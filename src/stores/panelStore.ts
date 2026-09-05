@@ -27,6 +27,7 @@ import { useTableStore } from "@/stores/tableStore";
 import { useChatPanelStore } from "@/stores/chatPanelStore";
 import { useAppStore } from "@/stores/appStore";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { usePluginStore } from "@/stores/pluginStore";
 import { useCollabStore } from "@/stores/collabStore";
 import { useVaultStore } from "@/stores/vaultStore";
 import { collectTabs, findViewHost } from "@/utils/workspaceLayout";
@@ -569,6 +570,10 @@ export const usePanelStore = create<PanelStore>((set, get) => {
             void useSettingsStore.getState().loadVaultConfig();
             void useVaultStore.getState().loadFiles();
           }
+          // 撕裂窗口插件运行时随仓库上下文重载（与主窗口 selectVault/backToVaultSelect 时机一致）：
+          // vaultId 置空（回启动页）也 load——此时只扫 app 插件，自然卸载 vault 插件；
+          // 插件事件（vault:switch/clear）按窗口隔离不跨窗口转发，撕裂窗口插件经重载兜底
+          void usePluginStore.getState().load().catch((e) => console.error("撕裂窗口加载插件失败", e));
           // AI 会话换仓库读盘 + 协作宿主重算（仓库房间变化）
           void useChatPanelStore.getState().load(payload.vaultId);
           get().syncCollabHost();
