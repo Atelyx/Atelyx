@@ -4,17 +4,19 @@
  * 与主窗口同代码入口，但只渲染单面板：自定义标题栏（窗口控制 + 拖动区）+ 标签头
  * （PanelTabBar，可多标签）+ 视图承载（ViewHost）。≡ 菜单锁定 = 整块窗口锁定。
  *
- * - 启动：panelStore.initPanel 握手（panel-init-request → panel-init），未就绪前渲染占位
- * - 状态：标签组镜像在 panelStore（layout-changed 广播同步）；本地操作乐观应用 + 请求主窗口
- * - 关闭：onCloseRequested → releaseView（flush 托管视图）→ panel-closed 上报 → 销毁
- * - 外观/配置：与主窗口一致（useAppearance + settingsStore 读盘；仓库级配置经 panel-init 后加载）
+ * - 启动：panelStore.initPanel——bootstrap 拉布局快照（ui-state）+ 订阅 layout-broadcast
+ *   广播镜像 + drag-session，未就绪前渲染 LoadingScreen
+ * - 状态：标签组镜像自 uiStateStore（Rust 广播权威布局）；视图离开本窗口即 releaseView（flush + 清内存）
+ * - 上下文：请求当前仓库/打开文件（emitRequestOpenFileState，应答经 open-file-changed 广播，
+ *   按需加载仓库级配置/文件树/AI 会话）
+ * - 关闭：installPanelCloseGuard（flush 托管视图 → notifyPanelClosed 上报 Rust → 销毁，守卫收在 panelStore）
+ * - 外观/配置：与主窗口一致（useAppearance + settingsStore.load() 读盘）
  * - watcher：订阅仓库文件变化（画布/表格/笔记跨窗口写盘经 watcher + 乐观合并收敛）
  */
 import { useEffect, useMemo } from "react";
 import { LayoutTemplate } from "lucide-react";
 import { useAppStore } from "@/stores/appStore";
-import { usePanelStore } from "@/stores/panelStore";
-import { usePluginStore } from "@/stores/pluginStore";
+import { titleOfTabs, usePanelStore } from "@/stores/panelStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useUiStateStore } from "@/stores/uiStateStore";
 import { useVaultStore } from "@/stores/vaultStore";
@@ -26,8 +28,6 @@ import { PanelPlaceholder } from "@/components/layout/PanelPlaceholder";
 import { LoadingScreen } from "@/components/common/LoadingScreen";
 import { useAppearance } from "@/hooks/useAppearance";
 import { collectAllViews } from "@/utils/workspaceLayout";
-import { onCloseRequested } from "@/services/window";
-import * as bus from "@/services/windowBus";
 
 export function PanelWindowRoot() {
   useAppearance();
@@ -42,7 +42,7 @@ export function PanelWindowRoot() {
   const toggleMaximizeWindow = useAppStore((s) => s.toggleMaximizeWindow);
   const closeWindow = useAppStore((s) => s.closeWindow);
 
-  // 初始化：面板角色 + 握手 + 外观/配置读盘 + watcher 订阅
+  // 初始化：面板角色 bootstrap（布局快照 + 广播订阅）+ 外观/配置读盘 + watcher 订阅
   useEffect(() => {
     void usePanelStore.getState().initPanel();
     void useSettingsStore.getState().load();
@@ -53,28 +53,19 @@ export function PanelWindowRoot() {
     return () => useVaultStore.getState().startFileWatcher(false);
   }, []);
 
-  // 关闭守卫：flush 托管视图 → 上报关闭（主窗口移除持久化条目）→ 销毁（onCloseRequested 内部完成）
+  // 关闭守卫（收进 panelStore.installPanelCloseGuard：flush 托管视图 → 上报关闭 → 销毁；幂等防重复订阅）
   useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    void onCloseRequested(async () => {
-      const ps = usePanelStore.getState();
-      for (const v of ps.panelTabs.map((t) => t.view)) {
-        await ps.releaseView(v);
-      }
-      await bus.emitPanelClosed(ps.windowId);
-    }).then((fn) => {
-      unlisten = fn;
-    });
-    return () => unlisten?.();
+    void usePanelStore.getState().installPanelCloseGuard();
   }, []);
 
-  // 聚焦门控（画布/表格快捷键）：激活标签即聚焦本窗口（面板窗口不持久化聚焦）
+  // 聚焦门控（画布/表格快捷键）：激活标签即聚焦本窗口——setFocusedPanel 会把
+  // focusedPanelId 经防抖持久化到 ui-state（与主窗口同一字段），重启后恢复
   useEffect(() => {
     useUiStateStore.getState().setFocusedPanel(windowId);
   }, [activeTabId, windowId]);
 
   const activeTab = tabs.find((t) => t.id === activeTabId) ?? tabs[0] ?? null;
-  const title = activeTab ? usePluginStore.getState().pluginViewLabel(activeTab.view) : "面板";
+  const title = titleOfTabs(tabs, activeTabId);
 
   const usedViews = useMemo(() => {
     if (!layoutMirror) return [];

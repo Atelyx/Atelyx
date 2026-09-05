@@ -7,8 +7,8 @@
 //! 旧 `ai`/`search`/`device_id` 字段读回时被 serde 忽略（未知字段），不再写回。
 //!
 //! 另有 `app_data_dir/ui-state.json`（应用级 UI 使用状态：工作区布局 + 上次打开文件 +
-//! 文件面板展开，见下方 `AppUiState`）。app_data_dir 本机独有、不随仓库同步，
-//! 无需按设备分桶——各仓库 `.atelyx/ui-state.json` 的分桶模型已废弃。
+//! 文件面板展开；本机独有、不随仓库同步，由 `crate::layout` 迷你窗口管理器单一写者
+//! 承载，见 `layout.rs`）。
 //!
 //! 整文件读写 + 原子写（写 `.tmp` → rename）。前端用 `updateGlobalConfig`（read-modify-write）
 //! 而非直接 `write_global_config`，避免覆盖其他字段。
@@ -144,77 +144,5 @@ pub fn write_global_config(app: AppHandle, mut config: GlobalConfig) -> Result<(
     config.recent_vaults = normalize_and_dedupe_vaults(config.recent_vaults);
     let path = global_config_path(&app)?;
     let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
-    crate::vault::atomic_write(&path, &json)
-}
-
-// ===== 应用级 UI 使用状态（app_data_dir/ui-state.json）=====
-// 工作区布局（布局列表 + 激活布局 + 聚焦面板）+ 上次打开文件 + 文件面板展开，
-// 全部应用级：app_data_dir 本机独有、不随仓库同步，跨仓库共享（无需按设备分桶）。
-// 与全局配置（global.json）分离：高频展开/折叠/拖拽写入抖动不进配置。
-
-/// ui-state.json 的 schema 版本（与前端 types/uiState.ts 的 UI_STATE_SCHEMA 对齐）。
-pub const UI_STATE_SCHEMA: &str = "atelyx-ui-state/v1";
-
-/// 应用级 UI 使用状态（扁平结构；`workspace_layouts` 面板树由前端自持 schema）。
-#[derive(Serialize, Deserialize, Clone, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct AppUiState {
-    pub schema: String,
-    /// 文件面板展开的文件夹相对路径列表（缺省 = 全部折叠；跨仓库按路径共享）。
-    #[serde(default)]
-    pub file_explorer_expanded: Vec<String>,
-    /// 上次打开的画布文件（相对仓库根路径；恢复时按当前仓库列表查找命中才打开）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_canvas_file: Option<String>,
-    /// 上次打开的笔记文件（相对仓库根路径）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_note_file: Option<String>,
-    /// 上次打开的表格文件（相对仓库根路径）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_table_file: Option<String>,
-    /// 工作区布局列表（区域树结构；缺省 = 默认布局）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_layouts: Option<serde_json::Value>,
-    /// 激活布局 id（缺省 = 布局列表第一个）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active_layout_id: Option<String>,
-    /// 聚焦面板 id（画布快捷键门控；缺省 = 布局第一个面板）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub focused_panel_id: Option<String>,
-    /// 撕裂出去的独立窗口（视图 + 位置尺寸，跨布局共享、重启恢复；前端自持 schema）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detached_windows: Option<serde_json::Value>,
-    /// 最近打开的文件（跨仓库、去重置顶、上限截断；前端自持 schema）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recent_files: Option<serde_json::Value>,
-}
-
-fn app_ui_state_path(app: &AppHandle) -> Result<PathBuf, String> {
-    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    Ok(dir.join("ui-state.json"))
-}
-
-/// 读应用级 UI 状态（不存在返回默认；解析失败/损坏降级为默认——手编辑损坏只影响恢复，不阻塞）。
-#[tauri::command]
-pub fn read_app_ui_state(app: AppHandle) -> Result<AppUiState, String> {
-    let path = app_ui_state_path(&app)?;
-    if !path.exists() {
-        return Ok(AppUiState::default());
-    }
-    let json = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let state = serde_json::from_str::<AppUiState>(&json).unwrap_or_default();
-    // schema 校验：不符即拒绝（同 .atlx/editor-chats 私有格式保护，防外部工具/手改误写）
-    if state.schema != UI_STATE_SCHEMA {
-        return Ok(AppUiState::default());
-    }
-    Ok(state)
-}
-
-/// 写应用级 UI 状态（原子写：临时文件 + fsync + rename，与 vault 侧 `atomic_write` 同一 durability 语义）。
-#[tauri::command]
-pub fn write_app_ui_state(app: AppHandle, state: AppUiState) -> Result<(), String> {
-    let path = app_ui_state_path(&app)?;
-    let json = serde_json::to_string_pretty(&state).map_err(|e| e.to_string())?;
     crate::vault::atomic_write(&path, &json)
 }

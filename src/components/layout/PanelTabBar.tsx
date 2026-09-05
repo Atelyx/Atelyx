@@ -52,8 +52,8 @@ export interface PanelTabBarProps {
 }
 
 /**
- * 视图选择菜单（头部空白右键弹出，与旧「添加视图」下拉同一内容）：
- * 组内已有 = 高亮「本组」（点击激活）；未占用 = 添加；其他位置占用 = 禁用。
+ * 视图选择菜单（头部空白右键弹出）：组内已有 = 高亮「本组」（点击激活）；未占用 = 添加；
+ * 其他位置占用 = 禁用。
  */
 export function ViewPickerMenu({
   x,
@@ -164,16 +164,16 @@ export const PanelTabBar = memo(function PanelTabBar({
     if (tab.locked) return;
     // 捕获：指针离开标签按钮（含拖出窗口）后事件仍送达本按钮；配合 OS 按下期间隐式捕获
     e.currentTarget.setPointerCapture(e.pointerId);
-    usePanelStore.getState().beginDragCandidate(tab, hostId, e.pointerId, e.clientX, e.clientY);
+    usePanelStore.getState().beginDragCandidate(tab, hostId, e.clientX, e.clientY);
   };
   const handlePointerMove = (e: React.PointerEvent) => {
     const ps = usePanelStore.getState();
-    if (ps.drag) ps.updateDrag(e.clientX, e.clientY);
+    if (ps.dragActive) ps.updateDrag(e.clientX, e.clientY);
     else ps.moveDragCandidate(e.clientX, e.clientY);
   };
   const handlePointerUp = (e: React.PointerEvent, tab: TabItem) => {
     const ps = usePanelStore.getState();
-    const hadDrag = !!ps.drag;
+    const hadDrag = ps.dragActive;
     if (hadDrag) {
       ps.finishDrag(e.clientX, e.clientY, false);
     } else if (ps.dragCandidate) {

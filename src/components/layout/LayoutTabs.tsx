@@ -1,5 +1,5 @@
 /**
- * 标题栏左侧：仓库切换按钮（`VaultSwitcher`，当前仓库名）+ 布局 tab 条（Blender 式工作区切换）。
+ * 标题栏左侧：仓库切换按钮（`VaultSwitcher`，当前仓库名）+ 布局 tab 条（切换/右键/双击重命名/pointer 排序/新建）。
  *
  * - 布局 tab：点击切换；**右键菜单**（重命名 inline / 删除红字，最后一个布局不可删）；
  *   双击重命名保留；**pointer 模拟拖拽排序**（WebView2 HTML5 DnD 不可靠）——

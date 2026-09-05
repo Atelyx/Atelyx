@@ -1,10 +1,9 @@
 /**
  * 当前窗口控制 service（decorations: false 自定义标题栏/全屏用）。
  */
-import { getAllWindows, getCurrentWindow, type Window } from "@tauri-apps/api/window";
+import { getCurrentWindow, type Window } from "@tauri-apps/api/window";
 import { LogicalSize } from "@tauri-apps/api/dpi";
 import { invoke } from "@tauri-apps/api/core";
-import type { WindowRect } from "@/services/windowBus";
 
 /** 启动页窗口尺寸（固定、不可调整）。 */
 const STARTUP_WINDOW = { width: 960, height: 640 };
@@ -86,26 +85,7 @@ export async function applyWorkspaceWindow(): Promise<void> {
   await win.setMinSize(minSize);
 }
 
-/** 创建撕裂面板窗口（Rust `commands/windows.rs::create_panel_window`）。
- * label = `panel-<id>`，与 ui-state 的 DetachedWindow.id 对应；url 同主入口，前端按 label 分流渲染。 */
-export async function createPanelWindow(
-  windowId: string,
-  title: string,
-  bounds: WindowRect,
-): Promise<boolean> {
-  try {
-    return await invoke<boolean>("create_panel_window", {
-      label: `panel-${windowId}`,
-      title,
-      bounds,
-    });
-  } catch (e) {
-    console.error("创建撕裂窗口失败", e);
-    return false;
-  }
-}
-
-/** 读取当前窗口屏幕位置（logical px；拖拽屏幕坐标换算用）。 */
+/** 读取当前窗口屏幕位置（logical px；屏幕坐标换算用）。 */
 export async function getCurrentOuterPosition(): Promise<{ x: number; y: number }> {
   const win = getCurrentWindow();
   const pos = await win.outerPosition();
@@ -122,13 +102,6 @@ export async function setWindowTitle(title: string): Promise<void> {
   await getCurrentWindow().setTitle(title);
 }
 
-/** 读取当前窗口外框尺寸（logical px）。 */
-export async function getCurrentOuterSize(): Promise<{ width: number; height: number }> {
-  const win = getCurrentWindow();
-  const size = await win.outerSize();
-  return size.toLogical(await win.scaleFactor());
-}
-
 /** 当前窗口 label（主窗口 "main"；撕裂窗口 "panel-<id>"；App 入口分流用）。 */
 export function getCurrentWindowLabel(): string {
   return getCurrentWindow().label;
@@ -143,19 +116,5 @@ export async function isMouseLeftDown(): Promise<boolean | null> {
   } catch (e) {
     console.error("查询鼠标左键状态失败", e);
     return null;
-  }
-}
-
-/** 按 label 关闭其他窗口（主窗口回收被拖空/移除的撕裂窗口用；窗口不存在时静默跳过）。 */
-export async function closeWindowByLabel(label: string): Promise<void> {
-  try {
-    for (const win of await getAllWindows()) {
-      if (win.label === label) {
-        await win.close();
-        return;
-      }
-    }
-  } catch (e) {
-    console.error(`关闭窗口 ${label} 失败`, e);
   }
 }

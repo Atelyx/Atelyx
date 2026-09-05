@@ -72,7 +72,19 @@ export {
   type WhiteboardEdge,
 } from "./canvas";
 
-export { UI_STATE_SCHEMA, type AppUiState, type RecentFileEntry } from "./uiState";
+export {
+  UI_STATE_SCHEMA,
+  type AppUiState,
+  type RecentFileEntry,
+  type LayoutBounds,
+  type LayoutOp,
+  type LayoutOpResult,
+  type UiStatePatch,
+  type DragStart,
+  type DropZone,
+  type DragBroadcast,
+  type DragHit,
+} from "./uiState";
 
 export {
   VIEW_KINDS,

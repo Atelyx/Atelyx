@@ -4,6 +4,11 @@
 //! 文件化仓库（`vault.rs`）为唯一存储出口。
 
 mod commands;
+mod layout;
+mod layout_drag;
+mod layout_model;
+mod layout_persist;
+mod layout_window;
 mod vault;
 mod watcher;
 
@@ -22,6 +27,15 @@ pub fn run() {
             app.manage(vault::VaultState::default());
             // 文件监听：持有当前仓库的 notify debouncer，open_vault 时启动
             app.manage(watcher::WatcherState::default());
+            // 布局迷你窗口管理器：布局模型唯一权威，启动即从 ui-state.json 加载
+            app.manage(layout::LayoutState::new());
+            layout::load_from_disk(app.handle(), &app.state::<layout::LayoutState>());
+            // 主窗口窗口事件钩子：Moved/Resized → 权威 bounds（拖拽命中/落点解析）
+            if let Some(main_win) = app.get_webview_window("main") {
+                main_win.on_window_event(layout::window_event_handler(app.handle(), "main".into()));
+                // 种子化初始 bounds：启动后未移动过时 on_window_event 不触发，拖拽解析读不到
+                layout::seed_window_bounds(app.handle(), "main");
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -95,9 +109,6 @@ pub fn run() {
             commands::global::write_global_config,
             // 本机设备名（协作身份默认值）
             commands::global::get_hostname,
-            // 应用级 UI 使用状态（app_data_dir/ui-state.json：工作区布局 + 上次打开文件 + 展开）
-            commands::global::read_app_ui_state,
-            commands::global::write_app_ui_state,
             // API key 安全存储（OS keychain，见 commands/keychain.rs）
             commands::keychain::set_api_key,
             commands::keychain::get_api_key,
@@ -108,10 +119,20 @@ pub fn run() {
             // 联网搜索代理（Tavily/SearXNG，Rust 侧请求绕 CORS + key 不进 WebView）
             commands::search::search_web,
             commands::web::fetch_web,
-            // 撕裂面板窗口（多窗口面板体系：可停靠标签组 + 可撕裂多窗口）
-            commands::windows::create_panel_window,
-            // 跨窗口拖拽释放检测（物理左键状态轮询，见 commands/windows.rs）
+            // 跨窗口拖拽释放检测（物理左键状态轮询，见 commands/windows.rs；Windows 专用净）
             commands::windows::is_mouse_left_down,
+            // 布局迷你窗口管理器（布局模型唯一权威：bootstrap/操作/非布局补丁/flush）
+            layout::layout_bootstrap,
+            layout::layout_op,
+            layout::ui_state_patch,
+            layout::layout_flush,
+            // 跨窗口拖拽会话（源窗口上报输入；会话/命中调和/落点解析/看门狗在 Rust）
+            layout::drag_update,
+            layout::drag_hit,
+            layout::drag_end,
+            // 撕裂窗口生命周期（关闭上报移除条目 / 启动恢复调和）
+            layout::panel_window_closed,
+            layout::layout_reconcile,
             // 主页面板数据（日历/仓库历史：带日期笔记扫描 + 全仓库历史版本聚合）
             commands::home::list_dated_notes,
             commands::home::list_repo_history,

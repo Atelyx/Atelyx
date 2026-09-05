@@ -1,8 +1,7 @@
 /**
  * 画布视图面板：ReactFlow 画布完整渲染（节点/边/悬浮控件/小地图/状态栏）。
  *
- * 从旧「主编辑区画布窗口」抽取：视口缓存（面板卸载重挂恢复）、画布右键菜单、
- * 节点右键菜单、面板拖拽落点、只读白板横幅全部内聚于此。
+ * 内聚职责：视口缓存（面板卸载重挂恢复）、画布右键菜单、节点右键菜单、面板拖拽落点、只读白板横幅。
  * 画布快捷键仅在**本面板聚焦**时生效（focusedPanelId 门控）。
  */
 import {
@@ -31,11 +30,15 @@ import {
   useReactFlow,
   useViewport,
   type Connection,
-  type Viewport,
 } from "@xyflow/react";
 import { useAppStore } from "@/stores/appStore";
 import { useCanvasStore } from "@/stores/canvasStore";
 import { useUiStateStore } from "@/stores/uiStateStore";
+import {
+  cacheCanvasViewport,
+  getCachedCanvasViewport,
+  onCanvasViewportHandoff,
+} from "@/stores/panelStore";
 import { useCanvasHotkeys } from "@/hooks/useCanvasHotkeys";
 import {
   DEFAULT_CONVERSATION_HEIGHT,
@@ -84,13 +87,10 @@ const builtinNodeTypes = {
 };
 const edgeTypes = { default: DataFlowEdge };
 
-/**
- * 画布视口缓存（按画布文件隔离）。模块级而非 useRef：面板卸载（布局切换/关闭）时
- * 组件实例销毁、ref 随之丢失；模块级 Map 跨挂载存活，重挂后 onInit 才能恢复视口。
- */
-const viewportCache = new Map<string, Viewport>();
+/** 视口恢复延迟（ms）：等刚装载的画布节点完成首帧布局后再设视口，防止被装载触发的渲染覆盖。 */
+const VIEWPORT_RESTORE_DELAY_MS = 50;
 
-// 连线合法性（边类型自动分类，见 2.4）：
+// 连线合法性（边类型按两端节点自动分类）：
 // - 资产（text/media/search/table）→ 对话：数据流引用边，放行（重复由 onConnect「再次注入」处理）
 // - 对话 → 资产：数据流产出边，同对已有边拦截（防重复）
 // - 其余（对话↔对话、link/group 参与、无对话组合）：关联自由线，同对已有边拦截
@@ -200,12 +200,15 @@ export const CanvasView = memo(function CanvasView({
       load(canvasFile);
   }, [canvasFile, load]);
 
-  // 画布加载完成（首次打开/切换画布 loading true→false；面板重挂时 load 不执行、
-  // loading 恒 false，挂载即走此分支）→ 恢复该画布上次视口位置；本次运行未打开过
-  // （无缓存视口，如重启后首次打开）→ 自动适应视图。fitView prop 仅初次挂载生效，
-  // 切画布不重挂实例，需手动触发
+  // 画布视口恢复（与 onInit 分工，互不重叠）：
+  // - 本 effect 只响应真实加载转换（loading true→false，首次打开/切换画布）：画布数据刚落位，
+  //   延迟到首帧布局完成后重设视口（无缓存视口如重启后首次打开 → 自动适应视图）。
+  //   fitView prop 仅初次挂载生效，切画布不重挂实例，需手动触发。
+  // - onInit 只处理「挂载时画布已就绪」（面板重挂），见组件尾部。
   const canvasLoading = useCanvasStore((s) => s.loading);
-  const prevLoadingRef = useRef(true);
+  // 以挂载时加载态为基线：仅经 loading=true 置位过的 prevLoadingRef 才算真实转换，
+  // 挂载即已加载的画布由此跳过本分支（交给 onInit），消除双路径重复恢复
+  const prevLoadingRef = useRef(canvasLoading);
   useEffect(() => {
     if (canvasLoading) {
       prevLoadingRef.current = true;
@@ -216,13 +219,21 @@ export const CanvasView = memo(function CanvasView({
       // 占位面板（无画布）没有视口可恢复/适应，跳过
       if (!canvasFile) return;
       const t = setTimeout(() => {
-        const vp = viewportCache.get(canvasFile);
+        const vp = getCachedCanvasViewport(canvasFile);
         if (vp) setViewport(vp);
         else fitView({ duration: 200, padding: 0.15 });
-      }, 50);
+      }, VIEWPORT_RESTORE_DELAY_MS);
       return () => clearTimeout(t);
     }
   }, [canvasLoading, fitView, setViewport, canvasFile]);
+
+  // 画布视口跨窗口交接补恢复：视图从别的窗口移入本窗口、交接事件晚于挂载到达时，
+  // 挂载时的 fitView 已被覆盖（画布刚加载），此处按到达的交接视口重设
+  useEffect(() => {
+    return onCanvasViewportHandoff((file, vp) => {
+      if (file === canvasFile) setViewport(vp);
+    });
+  }, [canvasFile, setViewport]);
 
   // ReactFlow 容器 ref：取画布区中心坐标（底部工具栏/文件面板建节点时落点）
   const flowWrapperRef = useRef<HTMLDivElement>(null);
@@ -541,12 +552,14 @@ export const CanvasView = memo(function CanvasView({
           onPaneClick={handlePaneClick}
           onNodeContextMenu={onNodeContextMenuInternal}
           onMoveEnd={(_event, viewport) => {
-            // 记录当前画布视口，面板卸载（布局切换/关闭）重挂时恢复（onInit）
-            if (canvasFile) viewportCache.set(canvasFile, viewport);
+            // 记录当前画布视口，面板卸载（布局切换/关闭）重挂时恢复；跨窗口交接时经 viewHandoff 转移
+            if (canvasFile) cacheCanvasViewport(canvasFile, viewport);
           }}
           onInit={(instance) => {
-            if (canvasFile) {
-              const vp = viewportCache.get(canvasFile);
+            // 挂载时画布已就绪（未在加载）→ 同步恢复缓存视口：pane 几何已定型、数据已就位，
+            // 立即重设无闪烁；挂载时仍在加载/后续切换画布由上面的 loading-effect 统一负责
+            if (canvasFile && !useCanvasStore.getState().loading) {
+              const vp = getCachedCanvasViewport(canvasFile);
               if (vp) instance.setViewport(vp);
             }
           }}

@@ -1,47 +1,35 @@
 //! 撕裂面板窗口管理（多窗口面板体系）。
 //!
-//! 前端 `services/window.ts::createPanelWindow` invoke 本命令，在 Rust 侧建窗口
-//! （Rust 侧创建无需 JS 侧 webview 创建权限；url 同主入口，前端按 label 分流渲染单面板）。
+//! 窗口创建/回收由布局迷你窗口管理器持有权威：撕裂建新窗与启动恢复经
+//! `layout_window::reconcile_panel_windows` 调本模块内部函数；前端不再直接建窗。
+//! url 同主入口，前端按 label 分流渲染单面板。
 
-use serde::Deserialize;
 use tauri::{window::Color, AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+
+use crate::layout::{window_event_handler, PANEL_LABEL_PREFIX, WindowBounds};
 
 /// 撕裂窗口加载地址：统一 `WebviewUrl::App("index.html")`（受信任协议，与主窗口同机制）。
 fn panel_url() -> WebviewUrl {
     WebviewUrl::App("index.html".into())
 }
 
-/// 窗口位置尺寸（logical px，与前端 `DetachedWindow.bounds` 一致）。
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WindowBounds {
-    pub x: f64,
-    pub y: f64,
-    pub width: f64,
-    pub height: f64,
-}
-
-/// 创建撕裂面板窗口（label = `panel-<id>`）。已存在（恢复防重）时直接返回 true。
-///
-/// Windows 关键约束（tauri 官方文档记录、[wry#583](https://github.com/tauri-apps/wry/issues/583)）：
-/// `WebviewWindowBuilder::build()` 在**同步命令**或事件处理器里调用会**死锁**——同步命令跑在
-/// 主线程 IPC 派发上下文，build() 内部 WebView2 异步创建（wry `wait_with_pump`）需要事件循环
-/// 在正常派发点泵消息，主线程被同步命令占用即互相等待、build() 永不返回（白屏 + 主窗口控制
-/// 失效）。正确做法是 **async 命令 + 独立线程**：build() 在 async runtime 线程执行，经
-/// `Message::CreateWindow` 投递主事件循环，在正常派发点创建窗口。故本命令为 async，
-/// **不**用 `run_on_main_thread` 包裹 build()（投递到主线程内 build() 正是死锁路径）。
-#[tauri::command]
-pub async fn create_panel_window(
-    app: AppHandle,
-    label: String,
-    title: String,
-    bounds: WindowBounds,
-) -> Result<bool, String> {
-    if app.get_webview_window(&label).is_some() {
-        return Ok(true);
+/// 创建撕裂面板窗口（label = `panel-<id>`；内部函数，供布局迷你窗口管理器
+/// 撕裂建新窗/恢复调和调用）。已存在（恢复防重）时直接返回 true。
+/// 同步命令/事件处理器里调用会死锁（wry#583），故本函数只在 async 上下文
+/// （拖拽落点/恢复调和命令）调用——build() 在 async runtime 线程执行，经投递
+/// 主事件循环在正常派发点创建窗口。
+pub(crate) fn create_panel_window_internal(
+    app: &AppHandle,
+    label: &str,
+    title: &str,
+    bounds: &WindowBounds,
+) -> bool {
+    if app.get_webview_window(label).is_some() {
+        return true;
     }
-    let builder = WebviewWindowBuilder::new(&app, &label, panel_url())
-        .title(title)
+    let label_owned = label.to_string();
+    let builder = WebviewWindowBuilder::new(app, label, panel_url())
+        .title(title.to_string())
         .inner_size(bounds.width, bounds.height)
         .position(bounds.x, bounds.y)
         // 与主窗口一致的自定义标题栏（decorations: false + 前端 TitleBarControls）
@@ -53,6 +41,10 @@ pub async fn create_panel_window(
     let win = builder.build();
     match win {
         Ok(win) => {
+            // 窗口事件钩子：Moved/Resized → 布局迷你窗口管理器权威 bounds（拖拽命中/落点解析）
+            win.on_window_event(window_event_handler(app, label_owned.clone()));
+            // 种子化初始 bounds：新窗未触发 Moved/Resized 前拖拽解析读不到（主窗口同，见 setup）
+            crate::layout::seed_window_bounds(app, &label_owned);
             let _ = win.set_focus();
         }
         Err(e) => {
@@ -62,15 +54,24 @@ pub async fn create_panel_window(
             }
         }
     }
-    Ok(true)
+    true
+}
+
+/// 关闭撕裂面板窗口（按 id；窗口不存在时静默跳过）。由布局迷你窗口管理器在
+/// 条目被移除（拖空/关空）时调用；关闭触发 JS onCloseRequested（flush 托管视图后销毁）。
+pub(crate) fn close_panel_window_internal(app: &AppHandle, window_id: &str) {
+    let label_full = format!("{PANEL_LABEL_PREFIX}{window_id}");
+    if let Some(win) = app.get_webview_window(&label_full) {
+        let _ = win.close();
+    }
 }
 
 /// 鼠标左键当前是否按下（跨窗口拖拽释放检测）。
 ///
-/// 标签拖出窗口后，webview 收不到窗口外的 pointerup（窗口外指针事件不可靠），
+/// 标签拖出窗口后，webview 可能收不到窗口外的 pointerup（窗口外指针事件不可靠），
 /// 拖拽会话无法结束、drop 指示器残留——前端在拖拽活跃期间轮询本命令，
 /// 物理检测左键松开即终止会话。仅 Windows 支持（GetAsyncKeyState），
-/// 其他平台返回 None（前端降级为超时兜底）。
+/// 其他平台返回 None（前端降级为 Rust 看门狗兜底）。
 #[tauri::command]
 pub fn is_mouse_left_down() -> Option<bool> {
     #[cfg(target_os = "windows")]

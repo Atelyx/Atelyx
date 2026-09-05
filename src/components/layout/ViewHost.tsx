@@ -20,7 +20,7 @@ import {
   Users,
   X,
 } from "lucide-react";
-import { type ReactNode } from "react";
+import { memo, type ReactNode } from "react";
 import { Puzzle } from "lucide-react";
 import { VIEW_LABELS } from "@/constants/views";
 import { useCanvasStore } from "@/stores/canvasStore";
@@ -82,8 +82,11 @@ function PluginPanelMount({ kind }: { kind: string }) {
   );
 }
 
-/** 按视图类型分派渲染（空视图 = 占位引导；插件视图查注册表）。 */
-export function ViewHost({ view, hostId }: { view: ViewKind; hostId: string }) {
+/**
+ * 按视图类型分派渲染（memo：view/hostId 为稳定原始值——布局广播全量更新时，
+ * 无关面板的视图组件不重渲染，画布/编辑器不被拖拽 resize 等高频广播打扰）。
+ */
+export const ViewHost = memo(function ViewHost({ view, hostId }: { view: ViewKind; hostId: string }) {
   switch (view) {
     case "canvas":
       return <CanvasView panelId={hostId} />;
@@ -115,7 +118,7 @@ export function ViewHost({ view, hostId }: { view: ViewKind; hostId: string }) {
       }
       return <div className="h-full w-full" style={{ background: "var(--bg-primary)" }} />;
   }
-}
+});
 
 /** 画布视图状态指示（无当前画布不显示；冲突 > 错误 > 保存状态）。 */
 function CanvasStatusIndicator() {

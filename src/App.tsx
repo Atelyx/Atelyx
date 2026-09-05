@@ -9,6 +9,7 @@ import { ErrorBoundary } from "@/components/common/ErrorBoundary";
 import { LoadingScreen } from "@/components/common/LoadingScreen";
 import { useAppearance } from "@/hooks/useAppearance";
 import { getCurrentWindowLabel } from "@/services/window";
+import { layoutReconcile } from "@/services/layout";
 import { PANEL_LABEL_PREFIX, usePanelStore } from "@/stores/panelStore";
 
 // 页面 lazy 分割：主包不含 CodeMirror/KaTeX/高亮语言包等重库，LoadingScreen 更快出现。
@@ -127,8 +128,9 @@ function MainWorkspaceApp() {
         // 否则 app 级插件（如主题）在启动页不生效，且与 backToVaultSelect 路径行为不一致。
         await usePluginStore.getState().load().catch(() => {});
       }
-      // 撕裂窗口恢复：在仓库打开之后重建（面板握手需仓库信息，见 panel-init 协议）
-      await usePanelStore.getState().restoreDetachedWindows();
+      // 撕裂窗口恢复：进仓库后由 Rust 调和补建持久化撕裂窗口的 OS 窗口；撕裂窗口自行
+      // bootstrap 拉布局快照 + 订阅 layout-broadcast 广播渲染
+      await layoutReconcile();
       // 自动更新（应用级，global.json）：开启时启动静默检查一次，失败静默跳过。
       // 走 store 包装（runAutoUpdate 内部先 flush 全部 pending 改动再检查安装，重启不丢数据；
       // 协作连接收尾不随 flush 执行，见 appStore.flushAllPending 注释）

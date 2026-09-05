@@ -4,7 +4,7 @@
  * 读写 `app_data_dir/global.json`，对应 Rust `commands/global.rs`。
  * 承载：最近打开仓库列表 + 自动更新开关 + 应用级界面外观（主题/强调色/字号/字体）+
  * 自动恢复上次打开文件（AI 供应商/搜索源等仓库级配置走各仓库 `.atelyx/config.json`；
- * 应用级 UI 使用状态走 `services/uiState` 的 `app_data_dir/ui-state.json`）。
+ * 应用级 UI 使用状态走 `services/layout` 的 Rust 迷你窗口管理器，见 `layout.rs`）。
  * recentVaults 的去重/排序/截断逻辑在此层维护（Rust 只做整文件读写）。
  *
  * **写入走 `updateGlobalConfig`（read-modify-write + 串行化）**，勿直接 `writeGlobalConfig`：

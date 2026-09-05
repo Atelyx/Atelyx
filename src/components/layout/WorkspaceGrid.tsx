@@ -4,8 +4,8 @@
  * Split → react-resizable-panels PanelGroup（非受控 + defaultSize，拖拽 onLayout 回写 sizes）；
  * Panel → PanelFrame（标签组头部 + 视图承载）。布局操作经 uiStateStore（走既有 debounce 持久化链路）。
  *
- * 分割/合并入口变化：边右键菜单已移除（分割收进面板 ≡ 菜单，面板清理走「关闭标签 → 空面板 →
- * 删除面板」），边回归纯 resize 手柄。
+ * 分割/合并入口：分割在面板 ≡ 菜单，面板清理走「关闭标签 → 空面板 → 删除面板」；
+ * 边 = 纯 resize 手柄。
  *
  * 跨窗口拖拽：面板 DOM 标注 data-drop-panel，panelStore 拖拽会话按 getBoundingClientRect 命中；
  * 本组件渲染 drop 指示器 overlay（中部 = 加标签 / 四边缘 = 分割）。
@@ -84,7 +84,7 @@ function SplitView({
   );
 }
 
-/** 边（纯 resize 手柄；右键菜单已随分割/合并入口迁移到 ≡ 菜单而移除）。
+/** 边 = 纯 resize 手柄（分割在面板 ≡ 菜单）。
  * 方向化样式（竖边 w / 横边 h + hover 强调）在 styles/index.css 按 data 属性统一处理。 */
 function SplitHandle() {
   return <PanelResizeHandle className="flex-shrink-0" />;
@@ -108,8 +108,10 @@ function DropIndicatorOverlay() {
     background: "color-mix(in srgb, var(--accent) 22%, transparent)",
     outline: "1px solid color-mix(in srgb, var(--accent) 60%, transparent)",
   };
+  // tab 区 = 标签排序：指示由 PanelTabBar 的插入条承担，整块高亮会盖住它（只显示面板块的假象）
+  if (zone === "tab") return null;
   let style: CSSProperties;
-  if (zone === "center" || zone === "tab") {
+  if (zone === "center") {
     style = { ...base, left: r.left, top: r.top, width: r.width, height: r.height };
   } else if (zone === "left") {
     style = { ...base, left: r.left, top: r.top, width: r.width * 0.12, height: r.height };
