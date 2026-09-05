@@ -255,6 +255,18 @@ function tabIndexAt(tabEls: HTMLElement[], cx: number): number {
   return tabEls.length;
 }
 
+/** 源面板尺寸（logical px；撕裂新窗默认取此值）。主窗口 = 面板 DOM rect，
+ * 撕裂窗口 = 整窗区域（含标题栏）rect；查不到（转正瞬间 DOM 缺失）返回 0 走 Rust 回退。 */
+function sourcePanelSize(sourceHost: string, role: "main" | "panel"): { width: number; height: number } {
+  const el =
+    role === "main"
+      ? document.querySelector(`[data-drop-panel="${sourceHost}"]`)
+      : document.querySelector("[data-panel-drop-root]");
+  if (!el) return { width: 0, height: 0 };
+  const r = el.getBoundingClientRect();
+  return { width: Math.round(r.width), height: Math.round(r.height) };
+}
+
 /** 面板窗口标签标题（窗口标题 = 激活标签视图名；插件视图走 pluginViewLabel 兜底；
  * 撕裂窗口标题复用（PanelWindowRoot 等）。 */
 export function titleOfTabs(tabs: TabItem[], activeTabId: string | null): string {
@@ -592,16 +604,20 @@ export const usePanelStore = create<PanelStore>((set, get) => {
       if (!c) return false;
       if (Math.hypot(clientX - c.x, clientY - c.y) < DRAG_THRESHOLD_PX) return false;
       // 转正：随首帧上报 Rust 开始拖拽会话（OS 鼠标按下隐式捕获保证窗口外仍收事件）
-      const { windowPos, windowId } = get();
+      const { windowPos, windowId, role } = get();
       const screenX = clientX + windowPos.x;
       const screenY = clientY + windowPos.y;
       set({ dragCandidate: null, dragActive: true });
+      const size = sourcePanelSize(c.sourceHost, role);
       void dragUpdate(screenX, screenY, {
         tabId: c.tab.id,
         view: c.tab.view,
         // sourceWindow = 窗口 label（Rust 依此区分主窗口/撕裂窗口来源 + 看门狗/落点解析）
         sourceWindow: windowLabelOf(windowId),
         sourceHost: c.sourceHost,
+        // 源面板尺寸：撕裂新窗默认取此值（0 = DOM 缺失，Rust 回退固定默认）
+        sourceWidth: size.width,
+        sourceHeight: size.height,
       }).catch((e) => {
         console.error("开始拖拽会话失败", e);
         // 转正失败回滚本地拖拽态（会话未建立，避免停在 dragActive 假态继续空上报）

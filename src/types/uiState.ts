@@ -85,6 +85,9 @@ export interface DragStart {
   sourceWindow: string;
   /** 源宿主：主窗口面板 id 或撕裂窗口 id。 */
   sourceHost: string;
+  /** 源面板尺寸（logical px；撕裂新窗默认取此值；0 = 未知走 Rust 回退）。 */
+  sourceWidth: number;
+  sourceHeight: number;
 }
 
 /** drop 区类型：center = 加标签；left/right/top/bottom = 分割（主窗口面板）；tab = 标签条排序。 */

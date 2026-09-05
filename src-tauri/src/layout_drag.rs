@@ -38,6 +38,9 @@ pub struct DragSession {
     pub source_window: String,
     /// 源宿主：主窗口面板 id 或撕裂窗口 id。
     pub source_host: String,
+    /// 源面板尺寸（logical px；撕裂新窗默认取此值，0 = 回退固定默认）。
+    pub source_width: f64,
+    pub source_height: f64,
     /// 最后已知屏幕坐标（logical px；拖拽终点/看门狗兜底用）。
     pub screen_x: f64,
     pub screen_y: f64,
@@ -78,6 +81,11 @@ pub struct DragStartPayload {
     pub view: ViewKind,
     pub source_window: String,
     pub source_host: String,
+    /// 源面板尺寸（logical px；撕裂新窗默认取此值，0 = 未知回退固定默认）。
+    #[serde(default)]
+    pub source_width: f64,
+    #[serde(default)]
+    pub source_height: f64,
 }
 
 /// 拖拽广播载荷（ghost + 各窗口命中计算驱动；End 时 active=false 其余字段为 None）。
@@ -97,13 +105,16 @@ fn point_in_bounds(x: f64, y: f64, b: &WindowBounds) -> bool {
     x >= b.x && x <= b.x + b.width && y >= b.y && y <= b.y + b.height
 }
 
-/// 撕裂窗口 bounds：窗口创建在鼠标附近（左上角偏移）。
-fn bounds_near(x: f64, y: f64) -> WindowBounds {
+/// 撕裂窗口 bounds：窗口创建在鼠标附近（左上角偏移）；尺寸 = 源面板尺寸（>0 用之，
+/// 否则回退固定默认——源 DOM 缺失等未知场景）。
+fn bounds_near(x: f64, y: f64, w: f64, h: f64) -> WindowBounds {
+    let w = if w > 0.0 { w } else { PANEL_WINDOW_WIDTH };
+    let h = if h > 0.0 { h } else { PANEL_WINDOW_HEIGHT };
     WindowBounds {
-        x: (x - PANEL_WINDOW_WIDTH / 2.0).round(),
+        x: (x - w / 2.0).round(),
         y: (y - 24.0).round(),
-        width: PANEL_WINDOW_WIDTH,
-        height: PANEL_WINDOW_HEIGHT,
+        width: w,
+        height: h,
         scale: 0.0,
     }
 }
@@ -161,6 +172,8 @@ pub async fn drag_update(
                         view: p.view,
                         source_window: p.source_window,
                         source_host: p.source_host,
+                        source_width: p.source_width,
+                        source_height: p.source_height,
                         screen_x,
                         screen_y,
                     });
@@ -551,10 +564,18 @@ fn resolve_drag(inner: &mut LayoutInner, cancelled: bool) {
             apply_layout_op(&mut inner.ui, &LayoutOp::DockIntoDetached { window_id, tab_id: drag.tab_id.clone(), index });
         }
         DropDecision::TearOff { panel_id } => {
-            apply_layout_op(&mut inner.ui, &LayoutOp::TearOff { panel_id, tab_id: drag.tab_id.clone(), bounds: bounds_near(x, y) });
+            apply_layout_op(&mut inner.ui, &LayoutOp::TearOff {
+                panel_id,
+                tab_id: drag.tab_id.clone(),
+                bounds: bounds_near(x, y, drag.source_width, drag.source_height),
+            });
         }
         DropDecision::TearOffFromDetached { window_id } => {
-            apply_layout_op(&mut inner.ui, &LayoutOp::TearOffFromDetached { window_id, tab_id: drag.tab_id.clone(), bounds: bounds_near(x, y) });
+            apply_layout_op(&mut inner.ui, &LayoutOp::TearOffFromDetached {
+                window_id,
+                tab_id: drag.tab_id.clone(),
+                bounds: bounds_near(x, y, drag.source_width, drag.source_height),
+            });
         }
     }
 }
@@ -625,7 +646,7 @@ mod tests {
     // ---- 落点决策纯函数（decide_drop_ops）----
 
     fn drag(tab: &str, view: &str, source_window: &str, source_host: &str, x: f64, y: f64) -> DragSession {
-        DragSession { tab_id: tab.into(), view: view.into(), source_window: source_window.into(), source_host: source_host.into(), screen_x: x, screen_y: y }
+        DragSession { tab_id: tab.into(), view: view.into(), source_window: source_window.into(), source_host: source_host.into(), source_width: 0.0, source_height: 0.0, screen_x: x, screen_y: y }
     }
 
     fn hit(zone: DropZone, panel_id: Option<&str>, tab_index: Option<usize>) -> DragHit {
@@ -814,6 +835,8 @@ mod tests {
                 view: "canvas".into(),
                 source_window: "main".into(),
                 source_host: "p2".into(),
+                source_width: 0.0,
+                source_height: 0.0,
                 screen_x: 500.0,
                 screen_y: 400.0,
             }),
@@ -830,6 +853,54 @@ mod tests {
         let p2 = find_panel(&active_layout(&inner.ui).tree, "p2").unwrap();
         assert!(!p2.iter().any(|t| t.id == "t-canvas"));
         assert!(inner.drag.is_none(), "解析后拖拽会话应被取走");
+    }
+
+    /// 撕裂新窗 bounds 尺寸 = 源面板尺寸（>0 用之）；未知（0）回退固定默认。
+    #[test]
+    fn bounds_near_uses_source_size() {
+        // 显式源尺寸生效，位置按源尺寸居中于光标
+        let b = bounds_near(1000.0, 500.0, 360.0, 480.0);
+        assert_eq!((b.width, b.height), (360.0, 480.0));
+        assert_eq!(b.x, (1000.0_f64 - 180.0).round());
+        assert_eq!(b.y, (500.0_f64 - 24.0).round());
+        // 0（源 DOM 缺失）回退固定默认
+        let b = bounds_near(1000.0, 500.0, 0.0, 0.0);
+        assert_eq!((b.width, b.height), (PANEL_WINDOW_WIDTH, PANEL_WINDOW_HEIGHT));
+    }
+
+    /// 回归：resolve_drag 窗外撕裂路径把拖拽会话携带的源面板尺寸写进新窗口 bounds
+    /// （源尺寸未知（0）时回退固定默认）。
+    #[test]
+    fn resolve_drag_tear_off_uses_source_size() {
+        let mut inner = LayoutInner {
+            ui: ui_with(two_panels_horizontal()),
+            persist_gen: 0,
+            dirty: false,
+            loaded: true,
+            window_bounds: HashMap::from([(
+                "main".into(),
+                WindowBounds { x: 0.0, y: 0.0, width: 1000.0, height: 800.0, scale: 1.0 },
+            )]),
+            drag: Some(DragSession {
+                tab_id: "t-canvas".into(),
+                view: "canvas".into(),
+                source_window: "main".into(),
+                source_host: "p2".into(),
+                source_width: 360.0,
+                source_height: 480.0,
+                screen_x: 3000.0,
+                screen_y: 2000.0,
+            }),
+            drag_hits: HashMap::new(),
+            drag_move_gen: 0,
+            drag_resolving: false,
+        };
+        resolve_drag(&mut inner, false);
+        assert_eq!(inner.ui.detached_windows.len(), 1);
+        let w = &inner.ui.detached_windows[0];
+        assert_eq!((w.bounds.width, w.bounds.height), (360.0, 480.0));
+        assert_eq!(w.bounds.x, (3000.0_f64 - 180.0).round());
+        assert_eq!(w.bounds.y, (2000.0_f64 - 24.0).round());
     }
 
     /// DropZone wire 值与前端 hitTest* 一致；未知值反序列化报错（构造性防御）。
