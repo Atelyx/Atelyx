@@ -214,8 +214,6 @@ export function MarkdownEditor({
   const dispatchRef = useRef<(spec: TransactionSpec) => void>(() => {});
   /** 程序化注入的回放抑制：applyBody 的 dispatch 同步触发 updateListener，写入期间置位吞掉回放。 */
   const suppressRef = useRef(false);
-  /** 上次注入内容：卸载 flush 时内容 === 注入目标则不重复上报。 */
-  const lastAppliedRef = useRef("");
   const syncSeqRef = useRef(syncSeq);
   /** 回调/body/选项经 ref 转发：create 闭包在挂载时构建一次，捕获不到后续渲染的最新值。 */
   const onBodyChangeRef = useRef(onBodyChange);
@@ -235,12 +233,12 @@ export function MarkdownEditor({
   /** 只读当前应用值（初始 = 挂载 prop；后续经 effect 同步到视图）。 */
   const readOnlyAppliedRef = useRef(readOnly);
 
-  /** 程序化写入：记录注入目标 + 抑制回放，再全量替换（CRLF 注入前规范化为 LF）。 */
+  /** 程序化写入：抑制回放后全量替换（CRLF 注入前规范化为 LF）——注入的 dispatch 同步触发
+   *  updateListener，置位 suppress 防注入被当作用户编辑上报。 */
   const applyBody = useCallback((md: string) => {
     const view = viewRef.current;
     if (!view) return;
     const normalized = md.replace(/\r\n/g, "\n");
-    lastAppliedRef.current = normalized;
     suppressRef.current = true;
     view.dispatch({
       changes: { from: 0, to: view.state.doc.length, insert: normalized },
@@ -334,12 +332,8 @@ export function MarkdownEditor({
       applyBody(bodyRef.current);
     }
     return () => {
-      // 卸载 flush：更新监听同步触发、正常编辑已实时上报，此处兜底取最新 doc
-      // （复用回放抑制：内容 === 上次注入目标则不报，防注入回放误上报）
-      const latest = view.state.doc.toString();
-      if (latest !== lastAppliedRef.current) {
-        onBodyChangeRef.current?.(latest);
-      }
+      // 卸载即销毁：doc 变更已由 updateListener 实时上报（applyBody 注入经 suppress 抑制），
+      // 无需兜底上报——所有变更在发生当刻即完成回调，卸载不产生额外 onBodyChange
       viewRef.current = null;
       dispatchRef.current = () => {};
       if (editorViewRef) editorViewRef.current = null;

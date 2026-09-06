@@ -476,7 +476,7 @@ export function NoteEditor({ file }: { file: string }) {
   }, [resolveReq, reloadFromDisk, saveLocalOverExternal]);
 
   const handleChange = (v: string) => {
-    // 无变化短路：卸载 flush 重报当前全文/属性面板改回原值/分歧收敛内容一致等「空步」
+    // 无变化短路：属性面板改回原值/协作收敛内容一致等「空步」
     // 不入撤销栈、不置脏不抖状态（内容未变，无任何必要副作用）
     if (v === contentRef.current) return;
     // 用户输入登记（撤销栈 + 挂起输入）：撤销回放（applyNoteUndo）不记栈；
@@ -1071,15 +1071,21 @@ export function NoteEditor({ file }: { file: string }) {
             readOnly={preview}
             interactiveCheckbox
             links={noteMarkdownLinks}
-            // 协作挂载分歧：干净 → 收敛 content 到协作基线（编辑器已以 ytext 为模型源）；
-            // 有未落盘编辑 → 本地正文写回 ytext（本地最新者胜，防陈旧基线回退本地输入）
+            // 协作挂载分歧：干净 → 收敛 content 到协作基线（不置脏不写盘——磁盘落盘只发生在
+            // 真实内容变化：用户编辑/远端合入经 onBodyChange→handleChange 保存链，挂载收敛不覆盖磁盘，
+            // 防空/陈旧基线打开即清空笔记）；有未落盘编辑 → 本地正文写回 ytext（本地最新者胜）
             onCollabDivergence={(ytextText) => {
               const bodyLF = parsed.body.replace(/\r\n/g, "\n");
               if (contentRef.current === lastSavedRef.current) {
                 const body = parsed.body.includes("\r\n")
                   ? ytextText.replace(/\n/g, "\r\n")
                   : ytextText;
-                handleChange(parsed.fmPrefix + body);
+                const full = parsed.fmPrefix + body;
+                if (full === contentRef.current) return;
+                contentRef.current = full;
+                lastSavedRef.current = full;
+                setContent(full);
+                setSaveStatus("idle");
               } else {
                 useNoteCollabStore.getState().syncLocalBody(file, bodyLF);
               }
