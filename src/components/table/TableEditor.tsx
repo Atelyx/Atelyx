@@ -42,6 +42,7 @@ import {
 import { computeColumnCalc, fieldDefaultWidth, selectionRegion, type TableRegion } from "@/utils/table";
 import { HistoryModal } from "@/components/history/HistoryModal";
 import { PopupLayer } from "@/components/common/PopupLayer";
+import { DropdownSelect } from "@/components/common/DropdownSelect";
 import { ErrorBoundary } from "@/components/common/ErrorBoundary";
 import { usePopupAnchor } from "@/hooks/usePopupAnchor";
 import { TableFormatToolbar } from "@/components/table/TableFormatToolbar";
@@ -658,35 +659,22 @@ export function TableEditor({ panelId }: { panelId: string }) {
         className="flex items-center gap-2 px-3 py-1.5 border-b flex-shrink-0 text-xs"
         style={{ borderColor: "var(--border)", color: "var(--text-secondary)" }}
       >
-        <span className="flex-1" />
-        {/* 视图切换：内置「表格」+ 插件表格视图（内存态不持久化；插件视图随 uiRevision 刷新） */}
-        <div className="flex items-center rounded border flex-shrink-0" style={{ borderColor: "var(--border)" }}>
-          <button
-            onClick={() => { setFormatBar(null); setView("table"); }}
-            className="px-2 py-0.5 text-xs transition-colors"
-            style={{
-              color: view === "table" ? "var(--accent-fg)" : "var(--text-secondary)",
-              background: view === "table" ? "var(--accent)" : undefined,
-            }}
-            title="表格视图"
-          >
-            表格
-          </button>
-          {pluginTableViews.map((tv) => (
-            <button
-              key={tv.kind}
-              onClick={() => { setFormatBar(null); setView(tv.kind); }}
-              className="px-2 py-0.5 text-xs transition-colors"
-              style={{
-                color: view === tv.kind ? "var(--accent-fg)" : "var(--text-secondary)",
-                background: view === tv.kind ? "var(--accent)" : undefined,
-              }}
-              title={tv.label}
-            >
-              {tv.label}
-            </button>
-          ))}
+        {/* 视图切换下拉：内置「表格」+ 插件表格视图（内存态不持久化；插件视图随 uiRevision 刷新） */}
+        <div className="flex items-center gap-1 flex-shrink-0">
+          <span>视图：</span>
+          <DropdownSelect
+            value={view}
+            onChange={(v) => { setFormatBar(null); setView(v); }}
+            options={[
+              { value: "table", label: "表格" },
+              ...pluginTableViews.map((tv) => ({ value: tv.kind, label: tv.label })),
+            ]}
+            className="px-2 py-1 text-xs rounded border flex-shrink-0"
+            style={{ borderColor: "var(--border)", color: "var(--text-secondary)" }}
+            title="切换视图"
+          />
         </div>
+        <span className="flex-1" />
         {/* 缩放百分比（Ctrl+滚轮缩放表格视图，纯视图状态；仅内置表格网格有效） */}
         {view === "table" && (
           <span
