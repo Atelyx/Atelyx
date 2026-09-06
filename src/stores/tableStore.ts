@@ -42,6 +42,7 @@ import {
   selectionRegion,
   styleEqual,
   summarizeTableSnapshot,
+  type TableRegion,
 } from "@/utils/table";
 import type {
   CalcType,
@@ -143,8 +144,10 @@ interface TableStoreState {
   selectAll: () => void;
   /** 拖拽框选多格（锚点 = 按下起点，终点 = 当前指针格；矩形范围由二者行/列推导）。 */
   selectRange: (anchorRowId: string, anchorFieldId: string, rowId: string, fieldId: string) => void;
-  /** 复制当前选中区域为 TSV 到系统剪贴板（无选区/空区域 no-op；失败静默）。 */
+  /** 复制当前选中区域为 TSV 到系统剪贴板（无选区/空区域 no-op；写失败置面板错误提示）。 */
   copySelection: () => void;
+  /** 剪切当前选中区域：复制 TSV 到剪贴板，成功后才清空区域（一步撤销；图片格跳过；写失败不销毁数据）。 */
+  cutSelection: () => Promise<void>;
   /** 从系统剪贴板读 TSV 并粘贴到当前选中锚点（空/无选区 no-op；一步撤销）。 */
   pasteFromClipboard: () => Promise<void>;
   /** 清空当前选中区域全部单元格（框选 Backspace/Delete 用；一步撤销，图片格跳过）。 */
@@ -624,6 +627,33 @@ function mergeCellStyle(cur: CellStyle | undefined, patch: Partial<CellStyle>): 
   return Object.keys(next).length === 0 ? undefined : next;
 }
 
+/** 清空指定矩形区域全部单元格（一步撤销；图片格跳过——单格 Delete 同口径不清图片；
+ *  无实际变化不入栈不落盘）。框选清空与剪切共用，区域均由 selectionRegion 产出（下标恒合法）。 */
+function clearRegionCells(region: TableRegion): void {
+  const s = useTableStore.getState();
+  let anyChange = false;
+  const outRows = s.rows.map((row, r) => {
+    if (r < region.rowStart || r > region.rowEnd) return row;
+    let changed = false;
+    const values = { ...row.values };
+    for (let c = region.colStart; c <= region.colEnd; c++) {
+      // 图片格不清空（与单格 Delete 不清图片同口径）
+      if (s.fields[c].type === "image") continue;
+      const cur = values[s.fields[c].id];
+      if (cellValueEqual(cur, undefined)) continue;
+      values[s.fields[c].id] = undefined;
+      changed = true;
+    }
+    if (!changed) return row;
+    anyChange = true;
+    return { ...row, values };
+  });
+  if (!anyChange) return;
+  undoMgr.push();
+  useTableStore.setState({ rows: outRows });
+  schedulePersist();
+}
+
 export const useTableStore = create<TableStoreState>((set, get) => ({
   tableFile: null,
   id: "",
@@ -1090,6 +1120,32 @@ export const useTableStore = create<TableStoreState>((set, get) => ({
     });
   },
 
+  cutSelection: async () => {
+    const s = get();
+    const sel = s.selection;
+    const file = s.tableFile;
+    const region = selectionRegion(sel, s.fields, s.rows);
+    if (!region) return;
+    const text = buildRegionTsv(s.fields, s.rows, region);
+    // 先写剪贴板：成功才清空（写失败不销毁数据）
+    if (text !== "") {
+      try {
+        await writeClipboardText(text);
+      } catch (e) {
+        console.warn("剪切单元格到剪贴板失败", e);
+        set({ error: "剪切失败，请重试" });
+        return;
+      }
+    }
+    // await 窗口内可能切表/收远端补丁：同表校验后按捕获 selection（行/列以 id 定位）重解析区域，
+    // 增删使 id 失效（region null）或已切表则跳过清空——剪贴板已写入，数据不丢
+    const latest = get();
+    if (latest.tableFile !== file) return;
+    const regionNow = selectionRegion(sel, latest.fields, latest.rows);
+    if (!regionNow) return;
+    clearRegionCells(regionNow);
+  },
+
   pasteFromClipboard: async () => {
     let text: string;
     try {
@@ -1115,28 +1171,7 @@ export const useTableStore = create<TableStoreState>((set, get) => ({
     const s = get();
     const region = selectionRegion(s.selection, s.fields, s.rows);
     if (!region) return;
-    // 清空区域全部单元格（一步撤销；图片格跳过——单格 Delete 同口径不清图片）
-    let anyChange = false;
-    const outRows = s.rows.map((row, r) => {
-      if (r < region.rowStart || r > region.rowEnd) return row;
-      let changed = false;
-      const values = { ...row.values };
-      for (let c = region.colStart; c <= region.colEnd; c++) {
-        // 图片格不清空（与单格 Delete 不清图片同口径）
-        if (s.fields[c].type === "image") continue;
-        const cur = values[s.fields[c].id];
-        if (cellValueEqual(cur, undefined)) continue;
-        values[s.fields[c].id] = undefined;
-        changed = true;
-      }
-      if (!changed) return row;
-      anyChange = true;
-      return { ...row, values };
-    });
-    if (!anyChange) return;
-    undoMgr.push();
-    set({ rows: outRows });
-    schedulePersist();
+    clearRegionCells(region);
   },
 
   setView: (view) => set({ view }),

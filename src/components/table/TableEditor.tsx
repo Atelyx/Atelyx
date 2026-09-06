@@ -9,8 +9,9 @@
  *   行首单击选整行；单元格按下不动（<5px）松手 = 选中（td 金色内描边，进入隐藏编辑态，
  *   编辑时保持单元格大小），拖动（>5px）= 拖拽框选多格（范围全体金色内描边）。
  *   选中后打字直达常驻输入框，首个字符/IME 组合覆盖原值；双击 = 取消覆盖（保留原值）。
- * - 复制/粘贴（选中区域 ↔ 系统剪贴板 TSV）：Ctrl+C 复制 / Ctrl+V 粘贴（编辑态输入框聚焦时
- *   放行原生行为）；数据单元格右键菜单「复制/粘贴」（点在当前选区内保留选区、否则落单格；
+ * - 复制/粘贴/剪切（选中区域 ↔ 系统剪贴板 TSV）：Ctrl+C 复制 / Ctrl+V 粘贴 / Ctrl+X 剪切
+ *   （先写剪贴板成功再清空选中区域，一步撤销；编辑态输入框聚焦时放行原生行为）；
+ *   数据单元格右键菜单「复制/剪切/粘贴」（点在当前选区内保留选区、否则落单格；
  *   整表选中时右键仍弹列宽/行高自适应菜单）。粘贴以选区左上角为锚点展开、越界自动补行/补列。
  * - 行拖拽为 pointer 模拟（HTML5 DnD 在 WebView2 不可靠，与文件面板同策略）：
  *   行首手柄按下 → 位移超 5px 激活 → 按行元素中点计算插入位（金色插入线指示）→ 松手 moveRow。
@@ -235,15 +236,16 @@ export function TableEditor({ panelId }: { panelId: string }) {
           useTableStore.getState().redo();
           return;
         }
-        // 复制/粘贴：放大预览打开时归预览（Esc/方向键）；编辑态单元格输入框（data-editing）
-        // 放行原生（复制草稿/贴入输入框）；选中态才接管为「选中区域 ↔ 剪贴板 TSV」结构化复制粘贴
-        if (key === "c" || key === "v") {
+        // 复制/粘贴/剪切：放大预览打开时归预览（Esc/方向键）；编辑态单元格输入框（data-editing）
+        // 放行原生（复制草稿/贴入输入框/剪切草稿）；选中态才接管为「选中区域 ↔ 剪贴板 TSV」结构化复制粘贴
+        if (key === "c" || key === "v" || key === "x") {
           if (document.querySelector("[data-lightbox]")) return;
           if (active?.hasAttribute("data-editing")) return;
           const st = useTableStore.getState();
           if (!st.selection || st.view !== "table") return;
           e.preventDefault();
           if (key === "c") st.copySelection();
+          else if (key === "x") void st.cutSelection();
           else void st.pasteFromClipboard();
           return;
         }
@@ -1095,7 +1097,7 @@ export function TableEditor({ panelId }: { panelId: string }) {
           onFormat={() => setFormatBar({ x: allMenu.x, y: allMenu.y })}
         />
       )}
-      {/* 数据单元格右键菜单：复制 / 粘贴 / 格式 */}
+      {/* 数据单元格右键菜单：复制 / 剪切 / 粘贴 / 格式 */}
       {cellMenu && (
         <CellMenu
           x={cellMenu.x}

@@ -14,6 +14,7 @@ import {
   Columns3,
   Copy,
   Pencil,
+  Scissors,
   Trash2,
   Type,
 } from "lucide-react";
@@ -25,8 +26,9 @@ import { useTableStore } from "@/stores/tableStore";
 import { columnAutoWidth } from "@/utils/table";
 import type { FieldType, TableField } from "@/types";
 
-/** 数据单元格右键菜单：复制 / 粘贴 / 格式（格式 = 在原坐标浮出气泡格式工具栏，见 TableEditor）。
- *  复制 = 当前选中区域 TSV 到系统剪贴板；粘贴 = 剪贴板 TSV 以选区锚点为起点写入，越界自动补行/补列。 */
+/** 数据单元格右键菜单：复制 / 剪切 / 粘贴 / 格式（格式 = 在原坐标浮出气泡格式工具栏，见 TableEditor）。
+ *  复制 = 当前选中区域 TSV 到系统剪贴板；剪切 = 复制成功后清空选中区域（一步撤销，图片格跳过）；
+ *  粘贴 = 剪贴板 TSV 以选区锚点为起点写入，越界自动补行/补列。 */
 export function CellMenu({
   x,
   y,
@@ -42,6 +44,9 @@ export function CellMenu({
     <Menu x={x} y={y} onClose={onClose} widthClass="w-32" stopPointerDown>
       <MenuItem onClick={() => { useTableStore.getState().copySelection(); onClose(); }}>
         <Copy size={14} /> 复制
+      </MenuItem>
+      <MenuItem onClick={() => { void useTableStore.getState().cutSelection(); onClose(); }}>
+        <Scissors size={14} /> 剪切
       </MenuItem>
       <MenuItem onClick={() => { void useTableStore.getState().pasteFromClipboard(); onClose(); }}>
         <ClipboardPaste size={14} /> 粘贴
