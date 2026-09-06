@@ -46,28 +46,36 @@ export function Menu({ x, y, onClose, widthClass = "w-48", contentClassName, rep
 interface MenuItemProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
   /** 危险操作样式（红字，hover 红底白字）。 */
   danger?: boolean;
+  /** 禁用项保持默认指针（不显示 not-allowed）——占用/状态指示类禁用项传 true。 */
+  noDisabledCursor?: boolean;
 }
 
 /** 统一菜单项（w-full 左对齐 + 图标文本同行 + hover 强调色）；danger = 删除类操作；
- *  disabled = 灰显不可点（协作禁删等场景）。 */
-export function MenuItem({ danger, style, className, disabled, ...rest }: MenuItemProps) {
+ *  disabled = 灰显不可点（协作禁删等场景）。hover 文字加 !important：调用方可经 style
+ *  覆盖默认文字色（如「本组/当前」强调色），但 hover 时仍统一为 accent-fg，避免强调色文字
+ *  落在强调色底上看不见。 */
+export function MenuItem({ danger, style, className, disabled, noDisabledCursor, ...rest }: MenuItemProps) {
   return (
     <button
       {...rest}
       disabled={disabled}
       className={`w-full text-left px-3 py-1.5 text-sm inline-flex items-center gap-1.5 ${
         disabled
-          ? "cursor-not-allowed"
+          ? noDisabledCursor
+            ? ""
+            : "cursor-not-allowed"
           : danger
             ? "text-[#f87171] hover:bg-red-600 hover:text-white"
-            : "hover:bg-[var(--accent)] hover:text-[var(--accent-fg)]"
+            : "hover:bg-[var(--accent)] hover:!text-[var(--accent-fg)]"
       } ${className ?? ""}`}
       style={
+        // 调用方 style.color 为 undefined 时回落默认色：直接 `{ color: 默认, ...style }` 展开
+        // 会把 color: undefined 顶掉默认色——占用/状态类禁用项不传色，须保持灰显
         disabled
-          ? { color: "var(--text-muted)", ...style }
+          ? { ...style, color: style?.color ?? "var(--text-muted)" }
           : danger
             ? undefined
-            : { color: "var(--text-primary)", ...style }
+            : { ...style, color: style?.color ?? "var(--text-primary)" }
       }
     />
   );

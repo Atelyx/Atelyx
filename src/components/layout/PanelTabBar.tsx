@@ -82,6 +82,7 @@ export function ViewPickerMenu({
           <MenuItem
             key={v}
             disabled={occupiedElsewhere}
+            noDisabledCursor
             onClick={() => {
               onPickView(v as ViewKind);
               onClose();
@@ -405,6 +406,7 @@ export const PanelTabBar = memo(function PanelTabBar({
                   <MenuItem
                     key={v}
                     disabled={isCurrent || occupiedElsewhere}
+                    noDisabledCursor
                     onClick={() => {
                       onSetTabView(menuTab.id, v as ViewKind);
                       setTabMenu(null);
