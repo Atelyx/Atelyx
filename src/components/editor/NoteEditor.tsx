@@ -1,7 +1,8 @@
 /**
- * 无画布时的 `.md` 笔记编辑器（未打开画布时单击笔记打开）。
+ * `.md` 笔记编辑器（未打开画布时单击笔记打开）。
  *
- * 占据主编辑区（画布位置）：顶部文件操作条，正文 textarea。
+ * 占据主编辑区（画布位置）：顶部文件操作条，正文 = 统一 CodeMirror 引擎
+ * （默认只读实时视图，双击/铅笔进入实时预览编辑；「···」菜单切源码模式 textarea）。
  * - 加载：进入时读笔记正文（切换笔记重读）；加载完成前用户已输入则保留输入（不覆盖正在打的字）。
  * - 保存：输入 debounce 500ms 自动写回 `.md`；卸载/切走时 flush 未落盘输入（不静默丢弃）；
  *   写入完成时若已有更新输入则保持「保存中…」，避免误报「已自动保存」；状态写 vaultStore 由面板 header 展示。
@@ -9,7 +10,6 @@
  */
 import { Check, ClipboardPaste, Copy, MoreHorizontal, Pencil, Scissors, Wand2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import ReactMarkdown from "react-markdown";
 import type { EditorView } from "@codemirror/view";
 import { useVaultStore, lastFolderRenameTarget, lastNoteRenameTarget, isKnownNoteDiskContent, type NoteSaveStatus } from "@/stores/vaultStore";
 import { useNoteUndoStore } from "@/stores/noteUndoStore";
@@ -20,17 +20,11 @@ import { useCollabStore } from "@/stores/collabStore";
 import { useNoteCollabStore } from "@/stores/noteCollabStore";
 import { Menu, MenuDivider, MenuItem } from "@/components/common/Menu";
 import type { BacklinkRow, CollabPeer } from "@/types";
-import {
-  MARKDOWN_PLUGINS,
-  REHYPE_PLUGINS,
-  remarkSoftLineBreak,
-} from "@/utils/markdown";
 import { parseFrontmatter, stringifyFrontmatter } from "@/utils/frontmatter";
 import { noteTitleFromFile } from "@/utils/filename";
 import { NotePropertiesView } from "@/components/editor/NotePropertiesView";
-import { MarkdownEditor } from "@/components/editor/MarkdownEditor";
+import { MarkdownEditor, type MarkdownEditorLinks } from "@/components/editor/MarkdownEditor";
 import { HistoryModal } from "@/components/history/HistoryModal";
-import { useMarkdownComponents } from "@/hooks/useMarkdownComponents";
 import { useVaultLinkHandlers } from "@/hooks/useVaultLinkHandlers";
 import { usePopupAnchor } from "@/hooks/usePopupAnchor";
 import { useVaultTagCandidates } from "@/hooks/useVaultTagCandidates";
@@ -100,7 +94,7 @@ export function NoteEditor({ file }: { file: string }) {
     text: string;
     selectionLive: boolean;
   } | null>(null);
-  /** 划词改写菜单第二阶段：评论输入框（repositionDeps 切换菜单内容）。 */
+  /** 划词改写菜单第二级：评论输入框（repositionDeps 切换菜单内容）。 */
   const [rewriteOpen, setRewriteOpen] = useState(false);
   /** 划词改写评论草稿。 */
   const [rewriteComment, setRewriteComment] = useState("");
@@ -119,7 +113,7 @@ export function NoteEditor({ file }: { file: string }) {
   const [clipHint, setClipHint] = useState<string | null>(null);
   const clipHintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  /** 关闭划词右键菜单（一/二阶段共用）。 */
+  /** 关闭划词右键菜单（两级共用）。 */
   const closeRewriteMenu = useCallback(() => {
     setContentMenu(null);
     setRewriteOpen(false);
@@ -832,14 +826,6 @@ export function NoteEditor({ file }: { file: string }) {
     [isCollab, collabPeers, file],
   );
 
-  /** 宽松换行（仓库级设置，缺省开启）：开启时预览注入软换行→<br> 插件。
-   * useMemo 稳定数组引用，避免无关渲染触发 ReactMarkdown 重建 processor。 */
-  const softLineBreak = useSettingsStore((s) => s.vaultConfig?.softLineBreak ?? true);
-  const previewPlugins = useMemo(
-    () => (softLineBreak ? [...MARKDOWN_PLUGINS, remarkSoftLineBreak] : MARKDOWN_PLUGINS),
-    [softLineBreak]
-  );
-
   /** 面板编辑提交：新 data 拼回完整 content，走既有 handleChange（debounce 保存/冲突条/外部感知全复用，零新机制）。 */
   const handlePropertiesUpdate = (next: Record<string, unknown>) => {
     try {
@@ -855,13 +841,16 @@ export function NoteEditor({ file }: { file: string }) {
   /** 笔记链接打开/新建（公共接线簇，见 hooks/useVaultLinkHandlers；本编辑器不做画布定位）。 */
   const { handleOpenWikiNote, isVaultPathNote, handleOpenVaultPathNote, handleCreateNote } =
     useVaultLinkHandlers();
-  // 预览的 Markdown 组件配置：hook 统一 useMemo 稳定化（回调全部稳定，防预览随输入重渲染）
-  const noteMarkdownComponents = useMarkdownComponents({
-    onOpenNote: handleOpenWikiNote,
-    isVaultPathNote,
-    onOpenVaultPathNote: handleOpenVaultPathNote,
-    onCreateNote: handleCreateNote,
-  });
+  // 统一渲染引擎的链接/定位回调（回调全部稳定化，防随输入重建装饰）
+  const noteMarkdownLinks: MarkdownEditorLinks = useMemo(
+    () => ({
+      onOpenNote: handleOpenWikiNote,
+      isVaultPathNote,
+      onOpenVaultPathNote: handleOpenVaultPathNote,
+      onCreateNote: handleCreateNote,
+    }),
+    [handleOpenWikiNote, isVaultPathNote, handleOpenVaultPathNote, handleCreateNote],
+  );
 
   /** 反链：全仓库 .md 中引用本文档的笔记（自身排除）；索引缓存 + 指纹增量刷新，扫描开销毫秒级。
    * 只在「切换打开的笔记」时扫描——不随仓库文件变化重扫（根除全量风暴），磁盘为真相自愈。
@@ -892,7 +881,7 @@ export function NoteEditor({ file }: { file: string }) {
     handleChange("---" + eol + "---" + eol + eol + content);
   };
 
-  /** 菜单打开时是否捕获到选区（一阶段菜单形态：完整菜单 vs 仅粘贴）。 */
+  /** 菜单打开时是否捕获到选区（第一级菜单形态：完整菜单 vs 仅粘贴）。 */
   const hasSelection = !!contentMenu?.text.trim();
 
   return (
@@ -1055,44 +1044,33 @@ export function NoteEditor({ file }: { file: string }) {
             cursor: preview ? "default" : "text",
           }}
         />
-      ) : preview ? (
-        /* 预览：只读渲染 Markdown（扩展语法公共配置；wiki 链接预览中不可定位，灰显降级）。
-           四边 border 与 textarea 的全局边框（--input-border）对齐：切换预览时顶部/左右/下方边线均不再变化 */
-        <div
-          data-note-content
-          className="flex-1 overflow-auto markdown-body max-w-none break-words p-4 text-sm leading-relaxed"
-          style={{ background: "var(--bg-primary)", color: "var(--text-primary)", border: "1px solid var(--input-border)" }}
-          onDoubleClick={() => {
-            // 双击进入编辑：先清除浏览器默认的双击文本选中（选中单词），再切换，避免进入编辑后残留选中
-            window.getSelection()?.removeAllRanges();
-            setPreview(false);
-          }}
-        >
-          <ReactMarkdown
-            remarkPlugins={previewPlugins}
-            rehypePlugins={REHYPE_PLUGINS}
-            components={noteMarkdownComponents}
-          >
-            {content}
-          </ReactMarkdown>
-        </div>
       ) : (
-        /* 编辑：实时预览编辑（CodeMirror 文本编辑 + 渲染装饰层，只编辑正文 body，
-           frontmatter 由属性面板管理；编辑器自身样式见 styles/index.css）；
-           border 与预览/源码模式对齐（1px），accent 高亮 = 进入编辑模式（与源码模式聚焦时一致） */
+        /* 只读实时视图 / 实时预览编辑：同一 CodeMirror 引擎，readOnly 动态切换（不重建 → 预览⇄编辑
+           零跳变、选区/滚动/协作绑定全保留）。只读态 widget 恒渲染（表格/数学/HTML/勾选框等全部显示），
+           双击/铅笔进入编辑；编辑器自身样式见 styles/index.css；border 与源码模式对齐（1px），
+           accent 高亮 = 进入编辑模式（与源码模式聚焦时一致） */
         <div
           data-note-content
           className="markdown-body flex-1 overflow-auto"
           style={{
             background: "var(--bg-primary)",
             color: "var(--text-primary)",
-            border: "1px solid var(--accent)",
+            border: preview ? "1px solid var(--input-border)" : "1px solid var(--accent)",
+          }}
+          onDoubleClick={() => {
+            // 只读态双击进入编辑：先清除浏览器默认的双击文本选中（选中单词），再切换，避免残留选中
+            if (!preview) return;
+            window.getSelection()?.removeAllRanges();
+            setPreview(false);
           }}
         >
           <MarkdownEditor
             body={parsed.body}
             syncSeq={editorSyncSeq}
             editorViewRef={cmViewRef}
+            readOnly={preview}
+            interactiveCheckbox
+            links={noteMarkdownLinks}
             // 协作挂载分歧：干净 → 收敛 content 到协作基线（编辑器已以 ytext 为模型源）；
             // 有未落盘编辑 → 本地正文写回 ytext（本地最新者胜，防陈旧基线回退本地输入）
             onCollabDivergence={(ytextText) => {

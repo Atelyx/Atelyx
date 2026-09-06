@@ -23,7 +23,6 @@ import {
   splitMentions,
   type MentionSeg,
 } from "@/utils/text";
-import { useMarkdownComponents } from "@/hooks/useMarkdownComponents";
 import type {
   ConversationData,
   MediaData,
@@ -41,6 +40,7 @@ import { DropdownSelect } from "@/components/common/DropdownSelect";
 import { ModelSelect } from "@/components/common/ModelSelect";
 import { Menu, MenuItem } from "@/components/common/Menu";
 import { ChatMessageBubble } from "@/components/common/ChatMessageBubble";
+import type { MarkdownEditorLinks } from "@/components/editor/MarkdownEditor";
 import { MentionTextarea } from "@/components/common/MentionTextarea";
 import { JumpToBottomButton } from "@/components/common/JumpToBottomButton";
 import { useInlineEdit } from "@/hooks/useInlineEdit";
@@ -660,14 +660,18 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
 
   // ===== 渲染 =====
 
-  // assistant 消息的 Markdown 组件配置：useMemo 稳定化（气泡 memo 生效前提，流式期间历史消息不重渲染）
-  const messageMarkdownComponents = useMarkdownComponents({
-    locate: { isLocatable: isWikiLocatable, onLocate: handleLocateWiki },
-    onOpenNote: handleOpenWikiNote,
-    isVaultPathNote,
-    onOpenVaultPathNote: handleOpenVaultPathNote,
-    onCreateNote: handleCreateNote,
-  });
+  // assistant 消息的链接/定位回调：useMemo 稳定化（气泡 memo 生效前提，流式期间历史消息不重渲染）
+  const messageMarkdownLinks = useMemo<MarkdownEditorLinks>(
+    () => ({
+      onOpenNote: handleOpenWikiNote,
+      isVaultPathNote,
+      onOpenVaultPathNote: handleOpenVaultPathNote,
+      onCreateNote: handleCreateNote,
+      isLocatable: isWikiLocatable,
+      onLocate: handleLocateWiki,
+    }),
+    [handleOpenWikiNote, isVaultPathNote, handleOpenVaultPathNote, handleCreateNote, isWikiLocatable, handleLocateWiki],
+  );
   const handleRollback = useCallback(
     (messageId: string) => rollbackTo(id, messageId),
     [id, rollbackTo],
@@ -848,7 +852,7 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
                   isStreaming={isStreamingMsg}
                   attachments={m.attachments}
                   onMediaExtract={extractToMediaNode}
-                  markdownComponents={messageMarkdownComponents}
+                  markdownLinks={messageMarkdownLinks}
                   copyText={
                     m.role === "user"
                       ? (m.displayContent ?? m.content)

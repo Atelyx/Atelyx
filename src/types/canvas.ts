@@ -189,7 +189,7 @@ export interface VaultConfig {
   /** API key 是否随仓库保存（多设备同步）：开启后 provider/Tavily key 明文写入本文件，随仓库同步；
    * 缺省 false = key 仅存本机 keychain（按仓库隔离）。开启有泄露风险（仓库被公开/云盘共享）。 */
   syncKeys?: boolean;
-  /** 宽松换行：开启时预览模式单个换行符渲染为换行；关闭时按 Markdown 标准视为空格。缺省 = true。 */
+  /** 宽松换行（仓库级，缺省 true）。 */
   softLineBreak?: boolean;
   /** 话题自动命名开关（缺省 = false 不启用）。 */
   autoNamingEnabled?: boolean;

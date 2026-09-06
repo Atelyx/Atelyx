@@ -9,7 +9,7 @@ import { useVaultStore } from "@/stores/vaultStore";
 export function EditorSettingsTab() {
   const vaultConfig = useSettingsStore((s) => s.vaultConfig);
   const setSoftLineBreak = useSettingsStore((s) => s.setSoftLineBreak);
-  /** 宽松换行：缺省开启（单个换行渲染为换行）。 */
+  /** 宽松换行：缺省开启。 */
   const softLineBreak = vaultConfig?.softLineBreak ?? true;
 
   // 重建内部链接：确认弹窗 / 执行中 / 内联结果
@@ -37,7 +37,7 @@ export function EditorSettingsTab() {
   return (
     <>
       <section className="flex-1 p-5 overflow-auto space-y-4">
-        {/* 宽松换行：仅渲染层生效，编辑模式始终原文 */}
+        {/* 宽松换行 */}
         <SettingCard
           title="宽松换行"
           description="单个换行显示为换行；关闭 = 按 Markdown 标准需空行换行"

@@ -7,7 +7,7 @@
  * - handleCreateNote：`[名]()` 空链接（目标不存在）→ 快捷新建并打开
  *
  * 回调全部 useCallback 稳定化（内部 getState() 实时读 noteList），
- * 是调用方 `useMemo([])` 缓存 markdownComponents 的前提（气泡 memo 生效）。
+ * 是调用方 `useMemo([])` 缓存 MarkdownEditorLinks 的前提（气泡 memo 生效）。
  */
 import { useCallback } from "react";
 import { useAppStore } from "@/stores/appStore";

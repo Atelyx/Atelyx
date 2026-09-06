@@ -7,9 +7,9 @@
  * （画布 = 定位节点，面板 = 打开笔记）、附件（仅画布有）、分支/重新生成（入口各自）。
  * 气泡配色/内边距/流式占位两入口恒同值，内联为模块级常量（调用点不再传，memo 引用恒稳定）。
  *
- * memo 生效前提：markdownComponents 必须 useMemo 稳定化、onRollback/onBranch 等
+ * memo 生效前提：markdownLinks 必须 useMemo 稳定化、onRollback/onBranch 等
  * 回调 useCallback——流式期间历史消息靠引用不变跳过重渲染（assistant 消息无 refs/
- * 附件，引用天然稳定，重渲染最贵的 ReactMarkdown 得以跳过）。
+ * 附件，引用天然稳定，重渲染最贵的 MarkdownView 得以跳过）。
  */
 import { memo, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import {
@@ -31,13 +31,10 @@ import {
   Search,
   Wrench,
 } from "lucide-react";
-import ReactMarkdown from "react-markdown";
-import type { Components } from "react-markdown";
 import { ThinkingBlock } from "@/components/common/ThinkingBlock";
-import { MARKDOWN_PLUGINS, REHYPE_PLUGINS } from "@/utils/markdown";
-import { splitMentions } from "@/utils/text";
 import { groupAgentSteps } from "@/utils/agentSteps";
 import type { AgentStep, Attachment, ToolRun } from "@/types";
+import { MarkdownView, type MarkdownEditorLinks } from "@/components/editor/MarkdownEditor";
 
 /** 两入口恒同值的气泡样式（画布/面板同款）：模块级单例，memo 浅比较引用恒稳定。 */
 const USER_BUBBLE_CLASS = "bg-[var(--bg-tertiary)]";
@@ -81,8 +78,8 @@ interface ChatMessageBubbleProps {
   attachments?: Attachment[];
   /** 附件图片右键 → 拉出为媒体节点（仅画布传）。 */
   onMediaExtract?: (att: Attachment) => void;
-  /** assistant Markdown 的组件工厂结果（调用方 useMemo 稳定化；缺省 = 纯渲染无链接拦截）。 */
-  markdownComponents?: Components;
+  /** assistant Markdown 的链接/定位回调（调用方 useMemo 稳定化；缺省 = 纯渲染无链接拦截）。 */
+  markdownLinks?: MarkdownEditorLinks;
   /** 复制内容（气泡所见原文，调用方算好：user = displayContent ?? content，assistant = content）。 */
   copyText: string;
   messageId: string;
@@ -108,7 +105,7 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
   isStreaming,
   attachments,
   onMediaExtract,
-  markdownComponents,
+  markdownLinks,
   copyText,
   messageId,
   canRollback,
@@ -132,23 +129,12 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
   };
   const atts = attachments ?? [];
   // refs → {key, label} 归一化：refs 为消息对象自带数组（引用稳定），refKeyOf 为模块级稳定函数，
-  // 该 useMemo 只在消息自身 refs 变化时重算——历史消息 memo 跳过渲染
+  // 该 useMemo 只在消息自身 refs 变化时重算——历史消息 memo 跳过渲染；同时供用户消息 MarkdownView
+  // 的 @引用 胶囊（mentions）使用
   const mentionRefs = useMemo(() => {
     if (!refs || !refKeyOf) return undefined;
     return refs.map((r) => ({ key: refKeyOf(r), label: r.label }));
   }, [refs, refKeyOf]);
-  // user 气泡按原文位置切分（@引用 → 胶囊段，其余普通文本段）——胶囊与输入框同位置就地渲染，
-  // 不另起独立 chip 行；无引用时 = 单普通段整段渲染，行为与未切分一致
-  const userSegs = useMemo(() => {
-    if (!displayContent) return undefined;
-    return splitMentions(
-      displayContent,
-      (mentionRefs ?? []).map((r) => ({ nodeId: r.key, text: `@${r.label}` }))
-    );
-  }, [displayContent, mentionRefs]);
-  // 分段渲染的 Markdown 组件：段落内联化（p → span）——纯文本碎片段与 @胶囊 同一文本流不独占行，
-  // 段内块级语法（列表/代码块等）照常块级；依赖 markdownComponents（调用方 useMemo 稳定）→ 引用稳定（气泡 memo 前提）
-  const segComponents = useMemo(() => ({ ...markdownComponents, p: InlineP }), [markdownComponents]);
   const stopProps = stopPropagation
     ? {
         onClick: (e: React.MouseEvent) => e.stopPropagation(),
@@ -161,7 +147,6 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
       <div
         className={`relative max-w-[85%] rounded-lg ${BUBBLE_PADDING_CLASS} ${isUser ? USER_BUBBLE_CLASS : ""}`}
         style={{
-          cursor: "text",
           userSelect: "text",
           WebkitUserSelect: "text",
           // assistant 底色/边框来自样式常量（原实现 bg-tertiary 被其覆盖，净效果一致），字色恒 text-primary
@@ -201,26 +186,13 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
         )}
         {isUser ? (
           <div className="markdown-body max-w-none break-words">
-            {userSegs?.map((seg, i) =>
-              seg.mention ? (
-                <RefChip
-                  key={i}
-                  text={seg.text}
-                  nodeId={seg.mention.nodeId}
-                  label={seg.mention.text.slice(1)}
-                  onRefChipClick={onRefChipClick}
-                />
-              ) : (
-                <ReactMarkdown
-                  key={i}
-                  remarkPlugins={MARKDOWN_PLUGINS}
-                  rehypePlugins={REHYPE_PLUGINS}
-                  components={segComponents}
-                >
-                  {seg.text}
-                </ReactMarkdown>
-              )
-            )}
+            {/* 用户消息整段统一引擎渲染；@引用 经 mention widget 原地渲染为胶囊（点击定位/打开） */}
+            <MarkdownView
+              text={displayContent ?? ""}
+              links={markdownLinks}
+              mentions={mentionRefs}
+              onMentionClick={onRefChipClick}
+            />
           </div>
         ) : (
           <div className="markdown-body max-w-none break-words">
@@ -236,7 +208,7 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
                           streaming={isStreaming && idx === stepGroups.length - 1}
                         />
                       ) : (
-                        <NarrationLine key={ti} text={tk.text} markdownComponents={markdownComponents} />
+                        <NarrationLine key={ti} text={tk.text} links={markdownLinks} />
                       ),
                     )}
                     {g.tools.map((run) => (
@@ -254,13 +226,10 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
                 {stepGroups.length > 0 && content ? (
                   <div className="my-1.5 border-t" style={{ borderColor: "var(--border)" }} />
                 ) : null}
-                <ReactMarkdown
-                  remarkPlugins={MARKDOWN_PLUGINS}
-                  rehypePlugins={REHYPE_PLUGINS}
-                  components={markdownComponents}
-                >
-                  {content || (stepGroups.length === 0 ? "..." : "")}
-                </ReactMarkdown>
+                <MarkdownView
+                  text={content || (stepGroups.length === 0 ? "..." : "")}
+                  links={markdownLinks}
+                />
               </>
             )}
           </div>
@@ -319,8 +288,14 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
   );
 });
 
-/** 段落内联化（p → span）：分段渲染的普通文本碎片段与 @胶囊 同一文本流（块级 p 会独占行把句子拆开）。 */
-const InlineP = ({ children }: { children?: ReactNode }) => <span>{children}</span>;
+/** 工具轮叙述行：模型在工具轮里说的正文，作为该步的叙述行展示（不进最终回复），与最终回复同 Markdown 正文渲染。 */
+function NarrationLine({ text, links }: { text: string; links?: MarkdownEditorLinks }) {
+  return (
+    <div className="markdown-body max-w-none break-words rounded px-1.5 py-1">
+      <MarkdownView text={text} links={links} />
+    </div>
+  );
+}
 
 /** 工具图标（按工具名分发；未知工具 = 通用扳手）。 */
 function toolIcon(name: string, size: number) {
@@ -342,21 +317,6 @@ function toolIcon(name: string, size: number) {
     default:
       return <Wrench size={size} className="flex-shrink-0" />;
   }
-}
-
-/** 工具轮叙述行：模型在工具轮里说的正文，作为该步的叙述行展示（不进最终回复），与最终回复同 Markdown 正文渲染。 */
-function NarrationLine({ text, markdownComponents }: { text: string; markdownComponents?: Components }) {
-  return (
-    <div className="markdown-body max-w-none break-words rounded px-1.5 py-1">
-      <ReactMarkdown
-        remarkPlugins={MARKDOWN_PLUGINS}
-        rehypePlugins={REHYPE_PLUGINS}
-        components={markdownComponents}
-      >
-        {text}
-      </ReactMarkdown>
-    </div>
-  );
 }
 
 /** 工具调用行：可点开详情。折叠 = 图标 + 参数摘要 + 状态 + 结果摘要；展开 = 完整参数与结果。 */
@@ -460,30 +420,3 @@ function prettyJson(json: string): string {
   }
 }
 
-/** user 气泡内嵌 @引用 胶囊（与输入框标签同位置渲染，点击行为由调用方绑定：画布 = 定位节点，面板 = 打开笔记）。 */
-function RefChip({
-  text,
-  nodeId,
-  label,
-  onRefChipClick,
-}: {
-  text: string;
-  nodeId: string;
-  label: string;
-  onRefChipClick?: (refKey: string, label: string) => void;
-}) {
-  return (
-    <button
-      onClick={() => onRefChipClick?.(nodeId, label)}
-      title={`定位到 ${label}`}
-      className="inline-flex items-center rounded-full px-2 py-0.5 border align-baseline transition-all hover:brightness-110"
-      style={{
-        background: "color-mix(in srgb, var(--accent) 18%, transparent)",
-        borderColor: "color-mix(in srgb, var(--accent) 45%, transparent)",
-        color: "var(--accent)",
-      }}
-    >
-      {text}
-    </button>
-  );
-}

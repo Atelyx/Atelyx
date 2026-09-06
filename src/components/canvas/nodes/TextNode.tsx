@@ -1,7 +1,6 @@
 import { AlertTriangle, Eye, FileText, Pencil, StickyNote } from "lucide-react";
 import { useRef, useState } from "react";
 import type { NodeProps } from "@xyflow/react";
-import ReactMarkdown from "react-markdown";
 import type { TextData } from "@/types";
 import { useCanvasStore } from "@/stores/canvasStore";
 import { useVaultStore } from "@/stores/vaultStore";
@@ -10,12 +9,11 @@ import {
   DEFAULT_TEXT_NODE_HEIGHT,
   DEFAULT_TEXT_NODE_WIDTH,
 } from "@/constants/canvas";
-import { MARKDOWN_PLUGINS, REHYPE_PLUGINS } from "@/utils/markdown";
 import { ConnectionFrame } from "./ConnectionFrame";
 import { useInlineEdit } from "@/hooks/useInlineEdit";
-import { useMarkdownComponents } from "@/hooks/useMarkdownComponents";
 import { useVaultLinkHandlers } from "@/hooks/useVaultLinkHandlers";
 import { useWikiNodeLocate } from "@/hooks/useWikiNodeLocate";
+import { MarkdownView, type MarkdownEditorLinks } from "@/components/editor/MarkdownEditor";
 
 export function TextNode({ id, data, width, height, selected }: NodeProps) {
   const { bodyMd, title, file, fileMissing } = data as unknown as TextData;
@@ -77,14 +75,15 @@ export function TextNode({ id, data, width, height, selected }: NodeProps) {
     handleOpenVaultPathNote,
     handleCreateNote,
   } = useVaultLinkHandlers();
-  // Markdown 组件配置稳定化（回调全部稳定，useMemo 防每次渲染重建）
-  const textMarkdownComponents = useMarkdownComponents({
-    locate: { isLocatable: isWikiLocatable, onLocate: handleLocateWiki },
+  // 统一渲染引擎的链接/定位回调（回调全部稳定，防随内容重建装饰）
+  const textMarkdownLinks: MarkdownEditorLinks = {
     onOpenNote: handleOpenWikiNote,
     isVaultPathNote,
     onOpenVaultPathNote: handleOpenVaultPathNote,
     onCreateNote: handleCreateNote,
-  });
+    isLocatable: isWikiLocatable,
+    onLocate: handleLocateWiki,
+  };
 
   return (
     <div
@@ -170,7 +169,7 @@ export function TextNode({ id, data, width, height, selected }: NodeProps) {
 
       <div
         className={`nodrag nowheel overflow-auto markdown-body max-w-none break-words px-3 py-2 flex-1 min-h-0`}
-        style={{ userSelect: "text", WebkitUserSelect: "text", cursor: "text" }}
+        style={{ userSelect: "text", WebkitUserSelect: "text" }}
         onDoubleClick={fileMissing || readOnly ? undefined : enterEdit}
       >
         {fileMissing ? (
@@ -204,13 +203,11 @@ export function TextNode({ id, data, width, height, selected }: NodeProps) {
             style={{ color: "var(--text-primary)", lineHeight: 1.6 }}
           />
         ) : (
-          <ReactMarkdown
-            remarkPlugins={MARKDOWN_PLUGINS}
-            rehypePlugins={REHYPE_PLUGINS}
-            components={textMarkdownComponents}
-          >
-            {bodyMd || "*（空）*"}
-          </ReactMarkdown>
+          <MarkdownView
+            text={bodyMd || "*（空）*"}
+            links={textMarkdownLinks}
+            className="h-full"
+          />
         )}
       </div>
 

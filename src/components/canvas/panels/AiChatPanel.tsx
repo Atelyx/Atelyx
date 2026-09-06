@@ -28,17 +28,17 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useEffect, useCallback, useRef, useState } from "react";
+import { useEffect, useCallback, useMemo, useRef, useState } from "react";
 import { useAppStore } from "@/stores/appStore";
 import { useChatPanelStore } from "@/stores/chatPanelStore";
 import { useSettingsStore, selectDefaultModelDisplay } from "@/stores/settingsStore";
 import { useAutoScrollFollow } from "@/hooks/useAutoScrollFollow";
-import { useMarkdownComponents } from "@/hooks/useMarkdownComponents";
 import {
   splitMentions,
   type MentionSeg,
 } from "@/utils/text";
 import { ChatMessageBubble } from "@/components/common/ChatMessageBubble";
+import type { MarkdownEditorLinks } from "@/components/editor/MarkdownEditor";
 import { MentionTextarea } from "@/components/common/MentionTextarea";
 import { JumpToBottomButton } from "@/components/common/JumpToBottomButton";
 import { DropdownSelect } from "@/components/common/DropdownSelect";
@@ -133,16 +133,19 @@ export function AiChatPanel() {
       setRenaming(false);
     }
   };
-  // assistant/user 消息的 Markdown 组件配置：hook 统一 useMemo 稳定化（气泡 memo 生效前提）。
+  // assistant/user 消息的链接/定位回调：hook 统一 useMemo 稳定化（气泡 memo 生效前提）。
   // 回调全部来自 useVaultLinkHandlers（useCallback 稳定 + 内部 getState 实时读 noteList），无需响应 noteList 变化重建
   const { handleOpenWikiNote, isVaultPathNote, handleOpenVaultPathNote, handleCreateNote } =
     useVaultLinkHandlers();
-  const chatMarkdownComponents = useMarkdownComponents({
-    onOpenNote: handleOpenWikiNote,
-    isVaultPathNote,
-    onOpenVaultPathNote: handleOpenVaultPathNote,
-    onCreateNote: handleCreateNote,
-  });
+  const chatMarkdownLinks = useMemo<MarkdownEditorLinks>(
+    () => ({
+      onOpenNote: handleOpenWikiNote,
+      isVaultPathNote,
+      onOpenVaultPathNote: handleOpenVaultPathNote,
+      onCreateNote: handleCreateNote,
+    }),
+    [handleOpenWikiNote, isVaultPathNote, handleOpenVaultPathNote, handleCreateNote],
+  );
   // 气泡操作回调稳定化（memo 生效前提）；rollbackTo 为 store action 引用恒稳定，onRollback 直传
   const handleRegenerate = useCallback(() => void regenerate(), [regenerate]);
   // @chip 点击按类型打开引用目标（画布/笔记/表格应用内打开，其他文件/文件夹在文件管理器中打开；
@@ -425,7 +428,7 @@ export function AiChatPanel() {
                   content={m.content}
                   steps={m.steps}
                   isStreaming={isStreamingMsg}
-                  markdownComponents={chatMarkdownComponents}
+                  markdownLinks={chatMarkdownLinks}
                   copyText={m.role === "user" ? (m.displayContent ?? m.content) : assistantReplyText(m)}
                   messageId={m.id}
                   canRollback={!isStreamingMsg && m.role === "assistant" && assistantReplyText(m).trim() !== ""}

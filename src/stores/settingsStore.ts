@@ -144,7 +144,7 @@ interface SettingsState {
   setExcludeFolders: (folders: string[]) => Promise<void>;
   /** 设置附件导入默认文件夹（仓库级；undefined = 仓库根目录）。 */
   setAttachmentFolder: (folder: string | undefined) => Promise<void>;
-  /** 设置宽松换行（仓库级）：开启时预览模式单个换行符渲染为换行（缺省 true）。 */
+  /** 设置宽松换行（仓库级，缺省 true）。 */
   setSoftLineBreak: (enabled: boolean) => Promise<void>;
   /** 设置进入仓库时是否自动恢复上次打开的文件（应用级；缺省 true = 开启，写 global.json）。 */
   setAutoRestoreFiles: (enabled: boolean) => Promise<void>;

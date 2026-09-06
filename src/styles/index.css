@@ -1,5 +1,4 @@
 @import "katex/dist/katex.min.css";
-@import "highlight.js/styles/github-dark.css";
 @import "@xyflow/react/dist/style.css";
 
 @tailwind base;
@@ -379,15 +378,25 @@ body {
   background: color-mix(in srgb, var(--accent) 25%, transparent);
 }
 
-/* 实时预览 widget：链接 / wiki 链接 / 图片 / 任务复选框 */
+/* 实时预览 widget：链接 / 内部链接 / 图片 / 任务复选框 */
 .md-editor-link {
   color: var(--accent);
   text-decoration: underline;
   cursor: pointer;
 }
-.md-editor-wikilink {
+/* 内部链接（wiki/仓库路径）：下划线式，缺失态虚线 */
+.md-editor-internal-link {
   color: var(--link-internal);
-  cursor: default;
+  text-decoration: none;
+  border-bottom: 1px solid currentColor;
+  cursor: pointer;
+}
+.md-editor-internal-link:hover {
+  text-decoration: underline;
+}
+.md-editor-internal-link.md-editor-internal-link-missing {
+  color: var(--text-muted);
+  border-bottom: 1px dashed currentColor;
 }
 /* 列表标记（无序小圆点 / 有序序号）：随标记隐藏后补位显示，不可选中 */
 .md-editor-list-marker {
@@ -427,6 +436,154 @@ body {
   vertical-align: middle;
   accent-color: var(--accent);
   cursor: pointer;
+}
+/* ==高亮== 内文 mark（定界符已隐藏） */
+.md-highlight {
+  background: var(--mark-bg);
+  color: var(--mark-color);
+  border-radius: 2px;
+  padding: 0 2px;
+}
+/* 数学（KaTeX）：行内垂直对齐 / 块级居中留白；解析失败回显源码灰显 */
+.md-editor-math {
+  display: inline-block;
+  vertical-align: middle;
+}
+.md-editor-math-block {
+  display: block;
+  text-align: center;
+  margin: 0.5em 0;
+  overflow-x: auto;
+}
+.md-editor-math-error {
+  color: var(--text-muted);
+  font-style: italic;
+  white-space: pre;
+}
+/* callout 徽章（替换 `> [!type]`）+ 引用块行着色（md-callout/md-quote 打在 .cm-line 上，
+   callout 类型色板复用下方 .callout-* 变量，经行装饰 class 继承到徽章） */
+.md-editor-callout-badge {
+  display: inline-block;
+  margin-right: 0.35em;
+  padding: 0 0.4em;
+  border-radius: 9999px;
+  font-size: 0.8em;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--callout-color, var(--accent));
+  background: color-mix(in srgb, var(--callout-color, var(--accent)) 16%, transparent);
+  user-select: none;
+}
+.cm-line.md-callout {
+  border-left: 3px solid var(--callout-color, var(--accent));
+  background: var(--callout-bg);
+  padding-left: 0.6em;
+}
+.cm-line.md-quote {
+  border-left: 3px solid var(--border);
+  padding-left: 0.8em;
+  color: var(--text-secondary);
+}
+/* 只读态：默认光标 + 隐藏原生编辑光标（点击不出现闪烁编辑指示；选区保留可拖选复制）。
+   原生 caret 是 contenteditable 的浏览器默认渲染，须经 caret-color: transparent 压掉
+   （本引擎未启用 drawSelection，无 CM 自绘 .cm-cursor 元素，故不存在针对它的规则）。 */
+.cm-readonly .cm-content,
+.cm-readonly .cm-line,
+.cm-readonly .cm-scroller {
+  cursor: default !important;
+}
+.cm-readonly .cm-content,
+.cm-readonly .cm-line {
+  caret-color: transparent !important;
+}
+/* 只读态仍可交互的 widget 保持 pointer 光标 */
+.cm-readonly .md-editor-checkbox,
+.cm-readonly .md-editor-link,
+.cm-readonly .md-editor-internal-link,
+.cm-readonly .md-editor-code-copy,
+.cm-readonly .mention-capsule {
+  cursor: pointer !important;
+}
+/* 围栏代码块（只读面 widget）：盒装 + 右上角悬浮复制按钮 */
+.md-editor-code-block {
+  position: relative;
+  margin: 0.4em 0;
+}
+.md-editor-code-block pre {
+  @apply rounded p-2 overflow-x-auto text-xs;
+  background: var(--code-bg);
+  color: var(--highlight-text);
+  border: 1px solid var(--border);
+  margin: 0;
+}
+.md-editor-code-block code {
+  @apply bg-transparent p-0;
+  color: var(--highlight-text);
+}
+.md-editor-code-copy {
+  position: absolute;
+  top: 0.35rem;
+  right: 0.35rem;
+  z-index: 1;
+  padding: 0.1rem 0.45rem;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  opacity: 0;
+  transition: opacity 0.15s;
+  cursor: pointer;
+}
+.md-editor-code-block:hover .md-editor-code-copy {
+  opacity: 1;
+}
+/* raw HTML 渲染（白名单清洗后）：kbd/details/dl/媒体排版 */
+.md-editor-html kbd {
+  padding: 0.1em 0.4em;
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: var(--bg-tertiary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.85em;
+}
+.md-editor-html details {
+  margin: 0.4em 0;
+  padding: 0.4em 0.8em;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-secondary);
+}
+.md-editor-html summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.md-editor-html dl {
+  margin: 0.4em 0;
+}
+.md-editor-html dt {
+  font-weight: 600;
+}
+.md-editor-html dd {
+  margin-left: 1.2em;
+}
+.md-editor-html video,
+.md-editor-html audio {
+  max-width: 100%;
+}
+/* 脚注引用 / 定义块 */
+.md-editor-footnote-ref {
+  color: var(--accent);
+  cursor: default;
+}
+.md-editor-footnote-def {
+  color: var(--text-secondary);
+  font-size: 0.9em;
+  padding-left: 0.6em;
+  border-left: 2px solid var(--border);
+  margin: 0.2em 0;
 }
 .markdown-body table {
   @apply border-collapse w-full my-1 text-xs;
@@ -540,20 +697,8 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.markdown-body blockquote.callout {
-  margin: 0.5em 0;
-  padding: 0.5em 1em;
-  border-left: 3px solid var(--callout-color, var(--accent));
-  background: var(--callout-bg);
-  border-radius: 0 6px 6px 0;
-}
-.markdown-body blockquote.callout > p:first-child {
-  margin-top: 0;
-}
-.markdown-body blockquote.callout > p:last-child {
-  margin-bottom: 0;
-}
-/* callout 类型色板：note/abstract/info/todo 蓝青系，tip/success 绿，warning 橙，danger 系红，example 紫，quote 灰 */
+/* callout 类型色板：note/abstract/info/todo 蓝青系，tip/success 绿，warning 橙，danger 系红，example 紫，quote 灰
+   （--callout-color 供 .cm-line.md-callout 行着色 + .md-editor-callout-badge 徽章继承） */
 .callout-note {
   --callout-color: #448aff;
 }
