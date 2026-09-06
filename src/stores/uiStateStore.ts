@@ -183,13 +183,15 @@ const persistCtl = createPersistController({
   delay: 400,
 });
 
-/** 非布局字段 → Rust 补丁（只发 JS 拥有的字段）。 */
+/** 非布局字段 → Rust 补丁（只发 JS 拥有的字段；last*File 为 null 时省略——清除走 closeFile 的定向补丁，
+ * 常规补丁不携带 null，防撕裂窗口持有的陈旧 null 副本误清主窗口记录；
+ * 陈旧非 null 值回写（撕裂窗口副本落后于主窗口）属撕裂窗口架构既有 LWW 限制，未在本次范围处理）。 */
 function nonLayoutPatch(s: UiStateStore): import("@/types").UiStatePatch {
   return {
     fileExplorerExpanded: [...s.fileExplorerExpanded],
-    lastCanvasFile: s.lastCanvasFile,
-    lastNoteFile: s.lastNoteFile,
-    lastTableFile: s.lastTableFile,
+    ...(s.lastCanvasFile !== null ? { lastCanvasFile: s.lastCanvasFile } : {}),
+    ...(s.lastNoteFile !== null ? { lastNoteFile: s.lastNoteFile } : {}),
+    ...(s.lastTableFile !== null ? { lastTableFile: s.lastTableFile } : {}),
     focusedPanelId: s.focusedPanelId,
     recentFiles: s.recentFiles,
   };
@@ -360,7 +362,17 @@ export const useUiStateStore = create<UiStateStore>((set, get) => {
       persistDebounced();
     },
 
-    closeFile: (kind) => setLastFile(set, kind, null),
+    closeFile: (kind) => {
+      setLastFile(set, kind, null);
+      // 常规补丁会省略 null（见 nonLayoutPatch），这里显式补发定向清除补丁，
+      // 让 Rust 侧「上次打开」记录立即失效——否则重启仍会恢复已关闭的文件。
+      // 与 persist 回调同款守卫：bootstrap 失败（loadFailed）时不落盘，防默认态覆盖磁盘真实记录
+      if (get().loaded && !get().loadFailed) {
+        void uiStatePatch({ [LAST_FILE_KEYS[kind]]: null }).catch((e) =>
+          console.error("清除上次打开文件记录失败", e),
+        );
+      }
+    },
 
     setFocusedPanel: (panelId) => {
       if (get().focusedPanelId === panelId) return;

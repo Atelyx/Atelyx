@@ -222,16 +222,26 @@ pub struct LayoutOpResult {
 pub struct UiStatePatch {
     #[serde(default)]
     pub file_explorer_expanded: Option<Vec<String>>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_patch_clearable")]
     pub last_canvas_file: Option<Option<String>>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_patch_clearable")]
     pub last_note_file: Option<Option<String>>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_patch_clearable")]
     pub last_table_file: Option<Option<String>>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_patch_clearable")]
     pub focused_panel_id: Option<Option<String>>,
     #[serde(default)]
     pub recent_files: Option<Vec<serde_json::Value>>,
+}
+
+/// 可清除补丁字段的反序列化：JSON `null` = 显式清除（外层 Some + 内层 None），
+/// 字符串 = 设置（外层 Some + 内层 Some）；字段缺失由 `#[serde(default)]` 提供外层 None（不改）。
+/// 原生 serde 会把 JSON null 直接解成外层 None、与「字段缺失」混淆，导致清除补丁被静默丢弃。
+fn de_patch_clearable<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Some(Option::<String>::deserialize(deserializer)?))
 }
 
 /// 归一化：schema 补齐 + 布局列表非空 + 主页固定置顶 + 激活布局有效 + 撕裂窗口过滤 + 最近打开截断。
@@ -853,6 +863,27 @@ mod tests {
         assert_eq!(ui.workspace_layouts[0].id, HOME_LAYOUT_ID);
         let _ = apply_layout_op(&mut ui, &LayoutOp::MoveLayout { from_index: 2, to_index: 0 });
         assert_eq!(ui.workspace_layouts[0].id, HOME_LAYOUT_ID);
+    }
+
+    #[test]
+    fn ui_state_patch_null_clears_and_missing_ignores() {
+        // JSON null 必须解为「显式清除」（外层 Some + 内层 None），不能与字段缺失混淆：
+        // 否则关闭文件发的清除补丁被 ui_state_patch 静默丢弃，重启仍会恢复已关闭的文件。
+        let p: UiStatePatch = serde_json::from_str(r#"{"lastCanvasFile": null}"#).unwrap();
+        assert_eq!(p.last_canvas_file, Some(None), "null 应解为显式清除");
+        let p: UiStatePatch = serde_json::from_str(r#"{"lastNoteFile": null}"#).unwrap();
+        assert_eq!(p.last_note_file, Some(None));
+        let p: UiStatePatch = serde_json::from_str(r#"{"lastTableFile": null, "focusedPanelId": null}"#).unwrap();
+        assert_eq!(p.last_table_file, Some(None));
+        assert_eq!(p.focused_panel_id, Some(None));
+        // 字符串 = 设置
+        let p: UiStatePatch = serde_json::from_str(r#"{"lastCanvasFile": "画布/a.atlx"}"#).unwrap();
+        assert_eq!(p.last_canvas_file, Some(Some("画布/a.atlx".into())));
+        // 字段缺失 = 不修改
+        let p: UiStatePatch = serde_json::from_str(r#"{}"#).unwrap();
+        assert_eq!(p.last_canvas_file, None, "字段缺失应解为不修改");
+        // 非法类型（数字等）整批补丁反序列化报错：null 特判不误伤其他类型
+        assert!(serde_json::from_str::<UiStatePatch>(r#"{"lastCanvasFile": 42}"#).is_err());
     }
 
     #[test]
