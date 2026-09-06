@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 import { EditorState } from "@codemirror/state";
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import type { DecorationSet } from "@codemirror/view";
-import { buildDecorations } from "./markdownDecorations";
+import { buildDecorations, blockLineAtEdge, sourceLineAtFraction, taskMarkerRange } from "./markdownDecorations";
 import {
   TableWidget,
   MathWidget,
@@ -167,6 +167,88 @@ describe("表格点击编辑（光标起点边界）", () => {
     });
     const decs = buildDecorations(state, { ...opts, readOnly: false }, () => {});
     expect(widgetNames(decs, md.length)).not.toContain("TableWidget");
+  });
+
+  it("光标落在块整行区间末端（末行行尾，即点最后一行源码末尾）→ 保持源码、不坍缩回 widget", () => {
+    // 修复前：半开区间 head < to 在 head == 末行行尾（点末行源码末尾）时误判移出 → widget 回包
+    const decs = buildAt(TABLE, TABLE.length - 1);
+    expect(widgetNames(decs, TABLE.length)).not.toContain("TableWidget");
+  });
+
+  it("光标移到块后下一行（空行分隔）内容 → 恢复渲染 widget", () => {
+    const md = TABLE + "\n尾行";
+    const decs = buildAt(md, md.length - 1);
+    expect(widgetNames(decs, md.length)).toContain("TableWidget");
+  });
+});
+
+describe("sourceLineAtFraction（点击纵向比例 → 源码对应行，F2）", () => {
+  const md = ["前置", "", "| 列A | 列B |", "| --- | --- |", "| 1 | 2 |"].join("\n");
+  const state = EditorState.create({
+    doc: md,
+    extensions: [markdown({ addKeymap: false, base: markdownLanguage })],
+  });
+  const doc = state.doc;
+  // 表格源码从行 3 到行 5
+  const from = doc.line(3).from;
+  const to = doc.line(5).to;
+
+  it("frac 0 → 首行起点", () => {
+    expect(sourceLineAtFraction(state, from, to, 0)).toBe(doc.line(3).from);
+  });
+
+  it("frac 0.5 → 中间行起点（点击表格中部落中间行源码）", () => {
+    expect(sourceLineAtFraction(state, from, to, 0.5)).toBe(doc.line(4).from);
+  });
+
+  it("frac 0.99 → 末行起点（点击块底缘落末行源码，不再恒落块首）", () => {
+    expect(sourceLineAtFraction(state, from, to, 0.99)).toBe(doc.line(5).from);
+  });
+
+  it("超出比例钳制（frac<0 / >1 不越界）", () => {
+    expect(sourceLineAtFraction(state, from, to, -1)).toBe(doc.line(3).from);
+    expect(sourceLineAtFraction(state, from, to, 5)).toBe(doc.line(5).from);
+  });
+});
+
+describe("blockLineAtEdge（以块当前区间边缘反推落点，修复构建期闭包陈旧）", () => {
+  const OLD_MD = ["前置", "", "| 列A | 列B |", "| --- | --- |", "| 1 | 2 |"].join("\n");
+  const NEW_MD = ["前置", "", "", "| 列A | 列B |", "| --- | --- |", "| 1 | 2 |"].join("\n"); // 上方多插一行
+  const newDoc = EditorState.create({ doc: NEW_MD, extensions: [markdown({ addKeymap: false, base: markdownLanguage })] }).doc;
+  const oldDoc = EditorState.create({ doc: OLD_MD, extensions: [markdown({ addKeymap: false, base: markdownLanguage })] }).doc;
+  // 构建期捕获的行数：旧文档中表格 3 行（源码未变 → 行数稳定）
+  const lineCount = oldDoc.line(5).number - oldDoc.line(3).number + 1;
+
+  it("上半点击（edgePos = 块当前 from）→ 落新文档首行，不随过期坐标漂移", () => {
+    const currentFrom = newDoc.line(4).from; // 新文档中表格首行（posAtCoords 上半返回 from 边缘）
+    expect(blockLineAtEdge(newDoc, 0.3, currentFrom, lineCount)).toBe(newDoc.line(4).from);
+  });
+
+  it("中部点击（edgePos = 块当前 to）→ 落新文档中间行（分隔行）", () => {
+    const currentTo = newDoc.line(6).to; // posAtCoords 下半返回 to 边缘
+    expect(blockLineAtEdge(newDoc, 0.5, currentTo, lineCount)).toBe(newDoc.line(5).from);
+  });
+
+  it("下半点击（edgePos = 块当前 to）→ 落新文档末行", () => {
+    const currentTo = newDoc.line(6).to;
+    expect(blockLineAtEdge(newDoc, 0.9, currentTo, lineCount)).toBe(newDoc.line(6).from);
+  });
+});
+
+describe("taskMarkerRange（勾选框以当前行重扫定位）", () => {
+  it("无序任务标记", () => {
+    expect(taskMarkerRange("- [ ] 待办", 0)).toEqual({ from: 0, to: 5 });
+    expect(taskMarkerRange("  - [x] 完成", 2)).toEqual({ from: 4, to: 9 });
+  });
+
+  it("有序任务标记", () => {
+    expect(taskMarkerRange("1. [ ] 项", 0)).toEqual({ from: 0, to: 6 });
+    expect(taskMarkerRange("10) [x] 项", 0)).toEqual({ from: 0, to: 7 });
+  });
+
+  it("无标记 → null", () => {
+    expect(taskMarkerRange("- 普通列表", 0)).toBeNull();
+    expect(taskMarkerRange("正文 [1]", 0)).toBeNull();
   });
 });
 

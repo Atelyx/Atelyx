@@ -6,7 +6,7 @@
  *
  * 供 markdownDecorations.ts 构建装饰、MarkdownEditor/MarkdownView 装配视图使用。
  */
-import { WidgetType } from "@codemirror/view";
+import { WidgetType, type EditorView } from "@codemirror/view";
 import katex from "katex";
 import { EXTERNAL_LINK_RE, decodeLinkHref } from "@/utils/markdown";
 import { sanitizeHtmlFragment } from "@/utils/htmlSanitize";
@@ -179,15 +179,19 @@ function renderKatex(text: string, display: boolean): string {
 
 const imageLoadCancels = new WeakMap<HTMLElement, () => void>();
 
+/** 块级 widget 点击编辑回调：收到 mousedown 事件、widget 自身 DOM 与实时 view，
+ *  供编辑侧按「点击纵向位置 → 对应源码行」换算落点，且落点基于当前文档（见 markdownDecorations）。 */
+export type BlockEditHandler = ((e: MouseEvent, el: HTMLElement, view: EditorView) => void) | null;
+
 /** widget 左键点击统一拦截：仅左键、可选跳过谓词（HtmlWidget 交互元素区放行），
- * preventDefault+stopPropagation 后执行回调（阻止 CM 内容层把点击当选区移动）。 */
-function onLeftClick(el: HTMLElement, run: () => void, skip?: (e: MouseEvent) => boolean) {
+ * preventDefault+stopPropagation 后执行回调并传入原始事件（阻止 CM 内容层把点击当选区移动）。 */
+function onLeftClick(el: HTMLElement, run: (e: MouseEvent) => void, skip?: (e: MouseEvent) => boolean) {
   el.addEventListener("mousedown", (e) => {
     if (e.button !== 0) return;
     if (skip?.(e)) return;
     e.preventDefault();
     e.stopPropagation();
-    run();
+    run(e);
   });
 }
 
@@ -296,11 +300,13 @@ export class ImageWidget extends WidgetType {
 }
 
 /** 任务列表复选框 widget：点击在 `[ ]`/`[x]` 之间切换（纯文本替换，零改写风险）；
- *  toggle 为空 = 禁用态展示（画布/对话只读面）。 */
+ *  toggle 为空 = 禁用态展示（画布/对话只读面）。
+ *  toggle 接收实时 view 与自身 DOM：构建期捕获的标记区间会随文档变更过期
+ *  （CM 按 eq 复用旧 widget），勾选落点须以当前文档为准（见 markdownDecorations 的 taskMarkerRange）。 */
 export class CheckboxWidget extends WidgetType {
   constructor(
     private readonly checked: boolean,
-    private readonly toggle: (() => void) | null,
+    private readonly toggle: ((view: EditorView, el: HTMLElement) => void) | null,
   ) {
     super();
   }
@@ -309,7 +315,7 @@ export class CheckboxWidget extends WidgetType {
     return other.checked === this.checked && !!other.toggle === !!this.toggle;
   }
 
-  toDOM() {
+  toDOM(view: EditorView) {
     const input = document.createElement("input");
     input.type = "checkbox";
     input.className = "md-editor-checkbox";
@@ -318,7 +324,7 @@ export class CheckboxWidget extends WidgetType {
       input.disabled = true;
     } else {
       input.addEventListener("mousedown", (e) => e.stopPropagation());
-      input.addEventListener("change", () => this.toggle?.());
+      input.addEventListener("change", () => this.toggle?.(view, input));
     }
     return input;
   }
@@ -374,12 +380,12 @@ export class DividerWidget extends WidgetType {
 }
 
 /** 数学 widget：行内/块级 KaTeX 渲染；解析失败回显源码（灰显）；
- *  点击（onEdit 非空时）把光标送入源码范围 → 可编辑态撕掉 widget 露源码。 */
+ *  点击（onEdit 非空时）把光标送入源码对应行 → 可编辑态撕掉 widget 露源码。 */
 export class MathWidget extends WidgetType {
   constructor(
     private readonly text: string,
     private readonly display: boolean,
-    private readonly onEdit: (() => void) | null,
+    private readonly onEdit: BlockEditHandler,
   ) {
     super();
   }
@@ -392,7 +398,7 @@ export class MathWidget extends WidgetType {
     );
   }
 
-  toDOM() {
+  toDOM(view: EditorView) {
     // 显式 HTMLElement（非 div|span 联合）：让 addEventListener 解析到具体事件过载（MouseEvent）
     const el: HTMLElement = document.createElement(this.display ? "div" : "span");
     el.className = this.display ? "md-editor-math md-editor-math-block" : "md-editor-math";
@@ -404,7 +410,7 @@ export class MathWidget extends WidgetType {
     }
     el.innerHTML = html;
     if (this.onEdit) {
-      onLeftClick(el, () => this.onEdit?.());
+      onLeftClick(el, (e) => this.onEdit?.(e, el, view));
     }
     return el;
   }
@@ -434,7 +440,7 @@ export class CalloutBadgeWidget extends WidgetType {
 export class TableWidget extends WidgetType {
   constructor(
     private readonly source: string,
-    private readonly onEdit: (() => void) | null,
+    private readonly onEdit: BlockEditHandler,
   ) {
     super();
   }
@@ -443,7 +449,7 @@ export class TableWidget extends WidgetType {
     return other.source === this.source && !!other.onEdit === !!this.onEdit;
   }
 
-  toDOM() {
+  toDOM(view: EditorView) {
     const table = document.createElement("table");
     table.className = "md-editor-table";
     const lines = this.source.split("\n").filter((l) => l.trim() !== "");
@@ -480,7 +486,7 @@ export class TableWidget extends WidgetType {
     }
     table.appendChild(tbody);
     if (this.onEdit) {
-      onLeftClick(table, () => this.onEdit?.());
+      onLeftClick(table, (e) => this.onEdit?.(e, table, view));
     }
     return table;
   }
@@ -494,7 +500,7 @@ export class HtmlWidget extends WidgetType {
     private readonly html: string,
     private readonly block: boolean,
     private readonly opts: DecorationOptions,
-    private readonly onEdit: (() => void) | null,
+    private readonly onEdit: BlockEditHandler,
   ) {
     super();
   }
@@ -507,7 +513,7 @@ export class HtmlWidget extends WidgetType {
     );
   }
 
-  toDOM() {
+  toDOM(view: EditorView) {
     // 显式 HTMLElement（非 div|span 联合）：让 addEventListener 解析到具体事件过载（MouseEvent）
     const el: HTMLElement = document.createElement(this.block ? "div" : "span");
     el.className = "md-editor-html";
@@ -542,7 +548,7 @@ export class HtmlWidget extends WidgetType {
       // 块内链接/交互元素不拦截（链接点击经 click 处理）；仅空白/其余区域送光标
       onLeftClick(
         el,
-        () => this.onEdit?.(),
+        (e) => this.onEdit?.(e, el, view),
         (e) => !!(e.target as Element | null)?.closest?.("a, button, input, summary"),
       );
     }
@@ -574,7 +580,7 @@ export class FootnoteDefWidget extends WidgetType {
   constructor(
     private readonly label: string,
     private readonly text: string,
-    private readonly onEdit: (() => void) | null,
+    private readonly onEdit: BlockEditHandler,
   ) {
     super();
   }
@@ -587,7 +593,7 @@ export class FootnoteDefWidget extends WidgetType {
     );
   }
 
-  toDOM() {
+  toDOM(view: EditorView) {
     const div = document.createElement("div");
     div.className = "md-editor-footnote-def";
     const sup = document.createElement("sup");
@@ -597,7 +603,7 @@ export class FootnoteDefWidget extends WidgetType {
     span.textContent = this.text;
     div.appendChild(span);
     if (this.onEdit) {
-      onLeftClick(div, () => this.onEdit?.());
+      onLeftClick(div, (e) => this.onEdit?.(e, div, view));
     }
     return div;
   }

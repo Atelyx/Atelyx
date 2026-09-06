@@ -12,12 +12,13 @@
  *
  * 安全：widget 只出 class + textContent / 已清洗 HTML（HtmlWidget），详见 markdownWidgets.tsx。
  */
-import { RangeSetBuilder, type EditorState, type Line, type TransactionSpec } from "@codemirror/state";
-import { Decoration, type DecorationSet } from "@codemirror/view";
+import { RangeSetBuilder, type EditorState, type Line, type TransactionSpec, type Text } from "@codemirror/state";
+import { Decoration, type DecorationSet, type EditorView } from "@codemirror/view";
 import { syntaxTree } from "@codemirror/language";
 import {
   type DecorationOptions,
   type RangeInfo,
+  type BlockEditHandler,
   LinkWidget,
   ImageWidget,
   CheckboxWidget,
@@ -85,6 +86,39 @@ function fencedCodeContent(src: string): string {
   if (lines.length >= 2) lines.shift();
   if (lines.length > 0 && /^```/.test(lines[lines.length - 1] ?? "")) lines.pop();
   return lines.join("\n");
+}
+
+/** 点击纵向比例 → 块源码对应行起点（纯函数，可单测）：
+ *  frac 0..1 映射到块首行..末行（末行含行尾时按行数钳制），供块级 widget 点击定位。 */
+export function sourceLineAtFraction(state: EditorState, from: number, to: number, frac: number): number {
+  const doc = state.doc;
+  const firstLine = doc.lineAt(from).number;
+  const lastLine = doc.lineAt(Math.max(to - 1, from)).number;
+  const lineCount = lastLine - firstLine + 1;
+  const lineIndex = Math.min(lineCount - 1, Math.max(0, Math.floor(frac * lineCount)));
+  return doc.line(firstLine + lineIndex).from;
+}
+
+/** 块级点击目标行起点（纯函数，可单测）：以「块当前区间边缘」反推首行。
+ *  块 widget 经 posAtCoords 返回其当前区间 from（点击上半）/ to（点击下半）——
+ *  高度图实时，因此落点始终基于当前文档，不随构建期闭包过期。
+ *  lineCount 在构建期捕获（eq 复用 = 源码未变 → 行数稳定；不能从过期坐标重算，会随上方插入偏移）。 */
+export function blockLineAtEdge(doc: Text, frac: number, edgePos: number, lineCount: number): number {
+  const firstLine =
+    frac < 0.5
+      ? doc.lineAt(edgePos).number
+      : doc.lineAt(Math.max(edgePos - 1, 0)).number - lineCount + 1;
+  const lineIndex = Math.min(lineCount - 1, Math.max(0, Math.floor(frac * lineCount)));
+  return doc.line(firstLine + lineIndex).from;
+}
+
+/** 行内任务标记区间 `- [ ]` / `1. [x]`（纯函数，可单测）：返回标记整体（含标记符与勾选态）。
+ *  供勾选框 toggle 以「勾选框 DOM 当前行」重扫定位——不依赖构建期坐标。 */
+export function taskMarkerRange(lineText: string, lineFrom: number): RangeInfo | null {
+  const m = /([-+*]|\d+[.)])\s*\[( |x)\]/.exec(lineText);
+  if (!m) return null;
+  const from = lineFrom + m.index;
+  return { from, to: from + m[0].length };
 }
 
 export function buildDecorations(
@@ -223,27 +257,52 @@ export function buildDecorations(
   const coveredByOpaque = (from: number, to: number) =>
     opaque.some((o) => from >= o.from && to <= o.to);
   const isCursorLine = (n: number) => editing && n === cursorLine;
-  /** 可编辑态点击块级 widget → 把光标送入块源码起点（撕掉 widget 露源码）+ 聚焦使光标可见；只读态 null。 */
-  const editAt = (from: number): (() => void) | null =>
+  /** 行内 widget（单行：行内 HTML/数学/脚注定义）点击 → 光标入源码起点 + 聚焦；只读态 null。
+   *  单行无高度差，无需点击比例映射（光标行规则随即撕开 widget 显示原文）。
+   *  落点 = posAtCoords 实时位置（构建期捕获坐标会随文档变更过期，同块级处理思路）。 */
+  const editInlineAt = (from: number): BlockEditHandler =>
     editing
-      ? () => {
-          dispatch({ selection: { anchor: from }, scrollIntoView: true });
+      ? (e, _el, view) => {
+          const pos = view.posAtCoords({ x: e.clientX, y: e.clientY }, false);
+          dispatch({ selection: { anchor: pos ?? from }, scrollIntoView: true });
           opts.focusEditor?.();
         }
       : null;
+  /** 可编辑态点击块级 widget → 光标落到点击位置对应的源码行（撕 widget 露源码）+ 聚焦；
+   *  只读态 null。整块渲染高度按比例映射源码行：点击中间行落中间行、点末行落末行。
+   *  构建期捕获的 from/to 会随文档变更过期（CM 按 eq 复用旧 widget 实例、旧闭包），
+   *  落点由实时 posAtCoords 边缘 + 构建期捕获的行数（源码未变则稳定）推导，基于当前文档。 */
+  const editBlockAt = (from: number, to: number): BlockEditHandler => {
+    const lineCount = doc.lineAt(Math.max(to - 1, from)).number - doc.lineAt(from).number + 1;
+    return editing
+      ? (e, el, view) => {
+          const rect = el.getBoundingClientRect();
+          const frac = rect.height > 0 ? (e.clientY - rect.top) / rect.height : 0;
+          const clickPos = view.posAtCoords({ x: e.clientX, y: e.clientY }, false);
+          const target =
+            clickPos === null
+              ? sourceLineAtFraction(view.state, from, to, frac) // 兜底：posAtCoords 不可得（罕见）
+              : blockLineAtEdge(view.state.doc, frac, clickPos, lineCount);
+          dispatch({ selection: { anchor: target }, scrollIntoView: true });
+          opts.focusEditor?.();
+        }
+      : null;
+  };
   /** 光标与区间相交（可编辑态才有效；只读恒 false = 恒渲染）——行内容器用，严格区间。 */
   const cursorInside = (from: number, to: number) => editing && sel.from < to && sel.to > from;
-  /** 块级 widget 的「光标在内」判定：折叠光标含起点边界（点击块 widget 光标落在块首 from → 撕 widget 露源码）。 */
-  const cursorInsideBlock = (from: number, to: number) => {
-    if (!editing) return false;
-    if (sel.from !== sel.to) return sel.from < to && sel.to > from;
-    return sel.head >= from && sel.head < to;
-  };
   /** block 装饰区间对齐整行边界。 */
   const lineSpan = (from: number, to: number): RangeInfo => ({
     from: doc.lineAt(from).from,
     to: doc.lineAt(Math.max(to - 1, from)).to,
   });
+  /** 块级 widget 的「光标在整行区间内」判定：整行区间 + 末端闭合（光标在块末行行尾也不回包）。
+   *  光标落在块整行区间内（含末行行尾）即保持源码展开，移出块（下一行起）才回包。 */
+  const cursorInsideBlock = (from: number, to: number) => {
+    if (!editing) return false;
+    if (sel.from !== sel.to) return sel.from < to && sel.to > from;
+    const span = lineSpan(from, to);
+    return sel.head >= span.from && sel.head <= span.to;
+  };
   /** widget 或 opaque 任一覆盖即跳过（行内正则检测统一守卫）。 */
   const coveredAll = (from: number, to: number) =>
     coveredByOpaque(from, to) || overlapsWidgets(from, to);
@@ -272,10 +331,20 @@ export function buildDecorations(
   for (const t of taskMarkers) {
     if (isCursorLine(doc.lineAt(t.from).number)) continue;
     const checked = doc.sliceString(t.from, t.to).includes("[x]");
-    const toggle = () => {
-      const nowChecked = state.sliceDoc(t.from, t.to).includes("[x]");
+    const toggle = (view: EditorView, el: HTMLElement) => {
+      // 构建期捕获的标记区间会随文档变更过期（CM 按 eq 复用旧 widget）——以勾选框 DOM
+      // 当前所在行为锚重扫任务标记，勾选落点与勾选态都基于当前文档
+      const line = view.state.doc.lineAt(view.posAtDOM(el));
+      const range = taskMarkerRange(line.text, line.from);
+      if (!range) return;
+      const marker = view.state.sliceDoc(range.from, range.to);
+      const nowChecked = marker.includes("[x]");
       dispatch({
-        changes: { from: t.from, to: t.to, insert: `${t.marker} [${nowChecked ? " " : "x"}]` },
+        changes: {
+          from: range.from,
+          to: range.to,
+          insert: marker.replace(/\[( |x)\]/, `[${nowChecked ? " " : "x"}]`),
+        },
       });
     };
     pushWidget(
@@ -287,7 +356,7 @@ export function buildDecorations(
     );
   }
 
-  // raw HTML 块（block widget；光标在内保持源码；点击送光标 → 撕 widget 露源码）
+  // raw HTML 块（block widget；光标在整行区间内保持源码；点击 → 光标落到点击位置对应源码行）
   for (const h of htmlBlocks) {
     if (cursorInsideBlock(h.from, h.to)) continue;
     const span = lineSpan(h.from, h.to);
@@ -295,13 +364,13 @@ export function buildDecorations(
       span.from,
       span.to,
       Decoration.replace({
-        widget: new HtmlWidget(doc.sliceString(h.from, h.to), true, opts, editAt(h.from)),
+        widget: new HtmlWidget(doc.sliceString(h.from, h.to), true, opts, editBlockAt(h.from, h.to)),
         block: true,
       }),
     );
   }
 
-  // 表格（block widget；光标在内保持源码；点击送光标 → 撕 widget 露源码可编辑）
+  // 表格（block widget；光标在整行区间内保持源码；点击 → 光标落到点击位置对应源码行）
   for (const t of tableRanges) {
     if (cursorInsideBlock(t.from, t.to)) continue;
     const span = lineSpan(t.from, t.to);
@@ -309,13 +378,13 @@ export function buildDecorations(
       span.from,
       span.to,
       Decoration.replace({
-        widget: new TableWidget(doc.sliceString(t.from, t.to), editAt(t.from)),
+        widget: new TableWidget(doc.sliceString(t.from, t.to), editBlockAt(t.from, t.to)),
         block: true,
       }),
     );
   }
 
-  // 块级数学 `$$...$$`（block widget；光标在内保持源码；点击送光标 → 撕 widget 露源码）
+  // 块级数学 `$$...$$`（block widget；光标在整行区间内保持源码；点击 → 光标落到点击位置对应源码行）
   const docText = doc.toString();
   for (const b of blockMathRanges(docText)) {
     if (cursorInsideBlock(b.from, b.to)) continue;
@@ -324,10 +393,10 @@ export function buildDecorations(
     const inner = content.replace(/^\$\$/, "").replace(/\$\$$/, "").trim();
     if (!inner) continue;
     const span = lineSpan(b.from, b.to);
-    pushWidget(span.from, span.to, Decoration.replace({ widget: new MathWidget(inner, true, editAt(b.from)), block: true }));
+    pushWidget(span.from, span.to, Decoration.replace({ widget: new MathWidget(inner, true, editBlockAt(b.from, b.to)), block: true }));
   }
 
-  // 脚注定义 `[^label]: text`（block widget 整行替换；光标所在行保持源码；点击送光标 → 撕 widget）
+  // 脚注定义 `[^label]: text`（block widget 整行替换；光标所在行保持源码；点击 → 光标入源码起点）
   forEachLine((line) => {
     const m = /^\[\^([^\]]+)\]:\s*(.*)$/.exec(line.text);
     if (!m || !m[1]) return;
@@ -336,7 +405,7 @@ export function buildDecorations(
       line.from,
       line.to,
       Decoration.replace({
-        widget: new FootnoteDefWidget(m[1] ?? "", m[2] ?? "", editAt(line.from)),
+        widget: new FootnoteDefWidget(m[1] ?? "", m[2] ?? "", editInlineAt(line.from)),
         block: true,
       }),
     );
@@ -461,7 +530,7 @@ export function buildDecorations(
     if (cursorInsideBlock(h.from, h.to)) continue;
     if (overlapsWidgets(h.from, h.to)) continue;
     pushWidget(h.from, h.to, Decoration.replace({
-      widget: new HtmlWidget(doc.sliceString(h.from, h.to), false, opts, editAt(h.from)),
+      widget: new HtmlWidget(doc.sliceString(h.from, h.to), false, opts, editInlineAt(h.from)),
     }));
   }
 
@@ -470,7 +539,7 @@ export function buildDecorations(
     for (const r of inlineMathRanges(line.text, line.from)) {
       if (coveredAll(r.from, r.to)) continue;
       const content = doc.sliceString(r.from + 1, r.to - 1);
-      pushWidget(r.from, r.to, Decoration.replace({ widget: new MathWidget(content, false, editAt(r.from)) }));
+      pushWidget(r.from, r.to, Decoration.replace({ widget: new MathWidget(content, false, editInlineAt(r.from)) }));
     }
   });
 
