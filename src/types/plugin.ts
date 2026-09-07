@@ -6,6 +6,7 @@
  * 反向（更老的插件、更新的 App）由插件自身的宿主兼容范围字段约束。
  */
 import type { TableField, TableRow } from "./table";
+import type { CanvasFileRow, FileTreeNode } from "./canvas";
 
 /** 清单格式版本：升级清单结构时递增；App 拒绝 schemaVersion 大于当前值的清单。 */
 export const PLUGIN_SCHEMA_VERSION = 2;
@@ -153,6 +154,22 @@ export interface InstalledPlugin {
   usedCapabilities: string[];
   /** 加载失败原因。 */
   error?: string;
+}
+
+/**
+ * UI 平面插件经 facade 获得的仓库访问契约（文件树 + 打开入口）。
+ * 经 `setPluginVaultAccess` provider 注入（见 services/plugins/ui.ts，pluginStore 接线），
+ * 任何面板插件可用，与内置搜索面板同一输入面。
+ */
+export interface VaultAccess {
+  /** 读取当前仓库文件树（调用时取当下快照）。 */
+  listFiles(): Promise<FileTreeNode[]>;
+  /** 打开画布（.atlx/.canvas 行，与文件面板同一入口）。 */
+  openCanvasFile(row: CanvasFileRow): void;
+  /** 打开笔记窗口。 */
+  openNote(file: string, title: string): void;
+  /** 打开表格窗口。 */
+  openTable(file: string, title: string): void;
 }
 
 /**

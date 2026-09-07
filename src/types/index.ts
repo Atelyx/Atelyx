@@ -174,4 +174,5 @@ export {
   type InstalledPlugin,
   type PluginSourceKind,
   type PluginTableSnapshot,
+  type VaultAccess,
 } from "./plugin";

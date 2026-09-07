@@ -97,18 +97,19 @@ export {
   getPluginCommands,
   getPluginNode,
   getPluginNodes,
-  getPluginPanel,
-  getPluginPanels,
   getPluginSetting,
   getPluginSettings,
   getPluginTableView,
   getPluginTableViews,
+  getViewContribution,
   listUiContributions,
   loadUiPlugin,
   onPluginUiChange,
   pluginViewKinds,
   pluginViewLabel,
+  registerBuiltinView,
   setPluginTableAccess,
+  setPluginVaultAccess,
   unregisterPluginUi,
 } from "./ui";
 export type {
@@ -116,11 +117,11 @@ export type {
   PluginCommandRegistration,
   PluginMainThreadFacade,
   PluginNodeRegistration,
-  PluginPanelRegistration,
   PluginSettingRegistration,
   PluginTableAccess,
   PluginTableViewRegistration,
   PluginUiContribution,
+  ViewContribution,
 } from "./ui";
 export { createPluginWorker, buildProxySource } from "./worker";
 export { transpileTs } from "./transpile";

@@ -11,15 +11,8 @@
 import React, { createElement, type ComponentType } from "react";
 import { VIEW_LABELS } from "@/constants/views";
 import { VIEW_KINDS } from "@/types";
-import type { PluginTableSnapshot } from "@/types";
+import type { CanvasFileRow, FileTreeNode, PluginTableSnapshot, VaultAccess } from "@/types";
 
-/** 插件面板注册项（kind 即工作区视图类型；渲染入口见 ViewHost）。 */
-export interface PluginPanelRegistration {
-  pluginId: string;
-  kind: string;
-  label: string;
-  component: ComponentType;
-}
 /** 插件设置项注册（设置页左侧 tab）。 */
 export interface PluginSettingRegistration {
   pluginId: string;
@@ -63,7 +56,20 @@ export interface PluginUiContribution {
   payload: unknown;
 }
 
-const panels = new Map<string, PluginPanelRegistration>(); // kind → 注册
+/**
+ * 视图贡献（统一注册表）：内置视图与插件面板同表注册，kind 全局唯一（重复即拒绝）；
+ * kind 缺失/来源卸载时对应视图回退空面板占位。
+ */
+export interface ViewContribution {
+  kind: string;
+  label: string;
+  component: ComponentType;
+  /** 来源：内置视图 = "builtin"；插件面板 = "plugin"（pluginId 标注作者）。 */
+  provider: "builtin" | "plugin";
+  pluginId?: string;
+}
+
+const viewContributions = new Map<string, ViewContribution>(); // kind → 贡献（内置与插件同表）
 const settings = new Map<string, PluginSettingRegistration>(); // `${pluginId}:${key}` → 注册
 const appPages = new Map<string, PluginAppPageRegistration>(); // id → 注册
 const nodes = new Map<string, PluginNodeRegistration>(); // type → 注册
@@ -84,12 +90,6 @@ export function onPluginUiChange(listener: () => void): () => void {
   };
 }
 
-export function getPluginPanel(kind: string): PluginPanelRegistration | undefined {
-  return panels.get(kind);
-}
-export function getPluginPanels(): PluginPanelRegistration[] {
-  return [...panels.values()];
-}
 export function getPluginSettings(): PluginSettingRegistration[] {
   return [...settings.values()];
 }
@@ -115,26 +115,61 @@ export function getPluginTableViews(): PluginTableViewRegistration[] {
   return [...tableViews.values()];
 }
 
+/** 某视图的贡献（内置 + 插件面板统一查找；ViewHost 分派 / 视图菜单元数据用）。 */
+export function getViewContribution(kind: string): ViewContribution | undefined {
+  return viewContributions.get(kind);
+}
+
 /** 某扩展点的全部主线程注册条目（宿主/其他插件消费自定义扩展点用）。 */
 export function listUiContributions(point: string): PluginUiContribution[] {
   return [...uiContributions.values()].filter((c) => c.point === point);
 }
 
-/** 视图显示名（含插件面板）：内建 VIEW_LABELS → 插件面板 label → 原样兜底（不崩溃）。 */
+/** 视图显示名（内建 VIEW_LABELS → 统一注册表（插件面板）→ 原样兜底，不崩溃）。 */
 export function pluginViewLabel(view: string): string {
-  return (VIEW_LABELS as Record<string, string>)[view] ?? panels.get(view)?.label ?? view;
+  return (VIEW_LABELS as Record<string, string>)[view] ?? viewContributions.get(view)?.label ?? view;
 }
 
-/** 面板视图候选（视图选择器/切换菜单合并用）：内建 + 插件面板。 */
+/** 面板视图候选（视图选择器/切换菜单合并用）：内建 + 注册表里的其他贡献（内置 kind 已含在 VIEW_KINDS，不重复）。 */
 export function pluginViewKinds(): string[] {
-  return [...VIEW_KINDS, ...getPluginPanels().map((p) => p.kind)];
+  const builtin = new Set<string>(VIEW_KINDS);
+  const contributed = [...viewContributions.values()].filter((c) => !builtin.has(c.kind)).map((c) => c.kind);
+  return [...(VIEW_KINDS as string[]), ...contributed];
 }
 
 // ===== 注册（经 facade 调用，pluginId 由闭包捕获） =====
 
-function registerPanel(pluginId: string, kind: string, label: string, component: ComponentType): void {
-  panels.set(kind, { pluginId, kind, label, component });
+/** 注册视图贡献（统一注册表核心）：kind 全局唯一——内置与插件同表，重复注册即拒绝；
+ *  插件不得占用内建 ViewKind（内置命名空间保留，防冒名劫持标签）。 */
+function registerViewContribution(
+  kind: string,
+  label: string,
+  component: ComponentType,
+  provider: "builtin" | "plugin",
+  pluginId?: string,
+): void {
+  if (typeof kind !== "string" || kind.length === 0) {
+    throw new Error("视图贡献需要非空 kind");
+  }
+  // 内置命名空间保留：VIEW_KINDS 内建 kind + "empty" 占位哨兵（ViewKind 但不含于 VIEW_KINDS），
+  // 插件不得占用（防冒名劫持标签/死注册/污染视图菜单）。
+  if (provider === "plugin" && ((VIEW_KINDS as readonly string[]).includes(kind) || kind === "empty")) {
+    throw new Error(`视图 kind ${kind} 为内置视图保留，插件需用反向域名命名自己的 kind`);
+  }
+  if (viewContributions.has(kind)) {
+    throw new Error(`视图 kind ${kind} 已被注册（内置或插件），kind 全局唯一`);
+  }
+  viewContributions.set(kind, { kind, label, component, provider, pluginId });
   notify();
+}
+
+/** 注册内置视图贡献（宿主第一方；App 启动时注册一次，幂等）。 */
+export function registerBuiltinView(contrib: { kind: string; label: string; component: ComponentType }): void {
+  registerViewContribution(contrib.kind, contrib.label, contrib.component, "builtin");
+}
+
+function registerPanel(pluginId: string, kind: string, label: string, component: ComponentType): void {
+  registerViewContribution(kind, label, component, "plugin", pluginId);
 }
 function registerSetting(pluginId: string, key: string, label: string, component: ComponentType): void {
   const globalKey = `${pluginId}:${key}`;
@@ -173,7 +208,9 @@ function registerContribution(pluginId: string, point: string, id: string | unde
 /** 撤销某插件在主线程平面的全部贡献（卸载/停用/重载时调用）。 */
 export function unregisterPluginUi(pluginId: string): void {
   let changed = false;
-  for (const [k, v] of panels) if (v.pluginId === pluginId) changed = panels.delete(k) || changed;
+  for (const [k, v] of viewContributions) {
+    if (v.provider === "plugin" && v.pluginId === pluginId) changed = viewContributions.delete(k) || changed;
+  }
   for (const [k, v] of settings) if (v.pluginId === pluginId) changed = settings.delete(k) || changed;
   for (const [k, v] of appPages) if (v.pluginId === pluginId) changed = appPages.delete(k) || changed;
   for (const [k, v] of nodes) if (v.pluginId === pluginId) changed = nodes.delete(k) || changed;
@@ -203,6 +240,20 @@ export function setPluginTableAccess(access: PluginTableAccess | null): void {
   tableAccess = access;
 }
 
+/** 插件侧仓库访问（facade 的 listFiles/open* 经它转发；pluginStore 接线注入，
+ *  ui.ts 保持不 import store——分层：store 经此把仓库文件树与打开回调暴露给主线程插件）。 */
+let vaultAccess: VaultAccess | null = null;
+
+/** 注入/复位插件侧仓库访问（pluginStore.load 时接线；null 复位供测试）。 */
+export function setPluginVaultAccess(access: VaultAccess | null): void {
+  vaultAccess = access;
+}
+
+/** 读取插件侧仓库访问（测试/诊断用；未接线 = null）。 */
+export function getPluginVaultAccess(): VaultAccess | null {
+  return vaultAccess;
+}
+
 /** 插件主线程 facade（插件代码经 `window.__atelyxPlugin__.forPlugin(id)` 取得）。 */
 export interface PluginMainThreadFacade {
   React: typeof React;
@@ -221,6 +272,14 @@ export interface PluginMainThreadFacade {
   selectTableRow(rowId: string | null): void;
   /** 解析表格图片条目为 dataURL（`data:` 内嵌条目原样透传；失败 reject，调用方兜底）。 */
   resolveTableImage(entry: string): Promise<string>;
+  /** 读取当前仓库文件树（未接线返回空数组；任何面板插件可用，含第三方搜索面板）。 */
+  listFiles(): Promise<FileTreeNode[]>;
+  /** 打开画布（.atlx/.canvas 行，与文件面板同一入口；未接线时 no-op）。 */
+  openCanvasFile(row: CanvasFileRow): void;
+  /** 打开笔记窗口（未接线时 no-op）。 */
+  openNote(file: string, title: string): void;
+  /** 打开表格窗口（未接线时 no-op）。 */
+  openTable(file: string, title: string): void;
 }
 
 declare global {
@@ -248,6 +307,10 @@ export function exposePluginFacade(): void {
       selectTableRow: (rowId) => tableAccess?.selectRow(rowId),
       resolveTableImage: (entry) =>
         tableAccess ? tableAccess.resolveImage(entry) : Promise.reject(new Error("插件表格访问未就绪")),
+      listFiles: () => (vaultAccess ? vaultAccess.listFiles() : Promise.resolve([])),
+      openCanvasFile: (row) => vaultAccess?.openCanvasFile(row),
+      openNote: (file, title) => vaultAccess?.openNote(file, title),
+      openTable: (file, title) => vaultAccess?.openTable(file, title),
     }),
   };
 }

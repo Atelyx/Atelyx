@@ -2,6 +2,7 @@
  * 主线程 UI 平面注册逻辑测试（services/plugins/ui）。
  *
  * 覆盖：facade 挂载、注册收集（panel/setting/command/tableview）、按插件撤销、视图候选合并与显示名兜底、
+ * 统一视图贡献注册表（内置/插件同表、kind 全局唯一与内置保留拒绝）、facade 仓库访问方法（provider 转发 + 未接线降级）、
  * 表格数据访问（subscribeTableData/selectTableRow/resolveTableImage 经 provider 转发 + 未接线降级）。
  * 仅测注册逻辑（无 DOM）：用最小 window stub；loadUiPlugin 的脚本注入路径不在本测试覆盖。
  */
@@ -9,24 +10,38 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import {
   exposePluginFacade,
   getPluginCommands,
-  getPluginPanel,
-  getPluginPanels,
   getPluginSetting,
   getPluginSettings,
   getPluginTableView,
   getPluginTableViews,
+  getPluginVaultAccess,
+  getViewContribution,
   pluginViewKinds,
   pluginViewLabel,
+  registerBuiltinView,
   setPluginTableAccess,
+  setPluginVaultAccess,
   unregisterPluginUi,
 } from "./ui";
-import type { PluginTableSnapshot } from "@/types";
+import type { PluginTableSnapshot, VaultAccess } from "@/types";
 
 // node 环境无 window：模块顶层不触 window（仅 exposePluginFacade 在调用时访问），stub 即可。
 (globalThis as { window?: unknown }).window = {};
 
 const Comp = () => null;
-const EMPTY_SNAP: PluginTableSnapshot = { tableFile: null, fields: [], rows: [], selectedRowId: null, peerColorByRowId: {} };
+const EMPTY_SNAP: PluginTableSnapshot = {
+  tableFile: null,
+  fields: [],
+  rows: [],
+  selectedRowId: null,
+  peerColorByRowId: {},
+};
+const RUNTIME: VaultAccess = {
+  listFiles: () => Promise.resolve([]),
+  openCanvasFile: () => {},
+  openNote: () => {},
+  openTable: () => {},
+};
 
 beforeEach(() => {
   unregisterPluginUi("com.test.any");
@@ -35,6 +50,7 @@ beforeEach(() => {
   unregisterPluginUi("com.test.b");
   window.__atelyxPlugin__ = undefined;
   setPluginTableAccess(null);
+  setPluginVaultAccess(null);
 });
 
 describe("主线程平面 facade 与注册", () => {
@@ -52,8 +68,8 @@ describe("主线程平面 facade 与注册", () => {
     bridge.registerSetting({ key: "config", label: "配置", component: Comp });
     bridge.registerCommand({ id: "run", label: "运行", run: () => 1 });
 
-    expect(getPluginPanel("com.test.hello.dashboard")?.label).toBe("仪表盘");
-    expect(getPluginPanels().map((p) => p.kind)).toContain("com.test.hello.dashboard");
+    expect(getViewContribution("com.test.hello.dashboard")?.label).toBe("仪表盘");
+    expect(getViewContribution("com.test.hello.dashboard")?.provider).toBe("plugin");
     expect(getPluginSettings().map((s) => s.key)).toContain("com.test.hello:config");
     expect(getPluginSetting("com.test.hello:config")?.label).toBe("配置");
     expect(getPluginCommands().map((c) => `${c.pluginId}:${c.id}`)).toContain("com.test.hello:run");
@@ -67,9 +83,9 @@ describe("主线程平面 facade 与注册", () => {
     a.registerPanel({ kind: "com.test.a.p2", label: "A2", component: Comp });
     b.registerPanel({ kind: "com.test.b.p1", label: "B1", component: Comp });
     unregisterPluginUi("com.test.a");
-    expect(getPluginPanel("com.test.a.p1")).toBeUndefined();
-    expect(getPluginPanel("com.test.a.p2")).toBeUndefined();
-    expect(getPluginPanel("com.test.b.p1")?.label).toBe("B1");
+    expect(getViewContribution("com.test.a.p1")).toBeUndefined();
+    expect(getViewContribution("com.test.a.p2")).toBeUndefined();
+    expect(getViewContribution("com.test.b.p1")?.label).toBe("B1");
   });
 
   it("视图候选合并与显示名兜底", () => {
@@ -149,5 +165,88 @@ describe("主线程平面 facade 与注册", () => {
     expect(() => bridge.subscribeTableData(() => {})()).not.toThrow();
     expect(() => bridge.selectTableRow("r1")).not.toThrow();
     await expect(bridge.resolveTableImage("x")).rejects.toThrow("插件表格访问未就绪");
+  });
+
+  it("内置视图贡献注册 + 统一读取（内置与插件面板同表）", () => {
+    exposePluginFacade();
+    // 内置贡献：kind "search" 与插件面板同表注册，provider 标注来源
+    registerBuiltinView({ kind: "search", label: "搜索", component: Comp });
+    const builtin = getViewContribution("search");
+    expect(builtin?.provider).toBe("builtin");
+    expect(builtin?.label).toBe("搜索");
+    // 插件面板经 registerPanel 进同一注册表（provider = plugin）
+    window.__atelyxPlugin__!.forPlugin("com.test.a").registerPanel({
+      kind: "com.test.a.search",
+      label: "搜索（插件）",
+      component: Comp,
+    });
+    const plugin = getViewContribution("com.test.a.search");
+    expect(plugin?.provider).toBe("plugin");
+    expect(plugin?.pluginId).toBe("com.test.a");
+    // 注册表驱动视图菜单与显示名（不同 kind 并列）
+    expect(pluginViewKinds()).toContain("search");
+    expect(pluginViewKinds()).toContain("com.test.a.search");
+    expect(pluginViewLabel("com.test.a.search")).toBe("搜索（插件）");
+  });
+
+  it("kind 全局唯一 + 内置保留：重复注册与占用内置 kind 均拒绝", () => {
+    exposePluginFacade();
+    registerBuiltinView({ kind: "com.test.builtin.x", label: "内置 X", component: Comp });
+    expect(() =>
+      registerBuiltinView({ kind: "com.test.builtin.x", label: "内置 X", component: Comp }),
+    ).toThrow(/全局唯一/);
+    // 内置注册不拦截（provider=builtin 允许注册 VIEW_KINDS 内 kind，见上一条用例），插件占用内置 kind 拒绝
+    expect(() =>
+      window.__atelyxPlugin__!.forPlugin("com.test.a").registerPanel({
+        kind: "canvas",
+        label: "画布（插件）",
+        component: Comp,
+      }),
+    ).toThrow(/内置视图保留/);
+    // "empty" 占位哨兵 kind 同样保留（ViewKind 但不含于 VIEW_KINDS，需显式拒绝）
+    expect(() =>
+      window.__atelyxPlugin__!.forPlugin("com.test.a").registerPanel({
+        kind: "empty",
+        label: "空面板（插件）",
+        component: Comp,
+      }),
+    ).toThrow(/内置视图保留/);
+    expect(() =>
+      window.__atelyxPlugin__!.forPlugin("com.test.a").registerPanel({
+        kind: "com.test.builtin.x",
+        label: "插件同名",
+        component: Comp,
+      }),
+    ).toThrow(/全局唯一/);
+    expect(() => registerBuiltinView({ kind: "", label: "空", component: Comp })).toThrow(/非空 kind/);
+    // 内置贡献不被插件卸载误删（provider=builtin 与 pluginId 隔离）
+    unregisterPluginUi("com.test.a");
+    expect(getViewContribution("com.test.builtin.x")?.provider).toBe("builtin");
+  });
+
+  it("facade 仓库访问方法：经 provider 转发 + 未接线安全降级", async () => {
+    exposePluginFacade();
+    const openNote = vi.fn();
+    const openTable = vi.fn();
+    const openCanvasFile = vi.fn();
+    const listFiles = vi.fn(() =>
+      Promise.resolve([{ name: "a.md", path: "a.md", isDir: false, updatedAt: 0, children: [] }]),
+    );
+    setPluginVaultAccess({ ...RUNTIME, listFiles, openNote, openTable, openCanvasFile });
+    const bridge = window.__atelyxPlugin__!.forPlugin("com.test.a");
+    await expect(bridge.listFiles()).resolves.toHaveLength(1);
+    bridge.openNote("a.md", "A");
+    bridge.openTable("t.atb", "T");
+    bridge.openCanvasFile({ id: "c.atlx", title: "C", file: "c.atlx", updatedAt: 0 });
+    expect(openNote).toHaveBeenCalledWith("a.md", "A");
+    expect(openTable).toHaveBeenCalledWith("t.atb", "T");
+    expect(openCanvasFile).toHaveBeenCalledWith({ id: "c.atlx", title: "C", file: "c.atlx", updatedAt: 0 });
+    // 未接线降级：listFiles 空数组、open* no-op
+    setPluginVaultAccess(null);
+    await expect(bridge.listFiles()).resolves.toEqual([]);
+    expect(() => bridge.openNote("b.md", "B")).not.toThrow();
+    expect(() => bridge.openTable("b.atb", "B")).not.toThrow();
+    expect(() => bridge.openCanvasFile({ id: "b.atlx", title: "B", file: "b.atlx", updatedAt: 0 })).not.toThrow();
+    expect(getPluginVaultAccess()).toBeNull();
   });
 });

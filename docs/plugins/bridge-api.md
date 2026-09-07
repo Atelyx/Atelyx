@@ -136,14 +136,38 @@ registerPanel({ kind: "com.example.hello.panel", label: "我的面板", componen
 
 facade 提供：
 
-- `registerPanel({ kind, label, component })` — 注册工作区面板视图（kind 即视图类型，出现在「添加视图」菜单）
+- `registerPanel({ kind, label, component })` — 注册工作区面板视图（kind 即视图类型，出现在「添加视图」菜单，与内置视图并列自选）
 - `registerSetting({ key, label, component })` — 注册设置页条目（出现在设置左侧栏）
 - `registerAppPage({ id, label, component })` — 注册应用级页面（插件命令可经 App 能力打开，全页接管）
 - `registerNode({ type, component })` — 注册画布节点类型
 - `registerCommand({ id, label, run })` — 注册全局命令（直接持有 run 函数）
 - `registerTableView({ kind, label, component })` — 注册**表格编辑器内的表格视图**
 - `registerContribution({ point, id?, payload })` — 通用扩展点注册（payload 直接持有引用）
+- `listFiles()` / `openCanvasFile` / `openNote` / `openTable` — **仓库访问方法**（文件树 + 打开文件；任何面板插件可用，与内置搜索面板同一输入面）
 - `React` / `h` — 构建组件所用
+
+### 注册第三方搜索面板（与内置并列）
+
+内置视图与第三方面板在**同一视图贡献注册表**里注册——kind 全局唯一：**重复注册、或占用内置
+保留 kind（如 `canvas`/`search`）都会抛错**（冲突会中断该插件脚本的后续注册，插件作者须用
+反向域名命名自己的 kind）。不同 kind 并列出现在「添加视图」菜单，用户自选、可同时打开在不同
+面板；内置「搜索」始终可用，停用/卸载插件后其视图项随之消失。
+
+```js
+const { React, h, registerPanel, listFiles, openNote } = window.__atelyxPlugin__.forPlugin("com.example.hello-search");
+
+function HelloSearch() {
+  const [files, setFiles] = React.useState(null);
+  React.useEffect(() => { listFiles().then(setFiles).catch(() => setFiles([])); }, []);
+  // 用文件树实现自己的搜索……
+  return h("div", null, "我的搜索面板");
+}
+// 自己的 kind，与内置「搜索」并列，用户自选
+registerPanel({ kind: "com.example.hello-search", label: "示例搜索", component: HelloSearch });
+```
+
+- **输入面**：`listFiles()`（仓库文件树）+ `openCanvasFile`/`openNote`/`openTable`（打开文件），与内置面板同源（宿主经 provider 注入）。
+- 完整可运行示例见 [`example/hello-search`](example/hello-search/README.md)。
 
 ### 表格数据（表格视图类插件）
 

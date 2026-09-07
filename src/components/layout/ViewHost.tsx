@@ -14,6 +14,7 @@ import {
   Info,
   LayoutTemplate,
   Palette,
+  Puzzle,
   Search,
   Sparkles,
   Table as TableIcon,
@@ -21,7 +22,6 @@ import {
   X,
 } from "lucide-react";
 import { memo, type ReactNode } from "react";
-import { Puzzle } from "lucide-react";
 import { VIEW_LABELS } from "@/constants/views";
 import { useCanvasStore } from "@/stores/canvasStore";
 import { useAppStore } from "@/stores/appStore";
@@ -59,22 +59,34 @@ export const VIEW_META: Record<ViewKind, { label: string; icon: ReactNode }> = {
 };
 
 /**
- * 视图元信息兜底解析：内建 VIEW_META → 插件面板注册 → 原样兜底。
+ * 视图元信息解析：内建 VIEW_META（内置视图元数据权威）→ 统一注册表（插件面板 label）→ 原样兜底。
  * 插件视图可能出现在持久化布局里（插件停用后仍在），各处索引必须走此函数避免崩溃。
  */
 export function viewMetaFor(view: string): { label: string; icon: ReactNode } {
   const builtin = (VIEW_META as Record<string, { label: string; icon: ReactNode }>)[view];
   if (builtin) return builtin;
-  const panel = usePluginStore.getState().pluginPanel(view);
-  return { label: panel?.label ?? view, icon: <Puzzle size={13} /> };
+  const contrib = usePluginStore.getState().viewContribution(view);
+  if (contrib) return { label: contrib.label, icon: <Puzzle size={13} /> };
+  return { label: view, icon: <Puzzle size={13} /> };
 }
 
-/** 插件面板承载：按 kind 渲染注册的组件（缺注册/卸载后空渲染；插件崩溃不影响 App）。 */
-function PluginPanelMount({ kind }: { kind: string }) {
+/** 内置视图贡献注册（宿主第一方）：搜索视图作为样例注册进统一视图注册表（模块加载即注册一次，幂等），
+ *  其余内置视图仍在 switch 硬编码分派，后续按同一模式增量迁移。 */
+function ensureBuiltinViewContribution(): void {
+  const s = usePluginStore.getState();
+  if (s.viewContribution("search")) return;
+  s.registerBuiltinView({ kind: "search", label: VIEW_LABELS.search, component: SearchView });
+}
+ensureBuiltinViewContribution();
+
+/** 视图贡献承载：按 kind 渲染注册的组件（内置贡献/插件面板同表；缺注册 = 空面板占位）。
+ *  订阅 uiRevision——插件异步注册晚于首渲染时自动升级占位；ViewHost 本体不订阅，
+ *  避免内置重型视图（笔记编辑器等）在插件注册时被无效重渲染。 */
+function ViewContributionMount({ kind }: { kind: string }) {
   usePluginStore((s) => s.uiRevision);
-  const panel = usePluginStore.getState().pluginPanel(kind);
-  if (!panel) return null;
-  const Comp = panel.component;
+  const contrib = usePluginStore.getState().viewContribution(kind);
+  if (!contrib) return <div className="h-full w-full" style={{ background: "var(--bg-primary)" }} />;
+  const Comp = contrib.component;
   return (
     <ErrorBoundary>
       <Comp />
@@ -96,8 +108,6 @@ export const ViewHost = memo(function ViewHost({ view, hostId }: { view: ViewKin
       return <TableView panelId={hostId} />;
     case "files":
       return <FilesView />;
-    case "search":
-      return <SearchView />;
     case "inspector":
       return <InspectorPanel />;
     case "aichat":
@@ -111,11 +121,9 @@ export const ViewHost = memo(function ViewHost({ view, hostId }: { view: ViewKin
     case "recent":
       return <RecentPanel />;
     default:
-      // 插件面板（kind 不在内建联合里）；缺注册 = 空面板占位。
-      if (view !== "empty") {
-        const panel = usePluginStore.getState().pluginPanel(view);
-        if (panel) return <PluginPanelMount kind={view} />;
-      }
+      // 统一视图注册表：内置贡献（搜索）与插件面板都由 ViewContributionMount 承载——
+      // 组件内订阅 uiRevision，异步注册/卸载自动升级或回退占位（修复空占位粘滞）。
+      if (view !== "empty") return <ViewContributionMount kind={view} />;
       return <div className="h-full w-full" style={{ background: "var(--bg-primary)" }} />;
   }
 });

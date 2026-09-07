@@ -22,12 +22,11 @@ import {
   getPluginAppPages,
   getPluginNode,
   getPluginNodes,
-  getPluginPanel,
-  getPluginPanels,
   getPluginSetting,
   getPluginSettings,
   getPluginTableView,
   getPluginTableViews,
+  getViewContribution,
   hostCapabilityLabel,
   hostCapabilitySensitive,
   loadPlugin,
@@ -43,8 +42,10 @@ import {
   pluginUpdate,
   pluginViewKinds as allPluginViewKinds,
   pluginViewLabel as pluginViewLabelOf,
+  registerBuiltinView,
   runtimeSnapshot,
   setPluginTableAccess,
+  setPluginVaultAccess,
   startPluginProcess,
   transpileTs,
   unloadPlugin,
@@ -53,14 +54,16 @@ import {
 import type {
   PluginAppPageRegistration,
   PluginNodeRegistration,
-  PluginPanelRegistration,
   PluginRow,
   PluginSettingRegistration,
   PluginTableAccess,
   PluginTableViewRegistration,
+  ViewContribution,
 } from "@/services/plugins";
 import { useTableStore } from "@/stores/tableStore";
 import { useCollabStore } from "@/stores/collabStore";
+import { useVaultStore } from "@/stores/vaultStore";
+import { useAppStore } from "@/stores/appStore";
 import { pickDirectory as pickDirectorySvc } from "@/services/dialog";
 import { buildPluginTableSnapshot } from "@/utils/table";
 import { resolveTableImageUrl } from "@/services/tableImageCache";
@@ -114,9 +117,6 @@ interface PluginStoreState {
   pluginTools(): ToolDefinition[];
   /** 插件工具的 UI 元数据（Agent 设置页名册合并；组件经此读取，不直连 services）。 */
   pluginToolMetas(): AgentToolMeta[];
-  /** 插件面板注册（kind → 注册；ViewHost 渲染 + 视图菜单合并）。 */
-  pluginPanels(): PluginPanelRegistration[];
-  pluginPanel(kind: string): PluginPanelRegistration | undefined;
   /** 插件设置项注册（设置页 tab 合并）。 */
   pluginSettings(): PluginSettingRegistration[];
   pluginSetting(key: string): PluginSettingRegistration | undefined;
@@ -130,6 +130,10 @@ interface PluginStoreState {
   pluginViewKinds(): string[];
   /** 视图显示名（含插件面板，未知视图原样兜底）。 */
   pluginViewLabel(view: string): string;
+  /** 某视图的贡献（内置 + 插件面板统一注册表；ViewHost 分派用，缺注册 = 空面板占位）。 */
+  viewContribution(kind: string): ViewContribution | undefined;
+  /** 注册内置视图贡献（宿主第一方；App 启动时注册一次，幂等）。 */
+  registerBuiltinView(contrib: { kind: string; label: string; component: ComponentType }): void;
   /** 插件表格视图注册（kind → 注册；TableEditor 视图切换合并）。 */
   pluginTableView(kind: string): PluginTableViewRegistration | undefined;
   /** 全部插件表格视图注册（工具条视图列表合并用）。 */
@@ -189,8 +193,8 @@ async function finishInstall(get: () => PluginStoreState, row: PluginRow): Promi
 }
 
 /** 表格数据访问接线守卫：load 每次进仓/启动都会跑，接线幂等只做一次（订阅常驻、跨仓库不重绑）。
- * 注意模块环：pluginStore → tableStore → collabStore → appStore → pluginStore 为良性环——
- * 全部 store 访问延迟到回调内 `getState()`，模块顶层零触碰（与既有 tableStore↔collabStore 同模式）。 */
+ * 注意模块环：pluginStore ↔ { tableStore, collabStore, appStore, vaultStore }（appStore 反向依赖
+ * pluginStore）为良性环——全部 store 访问延迟到回调内 `getState()`，模块顶层零触碰。 */
 let tableAccessWired = false;
 function ensureTableAccess(): void {
   if (tableAccessWired) return;
@@ -236,6 +240,21 @@ function ensureTableAccess(): void {
     resolveImage: resolveTableImageUrl,
   };
   setPluginTableAccess(access);
+}
+
+/** 插件侧仓库访问接线守卫：load 每次进仓/启动都会跑，接线幂等只做一次。
+ *  把仓库文件树与打开回调暴露给主线程插件（facade 的 listFiles/open* 方法）。
+ *  全部 store 访问延迟到回调内 getState()（与 ensureTableAccess 同模式，防模块环顶层触碰）。 */
+let vaultAccessWired = false;
+function ensureVaultAccess(): void {
+  if (vaultAccessWired) return;
+  vaultAccessWired = true;
+  setPluginVaultAccess({
+    listFiles: async () => useVaultStore.getState().tree,
+    openCanvasFile: (row) => useAppStore.getState().openCanvas(row),
+    openNote: (file, title) => useAppStore.getState().openNote(file, title),
+    openTable: (file, title) => useAppStore.getState().openTable(file, title),
+  });
 }
 
 export const usePluginStore = create<PluginStoreState>()((set, get) => {
@@ -344,6 +363,7 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
     load: async () => {
       exposePluginFacade();
       ensureTableAccess();
+      ensureVaultAccess();
       const seq = ++loadSeq;
       const rows = await pluginList();
       if (seq !== loadSeq) return; // 已有更新的 load 开始，本次作废（防孤儿 runtime）
@@ -441,8 +461,6 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
 
     pluginToolMetas: () => pluginToolMetasSvc(),
 
-    pluginPanels: () => getPluginPanels(),
-    pluginPanel: (kind) => getPluginPanel(kind),
     pluginSettings: () => getPluginSettings(),
     pluginSetting: (key) => getPluginSetting(key),
     pluginNode: (type) => getPluginNode(type),
@@ -454,6 +472,8 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
     pluginAppPage: (id) => getPluginAppPages().find((p) => p.id === id),
     pluginViewKinds: () => allPluginViewKinds(),
     pluginViewLabel: (view) => pluginViewLabelOf(view),
+    viewContribution: (kind) => getViewContribution(kind),
+    registerBuiltinView: (contrib) => registerBuiltinView(contrib),
     pluginTableView: (kind) => getPluginTableView(kind),
     pluginTableViews: () => getPluginTableViews(),
     capabilityLabel: (namespace) => hostCapabilityLabel(namespace) ?? namespace,
