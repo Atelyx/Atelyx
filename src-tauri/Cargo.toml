@@ -1,6 +1,6 @@
 [package]
 name = "atelyx"
-version = "0.4.1"
+version = "0.4.2"
 description = "一款优雅的桌面创作工作台：把对话、笔记、表格都放到一张无限画布上，思路随手连，AI 帮你记和整理"
 authors = ["Atelyx"]
 edition = "2021"
