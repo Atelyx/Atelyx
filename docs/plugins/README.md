@@ -1,6 +1,6 @@
 # Atelyx 插件开发指南
 
-Atelyx 是一个插件化平台：插件 = 一个 GitHub 仓库，含一份 `atelyx.json` 清单 + 入口脚本 + 资源。
+Atelyx 是一个插件化平台：插件 = 一个 git 仓库（市场侧以 GitHub 为主），含一份 `atelyx.json` 清单 + 入口脚本 + 资源。
 给仓库打上 `atelyx-plugin` topic，即可被市场自动收录，任何 Atelyx 用户都可在内置市场中找到并安装。
 
 插件可扩展九类能力，按运行平面分两组：
@@ -36,9 +36,17 @@ Atelyx 是一个插件化平台：插件 = 一个 GitHub 仓库，含一份 `ate
 
 1. 复制 `docs/plugins/example/hello-tool/` 到你自己的 GitHub 仓库（或从零按[清单格式](manifest.md)写）。
 2. 开发工具/命令逻辑，用 `bridge.registerTool(...)` / `bridge.registerCommand(...)` 注册。
-3. 打包：把 `atelyx.json` 与入口脚本打成 zip（zip 根含 `atelyx.json`，或置于唯一顶层目录）。
-4. 在 GitHub Release 上传 zip 资产。
-5. 给仓库打 `atelyx-plugin` topic。
-6. 市场聚合每 6 小时刷新一次，之后即可在 Atelyx 的市场中搜到并安装。
+3. 推送到 GitHub 仓库（`atelyx.json` 必须位于仓库根；**仓库最新提交即发布版本**，无需打包）。
+4. 给仓库打 `atelyx-plugin` topic。
+5. 市场聚合每 6 小时刷新一次，之后即可在 Atelyx 的市场中搜到并安装（安装 = git clone 仓库源码）。
 
-[打包与发布检查清单 →](publishing.md)
+## 开发期安装（无需发布）
+
+调试本地插件源码不需要发布：Atelyx 设置 → 插件页支持两种「取源码」安装：
+
+- **从本地文件夹安装**：选择插件源码目录，App 以目录链接实时引用——改源码即时生效（无拷贝）。
+- **从 Git 地址安装**：粘贴 git 仓库地址（GitHub / Gitee / 自建均可），App 克隆到插件目录，之后可一键更新（git pull）。
+
+本地目录来源的插件在管理页显示「本地目录」徽标且无更新按钮（本身即最新）；Git 来源显示「Git」徽标。
+
+[发布检查清单 →](publishing.md)

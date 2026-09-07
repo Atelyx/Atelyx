@@ -9,8 +9,7 @@
 
 1. 把本目录复制到你的 GitHub 仓库。
 2. （可选）修改 `atelyx.json` 的 `id`/`name`/`author`。
-3. 把 `atelyx.json` + `plugin.js` 打成 zip。
-4. 在 GitHub Release 上传 zip，给仓库打 `atelyx-plugin` topic。
+3. 推送到 GitHub 仓库（`atelyx.json` 位于仓库根），给仓库打 `atelyx-plugin` topic。
 
 安装后在 Atelyx 设置 → 插件 → 启用「你好工具」，然后在设置 → Agent → 勾选 `hello` 工具即可被模型调用。
 

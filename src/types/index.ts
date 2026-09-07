@@ -172,9 +172,8 @@ export {
   type PluginBadge,
   type PluginIndexEntry,
   type PluginIndex,
-  type PluginBlockEntry,
-  type PluginEndorseEntry,
   type PluginFiberPhase,
   type InstalledPlugin,
+  type PluginSourceKind,
   type PluginTableSnapshot,
 } from "./plugin";

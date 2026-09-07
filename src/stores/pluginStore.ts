@@ -11,6 +11,7 @@ import type {
   InstalledPlugin,
   PluginIndexEntry,
   PluginScope,
+  PluginSourceKind,
   ToolDefinition,
 } from "@/types";
 import { errText } from "@/types";
@@ -31,6 +32,7 @@ import {
   onPluginUiChange,
   onRuntimeChange,
   pluginInstall,
+  pluginInstallLocal,
   pluginList,
   pluginReadEntry,
   pluginSetEnabled,
@@ -47,12 +49,14 @@ import type {
   PluginAppPageRegistration,
   PluginNodeRegistration,
   PluginPanelRegistration,
+  PluginRow,
   PluginSettingRegistration,
   PluginTableAccess,
   PluginTableViewRegistration,
 } from "@/services/plugins";
 import { useTableStore } from "@/stores/tableStore";
 import { useCollabStore } from "@/stores/collabStore";
+import { pickDirectory as pickDirectorySvc } from "@/services/dialog";
 import { buildPluginTableSnapshot } from "@/utils/table";
 import { resolveTableImageUrl } from "@/services/tableImageCache";
 import { pluginToolMetas as pluginToolMetasSvc } from "@/services/ai/tools";
@@ -89,8 +93,14 @@ interface PluginStoreState {
   marketLoaded: boolean;
   /** 加载已装插件并按启用状态拉起运行时。 */
   load(): Promise<void>;
-  /** 从 GitHub 仓库安装（scope 由前端/清单决定；安装后默认未启用，由管理 UI 确认后启用）。 */
+  /** 从 GitHub 仓库安装（repo 为 `owner/repo` 市场引用或完整 git 地址；安装后默认未启用，由管理 UI 确认后启用）。 */
   install(repo: string, scope: PluginScope): Promise<void>;
+  /** 从本地目录安装（junction/符号链接实时引用，源目录改动即时生效；当前仅 app 级）。 */
+  installLocal(path: string): Promise<void>;
+  /** 调系统目录选择器选插件源目录并安装；用户取消 = false（未安装）。 */
+  installLocalFromPicker(): Promise<boolean>;
+  /** 从 git 地址安装（git clone，保留 .git 供更新；当前仅 app 级）。 */
+  installGit(url: string): Promise<void>;
   /** 卸载（删除目录 + 终止运行时 + 清理状态）。 */
   uninstall(id: string): Promise<void>;
   /** 启用/停用（启用 = 拉起运行时；停用 = 终止运行时）。 */
@@ -131,6 +141,7 @@ function toInstalled(row: {
   id: string;
   scope: PluginScope;
   installDir: string;
+  sourceKind: PluginSourceKind;
   enabled: boolean;
   manifest: unknown;
 }): InstalledPlugin {
@@ -140,10 +151,43 @@ function toInstalled(row: {
     manifest: validated.ok ? validated.manifest : (row.manifest as InstalledPlugin["manifest"]),
     scope: row.scope,
     installDir: row.installDir,
+    sourceKind: row.sourceKind,
     enabled: row.enabled,
     phase: "pending",
     usedCapabilities: [],
   };
+}
+
+/** 安装后统一收尾（模块私有）：封禁检查（仅市场）+ 宿主兼容强制 + 重载。
+ *  本地/Git 来源非市场，跳过封禁检查（Git 来源不受市场下架约束）。
+ *  封禁检查依赖市场索引已加载（marketItems 为空时静默放行——市场安装路径先经 loadMarket）。 */
+async function finishInstall(
+  get: () => PluginStoreState,
+  row: PluginRow,
+  checkBlocked: boolean,
+): Promise<void> {
+  try {
+    if (checkBlocked && get().marketItems.find((it) => it.id === row.id)?.blockedReason) {
+      throw new Error("该插件已被官方下架，无法安装");
+    }
+    // 宿主兼容强制（清单承诺）：版本/平台不匹配即回滚并报错。
+    // 宿主版本读取失败（瞬时 IPC 异常）按放行处理：不误删刚装好的插件，不兼容风险由运行时兜底。
+    let hostVersion: string | null = null;
+    try {
+      hostVersion = await getAppVersion();
+    } catch {
+      hostVersion = null;
+    }
+    if (hostVersion !== null) {
+      const compat = pluginCompatibleWithHost(row.manifest, hostVersion, detectPlatform());
+      if (!compat.ok) throw new Error(`无法安装：${compat.reason}`);
+    }
+  } catch (e) {
+    // 任一检查失败都回滚已落盘插件，避免「装了一半」留脏。
+    await pluginUninstall(row.id, row.scope).catch(() => {});
+    throw e;
+  }
+  await get().load();
 }
 
 /** 表格数据访问接线守卫：load 每次进仓/启动都会跑，接线幂等只做一次（订阅常驻、跨仓库不重绑）。
@@ -324,21 +368,33 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
 
     install: async (repo, scope) => {
       const row = await pluginInstall(repo, scope);
-      try {
-        // 封禁检查（市场已加载时）：命中即回滚——已下架插件不可安装。
-        if (get().marketItems.find((it) => it.id === row.id)?.blockedReason) {
-          throw new Error("该插件已被官方下架，无法安装");
-        }
-        // 宿主兼容强制（清单承诺）：版本/平台不匹配即回滚并报错。
-        const hostVersion = await getAppVersion();
-        const compat = pluginCompatibleWithHost(row.manifest, hostVersion, detectPlatform());
-        if (!compat.ok) throw new Error(`无法安装：${compat.reason}`);
-      } catch (e) {
-        // 任一检查失败（含 getAppVersion IPC 异常）都回滚已落盘插件，避免「装了一半」留脏。
-        await pluginUninstall(row.id, row.scope).catch(() => {});
-        throw e;
-      }
-      await get().load();
+      await finishInstall(get, row, true);
+    },
+
+    installLocal: async (path) => {
+      const row = await pluginInstallLocal(path, "app");
+      await finishInstall(get, row, false);
+    },
+
+    installLocalFromPicker: async () => {
+      const path = await pickDirectorySvc();
+      if (!path) return false;
+      await get().installLocal(path);
+      return true;
+    },
+
+    installGit: async (url) => {
+      const trimmed = url.trim();
+      if (!trimmed) throw new Error("请输入 git 仓库地址");
+      // 纯 owner/repo 输入归一化为完整 GitHub 地址（先剥 .git 尾缀防双后缀）：
+      // Git 入口语义统一为 Git 来源（徽标/更新一致）。
+      const base = trimmed.replace(/\.git$/i, "");
+      const gitRef =
+        !base.includes("://") && !base.includes("@") && base.split("/").length === 2
+          ? `https://github.com/${base}.git`
+          : trimmed;
+      const row = await pluginInstall(gitRef, "app");
+      await finishInstall(get, row, false);
     },
 
     uninstall: async (id) => {

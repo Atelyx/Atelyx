@@ -64,6 +64,9 @@ export type PluginType =
 /** 安装作用域：app=个人工具（本机，默认）；vault=随仓库共享。 */
 export type PluginScope = "app" | "vault";
 
+/** 插件安装来源类型（管理 UI 徽标/更新可用性依据）。 */
+export type PluginSourceKind = "market" | "git" | "local";
+
 /** 声明式皮肤：覆盖 CSS 变量（无需运行时代码；键可带或省略 `--` 前缀，应用时统一补前缀）。 */
 export interface PluginTheme {
   /** 主题变量覆盖（如 { "--accent": "#7c3aed" }）。 */
@@ -116,10 +119,10 @@ export interface PluginManifest {
   tags?: string[];
 }
 
-/** 市场徽标：official=官方出品（按账号自动判定）；endorsed=官方认可（人工授予）。 */
+/** 市场徽标：official=官方（按账号自动判定）；endorsed=精选（人工授予）。 */
 export type PluginBadge = "official" | "endorsed";
 
-/** 市场索引条目：发现元数据 + 下载定位（下载/更新按 repo 解析 GitHub Release）。 */
+/** 市场索引条目：发现元数据 + 来源定位（安装/更新取源码：git clone，无 git 回退 GitHub 源码包）。 */
 export interface PluginIndexEntry {
   id: string;
   name: string;
@@ -147,18 +150,6 @@ export interface PluginIndex {
   items: PluginIndexEntry[];
 }
 
-/** 封禁条目（blocklist.json）：官方下架依据，命中即不可安装/启用。 */
-export interface PluginBlockEntry {
-  id: string;
-  reason: string;
-}
-
-/** 官方认可条目（endorsed.json）：给优质第三方插件授予认可徽标。 */
-export interface PluginEndorseEntry {
-  id: string;
-  reason?: string;
-}
-
 /** 已装插件的运行阶段。 */
 export type PluginFiberPhase = "pending" | "loading" | "active" | "failed";
 
@@ -168,8 +159,10 @@ export interface InstalledPlugin {
   manifest: PluginManifest;
   /** 归一化作用域（缺省 app）。 */
   scope: PluginScope;
-  /** 安装目录（Rust 返回的绝对路径）。 */
+  /** 安装目录（Rust 返回的绝对路径；本地来源为链接路径）。 */
   installDir: string;
+  /** 安装来源类型（市场 / Git / 本地目录）。 */
+  sourceKind: PluginSourceKind;
   enabled: boolean;
   phase: PluginFiberPhase;
   /** 桥实际调用过的能力（内存审计，上限截断）。 */

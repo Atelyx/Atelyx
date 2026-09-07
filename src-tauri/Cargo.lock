@@ -238,6 +238,7 @@ dependencies = [
  "chrono",
  "dunce",
  "globset",
+ "junction",
  "keyring",
  "nanoid",
  "notify",
@@ -247,7 +248,6 @@ dependencies = [
  "rust_xlsxwriter",
  "serde",
  "serde_json",
- "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-clipboard-manager",
@@ -2279,6 +2279,16 @@ checksum = "5dea2b27dd239b2556ed7a25ba842fe47fd602e7fc7433c2a8d6106d4d9edd70"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "junction"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1bcc2cc77f63a374d3a17011d943b081f7cb60c942d1ddaf3504430378597385"
+dependencies = [
+ "scopeguard",
+ "winapi",
 ]
 
 [[package]]
@@ -4927,6 +4937,7 @@ dependencies = [
  "libc",
  "mio 1.2.2",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
  "windows-sys 0.61.2",
 ]

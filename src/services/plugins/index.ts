@@ -3,7 +3,7 @@
  * 插件列表/安装/卸载/启停/更新/读入口/插件数据都经这里，前端组件只经 store 触达。
  */
 import { invoke } from "@tauri-apps/api/core";
-import type { PluginManifest, PluginScope, PluginType } from "@/types";
+import type { PluginManifest, PluginScope, PluginSourceKind, PluginType } from "@/types";
 
 /** Rust `plugin_list` 返回行（原始清单由前端校验归一化）。 */
 export interface PluginRow {
@@ -13,6 +13,7 @@ export interface PluginRow {
   type: PluginType;
   scope: PluginScope;
   installDir: string;
+  sourceKind: PluginSourceKind;
   enabled: boolean;
   manifest: PluginManifest;
 }
@@ -22,9 +23,14 @@ export function pluginList(): Promise<PluginRow[]> {
   return invoke<PluginRow[]>("plugin_list");
 }
 
-/** 从 GitHub 仓库安装插件（下载 → 校验 → 原子落位；安装后默认未启用）。 */
+/** 安装插件：来源为 GitHub `owner/repo`（市场）或完整 git 地址；安装后默认未启用。 */
 export function pluginInstall(repo: string, scope: PluginScope): Promise<PluginRow> {
   return invoke<PluginRow>("plugin_install", { repo, scope });
+}
+
+/** 从本地目录安装插件（junction/符号链接实时引用，源目录改动即时生效）。 */
+export function pluginInstallLocal(path: string, scope: PluginScope): Promise<PluginRow> {
+  return invoke<PluginRow>("plugin_install_local", { path, scope });
 }
 
 /** 卸载插件（删除插件目录 + 清理状态记录）。 */

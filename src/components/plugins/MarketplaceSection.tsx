@@ -1,9 +1,9 @@
 /**
  * 插件市场浏览：官方索引（CDN）搜索/筛选/安装。
  *
- * - 搜索：名称/id/描述/仓库全文匹配；类型筛选（全部/各类型）；徽标展示（官方出品/官方认可）
+ * - 搜索：名称/id/描述/仓库全文匹配；类型筛选（全部/各类型）；徽标展示（官方/精选）
  * - 封禁条目灰显不可安装（官方下架）
- * - 安装 = 按 repo 走 GitHub Release（下载 → sha256 → 解压 → 校验 → 原子落位），默认未启用，
+ * - 安装 = 按 repo 取源码（git clone，无 git 回退 GitHub 源码包），默认未启用，
  *   由「已安装」tab 确认启用；scope 由本区顶部的安装作用域选择决定
  * - 顶部下拉（类型筛选/安装作用域）用统一 DropdownSelect 组件（自绘弹层，非原生 select）
  * 分层：只经 pluginStore 触达插件能力。
@@ -179,7 +179,7 @@ export function MarketplaceSection() {
                     )}
                   </div>
                   <div className="text-[11px] truncate" style={{ color: "var(--text-muted)" }}>
-                    {it.type ? PLUGIN_TYPE_LABELS[it.type] : "插件"} · {it.repo} · ⭐{it.stars}
+                    {it.type ? PLUGIN_TYPE_LABELS[it.type] : "插件"} · {it.repo} · {it.id} · ⭐{it.stars}
                   </div>
                 </div>
                 {blocked ? (

@@ -139,6 +139,7 @@ pub fn run() {
             // 插件平台（安装/卸载/启用/更新/读入口/插件数据；见 commands/plugin.rs）
             commands::plugin::plugin_list,
             commands::plugin::plugin_install,
+            commands::plugin::plugin_install_local,
             commands::plugin::plugin_uninstall,
             commands::plugin::plugin_set_enabled,
             commands::plugin::plugin_update,

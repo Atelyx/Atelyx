@@ -30,8 +30,8 @@ tauri-plugin-updater = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# 异步运行时（拖拽看门狗定时器；与 tauri 内置 tokio 同版本统一）
-tokio = { version = "1", features = ["time"] }
+# 异步运行时（拖拽看门狗定时器 + 插件 git 命令执行；与 tauri 内置 tokio 同版本统一）
+tokio = { version = "1", features = ["time", "process"] }
 
 # 附件图片转 dataURL 供前端 MediaNode 显示（文件面板拖附件建节点）
 base64 = "0.22"
@@ -66,14 +66,15 @@ regex = "1"
 # 表格导出 xlsx（rust_xlsxwriter 原生生成，样式：表头/边框/列宽/冻结首行/图片嵌入）
 rust_xlsxwriter = "0.80"
 
-# 插件平台：安装 zip 解压（防路径穿越/zip 炸弹）与 sha256 校验（GitHub Release 资产 digest）
+# 插件平台：安装源码包解压（防路径穿越/zip 炸弹；GitHub codeload 自动生成的归档）
 zip = "2"
-sha2 = "0.10"
 
+[target.'cfg(target_os = "windows")'.dependencies]
 # 跨窗口拖拽释放检测（Windows 专用）：标签拖出窗口后 webview 收不到窗口外 pointerup，
 # 前端轮询 GetAsyncKeyState(VK_LBUTTON) 物理判定鼠标已松开，终止拖拽会话并清除 drop 指示器
-[target.'cfg(target_os = "windows")'.dependencies]
 winapi = { version = "0.3", features = ["winuser"] }
+# 插件平台：本地目录安装的 Windows junction 创建（免管理员；Unix 走 std 符号链接）
+junction = "0.2"
 
 [features]
 # 自定义 protocol 用
