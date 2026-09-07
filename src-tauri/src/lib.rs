@@ -29,6 +29,8 @@ pub fn run() {
             app.manage(watcher::WatcherState::default());
             // 布局迷你窗口管理器：布局模型唯一权威，启动即从 ui-state.json 加载
             app.manage(layout::LayoutState::new());
+            // 插件子进程运行时注册表（Python stdio 桥；见 commands/plugin_process.rs）
+            app.manage(commands::plugin_process::ProcessRegistry::default());
             layout::load_from_disk(app.handle(), &app.state::<layout::LayoutState>());
             // 主窗口窗口事件钩子：Moved/Resized → 权威 bounds（拖拽命中/落点解析）
             if let Some(main_win) = app.get_webview_window("main") {
@@ -146,6 +148,10 @@ pub fn run() {
             commands::plugin::plugin_read_entry,
             commands::plugin::plugin_read_state,
             commands::plugin::plugin_write_state,
+            // 插件子进程运行时（Python stdio 桥：启停/写入/杀进程）
+            commands::plugin_process::plugin_process_start,
+            commands::plugin_process::plugin_process_write,
+            commands::plugin_process::plugin_process_kill,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

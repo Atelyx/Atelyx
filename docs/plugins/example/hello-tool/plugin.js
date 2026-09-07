@@ -5,7 +5,7 @@
  * 运行在独立 Web Worker：无 window、无系统访问，只能经 bridge 与 App 通信。
  */
 (async () => {
-  // 读上次称呼（state:persist 能力，已在清单 uses 声明）。
+  // 读上次称呼（state 能力，已在清单 declares 披露）。
   let saved = {};
   try {
     saved = (await bridge.stateRead()) ?? {};

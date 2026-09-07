@@ -1,6 +1,7 @@
 /**
- * 通用确认弹窗（fixed 遮罩 + 居中卡片，用于破坏性操作确认）。
- * Esc / 点击遮罩取消；「确认」按钮红色强调（破坏性语义）。
+ * 通用确认弹窗（fixed 遮罩 + 居中卡片，用于破坏性操作确认，也可作风险提示确认）。
+ * Esc / 点击遮罩取消；danger=true（默认）确认按钮红色（破坏性语义），
+ * danger=false 用强调色（如安装第三方代码的知情确认）。
  */
 import { useEffect, useRef } from "react";
 import { AlertTriangle } from "lucide-react";
@@ -10,6 +11,7 @@ export function ConfirmDialog({
   description,
   confirmText = "确认",
   cancelText = "取消",
+  danger = true,
   onConfirm,
   onCancel,
 }: {
@@ -17,6 +19,7 @@ export function ConfirmDialog({
   description?: string;
   confirmText?: string;
   cancelText?: string;
+  danger?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
 }) {
@@ -64,7 +67,8 @@ export function ConfirmDialog({
           </button>
           <button
             onClick={onConfirm}
-            className="px-3 py-1.5 text-xs rounded bg-red-600 hover:bg-red-500 text-white"
+            className={`px-3 py-1.5 text-xs rounded ${danger ? "bg-red-600 hover:bg-red-500 text-white" : ""}`}
+            style={danger ? undefined : { background: "var(--accent)", color: "var(--accent-fg)" }}
           >
             {confirmText}
           </button>

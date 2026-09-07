@@ -161,13 +161,11 @@ export type {
 
 export {
   PLUGIN_SCHEMA_VERSION,
-  PLUGIN_CAPABILITIES,
-  SENSITIVE_PLUGIN_CAPABILITIES,
   type PluginType,
   type PluginScope,
-  type PluginCapability,
-  type SensitivePluginCapability,
   type PluginManifest,
+  type PluginRuntime,
+  type PluginContributes,
   type PluginTheme,
   type PluginBadge,
   type PluginIndexEntry,

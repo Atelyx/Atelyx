@@ -14,8 +14,9 @@ import type {
   PluginSourceKind,
   ToolDefinition,
 } from "@/types";
-import { errText } from "@/types";
+import { errText, type PluginFiberPhase } from "@/types";
 import {
+  attachPlugin,
   contributedPluginTools,
   exposePluginFacade,
   getPluginAppPages,
@@ -27,6 +28,8 @@ import {
   getPluginSettings,
   getPluginTableView,
   getPluginTableViews,
+  hostCapabilityLabel,
+  hostCapabilitySensitive,
   loadPlugin,
   loadUiPlugin,
   onPluginUiChange,
@@ -42,6 +45,8 @@ import {
   pluginViewLabel as pluginViewLabelOf,
   runtimeSnapshot,
   setPluginTableAccess,
+  startPluginProcess,
+  transpileTs,
   unloadPlugin,
   unregisterPluginUi,
 } from "@/services/plugins";
@@ -83,10 +88,8 @@ interface PluginStoreState {
   initialized: boolean;
   /** UI 注册修订号（主线程插件脚本异步注册到达时自增；依赖插件 UI 的组件据此重渲染）。 */
   uiRevision: number;
-  /** 市场索引条目（含徽标/封禁合并）。 */
+  /** 市场索引条目（含徽标合并）。 */
   marketItems: PluginIndexEntry[];
-  marketGeneratedAt: string;
-  marketFetchedAt: number;
   marketLoading: boolean;
   marketError: string;
   /** 市场是否已加载过（UI 据此显示加载/空态）。 */
@@ -131,7 +134,11 @@ interface PluginStoreState {
   pluginTableView(kind: string): PluginTableViewRegistration | undefined;
   /** 全部插件表格视图注册（工具条视图列表合并用）。 */
   pluginTableViews(): PluginTableViewRegistration[];
-  /** 加载市场索引（缓存未过期直接回缓存；失败回落缓存快照并带时间戳提示）。 */
+  /** 能力命名空间展示文案（宿主能力返回注册表标签，插件命名空间原样）。 */
+  capabilityLabel(namespace: string): string;
+  /** 能力命名空间是否敏感（宿主注册表标记，UI「敏感」高亮）。 */
+  capabilitySensitive(namespace: string): boolean;
+  /** 加载市场索引（缓存未过期直接回缓存；网络失败直接提示失败）。 */
   loadMarket(force?: boolean): Promise<void>;
 }
 
@@ -158,18 +165,9 @@ function toInstalled(row: {
   };
 }
 
-/** 安装后统一收尾（模块私有）：封禁检查（仅市场）+ 宿主兼容强制 + 重载。
- *  本地/Git 来源非市场，跳过封禁检查（Git 来源不受市场下架约束）。
- *  封禁检查依赖市场索引已加载（marketItems 为空时静默放行——市场安装路径先经 loadMarket）。 */
-async function finishInstall(
-  get: () => PluginStoreState,
-  row: PluginRow,
-  checkBlocked: boolean,
-): Promise<void> {
+/** 安装后统一收尾（模块私有）：宿主兼容强制 + 重载。 */
+async function finishInstall(get: () => PluginStoreState, row: PluginRow): Promise<void> {
   try {
-    if (checkBlocked && get().marketItems.find((it) => it.id === row.id)?.blockedReason) {
-      throw new Error("该插件已被官方下架，无法安装");
-    }
     // 宿主兼容强制（清单承诺）：版本/平台不匹配即回滚并报错。
     // 宿主版本读取失败（瞬时 IPC 异常）按放行处理：不误删刚装好的插件，不兼容风险由运行时兜底。
     let hostVersion: string | null = null;
@@ -257,7 +255,17 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
     });
   };
 
-  /** 拉起单个启用插件的运行时（按平面：主线程 UI 入口 + worker 逻辑；失败标 failed 不阻塞）。 */
+  /** 读取插件入口源码；runtime 为 ts 且入口为 .ts/.tsx 时先转译成 JS（发布源码即可用，
+   *  无需构建产物；dist/ 预编译 .js 跳过）。 */
+  const readEntry = async (p: InstalledPlugin, path: string): Promise<string> => {
+    const code = await pluginReadEntry(p.id, path);
+    if (p.manifest.runtime === "ts" && /\.tsx?$/i.test(path)) {
+      return transpileTs(code);
+    }
+    return code;
+  };
+
+  /** 拉起单个启用插件的运行时（按平面：主线程 UI 入口 + 逻辑平面；失败标 failed 不阻塞）。 */
   const spawn = async (id: string): Promise<void> => {
     const p = get().plugins[id];
     if (!p) return;
@@ -267,30 +275,41 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
     try {
       const types = pluginTypeList(p.manifest);
       const hasWorker = types.some(isWorkerPluginType);
-      // 主线程平面：mainUi 优先；无 mainUi 时仅当无 worker 平面才把 main 当 UI 入口
-      // （否则同一份 main 会被双平面各执行一次——混合类型插件必须用 mainUi 承载 UI）。
+      // 主线程平面：mainUi 优先；无 mainUi 时仅当「js/ts 运行时 + 无 worker 平面」才把 main 当
+      // UI 入口——python 的 main 是子进程入口，注入主线程会静默失败（UI 平面永远跑 JS）。
       const uiEntry =
-        p.manifest.mainUi ?? (!hasWorker && types.some(isUiPluginType) ? p.manifest.main : undefined);
+        p.manifest.mainUi ??
+        ((p.manifest.runtime === "js" || p.manifest.runtime === "ts") &&
+        !hasWorker &&
+        types.some(isUiPluginType)
+          ? p.manifest.main
+          : undefined);
       if (uiEntry) {
-        const code = await pluginReadEntry(id, uiEntry);
+        const code = await readEntry(p, uiEntry);
         loadUiPlugin(id, code);
       }
-      // worker 平面：工具/后台/命令逻辑。
+      // 逻辑平面：工具/后台/命令逻辑。
+      const syncPhase = (phase: PluginFiberPhase, error?: string): void => {
+        set((s) => {
+          const cur = s.plugins[id];
+          if (!cur) return s;
+          return { plugins: { ...s.plugins, [id]: { ...cur, phase, error } } };
+        });
+      };
       if (hasWorker && p.manifest.main) {
-        const code = await pluginReadEntry(id, p.manifest.main);
-        const entry = loadPlugin(p.manifest, code);
-        set((s) => {
-          const cur = s.plugins[id];
-          if (!cur) return s;
-          return { plugins: { ...s.plugins, [id]: { ...cur, phase: entry.phase, error: entry.error } } };
-        });
+        // 子进程运行时（Python）：spawn 解释器经 stdio 桥接入同一套能力注册表。
+        if (p.manifest.runtime === "python") {
+          const transport = await startPluginProcess(id, p.manifest.runtime);
+          const entry = attachPlugin(p.manifest, transport);
+          syncPhase(entry.phase, entry.error);
+        } else {
+          const code = await readEntry(p, p.manifest.main);
+          const entry = loadPlugin(p.manifest, code);
+          syncPhase(entry.phase, entry.error);
+        }
       } else {
-        // 无 worker 平面：主线程脚本注入后即视为已加载（注册经 onPluginUiChange 刷新 UI）。
-        set((s) => {
-          const cur = s.plugins[id];
-          if (!cur) return s;
-          return { plugins: { ...s.plugins, [id]: { ...cur, phase: "active" } } };
-        });
+        // 无逻辑平面：主线程脚本注入后即视为已加载（注册经 onPluginUiChange 刷新 UI）。
+        syncPhase("active");
       }
     } catch (e) {
       set((s) => {
@@ -308,36 +327,17 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
    * 只允许最后一次生效，防止旧 load 覆盖插件表后残留孤儿 runtime。 */
   let loadSeq = 0;
 
-  /** 封禁落地：把市场封禁标记到已装插件，启用中的被强制停用（下架即禁用，符合市场承诺）。 */
-  const applyBlocklist = (): void => {
-    const blocked = new Map<string, string>();
-    for (const it of get().marketItems) if (it.blockedReason) blocked.set(it.id, it.blockedReason);
-    for (const p of Object.values(get().plugins)) {
-      const reason = blocked.get(p.id);
-      if (p.enabled && reason) void get().setEnabled(p.id, false).catch(() => {});
-      if (p.blocked !== reason) {
-        set((s) =>
-          s.plugins[p.id]
-            ? { plugins: { ...s.plugins, [p.id]: { ...s.plugins[p.id], blocked: reason } } }
-            : s,
-        );
-      }
-    }
-  };
-
   return {
     plugins: {},
     initialized: false,
     uiRevision: 0,
     marketItems: [],
-    marketGeneratedAt: "",
-    marketFetchedAt: 0,
     marketLoading: false,
     marketError: "",
     marketLoaded: false,
 
     /**
-     * 全量重载：先卸载全部运行时与 UI 贡献（仓库切换/重装后旧贡献不残留），再按当前上下文
+     * 全量重载：先取磁盘清单（失败则旧状态原样保留），再卸载旧运行时与 UI 贡献，按当前上下文
      * （app 插件 + 当前仓库 vault 插件）重建。语义 =「重置到磁盘状态」，可在 boot / 切仓库 /
      * 安装/更新后安全重复调用。
      */
@@ -345,12 +345,12 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
       exposePluginFacade();
       ensureTableAccess();
       const seq = ++loadSeq;
+      const rows = await pluginList();
+      if (seq !== loadSeq) return; // 已有更新的 load 开始，本次作废（防孤儿 runtime）
       for (const id of Object.keys(get().plugins)) {
         unloadPlugin(id);
         unregisterPluginUi(id);
       }
-      const rows = await pluginList();
-      if (seq !== loadSeq) return; // 已有更新的 load 开始，本次作废（防孤儿 runtime）
       const plugins: Record<string, InstalledPlugin> = {};
       for (const row of rows) {
         plugins[row.id] = toInstalled(row);
@@ -362,18 +362,16 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
         await spawn(row.id);
       }
       if (seq !== loadSeq) return;
-      // 封禁标记补录（市场已加载时）：重新标记已装插件并强制停用下架项。
-      if (get().marketLoaded) applyBlocklist();
     },
 
     install: async (repo, scope) => {
       const row = await pluginInstall(repo, scope);
-      await finishInstall(get, row, true);
+      await finishInstall(get, row);
     },
 
     installLocal: async (path) => {
       const row = await pluginInstallLocal(path, "app");
-      await finishInstall(get, row, false);
+      await finishInstall(get, row);
     },
 
     installLocalFromPicker: async () => {
@@ -394,7 +392,7 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
           ? `https://github.com/${base}.git`
           : trimmed;
       const row = await pluginInstall(gitRef, "app");
-      await finishInstall(get, row, false);
+      await finishInstall(get, row);
     },
 
     uninstall: async (id) => {
@@ -413,7 +411,6 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
     setEnabled: async (id, enabled) => {
       const p = get().plugins[id];
       if (!p || p.enabled === enabled) return;
-      if (enabled && p.blocked) return; // 已下架插件不可重新启用
       await pluginSetEnabled(id, enabled);
       if (enabled) {
         set((s) => ({
@@ -459,19 +456,18 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
     pluginViewLabel: (view) => pluginViewLabelOf(view),
     pluginTableView: (kind) => getPluginTableView(kind),
     pluginTableViews: () => getPluginTableViews(),
+    capabilityLabel: (namespace) => hostCapabilityLabel(namespace) ?? namespace,
+    capabilitySensitive: (namespace) => hostCapabilitySensitive(namespace),
 
     loadMarket: async (force = false) => {
       const cached = readMarketCache();
       if (!force && cached && !isMarketStale(cached.fetchedAt)) {
         set({
           marketItems: cached.items,
-          marketGeneratedAt: cached.generatedAt,
-          marketFetchedAt: cached.fetchedAt,
           marketLoaded: true,
           marketLoading: false,
           marketError: "",
         });
-        applyBlocklist();
         return;
       }
       set({ marketLoading: true, marketError: "" });
@@ -479,26 +475,11 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
         const snap = await fetchMarketIndex();
         set({
           marketItems: snap.items,
-          marketGeneratedAt: snap.generatedAt,
-          marketFetchedAt: snap.fetchedAt,
           marketLoaded: true,
           marketLoading: false,
         });
-        applyBlocklist();
       } catch (e) {
-        if (cached) {
-          set({
-            marketItems: cached.items,
-            marketGeneratedAt: cached.generatedAt,
-            marketFetchedAt: cached.fetchedAt,
-            marketLoaded: true,
-            marketLoading: false,
-            marketError: `市场刷新失败，使用缓存快照`,
-          });
-          applyBlocklist();
-        } else {
-          set({ marketLoading: false, marketError: `市场加载失败：${errText(e)}` });
-        }
+        set({ marketLoading: false, marketError: `市场加载失败：${errText(e)}` });
       }
     },
   };

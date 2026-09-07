@@ -64,16 +64,33 @@ export function pluginWriteState(id: string, data: unknown): Promise<void> {
 }
 
 export {
+  attachPlugin,
+  callPluginContributionFn,
   contributedCommands,
   contributedPluginTools,
+  emitPluginEvent,
+  hostCapabilityLabel,
+  hostCapabilityNames,
+  hostCapabilitySensitive,
+  listPluginContributions,
   loadPlugin,
   onRuntimeChange,
-  unloadPlugin,
-  runtimeSnapshot,
-  emitPluginEvent,
+  pluginCapabilitiesByOwner,
+  pluginCapabilityOwner,
+  registerHostCapability,
+  registerHostCapabilityMeta,
   runContributedCommand,
+  runtimeSnapshot,
+  unloadPlugin,
 } from "./bridge";
-export type { PluginCommandContribution, PluginRuntimeEntry } from "./bridge";
+export type {
+  HostCapabilityHandler,
+  HostCapabilityMeta,
+  PluginCommandContribution,
+  PluginContributionEntry,
+  PluginRuntimeEntry,
+  PluginStreamSink,
+} from "./bridge";
 export {
   exposePluginFacade,
   getPluginAppPages,
@@ -86,6 +103,7 @@ export {
   getPluginSettings,
   getPluginTableView,
   getPluginTableViews,
+  listUiContributions,
   loadUiPlugin,
   onPluginUiChange,
   pluginViewKinds,
@@ -102,5 +120,8 @@ export type {
   PluginSettingRegistration,
   PluginTableAccess,
   PluginTableViewRegistration,
+  PluginUiContribution,
 } from "./ui";
 export { createPluginWorker, buildProxySource } from "./worker";
+export { transpileTs } from "./transpile";
+export { startPluginProcess } from "./process";

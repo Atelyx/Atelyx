@@ -5,8 +5,8 @@
 ```
 你的插件仓库/
 ├── atelyx.json        # 清单（见 manifest.md）
-├── plugin.js          # worker 平面入口（main）
-├── ui.js              # 主线程 UI 入口（mainUi，可选）
+├── main.js            # 逻辑入口（main；也可为 main.ts / main.py）
+├── ui.js              # 主线程 UI 入口（mainUi，可选；任何语言都可附 JS UI）
 └── README.md          # 建议附使用说明
 ```
 
@@ -17,7 +17,8 @@ Atelyx 的安装一律「取源码」：市场安装会把你的仓库 git clone
 约束：
 
 - `atelyx.json` 必须位于**仓库根目录**（git clone 后以此为插件根）。
-- 入口 JS 单文件上限 2 MB。
+- JS/TS 入口单文件上限 16 MB（读入后整体注入 blob 的内存护栏，正常插件远低于此）；
+  Python 子进程入口不经此限制。
 
 ## 进入市场
 
@@ -31,7 +32,9 @@ Atelyx 的安装一律「取源码」：市场安装会把你的仓库 git clone
 ## 发布检查清单
 
 - [ ] `atelyx.json` 齐全：schemaVersion / id（反向域名、不可变）/ name / version / type / main
-- [ ] `uses` 如实声明（敏感能力如读 key/删文件/执行外部程序务必声明）
+- [ ] `declares` 如实披露将调用的能力命名空间（`state`/`shell` 等宿主命名空间，或他插件反向域名；
+  执行外部程序等敏感能力务必列出）
+- [ ] 非 js 语言：`runtime` 正确（ts/python），入口文件在仓库内
 - [ ] 功能类型正确（tool/panel/node/…），双平面入口（main/mainUi）指向正确文件
 - [ ] `atelyxVersionMin` 与目标宿主版本匹配
 - [ ] `atelyx.json` 位于仓库根，入口文件在仓库内

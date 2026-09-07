@@ -2,7 +2,7 @@
  * 设置 → 插件面板：已装插件管理 + 市场浏览。
  *
  * - 已装列表（app + 当前仓库 vault 级）：启停/更新/卸载，展示类型/作用域/来源/版本/运行状态/
- *   声明的命令/能力清单（敏感能力高亮）——启用前用户据此判断插件要碰什么。
+ *   披露的能力命名空间（宿主能力显示注册表标签 + 敏感高亮，插件命名空间原样）+ 实际调用审计。
  * - 安装入口：市场安装（git clone）之外，支持「从本地文件夹安装」（junction 实时引用）与
  *   「从 Git 地址安装」（git clone）。
  * - 市场：搜索/筛选/安装（见 MarketplaceSection）。
@@ -15,13 +15,7 @@ import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 import { ToggleSwitch } from "@/components/common/ToggleSwitch";
 import { MarketplaceSection } from "@/components/plugins/MarketplaceSection";
 import { errText } from "@/types";
-import {
-  PLUGIN_CAPABILITY_LABELS,
-  PLUGIN_SCOPE_LABELS,
-  PLUGIN_SOURCE_LABELS,
-  PLUGIN_TYPE_LABELS,
-} from "@/constants/plugins";
-import { isSensitiveCapability } from "@/utils/pluginManifest";
+import { PLUGIN_SCOPE_LABELS, PLUGIN_SOURCE_LABELS, PLUGIN_TYPE_LABELS } from "@/constants/plugins";
 
 type TabMode = "installed" | "market";
 
@@ -32,6 +26,8 @@ export function PluginsSettingsTab() {
   const uninstall = usePluginStore((s) => s.uninstall);
   const installLocalFromPicker = usePluginStore((s) => s.installLocalFromPicker);
   const installGit = usePluginStore((s) => s.installGit);
+  const capabilityLabel = usePluginStore((s) => s.capabilityLabel);
+  const capabilitySensitive = usePluginStore((s) => s.capabilitySensitive);
 
   const [mode, setMode] = useState<TabMode>("installed");
   const [notice, setNotice] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
@@ -146,8 +142,7 @@ export function PluginsSettingsTab() {
           </div>
         )}
         {rows.map((p) => {
-          const uses = p.manifest.uses ?? [];
-          const sensitive = uses.filter((u) => isSensitiveCapability(u));
+          const declares = p.manifest.declares ?? [];
           const failed = p.phase === "failed";
           return (
             <div
@@ -189,15 +184,6 @@ export function PluginsSettingsTab() {
                         加载失败
                       </span>
                     )}
-                    {p.blocked && (
-                      <span
-                        className="text-[10px] px-1.5 py-0.5 rounded"
-                        title={p.blocked}
-                        style={{ color: "#f87171", background: "rgba(248,113,113,0.1)" }}
-                      >
-                        已被官方下架
-                      </span>
-                    )}
                   </div>
                   <div className="text-[11px] truncate" style={{ color: "var(--text-muted)" }}>
                     {p.id} · {PLUGIN_TYPE_LABELS[p.manifest.type]} · {PLUGIN_SCOPE_LABELS[p.scope]} · v{p.manifest.version}
@@ -232,20 +218,34 @@ export function PluginsSettingsTab() {
                   {p.error}
                 </div>
               )}
-              {uses.length > 0 && (
+              {declares.length > 0 && (
                 <div className="mt-2 flex flex-wrap gap-1">
-                  {uses.map((u) => (
+                  {declares.map((ns) => (
                     <span
-                      key={u}
+                      key={ns}
                       className="text-[10px] px-1.5 py-0.5 rounded border"
-                      title={PLUGIN_CAPABILITY_LABELS[u] ?? u}
+                      title={`披露：将调用 ${ns}`}
                       style={{
-                        color: sensitive.includes(u) ? "#f59e0b" : "var(--text-secondary)",
+                        color: capabilitySensitive(ns) ? "#f59e0b" : "var(--text-secondary)",
                         borderColor: "var(--border)",
-                        background: sensitive.includes(u) ? "rgba(245,158,11,0.1)" : "transparent",
+                        background: capabilitySensitive(ns) ? "rgba(245,158,11,0.1)" : "transparent",
                       }}
                     >
-                      {PLUGIN_CAPABILITY_LABELS[u] ?? u}
+                      {capabilitySensitive(ns) ? `${capabilityLabel(ns)}（敏感）` : capabilityLabel(ns)}
+                    </span>
+                  ))}
+                </div>
+              )}
+              {p.usedCapabilities.length > 0 && (
+                <div className="mt-1.5 flex flex-wrap gap-1">
+                  {p.usedCapabilities.map((ns) => (
+                    <span
+                      key={ns}
+                      className="text-[10px] px-1.5 py-0.5 rounded"
+                      title={`实际调用：${ns}`}
+                      style={{ color: "var(--text-muted)", background: "var(--bg-secondary)" }}
+                    >
+                      {capabilityLabel(ns)} · 已调用
                     </span>
                   ))}
                 </div>

@@ -2,10 +2,10 @@
  * 插件市场数据源：官方索引（CDN 静态 JSON）消费。
  *
  * - `index.json`：插件清单（id/name/repo/stars/type…）
- * - `blocklist.json`：封禁表 `{ id: 原因 }`（命中 = 不可安装/启用）
  * - `endorsed.json`：精选表 `{ owner/repo: 理由 }`（授予精选徽标）
  *
- * 消费策略：内存 + localStorage 缓存（6h 过期），离线/失败时回落缓存快照并带时间戳提示；
+ * 消费策略：内存 + localStorage 缓存（6h 过期），未过期直接回缓存（启动秒开）；
+ * 网络失败直接报错。
  * 徽标 = 作者账号锚点（GitHub `owner/repo`，账号归属 GitHub 背书不可伪造）：
  * official = repo owner 命中官方名单；精选 = 严格按 `owner/repo` 命中精选表——
  * 不同作者巧合同 id 视为不同插件，自报 id 不能继承任一徽标（id + 作者账号双重校验）。
@@ -14,7 +14,6 @@
 import type { PluginBadge, PluginIndex, PluginIndexEntry } from "@/types";
 import {
   OFFICIAL_PLUGIN_ORGS,
-  PLUGIN_BLOCKLIST_URL,
   PLUGIN_ENDORSED_URL,
   PLUGIN_INDEX_CACHE_MS,
   PLUGIN_INDEX_URL,
@@ -58,7 +57,7 @@ async function fetchJson<T>(url: string, timeoutMs = 15000): Promise<T> {
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     // cache: "no-store"：jsdelivr 对 @main 下发 7 天 max-age，WebView2 HTTP 缓存会命中旧索引——
-    // 市场/封禁/精选必须每次走网络，否则新插件最长 7 天、下架条目最长 7 天不可见。
+    // 市场/精选必须每次走网络，否则新插件最长 7 天不可见。
     const resp = await fetch(url, { signal: controller.signal, cache: "no-store" });
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     return (await resp.json()) as T;
@@ -84,23 +83,21 @@ function writeCache<T>(key: string, data: T): void {
   }
 }
 
-/** 读取市场缓存快照（离线降级 + 启动秒开用）。 */
+/** 读取市场缓存快照（启动秒开用）。 */
 export function readMarketCache(): MarketSnapshot | null {
   return readCache<MarketSnapshot>(INDEX_CACHE_KEY);
 }
 
-/** 拉取市场索引（index + blocklist + endorsed 合并；失败抛错，由调用方回落缓存）。 */
+/** 拉取市场索引（index + endorsed 合并；网络失败直接抛错，由调用方提示，不回退缓存）。 */
 export async function fetchMarketIndex(): Promise<MarketSnapshot> {
-  const [index, blocklist, endorsed] = await Promise.all([
+  const [index, endorsed] = await Promise.all([
     fetchJson<PluginIndex>(PLUGIN_INDEX_URL),
-    fetchJson<Record<string, string>>(PLUGIN_BLOCKLIST_URL).catch(() => ({}) as Record<string, string>),
     fetchJson<Record<string, string>>(PLUGIN_ENDORSED_URL).catch(() => ({}) as Record<string, string>),
   ]);
   const endorsedSet = new Set(Object.keys(endorsed ?? {}));
   const items = (index?.items ?? []).map((it) => ({
     ...it,
     badge: badgeFor(it, endorsedSet),
-    blockedReason: (blocklist ?? {})[it.id],
   }));
   const snapshot: MarketSnapshot = {
     items,

@@ -3,6 +3,10 @@
 Atelyx 是一个插件化平台：插件 = 一个 git 仓库（市场侧以 GitHub 为主），含一份 `atelyx.json` 清单 + 入口脚本 + 资源。
 给仓库打上 `atelyx-plugin` topic，即可被市场自动收录，任何 Atelyx 用户都可在内置市场中找到并安装。
 
+插件逻辑平面支持 **JS / TypeScript / Python** 三种语言（UI 平面永远跑 JS）；
+宿主与插件在同一能力注册表里对等提供能力——插件可用 `registerCapability` **定义自己的能力**，
+其他插件经 `bridge.call(namespace, method, args)` 调用（见 [桥 API](bridge-api.md)）。
+
 插件可扩展九类能力，按运行平面分两组：
 
 ## 插件类型
@@ -24,13 +28,15 @@ Atelyx 是一个插件化平台：插件 = 一个 git 仓库（市场侧以 GitH
 
 ## 两个运行平面
 
-- **worker 平面**（`tool`/`background`/`command`）：入口 `main` 在独立的 Web Worker 中执行。
-  与 App 隔离：没有 `window`、没有系统命令访问，只能通过 `bridge` 对象与 App 通信（注册工具/命令、读写自身状态、订阅事件）。单个插件崩溃不影响 App。
+- **worker/子进程平面**（`tool`/`background`/`command`）：入口 `main` 在独立 Web Worker
+  （JS/TS）或子进程（Python）中执行。与 App 进程隔离、崩溃不影响 App；worker 无 `window`，
+  只能经 `bridge` 与 App 通信（注册工具/命令/能力/扩展点、调用宿主与他插件能力、读写自身状态、订阅事件）。
+  Python 子进程以与 App 相同的用户权限运行——完全自由模型下安装前务必确认插件来源。
 - **主线程平面**（`panel`/`tableview`/`setting`/`app`/`node`）：入口 `mainUi` 在主线程执行，可渲染 React 界面；
   未声明 `mainUi` 时，仅**无 worker 平面**（不属 tool/background/command）的插件才缺省用 `main` 作为 UI 入口。
   与 App 同上下文，经 `window.__atelyxPlugin__` 的 facade 注册贡献。
 
-详见 [清单格式](manifest.md) 与 [桥 API](bridge-api.md)。
+详见 [清单格式](manifest.md)、[桥 API](bridge-api.md) 与 [桥协议](bridge-protocol.md)。
 
 ## 快速开始
 

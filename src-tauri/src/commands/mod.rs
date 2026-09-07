@@ -6,6 +6,7 @@ pub mod global;
 pub mod home;
 pub mod keychain;
 pub mod plugin;
+pub mod plugin_process;
 pub mod search;
 pub mod table;
 pub mod vault;

@@ -2,18 +2,18 @@
  * 插件市场浏览：官方索引（CDN）搜索/筛选/安装。
  *
  * - 搜索：名称/id/描述/仓库全文匹配；类型筛选（全部/各类型）；徽标展示（官方/精选）
- * - 封禁条目灰显不可安装（官方下架）
  * - 安装 = 按 repo 取源码（git clone，无 git 回退 GitHub 源码包），默认未启用，
- *   由「已安装」tab 确认启用；scope 由本区顶部的安装作用域选择决定
+ *   由「已安装」tab 确认启用；安装前提示社区插件未受官方审查、可访问本地数据
  * - 顶部下拉（类型筛选/安装作用域）用统一 DropdownSelect 组件（自绘弹层，非原生 select）
  * 分层：只经 pluginStore 触达插件能力。
  */
 import { useEffect, useMemo, useState } from "react";
 import { Download, RefreshCw } from "lucide-react";
 import { DropdownSelect } from "@/components/common/DropdownSelect";
+import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 import { usePluginStore } from "@/stores/pluginStore";
 import { PLUGIN_BADGE_LABELS, PLUGIN_TYPE_LABELS } from "@/constants/plugins";
-import type { PluginScope, PluginType } from "@/types";
+import type { PluginIndexEntry, PluginScope, PluginType } from "@/types";
 
 const TYPE_FILTERS: { value: PluginType | "all"; label: string }[] = [
   { value: "all", label: "全部" },
@@ -25,6 +25,7 @@ const TYPE_FILTERS: { value: PluginType | "all"; label: string }[] = [
   { value: "setting", label: "设置项" },
   { value: "command", label: "命令" },
   { value: "background", label: "后台服务" },
+  { value: "tableview", label: "表格视图" },
 ];
 
 const SCOPE_OPTIONS: { value: PluginScope; label: string }[] = [
@@ -46,6 +47,7 @@ export function MarketplaceSection() {
   const [scope, setScope] = useState<PluginScope>("app");
   const [installingRepo, setInstallingRepo] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
+  const [confirming, setConfirming] = useState<PluginIndexEntry | null>(null);
 
   useEffect(() => {
     if (!marketLoaded) void loadMarket();
@@ -147,13 +149,17 @@ export function MarketplaceSection() {
           </div>
         )}
         {filtered.map((it) => {
-          const installed = !!plugins[it.id];
-          const blocked = !!it.blockedReason;
+          // 同 id 不同作者仓库是不同插件（徽标/安装均按 repo 锚定）：key 与安装态判定都按 repo。
+          const installed = Object.values(plugins).some((p) => {
+            if (p.id !== it.id) return false;
+            const folder = p.installDir.split(/[\\/]/).pop() ?? "";
+            return folder === it.repo.split("/")[1];
+          });
           return (
             <div
-              key={it.id}
+              key={it.repo}
               className="rounded border p-3"
-              style={{ borderColor: "var(--border)", background: "var(--bg-primary)", opacity: blocked ? 0.55 : 1 }}
+              style={{ borderColor: "var(--border)", background: "var(--bg-primary)" }}
             >
               <div className="flex items-center gap-2">
                 <div className="flex-1 min-w-0">
@@ -172,27 +178,18 @@ export function MarketplaceSection() {
                         {PLUGIN_BADGE_LABELS[it.badge]}
                       </span>
                     )}
-                    {blocked && (
-                      <span className="text-[10px] px-1.5 py-0.5 rounded" style={{ color: "#f87171", background: "rgba(248,113,113,0.1)" }}>
-                        已被官方下架
-                      </span>
-                    )}
                   </div>
                   <div className="text-[11px] truncate" style={{ color: "var(--text-muted)" }}>
                     {it.type ? PLUGIN_TYPE_LABELS[it.type] : "插件"} · {it.repo} · {it.id} · ⭐{it.stars}
                   </div>
                 </div>
-                {blocked ? (
-                  <span className="text-[11px] px-2 py-1 rounded" style={{ color: "var(--text-muted)" }}>
-                    不可安装
-                  </span>
-                ) : installed ? (
+                {installed ? (
                   <span className="text-[11px] px-2 py-1 rounded" style={{ color: "var(--text-secondary)" }}>
                     已安装
                   </span>
                 ) : (
                   <button
-                    onClick={() => void doInstall(it.repo)}
+                    onClick={() => setConfirming(it)}
                     disabled={installingRepo !== null}
                     className="flex items-center gap-1 px-2.5 py-1.5 rounded text-xs disabled:opacity-50"
                     style={{ background: "var(--accent)", color: "var(--accent-fg)" }}
@@ -207,15 +204,25 @@ export function MarketplaceSection() {
                   {it.tagline}
                 </div>
               )}
-              {blocked && it.blockedReason && (
-                <div className="mt-1 text-[11px] break-words" style={{ color: "#f87171" }}>
-                  下架原因：{it.blockedReason}
-                </div>
-              )}
             </div>
           );
         })}
       </div>
+
+      {confirming && (
+        <ConfirmDialog
+          title={`安装「${confirming.name}」`}
+          description="社区插件未经官方审查，可读写你的文件、运行程序、联网。仅从你信任的来源安装。"
+          confirmText="继续安装"
+          danger={false}
+          onConfirm={() => {
+            const repo = confirming.repo;
+            setConfirming(null);
+            void doInstall(repo);
+          }}
+          onCancel={() => setConfirming(null)}
+        />
+      )}
     </div>
   );
 }

@@ -43,8 +43,9 @@ const MAX_ENTRY_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_ARCHIVE_TOTAL: u64 = 512 * 1024 * 1024;
 /// zip 条目数上限。
 const MAX_ENTRY_COUNT: usize = 10_000;
-/// 入口 JS 读取字节上限。
-const MAX_ENTRY_JS_BYTES: u64 = 2 * 1024 * 1024;
+/// 入口 JS 读取字节上限（内存/加载护栏：读入后整体注入 blob，16MB 远超正常插件逻辑大小，
+/// 只拦误提交的巨型文件；Python 子进程入口不经此命令，不受限）。
+const MAX_ENTRY_JS_BYTES: u64 = 16 * 1024 * 1024;
 
 /// 插件 id 合法性（与前端 `pluginIdValid` 一致：反向域名式至少两段，无路径分隔符）。
 fn plugin_id_valid(id: &str) -> bool {
@@ -204,7 +205,7 @@ fn safe_join_plugin(base: &Path, relative: &str) -> Result<PathBuf, String> {
 /// 解析插件内路径并拒绝符号链接段：git clone / 本地来源的插件目录内可能带指向插件根之外的链接，
 /// 若只做语法校验，读/写会跟随链接越权。从插件根到目标逐段 `symlink_metadata`，任一段是链接
 /// （Windows junction 同为 reparse point，一并拒绝）即报错；不存在的段 = 待创建的写入路径，放行。
-fn safe_plugin_path(root: &Path, relative: &str) -> Result<PathBuf, String> {
+pub(crate) fn safe_plugin_path(root: &Path, relative: &str) -> Result<PathBuf, String> {
     let target = safe_join_plugin(root, relative)?;
     let rel_parts = target
         .strip_prefix(root)
@@ -268,8 +269,20 @@ fn manifest_valid_or_error(v: &Value) -> Result<(), String> {
         .and_then(|x| x.as_i64())
         .filter(|n| *n > 0)
         .ok_or("schemaVersion 必须是正整数")?;
-    if schema > 1 {
+    if schema > 2 {
         return Err(format!("清单格式版本过新（{schema}），需要更新 Atelyx"));
+    }
+    // runtime（多语言执行平面）：未知运行时本 App 无法执行，直接拒绝。
+    if let Some(rt) = obj.get("runtime") {
+        if !matches!(rt.as_str(), Some("js" | "ts" | "python")) {
+            return Err("runtime 仅支持 js/ts/python".to_string());
+        }
+    }
+    // declares（披露的命名空间）非数组即拒绝：字符串等畸形形态会让前端组件 .map 崩溃。
+    if let Some(d) = obj.get("declares") {
+        if !d.is_array() {
+            return Err("declares 必须是数组".to_string());
+        }
     }
     let id = req("id")?;
     if !plugin_id_valid(&id) {
@@ -278,6 +291,10 @@ fn manifest_valid_or_error(v: &Value) -> Result<(), String> {
     req("name")?;
     req("version")?;
     let kind = req("type")?;
+    // 主分类未知即拒绝（与前端 validatePluginManifest 一致；未知附加分类安全跳过）。
+    if !is_known_plugin_type(&kind) {
+        return Err(format!("未知插件类型：{kind}"));
+    }
     // main 仅在纯 theme 插件（无任何代码承载类型）时可省略——theme 是声明式皮肤，无入口。
     // 判定与前端一致：只按「已知类型」归一化（未知附加分类安全跳过，前向兼容）——
     // 混入 tool 等已知代码类型才必填 main；types 非数组按畸形拒绝（与前端校验对齐）。
@@ -300,7 +317,7 @@ fn manifest_valid_or_error(v: &Value) -> Result<(), String> {
     Ok(())
 }
 
-/// 已知插件类型（与前端 PluginType 联合一致；未知类型前向兼容跳过）。
+/// 已知插件类型（与前端 PluginType 联合一致）：主分类未知即拒绝；未知附加分类安全跳过。
 fn is_known_plugin_type(t: &str) -> bool {
     matches!(
         t,
@@ -309,7 +326,7 @@ fn is_known_plugin_type(t: &str) -> bool {
 }
 
 /// 读取插件根目录的清单。
-fn read_manifest(plugin_root: &Path) -> Result<Value, String> {
+pub(crate) fn read_manifest(plugin_root: &Path) -> Result<Value, String> {
     let path = safe_plugin_path(plugin_root, MANIFEST_FILE)?;
     let raw = fs::read_to_string(&path).map_err(|e| format!("读取清单失败：{e}"))?;
     let v: Value = serde_json::from_str(&raw).map_err(|e| format!("清单不是合法 JSON：{e}"))?;
@@ -987,7 +1004,7 @@ async fn codeload_update(
 
 /// 定位插件目录：优先按状态里的安装来源（scope），缺失时回退扫描两作用域按 id 定位
 /// （vault 级插件随仓库同步到新机器时 sources 记录在本机不存在，仍应可读可运行）。
-fn resolve_plugin_dir(app: &AppHandle, state: &VaultState, id: &str) -> Result<(PathBuf, String), String> {
+pub(crate) fn resolve_plugin_dir(app: &AppHandle, state: &VaultState, id: &str) -> Result<(PathBuf, String), String> {
     if plugin_id_valid(id) {
         if let Some(src) = read_plugin_state(app).sources.get(id) {
             if let Ok(base) = plugin_base_dir(app, state, &src.scope) {
@@ -1130,8 +1147,23 @@ mod tests {
             "main": "plugin.js"
         });
         assert!(manifest_valid_or_error(&ok).is_ok());
-        let bad = json!({ "schemaVersion": 2, "id": "com.x", "name": "x", "version": "1", "type": "tool", "main": "a.js" });
+        let bad = json!({ "schemaVersion": 3, "id": "com.x", "name": "x", "version": "1", "type": "tool", "main": "a.js" });
         assert!(manifest_valid_or_error(&bad).is_err());
+        // schemaVersion 2：多语言运行时字段。
+        let v2 = json!({
+            "schemaVersion": 2,
+            "id": "com.example.py",
+            "name": "Python 插件",
+            "version": "1.0.0",
+            "type": "tool",
+            "runtime": "python",
+            "main": "main.py",
+            "provides": ["com.example.py.data"],
+            "declares": ["vault:read"]
+        });
+        assert!(manifest_valid_or_error(&v2).is_ok());
+        let bad_runtime = json!({ "schemaVersion": 2, "id": "com.x", "name": "x", "version": "1", "type": "tool", "main": "a.rs", "runtime": "rust" });
+        assert!(manifest_valid_or_error(&bad_runtime).is_err());
         let missing = json!({ "schemaVersion": 1, "id": "com.x", "name": "x" });
         assert!(manifest_valid_or_error(&missing).is_err());
         // theme 声明式：纯 theme 可省略 main；含代码类型则必填。

@@ -2,49 +2,26 @@
  * 插件平台契约：清单 / 市场索引 / 能力 / 皮肤 / 运行状态。
  *
  * 这是分布式插件（任何来源、任何作者）与 App 之间的唯一数据契约。契约带格式版本号：
- * 未知的字段、类型、能力名一律跳过而不报错，保证「更新的插件、更老的 App」也能安全共处；
+ * 未知的字段、类型、附加分类一律跳过而不报错（主分类错误则拒绝，见 utils/pluginManifest）；
  * 反向（更老的插件、更新的 App）由插件自身的宿主兼容范围字段约束。
  */
 import type { TableField, TableRow } from "./table";
 
 /** 清单格式版本：升级清单结构时递增；App 拒绝 schemaVersion 大于当前值的清单。 */
-export const PLUGIN_SCHEMA_VERSION = 1;
+export const PLUGIN_SCHEMA_VERSION = 2;
 
-/** 插件可声明的全部能力/命令名（清单 uses 字段取值 + 运行时门槛共用，单一数据源）。 */
-export const PLUGIN_CAPABILITIES = [
-  // 敏感能力：未声明即运行时拒绝（声明了就能用，不额外弹窗）。
-  "keychain:read", // 读 API key
-  "shell", // 执行外部进程
-  "vault:delete", // 删除仓库文件
-  // 常规能力。
-  "vault:read", // 读仓库文件
-  "vault:write", // 写仓库文件
-  "vault:rename", // 重命名/移动仓库文件
-  "ai:chat", // 发起 AI 对话
-  "ai:tool", // 注册 AI 工具
-  "search:web", // 联网搜索
-  "web:fetch", // 抓取网页
-  "clipboard", // 剪贴板读写
-  "window:manage", // 窗口控制（新建/撕裂）
-  "settings:read", // 读配置
-  "settings:write", // 写配置
-  "state:persist", // 自持数据落盘
-  "events:subscribe", // 订阅应用事件
-  "table:read", // 读当前表格数据（行/字段/图片/选中行）
-] as const satisfies readonly string[];
+/** 插件逻辑运行平面（UI 平面永远在主线程跑 JS；此处仅逻辑平面语言）。 */
+export type PluginRuntime = "js" | "ts" | "python";
 
-/** 插件可声明的能力/命令全集。 */
-export type PluginCapability = (typeof PLUGIN_CAPABILITIES)[number];
-
-/** 敏感能力名单（未声明即运行时拒绝的子集）。 */
-export const SENSITIVE_PLUGIN_CAPABILITIES = [
-  "keychain:read",
-  "shell",
-  "vault:delete",
-] as const satisfies readonly PluginCapability[];
-
-/** 敏感能力类型。 */
-export type SensitivePluginCapability = (typeof SENSITIVE_PLUGIN_CAPABILITIES)[number];
+/** 静态贡献声明（纯元数据：市场/管理 UI 展示与发现；运行时行为经桥注册，二者不强制一致）。 */
+export interface PluginContributes {
+  /** 静态命令声明（id/label 展示用）。 */
+  commands?: Array<{ id: string; label: string }>;
+  /** 静态面板声明（kind/label 展示用）。 */
+  panels?: Array<{ kind: string; label: string }>;
+  /** 静态设置项声明（key/label 展示用）。 */
+  settings?: Array<{ key: string; label: string }>;
+}
 
 /**
  * 插件展示分类：type 只做市场展示/过滤，实际能力在运行时经桥注册（一个插件可属多类）。
@@ -97,13 +74,22 @@ export interface PluginManifest {
   atelyxVersionMax?: string;
   /** 目标平台（如 windows-x64 / linux-x64），缺省全平台。 */
   platforms?: string[];
-  /** 声明的能力/命令使用清单：市场展示 + 敏感能力门槛依据。 */
-  uses?: PluginCapability[];
+  /** 逻辑运行平面语言（缺省 js；UI 平面永远在主线程跑 JS）。 */
+  runtime?: PluginRuntime;
+  /** 提供的能力命名空间（反向域名，必含点；其他插件/宿主可经 bridge.call 调用）。 */
+  provides?: string[];
+  /** 依赖的能力命名空间（宿主或他插件提供；懒解析——缺失在调用时报错，不阻塞激活）。 */
+  requires?: string[];
+  /** 披露：将调用的能力命名空间（宿主命名空间如 state/shell，或他插件反向域名；
+   *  与 provides 同一词汇表，市场展示 + 管理页审计对照；无运行时门槛）。 */
+  declares?: string[];
+  /** 静态贡献声明（纯元数据：市场/管理 UI 展示与发现）。 */
+  contributes?: PluginContributes;
   /** 权限说明：能力名 → 一句理由（安装/详情展示）。 */
   permissions?: Record<string, string>;
   /** 声明式皮肤（type 为 theme 时通常携带；应用层按启用顺序叠加）。 */
   theme?: PluginTheme;
-  /** 入口 JS（相对插件根目录；worker 平面：tool/background/command 逻辑；纯 theme 插件可省略）。 */
+  /** 入口（相对插件根目录；js/ts 为脚本，python 为子进程入口；纯 theme 插件可省略）。 */
   main?: string;
   /** 主线程 UI 入口（相对插件根目录；可选：UI 类插件在此声明，与 main 并存时双平面加载）。 */
   mainUi?: string;
@@ -137,8 +123,6 @@ export interface PluginIndexEntry {
   /** 主分类（从清单解析，缺省未知）。 */
   type?: PluginType;
   badge?: PluginBadge;
-  /** 命中封禁名单时的原因。 */
-  blockedReason?: string;
 }
 
 /** 市场索引（index.json）。 */
@@ -169,8 +153,6 @@ export interface InstalledPlugin {
   usedCapabilities: string[];
   /** 加载失败原因。 */
   error?: string;
-  /** 命中市场封禁名单的原因（已装插件被下架标记；管理 UI 据此禁启提示）。 */
-  blocked?: string;
 }
 
 /**

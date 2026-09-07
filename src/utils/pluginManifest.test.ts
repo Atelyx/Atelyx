@@ -2,20 +2,16 @@
  * 插件清单校验与兼容性纯函数测试（utils/pluginManifest）。
  *
  * 覆盖：id 合法性、版本比较、宿主兼容（版本范围/平台）、清单校验的必填/可选/归一化、
- * 前向兼容（未知类型/能力名/附加分类跳过）、敏感能力判定。
+ * 前向兼容（未知附加分类跳过）、declares 命名空间披露。
  */
 import { describe, it, expect } from "vitest";
 import {
-  checkPluginCapability,
   compareVersions,
-  isKnownCapability,
-  isSensitiveCapability,
   pluginCompatibleWithHost,
   pluginIdValid,
   pluginTypeList,
   validatePluginManifest,
 } from "./pluginManifest";
-import type { PluginManifest } from "@/types";
 
 const validManifest = (): Record<string, unknown> => ({
   schemaVersion: 1,
@@ -79,7 +75,7 @@ describe("validatePluginManifest", () => {
     if (!result.ok) return;
     expect(result.manifest.scope).toBe("app");
     expect(result.manifest.types).toEqual(["tool"]);
-    expect(result.manifest.uses).toBeUndefined(); // 未声明 uses 时缺省省略
+    expect(result.manifest.declares).toBeUndefined(); // 未声明 declares 时缺省省略
   });
   it("拒绝结构错误", () => {
     expect(validatePluginManifest(null).ok).toBe(false);
@@ -87,34 +83,63 @@ describe("validatePluginManifest", () => {
     expect(validatePluginManifest({ ...validManifest(), name: "" }).ok).toBe(false);
     expect(validatePluginManifest({ ...validManifest(), type: "watcher" }).ok).toBe(false);
     expect(validatePluginManifest({ ...validManifest(), main: "" }).ok).toBe(false);
-    expect(validatePluginManifest({ ...validManifest(), schemaVersion: 2 }).ok).toBe(false); // 版本过新
+    expect(validatePluginManifest({ ...validManifest(), schemaVersion: 3 }).ok).toBe(false); // 版本过新
+    expect(validatePluginManifest({ ...validManifest(), runtime: "rust" }).ok).toBe(false); // 未知运行时
   });
-  it("前向兼容：未知附加分类/能力名/uses 跳过而不报错", () => {
+  it("前向兼容：未知附加分类跳过而不报错；declares 保留全部命名空间", () => {
     const result = validatePluginManifest({
       ...validManifest(),
       type: "tool",
       types: ["tool", "future-kind"],
-      uses: ["vault:read", "future:cap"],
+      declares: ["state", "com.example.db", "future:ns"],
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.manifest.types).toEqual(["tool"]);
-    expect(result.manifest.uses).toEqual(["vault:read"]);
+    expect(result.manifest.declares).toEqual(["state", "com.example.db", "future:ns"]);
   });
-  it("保留 uses/permissions/platforms 并校验类型", () => {
+  it("declares 畸形（非字符串/空串）拒绝", () => {
+    expect(validatePluginManifest({ ...validManifest(), declares: "state" }).ok).toBe(false);
+    expect(validatePluginManifest({ ...validManifest(), declares: [""] }).ok).toBe(false);
+    expect(validatePluginManifest({ ...validManifest(), declares: [123] }).ok).toBe(false);
+  });
+  it("保留 declares/permissions/platforms 并校验类型", () => {
     const result = validatePluginManifest({
       ...validManifest(),
       scope: "vault",
-      uses: ["vault:read", "keychain:read"],
-      permissions: { "vault:read": "读取笔记文件" },
+      declares: ["state", "shell"],
+      permissions: { shell: "执行打包命令" },
       platforms: ["windows-x64"],
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.manifest.scope).toBe("vault");
-    expect(result.manifest.uses).toEqual(["vault:read", "keychain:read"]);
-    expect(result.manifest.permissions).toEqual({ "vault:read": "读取笔记文件" });
+    expect(result.manifest.declares).toEqual(["state", "shell"]);
+    expect(result.manifest.permissions).toEqual({ shell: "执行打包命令" });
     expect(result.manifest.platforms).toEqual(["windows-x64"]);
+  });
+  it("schemaVersion 2：runtime/provides/requires/contributes 归一化", () => {
+    const result = validatePluginManifest({
+      ...validManifest(),
+      schemaVersion: 2,
+      runtime: "python",
+      provides: ["com.example.db", "com.example.db2"],
+      requires: ["vault", "com.example.dep"],
+      contributes: {
+        commands: [{ id: "hi", label: "你好" }, { label: "缺 id 被跳过" }],
+        panels: [{ kind: "com.example.db.panel", label: "面板" }],
+        future: [{ id: "x" }],
+      },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.manifest.runtime).toBe("python");
+    expect(result.manifest.provides).toEqual(["com.example.db", "com.example.db2"]);
+    expect(result.manifest.requires).toEqual(["vault", "com.example.dep"]);
+    expect(result.manifest.contributes?.commands).toEqual([{ id: "hi", label: "你好" }]);
+    expect(result.manifest.contributes?.panels).toEqual([{ kind: "com.example.db.panel", label: "面板" }]);
+    expect(result.manifest.contributes?.settings).toBeUndefined();
+    expect(result.manifest.contributes?.commands?.some((c) => c.id === "hi")).toBe(true);
   });
   it("theme 声明式皮肤解析与结构校验", () => {
     const ok = validatePluginManifest({
@@ -130,37 +155,6 @@ describe("validatePluginManifest", () => {
     expect(validatePluginManifest({ ...validManifest(), theme: { variables: "x" } }).ok).toBe(false);
     expect(validatePluginManifest({ ...validManifest(), theme: [] }).ok).toBe(false);
     expect(validatePluginManifest({ ...validManifest(), theme: { dark: "x" } }).ok).toBe(false);
-  });
-});
-
-describe("能力判定", () => {
-  it("敏感能力名单", () => {
-    expect(isSensitiveCapability("keychain:read")).toBe(true);
-    expect(isSensitiveCapability("shell")).toBe(true);
-    expect(isSensitiveCapability("vault:delete")).toBe(true);
-    expect(isSensitiveCapability("vault:read")).toBe(false);
-  });
-  it("未知能力名不破坏前向兼容", () => {
-    expect(isKnownCapability("vault:read")).toBe(true);
-    expect(isKnownCapability("future:cap")).toBe(false);
-  });
-});
-
-describe("checkPluginCapability（桥门槛）", () => {
-  const declared = (uses: PluginManifest["uses"]): Pick<PluginManifest, "uses"> => ({ uses });
-  it("敏感能力未声明即拒绝", () => {
-    expect(checkPluginCapability(declared([]), "keychain:read").ok).toBe(false);
-    expect(checkPluginCapability(declared(["vault:read"]), "shell").ok).toBe(false);
-  });
-  it("敏感能力已声明即可用", () => {
-    expect(checkPluginCapability(declared(["keychain:read"]), "keychain:read").ok).toBe(true);
-  });
-  it("非敏感能力放行", () => {
-    expect(checkPluginCapability(declared(undefined), "vault:read").ok).toBe(true);
-    expect(checkPluginCapability(declared(undefined), "ai:chat").ok).toBe(true);
-  });
-  it("未知能力名放行（前向兼容）", () => {
-    expect(checkPluginCapability(declared(undefined), "future:cap").ok).toBe(true);
   });
 });
 

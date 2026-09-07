@@ -1,14 +1,13 @@
 /**
  * 插件清单校验与兼容性判断。
- * 校验目标是「坏清单不让 App 内部功能出问题」，而不是拒绝一切：未知字段、未知能力名、未知附加
- * 分类一律跳过（前向兼容），只对结构性问题（缺字段、类型错误、格式版本过新）报错。
+ * 校验目标是「坏清单不让 App 内部功能出问题」，而不是拒绝一切：未知字段、未知附加
+ * 分类一律跳过（前向兼容），只对结构性问题（缺字段、类型错误、格式版本过新、未知运行时/主分类）报错。
  */
 import {
-  PLUGIN_CAPABILITIES,
   PLUGIN_SCHEMA_VERSION,
-  SENSITIVE_PLUGIN_CAPABILITIES,
-  type PluginCapability,
+  type PluginContributes,
   type PluginManifest,
+  type PluginRuntime,
   type PluginScope,
   type PluginTheme,
   type PluginType,
@@ -28,10 +27,11 @@ const KNOWN_PLUGIN_TYPES: readonly string[] = [
   "theme",
   "command",
   "background",
+  "tableview",
 ];
 
-/** 已知能力名集合（uses 校验用；未知能力名跳过不报错）。 */
-const KNOWN_CAPABILITIES: ReadonlySet<string> = new Set(PLUGIN_CAPABILITIES);
+/** 已知逻辑运行平面（与 types/plugin.ts 的 PluginRuntime 一致；未知运行时拒绝——本 App 无法执行）。 */
+const KNOWN_RUNTIMES: ReadonlySet<string> = new Set(["js", "ts", "python"]);
 
 const PLUGIN_ID_PATTERN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/;
 
@@ -40,36 +40,9 @@ export function pluginIdValid(id: string): boolean {
   return id.length <= 128 && PLUGIN_ID_PATTERN.test(id);
 }
 
-/** 是否为已知插件类型（未知类型在旧 App 上安全跳过）。 */
+/** 是否为已知插件类型（未知主分类拒绝；未知附加分类在旧 App 上安全跳过）。 */
 export function isKnownPluginType(type: string): boolean {
   return KNOWN_PLUGIN_TYPES.includes(type);
-}
-
-/** 是否为敏感能力（未声明即运行时拒绝）。 */
-export function isSensitiveCapability(cap: string): boolean {
-  return (SENSITIVE_PLUGIN_CAPABILITIES as readonly string[]).includes(cap);
-}
-
-/**
- * 桥能力门槛：敏感能力必须已声明（声明了就能用，不额外弹窗）；非敏感能力放行但计入审计。
- * 未知能力名放行（前向兼容——新能力由新 App 判定，旧插件不会被拒）。
- */
-export function checkPluginCapability(
-  manifest: Pick<PluginManifest, "uses">,
-  cap: string,
-): { ok: true } | { ok: false; reason: string } {
-  if (isSensitiveCapability(cap)) {
-    const declared = manifest.uses ?? [];
-    if (!declared.includes(cap as PluginCapability)) {
-      return { ok: false, reason: `插件未声明敏感能力：${cap}` };
-    }
-  }
-  return { ok: true };
-}
-
-/** 是否为已知能力名（未知能力名用于前向兼容：跳过不报错）。 */
-export function isKnownCapability(cap: string): boolean {
-  return KNOWN_CAPABILITIES.has(cap);
 }
 
 /** 全部分类（含主分类，去重；缺省 = [type]）。 */
@@ -166,13 +139,19 @@ export function validatePluginManifest(raw: unknown): ManifestValidateResult {
     errors.push("mainUi 必须是非空字符串");
   }
 
+  const runtime = normalizeRuntime(data.runtime, errors);
+
   if (errors.length > 0) return { ok: false, errors };
 
   const types = normalizeTypes(type as string, data.types, errors);
   // main 仅在纯 theme 插件（无任何代码承载类型）时可省略——theme 是声明式皮肤，无入口。
+  // 非字符串/空串已在上面拒绝，这里只补「缺省」判定，避免 null 双错误。
   const themeOnly = types.every((t) => t === "theme");
-  if (!themeOnly && typeof main !== "string") errors.push("main 不能为空");
-  const uses = normalizeUses(data.uses, errors);
+  if (!themeOnly && main === undefined) errors.push("main 不能为空");
+  const declares = normalizeDeclares(data.declares, errors);
+  const provides = normalizeStringList(data.provides, "provides", errors);
+  const requires = normalizeStringList(data.requires, "requires", errors);
+  const contributes = normalizeContributes(data.contributes, errors);
   const permissions = normalizePermissions(data.permissions, errors);
   const platforms = normalizeStringList(data.platforms, "platforms", errors);
   const theme = normalizeTheme(data.theme, errors);
@@ -187,7 +166,11 @@ export function validatePluginManifest(raw: unknown): ManifestValidateResult {
     ...(typeof main === "string" && main.trim().length > 0 ? { main } : {}),
     scope: normalizeScope(data.scope),
     ...(types.length > 0 ? { types } : {}),
-    ...(uses.length > 0 ? { uses } : {}),
+    ...(runtime ? { runtime } : {}),
+    ...(declares.length > 0 ? { declares } : {}),
+    ...(provides.length > 0 ? { provides } : {}),
+    ...(requires.length > 0 ? { requires } : {}),
+    ...(contributes ? { contributes } : {}),
     ...(Object.keys(permissions).length > 0 ? { permissions } : {}),
     ...(platforms.length > 0 ? { platforms } : {}),
     ...(theme ? { theme } : {}),
@@ -205,6 +188,40 @@ export function validatePluginManifest(raw: unknown): ManifestValidateResult {
   return { ok: true, manifest };
 }
 
+/** 逻辑运行平面归一化：缺省 js；未知运行时拒绝（本 App 无法执行）。 */
+function normalizeRuntime(rawRuntime: unknown, errors: string[]): PluginRuntime | undefined {
+  if (rawRuntime === undefined) return undefined;
+  if (typeof rawRuntime !== "string" || !KNOWN_RUNTIMES.has(rawRuntime)) {
+    errors.push(`runtime 仅支持 ${[...KNOWN_RUNTIMES].join("/")}`);
+    return undefined;
+  }
+  return rawRuntime as PluginRuntime;
+}
+
+/** contributes 归一化：只保留 commands/panels/settings 三类静态声明，缺标识字段（id/kind）跳过。 */
+function normalizeContributes(raw: unknown, errors: string[]): PluginContributes | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    errors.push("contributes 必须是对象");
+    return undefined;
+  }
+  const src = raw as Record<string, unknown>;
+  const pick = (key: string, idField: "id" | "kind"): Array<{ id: string; label: string } | { kind: string; label: string }> | undefined => {
+    const arr = src[key];
+    if (arr === undefined) return undefined;
+    if (!Array.isArray(arr)) return undefined;
+    const items = arr.filter(
+      (x) => typeof x === "object" && x !== null && typeof (x as Record<string, unknown>)[idField] === "string",
+    );
+    return items.length > 0 ? (items as Array<{ id: string; label: string } | { kind: string; label: string }>) : undefined;
+  };
+  const commands = pick("commands", "id") as PluginContributes["commands"];
+  const panels = pick("panels", "kind") as PluginContributes["panels"];
+  const settings = pick("settings", "id") as PluginContributes["settings"];
+  if (!commands && !panels && !settings) return undefined;
+  return { ...(commands ? { commands } : {}), ...(panels ? { panels } : {}), ...(settings ? { settings } : {}) };
+}
+
 /** 全部分类归一化：附加分类只保留已知类型，未知的跳过（前向兼容）。 */
 function normalizeTypes(type: string, rawTypes: unknown, errors: string[]): PluginType[] {
   if (rawTypes === undefined) return [type as PluginType];
@@ -219,21 +236,9 @@ function normalizeTypes(type: string, rawTypes: unknown, errors: string[]): Plug
   return [...new Set([type as PluginType, ...known])];
 }
 
-/** uses 归一化：只保留已知能力名，未知的跳过（前向兼容）。 */
-function normalizeUses(rawUses: unknown, errors: string[]): PluginCapability[] {
-  if (rawUses === undefined) return [];
-  if (!Array.isArray(rawUses)) {
-    errors.push("uses 必须是数组");
-    return [];
-  }
-  const result: PluginCapability[] = [];
-  for (const item of rawUses) {
-    if (typeof item === "string" && isKnownCapability(item)) {
-      const cap = item as PluginCapability;
-      if (!result.includes(cap)) result.push(cap);
-    }
-  }
-  return result;
+/** declares 归一化：调用的能力命名空间（非空字符串数组，与 provides/requires 同一词汇表）。 */
+function normalizeDeclares(rawDeclares: unknown, errors: string[]): string[] {
+  return normalizeStringList(rawDeclares, "declares", errors);
 }
 
 /** permissions 归一化：必须是能力名 → 非空字符串的表。 */
