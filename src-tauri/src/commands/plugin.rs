@@ -356,12 +356,31 @@ fn git_available() -> bool {
         .unwrap_or(false)
 }
 
+/// 传给 git 的路径参数：Windows UNC 一律转 POSIX 形式 `//server/share/...`——
+/// Git for Windows（MSYS2）对 `\\?\UNC\` verbatim 网络路径创建目录报 Invalid argument
+/// （NAS/中文路径场景），前斜杠 UNC 可绕开（MSYS 不再内部转 verbatim 形式）。
+/// 覆盖普通 UNC（`\\server\share\...`）与 verbatim UNC（`\\?\UNC\server\share\...`，
+/// 仓库根可能以 verbatim 形式存储）；本地盘路径与 verbatim 本地盘（`\\?\C:\`）原样透传。
+fn git_path_arg(path: &Path) -> String {
+    let s = path.to_string_lossy();
+    #[cfg(windows)]
+    {
+        if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+            return format!("//{}", rest.replace('\\', "/"));
+        }
+        if s.starts_with(r"\\") && !s.starts_with(r"\\?\") {
+            return s.replace('\\', "/");
+        }
+    }
+    s.into_owned()
+}
+
 /// 克隆 git 仓库到插件基础目录下的临时目录（保留 `.git` 供更新）；失败清理并返回错误。
 async fn git_clone_to(base: &Path, url: &str) -> Result<PathBuf, String> {
     let target = base.join(format!(".install-{}", nanoid::nanoid!()));
     let out = tokio::process::Command::new("git")
         .args(["clone", url])
-        .arg(&target)
+        .arg(git_path_arg(&target))
         .output()
         .await
         .map_err(|e| {
@@ -914,7 +933,7 @@ pub async fn plugin_update(
     // git 来源（含保留 .git 的市场来源）：git pull；失败目录不变，不引入备份回滚。
     let out = tokio::process::Command::new("git")
         .args(["-C"])
-        .arg(&dir)
+        .arg(git_path_arg(&dir))
         .arg("pull")
         .output()
         .await
@@ -1134,6 +1153,24 @@ mod tests {
         assert!(safe_plugin_path(root, "/abs").is_err());
         assert!(safe_plugin_path(root, "a/b/atelyx.json").is_ok());
         assert!(safe_plugin_path(root, "atelyx.json").is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn git_path_arg_converts_unc_and_passes_others() {
+        // 普通 UNC → 前斜杠 POSIX UNC（绕开 MSYS 对 verbatim 网络路径的 mkdir 失败）。
+        assert_eq!(
+            git_path_arg(Path::new(r"\\Zc-nas\团队文件-工作\动画创作知识库\.atelyx\plugins\.install-x")),
+            "//Zc-nas/团队文件-工作/动画创作知识库/.atelyx/plugins/.install-x"
+        );
+        // verbatim UNC（仓库根可能以此形式存储）同样转前斜杠 POSIX UNC。
+        assert_eq!(
+            git_path_arg(Path::new(r"\\?\UNC\Zc-nas\CogniVault\.atelyx\plugins\.install-x")),
+            "//Zc-nas/CogniVault/.atelyx/plugins/.install-x"
+        );
+        // 本地盘与 verbatim 本地盘原样透传（非网络路径，git 无 verbatim 问题）。
+        assert_eq!(git_path_arg(Path::new(r"C:\Users\me\plugins")), r"C:\Users\me\plugins");
+        assert_eq!(git_path_arg(Path::new(r"\\?\C:\Users\me")), r"\\?\C:\Users\me");
     }
 
     #[test]
