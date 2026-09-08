@@ -48,6 +48,11 @@ export function pluginSeedBuiltin(): Promise<void> {
   return invoke("plugin_seed_builtin");
 }
 
+/** 默认装配（官方默认插件集）：内置插件合成清单数组（含已卸载成员；装配视图推导「默认成员」用）。 */
+export function pluginDefaultPlugins(): Promise<PluginManifest[]> {
+  return invoke<PluginManifest[]>("plugin_default_plugins");
+}
+
 /** 更新插件（备份 → 安装 → 失败回滚）。 */
 export function pluginUpdate(id: string): Promise<PluginRow> {
   return invoke<PluginRow>("plugin_update", { id });

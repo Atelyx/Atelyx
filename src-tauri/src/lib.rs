@@ -145,6 +145,7 @@ pub fn run() {
             commands::plugin::plugin_uninstall,
             commands::plugin::plugin_set_enabled,
             commands::plugin::plugin_seed_builtin,
+            commands::plugin::plugin_default_plugins,
             commands::plugin::plugin_update,
             commands::plugin::plugin_read_entry,
             commands::plugin::plugin_read_state,

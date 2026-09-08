@@ -14,6 +14,7 @@ import { usePluginStore } from "@/stores/pluginStore";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 import { ToggleSwitch } from "@/components/common/ToggleSwitch";
 import { MarketplaceSection } from "@/components/plugins/MarketplaceSection";
+import { deriveComposition } from "@/utils/pluginComposition";
 import { errText } from "@/types";
 import { PLUGIN_SCOPE_LABELS, PLUGIN_SOURCE_LABELS, PLUGIN_TYPE_LABELS } from "@/constants/plugins";
 
@@ -33,6 +34,7 @@ export function PluginsSettingsTab() {
   const pluginCommands = usePluginStore((s) => s.pluginCommands);
   const runPluginCommand = usePluginStore((s) => s.runPluginCommand);
   const restoreBuiltin = usePluginStore((s) => s.restoreBuiltin);
+  const compositionDefaults = usePluginStore((s) => s.compositionDefaults);
 
   const [mode, setMode] = useState<TabMode>("installed");
   const [notice, setNotice] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
@@ -43,6 +45,12 @@ export function PluginsSettingsTab() {
   const allRows = Object.values(plugins).sort((a, b) => (a.id < b.id ? -1 : 1));
   const builtinRows = allRows.filter((p) => p.sourceKind === "builtin");
   const installedRows = allRows.filter((p) => p.sourceKind !== "builtin");
+  // 装配视图推导：默认集（官方内置插件） × 已装/启用 → 已卸载的默认成员（灰行 + 恢复入口）。
+  const installedForComposition: Record<string, { name: string; enabled: boolean }> = {};
+  for (const p of allRows) installedForComposition[p.id] = { name: p.manifest.name, enabled: p.enabled };
+  const uninstalledDefaults = deriveComposition(compositionDefaults, installedForComposition).filter(
+    (r) => r.role === "default" && !r.installed,
+  );
   // 命令合并全量一次（UI 平面异步注册经 uiRevision 订阅刷新）。
   const commands = pluginCommands();
 
@@ -143,29 +151,35 @@ export function PluginsSettingsTab() {
           </button>
         </div>
       </div>
-      {/* 内置插件：随 App 分发；可停用/卸载（卸载后经「恢复内置插件」重新播种） */}
+      {/* App 组成（默认装配）：官方默认插件集，默认启用；可停用/卸载调整。
+          装配是「默认值层」而非约束——启停只改运行时状态，恢复默认装配只补回已卸载成员、不复活停用。 */}
       <div className="mb-3 flex-shrink-0">
         <div className="flex items-center justify-between mb-1.5">
-          <span className="text-[11px] font-medium" style={{ color: "var(--text-muted)" }}>
-            内置插件
-          </span>
+          <div className="min-w-0">
+            <span className="text-[11px] font-medium" style={{ color: "var(--text-muted)" }}>
+              App 组成（默认装配）
+            </span>
+            <div className="text-[10px]" style={{ color: "var(--text-muted)" }}>
+              以下官方插件组成 App，默认启用；可停用/卸载调整
+            </div>
+          </div>
           <button
             onClick={() => void restoreBuiltin().catch((e) => setNotice({ kind: "error", text: errText(e) }))}
-            className="flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded hover:bg-[var(--hover)]"
+            className="flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded hover:bg-[var(--hover)] flex-shrink-0"
             style={{ color: "var(--text-secondary)" }}
-            title="补回已卸载的内置插件（不覆盖停用状态）"
+            title="补回已卸载的默认插件（不覆盖停用状态）"
           >
             <RefreshCw size={12} />
-            恢复内置插件
+            恢复默认装配
           </button>
         </div>
         <div
           className="rounded border p-3 space-y-2"
           style={{ borderColor: "var(--border)", background: "var(--bg-primary)" }}
         >
-          {builtinRows.length === 0 && (
+          {builtinRows.length === 0 && uninstalledDefaults.length === 0 && (
             <div className="text-[11px]" style={{ color: "var(--text-muted)" }}>
-              已全部卸载；可点上方「恢复内置插件」重新装回。
+              默认插件已全部卸载；可点上方「恢复默认装配」重新装回。
             </div>
           )}
           {builtinRows.map((p) => (
@@ -207,9 +221,38 @@ export function PluginsSettingsTab() {
               </button>
             </div>
           ))}
+          {uninstalledDefaults.map((r) => (
+            <div key={r.id} className="flex items-center gap-2 opacity-60">
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-medium truncate" style={{ color: "var(--text-primary)" }}>
+                    {r.name}
+                  </span>
+                  <span
+                    className="text-[10px] px-1.5 py-0.5 rounded flex-shrink-0"
+                    style={{ color: "var(--text-muted)", background: "var(--bg-secondary)" }}
+                  >
+                    已卸载
+                  </span>
+                </div>
+                <div className="text-[11px] truncate" style={{ color: "var(--text-muted)" }}>
+                  {r.id} · 默认插件（已卸载，恢复即装回）
+                </div>
+              </div>
+              <button
+                onClick={() => void restoreBuiltin().catch((e) => setNotice({ kind: "error", text: errText(e) }))}
+                title="恢复默认装配（补回全部已卸载的默认插件）"
+                className="flex items-center gap-1 px-2 py-1 rounded border text-[11px] flex-shrink-0"
+                style={{ borderColor: "var(--border)", color: "var(--text-secondary)" }}
+              >
+                <RefreshCw size={12} />
+                恢复默认装配
+              </button>
+            </div>
+          ))}
         </div>
       </div>
-      {/* 已装插件列表（第三方；内置插件在上方独立分区） */}
+      {/* 已装插件列表（第三方；默认装配分区在上方） */}
       <div className="flex-1 min-h-0 overflow-auto space-y-2">
         {installedRows.length === 0 && (
           <div className="text-sm py-8 text-center" style={{ color: "var(--text-muted)" }}>
@@ -357,7 +400,7 @@ export function PluginsSettingsTab() {
           title={`卸载插件「${plugins[confirmUninstall]?.manifest.name ?? confirmUninstall}」`}
           description={
             plugins[confirmUninstall]?.sourceKind === "builtin"
-              ? "将移除该内置插件（随 App 分发；可经「恢复内置插件」重新装回）。其视图随即从工作区移除。"
+              ? "将移除该默认插件（随 App 分发；可经「恢复默认装配」重新装回）。其视图随即从工作区移除。"
               : plugins[confirmUninstall]?.sourceKind === "local"
                 ? "将移除该插件的目录链接，本地源目录本身不受影响。插件贡献的功能随即移除。"
                 : "将删除插件目录与本地状态，插件贡献的功能随即移除。此操作不可撤销。"

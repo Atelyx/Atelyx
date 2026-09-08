@@ -217,6 +217,14 @@ fn seed_missing_builtins(pstate: &mut PluginState) {
     }
 }
 
+/// 默认装配（官方默认插件集，组合配置的默认值层来源）：返回内置插件合成清单数组。
+/// 含已卸载成员——`plugin_list` 不含已卸载条目，默认集必须来自编译期常量（单一权威，
+/// 前端据此推导「已卸载的默认成员」灰行）；字段与 `builtin_manifest` 同源。
+#[tauri::command]
+pub fn plugin_default_plugins() -> Vec<Value> {
+    BUILTIN_PLUGINS.iter().map(builtin_manifest).collect()
+}
+
 /// 首启播种内置插件：plugin-state 首次初始化时把内置插件行写入（enabled=true、来源 Builtin）。
 /// 之后不再自动播种——卸载保持卸载、停用保持停用；恢复由用户显式触发（`plugin_seed_builtin`）。
 fn ensure_builtin_seeded(app: &AppHandle) {
@@ -1377,6 +1385,19 @@ mod tests {
         }
         assert!(is_builtin_plugin_id("builtin.search"));
         assert!(!is_builtin_plugin_id("com.acme.x"));
+    }
+
+    #[test]
+    fn default_plugins_expose_builtin_set() {
+        // 默认装配与内置常量一致（单一权威：含已卸载成员也能枚举，供装配视图推导灰行）。
+        let defaults = plugin_default_plugins();
+        assert_eq!(defaults.len(), BUILTIN_PLUGINS.len());
+        for (def, v) in BUILTIN_PLUGINS.iter().zip(&defaults) {
+            assert_eq!(v["id"], def.id);
+            assert_eq!(v["name"], def.name);
+            assert_eq!(v["tagline"], def.tagline);
+            assert_eq!(v["type"].as_str(), Some("panel"));
+        }
     }
 
     #[test]

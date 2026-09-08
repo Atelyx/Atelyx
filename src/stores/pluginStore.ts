@@ -15,6 +15,7 @@ import type {
   PluginCanvasEdge,
   PluginCanvasNode,
   PluginIndexEntry,
+  PluginManifest,
   PluginScope,
   PluginSourceKind,
   ToolDefinition,
@@ -44,6 +45,7 @@ import {
   pluginInstall,
   pluginInstallLocal,
   pluginList,
+  pluginDefaultPlugins,
   pluginReadEntry,
   pluginSeedBuiltin,
   pluginSetEnabled,
@@ -133,6 +135,8 @@ interface PluginStoreState {
   marketError: string;
   /** 市场是否已加载过（UI 据此显示加载/空态）。 */
   marketLoaded: boolean;
+  /** 默认装配（官方默认插件集；组合配置视图的默认值层来源，含已卸载成员）。 */
+  compositionDefaults: PluginManifest[];
   /** 加载已装插件并按启用状态拉起运行时。 */
   load(): Promise<void>;
   /** 从 GitHub 仓库安装（repo 为 `owner/repo` 市场引用或完整 git 地址；安装后默认未启用，由管理 UI 确认后启用）。 */
@@ -641,6 +645,7 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
     marketLoading: false,
     marketError: "",
     marketLoaded: false,
+    compositionDefaults: [],
 
     /**
      * 全量重载：先取磁盘清单（失败则旧状态原样保留），再卸载旧运行时与 UI 贡献，按当前上下文
@@ -659,7 +664,7 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
       ensureSettingsAccess();
       ensureRuntimeChangeEvents();
       const seq = ++loadSeq;
-      const rows = await pluginList();
+      const [rows, defaults] = await Promise.all([pluginList(), pluginDefaultPlugins()]);
       if (seq !== loadSeq) return; // 已有更新的 load 开始，本次作废（防孤儿 runtime）
       // 内置插件 id 集合注入注册表（封闭 ViewKind 的防劫持放行依据）；须先于任何视图注册。
       setBuiltinPluginIds(new Set(rows.filter((r) => r.sourceKind === "builtin").map((r) => r.id)));
@@ -671,7 +676,7 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
       for (const row of rows) {
         plugins[row.id] = toInstalled(row);
       }
-      set({ plugins, initialized: true });
+      set({ plugins, compositionDefaults: defaults, initialized: true });
       // 面板/菜单只订阅 uiRevision：插件行落定后补发一次，让已渲染的降级占位/菜单按新状态收敛
       // （全停用内置的冷启动无任何注册 notify）。
       set((s) => ({ uiRevision: s.uiRevision + 1 }));
