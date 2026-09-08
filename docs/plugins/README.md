@@ -40,7 +40,7 @@ Atelyx 是一个插件化平台：插件 = 一个 git 仓库（市场侧以 GitH
 
 ## 快速开始
 
-1. 复制 `docs/plugins/example/hello-tool/` 到你自己的 GitHub 仓库（或从零按[清单格式](manifest.md)写）。
+1. 按[清单格式](manifest.md)从零写一份 `atelyx.json` 清单 + 入口脚本。
 2. 开发工具/命令逻辑，用 `bridge.registerTool(...)` / `bridge.registerCommand(...)` 注册。
 3. 推送到 GitHub 仓库（`atelyx.json` 必须位于仓库根；**仓库最新提交即发布版本**，无需打包）。
 4. 给仓库打 `atelyx-plugin` topic。

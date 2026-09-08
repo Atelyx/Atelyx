@@ -54,6 +54,7 @@ bridge.registerCapability({
 ```js
 const ver = await bridge.call("app", "version");                      // 宿主命名空间
 await bridge.call("state", "write", [{ lastRun: Date.now() }]);       // 宿主命名空间
+const content = await bridge.call("vault", "readFile", ["笔记/xxx.md"]); // 读仓库内任意文本文件
 const rows = await bridge.call("com.acme.database", "query", [sql]);  // 其他插件的能力
 ```
 
@@ -167,7 +168,6 @@ registerPanel({ kind: "com.example.hello-search", label: "示例搜索", compone
 ```
 
 - **输入面**：`listFiles()`（仓库文件树）+ `openCanvasFile`/`openNote`/`openTable`（打开文件），与内置面板同源（宿主经 provider 注入）。
-- 完整可运行示例见 [`example/hello-search`](example/hello-search/README.md)。
 
 ### 表格数据（表格视图类插件）
 
@@ -187,6 +187,7 @@ const dataUrl = await bridge.resolveTableImage(entry);
 | `state` | `read` / `write` | 插件自持 JSON 状态（原子落盘） |
 | `app` | `version` / `platform` | 宿主版本与平台 |
 | `shell` | `exec` | 执行外部进程（敏感；流式：`callStream` 得 `chunk{stream,data}`/`end{code}`；`call` 聚合返回 `{ code, stdout, stderr }`） |
+| `vault` | `listFiles` / `readFile` / `readFileWindow` / `listDir` / `glob` / `grep` | 仓库文件读取：文件树 / 任意文本文件 / 分页窗口 / 单层目录 / glob 检索 / grep 检索（路径相对仓库根） |
 | `ai` | —（糖方法面） | 注册 AI 工具（`registerTool`）经此审计/标注 |
 | `command` | —（糖方法面） | 注册命令（`registerCommand`） |
 | `event` | —（糖方法面） | 事件订阅与发布（`on`/`emit`） |
