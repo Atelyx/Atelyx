@@ -11,7 +11,7 @@
   <rect width="1280" height="720" fill="url(#dots)"/>
   <rect x="24" y="24" width="1232" height="672" rx="14" fill="none" stroke="#D4AF37" stroke-opacity="0.4" stroke-width="1.5"/>
   <text x="60" y="70" font-family="'Segoe UI', Arial, sans-serif" font-size="24" font-weight="700" fill="#D4AF37" letter-spacing="2">ATELYX</text>
-  <text x="1220" y="70" text-anchor="end" font-family="'Segoe UI', 'PingFang SC', Arial, sans-serif" font-size="16" fill="#8b8b8b">无限画布 · 对话分支与数据流</text>
+  <text x="1220" y="70" text-anchor="end" font-family="'Segoe UI', 'PingFang SC', Arial, sans-serif" font-size="16" fill="#8b8b8b">画布 · 对话分支与数据流</text>
 
   <g font-family="'Segoe UI', 'PingFang SC', Arial, sans-serif">
     <!-- file explorer sidebar -->

@@ -10,10 +10,10 @@
 
 <h1 style="color:#E5E0D5;font-weight:700;letter-spacing:3px;margin:16px 0 10px">ATELYX</h1>
 
-<p style="color:#D4AF37;font-size:17px;font-weight:600;margin:0 0 14px">Put conversations, notes, tables, and knowledge into one workbench — AI throughout, and multi-user collaboration</p>
+<p style="color:#D4AF37;font-size:17px;font-weight:600;margin:0 0 14px">Put conversations, notes, tables, and files into one extensible workbench — AI alongside, multi-user collaboration</p>
 
 <p style="color:#8b8b8b;max-width:660px;margin:0 auto 30px;font-size:15px;line-height:1.8">
-A human-first desktop creation workbench: a dockable multi-view workspace with multiple windows, so AI conversations, notes, knowledge bases, search, and tables are reachable and connectable at a glance — real-time multi-user collaboration, with AI woven throughout. Thinking should never be interrupted.
+Atelyx is a human-first, extensible desktop workbench: conversations, notes, tables, and files open side by side in one workbench or in separate windows. You lead the work and AI assists; LAN peers collaborate in real time, and data lives in plain local files. The plugin platform lets the workbench grow capabilities we can't yet define — Atelyx's aim is to explore new paradigms of collaboration and work in the AI era.
 </p>
 
 <span style="background:#D4AF37;color:#1C1C1E;border-radius:999px;padding:4px 18px;font-size:13px;font-weight:700;margin:0 4px">Windows</span>
@@ -24,25 +24,25 @@ A human-first desktop creation workbench: a dockable multi-view workspace with m
 
 ## Design Philosophy
 
-The worst thing in creation is not the lack of inspiration — it is the interruption of thought. When writing a screenplay, your material lives in a writing app, the storyboard in a spreadsheet tool, and coordination switches back to a chat app — each step feels convenient on its own, yet every switch breaks your flow. What Atelyx wants is to make those switches unnecessary:
+Day-to-day work often means switching between several tools: writing in one app, tables in another, coordination in a chat app — every switch breaks your flow. Atelyx puts the common scenarios into one workbench:
 
 <div style="border:1px solid #2a2a2e;border-left:3px solid #D4AF37;border-radius:8px;padding:14px 20px;margin:14px 0">
 
-**01 · One workbench, home for all creation** — conversations, notes, tables, files, and search can all sit side by side in a single workbench. Tabs dock, panels tear off into independent windows, and views combine freely.
+**01 · One workbench for common work** — conversations, notes, tables, files, and search open side by side in a single workbench; tabs dock, panels tear off into independent windows, and layouts combine freely.
 
-**02 · AI woven throughout** — from conversation and note text-selection to table row generation, to reading/writing vault files and web search, AI is one part of the creative flow rather than a separate chat tool you must switch to.
+**02 · AI as assistance, not a separate tool** — AI is embedded in conversations, notes, tables, files, and search instead of a separate tool you must switch to. You lead the work and AI assists — it is not a generator that auto-produces everything from a prompt.
 
-**03 · Artifacts are reusable** — materials, search results, and distilled paragraphs settle into reusable assets that plug into any conversation; context is no longer one-off.
+**03 · Reusable assets** — search results, distilled paragraphs, and pasted materials settle into reusable assets that plug into any conversation.
 
-**04 · Knowledge collaborates** — over a LAN, multiple people see each other in real time: co-editing a note, co-editing a canvas, co-viewing a table. Who is looking at what, and where their selection is, is visible at a glance.
+**04 · LAN collaboration** — peers see each other in real time over the LAN: co-editing a note, co-editing a canvas, co-viewing a table. Who is looking at what, and where their selection is, is visible at a glance.
 
 **05 · Files are the vault** — no database; canvases, notes, and attachments are plain files: accumulable, backup-able, Git-syncable, and openable in external editors with real-time sync back.
 
 </div>
 
-## Signature: Infinite Canvas · Directed Graph
+## Canvas · Directed-Graph Conversations
 
-The canvas remains a signature capability: a conversation with AI should not be a one-way timeline. Once branches multiply, they become impossible to compare; Atelyx turns them into canvas nodes — each branch inherits the full state of its parent and evolves independently, so any number of threads can be laid side by side and compared.
+The canvas is one view in the workbench, for handling conversation branches: a conversation with AI doesn't have to be a one-way timeline. Branches become nodes on the canvas — each inherits the full state of its parent and evolves independently, so any number of threads can be laid side by side and compared.
 
 - **Conversation is a directed graph, not a chat log** — a branch is a new node on the canvas; edges express data flow (producer → consumer)
 - **Edges are data flow** — typing `@` in the input box and dragging a line from a node's border are two ways of performing the same operation; solid = consumed, dashed = pending
@@ -79,6 +79,7 @@ The canvas remains a signature capability: a conversation with AI should not be 
 | | |
 | --- | --- |
 | **Dockable workspace · multi-window** | Tab groups dock; panels tear off into independent windows and can be dragged between panels; built-in canvas/note/table layouts; layouts named, saved, and restored on restart; tabs can be locked against accidental edits |
+| **Canvas · directed-graph conversations** | Conversation branches become canvas nodes with edges as data flow; text/media/search/table nodes are reusable and plug into conversations |
 | **Real-time multi-user collaboration** | LAN relay, online members visible in real time (nickname / color / selection highlight); notes co-edited via Yjs with remote cursors; canvas nodes and messages sync instantly with exclusive per-conversation locks and generation indicators; table selections and content shared live |
 | **AI conversation & Agents** | Streaming output, branching anytime, collapsible reasoning; reasoning-effort and model two-level selector; vault-level Agent configuration (system prompt + tools); multi-provider model management, connectivity test, model aliases |
 | **AI I/O & web** | Agent tools: web search, web fetch, read/locate/search/write/edit vault files |
@@ -92,7 +93,7 @@ The canvas remains a signature capability: a conversation with AI should not be 
 
 <div align="center">
 
-<img src="screenshots/canvas.svg" alt="Infinite canvas: conversation branches and data flow" width="100%">
+<img src="screenshots/canvas.svg" alt="Canvas: conversation branches and data flow" width="100%">
 
 <img src="screenshots/table.svg" alt="Multi-dimensional table: timeline and playback" width="100%">
 
@@ -139,23 +140,6 @@ my-vault/
 - `.atlx` / `.md` / attachments are recognized by extension and may live in any folder (including the root)
 - Text and media nodes store only path references — content stays in standalone files, shareable across canvases; deleting a canvas never deletes the files
 - External edits to `.md` files, attachments, or canvases sync back to the app in real time
-
-## Tech Stack
-
-| Layer | Choice |
-| --- | --- |
-| Desktop shell | Tauri 2 (Rust backend, native Wayland) |
-| Frontend | React 18 + TypeScript + Vite |
-| Workspace | Dockable tab groups + multi-window tearing; panel layout tree |
-| Canvas | React Flow |
-| State | Zustand |
-| Styling | TailwindCSS + lucide-react |
-| Markdown | react-markdown; CodeMirror 6 live-preview editing |
-| Collaboration | Yjs/CRDT note co-editing + self-hosted WebSocket relay (Docker, LAN) |
-| Storage | File-based vault (no database) + `notify` real-time external-edit watching |
-| AI | OpenAI-compatible providers (with reasoning effort); Agent tools can read/write files and go online; API keys in the OS keychain |
-| Search | Tavily API + self-hosted SearXNG |
-| Update | Auto-update with signed installers |
 
 ## Development
 

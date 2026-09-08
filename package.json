@@ -4,7 +4,7 @@
   "version": "0.4.3",
   "type": "module",
   "packageManager": "pnpm@10.20.0",
-  "description": "一款优雅的桌面创作工作台：把对话、笔记、表格都放到一张无限画布上，思路随手连，AI 帮你记和整理",
+  "description": "一款可拓展的桌面 AI 工作台：对话、笔记、表格、文件同台使用，AI 辅助贯穿，局域网多人协作",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
