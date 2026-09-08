@@ -213,7 +213,7 @@ const dataUrl = await bridge.resolveTableImage(entry);
 | `state` | `read` / `write` | 插件自持 JSON 状态（原子落盘） |
 | `app` | `version` / `platform` / `openPage` | 宿主版本与平台 / 打开插件应用页面（app 类型插件入口） |
 | `shell` | `exec` | 执行外部进程（敏感；流式：`callStream` 得 `chunk{stream,data}`/`end{code}`；`call` 聚合返回 `{ code, stdout, stderr }`） |
-| `vault` | `listFiles` / `readFile` / `readFileWindow` / `listDir` / `glob` / `grep` | 仓库文件读取：文件树 / 任意文本文件 / 分页窗口 / 单层目录 / glob 检索 / grep 检索（路径相对仓库根） |
+| `vault` | `listFiles` / `readFile` / `readFileWindow` / `listDir` / `glob` / `grep` / `writeFile` / `editFile` / `appendFile` / `renameFile` / `moveFile` / `deleteFile` / `deleteDir` / `createFolder` | 仓库文件读写：读（文件树 / 任意文本 / 分页窗口 / 单层目录 / glob / grep）+ 写（写 / 行级编辑 / 追加 / 同目录重命名 / 移动 / 删除文件 / 删除目录 / 创建目录）；路径相对仓库根，写方法语义与 AI 文件工具一致（`writeFile` 失败抛错（error reply），其余写方法业务失败返回 `{ ok:false, summary }`，参数错误抛错）；文件树变化经事件 `vault:changed` 通知 |
 | `canvas` | `snapshot` / `addNode` / `updateNode` / `moveNode` / `deleteNode` / `addEdge` / `deleteEdge` / `selectNode` | 当前画布读写：快照（nodes/edges 投影，与磁盘格式同构）与节点/边操作；`addNode`/`addEdge` 返回宿主生成的 id；结构/选择变化经事件 `canvas:changed` 通知 |
 | `table` | `snapshot` / `updateCell` / `addRow` / `removeRow` / `selectRow` | 当前打开的表格读写：快照（结构与表格视图插件同源）与行/单元格操作；数据/选中变化经事件 `table:changed` 通知 |
 | `ai` | `listModels` / `listAgents` / `chat` | 模型/Agent 列表 + 流式对话（`callStream` 得 `chunk{type:text\|reasoning,text}` → `end{content,reasoning,finishReason}`；`call` 聚合返回同形状）；另承载 `registerTool` 的审计标注 |
@@ -236,6 +236,7 @@ const dataUrl = await bridge.resolveTableImage(entry);
 | `canvas:changed` | `{ file }` | 当前画布结构/选中/标题变化（高频事件按需再调 `canvas.snapshot()` 取数据，勿在回调里做重活） |
 | `table:changed` | `{ file }` | 当前表格数据/选中变化 |
 | `collab:changed` | `{ peers }` | 协作在线用户列表变化 |
+| `vault:changed` | — | 仓库文件树变化（写方法/外部编辑/新建删除后触发；轻量信号，按需再调 `vault.listFiles()` 取数据） |
 
 跨插件事件用 `emit` + 订阅 `<插件id>:<主题>`。
 

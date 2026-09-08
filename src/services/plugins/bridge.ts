@@ -908,6 +908,18 @@ function isDialogFilters(value: unknown): value is { name: string; extensions: s
   );
 }
 
+/** vault.editFile 编辑项数组形状校验（{ oldText, newText } 数组；空数组合法——服务层按无改动处理）。 */
+function isEditEntries(value: unknown): value is { oldText: string; newText: string }[] {
+  if (!Array.isArray(value)) return false;
+  return value.every(
+    (e) =>
+      typeof e === "object" &&
+      e !== null &&
+      typeof (e as { oldText?: unknown }).oldText === "string" &&
+      typeof (e as { newText?: unknown }).newText === "string",
+  );
+}
+
 /** app.openPage 能力的中转回调（pluginStore 接线注入，绕开 bridge→store 层上依赖；null = 未接线）。 */
 let appPageOpener: ((pageId: string) => void) | null = null;
 
@@ -1008,6 +1020,43 @@ export function setSettingsAccess(fn: (() => PluginAiAccess | null) | null): voi
   settingsAccess = fn;
 }
 
+/**
+ * vault 写能力访问（worker 平面 `vault` 命名空间写方法的 store/service 数据源；pluginStore 接线注入）。
+ * 语义与 AI 文件工具一致（原子写/扩展名分发引用维护/树刷新）；业务失败返回 `{ ok:false, summary }`
+ * 不抛断，参数越界等硬错误抛错由桥转 error reply。bridge 不 import store——写方法只碰此注入对象。
+ */
+export interface PluginVaultWriteAccess {
+  /** 写任意文本文件（原子写 + 自动建父目录；失败抛错）。 */
+  writeFile(file: string, content: string): Promise<{ ok: boolean; summary: string }>;
+  /** 行级修改（oldText 唯一精确匹配、块间不重叠，校验通过统一替换；失败返回 { ok:false, summary }）。 */
+  editFile(file: string, edits: { oldText: string; newText: string }[]): Promise<{ ok: boolean; summary: string }>;
+  /** 追加到已存在文本文件（不存在/不可读拒绝，新建请用 writeFile）。 */
+  appendFile(file: string, content: string): Promise<{ ok: boolean; summary: string }>;
+  /** 同目录重命名（扩展名不可变更；按扩展名分发引用维护 + 树刷新）。 */
+  renameFile(oldPath: string, newName: string): Promise<{ ok: boolean; summary: string; actualPath: string }>;
+  /** 移动到目标目录（保持文件名；按扩展名分发引用维护 + 树刷新）。 */
+  moveFile(oldPath: string, targetDir: string): Promise<{ ok: boolean; summary: string; actualPath: string }>;
+  /** 删除文件（按扩展名分发；.atb 连带删私有附件目录；树刷新）。 */
+  deleteFile(path: string): Promise<{ ok: boolean; summary: string }>;
+  /** 删除目录（force=false 且非空时返回 needsConfirm 供调用方确认后重试）。 */
+  deleteDir(dir: string, force?: boolean): Promise<{ ok: boolean; summary: string; needsConfirm?: boolean; itemCount?: number }>;
+  /** 创建目录（返回实际路径）。 */
+  createFolder(dir: string): Promise<{ ok: boolean; summary: string; path: string }>;
+}
+
+let vaultWriteAccess: PluginVaultWriteAccess | null = null;
+
+/** 注入/复位 vault 写能力访问（pluginStore.load 时接线；null 复位供测试）。 */
+export function setPluginVaultWriteAccess(access: PluginVaultWriteAccess | null): void {
+  vaultWriteAccess = access;
+}
+
+/** 写方法守卫：未接线（未打开仓库）时报错，插件侧可据此降级。 */
+function requireVaultWrite(): PluginVaultWriteAccess {
+  if (!vaultWriteAccess) throw new Error("仓库写能力未就绪");
+  return vaultWriteAccess;
+}
+
 registerHostCapability(
   "state",
   async (method, args, ctx) => {
@@ -1099,7 +1148,8 @@ registerHostCapability(
 registerHostCapability(
   "vault",
   async (method, args) => {
-    // 仓库文件读取（worker/子进程平面经 bridge.call("vault", …)）；写方法后续按需补齐。
+    // 仓库文件读写（worker/子进程平面经 bridge.call("vault", …)）；读方法直连 services，
+    // 写方法经注入访问对象（pluginStore 接线，桥不 import store）。
     // 参数全为可序列化值（路径/选项对象），经 JSON 传输无引用跨越；路径安全边界在 Rust safe_join。
     if (method === "listFiles") return listVaultTree();
     if (method === "readFile") {
@@ -1127,9 +1177,67 @@ registerHostCapability(
       if (typeof pattern !== "string") throw new Error("vault.grep 需要检索正则");
       return grepVault(pattern, args[1] as { path?: string; include?: string } | undefined);
     }
+    // 写方法（读写全开）：与 AI 文件工具同一批 service/store 语义；未接线（无仓库）报错
+    if (method === "writeFile") {
+      const file = args[0];
+      const content = args[1];
+      if (typeof file !== "string" || typeof content !== "string") {
+        throw new Error("vault.writeFile 需要文件路径与内容字符串");
+      }
+      return requireVaultWrite().writeFile(file, content);
+    }
+    if (method === "editFile") {
+      const file = args[0];
+      const edits = args[1];
+      if (typeof file !== "string" || !isEditEntries(edits)) {
+        throw new Error("vault.editFile 需要文件路径与编辑项数组 [{ oldText, newText }]");
+      }
+      return requireVaultWrite().editFile(file, edits);
+    }
+    if (method === "appendFile") {
+      const file = args[0];
+      const content = args[1];
+      if (typeof file !== "string" || typeof content !== "string") {
+        throw new Error("vault.appendFile 需要文件路径与内容字符串");
+      }
+      return requireVaultWrite().appendFile(file, content);
+    }
+    if (method === "renameFile") {
+      const oldPath = args[0];
+      const newName = args[1];
+      if (typeof oldPath !== "string" || typeof newName !== "string") {
+        throw new Error("vault.renameFile 需要旧路径与新文件名");
+      }
+      return requireVaultWrite().renameFile(oldPath, newName);
+    }
+    if (method === "moveFile") {
+      const oldPath = args[0];
+      const targetDir = args[1];
+      if (typeof oldPath !== "string" || typeof targetDir !== "string") {
+        throw new Error("vault.moveFile 需要文件路径与目标目录");
+      }
+      return requireVaultWrite().moveFile(oldPath, targetDir);
+    }
+    if (method === "deleteFile") {
+      const path = args[0];
+      if (typeof path !== "string") throw new Error("vault.deleteFile 需要相对仓库根的文件路径");
+      return requireVaultWrite().deleteFile(path);
+    }
+    if (method === "deleteDir") {
+      const dir = args[0];
+      const force = args[1];
+      if (typeof dir !== "string") throw new Error("vault.deleteDir 需要目录路径");
+      if (force !== undefined && typeof force !== "boolean") throw new Error("vault.deleteDir 的 force 需要布尔值");
+      return requireVaultWrite().deleteDir(dir, force as boolean | undefined);
+    }
+    if (method === "createFolder") {
+      const dir = args[0];
+      if (typeof dir !== "string") throw new Error("vault.createFolder 需要目录路径");
+      return requireVaultWrite().createFolder(dir);
+    }
     throw new Error(`vault 无方法 ${method}`);
   },
-  { label: "仓库文件读取" },
+  { label: "仓库文件读写" },
 );
 
 registerHostCapability(

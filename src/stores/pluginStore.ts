@@ -61,6 +61,7 @@ import {
   setPluginTableAccess,
   setPluginTableRuntimeAccess,
   setPluginVaultAccess,
+  setPluginVaultWriteAccess,
   setSettingsAccess,
   startPluginProcess,
   transpileTs,
@@ -86,6 +87,11 @@ import { useVaultStore } from "@/stores/vaultStore";
 import { useAppStore } from "@/stores/appStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { pickDirectory as pickDirectorySvc } from "@/services/dialog";
+import {
+  appendVaultFile,
+  editVaultFile,
+  writeVaultFile,
+} from "@/services/vault/aiFiles";
 import { buildPluginTableSnapshot } from "@/utils/table";
 import { serializeEdgeForCollab, serializeNodeForCollab } from "@/utils/canvasCollab";
 import { resolveTableImageUrl } from "@/services/tableImageCache";
@@ -293,6 +299,44 @@ function ensureVaultAccess(): void {
   });
 }
 
+/** vault 写能力接线守卫：把仓库写方法暴露给 worker 平面 `vault` 命名空间（幂等一次）。
+ *  复用 AI 文件工具同一批 service/store 语义（原子写/扩展名分发引用维护/树刷新）；
+ *  直接 service 的写方法不登记 .md 磁盘基线（按外部写入处理，与 AI 写入一致）；
+ *  rename/move/delete/deleteDir/createFolder 走 vaultStore（扩展名分发 + loadFiles 刷新）。 */
+let vaultWriteWired = false;
+function ensureVaultWriteAccess(): void {
+  if (vaultWriteWired) return;
+  vaultWriteWired = true;
+  setPluginVaultWriteAccess({
+    writeFile: async (file, content) => {
+      await writeVaultFile(file, content);
+      return { ok: true, summary: `已写入「${file}」` };
+    },
+    editFile: (file, edits) => editVaultFile(file, edits),
+    appendFile: (file, content) => appendVaultFile(file, content),
+    renameFile: (oldPath, newName) => useVaultStore.getState().renameFile(oldPath, newName),
+    moveFile: (oldPath, targetDir) => useVaultStore.getState().moveFile(oldPath, targetDir),
+    deleteFile: (path) => useVaultStore.getState().deleteFile(path),
+    deleteDir: async (dir, force) => {
+      const r = await useVaultStore.getState().deleteFolder(dir, force);
+      return {
+        ok: r.deleted,
+        summary: r.deleted
+          ? `已删除目录「${dir}」`
+          : r.needsConfirm
+            ? `目录非空（${r.itemCount} 项），需确认后删除`
+            : "删除目录失败",
+        needsConfirm: r.needsConfirm,
+        itemCount: r.itemCount,
+      };
+    },
+    createFolder: async (dir) => {
+      const path = await useVaultStore.getState().createFolder(dir);
+      return { ok: true, summary: `已创建「${path}」`, path };
+    },
+  });
+}
+
 /** 表格能力接线守卫：把当前表格数据与写操作暴露给 worker 平面 `table` 命名空间（幂等一次）。
  *  快照复用表数据订阅的同一构造（buildPluginTableSnapshot），写操作直连 tableStore 动作。 */
 let tableRuntimeWired = false;
@@ -461,6 +505,9 @@ function ensureRuntimeChangeEvents(): void {
       emitPluginEvent("canvas:changed", { file: s.canvasFile });
     }
   });
+  useVaultStore.subscribe((s, prev) => {
+    if (s.tree !== prev.tree) emitPluginEvent("vault:changed", {});
+  });
 }
 
 export const usePluginStore = create<PluginStoreState>()((set, get) => {
@@ -605,6 +652,7 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
       setAppPageOpener((pageId) => useAppStore.getState().openPluginPage(pageId));
       ensureTableAccess();
       ensureVaultAccess();
+      ensureVaultWriteAccess();
       ensureTableRuntimeAccess();
       ensureCollabRuntimeAccess();
       ensureCanvasRuntimeAccess();

@@ -90,6 +90,7 @@ export {
   setPluginCanvasAccess,
   setPluginCollabAccess,
   setPluginTableRuntimeAccess,
+  setPluginVaultWriteAccess,
   setSettingsAccess,
   unloadPlugin,
 } from "./bridge";
