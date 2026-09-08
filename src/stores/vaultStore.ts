@@ -40,6 +40,7 @@ import {
   recordHistoryVersion,
   setHistoryAuthor,
   versionContentAt,
+  type HistoryAuthor as NoteHistoryAuthor,
   type HistoryVersion as NoteHistoryVersion,
 } from "@/services/history";
 import {
@@ -568,7 +569,12 @@ interface VaultFileState {
   /** 设置历史记录作者（进入仓库/身份变化时调用；组件不直连 service，走本 store）。 */
   noteHistorySetAuthor: (name: string, device: string) => void;
   /** 记录一条笔记历史版本（版本边界；连续编辑自动节流合并，不逐键记录）。 */
-  noteHistoryRecord: (file: string, content: string, action: "edit" | "restore", note?: string) => Promise<void>;
+  noteHistoryRecord: (
+    file: string,
+    content: string,
+    action: "edit" | "restore",
+    opts?: { note?: string; authorOverride?: NoteHistoryAuthor; coAuthors?: NoteHistoryAuthor[] },
+  ) => Promise<void>;
   /** 读取笔记历史版本列表（缺失/损坏 → 空数组，尽力而为）。 */
   noteHistoryLoad: (file: string) => Promise<NoteHistoryVersion[]>;
   /** 回滚笔记到指定版本：写回磁盘 + 记一条 restore 版本；返回回滚后的全文（供编辑器重载），失败返回 null。 */
@@ -1065,11 +1071,13 @@ export const useVaultStore = create<VaultFileState>((set, get) => ({
   noteHistorySetAuthor: (name, device) =>
     setHistoryAuthor({ id: device || name, name: name || device || "用户", device: device || "" }),
 
-  noteHistoryRecord: (file, content, action, note) =>
+  noteHistoryRecord: (file, content, action, opts) =>
     recordHistoryVersion("note", file, {
       content,
       action,
-      ...(note ? { note } : {}),
+      ...(opts?.authorOverride ? { authorOverride: opts.authorOverride } : {}),
+      ...(opts?.coAuthors && opts.coAuthors.length ? { coAuthors: opts.coAuthors } : {}),
+      ...(opts?.note ? { note: opts.note } : {}),
       // 连续编辑节流：60s 内合并为一个存档点（版本粒度，不逐键），显式边界（外部/回滚）不受限
       coalesceEditMs: action === "edit" ? 60_000 : 0,
     }),

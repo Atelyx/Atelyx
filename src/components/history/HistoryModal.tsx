@@ -47,6 +47,20 @@ function fmtTime(ts: number): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+/** 版本作者展示：单作者保留「name · device」（与历史原展示一致）；多协作者并发存档点展示全部参与者名（按名去重）。 */
+function formatAuthors(
+  author: HistoryVersion["author"],
+  coAuthors?: HistoryVersion["coAuthors"],
+): string {
+  if (!coAuthors || coAuthors.length === 0) {
+    return author.device && author.device !== author.name
+      ? `${author.name} · ${author.device}`
+      : author.name;
+  }
+  const uniq = [...new Set([author.name, ...coAuthors.map((c) => c.name)])];
+  return uniq.join("、");
+}
+
 /** 画布快照解析：`标题 · N 节点 · M 连线 · K 对话消息`；解析失败返回 null。 */
 function canvasStats(content: string): string | null {
   try {
@@ -194,8 +208,7 @@ export function HistoryModal({ kind, file, open, onClose, onRollback }: Props) {
                   {ACTION_LABEL[v.action] ?? v.action}
                 </span>
                 <span style={{ color: "var(--text-muted)" }}>
-                  {v.author.name}
-                  {v.author.device && v.author.device !== v.author.name ? ` · ${v.author.device}` : ""}
+                  {formatAuthors(v.author, v.coAuthors)}
                 </span>
                 <span className="ml-auto" style={{ color: "var(--text-muted)" }}>
                   {fmtTime(v.ts)}

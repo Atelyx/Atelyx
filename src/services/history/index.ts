@@ -8,9 +8,10 @@
  * 笔记默认行级，画布/表格经 `summarize` 回调生成实体级人话摘要），
  * 版本粒度 = 落盘存档点 + 外部写入 + 手动回滚 + Agent 工具写入（连贯编辑合并为一个存档点，不逐键）。
  *
- * 多人协作：作者 = 当前用户协作昵称（`setHistoryAuthor` 注入）；Agent 工具写文件经
- * `recordAgentFileWrite` 以 `AGENT_AUTHOR` 身份记录——合并仅限**同一作者**连续编辑，
- * 防 Agent 版本被并入用户版本、也防用户连续编辑被 Agent 打断拆版。
+ * 多人协作：默认作者 = 当前用户协作昵称（`setHistoryAuthor` 注入）；主作者可被
+ * `authorOverride` 覆盖——协作远端合入署发送端协作者、Agent 工具写文件署「AI Agent（操作人）」；
+ * 并发存档点可带 `coAuthors`（窗口内全部参与者，多人署名）。合并仅限**同一作者 id**连续编辑，
+ * 防版本串身份/串版（不同作者/不同操作人拆版）。
  *
  * 防膨胀：留存默认全留，可配 `maxVersions` 剪枝（保留最近 N 版）；diff 摘要而非整存两份正文。
  * 并发安全：读改写整文件（同事写同一侧文件为罕见边界，后写者胜，容忍偶发丢版本）。
@@ -44,6 +45,8 @@ export interface HistoryVersion {
   content: string;
   /** 相对上一版本的改动摘要（展示用；纯函数 diff 现算补全，见 diffSummary）。 */
   summary?: string;
+  /** 协作并发存档点内的其他参与作者（主 author 之外；多协作者同时编辑合并进同一版本时记录，按操作人署名）。 */
+  coAuthors?: HistoryAuthor[];
   /** 补充说明（外部导入/回滚/Agent 写入时的备注）。 */
   note?: string;
 }
@@ -213,6 +216,24 @@ function diffSummary(prev: string, next: string): string {
   return `${added ? `+${added} 行 ` : ""}${removed ? `−${removed} 行` : ""}`.trim();
 }
 
+/** 合并协作作者集合（按 id 去重）：coalesce 滑动更新时多存档点的参与者并集，防丢前序协作者。 */
+function mergeCoAuthors(
+  a: HistoryAuthor[] | undefined,
+  b: HistoryAuthor[] | undefined,
+): HistoryAuthor[] | undefined {
+  if (!b || b.length === 0) return a;
+  if (!a || a.length === 0) return b;
+  const seen = new Set(a.map((x) => x.id));
+  const merged = [...a];
+  for (const x of b) {
+    if (!seen.has(x.id)) {
+      seen.add(x.id);
+      merged.push(x);
+    }
+  }
+  return merged;
+}
+
 /**
  * 追加一个历史版本（版本边界）。内容与上一版本相同的 no-op 直接跳过（防重复存档点）。
  * maxVersions = 0 表示全留（默认）；>0 时保留最近 N 版（剪枝，防无限膨胀）。
@@ -233,6 +254,8 @@ export async function recordHistoryVersion(
     byteBudget?: number;
     /** 作者覆盖（Agent 工具写入等非当前用户来源）。 */
     authorOverride?: HistoryAuthor;
+    /** 协作并发存档点内的其他参与作者（主 author 之外；多协作者同时编辑合并进同一版本时记录）。 */
+    coAuthors?: HistoryAuthor[];
     /** 版本摘要生成（缺省 = 行级 diff）；prev = 上一版本全文（首版为空串）。表格/画布传实体级摘要。 */
     summarize?: (prev: string, next: string) => string;
   },
@@ -259,6 +282,7 @@ export async function recordHistoryVersion(
     last!.content = opts.content;
     last!.ts = Date.now();
     last!.author = author;
+    last!.coAuthors = mergeCoAuthors(last!.coAuthors, opts.coAuthors);
     last!.summary = summaryOf(prev, opts.content);
     if (opts.note) last!.note = opts.note;
     // 写盘前同样过字节预算：coalesce 滑动更新也可能把总量推过预算（大笔记贴近上限时
@@ -281,6 +305,7 @@ export async function recordHistoryVersion(
     action: opts.action,
     content: opts.content,
     summary: summaryOf(prevContent, opts.content),
+    ...(opts.coAuthors && opts.coAuthors.length ? { coAuthors: opts.coAuthors } : {}),
     ...(opts.note ? { note: opts.note } : {}),
   };
   let next = [...versions, version];
@@ -332,11 +357,19 @@ export async function recordAgentFileWrite(
       return;
     }
   }
+  // 操作人 = 当前登录用户（Agent 任务由其发起）：历史须能追溯到责任人，署名「AI Agent（操作人）」。
+  // id 带操作人标识——60s coalesce 只合并同一操作人的连续 Agent 写入，不同操作人不串版（防前序操作人丢失）。
+  const operator = myAuthor.name || myAuthor.device || "用户";
+  const operatorId = myAuthor.id || "unknown";
   await recordHistoryVersion(kind, file, {
     content: snapshot,
     action: "edit",
-    authorOverride: AGENT_AUTHOR,
-    note: "AI 工具写入/修改",
+    authorOverride: {
+      id: `${AGENT_AUTHOR.id}:${operatorId}`,
+      name: `AI Agent（${operator}）`,
+      device: AGENT_AUTHOR.device,
+    },
+    note: `AI 工具写入/修改（由 ${operator} 操作）`,
     coalesceEditMs: 60_000,
   });
 }

@@ -246,7 +246,7 @@ describe("recordAgentFileWrite", () => {
     await recordAgentFileWrite(CANVAS, '{"schema":"atelyx-canvas/v1"}');
     const vs = await loadHistory("canvas", CANVAS);
     expect(vs.length).toBe(1);
-    expect(vs[0].author.id).toBe("ai-agent");
+    expect(vs[0].author.id).toMatch(/^ai-agent/);
     expect(vs[0].action).toBe("edit");
   });
 

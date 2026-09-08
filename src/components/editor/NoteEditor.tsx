@@ -76,6 +76,15 @@ export function NoteEditor({ file }: { file: string }) {
   const collabColor = useSettingsStore((s) => s.collabColor);
   const collabDevice = useSettingsStore((s) => s.deviceName);
   const isCollab = collabEnabled && collabConnected;
+  /** 本端协作身份（协作态本地编辑计入参与作者集合用；id 规则与 history setHistoryAuthor 一致，展示可去重）。 */
+  const localAuthor = useMemo<{ id: string; name: string; device: string }>(
+    () => ({
+      id: collabDevice || collabNickname || "用户",
+      name: collabNickname || collabDevice || "用户",
+      device: collabDevice || "",
+    }),
+    [collabNickname, collabDevice],
+  );
   /** 当前笔记的协作文档绑定（后台 noteCollabStore 编排；下发给 MarkdownEditor 做 y-codemirror 绑定）。 */
   const collabBinding = useNoteCollabStore((s) => s.bindings[file]);
   const [content, setContent] = useState("");
@@ -196,6 +205,13 @@ export function NoteEditor({ file }: { file: string }) {
   /** 撤销/重做回放标记：applyNoteUndo 走 handleChange 复用保存/协作/冲突门控，
    *  但回放内容不得再记入撤销栈（防自我入栈形成撤销链）。 */
   const applyingUndoRef = useRef(false);
+  /** 最近一次内容变化的来源作者（主作者）：协作远端合入 → 该协作者身份；本地编辑 → null（历史署当前用户）。
+   *  历史按操作人署名用——远端合入落盘不署本端用户。 */
+  const lastChangeAuthorRef = useRef<{ id: string; name: string; device: string } | null>(null);
+  /** 自上次落盘以来参与内容变化的协作者集合（主作者 + 其余参与者，按 id 去重）：
+   *  多协作者并发编辑合并进同一存档点时，历史版本以 coAuthors 记录全部操作人。
+   *  落盘成功后清空（coalesce 合并由 history 层按 id 求并集，不在此累积）。 */
+  const changeAuthorSetRef = useRef<Map<string, { id: string; name: string; device: string }>>(new Map());
 
   /** 编辑器根节点引用：点击编辑器外部 → 取消编辑模式（回渲染预览）。 */
   const editorRootRef = useRef<HTMLDivElement>(null);
@@ -479,6 +495,19 @@ export function NoteEditor({ file }: { file: string }) {
     // 无变化短路：属性面板改回原值/协作收敛内容一致等「空步」
     // 不入撤销栈、不置脏不抖状态（内容未变，无任何必要副作用）
     if (v === contentRef.current) return;
+    // 捕获内容变化来源作者（历史按操作人署名）：协作远端合入 → 该协作者；
+    // 本地编辑 → null（历史署当前用户）。debounce 落盘前若又本地编辑会覆盖为 null（本地者胜），
+    // 与保存内容（最后一次 handleChange 的 v）一致。
+    const remoteAuthor =
+      isCollab && useNoteCollabStore.getState().isRemoteApplying()
+        ? useNoteCollabStore.getState().lastRemoteAuthor(file)
+        : null;
+    lastChangeAuthorRef.current = remoteAuthor;
+    // 参与作者集合（多协作者并发编辑同存档点 → 历史 coAuthors）：远端合入记该协作者，
+    // 本地编辑记本端身份（仅协作态；非协作单作者不记）。
+    if (isCollab) {
+      changeAuthorSetRef.current.set(remoteAuthor?.id ?? localAuthor.id, remoteAuthor ?? localAuthor);
+    }
     // 用户输入登记（撤销栈 + 挂起输入）：撤销回放（applyNoteUndo）不记栈；
     // 撤销栈记「本次输入前全文」（连续输入合并为一步，见 services/noteUndo）；
     // pendingNoteContent 供 flushAllPending/切仓库前把未落盘输入统一落盘 + 补历史
@@ -504,6 +533,19 @@ export function NoteEditor({ file }: { file: string }) {
     if (timerRef.current) clearTimeout(timerRef.current);
     const seq = ++saveSeqRef.current;
     timerRef.current = setTimeout(() => {
+      // 保存前同步快照本版作者：异步写盘期间 refs 可能被下一窗口 handleChange 推进，
+      // 快照保证版本署名 = 本次保存内容来源（防重叠保存窗口把下一窗口作者错署到本版）。
+      // 主作者 = 最后内容来源（远端合入署该协作者、本地署本端）；coAuthors = 窗口内其余参与者；
+      // 落盘成功且无新输入时清集合（见各分支 seq 守卫），coalesce 合并由 history 层按 id 求并集。
+      const mainAuthor = lastChangeAuthorRef.current;
+      const coAuthors = [...changeAuthorSetRef.current.values()].filter(
+        (a) => a.id !== (mainAuthor?.id ?? localAuthor.id),
+      );
+      const commitHistory = () =>
+        useVaultStore.getState().noteHistoryRecord(file, v, "edit", {
+          ...(mainAuthor ? { authorOverride: mainAuthor } : {}),
+          ...(coAuthors.length ? { coAuthors } : {}),
+        });
       // 协作态：多写者落盘内容收敛一致，远端/对端正收敛写盘不应走「磁盘≠基准=外部修改」冲突预检
       // （会误报），只做增量跳过 + 直接保存收敛全文；真实外部整文件写入由外部感知 effect 兜底
       // （见其 collab 分支：不静默覆盖）。
@@ -523,8 +565,8 @@ export function NoteEditor({ file }: { file: string }) {
             if (mountedRef.current && seq === saveSeqRef.current) setSaveStatus("saved");
             // 保存完成且无新输入：清除挂起登记（期间又有新输入则保留，由下一轮保存接管）
             if (seq === saveSeqRef.current) useVaultStore.getState().setPendingNoteContent(file, null);
-            // 记录编辑存档点（60s 内连续编辑合并为一版，不逐键）
-            void useVaultStore.getState().noteHistoryRecord(file, v, "edit");
+            if (seq === saveSeqRef.current) changeAuthorSetRef.current.clear();
+            commitHistory();
           })
           .catch(() => {
             if (mountedRef.current) setSaveStatus("error");
@@ -558,8 +600,8 @@ export function NoteEditor({ file }: { file: string }) {
               if (mountedRef.current && seq === saveSeqRef.current) setSaveStatus("saved");
               // 保存完成且无新输入：清除挂起登记
               if (seq === saveSeqRef.current) useVaultStore.getState().setPendingNoteContent(file, null);
-              // 记录编辑存档点（60s 内连续编辑合并为一版，不逐键）
-              void useVaultStore.getState().noteHistoryRecord(file, v, "edit");
+              if (seq === saveSeqRef.current) changeAuthorSetRef.current.clear();
+              commitHistory();
             })
             .catch(() => {
               if (mountedRef.current) setSaveStatus("error");
