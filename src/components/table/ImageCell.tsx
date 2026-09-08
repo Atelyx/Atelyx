@@ -11,8 +11,8 @@
  *   useTableImageSrc 立即渲染。
  * - 放大预览：portal 到 body（逃离表格 CSS zoom 缩放包装层）；连续打开以序号守卫，
  *   仅最新请求落地（防并发解析互相覆盖）。
- * - hover 按钮组：左上角 = 展示模式切换（多图时）+ 追加图片；右上角 = 移除当前图（仅轮播——
- *   九宫格逐格 hover 移除，右上角不叠按钮防遮挡）。
+ * - hover 按钮组：左上角 = 展示模式切换（多图时）+ 追加图片；右上角 = 移除当前图（仅轮播，
+ *   九宫格无移除入口）。
  * - 值读写经 store（addImageToCell/removeImageAt/toggleImageDisplay/reorderImages）；
  *   单元格值经 normalizeImageValue 读取（磁盘/远端旧形态与脏值统一归一，勿内联 typeof 判定）。
  */
@@ -157,7 +157,7 @@ export const ImageCell = memo(function ImageCell({ field, row }: Props) {
             fieldId={field.id}
           />
         )}
-        {/* 左上角 hover：模式切换（多图）/ 追加；右上角 hover：移除当前图（仅轮播，九宫格逐格移除不叠按钮） */}
+        {/* 左上角 hover：模式切换（多图）/ 追加；右上角 hover：移除当前图（仅轮播，九宫格无移除入口） */}
         <div className="absolute top-1 left-1 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
           {multi && (
             <button

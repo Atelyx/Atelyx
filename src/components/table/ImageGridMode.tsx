@@ -1,8 +1,7 @@
 /**
  * 图片单元格·九宫格模式（ImageCell 分派壳的拆分件）。
  *
- * - 多图平铺方块（object-cover 裁切，gridAutoRows 1fr 填满展示层）：点击开预览对应图、
- *   hover 单格 × 移除；单图限宽方块。
+ * - 多图平铺方块（object-cover 裁切，gridAutoRows 1fr 填满展示层）：点击开预览对应图；单图限宽方块。
  * - **长按格子拖动排序**：影子 portal 到 body 跟手（CSS zoom 会缩放 fixed 后代，与放大预览
  *   同避法），原位虚线占位，落点格实时让位，松手 reorderImages 写回。
  *
@@ -15,7 +14,6 @@
 import { memo, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { PointerEvent as ReactPointerEvent } from "react";
-import { X } from "lucide-react";
 import { IMAGE_LONG_PRESS_MS, IMAGE_PRESS_CANCEL_PX, IMAGE_GRID_GAP, IMAGE_GRID_SINGLE_MAX } from "@/constants/table";
 import { useTableStore } from "@/stores/tableStore";
 
@@ -193,7 +191,7 @@ export const ImageGridMode = memo(function ImageGridMode({
             return (
               <div
                 key={images[orig]}
-                className="group/tile relative rounded overflow-hidden cursor-pointer"
+                className="relative rounded overflow-hidden cursor-pointer"
                 style={{ maxWidth: images.length === 1 ? IMAGE_GRID_SINGLE_MAX : undefined }}
                 onPointerDown={(e) => onTilePointerDown(e, orig)}
                 onClick={() => {
@@ -214,18 +212,6 @@ export const ImageGridMode = memo(function ImageGridMode({
                 ) : (
                   <div className="absolute inset-0 bg-[var(--hover)]" />
                 )}
-                <button
-                  onPointerDown={(e) => e.stopPropagation()}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    useTableStore.getState().removeImageAt(rowId, fieldId, orig);
-                  }}
-                  className="absolute top-0.5 right-0.5 w-5 h-5 flex items-center justify-center rounded-full opacity-0 group-hover/tile:opacity-100 transition-opacity"
-                  style={{ background: "rgba(0,0,0,0.6)", color: "#f87171" }}
-                  title="移除图片"
-                >
-                  <X size={11} />
-                </button>
               </div>
             );
           })}
