@@ -8,10 +8,11 @@
 //! 日志：tracing 结构化输出（stderr / `docker logs`）。级别由 `RUST_LOG` 控制（默认 info；
 //! `RUST_LOG=debug` 看逐消息转发明细），`LOG_FORMAT=json` 切 JSON 行输出便于采集。
 //! 隐私红线：转发内容（patch / Yjs payload / selection）一律只记字节数不记内容；
-//! 身份元数据（昵称/设备名/仓库 id/文件相对路径）在局域网信任语境下可入日志。
+//! 身份元数据（昵称/设备名/仓库 id/文件相对路径/应用版本号）在局域网信任语境下可入日志。
 //!
 //! 协议（JSON over WS，字段 camelCase）：
-//! - C→S `hello`：`{ type, vaultId, nickname, color, deviceName }`（首条必发）
+//! - C→S `hello`：`{ type, vaultId, nickname, color, deviceName, version? }`（首条必发；
+//!   version = 本端应用版本号，协作房间展示各成员版本，旧客户端可缺省）
 //! - C→S `presence`：`{ type, file?, selection?, view?, openFiles?, lockedNodes?, streamingNodeIds? }`
 //!   （选中变化节流后发；openFiles/lockedNodes/streamingNodeIds 不透明透传，供协作房间/画布锁/生成灯）
 //! - C→S `table-patch`：`{ type, file, patch }`（表格增量补丁广播；patch 不透明透传，
@@ -20,8 +21,8 @@
 //!   客户端按 file 匹配只应用当前打开的画布）
 //! - C→S `ping`（保活）/ `bye`（离开）
 //! - S→C `hello-ack`：`{ type, peerId }`（分配的本连接 id，先于 peers 帧——客户端据此把自己过滤出列表）
-//! - S→C `peers`：`{ type, peers: [{ peerId, nickname, color, deviceName, presence? }] }`
-//!   （房间成员变化时全量推送；presence 字段 = `{ file?, selection?, view?, openFiles?, lockedNodes?, streamingNodeIds? }`）
+//! - S→C `peers`：`{ type, peers: [{ peerId, nickname, color, deviceName, version?, presence? }] }`
+//!   （房间成员变化时全量推送；version = 该成员应用版本号；presence 字段 = `{ file?, selection?, view?, openFiles?, lockedNodes?, streamingNodeIds? }`）
 //! - S→C `presence`：`{ type, peerId, presence }`（他人 presence 转发，不含自己）
 //! - S→C `table-patch`：`{ type, peerId, file, patch }`（他人补丁转发，不含自己）
 //! - S→C `canvas-patch`：`{ type, peerId, file, patch }`（他人补丁转发，不含自己）
@@ -58,6 +59,7 @@ struct PeerEntry {
     nickname: String,
     color: String,
     device_name: String,
+    version: Option<String>,
     presence: Option<Presence>,
     tx: broadcast::Sender<Arc<String>>,
 }
@@ -94,6 +96,9 @@ struct ClientMsg {
     color: String,
     #[serde(default)]
     device_name: String,
+    /// 本端应用版本号（hello 携带；协作房间展示各成员版本，旧客户端可缺省）。
+    #[serde(default)]
+    version: Option<String>,
     #[serde(default)]
     file: Option<String>,
     #[serde(default)]
@@ -138,6 +143,8 @@ struct PeerInfo {
     nickname: String,
     color: String,
     device_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     presence: Option<Presence>,
 }
@@ -199,6 +206,7 @@ fn broadcast_peers(rooms: &Rooms, vault_id: &str) {
             nickname: p.nickname.clone(),
             color: p.color.clone(),
             device_name: p.device_name.clone(),
+            version: p.version.clone(),
             presence: p.presence.clone(),
         })
         .collect();
@@ -319,6 +327,7 @@ async fn handle_socket(socket: WebSocket, hub: Hub, remote: SocketAddr) {
     let vault_id = hello.vault_id.clone();
     let nickname = hello.nickname.clone();
     let device_name = hello.device_name.clone();
+    let version = hello.version.clone();
     {
         let mut rooms = hub.0.lock().unwrap();
         let room = rooms.entry(vault_id.clone()).or_default();
@@ -328,6 +337,7 @@ async fn handle_socket(socket: WebSocket, hub: Hub, remote: SocketAddr) {
                 nickname: hello.nickname,
                 color: hello.color,
                 device_name: hello.device_name,
+                version: hello.version,
                 presence: None,
                 tx: btx.clone(),
             },
@@ -337,6 +347,7 @@ async fn handle_socket(socket: WebSocket, hub: Hub, remote: SocketAddr) {
             vault_id = %vault_id,
             nickname = %nickname,
             device_name = %device_name,
+            version = version.as_deref().unwrap_or(""),
             %remote,
             room_size = room.len(),
             "协作者加入房间",

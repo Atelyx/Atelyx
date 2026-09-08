@@ -1,13 +1,13 @@
 /**
- * 协作房间面板（主页）：展示同仓库在线协作者 + 各自打开的文件（presence 实时），点击可跳转打开。
+ * 协作房间面板（主页）：展示同仓库在线协作者 + 各自打开的文件（presence 实时）+ 各成员应用版本号，点击可跳转打开。
  *
- * 数据源：collabStore.peers（远端）+ settingsStore 身份 + appStore 当前打开文件合成「我」行。
+ * 数据源：collabStore.peers（远端，含 hello 上报的 version）+ settingsStore 身份 + appStore 当前打开文件合成「我」行。
  * 打开文件动作回调直连 appStore（与 FilesView 同模式）。
  * 同一身份（昵称+设备）多连接合并为一行：主窗口常驻 + 撕裂窗口会各持一条连接（relay 每连接一个
  * peer），展示层合并防「自己重复出现」；「前往设置」仅主窗口有效（设置弹窗只在主窗口渲染）。
  */
 import { Clock, Settings, Users, Wifi, WifiOff } from "lucide-react";
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useAppStore } from "@/stores/appStore";
 import { useCollabStore } from "@/stores/collabStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -27,18 +27,20 @@ function openFilesOf(presence: CollabPresence | null | undefined): NonNullable<C
   return [];
 }
 
-/** 单个协作者行（含自己）：色点 + 昵称 + 设备 + 打开文件列表（聚焦文件置顶）。 */
+/** 单个协作者行（含自己）：色点 + 昵称 + 设备 + 版本徽标 + 打开文件列表（聚焦文件置顶）。 */
 function MemberRow({
   isSelf,
   nickname,
   color,
   device,
+  version,
   openFiles,
 }: {
   isSelf: boolean;
   nickname: string;
   color: string;
   device: string;
+  version?: string;
   openFiles: CollabPresence["openFiles"] | null;
 }) {
   const files = openFiles ?? [];
@@ -61,6 +63,15 @@ function MemberRow({
           {device && (
             <span className="text-[10px] truncate flex-shrink-0" style={{ color: "var(--text-muted)" }}>
               {device}
+            </span>
+          )}
+          {version && (
+            <span
+              className="text-[10px] px-1 rounded flex-shrink-0"
+              style={{ color: "var(--text-muted)", border: "1px solid var(--border)" }}
+              title={`应用版本 ${version}`}
+            >
+              v{version}
             </span>
           )}
         </div>
@@ -110,6 +121,12 @@ export function CollabRoomPanel() {
   const openSettings = useAppStore((s) => s.openSettings);
   // 「前往设置」仅主窗口有效（设置弹窗只在主窗口渲染）
   const isMainWindow = usePanelStore((s) => s.windowId) === "main";
+  // 「我」行应用版本号（组件不直连 service，经 appStore 取；失败静默不显示徽标）
+  const getAppVersion = useAppStore((s) => s.getAppVersion);
+  const [selfVersion, setSelfVersion] = useState<string | undefined>(undefined);
+  useEffect(() => {
+    void getAppVersion().then(setSelfVersion).catch(() => {});
+  }, [getAppVersion]);
 
   // 「我」行：身份来自设置，打开文件来自 appStore 当前打开（无聚焦概念，全部平级展示）
   const selfOpenFiles: CollabPresence["openFiles"] = [];
@@ -129,7 +146,14 @@ export function CollabRoomPanel() {
       arr.push(p);
       byIdentity.set(key, arr);
     }
-    const rows: Array<{ id: string; nickname: string; color: string; device: string; openFiles: CollabPresence["openFiles"] }> = [];
+    const rows: Array<{
+      id: string;
+      nickname: string;
+      color: string;
+      device: string;
+      version?: string;
+      openFiles: CollabPresence["openFiles"];
+    }> = [];
     for (const group of byIdentity.values()) {
       // 分组恒非空（每组至少一个 peer）
       const first = group[0]!;
@@ -148,6 +172,8 @@ export function CollabRoomPanel() {
         nickname: first.nickname,
         color: first.color,
         device: first.deviceName,
+        // 同身份多连接 = 同一应用实例，版本一致，取首条即可
+        version: first.version,
         openFiles,
       });
     }
@@ -194,7 +220,7 @@ export function CollabRoomPanel() {
         ) : (
           <>
             {/* 自己 */}
-            <MemberRow isSelf nickname={nickname} color={color} device={deviceName} openFiles={selfOpenFiles} />
+            <MemberRow isSelf nickname={nickname} color={color} device={deviceName} version={selfVersion} openFiles={selfOpenFiles} />
             {/* 远端协作者（按身份合并；presence 无 file = 未在看文件，仍显示成员） */}
             {mergedPeers.length === 0 ? (
               <div className="flex flex-col items-center justify-center gap-1 py-8 text-center px-6">
@@ -211,6 +237,7 @@ export function CollabRoomPanel() {
                   nickname={p.nickname}
                   color={p.color}
                   device={p.device}
+                  version={p.version}
                   openFiles={p.openFiles}
                 />
               ))

@@ -22,6 +22,7 @@ import { useAppStore } from "@/stores/appStore";
 import { useTableStore } from "@/stores/tableStore";
 import { useCanvasStore } from "@/stores/canvasStore";
 import { useNoteCollabStore } from "@/stores/noteCollabStore";
+import { getAppVersion } from "@/services/app";
 import type { CollabPeer, CollabPresence, RelayTestResult } from "@/types";
 
 /** 本端 presence 广播节流（选中高频变化合并，不刷屏 relay）。 */
@@ -69,6 +70,17 @@ let pendingPresence: CollabPresence | null = null;
 let broadcastTimer: number | null = null;
 /** 表格/appStore 订阅只注册一次（init 时，确保各 store 模块已完成初始化——防循环 import 未完成期调用）。 */
 let subscribed = false;
+/** 应用版本号（运行期不变）：随 hello 上报协作房间展示各成员版本；首次读取后缓存，读取失败降级 undefined。 */
+let appVersionPromise: Promise<string | undefined> | null = null;
+function appVersionOnce(): Promise<string | undefined> {
+  appVersionPromise ??= getAppVersion().catch(() => undefined);
+  return appVersionPromise;
+}
+// 模块加载即预热：首连 await 版本号直接拿已解析值，消除建连被 IPC 阻塞的窗口（失败静默降级 undefined）
+void appVersionOnce();
+/** 连接建立序号：快速连续 applyConfig/切仓库时，await 版本号期间可能交错两次建立请求，
+ *  后一次须作废前一次（否则旧连接泄漏无人管理）。 */
+let connSeq = 0;
 
 /** 随机分配身份色（未配置时；与强调色体系一致的暖色系，避免刺眼）。设置页「随机」按钮复用。 */
 export function randomPeerColor(): string {
@@ -90,7 +102,7 @@ export function normalizeRelayUrl(raw: string): string {
   }
 }
 
-function establishConnection(): void {
+async function establishConnection(): Promise<void> {
   // 先发 bye 再断开（切仓库换房）：relay 收到 bye 立即踢出，否则旧 peer 要等 30s 心跳
   // 超时才消失，期间对端列表可见幽灵用户（dispose 路径同样先 bye，见 dispose）
   handle?.sendBye();
@@ -101,8 +113,14 @@ function establishConnection(): void {
   // 丢弃节流窗口内未发出的陈旧 presence（切仓库后旧文件的选中不得发进新房间）
   pendingPresence = null;
   useCollabStore.setState({ connected: false, peers: [] });
+  // 序号须先于早退判断递增：await 版本号期间若有禁用协作/地址清空/回启动页等早退调用，
+  // 也必须作废在途请求——否则旧请求恢复后仍用已失效配置建连（幽灵连接 / 发出 vaultId:null）
+  const seq = ++connSeq;
   const cfg = runtimeCfg;
   if (!cfg?.enabled || !cfg.url || !currentVaultId) return;
+  // 应用版本随 hello 上报（协作房间展示各成员版本）；版本运行期不变，仅首次真实读取，失败降级省略
+  const version = await appVersionOnce();
+  if (seq !== connSeq) return; // 期间有更新的连接请求（applyConfig/切仓库/早退），放弃本次
   handle = connectCollabRelay({
     url: cfg.url,
     hello: {
@@ -110,6 +128,7 @@ function establishConnection(): void {
       nickname: cfg.nickname || cfg.deviceName || "用户",
       color: cfg.color || randomPeerColor(),
       deviceName: cfg.deviceName,
+      version,
     },
     onHelloAck: (peerId) => {
       myPeerId = peerId;
@@ -245,7 +264,7 @@ function ensureSubscriptions(): void {
   useAppStore.subscribe((s, prev) => {
     if (s.vaultId !== prev.vaultId) {
       currentVaultId = s.vaultId;
-      establishConnection();
+      void establishConnection();
     }
   });
 }
@@ -269,7 +288,7 @@ export const useCollabStore = create<CollabStoreState>((set) => ({
       sendSyncMessage: (file, payload) => handle?.sendNoteSync(file, bytesToBase64(payload)),
       sendAwareness: (file, payload) => handle?.sendNoteAware(file, bytesToBase64(payload)),
     });
-    establishConnection();
+    void establishConnection();
   },
 
   applyConfig: (patch) => {
@@ -280,7 +299,7 @@ export const useCollabStore = create<CollabStoreState>((set) => ({
       // 设置页未配置颜色（空串）时保留已分配的随机色，防每次设置变更/重连都换身份色
       color: patch.color || runtimeCfg.color,
     };
-    establishConnection();
+    void establishConnection();
   },
 
   testConnection: async (rawUrl) => {
@@ -296,6 +315,8 @@ export const useCollabStore = create<CollabStoreState>((set) => ({
     handle?.sendBye();
     handle?.disconnect();
     handle = null;
+    // 作废等待中的建立请求（await 版本号期间 dispose 可能已执行，防幽灵重连）
+    connSeq++;
     // 解除广播钩子：协作关闭后画布/表格编辑不再走 relay（回落 watcher/磁盘通道）
     useTableStore.getState().setCollabBroadcast(null);
     useCanvasStore.getState().setCollabBroadcast(null);

@@ -4,12 +4,12 @@
  * 纯 I/O：连接/hello 入房/presence 上报/表格内容补丁上报/心跳保活/指数退避重连，
  * 状态与节流归 collabStore。
  * 协议见 `collab-relay/src/main.rs`（JSON，camelCase）：
- * - C→S `hello`：`{ type, vaultId, nickname, color, deviceName }`（连接后首条必发）
+ * - C→S `hello`：`{ type, vaultId, nickname, color, deviceName, version? }`（连接后首条必发；version = 本端应用版本号）
  * - C→S `presence`：`{ type, file?, selection?, view? }`
  * - C→S `table-patch`：`{ type, file, patch }`（表格增量补丁实时广播，LWW 按 id 应用）
  * - C→S `canvas-patch`：`{ type, file, patch }`（画布增量补丁实时广播，LWW 按 id 应用）
  * - C→S `ping`（保活）/ `bye`（离开）
- * - S→C `peers`：`{ type, peers: [...] }`（房间成员变化全量推送）
+ * - S→C `peers`：`{ type, peers: [...] }`（房间成员变化全量推送；成员含 version = 对方应用版本号）
  * - S→C `presence`：`{ type, peerId, presence }`（他人转发）
  * - S→C `table-patch`：`{ type, peerId, file, patch }`（他人补丁转发，不含自己）
  * - S→C `canvas-patch`：`{ type, peerId, file, patch }`（他人补丁转发，不含自己）

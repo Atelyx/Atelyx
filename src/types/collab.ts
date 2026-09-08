@@ -39,6 +39,8 @@ export interface CollabPeer {
   nickname: string;
   color: string;
   deviceName: string;
+  /** 该成员使用的应用版本号（hello 携带；旧客户端/旧中转缺省）。 */
+  version?: string;
   presence: CollabPresence | null;
 }
 
@@ -48,6 +50,8 @@ export interface CollabHello {
   nickname: string;
   color: string;
   deviceName: string;
+  /** 本端应用版本号（协作房间展示各成员版本；旧客户端可缺省）。 */
+  version?: string;
 }
 
 /** 连通性测试结果（设置页「检查连接」展示）。 */
