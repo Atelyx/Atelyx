@@ -33,7 +33,6 @@ import { CanvasView } from "@/components/layout/views/CanvasView";
 import { NoteView } from "@/components/layout/views/NoteView";
 import { TableView } from "@/components/layout/views/TableView";
 import { FilesView } from "@/components/layout/views/FilesView";
-import { AiChatView } from "@/components/layout/views/AiChatView";
 import { InspectorPanel } from "@/components/canvas/panels/InspectorPanel";
 import { CollabRoomPanel } from "@/components/canvas/panels/CollabRoomPanel";
 import { RepoHistoryPanel } from "@/components/history/RepoHistoryPanel";
@@ -114,14 +113,12 @@ export const ViewHost = memo(function ViewHost({ view, hostId }: { view: ViewKin
       return <FilesView />;
     case "inspector":
       return <InspectorPanel />;
-    case "aichat":
-      return <AiChatView />;
     case "collabroom":
       return <CollabRoomPanel />;
     case "repohistory":
       return <RepoHistoryPanel />;
     default:
-      // 统一视图注册表：内置插件（搜索/最近打开/日历）与插件面板都由 ViewContributionMount 承载——
+      // 统一视图注册表：内置插件（搜索/最近打开/日历/AI 对话）与插件面板都由 ViewContributionMount 承载——
       // 组件内订阅 uiRevision，异步注册/卸载自动升级或回退占位；"empty" 无贡献同样走空白占位。
       return <ViewContributionMount kind={view} />;
   }

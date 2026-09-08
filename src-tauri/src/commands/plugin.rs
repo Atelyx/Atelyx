@@ -164,6 +164,7 @@ const BUILTIN_PLUGINS: &[BuiltinPluginDef] = &[
     BuiltinPluginDef { id: "builtin.search", name: "搜索", tagline: "全文搜索仓库文件" },
     BuiltinPluginDef { id: "builtin.recent", name: "最近打开", tagline: "最近打开的文件列表" },
     BuiltinPluginDef { id: "builtin.calendar", name: "日历", tagline: "活动密度与手动日程" },
+    BuiltinPluginDef { id: "builtin.aichat", name: "AI 对话", tagline: "AI 对话会话面板" },
 ];
 
 fn is_builtin_plugin_id(id: &str) -> bool {
@@ -1384,6 +1385,7 @@ mod tests {
             assert_eq!(manifest["runtime"].as_str(), Some("js"));
         }
         assert!(is_builtin_plugin_id("builtin.search"));
+        assert!(is_builtin_plugin_id("builtin.aichat"));
         assert!(!is_builtin_plugin_id("com.acme.x"));
     }
 

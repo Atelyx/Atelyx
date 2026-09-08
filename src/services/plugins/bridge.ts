@@ -287,7 +287,7 @@ export function contributedPluginTools(): ToolDefinition[] {
   return [...runtimes.values()].flatMap((r) => r.toolDefs);
 }
 
-/** 插件贡献的命令（全局 id = `<pluginId>:<命令 id>`；供命令面板/管理 UI 展示与执行）。 */
+/** 插件贡献的命令（全局 id = `<pluginId>:<命令 id>`；供插件管理页展示与执行）。 */
 export interface PluginCommandContribution {
   globalId: string;
   pluginId: string;

@@ -13,6 +13,7 @@ import type { ComponentType } from "react";
 import { CalendarPanel } from "@/components/calendar/CalendarPanel";
 import { RecentPanel } from "@/components/layout/panels/RecentPanel";
 import { SearchView } from "@/components/layout/views/SearchView";
+import { AiChatView } from "@/components/layout/views/AiChatView";
 import { VIEW_LABELS } from "@/constants/views";
 
 interface BuiltinViewPayload {
@@ -27,4 +28,5 @@ export const BUILTIN_VIEWS: BuiltinViewPayload[] = [
   { pluginId: "builtin.search", kind: "search", label: VIEW_LABELS.search, component: SearchView },
   { pluginId: "builtin.recent", kind: "recent", label: VIEW_LABELS.recent, component: RecentPanel },
   { pluginId: "builtin.calendar", kind: "calendar", label: VIEW_LABELS.calendar, component: CalendarPanel },
+  { pluginId: "builtin.aichat", kind: "aichat", label: VIEW_LABELS.aichat, component: AiChatView },
 ];
