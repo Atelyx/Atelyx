@@ -19,6 +19,7 @@
  * - 重开（bindNoteDoc viewCount 0）：以磁盘重建 doc（client1=disk），先广播 `BASELINE_RESET(disk)`
  *   再发 syncStep1，让房间先行收敛到磁盘权威基线后（有序广播）再握手换状态，避免翻倍。
  * - 收到 `BASELINE_RESET(diskR)`：与本地 diskBaseline 相同 → no-op（防环）；不同 → 收敛：
+ *   空基线（diskR=""）且本地有内容 → 挂起保留本地（真实清空走增量，防空缓存/加载窗口空态误广播反复清空在线端）；
  *   clean（无未落盘编辑）→ 整体重建 doc 为 client1=diskR（destroy + 新实例，编辑器随 binding
  *   引用变化自动重绑）；dirty（正在输入）→ 挂起 pendingBaseline，实时编辑照常，待落盘
  *   （markNoteDiskWrite）后以「较新的磁盘文本」收敛，不丢最后协作者版本。
@@ -115,8 +116,31 @@ interface Entry {
   lastFlushed: string;
   /** 收到更新的权威基线但因 dirty 挂起，待 clean 后收敛。 */
   pendingBaseline: string | null;
+  /** 最近一次远端合入的作者（collabStore 从 peers 解析注入；历史按操作人署名用，无远端合入 = null）。 */
+  lastRemoteAuthor: NoteRemoteAuthor | null;
   /** 销毁/重建 doc 前清理其挂起定时器与 awareness（防切仓库/重建后旧 timer 把残留 awareness 发进新房间）。 */
   cleanup: () => void;
+}
+
+/** 远端合入作者（历史按操作人署名用：协作对端经 relay 广播的内容变化，作者 = 发送端身份）。 */
+export interface NoteRemoteAuthor {
+  id: string;
+  name: string;
+  device: string;
+}
+
+/** 远端 Yjs update 应用深度（同步窗口内 >0）：y-codemirror 在 yjs 事务内同步回写 CM，
+ *  onBodyChange→handleChange 与远端应用同栈执行，据此区分「远端合入」与「本地编辑」。 */
+let remoteApplyDepth = 0;
+
+/** 当前是否正在应用远端 Yjs update（协作回环/对端收敛时同步调用栈内为 true）。 */
+export function isRemoteNoteApplyActive(): boolean {
+  return remoteApplyDepth > 0;
+}
+
+/** 取某文件最近一次远端合入的作者（无 = null）。 */
+export function getLastRemoteAuthor(file: string): NoteRemoteAuthor | null {
+  return entries.get(file)?.lastRemoteAuthor ?? null;
 }
 
 const entries = new Map<string, Entry>();
@@ -217,6 +241,7 @@ function rebuildEntryToBaseline(e: Entry, baselineText: string): void {
   e.diskBaseline = baselineText;
   e.lastFlushed = baselineText;
   e.pendingBaseline = null;
+  e.lastRemoteAuthor = null;
   // store 侧刷新 binding → NoteEditor 重 render → MarkdownEditor 随 collab 引用变化自动重绑
   onBindingRefresh?.(e.doc.file, doc);
   // 重建后与房间重新收敛（确定性 seed 幂等）
@@ -238,6 +263,15 @@ function handleBaselineReset(file: string, diskText: string): void {
   const e = entries.get(file);
   if (!e) return;
   if (e.diskBaseline === diskText) return;
+  // 空基线且本地有非空内容：不整体重建为空（挂起，保留本地内容）。
+  // 空基线来自对端「空缓存/加载窗口空态」的误广播（打开被写空的笔记即广播，见 bindNoteDoc），
+  // 无条件以空重建会把在线端反复清空（共享仓库下逐端传染、历史反复出现空版本）；
+  // 真实清空由用户编辑产生的增量 update（ytext 删除）合入传播，不由全量空基线负责。
+  // 挂起后待 markNoteDiskWrite 以「较新的磁盘文本」收敛（不丢本地内容）。
+  if (diskText === "" && e.doc.ytext.toString() !== "") {
+    e.pendingBaseline = diskText;
+    return;
+  }
   if (e.doc.ytext.toString() !== e.lastFlushed) {
     // 正在输入（未落盘差异）：挂起；若本地落盘推进了磁盘，则以更新文本收敛而非旧通告
     e.pendingBaseline = diskText;
@@ -263,7 +297,15 @@ export function bindNoteDoc(file: string, text: string): NoteDoc {
   existing?.doc.ydoc.destroy();
   entries.delete(file);
   const { doc, cleanup } = createDoc(file, text);
-  entries.set(file, { doc, viewCount: 1, cleanup, diskBaseline: text, lastFlushed: text, pendingBaseline: null });
+  entries.set(file, {
+    doc,
+    viewCount: 1,
+    cleanup,
+    diskBaseline: text,
+    lastFlushed: text,
+    pendingBaseline: null,
+    lastRemoteAuthor: null,
+  });
   // 先广播磁盘权威基线（对端据此收敛，防重开塞入的新 seed 基线翻倍），再握手
   broadcast?.sendSyncMessage(file, writeBaselineResetHeader(text));
   const encoder = encoding.createEncoder();
@@ -286,7 +328,9 @@ export function markNoteDiskWrite(file: string): void {
   // 只记正文（ytext）而非调用方全文——磁盘含 frontmatter/CRLF，ytext 仅 LF 正文，不能直接比
   e.lastFlushed = e.doc.ytext.toString();
   const pending = e.pendingBaseline;
-  if (!pending) return;
+  // 空基线也可能作为挂起值（handleBaselineReset 空保护挂起 ""）——必须用 null 判空，
+  // 否则挂起的空基线永远无法收敛清理、残留阻塞后续基线收敛
+  if (pending === null) return;
   // 本地刚落盘文本若已推进（≠ 挂起旧通告），以本地更新文本为权威（保留在线端输入）；否则以挂起通告为权威
   const target = e.lastFlushed !== pending ? e.lastFlushed : pending;
   if (e.doc.ytext.toString() === target) {
@@ -322,7 +366,11 @@ export function applyLocalBody(file: string, bodyLF: string): void {
  *   在后续收敛（A 落盘后 markNoteDiskWrite 以最新磁盘收敛，B 再采纳）中自愈，见文件头残余说明。
  * - step1 要求回复 step2（全量状态）——编码输出广播给房间（幂等收敛，对端请求者应用）。
  */
-export function receiveSyncMessage(file: string, payload: Uint8Array): void {
+export function receiveSyncMessage(
+  file: string,
+  payload: Uint8Array,
+  remoteAuthor?: NoteRemoteAuthor,
+): void {
   const e = entries.get(file);
   if (!e) return;
   // 先识别是否基线重置通告
@@ -345,6 +393,11 @@ export function receiveSyncMessage(file: string, payload: Uint8Array): void {
     handleBaselineReset(file, diskText);
     return;
   }
+  // 记录本次远端合入作者（历史按操作人署名用）+ 置远端应用标记：
+  // y-codemirror 在 yjs 事务内同步回写 CM → onBodyChange→handleChange 与此同栈，
+  // NoteEditor 据此区分「远端合入」（内容变化来自协作对端，不署本端用户）。
+  e.lastRemoteAuthor = remoteAuthor ?? null;
+  remoteApplyDepth++;
   // 普通 y-protocols sync 消息：按标准流程合入（见函数头部说明，不在普通消息做 seed 消歧）
   const decoder = decoding.createDecoder(payload);
   const encoder = encoding.createEncoder();
@@ -357,6 +410,8 @@ export function receiveSyncMessage(file: string, payload: Uint8Array): void {
   } catch {
     // 解析失败的消息（乱序/格式异常）：丢弃，下一帧握手兜底收敛
     return;
+  } finally {
+    remoteApplyDepth--;
   }
   if (replyNeeded && broadcast) {
     broadcast.sendSyncMessage(file, encoding.toUint8Array(encoder));

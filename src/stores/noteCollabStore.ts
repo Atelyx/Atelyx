@@ -18,6 +18,9 @@ import {
   markNoteDiskWrite,
   setNoteCollabBindingRefresh,
   destroyAllNoteDocs,
+  getLastRemoteAuthor,
+  isRemoteNoteApplyActive,
+  type NoteRemoteAuthor,
 } from "@/services/noteCollab/noteDoc";
 
 /** 可下发给 MarkdownEditor 的协作绑定（纯数据，组件不自撞 service）。 */
@@ -45,6 +48,10 @@ interface NoteCollabState {
   syncLocalBody: (file: string, bodyLF: string) => void;
   /** 协作态落盘完成通知：驱动磁盘基线收敛（重建 doc 的挂起复位）。 */
   notifyNoteDiskWrite: (file: string) => void;
+  /** 当前是否正在应用远端 Yjs update（NoteEditor 据此区分「远端合入」与「本地编辑」，历史按操作人署名）。 */
+  isRemoteApplying: () => boolean;
+  /** 最近一次远端合入的作者（历史按操作人署名用；无 = null）。 */
+  lastRemoteAuthor: (file: string) => NoteRemoteAuthor | null;
   /** 应用退出/切仓库：清空全部协作文档上下文。 */
   clear: () => void;
 }
@@ -76,6 +83,10 @@ export const useNoteCollabStore = create<NoteCollabState>((set) => ({
   notifyNoteDiskWrite: (file) => {
     markNoteDiskWrite(file);
   },
+
+  isRemoteApplying: () => isRemoteNoteApplyActive(),
+
+  lastRemoteAuthor: (file) => getLastRemoteAuthor(file),
 
   clear: () => {
     destroyAllNoteDocs();

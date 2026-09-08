@@ -157,9 +157,16 @@ async function establishConnection(): Promise<void> {
       useCanvasStore.getState().applyRemoteCanvasPatch(file, patch);
     },
     // 笔记 Yjs 同步 / awareness 接收：解码后只合入本端已打开（注册表存在）的笔记（noteDoc 内部守卫）
-    onNoteSync: (_peerId, file, payload) => {
+    onNoteSync: (peerId, file, payload) => {
       try {
-        receiveSyncMessage(file, base64ToBytes(payload));
+        // 解析发送方身份（历史按操作人署名用：远端合入内容署名发送端而非本端用户）。
+        // peers 快照可能已更新/对端离线，查不到时缺省 null（历史回退本端署名）。
+        const peer = useCollabStore.getState().peers.find((p) => p.peerId === peerId);
+        receiveSyncMessage(
+          file,
+          base64ToBytes(payload),
+          peer ? { id: `peer-${peerId}`, name: peer.nickname, device: peer.deviceName } : undefined,
+        );
       } catch {
         console.warn("笔记协作同步消息解码失败", file);
       }
