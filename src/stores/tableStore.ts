@@ -27,7 +27,13 @@ import {
 } from "@/services/history";
 import { markSelfSave } from "@/utils/selfSave";
 import { clearTableImageCache } from "@/services/tableImageCache";
-import { useCollabStore } from "@/stores/collabStore";
+import {
+  collabSendSink,
+  publishCollabPresence,
+  registerCollabChannel,
+  registerCollabReconnect,
+  useCollabStore,
+} from "@/stores/collabStore";
 import { createPersistController } from "@/utils/persist";
 import { createUndoManager } from "@/utils/undoStack";
 import {
@@ -600,6 +606,37 @@ function resetTableState(error: string | null): void {
  * 亦用于 watcher 判别「磁盘写入是对端保存的广播回放（内容已应用，不得重载回退）」。 */
 export function hasCollabPeerOnTable(file: string): boolean {
   return useCollabStore.getState().peers.some((p) => p.presence?.file === file);
+}
+
+/** 表格域协作接线（wireCollabDomains 调用，幂等一次）：注册 table-patch 通道 handler、
+ *  presence 订阅、重连补发表格 presence、拆卸清理与广播钩子注入
+ * （经 collabSendSink 惰性读宿主 handle：断开时 no-op、重连后自动指向新连接）。
+ * 注意：须在画布域接线之前调用——重连补发的 presence 让「画布打开时画布槽覆盖表格槽」成立。 */
+let tableCollabWired = false;
+export function ensureTableCollabWiring(): void {
+  if (tableCollabWired) return;
+  tableCollabWired = true;
+  registerCollabChannel("table-patch", (peerId, file, patch) => {
+    // 只应用当前打开的表格（applyRemotePatch 内部按 file 守卫）；跳过自己
+    if (peerId === useCollabStore.getState().myPeerId) return;
+    useTableStore.getState().applyRemotePatch(file, patch as TablePatch);
+  });
+  // 表格打开/选中/视图变化 → 节流广播 presence（file null = 未看表格，清空远端高亮）
+  useTableStore.subscribe((s, prev) => {
+    if (s.tableFile !== prev.tableFile || s.selection !== prev.selection || s.view !== prev.view) {
+      publishCollabPresence({ file: s.tableFile, selection: s.selection, view: s.view });
+    }
+  });
+  // 重连后补发表格 presence（画布域接线在后：画布打开时其 presence 覆盖表格槽——画布为主工作区）
+  registerCollabReconnect(() => {
+    const ts = useTableStore.getState();
+    publishCollabPresence({ file: ts.tableFile, selection: ts.selection, view: ts.view });
+  });
+  // 广播钩子注入（schedulePersist 计算补丁后回调；宿主 handle 为模块级，重连自动生效）
+  useTableStore.getState().setCollabBroadcast((file, patch) => {
+    collabSendSink("table-patch")(file, patch);
+  });
+  // 不注册拆卸：广播钩子保持注入（出站咽喉断开时自然 no-op，协作关→开循环无需重注入）
 }
 
 /** 样式增量合并：patch 中**显式出现**的键才处理（值 undefined = 清除该项，真值 = 设置），

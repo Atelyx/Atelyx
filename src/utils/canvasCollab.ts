@@ -16,7 +16,6 @@ import type {
   CanvasFileEdge,
   CanvasFileNode,
   CanvasPatch,
-  CollabPeer,
   Message,
 } from "@/types";
 
@@ -257,55 +256,15 @@ export function computeCanvasCollabPatch(opts: {
 }
 
 /**
- * 确定性锁主判定：`since` 最小者持有；同 `since` 按 `peerId` 递增取小（relay 全局递增分配，
- * 各对端对同一批声明计算出一致锁主 → UI 确定性只读，不闪烁）。
- * 无声明返回 null。返回锁主 peerId。
+ * 协作锁原语（确定性锁主判定）实现在内核 `services/collab/locks.ts`；此处 re-export
+ * 保持画布域既有导入路径（canvasStore/组件/测试零改动）。语义：声明制 + since 最小者持有、
+ * 同 since 按 peerId 递增取小（详见 locks.ts 头注释）。
  */
-export function computeLockOwner(claims: { peerId: number; since: number }[]): number | null {
-  if (claims.length === 0) return null;
-  let owner = claims[0].peerId;
-  let best = claims[0].since;
-  for (let i = 1; i < claims.length; i++) {
-    const c = claims[i];
-    if (c.since < best || (c.since === best && c.peerId < owner)) {
-      best = c.since;
-      owner = c.peerId;
-    }
-  }
-  return owner;
-}
-
-/** 单节点独占锁判定结果（resolveLockState 返回，调用方按需取用）。 */
-export interface LockResolution {
-  /** 确定性锁主 peerId；无任何锁声明 = null。 */
-  owner: number | null;
-  /** 本端是否为锁主（无本端声明或未接入协作时恒 false）。 */
-  lockedByMe: boolean;
-}
-
-/**
- * 单节点独占编辑锁统一判定（canvasStore 写守卫 / useNodeCollab / ConversationNode 发送前校验
- * 三处同源）：收集本端声明（lockedConversations 记录的 since）+ 对端 presence.lockedNodes 声明
- * （仅按 nodeId 匹配，锁跨视图保活），经 computeLockOwner 确定性判定锁主。本端声明仅在
- * myPeerId 已分配时参与——未接入协作时声明无判定意义，结果与「无对端声明」一致。
- */
-export function resolveLockState(
-  nodeId: string,
-  mySince: number | undefined,
-  myPeerId: number | null,
-  peers: CollabPeer[],
-): LockResolution {
-  const claims: { peerId: number; since: number }[] = [];
-  if (mySince !== undefined && myPeerId !== null) {
-    claims.push({ peerId: myPeerId, since: mySince });
-  }
-  for (const p of peers) {
-    const c = p.presence?.lockedNodes?.find((l) => l.id === nodeId);
-    if (c) claims.push({ peerId: p.peerId, since: c.since });
-  }
-  const owner = computeLockOwner(claims);
-  return { owner, lockedByMe: owner !== null && owner === myPeerId };
-}
+export {
+  computeCollabLockOwner as computeLockOwner,
+  resolveCollabLock as resolveLockState,
+  type LockResolution,
+} from "@/services/collab/locks";
 
 /** 协作画布重命名抑制窗口（ms）：对端收到远端 title 补丁已同步新路径，watcher 收到
  * 旧路径 delete / 新路径 create 事件时在窗口内跳过 reload/conflict（内容已由补丁应用，

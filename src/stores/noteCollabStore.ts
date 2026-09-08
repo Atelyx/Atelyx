@@ -3,7 +3,8 @@
  *
  * NoteEditor 打开笔记（协作态）时经本 store 绑定/解绑协作文档，并把绑定对象（ytext + awareness）
  * 以 props 传给 MarkdownEditor 做 y-codemirror 绑定；保存仍走 vaultStore（收敛后全文写盘）。
- * 本 store 只做生命周期与身份登记，网络收发与广播钩子注入在 collabStore（见其 init）。
+ * 本 store 只做生命周期与身份登记；网络收发经 `ensureNoteCollabWiring` 注册到协作宿主
+ * （collabStore 通道注册表 + 发送 sink 注入，见下方接线）。
  *
  * 多面板打开同一笔记共享同一 `Y.Doc`（底层 noteDoc 引用计数），防多 doc 分叉。
  */
@@ -20,8 +21,61 @@ import {
   destroyAllNoteDocs,
   getLastRemoteAuthor,
   isRemoteNoteApplyActive,
+  receiveAwareness,
+  receiveSyncMessage,
+  resyncAllNoteDocs,
+  setNoteCollabBroadcast,
   type NoteRemoteAuthor,
 } from "@/services/noteCollab/noteDoc";
+import {
+  collabSendSink,
+  registerCollabChannel,
+  registerCollabReconnect,
+  registerCollabTeardown,
+  useCollabStore,
+} from "@/stores/collabStore";
+import { base64ToBytes, bytesToBase64 } from "@/utils/base64";
+
+/** 笔记域协作接线（wireCollabDomains 调用，幂等一次）：
+ *  注册 note-sync/note-aware 通道 handler（relay 载荷为不透明 base64，解码与作者解析归本域）、
+ *  重连重握手、拆卸清理与广播钩子注入（经 collabSendSink 惰性读宿主 handle：断开时 no-op、
+ *  重连后自动指向新连接，无需重注入）。
+ *  依赖方向：collabStore 不 import 本模块，本模块经注册表单向回注（无环）。 */
+let noteCollabWired = false;
+export function ensureNoteCollabWiring(): void {
+  if (noteCollabWired) return;
+  noteCollabWired = true;
+  registerCollabChannel("note-sync", (peerId, file, payload) => {
+    try {
+      // 解析发送方身份（历史按操作人署名用：远端合入内容署名发送端而非本端用户）；
+      // peers 快照可能已更新/对端离线，查不到时缺省 null（历史回退本端署名）。
+      const peer = useCollabStore.getState().peers.find((p) => p.peerId === peerId);
+      receiveSyncMessage(
+        file,
+        base64ToBytes(payload as string),
+        peer ? { id: `peer-${peerId}`, name: peer.nickname, device: peer.deviceName } : undefined,
+      );
+    } catch {
+      console.warn("笔记协作同步消息解码失败", file);
+    }
+  });
+  registerCollabChannel("note-aware", (_peerId, file, payload) => {
+    try {
+      receiveAwareness(file, base64ToBytes(payload as string));
+    } catch {
+      console.warn("笔记协作 awareness 解码失败", file);
+    }
+  });
+  // 重连后对激活文档重发 syncStep1 重新握手（对端需重新拿全量状态收敛）
+  registerCollabReconnect(() => resyncAllNoteDocs());
+  // 拆卸：清空全部协作文档与绑定（Y.Doc/awareness 随销毁释放观察者与定时器）；
+  // 广播钩子保持注入——读取 null handle 自然 no-op，重连后自动生效
+  registerCollabTeardown(() => useNoteCollabStore.getState().clear());
+  setNoteCollabBroadcast({
+    sendSyncMessage: (file, payload) => collabSendSink("note-sync")(file, bytesToBase64(payload)),
+    sendAwareness: (file, payload) => collabSendSink("note-aware")(file, bytesToBase64(payload)),
+  });
+}
 
 /** 可下发给 MarkdownEditor 的协作绑定（纯数据，组件不自撞 service）。 */
 export interface NoteCollabBinding {

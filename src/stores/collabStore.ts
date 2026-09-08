@@ -1,28 +1,28 @@
 /**
- * 协作 presence 运行时状态：本端与 collab-relay 的连接管理 + 同仓库在线用户列表。
+ * 协作运行时（DocHost 的 store 门面）：连接策略 + 同仓库在线用户列表。
  *
  * 配置（开关/地址/昵称/颜色）来自 settingsStore 应用级配置；房间按 appStore.vaultId 划分，
- * 切仓库换房（bye + 重连新 hello）；表格选中变化经 `useTableStore` 订阅节流广播
- * （100ms），peers 供表格视图渲染远端选中高亮。画布/笔记 presence 后续同通道扩展。
+ * 切仓库换房（bye + 重连新 hello）。传输/入站路由/出站咽喉归内核 DocHost
+ * （services/collab/docHost.ts）：本 store 只做「何时连/断/换房」策略与 presence 节流调度、
+ * peers/myPeerId 状态镜像；画布/笔记/表格域的协作接线（消息通道/重连/拆卸/presence 合并/
+ * 广播注入）经 `collabWiring.ts` 注册到 collabHost 注册表。本 store 不 import 任何域 store。
  */
 import { create } from "zustand";
 import {
-  connectCollabRelay,
-  testRelayConnection,
-  type CollabRelayHandle,
-} from "@/services/collab/relay";
-import {
-  receiveAwareness,
-  receiveSyncMessage,
-  resyncAllNoteDocs,
-  setNoteCollabBroadcast,
-} from "@/services/noteCollab/noteDoc";
-import { base64ToBytes, bytesToBase64 } from "@/utils/base64";
+  connectTransport,
+  disconnectTransport,
+  sendTransportMessage,
+  sendTransportPresence,
+  testTransport,
+  type CollabChannel,
+} from "@/services/collab/docHost";
 import { useAppStore } from "@/stores/appStore";
-import { useTableStore } from "@/stores/tableStore";
-import { useCanvasStore } from "@/stores/canvasStore";
-import { useNoteCollabStore } from "@/stores/noteCollabStore";
 import { getAppVersion } from "@/services/app";
+import {
+  mergeCollabPresence,
+  runCollabReconnects,
+  runCollabTeardowns,
+} from "@/utils/collabHost";
 import type { CollabPeer, CollabPresence, RelayTestResult } from "@/types";
 
 /** 本端 presence 广播节流（选中高频变化合并，不刷屏 relay）。 */
@@ -61,7 +61,6 @@ interface CollabStoreState {
 
 /** 当前运行时配置（init/applyConfig 更新；连接按它建立）。 */
 let runtimeCfg: CollabInitConfig | null = null;
-let handle: CollabRelayHandle | null = null;
 let currentVaultId: string | null = null;
 /** 本连接在房间内的 peerId（hello-ack 分配；据此把自己过滤出 peers，防自己出现在在线列表/高亮）。 */
 let myPeerId: number | null = null;
@@ -81,6 +80,26 @@ void appVersionOnce();
 /** 连接建立序号：快速连续 applyConfig/切仓库时，await 版本号期间可能交错两次建立请求，
  *  后一次须作废前一次（否则旧连接泄漏无人管理）。 */
 let connSeq = 0;
+
+// ===== 域接线注册表（画布/笔记/表格域经此自注册路由/重连/拆卸/presence 合并；宿主保持域无关） =====
+// 注册表本体在 utils/collabHost（纯数据容器可直测）；本模块 re-export 注册 API 供域接线调用，
+// 只做查表分发与合并，不 import 任何域 store/service（传输层不透明透传原始载荷）。
+export {
+  registerCollabChannel,
+  registerCollabPresenceProvider,
+  registerCollabReconnect,
+  registerCollabTeardown,
+} from "@/utils/collabHost";
+
+/** 可透传的发送通道（单源：继承自 DocHost/传输层 CollabChannel）。 */
+export type CollabSendChannel = CollabChannel;
+
+/** 域发送 sink（经 DocHost 出站咽喉：断开时静默丢弃；重连后自动指向新连接）。 */
+export function collabSendSink(
+  channel: CollabSendChannel,
+): (file: string, payload: unknown) => void {
+  return (file, payload) => sendTransportMessage(channel, file, payload);
+}
 
 /** 随机分配身份色（未配置时；与强调色体系一致的暖色系，避免刺眼）。设置页「随机」按钮复用。 */
 export function randomPeerColor(): string {
@@ -105,9 +124,7 @@ export function normalizeRelayUrl(raw: string): string {
 async function establishConnection(): Promise<void> {
   // 先发 bye 再断开（切仓库换房）：relay 收到 bye 立即踢出，否则旧 peer 要等 30s 心跳
   // 超时才消失，期间对端列表可见幽灵用户（dispose 路径同样先 bye，见 dispose）
-  handle?.sendBye();
-  handle?.disconnect();
-  handle = null;
+  disconnectTransport();
   // 断线/重连期间清空在线列表与身份（残留旧 peers 会误导远端高亮）
   myPeerId = null;
   // 丢弃节流窗口内未发出的陈旧 presence（切仓库后旧文件的选中不得发进新房间）
@@ -121,7 +138,9 @@ async function establishConnection(): Promise<void> {
   // 应用版本随 hello 上报（协作房间展示各成员版本）；版本运行期不变，仅首次真实读取，失败降级省略
   const version = await appVersionOnce();
   if (seq !== connSeq) return; // 期间有更新的连接请求（applyConfig/切仓库/早退），放弃本次
-  handle = connectCollabRelay({
+  try {
+    connectTransport({
+      name: "relay",
     url: cfg.url,
     hello: {
       vaultId: currentVaultId,
@@ -146,38 +165,6 @@ async function establishConnection(): Promise<void> {
         peers: s.peers.map((p) => (p.peerId === peerId ? { ...p, presence } : p)),
       }));
     },
-    // 表格内容补丁实时广播接收：只应用当前打开的表格（applyRemotePatch 内部按 file + 表 id 守卫）
-    onTablePatch: (peerId, file, patch) => {
-      if (peerId === myPeerId) return;
-      useTableStore.getState().applyRemotePatch(file, patch);
-    },
-    // 画布内容补丁实时广播接收：只应用当前打开的画布（applyRemoteCanvasPatch 内部按 file + id 守卫）
-    onCanvasPatch: (peerId, file, patch) => {
-      if (peerId === myPeerId) return;
-      useCanvasStore.getState().applyRemoteCanvasPatch(file, patch);
-    },
-    // 笔记 Yjs 同步 / awareness 接收：解码后只合入本端已打开（注册表存在）的笔记（noteDoc 内部守卫）
-    onNoteSync: (peerId, file, payload) => {
-      try {
-        // 解析发送方身份（历史按操作人署名用：远端合入内容署名发送端而非本端用户）。
-        // peers 快照可能已更新/对端离线，查不到时缺省 null（历史回退本端署名）。
-        const peer = useCollabStore.getState().peers.find((p) => p.peerId === peerId);
-        receiveSyncMessage(
-          file,
-          base64ToBytes(payload),
-          peer ? { id: `peer-${peerId}`, name: peer.nickname, device: peer.deviceName } : undefined,
-        );
-      } catch {
-        console.warn("笔记协作同步消息解码失败", file);
-      }
-    },
-    onNoteAware: (_peerId, file, payload) => {
-      try {
-        receiveAwareness(file, base64ToBytes(payload));
-      } catch {
-        console.warn("笔记协作 awareness 解码失败", file);
-      }
-    },
     // 服务端 error 帧（协议异常/房间拒绝）：协作是尽力而为的辅助能力，仅记录不打断使用
     onServerError: (message) => console.warn("协作中转错误：", message),
     onStatusChange: (connected) => {
@@ -185,33 +172,19 @@ async function establishConnection(): Promise<void> {
       // 连接建立后补发一次当前 presence：重连/进房间时本端选中立即可见，
       // 否则要等用户下一次选中变化才广播（hello 已先发，同 TCP FIFO 保证先入房）
       if (connected) {
-        const ts = useTableStore.getState();
-        schedulePresenceBroadcast({ file: ts.tableFile, selection: ts.selection, view: ts.view });
-        // 有画布打开时补发画布 presence（覆盖 table 槽——画布为主工作区；锁/流式经
-        // schedulePresenceBroadcast 跨视图合并，重连后立即恢复对端只见的编辑锁）
-        const cs = useCanvasStore.getState();
-        if (cs.canvasFile) {
-          schedulePresenceBroadcast({
-            file: cs.canvasFile,
-            selection: cs.selectedNodeId ? { kind: "node", nodeId: cs.selectedNodeId } : null,
-            view: "canvas",
-          });
-        }
-        // 重连后重新握手已打开的协作文档（上次连接断开的对端需重新拿全量状态）
-        resyncAllNoteDocs();
+        // 各域重连回调（表格/画布 presence 补发、笔记重新握手等；域经 registerCollabReconnect
+        // 自注册，接线顺序保证画布打开时画布 presence 覆盖表格槽）
+        runCollabReconnects();
       }
     },
   });
+  } catch (e) {
+    // 传输未注册/建连失败：协作是尽力而为的辅助能力，记录后保持未连接（后续 applyConfig/切仓库重试）
+    console.warn("协作连接建立失败：", e instanceof Error ? e.message : String(e));
+  }
 }
 
 function schedulePresenceBroadcast(presence: CollabPresence): void {
-  // 画布锁/流式跨视图保活：无论当前 view 槽（table/note/canvas）为何，都合并 canvas 的
-  // 独占编辑锁与生成中节点——用户在看表格/笔记期间其画布锁仍对端可见，对话节点持续只读
-  const cs = useCanvasStore.getState();
-  const lockedNodes = Object.entries(cs.lockedConversations).map(([id, since]) => ({ id, since }));
-  const streamingNodeIds = Object.entries(cs.streamingByConv)
-    .filter(([, v]) => v)
-    .map(([id]) => id);
   // 打开文件清单（跨视图保活：画布/笔记/表格可同时打开，聚焦文件置顶，供「协作房间」面板展示）
   const as = useAppStore.getState();
   const openFiles: CollabPresence["openFiles"] = [];
@@ -229,14 +202,13 @@ function schedulePresenceBroadcast(presence: CollabPresence): void {
   const merged: CollabPresence = {
     ...presence,
     ...(openFiles.length ? { openFiles } : {}),
-    ...(lockedNodes.length ? { lockedNodes } : {}),
-    ...(streamingNodeIds.length ? { streamingNodeIds } : {}),
   };
-  pendingPresence = merged;
+  // 域 presence provider 依次合并（画布锁/流式等跨视图保活经注册表接入，宿主域无关）
+  pendingPresence = mergeCollabPresence(merged);
   if (broadcastTimer !== null) return;
   broadcastTimer = window.setTimeout(() => {
     broadcastTimer = null;
-    if (handle && pendingPresence) handle.sendPresence(pendingPresence);
+    if (pendingPresence) sendTransportPresence(pendingPresence);
     pendingPresence = null;
   }, BROADCAST_THROTTLE_MS);
 }
@@ -247,33 +219,16 @@ export function publishPluginPresence(view: string | null, file: string | null):
   schedulePresenceBroadcast({ file, selection: null, view });
 }
 
-// 表格打开/选中/视图变化 → 节流广播 presence（file null = 未看表格，清空远端高亮）；
+/** 域 presence 上报（画布/表格域经注册表接线自用；内部合并打开文件清单与各 provider）。 */
+export function publishCollabPresence(base: CollabPresence): void {
+  schedulePresenceBroadcast(base);
+}
+
 // 切仓库（vaultId 变化）→ 换房间重连；无仓库（回启动页）→ 断开。
 // 注册推迟到 init（防循环 import 链中模块未完成初始化即调用 store）
 function ensureSubscriptions(): void {
   if (subscribed) return;
   subscribed = true;
-  useTableStore.subscribe((s, prev) => {
-    if (s.tableFile !== prev.tableFile || s.selection !== prev.selection || s.view !== prev.view) {
-      schedulePresenceBroadcast({ file: s.tableFile, selection: s.selection, view: s.view });
-    }
-  });
-  // 画布 presence：打开/切画布（canvasFile）、选中节点、独占编辑锁、流式起止任一变化 → 广播
-  // view=canvas（锁/流式经 schedulePresenceBroadcast 跨视图合并，此订阅只负责 view 槽与选中）。
-  // messagesByConv 逐 token 更新不在此订阅 → 流式 token 不刷屏 presence（只有流式起止变更）。
-  useCanvasStore.subscribe((s, prev) => {
-    const changed =
-      s.canvasFile !== prev.canvasFile ||
-      s.selectedNodeId !== prev.selectedNodeId ||
-      s.lockedConversations !== prev.lockedConversations ||
-      s.streamingByConv !== prev.streamingByConv;
-    if (!changed) return;
-    schedulePresenceBroadcast({
-      file: s.canvasFile,
-      selection: s.selectedNodeId ? { kind: "node", nodeId: s.selectedNodeId } : null,
-      view: "canvas",
-    });
-  });
   useAppStore.subscribe((s, prev) => {
     if (s.vaultId !== prev.vaultId) {
       currentVaultId = s.vaultId;
@@ -291,16 +246,8 @@ export const useCollabStore = create<CollabStoreState>((set) => ({
     ensureSubscriptions();
     runtimeCfg = { ...cfg, color: cfg.color || randomPeerColor() };
     currentVaultId = useAppStore.getState().vaultId;
-    // 注入表格补丁广播钩子（tableStore 在 schedulePersist 计算补丁后回调；handle 为模块级，
-    // establishConnection 重建连接后闭包自动指向新连接，无需重注入）
-    useTableStore.getState().setCollabBroadcast((file, patch) => handle?.sendTablePatch(file, patch));
-    // 注入画布补丁广播钩子（canvasStore 在 schedulePersist 计算补丁后回调，同表格）
-    useCanvasStore.getState().setCollabBroadcast((file, patch) => handle?.sendCanvasPatch(file, patch));
-    // 注入笔记协作广播钩子（Yjs 二进制约经 base64 走 relay 同通道）
-    setNoteCollabBroadcast({
-      sendSyncMessage: (file, payload) => handle?.sendNoteSync(file, bytesToBase64(payload)),
-      sendAwareness: (file, payload) => handle?.sendNoteAware(file, bytesToBase64(payload)),
-    });
+    // 各域广播钩子由域接线注入（ensure*CollabWiring，经 collabSendSink → DocHost 出站咽喉，
+    // 重连后自动指向新连接，无需重注入）
     void establishConnection();
   },
 
@@ -318,26 +265,18 @@ export const useCollabStore = create<CollabStoreState>((set) => ({
   testConnection: async (rawUrl) => {
     const url = normalizeRelayUrl(rawUrl);
     if (!url) return { ok: false, message: "请先填写中转地址" };
-    return testRelayConnection(url);
+    return testTransport("relay", url);
   },
 
   notePresence: (file) =>
     schedulePresenceBroadcast({ file, selection: null, view: file ? "note" : null }),
 
   dispose: () => {
-    handle?.sendBye();
-    handle?.disconnect();
-    handle = null;
+    disconnectTransport();
     // 作废等待中的建立请求（await 版本号期间 dispose 可能已执行，防幽灵重连）
     connSeq++;
-    // 解除广播钩子：协作关闭后画布/表格编辑不再走 relay（回落 watcher/磁盘通道）
-    useTableStore.getState().setCollabBroadcast(null);
-    useCanvasStore.getState().setCollabBroadcast(null);
-    // 释放本端画布独占编辑锁（协作关闭后锁声明不再对端可见，内存清空防陈旧）
-    useCanvasStore.getState().clearConversationLocks();
-    setNoteCollabBroadcast(null);
-    // 释放全部协作文档（Y.Doc/awareness 随销毁释放观察者与定时器）
-    useNoteCollabStore.getState().clear();
+    // 域拆卸钩子（表格/画布/笔记的广播钩子与文档清理经注册表；出站咽喉断开后自然 no-op）
+    runCollabTeardowns();
     runtimeCfg = null;
     myPeerId = null;
     if (broadcastTimer !== null) {

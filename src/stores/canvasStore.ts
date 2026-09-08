@@ -95,7 +95,15 @@ import { prefix, scanMentionHits } from "@/utils/text";
 import { noteTitleFromFile, sanitizeFilename, siblingPath, tableTitleFromFile } from "@/utils/filename";
 import { useSettingsStore } from "./settingsStore";
 import { useAppStore } from "./appStore";
-import { useCollabStore } from "./collabStore";
+import {
+  collabSendSink,
+  publishCollabPresence,
+  registerCollabChannel,
+  registerCollabPresenceProvider,
+  registerCollabReconnect,
+  registerCollabTeardown,
+  useCollabStore,
+} from "./collabStore";
 import { useVaultStore } from "./vaultStore";
 import type {
   Attachment,
@@ -446,6 +454,69 @@ export function hasCollabPeerOnCanvas(file: string): boolean {
   return useCollabStore
     .getState()
     .peers.some((p) => p.presence?.file === file && p.presence?.view === "canvas");
+}
+
+/** 画布域协作接线（wireCollabDomains 调用，幂等一次）：注册 canvas-patch 通道 handler、
+ *  presence 锁/流式合并 provider、重连补发画布 presence、presence 订阅、拆卸清理与广播钩子
+ *  注入（经 collabSendSink 惰性读宿主 handle：断开时 no-op、重连后自动指向新连接）。 */
+let canvasCollabWired = false;
+export function ensureCanvasCollabWiring(): void {
+  if (canvasCollabWired) return;
+  canvasCollabWired = true;
+  registerCollabChannel("canvas-patch", (peerId, file, patch) => {
+    // 只应用当前打开的画布（applyRemoteCanvasPatch 内部按 file + id 守卫）；跳过自己
+    if (peerId === useCollabStore.getState().myPeerId) return;
+    useCanvasStore.getState().applyRemoteCanvasPatch(file, patch as CanvasPatch);
+  });
+  // 画布锁/流式跨视图保活：无论当前 view 槽（table/note/canvas）为何，都合并 canvas 的
+  // 独占编辑锁与生成中节点——用户在看表格/笔记期间其画布锁仍对端可见，对话节点持续只读
+  registerCollabPresenceProvider((base) => {
+    const cs = useCanvasStore.getState();
+    const lockedNodes = Object.entries(cs.lockedConversations).map(([id, since]) => ({ id, since }));
+    const streamingNodeIds = Object.entries(cs.streamingByConv)
+      .filter(([, v]) => v)
+      .map(([id]) => id);
+    return {
+      ...base,
+      ...(lockedNodes.length ? { lockedNodes } : {}),
+      ...(streamingNodeIds.length ? { streamingNodeIds } : {}),
+    };
+  });
+  // 重连后补发画布 presence（覆盖 table 槽——画布为主工作区；锁/流式经 provider 合并，恢复对端锁）
+  registerCollabReconnect(() => {
+    const cs = useCanvasStore.getState();
+    if (!cs.canvasFile) return;
+    publishCollabPresence({
+      file: cs.canvasFile,
+      selection: cs.selectedNodeId ? { kind: "node", nodeId: cs.selectedNodeId } : null,
+      view: "canvas",
+    });
+  });
+  // 画布 presence 订阅：打开/切画布、选中节点、独占编辑锁、流式起止任一变化 → 广播
+  // messagesByConv 逐 token 更新不在此订阅 → 流式 token 不刷屏 presence（只有流式起止变更）
+  useCanvasStore.subscribe((s, prev) => {
+    const changed =
+      s.canvasFile !== prev.canvasFile ||
+      s.selectedNodeId !== prev.selectedNodeId ||
+      s.lockedConversations !== prev.lockedConversations ||
+      s.streamingByConv !== prev.streamingByConv;
+    if (!changed) return;
+    publishCollabPresence({
+      file: s.canvasFile,
+      selection: s.selectedNodeId ? { kind: "node", nodeId: s.selectedNodeId } : null,
+      view: "canvas",
+    });
+  });
+  // 广播钩子注入（schedulePersist 计算补丁后回调；宿主 handle 为模块级，重连自动生效）
+  useCanvasStore.getState().setCollabBroadcast((file, patch) => {
+    collabSendSink("canvas-patch")(file, patch);
+  });
+  // 拆卸：释放本端画布独占编辑锁（协作关闭后锁声明不再对端可见，内存清空防陈旧）；
+  // 广播钩子保持注入——出站咽喉（collabSendSink→docHost）断开时自然 no-op，重连自动生效，
+  // 协作关→开循环无需重注入（ensure*Wiring 幂等一次）
+  registerCollabTeardown(() => {
+    useCanvasStore.getState().clearConversationLocks();
+  });
 }
 
 /**

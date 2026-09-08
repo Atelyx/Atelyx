@@ -7,8 +7,9 @@
  * - 落盘：收敛后全文（`flushNoteDoc`）写回 `.md` 真源（调用方负责）。
  * - awareness：本地光标/选中/身份经 `y-codemirror.next` 更新；远端状态用于渲染用户色光标/选中。
  *
- * 多面板打开同一笔记共享同一 `Y.Doc` 实例（per-file 单例引用计数），避免多 doc 分叉。
- * 本模块为纯数据/同步层：网络收发经 collabStore 注入的广播钩子完成，不直连 relay。
+ * 多面板打开同一笔记共享同一 `Y.Doc` 实例（激活引用计数由 DocHost 文档注册表管理），
+ * 避免多 doc 分叉。本模块为纯数据/同步层：网络收发经 noteCollabStore 接线注入的
+ * 广播钩子完成，不直连 relay。
  *
  * # 磁盘基线收敛（防重开翻倍）
  *
@@ -16,7 +17,7 @@
  * 重开对端把「已合并磁盘全文」塞进新的 seed 基线，与「在线端旧基线 + 真实 cid 编辑」的
  * 拓扑相加即翻倍。机制：
  * - 每 entry 记录权威 `diskBaseline` 与最近落盘 `lastFlushed`（clean = doc 文本 == lastFlushed）。
- * - 重开（bindNoteDoc viewCount 0）：以磁盘重建 doc（client1=disk），先广播 `BASELINE_RESET(disk)`
+ * - 重开（无激活绑定，引用计数归零）：以磁盘重建 doc（client1=disk），先广播 `BASELINE_RESET(disk)`
  *   再发 syncStep1，让房间先行收敛到磁盘权威基线后（有序广播）再握手换状态，避免翻倍。
  * - 收到 `BASELINE_RESET(diskR)`：与本地 diskBaseline 相同 → no-op（防环）；不同 → 收敛：
  *   空基线（diskR=""）且本地有内容 → 挂起保留本地（真实清空走增量，防空缓存/加载窗口空态误广播反复清空在线端）；
@@ -42,6 +43,14 @@ import {
 } from "y-protocols/sync";
 import * as encoding from "lib0/encoding";
 import * as decoding from "lib0/decoding";
+import {
+  bindDoc,
+  destroyAllDocs,
+  registerDocModel,
+  resyncAllDocs,
+  unbindDoc,
+  type DocModelAdapter,
+} from "@/services/collab/docHost";
 
 /** 远端合入 origin 标记：本端 applyUpdate 用它，doc 'update' 事件据此对应用跳过回发。 */
 const REMOTE_ORIGIN = "note-collab-remote";
@@ -106,10 +115,9 @@ export function setNoteCollabBindingRefresh(
   onBindingRefresh = fn;
 }
 
-/** 每文件单例注册表（Y.Doc 生命周期）。 */
+/** 每文件单例注册表（Y.Doc 生命周期；激活引用计数由 DocHost 文档注册表管理）。 */
 interface Entry {
   doc: NoteDoc;
-  viewCount: number;
   /** 权威磁盘基线文本（本端当前持有的 seed 基线）。 */
   diskBaseline: string;
   /** 最近一次落盘/seed 的文本（clean = doc 文本 == lastFlushed）。 */
@@ -280,33 +288,19 @@ function handleBaselineReset(file: string, diskText: string): void {
   rebuildEntryToBaseline(e, diskText);
 }
 
-/**
- * 打开并绑定笔记文档：有激活编辑器（多面板共享）时复用现有 doc；
- * 无激活时以磁盘正文 text 重置基线（快照）后返回。调用方应在编辑器挂载时调用（refCount++）。
- * 传入的 text 为 LF 规范化后的全文（调用方保证）。
- * 重开时先广播 BASELINE_RESET 让房间收敛到磁盘权威基线，再发 syncStep1 握手。
- */
-export function bindNoteDoc(file: string, text: string): NoteDoc {
-  const existing = entries.get(file);
-  if (existing && existing.viewCount > 0) {
-    existing.viewCount += 1;
-    return existing.doc;
-  }
-  // 无激活编辑器：清理旧 doc（其挂起定时器/awareness/观察者随之释放），以磁盘基线重建
-  existing?.cleanup();
-  existing?.doc.ydoc.destroy();
-  entries.delete(file);
+/** 无激活编辑器时的文档创建（docHost.bindDoc 仅在无激活绑定/重建时调用本函数）：
+ *  以磁盘基线 text 重建（确定性 seed），先广播磁盘权威基线（对端据此收敛，防重开塞入的
+ *  新 seed 基线翻倍），再握手 syncStep1。 */
+function createNoteEntry(file: string, text: string): NoteDoc {
   const { doc, cleanup } = createDoc(file, text);
   entries.set(file, {
     doc,
-    viewCount: 1,
     cleanup,
     diskBaseline: text,
     lastFlushed: text,
     pendingBaseline: null,
     lastRemoteAuthor: null,
   });
-  // 先广播磁盘权威基线（对端据此收敛，防重开塞入的新 seed 基线翻倍），再握手
   broadcast?.sendSyncMessage(file, writeBaselineResetHeader(text));
   const encoder = encoding.createEncoder();
   writeSyncStep1(encoder, doc.ydoc);
@@ -314,11 +308,18 @@ export function bindNoteDoc(file: string, text: string): NoteDoc {
   return doc;
 }
 
-/** 编辑器卸载时释放（refCount--）；归零仍在注册表（内存开销小，保留远端状态），下次打开重置基线。 */
+/**
+ * 打开并绑定笔记文档：经 DocHost 文档注册表（docId = `note:${file}`）——有激活编辑器
+ * （引用计数 > 0）时复用现有 doc（多面板共享同一 Y.Doc）；无激活时以磁盘正文 text
+ * 重置基线（快照）。传入的 text 为 LF 规范化后的全文（调用方保证）。
+ */
+export function bindNoteDoc(file: string, text: string): NoteDoc {
+  return bindDoc(`note:${file}`, text) as NoteDoc;
+}
+
+/** 编辑器卸载时释放一个引用（多面板各释放一次）；协作文档仍留注册表保留远端状态，下次打开重置基线。 */
 export function unbindNoteDoc(file: string): void {
-  const e = entries.get(file);
-  if (!e) return;
-  e.viewCount = Math.max(0, e.viewCount - 1);
+  unbindDoc(`note:${file}`);
 }
 
 /** 协作态本端落盘完成登记：以当前 ytext（正文）推进 lastFlushed；若既有挂起基线 → 以最新磁盘权威收敛（不丢最后协作者版本）。 */
@@ -425,22 +426,53 @@ export function receiveAwareness(file: string, payload: Uint8Array): void {
   applyAwarenessUpdate(e.doc.awareness, payload, "remote");
 }
 
-/** 全部销毁（应用退出/切仓库清空协作上下文）。 */
-export function destroyAllNoteDocs(): void {
-  for (const e of entries.values()) {
-    e.cleanup();
-    e.doc.ydoc.destroy();
-  }
-  entries.clear();
+/** 单文档销毁（adapter.destroy）：清理挂起定时器/awareness 与观察者，移出注册表。 */
+function destroyNoteEntry(doc: NoteDoc): void {
+  entries.get(doc.file)?.cleanup();
+  doc.ydoc.destroy();
+  entries.delete(doc.file);
 }
 
-/** 重连后对所有激活协作文档重发 syncStep1（重新握手，索取对端全量状态收敛）。 */
-export function resyncAllNoteDocs(): void {
-  if (!broadcast) return;
-  for (const e of entries.values()) {
-    if (e.viewCount <= 0) continue;
-    const encoder = encoding.createEncoder();
-    writeSyncStep1(encoder, e.doc.ydoc);
-    broadcast.sendSyncMessage(e.doc.file, encoding.toUint8Array(encoder));
-  }
+/** 全部销毁（应用退出/切仓库清空协作上下文；经 DocHost 遍历激活文档）。 */
+export function destroyAllNoteDocs(): void {
+  destroyAllDocs();
 }
+
+/** 单文件重新握手（adapter.resync）：重连后重发 syncStep1，索取对端全量状态收敛。 */
+function resyncNoteEntry(file: string): void {
+  if (!broadcast) return;
+  const e = entries.get(file);
+  if (!e) return;
+  const encoder = encoding.createEncoder();
+  writeSyncStep1(encoder, e.doc.ydoc);
+  broadcast.sendSyncMessage(file, encoding.toUint8Array(encoder));
+}
+
+/** 重连后对所有激活协作文档重发 syncStep1（经 DocHost 遍历激活引用）。 */
+export function resyncAllNoteDocs(): void {
+  resyncAllDocs();
+}
+
+/**
+ * note 文档模型适配器（注册进 DocHost；磁盘基线收敛状态机与协议编解码留本模型内部实现——
+ * 当前仅 note 一个真模型，泛化状态机到内核收益不抵回归风险，状态机留模型内部）。
+ */
+const noteDocAdapter: DocModelAdapter = {
+  kind: "note",
+  createDoc: (docId, baseline) =>
+    createNoteEntry(docId.slice(docId.indexOf(":") + 1), baseline as string),
+  applyRemoteMessage: (inst, _peerId, payload, meta) => {
+    receiveSyncMessage(
+      (inst as NoteDoc).file,
+      payload as Uint8Array,
+      meta?.remoteAuthor as NoteRemoteAuthor | undefined,
+    );
+  },
+  resync: (inst) => resyncNoteEntry((inst as NoteDoc).file),
+  destroy: (inst) => destroyNoteEntry(inst as NoteDoc),
+  applyRemoteAwareness: (inst, payload) =>
+    receiveAwareness((inst as NoteDoc).file, payload as Uint8Array),
+};
+
+// 模型自注册（模块加载即注册——测试直接 import noteDoc 时注册表已就绪）
+registerDocModel(noteDocAdapter);

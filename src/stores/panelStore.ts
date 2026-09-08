@@ -29,6 +29,7 @@ import { useAppStore } from "@/stores/appStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { usePluginStore } from "@/stores/pluginStore";
 import { useCollabStore } from "@/stores/collabStore";
+import { wireCollabDomains } from "@/stores/collabWiring";
 import { useVaultStore } from "@/stores/vaultStore";
 import { collectTabs, findViewHost } from "@/utils/workspaceLayout";
 import { pluginViewLabel } from "@/services/plugins";
@@ -746,6 +747,8 @@ export const usePanelStore = create<PanelStore>((set, get) => {
         (v) => findViewHost(mirror.activeTree, mirror.detachedWindows, v) === get().windowId,
       );
       if (isHost && !collab.connected) {
+        // 域协作接线一次性注册（笔记/画布/表格经注册表回注宿主，幂等）
+        wireCollabDomains();
         collab.init({
           enabled: true,
           url: st.collabRelayUrl,

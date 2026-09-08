@@ -22,6 +22,11 @@ import type {
   RelayTestResult,
   TablePatch,
 } from "@/types";
+import {
+  registerCollabTransport,
+  type CollabTransportFactory,
+  type CollabTransportOptions,
+} from "./transport";
 
 /** 心跳间隔：relay 侧 30s 无消息超时踢出，25s 发 ping 保活。 */
 const HEARTBEAT_MS = 25_000;
@@ -263,3 +268,42 @@ export function connectCollabRelay(opts: CollabRelayOptions): CollabRelayHandle 
     },
   };
 }
+
+/** 默认内建传输：relay 工厂（把频道收发映射到现有四个 send* / on* 回调；协议不变）。
+ *  模块加载即注册进传输注册表——地址可配置，换后端 = 注册新 factory，域零改动。 */
+export const collabRelayTransport: CollabTransportFactory = {
+  name: "relay",
+  connect: (opts: CollabTransportOptions) => {
+    const handle = connectCollabRelay({
+      url: opts.url,
+      hello: opts.hello,
+      onHelloAck: opts.onHelloAck,
+      onPeers: opts.onPeers,
+      onPeerPresence: opts.onPeerPresence,
+      onTablePatch: (peerId, file, patch) =>
+        opts.onChannelMessage(peerId, "table-patch", file, patch),
+      onCanvasPatch: (peerId, file, patch) =>
+        opts.onChannelMessage(peerId, "canvas-patch", file, patch),
+      onNoteSync: (peerId, file, payload) =>
+        opts.onChannelMessage(peerId, "note-sync", file, payload),
+      onNoteAware: (peerId, file, payload) =>
+        opts.onChannelMessage(peerId, "note-aware", file, payload),
+      onServerError: opts.onServerError,
+      onStatusChange: opts.onStatusChange,
+    });
+    return {
+      sendPresence: (presence) => handle.sendPresence(presence),
+      sendMessage: (channel, file, payload) => {
+        if (channel === "note-sync") handle.sendNoteSync(file, payload as string);
+        else if (channel === "note-aware") handle.sendNoteAware(file, payload as string);
+        else if (channel === "canvas-patch") handle.sendCanvasPatch(file, payload as CanvasPatch);
+        else if (channel === "table-patch") handle.sendTablePatch(file, payload as TablePatch);
+      },
+      sendBye: () => handle.sendBye(),
+      disconnect: () => handle.disconnect(),
+    };
+  },
+  testConnection: testRelayConnection,
+};
+
+registerCollabTransport(collabRelayTransport);
