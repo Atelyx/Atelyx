@@ -35,6 +35,7 @@ _seq = 0
 _fns = {}
 _subs = []
 _streams = {}
+_ctxs = {}  # invoke seq → ctx（宿主 abort 帧置 ctx["aborted"]=True，插件据此提前退出）
 
 
 def _post(message):
@@ -77,6 +78,7 @@ def _handle_invoke(m):
         _post({"kind": "reply", "seq": seq, "ok": False, "error": "unknown fn"})
         return
     ctx = {"aborted": False}
+    _ctxs[seq] = ctx
     if m.get("stream"):
         ctx["stream"] = {
             "chunk": lambda d, s=seq: _post({"kind": "stream", "seq": s, "event": "chunk", "data": d}),
@@ -89,6 +91,8 @@ def _handle_invoke(m):
         _post({"kind": "reply", "seq": seq, "ok": True, "result": result})
     except Exception as e:  # noqa: BLE001 —— 插件异常回包给宿主，不杀死进程
         _post({"kind": "reply", "seq": seq, "ok": False, "error": str(e)})
+    finally:
+        _ctxs.pop(seq, None)
 
 
 def _pump(until_seq):
@@ -113,6 +117,11 @@ def _pump(until_seq):
             # 其他 reply（如流式 invoke 的尾随回包）忽略
         elif kind == "invoke":
             _handle_invoke(m)
+        elif kind == "abort":
+            c = _ctxs.get(m.get("seq"))
+            if c is not None:
+                c["aborted"] = True
+                _ctxs.pop(m.get("seq"), None)
         elif kind == "stream":
             s = _streams.get(m.get("seq"))
             if s:

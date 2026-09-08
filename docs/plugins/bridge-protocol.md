@@ -13,6 +13,7 @@
 | 宿主 → 插件 | `reply` | call 的返回值（`{ seq, ok, result \| error }`） |
 | 宿主 → 插件 | `invoke` | 运行插件注册的函数（`{ seq, fnId, args, stream? }`） |
 | 双向 | `stream` | 流式帧（`{ seq, event: "chunk"\|"end"\|"error", data }`） |
+| 宿主 → 插件 | `abort` | 中止通知（`{ seq }`：置该 invoke 的 `ctx.aborted`；宿主已在用户中止/超时时 reject 调用方，插件执行体可自查提前退出） |
 | 宿主 → 插件 | `event` | 应用事件投递（`{ event, payload }`） |
 
 ## 桥方法（`call` 的 method 取值）

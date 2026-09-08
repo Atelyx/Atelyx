@@ -110,15 +110,10 @@ struct PluginSource {
     /// 落位目录名（原名）；清单损坏时卸载仍可据此按路径定位删除。
     #[serde(default)]
     dir_name: String,
-    /// 来源类型（旧状态缺省市场）。
-    #[serde(default = "default_source_kind")]
+    /// 来源类型（缺省市场）。
+    #[serde(default)]
     kind: PluginSourceKind,
     scope: String,
-}
-
-/// 旧状态兼容：无 kind 字段的历史安装记录按市场来源处理。
-fn default_source_kind() -> PluginSourceKind {
-    PluginSourceKind::Market
 }
 
 /// 插件平台状态（app_data_dir/plugin-state.json）。
@@ -129,6 +124,22 @@ struct PluginState {
     enabled: HashMap<String, bool>,
     #[serde(default)]
     sources: HashMap<String, PluginSource>,
+}
+
+/// 跨作用域 id 全局唯一：同 id 已存在于另一作用域时拒绝安装（store/enabled/运行时均按裸 id
+/// 寻址，双作用域并存会互相踩踏；随仓库同步的重复由扫描兜底展示，安装路径从源头禁止）。
+fn ensure_global_id_unique(app: &AppHandle, state: &VaultState, scope: &str, id: &str) -> Result<(), String> {
+    for other in ["app", "vault"] {
+        if other == scope {
+            continue;
+        }
+        if let Ok(b) = plugin_base_dir(app, state, other) {
+            if find_plugin_dir(&b, id).is_ok() {
+                return Err("已安装相同 id 的插件（另一作用域），请先卸载".into());
+            }
+        }
+    }
+    Ok(())
 }
 
 fn plugin_base_dir(app: &AppHandle, state: &VaultState, scope: &str) -> Result<PathBuf, String> {
@@ -608,6 +619,7 @@ fn install_plugin_dir(
     if find_plugin_dir(&base, &id).is_ok() {
         return Err("已安装相同 id 的插件，请先卸载".into());
     }
+    ensure_global_id_unique(app, state, scope, &id)?;
     // 原子落位：改名为目标目录。
     let move_result = fs::rename(plugin_root, &target);
     move_result.map_err(|e| format!("安装失败：{e}"))?;
@@ -784,6 +796,7 @@ pub fn plugin_install_local(
     if find_plugin_dir(&base, &id).is_ok() {
         return Err("已安装相同 id 的插件，请先卸载".into());
     }
+    ensure_global_id_unique(&app, &state, &scope, &id)?;
     fs::create_dir_all(&base).map_err(|e| e.to_string())?;
     create_plugin_link(&src_dir, &target)?;
 
@@ -854,6 +867,11 @@ pub fn plugin_uninstall(
 ) -> Result<(), String> {
     let base = plugin_base_dir(&app, &state, &scope)?;
     let pstate = read_plugin_state(&app);
+    // id 视为不可信输入：非法 id 直接拒绝（防来源记录被篡改时 target_folder_name 回退 join(id)
+    // 把含分隔符的 id 拼进插件目录内任意子路径）。
+    if !plugin_id_valid(&id) {
+        return Err("插件不存在".to_string());
+    }
     // 优先按清单 id 扫描定位；清单损坏（扫描无法匹配）时按来源记录的落位目录名定位删除
     // （名字经 target_folder_name 同款清理校验，确保仍在插件目录内）。
     let dir = match find_plugin_dir(&base, &id) {
@@ -864,6 +882,10 @@ pub fn plugin_uninstall(
                 .get(&id)
                 .map(|s| target_folder_name(&s.dir_name, &id))
                 .unwrap_or_default();
+            // 无来源记录（随仓库同步/残留）时拒绝删除，防 base.join("") 把整个插件目录当目标。
+            if safe_name.is_empty() {
+                return Err("插件不存在".into());
+            }
             let by_name = base.join(&safe_name);
             if by_name.is_dir() {
                 by_name
@@ -1110,15 +1132,6 @@ mod tests {
         assert!(sanitize_zip_entry("/abs").is_err());
         assert!(sanitize_zip_entry("C:/x").is_err());
         assert!(sanitize_zip_entry("").is_err());
-    }
-
-    #[test]
-    fn source_kind_default_for_legacy_state() {
-        // 旧状态文件只有 repo/scope：反序列化后来源按市场处理（向后兼容）。
-        let raw = r#"{"repo":"com/example","scope":"app"}"#;
-        let src: PluginSource = serde_json::from_str(raw).unwrap();
-        assert_eq!(src.kind, PluginSourceKind::Market);
-        assert_eq!(src.scope, "app");
     }
 
     #[test]

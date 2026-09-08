@@ -57,7 +57,14 @@ export async function startPluginProcess(id: string, runtime: PluginRuntime): Pr
     }),
   );
 
-  const pid = (processId = await invoke<number>("plugin_process_start", { id, runtime }));
+  let pid: number;
+  try {
+    pid = processId = await invoke<number>("plugin_process_start", { id, runtime });
+  } catch (e) {
+    // 启动失败（无解释器/路径无效等）：先退订全部事件监听，防每次失败泄漏监听器。
+    for (const un of unlisteners) un();
+    throw e;
+  }
 
   return {
     post: (message) => {

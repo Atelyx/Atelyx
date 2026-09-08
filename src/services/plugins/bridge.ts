@@ -23,6 +23,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { PluginFiberPhase, PluginManifest, ToolDefinition, ToolResult } from "@/types";
 import { registerPluginTools, unregisterPluginTools } from "@/services/ai/tools";
+import { AGENT_TOOLS_META } from "@/constants/tools";
 import { getAppVersion } from "@/services/app";
 import { runProcess } from "@/services/shell";
 import { detectPlatform } from "@/utils/pluginHost";
@@ -58,7 +59,7 @@ interface Runtime {
   commandDefs: PluginCommandSpec[];
   subscriptions: Set<string>;
   invokeSeq: number;
-  invokePending: Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>;
+  invokePending: Map<number, PendingInvoke>;
   /** 零桥调用插件「loading」兜底定时器（到点置 active，防后台纯逻辑插件永显加载中）。 */
   activeTimer?: ReturnType<typeof setTimeout>;
 }
@@ -80,6 +81,22 @@ export type HostCapabilityHandler = (
   args: unknown[],
   ctx: { pluginId: string; stream?: PluginStreamSink },
 ) => Promise<unknown>;
+
+/** 在飞 invoke 的挂起项：resolve/reject 之外带 cleanup（清超时定时器 + 退订 abort 信号）。 */
+interface PendingInvoke {
+  resolve: (v: unknown) => void;
+  reject: (e: Error) => void;
+  cleanup: () => void;
+}
+
+/** invoke 附加选项：取消信号（用户停止）与超时（防挂死插件永久阻塞 AI 工具轮）。 */
+interface InvokeOptions {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}
+
+/** 插件 AI 工具单次执行超时（毫秒）：超时发 abort 帧 + reject，不让工具轮永久挂起。 */
+const PLUGIN_TOOL_TIMEOUT_MS = 10 * 60 * 1000;
 
 /** 宿主能力展示元数据（UI 标签 + 敏感标记；插件命名空间无元数据、原样显示）。 */
 export interface HostCapabilityMeta {
@@ -308,6 +325,7 @@ function handleWorkerMessage(runtime: Runtime, data: unknown): void {
     const pending = typeof m.seq === "number" ? runtime.invokePending.get(m.seq) : undefined;
     if (pending) {
       runtime.invokePending.delete(m.seq as number);
+      pending.cleanup();
       if (m.ok) pending.resolve(m.result);
       else pending.reject(new Error(m.error || "插件执行失败"));
     } else if (typeof m.seq === "number") {
@@ -466,7 +484,29 @@ async function dispatchMethod(runtime: Runtime, method: string, args: unknown[])
       if (typeof spec?.name !== "string" || typeof spec.executeId !== "string") {
         throw new Error("registerTool 参数不完整（需要 name/description/parameters/execute）");
       }
-      const def = wrapPluginTool(runtime, spec);
+      const name = spec.name.trim();
+      // 工具名直发模型（函数名）：OpenAI 只接受字母/数字/下划线/中划线；垃圾名会让模型调用直接失败。
+      if (!/^[a-zA-Z0-9_-]+$/.test(name) || name.length > 64) {
+        throw new Error("工具名仅限字母/数字/下划线/中划线且不超过 64 字符");
+      }
+      // 内置工具名保留：插件不得覆盖内置工具（注册表按名分发，同名会静默覆盖内置实现）。
+      if (AGENT_TOOLS_META.some((t) => t.id === name)) {
+        throw new Error(`工具名 ${name} 为内置工具保留`);
+      }
+      if (spec.description !== undefined && typeof spec.description !== "string") {
+        throw new Error("registerTool 的 description 必须是字符串");
+      }
+      if (
+        spec.parameters !== undefined &&
+        (typeof spec.parameters !== "object" || spec.parameters === null || Array.isArray(spec.parameters))
+      ) {
+        throw new Error("registerTool 的 parameters 必须是 JSON Schema 对象");
+      }
+      // 工具名全局唯一：与 registerCapability 的命名空间冲突拒绝同语义（两插件同名工具会静默覆盖）。
+      if ([...runtimes.values()].some((r) => r.toolDefs.some((t) => t.name === name))) {
+        throw new Error(`工具名 ${name} 已被其他插件占用`);
+      }
+      const def = wrapPluginTool(runtime, { ...spec, name });
       runtime.toolDefs.push(def);
       registerPluginTools([def]);
       notifyChange();
@@ -545,17 +585,23 @@ async function dispatchMethod(runtime: Runtime, method: string, args: unknown[])
   }
 }
 
-/** 插件工具包装：execute 经桥 RPC 回 worker 执行；validate 透传（参数已由注册表 JSON.parse，插件在 execute 内自校验）。 */
+/** 插件工具包装：execute 经桥 RPC 回 worker 执行（透传模型侧取消信号 + 超时收口）；
+ * validate 透传（参数已由注册表 JSON.parse，插件在 execute 内自校验）。 */
 function wrapPluginTool(runtime: Runtime, spec: PluginToolSpec): ToolDefinition {
   return {
     name: spec.name,
-    description: spec.description,
-    parameters: spec.parameters,
+    description: spec.description ?? "",
+    parameters: spec.parameters ?? {},
     validate: (args) => args as Record<string, unknown>,
     summarize: (args) => `${spec.name} ${safeSummary(args)}`,
-    execute: async (args): Promise<ToolResult> => {
+    execute: async (args, exec): Promise<ToolResult> => {
       // 只传 args：代理在 invoke 时统一追加 ctx，避免双重注入破坏 (args, ctx) 契约。
-      const raw = await invokeFn(runtime, spec.executeId, [args]);
+      // exec.signal（用户停止/超时）→ 宿主发 abort 帧置插件 ctx.aborted；超时/中止时 reject 收口，
+      // 不让挂死插件永久阻塞 AI 工具轮。
+      const raw = await invokeFn(runtime, spec.executeId, [args], {
+        signal: exec?.signal,
+        timeoutMs: PLUGIN_TOOL_TIMEOUT_MS,
+      });
       return raw as ToolResult;
     },
     parallelSafe: spec.parallelSafe,
@@ -571,16 +617,63 @@ function safeSummary(args: unknown): string {
   }
 }
 
-function invokeFn(runtime: Runtime, fnId: string, args: unknown[]): Promise<unknown> {
+function invokeFn(runtime: Runtime, fnId: string, args: unknown[], opts?: InvokeOptions): Promise<unknown> {
   if (runtime.disposed) return Promise.reject(new Error("插件已卸载"));
   const seq = ++runtime.invokeSeq;
   return new Promise((resolve, reject) => {
-    runtime.invokePending.set(seq, { resolve, reject });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let cleaned = false;
+    // 中止（用户停止/超时）：清理资源 → 删挂起项 → 发 abort 帧置插件 ctx.aborted → reject 收口。
+    const abortListener = (): void => {
+      if (cleaned) return;
+      cleaned = true;
+      if (timer) clearTimeout(timer);
+      runtime.invokePending.delete(seq);
+      post(runtime, { kind: "abort", seq });
+      reject(new Error("插件调用已中止"));
+    };
+    const cleanup = (): void => {
+      if (cleaned) return;
+      cleaned = true;
+      if (timer) clearTimeout(timer);
+      opts?.signal?.removeEventListener("abort", abortListener);
+    };
+    if (opts?.timeoutMs !== undefined) {
+      timer = setTimeout(() => {
+        if (cleaned) return;
+        cleaned = true;
+        opts?.signal?.removeEventListener("abort", abortListener);
+        runtime.invokePending.delete(seq);
+        post(runtime, { kind: "abort", seq });
+        reject(new Error("插件执行超时"));
+      }, opts.timeoutMs);
+    }
+    runtime.invokePending.set(seq, {
+      resolve: (v) => {
+        cleanup();
+        resolve(v);
+      },
+      reject: (e) => {
+        cleanup();
+        reject(e);
+      },
+      cleanup,
+    });
+    if (opts?.signal?.aborted) {
+      // 调用前已中止：不发起跨进程调用，直接收口（防浪费一次 post）。
+      abortListener();
+      return;
+    }
     try {
       runtime.transport.post({ kind: "invoke", seq, fnId, args });
     } catch (e) {
+      cleanup();
       runtime.invokePending.delete(seq);
       reject(e instanceof Error ? e : new Error(String(e)));
+      return;
+    }
+    if (opts?.signal) {
+      opts.signal.addEventListener("abort", abortListener, { once: true });
     }
   });
 }
@@ -588,6 +681,7 @@ function invokeFn(runtime: Runtime, fnId: string, args: unknown[]): Promise<unkn
 /** 在飞 invoke 统一 reject + 清空（卸载/失败时 worker 已终止、永不会回包）。 */
 function rejectPending(runtime: Runtime, reason: string): void {
   for (const pending of runtime.invokePending.values()) {
+    pending.cleanup();
     pending.reject(new Error(reason));
   }
   runtime.invokePending.clear();
@@ -643,6 +737,14 @@ function failPlugin(runtime: Runtime, error: string): void {
 
 // ===== 宿主第一方能力（注册表里的普通提供者） =====
 
+/** app.openPage 能力的中转回调（pluginStore 接线注入，绕开 bridge→store 层上依赖；null = 未接线）。 */
+let appPageOpener: ((pageId: string) => void) | null = null;
+
+/** 注入/复位 app.openPage 中转（pluginStore.load 时接线；null 复位供测试）。 */
+export function setAppPageOpener(opener: ((pageId: string) => void) | null): void {
+  appPageOpener = opener;
+}
+
 registerHostCapability(
   "state",
   async (method, args, ctx) => {
@@ -658,9 +760,17 @@ registerHostCapability(
 
 registerHostCapability(
   "app",
-  async (method) => {
+  async (method, args) => {
     if (method === "version") return getAppVersion();
     if (method === "platform") return detectPlatform();
+    if (method === "openPage") {
+      // 打开插件应用页面（app 类型插件入口；命令/其他插件经 bridge.call("app","openPage",[id]) 调用）。
+      const id = args[0];
+      if (typeof id !== "string" || id.length === 0) throw new Error("app.openPage 需要页面 id");
+      if (!appPageOpener) throw new Error("插件页面入口未就绪");
+      appPageOpener(id);
+      return true;
+    }
     throw new Error(`app 无方法 ${method}`);
   },
   { label: "宿主信息" },

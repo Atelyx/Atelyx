@@ -17,9 +17,11 @@ import type {
 import { errText, type PluginFiberPhase } from "@/types";
 import {
   attachPlugin,
+  contributedCommands,
   contributedPluginTools,
   exposePluginFacade,
   getPluginAppPages,
+  getPluginCommands,
   getPluginNode,
   getPluginNodes,
   getPluginSetting,
@@ -43,7 +45,9 @@ import {
   pluginViewKinds as allPluginViewKinds,
   pluginViewLabel as pluginViewLabelOf,
   registerBuiltinView,
+  runContributedCommand,
   runtimeSnapshot,
+  setAppPageOpener,
   setPluginTableAccess,
   setPluginVaultAccess,
   startPluginProcess,
@@ -53,6 +57,7 @@ import {
 } from "@/services/plugins";
 import type {
   PluginAppPageRegistration,
+  PluginCommandContribution,
   PluginNodeRegistration,
   PluginRow,
   PluginSettingRegistration,
@@ -138,6 +143,10 @@ interface PluginStoreState {
   pluginTableView(kind: string): PluginTableViewRegistration | undefined;
   /** 全部插件表格视图注册（工具条视图列表合并用）。 */
   pluginTableViews(): PluginTableViewRegistration[];
+  /** 插件命令（UI 平面 + worker 平面合并；管理 UI「运行命令」入口）。 */
+  pluginCommands(): PluginCommandContribution[];
+  /** 执行插件命令（UI 平面直接 run；worker 平面经桥 RPC）。 */
+  runPluginCommand(globalId: string): Promise<unknown>;
   /** 能力命名空间展示文案（宿主能力返回注册表标签，插件命名空间原样）。 */
   capabilityLabel(namespace: string): string;
   /** 能力命名空间是否敏感（宿主注册表标记，UI「敏感」高亮）。 */
@@ -303,10 +312,14 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
         types.some(isUiPluginType)
           ? p.manifest.main
           : undefined);
-      if (uiEntry) {
-        const code = await readEntry(p, uiEntry);
-        loadUiPlugin(id, code);
-      }
+      const uiLoad: Promise<void> = uiEntry
+        ? readEntry(p, uiEntry).then((code) => loadUiPlugin(id, code))
+        : Promise.resolve();
+      // UI 平面错误统一收口（镜像为永不 reject，防 worker 分支抛错时未捕获拒绝）。
+      const uiError = uiLoad.then(
+        () => undefined,
+        (e: unknown) => errText(e),
+      );
       // 逻辑平面：工具/后台/命令逻辑。
       const syncPhase = (phase: PluginFiberPhase, error?: string): void => {
         set((s) => {
@@ -326,8 +339,18 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
           const entry = loadPlugin(p.manifest, code);
           syncPhase(entry.phase, entry.error);
         }
+        // 双平面插件 UI 脚本失败 = 整插件故障：卸载运行时 + 撤销贡献 + 标 failed
+        // （与「worker 工具仍可用但标 failed」的状态矛盾相比，卸载是自洽的一致态）。
+        void uiError.then((err) => {
+          if (!err) return;
+          unloadPlugin(id);
+          unregisterPluginUi(id);
+          syncPhase("failed", err);
+        });
       } else {
-        // 无逻辑平面：主线程脚本注入后即视为已加载（注册经 onPluginUiChange 刷新 UI）。
+        // 纯 UI 平面：等脚本加载+执行完成再置 active；失败 → failed（脚本错误不再静默）。
+        const err = await uiError;
+        if (err) throw new Error(err);
         syncPhase("active");
       }
     } catch (e) {
@@ -362,6 +385,7 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
      */
     load: async () => {
       exposePluginFacade();
+      setAppPageOpener((pageId) => useAppStore.getState().openPluginPage(pageId));
       ensureTableAccess();
       ensureVaultAccess();
       const seq = ++loadSeq;
@@ -450,6 +474,8 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
     },
 
     update: async (id) => {
+      const p = get().plugins[id];
+      if (!p) return;
       unloadPlugin(id);
       unregisterPluginUi(id);
       await pluginUpdate(id);
@@ -476,6 +502,34 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
     registerBuiltinView: (contrib) => registerBuiltinView(contrib),
     pluginTableView: (kind) => getPluginTableView(kind),
     pluginTableViews: () => getPluginTableViews(),
+    pluginCommands: () => {
+      // UI 平面优先（直接持有 run），同 globalId 去重——双平面插件可注册同名命令。
+      const byGlobalId = new Map<string, PluginCommandContribution>();
+      for (const c of getPluginCommands()) {
+        const item: PluginCommandContribution = {
+          globalId: `${c.pluginId}:${c.id}`,
+          pluginId: c.pluginId,
+          id: c.id,
+          label: c.label,
+        };
+        byGlobalId.set(item.globalId, item);
+      }
+      for (const c of contributedCommands()) {
+        if (!byGlobalId.has(c.globalId)) byGlobalId.set(c.globalId, c);
+      }
+      return [...byGlobalId.values()].sort((a, b) => (a.globalId < b.globalId ? -1 : 1));
+    },
+    runPluginCommand: (globalId) => {
+      const uiCmd = getPluginCommands().find((c) => `${c.pluginId}:${c.id}` === globalId);
+      if (uiCmd) {
+        try {
+          return Promise.resolve(uiCmd.run());
+        } catch (e) {
+          return Promise.reject(e);
+        }
+      }
+      return runContributedCommand(globalId);
+    },
     capabilityLabel: (namespace) => hostCapabilityLabel(namespace) ?? namespace,
     capabilitySensitive: (namespace) => hostCapabilitySensitive(namespace),
 

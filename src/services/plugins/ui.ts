@@ -315,21 +315,37 @@ export function exposePluginFacade(): void {
   };
 }
 
-/** 加载插件主线程入口（blob script 注入）；先撤销该插件旧贡献（重载防重复注册）。 */
-export function loadUiPlugin(pluginId: string, code: string): void {
+/** 加载插件主线程入口（blob script 注入）；先撤销该插件旧贡献（重载防重复注册）。
+ * 返回 Promise：脚本加载/执行错误 → reject（pluginStore 据此置 failed）——
+ * 运行期错误经 window error 事件按 sourceURL 标记过滤，只认本插件脚本。 */
+export function loadUiPlugin(pluginId: string, code: string): Promise<void> {
   unregisterPluginUi(pluginId);
-  // 注入 React（供 TSX 经 esbuild jsx-transform 转出的 React.createElement 引用）。
-  const source = `(function(){\nvar bridge = window.__atelyxPlugin__.forPlugin(${JSON.stringify(pluginId)});\nvar React = bridge.React;\n${code}\n})();\n//# sourceURL=atelyx-plugin-${pluginId}`;
-  const url = URL.createObjectURL(new Blob([source], { type: "text/javascript" }));
-  const script = document.createElement("script");
-  script.src = url;
-  script.onload = () => {
-    URL.revokeObjectURL(url);
-    script.remove();
-  };
-  script.onerror = () => {
-    URL.revokeObjectURL(url);
-    script.remove();
-  };
-  document.head.appendChild(script);
+  return new Promise((resolve, reject) => {
+    // 注入 React（供 TSX 经 esbuild jsx-transform 转出的 React.createElement 引用）。
+    const source = `(function(){\nvar bridge = window.__atelyxPlugin__.forPlugin(${JSON.stringify(pluginId)});\nvar React = bridge.React;\n${code}\n})();\n//# sourceURL=atelyx-plugin-${pluginId}`;
+    const url = URL.createObjectURL(new Blob([source], { type: "text/javascript" }));
+    const script = document.createElement("script");
+    let settled = false;
+    const done = (error?: string): void => {
+      if (settled) return;
+      settled = true;
+      window.removeEventListener("error", onWindowError);
+      URL.revokeObjectURL(url);
+      script.remove();
+      if (error) reject(new Error(error));
+      else resolve();
+    };
+    // 运行期错误：ErrorEvent.filename 为 `# sourceURL` 标注名（或 blob URL）；只认本插件脚本。
+    const onWindowError = (e: ErrorEvent): void => {
+      const src = e.filename || "";
+      if (src.includes("atelyx-plugin-") || src === url) {
+        done(e.message || "插件 UI 执行出错");
+      }
+    };
+    script.src = url;
+    script.onload = () => done();
+    script.onerror = () => done("插件 UI 入口加载失败");
+    window.addEventListener("error", onWindowError);
+    document.head.appendChild(script);
+  });
 }

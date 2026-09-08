@@ -81,6 +81,7 @@ export {
   registerHostCapabilityMeta,
   runContributedCommand,
   runtimeSnapshot,
+  setAppPageOpener,
   unloadPlugin,
 } from "./bridge";
 export type {

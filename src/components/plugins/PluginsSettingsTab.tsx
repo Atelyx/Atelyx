@@ -9,7 +9,7 @@
  * 分层：本组件只经 pluginStore 触达插件能力（不直连 services）。
  */
 import { useState } from "react";
-import { FolderOpen, GitBranch, RefreshCw, Trash2 } from "lucide-react";
+import { FolderOpen, GitBranch, RefreshCw, Terminal, Trash2 } from "lucide-react";
 import { usePluginStore } from "@/stores/pluginStore";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 import { ToggleSwitch } from "@/components/common/ToggleSwitch";
@@ -21,6 +21,8 @@ type TabMode = "installed" | "market";
 
 export function PluginsSettingsTab() {
   const plugins = usePluginStore((s) => s.plugins);
+  // 订阅 UI 注册修订号：插件 UI 平面命令异步注册/卸载变化触发重渲染（命令列表在服务层非响应式）。
+  usePluginStore((s) => s.uiRevision);
   const setEnabled = usePluginStore((s) => s.setEnabled);
   const update = usePluginStore((s) => s.update);
   const uninstall = usePluginStore((s) => s.uninstall);
@@ -28,6 +30,8 @@ export function PluginsSettingsTab() {
   const installGit = usePluginStore((s) => s.installGit);
   const capabilityLabel = usePluginStore((s) => s.capabilityLabel);
   const capabilitySensitive = usePluginStore((s) => s.capabilitySensitive);
+  const pluginCommands = usePluginStore((s) => s.pluginCommands);
+  const runPluginCommand = usePluginStore((s) => s.runPluginCommand);
 
   const [mode, setMode] = useState<TabMode>("installed");
   const [notice, setNotice] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
@@ -36,6 +40,8 @@ export function PluginsSettingsTab() {
   const [installing, setInstalling] = useState(false);
 
   const rows = Object.values(plugins).sort((a, b) => (a.id < b.id ? -1 : 1));
+  // 命令合并全量一次（UI 平面异步注册经 uiRevision 订阅刷新）。
+  const commands = pluginCommands();
 
   /** 安装统一入口：action 返回 false（如取消目录选择）不算成功、不提示；onOk 成功回调（如清空输入）。 */
   const runInstall = async (
@@ -144,6 +150,7 @@ export function PluginsSettingsTab() {
         {rows.map((p) => {
           const declares = p.manifest.declares ?? [];
           const failed = p.phase === "failed";
+          const cmds = commands.filter((c) => c.pluginId === p.id);
           return (
             <div
               key={p.id}
@@ -216,6 +223,27 @@ export function PluginsSettingsTab() {
               {failed && p.error && (
                 <div className="mt-1.5 text-[11px] break-words" style={{ color: "#f87171" }}>
                   {p.error}
+                </div>
+              )}
+              {cmds.length > 0 && (
+                <div className="mt-2 flex flex-wrap items-center gap-1">
+                  <Terminal size={12} style={{ color: "var(--text-muted)" }} />
+                  {cmds.map((c) => (
+                    <button
+                      key={c.globalId}
+                      onClick={() =>
+                        void runPluginCommand(c.globalId).then(
+                          () => setNotice({ kind: "ok", text: `命令「${c.label}」已执行` }),
+                          (e) => setNotice({ kind: "error", text: `命令执行失败：${errText(e)}` }),
+                        )
+                      }
+                      title="运行此插件命令"
+                      className="px-1.5 py-0.5 rounded border text-[10px]"
+                      style={{ borderColor: "var(--border)", color: "var(--text-secondary)" }}
+                    >
+                      {c.label}
+                    </button>
+                  ))}
                 </div>
               )}
               {declares.length > 0 && (

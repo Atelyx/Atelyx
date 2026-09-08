@@ -18,6 +18,8 @@
  *   流式调用时主线程不回 reply，改发 `{ kind: "stream", seq, event, data }` 帧。
  * - 主线程 → 插件：`{ kind: "invoke", seq, fnId, args, stream? }` 运行插件注册的函数；
  *   stream=true 时注入 `ctx.stream`（chunk/end/error）供插件回推；插件回 `reply` 或 `stream`。
+ * - `{ kind: "abort", seq }` 中止通知：置该 invoke 的 `ctx.aborted`（宿主侧已在用户中止/超时时
+ *   reject 调用方；插件执行体可自查 ctx.aborted 提前退出）。
  * - `{ kind: "event", event, payload }` 事件投递。
  *
  * 注册类方法（registerTool 等）参数中的函数会被代理存为 fnId 引用，序列化只过描述信息；
@@ -120,7 +122,7 @@ export function buildProxySource(): string {
       `bridge[${JSON.stringify(m)}]=function(){return call(${JSON.stringify(m)},Array.prototype.slice.call(arguments));};`,
   ).join("\n");
   return `(function(){
-var seq=0;var pending={};var fns={};var subs=[];var streams={};
+var seq=0;var pending={};var fns={};var subs=[];var streams={};var ctxs={};
 self.addEventListener("message",function(e){
   var m=e.data;if(!m||typeof m!=="object")return;
   if(m.kind==="reply"){var p=pending[m.seq];if(!p)return;delete pending[m.seq];m.ok?p[0](m.result):p[1](new Error(m.error||"bridge error"));}
@@ -128,13 +130,14 @@ self.addEventListener("message",function(e){
     else if(m.event==="end"){if(s.end)s.end(m.data);delete streams[m.seq];}
     else if(m.event==="error"){if(s.error)s.error(m.data);delete streams[m.seq];}}
   else if(m.kind==="event"){for(var i=0;i<subs.length;i++)subs[i](m.event,m.payload);}
+  else if(m.kind==="abort"){var c=ctxs[m.seq];if(c){c.aborted=true;delete ctxs[m.seq];}}
   else if(m.kind==="invoke"){var f=fns[m.fnId];if(!f){self.postMessage({kind:"reply",seq:m.seq,ok:false,error:"unknown fn"});return;}
-    var ctx={aborted:false};
+    var ctx={aborted:false};ctxs[m.seq]=ctx;
     if(m.stream)ctx.stream={chunk:function(d){self.postMessage({kind:"stream",seq:m.seq,event:"chunk",data:d});},
       end:function(d){self.postMessage({kind:"stream",seq:m.seq,event:"end",data:d});},
       error:function(e){self.postMessage({kind:"stream",seq:m.seq,event:"error",data:(e&&e.message)?e.message:String(e)});}};
-    Promise.resolve().then(function(){return f.apply(null,(m.args||[]).concat([ctx]));}).then(function(r){self.postMessage({kind:"reply",seq:m.seq,ok:true,result:r});},
-      function(err){self.postMessage({kind:"reply",seq:m.seq,ok:false,error:err&&err.message?err.message:String(err)});});}
+    Promise.resolve().then(function(){return f.apply(null,(m.args||[]).concat([ctx]));}).then(function(r){delete ctxs[m.seq];self.postMessage({kind:"reply",seq:m.seq,ok:true,result:r});},
+      function(err){delete ctxs[m.seq];self.postMessage({kind:"reply",seq:m.seq,ok:false,error:err&&err.message?err.message:String(err)});});}
 });
 function call(method,args){var s=++seq;return new Promise(function(res,rej){pending[s]=[res,rej];self.postMessage({kind:"call",seq:s,method:method,args:args||[]});});}
 function reg(fn){var id="f"+(++seq);fns[id]=fn;return id;}
