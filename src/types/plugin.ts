@@ -79,8 +79,10 @@ export interface PluginManifest {
   runtime?: PluginRuntime;
   /** 提供的能力命名空间（反向域名，必含点；其他插件/宿主可经 bridge.call 调用）。 */
   provides?: string[];
-  /** 依赖的能力命名空间（宿主或他插件提供；懒解析——缺失在调用时报错，不阻塞激活）。 */
+  /** 依赖的能力命名空间（宿主或他插件提供；启动前校验，缺失即拒绝启用）。 */
   requires?: string[];
+  /** 显式替换意图：要替换的能力命名空间（须同时声明在 requires 里；冲突注册时 last-wins 替换并审计）。 */
+  replace?: string[];
   /** 披露：将调用的能力命名空间（宿主命名空间如 state/shell，或他插件反向域名；
    *  与 provides 同一词汇表，市场展示 + 管理页审计对照；无运行时门槛）。 */
   declares?: string[];
@@ -186,4 +188,39 @@ export interface PluginTableSnapshot {
   selectedRowId: string | null;
   /** 协作远端选中行 → 用户色（cell/range/row 区域归约；column/all 不染；首个匹配 peer 优先）。 */
   peerColorByRowId: Record<string, string>;
+}
+
+/**
+ * 插件画布节点（`canvas` 能力投影；与磁盘/协作格式同构，JSON 可序列化）。
+ * type 为开放字符串——插件可注册自定义节点类型（registerNode），不限于内置类型。
+ */
+export interface PluginCanvasNode {
+  id: string;
+  type: string;
+  x: number;
+  y: number;
+  width?: number;
+  height?: number;
+  /** 各类型 data；conversation 节点含 messages（与磁盘格式一致，消息数组随快照内嵌）。 */
+  data: Record<string, unknown>;
+}
+
+/** 插件画布边（与磁盘/协作格式同构；directed 缺省 true=数据流边，false=关联自由线）。 */
+export interface PluginCanvasEdge {
+  id: string;
+  source: string;
+  target: string;
+  sourceHandle?: string;
+  targetHandle?: string;
+  directed?: boolean;
+  linkMode?: string;
+}
+
+/** 插件画布快照（`canvas` 能力 snapshot() 返回；canvasFile=null = 未打开画布）。 */
+export interface PluginCanvasSnapshot {
+  canvasFile: string | null;
+  canvasTitle: string;
+  nodes: PluginCanvasNode[];
+  edges: PluginCanvasEdge[];
+  selectedNodeId: string | null;
 }

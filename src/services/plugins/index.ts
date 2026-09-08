@@ -87,6 +87,10 @@ export {
   runContributedCommand,
   runtimeSnapshot,
   setAppPageOpener,
+  setPluginCanvasAccess,
+  setPluginCollabAccess,
+  setPluginTableRuntimeAccess,
+  setSettingsAccess,
   unloadPlugin,
 } from "./bridge";
 export type {

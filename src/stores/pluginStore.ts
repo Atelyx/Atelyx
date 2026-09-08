@@ -12,6 +12,8 @@ import { create } from "zustand";
 import type { ComponentType } from "react";
 import type {
   InstalledPlugin,
+  PluginCanvasEdge,
+  PluginCanvasNode,
   PluginIndexEntry,
   PluginScope,
   PluginSourceKind,
@@ -33,6 +35,7 @@ import {
   getPluginTableViews,
   getViewContribution,
   hostCapabilityLabel,
+  hostCapabilityNames,
   hostCapabilitySensitive,
   loadPlugin,
   loadUiPlugin,
@@ -53,12 +56,17 @@ import {
   runtimeSnapshot,
   setAppPageOpener,
   setBuiltinPluginIds,
+  setPluginCanvasAccess,
+  setPluginCollabAccess,
   setPluginTableAccess,
+  setPluginTableRuntimeAccess,
   setPluginVaultAccess,
+  setSettingsAccess,
   startPluginProcess,
   transpileTs,
   unloadPlugin,
   unregisterPluginUi,
+  emitPluginEvent,
 } from "@/services/plugins";
 import type {
   PluginAppPageRegistration,
@@ -72,11 +80,14 @@ import type {
 } from "@/services/plugins";
 import { BUILTIN_VIEWS } from "@/components/plugins/builtinViews";
 import { useTableStore } from "@/stores/tableStore";
-import { useCollabStore } from "@/stores/collabStore";
+import { useCanvasStore } from "@/stores/canvasStore";
+import { useCollabStore, publishPluginPresence } from "@/stores/collabStore";
 import { useVaultStore } from "@/stores/vaultStore";
 import { useAppStore } from "@/stores/appStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { pickDirectory as pickDirectorySvc } from "@/services/dialog";
 import { buildPluginTableSnapshot } from "@/utils/table";
+import { serializeEdgeForCollab, serializeNodeForCollab } from "@/utils/canvasCollab";
 import { resolveTableImageUrl } from "@/services/tableImageCache";
 import { pluginToolMetas as pluginToolMetasSvc } from "@/services/ai/tools";
 import type { AgentToolMeta } from "@/constants/tools";
@@ -93,6 +104,7 @@ import {
   pluginTypeList,
   validatePluginManifest,
 } from "@/utils/pluginManifest";
+import { resolveEnabledDeps } from "@/utils/pluginDeps";
 import { detectPlatform } from "@/utils/pluginHost";
 
 /** 某视图 kind 由内置插件提供时的状态（ViewHost 降级占位/菜单过滤用；installed=false = 已卸载）。 */
@@ -281,6 +293,176 @@ function ensureVaultAccess(): void {
   });
 }
 
+/** 表格能力接线守卫：把当前表格数据与写操作暴露给 worker 平面 `table` 命名空间（幂等一次）。
+ *  快照复用表数据订阅的同一构造（buildPluginTableSnapshot），写操作直连 tableStore 动作。 */
+let tableRuntimeWired = false;
+function ensureTableRuntimeAccess(): void {
+  if (tableRuntimeWired) return;
+  tableRuntimeWired = true;
+  setPluginTableRuntimeAccess({
+    snapshot: () =>
+      buildPluginTableSnapshot(
+        useTableStore.getState().tableFile,
+        useTableStore.getState().fields,
+        useTableStore.getState().rows,
+        useTableStore.getState().selectedRowId,
+        useCollabStore.getState().peers,
+      ),
+    updateCell: (rowId, fieldId, value) => useTableStore.getState().updateCell(rowId, fieldId, value),
+    addRow: () => useTableStore.getState().addRow(),
+    removeRow: (rowId) => useTableStore.getState().removeRow(rowId),
+    selectRow: (rowId) => useTableStore.getState().selectRow(rowId),
+  });
+}
+
+/** 协作能力接线守卫：把在线用户与 presence 上报暴露给 worker 平面 `collab` 命名空间（幂等一次）。 */
+let collabRuntimeWired = false;
+function ensureCollabRuntimeAccess(): void {
+  if (collabRuntimeWired) return;
+  collabRuntimeWired = true;
+  setPluginCollabAccess({
+    peers: () => useCollabStore.getState().peers,
+    setPresence: (view, file) => publishPluginPresence(view, file),
+  });
+}
+
+/** 画布能力接线守卫：把当前画布快照与写操作暴露给 worker 平面 `canvas` 命名空间（幂等一次）。
+ *  投影复用协作/磁盘序列化纯函数（serializeNodeForCollab 内嵌对话消息、剥离 React Flow 视图态，JSON 安全）；
+ *  写方法守卫「已打开可写画布」；全部 store 访问延迟到回调内 getState()（防模块环）。 */
+let canvasRuntimeWired = false;
+function ensureCanvasRuntimeAccess(): void {
+  if (canvasRuntimeWired) return;
+  canvasRuntimeWired = true;
+  const requireWritable = (): void => {
+    const s = useCanvasStore.getState();
+    if (!s.canvasFile) throw new Error("未打开画布");
+    if (s.readOnly) throw new Error("画布为只读");
+  };
+  setPluginCanvasAccess({
+    snapshot: () => {
+      const s = useCanvasStore.getState();
+      const nodes: PluginCanvasNode[] = s.nodes.map((n) => {
+        const ser = serializeNodeForCollab(n, s.messagesByConv);
+        return {
+          id: ser.id,
+          type: ser.type,
+          x: ser.x,
+          y: ser.y,
+          width: ser.width,
+          height: ser.height,
+          data: ser.data as unknown as Record<string, unknown>,
+        };
+      });
+      const edges: PluginCanvasEdge[] = s.edges.map((e) => {
+        const ser = serializeEdgeForCollab(e);
+        return {
+          id: ser.id,
+          source: ser.source,
+          target: ser.target,
+          sourceHandle: ser.sourceHandle,
+          targetHandle: ser.targetHandle,
+          directed: ser.directed,
+          linkMode: ser.linkMode,
+        };
+      });
+      return {
+        canvasFile: s.canvasFile,
+        canvasTitle: s.canvasTitle,
+        nodes,
+        edges,
+        selectedNodeId: s.selectedNodeId,
+      };
+    },
+    addNode: (node) => {
+      requireWritable();
+      const id = crypto.randomUUID();
+      useCanvasStore.getState().addNode({ id, type: node.type, position: node.position, data: node.data ?? {} });
+      return id;
+    },
+    updateNode: (nodeId, patch) => {
+      requireWritable();
+      useCanvasStore.getState().updateNodeData(nodeId, patch);
+    },
+    moveNode: (nodeId, position) => {
+      requireWritable();
+      const st = useCanvasStore.getState();
+      // position 变更经 onNodesChange 应用（自身不入 undo 栈），显式 pushUndo 使其可撤销
+      st.pushUndo();
+      st.onNodesChange([{ type: "position", id: nodeId, position, dragging: false }]);
+    },
+    deleteNode: (nodeId) => {
+      requireWritable();
+      useCanvasStore.getState().deleteNodes([nodeId]);
+    },
+    addEdge: (edge) => {
+      requireWritable();
+      const st = useCanvasStore.getState();
+      const id = crypto.randomUUID();
+      st.addEdge({ id, ...edge });
+      return id;
+    },
+    deleteEdge: (edgeId) => {
+      requireWritable();
+      const st = useCanvasStore.getState();
+      st.pushUndo();
+      st.onEdgesChange([{ type: "remove", id: edgeId }]);
+    },
+    selectNode: (nodeId) => {
+      useCanvasStore.getState().selectNode(nodeId);
+    },
+  });
+}
+
+/** AI 配置接线守卫：把供应商/模型/Agent 与默认目标解析暴露给 worker 平面 `ai` 命名空间（幂等一次）。
+ *  providers 为运行时配置（apiKey 已由 settingsStore 填充——key 读取不进本层）。 */
+let settingsAccessWired = false;
+function ensureSettingsAccess(): void {
+  if (settingsAccessWired) return;
+  settingsAccessWired = true;
+  setSettingsAccess(() => {
+    const s = useSettingsStore.getState();
+    return {
+      providers: s.config.providers,
+      agents: s.agents,
+      resolveChatTarget: (sel) => s.resolveChatTarget(sel),
+    };
+  });
+}
+
+/** 能力变更事件接线守卫：store 变更 → emitPluginEvent 通知 worker 平面订阅插件（幂等一次）。
+ *  载荷为轻量信号（canvas/table 只带 file，插件按需再调 snapshot() 取数据）——
+ *  画布拖拽/流式是每帧高频变更，全量序列化快照会造成事件风暴与陈旧大载荷。 */
+let runtimeEventsWired = false;
+function ensureRuntimeChangeEvents(): void {
+  if (runtimeEventsWired) return;
+  runtimeEventsWired = true;
+  useTableStore.subscribe((s, prev) => {
+    if (
+      s.tableFile !== prev.tableFile ||
+      s.fields !== prev.fields ||
+      s.rows !== prev.rows ||
+      s.selectedRowId !== prev.selectedRowId
+    ) {
+      emitPluginEvent("table:changed", { file: s.tableFile });
+    }
+  });
+  useCollabStore.subscribe((s, prev) => {
+    if (s.peers !== prev.peers) emitPluginEvent("collab:changed", { peers: s.peers });
+  });
+  useCanvasStore.subscribe((s, prev) => {
+    if (
+      s.canvasFile !== prev.canvasFile ||
+      s.canvasTitle !== prev.canvasTitle ||
+      s.nodes !== prev.nodes ||
+      s.edges !== prev.edges ||
+      s.messagesByConv !== prev.messagesByConv ||
+      s.selectedNodeId !== prev.selectedNodeId
+    ) {
+      emitPluginEvent("canvas:changed", { file: s.canvasFile });
+    }
+  });
+}
+
 export const usePluginStore = create<PluginStoreState>()((set, get) => {
   /** 把运行时快照合并回 store（加载/激活/失败/卸载事件驱动）。 */
   const reconcile = (): void => {
@@ -423,6 +605,11 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
       setAppPageOpener((pageId) => useAppStore.getState().openPluginPage(pageId));
       ensureTableAccess();
       ensureVaultAccess();
+      ensureTableRuntimeAccess();
+      ensureCollabRuntimeAccess();
+      ensureCanvasRuntimeAccess();
+      ensureSettingsAccess();
+      ensureRuntimeChangeEvents();
       const seq = ++loadSeq;
       const rows = await pluginList();
       if (seq !== loadSeq) return; // 已有更新的 load 开始，本次作废（防孤儿 runtime）
@@ -440,10 +627,26 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
       // 面板/菜单只订阅 uiRevision：插件行落定后补发一次，让已渲染的降级占位/菜单按新状态收敛
       // （全停用内置的冷启动无任何注册 notify）。
       set((s) => ({ uiRevision: s.uiRevision + 1 }));
-      for (const row of rows) {
-        if (!row.enabled) continue;
+      // 真依赖校验（requires 启动前）：缺失/成环的启用插件拒绝拉起，附可读原因；
+      // 可启动插件按依赖解析顺序拉起（提供者先于依赖者）。
+      const depResult = resolveEnabledDeps(
+        rows.filter((r) => r.enabled).map((r) => ({ id: r.id, provides: r.manifest.provides, requires: r.manifest.requires })),
+        hostCapabilityNames(),
+      );
+      if (depResult.failed.length > 0) {
+        set((s) => {
+          const next = { ...s.plugins };
+          for (const f of depResult.failed) {
+            const cur = next[f.id];
+            if (!cur || !cur.enabled) continue;
+            next[f.id] = { ...cur, phase: "failed", error: f.reason };
+          }
+          return { plugins: next };
+        });
+      }
+      for (const id of depResult.spawnable) {
         if (seq !== loadSeq) return;
-        await spawn(row.id);
+        await spawn(id);
       }
     },
 

@@ -151,6 +151,15 @@ export function validatePluginManifest(raw: unknown): ManifestValidateResult {
   const declares = normalizeDeclares(data.declares, errors);
   const provides = normalizeStringList(data.provides, "provides", errors);
   const requires = normalizeStringList(data.requires, "requires", errors);
+  const replace = normalizeStringList(data.replace, "replace", errors);
+  if (replace.length > 0) {
+    // 显式替换意图必须以 requires 声明为前提（last-wins 是协商语义，不能是隐式抢占）
+    const requireSet = new Set(requires);
+    const undeclared = replace.filter((r) => !requireSet.has(r));
+    if (undeclared.length > 0) {
+      errors.push(`replace 声明的命名空间须同时声明在 requires 里：${undeclared.join("、")}`);
+    }
+  }
   const contributes = normalizeContributes(data.contributes, errors);
   const permissions = normalizePermissions(data.permissions, errors);
   const platforms = normalizeStringList(data.platforms, "platforms", errors);
@@ -170,6 +179,7 @@ export function validatePluginManifest(raw: unknown): ManifestValidateResult {
     ...(declares.length > 0 ? { declares } : {}),
     ...(provides.length > 0 ? { provides } : {}),
     ...(requires.length > 0 ? { requires } : {}),
+    ...(replace.length > 0 ? { replace } : {}),
     ...(contributes ? { contributes } : {}),
     ...(Object.keys(permissions).length > 0 ? { permissions } : {}),
     ...(platforms.length > 0 ? { platforms } : {}),

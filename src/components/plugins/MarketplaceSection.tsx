@@ -155,6 +155,8 @@ export function MarketplaceSection() {
             const folder = p.installDir.split(/[\\/]/).pop() ?? "";
             return folder === it.repo.split("/")[1];
           });
+          // 内置插件（随 App 分发）与市场条目同 id：免重复安装——展示「已内置」并禁装。
+          const installedBuiltin = Object.values(plugins).some((p) => p.id === it.id && p.sourceKind === "builtin");
           return (
             <div
               key={it.repo}
@@ -186,6 +188,10 @@ export function MarketplaceSection() {
                 {installed ? (
                   <span className="text-[11px] px-2 py-1 rounded" style={{ color: "var(--text-secondary)" }}>
                     已安装
+                  </span>
+                ) : installedBuiltin ? (
+                  <span className="text-[11px] px-2 py-1 rounded" style={{ color: "var(--text-secondary)" }}>
+                    已内置
                   </span>
                 ) : (
                   <button

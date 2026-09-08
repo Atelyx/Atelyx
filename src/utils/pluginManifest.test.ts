@@ -158,6 +158,35 @@ describe("validatePluginManifest", () => {
   });
 });
 
+describe("validatePluginManifest 的 replace 字段", () => {
+  it("replace 归一化：replace ⊆ requires 时通过并保留", () => {
+    const ok = validatePluginManifest({
+      ...validManifest(),
+      requires: ["com.shared", "shell"],
+      replace: ["com.shared"],
+    });
+    expect(ok.ok).toBe(true);
+    if (!ok.ok) return;
+    expect(ok.manifest.replace).toEqual(["com.shared"]);
+  });
+
+  it("replace 声明了 requires 未声明的命名空间：拒绝（显式替换意图必须以 requires 为前提）", () => {
+    const r = validatePluginManifest({
+      ...validManifest(),
+      requires: ["shell"],
+      replace: ["com.shared"],
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.errors.join(" ")).toContain("须同时声明在 requires 里");
+  });
+
+  it("replace 非字符串数组：拒绝", () => {
+    expect(validatePluginManifest({ ...validManifest(), replace: "com.shared" }).ok).toBe(false);
+    expect(validatePluginManifest({ ...validManifest(), replace: [123] }).ok).toBe(false);
+  });
+});
+
 describe("pluginTypeList", () => {
   it("含主分类去重", () => {
     expect(pluginTypeList({ type: "tool", types: ["tool", "panel"] })).toEqual(["tool", "panel"]);

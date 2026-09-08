@@ -16,7 +16,7 @@
   "main": "plugin.js",            // 必须：逻辑入口（js/ts 为脚本，python 为子进程入口；纯 theme 插件可省略）
   "mainUi": "ui.js",              // 可选：主线程 UI 入口（任何语言都可附 JS UI；无 UI 可省）
   "provides": ["com.example.hello.data"], // 可选：提供的能力命名空间（反向域名必含点；其他插件可经 bridge.call 调用）
-  "requires": ["vault", "shell"], // 可选：依赖的能力命名空间（宿主或他插件提供；懒解析，缺失在调用时报错）
+  "requires": ["vault", "shell"], // 可选：依赖的能力命名空间（宿主或他插件提供；启动前校验，缺失拒绝启用）
   "declares": ["ai", "state", "event"], // 可选：披露将调用的能力命名空间（市场展示 + 管理页审计对照；无运行时门槛）
   "contributes": { "commands": [{ "id": "hi", "label": "你好" }] }, // 可选：静态贡献声明（纯元数据，展示/发现用）
   "atelyxVersionMin": "0.4.2",    // 可选：兼容的宿主版本下限
@@ -59,12 +59,14 @@
 - `python`：入口 `main.py`，宿主 spawn 解释器（`python`/`python3`，需安装并加入 PATH）经
   stdio 桥接入；插件顶层直接用注入的全局 `bridge`，无需 import。
 
-## 能力命名空间 `provides` / `requires` / `declares`
+## 能力命名空间 `provides` / `requires` / `declares` / `replace`
 
 插件与宿主在同一能力注册表里对等提供能力：宿主命名空间不含点（`state`/`app`/`shell`，及
-`ai`/`command`/`event` 三个糖方法面），插件命名空间必为反向域名（含点）。三个字段同一词汇表：
-`provides` = 提供的能力，`requires` = 依赖的能力（懒解析：缺失在调用时报错，不阻塞激活），
-`declares` = 披露将调用的能力（市场展示 + 管理页「声明 vs 实际」审计对照）。
+`ai`/`command`/`event` 三个糖方法面），插件命名空间必为反向域名（含点）。四个字段同一词汇表：
+`provides` = 提供的能力，`requires` = 依赖的能力（**启动前校验**：缺失/成环的插件拒绝启用，
+管理页显示原因），`declares` = 披露将调用的能力（市场展示 + 管理页「声明 vs 实际」审计对照），
+`replace` = 显式替换意图：要替换的插件能力命名空间（**必须同时声明在 `requires` 里**，否则
+清单校验拒绝）——冲突注册时按后注册者替换，未声明 `replace` 的冲突默认拒绝。
 
 ## 披露 `declares` 与完全自由模型
 

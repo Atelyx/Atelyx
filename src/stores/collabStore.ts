@@ -241,6 +241,12 @@ function schedulePresenceBroadcast(presence: CollabPresence): void {
   }, BROADCAST_THROTTLE_MS);
 }
 
+/** 插件经协作能力上报本端 presence（view/file；selection 无——插件不做选中联动）。
+ *  内部合并当前画布锁/流式与打开文件清单，保持 presence 载荷完整（同表/画布订阅同通道）。 */
+export function publishPluginPresence(view: string | null, file: string | null): void {
+  schedulePresenceBroadcast({ file, selection: null, view });
+}
+
 // 表格打开/选中/视图变化 → 节流广播 presence（file null = 未看表格，清空远端高亮）；
 // 切仓库（vaultId 变化）→ 换房间重连；无仓库（回启动页）→ 断开。
 // 注册推迟到 init（防循环 import 链中模块未完成初始化即调用 store）

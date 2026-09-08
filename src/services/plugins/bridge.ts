@@ -22,10 +22,16 @@
  */
 import { invoke } from "@tauri-apps/api/core";
 import type { PluginFiberPhase, PluginManifest, ToolDefinition, ToolResult } from "@/types";
+import type { CellValue, CollabPeer, PluginCanvasSnapshot, PluginTableSnapshot } from "@/types";
+import type { AgentConfig, ChatTargetResult, ProviderConfig, ReasoningEffort } from "@/types";
+import { streamChat } from "@/services/ai/client";
 import { registerPluginTools, unregisterPluginTools } from "@/services/ai/tools";
 import { AGENT_TOOLS_META } from "@/constants/tools";
 import { getAppVersion } from "@/services/app";
 import { runProcess } from "@/services/shell";
+import { pickDirectory, pickFile, saveFile } from "@/services/dialog";
+import { copyImageToClipboard, readClipboardText, writeClipboardText } from "@/services/clipboard";
+import { closeWindow, minimizeWindow, toggleMaximizeWindow } from "@/services/window";
 import { listVaultTree } from "@/services/vault";
 import {
   globVault,
@@ -101,6 +107,8 @@ interface PendingInvoke {
 interface InvokeOptions {
   signal?: AbortSignal;
   timeoutMs?: number;
+  /** 能力包裹链续链信息：worker 侧据此构造 ctx.next（next() 经带 chainId 的 call 回调宿主续链）。 */
+  chain?: { ns: string; method: string; chainId: string; stream: boolean };
 }
 
 /** 插件 AI 工具单次执行超时（毫秒）：超时发 abort 帧 + reject，不让工具轮永久挂起。 */
@@ -122,6 +130,26 @@ interface PluginCapabilityEntry {
   methodIds: Record<string, string>;
 }
 const pluginCapabilities = new Map<string, PluginCapabilityEntry>();
+
+/** 能力包裹（middleware）：宿主能力命名空间 → 包裹方列表（按注册序串链，waterfall）。 */
+interface PluginWrapEntry {
+  pluginId: string;
+  fnId: string;
+}
+const pluginWrappers = new Map<string, PluginWrapEntry[]>();
+
+/** 包裹链上下文（续链定向）：宿主签发随机 chainId，包裹方 next() 经带 chainId 的 call 回调续链。 */
+interface WrapChainContext {
+  /** 原调用方插件 id（真实 handler 的 ctx.pluginId 透传它——透明中间件语义）。 */
+  callerPluginId: string;
+  /** 原调用方的流句柄（流式：sink 帧直达原调用方，包裹只看 args/结果）。 */
+  sink?: PluginStreamSink;
+  /** 下一层要运行的包裹下标。 */
+  nextIndex: number;
+  /** 当前在跑的包裹方（续链校验：续链调用必须来自它，防其他插件冒用 chainId）。 */
+  pendingWrapperId?: string;
+}
+const wrapChains = new Map<string, WrapChainContext>();
 
 /** 通用扩展点注册：point → 条目（载荷函数为 `{ $fn: fnId }`）。 */
 export interface PluginContributionEntry {
@@ -244,6 +272,7 @@ export function unloadPlugin(id: string): void {
   clearStreamRelaysFor(id);
   unregisterPluginCapabilities(id);
   unregisterPluginContributions(id);
+  unregisterPluginWrappers(id);
   runtimes.delete(id);
   notifyChange();
 }
@@ -423,19 +452,21 @@ async function handleCall(runtime: Runtime, msg: WorkerCallMessage): Promise<voi
         string,
         string,
         unknown[] | undefined,
-        { stream?: boolean } | undefined,
+        { stream?: boolean; chainId?: string } | undefined,
       ];
-      if (opts?.stream) {
-        // 流式调用：不回 reply，只发 stream 帧；出错也走 stream error（reply 会被 callStream 丢弃）。
+      const chainId = typeof opts?.chainId === "string" ? opts.chainId : undefined;
+      if (opts?.stream && !chainId) {
+        // 流式调用（非续链）：不回 reply，只发 stream 帧；出错也走 stream error（reply 会被 callStream 丢弃）。
         const sink = makeCallSink(runtime, msg.seq);
         try {
-          await dispatchCapability(runtime, ns, method, args ?? [], sink, msg.seq);
+          await dispatchCapability(runtime, ns, method, args ?? [], sink, msg.seq, undefined);
         } catch (e) {
           sink.error(e instanceof Error ? e.message : String(e));
         }
         return;
       }
-      reply(await dispatchCapability(runtime, ns, method, args ?? [], undefined, msg.seq));
+      // 续链调用（包裹方 next() 回调）走 reply：链路结果经 reply 冒回包裹方 await next()。
+      reply(await dispatchCapability(runtime, ns, method, args ?? [], undefined, msg.seq, chainId));
       return;
     }
     reply(await dispatchMethod(runtime, msg.method, msg.args ?? []));
@@ -444,7 +475,7 @@ async function handleCall(runtime: Runtime, msg: WorkerCallMessage): Promise<voi
   }
 }
 
-/** 能力调用分发：审计命名空间；宿主命名空间直接执行；插件命名空间经 invoke 中转。 */
+/** 能力调用分发：审计命名空间；宿主命名空间直接执行（有包裹则走链）；插件命名空间经 invoke 中转。 */
 async function dispatchCapability(
   runtime: Runtime,
   ns: string,
@@ -452,10 +483,18 @@ async function dispatchCapability(
   args: unknown[],
   stream: PluginStreamSink | undefined,
   callerSeq: number,
+  chainId?: string,
 ): Promise<unknown> {
   auditCapability(runtime, ns);
   const host = hostCapabilities.get(ns);
   if (host) {
+    const wrappers = pluginWrappers.get(ns);
+    if (wrappers && wrappers.length > 0) {
+      const result = await runWrappedChain(runtime, host, ns, method, args, stream, chainId);
+      // 流式收尾契约同非包裹路径：包裹短路/非流式 handler 被流式调用时补 end。
+      if (stream && !stream.ended) stream.end(result);
+      return result;
+    }
     const result = await host(method, args, { pluginId: runtime.entry.id, stream });
     if (stream && !stream.ended) {
       // 宿主 handler 未自行收尾（非流式 handler 被流式调用）时补 end。
@@ -482,6 +521,58 @@ async function dispatchCapability(
     return undefined;
   }
   return invokeFn(owner, fnId, args);
+}
+
+/**
+ * 能力包裹链（waterfall）：宿主能力按注册序被包裹——包裹方收到 (args, ctx, next)，
+ * next() 经带 chainId 的 call 消息回调宿主续链（跨线无法传函数，续链以消息往返表达）。
+ * 包裹可：改写参数（next(新 args)）、短路（不调 next 直接返回）、后处理（await next() 后改结果）。
+ * 流式：sink 帧直达原调用方（包裹只看 args/结果，不拦截流）；链上包裹方已停止时跳过继续。
+ */
+async function runWrappedChain(
+  runtime: Runtime,
+  host: HostCapabilityHandler,
+  ns: string,
+  method: string,
+  args: unknown[],
+  stream: PluginStreamSink | undefined,
+  chainId?: string,
+): Promise<unknown> {
+  const wrappers = pluginWrappers.get(ns) ?? [];
+  let ctx: WrapChainContext;
+  if (chainId) {
+    const existing = wrapChains.get(chainId);
+    if (!existing) throw new Error("包裹链已失效");
+    // 续链调用必须来自当前在跑的包裹方（防其他插件冒用 chainId 续链）
+    if (existing.pendingWrapperId !== runtime.entry.id) throw new Error("包裹链续链调用方不匹配");
+    ctx = existing;
+  } else {
+    ctx = { callerPluginId: runtime.entry.id, sink: stream, nextIndex: 0 };
+    const id = crypto.randomUUID();
+    wrapChains.set(id, ctx);
+    chainId = id;
+  }
+  try {
+    const step = async (index: number, stepArgs: unknown[]): Promise<unknown> => {
+      const w = wrappers[index];
+      if (!w) {
+        // 链走完：真实 handler——sink 用链上下文（原调用方）的，pluginId 透传原调用方（透明中间件）
+        return host(method, stepArgs, { pluginId: ctx.callerPluginId, stream: ctx.sink });
+      }
+      const owner = runtimes.get(w.pluginId);
+      if (!owner || owner.disposed) return step(index + 1, stepArgs); // 包裹方已停止：跳过继续
+      ctx.nextIndex = index + 1;
+      ctx.pendingWrapperId = w.pluginId;
+      const result = await invokeFn(owner, w.fnId, [stepArgs], {
+        chain: { ns, method, chainId: chainId as string, stream: !!ctx.sink },
+      });
+      delete ctx.pendingWrapperId;
+      return result;
+    };
+    return await step(ctx.nextIndex, args);
+  } finally {
+    if (chainId) wrapChains.delete(chainId);
+  }
 }
 
 async function dispatchMethod(runtime: Runtime, method: string, args: unknown[]): Promise<unknown> {
@@ -547,10 +638,48 @@ async function dispatchMethod(runtime: Runtime, method: string, args: unknown[])
       if (!spec.namespace.includes(".")) {
         throw new Error("registerCapability 需要反向域名 namespace（含点）与 methods");
       }
-      if (pluginCapabilities.has(spec.namespace)) {
-        throw new Error(`命名空间 ${spec.namespace} 已被其他插件占用`);
+      const existing = pluginCapabilities.get(spec.namespace);
+      if (existing) {
+        // 冲突默认 first-wins（拒绝 + 告警含持有者）；显式声明 replace 且 requires 同时声明
+        // 该命名空间 → last-wins 替换（替换无独立留痕；管理页覆盖展示归能力发现面）
+        const manifest = runtime.entry.manifest;
+        const canReplace =
+          Array.isArray(manifest.replace) &&
+          manifest.replace.includes(spec.namespace) &&
+          Array.isArray(manifest.requires) &&
+          manifest.requires.includes(spec.namespace);
+        if (!canReplace) {
+          throw new Error(`命名空间 ${spec.namespace} 已被插件 ${existing.owner} 占用`);
+        }
+        // last-wins 替换：注册表指向新持有者（旧持有者卸载按 owner 清理不误删新项；
+        // 新持有者卸载后能力消失、无自动回退——符合无特权原则）
+        pluginCapabilities.set(spec.namespace, { owner: runtime.entry.id, methodIds: spec.methodIds });
+        notifyChange();
+        return true;
       }
       pluginCapabilities.set(spec.namespace, { owner: runtime.entry.id, methodIds: spec.methodIds });
+      notifyChange();
+      return true;
+    }
+    case "wrapCapability": {
+      const spec = args[0] as { namespace?: unknown; handlerId?: unknown };
+      if (typeof spec?.namespace !== "string" || typeof spec?.handlerId !== "string") {
+        throw new Error("wrapCapability 需要 { namespace, handlerId }");
+      }
+      if (spec.namespace.includes(".")) {
+        throw new Error("wrapCapability 仅支持宿主能力命名空间（不含点）");
+      }
+      if (!hostCapabilities.has(spec.namespace)) {
+        throw new Error(`能力 ${spec.namespace} 不存在，无法包裹`);
+      }
+      const list = pluginWrappers.get(spec.namespace) ?? [];
+      // 同插件重复包裹 = 原位替换（一个插件对一个能力只包一层）；跨插件同命名空间叠加串链
+      const mine = list.findIndex((w) => w.pluginId === runtime.entry.id);
+      if (mine >= 0) list[mine] = { pluginId: runtime.entry.id, fnId: spec.handlerId };
+      else list.push({ pluginId: runtime.entry.id, fnId: spec.handlerId });
+      pluginWrappers.set(spec.namespace, list);
+      // 包裹参与审计：包裹即披露对目标能力的接触（管理页「声明 vs 实际」对照可见）
+      auditCapability(runtime, spec.namespace);
       notifyChange();
       return true;
     }
@@ -673,7 +802,13 @@ function invokeFn(runtime: Runtime, fnId: string, args: unknown[], opts?: Invoke
       return;
     }
     try {
-      runtime.transport.post({ kind: "invoke", seq, fnId, args });
+      runtime.transport.post({
+        kind: "invoke",
+        seq,
+        fnId,
+        args,
+        ...(opts?.chain ? { chain: opts.chain } : {}),
+      });
     } catch (e) {
       cleanup();
       runtime.invokePending.delete(seq);
@@ -713,6 +848,20 @@ function unregisterPluginCapabilities(pluginId: string): void {
   if (changed) notifyChange();
 }
 
+/** 撤销某插件的全部能力包裹（卸载/失败时；跨插件同命名空间包裹不受影响）。 */
+function unregisterPluginWrappers(pluginId: string): void {
+  let changed = false;
+  for (const [ns, list] of pluginWrappers) {
+    const filtered = list.filter((w) => w.pluginId !== pluginId);
+    if (filtered.length !== list.length) {
+      if (filtered.length === 0) pluginWrappers.delete(ns);
+      else pluginWrappers.set(ns, filtered);
+      changed = true;
+    }
+  }
+  if (changed) notifyChange();
+}
+
 function unregisterPluginContributions(pluginId: string): void {
   let changed = false;
   for (const [k, e] of contributions) {
@@ -737,6 +886,7 @@ function failPlugin(runtime: Runtime, error: string): void {
   clearStreamRelaysFor(runtime.entry.id);
   unregisterPluginCapabilities(runtime.entry.id);
   unregisterPluginContributions(runtime.entry.id);
+  unregisterPluginWrappers(runtime.entry.id);
   runtime.entry.phase = "failed";
   runtime.entry.error = error;
   notifyChange();
@@ -745,12 +895,117 @@ function failPlugin(runtime: Runtime, error: string): void {
 
 // ===== 宿主第一方能力（注册表里的普通提供者） =====
 
+/** dialog 过滤器数组形状校验（{ name, extensions } 数组；extensions 为非空字符串数组）。 */
+function isDialogFilters(value: unknown): value is { name: string; extensions: string[] }[] {
+  if (!Array.isArray(value) || value.length === 0) return false;
+  return value.every(
+    (f) =>
+      typeof f === "object" &&
+      f !== null &&
+      typeof (f as { name?: unknown }).name === "string" &&
+      Array.isArray((f as { extensions?: unknown }).extensions) &&
+      (f as { extensions: unknown[] }).extensions.every((e) => typeof e === "string" && e.length > 0),
+  );
+}
+
 /** app.openPage 能力的中转回调（pluginStore 接线注入，绕开 bridge→store 层上依赖；null = 未接线）。 */
 let appPageOpener: ((pageId: string) => void) | null = null;
 
 /** 注入/复位 app.openPage 中转（pluginStore.load 时接线；null 复位供测试）。 */
 export function setAppPageOpener(opener: ((pageId: string) => void) | null): void {
   appPageOpener = opener;
+}
+
+/**
+ * 表格能力访问（worker 平面 `table` 命名空间的 store 数据源；pluginStore 接线注入，
+ * bridge 不 import store——分层：store 经此把当前表格数据与写操作暴露给插件；null = 未接线）。
+ */
+export interface PluginTableRuntimeAccess {
+  /** 当前打开的表格快照（未打开表格时 tableFile 为 null、fields/rows 为空数组）。 */
+  snapshot(): PluginTableSnapshot;
+  /** 改单元格（value 为 JSON 可序列化值；undefined = 清空单元格）。 */
+  updateCell(rowId: string, fieldId: string, value: CellValue | undefined): void;
+  /** 追加一行。 */
+  addRow(): void;
+  /** 删除指定行。 */
+  removeRow(rowId: string): void;
+  /** 选中行（表格视图联动；null = 取消选中）。 */
+  selectRow(rowId: string | null): void;
+}
+
+let tableRuntimeAccess: PluginTableRuntimeAccess | null = null;
+
+/** 注入/复位表格能力访问（pluginStore.load 时接线；null 复位供测试）。 */
+export function setPluginTableRuntimeAccess(access: PluginTableRuntimeAccess | null): void {
+  tableRuntimeAccess = access;
+}
+
+/** 协作能力访问（worker 平面 `collab` 命名空间的 store 数据源；pluginStore 接线注入）。 */
+export interface PluginCollabAccess {
+  /** 同仓库在线用户列表（本端已过滤；可序列化）。 */
+  peers(): CollabPeer[];
+  /** 上报本端 presence（view 为 null = 离开；表格类插件视图 kind 原样透传）。 */
+  setPresence(view: string | null, file: string | null): void;
+}
+
+let collabAccess: PluginCollabAccess | null = null;
+
+/** 注入/复位协作能力访问（pluginStore.load 时接线；null 复位供测试）。 */
+export function setPluginCollabAccess(access: PluginCollabAccess | null): void {
+  collabAccess = access;
+}
+
+/**
+ * 画布能力访问（worker 平面 `canvas` 命名空间的 store 数据源；pluginStore 接线注入）。
+ * 写方法要求已打开可写画布（canvasFile 非空且非只读），否则抛错（守卫在接线实现内）。
+ */
+export interface PluginCanvasAccess {
+  /** 当前画布快照（canvasFile=null = 未打开画布；投影与磁盘/协作格式同构）。 */
+  snapshot(): PluginCanvasSnapshot;
+  /** 新增节点（type/position/data；宿主生成 id 并守卫可写；返回创建的节点 id）。 */
+  addNode(node: { type: string; position: { x: number; y: number }; data?: Record<string, unknown> }): string;
+  /** 更新节点 data（浅合并，不碰 position/尺寸）。 */
+  updateNode(nodeId: string, patch: Record<string, unknown>): void;
+  /** 移动节点（position 变更入 undo）。 */
+  moveNode(nodeId: string, position: { x: number; y: number }): void;
+  /** 删除节点（连带其边/流/消息；入 undo）。 */
+  deleteNode(nodeId: string): void;
+  /** 新增边（source/target 自动锚点；宿主生成 id；返回创建的边 id）。 */
+  addEdge(edge: {
+    source: string;
+    target: string;
+    sourceHandle?: string;
+    targetHandle?: string;
+    directed?: boolean;
+    linkMode?: string;
+  }): string;
+  /** 删除边（入 undo）。 */
+  deleteEdge(edgeId: string): void;
+  /** 选中节点（属性面板联动；null = 取消选中）。 */
+  selectNode(nodeId: string | null): void;
+}
+
+let canvasAccess: PluginCanvasAccess | null = null;
+
+/** 注入/复位画布能力访问（pluginStore.load 时接线；null 复位供测试）。 */
+export function setPluginCanvasAccess(access: PluginCanvasAccess | null): void {
+  canvasAccess = access;
+}
+
+/** AI 配置访问（worker 平面 `ai` 命名空间的配置数据源；pluginStore 接线注入。
+ *  providers 为运行时配置（含 apiKey——key 读取已由 settingsStore 完成，桥侧不碰 keychain）。 */
+export interface PluginAiAccess {
+  providers: ProviderConfig[];
+  agents: AgentConfig[];
+  /** 解析对话目标（provider/model；未指定时跟随默认模型），与画布/面板同源。 */
+  resolveChatTarget(selection?: { providerId?: string; model?: string }): ChatTargetResult;
+}
+
+let settingsAccess: (() => PluginAiAccess | null) | null = null;
+
+/** 注入/复位 AI 配置访问（pluginStore.load 时接线；null 复位供测试）。 */
+export function setSettingsAccess(fn: (() => PluginAiAccess | null) | null): void {
+  settingsAccess = fn;
 }
 
 registerHostCapability(
@@ -877,7 +1132,302 @@ registerHostCapability(
   { label: "仓库文件读取" },
 );
 
+registerHostCapability(
+  "dialog",
+  async (method, args) => {
+    // 系统对话框（目录/文件选择 + 保存）；用户取消返回 null。
+    if (method === "pickDirectory") return pickDirectory();
+    if (method === "pickFile") {
+      const filters = args[0];
+      if (filters !== undefined && !isDialogFilters(filters)) {
+        throw new Error("dialog.pickFile 需要过滤器数组 [{ name, extensions }]");
+      }
+      return pickFile(filters as { name: string; extensions: string[] }[] | undefined);
+    }
+    if (method === "saveFile") {
+      const opts = args[0];
+      if (opts !== undefined && (typeof opts !== "object" || opts === null || Array.isArray(opts))) {
+        throw new Error("dialog.saveFile 需要选项对象 { defaultPath?, filters? }");
+      }
+      const o = opts as { defaultPath?: string; filters?: { name: string; extensions: string[] }[] } | undefined;
+      if (o?.filters !== undefined && !isDialogFilters(o.filters)) {
+        throw new Error("dialog.saveFile 的 filters 需要过滤器数组 [{ name, extensions }]");
+      }
+      return saveFile({ defaultPath: o?.defaultPath, filters: o?.filters });
+    }
+    throw new Error(`dialog 无方法 ${method}`);
+  },
+  { label: "系统对话框" },
+);
+
+registerHostCapability(
+  "clipboard",
+  async (method, args) => {
+    // 系统剪贴板读写（文本 + 图片 dataURL）。安全敏感：可读取/写入用户剪贴板内容。
+    if (method === "readText") return readClipboardText();
+    if (method === "writeText") {
+      const text = args[0];
+      if (typeof text !== "string") throw new Error("clipboard.writeText 需要文本");
+      await writeClipboardText(text);
+      return true;
+    }
+    if (method === "copyImage") {
+      const dataUrl = args[0];
+      if (typeof dataUrl !== "string") throw new Error("clipboard.copyImage 需要图片 dataURL");
+      await copyImageToClipboard(dataUrl);
+      return true;
+    }
+    throw new Error(`clipboard 无方法 ${method}`);
+  },
+  { label: "剪贴板读写", sensitive: true },
+);
+
+registerHostCapability(
+  "window",
+  async (method) => {
+    // 当前窗口控制（自定义标题栏窗口的最小化/最大化/关闭）。
+    if (method === "minimize") {
+      await minimizeWindow();
+      return true;
+    }
+    if (method === "toggleMaximize") {
+      await toggleMaximizeWindow();
+      return true;
+    }
+    if (method === "close") {
+      await closeWindow();
+      return true;
+    }
+    throw new Error(`window 无方法 ${method}`);
+  },
+  { label: "窗口控制" },
+);
+
+registerHostCapability(
+  "table",
+  async (method, args) => {
+    // 当前打开的表格：读快照 + 写操作。变更经事件 `table:changed` 通知（pluginStore 发）。
+    if (!tableRuntimeAccess) throw new Error("表格能力未就绪");
+    if (method === "snapshot") return tableRuntimeAccess.snapshot();
+    if (method === "updateCell") {
+      const [rowId, fieldId, value] = args;
+      if (typeof rowId !== "string" || typeof fieldId !== "string") {
+        throw new Error("table.updateCell 需要 rowId 与 fieldId");
+      }
+      tableRuntimeAccess.updateCell(rowId, fieldId, value as CellValue | undefined);
+      return true;
+    }
+    if (method === "addRow") {
+      tableRuntimeAccess.addRow();
+      return true;
+    }
+    if (method === "removeRow") {
+      const rowId = args[0];
+      if (typeof rowId !== "string") throw new Error("table.removeRow 需要 rowId");
+      tableRuntimeAccess.removeRow(rowId);
+      return true;
+    }
+    if (method === "selectRow") {
+      const rowId = args[0];
+      if (rowId !== null && typeof rowId !== "string") throw new Error("table.selectRow 需要 rowId 或 null");
+      tableRuntimeAccess.selectRow(rowId as string | null);
+      return true;
+    }
+    throw new Error(`table 无方法 ${method}`);
+  },
+  { label: "表格数据" },
+);
+
+registerHostCapability(
+  "collab",
+  async (method, args) => {
+    // 协作在线状态：读 peers + 上报本端 presence。变更经事件 `collab:changed` 通知。
+    if (!collabAccess) throw new Error("协作能力未就绪");
+    if (method === "peers") return collabAccess.peers();
+    if (method === "setPresence") {
+      const [view, file] = args;
+      if (view !== null && typeof view !== "string") throw new Error("collab.setPresence 需要 view 或 null");
+      if (file !== null && typeof file !== "string") throw new Error("collab.setPresence 需要 file 或 null");
+      collabAccess.setPresence(view as string | null, file as string | null);
+      return true;
+    }
+    throw new Error(`collab 无方法 ${method}`);
+  },
+  { label: "协作在线状态" },
+);
+
+registerHostCapability(
+  "canvas",
+  async (method, args) => {
+    // 当前打开的画布：读快照 + 写操作（节点/边）。变更经事件 `canvas:changed` 通知（pluginStore 发）。
+    if (!canvasAccess) throw new Error("画布能力未就绪");
+    if (method === "snapshot") return canvasAccess.snapshot();
+    if (method === "addNode") {
+      const node = args[0];
+      if (
+        typeof node !== "object" ||
+        node === null ||
+        typeof (node as { type?: unknown }).type !== "string" ||
+        typeof (node as { position?: unknown }).position !== "object" ||
+        (node as { position?: unknown }).position === null
+      ) {
+        throw new Error("canvas.addNode 需要 { type, position, data? }");
+      }
+      return canvasAccess.addNode(
+        node as { type: string; position: { x: number; y: number }; data?: Record<string, unknown> },
+      );
+    }
+    if (method === "updateNode") {
+      const [nodeId, patch] = args;
+      if (typeof nodeId !== "string") throw new Error("canvas.updateNode 需要 nodeId");
+      if (typeof patch !== "object" || patch === null || Array.isArray(patch)) {
+        throw new Error("canvas.updateNode 需要 data 补丁对象");
+      }
+      canvasAccess.updateNode(nodeId, patch as Record<string, unknown>);
+      return true;
+    }
+    if (method === "moveNode") {
+      const [nodeId, position] = args;
+      if (typeof nodeId !== "string") throw new Error("canvas.moveNode 需要 nodeId");
+      if (typeof position !== "object" || position === null || Array.isArray(position)) {
+        throw new Error("canvas.moveNode 需要 position 对象");
+      }
+      canvasAccess.moveNode(nodeId, position as { x: number; y: number });
+      return true;
+    }
+    if (method === "deleteNode") {
+      const nodeId = args[0];
+      if (typeof nodeId !== "string") throw new Error("canvas.deleteNode 需要 nodeId");
+      canvasAccess.deleteNode(nodeId);
+      return true;
+    }
+    if (method === "addEdge") {
+      const edge = args[0];
+      if (
+        typeof edge !== "object" ||
+        edge === null ||
+        typeof (edge as { source?: unknown }).source !== "string" ||
+        typeof (edge as { target?: unknown }).target !== "string"
+      ) {
+        throw new Error("canvas.addEdge 需要 { source, target }");
+      }
+      const e = edge as {
+        source: string;
+        target: string;
+        sourceHandle?: string;
+        targetHandle?: string;
+        directed?: boolean;
+        linkMode?: string;
+      };
+      return canvasAccess.addEdge(e);
+    }
+    if (method === "deleteEdge") {
+      const edgeId = args[0];
+      if (typeof edgeId !== "string") throw new Error("canvas.deleteEdge 需要 edgeId");
+      canvasAccess.deleteEdge(edgeId);
+      return true;
+    }
+    if (method === "selectNode") {
+      const nodeId = args[0];
+      if (nodeId !== null && typeof nodeId !== "string") throw new Error("canvas.selectNode 需要 nodeId 或 null");
+      canvasAccess.selectNode(nodeId as string | null);
+      return true;
+    }
+    throw new Error(`canvas 无方法 ${method}`);
+  },
+  { label: "画布数据" },
+);
+
+registerHostCapability("ai", async (method, args, ctx) => {
+  // AI 会话能力：模型/Agent 列表 + 流式对话（chunk{type:text|reasoning,text} → end{content,reasoning,finishReason}）。
+  // 不传 meta 第三参：保留糖方法面「AI 会话与工具」的展示文案（handler 与 meta 分离，互不覆盖）。
+  const access = settingsAccess?.();
+  if (method === "chat") {
+    if (!access) throw new Error("AI 配置未就绪（未打开仓库）");
+    const req = (args[0] ?? {}) as {
+      providerId?: string;
+      model?: string;
+      messages?: unknown;
+      reasoningEffort?: string;
+      temperature?: unknown;
+      maxTokens?: unknown;
+      maxRetries?: unknown;
+    };
+    if (!Array.isArray(req.messages) || req.messages.length === 0) throw new Error("ai.chat 需要非空 messages");
+    // 供应商/模型解析：显式 providerId → 查找；否则跟随默认模型（resolveChatTarget 与画布/面板同源）
+    let provider: ProviderConfig;
+    let model: string;
+    if (req.providerId !== undefined) {
+      const p = access.providers.find((x) => x.id === req.providerId);
+      if (!p) throw new Error(`供应商 ${req.providerId} 不存在`);
+      const m = typeof req.model === "string" ? req.model : p.models[0]?.id;
+      if (!m) throw new Error("该供应商无可用模型");
+      provider = p;
+      model = m;
+    } else {
+      const target = access.resolveChatTarget(typeof req.model === "string" ? { model: req.model } : undefined);
+      if (!target.ok) throw new Error(target.error);
+      provider = target.provider;
+      model = target.model;
+    }
+    const sink = ctx.stream;
+    let content = "";
+    let reasoning = "";
+    let streamError: Error | null = null;
+    let nonStreamResult: { content: string; reasoning: string; finishReason?: unknown } | undefined;
+    await streamChat(
+      {
+        baseUrl: provider.baseUrl,
+        apiKey: provider.apiKey,
+        model,
+        messages: req.messages as Parameters<typeof streamChat>[0]["messages"],
+        ...(typeof req.reasoningEffort === "string" ? { reasoningEffort: req.reasoningEffort as ReasoningEffort } : {}),
+        ...(typeof req.temperature === "number" ? { temperature: req.temperature } : {}),
+        ...(typeof req.maxTokens === "number" ? { maxTokens: req.maxTokens } : {}),
+        retry: { maxRetries: typeof req.maxRetries === "number" ? req.maxRetries : 2 },
+      },
+      {
+        onDelta: (t) => {
+          content += t;
+          sink?.chunk({ type: "text", text: t });
+        },
+        onReasoningDelta: (t) => {
+          reasoning += t;
+          sink?.chunk({ type: "reasoning", text: t });
+        },
+        onDone: (reason) => {
+          const result = { content, reasoning, finishReason: reason };
+          if (sink) sink.end(result);
+          else nonStreamResult = result;
+        },
+        onError: (e) => {
+          if (sink) sink.error(e.message);
+          else streamError = e;
+        },
+      },
+    );
+    if (sink) return undefined; // sink 已自行 end，分发器不再补 end
+    if (streamError) throw streamError;
+    return nonStreamResult;
+  }
+  if (method === "listModels") {
+    if (!access) throw new Error("AI 配置未就绪（未打开仓库）");
+    const out: Array<{ providerId: string; providerName: string; modelId: string; label: string }> = [];
+    for (const p of access.providers) {
+      for (const m of p.models) {
+        out.push({ providerId: p.id, providerName: p.name, modelId: m.id, label: m.nickname ?? m.id });
+      }
+    }
+    return out;
+  }
+  if (method === "listAgents") {
+    if (!access) throw new Error("AI 配置未就绪（未打开仓库）");
+    return access.agents.map((a) => ({ id: a.id, name: a.name }));
+  }
+  throw new Error(`ai 无方法 ${method}`);
+});
+
 // 糖方法面（registerTool/registerCommand/on/emit）的展示元数据；handler 由 dispatchMethod 承载。
-registerHostCapabilityMeta("ai", { label: "注册 AI 工具" });
+registerHostCapabilityMeta("ai", { label: "AI 会话与工具" });
 registerHostCapabilityMeta("command", { label: "注册命令" });
 registerHostCapabilityMeta("event", { label: "事件订阅与发布" });

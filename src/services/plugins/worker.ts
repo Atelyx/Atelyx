@@ -136,6 +136,11 @@ self.addEventListener("message",function(e){
     if(m.stream)ctx.stream={chunk:function(d){self.postMessage({kind:"stream",seq:m.seq,event:"chunk",data:d});},
       end:function(d){self.postMessage({kind:"stream",seq:m.seq,event:"end",data:d});},
       error:function(e){self.postMessage({kind:"stream",seq:m.seq,event:"error",data:(e&&e.message)?e.message:String(e)});}};
+    // 能力包裹链续链：宿主签发 chainId，next() 是 worker 本地函数——经普通 call 消息带 chainId
+    // 回调宿主继续链路（跨线无法传函数，续链以消息往返表达；宿主按 chainId 定向续链上下文）。
+    // next() 不带参数 = 透传当前参数（m.args[0] = 宿主 invoke 传入的调用参数数组）；
+    // 带参数 = 改写后放行；next([]) = 显式清空。
+    if(m.chain)ctx.next=function(nextArgs){var a=arguments.length?nextArgs:(m.args&&m.args.length?m.args[0]:[]);return call("call",[m.chain.ns,m.chain.method,a||[],{stream:!!m.chain.stream,chainId:m.chain.chainId}]);};
     Promise.resolve().then(function(){return f.apply(null,(m.args||[]).concat([ctx]));}).then(function(r){delete ctxs[m.seq];self.postMessage({kind:"reply",seq:m.seq,ok:true,result:r});},
       function(err){delete ctxs[m.seq];self.postMessage({kind:"reply",seq:m.seq,ok:false,error:err&&err.message?err.message:String(err)});});}
 });
@@ -163,6 +168,11 @@ bridge.registerCapability=function(def){
 bridge.registerContribution=function(cont){
   if(!cont||typeof cont.point!=="string")return Promise.reject(new Error("registerContribution 需要 { point, id, payload }"));
   return call("registerContribution",[{point:cont.point,id:cont.id,payload:serialize(cont.payload||{})}]);
+};
+bridge.wrap=function(ns,fn){
+  if(typeof ns!=="string"||typeof fn!=="function")return Promise.reject(new Error("wrap 需要 (namespace, wrapperFn)"));
+  // 适配器把 (args, ctx, next) 透给用户包装函数：worker 侧 next 由链式 invoke 的 ctx.next 提供
+  return call("wrapCapability",[{namespace:ns,handlerId:reg(function(args,ctx){return fn(args,ctx,ctx&&ctx.next);})}]);
 };
 bridge.call=function(ns,method,args,opts){
   if(typeof ns!=="string"||typeof method!=="string")return Promise.reject(new Error("call 需要 (namespace, method, args)"));

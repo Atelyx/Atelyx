@@ -105,7 +105,7 @@ describe("能力注册表路由", () => {
       kind: "reply",
       seq: 1,
       ok: false,
-      error: "命名空间 com.a.db 已被其他插件占用",
+      error: "命名空间 com.a.db 已被插件 com.test.a 占用",
     });
 
     // 宿主命名空间保留 + 无点拒绝

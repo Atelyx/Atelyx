@@ -306,6 +306,8 @@ interface CanvasState {
   clearError: () => void;
   /** 删除所有选中的节点及关联的边（Delete/Backspace 快捷键）。 */
   deleteSelected: () => void;
+  /** 删除指定节点（连带其边/流/消息；Delete 键与插件 canvas 能力共用；extraEdgeIds 为额外删除的边）。 */
+  deleteNodes: (ids: string[], extraEdgeIds?: string[]) => void;
   /** 获取某对话节点入边引用的文本/搜索节点（send 时一次性固化注入）。 */
   getReferencedInputs: (conversationId: string) => ReferencedInput[];
   undo: () => void;
@@ -2638,7 +2640,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
   deleteSelected: () => {
     // 只读画布（外部白板格式）禁止删除节点
     if (get().readOnly) return;
-    const { nodes, edges, onNodesChange, onEdgesChange } = get();
+    const { nodes } = get();
     const selectedNodeIds = new Set(
       // 协作：被其他对端独占编辑的对话节点禁删（锁作用范围，防误删进行中的编辑）
       nodes
@@ -2647,26 +2649,36 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
     );
     // 连接后不可手动断开：Delete 只删节点，不再删除单独选中的边（连到被删节点的边随节点删除）。
     // 例外：无向关联边可单独删除（选中边后 Delete，关联线不表达数据流，无引用语义）
-    const orphanEdgeIds = edges
-      .filter(
-        (e) => selectedNodeIds.has(e.source) || selectedNodeIds.has(e.target),
-      )
+    const selectedUndirectedEdgeIds = get()
+      .edges.filter((e) => e.selected && e.directed === false)
       .map((e) => e.id);
-    const selectedUndirectedEdgeIds = edges
-      .filter((e) => e.selected && e.directed === false)
-      .map((e) => e.id);
+    if (selectedNodeIds.size === 0 && selectedUndirectedEdgeIds.length === 0) return;
+    get().deleteNodes([...selectedNodeIds], selectedUndirectedEdgeIds);
+  },
 
-    if (
-      selectedNodeIds.size === 0 &&
-      orphanEdgeIds.length === 0 &&
-      selectedUndirectedEdgeIds.length === 0
-    )
-      return;
+  deleteNodes: (ids, extraEdgeIds = []) => {
+    // 只读画布（外部白板格式）禁止删除节点
+    if (get().readOnly) return;
+    const { nodes, edges, onNodesChange, onEdgesChange } = get();
+    // 协作：被其他对端独占编辑的对话节点禁删（锁作用范围，防误删进行中的编辑）
+    const byId = new Map(nodes.map((n) => [n.id, n]));
+    const nodeIds = new Set(
+      ids.filter((id) => {
+        const n = byId.get(id);
+        return !!n && !(n.type === "conversation" && isConversationLockedByPeer(id));
+      }),
+    );
+    // 连到被删节点的边随节点删除（与 deleteSelected 同语义）；extraEdgeIds 为调用方指定删除的边
+    const orphanEdgeIds = edges
+      .filter((e) => nodeIds.has(e.source) || nodeIds.has(e.target))
+      .map((e) => e.id);
+    const allEdgeIds = new Set([...orphanEdgeIds, ...extraEdgeIds]);
+    if (nodeIds.size === 0 && allEdgeIds.size === 0) return;
 
     // 记录被删的对话节点 id，删除后清理其消息内存
     // （持久化层：messages 嵌对话节点，随画布自动保存增量落盘，删节点即删其消息）
     const deletedConvIds = nodes
-      .filter((n) => selectedNodeIds.has(n.id) && n.type === "conversation")
+      .filter((n) => nodeIds.has(n.id) && n.type === "conversation")
       .map((n) => n.id);
     // 注意：不清理对话节点的任务清单侧车——本删除可 undo（pushUndo 恢复节点/消息），
     // 若删侧车则 Ctrl+Z 后对话回来但清单永久丢失；孤儿侧车隐藏且无 watcher 回波，可接受。
@@ -2683,20 +2695,11 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 
     get().pushUndo();
 
-    const allEdgeIds = new Set([
-      ...orphanEdgeIds,
-      ...selectedUndirectedEdgeIds,
-    ]);
-
-    if (selectedNodeIds.size > 0) {
-      onNodesChange(
-        [...selectedNodeIds].map((id) => ({ type: "remove" as const, id })),
-      );
+    if (nodeIds.size > 0) {
+      onNodesChange([...nodeIds].map((id) => ({ type: "remove" as const, id })));
     }
     if (allEdgeIds.size > 0) {
-      onEdgesChange(
-        [...allEdgeIds].map((id) => ({ type: "remove" as const, id })),
-      );
+      onEdgesChange([...allEdgeIds].map((id) => ({ type: "remove" as const, id })));
     }
     if (deletedConvIds.length) {
       set((state) => {

@@ -174,5 +174,8 @@ export {
   type InstalledPlugin,
   type PluginSourceKind,
   type PluginTableSnapshot,
+  type PluginCanvasNode,
+  type PluginCanvasEdge,
+  type PluginCanvasSnapshot,
   type VaultAccess,
 } from "./plugin";

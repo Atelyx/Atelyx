@@ -49,6 +49,31 @@ bridge.registerCapability({
 注册后，其他插件（或未来宿主功能）可经 `bridge.call("com.acme.database", "query", [sql])` 调用；
 宿主在运行时之间中转。
 
+> **覆盖现有能力**：插件命名空间注册冲突默认拒绝（提示已占用该命名空间的插件）。若你的插件
+> 明确要**替换**某个现有插件能力，可在清单声明 `replace`（且必须同时声明在 `requires` 里，
+> 否则清单校验拒绝）——冲突时按后注册者替换。
+
+### 能力包裹（middleware）
+
+插件可包裹**宿主能力**（如 `shell`/`state`/`dialog`），在真实实现之前/之后插入逻辑：
+日志、鉴权（短路拒绝）、参数改写、结果后处理。按注册序串链（waterfall），包裹行为参与审计。
+
+```js
+bridge.wrap("shell", async (args, ctx, next) => {
+  console.log("shell.exec", args);
+  // 短路：直接返回，真实实现不执行
+  // return { code: 1, stdout: "", stderr: "被拦截" };
+  // 放行：await next() 拿下游结果；可改写参数 next(新args)、后处理结果
+  const result = await next();
+  console.log("shell.exec done", result);
+  return result;
+});
+```
+
+> `next()` 必须 `await`（续链以消息往返表达，勿 fire-and-forget）；`next(新 args)` 改写参数；
+> 不调 `next` 直接返回 = 短路。流式调用（`callStream`）时包裹只影响参数/结果，流帧直达调用方。
+> 仅支持包裹宿主命名空间（不含点）；同一插件重复包裹同一能力 = 原位替换。
+
 ### 调用能力（宿主 + 其他插件）
 
 ```js
@@ -152,7 +177,8 @@ facade 提供：
 内置视图与第三方面板在**同一视图贡献注册表**里注册——kind 全局唯一：**重复注册、或占用内置
 保留 kind（如 `canvas`/`search`）都会抛错**（冲突会中断该插件脚本的后续注册，插件作者须用
 反向域名命名自己的 kind）。不同 kind 并列出现在「添加视图」菜单，用户自选、可同时打开在不同
-面板；内置「搜索」始终可用，停用/卸载插件后其视图项随之消失。
+面板；内置「搜索」由随 App 分发的内置插件提供（可停用/卸载），停用或卸载任何提供方后其
+视图项随之消失。
 
 ```js
 const { React, h, registerPanel, listFiles, openNote } = window.__atelyxPlugin__.forPlugin("com.example.hello-search");
@@ -185,10 +211,16 @@ const dataUrl = await bridge.resolveTableImage(entry);
 | 命名空间 | 方法 | 说明 |
 | --- | --- | --- |
 | `state` | `read` / `write` | 插件自持 JSON 状态（原子落盘） |
-| `app` | `version` / `platform` | 宿主版本与平台 |
+| `app` | `version` / `platform` / `openPage` | 宿主版本与平台 / 打开插件应用页面（app 类型插件入口） |
 | `shell` | `exec` | 执行外部进程（敏感；流式：`callStream` 得 `chunk{stream,data}`/`end{code}`；`call` 聚合返回 `{ code, stdout, stderr }`） |
 | `vault` | `listFiles` / `readFile` / `readFileWindow` / `listDir` / `glob` / `grep` | 仓库文件读取：文件树 / 任意文本文件 / 分页窗口 / 单层目录 / glob 检索 / grep 检索（路径相对仓库根） |
-| `ai` | —（糖方法面） | 注册 AI 工具（`registerTool`）经此审计/标注 |
+| `canvas` | `snapshot` / `addNode` / `updateNode` / `moveNode` / `deleteNode` / `addEdge` / `deleteEdge` / `selectNode` | 当前画布读写：快照（nodes/edges 投影，与磁盘格式同构）与节点/边操作；`addNode`/`addEdge` 返回宿主生成的 id；结构/选择变化经事件 `canvas:changed` 通知 |
+| `table` | `snapshot` / `updateCell` / `addRow` / `removeRow` / `selectRow` | 当前打开的表格读写：快照（结构与表格视图插件同源）与行/单元格操作；数据/选中变化经事件 `table:changed` 通知 |
+| `ai` | `listModels` / `listAgents` / `chat` | 模型/Agent 列表 + 流式对话（`callStream` 得 `chunk{type:text\|reasoning,text}` → `end{content,reasoning,finishReason}`；`call` 聚合返回同形状）；另承载 `registerTool` 的审计标注 |
+| `collab` | `peers` / `setPresence` | 协作在线用户列表 / 上报本端 presence（view/file；`setPresence(null, null)` = 离开）；在线变化经事件 `collab:changed` 通知 |
+| `dialog` | `pickDirectory` / `pickFile` / `saveFile` | 系统对话框（目录/文件选择 + 保存；用户取消返回 null） |
+| `clipboard` | `readText` / `writeText` / `copyImage` | 剪贴板读写（文本 + 图片 dataURL；敏感） |
+| `window` | `minimize` / `toggleMaximize` / `close` | 当前窗口控制 |
 | `command` | —（糖方法面） | 注册命令（`registerCommand`） |
 | `event` | —（糖方法面） | 事件订阅与发布（`on`/`emit`） |
 
@@ -201,6 +233,9 @@ const dataUrl = await bridge.resolveTableImage(entry);
 | --- | --- | --- |
 | `vault:switch` | `{ root, id }` | 进入/切换仓库 |
 | `vault:clear` | — | 回到仓库选择页 |
+| `canvas:changed` | `{ file }` | 当前画布结构/选中/标题变化（高频事件按需再调 `canvas.snapshot()` 取数据，勿在回调里做重活） |
+| `table:changed` | `{ file }` | 当前表格数据/选中变化 |
+| `collab:changed` | `{ peers }` | 协作在线用户列表变化 |
 
 跨插件事件用 `emit` + 订阅 `<插件id>:<主题>`。
 
