@@ -43,7 +43,7 @@ export type PluginType =
 export type PluginScope = "app" | "vault";
 
 /** 插件安装来源类型（管理 UI 徽标/更新可用性依据）。 */
-export type PluginSourceKind = "market" | "git" | "local";
+export type PluginSourceKind = "market" | "git" | "local" | "builtin";
 
 /** 声明式皮肤：覆盖 CSS 变量（无需运行时代码；键可带或省略 `--` 前缀，应用时统一补前缀）。 */
 export interface PluginTheme {
@@ -144,9 +144,9 @@ export interface InstalledPlugin {
   manifest: PluginManifest;
   /** 归一化作用域（缺省 app）。 */
   scope: PluginScope;
-  /** 安装目录（Rust 返回的绝对路径；本地来源为链接路径）。 */
+  /** 安装目录（Rust 返回的绝对路径；本地来源为链接路径；内置插件无磁盘目录，为空串）。 */
   installDir: string;
-  /** 安装来源类型（市场 / Git / 本地目录）。 */
+  /** 安装来源类型（市场 / Git / 本地目录 / 内置）。 */
   sourceKind: PluginSourceKind;
   enabled: boolean;
   phase: PluginFiberPhase;

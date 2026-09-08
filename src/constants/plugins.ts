@@ -59,4 +59,5 @@ export const PLUGIN_SOURCE_LABELS: Record<PluginSourceKind, string> = {
   market: "市场",
   git: "Git",
   local: "本地目录",
+  builtin: "内置",
 };

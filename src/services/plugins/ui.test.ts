@@ -19,6 +19,7 @@ import {
   pluginViewKinds,
   pluginViewLabel,
   registerBuiltinView,
+  setBuiltinPluginIds,
   setPluginTableAccess,
   setPluginVaultAccess,
   unregisterPluginUi,
@@ -48,6 +49,7 @@ beforeEach(() => {
   unregisterPluginUi("com.test.hello");
   unregisterPluginUi("com.test.a");
   unregisterPluginUi("com.test.b");
+  setBuiltinPluginIds(null);
   window.__atelyxPlugin__ = undefined;
   setPluginTableAccess(null);
   setPluginVaultAccess(null);
@@ -69,7 +71,7 @@ describe("主线程平面 facade 与注册", () => {
     bridge.registerCommand({ id: "run", label: "运行", run: () => 1 });
 
     expect(getViewContribution("com.test.hello.dashboard")?.label).toBe("仪表盘");
-    expect(getViewContribution("com.test.hello.dashboard")?.provider).toBe("plugin");
+    expect(getViewContribution("com.test.hello.dashboard")?.pluginId).toBe("com.test.hello");
     expect(getPluginSettings().map((s) => s.key)).toContain("com.test.hello:config");
     expect(getPluginSetting("com.test.hello:config")?.label).toBe("配置");
     expect(getPluginCommands().map((c) => `${c.pluginId}:${c.id}`)).toContain("com.test.hello:run");
@@ -167,21 +169,20 @@ describe("主线程平面 facade 与注册", () => {
     await expect(bridge.resolveTableImage("x")).rejects.toThrow("插件表格访问未就绪");
   });
 
-  it("内置视图贡献注册 + 统一读取（内置与插件面板同表）", () => {
+  it("内置/插件面板视图贡献同表注册 + 统一读取", () => {
     exposePluginFacade();
-    // 内置贡献：kind "search" 与插件面板同表注册，provider 标注来源
-    registerBuiltinView({ kind: "search", label: "搜索", component: Comp });
-    const builtin = getViewContribution("search");
-    expect(builtin?.provider).toBe("builtin");
-    expect(builtin?.label).toBe("搜索");
-    // 插件面板经 registerPanel 进同一注册表（provider = plugin）
+    // 内置插件（注入的种子 id）可注册 VIEW_KINDS 内 kind（search 是内建视图），与插件面板同表注册
+    setBuiltinPluginIds(new Set(["builtin.search"]));
+    registerBuiltinView("builtin.search", { kind: "search", label: "搜索", component: Comp });
+    const fp = getViewContribution("search");
+    expect(fp?.pluginId).toBe("builtin.search");
+    // 插件面板经 registerPanel 进同一注册表（pluginId 溯源）
     window.__atelyxPlugin__!.forPlugin("com.test.a").registerPanel({
       kind: "com.test.a.search",
       label: "搜索（插件）",
       component: Comp,
     });
     const plugin = getViewContribution("com.test.a.search");
-    expect(plugin?.provider).toBe("plugin");
     expect(plugin?.pluginId).toBe("com.test.a");
     // 注册表驱动视图菜单与显示名（不同 kind 并列）
     expect(pluginViewKinds()).toContain("search");
@@ -191,11 +192,12 @@ describe("主线程平面 facade 与注册", () => {
 
   it("kind 全局唯一 + 内置保留：重复注册与占用内置 kind 均拒绝", () => {
     exposePluginFacade();
-    registerBuiltinView({ kind: "com.test.builtin.x", label: "内置 X", component: Comp });
+    setBuiltinPluginIds(new Set(["builtin.x"]));
+    registerBuiltinView("builtin.x", { kind: "com.test.fp.x", label: "内置 X", component: Comp });
     expect(() =>
-      registerBuiltinView({ kind: "com.test.builtin.x", label: "内置 X", component: Comp }),
+      registerBuiltinView("builtin.x", { kind: "com.test.fp.x", label: "内置 X", component: Comp }),
     ).toThrow(/全局唯一/);
-    // 内置注册不拦截（provider=builtin 允许注册 VIEW_KINDS 内 kind，见上一条用例），插件占用内置 kind 拒绝
+    // 未注入为内置的插件（第三方）占用 VIEW_KINDS kind 拒绝（防冒名劫持封闭枚举）
     expect(() =>
       window.__atelyxPlugin__!.forPlugin("com.test.a").registerPanel({
         kind: "canvas",
@@ -213,15 +215,35 @@ describe("主线程平面 facade 与注册", () => {
     ).toThrow(/内置视图保留/);
     expect(() =>
       window.__atelyxPlugin__!.forPlugin("com.test.a").registerPanel({
-        kind: "com.test.builtin.x",
+        kind: "com.test.fp.x",
         label: "插件同名",
         component: Comp,
       }),
     ).toThrow(/全局唯一/);
-    expect(() => registerBuiltinView({ kind: "", label: "空", component: Comp })).toThrow(/非空 kind/);
-    // 内置贡献不被插件卸载误删（provider=builtin 与 pluginId 隔离）
+    expect(() => registerBuiltinView("builtin.x", { kind: "", label: "空", component: Comp })).toThrow(/非空 kind/);
+    // 内置贡献不被第三方插件卸载误删（pluginId 隔离）
     unregisterPluginUi("com.test.a");
-    expect(getViewContribution("com.test.builtin.x")?.provider).toBe("builtin");
+    expect(getViewContribution("com.test.fp.x")?.pluginId).toBe("builtin.x");
+  });
+
+  it("内置插件可注册 VIEW_KINDS 内 kind；按 pluginId 卸载互不误删；非内置占用拒绝", () => {
+    exposePluginFacade();
+    setBuiltinPluginIds(new Set(["builtin.recent", "builtin.calendar"]));
+    registerBuiltinView("builtin.recent", { kind: "recent", label: "最近打开", component: Comp });
+    registerBuiltinView("builtin.calendar", { kind: "calendar", label: "日历", component: Comp });
+    expect(getViewContribution("recent")?.pluginId).toBe("builtin.recent");
+    // 未注入为内置的插件注册 VIEW_KINDS kind → 拒绝（内置 kind 是平台保留命名空间）
+    expect(() =>
+      window.__atelyxPlugin__!.forPlugin("com.test.a").registerPanel({
+        kind: "recent",
+        label: "最近打开（插件）",
+        component: Comp,
+      }),
+    ).toThrow(/内置视图保留/);
+    // 停用一个内置插件 = 按 pluginId 撤销，只删自己的贡献
+    unregisterPluginUi("builtin.recent");
+    expect(getViewContribution("recent")).toBeUndefined();
+    expect(getViewContribution("calendar")?.pluginId).toBe("builtin.calendar");
   });
 
   it("facade 仓库访问方法：经 provider 转发 + 未接线安全降级", async () => {

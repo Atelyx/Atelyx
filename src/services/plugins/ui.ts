@@ -57,19 +57,17 @@ export interface PluginUiContribution {
 }
 
 /**
- * 视图贡献（统一注册表）：内置视图与插件面板同表注册，kind 全局唯一（重复即拒绝）；
- * kind 缺失/来源卸载时对应视图回退空面板占位。
+ * 视图贡献（统一注册表）：所有插件视图同表注册，kind 全局唯一（重复即拒绝）；
+ * kind 缺失/来源卸载时对应视图回退空面板占位。pluginId 标注来源（溯源/按插件撤销）。
  */
 export interface ViewContribution {
   kind: string;
   label: string;
   component: ComponentType;
-  /** 来源：内置视图 = "builtin"；插件面板 = "plugin"（pluginId 标注作者）。 */
-  provider: "builtin" | "plugin";
-  pluginId?: string;
+  pluginId: string;
 }
 
-const viewContributions = new Map<string, ViewContribution>(); // kind → 贡献（内置与插件同表）
+const viewContributions = new Map<string, ViewContribution>(); // kind → 贡献（同表，pluginId 溯源）
 const settings = new Map<string, PluginSettingRegistration>(); // `${pluginId}:${key}` → 注册
 const appPages = new Map<string, PluginAppPageRegistration>(); // id → 注册
 const nodes = new Map<string, PluginNodeRegistration>(); // type → 注册
@@ -139,37 +137,49 @@ export function pluginViewKinds(): string[] {
 
 // ===== 注册（经 facade 调用，pluginId 由闭包捕获） =====
 
-/** 注册视图贡献（统一注册表核心）：kind 全局唯一——内置与插件同表，重复注册即拒绝；
- *  插件不得占用内建 ViewKind（内置命名空间保留，防冒名劫持标签）。 */
+/** 内置插件 id 集合（pluginStore 注入：插件行 sourceKind=builtin 的 id；用于封闭 ViewKind 的防劫持放行）。 */
+let builtinPluginIds: ReadonlySet<string> = new Set();
+
+/** 注入/复位内置插件 id 集合（pluginStore 加载插件行后调用；null 复位供测试）。 */
+export function setBuiltinPluginIds(ids: ReadonlySet<string> | null): void {
+  builtinPluginIds = ids ?? new Set();
+}
+
+/** 注册视图贡献（统一注册表核心）：kind 全局唯一，重复注册即拒绝。
+ *  VIEW_KINDS 封闭枚举 kind 为平台保留命名空间：仅内置插件（随 App 分发的种子条目）可注册，
+ *  第三方插件不得占用（防冒名劫持标签/死注册/污染视图菜单）。 */
 function registerViewContribution(
   kind: string,
   label: string,
   component: ComponentType,
-  provider: "builtin" | "plugin",
-  pluginId?: string,
+  pluginId: string,
 ): void {
   if (typeof kind !== "string" || kind.length === 0) {
     throw new Error("视图贡献需要非空 kind");
   }
-  // 内置命名空间保留：VIEW_KINDS 内建 kind + "empty" 占位哨兵（ViewKind 但不含于 VIEW_KINDS），
-  // 插件不得占用（防冒名劫持标签/死注册/污染视图菜单）。
-  if (provider === "plugin" && ((VIEW_KINDS as readonly string[]).includes(kind) || kind === "empty")) {
+  if (
+    ((VIEW_KINDS as readonly string[]).includes(kind) || kind === "empty") &&
+    !builtinPluginIds.has(pluginId)
+  ) {
     throw new Error(`视图 kind ${kind} 为内置视图保留，插件需用反向域名命名自己的 kind`);
   }
   if (viewContributions.has(kind)) {
-    throw new Error(`视图 kind ${kind} 已被注册（内置或插件），kind 全局唯一`);
+    throw new Error(`视图 kind ${kind} 已被注册，kind 全局唯一`);
   }
-  viewContributions.set(kind, { kind, label, component, provider, pluginId });
+  viewContributions.set(kind, { kind, label, component, pluginId });
   notify();
 }
 
-/** 注册内置视图贡献（宿主第一方；App 启动时注册一次，幂等）。 */
-export function registerBuiltinView(contrib: { kind: string; label: string; component: ComponentType }): void {
-  registerViewContribution(contrib.kind, contrib.label, contrib.component, "builtin");
+/** 注册内置插件视图贡献（内置插件 = 随 App 分发的种子条目；可注册 VIEW_KINDS 内 kind，停用即撤销）。 */
+export function registerBuiltinView(
+  pluginId: string,
+  contrib: { kind: string; label: string; component: ComponentType },
+): void {
+  registerViewContribution(contrib.kind, contrib.label, contrib.component, pluginId);
 }
 
 function registerPanel(pluginId: string, kind: string, label: string, component: ComponentType): void {
-  registerViewContribution(kind, label, component, "plugin", pluginId);
+  registerViewContribution(kind, label, component, pluginId);
 }
 function registerSetting(pluginId: string, key: string, label: string, component: ComponentType): void {
   const globalKey = `${pluginId}:${key}`;
@@ -205,11 +215,13 @@ function registerContribution(pluginId: string, point: string, id: string | unde
   notify();
 }
 
-/** 撤销某插件在主线程平面的全部贡献（卸载/停用/重载时调用）。 */
+/** 撤销某插件在主线程平面的全部贡献（卸载/停用/重载时调用；按 pluginId 溯源）。 */
 export function unregisterPluginUi(pluginId: string): void {
   let changed = false;
   for (const [k, v] of viewContributions) {
-    if (v.provider === "plugin" && v.pluginId === pluginId) changed = viewContributions.delete(k) || changed;
+    if (v.pluginId === pluginId) {
+      changed = viewContributions.delete(k) || changed;
+    }
   }
   for (const [k, v] of settings) if (v.pluginId === pluginId) changed = settings.delete(k) || changed;
   for (const [k, v] of appPages) if (v.pluginId === pluginId) changed = appPages.delete(k) || changed;

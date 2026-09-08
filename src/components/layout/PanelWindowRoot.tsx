@@ -17,6 +17,7 @@ import { useEffect, useMemo } from "react";
 import { LayoutTemplate } from "lucide-react";
 import { useAppStore } from "@/stores/appStore";
 import { titleOfTabs, usePanelStore } from "@/stores/panelStore";
+import { usePluginStore } from "@/stores/pluginStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useUiStateStore } from "@/stores/uiStateStore";
 import { useVaultStore } from "@/stores/vaultStore";
@@ -42,10 +43,13 @@ export function PanelWindowRoot() {
   const toggleMaximizeWindow = useAppStore((s) => s.toggleMaximizeWindow);
   const closeWindow = useAppStore((s) => s.closeWindow);
 
-  // 初始化：面板角色 bootstrap（布局快照 + 广播订阅）+ 外观/配置读盘 + watcher 订阅
+  // 初始化：面板角色 bootstrap（布局快照 + 广播订阅）+ 外观/配置读盘 + 插件运行时 + watcher 订阅
   useEffect(() => {
     void usePanelStore.getState().initPanel();
     void useSettingsStore.getState().load();
+    // 撕裂窗口是独立 webview：本窗口的插件运行时（内置/已装插件视图贡献）须各自 load 拉起——
+    // 切仓库时 panelStore 会再按 open-file-changed load，此处覆盖冷启动（启动页恢复的窗口）。
+    void usePluginStore.getState().load().catch((e) => console.error("撕裂窗口加载插件失败", e));
   }, []);
 
   useEffect(() => {

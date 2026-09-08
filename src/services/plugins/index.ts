@@ -43,6 +43,11 @@ export function pluginSetEnabled(id: string, enabled: boolean): Promise<void> {
   return invoke("plugin_set_enabled", { id, enabled });
 }
 
+/** 恢复内置插件（补播种缺失的内置条目；管理 UI「恢复内置插件」入口，调用后重载插件列表）。 */
+export function pluginSeedBuiltin(): Promise<void> {
+  return invoke("plugin_seed_builtin");
+}
+
 /** 更新插件（备份 → 安装 → 失败回滚）。 */
 export function pluginUpdate(id: string): Promise<PluginRow> {
   return invoke<PluginRow>("plugin_update", { id });
@@ -109,6 +114,7 @@ export {
   pluginViewKinds,
   pluginViewLabel,
   registerBuiltinView,
+  setBuiltinPluginIds,
   setPluginTableAccess,
   setPluginVaultAccess,
   unregisterPluginUi,

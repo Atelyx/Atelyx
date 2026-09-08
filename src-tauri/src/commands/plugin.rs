@@ -75,6 +75,9 @@ pub enum PluginSourceKind {
     Git,
     /// 本地目录（junction/符号链接实时引用，无拷贝无更新）。
     Local,
+    /// 内置（随 App 分发）：首启播种进 plugin-state，实现随宿主编译（无磁盘目录）。
+    /// 运行时与第三方插件无差别（同一注册表/启停/卸载/恢复）；版本随 App 走。
+    Builtin,
 }
 
 /// 插件运行信息（返回前端）。
@@ -95,7 +98,7 @@ pub struct PluginInfo {
 }
 
 /// 安装来源记录（更新依据：市场按 repo 重新拉取，git 按 url pull，本地实时引用）。
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 struct PluginSource {
     /// 市场来源的 GitHub `owner/repo`（更新定位）。
@@ -124,6 +127,9 @@ struct PluginState {
     enabled: HashMap<String, bool>,
     #[serde(default)]
     sources: HashMap<String, PluginSource>,
+    /// 内置插件是否已播种（首启一次；之后不自动播种，卸载保持卸载、停用保持停用）。
+    #[serde(default)]
+    builtin_seeded: bool,
 }
 
 /// 跨作用域 id 全局唯一：同 id 已存在于另一作用域时拒绝安装（store/enabled/运行时均按裸 id
@@ -140,6 +146,96 @@ fn ensure_global_id_unique(app: &AppHandle, state: &VaultState, scope: &str, id:
         }
     }
     Ok(())
+}
+
+// ===== 内置插件（随 App 分发，bundled） =====
+// 内置插件 = 分发属性：首启播种进 plugin-state，运行时与第三方插件同一注册表/启停/卸载/恢复，
+// 无任何特权。实现随宿主编译（无磁盘目录、无桥运行时），前端按 id 对应宿主组件载荷
+// （`components/plugins/builtinViews.tsx`）；版本随 App 走。
+
+/// 内置插件定义（id/展示信息；新增内置插件 = 在此加条目 + 前端补组件载荷）。
+struct BuiltinPluginDef {
+    id: &'static str,
+    name: &'static str,
+    tagline: &'static str,
+}
+
+const BUILTIN_PLUGINS: &[BuiltinPluginDef] = &[
+    BuiltinPluginDef { id: "builtin.search", name: "搜索", tagline: "全文搜索仓库文件" },
+    BuiltinPluginDef { id: "builtin.recent", name: "最近打开", tagline: "最近打开的文件列表" },
+    BuiltinPluginDef { id: "builtin.calendar", name: "日历", tagline: "活动密度与手动日程" },
+];
+
+fn is_builtin_plugin_id(id: &str) -> bool {
+    BUILTIN_PLUGINS.iter().any(|d| d.id == id)
+}
+
+/// 内置插件合成清单（前端消费 id/name/type/tagline；main 为校验占位——实现随宿主编译，
+/// 前端按 sourceKind=builtin 跳过入口读取，只做宿主视图贡献注册）。
+fn builtin_manifest(def: &BuiltinPluginDef) -> Value {
+    serde_json::json!({
+        "schemaVersion": 2,
+        "id": def.id,
+        "name": def.name,
+        "version": env!("CARGO_PKG_VERSION"),
+        "type": "panel",
+        "scope": "app",
+        "runtime": "js",
+        "main": "builtin",
+        "tagline": def.tagline,
+        "author": "Atelyx",
+        "license": "MIT",
+    })
+}
+
+fn plugin_info_from_builtin(def: &BuiltinPluginDef, scope: &str, enabled: bool) -> PluginInfo {
+    PluginInfo {
+        id: def.id.to_string(),
+        name: def.name.to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        kind: "panel".to_string(),
+        scope: scope.to_string(),
+        install_dir: String::new(),
+        enabled,
+        manifest: builtin_manifest(def),
+        source_kind: PluginSourceKind::Builtin,
+    }
+}
+
+/// 把缺失的内置插件条目写入状态（enabled=true、来源 Builtin）；已存在条目保持现状。
+/// 供首启播种与「恢复内置插件」共用（卸载保持卸载、停用保持停用）。
+fn seed_missing_builtins(pstate: &mut PluginState) {
+    for def in BUILTIN_PLUGINS {
+        if pstate.sources.contains_key(def.id) {
+            continue;
+        }
+        pstate.sources.insert(
+            def.id.to_string(),
+            PluginSource { kind: PluginSourceKind::Builtin, scope: "app".to_string(), ..Default::default() },
+        );
+        pstate.enabled.insert(def.id.to_string(), true);
+    }
+}
+
+/// 首启播种内置插件：plugin-state 首次初始化时把内置插件行写入（enabled=true、来源 Builtin）。
+/// 之后不再自动播种——卸载保持卸载、停用保持停用；恢复由用户显式触发（`plugin_seed_builtin`）。
+fn ensure_builtin_seeded(app: &AppHandle) {
+    let mut pstate = read_plugin_state(app);
+    if pstate.builtin_seeded {
+        return;
+    }
+    seed_missing_builtins(&mut pstate);
+    pstate.builtin_seeded = true;
+    // 播种失败不阻塞列表（下次重试）。
+    let _ = write_plugin_state(app, &pstate);
+}
+
+/// 恢复内置插件（用户显式触发）：补播种缺失的内置条目（enabled=true）。
+/// 已存在条目（启用/停用）保持现状，不覆盖用户改动。
+fn seed_builtin_plugins(app: &AppHandle) -> Result<(), String> {
+    let mut pstate = read_plugin_state(app);
+    seed_missing_builtins(&mut pstate);
+    write_plugin_state(app, &pstate)
 }
 
 fn plugin_base_dir(app: &AppHandle, state: &VaultState, scope: &str) -> Result<PathBuf, String> {
@@ -608,6 +704,9 @@ fn install_plugin_dir(
     if !plugin_id_valid(&id) {
         return Err("插件清单 id 非法".into());
     }
+    if is_builtin_plugin_id(&id) {
+        return Err(format!("插件 id {id} 为内置插件保留，无法安装"));
+    }
     let source_kind = source.kind;
 
     let folder = target_folder_name(folder_name, &id);
@@ -645,8 +744,23 @@ fn install_plugin_dir(
 /// 列出全部已装插件（app 级恒有；vault 级仅当前仓库；未开仓库时跳过 vault 目录）。
 #[tauri::command]
 pub fn plugin_list(app: AppHandle, state: State<'_, VaultState>) -> Result<Vec<PluginInfo>, String> {
+    ensure_builtin_seeded(&app);
     let pstate = read_plugin_state(&app);
     let mut out: Vec<PluginInfo> = Vec::new();
+
+    // 内置插件行（无磁盘目录，来源记录为 Builtin 即视为已装；与磁盘行同表去重）。
+    let mut seen: Vec<String> = Vec::new();
+    for (id, src) in &pstate.sources {
+        if src.kind != PluginSourceKind::Builtin {
+            continue;
+        }
+        let Some(def) = BUILTIN_PLUGINS.iter().find(|d| d.id == id) else {
+            continue;
+        };
+        let enabled = pstate.enabled.get(id).copied().unwrap_or(false);
+        out.push(plugin_info_from_builtin(def, "app", enabled));
+        seen.push(id.clone());
+    }
 
     let mut scan = |scope: &str, base: &Path| {
         let Ok(rd) = fs::read_dir(base) else {
@@ -659,7 +773,6 @@ pub fn plugin_list(app: AppHandle, state: State<'_, VaultState>) -> Result<Vec<P
             .collect();
         dirs.sort(); // 稳定遍历顺序：同 id 多目录时「第一个」可复现（与 find_plugin_dir 一致）
         // 同作用域内同 id 多目录只收第一个，防身份错乱；app/vault 两作用域各自独立去重。
-        let mut seen: Vec<String> = Vec::new();
         for dir in dirs {
             let Ok(manifest) = read_manifest(&dir) else {
                 continue; // 损坏插件跳过展示（管理 UI 仍可整体删除目录）
@@ -669,7 +782,7 @@ pub fn plugin_list(app: AppHandle, state: State<'_, VaultState>) -> Result<Vec<P
                 continue;
             }
             if seen.iter().any(|x| x == &id) {
-                continue;
+                continue; // 含内置 id（防御：内置 id 安装已被拒，仅手动拷贝目录可能撞名）
             }
             seen.push(id.clone());
             let enabled = pstate.enabled.get(&id).copied().unwrap_or(false);
@@ -778,6 +891,9 @@ pub fn plugin_install_local(
     if !plugin_id_valid(&id) {
         return Err("插件清单 id 非法".into());
     }
+    if is_builtin_plugin_id(&id) {
+        return Err(format!("插件 id {id} 为内置插件保留，无法安装"));
+    }
 
     let base = plugin_base_dir(&app, &state, &scope)?;
     // 源目录与插件目录都规范化后再判包含关系（大小写/长路径前缀差异会导致误判）。
@@ -865,13 +981,19 @@ pub fn plugin_uninstall(
     id: String,
     scope: String,
 ) -> Result<(), String> {
-    let base = plugin_base_dir(&app, &state, &scope)?;
-    let pstate = read_plugin_state(&app);
     // id 视为不可信输入：非法 id 直接拒绝（防来源记录被篡改时 target_folder_name 回退 join(id)
     // 把含分隔符的 id 拼进插件目录内任意子路径）。
     if !plugin_id_valid(&id) {
         return Err("插件不存在".to_string());
     }
+    let mut pstate = read_plugin_state(&app);
+    // 内置插件无磁盘目录：卸载 = 仅清状态记录（恢复经「恢复内置插件」入口重新播种）。
+    if pstate.sources.get(&id).map(|s| s.kind) == Some(PluginSourceKind::Builtin) {
+        pstate.enabled.remove(&id);
+        pstate.sources.remove(&id);
+        return write_plugin_state(&app, &pstate);
+    }
+    let base = plugin_base_dir(&app, &state, &scope)?;
     // 优先按清单 id 扫描定位；清单损坏（扫描无法匹配）时按来源记录的落位目录名定位删除
     // （名字经 target_folder_name 同款清理校验，确保仍在插件目录内）。
     let dir = match find_plugin_dir(&base, &id) {
@@ -900,7 +1022,6 @@ pub fn plugin_uninstall(
     } else {
         fs::remove_dir_all(&dir).map_err(|e| format!("卸载失败：{e}"))?;
     }
-    let mut pstate = read_plugin_state(&app);
     pstate.enabled.remove(&id);
     pstate.sources.remove(&id);
     write_plugin_state(&app, &pstate)
@@ -918,6 +1039,13 @@ pub fn plugin_set_enabled(app: AppHandle, id: String, enabled: bool) -> Result<(
     write_plugin_state(&app, &pstate)
 }
 
+/// 恢复内置插件（管理 UI「恢复内置插件」入口）：补播种缺失的内置条目。
+/// 已存在条目（启用/停用）保持现状；调用后前端重载插件列表。
+#[tauri::command]
+pub fn plugin_seed_builtin(app: AppHandle) -> Result<(), String> {
+    seed_builtin_plugins(&app)
+}
+
 /// 更新插件：按来源分派——git 来源 git pull（失败目录不变）；市场且无 .git 时重新下载源码包替换；
 /// 本地目录实时引用无需更新（返回当前信息）。
 #[tauri::command]
@@ -933,10 +1061,19 @@ pub async fn plugin_update(
         .cloned()
         .ok_or("插件无安装来源，无法更新（请先卸载重装）")?;
     let scope = source.scope.clone();
+    // 内置插件版本随 App 走，无独立更新；返回当前信息（无磁盘目录，提前返回）。
+    if source.kind == PluginSourceKind::Builtin {
+        let Some(def) = BUILTIN_PLUGINS.iter().find(|d| d.id == id) else {
+            return Err("插件不存在".into());
+        };
+        let enabled = pstate.enabled.get(&id).copied().unwrap_or(false);
+        return Ok(plugin_info_from_builtin(def, &scope, enabled));
+    }
     let base = plugin_base_dir(&app, &state, &scope)?;
     let dir = find_plugin_dir(&base, &id)?;
 
     match source.kind {
+        PluginSourceKind::Builtin => {} // 不可达（已提前返回）
         PluginSourceKind::Local => {
             // 本地目录实时引用：目录即源码，无更新概念；重读清单返回当前信息。
             let manifest = read_manifest(&dir)?;
@@ -1221,5 +1358,45 @@ mod tests {
         assert!(manifest_valid_or_error(&theme).is_ok());
         let tool_no_main = json!({ "schemaVersion": 1, "id": "com.x", "name": "x", "version": "1", "type": "tool" });
         assert!(manifest_valid_or_error(&tool_no_main).is_err());
+    }
+
+    #[test]
+    fn builtin_plugin_defs_are_valid() {
+        // id 唯一且合法；合成清单通过校验（schemaVersion/type/runtime；main 为校验占位）。
+        let ids: Vec<&str> = BUILTIN_PLUGINS.iter().map(|d| d.id).collect();
+        let mut uniq = ids.clone();
+        uniq.sort();
+        uniq.dedup();
+        assert_eq!(ids.len(), uniq.len(), "内置插件 id 必须唯一");
+        for def in BUILTIN_PLUGINS {
+            assert!(plugin_id_valid(def.id), "内置插件 id 非法：{}", def.id);
+            let manifest = builtin_manifest(def);
+            assert!(manifest_valid_or_error(&manifest).is_ok(), "内置插件清单非法：{}", def.id);
+            assert_eq!(manifest["type"].as_str(), Some("panel"));
+            assert_eq!(manifest["runtime"].as_str(), Some("js"));
+        }
+        assert!(is_builtin_plugin_id("builtin.search"));
+        assert!(!is_builtin_plugin_id("com.acme.x"));
+    }
+
+    #[test]
+    fn seed_missing_builtins_is_idempotent_and_preserves_state() {
+        let mut s = PluginState::default();
+        seed_missing_builtins(&mut s);
+        assert_eq!(s.sources.len(), BUILTIN_PLUGINS.len());
+        for def in BUILTIN_PLUGINS {
+            assert_eq!(s.sources[def.id].kind, PluginSourceKind::Builtin);
+            assert_eq!(s.enabled.get(def.id), Some(&true));
+        }
+        // 幂等：重复调用不增删。
+        let before_len = s.sources.len();
+        seed_missing_builtins(&mut s);
+        assert_eq!(s.sources.len(), before_len);
+        // 已存在条目保持现状（停用不复活）；缺失条目补回（恢复语义）。
+        s.enabled.insert(BUILTIN_PLUGINS[0].id.to_string(), false);
+        s.sources.remove(BUILTIN_PLUGINS[1].id);
+        seed_missing_builtins(&mut s);
+        assert_eq!(s.enabled.get(BUILTIN_PLUGINS[0].id), Some(&false)); // 停用保持
+        assert!(s.sources.contains_key(BUILTIN_PLUGINS[1].id)); // 缺失补回（显式恢复）
     }
 }

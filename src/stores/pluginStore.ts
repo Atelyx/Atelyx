@@ -1,9 +1,12 @@
 /**
- * 插件平台 store：已装插件状态（app + 当前仓库 vault）+ 运行时生命周期编排。
+ * 插件平台 store：已装插件状态（app + 当前仓库 vault + 内置插件行）+ 运行时生命周期编排。
  *
  * 分层：本 store 是插件相关状态的唯一出口——组件不直连 `services/plugins`；
  * 运行时（Worker/桥）本体在 `services/plugins/bridge`，本 store 只做编排与快照。
  * 加载时机：应用挂载/进仓后 `load()` 一次——先列清单，再逐个拉起启用插件（单个失败不影响其余）。
+ * 例外说明：本 store 静态 import `components/plugins/builtinViews.tsx`（内置插件宿主视图载荷，
+ * 组件层承载组件引用——services 不 import components 的约束所致）；该边经头注释文档化，
+ * 环上跨模块访问均为函数体内延迟求值，无顶层 getState/useXxx（新增顶层触碰会 TDZ 崩溃）。
  */
 import { create } from "zustand";
 import type { ComponentType } from "react";
@@ -39,6 +42,7 @@ import {
   pluginInstallLocal,
   pluginList,
   pluginReadEntry,
+  pluginSeedBuiltin,
   pluginSetEnabled,
   pluginUninstall,
   pluginUpdate,
@@ -48,6 +52,7 @@ import {
   runContributedCommand,
   runtimeSnapshot,
   setAppPageOpener,
+  setBuiltinPluginIds,
   setPluginTableAccess,
   setPluginVaultAccess,
   startPluginProcess,
@@ -65,6 +70,7 @@ import type {
   PluginTableViewRegistration,
   ViewContribution,
 } from "@/services/plugins";
+import { BUILTIN_VIEWS } from "@/components/plugins/builtinViews";
 import { useTableStore } from "@/stores/tableStore";
 import { useCollabStore } from "@/stores/collabStore";
 import { useVaultStore } from "@/stores/vaultStore";
@@ -88,6 +94,13 @@ import {
   validatePluginManifest,
 } from "@/utils/pluginManifest";
 import { detectPlatform } from "@/utils/pluginHost";
+
+/** 某视图 kind 由内置插件提供时的状态（ViewHost 降级占位/菜单过滤用；installed=false = 已卸载）。 */
+interface BuiltinViewState {
+  name: string;
+  enabled: boolean;
+  installed: boolean;
+}
 
 interface PluginStoreState {
   /** 已装插件（按 id；运行时阶段/审计与磁盘行合并）。 */
@@ -137,8 +150,6 @@ interface PluginStoreState {
   pluginViewLabel(view: string): string;
   /** 某视图的贡献（内置 + 插件面板统一注册表；ViewHost 分派用，缺注册 = 空面板占位）。 */
   viewContribution(kind: string): ViewContribution | undefined;
-  /** 注册内置视图贡献（宿主第一方；App 启动时注册一次，幂等）。 */
-  registerBuiltinView(contrib: { kind: string; label: string; component: ComponentType }): void;
   /** 插件表格视图注册（kind → 注册；TableEditor 视图切换合并）。 */
   pluginTableView(kind: string): PluginTableViewRegistration | undefined;
   /** 全部插件表格视图注册（工具条视图列表合并用）。 */
@@ -153,6 +164,10 @@ interface PluginStoreState {
   capabilitySensitive(namespace: string): boolean;
   /** 加载市场索引（缓存未过期直接回缓存；网络失败直接提示失败）。 */
   loadMarket(force?: boolean): Promise<void>;
+  /** 某视图 kind 由内置插件提供时的状态（组件经此查，不直连 services）；非内置提供 = undefined。 */
+  viewKindState(kind: string): BuiltinViewState | undefined;
+  /** 恢复内置插件（管理 UI「恢复内置插件」入口）：补播种缺失的内置条目后重载插件列表。 */
+  restoreBuiltin(): Promise<void>;
 }
 
 /** 磁盘行 → store 条目（清单经前端校验归一化；Rust 侧 plugin_list 已滤除损坏清单，
@@ -301,6 +316,26 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
     unregisterPluginUi(id);
     unloadPlugin(id);
     try {
+      // 内置插件：实现随宿主编译（无入口文件/无桥运行时），启用 = 注册宿主视图贡献。
+      if (p.sourceKind === "builtin") {
+        let registered = 0;
+        for (const v of BUILTIN_VIEWS) {
+          if (v.pluginId === id) {
+            registerBuiltinView(id, { kind: v.kind, label: v.label, component: v.component });
+            registered++;
+          }
+        }
+        if (registered === 0) {
+          // 内置清单（Rust）与前端载荷（builtinViews.tsx）不同步会静默无贡献：显式告警便于排查。
+          console.warn(`内置插件 ${id} 无对应视图载荷，未注册任何视图`);
+        }
+        set((s) => {
+          const cur = s.plugins[id];
+          if (!cur) return s;
+          return { plugins: { ...s.plugins, [id]: { ...cur, phase: "active" } } };
+        });
+        return;
+      }
       const types = pluginTypeList(p.manifest);
       const hasWorker = types.some(isWorkerPluginType);
       // 主线程平面：mainUi 优先；无 mainUi 时仅当「js/ts 运行时 + 无 worker 平面」才把 main 当
@@ -380,8 +415,8 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
 
     /**
      * 全量重载：先取磁盘清单（失败则旧状态原样保留），再卸载旧运行时与 UI 贡献，按当前上下文
-     * （app 插件 + 当前仓库 vault 插件）重建。语义 =「重置到磁盘状态」，可在 boot / 切仓库 /
-     * 安装/更新后安全重复调用。
+     * （app 插件 + 当前仓库 vault 插件 + 内置插件行）重建。语义 =「重置到磁盘状态」，可在
+     * boot / 切仓库 / 安装/更新后安全重复调用。
      */
     load: async () => {
       exposePluginFacade();
@@ -391,6 +426,8 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
       const seq = ++loadSeq;
       const rows = await pluginList();
       if (seq !== loadSeq) return; // 已有更新的 load 开始，本次作废（防孤儿 runtime）
+      // 内置插件 id 集合注入注册表（封闭 ViewKind 的防劫持放行依据）；须先于任何视图注册。
+      setBuiltinPluginIds(new Set(rows.filter((r) => r.sourceKind === "builtin").map((r) => r.id)));
       for (const id of Object.keys(get().plugins)) {
         unloadPlugin(id);
         unregisterPluginUi(id);
@@ -400,12 +437,14 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
         plugins[row.id] = toInstalled(row);
       }
       set({ plugins, initialized: true });
+      // 面板/菜单只订阅 uiRevision：插件行落定后补发一次，让已渲染的降级占位/菜单按新状态收敛
+      // （全停用内置的冷启动无任何注册 notify）。
+      set((s) => ({ uiRevision: s.uiRevision + 1 }));
       for (const row of rows) {
         if (!row.enabled) continue;
         if (seq !== loadSeq) return;
         await spawn(row.id);
       }
-      if (seq !== loadSeq) return;
     },
 
     install: async (repo, scope) => {
@@ -496,10 +535,20 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
       return out;
     },
     pluginAppPage: (id) => getPluginAppPages().find((p) => p.id === id),
-    pluginViewKinds: () => allPluginViewKinds(),
+    pluginViewKinds: () => {
+      // 过滤掉「提供它的内置插件已停用或已卸载」的视图 kind：已打开面板仍显示降级占位，
+      // 只是「添加视图」菜单不再提供。
+      const base = allPluginViewKinds();
+      const disabledKinds = new Set<string>();
+      for (const v of BUILTIN_VIEWS) {
+        const p = get().plugins[v.pluginId];
+        if (!p || !p.enabled) disabledKinds.add(v.kind);
+      }
+      if (disabledKinds.size === 0) return base;
+      return base.filter((k) => !disabledKinds.has(k));
+    },
     pluginViewLabel: (view) => pluginViewLabelOf(view),
     viewContribution: (kind) => getViewContribution(kind),
-    registerBuiltinView: (contrib) => registerBuiltinView(contrib),
     pluginTableView: (kind) => getPluginTableView(kind),
     pluginTableViews: () => getPluginTableViews(),
     pluginCommands: () => {
@@ -555,6 +604,20 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
       } catch (e) {
         set({ marketLoading: false, marketError: `市场加载失败：${errText(e)}` });
       }
+    },
+
+    viewKindState: (kind) => {
+      // kind → 内置插件 id（宿主组件载荷映射）→ 插件行状态；非内置提供 = undefined。
+      // 行缺失 = 已卸载（占位区分「停用」与「卸载」提示）。
+      const v = BUILTIN_VIEWS.find((x) => x.kind === kind);
+      if (!v) return undefined;
+      const p = get().plugins[v.pluginId];
+      if (!p) return { name: v.label, enabled: false, installed: false };
+      return { name: p.manifest.name, enabled: p.enabled, installed: true };
+    },
+    restoreBuiltin: async () => {
+      await pluginSeedBuiltin();
+      await get().load();
     },
   };
 });

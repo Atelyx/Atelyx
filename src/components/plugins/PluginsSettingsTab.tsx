@@ -32,6 +32,7 @@ export function PluginsSettingsTab() {
   const capabilitySensitive = usePluginStore((s) => s.capabilitySensitive);
   const pluginCommands = usePluginStore((s) => s.pluginCommands);
   const runPluginCommand = usePluginStore((s) => s.runPluginCommand);
+  const restoreBuiltin = usePluginStore((s) => s.restoreBuiltin);
 
   const [mode, setMode] = useState<TabMode>("installed");
   const [notice, setNotice] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
@@ -39,7 +40,9 @@ export function PluginsSettingsTab() {
   const [gitUrl, setGitUrl] = useState("");
   const [installing, setInstalling] = useState(false);
 
-  const rows = Object.values(plugins).sort((a, b) => (a.id < b.id ? -1 : 1));
+  const allRows = Object.values(plugins).sort((a, b) => (a.id < b.id ? -1 : 1));
+  const builtinRows = allRows.filter((p) => p.sourceKind === "builtin");
+  const installedRows = allRows.filter((p) => p.sourceKind !== "builtin");
   // 命令合并全量一次（UI 平面异步注册经 uiRevision 订阅刷新）。
   const commands = pluginCommands();
 
@@ -140,14 +143,80 @@ export function PluginsSettingsTab() {
           </button>
         </div>
       </div>
-      {/* 已装插件列表 */}
+      {/* 内置插件：随 App 分发；可停用/卸载（卸载后经「恢复内置插件」重新播种） */}
+      <div className="mb-3 flex-shrink-0">
+        <div className="flex items-center justify-between mb-1.5">
+          <span className="text-[11px] font-medium" style={{ color: "var(--text-muted)" }}>
+            内置插件
+          </span>
+          <button
+            onClick={() => void restoreBuiltin().catch((e) => setNotice({ kind: "error", text: errText(e) }))}
+            className="flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded hover:bg-[var(--hover)]"
+            style={{ color: "var(--text-secondary)" }}
+            title="补回已卸载的内置插件（不覆盖停用状态）"
+          >
+            <RefreshCw size={12} />
+            恢复内置插件
+          </button>
+        </div>
+        <div
+          className="rounded border p-3 space-y-2"
+          style={{ borderColor: "var(--border)", background: "var(--bg-primary)" }}
+        >
+          {builtinRows.length === 0 && (
+            <div className="text-[11px]" style={{ color: "var(--text-muted)" }}>
+              已全部卸载；可点上方「恢复内置插件」重新装回。
+            </div>
+          )}
+          {builtinRows.map((p) => (
+            <div key={p.id} className="flex items-center gap-2">
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-medium truncate" style={{ color: "var(--text-primary)" }}>
+                    {p.manifest.name}
+                  </span>
+                  <span
+                    className="text-[10px] px-1.5 py-0.5 rounded border flex-shrink-0"
+                    style={{ color: "var(--text-secondary)", borderColor: "var(--border)" }}
+                  >
+                    {PLUGIN_TYPE_LABELS[p.manifest.type]}
+                  </span>
+                  <span
+                    className="text-[10px] px-1.5 py-0.5 rounded flex-shrink-0"
+                    style={{ color: "var(--text-muted)", background: "var(--bg-secondary)" }}
+                  >
+                    {PLUGIN_SOURCE_LABELS.builtin}
+                  </span>
+                </div>
+                <div className="text-[11px] truncate" style={{ color: "var(--text-muted)" }}>
+                  {p.id} · {p.manifest.tagline ?? ""}
+                </div>
+              </div>
+              <ToggleSwitch
+                checked={p.enabled}
+                onChange={(on) => void setEnabled(p.id, on).catch((e) => setNotice({ kind: "error", text: errText(e) }))}
+                title={p.enabled ? "停用" : "启用"}
+              />
+              <button
+                onClick={() => setConfirmUninstall(p.id)}
+                title="卸载"
+                className="p-1.5 rounded hover:bg-[var(--hover)]"
+                style={{ color: "var(--text-muted)" }}
+              >
+                <Trash2 size={14} />
+              </button>
+            </div>
+          ))}
+        </div>
+      </div>
+      {/* 已装插件列表（第三方；内置插件在上方独立分区） */}
       <div className="flex-1 min-h-0 overflow-auto space-y-2">
-        {rows.length === 0 && (
+        {installedRows.length === 0 && (
           <div className="text-sm py-8 text-center" style={{ color: "var(--text-muted)" }}>
-            尚未安装插件。可从上方的「本地文件夹 / Git 地址」安装，或前往「市场」tab 浏览安装。
+            尚未安装第三方插件。可从上方的「本地文件夹 / Git 地址」安装，或前往「市场」tab 浏览安装。
           </div>
         )}
-        {rows.map((p) => {
+        {installedRows.map((p) => {
           const declares = p.manifest.declares ?? [];
           const failed = p.phase === "failed";
           const cmds = commands.filter((c) => c.pluginId === p.id);
@@ -287,9 +356,11 @@ export function PluginsSettingsTab() {
         <ConfirmDialog
           title={`卸载插件「${plugins[confirmUninstall]?.manifest.name ?? confirmUninstall}」`}
           description={
-            plugins[confirmUninstall]?.sourceKind === "local"
-              ? "将移除该插件的目录链接，本地源目录本身不受影响。插件贡献的功能随即移除。"
-              : "将删除插件目录与本地状态，插件贡献的功能随即移除。此操作不可撤销。"
+            plugins[confirmUninstall]?.sourceKind === "builtin"
+              ? "将移除该内置插件（随 App 分发；可经「恢复内置插件」重新装回）。其视图随即从工作区移除。"
+              : plugins[confirmUninstall]?.sourceKind === "local"
+                ? "将移除该插件的目录链接，本地源目录本身不受影响。插件贡献的功能随即移除。"
+                : "将删除插件目录与本地状态，插件贡献的功能随即移除。此操作不可撤销。"
           }
           confirmText="卸载"
           onConfirm={() => {

@@ -33,13 +33,10 @@ import { CanvasView } from "@/components/layout/views/CanvasView";
 import { NoteView } from "@/components/layout/views/NoteView";
 import { TableView } from "@/components/layout/views/TableView";
 import { FilesView } from "@/components/layout/views/FilesView";
-import { SearchView } from "@/components/layout/views/SearchView";
 import { AiChatView } from "@/components/layout/views/AiChatView";
 import { InspectorPanel } from "@/components/canvas/panels/InspectorPanel";
 import { CollabRoomPanel } from "@/components/canvas/panels/CollabRoomPanel";
-import { CalendarPanel } from "@/components/calendar/CalendarPanel";
 import { RepoHistoryPanel } from "@/components/history/RepoHistoryPanel";
-import { RecentPanel } from "@/components/layout/panels/RecentPanel";
 import type { ViewKind } from "@/types";
 
 /** 视图元信息（标签/头部共用；显示名单一来源 = VIEW_LABELS，图标在此维护）。 */
@@ -70,22 +67,29 @@ export function viewMetaFor(view: string): { label: string; icon: ReactNode } {
   return { label: view, icon: <Puzzle size={13} /> };
 }
 
-/** 内置视图贡献注册（宿主第一方）：搜索视图作为样例注册进统一视图注册表（模块加载即注册一次，幂等），
- *  其余内置视图仍在 switch 硬编码分派，后续按同一模式增量迁移。 */
-function ensureBuiltinViewContribution(): void {
-  const s = usePluginStore.getState();
-  if (s.viewContribution("search")) return;
-  s.registerBuiltinView({ kind: "search", label: VIEW_LABELS.search, component: SearchView });
-}
-ensureBuiltinViewContribution();
-
-/** 视图贡献承载：按 kind 渲染注册的组件（内置贡献/插件面板同表；缺注册 = 空面板占位）。
+/** 视图贡献承载：按 kind 渲染注册的组件（内置插件/插件面板同表；缺注册 = 空面板占位）。
  *  订阅 uiRevision——插件异步注册晚于首渲染时自动升级占位；ViewHost 本体不订阅，
  *  避免内置重型视图（笔记编辑器等）在插件注册时被无效重渲染。 */
 function ViewContributionMount({ kind }: { kind: string }) {
   usePluginStore((s) => s.uiRevision);
   const contrib = usePluginStore.getState().viewContribution(kind);
-  if (!contrib) return <div className="h-full w-full" style={{ background: "var(--bg-primary)" }} />;
+  if (!contrib) {
+    // 缺贡献：kind 由不可用的内置插件提供（停用/卸载）→ 降级占位（提示处置入口）；
+    // 否则保持空白占位（未知 kind / 第三方插件已卸载，不猜测原因）。
+    const state = usePluginStore.getState().viewKindState(kind);
+    if (state && !state.enabled) {
+      return (
+        <div className="h-full w-full flex items-center justify-center" style={{ background: "var(--bg-primary)" }}>
+          <div className="text-xs text-center px-6 leading-relaxed" style={{ color: "var(--text-muted)" }}>
+            「{state.name}」为内置插件，{state.installed ? "已停用" : "已卸载"}
+            <br />
+            {state.installed ? "可在设置 → 插件中重新启用" : "可在设置 → 插件中恢复"}
+          </div>
+        </div>
+      );
+    }
+    return <div className="h-full w-full" style={{ background: "var(--bg-primary)" }} />;
+  }
   const Comp = contrib.component;
   return (
     <ErrorBoundary>
@@ -114,17 +118,12 @@ export const ViewHost = memo(function ViewHost({ view, hostId }: { view: ViewKin
       return <AiChatView />;
     case "collabroom":
       return <CollabRoomPanel />;
-    case "calendar":
-      return <CalendarPanel />;
     case "repohistory":
       return <RepoHistoryPanel />;
-    case "recent":
-      return <RecentPanel />;
     default:
-      // 统一视图注册表：内置贡献（搜索）与插件面板都由 ViewContributionMount 承载——
-      // 组件内订阅 uiRevision，异步注册/卸载自动升级或回退占位（修复空占位粘滞）。
-      if (view !== "empty") return <ViewContributionMount kind={view} />;
-      return <div className="h-full w-full" style={{ background: "var(--bg-primary)" }} />;
+      // 统一视图注册表：内置插件（搜索/最近打开/日历）与插件面板都由 ViewContributionMount 承载——
+      // 组件内订阅 uiRevision，异步注册/卸载自动升级或回退占位；"empty" 无贡献同样走空白占位。
+      return <ViewContributionMount kind={view} />;
   }
 });
 
