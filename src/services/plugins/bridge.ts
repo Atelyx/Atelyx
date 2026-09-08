@@ -26,6 +26,14 @@ import { registerPluginTools, unregisterPluginTools } from "@/services/ai/tools"
 import { AGENT_TOOLS_META } from "@/constants/tools";
 import { getAppVersion } from "@/services/app";
 import { runProcess } from "@/services/shell";
+import { listVaultTree } from "@/services/vault";
+import {
+  globVault,
+  grepVault,
+  listVaultDir,
+  readVaultFile,
+  readVaultFileWindow,
+} from "@/services/vault/aiFiles";
 import { detectPlatform } from "@/utils/pluginHost";
 import {
   createPluginWorker,
@@ -831,6 +839,42 @@ registerHostCapability(
     throw new Error(`shell 无方法 ${method}`);
   },
   { label: "执行外部程序", sensitive: true },
+);
+
+registerHostCapability(
+  "vault",
+  async (method, args) => {
+    // 仓库文件读取（worker/子进程平面经 bridge.call("vault", …)）；写方法后续按需补齐。
+    // 参数全为可序列化值（路径/选项对象），经 JSON 传输无引用跨越；路径安全边界在 Rust safe_join。
+    if (method === "listFiles") return listVaultTree();
+    if (method === "readFile") {
+      const file = args[0];
+      if (typeof file !== "string") throw new Error("vault.readFile 需要相对仓库根的文件路径");
+      return readVaultFile(file);
+    }
+    if (method === "readFileWindow") {
+      const file = args[0];
+      if (typeof file !== "string") throw new Error("vault.readFileWindow 需要相对仓库根的文件路径");
+      return readVaultFileWindow(file, args[1] as { offset?: number; limit?: number } | undefined);
+    }
+    if (method === "listDir") {
+      const dir = args[0];
+      if (dir !== undefined && typeof dir !== "string") throw new Error("vault.listDir 需要目录路径或省略");
+      return listVaultDir(dir as string | undefined);
+    }
+    if (method === "glob") {
+      const pattern = args[0];
+      if (typeof pattern !== "string") throw new Error("vault.glob 需要检索模式");
+      return globVault(pattern, args[1] as { path?: string } | undefined);
+    }
+    if (method === "grep") {
+      const pattern = args[0];
+      if (typeof pattern !== "string") throw new Error("vault.grep 需要检索正则");
+      return grepVault(pattern, args[1] as { path?: string; include?: string } | undefined);
+    }
+    throw new Error(`vault 无方法 ${method}`);
+  },
+  { label: "仓库文件读取" },
 );
 
 // 糖方法面（registerTool/registerCommand/on/emit）的展示元数据；handler 由 dispatchMethod 承载。
