@@ -1,5 +1,5 @@
 /**
- * 主线程 UI 平面：UI 类插件（panel/setting/appPage/node/command）的主线程加载与注册收集。
+ * 主线程 UI 平面：UI 类插件（panel/setting/appPage/node/edge/command）的主线程加载与注册收集。
  *
  * UI 代码必须跑在主线程（渲染 React、触达 DOM），无法进 worker。加载方式：把插件入口作为
  * blob script 注入页面（CSP script-src 已含 blob:），代码包在 IIFE 里、只暴露按插件 id 生成的
@@ -8,7 +8,7 @@
  * 信任边界（完全自由模型）：主线程插件与 App 同上下文、理论上可触达 window/invoke——
  * 这是既定边界；插件应只经 facade 注册贡献。每插件独立加载，单个插件脚本报错只影响自身。
  */
-import React, { createElement, type ComponentType } from "react";
+import React, { createElement, type ComponentType, type ReactNode } from "react";
 import { VIEW_LABELS } from "@/constants/views";
 import { VIEW_KINDS } from "@/types";
 import type { CanvasFileRow, FileTreeNode, PluginTableSnapshot, VaultAccess } from "@/types";
@@ -29,6 +29,12 @@ export interface PluginAppPageRegistration {
 }
 /** 插件画布节点注册（CanvasView nodeTypes 合并接入处）。 */
 export interface PluginNodeRegistration {
+  pluginId: string;
+  type: string;
+  component: ComponentType;
+}
+/** 插件画布边注册（CanvasView edgeTypes 合并接入处；与节点同语义、last-wins 覆盖）。 */
+export interface PluginEdgeRegistration {
   pluginId: string;
   type: string;
   component: ComponentType;
@@ -59,11 +65,17 @@ export interface PluginUiContribution {
 /**
  * 视图贡献（统一注册表）：所有插件视图同表注册，kind 全局唯一（重复即拒绝）；
  * kind 缺失/来源卸载时对应视图回退空面板占位。pluginId 标注来源（溯源/按插件撤销）。
+ *
+ * `render` 为可选承载：内置重型视图（画布/表格）需要 hostId（聚焦门控）——
+ * 用 render(hostId) 而非 component（component 契约无 props，第三方面板不受影响）。
+ * render 与 component 至少其一（render 优先）。
  */
 export interface ViewContribution {
   kind: string;
   label: string;
-  component: ComponentType;
+  component?: ComponentType;
+  /** 可选：按宿主面板/撕裂窗口 id 渲染（内置重型视图用；第三方面板不提供）。 */
+  render?: (hostId: string) => ReactNode;
   pluginId: string;
 }
 
@@ -71,6 +83,7 @@ const viewContributions = new Map<string, ViewContribution>(); // kind → 贡�
 const settings = new Map<string, PluginSettingRegistration>(); // `${pluginId}:${key}` → 注册
 const appPages = new Map<string, PluginAppPageRegistration>(); // id → 注册
 const nodes = new Map<string, PluginNodeRegistration>(); // type → 注册
+const edges = new Map<string, PluginEdgeRegistration>(); // type → 注册
 const commands = new Map<string, PluginCommandRegistration>(); // `${pluginId}:${id}` → 注册
 const tableViews = new Map<string, PluginTableViewRegistration>(); // kind → 注册
 const uiContributions = new Map<string, PluginUiContribution>(); // `${point}:${pluginId}${id ? ":"+id : ""}` → 注册
@@ -102,6 +115,12 @@ export function getPluginNode(type: string): PluginNodeRegistration | undefined 
 }
 export function getPluginNodes(): PluginNodeRegistration[] {
   return [...nodes.values()];
+}
+export function getPluginEdge(type: string): PluginEdgeRegistration | undefined {
+  return edges.get(type);
+}
+export function getPluginEdges(): PluginEdgeRegistration[] {
+  return [...edges.values()];
 }
 export function getPluginCommands(): PluginCommandRegistration[] {
   return [...commands.values()];
@@ -151,11 +170,15 @@ export function setBuiltinPluginIds(ids: ReadonlySet<string> | null): void {
 function registerViewContribution(
   kind: string,
   label: string,
-  component: ComponentType,
+  component: ComponentType | undefined,
   pluginId: string,
+  render?: (hostId: string) => ReactNode,
 ): void {
   if (typeof kind !== "string" || kind.length === 0) {
     throw new Error("视图贡献需要非空 kind");
+  }
+  if (!component && !render) {
+    throw new Error("视图贡献需要 component 或 render");
   }
   if (
     ((VIEW_KINDS as readonly string[]).includes(kind) || kind === "empty") &&
@@ -166,16 +189,23 @@ function registerViewContribution(
   if (viewContributions.has(kind)) {
     throw new Error(`视图 kind ${kind} 已被注册，kind 全局唯一`);
   }
-  viewContributions.set(kind, { kind, label, component, pluginId });
+  viewContributions.set(kind, { kind, label, component, render, pluginId });
   notify();
 }
 
-/** 注册内置插件视图贡献（内置插件 = 随 App 分发的种子条目；可注册 VIEW_KINDS 内 kind，停用即撤销）。 */
+/** 注册内置插件视图贡献（内置插件 = 随 App 分发的种子条目；可注册 VIEW_KINDS 内 kind，停用即撤销）。
+ *  `render` 可选：内置重型视图（画布/表格）经它接收宿主面板/撕裂窗口 id；`component` 与 `render`
+ *  至少其一（render 优先）。 */
 export function registerBuiltinView(
   pluginId: string,
-  contrib: { kind: string; label: string; component: ComponentType },
+  contrib: {
+    kind: string;
+    label: string;
+    component?: ComponentType;
+    render?: (hostId: string) => ReactNode;
+  },
 ): void {
-  registerViewContribution(contrib.kind, contrib.label, contrib.component, pluginId);
+  registerViewContribution(contrib.kind, contrib.label, contrib.component, pluginId, contrib.render);
 }
 
 function registerPanel(pluginId: string, kind: string, label: string, component: ComponentType): void {
@@ -192,6 +222,10 @@ function registerAppPage(pluginId: string, id: string, label: string, component:
 }
 function registerNode(pluginId: string, type: string, component: ComponentType): void {
   nodes.set(type, { pluginId, type, component });
+  notify();
+}
+function registerEdge(pluginId: string, type: string, component: ComponentType): void {
+  edges.set(type, { pluginId, type, component });
   notify();
 }
 function registerCommand(pluginId: string, id: string, label: string, run: () => unknown): void {
@@ -226,6 +260,7 @@ export function unregisterPluginUi(pluginId: string): void {
   for (const [k, v] of settings) if (v.pluginId === pluginId) changed = settings.delete(k) || changed;
   for (const [k, v] of appPages) if (v.pluginId === pluginId) changed = appPages.delete(k) || changed;
   for (const [k, v] of nodes) if (v.pluginId === pluginId) changed = nodes.delete(k) || changed;
+  for (const [k, v] of edges) if (v.pluginId === pluginId) changed = edges.delete(k) || changed;
   for (const [k, v] of commands) if (v.pluginId === pluginId) changed = commands.delete(k) || changed;
   for (const [k, v] of tableViews) if (v.pluginId === pluginId) changed = tableViews.delete(k) || changed;
   for (const [k, v] of uiContributions) if (v.pluginId === pluginId) changed = uiContributions.delete(k) || changed;
@@ -274,6 +309,7 @@ export interface PluginMainThreadFacade {
   registerSetting(opts: { key: string; label: string; component: ComponentType }): void;
   registerAppPage(opts: { id: string; label: string; component: ComponentType }): void;
   registerNode(opts: { type: string; component: ComponentType }): void;
+  registerEdge(opts: { type: string; component: ComponentType }): void;
   registerCommand(opts: { id: string; label: string; run: () => unknown }): void;
   registerTableView(opts: { kind: string; label: string; component: ComponentType }): void;
   /** 通用扩展点注册（point 为任意字符串；payload 直接持有引用，可含组件/函数）。 */
@@ -312,6 +348,7 @@ export function exposePluginFacade(): void {
       registerSetting: (o) => registerSetting(pluginId, o.key, o.label, o.component),
       registerAppPage: (o) => registerAppPage(pluginId, o.id, o.label, o.component),
       registerNode: (o) => registerNode(pluginId, o.type, o.component),
+      registerEdge: (o) => registerEdge(pluginId, o.type, o.component),
       registerCommand: (o) => registerCommand(pluginId, o.id, o.label, o.run),
       registerTableView: (o) => registerTableView(pluginId, o.kind, o.label, o.component),
       registerContribution: (o) => registerContribution(pluginId, o.point, o.id, o.payload),

@@ -10,6 +10,8 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import {
   exposePluginFacade,
   getPluginCommands,
+  getPluginEdge,
+  getPluginEdges,
   getPluginSetting,
   getPluginSettings,
   getPluginTableView,
@@ -244,6 +246,47 @@ describe("主线程平面 facade 与注册", () => {
     unregisterPluginUi("builtin.recent");
     expect(getViewContribution("recent")).toBeUndefined();
     expect(getViewContribution("calendar")?.pluginId).toBe("builtin.calendar");
+  });
+
+  it("registerBuiltinView render-only 承载（重型视图经 hostId 渲染）；component 与 render 至少其一", () => {
+    exposePluginFacade();
+    setBuiltinPluginIds(new Set(["builtin.canvas"]));
+    // 画布视图需要宿主面板 id（聚焦门控）：只注册 render，不填 component
+    registerBuiltinView("builtin.canvas", {
+      kind: "canvas",
+      label: "画布",
+      render: (hostId) => `host:${hostId}`,
+    });
+    const c = getViewContribution("canvas");
+    expect(c?.pluginId).toBe("builtin.canvas");
+    expect(c?.component).toBeUndefined();
+    // render 按 hostId 承载（ViewHost 分派路径：render 优先于 component）
+    expect(c?.render?.("panel-1")).toBe("host:panel-1");
+    // component 与 render 全缺 → 拒绝（无渲染入口的视图贡献无意义）
+    expect(() => registerBuiltinView("builtin.canvas", { kind: "empty", label: "无渲染" })).toThrow(
+      /component 或 render/,
+    );
+  });
+
+  it("registerEdge 收集/读取/同名 last-wins 覆盖/按插件撤销", () => {
+    exposePluginFacade();
+    const edgeA = () => null;
+    const edgeB = () => null;
+    const bridgeA = window.__atelyxPlugin__!.forPlugin("com.test.a");
+    const bridgeB = window.__atelyxPlugin__!.forPlugin("com.test.b");
+    bridgeA.registerEdge({ type: "com.test.a.edge", component: edgeA });
+    bridgeA.registerEdge({ type: "custom", component: edgeA });
+    bridgeB.registerEdge({ type: "custom", component: edgeB });
+    // 读取 + last-wins（与节点同语义：同名 type 后注册者覆盖，不拒绝）
+    expect(getPluginEdges().map((e) => e.type)).toContain("com.test.a.edge");
+    expect(getPluginEdge("custom")?.component).toBe(edgeB);
+    expect(getPluginEdge("custom")?.pluginId).toBe("com.test.b");
+    // 按插件撤销只删自己的边注册
+    unregisterPluginUi("com.test.a");
+    expect(getPluginEdge("com.test.a.edge")).toBeUndefined();
+    expect(getPluginEdge("custom")?.pluginId).toBe("com.test.b");
+    unregisterPluginUi("com.test.b");
+    expect(getPluginEdge("custom")).toBeUndefined();
   });
 
   it("facade 仓库访问方法：经 provider 转发 + 未接线安全降级", async () => {

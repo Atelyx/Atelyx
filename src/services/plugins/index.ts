@@ -111,6 +111,8 @@ export {
   exposePluginFacade,
   getPluginAppPages,
   getPluginCommands,
+  getPluginEdge,
+  getPluginEdges,
   getPluginNode,
   getPluginNodes,
   getPluginSetting,
@@ -132,6 +134,7 @@ export {
 export type {
   PluginAppPageRegistration,
   PluginCommandRegistration,
+  PluginEdgeRegistration,
   PluginMainThreadFacade,
   PluginNodeRegistration,
   PluginSettingRegistration,

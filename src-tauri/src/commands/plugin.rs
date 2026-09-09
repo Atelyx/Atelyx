@@ -19,7 +19,7 @@
 //! 安全：插件 id 视为不可信输入（仍校验）；插件目录内路径访问经 `safe_plugin_path` 限制在对应插件根
 //! 目录内并拒绝符号链接段（防穿越越权）；插件代码在 WebView 隔离上下文执行、只能调前端桥。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
@@ -75,7 +75,7 @@ pub enum PluginSourceKind {
     Git,
     /// 本地目录（junction/符号链接实时引用，无拷贝无更新）。
     Local,
-    /// 内置（随 App 分发）：首启播种进 plugin-state，实现随宿主编译（无磁盘目录）。
+    /// 内置（随 App 分发）：播种进 plugin-state（首启 + 版本新增补种），实现随宿主编译（无磁盘目录）。
     /// 运行时与第三方插件无差别（同一注册表/启停/卸载/恢复）；版本随 App 走。
     Builtin,
 }
@@ -127,9 +127,10 @@ struct PluginState {
     enabled: HashMap<String, bool>,
     #[serde(default)]
     sources: HashMap<String, PluginSource>,
-    /// 内置插件是否已播种（首启一次；之后不自动播种，卸载保持卸载、停用保持停用）。
+    /// 已播种过的内置插件 id（增量播种依据：新增内置条目随 App 版本补播，已播种条目
+    /// 保持现状——卸载保持卸载、停用保持停用；恢复由用户显式触发）。
     #[serde(default)]
-    builtin_seeded: bool,
+    builtin_seeded_ids: Vec<String>,
 }
 
 /// 跨作用域 id 全局唯一：同 id 已存在于另一作用域时拒绝安装（store/enabled/运行时均按裸 id
@@ -148,8 +149,8 @@ fn ensure_global_id_unique(app: &AppHandle, state: &VaultState, scope: &str, id:
     Ok(())
 }
 
-// ===== 内置插件（随 App 分发，bundled） =====
-// 内置插件 = 分发属性：首启播种进 plugin-state，运行时与第三方插件同一注册表/启停/卸载/恢复，
+// ===== 内置插件（随 App 分发，sourceKind=builtin） =====
+// 内置插件 = 分发属性：播种进 plugin-state（首启 + 版本新增补种），运行时与第三方插件同一注册表/启停/卸载/恢复，
 // 无任何特权。实现随宿主编译（无磁盘目录、无桥运行时），前端按 id 对应宿主组件载荷
 // （`components/plugins/builtinViews.tsx`）；版本随 App 走。
 
@@ -165,6 +166,13 @@ const BUILTIN_PLUGINS: &[BuiltinPluginDef] = &[
     BuiltinPluginDef { id: "builtin.recent", name: "最近打开", tagline: "最近打开的文件列表" },
     BuiltinPluginDef { id: "builtin.calendar", name: "日历", tagline: "活动密度与手动日程" },
     BuiltinPluginDef { id: "builtin.aichat", name: "AI 对话", tagline: "AI 对话会话面板" },
+    BuiltinPluginDef { id: "builtin.canvas", name: "画布", tagline: "有向图对话画布" },
+    BuiltinPluginDef { id: "builtin.note", name: "笔记", tagline: "Markdown 笔记编辑器" },
+    BuiltinPluginDef { id: "builtin.table", name: "表格", tagline: "多维表格编辑器" },
+    BuiltinPluginDef { id: "builtin.files", name: "文件", tagline: "仓库文件树面板" },
+    BuiltinPluginDef { id: "builtin.inspector", name: "属性", tagline: "节点/笔记属性面板" },
+    BuiltinPluginDef { id: "builtin.collabroom", name: "协作房间", tagline: "协作在线用户面板" },
+    BuiltinPluginDef { id: "builtin.repohistory", name: "仓库历史", tagline: "仓库版本历史面板" },
 ];
 
 fn is_builtin_plugin_id(id: &str) -> bool {
@@ -204,7 +212,7 @@ fn plugin_info_from_builtin(def: &BuiltinPluginDef, scope: &str, enabled: bool) 
 }
 
 /// 把缺失的内置插件条目写入状态（enabled=true、来源 Builtin）；已存在条目保持现状。
-/// 供首启播种与「恢复内置插件」共用（卸载保持卸载、停用保持停用）。
+/// 供「恢复内置插件」与首启/增量播种共用（卸载保持卸载、停用保持停用）。
 fn seed_missing_builtins(pstate: &mut PluginState) {
     for def in BUILTIN_PLUGINS {
         if pstate.sources.contains_key(def.id) {
@@ -226,17 +234,51 @@ pub fn plugin_default_plugins() -> Vec<Value> {
     BUILTIN_PLUGINS.iter().map(builtin_manifest).collect()
 }
 
-/// 首启播种内置插件：plugin-state 首次初始化时把内置插件行写入（enabled=true、来源 Builtin）。
-/// 之后不再自动播种——卸载保持卸载、停用保持停用；恢复由用户显式触发（`plugin_seed_builtin`）。
+/// 内置插件播种（纯状态变换；真实入口 `ensure_builtin_seeded` 读写状态文件）：
+/// 把未纳入 `builtin_seeded_ids` 的内置条目补播种（enabled=true、来源 Builtin）。
+/// 增量语义 = 版本升级新增内置条目自动出现；已播种过的条目保持现状（卸载保持卸载、
+/// 停用保持停用）；恢复由用户显式触发（`plugin_seed_builtin`）。
+fn seed_new_builtins(pstate: &mut PluginState) {
+    let mut seeded: HashSet<String> = pstate.builtin_seeded_ids.iter().cloned().collect();
+    // 无 id 记录（首启或存量状态文件）时按现有内置来源推导已播种集，只增量补新增条目。
+    // 已卸载条目与新增条目不可区分（既定边界：升级补回一次，恢复入口可再卸载），
+    // 见 builtin_seeding_legacy_state_derives_seeded_from_sources 测试。
+    if seeded.is_empty() {
+        for id in pstate.sources.keys() {
+            if is_builtin_plugin_id(id) {
+                seeded.insert(id.clone());
+            }
+        }
+    }
+    for def in BUILTIN_PLUGINS {
+        if seeded.contains(def.id) {
+            continue;
+        }
+        if !pstate.sources.contains_key(def.id) {
+            pstate.sources.insert(
+                def.id.to_string(),
+                PluginSource { kind: PluginSourceKind::Builtin, scope: "app".to_string(), ..Default::default() },
+            );
+            pstate.enabled.insert(def.id.to_string(), true);
+        }
+        seeded.insert(def.id.to_string());
+    }
+    // 回写完整 seeded 记录（含 legacy 从 sources 推导的条目），按 BUILTIN_PLUGINS 顺序稳定。
+    pstate.builtin_seeded_ids = BUILTIN_PLUGINS
+        .iter()
+        .map(|d| d.id.to_string())
+        .filter(|id| seeded.contains(id))
+        .collect();
+}
+
 fn ensure_builtin_seeded(app: &AppHandle) {
     let mut pstate = read_plugin_state(app);
-    if pstate.builtin_seeded {
-        return;
-    }
-    seed_missing_builtins(&mut pstate);
-    pstate.builtin_seeded = true;
+    let before = pstate.builtin_seeded_ids.len();
+    seed_new_builtins(&mut pstate);
     // 播种失败不阻塞列表（下次重试）。
-    let _ = write_plugin_state(app, &pstate);
+    if pstate.builtin_seeded_ids.len() != before {
+        let _ = write_plugin_state(app, &pstate);
+    }
 }
 
 /// 恢复内置插件（用户显式触发）：补播种缺失的内置条目（enabled=true）。
@@ -244,6 +286,10 @@ fn ensure_builtin_seeded(app: &AppHandle) {
 fn seed_builtin_plugins(app: &AppHandle) -> Result<(), String> {
     let mut pstate = read_plugin_state(app);
     seed_missing_builtins(&mut pstate);
+    // 恢复后把已播种 id 记入 seeded 列表（此后这些条目不再增量补播，卸载保持卸载）。
+    let seeded: HashSet<&str> = pstate.builtin_seeded_ids.iter().map(String::as_str).collect();
+    let missing: Vec<&str> = BUILTIN_PLUGINS.iter().map(|d| d.id).filter(|id| !seeded.contains(*id)).collect();
+    pstate.builtin_seeded_ids.extend(missing.iter().map(|id| id.to_string()));
     write_plugin_state(app, &pstate)
 }
 
@@ -1421,5 +1467,67 @@ mod tests {
         seed_missing_builtins(&mut s);
         assert_eq!(s.enabled.get(BUILTIN_PLUGINS[0].id), Some(&false)); // 停用保持
         assert!(s.sources.contains_key(BUILTIN_PLUGINS[1].id)); // 缺失补回（显式恢复）
+    }
+
+    #[test]
+    fn builtin_seeding_is_incremental_by_id() {
+        // 增量播种：只补未记录的内置条目；已记录条目（含停用）保持现状。
+        let mut s = PluginState::default();
+        s.builtin_seeded_ids = BUILTIN_PLUGINS[..4].iter().map(|d| d.id.to_string()).collect();
+        for def in &BUILTIN_PLUGINS[..4] {
+            s.sources.insert(def.id.to_string(), PluginSource { kind: PluginSourceKind::Builtin, scope: "app".to_string(), ..Default::default() });
+        }
+        s.enabled.insert(BUILTIN_PLUGINS[1].id.to_string(), false); // 停用保持
+        seed_new_builtins(&mut s);
+        assert_eq!(s.enabled.get(BUILTIN_PLUGINS[1].id), Some(&false)); // 停用不复活
+        assert!(s.sources.contains_key(BUILTIN_PLUGINS[4].id)); // 未记录的新条目补播种
+        assert_eq!(s.enabled.get(BUILTIN_PLUGINS[4].id), Some(&true));
+        assert_eq!(s.sources.len(), BUILTIN_PLUGINS.len());
+        assert_eq!(s.builtin_seeded_ids.len(), BUILTIN_PLUGINS.len());
+        // 幂等：重复调用无新增、不覆盖停用状态。
+        seed_new_builtins(&mut s);
+        assert_eq!(s.sources.len(), BUILTIN_PLUGINS.len());
+        assert_eq!(s.builtin_seeded_ids.len(), BUILTIN_PLUGINS.len());
+        assert_eq!(s.enabled.get(BUILTIN_PLUGINS[1].id), Some(&false));
+    }
+
+    #[test]
+    fn builtin_seeding_legacy_state_derives_seeded_from_sources() {
+        // 旧状态文件无 id 记录（一次性布尔语义）：现有内置来源视为已播种，只补新条目、
+        // 不复活仍在列表中的旧条目状态；已卸载的旧条目无法与「新条目」区分（不做存量迁移
+        // 的既定边界：升级补回一次，恢复入口可再卸载）。
+        let mut s = PluginState::default();
+        for def in &BUILTIN_PLUGINS[..4] {
+            s.sources.insert(def.id.to_string(), PluginSource { kind: PluginSourceKind::Builtin, scope: "app".to_string(), ..Default::default() });
+        }
+        s.enabled.insert(BUILTIN_PLUGINS[0].id.to_string(), false);
+        seed_new_builtins(&mut s);
+        assert_eq!(s.enabled.get(BUILTIN_PLUGINS[0].id), Some(&false)); // 停用保持
+        assert!(s.sources.contains_key(BUILTIN_PLUGINS[3].id)); // 现有条目不重复播种
+        assert!(s.sources.contains_key(BUILTIN_PLUGINS[4].id)); // 新条目补播种
+        assert_eq!(s.sources.len(), BUILTIN_PLUGINS.len());
+        assert_eq!(s.builtin_seeded_ids.len(), BUILTIN_PLUGINS.len());
+    }
+
+    #[test]
+    fn builtin_seeding_keeps_seeded_uninstalled_removed() {
+        // 核心不变量：已记入 builtin_seeded_ids 的内置条目即使已被卸载（sources 无对应项）
+        // 也不再重新播种——卸载保持卸载（增量 by-id 语义的立足点）。
+        let mut s = PluginState::default();
+        s.builtin_seeded_ids = BUILTIN_PLUGINS[..4].iter().map(|d| d.id.to_string()).collect();
+        for def in &BUILTIN_PLUGINS[..4] {
+            if def.id == BUILTIN_PLUGINS[1].id {
+                continue; // 已卸载：不在 sources
+            }
+            s.sources.insert(def.id.to_string(), PluginSource { kind: PluginSourceKind::Builtin, scope: "app".to_string(), ..Default::default() });
+        }
+        seed_new_builtins(&mut s);
+        // 已播种但已卸载的条目不复活。
+        assert!(!s.sources.contains_key(BUILTIN_PLUGINS[1].id));
+        assert!(s.enabled.get(BUILTIN_PLUGINS[1].id).is_none()); // 卸载保持：不复活也不启用
+        // 未记录的后续条目仍补播种。
+        assert!(s.sources.contains_key(BUILTIN_PLUGINS[4].id));
+        assert_eq!(s.sources.len(), BUILTIN_PLUGINS.len() - 1);
+        assert_eq!(s.builtin_seeded_ids.len(), BUILTIN_PLUGINS.len());
     }
 }

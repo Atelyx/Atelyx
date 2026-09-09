@@ -27,7 +27,7 @@
  */
 
 /** 桥方法白名单（自动暴露给插件的 bridge.<method> 入口；简单透传型方法走这里）。
- * 承载逻辑平面可表达的方法；UI 类贡献（panel/node/setting/theme/app/command）
+ * 承载逻辑平面可表达的方法；UI 类贡献（panel/node/edge/setting/theme/app/command）
  * 走主线程平面，不在此列。 */
 export const BRIDGE_METHODS = [
   "stateRead",

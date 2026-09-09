@@ -4,6 +4,10 @@
  * hostId = 面板 id 或撕裂窗口 id（画布/表格聚焦门控用）。各视图内容由全局 store
  * 驱动（画布/表格/笔记打开文件状态），本组件只做分派；`ViewStatusIndicator` 供
  * 面板头/撕裂窗口头渲染保存/冲突/错误状态。
+ *
+ * 分派模型：所有视图经统一视图贡献注册表分派（内置插件 + 第三方面板同表）——
+ * 内核不硬编码视图，只做渲染宿主。内置重型视图（画布/表格）经贡献的 `render(hostId)`
+ * 接收宿主 id（聚焦门控），第三方面板组件契约无 props 不受影响。
  */
 import {
   CalendarDays,
@@ -29,13 +33,6 @@ import { useTableStore } from "@/stores/tableStore";
 import { useVaultStore } from "@/stores/vaultStore";
 import { usePluginStore } from "@/stores/pluginStore";
 import { ErrorBoundary } from "@/components/common/ErrorBoundary";
-import { CanvasView } from "@/components/layout/views/CanvasView";
-import { NoteView } from "@/components/layout/views/NoteView";
-import { TableView } from "@/components/layout/views/TableView";
-import { FilesView } from "@/components/layout/views/FilesView";
-import { InspectorPanel } from "@/components/canvas/panels/InspectorPanel";
-import { CollabRoomPanel } from "@/components/canvas/panels/CollabRoomPanel";
-import { RepoHistoryPanel } from "@/components/history/RepoHistoryPanel";
 import type { ViewKind } from "@/types";
 
 /** 视图元信息（标签/头部共用；显示名单一来源 = VIEW_LABELS，图标在此维护）。 */
@@ -66,12 +63,11 @@ export function viewMetaFor(view: string): { label: string; icon: ReactNode } {
   return { label: view, icon: <Puzzle size={13} /> };
 }
 
-/** 视图贡献承载：按 kind 渲染注册的组件（内置插件/插件面板同表；缺注册 = 空面板占位）。
- *  订阅 uiRevision——插件异步注册晚于首渲染时自动升级占位；ViewHost 本体不订阅，
- *  避免内置重型视图（笔记编辑器等）在插件注册时被无效重渲染。 */
-function ViewContributionMount({ kind }: { kind: string }) {
-  usePluginStore((s) => s.uiRevision);
-  const contrib = usePluginStore.getState().viewContribution(kind);
+/** 视图贡献承载：按 kind 渲染注册的组件（内置插件/插件面板同表；缺注册 = 降级占位）。
+ *  精确订阅——selector 只选本 kind 的贡献引用，贡献增删/替换时本组件重渲染（占位 ↔ 视图切换），
+ *  其他插件注册事件（uiRevision 变化但本 kind 贡献不变）不打扰重型视图（画布/笔记编辑器等）。 */
+function ViewContributionMount({ kind, hostId }: { kind: string; hostId: string }) {
+  const contrib = usePluginStore((s) => s.viewContribution(kind));
   if (!contrib) {
     // 缺贡献：kind 由不可用的内置插件提供（停用/卸载）→ 降级占位（提示处置入口）；
     // 否则保持空白占位（未知 kind / 第三方插件已卸载，不猜测原因）。
@@ -92,7 +88,7 @@ function ViewContributionMount({ kind }: { kind: string }) {
   const Comp = contrib.component;
   return (
     <ErrorBoundary>
-      <Comp />
+      {contrib.render ? contrib.render(hostId) : Comp ? <Comp /> : null}
     </ErrorBoundary>
   );
 }
@@ -100,28 +96,10 @@ function ViewContributionMount({ kind }: { kind: string }) {
 /**
  * 按视图类型分派渲染（memo：view/hostId 为稳定原始值——布局广播全量更新时，
  * 无关面板的视图组件不重渲染，画布/编辑器不被拖拽 resize 等高频广播打扰）。
+ * 所有视图经统一视图贡献注册表分派（内置插件 + 第三方面板同表），本组件只做渲染宿主。
  */
 export const ViewHost = memo(function ViewHost({ view, hostId }: { view: ViewKind; hostId: string }) {
-  switch (view) {
-    case "canvas":
-      return <CanvasView panelId={hostId} />;
-    case "note":
-      return <NoteView />;
-    case "table":
-      return <TableView panelId={hostId} />;
-    case "files":
-      return <FilesView />;
-    case "inspector":
-      return <InspectorPanel />;
-    case "collabroom":
-      return <CollabRoomPanel />;
-    case "repohistory":
-      return <RepoHistoryPanel />;
-    default:
-      // 统一视图注册表：内置插件（搜索/最近打开/日历/AI 对话）与插件面板都由 ViewContributionMount 承载——
-      // 组件内订阅 uiRevision，异步注册/卸载自动升级或回退占位；"empty" 无贡献同样走空白占位。
-      return <ViewContributionMount kind={view} />;
-  }
+  return <ViewContributionMount kind={view} hostId={hostId} />;
 });
 
 /** 画布视图状态指示（无当前画布不显示；冲突 > 错误 > 保存状态）。 */
@@ -314,14 +292,20 @@ function NoteStatusIndicator() {
   );
 }
 
-/** 按视图类型分派状态指示（view 变化 = 子组件类型切换，各子组件 hooks 固定）。 */
+/** 按视图类型分派状态指示（view 变化 = 子组件类型切换，各子组件 hooks 固定）。
+ *  画布/表格/笔记视图由内置插件提供：插件停用/卸载（贡献缺失）时面板已是降级占位，
+ *  状态指示一并隐藏，不显示过期的保存/冲突状态。订阅 uiRevision 使同一窗口内插件启停
+ *  也能收敛。注意：Tauri 各窗口是独立 WebView（各自 pluginStore/视图注册表，windowBus
+ *  无插件状态广播），主窗口启停插件不会同步到撕裂窗口——撕裂窗口仅在其自身动作下收敛。 */
 export function ViewStatusIndicator({ view }: { view: ViewKind }) {
+  usePluginStore((s) => s.uiRevision);
   switch (view) {
     case "canvas":
-      return <CanvasStatusIndicator />;
     case "table":
-      return <TableStatusIndicator />;
     case "note":
+      if (!usePluginStore.getState().viewContribution(view)) return null;
+      if (view === "canvas") return <CanvasStatusIndicator />;
+      if (view === "table") return <TableStatusIndicator />;
       return <NoteStatusIndicator />;
     default:
       return null;

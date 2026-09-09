@@ -165,7 +165,8 @@ facade 提供：
 - `registerPanel({ kind, label, component })` — 注册工作区面板视图（kind 即视图类型，出现在「添加视图」菜单，与内置视图并列自选）
 - `registerSetting({ key, label, component })` — 注册设置页条目（出现在设置左侧栏）
 - `registerAppPage({ id, label, component })` — 注册应用级页面（插件命令可经 App 能力打开，全页接管）
-- `registerNode({ type, component })` — 注册画布节点类型
+- `registerNode({ type, component })` — 注册画布节点类型（同名 type 覆盖既有注册，last-wins）
+- `registerEdge({ type, component })` — 注册画布边类型（同名 type 覆盖既有注册，last-wins；与 registerNode 同语义）
 - `registerCommand({ id, label, run })` — 注册全局命令（直接持有 run 函数）
 - `registerTableView({ kind, label, component })` — 注册**表格编辑器内的表格视图**
 - `registerContribution({ point, id?, payload })` — 通用扩展点注册（payload 直接持有引用）
@@ -178,7 +179,8 @@ facade 提供：
 保留 kind（如 `canvas`/`search`）都会抛错**（冲突会中断该插件脚本的后续注册，插件作者须用
 反向域名命名自己的 kind）。不同 kind 并列出现在「添加视图」菜单，用户自选、可同时打开在不同
 面板；内置「搜索」由随 App 分发的内置插件提供（可停用/卸载），停用或卸载任何提供方后其
-视图项随之消失。
+视图项随之消失。画布/笔记/表格/文件/属性/协作房间/仓库历史等内置视图同样由内置插件提供
+（可停用/卸载，停用后面板显示降级占位）——第三方插件注册自己的 kind 与它们并列、不占用内置 kind。
 
 ```js
 const { React, h, registerPanel, listFiles, openNote } = window.__atelyxPlugin__.forPlugin("com.example.hello-search");

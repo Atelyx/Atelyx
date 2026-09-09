@@ -85,7 +85,7 @@ const builtinNodeTypes = {
   link: withCollab(LinkNode),
   table: withCollab(TableNode),
 };
-const edgeTypes = { default: DataFlowEdge };
+const builtinEdgeTypes = { default: DataFlowEdge };
 
 /** 视口恢复延迟（ms）：等刚装载的画布节点完成首帧布局后再设视口，防止被装载触发的渲染覆盖。 */
 const VIEWPORT_RESTORE_DELAY_MS = 50;
@@ -144,6 +144,12 @@ export const CanvasView = memo(function CanvasView({
   const mergedNodeTypes = useMemo(
     () => ({ ...builtinNodeTypes, ...usePluginStore.getState().pluginNodeTypes() }),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- uiRevision 是插件注册的响应信号（节点表在服务层非响应式），必须作重算依赖
+    [uiRevision],
+  );
+  // 边类型表 = 内建 + 插件注册（与节点同 last-wins 语义：插件注册同名 type 覆盖内置）。
+  const mergedEdgeTypes = useMemo(
+    () => ({ ...builtinEdgeTypes, ...usePluginStore.getState().pluginEdgeTypes() }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 同上：uiRevision 是插件注册响应信号
     [uiRevision],
   );
   // 协作：同看本画布的在线用户（presence.file 命中 + view=canvas；断开连接自动消失）
@@ -565,7 +571,7 @@ export const CanvasView = memo(function CanvasView({
           }}
           isValidConnection={isValidConnection}
           nodeTypes={mergedNodeTypes}
-          edgeTypes={edgeTypes}
+          edgeTypes={mergedEdgeTypes}
           fitView
           minZoom={0.1}
           maxZoom={2}

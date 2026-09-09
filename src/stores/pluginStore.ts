@@ -28,6 +28,8 @@ import {
   exposePluginFacade,
   getPluginAppPages,
   getPluginCommands,
+  getPluginEdge,
+  getPluginEdges,
   getPluginNode,
   getPluginNodes,
   getPluginSetting,
@@ -74,6 +76,7 @@ import {
 import type {
   PluginAppPageRegistration,
   PluginCommandContribution,
+  PluginEdgeRegistration,
   PluginNodeRegistration,
   PluginRow,
   PluginSettingRegistration,
@@ -164,6 +167,10 @@ interface PluginStoreState {
   pluginNode(type: string): PluginNodeRegistration | undefined;
   /** 插件画布节点组件表（nodeTypes 合并用：type → component）。 */
   pluginNodeTypes(): Record<string, ComponentType>;
+  /** 插件画布边注册（CanvasView edgeTypes 合并；与节点同 last-wins 语义）。 */
+  pluginEdge(type: string): PluginEdgeRegistration | undefined;
+  /** 插件画布边组件表（edgeTypes 合并用：type → component）。 */
+  pluginEdgeTypes(): Record<string, ComponentType>;
   /** 插件应用页面注册（app 页面/模式全页接管）。 */
   pluginAppPage(id: string): PluginAppPageRegistration | undefined;
   /** 面板视图候选（内建 + 插件面板）。 */
@@ -554,7 +561,12 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
         let registered = 0;
         for (const v of BUILTIN_VIEWS) {
           if (v.pluginId === id) {
-            registerBuiltinView(id, { kind: v.kind, label: v.label, component: v.component });
+            registerBuiltinView(id, {
+              kind: v.kind,
+              label: v.label,
+              component: v.component,
+              render: v.render,
+            });
             registered++;
           }
         }
@@ -788,6 +800,12 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
     pluginNodeTypes: () => {
       const out: Record<string, ComponentType> = {};
       for (const reg of getPluginNodes()) out[reg.type] = reg.component;
+      return out;
+    },
+    pluginEdge: (type) => getPluginEdge(type),
+    pluginEdgeTypes: () => {
+      const out: Record<string, ComponentType> = {};
+      for (const reg of getPluginEdges()) out[reg.type] = reg.component;
       return out;
     },
     pluginAppPage: (id) => getPluginAppPages().find((p) => p.id === id),
