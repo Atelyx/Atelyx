@@ -6,10 +6,11 @@
  * - 卸载（fiber dispose）全部撤销：槽消失、服务消失、能力接线复位
  */
 import { describe, expect, it, afterEach } from "vitest";
-import { setPluginCanvasAccess, setPluginTableRuntimeAccess } from "@/services/plugins";
+import type { Context } from "@atelyx/cordis";
+import { setPluginCanvasAccess, setPluginTableRuntimeAccess } from "./access";
 import { CORDIS_BUILTIN_DEFS, type CordisBuiltinDef } from "@/components/plugins/cordis/builtins";
 import { createKernel, type Kernel } from "./kernel";
-import { mountProfile, unmountAll, unmountPlugin } from "./loader";
+import { mountPlugin, mountProfile, unmountAll, unmountPlugin } from "./loader";
 import { resolveViewKind, viewKinds } from "./slots";
 import type { Profile } from "@/utils/cordis/composition";
 
@@ -82,5 +83,25 @@ describe("第一方插件挂载集成", () => {
     expect(kernel.ctx.get("table")).toBeDefined();
     expect(resolveViewKind("table")).toBeDefined();
     expect(resolveViewKind("note")).toBeDefined();
+  });
+
+  it("第三方插件（裸 apply，无 inject）可直接消费 ctx.table/ctx.canvas", async () => {
+    kernel = createKernel();
+    await mountProfile(
+      kernel,
+      profile,
+      byId as never,
+      new Set(CORDIS_BUILTIN_DEFS.map((d) => d.id)),
+    );
+    // 模拟第三方插件：入口 = 默认导出 apply 函数（非 { inject, apply } 对象），直接访问 ctx.table/canvas。
+    const consumer: { id: string; apply: (ctx: Context) => void } = {
+      id: "com.test.consumer",
+      apply: (ctx) => {
+        expect(ctx.table.snapshot).toBeDefined();
+        expect(ctx.canvas.snapshot).toBeDefined();
+      },
+    };
+    const result = await mountPlugin(kernel, consumer);
+    expect(result.ok).toBe(true);
   });
 });

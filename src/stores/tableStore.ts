@@ -26,14 +26,9 @@ import {
   type HistoryVersion,
 } from "@/services/history";
 import { markSelfSave } from "@/utils/selfSave";
-import { clearTableImageCache, resolveTableImageUrl } from "@/services/tableImageCache";
-import {
-  emitPluginEvent,
-  setPluginTableAccess,
-  setPluginTableRuntimeAccess,
-  type PluginTableAccess,
-  type PluginTableRuntimeAccess,
-} from "@/services/plugins";
+import { clearTableImageCache } from "@/services/tableImageCache";
+import { emitPluginEvent } from "@/services/cordis/events";
+import { setPluginTableRuntimeAccess, type PluginTableRuntimeAccess } from "@/services/cordis/access";
 import {
   collabSendSink,
   publishCollabPresence,
@@ -655,51 +650,10 @@ export function registerTableCollabWiring(): () => void {
   };
 }
 
-/** 表格插件能力接线（builtin.table 载荷调用，随插件启停）：注册主线程 facade 表格数据访问
- * （subscribeTableData/selectTableRow/resolveTableImage）+ worker 平面 `table` 命名空间 +
+/** 表格插件能力接线（builtin.table 载荷调用，随插件启停）：注册 ctx.table 的 store 数据源 +
  * `table:changed` 事件发射；返回撤销函数（停用/卸载时撤销，能力随之消失）。
  * 快照复用同一构造（buildPluginTableSnapshot）；变更事件为轻量信号（只带 file，插件按需再取快照）。 */
 export function registerTablePluginWiring(): () => void {
-  const facade: PluginTableAccess = {
-    subscribeSnapshot: (cb) => {
-      const push = () => {
-        const ts = useTableStore.getState();
-        cb(
-          buildPluginTableSnapshot(
-            ts.tableFile,
-            ts.fields,
-            ts.rows,
-            ts.selectedRowId,
-            useCollabStore.getState().peers,
-          ),
-        );
-      };
-      push();
-      // 仅相关切片引用变化才推送（保存/脏标记等高频无关变更不打扰插件）；
-      // rows/fields 直传 store 不可变引用，选中变化不重建数组、插件卡片 memo 不受击穿。
-      const unsubTable = useTableStore.subscribe((s, prev) => {
-        if (
-          s.tableFile !== prev.tableFile ||
-          s.fields !== prev.fields ||
-          s.rows !== prev.rows ||
-          s.selectedRowId !== prev.selectedRowId
-        ) {
-          push();
-        }
-      });
-      // 协作订阅按 peers 整数组比较属粗粒度：presence 帧（onPeerPresence 恒 map 新数组）都会触发一次推送，
-      // 含与当前表格无关的笔记/画布选中更新；发送端 100ms 节流 + 局域网少量 peer，频率低，推送成本 ≈ 快照本身，可接受。
-      const unsubCollab = useCollabStore.subscribe((s, prev) => {
-        if (s.peers !== prev.peers) push();
-      });
-      return () => {
-        unsubTable();
-        unsubCollab();
-      };
-    },
-    selectRow: (rowId) => useTableStore.getState().selectRow(rowId),
-    resolveImage: resolveTableImageUrl,
-  };
   const runtime: PluginTableRuntimeAccess = {
     snapshot: () =>
       buildPluginTableSnapshot(
@@ -714,7 +668,6 @@ export function registerTablePluginWiring(): () => void {
     removeRow: (rowId) => useTableStore.getState().removeRow(rowId),
     selectRow: (rowId) => useTableStore.getState().selectRow(rowId),
   };
-  setPluginTableAccess(facade);
   setPluginTableRuntimeAccess(runtime);
   const offChange = useTableStore.subscribe((s, prev) => {
     if (
@@ -727,7 +680,6 @@ export function registerTablePluginWiring(): () => void {
     }
   });
   return () => {
-    setPluginTableAccess(null);
     setPluginTableRuntimeAccess(null);
     offChange();
   };

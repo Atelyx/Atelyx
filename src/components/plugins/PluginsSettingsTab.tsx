@@ -36,6 +36,7 @@ export function PluginsSettingsTab() {
   const runPluginCommand = usePluginStore((s) => s.runPluginCommand);
   const restoreBuiltin = usePluginStore((s) => s.restoreBuiltin);
   const compositionDefaults = usePluginStore((s) => s.compositionDefaults);
+  const pluginAudit = usePluginStore((s) => s.pluginAudit);
 
   const [mode, setMode] = useState<TabMode>("installed");
   const [notice, setNotice] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
@@ -61,6 +62,8 @@ export function PluginsSettingsTab() {
   );
   // 命令合并全量一次（UI 平面异步注册经 uiRevision 订阅刷新）。
   const commands = pluginCommands();
+  // 审计快照全量一次（服务读 + 事件订阅按插件归属；按 pluginId 建索引，避免每卡片重复重算）。
+  const auditByPlugin = new Map(pluginAudit().map((a) => [a.pluginId, a]));
 
   /** 安装统一入口：action 返回 false（如取消目录选择）不算成功、不提示；onOk 成功回调（如清空输入）。 */
   const runInstall = async (
@@ -275,6 +278,8 @@ export function PluginsSettingsTab() {
           const declares = p.manifest.declares ?? [];
           const failed = p.phase === "failed";
           const cmds = commands.filter((c) => c.pluginId === p.id);
+          // 审计实际侧（ctx 服务读 + 事件订阅，按插件归属）；仅记录实际触达的服务/事件。
+          const audit = auditByPlugin.get(p.id);
           return (
             <div
               key={p.id}
@@ -383,7 +388,7 @@ export function PluginsSettingsTab() {
                     <span
                       key={ns}
                       className="text-[10px] px-1.5 py-0.5 rounded border"
-                      title={`披露：将调用 ${ns}`}
+                      title={`披露：将访问 ${ns}`}
                       style={{
                         color: capabilitySensitive(ns) ? "#f59e0b" : "var(--text-secondary)",
                         borderColor: "var(--border)",
@@ -395,16 +400,26 @@ export function PluginsSettingsTab() {
                   ))}
                 </div>
               )}
-              {p.usedCapabilities.length > 0 && (
+              {audit && (audit.services.length > 0 || audit.events.length > 0) && (
                 <div className="mt-1.5 flex flex-wrap gap-1">
-                  {p.usedCapabilities.map((ns) => (
+                  {audit.services.map((ns) => (
                     <span
-                      key={ns}
+                      key={`svc:${ns}`}
                       className="text-[10px] px-1.5 py-0.5 rounded"
-                      title={`实际调用：${ns}`}
+                      title={`实际访问服务：${ns}`}
                       style={{ color: "var(--text-muted)", background: "var(--bg-secondary)" }}
                     >
-                      {capabilityLabel(ns)} · 已调用
+                      {capabilityLabel(ns)} · 已访问
+                    </span>
+                  ))}
+                  {audit.events.map((ev) => (
+                    <span
+                      key={`evt:${ev}`}
+                      className="text-[10px] px-1.5 py-0.5 rounded"
+                      title={`实际订阅事件：${ev}`}
+                      style={{ color: "var(--text-muted)", background: "var(--bg-secondary)" }}
+                    >
+                      {ev} · 已订阅
                     </span>
                   ))}
                 </div>

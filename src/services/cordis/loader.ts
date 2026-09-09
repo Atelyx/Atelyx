@@ -1,19 +1,21 @@
 /**
- * Cordis 挂载器：第一方插件生命周期（ctx.plugin 挂载 / 卸载 / 装配）。
+ * Cordis 挂载器：插件生命周期（ctx.plugin 挂载 / 卸载 / 装配）。
  *
- * 挂载 = 进程内（主线程）直接 apply 引用；失败 = 该插件 failed + 可读原因，不阻塞其余。
- * 第三方插件入口（TS → ESM → blob import 求值）为后续接入点，本模块只处理宿主侧 apply。
+ * 挂载 = 进程内（主线程）apply；失败 = 该插件 failed + 可读原因，不阻塞其余。
+ * 插件定义 = Cordis 插件（函数或 { apply, inject, provide, Config } 对象）；`inject` 声明的
+ * 依赖服务缺失时插件不激活（apply 不执行），挂载器据此返回失败 + 缺失清单（可见化）。
  * 审计归属：contextToPluginId 记录插件上下文 → 插件 id（audit.ts 据此归属服务读/事件订阅）。
  */
-import type { Context, Fiber, Plugin } from "@atelyx/cordis";
+import { Context, FiberState, type Fiber, type Plugin } from "@atelyx/cordis";
 import { errText } from "@/types";
 import type { Kernel } from "./kernel";
 import { resolveProfileMounts, type Profile } from "@/utils/cordis/composition";
 
-/** 第一方插件定义（apply 为宿主侧闭包；返回可选撤销函数，随 fiber 卸载执行）。 */
-export interface FirstPartyPlugin {
+/** 插件定义（第一方宿主侧闭包或第三方求值模块；可携带 Cordis 插件元数据）。 */
+export interface PluginDefinition {
   id: string;
-  apply: (ctx: Context) => void | (() => void);
+  /** Cordis 插件：函数 (ctx, config) 或对象 { apply, inject?, provide?, Config?, name? }。 */
+  apply: Plugin;
 }
 
 /** 挂载结果：ok 或失败原因。 */
@@ -21,6 +23,17 @@ export type MountResult = { ok: true } | { ok: false; reason: string };
 
 /** 插件上下文 → 插件 id（审计归属；mount 时经包装 apply 记录，WeakMap 随上下文回收）。 */
 export const contextToPluginId = new WeakMap<object, string>();
+
+/** 从调用方上下文推导插件 id（追原型链：ctx.extend 派生的上下文命中挂载时登记的原始 ctx）。 */
+export function pluginIdOf(ctx: object): string | undefined {
+  let cur: object | null = ctx;
+  while (cur) {
+    const id = contextToPluginId.get(cur);
+    if (id) return id;
+    cur = Object.getPrototypeOf(cur);
+  }
+  return undefined;
+}
 
 /** 每内核的已挂载 fiber 表（按插件 id）。 */
 const mountsByKernel = new WeakMap<Kernel, Map<string, Fiber>>();
@@ -42,22 +55,42 @@ async function disposeFiber(fiber: Fiber): Promise<void> {
   }
 }
 
-/** 挂载单个第一方插件（先撤销旧 fiber 防重复注册）；失败返回可读原因。 */
+/** 插件定义 → Cordis 可调用函数（函数即 apply；对象取 apply 方法）。 */
+function resolveApply(plugin: Plugin): (ctx: Context, config: unknown) => unknown {
+  return (typeof plugin === "function" ? plugin : plugin.apply) as (ctx: Context, config: unknown) => unknown;
+}
+
+/** 挂载单个插件（先撤销旧 fiber 防重复注册）；失败返回可读原因。 */
 export async function mountPlugin(
   kernel: Kernel,
-  plugin: FirstPartyPlugin,
+  plugin: PluginDefinition,
   config?: Record<string, unknown>,
 ): Promise<MountResult> {
   await unmountPlugin(kernel, plugin.id);
-  // 包装 apply：登记插件上下文归属（审计用），再执行真实 apply。
-  const wrappedApply = (ctx: Context): void | (() => void) => {
-    contextToPluginId.set(ctx as object, plugin.id);
-    return plugin.apply(ctx);
+  const callback = resolveApply(plugin.apply);
+  const metadata = typeof plugin.apply === "object" ? plugin.apply : undefined;
+  // 包装 apply：登记插件上下文归属（审计用），透传 Cordis 插件元数据（inject 激活语义），再执行真实 apply。
+  const wrapped: Plugin = {
+    ...(metadata?.name ? { name: metadata.name } : {}),
+    ...(metadata?.inject ? { inject: metadata.inject } : {}),
+    ...(metadata?.provide ? { provide: metadata.provide } : {}),
+    ...(metadata?.Config ? { Config: metadata.Config } : {}),
+    apply: (ctx: Context, pluginConfig?: unknown) => {
+      contextToPluginId.set(ctx as object, plugin.id);
+      return callback(ctx, pluginConfig);
+    },
   };
-  const fiber = kernel.ctx.plugin(wrappedApply as Plugin, config);
+  const fiber = kernel.ctx.plugin(wrapped, config);
   mountsOf(kernel).set(plugin.id, fiber);
   try {
     await fiber.await();
+    if (fiber.state !== FiberState.ACTIVE) {
+      // inject 依赖未满足：插件未激活（apply 未执行），附缺失服务清单。
+      const missing = Object.keys(fiber.inject ?? {}).filter((key) => !fiber.store?.[key]);
+      throw new Error(
+        missing.length > 0 ? `依赖服务未提供：${missing.join("、")}` : "插件未激活（依赖服务缺失）",
+      );
+    }
     return { ok: true };
   } catch (e) {
     mountsOf(kernel).delete(plugin.id);
@@ -87,11 +120,13 @@ export function mountedPluginIds(kernel: Kernel): string[] {
 }
 
 /** 装配挂载：先清场（重置语义 = 重置到磁盘状态），再按 profile × 启用集合挂载；
- *  单插件失败不阻塞其余，返回失败清单（pluginStore 据此置 failed + 可读原因）。 */
+ *  单插件失败不阻塞其余，返回失败清单（pluginStore 据此置 failed + 可读原因）。
+ *  当前运行时装配走 pluginStore.load 逐插件 spawn（见 mountPlugin）；本函数为组合层
+ *  （M3 用户可改组合树）的批量装配入口，测试覆盖其语义，尚未接入运行时挂载路径。 */
 export async function mountProfile(
   kernel: Kernel,
   profile: Profile,
-  plugins: Record<string, FirstPartyPlugin>,
+  plugins: Record<string, PluginDefinition>,
   enabledIds: ReadonlySet<string>,
 ): Promise<{ failed: Array<{ id: string; reason: string }> }> {
   await unmountAll(kernel);
@@ -99,7 +134,7 @@ export async function mountProfile(
   for (const m of resolveProfileMounts(profile, enabledIds)) {
     const plugin = plugins[m.id];
     if (!plugin) {
-      failed.push({ id: m.id, reason: "无第一方插件定义" });
+      failed.push({ id: m.id, reason: "无插件定义" });
       continue;
     }
     const result = await mountPlugin(kernel, plugin, m.config);

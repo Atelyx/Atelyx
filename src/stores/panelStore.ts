@@ -29,7 +29,7 @@ import { useCollabStore } from "@/stores/collabStore";
 import { useVaultStore } from "@/stores/vaultStore";
 import * as kernelLifecycle from "@/utils/kernelLifecycle";
 import { collectTabs, findViewHost } from "@/utils/workspaceLayout";
-import { pluginViewLabel } from "@/services/plugins";
+import { pluginViewLabel } from "@/services/cordis/slots";
 import {
   cacheCanvasViewport as cacheCanvasViewportSvc,
   emitCanvasViewportHandoff,

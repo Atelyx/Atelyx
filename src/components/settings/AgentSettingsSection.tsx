@@ -131,7 +131,7 @@ export function AgentSettingsSection() {
   const duplicateAgent = useSettingsStore((s) => s.duplicateAgent);
   const promptNotes = useSettingsStore((s) => s.promptNotes);
   // 订阅插件运行时：插件启停/卸载变化触发本组件重渲染（插件工具表在服务层，非响应式，
-  // 靠 pluginStore 收敛驱动重算；bridge 在工具注册成功时也会触发运行时变更通知）。
+  // 靠 pluginStore 收敛驱动重算；插件工具注册也经 pluginStore 的 UI 注册变更通知驱动重渲染）。
   usePluginStore((s) => s.plugins);
   const allToolsMeta: AgentToolMeta[] = [
     ...AGENT_TOOLS_META,

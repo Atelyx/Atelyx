@@ -5,8 +5,8 @@
 //! - vault 级插件：`<仓库根>/.atelyx/plugins/<目录>/`（随仓库共享）
 //! - 状态：`app_data_dir/plugin-state.json`（enabled 开关 + 安装来源 kind/repo/url/path/scope）
 //!
-//! 身份模型：插件身份 = 清单 `atelyx.json` 的 `id`（反向域名，仍校验）；**目录名 = 原名**（本地
-//! 源目录名 / 仓库名），不校验合法性、不要求等于 id。按 id 定位一律扫描目录读清单匹配；
+//! 身份模型：插件身份 = 清单 `package.json` 的 `name`（反向域名，仍校验）；**目录名 = 原名**（本地
+//! 源目录名 / 仓库名），不校验合法性、不要求等于 name。按 name 定位一律扫描目录读清单匹配；
 //! 点开头目录（`.install-*`/`.bak-*` 等临时/隐藏目录）不参与扫描。
 //!
 //! 安装流（三类来源，统一「取源码」）：
@@ -14,9 +14,9 @@
 //!   源码包（codeload，作者零操作，非 Release 资产）。
 //! - 手动 git 地址：git clone（保留 `.git` 供更新）。
 //! - 本地目录：junction（Windows）/ 符号链接（Unix）实时引用，无拷贝无更新。
-//! 三者统一：校验 `atelyx.json` → 以原名原子落位到 `plugins/<原名>/`（本地目录为链接）；失败不留脏。
+//! 三者统一：校验 `package.json` → 以原名原子落位到 `plugins/<原名>/`（本地目录为链接）；失败不留脏。
 //!
-//! 安全：插件 id 视为不可信输入（仍校验）；插件目录内路径访问经 `safe_plugin_path` 限制在对应插件根
+//! 安全：插件 name 视为不可信输入（仍校验）；插件目录内路径访问经 `safe_plugin_path` 限制在对应插件根
 //! 目录内并拒绝符号链接段（防穿越越权）；插件代码在 WebView 隔离上下文执行、只能调前端桥。
 
 use std::collections::{HashMap, HashSet};
@@ -30,8 +30,8 @@ use tauri::{AppHandle, Manager, State};
 
 use crate::vault::{atomic_write, VaultState};
 
-/// 插件清单文件名（插件根目录；与前端 `constants/plugins.ts` 的 `PLUGIN_MANIFEST_FILE` 一致）。
-const MANIFEST_FILE: &str = "atelyx.json";
+/// 插件包清单文件名（插件根目录；与前端 `constants/plugins.ts` 的 `PLUGIN_MANIFEST_FILE` 一致）。
+const MANIFEST_FILE: &str = "package.json";
 /// 状态文件名（app_data_dir 下）。
 const STATE_FILE: &str = "plugin-state.json";
 
@@ -43,9 +43,6 @@ const MAX_ENTRY_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_ARCHIVE_TOTAL: u64 = 512 * 1024 * 1024;
 /// zip 条目数上限。
 const MAX_ENTRY_COUNT: usize = 10_000;
-/// 入口 JS 读取字节上限（内存/加载护栏：读入后整体注入 blob，16MB 远超正常插件逻辑大小，
-/// 只拦误提交的巨型文件；Python 子进程入口不经此命令，不受限）。
-const MAX_ENTRY_JS_BYTES: u64 = 16 * 1024 * 1024;
 
 /// 插件 id 合法性（与前端 `pluginIdValid` 一致：反向域名式至少两段，无路径分隔符）。
 fn plugin_id_valid(id: &str) -> bool {
@@ -193,21 +190,21 @@ fn builtin_theme_manifest_values() -> Value {
     })
 }
 
-/// 内置插件合成清单（前端消费 id/name/type/tagline；main 为校验占位——实现随宿主编译，
-/// 前端按 sourceKind=builtin 跳过入口读取，只做宿主视图贡献注册/声明行消费）。
+/// 内置插件合成清单（前端消费 name/type/tagline；main 为校验占位——实现随宿主编译，
+/// 前端按 sourceKind=builtin 跳过入口读取；元数据放 `atelyx` 块，与第三方包同一字段契约）。
 fn builtin_manifest(def: &BuiltinPluginDef) -> Value {
     let mut manifest = serde_json::json!({
-        "schemaVersion": 2,
-        "id": def.id,
-        "name": def.name,
+        "name": def.id,
         "version": env!("CARGO_PKG_VERSION"),
-        "type": def.ty,
-        "scope": "app",
-        "runtime": "js",
         "main": "builtin",
-        "tagline": def.tagline,
-        "author": "Atelyx",
-        "license": "MIT",
+        "atelyx": {
+            "name": def.name,
+            "type": def.ty,
+            "scope": "app",
+            "tagline": def.tagline,
+            "author": "Atelyx",
+            "license": "MIT",
+        },
     });
     if def.ty == "theme" {
         // 主题插件：合成 themes + themeOptions（与第三方清单同一字段契约）
@@ -215,8 +212,8 @@ fn builtin_manifest(def: &BuiltinPluginDef) -> Value {
         if let (Some(themes), Some(theme_options)) =
             (theme.get("themes").cloned(), theme.get("themeOptions").cloned())
         {
-            manifest["themes"] = themes;
-            manifest["themeOptions"] = theme_options;
+            manifest["atelyx"]["themes"] = themes;
+            manifest["atelyx"]["themeOptions"] = theme_options;
         }
     }
     manifest
@@ -346,7 +343,7 @@ fn find_plugin_dir(base: &Path, id: &str) -> Result<PathBuf, String> {
         let Ok(manifest) = read_manifest(&dir) else {
             continue;
         };
-        if manifest["id"].as_str() == Some(id) {
+        if manifest["name"].as_str() == Some(id) {
             return Ok(dir);
         }
     }
@@ -441,7 +438,8 @@ fn write_plugin_state(app: &AppHandle, state: &PluginState) -> Result<(), String
 
 // ===== 清单校验 =====
 
-/// 最小清单校验（结构错误拒绝；字段枚举与前端 `validatePluginManifest` 对齐）。
+/// 插件包清单校验（结构错误拒绝；字段枚举与前端 `validatePluginManifest` 对齐）。
+/// 原始输入 = 插件根目录的 `package.json`（npm 标准字段 + 嵌套 `atelyx` 块）。
 fn manifest_valid_or_error(v: &Value) -> Result<(), String> {
     let obj = v.as_object().ok_or("清单必须是对象")?;
     let req = |k: &str| -> Result<String, String> {
@@ -451,78 +449,56 @@ fn manifest_valid_or_error(v: &Value) -> Result<(), String> {
             .map(|s| s.to_string())
             .ok_or_else(|| format!("清单缺少字段：{k}"))
     };
-    let schema = obj
-        .get("schemaVersion")
-        .and_then(|x| x.as_i64())
-        .filter(|n| *n > 0)
-        .ok_or("schemaVersion 必须是正整数")?;
-    if schema > 2 {
-        return Err(format!("清单格式版本过新（{schema}），需要更新 Atelyx"));
+    let name = req("name")?;
+    if !plugin_id_valid(&name) {
+        return Err("name 必须是合法的反向域名标识".to_string());
     }
-    // runtime（多语言执行平面）：未知运行时本 App 无法执行，直接拒绝。
-    if let Some(rt) = obj.get("runtime") {
-        if !matches!(rt.as_str(), Some("js" | "ts" | "python")) {
-            return Err("runtime 仅支持 js/ts/python".to_string());
+    req("version")?;
+    // main（入口，相对插件根目录）：.js/.ts/.tsx；纯 theme 插件可省略；Python 入口拒绝。
+    let main = obj.get("main");
+    if let Some(m) = main {
+        let s = m.as_str().filter(|s| !s.trim().is_empty()).ok_or("main 必须是非空字符串")?;
+        if s.ends_with(".py") {
+            return Err("Python 插件运行时已不受支持（请使用 JS/TS）".to_string());
         }
     }
-    // declares（披露的命名空间）非数组即拒绝：字符串等畸形形态会让前端组件 .map 崩溃。
-    if let Some(d) = obj.get("declares") {
+    // atelyx 块：插件元数据（显示名/类型/作用域/披露/主题等）。
+    let ax = v
+        .get("atelyx")
+        .and_then(|a| a.as_object())
+        .ok_or("清单缺少 atelyx 块")?;
+    let kind = ax
+        .get("type")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .ok_or("atelyx.type 缺少")?;
+    // 主分类未知即拒绝（与前端 validatePluginManifest 一致；未知附加分类安全跳过）。
+    if !is_known_plugin_type(kind) {
+        return Err(format!("未知插件类型：{kind}"));
+    }
+    // types（附加分类）非数组即拒绝：字符串等畸形形态会让前端组件 .map 崩溃。
+    if let Some(t) = ax.get("types") {
+        if !t.is_array() {
+            return Err("atelyx.types 必须是数组".to_string());
+        }
+    }
+    // declares（披露的服务）非数组即拒绝。
+    if let Some(d) = ax.get("declares") {
         if !d.is_array() {
-            return Err("declares 必须是数组".to_string());
+            return Err("atelyx.declares 必须是数组".to_string());
         }
     }
     // themes（主题条目）结构校验（与前端 validatePluginManifest 对齐）：畸形形态会让前端
     // deriveThemeProviders/normalizeThemeVarKeys 抛错击穿整窗，安装/读取时从源头拒绝。
-    if let Some(t) = obj.get("themes") {
-        let arr = t.as_array().ok_or("themes 必须是数组")?;
-        if arr.is_empty() {
-            return Err("themes 至少需要一个主题条目".to_string());
-        }
-        let mut seen_ids = std::collections::HashSet::new();
-        for item in arr {
-            let o = item.as_object().ok_or("themes 项必须是对象")?;
-            let has_nonempty = |k: &str| {
-                o.get(k).and_then(|x| x.as_str()).is_some_and(|s| !s.trim().is_empty())
-            };
-            if !has_nonempty("id") {
-                return Err("themes 项 id 必须是非空字符串".to_string());
-            }
-            let tid = o.get("id").and_then(|x| x.as_str()).unwrap_or_default().to_string();
-            if !seen_ids.insert(tid.clone()) {
-                return Err(format!("themes 内 id 重复：{tid}"));
-            }
-            if !has_nonempty("name") {
-                return Err("themes 项 name 必须是非空字符串".to_string());
-            }
-            let scheme = o.get("colorScheme").and_then(|x| x.as_str()).unwrap_or("");
-            if scheme != "light" && scheme != "dark" {
-                return Err("themes 项 colorScheme 仅支持 light/dark".to_string());
-            }
-            if !o.get("variables").is_some_and(|v| v.is_object()) {
-                return Err("themes 项 variables 必须是对象".to_string());
-            }
-        }
-    }
-    let id = req("id")?;
-    if !plugin_id_valid(&id) {
-        return Err("id 必须是合法的反向域名标识".to_string());
-    }
-    req("name")?;
-    req("version")?;
-    let kind = req("type")?;
-    // 主分类未知即拒绝（与前端 validatePluginManifest 一致；未知附加分类安全跳过）。
-    if !is_known_plugin_type(&kind) {
-        return Err(format!("未知插件类型：{kind}"));
+    if let Some(t) = ax.get("themes") {
+        validate_themes(t)?;
     }
     // main 仅在纯 theme 插件（无任何代码承载类型）时可省略——theme 是声明式皮肤，无入口。
     // 判定与前端一致：只按「已知类型」归一化（未知附加分类安全跳过，前向兼容）——
     // 混入 tool 等已知代码类型才必填 main；types 非数组按畸形拒绝（与前端校验对齐）。
-    let raw_types = obj.get("types");
-    if raw_types.is_some() && !raw_types.and_then(|t| t.as_array()).is_some() {
-        return Err("types 必须是数组".to_string());
-    }
     let theme_only = kind == "theme"
-        && raw_types
+        && ax
+            .get("types")
             .and_then(|t| t.as_array())
             .map_or(true, |arr| {
                 arr.iter()
@@ -530,8 +506,41 @@ fn manifest_valid_or_error(v: &Value) -> Result<(), String> {
                     .filter(|t| is_known_plugin_type(t))
                     .all(|t| t == "theme")
             });
-    if !theme_only {
-        req("main")?;
+    if !theme_only && main.is_none() {
+        return Err("清单缺少字段：main".to_string());
+    }
+    Ok(())
+}
+
+/// themes（主题条目）结构校验（非数组/空/条目畸形/id 重复均拒绝）。
+fn validate_themes(t: &Value) -> Result<(), String> {
+    let arr = t.as_array().ok_or("themes 必须是数组")?;
+    if arr.is_empty() {
+        return Err("themes 至少需要一个主题条目".to_string());
+    }
+    let mut seen_ids = std::collections::HashSet::new();
+    for item in arr {
+        let o = item.as_object().ok_or("themes 项必须是对象")?;
+        let has_nonempty = |k: &str| {
+            o.get(k).and_then(|x| x.as_str()).is_some_and(|s| !s.trim().is_empty())
+        };
+        if !has_nonempty("id") {
+            return Err("themes 项 id 必须是非空字符串".to_string());
+        }
+        let tid = o.get("id").and_then(|x| x.as_str()).unwrap_or_default().to_string();
+        if !seen_ids.insert(tid.clone()) {
+            return Err(format!("themes 内 id 重复：{tid}"));
+        }
+        if !has_nonempty("name") {
+            return Err("themes 项 name 必须是非空字符串".to_string());
+        }
+        let scheme = o.get("colorScheme").and_then(|x| x.as_str()).unwrap_or("");
+        if scheme != "light" && scheme != "dark" {
+            return Err("themes 项 colorScheme 仅支持 light/dark".to_string());
+        }
+        if !o.get("variables").is_some_and(|v| v.is_object()) {
+            return Err("themes 项 variables 必须是对象".to_string());
+        }
     }
     Ok(())
 }
@@ -772,7 +781,7 @@ fn locate_plugin_root(extract_dir: &Path) -> Result<PathBuf, String> {
     if entries.len() == 1 && dirs.len() == 1 && dirs[0].join(MANIFEST_FILE).exists() {
         return Ok(dirs[0].clone());
     }
-    Err("插件包缺少 atelyx.json".into())
+    Err("插件包缺少 package.json".into())
 }
 
 // ===== 安装 / 卸载 / 更新 =====
@@ -785,11 +794,13 @@ fn plugin_info_from(
     source_kind: PluginSourceKind,
     enabled: bool,
 ) -> PluginInfo {
+    let id = manifest["name"].as_str().unwrap_or("").to_string();
+    let display = manifest["atelyx"]["name"].as_str().unwrap_or(&id).to_string();
     PluginInfo {
-        id: manifest["id"].as_str().unwrap_or("").to_string(),
-        name: manifest["name"].as_str().unwrap_or("").to_string(),
+        id,
+        name: display,
         version: manifest["version"].as_str().unwrap_or("").to_string(),
-        kind: manifest["type"].as_str().unwrap_or("").to_string(),
+        kind: manifest["atelyx"]["type"].as_str().unwrap_or("").to_string(),
         scope: scope.to_string(),
         install_dir: dir.to_string_lossy().into_owned(),
         enabled,
@@ -812,12 +823,12 @@ fn install_plugin_dir(
     let base = plugin_base_dir(app, state, scope)?;
     fs::create_dir_all(&base).map_err(|e| e.to_string())?;
     let manifest = read_manifest(plugin_root)?;
-    let id = manifest["id"].as_str().unwrap_or("").to_string();
+    let id = manifest["name"].as_str().unwrap_or("").to_string();
     if !plugin_id_valid(&id) {
-        return Err("插件清单 id 非法".into());
+        return Err("插件清单 name 非法".into());
     }
     if is_builtin_plugin_id(&id) {
-        return Err(format!("插件 id {id} 为内置插件保留，无法安装"));
+        return Err(format!("插件 name {id} 为内置插件保留，无法安装"));
     }
     let source_kind = source.kind;
 
@@ -889,7 +900,7 @@ pub fn plugin_list(app: AppHandle, state: State<'_, VaultState>) -> Result<Vec<P
             let Ok(manifest) = read_manifest(&dir) else {
                 continue; // 损坏插件跳过展示（管理 UI 仍可整体删除目录）
             };
-            let id = manifest["id"].as_str().unwrap_or("").to_string();
+            let id = manifest["name"].as_str().unwrap_or("").to_string();
             if !plugin_id_valid(&id) {
                 continue;
             }
@@ -999,12 +1010,12 @@ pub fn plugin_install_local(
         return Err("所选路径不是有效目录".into());
     }
     let manifest = read_manifest(&src_dir).map_err(|e| format!("所选目录不是有效插件：{e}"))?;
-    let id = manifest["id"].as_str().unwrap_or("").to_string();
+    let id = manifest["name"].as_str().unwrap_or("").to_string();
     if !plugin_id_valid(&id) {
-        return Err("插件清单 id 非法".into());
+        return Err("插件清单 name 非法".into());
     }
     if is_builtin_plugin_id(&id) {
-        return Err(format!("插件 id {id} 为内置插件保留，无法安装"));
+        return Err(format!("插件 name {id} 为内置插件保留，无法安装"));
     }
 
     let base = plugin_base_dir(&app, &state, &scope)?;
@@ -1185,16 +1196,19 @@ fn plugin_is_theme(app: &AppHandle, state: &VaultState, pstate: &PluginState, id
     let Ok(base) = plugin_base_dir(app, state, &scope) else { return false; };
     let Ok(dir) = find_plugin_dir(&base, id) else { return false; };
     read_manifest(&dir).is_ok_and(|m| {
-        m.get("themes").and_then(|v| v.as_array()).is_some_and(|a| {
-            a.iter()
-                .filter(|t| {
-                    t.get("id")
-                        .and_then(|id| id.as_str())
-                        .is_some_and(|tid| !BUILTIN_BASE_THEME_IDS.contains(&tid))
-                })
-                .next()
-                .is_some()
-        })
+        m.get("atelyx")
+            .and_then(|a| a.get("themes"))
+            .and_then(|v| v.as_array())
+            .is_some_and(|a| {
+                a.iter()
+                    .filter(|t| {
+                        t.get("id")
+                            .and_then(|id| id.as_str())
+                            .is_some_and(|tid| !BUILTIN_BASE_THEME_IDS.contains(&tid))
+                    })
+                    .next()
+                    .is_some()
+            })
     })
 }
 
@@ -1331,10 +1345,10 @@ async fn codeload_update(
         }
     };
     let old_manifest = read_manifest(dir)?;
-    let old_id = old_manifest["id"].as_str().unwrap_or("").to_string();
-    // 校验新清单 id 与旧清单 id 一致：改 id 的版本无法原地更新，防新旧记录并存。
+    let old_id = old_manifest["name"].as_str().unwrap_or("").to_string();
+    // 校验新清单 name 与旧清单 name 一致：改 name 的版本无法原地更新，防新旧记录并存。
     let new_manifest = read_manifest(&plugin_root)?;
-    if new_manifest["id"].as_str() != Some(old_id.as_str()) {
+    if new_manifest["name"].as_str() != Some(old_id.as_str()) {
         let _ = fs::remove_dir_all(&extract_temp);
         return Err("插件 id 已变更，无法原地更新（请先卸载重装）".into());
     }
@@ -1400,9 +1414,6 @@ pub fn plugin_read_entry(
     let entry = path.as_deref().unwrap_or(main);
     let entry_path = safe_plugin_path(&dir, entry)?;
     let data = fs::read(&entry_path).map_err(|e| format!("读取插件入口失败：{e}"))?;
-    if data.len() as u64 > MAX_ENTRY_JS_BYTES {
-        return Err("插件入口文件过大".into());
-    }
     String::from_utf8(data).map_err(|_| "插件入口不是合法 UTF-8 文本".to_string())
 }
 
@@ -1443,10 +1454,10 @@ mod tests {
     #[test]
     fn zip_path_sanitize() {
         // 平台无关断言：`/` 与 `\` 都是分隔符。
-        let expected = Path::new("a").join("b").join("atelyx.json");
-        let got = sanitize_zip_entry("a/b/atelyx.json").unwrap();
+        let expected = Path::new("a").join("b").join("package.json");
+        let got = sanitize_zip_entry("a/b/package.json").unwrap();
         assert_eq!(Path::new(&got), expected);
-        assert_eq!(sanitize_zip_entry("./atelyx.json").unwrap(), "atelyx.json");
+        assert_eq!(sanitize_zip_entry("./package.json").unwrap(), "package.json");
         assert!(sanitize_zip_entry("a\\b").is_ok());
         assert!(sanitize_zip_entry("../evil").is_err());
         assert!(sanitize_zip_entry("a\\..\\b").is_err());
@@ -1485,8 +1496,8 @@ mod tests {
         // 语法越权（绝对路径/..）拒绝；不存在的段（待创建的写入路径）放行。
         assert!(safe_plugin_path(root, "../evil").is_err());
         assert!(safe_plugin_path(root, "/abs").is_err());
-        assert!(safe_plugin_path(root, "a/b/atelyx.json").is_ok());
-        assert!(safe_plugin_path(root, "atelyx.json").is_ok());
+        assert!(safe_plugin_path(root, "a/b/package.json").is_ok());
+        assert!(safe_plugin_path(root, "package.json").is_ok());
     }
 
     #[cfg(windows)]
@@ -1509,46 +1520,45 @@ mod tests {
 
     #[test]
     fn manifest_validation() {
+        // 合法插件包：package.json（name=反向域名）+ atelyx 块。
         let ok = json!({
-            "schemaVersion": 1,
-            "id": "com.example.todo",
-            "name": "示例",
+            "name": "com.example.todo",
             "version": "1.0.0",
-            "type": "tool",
-            "main": "plugin.js"
+            "main": "plugin.ts",
+            "description": "示例",
+            "atelyx": { "name": "示例工具", "type": "tool", "tagline": "一句话" },
         });
         assert!(manifest_valid_or_error(&ok).is_ok());
-        let bad = json!({ "schemaVersion": 3, "id": "com.x", "name": "x", "version": "1", "type": "tool", "main": "a.js" });
-        assert!(manifest_valid_or_error(&bad).is_err());
-        // schemaVersion 2：多语言运行时字段。
-        let v2 = json!({
-            "schemaVersion": 2,
-            "id": "com.example.py",
-            "name": "Python 插件",
-            "version": "1.0.0",
-            "type": "tool",
-            "runtime": "python",
-            "main": "main.py",
-            "provides": ["com.example.py.data"],
-            "declares": ["vault:read"]
-        });
-        assert!(manifest_valid_or_error(&v2).is_ok());
-        let bad_runtime = json!({ "schemaVersion": 2, "id": "com.x", "name": "x", "version": "1", "type": "tool", "main": "a.rs", "runtime": "rust" });
-        assert!(manifest_valid_or_error(&bad_runtime).is_err());
-        let missing = json!({ "schemaVersion": 1, "id": "com.x", "name": "x" });
-        assert!(manifest_valid_or_error(&missing).is_err());
+        // 缺 name/atelyx 块的清单（含旧格式）拒绝。
+        let old = json!({ "schemaVersion": 2, "id": "com.x", "name": "x", "version": "1", "type": "tool", "main": "a.js" });
+        assert!(manifest_valid_or_error(&old).is_err());
+        // name 必须反向域名。
+        let bad_name = json!({ "name": "todo", "version": "1", "main": "a.js", "atelyx": { "type": "tool" } });
+        assert!(manifest_valid_or_error(&bad_name).is_err());
+        // Python 入口拒绝。
+        let py = json!({ "name": "com.x.py", "version": "1", "main": "main.py", "atelyx": { "type": "tool" } });
+        assert!(manifest_valid_or_error(&py).is_err());
+        // 未知类型拒绝。
+        let bad_type = json!({ "name": "com.x", "version": "1", "main": "a.js", "atelyx": { "type": "rust" } });
+        assert!(manifest_valid_or_error(&bad_type).is_err());
+        // 缺 atelyx 块拒绝。
+        let no_ax = json!({ "name": "com.x", "version": "1", "main": "a.js" });
+        assert!(manifest_valid_or_error(&no_ax).is_err());
         // theme 声明式：纯 theme 可省略 main；含代码类型则必填。
-        let theme = json!({ "schemaVersion": 1, "id": "com.example.dark", "name": "x", "version": "1", "type": "theme" });
+        let theme = json!({ "name": "com.example.dark", "version": "1", "atelyx": { "type": "theme" } });
         assert!(manifest_valid_or_error(&theme).is_ok());
-        let tool_no_main = json!({ "schemaVersion": 1, "id": "com.x", "name": "x", "version": "1", "type": "tool" });
+        let tool_no_main = json!({ "name": "com.x", "version": "1", "atelyx": { "type": "tool" } });
         assert!(manifest_valid_or_error(&tool_no_main).is_err());
-        // themes 结构校验（与前端 normalizeThemes 对齐）：非数组/空/条目畸形/id 重复均拒绝。
+        // themes 结构校验（atelyx 块内；与前端 normalizeThemes 对齐）：非数组/空/条目畸形/id 重复均拒绝。
         let themes_ok = json!({
-            "schemaVersion": 1, "id": "com.example.theme", "name": "x", "version": "1", "type": "theme",
-            "themes": [
-                { "id": "nord-light", "name": "Nord 浅", "colorScheme": "light", "variables": {} },
-                { "id": "nord-dark", "name": "Nord 深", "colorScheme": "dark", "variables": { "--bg": "#000" } },
-            ],
+            "name": "com.example.theme", "version": "1",
+            "atelyx": {
+                "type": "theme",
+                "themes": [
+                    { "id": "nord-light", "name": "Nord 浅", "colorScheme": "light", "variables": {} },
+                    { "id": "nord-dark", "name": "Nord 深", "colorScheme": "dark", "variables": { "--bg": "#000" } },
+                ],
+            },
         });
         assert!(manifest_valid_or_error(&themes_ok).is_ok());
         for bad_themes in [
@@ -1564,35 +1574,33 @@ mod tests {
                 ],
             }),
         ] {
-            let mut m = json!({ "schemaVersion": 1, "id": "com.example.theme", "name": "x", "version": "1", "type": "theme" });
-            if let Some(t) = bad_themes.get("themes") {
-                m["themes"] = t.clone();
-            }
+            let mut m = json!({ "name": "com.example.theme", "version": "1", "atelyx": { "type": "theme" } });
+            m["atelyx"]["themes"] = bad_themes.clone();
             assert!(manifest_valid_or_error(&m).is_err(), "畸形 themes 应拒绝：{bad_themes}");
         }
     }
 
     #[test]
     fn builtin_plugin_defs_are_valid() {
-        // id 唯一且合法；合成清单通过校验（schemaVersion/type/runtime；main 为校验占位）。
+        // name 唯一且合法；合成清单通过校验（atelyx.type；main 为校验占位）。
         let ids: Vec<&str> = BUILTIN_PLUGINS.iter().map(|d| d.id).collect();
         let mut uniq = ids.clone();
         uniq.sort();
         uniq.dedup();
-        assert_eq!(ids.len(), uniq.len(), "内置插件 id 必须唯一");
+        assert_eq!(ids.len(), uniq.len(), "内置插件 name 必须唯一");
         for def in BUILTIN_PLUGINS {
-            assert!(plugin_id_valid(def.id), "内置插件 id 非法：{}", def.id);
+            assert!(plugin_id_valid(def.id), "内置插件 name 非法：{}", def.id);
             let manifest = builtin_manifest(def);
             assert!(manifest_valid_or_error(&manifest).is_ok(), "内置插件清单非法：{}", def.id);
-            assert_eq!(manifest["type"].as_str(), Some(def.ty));
-            assert_eq!(manifest["runtime"].as_str(), Some("js"));
+            assert_eq!(manifest["atelyx"]["type"].as_str(), Some(def.ty));
+            assert_eq!(manifest["main"].as_str(), Some("builtin"));
             if def.ty == "theme" {
                 // 主题插件：合成 themes（浅/深基底）+ themeOptions.accent
-                let themes = manifest["themes"].as_array().expect("主题插件必须带 themes");
+                let themes = manifest["atelyx"]["themes"].as_array().expect("主题插件必须带 themes");
                 assert_eq!(themes.len(), 2);
                 assert_eq!(themes[0]["id"], "light");
                 assert_eq!(themes[1]["id"], "dark");
-                assert_eq!(manifest["themeOptions"]["accent"], true);
+                assert_eq!(manifest["atelyx"]["themeOptions"]["accent"], true);
             }
         }
         assert!(is_builtin_plugin_id("builtin.search"));
@@ -1606,10 +1614,10 @@ mod tests {
         let defaults = plugin_default_plugins();
         assert_eq!(defaults.len(), BUILTIN_PLUGINS.len());
         for (def, v) in BUILTIN_PLUGINS.iter().zip(&defaults) {
-            assert_eq!(v["id"], def.id);
-            assert_eq!(v["name"], def.name);
-            assert_eq!(v["tagline"], def.tagline);
-            assert_eq!(v["type"].as_str(), Some(def.ty));
+            assert_eq!(v["name"], def.id);
+            assert_eq!(v["atelyx"]["name"], def.name);
+            assert_eq!(v["atelyx"]["tagline"], def.tagline);
+            assert_eq!(v["atelyx"]["type"].as_str(), Some(def.ty));
         }
     }
 

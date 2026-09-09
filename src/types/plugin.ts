@@ -1,33 +1,14 @@
 /**
- * 插件平台契约：清单 / 市场索引 / 能力 / 皮肤 / 运行状态。
+ * 插件平台契约：插件包 / 市场索引 / 能力 / 皮肤 / 运行状态。
  *
- * 这是分布式插件（任何来源、任何作者）与 App 之间的唯一数据契约。契约带格式版本号：
- * 未知的字段、类型、附加分类一律跳过而不报错（主分类错误则拒绝，见 utils/pluginManifest）；
- * 反向（更老的插件、更新的 App）由插件自身的宿主兼容范围字段约束。
+ * 这是分布式插件（任何来源、任何作者）与 App 之间的唯一数据契约。插件包 = 插件根目录的
+ * `package.json`（npm 标准字段 + 嵌套 `atelyx` 块）+ 单入口（默认导出 `apply(ctx)`）。
+ * 未知的字段、类型、附加分类一律跳过而不报错（主分类错误则拒绝，见 utils/pluginManifest）。
  */
 import type { TableField, TableRow } from "./table";
-import type { CanvasFileRow, FileTreeNode } from "./canvas";
 
-/** 清单格式版本：升级清单结构时递增；App 拒绝 schemaVersion 大于当前值的清单。 */
-export const PLUGIN_SCHEMA_VERSION = 2;
-
-/** 插件逻辑运行平面（UI 平面永远在主线程跑 JS；此处仅逻辑平面语言）。 */
-export type PluginRuntime = "js" | "ts" | "python";
-
-/** 静态贡献声明（纯元数据：市场/管理 UI 展示与发现；运行时行为经桥注册，二者不强制一致）。 */
-export interface PluginContributes {
-  /** 静态命令声明（id/label 展示用）。 */
-  commands?: Array<{ id: string; label: string }>;
-  /** 静态面板声明（kind/label 展示用）。 */
-  panels?: Array<{ kind: string; label: string }>;
-  /** 静态设置项声明（key/label 展示用）。 */
-  settings?: Array<{ key: string; label: string }>;
-}
-
-/**
- * 插件展示分类：type 只做市场展示/过滤，实际能力在运行时经桥注册（一个插件可属多类）。
- * 新增分类不破坏旧 App：旧 App 遇到未知 type 会在市场/安装时安全跳过。
- */
+/** 插件展示分类：type 只做市场展示/过滤，实际能力在运行时经 apply 注册（一个插件可属多类）。
+ *  新增分类不破坏旧 App：旧 App 遇到未知 type 会在市场/安装时安全跳过。 */
 export type PluginType =
   | "tool" // AI 工具/命令（模型可调用）
   | "setting" // 设置页条目
@@ -37,7 +18,7 @@ export type PluginType =
   | "theme" // UI 皮肤（CSS 变量覆盖）
   | "command" // 全局动作/菜单/快捷键
   | "background" // 后台常驻服务（无界面）
-  | "tableview"; // 表格编辑器内的多维表格视图（registerTableView）
+  | "tableview"; // 表格编辑器内的多维表格视图
 
 /** 安装作用域：app=个人工具（本机，默认）；vault=随仓库共享。 */
 export type PluginScope = "app" | "vault";
@@ -70,17 +51,18 @@ export interface PluginThemeOptions {
   accent?: boolean;
 }
 
-/** 插件清单（插件根目录的 atelyx.json）。 */
+/**
+ * 插件包清单（插件根目录的 package.json 归一化；原始输入为 npm 标准字段 + `atelyx` 块，
+ * 归一化后展平为本类型，见 utils/pluginManifest）。id = package.json 的 name（反向域名）。
+ */
 export interface PluginManifest {
-  /** 清单格式版本（= PLUGIN_SCHEMA_VERSION）。 */
-  schemaVersion: number;
-  /** 反向域名式稳定标识，发布后不可变。 */
+  /** 反向域名式稳定标识（= package.json 的 name），发布后不可变。 */
   id: string;
-  /** 显示名。 */
+  /** 显示名（package.json atelyx.name，缺省 = id）。 */
   name: string;
-  /** 语义化版本（x.y.z）。 */
+  /** 语义化版本（package.json version）。 */
   version: string;
-  /** 主分类（市场展示/过滤）。 */
+  /** 主分类（市场展示/过滤；package.json atelyx.type）。 */
   type: PluginType;
   /** 全部分类（含主分类，去重；缺省 = [type]）。 */
   types?: PluginType[];
@@ -92,29 +74,18 @@ export interface PluginManifest {
   atelyxVersionMax?: string;
   /** 目标平台（如 windows-x64 / linux-x64），缺省全平台。 */
   platforms?: string[];
-  /** 逻辑运行平面语言（缺省 js；UI 平面永远在主线程跑 JS）。 */
-  runtime?: PluginRuntime;
-  /** 提供的能力命名空间（反向域名，必含点；其他插件/宿主可经 bridge.call 调用）。 */
-  provides?: string[];
-  /** 依赖的能力命名空间（宿主或他插件提供；启动前校验，缺失即拒绝启用）。 */
-  requires?: string[];
-  /** 显式替换意图：要替换的能力命名空间（须同时声明在 requires 里；冲突注册时 last-wins 替换并审计）。 */
-  replace?: string[];
-  /** 披露：将调用的能力命名空间（宿主命名空间如 state/shell，或他插件反向域名；
-   *  与 provides 同一词汇表，市场展示 + 管理页审计对照；无运行时门槛）。 */
+  /** 入口（相对插件根目录；.js/.ts/.tsx；纯 theme 插件可省略）。 */
+  main?: string;
+  /** 披露：将访问的 Atelyx 服务名（管理页「声明 vs 实际」审计对照的声明侧；无运行时门槛）。 */
   declares?: string[];
-  /** 静态贡献声明（纯元数据：市场/管理 UI 展示与发现）。 */
-  contributes?: PluginContributes;
-  /** 权限说明：能力名 → 一句理由（安装/详情展示）。 */
+  /** 权限说明：服务名 → 一句理由（安装/详情展示）。 */
   permissions?: Record<string, string>;
   /** 声明式主题条目（type 含 theme 时通常携带；必须 ≥1；id 插件内唯一）。 */
   themes?: ThemeDefinition[];
   /** 主题设置项声明（预置类型：accent = 内核实现的强调色设置项）。 */
   themeOptions?: PluginThemeOptions;
-  /** 入口（相对插件根目录；js/ts 为脚本，python 为子进程入口；纯 theme 插件可省略）。 */
-  main?: string;
-  /** 主线程 UI 入口（相对插件根目录；可选：UI 类插件在此声明，与 main 并存时双平面加载）。 */
-  mainUi?: string;
+  /** 插件契约版本（宿主 App 版本解耦；不兼容时加载时响亮拒绝）。 */
+  hostApiVersion?: number;
   /** 一句简介。 */
   tagline?: string;
   /** 详细描述（markdown）。 */
@@ -171,32 +142,13 @@ export interface InstalledPlugin {
   sourceKind: PluginSourceKind;
   enabled: boolean;
   phase: PluginFiberPhase;
-  /** 桥实际调用过的能力（内存审计，上限截断）。 */
-  usedCapabilities: string[];
   /** 加载失败原因。 */
   error?: string;
 }
 
 /**
- * UI 平面插件经 facade 获得的仓库访问契约（文件树 + 打开入口）。
- * 经 `setPluginVaultAccess` provider 注入（见 services/plugins/ui.ts，pluginStore 接线），
- * 任何面板插件可用，与内置搜索面板同一输入面。
- */
-export interface VaultAccess {
-  /** 读取当前仓库文件树（调用时取当下快照）。 */
-  listFiles(): Promise<FileTreeNode[]>;
-  /** 打开画布（.atlx/.canvas 行，与文件面板同一入口）。 */
-  openCanvasFile(row: CanvasFileRow): void;
-  /** 打开笔记窗口。 */
-  openNote(file: string, title: string): void;
-  /** 打开表格窗口。 */
-  openTable(file: string, title: string): void;
-}
-
-/**
- * 插件表格数据快照（主线程 facade `subscribeTableData` 推送；结构即契约）。
- * 主线程同域直传 store 的不可变数组引用（选中/状态变化不重建 rows/fields，插件可据此 memo 隔离），
- * worker 平面若复用本契约须自行序列化。
+ * 插件表格数据快照（ctx.table.snapshot 返回；结构即契约）。
+ * rows/fields 为 store 的不可变数组引用（选中/状态变化不重建 rows/fields，插件可据此 memo 隔离）。
  */
 export interface PluginTableSnapshot {
   /** 当前打开的 .atb 相对仓库根路径（null = 未打开表格）。 */
@@ -211,7 +163,7 @@ export interface PluginTableSnapshot {
 
 /**
  * 插件画布节点（`canvas` 能力投影；与磁盘/协作格式同构，JSON 可序列化）。
- * type 为开放字符串——插件可注册自定义节点类型（registerNode），不限于内置类型。
+ * type 为开放字符串——插件可注册自定义节点类型，不限于内置类型。
  */
 export interface PluginCanvasNode {
   id: string;

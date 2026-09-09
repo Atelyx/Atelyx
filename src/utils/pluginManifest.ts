@@ -1,13 +1,11 @@
 /**
- * 插件清单校验与兼容性判断。
- * 校验目标是「坏清单不让 App 内部功能出问题」，而不是拒绝一切：未知字段、未知附加
- * 分类一律跳过（前向兼容），只对结构性问题（缺字段、类型错误、格式版本过新、未知运行时/主分类）报错。
+ * 插件包清单校验与归一化。
+ * 原始输入 = 插件根目录的 `package.json`（npm 标准字段 + 嵌套 `atelyx` 块）；归一化为
+ * `PluginManifest`（展平）。校验目标是「坏清单不让 App 内部功能出问题」，而不是拒绝一切：
+ * 未知字段、未知附加分类一律跳过（前向兼容），只对结构性问题（缺字段、类型错误、未知主分类）报错。
  */
 import {
-  PLUGIN_SCHEMA_VERSION,
-  type PluginContributes,
   type PluginManifest,
-  type PluginRuntime,
   type PluginScope,
   type PluginType,
   type ThemeDefinition,
@@ -30,9 +28,6 @@ const KNOWN_PLUGIN_TYPES: readonly string[] = [
   "tableview",
 ];
 
-/** 已知逻辑运行平面（与 types/plugin.ts 的 PluginRuntime 一致；未知运行时拒绝——本 App 无法执行）。 */
-const KNOWN_RUNTIMES: ReadonlySet<string> = new Set(["js", "ts", "python"]);
-
 const PLUGIN_ID_PATTERN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/;
 
 /** id 是否合法：反向域名式（至少两段、小写字母/数字/中划线、段不以中划线收尾）。 */
@@ -48,22 +43,6 @@ export function isKnownPluginType(type: string): boolean {
 /** 全部分类（含主分类，去重；缺省 = [type]）。 */
 export function pluginTypeList(manifest: Pick<PluginManifest, "type" | "types">): PluginType[] {
   return [...new Set([manifest.type, ...(manifest.types ?? [])])];
-}
-
-/** UI 类插件类型（主线程平面承载：渲染 React/触达 DOM）。 */
-const UI_PLUGIN_TYPES: ReadonlySet<PluginType> = new Set(["panel", "setting", "app", "node", "tableview"]);
-
-/** worker 平面插件类型（隔离上下文承载：工具/后台/命令逻辑）。 */
-const WORKER_PLUGIN_TYPES: ReadonlySet<PluginType> = new Set(["tool", "background", "command"]);
-
-/** 是否 UI 类插件类型（需要主线程平面）。 */
-export function isUiPluginType(type: PluginType): boolean {
-  return UI_PLUGIN_TYPES.has(type);
-}
-
-/** 是否 worker 类插件类型（隔离上下文承载逻辑）。 */
-export function isWorkerPluginType(type: PluginType): boolean {
-  return WORKER_PLUGIN_TYPES.has(type);
 }
 
 /** 语义化版本比较（容忍 1/2/3 段与缺段，非数字段按 0 处理）。 */
@@ -103,135 +82,93 @@ export function pluginCompatibleWithHost(
   return { ok: true };
 }
 
-/** 校验并归一化插件清单；结构错误返回原因列表。 */
+/** 校验并归一化插件包清单（package.json）；结构错误返回原因列表。 */
 export function validatePluginManifest(raw: unknown): ManifestValidateResult {
   if (typeof raw !== "object" || raw === null) return { ok: false, errors: ["清单必须是对象"] };
   const data = raw as Record<string, unknown>;
 
   const errors: string[] = [];
 
-  const schemaVersion = data.schemaVersion;
-  if (typeof schemaVersion !== "number" || !Number.isInteger(schemaVersion) || schemaVersion <= 0) {
-    errors.push("schemaVersion 必须是正整数");
-  } else if (schemaVersion > PLUGIN_SCHEMA_VERSION) {
-    errors.push(`清单格式版本过新（${schemaVersion}），需要更新 Atelyx`);
-  }
-
-  const id = data.id;
-  if (typeof id !== "string" || !pluginIdValid(id)) errors.push("id 必须是合法的反向域名标识");
-
-  const name = data.name;
-  if (typeof name !== "string" || name.trim().length === 0) errors.push("name 不能为空");
+  const id = data.name;
+  if (typeof id !== "string" || !pluginIdValid(id)) errors.push("name 必须是合法的反向域名标识");
 
   const version = data.version;
   if (typeof version !== "string" || version.trim().length === 0) errors.push("version 不能为空");
-
-  const type = data.type;
-  if (typeof type !== "string" || !isKnownPluginType(type)) errors.push(`未知插件类型：${String(type)}`);
 
   const main = data.main;
   if (main !== undefined && (typeof main !== "string" || main.trim().length === 0)) {
     errors.push("main 必须是非空字符串");
   }
 
-  const mainUi = data.mainUi;
-  if (mainUi !== undefined && (typeof mainUi !== "string" || mainUi.trim().length === 0)) {
-    errors.push("mainUi 必须是非空字符串");
+  // atelyx 块：插件元数据（显示名/类型/作用域/披露/主题等）。
+  const atelyx = data.atelyx;
+  if (typeof atelyx !== "object" || atelyx === null || Array.isArray(atelyx)) {
+    errors.push("缺少 atelyx 块");
+    return { ok: false, errors };
   }
+  const ax = atelyx as Record<string, unknown>;
 
-  const runtime = normalizeRuntime(data.runtime, errors);
+  const type = ax.type;
+  if (typeof type !== "string" || !isKnownPluginType(type)) errors.push(`未知插件类型：${String(type)}`);
 
   if (errors.length > 0) return { ok: false, errors };
 
-  const types = normalizeTypes(type as string, data.types, errors);
+  const types = normalizeTypes(type as string, ax.types, errors);
   // main 仅在纯 theme 插件（无任何代码承载类型）时可省略——theme 是声明式皮肤，无入口。
-  // 非字符串/空串已在上面拒绝，这里只补「缺省」判定，避免 null 双错误。
   const themeOnly = types.every((t) => t === "theme");
   if (!themeOnly && main === undefined) errors.push("main 不能为空");
-  const declares = normalizeDeclares(data.declares, errors);
-  const provides = normalizeStringList(data.provides, "provides", errors);
-  const requires = normalizeStringList(data.requires, "requires", errors);
-  const replace = normalizeStringList(data.replace, "replace", errors);
-  if (replace.length > 0) {
-    // 显式替换意图必须以 requires 声明为前提（last-wins 是协商语义，不能是隐式抢占）
-    const requireSet = new Set(requires);
-    const undeclared = replace.filter((r) => !requireSet.has(r));
-    if (undeclared.length > 0) {
-      errors.push(`replace 声明的命名空间须同时声明在 requires 里：${undeclared.join("、")}`);
-    }
-  }
-  const contributes = normalizeContributes(data.contributes, errors);
-  const permissions = normalizePermissions(data.permissions, errors);
-  const platforms = normalizeStringList(data.platforms, "platforms", errors);
-  const themes = normalizeThemes(data.themes, errors);
-  const themeOptions = normalizeThemeOptions(data.themeOptions, errors);
+
+  const declares = normalizeStringList(ax.declares, "declares", errors);
+  const permissions = normalizePermissions(ax.permissions, errors);
+  const platforms = normalizeStringList(ax.platforms, "platforms", errors);
+  const themes = normalizeThemes(ax.themes, errors);
+  const themeOptions = normalizeThemeOptions(ax.themeOptions, errors);
   if (errors.length > 0) return { ok: false, errors };
 
   const manifest: PluginManifest = {
-    schemaVersion: schemaVersion as number,
     id: id as string,
-    name: name as string,
+    name: normalizeName(ax.name, id as string),
     version: version as string,
     type: type as PluginType,
     ...(typeof main === "string" && main.trim().length > 0 ? { main } : {}),
-    scope: normalizeScope(data.scope),
+    scope: normalizeScope(ax.scope),
     ...(types.length > 0 ? { types } : {}),
-    ...(runtime ? { runtime } : {}),
     ...(declares.length > 0 ? { declares } : {}),
-    ...(provides.length > 0 ? { provides } : {}),
-    ...(requires.length > 0 ? { requires } : {}),
-    ...(replace.length > 0 ? { replace } : {}),
-    ...(contributes ? { contributes } : {}),
     ...(Object.keys(permissions).length > 0 ? { permissions } : {}),
     ...(platforms.length > 0 ? { platforms } : {}),
     ...(themes ? { themes } : {}),
     ...(themeOptions ? { themeOptions } : {}),
-    ...(typeof data.atelyxVersionMin === "string" ? { atelyxVersionMin: data.atelyxVersionMin } : {}),
-    ...(typeof data.atelyxVersionMax === "string" ? { atelyxVersionMax: data.atelyxVersionMax } : {}),
-    ...(typeof data.tagline === "string" ? { tagline: data.tagline } : {}),
-    ...(typeof mainUi === "string" && mainUi.trim().length > 0 ? { mainUi } : {}),
-    ...(typeof data.description === "string" ? { description: data.description } : {}),
-    ...(typeof data.author === "string" ? { author: data.author } : {}),
-    ...(typeof data.license === "string" ? { license: data.license } : {}),
-    ...(Array.isArray(data.tags) && data.tags.every((t) => typeof t === "string")
-      ? { tags: data.tags as string[] }
-      : {}),
+    ...(typeof ax.atelyxVersionMin === "string" ? { atelyxVersionMin: ax.atelyxVersionMin } : {}),
+    ...(typeof ax.atelyxVersionMax === "string" ? { atelyxVersionMax: ax.atelyxVersionMax } : {}),
+    ...(typeof ax.hostApiVersion === "number" ? { hostApiVersion: ax.hostApiVersion } : {}),
+    ...(typeof ax.tagline === "string" ? { tagline: ax.tagline } : {}),
+    ...(typeof ax.description === "string"
+      ? { description: ax.description }
+      : typeof data.description === "string"
+        ? { description: data.description }
+        : {}),
+    ...(typeof ax.author === "string"
+      ? { author: ax.author }
+      : typeof data.author === "string"
+        ? { author: data.author }
+        : {}),
+    ...(typeof ax.license === "string"
+      ? { license: ax.license }
+      : typeof data.license === "string"
+        ? { license: data.license }
+        : {}),
+    ...(Array.isArray(ax.tags) && ax.tags.every((t) => typeof t === "string")
+      ? { tags: ax.tags as string[] }
+      : Array.isArray(data.keywords) && data.keywords.every((t) => typeof t === "string")
+        ? { tags: data.keywords as string[] }
+        : {}),
   };
   return { ok: true, manifest };
 }
 
-/** 逻辑运行平面归一化：缺省 js；未知运行时拒绝（本 App 无法执行）。 */
-function normalizeRuntime(rawRuntime: unknown, errors: string[]): PluginRuntime | undefined {
-  if (rawRuntime === undefined) return undefined;
-  if (typeof rawRuntime !== "string" || !KNOWN_RUNTIMES.has(rawRuntime)) {
-    errors.push(`runtime 仅支持 ${[...KNOWN_RUNTIMES].join("/")}`);
-    return undefined;
-  }
-  return rawRuntime as PluginRuntime;
-}
-
-/** contributes 归一化：只保留 commands/panels/settings 三类静态声明，缺标识字段（id/kind）跳过。 */
-function normalizeContributes(raw: unknown, errors: string[]): PluginContributes | undefined {
-  if (raw === undefined) return undefined;
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-    errors.push("contributes 必须是对象");
-    return undefined;
-  }
-  const src = raw as Record<string, unknown>;
-  const pick = (key: string, idField: "id" | "kind"): Array<{ id: string; label: string } | { kind: string; label: string }> | undefined => {
-    const arr = src[key];
-    if (arr === undefined) return undefined;
-    if (!Array.isArray(arr)) return undefined;
-    const items = arr.filter(
-      (x) => typeof x === "object" && x !== null && typeof (x as Record<string, unknown>)[idField] === "string",
-    );
-    return items.length > 0 ? (items as Array<{ id: string; label: string } | { kind: string; label: string }>) : undefined;
-  };
-  const commands = pick("commands", "id") as PluginContributes["commands"];
-  const panels = pick("panels", "kind") as PluginContributes["panels"];
-  const settings = pick("settings", "id") as PluginContributes["settings"];
-  if (!commands && !panels && !settings) return undefined;
-  return { ...(commands ? { commands } : {}), ...(panels ? { panels } : {}), ...(settings ? { settings } : {}) };
+/** 显示名归一化：atelyx.name 缺省 = id。 */
+function normalizeName(raw: unknown, fallback: string): string {
+  return typeof raw === "string" && raw.trim().length > 0 ? raw.trim() : fallback;
 }
 
 /** 全部分类归一化：附加分类只保留已知类型，未知的跳过（前向兼容）。 */
@@ -248,23 +185,15 @@ function normalizeTypes(type: string, rawTypes: unknown, errors: string[]): Plug
   return [...new Set([type as PluginType, ...known])];
 }
 
-/** declares 归一化：调用的能力命名空间（非空字符串数组，与 provides/requires 同一词汇表）。 */
-function normalizeDeclares(rawDeclares: unknown, errors: string[]): string[] {
-  return normalizeStringList(rawDeclares, "declares", errors);
-}
-
-/** permissions 归一化：必须是能力名 → 非空字符串的表。 */
-function normalizePermissions(
-  rawPermissions: unknown,
-  errors: string[],
-): Record<string, string> {
-  if (rawPermissions === undefined) return {};
-  if (typeof rawPermissions !== "object" || rawPermissions === null || Array.isArray(rawPermissions)) {
+/** permissions 归一化：必须是服务名 → 非空字符串的表。 */
+function normalizePermissions(raw: unknown, errors: string[]): Record<string, string> {
+  if (raw === undefined) return {};
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     errors.push("permissions 必须是对象");
     return {};
   }
   const result: Record<string, string> = {};
-  for (const [key, value] of Object.entries(rawPermissions as Record<string, unknown>)) {
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
     if (typeof value === "string" && value.trim().length > 0) result[key] = value;
   }
   return result;
@@ -355,4 +284,3 @@ function normalizeVarTable(raw: unknown): Record<string, string> | undefined {
 function normalizeScope(rawScope: unknown): PluginScope {
   return rawScope === "vault" ? "vault" : "app";
 }
-

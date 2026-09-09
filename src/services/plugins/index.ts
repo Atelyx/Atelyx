@@ -1,6 +1,7 @@
 /**
- * 插件平台 service：Rust `commands/plugin.rs` 的 invoke 封装 + 运行时（bridge）re-export。
+ * 插件平台 service：Rust `commands/plugin.rs` 的 invoke 封装。
  * 插件列表/安装/卸载/启停/更新/读入口/插件数据都经这里，前端组件只经 store 触达。
+ * 运行时（Cordis 内核/挂载器）在 `services/cordis`，不在此层。
  */
 import { invoke } from "@tauri-apps/api/core";
 import type { PluginManifest, PluginScope, PluginSourceKind, PluginType } from "@/types";
@@ -58,7 +59,7 @@ export function pluginUpdate(id: string): Promise<PluginRow> {
   return invoke<PluginRow>("plugin_update", { id });
 }
 
-/** 读取插件入口 JS（path 缺省 = 清单 main；主线程 UI 入口传 mainUi）。 */
+/** 读取插件入口源码（path 缺省 = 清单 main）。 */
 export function pluginReadEntry(id: string, path?: string): Promise<string> {
   return invoke<string>("plugin_read_entry", { id, path });
 }
@@ -72,90 +73,3 @@ export function pluginReadState(id: string): Promise<unknown> {
 export function pluginWriteState(id: string, data: unknown): Promise<void> {
   return invoke("plugin_write_state", { id, data });
 }
-
-export {
-  attachPlugin,
-  callHostCapability,
-  callPluginContributionFn,
-  contributedCommands,
-  contributedPluginTools,
-  emitPluginEvent,
-  getPluginCanvasAccess,
-  getPluginCollabAccess,
-  getPluginTableRuntimeAccess,
-  getPluginVaultWriteAccess,
-  getSettingsAccess,
-  hostCapabilityLabel,
-  hostCapabilityNames,
-  hostCapabilitySensitive,
-  listPluginContributions,
-  loadPlugin,
-  onRuntimeChange,
-  pluginCapabilitiesByOwner,
-  pluginCapabilityOwner,
-  registerHostCapability,
-  registerHostCapabilityMeta,
-  runContributedCommand,
-  runtimeSnapshot,
-  setAppPageOpener,
-  setPluginCanvasAccess,
-  setPluginCollabAccess,
-  setPluginEventForwarder,
-  setPluginTableRuntimeAccess,
-  setPluginVaultWriteAccess,
-  setSettingsAccess,
-  unloadPlugin,
-} from "./bridge";
-export type {
-  HostCapabilityHandler,
-  HostCapabilityMeta,
-  PluginCommandContribution,
-  PluginContributionEntry,
-  PluginRuntimeEntry,
-  PluginStreamSink,
-  PluginTableRuntimeAccess,
-} from "./bridge";
-export {
-  exposePluginFacade,
-  getPluginAppPages,
-  getPluginCommands,
-  getPluginEdge,
-  getPluginEdges,
-  getPluginNode,
-  getPluginNodes,
-  getPluginSetting,
-  getPluginSettings,
-  getPluginTableView,
-  getPluginTableViews,
-  getPluginThemeSettings,
-  getViewContribution,
-  listUiContributions,
-  loadUiPlugin,
-  onPluginUiChange,
-  pluginViewKinds,
-  pluginViewLabel,
-  registerBuiltinView,
-  setBuiltinPluginIds,
-  setPluginTableAccess,
-  setPluginThemeSettingsAccess,
-  setPluginVaultAccess,
-  unregisterPluginUi,
-} from "./ui";
-export type {
-  PluginAppPageRegistration,
-  PluginCommandRegistration,
-  PluginEdgeRegistration,
-  PluginMainThreadFacade,
-  PluginNodeRegistration,
-  PluginSettingRegistration,
-  PluginTableAccess,
-  PluginTableViewRegistration,
-  PluginThemeSettingsAccess,
-  PluginUiContribution,
-  ThemeSettingComponentProps,
-  ThemeSettingRegistration,
-  ViewContribution,
-} from "./ui";
-export { createPluginWorker, buildProxySource } from "./worker";
-export { transpileTs } from "./transpile";
-export { startPluginProcess } from "./process";

@@ -5,6 +5,7 @@
  * 内置视图 = 第一方插件挂载时注册的 single 槽贡献；停用/卸载经 disposePluginSlots 撤销。
  */
 import type { ComponentType, ReactNode } from "react";
+import { VIEW_LABELS } from "@/constants/views";
 import type { SlotContribution } from "@/utils/cordis/slots";
 import { pickSlotWinner, sortSlotList } from "@/utils/cordis/slots";
 
@@ -13,6 +14,16 @@ export interface ViewSlotPayload {
   label: string;
   component?: ComponentType;
   render?: (hostId: string) => ReactNode;
+}
+
+/** 视图贡献（ViewHost 分派用：slot 胜出贡献的转换形态；render 优先，重型视图承载宿主面板 id）。 */
+export interface ViewContribution {
+  kind: string;
+  label: string;
+  component?: ComponentType;
+  /** 按宿主面板/撕裂窗口 id 渲染（内置重型视图用；第三方面板不提供）。 */
+  render?: (hostId: string) => ReactNode;
+  pluginId: string;
 }
 
 /** 槽贡献（视图载荷特化）。 */
@@ -104,4 +115,9 @@ export function registerViewSlot(
 /** 解析某视图 kind 的胜出贡献（ViewHost 分派用；无贡献 = undefined）。 */
 export function resolveViewKind(kind: string): ViewSlotContribution | undefined {
   return resolveSlot(`view/${kind}`) as ViewSlotContribution | undefined;
+}
+
+/** 视图显示名（视图槽标签 → 内置视图标签 → 原样兜底，不崩溃）。 */
+export function pluginViewLabel(view: string): string {
+  return resolveViewKind(view)?.payload.label ?? (VIEW_LABELS as Record<string, string>)[view] ?? view;
 }

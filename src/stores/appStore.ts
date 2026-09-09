@@ -39,7 +39,7 @@ import { readClipboardText as readClipboardTextSvc, writeClipboardText as writeC
 import { pickDirectory as pickDirectorySvc } from "@/services/dialog";
 import { applyStartupWindow as applyStartupWindowSvc, applyWorkspaceWindow as applyWorkspaceWindowSvc, closeWindow as closeWindowSvc, minimizeWindow as minimizeWindowSvc, onCloseRequested as onCloseRequestedSvc, toggleFullscreen as toggleFullscreenSvc, toggleMaximizeWindow as toggleMaximizeWindowSvc } from "@/services/window";
 import { checkAndAutoUpdate as checkAndAutoUpdateSvc, checkForUpdate as checkForUpdateSvc, installUpdate as installUpdateSvc } from "@/services/updater";
-import { emitPluginEvent } from "@/services/plugins";
+import { emitPluginEvent } from "@/services/cordis/events";
 import { usePluginStore } from "@/stores/pluginStore";
 import type { CanvasFileRow, RecentVault } from "@/types";
 

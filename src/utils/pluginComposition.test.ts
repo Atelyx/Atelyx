@@ -7,7 +7,6 @@ import type { PluginManifest } from "@/types";
 import { deriveComposition, type CompositionRow } from "./pluginComposition";
 
 const def = (id: string, name: string): PluginManifest => ({
-  schemaVersion: 2,
   id,
   name,
   version: "1.0.0",
@@ -52,7 +51,7 @@ describe("deriveComposition", () => {
     const defaults = [
       def("builtin.search", "搜索"),
       { ...def("bad.empty", "空id"), id: "" },
-      { schemaVersion: 2, name: "无id", version: "1.0.0", type: "panel" } as unknown as PluginManifest,
+      { name: "无id", version: "1.0.0", type: "panel" } as unknown as PluginManifest,
     ];
     const rows = deriveComposition(defaults, { "builtin.search": { name: "搜索", enabled: true } });
     expect(rows.map((r) => r.id)).toEqual(["builtin.search"]);

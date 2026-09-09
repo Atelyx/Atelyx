@@ -2,8 +2,8 @@
  * 插件平台 store：已装插件状态（app + 当前仓库 vault + 内置插件行）+ 运行时生命周期编排。
  *
  * 分层：本 store 是插件相关状态的唯一出口——组件不直连 `services/plugins`；
- * 内置插件运行时（Cordis 第一方）本体在 `services/cordis`（内核/挂载器），第三方插件运行时
- * （Worker/桥）本体在 `services/plugins/bridge`，本 store 只做编排与快照。
+ * 插件运行时（第一方与第三方 Cordis 插件）本体在 `services/cordis`（内核/挂载器/注册表），
+ * 本 store 只做编排与快照。
  * 加载时机：应用挂载/进仓后 `load()` 一次——先列清单，再逐个拉起启用插件（单个失败不影响其余）。
  * 例外说明：本 store 静态 import `components/plugins/cordis/builtins.tsx`（第一方插件注册表，
  * 组件层承载组件引用——services 不 import components 的约束所致）；该边经头注释文档化，
@@ -17,14 +17,18 @@ import type {
   PluginManifest,
   PluginScope,
   PluginSourceKind,
-  ToolDefinition,
 } from "@/types";
 import { errText, type PluginFiberPhase } from "@/types";
 import {
-  attachPlugin,
-  contributedCommands,
-  contributedPluginTools,
-  exposePluginFacade,
+  pluginInstall,
+  pluginInstallLocal,
+  pluginList,
+  pluginSeedBuiltin,
+  pluginSetEnabled,
+  pluginUninstall,
+  pluginUpdate,
+} from "@/services/plugins";
+import {
   getPluginAppPages,
   getPluginCommands,
   getPluginEdge,
@@ -36,49 +40,28 @@ import {
   getPluginThemeSettings,
   getPluginTableView,
   getPluginTableViews,
-  getViewContribution,
-  hostCapabilityLabel,
-  hostCapabilityNames,
-  hostCapabilitySensitive,
-  loadPlugin,
-  loadUiPlugin,
   onPluginUiChange,
-  onRuntimeChange,
-  pluginInstall,
-  pluginInstallLocal,
-  pluginList,
-  pluginReadEntry,
-  pluginSeedBuiltin,
-  pluginSetEnabled,
-  pluginUninstall,
-  pluginUpdate,
-  pluginViewKinds as allPluginViewKinds,
-  pluginViewLabel as pluginViewLabelOf,
-  runContributedCommand,
-  runtimeSnapshot,
+} from "@/services/cordis/ui";
+import {
   setAppPageOpener,
-  setBuiltinPluginIds,
   setPluginCollabAccess,
-  setPluginThemeSettingsAccess,
-  setPluginVaultAccess,
   setPluginVaultWriteAccess,
   setSettingsAccess,
-  startPluginProcess,
-  transpileTs,
-  unloadPlugin,
-  emitPluginEvent,
-} from "@/services/plugins";
+} from "@/services/cordis/access";
+import { emitPluginEvent } from "@/services/cordis/events";
+import { auditSnapshot, type PluginAuditEntry } from "@/services/cordis/audit";
+import { PLUGIN_SERVICE_LABELS, PLUGIN_SERVICE_SENSITIVE } from "@/constants/pluginServices";
+import type { PluginRow } from "@/services/plugins";
 import type {
   PluginAppPageRegistration,
   PluginCommandContribution,
   PluginEdgeRegistration,
   PluginNodeRegistration,
-  PluginRow,
   PluginSettingRegistration,
   PluginTableViewRegistration,
   ThemeSettingRegistration,
-  ViewContribution,
-} from "@/services/plugins";
+} from "@/services/cordis/ui";
+import type { ViewContribution } from "@/services/cordis/slots";
 import {
   CORDIS_BUILTIN_BY_ID,
   CORDIS_BUILTIN_DEFS,
@@ -86,9 +69,10 @@ import {
 } from "@/components/plugins/cordis/builtins";
 import { getKernel } from "@/services/cordis/kernel";
 import { mountPlugin, unmountPlugin } from "@/services/cordis/loader";
+import { mountThirdPartyPlugin } from "@/services/cordis/thirdParty";
 import { resolveViewKind, onSlotChange, viewKinds as slotViewKinds } from "@/services/cordis/slots";
 import type { ViewSlotContribution } from "@/services/cordis/slots";
-import { VIEW_KINDS } from "@/types";
+import { VIEW_LABELS } from "@/constants/views";
 import { useCollabStore, publishPluginPresence } from "@/stores/collabStore";
 import { useVaultStore } from "@/stores/vaultStore";
 import { useAppStore } from "@/stores/appStore";
@@ -108,13 +92,9 @@ import {
 } from "@/services/plugins/market";
 import { getAppVersion } from "@/services/app";
 import {
-  isUiPluginType,
-  isWorkerPluginType,
   pluginCompatibleWithHost,
-  pluginTypeList,
   validatePluginManifest,
 } from "@/utils/pluginManifest";
-import { resolveEnabledDeps } from "@/utils/pluginDeps";
 import { detectPlatform } from "@/utils/pluginHost";
 
 /** 某视图 kind 由内置插件提供时的状态（ViewHost 降级占位/菜单过滤用；installed=false = 已卸载）。 */
@@ -155,8 +135,6 @@ interface PluginStoreState {
   setEnabled(id: string, enabled: boolean): Promise<void>;
   /** 更新（备份 → 安装 → 失败回滚；成功则重载运行时）。 */
   update(id: string): Promise<void>;
-  /** 插件贡献的 AI 工具（Agent 名册组装用）。 */
-  pluginTools(): ToolDefinition[];
   /** 插件工具的 UI 元数据（Agent 设置页名册合并；组件经此读取，不直连 services）。 */
   pluginToolMetas(): AgentToolMeta[];
   /** 插件设置项注册（设置页 tab 合并）。 */
@@ -184,14 +162,16 @@ interface PluginStoreState {
   pluginTableView(kind: string): PluginTableViewRegistration | undefined;
   /** 全部插件表格视图注册（工具条视图列表合并用）。 */
   pluginTableViews(): PluginTableViewRegistration[];
-  /** 插件命令（UI 平面 + worker 平面合并；管理 UI「运行命令」入口）。 */
+  /** 插件命令（管理 UI「运行命令」入口）。 */
   pluginCommands(): PluginCommandContribution[];
-  /** 执行插件命令（UI 平面直接 run；worker 平面经桥 RPC）。 */
+  /** 执行插件命令。 */
   runPluginCommand(globalId: string): Promise<unknown>;
-  /** 能力命名空间展示文案（宿主能力返回注册表标签，插件命名空间原样）。 */
+  /** 服务展示文案（Atelyx 服务标签，未知服务原样）。 */
   capabilityLabel(namespace: string): string;
-  /** 能力命名空间是否敏感（宿主注册表标记，UI「敏感」高亮）。 */
+  /** 服务是否敏感（展示「敏感」高亮）。 */
   capabilitySensitive(namespace: string): boolean;
+  /** 插件审计快照（实际 = ctx 服务读 + 事件订阅，按插件归属；声明对照的实际侧）。 */
+  pluginAudit(): PluginAuditEntry[];
   /** 加载市场索引（缓存未过期直接回缓存；网络失败直接提示失败）。 */
   loadMarket(force?: boolean): Promise<void>;
   /** 某视图 kind 由内置插件提供时的状态（组件经此查，不直连 services）；非内置提供 = undefined。 */
@@ -219,13 +199,11 @@ function toInstalled(row: {
     sourceKind: row.sourceKind,
     enabled: row.enabled,
     phase: "pending",
-    usedCapabilities: [],
   };
 }
 
-/** 停止单个插件的运行时（旧桥第三方 + Cordis 第一方 fiber；各自按需生效）。 */
+/** 停止单个插件的运行时（Cordis fiber 卸载，effects 全部撤销）。 */
 async function stopPlugin(id: string): Promise<void> {
-  unloadPlugin(id);
   await unmountPlugin(getKernel(), id);
 }
 
@@ -255,37 +233,7 @@ async function finishInstall(get: () => PluginStoreState, row: PluginRow): Promi
   await get().load();
 }
 
-/** 插件侧仓库访问接线守卫：load 每次进仓/启动都会跑，接线幂等只做一次。
- *  把仓库文件树与打开回调暴露给主线程插件（facade 的 listFiles/open* 方法）。
- *  全部 store 访问延迟到回调内 getState()（防模块环顶层触碰）。 */
-let vaultAccessWired = false;
-function ensureVaultAccess(): void {
-  if (vaultAccessWired) return;
-  vaultAccessWired = true;
-  setPluginVaultAccess({
-    listFiles: async () => useVaultStore.getState().tree,
-    openCanvasFile: (row) => useAppStore.getState().openCanvas(row),
-    openNote: (file, title) => useAppStore.getState().openNote(file, title),
-    openTable: (file, title) => useAppStore.getState().openTable(file, title),
-  });
-}
-
-/** 插件侧主题设置项访问接线守卫（load 时接线，幂等一次）。
- *  把该插件条目的设置值字典与写入口暴露给主线程插件（facade 的 getThemeSettings/setThemeSetting）。
- *  store 访问延迟到回调内 getState()（与 ensureTableAccess 同模式，防模块环顶层触碰）。 */
-let themeSettingsAccessWired = false;
-function ensureThemeSettingsAccess(): void {
-  if (themeSettingsAccessWired) return;
-  themeSettingsAccessWired = true;
-  setPluginThemeSettingsAccess({
-    getSettings: (pluginId) => useSettingsStore.getState().themeSettings[pluginId] ?? {},
-    setSetting: (pluginId, key, value) => {
-      void useSettingsStore.getState().setThemeSetting(pluginId, key, value);
-    },
-  });
-}
-
-/** vault 写能力接线守卫：把仓库写方法暴露给 worker 平面 `vault` 命名空间（幂等一次）。
+/** vault 写能力接线守卫：把仓库写方法暴露给 `vault` 服务（幂等一次）。
  *  复用 AI 文件工具同一批 service/store 语义（原子写/扩展名分发引用维护/树刷新）；
  *  直接 service 的写方法不登记 .md 磁盘基线（按外部写入处理，与 AI 写入一致）；
  *  rename/move/delete/deleteDir/createFolder 走 vaultStore（扩展名分发 + loadFiles 刷新）。 */
@@ -323,7 +271,7 @@ function ensureVaultWriteAccess(): void {
   });
 }
 
-/** 协作能力接线守卫：把在线用户与 presence 上报暴露给 worker 平面 `collab` 命名空间（幂等一次）。 */
+/** 协作能力接线守卫：把在线用户与 presence 上报暴露给内核 `collab` 服务（幂等一次）。 */
 let collabRuntimeWired = false;
 function ensureCollabRuntimeAccess(): void {
   if (collabRuntimeWired) return;
@@ -334,7 +282,7 @@ function ensureCollabRuntimeAccess(): void {
   });
 }
 
-/** AI 配置接线守卫：把供应商/模型/Agent 与默认目标解析暴露给 worker 平面 `ai` 命名空间（幂等一次）。
+/** AI 配置接线守卫：把供应商/模型/Agent 与默认目标解析暴露给内核 `ai` 服务（幂等一次）。
  *  providers 为运行时配置（apiKey 已由 settingsStore 填充——key 读取不进本层）。 */
 let settingsAccessWired = false;
 function ensureSettingsAccess(): void {
@@ -350,7 +298,7 @@ function ensureSettingsAccess(): void {
   });
 }
 
-/** 能力变更事件接线守卫：内核侧 store 变更 → emitPluginEvent 通知 worker 平面订阅插件（幂等一次）。
+/** 能力变更事件接线守卫：内核侧 store 变更 → emitPluginEvent 通知订阅插件（幂等一次）。
  *  canvas/table 变更事件随各自内置插件启停注册（见 canvasStore/tableStore 的 register*PluginWiring）；
  *  collab/vault 属内核数据访问，常驻。载荷为轻量信号（插件按需再调 snapshot()/取数据）。 */
 let runtimeEventsWired = false;
@@ -366,122 +314,51 @@ function ensureRuntimeChangeEvents(): void {
 }
 
 export const usePluginStore = create<PluginStoreState>()((set, get) => {
-  /** 把运行时快照合并回 store（加载/激活/失败/卸载事件驱动）。 */
-  const reconcile = (): void => {
-    const entries = runtimeSnapshot();
+  /** 置插件运行阶段（加载/激活/失败）。 */
+  const syncPhase = (id: string, phase: PluginFiberPhase, error?: string): void => {
     set((s) => {
-      let changed = false;
-      const plugins = { ...s.plugins };
-      for (const e of entries) {
-        const p = plugins[e.id];
-        if (!p) continue;
-        plugins[e.id] = { ...p, phase: e.phase, usedCapabilities: e.used, error: e.error };
-        changed = true;
-      }
-      return changed ? { plugins } : s;
+      const cur = s.plugins[id];
+      if (!cur) return s;
+      return { plugins: { ...s.plugins, [id]: { ...cur, phase, error } } };
     });
   };
 
-  /** 读取插件入口源码；runtime 为 ts 且入口为 .ts/.tsx 时先转译成 JS（发布源码即可用，
-   *  无需构建产物；dist/ 预编译 .js 跳过）。 */
-  const readEntry = async (p: InstalledPlugin, path: string): Promise<string> => {
-    const code = await pluginReadEntry(p.id, path);
-    if (p.manifest.runtime === "ts" && /\.tsx?$/i.test(path)) {
-      return transpileTs(code);
-    }
-    return code;
-  };
-
-  /** 拉起单个启用插件的运行时（按平面：内置经 Cordis loader；第三方按主线程 UI 入口 + 逻辑平面；
-   *  失败标 failed 不阻塞）。 */
+  /** 拉起单个启用插件的运行时：内置经 loader 挂载第一方 apply；第三方 = 包格式入口
+   *  （.py 拒绝；TS 转译后 blob import 求值挂载）；失败标 failed + 可读原因，不阻塞其余。 */
   const spawn = async (id: string): Promise<void> => {
     const p = get().plugins[id];
     if (!p) return;
     // 先撤销旧运行时（重载防重复注册）。
     await stopPlugin(id);
     try {
-      // 内置插件：实现随宿主编译（无入口文件/无桥运行时），启用 = 挂载第一方 Cordis 插件
-      // （apply 注册视图槽 + 领域生命周期钩子 + 能力提供者 + 协作域接线 + 仓库事件订阅；
-      //  失败 = failed + 可读原因，不阻塞其余）。
       if (p.sourceKind === "builtin") {
         const def = CORDIS_BUILTIN_BY_ID[id];
         if (!def) {
-          // 内置清单（Rust）与前端注册表（cordis/builtins.tsx）不同步会静默无贡献：显式告警便于排查。
-          console.warn(`内置插件 ${id} 无第一方定义，未挂载`);
-        } else {
-          const result = await mountPlugin(getKernel(), { id, apply: def.apply });
-          if (!result.ok) throw new Error(result.reason);
+          // 内置清单（Rust）与前端注册表（cordis/builtins.tsx）不同步：标 failed + 可读原因，
+          // 防「active 但无贡献」误导（加载失败可见语义）。
+          syncPhase(id, "failed", "内置插件运行定义缺失");
+          return;
         }
-        set((s) => {
-          const cur = s.plugins[id];
-          if (!cur) return s;
-          return { plugins: { ...s.plugins, [id]: { ...cur, phase: "active" } } };
-        });
+        const result = await mountPlugin(getKernel(), { id, apply: def.apply });
+        if (!result.ok) throw new Error(result.reason);
+        syncPhase(id, "active");
         return;
       }
-      const types = pluginTypeList(p.manifest);
-      const hasWorker = types.some(isWorkerPluginType);
-      // 主线程平面：mainUi 优先；无 mainUi 时仅当「js/ts 运行时 + 无 worker 平面」才把 main 当
-      // UI 入口——python 的 main 是子进程入口，注入主线程会静默失败（UI 平面永远跑 JS）。
-      const uiEntry =
-        p.manifest.mainUi ??
-        ((p.manifest.runtime === "js" || p.manifest.runtime === "ts") &&
-        !hasWorker &&
-        types.some(isUiPluginType)
-          ? p.manifest.main
-          : undefined);
-      const uiLoad: Promise<void> = uiEntry
-        ? readEntry(p, uiEntry).then((code) => loadUiPlugin(id, code))
-        : Promise.resolve();
-      // UI 平面错误统一收口（镜像为永不 reject，防 worker 分支抛错时未捕获拒绝）。
-      const uiError = uiLoad.then(
-        () => undefined,
-        (e: unknown) => errText(e),
-      );
-      // 逻辑平面：工具/后台/命令逻辑。
-      const syncPhase = (phase: PluginFiberPhase, error?: string): void => {
-        set((s) => {
-          const cur = s.plugins[id];
-          if (!cur) return s;
-          return { plugins: { ...s.plugins, [id]: { ...cur, phase, error } } };
-        });
-      };
-      if (hasWorker && p.manifest.main) {
-        // 子进程运行时（Python）：spawn 解释器经 stdio 桥接入同一套能力注册表。
-        if (p.manifest.runtime === "python") {
-          const transport = await startPluginProcess(id, p.manifest.runtime);
-          const entry = attachPlugin(p.manifest, transport);
-          syncPhase(entry.phase, entry.error);
-        } else {
-          const code = await readEntry(p, p.manifest.main);
-          const entry = loadPlugin(p.manifest, code);
-          syncPhase(entry.phase, entry.error);
-        }
-        // 双平面插件 UI 脚本失败 = 整插件故障：卸载运行时 + 撤销贡献 + 标 failed
-        // （与「worker 工具仍可用但标 failed」的状态矛盾相比，卸载是自洽的一致态）。
-        void uiError.then(async (err) => {
-          if (!err) return;
-          await stopPlugin(id);
-          syncPhase("failed", err);
-        });
-      } else {
-        // 纯 UI 平面：等脚本加载+执行完成再置 active；失败 → failed（脚本错误不再静默）。
-        const err = await uiError;
-        if (err) throw new Error(err);
-        syncPhase("active");
+      // 声明式插件（如纯 theme）无入口：置 active 即可（主题提供者经清单消费）。
+      if (!p.manifest.main) {
+        syncPhase(id, "active");
+        return;
       }
+      const result = await mountThirdPartyPlugin(getKernel(), id, p.manifest.main);
+      if (!result.ok) throw new Error(result.reason);
+      syncPhase(id, "active");
     } catch (e) {
-      set((s) => {
-        const cur = s.plugins[id];
-        if (!cur) return s;
-        return { plugins: { ...s.plugins, [id]: { ...cur, phase: "failed", error: errText(e) } } };
-      });
+      syncPhase(id, "failed", errText(e));
     }
   };
 
-  onRuntimeChange(reconcile);
   onPluginUiChange(() => set((s) => ({ uiRevision: s.uiRevision + 1 })));
-  // 槽注册变化（第一方内置视图随 fiber 挂载/撤销）→ uiRevision 驱动视图菜单/面板重渲染。
+  // 槽注册变化（视图槽随 fiber 挂载/撤销）→ uiRevision 驱动视图菜单/面板重渲染。
   onSlotChange(() => set((s) => ({ uiRevision: s.uiRevision + 1 })));
 
   /** load 序号守卫：并发 load（回启动页 fire-and-forget 与紧接着进仓 load 竞态）时
@@ -504,24 +381,19 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
      * boot / 切仓库 / 安装/更新后安全重复调用。
      */
     load: async () => {
-      exposePluginFacade();
       setAppPageOpener((pageId) => useAppStore.getState().openPluginPage(pageId));
-      // 内核就绪（创建根 Context + 平台服务 + 事件桥；幂等单例）。
+      // 内核就绪（创建根 Context + 平台服务 + slots 注册 API；幂等单例）。
       getKernel();
-      // 内核侧数据访问接线（vault 读写/协作/ai 配置/主题设置 + collab/vault 变更事件）：
+      // 内核侧数据访问接线（vault 写/协作/ai 配置 + collab/vault 变更事件）：
       // canvas/table 能力提供者与变更事件随内置插件启停注册（cordis/builtins 的 capability）
-      ensureVaultAccess();
       ensureVaultWriteAccess();
       ensureCollabRuntimeAccess();
       ensureSettingsAccess();
-      ensureThemeSettingsAccess();
       ensureRuntimeChangeEvents();
       const seq = ++loadSeq;
       // 组合默认值层权威 = 前端第一方 profile（存在/顺序/默认启用；版本取宿主版本，读失败用占位）。
       const [rows, hostVersion] = await Promise.all([pluginList(), getAppVersion().catch(() => null)]);
       if (seq !== loadSeq) return; // 已有更新的 load 开始，本次作废（防孤儿 runtime）
-      // 内置插件 id 集合注入注册表（封闭 ViewKind 的防劫持放行依据）；须先于任何视图注册。
-      setBuiltinPluginIds(new Set(rows.filter((r) => r.sourceKind === "builtin").map((r) => r.id)));
       for (const id of Object.keys(get().plugins)) {
         await stopPlugin(id);
       }
@@ -537,26 +409,13 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
       // 面板/菜单只订阅 uiRevision：插件行落定后补发一次，让已渲染的降级占位/菜单按新状态收敛
       // （全停用内置的冷启动无任何注册 notify）。
       set((s) => ({ uiRevision: s.uiRevision + 1 }));
-      // 真依赖校验（requires 启动前）：缺失/成环的启用插件拒绝拉起，附可读原因；
-      // 可启动插件按依赖解析顺序拉起（提供者先于依赖者）。
-      const depResult = resolveEnabledDeps(
-        rows.filter((r) => r.enabled).map((r) => ({ id: r.id, provides: r.manifest.provides, requires: r.manifest.requires })),
-        hostCapabilityNames(),
-      );
-      if (depResult.failed.length > 0) {
-        set((s) => {
-          const next = { ...s.plugins };
-          for (const f of depResult.failed) {
-            const cur = next[f.id];
-            if (!cur || !cur.enabled) continue;
-            next[f.id] = { ...cur, phase: "failed", error: f.reason };
-          }
-          return { plugins: next };
-        });
-      }
-      // 进仓/启动加载会话中逐插件上报进度（含序号/总数）；非进仓上下文（回启动页/安装更新
-      // 收尾）entryLoading 为假不上报，加载屏步骤列表不会被无关操作污染。
-      const spawnable = depResult.spawnable;
+      // 挂载顺序：内置先于第三方（内置提供 ctx.canvas/table 等第三方 inject 依赖的服务；
+      // Cordis 注入对延迟出现的服务会重载，但挂载器一次性检查激活态，须先挂提供者）。
+      const enabled = rows.filter((r) => r.enabled);
+      const spawnable = [
+        ...enabled.filter((r) => r.sourceKind === "builtin"),
+        ...enabled.filter((r) => r.sourceKind !== "builtin"),
+      ].map((r) => r.id);
       const total = spawnable.length;
       for (let i = 0; i < spawnable.length; i++) {
         if (seq !== loadSeq) return;
@@ -644,8 +503,6 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
       await get().load();
     },
 
-    pluginTools: () => contributedPluginTools(),
-
     pluginToolMetas: () => pluginToolMetasSvc(),
 
     pluginSettings: () => getPluginSettings(),
@@ -665,37 +522,33 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
     },
     pluginAppPage: (id) => getPluginAppPages().find((p) => p.id === id),
     pluginViewKinds: () => {
-      // 已挂载的第一方视图槽（启用中的内置；停用/卸载的内置随 fiber 撤销自动消失）
-      // + 旧注册表里的第三方贡献 kind（内置 VIEW_KINDS 封闭枚举由槽提供，不重复）。
-      const builtinKinds = new Set(VIEW_KINDS as readonly string[]);
-      return [...slotViewKinds(), ...allPluginViewKinds().filter((k) => !builtinKinds.has(k))];
+      // 已挂载的视图槽（启用中的内置；停用/卸载随 fiber 撤销自动消失）。
+      return slotViewKinds();
     },
-    pluginViewLabel: (view) => resolveViewKind(view)?.payload.label ?? pluginViewLabelOf(view),
+    pluginViewLabel: (view) =>
+      resolveViewKind(view)?.payload.label ?? (VIEW_LABELS as Record<string, string>)[view] ?? view,
     viewContribution: (kind) => {
-      // 分派 = slots 优先（内置视图槽），旧注册表兜底（第三方面板仍走旧桥路径）。
+      // 分派 = slots（内置/第三方视图槽统一注册表）。
       // 转换结果按槽贡献对象缓存：selector 订阅需稳定引用（新对象会触发无限重渲染），
       // 贡献卸载/重挂载时是新对象 → 自然换缓存；旧对象随 WeakMap 自动回收。
       const slot = resolveViewKind(kind);
-      if (slot) {
-        let cached = slotViewCache.get(slot);
-        if (!cached) {
-          cached = {
-            kind,
-            label: slot.payload.label,
-            component: slot.payload.component,
-            render: slot.payload.render,
-            pluginId: slot.pluginId,
-          };
-          slotViewCache.set(slot, cached);
-        }
-        return cached;
+      if (!slot) return undefined;
+      let cached = slotViewCache.get(slot);
+      if (!cached) {
+        cached = {
+          kind,
+          label: slot.payload.label,
+          component: slot.payload.component,
+          render: slot.payload.render,
+          pluginId: slot.pluginId,
+        };
+        slotViewCache.set(slot, cached);
       }
-      return getViewContribution(kind);
+      return cached;
     },
     pluginTableView: (kind) => getPluginTableView(kind),
     pluginTableViews: () => getPluginTableViews(),
     pluginCommands: () => {
-      // UI 平面优先（直接持有 run），同 globalId 去重——双平面插件可注册同名命令。
       const byGlobalId = new Map<string, PluginCommandContribution>();
       for (const c of getPluginCommands()) {
         const item: PluginCommandContribution = {
@@ -705,9 +558,6 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
           label: c.label,
         };
         byGlobalId.set(item.globalId, item);
-      }
-      for (const c of contributedCommands()) {
-        if (!byGlobalId.has(c.globalId)) byGlobalId.set(c.globalId, c);
       }
       return [...byGlobalId.values()].sort((a, b) => (a.globalId < b.globalId ? -1 : 1));
     },
@@ -720,10 +570,11 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
           return Promise.reject(e);
         }
       }
-      return runContributedCommand(globalId);
+      return Promise.reject(new Error("命令不存在"));
     },
-    capabilityLabel: (namespace) => hostCapabilityLabel(namespace) ?? namespace,
-    capabilitySensitive: (namespace) => hostCapabilitySensitive(namespace),
+    capabilityLabel: (namespace) => PLUGIN_SERVICE_LABELS[namespace] ?? namespace,
+    capabilitySensitive: (namespace) => PLUGIN_SERVICE_SENSITIVE.has(namespace),
+    pluginAudit: () => auditSnapshot(getKernel().ctx),
 
     loadMarket: async (force = false) => {
       const cached = readMarketCache();

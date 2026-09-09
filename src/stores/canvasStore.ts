@@ -107,7 +107,8 @@ import {
   useCollabStore,
 } from "./collabStore";
 import { useVaultStore } from "./vaultStore";
-import { emitPluginEvent, setPluginCanvasAccess } from "@/services/plugins";
+import { emitPluginEvent } from "@/services/cordis/events";
+import { setPluginCanvasAccess } from "@/services/cordis/access";
 import type {
   Attachment,
   CanvasEdge,
@@ -537,8 +538,8 @@ export function registerCanvasCollabWiring(): () => void {
   };
 }
 
-/** 画布插件能力接线（builtin.canvas 载荷调用，随插件启停）：注册 worker 平面 `canvas` 命名空间
- *  数据源 + `canvas:changed` 事件发射；返回撤销函数（停用/卸载时撤销，能力随之消失）。
+/** 画布插件能力接线（builtin.canvas 载荷调用，随插件启停）：注册 ctx.canvas 服务的 store 数据源
+ *  + `canvas:changed` 事件发射；返回撤销函数（停用/卸载时撤销，能力随之消失）。
  *  投影复用协作/磁盘序列化纯函数（serializeNodeForCollab 内嵌对话消息、剥离 React Flow 视图态，JSON 安全）；
  *  写方法守卫「已打开可写画布」；变更事件为轻量信号（只带 file，插件按需再调 snapshot()）——
  *  画布拖拽/流式是每帧高频变更，全量序列化快照会造成事件风暴与陈旧大载荷。 */

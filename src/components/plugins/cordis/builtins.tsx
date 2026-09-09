@@ -267,7 +267,9 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
         useCanvasStore.setState({ error: e.message });
       }),
     ],
-    provideService: (ctx) => ctx.provide("canvas", createCanvasService()),
+    provideService: (ctx) =>
+      // 服务在 root 作用域提供（第三方插件可消费），生命周期随 builtin 插件 fiber（ctx.effect）
+      ctx.effect(() => ctx.root.provide("canvas", createCanvasService())),
   }),
   def({
     id: "builtin.note",
@@ -328,7 +330,9 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
         }
       }),
     ],
-    provideService: (ctx) => ctx.provide("table", createTableService()),
+    provideService: (ctx) =>
+      // 服务在 root 作用域提供（第三方插件可消费），生命周期随 builtin 插件 fiber（ctx.effect）
+      ctx.effect(() => ctx.root.provide("table", createTableService())),
   }),
   def({
     id: "builtin.files",
@@ -377,7 +381,9 @@ export const CORDIS_BUILTIN_BY_ID: Record<string, CordisBuiltinDef> = Object.fro
   CORDIS_BUILTIN_DEFS.map((d) => [d.id, d]),
 );
 
-/** 第一方装配 profile（默认装配权威：存在/顺序/默认启用；enabled 运行时真相在插件状态持久化）。 */
+/** 第一方装配 profile（默认装配权威：存在/顺序/默认启用；enabled 运行时真相在插件状态持久化）。
+ *  当前运行时装配走 pluginStore.load 逐插件 spawn（见 loader.mountPlugin）；此 profile 为
+ *  组合层（M3 用户可改组合树）的装配权威与测试锚点，尚未接入运行时挂载路径。 */
 export const CORDIS_BUILTIN_PROFILE: Profile = {
   name: "default",
   plugins: CORDIS_BUILTIN_DEFS.map((d) => ({ id: d.id, order: d.order, defaultEnabled: true })),
@@ -392,16 +398,14 @@ const BUILTIN_THEME_MANIFEST: Pick<PluginManifest, "themes" | "themeOptions"> = 
   themeOptions: { accent: true },
 };
 
-/** 内置插件合成清单（组合 UI 默认值层消费；与 Rust builtin_manifest 同字段契约）。 */
+/** 内置插件合成清单（组合 UI 默认值层消费；main 为占位——实现随宿主编译）。 */
 export function builtinManifest(def: CordisBuiltinDef, version: string): PluginManifest {
   const base: PluginManifest = {
-    schemaVersion: 2,
     id: def.id,
     name: def.name,
     version: version || "0.0.0",
     type: def.type as PluginType,
     scope: "app",
-    runtime: "js",
     main: "builtin",
     tagline: def.tagline,
     author: "Atelyx",

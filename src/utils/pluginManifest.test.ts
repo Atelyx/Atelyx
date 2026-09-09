@@ -1,8 +1,8 @@
 /**
- * 插件清单校验与兼容性纯函数测试（utils/pluginManifest）。
+ * 插件包清单校验与兼容性纯函数测试（utils/pluginManifest）。
  *
- * 覆盖：id 合法性、版本比较、宿主兼容（版本范围/平台）、清单校验的必填/可选/归一化、
- * 前向兼容（未知附加分类跳过）、declares 命名空间披露。
+ * 覆盖：name 合法性、版本比较、宿主兼容（版本范围/平台）、插件包（package.json + atelyx 块）
+ * 校验的必填/可选/归一化、前向兼容（未知附加分类跳过）、declares 服务披露。
  */
 import { describe, it, expect } from "vitest";
 import {
@@ -14,12 +14,11 @@ import {
 } from "./pluginManifest";
 
 const validManifest = (): Record<string, unknown> => ({
-  schemaVersion: 1,
-  id: "com.example.todo",
-  name: "示例插件",
+  name: "com.example.todo",
   version: "1.2.3",
-  type: "tool",
-  main: "plugin.js",
+  main: "plugin.ts",
+  description: "示例",
+  atelyx: { name: "示例插件", type: "tool" },
 });
 
 describe("pluginIdValid", () => {
@@ -69,86 +68,91 @@ describe("pluginCompatibleWithHost", () => {
 });
 
 describe("validatePluginManifest", () => {
-  it("接受合法清单并归一化缺省值", () => {
+  it("接受合法插件包并归一化缺省值", () => {
     const result = validatePluginManifest(validManifest());
     expect(result.ok).toBe(true);
     if (!result.ok) return;
+    expect(result.manifest.id).toBe("com.example.todo");
+    expect(result.manifest.name).toBe("示例插件");
     expect(result.manifest.scope).toBe("app");
     expect(result.manifest.types).toEqual(["tool"]);
-    expect(result.manifest.declares).toBeUndefined(); // 未声明 declares 时缺省省略
+    expect(result.manifest.declares).toBeUndefined();
+  });
+  it("atelyx.name 缺省 = package name；author/license/description/tags 回退顶层字段", () => {
+    const result = validatePluginManifest({
+      ...validManifest(),
+      atelyx: { type: "tool" },
+      author: "作者甲",
+      license: "MIT",
+      keywords: ["效率", "表格"],
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.manifest.name).toBe("com.example.todo");
+    expect(result.manifest.author).toBe("作者甲");
+    expect(result.manifest.license).toBe("MIT");
+    expect(result.manifest.tags).toEqual(["效率", "表格"]);
+    expect(result.manifest.description).toBe("示例");
   });
   it("拒绝结构错误", () => {
     expect(validatePluginManifest(null).ok).toBe(false);
-    expect(validatePluginManifest({ ...validManifest(), id: "todo" }).ok).toBe(false);
-    expect(validatePluginManifest({ ...validManifest(), name: "" }).ok).toBe(false);
-    expect(validatePluginManifest({ ...validManifest(), type: "watcher" }).ok).toBe(false);
+    expect(validatePluginManifest({ ...validManifest(), name: "todo" }).ok).toBe(false);
+    expect(validatePluginManifest({ ...validManifest(), version: "" }).ok).toBe(false);
+    expect(validatePluginManifest({ ...validManifest(), atelyx: undefined }).ok).toBe(false);
+    expect(validatePluginManifest({ ...validManifest(), atelyx: { type: "watcher" } }).ok).toBe(false);
     expect(validatePluginManifest({ ...validManifest(), main: "" }).ok).toBe(false);
-    expect(validatePluginManifest({ ...validManifest(), schemaVersion: 3 }).ok).toBe(false); // 版本过新
-    expect(validatePluginManifest({ ...validManifest(), runtime: "rust" }).ok).toBe(false); // 未知运行时
+    // 缺 name/atelyx 块的清单拒绝。
+    expect(validatePluginManifest({ schemaVersion: 2, id: "com.x", name: "x", version: "1", type: "tool", main: "a.js" }).ok).toBe(false);
   });
-  it("前向兼容：未知附加分类跳过而不报错；declares 保留全部命名空间", () => {
+  it("前向兼容：未知附加分类跳过而不报错；declares 保留全部服务名", () => {
     const result = validatePluginManifest({
       ...validManifest(),
-      type: "tool",
-      types: ["tool", "future-kind"],
-      declares: ["state", "com.example.db", "future:ns"],
-    });
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    expect(result.manifest.types).toEqual(["tool"]);
-    expect(result.manifest.declares).toEqual(["state", "com.example.db", "future:ns"]);
-  });
-  it("declares 畸形（非字符串/空串）拒绝", () => {
-    expect(validatePluginManifest({ ...validManifest(), declares: "state" }).ok).toBe(false);
-    expect(validatePluginManifest({ ...validManifest(), declares: [""] }).ok).toBe(false);
-    expect(validatePluginManifest({ ...validManifest(), declares: [123] }).ok).toBe(false);
-  });
-  it("保留 declares/permissions/platforms 并校验类型", () => {
-    const result = validatePluginManifest({
-      ...validManifest(),
-      scope: "vault",
-      declares: ["state", "shell"],
-      permissions: { shell: "执行打包命令" },
-      platforms: ["windows-x64"],
-    });
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    expect(result.manifest.scope).toBe("vault");
-    expect(result.manifest.declares).toEqual(["state", "shell"]);
-    expect(result.manifest.permissions).toEqual({ shell: "执行打包命令" });
-    expect(result.manifest.platforms).toEqual(["windows-x64"]);
-  });
-  it("schemaVersion 2：runtime/provides/requires/contributes 归一化", () => {
-    const result = validatePluginManifest({
-      ...validManifest(),
-      schemaVersion: 2,
-      runtime: "python",
-      provides: ["com.example.db", "com.example.db2"],
-      requires: ["vault", "com.example.dep"],
-      contributes: {
-        commands: [{ id: "hi", label: "你好" }, { label: "缺 id 被跳过" }],
-        panels: [{ kind: "com.example.db.panel", label: "面板" }],
-        future: [{ id: "x" }],
+      atelyx: {
+        ...(validManifest().atelyx as Record<string, unknown>),
+        types: ["tool", "future-kind"],
+        declares: ["table", "com.example.db", "future:ns"],
       },
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.manifest.runtime).toBe("python");
-    expect(result.manifest.provides).toEqual(["com.example.db", "com.example.db2"]);
-    expect(result.manifest.requires).toEqual(["vault", "com.example.dep"]);
-    expect(result.manifest.contributes?.commands).toEqual([{ id: "hi", label: "你好" }]);
-    expect(result.manifest.contributes?.panels).toEqual([{ kind: "com.example.db.panel", label: "面板" }]);
-    expect(result.manifest.contributes?.settings).toBeUndefined();
-    expect(result.manifest.contributes?.commands?.some((c) => c.id === "hi")).toBe(true);
+    expect(result.manifest.types).toEqual(["tool"]);
+    expect(result.manifest.declares).toEqual(["table", "com.example.db", "future:ns"]);
   });
-  it("themes 声明式主题条目解析与结构校验", () => {
+  it("declares 畸形（非字符串/空串）拒绝", () => {
+    expect(validatePluginManifest({ ...validManifest(), atelyx: { ...(validManifest().atelyx as Record<string, unknown>), declares: "table" } }).ok).toBe(false);
+    expect(validatePluginManifest({ ...validManifest(), atelyx: { ...(validManifest().atelyx as Record<string, unknown>), declares: [""] } }).ok).toBe(false);
+    expect(validatePluginManifest({ ...validManifest(), atelyx: { ...(validManifest().atelyx as Record<string, unknown>), declares: [123] } }).ok).toBe(false);
+  });
+  it("保留 scope/declares/permissions/platforms/hostApiVersion", () => {
+    const result = validatePluginManifest({
+      ...validManifest(),
+      atelyx: {
+        ...(validManifest().atelyx as Record<string, unknown>),
+        scope: "vault",
+        declares: ["table", "shell"],
+        permissions: { shell: "执行打包命令" },
+        platforms: ["windows-x64"],
+        hostApiVersion: 1,
+      },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.manifest.scope).toBe("vault");
+    expect(result.manifest.declares).toEqual(["table", "shell"]);
+    expect(result.manifest.permissions).toEqual({ shell: "执行打包命令" });
+    expect(result.manifest.platforms).toEqual(["windows-x64"]);
+    expect(result.manifest.hostApiVersion).toBe(1);
+  });
+  it("themes 声明式主题条目解析与结构校验（atelyx 块内）", () => {
     const ok = validatePluginManifest({
       ...validManifest(),
-      type: "theme",
-      themes: [
-        { id: "nord-light", name: "Nord 浅色", colorScheme: "light", variables: { "--accent": "#7c3aed", bg: "#111" } },
-        { id: "nord-dark", name: "Nord 深色", colorScheme: "dark", variables: {} },
-      ],
+      atelyx: {
+        type: "theme",
+        themes: [
+          { id: "nord-light", name: "Nord 浅色", colorScheme: "light", variables: { "--accent": "#7c3aed", bg: "#111" } },
+          { id: "nord-dark", name: "Nord 深色", colorScheme: "dark", variables: {} },
+        ],
+      },
     });
     expect(ok.ok).toBe(true);
     if (!ok.ok) return;
@@ -157,54 +161,45 @@ describe("validatePluginManifest", () => {
       { id: "nord-dark", name: "Nord 深色", colorScheme: "dark", variables: {} },
     ]);
 
-    expect(validatePluginManifest({ ...validManifest(), themes: "x" }).ok).toBe(false);
-    expect(validatePluginManifest({ ...validManifest(), themes: [] }).ok).toBe(false);
-    expect(validatePluginManifest({ ...validManifest(), themes: [{ id: "a", name: "A", colorScheme: "blue", variables: {} }] }).ok).toBe(false);
+    expect(validatePluginManifest({ ...validManifest(), atelyx: { ...(validManifest().atelyx as Record<string, unknown>), themes: "x" } }).ok).toBe(false);
+    expect(validatePluginManifest({ ...validManifest(), atelyx: { ...(validManifest().atelyx as Record<string, unknown>), themes: [] } }).ok).toBe(false);
     expect(
       validatePluginManifest({
         ...validManifest(),
-        themes: [
-          { id: "a", name: "A", colorScheme: "light", variables: {} },
-          { id: "a", name: "B", colorScheme: "dark", variables: {} },
-        ],
+        atelyx: { ...(validManifest().atelyx as Record<string, unknown>), themes: [{ id: "a", name: "A", colorScheme: "blue", variables: {} }] },
+      }).ok,
+    ).toBe(false);
+    expect(
+      validatePluginManifest({
+        ...validManifest(),
+        atelyx: {
+          ...(validManifest().atelyx as Record<string, unknown>),
+          themes: [
+            { id: "a", name: "A", colorScheme: "light", variables: {} },
+            { id: "a", name: "B", colorScheme: "dark", variables: {} },
+          ],
+        },
       }).ok,
     ).toBe(false);
   });
   it("themeOptions 预置设置项声明解析", () => {
-    const ok = validatePluginManifest({ ...validManifest(), themes: [{ id: "a", name: "A", colorScheme: "light", variables: {} }], themeOptions: { accent: true } });
+    const ok = validatePluginManifest({
+      ...validManifest(),
+      atelyx: {
+        type: "theme",
+        themes: [{ id: "a", name: "A", colorScheme: "light", variables: {} }],
+        themeOptions: { accent: true },
+      },
+    });
     expect(ok.ok).toBe(true);
     if (!ok.ok) return;
     expect(ok.manifest.themeOptions).toEqual({ accent: true });
-    expect(validatePluginManifest({ ...validManifest(), themeOptions: { accent: "yes" } }).ok).toBe(false);
-  });
-});
-
-describe("validatePluginManifest 的 replace 字段", () => {
-  it("replace 归一化：replace ⊆ requires 时通过并保留", () => {
-    const ok = validatePluginManifest({
-      ...validManifest(),
-      requires: ["com.shared", "shell"],
-      replace: ["com.shared"],
-    });
-    expect(ok.ok).toBe(true);
-    if (!ok.ok) return;
-    expect(ok.manifest.replace).toEqual(["com.shared"]);
-  });
-
-  it("replace 声明了 requires 未声明的命名空间：拒绝（显式替换意图必须以 requires 为前提）", () => {
-    const r = validatePluginManifest({
-      ...validManifest(),
-      requires: ["shell"],
-      replace: ["com.shared"],
-    });
-    expect(r.ok).toBe(false);
-    if (r.ok) return;
-    expect(r.errors.join(" ")).toContain("须同时声明在 requires 里");
-  });
-
-  it("replace 非字符串数组：拒绝", () => {
-    expect(validatePluginManifest({ ...validManifest(), replace: "com.shared" }).ok).toBe(false);
-    expect(validatePluginManifest({ ...validManifest(), replace: [123] }).ok).toBe(false);
+    expect(
+      validatePluginManifest({
+        ...validManifest(),
+        atelyx: { ...(validManifest().atelyx as Record<string, unknown>), themeOptions: { accent: "yes" } },
+      }).ok,
+    ).toBe(false);
   });
 });
 
@@ -218,12 +213,9 @@ describe("pluginTypeList", () => {
 describe("theme 免 main（纯主题插件无需入口）", () => {
   it("纯 theme 插件可省略 main", () => {
     const r = validatePluginManifest({
-      schemaVersion: 1,
-      id: "com.example.dark",
-      name: "暗色皮肤",
+      name: "com.example.dark",
       version: "1.0.0",
-      type: "theme",
-      themes: [{ id: "dark", name: "深色", colorScheme: "dark", variables: { bg: "#000" } }],
+      atelyx: { type: "theme", themes: [{ id: "dark", name: "深色", colorScheme: "dark", variables: { bg: "#000" } }] },
     });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
@@ -237,9 +229,11 @@ describe("theme 免 main（纯主题插件无需入口）", () => {
     const r = validatePluginManifest({
       ...validManifest(),
       main: undefined,
-      type: "theme",
-      types: ["theme", "tool"],
-      themes: [{ id: "dark", name: "深色", colorScheme: "dark", variables: { bg: "#000" } }],
+      atelyx: {
+        type: "theme",
+        types: ["theme", "tool"],
+        themes: [{ id: "dark", name: "深色", colorScheme: "dark", variables: { bg: "#000" } }],
+      },
     });
     expect(r.ok).toBe(false);
   });

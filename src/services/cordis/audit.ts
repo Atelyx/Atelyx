@@ -10,7 +10,7 @@
  */
 import { ReflectService } from "@atelyx/cordis";
 import type { Context } from "@atelyx/cordis";
-import { contextToPluginId } from "./loader";
+import { pluginIdOf } from "./loader";
 
 /** 单个插件的审计结果。 */
 export interface PluginAuditEntry {
@@ -58,7 +58,7 @@ export function installAudit(): () => void {
   ReflectService.handler.get = function (target, prop, receiver) {
     const value = originalGet.call(this, target, prop, receiver);
     if (typeof prop === "string" && ATELYX_SERVICES.has(prop) && value !== undefined) {
-      const pluginId = contextToPluginId.get(receiver as object);
+      const pluginId = pluginIdOf(receiver as object);
       if (pluginId) recordServiceRead(pluginId, prop);
     }
     return value;
@@ -75,7 +75,7 @@ export function auditSnapshot(ctx: Context): PluginAuditEntry[] {
   const eventsByPlugin = new Map<string, Set<string>>();
   for (const name of Object.keys(ctx.events._hooks)) {
     for (const hook of ctx.events._hooks[name]) {
-      const pluginId = contextToPluginId.get(hook.ctx as object);
+      const pluginId = pluginIdOf(hook.ctx as object);
       if (!pluginId) continue;
       let set = eventsByPlugin.get(pluginId);
       if (!set) {

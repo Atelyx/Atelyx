@@ -1,15 +1,14 @@
 /**
  * 插件平台常量：类型/作用域/徽标的展示文案，市场索引地址，官方名单。
- * 能力命名空间的展示文案与敏感标记由宿主能力注册表携带（services/plugins/bridge.ts），
- * 插件命名空间原样显示——此处不维护独立的能力词汇表。
+ * 插件面服务的展示文案与敏感标记见 constants/pluginServices.ts（此处不维护服务词汇表）。
  */
 import type { PluginBadge, PluginScope, PluginSourceKind, PluginType } from "@/types";
 
 /** 插件发现标签：作者给仓库打此 topic 即进入市场聚合。 */
 export const PLUGIN_DISCOVERY_TOPIC = "atelyx-plugin";
 
-/** 插件清单文件名（插件根目录）。 */
-export const PLUGIN_MANIFEST_FILE = "atelyx.json";
+/** 插件包清单文件名（插件根目录；npm 标准字段 + `atelyx` 块）。 */
+export const PLUGIN_MANIFEST_FILE = "package.json";
 
 /** app 级插件目录名（位于 app_data_dir 下）。 */
 export const PLUGIN_APP_DIR = "plugins";

@@ -22,6 +22,7 @@ import type {
   ReadWindowResult,
   ReasoningEffort,
 } from "@/types";
+import type { SlotsApi } from "./slotsApi";
 
 /** 服务流式收尾契约：流一定以 end/error 收尾（宿主 handler 未自行收尾时内核补 end）。 */
 export interface CordisStreamSink {
@@ -187,6 +188,8 @@ export interface TableService {
   addRow(): void;
   removeRow(rowId: string): void;
   selectRow(rowId: string | null): void;
+  /** 表格图片条目 → dataURL（`data:` 内嵌条目原样透传；读取失败 reject）。 */
+  resolveImage(entry: string): Promise<string>;
 }
 
 /** 服务面预留（M3 落实现；类型契约先行）。 */
@@ -208,7 +211,8 @@ export interface UiStateService {
 }
 
 /** 声明合并：@atelyx/cordis 的 Context 挂上 Atelyx 服务面与事件表。
- *  canvas/table 由对应第一方插件提供（停用即不可用），其余平台服务由内核提供（见 kernel.ts）。 */
+ *  canvas/table 由对应第一方插件提供（停用即不可用），其余平台服务由内核提供（见 kernel.ts）；
+ *  slots 为插件 UI 注册 API（由内核提供，见 slotsApi.ts）。 */
 declare module "@atelyx/cordis" {
   interface Context {
     state: StateService;
@@ -227,10 +231,13 @@ declare module "@atelyx/cordis" {
     history: HistoryService;
     layout: LayoutService;
     uiState: UiStateService;
+    slots: SlotsApi;
   }
   interface Events {
-    /** 进仓/切仓完成广播（旧桥载荷 { root, id } 同形）。 */
+    /** 进仓/切仓完成广播（载荷 { root, id }）。 */
     "vault:switch": (payload: { root: string; id: string }) => void;
+    /** 离开仓库/回启动页：清空仓库上下文（插件据此丢弃 vault 级驻留态）。 */
+    "vault:clear": () => void;
     /** 当前画布变更（轻量信号：只带 file，按需再调 ctx.canvas.snapshot()）。 */
     "canvas:changed": (payload: { file: string | null }) => void;
     /** 当前表格变更（轻量信号）。 */

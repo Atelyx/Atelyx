@@ -159,12 +159,9 @@ export type {
 } from "./llm";
 
 export {
-  PLUGIN_SCHEMA_VERSION,
   type PluginType,
   type PluginScope,
   type PluginManifest,
-  type PluginRuntime,
-  type PluginContributes,
   type PluginThemeOptions,
   type ThemeDefinition,
   type PluginBadge,
@@ -177,5 +174,4 @@ export {
   type PluginCanvasNode,
   type PluginCanvasEdge,
   type PluginCanvasSnapshot,
-  type VaultAccess,
 } from "./plugin";

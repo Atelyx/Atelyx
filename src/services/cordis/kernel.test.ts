@@ -1,13 +1,14 @@
 /**
  * Cordis 内核宿主测试（services/cordis/kernel）。
  *
- * 验证：平台服务提供/撤销、事件桥（桥事件 → ctx.emit）、canvas/table/collab 服务工厂
- * （经桥注入的访问对象）、懒单例。不触碰 Tauri invoke 路径的宿主能力（其实现与桥同源，
- * 由 services/plugins/*-capability.test.ts 以注入访问覆盖）。
+ * 验证：平台服务提供/撤销、事件发射（emitPluginEvent → ctx.emit）、canvas/table/collab 服务工厂
+ * （经注入的访问对象）、懒单例。不触碰 Tauri invoke 路径的服务实现（其与注入访问同源，
+ * 由领域侧接线覆盖）。
  */
 import { Context } from "@atelyx/cordis";
 import { describe, expect, it, afterEach } from "vitest";
-import { emitPluginEvent, setPluginCanvasAccess, setPluginCollabAccess, setPluginTableRuntimeAccess } from "@/services/plugins";
+import { setPluginCanvasAccess, setPluginCollabAccess, setPluginTableRuntimeAccess } from "./access";
+import { emitPluginEvent, setKernelRef } from "./events";
 import { createKernel, getKernel, resetKernel } from "./kernel";
 import { createCanvasService } from "./canvas";
 import { createTableService } from "./table";
@@ -31,30 +32,33 @@ describe("Cordis 内核宿主", () => {
     expect(ctx.get("vault" as never)).toBeUndefined();
   });
 
-  it("事件桥：桥事件同步转发到 ctx.emit（typed event）", () => {
-    const { ctx, dispose } = createKernel();
+  it("事件发射：emitPluginEvent → ctx.emit（typed event）", () => {
+    const k = createKernel();
+    setKernelRef(k);
     const seen: string[] = [];
-    ctx.on("canvas:changed", (p) => {
+    k.ctx.on("canvas:changed", (p) => {
       seen.push(`canvas:${p.file}`);
     });
-    ctx.on("vault:changed", () => {
+    k.ctx.on("vault:changed", () => {
       seen.push("vault");
     });
     emitPluginEvent("canvas:changed", { file: "c.atlx" });
     emitPluginEvent("vault:changed", {});
     expect(seen).toEqual(["canvas:c.atlx", "vault"]);
-    dispose();
+    setKernelRef(null);
+    k.dispose();
   });
 
-  it("事件桥卸载后桥事件不再转发", () => {
-    const { ctx, dispose } = createKernel();
+  it("内核未登记（kernelRef 空）时发射 no-op", () => {
+    const k = createKernel();
     const seen: string[] = [];
-    ctx.on("canvas:changed", () => {
+    k.ctx.on("canvas:changed", () => {
       seen.push("x");
     });
-    dispose();
+    setKernelRef(null);
     emitPluginEvent("canvas:changed", { file: "c.atlx" });
     expect(seen).toEqual([]);
+    k.dispose();
   });
 
   it("collab 服务经桥注入的访问对象可用", () => {

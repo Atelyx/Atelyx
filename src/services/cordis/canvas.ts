@@ -1,10 +1,10 @@
 /**
  * 画布服务提供器（ctx.canvas）：由第一方 builtin.canvas 插件挂载时经 ctx.provide 提供。
  *
- * 实现 = 桥注入的画布访问对象（registerCanvasPluginWiring 填充，见 stores/canvasStore）——
- * 与旧桥 `canvas` 命名空间同一数据源；停用/卸载 builtin.canvas 时 access 撤销、服务随之消失。
+ * 实现 = 注入的画布访问对象（registerCanvasPluginWiring 填充，见 stores/canvasStore）——
+ * 停用/卸载 builtin.canvas 时 access 撤销、服务随之消失。
  */
-import { getPluginCanvasAccess } from "@/services/plugins";
+import { getPluginCanvasAccess } from "./access";
 import type { CanvasService } from "./types";
 
 /** 构造画布服务（要求访问已接线：builtin.canvas 挂载时经 registerCanvasPluginWiring 填充）。 */
