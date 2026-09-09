@@ -2,8 +2,8 @@
  * Cordis 挂载器：第一方插件生命周期（ctx.plugin 挂载 / 卸载 / 装配）。
  *
  * 挂载 = 进程内（主线程）直接 apply 引用；失败 = 该插件 failed + 可读原因，不阻塞其余。
- * 第三方插件入口（TS → ESM → blob import 求值）为 M2 接入点，本模块只处理宿主侧 apply。
- * 审计归属：pluginFnToId 记录插件函数 → 插件 id（audit.ts 据此归属服务读/事件订阅）。
+ * 第三方插件入口（TS → ESM → blob import 求值）为后续接入点，本模块只处理宿主侧 apply。
+ * 审计归属：contextToPluginId 记录插件上下文 → 插件 id（audit.ts 据此归属服务读/事件订阅）。
  */
 import type { Context, Fiber, Plugin } from "@atelyx/cordis";
 import { errText } from "@/types";
@@ -19,8 +19,8 @@ export interface FirstPartyPlugin {
 /** 挂载结果：ok 或失败原因。 */
 export type MountResult = { ok: true } | { ok: false; reason: string };
 
-/** 插件函数 → 插件 id（审计归属；loader 挂载时记录，卸载不清除——WeakMap 自动回收）。 */
-export const pluginFnToId = new WeakMap<(...args: unknown[]) => unknown, string>();
+/** 插件上下文 → 插件 id（审计归属；mount 时经包装 apply 记录，WeakMap 随上下文回收）。 */
+export const contextToPluginId = new WeakMap<object, string>();
 
 /** 每内核的已挂载 fiber 表（按插件 id）。 */
 const mountsByKernel = new WeakMap<Kernel, Map<string, Fiber>>();
@@ -49,8 +49,12 @@ export async function mountPlugin(
   config?: Record<string, unknown>,
 ): Promise<MountResult> {
   await unmountPlugin(kernel, plugin.id);
-  pluginFnToId.set(plugin.apply as (...args: unknown[]) => unknown, plugin.id);
-  const fiber = kernel.ctx.plugin(plugin.apply as Plugin, config);
+  // 包装 apply：登记插件上下文归属（审计用），再执行真实 apply。
+  const wrappedApply = (ctx: Context): void | (() => void) => {
+    contextToPluginId.set(ctx as object, plugin.id);
+    return plugin.apply(ctx);
+  };
+  const fiber = kernel.ctx.plugin(wrappedApply as Plugin, config);
   mountsOf(kernel).set(plugin.id, fiber);
   try {
     await fiber.await();

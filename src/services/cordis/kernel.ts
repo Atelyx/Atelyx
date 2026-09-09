@@ -12,6 +12,7 @@ import { Context } from "@atelyx/cordis";
 import { callHostCapability, getPluginCollabAccess } from "@/services/plugins";
 import type { PluginStreamSink } from "@/services/plugins";
 import { installEventBridge } from "./eventBridge";
+import { installAudit, resetAudit } from "./audit";
 import type {
   AiService,
   AppService,
@@ -251,15 +252,25 @@ export function createKernel(): Kernel {
 }
 
 let kernel: Kernel | null = null;
+let auditDispose: (() => void) | null = null;
 
 /** 内核懒单例（每窗口一个；pluginStore.load 首行取用）。测试请直接用 createKernel。 */
 export function getKernel(): Kernel {
-  if (!kernel) kernel = createKernel();
+  if (!kernel) {
+    kernel = createKernel();
+    // 审计（服务读 + 事件订阅归属）随应用内核安装；createKernel 保持纯净（测试不装全局包装）。
+    auditDispose = installAudit();
+  }
   return kernel;
 }
 
 /** 复位懒单例（供测试）。 */
 export function resetKernel(): void {
-  if (kernel) kernel.dispose();
-  kernel = null;
+  if (kernel) {
+    kernel.dispose();
+    auditDispose?.();
+    auditDispose = null;
+    resetAudit();
+    kernel = null;
+  }
 }

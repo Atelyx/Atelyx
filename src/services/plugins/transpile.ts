@@ -14,7 +14,8 @@ import esbuildWasmUrl from "esbuild-wasm/esbuild.wasm?url";
 
 let initPromise: Promise<void> | null = null;
 
-/** 初始化 esbuild 运行时（幂等；失败可重试）。node（测试）用默认 wasm 加载；浏览器（WebView）须显式传 wasmURL。 */
+/** 初始化 esbuild 运行时（幂等；失败可重试）。node（测试）用默认 wasm 加载；浏览器（WebView）须显式传 wasmURL。
+ *  esbuild-wasm 的 initialize 进程内只能调用一次——本模块与依赖方共用此初始化。 */
 function ensureInit(): Promise<void> {
   if (!initPromise) {
     const options = typeof window === "undefined" ? {} : { wasmURL: esbuildWasmUrl };
@@ -24,6 +25,11 @@ function ensureInit(): Promise<void> {
     });
   }
   return initPromise;
+}
+
+/** 确保 esbuild wasm 已初始化（测试/外部直用 transform 时先调它，防重复 initialize）。 */
+export function ensureEsbuildInit(): Promise<void> {
+  return ensureInit();
 }
 
 /** TS/TSX 源码 → 浏览器可执行 JS（iife；JSX 转 `React.createElement`——主线程 UI 平面

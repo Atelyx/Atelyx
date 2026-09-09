@@ -8,10 +8,10 @@ import { Context } from "@atelyx/cordis";
 import { describe, expect, it, afterEach } from "vitest";
 import { createKernel, type Kernel } from "./kernel";
 import {
+  contextToPluginId,
   mountPlugin,
   mountProfile,
   mountedPluginIds,
-  pluginFnToId,
   unmountAll,
   unmountPlugin,
 } from "./loader";
@@ -47,7 +47,9 @@ describe("Cordis 挂载器", () => {
   it("挂载：服务/槽/事件生效；卸载随 fiber 撤销", async () => {
     const k = makeKernel();
     const seen: string[] = [];
+    let pluginCtx: Context | null = null;
     const apply = (ctx: Context) => {
+      pluginCtx = ctx;
       ctx.provide("loaderSvc", { ping: () => "pong" });
       ctx.on("loader/evt", (msg) => {
         seen.push(msg);
@@ -57,7 +59,9 @@ describe("Cordis 挂载器", () => {
     };
     const result = await mountPlugin(k, { id: "builtin.loader", apply });
     expect(result).toEqual({ ok: true });
-    expect(pluginFnToId.get(apply as never)).toBe("builtin.loader");
+    // 审计归属登记：插件上下文 → 插件 id。
+    expect(pluginCtx).not.toBeNull();
+    expect(contextToPluginId.get(pluginCtx!)).toBe("builtin.loader");
     expect(k.ctx.get("loaderSvc")).toBeDefined();
     expect(k.ctx.loaderSvc.ping()).toBe("pong");
     expect(resolveViewKind("loader-view")?.pluginId).toBe("builtin.loader");
