@@ -17,9 +17,14 @@
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "@atelyx/cordis": ["./vendor/cordis/src/index.ts"],
+      "@atelyx/cosmokit": ["./vendor/cosmokit/src/index.ts"]
     }
   },
   "include": ["src"],
-  "references": [{ "path": "./tsconfig.node.json" }]
+  "references": [
+    { "path": "./tsconfig.node.json" },
+    { "path": "./vendor" }
+  ]
 }

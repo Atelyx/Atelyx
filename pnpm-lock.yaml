@@ -29,6 +29,9 @@ importers:
       '@lezer/highlight':
         specifier: ^1.2.3
         version: 1.2.3
+      '@standard-schema/spec':
+        specifier: ^1.1.0
+        version: 1.1.0
       '@tauri-apps/api':
         specifier: ^2.1.1
         version: 2.11.1

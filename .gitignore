@@ -5,6 +5,7 @@ node_modules/
 dist/
 dist-ssr/
 dist-tsbuildinfo/
+vendor/.tsbuild/
 dist-test.css
 *.tsbuildinfo
 *.local

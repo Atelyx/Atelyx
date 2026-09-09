@@ -1,0 +1,32 @@
+{
+  // vendored Cordis 独立编译项目（说明见 vendor/README.md）。
+  // 被根 tsconfig references 引用：业务代码 import @atelyx/* 时经项目引用 redirect 到
+  // 本项目的 .d.ts 产物（.tsbuild/），vendor 源码不进入主程序、不受主严格项约束。
+  // 放宽项对齐上游代码风格；业务代码不受此边界影响。
+  "compilerOptions": {
+    "composite": true,
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "emitDeclarationOnly": true,
+    "outDir": "./.tsbuild",
+    "strict": true,
+    "noImplicitAny": false,
+    "noImplicitThis": false,
+    "strictFunctionTypes": false,
+    "noUncheckedIndexedAccess": false,
+    "exactOptionalPropertyTypes": false,
+    "noImplicitOverride": false,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "paths": {
+      "@atelyx/cosmokit": ["./cosmokit/src/index.ts"]
+    }
+  },
+  "include": ["cordis/src", "cosmokit/src"]
+}

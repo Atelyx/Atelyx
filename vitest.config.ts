@@ -11,6 +11,8 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "src"),
+      "@atelyx/cordis": path.resolve(__dirname, "vendor/cordis/src/index.ts"),
+      "@atelyx/cosmokit": path.resolve(__dirname, "vendor/cosmokit/src/index.ts"),
     },
   },
 });

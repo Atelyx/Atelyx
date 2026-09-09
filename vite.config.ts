@@ -11,6 +11,9 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "src"),
+      // vendored Cordis 依赖映射（源码见 vendor/，说明见 vendor/README.md）
+      "@atelyx/cordis": path.resolve(__dirname, "vendor/cordis/src/index.ts"),
+      "@atelyx/cosmokit": path.resolve(__dirname, "vendor/cosmokit/src/index.ts"),
     },
   },
   // Tauri 要求固定 dev 端口，且只通过 iframe 访问
