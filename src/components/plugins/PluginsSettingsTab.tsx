@@ -76,7 +76,7 @@ export function PluginsSettingsTab() {
   };
 
   return (
-    <section className="flex-1 min-h-0 p-5 flex flex-col overflow-hidden">
+    <section className="flex-1 min-h-0 p-5 overflow-y-auto">
       {/* 模式切换：已安装 / 市场 */}
       <div className="flex gap-1 mb-4">
         {(
@@ -157,11 +157,8 @@ export function PluginsSettingsTab() {
         <div className="flex items-center justify-between mb-1.5">
           <div className="min-w-0">
             <span className="text-[11px] font-medium" style={{ color: "var(--text-muted)" }}>
-              App 组成（默认装配）
+              内置插件
             </span>
-            <div className="text-[10px]" style={{ color: "var(--text-muted)" }}>
-              以下官方插件组成 App，默认启用；可停用/卸载调整
-            </div>
           </div>
           <button
             onClick={() => void restoreBuiltin().catch((e) => setNotice({ kind: "error", text: errText(e) }))}
@@ -253,7 +250,7 @@ export function PluginsSettingsTab() {
         </div>
       </div>
       {/* 已装插件列表（第三方；默认装配分区在上方） */}
-      <div className="flex-1 min-h-0 overflow-auto space-y-2">
+      <div className="space-y-2">
         {installedRows.length === 0 && (
           <div className="text-sm py-8 text-center" style={{ color: "var(--text-muted)" }}>
             尚未安装第三方插件。可从上方的「本地文件夹 / Git 地址」安装，或前往「市场」tab 浏览安装。
