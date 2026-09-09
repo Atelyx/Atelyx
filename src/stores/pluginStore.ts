@@ -4,7 +4,7 @@
  * 分层：本 store 是插件相关状态的唯一出口——组件不直连 `services/plugins`；
  * 运行时（Worker/桥）本体在 `services/plugins/bridge`，本 store 只做编排与快照。
  * 加载时机：应用挂载/进仓后 `load()` 一次——先列清单，再逐个拉起启用插件（单个失败不影响其余）。
- * 例外说明：本 store 静态 import `components/plugins/builtinViews.tsx`（内置插件宿主视图载荷，
+ * 例外说明：本 store 静态 import `components/plugins/builtinPayload.tsx`（内置插件宿主侧载荷，
  * 组件层承载组件引用——services 不 import components 的约束所致）；该边经头注释文档化，
  * 环上跨模块访问均为函数体内延迟求值，无顶层 getState/useXxx（新增顶层触碰会 TDZ 崩溃）。
  */
@@ -12,8 +12,6 @@ import { create } from "zustand";
 import type { ComponentType } from "react";
 import type {
   InstalledPlugin,
-  PluginCanvasEdge,
-  PluginCanvasNode,
   PluginIndexEntry,
   PluginManifest,
   PluginScope,
@@ -61,10 +59,7 @@ import {
   runtimeSnapshot,
   setAppPageOpener,
   setBuiltinPluginIds,
-  setPluginCanvasAccess,
   setPluginCollabAccess,
-  setPluginTableAccess,
-  setPluginTableRuntimeAccess,
   setPluginThemeSettingsAccess,
   setPluginVaultAccess,
   setPluginVaultWriteAccess,
@@ -82,14 +77,11 @@ import type {
   PluginNodeRegistration,
   PluginRow,
   PluginSettingRegistration,
-  PluginTableAccess,
   PluginTableViewRegistration,
   ThemeSettingRegistration,
   ViewContribution,
 } from "@/services/plugins";
-import { BUILTIN_VIEWS } from "@/components/plugins/builtinViews";
-import { useTableStore } from "@/stores/tableStore";
-import { useCanvasStore } from "@/stores/canvasStore";
+import { BUILTIN_PAYLOADS } from "@/components/plugins/builtinPayload";
 import { useCollabStore, publishPluginPresence } from "@/stores/collabStore";
 import { useVaultStore } from "@/stores/vaultStore";
 import { useAppStore } from "@/stores/appStore";
@@ -100,9 +92,6 @@ import {
   editVaultFile,
   writeVaultFile,
 } from "@/services/vault/aiFiles";
-import { buildPluginTableSnapshot } from "@/utils/table";
-import { serializeEdgeForCollab, serializeNodeForCollab } from "@/utils/canvasCollab";
-import { resolveTableImageUrl } from "@/services/tableImageCache";
 import { pluginToolMetas as pluginToolMetasSvc } from "@/services/ai/tools";
 import type { AgentToolMeta } from "@/constants/tools";
 import {
@@ -120,6 +109,8 @@ import {
 } from "@/utils/pluginManifest";
 import { resolveEnabledDeps } from "@/utils/pluginDeps";
 import { detectPlatform } from "@/utils/pluginHost";
+import { registerDomainLifecycle, unregisterDomainLifecycle } from "@/utils/kernelLifecycle";
+import { subscribeVaultEvent } from "@/utils/vaultEvents";
 
 /** 某视图 kind 由内置插件提供时的状态（ViewHost 降级占位/菜单过滤用；installed=false = 已卸载）。 */
 interface BuiltinViewState {
@@ -227,6 +218,18 @@ function toInstalled(row: {
   };
 }
 
+/** 已注册的内置载荷撤销句柄（pluginId → 撤销函数；生命周期钩子 + 仓库事件订阅等随插件启停撤销）。 */
+const payloadUnregisters = new Map<string, () => void>();
+
+/** 撤销某内置插件的宿主侧载荷（视图贡献 + 领域生命周期钩子 + 能力提供者 + 协作域接线 + 仓库事件订阅）。
+ *  随插件启停：停用/卸载/重载时调用（与 unregisterPluginUi 同点）；第三方插件无载荷，幂等 no-op。 */
+function unregisterBuiltinPayload(id: string): void {
+  payloadUnregisters.get(id)?.();
+  payloadUnregisters.delete(id);
+  unregisterDomainLifecycle(id); // 兜底（幂等）
+  unregisterPluginUi(id);
+}
+
 /** 安装后统一收尾（模块私有）：宿主兼容强制 + 重载。 */
 async function finishInstall(get: () => PluginStoreState, row: PluginRow): Promise<void> {
   try {
@@ -250,59 +253,9 @@ async function finishInstall(get: () => PluginStoreState, row: PluginRow): Promi
   await get().load();
 }
 
-/** 表格数据访问接线守卫：load 每次进仓/启动都会跑，接线幂等只做一次（订阅常驻、跨仓库不重绑）。
- * 注意模块环：pluginStore ↔ { tableStore, collabStore, appStore, vaultStore }（appStore 反向依赖
- * pluginStore）为良性环——全部 store 访问延迟到回调内 `getState()`，模块顶层零触碰。 */
-let tableAccessWired = false;
-function ensureTableAccess(): void {
-  if (tableAccessWired) return;
-  tableAccessWired = true;
-  const access: PluginTableAccess = {
-    subscribeSnapshot: (cb) => {
-      const push = () => {
-        const ts = useTableStore.getState();
-        cb(
-          buildPluginTableSnapshot(
-            ts.tableFile,
-            ts.fields,
-            ts.rows,
-            ts.selectedRowId,
-            useCollabStore.getState().peers,
-          ),
-        );
-      };
-      push();
-      // 仅相关切片引用变化才推送（保存/脏标记等高频无关变更不打扰插件）；
-      // rows/fields 直传 store 不可变引用，选中变化不重建数组、插件卡片 memo 不受击穿。
-      const unsubTable = useTableStore.subscribe((s, prev) => {
-        if (
-          s.tableFile !== prev.tableFile ||
-          s.fields !== prev.fields ||
-          s.rows !== prev.rows ||
-          s.selectedRowId !== prev.selectedRowId
-        ) {
-          push();
-        }
-      });
-      // 协作订阅按 peers 整数组比较属粗粒度：presence 帧（onPeerPresence 恒 map 新数组）都会触发一次推送，
-      // 含与当前表格无关的笔记/画布选中更新；发送端 100ms 节流 + 局域网少量 peer，频率低，推送成本 ≈ 快照本身，可接受。
-      const unsubCollab = useCollabStore.subscribe((s, prev) => {
-        if (s.peers !== prev.peers) push();
-      });
-      return () => {
-        unsubTable();
-        unsubCollab();
-      };
-    },
-    selectRow: (rowId) => useTableStore.getState().selectRow(rowId),
-    resolveImage: resolveTableImageUrl,
-  };
-  setPluginTableAccess(access);
-}
-
 /** 插件侧仓库访问接线守卫：load 每次进仓/启动都会跑，接线幂等只做一次。
  *  把仓库文件树与打开回调暴露给主线程插件（facade 的 listFiles/open* 方法）。
- *  全部 store 访问延迟到回调内 getState()（与 ensureTableAccess 同模式，防模块环顶层触碰）。 */
+ *  全部 store 访问延迟到回调内 getState()（防模块环顶层触碰）。 */
 let vaultAccessWired = false;
 function ensureVaultAccess(): void {
   if (vaultAccessWired) return;
@@ -368,28 +321,6 @@ function ensureVaultWriteAccess(): void {
   });
 }
 
-/** 表格能力接线守卫：把当前表格数据与写操作暴露给 worker 平面 `table` 命名空间（幂等一次）。
- *  快照复用表数据订阅的同一构造（buildPluginTableSnapshot），写操作直连 tableStore 动作。 */
-let tableRuntimeWired = false;
-function ensureTableRuntimeAccess(): void {
-  if (tableRuntimeWired) return;
-  tableRuntimeWired = true;
-  setPluginTableRuntimeAccess({
-    snapshot: () =>
-      buildPluginTableSnapshot(
-        useTableStore.getState().tableFile,
-        useTableStore.getState().fields,
-        useTableStore.getState().rows,
-        useTableStore.getState().selectedRowId,
-        useCollabStore.getState().peers,
-      ),
-    updateCell: (rowId, fieldId, value) => useTableStore.getState().updateCell(rowId, fieldId, value),
-    addRow: () => useTableStore.getState().addRow(),
-    removeRow: (rowId) => useTableStore.getState().removeRow(rowId),
-    selectRow: (rowId) => useTableStore.getState().selectRow(rowId),
-  });
-}
-
 /** 协作能力接线守卫：把在线用户与 presence 上报暴露给 worker 平面 `collab` 命名空间（幂等一次）。 */
 let collabRuntimeWired = false;
 function ensureCollabRuntimeAccess(): void {
@@ -398,93 +329,6 @@ function ensureCollabRuntimeAccess(): void {
   setPluginCollabAccess({
     peers: () => useCollabStore.getState().peers,
     setPresence: (view, file) => publishPluginPresence(view, file),
-  });
-}
-
-/** 画布能力接线守卫：把当前画布快照与写操作暴露给 worker 平面 `canvas` 命名空间（幂等一次）。
- *  投影复用协作/磁盘序列化纯函数（serializeNodeForCollab 内嵌对话消息、剥离 React Flow 视图态，JSON 安全）；
- *  写方法守卫「已打开可写画布」；全部 store 访问延迟到回调内 getState()（防模块环）。 */
-let canvasRuntimeWired = false;
-function ensureCanvasRuntimeAccess(): void {
-  if (canvasRuntimeWired) return;
-  canvasRuntimeWired = true;
-  const requireWritable = (): void => {
-    const s = useCanvasStore.getState();
-    if (!s.canvasFile) throw new Error("未打开画布");
-    if (s.readOnly) throw new Error("画布为只读");
-  };
-  setPluginCanvasAccess({
-    snapshot: () => {
-      const s = useCanvasStore.getState();
-      const nodes: PluginCanvasNode[] = s.nodes.map((n) => {
-        const ser = serializeNodeForCollab(n, s.messagesByConv);
-        return {
-          id: ser.id,
-          type: ser.type,
-          x: ser.x,
-          y: ser.y,
-          width: ser.width,
-          height: ser.height,
-          data: ser.data as unknown as Record<string, unknown>,
-        };
-      });
-      const edges: PluginCanvasEdge[] = s.edges.map((e) => {
-        const ser = serializeEdgeForCollab(e);
-        return {
-          id: ser.id,
-          source: ser.source,
-          target: ser.target,
-          sourceHandle: ser.sourceHandle,
-          targetHandle: ser.targetHandle,
-          directed: ser.directed,
-          linkMode: ser.linkMode,
-        };
-      });
-      return {
-        canvasFile: s.canvasFile,
-        canvasTitle: s.canvasTitle,
-        nodes,
-        edges,
-        selectedNodeId: s.selectedNodeId,
-      };
-    },
-    addNode: (node) => {
-      requireWritable();
-      const id = crypto.randomUUID();
-      useCanvasStore.getState().addNode({ id, type: node.type, position: node.position, data: node.data ?? {} });
-      return id;
-    },
-    updateNode: (nodeId, patch) => {
-      requireWritable();
-      useCanvasStore.getState().updateNodeData(nodeId, patch);
-    },
-    moveNode: (nodeId, position) => {
-      requireWritable();
-      const st = useCanvasStore.getState();
-      // position 变更经 onNodesChange 应用（自身不入 undo 栈），显式 pushUndo 使其可撤销
-      st.pushUndo();
-      st.onNodesChange([{ type: "position", id: nodeId, position, dragging: false }]);
-    },
-    deleteNode: (nodeId) => {
-      requireWritable();
-      useCanvasStore.getState().deleteNodes([nodeId]);
-    },
-    addEdge: (edge) => {
-      requireWritable();
-      const st = useCanvasStore.getState();
-      const id = crypto.randomUUID();
-      st.addEdge({ id, ...edge });
-      return id;
-    },
-    deleteEdge: (edgeId) => {
-      requireWritable();
-      const st = useCanvasStore.getState();
-      st.pushUndo();
-      st.onEdgesChange([{ type: "remove", id: edgeId }]);
-    },
-    selectNode: (nodeId) => {
-      useCanvasStore.getState().selectNode(nodeId);
-    },
   });
 }
 
@@ -504,37 +348,15 @@ function ensureSettingsAccess(): void {
   });
 }
 
-/** 能力变更事件接线守卫：store 变更 → emitPluginEvent 通知 worker 平面订阅插件（幂等一次）。
- *  载荷为轻量信号（canvas/table 只带 file，插件按需再调 snapshot() 取数据）——
- *  画布拖拽/流式是每帧高频变更，全量序列化快照会造成事件风暴与陈旧大载荷。 */
+/** 能力变更事件接线守卫：内核侧 store 变更 → emitPluginEvent 通知 worker 平面订阅插件（幂等一次）。
+ *  canvas/table 变更事件随各自内置插件启停注册（见 canvasStore/tableStore 的 register*PluginWiring）；
+ *  collab/vault 属内核数据访问，常驻。载荷为轻量信号（插件按需再调 snapshot()/取数据）。 */
 let runtimeEventsWired = false;
 function ensureRuntimeChangeEvents(): void {
   if (runtimeEventsWired) return;
   runtimeEventsWired = true;
-  useTableStore.subscribe((s, prev) => {
-    if (
-      s.tableFile !== prev.tableFile ||
-      s.fields !== prev.fields ||
-      s.rows !== prev.rows ||
-      s.selectedRowId !== prev.selectedRowId
-    ) {
-      emitPluginEvent("table:changed", { file: s.tableFile });
-    }
-  });
   useCollabStore.subscribe((s, prev) => {
     if (s.peers !== prev.peers) emitPluginEvent("collab:changed", { peers: s.peers });
-  });
-  useCanvasStore.subscribe((s, prev) => {
-    if (
-      s.canvasFile !== prev.canvasFile ||
-      s.canvasTitle !== prev.canvasTitle ||
-      s.nodes !== prev.nodes ||
-      s.edges !== prev.edges ||
-      s.messagesByConv !== prev.messagesByConv ||
-      s.selectedNodeId !== prev.selectedNodeId
-    ) {
-      emitPluginEvent("canvas:changed", { file: s.canvasFile });
-    }
   });
   useVaultStore.subscribe((s, prev) => {
     if (s.tree !== prev.tree) emitPluginEvent("vault:changed", {});
@@ -573,37 +395,44 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
     const p = get().plugins[id];
     if (!p) return;
     // 先撤销旧贡献（重载防重复注册）。
-    unregisterPluginUi(id);
+    unregisterBuiltinPayload(id);
     unloadPlugin(id);
     try {
-      // 内置插件：实现随宿主编译（无入口文件/无桥运行时），启用 = 注册宿主视图贡献。
+      // 内置插件：实现随宿主编译（无入口文件/无桥运行时），启用 = 注册宿主侧载荷
+      // （视图贡献 + 领域生命周期钩子）。
       if (p.sourceKind === "builtin") {
-        // 主题类内置插件 = 纯声明式（无视图载荷）：只置 active 供主题系统派生消费。
-        // 前提：当前内置主题插件不携带其他代码类型；未来若出现 theme+panel 复合内置，
-        // 此短路会漏注册视图载荷，需改为按类型分别处理。
-        if (pluginTypeList(p.manifest).some((t) => t === "theme")) {
-          set((s) => {
-            const cur = s.plugins[id];
-            if (!cur) return s;
-            return { plugins: { ...s.plugins, [id]: { ...cur, phase: "active" } } };
-          });
-          return;
-        }
-        let registered = 0;
-        for (const v of BUILTIN_VIEWS) {
-          if (v.pluginId === id) {
+        const payload = BUILTIN_PAYLOADS.find((x) => x.pluginId === id);
+        if (!payload) {
+          // 内置清单（Rust）与前端载荷（builtinPayload.tsx）不同步会静默无贡献：显式告警便于排查。
+          console.warn(`内置插件 ${id} 无对应载荷，未注册任何贡献`);
+        } else {
+          for (const v of payload.views) {
             registerBuiltinView(id, {
               kind: v.kind,
               label: v.label,
               component: v.component,
               render: v.render,
             });
-            registered++;
           }
-        }
-        if (registered === 0) {
-          // 内置清单（Rust）与前端载荷（builtinViews.tsx）不同步会静默无贡献：显式告警便于排查。
-          console.warn(`内置插件 ${id} 无对应视图载荷，未注册任何视图`);
+          // 领域生命周期钩子随插件启停注册（停用/卸载/重载经 unregisterBuiltinPayload 撤销）。
+          // 主题类内置插件（builtin.theme）= 纯声明式（views 空、无生命周期），只置 active
+          // 供主题系统派生消费，不经此分支注册任何载荷。
+          const unregs: Array<() => void> = [];
+          if (payload.lifecycle) unregs.push(registerDomainLifecycle(payload.lifecycle));
+          // 能力提供者接线（canvas/table 命名空间数据源 + 变更事件）：注册后能力对 worker 平面可用
+          const capUnreg = payload.capability?.();
+          if (capUnreg) unregs.push(capUnreg);
+          // 协作域接线（画布/表格/笔记通道/重连/拆卸）：注册后域协作参与生效
+          const collabUnreg = payload.collabWiring?.();
+          if (collabUnreg) unregs.push(collabUnreg);
+          for (const spec of payload.vaultEventHandlers ?? []) {
+            unregs.push(subscribeVaultEvent(spec));
+          }
+          if (unregs.length > 0) {
+            payloadUnregisters.set(id, () => {
+              for (const u of unregs) u();
+            });
+          }
         }
         set((s) => {
           const cur = s.plugins[id];
@@ -655,7 +484,7 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
         void uiError.then((err) => {
           if (!err) return;
           unloadPlugin(id);
-          unregisterPluginUi(id);
+          unregisterBuiltinPayload(id);
           syncPhase("failed", err);
         });
       } else {
@@ -698,12 +527,11 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
     load: async () => {
       exposePluginFacade();
       setAppPageOpener((pageId) => useAppStore.getState().openPluginPage(pageId));
-      ensureTableAccess();
+      // 内核侧数据访问接线（vault 读写/协作/ai 配置/主题设置 + collab/vault 变更事件）：
+      // canvas/table 能力提供者与变更事件随内置插件启停注册（builtinPayload.capability）
       ensureVaultAccess();
       ensureVaultWriteAccess();
-      ensureTableRuntimeAccess();
       ensureCollabRuntimeAccess();
-      ensureCanvasRuntimeAccess();
       ensureSettingsAccess();
       ensureThemeSettingsAccess();
       ensureRuntimeChangeEvents();
@@ -714,7 +542,7 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
       setBuiltinPluginIds(new Set(rows.filter((r) => r.sourceKind === "builtin").map((r) => r.id)));
       for (const id of Object.keys(get().plugins)) {
         unloadPlugin(id);
-        unregisterPluginUi(id);
+        unregisterBuiltinPayload(id);
       }
       const plugins: Record<string, InstalledPlugin> = {};
       for (const row of rows) {
@@ -795,7 +623,7 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
       // 成功后再清理本地运行时与贡献，删除 store 行。
       await pluginUninstall(id, p.scope);
       unloadPlugin(id);
-      unregisterPluginUi(id);
+      unregisterBuiltinPayload(id);
       set((s) => {
         const plugins = { ...s.plugins };
         delete plugins[id];
@@ -814,7 +642,7 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
         await spawn(id);
       } else {
         unloadPlugin(id);
-        unregisterPluginUi(id);
+        unregisterBuiltinPayload(id);
         // 复位运行阶段（桥已移除运行时，store 残留的 active 是过期状态）。
         set((s) => {
           const cur = s.plugins[id];
@@ -828,7 +656,7 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
       const p = get().plugins[id];
       if (!p) return;
       unloadPlugin(id);
-      unregisterPluginUi(id);
+      unregisterBuiltinPayload(id);
       await pluginUpdate(id);
       // load 按 enabled 状态自动重拉（enabled 由状态文件保持），无需再显式 spawn。
       await get().load();
@@ -859,9 +687,11 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
       // 只是「添加视图」菜单不再提供。
       const base = allPluginViewKinds();
       const disabledKinds = new Set<string>();
-      for (const v of BUILTIN_VIEWS) {
-        const p = get().plugins[v.pluginId];
-        if (!p || !p.enabled) disabledKinds.add(v.kind);
+      for (const p of BUILTIN_PAYLOADS) {
+        const plugin = get().plugins[p.pluginId];
+        if (!plugin || !plugin.enabled) {
+          for (const v of p.views) disabledKinds.add(v.kind);
+        }
       }
       if (disabledKinds.size === 0) return base;
       return base.filter((k) => !disabledKinds.has(k));
@@ -926,13 +756,16 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
     },
 
     viewKindState: (kind) => {
-      // kind → 内置插件 id（宿主组件载荷映射）→ 插件行状态；非内置提供 = undefined。
+      // kind → 内置插件 id（宿主载荷映射）→ 插件行状态；非内置提供 = undefined。
       // 行缺失 = 已卸载（占位区分「停用」与「卸载」提示）。
-      const v = BUILTIN_VIEWS.find((x) => x.kind === kind);
-      if (!v) return undefined;
-      const p = get().plugins[v.pluginId];
-      if (!p) return { name: v.label, enabled: false, installed: false };
-      return { name: p.manifest.name, enabled: p.enabled, installed: true };
+      for (const p of BUILTIN_PAYLOADS) {
+        const v = p.views.find((x) => x.kind === kind);
+        if (!v) continue;
+        const plugin = get().plugins[p.pluginId];
+        if (!plugin) return { name: v.label, enabled: false, installed: false };
+        return { name: plugin.manifest.name, enabled: plugin.enabled, installed: true };
+      }
+      return undefined;
     },
     restoreBuiltin: async () => {
       await pluginSeedBuiltin();

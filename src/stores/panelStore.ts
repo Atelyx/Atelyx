@@ -22,15 +22,12 @@ import { create } from "zustand";
 import type { Viewport } from "@xyflow/react";
 import type { LayoutNode, TabItem, ViewKind } from "@/types";
 import { useUiStateStore } from "@/stores/uiStateStore";
-import { useCanvasStore } from "@/stores/canvasStore";
-import { useTableStore } from "@/stores/tableStore";
-import { useChatPanelStore } from "@/stores/chatPanelStore";
 import { useAppStore } from "@/stores/appStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { usePluginStore } from "@/stores/pluginStore";
 import { useCollabStore } from "@/stores/collabStore";
-import { wireCollabDomains } from "@/stores/collabWiring";
 import { useVaultStore } from "@/stores/vaultStore";
+import * as kernelLifecycle from "@/utils/kernelLifecycle";
 import { collectTabs, findViewHost } from "@/utils/workspaceLayout";
 import { pluginViewLabel } from "@/services/plugins";
 import {
@@ -448,9 +445,9 @@ export const usePanelStore = create<PanelStore>((set, get) => {
         if (prev) {
           const before = new Set(collectTabs(prev.activeTree).map((t) => t.view));
           const after = new Set(collectTabs(mirror.activeTree).map((t) => t.view));
-          // 撕裂出去的 AI 会话视图回归主窗口：重读盘（面板窗口可能已改会话）
-          if (!before.has("aichat") && after.has("aichat")) {
-            void useChatPanelStore.getState().load(useAppStore.getState().vaultId);
+          // 视图进入本窗口（撕裂回归，如 aichat 重读盘）→ 生命周期分发
+          for (const v of after) {
+            if (!before.has(v)) kernelLifecycle.notifyViewGained(v);
           }
           // 视图离开本窗口（撕裂出去）→ 释放（flush 落盘 + 清内存 + 画布视口交接）
           for (const v of before) {
@@ -577,18 +574,21 @@ export const usePanelStore = create<PanelStore>((set, get) => {
           currentNoteTitle: payload.currentNoteTitle,
           currentTableTitle: payload.currentTableTitle,
         });
-        // 仓库上下文到达（切仓库或启动请求应答）：按需加载仓库级配置/文件树/AI 会话
+        // 仓库上下文到达（切仓库或启动请求应答）：按需加载仓库级配置/文件树/领域仓库上下文
         if (payload.vaultId !== app.vaultId) {
           if (payload.vaultId) {
             void useSettingsStore.getState().loadVaultConfig();
             void useVaultStore.getState().loadFiles();
           }
+          // AI 会话换仓库读盘（含 vaultId 置空 = 回启动页场景）经生命周期注册表分发
+          void kernelLifecycle
+            .notifyVaultEntered({ vaultId: payload.vaultId })
+            .catch((e) => console.error("撕裂窗口加载领域仓库上下文失败", e));
           // 撕裂窗口插件运行时随仓库上下文重载（与主窗口 selectVault/backToVaultSelect 时机一致）：
           // vaultId 置空（回启动页）也 load——此时只扫 app 插件，自然卸载 vault 插件；
           // 插件事件（vault:switch/clear）按窗口隔离不跨窗口转发，撕裂窗口插件经重载兜底
           void usePluginStore.getState().load().catch((e) => console.error("撕裂窗口加载插件失败", e));
-          // AI 会话换仓库读盘 + 协作宿主重算（仓库房间变化）
-          void useChatPanelStore.getState().load(payload.vaultId);
+          // 协作宿主重算（仓库房间变化）
           get().syncCollabHost();
         }
       });
@@ -709,23 +709,12 @@ export const usePanelStore = create<PanelStore>((set, get) => {
 
     releaseView: async (view) => {
       try {
-        switch (view) {
-          case "canvas":
-            // 画布视口跨窗口交接（目标窗口挂载后恢复）；内容落盘为共享真相
-            emitCanvasViewportHandoff(useAppStore.getState().currentCanvasFile);
-            await useCanvasStore.getState().flush();
-            useCanvasStore.getState().resetCanvasState();
-            break;
-          case "table":
-            await useTableStore.getState().flush();
-            useTableStore.getState().clear();
-            break;
-          case "aichat":
-            await useChatPanelStore.getState().flush(useAppStore.getState().vaultId);
-            break;
-          default:
-            break;
+        // 画布视口跨窗口交接（目标窗口挂载后恢复）；内容落盘为共享真相
+        if (view === "canvas") {
+          emitCanvasViewportHandoff(useAppStore.getState().currentCanvasFile);
         }
+        // 领域视图释放（flush 落盘 + 清内存）经生命周期注册表分发
+        await kernelLifecycle.releaseView(view);
       } catch (e) {
         console.error(`释放视图 ${view} 落盘失败`, e);
       }
@@ -741,14 +730,18 @@ export const usePanelStore = create<PanelStore>((set, get) => {
       const mirror = get().layoutMirror;
       if (!mirror) return;
       // 协作宿主 = 本窗口渲染了协作相关视图才连接（每个窗口独立持有连接）：
-      // 画布/笔记/表格显示远端 presence，协作房间面板本身也需要在线成员列表
-      const relevant: ViewKind[] = ["canvas", "table", "note", "collabroom"];
+      // 画布/笔记/表格显示远端 presence，协作房间面板本身也需要在线成员列表。
+      // 只统计「视图贡献存在」的相关视图（内置领域插件停用/卸载后其视图为降级占位，不算协作相关）
+      const candidates: ViewKind[] = ["canvas", "table", "note", "collabroom"];
+      const relevant = candidates.filter(
+        (v) => usePluginStore.getState().viewContribution(v) !== undefined,
+      );
       const isHost = relevant.some(
         (v) => findViewHost(mirror.activeTree, mirror.detachedWindows, v) === get().windowId,
       );
       if (isHost && !collab.connected) {
-        // 域协作接线一次性注册（笔记/画布/表格经注册表回注宿主，幂等）
-        wireCollabDomains();
+        // 域协作接线随内置插件启停注册（builtinPayload.collabWiring，pluginStore.spawn 时注册），
+        // 此处只需按当前布局是否承载协作视图连接宿主
         collab.init({
           enabled: true,
           url: st.collabRelayUrl,

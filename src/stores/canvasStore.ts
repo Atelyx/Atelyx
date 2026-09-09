@@ -40,6 +40,8 @@ import {
   mergeMessages,
   resolveLockState,
   serializeCanvasSnapshot,
+  serializeEdgeForCollab,
+  serializeNodeForCollab,
   summarizeCanvasSnapshot,
 } from "@/utils/canvasCollab";
 import { toLlmMessages } from "@/services/ai/client";
@@ -105,6 +107,7 @@ import {
   useCollabStore,
 } from "./collabStore";
 import { useVaultStore } from "./vaultStore";
+import { emitPluginEvent, setPluginCanvasAccess } from "@/services/plugins";
 import type {
   Attachment,
   CanvasEdge,
@@ -112,6 +115,8 @@ import type {
   CanvasPatch,
   ConversationData,
   LinkMode,
+  PluginCanvasEdge,
+  PluginCanvasNode,
   TableData,
   TextData,
   MediaData,
@@ -456,67 +461,182 @@ export function hasCollabPeerOnCanvas(file: string): boolean {
     .peers.some((p) => p.presence?.file === file && p.presence?.view === "canvas");
 }
 
-/** 画布域协作接线（wireCollabDomains 调用，幂等一次）：注册 canvas-patch 通道 handler、
+/** 画布域协作接线（builtin.canvas 载荷调用，随插件启停）：注册 canvas-patch 通道 handler、
  *  presence 锁/流式合并 provider、重连补发画布 presence、presence 订阅、拆卸清理与广播钩子
- *  注入（经 collabSendSink 惰性读宿主 handle：断开时 no-op、重连后自动指向新连接）。 */
-let canvasCollabWired = false;
-export function ensureCanvasCollabWiring(): void {
-  if (canvasCollabWired) return;
-  canvasCollabWired = true;
-  registerCollabChannel("canvas-patch", (peerId, file, patch) => {
-    // 只应用当前打开的画布（applyRemoteCanvasPatch 内部按 file + id 守卫）；跳过自己
-    if (peerId === useCollabStore.getState().myPeerId) return;
-    useCanvasStore.getState().applyRemoteCanvasPatch(file, patch as CanvasPatch);
-  });
+ *  注入（经 collabSendSink 惰性读宿主 handle：断开时 no-op、重连后自动指向新连接）；
+ *  返回撤销函数（停用/卸载时撤销注册 + 释放本端锁 + 复位广播钩子）。 */
+export function registerCanvasCollabWiring(): () => void {
+  const offs: Array<() => void> = [];
+  offs.push(
+    registerCollabChannel("canvas-patch", (peerId, file, patch) => {
+      // 只应用当前打开的画布（applyRemoteCanvasPatch 内部按 file + id 守卫）；跳过自己
+      if (peerId === useCollabStore.getState().myPeerId) return;
+      useCanvasStore.getState().applyRemoteCanvasPatch(file, patch as CanvasPatch);
+    }),
+  );
   // 画布锁/流式跨视图保活：无论当前 view 槽（table/note/canvas）为何，都合并 canvas 的
   // 独占编辑锁与生成中节点——用户在看表格/笔记期间其画布锁仍对端可见，对话节点持续只读
-  registerCollabPresenceProvider((base) => {
-    const cs = useCanvasStore.getState();
-    const lockedNodes = Object.entries(cs.lockedConversations).map(([id, since]) => ({ id, since }));
-    const streamingNodeIds = Object.entries(cs.streamingByConv)
-      .filter(([, v]) => v)
-      .map(([id]) => id);
-    return {
-      ...base,
-      ...(lockedNodes.length ? { lockedNodes } : {}),
-      ...(streamingNodeIds.length ? { streamingNodeIds } : {}),
-    };
-  });
-  // 重连后补发画布 presence（覆盖 table 槽——画布为主工作区；锁/流式经 provider 合并，恢复对端锁）
-  registerCollabReconnect(() => {
-    const cs = useCanvasStore.getState();
-    if (!cs.canvasFile) return;
-    publishCollabPresence({
-      file: cs.canvasFile,
-      selection: cs.selectedNodeId ? { kind: "node", nodeId: cs.selectedNodeId } : null,
-      view: "canvas",
-    });
-  });
+  offs.push(
+    registerCollabPresenceProvider((base) => {
+      const cs = useCanvasStore.getState();
+      const lockedNodes = Object.entries(cs.lockedConversations).map(([id, since]) => ({ id, since }));
+      const streamingNodeIds = Object.entries(cs.streamingByConv)
+        .filter(([, v]) => v)
+        .map(([id]) => id);
+      return {
+        ...base,
+        ...(lockedNodes.length ? { lockedNodes } : {}),
+        ...(streamingNodeIds.length ? { streamingNodeIds } : {}),
+      };
+    }),
+  );
+  // 重连后补发画布 presence（priority 高于表格域——画布最后补发覆盖表格槽；画布为主工作区，
+  // 锁/流式经 provider 合并，恢复对端锁）
+  offs.push(
+    registerCollabReconnect(
+      () => {
+        const cs = useCanvasStore.getState();
+        if (!cs.canvasFile) return;
+        publishCollabPresence({
+          file: cs.canvasFile,
+          selection: cs.selectedNodeId ? { kind: "node", nodeId: cs.selectedNodeId } : null,
+          view: "canvas",
+        });
+      },
+      1,
+    ),
+  );
   // 画布 presence 订阅：打开/切画布、选中节点、独占编辑锁、流式起止任一变化 → 广播
   // messagesByConv 逐 token 更新不在此订阅 → 流式 token 不刷屏 presence（只有流式起止变更）
-  useCanvasStore.subscribe((s, prev) => {
-    const changed =
-      s.canvasFile !== prev.canvasFile ||
-      s.selectedNodeId !== prev.selectedNodeId ||
-      s.lockedConversations !== prev.lockedConversations ||
-      s.streamingByConv !== prev.streamingByConv;
-    if (!changed) return;
-    publishCollabPresence({
-      file: s.canvasFile,
-      selection: s.selectedNodeId ? { kind: "node", nodeId: s.selectedNodeId } : null,
-      view: "canvas",
-    });
-  });
+  offs.push(
+    useCanvasStore.subscribe((s, prev) => {
+      const changed =
+        s.canvasFile !== prev.canvasFile ||
+        s.selectedNodeId !== prev.selectedNodeId ||
+        s.lockedConversations !== prev.lockedConversations ||
+        s.streamingByConv !== prev.streamingByConv;
+      if (!changed) return;
+      publishCollabPresence({
+        file: s.canvasFile,
+        selection: s.selectedNodeId ? { kind: "node", nodeId: s.selectedNodeId } : null,
+        view: "canvas",
+      });
+    }),
+  );
   // 广播钩子注入（schedulePersist 计算补丁后回调；宿主 handle 为模块级，重连自动生效）
   useCanvasStore.getState().setCollabBroadcast((file, patch) => {
     collabSendSink("canvas-patch")(file, patch);
   });
-  // 拆卸：释放本端画布独占编辑锁（协作关闭后锁声明不再对端可见，内存清空防陈旧）；
-  // 广播钩子保持注入——出站咽喉（collabSendSink→docHost）断开时自然 no-op，重连自动生效，
-  // 协作关→开循环无需重注入（ensure*Wiring 幂等一次）
-  registerCollabTeardown(() => {
-    useCanvasStore.getState().clearConversationLocks();
+  offs.push(() => useCanvasStore.getState().setCollabBroadcast(null));
+  // 拆卸：释放本端画布独占编辑锁（协作关闭后锁声明不再对端可见，内存清空防陈旧）
+  offs.push(registerCollabTeardown(() => useCanvasStore.getState().clearConversationLocks()));
+  // 撤销 = 画布退出协作：同样释放本端锁（与 collab 关闭的拆卸路径幂等重叠）
+  offs.push(() => useCanvasStore.getState().clearConversationLocks());
+  return () => {
+    for (const off of offs) off();
+  };
+}
+
+/** 画布插件能力接线（builtin.canvas 载荷调用，随插件启停）：注册 worker 平面 `canvas` 命名空间
+ *  数据源 + `canvas:changed` 事件发射；返回撤销函数（停用/卸载时撤销，能力随之消失）。
+ *  投影复用协作/磁盘序列化纯函数（serializeNodeForCollab 内嵌对话消息、剥离 React Flow 视图态，JSON 安全）；
+ *  写方法守卫「已打开可写画布」；变更事件为轻量信号（只带 file，插件按需再调 snapshot()）——
+ *  画布拖拽/流式是每帧高频变更，全量序列化快照会造成事件风暴与陈旧大载荷。 */
+export function registerCanvasPluginWiring(): () => void {
+  const requireWritable = (): void => {
+    const s = useCanvasStore.getState();
+    if (!s.canvasFile) throw new Error("未打开画布");
+    if (s.readOnly) throw new Error("画布为只读");
+  };
+  setPluginCanvasAccess({
+    snapshot: () => {
+      const s = useCanvasStore.getState();
+      const nodes: PluginCanvasNode[] = s.nodes.map((n) => {
+        const ser = serializeNodeForCollab(n, s.messagesByConv);
+        return {
+          id: ser.id,
+          type: ser.type,
+          x: ser.x,
+          y: ser.y,
+          width: ser.width,
+          height: ser.height,
+          data: ser.data as unknown as Record<string, unknown>,
+        };
+      });
+      const edges: PluginCanvasEdge[] = s.edges.map((e) => {
+        const ser = serializeEdgeForCollab(e);
+        return {
+          id: ser.id,
+          source: ser.source,
+          target: ser.target,
+          sourceHandle: ser.sourceHandle,
+          targetHandle: ser.targetHandle,
+          directed: ser.directed,
+          linkMode: ser.linkMode,
+        };
+      });
+      return {
+        canvasFile: s.canvasFile,
+        canvasTitle: s.canvasTitle,
+        nodes,
+        edges,
+        selectedNodeId: s.selectedNodeId,
+      };
+    },
+    addNode: (node) => {
+      requireWritable();
+      const id = crypto.randomUUID();
+      useCanvasStore.getState().addNode({ id, type: node.type, position: node.position, data: node.data ?? {} });
+      return id;
+    },
+    updateNode: (nodeId, patch) => {
+      requireWritable();
+      useCanvasStore.getState().updateNodeData(nodeId, patch);
+    },
+    moveNode: (nodeId, position) => {
+      requireWritable();
+      const st = useCanvasStore.getState();
+      // position 变更经 onNodesChange 应用（自身不入 undo 栈），显式 pushUndo 使其可撤销
+      st.pushUndo();
+      st.onNodesChange([{ type: "position", id: nodeId, position, dragging: false }]);
+    },
+    deleteNode: (nodeId) => {
+      requireWritable();
+      useCanvasStore.getState().deleteNodes([nodeId]);
+    },
+    addEdge: (edge) => {
+      requireWritable();
+      const st = useCanvasStore.getState();
+      const id = crypto.randomUUID();
+      st.addEdge({ id, ...edge });
+      return id;
+    },
+    deleteEdge: (edgeId) => {
+      requireWritable();
+      const st = useCanvasStore.getState();
+      st.pushUndo();
+      st.onEdgesChange([{ type: "remove", id: edgeId }]);
+    },
+    selectNode: (nodeId) => {
+      useCanvasStore.getState().selectNode(nodeId);
+    },
   });
+  const offChange = useCanvasStore.subscribe((s, prev) => {
+    if (
+      s.canvasFile !== prev.canvasFile ||
+      s.canvasTitle !== prev.canvasTitle ||
+      s.nodes !== prev.nodes ||
+      s.edges !== prev.edges ||
+      s.messagesByConv !== prev.messagesByConv ||
+      s.selectedNodeId !== prev.selectedNodeId
+    ) {
+      emitPluginEvent("canvas:changed", { file: s.canvasFile });
+    }
+  });
+  return () => {
+    setPluginCanvasAccess(null);
+    offChange();
+  };
 }
 
 /**

@@ -8,9 +8,7 @@
 import { Maximize, Settings } from "lucide-react";
 import { useEffect } from "react";
 import { useAppStore } from "@/stores/appStore";
-import { useChatPanelStore } from "@/stores/chatPanelStore";
 import { useSettingsStore } from "@/stores/settingsStore";
-import { useTableStore } from "@/stores/tableStore";
 import { useUiStateStore } from "@/stores/uiStateStore";
 import { useVaultStore, lastFolderRenameTarget, lastNoteRenameTarget, lastTableRenameTarget } from "@/stores/vaultStore";
 import { SettingsModal } from "@/components/settings/SettingsModal";
@@ -89,21 +87,8 @@ export function ProjectWorkspacePage() {
     }
   }, [vaultTableList, currentTableFile]);
 
-  // AI 对话面板会话：进工作区读盘加载；离开（回仓库选择页/切仓库）时 flush，防 debounce 窗口内丢改动
-  useEffect(() => {
-    void useChatPanelStore.getState().load(useAppStore.getState().vaultId);
-    // cleanup 不能返回 Promise（React Destructor 类型），卸载时 fire-and-forget 即可
-    return () => {
-      void useChatPanelStore.getState().flush(useAppStore.getState().vaultId);
-    };
-  }, []);
-
-  // 页面卸载（切仓库/回启动页）：flush 表格改动，防 debounce 窗口内丢
-  useEffect(() => {
-    return () => {
-      void useTableStore.getState().flush();
-    };
-  }, []);
+  // AI 对话面板会话与表格改动落盘：进仓库读盘 + 离开（回仓库选择页/切仓库）时 flush 防 debounce 丢改动，
+  // 均已归入领域生命周期注册表分发（builtin.aichat 的 onVaultEntered/onVaultExit、builtin.table 的 onVaultExit）
 
   // 历史记录作者登记（应用级全局，三 kind——画布/笔记/表格——共用同一身份）：
   // 身份随协作昵称/设备名变化刷新；未打开笔记时画布/表格历史也能正确署名

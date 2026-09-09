@@ -16,10 +16,10 @@
  */
 import { Fragment, useEffect, type CSSProperties } from "react";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
-import { useCanvasStore } from "@/stores/canvasStore";
 import { usePanelStore } from "@/stores/panelStore";
 import { useUiStateStore } from "@/stores/uiStateStore";
 import { collectPanels, collectAllViews, findPanel } from "@/utils/workspaceLayout";
+import { notifyViewRemoved } from "@/utils/kernelLifecycle";
 import { PanelFrame } from "@/components/layout/PanelFrame";
 import { DragGhost } from "@/components/layout/DragGhost";
 import type { LayoutNode, SplitNode } from "@/types";
@@ -143,10 +143,11 @@ export function WorkspaceGrid({ tree }: { tree: LayoutNode }) {
   // 稳定键（全局已占用视图集合的排序拼接，含撕裂窗口）：resize 拖拽时不变，PanelFrame memo 可跳过
   const usedKey = [...new Set(collectAllViews(tree, detachedWindows))].sort().join(",");
 
-  // 布局中无画布面板时清属性面板选中（画布未渲染，InspectorPanel 的 setCenter 定位无实例）
+  // 布局中无画布面板时清属性面板选中（画布未渲染，InspectorPanel 的 setCenter 定位无实例）；
+  // 经生命周期注册表分发（builtin.canvas 的 onViewRemoved 钩子）
   const hasCanvas = panels.some((p) => p.tabs.some((t) => t.view === "canvas"));
   useEffect(() => {
-    if (!hasCanvas) useCanvasStore.getState().selectNode(null);
+    if (!hasCanvas) notifyViewRemoved("canvas");
   }, [hasCanvas]);
 
   return (

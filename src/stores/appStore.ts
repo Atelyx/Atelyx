@@ -20,15 +20,18 @@ import {
 } from "@/services/global";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useVaultStore } from "@/stores/vaultStore";
-import { useNoteUndoStore } from "@/stores/noteUndoStore";
-import { useChatPanelStore } from "@/stores/chatPanelStore";
-import { useTableStore } from "@/stores/tableStore";
 import { useUiStateStore } from "@/stores/uiStateStore";
-import { useCalendarStore } from "@/stores/calendarStore";
 import { useCollabStore } from "@/stores/collabStore";
 import { migrateHistoryFile } from "@/services/history";
 import { markSelfSave } from "@/utils/selfSave";
-import { useCanvasStore } from "@/stores/canvasStore";
+import {
+  flushAllDomains,
+  notifyVaultEntered,
+  notifyVaultExit,
+  notifyVaultLeaving,
+  releaseView,
+} from "@/utils/kernelLifecycle";
+import { emitVaultEvent } from "@/utils/vaultEvents";
 import { baseName, dedupeFilename, parentDir, remapDirPrefix, sanitizeFilename, siblingPath, stripExt } from "@/utils/filename";
 import { getAppVersion as getVersionSvc } from "@/services/app";
 import { openInExplorer as openInExplorerSvc, openUrl as openUrlSvc } from "@/services/shell";
@@ -355,16 +358,11 @@ export const useAppStore = create<AppState>((set, get) => ({
     get().beginLoad();
     get().reportLoad("打开仓库");
     try {
-      // 切换前先落盘旧仓库的全部编辑并**等待写盘完成**：openVault 会把 VaultState.root 切到新仓库，
+      // 切换前先落盘旧仓库的全部领域编辑并**等待写盘完成**：openVault 会把 VaultState.root 切到新仓库，
       // 若 fire-and-forget 直接放行，写盘可能晚于 open_vault 执行、把旧仓库内容写进新仓库（跨仓库污染）。
-      // 画布/表格无改动则不写（脏门控，见各自 flush）；chatPanel 额外传当前仓库 vaultId 做归属校验
-      await useCanvasStore.getState().flush();
-      await useTableStore.getState().flush();
-      await useChatPanelStore.getState().flush(get().vaultId);
-      await useCalendarStore.getState().flush();
-      // 笔记编辑器挂起输入也须在 openVault 前落盘：切仓库后 NoteEditor 卸载 cleanup 因
-      // noteList 已清空跳过保存（防跨仓库写），若不在此 flush，最后 500ms 输入会丢
-      await useVaultStore.getState().flushPendingNotes();
+      // 领域 store 无改动则不写（脏门控，见各自 flush）；chatPanel 额外传当前仓库 vaultId 做归属校验。
+      // 经领域生命周期注册表分发（canvas/table/aichat/calendar/note 各钩子按注册序执行，失败快速传播）
+      await flushAllDomains({ vaultId: get().vaultId });
       const info = await openVault(root);
       const now = Math.floor(Date.now() / 1000);
       const recents = bumpRecentVault(get().recentVaults, info, now);
@@ -391,8 +389,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       // 旧仓库内容经已切换的 root 写进新仓库同路径文件（跨仓库污染）。挂起输入已在 openVault 前
       // flush 落盘旧仓库，此处清残留（含 flush 后、切仓库前新输入），不丢数据。
       useVaultStore.setState({ tree: [], noteList: [], tableList: [], noteContents: {}, pendingNoteContent: {} });
-      // 切仓库清空笔记撤销栈（防同路径串文件；会话内其余操作不清，见 noteUndoStore）
-      useNoteUndoStore.getState().clearAll();
+      // 切仓库同步清态（笔记撤销栈/画布运行时，经注册表分发）——同步执行，保住防跨仓库写入守卫：
+      // 清空须在下一个 await 之前完成（与上方 set 同批，React 提交卸载前 noteList 已清空）
+      notifyVaultLeaving();
       // 登记最近仓库失败不阻塞切换：global.json 写入异常（权限/磁盘）只影响最近列表，
       // 若放行抛错会被下方 catch 吞掉，导致后续重载（配置/画布列表/文件树/AI 会话）全部跳过
       try {
@@ -403,8 +402,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       // 加载仓库级配置覆盖（.atelyx/config.json），需在发消息前完成
       get().reportLoad("加载仓库配置");
       await useSettingsStore.getState().loadVaultConfig();
-      // 切换仓库：清空旧画布运行时状态（防残留 saveTimer 跨仓库写盘/旧消息残留）
-      useCanvasStore.getState().resetCanvasState();
       // 文件树/画布列表/AI 会话随切换等待完成：门控「全部加载完再进入」，加载屏覆盖到数据就绪。
       // 各自独立 try——任一加载失败不连带跳过其余（尤其 AI 会话加载不能被文件树失败跳过，
       // 否则历史/当前会话停留在旧仓库）
@@ -416,11 +413,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
       get().reportLoad("加载 AI 会话");
       try {
-        // force：真实仓库切换，强制重读盘（防 sessionVaultId 巧合等于目标时被幂等守卫跳过，
-        // 面板停留在旧仓库会话）
-        await useChatPanelStore.getState().load(info.id, true);
+        // 领域仓库上下文（AI 会话读盘等）经注册表分发；aichat 钩子 force：真实仓库切换，
+        // 强制重读盘（防 sessionVaultId 巧合等于目标时被幂等守卫跳过，面板停留在旧仓库会话）
+        await notifyVaultEntered({ vaultId: info.id });
       } catch (e) {
-        console.error("加载 AI 对话会话失败", e);
+        console.error("加载领域仓库上下文失败", e);
       }
       // 插件平台：切仓库后全量重载（load 内部先卸载旧贡献，再按新仓库上下文重建 app+vault 插件）；
       // 加载完成后再切工作区视图 + 广播 vault:switch，保证订阅方是已就绪的后台插件。
@@ -453,11 +450,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   backToVaultSelect: () => {
-    // 回启动页：AI 会话/日历日程/笔记挂起输入落盘防 debounce 丢改动（root 未切换，写旧仓库安全；
-    // 冲突未决/已删文件条目由 flushPendingNotes 内部保留）
-    void useChatPanelStore.getState().flush(get().vaultId);
-    void useCalendarStore.getState().flush();
-    void useVaultStore.getState().flushPendingNotes();
+    // 回启动页：AI 会话/日历日程/笔记挂起输入/表格改动落盘防 debounce 丢改动（root 未切换，写旧仓库
+    // 安全；冲突未决/已删文件条目由 flushPendingNotes 内部保留）。经注册表分发（fire-and-forget）。
+    void notifyVaultExit().catch((e) => console.error("退出仓库领域清理失败", e));
     useSettingsStore.getState().clearVaultConfig();
     // 清设置弹窗（防止下次进入工作区残留重开）
     set({ settingsModal: null });
@@ -487,13 +482,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   closePluginPage: () => set({ pluginPage: null }),
 
   flushAllPending: async () => {
-    await useCanvasStore.getState().flush();
-    await useTableStore.getState().flush();
-    await useChatPanelStore.getState().flush(get().vaultId);
-    await useCalendarStore.getState().flush();
-    // 笔记编辑器挂起的 debounce 输入（组件内 timer，不走 store）也在此统一落盘 +
+    // 领域 store 全部 pending 改动（画布/表格/AI 会话/日历/笔记挂起输入）经生命周期注册表分发；
+    // 笔记编辑器挂起的 debounce 输入（组件内 timer，不走 store）也在笔记钩子内统一落盘 +
     // 补历史存档点，防关窗/切仓库/AI 重命名移动删除前丢最后 500ms 输入
-    await useVaultStore.getState().flushPendingNotes();
+    await flushAllDomains({ vaultId: get().vaultId });
     await useUiStateStore.getState().flush();
     await useSettingsStore.getState().flush();
     // 协作连接收尾不在此处（本函数启动自动更新检查时也会调用）：dispose 会断开会话内协作连接
@@ -562,10 +554,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   closeCanvas: () => {
     set({ currentCanvasId: null, currentCanvasFile: null });
     useUiStateStore.getState().closeFile("canvas");
-    // 先落盘（防 debounce 窗口内丢改动）再清内存态；清空后不可写回
-    void useCanvasStore.getState().flush().finally(() => {
-      useCanvasStore.getState().resetCanvasState();
-    });
+    // 先落盘（防 debounce 窗口内丢改动）再清内存态（经注册表分发，与撕裂视图交接同语义）；清空后不可写回
+    void releaseView("canvas").catch((e) => console.error("关闭画布落盘失败", e));
   },
   openNote: (file, title) => {
     set({ currentNoteFile: file, currentNoteTitle: title });
@@ -588,16 +578,15 @@ export const useAppStore = create<AppState>((set, get) => ({
   closeTable: () => {
     set({ currentTableFile: null, currentTableTitle: "" });
     useUiStateStore.getState().closeFile("table");
-    // 先落盘（防 debounce 窗口内丢改动）再清内存态；清空后不可写回
-    void useTableStore.getState().flush().finally(() => {
-      useTableStore.getState().clear();
-    });
+    // 先落盘（防 debounce 窗口内丢改动）再清内存态（经注册表分发）；清空后不可写回
+    void releaseView("table").catch((e) => console.error("关闭表格落盘失败", e));
   },
   closeTableSilent: () => {
+    const file = get().currentTableFile;
+    // 文件已删：flush 会写回重建，只清内存态与保存定时器（经仓库事件分发，须在置空当前文件前发出）
+    if (file) emitVaultEvent({ kind: "table:deleted", path: file });
     set({ currentTableFile: null, currentTableTitle: "" });
     useUiStateStore.getState().closeFile("table");
-    // 文件已删：flush 会写回重建，只清内存态与保存定时器
-    useTableStore.getState().clear();
   },
   createCanvas: async (title = "未命名画布", dir = "") => {
     // 同名自动加序号（标题即文件名，保证同目录不重名），返回实际标题供 UI 提醒
@@ -629,12 +618,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       await migrateHistoryFile("canvas", row.file).catch(() => {});
       // 历史侧文件随迁（画布 kind 目录）；失败静默降级，不阻塞重命名主流程
       await remapSideloads(row.file, newFile).catch(() => {});
-      await useCanvasStore.getState().syncBaseUpdatedAt();
-      // 同步当前画布 file（防下次保存写旧路径产生双文件）
+      // 画布运行时引用同步（乐观锁基准 + 打开路径）经仓库事件分发
+      emitVaultEvent({ kind: "canvas:renamed", oldPath: row.file, newPath: newFile });
       useUiStateStore.getState().renameLastFile("canvas", row.file, newFile);
-      if (get().currentCanvasFile === row.file) {
-        useCanvasStore.setState({ canvasFile: newFile });
-      }
       await refreshCanvasAndTree();
     } catch (e) {
       console.error("重命名失败", e);
@@ -655,11 +641,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       await migrateHistoryFile("canvas", row.file).catch(() => {});
       // 历史侧文件随迁（画布 kind 目录）；失败静默降级，不阻塞移动主流程
       await remapSideloads(row.file, newFile).catch(() => {});
-      // 当前打开的就是被移动的画布：同步 file，防下次保存写旧路径产生双文件
+      // 画布运行时引用同步（乐观锁基准 + 打开路径）经仓库事件分发
+      emitVaultEvent({ kind: "canvas:moved", oldPath: row.file, newPath: newFile });
       useUiStateStore.getState().renameLastFile("canvas", row.file, newFile);
-      if (get().currentCanvasFile === row.file) {
-        useCanvasStore.setState({ canvasFile: newFile });
-      }
       await refreshCanvasAndTree();
       return newFile;
     } catch (e) {
@@ -695,9 +679,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       // 删除的是当前画布（id 或路径命中——AI 工具等调用方可能只有 file 无真实 id）：清空 canvasStore
       // （含未落盘 saveTimer / 进行中的流），否则残留 timer 会重写已删文件、watcher 事件匹配旧 id 产生误导 reload
       const isCurrent = row.id === currentCanvasId || row.file === currentCanvasFile;
-      if (isCurrent) {
-        useCanvasStore.getState().resetCanvasState();
-      }
+      // 当前画布复位运行时（防残留 saveTimer 重写已删文件）：经仓库事件分发（handler 按当前文件匹配，
+      // 须在下方置空 currentCanvasFile 前发出）
+      emitVaultEvent({ kind: "canvas:deleted", path: row.file });
       // 删除的是「上次打开」的画布：清空 uiState 记录（否则下次进入仓库尝试恢复已删文件）
       if (useUiStateStore.getState().lastCanvasFile === row.file) {
         useUiStateStore.getState().closeFile("canvas");
@@ -717,7 +701,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       .filter((c) => c.file.startsWith(`${dir}/`))
       .map((c) => c.id);
     if (affectedIds.length > 0 && currentCanvasId && affectedIds.includes(currentCanvasId)) {
-      useCanvasStore.getState().resetCanvasState();
+      // 当前画布位于被删目录内：复位运行时（经仓库事件分发，须在置空当前文件前发出）
+      const file = get().currentCanvasFile;
+      if (file) emitVaultEvent({ kind: "canvas:deleted", path: file });
       useUiStateStore.getState().closeFile("canvas");
       set({ currentCanvasId: null, currentCanvasFile: null });
     }
@@ -745,7 +731,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       return row;
     } catch (e) {
       console.error("转换为画布失败", e);
-      useCanvasStore.setState({ error: "转换为画布失败，请重试" });
+      emitVaultEvent({ kind: "canvas:error", message: "转换为画布失败，请重试" });
       return null;
     }
   },

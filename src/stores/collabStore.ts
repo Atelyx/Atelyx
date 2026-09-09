@@ -5,7 +5,7 @@
  * 切仓库换房（bye + 重连新 hello）。传输/入站路由/出站咽喉归内核 DocHost
  * （services/collab/docHost.ts）：本 store 只做「何时连/断/换房」策略与 presence 节流调度、
  * peers/myPeerId 状态镜像；画布/笔记/表格域的协作接线（消息通道/重连/拆卸/presence 合并/
- * 广播注入）经 `collabWiring.ts` 注册到 collabHost 注册表。本 store 不 import 任何域 store。
+ * 广播注入）随内置插件启停经各域 `register*CollabWiring` 注册到 collabHost 注册表。本 store 不 import 任何域 store。
  */
 import { create } from "zustand";
 import {

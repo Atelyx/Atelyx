@@ -26,7 +26,14 @@ import {
   type HistoryVersion,
 } from "@/services/history";
 import { markSelfSave } from "@/utils/selfSave";
-import { clearTableImageCache } from "@/services/tableImageCache";
+import { clearTableImageCache, resolveTableImageUrl } from "@/services/tableImageCache";
+import {
+  emitPluginEvent,
+  setPluginTableAccess,
+  setPluginTableRuntimeAccess,
+  type PluginTableAccess,
+  type PluginTableRuntimeAccess,
+} from "@/services/plugins";
 import {
   collabSendSink,
   publishCollabPresence,
@@ -38,6 +45,7 @@ import { createPersistController } from "@/utils/persist";
 import { createUndoManager } from "@/utils/undoStack";
 import {
   applyPasteGrid,
+  buildPluginTableSnapshot,
   buildRegionTsv,
   cellValueEqual,
   computeTablePatch,
@@ -608,35 +616,121 @@ export function hasCollabPeerOnTable(file: string): boolean {
   return useCollabStore.getState().peers.some((p) => p.presence?.file === file);
 }
 
-/** 表格域协作接线（wireCollabDomains 调用，幂等一次）：注册 table-patch 通道 handler、
- *  presence 订阅、重连补发表格 presence、拆卸清理与广播钩子注入
- * （经 collabSendSink 惰性读宿主 handle：断开时 no-op、重连后自动指向新连接）。
- * 注意：须在画布域接线之前调用——重连补发的 presence 让「画布打开时画布槽覆盖表格槽」成立。 */
-let tableCollabWired = false;
-export function ensureTableCollabWiring(): void {
-  if (tableCollabWired) return;
-  tableCollabWired = true;
-  registerCollabChannel("table-patch", (peerId, file, patch) => {
-    // 只应用当前打开的表格（applyRemotePatch 内部按 file 守卫）；跳过自己
-    if (peerId === useCollabStore.getState().myPeerId) return;
-    useTableStore.getState().applyRemotePatch(file, patch as TablePatch);
-  });
+/** 表格域协作接线（builtin.table 载荷调用，随插件启停）：注册 table-patch 通道 handler、
+ *  presence 订阅、重连补发表格 presence、广播钩子注入（经 collabSendSink 惰性读宿主 handle：
+ *  断开时 no-op、重连后自动指向新连接）；返回撤销函数（停用/卸载时撤销注册 + 复位广播钩子）。
+ *  presence 覆盖语义经显式 priority 表达（画布域重连 priority 更高，其后补发覆盖表格槽），
+ *  table 重连用默认 priority 0。 */
+export function registerTableCollabWiring(): () => void {
+  const offs: Array<() => void> = [];
+  offs.push(
+    registerCollabChannel("table-patch", (peerId, file, patch) => {
+      // 只应用当前打开的表格（applyRemotePatch 内部按 file 守卫）；跳过自己
+      if (peerId === useCollabStore.getState().myPeerId) return;
+      useTableStore.getState().applyRemotePatch(file, patch as TablePatch);
+    }),
+  );
   // 表格打开/选中/视图变化 → 节流广播 presence（file null = 未看表格，清空远端高亮）
-  useTableStore.subscribe((s, prev) => {
-    if (s.tableFile !== prev.tableFile || s.selection !== prev.selection || s.view !== prev.view) {
-      publishCollabPresence({ file: s.tableFile, selection: s.selection, view: s.view });
-    }
-  });
-  // 重连后补发表格 presence（画布域接线在后：画布打开时其 presence 覆盖表格槽——画布为主工作区）
-  registerCollabReconnect(() => {
-    const ts = useTableStore.getState();
-    publishCollabPresence({ file: ts.tableFile, selection: ts.selection, view: ts.view });
-  });
+  offs.push(
+    useTableStore.subscribe((s, prev) => {
+      if (s.tableFile !== prev.tableFile || s.selection !== prev.selection || s.view !== prev.view) {
+        publishCollabPresence({ file: s.tableFile, selection: s.selection, view: s.view });
+      }
+    }),
+  );
+  // 重连后补发表格 presence（priority 0；画布域重连 priority 更高在其后补发——画布打开时画布槽覆盖表格槽）
+  offs.push(
+    registerCollabReconnect(() => {
+      const ts = useTableStore.getState();
+      publishCollabPresence({ file: ts.tableFile, selection: ts.selection, view: ts.view });
+    }),
+  );
   // 广播钩子注入（schedulePersist 计算补丁后回调；宿主 handle 为模块级，重连自动生效）
   useTableStore.getState().setCollabBroadcast((file, patch) => {
     collabSendSink("table-patch")(file, patch);
   });
-  // 不注册拆卸：广播钩子保持注入（出站咽喉断开时自然 no-op，协作关→开循环无需重注入）
+  offs.push(() => useTableStore.getState().setCollabBroadcast(null));
+  return () => {
+    for (const off of offs) off();
+  };
+}
+
+/** 表格插件能力接线（builtin.table 载荷调用，随插件启停）：注册主线程 facade 表格数据访问
+ * （subscribeTableData/selectTableRow/resolveTableImage）+ worker 平面 `table` 命名空间 +
+ * `table:changed` 事件发射；返回撤销函数（停用/卸载时撤销，能力随之消失）。
+ * 快照复用同一构造（buildPluginTableSnapshot）；变更事件为轻量信号（只带 file，插件按需再取快照）。 */
+export function registerTablePluginWiring(): () => void {
+  const facade: PluginTableAccess = {
+    subscribeSnapshot: (cb) => {
+      const push = () => {
+        const ts = useTableStore.getState();
+        cb(
+          buildPluginTableSnapshot(
+            ts.tableFile,
+            ts.fields,
+            ts.rows,
+            ts.selectedRowId,
+            useCollabStore.getState().peers,
+          ),
+        );
+      };
+      push();
+      // 仅相关切片引用变化才推送（保存/脏标记等高频无关变更不打扰插件）；
+      // rows/fields 直传 store 不可变引用，选中变化不重建数组、插件卡片 memo 不受击穿。
+      const unsubTable = useTableStore.subscribe((s, prev) => {
+        if (
+          s.tableFile !== prev.tableFile ||
+          s.fields !== prev.fields ||
+          s.rows !== prev.rows ||
+          s.selectedRowId !== prev.selectedRowId
+        ) {
+          push();
+        }
+      });
+      // 协作订阅按 peers 整数组比较属粗粒度：presence 帧（onPeerPresence 恒 map 新数组）都会触发一次推送，
+      // 含与当前表格无关的笔记/画布选中更新；发送端 100ms 节流 + 局域网少量 peer，频率低，推送成本 ≈ 快照本身，可接受。
+      const unsubCollab = useCollabStore.subscribe((s, prev) => {
+        if (s.peers !== prev.peers) push();
+      });
+      return () => {
+        unsubTable();
+        unsubCollab();
+      };
+    },
+    selectRow: (rowId) => useTableStore.getState().selectRow(rowId),
+    resolveImage: resolveTableImageUrl,
+  };
+  const runtime: PluginTableRuntimeAccess = {
+    snapshot: () =>
+      buildPluginTableSnapshot(
+        useTableStore.getState().tableFile,
+        useTableStore.getState().fields,
+        useTableStore.getState().rows,
+        useTableStore.getState().selectedRowId,
+        useCollabStore.getState().peers,
+      ),
+    updateCell: (rowId, fieldId, value) => useTableStore.getState().updateCell(rowId, fieldId, value),
+    addRow: () => useTableStore.getState().addRow(),
+    removeRow: (rowId) => useTableStore.getState().removeRow(rowId),
+    selectRow: (rowId) => useTableStore.getState().selectRow(rowId),
+  };
+  setPluginTableAccess(facade);
+  setPluginTableRuntimeAccess(runtime);
+  const offChange = useTableStore.subscribe((s, prev) => {
+    if (
+      s.tableFile !== prev.tableFile ||
+      s.fields !== prev.fields ||
+      s.rows !== prev.rows ||
+      s.selectedRowId !== prev.selectedRowId
+    ) {
+      emitPluginEvent("table:changed", { file: s.tableFile });
+    }
+  });
+  return () => {
+    setPluginTableAccess(null);
+    setPluginTableRuntimeAccess(null);
+    offChange();
+  };
 }
 
 /** 样式增量合并：patch 中**显式出现**的键才处理（值 undefined = 清除该项，真值 = 设置），

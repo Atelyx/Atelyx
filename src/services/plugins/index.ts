@@ -106,6 +106,7 @@ export type {
   PluginContributionEntry,
   PluginRuntimeEntry,
   PluginStreamSink,
+  PluginTableRuntimeAccess,
 } from "./bridge";
 export {
   exposePluginFacade,
