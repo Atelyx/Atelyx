@@ -4,10 +4,11 @@
  * - 已添加（最近打开）仓库列表：点击切换（当前仓库高亮禁用）
  * - 分隔线下方「管理仓库」→ 返回启动页（VaultSelectPage）
  * 弹层 = `PopupLayer` 统一壳（向下弹出 + 下方空间不足向上翻转，minWidth = 按钮宽）。
- * 切换仓库进行中（`appStore.switchingVault`）：按钮转圈 + 禁用，防重复切换。
+ * 切换仓库期间工作区被全屏加载屏覆盖（appStore.entryLoading），无重复切换入口；
+ * 点击当前仓库由 root === vaultRoot 守卫拦截。
  * 分层：只读 appStore + 调 selectVault / backToVaultSelect（store 内完成 openVault/watcher/登记）。
  */
-import { Check, ChevronDown, Library, Loader2 } from "lucide-react";
+import { Check, ChevronDown, Library } from "lucide-react";
 import { useRef } from "react";
 import { useAppStore } from "@/stores/appStore";
 import { PopupLayer } from "@/components/common/PopupLayer";
@@ -17,7 +18,6 @@ export function VaultSwitcher() {
   const recentVaults = useAppStore((s) => s.recentVaults);
   const vaultRoot = useAppStore((s) => s.vaultRoot);
   const vaultName = useAppStore((s) => s.vaultName);
-  const switchingVault = useAppStore((s) => s.switchingVault);
   const selectVault = useAppStore((s) => s.selectVault);
   const backToVaultSelect = useAppStore((s) => s.backToVaultSelect);
 
@@ -26,8 +26,8 @@ export function VaultSwitcher() {
 
   const switchTo = async (root: string) => {
     close();
-    // 读条期间禁再次切换（getState 实时读，防闭包值在重渲染前过期）
-    if (useAppStore.getState().switchingVault || root === vaultRoot) return;
+    // 点击当前仓库 = no-op（防重复进入；切换中由全屏加载屏兜底）
+    if (root === vaultRoot) return;
     await selectVault(root);
   };
 
@@ -36,17 +36,12 @@ export function VaultSwitcher() {
       <button
         ref={barRef}
         onClick={toggle}
-        disabled={switchingVault}
-        className="flex items-center gap-1.5 px-2 h-8 rounded-md hover:bg-[var(--hover)] disabled:hover:bg-transparent disabled:cursor-default flex-shrink-0 min-w-0"
+        className="flex items-center gap-1.5 px-2 h-8 rounded-md hover:bg-[var(--hover)] flex-shrink-0 min-w-0"
         style={{ color: "var(--text-secondary)" }}
-        title={switchingVault ? "正在切换仓库…" : "切换仓库"}
+        title="切换仓库"
         data-tauri-drag-region="false"
       >
-        {switchingVault ? (
-          <Loader2 size={13} className="animate-spin flex-shrink-0" />
-        ) : (
-          <Library size={13} className="flex-shrink-0" />
-        )}
+        <Library size={13} className="flex-shrink-0" />
         <span
           className="flex-1 min-w-0 truncate text-xs text-left max-w-[140px]"
           style={{ color: "var(--text-primary)" }}

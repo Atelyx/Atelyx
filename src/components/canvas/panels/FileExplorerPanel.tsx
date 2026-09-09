@@ -20,7 +20,6 @@ import {
   ArrowUpDown,
   ChevronsDownUp,
   ChevronsUpDown,
-  Loader2,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useAppStore } from "@/stores/appStore";
@@ -84,8 +83,6 @@ export function FileExplorerPanel({ onOpenCanvasFile, onOpenNoteForEdit, onOpenT
 
   const canvases = useAppStore((s) => s.canvases);
   const currentCanvasFile = useAppStore((s) => s.currentCanvasFile);
-  // 切换仓库读条：树已清空等待新仓库数据时显示加载占位（防残留旧仓库文件树）
-  const switchingVault = useAppStore((s) => s.switchingVault);
   const deleteCanvas = useAppStore((s) => s.deleteCanvas);
 
   // 展开集合（初始空 = 默认全部折叠：进入仓库只显示顶层文件夹；点文件夹展开）。
@@ -221,41 +218,30 @@ export function FileExplorerPanel({ onOpenCanvasFile, onOpenNoteForEdit, onOpenT
           setMenu({ x: e.clientX, y: e.clientY, target: { kind: "folder", dir: "" } });
         }}
       >
-        {/* 切换仓库中：树已被清空（旧仓库内容不残留），显示加载占位直到新仓库数据就绪 */}
-        {switchingVault ? (
-          <div
-            className="flex items-center gap-1.5 px-3 py-2 text-xs"
-            style={{ color: "var(--text-muted)" }}
-          >
-            <Loader2 size={12} className="animate-spin flex-shrink-0" />
-            正在加载仓库…
-          </div>
-        ) : (
-          <ul>
-            <FileTree
-              nodes={tree}
-              depth={0}
-              parentDir=""
-              sortKey={sortKey}
-              expanded={expanded}
-              toggleExpanded={toggleExpanded}
-              editing={editing}
-              onEditingChange={setEditing}
-              onCommitEditing={commitEditing}
-              dropDir={dropDir}
-              folderColors={folderColors}
-              currentCanvasFile={currentCanvasFile}
-              openedNoteFile={openedNoteFile}
-              openedTableFile={openedTableFile}
-              canvasRowOf={canvasRowOf}
-              startPotentialDrag={startPotentialDrag}
-              onOpenCanvasFile={onOpenCanvasFile}
-              onOpenNoteForEdit={onOpenNoteForEdit}
-              onOpenTableFile={onOpenTableFile}
-              onOpenMenu={openMenu}
-            />
-          </ul>
-        )}
+        <ul>
+          <FileTree
+            nodes={tree}
+            depth={0}
+            parentDir=""
+            sortKey={sortKey}
+            expanded={expanded}
+            toggleExpanded={toggleExpanded}
+            editing={editing}
+            onEditingChange={setEditing}
+            onCommitEditing={commitEditing}
+            dropDir={dropDir}
+            folderColors={folderColors}
+            currentCanvasFile={currentCanvasFile}
+            openedNoteFile={openedNoteFile}
+            openedTableFile={openedTableFile}
+            canvasRowOf={canvasRowOf}
+            startPotentialDrag={startPotentialDrag}
+            onOpenCanvasFile={onOpenCanvasFile}
+            onOpenNoteForEdit={onOpenNoteForEdit}
+            onOpenTableFile={onOpenTableFile}
+            onOpenMenu={openMenu}
+          />
+        </ul>
       </div>
 
       {/* 拖拽幽灵（pointer 模拟拖拽时跟随鼠标；下方追加悬停目标的动作提示） */}

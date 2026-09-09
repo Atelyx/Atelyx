@@ -741,8 +741,18 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
           return { plugins: next };
         });
       }
-      for (const id of depResult.spawnable) {
+      // 进仓/启动加载会话中逐插件上报进度（含序号/总数）；非进仓上下文（回启动页/安装更新
+      // 收尾）entryLoading 为假不上报，加载屏步骤列表不会被无关操作污染。
+      const spawnable = depResult.spawnable;
+      const total = spawnable.length;
+      for (let i = 0; i < spawnable.length; i++) {
         if (seq !== loadSeq) return;
+        const id = spawnable[i];
+        if (useAppStore.getState().entryLoading) {
+          useAppStore.getState().reportLoad(
+            `加载插件：${get().plugins[id]?.manifest.name ?? id}（${i + 1}/${total}）`,
+          );
+        }
         await spawn(id);
       }
     },

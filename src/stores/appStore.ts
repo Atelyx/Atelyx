@@ -74,8 +74,16 @@ interface AppState {
   vaultRoot: string | null;
   /** 当前仓库名（显示用） */
   vaultName: string;
-  /** 切换仓库进行中（标题栏读条：覆盖 openVault + 文件树/画布列表/AI 会话加载完成，快速连切只认最后一次）。 */
-  switchingVault: boolean;
+  /** 全屏加载进行中（boot 异步 + selectVault 全程；App 据此渲染加载屏，插件逐项上报据此门控）。 */
+  entryLoading: boolean;
+  /** 加载步骤清单（已完成 + 当前进行中的标签，顺序；LoadingScreen 渲染步骤提示）。 */
+  loadSteps: string[];
+  /** 开始一次加载会话（幂等：已激活不重置；boot 先 begin，selectVault 复用）。 */
+  beginLoad: () => void;
+  /** 上报一个加载步骤（追加到步骤清单，最后一项 = 当前进行中）。 */
+  reportLoad: (label: string) => void;
+  /** 结束加载会话（幂等；只收 active，步骤清单保留到下一次 beginLoad 重置）。 */
+  endLoad: () => void;
   /** 当前仓库稳定 ID（`.atelyx/config.json` 的 vaultId；chatPanelStore 等据此识别仓库归属）。 */
   vaultId: string | null;
   /** 最近打开的仓库列表（按最近打开倒序） */
@@ -227,7 +235,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   pluginPage: null,
   vaultRoot: null,
   vaultName: "",
-  switchingVault: false,
+  entryLoading: false,
+  loadSteps: [],
   vaultId: null,
   recentVaults: [],
   currentCanvasId: null,
@@ -243,7 +252,17 @@ export const useAppStore = create<AppState>((set, get) => ({
   updateError: "",
   installing: false,
 
+  // 加载会话三方法：进仓/启动期间由 App boot 与 selectVault 调用，
+  // LoadingScreen 订阅 loadSteps 渲染步骤清单（已完成打勾、最后一项 = 当前进行中）。
+  // endLoad 只收 active 不清 steps：boot 内 selectVault 先收尾时步骤仍保留展示，
+  // 下一次 beginLoad 才重置清单。
+  beginLoad: () =>
+    set((s) => (s.entryLoading ? s : { entryLoading: true, loadSteps: [] })),
+  reportLoad: (label) => set((s) => ({ loadSteps: [...s.loadSteps, label] })),
+  endLoad: () => set({ entryLoading: false }),
+
   init: async (): Promise<string | null> => {
+    get().reportLoad("读取全局配置");
     let recents: RecentVault[] = [];
     let autoEnterRoot: string | null = null;
     let autoUpdate = false;
@@ -275,8 +294,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       view: "vaultSelect",
       autoUpdate: autoUpdate,
     });
-    // 应用级 UI 使用状态（布局/展开/上次文件）启动加载一次，之后跨仓库共享
-    void useUiStateStore.getState().load();
+    // 应用级 UI 使用状态（布局/展开/上次文件）启动加载一次，之后跨仓库共享。
+    // 等待完成：进仓门控「全部加载完再进入」涵盖布局状态，恢复上次打开文件依赖 loaded。
+    get().reportLoad("加载布局与使用状态");
+    await useUiStateStore.getState().load();
     return autoEnterRoot;
   },
 
@@ -328,9 +349,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   selectVault: async (root) => {
-    // 快速连续切换时仅最后一次调用有权清读条（finally 守卫）
+    // 快速连续切换时仅最后一次调用有权 endLoad（finally 守卫）
     const seq = ++vaultSwitchSeq;
-    set({ switchingVault: true });
+    // 全屏加载会话：进入仓库期间逐步上报加载项；boot 已 begin 时幂等不重置
+    get().beginLoad();
+    get().reportLoad("打开仓库");
     try {
       // 切换前先落盘旧仓库的全部编辑并**等待写盘完成**：openVault 会把 VaultState.root 切到新仓库，
       // 若 fire-and-forget 直接放行，写盘可能晚于 open_vault 执行、把旧仓库内容写进新仓库（跨仓库污染）。
@@ -348,12 +371,12 @@ export const useAppStore = create<AppState>((set, get) => ({
       // set + 清空须在下一个 await 之前同步完成，双保险防跨仓库写入：
       // 1) NoteEditor debounce timer 是 macrotask，openVault→set 间无 await 则无隙可乘；
       // 2) 清空 noteList 先于 React 提交卸载（见下方注释），cleanup 的 stillExists 守卫必跳过。
+      // 注意 view 不在此切：进仓门控「全部加载完（含插件）再进入仓库」，工作区视图在末尾统一切换
       set({
         vaultRoot: info.root,
         vaultName: info.name,
         vaultId: info.id,
         recentVaults: recents,
-        view: "workspace",
         canvases: [],
         currentCanvasId: null,
         currentCanvasFile: null,
@@ -378,17 +401,20 @@ export const useAppStore = create<AppState>((set, get) => ({
         console.error("登记最近仓库失败", e);
       }
       // 加载仓库级配置覆盖（.atelyx/config.json），需在发消息前完成
+      get().reportLoad("加载仓库配置");
       await useSettingsStore.getState().loadVaultConfig();
       // 切换仓库：清空旧画布运行时状态（防残留 saveTimer 跨仓库写盘/旧消息残留）
       useCanvasStore.getState().resetCanvasState();
-      // 文件树/画布列表/AI 会话随切换等待完成：读条覆盖到数据就绪，避免切换后面板仍显示旧仓库内容。
-      // 工作区视图在 set() 已立即切换（不阻塞显示）；各自独立 try——任一加载失败不连带跳过其余
-      // （尤其 AI 会话加载不能被文件树失败跳过，否则历史/当前会话停留在旧仓库）
+      // 文件树/画布列表/AI 会话随切换等待完成：门控「全部加载完再进入」，加载屏覆盖到数据就绪。
+      // 各自独立 try——任一加载失败不连带跳过其余（尤其 AI 会话加载不能被文件树失败跳过，
+      // 否则历史/当前会话停留在旧仓库）
+      get().reportLoad("加载文件树与画布列表");
       try {
         await refreshCanvasAndTree();
       } catch (e) {
         console.error("加载文件树/画布列表失败", e);
       }
+      get().reportLoad("加载 AI 会话");
       try {
         // force：真实仓库切换，强制重读盘（防 sessionVaultId 巧合等于目标时被幂等守卫跳过，
         // 面板停留在旧仓库会话）
@@ -397,19 +423,22 @@ export const useAppStore = create<AppState>((set, get) => ({
         console.error("加载 AI 对话会话失败", e);
       }
       // 插件平台：切仓库后全量重载（load 内部先卸载旧贡献，再按新仓库上下文重建 app+vault 插件）；
-      // 加载完成后再广播 vault:switch，保证订阅方是已就绪的后台插件。
+      // 加载完成后再切工作区视图 + 广播 vault:switch，保证订阅方是已就绪的后台插件。
+      get().reportLoad("加载插件");
       try {
         await usePluginStore.getState().load();
       } catch (e) {
         console.error("加载插件失败", e);
       }
+      // 全部加载完成（含插件）才进入仓库：切换工作区视图，窗口形态随 view 统一应用
+      set({ view: "workspace" });
       emitPluginEvent("vault:switch", { root: info.root, id: info.id });
       return true;
     } catch (e) {
       console.error("打开仓库失败", e);
       return false;
     } finally {
-      if (seq === vaultSwitchSeq) set({ switchingVault: false });
+      if (seq === vaultSwitchSeq) get().endLoad();
     }
   },
 

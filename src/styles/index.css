@@ -826,6 +826,18 @@ input[type="number"]::-webkit-inner-spin-button {
   animation: sweep-slide 1.2s linear infinite;
 }
 
+/* 加载步骤条目入场：底部锚定堆叠，新条目轻入推挤旧条目上移（顶部渐变遮罩淡出） */
+@keyframes load-step-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 /* ===== 工作区面板网格 ===== */
 /* 边 resize 手柄：方向由 PanelGroup 的 data 属性决定（水平分割 = 竖边，垂直分割 = 横边） */
 [data-panel-group-direction="horizontal"] > [data-panel-resize-handle-enabled] {

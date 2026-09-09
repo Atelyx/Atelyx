@@ -46,8 +46,6 @@ export function VaultSelectPage() {
   const [version, setVersion] = useState("");
   const [menu, setMenu] = useState<VaultMenuState | null>(null);
   const [confirmingRoot, setConfirmingRoot] = useState<string | null>(null);
-  // 切换仓库读条（store 级：覆盖 selectVault 全程，含文件树/画布列表/AI 会话加载完成）
-  const switchingVault = useAppStore((s) => s.switchingVault);
 
   useEffect(() => {
     void getAppVersion().then(setVersion).catch(() => {});
@@ -145,7 +143,7 @@ export function VaultSelectPage() {
             title="打开仓库"
             desc="选择一个文件夹作为仓库打开。"
             onAction={() => void pickAndOpenVault()}
-            busy={busy || switchingVault}
+            busy={busy}
           />
         </div>
 
@@ -170,7 +168,7 @@ export function VaultSelectPage() {
                   <div className="flex items-center gap-2">
                     <button
                       onClick={() => void selectVault(v.root)}
-                      disabled={busy || switchingVault}
+                      disabled={busy}
                       className="flex-1 min-w-0 flex items-center gap-2 text-left"
                       title={v.name}
                     >
@@ -213,7 +211,7 @@ export function VaultSelectPage() {
                   </div>
                   <button
                     onClick={() => void selectVault(v.root)}
-                    disabled={busy || switchingVault}
+                    disabled={busy}
                     className="block w-full mt-1.5 text-left"
                     title={v.root}
                   >
