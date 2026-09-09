@@ -54,6 +54,22 @@ export interface PluginTableViewRegistration {
   component: ComponentType;
 }
 
+/** 主题插件设置项组件 props（主题页设置区：绑定该插件条目的设置值字典）。 */
+export interface ThemeSettingComponentProps {
+  /** 该插件条目的设置值字典（含预置键 colorMode/accentColor 与插件自定义键）。 */
+  value: Record<string, unknown>;
+  /** 写设置项（value = undefined 删除键恢复默认；落盘 global.json）。 */
+  onChange: (key: string, value: unknown) => void;
+}
+
+/** 主题插件设置项注册（主题页设置区：激活该插件时渲染其设置区块；键 pluginId 内唯一）。 */
+export interface ThemeSettingRegistration {
+  pluginId: string;
+  key: string;
+  label: string;
+  component: ComponentType<ThemeSettingComponentProps>;
+}
+
 /** 通用扩展点注册（主线程平面）：point → 条目；现有 register* 是它的特化（类型化便捷入口）。 */
 export interface PluginUiContribution {
   pluginId: string;
@@ -86,6 +102,7 @@ const nodes = new Map<string, PluginNodeRegistration>(); // type → 注册
 const edges = new Map<string, PluginEdgeRegistration>(); // type → 注册
 const commands = new Map<string, PluginCommandRegistration>(); // `${pluginId}:${id}` → 注册
 const tableViews = new Map<string, PluginTableViewRegistration>(); // kind → 注册
+const themeSettings = new Map<string, ThemeSettingRegistration>(); // `${pluginId}:${key}` → 注册
 const uiContributions = new Map<string, PluginUiContribution>(); // `${point}:${pluginId}${id ? ":"+id : ""}` → 注册
 
 const listeners = new Set<() => void>();
@@ -130,6 +147,10 @@ export function getPluginTableView(kind: string): PluginTableViewRegistration | 
 }
 export function getPluginTableViews(): PluginTableViewRegistration[] {
   return [...tableViews.values()];
+}
+/** 某主题插件的设置项注册（主题页设置区渲染用；空 = 该插件无自定义设置项）。 */
+export function getPluginThemeSettings(pluginId: string): ThemeSettingRegistration[] {
+  return [...themeSettings.values()].filter((s) => s.pluginId === pluginId);
 }
 
 /** 某视图的贡献（内置 + 插件面板统一查找；ViewHost 分派 / 视图菜单元数据用）。 */
@@ -241,6 +262,15 @@ function registerTableView(
   tableViews.set(kind, { pluginId, kind, label, component });
   notify();
 }
+function registerThemeSetting(
+  pluginId: string,
+  key: string,
+  label: string,
+  component: ComponentType<ThemeSettingComponentProps>,
+): void {
+  themeSettings.set(`${pluginId}:${key}`, { pluginId, key, label, component });
+  notify();
+}
 
 /** 通用扩展点注册（payload 直接持有引用——主线程同域，无需序列化）。 */
 function registerContribution(pluginId: string, point: string, id: string | undefined, payload: unknown): void {
@@ -263,6 +293,7 @@ export function unregisterPluginUi(pluginId: string): void {
   for (const [k, v] of edges) if (v.pluginId === pluginId) changed = edges.delete(k) || changed;
   for (const [k, v] of commands) if (v.pluginId === pluginId) changed = commands.delete(k) || changed;
   for (const [k, v] of tableViews) if (v.pluginId === pluginId) changed = tableViews.delete(k) || changed;
+  for (const [k, v] of themeSettings) if (v.pluginId === pluginId) changed = themeSettings.delete(k) || changed;
   for (const [k, v] of uiContributions) if (v.pluginId === pluginId) changed = uiContributions.delete(k) || changed;
   if (changed) notify();
 }
@@ -301,6 +332,22 @@ export function getPluginVaultAccess(): VaultAccess | null {
   return vaultAccess;
 }
 
+/** 主题插件设置项访问（facade 的 getThemeSettings/setThemeSetting 经它转发；pluginStore 接线注入
+ *  settingsStore——ui.ts 保持不 import store，分层：store 经此把该插件条目的设置值暴露给主线程插件）。 */
+export interface PluginThemeSettingsAccess {
+  /** 读某主题插件条目的设置值字典（含预置键 colorMode/accentColor 与插件自定义键）。 */
+  getSettings(pluginId: string): Record<string, unknown>;
+  /** 写某主题插件条目的设置项（value = undefined 删除键恢复默认；落盘 global.json，失败仅记日志）。 */
+  setSetting(pluginId: string, key: string, value: unknown): void;
+}
+
+let themeSettingsAccess: PluginThemeSettingsAccess | null = null;
+
+/** 注入/复位主题设置项访问（pluginStore.load 时接线；null 复位供测试）。 */
+export function setPluginThemeSettingsAccess(access: PluginThemeSettingsAccess | null): void {
+  themeSettingsAccess = access;
+}
+
 /** 插件主线程 facade（插件代码经 `window.__atelyxPlugin__.forPlugin(id)` 取得）。 */
 export interface PluginMainThreadFacade {
   React: typeof React;
@@ -312,6 +359,16 @@ export interface PluginMainThreadFacade {
   registerEdge(opts: { type: string; component: ComponentType }): void;
   registerCommand(opts: { id: string; label: string; run: () => unknown }): void;
   registerTableView(opts: { kind: string; label: string; component: ComponentType }): void;
+  /** 注册主题设置项（主题页设置区渲染：激活该主题插件时展示其设置区块；props 绑定该插件条目的设置值字典）。 */
+  registerThemeSetting(opts: {
+    key: string;
+    label: string;
+    component: ComponentType<ThemeSettingComponentProps>;
+  }): void;
+  /** 读本插件条目的主题设置值字典（未接线返回空对象）。 */
+  getThemeSettings(): Record<string, unknown>;
+  /** 写本插件条目的主题设置项（value = undefined 删除键恢复默认；落盘 global.json，失败仅记日志）。 */
+  setThemeSetting(key: string, value: unknown): void;
   /** 通用扩展点注册（point 为任意字符串；payload 直接持有引用，可含组件/函数）。 */
   registerContribution(opts: { point: string; id?: string; payload: unknown }): void;
   /** 订阅当前打开的表格的数据快照（tableStore 为应用级单例，撕裂窗口同源；立即推一次 + 变更推；返回退订函数）。 */
@@ -351,6 +408,9 @@ export function exposePluginFacade(): void {
       registerEdge: (o) => registerEdge(pluginId, o.type, o.component),
       registerCommand: (o) => registerCommand(pluginId, o.id, o.label, o.run),
       registerTableView: (o) => registerTableView(pluginId, o.kind, o.label, o.component),
+      registerThemeSetting: (o) => registerThemeSetting(pluginId, o.key, o.label, o.component),
+      getThemeSettings: () => (themeSettingsAccess ? themeSettingsAccess.getSettings(pluginId) : {}),
+      setThemeSetting: (key, value) => themeSettingsAccess?.setSetting(pluginId, key, value),
       registerContribution: (o) => registerContribution(pluginId, o.point, o.id, o.payload),
       subscribeTableData: (cb) => (tableAccess ? tableAccess.subscribeSnapshot(cb) : () => {}),
       selectTableRow: (rowId) => tableAccess?.selectRow(rowId),

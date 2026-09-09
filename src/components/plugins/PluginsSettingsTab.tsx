@@ -15,6 +15,7 @@ import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 import { ToggleSwitch } from "@/components/common/ToggleSwitch";
 import { MarketplaceSection } from "@/components/plugins/MarketplaceSection";
 import { deriveComposition } from "@/utils/pluginComposition";
+import { deriveThemeProviders, isThemePluginRow } from "@/utils/pluginTheme";
 import { errText } from "@/types";
 import { PLUGIN_SCOPE_LABELS, PLUGIN_SOURCE_LABELS, PLUGIN_TYPE_LABELS } from "@/constants/plugins";
 
@@ -45,6 +46,13 @@ export function PluginsSettingsTab() {
   const allRows = Object.values(plugins).sort((a, b) => (a.id < b.id ? -1 : 1));
   const builtinRows = allRows.filter((p) => p.sourceKind === "builtin");
   const installedRows = allRows.filter((p) => p.sourceKind !== "builtin");
+  // 主题插件守恒（与 Rust 命令校验双保险）：主题插件必须至少保留一个启用——
+  // 停用/卸载「当前启用且为最后一个」的主题插件时禁用操作并附提示。
+  // 判定口径与 Rust plugin_is_theme 一致（isThemePluginRow 排除内置基底重名条目）。
+  const enabledThemeCount = deriveThemeProviders(allRows).providers.length;
+  const isLastEnabledTheme = (p: (typeof allRows)[number]) =>
+    isThemePluginRow(p) && p.enabled && enabledThemeCount <= 1;
+  const LAST_THEME_HINT = "至少保留一个主题插件（可先启用/安装其他主题插件）";
   // 装配视图推导：默认集（官方内置插件） × 已装/启用 → 已卸载的默认成员（灰行 + 恢复入口）。
   const installedForComposition: Record<string, { name: string; enabled: boolean }> = {};
   for (const p of allRows) installedForComposition[p.id] = { name: p.manifest.name, enabled: p.enabled };
@@ -206,12 +214,19 @@ export function PluginsSettingsTab() {
               <ToggleSwitch
                 checked={p.enabled}
                 onChange={(on) => void setEnabled(p.id, on).catch((e) => setNotice({ kind: "error", text: errText(e) }))}
-                title={p.enabled ? "停用" : "启用"}
+                title={isLastEnabledTheme(p) ? LAST_THEME_HINT : p.enabled ? "停用" : "启用"}
+                disabled={isLastEnabledTheme(p)}
               />
               <button
-                onClick={() => setConfirmUninstall(p.id)}
-                title="卸载"
-                className="p-1.5 rounded hover:bg-[var(--hover)]"
+                onClick={() => {
+                  if (isLastEnabledTheme(p)) return;
+                  setConfirmUninstall(p.id);
+                }}
+                aria-disabled={isLastEnabledTheme(p)}
+                title={isLastEnabledTheme(p) ? LAST_THEME_HINT : "卸载"}
+                className={`p-1.5 rounded ${
+                  isLastEnabledTheme(p) ? "opacity-50" : "hover:bg-[var(--hover)]"
+                }`}
                 style={{ color: "var(--text-muted)" }}
               >
                 <Trash2 size={14} />
@@ -307,8 +322,9 @@ export function PluginsSettingsTab() {
                 </div>
                 <ToggleSwitch
                   checked={p.enabled}
-                  onChange={(on) => void setEnabled(p.id, on)}
-                  title={p.enabled ? "停用" : "启用"}
+                  onChange={(on) => void setEnabled(p.id, on).catch((e) => setNotice({ kind: "error", text: errText(e) }))}
+                  title={isLastEnabledTheme(p) ? LAST_THEME_HINT : p.enabled ? "停用" : "启用"}
+                  disabled={isLastEnabledTheme(p)}
                 />
                 {p.sourceKind !== "local" && (
                   <button
@@ -321,9 +337,15 @@ export function PluginsSettingsTab() {
                   </button>
                 )}
                 <button
-                  onClick={() => setConfirmUninstall(p.id)}
-                  title="卸载"
-                  className="p-1.5 rounded hover:bg-[var(--hover)]"
+                  onClick={() => {
+                    if (isLastEnabledTheme(p)) return;
+                    setConfirmUninstall(p.id);
+                  }}
+                  aria-disabled={isLastEnabledTheme(p)}
+                  title={isLastEnabledTheme(p) ? LAST_THEME_HINT : "卸载"}
+                  className={`p-1.5 rounded ${
+                    isLastEnabledTheme(p) ? "opacity-50" : "hover:bg-[var(--hover)]"
+                  }`}
                   style={{ color: "var(--text-muted)" }}
                 >
                   <Trash2 size={14} />
@@ -397,7 +419,9 @@ export function PluginsSettingsTab() {
           title={`卸载插件「${plugins[confirmUninstall]?.manifest.name ?? confirmUninstall}」`}
           description={
             plugins[confirmUninstall]?.sourceKind === "builtin"
-              ? "将移除该默认插件（随 App 分发；可经「恢复默认装配」重新装回）。其视图随即从工作区移除。"
+              ? isThemePluginRow(plugins[confirmUninstall]!)
+                ? "将移除该默认主题插件（随 App 分发；可经「恢复默认装配」重新装回）。主题随即切回剩余的主题插件。"
+                : "将移除该默认插件（随 App 分发；可经「恢复默认装配」重新装回）。其视图随即从工作区移除。"
               : plugins[confirmUninstall]?.sourceKind === "local"
                 ? "将移除该插件的目录链接，本地源目录本身不受影响。插件贡献的功能随即移除。"
                 : "将删除插件目录与本地状态，插件贡献的功能随即移除。此操作不可撤销。"

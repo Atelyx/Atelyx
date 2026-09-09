@@ -37,10 +37,14 @@ pub struct GlobalConfig {
     /// 自动检查更新（应用级）：开启后每次启动应用静默检查新版本并自动安装。缺省 None = 关闭。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_update: Option<bool>,
-    /// 应用级主题："light" | "dark" | "system"。缺失时前端默认 "dark"。
+    /// 应用级激活的主题插件 id（旧值 "light" | "dark" | "system" 由前端读时迁移为
+    /// 内置主题插件 + 深浅模式设置）。缺失时前端默认内置主题插件。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theme: Option<String>,
-    /// 应用级强调色（hex，如 "#d4af37"；缺省 = 默认金色）。
+    /// 各主题插件的设置项值字典（键 = 插件 id；预置键 colorMode/accentColor + 插件自定义键）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme_settings: Option<std::collections::BTreeMap<String, std::collections::BTreeMap<String, serde_json::Value>>>,
+    /// 旧版应用级强调色（hex，如 "#d4af37"；前端读时迁移进 theme_settings 内置条目，迁移后不再写入）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accent_color: Option<String>,
     /// 应用级界面基础字号（px，覆盖 :root font-size；缺省 = 18）。

@@ -34,6 +34,7 @@ import {
   getPluginNodes,
   getPluginSetting,
   getPluginSettings,
+  getPluginThemeSettings,
   getPluginTableView,
   getPluginTableViews,
   getViewContribution,
@@ -64,6 +65,7 @@ import {
   setPluginCollabAccess,
   setPluginTableAccess,
   setPluginTableRuntimeAccess,
+  setPluginThemeSettingsAccess,
   setPluginVaultAccess,
   setPluginVaultWriteAccess,
   setSettingsAccess,
@@ -82,6 +84,7 @@ import type {
   PluginSettingRegistration,
   PluginTableAccess,
   PluginTableViewRegistration,
+  ThemeSettingRegistration,
   ViewContribution,
 } from "@/services/plugins";
 import { BUILTIN_VIEWS } from "@/components/plugins/builtinViews";
@@ -163,6 +166,8 @@ interface PluginStoreState {
   /** 插件设置项注册（设置页 tab 合并）。 */
   pluginSettings(): PluginSettingRegistration[];
   pluginSetting(key: string): PluginSettingRegistration | undefined;
+  /** 某主题插件的设置项注册（主题页设置区渲染用；经 store 中转，组件不直连 services）。 */
+  pluginThemeSettings(pluginId: string): ThemeSettingRegistration[];
   /** 插件画布节点注册（CanvasView nodeTypes 合并）。 */
   pluginNode(type: string): PluginNodeRegistration | undefined;
   /** 插件画布节点组件表（nodeTypes 合并用：type → component）。 */
@@ -307,6 +312,21 @@ function ensureVaultAccess(): void {
     openCanvasFile: (row) => useAppStore.getState().openCanvas(row),
     openNote: (file, title) => useAppStore.getState().openNote(file, title),
     openTable: (file, title) => useAppStore.getState().openTable(file, title),
+  });
+}
+
+/** 插件侧主题设置项访问接线守卫（load 时接线，幂等一次）。
+ *  把该插件条目的设置值字典与写入口暴露给主线程插件（facade 的 getThemeSettings/setThemeSetting）。
+ *  store 访问延迟到回调内 getState()（与 ensureTableAccess 同模式，防模块环顶层触碰）。 */
+let themeSettingsAccessWired = false;
+function ensureThemeSettingsAccess(): void {
+  if (themeSettingsAccessWired) return;
+  themeSettingsAccessWired = true;
+  setPluginThemeSettingsAccess({
+    getSettings: (pluginId) => useSettingsStore.getState().themeSettings[pluginId] ?? {},
+    setSetting: (pluginId, key, value) => {
+      void useSettingsStore.getState().setThemeSetting(pluginId, key, value);
+    },
   });
 }
 
@@ -558,6 +578,17 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
     try {
       // 内置插件：实现随宿主编译（无入口文件/无桥运行时），启用 = 注册宿主视图贡献。
       if (p.sourceKind === "builtin") {
+        // 主题类内置插件 = 纯声明式（无视图载荷）：只置 active 供主题系统派生消费。
+        // 前提：当前内置主题插件不携带其他代码类型；未来若出现 theme+panel 复合内置，
+        // 此短路会漏注册视图载荷，需改为按类型分别处理。
+        if (pluginTypeList(p.manifest).some((t) => t === "theme")) {
+          set((s) => {
+            const cur = s.plugins[id];
+            if (!cur) return s;
+            return { plugins: { ...s.plugins, [id]: { ...cur, phase: "active" } } };
+          });
+          return;
+        }
         let registered = 0;
         for (const v of BUILTIN_VIEWS) {
           if (v.pluginId === id) {
@@ -674,6 +705,7 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
       ensureCollabRuntimeAccess();
       ensureCanvasRuntimeAccess();
       ensureSettingsAccess();
+      ensureThemeSettingsAccess();
       ensureRuntimeChangeEvents();
       const seq = ++loadSeq;
       const [rows, defaults] = await Promise.all([pluginList(), pluginDefaultPlugins()]);
@@ -749,9 +781,11 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
     uninstall: async (id) => {
       const p = get().plugins[id];
       if (!p) return;
+      // Rust 先行（含守恒校验等拒绝路径）：失败抛错时本地运行时保持完好、状态一致；
+      // 成功后再清理本地运行时与贡献，删除 store 行。
+      await pluginUninstall(id, p.scope);
       unloadPlugin(id);
       unregisterPluginUi(id);
-      await pluginUninstall(id, p.scope);
       set((s) => {
         const plugins = { ...s.plugins };
         delete plugins[id];
@@ -796,6 +830,7 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
 
     pluginSettings: () => getPluginSettings(),
     pluginSetting: (key) => getPluginSetting(key),
+    pluginThemeSettings: (pluginId) => getPluginThemeSettings(pluginId),
     pluginNode: (type) => getPluginNode(type),
     pluginNodeTypes: () => {
       const out: Record<string, ComponentType> = {};

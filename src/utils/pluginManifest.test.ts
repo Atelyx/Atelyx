@@ -141,20 +141,41 @@ describe("validatePluginManifest", () => {
     expect(result.manifest.contributes?.settings).toBeUndefined();
     expect(result.manifest.contributes?.commands?.some((c) => c.id === "hi")).toBe(true);
   });
-  it("theme 声明式皮肤解析与结构校验", () => {
+  it("themes 声明式主题条目解析与结构校验", () => {
     const ok = validatePluginManifest({
       ...validManifest(),
       type: "theme",
-      theme: { variables: { "--accent": "#7c3aed", bg: "#111" }, dark: { "--bg": "#000" } },
+      themes: [
+        { id: "nord-light", name: "Nord 浅色", colorScheme: "light", variables: { "--accent": "#7c3aed", bg: "#111" } },
+        { id: "nord-dark", name: "Nord 深色", colorScheme: "dark", variables: {} },
+      ],
     });
     expect(ok.ok).toBe(true);
     if (!ok.ok) return;
-    expect(ok.manifest.theme?.variables).toEqual({ "--accent": "#7c3aed", bg: "#111" });
-    expect(ok.manifest.theme?.dark).toEqual({ "--bg": "#000" });
+    expect(ok.manifest.themes).toEqual([
+      { id: "nord-light", name: "Nord 浅色", colorScheme: "light", variables: { "--accent": "#7c3aed", bg: "#111" } },
+      { id: "nord-dark", name: "Nord 深色", colorScheme: "dark", variables: {} },
+    ]);
 
-    expect(validatePluginManifest({ ...validManifest(), theme: { variables: "x" } }).ok).toBe(false);
-    expect(validatePluginManifest({ ...validManifest(), theme: [] }).ok).toBe(false);
-    expect(validatePluginManifest({ ...validManifest(), theme: { dark: "x" } }).ok).toBe(false);
+    expect(validatePluginManifest({ ...validManifest(), themes: "x" }).ok).toBe(false);
+    expect(validatePluginManifest({ ...validManifest(), themes: [] }).ok).toBe(false);
+    expect(validatePluginManifest({ ...validManifest(), themes: [{ id: "a", name: "A", colorScheme: "blue", variables: {} }] }).ok).toBe(false);
+    expect(
+      validatePluginManifest({
+        ...validManifest(),
+        themes: [
+          { id: "a", name: "A", colorScheme: "light", variables: {} },
+          { id: "a", name: "B", colorScheme: "dark", variables: {} },
+        ],
+      }).ok,
+    ).toBe(false);
+  });
+  it("themeOptions 预置设置项声明解析", () => {
+    const ok = validatePluginManifest({ ...validManifest(), themes: [{ id: "a", name: "A", colorScheme: "light", variables: {} }], themeOptions: { accent: true } });
+    expect(ok.ok).toBe(true);
+    if (!ok.ok) return;
+    expect(ok.manifest.themeOptions).toEqual({ accent: true });
+    expect(validatePluginManifest({ ...validManifest(), themeOptions: { accent: "yes" } }).ok).toBe(false);
   });
 });
 
@@ -202,12 +223,12 @@ describe("theme 免 main（纯主题插件无需入口）", () => {
       name: "暗色皮肤",
       version: "1.0.0",
       type: "theme",
-      theme: { variables: { bg: "#000" } },
+      themes: [{ id: "dark", name: "深色", colorScheme: "dark", variables: { bg: "#000" } }],
     });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.manifest.main).toBeUndefined();
-    expect(r.manifest.theme?.variables).toEqual({ bg: "#000" });
+    expect(r.manifest.themes?.[0].variables).toEqual({ bg: "#000" });
   });
   it("非 theme（tool）插件缺 main 拒绝", () => {
     expect(validatePluginManifest({ ...validManifest(), main: undefined }).ok).toBe(false);
@@ -218,7 +239,7 @@ describe("theme 免 main（纯主题插件无需入口）", () => {
       main: undefined,
       type: "theme",
       types: ["theme", "tool"],
-      theme: { variables: { bg: "#000" } },
+      themes: [{ id: "dark", name: "深色", colorScheme: "dark", variables: { bg: "#000" } }],
     });
     expect(r.ok).toBe(false);
   });

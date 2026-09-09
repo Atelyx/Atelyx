@@ -16,6 +16,7 @@ import {
   getPluginSettings,
   getPluginTableView,
   getPluginTableViews,
+  getPluginThemeSettings,
   getPluginVaultAccess,
   getViewContribution,
   pluginViewKinds,
@@ -23,6 +24,7 @@ import {
   registerBuiltinView,
   setBuiltinPluginIds,
   setPluginTableAccess,
+  setPluginThemeSettingsAccess,
   setPluginVaultAccess,
   unregisterPluginUi,
 } from "./ui";
@@ -55,6 +57,7 @@ beforeEach(() => {
   window.__atelyxPlugin__ = undefined;
   setPluginTableAccess(null);
   setPluginVaultAccess(null);
+  setPluginThemeSettingsAccess(null);
 });
 
 describe("主线程平面 facade 与注册", () => {
@@ -118,6 +121,32 @@ describe("主线程平面 facade 与注册", () => {
     unregisterPluginUi("com.test.a");
     expect(getPluginTableView("com.test.a.tl")).toBeUndefined();
     expect(getPluginTableViews()).toHaveLength(0);
+  });
+
+  it("registerThemeSetting 收集/读取/按插件撤销 + facade 读写经 provider 转发", () => {
+    exposePluginFacade();
+    const bridge = window.__atelyxPlugin__!.forPlugin("com.test.a");
+    bridge.registerThemeSetting({ key: "variant", label: "配色", component: Comp });
+    expect(getPluginThemeSettings("com.test.a").map((s) => s.key)).toContain("variant");
+    expect(getPluginThemeSettings("com.test.b")).toHaveLength(0);
+
+    // facade 读写经注入 provider 转发（未接线降级为空对象/静默）
+    expect(bridge.getThemeSettings()).toEqual({});
+    bridge.setThemeSetting("accentColor", "#123456"); // 未接线静默
+
+    const store: Record<string, Record<string, unknown>> = { "com.test.a": { colorMode: "dark" } };
+    setPluginThemeSettingsAccess({
+      getSettings: (pluginId) => store[pluginId] ?? {},
+      setSetting: (pluginId, key, value) => {
+        store[pluginId] = { ...(store[pluginId] ?? {}), [key]: value };
+      },
+    });
+    expect(bridge.getThemeSettings()).toEqual({ colorMode: "dark" });
+    bridge.setThemeSetting("accentColor", "#123456");
+    expect(store["com.test.a"].accentColor).toBe("#123456");
+
+    unregisterPluginUi("com.test.a");
+    expect(getPluginThemeSettings("com.test.a")).toHaveLength(0);
   });
 
   it("subscribeTableData 立即推一次 + 变更推 + 退订生效", () => {

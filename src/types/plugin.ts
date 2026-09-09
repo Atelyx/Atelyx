@@ -45,12 +45,29 @@ export type PluginScope = "app" | "vault";
 /** 插件安装来源类型（管理 UI 徽标/更新可用性依据）。 */
 export type PluginSourceKind = "market" | "git" | "local" | "builtin";
 
-/** 声明式皮肤：覆盖 CSS 变量（无需运行时代码；键可带或省略 `--` 前缀，应用时统一补前缀）。 */
-export interface PluginTheme {
-  /** 主题变量覆盖（如 { "--accent": "#7c3aed" }）。 */
+/**
+ * 声明式主题条目：基础配色方案 + 语义变量覆盖（无需运行时代码；键可带或省略 `--` 前缀，
+ * 应用时统一补前缀）。主题只覆盖想改的变量子集，未覆盖的落回基础方案（colorScheme 决定的
+ * 内置浅/深基底），保证对比度与完整性兜底。
+ */
+export interface ThemeDefinition {
+  /** 主题条目 id（插件内唯一；与内置基底 `light`/`dark` 重名会被拒绝）。 */
+  id: string;
+  /** 显示名（主题选择列表展示）。 */
+  name: string;
+  /** 基础配色方案：决定 `.dark` class / color-scheme / 原生控件配色。 */
+  colorScheme: "light" | "dark";
+  /** 语义变量覆盖（如 { "--bg-primary": "#f0f0f0" }）。 */
   variables: Record<string, string>;
-  /** 暗色模式下的额外覆盖（可选，浅色覆盖之上叠加）。 */
-  dark?: Record<string, string>;
+}
+
+/**
+ * 主题插件设置项声明：预置设置项类型（由内核实现并应用，无需插件代码）。
+ * 自定义设置项经主线程 UI 平面 registerThemeSetting 运行时注册。
+ */
+export interface PluginThemeOptions {
+  /** 使用内核预置「强调色」设置项（值自动应用到 --accent 系列；存 themeSettings[插件id].accentColor）。 */
+  accent?: boolean;
 }
 
 /** 插件清单（插件根目录的 atelyx.json）。 */
@@ -90,8 +107,10 @@ export interface PluginManifest {
   contributes?: PluginContributes;
   /** 权限说明：能力名 → 一句理由（安装/详情展示）。 */
   permissions?: Record<string, string>;
-  /** 声明式皮肤（type 为 theme 时通常携带；应用层按启用顺序叠加）。 */
-  theme?: PluginTheme;
+  /** 声明式主题条目（type 含 theme 时通常携带；必须 ≥1；id 插件内唯一）。 */
+  themes?: ThemeDefinition[];
+  /** 主题设置项声明（预置类型：accent = 内核实现的强调色设置项）。 */
+  themeOptions?: PluginThemeOptions;
   /** 入口（相对插件根目录；js/ts 为脚本，python 为子进程入口；纯 theme 插件可省略）。 */
   main?: string;
   /** 主线程 UI 入口（相对插件根目录；可选：UI 类插件在此声明，与 main 并存时双平面加载）。 */

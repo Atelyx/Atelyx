@@ -119,6 +119,7 @@ export {
   getPluginSettings,
   getPluginTableView,
   getPluginTableViews,
+  getPluginThemeSettings,
   getViewContribution,
   listUiContributions,
   loadUiPlugin,
@@ -128,6 +129,7 @@ export {
   registerBuiltinView,
   setBuiltinPluginIds,
   setPluginTableAccess,
+  setPluginThemeSettingsAccess,
   setPluginVaultAccess,
   unregisterPluginUi,
 } from "./ui";
@@ -140,7 +142,10 @@ export type {
   PluginSettingRegistration,
   PluginTableAccess,
   PluginTableViewRegistration,
+  PluginThemeSettingsAccess,
   PluginUiContribution,
+  ThemeSettingComponentProps,
+  ThemeSettingRegistration,
   ViewContribution,
 } from "./ui";
 export { createPluginWorker, buildProxySource } from "./worker";

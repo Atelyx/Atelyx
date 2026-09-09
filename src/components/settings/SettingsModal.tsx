@@ -4,6 +4,7 @@ import {
   ChevronRight,
   FolderTree,
   Info,
+  Palette,
   PenLine,
   Puzzle,
   Search,
@@ -19,6 +20,7 @@ import { ProviderSettingsSection } from "@/components/settings/ProviderSettingsS
 import { AgentSettingsSection } from "@/components/settings/AgentSettingsSection";
 import { AboutSection } from "@/components/settings/AboutSection";
 import { GeneralSettingsTab } from "@/components/settings/tabs/GeneralSettingsTab";
+import { ThemeSettingsTab } from "@/components/settings/tabs/ThemeSettingsTab";
 import { CollabSettingsTab } from "@/components/settings/tabs/CollabSettingsTab";
 import { ModelServicesSettingsTab } from "@/components/settings/tabs/ModelServicesSettingsTab";
 import { FilesSettingsTab } from "@/components/settings/tabs/FilesSettingsTab";
@@ -30,6 +32,7 @@ import { usePluginStore } from "@/stores/pluginStore";
 
 type Tab =
   | "general"
+  | "theme"
   | "collab"
   | "providers"
   | "modelServices"
@@ -43,6 +46,7 @@ type Tab =
 /** 左侧 tab 栏配置（图标 + 标签；折叠后仅显示图标）。 */
 const TAB_ITEMS: { key: Tab; label: string; icon: LucideIcon }[] = [
   { key: "general", label: "通用", icon: Settings },
+  { key: "theme", label: "主题", icon: Palette },
   { key: "collab", label: "多人协作", icon: Users },
   { key: "providers", label: "模型供应商", icon: Server },
   { key: "modelServices", label: "模型服务", icon: Bot },
@@ -168,8 +172,11 @@ export function SettingsModal({ onClose, initialTab }: { onClose: () => void; in
           </aside>
           <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
             {tab === "general" ? (
-              /* ===== 通用：应用级外观 + 仓库级 key 同步 ===== */
+              /* ===== 通用：应用级外观（字号/字体等）+ 仓库级 key 同步 ===== */
               <GeneralSettingsTab />
+            ) : tab === "theme" ? (
+              /* ===== 主题：主题插件选择 + 激活主题的设置项 ===== */
+              <ThemeSettingsTab />
             ) : tab === "collab" ? (
               /* ===== 多人协作（应用级） ===== */
               <CollabSettingsTab />

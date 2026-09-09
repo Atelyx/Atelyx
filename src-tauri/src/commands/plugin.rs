@@ -155,46 +155,71 @@ fn ensure_global_id_unique(app: &AppHandle, state: &VaultState, scope: &str, id:
 // （`components/plugins/builtinViews.tsx`）；版本随 App 走。
 
 /// 内置插件定义（id/展示信息；新增内置插件 = 在此加条目 + 前端补组件载荷）。
+/// `ty` = 主分类（panel/theme 等；theme = 声明式主题插件，无视图载荷）。
 struct BuiltinPluginDef {
     id: &'static str,
     name: &'static str,
     tagline: &'static str,
+    ty: &'static str,
 }
 
 const BUILTIN_PLUGINS: &[BuiltinPluginDef] = &[
-    BuiltinPluginDef { id: "builtin.search", name: "搜索", tagline: "全文搜索仓库文件" },
-    BuiltinPluginDef { id: "builtin.recent", name: "最近打开", tagline: "最近打开的文件列表" },
-    BuiltinPluginDef { id: "builtin.calendar", name: "日历", tagline: "活动密度与手动日程" },
-    BuiltinPluginDef { id: "builtin.aichat", name: "AI 对话", tagline: "AI 对话会话面板" },
-    BuiltinPluginDef { id: "builtin.canvas", name: "画布", tagline: "有向图对话画布" },
-    BuiltinPluginDef { id: "builtin.note", name: "笔记", tagline: "Markdown 笔记编辑器" },
-    BuiltinPluginDef { id: "builtin.table", name: "表格", tagline: "多维表格编辑器" },
-    BuiltinPluginDef { id: "builtin.files", name: "文件", tagline: "仓库文件树面板" },
-    BuiltinPluginDef { id: "builtin.inspector", name: "属性", tagline: "节点/笔记属性面板" },
-    BuiltinPluginDef { id: "builtin.collabroom", name: "协作房间", tagline: "协作在线用户面板" },
-    BuiltinPluginDef { id: "builtin.repohistory", name: "仓库历史", tagline: "仓库版本历史面板" },
+    BuiltinPluginDef { id: "builtin.search", name: "搜索", tagline: "全文搜索仓库文件", ty: "panel" },
+    BuiltinPluginDef { id: "builtin.recent", name: "最近打开", tagline: "最近打开的文件列表", ty: "panel" },
+    BuiltinPluginDef { id: "builtin.calendar", name: "日历", tagline: "活动密度与手动日程", ty: "panel" },
+    BuiltinPluginDef { id: "builtin.aichat", name: "AI 对话", tagline: "AI 对话会话面板", ty: "panel" },
+    BuiltinPluginDef { id: "builtin.canvas", name: "画布", tagline: "有向图对话画布", ty: "panel" },
+    BuiltinPluginDef { id: "builtin.note", name: "笔记", tagline: "Markdown 笔记编辑器", ty: "panel" },
+    BuiltinPluginDef { id: "builtin.table", name: "表格", tagline: "多维表格编辑器", ty: "panel" },
+    BuiltinPluginDef { id: "builtin.files", name: "文件", tagline: "仓库文件树面板", ty: "panel" },
+    BuiltinPluginDef { id: "builtin.inspector", name: "属性", tagline: "节点/笔记属性面板", ty: "panel" },
+    BuiltinPluginDef { id: "builtin.collabroom", name: "协作房间", tagline: "协作在线用户面板", ty: "panel" },
+    BuiltinPluginDef { id: "builtin.repohistory", name: "仓库历史", tagline: "仓库版本历史面板", ty: "panel" },
+    BuiltinPluginDef { id: "builtin.theme", name: "默认主题", tagline: "内置浅色/深色主题与强调色设置", ty: "theme" },
 ];
 
 fn is_builtin_plugin_id(id: &str) -> bool {
     BUILTIN_PLUGINS.iter().any(|d| d.id == id)
 }
 
-/// 内置插件合成清单（前端消费 id/name/type/tagline；main 为校验占位——实现随宿主编译，
-/// 前端按 sourceKind=builtin 跳过入口读取，只做宿主视图贡献注册）。
-fn builtin_manifest(def: &BuiltinPluginDef) -> Value {
+/// 内置主题插件默认条目：浅色/深色基底（空变量 = 基础方案，未覆盖变量落回内置 CSS 双 palette）。
+fn builtin_theme_manifest_values() -> Value {
     serde_json::json!({
+        "themes": [
+            { "id": "light", "name": "浅色", "colorScheme": "light", "variables": {} },
+            { "id": "dark", "name": "深色", "colorScheme": "dark", "variables": {} },
+        ],
+        "themeOptions": { "accent": true },
+    })
+}
+
+/// 内置插件合成清单（前端消费 id/name/type/tagline；main 为校验占位——实现随宿主编译，
+/// 前端按 sourceKind=builtin 跳过入口读取，只做宿主视图贡献注册/声明行消费）。
+fn builtin_manifest(def: &BuiltinPluginDef) -> Value {
+    let mut manifest = serde_json::json!({
         "schemaVersion": 2,
         "id": def.id,
         "name": def.name,
         "version": env!("CARGO_PKG_VERSION"),
-        "type": "panel",
+        "type": def.ty,
         "scope": "app",
         "runtime": "js",
         "main": "builtin",
         "tagline": def.tagline,
         "author": "Atelyx",
         "license": "MIT",
-    })
+    });
+    if def.ty == "theme" {
+        // 主题插件：合成 themes + themeOptions（与第三方清单同一字段契约）
+        let theme = builtin_theme_manifest_values();
+        if let (Some(themes), Some(theme_options)) =
+            (theme.get("themes").cloned(), theme.get("themeOptions").cloned())
+        {
+            manifest["themes"] = themes;
+            manifest["themeOptions"] = theme_options;
+        }
+    }
+    manifest
 }
 
 fn plugin_info_from_builtin(def: &BuiltinPluginDef, scope: &str, enabled: bool) -> PluginInfo {
@@ -202,7 +227,7 @@ fn plugin_info_from_builtin(def: &BuiltinPluginDef, scope: &str, enabled: bool) 
         id: def.id.to_string(),
         name: def.name.to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
-        kind: "panel".to_string(),
+        kind: def.ty.to_string(),
         scope: scope.to_string(),
         install_dir: String::new(),
         enabled,
@@ -444,6 +469,38 @@ fn manifest_valid_or_error(v: &Value) -> Result<(), String> {
     if let Some(d) = obj.get("declares") {
         if !d.is_array() {
             return Err("declares 必须是数组".to_string());
+        }
+    }
+    // themes（主题条目）结构校验（与前端 validatePluginManifest 对齐）：畸形形态会让前端
+    // deriveThemeProviders/normalizeThemeVarKeys 抛错击穿整窗，安装/读取时从源头拒绝。
+    if let Some(t) = obj.get("themes") {
+        let arr = t.as_array().ok_or("themes 必须是数组")?;
+        if arr.is_empty() {
+            return Err("themes 至少需要一个主题条目".to_string());
+        }
+        let mut seen_ids = std::collections::HashSet::new();
+        for item in arr {
+            let o = item.as_object().ok_or("themes 项必须是对象")?;
+            let has_nonempty = |k: &str| {
+                o.get(k).and_then(|x| x.as_str()).is_some_and(|s| !s.trim().is_empty())
+            };
+            if !has_nonempty("id") {
+                return Err("themes 项 id 必须是非空字符串".to_string());
+            }
+            let tid = o.get("id").and_then(|x| x.as_str()).unwrap_or_default().to_string();
+            if !seen_ids.insert(tid.clone()) {
+                return Err(format!("themes 内 id 重复：{tid}"));
+            }
+            if !has_nonempty("name") {
+                return Err("themes 项 name 必须是非空字符串".to_string());
+            }
+            let scheme = o.get("colorScheme").and_then(|x| x.as_str()).unwrap_or("");
+            if scheme != "light" && scheme != "dark" {
+                return Err("themes 项 colorScheme 仅支持 light/dark".to_string());
+            }
+            if !o.get("variables").is_some_and(|v| v.is_object()) {
+                return Err("themes 项 variables 必须是对象".to_string());
+            }
         }
     }
     let id = req("id")?;
@@ -1042,6 +1099,9 @@ pub fn plugin_uninstall(
         return Err("插件不存在".to_string());
     }
     let mut pstate = read_plugin_state(&app);
+    // 守恒守护：卸载「当前启用且为最后一个」的主题插件被拒（与停用同一规则）
+    let target_enabled = pstate.enabled.get(&id).copied().unwrap_or(false);
+    guard_last_enabled_theme_plugin(&app, &state, &pstate, &id, target_enabled)?;
     // 内置插件无磁盘目录：卸载 = 仅清状态记录（恢复经「恢复内置插件」入口重新播种）。
     if pstate.sources.get(&id).map(|s| s.kind) == Some(PluginSourceKind::Builtin) {
         pstate.enabled.remove(&id);
@@ -1084,14 +1144,83 @@ pub fn plugin_uninstall(
 
 /// 启用/停用插件（前端先确认权限再启用；vault 级插件卸载/禁用不清仓库内文件）。
 #[tauri::command]
-pub fn plugin_set_enabled(app: AppHandle, id: String, enabled: bool) -> Result<(), String> {
+pub fn plugin_set_enabled(
+    app: AppHandle,
+    state: State<'_, VaultState>,
+    id: String,
+    enabled: bool,
+) -> Result<(), String> {
     let mut pstate = read_plugin_state(&app);
+    if !enabled {
+        let target_enabled = pstate.enabled.get(&id).copied().unwrap_or(false);
+        guard_last_enabled_theme_plugin(&app, &state, &pstate, &id, target_enabled)?;
+    }
     if enabled {
         pstate.enabled.insert(id.clone(), true);
     } else {
         pstate.enabled.remove(&id);
     }
     write_plugin_state(&app, &pstate)
+}
+
+/// 内置插件是否主题插件（合成清单 ty == "theme"）。
+fn builtin_plugin_is_theme(id: &str) -> bool {
+    BUILTIN_PLUGINS.iter().any(|d| d.id == id && d.ty == "theme")
+}
+
+/// 内置基底主题条目 id（与合成清单 themes 条目一致；第三方主题条目禁止占用，防冒名——
+/// 与前端 utils/pluginTheme.ts 的 BUILTIN_THEME_IDS 同规则，守恒计数须与前端派生一致）。
+const BUILTIN_BASE_THEME_IDS: [&str; 2] = ["light", "dark"];
+
+/// 是否主题插件（清单含「去除内置基底重名条目后仍非空」的 themes——内置合成清单与第三方清单
+/// 同一字段契约；重名条目与前端派生同规则排除，保证守恒计数两端一致）。
+/// 边界：读清单失败（目录缺失/清单损坏）降级为 false——损坏插件不参与守恒、可被停用/卸载清理，
+/// 避免用户被损坏插件困住（前端此时回退基底主题，不崩溃）。
+fn plugin_is_theme(app: &AppHandle, state: &VaultState, pstate: &PluginState, id: &str) -> bool {
+    if is_builtin_plugin_id(id) {
+        return builtin_plugin_is_theme(id);
+    }
+    let Some(source) = pstate.sources.get(id) else { return false; };
+    let scope = source.scope.clone();
+    let Ok(base) = plugin_base_dir(app, state, &scope) else { return false; };
+    let Ok(dir) = find_plugin_dir(&base, id) else { return false; };
+    read_manifest(&dir).is_ok_and(|m| {
+        m.get("themes").and_then(|v| v.as_array()).is_some_and(|a| {
+            a.iter()
+                .filter(|t| {
+                    t.get("id")
+                        .and_then(|id| id.as_str())
+                        .is_some_and(|tid| !BUILTIN_BASE_THEME_IDS.contains(&tid))
+                })
+                .next()
+                .is_some()
+        })
+    })
+}
+
+/// 当前启用中的主题插件数量。
+fn enabled_theme_plugin_count(app: &AppHandle, state: &VaultState, pstate: &PluginState) -> usize {
+    pstate
+        .enabled
+        .iter()
+        .filter(|(id, enabled)| **enabled && plugin_is_theme(app, state, pstate, id))
+        .count()
+}
+
+/// 守恒守护：主题插件必须至少保留一个启用——停用/卸载「当前启用且为最后一个」的主题插件被拒。
+fn guard_last_enabled_theme_plugin(
+    app: &AppHandle,
+    state: &VaultState,
+    pstate: &PluginState,
+    id: &str,
+    target_enabled: bool,
+) -> Result<(), String> {
+    if target_enabled && plugin_is_theme(app, state, pstate, id)
+        && enabled_theme_plugin_count(app, state, pstate) <= 1
+    {
+        return Err("至少保留一个主题插件（可先启用/安装其他主题插件）".to_string());
+    }
+    Ok(())
 }
 
 /// 恢复内置插件（管理 UI「恢复内置插件」入口）：补播种缺失的内置条目。
@@ -1413,6 +1542,34 @@ mod tests {
         assert!(manifest_valid_or_error(&theme).is_ok());
         let tool_no_main = json!({ "schemaVersion": 1, "id": "com.x", "name": "x", "version": "1", "type": "tool" });
         assert!(manifest_valid_or_error(&tool_no_main).is_err());
+        // themes 结构校验（与前端 normalizeThemes 对齐）：非数组/空/条目畸形/id 重复均拒绝。
+        let themes_ok = json!({
+            "schemaVersion": 1, "id": "com.example.theme", "name": "x", "version": "1", "type": "theme",
+            "themes": [
+                { "id": "nord-light", "name": "Nord 浅", "colorScheme": "light", "variables": {} },
+                { "id": "nord-dark", "name": "Nord 深", "colorScheme": "dark", "variables": { "--bg": "#000" } },
+            ],
+        });
+        assert!(manifest_valid_or_error(&themes_ok).is_ok());
+        for bad_themes in [
+            json!({ "themes": "not-array" }),
+            json!({ "themes": [] }),
+            json!({ "themes": [{ "id": "a", "name": "A", "colorScheme": "blue", "variables": {} }] }),
+            json!({ "themes": [{ "id": "a", "name": "A", "colorScheme": "light", "variables": null }] }),
+            json!({ "themes": [{ "id": "a", "name": "A", "colorScheme": "light" }] }),
+            json!({
+                "themes": [
+                    { "id": "a", "name": "A", "colorScheme": "light", "variables": {} },
+                    { "id": "a", "name": "B", "colorScheme": "dark", "variables": {} },
+                ],
+            }),
+        ] {
+            let mut m = json!({ "schemaVersion": 1, "id": "com.example.theme", "name": "x", "version": "1", "type": "theme" });
+            if let Some(t) = bad_themes.get("themes") {
+                m["themes"] = t.clone();
+            }
+            assert!(manifest_valid_or_error(&m).is_err(), "畸形 themes 应拒绝：{bad_themes}");
+        }
     }
 
     #[test]
@@ -1427,11 +1584,19 @@ mod tests {
             assert!(plugin_id_valid(def.id), "内置插件 id 非法：{}", def.id);
             let manifest = builtin_manifest(def);
             assert!(manifest_valid_or_error(&manifest).is_ok(), "内置插件清单非法：{}", def.id);
-            assert_eq!(manifest["type"].as_str(), Some("panel"));
+            assert_eq!(manifest["type"].as_str(), Some(def.ty));
             assert_eq!(manifest["runtime"].as_str(), Some("js"));
+            if def.ty == "theme" {
+                // 主题插件：合成 themes（浅/深基底）+ themeOptions.accent
+                let themes = manifest["themes"].as_array().expect("主题插件必须带 themes");
+                assert_eq!(themes.len(), 2);
+                assert_eq!(themes[0]["id"], "light");
+                assert_eq!(themes[1]["id"], "dark");
+                assert_eq!(manifest["themeOptions"]["accent"], true);
+            }
         }
         assert!(is_builtin_plugin_id("builtin.search"));
-        assert!(is_builtin_plugin_id("builtin.aichat"));
+        assert!(is_builtin_plugin_id("builtin.theme"));
         assert!(!is_builtin_plugin_id("com.acme.x"));
     }
 
@@ -1444,8 +1609,16 @@ mod tests {
             assert_eq!(v["id"], def.id);
             assert_eq!(v["name"], def.name);
             assert_eq!(v["tagline"], def.tagline);
-            assert_eq!(v["type"].as_str(), Some("panel"));
+            assert_eq!(v["type"].as_str(), Some(def.ty));
         }
+    }
+
+    #[test]
+    fn last_theme_plugin_guard_blocks_disable() {
+        // 守恒：停用/卸载最后一个启用主题插件被拒；内置主题插件在集合内。
+        assert!(builtin_plugin_is_theme("builtin.theme"));
+        assert!(!builtin_plugin_is_theme("builtin.canvas"));
+        assert!(!builtin_plugin_is_theme("builtin.search"));
     }
 
     #[test]

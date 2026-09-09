@@ -15,10 +15,14 @@ import type {
   GlobalProvider,
   GlobalSearchConfig,
   ProviderConfig,
-  ThemeMode,
   ToolSchema,
   VaultConfig,
 } from "@/types";
+import {
+  BUILTIN_THEME_PLUGIN_ID,
+  DEFAULT_BUILTIN_THEME_SETTINGS,
+  normalizeThemeConfig,
+} from "@/utils/pluginTheme";
 import { DEFAULT_AI_CONFIG } from "@/constants/ai";
 import { DEFAULT_AGENT_TOOLS } from "@/constants/tools";
 import { BUILTIN_AGENTS, BUILTIN_AGENT_CHAT_ID } from "@/constants/agents";
@@ -50,10 +54,10 @@ import { createPersistController } from "@/utils/persist";
 interface SettingsState {
   /** 运行时 AI 配置（providers 含 key，从 keychain 填充）。 */
   config: AiConfig;
-  /** 应用级主题模式（"system" = 跟随系统，由页面层解析 prefers-color-scheme；存 global.json）。 */
-  theme: ThemeMode;
-  /** 应用级强调色（hex；undefined = 默认金色，存 global.json）。 */
-  accentColor?: string;
+  /** 激活的主题插件 id（应用级，写 global.json；缺省 = 内置主题插件，其深浅模式默认跟随系统）。 */
+  theme: string;
+  /** 各主题插件的设置项值字典（应用级，写 global.json；预置键 colorMode/accentColor + 插件自定义键）。 */
+  themeSettings: Record<string, Record<string, unknown>>;
   /** 应用级界面基础字号（px；undefined = 默认 18，存 global.json）。 */
   fontSize?: number;
   /** 应用级界面字体（CSS font-family；undefined = 系统默认，存 global.json）。 */
@@ -134,10 +138,11 @@ interface SettingsState {
   setFontSize: (size: number | undefined) => Promise<void>;
   /** 设应用级界面字体（undefined = 跟随系统默认，写 global.json）。 */
   setFontFamily: (family: string | undefined) => Promise<void>;
-  /** 切换主题（应用级，写 global.json）。 */
-  toggleTheme: () => Promise<void>;
-  /** 设应用级强调色（hex；undefined = 恢复默认金色，写 global.json）。 */
-  setAccentColor: (color: string | undefined) => Promise<void>;
+  /** 切换激活的主题插件（应用级，写 global.json）。 */
+  setThemePlugin: (pluginId: string) => Promise<void>;
+  /** 写激活/指定主题插件的设置项值（应用级，写 global.json；value = undefined 删除键恢复默认）。
+   * 预置键：colorMode（内置深浅模式）/ accentColor（强调色）；其余为插件自定义键。 */
+  setThemeSetting: (pluginId: string, key: string, value: unknown) => Promise<void>;
   /** 文件面板排序方式（仓库级）。 */
   setFileExplorerSort: (sortKey: FileExplorerSortKey) => Promise<void>;
   /** 设置文件面板排除的文件夹名列表（仓库级；空数组 = 无排除）。 */
@@ -317,8 +322,8 @@ function findProviderByModel(
 
 export const useSettingsStore = create<SettingsState>((set, get) => ({
   config: DEFAULT_AI_CONFIG,
-  theme: "dark",
-  accentColor: undefined,
+  theme: BUILTIN_THEME_PLUGIN_ID,
+  themeSettings: { [BUILTIN_THEME_PLUGIN_ID]: { ...DEFAULT_BUILTIN_THEME_SETTINGS } },
   fontSize: undefined,
   fontFamily: undefined,
   autoRestoreFiles: true,
@@ -339,8 +344,10 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   load: async () => {
     // 应用级外观（主题/强调色/字号/字体/自动恢复）从 global.json 读一次，跨仓库共享；
     // 仓库级配置（供应商/搜索源等）无仓库上下文时为空，进入仓库后由 loadVaultConfig 填充
-    let theme: ThemeMode = "dark";
-    let accentColor: string | undefined;
+    let theme: string = BUILTIN_THEME_PLUGIN_ID;
+    let themeSettings: Record<string, Record<string, unknown>> = {
+      [BUILTIN_THEME_PLUGIN_ID]: { ...DEFAULT_BUILTIN_THEME_SETTINGS },
+    };
     let fontSize: number | undefined;
     let fontFamily: string | undefined;
     let autoRestoreFiles = true;
@@ -352,8 +359,10 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     let deviceName = "";
     try {
       const cfg = await readGlobalConfig();
-      if (cfg.theme === "light" || cfg.theme === "dark" || cfg.theme === "system") theme = cfg.theme;
-      accentColor = cfg.accentColor;
+      // 主题配置归一化（旧三态/旧全局强调色迁移 + 磁盘优先）为纯函数，见 utils/pluginTheme
+      const normalized = normalizeThemeConfig(cfg);
+      theme = normalized.theme;
+      themeSettings = normalized.themeSettings;
       fontSize = cfg.fontSize;
       fontFamily = cfg.fontFamily;
       autoRestoreFiles = cfg.autoRestoreFiles ?? true;
@@ -374,7 +383,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     set({
       config: DEFAULT_AI_CONFIG,
       theme,
-      accentColor,
+      themeSettings,
       fontSize,
       fontFamily,
       autoRestoreFiles,
@@ -630,21 +639,20 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
 
   setFontFamily: (family) => commitGlobal({ fontFamily: family }, "保存字体配置失败"),
 
-  /** 切换主题模式：light → dark → system 循环（跟随系统 = 按系统外观实时解析）。应用级，写 global.json。 */
-  toggleTheme: () => {
-    const next: ThemeMode =
-      get().theme === "light" ? "dark" : get().theme === "dark" ? "system" : "light";
-    return commitGlobal({ theme: next }, "保存主题配置失败");
+  /** 切换激活的主题插件（应用级，写 global.json）。 */
+  setThemePlugin: (pluginId) => commitGlobal({ theme: pluginId }, "保存主题配置失败"),
+
+  /** 写主题插件设置项值（应用级，写 global.json；value = undefined 删除键恢复默认）。 */
+  setThemeSetting: async (pluginId, key, value) => {
+    const current = get().themeSettings;
+    const entry = { ...(current[pluginId] ?? {}) };
+    if (value === undefined) delete entry[key];
+    else entry[key] = value;
+    await commitGlobal({ themeSettings: { ...current, [pluginId]: entry } }, "保存主题设置失败");
   },
 
   setFileExplorerSort: async (sortKey) => {
     await commitVault({ fileExplorerSort: sortKey });
-  },
-
-  /** 设应用级强调色（undefined = 恢复默认金色；只接受合法 hex 格式）。 */
-  setAccentColor: async (color) => {
-    if (color !== undefined && !/^#[0-9a-fA-F]{6}$/.test(color)) return;
-    await commitGlobal({ accentColor: color }, "保存强调色配置失败");
   },
 
   setExcludeFolders: async (folders) => {

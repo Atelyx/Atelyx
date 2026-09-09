@@ -9,8 +9,8 @@ import {
   type PluginManifest,
   type PluginRuntime,
   type PluginScope,
-  type PluginTheme,
   type PluginType,
+  type ThemeDefinition,
 } from "@/types";
 
 export type ManifestValidateResult =
@@ -163,7 +163,8 @@ export function validatePluginManifest(raw: unknown): ManifestValidateResult {
   const contributes = normalizeContributes(data.contributes, errors);
   const permissions = normalizePermissions(data.permissions, errors);
   const platforms = normalizeStringList(data.platforms, "platforms", errors);
-  const theme = normalizeTheme(data.theme, errors);
+  const themes = normalizeThemes(data.themes, errors);
+  const themeOptions = normalizeThemeOptions(data.themeOptions, errors);
   if (errors.length > 0) return { ok: false, errors };
 
   const manifest: PluginManifest = {
@@ -183,7 +184,8 @@ export function validatePluginManifest(raw: unknown): ManifestValidateResult {
     ...(contributes ? { contributes } : {}),
     ...(Object.keys(permissions).length > 0 ? { permissions } : {}),
     ...(platforms.length > 0 ? { platforms } : {}),
-    ...(theme ? { theme } : {}),
+    ...(themes ? { themes } : {}),
+    ...(themeOptions ? { themeOptions } : {}),
     ...(typeof data.atelyxVersionMin === "string" ? { atelyxVersionMin: data.atelyxVersionMin } : {}),
     ...(typeof data.atelyxVersionMax === "string" ? { atelyxVersionMax: data.atelyxVersionMax } : {}),
     ...(typeof data.tagline === "string" ? { tagline: data.tagline } : {}),
@@ -277,31 +279,68 @@ function normalizeStringList(raw: unknown, field: string, errors: string[]): str
   return raw as string[];
 }
 
-/** theme 归一化：variables 必填（字符串值表）、dark 可选；空主题视为未声明。 */
-function normalizeTheme(raw: unknown, errors: string[]): PluginTheme | undefined {
+/** themes 归一化：非空数组（每项 id/name/colorScheme/variables），id 插件内唯一；未知字段跳过。 */
+function normalizeThemes(raw: unknown, errors: string[]): ThemeDefinition[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw)) {
+    errors.push("themes 必须是数组");
+    return undefined;
+  }
+  const items: ThemeDefinition[] = [];
+  const seen = new Set<string>();
+  for (const rawItem of raw) {
+    if (typeof rawItem !== "object" || rawItem === null) {
+      errors.push("themes 项必须是对象");
+      continue;
+    }
+    const item = rawItem as Record<string, unknown>;
+    const id = item.id;
+    const name = item.name;
+    const colorScheme = item.colorScheme;
+    if (typeof id !== "string" || id.trim().length === 0) {
+      errors.push("themes 项 id 必须是非空字符串");
+      continue;
+    }
+    if (typeof name !== "string" || name.trim().length === 0) {
+      errors.push(`themes[${id}].name 必须是非空字符串`);
+      continue;
+    }
+    if (colorScheme !== "light" && colorScheme !== "dark") {
+      errors.push(`themes[${id}].colorScheme 仅支持 light/dark`);
+      continue;
+    }
+    const variables = normalizeVarTable(item.variables);
+    if (variables === undefined) {
+      errors.push(`themes[${id}].variables 必须是字符串值对象`);
+      continue;
+    }
+    if (seen.has(id)) {
+      errors.push(`themes 内 id 重复：${id}`);
+      continue;
+    }
+    seen.add(id);
+    items.push({ id, name, colorScheme, variables });
+  }
+  if (items.length === 0) {
+    errors.push("themes 至少需要一个主题条目");
+    return undefined;
+  }
+  return items;
+}
+
+/** themeOptions 归一化：仅接受 { accent?: boolean }；未知键跳过。 */
+function normalizeThemeOptions(raw: unknown, errors: string[]): { accent?: boolean } | undefined {
   if (raw === undefined) return undefined;
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-    errors.push("theme 必须是对象");
+    errors.push("themeOptions 必须是对象");
     return undefined;
   }
   const obj = raw as Record<string, unknown>;
-  const variables = normalizeVarTable(obj.variables);
-  if (variables === undefined) {
-    errors.push("theme.variables 必须是字符串值对象");
+  if (obj.accent !== undefined && typeof obj.accent !== "boolean") {
+    errors.push("themeOptions.accent 必须是布尔值");
     return undefined;
   }
-  let dark: Record<string, string> | undefined;
-  if (obj.dark !== undefined) {
-    dark = normalizeVarTable(obj.dark);
-    if (dark === undefined) {
-      errors.push("theme.dark 必须是字符串值对象");
-      return undefined;
-    }
-  }
-  if (Object.keys(variables).length === 0 && (!dark || Object.keys(dark).length === 0)) {
-    return undefined; // 空主题（无任何覆盖）按未声明处理
-  }
-  return dark ? { variables, dark } : { variables };
+  return obj.accent === true ? { accent: true } : undefined;
 }
 
 function normalizeVarTable(raw: unknown): Record<string, string> | undefined {

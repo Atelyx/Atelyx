@@ -169,6 +169,8 @@ facade 提供：
 - `registerEdge({ type, component })` — 注册画布边类型（同名 type 覆盖既有注册，last-wins；与 registerNode 同语义）
 - `registerCommand({ id, label, run })` — 注册全局命令（直接持有 run 函数）
 - `registerTableView({ kind, label, component })` — 注册**表格编辑器内的表格视图**
+- `registerThemeSetting({ key, label, component })` — 注册**主题设置区块**（渲染在设置页「主题」tab 的该主题设置区；组件接收 `{ value, onChange(key, value) }`，值持久化到该插件的 `themeSettings` 条目、切主题跟随；第三方主题插件的配色切换等自定义设置经它提供）
+- `getThemeSettings()` / `setThemeSetting(key, value)` — 读写**本插件条目的主题设置值**（预置键 `accentColor` 等 + 插件自定义键；`setThemeSetting(key, undefined)` 删除键恢复默认）
 - `registerContribution({ point, id?, payload })` — 通用扩展点注册（payload 直接持有引用）
 - `listFiles()` / `openCanvasFile` / `openNote` / `openTable` — **仓库访问方法**（文件树 + 打开文件；任何面板插件可用，与内置搜索面板同一输入面）
 - `React` / `h` — 构建组件所用

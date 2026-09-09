@@ -6,19 +6,25 @@ export function ToggleSwitch({
   checked,
   onChange,
   title,
+  disabled,
 }: {
   checked: boolean;
   onChange: (checked: boolean) => void;
   title?: string;
+  /** 禁用（只读不响应；title 提示原因）。 */
+  disabled?: boolean;
 }) {
   return (
     <button
       type="button"
       role="switch"
       aria-checked={checked}
-      onClick={() => onChange(!checked)}
+      aria-disabled={disabled}
+      onClick={() => {
+        if (!disabled) onChange(!checked);
+      }}
       title={title}
-      className="relative w-11 h-6 rounded-full transition-colors flex-shrink-0"
+      className={`relative w-11 h-6 rounded-full transition-colors flex-shrink-0 ${disabled ? "opacity-50" : ""}`}
       style={{ background: checked ? "var(--accent)" : "#64748b" }}
     >
       <span

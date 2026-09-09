@@ -22,10 +22,10 @@
   "atelyxVersionMin": "0.4.2",    // 可选：兼容的宿主版本下限
   // "atelyxVersionMax": "0.5.0", // 可选：兼容的宿主版本上限（不含）
   "platforms": ["windows-x64"],   // 可选：目标平台，缺省全平台
-  "theme": {                      // 可选（type 含 theme 时）：声明式皮肤，无需代码
-    "variables": { "accent": "#7c3aed" },  // CSS 变量覆盖（键可省略 -- 前缀）
-    "dark": { "bg": "#0b0b0d" }            // 可选：暗色模式额外覆盖
-  },
+  "themes": [                     // 可选（type 含 theme 时）：声明式主题条目，无需代码
+    { "id": "nord-light", "name": "Nord 浅色", "colorScheme": "light", "variables": { "accent": "#7c3aed" } }
+  ],
+  "themeOptions": { "accent": true }, // 可选：预置设置项声明（accent = 内核实现的强调色设置项）
   "tagline": "一句话简介",
   "description": "详细描述（markdown）",
   "author": "作者",
@@ -46,7 +46,7 @@
 | `setting` | 设置页条目（主线程 UI） |
 | `app` | 应用级页面/模式（主线程 UI，可全页接管） |
 | `node` | 画布节点（主线程 UI） |
-| `theme` | UI 皮肤（声明式，无需入口） |
+| `theme` | 主题插件（声明式主题条目 + 可选设置项，无需入口） |
 
 ## 多语言 `runtime`
 
@@ -84,7 +84,32 @@
 - `app`（默认）：个人工具，装在 App 数据目录，跨仓库可用，不随仓库同步。
 - `vault`：随仓库共享，装在仓库 `.atelyx/plugins/`，适合团队共用的插件；安装时会有「代码随仓库扩散」提示。
 
-## 声明式皮肤（`theme`）
+## 声明式主题（`themes` + `themeOptions`）
 
-`theme` 类型插件只需在清单里声明 CSS 变量覆盖，无需任何代码。变量作用于 `:root`
-（浅色）与暗色（`dark` 覆盖）。多个主题插件按 id 排序叠加，后者覆盖前者。
+`theme` 类型插件在清单里声明主题条目与可选设置项，无需代码。每个主题条目 = 一个
+**基础配色方案 + 一组语义变量覆盖**：
+
+```json
+{
+  "type": "theme",
+  "themes": [
+    { "id": "nord-light", "name": "Nord 浅色", "colorScheme": "light", "variables": { "--accent": "#7c3aed", "--bg-primary": "#f0f2f5" } },
+    { "id": "nord-dark", "name": "Nord 深色", "colorScheme": "dark", "variables": { "--accent": "#a78bfa" } }
+  ],
+  "themeOptions": { "accent": true }
+}
+```
+
+- `themes`：非空数组；`id` 插件内唯一；`colorScheme` 为 `light`/`dark`（固定基底，不跟随系统；
+  想做两套配色就声明两个条目）；`variables` 是语义 CSS 变量覆盖（如 `--bg-primary`/`--text-*`/`--border` 等，
+  键可省略 `--` 前缀），**只覆盖想改的子集**，未覆盖的落回内置浅/深基础方案。与内置基底
+  `light`/`dark` 重名的条目会被拒绝。
+- `themeOptions.accent`：可选。声明后主题页为该插件提供内核预置的「强调色」设置项（值自动应用到
+  `--accent` 系列变量，无需代码）。
+- 自定义设置项：可选。插件带 `mainUi` 入口时，可经主线程 facade 的
+  `registerThemeSetting({ key, label, component })` 注册设置区块（组件接收
+  `{ value, onChange(key, value) }`，值持久化到该插件的 `themeSettings` 条目，切主题跟随），
+  渲染在设置页「主题」tab 的该主题设置区。
+
+主题插件与其它插件同一生命周期：安装后需在「已安装」列表启用；**平台至少保留一个启用的主题
+插件**（停用/卸载最后一个会被拒绝）。
