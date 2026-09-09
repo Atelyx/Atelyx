@@ -72,6 +72,12 @@ describe("slots 注册表", () => {
     expect(viewKinds()).not.toContain("canvas");
   });
 
+  it("resolveViewKind 返回稳定引用（selector 订阅依赖；贡献注册期内多次调用同一对象）", () => {
+    regView("canvas", "builtin.canvas", "画布");
+    // 稳定引用：若每次返回新对象，zustand selector 会触发无限重渲染。
+    expect(resolveViewKind("canvas")).toBe(resolveViewKind("canvas"));
+  });
+
   it("重复注册同一 id 拒绝", () => {
     regView("canvas", "builtin.canvas", "画布");
     expect(() => regView("canvas", "builtin.canvas", "画布")).toThrow("已注册");

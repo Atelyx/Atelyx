@@ -87,6 +87,7 @@ import {
 import { getKernel } from "@/services/cordis/kernel";
 import { mountPlugin, unmountPlugin } from "@/services/cordis/loader";
 import { resolveViewKind, onSlotChange, viewKinds as slotViewKinds } from "@/services/cordis/slots";
+import type { ViewSlotContribution } from "@/services/cordis/slots";
 import { VIEW_KINDS } from "@/types";
 import { useCollabStore, publishPluginPresence } from "@/stores/collabStore";
 import { useVaultStore } from "@/stores/vaultStore";
@@ -227,6 +228,9 @@ async function stopPlugin(id: string): Promise<void> {
   unloadPlugin(id);
   await unmountPlugin(getKernel(), id);
 }
+
+/** slots 视图贡献 → ViewContribution 转换缓存（selector 稳定引用；随贡献对象 GC 自动失效）。 */
+const slotViewCache = new WeakMap<ViewSlotContribution, ViewContribution>();
 
 /** 安装后统一收尾（模块私有）：宿主兼容强制 + 重载。 */
 async function finishInstall(get: () => PluginStoreState, row: PluginRow): Promise<void> {
@@ -669,15 +673,22 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
     pluginViewLabel: (view) => resolveViewKind(view)?.payload.label ?? pluginViewLabelOf(view),
     viewContribution: (kind) => {
       // 分派 = slots 优先（内置视图槽），旧注册表兜底（第三方面板仍走旧桥路径）。
+      // 转换结果按槽贡献对象缓存：selector 订阅需稳定引用（新对象会触发无限重渲染），
+      // 贡献卸载/重挂载时是新对象 → 自然换缓存；旧对象随 WeakMap 自动回收。
       const slot = resolveViewKind(kind);
       if (slot) {
-        return {
-          kind,
-          label: slot.payload.label,
-          component: slot.payload.component,
-          render: slot.payload.render,
-          pluginId: slot.pluginId,
-        };
+        let cached = slotViewCache.get(slot);
+        if (!cached) {
+          cached = {
+            kind,
+            label: slot.payload.label,
+            component: slot.payload.component,
+            render: slot.payload.render,
+            pluginId: slot.pluginId,
+          };
+          slotViewCache.set(slot, cached);
+        }
+        return cached;
       }
       return getViewContribution(kind);
     },
