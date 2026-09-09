@@ -16,7 +16,8 @@
 //! 导致启动失败（跨平台）；改为在进程退出（EOF 读线程）与 kill 路径清理。
 //!
 //! 编码与行：通信一律 UTF-8（spawn 设 `PYTHONUTF8=1` + runner 内 reconfigure 双保险）；
-//! 读线程经 `fill_buf` 边读边限长、超限丢到换行、非 UTF-8 行跳过——防失控插件打爆内存且不中断通道。
+//! 读线程逐行读入、非 UTF-8 行跳过——不中断通道；**不设行长度上限**（完全自由信任模型下
+//! 插件输出行如实透传，与「插件可读写文件/执行程序」同等的信任边界）。
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
@@ -33,10 +34,6 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::vault::VaultState;
 use super::plugin::{read_manifest, resolve_plugin_dir, safe_plugin_path};
-
-/** 单行（stdout/stderr/写入）长度上限：边读边限、超限丢到换行——防失控插件打爆内存；
- *  同时是协议消息的上限（超大载荷会被跳过/拒绝，属已知边界）。 */
-const MAX_LINE_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Default)]
 pub struct ProcessRegistry {
@@ -71,11 +68,10 @@ struct ProcessExit {
     code: Option<i32>,
 }
 
-/// 读一行并限长：fill_buf/consume 边读边限，超限丢弃直到换行（不整行读入）；
-/// 非 UTF-8 行返回空串（跳过不中断通道）。EOF/读错返回 None。
-fn read_line_capped<R: BufRead>(reader: &mut R, cap: usize) -> Option<String> {
+/// 读一行：fill_buf/consume 逐段读入直到换行；非 UTF-8 行返回空串（跳过不中断通道）。
+/// EOF/读错返回 None。
+fn read_line_utf8<R: BufRead>(reader: &mut R) -> Option<String> {
     let mut buf: Vec<u8> = Vec::new();
-    let mut overlong = false;
     loop {
         let available = match reader.fill_buf() {
             Ok(a) if a.is_empty() => return None, // EOF
@@ -84,14 +80,10 @@ fn read_line_capped<R: BufRead>(reader: &mut R, cap: usize) -> Option<String> {
         };
         let nl = available.iter().position(|&b| b == b'\n');
         let take = nl.map_or(available.len(), |i| i + 1);
-        if buf.len() + take > cap {
-            overlong = true;
-        } else if !overlong {
-            buf.extend_from_slice(&available[..take]);
-        }
+        buf.extend_from_slice(&available[..take]);
         reader.consume(take);
         if nl.is_some() {
-            if overlong || buf.is_empty() {
+            if buf.is_empty() {
                 return Some(String::new());
             }
             return match std::str::from_utf8(&buf) {
@@ -199,7 +191,7 @@ pub async fn plugin_process_start(
     let app_code = app.clone();
     thread::spawn(move || {
         let mut reader = BufReader::new(stdout);
-        while let Some(line) = read_line_capped(&mut reader, MAX_LINE_BYTES) {
+        while let Some(line) = read_line_utf8(&mut reader) {
             if line.is_empty() {
                 continue;
             }
@@ -234,7 +226,7 @@ pub async fn plugin_process_start(
         let app_err = app.clone();
         thread::spawn(move || {
             let mut reader = BufReader::new(stderr);
-            while let Some(line) = read_line_capped(&mut reader, MAX_LINE_BYTES) {
+            while let Some(line) = read_line_utf8(&mut reader) {
                 if line.is_empty() {
                     continue;
                 }
@@ -253,9 +245,6 @@ pub async fn plugin_process_write(
     process_id: u64,
     line: String,
 ) -> Result<(), String> {
-    if line.len() > MAX_LINE_BYTES {
-        return Err("消息过大".into());
-    }
     let inner = registry.inner.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let mut guard = inner.lock().unwrap();
