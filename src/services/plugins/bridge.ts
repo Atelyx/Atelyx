@@ -186,6 +186,22 @@ export function registerHostCapabilityMeta(namespace: string, meta: HostCapabili
   hostCapabilityMeta.set(namespace, meta);
 }
 
+/** 调用宿主能力（内核 typed 服务门面复用同一实现；不经插件路由/审计——宿主侧信任调用）。
+ *  流式：ctx.stream 为调用流句柄（sink 帧直达调用方；handler 未自行收尾时分发器补 end）。 */
+export async function callHostCapability(
+  namespace: string,
+  method: string,
+  args: unknown[],
+  ctx: { pluginId: string; stream?: PluginStreamSink },
+): Promise<unknown> {
+  const host = hostCapabilities.get(namespace);
+  if (!host) throw new Error(`宿主能力 ${namespace} 不存在`);
+  const stream = ctx.stream;
+  const result = await host(method, args, { pluginId: ctx.pluginId, stream });
+  if (stream && !stream.ended) stream.end(result);
+  return result;
+}
+
 /** 宿主能力展示文案（插件命名空间返回 undefined，UI 原样显示）。 */
 export function hostCapabilityLabel(namespace: string): string | undefined {
   return hostCapabilityMeta.get(namespace)?.label;
@@ -334,8 +350,17 @@ function notifyChange(): void {
   for (const listener of changeListeners) listener(snap);
 }
 
-/** 事件投递：发给订阅了该事件的全部插件。 */
+/** 事件转发钩子：把桥事件同步转发给 Cordis 事件总线（内核接线；null = 未接线）。 */
+let pluginEventForwarder: ((event: string, payload: unknown) => void) | null = null;
+
+/** 注入/复位事件转发钩子（内核 eventBridge 接线；null 复位供测试）。 */
+export function setPluginEventForwarder(fn: ((event: string, payload: unknown) => void) | null): void {
+  pluginEventForwarder = fn;
+}
+
+/** 事件投递：发给订阅了该事件的全部插件；同步转发给 Cordis 事件总线。 */
 export function emitPluginEvent(event: string, payload: unknown): void {
+  pluginEventForwarder?.(event, payload);
   for (const runtime of runtimes.values()) {
     if (runtime.disposed || !runtime.subscriptions.has(event)) continue;
     try {
@@ -952,6 +977,11 @@ export function setPluginTableRuntimeAccess(access: PluginTableRuntimeAccess | n
   tableRuntimeAccess = access;
 }
 
+/** 读取表格能力访问（内核服务经它消费同一数据源；未接线 = null）。 */
+export function getPluginTableRuntimeAccess(): PluginTableRuntimeAccess | null {
+  return tableRuntimeAccess;
+}
+
 /** 协作能力访问（worker 平面 `collab` 命名空间的 store 数据源；pluginStore 接线注入）。 */
 export interface PluginCollabAccess {
   /** 同仓库在线用户列表（本端已过滤；可序列化）。 */
@@ -965,6 +995,11 @@ let collabAccess: PluginCollabAccess | null = null;
 /** 注入/复位协作能力访问（pluginStore.load 时接线；null 复位供测试）。 */
 export function setPluginCollabAccess(access: PluginCollabAccess | null): void {
   collabAccess = access;
+}
+
+/** 读取协作能力访问（内核服务经它消费同一数据源；未接线 = null）。 */
+export function getPluginCollabAccess(): PluginCollabAccess | null {
+  return collabAccess;
 }
 
 /**
@@ -1004,6 +1039,11 @@ export function setPluginCanvasAccess(access: PluginCanvasAccess | null): void {
   canvasAccess = access;
 }
 
+/** 读取画布能力访问（内核服务经它消费同一数据源；未接线 = null）。 */
+export function getPluginCanvasAccess(): PluginCanvasAccess | null {
+  return canvasAccess;
+}
+
 /** AI 配置访问（worker 平面 `ai` 命名空间的配置数据源；pluginStore 接线注入。
  *  providers 为运行时配置（含 apiKey——key 读取已由 settingsStore 完成，桥侧不碰 keychain）。 */
 export interface PluginAiAccess {
@@ -1018,6 +1058,11 @@ let settingsAccess: (() => PluginAiAccess | null) | null = null;
 /** 注入/复位 AI 配置访问（pluginStore.load 时接线；null 复位供测试）。 */
 export function setSettingsAccess(fn: (() => PluginAiAccess | null) | null): void {
   settingsAccess = fn;
+}
+
+/** 读取 AI 配置访问函数（内核服务经它消费同一数据源；未接线 = null）。 */
+export function getSettingsAccess(): (() => PluginAiAccess | null) | null {
+  return settingsAccess;
 }
 
 /**
@@ -1049,6 +1094,11 @@ let vaultWriteAccess: PluginVaultWriteAccess | null = null;
 /** 注入/复位 vault 写能力访问（pluginStore.load 时接线；null 复位供测试）。 */
 export function setPluginVaultWriteAccess(access: PluginVaultWriteAccess | null): void {
   vaultWriteAccess = access;
+}
+
+/** 读取 vault 写能力访问（内核服务经它消费同一数据源；未接线 = null）。 */
+export function getPluginVaultWriteAccess(): PluginVaultWriteAccess | null {
+  return vaultWriteAccess;
 }
 
 /** 写方法守卫：未接线（未打开仓库）时报错，插件侧可据此降级。 */

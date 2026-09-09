@@ -740,7 +740,7 @@ export const usePanelStore = create<PanelStore>((set, get) => {
         (v) => findViewHost(mirror.activeTree, mirror.detachedWindows, v) === get().windowId,
       );
       if (isHost && !collab.connected) {
-        // 域协作接线随内置插件启停注册（builtinPayload.collabWiring，pluginStore.spawn 时注册），
+        // 域协作接线随内置插件启停注册（cordis/builtins 的 collabWiring，pluginStore.spawn 时注册），
         // 此处只需按当前布局是否承载协作视图连接宿主
         collab.init({
           enabled: true,

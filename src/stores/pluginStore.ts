@@ -2,9 +2,10 @@
  * 插件平台 store：已装插件状态（app + 当前仓库 vault + 内置插件行）+ 运行时生命周期编排。
  *
  * 分层：本 store 是插件相关状态的唯一出口——组件不直连 `services/plugins`；
- * 运行时（Worker/桥）本体在 `services/plugins/bridge`，本 store 只做编排与快照。
+ * 内置插件运行时（Cordis 第一方）本体在 `services/cordis`（内核/挂载器），第三方插件运行时
+ * （Worker/桥）本体在 `services/plugins/bridge`，本 store 只做编排与快照。
  * 加载时机：应用挂载/进仓后 `load()` 一次——先列清单，再逐个拉起启用插件（单个失败不影响其余）。
- * 例外说明：本 store 静态 import `components/plugins/builtinPayload.tsx`（内置插件宿主侧载荷，
+ * 例外说明：本 store 静态 import `components/plugins/cordis/builtins.tsx`（第一方插件注册表，
  * 组件层承载组件引用——services 不 import components 的约束所致）；该边经头注释文档化，
  * 环上跨模块访问均为函数体内延迟求值，无顶层 getState/useXxx（新增顶层触碰会 TDZ 崩溃）。
  */
@@ -46,7 +47,6 @@ import {
   pluginInstall,
   pluginInstallLocal,
   pluginList,
-  pluginDefaultPlugins,
   pluginReadEntry,
   pluginSeedBuiltin,
   pluginSetEnabled,
@@ -54,7 +54,6 @@ import {
   pluginUpdate,
   pluginViewKinds as allPluginViewKinds,
   pluginViewLabel as pluginViewLabelOf,
-  registerBuiltinView,
   runContributedCommand,
   runtimeSnapshot,
   setAppPageOpener,
@@ -67,7 +66,6 @@ import {
   startPluginProcess,
   transpileTs,
   unloadPlugin,
-  unregisterPluginUi,
   emitPluginEvent,
 } from "@/services/plugins";
 import type {
@@ -81,7 +79,15 @@ import type {
   ThemeSettingRegistration,
   ViewContribution,
 } from "@/services/plugins";
-import { BUILTIN_PAYLOADS } from "@/components/plugins/builtinPayload";
+import {
+  CORDIS_BUILTIN_BY_ID,
+  CORDIS_BUILTIN_DEFS,
+  builtinManifest,
+} from "@/components/plugins/cordis/builtins";
+import { getKernel } from "@/services/cordis/kernel";
+import { mountPlugin, unmountPlugin } from "@/services/cordis/loader";
+import { resolveViewKind, onSlotChange, viewKinds as slotViewKinds } from "@/services/cordis/slots";
+import { VIEW_KINDS } from "@/types";
 import { useCollabStore, publishPluginPresence } from "@/stores/collabStore";
 import { useVaultStore } from "@/stores/vaultStore";
 import { useAppStore } from "@/stores/appStore";
@@ -109,8 +115,6 @@ import {
 } from "@/utils/pluginManifest";
 import { resolveEnabledDeps } from "@/utils/pluginDeps";
 import { detectPlatform } from "@/utils/pluginHost";
-import { registerDomainLifecycle, unregisterDomainLifecycle } from "@/utils/kernelLifecycle";
-import { subscribeVaultEvent } from "@/utils/vaultEvents";
 
 /** 某视图 kind 由内置插件提供时的状态（ViewHost 降级占位/菜单过滤用；installed=false = 已卸载）。 */
 interface BuiltinViewState {
@@ -218,16 +222,10 @@ function toInstalled(row: {
   };
 }
 
-/** 已注册的内置载荷撤销句柄（pluginId → 撤销函数；生命周期钩子 + 仓库事件订阅等随插件启停撤销）。 */
-const payloadUnregisters = new Map<string, () => void>();
-
-/** 撤销某内置插件的宿主侧载荷（视图贡献 + 领域生命周期钩子 + 能力提供者 + 协作域接线 + 仓库事件订阅）。
- *  随插件启停：停用/卸载/重载时调用（与 unregisterPluginUi 同点）；第三方插件无载荷，幂等 no-op。 */
-function unregisterBuiltinPayload(id: string): void {
-  payloadUnregisters.get(id)?.();
-  payloadUnregisters.delete(id);
-  unregisterDomainLifecycle(id); // 兜底（幂等）
-  unregisterPluginUi(id);
+/** 停止单个插件的运行时（旧桥第三方 + Cordis 第一方 fiber；各自按需生效）。 */
+async function stopPlugin(id: string): Promise<void> {
+  unloadPlugin(id);
+  await unmountPlugin(getKernel(), id);
 }
 
 /** 安装后统一收尾（模块私有）：宿主兼容强制 + 重载。 */
@@ -390,49 +388,25 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
     return code;
   };
 
-  /** 拉起单个启用插件的运行时（按平面：主线程 UI 入口 + 逻辑平面；失败标 failed 不阻塞）。 */
+  /** 拉起单个启用插件的运行时（按平面：内置经 Cordis loader；第三方按主线程 UI 入口 + 逻辑平面；
+   *  失败标 failed 不阻塞）。 */
   const spawn = async (id: string): Promise<void> => {
     const p = get().plugins[id];
     if (!p) return;
-    // 先撤销旧贡献（重载防重复注册）。
-    unregisterBuiltinPayload(id);
-    unloadPlugin(id);
+    // 先撤销旧运行时（重载防重复注册）。
+    await stopPlugin(id);
     try {
-      // 内置插件：实现随宿主编译（无入口文件/无桥运行时），启用 = 注册宿主侧载荷
-      // （视图贡献 + 领域生命周期钩子）。
+      // 内置插件：实现随宿主编译（无入口文件/无桥运行时），启用 = 挂载第一方 Cordis 插件
+      // （apply 注册视图槽 + 领域生命周期钩子 + 能力提供者 + 协作域接线 + 仓库事件订阅；
+      //  失败 = failed + 可读原因，不阻塞其余）。
       if (p.sourceKind === "builtin") {
-        const payload = BUILTIN_PAYLOADS.find((x) => x.pluginId === id);
-        if (!payload) {
-          // 内置清单（Rust）与前端载荷（builtinPayload.tsx）不同步会静默无贡献：显式告警便于排查。
-          console.warn(`内置插件 ${id} 无对应载荷，未注册任何贡献`);
+        const def = CORDIS_BUILTIN_BY_ID[id];
+        if (!def) {
+          // 内置清单（Rust）与前端注册表（cordis/builtins.tsx）不同步会静默无贡献：显式告警便于排查。
+          console.warn(`内置插件 ${id} 无第一方定义，未挂载`);
         } else {
-          for (const v of payload.views) {
-            registerBuiltinView(id, {
-              kind: v.kind,
-              label: v.label,
-              component: v.component,
-              render: v.render,
-            });
-          }
-          // 领域生命周期钩子随插件启停注册（停用/卸载/重载经 unregisterBuiltinPayload 撤销）。
-          // 主题类内置插件（builtin.theme）= 纯声明式（views 空、无生命周期），只置 active
-          // 供主题系统派生消费，不经此分支注册任何载荷。
-          const unregs: Array<() => void> = [];
-          if (payload.lifecycle) unregs.push(registerDomainLifecycle(payload.lifecycle));
-          // 能力提供者接线（canvas/table 命名空间数据源 + 变更事件）：注册后能力对 worker 平面可用
-          const capUnreg = payload.capability?.();
-          if (capUnreg) unregs.push(capUnreg);
-          // 协作域接线（画布/表格/笔记通道/重连/拆卸）：注册后域协作参与生效
-          const collabUnreg = payload.collabWiring?.();
-          if (collabUnreg) unregs.push(collabUnreg);
-          for (const spec of payload.vaultEventHandlers ?? []) {
-            unregs.push(subscribeVaultEvent(spec));
-          }
-          if (unregs.length > 0) {
-            payloadUnregisters.set(id, () => {
-              for (const u of unregs) u();
-            });
-          }
+          const result = await mountPlugin(getKernel(), { id, apply: def.apply });
+          if (!result.ok) throw new Error(result.reason);
         }
         set((s) => {
           const cur = s.plugins[id];
@@ -481,10 +455,9 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
         }
         // 双平面插件 UI 脚本失败 = 整插件故障：卸载运行时 + 撤销贡献 + 标 failed
         // （与「worker 工具仍可用但标 failed」的状态矛盾相比，卸载是自洽的一致态）。
-        void uiError.then((err) => {
+        void uiError.then(async (err) => {
           if (!err) return;
-          unloadPlugin(id);
-          unregisterBuiltinPayload(id);
+          await stopPlugin(id);
           syncPhase("failed", err);
         });
       } else {
@@ -504,6 +477,8 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
 
   onRuntimeChange(reconcile);
   onPluginUiChange(() => set((s) => ({ uiRevision: s.uiRevision + 1 })));
+  // 槽注册变化（第一方内置视图随 fiber 挂载/撤销）→ uiRevision 驱动视图菜单/面板重渲染。
+  onSlotChange(() => set((s) => ({ uiRevision: s.uiRevision + 1 })));
 
   /** load 序号守卫：并发 load（回启动页 fire-and-forget 与紧接着进仓 load 竞态）时
    * 只允许最后一次生效，防止旧 load 覆盖插件表后残留孤儿 runtime。 */
@@ -527,8 +502,10 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
     load: async () => {
       exposePluginFacade();
       setAppPageOpener((pageId) => useAppStore.getState().openPluginPage(pageId));
+      // 内核就绪（创建根 Context + 平台服务 + 事件桥；幂等单例）。
+      getKernel();
       // 内核侧数据访问接线（vault 读写/协作/ai 配置/主题设置 + collab/vault 变更事件）：
-      // canvas/table 能力提供者与变更事件随内置插件启停注册（builtinPayload.capability）
+      // canvas/table 能力提供者与变更事件随内置插件启停注册（cordis/builtins 的 capability）
       ensureVaultAccess();
       ensureVaultWriteAccess();
       ensureCollabRuntimeAccess();
@@ -536,19 +513,23 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
       ensureThemeSettingsAccess();
       ensureRuntimeChangeEvents();
       const seq = ++loadSeq;
-      const [rows, defaults] = await Promise.all([pluginList(), pluginDefaultPlugins()]);
+      // 组合默认值层权威 = 前端第一方 profile（存在/顺序/默认启用；版本取宿主版本，读失败用占位）。
+      const [rows, hostVersion] = await Promise.all([pluginList(), getAppVersion().catch(() => null)]);
       if (seq !== loadSeq) return; // 已有更新的 load 开始，本次作废（防孤儿 runtime）
       // 内置插件 id 集合注入注册表（封闭 ViewKind 的防劫持放行依据）；须先于任何视图注册。
       setBuiltinPluginIds(new Set(rows.filter((r) => r.sourceKind === "builtin").map((r) => r.id)));
       for (const id of Object.keys(get().plugins)) {
-        unloadPlugin(id);
-        unregisterBuiltinPayload(id);
+        await stopPlugin(id);
       }
       const plugins: Record<string, InstalledPlugin> = {};
       for (const row of rows) {
         plugins[row.id] = toInstalled(row);
       }
-      set({ plugins, compositionDefaults: defaults, initialized: true });
+      set({
+        plugins,
+        compositionDefaults: CORDIS_BUILTIN_DEFS.map((d) => builtinManifest(d, hostVersion ?? "0.0.0")),
+        initialized: true,
+      });
       // 面板/菜单只订阅 uiRevision：插件行落定后补发一次，让已渲染的降级占位/菜单按新状态收敛
       // （全停用内置的冷启动无任何注册 notify）。
       set((s) => ({ uiRevision: s.uiRevision + 1 }));
@@ -622,8 +603,7 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
       // Rust 先行（含守恒校验等拒绝路径）：失败抛错时本地运行时保持完好、状态一致；
       // 成功后再清理本地运行时与贡献，删除 store 行。
       await pluginUninstall(id, p.scope);
-      unloadPlugin(id);
-      unregisterBuiltinPayload(id);
+      await stopPlugin(id);
       set((s) => {
         const plugins = { ...s.plugins };
         delete plugins[id];
@@ -641,9 +621,8 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
         }));
         await spawn(id);
       } else {
-        unloadPlugin(id);
-        unregisterBuiltinPayload(id);
-        // 复位运行阶段（桥已移除运行时，store 残留的 active 是过期状态）。
+        await stopPlugin(id);
+        // 复位运行阶段（运行时已移除，store 残留的 active 是过期状态）。
         set((s) => {
           const cur = s.plugins[id];
           if (!cur) return s;
@@ -655,8 +634,7 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
     update: async (id) => {
       const p = get().plugins[id];
       if (!p) return;
-      unloadPlugin(id);
-      unregisterBuiltinPayload(id);
+      await stopPlugin(id);
       await pluginUpdate(id);
       // load 按 enabled 状态自动重拉（enabled 由状态文件保持），无需再显式 spawn。
       await get().load();
@@ -683,21 +661,26 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
     },
     pluginAppPage: (id) => getPluginAppPages().find((p) => p.id === id),
     pluginViewKinds: () => {
-      // 过滤掉「提供它的内置插件已停用或已卸载」的视图 kind：已打开面板仍显示降级占位，
-      // 只是「添加视图」菜单不再提供。
-      const base = allPluginViewKinds();
-      const disabledKinds = new Set<string>();
-      for (const p of BUILTIN_PAYLOADS) {
-        const plugin = get().plugins[p.pluginId];
-        if (!plugin || !plugin.enabled) {
-          for (const v of p.views) disabledKinds.add(v.kind);
-        }
-      }
-      if (disabledKinds.size === 0) return base;
-      return base.filter((k) => !disabledKinds.has(k));
+      // 已挂载的第一方视图槽（启用中的内置；停用/卸载的内置随 fiber 撤销自动消失）
+      // + 旧注册表里的第三方贡献 kind（内置 VIEW_KINDS 封闭枚举由槽提供，不重复）。
+      const builtinKinds = new Set(VIEW_KINDS as readonly string[]);
+      return [...slotViewKinds(), ...allPluginViewKinds().filter((k) => !builtinKinds.has(k))];
     },
-    pluginViewLabel: (view) => pluginViewLabelOf(view),
-    viewContribution: (kind) => getViewContribution(kind),
+    pluginViewLabel: (view) => resolveViewKind(view)?.payload.label ?? pluginViewLabelOf(view),
+    viewContribution: (kind) => {
+      // 分派 = slots 优先（内置视图槽），旧注册表兜底（第三方面板仍走旧桥路径）。
+      const slot = resolveViewKind(kind);
+      if (slot) {
+        return {
+          kind,
+          label: slot.payload.label,
+          component: slot.payload.component,
+          render: slot.payload.render,
+          pluginId: slot.pluginId,
+        };
+      }
+      return getViewContribution(kind);
+    },
     pluginTableView: (kind) => getPluginTableView(kind),
     pluginTableViews: () => getPluginTableViews(),
     pluginCommands: () => {
@@ -756,12 +739,12 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
     },
 
     viewKindState: (kind) => {
-      // kind → 内置插件 id（宿主载荷映射）→ 插件行状态；非内置提供 = undefined。
+      // kind → 第一方插件 id（注册表映射）→ 插件行状态；非内置提供 = undefined。
       // 行缺失 = 已卸载（占位区分「停用」与「卸载」提示）。
-      for (const p of BUILTIN_PAYLOADS) {
-        const v = p.views.find((x) => x.kind === kind);
+      for (const def of CORDIS_BUILTIN_DEFS) {
+        const v = def.views.find((x) => x.kind === kind);
         if (!v) continue;
-        const plugin = get().plugins[p.pluginId];
+        const plugin = get().plugins[def.id];
         if (!plugin) return { name: v.label, enabled: false, installed: false };
         return { name: plugin.manifest.name, enabled: plugin.enabled, installed: true };
       }

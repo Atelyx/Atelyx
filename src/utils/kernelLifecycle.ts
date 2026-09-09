@@ -3,7 +3,7 @@
  *
  * 内核启动路径（appStore/panelStore/App boot/页面）不直接调用领域 store：领域生命周期钩子
  * （flush / 切仓库清态与进仓加载 / 回启动页清理 / 释放视图 / 视图进出窗口）经此注册表注册，
- * 内核只做分发。注册/撤销随内置插件启停驱动（pluginStore.spawn/unload → builtinPayload.lifecycle）。
+ * 内核只做分发。注册/撤销随内置插件启停驱动（pluginStore.spawn/unload → cordis/builtins 的 lifecycle）。
  *
  * 错误语义 = 失败快速传播（fail-fast）：分发按注册序执行，任一钩子抛错即向外传播——
  * 与重构前「内核直接调用领域 store 方法、由调用方 try/catch」的语义逐位一致（如 selectVault

@@ -11,11 +11,23 @@ import type { PluginTransport } from "./worker";
 import {
   attachPlugin,
   callPluginContributionFn,
+  emitPluginEvent,
+  getPluginCanvasAccess,
+  getPluginCollabAccess,
+  getPluginTableRuntimeAccess,
+  getPluginVaultWriteAccess,
+  getSettingsAccess,
   listPluginContributions,
   pluginCapabilitiesByOwner,
   pluginCapabilityOwner,
   registerHostCapability,
   runtimeSnapshot,
+  setPluginCanvasAccess,
+  setPluginCollabAccess,
+  setPluginEventForwarder,
+  setPluginTableRuntimeAccess,
+  setPluginVaultWriteAccess,
+  setSettingsAccess,
   unloadPlugin,
 } from "./bridge";
 
@@ -414,5 +426,50 @@ describe("审计（命名空间）", () => {
     expect(used).toContain("com.a.x");
     expect(used).toContain("testaudit");
     expect(used).toContain("ai");
+  });
+});
+
+describe("访问读口与事件转发（内核接缝）", () => {
+  it("注入的访问对象可经读口取回（单一数据源）", () => {
+    const canvas = { snapshot: () => ({ canvasFile: null }) };
+    const table = { snapshot: () => ({ tableFile: null }) };
+    const collab = { peers: () => [] };
+    const vaultWrite = { writeFile: async () => ({ ok: true, summary: "x" }) };
+    const ai = () => ({ providers: [] });
+    setPluginCanvasAccess(canvas as never);
+    setPluginTableRuntimeAccess(table as never);
+    setPluginCollabAccess(collab as never);
+    setPluginVaultWriteAccess(vaultWrite as never);
+    setSettingsAccess(ai as never);
+    expect(getPluginCanvasAccess()).toBe(canvas);
+    expect(getPluginTableRuntimeAccess()).toBe(table);
+    expect(getPluginCollabAccess()).toBe(collab);
+    expect(getPluginVaultWriteAccess()).toBe(vaultWrite);
+    expect(getSettingsAccess()).toBe(ai);
+    setPluginCanvasAccess(null);
+    setPluginTableRuntimeAccess(null);
+    setPluginCollabAccess(null);
+    setPluginVaultWriteAccess(null);
+    setSettingsAccess(null);
+    expect(getPluginCanvasAccess()).toBeNull();
+    expect(getPluginTableRuntimeAccess()).toBeNull();
+    expect(getPluginCollabAccess()).toBeNull();
+    expect(getPluginVaultWriteAccess()).toBeNull();
+    expect(getSettingsAccess()).toBeNull();
+  });
+
+  it("事件转发钩子：emitPluginEvent 同步转发且不影响插件投递", async () => {
+    const forwarded: Array<{ event: string; payload: unknown }> = [];
+    setPluginEventForwarder((event, payload) => forwarded.push({ event, payload }));
+    const a = spawnPlugin("com.test.fwd");
+    a.transport.receive({ kind: "call", seq: 1, method: "subscribe", args: ["canvas:changed"] });
+    await tick();
+    emitPluginEvent("canvas:changed", { file: "c.atlx" });
+    expect(forwarded).toContainEqual({ event: "canvas:changed", payload: { file: "c.atlx" } });
+    expect(a.transport.posted).toContainEqual({ kind: "event", event: "canvas:changed", payload: { file: "c.atlx" } });
+    setPluginEventForwarder(null);
+    forwarded.length = 0;
+    emitPluginEvent("canvas:changed", { file: "d.atlx" });
+    expect(forwarded).toEqual([]);
   });
 });

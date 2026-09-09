@@ -7,7 +7,7 @@
  * - 文件动作联动：note/table/attachment 重命名/移动/删除、文件夹重命名/移动（载荷含 old/new 路径，
  *   供领域订阅者做画布节点引用同步/撤销栈路径迁移/UI 状态 remap 等）。
  *
- * 订阅随内置插件启停注册（builtinPayload.vaultEventHandlers）；未注册 kind 静默丢弃。
+ * 订阅随内置插件启停注册（cordis/builtins 的 vaultEventHandlers）；未注册 kind 静默丢弃。
  * 同步投递保序；handler 抛错向外传播（与重构前「内核直接调用领域方法、调用方 try/catch」语义一致）。
  * 纯数据容器 + 纯函数，无 store/service 依赖，可直测（模式同 utils/collabHost.ts）。
  */
@@ -35,7 +35,7 @@ export type VaultEventHandler = (event: VaultEvent) => void;
 /** 某 kind 事件的具体载荷类型：交叉收窄（成员 kind 为联合时也能正确落到单个字面量）。 */
 export type VaultEventOf<K extends VaultEvent["kind"]> = VaultEvent & { kind: K };
 
-/** 订阅条目（声明式，builtinPayload 直接消费；handler 为宽化事件，按 kind 自行收窄）。 */
+/** 订阅条目（声明式，cordis/builtins 直接消费；handler 为宽化事件，按 kind 自行收窄）。 */
 export interface VaultEventSubscription {
   kind: VaultEvent["kind"];
   handler: VaultEventHandler;

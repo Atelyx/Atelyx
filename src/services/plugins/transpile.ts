@@ -14,10 +14,11 @@ import esbuildWasmUrl from "esbuild-wasm/esbuild.wasm?url";
 
 let initPromise: Promise<void> | null = null;
 
-/** 初始化 esbuild 运行时（幂等；失败可重试）。 */
+/** 初始化 esbuild 运行时（幂等；失败可重试）。node（测试）用默认 wasm 加载；浏览器（WebView）须显式传 wasmURL。 */
 function ensureInit(): Promise<void> {
   if (!initPromise) {
-    initPromise = initialize({ wasmURL: esbuildWasmUrl }).catch((e) => {
+    const options = typeof window === "undefined" ? {} : { wasmURL: esbuildWasmUrl };
+    initPromise = initialize(options).catch((e) => {
       initPromise = null;
       throw e;
     });
@@ -36,6 +37,18 @@ export async function transpileTs(source: string): Promise<string> {
     jsx: "transform",
     jsxFactory: "React.createElement",
     jsxFragment: "React.Fragment",
+  });
+  return result.code;
+}
+
+/** TS/TSX 源码 → ESM（默认导出 apply 的插件入口；WebView 经 blob import 求值挂载）。 */
+export async function transpileEsm(source: string): Promise<string> {
+  await ensureInit();
+  const result = await transform(source, {
+    loader: "tsx",
+    format: "esm",
+    target: "es2020",
+    jsx: "transform",
   });
   return result.code;
 }
