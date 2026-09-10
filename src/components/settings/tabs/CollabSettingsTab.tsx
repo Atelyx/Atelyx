@@ -2,6 +2,7 @@ import { useState } from "react";
 import { RotateCcw } from "lucide-react";
 import { ToggleSwitch } from "@/components/common/ToggleSwitch";
 import { SettingCard } from "@/components/settings/SettingCard";
+import { SlotListMount } from "@/components/plugins/SlotHost";
 import { normalizeRelayUrl, randomPeerColor, useCollabStore } from "@/stores/collabStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import type { RelayTestResult } from "@/types";
@@ -165,6 +166,9 @@ export function CollabSettingsTab() {
           </button>
         </div>
       </SettingCard>
+
+      {/* 插件贡献的设置区块（ctx.slots.registerUi 槽名 settings/collab） */}
+      <SlotListMount slot="settings/collab" />
     </section>
   );
 }

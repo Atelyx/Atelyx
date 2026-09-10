@@ -1,10 +1,10 @@
 /**
- * 第三方插件浏览器侧挂载：入口源码 → ESM 求值 → Cordis apply。
+ * 插件包入口挂载：入口源码 → ESM 求值 → Cordis apply。
  *
  * 链路：Rust `plugin_read_entry` 读取入口 → `.ts/.tsx` 经 esbuild-wasm 转译 ESM → 动态
  * import 求值（WebView 用 blob: URL，node 测试用 data: URL）→ 取默认导出（apply）→
  * mountPlugin 挂载。入口须自包含（无运行时 import/export 依赖；`import type` 为类型注解，
- * 转译时擦除）；Python 入口直接拒绝。
+ * 转译时擦除）；入口扩展名在安装/读取时由清单校验限制为 .js/.ts/.tsx。
  */
 import type { Plugin } from "@atelyx/cordis";
 import { pluginReadEntry } from "@/services/plugins";
@@ -35,15 +35,8 @@ export async function evaluatePluginModule(code: string): Promise<unknown> {
   }
 }
 
-/** 挂载第三方插件（入口 = 清单 main；.py 拒绝；转译后求值挂载）。 */
-export async function mountThirdPartyPlugin(
-  kernel: Kernel,
-  id: string,
-  main: string,
-): Promise<MountResult> {
-  if (/\.py$/i.test(main)) {
-    return { ok: false, reason: "Python 插件运行时已不受支持（请使用 JS/TS）" };
-  }
+/** 挂载插件包实现（入口 = 清单 main；转译后求值挂载）。 */
+export async function mountPluginFromPackage(kernel: Kernel, id: string, main: string): Promise<MountResult> {
   const code = await pluginReadEntry(id, main);
   const js = /\.tsx?$/i.test(main) ? await transpileEsm(code) : code;
   const apply = await evaluatePluginModule(js);

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { ToggleSwitch } from "@/components/common/ToggleSwitch";
 import { SettingCard } from "@/components/settings/SettingCard";
+import { SlotListMount } from "@/components/plugins/SlotHost";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useVaultStore } from "@/stores/vaultStore";
@@ -82,6 +83,9 @@ export function EditorSettingsTab() {
             重建内部链接
           </button>
         </SettingCard>
+
+        {/* 插件贡献的设置区块（ctx.slots.registerUi 槽名 settings/editor） */}
+        <SlotListMount slot="settings/editor" />
       </section>
       {rebuildConfirm && (
         <ConfirmDialog

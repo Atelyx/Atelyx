@@ -2,6 +2,7 @@
 
 插件的 `apply(ctx, config)` 拿到插件上下文 `ctx`。所有能力都经 `ctx` 触达——类型化服务、
 事件总线、UI 注册与副作用管理。**无全局变量、无隐藏入口**；入口须自包含，直接使用 `ctx`。
+`config` 目前没有宿主侧配置来源（恒为 `undefined`），插件不要依赖它。
 
 ## 副作用管理：`ctx.effect`
 
@@ -26,18 +27,18 @@ ctx.effect(() => {
 | `ctx.dialog` | `pickDirectory()` / `pickFile(filters?)` / `saveFile(opts?)` | 系统对话框（用户取消返回 null） |
 | `ctx.clipboard` | `readText()` / `writeText(text)` / `copyImage(dataUrl)` | 剪贴板读写（敏感） |
 | `ctx.window` | `minimize()` / `toggleMaximize()` / `close()` | 窗口控制 |
-| `ctx.ai` | `chat(req, handlers?)` / `listModels()` / `listAgents()` | AI 会话（流式或聚合）、模型/Agent 列表；`req.signal` 可中止流式（中止后按 `end` 收敛） |
+| `ctx.ai` | `chat(req, handlers?)` / `listModels()` / `listAgents()` / `registerTool(opts)` | AI 会话（流式或聚合）、模型/Agent 列表、注册模型可调用的工具；`req.signal` 可中止流式（中止后按 `end` 收敛） |
 | `ctx.collab` | `peers()` / `setPresence(view, file)` | 协作在线状态 |
-| `ctx.canvas` | `snapshot()` / `addNode/updateNode/moveNode/deleteNode/addEdge/deleteEdge/selectNode` | 当前画布读写（由内置画布插件提供，停用即不可用） |
-| `ctx.table` | `snapshot()` / `updateCell/addRow/removeRow/selectRow/resolveImage` | 当前表格读写（由内置表格插件提供，停用即不可用） |
-| `ctx.note` | `currentFile()` / `open(file, title)` / `read(file?)` / `write(content)` / `save()` | 当前笔记读写（由内置笔记插件提供，停用即不可用） |
-| `ctx.chat` | `sessions()` / `activeSession()` / `isStreaming()` / `openSession(id)` / `startSession()` / `sendMessage(content)` / `stop()` / `deleteSession(id)` | AI 会话管理（由内置 AI 对话插件提供，停用即不可用） |
+| `ctx.canvas` | `snapshot()` / `addNode/updateNode/moveNode/deleteNode/addEdge/deleteEdge/selectNode` | 当前画布读写（由随应用分发的画布插件提供，停用即不可用） |
+| `ctx.table` | `snapshot()` / `updateCell/addRow/removeRow/selectRow/resolveImage` | 当前表格读写（由随应用分发的表格插件提供，停用即不可用） |
+| `ctx.note` | `currentFile()` / `open(file, title)` / `read(file?)` / `write(content)` / `save()` | 当前笔记读写（由随应用分发的笔记插件提供，停用即不可用） |
+| `ctx.chat` | `sessions()` / `activeSession()` / `isStreaming()` / `openSession(id)` / `startSession()` / `sendMessage(content)` / `stop()` / `deleteSession(id)` | AI 会话管理（由随应用分发的 AI 对话插件提供，停用即不可用） |
 | `ctx.history` | `list(kind, file)` / `rollback(kind, file, seq)` / `repoHistory()` | 领域历史读 + 回滚（`kind` = note/canvas/table） |
 | `ctx.layout` | `activeLayoutId()` / `layouts()` / `addView(panelId, view)` / `op(op)` | 布局读 + 安全操作子集（权威在 Rust） |
 | `ctx.uiState` | `read()` | 应用级 UI 使用状态读（只读非布局字段 + 布局镜像） |
 
 依赖某个服务时用 apply 对象声明：`{ name, inject: ["table"], apply(ctx) { ... } }`——
-服务缺失（如对应的内置插件被停用）时插件不激活，管理页显示原因。
+服务缺失（如提供该服务的插件被停用）时插件不激活，管理页显示原因。
 
 ## 事件：`ctx.events.on` / `ctx.emit`
 
@@ -69,19 +70,19 @@ ctx.effect(() =>
 ## UI 注册：`ctx.slots`
 
 所有 `register*` 返回的撤销函数（或经 `ctx.effect` 包裹时）在插件停用/卸载时自动撤销。
-`single` 槽（视图/节点/边/表格视图）按 `priority` 取胜出者（higher wins，缺省 0）——第三方设更高
-`priority` 即可**替换**内置视图/节点/边（如 `registerView({ kind: "note", priority: 10 })` 替换内置笔记编辑器）。
+`single` 槽（视图/节点/边/表格视图）按 `priority` 取胜出者（higher wins，缺省 0）——设更高
+`priority` 即可**替换**随应用分发的同 kind 视图/节点/边（如 `registerView({ kind: "note", priority: 10 })` 替换默认笔记编辑器）。
 
 ### 工作区面板视图 `registerView`
 
 ```ts
 ctx.slots.registerView({ kind: "com.example.panel", label: "我的面板", component: MyComponent });
-ctx.slots.registerView({ kind: "note", label: "我的笔记", component: MyNote, priority: 10 }); // 替换内置笔记
+ctx.slots.registerView({ kind: "note", label: "我的笔记", component: MyNote, priority: 10 }); // 替换默认笔记视图
 ```
 
-- `kind`：插件内唯一（建议反向域名式）；注册后出现在工作区「添加面板」菜单（第三方可注册任意 kind，`ViewKind` 已开放）。
+- `kind`：插件内唯一（建议反向域名式）；注册后出现在工作区「添加面板」菜单（任意插件可注册任意 kind，`ViewKind` 已开放）。
 - `component`：React 组件（无 props 契约）；宿主内 JSX 经转译引用 `React.createElement`（宿主已提供 React 全局）。
-- `priority`：可选，替换内置同 kind 视图/节点/边时设高值。
+- `priority`：可选，替换同 kind 的默认实现时设高值。
 
 ### 画布节点 / 边 `registerNode` / `registerEdge`
 
@@ -90,7 +91,7 @@ ctx.slots.registerNode({ type: "com.example.card", component: MyNode });
 ctx.slots.registerEdge({ type: "com.example.link", component: MyEdge });
 ```
 
-- 注册后 CanvasView `nodeTypes`/`edgeTypes` 合并；同名 `type` 经 `priority` 胜负（可替换内置 `conversation`/`text` 等）。
+- 注册后 CanvasView `nodeTypes`/`edgeTypes` 合并；同名 `type` 经 `priority` 胜负（可替换随应用分发的 `conversation`/`text` 等）。
 
 ### 表格视图 `registerTableView`
 
@@ -110,21 +111,54 @@ ctx.slots.registerCommand({ id: "say", label: "打招呼", run: () => console.lo
 ctx.slots.registerThemeSetting({ key: "accent", label: "强调色", component: AccentComp });
 ```
 
-- 设置项并入设置页左侧栏（`plugin:<pluginId>:<key>` 形式 tab）；命令出现在管理页「运行命令」。
+- `registerSetting` 注册的是**独立设置页**：并入设置页左侧栏（`plugin:<pluginId>:<key>` 形式 tab，
+  整页由你的组件渲染）；想在既有设置页里追加一节，用下面的设置区块槽。
+- 命令出现在管理页「运行命令」；`shortcut`（如 `"mod+k"`）由宿主统一监听绑定。
 - `registerThemeSetting` 绑定激活的主题插件条目的设置值字典（`{ colorMode, accentColor, ... }`），
   `onChange(key, value)` 写回（value = `undefined` 删除键恢复默认）。
 
 ### 任意 UI 槽位 `registerUi`
 
 ```ts
-ctx.slots.registerUi({ slot: "toolbar/note/right", component: ToolbarBtn, priority: 0 });
+// 工具条：单行内联控件
+ctx.slots.registerUi({ slot: "toolbar/note/right", component: ToolbarBtn });
+// 设置页区块：在某设置页内追加一节（纵向排列，可由多个区块并列）
+ctx.slots.registerUi({ slot: "settings/files", component: AttachmentRulesBlock });
 ```
 
 - 向任意具名 UI 槽位贡献一个组件（`toolbar/<region>`、`panelhead/<region>`、`contextmenu/<target>`、
-  `settings/<block>`、`statusbar/<region>` 等）；list 槽多贡献按 `priority` 降序渲染。
-- 宿主侧 `SlotListMount`/`SlotMount`（`components/plugins/SlotHost.tsx`）读取并渲染对应槽位；
-  内置笔记本工具条 `toolbar/note/right` 与表格工具条 `toolbar/table/right` 已接入。
+  `settings/<tab>`、`statusbar/<region>` 等）；list 槽多贡献按 `priority` 降序渲染。
+- 已接入的槽位：`toolbar/note/right`、`toolbar/table/right`、`toolbar/files`、`statusbar/canvas`、
+  `panelhead/status`、`titlebar/right`，以及设置页区块
+  `settings/general`、`settings/theme`、`settings/collab`、`settings/modelServices`、
+  `settings/search`、`settings/files`、`settings/editor`（区块自行负责标题与卡片外观，
+  可用 CSS 变量 `--bg-*`/`--border-*`/`--text-*`）。
+- 宿主侧 `SlotListMount`/`SlotMount`（`components/plugins/SlotHost.tsx`）读取并渲染对应槽位。
 
-## 配置
+## AI 工具：`ctx.ai.registerTool`
 
-`apply(ctx, config)` 的第二参为插件配置（当前为 `{}` 占位，组合配置层开放后生效）。
+```ts
+ctx.ai.registerTool({
+  name: "com_example_lookup",          // 工具名（模型可见；小写字母/数字/下划线）
+  description: "按关键词查公司内部术语表",
+  parameters: { type: "object", properties: { q: { type: "string" } }, required: ["q"] },
+  run: async (args) => {
+    const text = await ctx.vault.readFile(`术语表/${String(args.q)}.md`);  // 能力仍走 ctx
+    return `已读取 ${String(args.q)}：${text.slice(0, 200)}`;
+  },
+});
+```
+
+- 注册后进入 Agent 名册的「插件」分类（**需在设置 → Agent 里勾选该工具才生效**）；停用/卸载插件时自动撤销。
+- `run(args, { signal })` 返回气泡摘要文本；`signal` 在用户中止时置位（长任务请自行检查并尽快返回）；
+  抛错即记为失败结果（不中断整轮对话）；工具名与已有工具重复会被拒绝（防覆盖宿主工具）。
+- 参数校验/摘要/结果回填由宿主补齐；工具内部访问仓库、网络等能力仍统一经 `ctx`（受同一审计与披露）。
+
+## 组合与替换
+
+- 你的插件与随应用分发的插件同一条注册表/生命周期/审计，无特权差别：安装 + 启用即可生效。
+- **替换/增强默认实现**：在 `apply` 里注册同 kind 的视图/节点/边并给更高的 `priority`
+  （single 槽 `priority` 高者胜出，同值后者胜）——替换关系由插件自己声明，用户不需要额外配置。
+- **依赖提供者**：用 apply 对象的 `inject` 声明依赖的服务；提供者在默认组合中先挂载，
+  你的插件随后激活。
+- 行序（装配顺序）由宿主决定，不面向用户配置：默认组合成员在前，其余插件按 id 追加。

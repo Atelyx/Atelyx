@@ -1,8 +1,8 @@
 /**
- * 「主题」设置 tab（内核设置页）：下拉选择主题插件（内置默认主题 + 已启用第三方主题插件），
+ * 「主题」设置 tab（内核设置页）：下拉选择主题插件（默认主题 + 已启用的用户主题插件），
  * 下方渲染激活插件的设置项——
- * - 内置主题插件：深浅模式（跟随系统/浅色/深色，内核预置）+ 强调色（内核预置，值自动应用 --accent）；
- * - 第三方主题插件：声明 themeOptions.accent 时渲染预置强调色卡 + registerThemeSetting 注册的自定义设置区块。
+ * - 默认主题插件：深浅模式（跟随系统/浅色/深色，内核预置）+ 强调色（内核预置，值自动应用 --accent）；
+ * - 用户主题插件：声明 themeOptions.accent 时渲染预置强调色卡 + registerThemeSetting 注册的自定义设置区块。
  *
  * 主题系统是内核原语（切换/解析/应用/存储框架）；「提供什么主题与设置项」由主题插件声明。
  */
@@ -10,6 +10,7 @@ import { Check, RotateCcw } from "lucide-react";
 import { useMemo } from "react";
 import { DropdownSelect, type DropdownOption } from "@/components/common/DropdownSelect";
 import { SettingCard } from "@/components/settings/SettingCard";
+import { SlotListMount } from "@/components/plugins/SlotHost";
 import { useDebouncedDraft } from "@/hooks/useDraftSync";
 import { usePluginStore } from "@/stores/pluginStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -22,7 +23,7 @@ import {
   type ThemeColorMode,
 } from "@/utils/pluginTheme";
 
-/** 内置深浅模式选项（值 = 主题条目/解析目标；跟随系统 = 按 prefers-color-scheme 实时解析）。 */
+/** 默认主题插件的深浅模式选项（值 = 主题条目/解析目标；跟随系统 = 按 prefers-color-scheme 实时解析）。 */
 const COLOR_MODE_OPTIONS: { label: string; value: ThemeColorMode }[] = [
   { label: "跟随系统", value: "system" },
   { label: "浅色", value: "light" },
@@ -85,7 +86,7 @@ function AccentSettingCard({ pluginId }: { pluginId: string }) {
   );
 }
 
-/** 内置主题插件的设置区：深浅模式 + 强调色。pluginId = 解析后的激活插件 id（可能回退，非原始持久化值）。 */
+/** 默认主题插件的设置区：深浅模式 + 强调色。pluginId = 解析后的激活插件 id（可能回退，非原始持久化值）。 */
 function BuiltinThemeSettings({
   pluginId,
   settings,
@@ -126,7 +127,7 @@ function BuiltinThemeSettings({
   );
 }
 
-/** 第三方主题插件的设置区：声明的强调色 + registerThemeSetting 注册的自定义设置区块。 */
+/** 用户主题插件的设置区：声明的强调色 + registerThemeSetting 注册的自定义设置区块。 */
 function PluginThemeSettings({
   pluginId,
   settings,
@@ -182,10 +183,10 @@ export function ThemeSettingsTab() {
     const opts: DropdownOption[] = [];
     for (const p of providers) {
       if (p.builtin) {
-        opts.push({ value: p.pluginId, label: p.name, group: "内置主题" });
+        opts.push({ value: p.pluginId, label: p.name, group: "默认主题" });
       } else {
         // 不显示条目数（配色切换等设置由主题插件自备，见 registerThemeSetting）
-        opts.push({ value: p.pluginId, label: p.name, group: "插件主题" });
+        opts.push({ value: p.pluginId, label: p.name, group: "用户主题" });
       }
     }
     return opts;
@@ -217,6 +218,9 @@ export function ThemeSettingsTab() {
           暂无可用主题插件
         </div>
       )}
+
+      {/* 插件贡献的设置区块（ctx.slots.registerUi 槽名 settings/theme） */}
+      <SlotListMount slot="settings/theme" />
     </section>
   );
 }

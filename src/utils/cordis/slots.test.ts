@@ -118,7 +118,7 @@ describe("slots 注册表", () => {
     const off1 = registerNodeSlot("conversation", "builtin.canvas", (() => null) as never, { priority: 0 });
     registered.push("builtin.canvas:node/conversation");
     expect(resolveNodeSlot("conversation")?.pluginId).toBe("builtin.canvas");
-    // 第三方以更高 priority 注册同 type → 胜出（实施内置替换语义）。
+    // 用户插件以更高 priority 注册同 type → 胜出（替换默认实现）。
     const off2 = registerNodeSlot("conversation", "com.test.conv", (() => null) as never, { priority: 10 });
     registered.push("com.test.conv:node/conversation");
     expect(resolveNodeSlot("conversation")?.pluginId).toBe("com.test.conv");

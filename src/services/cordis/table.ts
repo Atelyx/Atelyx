@@ -1,5 +1,5 @@
 /**
- * 表格服务提供器（ctx.table）：由第一方 builtin.table 插件挂载时经 ctx.provide 提供。
+ * 表格服务提供器（ctx.table）：由 builtin.table 行挂载时经 ctx.provide 提供。
  *
  * 实现 = 注入的表格访问对象（stores/tableStore 的 registerTablePluginWiring 填充）——
  * 停用/卸载 builtin.table 时 access 撤销、服务随之消失。

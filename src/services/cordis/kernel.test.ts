@@ -12,6 +12,7 @@ import { emitPluginEvent, setKernelRef } from "./events";
 import { createKernel, getKernel, resetKernel } from "./kernel";
 import { createCanvasService } from "./canvas";
 import { createTableService } from "./table";
+import { buildAgentTools, pluginToolMetas } from "@/services/ai/tools";
 
 afterEach(() => {
   resetKernel();
@@ -61,7 +62,7 @@ describe("Cordis 内核宿主", () => {
     k.dispose();
   });
 
-  it("collab 服务经桥注入的访问对象可用", () => {
+  it("collab 服务经注入的访问对象可用", () => {
     const { ctx, dispose } = createKernel();
     const fake = {
       peers: () => [{ id: "p1" }],
@@ -73,7 +74,7 @@ describe("Cordis 内核宿主", () => {
     dispose();
   });
 
-  it("画布/表格服务工厂读取桥注入的访问对象", () => {
+  it("画布/表格服务工厂读取注入的访问对象", () => {
     const fakeCanvas = {
       snapshot: () => ({ canvasFile: "c.atlx", canvasTitle: "t", nodes: [], edges: [], selectedNodeId: null }),
       addNode: () => "n1",
@@ -104,5 +105,42 @@ describe("Cordis 内核宿主", () => {
     resetKernel();
     const c = getKernel();
     expect(c).not.toBe(a);
+  });
+
+  it("ctx.ai.registerTool：插件注册的 AI 工具进名册与分发器，随 fiber 卸载撤销", async () => {
+    const k = createKernel();
+    const fiber = k.ctx.plugin((ctx: Context) => {
+      ctx.ai.registerTool({
+        name: "plugin_echo",
+        description: "回显参数",
+        run: (args) => `echo:${String(args.text)}`,
+      });
+    });
+    await fiber.await();
+    expect(pluginToolMetas().map((m) => m.id)).toContain("plugin_echo");
+    expect(pluginToolMetas().find((m) => m.id === "plugin_echo")?.category).toBe("plugin");
+    expect(buildAgentTools(["plugin_echo"], true).tools.map((t) => t.name)).toContain("plugin_echo");
+    await fiber.dispose();
+    expect(pluginToolMetas().map((m) => m.id)).not.toContain("plugin_echo");
+    expect(buildAgentTools(["plugin_echo"], true).tools).toEqual([]);
+    k.dispose();
+  });
+
+  it("ctx.ai.registerTool：工具名非法即报错（不静默注册）", async () => {
+    const k = createKernel();
+    const fiber = k.ctx.plugin((ctx: Context) => {
+      ctx.ai.registerTool({ name: "Bad Name", description: "x", run: () => "x" });
+    });
+    await expect(fiber.await()).rejects.toThrow("工具名须为非空标识");
+    k.dispose();
+  });
+
+  it("ctx.ai.registerTool：与内置工具同名即报错（防静默覆盖宿主工具）", async () => {
+    const k = createKernel();
+    const fiber = k.ctx.plugin((ctx: Context) => {
+      ctx.ai.registerTool({ name: "write_file", description: "冒名", run: () => "x" });
+    });
+    await expect(fiber.await()).rejects.toThrow("工具名已被占用");
+    k.dispose();
   });
 });

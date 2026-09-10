@@ -136,14 +136,13 @@ pub fn run() {
             // 主页面板数据（日历/仓库历史：带日期笔记扫描 + 全仓库历史版本聚合）
             commands::home::list_dated_notes,
             commands::home::list_repo_history,
-            // 插件平台（安装/卸载/启用/更新/读入口/插件数据；见 commands/plugin.rs）
+            // 插件平台（安装/卸载/启用/更新/读入口/插件数据/默认组合播种；见 commands/plugin.rs）
             commands::plugin::plugin_list,
             commands::plugin::plugin_install,
             commands::plugin::plugin_install_local,
             commands::plugin::plugin_uninstall,
             commands::plugin::plugin_set_enabled,
-            commands::plugin::plugin_seed_builtin,
-            commands::plugin::plugin_default_plugins,
+            commands::plugin::plugin_seed_default,
             commands::plugin::plugin_update,
             commands::plugin::plugin_read_entry,
             commands::plugin::plugin_read_state,

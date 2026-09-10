@@ -23,16 +23,16 @@ export type PluginType =
 /** 安装作用域：app=个人工具（本机，默认）；vault=随仓库共享。 */
 export type PluginScope = "app" | "vault";
 
-/** 插件安装来源类型（管理 UI 徽标/更新可用性依据）。 */
+/** 插件来源（中性信息：展示徽标 + 更新渠道分派；不构成类别，不参与装配/权限判定）。 */
 export type PluginSourceKind = "market" | "git" | "local" | "builtin";
 
 /**
  * 声明式主题条目：基础配色方案 + 语义变量覆盖（无需运行时代码；键可带或省略 `--` 前缀，
  * 应用时统一补前缀）。主题只覆盖想改的变量子集，未覆盖的落回基础方案（colorScheme 决定的
- * 内置浅/深基底），保证对比度与完整性兜底。
+ * 浅/深基础条目），保证对比度与完整性兜底。
  */
 export interface ThemeDefinition {
-  /** 主题条目 id（插件内唯一；与内置基底 `light`/`dark` 重名会被拒绝）。 */
+  /** 主题条目 id（插件内唯一；与基础条目 `light`/`dark` 重名会被丢弃，插件其余条目仍生效）。 */
   id: string;
   /** 显示名（主题选择列表展示）。 */
   name: string;
@@ -50,6 +50,14 @@ export interface PluginThemeOptions {
   /** 使用内核预置「强调色」设置项（值自动应用到 --accent 系列；存 themeSettings[插件id].accentColor）。 */
   accent?: boolean;
 }
+
+/**
+ * 插件包原始清单（插件根目录 `package.json` 的原始形状）：`name` = 插件 id（反向域名）、
+ * `version`、`main` + 嵌套 `atelyx` 块（显示名/类型/作用域/披露/主题声明等）。
+ * 跨 Rust 边界的形态（列表返回行与默认组合播种都用它）；行对象经 `utils/pluginManifest`
+ * 归一化为 `PluginManifest` 后供前端消费。
+ */
+export type PluginPackageJson = Record<string, unknown>;
 
 /**
  * 插件包清单（插件根目录的 package.json 归一化；原始输入为 npm 标准字段 + `atelyx` 块，
@@ -127,8 +135,8 @@ export interface PluginIndex {
   items: PluginIndexEntry[];
 }
 
-/** 已装插件的运行阶段。 */
-export type PluginFiberPhase = "pending" | "loading" | "active" | "failed";
+/** 插件行的运行阶段。 */
+export type PluginFiberPhase = "pending" | "active" | "failed";
 
 /** 已装插件运行记录（pluginStore 用）。 */
 export interface InstalledPlugin {
@@ -136,9 +144,9 @@ export interface InstalledPlugin {
   manifest: PluginManifest;
   /** 归一化作用域（缺省 app）。 */
   scope: PluginScope;
-  /** 安装目录（Rust 返回的绝对路径；本地来源为链接路径；内置插件无磁盘目录，为空串）。 */
+  /** 安装目录（Rust 返回的绝对路径；本地来源为链接路径；实现随应用编译的行无磁盘目录，为空串）。 */
   installDir: string;
-  /** 安装来源类型（市场 / Git / 本地目录 / 内置）。 */
+  /** 来源（中性信息）。 */
   sourceKind: PluginSourceKind;
   enabled: boolean;
   phase: PluginFiberPhase;

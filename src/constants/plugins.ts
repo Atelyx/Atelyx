@@ -1,20 +1,9 @@
 /**
- * 插件平台常量：类型/作用域/徽标的展示文案，市场索引地址，官方名单。
- * 插件面服务的展示文案与敏感标记见 constants/pluginServices.ts（此处不维护服务词汇表）。
+ * 插件平台常量：类型/作用域/来源/徽标的展示文案，市场索引地址，官方名单。
+ * 插件面服务的展示文案与敏感标记见 constants/pluginServices.ts（此处不维护服务词汇表）；
+ * 插件目录布局与清单文件名归 Rust 侧（`commands/plugin.rs` 的常量），前端不重复持有。
  */
 import type { PluginBadge, PluginScope, PluginSourceKind, PluginType } from "@/types";
-
-/** 插件发现标签：作者给仓库打此 topic 即进入市场聚合。 */
-export const PLUGIN_DISCOVERY_TOPIC = "atelyx-plugin";
-
-/** 插件包清单文件名（插件根目录；npm 标准字段 + `atelyx` 块）。 */
-export const PLUGIN_MANIFEST_FILE = "package.json";
-
-/** app 级插件目录名（位于 app_data_dir 下）。 */
-export const PLUGIN_APP_DIR = "plugins";
-
-/** vault 级插件目录（相对仓库根）。 */
-export const PLUGIN_VAULT_DIR = ".atelyx/plugins";
 
 /** 官方账号名单：这些账号发布的插件自动带 official 徽标（市场聚合侧同用）。 */
 export const OFFICIAL_PLUGIN_ORGS = ["Xuhang944"] as const;
@@ -53,10 +42,10 @@ export const PLUGIN_BADGE_LABELS: Record<PluginBadge, string> = {
   endorsed: "精选",
 };
 
-/** 插件安装来源展示文案（已装列表徽标）。 */
+/** 插件来源展示文案（组合树行徽标；来源仅作中性信息，不构成类别）。 */
 export const PLUGIN_SOURCE_LABELS: Record<PluginSourceKind, string> = {
   market: "市场",
   git: "Git",
   local: "本地目录",
-  builtin: "内置",
+  builtin: "随应用",
 };

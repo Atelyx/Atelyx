@@ -1,30 +1,27 @@
 /**
- * 插件平台 store：已装插件状态（app + 当前仓库 vault + 内置插件行）+ 运行时生命周期编排。
+ * 插件平台 store：插件行状态（app + 当前仓库 vault）+ 组合层（默认组合 + 已装行）+ 生命周期编排。
  *
  * 分层：本 store 是插件相关状态的唯一出口——组件不直连 `services/plugins`；
- * 插件运行时（第一方与第三方 Cordis 插件）本体在 `services/cordis`（内核/挂载器/注册表），
+ * 插件运行时（Cordis 内核/挂载器/注册表）在 `services/cordis`，组合层推导在 `utils/cordis/composition`，
  * 本 store 只做编排与快照。
- * 加载时机：应用挂载/进仓后 `load()` 一次——先列清单，再逐个拉起启用插件（单个失败不影响其余）。
- * 例外说明：本 store 静态 import `components/plugins/cordis/builtins.tsx`（第一方插件注册表，
+ * 装配：行来自插件列表（磁盘包行 + 随应用分发的行），装配顺序 = 默认组合成员在前、其余按 id 追加；
+ * 挂载实现按「入口解析方式」判定——行有落位目录则读该包磁盘入口，否则经随应用分发实现注册表取编译实现。
+ * 「谁替换谁」由插件在 apply 里经 ctx.slots 的 priority / inject 声明，组合层不提供行级覆盖。
+ * 加载时机：应用挂载/进仓后 `load()` 一次——先按默认组合清单播种并取行，再按装配顺序拉起启用行。
+ * 例外说明：本 store 静态 import `components/plugins/cordis/builtins.tsx`（随应用分发插件注册表，
  * 组件层承载组件引用——services 不 import components 的约束所致）；该边经头注释文档化，
  * 环上跨模块访问均为函数体内延迟求值，无顶层 getState/useXxx（新增顶层触碰会 TDZ 崩溃）。
  */
 import { create } from "zustand";
 import type { ComponentType } from "react";
-import type {
-  InstalledPlugin,
-  PluginIndexEntry,
-  PluginManifest,
-  PluginScope,
-  PluginSourceKind,
-} from "@/types";
+import type { InstalledPlugin, PluginIndexEntry, PluginManifest, PluginPackageJson, PluginScope } from "@/types";
 import { errText, type PluginFiberPhase } from "@/types";
 import type { AppUiState } from "@/types";
 import {
   pluginInstall,
   pluginInstallLocal,
   pluginList,
-  pluginSeedBuiltin,
+  pluginSeedDefault,
   pluginSetEnabled,
   pluginUninstall,
   pluginUpdate,
@@ -32,9 +29,7 @@ import {
 import {
   getPluginAppPages,
   getPluginCommands,
-  getPluginEdge,
   getPluginEdges,
-  getPluginNode,
   getPluginNodes,
   getPluginSetting,
   getPluginSettings,
@@ -59,8 +54,6 @@ import type { PluginRow } from "@/services/plugins";
 import type {
   PluginAppPageRegistration,
   PluginCommandContribution,
-  PluginEdgeRegistration,
-  PluginNodeRegistration,
   PluginSettingRegistration,
   PluginTableViewRegistration,
   ThemeSettingRegistration,
@@ -69,15 +62,17 @@ import type { ViewContribution } from "@/services/cordis/slots";
 import {
   CORDIS_BUILTIN_BY_ID,
   CORDIS_BUILTIN_DEFS,
+  DEFAULT_COMPOSITION,
   builtinManifest,
 } from "@/components/plugins/cordis/builtins";
 import { getKernel } from "@/services/cordis/kernel";
 import { installCommandHotkeys } from "@/services/cordis/commandHotkeys";
-import { mountPlugin, unmountPlugin } from "@/services/cordis/loader";
-import { mountThirdPartyPlugin } from "@/services/cordis/thirdParty";
+import { mountPlugin, unmountAll, unmountPlugin } from "@/services/cordis/loader";
+import { mountPluginFromPackage } from "@/services/cordis/packageMount";
 import { resolveViewKind, onSlotChange, viewKinds as slotViewKinds } from "@/services/cordis/slots";
 import type { ViewSlotContribution } from "@/services/cordis/slots";
 import { VIEW_LABELS } from "@/constants/views";
+import { composePlugins, compositionPackages, mountOrder } from "@/utils/cordis/composition";
 import { useCollabStore, publishPluginPresence } from "@/stores/collabStore";
 import { useVaultStore } from "@/stores/vaultStore";
 import { useAppStore } from "@/stores/appStore";
@@ -102,21 +97,18 @@ import {
   readMarketCache,
 } from "@/services/plugins/market";
 import { getAppVersion } from "@/services/app";
-import {
-  pluginCompatibleWithHost,
-  validatePluginManifest,
-} from "@/utils/pluginManifest";
+import { pluginCompatibleWithHost, validatePluginManifest } from "@/utils/pluginManifest";
 import { detectPlatform } from "@/utils/pluginHost";
 
-/** 某视图 kind 由内置插件提供时的状态（ViewHost 降级占位/菜单过滤用；installed=false = 已卸载）。 */
-interface BuiltinViewState {
+/** 某视图 kind 的默认实现提供行状态（ViewHost 降级占位用；installed=false = 已卸载）。 */
+interface ViewProviderState {
   name: string;
   enabled: boolean;
   installed: boolean;
 }
 
 interface PluginStoreState {
-  /** 已装插件（按 id；运行时阶段/审计与磁盘行合并）。 */
+  /** 插件行（按 id；运行时阶段/审计与列表行合并）。 */
   plugins: Record<string, InstalledPlugin>;
   /** 已初始化（应用挂载/进仓后加载一次）。 */
   initialized: boolean;
@@ -128,11 +120,10 @@ interface PluginStoreState {
   marketError: string;
   /** 市场是否已加载过（UI 据此显示加载/空态）。 */
   marketLoaded: boolean;
-  /** 默认装配（官方默认插件集；组合配置视图的默认值层来源，含已卸载成员）。 */
-  compositionDefaults: PluginManifest[];
-  /** 加载已装插件并按启用状态拉起运行时。 */
+  /** 加载插件行并按装配顺序拉起运行时。 */
   load(): Promise<void>;
-  /** 从 GitHub 仓库安装（repo 为 `owner/repo` 市场引用或完整 git 地址；安装后默认未启用，由管理 UI 确认后启用）。 */
+  /** 从 GitHub 仓库安装（repo 为 `owner/repo` 市场引用或完整 git 地址；新装默认停用，
+   *  同名行被替换时沿用该行原有启停状态）。 */
   install(repo: string, scope: PluginScope): Promise<void>;
   /** 从本地目录安装（junction/符号链接实时引用，源目录改动即时生效；当前仅 app 级）。 */
   installLocal(path: string): Promise<void>;
@@ -140,12 +131,14 @@ interface PluginStoreState {
   installLocalFromPicker(): Promise<boolean>;
   /** 从 git 地址安装（git clone，保留 .git 供更新；当前仅 app 级）。 */
   installGit(url: string): Promise<void>;
-  /** 卸载（删除目录 + 终止运行时 + 清理状态）。 */
+  /** 卸载（删除目录/链接 + 终止运行时 + 清理状态）。 */
   uninstall(id: string): Promise<void>;
   /** 启用/停用（启用 = 拉起运行时；停用 = 终止运行时）。 */
   setEnabled(id: string, enabled: boolean): Promise<void>;
   /** 更新（备份 → 安装 → 失败回滚；成功则重载运行时）。 */
   update(id: string): Promise<void>;
+  /** 恢复默认装配：补播种已卸载的默认行 + 重载。 */
+  restoreDefaultComposition(): Promise<void>;
   /** 插件工具的 UI 元数据（Agent 设置页名册合并；组件经此读取，不直连 services）。 */
   pluginToolMetas(): AgentToolMeta[];
   /** 插件设置项注册（设置页 tab 合并）。 */
@@ -153,13 +146,9 @@ interface PluginStoreState {
   pluginSetting(key: string): PluginSettingRegistration | undefined;
   /** 某主题插件的设置项注册（主题页设置区渲染用；经 store 中转，组件不直连 services）。 */
   pluginThemeSettings(pluginId: string): ThemeSettingRegistration[];
-  /** 插件画布节点注册（CanvasView nodeTypes 合并）。 */
-  pluginNode(type: string): PluginNodeRegistration | undefined;
-  /** 插件画布节点组件表（nodeTypes 合并用：type → component）。 */
+  /** 插件画布节点组件表（nodeTypes 合并用：type → component，single 槽胜出）。 */
   pluginNodeTypes(): Record<string, ComponentType>;
-  /** 插件画布边注册（CanvasView edgeTypes 合并；与节点同 last-wins 语义）。 */
-  pluginEdge(type: string): PluginEdgeRegistration | undefined;
-  /** 插件画布边组件表（edgeTypes 合并用：type → component）。 */
+  /** 插件画布边组件表（edgeTypes 合并用：type → component，single 槽胜出）。 */
   pluginEdgeTypes(): Record<string, ComponentType>;
   /** 插件应用页面注册（app 页面/模式全页接管）。 */
   pluginAppPage(id: string): PluginAppPageRegistration | undefined;
@@ -167,7 +156,7 @@ interface PluginStoreState {
   pluginViewKinds(): string[];
   /** 视图显示名（含插件面板，未知视图原样兜底）。 */
   pluginViewLabel(view: string): string;
-  /** 某视图的贡献（内置 + 插件面板统一注册表；ViewHost 分派用，缺注册 = 空面板占位）。 */
+  /** 某视图的贡献（统一视图槽注册表；ViewHost 分派用，缺注册 = 空面板占位）。 */
   viewContribution(kind: string): ViewContribution | undefined;
   /** 插件表格视图注册（kind → 注册；TableEditor 视图切换合并）。 */
   pluginTableView(kind: string): PluginTableViewRegistration | undefined;
@@ -185,26 +174,16 @@ interface PluginStoreState {
   pluginAudit(): PluginAuditEntry[];
   /** 加载市场索引（缓存未过期直接回缓存；网络失败直接提示失败）。 */
   loadMarket(force?: boolean): Promise<void>;
-  /** 某视图 kind 由内置插件提供时的状态（组件经此查，不直连 services）；非内置提供 = undefined。 */
-  viewKindState(kind: string): BuiltinViewState | undefined;
-  /** 恢复内置插件（管理 UI「恢复内置插件」入口）：补播种缺失的内置条目后重载插件列表。 */
-  restoreBuiltin(): Promise<void>;
+  /** 某视图 kind 的默认实现提供行状态（组件经此查，不直连 services）；非默认组合提供 = undefined。 */
+  viewProviderState(kind: string): ViewProviderState | undefined;
 }
 
-/** 磁盘行 → store 条目（清单经前端校验归一化；Rust 侧 plugin_list 已滤除损坏清单，
- * 此处回退 cast 仅兜底意外形态——正常路径 validated.ok 恒真）。 */
-function toInstalled(row: {
-  id: string;
-  scope: PluginScope;
-  installDir: string;
-  sourceKind: PluginSourceKind;
-  enabled: boolean;
-  manifest: unknown;
-}): InstalledPlugin {
+/** 列表行 → store 条目（清单经前端校验归一化；Rust 侧已滤除损坏清单，回退 cast 仅兜底意外形态）。 */
+function toInstalled(row: PluginRow): InstalledPlugin {
   const validated = validatePluginManifest(row.manifest);
   return {
     id: row.id,
-    manifest: validated.ok ? validated.manifest : (row.manifest as InstalledPlugin["manifest"]),
+    manifest: validated.ok ? validated.manifest : (row.manifest as unknown as PluginManifest),
     scope: row.scope,
     installDir: row.installDir,
     sourceKind: row.sourceKind,
@@ -366,7 +345,7 @@ function ensureUiStateAccess(): void {
 }
 
 /** 能力变更事件接线守卫：内核侧 store 变更 → emitPluginEvent 通知订阅插件（幂等一次）。
- *  canvas/table 变更事件随各自内置插件启停注册（见 canvasStore/tableStore 的 register*PluginWiring）；
+ *  canvas/table 变更事件随各自插件启停注册（见 canvasStore/tableStore 的 register*PluginWiring）；
  *  collab/vault 属内核数据访问，常驻。载荷为轻量信号（插件按需再调 snapshot()/取数据）。 */
 let runtimeEventsWired = false;
 function ensureRuntimeChangeEvents(): void {
@@ -390,33 +369,32 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
     });
   };
 
-  /** 拉起单个启用插件的运行时：内置经 loader 挂载第一方 apply；第三方 = 包格式入口
-   *  （.py 拒绝；TS 转译后 blob import 求值挂载）；失败标 failed + 可读原因，不阻塞其余。 */
+  /** 默认组合清单（默认组合层定义 → 原始插件包清单；版本取宿主版本）。 */
+  const defaultManifests = (hostVersion: string | null): PluginPackageJson[] =>
+    CORDIS_BUILTIN_DEFS.map((d) => builtinManifest(d, hostVersion ?? "0.0.0"));
+
+  /** 拉起单个插件行的运行时：行有落位目录（磁盘包）则读该包入口，否则经实现注册表取编译实现
+   *  （同为「入口解析方式」，与列表的磁盘行优先一致）；失败标 failed + 可读原因。 */
   const spawn = async (id: string): Promise<void> => {
-    const p = get().plugins[id];
-    if (!p) return;
     // 先撤销旧运行时（重载防重复注册）。
     await stopPlugin(id);
     try {
-      if (p.sourceKind === "builtin") {
+      const plugin = get().plugins[id];
+      if (!plugin) throw new Error("插件不存在");
+      if (plugin.installDir === "") {
         const def = CORDIS_BUILTIN_BY_ID[id];
-        if (!def) {
-          // 内置清单（Rust）与前端注册表（cordis/builtins.tsx）不同步：标 failed + 可读原因，
-          // 防「active 但无贡献」误导（加载失败可见语义）。
-          syncPhase(id, "failed", "内置插件运行定义缺失");
-          return;
-        }
+        if (!def) throw new Error("实现随应用编译但缺少对应实现定义");
         const result = await mountPlugin(getKernel(), { id, apply: def.apply });
         if (!result.ok) throw new Error(result.reason);
         syncPhase(id, "active");
         return;
       }
-      // 声明式插件（如纯 theme）无入口：置 active 即可（主题提供者经清单消费）。
-      if (!p.manifest.main) {
+      // 磁盘包无入口 = 声明式插件（如纯 theme）：置 active 即可（主题提供者经清单消费）。
+      if (!plugin.manifest.main) {
         syncPhase(id, "active");
         return;
       }
-      const result = await mountThirdPartyPlugin(getKernel(), id, p.manifest.main);
+      const result = await mountPluginFromPackage(getKernel(), id, plugin.manifest.main);
       if (!result.ok) throw new Error(result.reason);
       syncPhase(id, "active");
     } catch (e) {
@@ -432,6 +410,10 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
    * 只允许最后一次生效，防止旧 load 覆盖插件表后残留孤儿 runtime。 */
   let loadSeq = 0;
 
+  /** 装配顺序：默认组合成员在前，其余按 id 追加（行有落位目录 → 磁盘入口，否则编译实现）。 */
+  const mountIds = (): string[] =>
+    mountOrder(composePlugins(DEFAULT_COMPOSITION, compositionPackages(get().plugins)));
+
   return {
     plugins: {},
     initialized: false,
@@ -440,19 +422,17 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
     marketLoading: false,
     marketError: "",
     marketLoaded: false,
-    compositionDefaults: [],
 
     /**
-     * 全量重载：先取磁盘清单（失败则旧状态原样保留），再卸载旧运行时与 UI 贡献，按当前上下文
-     * （app 插件 + 当前仓库 vault 插件 + 内置插件行）重建。语义 =「重置到磁盘状态」，可在
-     * boot / 切仓库 / 安装/更新后安全重复调用。
+     * 全量重载：先按默认组合清单播种并取行（失败则旧状态原样保留），再卸载旧运行时与 UI 贡献，
+     * 按装配顺序重建。语义 =「重置到当前插件行状态」，可在 boot / 切仓库 / 安装更新后安全重复调用。
      */
     load: async () => {
       setAppPageOpener((pageId) => useAppStore.getState().openPluginPage(pageId));
       // 内核就绪（创建根 Context + 平台服务 + slots 注册 API；幂等单例）。
       getKernel();
       // 内核侧数据访问接线（vault 写/协作/ai 配置 + collab/vault 变更事件）：
-      // canvas/table 能力提供者与变更事件随内置插件启停注册（cordis/builtins 的 capability）
+      // canvas/table 能力提供者与变更事件随对应插件启停注册（cordis/builtins 的 capability）
       ensureVaultWriteAccess();
       ensureCollabRuntimeAccess();
       ensureSettingsAccess();
@@ -462,41 +442,31 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
       ensureRuntimeChangeEvents();
       installCommandHotkeys();
       const seq = ++loadSeq;
-      // 组合默认值层权威 = 前端第一方 profile（存在/顺序/默认启用；版本取宿主版本，读失败用占位）。
-      const [rows, hostVersion] = await Promise.all([pluginList(), getAppVersion().catch(() => null)]);
+      // 默认组合清单权威在本层（存在/顺序/清单随 App 版本）；Rust 据此播种随应用分发的行。
+      const hostVersion = await getAppVersion().catch(() => null);
+      const rows = await pluginList(defaultManifests(hostVersion));
       if (seq !== loadSeq) return; // 已有更新的 load 开始，本次作废（防孤儿 runtime）
-      for (const id of Object.keys(get().plugins)) {
-        await stopPlugin(id);
-      }
+      // 清场：卸载内核里全部已挂载 fiber（比按 store 行逐个 stop 更彻底，含已不在行里的残留）。
+      await unmountAll(getKernel());
       const plugins: Record<string, InstalledPlugin> = {};
       for (const row of rows) {
         plugins[row.id] = toInstalled(row);
       }
-      set({
-        plugins,
-        compositionDefaults: CORDIS_BUILTIN_DEFS.map((d) => builtinManifest(d, hostVersion ?? "0.0.0")),
-        initialized: true,
-      });
-      // 面板/菜单只订阅 uiRevision：插件行落定后补发一次，让已渲染的降级占位/菜单按新状态收敛
-      // （全停用内置的冷启动无任何注册 notify）。
+      set({ plugins, initialized: true });
+      // 面板/菜单只订阅 uiRevision：行落定后补发一次，让已渲染的降级占位/菜单按新状态收敛
+      // （全停用行的冷启动无任何注册 notify）。
       set((s) => ({ uiRevision: s.uiRevision + 1 }));
-      // 挂载顺序：内置先于第三方（内置提供 ctx.canvas/table 等第三方 inject 依赖的服务；
-      // Cordis 注入对延迟出现的服务会重载，但挂载器一次性检查激活态，须先挂提供者）。
-      const enabled = rows.filter((r) => r.enabled);
-      const spawnable = [
-        ...enabled.filter((r) => r.sourceKind === "builtin"),
-        ...enabled.filter((r) => r.sourceKind !== "builtin"),
-      ].map((r) => r.id);
-      const total = spawnable.length;
-      for (let i = 0; i < spawnable.length; i++) {
+      // 装配顺序 = 默认组合成员在前（其提供者先就绪，满足后续行的 inject 依赖）。
+      const mounts = mountIds();
+      const total = mounts.length;
+      for (let i = 0; i < mounts.length; i++) {
         if (seq !== loadSeq) return;
-        const id = spawnable[i];
         if (useAppStore.getState().entryLoading) {
           useAppStore.getState().reportLoad(
-            `加载插件：${get().plugins[id]?.manifest.name ?? id}（${i + 1}/${total}）`,
+            `加载插件：${get().plugins[mounts[i]]?.manifest.name ?? mounts[i]}（${i + 1}/${total}）`,
           );
         }
-        await spawn(id);
+        await spawn(mounts[i]);
       }
     },
 
@@ -535,7 +505,7 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
       const p = get().plugins[id];
       if (!p) return;
       // Rust 先行（含守恒校验等拒绝路径）：失败抛错时本地运行时保持完好、状态一致；
-      // 成功后再清理本地运行时与贡献，删除 store 行。
+      // 成功后再终止运行时与贡献、删除 store 行（默认组合成员卸载后仍在列表中成灰行）。
       await pluginUninstall(id, p.scope);
       await stopPlugin(id);
       set((s) => {
@@ -570,7 +540,7 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
       if (!p) return;
       await stopPlugin(id);
       await pluginUpdate(id);
-      // load 按 enabled 状态自动重拉（enabled 由状态文件保持），无需再显式 spawn。
+      // load 按行状态自动重拉（enabled 由状态文件保持），无需再显式 spawn。
       await get().load();
     },
 
@@ -579,13 +549,11 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
     pluginSettings: () => getPluginSettings(),
     pluginSetting: (key) => getPluginSetting(key),
     pluginThemeSettings: (pluginId) => getPluginThemeSettings(pluginId),
-    pluginNode: (type) => getPluginNode(type),
     pluginNodeTypes: () => {
       const out: Record<string, ComponentType> = {};
       for (const reg of getPluginNodes()) out[reg.type] = reg.component;
       return out;
     },
-    pluginEdge: (type) => getPluginEdge(type),
     pluginEdgeTypes: () => {
       const out: Record<string, ComponentType> = {};
       for (const reg of getPluginEdges()) out[reg.type] = reg.component;
@@ -593,13 +561,13 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
     },
     pluginAppPage: (id) => getPluginAppPages().find((p) => p.id === id),
     pluginViewKinds: () => {
-      // 已挂载的视图槽（启用中的内置；停用/卸载随 fiber 撤销自动消失）。
+      // 已挂载的视图槽（启用中的行；停用/卸载随 fiber 撤销自动消失）。
       return slotViewKinds();
     },
     pluginViewLabel: (view) =>
       resolveViewKind(view)?.payload.label ?? (VIEW_LABELS as Record<string, string>)[view] ?? view,
     viewContribution: (kind) => {
-      // 分派 = slots（内置/第三方视图槽统一注册表）。
+      // 分派 = slots（统一视图槽注册表）。
       // 转换结果按槽贡献对象缓存：selector 订阅需稳定引用（新对象会触发无限重渲染），
       // 贡献卸载/重挂载时是新对象 → 自然换缓存；旧对象随 WeakMap 自动回收。
       const slot = resolveViewKind(kind);
@@ -671,8 +639,8 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
       }
     },
 
-    viewKindState: (kind) => {
-      // kind → 第一方插件 id（注册表映射）→ 插件行状态；非内置提供 = undefined。
+    viewProviderState: (kind) => {
+      // kind → 随应用分发的默认实现行（注册表映射）→ 行状态；非默认组合提供 = undefined。
       // 行缺失 = 已卸载（占位区分「停用」与「卸载」提示）。
       for (const def of CORDIS_BUILTIN_DEFS) {
         const v = def.views.find((x) => x.kind === kind);
@@ -683,8 +651,10 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
       }
       return undefined;
     },
-    restoreBuiltin: async () => {
-      await pluginSeedBuiltin();
+
+    restoreDefaultComposition: async () => {
+      const hostVersion = await getAppVersion().catch(() => null);
+      await pluginSeedDefault(defaultManifests(hostVersion));
       await get().load();
     },
   };

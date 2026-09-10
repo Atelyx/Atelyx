@@ -7,8 +7,8 @@
  * - 文件动作联动：note/table/attachment 重命名/移动/删除、文件夹重命名/移动（载荷含 old/new 路径，
  *   供领域订阅者做画布节点引用同步/撤销栈路径迁移/UI 状态 remap 等）。
  *
- * 订阅随内置插件启停注册（cordis/builtins 的 vaultEventHandlers）；未注册 kind 静默丢弃。
- * 同步投递保序；handler 抛错向外传播（与重构前「内核直接调用领域方法、调用方 try/catch」语义一致）。
+ * 订阅随插件启停注册（cordis/builtins 的 vaultEventHandlers）；未注册 kind 静默丢弃。
+ * 同步投递保序；handler 抛错向外传播（调用方自行 try/catch，失败不静默）。
  * 纯数据容器 + 纯函数，无 store/service 依赖，可直测（模式同 utils/collabHost.ts）。
  */
 

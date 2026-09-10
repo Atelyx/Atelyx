@@ -1,15 +1,16 @@
 /**
- * 第三方插件挂载测试（services/cordis/thirdParty + loader 扩展）。
+ * 插件包挂载测试（services/cordis/packageMount + loader 扩展）。
  *
  * 覆盖：TS 入口 → ESM 求值 → apply 挂载/卸载；apply 对象（inject）缺失依赖 → failed + 缺失清单；
- * inject 满足 → 激活；.py 入口拒绝；ctx→pluginId 审计归属。
+ * inject 满足 → 激活；ctx→pluginId 审计归属。
  */
-import { describe, expect, it, afterEach } from "vitest";
+import { describe, expect, it, afterEach, vi } from "vitest";
 import type { Context } from "@atelyx/cordis";
+import { pluginReadEntry } from "@/services/plugins";
 import { transpileEsm } from "@/services/plugins/transpile";
 import { createKernel, type Kernel } from "./kernel";
-import { evaluatePluginModule, mountThirdPartyPlugin } from "./thirdParty";
-import { contextToPluginId, mountPlugin, unmountAll } from "./loader";
+import { evaluatePluginModule, mountPluginFromPackage } from "./packageMount";
+import { contextToPluginId, mountPlugin, mountedPluginIds, unmountAll } from "./loader";
 
 const TS_APPLY = `
 import type { Context } from "@atelyx/cordis";
@@ -17,6 +18,13 @@ export default function apply(ctx: Context) {
   ctx.provide("tpSvc", { ping: () => "pong" });
 }
 `;
+
+// 入口读取走 Rust IPC：测试里以固定源码替代（断言「按实现来源包读入口」这一解析语义）。
+vi.mock("@/services/plugins", () => ({
+  pluginReadEntry: vi.fn(
+    async () => `export default function apply(ctx) { ctx.provide("pkgSvc", { ping: () => "pong" }); }`,
+  ),
+}));
 
 let kernel: Kernel | null = null;
 
@@ -28,7 +36,7 @@ afterEach(async () => {
   }
 });
 
-describe("第三方插件挂载", () => {
+describe("用户插件挂载", () => {
   it("TS 入口 → ESM 求值 → apply 挂载；卸载随 fiber 撤销", async () => {
     kernel = createKernel();
     const js = await transpileEsm(TS_APPLY);
@@ -85,10 +93,12 @@ describe("第三方插件挂载", () => {
     expect(contextToPluginId.get(pluginCtx!)).toBe("com.test.tp");
   });
 
-  it("mountThirdPartyPlugin 拒绝 .py 入口", async () => {
+  it("按清单入口路径读取并挂载（入口读 IPC 收到 id + main）", async () => {
     kernel = createKernel();
-    const result = await mountThirdPartyPlugin(kernel, "com.test.py", "main.py");
-    expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.reason).toContain("Python 插件运行时已不受支持");
+    const result = await mountPluginFromPackage(kernel, "com.acme.richnote", "main.js");
+    expect(result).toEqual({ ok: true });
+    expect(vi.mocked(pluginReadEntry)).toHaveBeenCalledWith("com.acme.richnote", "main.js");
+    expect(mountedPluginIds(kernel)).toEqual(["com.acme.richnote"]);
+    expect(kernel.ctx.get("pkgSvc")).toBeDefined();
   });
 });

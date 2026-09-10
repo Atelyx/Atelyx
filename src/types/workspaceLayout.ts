@@ -19,7 +19,7 @@
  * （见 `types/uiState.ts` 的 `AppUiState`，Rust 侧 `commands/global.rs` 同步字段）。
  */
 
-/** 内置视图类型（宿主随附；面板承载的内容）。 */
+/** 宿主视图类型（宿主随附；面板承载的内容）。 */
 export type BuiltinViewKind =
   | "canvas"
   | "note"

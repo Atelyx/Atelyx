@@ -1,4 +1,5 @@
 import { SettingCard } from "@/components/settings/SettingCard";
+import { SlotListMount } from "@/components/plugins/SlotHost";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useDraftSync } from "@/hooks/useDraftSync";
 
@@ -71,6 +72,9 @@ export function FilesSettingsTab() {
           }}
         />
       </SettingCard>
+
+      {/* 插件贡献的设置区块（ctx.slots.registerUi 槽名 settings/files） */}
+      <SlotListMount slot="settings/files" />
     </section>
   );
 }

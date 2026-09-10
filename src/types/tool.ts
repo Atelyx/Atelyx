@@ -188,6 +188,25 @@ export interface ToolExecContext {
   capabilities: ToolCapabilities;
 }
 
+/**
+ * 插件贡献的 AI 工具（`ctx.ai.registerTool` 载荷）：插件只给模型可见的 schema 与执行体，
+ * 参数校验/气泡摘要/失败收敛由宿主补齐（插件入口自包含，不接触宿主内部工具契约）。
+ */
+export interface PluginToolOptions {
+  /** 工具名（发给模型，全局唯一；小写字母/数字/下划线）。 */
+  name: string;
+  /** 发给模型的用途说明（模型据此决定是否调用）。 */
+  description: string;
+  /** 参数 JSON Schema；缺省 = 无参对象 schema。 */
+  parameters?: Record<string, unknown>;
+  /** 执行体：入参 = 模型给出的参数对象，返回气泡摘要文本；抛错即失败结果（不中断整轮）。
+   *  第二参给中止信号（用户中止时置位），长任务请自行检查并尽快返回。 */
+  run: (
+    args: Record<string, unknown>,
+    ctx: { signal: AbortSignal },
+  ) => Promise<string> | string;
+}
+
 /** 自包含工具模块（defineTool 产出）。 */
 export interface ToolDefinition<A = Record<string, unknown>> {
   /** 工具名（发给模型，也是注册表的联结 id）。 */

@@ -3,13 +3,18 @@
 //! 存储布局：
 //! - app 级插件：`app_data_dir/plugins/<目录>/`（个人工具，本机）
 //! - vault 级插件：`<仓库根>/.atelyx/plugins/<目录>/`（随仓库共享）
-//! - 状态：`app_data_dir/plugin-state.json`（enabled 开关 + 安装来源 kind/repo/url/path/scope）
+//! - 状态：`app_data_dir/plugin-state.json`（每 id：enabled 开关 + 行来源 kind/scope/落位目录名 +
+//!   随应用分发行的清单 + 已播种 id 记录）
 //!
 //! 身份模型：插件身份 = 清单 `package.json` 的 `name`（反向域名，仍校验）；**目录名 = 原名**（本地
 //! 源目录名 / 仓库名），不校验合法性、不要求等于 name。按 name 定位一律扫描目录读清单匹配；
 //! 点开头目录（`.install-*`/`.bak-*` 等临时/隐藏目录）不参与扫描。
 //!
-//! 安装流（三类来源，统一「取源码」）：
+//! 行的两种实现解析：磁盘包（扫目录读清单）与随应用分发的包（实现随宿主编译、无磁盘目录，清单由
+//! 前端随 `plugin_list` 的 `defaults` 交给本层播种并保存）。二者同一张行表、同一启停/卸载路径；
+//! 同名 id 的磁盘包覆盖随应用分发的实现（磁盘行优先列出）。
+//!
+//! 安装流（三类安装来源，统一「取源码」；随应用分发行不是安装来源，只由播种产生）：
 //! - 市场：GitHub `owner/repo`，git clone 到临时目录；本机无 git 时回退下载 GitHub 自动生成的
 //!   源码包（codeload，作者零操作，非 Release 资产）。
 //! - 手动 git 地址：git clone（保留 `.git` 供更新）。
@@ -17,11 +22,11 @@
 //! 三者统一：校验 `package.json` → 以原名原子落位到 `plugins/<原名>/`（本地目录为链接）；失败不留脏。
 //!
 //! 安全：插件 name 视为不可信输入（仍校验）；插件目录内路径访问经 `safe_plugin_path` 限制在对应插件根
-//! 目录内并拒绝符号链接段（防穿越越权）；插件代码在 WebView 隔离上下文执行、只能调前端桥。
+//! 目录内并拒绝符号链接段（防穿越越权）；插件代码在 WebView 主上下文内执行（安装即授权，能力经 ctx 面）。
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -30,7 +35,7 @@ use tauri::{AppHandle, Manager, State};
 
 use crate::vault::{atomic_write, VaultState};
 
-/// 插件包清单文件名（插件根目录；与前端 `constants/plugins.ts` 的 `PLUGIN_MANIFEST_FILE` 一致）。
+/// 插件包清单文件名（插件根目录）。
 const MANIFEST_FILE: &str = "package.json";
 /// 状态文件名（app_data_dir 下）。
 const STATE_FILE: &str = "plugin-state.json";
@@ -43,6 +48,8 @@ const MAX_ENTRY_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_ARCHIVE_TOTAL: u64 = 512 * 1024 * 1024;
 /// zip 条目数上限。
 const MAX_ENTRY_COUNT: usize = 10_000;
+/// 允许的插件入口扩展名（宿主只转译/求值 JS/TS；与 docs/plugins/manifest.md 的入口契约一致）。
+const ENTRY_EXTENSIONS: [&str; 3] = [".js", ".ts", ".tsx"];
 
 /// 插件 id 合法性（与前端 `pluginIdValid` 一致：反向域名式至少两段，无路径分隔符）。
 fn plugin_id_valid(id: &str) -> bool {
@@ -72,8 +79,8 @@ pub enum PluginSourceKind {
     Git,
     /// 本地目录（junction/符号链接实时引用，无拷贝无更新）。
     Local,
-    /// 内置（随 App 分发）：播种进 plugin-state（首启 + 版本新增补种），实现随宿主编译（无磁盘目录）。
-    /// 运行时与第三方插件无差别（同一注册表/启停/卸载/恢复）；版本随 App 走。
+    /// 随应用分发（实现随宿主编译，无磁盘目录；清单随 `plugin_list` 的 `defaults` 播种保存）。
+    /// 仅作来源信息：更新无独立渠道、行以「有无落位目录」判定。
     Builtin,
 }
 
@@ -94,25 +101,24 @@ pub struct PluginInfo {
     pub source_kind: PluginSourceKind,
 }
 
-/// 安装来源记录（更新依据：市场按 repo 重新拉取，git 按 url pull，本地实时引用）。
+/// 行来源记录（更新定位与卸载定位依据：市场按 repo 重新拉取，git 即安装目录内 `git pull`，
+/// 本地为实时引用无更新）。
 #[derive(Serialize, Deserialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 struct PluginSource {
     /// 市场来源的 GitHub `owner/repo`（更新定位）。
     #[serde(default)]
     repo: String,
-    /// 手动 git 来源的仓库地址。
-    #[serde(default)]
-    url: String,
-    /// 本地来源的源目录绝对路径（junction/符号链接目标）。
-    #[serde(default)]
-    path: String,
-    /// 落位目录名（原名）；清单损坏时卸载仍可据此按路径定位删除。
+    /// 落位目录名（原名）；清单损坏/链接悬空时卸载仍可据此按路径定位删除。
+    /// 为空 = 实现随应用编译（无磁盘目录）。
     #[serde(default)]
     dir_name: String,
     /// 来源类型（缺省市场）。
     #[serde(default)]
     kind: PluginSourceKind,
+    /// 随应用分发行的清单（磁盘行的清单以磁盘为准，此处为 None）。
+    #[serde(default)]
+    manifest: Option<Value>,
     scope: String,
 }
 
@@ -124,14 +130,17 @@ struct PluginState {
     enabled: HashMap<String, bool>,
     #[serde(default)]
     sources: HashMap<String, PluginSource>,
-    /// 已播种过的内置插件 id（增量播种依据：新增内置条目随 App 版本补播，已播种条目
-    /// 保持现状——卸载保持卸载、停用保持停用；恢复由用户显式触发）。
+    /// 已播种过的默认组合行 id（增量播种依据：新增条目随 App 版本补播，已播种条目保持现状
+    /// ——卸载保持卸载、停用保持停用；恢复由用户显式触发）。
     #[serde(default)]
-    builtin_seeded_ids: Vec<String>,
+    seeded_ids: Vec<String>,
 }
 
 /// 跨作用域 id 全局唯一：同 id 已存在于另一作用域时拒绝安装（store/enabled/运行时均按裸 id
 /// 寻址，双作用域并存会互相踩踏；随仓库同步的重复由扫描兜底展示，安装路径从源头禁止）。
+/// 「实现随应用编译的行」同占 app 作用域：来源记录按裸 id 单条保存，被 vault 级包覆盖后该行
+/// 在别的仓库无处重建（既不列出也恢复不回），故同 id 的 vault 级安装一并拒绝——想替换随应用
+/// 分发的实现请选「本机」作用域（磁盘包覆盖该实现）。
 fn ensure_global_id_unique(app: &AppHandle, state: &VaultState, scope: &str, id: &str) -> Result<(), String> {
     for other in ["app", "vault"] {
         if other == scope {
@@ -142,177 +151,111 @@ fn ensure_global_id_unique(app: &AppHandle, state: &VaultState, scope: &str, id:
                 return Err("已安装相同 id 的插件（另一作用域），请先卸载".into());
             }
         }
+        if other == "app" && has_compiled_row(app, state, id)? {
+            return Err("该 id 由随应用分发的插件占用（实现随应用编译）：请选「本机」作用域安装以替代该行".into());
+        }
     }
     Ok(())
 }
 
-// ===== 内置插件（随 App 分发，sourceKind=builtin） =====
-// 内置插件 = 分发属性：播种进 plugin-state（首启 + 版本新增补种），运行时与第三方插件同一注册表/启停/卸载/恢复，
-// 无任何特权。实现随宿主编译（无磁盘目录、无桥运行时），前端按 id 对应宿主组件载荷
-// （`components/plugins/builtinViews.tsx`）；版本随 App 走。
-
-/// 内置插件定义（id/展示信息；新增内置插件 = 在此加条目 + 前端补组件载荷）。
-/// `ty` = 主分类（panel/theme 等；theme = 声明式主题插件，无视图载荷）。
-struct BuiltinPluginDef {
-    id: &'static str,
-    name: &'static str,
-    tagline: &'static str,
-    ty: &'static str,
-}
-
-const BUILTIN_PLUGINS: &[BuiltinPluginDef] = &[
-    BuiltinPluginDef { id: "builtin.search", name: "搜索", tagline: "全文搜索仓库文件", ty: "panel" },
-    BuiltinPluginDef { id: "builtin.recent", name: "最近打开", tagline: "最近打开的文件列表", ty: "panel" },
-    BuiltinPluginDef { id: "builtin.calendar", name: "日历", tagline: "活动密度与手动日程", ty: "panel" },
-    BuiltinPluginDef { id: "builtin.aichat", name: "AI 对话", tagline: "AI 对话会话面板", ty: "panel" },
-    BuiltinPluginDef { id: "builtin.canvas", name: "画布", tagline: "有向图对话画布", ty: "panel" },
-    BuiltinPluginDef { id: "builtin.note", name: "笔记", tagline: "Markdown 笔记编辑器", ty: "panel" },
-    BuiltinPluginDef { id: "builtin.table", name: "表格", tagline: "多维表格编辑器", ty: "panel" },
-    BuiltinPluginDef { id: "builtin.files", name: "文件", tagline: "仓库文件树面板", ty: "panel" },
-    BuiltinPluginDef { id: "builtin.inspector", name: "属性", tagline: "节点/笔记属性面板", ty: "panel" },
-    BuiltinPluginDef { id: "builtin.collabroom", name: "协作房间", tagline: "协作在线用户面板", ty: "panel" },
-    BuiltinPluginDef { id: "builtin.repohistory", name: "仓库历史", tagline: "仓库版本历史面板", ty: "panel" },
-    BuiltinPluginDef { id: "builtin.theme", name: "默认主题", tagline: "内置浅色/深色主题与强调色设置", ty: "theme" },
-];
-
-fn is_builtin_plugin_id(id: &str) -> bool {
-    BUILTIN_PLUGINS.iter().any(|d| d.id == id)
-}
-
-/// 内置主题插件默认条目：浅色/深色基底（空变量 = 基础方案，未覆盖变量落回内置 CSS 双 palette）。
-fn builtin_theme_manifest_values() -> Value {
-    serde_json::json!({
-        "themes": [
-            { "id": "light", "name": "浅色", "colorScheme": "light", "variables": {} },
-            { "id": "dark", "name": "深色", "colorScheme": "dark", "variables": {} },
-        ],
-        "themeOptions": { "accent": true },
-    })
-}
-
-/// 内置插件合成清单（前端消费 name/type/tagline；main 为校验占位——实现随宿主编译，
-/// 前端按 sourceKind=builtin 跳过入口读取；元数据放 `atelyx` 块，与第三方包同一字段契约）。
-fn builtin_manifest(def: &BuiltinPluginDef) -> Value {
-    let mut manifest = serde_json::json!({
-        "name": def.id,
-        "version": env!("CARGO_PKG_VERSION"),
-        "main": "builtin",
-        "atelyx": {
-            "name": def.name,
-            "type": def.ty,
-            "scope": "app",
-            "tagline": def.tagline,
-            "author": "Atelyx",
-            "license": "MIT",
-        },
-    });
-    if def.ty == "theme" {
-        // 主题插件：合成 themes + themeOptions（与第三方清单同一字段契约）
-        let theme = builtin_theme_manifest_values();
-        if let (Some(themes), Some(theme_options)) =
-            (theme.get("themes").cloned(), theme.get("themeOptions").cloned())
-        {
-            manifest["atelyx"]["themes"] = themes;
-            manifest["atelyx"]["themeOptions"] = theme_options;
-        }
+/// 是否存在「以随应用编译实现呈现」的行：无落位目录，或落位目录当前不可见但宿主清单已存
+/// （`plugin_list` 对这两类行同样以 `install_dir` 空 = 编译实现列出，判定口径必须与展示一致）。
+fn has_compiled_row(app: &AppHandle, state: &VaultState, id: &str) -> Result<bool, String> {
+    let Some(src) = read_plugin_state(app)?.sources.get(id).cloned() else {
+        return Ok(false);
+    };
+    if src.dir_name.is_empty() {
+        return Ok(true);
     }
-    manifest
+    let dir_visible = plugin_base_dir(app, state, &src.scope)
+        .ok()
+        .is_some_and(|base| find_plugin_dir(&base, id).is_ok());
+    Ok(!dir_visible && src.manifest.is_some())
 }
 
-fn plugin_info_from_builtin(def: &BuiltinPluginDef, scope: &str, enabled: bool) -> PluginInfo {
-    PluginInfo {
-        id: def.id.to_string(),
-        name: def.name.to_string(),
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        kind: def.ty.to_string(),
-        scope: scope.to_string(),
-        install_dir: String::new(),
-        enabled,
-        manifest: builtin_manifest(def),
-        source_kind: PluginSourceKind::Builtin,
-    }
-}
+// ===== 默认组合播种（随应用分发的行） =====
+// 默认组合清单（行定义 + 各行的清单）由前端随 `plugin_list(defaults)` 交给本层，本层不做类别区分：
+// 只按 id 增量补建「无磁盘目录的实现随应用编译」的行，并保存清单（供列行、主题守恒判定消费）。
 
-/// 把缺失的内置插件条目写入状态（enabled=true、来源 Builtin）；已存在条目保持现状。
-/// 供「恢复内置插件」与首启/增量播种共用（卸载保持卸载、停用保持停用）。
-fn seed_missing_builtins(pstate: &mut PluginState) {
-    for def in BUILTIN_PLUGINS {
-        if pstate.sources.contains_key(def.id) {
+/// 逐条播种默认组合行（纯状态变换；返回是否改了状态——未变则不落盘，避免每次列表都写文件）：
+/// - 磁盘已有同 id 包 → 记已播种、不建行（同名磁盘包覆盖随应用分发的实现）；
+/// - 已有行（含旧状态里无清单的行）→ 刷新清单（版本/声明随 App 更新），保留启停状态。同名磁盘包
+///   的目录当前不可见时（外部删除/在别的仓库）清单也在此刷新：该行随即以「实现随应用编译」继续
+///   可用（默认功能自愈），卸载按「有清单无目录 = 只清记录」收尾——不会留下卸不掉的行；
+/// - 已播种且无对应行（被卸载）→ 保持卸载；`restore` 时补建回默认（用户显式触发的恢复）；
+/// - 其余 → 建行（来源 Builtin、无落位目录、默认启用）；
+/// - 本次清单里已不存在的随应用分发行 → 连同播种标记清理（退役行不留残渣）。
+/// 清单来自宿主自身，只校验 id（行的键与定位依据）；缺失/非法 id 的条目跳过。
+fn seed_default_rows(pstate: &mut PluginState, defaults: &[Value], disk_ids: &HashSet<String>, restore: bool) -> bool {
+    // 已播种 id（顺序 = 既有记录 + 本次清单新增）。
+    let mut seeded: HashSet<String> = pstate.seeded_ids.iter().cloned().collect();
+    let mut seeded_ids: Vec<String> = pstate.seeded_ids.clone();
+    let mut changed = false;
+    for entry in defaults {
+        let Some(id) = entry.get("name").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if !plugin_id_valid(id) {
             continue;
         }
-        pstate.sources.insert(
-            def.id.to_string(),
-            PluginSource { kind: PluginSourceKind::Builtin, scope: "app".to_string(), ..Default::default() },
-        );
-        pstate.enabled.insert(def.id.to_string(), true);
-    }
-}
-
-/// 默认装配（官方默认插件集，组合配置的默认值层来源）：返回内置插件合成清单数组。
-/// 含已卸载成员——`plugin_list` 不含已卸载条目，默认集必须来自编译期常量（单一权威，
-/// 前端据此推导「已卸载的默认成员」灰行）；字段与 `builtin_manifest` 同源。
-#[tauri::command]
-pub fn plugin_default_plugins() -> Vec<Value> {
-    BUILTIN_PLUGINS.iter().map(builtin_manifest).collect()
-}
-
-/// 内置插件播种（纯状态变换；真实入口 `ensure_builtin_seeded` 读写状态文件）：
-/// 把未纳入 `builtin_seeded_ids` 的内置条目补播种（enabled=true、来源 Builtin）。
-/// 增量语义 = 版本升级新增内置条目自动出现；已播种过的条目保持现状（卸载保持卸载、
-/// 停用保持停用）；恢复由用户显式触发（`plugin_seed_builtin`）。
-fn seed_new_builtins(pstate: &mut PluginState) {
-    let mut seeded: HashSet<String> = pstate.builtin_seeded_ids.iter().cloned().collect();
-    // 无 id 记录（首启或存量状态文件）时按现有内置来源推导已播种集，只增量补新增条目。
-    // 已卸载条目与新增条目不可区分（既定边界：升级补回一次，恢复入口可再卸载），
-    // 见 builtin_seeding_legacy_state_derives_seeded_from_sources 测试。
-    if seeded.is_empty() {
-        for id in pstate.sources.keys() {
-            if is_builtin_plugin_id(id) {
-                seeded.insert(id.clone());
+        let id = id.to_string();
+        if !seeded_ids.contains(&id) {
+            seeded_ids.push(id.clone());
+            changed = true;
+        }
+        if disk_ids.contains(&id) {
+            continue;
+        }
+        match pstate.sources.get_mut(&id) {
+            Some(row) => {
+                if row.manifest.as_ref() != Some(entry) {
+                    row.manifest = Some(entry.clone());
+                    changed = true;
+                }
+            }
+            None => {
+                if seeded.contains(&id) && !restore {
+                    continue;
+                }
+                pstate.sources.insert(
+                    id.clone(),
+                    PluginSource {
+                        kind: PluginSourceKind::Builtin,
+                        scope: "app".to_string(),
+                        manifest: Some(entry.clone()),
+                        ..Default::default()
+                    },
+                );
+                pstate.enabled.insert(id.clone(), true);
+                seeded.insert(id);
+                changed = true;
             }
         }
     }
-    for def in BUILTIN_PLUGINS {
-        if seeded.contains(def.id) {
-            continue;
+    changed |= pstate.seeded_ids != seeded_ids;
+    pstate.seeded_ids = seeded_ids;
+    // 默认组合里已不存在的「随应用分发行」记录连同其播种标记一起清理：留着它只会每次启动多出一行
+    // 查不到实现的空白行（前端判为加载失败），并让状态文件单调增长。
+    // 仅在本次清单非空时清理——空清单（调用方异常）不得当成「默认组合已清空」把行全删。
+    if !defaults.is_empty() {
+        let live: HashSet<String> = defaults
+            .iter()
+            .filter_map(|e| e.get("name").and_then(|v| v.as_str()).map(|s| s.to_string()))
+            .collect();
+        let retired: Vec<String> = pstate
+            .sources
+            .iter()
+            .filter(|(id, s)| s.dir_name.is_empty() && !live.contains(id.as_str()))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in retired {
+            pstate.sources.remove(&id);
+            pstate.enabled.remove(&id);
+            pstate.seeded_ids.retain(|x| x != &id);
+            changed = true;
         }
-        if !pstate.sources.contains_key(def.id) {
-            pstate.sources.insert(
-                def.id.to_string(),
-                PluginSource { kind: PluginSourceKind::Builtin, scope: "app".to_string(), ..Default::default() },
-            );
-            pstate.enabled.insert(def.id.to_string(), true);
-        }
-        seeded.insert(def.id.to_string());
     }
-    // 回写完整 seeded 记录（含 legacy 从 sources 推导的条目），按 BUILTIN_PLUGINS 顺序稳定。
-    pstate.builtin_seeded_ids = BUILTIN_PLUGINS
-        .iter()
-        .map(|d| d.id.to_string())
-        .filter(|id| seeded.contains(id))
-        .collect();
-}
-
-fn ensure_builtin_seeded(app: &AppHandle) {
-    let mut pstate = read_plugin_state(app);
-    let before = pstate.builtin_seeded_ids.len();
-    seed_new_builtins(&mut pstate);
-    // 播种失败不阻塞列表（下次重试）。
-    if pstate.builtin_seeded_ids.len() != before {
-        let _ = write_plugin_state(app, &pstate);
-    }
-}
-
-/// 恢复内置插件（用户显式触发）：补播种缺失的内置条目（enabled=true）。
-/// 已存在条目（启用/停用）保持现状，不覆盖用户改动。
-fn seed_builtin_plugins(app: &AppHandle) -> Result<(), String> {
-    let mut pstate = read_plugin_state(app);
-    seed_missing_builtins(&mut pstate);
-    // 恢复后把已播种 id 记入 seeded 列表（此后这些条目不再增量补播，卸载保持卸载）。
-    let seeded: HashSet<&str> = pstate.builtin_seeded_ids.iter().map(String::as_str).collect();
-    let missing: Vec<&str> = BUILTIN_PLUGINS.iter().map(|d| d.id).filter(|id| !seeded.contains(*id)).collect();
-    pstate.builtin_seeded_ids.extend(missing.iter().map(|id| id.to_string()));
-    write_plugin_state(app, &pstate)
+    changed
 }
 
 fn plugin_base_dir(app: &AppHandle, state: &VaultState, scope: &str) -> Result<PathBuf, String> {
@@ -327,6 +270,30 @@ fn plugin_base_dir(app: &AppHandle, state: &VaultState, scope: &str) -> Result<P
         }
         other => Err(format!("未知插件作用域：{other}")),
     }
+}
+
+/// 磁盘包 id 集（app + vault 两个作用域；未开仓库时只算 app）。
+fn disk_plugin_ids(app: &AppHandle, state: &VaultState) -> HashSet<String> {
+    let mut ids = HashSet::new();
+    let mut collect = |base: &Path| {
+        let Ok(rd) = fs::read_dir(base) else {
+            return;
+        };
+        for dir in rd.flatten().map(|e| e.path()).filter(|p| p.is_dir() && !is_hidden_dir(p)) {
+            if let Ok(manifest) = read_manifest(&dir) {
+                if let Some(id) = manifest["name"].as_str() {
+                    ids.insert(id.to_string());
+                }
+            }
+        }
+    };
+    if let Ok(base) = plugin_base_dir(app, state, "app") {
+        collect(&base);
+    }
+    if let Ok(root) = state.root() {
+        collect(&root.join(".atelyx/plugins"));
+    }
+    ids
 }
 
 /// 在作用域插件目录下按清单 id 定位插件目录（目录名任意，身份以清单 id 为准）。
@@ -419,14 +386,46 @@ fn plugin_state_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir.join(STATE_FILE))
 }
 
-fn read_plugin_state(app: &AppHandle) -> PluginState {
-    let Ok(path) = plugin_state_path(app) else {
-        return PluginState::default();
+/// 读插件平台状态。
+/// - `Ok(state)`：文件不存在 = 首次运行（空状态）；解析失败 = 把损坏文件改名备份后按空状态继续
+///   （播种随即按默认组合重建随应用分发的行；备份保留原始文件供排查）。
+/// - `Err(reason)`：文件存在但读不进来（句柄被占用/权限/非 UTF-8）。这种情况**不能**按空状态往下写——
+///   会把启用开关与安装来源整表抹掉，所以写路径必须报错；只读展示路径用 `read_plugin_state_lenient`。
+fn read_plugin_state(app: &AppHandle) -> Result<PluginState, String> {
+    let path = plugin_state_path(app)?;
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(PluginState::default()),
+        Err(e) => return Err(format!("读取插件状态失败（可能被其它程序占用，请重试）：{e}")),
     };
-    fs::read_to_string(path)
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_default()
+    match serde_json::from_str(&raw) {
+        Ok(state) => Ok(state),
+        Err(e) => {
+            let note = backup_corrupt_state(&path)
+                .map_or_else(|| "备份失败".to_string(), |p| format!("已备份为 {}", p.display()));
+            eprintln!("[plugin] 插件状态文件损坏，{note}（按空状态继续）：{e}");
+            Ok(PluginState::default())
+        }
+    }
+}
+
+/// 只读展示路径的宽松读：读不进来时按空状态展示（前端仍有默认组合行可用），并且调用方不得落盘
+/// 这份「读失败得出的状态」——否则等于把用户状态清空。
+fn read_plugin_state_lenient(app: &AppHandle) -> (PluginState, bool) {
+    match read_plugin_state(app) {
+        Ok(state) => (state, true),
+        Err(e) => {
+            eprintln!("[plugin] {e}（本次只作展示用，不落盘）");
+            (PluginState::default(), false)
+        }
+    }
+}
+
+/// 把损坏的状态文件改名备份；返回备份路径（失败 = None）。
+/// 备份名带随机后缀：同名目标在 Windows 上会被 rename 静默替换，固定名会让新的损坏冲掉旧备份。
+fn backup_corrupt_state(path: &Path) -> Option<PathBuf> {
+    let backup = path.with_file_name(format!("{STATE_FILE}.corrupt-{}", nanoid::nanoid!()));
+    fs::rename(path, &backup).ok().map(|_| backup)
 }
 
 fn write_plugin_state(app: &AppHandle, state: &PluginState) -> Result<(), String> {
@@ -454,12 +453,13 @@ fn manifest_valid_or_error(v: &Value) -> Result<(), String> {
         return Err("name 必须是合法的反向域名标识".to_string());
     }
     req("version")?;
-    // main（入口，相对插件根目录）：.js/.ts/.tsx；纯 theme 插件可省略；Python 入口拒绝。
+    // main（入口，相对插件根目录）：.js/.ts/.tsx；纯 theme 插件可省略。其余扩展名一律拒绝
+    // （宿主只求值 JS/TS；拒绝理由与 docs/plugins/manifest.md 的入口契约一致）。
     let main = obj.get("main");
     if let Some(m) = main {
         let s = m.as_str().filter(|s| !s.trim().is_empty()).ok_or("main 必须是非空字符串")?;
-        if s.ends_with(".py") {
-            return Err("Python 插件运行时已不受支持（请使用 JS/TS）".to_string());
+        if !ENTRY_EXTENSIONS.iter().any(|ext| s.to_ascii_lowercase().ends_with(ext)) {
+            return Err("插件入口须为 .js/.ts/.tsx 文件".to_string());
         }
     }
     // atelyx 块：插件元数据（显示名/类型/作用域/披露/主题等）。
@@ -575,13 +575,37 @@ fn is_github_repo_ref(s: &str) -> bool {
     parts.next().is_none() && !owner.is_empty() && !repo.is_empty()
 }
 
-/// git 是否可用（探测 `git --version`）。
-fn git_available() -> bool {
-    std::process::Command::new("git")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+/// git 命令构造：关掉交互式凭据提示（否则私有仓库会让 git 在 stdin 上等死），
+/// 并让子进程随 future 一起被丢弃（超时/取消时不留下孤儿 git 进程）。
+fn git_command() -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.env("GIT_TERMINAL_PROMPT", "0").kill_on_drop(true);
+    cmd
+}
+
+/// git 单次操作的挂死宽限期（**不是体积/时长上限**：git 的下载体积不限）。
+/// 正常插件源码仓库远小于该值，只有网络黑洞/半开连接才会触发；触发即报错而非无限等待。
+const GIT_HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(1800);
+
+/// 执行 git 并把超时收敛为可读错误（`kill_on_drop` 保证超时后进程被回收）。
+async fn run_git(mut cmd: tokio::process::Command) -> Result<std::process::Output, String> {
+    match tokio::time::timeout(GIT_HANG_GUARD, cmd.output()).await {
+        Ok(Ok(out)) => Ok(out),
+        Ok(Err(e)) => Err(if e.kind() == std::io::ErrorKind::NotFound {
+            "未检测到 git 命令，请安装 Git 或改用本地文件夹安装".to_string()
+        } else {
+            format!("执行 git 失败：{e}")
+        }),
+        Err(_) => Err("git 操作超时（网络不可达或仓库过大），已中止".to_string()),
+    }
+}
+
+/// git 是否可用（探测 `git --version`；同样给短超时，防探测本身挂住）。
+async fn git_available() -> bool {
+    match tokio::time::timeout(std::time::Duration::from_secs(10), git_command().arg("--version").output()).await {
+        Ok(Ok(out)) => out.status.success(),
+        _ => false,
+    }
 }
 
 /// 传给 git 的路径参数：Windows UNC 一律转 POSIX 形式 `//server/share/...`——
@@ -603,21 +627,31 @@ fn git_path_arg(path: &Path) -> String {
     s.into_owned()
 }
 
+/// 手动 git 地址白名单（显式 scheme 的绝对地址；`git@host:owner/repo` 形式以 `git@` 开头）。
+/// 拒绝以 `-` 开头的输入：git 会把位置参数当选项解析（如 `--upload-pack=<cmd>`、`ext::<cmd>`
+/// 均可触发本机命令执行）。市场来源（owner/repo）由 `is_github_repo_ref` 单独校验，不走此函数。
+fn validate_git_url(url: &str) -> Result<(), String> {
+    if url.starts_with('-') {
+        return Err("git 地址不能以 - 开头".into());
+    }
+    const SCHEMES: [&str; 5] = ["https://", "http://", "ssh://", "git://", "git@"];
+    if !SCHEMES.iter().any(|s| url.starts_with(s)) {
+        return Err("git 地址须以 https:// / http:// / ssh:// / git:// / git@ 开头".into());
+    }
+    Ok(())
+}
+
 /// 克隆 git 仓库到插件基础目录下的临时目录（保留 `.git` 供更新）；失败清理并返回错误。
+/// 参数经 `--` 终止选项解析（URL 只可能来自白名单校验或 owner/repo 拼装，双保险防选项注入）；
+/// 体积不设上限，仅有挂死宽限（见 GIT_HANG_GUARD）。
 async fn git_clone_to(base: &Path, url: &str) -> Result<PathBuf, String> {
     let target = base.join(format!(".install-{}", nanoid::nanoid!()));
-    let out = tokio::process::Command::new("git")
-        .args(["clone", url])
-        .arg(git_path_arg(&target))
-        .output()
-        .await
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                "未检测到 git 命令，请安装 Git 或改用本地文件夹安装".to_string()
-            } else {
-                format!("执行 git 失败：{e}")
-            }
-        })?;
+    let out = run_git({
+        let mut cmd = git_command();
+        cmd.args(["clone", "--", url]).arg(git_path_arg(&target));
+        cmd
+    })
+    .await?;
     if !out.status.success() {
         let _ = fs::remove_dir_all(&target);
         let msg = String::from_utf8_lossy(&out.stderr).trim().to_string();
@@ -626,10 +660,20 @@ async fn git_clone_to(base: &Path, url: &str) -> Result<PathBuf, String> {
     Ok(target)
 }
 
+/// HTTP 客户端（仅用于本层自己的请求：GitHub 分支解析与源码包下载）：
+/// 逐块空闲超时（60s 无数据即失败）——不用总超时，慢链路上的大源码包不会被中途 abort；
+/// 体积上限在 download_zip 的累计校验里（64MB），不会无限挂。
+fn http_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .read_timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|e| format!("创建网络客户端失败：{e}"))
+}
+
 /// 解析仓库默认分支（无 git 回退源码包时需要分支名定位归档）。
 async fn resolve_default_branch(repo: &str) -> Result<String, String> {
     let url = format!("https://api.github.com/repos/{repo}");
-    let resp = reqwest::Client::new()
+    let resp = http_client()?
         .get(&url)
         .header("User-Agent", "atelyx")
         .send()
@@ -660,7 +704,7 @@ async fn codeload_extract_to(
 ) -> Result<(PathBuf, PathBuf), String> {
     let base = plugin_base_dir(app, state, scope)?;
     let branch = resolve_default_branch(repo).await?;
-    let client = reqwest::Client::new();
+    let client = http_client()?;
     let zip_temp = base.join(format!(".download-{}.zip", nanoid::nanoid!()));
     let download = download_zip(&client, &codeload_url(repo, &branch), &zip_temp).await;
     if let Err(e) = download {
@@ -689,9 +733,9 @@ async fn codeload_extract_to(
     Ok((root, extract_temp))
 }
 
-/// 下载 zip 到临时文件（体积上限校验）。
+/// 下载 zip 到临时文件（边收边写 + 累计体积上限：上限在读取路径上生效，防超大响应先整包进内存）。
 async fn download_zip(client: &reqwest::Client, url: &str, temp: &Path) -> Result<(), String> {
-    let resp = client
+    let mut resp = client
         .get(url)
         .header("User-Agent", "atelyx")
         .send()
@@ -700,11 +744,16 @@ async fn download_zip(client: &reqwest::Client, url: &str, temp: &Path) -> Resul
     if !resp.status().is_success() {
         return Err(format!("下载插件失败（HTTP {}）", resp.status()));
     }
-    let bytes = resp.bytes().await.map_err(|e| format!("下载插件失败：{e}"))?;
-    if bytes.len() as u64 > MAX_ARCHIVE_BYTES {
-        return Err("插件包超过体积上限".into());
+    let mut file = fs::File::create(temp).map_err(|e| e.to_string())?;
+    let mut total: u64 = 0;
+    while let Some(chunk) = resp.chunk().await.map_err(|e| format!("下载插件失败：{e}"))? {
+        total += chunk.len() as u64;
+        if total > MAX_ARCHIVE_BYTES {
+            return Err("插件包超过体积上限".into());
+        }
+        file.write_all(&chunk).map_err(|e| e.to_string())?;
     }
-    fs::write(temp, &bytes).map_err(|e| e.to_string())
+    Ok(())
 }
 
 // ===== zip 解压 =====
@@ -809,6 +858,22 @@ fn plugin_info_from(
     }
 }
 
+/// 由清单构建随应用分发行的运行信息（无磁盘目录：install_dir 空 = 实现随应用编译）。
+fn plugin_info_from_manifest(id: &str, manifest: &Value, scope: &str, source_kind: PluginSourceKind, enabled: bool) -> PluginInfo {
+    let display = manifest["atelyx"]["name"].as_str().unwrap_or(id).to_string();
+    PluginInfo {
+        id: id.to_string(),
+        name: display,
+        version: manifest["version"].as_str().unwrap_or("").to_string(),
+        kind: manifest["atelyx"]["type"].as_str().unwrap_or("").to_string(),
+        scope: scope.to_string(),
+        install_dir: String::new(),
+        enabled,
+        manifest: manifest.clone(),
+        source_kind,
+    }
+}
+
 /// 从已就绪的插件源码根目录执行校验 + 原子落位（git clone / 源码包解压共用）。
 /// 目录名 = `folder_name`（原名）；同名目录或同清单 id 目录已存在时报错，先卸载再装。
 /// 调用方负责清理 `plugin_root` 所在临时目录残留。
@@ -826,9 +891,6 @@ fn install_plugin_dir(
     let id = manifest["name"].as_str().unwrap_or("").to_string();
     if !plugin_id_valid(&id) {
         return Err("插件清单 name 非法".into());
-    }
-    if is_builtin_plugin_id(&id) {
-        return Err(format!("插件 name {id} 为内置插件保留，无法安装"));
     }
     let source_kind = source.kind;
 
@@ -849,7 +911,7 @@ fn install_plugin_dir(
     // 记录安装来源（更新依据 + 落位目录名兜底）。
     let mut source = source;
     source.dir_name = folder.clone();
-    let mut pstate = read_plugin_state(app);
+    let mut pstate = read_plugin_state(app)?;
     pstate.sources.insert(id.clone(), source);
     if let Err(e) = write_plugin_state(app, &pstate) {
         // 状态写失败回滚落位，防「有目录无来源记录」的幽灵插件（重装/更新都定位不到）。
@@ -858,32 +920,34 @@ fn install_plugin_dir(
         return Err(e);
     }
 
+    // 启用状态按 id 保持：新装默认停用（由用户确认后启用）；同名替换沿用原行状态（原行启用即生效）。
     let enabled = pstate.enabled.get(&id).copied().unwrap_or(false);
     Ok(plugin_info_from(&target, &manifest, scope, source_kind, enabled))
 }
 
 // ===== 命令 =====
 
-/// 列出全部已装插件（app 级恒有；vault 级仅当前仓库；未开仓库时跳过 vault 目录）。
+/// 列出全部插件行：先按 `defaults`（默认组合清单）增量播种随应用分发的行，再列出磁盘包行
+/// （app 级恒有；vault 级仅当前仓库；未开仓库时跳过 vault 目录）+ 无同名磁盘包的随应用分发行。
 #[tauri::command]
-pub fn plugin_list(app: AppHandle, state: State<'_, VaultState>) -> Result<Vec<PluginInfo>, String> {
-    ensure_builtin_seeded(&app);
-    let pstate = read_plugin_state(&app);
-    let mut out: Vec<PluginInfo> = Vec::new();
-
-    // 内置插件行（无磁盘目录，来源记录为 Builtin 即视为已装；与磁盘行同表去重）。
-    let mut seen: Vec<String> = Vec::new();
-    for (id, src) in &pstate.sources {
-        if src.kind != PluginSourceKind::Builtin {
-            continue;
+pub fn plugin_list(
+    app: AppHandle,
+    state: State<'_, VaultState>,
+    defaults: Vec<Value>,
+) -> Result<Vec<PluginInfo>, String> {
+    // 只读展示路径：读不到状态也不阻断列表（播种只在读成功时落盘，见下）。
+    let (mut pstate, state_readable) = read_plugin_state_lenient(&app);
+    let disk_ids = disk_plugin_ids(&app, &state);
+    // 状态未变不落盘（每次列表调用都写会与其它插件命令的读改写互相覆盖）；
+    // 真写失败不能吞（否则用户改动默默不持久化）——转 stderr 日志，列表本身照常返回。
+    if state_readable && seed_default_rows(&mut pstate, &defaults, &disk_ids, false) {
+        if let Err(e) = write_plugin_state(&app, &pstate) {
+            eprintln!("[plugin] 默认组合播种状态写盘失败：{e}");
         }
-        let Some(def) = BUILTIN_PLUGINS.iter().find(|d| d.id == id) else {
-            continue;
-        };
-        let enabled = pstate.enabled.get(id).copied().unwrap_or(false);
-        out.push(plugin_info_from_builtin(def, "app", enabled));
-        seen.push(id.clone());
     }
+
+    let mut out: Vec<PluginInfo> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
 
     let mut scan = |scope: &str, base: &Path| {
         let Ok(rd) = fs::read_dir(base) else {
@@ -901,31 +965,51 @@ pub fn plugin_list(app: AppHandle, state: State<'_, VaultState>) -> Result<Vec<P
                 continue; // 损坏插件跳过展示（管理 UI 仍可整体删除目录）
             };
             let id = manifest["name"].as_str().unwrap_or("").to_string();
-            if !plugin_id_valid(&id) {
+            if !plugin_id_valid(&id) || !seen.insert(id.clone()) {
                 continue;
             }
-            if seen.iter().any(|x| x == &id) {
-                continue; // 含内置 id（防御：内置 id 安装已被拒，仅手动拷贝目录可能撞名）
-            }
-            seen.push(id.clone());
             let enabled = pstate.enabled.get(&id).copied().unwrap_or(false);
             let source_kind = pstate.sources.get(&id).map(|s| s.kind).unwrap_or_default();
             out.push(plugin_info_from(&dir, &manifest, scope, source_kind, enabled));
         }
     };
 
+    // 磁盘行优先：同名磁盘包覆盖随应用分发的实现（随应用分发行不再列出）。
     if let Ok(base) = plugin_base_dir(&app, &state, "app") {
         scan("app", &base);
     }
     if let Ok(root) = state.root() {
-        let base = root.join(".atelyx/plugins");
-        scan("vault", &base);
+        scan("vault", &root.join(".atelyx/plugins"));
     }
+    // 随应用分发的行：有清单且无同名磁盘包的来源记录。
+    for (id, src) in &pstate.sources {
+        let Some(manifest) = &src.manifest else {
+            continue;
+        };
+        if seen.contains(id) {
+            continue;
+        }
+        seen.insert(id.clone());
+        let enabled = pstate.enabled.get(id).copied().unwrap_or(false);
+        out.push(plugin_info_from_manifest(id, manifest, &src.scope, src.kind, enabled));
+    }
+
     out.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(out)
 }
 
-/// 安装插件（来源 = GitHub `owner/repo` 或完整 git 地址；安装后默认未启用，由前端确认后启用）。
+/// 恢复默认装配（用户显式触发）：把 `entries`（默认组合清单）里缺失的行补建回默认启用。
+/// 已存在的行（启用/停用）保持现状，不覆盖用户改动。
+#[tauri::command]
+pub fn plugin_seed_default(app: AppHandle, state: State<'_, VaultState>, entries: Vec<Value>) -> Result<(), String> {
+    let mut pstate = read_plugin_state(&app)?;
+    let disk_ids = disk_plugin_ids(&app, &state);
+    seed_default_rows(&mut pstate, &entries, &disk_ids, true);
+    write_plugin_state(&app, &pstate)
+}
+
+/// 安装插件（来源 = GitHub `owner/repo` 或完整 git 地址；新装默认停用，由用户确认后启用；
+/// 同名行被替换时沿用该行原有启停状态，原行已启用则安装后即生效）。
 /// 市场来源优先 git clone，本机无 git 时回退 GitHub 自动生成的源码包；
 /// 手动 git 地址必须有 git。id 以清单为准，repo 只做获取定位。
 #[tauri::command]
@@ -940,15 +1024,14 @@ pub async fn plugin_install(
 
     if is_github_repo_ref(&repo) {
         // 市场来源：优先 git clone，无 git 回退源码包。
-        if git_available() {
+        if git_available().await {
             let clone_target = git_clone_to(&base, &format!("https://github.com/{repo}.git")).await?;
             let source = PluginSource {
                 repo: repo.clone(),
-                url: String::new(),
-                path: String::new(),
                 dir_name: String::new(), // 落位时由 install_plugin_dir 写入
                 kind: PluginSourceKind::Market,
                 scope: scope.clone(),
+                ..Default::default()
             };
             let result = install_plugin_dir(&app, &state, &scope, source, &repo_folder_name(&repo), &clone_target);
             if result.is_err() {
@@ -961,11 +1044,10 @@ pub async fn plugin_install(
             Ok((root, extract_temp)) => {
                 let source = PluginSource {
                     repo: repo.clone(),
-                    url: String::new(),
-                    path: String::new(),
                     dir_name: String::new(), // 落位时由 install_plugin_dir 写入
                     kind: PluginSourceKind::Market,
                     scope: scope.clone(),
+                    ..Default::default()
                 };
                 let result =
                     install_plugin_dir(&app, &state, &scope, source, &repo_folder_name(&repo), &root);
@@ -977,18 +1059,17 @@ pub async fn plugin_install(
         };
     }
 
-    // 手动 git 地址：必须有 git。
-    if !git_available() {
+    // 手动 git 地址：必须有 git，且地址须过白名单（拒选项注入/未知协议）。
+    validate_git_url(&repo)?;
+    if !git_available().await {
         return Err("未检测到 git 命令，请安装 Git 或改用本地文件夹安装".into());
     }
     let clone_target = git_clone_to(&base, &repo).await?;
     let source = PluginSource {
-        repo: String::new(),
-        url: repo.clone(),
-        path: String::new(),
         dir_name: String::new(), // 落位时由 install_plugin_dir 写入
         kind: PluginSourceKind::Git,
         scope: scope.clone(),
+        ..Default::default()
     };
     let result = install_plugin_dir(&app, &state, &scope, source, &repo_folder_name(&repo), &clone_target);
     if result.is_err() {
@@ -1014,9 +1095,6 @@ pub fn plugin_install_local(
     if !plugin_id_valid(&id) {
         return Err("插件清单 name 非法".into());
     }
-    if is_builtin_plugin_id(&id) {
-        return Err(format!("插件 name {id} 为内置插件保留，无法安装"));
-    }
 
     let base = plugin_base_dir(&app, &state, &scope)?;
     // 源目录与插件目录都规范化后再判包含关系（大小写/长路径前缀差异会导致误判）。
@@ -1039,17 +1117,15 @@ pub fn plugin_install_local(
     fs::create_dir_all(&base).map_err(|e| e.to_string())?;
     create_plugin_link(&src_dir, &target)?;
 
-    // 记录安装来源（更新依据：本地来源实时引用，无需更新）。
-    let mut pstate = read_plugin_state(&app);
+    // 记录行来源（本地来源为实时引用，无更新）。
+    let mut pstate = read_plugin_state(&app)?;
     pstate.sources.insert(
         id.clone(),
         PluginSource {
-            repo: String::new(),
-            url: String::new(),
-            path: src_dir.to_string_lossy().into_owned(),
             dir_name: folder.clone(),
             kind: PluginSourceKind::Local,
             scope: scope.clone(),
+            ..Default::default()
         },
     );
     if let Err(e) = write_plugin_state(&app, &pstate) {
@@ -1096,7 +1172,9 @@ fn remove_link_only(dir: &Path) -> Result<(), String> {
     }
 }
 
-/// 卸载插件：本地来源只删链接（源目录不动）；其余删除整个插件目录。清理状态记录。
+/// 卸载插件：本地来源只删链接（源目录不动，链接悬空也能删）；其余删除整个插件目录；
+/// 无落位目录的行（实现随应用编译）只清状态记录与启用开关。
+/// 被拒的情形：最后一个启用的主题插件（守恒）、未开仓库/未知作用域、落位目录不可达（网络路径离线）、磁盘删除失败。
 #[tauri::command]
 pub fn plugin_uninstall(
     app: AppHandle,
@@ -1109,44 +1187,40 @@ pub fn plugin_uninstall(
     if !plugin_id_valid(&id) {
         return Err("插件不存在".to_string());
     }
-    let mut pstate = read_plugin_state(&app);
+    let mut pstate = read_plugin_state(&app)?;
     // 守恒守护：卸载「当前启用且为最后一个」的主题插件被拒（与停用同一规则）
     let target_enabled = pstate.enabled.get(&id).copied().unwrap_or(false);
     guard_last_enabled_theme_plugin(&app, &state, &pstate, &id, target_enabled)?;
-    // 内置插件无磁盘目录：卸载 = 仅清状态记录（恢复经「恢复内置插件」入口重新播种）。
-    if pstate.sources.get(&id).map(|s| s.kind) == Some(PluginSourceKind::Builtin) {
-        pstate.enabled.remove(&id);
-        pstate.sources.remove(&id);
-        return write_plugin_state(&app, &pstate);
-    }
     let base = plugin_base_dir(&app, &state, &scope)?;
-    // 优先按清单 id 扫描定位；清单损坏（扫描无法匹配）时按来源记录的落位目录名定位删除
-    // （名字经 target_folder_name 同款清理校验，确保仍在插件目录内）。
+    let source = pstate.sources.get(&id).cloned().unwrap_or_default();
+    // 定位待删目录：优先按清单 id 扫描；清单损坏/链接悬空（扫描按 is_dir 判定收不到）时按来源记录的
+    // 落位目录名定位（名字经 target_folder_name 同款清理校验，确保仍在插件目录内）。
     let dir = match find_plugin_dir(&base, &id) {
-        Ok(d) => d,
+        Ok(d) => Some(d),
+        Err(_) if source.dir_name.is_empty() => {
+            // 无落位目录 = 实现随应用编译：无目录可删，仅清状态记录（恢复经「恢复默认组合」）。
+            None
+        }
         Err(_) => {
-            let safe_name = pstate
-                .sources
-                .get(&id)
-                .map(|s| target_folder_name(&s.dir_name, &id))
-                .unwrap_or_default();
-            // 无来源记录（随仓库同步/残留）时拒绝删除，防 base.join("") 把整个插件目录当目标。
-            if safe_name.is_empty() {
-                return Err("插件不存在".into());
-            }
-            let by_name = base.join(&safe_name);
-            if by_name.is_dir() {
-                by_name
+            let by_name = base.join(target_folder_name(&source.dir_name, &id));
+            if fs::symlink_metadata(&by_name).is_ok() {
+                // 目录/链接仍在（本地源目录被移走后 junction 悬空也在此列）：按名删除。
+                Some(by_name)
+            } else if source.manifest.is_some() {
+                // 目录已不在，但该行以随应用分发的实现呈现（清单随宿主保存）：无目录可删，清记录即可。
+                None
             } else {
+                // 有落位目录但不可达（如网络路径离线）：报错而不清记录，防误删安装来源。
                 return Err("插件不存在".into());
             }
         }
     };
-    let is_local = pstate.sources.get(&id).map(|s| s.kind == PluginSourceKind::Local).unwrap_or(false);
-    if is_local {
-        remove_link_only(&dir)?;
-    } else {
-        fs::remove_dir_all(&dir).map_err(|e| format!("卸载失败：{e}"))?;
+    if let Some(dir) = dir {
+        if source.kind == PluginSourceKind::Local {
+            remove_link_only(&dir)?;
+        } else {
+            fs::remove_dir_all(&dir).map_err(|e| format!("卸载失败：{e}"))?;
+        }
     }
     pstate.enabled.remove(&id);
     pstate.sources.remove(&id);
@@ -1161,7 +1235,11 @@ pub fn plugin_set_enabled(
     id: String,
     enabled: bool,
 ) -> Result<(), String> {
-    let mut pstate = read_plugin_state(&app);
+    // id 校验与其它入口同口径：非法 id 不往 enabled 表写垃圾键。
+    if !plugin_id_valid(&id) {
+        return Err("插件不存在".to_string());
+    }
+    let mut pstate = read_plugin_state(&app)?;
     if !enabled {
         let target_enabled = pstate.enabled.get(&id).copied().unwrap_or(false);
         guard_last_enabled_theme_plugin(&app, &state, &pstate, &id, target_enabled)?;
@@ -1174,42 +1252,50 @@ pub fn plugin_set_enabled(
     write_plugin_state(&app, &pstate)
 }
 
-/// 内置插件是否主题插件（合成清单 ty == "theme"）。
-fn builtin_plugin_is_theme(id: &str) -> bool {
-    BUILTIN_PLUGINS.iter().any(|d| d.id == id && d.ty == "theme")
-}
-
-/// 内置基底主题条目 id（与合成清单 themes 条目一致；第三方主题条目禁止占用，防冒名——
-/// 与前端 utils/pluginTheme.ts 的 BUILTIN_THEME_IDS 同规则，守恒计数须与前端派生一致）。
+/// 基础主题条目 id（浅/深基底；其他插件不得占用，防冒名——与前端 utils/pluginTheme.ts 的
+/// BUILTIN_THEME_IDS 同规则，守恒计数须与前端派生一致）。
 const BUILTIN_BASE_THEME_IDS: [&str; 2] = ["light", "dark"];
 
-/// 是否主题插件（清单含「去除内置基底重名条目后仍非空」的 themes——内置合成清单与第三方清单
-/// 同一字段契约；重名条目与前端派生同规则排除，保证守恒计数两端一致）。
-/// 边界：读清单失败（目录缺失/清单损坏）降级为 false——损坏插件不参与守恒、可被停用/卸载清理，
+/// 基础主题提供者 id（声明浅/深基底那一个插件；主题内核的身份常量，与前端
+/// utils/pluginTheme.ts 的 BUILTIN_THEME_PLUGIN_ID 同值）。
+const BASE_THEME_PLUGIN_ID: &str = "builtin.theme";
+
+/// 行清单解析：磁盘包读磁盘清单；随应用分发的行读来源记录里保存的清单。
+fn row_manifest(app: &AppHandle, state: &VaultState, pstate: &PluginState, id: &str) -> Option<Value> {
+    let source = pstate.sources.get(id)?;
+    let base = plugin_base_dir(app, state, &source.scope).ok()?;
+    if let Ok(dir) = find_plugin_dir(&base, id) {
+        if let Ok(manifest) = read_manifest(&dir) {
+            return Some(manifest);
+        }
+    }
+    source.manifest.clone()
+}
+
+/// 是否主题插件（清单含「去除基础主题重名条目后仍非空」的 themes；随应用分发与磁盘包同一字段契约）。
+/// 基础主题提供者自身声明基底条目，不受该过滤影响（与前端派生口径一致）。
+/// 边界：清单读不到（目录缺失/清单损坏）降级为 false——损坏插件不参与守恒、可被停用/卸载清理，
 /// 避免用户被损坏插件困住（前端此时回退基底主题，不崩溃）。
 fn plugin_is_theme(app: &AppHandle, state: &VaultState, pstate: &PluginState, id: &str) -> bool {
-    if is_builtin_plugin_id(id) {
-        return builtin_plugin_is_theme(id);
-    }
-    let Some(source) = pstate.sources.get(id) else { return false; };
-    let scope = source.scope.clone();
-    let Ok(base) = plugin_base_dir(app, state, &scope) else { return false; };
-    let Ok(dir) = find_plugin_dir(&base, id) else { return false; };
-    read_manifest(&dir).is_ok_and(|m| {
-        m.get("atelyx")
-            .and_then(|a| a.get("themes"))
-            .and_then(|v| v.as_array())
-            .is_some_and(|a| {
-                a.iter()
-                    .filter(|t| {
+    row_manifest(app, state, pstate, id).is_some_and(|m| manifest_is_theme(&m, id))
+}
+
+/// 清单主题判定（与前端 utils/pluginTheme.ts 的派生口径一致）：
+/// themes 非空，且（基础主题提供者自身 或 存在基础条目之外的条目——重名条目按占用处理、不计入）。
+fn manifest_is_theme(manifest: &Value, id: &str) -> bool {
+    manifest
+        .get("atelyx")
+        .and_then(|a| a.get("themes"))
+        .and_then(|v| v.as_array())
+        .is_some_and(|a| {
+            !a.is_empty()
+                && (id == BASE_THEME_PLUGIN_ID
+                    || a.iter().any(|t| {
                         t.get("id")
                             .and_then(|id| id.as_str())
                             .is_some_and(|tid| !BUILTIN_BASE_THEME_IDS.contains(&tid))
-                    })
-                    .next()
-                    .is_some()
-            })
-    })
+                    }))
+        })
 }
 
 /// 当前启用中的主题插件数量。
@@ -1237,13 +1323,6 @@ fn guard_last_enabled_theme_plugin(
     Ok(())
 }
 
-/// 恢复内置插件（管理 UI「恢复内置插件」入口）：补播种缺失的内置条目。
-/// 已存在条目（启用/停用）保持现状；调用后前端重载插件列表。
-#[tauri::command]
-pub fn plugin_seed_builtin(app: AppHandle) -> Result<(), String> {
-    seed_builtin_plugins(&app)
-}
-
 /// 更新插件：按来源分派——git 来源 git pull（失败目录不变）；市场且无 .git 时重新下载源码包替换；
 /// 本地目录实时引用无需更新（返回当前信息）。
 #[tauri::command]
@@ -1252,55 +1331,43 @@ pub async fn plugin_update(
     state: State<'_, VaultState>,
     id: String,
 ) -> Result<PluginInfo, String> {
-    let pstate = read_plugin_state(&app);
+    let pstate = read_plugin_state(&app)?;
     let source = pstate
         .sources
         .get(&id)
         .cloned()
         .ok_or("插件无安装来源，无法更新（请先卸载重装）")?;
     let scope = source.scope.clone();
-    // 内置插件版本随 App 走，无独立更新；返回当前信息（无磁盘目录，提前返回）。
-    if source.kind == PluginSourceKind::Builtin {
-        let Some(def) = BUILTIN_PLUGINS.iter().find(|d| d.id == id) else {
+    // 无落位目录 = 实现随应用编译：版本随 App 走，无独立更新；返回当前信息。
+    if source.dir_name.is_empty() {
+        let Some(manifest) = source.manifest else {
             return Err("插件不存在".into());
         };
         let enabled = pstate.enabled.get(&id).copied().unwrap_or(false);
-        return Ok(plugin_info_from_builtin(def, &scope, enabled));
+        return Ok(plugin_info_from_manifest(&id, &manifest, &scope, source.kind, enabled));
     }
     let base = plugin_base_dir(&app, &state, &scope)?;
     let dir = find_plugin_dir(&base, &id)?;
 
-    match source.kind {
-        PluginSourceKind::Builtin => {} // 不可达（已提前返回）
-        PluginSourceKind::Local => {
-            // 本地目录实时引用：目录即源码，无更新概念；重读清单返回当前信息。
-            let manifest = read_manifest(&dir)?;
-            let enabled = pstate.enabled.get(&id).copied().unwrap_or(false);
-            return Ok(plugin_info_from(&dir, &manifest, &scope, PluginSourceKind::Local, enabled));
-        }
-        PluginSourceKind::Market => {
-            // 源码包装的插件（无 git 环境安装，无 .git）：重新下载源码包替换。
-            if !dir.join(".git").exists() {
-                return codeload_update(&app, &state, &scope, &source, &dir, &base).await;
-            }
-        }
-        PluginSourceKind::Git => {}
+    // 本地目录实时引用：目录即源码，无更新概念；重读清单返回当前信息。
+    if source.kind == PluginSourceKind::Local {
+        let manifest = read_manifest(&dir)?;
+        let enabled = pstate.enabled.get(&id).copied().unwrap_or(false);
+        return Ok(plugin_info_from(&dir, &manifest, &scope, PluginSourceKind::Local, enabled));
+    }
+    // 源码包装的市场插件（无 git 环境安装，无 .git）：重新下载源码包替换。
+    if source.kind == PluginSourceKind::Market && !dir.join(".git").exists() {
+        return codeload_update(&app, &state, &scope, &source, &dir, &base).await;
     }
 
-    // git 来源（含保留 .git 的市场来源）：git pull；失败目录不变，不引入备份回滚。
-    let out = tokio::process::Command::new("git")
-        .args(["-C"])
-        .arg(git_path_arg(&dir))
-        .arg("pull")
-        .output()
-        .await
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                "未检测到 git 命令，无法更新".to_string()
-            } else {
-                format!("执行 git 失败：{e}")
-            }
-        })?;
+    // 其余（Git 来源与保留 .git 的市场来源）：git pull；失败目录不变，不引入备份回滚。
+    // `--ff-only`：上游改写历史/本地分叉时直接失败并保持工作树干净（半合并会让清单读不出、行从列表消失）。
+    let out = run_git({
+        let mut cmd = git_command();
+        cmd.args(["-C"]).arg(git_path_arg(&dir)).args(["pull", "--ff-only"]);
+        cmd
+    })
+    .await?;
     if !out.status.success() {
         let msg = String::from_utf8_lossy(&out.stderr).trim().to_string();
         return Err(if msg.is_empty() { "git pull 失败".to_string() } else { msg });
@@ -1320,7 +1387,7 @@ async fn codeload_update(
     base: &Path,
 ) -> Result<PluginInfo, String> {
     let branch = resolve_default_branch(&source.repo).await?;
-    let client = reqwest::Client::new();
+    let client = http_client()?;
     let zip_temp = base.join(format!(".update-{}.zip", nanoid::nanoid!()));
     if let Err(e) = download_zip(&client, &codeload_url(&source.repo, &branch), &zip_temp).await {
         let _ = fs::remove_file(&zip_temp);
@@ -1382,7 +1449,8 @@ async fn codeload_update(
 /// （vault 级插件随仓库同步到新机器时 sources 记录在本机不存在，仍应可读可运行）。
 pub(crate) fn resolve_plugin_dir(app: &AppHandle, state: &VaultState, id: &str) -> Result<(PathBuf, String), String> {
     if plugin_id_valid(id) {
-        if let Some(src) = read_plugin_state(app).sources.get(id) {
+        // 状态读取失败不阻断定位：下面还有按两作用域扫描的兜底（随仓库同步过来的插件本机无来源记录）。
+        if let Some(src) = read_plugin_state(app).ok().and_then(|s| s.sources.get(id).cloned()) {
             if let Ok(base) = plugin_base_dir(app, state, &src.scope) {
                 if let Ok(dir) = find_plugin_dir(&base, id) {
                     return Ok((dir, src.scope.clone()));
@@ -1400,7 +1468,7 @@ pub(crate) fn resolve_plugin_dir(app: &AppHandle, state: &VaultState, id: &str) 
     Err("插件不存在".to_string())
 }
 
-/// 读取插件入口 JS（供隔离上下文加载；限制在插件根目录内）。path 缺省 = 清单 main。
+/// 读取插件入口 JS（供宿主求值加载；限制在插件根目录内）。path 缺省 = 清单 main。
 #[tauri::command]
 pub fn plugin_read_entry(
     app: AppHandle,
@@ -1413,11 +1481,15 @@ pub fn plugin_read_entry(
     let main = manifest["main"].as_str().ok_or("清单缺少 main")?;
     let entry = path.as_deref().unwrap_or(main);
     let entry_path = safe_plugin_path(&dir, entry)?;
+    let size = fs::metadata(&entry_path).map_err(|e| format!("读取插件入口失败：{e}"))?.len();
+    if size > MAX_ENTRY_BYTES {
+        return Err(format!("插件入口过大（上限 {} 字节）", MAX_ENTRY_BYTES));
+    }
     let data = fs::read(&entry_path).map_err(|e| format!("读取插件入口失败：{e}"))?;
     String::from_utf8(data).map_err(|_| "插件入口不是合法 UTF-8 文本".to_string())
 }
 
-/// 读取插件自持数据（单 JSON 对象，桥 state:persist 落盘）。
+/// 读取插件自持数据（单 JSON 对象，原子写落盘）。
 #[tauri::command]
 pub fn plugin_read_state(app: AppHandle, state: State<'_, VaultState>, id: String) -> Result<Value, String> {
     let (dir, _scope) = resolve_plugin_dir(&app, &state, &id)?;
@@ -1477,6 +1549,24 @@ mod tests {
     }
 
     #[test]
+    fn git_url_whitelist_blocks_option_injection() {
+        // 显式 scheme 的绝对地址放行（含 SSH 简写）。
+        for ok in [
+            "https://github.com/com/example.git",
+            "http://192.168.1.10/git/example.git",
+            "ssh://git@host/example.git",
+            "git://host/example.git",
+            "git@github.com:com/example.git",
+        ] {
+            assert!(validate_git_url(ok).is_ok(), "{ok} 应放行");
+        }
+        // 选项注入与未知协议拒绝（git 会把 `-` 开头的位置参数当选项）。
+        for bad in ["--upload-pack=sh -c id", "-c", "ext::sh -c id", "file:///tmp/x", "example.git", ""] {
+            assert!(validate_git_url(bad).is_err(), "{bad} 应拒绝");
+        }
+    }
+
+    #[test]
     fn repo_and_target_folder_names() {
         // 原名 = 仓库名（owner/repo、完整 URL、SSH 地址都收敛到 repo 段）。
         assert_eq!(repo_folder_name("com/example"), "example");
@@ -1529,15 +1619,17 @@ mod tests {
             "atelyx": { "name": "示例工具", "type": "tool", "tagline": "一句话" },
         });
         assert!(manifest_valid_or_error(&ok).is_ok());
-        // 缺 name/atelyx 块的清单（含旧格式）拒绝。
-        let old = json!({ "schemaVersion": 2, "id": "com.x", "name": "x", "version": "1", "type": "tool", "main": "a.js" });
-        assert!(manifest_valid_or_error(&old).is_err());
+        // 缺 atelyx 块的清单拒绝（顶层 self 描述字段不算数）。
+        let no_ax_block = json!({ "schemaVersion": 2, "id": "com.x", "name": "com.x", "version": "1", "type": "tool", "main": "a.js" });
+        assert!(manifest_valid_or_error(&no_ax_block).is_err());
         // name 必须反向域名。
         let bad_name = json!({ "name": "todo", "version": "1", "main": "a.js", "atelyx": { "type": "tool" } });
         assert!(manifest_valid_or_error(&bad_name).is_err());
-        // Python 入口拒绝。
-        let py = json!({ "name": "com.x.py", "version": "1", "main": "main.py", "atelyx": { "type": "tool" } });
-        assert!(manifest_valid_or_error(&py).is_err());
+        // 入口扩展名限 .js/.ts/.tsx（其余拒绝）。
+        let bad_ext = json!({ "name": "com.x.ext", "version": "1", "main": "main.other", "atelyx": { "type": "tool" } });
+        assert!(manifest_valid_or_error(&bad_ext).is_err());
+        let mjs = json!({ "name": "com.x.mjs", "version": "1", "main": "index.mjs", "atelyx": { "type": "tool" } });
+        assert!(manifest_valid_or_error(&mjs).is_err());
         // 未知类型拒绝。
         let bad_type = json!({ "name": "com.x", "version": "1", "main": "a.js", "atelyx": { "type": "rust" } });
         assert!(manifest_valid_or_error(&bad_type).is_err());
@@ -1580,135 +1672,207 @@ mod tests {
         }
     }
 
-    #[test]
-    fn builtin_plugin_defs_are_valid() {
-        // name 唯一且合法；合成清单通过校验（atelyx.type；main 为校验占位）。
-        let ids: Vec<&str> = BUILTIN_PLUGINS.iter().map(|d| d.id).collect();
-        let mut uniq = ids.clone();
-        uniq.sort();
-        uniq.dedup();
-        assert_eq!(ids.len(), uniq.len(), "内置插件 name 必须唯一");
-        for def in BUILTIN_PLUGINS {
-            assert!(plugin_id_valid(def.id), "内置插件 name 非法：{}", def.id);
-            let manifest = builtin_manifest(def);
-            assert!(manifest_valid_or_error(&manifest).is_ok(), "内置插件清单非法：{}", def.id);
-            assert_eq!(manifest["atelyx"]["type"].as_str(), Some(def.ty));
-            assert_eq!(manifest["main"].as_str(), Some("builtin"));
-            if def.ty == "theme" {
-                // 主题插件：合成 themes（浅/深基底）+ themeOptions.accent
-                let themes = manifest["atelyx"]["themes"].as_array().expect("主题插件必须带 themes");
-                assert_eq!(themes.len(), 2);
-                assert_eq!(themes[0]["id"], "light");
-                assert_eq!(themes[1]["id"], "dark");
-                assert_eq!(manifest["atelyx"]["themeOptions"]["accent"], true);
-            }
+    /// 默认组合清单条目（测试用：模拟前端随 `plugin_list(defaults)` 交来的原始插件包清单
+    /// ——`name` = 插件 id + `atelyx` 块，与磁盘插件包同一形状）。
+    fn default_entries(ids: &[&str]) -> Vec<Value> {
+        ids.iter()
+            .map(|id| raw_manifest(id, "panel", None))
+            .collect()
+    }
+
+    /// 原始插件包清单（name = id；显示名/类型/主题声明在 atelyx 块）。
+    fn raw_manifest(id: &str, kind: &str, themes: Option<Value>) -> Value {
+        let mut atelyx = json!({
+            "name": format!("显示名-{id}"),
+            "type": kind,
+            "scope": "app",
+            "tagline": "一句话",
+            "author": "Atelyx",
+            "license": "MIT",
+        });
+        if let Some(themes) = themes {
+            atelyx["themes"] = themes;
         }
-        assert!(is_builtin_plugin_id("builtin.search"));
-        assert!(is_builtin_plugin_id("builtin.theme"));
-        assert!(!is_builtin_plugin_id("com.acme.x"));
+        json!({ "name": id, "version": "0.0.0", "main": "builtin", "atelyx": atelyx })
     }
 
     #[test]
-    fn default_plugins_expose_builtin_set() {
-        // 默认装配与内置常量一致（单一权威：含已卸载成员也能枚举，供装配视图推导灰行）。
-        let defaults = plugin_default_plugins();
-        assert_eq!(defaults.len(), BUILTIN_PLUGINS.len());
-        for (def, v) in BUILTIN_PLUGINS.iter().zip(&defaults) {
-            assert_eq!(v["name"], def.id);
-            assert_eq!(v["atelyx"]["name"], def.name);
-            assert_eq!(v["atelyx"]["tagline"], def.tagline);
-            assert_eq!(v["atelyx"]["type"].as_str(), Some(def.ty));
-        }
-    }
-
-    #[test]
-    fn last_theme_plugin_guard_blocks_disable() {
-        // 守恒：停用/卸载最后一个启用主题插件被拒；内置主题插件在集合内。
-        assert!(builtin_plugin_is_theme("builtin.theme"));
-        assert!(!builtin_plugin_is_theme("builtin.canvas"));
-        assert!(!builtin_plugin_is_theme("builtin.search"));
-    }
-
-    #[test]
-    fn seed_missing_builtins_is_idempotent_and_preserves_state() {
+    fn seeding_adds_rows_and_is_idempotent() {
+        // 播种建行（来源 Builtin、默认启用、清单已存）；重复播种不增删、不覆盖启停。
+        let entries = default_entries(&["builtin.search", "builtin.note", "builtin.theme"]);
         let mut s = PluginState::default();
-        seed_missing_builtins(&mut s);
-        assert_eq!(s.sources.len(), BUILTIN_PLUGINS.len());
-        for def in BUILTIN_PLUGINS {
-            assert_eq!(s.sources[def.id].kind, PluginSourceKind::Builtin);
-            assert_eq!(s.enabled.get(def.id), Some(&true));
+        assert!(seed_default_rows(&mut s, &entries, &HashSet::new(), false));
+        assert_eq!(s.sources.len(), 3);
+        for id in ["builtin.search", "builtin.note", "builtin.theme"] {
+            assert_eq!(s.sources[id].kind, PluginSourceKind::Builtin);
+            assert_eq!(s.sources[id].manifest.as_ref().unwrap()["name"], id);
+            assert_eq!(s.enabled.get(id), Some(&true));
         }
-        // 幂等：重复调用不增删。
-        let before_len = s.sources.len();
-        seed_missing_builtins(&mut s);
-        assert_eq!(s.sources.len(), before_len);
-        // 已存在条目保持现状（停用不复活）；缺失条目补回（恢复语义）。
-        s.enabled.insert(BUILTIN_PLUGINS[0].id.to_string(), false);
-        s.sources.remove(BUILTIN_PLUGINS[1].id);
-        seed_missing_builtins(&mut s);
-        assert_eq!(s.enabled.get(BUILTIN_PLUGINS[0].id), Some(&false)); // 停用保持
-        assert!(s.sources.contains_key(BUILTIN_PLUGINS[1].id)); // 缺失补回（显式恢复）
+        assert_eq!(s.seeded_ids, vec!["builtin.search", "builtin.note", "builtin.theme"]);
+
+        s.enabled.insert("builtin.note".into(), false);
+        // 幂等：状态未变 → 不落盘（返回 false），启停保持。
+        assert!(!seed_default_rows(&mut s, &entries, &HashSet::new(), false));
+        assert_eq!(s.sources.len(), 3);
+        assert_eq!(s.enabled.get("builtin.note"), Some(&false));
     }
 
     #[test]
-    fn builtin_seeding_is_incremental_by_id() {
-        // 增量播种：只补未记录的内置条目；已记录条目（含停用）保持现状。
+    fn seeding_reads_frontend_payload_shape() {
+        // 跨语言形状契约：前端清单（name = id + atelyx 块）必须能播种成行，
+        // 且随应用分发行的展示名/类型经 atelyx 块解析（列表与主题守恒都读这里）。
+        let theme = raw_manifest(
+            "builtin.theme",
+            "theme",
+            Some(json!([{ "id": "light", "name": "浅色", "colorScheme": "light", "variables": {} }])),
+        );
+        let entries = vec![raw_manifest("builtin.note", "panel", None), theme];
         let mut s = PluginState::default();
-        s.builtin_seeded_ids = BUILTIN_PLUGINS[..4].iter().map(|d| d.id.to_string()).collect();
-        for def in &BUILTIN_PLUGINS[..4] {
-            s.sources.insert(def.id.to_string(), PluginSource { kind: PluginSourceKind::Builtin, scope: "app".to_string(), ..Default::default() });
-        }
-        s.enabled.insert(BUILTIN_PLUGINS[1].id.to_string(), false); // 停用保持
-        seed_new_builtins(&mut s);
-        assert_eq!(s.enabled.get(BUILTIN_PLUGINS[1].id), Some(&false)); // 停用不复活
-        assert!(s.sources.contains_key(BUILTIN_PLUGINS[4].id)); // 未记录的新条目补播种
-        assert_eq!(s.enabled.get(BUILTIN_PLUGINS[4].id), Some(&true));
-        assert_eq!(s.sources.len(), BUILTIN_PLUGINS.len());
-        assert_eq!(s.builtin_seeded_ids.len(), BUILTIN_PLUGINS.len());
-        // 幂等：重复调用无新增、不覆盖停用状态。
-        seed_new_builtins(&mut s);
-        assert_eq!(s.sources.len(), BUILTIN_PLUGINS.len());
-        assert_eq!(s.builtin_seeded_ids.len(), BUILTIN_PLUGINS.len());
-        assert_eq!(s.enabled.get(BUILTIN_PLUGINS[1].id), Some(&false));
+        assert!(seed_default_rows(&mut s, &entries, &HashSet::new(), false));
+        assert_eq!(s.sources.len(), 2, "前端形状的清单必须播种成行");
+
+        let info = plugin_info_from_manifest(
+            "builtin.note",
+            s.sources["builtin.note"].manifest.as_ref().unwrap(),
+            "app",
+            PluginSourceKind::Builtin,
+            true,
+        );
+        assert_eq!(info.name, "显示名-builtin.note");
+        assert_eq!(info.kind, "panel");
+        assert_eq!(info.install_dir, "");
+        // 基础主题提供者自身声明基底条目 → 计入主题守恒（与前端派生口径一致）。
+        assert!(manifest_is_theme(s.sources["builtin.theme"].manifest.as_ref().unwrap(), "builtin.theme"));
     }
 
     #[test]
-    fn builtin_seeding_legacy_state_derives_seeded_from_sources() {
-        // 旧状态文件无 id 记录（一次性布尔语义）：现有内置来源视为已播种，只补新条目、
-        // 不复活仍在列表中的旧条目状态；已卸载的旧条目无法与「新条目」区分（不做存量迁移
-        // 的既定边界：升级补回一次，恢复入口可再卸载）。
+    fn seeding_refreshes_manifest_of_existing_row() {
+        // 已有行（含旧状态里无清单的行）→ 刷新清单并保留启停状态（行不再重复建）。
         let mut s = PluginState::default();
-        for def in &BUILTIN_PLUGINS[..4] {
-            s.sources.insert(def.id.to_string(), PluginSource { kind: PluginSourceKind::Builtin, scope: "app".to_string(), ..Default::default() });
-        }
-        s.enabled.insert(BUILTIN_PLUGINS[0].id.to_string(), false);
-        seed_new_builtins(&mut s);
-        assert_eq!(s.enabled.get(BUILTIN_PLUGINS[0].id), Some(&false)); // 停用保持
-        assert!(s.sources.contains_key(BUILTIN_PLUGINS[3].id)); // 现有条目不重复播种
-        assert!(s.sources.contains_key(BUILTIN_PLUGINS[4].id)); // 新条目补播种
-        assert_eq!(s.sources.len(), BUILTIN_PLUGINS.len());
-        assert_eq!(s.builtin_seeded_ids.len(), BUILTIN_PLUGINS.len());
+        s.sources.insert(
+            "builtin.search".into(),
+            PluginSource { kind: PluginSourceKind::Builtin, scope: "app".into(), ..Default::default() },
+        );
+        s.enabled.insert("builtin.search".into(), false);
+        let entries = default_entries(&["builtin.search"]);
+        seed_default_rows(&mut s, &entries, &HashSet::new(), false);
+        assert_eq!(s.sources["builtin.search"].manifest.as_ref().unwrap()["name"], "builtin.search");
+        assert_eq!(s.enabled.get("builtin.search"), Some(&false));
     }
 
     #[test]
-    fn builtin_seeding_keeps_seeded_uninstalled_removed() {
-        // 核心不变量：已记入 builtin_seeded_ids 的内置条目即使已被卸载（sources 无对应项）
-        // 也不再重新播种——卸载保持卸载（增量 by-id 语义的立足点）。
+    fn seeding_prunes_retired_default_rows() {
+        // 默认组合里已不存在的随应用分发行（退役）连同播种标记一起清理：不留空白行、状态不单调增长。
         let mut s = PluginState::default();
-        s.builtin_seeded_ids = BUILTIN_PLUGINS[..4].iter().map(|d| d.id.to_string()).collect();
-        for def in &BUILTIN_PLUGINS[..4] {
-            if def.id == BUILTIN_PLUGINS[1].id {
-                continue; // 已卸载：不在 sources
-            }
-            s.sources.insert(def.id.to_string(), PluginSource { kind: PluginSourceKind::Builtin, scope: "app".to_string(), ..Default::default() });
-        }
-        seed_new_builtins(&mut s);
-        // 已播种但已卸载的条目不复活。
-        assert!(!s.sources.contains_key(BUILTIN_PLUGINS[1].id));
-        assert!(s.enabled.get(BUILTIN_PLUGINS[1].id).is_none()); // 卸载保持：不复活也不启用
-        // 未记录的后续条目仍补播种。
-        assert!(s.sources.contains_key(BUILTIN_PLUGINS[4].id));
-        assert_eq!(s.sources.len(), BUILTIN_PLUGINS.len() - 1);
-        assert_eq!(s.builtin_seeded_ids.len(), BUILTIN_PLUGINS.len());
+        s.sources.insert(
+            "builtin.retired".into(),
+            PluginSource {
+                kind: PluginSourceKind::Builtin,
+                scope: "app".into(),
+                manifest: Some(raw_manifest("builtin.retired", "panel", None)),
+                ..Default::default()
+            },
+        );
+        s.enabled.insert("builtin.retired".into(), true);
+        s.seeded_ids = vec!["builtin.retired".into()];
+        let entries = default_entries(&["builtin.search"]);
+        assert!(seed_default_rows(&mut s, &entries, &HashSet::new(), false));
+        assert!(!s.sources.contains_key("builtin.retired"), "退役行应被清理");
+        assert_eq!(s.enabled.get("builtin.retired"), None);
+        assert_eq!(s.seeded_ids, vec!["builtin.search".to_string()]);
+    }
+
+    #[test]
+    fn seeding_keeps_rows_when_defaults_empty() {
+        // 空清单 = 调用方异常，不得当成「默认组合已清空」把已有行删掉。
+        let mut s = PluginState::default();
+        s.sources.insert(
+            "builtin.search".into(),
+            PluginSource {
+                kind: PluginSourceKind::Builtin,
+                scope: "app".into(),
+                manifest: Some(raw_manifest("builtin.search", "panel", None)),
+                ..Default::default()
+            },
+        );
+        seed_default_rows(&mut s, &[], &HashSet::new(), false);
+        assert!(s.sources.contains_key("builtin.search"));
+    }
+
+    #[test]
+    fn backup_corrupt_state_uses_unique_name() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("plugin-state-test-{}.json", nanoid::nanoid!()));
+        fs::write(&path, "not json").unwrap();
+        let first = backup_corrupt_state(&path).expect("首次备份应成功");
+        assert!(!path.exists(), "原文件应已被移走");
+        // 第二次损坏不得覆盖第一次的备份（同名 rename 在 Windows 上会静默替换）。
+        fs::write(&path, "not json again").unwrap();
+        let second = backup_corrupt_state(&path).expect("第二次备份应成功");
+        assert_ne!(first, second);
+        assert!(first.exists() && second.exists());
+        let _ = fs::remove_file(first);
+        let _ = fs::remove_file(second);
+    }
+
+    #[test]
+    fn seeding_keeps_uninstalled_removed_and_restore_readds() {
+        // 已播种但被卸载（无行）→ 保持卸载；restore（用户显式恢复）→ 补建回默认启用。
+        let entries = default_entries(&["builtin.search", "builtin.note"]);
+        let mut s = PluginState::default();
+        s.seeded_ids = vec!["builtin.search".into(), "builtin.note".into()];
+        s.sources.insert(
+            "builtin.search".into(),
+            PluginSource { kind: PluginSourceKind::Builtin, scope: "app".into(), ..Default::default() },
+        );
+        seed_default_rows(&mut s, &entries, &HashSet::new(), false);
+        assert!(!s.sources.contains_key("builtin.note"));
+        assert_eq!(s.enabled.get("builtin.note"), None);
+
+        seed_default_rows(&mut s, &entries, &HashSet::new(), true);
+        assert!(s.sources.contains_key("builtin.note"));
+        assert_eq!(s.enabled.get("builtin.note"), Some(&true));
+    }
+
+    #[test]
+    fn seeding_skips_disk_backed_ids() {
+        // 磁盘已有同名包 → 不建行（磁盘包覆盖随应用分发的实现），但记入已播种 id。
+        let entries = default_entries(&["builtin.note"]);
+        let mut s = PluginState::default();
+        let disk: HashSet<String> = ["builtin.note".to_string()].into_iter().collect();
+        seed_default_rows(&mut s, &entries, &disk, false);
+        assert!(s.sources.is_empty());
+        assert_eq!(s.seeded_ids, vec!["builtin.note"]);
+        // 覆盖包卸载后不自动复活（要恢复默认需显式恢复）。
+        seed_default_rows(&mut s, &entries, &HashSet::new(), false);
+        assert!(s.sources.is_empty());
+    }
+
+    #[test]
+    fn seeding_skips_entries_without_valid_id() {
+        let mut s = PluginState::default();
+        let entries = vec![json!({ "version": "1" }), json!({ "name": "todo" }), json!({ "name": "com.ok.x" })];
+        seed_default_rows(&mut s, &entries, &HashSet::new(), false);
+        assert_eq!(s.sources.keys().collect::<Vec<_>>(), vec!["com.ok.x"]);
+        assert_eq!(s.seeded_ids, vec!["com.ok.x"]);
+    }
+
+    #[test]
+    fn theme_manifest_detection() {
+        // 主题声明口径（与前端派生一致）：只含基础条目（light/dark）= 非主题插件（重名条目按占用处理）；
+        // 含自定义条目 = 主题插件；基础主题提供者自身声明基底条目 = 主题插件。
+        let base_only = json!({ "atelyx": { "themes": [
+            { "id": "light", "name": "浅色", "colorScheme": "light", "variables": {} },
+            { "id": "dark", "name": "深色", "colorScheme": "dark", "variables": {} },
+        ] } });
+        assert!(manifest_is_theme(&base_only, BASE_THEME_PLUGIN_ID));
+        assert!(!manifest_is_theme(&base_only, "com.acme.theme"));
+        let custom = json!({ "atelyx": { "themes": [
+            { "id": "nord", "name": "Nord", "colorScheme": "dark", "variables": {} },
+        ] } });
+        assert!(manifest_is_theme(&custom, "com.acme.theme"));
+        assert!(!manifest_is_theme(&json!({ "atelyx": { "themes": [] } }), "com.acme.theme"));
+        assert!(!manifest_is_theme(&json!({ "atelyx": { "type": "panel" } }), "com.acme.panel"));
+        assert!(!manifest_is_theme(&json!({}), "com.acme.theme"));
     }
 }

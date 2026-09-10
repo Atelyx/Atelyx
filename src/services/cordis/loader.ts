@@ -9,9 +9,8 @@
 import { Context, FiberState, type Fiber, type Plugin } from "@atelyx/cordis";
 import { errText } from "@/types";
 import type { Kernel } from "./kernel";
-import { resolveProfileMounts, type Profile } from "@/utils/cordis/composition";
 
-/** 插件定义（第一方宿主侧闭包或第三方求值模块；可携带 Cordis 插件元数据）。 */
+/** 插件定义（宿主侧编译实现或插件包求值模块；可携带 Cordis 插件元数据）。 */
 export interface PluginDefinition {
   id: string;
   /** Cordis 插件：函数 (ctx, config) 或对象 { apply, inject?, provide?, Config?, name? }。 */
@@ -107,38 +106,14 @@ export async function unmountPlugin(kernel: Kernel, id: string): Promise<void> {
   await disposeFiber(fiber);
 }
 
-/** 卸载当前全部已挂载插件（重载/清场用）。 */
+/** 卸载当前全部已挂载插件（重载清场；pluginStore.load 用）。 */
 export async function unmountAll(kernel: Kernel): Promise<void> {
   for (const id of [...mountsOf(kernel).keys()]) {
     await unmountPlugin(kernel, id);
   }
 }
 
-/** 已挂载插件 id 列表（快照；管理/审计用）。 */
+/** 已挂载插件 id 列表（测试断言挂载状态用）。 */
 export function mountedPluginIds(kernel: Kernel): string[] {
   return [...mountsOf(kernel).keys()];
-}
-
-/** 装配挂载：先清场（重置语义 = 重置到磁盘状态），再按 profile × 启用集合挂载；
- *  单插件失败不阻塞其余，返回失败清单（pluginStore 据此置 failed + 可读原因）。
- *  当前运行时装配走 pluginStore.load 逐插件 spawn（见 mountPlugin）；本函数为组合层
- *  （M3 用户可改组合树）的批量装配入口，测试覆盖其语义，尚未接入运行时挂载路径。 */
-export async function mountProfile(
-  kernel: Kernel,
-  profile: Profile,
-  plugins: Record<string, PluginDefinition>,
-  enabledIds: ReadonlySet<string>,
-): Promise<{ failed: Array<{ id: string; reason: string }> }> {
-  await unmountAll(kernel);
-  const failed: Array<{ id: string; reason: string }> = [];
-  for (const m of resolveProfileMounts(profile, enabledIds)) {
-    const plugin = plugins[m.id];
-    if (!plugin) {
-      failed.push({ id: m.id, reason: "无插件定义" });
-      continue;
-    }
-    const result = await mountPlugin(kernel, plugin, m.config);
-    if (!result.ok) failed.push({ id: m.id, reason: result.reason });
-  }
-  return { failed };
 }

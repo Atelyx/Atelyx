@@ -18,11 +18,7 @@ import type {
   ToolSchema,
   VaultConfig,
 } from "@/types";
-import {
-  BUILTIN_THEME_PLUGIN_ID,
-  DEFAULT_BUILTIN_THEME_SETTINGS,
-  normalizeThemeConfig,
-} from "@/utils/pluginTheme";
+import { BUILTIN_THEME_PLUGIN_ID, DEFAULT_BUILTIN_THEME_SETTINGS } from "@/utils/pluginTheme";
 import { DEFAULT_AI_CONFIG } from "@/constants/ai";
 import { DEFAULT_AGENT_TOOLS } from "@/constants/tools";
 import { BUILTIN_AGENTS, BUILTIN_AGENT_CHAT_ID } from "@/constants/agents";
@@ -54,7 +50,7 @@ import { createPersistController } from "@/utils/persist";
 interface SettingsState {
   /** 运行时 AI 配置（providers 含 key，从 keychain 填充）。 */
   config: AiConfig;
-  /** 激活的主题插件 id（应用级，写 global.json；缺省 = 内置主题插件，其深浅模式默认跟随系统）。 */
+  /** 激活的主题插件 id（应用级，写 global.json；缺省 = 默认主题插件，其深浅模式默认跟随系统）。 */
   theme: string;
   /** 各主题插件的设置项值字典（应用级，写 global.json；预置键 colorMode/accentColor + 插件自定义键）。 */
   themeSettings: Record<string, Record<string, unknown>>;
@@ -359,10 +355,12 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     let deviceName = "";
     try {
       const cfg = await readGlobalConfig();
-      // 主题配置归一化（旧三态/旧全局强调色迁移 + 磁盘优先）为纯函数，见 utils/pluginTheme
-      const normalized = normalizeThemeConfig(cfg);
-      theme = normalized.theme;
-      themeSettings = normalized.themeSettings;
+      // 主题：激活插件 id 直接取磁盘值（缺省 = 默认主题插件），设置字典缺省补该插件的预置项。
+      theme = cfg.theme ?? BUILTIN_THEME_PLUGIN_ID;
+      themeSettings = { ...(cfg.themeSettings ?? {}) };
+      if (themeSettings[BUILTIN_THEME_PLUGIN_ID] === undefined) {
+        themeSettings[BUILTIN_THEME_PLUGIN_ID] = { ...DEFAULT_BUILTIN_THEME_SETTINGS };
+      }
       fontSize = cfg.fontSize;
       fontFamily = cfg.fontFamily;
       autoRestoreFiles = cfg.autoRestoreFiles ?? true;

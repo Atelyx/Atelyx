@@ -4,7 +4,7 @@
  * 槽命名约定（渲染/扩展位置常量）：view/<kind>、node/<type>、edge/<type>、tableview/<kind>、
  * titlebar/<region>、toolbar/<region>、panelhead/<region>、contextmenu/<target>、
  * settings/<block>、statusbar/<region>、command/<id>。
- * 内置视图/节点/边 = 第一方插件挂载时注册的 single 槽贡献；注册经 ctx.effect 随 fiber 撤销
+ * 随应用分发的视图/节点/边 = 对应默认组合成员挂载时注册的 single 槽贡献；注册经 ctx.effect 随 fiber 撤销
  * （disposePluginSlots 仅供测试/兜底，正常卸载走 effect 清理）。
  */
 import type { ComponentType, ReactNode } from "react";
@@ -24,7 +24,7 @@ export interface ViewContribution {
   kind: string;
   label: string;
   component?: ComponentType;
-  /** 按宿主面板/撕裂窗口 id 渲染（内置重型视图用；第三方面板不提供）。 */
+  /** 按宿主面板/撕裂窗口 id 渲染（重型视图用；普通插件面板不提供）。 */
   render?: (hostId: string) => ReactNode;
   pluginId: string;
 }
@@ -178,7 +178,7 @@ export function resolveTableViewSlot(kind: string): SlotContribution<{ label: st
   return resolveSlot(`tableview/${kind}`) as SlotContribution<{ label: string; component: ComponentType }> | undefined;
 }
 
-/** 视图显示名（视图槽标签 → 内置视图标签 → 原样兜底，不崩溃）。 */
+/** 视图显示名（视图槽标签 → 宿主视图标签 → 原样兜底，不崩溃）。 */
 export function pluginViewLabel(view: string): string {
   return resolveViewKind(view)?.payload.label ?? (VIEW_LABELS as Record<string, string>)[view] ?? view;
 }

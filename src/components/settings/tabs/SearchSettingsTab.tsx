@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { DropdownSelect } from "@/components/common/DropdownSelect";
 import { SettingCard } from "@/components/settings/SettingCard";
+import { SlotListMount } from "@/components/plugins/SlotHost";
 import { useSettingsStore } from "@/stores/settingsStore";
 
 /** 联网搜索面板（仓库级）。 */
@@ -73,6 +74,9 @@ export function SearchSettingsTab() {
           />
         </SettingCard>
       )}
+
+      {/* 插件贡献的设置区块（ctx.slots.registerUi 槽名 settings/search） */}
+      <SlotListMount slot="settings/search" />
     </section>
   );
 }

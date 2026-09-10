@@ -1,8 +1,8 @@
 /**
  * Cordis 挂载器测试（services/cordis/loader）。
  *
- * 验证：第一方插件 ctx.plugin 挂载 → 服务/槽/事件生效 → 卸载随 fiber 撤销；
- * apply 抛错 → failed + 可读原因且不留残留；装配按 profile × 启用集合顺序挂载。
+ * 验证：插件 ctx.plugin 挂载 → 服务/槽/事件生效 → 卸载随 fiber 撤销；
+ * apply 抛错 → failed + 可读原因且不留残留；同 id 重复挂载 = 替换。
  */
 import { Context } from "@atelyx/cordis";
 import { describe, expect, it, afterEach } from "vitest";
@@ -10,13 +10,11 @@ import { createKernel, type Kernel } from "./kernel";
 import {
   contextToPluginId,
   mountPlugin,
-  mountProfile,
   mountedPluginIds,
   unmountAll,
   unmountPlugin,
 } from "./loader";
 import { registerViewSlot } from "./slots";
-import type { Profile } from "@/utils/cordis/composition";
 import { resolveViewKind } from "./slots";
 
 declare module "@atelyx/cordis" {
@@ -102,30 +100,5 @@ describe("Cordis 挂载器", () => {
     expect(k.ctx.get("loaderSvc")).toBeDefined();
     await unmountPlugin(k, "builtin.loader");
     expect(k.ctx.get("loaderSvc")).toBeUndefined();
-  });
-
-  it("装配：profile × 启用集合按序挂载，失败清单收集", async () => {
-    const k = makeKernel();
-    const profile: Profile = {
-      name: "default",
-      plugins: [
-        { id: "builtin.a", order: 1, defaultEnabled: true },
-        { id: "builtin.b", order: 2, defaultEnabled: true },
-        { id: "builtin.c", order: 3, defaultEnabled: true },
-      ],
-    };
-    const plugins = {
-      "builtin.a": { id: "builtin.a", apply: (ctx: Context) => { ctx.provide("loaderSvc", { ping: () => "a" }); } },
-      "builtin.b": { id: "builtin.b", apply: () => { throw new Error("b 失败"); } },
-      "builtin.c": { id: "builtin.c", apply: () => {} },
-    };
-    const { failed } = await mountProfile(k, profile, plugins, new Set(["builtin.a", "builtin.b", "builtin.c"]));
-    expect(failed).toEqual([{ id: "builtin.b", reason: "b 失败" }]);
-    expect(mountedPluginIds(k).sort()).toEqual(["builtin.a", "builtin.c"]);
-    expect(k.ctx.loaderSvc.ping()).toBe("a");
-    // 未启用的不挂载
-    await unmountAll(k);
-    await mountProfile(k, profile, plugins, new Set(["builtin.c"]));
-    expect(mountedPluginIds(k)).toEqual(["builtin.c"]);
   });
 });

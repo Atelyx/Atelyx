@@ -1,10 +1,10 @@
 //! 全局配置命令（应用级数据）。
 //!
 //! 读写 `app_data_dir/global.json`：**应用级配置**——最近打开仓库列表 + 自动更新开关 +
-//! 界面外观（主题/强调色/字号/字体）+ 自动恢复上次打开文件。
+//! 界面外观（主题/字号/字体）+ 自动恢复上次打开文件。
 //! AI 供应商 / 搜索源已仓库化（`vault.rs` 的 `VaultConfig.providers/search`），
-//! 不再由本文件承载；API key 永不落文件（仅存 keychain，见 `commands/keychain.rs`）——
-//! 旧 `ai`/`search`/`device_id` 字段读回时被 serde 忽略（未知字段），不再写回。
+//! 不再由本文件承载；API key 永不落文件（仅存 keychain，见 `commands/keychain.rs`）。
+//! 字段只按当前形状读写；文件里出现未知字段时由 serde 忽略（不报错、不写回）。
 //!
 //! 另有 `app_data_dir/ui-state.json`（应用级 UI 使用状态：工作区布局 + 上次打开文件 +
 //! 文件面板展开；本机独有、不随仓库同步，由 `crate::layout` 迷你窗口管理器单一写者
@@ -27,8 +27,8 @@ pub struct RecentVault {
     pub last_opened_at: i64,
 }
 
-/// 全局配置根结构（**应用级**：最近仓库列表 + 自动更新开关 + 界面外观（主题/强调色/字号/字体）+
-/// 自动恢复上次打开文件；旧 ai/search/deviceId 字段读回时被忽略）。
+/// 全局配置根结构（**应用级**：最近仓库列表 + 自动更新开关 + 界面外观（主题/字号/字体）+
+/// 自动恢复上次打开文件；未知字段由 serde 忽略）。
 #[derive(Serialize, Deserialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct GlobalConfig {
@@ -37,16 +37,12 @@ pub struct GlobalConfig {
     /// 自动检查更新（应用级）：开启后每次启动应用静默检查新版本并自动安装。缺省 None = 关闭。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_update: Option<bool>,
-    /// 应用级激活的主题插件 id（旧值 "light" | "dark" | "system" 由前端读时迁移为
-    /// 内置主题插件 + 深浅模式设置）。缺失时前端默认内置主题插件。
+    /// 应用级激活的主题插件 id。缺失时前端默认取默认主题插件。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theme: Option<String>,
     /// 各主题插件的设置项值字典（键 = 插件 id；预置键 colorMode/accentColor + 插件自定义键）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theme_settings: Option<std::collections::BTreeMap<String, std::collections::BTreeMap<String, serde_json::Value>>>,
-    /// 旧版应用级强调色（hex，如 "#d4af37"；前端读时迁移进 theme_settings 内置条目，迁移后不再写入）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub accent_color: Option<String>,
     /// 应用级界面基础字号（px，覆盖 :root font-size；缺省 = 18）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub font_size: Option<f64>,

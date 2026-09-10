@@ -1,22 +1,22 @@
 /**
- * 第一方 Cordis 插件注册表（components 层承载组件引用——services 不 import components）。
+ * 随应用分发的插件：实现注册表 + 默认组合定义（分发属性，非类别）。
  *
- * 内置插件 = 随 App 分发的插件（sourceKind builtin）；实现随宿主编译，本模块是 id → Cordis
- * 插件定义的装载映射。pluginStore 按插件行启停状态经 loader 挂载/卸载（fiber 生命周期）：
+ * 这些插件与用户安装的插件同注册表/同生命周期/同 slots·services·events/同审计，无特权；
+ * 唯一差别是**实现解析方式**——实现随宿主编译（本模块 id → Cordis 插件定义的映射），
+ * 而非从磁盘读入口。pluginStore 按组合行启停状态经 loader 挂载/卸载（fiber 生命周期）：
  * - 视图贡献 → view/<kind> 槽（single；重型视图 render(hostId) 承载宿主面板 id）；
  * - 领域生命周期钩子（flush/切仓库/释放视图）经 kernelLifecycle 注册，随 fiber 撤销；
  * - 能力提供者 / 协作域接线 / 仓库事件订阅经 ctx.effect 注册（apply 中途抛错/卸载均自动撤销）；
- * - builtin.canvas/table 额外提供 ctx.canvas/ctx.table 类型化服务（停用即消失，语义同现状）。
+ * - builtin.canvas/table/note/chat 额外提供 ctx.canvas/ctx.table/ctx.note/ctx.chat 类型化服务（停用即消失）。
  *
- * 数组顺序 = 领域生命周期钩子的 flush 注册序（对齐既有注册序）；也是 profile 装配顺序。
- * 注意：id 与 Rust 侧内置插件清单（commands/plugin.rs）一一对应，新增内置插件须两侧同步；
+ * 数组顺序 = 领域生命周期钩子的 flush 注册序（对齐既有注册序）；也是默认组合的装配顺序。
  * 本模块被 pluginStore 静态 import，环内所有跨模块访问均为函数体内延迟求值（无顶层
  * getState/useXxx），新增顶层触碰会 TDZ 崩溃。
  */
 import type { ComponentType, ReactNode } from "react";
 import type { Context } from "@atelyx/cordis";
-import type { PluginManifest, PluginType, ThemeDefinition } from "@/types";
-import type { Profile } from "@/utils/cordis/composition";
+import type { PluginManifest, PluginPackageJson } from "@/types";
+import type { CompositionDefault } from "@/utils/cordis/composition";
 import type { DomainLifecycleHooks } from "@/utils/kernelLifecycle";
 import type { VaultEventHandler, VaultEvent, VaultEventOf } from "@/utils/vaultEvents";
 import { CalendarPanel } from "@/components/calendar/CalendarPanel";
@@ -41,6 +41,7 @@ import { useVaultStore } from "@/stores/vaultStore";
 import { registerDomainLifecycle } from "@/utils/kernelLifecycle";
 import { subscribeVaultEvent } from "@/utils/vaultEvents";
 import { registerViewSlot } from "@/services/cordis/slots";
+import { pluginIdOf } from "@/services/cordis/loader";
 import { createCanvasService } from "@/services/cordis/canvas";
 import { createTableService } from "@/services/cordis/table";
 import { createNoteService } from "@/services/cordis/note";
@@ -52,9 +53,9 @@ import { VIEW_LABELS } from "@/constants/views";
 export interface BuiltinViewPayload {
   kind: string;
   label: string;
-  /** 无 props 契约的视图组件（第三方面板同款；重型视图用 render，不填 component）。 */
+  /** 无 props 契约的视图组件（用户插件面板同款；重型视图用 render，不填 component）。 */
   component?: ComponentType;
-  /** 内置重型视图按宿主面板/撕裂窗口 id 渲染（画布/表格需 panelId 聚焦门控）。 */
+  /** 重型视图按宿主面板/撕裂窗口 id 渲染（画布/表格需 panelId 聚焦门控）。 */
   render?: (hostId: string) => ReactNode;
 }
 
@@ -72,15 +73,13 @@ function vaultHandler<K extends VaultEvent["kind"]>(
   return { kind, handler: handler as VaultEventHandler };
 }
 
-/** 单个第一方插件定义。 */
+/** 单个随应用分发的插件定义（数组顺序 = 装配顺序 = 领域生命周期 flush 注册序）。 */
 export interface CordisBuiltinDef {
   id: string;
   name: string;
   type: string;
   tagline: string;
-  /** 装配顺序（= 领域生命周期 flush 注册序）。 */
-  order: number;
-  /** 视图载荷（kind → 插件 id 映射与测试用；apply 据此注册槽）。 */
+  /** 视图载荷（kind + 标签；apply 据此注册槽，管理页按 kind 反查提供行）。 */
   views: BuiltinViewPayload[];
   /** 挂载实现（pluginStore 经 loader 调 ctx.plugin(apply)）。 */
   apply(ctx: Context): void;
@@ -88,7 +87,9 @@ export interface CordisBuiltinDef {
 
 // ===== 挂载装配辅助（全部经 ctx.effect，生命周期随 fiber） =====
 
-function mountViews(ctx: Context, pluginId: string, views: BuiltinViewPayload[]): void {
+function mountViews(ctx: Context, views: BuiltinViewPayload[]): void {
+  // 槽归属按挂载上下文推导（= 组合行 id）：行实现来源被替换时，贡献归属仍跟着跑代码的那一行。
+  const pluginId = pluginIdOf(ctx) ?? "plugin";
   for (const v of views) {
     ctx.effect(() =>
       registerViewSlot(v.kind, pluginId, { label: v.label, component: v.component, render: v.render }),
@@ -157,7 +158,6 @@ interface BuiltinDefOptions {
   name: string;
   type: string;
   tagline: string;
-  order: number;
   views: BuiltinViewPayload[];
   lifecycle?: DomainLifecycleHooks;
   /** 能力提供者接线（如 canvas/table 命名空间数据源 + 变更事件；返回 unregister）。 */
@@ -169,27 +169,26 @@ interface BuiltinDefOptions {
   provideService?: (ctx: Context) => void;
 }
 
-/** 由选项生成第一方插件定义（apply = 装配所有载荷；卸载 = fiber dispose 全撤销）。 */
+/** 由选项生成插件定义（apply = 装配所有载荷；卸载 = fiber dispose 全撤销）。 */
 function def(opts: BuiltinDefOptions): CordisBuiltinDef {
   const apply = (ctx: Context): void => {
-    mountViews(ctx, opts.id, opts.views);
+    mountViews(ctx, opts.views);
     if (opts.lifecycle) mountLifecycle(ctx, opts.lifecycle);
     if (opts.capability) mountWiring(ctx, opts.capability);
     if (opts.collabWiring) mountWiring(ctx, opts.collabWiring);
     if (opts.vaultEventHandlers) mountVaultEvents(ctx, opts.vaultEventHandlers);
     opts.provideService?.(ctx);
   };
-  return { id: opts.id, name: opts.name, type: opts.type, tagline: opts.tagline, order: opts.order, views: opts.views, apply };
+  return { id: opts.id, name: opts.name, type: opts.type, tagline: opts.tagline, views: opts.views, apply };
 }
 
-/** 第一方插件定义总表（id 全局唯一；views 内 kind 全局唯一）。 */
+/** 随应用分发插件定义总表（id 全局唯一；views 内 kind 全局唯一）。 */
 export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
   def({
     id: "builtin.search",
     name: "搜索",
     type: "panel",
     tagline: "全文搜索仓库文件",
-    order: 1,
     views: [{ kind: "search", label: VIEW_LABELS.search, component: SearchView }],
   }),
   def({
@@ -197,7 +196,6 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
     name: "最近打开",
     type: "panel",
     tagline: "最近打开的文件列表",
-    order: 2,
     views: [{ kind: "recent", label: VIEW_LABELS.recent, component: RecentPanel }],
   }),
   def({
@@ -205,7 +203,6 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
     name: "日历",
     type: "panel",
     tagline: "活动密度与手动日程",
-    order: 3,
     views: [{ kind: "calendar", label: VIEW_LABELS.calendar, component: CalendarPanel }],
     lifecycle: {
       id: "builtin.calendar",
@@ -222,7 +219,6 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
     name: "AI 对话",
     type: "panel",
     tagline: "AI 对话会话面板",
-    order: 4,
     views: [{ kind: "aichat", label: VIEW_LABELS.aichat, component: AiChatView }],
     lifecycle: {
       id: "builtin.aichat",
@@ -248,7 +244,7 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
     },
     capability: wireChatAccess,
     provideService: (ctx) =>
-      // 服务 root 作用域提供（第三方插件可消费），生命周期随 builtin 插件 fiber（ctx.effect）
+      // 服务 root 作用域提供（其它插件可消费），生命周期随 builtin 插件 fiber（ctx.effect）
       ctx.effect(() => ctx.root.provide("chat", createChatService())),
   }),
   def({
@@ -256,7 +252,6 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
     name: "画布",
     type: "panel",
     tagline: "有向图对话画布",
-    order: 5,
     views: [
       {
         kind: "canvas",
@@ -317,7 +312,7 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
       }),
     ],
     provideService: (ctx) =>
-      // 服务在 root 作用域提供（第三方插件可消费），生命周期随 builtin 插件 fiber（ctx.effect）
+      // 服务在 root 作用域提供（其它插件可消费），生命周期随 builtin 插件 fiber（ctx.effect）
       ctx.effect(() => ctx.root.provide("canvas", createCanvasService())),
   }),
   def({
@@ -325,7 +320,6 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
     name: "笔记",
     type: "panel",
     tagline: "Markdown 笔记编辑器",
-    order: 6,
     views: [{ kind: "note", label: VIEW_LABELS.note, component: NoteView }],
     lifecycle: {
       id: "builtin.note",
@@ -343,7 +337,7 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
     capability: wireNoteAccess,
     collabWiring: registerNoteCollabWiring,
     provideService: (ctx) =>
-      // 服务 root 作用域提供（第三方插件可消费），生命周期随 builtin 插件 fiber（ctx.effect）
+      // 服务 root 作用域提供（其它插件可消费），生命周期随 builtin 插件 fiber（ctx.effect）
       ctx.effect(() => ctx.root.provide("note", createNoteService())),
   }),
   def({
@@ -351,7 +345,6 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
     name: "表格",
     type: "panel",
     tagline: "多维表格编辑器",
-    order: 7,
     views: [
       {
         kind: "table",
@@ -384,7 +377,7 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
       }),
     ],
     provideService: (ctx) =>
-      // 服务在 root 作用域提供（第三方插件可消费），生命周期随 builtin 插件 fiber（ctx.effect）
+      // 服务在 root 作用域提供（其它插件可消费），生命周期随 builtin 插件 fiber（ctx.effect）
       ctx.effect(() => ctx.root.provide("table", createTableService())),
   }),
   def({
@@ -392,7 +385,6 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
     name: "文件",
     type: "panel",
     tagline: "仓库文件树面板",
-    order: 8,
     views: [{ kind: "files", label: VIEW_LABELS.files, component: FilesView }],
   }),
   def({
@@ -400,7 +392,6 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
     name: "属性",
     type: "panel",
     tagline: "节点/笔记属性面板",
-    order: 9,
     views: [{ kind: "inspector", label: VIEW_LABELS.inspector, component: InspectorPanel }],
   }),
   def({
@@ -408,7 +399,6 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
     name: "协作房间",
     type: "panel",
     tagline: "协作在线用户面板",
-    order: 10,
     views: [{ kind: "collabroom", label: VIEW_LABELS.collabroom, component: CollabRoomPanel }],
   }),
   def({
@@ -416,33 +406,31 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
     name: "仓库历史",
     type: "panel",
     tagline: "仓库版本历史面板",
-    order: 11,
     views: [{ kind: "repohistory", label: VIEW_LABELS.repohistory, component: RepoHistoryPanel }],
   }),
   def({
     id: "builtin.theme",
     name: "默认主题",
     type: "theme",
-    tagline: "内置浅色/深色主题与强调色设置",
-    order: 12,
-    views: [], // 主题类内置插件 = 纯声明式（无视图载荷），只置 active 供主题系统派生消费
+    tagline: "默认浅色/深色主题与强调色设置",
+    views: [], // 主题类行 = 纯声明式（无视图载荷），只置 active 供主题系统派生消费
   }),
 ];
 
-/** 第一方插件按 id 索引（装配/挂载用）。 */
+/** 随应用分发的插件按 id 索引（实现解析用：命中即用编译内置实现，否则读磁盘入口）。 */
 export const CORDIS_BUILTIN_BY_ID: Record<string, CordisBuiltinDef> = Object.fromEntries(
   CORDIS_BUILTIN_DEFS.map((d) => [d.id, d]),
 );
 
-/** 第一方装配 profile（默认装配权威：存在/顺序/默认启用；enabled 运行时真相在插件状态持久化）。
- *  当前运行时装配走 pluginStore.load 逐插件 spawn（见 loader.mountPlugin）；此 profile 为
- *  组合层（M3 用户可改组合树）的装配权威与测试锚点，尚未接入运行时挂载路径。 */
-export const CORDIS_BUILTIN_PROFILE: Profile = {
-  name: "default",
-  plugins: CORDIS_BUILTIN_DEFS.map((d) => ({ id: d.id, order: d.order, defaultEnabled: true })),
-};
+/** 默认组合层：随应用分发的插件即默认组合的普通行（数组顺序 = 装配顺序，也是领域生命周期 flush 注册序）。
+ *  enabled 由插件状态持久化决定；用户可停用或卸载，替换关系由各插件在 apply 里声明（priority/inject）。 */
+export const DEFAULT_COMPOSITION: CompositionDefault[] = CORDIS_BUILTIN_DEFS.map((d) => ({
+  id: d.id,
+  name: d.name,
+  tagline: d.tagline,
+}));
 
-/** 内置主题插件合成清单：浅色/深色基底（空变量 = 基础方案；与 Rust builtin_manifest 同构）。 */
+/** 主题插件声明的基础条目：浅色/深色基底（空变量 = 基础方案，未覆盖变量落回内置 CSS 双 palette）。 */
 const BUILTIN_THEME_MANIFEST: Pick<PluginManifest, "themes" | "themeOptions"> = {
   themes: [
     { id: "light", name: "浅色", colorScheme: "light", variables: {} },
@@ -451,21 +439,23 @@ const BUILTIN_THEME_MANIFEST: Pick<PluginManifest, "themes" | "themeOptions"> = 
   themeOptions: { accent: true },
 };
 
-/** 内置插件合成清单（组合 UI 默认值层消费；main 为占位——实现随宿主编译）。 */
-export function builtinManifest(def: CordisBuiltinDef, version: string): PluginManifest {
-  const base: PluginManifest = {
-    id: def.id,
+/** 随应用分发插件的清单（默认组合的唯一权威，随 `plugin_list` 交给 Rust 播种并保存）。
+ *  形状 = 插件包原始清单（`package.json`：`name` = 插件 id + `atelyx` 块），与磁盘插件包同一
+ *  字段契约——宿主按此形状读写行的显示名/类型/主题声明；行对象经 `validatePluginManifest`
+ *  归一化为 `PluginManifest`。
+ *  `main` 为占位——这些插件的实现随宿主编译，入口经 id 查实现注册表，不从磁盘读。 */
+export function builtinManifest(def: CordisBuiltinDef, version: string): PluginPackageJson {
+  const atelyx: Record<string, unknown> = {
     name: def.name,
-    version: version || "0.0.0",
-    type: def.type as PluginType,
+    type: def.type,
     scope: "app",
-    main: "builtin",
     tagline: def.tagline,
     author: "Atelyx",
     license: "MIT",
   };
   if (def.id === "builtin.theme") {
-    return { ...base, themes: BUILTIN_THEME_MANIFEST.themes as ThemeDefinition[], themeOptions: BUILTIN_THEME_MANIFEST.themeOptions };
+    atelyx.themes = BUILTIN_THEME_MANIFEST.themes;
+    atelyx.themeOptions = BUILTIN_THEME_MANIFEST.themeOptions;
   }
-  return base;
+  return { name: def.id, version: version || "0.0.0", main: "builtin", atelyx };
 }

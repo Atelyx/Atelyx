@@ -1,13 +1,13 @@
 /**
  * Cordis 内核契约：类型化 ctx 服务 + typed events（Atelyx 宿主侧服务面）。
  *
- * 服务实现 = 宿主能力门面（复用桥宿主能力实现，见 kernel.ts）；本文件只定义类型契约。
- * 字符串路由（bridge.call(ns, method)）在此收敛为 ctx.<domain>.<method>() 的类型化方法；
+ * 服务实现 = 宿主侧直连 service 层与注入访问（见 kernel.ts）；本文件只定义类型契约，
+ * 插件侧一律经 ctx.<domain>.<method>() 的类型化方法触达。
  * 事件闭集（vault:switch/canvas:changed/table:changed/collab:changed/vault:changed）
  * 在此声明为 typed event map（@mode 标注分派模式）。
  *
- * note/chat/history/layout/uiState 为服务面预留（仅占位声明契约，服务侧未实现）；canvas/table 由对应
- * 第一方插件提供（停用即不可用）；其余平台服务由内核提供。
+ * 平台服务（state/app/shell/vault/dialog/clipboard/window/ai/collab）与内核领域服务
+ * （history/layout/uiState）由内核提供；canvas/table/note/chat 由对应插件提供（停用即不可用）。
  */
 import type {
   AppUiState,
@@ -23,6 +23,7 @@ import type {
   LlmMessage,
   PluginCanvasSnapshot,
   PluginTableSnapshot,
+  PluginToolOptions,
   ReadWindowResult,
   ReasoningEffort,
   RepoHistoryResult,
@@ -31,16 +32,7 @@ import type {
 import type { HistoryKind, HistoryVersion } from "@/services/history";
 import type { SlotsApi } from "./slotsApi";
 
-/** 服务流式收尾契约：流一定以 end/error 收尾（宿主 handler 未自行收尾时内核补 end）。 */
-export interface CordisStreamSink {
-  chunk(data: unknown): void;
-  end(data?: unknown): void;
-  error(message: string): void;
-  /** 是否已 end/error（已收尾后其余调用忽略）。 */
-  ended: boolean;
-}
-
-/** ai.chat 请求（与桥 ai 能力同字段；供应商未指定时跟随默认模型；signal 可中止流式）。 */
+/** ai.chat 请求（供应商未指定时跟随默认模型；signal 可中止流式）。 */
 export interface ChatRequest {
   providerId?: string;
   model?: string;
@@ -157,12 +149,14 @@ export interface WindowService {
   close(): Promise<void>;
 }
 
-/** AI 会话服务：模型/Agent 列表 + 流式对话。 */
+/** AI 会话服务：模型/Agent 列表 + 流式对话 + 插件工具贡献。 */
 export interface AiService {
   /** 流式对话；传 handlers 则经 chunk/end 推送（resolve 时流已收尾），否则返回聚合结果。 */
   chat(req: ChatRequest, handlers?: ChatStreamHandlers): Promise<ChatResult | undefined>;
   listModels(): Promise<Array<{ providerId: string; providerName: string; modelId: string; label: string }>>;
   listAgents(): Promise<Array<{ id: string; name: string }>>;
+  /** 注册模型可调用的工具（进 Agent 名册「插件」分类，用户勾选后生效）；随插件 fiber 撤销。 */
+  registerTool(opts: PluginToolOptions): () => void;
 }
 
 /** 协作在线状态服务（读 peers + 上报本端 presence）。 */
@@ -264,7 +258,7 @@ export interface UiStateService {
 }
 
 /** 声明合并：@atelyx/cordis 的 Context 挂上 Atelyx 服务面与事件表。
- *  canvas/table 由对应第一方插件提供（停用即不可用），其余平台服务由内核提供（见 kernel.ts）；
+ *  canvas/table/note/chat 由对应插件提供（停用即不可用），其余平台服务由内核提供（见 kernel.ts）；
  *  slots 为插件 UI 注册 API（由内核提供，见 slotsApi.ts）。 */
 declare module "@atelyx/cordis" {
   interface Context {

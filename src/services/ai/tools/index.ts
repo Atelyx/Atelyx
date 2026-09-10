@@ -9,6 +9,7 @@
 import type {
   LlmMessage,
   LlmToolCall,
+  PluginToolOptions,
   ToolDefinition,
   ToolExecContext,
   ToolExecResult,
@@ -31,6 +32,7 @@ import { DELETE_FILE_TOOL } from "./deleteFile";
 import { DELETE_DIR_TOOL } from "./deleteDir";
 import { TODO_WRITE_TOOL } from "./todoWrite";
 import { createToolRegistry } from "./registry";
+import { errText } from "@/types";
 import { FILE_REFERENCE_PROMPT, AGENT_TOOLS_META, type AgentToolMeta } from "@/constants/tools";
 
 /** Agent 模式全部工具（注册顺序 = 名册/浮层展示顺序，与 AGENT_TOOLS_META 一致）。各工具参数类型各异，注册为通用定义。 */
@@ -79,6 +81,30 @@ export function unregisterPluginTools(defs: ToolDefinition[]): void {
 /** 插件工具的 UI 元数据（归入「插件」分类；label = 工具名，Agent 设置页据此展示勾选）。 */
 export function pluginToolMetas(): AgentToolMeta[] {
   return pluginToolDefs.map((t) => ({ id: t.name, label: t.name, category: "plugin" }));
+}
+
+/** 工具名是否已被占用（内置或已注册的插件工具）：名字是注册表与模型名册的联结键，必须先判重。 */
+export function isToolNameTaken(name: string): boolean {
+  return agentTools.some((t) => t.name === name);
+}
+
+/** 插件工具载荷 → 自包含工具定义：schema/执行体来自插件，参数校验/摘要/失败收敛由宿主补齐。 */
+export function pluginToolDefinition(opts: PluginToolOptions): ToolDefinition {
+  return {
+    name: opts.name,
+    description: opts.description,
+    parameters: opts.parameters ?? { type: "object", properties: {} },
+    validate: (args) => (typeof args === "object" && args !== null ? (args as Record<string, unknown>) : {}),
+    summarize: () => opts.name,
+    execute: async (args, exec) => {
+      try {
+        // 中止信号透传给插件（长任务请自行响应；不响应则跑完，与内置工具的语义差由插件自负）。
+        return { ok: true, summary: await opts.run(args, { signal: exec.signal }) };
+      } catch (e) {
+        return { ok: false, summary: `插件工具失败：${errText(e)}` };
+      }
+    },
+  };
 }
 
 /** 运行前摘要（消息气泡工具块展示，容忍残缺参数）。 */

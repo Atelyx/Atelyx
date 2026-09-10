@@ -8,11 +8,11 @@
  * 分层：只经 pluginStore 触达插件能力。
  */
 import { useEffect, useMemo, useState } from "react";
-import { Download, RefreshCw } from "lucide-react";
+import { Download, RefreshCw, Star } from "lucide-react";
 import { DropdownSelect } from "@/components/common/DropdownSelect";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 import { usePluginStore } from "@/stores/pluginStore";
-import { PLUGIN_BADGE_LABELS, PLUGIN_TYPE_LABELS } from "@/constants/plugins";
+import { PLUGIN_BADGE_LABELS, PLUGIN_SOURCE_LABELS, PLUGIN_TYPE_LABELS } from "@/constants/plugins";
 import type { PluginIndexEntry, PluginScope, PluginType } from "@/types";
 
 const TYPE_FILTERS: { value: PluginType | "all"; label: string }[] = [
@@ -66,13 +66,21 @@ export function MarketplaceSection() {
     });
   }, [marketItems, query, typeFilter]);
 
-  const doInstall = async (repo: string): Promise<void> => {
+  /** 安装统一入口：同名 id 已有行时提示「实现替代」，否则提示启用入口。 */
+  const doInstall = async (entry: PluginIndexEntry): Promise<void> => {
+    const repo = entry.repo;
     if (installingRepo) return;
     setInstallingRepo(repo);
     setNotice(null);
+    const replacing = Object.values(plugins).some((p) => p.id === entry.id);
     try {
       await install(repo, scope);
-      setNotice({ kind: "ok", text: `已安装 ${repo}（默认未启用，到「已安装」tab 启用）` });
+      setNotice({
+        kind: "ok",
+        text: replacing
+          ? `已安装 ${repo}（同名行已由本包实现替代，沿用其启停状态）`
+          : `已安装 ${repo}（默认未启用，到「已安装」tab 启用）`,
+      });
     } catch (e) {
       setNotice({ kind: "error", text: `安装失败：${e instanceof Error ? e.message : String(e)}` });
     } finally {
@@ -155,8 +163,8 @@ export function MarketplaceSection() {
             const folder = p.installDir.split(/[\\/]/).pop() ?? "";
             return folder === it.repo.split("/")[1];
           });
-          // 内置插件（随 App 分发）与市场条目同 id：免重复安装——展示「已内置」并禁装。
-          const installedBuiltin = Object.values(plugins).some((p) => p.id === it.id && p.sourceKind === "builtin");
+          // 同名 id 已有行（随应用分发或已安装）：安装将以本包实现替代那一行。
+          const sameIdRow = Object.values(plugins).find((p) => p.id === it.id);
           return (
             <div
               key={it.repo}
@@ -181,17 +189,17 @@ export function MarketplaceSection() {
                       </span>
                     )}
                   </div>
-                  <div className="text-[11px] truncate" style={{ color: "var(--text-muted)" }}>
-                    {it.type ? PLUGIN_TYPE_LABELS[it.type] : "插件"} · {it.repo} · {it.id} · ⭐{it.stars}
+                  <div className="text-[11px] truncate flex items-center gap-1" style={{ color: "var(--text-muted)" }}>
+                    <span className="truncate">
+                      {it.type ? PLUGIN_TYPE_LABELS[it.type] : "插件"} · {it.repo} · {it.id}
+                    </span>
+                    <Star size={11} className="flex-shrink-0" />
+                    <span className="flex-shrink-0">{it.stars}</span>
                   </div>
                 </div>
                 {installed ? (
                   <span className="text-[11px] px-2 py-1 rounded" style={{ color: "var(--text-secondary)" }}>
                     已安装
-                  </span>
-                ) : installedBuiltin ? (
-                  <span className="text-[11px] px-2 py-1 rounded" style={{ color: "var(--text-secondary)" }}>
-                    已内置
                   </span>
                 ) : (
                   <button
@@ -201,10 +209,19 @@ export function MarketplaceSection() {
                     style={{ background: "var(--accent)", color: "var(--accent-fg)" }}
                   >
                     <Download size={13} />
-                    {installingRepo === it.repo ? "安装中…" : "安装"}
+                    {installingRepo === it.repo ? "安装中…" : sameIdRow ? "安装（替换同名）" : "安装"}
                   </button>
                 )}
               </div>
+              {sameIdRow && !installed && (
+                <div className="mt-1 text-[11px] break-words" style={{ color: "var(--text-muted)" }}>
+                  同名插件已存在（{PLUGIN_SOURCE_LABELS[sameIdRow.sourceKind]}），安装将以本包实现替代该行
+                  （沿用其启停状态）。
+                  {sameIdRow.installDir === "" && scope === "vault"
+                    ? "该行由随应用分发的实现占用：请选「本机」作用域安装。"
+                    : ""}
+                </div>
+              )}
               {it.tagline && (
                 <div className="mt-1 text-xs break-words" style={{ color: "var(--text-secondary)" }}>
                   {it.tagline}
@@ -222,9 +239,9 @@ export function MarketplaceSection() {
           confirmText="继续安装"
           danger={false}
           onConfirm={() => {
-            const repo = confirming.repo;
+            const entry = confirming;
             setConfirming(null);
-            void doInstall(repo);
+            void doInstall(entry);
           }}
           onCancel={() => setConfirming(null)}
         />

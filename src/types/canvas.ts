@@ -258,14 +258,12 @@ export interface GlobalConfig {
   recentVaults: RecentVault[];
   /** 自动检查更新（应用级）：开启后每次启动应用静默检查新版本并自动安装。缺省 = false（关闭）。 */
   autoUpdate?: boolean;
-  /** 激活的主题插件 id（global.json；旧值 light/dark/system 读时迁移为内置主题插件 + 深浅模式设置）。
-   * 缺省 = 内置主题插件。主题条目/设置项见 utils/pluginTheme 与 types/plugin.ts。 */
+  /** 激活的主题插件 id（global.json）。缺省 = 默认主题插件；
+   * 主题条目/设置项见 utils/pluginTheme 与 types/plugin.ts。 */
   theme?: string;
   /** 各主题插件的设置项值字典（键 = 插件 id；预置键 colorMode/accentColor + 插件自定义键）。
-   * 缺省 = 内置主题插件 { colorMode: "system" }。 */
+   * 缺省 = 默认主题插件 { colorMode: "system" }。 */
   themeSettings?: Record<string, Record<string, unknown>>;
-  /** 旧版应用级强调色（hex；读时迁移进 themeSettings 内置条目，迁移后不再写入）。 */
-  accentColor?: string;
   /** 应用级界面基础字号（px，覆盖 :root font-size；缺省 = 18）。 */
   fontSize?: number;
   /** 应用级界面字体（CSS font-family 值；缺省 = system-ui 默认）。 */

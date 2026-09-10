@@ -1,5 +1,6 @@
 import { DropdownSelect, type DropdownOption } from "@/components/common/DropdownSelect";
 import { SettingCard } from "@/components/settings/SettingCard";
+import { SlotListMount } from "@/components/plugins/SlotHost";
 import {
   MODEL_PAIR_SEP,
   buildModelChoices,
@@ -111,6 +112,9 @@ export function ModelServicesSettingsTab() {
           }}
         />
       </SettingCard>
+
+      {/* 插件贡献的设置区块（ctx.slots.registerUi 槽名 settings/modelServices） */}
+      <SlotListMount slot="settings/modelServices" />
     </section>
   );
 }

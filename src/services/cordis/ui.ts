@@ -1,5 +1,5 @@
 /**
- * 宿主侧 UI 贡献注册表：插件主线程平面（设置项/应用页/命令/主题设置项/通用扩展点）。
+ * 宿主侧 UI 贡献注册表：插件主线程平面（设置项/应用页/命令/主题设置项）。
  *
  * 注册经 ctx.slots 触达（slotsApi.ts，随插件 fiber 生命周期撤销）；消费者经 pluginStore 读取。
  * 本表为「键值型」主线程平面：设置 key / 应用页 id / 命令 globalId / 主题设置 key 天然唯一，
@@ -76,19 +76,10 @@ export interface ThemeSettingRegistration {
   component: ComponentType<ThemeSettingComponentProps>;
 }
 
-/** 通用扩展点注册（主线程平面）：point → 条目。 */
-export interface PluginUiContribution {
-  pluginId: string;
-  point: string;
-  id?: string;
-  payload: unknown;
-}
-
 const settings = new Map<string, PluginSettingRegistration>(); // `${pluginId}:${key}` → 注册
 const appPages = new Map<string, PluginAppPageRegistration>(); // id → 注册
 const commands = new Map<string, PluginCommandRegistration>(); // `${pluginId}:${id}` → 注册
 const themeSettings = new Map<string, ThemeSettingRegistration>(); // `${pluginId}:${key}` → 注册
-const uiContributions = new Map<string, PluginUiContribution>(); // `${point}:${pluginId}${id ? ":"+id : ""}` → 注册
 
 const listeners = new Set<() => void>();
 function notify(): void {
@@ -112,22 +103,14 @@ export function getPluginSetting(key: string): PluginSettingRegistration | undef
 export function getPluginAppPages(): PluginAppPageRegistration[] {
   return [...appPages.values()];
 }
-export function getPluginNode(type: string): PluginNodeRegistration | undefined {
-  const winner = resolveNodeSlot(type);
-  if (!winner) return undefined;
-  return { pluginId: winner.pluginId, type, component: winner.payload.component };
-}
+/** 画布节点槽胜出者（single 槽；CanvasView 合并 nodeTypes 用）。 */
 export function getPluginNodes(): PluginNodeRegistration[] {
   return nodeKinds()
     .map((type) => ({ type, winner: resolveNodeSlot(type) }))
     .filter((x): x is { type: string; winner: NonNullable<ReturnType<typeof resolveNodeSlot>> } => !!x.winner)
     .map(({ type, winner }) => ({ pluginId: winner.pluginId, type, component: winner.payload.component }));
 }
-export function getPluginEdge(type: string): PluginEdgeRegistration | undefined {
-  const winner = resolveEdgeSlot(type);
-  if (!winner) return undefined;
-  return { pluginId: winner.pluginId, type, component: winner.payload.component };
-}
+/** 画布边槽胜出者（single 槽；CanvasView 合并 edgeTypes 用）。 */
 export function getPluginEdges(): PluginEdgeRegistration[] {
   return edgeKinds()
     .map((type) => ({ type, winner: resolveEdgeSlot(type) }))
@@ -151,11 +134,6 @@ export function getPluginTableViews(): PluginTableViewRegistration[] {
 /** 某主题插件的设置项注册（主题页设置区渲染用；空 = 该插件无自定义设置项）。 */
 export function getPluginThemeSettings(pluginId: string): ThemeSettingRegistration[] {
   return [...themeSettings.values()].filter((s) => s.pluginId === pluginId);
-}
-
-/** 某扩展点的全部主线程注册条目（宿主/其他插件消费自定义扩展点用）。 */
-export function listUiContributions(point: string): PluginUiContribution[] {
-  return [...uiContributions.values()].filter((c) => c.point === point);
 }
 
 // ===== 注册（经 ctx.slots 调用，pluginId 由调用方上下文解析） =====
@@ -220,7 +198,7 @@ export function registerPluginThemeSetting(
   };
 }
 
-/** 撤销某插件在主线程平面的全部键值贡献（停用/卸载/重载时调用；按 pluginId 溯源）。
+/** 撤销某插件在主线程平面的全部键值贡献（测试用；正常卸载走各注册的 ctx.effect 撤销）。
  *  视图/节点/边/表格视图槽贡献不在此表（走 slots 注册表，见 disposePluginSlots）。 */
 export function unregisterPluginUi(pluginId: string): void {
   let changed = false;
@@ -228,6 +206,5 @@ export function unregisterPluginUi(pluginId: string): void {
   for (const [k, v] of appPages) if (v.pluginId === pluginId) changed = appPages.delete(k) || changed;
   for (const [k, v] of commands) if (v.pluginId === pluginId) changed = commands.delete(k) || changed;
   for (const [k, v] of themeSettings) if (v.pluginId === pluginId) changed = themeSettings.delete(k) || changed;
-  for (const [k, v] of uiContributions) if (v.pluginId === pluginId) changed = uiContributions.delete(k) || changed;
   if (changed) notify();
 }

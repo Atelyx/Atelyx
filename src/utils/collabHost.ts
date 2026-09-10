@@ -3,7 +3,7 @@
  * 画布/笔记/表格域在此注册消息通道 handler、重连/拆卸钩子与 presence 合并 provider，
  * 宿主（collabStore）只查表分发与合并。纯数据容器 + 纯函数，无 store/service 依赖，可直测。
  *
- * 注册/撤销随内置插件启停（cordis/builtins 的 collabWiring）：register* 返回撤销函数。
+ * 注册/撤销随插件启停（cordis/builtins 的 collabWiring）：register* 返回撤销函数。
  * 重连/拆卸/presence 运行序 = priority 升序（同 priority 按注册序）——域间「谁覆盖谁」显式声明，
  * 不依赖注册序（随插件启停后注册序 = 插件 spawn 序，不再是可靠顺序来源）。
  */

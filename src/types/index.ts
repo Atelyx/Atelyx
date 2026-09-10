@@ -140,6 +140,7 @@ export {
   type ToolExecContext,
   type ToolDefinition,
   type ToolExecResult,
+  type PluginToolOptions,
   type ReadWindowLine,
   type ReadWindowResult,
   type GlobVaultResult,
@@ -162,6 +163,7 @@ export type {
 export {
   type PluginType,
   type PluginScope,
+  type PluginPackageJson,
   type PluginManifest,
   type PluginThemeOptions,
   type ThemeDefinition,

@@ -27,7 +27,7 @@ export interface RegisterViewOptions {
   component?: ComponentType;
   /** 按宿主面板/撕裂窗口 id 渲染（重型视图用）。 */
   render?: (hostId: string) => ReactNode;
-  /** 槽优先级（higher wins；缺省 0。替换内置视图/节点/边时设高值）。 */
+  /** 槽优先级（higher wins；缺省 0。替换同 kind 的默认实现时设高值）。 */
   priority?: number;
 }
 
@@ -41,7 +41,7 @@ export interface RegisterTableViewOptions {
 }
 
 /** 画布节点注册载荷（CanvasView nodeTypes 合并；single 胜出。同 type 注册即覆盖内置基座，
- *  多个第三方同 type 时高 priority 胜出）。 */
+ *  多个插件同 type 时高 priority 胜出）。 */
 export interface RegisterNodeOptions {
   type: string;
   component: ComponentType;

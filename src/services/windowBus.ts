@@ -12,14 +12,6 @@
 import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { DropZone, ViewKind } from "@/types";
 
-/** 窗口位置尺寸（logical px）。 */
-export interface WindowRect {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
-
 /** 一次命中的 drop 目标（本窗口本地计算；指示器渲染用——落点解析在 Rust）。 */
 export interface DropTargetInfo {
   /** 目标窗口 label（"main" 或 panel label）。 */

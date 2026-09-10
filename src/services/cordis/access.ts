@@ -1,7 +1,7 @@
 /**
  * 内核访问注入：插件面服务的 store/service 数据源（单例注入点）。
  *
- * 内核服务（kernel/canvas/table）不 import store——pluginStore 与领域 store 经本模块把
+ * 内核服务（kernel/canvas/table/note/chat/history/layout/uiState）不 import store——pluginStore 与领域 store 经本模块把
  * 当前仓库/画布/表格/协作/ai 配置等运行时数据注入插件面服务；未接线（未进仓/未打开）时
  * getter 返回 null，服务侧据此抛「能力未就绪」。
  */
@@ -158,11 +158,6 @@ let vaultWriteAccess: PluginVaultWriteAccess | null = null;
 /** 注入/复位 vault 写能力访问（pluginStore.load 时接线；null 复位供测试）。 */
 export function setPluginVaultWriteAccess(access: PluginVaultWriteAccess | null): void {
   vaultWriteAccess = access;
-}
-
-/** 读取 vault 写能力访问（ctx.vault 服务消费；未接线 = null）。 */
-export function getPluginVaultWriteAccess(): PluginVaultWriteAccess | null {
-  return vaultWriteAccess;
 }
 
 /** 写方法守卫：未接线（未打开仓库）时报错，插件侧可据此降级。 */

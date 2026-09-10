@@ -1,7 +1,7 @@
 /**
  * 系统 shell service：在文件管理器中打开路径 / 默认程序打开 URL / 执行外部进程（流式）。
  * 进程执行经 tauri-plugin-shell 的 Command API（权限 shell:default 含 allow-execute），
- * 供插件桥的 `shell` 能力与未来第一方工具使用。
+ * 供插件 `ctx.shell` 能力与宿主工具使用。
  */
 import { open as shellOpen, Command } from "@tauri-apps/plugin-shell";
 

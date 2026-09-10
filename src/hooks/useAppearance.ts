@@ -29,7 +29,7 @@ export function useAppearance(): void {
   const fontSize = useSettingsStore((s) => s.fontSize);
   const fontFamily = useSettingsStore((s) => s.fontFamily);
 
-  // 跟随系统：监听 prefers-color-scheme 变化（内置主题插件深浅模式 = 跟随系统时实时生效）
+  // 跟随系统：监听 prefers-color-scheme 变化（默认主题插件深浅模式 = 跟随系统时实时生效）
   const [systemDark, setSystemDark] = useState(() =>
     window.matchMedia("(prefers-color-scheme: dark)").matches,
   );
@@ -40,7 +40,7 @@ export function useAppearance(): void {
     return () => mq.removeEventListener("change", onChange);
   }, []);
 
-  // 解析激活主题：已启用主题插件（含内置条目，经合成清单同路径）→ 激活插件 → 激活条目
+  // 解析激活主题：已启用主题插件（含默认主题插件，同一清单路径）→ 激活插件 → 激活条目
   const plugins = usePluginStore((s) => s.plugins);
   const providers = useMemo(
     () => deriveThemeProviders(Object.values(plugins)).providers,

@@ -731,7 +731,7 @@ export const usePanelStore = create<PanelStore>((set, get) => {
       if (!mirror) return;
       // 协作宿主 = 本窗口渲染了协作相关视图才连接（每个窗口独立持有连接）：
       // 画布/笔记/表格显示远端 presence，协作房间面板本身也需要在线成员列表。
-      // 只统计「视图贡献存在」的相关视图（内置领域插件停用/卸载后其视图为降级占位，不算协作相关）
+      // 只统计「视图贡献存在」的相关视图（领域插件停用/卸载后其视图为降级占位，不算协作相关）
       const candidates: ViewKind[] = ["canvas", "table", "note", "collabroom"];
       const relevant = candidates.filter(
         (v) => usePluginStore.getState().viewContribution(v) !== undefined,
@@ -740,7 +740,7 @@ export const usePanelStore = create<PanelStore>((set, get) => {
         (v) => findViewHost(mirror.activeTree, mirror.detachedWindows, v) === get().windowId,
       );
       if (isHost && !collab.connected) {
-        // 域协作接线随内置插件启停注册（cordis/builtins 的 collabWiring，pluginStore.spawn 时注册），
+        // 域协作接线随插件启停注册（cordis/builtins 的 collabWiring，pluginStore.spawn 时注册），
         // 此处只需按当前布局是否承载协作视图连接宿主
         collab.init({
           enabled: true,

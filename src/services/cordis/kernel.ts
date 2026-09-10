@@ -3,15 +3,14 @@
  *
  * 服务实现 = 宿主侧直连：平台服务（state/app/shell/vault/dialog/clipboard/window/ai/collab）
  * 直接调用 service 层与注入访问（access.ts，store 数据经 pluginStore 接线）——类型化方法面，
- * 无字符串路由中转；canvas/table 由对应第一方插件提供（见 canvas.ts/table.ts）。
+ * 无字符串路由中转；canvas/table/note/chat 由对应插件提供（见 canvas.ts/table.ts/note.ts/chat.ts）。
  *
  * 每窗口一个内核（懒单例，pluginStore.load 首行取用）；撕裂窗口 bootstrap 时各自创建。
  * 事件发射经 events.ts（ctx.emit 直发）；审计由 audit.ts 单独安装。
- * 第三方插件 ESM 求值需 React 全局（JSX 经 esbuild 转出 React.createElement 引用）。
+ * 用户插件的 ESM 求值需 React 全局（JSX 经 esbuild 转出 React.createElement 引用）。
  */
-import { invoke } from "@tauri-apps/api/core";
 import React from "react";
-import { Context } from "@atelyx/cordis";
+import { Context, symbols } from "@atelyx/cordis";
 import { getAppVersion } from "@/services/app";
 import { detectPlatform } from "@/utils/pluginHost";
 import { runProcess } from "@/services/shell";
@@ -19,6 +18,8 @@ import { pickDirectory, pickFile, saveFile } from "@/services/dialog";
 import { copyImageToClipboard, readClipboardText, writeClipboardText } from "@/services/clipboard";
 import { closeWindow, minimizeWindow, toggleMaximizeWindow } from "@/services/window";
 import { listVaultTree } from "@/services/vault";
+import { pluginReadState, pluginWriteState } from "@/services/plugins";
+import { registerPluginTools, unregisterPluginTools } from "@/services/ai/tools";
 import {
   globVault,
   grepVault,
@@ -27,6 +28,8 @@ import {
   readVaultFileWindow,
 } from "@/services/vault/aiFiles";
 import { streamChat } from "@/services/ai/client";
+import { isToolNameTaken, pluginToolDefinition } from "@/services/ai/tools";
+import type { PluginToolOptions } from "@/types";
 import {
   getAppPageOpener,
   getPluginCollabAccess,
@@ -56,9 +59,14 @@ import "./types";
 
 declare global {
   interface Window {
-    /** 第三方插件 ESM 求值运行时：JSX 转出 React.createElement 引用的全局。 */
+    /** 插件 ESM 求值运行时：JSX 转出 React.createElement 引用的全局。 */
     React?: typeof React;
   }
+}
+
+/** ai 服务实例（tracker 注入调用方插件上下文：registerTool 随其 fiber 撤销）。 */
+interface AiServiceInstance extends AiService {
+  ctx: Context;
 }
 
 /** 流句柄（shell/ai 流式：chunk/end/error 帧；已收尾后忽略后续调用）。 */
@@ -141,10 +149,8 @@ export function createKernel(): Kernel {
   }
 
   const state: StateService = {
-    read: (pluginId) =>
-      invoke<unknown>("plugin_read_state", { id: pluginId }),
-    write: (pluginId, data) =>
-      invoke<void>("plugin_write_state", { id: pluginId, data }),
+    read: (pluginId) => pluginReadState(pluginId),
+    write: (pluginId, data) => pluginWriteState(pluginId, data),
   };
   provide("state", state);
 
@@ -341,7 +347,24 @@ export function createKernel(): Kernel {
       if (!access) throw new Error("AI 配置未就绪（未打开仓库）");
       return Promise.resolve(access.agents.map((a) => ({ id: a.id, name: a.name })));
     },
+    registerTool(this: AiServiceInstance, opts: PluginToolOptions): () => void {
+      if (typeof opts.name !== "string" || !/^[a-z0-9_]+$/.test(opts.name)) {
+        throw new Error("工具名须为非空标识（小写字母/数字/下划线）");
+      }
+      // 名字是注册表与模型名册的联结键：重名会同时污染名册与分发（后者静默覆盖宿主工具），直接拒绝。
+      if (isToolNameTaken(opts.name)) {
+        throw new Error(`工具名已被占用：${opts.name}（请换名）`);
+      }
+      const ctx = this.ctx;
+      const def = pluginToolDefinition(opts);
+      return ctx.effect(() => {
+        registerPluginTools([def]);
+        return () => unregisterPluginTools([def]);
+      });
+    },
   };
+  // tracker：插件经 ctx.ai 读取时 `this.ctx` 解析为调用方上下文（工具注册随其 fiber 撤销）。
+  Object.defineProperty(ai, symbols.tracker, { value: { property: "ctx" } });
   provide("ai", ai);
 
   const collab: CollabService = {
@@ -379,7 +402,7 @@ let kernel: Kernel | null = null;
 let auditDispose: (() => void) | null = null;
 let reactGlobalSet = false;
 
-/** 第三方插件 ESM 求值运行时：JSX 经 esbuild 转出 React.createElement 引用（window.React 全局）。
+/** 插件 ESM 求值运行时：JSX 经 esbuild 转出 React.createElement 引用（window.React 全局）。
  *  幂等一次；node（测试）无 window 跳过。 */
 function ensurePluginRuntimeGlobals(): void {
   if (reactGlobalSet || typeof window === "undefined") return;

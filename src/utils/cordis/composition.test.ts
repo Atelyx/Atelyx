@@ -1,39 +1,62 @@
 /**
- * 组合 profile 纯函数测试（utils/cordis/composition）。
+ * 组合层纯函数测试（utils/cordis/composition）。
+ *
+ * 覆盖：列表行推导（默认组合层在前、已装插件追加在后、已卸载默认成员成灰行）、装配顺序过滤。
  */
 import { describe, expect, it } from "vitest";
-import { resolveProfileMounts, type Profile } from "./composition";
+import {
+  composePlugins,
+  mountOrder,
+  type CompositionDefault,
+  type CompositionPackage,
+} from "./composition";
 
-const profile: Profile = {
-  name: "default",
-  plugins: [
-    { id: "builtin.search", order: 1, defaultEnabled: true },
-    { id: "builtin.recent", order: 2, defaultEnabled: true },
-    { id: "builtin.calendar", order: 3, defaultEnabled: true },
-    { id: "builtin.canvas", order: 5, defaultEnabled: true },
-    { id: "builtin.table", order: 7, defaultEnabled: true },
-    { id: "builtin.theme", order: 12, defaultEnabled: true, defaultConfig: { accent: true } },
-  ],
-};
+const DEFAULTS: CompositionDefault[] = [
+  { id: "builtin.search", name: "搜索" },
+  { id: "builtin.canvas", name: "画布" },
+  { id: "builtin.note", name: "笔记" },
+];
 
-describe("组合 profile", () => {
-  it("按启用集合过滤 + profile 顺序返回挂载行", () => {
-    const mounts = resolveProfileMounts(profile, new Set(["builtin.canvas", "builtin.search"]));
-    expect(mounts.map((m) => m.id)).toEqual(["builtin.search", "builtin.canvas"]);
+function pkg(id: string, enabled = true): CompositionPackage {
+  return { id, name: id, version: "1.0.0", sourceKind: "market", enabled };
+}
+
+describe("composePlugins", () => {
+  it("默认组合层在前（定义顺序），已装插件按 id 追加在后", () => {
+    const rows = composePlugins(DEFAULTS, [pkg("com.b.tool"), pkg("com.a.tool"), pkg("builtin.canvas")]);
+    expect(rows.map((r) => r.id)).toEqual([
+      "builtin.search",
+      "builtin.canvas",
+      "builtin.note",
+      "com.a.tool",
+      "com.b.tool",
+    ]);
   });
 
-  it("启用集合为空 → 无挂载行", () => {
-    expect(resolveProfileMounts(profile, new Set())).toEqual([]);
+  it("已卸载的默认成员成灰行（installed=false，展示字段取默认组合层定义）", () => {
+    const rows = composePlugins(DEFAULTS, [pkg("builtin.search")]);
+    const note = rows.find((r) => r.id === "builtin.note");
+    expect(note).toMatchObject({ installed: false, enabled: false, name: "笔记", version: "" });
   });
 
-  it("附带默认 config（缺省 undefined）", () => {
-    const mounts = resolveProfileMounts(profile, new Set(["builtin.canvas", "builtin.theme"]));
-    expect(mounts.find((m) => m.id === "builtin.theme")?.config).toEqual({ accent: true });
-    expect(mounts.find((m) => m.id === "builtin.canvas")?.config).toBeUndefined();
+  it("已装行取插件列表的展示字段（含停用状态）", () => {
+    const rows = composePlugins(DEFAULTS, [{ ...pkg("builtin.canvas", false), name: "画布插件", version: "2.0.0" }]);
+    expect(rows.find((r) => r.id === "builtin.canvas")).toMatchObject({
+      installed: true,
+      enabled: false,
+      name: "画布插件",
+      version: "2.0.0",
+    });
+  });
+});
+
+describe("mountOrder", () => {
+  it("只取已安装且启用的行，保持列表顺序", () => {
+    const rows = composePlugins(DEFAULTS, [pkg("builtin.search"), pkg("builtin.canvas", false), pkg("com.a.tool")]);
+    expect(mountOrder(rows)).toEqual(["builtin.search", "com.a.tool"]);
   });
 
-  it("未在 profile 中的 id 不产生挂载行", () => {
-    const mounts = resolveProfileMounts(profile, new Set(["com.third.party"]));
-    expect(mounts).toEqual([]);
+  it("未安装的默认成员不参与装配", () => {
+    expect(mountOrder(composePlugins(DEFAULTS, []))).toEqual([]);
   });
 });

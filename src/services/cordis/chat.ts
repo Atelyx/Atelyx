@@ -1,5 +1,5 @@
 /**
- * AI 会话服务提供器（ctx.chat）：由第一方 builtin.aichat 插件挂载时经 ctx.provide 提供。
+ * AI 会话服务提供器（ctx.chat）：由 builtin.aichat 行挂载时经 ctx.provide 提供。
  *
  * 实现 = 注入的 AI 会话访问对象（pluginStore 接线填充，见 stores/pluginStore ensureChatAccess）——
  * 停用/卸载 builtin.aichat 时服务随之消失（ctx.effect 撤销）。

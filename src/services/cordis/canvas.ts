@@ -1,5 +1,5 @@
 /**
- * 画布服务提供器（ctx.canvas）：由第一方 builtin.canvas 插件挂载时经 ctx.provide 提供。
+ * 画布服务提供器（ctx.canvas）：由 builtin.canvas 行挂载时经 ctx.provide 提供。
  *
  * 实现 = 注入的画布访问对象（registerCanvasPluginWiring 填充，见 stores/canvasStore）——
  * 停用/卸载 builtin.canvas 时 access 撤销、服务随之消失。

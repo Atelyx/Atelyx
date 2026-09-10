@@ -1,6 +1,7 @@
 import { ToggleSwitch } from "@/components/common/ToggleSwitch";
 import { DropdownSelect } from "@/components/common/DropdownSelect";
 import { SettingCard } from "@/components/settings/SettingCard";
+import { SlotListMount } from "@/components/plugins/SlotHost";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useAppStore } from "@/stores/appStore";
 import { useDraftSync } from "@/hooks/useDraftSync";
@@ -142,6 +143,9 @@ export function GeneralSettingsTab() {
           title="API key 随仓库保存"
         />
       </SettingCard>
+
+      {/* 插件贡献的设置区块（ctx.slots.registerUi 槽名 settings/general） */}
+      <SlotListMount slot="settings/general" />
     </section>
   );
 }

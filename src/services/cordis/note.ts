@@ -1,5 +1,5 @@
 /**
- * 笔记服务提供器（ctx.note）：由第一方 builtin.note 插件挂载时经 ctx.provide 提供。
+ * 笔记服务提供器（ctx.note）：由 builtin.note 行挂载时经 ctx.provide 提供。
  *
  * 实现 = 注入的笔记访问对象（pluginStore 接线填充，见 stores/pluginStore ensureNoteAccess）——
  * 停用/卸载 builtin.note 时服务随之消失（ctx.effect 撤销）。

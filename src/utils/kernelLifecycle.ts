@@ -3,11 +3,10 @@
  *
  * 内核启动路径（appStore/panelStore/App boot/页面）不直接调用领域 store：领域生命周期钩子
  * （flush / 切仓库清态与进仓加载 / 回启动页清理 / 释放视图 / 视图进出窗口）经此注册表注册，
- * 内核只做分发。注册/撤销随内置插件启停驱动（pluginStore.spawn/unload → cordis/builtins 的 lifecycle）。
+ * 内核只做分发。注册/撤销随插件启停驱动（pluginStore.spawn/unload → cordis/builtins 的 lifecycle）。
  *
- * 错误语义 = 失败快速传播（fail-fast）：分发按注册序执行，任一钩子抛错即向外传播——
- * 与重构前「内核直接调用领域 store 方法、由调用方 try/catch」的语义逐位一致（如 selectVault
- * 中 flush 失败即中止切换，防跨仓库数据污染）。调用方按重构前对直接调用的处置方式包 try/catch。
+ * 错误语义 = 失败快速传播（fail-fast）：分发按注册序执行，任一钩子抛错即向外传播——调用方
+ * 自行 try/catch（如 selectVault 中 flush 失败即中止切换，防跨仓库数据污染）。
  *
  * 纯数据容器 + 纯函数，无 store/service 依赖，可直测（模式同 utils/collabHost.ts）。
  */
@@ -20,7 +19,7 @@ export interface VaultLifecycleContext {
 
 /** 单领域生命周期钩子（按领域插件 id 注册；无对应能力时字段省略）。 */
 export interface DomainLifecycleHooks {
-  /** 域标识（内置插件 id，如 `builtin.canvas`；注册表键，撤销按此匹配）。 */
+  /** 域标识（插件 id，如 `builtin.canvas`；注册表键，撤销按此匹配）。 */
   id: string;
   /** 关窗前/切仓库前落盘全部 pending 改动（按注册序 await）。 */
   flush?: (ctx: VaultLifecycleContext) => Promise<void>;
@@ -48,12 +47,12 @@ export function registerDomainLifecycle(h: DomainLifecycleHooks): () => void {
   };
 }
 
-/** 按 id 撤销领域生命周期钩子（幂等；pluginStore 卸载/停用内置插件时调用）。 */
+/** 按 id 撤销领域生命周期钩子（幂等；测试用——插件侧撤销由 ctx.effect 承担）。 */
 export function unregisterDomainLifecycle(id: string): void {
   hooks.delete(id);
 }
 
-/** 是否已注册（pluginStore 撤钩前 flush 判定用）。 */
+/** 是否已注册（测试用）。 */
 export function hasDomainLifecycle(id: string): boolean {
   return hooks.has(id);
 }
