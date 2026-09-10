@@ -383,14 +383,14 @@ export const useAppStore = create<AppState>((set, get) => ({
         currentTableFile: null,
         currentTableTitle: "",
       });
-      // 立即清空旧仓库文件树 + 笔记内容缓存/挂起输入 + 撤销栈（**必须在任何 await 之前**）：
+      // 立即清空旧仓库文件树 + 撤销栈/笔记运行时态（**必须在任何 await 之前**）：
       // NoteEditor 随 currentNoteFile 置空而卸载，其 cleanup 按「noteList 是否仍含该文件」决定是否
       // flush——若此处落后于下一个 await（React 提交卸载），noteList 还是旧仓库列表，cleanup 会把
-      // 旧仓库内容经已切换的 root 写进新仓库同路径文件（跨仓库污染）。挂起输入已在 openVault 前
-      // flush 落盘旧仓库，此处清残留（含 flush 后、切仓库前新输入），不丢数据。
-      useVaultStore.setState({ tree: [], noteList: [], tableList: [], noteContents: {}, pendingNoteContent: {} });
-      // 切仓库同步清态（笔记撤销栈/画布运行时，经注册表分发）——同步执行，保住防跨仓库写入守卫：
-      // 清空须在下一个 await 之前完成（与上方 set 同批，React 提交卸载前 noteList 已清空）
+      // 旧仓库内容经已切换的 root 写进新仓库同路径文件（跨仓库污染）。笔记挂起输入已在 openVault 前
+      // flush 落盘旧仓库，残留（含 flush 后、切仓库前新输入）由下方 notifyVaultLeaving 同步清掉，不丢数据。
+      useVaultStore.setState({ tree: [], noteList: [], tableList: [] });
+      // 切仓库同步清态（笔记运行时态/撤销栈/画布运行时，经领域生命周期注册表分发）——同步执行，
+      // 保住防跨仓库写入守卫：清空须在下一个 await 之前完成（与上方 set 同批，React 提交卸载前 noteList 已清空）
       notifyVaultLeaving();
       // 登记最近仓库失败不阻塞切换：global.json 写入异常（权限/磁盘）只影响最近列表，
       // 若放行抛错会被下方 catch 吞掉，导致后续重载（配置/画布列表/文件树/AI 会话）全部跳过

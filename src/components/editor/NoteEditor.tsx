@@ -5,13 +5,14 @@
  * （默认只读实时视图，双击/铅笔进入实时预览编辑；「···」菜单切源码模式 textarea）。
  * - 加载：进入时读笔记正文（切换笔记重读）；加载完成前用户已输入则保留输入（不覆盖正在打的字）。
  * - 保存：输入 debounce 500ms 自动写回 `.md`；卸载/切走时 flush 未落盘输入（不静默丢弃）；
- *   写入完成时若已有更新输入则保持「保存中…」，避免误报「已自动保存」；状态写 vaultStore 由面板 header 展示。
- * - 分层：走 vaultStore（readNoteContent / saveNoteContent），不直调 service。
+ *   写入完成时若已有更新输入则保持「保存中…」，避免误报「已自动保存」；状态写 noteStore 由面板 header 展示。
+ * - 分层：走 noteStore（readNoteContent / saveNoteContent），不直调 service。
  */
 import { Check, ClipboardPaste, Copy, MoreHorizontal, Pencil, Scissors, Wand2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { EditorView } from "@codemirror/view";
-import { useVaultStore, lastFolderRenameTarget, lastNoteRenameTarget, isKnownNoteDiskContent, type NoteSaveStatus } from "@/stores/vaultStore";
+import { isKnownNoteDiskContent, useNoteStore, type NoteSaveStatus } from "@/stores/noteStore";
+import { useVaultStore, lastFolderRenameTarget, lastNoteRenameTarget } from "@/stores/vaultStore";
 import { useNoteUndoStore } from "@/stores/noteUndoStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useAppStore } from "@/stores/appStore";
@@ -62,13 +63,13 @@ function locateSelectionInDoc(
 }
 
 export function NoteEditor({ file }: { file: string }) {
-  const readNoteContent = useVaultStore((s) => s.readNoteContent);
-  const readNoteFresh = useVaultStore((s) => s.readNoteFresh);
-  const saveNoteContent = useVaultStore((s) => s.saveNoteContent);
-  // 外部修改感知：watcher note 事件 bump 序号（vaultStore.markNoteExternallyEdited），据此重读磁盘
-  const externalEditSeq = useVaultStore((s) => s.externalNoteEdits[file] ?? 0);
-  // 保存状态存 vaultStore（面板 header 展示；本组件只写不持）
-  const noteSaveStatus = useVaultStore((s) => s.noteSaveStates[file]);
+  const readNoteContent = useNoteStore((s) => s.readNoteContent);
+  const readNoteFresh = useNoteStore((s) => s.readNoteFresh);
+  const saveNoteContent = useNoteStore((s) => s.saveNoteContent);
+  // 外部修改感知：watcher note 事件 bump 序号（noteStore.markNoteExternallyEdited），据此重读磁盘
+  const externalEditSeq = useNoteStore((s) => s.externalNoteEdits[file] ?? 0);
+  // 保存状态存 noteStore（面板 header 展示；本组件只写不持）
+  const noteSaveStatus = useNoteStore((s) => s.noteSaveStates[file]);
   const loadError = noteSaveStatus?.loadError ?? false;
   /** 协作态判定与应用身份：中转开关已开且已连接时，当前笔记进入 Yjs 协同编辑。 */
   const collabEnabled = useSettingsStore((s) => s.collabEnabled);
@@ -169,12 +170,12 @@ export function NoteEditor({ file }: { file: string }) {
   };
   /** 非用户编辑的 content 更新序号（加载完成/外部刷新/冲突重载时递增），MarkdownEditor 据此同步正文。 */
   const [editorSyncSeq, setEditorSyncSeq] = useState(0);
-  /** 外部修改冲突：本地有未保存改动 + 磁盘已被外部改过。状态存 vaultStore 由面板 header 展示，期间暂停自动保存防覆盖。 */
+  /** 外部修改冲突：本地有未保存改动 + 磁盘已被外部改过。状态存 noteStore 由面板 header 展示，期间暂停自动保存防覆盖。 */
   const conflictRef = useRef(false);
   const setConflictState = useCallback(
     (v: boolean) => {
       conflictRef.current = v;
-      useVaultStore.getState().setNoteConflict(file, v);
+      useNoteStore.getState().setNoteConflict(file, v);
     },
     [file],
   );
@@ -182,7 +183,7 @@ export function NoteEditor({ file }: { file: string }) {
   /** 保存状态写 store（面板 header 展示；组件不持 state）。 */
   const setSaveStatus = useCallback(
     (state: SaveState, isLoadError = false) =>
-      useVaultStore.getState().setNoteSaveState(file, { state, loadError: isLoadError }),
+      useNoteStore.getState().setNoteSaveState(file, { state, loadError: isLoadError }),
     [file],
   );
   /** 最新输入（卸载时 flush 用，避免闭包拿到过期内容）。 */
@@ -287,7 +288,7 @@ export function NoteEditor({ file }: { file: string }) {
   useEffect(() => {
     let cancelled = false;
     // 加载起始的序号快照：加载期间外部修改（序号移动）则丢弃本次结果，避免旧内容覆盖新磁盘
-    const seqAtLoad = useVaultStore.getState().externalNoteEdits[file] ?? 0;
+    const seqAtLoad = useNoteStore.getState().externalNoteEdits[file] ?? 0;
     setContent("");
     // 镜像清空 contentRef：与 content 恒同步（撤销栈以 contentRef 记「输入前全文」，切笔记不残留
     // 上一笔记内容被误记为 before；加载完成后再同步为真实内容，见下方 !dirty 分支）
@@ -302,7 +303,7 @@ export function NoteEditor({ file }: { file: string }) {
       .then((c) => {
         if (cancelled) return;
         // 加载期间外部已修改（序号移动）：放弃本次加载结果，外部感知 useEffect 会刷新（防旧内容覆盖新磁盘）
-        if ((useVaultStore.getState().externalNoteEdits[file] ?? 0) !== seqAtLoad) return;
+        if ((useNoteStore.getState().externalNoteEdits[file] ?? 0) !== seqAtLoad) return;
         // 基准 = 磁盘最新（即使输入优先不覆盖内容，后续自写回放/外部修改感知也以它为参照）
         lastSavedRef.current = c;
         if (!dirtyRef.current) {
@@ -323,9 +324,9 @@ export function NoteEditor({ file }: { file: string }) {
       // 卸载/切走：清除保存/冲突状态（面板 header 随视图不显示），再 flush 未落盘的输入（debounce 窗口内不静默丢弃）。
       // 组件已卸载不能再 setState，fire-and-forget 写盘即可。
       // 冲突未决时跳过：外部已修改且未明确选择，不覆盖外部修改（提示条已告知）
-      useVaultStore.getState().setNoteSaveState(file, null);
-      useVaultStore.getState().setNoteConflict(file, false);
-      useVaultStore.getState().clearNoteConflictResolveReq(file);
+      useNoteStore.getState().setNoteSaveState(file, null);
+      useNoteStore.getState().setNoteConflict(file, false);
+      useNoteStore.getState().clearNoteConflictResolveReq(file);
       if (conflictRef.current) return;
       if (timerRef.current) {
         clearTimeout(timerRef.current);
@@ -340,9 +341,9 @@ export function NoteEditor({ file }: { file: string }) {
           void saveNoteContent(target, pendingContent)
             .then(() => {
               // 清除挂起登记前比对内容：flush 在途期间若有新编辑重新登记（多面板/快速切回），
-              // 不误清新值（与 vaultStore.flushPendingNotes「只清未被替换条目」同语义）
-              if (useVaultStore.getState().pendingNoteContent[file] === pendingContent) {
-                useVaultStore.getState().setPendingNoteContent(file, null);
+              // 不误清新值（与 noteStore.flushPendingNotes「只清未被替换条目」同语义）
+              if (useNoteStore.getState().pendingNoteContent[file] === pendingContent) {
+                useNoteStore.getState().setPendingNoteContent(file, null);
               }
             })
             .catch((e) => console.error("笔记保存失败", e));
@@ -476,9 +477,9 @@ export function NoteEditor({ file }: { file: string }) {
       });
   }, [file, saveNoteContent, setConflictState, setSaveStatus]);
 
-  /** 面板 header 冲突条按钮 → vaultStore 序号请求 → 本组件订阅执行（与 externalNoteEdits 同构）。
+  /** 面板 header 冲突条按钮 → noteStore 序号请求 → 本组件订阅执行（与 externalNoteEdits 同构）。
    * 首帧以当前序号为基线：只响应本实例挂载后发出的请求（防处理卸载前残留请求）。 */
-  const resolveReq = useVaultStore((s) => s.noteConflictResolveReq[file]);
+  const resolveReq = useNoteStore((s) => s.noteConflictResolveReq[file]);
   const processedResolveSeqRef = useRef<number | undefined>(undefined);
   useEffect(() => {
     if (processedResolveSeqRef.current === undefined) {
@@ -514,7 +515,7 @@ export function NoteEditor({ file }: { file: string }) {
     // pendingNoteContent 供 flushAllPending/切仓库前把未落盘输入统一落盘 + 补历史
     if (!applyingUndoRef.current) {
       useNoteUndoStore.getState().recordEdit(file, contentRef.current);
-      useVaultStore.getState().setPendingNoteContent(file, v);
+      useNoteStore.getState().setPendingNoteContent(file, v);
     }
     dirtyRef.current = true;
     contentRef.current = v;
@@ -543,7 +544,7 @@ export function NoteEditor({ file }: { file: string }) {
         (a) => a.id !== (mainAuthor?.id ?? localAuthor.id),
       );
       const commitHistory = () =>
-        useVaultStore.getState().noteHistoryRecord(file, v, "edit", {
+        useNoteStore.getState().noteHistoryRecord(file, v, "edit", {
           ...(mainAuthor ? { authorOverride: mainAuthor } : {}),
           ...(coAuthors.length ? { coAuthors } : {}),
         });
@@ -565,7 +566,7 @@ export function NoteEditor({ file }: { file: string }) {
             if (seq === saveSeqRef.current) dirtyRef.current = false;
             if (mountedRef.current && seq === saveSeqRef.current) setSaveStatus("saved");
             // 保存完成且无新输入：清除挂起登记（期间又有新输入则保留，由下一轮保存接管）
-            if (seq === saveSeqRef.current) useVaultStore.getState().setPendingNoteContent(file, null);
+            if (seq === saveSeqRef.current) useNoteStore.getState().setPendingNoteContent(file, null);
             if (seq === saveSeqRef.current) changeAuthorSetRef.current.clear();
             commitHistory();
           })
@@ -600,7 +601,7 @@ export function NoteEditor({ file }: { file: string }) {
               // 期间又有新输入（新定时器已接管）→ 不显示「已自动保存」；组件已卸载不再写状态
               if (mountedRef.current && seq === saveSeqRef.current) setSaveStatus("saved");
               // 保存完成且无新输入：清除挂起登记
-              if (seq === saveSeqRef.current) useVaultStore.getState().setPendingNoteContent(file, null);
+              if (seq === saveSeqRef.current) useNoteStore.getState().setPendingNoteContent(file, null);
               if (seq === saveSeqRef.current) changeAuthorSetRef.current.clear();
               commitHistory();
             })
@@ -635,7 +636,7 @@ export function NoteEditor({ file }: { file: string }) {
     applyingUndoRef.current = false;
     // 撤销/重做是应持久化的编辑：登记挂起输入（handleChange 在 applyingUndoRef 下跳过登记，
     // 而 recordEdit 跳过与 pending 登记是两个维度——漏登记会在 500ms 内 flush 时落盘撤销前旧内容）
-    useVaultStore.getState().setPendingNoteContent(file, target);
+    useNoteStore.getState().setPendingNoteContent(file, target);
     setEditorSyncSeq((s) => s + 1);
   };
 
@@ -803,7 +804,7 @@ export function NoteEditor({ file }: { file: string }) {
    * handleChange 全保存链（防抖/冲突/撤销/挂起输入/历史/协作全复用）——面板不直写，防未落盘
    * 正文被整文件覆盖、改动被挂起保存静默回滚。编辑器未挂载时请求无人消费（面板以
    * noteSaveStates 判定改走直写路径）。首帧以当前序号为基线，只响应本实例挂载后的请求。 */
-  const propsEditReq = useVaultStore((s) => (file ? s.notePropsEditReq[file] : undefined));
+  const propsEditReq = useNoteStore((s) => (file ? s.notePropsEditReq[file] : undefined));
   const processedPropsSeqRef = useRef<number | undefined>(undefined);
   useEffect(() => {
     if (processedPropsSeqRef.current === undefined) {
@@ -825,7 +826,7 @@ export function NoteEditor({ file }: { file: string }) {
     }
     handleChangeRef.current(merged);
     // 预写缓存：属性面板经 noteContents 订阅即时刷新（落盘由 handleChange 的 debounce 保存负责）
-    useVaultStore.getState().stageNoteContent(file, merged);
+    useNoteStore.getState().stageNoteContent(file, merged);
   }, [propsEditReq, parsed, loadError, file]);
 
   /** 协作文档绑定：进入协作态且内容已加载时，以正文（body，LF）为基线绑定 Y.Doc；

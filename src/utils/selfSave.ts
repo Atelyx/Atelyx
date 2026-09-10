@@ -2,7 +2,7 @@
  * 自写回放抑制（watcher 事件消歧）：写盘/CRUD 完成时按「文件路径」记录时刻；
  * watcher 收到同路径事件且在抑制窗口内 → 视为 app 自写回放，不弹「已被外部修改」误提示。
  * 重命名/移动类操作经 Rust 扫盘改写多个 .atlx（前端不知全集），用全局标记兜底。
- * .md 内容自写经路径级标记（`markSelfSave(file)`，见 vaultStore.saveNoteContent）——
+ * .md 内容自写经路径级标记（`markSelfSave(file)`，见 noteStore.saveNoteContent）——
  * 仅用于 watcher 笔记分支跳过无关的全树重扫；其跨编辑面同步与冲突检测
  * （markNoteExternallyEdited）不走本抑制，不受影响。附件/.md 其它来源事件不抑制。
  *

@@ -7,10 +7,8 @@
  */
 import { useEffect, useMemo, useState } from "react";
 import { History, RotateCcw, ChevronDown, ChevronRight, X } from "lucide-react";
-import {
-  useVaultStore,
-  type HistoryVersion,
-} from "@/stores/vaultStore";
+import { type HistoryVersion } from "@/stores/vaultStore";
+import { useNoteStore } from "@/stores/noteStore";
 import { useCanvasStore } from "@/stores/canvasStore";
 import { useTableStore } from "@/stores/tableStore";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
@@ -103,7 +101,7 @@ export function HistoryModal({ kind, file, open, onClose, onRollback }: Props) {
     setError(null);
     const load =
       kind === "note"
-        ? () => useVaultStore.getState().noteHistoryLoad(file)
+        ? () => useNoteStore.getState().noteHistoryLoad(file)
         : kind === "canvas"
           ? () => useCanvasStore.getState().canvasHistoryLoad(file)
           : () => useTableStore.getState().tableHistoryLoad(file);
@@ -122,7 +120,7 @@ export function HistoryModal({ kind, file, open, onClose, onRollback }: Props) {
     setConfirmSeq(null);
     let content: string | null = null;
     try {
-      if (kind === "note") content = await useVaultStore.getState().noteHistoryRollback(file, seq);
+      if (kind === "note") content = await useNoteStore.getState().noteHistoryRollback(file, seq);
       else if (kind === "canvas") content = await useCanvasStore.getState().canvasHistoryRollback(file, seq);
       else content = await useTableStore.getState().tableHistoryRollback(file, seq);
     } catch {

@@ -2373,7 +2373,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
     const bodyMd = d.bodyMd ?? "";
     try {
       await writeNote(file, bodyMd);
-      // 登记磁盘基线（同 saveNoteContent/applyNoteEdits：应用自写须被外部修改感知识别）
+      // 登记磁盘基线（同 saveNoteContent/saveTextNodeAsNote：应用自写须被外部修改感知识别）
       recordNoteDiskContent(file, bodyMd);
       // 记初始历史存档点（画布文本转笔记的首次写盘，防该笔记无历史记录；尽力而为）
       void recordHistoryVersion("note", file, { content: bodyMd, action: "edit", coalesceEditMs: 60_000 });

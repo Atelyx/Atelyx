@@ -96,7 +96,7 @@ export function ProjectWorkspacePage() {
   const collabNickname = useSettingsStore((s) => s.collabNickname);
   const collabDevice = useSettingsStore((s) => s.deviceName);
   useEffect(() => {
-    useVaultStore.getState().noteHistorySetAuthor(
+    useVaultStore.getState().historySetAuthor(
       collabNickname || collabDevice || "用户",
       collabDevice || "",
     );

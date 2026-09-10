@@ -18,12 +18,9 @@ import {
   deleteAttachment,
   deleteFolder as deleteFolderSvc,
   deleteNote,
-  isKnownNoteDiskContent as isKnownNoteDiskContentSvc,
   listVaultTree,
-  recordNoteDiskContent as recordNoteDiskContentSvc,
   readAttachmentDataUrl as readAttachmentDataUrlSvc,
   readCanvasVault,
-  readNote,
   remapSideloads,
   remapSideloadsByDir,
   renameAttachment as renameAttachmentSvc,
@@ -34,15 +31,7 @@ import {
   rebuildInternalLinks as rebuildInternalLinksSvc,
   writeNote,
 } from "@/services/vault";
-import {
-  loadHistory as loadNoteHistory,
-  migrateHistoryFile,
-  recordHistoryVersion,
-  setHistoryAuthor,
-  versionContentAt,
-  type HistoryAuthor as NoteHistoryAuthor,
-  type HistoryVersion as NoteHistoryVersion,
-} from "@/services/history";
+import { migrateHistoryFile, setHistoryAuthor } from "@/services/history";
 import {
   createTableVault,
   deleteTableVault,
@@ -55,7 +44,6 @@ import { subscribeVaultFileChanges } from "@/services/watcher";
 import { isSelfSaveEcho, markSelfSave } from "@/utils/selfSave";
 import { useAppStore } from "@/stores/appStore";
 import { emitVaultEvent, emitVaultEventAsync, type VaultEvent } from "@/utils/vaultEvents";
-import { emitPluginEvent } from "@/services/cordis/events";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useUiStateStore } from "@/stores/uiStateStore";
 import { baseName, dedupeFilename, parentDir, sanitizeFilename, siblingPath, stripExt } from "@/utils/filename";
@@ -108,29 +96,6 @@ export function lastFolderRenameTarget(file: string): string | null {
   return file.startsWith(prefix) ? `${newDir}/${file.slice(prefix.length)}` : null;
 }
 
-/**
- * 按文件串行写盘队列：同一笔记的并发保存严格按调用序落盘，后调用者最后写。
- * 解决「卸载 flush 写盘在途 + 重挂载/新编辑又写盘」的同文件乱序覆盖（跨布局回退根因之一）：
- * 无论两个 `saveNoteContent` 的调用先后如何交织，磁盘最终 = 最后一次调用的内容。
- * 前序失败不阻断本序（prev.then(fn, fn)）。
- */
-const noteWriteQueues = new Map<string, Promise<void>>();
-function withNoteWriteQueue(file: string, fn: () => Promise<void>): Promise<void> {
-  const prev = noteWriteQueues.get(file) ?? Promise.resolve();
-  const next = prev.then(fn, fn);
-  noteWriteQueues.set(file, next);
-  // 队列项完成且仍是最新条目时自清理（Map 只留进行中的条目，防长会话无限增长）
-  void next.finally(() => {
-    if (noteWriteQueues.get(file) === next) noteWriteQueues.delete(file);
-  });
-  return next;
-}
-
-/** 磁盘内容是否为应用自写（组件不直连 service：NoteEditor 跨编辑面自写识别用）。 */
-export function isKnownNoteDiskContent(file: string, content: string): boolean {
-  return isKnownNoteDiskContentSvc(file, content);
-}
-
 /** 相对路径的小写扩展名（不含点；无扩展名 = 空串）。AI 文件工具按扩展名分发用。 */
 function relExt(path: string): string {
   const i = path.lastIndexOf(".");
@@ -155,24 +120,6 @@ function canvasRowOf(file: string): CanvasFileRow {
 
 /** loadFiles 并发守卫：递增序号，仅最后一次发起者的扫描结果落盘（后台填充与 watcher 触发并发时防旧结果覆盖）。 */
 let loadFilesSeq = 0;
-
-/** 笔记内容缓存上限（FIFO 淘汰最旧；防大笔记常驻内存无限膨胀，切仓库清空）。 */
-const MAX_NOTE_CACHE = 30;
-
-/** 写入单文件笔记缓存并淘汰最旧（重复写入 = 移除旧条目再追加，FIFO 顺序近似最近使用）。 */
-function cacheNoteContent(
-  cache: Record<string, string>,
-  file: string,
-  content: string,
-): Record<string, string> {
-  const next: Record<string, string> = {};
-  for (const [k, v] of Object.entries(cache)) if (k !== file) next[k] = v;
-  next[file] = content;
-  if (Object.keys(next).length > MAX_NOTE_CACHE) {
-    delete next[Object.keys(next)[0]];
-  }
-  return next;
-}
 
 /** 文件监听订阅状态（startFileWatcher 幂等启停用）。
  * watcherGen = 订阅代数：每次启/停递增，在途订阅完成时校验代数一致才保留——
@@ -384,15 +331,8 @@ async function applyFileDuplicate(file: string): Promise<string> {
   return newFile;
 }
 
-/** 笔记编辑器保存状态（面板 header 展示用；仅挂载中的编辑器写入、卸载清除）。 */
-export type NoteSaveStatus = {
-  state: "idle" | "edited" | "saving" | "saved" | "error";
-  loadError: boolean;
-};
-
-/** 历史版本类型（组件不直连 service，经本 store 读历史）。 */
-export type { HistoryAuthor, HistoryAction, HistoryVersion, HistoryKind } from "@/services/history";
-export type { HistoryVersion as NoteHistoryVersion } from "@/services/history";
+/** 历史版本类型（历史面板三 kind 共用；组件不直连 service，经本 store 取类型）。 */
+export type { HistoryVersion } from "@/services/history";
 
 interface VaultFileState {
   /** 全仓库文件树（递归，跳过隐藏/排除目录与 `.tmp`）。 */
@@ -403,22 +343,10 @@ interface VaultFileState {
   tableList: { name: string; file: string }[];
   /** 按相对路径查树节点类型（dir/file；不存在 = null）。@引用 路径块的目录 `/` 后缀标注用。 */
   pathKind: (path: string) => "dir" | "file" | null;
-  /** 笔记内容缓存（file → 正文；仅本会话内读过的笔记，FIFO 上限）。布局切换/重开笔记直接命中，
-   *  避免每次 NoteEditor 挂载都读盘（与 tableStore 的「已加载不重读」同语义）；切仓库清空。 */
-  noteContents: Record<string, string>;
   /** 全仓库标签词汇表（属性区 tags 候选建议数据源；按需加载，Rust 侧指纹缓存保证开销可控）。 */
   vaultTags: TagRow[] | null;
   /** 拉取全仓库标签词汇表（失败静默置 null，调用方降级为无候选）。 */
   loadVaultTags: () => Promise<void>;
-  /** 笔记编辑器未落盘的最近输入（file → 正文；handleChange 登记、保存完成/flush 后清除）。
-   *  供 flushAllPending（关窗守卫/AI 重命名移动删除前）把组件内 debounce timer 之外的
-   *  挂起输入统一落盘 + 补历史存档点——组件卸载与关窗都不丢最后 500ms。 */
-  pendingNoteContent: Record<string, string>;
-  /** 登记/清除笔记未落盘输入（NoteEditor 维护；保存完成且无新输入时清除）。 */
-  setPendingNoteContent: (file: string, content: string | null) => void;
-  /** 立即落盘全部挂起笔记输入（关窗守卫/AI 文件操作前 flush 用），并补历史存档点（60s 合并）。
-   *  期间又有新编辑（handleChange 重新登记）则保留给下一轮，不误清。 */
-  flushPendingNotes: () => Promise<void>;
   /** 拉取全仓库文件树（watcher 事件/挂载时调用）。canvases 走 appStore.loadList。 */
   loadFiles: () => Promise<void>;
   /**
@@ -518,57 +446,14 @@ interface VaultFileState {
    * 副本是独立目录，内部相对路径引用随整体复制仍有效，无需链接维护。
    */
   duplicateFolder: (dir: string) => Promise<string>;
-  /** 读笔记正文（无画布笔记编辑器用；组件不直调 service，走本 store）。 */
-  readNoteContent: (file: string) => Promise<string>;
-  /** 直读笔记磁盘全文（绕过内容缓存；外部修改感知/写前校验用真实磁盘）。 */
-  readNoteFresh: (file: string) => Promise<string>;
   /** 查询反链（`[[笔记名]]` 或 `[label](基于仓库的路径)`；Rust 索引缓存，组件不直调 service，走本 store）。 */
   scanWikiBacklinks: (noteName: string, noteFile: string) => Promise<BacklinkRow[]>;
   /** 一键重建内部链接（设置 → 编辑器入口；Rust 字节级跨度改写，组件不直调 service，走本 store）。 */
   rebuildInternalLinks: () => Promise<RebuildLinksResult>;
   /** 读附件为 dataURL（仅图片扩展名；失败抛错由调用方降级）。组件不直调 service，走本 store。 */
   readAttachmentDataUrl: (file: string) => Promise<string>;
-  /** 写回笔记正文并刷新文件树（mtime 变化即时反映到面板）。 */
-  saveNoteContent: (file: string, content: string) => Promise<void>;
-  /** 作废单文件笔记内容缓存（真实外部修改/删除时调用；下次读取走盘）。 */
-  invalidateNoteCache: (file: string) => void;
-  /** 设置历史记录作者（进入仓库/身份变化时调用；组件不直连 service，走本 store）。 */
-  noteHistorySetAuthor: (name: string, device: string) => void;
-  /** 记录一条笔记历史版本（版本边界；连续编辑自动节流合并，不逐键记录）。 */
-  noteHistoryRecord: (
-    file: string,
-    content: string,
-    action: "edit" | "restore",
-    opts?: { note?: string; authorOverride?: NoteHistoryAuthor; coAuthors?: NoteHistoryAuthor[] },
-  ) => Promise<void>;
-  /** 读取笔记历史版本列表（缺失/损坏 → 空数组，尽力而为）。 */
-  noteHistoryLoad: (file: string) => Promise<NoteHistoryVersion[]>;
-  /** 回滚笔记到指定版本：写回磁盘 + 记一条 restore 版本；返回回滚后的全文（供编辑器重载），失败返回 null。 */
-  noteHistoryRollback: (file: string, seq: number) => Promise<string | null>;
-  /** 外部修改的笔记（file → 递增序号）。NoteEditor 订阅感知外部变更：无本地改动时实时刷新，有改动时提示冲突。 */
-  externalNoteEdits: Record<string, number>;
-  /** watcher 收到 `.md` 外部变化事件时 bump 序号（软件内重命名旧路径事件由调用方跳过）。 */
-  markNoteExternallyEdited: (file: string) => void;
-  /** 笔记编辑器保存状态（file → 状态；面板 header 读取，编辑器卸载/切文件时清除）。 */
-  noteSaveStates: Record<string, NoteSaveStatus>;
-  /** 更新笔记编辑器保存状态（null = 清除）。 */
-  setNoteSaveState: (file: string, status: NoteSaveStatus | null) => void;
-  /** 笔记编辑器冲突状态（file → 是否冲突；面板 header 读取，编辑器卸载/切文件时清除）。 */
-  noteConflicts: Record<string, boolean>;
-  /** 更新笔记编辑器冲突状态（false = 清除）。 */
-  setNoteConflict: (file: string, conflict: boolean) => void;
-  /** 笔记冲突解决请求（file → 递增序号 + 解决方式；面板 header 按钮发请求，NoteEditor 订阅执行）。 */
-  noteConflictResolveReq: Record<string, { seq: number; keepLocal: boolean }>;
-  /** 请求解决笔记冲突（keepLocal = 保留本地并保存；false = 重新加载丢弃本地）。 */
-  resolveNoteConflict: (file: string, keepLocal: boolean) => void;
-  /** 清除笔记冲突解决请求（编辑器卸载时调用，防残留）。 */
-  clearNoteConflictResolveReq: (file: string) => void;
-  /** 仅更新单文件笔记内容缓存（不经磁盘/基线；属性面板经编辑器合并后预写，面板即时刷新）。 */
-  stageNoteContent: (file: string, content: string) => void;
-  /** 笔记属性编辑请求（file → 递增序号 + 新 data；属性面板发请求，NoteEditor 订阅合并到实时正文走保存链）。 */
-  notePropsEditReq: Record<string, { seq: number; data: Record<string, unknown> }>;
-  /** 请求编辑笔记属性（属性面板调用；编辑器未挂载时请求无人消费，面板走直写路径）。 */
-  requestNotePropsEdit: (file: string, data: Record<string, unknown>) => void;
+  /** 设置历史记录作者（进入仓库/身份变化时调用；画布/笔记/表格共用的署名）。 */
+  historySetAuthor: (name: string, device: string) => void;
   /**
    * 仓库文件监听启停（幂等）：订阅 Rust watcher 事件并按 kind 分发到各 store。
    * 工作区挂载时 enable（App.tsx 调），回启动页 disable。分层：订阅副作用归 store，组件不直连 service。
@@ -621,9 +506,7 @@ export const useVaultStore = create<VaultFileState>((set, get) => ({
   tree: [],
   noteList: [],
   tableList: [],
-  noteContents: {},
   vaultTags: null,
-  pendingNoteContent: {},
 
   pathKind: (path) => {
     const node = findNode(get().tree, path);
@@ -862,8 +745,12 @@ export const useVaultStore = create<VaultFileState>((set, get) => ({
   },
 
   deleteFolder: async (dir, force = false) => {
+    // 目录内 .md 删除后不产生逐文件事件（Rust 目录事件不投递）：删除前收集，成功删除后按 note:deleted 投递，
+    // 供笔记域清挂起输入与正文缓存（否则同路径重建的新笔记会读到旧正文、被旧挂起输入覆盖）
+    const notesInDir = collectByExt(findNode(get().tree, dir)?.children ?? [], ".md").map((n) => n.file);
     const result = await deleteFolderSvc(dir, force);
     if (!result.deleted) return result;
+    for (const file of notesInDir) emitVaultEvent({ kind: "note:deleted", path: file });
     // 目录内画布全部消失：当前打开的画布在目录内 → 清空运行时状态 + 画布槽/标签（同 deleteCanvas 联动）
     const appStore = useAppStore.getState();
     const hadCanvases = appStore.closeCanvasIfInDir(dir);
@@ -918,16 +805,6 @@ export const useVaultStore = create<VaultFileState>((set, get) => ({
     return newDir;
   },
 
-  readNoteContent: async (file) => {
-    // 命中缓存（本会话已读过）：布局切换/重开笔记直接返回，不再读盘
-    const cached = get().noteContents[file];
-    if (cached !== undefined) return cached;
-    const content = await readNote(file);
-    set((s) => ({ noteContents: cacheNoteContent(s.noteContents, file, content) }));
-    return content;
-  },
-  /** 直读笔记磁盘全文（绕过内容缓存）：外部修改感知/写前校验需要真实磁盘而非可能滞后的缓存。 */
-  readNoteFresh: (file) => readNote(file),
   scanWikiBacklinks: (noteName, noteFile) => scanWikiBacklinksSvc(noteName, noteFile),
   loadVaultTags: async () => {
     try {
@@ -940,158 +817,8 @@ export const useVaultStore = create<VaultFileState>((set, get) => ({
   rebuildInternalLinks: () => rebuildInternalLinksSvc(),
   readAttachmentDataUrl: (file) => readAttachmentDataUrlSvc(file),
 
-  saveNoteContent: async (file, content) => {
-    // 缓存先行（先于异步写盘）：重挂载/跨编辑面读取立即拿到最新内容，消灭「卸载 flush
-    // 写盘在途 → 重挂载读陈旧缓存」的闪回/回退窗口（跨布局回退根因之一）。写盘失败时
-    // 缓存与编辑器显示一致（均为最新内容），失败由调用方置 error 状态，下次保存重试。
-    get().stageNoteContent(file, content);
-    await withNoteWriteQueue(file, async () => {
-      await writeNote(file, content);
-      // 登记磁盘基线（同 applyNoteEdits/saveTextNodeAsNote）：应用自写须被外部修改感知识别
-      recordNoteDiskContentSvc(file, content);
-      // 标记路径级自写回波：watcher 收到同路径事件后跳过无关的全树重扫（内容编辑不改文件树）
-      markSelfSave(file);
-    });
-    // 笔记内容落盘：通知订阅方（note:changed 轻量信号，按需再调 note 服务读内容）。
-    emitPluginEvent("note:changed", { file });
-  },
-
-  invalidateNoteCache: (file) =>
-    set((s) => {
-      if (!(file in s.noteContents)) return s; // 无缓存条目：返回原引用，不触发订阅
-      const next = { ...s.noteContents };
-      delete next[file];
-      return { noteContents: next };
-    }),
-
-  setPendingNoteContent: (file, content) =>
-    set((s) => {
-      const next = { ...s.pendingNoteContent };
-      if (content === null) delete next[file];
-      else next[file] = content;
-      return { pendingNoteContent: next };
-    }),
-
-  flushPendingNotes: async () => {
-    const pending = get().pendingNoteContent;
-    // 失败/冲突未决/文件已删的条目不清除（保留给下一轮或用户决策），其余落盘后清除
-    const keep = new Set<string>();
-    for (const [file, content] of Object.entries(pending)) {
-      // 冲突未决（外部已修改、用户未选择「重新加载/保留本地」）：不覆盖外部修改，保留待决策
-      if (get().noteConflicts[file]) {
-        keep.add(file);
-        continue;
-      }
-      // 文件已从列表消失（已被删除，cleanup 同款 stillExists 守卫）：不重建已删除文件
-      if (!get().noteList.some((n) => n.file === file)) {
-        keep.add(file);
-        continue;
-      }
-      try {
-        // 走统一写盘链（缓存先行 + 按文件串行队列），落盘后补历史存档点（60s 合并；
-        // 与 debounce 路径同内容时 recordHistoryVersion 按内容去重跳过，不产生重复版本）
-        await get().saveNoteContent(file, content);
-        await get().noteHistoryRecord(file, content, "edit");
-      } catch (e) {
-        // 写盘失败：保留条目待重试（防关窗/切仓库场景下未落盘输入永久丢失）
-        keep.add(file);
-        console.error("笔记挂起输入落盘失败", e);
-      }
-    }
-    // 只清「落盘成功且未被新编辑替换」的条目（期间 handleChange 重新登记的保留给下一轮）
-    set((s) => {
-      const next = { ...s.pendingNoteContent };
-      for (const [file, content] of Object.entries(pending)) {
-        if (!keep.has(file) && next[file] === content) delete next[file];
-      }
-      return { pendingNoteContent: next };
-    });
-  },
-
-  noteHistorySetAuthor: (name, device) =>
+  historySetAuthor: (name, device) =>
     setHistoryAuthor({ id: device || name, name: name || device || "用户", device: device || "" }),
-
-  noteHistoryRecord: (file, content, action, opts) =>
-    recordHistoryVersion("note", file, {
-      content,
-      action,
-      ...(opts?.authorOverride ? { authorOverride: opts.authorOverride } : {}),
-      ...(opts?.coAuthors && opts.coAuthors.length ? { coAuthors: opts.coAuthors } : {}),
-      ...(opts?.note ? { note: opts.note } : {}),
-      // 连续编辑节流：60s 内合并为一个存档点（版本粒度，不逐键），显式边界（外部/回滚）不受限
-      coalesceEditMs: action === "edit" ? 60_000 : 0,
-    }),
-
-  noteHistoryLoad: (file) => loadNoteHistory("note", file),
-
-  noteHistoryRollback: async (file, seq) => {
-    const versions = await loadNoteHistory("note", file);
-    const content = versionContentAt(versions, seq);
-    if (content == null) return null;
-    await get().saveNoteContent(file, content);
-    // 回滚记一条 restore 版本（滚动恢复点 + 审计「何时回滚到哪」）
-    await recordHistoryVersion("note", file, { content, action: "restore" });
-    return content;
-  },
-
-  externalNoteEdits: {},
-
-  markNoteExternallyEdited: (file) =>
-    set((s) => ({
-      externalNoteEdits: { ...s.externalNoteEdits, [file]: (s.externalNoteEdits[file] ?? 0) + 1 },
-    })),
-
-  noteSaveStates: {},
-
-  setNoteSaveState: (file, status) =>
-    set((s) => {
-      if (status === null) {
-        const next = { ...s.noteSaveStates };
-        delete next[file];
-        return { noteSaveStates: next };
-      }
-      return { noteSaveStates: { ...s.noteSaveStates, [file]: status } };
-    }),
-
-  noteConflicts: {},
-
-  setNoteConflict: (file, conflict) =>
-    set((s) => {
-      const next = { ...s.noteConflicts };
-      if (conflict) next[file] = true;
-      else delete next[file];
-      return { noteConflicts: next };
-    }),
-
-  noteConflictResolveReq: {},
-
-  resolveNoteConflict: (file, keepLocal) =>
-    set((s) => ({
-      noteConflictResolveReq: {
-        ...s.noteConflictResolveReq,
-        [file]: { seq: (s.noteConflictResolveReq[file]?.seq ?? 0) + 1, keepLocal },
-      },
-    })),
-
-  clearNoteConflictResolveReq: (file) =>
-    set((s) => {
-      const next = { ...s.noteConflictResolveReq };
-      delete next[file];
-      return { noteConflictResolveReq: next };
-    }),
-
-  stageNoteContent: (file, content) =>
-    set((s) => ({ noteContents: cacheNoteContent(s.noteContents, file, content) })),
-
-  notePropsEditReq: {},
-
-  requestNotePropsEdit: (file, data) =>
-    set((s) => ({
-      notePropsEditReq: {
-        ...s.notePropsEditReq,
-        [file]: { seq: (s.notePropsEditReq[file]?.seq ?? 0) + 1, data },
-      },
-    })),
 
   startFileWatcher: (enabled) => {
     // 幂等：同一状态重复调用不动作（App 的 view effect 可能多次触发相同值）

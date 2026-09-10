@@ -7,7 +7,7 @@
  * - 焦点在画布/选中其他节点 → 节点属性（对话：Agent + 来源/资产列表；文本/媒体：基本信息 + 来源/消费方）
  * - 其余（无选中、非笔记焦点）→ 空面板（无占位提示）
  * 资产列表项点击 → setCenter 定位到对应节点（与 @chip 点击定位一致）。
- * 分层：走 canvasStore / appStore / uiStateStore / panelStore / vaultStore / settingsStore，不直调 service。
+ * 分层：走 canvasStore / appStore / uiStateStore / panelStore / noteStore / settingsStore，不直调 service。
  */
 import {
   Bot,
@@ -28,7 +28,7 @@ import { useCanvasStore } from "@/stores/canvasStore";
 import { usePanelStore } from "@/stores/panelStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useUiStateStore } from "@/stores/uiStateStore";
-import { useVaultStore } from "@/stores/vaultStore";
+import { useNoteStore } from "@/stores/noteStore";
 import { BUILTIN_AGENT_CHAT_ID } from "@/constants/agents";
 import { DropdownSelect } from "@/components/common/DropdownSelect";
 import { NotePropertiesView } from "@/components/editor/NotePropertiesView";
@@ -279,7 +279,7 @@ export function InspectorPanel() {
   const selectedNoteFile =
     node && node.type === "text" ? (node.data as unknown as TextData).file ?? null : null;
   const targetNoteFile = context?.kind === "note" ? context.file : selectedNoteFile;
-  const noteContent = useVaultStore((s) =>
+  const noteContent = useNoteStore((s) =>
     targetNoteFile ? s.noteContents[targetNoteFile] : undefined,
   );
   const parsed = useMemo(
@@ -289,7 +289,7 @@ export function InspectorPanel() {
   // 目标笔记未缓存（首次展示 / 外部修改作废缓存）→ 补读；读失败保持 undefined（不渲染属性编辑区）
   useEffect(() => {
     if (targetNoteFile && noteContent === undefined) {
-      void useVaultStore.getState().readNoteContent(targetNoteFile).catch(() => {
+      void useNoteStore.getState().readNoteContent(targetNoteFile).catch(() => {
         // 读失败静默：属性编辑区不渲染，防在已删除文件上误建（写盘复活文件）
       });
     }
@@ -309,7 +309,7 @@ export function InspectorPanel() {
   };
 
   // 笔记模式：frontmatter 属性（与编辑器属性区同一组件，增删改即时写盘，
-  // 经 vaultStore 缓存/保存链与编辑器双向同步）
+  // 经 noteStore 缓存/保存链与编辑器双向同步）
   if (targetNoteFile) {
     const title = noteTitleFromFile(targetNoteFile);
     /** 笔记属性提交：编辑器挂载时路由到编辑器合并实时正文走保存链（防未落盘正文被整文件覆盖、
@@ -319,21 +319,21 @@ export function InspectorPanel() {
       lastFailedDataRef.current = next;
       // 编辑器是否挂载 = noteSaveStates 是否有该文件条目（编辑器加载即登记、卸载清除）
       const editorMounted =
-        useVaultStore.getState().noteSaveStates[targetNoteFile] !== undefined;
+        useNoteStore.getState().noteSaveStates[targetNoteFile] !== undefined;
       if (editorMounted) {
-        useVaultStore.getState().requestNotePropsEdit(targetNoteFile, next);
+        useNoteStore.getState().requestNotePropsEdit(targetNoteFile, next);
         setSaveError(false);
         return;
       }
       try {
         const full = stringifyFrontmatter(next, parsed.body);
-        void useVaultStore
+        void useNoteStore
           .getState()
           .saveNoteContent(targetNoteFile, full)
           .then(() => {
             setSaveError(false);
             // 记编辑存档点（与编辑器 debounce 保存同源；60s 连续编辑合并）
-            void useVaultStore.getState().noteHistoryRecord(targetNoteFile, full, "edit");
+            void useNoteStore.getState().noteHistoryRecord(targetNoteFile, full, "edit");
           })
           .catch((e) => {
             console.error("笔记属性保存失败", e);

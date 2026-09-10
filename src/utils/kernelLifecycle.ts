@@ -3,7 +3,8 @@
  *
  * 内核启动路径（appStore/panelStore/App boot/页面）不直接调用领域 store：领域生命周期钩子
  * （flush / 切仓库清态与进仓加载 / 回启动页清理 / 释放视图 / 视图进出窗口）经此注册表注册，
- * 内核只做分发。注册/撤销随插件启停驱动（pluginStore.spawn/unload → cordis/builtins 的 lifecycle）。
+ * 内核只做分发。注册/撤销随插件启停驱动（pluginStore.spawn/unload → cordis/builtins 的 lifecycle）；
+ * 领域 store 自身的数据边界（如笔记运行时态随仓库清空）在模块加载时自注册，不随插件启停撤销。
  *
  * 错误语义 = 失败快速传播（fail-fast）：分发按注册序执行，任一钩子抛错即向外传播——调用方
  * 自行 try/catch（如 selectVault 中 flush 失败即中止切换，防跨仓库数据污染）。
@@ -19,7 +20,7 @@ export interface VaultLifecycleContext {
 
 /** 单领域生命周期钩子（按领域插件 id 注册；无对应能力时字段省略）。 */
 export interface DomainLifecycleHooks {
-  /** 域标识（插件 id，如 `builtin.canvas`；注册表键，撤销按此匹配）。 */
+  /** 域标识（插件 id 如 `builtin.canvas`，或自注册的 store 标识如 `noteStore`；注册表键，撤销按此匹配）。 */
   id: string;
   /** 关窗前/切仓库前落盘全部 pending 改动（按注册序 await）。 */
   flush?: (ctx: VaultLifecycleContext) => Promise<void>;

@@ -76,6 +76,7 @@ import { VIEW_LABELS } from "@/constants/views";
 import { composePlugins, compositionPackages, mountOrder } from "@/utils/cordis/composition";
 import { useCollabStore, publishPluginPresence } from "@/stores/collabStore";
 import { useVaultStore } from "@/stores/vaultStore";
+import { useNoteStore } from "@/stores/noteStore";
 import { useAppStore } from "@/stores/appStore";
 import { useCanvasStore } from "@/stores/canvasStore";
 import { useTableStore } from "@/stores/tableStore";
@@ -302,7 +303,7 @@ function ensureHistoryAccess(): void {
   setPluginHistoryAccess({
     list: (kind, file) => loadHistory(kind, file),
     rollback: async (kind, file, seq) => {
-      if (kind === "note") await useVaultStore.getState().noteHistoryRollback(file, seq);
+      if (kind === "note") await useNoteStore.getState().noteHistoryRollback(file, seq);
       else if (kind === "canvas") await useCanvasStore.getState().canvasHistoryRollback(file, seq);
       else await useTableStore.getState().tableHistoryRollback(file, seq);
     },

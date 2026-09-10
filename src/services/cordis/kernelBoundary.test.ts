@@ -20,6 +20,7 @@ const DOMAIN_STORES = [
   "canvasStore",
   "tableStore",
   "chatPanelStore",
+  "noteStore",
   "noteCollabStore",
   "noteUndoStore",
   "calendarStore",
@@ -42,8 +43,9 @@ const KERNEL_PATH = [
 
 /** 宿主接线模块（显式例外）：领域 store 仅用于把数据源注入内核 ctx 服务。 */
 const HOST_WIRING_EXCEPTION = "stores/pluginStore.ts";
-/** 该例外当前登记的领域依赖（新增即须在此登记并说明理由）。 */
-const HOST_WIRING_DOMAIN_DEPS = ["canvasStore", "tableStore", "repoHistoryStore"];
+/** 该例外当前登记的领域依赖（新增即须在此登记并说明理由）。
+ *  canvasStore/tableStore/repoHistoryStore/noteStore = ctx.canvas/ctx.table/ctx.history（含笔记历史回滚）数据源。 */
+const HOST_WIRING_DOMAIN_DEPS = ["canvasStore", "tableStore", "repoHistoryStore", "noteStore"];
 
 describe("内核路径导入守卫", () => {
   it("内核路径不 import 领域 store", async () => {

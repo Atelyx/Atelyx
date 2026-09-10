@@ -44,6 +44,7 @@ import { registerNoteCollabWiring } from "@/stores/noteCollabStore";
 import { useChatPanelStore } from "@/stores/chatPanelStore";
 import { useCalendarStore } from "@/stores/calendarStore";
 import { useNoteUndoStore } from "@/stores/noteUndoStore";
+import { useNoteStore } from "@/stores/noteStore";
 import { isPendingFolderRenameOldPath, isPendingRenameOldPath, useVaultStore } from "@/stores/vaultStore";
 import { isSelfSaveEcho } from "@/utils/selfSave";
 import { isCollabCanvasRenamePath } from "@/utils/canvasCollab";
@@ -130,15 +131,15 @@ function wireNoteAccess(): () => void {
     read: async (file) => {
       const target = file ?? useAppStore.getState().currentNoteFile;
       if (!target) throw new Error("未打开笔记");
-      return useVaultStore.getState().readNoteContent(target);
+      return useNoteStore.getState().readNoteContent(target);
     },
     write: async (content) => {
       const target = useAppStore.getState().currentNoteFile;
       if (!target) throw new Error("未打开笔记");
-      await useVaultStore.getState().saveNoteContent(target, content);
+      await useNoteStore.getState().saveNoteContent(target, content);
     },
     save: async () => {
-      await useVaultStore.getState().flushPendingNotes();
+      await useNoteStore.getState().flushPendingNotes();
     },
   });
   return () => setPluginNoteAccess(null);
@@ -417,14 +418,14 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
     lifecycle: {
       id: "builtin.note",
       flush: async () => {
-        await useVaultStore.getState().flushPendingNotes();
+        await useNoteStore.getState().flushPendingNotes();
       },
       onVaultLeaving: () => {
-        // 切仓库清空笔记撤销栈（防同路径串文件）
+        // 切仓库清空笔记撤销栈（防同路径串文件）；笔记运行时态的清态由 noteStore 自注册承担
         useNoteUndoStore.getState().clearAll();
       },
       onVaultExit: async () => {
-        await useVaultStore.getState().flushPendingNotes();
+        await useNoteStore.getState().flushPendingNotes();
       },
     },
     capability: wireNoteAccess,
@@ -434,22 +435,37 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
         if (isPendingRenameOldPath(e.path) || isPendingFolderRenameOldPath(e.path)) return;
         // NoteEditor 感知外部修改：无本地改动实时刷新、有改动提示冲突
         //（markNoteExternallyEdited 始终保留：跨编辑面同步 + 冲突检测必经，不受自写回波影响）
-        useVaultStore.getState().markNoteExternallyEdited(e.path);
+        useNoteStore.getState().markNoteExternallyEdited(e.path);
         // 真实外部修改（非本端自写回波，含画布/AI 写 .md）：作废笔记内容缓存，下次读取走盘
         //（自写回波缓存已由 saveNoteContent 同步，不另行作废防缓存失效后重读盘）
-        if (!isSelfSaveEcho(e.path)) useVaultStore.getState().invalidateNoteCache(e.path);
+        if (!isSelfSaveEcho(e.path)) useNoteStore.getState().invalidateNoteCache(e.path);
       }),
-      // 撤销栈随路径迁移（撤销历史不因改名丢失、旧键不滞留内存）
+      // 路径迁移/消失：撤销栈随路径迁移（撤销历史不因改名丢失、旧键不滞留内存），正文缓存按旧路径作废。
+      // 缓存按路径键存，旧路径可被同名新文件复用，不作废会把已改走/已删的正文串给新笔记；
+      // 删除路径的 watcher 事件可能落在自写抑制窗口内被跳过，故与改名同款显式作废
       vaultHandler("note:renamed", (e) => {
+        useNoteStore.getState().invalidateNoteCache(e.oldPath);
         useNoteUndoStore.getState().renameFile(e.oldPath, e.newPath);
       }),
       vaultHandler("note:moved", (e) => {
+        useNoteStore.getState().invalidateNoteCache(e.oldPath);
         useNoteUndoStore.getState().renameFile(e.oldPath, e.newPath);
       }),
       vaultHandler("note:deleted", (e) => {
-        // 文件已删：清撤销栈与挂起输入（挂起输入不清会在下次 flush 时经 writeNote 重建已删文件）
+        // 文件已删：清撤销栈、挂起输入与正文缓存（挂起输入不清会在下次 flush 时经 writeNote 重建已删文件）
         useNoteUndoStore.getState().clearFile(e.path);
-        useVaultStore.getState().setPendingNoteContent(e.path, null);
+        useNoteStore.getState().setPendingNoteContent(e.path, null);
+        useNoteStore.getState().invalidateNoteCache(e.path);
+      }),
+      // 文件夹改名/移动：目录下笔记的正文缓存按新旧前缀作废——旧前缀不再指代这批文件，
+      // 新前缀可能复用本会话内已改走/已删目录的路径
+      vaultHandler("folder:renamed", (e) => {
+        useNoteStore.getState().invalidateNoteCacheUnder(e.oldDir);
+        useNoteStore.getState().invalidateNoteCacheUnder(e.newDir);
+      }),
+      vaultHandler("folder:moved", (e) => {
+        useNoteStore.getState().invalidateNoteCacheUnder(e.oldDir);
+        useNoteStore.getState().invalidateNoteCacheUnder(e.newDir);
       }),
     ],
     provideService: (ctx) =>

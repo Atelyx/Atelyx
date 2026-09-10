@@ -30,7 +30,7 @@ import { VIEW_LABELS } from "@/constants/views";
 import { useCanvasStore } from "@/stores/canvasStore";
 import { useAppStore } from "@/stores/appStore";
 import { useTableStore } from "@/stores/tableStore";
-import { useVaultStore } from "@/stores/vaultStore";
+import { useNoteStore } from "@/stores/noteStore";
 import { usePluginStore } from "@/stores/pluginStore";
 import { ErrorBoundary } from "@/components/common/ErrorBoundary";
 import type { BuiltinViewKind, ViewKind } from "@/types";
@@ -240,9 +240,9 @@ function TableStatusIndicator() {
 /** 笔记视图状态指示（无当前笔记不显示；冲突 > 保存状态）。 */
 function NoteStatusIndicator() {
   const currentNoteFile = useAppStore((s) => s.currentNoteFile);
-  const conflict = useVaultStore((s) => (currentNoteFile ? s.noteConflicts[currentNoteFile] : false));
-  const status = useVaultStore((s) => (currentNoteFile ? s.noteSaveStates[currentNoteFile] : undefined));
-  const resolveNoteConflict = useVaultStore((s) => s.resolveNoteConflict);
+  const conflict = useNoteStore((s) => (currentNoteFile ? s.noteConflicts[currentNoteFile] : false));
+  const status = useNoteStore((s) => (currentNoteFile ? s.noteSaveStates[currentNoteFile] : undefined));
+  const resolveNoteConflict = useNoteStore((s) => s.resolveNoteConflict);
   if (!currentNoteFile) return null;
   if (conflict) {
     return (
