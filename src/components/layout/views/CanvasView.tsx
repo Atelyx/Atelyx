@@ -40,6 +40,7 @@ import {
   onCanvasViewportHandoff,
 } from "@/stores/panelStore";
 import { useCanvasHotkeys } from "@/hooks/useCanvasHotkeys";
+import { useNoteUndoRouting } from "@/hooks/useNoteUndoRouting";
 import {
   DEFAULT_CONVERSATION_HEIGHT,
   DEFAULT_CONVERSATION_WIDTH,
@@ -266,6 +267,8 @@ export const CanvasView = memo(function CanvasView({
     focused && !readOnly,
     handlePaste,
   );
+  // 画布上的笔记节点编辑面参与笔记撤销路由（面板未打开时也要能 Ctrl+Z）
+  useNoteUndoRouting();
 
   const addConversationAt = useCallback(
     (x: number, y: number) => {

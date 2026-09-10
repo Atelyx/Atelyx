@@ -31,6 +31,9 @@ export interface CollabPresence {
   lockedNodes?: CollabLockClaim[];
   /** 画布正在 AI 生成的对话节点（生成中指示灯）。 */
   streamingNodeIds?: string[];
+  /** 本端已打开编辑面的笔记（笔记面板或画布笔记节点）：对端据此显示「谁在看/改这篇」，
+   *  与聚焦文件无关——画布节点上编辑笔记时聚焦文件仍是画布。 */
+  editingNotes?: string[];
 }
 
 /** 房间（同仓库 vaultId）内一个在线用户。 */

@@ -17,7 +17,7 @@
  * 链接点击经 shell 打开系统程序，webview 不导航。
  *
  * 与 frontmatter 解耦：只编辑正文 body，`onBodyChange` 输出完整正文 markdown，
- * 由 NoteEditor 用 `fmPrefix + body` 拼回完整 content（frontmatter 原样保留）。
+ * 由编辑面用 `fmPrefix + body` 拼回完整 content（frontmatter 原样保留）。
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -43,10 +43,9 @@ import {
   markdownLanguage,
 } from "@codemirror/lang-markdown";
 import { languages } from "@codemirror/language-data";
-import { defaultKeymap } from "@codemirror/commands";
+import { defaultKeymap, history } from "@codemirror/commands";
 import { tags } from "@lezer/highlight";
-import type { Text as YText } from "yjs";
-import type { Awareness } from "y-protocols/awareness";
+import type { NoteEditorBinding } from "@/types";
 import { yCollab } from "y-codemirror.next";
 import { useAppStore } from "@/stores/appStore";
 import { useVaultStore } from "@/stores/vaultStore";
@@ -170,19 +169,22 @@ export interface MarkdownEditorLinks {
 interface Props {
   /** 当前正文（挂载时初始注入；外部同步时 replaceAll 的目标）。 */
   body: string;
-  /** 非用户编辑的 content 更新序号（外部修改/冲突重载/加载完成时 NoteEditor 递增），变化即同步编辑器。 */
+  /** 非用户编辑的内容更新序号（外部修改/冲突重载/加载完成时编辑面递增），变化即同步编辑器。 */
   syncSeq: number;
   /** 用户编辑回调：输出编辑器当前全文 markdown 正文。只读态仍可传（勾选框 toggle 上报走保存链）。 */
   onBodyChange?: (markdown: string) => void;
   /** 协作绑定：提供时进入 Yjs 协同编辑（y-codemirror 绑 Y.Text + 远端光标）；
-   *  缺省 = 本地单写者纯文本编辑。撤销键不在本组件绑定（见 NoteEditor 窗口级路由）。 */
-  collab?: { ytext: YText; awareness: Awareness };
-  /** 编辑器实例外抛（NoteEditor 划词右键剪切/粘贴按选区 dispatch 用）；创建后赋值、卸载置 null。 */
+   *  缺省 = 本地单写者纯文本编辑。撤销键不在本组件绑定（见 hooks/useNoteUndoRouting）。 */
+  collab?: NoteEditorBinding;
+  /** 编辑器实例外抛（编辑面划词右键剪切/粘贴按选区 dispatch 用）；创建后赋值、卸载置 null。 */
   editorViewRef?: { current: EditorView | null };
-  /** 协作挂载时 ytext 与 body 分歧的处置（NoteEditor 注入；参数 = ytext 正文 LF）。 */
+  /** 协作挂载时 ytext 与 body 分歧的处置（编辑面注入；参数 = ytext 正文 LF）。 */
   onCollabDivergence?: (ytextText: string) => void;
   /** 只读（默认实时视图/画布/对话展示面）：停用光标行显示原文规则，widget 恒渲染；可动态切换不重建。 */
   readOnly?: boolean;
+  /** 本地历史（CM 内 undo/redo）：仅无文件编辑面（画布内文本节点草稿）用——笔记面板/笔记节点
+   *  的撤销归按文件持久栈（见 hooks/useNoteUndoRouting），两者同时存在会双撤销。 */
+  localHistory?: boolean;
   /** 任务勾选框可点（笔记可点写回；画布/对话只读展示面禁用态）。 */
   interactiveCheckbox?: boolean;
   /** 链接/定位回调（wiki/仓库路径/空链接新建/画布定位）。 */
@@ -202,6 +204,7 @@ export function MarkdownEditor({
   editorViewRef,
   onCollabDivergence,
   readOnly = false,
+  localHistory = false,
   interactiveCheckbox = true,
   links,
   mentions,
@@ -299,10 +302,11 @@ export function MarkdownEditor({
           }),
           EditorView.lineWrapping,
           // keymap 协作/非协作一致（协作只多 yCollab 绑定，行为不因协作开关分叉）：
-          // 撤销/重做不在 CM 内绑定——统一由 NoteEditor 窗口级路由接按文件持久栈；
-          // CM 内置 history 与 y-undo 均随 EditorView 销毁丢失（预览↔编辑/重挂载即清），
-          // 持久栈跨重挂载保留，也不与窗口路由双撤销
+          // 撤销/重做不在 CM 内绑定——笔记编辑面的撤销统一由窗口级路由接按文件持久栈
+          // （CM 内置 history 随 EditorView 销毁丢失）；无文件编辑面（画布内文本节点草稿）
+          // 没有该持久栈，故由 localHistory 单独提供 CM 内撤销
           keymap.of([...markdownKeymap, ...defaultKeymap]),
+          ...(localHistory ? [history()] : []),
           ...(collab ? [yCollab(collab.ytext, collab.awareness)] : []),
           syntaxHighlighting(highlightStyle),
           editorTheme,
@@ -340,8 +344,8 @@ export function MarkdownEditor({
       view.destroy();
     };
     // collab 切换（重建视图）依赖其引用；applyBody 为稳定回调；editorViewRef 为父组件 useRef（引用稳定，
-    // 仅为 exhaustive-deps 合规列入，不会触发重建）
-  }, [applyBody, collab, editorViewRef]);
+    // 仅为 exhaustive-deps 合规列入，不会触发重建）；localHistory 只在挂载配置生效，运行期不变
+  }, [applyBody, collab, editorViewRef, localHistory]);
 
   // 只读切换：同一视图翻转（不重建 → 选区/滚动/协作绑定保留），装饰经 readOnlyEffect 同步
   useEffect(() => {

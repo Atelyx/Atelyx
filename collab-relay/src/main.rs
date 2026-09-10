@@ -13,8 +13,8 @@
 //! 协议（JSON over WS，字段 camelCase）：
 //! - C→S `hello`：`{ type, vaultId, nickname, color, deviceName, version? }`（首条必发；
 //!   version = 本端应用版本号，协作房间展示各成员版本，旧客户端可缺省）
-//! - C→S `presence`：`{ type, file?, selection?, view?, openFiles?, lockedNodes?, streamingNodeIds? }`
-//!   （选中变化节流后发；openFiles/lockedNodes/streamingNodeIds 不透明透传，供协作房间/画布锁/生成灯）
+//! - C→S `presence`：`{ type, file?, selection?, view?, openFiles?, lockedNodes?, streamingNodeIds?, editingNotes? }`
+//!   （选中变化节流后发；openFiles/lockedNodes/streamingNodeIds/editingNotes 不透明透传，供协作房间/画布锁/生成灯/笔记编辑面互见）
 //! - C→S `table-patch`：`{ type, file, patch }`（表格增量补丁广播；patch 不透明透传，
 //!   客户端按 file 匹配只应用当前打开的表格）
 //! - C→S `canvas-patch`：`{ type, file, patch }`（画布增量补丁广播；patch 不透明透传，
@@ -22,7 +22,7 @@
 //! - C→S `ping`（保活）/ `bye`（离开）
 //! - S→C `hello-ack`：`{ type, peerId }`（分配的本连接 id，先于 peers 帧——客户端据此把自己过滤出列表）
 //! - S→C `peers`：`{ type, peers: [{ peerId, nickname, color, deviceName, version?, presence? }] }`
-//!   （房间成员变化时全量推送；version = 该成员应用版本号；presence 字段 = `{ file?, selection?, view?, openFiles?, lockedNodes?, streamingNodeIds? }`）
+//!   （房间成员变化时全量推送；version = 该成员应用版本号；presence 字段 = `{ file?, selection?, view?, openFiles?, lockedNodes?, streamingNodeIds?, editingNotes? }`）
 //! - S→C `presence`：`{ type, peerId, presence }`（他人 presence 转发，不含自己）
 //! - S→C `table-patch`：`{ type, peerId, file, patch }`（他人补丁转发，不含自己）
 //! - S→C `canvas-patch`：`{ type, peerId, file, patch }`（他人补丁转发，不含自己）
@@ -114,6 +114,9 @@ struct ClientMsg {
     /// 画布正在 AI 生成的对话节点（生成灯；不透明透传）。
     #[serde(default)]
     streaming_node_ids: Option<serde_json::Value>,
+    /// 本端已打开编辑面的笔记（跨视图互见；不透明透传）。
+    #[serde(default)]
+    editing_notes: Option<serde_json::Value>,
     /// 表格增量补丁（`table-patch` 消息；不透明透传，relay 不解析内容）。
     #[serde(default)]
     patch: Option<serde_json::Value>,
@@ -134,6 +137,9 @@ struct Presence {
     locked_nodes: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     streaming_node_ids: Option<serde_json::Value>,
+    /// 本端已打开编辑面的笔记（跨视图互见：画布节点上编辑笔记时聚焦文件仍是画布）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    editing_notes: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -388,6 +394,7 @@ async fn handle_socket(socket: WebSocket, hub: Hub, remote: SocketAddr) {
                             open_files: msg.open_files,
                             locked_nodes: msg.locked_nodes,
                             streaming_node_ids: msg.streaming_node_ids,
+                            editing_notes: msg.editing_notes,
                         };
                         // presence 高频（选中节流后仍密集）：debug 只记文件/视图与清单数量，
                         // 不记 selection 内容（内容可能含用户文本/图片选区）
@@ -408,6 +415,11 @@ async fn handle_socket(socket: WebSocket, hub: Hub, remote: SocketAddr) {
                                 .map_or(0, |a| a.len()),
                             streaming_nodes = presence
                                 .streaming_node_ids
+                                .as_ref()
+                                .and_then(|v| v.as_array())
+                                .map_or(0, |a| a.len()),
+                            editing_notes = presence
+                                .editing_notes
                                 .as_ref()
                                 .and_then(|v| v.as_array())
                                 .map_or(0, |a| a.len()),

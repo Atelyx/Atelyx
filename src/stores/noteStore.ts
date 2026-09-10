@@ -5,7 +5,7 @@
  * 写盘链 = **缓存先行**（先于异步写盘更新内容缓存，防重挂载读到陈旧缓存闪回/回退）+ **按文件串行写盘队列**
  * （同一笔记的并发保存严格按调用序落盘，后调用者最后写）。
  *
- * 分层：组件不直连 service，NoteEditor/属性面板/面板 header 经本 store 读写。
+ * 分层：组件不直连 service；笔记编辑会话（noteSessionStore）、属性面板、面板 header 经本 store 读写。
  * 模块环：builtins（组件层）静态引本模块、本模块引 vaultStore，环上的跨模块访问只能在函数体内延迟求值
  * （顶层 getState/useXxx 会在环上 TDZ 崩溃）。
  */
@@ -39,10 +39,12 @@ function withNoteWriteQueue(file: string, fn: () => Promise<void>): Promise<void
   const prev = noteWriteQueues.get(file) ?? Promise.resolve();
   const next = prev.then(fn, fn);
   noteWriteQueues.set(file, next);
-  // 队列项完成且仍是最新条目时自清理（Map 只留进行中的条目，防长会话无限增长）
-  void next.finally(() => {
+  // 队列项完成且仍是最新条目时自清理（Map 只留进行中的条目，防长会话无限增长）；
+  // 成功/失败两条路径都要接住，否则写盘失败会留下未处理的 rejection
+  const cleanup = () => {
     if (noteWriteQueues.get(file) === next) noteWriteQueues.delete(file);
-  });
+  };
+  void next.then(cleanup, cleanup);
   return next;
 }
 
@@ -53,6 +55,9 @@ export function isKnownNoteDiskContent(file: string, content: string): boolean {
 
 /** 笔记内容缓存上限（FIFO 淘汰最旧；防大笔记常驻内存无限膨胀，切仓库清空）。 */
 const MAX_NOTE_CACHE = 30;
+
+/** 冲突解决请求序号（全局单调，见 resolveNoteConflict）。 */
+let conflictResolveSeq = 0;
 
 /** 写入单文件笔记缓存并淘汰最旧（重复写入 = 移除旧条目再追加，FIFO 顺序近似最近使用）。 */
 function cacheNoteContent(
@@ -83,12 +88,12 @@ interface NoteState {
    *  供 flushPendingNotes（关窗守卫/AI 重命名移动删除前）把组件内 debounce timer 之外的
    *  挂起输入统一落盘 + 补历史存档点——组件卸载与关窗都不丢最后 500ms。 */
   pendingNoteContent: Record<string, string>;
-  /** 登记/清除笔记未落盘输入（NoteEditor 维护；保存完成且无新输入时清除）。 */
+  /** 登记/清除笔记未落盘输入（编辑会话维护；保存完成且无新输入时清除）。 */
   setPendingNoteContent: (file: string, content: string | null) => void;
   /** 立即落盘全部挂起笔记输入（关窗守卫/AI 文件操作前 flush 用），并补历史存档点（60s 合并）。
-   *  期间又有新编辑（handleChange 重新登记）则保留给下一轮，不误清。 */
+   *  期间又有新编辑（会话重新登记）则保留给下一轮，不误清。 */
   flushPendingNotes: () => Promise<void>;
-  /** 读笔记正文（无画布笔记编辑器用；组件不直调 service，走本 store）。 */
+  /** 读笔记正文（编辑会话加载用；组件不直调 service，走本 store）。 */
   readNoteContent: (file: string) => Promise<string>;
   /** 直读笔记磁盘全文（绕过内容缓存；外部修改感知/写前校验用真实磁盘）。 */
   readNoteFresh: (file: string) => Promise<string>;
@@ -98,7 +103,7 @@ interface NoteState {
   invalidateNoteCache: (file: string) => void;
   /** 作废某目录下的全部内容缓存（文件夹改名/移动后该前缀路径不再指代同一批文件）。 */
   invalidateNoteCacheUnder: (dir: string) => void;
-  /** 仅更新单文件笔记内容缓存（不经磁盘/基线；属性面板经编辑器合并后预写，面板即时刷新）。 */
+  /** 仅更新单文件笔记内容缓存（不经磁盘/基线；写盘前预写，读取方即时拿到新内容）。 */
   stageNoteContent: (file: string, content: string) => void;
   /** 记录一条笔记历史版本（版本边界；连续编辑自动节流合并，不逐键记录）。 */
   noteHistoryRecord: (
@@ -129,10 +134,6 @@ interface NoteState {
   resolveNoteConflict: (file: string, keepLocal: boolean) => void;
   /** 清除笔记冲突解决请求（编辑器卸载时调用，防残留）。 */
   clearNoteConflictResolveReq: (file: string) => void;
-  /** 笔记属性编辑请求（file → 递增序号 + 新 data；属性面板发请求，NoteEditor 订阅合并到实时正文走保存链）。 */
-  notePropsEditReq: Record<string, { seq: number; data: Record<string, unknown> }>;
-  /** 请求编辑笔记属性（属性面板调用；编辑器未挂载时请求无人消费，面板走直写路径）。 */
-  requestNotePropsEdit: (file: string, data: Record<string, unknown>) => void;
   /** 切仓库清态（openVault 后、下一个 await 前由领域生命周期钩子同步调用）：清空内容缓存与挂起输入。 */
   reset: () => void;
 }
@@ -289,11 +290,13 @@ export const useNoteStore = create<NoteState>((set, get) => ({
 
   noteConflictResolveReq: {},
 
+  // 请求序号全局单调（不随条目清除归零）：会话按「已处理的最大序号」判断新请求，
+  // 清除条目后从头计数会让会话误判为已处理过而吞掉按钮点击
   resolveNoteConflict: (file, keepLocal) =>
     set((s) => ({
       noteConflictResolveReq: {
         ...s.noteConflictResolveReq,
-        [file]: { seq: (s.noteConflictResolveReq[file]?.seq ?? 0) + 1, keepLocal },
+        [file]: { seq: ++conflictResolveSeq, keepLocal },
       },
     })),
 
@@ -304,20 +307,12 @@ export const useNoteStore = create<NoteState>((set, get) => ({
       return { noteConflictResolveReq: next };
     }),
 
-  notePropsEditReq: {},
-
-  requestNotePropsEdit: (file, data) =>
-    set((s) => ({
-      notePropsEditReq: {
-        ...s.notePropsEditReq,
-        [file]: { seq: (s.notePropsEditReq[file]?.seq ?? 0) + 1, data },
-      },
-    })),
-
   reset: () => {
     // 挂起输入已在切仓库前 flush 落盘，这里只清残留（含 flush 后、切仓库前的新输入）：
-    // 必须与调用方同步完成，防旧仓库内容经已切换的仓库根写进新仓库同路径文件
-    set({ noteContents: {}, pendingNoteContent: {} });
+    // 必须与调用方同步完成，防旧仓库内容经已切换的仓库根写进新仓库同路径文件。
+    // 冲突/保存状态同属按文件的旧仓库运行时态，一并清（残留会让新仓库同路径误显冲突条、
+    // 并让 flushPendingNotes 永久跳过该文件）
+    set({ noteContents: {}, pendingNoteContent: {}, noteConflicts: {}, noteSaveStates: {} });
   },
 }));
 

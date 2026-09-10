@@ -45,11 +45,14 @@ import { useChatPanelStore } from "@/stores/chatPanelStore";
 import { useCalendarStore } from "@/stores/calendarStore";
 import { useNoteUndoStore } from "@/stores/noteUndoStore";
 import { useNoteStore } from "@/stores/noteStore";
+import { closeAllNoteSessions, noteSurfaceProvider, openNoteSessionFiles } from "@/stores/noteSessionStore";
+import { registerCollabPresenceProvider } from "@/stores/collabStore";
 import { isPendingFolderRenameOldPath, isPendingRenameOldPath, useVaultStore } from "@/stores/vaultStore";
 import { isSelfSaveEcho } from "@/utils/selfSave";
 import { isCollabCanvasRenamePath } from "@/utils/canvasCollab";
 import { tableToSnapshotText } from "@/utils/table";
 import { registerDomainLifecycle } from "@/utils/kernelLifecycle";
+import { registerNoteSurface } from "@/utils/noteSurfaceHost";
 import { subscribeVaultEvent } from "@/utils/vaultEvents";
 import { registerViewSlot } from "@/services/cordis/slots";
 import { pluginIdOf } from "@/services/cordis/loader";
@@ -143,6 +146,23 @@ function wireNoteAccess(): () => void {
     },
   });
   return () => setPluginNoteAccess(null);
+}
+
+/** 笔记正文编辑能力接线（builtin.note 的 capability）：注册会话提供者，笔记面板与画布文本节点经
+ *  `utils/noteSurfaceHost` 取同一篇的会话；presence 上报本端已打开编辑面的笔记（画布节点上编辑笔记时
+ *  聚焦文件是画布，对端据此仍能看到「谁在这篇笔记上」）。
+ *  返回 unregister（停用/卸载先落盘挂起输入再注销）。 */
+function wireNoteSurface(): () => void {
+  const off = registerNoteSurface(noteSurfaceProvider);
+  const offPresence = registerCollabPresenceProvider((base) => {
+    const editingNotes = openNoteSessionFiles();
+    return editingNotes.length ? { ...base, editingNotes } : base;
+  });
+  return () => {
+    offPresence();
+    closeAllNoteSessions();
+    off();
+  };
 }
 
 /** AI 会话能力接线（builtin.aichat 的 capability）：把会话历史 + 发起/停止注入 ctx.chat 数据源；
@@ -421,14 +441,22 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
         await useNoteStore.getState().flushPendingNotes();
       },
       onVaultLeaving: () => {
-        // 切仓库清空笔记撤销栈（防同路径串文件）；笔记运行时态的清态由 noteStore 自注册承担
+        // 切仓库清空笔记撤销栈与编辑会话（防同路径串文件）；笔记运行时态的清态由 noteStore 自注册承担
         useNoteUndoStore.getState().clearAll();
+        closeAllNoteSessions();
       },
       onVaultExit: async () => {
         await useNoteStore.getState().flushPendingNotes();
       },
     },
-    capability: wireNoteAccess,
+    capability: () => {
+      const offAccess = wireNoteAccess();
+      const offSurface = wireNoteSurface();
+      return () => {
+        offSurface();
+        offAccess();
+      };
+    },
     collabWiring: registerNoteCollabWiring,
     vaultEventHandlers: [
       vaultHandler("note:changed", (e) => {

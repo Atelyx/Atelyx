@@ -250,7 +250,7 @@ function rebuildEntryToBaseline(e: Entry, baselineText: string): void {
   e.lastFlushed = baselineText;
   e.pendingBaseline = null;
   e.lastRemoteAuthor = null;
-  // store 侧刷新 binding → NoteEditor 重 render → MarkdownEditor 随 collab 引用变化自动重绑
+  // store 侧刷新 binding → 编辑面重 render → MarkdownEditor 随 collab 引用变化自动重绑
   onBindingRefresh?.(e.doc.file, doc);
   // 重建后与房间重新收敛（确定性 seed 幂等）
   if (broadcast) {
@@ -395,8 +395,8 @@ export function receiveSyncMessage(
     return;
   }
   // 记录本次远端合入作者（历史按操作人署名用）+ 置远端应用标记：
-  // y-codemirror 在 yjs 事务内同步回写 CM → onBodyChange→handleChange 与此同栈，
-  // NoteEditor 据此区分「远端合入」（内容变化来自协作对端，不署本端用户）。
+  // y-codemirror 在 yjs 事务内同步回写 CM → onBodyChange→提交链与此同栈，
+  // 编辑会话据此区分「远端合入」（内容变化来自协作对端，不署本端用户）。
   e.lastRemoteAuthor = remoteAuthor ?? null;
   remoteApplyDepth++;
   // 普通 y-protocols sync 消息：按标准流程合入（见函数头部说明，不在普通消息做 seed 消歧）

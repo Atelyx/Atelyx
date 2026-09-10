@@ -129,6 +129,8 @@ async function establishConnection(): Promise<void> {
   myPeerId = null;
   // 丢弃节流窗口内未发出的陈旧 presence（切仓库后旧文件的选中不得发进新房间）
   pendingPresence = null;
+  // 最近一次上报基底同理失效：换房后 republishPresence 不得拿旧仓库的聚焦文件成帧
+  lastPresenceBase = null;
   useCollabStore.setState({ connected: false, peers: [] });
   // 序号须先于早退判断递增：await 版本号期间若有禁用协作/地址清空/回启动页等早退调用，
   // 也必须作废在途请求——否则旧请求恢复后仍用已失效配置建连（幽灵连接 / 发出 vaultId:null）
@@ -184,7 +186,11 @@ async function establishConnection(): Promise<void> {
   }
 }
 
+/** 最近一次上报的 presence 基底（不含 openFiles 等派生字段）：域内状态变化时据此重发。 */
+let lastPresenceBase: CollabPresence | null = null;
+
 function schedulePresenceBroadcast(presence: CollabPresence): void {
+  lastPresenceBase = presence;
   // 打开文件清单（跨视图保活：画布/笔记/表格可同时打开，聚焦文件置顶，供「协作房间」面板展示）
   const as = useAppStore.getState();
   const openFiles: CollabPresence["openFiles"] = [];
@@ -217,6 +223,12 @@ function schedulePresenceBroadcast(presence: CollabPresence): void {
  *  内部合并当前画布锁/流式与打开文件清单，保持 presence 载荷完整（同表/画布订阅同通道）。 */
 export function publishPluginPresence(view: string | null, file: string | null): void {
   schedulePresenceBroadcast({ file, selection: null, view });
+}
+
+/** 重发最近一次 presence（域内状态变化但聚焦文件/选中未变时用，如笔记编辑面开关）。
+ *  未上报过（未连接/未进仓）为 no-op。 */
+export function republishPresence(): void {
+  if (lastPresenceBase) schedulePresenceBroadcast(lastPresenceBase);
 }
 
 /** 域 presence 上报（画布/表格域经注册表接线自用；内部合并打开文件清单与各 provider）。 */
@@ -284,6 +296,7 @@ export const useCollabStore = create<CollabStoreState>((set) => ({
       broadcastTimer = null;
     }
     pendingPresence = null;
+    lastPresenceBase = null;
     set({ connected: false, peers: [], myPeerId: null });
   },
 }));

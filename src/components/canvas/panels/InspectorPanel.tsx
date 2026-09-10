@@ -28,10 +28,10 @@ import { useCanvasStore } from "@/stores/canvasStore";
 import { usePanelStore } from "@/stores/panelStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useUiStateStore } from "@/stores/uiStateStore";
-import { useNoteStore } from "@/stores/noteStore";
 import { BUILTIN_AGENT_CHAT_ID } from "@/constants/agents";
 import { DropdownSelect } from "@/components/common/DropdownSelect";
 import { NotePropertiesView } from "@/components/editor/NotePropertiesView";
+import { useNoteBodySession, useNoteSurface } from "@/hooks/useNoteBodySession";
 import { useVaultTagCandidates } from "@/hooks/useVaultTagCandidates";
 import { parseFrontmatter, stringifyFrontmatter } from "@/utils/frontmatter";
 import { noteTitleFromFile } from "@/utils/filename";
@@ -279,23 +279,18 @@ export function InspectorPanel() {
   const selectedNoteFile =
     node && node.type === "text" ? (node.data as unknown as TextData).file ?? null : null;
   const targetNoteFile = context?.kind === "note" ? context.file : selectedNoteFile;
-  const noteContent = useNoteStore((s) =>
-    targetNoteFile ? s.noteContents[targetNoteFile] : undefined,
-  );
+  // 笔记正文会话：属性读写与笔记面板/画布节点共用同一条保存链（同一篇笔记只有一个写者）
+  const { session: noteSession, view: noteView } = useNoteBodySession(targetNoteFile);
+  /** 笔记能力是否可用：会话/属性尚在载入时与「能力缺席」是两回事，降级文案只对后者 */
+  const noteSurface = useNoteSurface();
   const parsed = useMemo(
-    () => (noteContent !== undefined ? parseFrontmatter(noteContent) : null),
-    [noteContent],
+    () => (noteView ? parseFrontmatter(noteView.content) : null),
+    [noteView],
   );
-  // 目标笔记未缓存（首次展示 / 外部修改作废缓存）→ 补读；读失败保持 undefined（不渲染属性编辑区）
-  useEffect(() => {
-    if (targetNoteFile && noteContent === undefined) {
-      void useNoteStore.getState().readNoteContent(targetNoteFile).catch(() => {
-        // 读失败静默：属性编辑区不渲染，防在已删除文件上误建（写盘复活文件）
-      });
-    }
-  }, [targetNoteFile, noteContent]);
+  // 落盘失败由会话写入会话状态（面板 header 展示）；本面板独立成面板时也要可见
+  const noteSaveFailed = !!noteView?.error;
   const { tagCandidates, requestTagCandidates } = useVaultTagCandidates();
-  // 直写路径保存失败：内联错误提示 + 重试（编辑器挂载时路由到编辑器，失败由其保存状态展示）
+  // 属性提交失败：内联错误提示 + 重试（stringify 失败等本端错误；写盘失败见 noteSaveFailed）
   const [saveError, setSaveError] = useState(false);
   const lastFailedDataRef = useRef<Record<string, unknown> | null>(null);
 
@@ -308,39 +303,16 @@ export function InspectorPanel() {
     setCenter(n.position.x + w / 2, n.position.y + h / 2, { zoom: 1, duration: 300 });
   };
 
-  // 笔记模式：frontmatter 属性（与编辑器属性区同一组件，增删改即时写盘，
-  // 经 noteStore 缓存/保存链与编辑器双向同步）
+  // 笔记模式：frontmatter 属性（与编辑器属性区同一组件，改动经会话保存链落盘）
   if (targetNoteFile) {
     const title = noteTitleFromFile(targetNoteFile);
-    /** 笔记属性提交：编辑器挂载时路由到编辑器合并实时正文走保存链（防未落盘正文被整文件覆盖、
-     * 撤销/挂起输入/历史全复用）；未挂载才直写。 */
     const handleNotePropsUpdate = (next: Record<string, unknown>) => {
-      if (!parsed) return;
+      if (!parsed || !noteSession) return;
       lastFailedDataRef.current = next;
-      // 编辑器是否挂载 = noteSaveStates 是否有该文件条目（编辑器加载即登记、卸载清除）
-      const editorMounted =
-        useNoteStore.getState().noteSaveStates[targetNoteFile] !== undefined;
-      if (editorMounted) {
-        useNoteStore.getState().requestNotePropsEdit(targetNoteFile, next);
-        setSaveError(false);
-        return;
-      }
       try {
-        const full = stringifyFrontmatter(next, parsed.body);
-        void useNoteStore
-          .getState()
-          .saveNoteContent(targetNoteFile, full)
-          .then(() => {
-            setSaveError(false);
-            // 记编辑存档点（与编辑器 debounce 保存同源；60s 连续编辑合并）
-            void useNoteStore.getState().noteHistoryRecord(targetNoteFile, full, "edit");
-          })
-          .catch((e) => {
-            console.error("笔记属性保存失败", e);
-            setSaveError(true);
-          });
+        noteSession.commitContent(stringifyFrontmatter(next, parsed.body));
+        setSaveError(false);
       } catch (e) {
-        // stringify 异常（不应发生）：不污染内容，记录日志便于排查（与 NoteEditor 同策略）
         console.error("[frontmatter] stringify error:", e, next);
         setSaveError(true);
       }
@@ -363,7 +335,7 @@ export function InspectorPanel() {
               {targetNoteFile}
             </div>
           </div>
-          {parsed && (
+          {parsed ? (
             <NotePropertiesView
               key={targetNoteFile}
               data={parsed.data}
@@ -373,8 +345,13 @@ export function InspectorPanel() {
               tagCandidates={tagCandidates}
               onRequestTagCandidates={requestTagCandidates}
             />
-          )}
-          {saveError && (
+          ) : !noteSurface ? (
+            /* 笔记能力缺席（笔记插件停用）：属性读写无提供者，明示降级而不是静默少一块 */
+            <div className="text-xs" style={{ color: "#f59e0b" }}>
+              笔记能力未启用，属性不可编辑
+            </div>
+          ) : null}
+          {(saveError || noteSaveFailed) && (
             <div className="text-xs flex items-center gap-2" style={{ color: "#f87171" }}>
               <span>属性保存失败</span>
               <button

@@ -25,7 +25,6 @@ import {
   deleteNote,
   type RuntimeCanvas,
 } from "@/services/vault";
-import { decideTextNodeRefresh } from "@/utils/noteRefresh";
 import { readTableVault } from "@/services/table";
 import { tableToSnapshotText } from "@/utils/table";
 import {
@@ -2227,41 +2226,15 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
     }),
   refreshTextContent: (file) =>
     refreshFileNodes(file, "text", async (targets) => {
+      // 节点正文只是渲染缓存（编辑中正文以编辑会话为源），故一律读到磁盘最新再逐节点比对：
+      // 正文一致即不返回补丁（防每次 note:changed 都换节点引用）；并发两次读盘时较旧回落属瞬时现象，
+      // 下一次事件或重新进入编辑即自愈
       const bodyMd = await readNote(file);
-      // 逐节点判定刷新/跳过（见 utils/noteRefresh#decideTextNodeRefresh）：
-      // - 节点正文 == 磁盘 → 已一致跳过；
-      // - 自上次落盘后改过正文（bodyMd ≠ lastSaved 同 id 节点）且磁盘仍停在节点基线 →
-      //   保留本地编辑跳过，防「提交编辑 A → 保存写盘 → 回波到达前又提交编辑 B → 回波把 B 覆盖回 A」丢字；
-      // - 未编辑过/新建未落盘 → 刷新到磁盘最新；
-      // - 已编辑但磁盘已前进到节点基线之后（笔记编辑器/AI 写入）→ 外部最新者胜，刷新到磁盘，
-      //   防陈旧基线上的编辑回写覆盖磁盘新内容（笔记编辑器静默回退根因，见 noteRefresh）。
-      // 不能用 isKnownNoteDiskContent（lastWrittenMd）判回波：AI 文件写入也会登记基线，
-      // 会把「磁盘新于节点内存」误判为自写回波而跳过刷新，节点保持陈旧——下次画布保存
-      // 经 toFileNode 把旧正文回写覆盖 Agent 编辑。
-      // 记录判定时刻的节点正文：set 时若正文已变（await 读盘窗口内用户又编辑了该节点），
-      // 跳过刷新保留更新的本地编辑（与 keep 分支同语义，防把新输入覆盖回磁盘内容）。
-      const staleDecisions = new Map<string, string>();
-      for (const n of targets) {
-        const cur = (n.data as unknown as TextData).bodyMd ?? "";
-        if (cur === bodyMd) continue;
-        const saved = lastSavedNodes.find((s) => s.id === n.id);
-        const savedBody = saved
-          ? (saved.data as unknown as TextData).bodyMd
-          : undefined;
-        if (decideTextNodeRefresh(cur, savedBody, bodyMd) === "refresh") {
-          staleDecisions.set(n.id, cur);
-        }
-      }
-      if (staleDecisions.size === 0) return null;
-      // 同步磁盘基线（lastWrittenMd）：外部编辑刷新后用户「改回旧值」时脏检测能感知差异
-      // （基线陈旧会导致回退被误判为「与上次写入一致」而跳过写盘，外部内容永久覆盖用户回退）
-      recordNoteDiskContent(file, bodyMd);
-      return (n) => {
-        const decCur = staleDecisions.get(n.id);
-        if (decCur === undefined) return null;
-        if (((n.data as unknown as TextData).bodyMd ?? "") !== decCur) return null;
-        return { bodyMd, fileMissing: false };
-      };
+      const ids = new Set(targets.map((t) => t.id));
+      return (n) =>
+        ids.has(n.id) && (n.data as unknown as TextData).bodyMd !== bodyMd
+          ? { bodyMd, fileMissing: false }
+          : null;
     }),
   refreshMediaContent: (file) =>
     refreshFileNodes(file, "media", async (targets) => {
@@ -3052,9 +3025,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
         if (i >= 0) {
           // 远端结构补丁省略、由接收端自行补读的内容，覆盖前保留本端既有值防瞬时空白：
           // - 文件型 text 节点：正文在共享盘 `.md`，补丁只带 { title, file } 不带 bodyMd。
-          //   直接剥离会让接收端节点空白，且 stripped 空值会被 refreshTextContent 的 keep
-          //   判定误认为「用户清空过正文」而跳过刷新（持久空白）；保留后 refreshTextContent
-          //   以「补丁前正文」与磁盘比对：一致跳过 / 磁盘更新则刷新。
+          //   保留本端值后由 refreshTextContent 读盘补到最新（正文一致则跳过）。
           // - table 节点：快照摘要不在补丁（在共享盘 `.atb`），保留本端既有 snapshot 防画布
           //   节点空白，后续由表格 watcher 分支 refreshTableContent 补读最新。
           if (node.type === "text" || node.type === "table") {

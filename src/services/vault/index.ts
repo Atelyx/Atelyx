@@ -28,7 +28,6 @@ import {
 } from "@/utils/canvasCollab";
 import { coalesceAgentSteps, normalizeAgentSteps } from "@/utils/agentSteps";
 import { readTableVault } from "@/services/table";
-import { recordHistoryVersion } from "@/services/history";
 import {
   type CanvasFile,
   type CanvasCreateResult,
@@ -370,9 +369,9 @@ function setLastWrittenMd(file: string, content: string): void {
 }
 
 /**
- * 记录某 .md 的最近已知磁盘内容（load/外部刷新读到磁盘内容后调用）。
+ * 记录某 `.md` 的最近已知磁盘内容（load 读盘与应用内写盘后调用）。
  * 脏检测基线 = 「最近已知磁盘内容」而非「应用最近一次写入」：外部改后刷新、用户改回旧值
- * 时必须能感知差异写盘（否则外部内容会永久覆盖用户的回退），见 canvasStore.refreshTextContent。
+ * 时必须能感知差异写盘（否则外部内容会永久覆盖用户的回退），见 stores/noteSessionStore。
  */
 export function recordNoteDiskContent(file: string, content: string): void {
   setLastWrittenMd(file, content);
@@ -483,7 +482,7 @@ async function canvasFileToRuntime(file: CanvasFile): Promise<RuntimeCanvas> {
 
 /**
  * 单个运行时节点 → 磁盘节点。
- * - text 笔记节点：脏检测写回 `.md`（lastWrittenMd 基线）+ 剥离 bodyMd，data 只留 {title, file}
+ * - text 笔记节点：剥离 bodyMd，data 只留 `{title, file}`（正文写盘归笔记编辑会话）
  * - conversation 节点：嵌入 `messagesByConv[id]` 到 `data.messages`
  * - 扁平 position → x/y
  */
@@ -495,26 +494,7 @@ async function toFileNode(
   if (n.type === "text") {
     const td = n.data as unknown as TextData;
     if (td.file) {
-      // 笔记节点：脏检测写回 `.md` + 剥离 bodyMd，data 只留 {title, file}（正文在 .md 文件）
-      // 脏检测：bodyMd 与上次写入值不同才写盘（外部改 .md 后 bodyMd 未变则不写，保留外部内容）
-      if (
-        td.bodyMd !== undefined &&
-        lastWrittenMd.get(td.file) !== td.bodyMd
-      ) {
-        try {
-          await writeNote(td.file, td.bodyMd);
-          setLastWrittenMd(td.file, td.bodyMd);
-          // 画布文本节点写回 .md：记笔记历史存档点（60s 合并；与编辑器保存同源，防
-          // 只在画布上编辑的笔记无历史记录）。历史尽力而为，失败静默不阻塞画布保存
-          void recordHistoryVersion("note", td.file, {
-            content: td.bodyMd,
-            action: "edit",
-            coalesceEditMs: 60_000,
-          });
-        } catch (e) {
-          console.error("写笔记失败", e);
-        }
-      }
+      // 笔记节点：正文在 `.md`，写盘归笔记编辑会话（同一篇的多个编辑面共用一条写盘链）
       data = { title: td.title || "未命名", file: td.file };
     } else {
       // 画布内文本节点（无 file）：bodyMd 随 .atlx 内嵌持久化，不落 `.md`（右键「保存为笔记」才写文件）
@@ -591,7 +571,6 @@ export interface CanvasSaveSnapshot {
 /**
  * 增量保存画布（自动保存主路径）：与上次保存快照按引用 diff，只序列化变化/新增/删除的实体，
  * 经 `patch_canvas_vault` 按稳定 id 合并到磁盘全量文件（乐观锁语义同全量写）。
- * 脏 text 节点 .md 写回在此（同全量路径的 lastWrittenMd 门控）。
  * 空补丁（无变化实体）返回 null——调用方跳过 IPC（磁盘已一致）。
  * 返回写入后的 { updatedAt, file }（title 变更重命名时 file = 新相对路径）。
  */

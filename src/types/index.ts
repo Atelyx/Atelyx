@@ -178,3 +178,10 @@ export {
   type PluginCanvasEdge,
   type PluginCanvasSnapshot,
 } from "./plugin";
+
+export type {
+  NoteEditorBinding,
+  NoteBodySessionView,
+  NoteBodySession,
+  NoteSurfaceProvider,
+} from "./noteSurface";
