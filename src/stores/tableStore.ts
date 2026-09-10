@@ -25,7 +25,7 @@ import {
   versionContentAt,
   type HistoryVersion,
 } from "@/services/history";
-import { markSelfSave } from "@/utils/selfSave";
+import { isSelfSaveEcho, markSelfSave } from "@/utils/selfSave";
 import { clearTableImageCache } from "@/services/tableImageCache";
 import { emitPluginEvent } from "@/services/cordis/events";
 import { setPluginTableRuntimeAccess, type PluginTableRuntimeAccess } from "@/services/cordis/access";
@@ -51,6 +51,7 @@ import {
   selectionRegion,
   styleEqual,
   summarizeTableSnapshot,
+  tablesEqual,
   type TableRegion,
 } from "@/utils/table";
 import type {
@@ -95,6 +96,9 @@ interface TableStoreState {
   load: (file: string) => Promise<void>;
   /** 外部修改后重载磁盘最新内容（无本地改动时 watcher 调用）。 */
   reloadFromDisk: () => Promise<void>;
+  /** 外部写入后按内容比对决定是否重载（协作对端在场 / 自写回放 / 读盘与内存一致 → 跳过）。
+   *  仅当前打开且无脏改动时生效；读失败（文件被外部删除等）干净态下走 reloadFromDisk 的错误路径降级提示。 */
+  syncFromDiskIfChanged: (file: string) => Promise<void>;
   /** 冲突处理：keepLocal=true 保留本地并保存（绕过乐观锁覆盖磁盘）；false 重载丢弃本地。 */
   resolveConflict: (keepLocal: boolean) => Promise<void>;
   /** 清空运行时状态（切仓库/关窗口/删除文件时调用：取消保存定时器，防残留 timer 重写已删文件）。 */
@@ -812,6 +816,28 @@ export const useTableStore = create<TableStoreState>((set, get) => ({
     if (!file) return;
     // load 会清 dirty/冲突并同步乐观锁基准（磁盘即最新）
     await get().load(file);
+  },
+
+  syncFromDiskIfChanged: async (file) => {
+    // 协作对端同表在场 → 跳过读比重载：广播比落盘先到（编辑即达 vs 500ms 防抖落盘 + watcher 延迟），
+    // 磁盘合法落后于内存，重载会用陈旧盘回退已应用的对端补丁（闪烁/永久回退根因）；
+    // 磁盘收敛由下次保存的乐观锁自动三方合并负责（retryMergePersist）
+    if (hasCollabPeerOnTable(file)) return;
+    // 自写回放（本端刚写盘，内容已知）跳过读比：省去每次保存后的整表读盘 + 深比
+    //（大表图片多时 .atb 可达数十 MB，保存后卡顿主因）；自写窗口内（markSelfSave 2s）
+    // 的外部编辑可能漏检，由乐观锁 + 自动三方合并兜底收敛
+    if (isSelfSaveEcho(file)) return;
+    try {
+      const disk = await readTableVault(file);
+      // 读盘期间可能已切表/产生脏改动：以最新状态守卫，防误重载覆盖新编辑
+      const s = get();
+      if (s.tableFile !== file || s.dirty) return;
+      if (tablesEqual(disk, { fields: s.fields, rows: s.rows })) return;
+      void s.reloadFromDisk();
+    } catch {
+      const s = get();
+      if (s.tableFile === file && !s.dirty) void s.reloadFromDisk();
+    }
   },
 
   resolveConflict: async (keepLocal) => {

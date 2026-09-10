@@ -21,6 +21,9 @@ ctx.effect(() => {
 | 服务 | 方法 | 说明 |
 | --- | --- | --- |
 | `ctx.state` | `read(pluginId)` / `write(pluginId, data)` | 插件自持状态（单 JSON 对象，按插件 id 隔离） |
+| `ctx.storage` | `get(pluginId, key)` / `set(pluginId, key, value)` / `delete(pluginId, key)` / `keys(pluginId)` / `clear(pluginId)` | 插件键值存储（按插件 id 隔离，独立于 `ctx.state`；值须 JSON 可序列化） |
+| `ctx.http` | `request({ url, method?, headers?, body? })` | 通用 HTTP 请求（敏感：网络出口；Rust 代理绕 CORS，20s 超时 + 1MB 响应上限，内网/回环地址拒绝） |
+| `ctx.notification` | `notify({ message, title?, level? })` / `dismiss(id)` | 应用内通知（右下角堆叠；`level` = info/success/warning/error，自动消失） |
 | `ctx.app` | `version()` / `platform()` / `openPage(pageId)` | 宿主信息与页面打开 |
 | `ctx.shell` | `exec(opts, handlers?)` | 执行外部程序（敏感：可执行任意命令；传 handlers 流式） |
 | `ctx.vault` | `listFiles/readFile/readFileWindow/listDir/glob/grep/writeFile/editFile/appendFile/renameFile/moveFile/deleteFile/deleteDir/createFolder` | 仓库文件读写（写方法语义与 AI 文件工具一致；失败返回 `{ ok, summary }` 不抛断） |

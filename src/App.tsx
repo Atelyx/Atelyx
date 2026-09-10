@@ -7,6 +7,7 @@ import { usePluginStore } from "@/stores/pluginStore";
 import { PanelWindowRoot } from "@/components/layout/PanelWindowRoot";
 import { ErrorBoundary } from "@/components/common/ErrorBoundary";
 import { LoadingScreen } from "@/components/common/LoadingScreen";
+import { NotificationHost } from "@/components/common/NotificationHost";
 import { useAppearance } from "@/hooks/useAppearance";
 import { getCurrentWindowLabel } from "@/services/window";
 import { layoutReconcile } from "@/services/layout";
@@ -204,9 +205,11 @@ export default function App() {
 
   return (
     <ReactFlowProvider>
-      {/* 错误边界：渲染崩溃显示错误面板（可读可关窗），不白屏 */}
+      {/* 错误边界：渲染崩溃显示错误面板（可读可关窗），不白屏；通知宿主也在边界内（其渲染异常不越界白屏） */}
       <ErrorBoundary>
         {isPanel ? <PanelWindowRoot /> : <MainWorkspaceApp />}
+        {/* 应用内通知宿主（每个窗口各挂一个；插件经 ctx.notification 触达） */}
+        <NotificationHost />
       </ErrorBoundary>
     </ReactFlowProvider>
   );

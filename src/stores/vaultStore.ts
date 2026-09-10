@@ -53,19 +53,14 @@ import {
 } from "@/services/table";
 import { subscribeVaultFileChanges } from "@/services/watcher";
 import { isSelfSaveEcho, markSelfSave } from "@/utils/selfSave";
-import { isCollabCanvasRenamePath } from "@/utils/canvasCollab";
-import { useCanvasStore, hasCollabPeerOnCanvas } from "@/stores/canvasStore";
 import { useAppStore } from "@/stores/appStore";
-import { useNoteUndoStore } from "@/stores/noteUndoStore";
-import { useChatPanelStore } from "@/stores/chatPanelStore";
+import { emitVaultEvent, emitVaultEventAsync, type VaultEvent } from "@/utils/vaultEvents";
 import { emitPluginEvent } from "@/services/cordis/events";
 import { useSettingsStore } from "@/stores/settingsStore";
-import { useTableStore, hasCollabPeerOnTable } from "@/stores/tableStore";
 import { useUiStateStore } from "@/stores/uiStateStore";
-import { baseName, dedupeFilename, parentDir, remapDirPrefix, sanitizeFilename, siblingPath, stripExt } from "@/utils/filename";
-import { tableToSnapshotText, tablesEqual } from "@/utils/table";
+import { baseName, dedupeFilename, parentDir, sanitizeFilename, siblingPath, stripExt } from "@/utils/filename";
 import { errText } from "@/types";
-import type { BacklinkRow, CanvasFileRow, DeleteFolderResult, FileTreeNode, RebuildLinksResult, TagRow, TextData, VaultFileChange } from "@/types";
+import type { BacklinkRow, CanvasFileRow, DeleteFolderResult, FileTreeNode, RebuildLinksResult, TagRow, VaultFileChange } from "@/types";
 
 /**
  * 文本节点 `.md` 文件名约定：`<sanitized-title>.md`（标题即文件名，无 id 后缀）。
@@ -75,30 +70,11 @@ import type { BacklinkRow, CanvasFileRow, DeleteFolderResult, FileTreeNode, Rebu
 /**
  * 软件内正在进行的重命名（old → new）。renameNote/renameAttachment 记录，
  * watcher 收到旧路径的删除事件时据此跳过（file 引用已同步，防误标文件缺失）。
+ * 谓词供领域订阅者判定（内核只提供事实，不代领域决定是否跳过）。
  */
 let pendingRename: { oldFile: string; newFile: string } | null = null;
 export function isPendingRenameOldPath(path: string): boolean {
   return pendingRename?.oldFile === path;
-}
-
-/**
- * watcher `table` 事件回放判别（打开表格路径命中时）：读盘（Rust 缓存，mtime+len 指纹失效，快）
- * 与内存内容比对——一致 = 自写回放或已广播应用的对端写入 → 跳过（不重载，保护撤销栈/选中态）；
- * 不一致 = 真实外部修改 → 静默重载。不用时间窗抑制（盲窗会吞掉对端写入），内容比对精确。
- * 读失败（文件被外部删除等）：干净时交由 reloadFromDisk 的读错误路径降级提示。
- */
-async function maybeReloadTableIfChanged(file: string): Promise<void> {
-  try {
-    const disk = await readTableVault(file);
-    // 读盘期间可能已切表/产生脏改动：以最新状态守卫，防误重载覆盖新编辑
-    const s = useTableStore.getState();
-    if (s.tableFile !== file || s.dirty) return;
-    if (tablesEqual(disk, { fields: s.fields, rows: s.rows })) return;
-    void s.reloadFromDisk();
-  } catch {
-    const s = useTableStore.getState();
-    if (s.tableFile === file && !s.dirty) void s.reloadFromDisk();
-  }
 }
 
 /** 最近一次软件内笔记重命名（保留跨渲染周期，供窗口联动区分「重命名」与「真删除」）。 */
@@ -206,7 +182,20 @@ let watcherUnlisten: (() => void) | undefined;
 let watcherGen = 0;
 
 /**
- * renameNote/moveNote 共用核心：pendingRename 记录 + 服务调用 + 自写抑制 + 乐观锁基准 +
+ * 投递文件动作事件：领域反应失败不阻断内核簿记。
+ * 侧文件迁移/提示词重映射/「上次打开」同步等属内核职责，不能因某个订阅方（含用户插件）抛错被跳过；
+ * 领域订阅方各自负责自身失败降级（此处只记日志）。
+ */
+async function emitFileEvent(event: VaultEvent): Promise<void> {
+  try {
+    await emitVaultEventAsync(event);
+  } catch (e) {
+    console.error("仓库文件事件投递失败", e);
+  }
+}
+
+/**
+ * renameNote/moveNote 共用核心：pendingRename 记录 + 服务调用 + 自写抑制 + 自动保存基准 +
  * 画布节点同步（text file）+ 树刷新 + 重命名记录。
  * newTitle 为 null = 移动（title 不变，只改 file）；否则 = 重命名（title 一并更新）。
  */
@@ -216,20 +205,14 @@ async function applyNoteFileChange(oldFile: string, newFile: string, newTitle: s
     await renameNoteSvc(oldFile, newFile);
     // rename_note 会扫描更新所有 .atlx 的 file 引用（写 .atlx），标记自写抑制 watcher 误报
     markSelfSave();
-    // 磁盘 .atlx 已变：同步当前画布乐观锁基准，防重命名后自动保存被「已被外部修改」拒绝
-    await useCanvasStore.getState().syncBaseUpdatedAt();
-    // 同步当前画布内引用该笔记的节点：text 节点 title + file
-    // （磁盘已被 rename_note 更新，此处同步内存防下次保存把旧值回写覆盖；
-    //   同步后 watcher 旧路径事件按新路径匹配不到节点，天然不再误标缺失）
-    const canvasState = useCanvasStore.getState();
-    for (const n of canvasState.nodes) {
-      if (n.type === "text" && (n.data as { file?: string }).file === oldFile) {
-        canvasState.updateNodeData(
-          n.id,
-          newTitle !== null ? { title: newTitle, file: newFile } : { file: newFile },
-        );
-      }
-    }
+    // 磁盘 .atlx 已变：画布订阅者据 `note:renamed|moved` 同步乐观锁基准与节点 file/title，
+    // 须在函数返回前完成（下一次自动保存依赖基准已更新）；撤销栈路径迁移同由笔记订阅者承担
+    await emitFileEvent({
+      kind: newTitle === null ? "note:moved" : "note:renamed",
+      oldPath: oldFile,
+      newPath: newFile,
+      newTitle,
+    });
     await useVaultStore.getState().loadFiles();
     // 记录本次重命名（跨渲染保留）：窗口联动据此把打开的笔记切到新文件，而非误判删除关闭
     lastNoteRename = { oldFile, newFile };
@@ -238,8 +221,6 @@ async function applyNoteFileChange(oldFile: string, newFile: string, newTitle: s
     await migrateHistoryFile("note", oldFile).catch(() => {});
     // 历史侧文件随迁（新路径继续累积、旧版本不丢）；失败静默降级，不阻塞重命名主流程
     await remapSideloads(oldFile, newFile).catch(() => {});
-    // 撤销栈随路径迁移（撤销历史不因改名丢失、旧键不滞留内存）
-    useNoteUndoStore.getState().renameFile(oldFile, newFile);
     // 系统提示词标记按路径引用：重命名/移动后同步 promptNotes，防标记指向旧路径失效
     await useSettingsStore.getState().remapPromptNote(oldFile, newFile);
     // Agent 引用的提示词笔记同款同步（agents.json 的 systemPromptFile 指向旧路径失效）
@@ -251,22 +232,23 @@ async function applyNoteFileChange(oldFile: string, newFile: string, newTitle: s
   }
 }
 
-/** renameAttachment/moveAttachment 共用核心（media 节点 file 同步，无 title）。 */
-async function applyAttachmentFileChange(oldFile: string, newFile: string): Promise<void> {
+/** renameAttachment/moveAttachment 共用核心（media 节点 file 同步归画布订阅者）。 */
+async function applyAttachmentFileChange(
+  oldFile: string,
+  newFile: string,
+  kind: "attachment:renamed" | "attachment:moved",
+): Promise<void> {
   pendingRename = { oldFile, newFile };
   try {
     await renameAttachmentSvc(oldFile, newFile);
     // rename_attachment 会扫描更新所有 .atlx 的 media 引用（写 .atlx），标记自写抑制 watcher 误报
     markSelfSave();
-    // 磁盘 .atlx 已变：同步当前画布乐观锁基准（同 applyNoteFileChange）
-    await useCanvasStore.getState().syncBaseUpdatedAt();
-    // 同步当前画布内引用该附件的 media 节点 file（防回写覆盖 + watcher 误标缺失）
-    const canvasState = useCanvasStore.getState();
-    for (const n of canvasState.nodes) {
-      if (n.type === "media" && (n.data as { file?: string }).file === oldFile) {
-        canvasState.updateNodeData(n.id, { file: newFile });
-      }
-    }
+    // 磁盘 .atlx 已变：画布订阅者同步乐观锁基准 + 引用该附件的 media 节点 file（防回写覆盖旧值）
+    await emitFileEvent({
+      kind,
+      oldPath: oldFile,
+      newPath: newFile,
+    });
     await useVaultStore.getState().loadFiles();
   } finally {
     pendingRename = null;
@@ -274,8 +256,8 @@ async function applyAttachmentFileChange(oldFile: string, newFile: string): Prom
 }
 
 /**
- * renameTable/moveTable 共用核心：pendingRename 记录 + 服务调用 + 自写抑制 + 乐观锁基准 +
- * 画布 table 节点同步（file/title）+ 树刷新 + 重命名记录（模式同 applyNoteFileChange）。
+ * renameTable/moveTable 共用核心：pendingRename 记录 + 服务调用 + 自写抑制 + 树刷新 + 重命名记录；
+ * 画布 table 节点引用同步与乐观锁基准由画布订阅者据事件承担（模式同 applyNoteFileChange）。
  * 服务命令内部已按 title/新路径扫描更新全部 .atlx 的 table 节点引用。
  */
 async function applyTableFileChange(oldFile: string, newFile: string, newTitle: string | null): Promise<void> {
@@ -287,17 +269,12 @@ async function applyTableFileChange(oldFile: string, newFile: string, newTitle: 
       await moveTableVault(oldFile, newFile);
     }
     markSelfSave();
-    await useCanvasStore.getState().syncBaseUpdatedAt();
-    // 同步当前画布内引用该表格的 table 节点（防下次保存把旧值回写覆盖 + watcher 误标缺失）
-    const canvasState = useCanvasStore.getState();
-    for (const n of canvasState.nodes) {
-      if (n.type === "table" && (n.data as { file?: string }).file === oldFile) {
-        canvasState.updateNodeData(
-          n.id,
-          newTitle !== null ? { title: newTitle, file: newFile } : { file: newFile },
-        );
-      }
-    }
+    await emitFileEvent({
+      kind: newTitle === null ? "table:moved" : "table:renamed",
+      oldPath: oldFile,
+      newPath: newFile,
+      newTitle,
+    });
     await useVaultStore.getState().loadFiles();
     lastTableRename = { oldFile, newFile };
     // 侧文件先确保在新编码名下，再随重命名迁移（同 applyNoteFileChange）
@@ -311,8 +288,13 @@ async function applyTableFileChange(oldFile: string, newFile: string, newTitle: 
   }
 }
 
-/** renameFolder/moveFolder 共用核心：pendingFolderRename 记录 + 服务调用 + 自写抑制 + 画布路径/节点引用同步 + 树刷新。 */
-async function applyFolderFileChange(oldDir: string, newDir: string): Promise<void> {
+/** renameFolder/moveFolder 共用核心：pendingFolderRename 记录 + 服务调用 + 自写抑制 + 树/列表刷新；
+ *  画布打开路径与节点引用的前缀同步归画布订阅者（据 `folder:renamed|moved` 事件）。 */
+async function applyFolderFileChange(
+  oldDir: string,
+  newDir: string,
+  kind: "folder:renamed" | "folder:moved",
+): Promise<void> {
   pendingFolderRename = { oldDir, newDir };
   try {
     await renameFolderSvc(oldDir, newDir);
@@ -324,27 +306,15 @@ async function applyFolderFileChange(oldDir: string, newDir: string): Promise<vo
     await remapSideloadsByDir(oldDir, newDir).catch(() => {});
     // rename_folder 会扫描更新所有 .atlx 的目录前缀引用（写 .atlx），标记自写抑制 watcher 误报
     markSelfSave();
-    // 当前画布文件若位于该目录下：先同步路径（旧路径已不存在），再同步乐观锁基准
-    // （磁盘 .atlx 已被 rename_folder 更新 updatedAt，防下次自动保存被「已被外部修改」拒绝）
-    const canvasFile = useCanvasStore.getState().canvasFile;
-    if (canvasFile?.startsWith(`${oldDir}/`)) {
-      useCanvasStore.setState({ canvasFile: remapDirPrefix(canvasFile, oldDir, newDir) });
-      useAppStore.getState().renameCurrentCanvasFile(oldDir, newDir);
-    }
-    await useCanvasStore.getState().syncBaseUpdatedAt();
-    // 同步当前画布内位于该目录下的节点引用（磁盘已被 rename_folder 更新，此处同步内存
-    // 防下次保存把旧路径回写覆盖；同步后 watcher 旧路径事件按前缀匹配不到节点，天然不再误标缺失）
-    const canvasState = useCanvasStore.getState();
-    for (const n of canvasState.nodes) {
-      const d = n.data as { file?: string };
-      if (
-        (n.type === "text" || n.type === "media") &&
-        d.file &&
-        d.file.startsWith(`${oldDir}/`)
-      ) {
-        canvasState.updateNodeData(n.id, { file: remapDirPrefix(d.file, oldDir, newDir) });
-      }
-    }
+    // 当前画布文件若位于该目录下：先同步打开路径（旧路径已不存在，方法内部自带前缀守卫）；
+    // 画布订阅者再同步其运行时路径/乐观锁基准/节点前缀引用（磁盘 .atlx 已被 rename_folder 更新
+    // updatedAt，防下次保存误判「已被外部修改」）
+    useAppStore.getState().renameCurrentCanvasFile(oldDir, newDir);
+    await emitFileEvent({
+      kind,
+      oldDir,
+      newDir,
+    });
     // 系统提示词标记 / 文件夹图标颜色 / 展开集合 / 上次打开文件：前缀同步（防标记与恢复指向失效路径）
     await useSettingsStore.getState().remapPromptNotesByDir(oldDir, newDir);
     await useSettingsStore.getState().remapAgentPromptNotesByDir(oldDir, newDir);
@@ -548,11 +518,6 @@ interface VaultFileState {
    * 副本是独立目录，内部相对路径引用随整体复制仍有效，无需链接维护。
    */
   duplicateFolder: (dir: string) => Promise<string>;
-  /**
-   * 画布内文本节点（无 file）右键「保存为笔记」：落根目录生成 `.md`（净化 + 同名去重）并写入正文，
-   * 节点 data.file 置为生成路径转为笔记节点（后续编辑写回 `.md`）。已是笔记节点则 no-op。
-   */
-  saveTextNodeAsNote: (nodeId: string) => Promise<void>;
   /** 读笔记正文（无画布笔记编辑器用；组件不直调 service，走本 store）。 */
   readNoteContent: (file: string) => Promise<string>;
   /** 直读笔记磁盘全文（绕过内容缓存；外部修改感知/写前校验用真实磁盘）。 */
@@ -700,10 +665,9 @@ export const useVaultStore = create<VaultFileState>((set, get) => ({
 
   deleteNote: async (file) => {
     await deleteNote(file);
-    // 文件已删：清掉该文件的撤销栈与挂起输入（防残留内存；会话内其余操作不清栈；
-    // 挂起输入不清会在下次 flushPendingNotes 经 writeNote 重建已删除文件）
-    useNoteUndoStore.getState().clearFile(file);
-    get().setPendingNoteContent(file, null);
+    // 文件已删：清掉该文件的撤销栈与挂起输入（防残留内存；挂起输入不清会在下次 flush 时
+    // 经 writeNote 重建已删除文件）——归笔记订阅者（`note:deleted` 事件）
+    emitVaultEvent({ kind: "note:deleted", path: file });
     // 删除的是「上次打开」的笔记：清空 uiState 记录（否则下次进入仓库尝试恢复已删文件）
     if (useUiStateStore.getState().lastNoteFile === file) {
       useUiStateStore.getState().closeFile("note");
@@ -724,12 +688,12 @@ export const useVaultStore = create<VaultFileState>((set, get) => ({
     const safe = dedupeFilename(newName.trim() || "未命名", existing);
     const newFile = oldDir ? `${oldDir}/${safe}` : safe;
     if (newFile === oldFile) return;
-    await applyAttachmentFileChange(oldFile, newFile);
+    await applyAttachmentFileChange(oldFile, newFile, "attachment:renamed");
   },
 
   moveAttachment: async (oldFile, targetDir) => {
     return moveVaultFile(oldFile, targetDir, (newFile) =>
-      applyAttachmentFileChange(oldFile, newFile),
+      applyAttachmentFileChange(oldFile, newFile, "attachment:moved"),
     );
   },
 
@@ -924,7 +888,7 @@ export const useVaultStore = create<VaultFileState>((set, get) => ({
     );
     const newDir = oldParent ? `${oldParent}/${newName}` : newName;
     if (newDir === oldDir) return newDir;
-    await applyFolderFileChange(oldDir, newDir);
+    await applyFolderFileChange(oldDir, newDir, "folder:renamed");
     return newDir;
   },
 
@@ -939,7 +903,7 @@ export const useVaultStore = create<VaultFileState>((set, get) => ({
     if (newDir === oldDir) return oldDir;
     // 非法嵌套（移到自身/自身后代）静默 no-op：目录移进自己内部会让自己消失（各平台行为不一致）
     if (targetDir === oldDir || targetDir.startsWith(`${oldDir}/`)) return oldDir;
-    await applyFolderFileChange(oldDir, newDir);
+    await applyFolderFileChange(oldDir, newDir, "folder:moved");
     return newDir;
   },
 
@@ -952,33 +916,6 @@ export const useVaultStore = create<VaultFileState>((set, get) => ({
     // 目录内可能含 .atlx：画布列表同步刷新（否则文件面板画布区不显示副本画布）
     await useAppStore.getState().loadList();
     return newDir;
-  },
-
-  saveTextNodeAsNote: async (nodeId) => {
-    const canvasState = useCanvasStore.getState();
-    const node = canvasState.nodes.find((n) => n.id === nodeId);
-    if (!node || node.type !== "text") return;
-    const d = node.data as unknown as TextData;
-    if (d.file) return; // 已是笔记节点
-    // 结构转换（画布内文本 → 笔记节点）入 undo 栈：Ctrl+Z 可还原为画布内文本节点。
-    // 已知语义：撤销只回滚内存态，不删除已落盘的 .md 文件（文件残留由用户手动清理）
-    canvasState.pushUndo();
-    // createNote 生成文件名（title 净化 + 同目录去重）并建空文件；再写正文；成功后节点转笔记引用
-    const file = await get().createNote(d.title || "未命名");
-    try {
-      await writeNote(file, d.bodyMd ?? "");
-      // 登记磁盘基线（同 saveNoteContent/applyNoteEdits：应用自写须被外部修改感知识别）
-      recordNoteDiskContentSvc(file, d.bodyMd ?? "");
-      // 记初始历史存档点（画布文本转笔记的首次写盘，防该笔记无历史记录；尽力而为）
-      void get().noteHistoryRecord(file, d.bodyMd ?? "", "edit");
-    } catch (e) {
-      // 写正文失败：回滚已建的空文件（防根目录残留孤儿 .md），节点保持画布内文本不转引用
-      console.error("保存为笔记失败", e);
-      await deleteNote(file).catch(() => {});
-      throw e;
-    }
-    await get().loadFiles();
-    canvasState.updateNodeData(nodeId, { file });
   },
 
   readNoteContent: async (file) => {
@@ -1172,113 +1109,31 @@ export const useVaultStore = create<VaultFileState>((set, get) => ({
     // 完成时按代数丢弃本次订阅——否则旧订阅覆盖 watcherUnlisten 导致前一个泄漏常驻
     void (async () => {
       const unlisten = await subscribeVaultFileChanges((c: VaultFileChange) => {
-        if (c.kind === "canvas") {
-          const store = useCanvasStore.getState();
-          // 按文件路径匹配当前画布（画布任意文件夹存放，路径即磁盘身份）；
-          // 文件夹重命名期间旧路径删除事件：canvasFile 尚未 remap（Rust 移动目录可能慢于 300ms debounce），
-          // 跳过重读防误触 reloadFromDisk 读已不存在的旧路径
-          if (c.path === store.canvasFile && !isPendingFolderRenameOldPath(c.path)) {
-            // 当前画布内容事件：自写回波 / 协作重命名回波 / 协作对端在场 → 内容已由本端写盘或
-            // 广播应用进内存，跳过重载——对端在场时磁盘合法落后于广播（500ms 防抖落盘 + 300ms
-            // watcher 延迟），重载会用陈旧盘回退已应用内容，且 reloadFromDisk→load 杀进行中
-            // AI 流/清锁/清撤销（画布版闪烁/运行态破坏根因）；磁盘收敛由下次保存的乐观锁自动
-            // 三方合并负责（canvasStore.handleSaveConflict）。真实外部修改（无对端在场）才重载。
-            if (
-              !isSelfSaveEcho(c.path) &&
-              !isCollabCanvasRenamePath(c.path) &&
-              !hasCollabPeerOnCanvas(c.path)
-            ) {
-              if (store.dirty) {
-                // 本地有未保存改动：自动重载会丢改动，改为冲突提示让用户决策
-                useCanvasStore.setState({ conflictPending: true });
-              } else {
-                // 无未保存改动：安全自动重载磁盘最新内容
-                void useCanvasStore.getState().reloadFromDisk();
-              }
-              // 当前画布内容被外部改写：仅列表行 updatedAt 排序可能变化，刷新列表即可
-              void useAppStore.getState().loadList();
-            }
-            // 当前画布事件一律不落入下方 CRUD 分支（纯内容写不改文件树；协作重命名的旧路径
-            // 删除事件经下方分支触发树刷新）
-            return;
-          }
-          // 非当前画布：外部新建/删除/重命名画布（含协作重命名的旧路径删除事件）→ 刷新列表 + 文件树。
-          // 自写回放（isSelfSaveEcho）跳过：画布 CRUD 已在 appStore 内主动刷新两数据源
-          if (!isSelfSaveEcho(c.path)) {
-            void useAppStore.getState().loadList();
-            void get().loadFiles();
-          }
+        // 内核只做两件事：①不改文件树的内容写（自写回波）跳过全树重扫；②把变化投给领域订阅者。
+        // 领域反应（重载/冲突/预览刷新/外部编辑标记/会话合并）与「重命名中旧路径」的抑制判定
+        // 归各领域自身（各 kind 口径不同，统一过滤会改变行为）。
+        if (c.kind === "chat") {
+          // AI 对话历史（.atelyx/对话历史/*.jsonl|*.meta.json）：不刷文件树（.atelyx/ 不在树内）
+          emitVaultEvent({ kind: "chat:changed", path: c.path });
           return;
         }
-
         if (c.kind === "note") {
-          // 软件内重命名期间旧路径的删除事件：file 引用已由 renameNote 同步，
-          // 跳过重读防误标文件缺失；新路径创建事件正常刷新（同步后节点 file 已指向新路径，命中即刷新）
-          if (!isPendingRenameOldPath(c.path) && !isPendingFolderRenameOldPath(c.path)) {
-            void useCanvasStore.getState().refreshTextContent(c.path);
-            // NoteEditor 感知外部修改：无本地改动实时刷新、有改动提示冲突
-            // （markNoteExternallyEdited 始终保留：跨编辑面同步 + 冲突检测必经，不受自写回波影响）
-            get().markNoteExternallyEdited(c.path);
-            // 真实外部修改（非本端自写回波，含画布/AI 写 .md）：作废笔记内容缓存，下次读取走盘
-            // （自写回波缓存已由 saveNoteContent 同步，不另行作废防缓存失效后重读盘）
-            if (!isSelfSaveEcho(c.path)) get().invalidateNoteCache(c.path);
-          }
-          // 纯内容自写回波（本端写盘，markSelfSave 已标记）不改文件树：跳过全仓库重扫；
-          // 外部新建/删除/改名 .md 非自写回波，仍重扫（与 canvas/table 分支同语义）
+          emitVaultEvent({ kind: "note:changed", path: c.path });
           if (!isSelfSaveEcho(c.path)) void get().loadFiles();
           return;
         }
-
         if (c.kind === "table") {
-          // 当前打开的表格事件：干净 → 读盘内容比对判别（自写回放/已广播应用的对端写入跳过，
-          // 真实外部修改静默重载）；有脏 → 不弹冲突条——防抖保存 ≤500ms 内触发，乐观锁 +
-          // 自动三方合并收敛（冲突条仅作合并失败兜底，见 tableStore.reportError）。
-          // 自写回波（本端刚写盘，内容已知）同样跳过读比——省去大表每次保存后的整表读盘 +
-          // tablesEqual 深比（大表图片多时 .atb 可达数十 MB，JS 主线程开销显著，保存后卡顿主因）；
-          // 自写窗口内（markSelfSave 2s）的外部编辑可能漏检，乐观锁 + 自动三方合并兜底收敛
-          // （与 canvas 分支同语义）。软件内重命名旧路径的删除事件跳过（file 引用已同步）。
-          // 协作对端同表在场 → 跳过读比重载：广播比落盘先到（编辑即达 vs 500ms 防抖落盘 +
-          // 300ms watcher 延迟），磁盘合法落后于内存，重载会用陈旧磁盘回退已应用的对端补丁
-          // （闪烁/永久回退根因）；磁盘收敛由下次保存的乐观锁自动三方合并负责（tableStore
-          // retryMergePersist），与「无对端 = 真实外部修改仍重载」路径互不干扰。
-          const store = useTableStore.getState();
-          const selfEcho = isSelfSaveEcho(c.path);
-          if (
-            c.path === store.tableFile &&
-            !isPendingRenameOldPath(c.path) &&
-            !isPendingFolderRenameOldPath(c.path) &&
-            !selfEcho &&
-            !hasCollabPeerOnTable(c.path) &&
-            !store.dirty
-          ) {
-            void maybeReloadTableIfChanged(c.path);
-          }
-          // 画布上引用该表格的节点：silent 刷新快照（与 note 事件刷新 text 节点对称）。
-          // 打开表格的自写回波直接用内存内容构建快照（磁盘 == 内存），免再整表读盘。
-          if (!isPendingRenameOldPath(c.path) && !isPendingFolderRenameOldPath(c.path)) {
-            void useCanvasStore.getState().refreshTableContent(c.path, {
-              ...(selfEcho && c.path === store.tableFile
-                ? { snapshot: tableToSnapshotText({ fields: store.fields, rows: store.rows }) }
-                : {}),
-            });
-          }
-          // 纯内容写（自写回波）不改变文件树结构：跳过全仓库重扫（与 canvas 分支同语义）
-          if (!selfEcho) void get().loadFiles();
+          emitVaultEvent({ kind: "table:changed", path: c.path });
+          if (!isSelfSaveEcho(c.path)) void get().loadFiles();
           return;
         }
-
-        if (c.kind === "chat") {
-          // AI 对话历史（.atelyx/对话历史/*.jsonl|*.meta.json）：外部变更内容比对合并，
-          // 新会话/新消息/改名/删除经此实时互见（自写回波由 chatPanelStore 内容比对判别）。
-          // 不刷新文件树——.atelyx/ 不在文件树。
-          useChatPanelStore.getState().applyExternalChatChange(c.path);
+        if (c.kind === "canvas") {
+          // 「当前画布」判据与「是否刷列表/文件树」同属画布域知识（含重载/冲突决策），统一归画布订阅者
+          emitVaultEvent({ kind: "canvas:changed", path: c.path });
           return;
         }
-
-        // attachment
-        if (!isPendingRenameOldPath(c.path) && !isPendingFolderRenameOldPath(c.path)) {
-          void useCanvasStore.getState().refreshMediaContent(c.path);
-        }
+        // attachment：画布媒体节点预览刷新归画布订阅者；树结构可能变化，一律重扫
+        emitVaultEvent({ kind: "attachment:changed", path: c.path });
         void get().loadFiles();
       });
       if (gen !== watcherGen) {

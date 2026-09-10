@@ -1509,6 +1509,81 @@ pub fn plugin_write_state(app: AppHandle, state: State<'_, VaultState>, id: Stri
     atomic_write(&path, &raw)
 }
 
+/// 插件键值存储的读改写串行化：整表读改写必须互斥，否则并发写会丢键
+///（同一 realm 内 `Promise.all`、多窗口各自独立 realm 同时写同一插件）。
+static PLUGIN_KV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 读键值表（文件不存在 = 空表；损坏 = 改名备份后按空表继续，同 plugin-state 的降级策略）。
+fn read_kv_file(dir: &Path) -> Result<serde_json::Map<String, Value>, String> {
+    let path = safe_plugin_path(dir, "data/kv.json")?;
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(serde_json::Map::new()),
+        Err(e) => return Err(format!("读取插件键值数据失败：{e}")),
+    };
+    match serde_json::from_str::<Value>(&raw) {
+        Ok(Value::Object(map)) => Ok(map),
+        Ok(_) => Err("插件键值数据必须是 JSON 对象".to_string()),
+        Err(e) => {
+            let note = backup_corrupt_state(&path)
+                .map_or_else(|| "备份失败".to_string(), |p| format!("已备份为 {}", p.display()));
+            eprintln!("[plugin] 插件键值数据损坏，{note}（按空表继续）：{e}");
+            Ok(serde_json::Map::new())
+        }
+    }
+}
+
+/// 写键值表（原子写；调用方须持有 PLUGIN_KV_LOCK）。
+fn write_kv_file(dir: &Path, map: &serde_json::Map<String, Value>) -> Result<(), String> {
+    let data_dir = safe_plugin_path(dir, "data")?;
+    fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
+    let raw = serde_json::to_string(&Value::Object(map.clone())).map_err(|e| e.to_string())?;
+    atomic_write(&data_dir.join("kv.json"), &raw)
+}
+
+/// 读取插件键值存储（单 JSON 对象，独立于 state.json；键值面见 ctx.storage）。
+#[tauri::command]
+pub fn plugin_kv_read(app: AppHandle, state: State<'_, VaultState>, id: String) -> Result<Value, String> {
+    let (dir, _scope) = resolve_plugin_dir(&app, &state, &id)?;
+    let _guard = PLUGIN_KV_LOCK.lock().map_err(|_| "键值存储忙，请重试".to_string())?;
+    Ok(Value::Object(read_kv_file(&dir)?))
+}
+
+/// 写一个键（Rust 侧完成读改写：调用方无需整表往返，并发写不会互相丢键）。
+#[tauri::command]
+pub fn plugin_kv_set(
+    app: AppHandle,
+    state: State<'_, VaultState>,
+    id: String,
+    key: String,
+    value: Value,
+) -> Result<(), String> {
+    let (dir, _scope) = resolve_plugin_dir(&app, &state, &id)?;
+    let _guard = PLUGIN_KV_LOCK.lock().map_err(|_| "键值存储忙，请重试".to_string())?;
+    let mut map = read_kv_file(&dir)?;
+    map.insert(key, value);
+    write_kv_file(&dir, &map)
+}
+
+/// 删一个键（不存在 = no-op）。
+#[tauri::command]
+pub fn plugin_kv_delete(app: AppHandle, state: State<'_, VaultState>, id: String, key: String) -> Result<(), String> {
+    let (dir, _scope) = resolve_plugin_dir(&app, &state, &id)?;
+    let _guard = PLUGIN_KV_LOCK.lock().map_err(|_| "键值存储忙，请重试".to_string())?;
+    let mut map = read_kv_file(&dir)?;
+    map.remove(&key);
+    write_kv_file(&dir, &map)
+}
+
+/// 整表覆盖写（ctx.storage.clear 用）。
+#[tauri::command]
+pub fn plugin_kv_write(app: AppHandle, state: State<'_, VaultState>, id: String, data: Value) -> Result<(), String> {
+    let (dir, _scope) = resolve_plugin_dir(&app, &state, &id)?;
+    let map = data.as_object().ok_or_else(|| "键值表必须是 JSON 对象".to_string())?.clone();
+    let _guard = PLUGIN_KV_LOCK.lock().map_err(|_| "键值存储忙，请重试".to_string())?;
+    write_kv_file(&dir, &map)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

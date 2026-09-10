@@ -62,7 +62,10 @@
 
 ## 宿主兼容
 
-- `atelyxVersionMin`/`atelyxVersionMax`：不匹配的插件在安装时会被拒绝（并回滚清理）。
+- `atelyxVersionMin`/`atelyxVersionMax`：不匹配的插件在安装时会被拒绝（并回滚清理），启用时加载也会被拒绝。
+- `hostApiVersion`：插件契约版本（`ctx` 服务面与 `ui` 注册面的语义版本，与宿主 App 版本解耦）。
+  **缺省视为当前契约版本**；显式声明且与宿主不同时，安装与加载都会被拒绝并提示所需版本——
+  这样破坏性契约变更会响亮失败，而不是静默坏掉。当前契约版本为 1。
 - `platforms`：`windows-x64` / `linux-x64`，缺省全平台。
 
 ## 作用域

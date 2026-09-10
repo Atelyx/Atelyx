@@ -8,7 +8,12 @@
  *   供领域订阅者做画布节点引用同步/撤销栈路径迁移/UI 状态 remap 等）。
  *
  * 订阅随插件启停注册（cordis/builtins 的 vaultEventHandlers）；未注册 kind 静默丢弃。
- * 同步投递保序；handler 抛错向外传播（调用方自行 try/catch，失败不静默）。
+ * 投递两种口径：
+ * - `emitVaultEvent`：同步按注册序投递（watcher 信号泵用；领域反应的 await 不阻塞投递方，
+ *   与既有「泵内 fire-and-forget」语义一致）；
+ * - `emitVaultEventAsync`：逐个 await handler（文件动作路径用；领域反应须在调用方继续前完成，
+ *   如画布乐观锁基准同步不得晚于后续自动保存）。
+ * handler 抛错向外传播（调用方自行 try/catch，失败不静默）。
  * 纯数据容器 + 纯函数，无 store/service 依赖，可直测（模式同 utils/collabHost.ts）。
  */
 
@@ -30,7 +35,7 @@ export type VaultWatchEvent =
 /** 全部 vault 事件（判别联合；订阅者按 kind 收窄载荷）。 */
 export type VaultEvent = VaultWatchEvent | VaultActionEvent;
 
-export type VaultEventHandler = (event: VaultEvent) => void;
+export type VaultEventHandler = (event: VaultEvent) => void | Promise<void>;
 
 /** 某 kind 事件的具体载荷类型：交叉收窄（成员 kind 为联合时也能正确落到单个字面量）。 */
 export type VaultEventOf<K extends VaultEvent["kind"]> = VaultEvent & { kind: K };
@@ -66,9 +71,33 @@ export function onVaultEvent<K extends VaultEvent["kind"]>(
   return subscribeVaultEvent({ kind, handler: handler as VaultEventHandler });
 }
 
-/** 广播一个 vault 事件（同步按注册序投递；handler 抛错向外传播）。 */
+/** 广播一个 vault 事件（同步按注册序投递；handler 抛错向外传播）。
+ *  同步口径不等待领域反应：返回 Promise 的 handler 由调用方自担收尾，此处只兜住未捕获拒绝。 */
 export function emitVaultEvent(event: VaultEvent): void {
   const set = handlers.get(event.kind);
   if (!set) return;
-  for (const h of set) h(event);
+  for (const h of set) {
+    const ret = h(event);
+    if (ret instanceof Promise) void ret.catch((e) => console.error("仓库事件订阅方失败", e));
+  }
+}
+
+/** 广播并等待全部 handler 完成（按注册序；文件动作路径用）。
+ *  快照订阅者列表：等待期间有注册/撤销不改变本次投递对象（避免漏投/重投）。
+ *  单个订阅方失败不阻断其余订阅方（领域反应彼此独立），全部投递完再抛聚合错误。 */
+export async function emitVaultEventAsync(event: VaultEvent): Promise<void> {
+  const set = handlers.get(event.kind);
+  if (!set) return;
+  const failures: unknown[] = [];
+  for (const h of [...set]) {
+    try {
+      await h(event);
+    } catch (e) {
+      failures.push(e);
+      console.error("仓库事件订阅方失败", e);
+    }
+  }
+  if (failures.length > 0) {
+    throw new Error(`仓库事件 ${event.kind} 有 ${failures.length} 个订阅方失败`);
+  }
 }

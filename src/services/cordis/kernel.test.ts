@@ -22,10 +22,23 @@ afterEach(() => {
 });
 
 describe("Cordis 内核宿主", () => {
-  it("createKernel 提供平台服务（state/app/shell/vault/dialog/clipboard/window/ai/collab）", () => {
+  it("createKernel 提供平台服务（state/storage/http/notification/app/shell/vault/dialog/clipboard/window/ai/collab）", () => {
     const { ctx, dispose } = createKernel();
     expect(ctx).toBeInstanceOf(Context);
-    for (const name of ["state", "app", "shell", "vault", "dialog", "clipboard", "window", "ai", "collab"]) {
+    for (const name of [
+      "state",
+      "storage",
+      "http",
+      "notification",
+      "app",
+      "shell",
+      "vault",
+      "dialog",
+      "clipboard",
+      "window",
+      "ai",
+      "collab",
+    ]) {
       expect(ctx.get(name as never), name).toBeDefined();
     }
     dispose();

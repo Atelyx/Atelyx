@@ -43,6 +43,7 @@ import {
   setPluginCollabAccess,
   setPluginHistoryAccess,
   setPluginLayoutAccess,
+  setPluginNotificationAccess,
   setPluginUiStateAccess,
   setPluginVaultWriteAccess,
   setSettingsAccess,
@@ -80,6 +81,7 @@ import { useCanvasStore } from "@/stores/canvasStore";
 import { useTableStore } from "@/stores/tableStore";
 import { useRepoHistoryStore } from "@/stores/repoHistoryStore";
 import { useUiStateStore } from "@/stores/uiStateStore";
+import { useNotificationStore } from "@/stores/notificationStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { loadHistory } from "@/services/history";
 import { layoutOp } from "@/services/layout";
@@ -203,18 +205,11 @@ const slotViewCache = new WeakMap<ViewSlotContribution, ViewContribution>();
 /** 安装后统一收尾（模块私有）：宿主兼容强制 + 重载。 */
 async function finishInstall(get: () => PluginStoreState, row: PluginRow): Promise<void> {
   try {
-    // 宿主兼容强制（清单承诺）：版本/平台不匹配即回滚并报错。
-    // 宿主版本读取失败（瞬时 IPC 异常）按放行处理：不误删刚装好的插件，不兼容风险由运行时兜底。
-    let hostVersion: string | null = null;
-    try {
-      hostVersion = await getAppVersion();
-    } catch {
-      hostVersion = null;
-    }
-    if (hostVersion !== null) {
-      const compat = pluginCompatibleWithHost(row.manifest, hostVersion, detectPlatform());
-      if (!compat.ok) throw new Error(`无法安装：${compat.reason}`);
-    }
+    // 宿主兼容强制（清单承诺）：契约版本/宿主版本/平台不匹配即回滚并报错。
+    // 宿主版本读取失败（瞬时 IPC 异常）传 null：跳过版本范围判断，不误删刚装好的插件
+    const hostVersion = await getAppVersion().catch(() => null);
+    const compat = pluginCompatibleWithHost(row.manifest, hostVersion, detectPlatform());
+    if (!compat.ok) throw new Error(`无法安装：${compat.reason}`);
   } catch (e) {
     // 任一检查失败都回滚已落盘插件，避免「装了一半」留脏。
     await pluginUninstall(row.id, row.scope).catch(() => {});
@@ -269,6 +264,17 @@ function ensureCollabRuntimeAccess(): void {
   setPluginCollabAccess({
     peers: () => useCollabStore.getState().peers,
     setPresence: (view, file) => publishPluginPresence(view, file),
+  });
+}
+
+/** 通知能力接线：把应用内通知运行时暴露给内核 `notification` 服务（幂等一次）。 */
+let notificationWired = false;
+function ensureNotificationAccess(): void {
+  if (notificationWired) return;
+  notificationWired = true;
+  setPluginNotificationAccess({
+    notify: (input) => useNotificationStore.getState().notify(input),
+    dismiss: (id) => useNotificationStore.getState().dismiss(id),
   });
 }
 
@@ -435,6 +441,7 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
       // canvas/table 能力提供者与变更事件随对应插件启停注册（cordis/builtins 的 capability）
       ensureVaultWriteAccess();
       ensureCollabRuntimeAccess();
+      ensureNotificationAccess();
       ensureSettingsAccess();
       ensureHistoryAccess();
       ensureLayoutAccess();
@@ -459,14 +466,23 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
       // 装配顺序 = 默认组合成员在前（其提供者先就绪，满足后续行的 inject 依赖）。
       const mounts = mountIds();
       const total = mounts.length;
+      const platform = detectPlatform();
       for (let i = 0; i < mounts.length; i++) {
         if (seq !== loadSeq) return;
+        const id = mounts[i];
+        // 加载前兼容校验（契约版本/宿主版本范围/平台）：不兼容的行响亮失败并附原因，不挂载、不阻塞其余行
+        const manifest = get().plugins[id].manifest;
+        const compat = pluginCompatibleWithHost(manifest, hostVersion, platform);
+        if (!compat.ok) {
+          syncPhase(id, "failed", compat.reason);
+          continue;
+        }
         if (useAppStore.getState().entryLoading) {
           useAppStore.getState().reportLoad(
-            `加载插件：${get().plugins[mounts[i]]?.manifest.name ?? mounts[i]}（${i + 1}/${total}）`,
+            `加载插件：${get().plugins[id]?.manifest.name ?? id}（${i + 1}/${total}）`,
           );
         }
-        await spawn(mounts[i]);
+        await spawn(id);
       }
     },
 

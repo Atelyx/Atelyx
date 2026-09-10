@@ -17,6 +17,11 @@ export const PLUGIN_ENDORSED_URL =
 /** 市场索引本地缓存时长（毫秒）。 */
 export const PLUGIN_INDEX_CACHE_MS = 6 * 60 * 60 * 1000;
 
+/** 当前插件契约版本（ctx 服务面 + slots 注册面的语义版本，与宿主 App 版本解耦）。
+ *  插件清单显式声明 `hostApiVersion` 且不等于本值时拒绝加载（缺省视为本值）；
+ *  新增服务/槽位等向后兼容增量不升版本，破坏性变更才升。 */
+export const PLUGIN_HOST_API_VERSION = 1;
+
 /** 插件类型展示文案。 */
 export const PLUGIN_TYPE_LABELS: Record<PluginType, string> = {
   tool: "AI 工具/命令",

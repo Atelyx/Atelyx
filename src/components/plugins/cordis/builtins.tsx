@@ -31,13 +31,23 @@ import { InspectorPanel } from "@/components/canvas/panels/InspectorPanel";
 import { CollabRoomPanel } from "@/components/canvas/panels/CollabRoomPanel";
 import { RepoHistoryPanel } from "@/components/history/RepoHistoryPanel";
 import { useAppStore } from "@/stores/appStore";
-import { useCanvasStore, registerCanvasCollabWiring, registerCanvasPluginWiring } from "@/stores/canvasStore";
+import {
+  useCanvasStore,
+  hasCollabPeerOnCanvas,
+  registerCanvasCollabWiring,
+  registerCanvasPluginWiring,
+  syncCanvasDirRefs,
+  syncCanvasNodeRefs,
+} from "@/stores/canvasStore";
 import { useTableStore, registerTableCollabWiring, registerTablePluginWiring } from "@/stores/tableStore";
 import { registerNoteCollabWiring } from "@/stores/noteCollabStore";
 import { useChatPanelStore } from "@/stores/chatPanelStore";
 import { useCalendarStore } from "@/stores/calendarStore";
 import { useNoteUndoStore } from "@/stores/noteUndoStore";
-import { useVaultStore } from "@/stores/vaultStore";
+import { isPendingFolderRenameOldPath, isPendingRenameOldPath, useVaultStore } from "@/stores/vaultStore";
+import { isSelfSaveEcho } from "@/utils/selfSave";
+import { isCollabCanvasRenamePath } from "@/utils/canvasCollab";
+import { tableToSnapshotText } from "@/utils/table";
 import { registerDomainLifecycle } from "@/utils/kernelLifecycle";
 import { subscribeVaultEvent } from "@/utils/vaultEvents";
 import { registerViewSlot } from "@/services/cordis/slots";
@@ -243,6 +253,13 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
       },
     },
     capability: wireChatAccess,
+    vaultEventHandlers: [
+      vaultHandler("chat:changed", (e) => {
+        // AI 对话历史（.atelyx/对话历史/*.jsonl|*.meta.json）：外部变更内容比对合并，
+        // 新会话/新消息/改名/删除经此实时互见（自写回波由 chatPanelStore 内容比对判别）
+        useChatPanelStore.getState().applyExternalChatChange(e.path);
+      }),
+    ],
     provideService: (ctx) =>
       // 服务 root 作用域提供（其它插件可消费），生命周期随 builtin 插件 fiber（ctx.effect）
       ctx.effect(() => ctx.root.provide("chat", createChatService())),
@@ -280,6 +297,82 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
     capability: registerCanvasPluginWiring,
     collabWiring: registerCanvasCollabWiring,
     vaultEventHandlers: [
+      vaultHandler("canvas:changed", (e) => {
+        const store = useCanvasStore.getState();
+        // 按文件路径匹配当前画布（画布任意文件夹存放，路径即磁盘身份）；
+        // 文件夹重命名期间旧路径删除事件：canvasFile 尚未 remap（Rust 移动目录可能慢于 300ms debounce），
+        // 跳过重读防误触 reloadFromDisk 读已不存在的旧路径
+        if (e.path !== store.canvasFile || isPendingFolderRenameOldPath(e.path)) {
+          // 非当前画布：外部新建/删除/重命名画布（含协作重命名的旧路径删除事件）→ 刷新列表 + 文件树。
+          // 自写回放跳过：画布 CRUD 已在 appStore 内主动刷新两数据源
+          if (!isSelfSaveEcho(e.path)) {
+            void useAppStore.getState().loadList();
+            void useVaultStore.getState().loadFiles();
+          }
+          return;
+        }
+        // 自写回波 / 协作重命名回波 / 协作对端在场 → 内容已由本端写盘或广播应用进内存，跳过重载：
+        // 对端在场时磁盘合法落后于广播（500ms 防抖落盘 + 300ms watcher 延迟），重载会用陈旧盘回退
+        // 已应用内容，且 reloadFromDisk→load 杀进行中 AI 流/清锁/清撤销（画布版闪烁/运行态破坏根因）；
+        // 磁盘收敛由下次保存的乐观锁自动三方合并负责（canvasStore.handleSaveConflict）。
+        // 真实外部修改（无对端在场）才重载。
+        if (isSelfSaveEcho(e.path) || isCollabCanvasRenamePath(e.path) || hasCollabPeerOnCanvas(e.path)) {
+          return;
+        }
+        if (store.dirty) {
+          // 本地有未保存改动：自动重载会丢改动，改为冲突提示让用户决策
+          useCanvasStore.setState({ conflictPending: true });
+        } else {
+          // 无未保存改动：安全自动重载磁盘最新内容
+          void store.reloadFromDisk();
+        }
+        // 当前画布内容被外部改写：仅列表行 updatedAt 排序可能变化，刷新列表即可（纯内容写不改文件树）
+        void useAppStore.getState().loadList();
+      }),
+      vaultHandler("note:changed", (e) => {
+        if (isPendingRenameOldPath(e.path) || isPendingFolderRenameOldPath(e.path)) return;
+        // 画布上引用该笔记的节点：silent 刷新正文（与 NoteEditor 外部感知相互独立）
+        void useCanvasStore.getState().refreshTextContent(e.path);
+      }),
+      vaultHandler("table:changed", (e) => {
+        if (isPendingRenameOldPath(e.path) || isPendingFolderRenameOldPath(e.path)) return;
+        // 画布上引用该表格的节点：silent 刷新快照。打开表格的自写回波直接用内存内容构建快照
+        //（磁盘 == 内存），免再整表读盘。
+        const store = useTableStore.getState();
+        const snapshot =
+          isSelfSaveEcho(e.path) && e.path === store.tableFile
+            ? tableToSnapshotText({ fields: store.fields, rows: store.rows })
+            : undefined;
+        void useCanvasStore.getState().refreshTableContent(e.path, snapshot ? { snapshot } : {});
+      }),
+      vaultHandler("attachment:changed", (e) => {
+        if (isPendingRenameOldPath(e.path) || isPendingFolderRenameOldPath(e.path)) return;
+        void useCanvasStore.getState().refreshMediaContent(e.path);
+      }),
+      vaultHandler("note:renamed", async (e) => {
+        await syncCanvasNodeRefs(e.oldPath, e.newPath, e.newTitle ?? null, "text");
+      }),
+      vaultHandler("note:moved", async (e) => {
+        await syncCanvasNodeRefs(e.oldPath, e.newPath, e.newTitle ?? null, "text");
+      }),
+      vaultHandler("table:renamed", async (e) => {
+        await syncCanvasNodeRefs(e.oldPath, e.newPath, e.newTitle ?? null, "table");
+      }),
+      vaultHandler("table:moved", async (e) => {
+        await syncCanvasNodeRefs(e.oldPath, e.newPath, e.newTitle ?? null, "table");
+      }),
+      vaultHandler("attachment:renamed", async (e) => {
+        await syncCanvasNodeRefs(e.oldPath, e.newPath, e.newTitle ?? null, "media");
+      }),
+      vaultHandler("attachment:moved", async (e) => {
+        await syncCanvasNodeRefs(e.oldPath, e.newPath, e.newTitle ?? null, "media");
+      }),
+      vaultHandler("folder:renamed", async (e) => {
+        await syncCanvasDirRefs(e.oldDir, e.newDir);
+      }),
+      vaultHandler("folder:moved", async (e) => {
+        await syncCanvasDirRefs(e.oldDir, e.newDir);
+      }),
       vaultHandler("canvas:renamed", async (e) => {
         try {
           // 磁盘 .atlx 已被重命名：同步当前画布乐观锁基准 + 打开路径（防回写旧路径/乐观锁误冲突）
@@ -336,6 +429,29 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
     },
     capability: wireNoteAccess,
     collabWiring: registerNoteCollabWiring,
+    vaultEventHandlers: [
+      vaultHandler("note:changed", (e) => {
+        if (isPendingRenameOldPath(e.path) || isPendingFolderRenameOldPath(e.path)) return;
+        // NoteEditor 感知外部修改：无本地改动实时刷新、有改动提示冲突
+        //（markNoteExternallyEdited 始终保留：跨编辑面同步 + 冲突检测必经，不受自写回波影响）
+        useVaultStore.getState().markNoteExternallyEdited(e.path);
+        // 真实外部修改（非本端自写回波，含画布/AI 写 .md）：作废笔记内容缓存，下次读取走盘
+        //（自写回波缓存已由 saveNoteContent 同步，不另行作废防缓存失效后重读盘）
+        if (!isSelfSaveEcho(e.path)) useVaultStore.getState().invalidateNoteCache(e.path);
+      }),
+      // 撤销栈随路径迁移（撤销历史不因改名丢失、旧键不滞留内存）
+      vaultHandler("note:renamed", (e) => {
+        useNoteUndoStore.getState().renameFile(e.oldPath, e.newPath);
+      }),
+      vaultHandler("note:moved", (e) => {
+        useNoteUndoStore.getState().renameFile(e.oldPath, e.newPath);
+      }),
+      vaultHandler("note:deleted", (e) => {
+        // 文件已删：清撤销栈与挂起输入（挂起输入不清会在下次 flush 时经 writeNote 重建已删文件）
+        useNoteUndoStore.getState().clearFile(e.path);
+        useVaultStore.getState().setPendingNoteContent(e.path, null);
+      }),
+    ],
     provideService: (ctx) =>
       // 服务 root 作用域提供（其它插件可消费），生命周期随 builtin 插件 fiber（ctx.effect）
       ctx.effect(() => ctx.root.provide("note", createNoteService())),
@@ -369,6 +485,12 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
     capability: registerTablePluginWiring,
     collabWiring: registerTableCollabWiring,
     vaultEventHandlers: [
+      vaultHandler("table:changed", (e) => {
+        if (isPendingRenameOldPath(e.path) || isPendingFolderRenameOldPath(e.path)) return;
+        // 当前打开的表格：干净 → 读盘内容比对判别（自写回放/已应用的对端写入跳过，真实外部修改静默重载）；
+        // 有脏 → 不弹冲突条——防抖保存 ≤500ms 内触发，乐观锁 + 自动三方合并收敛（冲突条仅作兜底）
+        void useTableStore.getState().syncFromDiskIfChanged(e.path);
+      }),
       vaultHandler("table:deleted", (e) => {
         // 打开的表格文件已被删除：只清内存态（flush 会写回重建已删文件）
         if (useAppStore.getState().currentTableFile === e.path) {

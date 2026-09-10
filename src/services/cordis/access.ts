@@ -18,6 +18,7 @@ import type {
   WorkspaceLayout,
 } from "@/types";
 import type { HistoryKind, HistoryVersion } from "@/services/history";
+import type { NotificationInput } from "./types";
 import type { AgentConfig, ChatTargetResult, ProviderConfig } from "@/types";
 
 /** 表格能力访问（ctx.table 的 store 数据源；pluginStore/tableStore 接线注入）。 */
@@ -64,6 +65,26 @@ export function setPluginCollabAccess(access: PluginCollabAccess | null): void {
 /** 读取协作能力访问（ctx.collab 服务消费同一数据源；未接线 = null）。 */
 export function getPluginCollabAccess(): PluginCollabAccess | null {
   return collabAccess;
+}
+
+/** 通知能力访问（ctx.notification 的 store 数据源；pluginStore 接线注入）。 */
+export interface PluginNotificationAccess {
+  /** 弹出一条通知，返回通知 id。 */
+  notify(input: NotificationInput): string;
+  /** 关闭一条通知（不存在 = no-op）。 */
+  dismiss(id: string): void;
+}
+
+let notificationAccess: PluginNotificationAccess | null = null;
+
+/** 注入/复位通知能力访问（pluginStore.load 时接线；null 复位供测试）。 */
+export function setPluginNotificationAccess(access: PluginNotificationAccess | null): void {
+  notificationAccess = access;
+}
+
+/** 读取通知能力访问（ctx.notification 服务消费同一数据源；未接线 = null）。 */
+export function getPluginNotificationAccess(): PluginNotificationAccess | null {
+  return notificationAccess;
 }
 
 /**

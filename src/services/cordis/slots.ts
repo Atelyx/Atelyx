@@ -9,7 +9,7 @@
  */
 import type { ComponentType, ReactNode } from "react";
 import { VIEW_LABELS } from "@/constants/views";
-import type { SlotCardinality, SlotContribution, SlotScope } from "@/utils/cordis/slots";
+import type { SlotCardinality, SlotContribution } from "@/utils/cordis/slots";
 import { pickSlotWinner, sortSlotList } from "@/utils/cordis/slots";
 
 /** 视图槽载荷（view/<kind>）：label + component/render 至少其一（render 优先，重型视图承载宿主面板 id）。 */
@@ -95,10 +95,9 @@ export function viewKinds(): string[] {
     .map((s) => s.slice(prefix.length));
 }
 
-/** 槽注册通用 opts（cardinality/scope/priority/id）。 */
+/** 槽注册通用 opts（cardinality/priority/id）。 */
 export interface SlotRegisterOptions {
   cardinality?: SlotCardinality;
-  scope?: SlotScope;
   priority?: number;
   /** 覆盖默认贡献 id（缺省 `<pluginId>:<slot>`）。 */
   id?: string;
@@ -126,7 +125,6 @@ export function registerSlotContrib(
     pluginId,
     slot,
     cardinality,
-    scope: opts?.scope ?? "root",
     priority: opts?.priority ?? 0,
     payload,
   });

@@ -18,7 +18,8 @@ import { pickDirectory, pickFile, saveFile } from "@/services/dialog";
 import { copyImageToClipboard, readClipboardText, writeClipboardText } from "@/services/clipboard";
 import { closeWindow, minimizeWindow, toggleMaximizeWindow } from "@/services/window";
 import { listVaultTree } from "@/services/vault";
-import { pluginReadState, pluginWriteState } from "@/services/plugins";
+import { pluginKvDelete, pluginKvRead, pluginKvSet, pluginKvWrite, pluginReadState, pluginWriteState } from "@/services/plugins";
+import { httpRequest } from "@/services/http";
 import { registerPluginTools, unregisterPluginTools } from "@/services/ai/tools";
 import {
   globVault,
@@ -33,8 +34,10 @@ import type { PluginToolOptions } from "@/types";
 import {
   getAppPageOpener,
   getPluginCollabAccess,
+  getPluginNotificationAccess,
   getSettingsAccess,
   requireVaultWrite,
+  type PluginNotificationAccess,
 } from "./access";
 import { installAudit, resetAudit } from "./audit";
 import { createSlotsApi } from "./slotsApi";
@@ -49,9 +52,12 @@ import type {
   ClipboardService,
   CollabService,
   DialogService,
+  HttpService,
+  NotificationService,
   ShellExecResult,
   ShellService,
   StateService,
+  StorageService,
   VaultService,
   WindowService,
 } from "./types";
@@ -143,6 +149,13 @@ export function createKernel(): Kernel {
   const ctx = new Context();
   const disposables: Array<() => void> = [];
 
+  /** 取通知能力访问；未接线（未加载插件/未打开仓库）时抛错，两个方法口径一致。 */
+  function requireNotificationAccess(): PluginNotificationAccess {
+    const access = getPluginNotificationAccess();
+    if (!access) throw new Error("通知能力未就绪");
+    return access;
+  }
+
   /** 在根 Context 上提供平台服务并收集撤销。 */
   function provide(name: string, value: unknown): void {
     disposables.push(ctx.provide(name as never, value as never));
@@ -153,6 +166,22 @@ export function createKernel(): Kernel {
     write: (pluginId, data) => pluginWriteState(pluginId, data),
   };
   provide("state", state);
+
+  /** 键值面按插件 id 显式寻址（与 ctx.state 同约定）：服务侧不猜调用方身份；
+   *  单键读改写由 Rust 侧串行完成（并发写不丢键），clear 走整表覆盖。 */
+  const storage: StorageService = {
+    get: async (pluginId, key) => (await pluginKvRead(pluginId))[key],
+    set: (pluginId, key, value) => pluginKvSet(pluginId, key, value),
+    delete: (pluginId, key) => pluginKvDelete(pluginId, key),
+    keys: async (pluginId) => Object.keys(await pluginKvRead(pluginId)),
+    clear: (pluginId) => pluginKvWrite(pluginId, {}),
+  };
+  provide("storage", storage);
+
+  const http: HttpService = {
+    request: (req) => httpRequest(req),
+  };
+  provide("http", http);
 
   const app: AppService = {
     version: () => getAppVersion(),
@@ -380,6 +409,12 @@ export function createKernel(): Kernel {
     },
   };
   provide("collab", collab);
+
+  const notification: NotificationService = {
+    notify: (input) => requireNotificationAccess().notify(input),
+    dismiss: (id) => requireNotificationAccess().dismiss(id),
+  };
+  provide("notification", notification);
 
   // 插件 UI 注册 API（视图槽/表格视图；经 tracker 绑定调用方插件 fiber）。
   provide("slots", createSlotsApi());

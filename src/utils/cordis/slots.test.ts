@@ -26,7 +26,6 @@ const contrib = (partial: Partial<SlotContribution> & { id: string }): SlotContr
   pluginId: "p",
   slot: "view/x",
   cardinality: "single",
-  scope: "root",
   priority: 0,
   payload: {},
   ...partial,

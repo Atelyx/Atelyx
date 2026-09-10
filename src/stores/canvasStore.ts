@@ -21,6 +21,8 @@ import {
   recordNoteDiskContent,
   renameCanvasVault,
   writeCanvasVault,
+  writeNote,
+  deleteNote,
   type RuntimeCanvas,
 } from "@/services/vault";
 import { decideTextNodeRefresh } from "@/utils/noteRefresh";
@@ -94,7 +96,7 @@ import {
 import { isAssetConsumed } from "@/utils/consumed";
 import { appendNarration, appendReasoning, assistantReplyText, fillAssistantReplyText, finalizeReplyText, mergeToolRuns } from "@/utils/agentSteps";
 import { prefix, scanMentionHits } from "@/utils/text";
-import { noteTitleFromFile, sanitizeFilename, siblingPath, tableTitleFromFile } from "@/utils/filename";
+import { noteTitleFromFile, remapDirPrefix, sanitizeFilename, siblingPath, tableTitleFromFile } from "@/utils/filename";
 import { useSettingsStore } from "./settingsStore";
 import { useAppStore } from "./appStore";
 import {
@@ -275,6 +277,11 @@ interface CanvasState {
   selectNode: (nodeId: string | null) => void;
   /** 更新节点 data（模型切换等内容变更，自动落库）。 */
   updateNodeData: (nodeId: string, patch: Record<string, unknown>) => void;
+  /**
+   * 画布内文本节点（无 file）右键「保存为笔记」：落根目录生成 `.md`（净化 + 同名去重）并写入正文，
+   * 节点 data.file 置为生成路径转为笔记节点（后续编辑写回 `.md`）。已是笔记节点则 no-op。
+   */
+  saveTextNodeAsNote: (nodeId: string) => Promise<void>;
   // ===== 多人实时协作（presence + canvas-patch 补丁）=====
   /** 本端独占编辑中的对话节点（convId → 获取时间戳 since；锁主判定见 utils/canvasCollab）。 */
   lockedConversations: Record<string, number>;
@@ -460,6 +467,45 @@ export function hasCollabPeerOnCanvas(file: string): boolean {
   return useCollabStore
     .getState()
     .peers.some((p) => p.presence?.file === file && p.presence?.view === "canvas");
+}
+
+/** 仓库文件重命名/移动后同步画布引用：磁盘 .atlx 已被 Rust 改写（rename_note/rename_table/
+ *  rename_attachment 扫描全部 .atlx），内存不同步会在下次自动保存把旧路径回写覆盖，也会让
+ *  watcher 旧路径事件误标节点缺失。同步乐观锁基准一并推进，防保存被「已被外部修改」拒绝。
+ *  newTitle 为 null = 移动（只改 file，标题不变）。 */
+export async function syncCanvasNodeRefs(
+  oldPath: string,
+  newPath: string,
+  newTitle: string | null,
+  nodeType: "text" | "media" | "table",
+): Promise<void> {
+  await useCanvasStore.getState().syncBaseUpdatedAt();
+  const canvasState = useCanvasStore.getState();
+  for (const n of canvasState.nodes) {
+    if (n.type !== nodeType) continue;
+    if ((n.data as { file?: string }).file !== oldPath) continue;
+    canvasState.updateNodeData(
+      n.id,
+      newTitle !== null ? { title: newTitle, file: newPath } : { file: newPath },
+    );
+  }
+}
+
+/** 文件夹重命名/移动后同步画布引用：打开路径改前缀（旧路径已不存在，防 reload 读旧路径）+
+ *  乐观锁基准 + 目录下 text/media 节点引用前缀（磁盘已被 rename_folder 整体改写）。 */
+export async function syncCanvasDirRefs(oldDir: string, newDir: string): Promise<void> {
+  const canvasFile = useCanvasStore.getState().canvasFile;
+  if (canvasFile?.startsWith(`${oldDir}/`)) {
+    useCanvasStore.setState({ canvasFile: remapDirPrefix(canvasFile, oldDir, newDir) });
+  }
+  await useCanvasStore.getState().syncBaseUpdatedAt();
+  const canvasState = useCanvasStore.getState();
+  for (const n of canvasState.nodes) {
+    const d = n.data as { file?: string };
+    if ((n.type === "text" || n.type === "media") && d.file?.startsWith(`${oldDir}/`)) {
+      canvasState.updateNodeData(n.id, { file: remapDirPrefix(d.file, oldDir, newDir) });
+    }
+  }
 }
 
 /** 画布域协作接线（builtin.canvas 载荷调用，随插件启停）：注册 canvas-patch 通道 handler、
@@ -2313,6 +2359,32 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
     } catch {
       // 画布被外部删除等情况：保持现状，reload/切换路径会处理
     }
+  },
+  saveTextNodeAsNote: async (nodeId) => {
+    const node = get().nodes.find((n) => n.id === nodeId);
+    if (!node || node.type !== "text") return;
+    const d = node.data as unknown as TextData;
+    if (d.file) return; // 已是笔记节点
+    // 结构转换（画布内文本 → 笔记节点）入 undo 栈：Ctrl+Z 可还原为画布内文本节点。
+    // 已知语义：撤销只回滚内存态，不删除已落盘的 .md 文件（文件残留由用户手动清理）
+    get().pushUndo();
+    // createNote 生成文件名（title 净化 + 同目录去重）并建空文件；再写正文；成功后节点转笔记引用
+    const file = await useVaultStore.getState().createNote(d.title || "未命名");
+    const bodyMd = d.bodyMd ?? "";
+    try {
+      await writeNote(file, bodyMd);
+      // 登记磁盘基线（同 saveNoteContent/applyNoteEdits：应用自写须被外部修改感知识别）
+      recordNoteDiskContent(file, bodyMd);
+      // 记初始历史存档点（画布文本转笔记的首次写盘，防该笔记无历史记录；尽力而为）
+      void recordHistoryVersion("note", file, { content: bodyMd, action: "edit", coalesceEditMs: 60_000 });
+    } catch (e) {
+      // 写正文失败：回滚已建的空文件（防根目录残留孤儿 .md），节点保持画布内文本不转引用
+      console.error("保存为笔记失败", e);
+      await deleteNote(file).catch(() => {});
+      throw e;
+    }
+    await useVaultStore.getState().loadFiles();
+    get().updateNodeData(nodeId, { file });
   },
   getReferencedInputs: (conversationId) => {
     const { nodes, edges } = get();

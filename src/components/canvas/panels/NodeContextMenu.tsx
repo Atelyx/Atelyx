@@ -1,7 +1,6 @@
 import { BookmarkPlus, ClipboardCopy, Trash2 } from "lucide-react";
 import { useCallback } from "react";
 import { useCanvasStore } from "@/stores/canvasStore";
-import { useVaultStore } from "@/stores/vaultStore";
 import { useNodeCollab } from "@/hooks/useNodeCollab";
 import { Menu, MenuDivider, MenuItem } from "@/components/common/Menu";
 import type { TextData } from "@/types";
@@ -24,7 +23,7 @@ export function NodeContextMenu({ nodeId, x, y, onClose }: Props) {
   const deleteDisabled = node?.type === "conversation" && lockedByPeer !== null;
 
   const handleSaveAsNote = useCallback(() => {
-    void useVaultStore
+    void useCanvasStore
       .getState()
       .saveTextNodeAsNote(nodeId)
       .catch(() => useCanvasStore.setState({ error: "保存为笔记失败，请重试" }));

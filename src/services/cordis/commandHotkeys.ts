@@ -5,7 +5,6 @@
  * 幂等安装一次（pluginStore.load 时）。输入框聚焦时跳过（防与打字冲突）。
  */
 import { getPluginCommands } from "./ui";
-import { usePluginStore } from "@/stores/pluginStore";
 
 /** 修饰键白名单（快捷键解析用）。 */
 const MODIFIERS = new Set(["mod", "ctrl", "meta", "shift", "alt"]);
@@ -46,8 +45,8 @@ export function installCommandHotkeys(): void {
     for (const c of getPluginCommands()) {
       if (c.shortcut && matchesShortcut(c.shortcut, e)) {
         e.preventDefault();
-        const globalId = `${c.pluginId}:${c.id}`;
-        void usePluginStore.getState().runPluginCommand(globalId).catch((err) => console.error(err));
+        // 直接执行注册表里的回调（注册时已绑定调用方插件 fiber，随停用撤销）
+        void Promise.resolve(c.run()).catch((err) => console.error(err));
         return;
       }
     }

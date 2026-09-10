@@ -10,6 +10,7 @@ import {
   type PluginType,
   type ThemeDefinition,
 } from "@/types";
+import { PLUGIN_HOST_API_VERSION } from "@/constants/plugins";
 
 export type ManifestValidateResult =
   | { ok: true; manifest: PluginManifest }
@@ -64,20 +65,29 @@ function parseVersion(value: string): number[] {
   });
 }
 
-/** 插件是否兼容当前宿主（版本范围 + 平台）。 */
+/** 插件是否兼容当前宿主（契约版本 + 版本范围 + 平台）。
+ *  `hostVersion` 为 null = 宿主版本读取失败（IPC 瞬时异常）：跳过版本范围判断（不误判），
+ *  契约版本与平台判断仍生效——它们不依赖 IPC 结果。 */
 export function pluginCompatibleWithHost(
-  manifest: Pick<PluginManifest, "atelyxVersionMin" | "atelyxVersionMax" | "platforms">,
-  hostVersion: string,
+  manifest: Pick<PluginManifest, "atelyxVersionMin" | "atelyxVersionMax" | "platforms" | "hostApiVersion">,
+  hostVersion: string | null,
   platform: string,
 ): { ok: true } | { ok: false; reason: string } {
+  if (manifest.hostApiVersion !== undefined && manifest.hostApiVersion !== PLUGIN_HOST_API_VERSION) {
+    return {
+      ok: false,
+      reason: `需要插件契约版本 ${manifest.hostApiVersion}，当前宿主为 ${PLUGIN_HOST_API_VERSION}`,
+    };
+  }
+  if (manifest.platforms && manifest.platforms.length > 0 && !manifest.platforms.includes(platform)) {
+    return { ok: false, reason: `不支持当前平台（${platform}）` };
+  }
+  if (hostVersion === null) return { ok: true };
   if (manifest.atelyxVersionMin && compareVersions(hostVersion, manifest.atelyxVersionMin) < 0) {
     return { ok: false, reason: `需要 Atelyx ${manifest.atelyxVersionMin} 及以上版本` };
   }
   if (manifest.atelyxVersionMax && compareVersions(hostVersion, manifest.atelyxVersionMax) >= 0) {
     return { ok: false, reason: `仅支持 Atelyx ${manifest.atelyxVersionMax} 以下版本` };
-  }
-  if (manifest.platforms && manifest.platforms.length > 0 && !manifest.platforms.includes(platform)) {
-    return { ok: false, reason: `不支持当前平台（${platform}）` };
   }
   return { ok: true };
 }
@@ -110,6 +120,11 @@ export function validatePluginManifest(raw: unknown): ManifestValidateResult {
 
   const type = ax.type;
   if (typeof type !== "string" || !isKnownPluginType(type)) errors.push(`未知插件类型：${String(type)}`);
+
+  // 契约版本显式给值必须是数字：字符串/对象等一律拒绝（静默当缺省会把不兼容插件放行）
+  if (ax.hostApiVersion !== undefined && typeof ax.hostApiVersion !== "number") {
+    errors.push("hostApiVersion 必须是数字");
+  }
 
   if (errors.length > 0) return { ok: false, errors };
 

@@ -119,6 +119,7 @@ pub fn run() {
             // 联网搜索代理（Tavily/SearXNG，Rust 侧请求绕 CORS + key 不进 WebView）
             commands::search::search_web,
             commands::web::fetch_web,
+            commands::web::http_request,
             // 跨窗口拖拽释放检测（物理左键状态轮询，见 commands/windows.rs；Windows 专用净）
             commands::windows::is_mouse_left_down,
             // 布局迷你窗口管理器（布局模型唯一权威：bootstrap/操作/非布局补丁/flush）
@@ -147,6 +148,10 @@ pub fn run() {
             commands::plugin::plugin_read_entry,
             commands::plugin::plugin_read_state,
             commands::plugin::plugin_write_state,
+            commands::plugin::plugin_kv_read,
+            commands::plugin::plugin_kv_set,
+            commands::plugin::plugin_kv_delete,
+            commands::plugin::plugin_kv_write,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

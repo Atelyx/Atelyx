@@ -70,3 +70,23 @@ export function pluginReadState(id: string): Promise<unknown> {
 export function pluginWriteState(id: string, data: unknown): Promise<void> {
   return invoke("plugin_write_state", { id, data });
 }
+
+/** 读取插件键值存储（单 JSON 对象，独立于 state.json）。 */
+export function pluginKvRead(id: string): Promise<Record<string, unknown>> {
+  return invoke<Record<string, unknown>>("plugin_kv_read", { id });
+}
+
+/** 写插件键值存储的一个键（Rust 侧读改写串行，调用方无需整表往返）。 */
+export function pluginKvSet(id: string, key: string, value: unknown): Promise<void> {
+  return invoke("plugin_kv_set", { id, key, value });
+}
+
+/** 删插件键值存储的一个键（不存在 = no-op）。 */
+export function pluginKvDelete(id: string, key: string): Promise<void> {
+  return invoke("plugin_kv_delete", { id, key });
+}
+
+/** 整表覆盖插件键值存储（ctx.storage.clear 用）。 */
+export function pluginKvWrite(id: string, data: Record<string, unknown>): Promise<void> {
+  return invoke("plugin_kv_write", { id, data });
+}

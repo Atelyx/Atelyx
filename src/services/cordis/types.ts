@@ -30,6 +30,7 @@ import type {
   WorkspaceLayout,
 } from "@/types";
 import type { HistoryKind, HistoryVersion } from "@/services/history";
+import type { HttpRequestInput, HttpResponseResult } from "@/services/http";
 import type { SlotsApi } from "./slotsApi";
 
 /** ai.chat 请求（供应商未指定时跟随默认模型；signal 可中止流式）。 */
@@ -91,6 +92,46 @@ export interface DialogFilters {
 export interface StateService {
   read(pluginId: string): Promise<unknown>;
   write(pluginId: string, data: unknown): Promise<void>;
+}
+
+/** 插件键值存储服务（按插件 id 隔离；值须为 JSON 可序列化，整表落 `data/kv.json`）。 */
+export interface StorageService {
+  /** 读一个键（不存在 = undefined）。 */
+  get(pluginId: string, key: string): Promise<unknown>;
+  /** 写一个键（整表原子写）。 */
+  set(pluginId: string, key: string, value: unknown): Promise<void>;
+  /** 删一个键（不存在 = no-op）。 */
+  delete(pluginId: string, key: string): Promise<void>;
+  /** 全部键名。 */
+  keys(pluginId: string): Promise<string[]>;
+  /** 清空该插件的全部键。 */
+  clear(pluginId: string): Promise<void>;
+}
+
+/** 通用 HTTP 请求/响应类型：形状定义在 `services/http`（命令封装处），此处只做别名与注入面声明。 */
+export type { HttpRequestInput as HttpRequest, HttpResponseResult as HttpResponse } from "@/services/http";
+
+/** 通用 HTTP 请求服务（Rust 代理：CORS 绕行 + SSRF 防护 + 统一超时/响应上限）。 */
+export interface HttpService {
+  request(req: HttpRequestInput): Promise<HttpResponseResult>;
+}
+
+/** 通知级别（ctx.notification、access 注入与宿主通知组件共用）。 */
+export type NotificationLevel = "info" | "success" | "warning" | "error";
+
+/** 通知输入（宿主与插件共用同一形状）。 */
+export interface NotificationInput {
+  message: string;
+  title?: string;
+  level?: NotificationLevel;
+}
+
+/** 应用内通知服务（右下角通知堆叠；宿主窗口内可见）。 */
+export interface NotificationService {
+  /** 弹出一条通知，返回通知 id（可据此提前关闭）。level 缺省 info。 */
+  notify(input: NotificationInput): string;
+  /** 关闭一条通知（不存在 = no-op）。 */
+  dismiss(id: string): void;
 }
 
 /** 宿主信息服务。 */
@@ -263,6 +304,9 @@ export interface UiStateService {
 declare module "@atelyx/cordis" {
   interface Context {
     state: StateService;
+    storage: StorageService;
+    http: HttpService;
+    notification: NotificationService;
     app: AppService;
     shell: ShellService;
     vault: VaultService;

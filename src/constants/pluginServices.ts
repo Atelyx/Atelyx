@@ -4,6 +4,9 @@
  */
 export const PLUGIN_SERVICE_LABELS: Record<string, string> = {
   state: "插件自持状态",
+  storage: "插件键值存储",
+  http: "联网请求",
+  notification: "应用内通知",
   app: "宿主信息",
   shell: "执行外部程序",
   vault: "仓库文件读写",
@@ -22,4 +25,4 @@ export const PLUGIN_SERVICE_LABELS: Record<string, string> = {
 };
 
 /** 敏感服务（审计/披露 UI「敏感」高亮）。 */
-export const PLUGIN_SERVICE_SENSITIVE: ReadonlySet<string> = new Set(["shell", "clipboard"]);
+export const PLUGIN_SERVICE_SENSITIVE: ReadonlySet<string> = new Set(["shell", "clipboard", "http"]);
