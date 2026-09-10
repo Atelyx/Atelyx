@@ -51,7 +51,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDExMzhBOTMyNzY5Nzk5NTIKUldSU21aZDJNcWs0RVZNWXUwLzMzelB5SjBOclMvSzRmaitYOU5tYmVuYjNqdXIwUnlUSUR5K0YK",
       "endpoints": [
-        "https://github.com/Xuhang944/Atelyx/releases/latest/download/latest.json"
+        "https://github.com/Atelyx/Atelyx/releases/latest/download/latest.json"
       ],
       "windows": {
         "installMode": "passive"

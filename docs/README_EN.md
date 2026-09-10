@@ -105,7 +105,7 @@ The canvas is one view in the workbench, for handling conversation branches: a c
 
 ## Installation
 
-Download the installer for your platform from [GitHub Releases](https://github.com/Xuhang944/Atelyx/releases):
+Download the installer for your platform from [GitHub Releases](https://github.com/Atelyx/Atelyx/releases):
 
 | Platform | Package |
 | --- | --- |
@@ -160,7 +160,7 @@ pnpm run tauri:build # build installers
 
 ## Contributing
 
-- Report bugs / request features: [Issues](https://github.com/Xuhang944/Atelyx/issues)
+- Report bugs / request features: [Issues](https://github.com/Atelyx/Atelyx/issues)
 - Before submitting a pull request, please read [CONTRIBUTING.md](CONTRIBUTING.md) (Chinese)
 
 ## License

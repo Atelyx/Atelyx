@@ -105,7 +105,7 @@ Atelyx 是一款以人为本的可拓展桌面工作台：对话、笔记、表�
 
 ## 安装
 
-从 [GitHub Releases](https://github.com/Xuhang944/Atelyx/releases) 下载对应平台安装包：
+从 [GitHub Releases](https://github.com/Atelyx/Atelyx/releases) 下载对应平台安装包：
 
 | 平台 | 安装包 |
 | --- | --- |
@@ -160,7 +160,7 @@ pnpm run tauri:build # 打包
 
 ## 参与贡献
 
-- 提 Bug / 需求：[Issues](https://github.com/Xuhang944/Atelyx/issues)
+- 提 Bug / 需求：[Issues](https://github.com/Atelyx/Atelyx/issues)
 - 提交 Pull Request：请先阅读 [贡献准则](docs/CONTRIBUTING.md)
 
 ## License

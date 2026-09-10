@@ -12,7 +12,7 @@ import { useAppStore } from "@/stores/appStore";
 import appIcon from "@/assets/icon.svg";
 
 /** 项目主页（更新源为 GitHub Release，见 tauri.conf.json updater.endpoints）。 */
-const REPO_URL = "https://github.com/Xuhang944/Atelyx";
+const REPO_URL = "https://github.com/Atelyx/Atelyx";
 
 /**
  * 设置页「关于」tab：Logo + 版本号 + 手动检查更新（下载安装后 relaunch 重启）。

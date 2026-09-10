@@ -12,7 +12,7 @@
 前置要求：Node.js 18+、pnpm、Rust（stable）、Tauri 2 系统依赖。
 
 ```bash
-git clone https://github.com/Xuhang944/Atelyx.git
+git clone https://github.com/Atelyx/Atelyx.git
 cd Atelyx
 pnpm install
 pnpm run tauri:dev    # 启动开发（自动开 Vite + Tauri 窗口）

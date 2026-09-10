@@ -9,13 +9,13 @@ import { badgeFor, isMarketStale, isOfficialRepo } from "./market";
 
 describe("market 纯逻辑", () => {
   it("官方账号判定", () => {
-    expect(isOfficialRepo("Xuhang944/plugins")).toBe(true);
+    expect(isOfficialRepo("Atelyx/plugins")).toBe(true);
     expect(isOfficialRepo("someone/plugins")).toBe(false);
   });
 
   it("徽标：官方账号 → official；精选严格按 owner/repo，自报 id 不继承（防伪造）", () => {
     const endorsed = new Set(["nice/repo"]);
-    expect(badgeFor({ repo: "Xuhang944/x", id: "a" }, endorsed)).toBe("official");
+    expect(badgeFor({ repo: "Atelyx/x", id: "a" }, endorsed)).toBe("official");
     expect(badgeFor({ repo: "nice/repo", id: "b" }, endorsed)).toBe("endorsed");
     // 同 id 不同作者仓库（仿冒克隆）：不继承精选——id + 作者账号双重校验。
     expect(badgeFor({ repo: "other/repo", id: "com.good.plugin" }, endorsed)).toBeUndefined();
