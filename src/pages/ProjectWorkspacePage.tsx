@@ -15,6 +15,7 @@ import { SettingsModal } from "@/components/settings/SettingsModal";
 import { TitleBarControls } from "@/components/common/TitleBarControls";
 import { LayoutTabs } from "@/components/layout/LayoutTabs";
 import { WorkspaceGrid } from "@/components/layout/WorkspaceGrid";
+import { SlotListMount } from "@/components/plugins/SlotHost";
 import { noteTitleFromFile, tableTitleFromFile } from "@/utils/filename";
 import { HOME_LAYOUT_ID, type FileTreeNode } from "@/types";
 
@@ -185,6 +186,10 @@ export function ProjectWorkspacePage() {
 
             {/* 右操作区（常驻）：设置 + 全屏（ml-auto 贴右缘，窗口控制在其后） */}
             <div className="ml-auto flex-shrink-0 flex items-center" data-tauri-drag-region>
+              {/* 插件贡献区：标题栏右操作区（list 槽，priority 降序；容器避让窗口拖拽） */}
+              <span data-tauri-drag-region="false" className="flex items-center">
+                <SlotListMount slot="titlebar/right" />
+              </span>
               <button
                 onClick={(e) => { e.stopPropagation(); openSettings(); }}
                 className="w-8 h-8 flex items-center justify-center rounded-md hover:opacity-80"

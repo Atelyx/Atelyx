@@ -6,22 +6,29 @@
  * 事件闭集（vault:switch/canvas:changed/table:changed/collab:changed/vault:changed）
  * 在此声明为 typed event map（@mode 标注分派模式）。
  *
- * note/chat/history/layout/uiState 为服务面预留（M3 落实现）；canvas/table 由对应
+ * note/chat/history/layout/uiState 为服务面预留（仅占位声明契约，服务侧未实现）；canvas/table 由对应
  * 第一方插件提供（停用即不可用）；其余平台服务由内核提供。
  */
 import type {
+  AppUiState,
   CellValue,
   CollabPeer,
+  EditorChatSession,
   FileTreeNode,
   GlobVaultResult,
   GrepVaultResult,
+  LayoutOp,
+  LayoutOpResult,
   ListDirResult,
   LlmMessage,
   PluginCanvasSnapshot,
   PluginTableSnapshot,
   ReadWindowResult,
   ReasoningEffort,
+  RepoHistoryResult,
+  WorkspaceLayout,
 } from "@/types";
+import type { HistoryKind, HistoryVersion } from "@/services/history";
 import type { SlotsApi } from "./slotsApi";
 
 /** 服务流式收尾契约：流一定以 end/error 收尾（宿主 handler 未自行收尾时内核补 end）。 */
@@ -33,7 +40,7 @@ export interface CordisStreamSink {
   ended: boolean;
 }
 
-/** ai.chat 请求（与桥 ai 能力同字段；供应商未指定时跟随默认模型）。 */
+/** ai.chat 请求（与桥 ai 能力同字段；供应商未指定时跟随默认模型；signal 可中止流式）。 */
 export interface ChatRequest {
   providerId?: string;
   model?: string;
@@ -42,6 +49,8 @@ export interface ChatRequest {
   temperature?: number;
   maxTokens?: number;
   maxRetries?: number;
+  /** 中止信号（abort 后流按 onDone 收敛，不重试）。 */
+  signal?: AbortSignal;
 }
 
 /** ai.chat 聚合结果（非流式；流式经 chunk/end 推送）。 */
@@ -192,22 +201,66 @@ export interface TableService {
   resolveImage(entry: string): Promise<string>;
 }
 
-/** 服务面预留（M3 落实现；类型契约先行）。 */
+/** 笔记内容服务（当前打开的笔记；读写走当前仓库上下文的编辑器链）。 */
 export interface NoteService {
-  /** 预留：打开笔记内容 / 编辑器读写。 */
-  readonly _reserved: true;
+  /** 当前打开的笔记路径（相对仓库根；null = 未打开）。 */
+  currentFile(): string | null;
+  /** 打开笔记（设置全局文件状态；title 为显示标题）。 */
+  open(file: string, title: string): void;
+  /** 读笔记内容（未指定 file = 当前打开的笔记；失败 throw）。 */
+  read(file?: string): Promise<string>;
+  /** 写当前打开笔记内容（原子写 + 基线登记；失败 throw）。 */
+  write(content: string): Promise<void>;
+  /** 落盘当前笔记挂起输入（防抖缓存全部写入）。 */
+  save(): Promise<void>;
 }
+
+/** AI 会话服务（会话历史 + 发起/停止会话）。 */
 export interface ChatService {
-  readonly _reserved: true;
+  /** 会话列表（按最近打开倒序）。 */
+  sessions(): EditorChatSession[];
+  /** 当前激活会话（无 = null）。 */
+  activeSession(): EditorChatSession | null;
+  /** 是否正在流式生成。 */
+  isStreaming(): boolean;
+  /** 激活指定会话。 */
+  openSession(id: string): void;
+  /** 切到新对话态（真正会话在首条消息发送时创建）。 */
+  startSession(): void;
+  /** 发送用户消息（会话流式生成；失败 throw）。 */
+  sendMessage(content: string): Promise<void>;
+  /** 中止当前流式生成。 */
+  stop(): void;
+  /** 删除会话（含侧文件；异步落盘，失败仅日志）。 */
+  deleteSession(id: string): void;
 }
+
+/** 领域历史服务（笔记/画布/表格的版本历史读 + 回滚）。 */
 export interface HistoryService {
-  readonly _reserved: true;
+  /** 列某文件的版本历史（按 seq 升序）。 */
+  list(kind: HistoryKind, file: string): Promise<HistoryVersion[]>;
+  /** 回滚到某版本（note 直写；canvas/table 仅当前打开文件可回滚）。 */
+  rollback(kind: HistoryKind, file: string, seq: number): Promise<void>;
+  /** 仓库历史聚合（按日计数 + 版本流；未加载 = null）。 */
+  repoHistory(): RepoHistoryResult | null;
 }
+
+/** 布局服务（读取布局镜像 + 安全操作子集；布局权威在 Rust layout.rs）。 */
 export interface LayoutService {
-  readonly _reserved: true;
+  /** 当前激活布局 id。 */
+  activeLayoutId(): string | null;
+  /** 布局列表。 */
+  layouts(): WorkspaceLayout[];
+  /** 向指定面板添加一个视图（经 layout_op）。 */
+  addView(panelId: string, view: string): Promise<LayoutOpResult>;
+  /** 发布布局操作（限定安全子集；见 KernelLayoutService 实现）。 */
+  op(op: LayoutOp): Promise<LayoutOpResult>;
 }
+
+/** 应用级 UI 使用状态读服务（非布局字段；只读）。 */
 export interface UiStateService {
-  readonly _reserved: true;
+  /** 当前 AppUiState（非布局 JS 权威字段 + 布局镜像；只读）。 */
+  read(): AppUiState;
 }
 
 /** 声明合并：@atelyx/cordis 的 Context 挂上 Atelyx 服务面与事件表。
@@ -234,18 +287,30 @@ declare module "@atelyx/cordis" {
     slots: SlotsApi;
   }
   interface Events {
-    /** 进仓/切仓完成广播（载荷 { root, id }）。 */
+    /** 进仓/切仓完成广播（载荷 { root, id }）。@emit */
     "vault:switch": (payload: { root: string; id: string }) => void;
-    /** 离开仓库/回启动页：清空仓库上下文（插件据此丢弃 vault 级驻留态）。 */
+    /** 离开仓库/回启动页：清空仓库上下文（插件据此丢弃 vault 级驻留态）。@emit */
     "vault:clear": () => void;
-    /** 当前画布变更（轻量信号：只带 file，按需再调 ctx.canvas.snapshot()）。 */
+    /** 当前画布变更（轻量信号：只带 file，按需再调 ctx.canvas.snapshot()）。@emit */
     "canvas:changed": (payload: { file: string | null }) => void;
-    /** 当前表格变更（轻量信号）。 */
+    /** 当前表格变更（轻量信号）。@emit */
     "table:changed": (payload: { file: string | null }) => void;
-    /** 协作在线用户变更。 */
+    /** 协作在线用户变更。@emit */
     "collab:changed": (payload: { peers: CollabPeer[] }) => void;
-    /** 仓库文件树变更。 */
+    /** 仓库文件树变更。@emit */
     "vault:changed": () => void;
+
+    // ===== 领域事件开放（全部 @emit；按需开放 serial/waterfall veto 面） =====
+    /** 笔记打开/切换（file = null = 关闭当前笔记）。@emit */
+    "note:opened": (payload: { file: string | null }) => void;
+    /** 当前笔记内容变更（保存落盘后发出；按需再调 note 服务读内容）。@emit */
+    "note:changed": (payload: { file: string | null }) => void;
+    /** AI 会话开始（发起请求）。@emit */
+    "chat:started": (payload: { sessionId: string }) => void;
+    /** AI 会话消息（角色 + 内容；assistant 消息在流式完成后发出，非逐 token）。@emit */
+    "chat:message": (payload: { sessionId: string; role: "user" | "assistant"; content: string }) => void;
+    /** AI 会话结束（正常 / 中止 / 出错统一收敛）。@emit */
+    "chat:finished": (payload: { sessionId: string }) => void;
   }
 }
 

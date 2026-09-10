@@ -35,6 +35,9 @@ import {
 } from "./access";
 import { installAudit, resetAudit } from "./audit";
 import { createSlotsApi } from "./slotsApi";
+import { createHistoryService } from "./history";
+import { createLayoutService } from "./layout";
+import { createUiStateService } from "./uiState";
 import { setKernelRef } from "./events";
 import type {
   AiService,
@@ -293,6 +296,7 @@ export function createKernel(): Kernel {
         ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
         ...(req.maxTokens !== undefined ? { maxTokens: req.maxTokens } : {}),
         retry: { maxRetries: typeof req.maxRetries === "number" ? req.maxRetries : 2 },
+        ...(req.signal ? { signal: req.signal } : {}),
       };
       let content = "";
       let reasoning = "";
@@ -356,6 +360,11 @@ export function createKernel(): Kernel {
 
   // 插件 UI 注册 API（视图槽/表格视图；经 tracker 绑定调用方插件 fiber）。
   provide("slots", createSlotsApi());
+
+  // 领域/布局/UI 状态服务（内核提供，root 作用域；实现 = 注入访问对象，见 access.ts）。
+  provide("history", createHistoryService());
+  provide("layout", createLayoutService());
+  provide("uiState", createUiStateService());
 
   return {
     ctx,

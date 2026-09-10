@@ -8,7 +8,7 @@ import { describe, expect, it, afterEach } from "vitest";
 import type { Context } from "@atelyx/cordis";
 import { createKernel, type Kernel } from "./kernel";
 import { mountPlugin, unmountAll } from "./loader";
-import { resolveViewKind, viewKinds } from "./slots";
+import { resolveViewKind, viewKinds, listSlot, registeredSlots } from "./slots";
 import { getPluginTableView } from "./ui";
 
 let kernel: Kernel | null = null;
@@ -58,5 +58,18 @@ describe("ctx.slots", () => {
     const result = await mountPlugin(kernel, { id: "com.test.ui", apply });
     expect(result.ok).toBe(false);
     expect(viewKinds()).toEqual([]);
+  });
+
+  it("registerUi：可向任意具名槽位贡献组件；卸载撤销", async () => {
+    kernel = createKernel();
+    const apply = (ctx: Context) => {
+      ctx.slots.registerUi({ slot: "toolbar/note/right", component: () => null });
+    };
+    await mountPlugin(kernel, { id: "com.test.ui", apply });
+    expect(registeredSlots()).toContain("toolbar/note/right");
+    expect(listSlot("toolbar/note/right")).toHaveLength(1);
+
+    await unmountAll(kernel);
+    expect(listSlot("toolbar/note/right")).toHaveLength(0);
   });
 });

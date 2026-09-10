@@ -13,6 +13,7 @@ import {
 } from "@/services/vault";
 import { toLlmMessages } from "@/services/ai/client";
 import { abortAutoTitle } from "@/services/ai/autoTitle";
+import { emitPluginEvent } from "@/services/cordis/events";
 import { ERROR_PREFIX, TIMEOUT_ERROR_TEXT } from "@/constants/chat";
 import { BUILTIN_AGENT_CHAT_ID } from "@/constants/agents";
 import {
@@ -603,6 +604,9 @@ async function runExchange(
     streaming: true,
     error: null,
   });
+  // 领域事件（状态提交后发出，订阅方读到的是已含本 user 消息的最新会话）：会话请求开始 + 用户消息。
+  emitPluginEvent("chat:started", { sessionId: active.id });
+  emitPluginEvent("chat:message", { sessionId: active.id, role: "user", content: userMsg.displayContent ?? userMsg.content });
   schedulePersist(active.id);
 
   const controller = new AbortController();
@@ -744,6 +748,8 @@ async function runExchange(
       }));
       schedulePersist(active.id);
       void autoNameSession(active.id);
+      // 会话轮次结束（出错收敛也通知订阅方，与 正常/中止 语义一致）。
+      emitPluginEvent("chat:finished", { sessionId: active.id });
       abortController = null;
     },
     onDone: ({ content, reasoning, timedOut, truncated, promoteNarration }) => {
@@ -794,6 +800,11 @@ async function runExchange(
       });
       schedulePersist(active.id);
       void autoNameSession(active.id);
+      // 领域事件：assistant 完成消息（保留分支才有最终内容；超时/移除分支不入列）+ 会话轮次结束。
+      if (decision.kind !== "timeout-error" && decision.kind !== "remove" && finalized.content) {
+        emitPluginEvent("chat:message", { sessionId: active.id, role: "assistant", content: finalized.content });
+      }
+      emitPluginEvent("chat:finished", { sessionId: active.id });
       abortController = null;
     },
     executeTools: (calls) =>

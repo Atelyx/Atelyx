@@ -74,6 +74,8 @@ import { PanelPlaceholder } from "@/components/layout/PanelPlaceholder";
 import { Menu, MenuDivider, MenuItem } from "@/components/common/Menu";
 import { PopupLayer } from "@/components/common/PopupLayer";
 import { HistoryModal } from "@/components/history/HistoryModal";
+import { SlotListMount } from "@/components/plugins/SlotHost";
+import { MenuSlotList } from "@/components/plugins/MenuSlot";
 import { usePopupAnchor } from "@/hooks/usePopupAnchor";
 
 const builtinNodeTypes = {
@@ -663,6 +665,8 @@ export const CanvasView = memo(function CanvasView({
             {nodes.length} 个节点 · {edges.length} 条连线
           </span>
           <ZoomBadge />
+          {/* 插件贡献区：画布状态条（list 槽，priority 降序） */}
+          <SlotListMount slot="statusbar/canvas" />
         </div>
       </div>
 
@@ -697,6 +701,8 @@ export const CanvasView = memo(function CanvasView({
             </div>
           ) : (
             <>
+              {/* 插件菜单项：画布空白右键菜单（contextmenu/canvas） */}
+              <MenuSlotList target="canvas" />
               <MenuItem
                 onClick={() => {
                   addConversationAt(menu.flowX, menu.flowY);

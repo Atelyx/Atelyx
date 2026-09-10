@@ -26,6 +26,7 @@ import { useAppStore } from "@/stores/appStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useUiStateStore } from "@/stores/uiStateStore";
 import { useVaultStore } from "@/stores/vaultStore";
+import { SlotListMount } from "@/components/plugins/SlotHost";
 import { FileContextMenu } from "@/components/canvas/panels/FileContextMenu";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 import { baseName, noteTitleFromFile, tableTitleFromFile } from "@/utils/filename";
@@ -194,6 +195,8 @@ export function FileExplorerPanel({ onOpenCanvasFile, onOpenNoteForEdit, onOpenT
             onClose={() => setSortMenu(null)}
           />
         )}
+        {/* 插件贡献区：文件面板工具条（list 槽，priority 降序） */}
+        <SlotListMount slot="toolbar/files" />
       </div>
 
       {/* 重名自动加序号提醒 */}

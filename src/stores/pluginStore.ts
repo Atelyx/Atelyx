@@ -19,6 +19,7 @@ import type {
   PluginSourceKind,
 } from "@/types";
 import { errText, type PluginFiberPhase } from "@/types";
+import type { AppUiState } from "@/types";
 import {
   pluginInstall,
   pluginInstallLocal,
@@ -45,6 +46,9 @@ import {
 import {
   setAppPageOpener,
   setPluginCollabAccess,
+  setPluginHistoryAccess,
+  setPluginLayoutAccess,
+  setPluginUiStateAccess,
   setPluginVaultWriteAccess,
   setSettingsAccess,
 } from "@/services/cordis/access";
@@ -68,6 +72,7 @@ import {
   builtinManifest,
 } from "@/components/plugins/cordis/builtins";
 import { getKernel } from "@/services/cordis/kernel";
+import { installCommandHotkeys } from "@/services/cordis/commandHotkeys";
 import { mountPlugin, unmountPlugin } from "@/services/cordis/loader";
 import { mountThirdPartyPlugin } from "@/services/cordis/thirdParty";
 import { resolveViewKind, onSlotChange, viewKinds as slotViewKinds } from "@/services/cordis/slots";
@@ -76,7 +81,13 @@ import { VIEW_LABELS } from "@/constants/views";
 import { useCollabStore, publishPluginPresence } from "@/stores/collabStore";
 import { useVaultStore } from "@/stores/vaultStore";
 import { useAppStore } from "@/stores/appStore";
+import { useCanvasStore } from "@/stores/canvasStore";
+import { useTableStore } from "@/stores/tableStore";
+import { useRepoHistoryStore } from "@/stores/repoHistoryStore";
+import { useUiStateStore } from "@/stores/uiStateStore";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { loadHistory } from "@/services/history";
+import { layoutOp } from "@/services/layout";
 import { pickDirectory as pickDirectorySvc } from "@/services/dialog";
 import {
   appendVaultFile,
@@ -298,6 +309,62 @@ function ensureSettingsAccess(): void {
   });
 }
 
+/** 领域历史访问接线守卫：把历史列表/回滚/仓库聚合暴露给内核 `history` 服务（幂等一次）。 */
+let historyAccessWired = false;
+function ensureHistoryAccess(): void {
+  if (historyAccessWired) return;
+  historyAccessWired = true;
+  setPluginHistoryAccess({
+    list: (kind, file) => loadHistory(kind, file),
+    rollback: async (kind, file, seq) => {
+      if (kind === "note") await useVaultStore.getState().noteHistoryRollback(file, seq);
+      else if (kind === "canvas") await useCanvasStore.getState().canvasHistoryRollback(file, seq);
+      else await useTableStore.getState().tableHistoryRollback(file, seq);
+    },
+    repoHistory: () => {
+      const s = useRepoHistoryStore.getState();
+      return { entries: s.entries, dailyCounts: s.dailyCounts };
+    },
+  });
+}
+
+/** 布局访问接线守卫：把布局镜像 + 安全操作子集暴露给内核 `layout` 服务（幂等一次）。
+ *  addView/op 均经 layout-op（Rust 是唯一变更入口）。 */
+let layoutAccessWired = false;
+function ensureLayoutAccess(): void {
+  if (layoutAccessWired) return;
+  layoutAccessWired = true;
+  setPluginLayoutAccess({
+    activeLayoutId: () => useUiStateStore.getState().activeLayoutId,
+    layouts: () => useUiStateStore.getState().workspaceLayouts,
+    addView: (panelId, view) => layoutOp({ op: "addView", panelId, view }),
+    op: (op) => layoutOp(op),
+  });
+}
+
+/** 应用级 UI 使用状态访问接线守卫：把非布局字段 + 布局镜像暴露给内核 `uiState` 服务（幂等一次）。 */
+let uiStateAccessWired = false;
+function ensureUiStateAccess(): void {
+  if (uiStateAccessWired) return;
+  uiStateAccessWired = true;
+  setPluginUiStateAccess({
+    read: () => {
+      const s = useUiStateStore.getState();
+      return {
+        fileExplorerExpanded: [...s.fileExplorerExpanded],
+        lastCanvasFile: s.lastCanvasFile ?? undefined,
+        lastNoteFile: s.lastNoteFile ?? undefined,
+        lastTableFile: s.lastTableFile ?? undefined,
+        workspaceLayouts: s.workspaceLayouts,
+        activeLayoutId: s.activeLayoutId ?? undefined,
+        focusedPanelId: s.focusedPanelId ?? undefined,
+        detachedWindows: s.detachedWindows,
+        recentFiles: s.recentFiles,
+      } as unknown as AppUiState;
+    },
+  });
+}
+
 /** 能力变更事件接线守卫：内核侧 store 变更 → emitPluginEvent 通知订阅插件（幂等一次）。
  *  canvas/table 变更事件随各自内置插件启停注册（见 canvasStore/tableStore 的 register*PluginWiring）；
  *  collab/vault 属内核数据访问，常驻。载荷为轻量信号（插件按需再调 snapshot()/取数据）。 */
@@ -389,7 +456,11 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
       ensureVaultWriteAccess();
       ensureCollabRuntimeAccess();
       ensureSettingsAccess();
+      ensureHistoryAccess();
+      ensureLayoutAccess();
+      ensureUiStateAccess();
       ensureRuntimeChangeEvents();
+      installCommandHotkeys();
       const seq = ++loadSeq;
       // 组合默认值层权威 = 前端第一方 profile（存在/顺序/默认启用；版本取宿主版本，读失败用占位）。
       const [rows, hostVersion] = await Promise.all([pluginList(), getAppVersion().catch(() => null)]);

@@ -12,6 +12,7 @@ import { memo, useRef, useState, type ReactNode } from "react";
 import { useAppStore } from "@/stores/appStore";
 import { usePanelStore } from "@/stores/panelStore";
 import { usePluginStore } from "@/stores/pluginStore";
+import { SlotListMount } from "@/components/plugins/SlotHost";
 import { usePopupAnchor } from "@/hooks/usePopupAnchor";
 import { PopupLayer } from "@/components/common/PopupLayer";
 import { Menu as MenuShell, MenuDivider, MenuItem } from "@/components/common/Menu";
@@ -278,6 +279,8 @@ export const PanelTabBar = memo(function PanelTabBar({
 
       {/* 状态指示 */}
       {status}
+      {/* 插件贡献区：面板头状态区（list 槽，priority 降序） */}
+      <SlotListMount slot="panelhead/status" />
 
       {/* ≡ 菜单（右侧；锁定 + 删除面板 + 分割） */}
       <div className="flex-shrink-0">

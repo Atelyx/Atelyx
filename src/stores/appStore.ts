@@ -562,10 +562,12 @@ export const useAppStore = create<AppState>((set, get) => ({
     useUiStateStore.getState().recordOpenFile("note", file);
     const vaultId = get().vaultId;
     if (vaultId) useUiStateStore.getState().recordRecentFile(file, "note", vaultId);
+    emitPluginEvent("note:opened", { file });
   },
   closeNote: () => {
     set({ currentNoteFile: null, currentNoteTitle: "" });
     useUiStateStore.getState().closeFile("note");
+    emitPluginEvent("note:opened", { file: null });
   },
   openTable: (file, title) => {
     set({ currentTableFile: file, currentTableTitle: title });

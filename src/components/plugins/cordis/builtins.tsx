@@ -43,6 +43,9 @@ import { subscribeVaultEvent } from "@/utils/vaultEvents";
 import { registerViewSlot } from "@/services/cordis/slots";
 import { createCanvasService } from "@/services/cordis/canvas";
 import { createTableService } from "@/services/cordis/table";
+import { createNoteService } from "@/services/cordis/note";
+import { createChatService } from "@/services/cordis/chat";
+import { setPluginNoteAccess, setPluginChatAccess } from "@/services/cordis/access";
 import { VIEW_LABELS } from "@/constants/views";
 
 /** 单个视图载荷（无 props 契约的视图组件；重型视图用 render 承载宿主面板 id）。 */
@@ -105,6 +108,48 @@ function mountVaultEvents(ctx: Context, specs: VaultEventHandlerSpec[]): void {
   for (const spec of specs) {
     ctx.effect(() => subscribeVaultEvent(spec));
   }
+}
+
+/** 笔记能力接线（builtin.note 的 capability）：把当前打开的笔记 + 编辑器读写注入 ctx.note 数据源；
+ *  返回 unregister（停用/卸载复位访问）。 */
+function wireNoteAccess(): () => void {
+  setPluginNoteAccess({
+    currentFile: () => useAppStore.getState().currentNoteFile,
+    open: (file, title) => useAppStore.getState().openNote(file, title),
+    read: async (file) => {
+      const target = file ?? useAppStore.getState().currentNoteFile;
+      if (!target) throw new Error("未打开笔记");
+      return useVaultStore.getState().readNoteContent(target);
+    },
+    write: async (content) => {
+      const target = useAppStore.getState().currentNoteFile;
+      if (!target) throw new Error("未打开笔记");
+      await useVaultStore.getState().saveNoteContent(target, content);
+    },
+    save: async () => {
+      await useVaultStore.getState().flushPendingNotes();
+    },
+  });
+  return () => setPluginNoteAccess(null);
+}
+
+/** AI 会话能力接线（builtin.aichat 的 capability）：把会话历史 + 发起/停止注入 ctx.chat 数据源；
+ *  返回 unregister（停用/卸载复位访问）。 */
+function wireChatAccess(): () => void {
+  setPluginChatAccess({
+    sessions: () => useChatPanelStore.getState().sessions,
+    activeSession: () => {
+      const s = useChatPanelStore.getState();
+      return s.sessions.find((x) => x.id === s.activeSessionId) ?? null;
+    },
+    isStreaming: () => useChatPanelStore.getState().streaming,
+    openSession: (id) => useChatPanelStore.getState().openSession(id),
+    startSession: () => useChatPanelStore.getState().newSession(),
+    sendMessage: (content) => useChatPanelStore.getState().send(content),
+    stop: () => useChatPanelStore.getState().stop(),
+    deleteSession: (id) => useChatPanelStore.getState().deleteSession(id),
+  });
+  return () => setPluginChatAccess(null);
 }
 
 interface BuiltinDefOptions {
@@ -201,6 +246,10 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
         await useChatPanelStore.getState().flush(useAppStore.getState().vaultId);
       },
     },
+    capability: wireChatAccess,
+    provideService: (ctx) =>
+      // 服务 root 作用域提供（第三方插件可消费），生命周期随 builtin 插件 fiber（ctx.effect）
+      ctx.effect(() => ctx.root.provide("chat", createChatService())),
   }),
   def({
     id: "builtin.canvas",
@@ -291,7 +340,11 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
         await useVaultStore.getState().flushPendingNotes();
       },
     },
+    capability: wireNoteAccess,
     collabWiring: registerNoteCollabWiring,
+    provideService: (ctx) =>
+      // 服务 root 作用域提供（第三方插件可消费），生命周期随 builtin 插件 fiber（ctx.effect）
+      ctx.effect(() => ctx.root.provide("note", createNoteService())),
   }),
   def({
     id: "builtin.table",

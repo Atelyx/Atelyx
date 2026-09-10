@@ -5,7 +5,19 @@
  * 当前仓库/画布/表格/协作/ai 配置等运行时数据注入插件面服务；未接线（未进仓/未打开）时
  * getter 返回 null，服务侧据此抛「能力未就绪」。
  */
-import type { CellValue, CollabPeer, PluginCanvasSnapshot, PluginTableSnapshot } from "@/types";
+import type {
+  AppUiState,
+  CellValue,
+  CollabPeer,
+  EditorChatSession,
+  LayoutOp,
+  LayoutOpResult,
+  PluginCanvasSnapshot,
+  PluginTableSnapshot,
+  RepoHistoryResult,
+  WorkspaceLayout,
+} from "@/types";
+import type { HistoryKind, HistoryVersion } from "@/services/history";
 import type { AgentConfig, ChatTargetResult, ProviderConfig } from "@/types";
 
 /** 表格能力访问（ctx.table 的 store 数据源；pluginStore/tableStore 接线注入）。 */
@@ -171,3 +183,111 @@ export function setAppPageOpener(opener: ((pageId: string) => void) | null): voi
 export function getAppPageOpener(): ((pageId: string) => void) | null {
   return appPageOpener;
 }
+
+/** 笔记能力访问（ctx.note 的 store 数据源；pluginStore 接线注入）。
+ *  read/write 走当前仓库上下文的编辑器链（读写全开；未打开笔记时 write 抛错）。 */
+export interface PluginNoteAccess {
+  currentFile(): string | null;
+  open(file: string, title: string): void;
+  /** 读笔记内容（未指定 file = 当前打开的笔记；失败 throw）。 */
+  read(file?: string): Promise<string>;
+  /** 写当前打开笔记内容（原子写 + 基线登记；失败 throw）。 */
+  write(content: string): Promise<void>;
+  /** 落盘当前笔记挂起输入。 */
+  save(): Promise<void>;
+}
+
+let noteAccess: PluginNoteAccess | null = null;
+
+/** 注入/复位笔记能力访问（pluginStore 接线；null 复位供测试）。 */
+export function setPluginNoteAccess(access: PluginNoteAccess | null): void {
+  noteAccess = access;
+}
+
+/** 读取笔记能力访问（ctx.note 服务消费；未接线 = null）。 */
+export function getPluginNoteAccess(): PluginNoteAccess | null {
+  return noteAccess;
+}
+
+/** AI 会话能力访问（ctx.chat 的 store 数据源；pluginStore 接线注入）。 */
+export interface PluginChatAccess {
+  sessions(): EditorChatSession[];
+  activeSession(): EditorChatSession | null;
+  isStreaming(): boolean;
+  openSession(id: string): void;
+  startSession(): void;
+  sendMessage(content: string): Promise<void>;
+  stop(): void;
+  deleteSession(id: string): void;
+}
+
+let chatAccess: PluginChatAccess | null = null;
+
+/** 注入/复位 AI 会话能力访问（pluginStore 接线；null 复位供测试）。 */
+export function setPluginChatAccess(access: PluginChatAccess | null): void {
+  chatAccess = access;
+}
+
+/** 读取 AI 会话能力访问（ctx.chat 服务消费；未接线 = null）。 */
+export function getPluginChatAccess(): PluginChatAccess | null {
+  return chatAccess;
+}
+
+/** 领域历史能力访问（ctx.history 的 store/service 数据源；pluginStore 接线注入）。
+ *  list 走通用历史服务；rollback 按 kind 分派到对应文件存储链；repoHistory 读仓库聚合。 */
+export interface PluginHistoryAccess {
+  list(kind: HistoryKind, file: string): Promise<HistoryVersion[]>;
+  rollback(kind: HistoryKind, file: string, seq: number): Promise<void>;
+  repoHistory(): RepoHistoryResult | null;
+}
+
+let historyAccess: PluginHistoryAccess | null = null;
+
+/** 注入/复位历史能力访问（pluginStore 接线；null 复位供测试）。 */
+export function setPluginHistoryAccess(access: PluginHistoryAccess | null): void {
+  historyAccess = access;
+}
+
+/** 读取历史能力访问（ctx.history 服务消费；未接线 = null）。 */
+export function getPluginHistoryAccess(): PluginHistoryAccess | null {
+  return historyAccess;
+}
+
+/** 布局能力访问（ctx.layout 的 store/service 数据源；pluginStore 接线注入）。
+ *  op 限定安全子集（布局权威在 Rust layout.rs）；addView 为常用快捷。 */
+export interface PluginLayoutAccess {
+  activeLayoutId(): string | null;
+  layouts(): WorkspaceLayout[];
+  addView(panelId: string, view: string): Promise<LayoutOpResult>;
+  op(op: LayoutOp): Promise<LayoutOpResult>;
+}
+
+let layoutAccess: PluginLayoutAccess | null = null;
+
+/** 注入/复位布局能力访问（pluginStore 接线；null 复位供测试）。 */
+export function setPluginLayoutAccess(access: PluginLayoutAccess | null): void {
+  layoutAccess = access;
+}
+
+/** 读取布局能力访问（ctx.layout 服务消费；未接线 = null）。 */
+export function getPluginLayoutAccess(): PluginLayoutAccess | null {
+  return layoutAccess;
+}
+
+/** 应用级 UI 使用状态访问（ctx.uiState 的 store 数据源；pluginStore 接线注入）。只读非布局字段 + 布局镜像。 */
+export interface PluginUiStateAccess {
+  read(): AppUiState;
+}
+
+let uiStateAccess: PluginUiStateAccess | null = null;
+
+/** 注入/复位 UI 状态访问（pluginStore 接线；null 复位供测试）。 */
+export function setPluginUiStateAccess(access: PluginUiStateAccess | null): void {
+  uiStateAccess = access;
+}
+
+/** 读取 UI 状态访问（ctx.uiState 服务消费；未接线 = null）。 */
+export function getPluginUiStateAccess(): PluginUiStateAccess | null {
+  return uiStateAccess;
+}
+

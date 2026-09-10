@@ -15,7 +15,12 @@ export function setKernelRef(kernel: Kernel | null): void {
 }
 
 /** 事件发射：同步投递到内核 ctx 事件总线；未建内核时忽略。
- *  经 events 服务直发（其 emit 为开放签名；typed events 见 types.ts CordisEvents）。 */
+ *  经 events 服务直发（其 emit 为开放签名；typed events 见 types.ts CordisEvents）。
+ *  异常隔离：第三方插件监听器抛错不污染宿主调用方流程（写盘/订阅回调）；错误转 console 供排查。 */
 export function emitPluginEvent(event: string, payload: unknown): void {
-  kernelRef?.ctx.events.emit(event, payload);
+  try {
+    kernelRef?.ctx.events.emit(event, payload);
+  } catch (e) {
+    console.error(`插件监听器处理事件 ${event} 抛错`, e);
+  }
 }

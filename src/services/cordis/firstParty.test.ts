@@ -58,12 +58,21 @@ describe("第一方插件挂载集成", () => {
     expect(kernel.ctx.canvas.snapshot()).toBeDefined();
     expect(kernel.ctx.table.snapshot()).toBeDefined();
     expect(kernel.ctx.get("vault")).toBeDefined();
+    // 能力全开：ctx.note/ctx.chat 由内置插件提供（停用即不可用）。
+    expect(kernel.ctx.get("note")).toBeDefined();
+    expect(kernel.ctx.get("chat")).toBeDefined();
+    // 内核服务：ctx.history/ctx.layout/ctx.uiState 由内核提供（root 常驻）。
+    expect(kernel.ctx.get("history")).toBeDefined();
+    expect(kernel.ctx.get("layout")).toBeDefined();
+    expect(kernel.ctx.get("uiState")).toBeDefined();
 
     // 卸载全部：槽与服务随 fiber 撤销。
     await unmountAll(kernel);
     expect(viewKinds()).toEqual([]);
     expect(kernel.ctx.get("canvas")).toBeUndefined();
     expect(kernel.ctx.get("table")).toBeUndefined();
+    expect(kernel.ctx.get("note")).toBeUndefined();
+    expect(kernel.ctx.get("chat")).toBeUndefined();
   });
 
   it("停用单插件 = 只撤销该插件的槽与服务，其余不受影响", async () => {
@@ -103,5 +112,30 @@ describe("第一方插件挂载集成", () => {
     };
     const result = await mountPlugin(kernel, consumer);
     expect(result.ok).toBe(true);
+  });
+
+  it("第三方可替换内置 note 视图（single 槽高 priority 胜出，无特权报错）", async () => {
+    kernel = createKernel();
+    await mountProfile(
+      kernel,
+      profile,
+      byId as never,
+      new Set(CORDIS_BUILTIN_DEFS.map((d) => d.id)),
+    );
+    // 内置 note 视图已注册（builtin.note，priority 0）。
+    expect(resolveViewKind("note")?.pluginId).toBe("builtin.note");
+
+    // 第三方注册 view/note 且 priority 更高 → single 槽胜出，替换内置实现。
+    const replacer: { id: string; apply: (ctx: Context) => void } = {
+      id: "com.test.note",
+      apply: (ctx) => {
+        ctx.slots.registerView({ kind: "note", label: "我的笔记", component: () => null, priority: 10 });
+      },
+    };
+    const result = await mountPlugin(kernel, replacer);
+    expect(result.ok).toBe(true);
+    const winner = resolveViewKind("note");
+    expect(winner?.pluginId).toBe("com.test.note");
+    expect(winner?.payload.label).toBe("我的笔记");
   });
 });

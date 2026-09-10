@@ -58,6 +58,7 @@ import { useCanvasStore, hasCollabPeerOnCanvas } from "@/stores/canvasStore";
 import { useAppStore } from "@/stores/appStore";
 import { useNoteUndoStore } from "@/stores/noteUndoStore";
 import { useChatPanelStore } from "@/stores/chatPanelStore";
+import { emitPluginEvent } from "@/services/cordis/events";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useTableStore, hasCollabPeerOnTable } from "@/stores/tableStore";
 import { useUiStateStore } from "@/stores/uiStateStore";
@@ -1014,6 +1015,8 @@ export const useVaultStore = create<VaultFileState>((set, get) => ({
       // 标记路径级自写回波：watcher 收到同路径事件后跳过无关的全树重扫（内容编辑不改文件树）
       markSelfSave(file);
     });
+    // 笔记内容落盘：通知订阅方（note:changed 轻量信号，按需再调 note 服务读内容）。
+    emitPluginEvent("note:changed", { file });
   },
 
   invalidateNoteCache: (file) =>

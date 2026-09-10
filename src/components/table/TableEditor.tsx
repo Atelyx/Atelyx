@@ -42,6 +42,7 @@ import {
 import { computeColumnCalc, fieldDefaultWidth, selectionRegion, type TableRegion } from "@/utils/table";
 import { HistoryModal } from "@/components/history/HistoryModal";
 import { PopupLayer } from "@/components/common/PopupLayer";
+import { SlotListMount } from "@/components/plugins/SlotHost";
 import { DropdownSelect } from "@/components/common/DropdownSelect";
 import { ErrorBoundary } from "@/components/common/ErrorBoundary";
 import { usePopupAnchor } from "@/hooks/usePopupAnchor";
@@ -706,6 +707,8 @@ export function TableEditor({ panelId }: { panelId: string }) {
             ))}
           </div>
         )}
+        {/* 插件贡献区：表格工具条右侧（list 槽，priority 降序） */}
+        <SlotListMount slot="toolbar/table/right" />
         {/* 「···」更多选项：历史记录 + 导出 xlsx（统一 usePopupAnchor + PopupLayer 浮层） */}
         <span className="flex-shrink-0">
           <button

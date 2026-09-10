@@ -88,6 +88,7 @@ export {
 export {
   VIEW_KINDS,
   HOME_LAYOUT_ID,
+  type BuiltinViewKind,
   type ViewKind,
   type SplitDirection,
   type TabItem,

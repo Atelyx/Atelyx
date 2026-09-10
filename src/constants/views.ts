@@ -1,9 +1,10 @@
 /**
- * 视图显示名（面板头标签 / 撕裂窗口标题共用）。
+ * 视图显示名（面板头标签 / 撕裂窗口标题共用）。键 = 内置视图类型（穷举保护）；
+ * 插件视图 label 不在此表，走 pluginViewLabel/viewMetaFor 兜底。
  */
-import type { ViewKind } from "@/types";
+import type { BuiltinViewKind } from "@/types";
 
-export const VIEW_LABELS: Record<ViewKind, string> = {
+export const VIEW_LABELS: Record<BuiltinViewKind, string> = {
   canvas: "画布",
   note: "笔记",
   table: "表格",

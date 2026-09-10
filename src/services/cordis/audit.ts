@@ -21,7 +21,7 @@ export interface PluginAuditEntry {
   events: string[];
 }
 
-/** 纳入审计的 Atelyx 服务面（内核 + 第一方插件提供；M3 新增服务面时同步）。 */
+/** 纳入审计的 Atelyx 服务面（内核 + 第一方插件提供；新增服务面时同步）。 */
 const ATELYX_SERVICES = new Set([
   "state",
   "app",
@@ -34,6 +34,11 @@ const ATELYX_SERVICES = new Set([
   "collab",
   "canvas",
   "table",
+  "note",
+  "chat",
+  "history",
+  "layout",
+  "uiState",
 ]);
 
 /** 服务读记录：插件 id → 服务名集合。 */

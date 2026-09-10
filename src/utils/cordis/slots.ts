@@ -1,10 +1,13 @@
 /**
  * slots 代数纯核心（cardinality × scope × priority）。
  *
- * 槽 = 具名渲染/扩展位置（如 "view/canvas"）；贡献按 (cardinality, scope, priority) 解析：
+ * 槽 = 具名渲染/扩展位置（如 "view/canvas"、"toolbar/note/right"、"canvas/node/conversation"）。
+ * 贡献按 (cardinality, scope, priority) 解析：
  * - single：最高 priority 胜出（同优先级后注册者胜，last-wins 覆盖语义）；
- * - list：按 priority 降序全量提供。
- * scope（root/vault）为挂载范围标记，M1 仅 root；纯函数无依赖，可直测。
+ * - list：按 priority 降序全量提供（UI 区域多贡献有序）。
+ * scope（root/vault）为挂载范围标记：root = 跨仓库、vault = 随当前仓库；
+ * resolveSlot/listSlot 只按槽名筛选（scope 为元信息，供运行时按上下文过滤）。
+ * 纯函数无依赖，可直测。
  */
 export type SlotCardinality = "single" | "list";
 

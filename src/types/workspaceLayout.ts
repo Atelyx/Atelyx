@@ -19,8 +19,8 @@
  * （见 `types/uiState.ts` 的 `AppUiState`，Rust 侧 `commands/global.rs` 同步字段）。
  */
 
-/** 视图类型（面板承载的内容）。 */
-export type ViewKind =
+/** 内置视图类型（宿主随附；面板承载的内容）。 */
+export type BuiltinViewKind =
   | "canvas"
   | "note"
   | "table"
@@ -33,6 +33,10 @@ export type ViewKind =
   | "repohistory"
   | "recent"
   | "empty";
+
+/** 视图类型：内置视图或插件注册的开放 kind（Rust 侧 view 恒为 String，见 layout_model.rs）。
+ *  非封闭枚举——插件可注册任意 kind 并出现在「添加面板」菜单/被 ViewHost 承载。 */
+export type ViewKind = BuiltinViewKind | (string & {});
 
 /** 分割方向：horizontal = 左右并排，vertical = 上下叠放。 */
 export type SplitDirection = "horizontal" | "vertical";

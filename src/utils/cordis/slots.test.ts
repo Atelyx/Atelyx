@@ -7,11 +7,17 @@ import { pickSlotWinner, sortSlotList } from "@/utils/cordis/slots";
 import {
   disposePluginSlots,
   listSlot,
+  registerNodeSlot,
   registerSlot,
+  registerTableViewSlot,
+  registerUiSlot,
   registerViewSlot,
   registeredSlots,
+  resolveNodeSlot,
   resolveSlot,
+  resolveTableViewSlot,
   resolveViewKind,
+  tableViewKinds,
   unregisterSlot,
   viewKinds,
 } from "@/services/cordis/slots";
@@ -106,5 +112,47 @@ describe("slots 注册表", () => {
     reg(contrib({ id: "b", slot: "view/b", priority: 2 }));
     expect(resolveSlot("view/a")?.id).toBe("a");
     expect(resolveSlot("view/none")).toBeUndefined();
+  });
+
+  it("node/edge/tableview 槽：single 胜出，可被高 priority 替换", () => {
+    const off1 = registerNodeSlot("conversation", "builtin.canvas", (() => null) as never, { priority: 0 });
+    registered.push("builtin.canvas:node/conversation");
+    expect(resolveNodeSlot("conversation")?.pluginId).toBe("builtin.canvas");
+    // 第三方以更高 priority 注册同 type → 胜出（实施内置替换语义）。
+    const off2 = registerNodeSlot("conversation", "com.test.conv", (() => null) as never, { priority: 10 });
+    registered.push("com.test.conv:node/conversation");
+    expect(resolveNodeSlot("conversation")?.pluginId).toBe("com.test.conv");
+    expect(resolveNodeSlot("missing")).toBeUndefined();
+    off1();
+    off2();
+    expect(resolveNodeSlot("conversation")).toBeUndefined();
+  });
+
+  it("tableview 槽：single 胜出 + tableViewKinds 枚举", () => {
+    const off = registerTableViewSlot("timeline", "com.test.tl", { label: "时间线", component: (() => null) as never }, { priority: 0 });
+    registered.push("com.test.tl:tableview/timeline");
+    expect(resolveTableViewSlot("timeline")?.payload.label).toBe("时间线");
+    expect(tableViewKinds()).toContain("timeline");
+    off();
+    expect(resolveTableViewSlot("timeline")).toBeUndefined();
+  });
+
+  it("UI 区域槽默认 list（多贡献有序，priority 降序）", () => {
+    const off = registerUiSlot("toolbar/note/right", "com.test.tb", { component: (() => null) as never }, { priority: 1 });
+    registered.push("com.test.tb:toolbar/note/right");
+    expect(listSlot("toolbar/note/right").map((c) => (c.payload as { component: unknown }).component)).toHaveLength(1);
+    expect((listSlot("toolbar/note/right")[0]?.payload as { component: unknown }).component).toBeDefined();
+    off();
+    expect(listSlot("toolbar/note/right")).toEqual([]);
+  });
+
+  it("list 槽同插件多贡献 id 自动去重（不拒绝）", () => {
+    const a = registerUiSlot("toolbar/note/right", "com.test.tb", { component: (() => null) as never }, { priority: 0 });
+    const b = registerUiSlot("toolbar/note/right", "com.test.tb", { component: (() => null) as never }, { priority: 0 });
+    registered.push("com.test.tb:toolbar/note/right");
+    registered.push("com.test.tb:toolbar/note/right:1");
+    expect(listSlot("toolbar/note/right")).toHaveLength(2);
+    a();
+    b();
   });
 });

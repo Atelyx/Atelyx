@@ -1,10 +1,13 @@
 /**
- * 宿主侧 UI 贡献注册表：插件主线程平面（设置项/应用页/节点/边/命令/表格视图/主题设置项/通用扩展点）。
+ * 宿主侧 UI 贡献注册表：插件主线程平面（设置项/应用页/命令/主题设置项/通用扩展点）。
  *
  * 注册经 ctx.slots 触达（slotsApi.ts，随插件 fiber 生命周期撤销）；消费者经 pluginStore 读取。
- * 视图贡献（view/<kind>）不在此表——走 slots 注册表（services/cordis/slots.ts）。
+ * 本表为「键值型」主线程平面：设置 key / 应用页 id / 命令 globalId / 主题设置 key 天然唯一，
+ * 同 key 后注册覆盖（last-wins）；需要优先级竞争的位置一律走 slots。
+ * 节点/边/表格视图的读取 getter 亦收拢于此（读 slots 注册表，single 胜出），供 pluginStore 统一读取。
  */
 import type { ComponentType } from "react";
+import { resolveNodeSlot, resolveEdgeSlot, resolveTableViewSlot, nodeKinds, edgeKinds, tableViewKinds } from "./slots";
 
 /** 插件设置项注册（设置页左侧 tab）。 */
 export interface PluginSettingRegistration {
@@ -26,7 +29,7 @@ export interface PluginNodeRegistration {
   type: string;
   component: ComponentType;
 }
-/** 插件画布边注册（CanvasView edgeTypes 合并接入处；与节点同语义、last-wins 覆盖）。 */
+/** 插件画布边注册（CanvasView edgeTypes 合并接入处；single 槽胜出，可高 priority 替换内置）。 */
 export interface PluginEdgeRegistration {
   pluginId: string;
   type: string;
@@ -38,6 +41,8 @@ export interface PluginCommandRegistration {
   id: string;
   label: string;
   run: () => unknown;
+  /** 快捷键（如 "mod+k"；可选；主线程统一监听匹配后执行）。 */
+  shortcut?: string;
 }
 
 /** 插件命令贡献（管理 UI「运行命令」入口：全局 id = `<pluginId>:<命令 id>`）。 */
@@ -81,10 +86,7 @@ export interface PluginUiContribution {
 
 const settings = new Map<string, PluginSettingRegistration>(); // `${pluginId}:${key}` → 注册
 const appPages = new Map<string, PluginAppPageRegistration>(); // id → 注册
-const nodes = new Map<string, PluginNodeRegistration>(); // type → 注册
-const edges = new Map<string, PluginEdgeRegistration>(); // type → 注册
 const commands = new Map<string, PluginCommandRegistration>(); // `${pluginId}:${id}` → 注册
-const tableViews = new Map<string, PluginTableViewRegistration>(); // kind → 注册
 const themeSettings = new Map<string, ThemeSettingRegistration>(); // `${pluginId}:${key}` → 注册
 const uiContributions = new Map<string, PluginUiContribution>(); // `${point}:${pluginId}${id ? ":"+id : ""}` → 注册
 
@@ -111,25 +113,40 @@ export function getPluginAppPages(): PluginAppPageRegistration[] {
   return [...appPages.values()];
 }
 export function getPluginNode(type: string): PluginNodeRegistration | undefined {
-  return nodes.get(type);
+  const winner = resolveNodeSlot(type);
+  if (!winner) return undefined;
+  return { pluginId: winner.pluginId, type, component: winner.payload.component };
 }
 export function getPluginNodes(): PluginNodeRegistration[] {
-  return [...nodes.values()];
+  return nodeKinds()
+    .map((type) => ({ type, winner: resolveNodeSlot(type) }))
+    .filter((x): x is { type: string; winner: NonNullable<ReturnType<typeof resolveNodeSlot>> } => !!x.winner)
+    .map(({ type, winner }) => ({ pluginId: winner.pluginId, type, component: winner.payload.component }));
 }
 export function getPluginEdge(type: string): PluginEdgeRegistration | undefined {
-  return edges.get(type);
+  const winner = resolveEdgeSlot(type);
+  if (!winner) return undefined;
+  return { pluginId: winner.pluginId, type, component: winner.payload.component };
 }
 export function getPluginEdges(): PluginEdgeRegistration[] {
-  return [...edges.values()];
+  return edgeKinds()
+    .map((type) => ({ type, winner: resolveEdgeSlot(type) }))
+    .filter((x): x is { type: string; winner: NonNullable<ReturnType<typeof resolveEdgeSlot>> } => !!x.winner)
+    .map(({ type, winner }) => ({ pluginId: winner.pluginId, type, component: winner.payload.component }));
 }
 export function getPluginCommands(): PluginCommandRegistration[] {
   return [...commands.values()];
 }
 export function getPluginTableView(kind: string): PluginTableViewRegistration | undefined {
-  return tableViews.get(kind);
+  const winner = resolveTableViewSlot(kind);
+  if (!winner) return undefined;
+  return { pluginId: winner.pluginId, kind, label: winner.payload.label, component: winner.payload.component };
 }
 export function getPluginTableViews(): PluginTableViewRegistration[] {
-  return [...tableViews.values()];
+  return tableViewKinds()
+    .map((kind) => ({ kind, winner: resolveTableViewSlot(kind) }))
+    .filter((x): x is { kind: string; winner: NonNullable<ReturnType<typeof resolveTableViewSlot>> } => !!x.winner)
+    .map(({ kind, winner }) => ({ pluginId: winner.pluginId, kind, label: winner.payload.label, component: winner.payload.component }));
 }
 /** 某主题插件的设置项注册（主题页设置区渲染用；空 = 该插件无自定义设置项）。 */
 export function getPluginThemeSettings(pluginId: string): ThemeSettingRegistration[] {
@@ -143,26 +160,73 @@ export function listUiContributions(point: string): PluginUiContribution[] {
 
 // ===== 注册（经 ctx.slots 调用，pluginId 由调用方上下文解析） =====
 
-/** 注册插件表格视图（表格编辑器视图列表；按 pluginId 溯源，卸载随插件撤销）。 */
-export function registerPluginTableView(
+/** 注册插件设置项（设置页 tab）；pluginId 溯源，返回精确撤销（删本项）。 */
+export function registerPluginSetting(
   pluginId: string,
-  kind: string,
+  key: string,
   label: string,
   component: ComponentType,
-): void {
-  tableViews.set(kind, { pluginId, kind, label, component });
+): () => void {
+  const k = `${pluginId}:${key}`;
+  settings.set(k, { pluginId, key, label, component });
   notify();
+  return () => {
+    if (settings.delete(k)) notify();
+  };
 }
 
-/** 撤销某插件在主线程平面的全部贡献（停用/卸载/重载时调用；按 pluginId 溯源）。 */
+/** 注册插件应用级页面（全页接管）；pluginId 溯源，返回精确撤销。 */
+export function registerPluginAppPage(
+  pluginId: string,
+  id: string,
+  label: string,
+  component: ComponentType,
+): () => void {
+  appPages.set(id, { pluginId, id, label, component });
+  notify();
+  return () => {
+    if (appPages.delete(id)) notify();
+  };
+}
+
+/** 注册插件主线程命令（管理 UI「运行命令」入口）；pluginId 溯源，返回精确撤销。 */
+export function registerPluginCommand(
+  pluginId: string,
+  id: string,
+  label: string,
+  run: () => unknown,
+  shortcut?: string,
+): () => void {
+  const k = `${pluginId}:${id}`;
+  commands.set(k, { pluginId, id, label, run, ...(shortcut ? { shortcut } : {}) });
+  notify();
+  return () => {
+    if (commands.delete(k)) notify();
+  };
+}
+
+/** 注册主题插件设置项（主题页设置区）；pluginId 溯源，返回精确撤销。 */
+export function registerPluginThemeSetting(
+  pluginId: string,
+  key: string,
+  label: string,
+  component: ComponentType<ThemeSettingComponentProps>,
+): () => void {
+  const k = `${pluginId}:${key}`;
+  themeSettings.set(k, { pluginId, key, label, component });
+  notify();
+  return () => {
+    if (themeSettings.delete(k)) notify();
+  };
+}
+
+/** 撤销某插件在主线程平面的全部键值贡献（停用/卸载/重载时调用；按 pluginId 溯源）。
+ *  视图/节点/边/表格视图槽贡献不在此表（走 slots 注册表，见 disposePluginSlots）。 */
 export function unregisterPluginUi(pluginId: string): void {
   let changed = false;
   for (const [k, v] of settings) if (v.pluginId === pluginId) changed = settings.delete(k) || changed;
   for (const [k, v] of appPages) if (v.pluginId === pluginId) changed = appPages.delete(k) || changed;
-  for (const [k, v] of nodes) if (v.pluginId === pluginId) changed = nodes.delete(k) || changed;
-  for (const [k, v] of edges) if (v.pluginId === pluginId) changed = edges.delete(k) || changed;
   for (const [k, v] of commands) if (v.pluginId === pluginId) changed = commands.delete(k) || changed;
-  for (const [k, v] of tableViews) if (v.pluginId === pluginId) changed = tableViews.delete(k) || changed;
   for (const [k, v] of themeSettings) if (v.pluginId === pluginId) changed = themeSettings.delete(k) || changed;
   for (const [k, v] of uiContributions) if (v.pluginId === pluginId) changed = uiContributions.delete(k) || changed;
   if (changed) notify();

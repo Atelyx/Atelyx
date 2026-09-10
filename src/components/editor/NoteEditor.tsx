@@ -25,6 +25,7 @@ import { noteTitleFromFile } from "@/utils/filename";
 import { NotePropertiesView } from "@/components/editor/NotePropertiesView";
 import { MarkdownEditor, type MarkdownEditorLinks } from "@/components/editor/MarkdownEditor";
 import { HistoryModal } from "@/components/history/HistoryModal";
+import { SlotListMount } from "@/components/plugins/SlotHost";
 import { useVaultLinkHandlers } from "@/hooks/useVaultLinkHandlers";
 import { usePopupAnchor } from "@/hooks/usePopupAnchor";
 import { useVaultTagCandidates } from "@/hooks/useVaultTagCandidates";
@@ -939,6 +940,8 @@ export function NoteEditor({ file }: { file: string }) {
         style={{ borderBottom: "1px solid var(--border)", color: "var(--text-muted)" }}
       >
         <span className="ml-auto flex items-center gap-2 flex-shrink-0">
+          {/* 插件贡献区：笔记工具条右侧（list 槽，priority 降序） */}
+          <SlotListMount slot="toolbar/note/right" />
           {/* 协作协作者：同看这篇笔记的在线用户（用户色卷标，点击定位到其选中位——暂只展示） */}
           {notePeers.length > 0 && (
             <span className="flex items-center gap-1 flex-shrink-0">

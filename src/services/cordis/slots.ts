@@ -1,12 +1,15 @@
 /**
  * slots 运行时注册表：具名槽的贡献收集与解析（纯代数见 utils/cordis/slots）。
  *
- * 视图槽命名 `view/<kind>`（M1 仅视图；标题栏/工具条/菜单等槽位 M3 全树化时扩展前缀）。
- * 内置视图 = 第一方插件挂载时注册的 single 槽贡献；停用/卸载经 disposePluginSlots 撤销。
+ * 槽命名约定（渲染/扩展位置常量）：view/<kind>、node/<type>、edge/<type>、tableview/<kind>、
+ * titlebar/<region>、toolbar/<region>、panelhead/<region>、contextmenu/<target>、
+ * settings/<block>、statusbar/<region>、command/<id>。
+ * 内置视图/节点/边 = 第一方插件挂载时注册的 single 槽贡献；注册经 ctx.effect 随 fiber 撤销
+ * （disposePluginSlots 仅供测试/兜底，正常卸载走 effect 清理）。
  */
 import type { ComponentType, ReactNode } from "react";
 import { VIEW_LABELS } from "@/constants/views";
-import type { SlotContribution } from "@/utils/cordis/slots";
+import type { SlotCardinality, SlotContribution, SlotScope } from "@/utils/cordis/slots";
 import { pickSlotWinner, sortSlotList } from "@/utils/cordis/slots";
 
 /** 视图槽载荷（view/<kind>）：label + component/render 至少其一（render 优先，重型视图承载宿主面板 id）。 */
@@ -92,19 +95,37 @@ export function viewKinds(): string[] {
     .map((s) => s.slice(prefix.length));
 }
 
-/** 注册视图槽贡献（slot = `view/<kind>`）；返回撤销函数。 */
-export function registerViewSlot(
-  kind: string,
+/** 槽注册通用 opts（cardinality/scope/priority/id）。 */
+export interface SlotRegisterOptions {
+  cardinality?: SlotCardinality;
+  scope?: SlotScope;
+  priority?: number;
+  /** 覆盖默认贡献 id（缺省 `<pluginId>:<slot>`）。 */
+  id?: string;
+}
+
+/** 注册任意槽贡献；返回撤销函数。默认 id = `<pluginId>:<slot>`。
+ *  single 槽同插件重复注册（同 slot）按「重复 id 拒绝」（语义歧义）；list 槽（可多贡献）
+ *  同插件重复注册自动加序去重（`<pluginId>:<slot>:N`）。 */
+export function registerSlotContrib(
+  slot: string,
   pluginId: string,
-  payload: ViewSlotPayload,
-  opts?: { cardinality?: "single" | "list"; scope?: "root" | "vault"; priority?: number; id?: string },
+  payload: unknown,
+  opts?: SlotRegisterOptions,
 ): () => void {
-  const id = opts?.id ?? `${pluginId}:view/${kind}`;
+  const cardinality = opts?.cardinality ?? "single";
+  const base = opts?.id ?? `${pluginId}:${slot}`;
+  let id = base;
+  // list 可多贡献：同插件同槽重复注册时 id 自动去重。
+  if (cardinality === "list") {
+    let n = 1;
+    while (contributions.has(id)) id = `${base}:${n++}`;
+  }
   registerSlot({
     id,
     pluginId,
-    slot: `view/${kind}`,
-    cardinality: opts?.cardinality ?? "single",
+    slot,
+    cardinality,
     scope: opts?.scope ?? "root",
     priority: opts?.priority ?? 0,
     payload,
@@ -112,12 +133,92 @@ export function registerViewSlot(
   return () => unregisterSlot(id);
 }
 
+/** 注册视图槽贡献（slot = `view/<kind>`）；返回撤销函数。 */
+export function registerViewSlot(
+  kind: string,
+  pluginId: string,
+  payload: ViewSlotPayload,
+  opts?: SlotRegisterOptions,
+): () => void {
+  return registerSlotContrib(`view/${kind}`, pluginId, payload, opts);
+}
+
+/** 注册画布节点槽贡献（slot = `node/<type>`；single 胜出，可被同 type 高 priority 替换）。 */
+export function registerNodeSlot(type: string, pluginId: string, component: ComponentType, opts?: SlotRegisterOptions): () => void {
+  return registerSlotContrib(`node/${type}`, pluginId, { component }, opts);
+}
+
+/** 注册画布边槽贡献（slot = `edge/<type>`；single 胜出）。 */
+export function registerEdgeSlot(type: string, pluginId: string, component: ComponentType, opts?: SlotRegisterOptions): () => void {
+  return registerSlotContrib(`edge/${type}`, pluginId, { component }, opts);
+}
+
+/** 注册表格视图槽贡献（slot = `tableview/<kind>`；single 胜出）。 */
+export function registerTableViewSlot(kind: string, pluginId: string, payload: { label: string; component: ComponentType }, opts?: SlotRegisterOptions): () => void {
+  return registerSlotContrib(`tableview/${kind}`, pluginId, payload, opts);
+}
+
 /** 解析某视图 kind 的胜出贡献（ViewHost 分派用；无贡献 = undefined）。 */
 export function resolveViewKind(kind: string): ViewSlotContribution | undefined {
   return resolveSlot(`view/${kind}`) as ViewSlotContribution | undefined;
 }
 
+/** 解析画布节点胜出贡献（CanvasView nodeTypes 合并用；无贡献 = undefined）。 */
+export function resolveNodeSlot(type: string): SlotContribution<{ component: ComponentType }> | undefined {
+  return resolveSlot(`node/${type}`) as SlotContribution<{ component: ComponentType }> | undefined;
+}
+
+/** 解析画布边胜出贡献（CanvasView edgeTypes 合并用）。 */
+export function resolveEdgeSlot(type: string): SlotContribution<{ component: ComponentType }> | undefined {
+  return resolveSlot(`edge/${type}`) as SlotContribution<{ component: ComponentType }> | undefined;
+}
+
+/** 解析表格视图胜出贡献（TableEditor 视图分派用）。 */
+export function resolveTableViewSlot(kind: string): SlotContribution<{ label: string; component: ComponentType }> | undefined {
+  return resolveSlot(`tableview/${kind}`) as SlotContribution<{ label: string; component: ComponentType }> | undefined;
+}
+
 /** 视图显示名（视图槽标签 → 内置视图标签 → 原样兜底，不崩溃）。 */
 export function pluginViewLabel(view: string): string {
   return resolveViewKind(view)?.payload.label ?? (VIEW_LABELS as Record<string, string>)[view] ?? view;
+}
+
+/** 画布节点 type 集合（槽名剥 `node/` 前缀；CanvasView 内置节点/边合并兜底用）。 */
+export function nodeKinds(): string[] {
+  const prefix = "node/";
+  return registeredSlots()
+    .filter((s) => s.startsWith(prefix))
+    .map((s) => s.slice(prefix.length));
+}
+
+/** 画布边 type 集合（槽名剥 `edge/` 前缀）。 */
+export function edgeKinds(): string[] {
+  const prefix = "edge/";
+  return registeredSlots()
+    .filter((s) => s.startsWith(prefix))
+    .map((s) => s.slice(prefix.length));
+}
+
+/** 表格视图 kind 集合（槽名剥 `tableview/` 前缀）。 */
+export function tableViewKinds(): string[] {
+  const prefix = "tableview/";
+  return registeredSlots()
+    .filter((s) => s.startsWith(prefix))
+    .map((s) => s.slice(prefix.length));
+}
+
+/** UI 区域槽载荷（titlebar/toolbar/panelhead/contextmenu/settings/statusbar 等具名槽位）。 */
+export interface UiSlotPayload {
+  /** 渲染组件（无 props 契约）。 */
+  component: ComponentType;
+}
+
+/** UI 区域槽（titlebar/toolbar/panelhead/contextmenu/settings/statusbar 等）：默认 list（多贡献有序），可指定 single。 */
+export function registerUiSlot(
+  slot: string,
+  pluginId: string,
+  payload: UiSlotPayload,
+  opts?: SlotRegisterOptions,
+): () => void {
+  return registerSlotContrib(slot, pluginId, payload, { cardinality: "list", ...opts });
 }

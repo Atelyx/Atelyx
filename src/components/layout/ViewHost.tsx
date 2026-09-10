@@ -33,10 +33,11 @@ import { useTableStore } from "@/stores/tableStore";
 import { useVaultStore } from "@/stores/vaultStore";
 import { usePluginStore } from "@/stores/pluginStore";
 import { ErrorBoundary } from "@/components/common/ErrorBoundary";
-import type { ViewKind } from "@/types";
+import type { BuiltinViewKind, ViewKind } from "@/types";
 
-/** 视图元信息（标签/头部共用；显示名单一来源 = VIEW_LABELS，图标在此维护）。 */
-export const VIEW_META: Record<ViewKind, { label: string; icon: ReactNode }> = {
+/** 视图元信息（标签/头部共用；显示名单一来源 = VIEW_LABELS，图标在此维护）。
+ *  键 = 内置视图类型（穷举保护）；插件视图走 viewMetaFor 兜底。 */
+export const VIEW_META: Record<BuiltinViewKind, { label: string; icon: ReactNode }> = {
   canvas: { label: VIEW_LABELS.canvas, icon: <Palette size={13} /> },
   note: { label: VIEW_LABELS.note, icon: <FileText size={13} /> },
   table: { label: VIEW_LABELS.table, icon: <TableIcon size={13} /> },
