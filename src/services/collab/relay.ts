@@ -262,9 +262,21 @@ export function connectCollabRelay(opts: CollabRelayOptions): CollabRelayHandle 
         clearInterval(heartbeatTimer);
         heartbeatTimer = null;
       }
-      ws?.close();
+      const socket = ws;
       ws = null;
       alive = false;
+      if (!socket) return;
+      if (socket.readyState === WebSocket.CONNECTING) {
+        // 连接尚未建立（如 effect 双跑的 cleanup 抢先）：此刻 close() 会触发浏览器告警
+        // 「closed before the connection is established」。摘掉既有 handler 后改为「建立即关」——
+        // 终态一致：不发 hello、不再重连、不再改连接状态。
+        socket.onopen = () => socket.close();
+        socket.onmessage = null;
+        socket.onerror = null;
+        socket.onclose = null;
+        return;
+      }
+      socket.close();
     },
   };
 }
