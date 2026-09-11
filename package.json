@@ -1,7 +1,7 @@
 {
   "name": "atelyx",
   "private": true,
-  "version": "0.4.4",
+  "version": "0.4.5",
   "type": "module",
   "packageManager": "pnpm@10.20.0",
   "description": "一款可拓展的桌面 AI 工作台：对话、笔记、表格、文件同台使用，AI 辅助贯穿，局域网多人协作",
