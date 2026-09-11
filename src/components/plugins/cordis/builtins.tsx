@@ -40,7 +40,7 @@ import {
   syncCanvasNodeRefs,
 } from "@/stores/canvasStore";
 import { useTableStore, registerTableCollabWiring, registerTablePluginWiring } from "@/stores/tableStore";
-import { registerNoteCollabWiring } from "@/stores/noteCollabStore";
+import { registerNoteCollabWiring, useNoteCollabStore } from "@/stores/noteCollabStore";
 import { useChatPanelStore } from "@/stores/chatPanelStore";
 import { useCalendarStore } from "@/stores/calendarStore";
 import { useNoteUndoStore } from "@/stores/noteUndoStore";
@@ -445,6 +445,8 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
         // 切仓库清空笔记撤销栈与编辑会话（防同路径串文件）；笔记运行时态的清态由 noteStore 自注册承担
         useNoteUndoStore.getState().clearAll();
         closeAllNoteSessions();
+        // 协作文档以「仓库内相对路径」为身份：跨仓库同名路径不得复用旧文档（CRDT 状态与基线序号一并清空）
+        useNoteCollabStore.getState().clear();
       },
       onVaultExit: async () => {
         await useNoteStore.getState().flushPendingNotes();
@@ -475,26 +477,33 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
       vaultHandler("note:renamed", (e) => {
         useNoteStore.getState().invalidateNoteCache(e.oldPath);
         useNoteUndoStore.getState().renameFile(e.oldPath, e.newPath);
+        // 协作文档以路径为身份：旧路径文档随迁作废（同名新文件不得复用其 CRDT 状态）
+        useNoteCollabStore.getState().disposeDoc(e.oldPath);
       }),
       vaultHandler("note:moved", (e) => {
         useNoteStore.getState().invalidateNoteCache(e.oldPath);
         useNoteUndoStore.getState().renameFile(e.oldPath, e.newPath);
+        useNoteCollabStore.getState().disposeDoc(e.oldPath);
       }),
       vaultHandler("note:deleted", (e) => {
         // 文件已删：清撤销栈、挂起输入与正文缓存（挂起输入不清会在下次 flush 时经 writeNote 重建已删文件）
         useNoteUndoStore.getState().clearFile(e.path);
         useNoteStore.getState().setPendingNoteContent(e.path, null);
         useNoteStore.getState().invalidateNoteCache(e.path);
+        useNoteCollabStore.getState().disposeDoc(e.path);
       }),
       // 文件夹改名/移动：目录下笔记的正文缓存按新旧前缀作废——旧前缀不再指代这批文件，
       // 新前缀可能复用本会话内已改走/已删目录的路径
       vaultHandler("folder:renamed", (e) => {
         useNoteStore.getState().invalidateNoteCacheUnder(e.oldDir);
         useNoteStore.getState().invalidateNoteCacheUnder(e.newDir);
+        // 协作文档以路径为身份：旧目录前缀下的文档随迁作废
+        useNoteCollabStore.getState().disposeDocsUnder(e.oldDir);
       }),
       vaultHandler("folder:moved", (e) => {
         useNoteStore.getState().invalidateNoteCacheUnder(e.oldDir);
         useNoteStore.getState().invalidateNoteCacheUnder(e.newDir);
+        useNoteCollabStore.getState().disposeDocsUnder(e.oldDir);
       }),
     ],
     provideService: (ctx) =>

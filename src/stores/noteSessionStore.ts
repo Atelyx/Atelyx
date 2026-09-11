@@ -48,6 +48,8 @@ interface SessionRuntime {
   timer: ReturnType<typeof setTimeout> | null;
   /** 保存序号：写入完成时若已有更新输入，保持「保存中…」而非误报「已保存」。 */
   saveSeq: number;
+  /** 协作绑定在途（已发起直读盘取基线，等待结果）：防同会话重复发起。 */
+  bindingPending: boolean;
   /** 最近一次内容变化的来源作者（主作者）：协作远端合入 → 该协作者；本地编辑 → null。 */
   lastChangeAuthor: HistoryAuthor | null;
   /** 自上次落盘以来参与内容变化的协作者集合（历史 coAuthors）；落盘成功后清空。 */
@@ -126,17 +128,45 @@ function bodyLF(content: string): string {
   return parseFrontmatter(content).body.replace(/\r\n/g, "\n");
 }
 
-/** 协作态以正文（LF）为 Y.Doc 基线绑定；已绑定（会话共享）、冲突未决或正文为空时不重复建。 */
+/**
+ * 协作态绑定：以**磁盘最新正文**为基线（peer 把打开文本当磁盘权威并入外部改动，并登记为共同祖先），
+ * 内容缓存可能滞后于磁盘（自写回波抑制窗口内的远端写入），故直读盘取基线；读失败退回会话正文（仍优于不绑定）。
+ * 本端有未落盘输入时不特殊处理：绑定后由 `handleCollabDivergence` 把会话正文按差量写回 ytext（本地最新者胜），
+ * 共同祖先仍是磁盘正文——未落盘内容不会被登记成已落盘。
+ * 绑定完成即把会话对齐到 CRDT 真值。
+ */
 function ensureCollabBinding(rt: SessionRuntime): void {
-  if (!isCollabActive() || rt.conflict) return;
-  const content = view(rt.file)?.content ?? "";
+  if (!isCollabActive() || rt.conflict || rt.bindingPending) return;
+  const file = rt.file;
+  if (useNoteCollabStore.getState().bindings[file]) return;
+  const content = view(file)?.content ?? "";
+  // 空正文不参与协作（无可合并内容）：用户输入后经 commit 再次进入本函数完成绑定
   if (!content) return;
-  if (useNoteCollabStore.getState().bindings[rt.file]) return;
-  const { collabNickname, collabColor, deviceName } = useSettingsStore.getState();
-  useNoteCollabStore.getState().bind(rt.file, bodyLF(content), {
-    name: collabNickname || deviceName || "用户",
-    color: collabColor || "#30bced",
-  });
+
+  const bindWith = (baselineContent: string): void => {
+    const { collabNickname, collabColor, deviceName } = useSettingsStore.getState();
+    const binding = useNoteCollabStore.getState().bind(file, bodyLF(baselineContent), {
+      name: collabNickname || deviceName || "用户",
+      color: collabColor || "#30bced",
+    });
+    rt.session.handleCollabDivergence(binding.ytext.toString());
+  };
+
+  rt.bindingPending = true;
+  void useNoteStore
+    .getState()
+    .readNoteFresh(file)
+    .catch(() => null)
+    .then((disk) => {
+      rt.bindingPending = false;
+      // 读盘窗口内会话可能已关闭/转冲突/协作失活/已由他处绑定：这些分支都是「无需绑定」的合法条件，
+      // 不是失败——后续输入（commit）或协作连接变化会再次触发本函数完成绑定
+      if (runtimeMap.get(file) !== rt || rt.conflict) return;
+      if (!isCollabActive() || useNoteCollabStore.getState().bindings[file]) return;
+      const latest = view(file)?.content ?? "";
+      if (!latest) return;
+      bindWith(disk ?? latest);
+    });
 }
 
 /**
@@ -230,7 +260,7 @@ async function save(rt: SessionRuntime, seq: number): Promise<void> {
       await useNoteStore.getState().saveNoteContent(file, content);
       if (runtimeMap.get(file) !== rt) return;
       rt.lastSaved = content;
-      useNoteCollabStore.getState().notifyNoteDiskWrite(file);
+      useNoteCollabStore.getState().notifyNoteDiskWrite(file, bodyLF(content));
       finishSave(rt, seq);
       recordHistory();
       return;
@@ -307,6 +337,7 @@ async function handleExternalChange(rt: SessionRuntime): Promise<void> {
       // 多写者协作：对端/本端正收敛写盘是常态，不走单写者冲突模型
       if (disk === current.content) {
         rt.lastSaved = disk;
+        useNoteCollabStore.getState().notifyNoteDiskWrite(file, bodyLF(disk));
         return;
       }
       if (current.dirty) return; // 本地有未落盘编辑：保留本地，等防抖写盘收敛
@@ -315,6 +346,8 @@ async function handleExternalChange(rt: SessionRuntime): Promise<void> {
         rt.timer = null;
       }
       rt.lastSaved = disk;
+      // 磁盘已持有该正文（对端写入）：三方合并的共同祖先随之对齐
+      useNoteCollabStore.getState().notifyNoteDiskWrite(file, bodyLF(disk));
       replaceContent(rt, disk);
       patchView(file, { dirty: false });
       setSaveState(file, "idle");
@@ -352,6 +385,7 @@ async function reloadFromDisk(rt: SessionRuntime): Promise<void> {
     rt.lastSaved = disk;
     setConflict(rt, false);
     useNoteStore.getState().setPendingNoteContent(file, null);
+    useNoteCollabStore.getState().notifyNoteDiskWrite(file, bodyLF(disk));
     replaceContent(rt, disk);
     patchView(file, { dirty: false });
     setSaveState(file, "idle");
@@ -373,6 +407,7 @@ async function saveLocalOverExternal(rt: SessionRuntime): Promise<void> {
     await useNoteStore.getState().saveNoteContent(file, content);
     if (runtimeMap.get(file) !== rt || seq !== rt.saveSeq) return;
     rt.lastSaved = content;
+    useNoteCollabStore.getState().notifyNoteDiskWrite(file, bodyLF(content));
     useNoteStore.getState().setPendingNoteContent(file, null);
     patchView(file, { dirty: false });
     setSaveState(file, "saved");
@@ -446,6 +481,9 @@ function flushPending(rt: SessionRuntime): void {
       if (useNoteStore.getState().pendingNoteContent[file] === pending) {
         useNoteStore.getState().setPendingNoteContent(file, null);
       }
+      // 不在此登记磁盘基线：本函数只由 closeSession 调用，编辑器绑定随之下线；保留文档（refcount=0）
+      // 仍会接收帧并用 lastFlushed 当共同祖先，其偏旧由下次打开时的直读盘正文校正——
+      // 偏旧是保守方向（不会把未落盘内容当已落盘），代价只是合并精度
     })
     .catch((e) => console.error("笔记保存失败", e));
 }
@@ -475,6 +513,7 @@ function openSession(file: string, baselineContent?: string): NoteBodySession {
     processedResolveSeq: useNoteStore.getState().noteConflictResolveReq[file]?.seq ?? 0,
     timer: null,
     saveSeq: 0,
+    bindingPending: false,
     lastChangeAuthor: null,
     changeAuthors: new Map(),
     session: {
@@ -499,6 +538,7 @@ function openSession(file: string, baselineContent?: string): NoteBodySession {
         setConflict(rt, false);
         // 回滚内容已落盘：回滚前的本地输入作废，防关窗 flush 把它写回覆盖回滚结果
         useNoteStore.getState().setPendingNoteContent(file, null);
+        useNoteCollabStore.getState().notifyNoteDiskWrite(file, bodyLF(content));
         replaceContent(rt, content);
         patchView(file, { dirty: false });
         setSaveState(file, "saved");

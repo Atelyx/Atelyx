@@ -5,11 +5,14 @@
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
-const h = vi.hoisted(() => ({ reads: [] as string[], failWrites: false }));
+const h = vi.hoisted(() => ({ reads: [] as string[], failWrites: false, failReads: false }));
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: async (cmd: string) => {
-    if (cmd === "read_note") return h.reads.shift() ?? "";
+    if (cmd === "read_note") {
+      if (h.failReads) throw new Error("read failed");
+      return h.reads.shift() ?? "";
+    }
     if (h.failWrites) throw new Error("write failed");
     return "";
   },
@@ -18,18 +21,31 @@ vi.mock("@tauri-apps/api/core", () => ({
 type SessionStore = typeof import("./noteSessionStore");
 type NoteStore = typeof import("./noteStore");
 type NotificationStore = typeof import("./notificationStore");
+type SettingsStore = typeof import("./settingsStore");
+type CollabStore = typeof import("./collabStore");
+type NoteCollabStore = typeof import("./noteCollabStore");
 
 let store: SessionStore;
 let noteStore: NoteStore;
 let notifications: NotificationStore;
+let settings: SettingsStore;
+let collab: CollabStore;
+let noteCollab: NoteCollabStore;
 
 beforeEach(async () => {
   vi.resetModules();
   h.reads = [];
   h.failWrites = false;
+  h.failReads = false;
   store = await import("./noteSessionStore");
   noteStore = await import("./noteStore");
   notifications = await import("./notificationStore");
+  settings = await import("./settingsStore");
+  collab = await import("./collabStore");
+  noteCollab = await import("./noteCollabStore");
+  // 默认非协作态：协作用例各自打开开关，避免相互影响
+  settings.useSettingsStore.setState({ collabEnabled: false });
+  collab.useCollabStore.setState({ connected: false, peers: [] });
 });
 
 describe("会话引用计数", () => {
@@ -132,5 +148,95 @@ describe("外部修改与冲突", () => {
       expect(noteStore.useNoteStore.getState().pendingNoteContent["a.md"]).toBeUndefined(),
     );
     expect(reopened.getState().conflict).toBe(false);
+  });
+});
+
+describe("协作态绑定基线", () => {
+  /** 打开协作开关并返回会话；reads 队列按 read_note 调用顺序喂入（缓存未命中/直读盘都走它）。 */
+  function openCollab(file = "a.md") {
+    settings.useSettingsStore.setState({ collabEnabled: true });
+    collab.useCollabStore.setState({ connected: true });
+    return { session: store.noteSurfaceProvider.open(file), file };
+  }
+
+  it("无未落盘输入：直读盘取基线（缓存滞后时以磁盘为准），并从磁盘内容对齐会话", async () => {
+    // 缓存已有旧内容（未命中读盘），直读盘返回更新正文
+    noteStore.useNoteStore.getState().stageNoteContent("a.md", "缓存旧内容");
+    h.reads.push("盘上较新内容");
+    const { session } = openCollab();
+    await vi.waitFor(() => expect(noteCollab.useNoteCollabStore.getState().bindings["a.md"]).toBeDefined());
+    expect(h.reads).toHaveLength(0); // 直读盘已消费
+    await vi.waitFor(() => expect(session.getState().content).toBe("盘上较新内容"));
+  });
+
+  it("有未落盘输入：仍以磁盘正文为基线，会话正文按差量写回文档（不回退、不登记为已落盘）", async () => {
+    noteStore.useNoteStore.getState().stageNoteContent("a.md", "未落盘新内容");
+    h.reads.push("盘上更旧内容");
+    const { session } = openCollab();
+    // 绑定前先本地输入（会话脏 + 挂起输入）：此时写盘仍在途，直读盘会读到更旧的正文
+    session.applyBody("未落盘新内容");
+    await vi.waitFor(() => expect(noteCollab.useNoteCollabStore.getState().bindings["a.md"]).toBeDefined());
+    // 基线仍取自磁盘（不跳过读盘），未落盘输入随后按差量写回共享基线
+    expect(h.reads).toHaveLength(0);
+    await vi.waitFor(() =>
+      expect(noteCollab.useNoteCollabStore.getState().bindings["a.md"].ytext.toString()).toBe(
+        "未落盘新内容",
+      ),
+    );
+    expect(session.getState().content).toBe("未落盘新内容");
+  });
+
+  it("直读盘失败：退回会话正文完成绑定（不阻塞协作）", async () => {
+    noteStore.useNoteStore.getState().stageNoteContent("a.md", "会话正文");
+    h.failReads = true;
+    const { session } = openCollab();
+    await vi.waitFor(() => expect(noteCollab.useNoteCollabStore.getState().bindings["a.md"]).toBeDefined());
+    expect(session.getState().content).toBe("会话正文");
+  });
+
+  it("磁盘确实为空：以空正文为基线，会话对齐到空（外部清空即权威）", async () => {
+    noteStore.useNoteStore.getState().stageNoteContent("a.md", "缓存内容");
+    h.reads.push(""); // 直读盘得到一个空文件
+    const { session } = openCollab();
+    await vi.waitFor(() => expect(noteCollab.useNoteCollabStore.getState().bindings["a.md"]).toBeDefined());
+    await vi.waitFor(() => expect(session.getState().content).toBe(""));
+  });
+
+  it("非协作态不建立协作文档", async () => {
+    store.noteSurfaceProvider.open("a.md");
+    await vi.waitFor(() => expect(store.noteSurfaceProvider.get("a.md")).not.toBeNull());
+    expect(noteCollab.useNoteCollabStore.getState().bindings["a.md"]).toBeUndefined();
+  });
+
+  /** 对端更高序基线通告（触发采纳重建）。 */
+  async function adoptPeerBaseline(file: string, text: string): Promise<void> {
+    const { receiveSyncMessage } = await import("@/services/noteCollab/noteDoc");
+    const { baselineIdOf, encodeNoteBaseline } = await import("@/services/noteCollab/frame");
+    const tag = { seq: 99, author: "对端", id: baselineIdOf(text) };
+    receiveSyncMessage(file, encodeNoteBaseline(tag, text, text), 1);
+  }
+
+  it("编辑面打开期间文档被采纳重建：绑定刷新到新文档", async () => {
+    noteStore.useNoteStore.getState().stageNoteContent("a.md", "本端正文");
+    openCollab();
+    await vi.waitFor(() => expect(noteCollab.useNoteCollabStore.getState().bindings["a.md"]).toBeDefined());
+    const before = noteCollab.useNoteCollabStore.getState().bindings["a.md"];
+    await adoptPeerBaseline("a.md", "对端新正文");
+    const after = noteCollab.useNoteCollabStore.getState().bindings["a.md"];
+    expect(after).toBeDefined();
+    expect(after).not.toBe(before);
+    expect(after.ytext.toString()).toBe("对端新正文");
+  });
+
+  it("会话关闭（无编辑面）的保留文档被重建：不凭空复活绑定", async () => {
+    noteStore.useNoteStore.getState().stageNoteContent("a.md", "本端正文");
+    openCollab();
+    await vi.waitFor(() => expect(noteCollab.useNoteCollabStore.getState().bindings["a.md"]).toBeDefined());
+    store.noteSurfaceProvider.close("a.md");
+    expect(noteCollab.useNoteCollabStore.getState().bindings["a.md"]).toBeUndefined();
+
+    // 保留文档仍参与房间收敛（refcount=0 也会采纳更高序基线并重建），但不得生出无编辑面的绑定
+    await adoptPeerBaseline("a.md", "对端新正文");
+    expect(noteCollab.useNoteCollabStore.getState().bindings["a.md"]).toBeUndefined();
   });
 });
