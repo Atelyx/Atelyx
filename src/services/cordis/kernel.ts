@@ -44,7 +44,7 @@ import { createSlotsApi } from "./slotsApi";
 import { createHistoryService } from "./history";
 import { createLayoutService } from "./layout";
 import { createUiStateService } from "./uiState";
-import { setKernelRef } from "./events";
+import { installEventIsolation, setKernelRef } from "./events";
 import type {
   AiService,
   AppService,
@@ -146,6 +146,9 @@ export interface Kernel {
 
 /** 构造平台服务并挂到根 Context（服务对象引用注入 access 经 getter 惰性读取）。 */
 export function createKernel(): Kernel {
+  // 事件投递的异常隔离属 emit 语义本身（不是审计式归因包装）：任何内核都必须有，
+  // 否则一个插件监听器抛错会静默吃掉同事件其余监听器——故与内核一同就位，进程级幂等。
+  installEventIsolation();
   const ctx = new Context();
   const disposables: Array<() => void> = [];
 
@@ -450,7 +453,8 @@ export function getKernel(): Kernel {
   if (!kernel) {
     ensurePluginRuntimeGlobals();
     kernel = createKernel();
-    // 审计（服务读 + 事件订阅归属）随应用内核安装；createKernel 保持纯净（测试不装全局包装）。
+    // 审计（服务读 + 事件订阅归属）是「归因」包装，只在应用路径安装（测试不装，避免把测试自身的
+    // 服务访问记进归属表）；emit 异常隔离属 emit 语义本身，已随 createKernel 就位。
     auditDispose = installAudit();
     setKernelRef(kernel);
   }

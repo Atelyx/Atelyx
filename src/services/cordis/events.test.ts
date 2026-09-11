@@ -1,8 +1,8 @@
 /**
  * 领域事件开放测试：插件订阅 typed events（note:changed/chat:message 等）并收到回调；
- * 卸载后订阅随 fiber 撤销（不再收到）。
+ * 卸载后订阅随 fiber 撤销（不再收到）；单个监听器抛错不打断同事件其余监听器（逐监听器隔离）。
  */
-import { describe, expect, it, afterEach } from "vitest";
+import { describe, expect, it, afterEach, vi } from "vitest";
 import type { Context } from "@atelyx/cordis";
 import { createKernel, type Kernel } from "./kernel";
 import { mountPlugin, unmountAll } from "./loader";
@@ -56,5 +56,39 @@ describe("领域事件开放", () => {
     received.length = 0;
     emitPluginEvent("note:changed", { file: "x.md" });
     expect(received).toHaveLength(0);
+  });
+
+  it("单个监听器抛错不打断同事件其余监听器（同步与异步）", async () => {
+    const k = await boot();
+    const received: string[] = [];
+    const errors: unknown[][] = [];
+    const errorSpy = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      errors.push(args);
+    });
+    const apply = (ctx: Context) => {
+      ctx.effect(() =>
+        ctx.events.on("note:changed", () => {
+          throw new Error("插件甲处理失败");
+        }),
+      );
+      ctx.effect(() =>
+        ctx.events.on("note:changed", () => Promise.reject(new Error("插件乙异步失败"))),
+      );
+      ctx.effect(() => ctx.events.on("note:changed", () => received.push("丙")));
+    };
+    const result = await mountPlugin(k, { id: "com.test.isolate", apply });
+    expect(result.ok).toBe(true);
+
+    // 抛错的甲在前：乙（异步拒绝）与丙仍须被投递
+    emitPluginEvent("note:changed", { file: "a.md" });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(received).toEqual(["丙"]);
+    expect(errors).toHaveLength(2);
+    // 日志必须带事件名（dispatch 会就地消费 args，事件名需在派发前取，否则只剩载荷无法定位）
+    for (const call of errors) {
+      expect(call.map((part) => String(part)).join(" ")).toContain("note:changed");
+    }
+    errorSpy.mockRestore();
   });
 });

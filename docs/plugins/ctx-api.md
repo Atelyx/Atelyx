@@ -37,7 +37,7 @@ ctx.effect(() => {
 | `ctx.note` | `currentFile()` / `open(file, title)` / `read(file?)` / `write(content)` / `save()` | 当前笔记读写（由随应用分发的笔记插件提供，停用即不可用） |
 | `ctx.chat` | `sessions()` / `activeSession()` / `isStreaming()` / `openSession(id)` / `startSession()` / `sendMessage(content)` / `stop()` / `deleteSession(id)` | AI 会话管理（由随应用分发的 AI 对话插件提供，停用即不可用） |
 | `ctx.history` | `list(kind, file)` / `rollback(kind, file, seq)` / `repoHistory()` | 领域历史读 + 回滚（`kind` = note/canvas/table） |
-| `ctx.layout` | `activeLayoutId()` / `layouts()` / `addView(panelId, view)` / `op(op)` | 布局读 + 安全操作子集（权威在 Rust） |
+| `ctx.layout` | `activeLayoutId()` / `layouts()` / `addView(panelId, view)` / `op(op)` | 布局读 + 布局操作发布（`op` 与 Rust `LayoutOp` 逐字段对齐；布局权威在 Rust，改布局一律经 `layout_op` 命令） |
 | `ctx.uiState` | `read()` | 应用级 UI 使用状态读（只读非布局字段 + 布局镜像） |
 
 依赖某个服务时用 apply 对象声明：`{ name, inject: ["table"], apply(ctx) { ... } }`——

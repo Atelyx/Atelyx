@@ -10,6 +10,7 @@
  */
 import { ReflectService } from "@atelyx/cordis";
 import type { Context } from "@atelyx/cordis";
+import { PLUGIN_SERVICE_NAMES } from "@/constants/pluginServices";
 import { pluginIdOf } from "./loader";
 
 /** 单个插件的审计结果。 */
@@ -21,28 +22,8 @@ export interface PluginAuditEntry {
   events: string[];
 }
 
-/** 纳入审计的 Atelyx 服务面（内核 + 插件提供的领域服务；新增服务面时同步）。 */
-const ATELYX_SERVICES = new Set([
-  "state",
-  "storage",
-  "http",
-  "notification",
-  "app",
-  "shell",
-  "vault",
-  "dialog",
-  "clipboard",
-  "window",
-  "ai",
-  "collab",
-  "canvas",
-  "table",
-  "note",
-  "chat",
-  "history",
-  "layout",
-  "uiState",
-]);
+/** 纳入审计的 Atelyx 服务面（与展示标签同一清单，避免两处枚举漂移；新增服务面改 constants 一处）。 */
+const ATELYX_SERVICES = new Set(PLUGIN_SERVICE_NAMES);
 
 /** 服务读记录：插件 id → 服务名集合。 */
 const serviceReads = new Map<string, Set<string>>();
@@ -108,4 +89,10 @@ export function auditSnapshot(ctx: Context): PluginAuditEntry[] {
 /** 清空服务读记录（供测试复位）。 */
 export function resetAudit(): void {
   serviceReads.clear();
+}
+
+/** 丢弃单个插件的服务读记录（卸载时调用）：记录只增不删会让审计跨卸载/换包累积，
+ *  把已卸载插件的旧访问当作当前行的「实际侧」。事件侧随 fiber 撤销自然消失，无需清理。 */
+export function forgetPluginAudit(pluginId: string): void {
+  serviceReads.delete(pluginId);
 }

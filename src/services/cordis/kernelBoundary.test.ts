@@ -3,9 +3,12 @@
  *
  * 断言内核启动/组合路径不依赖领域 store——「内核可脱离领域代码独立启动」的可回归证据。
  * 运行时无法观测模块图，静态读源码断言 import 说明符是唯一可靠手段。
- * 扫描口径：`from "..."` / `import "..."` / `import("...")` 三种 ESM 形式（本仓库 import 均走其中之一）。
+ * 扫描口径：`from "..."` / `import "..."` / `import("...")` / `require("...")` 四种形式；
+ * 模板串与变量说明符无法静态解析，不在此列（新增此类写法须人工确认）。
  * 例外：宿主接线模块 stores/pluginStore.ts 不在内核路径清单内（它把领域 store 的数据源注入内核
  * ctx 服务），其领域依赖以显式清单登记——新增依赖会让本测试失败，须在此登记理由。
+ * 第二跳同样登记：pluginStore 静态 import `components/plugins/cordis/builtins.tsx`（随应用分发的
+ * 插件实现注册表），后者按插件 apply 闭包直接消费领域 store —— 那份依赖单独成清单，同样以测试锁死。
  */
 import { readdir, readFile, stat } from "node:fs/promises";
 import { dirname, relative, resolve } from "node:path";
@@ -15,7 +18,7 @@ const srcRoot = resolve(process.cwd(), "src");
 
 /** 领域 store（领域功能运行时状态；内核路径不得 import）。
  *  内核自带的 store（appStore/panelStore/uiStateStore/settingsStore/collabStore/notificationStore 等）不在名单内。
- *  局限：经中间模块间接 re-export、非 ESM 的 require 不在扫描范围。 */
+ *  局限：经中间模块间接 re-export、非 ESM 的 require 已在扫描范围内，模板串/变量说明符不在。 */
 const DOMAIN_STORES = [
   "canvasStore",
   "tableStore",
@@ -23,6 +26,7 @@ const DOMAIN_STORES = [
   "noteStore",
   "noteCollabStore",
   "noteUndoStore",
+  "noteSessionStore",
   "calendarStore",
   "repoHistoryStore",
 ] as const;
@@ -46,6 +50,20 @@ const HOST_WIRING_EXCEPTION = "stores/pluginStore.ts";
 /** 该例外当前登记的领域依赖（新增即须在此登记并说明理由）。
  *  canvasStore/tableStore/repoHistoryStore/noteStore = ctx.canvas/ctx.table/ctx.history（含笔记历史回滚）数据源。 */
 const HOST_WIRING_DOMAIN_DEPS = ["canvasStore", "tableStore", "repoHistoryStore", "noteStore"];
+
+/** 第二跳：随应用分发的插件实现注册表（pluginStore 的静态 import），其领域依赖同样须登记。
+ *  八项分别对应各内置插件 apply 闭包消费的领域 store（画布/表格/AI 面板/笔记/笔记协作/笔记撤销/日历/笔记正文会话）。 */
+const BUILTINS_EXCEPTION = "components/plugins/cordis/builtins.tsx";
+const BUILTINS_DOMAIN_DEPS = [
+  "canvasStore",
+  "tableStore",
+  "chatPanelStore",
+  "noteStore",
+  "noteCollabStore",
+  "noteUndoStore",
+  "noteSessionStore",
+  "calendarStore",
+];
 
 describe("内核路径导入守卫", () => {
   it("内核路径不 import 领域 store", async () => {
@@ -76,6 +94,11 @@ describe("内核路径导入守卫", () => {
   it("宿主接线模块的领域依赖限于已登记清单", async () => {
     const deps = await importedDomainStores(resolve(srcRoot, HOST_WIRING_EXCEPTION));
     expect([...deps].sort()).toEqual([...HOST_WIRING_DOMAIN_DEPS].sort());
+  });
+
+  it("插件实现注册表的领域依赖限于已登记清单（宿主接线的第二跳）", async () => {
+    const deps = await importedDomainStores(resolve(srcRoot, BUILTINS_EXCEPTION));
+    expect([...deps].sort()).toEqual([...BUILTINS_DOMAIN_DEPS].sort());
   });
 });
 
@@ -111,7 +134,7 @@ async function importedDomainStores(file: string): Promise<string[]> {
   return [...found];
 }
 
-/** 源码中的 ESM import 说明符。 */
+/** 源码中的模块说明符（静态 import/require 的四种形态）。 */
 async function importSpecifiers(file: string): Promise<string[]> {
   const source = await readFile(file, "utf8");
   const out: string[] = [];
@@ -119,6 +142,7 @@ async function importSpecifiers(file: string): Promise<string[]> {
     /\bfrom\s+["']([^"']+)["']/gu,
     /\bimport\s+["']([^"']+)["']/gu,
     /\bimport\s*\(\s*["']([^"']+)["']/gu,
+    /\brequire\s*\(\s*["']([^"']+)["']/gu,
   ]) {
     for (const match of source.matchAll(pattern)) out.push(match[1]!);
   }

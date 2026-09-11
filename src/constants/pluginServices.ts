@@ -22,7 +22,11 @@ export const PLUGIN_SERVICE_LABELS: Record<string, string> = {
   history: "领域历史读与回滚",
   layout: "工作区布局读与操作",
   uiState: "应用级 UI 状态读",
+  slots: "插件 UI 注册",
 };
+
+/** 纳入审计/披露的服务面名单（唯一清单：审计侧据此判定「访问了哪个服务」，与展示标签同源）。 */
+export const PLUGIN_SERVICE_NAMES: readonly string[] = Object.keys(PLUGIN_SERVICE_LABELS);
 
 /** 敏感服务（审计/披露 UI「敏感」高亮）。 */
 export const PLUGIN_SERVICE_SENSITIVE: ReadonlySet<string> = new Set(["shell", "clipboard", "http"]);

@@ -280,7 +280,7 @@ export interface HistoryService {
   repoHistory(): RepoHistoryResult | null;
 }
 
-/** 布局服务（读取布局镜像 + 安全操作子集；布局权威在 Rust layout.rs）。 */
+/** 布局服务（读取布局镜像 + 发布布局操作；布局权威在 Rust layout.rs）。 */
 export interface LayoutService {
   /** 当前激活布局 id。 */
   activeLayoutId(): string | null;
@@ -288,7 +288,7 @@ export interface LayoutService {
   layouts(): WorkspaceLayout[];
   /** 向指定面板添加一个视图（经 layout_op）。 */
   addView(panelId: string, view: string): Promise<LayoutOpResult>;
-  /** 发布布局操作（限定安全子集；见 KernelLayoutService 实现）。 */
+  /** 发布布局操作（`LayoutOp` 与 Rust `LayoutOp` 逐字段对齐，命令层全量受理；布局权威在 Rust）。 */
   op(op: LayoutOp): Promise<LayoutOpResult>;
 }
 

@@ -2,7 +2,8 @@
  * 布局服务提供器（ctx.layout）：由内核提供（root 作用域，跨插件生命周期常驻）。
  *
  * 布局权威在 Rust layout.rs（layout-op 是唯一变更入口）；本服务只读布局镜像 +
- * 发布安全操作子集（addView/op）。访问延迟到方法调用时读取（服务可随内核创建）。
+ * 发布布局操作（`LayoutOp` 与 Rust 侧逐字段对齐，由命令层受理）。访问延迟到方法调用时读取
+ * （服务可随内核创建）。
  */
 import { getPluginLayoutAccess } from "./access";
 import type { LayoutService } from "./types";
