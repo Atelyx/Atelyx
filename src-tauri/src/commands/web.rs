@@ -4,14 +4,15 @@
 //! 且便于统一超时与大小上限。`fetch_web` 返回 `title` + 正文纯文本，供 AI `fetch_url` 工具
 //! 回填上下文做回答依据；`http_request` 返回状态码 + 响应头 + 原样文本体，供插件访问 HTTP API。
 //!
-//! 边界捕获：非 http/https 拒绝、内网/回环地址拒绝（SSRF 防护）、方法白名单外拒绝、
-//! 网络/HTTP 错误返回 Err，前端降级为错误文本。
+//! 边界捕获：非 http/https 拒绝、内网/回环地址拒绝（SSRF 防护，策略见 `net_guard`）、
+//! 方法白名单外拒绝、网络/HTTP 错误返回 Err，前端降级为错误文本。
 
 use std::collections::HashMap;
 
 use reqwest::header::{ACCEPT, USER_AGENT};
-use reqwest::Url;
 use serde::{Deserialize, Serialize};
+
+use crate::net_guard::{ensure_public_http_url, redirect_policy};
 
 /// 抓取响应上限（字节）。防超大页面/二进制拖死请求，超出即截断。
 const MAX_RESPONSE_BYTES: usize = 1_000_000;
@@ -19,8 +20,6 @@ const MAX_RESPONSE_BYTES: usize = 1_000_000;
 const MAX_TEXT_CHARS: usize = 20_000;
 /// 允许的 HTTP 方法（白名单：其余一律拒绝，防 CONNECT/TRACE 等非预期语义）。
 const ALLOWED_METHODS: [&str; 6] = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"];
-/// 最多跟随的重定向跳数（每跳都重新过公网校验，见 redirect_policy）。
-const MAX_REDIRECTS: usize = 10;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -62,7 +61,7 @@ pub async fn fetch_web(url: String) -> Result<FetchedWebPage, String> {
     // 重定向每跳复检（默认策略会默默跟随 302 到内网地址，绕过入口校验）
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
-        .redirect(redirect_policy())
+        .redirect(redirect_policy(ensure_public_http_url))
         .build()
         .map_err(|e| format!("客户端初始化失败：{}", e))?;
     let resp = client
@@ -96,7 +95,7 @@ pub async fn http_request(req: HttpRequest) -> Result<HttpResponse, String> {
     // 重定向每跳复检（默认策略会默默跟随 302 到内网地址，绕过入口校验）
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
-        .redirect(redirect_policy())
+        .redirect(redirect_policy(ensure_public_http_url))
         .build()
         .map_err(|e| format!("客户端初始化失败：{}", e))?;
     let mut builder = client.request(method, url);
@@ -143,22 +142,6 @@ async fn read_capped(mut resp: reqwest::Response, cap: usize) -> Result<(Vec<u8>
     Ok((out, false))
 }
 
-/// 重定向是否放行：跳数在上限内且目标通过公网校验。
-fn redirect_allowed(hops: usize, url: &str) -> bool {
-    hops < MAX_REDIRECTS && ensure_public_http_url(url).is_ok()
-}
-
-/// 重定向策略：每跳重新做公网校验（被拒目标即停止，把 3xx 响应原样交回调用方，不再向该地址发请求）。
-fn redirect_policy() -> reqwest::redirect::Policy {
-    reqwest::redirect::Policy::custom(|attempt| {
-        if redirect_allowed(attempt.previous().len(), attempt.url().as_str()) {
-            attempt.follow()
-        } else {
-            attempt.stop()
-        }
-    })
-}
-
 /// 请求方法白名单校验 + 归一化（缺省 GET）。
 fn normalize_method(raw: Option<&str>) -> Result<reqwest::Method, String> {
     let method = raw.unwrap_or("GET").to_uppercase();
@@ -166,43 +149,6 @@ fn normalize_method(raw: Option<&str>) -> Result<reqwest::Method, String> {
         return Err(format!("不支持的请求方法：{method}"));
     }
     reqwest::Method::from_bytes(method.as_bytes()).map_err(|e| format!("请求方法无效：{e}"))
-}
-
-/// http/https 校验 + SSRF 防护（拒绝内网/回环/链路本地地址），返回解析后的 URL。
-///
-/// 限制：域名 + DNS rebinding（解析后将内网 IP 返回）场景未做全量地址验证，仍封堵 IP 字面量主通路。
-fn ensure_public_http_url(raw: &str) -> Result<Url, String> {
-    if !raw.starts_with("https://") && !raw.starts_with("http://") {
-        return Err("仅支持 http/https 网址".to_string());
-    }
-    let parsed = Url::parse(raw).map_err(|e| format!("URL 解析失败：{e}"))?;
-    let host = parsed.host_str().ok_or_else(|| "无效 URL host".to_string())?;
-    // IPv6 字面量在 URL 里带方括号（可带 zone id，如 `[fe80::1%25eth0]`）：剥掉后再按 IpAddr 解析，
-    // 否则 `[::1]` 这类地址解析失败、绕过下面的内网判定。
-    let zone = host.find('%').unwrap_or(host.len());
-    let bare = host[..zone].trim_start_matches('[').trim_end_matches(']');
-    if bare.eq_ignore_ascii_case("localhost") {
-        return Err("拒绝访问 localhost（SSRF 防护）".to_string());
-    }
-    if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
-        let blocked = match ip {
-            std::net::IpAddr::V4(v4) => {
-                v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified() || v4.is_broadcast()
-            }
-            std::net::IpAddr::V6(v6) => {
-                // 封堵回环/未指定/唯一本地(ULA fc00::/7)/link-local(fe80::/10)/IPv4-mapped(可伪装内网 v4)
-                v6.is_loopback()
-                    || v6.is_unspecified()
-                    || v6.is_unique_local()
-                    || (v6.segments()[0] & 0xffc0) == 0xfe80
-                    || v6.to_ipv4_mapped().is_some()
-            }
-        };
-        if blocked {
-            return Err("拒绝访问内网/回环/链路本地地址（SSRF 防护）".to_string());
-        }
-    }
-    Ok(parsed)
 }
 
 /// 提取 `<title>` 内容（去标签、去空白）。基于 ASCII 小写做字节定位（长度不变，安全）。
@@ -374,34 +320,6 @@ mod web_tests {
         assert!(normalize_method(Some("TRACE")).is_err());
         assert!(normalize_method(Some("CONNECT")).is_err());
         assert!(normalize_method(Some("")).is_err());
-    }
-
-    #[test]
-    fn url_guard_blocks_non_http_and_internal_targets() {
-        assert!(ensure_public_http_url("https://example.com/a").is_ok());
-        assert!(ensure_public_http_url("http://example.com/a").is_ok());
-        // 协议限制。
-        assert!(ensure_public_http_url("ftp://example.com/a").is_err());
-        assert!(ensure_public_http_url("file:///etc/passwd").is_err());
-        // SSRF：回环/私网/链路本地/IPv6 回环与别名。
-        assert!(ensure_public_http_url("http://127.0.0.1:8080/").is_err());
-        assert!(ensure_public_http_url("http://localhost/").is_err());
-        assert!(ensure_public_http_url("http://169.254.169.254/latest/meta-data").is_err());
-        assert!(ensure_public_http_url("http://10.0.0.5/").is_err());
-        assert!(ensure_public_http_url("http://[::1]/").is_err());
-    }
-
-    #[test]
-    fn redirect_targets_are_rechecked_per_hop() {
-        // 公网目标放行（含 http→https 之类正常跳转）。
-        assert!(redirect_allowed(0, "https://example.com/a"));
-        assert!(redirect_allowed(3, "http://example.com/a"));
-        // 跳向内网/回环/超跳数一律不放行（302 到内网是绕过入口校验的主通路）。
-        assert!(!redirect_allowed(0, "http://127.0.0.1:7701/"));
-        assert!(!redirect_allowed(0, "http://169.254.169.254/latest/meta-data"));
-        assert!(!redirect_allowed(0, "http://[::1]/"));
-        assert!(!redirect_allowed(0, "ftp://example.com/"));
-        assert!(!redirect_allowed(MAX_REDIRECTS, "https://example.com/a"));
     }
 
     #[test]

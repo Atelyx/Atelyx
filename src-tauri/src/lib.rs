@@ -9,6 +9,7 @@ mod layout_drag;
 mod layout_model;
 mod layout_persist;
 mod layout_window;
+mod net_guard;
 mod vault;
 mod watcher;
 
