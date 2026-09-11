@@ -1146,7 +1146,7 @@ fn create_plugin_link(src: &Path, link: &Path) -> Result<(), String> {
 
 #[cfg(not(windows))]
 fn create_plugin_link(src: &Path, link: &Path) -> Result<(), String> {
-    std::os::unix::fs::symlink_dir(src, link).map_err(|e| format!("创建符号链接失败：{e}"))
+    std::os::unix::fs::symlink(src, link).map_err(|e| format!("创建符号链接失败：{e}"))
 }
 
 /// Windows 下目录链接（junction）判定：检查 reparse point 位（junction 与符号链接同属）。
