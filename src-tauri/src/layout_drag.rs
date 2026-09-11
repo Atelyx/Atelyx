@@ -154,7 +154,7 @@ pub async fn drag_update(
         }
     }
     let (gen, broadcast) = {
-        let mut inner = state.inner.lock().unwrap();
+        let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
         match start {
             Some(p) => {
                 // 会话创建是持久化消费路径的前置：bootstrap 完成前不接受（防默认态覆写磁盘状态）
@@ -211,7 +211,7 @@ pub async fn drag_update(
 #[tauri::command]
 pub async fn drag_hit(app: AppHandle, window: String, hit: Option<DragHit>) -> Result<(), String> {
     let state = app.state::<LayoutState>();
-    let mut inner = state.inner.lock().unwrap();
+    let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
     if inner.drag.is_none() {
         return Ok(());
     }
@@ -283,7 +283,10 @@ fn cursor_to_logical(
 async fn finish_drag(app: &AppHandle, screen_x: Option<f64>, screen_y: Option<f64>, cancelled: bool) {
     let state = app.state::<LayoutState>();
     let need_settle = {
-        let mut inner = state.inner.lock().unwrap();
+        let Ok(mut inner) = state.inner.lock() else {
+            eprintln!("[layout] 布局状态锁已损坏，放弃本次拖拽收尾");
+            return;
+        };
         if !inner.loaded || inner.drag_resolving || inner.drag.is_none() {
             return;
         }
@@ -326,7 +329,10 @@ async fn finish_drag(app: &AppHandle, screen_x: Option<f64>, screen_y: Option<f6
         wait_for_settle(&state, target.as_deref(), snapshot).await;
     }
 
-    let mut inner = state.inner.lock().unwrap();
+    let Ok(mut inner) = state.inner.lock() else {
+        eprintln!("[layout] 布局状态锁已损坏，放弃本次拖拽落点提交");
+        return;
+    };
     inner.drag_resolving = false;
     resolve_drag(&mut inner, cancelled);
     // 取消路径不改布局，不置 dirty（避免无谓落盘）
@@ -355,7 +361,10 @@ async fn wait_for_settle(state: &LayoutState, target: Option<&str>, snapshot: Op
     loop {
         let changed = match target {
             Some(label) => {
-                let inner = state.inner.lock().unwrap();
+                let Ok(inner) = state.inner.lock() else {
+                    eprintln!("[layout] 布局状态锁已损坏，放弃等待拖拽落点");
+                    return;
+                };
                 inner.drag_hits.get(label).cloned() != snapshot
             }
             None => false,
@@ -588,7 +597,10 @@ fn arm_watchdog(app: &AppHandle, gen: u64) {
         tokio::time::sleep(Duration::from_millis(DRAG_WATCHDOG_MS)).await;
         let state = app.state::<LayoutState>();
         let should_finish = {
-            let mut inner = state.inner.lock().unwrap();
+            let Ok(mut inner) = state.inner.lock() else {
+                eprintln!("[layout] 布局状态锁已损坏，看门狗放弃收尾");
+                return;
+            };
             if inner.drag_move_gen != gen || inner.drag.is_none() {
                 return;
             }

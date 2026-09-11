@@ -7,7 +7,9 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use nanoid::nanoid;
 use regex::Regex;
@@ -1287,31 +1289,69 @@ pub fn list_chat_sessions_file(root: &Path) -> Result<Vec<ChatSessionRow>, Strin
 
 // ===== 工具 =====
 
-/// 原子写：写唯一临时文件 → fsync → rename 覆盖目标。
-/// - 临时名带纳秒时间戳后缀：并发写同一目标不交叉同一 tmp（乐观锁 TOCTOU 之外的最后防线）；
+/// 原子写：写唯一临时文件 → fsync → rename 覆盖目标 → fsync 父目录。
+/// - 临时名带纳秒时间戳 + 进程内序号：并发写同一目标不交叉同一 tmp（乐观锁 TOCTOU 之外的最后防线）；
 ///   保持 `.tmp` 扩展名，让 watcher 能过滤自写副产物。
 /// - 写后 sync_all：崩溃/断电时 rename 已提交但数据未刷盘会丢最后一次保存。
-/// - rename 失败时清理临时文件，避免残留。
+/// - 任一步失败都清理临时文件，避免残留。
 /// pub(crate)：commands/global.rs 的全局配置/UI 状态写盘复用（保证全项目同一 durability 语义）。
 pub(crate) fn atomic_write(path: &Path, content: &str) -> Result<(), String> {
-    use std::io::Write;
-    let uniq = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let tmp = PathBuf::from(format!("{}.{}.tmp", path.display(), uniq));
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let mut f = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
-    f.write_all(content.as_bytes()).map_err(|e| e.to_string())?;
-    f.sync_all().map_err(|e| e.to_string())?;
-    drop(f);
+    let tmp = write_tmp(path, content)?;
     std::fs::rename(&tmp, path).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
         format!("写入失败：{e}")
-    })
+    })?;
+    sync_parent_dir(path);
+    Ok(())
 }
+
+/// 进程内单调序号：SystemTime 不可用时（uniq 恒 0）仍避免并发写同一目标共用同一 tmp 名。
+static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// 写临时文件（建父目录 → 写入 → fsync），返回 tmp 路径；写入期任一步失败即清理 tmp。
+fn write_tmp(path: &Path, content: &str) -> Result<PathBuf, String> {
+    use std::io::Write;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = PathBuf::from(format!("{}.{}.{}.tmp", path.display(), nanos, seq));
+    let write = || -> std::io::Result<()> {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(content.as_bytes())?;
+        f.sync_all()
+    };
+    match write() {
+        // f 在闭包结束时析构（Windows 上 rename 目标不能是打开的文件）
+        Ok(()) => Ok(tmp),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e.to_string())
+        }
+    }
+}
+
+/// rename 后 fsync 父目录：只 fsync 文件本身时，断电可能让 rename 未持久化而回退旧内容。
+/// 尽力而为——rename 已成功，把目录 fsync 的失败上报成「写失败」会误导调用方。
+fn sync_parent_dir(path: &Path) {
+    if let Some(parent) = path.parent() {
+        sync_dir(parent);
+    }
+}
+
+#[cfg(unix)]
+fn sync_dir(dir: &Path) {
+    if let Ok(d) = std::fs::File::open(dir) {
+        let _ = d.sync_all();
+    }
+}
+
+#[cfg(not(unix))]
+fn sync_dir(_dir: &Path) {}
 
 /// 文件名净化：替换 `/\:*?"<>|` 为 `_`（对应前端 utils/filename.ts），
 /// 去首尾空白；Windows 保留名（CON/PRN/AUX/NUL/COM1-9/LPT1-9，含任意扩展名）与尾部点/空格
@@ -2213,10 +2253,55 @@ pub(crate) fn collect_md_link_updates(
     Ok(updates)
 }
 
-/// 写回收集的 .md 更新（复用 write_note 原子写 + 路径校验）。
+/// 写回收集的 .md 更新：两阶段提交——先把全部内容落成各自 tmp，全部成功后再逐个 rename。
+///
+/// 写入阶段失败（磁盘满/权限/路径非法）即清理全部 tmp 返回 Err，磁盘保持**全部旧内容**；
+/// 逐个 rename 半途失败时同样清理剩余 tmp（已 rename 的无法回退）。跨多文件的事务在文件系统层
+/// 无法做到真正原子，本函数消除的是「内容写入期失败留下部分文件已改」这一主要半写来源。
 pub(crate) fn flush_md_updates(root: &Path, updates: &[(String, String)]) -> Result<(), String> {
+    let mut staged: Vec<(PathBuf, PathBuf)> = Vec::with_capacity(updates.len());
+    let discard = |staged: &[(PathBuf, PathBuf)]| {
+        for (tmp, _) in staged {
+            let _ = std::fs::remove_file(tmp);
+        }
+    };
+
+    // 阶段一：内容全部落 tmp（不触碰目标文件）
     for (rel, content) in updates {
-        write_note(root, rel, content)?;
+        let target = match safe_join(root, rel, true) {
+            Ok(p) => p,
+            Err(e) => {
+                discard(&staged);
+                return Err(e);
+            }
+        };
+        match write_tmp(&target, content) {
+            Ok(tmp) => staged.push((tmp, target)),
+            Err(e) => {
+                discard(&staged);
+                return Err(e);
+            }
+        }
+    }
+
+    // 阶段二：逐个提交（同目录 rename，失败窗口远小于写入期）
+    for (i, (tmp, target)) in staged.iter().enumerate() {
+        if let Err(e) = std::fs::rename(tmp, target) {
+            let _ = std::fs::remove_file(tmp);
+            discard(&staged[i + 1..]);
+            return Err(format!("写入失败：{e}"));
+        }
+    }
+
+    // 与 atomic_write 同一下 durability 语义：提交后 fsync 各目标父目录（去重，避免同目录重复 fsync）
+    let mut dirs: HashSet<&Path> = HashSet::new();
+    for (_, target) in &staged {
+        if let Some(parent) = target.parent() {
+            dirs.insert(parent);
+        }
+    }
+    for dir in dirs {
+        sync_dir(dir);
     }
     Ok(())
 }
@@ -2780,5 +2865,306 @@ mod tag_index_tests {
     fn url_fragment_not_tag() {
         // URL 片段 `#` 前是 `/`，不是标签
         assert_tags("见 https://x.com/#faq\n", &[]);
+    }
+}
+
+#[cfg(test)]
+mod test_support {
+    use std::path::{Path, PathBuf};
+
+    /// 测试用临时目录（纳秒级命名防碰撞）；`Drop` 递归清理，测试失败也不留残留。
+    pub(crate) struct TempDir(PathBuf);
+
+    impl TempDir {
+        pub(crate) fn new(tag: &str) -> Self {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let dir = std::env::temp_dir().join(format!("atelyx-{tag}-{nanos}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            TempDir(dir)
+        }
+
+        pub(crate) fn join(&self, rel: &str) -> PathBuf {
+            self.0.join(rel)
+        }
+    }
+
+    impl std::ops::Deref for TempDir {
+        type Target = Path;
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// 目录树下残留的 `.tmp` 文件（相对路径，排序）。
+    pub(crate) fn tmp_leftovers(dir: &Path) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(cur) = stack.pop() {
+            for entry in std::fs::read_dir(&cur).unwrap().filter_map(|e| e.ok()) {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.to_string_lossy().ends_with(".tmp") {
+                    out.push(path.to_string_lossy().into_owned());
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+}
+
+#[cfg(test)]
+mod safe_join_tests {
+    use super::test_support::{tmp_leftovers, TempDir};
+    use super::*;
+
+    #[test]
+    fn rejects_traversal_and_absolute() {
+        let root = TempDir::new("safejoin-reject");
+        for bad in [
+            "",
+            "..",
+            "../escape.md",
+            "a/..",
+            "a/../../escape.md",
+            "notes/../../outside/x.md",
+            "/etc/passwd",
+        ] {
+            assert!(safe_join(&root, bad, false).is_err(), "应拒绝：{bad}");
+        }
+        assert!(tmp_leftovers(&root).is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rejects_windows_prefix_paths() {
+        let root = TempDir::new("safejoin-winprefix");
+        for bad in [
+            "C:\\Windows\\x.md",
+            "C:/Windows/x.md",
+            "\\\\server\\share\\x.md",
+            "\\\\?\\C:\\x.md",
+            "\\x.md",
+        ] {
+            assert!(safe_join(&root, bad, false).is_err(), "应拒绝：{bad}");
+        }
+    }
+
+    #[test]
+    fn accepts_plain_relative_paths() {
+        let root = TempDir::new("safejoin-plain");
+        std::fs::create_dir_all(root.join("子目录/深层")).unwrap();
+        assert_eq!(safe_join(&root, "a.md", false).unwrap(), root.join("a.md"));
+        assert_eq!(
+            safe_join(&root, "子目录/深层/b.md", false).unwrap(),
+            root.join("子目录/深层/b.md")
+        );
+        // `./` 段被归一化掉
+        assert_eq!(safe_join(&root, "./a.md", false).unwrap(), root.join("a.md"));
+        // 中文与 emoji 文件名
+        assert_eq!(
+            safe_join(&root, "子目录/📝笔记.md", false).unwrap(),
+            root.join("子目录/📝笔记.md")
+        );
+    }
+
+    #[test]
+    fn missing_parent_rejected_unless_create_parents() {
+        let root = TempDir::new("safejoin-parents");
+        assert!(safe_join(&root, "新目录/x.md", false).is_err());
+        let created = safe_join(&root, "新目录/深层/x.md", true).unwrap();
+        assert!(created.parent().unwrap().is_dir());
+        assert_eq!(created, root.join("新目录/深层/x.md"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlink_escaping_root() {
+        let root = TempDir::new("safejoin-symlink-out");
+        let outside = TempDir::new("safejoin-symlink-target");
+        std::fs::write(outside.join("secret.md"), "s").unwrap();
+        std::os::unix::fs::symlink(outside.join("secret.md"), root.join("evil.md")).unwrap();
+        assert!(safe_join(&root, "evil.md", false).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn accepts_symlink_inside_root() {
+        let root = TempDir::new("safejoin-symlink-in");
+        std::fs::write(root.join("real.md"), "s").unwrap();
+        std::os::unix::fs::symlink(root.join("real.md"), root.join("link.md")).unwrap();
+        assert_eq!(safe_join(&root, "link.md", false).unwrap(), root.join("link.md"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn accepts_root_that_is_itself_a_symlink() {
+        // 仓库根经符号链接打开（网络盘/挂载点常见）：root 与 canonicalize 后的父目录必须一致，
+        // 否则正常写入会被误判「路径越界」
+        let real = TempDir::new("safejoin-real-root");
+        let parent = TempDir::new("safejoin-link-parent");
+        let link = parent.join("link-root");
+        std::os::unix::fs::symlink(&*real, &link).unwrap();
+        assert_eq!(safe_join(&link, "a.md", false).unwrap(), link.join("a.md"));
+    }
+}
+
+#[cfg(test)]
+mod atomic_write_tests {
+    use super::test_support::{tmp_leftovers, TempDir};
+    use super::*;
+
+    #[test]
+    fn writes_and_replaces_content() {
+        let root = TempDir::new("atomic-replace");
+        let target = root.join("a.md");
+        atomic_write(&target, "第一版").unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "第一版");
+        atomic_write(&target, "第二版").unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "第二版");
+        assert!(tmp_leftovers(&root).is_empty(), "残留：{:?}", tmp_leftovers(&root));
+    }
+
+    #[test]
+    fn creates_missing_parent_dirs() {
+        let root = TempDir::new("atomic-mkdir");
+        let target = root.join("新目录/深层/a.md");
+        atomic_write(&target, "x").unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "x");
+        assert!(tmp_leftovers(&root).is_empty());
+    }
+
+    #[test]
+    fn no_tmp_left_when_target_is_a_directory() {
+        let root = TempDir::new("atomic-renfail");
+        let target = root.join("adir");
+        std::fs::create_dir(&target).unwrap();
+        assert!(atomic_write(&target, "x").is_err());
+        assert!(tmp_leftovers(&root).is_empty(), "残留：{:?}", tmp_leftovers(&root));
+        // 目标目录未被动过
+        assert!(target.is_dir());
+    }
+
+    #[test]
+    fn no_tmp_created_when_parent_is_a_file() {
+        // 父目录被占位 → 建目录阶段即失败，不产生任何 tmp
+        let root = TempDir::new("atomic-noparent");
+        std::fs::write(root.join("afile"), "x").unwrap();
+        let target = root.join("afile/a.md");
+        assert!(atomic_write(&target, "x").is_err());
+        assert!(tmp_leftovers(&root).is_empty());
+        assert_eq!(std::fs::read_to_string(root.join("afile")).unwrap(), "x");
+    }
+
+    #[test]
+    fn concurrent_writes_same_target_yield_one_complete_version() {
+        let root = TempDir::new("atomic-concurrent");
+        let target = root.join("same.md");
+        let versions: Vec<String> = (0..8).map(|i| format!("版本-{i}-{}", "x".repeat(4096))).collect();
+        std::thread::scope(|scope| {
+            for v in &versions {
+                let target = &target;
+                scope.spawn(move || atomic_write(target, v).unwrap());
+            }
+        });
+        let final_content = std::fs::read_to_string(&target).unwrap();
+        assert!(versions.contains(&final_content), "落盘内容不是任何一个完整版本");
+        assert!(tmp_leftovers(&root).is_empty(), "残留：{:?}", tmp_leftovers(&root));
+    }
+}
+
+#[cfg(test)]
+mod flush_md_updates_tests {
+    use super::test_support::{tmp_leftovers, TempDir};
+    use super::*;
+
+    fn write(root: &Path, rel: &str, content: &str) {
+        let path = root.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+    }
+
+    fn updates_of(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect()
+    }
+
+    #[test]
+    fn commits_all_updates_and_leaves_no_tmp() {
+        let root = TempDir::new("flushmd-commit");
+        write(&root, "a.md", "A1");
+        write(&root, "子目录/b.md", "B1");
+        let updates = updates_of(&[("a.md", "A2"), ("子目录/b.md", "B2"), ("新目录/c.md", "C1")]);
+        flush_md_updates(&root, &updates).unwrap();
+        assert_eq!(std::fs::read_to_string(root.join("a.md")).unwrap(), "A2");
+        assert_eq!(std::fs::read_to_string(root.join("子目录/b.md")).unwrap(), "B2");
+        assert_eq!(std::fs::read_to_string(root.join("新目录/c.md")).unwrap(), "C1");
+        assert!(tmp_leftovers(&root).is_empty(), "残留：{:?}", tmp_leftovers(&root));
+    }
+
+    #[test]
+    fn write_failure_keeps_every_target_unchanged() {
+        let root = TempDir::new("flushmd-rollback");
+        write(&root, "a.md", "A1");
+        write(&root, "b.md", "B1");
+        // 第 3 篇的目标父目录被一个普通文件占位 → safe_join 无法建父目录，写入阶段失败
+        std::fs::write(root.join("blocked"), "x").unwrap();
+        let updates = updates_of(&[("a.md", "A2"), ("b.md", "B2"), ("blocked/c.md", "C1")]);
+
+        assert!(flush_md_updates(&root, &updates).is_err());
+        assert_eq!(std::fs::read_to_string(root.join("a.md")).unwrap(), "A1", "前序目标被半写");
+        assert_eq!(std::fs::read_to_string(root.join("b.md")).unwrap(), "B1", "前序目标被半写");
+        assert!(!root.join("blocked/c.md").exists());
+        assert!(tmp_leftovers(&root).is_empty(), "残留：{:?}", tmp_leftovers(&root));
+    }
+
+    #[test]
+    fn empty_updates_is_noop() {
+        let root = TempDir::new("flushmd-empty");
+        flush_md_updates(&root, &[]).unwrap();
+        assert!(tmp_leftovers(&root).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod sanitize_filename_tests {
+    use super::sanitize_filename;
+
+    /// 与前端 `utils/filename.ts::sanitizeFilename` **同一张用例表**（改一侧而另一侧未同步即失败）。
+    /// 前端预测的落盘名必须等于 Rust 实际写盘名，否则改名后的保存目标与列表路径会指错文件。
+    /// 保留名一律只折叠 ASCII 字母（与前端 `/[a-z]/` 折叠一致），不做 Unicode 大小写。
+    #[test]
+    fn matches_frontend_sanitize_filename() {
+        for (input, expected) in [
+            // 非法字符替换 + trim
+            ("a/b:c*d?\"e<f>g|h", "a_b_c_d__e_f_g_h"),
+            ("  笔记  ", "笔记"),
+            ("a\\b", "a_b"),
+            // Windows 保留名按首个点前的 stem 判定（含扩展名同样非法）
+            ("con.md", "_con.md"),
+            ("CON", "_CON"),
+            ("lpt9.txt", "_lpt9.txt"),
+            ("com1", "_com1"),
+            ("PRN", "_PRN"),
+            ("icon.md", "icon.md"),
+            // 尾部点补 `_`；尾空格先被 trim（故不补）
+            ("笔记.", "笔记._"),
+            ("笔记 ", "笔记"),
+            ("笔记", "笔记"),
+            // 多字节字符不受 ASCII 折叠影响
+            ("第三季度.atlx", "第三季度.atlx"),
+            ("📝笔记", "📝笔记"),
+        ] {
+            assert_eq!(sanitize_filename(input), expected, "输入 {input:?}");
+        }
     }
 }

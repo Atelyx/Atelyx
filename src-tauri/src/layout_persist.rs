@@ -42,7 +42,10 @@ pub fn load_from_disk(app: &AppHandle, state: &LayoutState) {
         ui = AppUiState::default();
     }
     normalize(&mut ui);
-    let mut inner = state.inner.lock().unwrap();
+    let Ok(mut inner) = state.inner.lock() else {
+        eprintln!("[layout] 布局状态锁已损坏，放弃加载（保持默认布局）");
+        return;
+    };
     inner.ui = ui;
     inner.loaded = true;
     inner.dirty = false;
@@ -51,7 +54,10 @@ pub fn load_from_disk(app: &AppHandle, state: &LayoutState) {
 /// 调度防抖落盘：世代号合并——仅最新一代真正写盘（连续操作只落一次）。
 pub(crate) fn schedule_persist(app: &AppHandle, state: &LayoutState) {
     let gen = {
-        let mut inner = state.inner.lock().unwrap();
+        let Ok(mut inner) = state.inner.lock() else {
+            eprintln!("[layout] 布局状态锁已损坏，放弃落盘调度");
+            return;
+        };
         inner.persist_gen += 1;
         inner.persist_gen
     };
@@ -65,7 +71,10 @@ pub(crate) fn schedule_persist(app: &AppHandle, state: &LayoutState) {
 /// 世代检查后落盘（仅最新一代执行；dirty 清除）。
 fn persist_after_gen(app: &AppHandle, gen: u64) {
     let state = app.state::<LayoutState>();
-    let mut inner = state.inner.lock().unwrap();
+    let Ok(mut inner) = state.inner.lock() else {
+        eprintln!("[layout] 布局状态锁已损坏，放弃本次落盘");
+        return;
+    };
     if inner.persist_gen != gen || !inner.dirty {
         return;
     }
@@ -75,14 +84,15 @@ fn persist_after_gen(app: &AppHandle, gen: u64) {
     persist_write(app, &ui);
 }
 
-/// 无条件立即落盘（flush 命令）。
-pub(crate) fn persist_now(app: &AppHandle) {
+/// 无条件立即落盘（flush 命令）；锁损坏时返回 Err —— 退出/切仓库前的 flush 不能把「没写」谎报成成功。
+pub(crate) fn persist_now(app: &AppHandle) -> Result<(), String> {
     let state = app.state::<LayoutState>();
-    let mut inner = state.inner.lock().unwrap();
+    let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
     inner.dirty = false;
     let ui = inner.ui.clone();
     drop(inner);
     persist_write(app, &ui);
+    Ok(())
 }
 
 fn persist_write(app: &AppHandle, ui: &AppUiState) {

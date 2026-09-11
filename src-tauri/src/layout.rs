@@ -342,11 +342,12 @@ pub(crate) fn apply_layout_op(ui: &mut AppUiState, op: &LayoutOp) -> LayoutOpRes
 // ===== 命令 =====
 
 /// 布局状态全量快照（bootstrap）：主窗口/撕裂窗口初始化渲染用。
-/// 返回归一化后的完整 AppUiState（含非布局字段，前端据此初始化自身镜像）。
+/// 返回归一化后的完整 AppUiState（含非布局字段，前端据此初始化自身镜像）；
+/// 锁被 poison（曾持锁 panic）时返回 Err，由调用方进入错误态而非继续用可疑模型渲染。
 #[tauri::command]
-pub fn layout_bootstrap(state: State<'_, LayoutState>) -> AppUiState {
-    let inner = state.inner.lock().unwrap();
-    inner.ui.clone()
+pub fn layout_bootstrap(state: State<'_, LayoutState>) -> Result<AppUiState, String> {
+    let inner = state.inner.lock().map_err(|e| e.to_string())?;
+    Ok(inner.ui.clone())
 }
 
 /// 应用一个布局操作：校验 + 变更 + 广播 + 调度落盘。返回操作结果（splitPanel/tearOff 用）。
@@ -354,7 +355,7 @@ pub fn layout_bootstrap(state: State<'_, LayoutState>) -> AppUiState {
 #[tauri::command]
 pub async fn layout_op(app: AppHandle, op: LayoutOp) -> Result<LayoutOpResult, String> {
     let state = app.state::<LayoutState>();
-    let mut inner = state.inner.lock().unwrap();
+    let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
     if !inner.loaded {
         return Ok(LayoutOpResult::default());
     }
@@ -372,7 +373,7 @@ pub async fn layout_op(app: AppHandle, op: LayoutOp) -> Result<LayoutOpResult, S
 #[tauri::command]
 pub async fn ui_state_patch(app: AppHandle, patch: UiStatePatch) -> Result<(), String> {
     let state = app.state::<LayoutState>();
-    let mut inner = state.inner.lock().unwrap();
+    let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
     if !inner.loaded {
         return Ok(());
     }
@@ -403,8 +404,7 @@ pub async fn ui_state_patch(app: AppHandle, patch: UiStatePatch) -> Result<(), S
 /// 立即落盘（应用退出/切页面前 flush 用，防 debounce 窗口内丢状态）。
 #[tauri::command]
 pub async fn layout_flush(app: AppHandle) -> Result<(), String> {
-    persist_now(&app);
-    Ok(())
+    persist_now(&app)
 }
 
 /// 布局调和（主窗口启动后调用）：种子化全部窗口 bounds + 补建持久化撕裂窗口的 OS 窗口。
@@ -423,7 +423,7 @@ pub async fn layout_reconcile(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub async fn panel_window_closed(app: AppHandle, window_id: String) -> Result<(), String> {
     let state = app.state::<LayoutState>();
-    let mut inner = state.inner.lock().unwrap();
+    let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
     if !inner.loaded {
         return Ok(());
     }
@@ -446,6 +446,30 @@ pub async fn panel_window_closed(app: AppHandle, window_id: String) -> Result<()
 mod tests {
     use super::*;
     use crate::layout_model::{LayoutNode, TabItem, UI_STATE_SCHEMA, WorkspaceLayout};
+
+    /// 布局状态锁的失败语义必须显式化：命令层 `map_err(...)?` 传播 Err，无返回值的内部路径
+    /// 用 `let ... else { 记录并 return }`。`unwrap()` 会让一次持锁 panic 变成此后每次调用的 panic
+    /// （布局与多窗口持久化在本进程剩余生命周期永久不可用），故此处静态锁死该形态。
+    /// 只扫 `#[cfg(test)]` 之前的生产区（测试代码与本断言的字符串本身不受限）。
+    #[test]
+    fn no_unguarded_layout_lock() {
+        fn production_part(src: &str) -> &str {
+            src.split("#[cfg(test)]").next().unwrap_or(src)
+        }
+        for (name, src) in [
+            ("layout.rs", include_str!("layout.rs")),
+            ("layout_drag.rs", include_str!("layout_drag.rs")),
+            ("layout_model.rs", include_str!("layout_model.rs")),
+            ("layout_persist.rs", include_str!("layout_persist.rs")),
+            ("layout_window.rs", include_str!("layout_window.rs")),
+        ] {
+            let prod = production_part(src);
+            assert!(
+                !prod.contains(".inner.lock().unwrap()") && !prod.contains(".inner.lock().expect("),
+                "{name} 存在未处理的布局锁：poison 后必须返回 Err 或提前返回，不得 panic"
+            );
+        }
+    }
 
     fn ui_with(tree: LayoutNode) -> AppUiState {
         AppUiState {

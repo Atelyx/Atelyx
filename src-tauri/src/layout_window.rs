@@ -55,7 +55,10 @@ fn write_bounds(
     scale: f64,
 ) {
     let state = app.state::<LayoutState>();
-    let mut inner = state.inner.lock().unwrap();
+    let Ok(mut inner) = state.inner.lock() else {
+        eprintln!("[layout] 布局状态锁已损坏，放弃写入窗口 bounds");
+        return;
+    };
     let entry = inner
         .window_bounds
         .entry(label.to_string())
@@ -124,7 +127,11 @@ pub(crate) fn reconcile_panel_windows(app: &AppHandle) {
     let state = app.state::<LayoutState>();
     // 锁内读当前模型：调用方（layout_op/finish_drag）此前在锁外用「陈旧快照」调用，
     // 并发命令下会把刚建的撕裂窗口当幽灵关掉（建了又关抖动）——自锁读当前模型消除该竞态
-    let ui = state.inner.lock().unwrap().ui.clone();
+    let Ok(inner) = state.inner.lock() else {
+        eprintln!("[layout] 布局状态锁已损坏，放弃窗口调和");
+        return;
+    };
+    let ui = inner.ui.clone();
     let existing: HashSet<String> = app.webview_windows().keys().cloned().collect();
     let wanted: HashSet<String> = ui
         .detached_windows

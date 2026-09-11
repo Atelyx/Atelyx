@@ -554,7 +554,7 @@ fn ext_from_mime(mime: &str) -> Option<&'static str> {
     }
 }
 
-/// 工作表名净化：禁止 `[]:*?/\` 字符 + 长度 ≤ 31（Excel 限制，超长/非法名会拒绝）。
+/// 工作表名净化：禁止 `[]:*?/\` 字符 + 长度 ≤ 31 **字符**（Excel 限制，超长/非法名会拒绝）。
 fn sheet_name_of(title: &str) -> String {
     let cleaned: String = title
         .chars()
@@ -564,9 +564,10 @@ fn sheet_name_of(title: &str) -> String {
         })
         .collect();
     let trimmed = cleaned.trim();
-    let mut name = if trimmed.is_empty() { "表格".to_string() } else { trimmed.to_string() };
-    name.truncate(31);
-    name
+    // 按字符而非字节截断：31 不是多字节字符的边界（`String::truncate` 会 panic），
+    // 且 Excel 的 31 上限本就是字符数
+    let base = if trimmed.is_empty() { "表格" } else { trimmed };
+    base.chars().take(31).collect()
 }
 
 /// 列宽按字段类型预设（Excel 字符宽度单位）。
@@ -585,4 +586,61 @@ fn column_width_of(field_type: &str) -> f64 {
 fn data_url_to_bytes(url: &str) -> Option<Vec<u8>> {
     let b64 = url.split_once(",")?.1;
     base64::engine::general_purpose::STANDARD.decode(b64).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sheet_name_of;
+
+    #[test]
+    fn sheet_name_keeps_short_titles() {
+        assert_eq!(sheet_name_of("销售表"), "销售表");
+        assert_eq!(sheet_name_of("Q3 plan"), "Q3 plan");
+    }
+
+    #[test]
+    fn sheet_name_replaces_illegal_chars() {
+        assert_eq!(sheet_name_of("a[b]:c*d?e/f\\g"), "a_b__c_d_e_f_g");
+        // 全是非法字符：替换后非空，不回落到「表格」
+        assert_eq!(sheet_name_of("[]:*?/\\"), "_______");
+    }
+
+    #[test]
+    fn sheet_name_falls_back_when_blank() {
+        assert_eq!(sheet_name_of(""), "表格");
+        assert_eq!(sheet_name_of("   "), "表格");
+    }
+
+    #[test]
+    fn sheet_name_truncates_by_chars_not_bytes() {
+        // 13 个汉字 = 39 字节：按字节截到 31 会落在字符中间 panic
+        let cjk = "第三季度市场推广投放计划表";
+        assert_eq!(cjk.chars().count(), 13);
+        assert_eq!(cjk.len(), 39);
+        assert_eq!(sheet_name_of(cjk), cjk);
+
+        let ascii31 = "x".repeat(31);
+        assert_eq!(sheet_name_of(&ascii31), ascii31);
+    }
+
+    #[test]
+    fn sheet_name_caps_at_31_chars() {
+        for title in [
+            "汉".repeat(31),
+            "汉".repeat(32),
+            "汉".repeat(100),
+            "🙂".repeat(40), // 4 字节字符
+            "ab🙂".repeat(20),
+        ] {
+            let name = sheet_name_of(&title);
+            assert!(
+                name.chars().count() <= 31,
+                "期望 ≤ 31 字符，实际 {}（{name}）",
+                name.chars().count()
+            );
+            assert!(!name.is_empty());
+        }
+        assert_eq!(sheet_name_of(&"汉".repeat(32)).chars().count(), 31);
+        assert_eq!(sheet_name_of(&"汉".repeat(32)), "汉".repeat(31));
+    }
 }
