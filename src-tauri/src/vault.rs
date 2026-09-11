@@ -1470,7 +1470,7 @@ pub fn rename_folder(root: &Path, old_dir: &str, new_dir: &str) -> Result<(), St
     std::fs::rename(&old_path, &new_path).map_err(|e| e.to_string())
 }
 
-/// 复制整个目录到新相对路径（递归复制全部内容含隐藏文件；校验 + 防覆盖，与 rename_folder 对称）。
+/// 复制整个目录到新相对路径（递归复制全部内容含隐藏文件；链接不复制；校验 + 防覆盖，与 rename_folder 对称）。
 /// 副本是独立目录，内部 .atlx 引用仍是相对路径、随目录整体复制，无需链接维护；
 /// 目录内画布/表格重新生成 id（防同 id 双文件歧义：画布标签按 id 去重、协作合并按 id 身份）。
 pub fn copy_folder(root: &Path, old_dir: &str, new_dir: &str) -> Result<(), String> {
@@ -1498,13 +1498,19 @@ pub fn copy_folder(root: &Path, old_dir: &str, new_dir: &str) -> Result<(), Stri
     Ok(())
 }
 
-/// 递归复制目录内容（含隐藏文件与子目录）。
+/// 递归复制目录内容（含隐藏文件与子目录；链接一律跳过——Unix 符号链接与 Windows 符号链接/
+/// 目录联接都由 `DirEntry::file_type`（不跟随链接）报为链接。`fs::copy` 会跟随链接，
+/// 把仓库外文件的内容复制进仓库；链接到目录则整个复制失败）。
 fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            continue;
+        }
         let target = dst.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
+        if file_type.is_dir() {
             copy_dir_all(&entry.path(), &target)?;
         } else {
             std::fs::copy(entry.path(), &target)?;
@@ -3016,6 +3022,74 @@ mod safe_join_tests {
         let link = parent.join("link-root");
         std::os::unix::fs::symlink(&*real, &link).unwrap();
         assert_eq!(safe_join(&link, "a.md", false).unwrap(), link.join("a.md"));
+    }
+}
+
+#[cfg(test)]
+mod copy_folder_tests {
+    use super::copy_folder;
+    use super::test_support::TempDir;
+    use std::path::Path;
+
+    #[test]
+    fn copies_files_and_subdirs() {
+        let root = TempDir::new("copyfolder-plain");
+        std::fs::create_dir_all(root.join("源/子目录")).unwrap();
+        std::fs::write(root.join("源/原件.md"), "content").unwrap();
+        std::fs::write(root.join("源/子目录/内.md"), "inner").unwrap();
+
+        copy_folder(&root, "源", "副本").unwrap();
+
+        assert_eq!(std::fs::read_to_string(root.join("副本/原件.md")).unwrap(), "content");
+        assert_eq!(std::fs::read_to_string(root.join("副本/子目录/内.md")).unwrap(), "inner");
+        // 源目录内容不变
+        assert_eq!(std::fs::read_to_string(root.join("源/原件.md")).unwrap(), "content");
+    }
+
+    /// 建文件/目录链接（Unix 符号链接；Windows 符号链接需开发者模式）。
+    /// 建不了返回 false，平台不支持该用例时跳过。
+    #[cfg(unix)]
+    fn link(original: &Path, link_path: &Path, _dir: bool) -> bool {
+        std::os::unix::fs::symlink(original, link_path).is_ok()
+    }
+
+    #[cfg(windows)]
+    fn link(original: &Path, link_path: &Path, dir: bool) -> bool {
+        if dir {
+            std::os::windows::fs::symlink_dir(original, link_path).is_ok()
+        } else {
+            std::os::windows::fs::symlink_file(original, link_path).is_ok()
+        }
+    }
+
+    #[test]
+    fn skips_links_to_file_and_directory() {
+        let root = TempDir::new("copyfolder-link");
+        let outside = TempDir::new("copyfolder-outside");
+        std::fs::write(outside.join("secret.md"), "secret").unwrap();
+        std::fs::create_dir_all(root.join("源")).unwrap();
+        std::fs::write(root.join("源/原件.md"), "content").unwrap();
+        // 链接到仓库外文件：不得把外部内容复制进仓库
+        if !link(&outside.join("secret.md"), &root.join("源/外链.md"), false) {
+            return;
+        }
+        // 链接到祖先目录（仓库根）：不得递归展开
+        if !link(&root, &root.join("源/根链"), true) {
+            return;
+        }
+
+        copy_folder(&root, "源", "副本").unwrap();
+
+        assert!(root.join("副本/原件.md").is_file());
+        assert!(!root.join("副本/外链.md").exists());
+        assert!(!root.join("副本/根链").exists());
+        // 源目录的链接仍在（复制不改动源）
+        assert!(root
+            .join("源/外链.md")
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 }
 
