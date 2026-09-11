@@ -943,6 +943,23 @@ fn plugin_info_from_manifest(id: &str, manifest: &Value, scope: &str, source_kin
     }
 }
 
+/// 安装后的启停状态策略。新装与更新对「是否沿用原行启用状态」的要求相反，故用枚举在调用点表明意图，
+/// 避免裸布尔参数被读反（新装一律停用：第三方/替换内置的行不得以启用态直接运行）。
+#[derive(Clone, Copy)]
+enum InstallEnable {
+    /// 新装：无论该 id 原本是否有启用记录，一律从停用开始，由用户显式启用。
+    Disabled,
+    /// 更新：沿用原行状态（用户启用过的行不该在更新后静默关闭；无记录 = 停用）。
+    Inherit,
+}
+
+fn install_enabled_after(previous: Option<bool>, policy: InstallEnable) -> bool {
+    match policy {
+        InstallEnable::Disabled => false,
+        InstallEnable::Inherit => previous.unwrap_or(false),
+    }
+}
+
 /// 从已就绪的插件源码根目录执行校验 + 原子落位（git clone / 源码包解压共用）。
 /// 目录名 = `folder_name`（原名）；同名目录或同清单 id 目录已存在时报错，先卸载再装。
 /// 调用方负责清理 `plugin_root` 所在临时目录残留。
@@ -953,6 +970,7 @@ fn install_plugin_dir(
     source: PluginSource,
     folder_name: &str,
     plugin_root: &Path,
+    policy: InstallEnable,
 ) -> Result<PluginInfo, String> {
     let base = plugin_base_dir(app, state, scope)?;
     fs::create_dir_all(&base).map_err(|e| e.to_string())?;
@@ -977,13 +995,14 @@ fn install_plugin_dir(
     let move_result = fs::rename(plugin_root, &target);
     move_result.map_err(|e| format!("安装失败：{e}"))?;
 
-    // 记录安装来源（更新依据 + 落位目录名兜底）；启用状态按 id 保持（新装默认停用，
-    // 同名替换沿用原行状态）——两者在同一次锁内读改写取回，与并发的启停命令不互相覆盖。
+    // 记录安装来源（更新依据 + 落位目录名兜底）；启用状态按策略取——原状态在同一次锁内读改写取回，
+    // 与并发的启停命令不互相覆盖（新装恒为停用，见 InstallEnable）。
     let mut source = source;
     source.dir_name = folder.clone();
     let enabled = update_plugin_state(app, |pstate| {
+        let previous = pstate.enabled.get(&id).copied();
         pstate.sources.insert(id.clone(), source);
-        Ok((pstate.enabled.get(&id).copied().unwrap_or(false), true))
+        Ok((install_enabled_after(previous, policy), true))
     })
     .map_err(|e| {
         // 状态写失败回滚落位，防「有目录无来源记录」的幽灵插件（重装/更新都定位不到）。
@@ -1084,8 +1103,8 @@ pub fn plugin_seed_default(app: AppHandle, state: State<'_, VaultState>, entries
     })
 }
 
-/// 安装插件（来源 = GitHub `owner/repo` 或完整 git 地址；新装默认停用，由用户确认后启用；
-/// 同名行被替换时沿用该行原有启停状态，原行已启用则安装后即生效）。
+/// 安装插件（来源 = GitHub `owner/repo` 或完整 git 地址；新装一律停用，由用户确认后启用；
+/// 同名行被替换时同样从停用开始——替换进来的实现仍须用户显式启用）。
 /// 市场来源优先 git clone，本机无 git 时回退 GitHub 自动生成的源码包；
 /// 手动 git 地址必须有 git。id 以清单为准，repo 只做获取定位。
 #[tauri::command]
@@ -1109,7 +1128,7 @@ pub async fn plugin_install(
                 scope: scope.clone(),
                 ..Default::default()
             };
-            let result = install_plugin_dir(&app, &state, &scope, source, &repo_folder_name(&repo), &clone_target);
+            let result = install_plugin_dir(&app, &state, &scope, source, &repo_folder_name(&repo), &clone_target, InstallEnable::Disabled);
             if result.is_err() {
                 let _ = fs::remove_dir_all(&clone_target);
             }
@@ -1126,7 +1145,7 @@ pub async fn plugin_install(
                     ..Default::default()
                 };
                 let result =
-                    install_plugin_dir(&app, &state, &scope, source, &repo_folder_name(&repo), &root);
+                    install_plugin_dir(&app, &state, &scope, source, &repo_folder_name(&repo), &root, InstallEnable::Disabled);
                 // 成功/失败都无条件清理解压临时目录（成功时插件根已移走，残留仅外层包装目录）。
                 let _ = fs::remove_dir_all(&extract_temp);
                 result
@@ -1147,7 +1166,7 @@ pub async fn plugin_install(
         scope: scope.clone(),
         ..Default::default()
     };
-    let result = install_plugin_dir(&app, &state, &scope, source, &repo_folder_name(&repo), &clone_target);
+    let result = install_plugin_dir(&app, &state, &scope, source, &repo_folder_name(&repo), &clone_target, InstallEnable::Disabled);
     if result.is_err() {
         let _ = fs::remove_dir_all(&clone_target);
     }
@@ -1193,7 +1212,8 @@ pub fn plugin_install_local(
     fs::create_dir_all(&base).map_err(|e| e.to_string())?;
     create_plugin_link(&src_dir, &target)?;
 
-    // 记录行来源（本地来源为实时引用，无更新）；启用状态按 id 保持——同一次锁内读改写取回。
+    // 记录行来源（本地来源为实时引用，无更新）；新装恒为停用：同名旧行可能处于启用态，但替换进来的
+    // 实现仍须用户显式启用——不读原状态，与另三个新装入口同一策略。
     let enabled = update_plugin_state(&app, |pstate| {
         pstate.sources.insert(
             id.clone(),
@@ -1204,7 +1224,7 @@ pub fn plugin_install_local(
                 ..Default::default()
             },
         );
-        Ok((pstate.enabled.get(&id).copied().unwrap_or(false), true))
+        Ok((install_enabled_after(None, InstallEnable::Disabled), true))
     })
     .map_err(|e| {
         // 状态写失败回滚链接，防「有链接无来源记录」残留。
@@ -1513,7 +1533,7 @@ async fn codeload_update(
         let _ = fs::remove_dir_all(&extract_temp);
         return Err(format!("备份旧版失败：{e}"));
     }
-    let install = install_plugin_dir(app, state, scope, source.clone(), &folder_name, &plugin_root);
+    let install = install_plugin_dir(app, state, scope, source.clone(), &folder_name, &plugin_root, InstallEnable::Inherit);
     let _ = fs::remove_dir_all(&extract_temp);
     match install {
         Ok(info) => {
@@ -1680,6 +1700,19 @@ mod tests {
         assert!(!plugin_id_valid("com/example"));
         assert!(!plugin_id_valid(".."));
         assert!(!plugin_id_valid("COM.Example"));
+    }
+
+    /// 安装后的启停状态：新装一律停用（含替换掉原本启用的同名行），只有更新才沿用原状态。
+    #[test]
+    fn install_enabled_policy() {
+        // 新装（市场 / 本地文件夹同一策略）：无论该 id 原本是否存在启用状态，都从停用开始
+        assert!(!install_enabled_after(None, InstallEnable::Disabled));
+        assert!(!install_enabled_after(Some(true), InstallEnable::Disabled));
+        assert!(!install_enabled_after(Some(false), InstallEnable::Disabled));
+        // 更新：沿用原行状态（无记录 = 停用）
+        assert!(install_enabled_after(Some(true), InstallEnable::Inherit));
+        assert!(!install_enabled_after(Some(false), InstallEnable::Inherit));
+        assert!(!install_enabled_after(None, InstallEnable::Inherit));
     }
 
     #[test]

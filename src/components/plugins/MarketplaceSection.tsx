@@ -66,21 +66,19 @@ export function MarketplaceSection() {
     });
   }, [marketItems, query, typeFilter]);
 
-  /** 安装统一入口：同名 id 已有行时提示「实现替代」，否则提示启用入口。 */
+  /** 安装统一入口：按包内实际 id 如实提示（替换了哪一行由落位结果判定，不认索引自报 id）。 */
   const doInstall = async (entry: PluginIndexEntry): Promise<void> => {
     const repo = entry.repo;
     if (installingRepo) return;
     setInstallingRepo(repo);
     setNotice(null);
-    const replacing = Object.values(plugins).some((p) => p.id === entry.id);
     try {
-      await install(repo, scope);
-      setNotice({
-        kind: "ok",
-        text: replacing
-          ? `已安装 ${repo}（同名行已由本包实现替代，沿用其启停状态）`
-          : `已安装 ${repo}（默认未启用，到「已安装」tab 启用）`,
-      });
+      const result = await install(repo, scope);
+      const idNote = result.id === entry.id ? "" : `（包内 id 为 ${result.id}，与索引 id ${entry.id} 不同）`;
+      const replacedNote = result.replaced
+        ? "已替代同名行，该行现为停用状态，到「已安装」tab 启用"
+        : "默认未启用，到「已安装」tab 启用";
+      setNotice({ kind: "ok", text: `已安装 ${repo}${idNote}：${replacedNote}` });
     } catch (e) {
       setNotice({ kind: "error", text: `安装失败：${e instanceof Error ? e.message : String(e)}` });
     } finally {
@@ -215,8 +213,9 @@ export function MarketplaceSection() {
               </div>
               {sameIdRow && !installed && (
                 <div className="mt-1 text-[11px] break-words" style={{ color: "var(--text-muted)" }}>
-                  同名插件已存在（{PLUGIN_SOURCE_LABELS[sameIdRow.sourceKind]}），安装将以本包实现替代该行
-                  （沿用其启停状态）。
+                  同名 id 行已存在（{PLUGIN_SOURCE_LABELS[sameIdRow.sourceKind]}，按索引自报 id 判定）。
+                  若包内清单 id 与之一致，安装将以本包实现替代该行；新装一律停用（需到「已安装」tab 启用），
+                  实际落位 id 以安装结果提示为准。
                   {sameIdRow.installDir === "" && scope === "vault"
                     ? "该行由随应用分发的实现占用：请选「本机」作用域安装。"
                     : ""}

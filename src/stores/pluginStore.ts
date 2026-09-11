@@ -124,15 +124,14 @@ interface PluginStoreState {
   marketLoaded: boolean;
   /** 加载插件行并按装配顺序拉起运行时。 */
   load(): Promise<void>;
-  /** 从 GitHub 仓库安装（repo 为 `owner/repo` 市场引用或完整 git 地址；新装默认停用，
-   *  同名行被替换时沿用该行原有启停状态）。 */
-  install(repo: string, scope: PluginScope): Promise<void>;
+  /** 从 GitHub 仓库安装（repo 为 `owner/repo` 市场引用或完整 git 地址；新装一律停用）。 */
+  install(repo: string, scope: PluginScope): Promise<PluginInstallResult>;
   /** 从本地目录安装（junction/符号链接实时引用，源目录改动即时生效；当前仅 app 级）。 */
-  installLocal(path: string): Promise<void>;
+  installLocal(path: string): Promise<PluginInstallResult>;
   /** 调系统目录选择器选插件源目录并安装；用户取消 = false（未安装）。 */
   installLocalFromPicker(): Promise<boolean>;
   /** 从 git 地址安装（git clone，保留 .git 供更新；当前仅 app 级）。 */
-  installGit(url: string): Promise<void>;
+  installGit(url: string): Promise<PluginInstallResult>;
   /** 卸载（删除目录/链接 + 终止运行时 + 清理状态）。 */
   uninstall(id: string): Promise<void>;
   /** 启用/停用（启用 = 拉起运行时；停用 = 终止运行时）。 */
@@ -179,6 +178,12 @@ interface PluginStoreState {
   viewProviderState(kind: string): ViewProviderState | undefined;
 }
 
+/** 安装结果：`id` = 包内清单声明的实际落位 id（可能不同于市场索引 id），`replaced` = 是否替代了同名既有行。 */
+export interface PluginInstallResult {
+  id: string;
+  replaced: boolean;
+}
+
 /** 列表行 → store 条目（清单经前端校验归一化；Rust 侧已滤除损坏清单，回退 cast 仅兜底意外形态）。 */
 function toInstalled(row: PluginRow): InstalledPlugin {
   const validated = validatePluginManifest(row.manifest);
@@ -201,8 +206,8 @@ async function stopPlugin(id: string): Promise<void> {
 /** slots 视图贡献 → ViewContribution 转换缓存（selector 稳定引用；随贡献对象 GC 自动失效）。 */
 const slotViewCache = new WeakMap<ViewSlotContribution, ViewContribution>();
 
-/** 安装后统一收尾（模块私有）：宿主兼容强制 + 重载。 */
-async function finishInstall(get: () => PluginStoreState, row: PluginRow): Promise<void> {
+/** 安装后统一收尾（模块私有）：宿主兼容强制 + 重载；返回落位行（调用方按实际 id 提示）。 */
+async function finishInstall(get: () => PluginStoreState, row: PluginRow): Promise<PluginRow> {
   try {
     // 宿主兼容强制（清单承诺）：契约版本/宿主版本/平台不匹配即回滚并报错。
     // 宿主版本读取失败（瞬时 IPC 异常）传 null：跳过版本范围判断，不误删刚装好的插件
@@ -215,6 +220,7 @@ async function finishInstall(get: () => PluginStoreState, row: PluginRow): Promi
     throw e;
   }
   await get().load();
+  return row;
 }
 
 /** vault 写能力接线守卫：把仓库写方法暴露给 `vault` 服务（幂等一次）。
@@ -486,13 +492,19 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
     },
 
     install: async (repo, scope) => {
+      const before = new Set(Object.keys(get().plugins));
       const row = await pluginInstall(repo, scope);
       await finishInstall(get, row);
+      // 替换判定按「包内实际 id」对安装前快照比对：市场索引 id 与包内 name 不一致时，
+      // 只认后者才能如实提示被替代的行
+      return { id: row.id, replaced: before.has(row.id) };
     },
 
     installLocal: async (path) => {
+      const before = new Set(Object.keys(get().plugins));
       const row = await pluginInstallLocal(path, "app");
       await finishInstall(get, row);
+      return { id: row.id, replaced: before.has(row.id) };
     },
 
     installLocalFromPicker: async () => {
@@ -512,8 +524,10 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
         !base.includes("://") && !base.includes("@") && base.split("/").length === 2
           ? `https://github.com/${base}.git`
           : trimmed;
+      const before = new Set(Object.keys(get().plugins));
       const row = await pluginInstall(gitRef, "app");
       await finishInstall(get, row);
+      return { id: row.id, replaced: before.has(row.id) };
     },
 
     uninstall: async (id) => {

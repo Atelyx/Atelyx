@@ -25,13 +25,13 @@ export function pluginList(defaults: PluginPackageJson[]): Promise<PluginRow[]> 
   return invoke<PluginRow[]>("plugin_list", { defaults });
 }
 
-/** 安装插件：来源为 GitHub `owner/repo`（市场）或完整 git 地址；新装默认停用（用户确认后启用），
- *  同名行被替换时沿用该行原有启停状态。 */
+/** 安装插件：来源为 GitHub `owner/repo`（市场）或完整 git 地址；新装一律停用（含替代同名行），
+ *  由用户显式启用；只有更新才沿用原行启停状态。 */
 export function pluginInstall(repo: string, scope: PluginScope): Promise<PluginRow> {
   return invoke<PluginRow>("plugin_install", { repo, scope });
 }
 
-/** 从本地目录安装插件（junction/符号链接实时引用，源目录改动即时生效）。 */
+/** 从本地目录安装插件（junction/符号链接实时引用，源目录改动即时生效；新装同样一律停用）。 */
 export function pluginInstallLocal(path: string, scope: PluginScope): Promise<PluginRow> {
   return invoke<PluginRow>("plugin_install_local", { path, scope });
 }

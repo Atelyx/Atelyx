@@ -11,7 +11,7 @@
  */
 import { useMemo, useState } from "react";
 import { FolderOpen, GitBranch, RefreshCw, Terminal, Trash2 } from "lucide-react";
-import { usePluginStore } from "@/stores/pluginStore";
+import { usePluginStore, type PluginInstallResult } from "@/stores/pluginStore";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 import { ToggleSwitch } from "@/components/common/ToggleSwitch";
 import { MarketplaceSection } from "@/components/plugins/MarketplaceSection";
@@ -59,7 +59,7 @@ export function PluginsSettingsTab() {
 
   /** 安装统一入口：action 返回 false（如取消目录选择）不算成功、不提示；onOk 成功回调（如清空输入）。 */
   const runInstall = async (
-    action: () => Promise<boolean | void>,
+    action: () => Promise<boolean | void | PluginInstallResult>,
     okText: string,
     onOk?: () => void,
   ) => {
@@ -120,7 +120,7 @@ export function PluginsSettingsTab() {
       <div className="flex items-center gap-2 mb-3 flex-shrink-0">
         <button
           onClick={() =>
-            void runInstall(() => installLocalFromPicker(), "已从本地文件夹安装（源目录改动即时生效）")
+            void runInstall(() => installLocalFromPicker(), "已从本地文件夹安装（默认未启用，源目录改动即时生效）")
           }
           disabled={installing}
           title="选择本地插件源码目录，实时引用安装（无拷贝，改源码即时生效）"
@@ -137,7 +137,7 @@ export function PluginsSettingsTab() {
             onChange={(e) => setGitUrl(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter") {
-                void runInstall(() => installGit(gitUrl), "已从 Git 地址安装", () => setGitUrl(""));
+                void runInstall(() => installGit(gitUrl), "已从 Git 地址安装（默认未启用）", () => setGitUrl(""));
               }
             }}
             placeholder="从 Git 地址安装（如 https://github.com/owner/repo）"
@@ -145,7 +145,7 @@ export function PluginsSettingsTab() {
             style={{ borderColor: "var(--border)", color: "var(--text-primary)", background: "var(--bg-primary)" }}
           />
           <button
-            onClick={() => void runInstall(() => installGit(gitUrl), "已从 Git 地址安装", () => setGitUrl(""))}
+            onClick={() => void runInstall(() => installGit(gitUrl), "已从 Git 地址安装（默认未启用）", () => setGitUrl(""))}
             disabled={installing || !gitUrl.trim()}
             className="px-2.5 py-1.5 rounded border text-xs flex-shrink-0 transition-opacity disabled:opacity-50"
             style={{ borderColor: "var(--border)", color: "var(--text-secondary)" }}
