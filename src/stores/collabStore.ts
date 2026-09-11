@@ -27,6 +27,8 @@ import type { CollabPeer, CollabPresence, RelayTestResult } from "@/types";
 
 /** 本端 presence 广播节流（选中高频变化合并，不刷屏 relay）。 */
 const BROADCAST_THROTTLE_MS = 100;
+/** 传输侧缺帧提示（resync）合并窗口：一波缺帧只做一次全量重握手，其余由周期反熵兜底。 */
+const RESYNC_COALESCE_MS = 3_000;
 
 export interface CollabInitConfig {
   enabled: boolean;
@@ -67,6 +69,8 @@ let myPeerId: number | null = null;
 /** 节流广播暂存（节流窗口内的最新 presence）。 */
 let pendingPresence: CollabPresence | null = null;
 let broadcastTimer: number | null = null;
+/** 最近一次按服务端缺帧提示做全量重握手的时刻（合并窗口内忽略后续提示）。 */
+let lastResyncAt = 0;
 /** 表格/appStore 订阅只注册一次（init 时，确保各 store 模块已完成初始化——防循环 import 未完成期调用）。 */
 let subscribed = false;
 /** 应用版本号（运行期不变）：随 hello 上报协作房间展示各成员版本；首次读取后缓存，读取失败降级 undefined。 */
@@ -125,6 +129,8 @@ async function establishConnection(): Promise<void> {
   // 先发 bye 再断开（切仓库换房）：relay 收到 bye 立即踢出，否则旧 peer 要等 30s 心跳
   // 超时才消失，期间对端列表可见幽灵用户（dispose 路径同样先 bye，见 dispose）
   disconnectTransport();
+  // 换连接即重新计时：上一个连接刚接受过 resync 不应吞掉新连接的首个 resync
+  lastResyncAt = 0;
   // 断线/重连期间清空在线列表与身份（残留旧 peers 会误导远端高亮）
   myPeerId = null;
   // 丢弃节流窗口内未发出的陈旧 presence（切仓库后旧文件的选中不得发进新房间）
@@ -169,6 +175,14 @@ async function establishConnection(): Promise<void> {
     },
     // 服务端 error 帧（协议异常/房间拒绝）：协作是尽力而为的辅助能力，仅记录不打断使用
     onServerError: (message) => console.warn("协作中转错误：", message),
+    // 本连接接收队列被广播裁剪（消费过慢）→ 帧已丢：与重连同款重新握手补齐；
+    // 服务端按最小间隔下发，本端再合并一波，防「重握手大帧 → 更慢 → 再下发」自激
+    onResync: () => {
+      const now = Date.now();
+      if (now - lastResyncAt < RESYNC_COALESCE_MS) return;
+      lastResyncAt = now;
+      runCollabReconnects();
+    },
     onStatusChange: (connected) => {
       useCollabStore.setState({ connected });
       // 连接建立后补发一次当前 presence：重连/进房间时本端选中立即可见，

@@ -13,6 +13,8 @@
  * - S→C `presence`：`{ type, peerId, presence }`（他人转发）
  * - S→C `table-patch`：`{ type, peerId, file, patch }`（他人补丁转发，不含自己）
  * - S→C `canvas-patch`：`{ type, peerId, file, patch }`（他人补丁转发，不含自己）
+ * - S→C `resync`：`{ type }`（本连接消费过慢、接收队列被广播裁剪时下发；客户端据此对激活笔记重新握手
+ *   索取对端全量状态；补丁域当前只补发 presence，陈旧补丁由后续补丁与磁盘收敛兜底）
  */
 import type {
   CanvasPatch,
@@ -102,6 +104,7 @@ export type CollabServerMessage =
   | { type: "canvas-patch"; peerId: number; file: string; patch: CanvasPatch }
   | { type: "note-sync"; peerId: number; file: string; payload: string }
   | { type: "note-aware"; peerId: number; file: string; payload: string }
+  | { type: "resync" }
   | { type: "pong" }
   | { type: "error"; message: string };
 
@@ -137,6 +140,8 @@ export interface CollabRelayOptions {
   onNoteSync: (peerId: number, file: string, payload: string) => void;
   /** 收到他人笔记 awareness 更新（base64 → 调用方解码应用）。 */
   onNoteAware: (peerId: number, file: string, payload: string) => void;
+  /** 接收队列被广播裁剪（消费过慢）：调用方需重新握手补齐（笔记域索取全量状态）。 */
+  onResync: () => void;
   /** 收到服务端 error 帧（协议异常/房间拒绝等）——调用方决定日志或 UI 反馈。 */
   onServerError: (message: string) => void;
   onStatusChange: (connected: boolean) => void;
@@ -162,8 +167,10 @@ export function connectCollabRelay(opts: CollabRelayOptions): CollabRelayHandle 
     ws.onopen = () => {
       alive = true;
       retryDelay = 1000;
-      opts.onStatusChange(true);
+      // hello 必须先于任何其它帧发出：连接态回调同步触发各域重连钩子（可能立刻广播 note-sync），
+      // 而 relay 规定首条消息必须是 hello，否则整条连接被拒
       ws?.send(JSON.stringify({ type: "hello", ...opts.hello }));
+      opts.onStatusChange(true);
       heartbeatTimer = window.setInterval(() => {
         if (ws && ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ type: "ping" }));
@@ -195,6 +202,7 @@ export function connectCollabRelay(opts: CollabRelayOptions): CollabRelayHandle 
         opts.onNoteSync(msg.peerId, msg.file, msg.payload);
       else if (msg.type === "note-aware")
         opts.onNoteAware(msg.peerId, msg.file, msg.payload);
+      else if (msg.type === "resync") opts.onResync();
       else if (msg.type === "pong") {
         // 保活回执：仅刷新 lastMessageAt（staleness 检测用），无其他副作用
       } else if (msg.type === "error") opts.onServerError(msg.message);
@@ -300,6 +308,7 @@ export const collabRelayTransport: CollabTransportFactory = {
         opts.onChannelMessage(peerId, "note-sync", file, payload),
       onNoteAware: (peerId, file, payload) =>
         opts.onChannelMessage(peerId, "note-aware", file, payload),
+      onResync: opts.onResync,
       onServerError: opts.onServerError,
       onStatusChange: opts.onStatusChange,
     });

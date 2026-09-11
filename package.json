@@ -18,7 +18,7 @@
     "format": "prettier --write .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml && cargo test --manifest-path collab-relay/Cargo.toml",
     "check": "pnpm run build:vendor && pnpm run typecheck && pnpm run lint && pnpm run test && pnpm run test:rust"
   },
   "dependencies": {

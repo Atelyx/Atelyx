@@ -26,6 +26,8 @@
 //! - S→C `presence`：`{ type, peerId, presence }`（他人 presence 转发，不含自己）
 //! - S→C `table-patch`：`{ type, peerId, file, patch }`（他人补丁转发，不含自己）
 //! - S→C `canvas-patch`：`{ type, peerId, file, patch }`（他人补丁转发，不含自己）
+//! - S→C `resync`：`{ type }`（本连接消费过慢、接收队列被广播裁剪时下发；客户端收到后重新握手，
+//!   对全部激活笔记重发 syncStep1 索取对端全量状态。不携带文件信息）
 //! - S→C `error`：`{ type, message }`
 
 use std::collections::HashMap;
@@ -33,7 +35,7 @@ use std::io::IsTerminal;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, State};
@@ -48,6 +50,9 @@ use tracing_subscriber::EnvFilter;
 
 /// 心跳超时：期间无任何消息（含 ping）即断开。
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// resync 下发最小间隔：慢消费者会连续落后，逐次下发会让客户端反复全量重握手（大帧反过来加重积压）。
+const RESYNC_MIN_INTERVAL: Duration = Duration::from_secs(5);
 
 static NEXT_PEER_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -310,6 +315,7 @@ async fn handle_socket(socket: WebSocket, hub: Hub, remote: SocketAddr) {
     // （含自己）在 send_task 启动前被 send 丢弃（broadcast 无 receiver 时 send 直接 Err）
     let mut btx_rx = btx.subscribe();
     let send_task = tokio::spawn(async move {
+        let mut last_resync: Option<Instant> = None;
         loop {
             match btx_rx.recv().await {
                 Ok(payload) => {
@@ -318,9 +324,20 @@ async fn handle_socket(socket: WebSocket, hub: Hub, remote: SocketAddr) {
                         break;
                     }
                 }
-                // 消费过慢被广播层裁剪（lagged）：跳过该帧继续，防发送任务误退出
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    debug!(peer_id, "发送队列过慢，跳过被裁剪帧");
+                // 消费过慢被广播层裁剪（lagged）：被裁的帧收不回来，下发 resync 让客户端重新握手
+                // （笔记域重发 syncStep1 索取对端全量状态），否则内容静默分歧；
+                // 按最小间隔下发，避免持续落后时反复触发全量重握手（其大帧反过来加重积压）
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    debug!(peer_id, dropped = n, "发送队列过慢，跳过被裁剪帧");
+                    if resync_due(last_resync, Instant::now()) {
+                        last_resync = Some(Instant::now());
+                        warn!(peer_id, "下发 resync：客户端需重新握手补齐被裁剪的状态");
+                        let resync = server_msg("resync", None, None, None, None, None, None);
+                        if sink.send(Message::Text((*resync).clone().into())).await.is_err() {
+                            debug!(peer_id, "发送失败，客户端断开");
+                            break;
+                        }
+                    }
                     continue;
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -537,4 +554,71 @@ async fn handle_socket(socket: WebSocket, hub: Hub, remote: SocketAddr) {
         "协作者连接结束",
     );
     send_task.abort();
+}
+
+/// 是否允许下发 resync：首次（`last` 为 None）允许，其后需过 `RESYNC_MIN_INTERVAL`。
+fn resync_due(last: Option<Instant>, now: Instant) -> bool {
+    match last {
+        None => true,
+        Some(at) => now.saturating_duration_since(at) >= RESYNC_MIN_INTERVAL,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// resync 是纯类型帧：客户端只据 `type` 重新握手，帧内不带任何多余字段。
+    #[test]
+    fn resync_frame_carries_type_only() {
+        let frame = server_msg("resync", None, None, None, None, None, None);
+        let value: serde_json::Value = serde_json::from_str(&frame).expect("resync 帧须为合法 JSON");
+        assert_eq!(value["type"], "resync");
+        assert_eq!(value.as_object().map(|o| o.len()), Some(1));
+    }
+
+    /// resync 下发节流：首次放行，间隔内拒绝，超过间隔再放行（防慢消费者自激）。
+    #[test]
+    fn resync_due_is_throttled() {
+        let now = Instant::now();
+        assert!(resync_due(None, now), "首次应放行");
+        assert!(!resync_due(Some(now), now), "同一时刻应被节流");
+        assert!(
+            !resync_due(Some(now), now + RESYNC_MIN_INTERVAL - Duration::from_millis(1)),
+            "未到间隔应被节流"
+        );
+        assert!(
+            resync_due(Some(now), now + RESYNC_MIN_INTERVAL),
+            "到达最小间隔应放行"
+        );
+    }
+
+    /// 可选字段的 skip_serializing_if 语义：给了就序列化，没给就不出现（笔记同步帧仍带 file/payload）。
+    #[test]
+    fn optional_fields_skip_when_absent() {
+        let note = server_msg(
+            "note-sync",
+            Some(7),
+            None,
+            None,
+            Some("notes/a.md".to_string()),
+            None,
+            Some("AAA=".to_string()),
+        );
+        let value: serde_json::Value = serde_json::from_str(&note).expect("note 帧须为合法 JSON");
+        assert_eq!(value["type"], "note-sync");
+        assert_eq!(value["peerId"], 7);
+        assert_eq!(value["file"], "notes/a.md");
+        assert_eq!(value["payload"], "AAA=");
+        assert!(value.get("peers").is_none());
+        assert!(value.get("presence").is_none());
+        assert!(value.get("patch").is_none());
+
+        let ack = server_msg("hello-ack", Some(3), None, None, None, None, None);
+        let value: serde_json::Value = serde_json::from_str(&ack).expect("hello-ack 须为合法 JSON");
+        assert_eq!(value["type"], "hello-ack");
+        assert_eq!(value["peerId"], 3);
+        assert!(value.get("file").is_none());
+        assert!(value.get("payload").is_none());
+    }
 }

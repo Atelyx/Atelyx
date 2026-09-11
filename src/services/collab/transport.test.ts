@@ -1,7 +1,7 @@
 /**
  * 协作传输注册表测试（services/collab/transport.ts）。
  * 覆盖工厂注册/覆盖/未注册报错、connect 路由到对应工厂、连通性测试路由与降级报错。
- * relay 工厂的真实连接走 WebSocket（node 环境不直测，映射语义由 collabStore 回归锚点覆盖）。
+ * relay 工厂的真实连接走 WebSocket（node 环境不直测，帧分发与握手帧序由 `relay.test.ts` 覆盖）。
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import type {
@@ -26,6 +26,7 @@ const fakeOptions = (): CollabTransportOptions => ({
   onPeers: () => {},
   onPeerPresence: () => {},
   onChannelMessage: () => {},
+  onResync: () => {},
   onServerError: () => {},
   onStatusChange: () => {},
 });
