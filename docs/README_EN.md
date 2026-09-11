@@ -145,7 +145,7 @@ my-vault/
 
 ```bash
 pnpm run dev         # Vite dev server
-pnpm run check       # typecheck + ESLint + tests
+pnpm run check       # full gate: vendor build + typecheck + ESLint + frontend tests + cargo test
 pnpm run format      # Prettier
 pnpm run tauri:dev   # start dev (Vite + Tauri window)
 pnpm run tauri:build # build installers

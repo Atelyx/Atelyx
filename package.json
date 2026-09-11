@@ -18,7 +18,8 @@
     "format": "prettier --write .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "check": "pnpm run build:vendor && pnpm run typecheck && pnpm run lint && pnpm run test"
+    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "check": "pnpm run build:vendor && pnpm run typecheck && pnpm run lint && pnpm run test && pnpm run test:rust"
   },
   "dependencies": {
     "@codemirror/commands": "^6.10.4",
@@ -61,6 +62,7 @@
     "eslint-plugin-react-hooks": "^5.0.0",
     "eslint-plugin-react-refresh": "^0.4.12",
     "globals": "^16.0.0",
+    "jsdom": "^30.0.1",
     "postcss": "^8.4.47",
     "prettier": "^3.3.3",
     "tailwindcss": "^3.4.13",
