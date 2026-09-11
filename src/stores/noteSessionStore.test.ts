@@ -1,17 +1,44 @@
 /**
  * 笔记正文编辑会话测试（stores/noteSessionStore.ts）。
- * 只覆盖不依赖真实仓库 I/O 的语义：引用计数、提交与订阅、外部修改转冲突、冲突跨会话保留。
- * 读写 .md 经 Tauri 命令，这里按调用顺序喂入返回值（`read_note`）。
+ * 只覆盖不依赖真实仓库 I/O 的语义：引用计数、提交与订阅、外部修改转冲突、冲突跨会话保留、
+ * 落盘竞态（在途写盘）。
+ * 读写 .md 经 Tauri 命令：`read_note` 按调用顺序喂入返回值（缺省读假磁盘），
+ * `write_note` 落假磁盘并可按序注入延迟/失败（模拟慢盘与写盘失败的在途窗口）。
  */
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 
-const h = vi.hoisted(() => ({ reads: [] as string[], failWrites: false, failReads: false }));
+const h = vi.hoisted(() => ({
+  reads: [] as string[],
+  failWrites: false,
+  failReads: false,
+  /** 假磁盘（write_note 落盘、read_note 缺省读回）：断言撤销是否真的落盘。 */
+  disk: {} as Record<string, string>,
+  /** 各次 write_note 发起时的正文（按调用顺序；发起即记录，不受延迟影响）。 */
+  writeStarted: [] as string[],
+  /** 各次 write_note 完成后的正文（按完成顺序）。 */
+  writes: [] as string[],
+  /** 各次 write_note 的延迟（毫秒）与失败计划（按调用顺序消费，缺省 0/false）。 */
+  writeDelays: [] as number[],
+  writeFails: [] as boolean[],
+}));
 
 vi.mock("@tauri-apps/api/core", () => ({
-  invoke: async (cmd: string) => {
+  invoke: async (cmd: string, args?: Record<string, unknown>) => {
+    const file = String(args?.file ?? "");
     if (cmd === "read_note") {
       if (h.failReads) throw new Error("read failed");
-      return h.reads.shift() ?? "";
+      return h.reads.shift() ?? h.disk[file] ?? "";
+    }
+    if (cmd === "write_note") {
+      const content = String(args?.content ?? "");
+      const delay = h.writeDelays.shift() ?? 0;
+      const fails = h.failWrites || (h.writeFails.shift() ?? false);
+      h.writeStarted.push(content);
+      if (delay) await new Promise((r) => setTimeout(r, delay));
+      if (fails) throw new Error("write failed");
+      h.disk[file] = content;
+      h.writes.push(content);
+      return "";
     }
     if (h.failWrites) throw new Error("write failed");
     return "";
@@ -32,11 +59,25 @@ let settings: SettingsStore;
 let collab: CollabStore;
 let noteCollab: NoteCollabStore;
 
+/** 注入写盘失败的用例：静音期望内的失败日志（断言的是状态与落盘结果，不是日志输出）。 */
+function silenceSaveErrorLog(): void {
+  vi.spyOn(console, "error").mockImplementation(() => {});
+}
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
 beforeEach(async () => {
   vi.resetModules();
   h.reads = [];
   h.failWrites = false;
   h.failReads = false;
+  h.disk = {};
+  h.writeStarted = [];
+  h.writes = [];
+  h.writeDelays = [];
+  h.writeFails = [];
   store = await import("./noteSessionStore");
   noteStore = await import("./noteStore");
   notifications = await import("./notificationStore");
@@ -90,6 +131,7 @@ describe("提交与订阅", () => {
 
 describe("落盘状态", () => {
   it("写盘失败置 error，下次保存成功后复位", async () => {
+    silenceSaveErrorLog();
     const session = store.noteSurfaceProvider.open("a.md");
     h.failWrites = true;
     session.applyBody("local");
@@ -238,5 +280,64 @@ describe("协作态绑定基线", () => {
     // 保留文档仍参与房间收敛（refcount=0 也会采纳更高序基线并重建），但不得生出无编辑面的绑定
     await adoptPeerBaseline("a.md", "对端新正文");
     expect(noteCollab.useNoteCollabStore.getState().bindings["a.md"]).toBeUndefined();
+  });
+});
+
+describe("在途写盘竞态", () => {
+  /** 协作态会话（协作分支不直读盘，基线/在途内容的分歧只由本模块组织）。 */
+  function openCollab(file = "a.md", disk = "hello\n") {
+    h.disk[file] = disk;
+    settings.useSettingsStore.setState({ collabEnabled: true });
+    collab.useCollabStore.setState({ connected: true });
+    return { session: store.noteSurfaceProvider.open(file), file };
+  }
+
+  it("改动后立刻删回原样：撤销后的正文必须落盘，不因上次写盘在途被判为无改动", async () => {
+    h.writeDelays = [700, 0];
+    const { session } = openCollab();
+    await vi.waitFor(() => expect(session.getState().content).toBe("hello\n"));
+
+    session.applyBody("hello world\n");
+    // 首次写盘已发起但未落盘（延迟 700ms）：此刻删回原样
+    await vi.waitFor(() => expect(h.writeStarted).toHaveLength(1), { timeout: 3000 });
+    session.applyBody("hello\n");
+
+    await vi.waitFor(() => expect(h.writes).toHaveLength(2), { timeout: 3000 });
+    await vi.waitFor(() => expect(session.getState().dirty).toBe(false), { timeout: 3000 });
+    expect(h.writes).toEqual(["hello world\n", "hello\n"]);
+    expect(h.disk["a.md"]).toBe("hello\n");
+    expect(noteStore.useNoteStore.getState().noteSaveStates["a.md"]?.state).not.toBe("error");
+  });
+
+  it("写盘失败但内容已被后续输入取代：不置「保存失败」（当前正文另有写盘接管）", async () => {
+    silenceSaveErrorLog();
+    h.writeDelays = [800, 0];
+    h.writeFails = [true];
+    const { session } = openCollab();
+    await vi.waitFor(() => expect(session.getState().content).toBe("hello\n"));
+    const errors: boolean[] = [];
+    const off = session.subscribe(() => errors.push(!!session.getState().error));
+
+    session.applyBody("hello world\n");
+    await vi.waitFor(() => expect(h.writeStarted).toHaveLength(1), { timeout: 3000 });
+    session.applyBody("hello\n");
+
+    // 首次写盘迟到的失败落在撤销之后：撤销后的正文由第二次写盘落盘，全程不得出现「保存失败」
+    await vi.waitFor(() => expect(h.writes).toEqual(["hello\n"]), { timeout: 3000 });
+    off();
+    expect(errors).not.toContain(true);
+    expect(noteStore.useNoteStore.getState().noteSaveStates["a.md"]?.state).toBe("saved");
+  });
+
+  it("当前正文的写盘失败：如实置「保存失败」并保留挂起登记待重试", async () => {
+    silenceSaveErrorLog();
+    h.writeFails = [true];
+    const { session } = openCollab();
+    await vi.waitFor(() => expect(session.getState().content).toBe("hello\n"));
+
+    session.applyBody("hello world\n");
+    await vi.waitFor(() => expect(session.getState().error).toBe(true), { timeout: 3000 });
+    expect(session.getState().dirty).toBe(true);
+    expect(noteStore.useNoteStore.getState().pendingNoteContent["a.md"]).toBe("hello world\n");
   });
 });
