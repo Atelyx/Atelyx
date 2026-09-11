@@ -59,7 +59,9 @@ export type LayoutOp =
   | { op: "activateLayout"; id: string }
   | { op: "moveLayout"; fromIndex: number; toIndex: number };
 
-/** 布局操作返回值（仅 splitPanel/tearOff 需要；其余操作前端靠广播收敛）。 */
+/** 布局操作返回值：splitPanel 的新面板 id 与 tearOff 的新撕裂窗口条目。
+ *  前端只消费 `splitPanelId`（撕裂/停靠由 Rust 拖拽落点解析驱动，不再发这两个 op）；
+ *  `detachedWindow` 保留在契约内供插件经 `ctx.layout.op` 发送这两个 op 时读取。 */
 export interface LayoutOpResult {
   /** SplitPanel 新建面板 id。 */
   splitPanelId?: string | null;

@@ -8,10 +8,13 @@ export function PanelPlaceholder({
   icon,
   title,
   description,
+  action,
 }: {
   icon: ReactNode;
   title: string;
   description: string;
+  /** 可选操作区（如失败态的重试按钮）。 */
+  action?: ReactNode;
 }) {
   return (
     <div
@@ -26,6 +29,7 @@ export function PanelPlaceholder({
         <p className="text-sm" style={{ color: "var(--text-muted)" }}>
           {description}
         </p>
+        {action}
       </div>
     </div>
   );

@@ -3,6 +3,7 @@
 //! bounds 单一写者：OS 窗口事件 → 注册表 → 撕裂窗口模型（持久化位置）。
 
 use std::collections::HashSet;
+use std::sync::Mutex;
 
 use tauri::{AppHandle, Manager};
 
@@ -117,6 +118,20 @@ fn title_of_tabs_rust(tabs: &[crate::layout_model::TabItem], active_tab_id: &Opt
     active.map(|t| t.view.clone()).unwrap_or_else(|| "面板".to_string())
 }
 
+/// 读当前布局模型快照。锁只在本函数内持有：建窗路径（`seed_window_bounds` → `write_bounds`）
+/// 会在同线程二次取同一把非可重入锁，调用方持锁期间触发建窗即自死锁。关窗与窗口事件是否同线程
+/// 同步派发无保证，故「建窗/关窗/让主事件循环回头」的动作一律在放锁后执行。
+fn ui_snapshot(state: &LayoutState) -> Option<AppUiState> {
+    let inner = state.inner.lock().ok()?;
+    Some(inner.ui.clone())
+}
+
+/// 调和串行化锁：布局模型锁在窗口动作期间已放锁，故「模型快照 + OS 窗口集合」的成对读取不再互斥——
+/// 两次调和交叉时，一方会把另一方刚建好的窗口当幽灵关掉（其关闭上报又会删掉模型条目，标签丢失）。
+/// 本锁与布局模型锁互不嵌套（调用方调本函数前都已放掉模型锁）、窗口动作期间不做 await，故无锁序环；
+/// 等待者短暂阻塞换取「每个请求都跑完整一轮」，比标记 + 补跑协议更简单且不会漏唤醒。
+static RECONCILE_LOCK: Mutex<()> = Mutex::new(());
+
 /// 撕裂窗口 OS 窗口调和：补建缺失（模型有条目但无对应窗口） + 回收幽灵
 /// （OS 窗口存在但模型条目已移除——如条目移除后 OS 窗口未销毁）。
 /// 回收幽灵经 win.close() 触发其 JS onCloseRequested（flush 后销毁），
@@ -124,14 +139,18 @@ fn title_of_tabs_rust(tabs: &[crate::layout_model::TabItem], active_tab_id: &Opt
 ///
 /// 幽灵回收同时覆盖「条目移除后关 OS 窗」场景，调用方无需再按 before/after 快照 diff。
 pub(crate) fn reconcile_panel_windows(app: &AppHandle) {
+    // poison 恢复：上一次调和 panic 不该让窗口生命周期永久停摆（布局模型锁另有自己的 poison 处理）
+    let _guard = RECONCILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    reconcile_windows_once(app);
+}
+
+/// 单轮调和（只在 `reconcile_panel_windows` 的串行化保护内执行）。
+fn reconcile_windows_once(app: &AppHandle) {
     let state = app.state::<LayoutState>();
-    // 锁内读当前模型：调用方（layout_op/finish_drag）此前在锁外用「陈旧快照」调用，
-    // 并发命令下会把刚建的撕裂窗口当幽灵关掉（建了又关抖动）——自锁读当前模型消除该竞态
-    let Ok(inner) = state.inner.lock() else {
+    let Some(ui) = ui_snapshot(&state) else {
         eprintln!("[layout] 布局状态锁已损坏，放弃窗口调和");
         return;
     };
-    let ui = inner.ui.clone();
     let existing: HashSet<String> = app.webview_windows().keys().cloned().collect();
     let wanted: HashSet<String> = ui
         .detached_windows

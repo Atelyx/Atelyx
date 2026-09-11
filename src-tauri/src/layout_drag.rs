@@ -259,15 +259,16 @@ fn global_cursor_pos() -> Option<(f64, f64)> {
 
 /// 物理 px 光标 → 逻辑 px（取光标所在窗口的 scale；不在任何窗口内时取源窗口 scale）。
 /// 混合 DPI 下各窗口 scale 不同，按所在窗口换算后与同窗口 bounds 比较自洽；
-/// 光标在桌面（窗外）时退回源窗口 scale 近似。
-/// 源窗口必在注册表内：拖拽开始时对所有窗口 seed 且条目进程内恒存，故直接索引。
+/// 光标在桌面（窗外）时退回源窗口 scale 近似；源窗口 bounds 缺失（该窗口 seed 未成功：
+/// 取窗口/scale 失败时 `seed_window_bounds` 不写条目）按 1.0 近似——本函数在持锁块内被调用，
+/// lookup 缺失不得 panic（一次 panic 会毒化布局锁，使布局与多窗口能力在本进程剩余生命周期永久失效）。
 fn cursor_to_logical(
     window_bounds: &HashMap<String, WindowBounds>,
     fallback_label: &str,
     px: f64,
     py: f64,
 ) -> (f64, f64) {
-    let mut sf = window_bounds[fallback_label].scale;
+    let mut sf = window_bounds.get(fallback_label).map(|b| b.scale).unwrap_or(1.0);
     for b in window_bounds.values() {
         let lx = px / b.scale;
         let ly = py / b.scale;
@@ -969,5 +970,8 @@ mod tests {
         assert_eq!(cursor_to_logical(&bounds, "main", 4400.0, 300.0), (2200.0, 150.0));
         // 光标在桌面（窗外）→ 回退源窗口 scale（main = 1.0）
         assert_eq!(cursor_to_logical(&bounds, "main", 5000.0, 5000.0), (5000.0, 5000.0));
+        // 源窗口 bounds 缺失（seed 未成功）→ 按 1.0 近似，不得 panic（本函数在持锁块内调用）；
+        // 坐标须落在所有窗口之外，否则 for 循环会先命中窗口分支、覆盖回退值
+        assert_eq!(cursor_to_logical(&bounds, "panel-gone", 9000.0, 9000.0), (9000.0, 9000.0));
     }
 }

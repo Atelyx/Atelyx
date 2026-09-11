@@ -103,22 +103,6 @@ interface UiStateStore {
   ) => Promise<string | null>;
   /** 删除面板 = 整块移除（含其全部标签）并合并到父 Split 兄弟；最后一个面板不可删。 */
   closePanel: (panelId: string) => void;
-  /** 撕裂标签：从面板移除（面板留空）→ 挂到应用级 detachedWindows，返回新窗口条目。 */
-  tearOffTab: (
-    panelId: string,
-    tabId: string,
-    bounds: DetachedWindow["bounds"],
-  ) => Promise<DetachedWindow | null>;
-  /** 撕裂窗口再撕裂：把标签从撕裂窗口移到新的撕裂窗口条目（源窗口拖空后由调用方回收）。 */
-  tearOffFromDetached: (
-    windowId: string,
-    tabId: string,
-    bounds: DetachedWindow["bounds"],
-  ) => Promise<DetachedWindow | null>;
-  /** 拖回：把撕裂窗口中的标签停靠进主窗口面板（默认尾部并激活；源窗口拖空自动移除）。 */
-  dockTabIntoPanel: (panelId: string, tabId: string, index?: number) => void;
-  /** 拖入：把标签停靠进撕裂窗口（来源 = 树面板或另一撕裂窗口；同窗口 = 组内排序）。 */
-  dockTabIntoDetached: (windowId: string, tabId: string, index?: number) => void;
   /** 向撕裂窗口添加新视图标签（视图全局唯一，已占用则忽略；面板窗口「添加视图」入口）。 */
   detachedAddView: (windowId: string, view: ViewKind) => void;
   /** 激活撕裂窗口中的标签。 */
@@ -131,8 +115,6 @@ interface UiStateStore {
   detachedSetTabView: (windowId: string, tabId: string, view: ViewKind) => void;
   /** 撕裂窗口标签组内排序。 */
   detachedMoveTab: (windowId: string, tabId: string, toIndex: number) => void;
-  /** 移除撕裂窗口条目（OS 窗口已关闭/拖空自动关窗时调用）。 */
-  removeDetachedWindow: (windowId: string) => void;
   /** 拖拽调宽回写 Split 子树尺寸比例（百分数，和 = 100，长度 = children 长度；前端防抖提交）。 */
   setLayoutSizes: (splitId: string, sizes: number[]) => void;
   /** 新建布局（复制当前激活布局），命名「布局 N」自动去重，并激活。 */
@@ -411,32 +393,6 @@ export const useUiStateStore = create<UiStateStore>((set, get) => {
       }
     },
 
-    tearOffTab: async (panelId, tabId, bounds) => {
-      try {
-        const r: LayoutOpResult = await layoutOp({ op: "tearOff", panelId, tabId, bounds });
-        return r.detachedWindow ?? null;
-      } catch (e) {
-        console.error("撕裂标签失败", e);
-        return null;
-      }
-    },
-
-    tearOffFromDetached: async (windowId, tabId, bounds) => {
-      try {
-        const r: LayoutOpResult = await layoutOp({ op: "tearOffFromDetached", windowId, tabId, bounds });
-        return r.detachedWindow ?? null;
-      } catch (e) {
-        console.error("撕裂窗口再撕裂失败", e);
-        return null;
-      }
-    },
-
-    dockTabIntoPanel: (panelId, tabId, index) =>
-      sendLayoutOp({ op: "dockIntoPanel", panelId, tabId, index }),
-
-    dockTabIntoDetached: (windowId, tabId, index) =>
-      sendLayoutOp({ op: "dockIntoDetached", windowId, tabId, index }),
-
     detachedAddView: (windowId, view) => sendLayoutOp({ op: "detachedAddView", windowId, view }),
     detachedSetActive: (windowId, tabId) => sendLayoutOp({ op: "detachedSetActive", windowId, tabId }),
     detachedCloseTab: (windowId, tabId) => sendLayoutOp({ op: "detachedCloseTab", windowId, tabId }),
@@ -446,7 +402,6 @@ export const useUiStateStore = create<UiStateStore>((set, get) => {
       sendLayoutOp({ op: "detachedSetTabView", windowId, tabId, view }),
     detachedMoveTab: (windowId, tabId, toIndex) =>
       sendLayoutOp({ op: "detachedMoveTab", windowId, tabId, toIndex }),
-    removeDetachedWindow: (windowId) => sendLayoutOp({ op: "removeDetachedWindow", windowId }),
 
     // 拖拽调宽：resize 拖拽高频，前端防抖提交（Rust 仍是最终权威）
     setLayoutSizes: debounceSetSizes(),

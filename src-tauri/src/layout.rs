@@ -471,6 +471,46 @@ mod tests {
         }
     }
 
+    /// 回归守卫：调和体只能经 `ui_snapshot` 读模型。
+    /// 该函数内部建窗，而建窗路径（`seed_window_bounds` → `write_bounds`）会在同线程二次取同一把
+    /// 非可重入锁；函数自身一旦持有 guard 就自死锁（锁永不释放 → 新窗口 bootstrap 永久挂起、
+    /// 主窗口冻结）。运行期无法单测（需 AppHandle），故静态锁死「读模型只走快照函数」这一形态。
+    #[test]
+    fn reconcile_reads_model_through_snapshot_only() {
+        let src = include_str!("layout_window.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+        let body = function_body(prod, "fn reconcile_windows_once")
+            .expect("reconcile_windows_once 必须存在");
+        assert!(
+            !body.contains(".inner.lock()"),
+            "调和体不得自行取布局锁（建窗回调 write_bounds 会二次取锁 → 自死锁），请经 ui_snapshot 读快照"
+        );
+        assert!(
+            body.contains("ui_snapshot("),
+            "调和体必须经 ui_snapshot 读模型快照"
+        );
+        // 串行化包装只做加锁与调用，不得在窗口动作期间持锁
+        let wrapper = function_body(prod, "fn reconcile_panel_windows")
+            .expect("reconcile_panel_windows 必须存在");
+        assert!(
+            !wrapper.contains(".inner.lock()"),
+            "调和串行化包装不得取布局锁（窗口动作在调和体里执行）"
+        );
+        // 调和体只能从包装调用（绕过串行化 = 原竞态回归）；出现次数 = 定义 1 + 调用 1
+        assert_eq!(
+            prod.matches("reconcile_windows_once(").count(),
+            2,
+            "reconcile_windows_once 只允许定义处与被 reconcile_panel_windows 调用各一次"
+        );
+    }
+
+    /// 按函数名取函数体源码（首个顶格 `}` 为止；按行切分，与行尾风格无关）。
+    fn function_body<'a>(src: &'a str, signature: &str) -> Option<String> {
+        let after = src.split(signature).nth(1)?;
+        let lines: Vec<&str> = after.lines().take_while(|line| *line != "}").collect();
+        Some(lines.join("\n"))
+    }
+
     fn ui_with(tree: LayoutNode) -> AppUiState {
         AppUiState {
             schema: UI_STATE_SCHEMA.into(),

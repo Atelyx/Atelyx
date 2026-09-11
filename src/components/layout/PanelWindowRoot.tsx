@@ -14,7 +14,7 @@
  * - watcher：订阅仓库文件变化（画布/表格/笔记跨窗口写盘经 watcher + 乐观合并收敛）
  */
 import { useEffect, useMemo } from "react";
-import { LayoutTemplate } from "lucide-react";
+import { LayoutTemplate, TriangleAlert } from "lucide-react";
 import { useAppStore } from "@/stores/appStore";
 import { titleOfTabs, usePanelStore } from "@/stores/panelStore";
 import { usePluginStore } from "@/stores/pluginStore";
@@ -33,6 +33,7 @@ import { collectAllViews } from "@/utils/workspaceLayout";
 export function PanelWindowRoot() {
   useAppearance();
   const panelReady = usePanelStore((s) => s.panelReady);
+  const panelError = usePanelStore((s) => s.panelError);
   const tabs = usePanelStore((s) => s.panelTabs);
   const activeTabId = usePanelStore((s) => s.panelActiveTabId);
   const windowId = usePanelStore((s) => s.windowId);
@@ -88,7 +89,8 @@ export function PanelWindowRoot() {
       style={{ background: "var(--bg-primary)" }}
       data-panel-drop-root
     >
-      {/* 自定义标题栏（与主窗口一致：拖动区 + 窗口控制） */}
+      {/* 自定义标题栏（与主窗口一致：拖动区 + 窗口控制）。错误态同样渲染——否则窗口既不能拖动
+          也无法最小化/关闭，只能靠任务栏，而错误态是「布局服务未响应」这类可达界面 */}
       <div
         className="h-9 flex items-center gap-1 px-2 flex-shrink-0 select-none"
         style={{ background: "var(--bg-secondary)", borderBottom: "1px solid var(--border)" }}
@@ -110,46 +112,68 @@ export function PanelWindowRoot() {
         </div>
       </div>
 
-      {/* 标签头 + 视图承载 */}
-      <PanelTabBar
-        hostId={windowId}
-        isPanel
-        allowSplit={false}
-        tabs={tabs}
-        activeTabId={activeTabId}
-        usedViews={usedViews}
-        canDeletePanel
-        status={activeTab ? <ViewStatusIndicator view={activeTab.view} /> : null}
-        onPickView={(view) => usePanelStore.getState().panelAddView(view)}
-        onActivate={(tabId) => usePanelStore.getState().panelSetActive(tabId)}
-        onCloseTab={(tabId) => usePanelStore.getState().panelCloseTab(tabId)}
-        onCloseFile={(view) => {
-          // 关闭文件（标签保留）：文件状态全局唯一，按视图清全局当前文件状态
-          const app = useAppStore.getState();
-          if (view === "canvas") app.closeCanvas();
-          else if (view === "note") app.closeNote();
-          else if (view === "table") app.closeTable();
-        }}
-        onSetTabView={(tabId, view) => usePanelStore.getState().panelSetTabView(tabId, view)}
-        onTogglePanelLock={() => {
-          // 整块锁定/解锁撕裂窗口：所有标签统一设同一锁定值（空窗口无标签，无操作）
-          const target = !(tabs.length > 0 && tabs.every((t) => t.locked));
-          tabs.forEach((t) => usePanelStore.getState().panelSetLocked(t.id, target));
-        }}
-        onDeletePanel={() => void closeWindow()}
-        onFocusHost={() => useUiStateStore.getState().setFocusedPanel(windowId)}
-      />
-      <div className="flex-1 min-h-0">
-        {activeTab ? (
-          <ViewHost view={activeTab.view} hostId={windowId} />
-        ) : (
+      {panelError ? (
+        // bootstrap 失败/超时：可见错误态 + 重试入口（不静默停在加载屏）
+        <div className="flex-1 min-h-0">
           <PanelPlaceholder
-            icon={<LayoutTemplate size={64} strokeWidth={1.5} />}
-            title="空面板"
-            description="右键头部添加视图，或从主窗口拖入标签。"
+            icon={<TriangleAlert size={64} strokeWidth={1.5} />}
+            title="面板未能加载"
+            description={panelError}
+            action={
+              <button
+                onClick={() => void usePanelStore.getState().retryPanelInit()}
+                className="px-3 py-1.5 rounded text-xs border hover:bg-[var(--hover)]"
+                style={{ borderColor: "var(--border)", color: "var(--text-primary)" }}
+              >
+                重试
+              </button>
+            }
           />
-        )}
-      </div>
+        </div>
+      ) : (
+        <>
+          {/* 标签头 + 视图承载 */}
+          <PanelTabBar
+            hostId={windowId}
+            isPanel
+            allowSplit={false}
+            tabs={tabs}
+            activeTabId={activeTabId}
+            usedViews={usedViews}
+            canDeletePanel
+            status={activeTab ? <ViewStatusIndicator view={activeTab.view} /> : null}
+            onPickView={(view) => usePanelStore.getState().panelAddView(view)}
+            onActivate={(tabId) => usePanelStore.getState().panelSetActive(tabId)}
+            onCloseTab={(tabId) => usePanelStore.getState().panelCloseTab(tabId)}
+            onCloseFile={(view) => {
+              // 关闭文件（标签保留）：文件状态全局唯一，按视图清全局当前文件状态
+              const app = useAppStore.getState();
+              if (view === "canvas") app.closeCanvas();
+              else if (view === "note") app.closeNote();
+              else if (view === "table") app.closeTable();
+            }}
+            onSetTabView={(tabId, view) => usePanelStore.getState().panelSetTabView(tabId, view)}
+            onTogglePanelLock={() => {
+              // 整块锁定/解锁撕裂窗口：所有标签统一设同一锁定值（空窗口无标签，无操作）
+              const target = !(tabs.length > 0 && tabs.every((t) => t.locked));
+              tabs.forEach((t) => usePanelStore.getState().panelSetLocked(t.id, target));
+            }}
+            onDeletePanel={() => void closeWindow()}
+            onFocusHost={() => useUiStateStore.getState().setFocusedPanel(windowId)}
+          />
+          <div className="flex-1 min-h-0">
+            {activeTab ? (
+              <ViewHost view={activeTab.view} hostId={windowId} />
+            ) : (
+              <PanelPlaceholder
+                icon={<LayoutTemplate size={64} strokeWidth={1.5} />}
+                title="空面板"
+                description="右键头部添加视图，或从主窗口拖入标签。"
+              />
+            )}
+          </div>
+        </>
+      )}
 
       {/* drop 指示器（中部 = 加标签） */}
       {isDropTarget && (

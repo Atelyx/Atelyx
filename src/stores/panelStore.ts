@@ -27,6 +27,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { usePluginStore } from "@/stores/pluginStore";
 import { useCollabStore } from "@/stores/collabStore";
 import { useVaultStore } from "@/stores/vaultStore";
+import { useNotificationStore } from "@/stores/notificationStore";
 import * as kernelLifecycle from "@/utils/kernelLifecycle";
 import { collectTabs, findViewHost } from "@/utils/workspaceLayout";
 import { pluginViewLabel } from "@/services/cordis/slots";
@@ -44,7 +45,7 @@ import {
   panelWindowClosed,
 } from "@/services/layout";
 import * as bus from "@/services/windowBus";
-import type { DropTargetInfo } from "@/services/windowBus";
+import type { DropTargetInfo, OpenFileChangedPayload } from "@/services/windowBus";
 import type { DragBroadcast, DragHit } from "@/types";
 import {
   getCurrentOuterPosition,
@@ -62,6 +63,10 @@ const DRAG_THRESHOLD_PX = 4;
 const MOUSE_POLL_INTERVAL_MS = 120;
 /** 拖拽上报节流（ms）：pointermove 高频，按 ~25fps 上报（Rust 广播回程驱动命中/ghost）。 */
 const DRAG_REPORT_INTERVAL_MS = 40;
+/** 撕裂窗口 bootstrap 限时（ms）：布局服务无响应时不永久停在加载屏，转可见错误态 + 重试入口。 */
+const PANEL_BOOT_TIMEOUT_MS = 5000;
+/** 仓库上下文应答等待上限（ms）：主窗口未应答时给出可见提示，不静默等待成白板。 */
+const PANEL_CONTEXT_TIMEOUT_MS = 3000;
 /** 面板窗口 label 前缀（与 Rust PANEL_LABEL_PREFIX 对齐）。 */
 export const PANEL_LABEL_PREFIX = "panel-";
 
@@ -76,6 +81,13 @@ let closeGuardInstalled = false;
 let mainInitialized = false;
 /** initPanel 幂等守卫（防 React StrictMode 双挂载重复 bootstrap/订阅广播/总线）。 */
 let panelInitialized = false;
+/** 面板窗口一次性接线标志：位置跟随 + 布局镜像/拖拽广播订阅 + 上下文应答监听都只注册一次
+ *  （这些注册函数自身无幂等，重试路径重复注册会让同一广播按份数重复触发整条仓库上下文重载链）。 */
+let panelWired = false;
+/** 上下文应答监听注册的在途 promise（重试时复用同一次注册，不重复监听）。 */
+let contextListener: ReturnType<typeof bus.onOpenFileChanged> | null = null;
+/** 本次窗口是否已收到过仓库上下文应答（3s 未应答提示的判据）。 */
+let contextAnswered = false;
 
 /**
  * 画布视口跨窗口交接薄封装（组件 → store → service 分层：CanvasView 不直连 services，
@@ -120,6 +132,8 @@ interface PanelStore {
   panelActiveTabId: string | null;
   /** panel 是否已完成 bootstrap（渲染 gate）。 */
   panelReady: boolean;
+  /** panel bootstrap 失败/超时原因（非空 = 渲染错误态 + 重试入口；晚到成功自愈清空）。 */
+  panelError: string | null;
   /** 按下候选（未转正）。 */
   dragCandidate: DragCandidate | null;
   /** 本窗口发起的拖拽是否已转正（Rust 会话活跃；标签 pointer 处理器据此分流）。 */
@@ -137,6 +151,8 @@ interface PanelStore {
   initMain: () => Promise<void>;
   /** 撕裂窗口初始化：bootstrap + 订阅广播 + 事件监听。 */
   initPanel: () => Promise<void>;
+  /** 撕裂窗口 bootstrap 重试（错误态「重试」入口；订阅不重复注册）。 */
+  retryPanelInit: () => Promise<void>;
 
   /** 拖拽源：记录按下候选（锁定标签不进入）。 */
   beginDragCandidate: (tab: TabItem, sourceHost: string, x: number, y: number) => void;
@@ -410,12 +426,79 @@ export const usePanelStore = create<PanelStore>((set, get) => {
     void onDragSession(onDragSessionState).catch((e) => console.error("订阅拖拽会话广播失败", e));
   };
 
+  /** 仓库上下文应答处理器（`open-file-changed`）：镜像当前仓库/打开文件，并按需加载仓库级配置、
+   *  文件树、领域仓库上下文与插件运行时。注册归 initPanel 的一次性接线（重复注册会让每次广播
+   *  按份数重复触发整条重载链）。 */
+  const applyOpenFileContext = (payload: OpenFileChangedPayload): void => {
+    contextAnswered = true;
+    const app = useAppStore.getState();
+    useAppStore.setState({
+      vaultId: payload.vaultId,
+      vaultRoot: payload.vaultRoot,
+      vaultName: payload.vaultName,
+      currentCanvasFile: payload.currentCanvasFile,
+      currentNoteFile: payload.currentNoteFile,
+      currentTableFile: payload.currentTableFile,
+      currentNoteTitle: payload.currentNoteTitle,
+      currentTableTitle: payload.currentTableTitle,
+    });
+    // 仓库上下文到达（切仓库或启动请求应答）：按需加载仓库级配置/文件树/领域仓库上下文
+    if (payload.vaultId !== app.vaultId) {
+      if (payload.vaultId) {
+        void useSettingsStore.getState().loadVaultConfig();
+        void useVaultStore.getState().loadFiles();
+      }
+      // AI 会话换仓库读盘（含 vaultId 置空 = 回启动页场景）经生命周期注册表分发
+      void kernelLifecycle
+        .notifyVaultEntered({ vaultId: payload.vaultId })
+        .catch((e) => console.error("撕裂窗口加载领域仓库上下文失败", e));
+      // 撕裂窗口插件运行时随仓库上下文重载（与主窗口 selectVault/backToVaultSelect 时机一致）：
+      // vaultId 置空（回启动页）也 load——此时只扫 app 插件，自然卸载 vault 插件；
+      // 插件事件（vault:switch/clear）按窗口隔离不跨窗口转发，撕裂窗口插件经重载兜底
+      void usePluginStore.getState().load().catch((e) => console.error("撕裂窗口加载插件失败", e));
+      // 协作宿主重算（仓库房间变化）
+      get().syncCollabHost();
+    }
+  };
+
+  /** 请求当前仓库/打开文件上下文（面板渲染只依赖布局快照，本段失败只提示、不盖面板）。
+   *  应答监听已在一次性接线里注册完成（listen 是异步 IPC，先发请求会丢应答）。 */
+  const requestPanelContext = async (): Promise<void> => {
+    // 同一失败只提示一次：定时器已弹过「未获取到」时，catch 不再补一条
+    // （listen 注册晚于 3s 才 reject 时 clearTimeout 拦不住已触发的回调）
+    let noAnswerNotified = false;
+    // 无应答兜底自请求发出计时：覆盖 emit 自身挂起（主窗口忙/卡住）的情形
+    const noAnswerTimer = window.setTimeout(() => {
+      if (contextAnswered) return;
+      noAnswerNotified = true;
+      useNotificationStore.getState().notify({
+        level: "warning",
+        message: "未获取到仓库上下文，面板的仓库数据可能不完整（关闭本窗口重开可重试）",
+      });
+    }, PANEL_CONTEXT_TIMEOUT_MS);
+    try {
+      if (contextListener) await contextListener;
+      await bus.emitRequestOpenFileState();
+    } catch (e) {
+      // emit/注册已失败：本次结论就是失败，不再让未应答定时器对同一件事再弹一条
+      window.clearTimeout(noAnswerTimer);
+      console.error("撕裂窗口请求仓库上下文失败", e);
+      if (!noAnswerNotified) {
+        useNotificationStore.getState().notify({
+          level: "warning",
+          message: "仓库上下文请求失败，面板的仓库数据可能不完整",
+        });
+      }
+    }
+  };
+
   return {
     role: "main",
     windowId: "main",
     panelTabs: [],
     panelActiveTabId: null,
     panelReady: false,
+    panelError: null,
     dragCandidate: null,
     dragActive: false,
     dropTarget: null,
@@ -533,10 +616,8 @@ export const usePanelStore = create<PanelStore>((set, get) => {
       } catch {
         /* 忽略 */
       }
-      followWindowMoves();
 
-      // 布局镜像 bootstrap + 订阅广播（uiStateStore 持有 Rust 广播来的权威布局）
-      await useUiStateStore.getState().load();
+      // 布局镜像同步（订阅回调与本次 bootstrap 共用）；仅布局字段变化触发
       const syncFromUi = (): void => {
         const ui = useUiStateStore.getState();
         const entry = ui.detachedWindows.find((w) => w.id === windowId) ?? null;
@@ -549,49 +630,62 @@ export const usePanelStore = create<PanelStore>((set, get) => {
         for (const v of before) {
           if (!after.has(v)) void get().releaseView(v);
         }
-        set({ panelTabs: nextTabs, panelActiveTabId: entry ? entry.activeTabId : null, panelReady: true });
+        set({
+          panelTabs: nextTabs,
+          panelActiveTabId: entry ? entry.activeTabId : null,
+          panelReady: true,
+          // 拉取成功后清错误态（重试成功、或错误态期间布局广播到达）
+          panelError: null,
+        });
         get().syncCollabHost();
       };
-      subscribeLayoutMirror(syncFromUi);
-      syncFromUi();
-      subscribeDragSession();
 
+      // 窗口级接线只做一次：重试只重跑下面的拉取，不重复注册 IPC 监听（注册函数自身无幂等）
+      if (!panelWired) {
+        panelWired = true;
+        followWindowMoves();
+        subscribeLayoutMirror(syncFromUi);
+        subscribeDragSession();
+        // 应答监听必须先于请求注册（listen 是异步 IPC 注册，先发请求会丢应答）
+        contextListener = bus.onOpenFileChanged(applyOpenFileContext);
+        // 注册失败时兜住 rejection（布局阶段若提前返回就没人体 await 它，会变成未处理拒绝）
+        contextListener.catch((e: unknown) => console.error("撕裂窗口订阅仓库上下文失败", e));
+      }
+
+      // 阶段一：布局快照——面板渲染的唯一硬依赖，限时防永久停在加载屏。
+      // 与仓库上下文分开计时：上下文慢只是功能不全，不该把已就绪的面板盖成「布局未响应」。
+      const layoutOk = await Promise.race([
+        useUiStateStore.getState().load().then(
+          () => {
+            syncFromUi();
+            return true;
+          },
+          (e: unknown) => {
+            console.error("撕裂窗口读取布局快照失败", e);
+            return false;
+          },
+        ),
+        new Promise<false>((resolve) => window.setTimeout(() => resolve(false), PANEL_BOOT_TIMEOUT_MS)),
+      ]);
+      if (!layoutOk && !get().layoutMirror) {
+        // 布局确实没拿到才报错；已有镜像（上一次尝试成功过）不误判
+        set({ panelReady: true, panelError: "布局服务未响应，面板未能加载" });
+        return;
+      }
       // 窗口标题 = 激活标签（Rust 建窗用占位标题，boot 后按视图名刷新）
       const entry0 = useUiStateStore.getState().detachedWindows.find((w) => w.id === windowId);
       if (entry0) void setWindowTitle(titleOfTabs(entry0.tabs, entry0.activeTabId));
-      // 请求当前仓库/打开文件上下文（boot 可能晚于主窗口的上下文广播）
-      void bus.emitRequestOpenFileState();
+      // 阶段二：仓库上下文（失败只提示，见 requestPanelContext）
+      void requestPanelContext();
+    },
 
-      void bus.onOpenFileChanged((payload) => {
-        const app = useAppStore.getState();
-        useAppStore.setState({
-          vaultId: payload.vaultId,
-          vaultRoot: payload.vaultRoot,
-          vaultName: payload.vaultName,
-          currentCanvasFile: payload.currentCanvasFile,
-          currentNoteFile: payload.currentNoteFile,
-          currentTableFile: payload.currentTableFile,
-          currentNoteTitle: payload.currentNoteTitle,
-          currentTableTitle: payload.currentTableTitle,
-        });
-        // 仓库上下文到达（切仓库或启动请求应答）：按需加载仓库级配置/文件树/领域仓库上下文
-        if (payload.vaultId !== app.vaultId) {
-          if (payload.vaultId) {
-            void useSettingsStore.getState().loadVaultConfig();
-            void useVaultStore.getState().loadFiles();
-          }
-          // AI 会话换仓库读盘（含 vaultId 置空 = 回启动页场景）经生命周期注册表分发
-          void kernelLifecycle
-            .notifyVaultEntered({ vaultId: payload.vaultId })
-            .catch((e) => console.error("撕裂窗口加载领域仓库上下文失败", e));
-          // 撕裂窗口插件运行时随仓库上下文重载（与主窗口 selectVault/backToVaultSelect 时机一致）：
-          // vaultId 置空（回启动页）也 load——此时只扫 app 插件，自然卸载 vault 插件；
-          // 插件事件（vault:switch/clear）按窗口隔离不跨窗口转发，撕裂窗口插件经重载兜底
-          void usePluginStore.getState().load().catch((e) => console.error("撕裂窗口加载插件失败", e));
-          // 协作宿主重算（仓库房间变化）
-          get().syncCollabHost();
-        }
-      });
+    retryPanelInit: async () => {
+      panelInitialized = false;
+      set({ panelReady: false, panelError: null });
+      // 重跑会经 uiStateStore.load()，其首行 cancel 掉在途防抖补丁（只清 timer 不落盘）——
+      // 先把本窗口待写的非布局字段刷到磁盘，防这次重试丢掉处于防抖窗口内的展开/上次文件
+      await useUiStateStore.getState().flush();
+      await get().initPanel();
     },
 
     beginDragCandidate: (tab, sourceHost, x, y) => {
