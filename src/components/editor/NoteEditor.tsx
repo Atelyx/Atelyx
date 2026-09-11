@@ -642,9 +642,9 @@ export function NoteEditor({ file }: { file: string }) {
             readOnly={preview}
             interactiveCheckbox
             links={noteMarkdownLinks}
-            // 协作挂载分歧：干净 → 收敛会话基准到协作基线（不置脏不写盘——磁盘落盘只发生在
-            // 真实内容变化：用户编辑/远端合入经 onBodyChange 保存链，挂载收敛不覆盖磁盘，
-            // 防空/陈旧基线打开即清空笔记）；有未落盘编辑 → 本地正文写回 ytext（本地最新者胜）
+            // 协作挂载分歧：干净 → 采纳 ytext 正文并按内容变更走保存链落盘（协作态编辑面以 ytext
+            // 为文档源，磁盘须随之收敛；磁盘已持有该正文时保存链判无内容可写，不重复写盘）；
+            // 有未落盘编辑 → 本地正文写回 ytext（本地最新者胜）
             onCollabDivergence={(ytextText) => session?.handleCollabDivergence(ytextText)}
             onBodyChange={(md) => session?.applyBody(md)}
           />

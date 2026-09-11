@@ -146,13 +146,14 @@ function ensureCollabBinding(rt: SessionRuntime): void {
   // 空正文不参与协作（无可合并内容）：用户输入后经 commit 再次进入本函数完成绑定
   if (!content) return;
 
-  const bindWith = (baselineContent: string): void => {
+  const bindWith = (baselineContent: string, diskContent: string | undefined): void => {
     const { collabNickname, collabColor, deviceName } = useSettingsStore.getState();
     const binding = useNoteCollabStore.getState().bind(file, bodyLF(baselineContent), {
       name: collabNickname || deviceName || "用户",
       color: collabColor || "#30bced",
     });
-    rt.session.handleCollabDivergence(binding.ytext.toString());
+    // 直读盘正文交给会话做采纳判定：与磁盘逐字节一致（无对端合入）时只对齐视图，不重复写盘
+    rt.session.handleCollabDivergence(binding.ytext.toString(), diskContent);
   };
 
   rt.bindingPending = true;
@@ -168,7 +169,9 @@ function ensureCollabBinding(rt: SessionRuntime): void {
       if (!isCollabActive() || useNoteCollabStore.getState().bindings[file]) return;
       const latest = view(file)?.content ?? "";
       if (!latest) return;
-      bindWith(disk ?? latest);
+      // 读盘成功则磁盘正文即事实（空文件也是事实，按形态与逐字节比对用）；读失败退回会话正文，且不提供磁盘事实
+      if (disk === null) bindWith(latest, undefined);
+      else bindWith(disk, disk);
     });
 }
 
@@ -572,23 +575,31 @@ function openSession(file: string, baselineContent?: string): NoteBodySession {
         patchView(file, { dirty: false });
         setSaveState(file, "saved");
       },
-      handleCollabDivergence: (ytextText) => {
+      handleCollabDivergence: (ytextText, diskContent) => {
         const current = view(file);
         if (!current || !currentBinding(file)) return;
-        // 本地有未落盘编辑：本地正文写回 ytext（本地最新者胜）；否则把 ytext 收作会话基准（不写盘）
+        // 本地有未落盘编辑：本地正文写回 ytext（本地最新者胜）
         if (current.dirty) {
           useNoteCollabStore.getState().syncLocalBody(file, bodyLF(current.content));
           return;
         }
-        const parsed = parseFrontmatter(current.content);
-        const restored = parsed.body.includes("\r\n")
+        // 正文只存在于 CRDT，frontmatter/换行风格只存在于磁盘：直读盘正文可用时采纳形态以磁盘为准
+        const shape = parseFrontmatter(diskContent ?? current.content);
+        const restored = shape.body.includes("\r\n")
           ? ytextText.replace(/\n/g, "\r\n")
           : ytextText;
-        const content = parsed.fmPrefix + restored;
+        const content = shape.fmPrefix + restored;
         if (content === current.content) return;
-        rt.lastSaved = content;
-        patchView(file, { content, dirty: false });
-        setSaveState(file, "idle");
+        // 采纳结果与磁盘逐字节一致：磁盘已持有，只对齐会话视图
+        if (content === diskContent) {
+          patchView(file, { content, dirty: false });
+          setSaveState(file, "idle");
+          return;
+        }
+        // 采纳对端/保留文档已前进的正文：按内容变更走保存链落盘。不得登记为已落盘基线——
+        // 协作态编辑面以 ytext 为文档源，登记会让磁盘永久落后于编辑面，且随后的「改回该内容」
+        // 会被判无改动而漏写；进撤销栈与远端合入同语义。
+        commit(rt, content, false);
       },
     },
   };

@@ -32,7 +32,7 @@ vi.mock("@tauri-apps/api/core", () => ({
     if (cmd === "write_note") {
       const content = String(args?.content ?? "");
       const delay = h.writeDelays.shift() ?? 0;
-      const fails = h.failWrites || (h.writeFails.shift() ?? false);
+      const fails = h.writeFails.shift() ?? h.failWrites;
       h.writeStarted.push(content);
       if (delay) await new Promise((r) => setTimeout(r, delay));
       if (fails) throw new Error("write failed");
@@ -209,6 +209,18 @@ describe("协作态绑定基线", () => {
     await vi.waitFor(() => expect(noteCollab.useNoteCollabStore.getState().bindings["a.md"]).toBeDefined());
     expect(h.reads).toHaveLength(0); // 直读盘已消费
     await vi.waitFor(() => expect(session.getState().content).toBe("盘上较新内容"));
+    // 采纳正文与直读盘正文一致：只对齐视图，不重复写盘
+    expect(h.writes).toEqual([]);
+  });
+
+  it("采纳时 frontmatter 以直读盘为准：会话对齐到磁盘全文且不写盘", async () => {
+    // 缓存带旧 frontmatter，磁盘 frontmatter 已被外部改过：CRDT 只承载正文，frontmatter 只能来自磁盘
+    noteStore.useNoteStore.getState().stageNoteContent("a.md", "---\ntitle: 旧\n---\nhello\n");
+    h.reads.push("---\ntitle: 新\n---\nhello\n");
+    const { session } = openCollab();
+    await vi.waitFor(() => expect(noteCollab.useNoteCollabStore.getState().bindings["a.md"]).toBeDefined());
+    await vi.waitFor(() => expect(session.getState().content).toBe("---\ntitle: 新\n---\nhello\n"));
+    expect(h.writes).toEqual([]);
   });
 
   it("有未落盘输入：仍以磁盘正文为基线，会话正文按差量写回文档（不回退、不登记为已落盘）", async () => {
@@ -339,5 +351,30 @@ describe("在途写盘竞态", () => {
     await vi.waitFor(() => expect(session.getState().error).toBe(true), { timeout: 3000 });
     expect(session.getState().dirty).toBe(true);
     expect(noteStore.useNoteStore.getState().pendingNoteContent["a.md"]).toBe("hello world\n");
+  });
+});
+
+describe("协作采纳落盘", () => {
+  it("采纳对端已前进的正文：磁盘随之收敛，且不被登记为已落盘基线", async () => {
+    h.disk["a.md"] = "hello\n";
+    settings.useSettingsStore.setState({ collabEnabled: true });
+    collab.useCollabStore.setState({ connected: true });
+    const session = store.noteSurfaceProvider.open("a.md");
+    await vi.waitFor(() => expect(session.getState().content).toBe("hello\n"));
+    await vi.waitFor(() =>
+      expect(noteCollab.useNoteCollabStore.getState().bindings["a.md"]).toBeDefined(),
+    );
+
+    // 保留文档已收到对端帧：ytext 前进到磁盘还没有的正文 → 采纳并按内容变更落盘
+    session.handleCollabDivergence("peer content\n");
+    await vi.waitFor(() => expect(h.disk["a.md"]).toBe("peer content\n"), { timeout: 3000 });
+    expect(h.writes).toEqual(["peer content\n"]);
+
+    // 磁盘已持有该正文：「改一下又删回原样」判无内容可写（不重复写盘），正文不回退
+    session.applyBody("peer content\nx");
+    session.applyBody("peer content\n");
+    await vi.waitFor(() => expect(session.getState().dirty).toBe(false), { timeout: 3000 });
+    expect(h.writes).toEqual(["peer content\n"]);
+    expect(h.disk["a.md"]).toBe("peer content\n");
   });
 });

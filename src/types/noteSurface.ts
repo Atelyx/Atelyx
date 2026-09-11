@@ -39,8 +39,10 @@ export interface NoteBodySession {
   applyBody: (bodyLF: string) => void;
   /** 全文提交（源码模式编辑、属性区合并）。 */
   commitContent: (content: string) => void;
-  /** 协作挂载分歧（ytext 正文与本地正文相悖）：本地有未落盘编辑则写回 ytext，否则把 ytext 收作会话基准。 */
-  handleCollabDivergence: (ytextText: string) => void;
+  /** 协作挂载分歧（ytext 正文与本地正文相悖）：本地有未落盘编辑则写回 ytext，否则采纳 ytext 正文。
+   *  `diskContent` = 调用方已直读到的磁盘正文：采纳时 frontmatter/换行风格以磁盘为准，与磁盘逐字节
+   *  一致时只对齐视图不写盘，否则按内容变更走保存链落盘。 */
+  handleCollabDivergence: (ytextText: string, diskContent?: string) => void;
   undo: () => void;
   redo: () => void;
   /** 冲突「重新加载」：丢弃本地改动，回到磁盘最新。 */
