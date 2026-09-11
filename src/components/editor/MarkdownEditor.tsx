@@ -52,7 +52,7 @@ import { useVaultStore } from "@/stores/vaultStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { collapseSoftLineBreaks } from "@/utils/softLineBreak";
 import type { DecorationOptions } from "./markdownWidgets";
-import { buildDecorations } from "./markdownDecorations";
+import { buildDecorations, livePreviewNeedsRebuild } from "./markdownDecorations";
 
 // ===== 只读动态切换（同一视图不重建）=====
 
@@ -120,7 +120,7 @@ const editorTheme = EditorView.theme({
 
 // ===== 实时预览装饰 StateField =====
 
-/** 实时预览装饰：文档/选区/只读切换变化时全量重建（笔记规模下开销可忽略）。
+/** 实时预览装饰：文档/选区/只读切换/语法树推进时全量重建（笔记规模下开销可忽略）。
  * 用 StateField + EditorView.decorations.from 而非 ViewPlugin：block 装饰（表格/公式/横隔条）
  * 只能经 standard decorations 提供，ViewPlugin 提供会抛 RangeError。 */
 function livePreview(
@@ -137,11 +137,7 @@ function livePreview(
       );
     },
     update(value, tr) {
-      if (
-        tr.docChanged ||
-        tr.selection !== undefined ||
-        tr.effects.some((e) => e.is(readOnlyEffect))
-      ) {
+      if (livePreviewNeedsRebuild(tr, readOnlyEffect)) {
         return buildDecorations(
           tr.state,
           buildOpts(tr.state.field(roField)),

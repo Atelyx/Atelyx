@@ -70,11 +70,12 @@ export function inlineTagRanges(lineText: string, lineFrom: number): RangeInfo[]
   return out;
 }
 
-/** `[text](url)` / `![alt](url)`（含可选 title）解析；不匹配返回 null（保持原文）。 */
+/** `[text](url)` / `![alt](url)`（含可选 title）解析；不匹配返回 null（保持原文）。
+ *  URL 可空：`[名]()` 是「快捷新建同名笔记」语法，故两个正则的 URL 组都允许零字符。 */
 export function parseBracketLink(text: string): { label: string; url: string } | null {
   const m =
-    /^\[([^\]]*)\]\(([^)\s]+)(?:\s+["'`][^"'`]*["'`])?\)$/.exec(text) ||
-    /^\[([^\]]*)\]\(([^)]+)\)$/.exec(text);
+    /^\[([^\]]*)\]\(([^)\s]*)(?:\s+["'`][^"'`]*["'`])?\)$/.exec(text) ||
+    /^\[([^\]]*)\]\(([^)]*)\)$/.exec(text);
   if (!m) return null;
   return { label: m[1] ?? "", url: m[2]?.trim() ?? "" };
 }

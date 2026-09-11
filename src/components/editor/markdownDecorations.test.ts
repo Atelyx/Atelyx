@@ -4,15 +4,24 @@
  * 各类 widget/行装饰都能产出（防排序/重叠类回归）。
  */
 import { describe, expect, it } from "vitest";
-import { EditorState } from "@codemirror/state";
+import { EditorState, StateEffect, type Extension } from "@codemirror/state";
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
+import { syntaxTree } from "@codemirror/language";
 import type { DecorationSet } from "@codemirror/view";
-import { buildDecorations, blockLineAtEdge, sourceLineAtFraction, taskMarkerRange } from "./markdownDecorations";
+import {
+  buildDecorations,
+  blockLineAtEdge,
+  livePreviewNeedsRebuild,
+  sourceLineAtFraction,
+  taskMarkerRange,
+} from "./markdownDecorations";
 import {
   TableWidget,
   MathWidget,
   HtmlWidget,
   FootnoteDefWidget,
+  LinkWidget,
+  parseBracketLink,
   type DecorationOptions,
 } from "./markdownWidgets";
 
@@ -49,6 +58,22 @@ function widgetNames(decs: DecorationSet, len: number): string[] {
     if (w) names.push((w as { constructor?: { name?: string } }).constructor?.name ?? "?");
   });
   return names;
+}
+
+/** 收集区间内所有 LinkWidget（按文档位置）。 */
+function linkWidgets(decs: DecorationSet, len: number): LinkWidget[] {
+  const out: LinkWidget[] = [];
+  decs.between(0, len, (_from, _to, dec) => {
+    const w = (dec as { spec?: { widget?: object } }).spec?.widget;
+    if (w instanceof LinkWidget) out.push(w);
+  });
+  return out;
+}
+
+/** LinkWidget 私有字段的只读视口（测试内窥视模式与点击回调，不改生产可见性）。 */
+function linkInfo(w: LinkWidget): { text: string; url: string; kind: string; click: () => void } {
+  const v = w as unknown as { text: string; url: string; kind: string; onClick: () => void };
+  return { text: v.text, url: v.url, kind: v.kind, click: v.onClick };
 }
 
 const MIXED_DOC = [
@@ -120,6 +145,62 @@ describe("图片渲染", () => {
   it("行内代码内的图片语法不装饰（opaque）", () => {
     const doc = "`![x](y.png)` 后文";
     expect(widgetNames(build(doc), doc.length)).not.toContain("ImageWidget");
+  });
+});
+
+describe("括号链接与 `[名]()` 快捷新建（URL 可空）", () => {
+  function buildWithCreate(md: string, onCreateNote: (label: string) => void): DecorationSet {
+    const state = EditorState.create({
+      doc: md,
+      extensions: [markdown({ addKeymap: false, base: markdownLanguage })],
+    });
+    return buildDecorations(state, { ...opts, onCreateNote }, () => {});
+  }
+
+  it("混合语法文档中的 `[新建]()` 产出可点击 create widget，点击回调收到 label", () => {
+    const created: string[] = [];
+    const links = linkWidgets(buildWithCreate(MIXED_DOC, (l) => created.push(l)), MIXED_DOC.length).map(linkInfo);
+    const create = links.filter((l) => l.kind === "create");
+    expect(create).toHaveLength(1);
+    expect(create[0]).toMatchObject({ text: "新建", url: "" });
+    create[0].click();
+    expect(created).toEqual(["新建"]);
+  });
+
+  it("`[名]( )` 空白路径 trim 后同样走 create", () => {
+    const doc = "[新建]( )";
+    const links = linkWidgets(buildWithCreate(doc, () => {}), doc.length).map(linkInfo);
+    expect(links.filter((l) => l.kind === "create")).toHaveLength(1);
+  });
+
+  it("`[]()` 空 label 不产出 create widget（避免建出无名笔记）", () => {
+    const doc = "[]()";
+    const links = linkWidgets(buildWithCreate(doc, () => {}), doc.length).map(linkInfo);
+    expect(links.some((l) => l.kind === "create")).toBe(false);
+  });
+
+  it("`[x](<url>)` 尖括号形式 URL 非空，不产出 create widget", () => {
+    const doc = "[x](<https://e.com>)";
+    const links = linkWidgets(buildWithCreate(doc, () => {}), doc.length).map(linkInfo);
+    expect(links.some((l) => l.kind === "create")).toBe(false);
+  });
+
+  it("`[点我](https://example.com)` 仍渲染为外链 widget", () => {
+    const doc = "[点我](https://example.com)";
+    const links = linkWidgets(buildWithCreate(doc, () => {}), doc.length).map(linkInfo);
+    expect(links.map((l) => l.kind)).toEqual(["external"]);
+    expect(links[0].text).toBe("点我");
+  });
+
+  it("parseBracketLink：URL 可空但 label 保留，title 形式不误解析", () => {
+    expect(parseBracketLink("[新建]()")).toEqual({ label: "新建", url: "" });
+    expect(parseBracketLink("[新建]( )")).toEqual({ label: "新建", url: "" });
+    expect(parseBracketLink("[]()")).toEqual({ label: "", url: "" });
+    expect(parseBracketLink("[a](b.md)")).toEqual({ label: "a", url: "b.md" });
+    expect(parseBracketLink('[a](b.md "标题")')).toEqual({ label: "a", url: "b.md" });
+    // 尖括号形式原样保留 `<...>`（非空 url，不判成空路径；也因此不会被当作外链前缀）
+    expect(parseBracketLink("[a](<https://e.com>)")).toEqual({ label: "a", url: "<https://e.com>" });
+    expect(parseBracketLink("不是链接")).toBeNull();
   });
 });
 
@@ -280,5 +361,47 @@ describe("widget eq（只读↔编辑翻转须强制重画）", () => {
     expect(new FootnoteDefWidget("1", "text", null).eq(new FootnoteDefWidget("1", "text", () => {}))).toBe(
       false,
     );
+  });
+});
+
+describe("livePreviewNeedsRebuild（装饰重建判定）", () => {
+  const roEffect = StateEffect.define<boolean>();
+  const marker = StateEffect.define<null>();
+  // 两个独立的 markdown() 实例：配置不同 → 重新配置语言 facet 会换掉语法树引用
+  const langA = markdown({ addKeymap: false, base: markdownLanguage });
+  const langB = markdown({ addKeymap: false, base: markdownLanguage });
+  const DOC = "# 标题\n\n正文 [点我](https://example.com)\n\n| a | b |\n| - | - |\n| 1 | 2 |\n";
+
+  function stateWithLanguage(ext: Extension): EditorState {
+    return EditorState.create({ doc: DOC, extensions: [ext] });
+  }
+
+  it("文档变化 → 重建", () => {
+    const tr = stateWithLanguage(langA).update({ changes: { from: 0, insert: "x" } });
+    expect(livePreviewNeedsRebuild(tr, roEffect)).toBe(true);
+  });
+
+  it("显式选区变化 → 重建", () => {
+    const tr = stateWithLanguage(langA).update({ selection: { anchor: 1 } });
+    expect(livePreviewNeedsRebuild(tr, roEffect)).toBe(true);
+  });
+
+  it("只读切换效果 → 重建", () => {
+    const tr = stateWithLanguage(langA).update({ effects: roEffect.of(false) });
+    expect(livePreviewNeedsRebuild(tr, roEffect)).toBe(true);
+  });
+
+  it("effects-only 且语法树推进 → 重建（后台解析补完的唯一信号）", () => {
+    const tr = stateWithLanguage(langA).update({ effects: StateEffect.reconfigure.of([langB]) });
+    expect(tr.docChanged).toBe(false);
+    expect(tr.selection).toBeUndefined();
+    expect(syntaxTree(tr.state)).not.toBe(syntaxTree(tr.startState));
+    expect(livePreviewNeedsRebuild(tr, roEffect)).toBe(true);
+  });
+
+  it("effects-only 且语法树未变 → 不重建（无关 effect 不触发全量重建）", () => {
+    const tr = stateWithLanguage(langA).update({ effects: marker.of(null) });
+    expect(syntaxTree(tr.state)).toBe(syntaxTree(tr.startState));
+    expect(livePreviewNeedsRebuild(tr, roEffect)).toBe(false);
   });
 });

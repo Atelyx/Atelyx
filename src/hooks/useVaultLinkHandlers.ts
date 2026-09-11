@@ -4,7 +4,7 @@
  * 收敛对话节点 / 文本节点 / 笔记编辑器 / AI 对话面板四处逐字复制的接线簇：
  * - handleOpenWikiNote：`[[wiki 链接]]` 命中仓库笔记 → 打开
  * - isVaultPathNote / handleOpenVaultPathNote：`[label](路径)` 命中仓库笔记 → 打开
- * - handleCreateNote：`[名]()` 空链接（目标不存在）→ 快捷新建并打开
+ * - handleCreateNote：`[名]()` 空路径链接 → 快捷新建同名笔记并打开
  *
  * 回调全部 useCallback 稳定化（内部 getState() 实时读 noteList），
  * 是调用方 `useMemo([])` 缓存 MarkdownEditorLinks 的前提（气泡 memo 生效）。

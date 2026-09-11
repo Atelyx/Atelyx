@@ -12,7 +12,7 @@
  *
  * 安全：widget 只出 class + textContent / 已清洗 HTML（HtmlWidget），详见 markdownWidgets.tsx。
  */
-import { RangeSetBuilder, type EditorState, type Line, type TransactionSpec, type Text } from "@codemirror/state";
+import { RangeSetBuilder, type EditorState, type Line, type StateEffectType, type Text, type Transaction, type TransactionSpec } from "@codemirror/state";
 import { Decoration, type DecorationSet, type EditorView } from "@codemirror/view";
 import { syntaxTree } from "@codemirror/language";
 import {
@@ -467,15 +467,13 @@ export function buildDecorations(
             ),
           }),
         );
-      } else if (parsed.url === "" && opts.onCreateNote) {
-        // `[名]()` 空路径 = 目标笔记不存在，点击快捷新建
+      } else if (parsed.url === "" && parsed.label && opts.onCreateNote) {
+        // `[名]()` 空路径 = 快捷新建同名笔记（label 为空时不产出 widget，保持原文）
         pushWidget(
           c.from,
           c.to,
           Decoration.replace({
-            widget: new LinkWidget(parsed.label, "", "create", () =>
-              opts.onCreateNote?.(parsed.label || ""),
-            ),
+            widget: new LinkWidget(parsed.label, "", "create", () => opts.onCreateNote?.(parsed.label)),
           }),
         );
       } else if (opts.isVaultPathNote?.(parsed.url) && opts.onOpenVaultPathNote) {
@@ -734,4 +732,22 @@ export function buildDecorations(
   );
   for (const w of widgetEntries) builder.add(w.from, w.to, w.dec);
   return builder.finish();
+}
+
+/** 实时预览装饰是否需要重建。
+ *
+ *  判定必须含**语法树推进**：CodeMirror 的后台解析补完只派发 `Language.setState` 效果事务
+ *  （docChanged 为 false、无 selection），仅看前三条会漏掉它，装饰便只反映 `LanguageState.init`
+ *  同步解析的前 ~3000 字符——文档尾部的标题/链接/表格/围栏码等因此保持源码可见。
+ *  语法树引用比较是 O(1)，代价只是每次后台解析补完多重建一次。 */
+export function livePreviewNeedsRebuild(
+  tr: Transaction,
+  readOnlyEffect: StateEffectType<boolean>,
+): boolean {
+  return (
+    tr.docChanged ||
+    tr.selection !== undefined ||
+    tr.effects.some((e) => e.is(readOnlyEffect)) ||
+    syntaxTree(tr.state) !== syntaxTree(tr.startState)
+  );
 }

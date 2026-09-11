@@ -46,7 +46,14 @@ const sanitizeCache = new Map<string, string>();
 export function sanitizeHtmlFragment(html: string): string {
   const hit = sanitizeCache.get(html);
   if (hit !== undefined) return hit;
-  const out = DOMPurify.sanitize(html, { ALLOWED_TAGS, ALLOWED_ATTR, FORBID_TAGS });
+  // ALLOW_DATA_ATTR 必须显式关：DOMPurify 默认 true，且该判定独立于 ALLOWED_ATTR——
+  // 否则 raw HTML 可注入 data-note-file 等属性，被 closest() 取到后劫持笔记的撤销/右键路由。
+  const out = DOMPurify.sanitize(html, {
+    ALLOWED_TAGS,
+    ALLOWED_ATTR,
+    FORBID_TAGS,
+    ALLOW_DATA_ATTR: false,
+  });
   if (sanitizeCache.size >= CACHE_LIMIT) sanitizeCache.clear();
   sanitizeCache.set(html, out);
   return out;
