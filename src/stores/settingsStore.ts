@@ -201,6 +201,17 @@ function toGlobalProvider(p: ProviderConfig, syncKeys: boolean): GlobalProvider 
   };
 }
 
+/** 运行时搜索配置 → 磁盘 GlobalSearchConfig（`syncKeys` 关时剥离明文 `tavilyApiKey`，与
+ *  `toGlobalProvider` 同口径：非同步模式 key 只存本机 keychain）。 */
+function toGlobalSearchConfig(
+  search: GlobalSearchConfig | undefined,
+  syncKeys: boolean,
+): GlobalSearchConfig | undefined {
+  if (!search || syncKeys) return search;
+  const { tavilyApiKey: _omitted, ...rest } = search;
+  return rest;
+}
+
 /** 当前仓库稳定 ID（keychain 条目按仓库隔离用；设置入口只在工作区，必有当前仓库）。 */
 function currentVaultId(): string {
   return useAppStore.getState().vaultId ?? "";
@@ -253,8 +264,9 @@ function persistDebounced(): void {
   persistCtl.schedule();
 }
 
-/** 写仓库级配置前剔除 undefined，保持 .atelyx/config.json 干净（providers 空数组不落盘；
- * 主题/强调色/字号/字体/自动恢复为应用级，不在此承载）。 */
+/** 写仓库级配置前剔除 undefined 并剥离未授权的明文 key，保持 .atelyx/config.json 干净
+ *  （providers 空数组不落盘；`syncKeys` 关时 `search.tavilyApiKey` 不落盘；
+ *  主题/强调色/字号/字体/自动恢复为应用级，不在此承载）。 */
 function cleanVaultConfig(vc: VaultConfig): VaultConfig {
   const out: VaultConfig = {};
   if (vc.model !== undefined) out.model = vc.model;
@@ -268,7 +280,11 @@ function cleanVaultConfig(vc: VaultConfig): VaultConfig {
   // 仓库级 AI 配置（无 key）与仓库稳定 ID 必须保留：否则写盘后供应商/搜索源丢失，
   // vaultId 消失会让下次 open_vault 重新生成 ID、keychain key 失配
   if (vc.providers !== undefined) out.providers = vc.providers;
-  if (vc.search !== undefined) out.search = vc.search;
+  // key 只在 syncKeys 开启时随仓库落盘：本函数是前端四条写盘路径（persist/commitVault/setSyncKeys/
+  // setTavilyKey）的唯一汇聚点，剥离放这里才能保证「只改 SearXNG 地址」「改任一 AI 配置」都不会把明文 key 写回
+  // （Rust 侧另有一处重写：`ensure_vault_id_on_disk` 首开补 vaultId 时按读到的内容原样写回，不新增 key）
+  const search = toGlobalSearchConfig(vc.search, !!vc.syncKeys);
+  if (search !== undefined) out.search = search;
   if (vc.syncKeys !== undefined) out.syncKeys = vc.syncKeys;
   if (vc.vaultId !== undefined) out.vaultId = vc.vaultId;
   // temperature / defaultProviderId 字段不写回（配置中不再承载）
@@ -420,10 +436,12 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         }),
       );
       const config: AiConfig = { providers };
-      // 搜索源：仓库级配置 + Tavily key（syncKeys 开 = 直读 config 内 tavilyApiKey；关 = keychain 条目 provider-<vaultId>-search-tavily）
-      let searchConfig: GlobalSearchConfig = { provider: "tavily", searxngUrl: "" };
+      // 搜索源：syncKeys 开 = 直读 config 内 tavilyApiKey；关 = 剥离明文 key 后取配置 + keychain 条目取 key
+      const searchConfig: GlobalSearchConfig = toGlobalSearchConfig(vc.search, !!vc.syncKeys) ?? {
+        provider: "tavily",
+        searxngUrl: "",
+      };
       let tavilyKey = "";
-      if (vc.search) searchConfig = vc.search;
       if (vc.syncKeys) {
         tavilyKey = searchConfig.tavilyApiKey ?? "";
       } else {
@@ -431,6 +449,17 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
           tavilyKey = await getApiKey(vaultId, "search-tavily");
         } catch (e) {
           console.error("keychain 读取失败 search-tavily", e);
+        }
+        // 配置里残留明文 key（曾在开启状态下落盘、之后 SyncKeys 关闭或手工改回）：采纳为本机 keychain
+        // 条目——与「关闭 = 剥离配置文件并回写 keychain」同语义，避免用户已配置的 key 被静默丢弃。
+        // 文件里那份残留不参与取用（Rust 侧同样只在 syncKeys 开启时读文件内 key），
+        // 由下一次任意仓库级配置写盘经 cleanVaultConfig 剥离
+        const strayKey = vc.search?.tavilyApiKey?.trim();
+        if (!tavilyKey && strayKey) {
+          tavilyKey = strayKey;
+          await setApiKey(vaultId, "search-tavily", strayKey).catch((e) =>
+            console.error("keychain 回写失败 search-tavily", e),
+          );
         }
       }
       // 系统提示词标记独立落盘 .atelyx/prompt-notes.json（config.json 只存仓库配置）
