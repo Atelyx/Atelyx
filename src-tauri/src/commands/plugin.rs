@@ -344,11 +344,25 @@ fn target_folder_name(folder_name: &str, id: &str) -> String {
     }
 }
 
-/// 把插件目录内相对路径安全地拼接到插件根（防穿越越权）。
+/// 把插件目录内相对路径安全地拼接到插件根（防穿越越权 + 拒绝 `.git` 段）。
 fn safe_join_plugin(base: &Path, relative: &str) -> Result<PathBuf, String> {
     let rel = Path::new(relative);
-    if rel.is_absolute() || rel.components().any(|c| !matches!(c, Component::Normal(_))) {
-        return Err(format!("非法插件内路径：{relative}"));
+    for c in rel.components() {
+        match c {
+            Component::Normal(seg) => {
+                // `.git` 不可访问：git clone 会把安装 URL（可能内嵌凭据）原样写进 `.git/config`，
+                // 而插件目录位于仓库内、会随 Git/云盘同步流出。
+                // Win32 归一化会剥掉每段结尾的点与空格，故先 trim 再比（`.git.`/`.git ` 同样命中）
+                if seg
+                    .to_string_lossy()
+                    .trim_end_matches(['.', ' '])
+                    .eq_ignore_ascii_case(".git")
+                {
+                    return Err(format!("非法插件内路径（.git 不可访问）：{relative}"));
+                }
+            }
+            _ => return Err(format!("非法插件内路径：{relative}")),
+        }
     }
     Ok(base.join(rel))
 }
@@ -392,8 +406,12 @@ fn plugin_state_path(app: &AppHandle) -> Result<PathBuf, String> {
 /// - `Err(reason)`：文件存在但读不进来（句柄被占用/权限/非 UTF-8）。这种情况**不能**按空状态往下写——
 ///   会把启用开关与安装来源整表抹掉，所以写路径必须报错；只读展示路径用 `read_plugin_state_lenient`。
 fn read_plugin_state(app: &AppHandle) -> Result<PluginState, String> {
-    let path = plugin_state_path(app)?;
-    let raw = match fs::read_to_string(&path) {
+    read_plugin_state_at(&plugin_state_path(app)?)
+}
+
+/// 按路径读（与 `read_plugin_state` 同一语义，供锁内读改写与单测复用）。
+fn read_plugin_state_at(path: &Path) -> Result<PluginState, String> {
+    let raw = match fs::read_to_string(path) {
         Ok(raw) => raw,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(PluginState::default()),
         Err(e) => return Err(format!("读取插件状态失败（可能被其它程序占用，请重试）：{e}")),
@@ -401,7 +419,7 @@ fn read_plugin_state(app: &AppHandle) -> Result<PluginState, String> {
     match serde_json::from_str(&raw) {
         Ok(state) => Ok(state),
         Err(e) => {
-            let note = backup_corrupt_state(&path)
+            let note = backup_corrupt_state(path)
                 .map_or_else(|| "备份失败".to_string(), |p| format!("已备份为 {}", p.display()));
             eprintln!("[plugin] 插件状态文件损坏，{note}（按空状态继续）：{e}");
             Ok(PluginState::default())
@@ -428,11 +446,44 @@ fn backup_corrupt_state(path: &Path) -> Option<PathBuf> {
     fs::rename(path, &backup).ok().map(|_| backup)
 }
 
-fn write_plugin_state(app: &AppHandle, state: &PluginState) -> Result<(), String> {
-    let path = plugin_state_path(app)?;
+/// 按路径写状态（锁内读改写与单测复用）。
+fn write_plugin_state_at(path: &Path, state: &PluginState) -> Result<(), String> {
     let raw = serde_json::to_string_pretty(state).map_err(|e| e.to_string())?;
     // 复用 vault::atomic_write：唯一临时名 + fsync + 失败清理（全项目同一 durability 语义）。
-    atomic_write(&path, &raw)
+    atomic_write(path, &raw)
+}
+
+/// plugin-state.json 的进程级串行锁。同步命令内联在 IPC 回调、异步命令在 tokio 多线程运行时，
+/// 两侧可真正并发；读-改-写不加锁会丢更新（丢 `enabled` 开关或 `sources` 记录，
+/// 后者会让更新/按名卸载持续失效）。
+static PLUGIN_STATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 在进程级锁内完成 plugin-state 的「读 → 改 → 写」，返回闭包产物。
+///
+/// `f` 的 `bool` = 本次是否落盘（状态未变时跳过写，避免列表路径的空写与无谓 fsync）。
+/// 锁只覆盖这段临界区：`f` 内不得做耗时 I/O、不得跨 `await`（长操作请在调用前完成）；
+/// 需要基于最新状态做判定时，用闭包拿到的 `&mut PluginState`，不要用锁外的陈旧读。
+fn mutate_plugin_state_at<T>(
+    path: &Path,
+    f: impl FnOnce(&mut PluginState) -> Result<(T, bool), String>,
+) -> Result<T, String> {
+    // lock() 的唯一失败模式是 poison（曾持锁 panic），重试不会恢复
+    let _guard = PLUGIN_STATE_LOCK
+        .lock()
+        .map_err(|_| "插件状态锁已损坏，请重启应用".to_string())?;
+    let mut state = read_plugin_state_at(path)?;
+    let (out, changed) = f(&mut state)?;
+    if changed {
+        write_plugin_state_at(path, &state)?;
+    }
+    Ok(out)
+}
+
+fn update_plugin_state<T>(
+    app: &AppHandle,
+    f: impl FnOnce(&mut PluginState) -> Result<(T, bool), String>,
+) -> Result<T, String> {
+    mutate_plugin_state_at(&plugin_state_path(app)?, f)
 }
 
 // ===== 清单校验 =====
@@ -630,6 +681,8 @@ fn git_path_arg(path: &Path) -> String {
 /// 手动 git 地址白名单（显式 scheme 的绝对地址；`git@host:owner/repo` 形式以 `git@` 开头）。
 /// 拒绝以 `-` 开头的输入：git 会把位置参数当选项解析（如 `--upload-pack=<cmd>`、`ext::<cmd>`
 /// 均可触发本机命令执行）。市场来源（owner/repo）由 `is_github_repo_ref` 单独校验，不走此函数。
+/// 另拒绝内嵌凭据：git clone 会把 URL 原样写进 `.git/config`，
+/// 该文件位于仓库内、会随 Git/云盘同步。
 fn validate_git_url(url: &str) -> Result<(), String> {
     if url.starts_with('-') {
         return Err("git 地址不能以 - 开头".into());
@@ -637,6 +690,22 @@ fn validate_git_url(url: &str) -> Result<(), String> {
     const SCHEMES: [&str; 5] = ["https://", "http://", "ssh://", "git://", "git@"];
     if !SCHEMES.iter().any(|s| url.starts_with(s)) {
         return Err("git 地址须以 https:// / http:// / ssh:// / git:// / git@ 开头".into());
+    }
+    if let Some((scheme, rest)) = url.split_once("://") {
+        // authority = `://` 到首个路径/查询/锚点之前
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+        if let Some((userinfo, _)) = authority.rsplit_once('@') {
+            // `ssh://git@host` 是常规写法（无密码、另走公钥认证），放行；
+            // 其余 userinfo 都算凭据：`user:pass@` 含密码，而 http(s)/git 的 `user@`
+            // 常被当作「用户名即令牌」（如 GitHub PAT 的 `https://<token>@github.com/...`）
+            let ssh_key_only = scheme.eq_ignore_ascii_case("ssh") && !userinfo.contains(':');
+            if !ssh_key_only {
+                return Err(
+                    "git 地址不能内嵌凭据（会明文写入插件目录的 .git/config）；请改用 SSH 地址或凭据管理器"
+                        .into(),
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -908,20 +977,21 @@ fn install_plugin_dir(
     let move_result = fs::rename(plugin_root, &target);
     move_result.map_err(|e| format!("安装失败：{e}"))?;
 
-    // 记录安装来源（更新依据 + 落位目录名兜底）。
+    // 记录安装来源（更新依据 + 落位目录名兜底）；启用状态按 id 保持（新装默认停用，
+    // 同名替换沿用原行状态）——两者在同一次锁内读改写取回，与并发的启停命令不互相覆盖。
     let mut source = source;
     source.dir_name = folder.clone();
-    let mut pstate = read_plugin_state(app)?;
-    pstate.sources.insert(id.clone(), source);
-    if let Err(e) = write_plugin_state(app, &pstate) {
+    let enabled = update_plugin_state(app, |pstate| {
+        pstate.sources.insert(id.clone(), source);
+        Ok((pstate.enabled.get(&id).copied().unwrap_or(false), true))
+    })
+    .map_err(|e| {
         // 状态写失败回滚落位，防「有目录无来源记录」的幽灵插件（重装/更新都定位不到）。
         let _ = fs::rename(&target, plugin_root);
         let _ = fs::remove_dir_all(plugin_root);
-        return Err(e);
-    }
+        e
+    })?;
 
-    // 启用状态按 id 保持：新装默认停用（由用户确认后启用）；同名替换沿用原行状态（原行启用即生效）。
-    let enabled = pstate.enabled.get(&id).copied().unwrap_or(false);
     Ok(plugin_info_from(&target, &manifest, scope, source_kind, enabled))
 }
 
@@ -938,10 +1008,15 @@ pub fn plugin_list(
     // 只读展示路径：读不到状态也不阻断列表（播种只在读成功时落盘，见下）。
     let (mut pstate, state_readable) = read_plugin_state_lenient(&app);
     let disk_ids = disk_plugin_ids(&app, &state);
-    // 状态未变不落盘（每次列表调用都写会与其它插件命令的读改写互相覆盖）；
-    // 真写失败不能吞（否则用户改动默默不持久化）——转 stderr 日志，列表本身照常返回。
-    if state_readable && seed_default_rows(&mut pstate, &defaults, &disk_ids, false) {
-        if let Err(e) = write_plugin_state(&app, &pstate) {
+    // 展示行就地播种（本次调用即可见）。
+    let seeded = seed_default_rows(&mut pstate, &defaults, &disk_ids, false);
+    // 落盘走锁内读改写：以最新状态为基础补一遍（幂等），未变不写、写失败不吞
+    // （否则用户改动默默不持久化）——转 stderr 日志，列表本身照常返回。
+    if state_readable && seeded {
+        if let Err(e) = update_plugin_state(&app, |fresh| {
+            let changed = seed_default_rows(fresh, &defaults, &disk_ids, false);
+            Ok(((), changed))
+        }) {
             eprintln!("[plugin] 默认组合播种状态写盘失败：{e}");
         }
     }
@@ -1002,10 +1077,11 @@ pub fn plugin_list(
 /// 已存在的行（启用/停用）保持现状，不覆盖用户改动。
 #[tauri::command]
 pub fn plugin_seed_default(app: AppHandle, state: State<'_, VaultState>, entries: Vec<Value>) -> Result<(), String> {
-    let mut pstate = read_plugin_state(&app)?;
     let disk_ids = disk_plugin_ids(&app, &state);
-    seed_default_rows(&mut pstate, &entries, &disk_ids, true);
-    write_plugin_state(&app, &pstate)
+    update_plugin_state(&app, |pstate| {
+        let changed = seed_default_rows(pstate, &entries, &disk_ids, true);
+        Ok(((), changed))
+    })
 }
 
 /// 安装插件（来源 = GitHub `owner/repo` 或完整 git 地址；新装默认停用，由用户确认后启用；
@@ -1117,24 +1193,25 @@ pub fn plugin_install_local(
     fs::create_dir_all(&base).map_err(|e| e.to_string())?;
     create_plugin_link(&src_dir, &target)?;
 
-    // 记录行来源（本地来源为实时引用，无更新）。
-    let mut pstate = read_plugin_state(&app)?;
-    pstate.sources.insert(
-        id.clone(),
-        PluginSource {
-            dir_name: folder.clone(),
-            kind: PluginSourceKind::Local,
-            scope: scope.clone(),
-            ..Default::default()
-        },
-    );
-    if let Err(e) = write_plugin_state(&app, &pstate) {
+    // 记录行来源（本地来源为实时引用，无更新）；启用状态按 id 保持——同一次锁内读改写取回。
+    let enabled = update_plugin_state(&app, |pstate| {
+        pstate.sources.insert(
+            id.clone(),
+            PluginSource {
+                dir_name: folder.clone(),
+                kind: PluginSourceKind::Local,
+                scope: scope.clone(),
+                ..Default::default()
+            },
+        );
+        Ok((pstate.enabled.get(&id).copied().unwrap_or(false), true))
+    })
+    .map_err(|e| {
         // 状态写失败回滚链接，防「有链接无来源记录」残留。
         let _ = fs::remove_dir(&target);
-        return Err(e);
-    }
+        e
+    })?;
 
-    let enabled = pstate.enabled.get(&id).copied().unwrap_or(false);
     Ok(plugin_info_from(&target, &manifest, &scope, PluginSourceKind::Local, enabled))
 }
 
@@ -1187,7 +1264,7 @@ pub fn plugin_uninstall(
     if !plugin_id_valid(&id) {
         return Err("插件不存在".to_string());
     }
-    let mut pstate = read_plugin_state(&app)?;
+    let pstate = read_plugin_state(&app)?;
     // 守恒守护：卸载「当前启用且为最后一个」的主题插件被拒（与停用同一规则）
     let target_enabled = pstate.enabled.get(&id).copied().unwrap_or(false);
     guard_last_enabled_theme_plugin(&app, &state, &pstate, &id, target_enabled)?;
@@ -1222,9 +1299,13 @@ pub fn plugin_uninstall(
             fs::remove_dir_all(&dir).map_err(|e| format!("卸载失败：{e}"))?;
         }
     }
-    pstate.enabled.remove(&id);
-    pstate.sources.remove(&id);
-    write_plugin_state(&app, &pstate)
+    // 状态清理由锁内读改写完成：目录删除在锁外（可能慢），写入必须以最新状态为基础，
+    // 否则会覆盖并发命令刚写入的 enabled/sources
+    update_plugin_state(&app, |fresh| {
+        fresh.enabled.remove(&id);
+        fresh.sources.remove(&id);
+        Ok(((), true))
+    })
 }
 
 /// 启用/停用插件（前端先确认权限再启用；vault 级插件卸载/禁用不清仓库内文件）。
@@ -1239,17 +1320,20 @@ pub fn plugin_set_enabled(
     if !plugin_id_valid(&id) {
         return Err("插件不存在".to_string());
     }
-    let mut pstate = read_plugin_state(&app)?;
+    // 守卫读只作决策输入（锁外）；开关变更走锁内读改写，避免覆盖并发命令刚写入的 enabled/sources
+    let pstate = read_plugin_state(&app)?;
     if !enabled {
         let target_enabled = pstate.enabled.get(&id).copied().unwrap_or(false);
         guard_last_enabled_theme_plugin(&app, &state, &pstate, &id, target_enabled)?;
     }
-    if enabled {
-        pstate.enabled.insert(id.clone(), true);
-    } else {
-        pstate.enabled.remove(&id);
-    }
-    write_plugin_state(&app, &pstate)
+    update_plugin_state(&app, |fresh| {
+        if enabled {
+            fresh.enabled.insert(id.clone(), true);
+        } else {
+            fresh.enabled.remove(&id);
+        }
+        Ok(((), true))
+    })
 }
 
 /// 基础主题条目 id（浅/深基底；其他插件不得占用，防冒名——与前端 utils/pluginTheme.ts 的
@@ -1639,6 +1723,94 @@ mod tests {
         for bad in ["--upload-pack=sh -c id", "-c", "ext::sh -c id", "file:///tmp/x", "example.git", ""] {
             assert!(validate_git_url(bad).is_err(), "{bad} 应拒绝");
         }
+    }
+
+    #[test]
+    fn git_url_rejects_embedded_credentials() {
+        // 内嵌凭据拒绝：git clone 会把 URL 原样写进 .git/config（位于仓库内，随 Git/云盘流出）
+        for bad in [
+            "https://user:token@github.com/com/example.git",
+            "http://user:pass@192.168.1.10/git/example.git",
+            "ssh://user:pass@host/example.git",
+            "git://user:pass@host/example.git",
+            // 无冒号但同为凭据：`user@` 形式下用户名即令牌（GitHub PAT 的官方 clone 写法）
+            "https://ghp_xxx@github.com/com/example.git",
+            "https://user@github.com/com/example.git",
+            "https://user%3Apass@github.com/com/example.git",
+            "git://user@host/example.git",
+        ] {
+            assert!(validate_git_url(bad).is_err(), "{bad} 应拒绝");
+        }
+        // 无凭据（仅端口/路径含冒号，或 ssh 的免密 user@）仍放行
+        for ok in [
+            "https://github.com/com/example.git",
+            "https://host:8443/com/example.git",
+            "ssh://git@host:22/com/example.git",
+            "ssh://git@host/example.git",
+            "git@github.com:com/example.git",
+            "https://host/a:b/example.git",
+        ] {
+            assert!(validate_git_url(ok).is_ok(), "{ok} 应放行");
+        }
+    }
+
+    #[test]
+    fn safe_plugin_path_rejects_git_dir() {
+        let root = Path::new("/tmp/plugin-root");
+        assert!(safe_plugin_path(root, ".git/config").is_err());
+        assert!(safe_plugin_path(root, ".GIT/config").is_err());
+        assert!(safe_plugin_path(root, "sub/.git/config").is_err());
+        assert!(safe_plugin_path(root, "sub/.git").is_err());
+        // Win32 归一化剥掉段尾的点/空格，这些在 Windows 上等价于 `.git`
+        assert!(safe_plugin_path(root, ".git./config").is_err());
+        assert!(safe_plugin_path(root, ".git /config").is_err());
+        assert!(safe_plugin_path(root, "sub/.git./config").is_err());
+        // 仅同名子串不算命中
+        assert!(safe_plugin_path(root, ".gitignore").is_ok());
+        assert!(safe_plugin_path(root, "sub/.github/workflows/ci.yml").is_ok());
+    }
+
+    /// 「安装中同时切换另一插件启停」的丢更新回归：并发读改写不得丢任一方的字段
+    /// （丢 `sources` 会让更新/按名卸载持续失效，丢 `enabled` 会让开关静默回退）。
+    #[test]
+    fn concurrent_state_updates_keep_all_fields() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("atelyx-plugin-state-{nanos}"));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("plugin-state.json");
+
+        std::thread::scope(|scope| {
+            for i in 0..8 {
+                let path = path.clone();
+                scope.spawn(move || {
+                    mutate_plugin_state_at(&path, |s| {
+                        s.enabled.insert(format!("com.test.e{i}"), true);
+                        Ok(((), true))
+                    })
+                    .unwrap();
+                });
+            }
+            for i in 0..8 {
+                let path = path.clone();
+                scope.spawn(move || {
+                    mutate_plugin_state_at(&path, |s| {
+                        s.sources.insert(format!("com.test.s{i}"), PluginSource::default());
+                        Ok(((), true))
+                    })
+                    .unwrap();
+                });
+            }
+        });
+
+        let final_state = read_plugin_state_at(&path).unwrap();
+        for i in 0..8 {
+            assert!(final_state.enabled.contains_key(&format!("com.test.e{i}")), "丢了 enabled[{i}]");
+            assert!(final_state.sources.contains_key(&format!("com.test.s{i}")), "丢了 sources[{i}]");
+        }
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

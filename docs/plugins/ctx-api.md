@@ -25,7 +25,7 @@ ctx.effect(() => {
 | `ctx.http` | `request({ url, method?, headers?, body? })` | 通用 HTTP 请求（敏感：网络出口；Rust 代理绕 CORS，20s 超时 + 1MB 响应上限，内网/回环地址拒绝） |
 | `ctx.notification` | `notify({ message, title?, level? })` / `dismiss(id)` | 应用内通知（右下角堆叠；`level` = info/success/warning/error，自动消失） |
 | `ctx.app` | `version()` / `platform()` / `openPage(pageId)` | 宿主信息与页面打开 |
-| `ctx.shell` | `exec(opts, handlers?)` | 执行外部程序（敏感：可执行任意命令；传 handlers 流式） |
+| `ctx.shell` | `exec(opts, handlers?)` | 执行外部程序（敏感：宿主只登记了 shell 解释器，`opts.command` 传 `sh`（Unix，配 `-c`）或 `cmd.exe`（Windows，配 `/C`）；args 全开，等价任意命令执行。传 handlers 流式） |
 | `ctx.vault` | `listFiles/readFile/readFileWindow/listDir/glob/grep/writeFile/editFile/appendFile/renameFile/moveFile/deleteFile/deleteDir/createFolder` | 仓库文件读写（写方法语义与 AI 文件工具一致；失败返回 `{ ok, summary }` 不抛断） |
 | `ctx.dialog` | `pickDirectory()` / `pickFile(filters?)` / `saveFile(opts?)` | 系统对话框（用户取消返回 null） |
 | `ctx.clipboard` | `readText()` / `writeText(text)` / `copyImage(dataUrl)` | 剪贴板读写（敏感） |
@@ -114,8 +114,10 @@ ctx.slots.registerCommand({ id: "say", label: "打招呼", run: () => console.lo
 ctx.slots.registerThemeSetting({ key: "accent", label: "强调色", component: AccentComp });
 ```
 
-- `registerSetting` 注册的是**独立设置页**：并入设置页左侧栏（`plugin:<pluginId>:<key>` 形式 tab，
+- `registerSetting` 注册的是**独立设置页**：并入设置页左侧栏（tab 以你传入的 `key` 命名，
   整页由你的组件渲染）；想在既有设置页里追加一节，用下面的设置区块槽。
+  `key` 在插件内唯一；设置页左侧栏的 tab 以 `pluginId` + `key` 共同标识，不同插件的同名 `key`
+  互不冲突（仍建议带自身命名空间前缀，便于用户辨认）。
 - 命令出现在管理页「运行命令」；`shortcut`（如 `"mod+k"`）由宿主统一监听绑定。
 - `registerThemeSetting` 绑定激活的主题插件条目的设置值字典（`{ colorMode, accentColor, ... }`），
   `onChange(key, value)` 写回（value = `undefined` 删除键恢复默认）。

@@ -31,7 +31,6 @@ import {
   getPluginCommands,
   getPluginEdges,
   getPluginNodes,
-  getPluginSetting,
   getPluginSettings,
   getPluginThemeSettings,
   getPluginTableView,
@@ -146,7 +145,6 @@ interface PluginStoreState {
   pluginToolMetas(): AgentToolMeta[];
   /** 插件设置项注册（设置页 tab 合并）。 */
   pluginSettings(): PluginSettingRegistration[];
-  pluginSetting(key: string): PluginSettingRegistration | undefined;
   /** 某主题插件的设置项注册（主题页设置区渲染用；经 store 中转，组件不直连 services）。 */
   pluginThemeSettings(pluginId: string): ThemeSettingRegistration[];
   /** 插件画布节点组件表（nodeTypes 合并用：type → component，single 槽胜出）。 */
@@ -564,7 +562,6 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
     pluginToolMetas: () => pluginToolMetasSvc(),
 
     pluginSettings: () => getPluginSettings(),
-    pluginSetting: (key) => getPluginSetting(key),
     pluginThemeSettings: (pluginId) => getPluginThemeSettings(pluginId),
     pluginNodeTypes: () => {
       const out: Record<string, ComponentType> = {};

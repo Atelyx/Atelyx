@@ -1,0 +1,14 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "shell-exec-unix",
+  "description": "插件进程执行（Unix）：仅登记 `sh`，但 args 全开 —— 插件传 `sh -c <命令>` 即等价执行任意命令。scope 的 `name` 必须等于插件传给 Command.create 的程序名，`cmd` 才是真正启动的程序。",
+  "platforms": ["linux", "macOS"],
+  "windows": ["*"],
+  "permissions": [
+    "shell:allow-kill",
+    {
+      "identifier": "shell:allow-spawn",
+      "allow": [{ "name": "sh", "cmd": "/bin/sh", "args": true }]
+    }
+  ]
+}

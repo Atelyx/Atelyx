@@ -15,7 +15,7 @@ import {
   X,
   type LucideIcon,
 } from "lucide-react";
-import { useState } from "react";
+import { useState, type ComponentType } from "react";
 import { ProviderSettingsSection } from "@/components/settings/ProviderSettingsSection";
 import { AgentSettingsSection } from "@/components/settings/AgentSettingsSection";
 import { AboutSection } from "@/components/settings/AboutSection";
@@ -58,18 +58,20 @@ const TAB_ITEMS: { key: Tab; label: string; icon: LucideIcon }[] = [
   { key: "about", label: "关于", icon: Info },
 ];
 
-/** 插件设置项承载（按全局 key 渲染注册的组件；插件停用/卸载后显示占位）。 */
-function PluginSettingMount({ settingKey }: { settingKey: string }) {
-  usePluginStore((s) => s.uiRevision);
-  const reg = usePluginStore.getState().pluginSetting(settingKey);
-  if (!reg) {
+/** 插件设置项 tab 标识：`pluginId` + `key`（不同插件同名 key 互不冲突，与内置 tab 也不可能相撞）。 */
+function pluginTabId(t: { pluginId: string; key: string }): string {
+  return `${t.pluginId}:${t.key}`;
+}
+
+/** 插件设置项承载（直接渲染注册的组件；插件停用/卸载后显示占位）。 */
+function PluginSettingMount({ component: Comp }: { component: ComponentType | undefined }) {
+  if (!Comp) {
     return (
       <div className="p-5 text-sm" style={{ color: "var(--text-muted)" }}>
         该插件设置已停用或卸载
       </div>
     );
   }
-  const Comp = reg.component;
   return (
     <ErrorBoundary>
       <Comp />
@@ -78,18 +80,21 @@ function PluginSettingMount({ settingKey }: { settingKey: string }) {
 }
 
 /** 设置页壳：左侧可折叠标签栏 + tab 条件分派 + 全局弹窗；各 tab 草稿与状态自持（直接订阅 store）。
- * 插件设置项以 `plugin:<pluginId>:<key>` 形式的 tab 并入左侧栏（注册变化经 uiRevision 刷新）。 */
+ * 插件设置项的 tab 以注册时的键并入左侧栏（注册变化经 uiRevision 刷新）。 */
 export function SettingsModal({ onClose, initialTab }: { onClose: () => void; initialTab?: string }) {
   // 设置内容：应用级（通用 / 多人协作 / 关于）+ 仓库级（模型供应商 / 模型服务 / Agent / 联网搜索 / 文件与路径 / 编辑器）+ 插件设置项
   usePluginStore((s) => s.uiRevision);
   const pluginTabs = usePluginStore.getState().pluginSettings();
   const [tab, setTab] = useState<string>(() => {
     const builtinKeys: string[] = TAB_ITEMS.map((t) => t.key);
-    if (initialTab && (builtinKeys.includes(initialTab) || pluginTabs.some((t) => t.key === initialTab))) {
+    if (initialTab && (builtinKeys.includes(initialTab) || pluginTabs.some((t) => pluginTabId(t) === initialTab))) {
       return initialTab;
     }
     return "general";
   });
+  /** 当前 tab 对应的插件设置项注册（非内置 tab 即插件 tab；注册已撤销时显示占位）。 */
+  const pluginTab = pluginTabs.find((t) => pluginTabId(t) === tab);
+  const isPluginTab = !TAB_ITEMS.some((t) => t.key === tab);
   /** 左侧 tab 栏折叠状态（折叠后仅显示图标）。 */
   const [tabsCollapsed, setTabsCollapsed] = useState(false);
 
@@ -134,7 +139,7 @@ export function SettingsModal({ onClose, initialTab }: { onClose: () => void; in
             <div className="flex-1 overflow-auto p-2 space-y-1">
               {[
                 ...TAB_ITEMS,
-                ...pluginTabs.map((t) => ({ key: t.key, label: t.label, icon: Puzzle as LucideIcon })),
+                ...pluginTabs.map((t) => ({ key: pluginTabId(t), label: t.label, icon: Puzzle as LucideIcon })),
               ].map((item) => (
                 <button
                   key={item.key}
@@ -201,9 +206,9 @@ export function SettingsModal({ onClose, initialTab }: { onClose: () => void; in
             ) : tab === "plugins" ? (
               /* ===== 插件面板：已装插件管理 + 市场浏览 ===== */
               <PluginsSettingsTab />
-            ) : pluginTabs.some((t) => t.key === tab) ? (
+            ) : isPluginTab ? (
               /* ===== 插件设置项（主线程平面注册） ===== */
-              <PluginSettingMount settingKey={tab} />
+              <PluginSettingMount component={pluginTab?.component} />
             ) : (
               /* ===== 编辑器面板（仓库级） ===== */
               <EditorSettingsTab />

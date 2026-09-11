@@ -156,3 +156,133 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
+#[cfg(test)]
+mod capability_contract_tests {
+    /// 校验 `tauri.conf.json > plugins > shell > open` 的放行范围。
+    ///
+    /// tauri-plugin-shell 会把该正则**整体包上 `^...$`** 后逐项 `is_match`，
+    /// 因此配置里的正则本身不得再写 `^`/`$`，且分支必须自带「前缀 + 余下部分」结构。
+    /// 放行：http(s)/file/mailto/tel/xmpp 与本地绝对路径（盘符、UNC、Unix `/`，含裸根）；
+    /// 拒绝：相对路径、未知 scheme 与命令行风格的 `-`/`--` 开头串。
+    #[test]
+    fn open_scope_allows_local_paths_and_known_schemes() {
+        let cfg: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).expect("tauri.conf.json 解析失败");
+        let validator = cfg["plugins"]["shell"]["open"]
+            .as_str()
+            .expect("plugins.shell.open 未配置");
+        let regex = regex::Regex::new(&format!("^{validator}$")).expect("shell.open 正则非法");
+
+        for allowed in [
+            "https://example.com/x",
+            "http://127.0.0.1:8080/a?b=c",
+            "file:///home/u/a.md",
+            "mailto:a@b.com",
+            "tel:+8613800138000",
+            "xmpp:a@b.com",
+            "E:\\仓库",
+            "E:/仓库",
+            "C:\\Users\\me\\Desktop",
+            "\\\\server\\share\\x",
+            "/home/u/仓库/笔记.md",
+            // 裸根：在文件管理器中打开盘符/文件系统根
+            "/",
+            "C:\\",
+            "E:/",
+            "\\\\",
+        ] {
+            assert!(regex.is_match(allowed), "应放行：{allowed}");
+        }
+
+        for denied in [
+            "",
+            "-i",
+            "--enable-debugging",
+            "relative/x.md",
+            "javascript:alert(1)",
+            "data:text/html,x",
+            "vbscript:msgbox(1)",
+            "ftp://x.com/a",
+        ] {
+            assert!(!regex.is_match(denied), "应拒绝：{denied}");
+        }
+    }
+
+    /// 插件进程执行必须落在带 scope 的能力上：裸权限点只放行命令本身，而 tauri-plugin-shell
+    /// 还要按 scope 的 `name` 匹配程序（无通配符），缺 scope 时 `ctx.shell.exec` 仍会被拒。
+    /// 这里断言两个平台能力文件各自只在自己的平台上生效、登记了一个 `args` 全开的解释器，
+    /// 且名字与前端会传的程序名一致。
+    #[test]
+    fn capabilities_scope_shell_execution() {
+        for (file, src, expected_name, expected_cmd, expected_platforms) in [
+            (
+                "shell-exec-unix.json",
+                include_str!("../capabilities/shell-exec-unix.json"),
+                "sh",
+                "/bin/sh",
+                ["linux", "macOS"].as_slice(),
+            ),
+            (
+                "shell-exec-windows.json",
+                include_str!("../capabilities/shell-exec-windows.json"),
+                "cmd.exe",
+                "cmd.exe",
+                ["windows"].as_slice(),
+            ),
+        ] {
+            let cfg: serde_json::Value = serde_json::from_str(src).expect("能力文件解析失败");
+            let platforms: Vec<&str> = cfg["platforms"]
+                .as_array()
+                .expect("platforms 缺失")
+                .iter()
+                .filter_map(|v| v.as_str())
+                .collect();
+            for want in expected_platforms {
+                assert!(platforms.contains(want), "{file} 的 platforms 缺 {want}");
+            }
+            let perms = cfg["permissions"].as_array().expect("permissions 缺失");
+            assert!(
+                perms.iter().any(|p| p.as_str() == Some("shell:allow-kill")),
+                "{file} 缺少 shell:allow-kill（取消进程需要）"
+            );
+            let spawn_scope = perms
+                .iter()
+                .find(|p| p["identifier"] == "shell:allow-spawn")
+                .and_then(|p| p["allow"].as_array())
+                .unwrap_or_else(|| panic!("{file} 未给 shell:allow-spawn 声明 scope"));
+            let entry = spawn_scope
+                .iter()
+                .find(|e| e["name"] == expected_name)
+                .unwrap_or_else(|| panic!("{file} 未登记程序名 {expected_name}"));
+            assert_eq!(entry["cmd"], expected_cmd, "{file} 的 cmd 不符");
+            // args 全开才能传 `-c`/`/C <命令>`；缺省是拒绝任何参数
+            assert_eq!(entry["args"], serde_json::Value::Bool(true), "{file} 的 args 未全开");
+        }
+    }
+
+    /// `shell:default` 只含 `allow-open`（本地路径靠 `plugins.shell.open` 的 scope 放行），
+    /// 进程执行不得退回裸权限点（字符串与带 scope 的对象两种写法都算）。
+    #[test]
+    fn default_capability_keeps_shell_open_only() {
+        let cfg: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/default.json")).expect("capabilities 解析失败");
+        let perms: Vec<String> = cfg["permissions"]
+            .as_array()
+            .expect("permissions 缺失")
+            .iter()
+            .filter_map(|v| {
+                v.as_str()
+                    .map(str::to_string)
+                    .or_else(|| v["identifier"].as_str().map(str::to_string))
+            })
+            .collect();
+        assert!(perms.iter().any(|p| p == "shell:default"), "缺少 shell:default（open 依赖）");
+        for must_not in ["shell:allow-execute", "shell:allow-spawn", "shell:allow-kill"] {
+            assert!(
+                !perms.iter().any(|p| p == must_not),
+                "{must_not} 不该出现在默认能力集：进程执行必须带 scope（见 shell-exec-*.json）"
+            );
+        }
+    }
+}

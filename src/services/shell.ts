@@ -1,7 +1,14 @@
 /**
  * 系统 shell service：在文件管理器中打开路径 / 默认程序打开 URL / 执行外部进程（流式）。
- * 进程执行经 tauri-plugin-shell 的 Command API（权限 shell:default 含 allow-execute），
- * 供插件 `ctx.shell` 能力与宿主工具使用。
+ *
+ * - `open`（openInExplorer / openUrl）：放行范围由 `tauri.conf.json > plugins > shell > open`
+ *   的正则决定（该正则由 tauri-plugin-shell 整体包上 `^...$` 后逐项匹配），
+ *   不匹配即 `Err(Validation)`；本地路径依赖该配置放行。
+ * - 进程执行：经 tauri-plugin-shell 的 Command API，要过两道关——权限点
+ *   （`shell:allow-spawn`，capability 里授予）与**程序 scope**（capability 里逐个登记
+ *   `name`/`cmd`，无通配符）。因此本模块传的 `program` 必须等于 scope 登记的 `name`：
+ *   `capabilities/shell-exec-unix.json` 登记 `sh`、`shell-exec-windows.json` 登记 `cmd.exe`，
+ *   两者 `args` 全开（插件传 `-c`/`/C <命令>` 即等价任意命令执行）。传未登记的程序会被拒绝。
  */
 import { open as shellOpen, Command } from "@tauri-apps/plugin-shell";
 

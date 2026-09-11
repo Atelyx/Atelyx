@@ -97,9 +97,6 @@ export function onPluginUiChange(listener: () => void): () => void {
 export function getPluginSettings(): PluginSettingRegistration[] {
   return [...settings.values()];
 }
-export function getPluginSetting(key: string): PluginSettingRegistration | undefined {
-  return settings.get(key);
-}
 export function getPluginAppPages(): PluginAppPageRegistration[] {
   return [...appPages.values()];
 }
