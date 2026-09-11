@@ -15,7 +15,6 @@
     "typecheck": "tsc --noEmit",
     "build:vendor": "tsc -b vendor/tsconfig.json",
     "lint": "eslint .",
-    "format": "prettier --write .",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml && cargo test --manifest-path collab-relay/Cargo.toml",

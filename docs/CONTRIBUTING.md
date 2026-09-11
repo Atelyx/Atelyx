@@ -22,7 +22,6 @@ pnpm run tauri:dev    # 启动开发（自动开 Vite + Tauri 窗口）
 
 ```bash
 pnpm run check       # 完整门禁（含 cargo test，提交前必须通过；需本机已装 Rust 工具链）
-pnpm run format      # Prettier 格式化
 pnpm run tauri:build # 打包
 ```
 

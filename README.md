@@ -146,7 +146,6 @@ pnpm run tauri:build # 打包
 ```bash
 pnpm run dev        # Vite 开发服务器
 pnpm run check      # 完整门禁：vendor 构建 + 类型检查 + ESLint + 前端测试 + cargo test
-pnpm run format     # Prettier 格式化
 pnpm run tauri:dev  # 启动开发（自动开 Vite + Tauri 窗口）
 pnpm run tauri:build # 打包
 ```
