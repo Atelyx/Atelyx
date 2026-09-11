@@ -20,7 +20,6 @@ import {
   deleteNote,
   listVaultTree,
   readAttachmentDataUrl as readAttachmentDataUrlSvc,
-  readCanvasVault,
   remapSideloads,
   remapSideloadsByDir,
   renameAttachment as renameAttachmentSvc,
@@ -100,15 +99,6 @@ export function lastFolderRenameTarget(file: string): string | null {
 function relExt(path: string): string {
   const i = path.lastIndexOf(".");
   return i > path.lastIndexOf("/") ? path.slice(i + 1).toLowerCase() : "";
-}
-
-/** 画布路径是否已从磁盘消失（读失败 = 不存在）。renameCanvas/deleteCanvas 吞错后的落盘事实验证用——
- * canvases 列表不含隐藏/排除目录内的画布，不能作为验证依据。 */
-async function canvasPathGone(file: string): Promise<boolean> {
-  return readCanvasVault(file).then(
-    () => false,
-    () => true,
-  );
 }
 
 /** 画布列表行（rename/move/deleteCanvas 按 file 定位、title 供去重排除；列表未命中时用占位行兜底）。 */
@@ -644,21 +634,10 @@ export const useVaultStore = create<VaultFileState>((set, get) => ({
       if (ext === "md") actual = await get().renameNote(old, stripExt(name));
       else if (ext === "atb") actual = await get().renameTable(old, stripExt(name));
       else if (ext === "atlx") {
-        const row = canvasRowOf(old);
-        const actualTitle = await useAppStore.getState().renameCanvas(row, stripExt(name));
-        const expected = siblingPath(old, `${sanitizeFilename(actualTitle)}.atlx`);
-        // renameCanvas 失败时静默返回期望标题：以「expected 处磁盘 id/title 已更新」事实验证落盘
-        // （canvases 列表不含隐藏/排除目录内的画布，不能作验证依据）
-        const disk = await readCanvasVault(expected);
-        // id 未知（列表外画布）时辅以「旧路径已消失」判定，防 expected 撞上同 title 的他者画布误报成功；
-        // case-only 改名物理路径不变，不要求旧路径消失
-        const caseOnly = expected.toLowerCase() === old.toLowerCase();
-        const idMismatch = row.id !== "" && disk.id !== row.id;
-        const staleOld = row.id === "" && !caseOnly && !(await canvasPathGone(old));
-        if (disk.title !== actualTitle || idMismatch || staleOld) {
-          throw new Error(`画布重命名未生效：${old}`);
-        }
-        actual = expected;
+        // renameCanvas 失败会抛错，成功即已落盘（Rust 侧先写新文件再删旧文件）；前端预测名与 Rust
+        // 落盘名的一致性由两侧 sanitizeFilename 的对齐用例锁定，不在运行时盘读复核（会多两次 IPC）
+        const actualTitle = await useAppStore.getState().renameCanvas(canvasRowOf(old), stripExt(name));
+        actual = siblingPath(old, `${sanitizeFilename(actualTitle)}.atlx`);
       } else {
         // 附件类：renameAttachment 内部还会 dedupe，这里预计算同名防「实际名 ≠ 汇报名」
         const existing = siblingFileNames(parentDir(old)).filter((n) => siblingPath(old, n) !== old);
@@ -709,11 +688,8 @@ export const useVaultStore = create<VaultFileState>((set, get) => ({
       } else if (ext === "atb") {
         await get().deleteTable(p);
       } else if (ext === "atlx") {
-        // deleteCanvas 失败时静默不抛错：以「路径已从磁盘消失」事实验证
+        // deleteCanvas 失败会抛错，成功即已删盘（Rust 侧文件不存在时本就报错）
         await useAppStore.getState().deleteCanvas(canvasRowOf(p));
-        if (!(await canvasPathGone(p))) {
-          throw new Error(`画布删除未生效：${p}`);
-        }
       } else {
         await get().deleteAttachment(p);
       }

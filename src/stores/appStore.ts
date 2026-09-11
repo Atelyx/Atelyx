@@ -41,6 +41,7 @@ import { applyStartupWindow as applyStartupWindowSvc, applyWorkspaceWindow as ap
 import { checkAndAutoUpdate as checkAndAutoUpdateSvc, checkForUpdate as checkForUpdateSvc, installUpdate as installUpdateSvc } from "@/services/updater";
 import { emitPluginEvent } from "@/services/cordis/events";
 import { usePluginStore } from "@/stores/pluginStore";
+import { useNotificationStore } from "@/stores/notificationStore";
 import type { CanvasFileRow, RecentVault } from "@/types";
 
 /** 手动检查更新状态（设置页「关于」tab 用）。 */
@@ -143,9 +144,9 @@ interface AppState {
 
   /** 调系统目录选择器，选中路径（用户取消返回 null）。 */
   pickVaultDirectory: () => Promise<string | null>;
-  /** 在系统文件管理器中打开路径。 */
+  /** 在系统文件管理器中打开路径（失败弹通知，不向上抛）。 */
   openInExplorer: (path: string) => Promise<void>;
-  /** 用系统默认程序打开外部 URL（webview 不导航）。 */
+  /** 用系统默认程序打开外部 URL（webview 不导航；失败弹通知，不向上抛）。 */
   openUrl: (url: string) => Promise<void>;
   /** 读系统剪贴板纯文本（无文本返回空串）。 */
   readClipboardText: () => Promise<string>;
@@ -186,9 +187,12 @@ interface AppState {
    * （防写回重建已删文件），只清内存态与保存定时器。
    */
   closeTableSilent: () => void;
-  /** 新建画布到 dir（相对仓库根，空 = 根目录），返回 { id, file, title }（title 可能被同名去重）。 */
-  createCanvas: (title?: string, dir?: string) => Promise<{ id: string | null; file: string | null; title: string }>;
-  /** 重命名画布（同目录改文件名，按当前 file），返回实际标题。 */
+  // 画布写操作组（新建/重命名/移动/复制/删除）的失败边界 = 落盘那一步：只有落盘失败才抛错（调用方据此提示）。
+  // 其后的同步步骤（自写抑制/侧文件随迁/事件分发/列表刷新）不影响成败——订阅方异常已在事件总线逐个隔离、
+  // 两条列表加载各自吞错；不得把它们纳入失败判定，否则文件已改却被报成「操作失败」，重试会重复建或撞旧路径。
+  /** 新建画布到 dir（相对仓库根，空 = 根目录），返回 { id, file, title }（title 可能被同名去重）；失败抛错。 */
+  createCanvas: (title?: string, dir?: string) => Promise<{ id: string; file: string; title: string }>;
+  /** 重命名画布（同目录改文件名，按当前 file），返回实际标题；失败抛错。 */
   renameCanvas: (row: CanvasFileRow, title: string) => Promise<string>;
   /** 移动画布文件到目标文件夹（保持文件名，目标同名自动加序号；同目录 no-op），返回实际 file。 */
   moveCanvas: (row: CanvasFileRow, targetDir: string) => Promise<string>;
@@ -198,7 +202,7 @@ interface AppState {
    * 副本不自动打开。
    */
   duplicateCanvas: (row: CanvasFileRow) => Promise<string>;
-  /** 删除画布（按 file）。 */
+  /** 删除画布（按 file）；失败抛错。 */
   deleteCanvas: (row: CanvasFileRow) => Promise<void>;
   /**
    * 删除文件夹联动：目录内画布全部消失——当前打开的画布在目录内则复位画布运行时状态
@@ -220,6 +224,15 @@ interface AppState {
 async function refreshCanvasAndTree(): Promise<void> {
   await useAppStore.getState().loadList();
   await useVaultStore.getState().loadFiles();
+}
+
+/** 系统「在文件管理器中打开」只接受绝对路径：仓库相对路径（@chip、`file:` 引用、图片/路径链接）
+ *  按当前仓库根补全，否则会被 shell 的 scope 校验拒绝。已是绝对路径（Unix `/`、盘符、UNC、`file://`）原样返回。 */
+function explorerAbsolutePath(path: string, vaultRoot: string | null): string {
+  const isAbsolute =
+    path.startsWith("/") || path.startsWith("\\\\") || path.startsWith("file://") || /^[A-Za-z]:[\\/]/.test(path);
+  if (isAbsolute || !vaultRoot) return path;
+  return `${vaultRoot.replace(/[\\/]+$/, "")}/${path}`;
 }
 
 /** 同目录现有画布行（画布 CRUD 防重名 siblings 计算，五处共用）：parentDir 命中 dir；
@@ -452,7 +465,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   backToVaultSelect: () => {
     // 回启动页：AI 会话/日历日程/笔记挂起输入/表格改动落盘防 debounce 丢改动（root 未切换，写旧仓库
     // 安全；冲突未决/已删文件条目由 flushPendingNotes 内部保留）。经注册表分发（fire-and-forget）。
-    void notifyVaultExit().catch((e) => console.error("退出仓库领域清理失败", e));
+    // vaultId 在置空前同步捕获随 ctx 传入：分发是 async 循环，钩子被调用时 store 里的 vaultId 已为 null。
+    const exitingVaultId = get().vaultId;
+    void notifyVaultExit({ vaultId: exitingVaultId }).catch((e) =>
+      console.error("退出仓库领域清理失败", e),
+    );
     useSettingsStore.getState().clearVaultConfig();
     // 清设置弹窗（防止下次进入工作区残留重开）
     set({ settingsModal: null });
@@ -515,8 +532,23 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   pickVaultDirectory: () => pickDirectorySvc(),
-  openInExplorer: (path) => openInExplorerSvc(path),
-  openUrl: (url) => openUrlSvc(url),
+  openInExplorer: async (path) => {
+    try {
+      await openInExplorerSvc(explorerAbsolutePath(path, get().vaultRoot));
+    } catch (e) {
+      // 系统打开失败必须可见：shell 的 scope 校验/权限拒绝只抛错，吞掉等于点击无反应
+      console.error("在文件管理器中打开失败", e);
+      useNotificationStore.getState().notify({ level: "error", message: "无法在文件管理器中打开该路径" });
+    }
+  },
+  openUrl: async (url) => {
+    try {
+      await openUrlSvc(url);
+    } catch (e) {
+      console.error("打开链接失败", e);
+      useNotificationStore.getState().notify({ level: "error", message: "无法用系统默认程序打开该链接" });
+    }
+  },
   readClipboardText: () => readClipboardTextSvc(),
   writeClipboardText: (text) => writeClipboardTextSvc(text),
   getAppVersion: () => getVersionSvc(),
@@ -594,15 +626,17 @@ export const useAppStore = create<AppState>((set, get) => ({
     // 同名自动加序号（标题即文件名，保证同目录不重名），返回实际标题供 UI 提醒
     const siblings = canvasesInDir(dir).map((c) => c.title);
     const actual = dedupeFilename(title, siblings);
+    let created: { id: string; file: string };
     try {
-      const { id, file } = await createCanvasVault(actual, dir);
-      markSelfSave(file);
-      await refreshCanvasAndTree();
-      return { id, file, title: actual };
+      created = await createCanvasVault(actual, dir);
     } catch (e) {
+      // 不吞错误：调用方据此提示失败（与其余画布写操作同一失败契约）
       console.error("新建画布失败", e);
-      return { id: null, file: null, title: actual };
+      throw e;
     }
+    markSelfSave(created.file);
+    await refreshCanvasAndTree();
+    return { id: created.id, file: created.file, title: actual };
   },
   renameCanvas: async (row, title) => {
     // 同名自动加序号（排除自身，同目录），返回实际标题供 UI 提醒
@@ -612,21 +646,23 @@ export const useAppStore = create<AppState>((set, get) => ({
     const actual = dedupeFilename(title, siblings);
     try {
       await renameCanvasVault(row.file, actual);
-      // 重命名后文件名变了：先算新路径再标记自写（旧路径删除 + 新路径创建事件一并抑制），
-      // 当前画布磁盘 .atlx 已被 Rust 改（title + 同目录改文件名），同步乐观锁基准防下次保存误冲突
-      const newFile = siblingPath(row.file, `${sanitizeFilename(actual)}.atlx`);
-      markSelfSave([row.file, newFile]);
-      // 侧文件先确保在新编码名下，再随重命名迁移（同笔记/表格路径）
-      await migrateHistoryFile("canvas", row.file).catch(() => {});
-      // 历史侧文件随迁（画布 kind 目录）；失败静默降级，不阻塞重命名主流程
-      await remapSideloads(row.file, newFile).catch(() => {});
-      // 画布运行时引用同步（乐观锁基准 + 打开路径）经仓库事件分发
-      emitVaultEvent({ kind: "canvas:renamed", oldPath: row.file, newPath: newFile });
-      useUiStateStore.getState().renameLastFile("canvas", row.file, newFile);
-      await refreshCanvasAndTree();
     } catch (e) {
+      // 不吞错误：调用方据此提示失败，磁盘未变时不得让 UI 以为改名成功
       console.error("重命名失败", e);
+      throw e;
     }
+    const newFile = siblingPath(row.file, `${sanitizeFilename(actual)}.atlx`);
+    // 重命名后文件名变了：先算新路径再标记自写（旧路径删除 + 新路径创建事件一并抑制），
+    // 当前画布磁盘 .atlx 已被 Rust 改（title + 同目录改文件名），同步乐观锁基准防下次保存误冲突
+    markSelfSave([row.file, newFile]);
+    // 侧文件先确保在新编码名下，再随重命名迁移（同笔记/表格路径）
+    await migrateHistoryFile("canvas", row.file).catch(() => {});
+    // 历史侧文件随迁（画布 kind 目录）；失败静默降级，不阻塞重命名主流程
+    await remapSideloads(row.file, newFile).catch(() => {});
+    // 画布运行时引用同步（乐观锁基准 + 打开路径）经仓库事件分发
+    emitVaultEvent({ kind: "canvas:renamed", oldPath: row.file, newPath: newFile });
+    useUiStateStore.getState().renameLastFile("canvas", row.file, newFile);
+    await refreshCanvasAndTree();
     return actual;
   },
   moveCanvas: async (row, targetDir) => {
@@ -638,64 +674,67 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (newFile === row.file) return row.file;
     try {
       await moveCanvasVault(row.file, newFile);
-      markSelfSave([row.file, newFile]);
-      // 侧文件先确保在新编码名下，再随移动迁移（同 renameCanvas）
-      await migrateHistoryFile("canvas", row.file).catch(() => {});
-      // 历史侧文件随迁（画布 kind 目录）；失败静默降级，不阻塞移动主流程
-      await remapSideloads(row.file, newFile).catch(() => {});
-      // 画布运行时引用同步（乐观锁基准 + 打开路径）经仓库事件分发
-      emitVaultEvent({ kind: "canvas:moved", oldPath: row.file, newPath: newFile });
-      useUiStateStore.getState().renameLastFile("canvas", row.file, newFile);
-      await refreshCanvasAndTree();
-      return newFile;
     } catch (e) {
       // 不吞错误：调用方（FileExplorerPanel.handleMoveFile）据此提示「移动文件失败」
       console.error("移动画布失败", e);
       throw e;
     }
+    markSelfSave([row.file, newFile]);
+    // 侧文件先确保在新编码名下，再随移动迁移（同 renameCanvas）
+    await migrateHistoryFile("canvas", row.file).catch(() => {});
+    // 历史侧文件随迁（画布 kind 目录）；失败静默降级，不阻塞移动主流程
+    await remapSideloads(row.file, newFile).catch(() => {});
+    // 画布运行时引用同步（乐观锁基准 + 打开路径）经仓库事件分发
+    emitVaultEvent({ kind: "canvas:moved", oldPath: row.file, newPath: newFile });
+    useUiStateStore.getState().renameLastFile("canvas", row.file, newFile);
+    await refreshCanvasAndTree();
+    return newFile;
   },
   duplicateCanvas: async (row) => {
     // 同名自动加序号（同目录），返回实际标题供 UI 提醒
     const siblings = canvasesInDir(parentDir(row.file)).map((c) => c.title);
     const actual = dedupeFilename(row.title, siblings);
+    let target: string;
     try {
       // 读磁盘原文 → 重写 id/title → 写新文件（write 的落盘路径由 title 决定，与 siblingPath 一致）
       const canvas = await readCanvasVault(row.file);
       canvas.id = crypto.randomUUID();
       canvas.title = actual;
-      const target = siblingPath(row.file, `${sanitizeFilename(actual)}.atlx`);
+      target = siblingPath(row.file, `${sanitizeFilename(actual)}.atlx`);
       await writeCanvasVault(canvas, target);
-      markSelfSave(target);
-      await refreshCanvasAndTree();
-      return actual;
     } catch (e) {
       console.error("复制画布失败", e);
       throw e;
     }
+    markSelfSave(target);
+    await refreshCanvasAndTree();
+    return actual;
   },
   deleteCanvas: async (row) => {
     try {
       await deleteCanvasVault(row.file);
-      markSelfSave(row.file);
-      const { currentCanvasId, currentCanvasFile } = get();
-      // 删除的是当前画布（id 或路径命中——AI 工具等调用方可能只有 file 无真实 id）：清空 canvasStore
-      // （含未落盘 saveTimer / 进行中的流），否则残留 timer 会重写已删文件、watcher 事件匹配旧 id 产生误导 reload
-      const isCurrent = row.id === currentCanvasId || row.file === currentCanvasFile;
-      // 当前画布复位运行时（防残留 saveTimer 重写已删文件）：经仓库事件分发（handler 按当前文件匹配，
-      // 须在下方置空 currentCanvasFile 前发出）
-      emitVaultEvent({ kind: "canvas:deleted", path: row.file });
-      // 删除的是「上次打开」的画布：清空 uiState 记录（否则下次进入仓库尝试恢复已删文件）
-      if (useUiStateStore.getState().lastCanvasFile === row.file) {
-        useUiStateStore.getState().closeFile("canvas");
-      }
-      set({
-        currentCanvasId: isCurrent ? null : currentCanvasId,
-        currentCanvasFile: isCurrent ? null : currentCanvasFile,
-      });
-      await refreshCanvasAndTree();
     } catch (e) {
+      // 不吞错误：调用方据此提示失败（与其余画布写操作同一失败契约）
       console.error("删除失败", e);
+      throw e;
     }
+    markSelfSave(row.file);
+    const { currentCanvasId, currentCanvasFile } = get();
+    // 删除的是当前画布（id 或路径命中——AI 工具等调用方可能只有 file 无真实 id）：清空 canvasStore
+    // （含未落盘 saveTimer / 进行中的流），否则残留 timer 会重写已删文件、watcher 事件匹配旧 id 产生误导 reload
+    const isCurrent = row.id === currentCanvasId || row.file === currentCanvasFile;
+    // 当前画布复位运行时（防残留 saveTimer 重写已删文件）：经仓库事件分发（handler 按当前文件匹配，
+    // 须在下方置空 currentCanvasFile 前发出）
+    emitVaultEvent({ kind: "canvas:deleted", path: row.file });
+    // 删除的是「上次打开」的画布：清空 uiState 记录（否则下次进入仓库尝试恢复已删文件）
+    if (useUiStateStore.getState().lastCanvasFile === row.file) {
+      useUiStateStore.getState().closeFile("canvas");
+    }
+    set({
+      currentCanvasId: isCurrent ? null : currentCanvasId,
+      currentCanvasFile: isCurrent ? null : currentCanvasFile,
+    });
+    await refreshCanvasAndTree();
   },
   closeCanvasIfInDir: (dir) => {
     const { canvases, currentCanvasId } = get();

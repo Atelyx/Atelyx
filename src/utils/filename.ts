@@ -16,8 +16,10 @@ const WINDOWS_RESERVED_RE = /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/;
 export function sanitizeFilename(title: string): string {
   const cleaned = title.replace(/[\/\\:*?"<>|]/g, "_").trim();
   const stem = cleaned.split(".")[0] ?? "";
-  // 保留名判定两侧统一 ASCII 大写（不带 i 标志防 Unicode 折叠误判）
-  if (WINDOWS_RESERVED_RE.test(stem.toUpperCase())) return `_${cleaned}`;
+  // 只折叠 ASCII 字母，与 Rust `to_ascii_uppercase` 对齐：用 `toUpperCase()` 会做 Unicode 大小写，
+  // 且可能变长（`ß`→`SS`），使两侧保留名判定不一致
+  const asciiUpper = stem.replace(/[a-z]/g, (c) => c.toUpperCase());
+  if (WINDOWS_RESERVED_RE.test(asciiUpper)) return `_${cleaned}`;
   if (/[.]$/.test(cleaned)) return `${cleaned}_`;
   return cleaned;
 }

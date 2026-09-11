@@ -13,7 +13,8 @@
  *   与既有「泵内 fire-and-forget」语义一致）；
  * - `emitVaultEventAsync`：逐个 await handler（文件动作路径用；领域反应须在调用方继续前完成，
  *   如画布乐观锁基准同步不得晚于后续自动保存）。
- * handler 抛错向外传播（调用方自行 try/catch，失败不静默）。
+ * 两种口径的订阅方异常都逐个隔离：`emitVaultEvent` 记日志后继续（订阅方的缺陷不得改变文件动作
+ * 本身的成败，也不得饿死同级订阅方）；`emitVaultEventAsync` 隔离投递后汇总抛错，由调用方决定上报。
  * 纯数据容器 + 纯函数，无 store/service 依赖，可直测（模式同 utils/collabHost.ts）。
  */
 
@@ -71,14 +72,20 @@ export function onVaultEvent<K extends VaultEvent["kind"]>(
   return subscribeVaultEvent({ kind, handler: handler as VaultEventHandler });
 }
 
-/** 广播一个 vault 事件（同步按注册序投递；handler 抛错向外传播）。
- *  同步口径不等待领域反应：返回 Promise 的 handler 由调用方自担收尾，此处只兜住未捕获拒绝。 */
+/** 广播一个 vault 事件（同步按注册序投递；同步信号泵用，调用方不等待领域反应）。
+ *  逐个订阅方隔离：同步抛错与被拒 Promise 都只记日志，既不阻断其余订阅方，也不外传给调用方——
+ *  订阅方的缺陷不得改变文件动作本身的成败（如画布改名/删除只由落盘决定）。
+ *  快照订阅者列表：投递期间的注册/撤销不改变本次投递对象（同 `emitVaultEventAsync`）。 */
 export function emitVaultEvent(event: VaultEvent): void {
   const set = handlers.get(event.kind);
   if (!set) return;
-  for (const h of set) {
-    const ret = h(event);
-    if (ret instanceof Promise) void ret.catch((e) => console.error("仓库事件订阅方失败", e));
+  for (const h of [...set]) {
+    try {
+      const ret = h(event);
+      if (ret instanceof Promise) void ret.catch((e) => console.error("仓库事件订阅方失败", e));
+    } catch (e) {
+      console.error("仓库事件订阅方失败", e);
+    }
   }
 }
 

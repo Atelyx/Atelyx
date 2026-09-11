@@ -40,7 +40,7 @@ export function LinkNode({ data, width, height, selected }: NodeProps) {
 
   const handleOpen = () => {
     if (!url || !isOpenableUrl(url)) return;
-    void openUrl(url).catch((e) => console.error("打开链接失败", e));
+    void openUrl(url);
   };
 
   return (

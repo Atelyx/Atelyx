@@ -43,9 +43,7 @@ function ResultRow({
           onClick={(e) => {
             e.preventDefault();
             e.stopPropagation();
-            void openUrl(item.url).catch((err) =>
-              console.error("打开链接失败", err),
-            );
+            void openUrl(item.url);
           }}
           className="flex-1 min-w-0 truncate hover:opacity-80 inline-flex items-center gap-1"
           style={{ color: "var(--accent)" }}

@@ -30,8 +30,8 @@ describe("领域生命周期注册表", () => {
       onVaultEntered: async () => {
         order.push("a.entered");
       },
-      onVaultExit: async () => {
-        order.push("a.exit");
+      onVaultExit: async (ctx) => {
+        order.push(`a.exit:${ctx.vaultId}`);
       },
       releaseView: async (v) => {
         order.push(`a.release:${v}`);
@@ -65,8 +65,8 @@ describe("领域生命周期注册表", () => {
     expect(order).toEqual(["a.entered"]);
 
     order.length = 0;
-    await notifyVaultExit();
-    expect(order).toEqual(["a.exit"]);
+    await notifyVaultExit({ vaultId: "v1" });
+    expect(order).toEqual(["a.exit:v1"]);
 
     order.length = 0;
     await releaseView("canvas");
@@ -140,7 +140,7 @@ describe("领域生命周期注册表", () => {
     expect(hasDomainLifecycle("any")).toBe(false);
     notifyVaultLeaving();
     await notifyVaultEntered({ vaultId: "v" });
-    await notifyVaultExit();
+    await notifyVaultExit({ vaultId: null });
     await releaseView("table");
     notifyViewGained("canvas");
     notifyViewRemoved("note");
@@ -172,6 +172,20 @@ describe("领域生命周期注册表", () => {
     expect(got).toEqual(["vault-7"]);
     r();
     unregisterDomainLifecycle("entered");
+  });
+
+  it("回启动页清理透传切换前的 vaultId（钩子不回读 store）", async () => {
+    const got: unknown[] = [];
+    const r = registerDomainLifecycle({
+      id: "exit",
+      onVaultExit: async (ctx) => {
+        got.push(ctx.vaultId);
+      },
+    });
+    await notifyVaultExit({ vaultId: "vault-9" });
+    expect(got).toEqual(["vault-9"]);
+    r();
+    unregisterDomainLifecycle("exit");
   });
 
   it("releaseView 只调用实现了 releaseView 的钩子（各自判断 view）", async () => {

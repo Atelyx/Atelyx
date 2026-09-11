@@ -260,8 +260,9 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
         // 进仓后读盘加载 AI 会话（force：真实切换强制重读，防幂等守卫跳过旧会话）
         await useChatPanelStore.getState().load(ctx.vaultId, true);
       },
-      onVaultExit: async () => {
-        await useChatPanelStore.getState().flush(useAppStore.getState().vaultId);
+      onVaultExit: async (ctx) => {
+        // 必须用 ctx.vaultId：分发晚于 store 置空，回读 store 会拿到 null 而被仓库守卫丢弃
+        await useChatPanelStore.getState().flush(ctx.vaultId);
       },
       onViewGained: (view) => {
         if (view !== "aichat") return;

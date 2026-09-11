@@ -193,9 +193,7 @@ export function useCommitEditing({
         } else if (e.kind === "creating") {
           if (e.type === "canvas") {
             const { id, file, title } = await createCanvas(v, e.dir);
-            if (file && id) {
-              onOpenCanvasFile({ id, file, title, updatedAt: 0 });
-            }
+            onOpenCanvasFile({ id, file, title, updatedAt: 0 });
             if (title !== v) onNotice(`「${v}」已存在，已创建为「${title}」`);
           } else if (e.type === "note") {
             const file = await createNote(v, e.dir);

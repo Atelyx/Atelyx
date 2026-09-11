@@ -1,6 +1,7 @@
 /**
- * sanitizeFilename 与 Rust `sanitize_filename` 的对齐锁定：
- * 保留名/尾点规则曾缺失，导致前端预测的落盘名与实际写盘名漂移（画布改名验证/保存目标指错文件）。
+ * sanitizeFilename 与 Rust `sanitize_filename` 的对齐锁定（两侧同一张用例表：
+ * `src-tauri/src/vault.rs` 的 `sanitize_filename_tests`，改一侧而另一侧未同步即失败）。
+ * 保留名/尾点规则曾缺失，导致前端预测的落盘名与实际写盘名漂移（画布改名的保存目标指错文件）。
  */
 import { describe, expect, it } from "vitest";
 import { sanitizeFilename } from "./filename";

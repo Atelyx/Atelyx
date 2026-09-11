@@ -1,6 +1,6 @@
 /**
  * 仓库文件事件发射器测试：
- * 订阅/撤销/按 kind 分发/同步保序/未注册静默丢弃/handler 抛错传播。
+ * 订阅/撤销/按 kind 分发/同步保序/未注册静默丢弃/订阅方异常逐个隔离。
  */
 import { describe, it, expect } from "vitest";
 import { emitVaultEvent, onVaultEvent } from "./vaultEvents";
@@ -55,15 +55,23 @@ describe("仓库文件事件发射器", () => {
     off2();
   });
 
-  it("handler 抛错向外传播（不吞）", () => {
+  it("订阅方同步抛错被隔离：后续订阅方仍收到，且不外传给调用方", () => {
     const after: string[] = [];
     const off1 = onVaultEvent("canvas:changed", () => {
       throw new Error("handler 失败");
     });
     const off2 = onVaultEvent("canvas:changed", () => after.push("after"));
-    expect(() => emitVaultEvent({ kind: "canvas:changed", path: "c.atlx" })).toThrow("handler 失败");
-    expect(after).toEqual([]);
+    expect(() => emitVaultEvent({ kind: "canvas:changed", path: "c.atlx" })).not.toThrow();
+    expect(after).toEqual(["after"]);
     off1();
     off2();
+  });
+
+  it("订阅方返回被拒 Promise 也不外传给调用方", () => {
+    const off = onVaultEvent("table:changed", async () => {
+      throw new Error("async handler 失败");
+    });
+    expect(() => emitVaultEvent({ kind: "table:changed", path: "t.atb" })).not.toThrow();
+    off();
   });
 });
