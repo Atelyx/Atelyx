@@ -24,7 +24,7 @@ Atelyx 是插件化平台：插件 = 一个 git 仓库（市场侧以 GitHub 为
 | --- | --- |
 | `ctx.<service>` | 类型化服务：平台服务 `state`/`app`/`shell`/`vault`/`dialog`/`clipboard`/`window`/`ai`/`collab` + 内核领域服务 `history`/`layout`/`uiState` + 插件提供的 `canvas`/`table`/`note`/`chat`（见 [ctx API](ctx-api.md)） |
 | `ctx.events` | 领域事件总线：`ctx.events.on("canvas:changed", ...)` 订阅（`table:changed`/`vault:changed` 等，见 [ctx API](ctx-api.md)） |
-| `ctx.slots` | 注册面：`registerView`/`registerTableView`/`registerNode`/`registerEdge`/`registerUi`/`registerMenu`/`registerSetting`/`registerAppPage`/`registerCommand`/`registerThemeSetting`（见 [ctx API](ctx-api.md)） |
+| `ctx.slots` | 注册面：`registerView`/`registerTableView`/`registerNode`/`registerEdge`/`registerUi`/`registerMenu`/`registerSetting`/`registerAppPage`/`registerCommand`/`registerThemeSetting`；`list()` 返回宿主可贡献的槽位声明表（见 [ctx API](ctx-api.md)） |
 | `ctx.ai` | AI 会话与工具：`ctx.ai.chat(...)` 直连模型；`ctx.ai.registerTool(...)` 贡献模型可调用的工具 |
 | `ctx.effect` | 注册副作用（订阅/接线等），插件停用/卸载时自动撤销——**所有注册都应经它包裹** |
 

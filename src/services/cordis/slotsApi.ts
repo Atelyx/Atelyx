@@ -6,10 +6,14 @@
  * contextToPluginId 归属（追原型链，见 loader.pluginIdOf）。
  * 视图/节点/边/表格视图为 slots 槽贡献（single 胜出，priority 定胜负）；设置项/应用页/
  * 命令/主题设置项为 ui.ts 键值平面（同 key last-wins）。
+ * 槽位注册须匹配 constants/slots.ts 的声明表（未声明、基数或载荷字段不符即抛错，插件行标 failed）；
+ * `list()` 暴露该声明表供插件发现可贡献的位置。
  */
 import { symbols } from "@atelyx/cordis";
 import type { ComponentType, ReactNode } from "react";
 import type { Context } from "@atelyx/cordis";
+import { SLOT_DECLARATIONS } from "@/constants/slots";
+import type { SlotDeclaration } from "@/constants/slots";
 import { registerViewSlot, registerNodeSlot, registerEdgeSlot, registerTableViewSlot, registerUiSlot, registerSlotContrib } from "./slots";
 import { pluginIdOf } from "./loader";
 import {
@@ -87,10 +91,10 @@ export interface RegisterThemeSettingOptions {
   component: ComponentType<ThemeSettingComponentProps>;
 }
 
-/** 通用 UI 区域注册载荷（任意具名槽位：toolbar/<region>、panelhead/<region>、contextmenu/<target>、
- *  settings/<block>、statusbar/<region> 等；list 槽多贡献有序，priority 降序）。 */
+/** 通用 UI 区域注册载荷（已声明的具名槽位，如 toolbar/note/right、settings/files；list 槽多贡献有序，
+ *  priority 降序）。右键菜单项见 RegisterMenuOptions。 */
 export interface RegisterUiOptions {
-  /** 槽名（如 "toolbar/note/right"）。 */
+  /** 槽名（须在 constants/slots 的声明表内，如 "toolbar/note/right"）。 */
   slot: string;
   /** 渲染组件（无 props 契约）。 */
   component: ComponentType;
@@ -100,7 +104,8 @@ export interface RegisterUiOptions {
 
 /** 右键菜单项注册载荷（contextmenu/<target> 槽；list 多贡献，priority 降序）。 */
 export interface RegisterMenuOptions {
-  /** 菜单目标（如 "canvas"、"node"、"file"、"folder"、"panel-tab"）。 */
+  /** 菜单目标。须在 constants/slots 的声明表内（当前：`canvas`）——注册未声明的目标即失败并提示
+   *  可用目标。 */
   target: string;
   /** 菜单项文案。 */
   label: string;
@@ -120,10 +125,12 @@ export interface SlotsApi {
   registerAppPage(opts: RegisterAppPageOptions): () => void;
   registerCommand(opts: RegisterCommandOptions): () => void;
   registerThemeSetting(opts: RegisterThemeSettingOptions): () => void;
-  /** 向任意具名 UI 槽位贡献一个组件（list 槽多贡献有序）。 */
+  /** 向已声明的具名 UI 槽位贡献一个组件（list 槽多贡献有序）。 */
   registerUi(opts: RegisterUiOptions): () => void;
   /** 向右键菜单贡献一个菜单项（label + 回调；list 槽多贡献有序）。 */
   registerMenu(opts: RegisterMenuOptions): () => void;
+  /** 宿主可贡献的槽位清单（声明表：key / 基数 / 载荷字段 / 用途）——插件据此发现能贡献的位置。 */
+  list(): readonly SlotDeclaration[];
 }
 
 interface SlotsApiInstance extends SlotsApi {
@@ -207,6 +214,9 @@ export function createSlotsApi(): SlotsApi {
       const ctx = this.ctx;
       const pluginId = pluginIdOfCtx(ctx);
       return ctx.effect(() => registerPluginThemeSetting(pluginId, opts.key, opts.label, opts.component));
+    },
+    list(): readonly SlotDeclaration[] {
+      return SLOT_DECLARATIONS;
     },
   };
   Object.defineProperty(api, symbols.tracker, { value: { property: "ctx" } });

@@ -1,14 +1,16 @@
 /**
  * slots 运行时注册表：具名槽的贡献收集与解析（纯代数见 utils/cordis/slots）。
  *
- * 槽命名约定（渲染/扩展位置常量）：view/<kind>、node/<type>、edge/<type>、tableview/<kind>、
- * titlebar/<region>、toolbar/<region>、panelhead/<region>、contextmenu/<target>、
- * settings/<block>、statusbar/<region>、command/<id>。
+ * 可注册的槽位以 constants/slots.ts 的声明表为唯一清单：固定具名槽（titlebar/toolbar/
+ * panelhead/statusbar/settings）与右键菜单目标（contextmenu/<target>）未声明即注册失败并附近似槽名
+ * 提示；开放 kind 槽（view/node/edge/tableview）按前缀放行。
  * 随应用分发的视图/节点/边 = 对应默认组合成员挂载时注册的 single 槽贡献；注册经 ctx.effect 随 fiber 撤销
  * （disposePluginSlots 仅供测试/兜底，正常卸载走 effect 清理）。
  */
 import type { ComponentType, ReactNode } from "react";
 import { VIEW_LABELS } from "@/constants/views";
+import { findSlotDeclaration, slotPayloadShape, suggestSlotNames } from "@/constants/slots";
+import type { SlotDeclaration } from "@/constants/slots";
 import type { SlotCardinality, SlotContribution } from "@/utils/cordis/slots";
 import { pickSlotWinner, sortSlotList } from "@/utils/cordis/slots";
 
@@ -103,6 +105,40 @@ export interface SlotRegisterOptions {
   id?: string;
 }
 
+/** 槽位声明校验：未声明即抛错（附近似槽名提示），基数与载荷不符即抛错。
+ *  抛错随插件 apply 传播 → 挂载器标记该行 failed + 可读原因（不静默丢失）。 */
+function assertSlotDeclared(slot: string, cardinality: SlotCardinality, payload: unknown): void {
+  const decl = findSlotDeclaration(slot);
+  if (!decl) {
+    const hints = suggestSlotNames(slot);
+    const hint = hints.length > 0 ? `；是否想注册：${hints.join("、")}` : "（宿主未渲染该位置）";
+    throw new Error(`未声明的槽位「${slot}」${hint}`);
+  }
+  if (decl.cardinality !== cardinality) {
+    throw new Error(`槽位「${slot}」的基数是 ${decl.cardinality}，收到 ${cardinality}`);
+  }
+  assertSlotPayload(slot, decl, payload);
+}
+
+/** 载荷字段契约校验：缺必需字段 / 带未知字段即抛错（治「字段名拼错静默渲染空白」）。 */
+function assertSlotPayload(slot: string, decl: SlotDeclaration, payload: unknown): void {
+  if (typeof payload !== "object" || payload === null) {
+    throw new Error(`槽位「${slot}」的载荷须为对象（应为 ${slotPayloadShape(decl)}）`);
+  }
+  const record = payload as Record<string, unknown>;
+  // 缺字段只看自有属性（原型链上的同名成员不算提供，否则 Object.prototype 成员名会被误判为已给）。
+  const hasOwn = (key: string): boolean => Object.prototype.hasOwnProperty.call(record, key);
+  const missing = decl.required.filter((key) => !hasOwn(key) || record[key] === undefined);
+  if (missing.length > 0) {
+    throw new Error(`槽位「${slot}」的载荷缺少字段：${missing.join("、")}（应为 ${slotPayloadShape(decl)}）`);
+  }
+  const allowed = new Set<string>([...decl.required, ...(decl.optional ?? [])]);
+  const unknown = Object.keys(record).filter((key) => !allowed.has(key));
+  if (unknown.length > 0) {
+    throw new Error(`槽位「${slot}」的载荷含未知字段：${unknown.join("、")}（应为 ${slotPayloadShape(decl)}）`);
+  }
+}
+
 /** 注册任意槽贡献；返回撤销函数。默认 id = `<pluginId>:<slot>`。
  *  single 槽同插件重复注册（同 slot）按「重复 id 拒绝」（语义歧义）；list 槽（可多贡献）
  *  同插件重复注册自动加序去重（`<pluginId>:<slot>:N`）。 */
@@ -113,6 +149,7 @@ export function registerSlotContrib(
   opts?: SlotRegisterOptions,
 ): () => void {
   const cardinality = opts?.cardinality ?? "single";
+  assertSlotDeclared(slot, cardinality, payload);
   const base = opts?.id ?? `${pluginId}:${slot}`;
   let id = base;
   // list 可多贡献：同插件同槽重复注册时 id 自动去重。
@@ -205,13 +242,14 @@ export function tableViewKinds(): string[] {
     .map((s) => s.slice(prefix.length));
 }
 
-/** UI 区域槽载荷（titlebar/toolbar/panelhead/contextmenu/settings/statusbar 等具名槽位）。 */
+/** UI 区域槽载荷（titlebar/toolbar/panelhead/settings/statusbar 等具名槽位）。 */
 export interface UiSlotPayload {
   /** 渲染组件（无 props 契约）。 */
   component: ComponentType;
 }
 
-/** UI 区域槽（titlebar/toolbar/panelhead/contextmenu/settings/statusbar 等）：默认 list（多贡献有序），可指定 single。 */
+/** UI 区域槽（titlebar/toolbar/panelhead/settings/statusbar 等）：默认 list（多贡献有序），可指定 single。
+ *  右键菜单项不走此 API（载荷不同），见 slotsApi 的 registerMenu。 */
 export function registerUiSlot(
   slot: string,
   pluginId: string,

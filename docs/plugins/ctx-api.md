@@ -122,7 +122,7 @@ ctx.slots.registerThemeSetting({ key: "accent", label: "强调色", component: A
 - `registerThemeSetting` 绑定激活的主题插件条目的设置值字典（`{ colorMode, accentColor, ... }`），
   `onChange(key, value)` 写回（value = `undefined` 删除键恢复默认）。
 
-### 任意 UI 槽位 `registerUi`
+### 具名 UI 槽位 `registerUi`
 
 ```ts
 // 工具条：单行内联控件
@@ -131,14 +131,36 @@ ctx.slots.registerUi({ slot: "toolbar/note/right", component: ToolbarBtn });
 ctx.slots.registerUi({ slot: "settings/files", component: AttachmentRulesBlock });
 ```
 
-- 向任意具名 UI 槽位贡献一个组件（`toolbar/<region>`、`panelhead/<region>`、`contextmenu/<target>`、
-  `settings/<tab>`、`statusbar/<region>` 等）；list 槽多贡献按 `priority` 降序渲染。
+- 向已声明的具名 UI 槽位（`ctx.slots.list()` 可查，如 `toolbar/note/right`、`settings/files`）贡献一个
+  组件；list 槽多贡献按 `priority` 降序渲染。右键菜单项不走本方法（载荷形状不同），见下节 `registerMenu`。
+- 槽位须先在宿主声明表登记：**固定具名槽未声明即注册失败**并给近似槽名提示，载荷须匹配声明的字段
+  契约（缺必需字段或带未知字段即失败）——失败即该插件行标 failed + 可读原因，不再静默丢失。
+- 开放 kind 槽按前缀放行、可自定 kind/type，但各有专用方法（本方法只传 `component`，用于上面的固定
+  具名槽）：`view`→`registerView`、`tableview`→`registerTableView`、`node`/`edge`→`registerNode`/
+  `registerEdge`、`contextmenu`→`registerMenu`。
+- `ctx.slots.list()` 返回声明表（key / 基数 / 载荷字段 / 用途），据此发现可贡献的位置。
 - 已接入的槽位：`toolbar/note/right`、`toolbar/table/right`、`toolbar/files`、`statusbar/canvas`、
   `panelhead/status`、`titlebar/right`，以及设置页区块
   `settings/general`、`settings/theme`、`settings/collab`、`settings/modelServices`、
   `settings/search`、`settings/files`、`settings/editor`（区块自行负责标题与卡片外观，
   可用 CSS 变量 `--bg-*`/`--border-*`/`--text-*`）。
 - 宿主侧 `SlotListMount`/`SlotMount`（`components/plugins/SlotHost.tsx`）读取并渲染对应槽位。
+
+### 右键菜单项 `registerMenu`
+
+```ts
+ctx.slots.registerMenu({
+  target: "canvas",          // 菜单目标（当前宿主渲染点：canvas）
+  label: "统计选中节点",
+  onClick: () => countSelected(),
+  priority: 10,              // 可选，list 槽按 priority 降序
+});
+```
+
+- 向指定菜单目标追加一项；`label` 与 `onClick` 必填。载荷形状与 `registerUi`（只传 `component`）不同，
+  两者不可混用。
+- 菜单目标须先在声明表登记（`contextmenu/<target>`）：注册未声明的目标即失败并提示可用目标。
+  当前宿主渲染点为 `canvas`，可用目标见 `ctx.slots.list()`。
 
 ## AI 工具：`ctx.ai.registerTool`
 

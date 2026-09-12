@@ -8,12 +8,13 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createKernel } from "./kernel";
 import { mountedPluginIds, mountPlugin, unmountPlugin } from "./loader";
-import { listSlot, registerSlotContrib, registeredSlots } from "./slots";
+import { listSlot, registerSlotContrib, registeredSlots, unregisterSlot } from "./slots";
 
 afterEach(() => {
-  // 槽注册表为模块级：测试内注册的贡献随 fiber 卸载撤销，此处仅兜底清空
+  // 槽注册表为模块级：测试内注册的贡献随 fiber 卸载撤销，此处仅兜底按 id 清空。
+  // （不能靠「重注册取撤销函数」兜底：新建贡献的撤销只删新建那条，原贡献仍在；single 槽还会因重复 id 抛错。）
   for (const slot of registeredSlots()) {
-    for (const contrib of listSlot(slot)) registerSlotContrib(slot, contrib.pluginId, contrib.payload)();
+    for (const contrib of listSlot(slot)) unregisterSlot(contrib.id);
   }
 });
 
@@ -59,7 +60,7 @@ describe("内核独立启动（零插件）", () => {
       apply: (ctx) => {
         // 插件侧一律经 ctx.effect 注册（随 fiber 撤销的必要条件）
         ctx.effect(() =>
-          registerSlotContrib("panelhead/status", "com.test.stub", { marker: true }),
+          registerSlotContrib("panelhead/status", "com.test.stub", { component: () => null }, { cardinality: "list" }),
         );
       },
     });
