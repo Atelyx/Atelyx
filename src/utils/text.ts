@@ -60,6 +60,31 @@ export function mentionTextOf(node: FlowNode): string {
   return prefix(md.name ?? md.mime) || "文件";
 }
 
+/**
+ * @标签 原位插入的纯文本变换（对话节点与 AI 对话面板输入框共用同一语义）：
+ * 把 `[insertAt, end)` 区间（= `@` 到光标间的过滤词）替换为「前导分隔空格 + 标签 + 尾随空格」，
+ * 返回新文本与「尾随空格之后」的光标位置。
+ *
+ * 插入位置只由传入的 `prev` 决定，调用方须在 `setInput(prev => ...)` 内按 `prev` 计算——
+ * 用渲染期闭包的 `input` 会让同一 tick 内先后到达的两次插入互相覆盖（后写盖先写、@标签丢失）。
+ * 前导空格仅在前文非空且不以空白结尾时补，保证胶囊前后为空白区（胶囊背景外扩不遮相邻字符）。
+ */
+export function insertMentionTag(
+  prev: string,
+  insertAt: number,
+  end: number,
+  mentionText: string,
+): { text: string; caret: number } {
+  const from = Math.min(Math.max(insertAt, 0), prev.length);
+  const to = Math.min(Math.max(end, from), prev.length);
+  const before = prev.slice(0, from);
+  const sep = before && !/\s$/.test(before) ? " " : "";
+  return {
+    text: prev.slice(0, from) + sep + mentionText + " " + prev.slice(to),
+    caret: from + sep.length + mentionText.length + 1,
+  };
+}
+
 /** 输入框内 @提及 的命中片段（含精确位置）。 */
 export interface MentionHit {
   start: number;
