@@ -34,7 +34,7 @@ ctx.effect(() => {
 | `ctx.collab` | `peers()` / `setPresence(view, file)` | 协作在线状态 |
 | `ctx.canvas` | `snapshot()` / `addNode/updateNode/moveNode/deleteNode/addEdge/deleteEdge/selectNode` | 当前画布读写（由随应用分发的画布插件提供，停用即不可用） |
 | `ctx.table` | `snapshot()` / `updateCell/addRow/removeRow/selectRow/resolveImage` | 当前表格读写（由随应用分发的表格插件提供，停用即不可用） |
-| `ctx.note` | `currentFile()` / `open(file, title)` / `read(file?)` / `write(content)` / `save()` | 当前笔记读写（由随应用分发的笔记插件提供，停用即不可用） |
+| `ctx.note` | `currentFile()` / `open(file, title)` / `read(file?)` / `write(content)` / `save()` | 当前笔记读写（由随应用分发的笔记插件提供，停用即不可用）。写入 `.md` 时若该笔记正被编辑且有未落盘输入，宿主按「磁盘内容与本地正文不同」转冲突条由用户决策，不会静默覆盖任何一侧 |
 | `ctx.chat` | `sessions()` / `activeSession()` / `isStreaming()` / `openSession(id)` / `startSession()` / `sendMessage(content)` / `stop()` / `deleteSession(id)` | AI 会话管理（由随应用分发的 AI 对话插件提供，停用即不可用） |
 | `ctx.history` | `list(kind, file)` / `rollback(kind, file, seq)` / `repoHistory()` | 领域历史读 + 回滚（`kind` = note/canvas/table） |
 | `ctx.layout` | `activeLayoutId()` / `layouts()` / `addView(panelId, view)` / `op(op)` | 布局读 + 布局操作发布（`op` 与 Rust `LayoutOp` 逐字段对齐；布局权威在 Rust，改布局一律经 `layout_op` 命令） |

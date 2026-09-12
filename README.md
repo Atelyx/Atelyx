@@ -128,7 +128,7 @@ pnpm run tauri:build # 打包
 
 ```
 我的仓库/
-├── .atelyx/        仓库级配置（隐藏目录：config / agents / prompt-notes / 对话历史 / history；API key 不落盘）
+├── .atelyx/        仓库级配置（隐藏目录：config / agents / prompt-notes / 对话历史 / history / temp 未入库附件；API key 不落盘）
 ├── 项目A/
 │   ├── 画布.atlx   画布文件（一个画布一个 JSON）
 │   ├── 表格.atb    多维表格文件
