@@ -37,6 +37,14 @@ pub fn run() {
                 // 种子化初始 bounds：启动后未移动过时 on_window_event 不触发，拖拽解析读不到
                 layout::seed_window_bounds(app.handle(), "main");
             }
+            // app 作用域插件目录的超龄残留（崩溃遗留的 .install-*/.bak-* 等）后台清理：
+            // vault 作用域要等 open_vault 才知根路径（见 commands::vault::open_vault）
+            let sweep_app = app.handle().clone();
+            std::thread::spawn(move || {
+                if let Ok(dir) = sweep_app.path().app_data_dir() {
+                    commands::plugin::sweep_plugin_residues(&dir.join("plugins"));
+                }
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -60,7 +68,11 @@ pub fn run() {
             commands::vault::list_vault_dir,
             commands::vault::rename_note,
             commands::vault::read_vault_config,
-            commands::vault::write_vault_config,
+            commands::vault::vault_config_patch,
+            // 未入库附件（粘贴/拖入先落仓库内隐藏临时区，画布只存路径引用）
+            commands::temp_attachment::write_temp_attachment,
+            commands::temp_attachment::import_vault_attachment,
+            commands::temp_attachment::cleanup_canvas_temp_attachments,
             commands::vault::read_prompt_notes,
             commands::vault::write_prompt_notes,
             commands::vault::read_agents,

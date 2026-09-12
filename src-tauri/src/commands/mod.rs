@@ -8,6 +8,7 @@ pub mod keychain;
 pub mod plugin;
 pub mod search;
 pub mod table;
+pub mod temp_attachment;
 pub mod vault;
 pub mod web;
 pub mod windows;

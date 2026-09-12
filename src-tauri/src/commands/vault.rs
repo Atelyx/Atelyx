@@ -26,10 +26,11 @@ use crate::vault::{
     init_vault_dirs, list_canvas_files,
     list_vault_tree as list_vault_tree_impl, markdown_link_path, read_canvas_file,
     read_canvas_file_cached, read_file_bytes, read_note as read_note_file,
-    read_vault_config as read_vault_config_file, refresh_wiki_index,
-    rename_folder as rename_folder_impl, rename_note_file, rel_with_new_title,
+    read_vault_config_with_backup,
+    refresh_wiki_index, rename_folder as rename_folder_impl, rename_note_file, rel_with_new_title,
     resolve_link_target, rewrite_internal_links, safe_join, same_physical_file,
     sanitize_filename, walk_md_in, write_canvas_file, write_note as write_note_file, write_vault_config as write_vault_config_file,
+    patch_vault_config,
     aggregate_tag_counts, refresh_tag_index,
     list_chat_sessions_file,
     read_chat_session_meta_file, write_chat_session_meta_file, delete_chat_session_meta_file,
@@ -70,6 +71,17 @@ pub struct VaultInfo {
     pub name: String,
     /// 仓库稳定 ID（`.atelyx/config.json` 的 vaultId，首次打开生成、之后固定）。
     pub id: String,
+    /// 非空 = `config.json` 原文损坏、已按该文件名备份并按空配置继续（前端据此提示用户重新配置）
+    pub config_corrupt_backup: Option<String>,
+}
+
+/// `read_vault_config` 的返回：仓库配置 + 损坏备份文件名（`None` = 正常读取）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultConfigRead {
+    pub config: VaultConfig,
+    /// 非空 = `config.json` 原文损坏、已按该文件名备份并退回空配置（前端据此提示用户重新配置）
+    pub corrupt_backup: Option<String>,
 }
 
 /// 打开仓库：设当前仓库根 + 初始化目录结构 + 启动文件监听 + 返回仓库信息。
@@ -86,31 +98,113 @@ pub fn open_vault(
         return Err(format!("仓库路径不是文件夹：{}", path));
     }
     let root = dunce::canonicalize(&raw).map_err(|e| format!("仓库路径不可达：{} ({e})", path))?;
-    let (vault_id, exclude_folders) = activate_vault(&app, &state, &root)?;
-    // 反链索引后台预热：把唯一一次全量扫描（读全部 .md 提取引用）塞进「进入仓库」阶段，不阻塞打开；
-    // 失败静默——首次反链查询会懒构建兜底（预热与查询竞争时以先建为准，索引幂等可重建）。
-    // 锁 poison 在此同样容忍：后台预热非关键路径，查询侧会重建。
+    let (vault_id, exclude_folders, corrupt_backup) = activate_vault(&app, &state, &root)?;
+    // 反链/标签索引后台预热：把唯一一次全量扫描（读全部 .md 提取引用/标签）塞进「进入仓库」阶段，不阻塞打开；
+    // 失败静默——首次查询会懒构建兜底（索引幂等可重建）。锁 poison 在此同样容忍：后台预热非关键路径。
+    // 世代与 root 必须成对取得（`session_snapshot` 在同一把 session 锁内读三者）：快速连续切仓库时
+    // 若只裸读世代，可能拿到「后一次 open_vault」的世代配本次的 root，预热就会把旧仓库索引装进新会话。
+    let (snap_root, _, warm_generation) = state.session_snapshot()?;
+    if snap_root != root {
+        // 已被另一次 open_vault 接管：本轮不预热（索引由那次或首次查询懒构建）
+        return Ok(vault_info_from(root, vault_id, corrupt_backup));
+    }
     let warm_app = app.clone();
     let warm_root = root.clone();
-    let warm_exclude = exclude_folders;
+    let warm_exclude = exclude_folders.clone();
     std::thread::spawn(move || {
-        if let Some(st) = warm_app.try_state::<VaultState>() {
-            if let Ok(mut guard) = st.wiki.lock() {
-                if guard.is_none() {
-                    *guard = Some(WikiIndex::default());
-                    let _ = refresh_wiki_index(&warm_root, &warm_exclude, guard.as_mut().unwrap());
-                }
-            }
-            // 标签索引后台预热：与反链同策略（失败静默，查询侧懒构建兜底）
-            if let Ok(mut guard) = st.tags.lock() {
-                if guard.is_none() {
-                    *guard = Some(TagIndex::default());
-                    let _ = refresh_tag_index(&warm_root, &warm_exclude, guard.as_mut().unwrap());
+        let Some(st) = warm_app.try_state::<VaultState>() else {
+            return;
+        };
+        // vault 作用域插件目录的超龄残留（崩溃遗留的 .install-*/.bak-* 等）随预热线程顺带清理
+        crate::commands::plugin::sweep_plugin_residues(&warm_root.join(".atelyx/plugins"));
+        // 未入库附件临时区的兜底回收：清理「画布已不存在」的超龄目录
+        // （崩溃/强杀遗留，画布未走正常关闭路径；正常关闭由 cleanup_canvas_temp_attachments 按引用清单个清）
+        crate::commands::temp_attachment::sweep_orphan_temp_dirs(&warm_root);
+        warm_indexes(&st, &warm_root, &warm_exclude, warm_generation);
+    });
+    Ok(vault_info_from(root, vault_id, corrupt_backup))
+}
+
+/// 后台预热反链与标签索引：**先在锁外构建完整索引，再取锁安装**。
+/// 为什么不在锁内边扫描边填：扫描大仓库要数秒，查询侧（`scan_wiki_backlinks`/`scan_vault_tags`）
+/// 取的是同一把锁，持锁扫描会让「进仓后立刻点开笔记」同步阻塞到扫描结束。
+/// 取锁时若已被并发填充（查询侧懒构建/另一次预热），本轮的观测作废不安装——索引只是内存缓存，
+/// 磁盘为真相，丢弃一次预热无任何副作用。`generation` 由 `open_vault` 在起线程前捕获：
+/// 预热是后台任务，期间可能已切到别的仓库（同路径 + 同指纹的旧仓库条目会一直用错，见 `with_index`）。
+fn warm_indexes(state: &VaultState, root: &Path, exclude: &[String], generation: u64) {
+    let fresh = || state.generation.load(std::sync::atomic::Ordering::SeqCst) == generation;
+    let needs_wiki = state.wiki.lock().map(|g| g.is_none()).unwrap_or(false);
+    if needs_wiki {
+        let mut index = WikiIndex::default();
+        if refresh_wiki_index(root, exclude, &mut index).is_ok() {
+            if let Ok(mut guard) = state.wiki.lock() {
+                if guard.is_none() && fresh() {
+                    *guard = Some(index);
                 }
             }
         }
-    });
-    Ok(vault_info_from(root, vault_id))
+    }
+    let needs_tags = state.tags.lock().map(|g| g.is_none()).unwrap_or(false);
+    if needs_tags {
+        let mut index = TagIndex::default();
+        if refresh_tag_index(root, exclude, &mut index).is_ok() {
+            if let Ok(mut guard) = state.tags.lock() {
+                if guard.is_none() && fresh() {
+                    *guard = Some(index);
+                }
+            }
+        }
+    }
+}
+
+/// 取某索引并把刷新放在锁外：`std::mem::take` 移出索引 → 锁外刷指纹 → 放回。
+/// 取锁间隙其他请求看到 `None` 会各自重建/刷新，索引幂等故无副作用；代价是极小概率重复扫描一次，
+/// 换来的是「刷新期间不持锁」，查询不再互相排队。
+///
+/// `generation` 由调用方与 root 一起原子取得（`VaultState::session_snapshot`）：刷新（大仓库数秒）
+/// 期间可能已切换仓库，`set` 清空并递增世代后旧仓库的索引不得再装回来（同路径 + 同指纹的条目会
+/// 一直用错，直到文件被改动）。世代必须在取 root 的同一步拿到——晚一步就会出现「读完 root 才读世代」
+/// 的窗口，那期间切仓库同样会把旧仓库索引装进新会话。
+fn with_index<I: Default, O>(
+    lock: &std::sync::Mutex<Option<I>>,
+    state: &VaultState,
+    generation: u64,
+    refresh: impl FnOnce(&mut I) -> Result<(), String>,
+    f: impl FnOnce(&I) -> O,
+) -> Result<O, String> {
+    let mut index = {
+        let mut guard = lock.lock().map_err(|e| e.to_string())?;
+        guard.take().unwrap_or_default()
+    };
+    refresh(&mut index)?;
+    let out = f(&index);
+    let mut guard = lock.lock().map_err(|e| e.to_string())?;
+    if state.generation.load(std::sync::atomic::Ordering::SeqCst) == generation {
+        *guard = Some(index);
+    }
+    Ok(out)
+}
+
+/// 反链索引查询（刷新在锁外，见 `with_index`）。
+fn with_wiki_index<O>(
+    state: &VaultState,
+    root: &Path,
+    exclude: &[String],
+    generation: u64,
+    f: impl FnOnce(&WikiIndex) -> O,
+) -> Result<O, String> {
+    with_index(&state.wiki, state, generation, |index| refresh_wiki_index(root, exclude, index), f)
+}
+
+/// 标签索引查询（刷新在锁外，见 `with_index`）。
+fn with_tag_index<O>(
+    state: &VaultState,
+    root: &Path,
+    exclude: &[String],
+    generation: u64,
+    f: impl FnOnce(&TagIndex) -> O,
+) -> Result<O, String> {
+    with_index(&state.tags, state, generation, |index| refresh_tag_index(root, exclude, index), f)
 }
 
 /// 枚举当前仓库的画布列表（递归扫描全仓库 .atlx，按 updatedAt 倒序）。
@@ -342,14 +436,10 @@ pub fn scan_wiki_backlinks(
     note_file: String,
     state: State<'_, VaultState>,
 ) -> Result<Vec<BacklinkRow>, String> {
-    let root = state.root()?;
-    let exclude = state.exclude_folders()?;
-    let mut guard = state.wiki.lock().map_err(|e| e.to_string())?;
-    if guard.is_none() {
-        *guard = Some(WikiIndex::default());
-    }
-    refresh_wiki_index(&root, &exclude, guard.as_mut().unwrap())?;
-    Ok(query_wiki_backlinks(guard.as_ref().unwrap(), &note_name, &note_file))
+    let (root, exclude, generation) = state.session_snapshot()?;
+    with_wiki_index(&state, &root, &exclude, generation, |index| {
+        query_wiki_backlinks(index, &note_name, &note_file)
+    })
 }
 
 /// 全仓库标签词汇表（frontmatter `tags` + 正文内联 `#标签`；索引缓存 + 指纹增量刷新）。
@@ -357,14 +447,8 @@ pub fn scan_wiki_backlinks(
 /// 返回出现次数降序 + 名称升序、上限 1000；纯内存缓存，磁盘为真相（外部编辑自愈）。
 #[tauri::command]
 pub fn scan_vault_tags(state: State<'_, VaultState>) -> Result<Vec<TagRow>, String> {
-    let root = state.root()?;
-    let exclude = state.exclude_folders()?;
-    let mut guard = state.tags.lock().map_err(|e| e.to_string())?;
-    if guard.is_none() {
-        *guard = Some(TagIndex::default());
-    }
-    refresh_tag_index(&root, &exclude, guard.as_mut().unwrap())?;
-    Ok(aggregate_tag_counts(guard.as_ref().unwrap()))
+    let (root, exclude, generation) = state.session_snapshot()?;
+    with_tag_index(&state, &root, &exclude, generation, aggregate_tag_counts)
 }
 
 /// 重建内部链接的结果统计。
@@ -692,6 +776,14 @@ fn list_dir_entries(dir: &Path, max: usize) -> Result<ListDirResult, String> {
     Ok(ListDirResult { entries, total, capped })
 }
 
+/// 链接维护的副作用报告：本次被改写的 `.md` 相对路径清单。
+/// 前端据此作废这些笔记的正文缓存（它们的 watcher 回波落在自写抑制窗口内，拿不到变更事件）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkRewriteResult {
+    pub rewritten: Vec<String>,
+}
+
 /// 重命名 .md 笔记 + 扫描所有 .atlx 更新 text 节点 file 引用 + 扫描所有 .md 更新内部链接（链接维护）。
 /// 预扫描 → 改名 → 统一写回：任一写回失败时回滚重命名（避免「已改名但引用未更新、
 /// 重试报源文件不存在」的半完成态）。
@@ -701,7 +793,7 @@ pub fn rename_note(
     old_file: String,
     new_file: String,
     state: State<'_, VaultState>,
-) -> Result<(), String> {
+) -> Result<LinkRewriteResult, String> {
     let root = state.root()?;
     let exclude = state.exclude_folders()?;
     let pending = collect_ref_updates(&root, &old_file, &new_file)?;
@@ -736,7 +828,9 @@ pub fn rename_note(
         let _ = rename_note_file(&root, &new_file, &old_file);
         return Err(format!("更新笔记内部链接失败，重命名已回滚（请重试）：{e}"));
     }
-    Ok(())
+    Ok(LinkRewriteResult {
+        rewritten: pending_md.into_iter().map(|(rel, _)| rel).collect(),
+    })
 }
 
 /// 枚举仓库文件树（文件面板全仓库树；跳过隐藏/排除目录与 `.tmp`）。
@@ -825,7 +919,7 @@ pub fn rename_folder(
     old_dir: String,
     new_dir: String,
     state: State<'_, VaultState>,
-) -> Result<(), String> {
+) -> Result<LinkRewriteResult, String> {
     let root = state.root()?;
     let exclude = state.exclude_folders()?;
     rename_folder_impl(&root, &old_dir, &new_dir)?;
@@ -866,7 +960,9 @@ pub fn rename_folder(
         let _ = rename_folder_impl(&root, &new_dir, &old_dir);
         return Err(format!("更新笔记内部链接失败，重命名已回滚（请重试）：{e}"));
     }
-    Ok(())
+    Ok(LinkRewriteResult {
+        rewritten: pending_md.into_iter().map(|(rel, _)| rel).collect(),
+    })
 }
 
 /// 迁移单个文件的全部候选历史侧文件到新编码路径（笔记/表格/画布重命名/移动后调用）。
@@ -911,9 +1007,8 @@ pub fn rename_attachment(
     Ok(())
 }
 
-/// 读附件为 dataURL（`data:<mime>;base64,...`），供前端 MediaNode 显示图片。
-/// 仅图片扩展名（png/jpg/jpeg/webp/gif）支持；其他返回错误（前端走文本解析分支）。
-/// 读仓库内附件为 data URL（media 节点缩略图/预览用）。mime 按扩展名推断，失败降级 application/octet-stream。
+/// 读仓库内附件为 dataURL（`data:<mime>;base64,...`），供 media 节点缩略图/预览与未入库附件读回。
+/// 图片扩展名推具体 mime，其余按 `application/octet-stream`（调用方按内容自行消费为文本或二进制）。
 #[tauri::command]
 pub fn read_attachment_data_url(
     file: String,
@@ -921,7 +1016,7 @@ pub fn read_attachment_data_url(
 ) -> Result<String, String> {
     let root = state.root()?;
     let bytes = read_file_bytes(&root, &file)?;
-    let mime = mime_from_ext(&file).ok_or_else(|| format!("非图片附件，不支持 dataURL：{}", file))?;
+    let mime = mime_from_ext(&file).unwrap_or("application/octet-stream");
     let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
     Ok(format!("data:{};base64,{}", mime, b64))
 }
@@ -943,19 +1038,24 @@ pub(crate) fn mime_from_ext(file: &str) -> Option<&'static str> {
 
 /// 读仓库级配置（.atelyx/config.json，不存在返回空覆盖）。
 #[tauri::command]
-pub fn read_vault_config(state: State<'_, VaultState>) -> Result<VaultConfig, String> {
+pub fn read_vault_config(state: State<'_, VaultState>) -> Result<VaultConfigRead, String> {
     let root = state.root()?;
-    read_vault_config_file(&root)
+    let (config, corrupt_backup) = read_vault_config_with_backup(&root)?;
+    Ok(VaultConfigRead { config, corrupt_backup })
 }
 
-/// 写仓库级配置（原子写 .atelyx/config.json；类型层不含 api_key，防 key 落仓库）。
+/// 以字段级合并补丁写仓库级配置（`.atelyx/config.json`）：只影响补丁里出现的字段，
+/// 其余字段保留磁盘当前值（防撕裂窗口用陈旧内存副本整文件覆盖主窗口刚写入的配置）。
+/// 补丁值为 `null` = 删除该键；值为对象 = 与磁盘同名键递归合并；数组/标量 = 整体替换。
+/// 合并结果经 `VaultConfig` 往返，未知字段（旧版本/手工添加）会被丢弃——写盘后的文件只含当前已知字段。
+/// 返回损坏原文的备份文件名（`null` = 未发生损坏；非空 = 已备份并提示用户）。
 #[tauri::command]
-pub fn write_vault_config(
-    config: VaultConfig,
+pub fn vault_config_patch(
+    patch: serde_json::Value,
     state: State<'_, VaultState>,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     let root = state.root()?;
-    write_vault_config_file(&root, &config)
+    patch_vault_config(&root, &patch)
 }
 
 /// 读系统提示词标记列表（.atelyx/prompt-notes.json，不存在/损坏返回空）。
@@ -1111,8 +1211,8 @@ pub fn ensure_default_vault(
 ) -> Result<VaultInfo, String> {
     // 已打开则直接返回（重新读配置拿 id；缺失时补生成，与 open_vault 语义一致）
     if let Ok(root) = state.root() {
-        let (vault_id, _) = ensure_vault_id_on_disk(&root)?;
-        return Ok(vault_info_from(root, vault_id));
+        let (vault_id, _, corrupt_backup) = ensure_vault_id_on_disk(&root)?;
+        return Ok(vault_info_from(root, vault_id, corrupt_backup));
     }
     let app_data_dir = app_handle
         .path()
@@ -1125,8 +1225,8 @@ pub fn ensure_default_vault(
     // 与 open_vault 一致：dunce::canonicalize → 先启监听再切 state，保证存/回传格式统一
     let default_root = dunce::canonicalize(&default_root)
         .map_err(|e| format!("默认仓库路径不可达：{} ({e})", default_root.display()))?;
-    let (vault_id, _) = activate_vault(&app_handle, &state, &default_root)?;
-    Ok(vault_info_from(default_root, vault_id))
+    let (vault_id, _, corrupt_backup) = activate_vault(&app_handle, &state, &default_root)?;
+    Ok(vault_info_from(default_root, vault_id, corrupt_backup))
 }
 
 /// 新建空画布，返回 `{ id, file }`（file = 相对仓库根路径，前端打开/保存用）。
@@ -1188,25 +1288,27 @@ fn ensure_vault_id(config: &mut VaultConfig) -> (String, bool) {
 }
 
 /// 从路径构造 VaultInfo（仓库名经 `vault_display_name`，兼容网络共享根等 `file_name()` 取不到的场景）。
-fn vault_info_from(root: PathBuf, id: String) -> VaultInfo {
+fn vault_info_from(root: PathBuf, id: String, config_corrupt_backup: Option<String>) -> VaultInfo {
     VaultInfo {
         root: root.to_string_lossy().to_string(),
         name: crate::vault::vault_display_name(&root),
         id,
+        config_corrupt_backup,
     }
 }
 
 /// 仓库稳定 ID 保障 + 生效文件面板配置读取（激活流程与「已打开」快路径共用）：
 /// 读配置 → 缺失生成 nanoid → 仅新建时落盘（失败不阻塞打开——下次打开会补写，内存值本轮回调已生效）。
-/// 返回 (vault_id, exclude_folders)。
-fn ensure_vault_id_on_disk(root: &Path) -> Result<(String, Vec<String>), String> {
-    let mut config = read_vault_config_file(root)?;
+/// 返回 (vault_id, exclude_folders, 损坏备份文件名)。备份名必须往上传：配置损坏时本函数紧接着就会
+/// 用「只剩 vaultId」的新配置覆盖原路径，前端若另起一次读命令只会读到这份合法新文件、永远发现不了损坏。
+fn ensure_vault_id_on_disk(root: &Path) -> Result<(String, Vec<String>, Option<String>), String> {
+    let (mut config, corrupt_backup) = read_vault_config_with_backup(root)?;
     let (vault_id, vault_id_new) = ensure_vault_id(&mut config);
     let exclude_folders = config.exclude_folders.clone().unwrap_or_default();
     if vault_id_new {
         let _ = write_vault_config_file(root, &config);
     }
-    Ok((vault_id, exclude_folders))
+    Ok((vault_id, exclude_folders, corrupt_backup))
 }
 
 /// 仓库激活公共流程（open_vault / ensure_default_vault 共用）：保障 vault_id → init 目录 →
@@ -1217,14 +1319,14 @@ fn activate_vault(
     app_handle: &AppHandle,
     state: &State<'_, VaultState>,
     root: &Path,
-) -> Result<(String, Vec<String>), String> {
-    let (vault_id, exclude_folders) = ensure_vault_id_on_disk(root)?;
+) -> Result<(String, Vec<String>, Option<String>), String> {
+    let (vault_id, exclude_folders, corrupt_backup) = ensure_vault_id_on_disk(root)?;
     init_vault_dirs(root)?;
     if let Err(e) = watcher::start(app_handle.clone(), root.to_path_buf(), exclude_folders.clone()) {
         eprintln!("文件监听启动失败（仓库仍可打开，实时同步降级）：{e}");
     }
     state.set(root.to_path_buf(), exclude_folders.clone())?;
-    Ok((vault_id, exclude_folders))
+    Ok((vault_id, exclude_folders, corrupt_backup))
 }
 
 /// 保存名冲突守卫（画布/表格保存命令共用）：新路径已被另一文件占用（解析出的稳定 id 不同，
@@ -1383,6 +1485,48 @@ fn remap_dir_refs_in_canvas(canvas: &mut CanvasFile, old_dir: &str, new_dir: &st
         }
     }
     changed
+}
+
+#[cfg(test)]
+mod ensure_vault_id_tests {
+    use super::*;
+    use crate::vault::test_support::TempDir;
+
+    /// 仓库配置损坏时，激活路径必须把备份名带出来（前端据此提示用户），并补出可用的 vaultId。
+    /// 这条覆盖的是「open_vault 先消费损坏、前端再读只会读到合法新文件」的时序——只测读命令看不出来。
+    #[test]
+    fn corrupt_config_is_reported_and_replaced_with_new_vault_id() {
+        let root = TempDir::new("ensure-vault-id-corrupt");
+        let dir = root.join(".atelyx");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.json"), "{ 这不是 JSON").unwrap();
+
+        let (vault_id, _exclude, backup) = ensure_vault_id_on_disk(&root).unwrap();
+
+        let backup = backup.expect("损坏必须回传备份名");
+        assert!(dir.join(&backup).is_file(), "原文要留档");
+        assert!(!vault_id.is_empty());
+        // 补出的配置含 vaultId，且原路径已让开（后续读路径读到的是这份合法文件）
+        let on_disk = crate::vault::read_vault_config(&root).unwrap();
+        assert_eq!(on_disk.vault_id.as_deref(), Some(vault_id.as_str()));
+    }
+
+    #[test]
+    fn healthy_config_reports_no_backup() {
+        let root = TempDir::new("ensure-vault-id-ok");
+        let dir = root.join(".atelyx");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("config.json"),
+            r#"{"vaultId":"fixed-id","fileExplorerSort":"name"}"#,
+        )
+        .unwrap();
+
+        let (vault_id, _exclude, backup) = ensure_vault_id_on_disk(&root).unwrap();
+
+        assert_eq!(vault_id, "fixed-id");
+        assert!(backup.is_none());
+    }
 }
 
 #[cfg(test)]

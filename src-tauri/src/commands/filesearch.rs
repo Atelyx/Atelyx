@@ -181,6 +181,7 @@ fn collect_glob_files(
 
 /// 按 glob 模式枚举仓库内文件路径（相对仓库根、`/` 分隔；只返回文件；跳过隐藏目录/排除文件夹）。
 /// 结果按修改时间升序（`rg --sort=modified` 同语义），最多内联返回 GLOB_MAX_RESULTS 条。
+/// 目录遍历是纯阻塞 IO：放 `spawn_blocking`，不占 async 执行器（否则并发 glob/grep 会互相排队）。
 #[tauri::command]
 pub async fn glob_vault(
     pattern: String,
@@ -189,23 +190,27 @@ pub async fn glob_vault(
 ) -> Result<GlobVaultResult, String> {
     let root = state.root()?;
     let exclude = state.exclude_folders()?;
-    let matcher = build_glob_matcher(&pattern)?;
-    let (base_rel, base_is_file) = resolve_base(&root, path.as_deref())?;
-    let mut entries = collect_glob_files(&root, &base_rel, base_is_file, &exclude, &matcher)?;
-    entries.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
-    let total = entries.len();
-    let capped = total > GLOB_MAX_RESULTS;
-    let paths: Vec<String> = entries
-        .into_iter()
-        .take(GLOB_MAX_RESULTS)
-        .map(|(rel, _)| rel)
-        .collect();
-    Ok(GlobVaultResult {
-        root: path.unwrap_or_default(),
-        paths,
-        total,
-        capped,
+    tauri::async_runtime::spawn_blocking(move || {
+        let matcher = build_glob_matcher(&pattern)?;
+        let (base_rel, base_is_file) = resolve_base(&root, path.as_deref())?;
+        let mut entries = collect_glob_files(&root, &base_rel, base_is_file, &exclude, &matcher)?;
+        entries.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+        let total = entries.len();
+        let capped = total > GLOB_MAX_RESULTS;
+        let paths: Vec<String> = entries
+            .into_iter()
+            .take(GLOB_MAX_RESULTS)
+            .map(|(rel, _)| rel)
+            .collect();
+        Ok(GlobVaultResult {
+            root: path.unwrap_or_default(),
+            paths,
+            total,
+            capped,
+        })
     })
+    .await
+    .map_err(|e| format!("检索线程失败：{e}"))?
 }
 
 /// 前 N 字节含 `\0` 判二进制（与常规文本/二进制判别一致，跳过不可读内容避免垃圾回填）。
@@ -314,6 +319,7 @@ fn scan_for_matches(
 /// 用正则搜索仓库内文件内容（相对仓库根路径，与 read_file 同坐标），返回匹配行
 /// （1-based 绝对行号；单行预览按 GREP_MAX_LINE_BYTES 字节截断），最多内联返回
 /// GREP_MAX_MATCHES 条、恒附精确总数。二进制/超大/不可读文件跳过。
+/// 全仓库扫描是纯阻塞 IO：放 `spawn_blocking`，不占 async 执行器。
 #[tauri::command]
 pub async fn grep_vault(
     pattern: String,
@@ -323,30 +329,34 @@ pub async fn grep_vault(
 ) -> Result<GrepVaultResult, String> {
     let root = state.root()?;
     let exclude = state.exclude_folders()?;
-    let re = Regex::new(&pattern).map_err(|e| format!("正则表达式无效：{e}"))?;
-    let include_matcher = match include.as_deref() {
-        Some(p) => Some(build_glob_matcher(p)?),
-        None => None,
-    };
-    let (base_rel, base_is_file) = resolve_base(&root, path.as_deref())?;
-    let mut retained: Vec<GrepMatchRow> = Vec::new();
-    let mut total = 0usize;
-    scan_for_matches(
-        &root,
-        &base_rel,
-        base_is_file,
-        &exclude,
-        &re,
-        include_matcher.as_ref(),
-        &mut retained,
-        &mut total,
-    )?;
-    let capped = total > retained.len();
-    Ok(GrepVaultResult {
-        matches: retained,
-        total,
-        capped,
+    tauri::async_runtime::spawn_blocking(move || {
+        let re = Regex::new(&pattern).map_err(|e| format!("正则表达式无效：{e}"))?;
+        let include_matcher = match include.as_deref() {
+            Some(p) => Some(build_glob_matcher(p)?),
+            None => None,
+        };
+        let (base_rel, base_is_file) = resolve_base(&root, path.as_deref())?;
+        let mut retained: Vec<GrepMatchRow> = Vec::new();
+        let mut total = 0usize;
+        scan_for_matches(
+            &root,
+            &base_rel,
+            base_is_file,
+            &exclude,
+            &re,
+            include_matcher.as_ref(),
+            &mut retained,
+            &mut total,
+        )?;
+        let capped = total > retained.len();
+        Ok(GrepVaultResult {
+            matches: retained,
+            total,
+            capped,
+        })
     })
+    .await
+    .map_err(|e| format!("检索线程失败：{e}"))?
 }
 
 #[cfg(test)]

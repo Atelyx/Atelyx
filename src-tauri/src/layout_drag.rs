@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
+use tokio::time::Instant;
 
 use crate::layout::{apply_layout_op, LayoutInner, LayoutState};
 use crate::layout_model::{
@@ -19,9 +20,14 @@ use crate::layout_window::{reconcile_panel_windows, seed_window_bounds, PANEL_LA
 /// 撕裂窗口默认尺寸（logical px，与前端一致）。
 const PANEL_WINDOW_WIDTH: f64 = 420.0;
 const PANEL_WINDOW_HEIGHT: f64 = 560.0;
-/// 拖拽看门狗（ms）：光标移出所有应用窗口后长时间无输入 → 按最后坐标自动结束
-/// （释放事件丢失的跨平台兜底；Windows 上前端左键轮询 + JS pointerup 先于本兜底生效）。
-const DRAG_WATCHDOG_MS: u64 = 1200;
+/// 拖拽看门狗：**静默超时即收尾**（释放事件丢失的跨平台兜底）。
+///
+/// 为什么按「一段时间没有新的移动上报」而不是「光标移出所有应用窗口」：窗口内同样会丢事件
+/// （指针捕获失效 / 事件被别的窗口吞掉），只判窗口外会让会话永久保留——ghost 常驻、落点永不提交。
+/// 空闲上限按光标是否落在任一应用窗口内分两档：窗口内更长。真正避免「拖着停在目标上被误收尾」的是
+/// 收尾前的左键探测（Windows 可探测）；无探测能力的平台只能靠这两档计时兜底，长时间停顿仍会收尾。
+const DRAG_IDLE_OUTSIDE_MS: u64 = 1200;
+const DRAG_IDLE_INSIDE_MS: u64 = 4000;
 /// 拖拽结束命中回程等待上限（ms）：广播最终坐标后轮询光标所在窗口的命中变化，
 /// 命中即提前结束；无目标窗口（桌面）时走完全部超时。超时而非固定延时——
 /// 命中回程快时不再空等，行为上限与原固定延时一致。
@@ -136,6 +142,17 @@ fn drag_broadcast_active(inner: &LayoutInner) -> Option<DragBroadcast> {
     })
 }
 
+/// 新 begin 是否按新会话重建：同一次手势（同标签 + 同源窗口）保留原会话（先到先得，
+/// 连续 begin / 解析中不覆盖进行中会话）；身份变了说明上一轮手势的释放事件丢了，
+/// 旧会话不会自愈（ghost 显示旧标签、松手提交旧标签），必须按新 begin 重建。
+/// 抽成纯函数便于直测——命令本身要 AppHandle，无 Tauri 运行时不可单测。
+fn begin_replaces_session(existing: Option<&DragSession>, p: &DragStartPayload) -> bool {
+    match existing {
+        None => true,
+        Some(d) => d.tab_id != p.tab_id || d.source_window != p.source_window,
+    }
+}
+
 /// 拖拽更新（start=Some 创建会话，None 仅更新坐标）：更新会话 + 广播 + 重置看门狗。
 /// start=Some：刷新全部窗口 bounds（窗口可能在启动后移动过而事件/种子未覆盖，落点解析
 /// 的「光标在哪个窗口」判定需要最新 bounds）+ 建会话（含 loaded 检查 + 清空旧命中）。
@@ -165,8 +182,10 @@ pub async fn drag_update(
                 if inner.drag_resolving {
                     return Ok(());
                 }
-                // 已有会话则忽略（先到先得）——解析中/连续 begin 不覆盖进行中会话
-                if inner.drag.is_none() {
+                // 已有会话：同一次手势的重复 begin（先到先得）保留原会话；身份不同（标签/源窗口变了）
+                // 说明上一轮的释放事件丢了（Wayland 吞 pointerup、Windows 轮询也失败），旧会话不会自愈——
+                // 若继续沿用，松手时提交的会是旧标签。按新 begin 重建会话。
+                if begin_replaces_session(inner.drag.as_ref(), &p) {
                     inner.drag = Some(DragSession {
                         tab_id: p.tab_id,
                         view: p.view,
@@ -178,6 +197,13 @@ pub async fn drag_update(
                         screen_y,
                     });
                     inner.drag_hits.clear();
+                } else if let Some(d) = inner.drag.as_mut() {
+                    // 同一次手势的重复 begin：身份不变，但视图/宿主/尺寸以本次上报为准——
+                    // 残留会话期间标签可能改过视图（ghost 图标与文字取自 `view`），面板也可能被移动过
+                    d.view = p.view;
+                    d.source_host = p.source_host;
+                    d.source_width = p.source_width;
+                    d.source_height = p.source_height;
                 }
             }
             None => {
@@ -203,7 +229,7 @@ pub async fn drag_update(
     if let Some(b) = broadcast {
         broadcast_drag(&app, &b);
     }
-    arm_watchdog(&app, gen);
+    arm_watchdog(&app, gen, Instant::now(), DRAG_IDLE_OUTSIDE_MS);
     Ok(())
 }
 
@@ -590,32 +616,94 @@ fn resolve_drag(inner: &mut LayoutInner, cancelled: bool) {
     }
 }
 
-/// 拖拽看门狗：仅当光标移出所有应用窗口且长时间无输入时按最后坐标自动结束
-/// （释放事件丢失的跨平台兜底；世代号合并——仅最新一次 move 的到期任务真正执行）。
-fn arm_watchdog(app: &AppHandle, gen: u64) {
+/// 看门狗每轮裁决（纯逻辑，可单测）：无事可做 / 已空闲够久该收尾 / 尚未超时空闲上限（重新武装等待）。
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum WatchdogDecision {
+    /// 会话已结束、已被接管或正在解析落点：本轮不介入。
+    Idle,
+    /// 空闲已超上限：按最后坐标收尾。
+    Finish,
+    /// 尚未超上限：以该毫秒数重新武装。
+    Rearm(u64),
+}
+
+/// 看门狗裁决：`gen` = 本任务武装时的移动世代号，`started` = 本轮空闲计时起点（跨轮重新武装时不变，
+/// 故窗口内外两档的时间线共用同一个起点）。
+/// 世代号不同 = 期间又有移动上报（新一代看门狗负责），本轮直接退出——空闲计时的起点由此天然等于
+/// 「最后一次移动上报」，无需另存时间戳。窗口内用更长的空闲上限（光标可能停在目标上观察）。
+///
+/// `left_button_down`：左键是否仍按下（`None` = 平台无探测能力）。看门狗本意是兜「释放事件丢失」，
+/// 不该把「用户仍按着但没动」当成释放——那会在用户还在拖的时候自动提交落点。作为参数传入是为了
+/// 让判定可直测（真实取值由调用方探测，测试注入受控值）。
+fn watchdog_decision(
+    inner: &LayoutInner,
+    gen: u64,
+    now: Instant,
+    started: Instant,
+    left_button_down: Option<bool>,
+) -> WatchdogDecision {
+    if inner.drag_resolving || inner.drag_move_gen != gen || inner.drag.is_none() {
+        return WatchdogDecision::Idle;
+    }
+    let Some(drag) = inner.drag.as_ref() else {
+        return WatchdogDecision::Idle;
+    };
+    // 光标落在任一应用窗口内：用户可能拖着停在目标上观察，给更长的空闲上限
+    let inside = inner
+        .window_bounds
+        .values()
+        .any(|b| point_in_bounds(drag.screen_x, drag.screen_y, b));
+    let limit = if inside { DRAG_IDLE_INSIDE_MS } else { DRAG_IDLE_OUTSIDE_MS };
+    let elapsed_ms = now.duration_since(started).as_millis() as u64;
+    if elapsed_ms < limit {
+        // 传「距上限还剩多久」：计时起点跨轮不变，传上限会让窗口内档变成两段相加
+        return WatchdogDecision::Rearm(limit - elapsed_ms);
+    }
+    if left_button_down == Some(true) {
+        // 左键仍按着（用户在途拖动只是停住）：等「窗口内上限」再复查一次，不按剩余量空转忙等
+        return WatchdogDecision::Rearm(DRAG_IDLE_INSIDE_MS);
+    }
+    WatchdogDecision::Finish
+}
+
+/// 拖拽看门狗（静默兜底）：空闲达上限即收尾（释放事件丢失的跨平台兜底）。
+///
+/// `started` 是**本次空闲计时的起点**，跨轮保持不变（每轮 `Rearm` 都只等剩余时间），
+/// 否则「窗口内上限」会被拆成多段相加而实际变长。
+/// `wait_ms` 只决定本轮先睡多久（首轮按窗口外上限起等：窗口外场景的兜底速度不被窗口内长上限拖慢）。
+fn arm_watchdog(app: &AppHandle, gen: u64, started: Instant, wait_ms: u64) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(DRAG_WATCHDOG_MS)).await;
+        tokio::time::sleep(Duration::from_millis(wait_ms)).await;
         let state = app.state::<LayoutState>();
-        let should_finish = {
-            let Ok(mut inner) = state.inner.lock() else {
+        let decision = {
+            let Ok(inner) = state.inner.lock() else {
                 eprintln!("[layout] 布局状态锁已损坏，看门狗放弃收尾");
                 return;
             };
-            if inner.drag_move_gen != gen || inner.drag.is_none() {
-                return;
-            }
-            let drag = inner.drag.clone().unwrap();
-            let outside = inner.window_bounds.values().all(|b| !point_in_bounds(drag.screen_x, drag.screen_y, b));
-            if !outside {
-                return;
-            }
-            // 本看门狗接管：后续 move 会再触发新看门狗（用户在途拖动不受影响）
-            inner.drag_move_gen += 1;
-            true
+            watchdog_decision(
+                &inner,
+                gen,
+                Instant::now(),
+                started,
+                crate::commands::windows::is_mouse_left_down(),
+            )
         };
-        if should_finish {
-            finish_drag(&app, None, None, false).await;
+        match decision {
+            WatchdogDecision::Idle => {}
+            WatchdogDecision::Rearm(ms) => arm_watchdog(&app, gen, started, ms),
+            WatchdogDecision::Finish => {
+                // 标记本世代已由看门狗接管：后续 move 会上报新世代并重新武装
+                match state.inner.lock() {
+                    Ok(mut inner) => {
+                        if inner.drag_move_gen == gen {
+                            inner.drag_move_gen += 1;
+                        }
+                    }
+                    Err(_) => return,
+                }
+                finish_drag(&app, None, None, false).await;
+            }
         }
     });
 }
@@ -973,5 +1061,141 @@ mod tests {
         // 源窗口 bounds 缺失（seed 未成功）→ 按 1.0 近似，不得 panic（本函数在持锁块内调用）；
         // 坐标须落在所有窗口之外，否则 for 循环会先命中窗口分支、覆盖回退值
         assert_eq!(cursor_to_logical(&bounds, "panel-gone", 9000.0, 9000.0), (9000.0, 9000.0));
+    }
+
+    // ---- 看门狗裁决（watchdog_decision；丢事件后的自动收尾）----
+
+    /// 构造带活跃拖拽会话的 LayoutInner：`gen` 为移动世代号，坐标决定光标是否落在窗口内。
+    fn inner_with_drag(gen: u64, x: f64, y: f64) -> LayoutInner {
+        LayoutInner {
+            ui: ui_with(two_panels_horizontal()),
+            persist_gen: 0,
+            dirty: false,
+            loaded: true,
+            window_bounds: HashMap::from([("main".to_string(), main_bounds())]),
+            drag: Some(drag("t-files", "files", "main", "p1", x, y)),
+            drag_hits: HashMap::new(),
+            drag_move_gen: gen,
+            drag_resolving: false,
+        }
+    }
+
+    fn start_payload(tab: &str, window: &str) -> DragStartPayload {
+        DragStartPayload {
+            tab_id: tab.into(),
+            view: "files".into(),
+            source_window: window.into(),
+            source_host: "p1".into(),
+            source_width: 0.0,
+            source_height: 0.0,
+        }
+    }
+
+    #[test]
+    fn begin_replaces_only_foreign_session() {
+        let existing = drag("t-files", "files", "main", "p1", 0.0, 0.0);
+        // 无会话：建新会话
+        assert!(begin_replaces_session(None, &start_payload("t-files", "main")));
+        // 同一次手势的重复 begin（同标签同源窗口）：保留原会话（先到先得）
+        assert!(!begin_replaces_session(Some(&existing), &start_payload("t-files", "main")));
+        // 换了标签或换了源窗口：上一轮释放丢了、旧会话不会自愈 → 按新 begin 重建
+        assert!(begin_replaces_session(Some(&existing), &start_payload("t-note", "main")));
+        assert!(begin_replaces_session(Some(&existing), &start_payload("t-files", "panel-w1")));
+    }
+
+    #[test]
+    fn watchdog_ignores_stale_generation() {
+        // 期间又有移动上报（世代号变了）：本轮退出，由新一代看门狗负责
+        let inner = inner_with_drag(7, 500.0, 300.0);
+        let t0 = Instant::now();
+        assert_eq!(
+            watchdog_decision(&inner, 6, t0 + Duration::from_secs(60), t0, Some(false)),
+            WatchdogDecision::Idle
+        );
+    }
+
+    #[test]
+    fn watchdog_ignores_missing_session_and_resolving() {
+        let t0 = Instant::now();
+        let mut inner = inner_with_drag(1, 500.0, 300.0);
+        inner.drag = None;
+        assert_eq!(
+            watchdog_decision(&inner, 1, t0 + Duration::from_secs(60), t0, Some(false)),
+            WatchdogDecision::Idle
+        );
+        let mut inner = inner_with_drag(1, 500.0, 300.0);
+        inner.drag_resolving = true;
+        assert_eq!(
+            watchdog_decision(&inner, 1, t0 + Duration::from_secs(60), t0, Some(false)),
+            WatchdogDecision::Idle
+        );
+    }
+
+    #[test]
+    fn watchdog_finishes_when_cursor_outside_after_outside_idle() {
+        let inner = inner_with_drag(3, 5000.0, 5000.0);
+        let t0 = Instant::now();
+        assert_eq!(
+            watchdog_decision(
+                &inner,
+                3,
+                t0 + Duration::from_millis(DRAG_IDLE_OUTSIDE_MS),
+                t0,
+                None
+            ),
+            WatchdogDecision::Finish
+        );
+    }
+
+    #[test]
+    fn watchdog_rearm_reports_remaining_not_limit() {
+        // 调用方每轮重置计时起点：Rearm 必须给「还剩多久」，给上限会让窗口内档实际变成两段相加
+        let inner = inner_with_drag(3, 500.0, 300.0);
+        let t0 = Instant::now();
+        let elapsed = Duration::from_millis(DRAG_IDLE_OUTSIDE_MS + 100);
+        assert_eq!(
+            watchdog_decision(&inner, 3, t0 + elapsed, t0, None),
+            WatchdogDecision::Rearm(DRAG_IDLE_INSIDE_MS - DRAG_IDLE_OUTSIDE_MS - 100)
+        );
+    }
+
+    #[test]
+    fn watchdog_keeps_waiting_inside_window_up_to_longer_limit() {
+        // 光标在窗口内：到窗口内的长上限才收尾（窗口外上限早就过了）
+        let inner = inner_with_drag(3, 500.0, 300.0);
+        let t0 = Instant::now();
+        assert_eq!(
+            watchdog_decision(
+                &inner,
+                3,
+                t0 + Duration::from_millis(DRAG_IDLE_INSIDE_MS),
+                t0,
+                Some(false)
+            ),
+            WatchdogDecision::Finish
+        );
+    }
+
+    #[test]
+    fn watchdog_does_not_finish_while_left_button_still_down() {
+        // 用户在途拖动、只是停住没动（左键仍按着）：不得当释放丢失收尾，继续等
+        let inner = inner_with_drag(3, 500.0, 300.0);
+        let t0 = Instant::now();
+        assert_eq!(
+            watchdog_decision(
+                &inner,
+                3,
+                t0 + Duration::from_millis(DRAG_IDLE_INSIDE_MS * 3),
+                t0,
+                Some(true)
+            ),
+            WatchdogDecision::Rearm(DRAG_IDLE_INSIDE_MS)
+        );
+    }
+
+    #[test]
+    fn watchdog_inside_limit_is_longer_than_outside() {
+        // 两档上限的相对关系即「窗口内不误收尾」的全部保证，回归时须一并检查
+        assert!(DRAG_IDLE_INSIDE_MS > DRAG_IDLE_OUTSIDE_MS);
     }
 }

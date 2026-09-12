@@ -26,6 +26,9 @@ pub struct CachedFile<T> {
 /// 当前仓库会话状态，由 lib.rs app.manage 注入，命令通过 State<VaultState> 读取。
 pub struct VaultState {
     pub session: Mutex<Option<VaultSession>>,
+    /// 会话世代：每次 `set`（切换仓库）自增。索引在锁外构建，安装前必须比对世代——
+    /// 否则构建期间切换了仓库，旧仓库的索引会被装进新仓库会话（同路径同指纹的条目会一直用错）。
+    pub generation: std::sync::atomic::AtomicU64,
     /// 反链索引缓存：纯内存、磁盘为真相（每次查询按指纹 diff 自愈）；切换仓库时随 set 清空，查询时懒构建。
     pub wiki: Mutex<Option<WikiIndex>>,
     /// 标签索引缓存：同反链（纯内存、磁盘为真相、指纹增量刷新；切仓库随 set 清空、查询懒构建）。
@@ -47,6 +50,7 @@ impl Default for VaultState {
     fn default() -> Self {
         Self {
             session: Mutex::new(None),
+            generation: std::sync::atomic::AtomicU64::new(0),
             wiki: Mutex::new(None),
             tags: Mutex::new(None),
             canvas_cache: Mutex::new(HashMap::new()),
@@ -76,9 +80,23 @@ impl VaultState {
             .ok_or_else(|| "未打开仓库".to_string())
     }
 
+    /// 会话快照：在**同一把 session 锁内**同时取 root / exclude / 世代。
+    ///
+    /// 索引在锁外构建、安装前用世代比对（见 commands::vault 的 `with_index`），分开取会出现
+    /// 「读完 root 才读世代」的窗口——那期间切仓库，旧仓库的索引仍会被装进新会话。
+    pub fn session_snapshot(&self) -> Result<(PathBuf, Vec<String>, u64), String> {
+        let guard = self.session.lock().map_err(|e| e.to_string())?;
+        let session = guard.as_ref().ok_or_else(|| "未打开仓库".to_string())?;
+        let generation = self
+            .generation
+            .load(std::sync::atomic::Ordering::SeqCst);
+        Ok((session.root.clone(), session.exclude_folders.clone(), generation))
+    }
+
     /// 设置当前仓库会话（canonicalize 消除 `..`/符号链接，保证 safe_join 校验与 watcher 语义一致；
     /// 用 dunce 去除 Windows `\\?\` 长路径前缀，保证存/回传给前端的路径格式统一）。
-    /// 同时清空反链索引缓存：不同仓库的索引不混用（查询时懒重建）。
+    /// 同时清空反链索引缓存并递增会话世代：不同仓库的索引不混用（查询时懒重建），
+    /// 且锁外构建中的索引据世代判定作废（见 `generation`）。
     /// 返回 Result：Mutex poisoned 时向上传播而非静默丢弃（与 root() 策略一致）。
     pub fn set(&self, root: PathBuf, exclude_folders: Vec<String>) -> Result<(), String> {
         let canonical = dunce::canonicalize(&root).unwrap_or_else(|_| root.clone());
@@ -87,6 +105,8 @@ impl VaultState {
             root: canonical,
             exclude_folders,
         });
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         // 以下四个辅助锁（wiki/tags/canvas_cache/table_cache）poison 时清空动作无副作用，吞掉即可；
         // 读路径（query/read_cached）对 poison 走 map_err 传播（见 416/433 行），与本处策略一致。
         let _ = self.wiki.lock().map(|mut w| *w = None);
@@ -913,20 +933,200 @@ pub struct VaultConfig {
     pub auto_naming_model: Option<EditorChatModelOverride>,
 }
 
+/// 路径（相对 `.atelyx/`）与读写的唯一出口：命令层不自行拼路径，避免两处口径漂移。
+const VAULT_CONFIG_FILE: &str = "config.json";
+
+/// 把损坏的 JSON 配置文件改名备份（原文完整保留供排查/人工取回），返回备份路径（失败 = None）。
+///
+/// 为什么读路径必须备份而不是直接降级为空：这些文件都走「读 → 改 → 写」或被后续写盘整文件覆盖，
+/// 读到的空状态会被写回磁盘，等于一次外部编辑/磁盘异常就静默清空用户配置。
+/// 名字带随机后缀：同名目标在 Windows 上会被 rename 静默替换，固定名会让新的损坏冲掉旧备份。
+/// `tag` 只用于日志前缀（便于按模块定位）。
+pub(crate) fn backup_corrupt_config(path: &Path, tag: &str) -> Option<PathBuf> {
+    let name = path.file_name()?.to_string_lossy().into_owned();
+    let backup = path.with_file_name(format!("{name}.corrupt-{}", nanoid::nanoid!()));
+    match std::fs::rename(path, &backup) {
+        Ok(()) => Some(backup),
+        Err(e) => {
+            eprintln!("[{tag}] 损坏配置备份失败：{e}");
+            None
+        }
+    }
+}
+
+/// 读仓库级配置（文件不存在返回空覆盖）。
 pub fn read_vault_config(root: &Path) -> Result<VaultConfig, String> {
-    let path = root.join(".atelyx").join("config.json");
+    read_vault_config_with_backup(root).map(|(config, _)| config)
+}
+
+/// 读仓库级配置，并带回「损坏备份文件名」（`None` = 未发生损坏）。
+///
+/// 解析失败先备份原文再降级：仓库配置由前端做「读 → 改 → 写」与字段级合并补丁，读到的空配置参与
+/// 后续写盘——不备份就等于「一次外部编辑/磁盘异常静默清空供应商/默认模型/vaultId」（vaultId 丢失还会
+/// 让下次 open_vault 重新生成 ID、keychain 条目失配）。
+/// 备份文件名回传调用方：读到的空配置会让用户看到「设置全没了」，必须能告知原因与备份位置。
+/// **备份失败即报错**（与补丁写路径同口径）：留不下原文还按空配置继续，调用方紧接着就会用
+/// 「只剩 vaultId」的配置覆盖它——原文既没留档、用户也没被告知。
+pub fn read_vault_config_with_backup(root: &Path) -> Result<(VaultConfig, Option<String>), String> {
+    let path = root.join(".atelyx").join(VAULT_CONFIG_FILE);
     if !path.exists() {
-        return Ok(VaultConfig::default());
+        return Ok((VaultConfig::default(), None));
     }
     let json = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    // 与 read_global_config 一致：解析失败降级为默认配置（手编辑损坏不阻塞仓库打开），IO 错误仍上报
-    Ok(serde_json::from_str::<VaultConfig>(&json).unwrap_or_default())
+    match serde_json::from_str::<VaultConfig>(&json) {
+        Ok(config) => Ok((config, None)),
+        Err(e) => {
+            let Some(backup) = backup_corrupt_config(&path, "vault") else {
+                return Err(format!(
+                    "仓库配置已损坏且原文备份失败（{}），已中止读取以免覆盖原文：{e}",
+                    path.display()
+                ));
+            };
+            eprintln!(
+                "[vault] 仓库配置损坏，已备份为 {}（按空配置继续）：{e}",
+                backup.display()
+            );
+            let name = backup
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned());
+            Ok((VaultConfig::default(), name))
+        }
+    }
 }
 
 pub fn write_vault_config(root: &Path, config: &VaultConfig) -> Result<(), String> {
-    let path = root.join(".atelyx").join("config.json");
+    let path = root.join(".atelyx").join(VAULT_CONFIG_FILE);
     let json = serde_json::to_string_pretty(config).map_err(|e| e.to_string())?;
     atomic_write(&path, &json)
+}
+
+/// 删除「残留明文 key」的指令只在合并后仍不是同步模式时生效。
+///
+/// 该指令来自前端**加载时**对文件的观察（见 stores/settingsStore 的 `strayTavilyKeyOnDisk`）：
+/// 期间文件可能已被别的设备改成 `syncKeys: true` 并写入合法 key（`.atelyx` 没有 watcher，
+/// 前端内存不会更新）。只认磁盘事实——合并后仍是同步模式就不接受这次删键，防把别的设备刚写入的
+/// key 抹掉；用户显式关闭开关时补丁同时带 `syncKeys: false`，删除照常生效。
+fn guard_stale_key_deletion(base_json: &str, patch: &serde_json::Value) -> serde_json::Value {
+    let Some(patch_obj) = patch.as_object() else {
+        return patch.clone();
+    };
+    let deletes_key = patch_obj
+        .get("search")
+        .and_then(|s| s.as_object())
+        .and_then(|s| s.get("tavilyApiKey"))
+        .is_some_and(|v| v.is_null());
+    if !deletes_key {
+        return patch.clone();
+    }
+    let base: serde_json::Value = serde_json::from_str(base_json).unwrap_or(serde_json::json!({}));
+    // 补丁里的 `syncKeys`：显式 `null` = 删键指令 = 合并后为默认 false（缺省才回落磁盘现值）
+    let sync_after = match patch_obj.get("syncKeys") {
+        Some(serde_json::Value::Bool(v)) => *v,
+        Some(serde_json::Value::Null) => false,
+        _ => base
+            .get("syncKeys")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+    };
+    if !sync_after {
+        return patch.clone();
+    }
+    let mut out = patch_obj.clone();
+    if let Some(search) = out.get_mut("search").and_then(|s| s.as_object_mut()) {
+        search.remove("tavilyApiKey");
+    }
+    serde_json::Value::Object(out)
+}
+
+/// 把字段级合并补丁应用到 `.atelyx/config.json`（读磁盘原文 → 合并 → 原子写），
+/// 返回损坏原文的备份文件名（`None` = 未发生损坏；调用方据此提示用户）。
+///
+/// 为什么以磁盘原文为基线、而不以调用方内存态为基线：前端各 setter 只发自己改动的字段，未出现在补丁里
+/// 的字段必须保留**磁盘上的当前值**。撕裂窗口持独立 store 副本，其内存态可能落后于主窗口刚写入的值；
+/// 若以内存态为基线整文件写，会把主窗口的改动整片抹掉（供应商丢失即此因）。
+///
+/// 基线损坏**不得当空配置继续**：那会把「仅含补丁字段」的配置写回，其余字段（providers/model/vaultId…）
+/// 永久删除且不留档（前端只在进仓时读一次配置，之后文件被外部改坏不会有第二次读来触发备份）。
+/// 故这里与读路径同口径：先备份原文，再按空基线继续——用户下次改动设置时重新配置，但原文可人工取回。
+/// 损坏判定走类型级反序列化（不只「是不是 JSON」）：合法 JSON 但字段类型错（`{"providers":"oops"}`）
+/// 同样会让合并失败并静默丢掉用户改动，必须与解析失败同口径先留档。备份失败则直接报错不写盘——
+/// 留不下原文就继续覆盖，等于把用户配置一次性抹掉且无从取回。
+pub fn patch_vault_config(root: &Path, patch: &serde_json::Value) -> Result<Option<String>, String> {
+    let path = root.join(".atelyx").join(VAULT_CONFIG_FILE);
+    let mut corrupt_backup: Option<String> = None;
+    let base = match std::fs::read_to_string(&path) {
+        Ok(raw) => {
+            if serde_json::from_str::<VaultConfig>(&raw).is_err() {
+                let Some(backup) = backup_corrupt_config(&path, "vault") else {
+                    return Err(
+                        "仓库配置已损坏且原文备份失败，已取消本次保存（检查文件权限后重试）".to_string(),
+                    );
+                };
+                eprintln!(
+                    "[vault] 仓库配置损坏，已备份为 {}（按空配置继续合并补丁）",
+                    backup.display()
+                );
+                corrupt_backup = backup
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned());
+                // 损坏原文已留档：本次按空基线合并（继续拿损坏文本当基线会连补丁一起失败，
+                // 用户的这次改动也会丢掉）
+                String::new()
+            } else {
+                raw
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        // 读不进来（句柄被占用/权限）不能当空基线：会静默清空配置，如实上报调用方
+        Err(e) => return Err(format!("读取仓库配置失败：{e}")),
+    };
+    let merged = merge_vault_config(&base, &guard_stale_key_deletion(&base, patch))?;
+    write_vault_config(root, &merged)?;
+    Ok(corrupt_backup)
+}
+
+/// 把字段级合并补丁应用到 config.json 的原始内容上（RFC 7386 语义：补丁值为 `null` 删键、
+/// 值为对象递归合并、其余整体替换），返回合并后的配置。
+///
+/// 合并结果经 `VaultConfig` 反序列化再序列化：这一趟保证输出只含已知字段、保持 `skip_serializing_if`
+/// 的干净形状（未知字段被丢弃，与 `write_vault_config` 同一形状约束）。
+pub fn merge_vault_config(base_json: &str, patch: &serde_json::Value) -> Result<VaultConfig, String> {
+    let patch_obj = patch
+        .as_object()
+        .ok_or_else(|| "配置补丁必须是 JSON 对象".to_string())?;
+    let mut base: serde_json::Value =
+        serde_json::from_str(base_json).unwrap_or(serde_json::json!({}));
+    if !base.is_object() {
+        base = serde_json::json!({});
+    }
+    if let Some(target) = base.as_object_mut() {
+        merge_json_objects(target, patch_obj);
+    }
+    serde_json::from_value(base).map_err(|e| format!("合并后的配置形状非法：{e}"))
+}
+
+/// 递归合并：`null` 删键，两侧同为对象则下钻，其余以补丁值覆盖。
+fn merge_json_objects(
+    target: &mut serde_json::Map<String, serde_json::Value>,
+    patch: &serde_json::Map<String, serde_json::Value>,
+) {
+    for (key, value) in patch {
+        if value.is_null() {
+            target.remove(key);
+            continue;
+        }
+        // 两侧都是对象才下钻；数组与标量整体替换（`providers` 是列表，逐项合并无明确语义）
+        let merged = match (target.get_mut(key), value) {
+            (Some(serde_json::Value::Object(existing)), serde_json::Value::Object(incoming)) => {
+                merge_json_objects(existing, incoming);
+                None
+            }
+            _ => Some(value.clone()),
+        };
+        if let Some(v) = merged {
+            target.insert(key.clone(), v);
+        }
+    }
 }
 
 // ===== 系统提示词标记（.atelyx/prompt-notes.json，独立于 config.json）=====
@@ -2875,7 +3075,7 @@ mod tag_index_tests {
 }
 
 #[cfg(test)]
-mod test_support {
+pub(crate) mod test_support {
     use std::path::{Path, PathBuf};
 
     /// 测试用临时目录（纳秒级命名防碰撞）；`Drop` 递归清理，测试失败也不留残留。
@@ -3090,6 +3290,205 @@ mod copy_folder_tests {
             .unwrap()
             .file_type()
             .is_symlink());
+    }
+}
+
+#[cfg(test)]
+mod merge_vault_config_tests {
+    use super::test_support::TempDir;
+    use super::*;
+
+    fn apply(base: &str, patch: &str) -> VaultConfig {
+        let patch: serde_json::Value = serde_json::from_str(patch).unwrap();
+        merge_vault_config(base, &patch).unwrap()
+    }
+
+    #[test]
+    fn only_patched_fields_change() {
+        // 撕裂窗口场景：补丁只带排序，磁盘上的供应商必须原样保留
+        let merged = apply(
+            r#"{"providers":[{"id":"p1","name":"A","baseUrl":"u","models":[]}],"fileExplorerSort":"name"}"#,
+            r#"{"fileExplorerSort":"updated"}"#,
+        );
+        assert_eq!(merged.file_explorer_sort.as_deref(), Some("updated"));
+        assert_eq!(merged.providers.unwrap()[0].id, "p1");
+    }
+
+    #[test]
+    fn null_removes_key() {
+        let merged = apply(r#"{"model":"m1","modelProviderId":"p1"}"#, r#"{"model":null}"#);
+        assert!(merged.model.is_none());
+        assert_eq!(merged.model_provider_id.as_deref(), Some("p1"));
+    }
+
+    #[test]
+    fn nested_object_merges_and_null_removes_only_its_key() {
+        let merged = apply(
+            r#"{"search":{"provider":"tavily","searxngUrl":"http://x"}}"#,
+            r#"{"search":{"searxngUrl":null,"provider":"searxng"}}"#,
+        );
+        let search = merged.search.unwrap();
+        assert_eq!(search.provider, "searxng");
+        assert_eq!(search.searxng_url, "");
+    }
+
+    #[test]
+    fn array_replaces_whole_not_item_wise() {
+        let merged = apply(
+            r#"{"providers":[{"id":"p1","name":"A","baseUrl":"u","models":[]},{"id":"p2","name":"B","baseUrl":"u","models":[]}]}"#,
+            r#"{"providers":[{"id":"p3","name":"C","baseUrl":"u","models":[]}]}"#,
+        );
+        let providers = merged.providers.unwrap();
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].id, "p3");
+    }
+
+    #[test]
+    fn unknown_patch_fields_are_dropped() {
+        let merged = apply(r#"{"model":"m1"}"#, r#"{"不认识的字段":1,"model":"m2"}"#);
+        assert_eq!(merged.model.as_deref(), Some("m2"));
+        let json = serde_json::to_string(&merged).unwrap();
+        assert!(!json.contains("不认识的字段"));
+    }
+
+    #[test]
+    fn unknown_base_fields_and_corrupt_base_are_tolerated() {
+        let merged = apply(r#"{"未来字段":1,"model":"m1"}"#, r#"{"softLineBreak":true}"#);
+        assert_eq!(merged.model.as_deref(), Some("m1"));
+        assert_eq!(merged.soft_line_break, Some(true));
+
+        let merged = apply("这不是 JSON", r#"{"model":"m1"}"#);
+        assert_eq!(merged.model.as_deref(), Some("m1"));
+    }
+
+    #[test]
+    fn non_object_patch_is_rejected() {
+        let patch: serde_json::Value = serde_json::from_str("[1,2]").unwrap();
+        assert!(merge_vault_config("{}", &patch).is_err());
+    }
+
+    #[test]
+    fn patch_round_trips_through_disk() {
+        let root = TempDir::new("vault-config-patch");
+        std::fs::create_dir_all(root.join(".atelyx")).unwrap();
+        std::fs::write(
+            root.join(".atelyx").join("config.json"),
+            r#"{"providers":[{"id":"p1","name":"A","baseUrl":"u","models":[]}],"fileExplorerSort":"name"}"#,
+        )
+        .unwrap();
+        let patch: serde_json::Value = serde_json::from_str(r#"{"attachmentFolder":"附件"}"#).unwrap();
+        let backup = patch_vault_config(&root, &patch).unwrap();
+        assert!(backup.is_none(), "配置正常时不应报告损坏");
+        let on_disk = read_vault_config(&root).unwrap();
+        assert_eq!(on_disk.attachment_folder.as_deref(), Some("附件"));
+        assert_eq!(on_disk.providers.unwrap()[0].id, "p1");
+        assert_eq!(on_disk.file_explorer_sort.as_deref(), Some("name"));
+    }
+
+    #[test]
+    fn patch_reports_corrupt_base_and_keeps_backup() {
+        let root = TempDir::new("vault-config-patch-corrupt");
+        let dir = root.join(".atelyx");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.json"), "{ 这不是 JSON").unwrap();
+
+        let patch: serde_json::Value = serde_json::from_str(r#"{"attachmentFolder":"附件"}"#).unwrap();
+        let backup = patch_vault_config(&root, &patch).unwrap().expect("损坏必须回传备份名");
+
+        // 原文留档 + 备份名可定位；补丁按空基线写回（其余字段只在备份里）
+        assert!(dir.join(&backup).is_file());
+        let on_disk = read_vault_config(&root).unwrap();
+        assert_eq!(on_disk.attachment_folder.as_deref(), Some("附件"));
+    }
+
+    #[test]
+    fn patch_treats_wrong_field_types_as_corrupt() {
+        // 合法 JSON 但字段类型错：不先留档就合并会失败，用户改动静默丢失且无从取回
+        let root = TempDir::new("vault-config-patch-typemismatch");
+        let dir = root.join(".atelyx");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.json"), r#"{"providers":"oops"}"#).unwrap();
+
+        let patch: serde_json::Value = serde_json::from_str(r#"{"attachmentFolder":"附件"}"#).unwrap();
+        let backup = patch_vault_config(&root, &patch).unwrap().expect("类型不符按损坏处理");
+        assert_eq!(
+            std::fs::read_to_string(dir.join(&backup)).unwrap(),
+            r#"{"providers":"oops"}"#
+        );
+    }
+
+    #[test]
+    fn stale_key_deletion_is_ignored_while_sync_keys_on_disk() {
+        // 删键指令来自前端加载时的观察；磁盘已被别的设备改成 syncKeys=true 时不得生效
+        //（否则会把另一设备刚写入的合法 key 抹掉）
+        let root = TempDir::new("vault-config-stale-key");
+        let dir = root.join(".atelyx");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        std::fs::write(
+            &path,
+            r#"{"syncKeys":true,"search":{"provider":"tavily","tavilyApiKey":"tvly-new"}}"#,
+        )
+        .unwrap();
+        let patch: serde_json::Value =
+            serde_json::from_str(r#"{"search":{"tavilyApiKey":null}}"#).unwrap();
+        patch_vault_config(&root, &patch).unwrap();
+        let on_disk = read_vault_config(&root).unwrap();
+        assert_eq!(
+            on_disk.search.as_ref().and_then(|s| s.tavily_api_key.as_deref()),
+            Some("tvly-new"),
+            "磁盘仍是同步模式时不得执行残留 key 删键"
+        );
+
+        // 用户显式关闭开关（补丁同时带 syncKeys=false）：删除照常生效
+        let patch: serde_json::Value = serde_json::from_str(
+            r#"{"syncKeys":false,"search":{"provider":"tavily","tavilyApiKey":null}}"#,
+        )
+        .unwrap();
+        patch_vault_config(&root, &patch).unwrap();
+        let on_disk = read_vault_config(&root).unwrap();
+        assert!(on_disk.search.as_ref().and_then(|s| s.tavily_api_key.as_ref()).is_none());
+
+        // 磁盘本就不是同步模式：删除照常生效
+        std::fs::write(
+            &path,
+            r#"{"search":{"provider":"tavily","tavilyApiKey":"tvly-stray"}}"#,
+        )
+        .unwrap();
+        let patch: serde_json::Value =
+            serde_json::from_str(r#"{"search":{"tavilyApiKey":null}}"#).unwrap();
+        patch_vault_config(&root, &patch).unwrap();
+        let on_disk = read_vault_config(&root).unwrap();
+        assert!(on_disk.search.as_ref().and_then(|s| s.tavily_api_key.as_ref()).is_none());
+    }
+
+    #[test]
+    fn corrupt_config_is_backed_up_not_silently_dropped() {
+        let root = TempDir::new("vault-config-corrupt");
+        let dir = root.join(".atelyx");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        std::fs::write(&path, "{ 这不是 JSON").unwrap();
+
+        let (config, backup) = read_vault_config_with_backup(&root).unwrap();
+
+        assert!(config.providers.is_none(), "损坏配置降级为空覆盖");
+        // 原文必须留档：否则紧接的写盘会把它永久抹掉
+        let backups: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("config.json.corrupt-"))
+            .collect();
+        assert_eq!(backups.len(), 1, "应有且只有一个备份：{backups:?}");
+        // 备份文件名必须回传调用方：读到的空配置要能向用户说明原因（否则「设置与 key 全没了」无从解释）
+        assert_eq!(backup.as_deref(), Some(backups[0].as_str()));
+        assert_eq!(
+            std::fs::read_to_string(dir.join(&backups[0])).unwrap(),
+            "{ 这不是 JSON"
+        );
+        // 原路径已让开：后续写盘不会与备份互相覆盖
+        assert!(!path.exists());
     }
 }
 

@@ -128,42 +128,46 @@ fn extract_ymd(value: &str) -> Option<String> {
 }
 
 /// 扫描仓库 `.md` frontmatter 的 date/due 字段，返回带日期笔记（尽力而为：读失败/无日期跳过）。
-/// async：全仓库扫描在 async 运行时线程执行，不阻塞主/UI 线程（主页面板切换/后台刷新期间 UI 保持可点）。
+/// 全仓库扫描是纯阻塞 IO：放 `spawn_blocking`，不占 async 执行器（否则与同运行时的其他命令互相排队）。
 #[tauri::command]
 pub async fn list_dated_notes(state: State<'_, VaultState>) -> Result<Vec<DatedNote>, String> {
     let root = state.root()?;
     let exclude = state.exclude_folders()?;
-    let mut notes: Vec<DatedNote> = Vec::new();
-    let _ = walk_md_in(&root, "", &exclude, &mut |rel, path| {
-        if notes.len() >= DATED_NOTE_CAP {
-            return Ok(());
-        }
-        let head = match read_head(path, MD_HEAD_CAP) {
-            Some(h) => h,
-            None => return Ok(()),
-        };
-        let (date, due) = frontmatter_block(&head)
-            .map(frontmatter_date_values)
-            .unwrap_or((None, None));
-        let date = date.as_deref().and_then(extract_ymd);
-        let due = due.as_deref().and_then(extract_ymd);
-        if date.is_none() && due.is_none() {
-            return Ok(());
-        }
-        let title = Path::new(rel)
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| rel.to_string());
-        notes.push(DatedNote {
-            file: rel.to_string(),
-            title,
-            date,
-            due,
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut notes: Vec<DatedNote> = Vec::new();
+        let _ = walk_md_in(&root, "", &exclude, &mut |rel, path| {
+            if notes.len() >= DATED_NOTE_CAP {
+                return Ok(());
+            }
+            let head = match read_head(path, MD_HEAD_CAP) {
+                Some(h) => h,
+                None => return Ok(()),
+            };
+            let (date, due) = frontmatter_block(&head)
+                .map(frontmatter_date_values)
+                .unwrap_or((None, None));
+            let date = date.as_deref().and_then(extract_ymd);
+            let due = due.as_deref().and_then(extract_ymd);
+            if date.is_none() && due.is_none() {
+                return Ok(());
+            }
+            let title = Path::new(rel)
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| rel.to_string());
+            notes.push(DatedNote {
+                file: rel.to_string(),
+                title,
+                date,
+                due,
+            });
+            Ok(())
         });
-        Ok(())
-    });
-    notes.sort_by(|a, b| a.file.cmp(&b.file));
-    Ok(notes)
+        notes.sort_by(|a, b| a.file.cmp(&b.file));
+        Ok(notes)
+    })
+    .await
+    .map_err(|e| format!("扫描线程失败：{e}"))?
 }
 
 // ===== 历史版本聚合 =====
@@ -243,27 +247,31 @@ fn ts_to_ymd(ts_ms: i64) -> Option<String> {
 
 /// 聚合 `.atelyx/history/` 全部版本：版本流（ts 倒序、上限）+ 全量按日计数。
 /// 尽力而为：缺失/损坏侧文件跳过，不阻塞面板。
-/// async：全仓库聚合在 async 运行时线程执行，不阻塞主/UI 线程（主页面板切换/后台刷新期间 UI 保持可点）。
+/// 目录聚合是纯阻塞 IO：放 `spawn_blocking`，不占 async 执行器。
 #[tauri::command]
 pub async fn list_repo_history(state: State<'_, VaultState>) -> Result<RepoHistoryResult, String> {
     let root = state.root()?;
-    let mut entries: Vec<RepoHistoryEntry> = Vec::new();
-    collect_history_dir(&root.join(".atelyx/history"), "note", &mut entries);
-    // 全量按日计数（活动日历，不受版本流上限截断）
-    let mut counts: BTreeMap<String, i64> = BTreeMap::new();
-    for e in &entries {
-        if let Some(date) = ts_to_ymd(e.ts) {
-            *counts.entry(date).or_insert(0) += 1;
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut entries: Vec<RepoHistoryEntry> = Vec::new();
+        collect_history_dir(&root.join(".atelyx/history"), "note", &mut entries);
+        // 全量按日计数（活动日历，不受版本流上限截断）
+        let mut counts: BTreeMap<String, i64> = BTreeMap::new();
+        for e in &entries {
+            if let Some(date) = ts_to_ymd(e.ts) {
+                *counts.entry(date).or_insert(0) += 1;
+            }
         }
-    }
-    let daily_counts = counts
-        .into_iter()
-        .map(|(date, count)| DailyCount { date, count })
-        .collect();
-    entries.sort_by(|a, b| b.ts.cmp(&a.ts));
-    entries.truncate(HISTORY_FEED_CAP);
-    Ok(RepoHistoryResult {
-        entries,
-        daily_counts,
+        let daily_counts = counts
+            .into_iter()
+            .map(|(date, count)| DailyCount { date, count })
+            .collect();
+        entries.sort_by(|a, b| b.ts.cmp(&a.ts));
+        entries.truncate(HISTORY_FEED_CAP);
+        Ok(RepoHistoryResult {
+            entries,
+            daily_counts,
+        })
     })
+    .await
+    .map_err(|e| format!("聚合线程失败：{e}"))?
 }

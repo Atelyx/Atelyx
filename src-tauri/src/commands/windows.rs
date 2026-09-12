@@ -69,9 +69,10 @@ pub(crate) fn close_panel_window_internal(app: &AppHandle, window_id: &str) {
 /// 鼠标左键当前是否按下（跨窗口拖拽释放检测）。
 ///
 /// 标签拖出窗口后，webview 可能收不到窗口外的 pointerup（窗口外指针事件不可靠），
-/// 拖拽会话无法结束、drop 指示器残留——前端在拖拽活跃期间轮询本命令，
-/// 物理检测左键松开即终止会话。仅 Windows 支持（GetAsyncKeyState），
-/// 其他平台返回 None（前端降级为 Rust 看门狗兜底）。
+/// 拖拽会话无法结束、drop 指示器残留——前端在拖拽活跃期间轮询本命令，物理检测左键松开即终止会话；
+/// Rust 侧拖拽看门狗收尾前也调用它（`layout_drag`）避免把「按住暂停」当成释放。
+/// 仅 Windows 支持（GetAsyncKeyState），其他平台返回 None = 无探测能力，
+/// 调用方按「已空闲够久即收尾」处理（拿不到按键状态，只能按计时判定）。
 #[tauri::command]
 pub fn is_mouse_left_down() -> Option<bool> {
     #[cfg(target_os = "windows")]

@@ -272,6 +272,93 @@ fn plugin_base_dir(app: &AppHandle, state: &VaultState, scope: &str) -> Result<P
     }
 }
 
+/// 安装/更新中途崩溃留下的临时与备份条目最大存活时长（秒）。
+/// 备份只对「更新中途崩溃」的即时恢复有意义：24h 内重启必然已经历成功或回滚其中一条路径，
+/// 超龄备份不再对应任何状态记录，继续保留只会随每次更新堆积（仓库随 Git/云盘同步时更明显）。
+const RESIDUE_MAX_AGE_SECS: u64 = 24 * 60 * 60;
+
+/// 残留名里的创建时刻（秒）：`.bak-`/`.rm-`/`.install-` 等中途改名而来，`rename` 保留**原目录**的
+/// mtime，用 mtime 判龄会把「刚创建但继承了几十天 mtime」的活残留当超龄清掉（更新回滚/卸载补偿
+/// 正依赖它存活）。故残留名自带创建时刻，清扫只认名字里的时刻。
+fn residue_stamp_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// 生成带创建时刻的残留名（`.<kind>-<stamp>-<随机后缀>[.zip]`）。
+/// 时刻恒在第 2 段（`residue_stamp_of` 据此解析，与 kind 之外的附加信息无关）；
+/// 点开头 → 不参与插件扫描；随机后缀防同名冲突。
+fn residue_name(kind: &str, suffix: &str) -> String {
+    format!(".{kind}-{}-{}{suffix}", residue_stamp_now(), nanoid::nanoid!())
+}
+
+/// 从残留名里取创建时刻（缺失/不是数字返回 None = 判不了龄，按「不敢清」处理）。
+fn residue_stamp_of(name: &str) -> Option<u64> {
+    let stem = name.strip_suffix(".zip").unwrap_or(name);
+    let mut parts = stem.trim_start_matches('.').split('-');
+    parts.next()?;
+    parts.next()?.parse::<u64>().ok()
+}
+
+/// 清理插件目录下的超龄残留（`.install-*`/`.update-*`/`.bak-*`/`.rm-*` 目录与 `.download-*.zip` 文件）。
+///
+/// 为什么按年龄而非「一律清」：安装/更新正在进行时这些条目是活的中间态，清掉会让该次安装失败
+/// （更新回滚依赖 `.bak-*`、卸载补偿依赖 `.rm-*`）；年龄阈值把「同一次流程内」与「上次崩溃遗留」分开。
+/// 单个条目出错不中断整批（只记日志）；基础目录不存在直接返回。
+pub(crate) fn sweep_plugin_residues(base: &Path) {
+    sweep_plugin_residues_with_age(base, RESIDUE_MAX_AGE_SECS);
+}
+
+/// 清扫实现（年龄上限参数化：生产常量与测试共用一份逻辑）。
+fn sweep_plugin_residues_with_age(base: &Path, max_age_secs: u64) {
+    let Ok(rd) = fs::read_dir(base) else {
+        return;
+    };
+    let now = residue_stamp_now();
+    for entry in rd.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !is_residue_name(&name) {
+            continue;
+        }
+        let Ok(meta) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        // 名字里没有创建时刻（无法判龄）→ 保留：宁可留垃圾，不删可能是活的残留
+        let Some(created) = residue_stamp_of(&name) else {
+            continue;
+        };
+        if now.saturating_sub(created) < max_age_secs {
+            continue;
+        }
+        // 目录链接（本地来源插件卸载时隔离的 junction/符号链接）必须走平台分流的删链接实现：
+        // 见 remove_link（Windows junction 用 remove_dir，Unix 符号链接用 remove_file）
+        let removed = if is_dir_link(&meta) {
+            remove_link(&path)
+        } else if meta.is_dir() {
+            fs::remove_dir_all(&path)
+        } else {
+            fs::remove_file(&path)
+        };
+        if let Err(e) = removed {
+            eprintln!("[plugin] 清理残留 {name} 失败：{e}");
+        }
+    }
+}
+
+/// 是否安装/更新/卸载流程的残留名：
+/// `.install-*`/`.update-*`（解压落位中间态）、`.download-*.zip`（源码包下载中间态）、
+/// `.bak-*`（更新备份）、`.rm-*`（卸载隔离态——隔离中崩溃或补偿失败时留给本清理）。
+fn is_residue_name(name: &str) -> bool {
+    name.starts_with(".install-")
+        || name.starts_with(".update-")
+        || name.starts_with(".bak-")
+        || name.starts_with(".rm-")
+        || (name.starts_with(".download-") && name.ends_with(".zip"))
+}
+
 /// 磁盘包 id 集（app + vault 两个作用域；未开仓库时只算 app）。
 fn disk_plugin_ids(app: &AppHandle, state: &VaultState) -> HashSet<String> {
     let mut ids = HashSet::new();
@@ -419,7 +506,8 @@ fn read_plugin_state_at(path: &Path) -> Result<PluginState, String> {
     match serde_json::from_str(&raw) {
         Ok(state) => Ok(state),
         Err(e) => {
-            let note = backup_corrupt_state(path)
+            // 复用 vault 侧的损坏备份助手（同一「改名 + 随机后缀」语义，两处不再各写一份）
+            let note = crate::vault::backup_corrupt_config(path, "plugin")
                 .map_or_else(|| "备份失败".to_string(), |p| format!("已备份为 {}", p.display()));
             eprintln!("[plugin] 插件状态文件损坏，{note}（按空状态继续）：{e}");
             Ok(PluginState::default())
@@ -437,13 +525,6 @@ fn read_plugin_state_lenient(app: &AppHandle) -> (PluginState, bool) {
             (PluginState::default(), false)
         }
     }
-}
-
-/// 把损坏的状态文件改名备份；返回备份路径（失败 = None）。
-/// 备份名带随机后缀：同名目标在 Windows 上会被 rename 静默替换，固定名会让新的损坏冲掉旧备份。
-fn backup_corrupt_state(path: &Path) -> Option<PathBuf> {
-    let backup = path.with_file_name(format!("{STATE_FILE}.corrupt-{}", nanoid::nanoid!()));
-    fs::rename(path, &backup).ok().map(|_| backup)
 }
 
 /// 按路径写状态（锁内读改写与单测复用）。
@@ -714,7 +795,7 @@ fn validate_git_url(url: &str) -> Result<(), String> {
 /// 参数经 `--` 终止选项解析（URL 只可能来自白名单校验或 owner/repo 拼装，双保险防选项注入）；
 /// 体积不设上限，仅有挂死宽限（见 GIT_HANG_GUARD）。
 async fn git_clone_to(base: &Path, url: &str) -> Result<PathBuf, String> {
-    let target = base.join(format!(".install-{}", nanoid::nanoid!()));
+    let target = base.join(residue_name("install", ""));
     let out = run_git({
         let mut cmd = git_command();
         cmd.args(["clone", "--", url]).arg(git_path_arg(&target));
@@ -774,13 +855,13 @@ async fn codeload_extract_to(
     let base = plugin_base_dir(app, state, scope)?;
     let branch = resolve_default_branch(repo).await?;
     let client = http_client()?;
-    let zip_temp = base.join(format!(".download-{}.zip", nanoid::nanoid!()));
+    let zip_temp = base.join(residue_name("download", ".zip"));
     let download = download_zip(&client, &codeload_url(repo, &branch), &zip_temp).await;
     if let Err(e) = download {
         let _ = fs::remove_file(&zip_temp);
         return Err(e);
     }
-    let extract_temp = base.join(format!(".install-{}", nanoid::nanoid!()));
+    let extract_temp = base.join(residue_name("install", ""));
     if let Err(e) = fs::create_dir_all(&extract_temp) {
         let _ = fs::remove_file(&zip_temp);
         let _ = fs::remove_dir_all(&extract_temp);
@@ -1260,13 +1341,30 @@ fn is_dir_link(meta: &fs::Metadata) -> bool {
 
 /// 仅删除目录链接（junction/符号链接），绝不触碰链接目标；真实目录（状态与目录不一致兜底）整删。
 /// 显式先判链接再删，把「本地来源卸载不误删源目录」从依赖 std 行为变为代码保证。
+/// 错误文案不加「卸载失败：」前缀——调用方（卸载事务）会统一包一层，避免双重前缀。
 fn remove_link_only(dir: &Path) -> Result<(), String> {
     let meta = fs::symlink_metadata(dir).map_err(|e| format!("读取链接信息失败：{e}"))?;
     if is_dir_link(&meta) {
-        fs::remove_dir(dir).map_err(|e| format!("卸载失败：{e}"))
+        remove_link(dir).map_err(|e| e.to_string())
     } else {
-        fs::remove_dir_all(dir).map_err(|e| format!("卸载失败：{e}"))
+        fs::remove_dir_all(dir).map_err(|e| e.to_string())
     }
+}
+
+/// 删除目录链接本身（不跟随）。
+///
+/// 平台必须分开：Windows 的 junction 只能用 `remove_dir`（`remove_file` 报权限错误），
+/// 而 Unix 的 `remove_dir` 就是 `rmdir(2)`——它**不跟随末尾符号链接**、对符号链接直接返回
+/// ENOTDIR，只能用 `remove_file`(unlink)。写成一套会让 Linux 上的卸载在状态已清后报错、
+/// 残留隔离目录永远清不掉。
+#[cfg(windows)]
+fn remove_link(link: &Path) -> std::io::Result<()> {
+    fs::remove_dir(link)
+}
+
+#[cfg(not(windows))]
+fn remove_link(link: &Path) -> std::io::Result<()> {
+    fs::remove_file(link)
 }
 
 /// 卸载插件：本地来源只删链接（源目录不动，链接悬空也能删）；其余删除整个插件目录；
@@ -1300,32 +1398,81 @@ pub fn plugin_uninstall(
         }
         Err(_) => {
             let by_name = base.join(target_folder_name(&source.dir_name, &id));
-            if fs::symlink_metadata(&by_name).is_ok() {
+            match fs::symlink_metadata(&by_name) {
                 // 目录/链接仍在（本地源目录被移走后 junction 悬空也在此列）：按名删除。
-                Some(by_name)
-            } else if source.manifest.is_some() {
+                Ok(_) => Some(by_name),
                 // 目录已不在，但该行以随应用分发的实现呈现（清单随宿主保存）：无目录可删，清记录即可。
-                None
-            } else {
+                Err(_) if source.manifest.is_some() => None,
+                // 目录确实不存在（卸载补偿失败留下的幽灵记录：目录已被残留清扫删掉、状态记录卡住）：
+                // 无处可删，按「已不在」处理清掉记录，让这一行不再永久占位、无法重试。
+                // 前提是插件目录本身可枚举：路径不可达（网络离线/权限）不等于不存在，那种情况照旧报错，
+                // 防误删安装来源。已知取舍：同一 id 更新中途（目录已改名成 `.bak-*`、状态尚未写回）
+                // 恰好确认卸载时也会走到这里清掉记录——更新成功会重新写入、失败回滚则该行需重装恢复。
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::NotFound && fs::read_dir(&base).is_ok() =>
+                {
+                    None
+                }
                 // 有落位目录但不可达（如网络路径离线）：报错而不清记录，防误删安装来源。
-                return Err("插件不存在".into());
+                Err(_) => return Err("插件不存在".into()),
             }
         }
     };
     if let Some(dir) = dir {
-        if source.kind == PluginSourceKind::Local {
-            remove_link_only(&dir)?;
-        } else {
-            fs::remove_dir_all(&dir).map_err(|e| format!("卸载失败：{e}"))?;
-        }
+        uninstall_dir_transaction(&dir, source.kind, || {
+            // 状态清理由锁内读改写完成：目录操作在锁外（可能慢），写入必须以最新状态为基础，
+            // 否则会覆盖并发命令刚写入的 enabled/sources
+            update_plugin_state(&app, |fresh| {
+                fresh.enabled.remove(&id);
+                fresh.sources.remove(&id);
+                Ok(((), true))
+            })
+        })?;
+    } else {
+        // 无落位目录（实现随应用编译 / 目录已不在）：只需清状态记录
+        update_plugin_state(&app, |fresh| {
+            fresh.enabled.remove(&id);
+            fresh.sources.remove(&id);
+            Ok(((), true))
+        })?;
     }
-    // 状态清理由锁内读改写完成：目录删除在锁外（可能慢），写入必须以最新状态为基础，
-    // 否则会覆盖并发命令刚写入的 enabled/sources
-    update_plugin_state(&app, |fresh| {
-        fresh.enabled.remove(&id);
-        fresh.sources.remove(&id);
-        Ok(((), true))
-    })
+    Ok(())
+}
+
+/// 卸载的「删目录 + 清状态」两步事务：先把落位目录改名为同目录 `.rm-*`（隔离态，可补偿），
+/// 再写状态，最后才真正删除隔离目录。
+///
+/// 为什么不能先删目录再写状态：两步之间崩溃/写失败会留下「目录已删、`sources[id]` 仍在」的记录；
+/// 而 `plugin_list` 要求可展示的落位目录或宿主清单才列出行，用户看到的是行消失 + 再卸载报「插件不存在」，
+/// 即卸不掉的幽灵记录。隔离 + 补偿让失败路径保持原状可重试；补偿本身也失败时目录留在 `.rm-*`
+/// （由 `sweep_plugin_residues` 超龄清掉），状态记录由下一次对该 id 的卸载按「目录确实不存在」清掉
+/// （见 `plugin_uninstall` 的按名定位分支）。
+fn uninstall_dir_transaction(
+    dir: &Path,
+    kind: PluginSourceKind,
+    clear_state: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    let isolated = dir.with_file_name(residue_name("rm", ""));
+    if let Err(e) = fs::rename(dir, &isolated) {
+        return Err(format!("卸载失败：{e}"));
+    }
+    if let Err(e) = clear_state() {
+        // 补偿：目录改名还原，状态未变——用户可原样重试（不留幽灵记录）
+        if let Err(back) = fs::rename(&isolated, dir) {
+            eprintln!(
+                "[plugin] 卸载状态写失败且目录还原失败（残留 {}）：{back}",
+                isolated.display()
+            );
+        }
+        return Err(e);
+    }
+    // 本地来源只删链接（源目录不动）；其余整目录删除。删除失败不改变已提交的卸载结论。
+    if kind == PluginSourceKind::Local {
+        remove_link_only(&isolated).map_err(|e| format!("卸载失败：{e}"))?;
+    } else {
+        fs::remove_dir_all(&isolated).map_err(|e| format!("卸载失败：{e}"))?;
+    }
+    Ok(())
 }
 
 /// 启用/停用插件（前端先确认权限再启用；vault 级插件卸载/禁用不清仓库内文件）。
@@ -1492,12 +1639,12 @@ async fn codeload_update(
 ) -> Result<PluginInfo, String> {
     let branch = resolve_default_branch(&source.repo).await?;
     let client = http_client()?;
-    let zip_temp = base.join(format!(".update-{}.zip", nanoid::nanoid!()));
+    let zip_temp = base.join(residue_name("update", ".zip"));
     if let Err(e) = download_zip(&client, &codeload_url(&source.repo, &branch), &zip_temp).await {
         let _ = fs::remove_file(&zip_temp);
         return Err(e);
     }
-    let extract_temp = base.join(format!(".update-{}", nanoid::nanoid!()));
+    let extract_temp = base.join(residue_name("update", ""));
     if let Err(e) = fs::create_dir_all(&extract_temp) {
         let _ = fs::remove_file(&zip_temp);
         return Err(format!("创建临时目录失败：{e}"));
@@ -1528,7 +1675,7 @@ async fn codeload_update(
     let target = base.join(&folder_name);
 
     // 备份旧版 → 落位新版 → 任一失败回滚旧版。
-    let backup = base.join(format!(".bak-{}-{}", old_id, nanoid::nanoid!()));
+    let backup = base.join(residue_name("bak", ""));
     if let Err(e) = fs::rename(dir, &backup) {
         let _ = fs::remove_dir_all(&extract_temp);
         return Err(format!("备份旧版失败：{e}"));
@@ -1629,7 +1776,7 @@ fn read_kv_file(dir: &Path) -> Result<serde_json::Map<String, Value>, String> {
         Ok(Value::Object(map)) => Ok(map),
         Ok(_) => Err("插件键值数据必须是 JSON 对象".to_string()),
         Err(e) => {
-            let note = backup_corrupt_state(&path)
+            let note = crate::vault::backup_corrupt_config(&path, "plugin")
                 .map_or_else(|| "备份失败".to_string(), |p| format!("已备份为 {}", p.display()));
             eprintln!("[plugin] 插件键值数据损坏，{note}（按空表继续）：{e}");
             Ok(serde_json::Map::new())
@@ -2080,15 +2227,15 @@ mod tests {
     }
 
     #[test]
-    fn backup_corrupt_state_uses_unique_name() {
+    fn corrupt_config_backup_uses_unique_name() {
+        // 共用助手（vault::backup_corrupt_config）：同一文件连续损坏两次不得互相覆盖
         let dir = std::env::temp_dir();
         let path = dir.join(format!("plugin-state-test-{}.json", nanoid::nanoid!()));
         fs::write(&path, "not json").unwrap();
-        let first = backup_corrupt_state(&path).expect("首次备份应成功");
+        let first = crate::vault::backup_corrupt_config(&path, "plugin").expect("首次备份应成功");
         assert!(!path.exists(), "原文件应已被移走");
-        // 第二次损坏不得覆盖第一次的备份（同名 rename 在 Windows 上会静默替换）。
         fs::write(&path, "not json again").unwrap();
-        let second = backup_corrupt_state(&path).expect("第二次备份应成功");
+        let second = crate::vault::backup_corrupt_config(&path, "plugin").expect("第二次备份应成功");
         assert_ne!(first, second);
         assert!(first.exists() && second.exists());
         let _ = fs::remove_file(first);
@@ -2154,5 +2301,98 @@ mod tests {
         assert!(!manifest_is_theme(&json!({ "atelyx": { "themes": [] } }), "com.acme.theme"));
         assert!(!manifest_is_theme(&json!({ "atelyx": { "type": "panel" } }), "com.acme.panel"));
         assert!(!manifest_is_theme(&json!({}), "com.acme.theme"));
+    }
+
+    /// 测试用临时目录（Drop 递归清理）。
+    use crate::vault::test_support::TempDir;
+
+    #[test]
+    fn uninstall_restores_dir_when_state_write_fails() {
+        let tmp = TempDir::new("uninstall-rollback");
+        let dir = tmp.join("com.acme.todo");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("package.json"), "{}").unwrap();
+
+        let err = uninstall_dir_transaction(&dir, PluginSourceKind::Market, || {
+            Err("状态文件写失败".to_string())
+        })
+        .unwrap_err();
+
+        assert!(err.contains("状态文件写失败"));
+        // 目录仍在原路径（改名已还原），状态未变 → 可原样重试，不留幽灵记录
+        assert!(dir.join("package.json").is_file());
+        assert!(fs::read_dir(&*tmp).unwrap().flatten().all(|e| {
+            !e.file_name().to_string_lossy().starts_with(".rm-")
+        }));
+    }
+
+    #[test]
+    fn uninstall_removes_dir_after_state_committed() {
+        let tmp = TempDir::new("uninstall-ok");
+        let dir = tmp.join("com.acme.todo");
+        fs::create_dir_all(&dir).unwrap();
+        let cleared = std::cell::Cell::new(false);
+
+        uninstall_dir_transaction(&dir, PluginSourceKind::Market, || {
+            cleared.set(true);
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(cleared.get());
+        assert!(!dir.exists());
+        assert!(fs::read_dir(&*tmp).unwrap().flatten().next().is_none());
+    }
+
+    #[test]
+    fn residue_sweep_filters_by_name_and_age() {
+        let tmp = TempDir::new("residue-sweep");
+        // 超龄项用合成旧时刻（第 2 段 stamp = 0 = 必然超龄）：不依赖真实时钟，
+        // 用「刚创建 + 1 秒阈值」会跨秒抖动（CI 卡顿即失败）
+        let old_kinds: Vec<String> = ["install", "update", "bak", "rm"]
+            .iter()
+            .map(|kind| format!(".{kind}-0-abcdef"))
+            .collect();
+        for name in &old_kinds {
+            fs::create_dir_all(tmp.join(name)).unwrap();
+        }
+        fs::create_dir_all(tmp.join(".download-0-abcdef.zip")).unwrap();
+        fs::create_dir_all(tmp.join("com.acme.todo")).unwrap();
+        fs::create_dir_all(tmp.join(".hidden-other")).unwrap();
+
+        sweep_plugin_residues(&*tmp);
+
+        for name in &old_kinds {
+            assert!(!tmp.join(name).exists(), "超龄残留应被清理：{name}");
+        }
+        assert!(!tmp.join(".download-0-abcdef.zip").exists(), "超龄下载中间文件应被清理");
+        assert!(tmp.join("com.acme.todo").exists(), "插件目录不得清理");
+        assert!(tmp.join(".hidden-other").exists(), "非残留名的隐藏目录不得清理");
+    }
+
+    #[test]
+    fn residue_sweep_keeps_fresh_entries() {
+        let tmp = TempDir::new("residue-fresh");
+        let in_progress = tmp.join(&residue_name("install", ""));
+        fs::create_dir_all(&in_progress).unwrap();
+
+        // 生产阈值下刚创建的中间态必须在（同一次安装流程内不得被清理）
+        sweep_plugin_residues(&*tmp);
+
+        assert!(in_progress.exists(), "新鲜中间态不得清理（安装可能正在进行）");
+    }
+
+    #[test]
+    fn residue_age_comes_from_name_not_mtime() {
+        // `.bak-*`/`.rm-*` 由既有插件目录改名而来，mtime 继承原目录（可能几十天前）；
+        // 判龄必须认名字里的创建时刻，否则刚创建的活备份/活隔离目录会被当超龄清掉
+        let name = residue_name("bak", "");
+        let stamp = residue_stamp_of(&name).expect("残留名带创建时刻");
+        assert!(residue_stamp_now().saturating_sub(stamp) < 5, "刚生成的残留名应判为新鲜：{name}");
+        // 名字里没有时刻（无法判龄）→ 不认，交由清扫保留
+        assert_eq!(residue_stamp_of(".bak-旧格式-xyz"), None);
+        assert_eq!(residue_stamp_of(".install-abc"), None);
+        // `.zip` 后缀不影响解析
+        assert_eq!(residue_stamp_of(".download-0-abcdef.zip"), Some(0));
     }
 }

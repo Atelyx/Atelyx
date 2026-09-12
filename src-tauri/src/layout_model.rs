@@ -244,13 +244,19 @@ where
     Ok(Some(Option::<String>::deserialize(deserializer)?))
 }
 
-/// 归一化：schema 补齐 + 布局列表非空 + 主页固定置顶 + 激活布局有效 + 撕裂窗口过滤 + 最近打开截断。
+/// 归一化：schema 补齐 + 布局列表非空 + 主页固定置顶 + 激活布局有效 + 撕裂窗口过滤 + 最近打开截断
+/// + 各 Split 尺寸形状修复。
 pub(crate) fn normalize(ui: &mut AppUiState) {
     ui.schema = UI_STATE_SCHEMA.to_string();
     if ui.workspace_layouts.is_empty() {
         ui.workspace_layouts = create_default_layouts();
     }
     ui.workspace_layouts = ensure_home_layout(std::mem::take(&mut ui.workspace_layouts));
+    // 尺寸形状修复：磁盘上的坏值（长度不符/负值/全零）会被前端按越界值渲染，
+    // 而形状守卫只拦新写入、不会覆盖既有坏值 → 该 Split 的拖宽永远只发坏帧而被拒。
+    for layout in &mut ui.workspace_layouts {
+        repair_tree_sizes(&mut layout.tree);
+    }
     let first = ui.workspace_layouts[0].id.clone();
     if !ui.workspace_layouts.iter().any(|l| Some(&l.id) == ui.active_layout_id.as_ref()) {
         ui.active_layout_id = Some(first);
@@ -259,6 +265,25 @@ pub(crate) fn normalize(ui: &mut AppUiState) {
     ui.detached_windows.retain(|w| !w.tabs.is_empty());
     if ui.recent_files.len() > MAX_RECENT_FILES {
         ui.recent_files.truncate(MAX_RECENT_FILES);
+    }
+}
+
+/// 递归修复各 Split 的尺寸：形状不合法（长度 ≠ 子树数、非有限、负值、全零）时回落为均分。
+/// 均分而非删除子树：布局结构本身有效，只有占比不可信。
+/// 空 Split（子树为 0，仅手改文件可造）回落结果仍是空向量、`sizes_valid_for` 恒假——该形态不渲染
+/// 面板故无可见后果，这里只保证不 panic。
+fn repair_tree_sizes(node: &mut LayoutNode) {
+    match node {
+        LayoutNode::Panel { .. } => {}
+        LayoutNode::Split { children, sizes, .. } => {
+            for child in children.iter_mut() {
+                repair_tree_sizes(child);
+            }
+            if !sizes_valid_for(sizes, children.len()) {
+                let n = children.len().max(1) as f64;
+                *sizes = vec![100.0 / n; children.len()];
+            }
+        }
     }
 }
 
@@ -740,6 +765,27 @@ pub(crate) fn set_layout_sizes_op(tree: &LayoutNode, split_id: &str, sizes: &[f6
     }
 }
 
+/// 目标 Split 的 children 数量（回写尺寸前做形状校验用；未命中返回 None）。
+pub(crate) fn split_children_count(tree: &LayoutNode, split_id: &str) -> Option<usize> {
+    match tree_node_by_id(tree, split_id) {
+        Some(LayoutNode::Split { children, .. }) => Some(children.len()),
+        _ => None,
+    }
+}
+
+/// 尺寸形状是否合法：长度 = children 数量、全部有限且非负、和 > 0。
+///
+/// 三处消费：命令入口的预检（`op_passes_shape_check`）、操作应用时的兜底（`apply_layout_op`）、
+/// 读盘归一化时的修复判定（`repair_tree_sizes`）。不校验时长度不符/负值会被接受并持久化，
+/// 前端按这些值布局会越界或塌陷，且坏状态每次启动都被读回（非有限值会让整次序列化失败，
+/// 表现为该次落盘整体丢失）。
+pub(crate) fn sizes_valid_for(sizes: &[f64], child_count: usize) -> bool {
+    sizes.len() == child_count
+        && !sizes.is_empty()
+        && sizes.iter().all(|s| s.is_finite() && *s >= 0.0)
+        && sizes.iter().sum::<f64>() > 0.0
+}
+
 /// 撕裂：从面板移除标签（面板留空），返回 { 新树, 被移除的标签 }。
 pub(crate) fn tear_off_from_panel_op(tree: &LayoutNode, panel_id: &str, tab_id: &str) -> Option<(LayoutNode, TabItem)> {
     let (hit_panel, tab) = find_tab_in_tree(tree, tab_id)?;
@@ -822,6 +868,54 @@ mod tests {
         // 根即该面板（单面板树）不可关闭
         let root = panel("p1", &["files"]);
         assert!(close_panel_op(&root, "p1").is_none());
+    }
+
+    #[test]
+    fn normalize_repairs_deformed_split_sizes() {
+        // 磁盘上既有坏值（长度不符/负值）：归一化必须修复，否则前端按越界值渲染，
+        // 且自己持续发坏帧会被形状守卫全部拒绝 → 该 Split 的拖宽永远无效
+        let bad_tree = LayoutNode::Split {
+            id: "s1".into(),
+            direction: "horizontal".into(),
+            children: vec![panel("p1", &["files"]), panel("p2", &["canvas"]), panel("p3", &["note"])],
+            sizes: vec![-5.0, 105.0],
+        };
+        let mut ui = AppUiState {
+            schema: UI_STATE_SCHEMA.into(),
+            workspace_layouts: vec![
+                WorkspaceLayout { id: "l1".into(), name: "L".into(), tree: bad_tree },
+            ],
+            active_layout_id: Some("l1".into()),
+            ..Default::default()
+        };
+
+        normalize(&mut ui);
+
+        // 主页被补入并置顶，按 id 取回本用例的布局
+        let l1 = ui.workspace_layouts.iter().find(|l| l.id == "l1").unwrap();
+        match &l1.tree {
+            LayoutNode::Split { sizes, children, .. } => {
+                assert!(sizes_valid_for(sizes, children.len()), "坏尺寸应被修复：{sizes:?}");
+                assert_eq!(sizes.len(), 3);
+            }
+            _ => panic!("expected split root"),
+        }
+        // 合法尺寸不被改动
+        let mut ui2 = AppUiState {
+            schema: UI_STATE_SCHEMA.into(),
+            workspace_layouts: vec![
+                WorkspaceLayout { id: "l1".into(), name: "L".into(), tree: two_panels_horizontal() },
+            ],
+            active_layout_id: Some("l1".into()),
+            ..Default::default()
+        };
+        normalize(&mut ui2);
+        // 主页被补入并置顶，按 id 取回本用例的布局
+        let l1 = ui2.workspace_layouts.iter().find(|l| l.id == "l1").unwrap();
+        match &l1.tree {
+            LayoutNode::Split { sizes, .. } => assert_eq!(sizes, &vec![20.0, 80.0]),
+            _ => panic!("expected split root"),
+        }
     }
 
     #[test]

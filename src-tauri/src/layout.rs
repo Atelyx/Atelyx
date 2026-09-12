@@ -23,7 +23,8 @@ use crate::layout_model::{
     create_tab, find_panel, find_tab_in_detached, find_tab_in_tree, group_activate_tab,
     group_add_tab, group_move_tab, group_of, group_of_detached, group_remove_tab,
     group_set_tab_locked, group_set_tab_view, map_detached, map_panel, next_layout_name,
-    prune_empty_windows, regenerate_ids, set_active_tree, set_layout_sizes_op, split_panel_op,
+    prune_empty_windows, regenerate_ids, set_active_tree, set_layout_sizes_op, sizes_valid_for,
+    split_children_count, split_panel_op,
     tear_off_from_panel_op, AppUiState, DetachedWindow, LayoutOp, LayoutOpResult, UiStatePatch,
     MAX_RECENT_FILES, HOME_LAYOUT_ID, WorkspaceLayout,
 };
@@ -279,8 +280,14 @@ pub(crate) fn apply_layout_op(ui: &mut AppUiState, op: &LayoutOp) -> LayoutOpRes
         }
         LayoutOp::SetLayoutSizes { split_id, sizes } => {
             let tree = active_layout(ui).tree;
-            let tree = set_layout_sizes_op(&tree, split_id, sizes);
-            set_active_tree(ui, tree);
+            // 形状校验（长度 = children 数、有限非负、和 > 0）：坏值一旦落进模型就会被广播并持久化，
+            // 前端随后按它布局可能越界/塌陷，且坏状态每次启动都被读回。不合法 = 忽略本次操作。
+            let valid = split_children_count(&tree, split_id)
+                .is_some_and(|n| sizes_valid_for(sizes, n));
+            if valid {
+                let tree = set_layout_sizes_op(&tree, split_id, sizes);
+                set_active_tree(ui, tree);
+            }
         }
         LayoutOp::AddLayout => {
             let active = active_layout(ui);
@@ -350,6 +357,16 @@ pub fn layout_bootstrap(state: State<'_, LayoutState>) -> Result<AppUiState, Str
     Ok(inner.ui.clone())
 }
 
+/// 尺寸补丁是否可应用（用于在变更前挡掉坏值：坏值既不该进模型，也不该触发落盘/广播）。
+/// 其余操作恒为 true（各自在校验分支内决定是否真正改动）。
+pub(crate) fn op_passes_shape_check(ui: &AppUiState, op: &LayoutOp) -> bool {
+    match op {
+        LayoutOp::SetLayoutSizes { split_id, sizes } => split_children_count(&active_layout(ui).tree, split_id)
+            .is_some_and(|n| sizes_valid_for(sizes, n)),
+        _ => true,
+    }
+}
+
 /// 应用一个布局操作：校验 + 变更 + 广播 + 调度落盘。返回操作结果（splitPanel/tearOff 用）。
 /// 布局模型变更后同步窗口生命周期：reconcile 自锁读当前模型补建缺失/回收幽灵。
 #[tauri::command]
@@ -357,6 +374,10 @@ pub async fn layout_op(app: AppHandle, op: LayoutOp) -> Result<LayoutOpResult, S
     let state = app.state::<LayoutState>();
     let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
     if !inner.loaded {
+        return Ok(LayoutOpResult::default());
+    }
+    // 形状不合法 = 什么也没发生：不置 dirty、不落盘、不广播（否则坏值会被持久化并被各窗口读回）
+    if !op_passes_shape_check(&inner.ui, &op) {
         return Ok(LayoutOpResult::default());
     }
     let result = apply_layout_op(&mut inner.ui, &op);
@@ -762,6 +783,55 @@ mod tests {
             LayoutNode::Split { sizes, .. } => assert_eq!(sizes, &vec![30.0, 70.0]),
             _ => panic!("expected split root"),
         }
+    }
+
+    #[test]
+    fn set_layout_sizes_rejects_deformed_patch() {
+        // 坏值一律拒收：长度不符 / NaN / 负值 / 全零（和必须 > 0）。
+        // 它们不该进模型、不该落盘、也不该被广播（前端按坏值布局会越界或塌陷，且坏状态每次启动都被读回）。
+        let bad: Vec<(&str, Vec<f64>)> = vec![
+            ("长度过短", vec![50.0]),
+            ("长度过长", vec![10.0, 20.0, 70.0]),
+            ("NaN", vec![f64::NAN, 50.0]),
+            ("无穷", vec![f64::INFINITY, 50.0]),
+            ("负值", vec![-5.0, 105.0]),
+            ("全零", vec![0.0, 0.0]),
+            ("空", vec![]),
+        ];
+        for (label, sizes) in bad {
+            let mut ui = ui_with(two_panels_horizontal());
+            let op = LayoutOp::SetLayoutSizes { split_id: "s1".into(), sizes };
+            assert!(!op_passes_shape_check(&ui, &op), "{label} 应被形状校验拒绝");
+            // 校验拒不通过时命令层提前返回，模型不得被改动
+            if op_passes_shape_check(&ui, &op) {
+                let _ = apply_layout_op(&mut ui, &op);
+            }
+            let tree = active_layout(&ui).tree;
+            match &tree {
+                LayoutNode::Split { sizes, .. } => assert_eq!(sizes, &vec![20.0, 80.0], "{label} 后模型应保持不变"),
+                _ => panic!("expected split root"),
+            }
+        }
+        // 形状合法（和不为 100，由前端归一化口径保证）仍被接受
+        let mut ui = ui_with(two_panels_horizontal());
+        let op = LayoutOp::SetLayoutSizes { split_id: "s1".into(), sizes: vec![33.3, 66.7] };
+        assert!(op_passes_shape_check(&ui, &op));
+        let _ = apply_layout_op(&mut ui, &op);
+        match &active_layout(&ui).tree {
+            LayoutNode::Split { sizes, .. } => assert_eq!(sizes, &vec![33.3, 66.7]),
+            _ => panic!("expected split root"),
+        }
+    }
+
+    #[test]
+    fn sizes_valid_for_rules() {
+        assert!(sizes_valid_for(&[50.0, 50.0], 2));
+        assert!(sizes_valid_for(&[0.0, 100.0], 2));
+        assert!(!sizes_valid_for(&[50.0, 50.0], 3));
+        assert!(!sizes_valid_for(&[f64::NAN, 50.0], 2));
+        assert!(!sizes_valid_for(&[-1.0, 101.0], 2));
+        assert!(!sizes_valid_for(&[0.0, 0.0], 2));
+        assert!(!sizes_valid_for(&[], 0));
     }
 
     #[test]

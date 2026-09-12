@@ -69,6 +69,15 @@ pub struct GlobalConfig {
     pub default_home_layout: Option<bool>,
 }
 
+/// `read_global_config` 的返回：全局配置 + 损坏备份文件名（`None` = 正常读取）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GlobalConfigRead {
+    pub config: GlobalConfig,
+    /// 非空 = `global.json` 原文损坏、已按该文件名备份并退回空配置（前端据此提示用户）
+    pub corrupt_backup: Option<String>,
+}
+
 /// 获取本机设备名（协作身份默认值：昵称留空时前端用它兜底展示）。
 #[tauri::command]
 pub fn get_hostname() -> String {
@@ -120,21 +129,47 @@ fn normalize_and_dedupe_vaults(mut recents: Vec<RecentVault>) -> Vec<RecentVault
     recents
 }
 
-/// 读全局配置（文件不存在或解析失败时返回空配置，不报错——允许首次启动/手编辑损坏）。
+/// 读全局配置（文件不存在返回空配置；解析失败先备份原文再降级）。
 /// 返回前对 recentVaults 归一化去重，兼容旧版本写入的 `\\?\` 前缀脏数据。
+///
+/// 为什么解析失败要先备份：本文件由 `updateGlobalConfig` 做 read-modify-write，读到的空配置会被
+/// 原样写回——不备份就等于「一次外部编辑/磁盘异常静默清空最近仓库/主题/字号/协作地址」。
+/// 备份走改名（原文完整保留，可人工取回）；备份文件名一并回传，读到空配置时前端能说明原因。
+/// **备份失败即报错**（与 `config.json` 读路径同口径）：留不下原文就继续按空配置走，
+/// 调用方紧接着的 read-modify-write 会把原文整体覆盖——既无备份也无从告知。
 #[tauri::command]
-pub fn read_global_config(app: AppHandle) -> Result<GlobalConfig, String> {
+pub fn read_global_config(app: AppHandle) -> Result<GlobalConfigRead, String> {
     let path = global_config_path(&app)?;
-    if !path.exists() {
-        return Ok(GlobalConfig::default());
-    }
-    let data = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let mut config = match serde_json::from_str::<GlobalConfig>(&data) {
-        Ok(c) => c,
-        Err(_) => GlobalConfig::default(),
+    let mut corrupt_backup: Option<String> = None;
+    let mut config = if !path.exists() {
+        GlobalConfig::default()
+    } else {
+        let data = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        match serde_json::from_str::<GlobalConfig>(&data) {
+            Ok(c) => c,
+            Err(e) => {
+                let Some(backup) = crate::vault::backup_corrupt_config(&path, "global") else {
+                    return Err(format!(
+                        "全局配置已损坏且原文备份失败（{}），已中止读取以免覆盖原文：{e}",
+                        path.display()
+                    ));
+                };
+                eprintln!(
+                    "[global] 全局配置损坏，已备份为 {}（按空配置继续）：{e}",
+                    backup.display()
+                );
+                corrupt_backup = backup
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned());
+                GlobalConfig::default()
+            }
+        }
     };
     config.recent_vaults = normalize_and_dedupe_vaults(config.recent_vaults);
-    Ok(config)
+    Ok(GlobalConfigRead {
+        config,
+        corrupt_backup,
+    })
 }
 
 /// 写全局配置（原子写：临时文件 + fsync + rename，与 vault 侧 `atomic_write` 同一 durability 语义）。
