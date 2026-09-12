@@ -60,17 +60,19 @@ export interface TextFileData {
   file: string;
 }
 
-/** 媒体节点：原文件在 附件/，此处存路径引用 + 元数据。 */
+/** 媒体节点：内容在独立文件（仓库附件或未入库的临时件），此处存路径引用 + 元数据。 */
 export interface MediaFileData {
-  /** 相对仓库根的路径，如 `附件/image-xxx.png` */
-  file: string;
+  /** 仓库相对路径：`.atelyx/temp/<canvasKey>/…` = 未入库临时件，其余 = 仓库附件；缺省 = 内容只在节点自身（thumb/body 内嵌） */
+  file?: string;
   mime: string;
   kind: "image" | "file";
   /** 文件名（画布显示用） */
   name?: string;
   /** 二进制类解析失败时标注，仅作画布参考、不注入模型 */
   parseFailed?: boolean;
-  /** 文本类文件解析出的内容（@ 引用/连边时注入用） */
+  /** 图片 dataURL 预览：有 `file` 时是按引用读回的运行时缓存（不落盘）；无 `file` 的节点是唯一副本，随 `.atlx` 内嵌 */
+  thumb?: string;
+  /** 文本类文件解析出的内容（@ 引用/连边时注入用）：有 `file` 时是读回缓存（不落盘），无 `file` 时随 `.atlx` 内嵌 */
   body?: string;
   /** 按图片真实比例计算的展示宽度（px），用户 resize 后此字段不再生效 */
   displayWidth?: number;
@@ -196,6 +198,13 @@ export interface VaultConfig {
   vaultId?: string;
 }
 
+/** `read_vault_config` 的返回：仓库配置 + 损坏备份文件名（null = 正常读取）。 */
+export interface VaultConfigRead {
+  config: VaultConfig;
+  /** 非空 = `config.json` 原文损坏，已按该文件名备份并退回空配置（用户可见提示据此弹出）。 */
+  corruptBackup: string | null;
+}
+
 /** open_vault 返回的仓库信息。 */
 export interface VaultInfo {
   /** 仓库根绝对路径 */
@@ -204,6 +213,8 @@ export interface VaultInfo {
   name: string;
   /** 仓库稳定 ID（`.atelyx/config.json` 的 vaultId，首次打开生成、之后固定；仓库归属识别用）。 */
   id: string;
+  /** 非空 = `.atelyx/config.json` 原文损坏、已按该文件名备份并按空配置继续（用户可见提示据此弹出）。 */
+  configCorruptBackup: string | null;
 }
 
 /** 最近打开的仓库（存全局 global.json，启动页展示）。 */
@@ -230,6 +241,15 @@ export interface RebuildLinksResult {
   modified: number;
   /** 改写的链接处数 */
   links: number;
+}
+
+/**
+ * 链接维护的副作用报告（rename_note / rename_folder 返回）：本次被 Rust 代写正文的 `.md` 相对路径清单。
+ * 这些文件的自写回波被调用方的抑制窗口吞掉，订阅方只能据此作废其正文缓存
+ * （见 `VaultActionEvent.rewritten`）。
+ */
+export interface LinkRewriteResult {
+  rewritten: string[];
 }
 
 export type SearchProvider = "tavily" | "searxng";
@@ -280,6 +300,13 @@ export interface GlobalConfig {
   collabNickname?: string;
   /** 协作身份色（hex；空 = 随机分配）。 */
   collabColor?: string;
+}
+
+/** `read_global_config` 的返回：全局配置 + 损坏备份文件名（null = 正常读取）。 */
+export interface GlobalConfigRead {
+  config: GlobalConfig;
+  /** 非空 = `global.json` 原文损坏，已按该文件名备份并退回空配置（用户可见提示据此弹出）。 */
+  corruptBackup: string | null;
 }
 
 // ===== 外部白板格式（.canvas JSON，只读查看/转换为画布用）=====

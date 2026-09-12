@@ -476,12 +476,15 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
       // 删除路径的 watcher 事件可能落在自写抑制窗口内被跳过，故与改名同款显式作废
       vaultHandler("note:renamed", (e) => {
         useNoteStore.getState().invalidateNoteCache(e.oldPath);
+        // Rust 代写正文的其它笔记（链接改写）：自写回波被抑制窗口吞掉，缓存须显式作废
+        for (const file of e.rewritten ?? []) useNoteStore.getState().invalidateNoteCache(file);
         useNoteUndoStore.getState().renameFile(e.oldPath, e.newPath);
         // 协作文档以路径为身份：旧路径文档随迁作废（同名新文件不得复用其 CRDT 状态）
         useNoteCollabStore.getState().disposeDoc(e.oldPath);
       }),
       vaultHandler("note:moved", (e) => {
         useNoteStore.getState().invalidateNoteCache(e.oldPath);
+        for (const file of e.rewritten ?? []) useNoteStore.getState().invalidateNoteCache(file);
         useNoteUndoStore.getState().renameFile(e.oldPath, e.newPath);
         useNoteCollabStore.getState().disposeDoc(e.oldPath);
       }),
@@ -497,12 +500,15 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
       vaultHandler("folder:renamed", (e) => {
         useNoteStore.getState().invalidateNoteCacheUnder(e.oldDir);
         useNoteStore.getState().invalidateNoteCacheUnder(e.newDir);
+        // 目录前缀之外也可能有笔记被代写链接（指向该目录下笔记的引用）：按清单逐条作废
+        for (const file of e.rewritten ?? []) useNoteStore.getState().invalidateNoteCache(file);
         // 协作文档以路径为身份：旧目录前缀下的文档随迁作废
         useNoteCollabStore.getState().disposeDocsUnder(e.oldDir);
       }),
       vaultHandler("folder:moved", (e) => {
         useNoteStore.getState().invalidateNoteCacheUnder(e.oldDir);
         useNoteStore.getState().invalidateNoteCacheUnder(e.newDir);
+        for (const file of e.rewritten ?? []) useNoteStore.getState().invalidateNoteCache(file);
         useNoteCollabStore.getState().disposeDocsUnder(e.oldDir);
       }),
     ],

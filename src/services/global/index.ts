@@ -13,13 +13,13 @@
  * promise 链串行化，避免并发 read-modify-write 丢更新。
  */
 import { invoke } from "@tauri-apps/api/core";
-import type { GlobalConfig, RecentVault, VaultInfo } from "@/types";
+import type { GlobalConfig, GlobalConfigRead, RecentVault, VaultInfo } from "@/types";
 
 const MAX_RECENT_VAULTS = 10;
 
-/** 读全局配置（文件不存在返回空配置）。 */
-export async function readGlobalConfig(): Promise<GlobalConfig> {
-  return invoke<GlobalConfig>("read_global_config");
+/** 读全局配置（文件不存在返回空配置）。`corruptBackup` 非空 = 原文损坏已备份为磁盘上该文件名。 */
+export async function readGlobalConfig(): Promise<GlobalConfigRead> {
+  return invoke<GlobalConfigRead>("read_global_config");
 }
 
 /** 获取本机设备名（协作身份默认值）。 */
@@ -74,12 +74,15 @@ function serialized<T>(fn: () => Promise<T>): Promise<T> {
  * Read-modify-write global.json：读当前值 → 浅合并 patch 顶层字段 → 写回。
  * 串行化保证并发调用不丢更新。`patch.theme` / `patch.recentVaults`
  * 整体替换对应字段（不做深合并），调用方传完整子对象。
+ * 返回本次读到的损坏备份文件名（`null` = 无损坏）：调用方据此提示用户
+ * （读到的空配置会与 patch 一起写回，等于把其余字段重置，必须可见）。
  */
-export async function updateGlobalConfig(patch: Partial<GlobalConfig>): Promise<void> {
-  await serialized(async () => {
-    const current = await readGlobalConfig();
+export async function updateGlobalConfig(patch: Partial<GlobalConfig>): Promise<string | null> {
+  return serialized(async () => {
+    const { config: current, corruptBackup } = await readGlobalConfig();
     const merged: GlobalConfig = { ...current, ...patch };
     await writeGlobalConfig(merged);
+    return corruptBackup;
   });
 }
 

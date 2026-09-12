@@ -17,6 +17,8 @@ const h = vi.hoisted(() => ({
   writeStarted: [] as string[],
   /** 各次 write_note 完成后的正文（按完成顺序）。 */
   writes: [] as string[],
+  /** 各次 read_note 的延迟（毫秒，按调用顺序消费）：构造「读盘在途期间又来一次外部变化」。 */
+  readDelays: [] as number[],
   /** 各次 write_note 的延迟（毫秒）与失败计划（按调用顺序消费，缺省 0/false）。 */
   writeDelays: [] as number[],
   writeFails: [] as boolean[],
@@ -27,7 +29,10 @@ vi.mock("@tauri-apps/api/core", () => ({
     const file = String(args?.file ?? "");
     if (cmd === "read_note") {
       if (h.failReads) throw new Error("read failed");
-      return h.reads.shift() ?? h.disk[file] ?? "";
+      const delay = h.readDelays.shift() ?? 0;
+      const value = h.reads.shift() ?? h.disk[file] ?? "";
+      if (delay) await new Promise((r) => setTimeout(r, delay));
+      return value;
     }
     if (cmd === "write_note") {
       const content = String(args?.content ?? "");
@@ -71,6 +76,7 @@ afterEach(() => {
 beforeEach(async () => {
   vi.resetModules();
   h.reads = [];
+  h.readDelays = [];
   h.failWrites = false;
   h.failReads = false;
   h.disk = {};
@@ -190,6 +196,217 @@ describe("外部修改与冲突", () => {
       expect(noteStore.useNoteStore.getState().pendingNoteContent["a.md"]).toBeUndefined(),
     );
     expect(reopened.getState().conflict).toBe(false);
+  });
+
+  /**
+   * 应用内其它写者（画布文本节点 / AI 文件工具 / Rust 链接改写）落盘的内容与本地未落盘正文
+   * 不同时，与真实外部修改同口径转冲突：磁盘内容看不出「谁写的」，放行等于让尚未落盘的本地
+   * 输入静默盖掉刚写进去的正文（无冲突条、无历史、无用户可见信号）。
+   */
+  it("应用内写者落盘的内容与本地正文不同：转冲突、不静默覆盖", async () => {
+    const session = store.noteSurfaceProvider.open("a.md");
+    session.applyBody("本地未落盘");
+    expect(session.getState().conflict).toBe(false);
+
+    await noteStore.useNoteStore.getState().saveNoteContent("a.md", "应用自写内容");
+    h.reads.push("应用自写内容");
+    noteStore.useNoteStore.getState().markNoteExternallyEdited("a.md");
+
+    await vi.waitFor(() => expect(session.getState().conflict).toBe(true));
+    expect(session.getState().content).toBe("本地未落盘"); // 本地输入保留，等用户决策
+    expect(h.disk["a.md"]).toBe("应用自写内容"); // 磁盘上是应用写者的正文，未被覆盖
+    expect(noteStore.useNoteStore.getState().noteConflicts["a.md"]).toBe(true);
+    expect(notifications.useNotificationStore.getState().items).toHaveLength(1);
+  });
+
+  /**
+   * 磁盘持有的正是本地正文（关窗/切仓库/AI 操作前的挂起输入落盘走的就是这份内容）：内容已在盘上，
+   * 基线跟上并清脏即可——这是逐字节的内容事实，不是对写出者的推断，故不弹冲突条。
+   */
+  it("磁盘内容与本地正文一致：基线对齐、清脏、不弹冲突条", async () => {
+    const session = store.noteSurfaceProvider.open("a.md");
+    session.applyBody("本地未落盘");
+    // 应用内 flush 链把同一份正文写盘（不经会话写盘链，会话基线仍落后）
+    await noteStore.useNoteStore.getState().saveNoteContent("a.md", "本地未落盘");
+    const writesBefore = h.writes.length;
+
+    h.reads.push("本地未落盘");
+    noteStore.useNoteStore.getState().markNoteExternallyEdited("a.md");
+
+    await vi.waitFor(() => expect(session.getState().dirty).toBe(false));
+    expect(session.getState().conflict).toBe(false);
+    expect(session.getState().content).toBe("本地未落盘");
+    expect(noteStore.useNoteStore.getState().pendingNoteContent["a.md"]).toBeUndefined();
+    expect(notifications.useNotificationStore.getState().items).toHaveLength(0);
+    // 内容已在盘上：不再补一次相同写盘
+    await new Promise((r) => setTimeout(r, 600));
+    expect(h.writes).toHaveLength(writesBefore);
+  });
+
+  it("真正的外部修改仍转冲突（内容比对不得放宽成「一概不冲突」）", async () => {
+    const session = store.noteSurfaceProvider.open("a.md");
+    session.applyBody("本地未落盘");
+    await noteStore.useNoteStore.getState().saveNoteContent("a.md", "应用自写内容");
+
+    // 外部把磁盘改成别的内容：与本地正文也不相等 → 按外部修改处理
+    h.disk["a.md"] = "别人改的内容";
+    noteStore.useNoteStore.getState().markNoteExternallyEdited("a.md");
+
+    await vi.waitFor(() => expect(session.getState().conflict).toBe(true));
+    expect(noteStore.useNoteStore.getState().noteConflicts["a.md"]).toBe(true);
+  });
+
+  /**
+   * `save()` 的写前基准只认本会话确认过的落盘内容：磁盘被应用内写者改过（本会话未参与）时
+   * 转冲突让用户决策，不得用尚未落盘的本地输入覆盖它。
+   */
+  it("save 的写前基准不放行「应用内写者刚写的内容」：转冲突而非静默覆盖", async () => {
+    const session = store.noteSurfaceProvider.open("a.md");
+    session.applyBody("本地未落盘");
+    // 应用内另一次写入改动了磁盘，会话的 lastSaved 未参与其中
+    await noteStore.useNoteStore.getState().saveNoteContent("a.md", "应用内另一次写入");
+
+    // 触发会话保存（防抖落点）：写前应发现磁盘 ≠ lastSaved 并转冲突
+    await vi.waitFor(() => expect(session.getState().conflict).toBe(true), { timeout: 3000 });
+    expect(noteStore.useNoteStore.getState().noteConflicts["a.md"]).toBe(true);
+    // 磁盘上仍是应用内写者的内容，未被尚未落盘的本地输入覆盖
+    expect(h.disk["a.md"]).toBe("应用内另一次写入");
+  });
+
+  it("保留本地写盘失败：冲突态与挂起登记都保留（可重试），不静默当成功", async () => {
+    const session = store.noteSurfaceProvider.open("a.md");
+    session.applyBody("local");
+    h.reads.push("external");
+    noteStore.useNoteStore.getState().markNoteExternallyEdited("a.md");
+    await vi.waitFor(() => expect(session.getState().conflict).toBe(true));
+
+    silenceSaveErrorLog();
+    h.writeFails.push(true);
+    session.saveLocalOverExternal();
+    await vi.waitFor(() => expect(session.getState().error).toBe(true));
+
+    // 冲突未决 + 挂起输入在册：关窗 flush 仍会跳过该文件，用户可再次选择
+    expect(session.getState().conflict).toBe(true);
+    expect(noteStore.useNoteStore.getState().noteConflicts["a.md"]).toBe(true);
+    expect(session.getState().dirty).toBe(true);
+    expect(noteStore.useNoteStore.getState().pendingNoteContent["a.md"]).toBe("local");
+    expect(h.writes).toEqual([]);
+  });
+
+  it("读盘在途又有新变化：丢弃本次读到的旧快照，不回退视图", async () => {
+    const session = store.noteSurfaceProvider.open("a.md");
+    // 第一次外部变化：读盘慢（在途期间第二次变化到达）
+    h.readDelays.push(60);
+    h.reads.push("旧快照");
+    noteStore.useNoteStore.getState().markNoteExternallyEdited("a.md");
+    // 第二次：读盘立即返回，先完成并采纳
+    h.reads.push("最新内容");
+    noteStore.useNoteStore.getState().markNoteExternallyEdited("a.md");
+
+    await vi.waitFor(() => expect(session.getState().content).toBe("最新内容"), { timeout: 3000 });
+    // 等第一次（延迟）读返回：不得把视图回退到旧快照
+    await new Promise((r) => setTimeout(r, 150));
+    expect(session.getState().content).toBe("最新内容");
+  });
+
+  /**
+   * 写盘在途 + 继续输入 + 外部同时变化（三者交叉）：排在慢写之后的本地写盘在排队期间必须被作废，
+   * 否则它落地时会覆盖刚被识别出来的外部内容（用户看到冲突条、磁盘却已被本端改写）。
+   */
+  it("写盘在途期间外部改盘转冲突：排队中的本地写盘作废，不把未落盘输入写下去", async () => {
+    const session = store.noteSurfaceProvider.open("a.md");
+    h.writeDelays = [900, 0];
+    session.applyBody("本地第一版");
+    await vi.waitFor(() => expect(h.writeStarted).toHaveLength(1), { timeout: 3000 });
+    // 继续输入 → 第二次保存（排在慢写之后）
+    session.applyBody("本地第二版");
+    // 等第二次保存已发起并排在队列里（第一次写盘仍在途）
+    await new Promise((r) => setTimeout(r, 750));
+
+    h.disk["a.md"] = "外部内容";
+    h.reads.push("外部内容");
+    noteStore.useNoteStore.getState().markNoteExternallyEdited("a.md");
+    await vi.waitFor(() => expect(session.getState().conflict).toBe(true));
+
+    // 等在途写盘落地（只落第一次；排队中的第二次被取消），再做断言——
+    // 不等它收尾会让迟到的写盘落到下一个用例的假磁盘上
+    await vi.waitFor(() => expect(h.writes).toHaveLength(1), { timeout: 3000 });
+    expect(h.writes).not.toContain("本地第二版");
+    expect(session.getState().conflict).toBe(true);
+    expect(noteStore.useNoteStore.getState().pendingNoteContent["a.md"]).toBe("本地第二版");
+  });
+
+  /**
+   * 冲突在「写盘已落地」之后被本端写收尾时收口：冲突条此刻已无决策意义（两个按钮都只会读到
+   * 本次写入的内容），必须就地清除并提示——否则冲突态会让后续键入不再自动保存、关窗又被
+   * flush 跳过，那些键入只留在内存里。
+   */
+  it("写盘落地后才被置冲突：收尾时清除冲突并提示（不留悬空的冲突条）", async () => {
+    const session = store.noteSurfaceProvider.open("a.md");
+    h.writeDelays = [500];
+    session.applyBody("本地正文");
+    await vi.waitFor(() => expect(h.writeStarted).toHaveLength(1), { timeout: 3000 });
+
+    // 写盘仍在途时外部改盘（watcher 回波先到）、随后本端写落地
+    h.reads.push("外部内容");
+    noteStore.useNoteStore.getState().markNoteExternallyEdited("a.md");
+    await vi.waitFor(() => expect(session.getState().conflict).toBe(true));
+
+    // 写落地后收尾读取的磁盘内容 = 本次写入 → 冲突收口（清冲突 + 提示），状态回到一致
+    h.reads.push("本地正文");
+    await vi.waitFor(() => expect(session.getState().conflict).toBe(false), { timeout: 3000 });
+    await vi.waitFor(() => expect(session.getState().dirty).toBe(false), { timeout: 3000 });
+    expect(noteStore.useNoteStore.getState().noteConflicts["a.md"]).toBeUndefined();
+    expect(h.disk["a.md"]).toBe("本地正文");
+    expect(
+      notifications.useNotificationStore.getState().items.some((n) => n.message.includes("覆盖")),
+    ).toBe(true);
+  });
+
+  it("采纳磁盘内容时本端仍有旧写在途：不采纳（避免清脏后正文与磁盘静默分歧）", async () => {
+    const session = store.noteSurfaceProvider.open("a.md");
+    h.writeDelays = [400];
+    session.applyBody("本地第一版");
+    await vi.waitFor(() => expect(h.writeStarted).toHaveLength(1), { timeout: 3000 });
+    session.applyBody("本地第二版");
+    // 应用内写者（flush 链）写下与本地正文相同的内容：watcher 回波会看到 disk === current.content
+    h.disk["a.md"] = "本地第二版";
+    h.reads.push("本地第二版");
+    noteStore.useNoteStore.getState().markNoteExternallyEdited("a.md");
+
+    // 在途写盘未收尾前不得清脏（那次写落盘后磁盘会变回更旧内容，清脏就成了静默分歧）
+    await new Promise((r) => setTimeout(r, 100));
+    expect(session.getState().dirty).toBe(true);
+    // 等这次在途写盘收尾，避免迟到结果落到下一个用例
+    await vi.waitFor(() => expect(h.writes).toHaveLength(1), { timeout: 3000 });
+  });
+});
+
+describe("写盘许可（排队期间可取消）", () => {
+  it("许可为假：不写盘，且不污染内容缓存", async () => {
+    noteStore.useNoteStore.getState().stageNoteContent("a.md", "旧内容");
+
+    const written = await noteStore.useNoteStore
+      .getState()
+      .saveNoteContent("a.md", "新内容", () => false);
+
+    expect(written).toBe(false);
+    expect(h.writes).toEqual([]);
+    expect(noteStore.useNoteStore.getState().noteContents["a.md"]).toBe("旧内容");
+  });
+
+  it("排队期间许可转假：排在慢写之后的这次写盘被跳过，磁盘保留前一次内容", async () => {
+    h.writeDelays = [200, 0];
+    const first = noteStore.useNoteStore.getState().saveNoteContent("a.md", "第一次");
+    await vi.waitFor(() => expect(h.writeStarted).toHaveLength(1), { timeout: 3000 });
+    const second = noteStore.useNoteStore
+      .getState()
+      .saveNoteContent("a.md", "第二次", () => false);
+
+    expect(await first).toBe(true);
+    expect(await second).toBe(false);
+    expect(h.writes).toEqual(["第一次"]);
+    expect(h.disk["a.md"]).toBe("第一次");
   });
 });
 

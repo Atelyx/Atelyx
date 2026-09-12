@@ -11,9 +11,7 @@
  */
 import { create } from "zustand";
 import {
-  isKnownNoteDiskContent as isKnownNoteDiskContentSvc,
   readNote,
-  recordNoteDiskContent as recordNoteDiskContentSvc,
   writeNote,
 } from "@/services/vault";
 import {
@@ -46,11 +44,6 @@ function withNoteWriteQueue(file: string, fn: () => Promise<void>): Promise<void
   };
   void next.then(cleanup, cleanup);
   return next;
-}
-
-/** 磁盘内容是否为应用自写（组件不直连 service：NoteEditor 跨编辑面自写识别用）。 */
-export function isKnownNoteDiskContent(file: string, content: string): boolean {
-  return isKnownNoteDiskContentSvc(file, content);
 }
 
 /** 笔记内容缓存上限（FIFO 淘汰最旧；防大笔记常驻内存无限膨胀，切仓库清空）。 */
@@ -98,7 +91,12 @@ interface NoteState {
   /** 直读笔记磁盘全文（绕过内容缓存；外部修改感知/写前校验用真实磁盘）。 */
   readNoteFresh: (file: string) => Promise<string>;
   /** 写回笔记正文并落盘（缓存先行 + 按文件串行队列）。 */
-  saveNoteContent: (file: string, content: string) => Promise<void>;
+  /** 写正文并返回是否真的落盘（`canWrite` 见实现：排队期间可取消）。 */
+  saveNoteContent: (
+    file: string,
+    content: string,
+    canWrite?: () => boolean,
+  ) => Promise<boolean>;
   /** 作废单文件笔记内容缓存（真实外部修改/删除/改名时调用；下次读取走盘）。 */
   invalidateNoteCache: (file: string) => void;
   /** 作废某目录下的全部内容缓存（文件夹改名/移动后该前缀路径不再指代同一批文件）。 */
@@ -153,20 +151,34 @@ export const useNoteStore = create<NoteState>((set, get) => ({
   /** 直读笔记磁盘全文（绕过内容缓存）：外部修改感知/写前校验需要真实磁盘而非可能滞后的缓存。 */
   readNoteFresh: (file) => readNote(file),
 
-  saveNoteContent: async (file, content) => {
+  /**
+   * 写笔记正文（缓存先行 + 按文件串行队列）。返回是否真的落盘。
+   *
+   * `canWrite`：可在排队期间被取消的落盘许可（笔记会话在写盘排队期间被外部修改打断转冲突时，
+   * 这次尚未执行的写盘必须作废——否则它落地时会覆盖刚被识别出来的外部内容，而用户看到的是冲突条）。
+   * 取消时同时作废刚写入的内容缓存：缓存若停在未落盘正文上，重开会话会把它当磁盘基线。
+   */
+  saveNoteContent: async (file, content, canWrite) => {
+    if (canWrite && !canWrite()) return false;
     // 缓存先行（先于异步写盘）：重挂载/跨编辑面读取立即拿到最新内容，消灭「卸载 flush
     // 写盘在途 → 重挂载读陈旧缓存」的闪回/回退窗口（跨布局回退根因之一）。写盘失败时
     // 缓存与编辑器显示一致（均为最新内容），失败由调用方置 error 状态，下次保存重试。
     get().stageNoteContent(file, content);
+    let written = false;
     await withNoteWriteQueue(file, async () => {
+      if (canWrite && !canWrite()) {
+        get().invalidateNoteCache(file);
+        return;
+      }
       await writeNote(file, content);
-      // 登记磁盘基线（同 saveTextNodeAsNote）：应用自写须被外部修改感知识别
-      recordNoteDiskContentSvc(file, content);
       // 标记路径级自写回波：watcher 收到同路径事件后跳过无关的全树重扫（内容编辑不改文件树）
       markSelfSave(file);
+      written = true;
     });
+    if (!written) return false;
     // 笔记内容落盘：通知订阅方（note:changed 轻量信号，按需再调 note 服务读内容）。
     emitPluginEvent("note:changed", { file });
+    return true;
   },
 
   invalidateNoteCache: (file) =>

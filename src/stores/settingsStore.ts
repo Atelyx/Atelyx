@@ -1,11 +1,12 @@
 import { create } from "zustand";
 import { getApiKey, setApiKey, deleteApiKey } from "@/services/keychain";
-import { readAgents, readFolderColors, readNote, readPromptNotes, readVaultConfig, writeAgents, writeFolderColors, writePromptNotes, writeVaultConfig } from "@/services/vault";
+import { readAgents, readFolderColors, readNote, readPromptNotes, readVaultConfig, patchVaultConfig, writeAgents, writeFolderColors, writePromptNotes } from "@/services/vault";
 import { fetchProviderModels } from "@/services/ai/client";
 import { buildAgentTools } from "@/services/ai/tools";
 import { getHostname, readGlobalConfig, updateGlobalConfig } from "@/services/global";
 import { useAppStore } from "@/stores/appStore";
 import { useCollabStore } from "@/stores/collabStore";
+import { useNotificationStore } from "@/stores/notificationStore";
 import type {
   AgentConfig,
   AiConfig,
@@ -45,6 +46,10 @@ import { createPersistController } from "@/utils/persist";
  *
  * 加载时机：应用挂载 load（读 global.json 填充应用级外观）；
  * selectVault → loadVaultConfig（读 config.json；syncKeys 关时从 keychain 填充 key，开时直读 config 内 key）；无仓库时状态为空。
+ *
+ * 写盘（仓库级）：只把本次改动的字段作为补丁发出（`vault_config_patch`，Rust 侧按字段合并进磁盘
+ * 现有配置），不再整文件重写——撕裂窗口持有独立 store 副本，整文件写会用陈旧副本覆盖主窗口刚写入的
+ * 字段（供应商丢失即此因）。同时按内容摘要做脏门控：与上次成功持久化一致时不写盘、不写 keychain。
  */
 
 interface SettingsState {
@@ -217,36 +222,140 @@ function currentVaultId(): string {
   return useAppStore.getState().vaultId ?? "";
 }
 
-/** 写 keychain：有 key 则存、无 key 则删旧条目（清空 key 时真正移除，防止 loadVaultConfig 把旧 key 读回）。 */
-async function persistKeys(vaultId: string, providers: ProviderConfig[]): Promise<void> {
-  await Promise.all(
-    providers.map((p) =>
+/**
+ * 写 keychain：有 key 则存、无 key 则删旧条目（清空 key 时真正移除，防止 loadVaultConfig 把旧 key 读回）。
+ * 只写与上次不同的条目——持久化由配置变化触发，绝大多数轮次 key 并未改动，逐条重写会白跑一轮 IPC。
+ *
+ * `force` 用于切换 key 落盘策略（syncKeys 开关）时：那一刻「keychain 里是什么」无从假设
+ * （文件里可能是别的设备写入的值），必须无条件重写，否则本机 keychain 会留着旧值。
+ */
+async function persistKeys(
+  vaultId: string,
+  providers: ProviderConfig[],
+  force = false,
+): Promise<void> {
+  const next = new Map<string, string>();
+  const writes: Array<Promise<void>> = [];
+  for (const p of providers) {
+    const entry = `${vaultId}:${p.id}`;
+    next.set(entry, p.apiKey);
+    if (!force && persistedKeys.get(entry) === p.apiKey) continue;
+    writes.push(
       p.apiKey
-        ? setApiKey(vaultId, p.id, p.apiKey).catch((e) => console.error("keychain 写入失败", p.id, e))
-        : deleteApiKey(vaultId, p.id).catch((e) => console.error("keychain 删除失败", p.id, e)),
-    ),
+        ? setApiKey(vaultId, p.id, p.apiKey).catch((e) =>
+            console.error("keychain 写入失败", p.id, e),
+          )
+        : deleteApiKey(vaultId, p.id).catch((e) =>
+            console.error("keychain 删除失败", p.id, e),
+          ),
+    );
+  }
+  // 已被移除的 provider：删除其 keychain 条目（removeProvider 也会定向删，此处兜底重复删除幂等）
+  for (const entry of persistedKeys.keys()) {
+    if (next.has(entry)) continue;
+    const id = entry.slice(vaultId.length + 1);
+    writes.push(
+      deleteApiKey(vaultId, id).catch((e) => console.error("keychain 删除失败", id, e)),
+    );
+  }
+  await Promise.all(writes);
+  persistedKeys = next;
+}
+
+/** 仓库级配置补丁：`undefined` = 该字段不在补丁里（磁盘保持当前值），`null` = 删除磁盘上该键。
+ * 清空语义必须用 `null` 表达——补丁只发变更字段，`undefined` 与「没改」无法区分。 */
+type VaultConfigPatch = {
+  [K in keyof VaultConfig]?: NonNullable<VaultConfig[K]> | null;
+};
+
+/** 已加载配置的仓库 id（null = 未加载/加载失败）。脏门控与写盘归属守卫共用：
+ * 加载失败时为空，写盘一律跳过——此时内存是默认值，落盘会把磁盘上真实配置抹掉。 */
+let loadedForVaultId: string | null = null;
+
+/** 上一次成功持久化的配置摘要（providers 含 key）。空 = 无基线（下次必写）。
+ * 判「有脏」不能只看 config.json：非同步模式下 key 不落文件，纯改 key 时磁盘内容不变，
+ * 摘要必须含 key 才能让 keychain 写入照常发生。 */
+let persistedDigest = "";
+
+/** 上一次已写入 keychain 的 provider key（vaultId:providerId → key），只重写变化项。 */
+let persistedKeys = new Map<string, string>();
+
+/** 加载时在 config.json 里发现的残留明文 Tavily key（`syncKeys` 关时不该存在：手工编辑、
+ *  云盘合并回旧版本、开启期崩溃）。置位后任意一次仓库级写盘都会显式下发 `tavilyApiKey: null`
+ *  把它删掉——「关闭开关即剥离」不能只依赖开关那一次删键。 */
+let strayTavilyKeyOnDisk = false;
+
+/** 上一次已提示过的仓库配置写盘失败原因（同因不重复弹：防抖重试会让同一错误刷屏）。 */
+let lastVaultPatchError = "";
+
+/** 配置摘要（providers 含 key；字段顺序稳定，同一内容恒等）。 */
+function configDigest(cfg: AiConfig): string {
+  return JSON.stringify(
+    cfg.providers.map((p) => [p.id, p.name, p.baseUrl, p.models, p.apiKey]),
   );
 }
 
-/** 全量持久化：合并进仓库级配置写 `.atelyx/config.json` + 按 syncKeys 决定 key 落盘
- * （开 = key 随 config.json 落盘多设备同步；关 = key 写 keychain 按仓库隔离）。 */
+/** 丢弃写盘基线：切仓库/回启动页后下次进入必写。 */
+function resetPersistBaseline(): void {
+  loadedForVaultId = null;
+  persistedDigest = "";
+  persistedKeys = new Map();
+  strayTavilyKeyOnDisk = false;
+}
+
+/** 仓库级配置写盘（本模块唯一出口）：补丁交给 Rust 侧字段级合并，并处理三件必须可见的事：
+ *  - 磁盘原文损坏：后端已把原文备份并退回空基线，必须提示用户（他看到的是「设置被重置」）；
+ *  - 后端拒绝写盘（损坏原文备份失败）：内存已改、磁盘没改，静默等于用户以为已保存；
+ *  - 本次写盘是否顺带删掉了加载时发现的残留明文 key（`cleanVaultPatch` 注入）→ 写完即失效该标记。 */
+async function writeVaultPatch(patch: Record<string, unknown>): Promise<void> {
+  let backup: string | null;
+  try {
+    backup = await patchVaultConfig(patch);
+  } catch (e) {
+    const message = `仓库配置保存失败：${e instanceof Error ? e.message : String(e)}`;
+    // 持久性失败（如磁盘只读）会被 400ms 防抖反复重试：同一原因只提示一次，成功后才允许再提示
+    if (lastVaultPatchError !== message) {
+      lastVaultPatchError = message;
+      useNotificationStore.getState().notify({ level: "error", message });
+    }
+    throw e;
+  }
+  lastVaultPatchError = "";
+  strayTavilyKeyOnDisk = false;
+  if (backup) {
+    useNotificationStore.getState().notify({
+      level: "error",
+      message: `仓库配置文件已损坏，原文备份为 .atelyx/${backup}：本次改动之外的设置已重置`,
+    });
+  }
+}
+
+/** 全量持久化：把当前供应商配置补丁进 `.atelyx/config.json` + 按 syncKeys 决定 key 落盘
+ * （开 = key 随 config.json 落盘多设备同步；关 = key 写 keychain 按仓库隔离）。
+ * 无脏（与上次成功持久化内容一致）直接返回，不写盘也不写 keychain。 */
 async function persist(cfg: AiConfig): Promise<void> {
   // 捕获仓库快照：persist 是异步的（debounce 自动触发），期间用户可能已切换仓库，
   // 防 A 仓库的配置覆盖 B 仓库 config.json、A 的 key 写进 B 的 keychain 条目
   const vaultId = currentVaultId();
-  if (!vaultId) return;
+  // 未进仓库或仓库配置未成功加载（内存为默认值）时不写：否则会抹掉磁盘上的真实配置
+  if (!vaultId || loadedForVaultId !== vaultId) return;
+  const digest = configDigest(cfg);
+  if (digest === persistedDigest) return;
   const base = useSettingsStore.getState().vaultConfig ?? {};
   const syncKeys = !!base.syncKeys;
-  const vc: VaultConfig = {
-    ...base,
-    providers: cfg.providers.length ? cfg.providers.map((p) => toGlobalProvider(p, syncKeys)) : undefined,
-  };
+  // 只发 providers 一个字段：其余字段保留磁盘当前值（同一仓库的其他写者/撕裂窗口可能刚改过）
+  const providers = cfg.providers.length ? cfg.providers : null;
   // 写盘前同步校验仓库未变；已切换则丢弃本次持久化（loadVaultConfig 已加载新仓库）
   if (currentVaultId() !== vaultId) return;
-  useSettingsStore.setState({ vaultConfig: vc });
-  await writeVaultConfig(cleanVaultConfig(vc));
+  await writeVaultPatch(cleanVaultPatch({ providers }));
+  // 内存基线在 await 之后按「当前状态」重取：等待 IPC 期间可能已有别的 commitVault 落进内存，
+  // 用 await 之前捕获的旧 base 覆盖会把那次改动回滚掉（磁盘无碍，但设置页显示回退）
+  useSettingsStore.setState((s) => ({
+    vaultConfig: { ...(s.vaultConfig ?? {}), providers: providers ?? undefined },
+  }));
   // syncKeys 开启时 key 已随 config.json 落盘，无需再写 keychain
   if (!syncKeys) await persistKeys(vaultId, cfg.providers);
+  persistedDigest = digest;
 }
 
 // 输入框键击高频，debounce 后落盘避免每键一次 IPC + keychain 写入
@@ -264,43 +373,104 @@ function persistDebounced(): void {
   persistCtl.schedule();
 }
 
-/** 写仓库级配置前剔除 undefined 并剥离未授权的明文 key，保持 .atelyx/config.json 干净
- *  （providers 空数组不落盘；`syncKeys` 关时 `search.tavilyApiKey` 不落盘；
- *  主题/强调色/字号/字体/自动恢复为应用级，不在此承载）。 */
-function cleanVaultConfig(vc: VaultConfig): VaultConfig {
-  const out: VaultConfig = {};
-  if (vc.model !== undefined) out.model = vc.model;
-  if (vc.modelProviderId !== undefined) out.modelProviderId = vc.modelProviderId;
-  if (vc.fileExplorerSort !== undefined) out.fileExplorerSort = vc.fileExplorerSort;
-  if (vc.excludeFolders !== undefined) out.excludeFolders = vc.excludeFolders;
-  if (vc.attachmentFolder !== undefined) out.attachmentFolder = vc.attachmentFolder;
-  if (vc.softLineBreak !== undefined) out.softLineBreak = vc.softLineBreak;
-  if (vc.autoNamingEnabled !== undefined) out.autoNamingEnabled = vc.autoNamingEnabled;
-  if (vc.autoNamingModel !== undefined) out.autoNamingModel = vc.autoNamingModel;
-  // 仓库级 AI 配置（无 key）与仓库稳定 ID 必须保留：否则写盘后供应商/搜索源丢失，
-  // vaultId 消失会让下次 open_vault 重新生成 ID、keychain key 失配
-  if (vc.providers !== undefined) out.providers = vc.providers;
-  // key 只在 syncKeys 开启时随仓库落盘：本函数是前端四条写盘路径（persist/commitVault/setSyncKeys/
-  // setTavilyKey）的唯一汇聚点，剥离放这里才能保证「只改 SearXNG 地址」「改任一 AI 配置」都不会把明文 key 写回
-  // （Rust 侧另有一处重写：`ensure_vault_id_on_disk` 首开补 vaultId 时按读到的内容原样写回，不新增 key）
-  const search = toGlobalSearchConfig(vc.search, !!vc.syncKeys);
-  if (search !== undefined) out.search = search;
-  if (vc.syncKeys !== undefined) out.syncKeys = vc.syncKeys;
-  if (vc.vaultId !== undefined) out.vaultId = vc.vaultId;
-  // temperature / defaultProviderId 字段不写回（配置中不再承载）
+/**
+ * 写盘补丁清理：逐字段改动，不重建整份配置。
+ *
+ * 两个不可省的语义：
+ * 1) `null` 是**删键指令**，必须原样传到 Rust 侧（`vault_config_patch` 只在值为 `null` 时删键）。
+ *    合并语义下「省略键」= 保留磁盘现值，所以清空 key 只能靠 `null`——若在这里把 `null` 当成
+ *    「无值」丢掉，关闭「API key 随仓库保存」后 `search.tavilyApiKey` 的明文会永远留在 config.json。
+ * 2) `providers` 按当前 `syncKeys` 映射为磁盘形状（关 = 剥离 `apiKey`）；`search` 同口径，
+ *    但**只剥离已有值、不引入 `null`**（那是显式删除，由补丁自己携带）。
+ *
+ * 补丁里没有的字段一律不出现——磁盘上其余字段由 Rust 侧按字段合并保留。
+ * 这里是前端全部仓库级写盘路径（persist / commitVault / 切 key 落盘策略）的唯一汇聚点。
+ */
+function cleanVaultPatch(
+  patch: Partial<Record<keyof VaultConfig, unknown>>,
+): Record<string, unknown> {
+  const syncKeys = !!useSettingsStore.getState().vaultConfig?.syncKeys;
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === undefined) continue;
+    out[key] = value;
+  }
+  if (out.providers !== undefined) {
+    out.providers =
+      out.providers === null
+        ? null
+        : (out.providers as ProviderConfig[]).map((p) => toGlobalProvider(p, syncKeys));
+  }
+  if (out.search && typeof out.search === "object") {
+    out.search = stripSearchKeys(
+      out.search as Record<string, unknown>,
+      syncKeys,
+    );
+  }
+  // 磁盘上已发现的残留明文 key：借任意一次写盘顺手删掉（`null` = 删键指令）
+  if (!syncKeys && strayTavilyKeyOnDisk) {
+    const search =
+      out.search && typeof out.search === "object"
+        ? (out.search as Record<string, unknown>)
+        : {};
+    out.search = { ...search, tavilyApiKey: null };
+  }
   return out;
 }
 
-/** 仓库级配置写盘统一入口（各 setXxx 收敛于此）：merge patch → 更新内存 → 清理敏感字段 → 落盘。
+/**
+ * 搜索引擎配置落盘前的 key 剥离：`null`（删键指令）原样保留，`undefined` 丢弃，
+ * 非同步模式下剥离 `tavilyApiKey` 的**已有值**。
+ */
+function stripSearchKeys(
+  search: Record<string, unknown>,
+  syncKeys: boolean,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(search)) {
+    if (value === undefined) continue;
+    if (!syncKeys && key === "tavilyApiKey" && value !== null) continue;
+    out[key] = value;
+  }
+  return out;
+}
+
+/** 仓库级配置写盘统一入口（各 setXxx 收敛于此）：只把补丁里出现的字段发出去 → 更新内存 → 落盘。
+ * 未出现的字段保留磁盘当前值（Rust 侧字段级合并），撕裂窗口的陈旧副本因此不会覆盖主窗口刚写入的值。
  * 失败仅记日志不打断 UI（配置丢失可重设，非关键路径）。 */
-async function commitVault(patch: Partial<VaultConfig>): Promise<void> {
-  const vc: VaultConfig = { ...(useSettingsStore.getState().vaultConfig ?? {}), ...patch };
-  useSettingsStore.setState({ vaultConfig: vc });
+async function commitVault(patch: VaultConfigPatch): Promise<void> {
+  const base = useSettingsStore.getState().vaultConfig ?? {};
+  useSettingsStore.setState({ vaultConfig: applyVaultPatch(base, patch) });
+  const clean = cleanVaultPatch(patch);
+  // 全字段被过滤（补丁实际为空）：无事可做，省一次 IPC
+  if (Object.keys(clean).length === 0) return;
   try {
-    await writeVaultConfig(cleanVaultConfig(vc));
+    await writeVaultPatch(clean);
   } catch (e) {
     console.error("保存仓库级配置失败", e);
   }
+}
+
+/** 补丁应用到内存态：`null` 删键（与磁盘合并语义一致），`undefined` 不动。 */
+function applyVaultPatch(base: VaultConfig, patch: VaultConfigPatch): VaultConfig {
+  const next: VaultConfig = { ...base };
+  for (const [key, value] of Object.entries(patch) as Array<
+    [keyof VaultConfig, VaultConfig[keyof VaultConfig] | null | undefined]
+  >) {
+    if (value === undefined) continue;
+    (next as Record<string, unknown>)[key] = value === null ? undefined : value;
+  }
+  return next;
+}
+
+/** 全局配置损坏（原文已备份）的用户可见提示：读到空配置会连带重置最近仓库与外观，
+ *  只写日志等于用户看到「东西全没了」却不知原因。备份文件在应用数据目录（与 global.json 同目录）。 */
+function notifyGlobalConfigCorrupt(backup: string | null): void {
+  if (!backup) return;
+  useNotificationStore.getState().notify({
+    level: "error",
+    message: `全局配置已损坏，原文备份为 ${backup}（应用数据目录）：最近仓库与外观设置已重置`,
+  });
 }
 
 /** 应用级配置写盘统一入口（各外观 setXxx 收敛于此）：先写内存再 patch 落 global.json，
@@ -308,7 +478,7 @@ async function commitVault(patch: Partial<VaultConfig>): Promise<void> {
 async function commitGlobal(patch: Partial<GlobalConfig>, errMsg: string): Promise<void> {
   useSettingsStore.setState(patch);
   try {
-    await updateGlobalConfig(patch);
+    notifyGlobalConfigCorrupt(await updateGlobalConfig(patch));
   } catch (e) {
     console.error(errMsg, e);
   }
@@ -370,7 +540,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     let collabColor = "";
     let deviceName = "";
     try {
-      const cfg = await readGlobalConfig();
+      const { config: cfg, corruptBackup } = await readGlobalConfig();
+      notifyGlobalConfigCorrupt(corruptBackup);
       // 主题：激活插件 id 直接取磁盘值（缺省 = 默认主题插件），设置字典缺省补该插件的预置项。
       theme = cfg.theme ?? BUILTIN_THEME_PLUGIN_ID;
       themeSettings = { ...(cfg.themeSettings ?? {}) };
@@ -387,6 +558,11 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       collabColor = cfg.collabColor ?? "";
     } catch (e) {
       console.error("读取外观配置失败", e);
+      // 读失败（含「全局配置损坏且原文备份失败」被后端拒绝）会让外观与协作配置本次不可用，必须可见
+      useNotificationStore.getState().notify({
+        level: "error",
+        message: `全局配置读取失败，本次使用默认外观：${e instanceof Error ? e.message : String(e)}`,
+      });
     }
     try {
       // 设备名独立读（配置读取失败不连带丢失协作身份兜底）
@@ -416,8 +592,10 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   },
 
   loadVaultConfig: async () => {
+    // 基线随仓库重置：新仓库的配置与上一仓库无关，下次写盘必须发生
+    resetPersistBaseline();
     try {
-      const vc = await readVaultConfig();
+      const { config: vc, corruptBackup } = await readVaultConfig();
       const vaultId = currentVaultId();
       // 仓库级 AI 供应商：syncKeys 开 = key 随仓库落盘直读 config（多设备共享）；关 = 从 keychain 按仓库隔离填充
       const providers = await Promise.all(
@@ -450,11 +628,12 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         } catch (e) {
           console.error("keychain 读取失败 search-tavily", e);
         }
-        // 配置里残留明文 key（曾在开启状态下落盘、之后 SyncKeys 关闭或手工改回）：采纳为本机 keychain
+        // 配置里残留明文 key（曾在开启状态下落盘、之后 syncKeys 关闭或手工改回）：采纳为本机 keychain
         // 条目——与「关闭 = 剥离配置文件并回写 keychain」同语义，避免用户已配置的 key 被静默丢弃。
         // 文件里那份残留不参与取用（Rust 侧同样只在 syncKeys 开启时读文件内 key），
-        // 由下一次任意仓库级配置写盘经 cleanVaultConfig 剥离
+        // 置位标记后由下一次任意仓库级写盘经 cleanVaultPatch 显式删键
         const strayKey = vc.search?.tavilyApiKey?.trim();
+        strayTavilyKeyOnDisk = !!strayKey;
         if (!tavilyKey && strayKey) {
           tavilyKey = strayKey;
           await setApiKey(vaultId, "search-tavily", strayKey).catch((e) =>
@@ -501,12 +680,35 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         agents,
         folderColors,
       });
+      // 配置损坏时读到的是空配置（磁盘原文已备份）：不提示就等于用户看到「设置与 API key 全没了」而不知原因，
+      // 且 vaultId 已随损坏丢失、keychain 条目按新 id 查不到，必须明确要求重新配置。
+      if (corruptBackup) {
+        useNotificationStore.getState().notify({
+          level: "error",
+          message: `仓库配置文件已损坏，原文备份为 .atelyx/${corruptBackup}：供应商、默认模型与 API key 已重置，需重新配置`,
+        });
+      }
+      // 只有走到这里才算「加载成功」：写盘守卫据此判定，加载失败时内存是默认值，落盘会抹掉磁盘配置
+      loadedForVaultId = vaultId;
+      persistedDigest = configDigest(config);
+      // 只有走 keychain 的仓库才建基线：syncKeys 开启时内存 key 来自配置文件，
+      // 把它写进「keychain 已写入」基线会让「关闭开关」时的回写被误跳过（本机 keychain 残留旧值）。
+      persistedKeys = new Map(
+        vc.syncKeys ? [] : providers.map((p) => [`${vaultId}:${p.id}`, p.apiKey]),
+      );
     } catch (e) {
       console.error("读取仓库级配置失败", e);
+      // 加载失败后本仓库的 provider 写盘会被守卫整体跳过（内存是默认值/上一仓库的值，落盘会抹掉磁盘配置）。
+      // 「该写却不写」必须让用户知道，否则改设置看起来生效、重启后全丢。
+      useNotificationStore.getState().notify({
+        level: "error",
+        message: "仓库配置读取失败：供应商与 API key 的修改不会保存，请重新打开仓库后再试",
+      });
     }
   },
 
-  clearVaultConfig: () =>
+  clearVaultConfig: () => {
+    resetPersistBaseline();
     set({
       vaultConfig: null,
       config: DEFAULT_AI_CONFIG,
@@ -515,7 +717,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       promptNotes: [],
       agents: [],
       folderColors: {},
-    }),
+    });
+  },
 
   // 话题自动命名模型解析：设置页指定（autoNamingModel）→ 仓库默认模型（vaultConfig.model）；
   // 未配置视为不启用（缺省关闭），显式开启（autoNamingEnabled === true）才命名（画布/面板自动命名共用，一次定义）；
@@ -649,8 +852,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   setVaultModel: async (model) => {
     await commitVault(
       model
-        ? { model: model.model, modelProviderId: model.providerId || undefined }
-        : { model: undefined, modelProviderId: undefined },
+        ? { model: model.model, modelProviderId: model.providerId || null }
+        : { model: null, modelProviderId: null },
     );
   },
 
@@ -659,7 +862,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   },
 
   setAutoNamingModel: async (model) => {
-    await commitVault({ autoNamingModel: model ?? undefined });
+    await commitVault({ autoNamingModel: model ?? null });
   },
 
   setFontSize: (size) => commitGlobal({ fontSize: size }, "保存字号配置失败"),
@@ -683,8 +886,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   },
 
   setExcludeFolders: async (folders) => {
-    // 空数组不落盘（缺省 = 无排除，保持 config.json 干净）
-    await commitVault({ excludeFolders: folders.length ? folders : undefined });
+    // 空数组 = 删除该键（缺省 = 无排除，保持 config.json 干净）
+    await commitVault({ excludeFolders: folders.length ? folders : null });
   },
 
   setSoftLineBreak: async (enabled) => {
@@ -700,12 +903,14 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   setCollabConfig: async (patch) => {
     set(patch);
     try {
-      await updateGlobalConfig({
-        collabEnabled: get().collabEnabled || undefined,
-        collabRelayUrl: get().collabRelayUrl || undefined,
-        collabNickname: get().collabNickname || undefined,
-        collabColor: get().collabColor || undefined,
-      });
+      notifyGlobalConfigCorrupt(
+        await updateGlobalConfig({
+          collabEnabled: get().collabEnabled || undefined,
+          collabRelayUrl: get().collabRelayUrl || undefined,
+          collabNickname: get().collabNickname || undefined,
+          collabColor: get().collabColor || undefined,
+        }),
+      );
       // 配置变更即时生效：重建 relay 连接（开关/地址/身份变化）
       useCollabStore.getState().applyConfig({
         enabled: get().collabEnabled,
@@ -719,7 +924,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   },
 
   setAttachmentFolder: async (folder) => {
-    await commitVault({ attachmentFolder: folder || undefined });
+    await commitVault({ attachmentFolder: folder || null });
   },
 
   /** 注册/注销系统提示词笔记：数组含该路径则移除，否则添加（空数组也落盘保持文件干净，独立于 config.json）。 */
@@ -934,11 +1139,13 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     const vaultId = currentVaultId();
     try {
       if (get().vaultConfig?.syncKeys) {
-        // syncKeys 开启：Tavily key 随仓库落盘（search.tavilyApiKey，空串剥离）
+        // syncKeys 开启：Tavily key 随仓库落盘。空串必须发 `null`（删键指令）——
+        // 合并语义下省略该键 = 保留磁盘现值，明文 key 会留在配置文件里。
         const searchConfig = { ...get().searchConfig, tavilyApiKey: key || undefined };
-        const vc: VaultConfig = { ...(get().vaultConfig ?? {}), search: searchConfig };
-        set({ searchConfig, vaultConfig: vc });
-        await writeVaultConfig(cleanVaultConfig(vc));
+        set({ searchConfig, vaultConfig: { ...(get().vaultConfig ?? {}), search: searchConfig } });
+        await writeVaultPatch(
+          cleanVaultPatch({ search: { ...searchConfig, tavilyApiKey: key || null } }),
+        );
       } else if (key) {
         // 默认：key 走 keychain（条目 `provider-<vaultId>-search-tavily`，与 provider key 区分）；空串删除条目
         await setApiKey(vaultId, "search-tavily", key);
@@ -950,8 +1157,14 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     }
   },
 
-  /** 开关「API key 随仓库保存」（多设备同步）：开启 = 当前 key 全量写入 config.json；
-   * 关闭 = 剥离 config 内 key + 回写 keychain（覆盖旧条目，防开启期间 key 变更丢同步）。 */
+  /**
+   * 开关「API key 随仓库保存」（多设备同步）：开启 = 当前 key 写入 config.json；
+   * 关闭 = 剥离 config 内 key + 回写 keychain。
+   *
+   * 关闭时必须显式发 `null` 删键：合并语义下「省略键」= 保留磁盘现值，省略等于把开启期间落盘的
+   * 明文 key 永久留在 config.json（文件可能随 Git/云盘同步 → 泄露）。同理 keychain 回写要 `force`：
+   * 那一刻「本机 keychain 里是什么」无从假设（文件里可能是别的设备写入的值）。
+   */
   setSyncKeys: async (enabled) => {
     const base = get().vaultConfig ?? {};
     const { config, searchConfig, tavilyKey } = get();
@@ -963,25 +1176,34 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       : hasSearch
         ? { provider: searchConfig.provider, searxngUrl: searchConfig.searxngUrl }
         : undefined;
-    const vc: VaultConfig = {
-      ...base,
-      syncKeys: enabled,
-      // 开启：key 随供应商/搜索配置落盘；关闭：剥离 key 字段（key 由下方回写 keychain）
-      providers: config.providers.length
-        ? config.providers.map((p) => toGlobalProvider(p, enabled))
-        : base.providers,
-      search: nextSearch,
-    };
+    const providers = config.providers.length ? config.providers : base.providers;
+    const vc: VaultConfig = { ...base, syncKeys: enabled, providers, search: nextSearch };
     set({ vaultConfig: vc, searchConfig: nextSearch ?? { provider: "tavily", searxngUrl: "" } });
     try {
-      await writeVaultConfig(cleanVaultConfig(vc));
+      // providers 关闭时按磁盘形状映射（不含 apiKey）后整数组替换——磁盘上原有的 apiKey 随之消失；
+      // search 关闭时 tavilyApiKey 发 `null`（嵌套对象是字段级合并，省略键 = 保留磁盘现值）
+      const providerPatch =
+        (config.providers.length ? config.providers : undefined)?.map((p) =>
+          toGlobalProvider(p, enabled),
+        ) ?? null;
+      const patch: Record<string, unknown> = {
+        syncKeys: enabled,
+        providers: providerPatch,
+        search:
+          nextSearch === undefined
+            ? null
+            : enabled
+              ? nextSearch
+              : { provider: nextSearch.provider, searxngUrl: nextSearch.searxngUrl, tavilyApiKey: null },
+      };
+      await writeVaultPatch(cleanVaultPatch(patch));
     } catch (e) {
       console.error("保存仓库级配置失败", e);
     }
     if (!enabled) {
-      // 关闭：key 从 config 剥离后回写 keychain（best-effort）
+      // 关闭：key 从 config 剥离后回写 keychain（best-effort；force 覆盖旧条目）
       const vaultId = currentVaultId();
-      await persistKeys(vaultId, config.providers);
+      await persistKeys(vaultId, config.providers, true);
       try {
         if (tavilyKey) await setApiKey(vaultId, "search-tavily", tavilyKey);
         else await deleteApiKey(vaultId, "search-tavily");

@@ -12,7 +12,7 @@ import type { NoteBodySession, NoteBodySessionView, NoteSurfaceProvider } from "
 import { parseFrontmatter } from "@/utils/frontmatter";
 import { noteTitleFromFile } from "@/utils/filename";
 import { notifyNoteSurfaceChange } from "@/utils/noteSurfaceHost";
-import { isKnownNoteDiskContent, useNoteStore, type NoteSaveStatus } from "@/stores/noteStore";
+import { useNoteStore, type NoteSaveStatus } from "@/stores/noteStore";
 import { useNoteUndoStore } from "@/stores/noteUndoStore";
 import { useNoteCollabStore } from "@/stores/noteCollabStore";
 import { republishPresence, useCollabStore } from "@/stores/collabStore";
@@ -243,11 +243,16 @@ function diskContentOf(rt: SessionRuntime): string {
   return rt.pendingWrite ?? rt.lastSaved;
 }
 
-/** 写盘并登记在途内容（`diskContentOf` 判定用）；结束后仍等于自身才注销——已被更新输入接管则保留。 */
-async function writeContent(rt: SessionRuntime, content: string): Promise<void> {
+/** 写盘并登记在途内容（`diskContentOf` 判定用）；结束后仍等于自身才注销——已被更新输入接管则保留。
+ *  返回是否真的落盘（`canWrite` 允许调用方在排队期间取消这次写盘，见 noteStore.saveNoteContent）。 */
+async function writeContent(
+  rt: SessionRuntime,
+  content: string,
+  canWrite?: () => boolean,
+): Promise<boolean> {
   rt.pendingWrite = content;
   try {
-    await useNoteStore.getState().saveNoteContent(rt.file, content);
+    return await useNoteStore.getState().saveNoteContent(rt.file, content, canWrite);
   } finally {
     if (rt.pendingWrite === content) rt.pendingWrite = null;
   }
@@ -288,6 +293,9 @@ async function save(rt: SessionRuntime, seq: number): Promise<void> {
     }
     const disk = await useNoteStore.getState().readNoteFresh(file);
     if (runtimeMap.get(file) !== rt || seq !== rt.saveSeq) return;
+    // 写前基准只认本会话自己确认过的落盘内容（`lastSaved` / 在途 `pendingWrite`）：
+    // 磁盘内容对不上就转冲突，宁可多弹一次条也不静默覆盖（应用内写者与真实外部修改同口径，
+    // 不按「谁写的」放行——内容归属无法从磁盘判定，放行等于让未落盘的本地输入盖掉别人的正文）。
     if (disk !== rt.lastSaved) {
       setConflict(rt, true);
       return;
@@ -297,9 +305,38 @@ async function save(rt: SessionRuntime, seq: number): Promise<void> {
       return;
     }
     setSaveState(file, "saving");
-    await writeContent(rt, content);
-    if (runtimeMap.get(file) !== rt) return;
-    rt.lastSaved = content;
+    // 写盘许可在排队期间仍会复查：期间磁盘被外部改动并转冲突时，这次尚未落盘的写必须作废，
+    // 否则它落地时会覆盖刚识别出来的外部内容（用户看到的是冲突条，磁盘却已被本端改写）
+    const written = await writeContent(rt, content, () => !rt.conflict);
+    // 基线推进放在会话/序号守卫之前：磁盘已确认持有本次写入的正文，与会话是否已被新输入接管无关。
+    // 若守卫先返回，就会出现「写落地了但基线没跟上」——会话把自己写的盘面当成外部修改，
+    // 弹出归因错误的冲突条并暂停自动保存（用户只能靠「重新加载/保留本地」退出）。
+    if (written) rt.lastSaved = content;
+    if (runtimeMap.get(file) !== rt || seq !== rt.saveSeq) return;
+    if (!written) {
+      // 排队期间被取消（会话已转冲突）：不推进基线；保存状态从「保存中」落到「有未落盘输入」，
+      // 决策交给冲突条
+      setSaveState(file, "edited");
+      return;
+    }
+    // 写入在途期间若检测到外部改动并置了冲突，此刻本端写已落地：必须就地收口，否则冲突条
+    // 已无决策意义（保留本地/重新加载都会读到本次写入的内容），而冲突态会让后续键入不再自动保存、
+    // 关窗 flush 又跳过该文件——那些键入只留在内存里。
+    if (rt.conflict) {
+      const diskAfter = await useNoteStore.getState().readNoteFresh(file);
+      if (runtimeMap.get(file) !== rt) return;
+      if (diskAfter !== content) {
+        // 本端写落地后磁盘又变了（另有写者随后落盘）：冲突仍然成立，保持冲突态与「有未落盘输入」
+        patchView(file, { dirty: true });
+        setSaveState(file, "edited");
+        return;
+      }
+      setConflict(rt, false);
+      useNotificationStore.getState().notify({
+        level: "warning",
+        message: `笔记「${noteTitleFromFile(file)}」保存期间检测到的其他修改已被本次写入覆盖`,
+      });
+    }
     finishSave(rt, seq);
     recordHistory();
   } catch (e) {
@@ -356,9 +393,12 @@ async function load(rt: SessionRuntime): Promise<void> {
 /** 外部修改感知：磁盘内容 ≠ 自上次落盘基准时刷新或转冲突。 */
 async function handleExternalChange(rt: SessionRuntime): Promise<void> {
   const file = rt.file;
+  const seqAtRead = useNoteStore.getState().externalNoteEdits[file] ?? 0;
   try {
     const disk = await useNoteStore.getState().readNoteFresh(file);
     if (runtimeMap.get(file) !== rt) return;
+    // 读盘期间又有新的外部变化：本次读到的是旧快照，丢弃（新事件那一轮自己会收敛）
+    if ((useNoteStore.getState().externalNoteEdits[file] ?? 0) !== seqAtRead) return;
     const current = view(file);
     if (!current || disk === rt.lastSaved) return;
     if (isCollabActive()) {
@@ -382,12 +422,25 @@ async function handleExternalChange(rt: SessionRuntime): Promise<void> {
       return;
     }
     if (current.dirty) {
-      // 应用内其他编辑面写入（画布文本节点/AI 工具登记基线）：静默保留本地输入；
-      // 真实外部修改则暂停自动保存并提示冲突，防覆盖
-      if (isKnownNoteDiskContent(file, disk)) {
+      // 磁盘持有的正是本地正文（应用内写者/flush 落的就是这一份）：内容已在盘上，基线跟上即可，
+      // 不再等一次写盘、也不弹冲突条——这是内容事实（逐字节比对），不是对写出者的推断。
+      // 例外：本端仍有在途写盘（`pendingWrite`）时不能采纳——那次写落地后磁盘会变回更旧的内容，
+      // 此刻清脏会让本地正文与磁盘静默分歧（交由它在途写盘收尾后由正常保存收敛）。
+      if (disk === current.content && !rt.pendingWrite) {
         rt.lastSaved = disk;
+        if (rt.timer) {
+          clearTimeout(rt.timer);
+          rt.timer = null;
+        }
+        setConflict(rt, false);
+        useNoteStore.getState().setPendingNoteContent(file, null);
+        patchView(file, { dirty: false });
+        setSaveState(file, "saved");
         return;
       }
+      // 磁盘与本地正文不同：一律按冲突处理（应用内写者与真实外部修改同口径）。
+      // 应用内写者的内容不经本会话，本地未落盘输入一旦继续写盘就把它盖掉了——那是静默覆盖，
+      // 强制让用户在冲突条上选保留本地或重新加载。
       if (rt.timer) {
         clearTimeout(rt.timer);
         rt.timer = null;
@@ -407,9 +460,12 @@ async function handleExternalChange(rt: SessionRuntime): Promise<void> {
 /** 冲突「重新加载」：丢弃本地改动回到磁盘最新（挂起输入一并作废，防旧内容随后被 flush 写回）。 */
 async function reloadFromDisk(rt: SessionRuntime): Promise<void> {
   const file = rt.file;
+  const seqAtRead = useNoteStore.getState().externalNoteEdits[file] ?? 0;
   try {
     const disk = await useNoteStore.getState().readNoteFresh(file);
     if (runtimeMap.get(file) !== rt) return;
+    // 读盘期间又有新的外部变化：本次读到的是旧快照，丢弃（新事件那一轮自己会收敛）
+    if ((useNoteStore.getState().externalNoteEdits[file] ?? 0) !== seqAtRead) return;
     rt.lastSaved = disk;
     setConflict(rt, false);
     useNoteStore.getState().setPendingNoteContent(file, null);
@@ -428,12 +484,13 @@ async function saveLocalOverExternal(rt: SessionRuntime): Promise<void> {
   const current = view(file);
   if (!current) return;
   const content = current.content;
-  setConflict(rt, false);
   const seq = ++rt.saveSeq;
   setSaveState(file, "saving");
   try {
     await writeContent(rt, content);
     if (runtimeMap.get(file) !== rt || seq !== rt.saveSeq) return;
+    // 冲突态只在确认落盘后清除：写盘失败还清掉冲突，等于把「外部已改动」这个事实也一并抹掉
+    setConflict(rt, false);
     rt.lastSaved = content;
     useNoteCollabStore.getState().notifyNoteDiskWrite(file, bodyLF(content));
     useNoteStore.getState().setPendingNoteContent(file, null);
@@ -443,7 +500,12 @@ async function saveLocalOverExternal(rt: SessionRuntime): Promise<void> {
     if (runtimeMap.get(file) !== rt) return;
     console.error("笔记保存失败", e);
     // 内容已被后续输入取代：不给更新的保存窗口贴旧结论
-    if (view(file)?.content === content) setSaveState(file, "error");
+    if (view(file)?.content !== content) return;
+    // 本地正文仍在磁盘之外：保持冲突态（冲突条与关窗拦截继续有效）并补回挂起登记供重试
+    setConflict(rt, true);
+    patchView(file, { dirty: true });
+    useNoteStore.getState().setPendingNoteContent(file, content);
+    setSaveState(file, "error");
   }
 }
 

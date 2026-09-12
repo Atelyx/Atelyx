@@ -18,11 +18,14 @@
  * 纯数据容器 + 纯函数，无 store/service 依赖，可直测（模式同 utils/collabHost.ts）。
  */
 
-/** 文件动作事件（重命名/移动/删除/文件夹重命名）：载荷含新旧路径。 */
+/** 文件动作事件（重命名/移动/删除/文件夹重命名）：载荷含新旧路径。
+ *  `rewritten`：本次动作中被 Rust 代写正文的其它笔记（链接改写）——这些文件的自写回波被
+ *  `markSelfSave` 抑制，订阅方拿不到它们的 `note:changed`，正文缓存须按此清掉。 */
 export type VaultActionEvent =
-  | { kind: "note:renamed" | "note:moved" | "table:renamed" | "table:moved" | "attachment:renamed" | "attachment:moved" | "canvas:renamed" | "canvas:moved"; oldPath: string; newPath: string; newTitle?: string | null }
+  | { kind: "note:renamed" | "note:moved"; oldPath: string; newPath: string; newTitle?: string | null; rewritten?: string[] }
+  | { kind: "table:renamed" | "table:moved" | "attachment:renamed" | "attachment:moved" | "canvas:renamed" | "canvas:moved"; oldPath: string; newPath: string; newTitle?: string | null }
   | { kind: "note:deleted" | "table:deleted" | "canvas:deleted"; path: string }
-  | { kind: "folder:renamed" | "folder:moved"; oldDir: string; newDir: string }
+  | { kind: "folder:renamed" | "folder:moved"; oldDir: string; newDir: string; rewritten?: string[] }
   | { kind: "canvas:error"; message: string };
 
 /** watcher 变更事件：纯路径信号，领域按需再读盘/取快照（判别联合，kind 为单个字面量）。 */

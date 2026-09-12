@@ -58,6 +58,16 @@ let closeGuardInstalled = false;
 /** selectVault 并发序号：快速连续切换时仅最后一次调用有权清除切换读条（finally 守卫）。 */
 let vaultSwitchSeq = 0;
 
+/** 全局配置损坏（原文已备份）的用户可见提示：读到空配置会连带重置最近仓库与外观，
+ *  只写日志等于用户看到「东西全没了」却不知原因。备份文件在应用数据目录（与 global.json 同目录）。 */
+function notifyGlobalConfigCorrupt(backup: string | null): void {
+  if (!backup) return;
+  useNotificationStore.getState().notify({
+    level: "error",
+    message: `全局配置已损坏，原文备份为 ${backup}（应用数据目录）：最近仓库与外观设置已重置`,
+  });
+}
+
 /**
  * 应用级状态：路由 + 当前仓库 + 画布列表 CRUD。
  *
@@ -283,22 +293,41 @@ export const useAppStore = create<AppState>((set, get) => ({
     let autoEnterRoot: string | null = null;
     let autoUpdate = false;
     try {
-      const cfg = await readGlobalConfig();
+      const { config: cfg, corruptBackup } = await readGlobalConfig();
       recents = cfg.recentVaults;
       autoUpdate = cfg.autoUpdate ?? false;
+      notifyGlobalConfigCorrupt(corruptBackup);
     } catch (e) {
       console.error("读取全局配置失败", e);
+      // 读失败（含「全局配置损坏且原文备份失败」被后端拒绝）会让最近仓库与外观本次不可用，必须可见
+      useNotificationStore.getState().notify({
+        level: "error",
+        message: `全局配置读取失败，本次以空配置启动：${e instanceof Error ? e.message : String(e)}`,
+      });
     }
     if (recents.length === 0) {
       // 首启无最近仓库 → ensureDefaultVault 建默认仓库并登记；
       // 本次不自动进入，展示启动页让用户选择/新建仓库
       try {
         const info = await ensureDefaultVault();
+        // 默认仓库也可能是损坏配置（Rust 两条路径都回传备份名）：与 selectVault 同口径提示
+        if (info.configCorruptBackup) {
+          useNotificationStore.getState().notify({
+            level: "error",
+            message: `仓库配置文件已损坏，原文备份为 .atelyx/${info.configCorruptBackup}：供应商、默认模型与 API key 需重新配置`,
+          });
+        }
         const now = Math.floor(Date.now() / 1000);
         recents = bumpRecentVault(recents, info, now);
+        // 同一流程上面刚读过全局配置并消费过损坏提示，这里不再重复消费返回的备份名
         await updateGlobalConfig({ recentVaults: recents });
       } catch (e) {
         console.error("初始化默认仓库失败", e);
+        // 与 open_vault 失败同口径：默认仓库建不起来时用户停在启动页、列表为空，必须说明原因
+        useNotificationStore.getState().notify({
+          level: "error",
+          message: `初始化默认仓库失败：${e instanceof Error ? e.message : String(e)}`,
+        });
       }
     } else {
       // 非首启：recentVaults[0] = 最近打开（selectVault 时置顶）= 上次所在仓库，
@@ -320,7 +349,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   setAutoUpdate: async (enabled) => {
     set({ autoUpdate: enabled });
     try {
-      await updateGlobalConfig({ autoUpdate: enabled });
+      notifyGlobalConfigCorrupt(await updateGlobalConfig({ autoUpdate: enabled }));
     } catch (e) {
       console.error("保存自动更新配置失败", e);
     }
@@ -377,6 +406,13 @@ export const useAppStore = create<AppState>((set, get) => ({
       // 经领域生命周期注册表分发（canvas/table/aichat/calendar/note 各钩子按注册序执行，失败快速传播）
       await flushAllDomains({ vaultId: get().vaultId });
       const info = await openVault(root);
+      // 配置损坏已由 open_vault 备份（它紧接着就会用新 vaultId 覆盖原路径，之后再读只会读到合法文件）
+      if (info.configCorruptBackup) {
+        useNotificationStore.getState().notify({
+          level: "error",
+          message: `仓库配置文件已损坏，原文备份为 .atelyx/${info.configCorruptBackup}：供应商、默认模型与 API key 需重新配置`,
+        });
+      }
       const now = Math.floor(Date.now() / 1000);
       const recents = bumpRecentVault(get().recentVaults, info, now);
       // set + 清空须在下一个 await 之前同步完成，双保险防跨仓库写入：
@@ -408,7 +444,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       // 登记最近仓库失败不阻塞切换：global.json 写入异常（权限/磁盘）只影响最近列表，
       // 若放行抛错会被下方 catch 吞掉，导致后续重载（配置/画布列表/文件树/AI 会话）全部跳过
       try {
-        await updateGlobalConfig({ recentVaults: recents });
+        notifyGlobalConfigCorrupt(await updateGlobalConfig({ recentVaults: recents }));
       } catch (e) {
         console.error("登记最近仓库失败", e);
       }
@@ -446,6 +482,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       return true;
     } catch (e) {
       console.error("打开仓库失败", e);
+      // 失败必须可见（含「配置损坏且备份失败」这类后端拒绝继续的情形）：否则用户只看到回到启动页
+      useNotificationStore.getState().notify({
+        level: "error",
+        message: `打开仓库失败：${e instanceof Error ? e.message : String(e)}`,
+      });
       return false;
     } finally {
       if (seq === vaultSwitchSeq) get().endLoad();
@@ -455,7 +496,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   removeRecentVault: async (root) => {
     const recents = dropVaultFromRecents(get().recentVaults, root);
     try {
-      await updateGlobalConfig({ recentVaults: recents });
+      notifyGlobalConfigCorrupt(await updateGlobalConfig({ recentVaults: recents }));
     } catch (e) {
       console.error("更新最近仓库列表失败", e);
     }

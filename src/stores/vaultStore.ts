@@ -139,16 +139,19 @@ async function emitFileEvent(event: VaultEvent): Promise<void> {
 async function applyNoteFileChange(oldFile: string, newFile: string, newTitle: string | null): Promise<void> {
   pendingRename = { oldFile, newFile };
   try {
-    await renameNoteSvc(oldFile, newFile);
+    const { rewritten } = await renameNoteSvc(oldFile, newFile);
     // rename_note 会扫描更新所有 .atlx 的 file 引用（写 .atlx），标记自写抑制 watcher 误报
     markSelfSave();
     // 磁盘 .atlx 已变：画布订阅者据 `note:renamed|moved` 同步乐观锁基准与节点 file/title，
-    // 须在函数返回前完成（下一次自动保存依赖基准已更新）；撤销栈路径迁移同由笔记订阅者承担
+    // 须在函数返回前完成（下一次自动保存依赖基准已更新）；撤销栈路径迁移同由笔记订阅者承担。
+    // `rewritten`（被代写正文的其它笔记）随事件下发：它们的自写回波被上面的抑制窗口吞掉，
+    // 订阅方只能据此作废其正文缓存。
     await emitFileEvent({
       kind: newTitle === null ? "note:moved" : "note:renamed",
       oldPath: oldFile,
       newPath: newFile,
       newTitle,
+      rewritten,
     });
     await useVaultStore.getState().loadFiles();
     // 记录本次重命名（跨渲染保留）：窗口联动据此把打开的笔记切到新文件，而非误判删除关闭
@@ -234,7 +237,7 @@ async function applyFolderFileChange(
 ): Promise<void> {
   pendingFolderRename = { oldDir, newDir };
   try {
-    await renameFolderSvc(oldDir, newDir);
+    const { rewritten } = await renameFolderSvc(oldDir, newDir);
     // 立即记录本次重命名/移动（跨渲染保留）：目录已移动，后续任何渲染间隙的窗口联动
     // 据此把打开的笔记切到新文件，而非误判删除关闭（放 loadFiles/loadList 之后
     // 会留出 IPC await 间隙，联动 effect 先跑导致笔记窗口被误关）
@@ -247,10 +250,13 @@ async function applyFolderFileChange(
     // 画布订阅者再同步其运行时路径/乐观锁基准/节点前缀引用（磁盘 .atlx 已被 rename_folder 更新
     // updatedAt，防下次保存误判「已被外部修改」）
     useAppStore.getState().renameCurrentCanvasFile(oldDir, newDir);
+    // `rewritten`（被代写正文的笔记，可能在目录前缀之外）随事件下发：自写回波被抑制窗口吞掉，
+    // 订阅方只能据此作废其正文缓存
     await emitFileEvent({
       kind,
       oldDir,
       newDir,
+      rewritten,
     });
     // 系统提示词标记 / 文件夹图标颜色 / 展开集合 / 上次打开文件：前缀同步（防标记与恢复指向失效路径）
     await useSettingsStore.getState().remapPromptNotesByDir(oldDir, newDir);
@@ -790,7 +796,10 @@ export const useVaultStore = create<VaultFileState>((set, get) => ({
       set({ vaultTags: null });
     }
   },
-  rebuildInternalLinks: () => rebuildInternalLinksSvc(),
+  rebuildInternalLinks: async () => {
+    // 代写产生的 watcher 事件未被自写抑制（此处不调 markSelfSave）：正文缓存由订阅方按事件作废
+    return rebuildInternalLinksSvc();
+  },
   readAttachmentDataUrl: (file) => readAttachmentDataUrlSvc(file),
 
   historySetAuthor: (name, device) =>

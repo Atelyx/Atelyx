@@ -32,9 +32,8 @@ export async function readVaultFileWindow(
 
 /**
  * 写仓库内任意文本文件（原子写 + 自动建父目录）。
- * 注意：不登记 `.md` 磁盘基线（lastWrittenMd）——AI 写入对冲突/刷新模型按「外部写入」处理：
- * 打开中的笔记干净态静默刷新、有未保存改动弹冲突条（防静默覆盖 Agent 编辑）；
- * 画布笔记节点正文由编辑会话读取磁盘刷新，不参与该基线。
+ * 打开的笔记会话按磁盘内容事实收敛：写的内容与本地未落盘正文不同即转冲突条由用户决策，
+ * 不按「应用自写」放行（放行会让本地未落盘输入静默盖掉刚写进去的正文）。
  */
 export async function writeVaultFile(file: string, content: string): Promise<void> {
   await invoke("write_vault_file", { file, content });

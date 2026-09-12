@@ -43,15 +43,18 @@ import {
   type ChatSessionMeta,
   type ChatSessionRow,
   type FileTreeNode,
+  type MediaData,
   type Message,
+  type Attachment,
   type TableData,
   type TableFileData,
   type TextData,
   type TextFileData,
   type BacklinkRow,
+  type LinkRewriteResult,
   type RebuildLinksResult,
   type TagRow,
-  type VaultConfig,
+  type VaultConfigRead,
   type VaultInfo,
   type AgentConfig,
 } from "@/types";
@@ -134,16 +137,17 @@ export async function writeNote(file: string, content: string): Promise<void> {
 
 /**
  * 重命名 .md 笔记 + 扫描所有 .atlx 更新 text 节点 file 引用（链接维护）。
+ * 返回被改写的 `.md` 相对路径清单（内部链接归一化，见 `LinkRewriteResult`）——
+ * 调用方据此作废这些笔记的正文缓存（其 watcher 回波被自写抑制窗口吞掉）。
  * @param oldFile 相对仓库根路径，如 `笔记/old.md`
  * @param newFile 相对仓库根路径，如 `笔记/new.md`
  */
 export async function renameNote(
   oldFile: string,
   newFile: string,
-): Promise<void> {
-  await invoke("rename_note", { oldFile, newFile });
+): Promise<LinkRewriteResult> {
+  return invoke<LinkRewriteResult>("rename_note", { oldFile, newFile });
 }
-
 /** 删除 .md 笔记（不更新 .atlx 引用）。 */
 export async function deleteNote(file: string): Promise<void> {
   await invoke("delete_note", { file });
@@ -191,14 +195,23 @@ export async function readAttachmentDataUrl(file: string): Promise<string> {
   return invoke<string>("read_attachment_data_url", { file });
 }
 
-/** 读仓库级配置（.atelyx/config.json，不存在返回 {}）。 */
-export async function readVaultConfig(): Promise<VaultConfig> {
-  return invoke<VaultConfig>("read_vault_config");
+/**
+ * 读仓库级配置（.atelyx/config.json，不存在返回空配置）。
+ * `corruptBackup` 非空 = 原文损坏已备份为磁盘上该文件名、本次按空配置返回（调用方须提示用户）。
+ */
+export async function readVaultConfig(): Promise<VaultConfigRead> {
+  return invoke<VaultConfigRead>("read_vault_config");
 }
 
-/** 写仓库级配置（原子写 .atelyx/config.json）。 */
-export async function writeVaultConfig(config: VaultConfig): Promise<void> {
-  await invoke("write_vault_config", { config });
+/**
+ * 以字段级合并补丁写仓库级配置：只影响补丁里出现的字段，其余保留磁盘当前值。
+ * 补丁值为 `null` = 删除该键；值为对象 = 与磁盘同名键递归合并；数组/标量 = 整体替换。
+ * 设置项写盘统一走这里（整文件写会覆盖别的写者刚写入的字段）。
+ * 返回损坏原文的备份文件名（`null` = 未发生损坏）：非空表示磁盘原文损坏、已备份并按空基线合并，
+ * 调用方必须提示用户（其余字段已不在配置里，只写日志等于用户看到「设置被重置」却不知原因）。
+ */
+export async function patchVaultConfig(patch: Record<string, unknown>): Promise<string | null> {
+  return invoke<string | null>("vault_config_patch", { patch });
 }
 
 /** 读系统提示词标记列表（.atelyx/prompt-notes.json，不存在/损坏返回空）。 */
@@ -325,12 +338,15 @@ export async function deleteFolder(
   return invoke<DeleteFolderResult>("delete_folder", { dir, force });
 }
 
-/** 重命名文件夹：移动整个目录 + 扫描所有 .atlx 更新位于该目录下文件的引用（`old_dir/` 前缀 → `new_dir/`）。 */
+/**
+ * 重命名文件夹：移动整个目录 + 扫描所有 .atlx 更新位于该目录下文件的引用（`old_dir/` 前缀 → `new_dir/`）。
+ * 返回被改写的 `.md` 相对路径清单（内部链接归一化，语义同 `renameNote`）。
+ */
 export async function renameFolder(
   oldDir: string,
   newDir: string,
-): Promise<void> {
-  await invoke("rename_folder", { oldDir, newDir });
+): Promise<LinkRewriteResult> {
+  return invoke<LinkRewriteResult>("rename_folder", { oldDir, newDir });
 }
 
 /**
@@ -352,35 +368,6 @@ export async function remapSideloadsByDir(oldDir: string, newDir: string): Promi
 }
 
 // ===== 运行时 ↔ 磁盘格式转换 =====
-
-/** 最近写入的 .md 内容缓存（脏检测：仅内容变化才写盘，避免每次保存全量重写全部笔记）。 */
-const lastWrittenMd = new Map<string, string>();
-
-/** 基线条目上限：超出按写入先后淘汰最旧（Map 保持插入序，keys().next() 即最旧）。
- * 条目只是脏检测基线，被淘汰后下次保存按「基线缺失 = 有差异」重写一次并重新登记，语义无损。 */
-const LAST_WRITTEN_MD_MAX = 1000;
-
-function setLastWrittenMd(file: string, content: string): void {
-  lastWrittenMd.set(file, content);
-  if (lastWrittenMd.size > LAST_WRITTEN_MD_MAX) {
-    const oldest = lastWrittenMd.keys().next().value;
-    if (oldest !== undefined) lastWrittenMd.delete(oldest);
-  }
-}
-
-/**
- * 记录某 `.md` 的最近已知磁盘内容（load 读盘与应用内写盘后调用）。
- * 脏检测基线 = 「最近已知磁盘内容」而非「应用最近一次写入」：外部改后刷新、用户改回旧值
- * 时必须能感知差异写盘（否则外部内容会永久覆盖用户的回退），见 stores/noteSessionStore。
- */
-export function recordNoteDiskContent(file: string, content: string): void {
-  setLastWrittenMd(file, content);
-}
-
-/** 判断磁盘内容是否为应用自写（与最近已知磁盘内容基线逐字节相等）。自写回波返回 true，内存态不更旧。 */
-export function isKnownNoteDiskContent(file: string, content: string): boolean {
-  return lastWrittenMd.get(file) === content;
-}
 
 /** 加载后的运行时画布（对齐原 loadCanvas 返回结构，供 canvasStore 消费）。 */
 export interface RuntimeCanvas {
@@ -410,10 +397,7 @@ async function canvasFileToRuntime(file: CanvasFile): Promise<RuntimeCanvas> {
       if (td.file) {
         // 笔记节点：正文从 `.md` 实时读取
         try {
-          const bodyMd = await readNote(td.file);
-          data.bodyMd = bodyMd;
-          // 记录磁盘基线：load 后该文件内容即磁盘内容，后续脏检测以此为基准
-          recordNoteDiskContent(td.file, bodyMd);
+          data.bodyMd = await readNote(td.file);
         } catch {
           // 文件不存在，bodyMd 留空（外部编辑删除等情况）
         }
@@ -483,7 +467,8 @@ async function canvasFileToRuntime(file: CanvasFile): Promise<RuntimeCanvas> {
 /**
  * 单个运行时节点 → 磁盘节点。
  * - text 笔记节点：剥离 bodyMd，data 只留 `{title, file}`（正文写盘归笔记编辑会话）
- * - conversation 节点：嵌入 `messagesByConv[id]` 到 `data.messages`
+ * - conversation 节点：嵌入 `messagesByConv[id]` 到 `data.messages`，附件只留 `file` 引用（剥离 payload）
+ * - media 节点：只留 `file` 引用（剥离 thumb/body 运行时缓存）
  * - 扁平 position → x/y
  */
 async function toFileNode(
@@ -501,7 +486,8 @@ async function toFileNode(
       data = { title: td.title || "未命名", bodyMd: td.bodyMd ?? "" };
     }
   } else if (n.type === "conversation") {
-    data = { ...n.data, messages: messagesByConv[n.id] ?? [] };
+    const messages = (messagesByConv[n.id] ?? []).map(stripMessageAttachmentPayload);
+    data = { ...n.data, messages };
   } else if (n.type === "group") {
     // 分组节点：只落 label/color（color 未设置时 undefined 字段随 JSON.stringify 丢弃）
     data = {
@@ -514,8 +500,28 @@ async function toFileNode(
     // 表格节点：只落 {title, file}（快照在 .atb 文件，运行时填充/剥离）
     const td = n.data as unknown as TableData;
     data = { title: td.title || "未命名", file: td.file };
+  } else if (n.type === "media") {
+    // 媒体节点：内容在文件（仓库附件或未入库的临时区），节点只存引用与展示元信息。
+    // thumb/body 是按引用读回的运行时缓存——**只在有引用时剥离**：无 `file` 的媒体节点，
+    // 内容只存在于节点自身（没有可读回的来源），剥掉即销毁唯一副本。
+    const md = n.data as unknown as MediaData;
+    data = {
+      file: md.file,
+      mime: md.mime,
+      kind: md.kind,
+      name: md.name,
+      ...(md.displayWidth !== undefined ? { displayWidth: md.displayWidth } : {}),
+      ...(md.userResized ? { userResized: true } : {}),
+      ...(md.parseFailed ? { parseFailed: true } : {}),
+      ...(md.file
+        ? {}
+        : {
+            ...(md.thumb !== undefined ? { thumb: md.thumb } : {}),
+            ...(md.body !== undefined ? { body: md.body } : {}),
+          }),
+    };
   } else {
-    // media/search：原样保留（media 的 thumb 暂随 .atlx 持久化，TODO 后续落盘）
+    // search 等其余节点：原样保留
     data = { ...n.data };
   }
   return {
@@ -526,6 +532,23 @@ async function toFileNode(
     width: n.width,
     height: n.height,
     data: data as unknown as CanvasFileNode["data"],
+  };
+}
+
+/**
+ * 消息落盘前剥离附件内容：只留引用与元信息（payload 是按引用读回的运行时缓存）。
+ * **只剥有 `file` 引用的附件**——无引用的附件（旧数据、历史内嵌附件）内容只存在于消息自身，
+ * 剥掉即销毁唯一副本（读回入口都以 `file` 为前提）。
+ */
+function stripMessageAttachmentPayload(m: Message): Message {
+  if (!m.attachments?.length) return m;
+  return {
+    ...m,
+    attachments: m.attachments.map((att) => {
+      if (!att.file) return att;
+      const { payload: _dropped, ...rest } = att;
+      return rest as Attachment;
+    }),
   };
 }
 

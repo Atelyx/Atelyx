@@ -6,10 +6,19 @@ export type Role = "system" | "user" | "assistant";
 
 export interface Attachment {
   kind: "image" | "file";
-  /** 图片：base64 data URL；文件：解析出的文本内容 */
-  payload: string;
+  /**
+   * 附件内容（运行时）：图片 = base64 dataURL，文件 = 解析出的文本。
+   * **不随 `.atlx` 持久化**（有 `file` 引用时按引用读回，读到的内容缓存在这里）；
+   * 缺省 = 尚未读回或读失败，消费方须自行按 `file` 补齐或跳过。
+   */
+  payload?: string;
   mime: string;
   filename?: string;
+  /**
+   * 附件内容引用（仓库相对路径）：`.atelyx/temp/<canvasKey>/…` = 未入库（仓库内隐藏临时区），
+   * 其余 = 已入库的仓库附件（「保存到仓库」后）。有 `file` 时内容以它为准，`payload` 仅作运行时缓存。
+   */
+  file?: string;
   /** 来自画布媒体节点（@ 提及 / 连边）时标记源节点 id（用于「已注入」检测），临时附件无此字段 */
   sourceNodeId?: string;
 }
@@ -67,10 +76,18 @@ export type AgentStep =
 export interface PendingAttachment {
   id: string;
   kind: "image" | "file";
-  /** 图片：data URL；文件：读取的文本内容（解析失败为空字符串） */
-  payload: string;
+  /**
+   * 附件内容（运行时）：图片 = dataURL，文件 = 读取的文本内容。
+   * **不持久化**，有 `file` 引用时按引用读回；缺省 = 尚未读回或读失败。
+   */
+  payload?: string;
   mime: string;
   filename?: string;
+  /**
+   * 内容引用（仓库相对路径）：`.atelyx/temp/<canvasKey>/…` = 未入库（仓库内隐藏临时区），
+   * 其余 = 已入库的仓库附件（媒体节点引用）。有 `file` 时内容以它为准。
+   */
+  file?: string;
   /** 来自画布媒体节点（@ 提及 / 连边）时标记源节点 id（用于「已注入」检测），临时附件无此字段 */
   sourceNodeId?: string;
   /** 文本类文件解析失败，仅作画布参考 */

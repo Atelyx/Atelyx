@@ -58,17 +58,20 @@ export interface TextData {
 }
 
 export interface MediaData {
-  /** 相对仓库根的附件路径，如 `附件/image-xxx.png`（原 filePath，仓库化改名） */
+  /**
+   * 附件引用（仓库相对路径）：`.atelyx/temp/<canvasKey>/…` = 未入库（仓库内临时区），其余 = 已入库附件。
+   * 内容不在节点里内嵌——图片字节/文本正文按引用读盘（与文本节点 `bodyMd` 剥离同模式）。
+   */
   file?: string;
   mime: string;
   kind: "image" | "file";
-  /** 图片：dataURL 预览（运行时缓存；TODO 后续落盘 `附件/` 改存路径，剥离 thumb） */
+  /** 图片：dataURL 预览（运行时缓存，按 `file` 读回后填充；**不持久化**——否则画布文件重又内嵌 base64） */
   thumb?: string;
   /** 文件名（画布显示用） */
   name?: string;
   /** 二进制类解析失败时标注，仅作画布参考、不注入模型 */
   parseFailed?: boolean;
-  /** 文本类文件解析出的内容（@ 引用/连边时注入用） */
+  /** 文本类文件解析出的内容（@ 引用/连边时注入用，运行时填充；不持久化） */
   body?: string;
   /**
    * 按图片真实比例计算的展示宽度（px），首次加载时推导并持久化。
