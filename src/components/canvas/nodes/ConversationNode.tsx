@@ -19,6 +19,7 @@ import { isAssetConsumed } from "@/utils/consumed";
 import { findFreeSpot } from "@/utils/layout";
 import { useNotificationStore } from "@/stores/notificationStore";
 import {
+  insertMentionTag,
   mentionTextOf,
   prefix,
   splitMentions,
@@ -427,28 +428,30 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
       { x: convNode.position.x - 310, y: convNode.position.y },
       { w: 260, h: 240 },
     );
-    addNode({
-      id: mediaId,
-      type: "media",
-      position: spot,
-      data: toMediaData(att),
-    });
-    addEdge({
-      id: crypto.randomUUID(),
-      source: mediaId,
-      target: id,
-      sourceHandle: null,
-      targetHandle: null,
-    });
+    // 节点 + 关联边同属一次操作：一次入栈，Ctrl+Z 一次整体回退
+    addNode(
+      {
+        id: mediaId,
+        type: "media",
+        position: spot,
+        data: toMediaData(att),
+      },
+      {
+        id: crypto.randomUUID(),
+        source: mediaId,
+        target: id,
+        sourceHandle: null,
+        targetHandle: null,
+      },
+    );
     setAttachments((prev) => prev.filter((a) => a.id !== att.id));
   };
 
   // ===== @ 提及（反向：手动 @ → 自动建边） =====
 
-  /** @标签 原位插入（各插入路径共用同一语义：@ 到光标间过滤词替换、分隔空格、尾随空格、
-   *  光标复位到尾随空格后、关闭选择器）；record 回调登记引用映射（节点 mentions / 纯路径 fileMentions）。
-   *  插入位置在 `setInput(prev => …)` 内按 `prev` 计算：同一 tick 多条引用入队时（多选拖拽一次引用多个文件）
-   *  后一条必须看到前一条已插入后的文本，用渲染期闭包的 `input` 会让后写覆盖先写、@标签丢失。
+  /** @标签 原位插入（各插入路径共用同一语义，变换本身见 `insertMentionTag`）；record 回调登记
+   *  引用映射（节点 mentions / 纯路径 fileMentions）。插入位置在 `setInput(prev => …)` 内按 `prev`
+   *  计算——渲染期闭包的 `input` 已含上一次入队结果，两次插入同 tick 到达时会互相覆盖。
    *  `atIdx`/光标是「待替换区间」的渲染期事实，同 tick 多次插入不会改变它们（每次插入后都会复位选择器）。 */
   const insertMentionLabel = (mentionText: string, record: () => void) => {
     const caret = textareaRef.current?.selectionStart ?? input.length;
@@ -456,14 +459,9 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
     const end = Math.max(caret, insertAt);
     let caretAfter = 0;
     setInput((prev) => {
-      const from = Math.min(Math.max(atIdx, 0), prev.length);
-      const to = Math.min(Math.max(end, from), prev.length);
-      // 前文非空且不以空白结尾时补分隔空格，标签后恒带一个尾随空格——
-      // 保证胶囊前后为空白区，胶囊背景外扩（.mention-capsule）不遮相邻字符
-      const before = prev.slice(0, from);
-      const sep = before && !/\s$/.test(before) ? " " : "";
-      caretAfter = from + sep.length + mentionText.length + 1;
-      return prev.slice(0, from) + sep + mentionText + " " + prev.slice(to);
+      const { text, caret: next } = insertMentionTag(prev, insertAt, end, mentionText);
+      caretAfter = next;
+      return text;
     });
     record();
     // 光标移到尾随空格之后（继续输入不紧贴胶囊）
@@ -582,22 +580,25 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
       { x: convNode.position.x + 480, y: convNode.position.y },
       { w: 320, h: 240 },
     );
-    addNode({
-      id: textNodeId,
-      type: "text",
-      position: spot,
-      // 显式写入默认尺寸（与 addTextNoteFromVault 一致，避免依赖 TextNode 的 ?? 回退）
-      width: DEFAULT_TEXT_NODE_WIDTH,
-      height: DEFAULT_TEXT_NODE_HEIGHT,
-      data: { title, bodyMd: selMenu.text },
-    });
-    addEdge({
-      id: crypto.randomUUID(),
-      source: id,
-      target: textNodeId,
-      sourceHandle: null,
-      targetHandle: null,
-    });
+    // 节点 + 关联边同属一次操作：一次入栈，Ctrl+Z 一次整体回退
+    addNode(
+      {
+        id: textNodeId,
+        type: "text",
+        position: spot,
+        // 显式写入默认尺寸（与 addTextNoteFromVault 一致，避免依赖 TextNode 的 ?? 回退）
+        width: DEFAULT_TEXT_NODE_WIDTH,
+        height: DEFAULT_TEXT_NODE_HEIGHT,
+        data: { title, bodyMd: selMenu.text },
+      },
+      {
+        id: crypto.randomUUID(),
+        source: id,
+        target: textNodeId,
+        sourceHandle: null,
+        targetHandle: null,
+      },
+    );
     setSelMenu(null);
   };
 
@@ -615,21 +616,24 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
         { x: convNode.position.x + 480, y: convNode.position.y },
         { w: 260, h: 240 },
       );
-      addNode({
-        id: mediaId,
-        type: "media",
-        position: spot,
-        data: toMediaData(att),
-      });
-      addEdge({
-        id: crypto.randomUUID(),
-        source: id,
-        target: mediaId,
-        sourceHandle: null,
-        targetHandle: null,
-      });
+      // 节点 + 关联边同属一次操作：一次入栈，Ctrl+Z 一次整体回退
+      addNode(
+        {
+          id: mediaId,
+          type: "media",
+          position: spot,
+          data: toMediaData(att),
+        },
+        {
+          id: crypto.randomUUID(),
+          source: id,
+          target: mediaId,
+          sourceHandle: null,
+          targetHandle: null,
+        },
+      );
     },
-    [id, addNode, addEdge],
+    [id, addNode],
   );
 
   // ===== 分支：以点击消息（含）之前的全部完整状态创建子对话节点 =====

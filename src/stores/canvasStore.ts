@@ -233,12 +233,15 @@ interface CanvasState {
   onNodeDragStart: (event: unknown, node: Node) => void;
   /** 复制选中节点到内部剪贴板（深拷贝 data，不带边；多选全复制）。无选中返回 false。 */
   copySelectedNodes: () => boolean;
-  /** 粘贴剪贴板节点到目标位置（整体中心对齐，重新生成 id；空剪贴板 no-op，入 undo 栈）。 */
-  pasteNodes: (position: { x: number; y: number }) => void;
+  /** 粘贴剪贴板节点到目标位置（整体中心对齐，重新生成 id；空剪贴板 no-op，入 undo 栈）。
+   *  返回是否真的粘贴了节点——快捷键据返回值决定是否接管 Ctrl+V（false = 放行浏览器默认粘贴）。 */
+  pasteNodes: (position: { x: number; y: number }) => boolean;
   /** 节点拖动结束：重算相连边的锚点（位置自适应）。 */
   onNodeDragStop: (event: unknown, node: Node) => void;
-  /** 添加节点到画布。 */
-  addNode: (node: Node) => void;
+  /** 添加节点到画布（入 undo 栈）。传 `edge` 则与节点同属一次操作：单次 undo 栈、Ctrl+Z 一次整体回退。
+   *  建点多自带一条关联边的入口（拉出产物节点/固定附件）必须带上 `edge`——分两次 addNode/addEdge
+   *  会在撤销栈上留下两步，用户按一次 Ctrl+Z 只退掉一半。 */
+  addNode: (node: Node, edge?: Edge) => void;
   /**
    * 从仓库 `.md` 文件建文本节点（文件面板拖拽）：读正文填 bodyMd，
    * file 引用该文件（不复制）。findFreeSpot 避让已有节点。
@@ -2396,8 +2399,8 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
   },
   pasteNodes: (position) => {
     // 未打开画布（占位面板）时粘贴无意义：不写入 store（canvasId null 时 persist 虽不落盘，
-    // 但节点会残留在内存态，打开画布前状态混乱）
-    if (!get().canvasId || clipboardNodes.length === 0) return;
+    // 但节点会残留在内存态，打开画布前状态混乱）。返回 false 让快捷键放行默认粘贴。
+    if (!get().canvasId || clipboardNodes.length === 0) return false;
     get().pushUndo();
     // 整体中心对齐：以剪贴板包围盒中心为锚，粘贴件中心落在目标位置（多选复制保持相对排布）
     const xs = clipboardNodes.map((c) => c.position.x);
@@ -2425,11 +2428,14 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
       ],
     });
     schedulePersist();
+    return true;
   },
-  addNode: (node) => {
+  addNode: (node, edge) => {
     get().pushUndo();
     const nodes = [...get().nodes, node];
-    set({ nodes });
+    // withHandles 传入含新节点的列表：边两端锚点按节点类型自适应
+    if (edge) set({ nodes, edges: [...get().edges, withHandles(edge, nodes)] });
+    else set({ nodes });
     schedulePersist();
   },
   addTextNoteFromVault: async (file, title, position, exact = false) => {

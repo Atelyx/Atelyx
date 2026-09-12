@@ -256,7 +256,8 @@ export const CanvasView = memo(function CanvasView({
   }, [screenToFlowPosition]);
 
   // 画布快捷键仅在画布面板聚焦时启用（其他面板激活时 Delete/Ctrl+Z/Ctrl+A 不误操作画布）；
-  // 只读白板（外部白板格式）不提供编辑快捷键；Ctrl+V 粘贴到画布视口中心（坐标由 UI 层提供，store 不依赖 ReactFlow）
+  // 只读白板（外部白板格式）不提供编辑快捷键；Ctrl+V 粘贴到画布视口中心（坐标由 UI 层提供，store 不依赖 ReactFlow）。
+  // 返回是否已粘贴：false 时快捷键放行浏览器默认粘贴（剪贴板里不是画布节点）
   const handlePaste = useCallback(
     () => pasteNodes(canvasCenter()),
     [pasteNodes, canvasCenter],

@@ -18,7 +18,7 @@ function isInputTarget(e: KeyboardEvent) {
 export function useCanvasHotkeys(
   onEscape?: () => void,
   enabled = true,
-  onPaste?: () => void,
+  onPaste?: () => boolean,
 ) {
   const getState = useCanvasStore.getState;
 
@@ -78,8 +78,9 @@ export function useCanvasHotkeys(
         case "v":
         case "V": {
           if (e.ctrlKey || e.metaKey) {
-            e.preventDefault();
-            onPaste?.();
+            // 有画布节点可粘贴才接管；剪贴板无节点（如复制的是页面文本）时放行默认粘贴，
+            // 否则无条件 preventDefault 会静默吞掉正文里的粘贴
+            if (onPaste?.()) e.preventDefault();
           }
           break;
         }
