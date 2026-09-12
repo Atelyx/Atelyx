@@ -50,14 +50,23 @@ async function readCalendarItems(): Promise<CalendarItem[]> {
   }
 }
 
+/** 上一次成功落盘的日程序列化快照（脏门控基线；null = 无基线，下次必写）。
+ * 手动日程 CRUD 每次都 `schedule()`，但同一日程可能被多轮触发（更新回显、切面板重挂），
+ * 无差异时写盘纯属浪费且会让撕裂窗口/外部同步场景产生无意义写入。 */
+let persistedItems: string | null = null;
+
 const persistCtl = createPersistController({
   persist: async () => {
     const s = useCalendarStore.getState();
     // 跨仓库守卫：未加载（首启/已清空）不写
     if (!s.loadedForVault) return;
+    const snapshot = JSON.stringify(s.items);
+    // 无脏：内存日程与上次落盘一致，不写盘（首载基线由 load 建立，故「加载后立即写」不会发生）
+    if (snapshot === persistedItems) return;
     try {
       const payload: CalendarFile = { schema: CALENDAR_SCHEMA, items: s.items };
       await writeVaultFile(CALENDAR_FILE, JSON.stringify(payload, null, 2));
+      persistedItems = snapshot;
     } catch (e) {
       console.error("保存日历日程失败", e);
     }
@@ -87,11 +96,14 @@ export const useCalendarStore = create<CalendarState>((set, get) => ({
     // 首载/切仓库：清残留 debounce（双保险防旧 timer 写新仓库）+ 清空防旧仓库数据闪现
     persistCtl.cancel();
     set({ loadedForVault: null, items: [], datedNotes: [] });
+    persistedItems = null;
     try {
       const [items, datedNotes] = await Promise.all([readCalendarItems(), listDatedNotes()]);
       // 竞态守卫：等待期间用户可能已切仓库
       if (useAppStore.getState().vaultId !== vaultId) return;
       set({ items, datedNotes, loadedForVault: vaultId });
+      // 脏门控基线 = 刚落盘的磁盘内容：加载本身不产生写盘
+      persistedItems = JSON.stringify(items);
     } catch (e) {
       console.error("加载日历失败", e);
       if (useAppStore.getState().vaultId === vaultId) {

@@ -16,7 +16,7 @@
  * 释放检测三层冗余（全部汇入 Rust `drag_end`，先到先得幂等）：
  * 1) 源窗口 pointerup（捕获期间窗口外事件通常可达）
  * 2) Windows 左键物理状态轮询（`is_mouse_left_down`，窗口外 pointerup 丢失的主修复）
- * 3) Rust 看门狗（光标移出所有应用窗口后长时间无输入，跨平台兜底）
+ * 3) Rust 看门狗（一段时间没有新的移动上报即按最后坐标收尾，跨平台兜底）
  */
 import { create } from "zustand";
 import type { Viewport } from "@xyflow/react";

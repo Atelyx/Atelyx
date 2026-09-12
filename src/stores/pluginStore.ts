@@ -225,7 +225,7 @@ async function finishInstall(get: () => PluginStoreState, row: PluginRow): Promi
 
 /** vault 写能力接线守卫：把仓库写方法暴露给 `vault` 服务（幂等一次）。
  *  复用 AI 文件工具同一批 service/store 语义（原子写/扩展名分发引用维护/树刷新）；
- *  直接 service 的写方法不登记 .md 磁盘基线（按外部写入处理，与 AI 写入一致）；
+ *  `.md` 写入对打开的笔记会话就是一次磁盘内容变化（会话按内容事实收敛，不按调用方放行）；
  *  rename/move/delete/deleteDir/createFolder 走 vaultStore（扩展名分发 + loadFiles 刷新）。 */
 let vaultWriteWired = false;
 function ensureVaultWriteAccess(): void {

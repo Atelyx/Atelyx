@@ -5,6 +5,7 @@
  * 乐观锁 `baseUpdatedAt`（磁盘版本更新则拒绝覆盖，冲突提示条由页面层展示）。
  * 窗口槽/恢复/重命名联动由页面层（ProjectWorkspacePage）编排，本 store 只管内容与持久化。
  * title 变更走 `vaultStore.renameTable`（Rust 改文件名 + 同步画布引用），本 store 不直接改 title。
+ * 数据边界：切仓库清空运行时态（见文件末尾自注册的 `onVaultLeaving`）。
  */
 import { create } from "zustand";
 import { CALC_TYPES_BY_FIELD, TABLE_SCHEMA } from "@/constants/table";
@@ -38,6 +39,7 @@ import {
 } from "@/stores/collabStore";
 import { createPersistController } from "@/utils/persist";
 import { createUndoManager } from "@/utils/undoStack";
+import { registerDomainLifecycle } from "@/utils/kernelLifecycle";
 import {
   applyPasteGrid,
   buildPluginTableSnapshot,
@@ -1394,3 +1396,22 @@ export const useTableStore = create<TableStoreState>((set, get) => ({
     }
   },
 }));
+
+/**
+ * 切仓库清空表格运行时态：在模块加载时注册，不挂表格插件的生命周期钩子——
+ * 表格插件停用期间内核照常切仓库，残留的 tableFile/dirty 会让旧表的防抖保存按**旧仓库相对路径**
+ * 写进新仓库同名文件（跨仓库污染），也会让新仓库同路径表格误显冲突条。
+ * 这是本 store 自身的数据边界（非领域事件反应），故不随插件启停撤销。
+ * 不走 `clear()`：那会顺带回收附件（按旧仓库相对路径，此时不可取）；切仓库只需清内存态。
+ */
+registerDomainLifecycle({
+  id: "tableStore",
+  onVaultLeaving: () => {
+    // 先取消未落盘的防抖保存：resetTableState 会清掉 tableFile（persist 随即早退），
+    // 这里取消是双保险——防 reset 之后仍有人在清态前重新置上 tableFile 而让 timer 落到新仓库
+    persistCtl.cancel();
+    undoMgr.clear();
+    resetTableState(null);
+    syncLastSaved();
+  },
+});

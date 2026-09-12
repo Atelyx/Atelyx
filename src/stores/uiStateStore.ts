@@ -23,6 +23,7 @@ import { layoutBootstrap, layoutFlush, layoutOp, onLayoutBroadcast, uiStatePatch
 import {
   createDefaultLayouts,
   type DetachedWindow,
+  type LayoutNode,
   type SplitDirection,
   type ViewKind,
   type WorkspaceLayout,
@@ -458,7 +459,35 @@ function debounceSetSizes(): (splitId: string, sizes: number[]) => void {
       if (!pending) return;
       const { splitId: id, sizes: sz } = pending;
       pending = null;
+      // 长度与当前激活树里该 Split 的 children 数不符 = 树已在拖拽期间被改动（分割/关面板/切布局）：
+      // 该帧是过期观测，丢弃即可省一次注定被拒的 IPC。
+      if (!sizesMatchSplit(id, sz)) return;
       sendLayoutOp({ op: "setLayoutSizes", splitId: id, sizes: sz });
     }, 250);
   };
+}
+
+/** 给定 Split id 在**当前激活布局**里的 children 数量（不是本布局/未命中返回 null）。 */
+function splitChildCount(splitId: string): number | null {
+  const s = useUiStateStore.getState();
+  const layout = s.workspaceLayouts.find((l) => l.id === s.activeLayoutId) ?? s.workspaceLayouts[0];
+  if (!layout) return null;
+  const walk = (node: LayoutNode): number | null => {
+    if (node.kind === "panel") return null;
+    if (node.id === splitId) return node.children.length;
+    for (const child of node.children) {
+      const hit = walk(child);
+      if (hit !== null) return hit;
+    }
+    return null;
+  };
+  return walk(layout.tree);
+}
+
+/** 尺寸帧形状是否与当前树一致（长度 + 有限非负 + 和 > 0；与 Rust 侧 `sizes_valid_for` 同口径）。 */
+function sizesMatchSplit(splitId: string, sizes: number[]): boolean {
+  const count = splitChildCount(splitId);
+  if (count === null || sizes.length !== count || sizes.length === 0) return false;
+  if (!sizes.every((v) => Number.isFinite(v) && v >= 0)) return false;
+  return sizes.reduce((a, b) => a + b, 0) > 0;
 }
