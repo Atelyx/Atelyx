@@ -13,6 +13,7 @@ import type { NodeProps } from "@xyflow/react";
 import type { SearchResultData, SearchResultItem } from "@/types";
 import { useCanvasStore } from "@/stores/canvasStore";
 import { useAppStore } from "@/stores/appStore";
+import { isOpenableUrl } from "@/utils/markdown";
 import { ConnectionFrame } from "./ConnectionFrame";
 import { ResizeHandle } from "./ResizeHandle";
 
@@ -28,6 +29,8 @@ function ResultRow({
 }) {
   const [open, setOpen] = useState(false);
   const openUrl = useAppStore((s) => s.openUrl);
+  // 搜索 provider 返回的 URL 属外部输入：仅可外部打开的协议才可点击
+  const openable = isOpenableUrl(item.url);
   return (
     <li className="text-xs">
       <div className="flex items-start gap-1.5">
@@ -39,18 +42,18 @@ function ResultRow({
           className="nodrag mt-0.5 flex-shrink-0"
         />
         <a
-          href={item.url}
+          href={openable ? item.url : undefined}
           onClick={(e) => {
             e.preventDefault();
             e.stopPropagation();
-            void openUrl(item.url);
+            if (openable) void openUrl(item.url);
           }}
           className="flex-1 min-w-0 truncate hover:opacity-80 inline-flex items-center gap-1"
-          style={{ color: "var(--accent)" }}
+          style={{ color: "var(--accent)", cursor: openable ? "pointer" : "default" }}
           title={item.url}
         >
           <span className="truncate">{item.title || item.url}</span>
-          <ExternalLink size={10} className="flex-shrink-0" />
+          {openable && <ExternalLink size={10} className="flex-shrink-0" />}
         </a>
         <button
           onClick={() => setOpen((v) => !v)}

@@ -66,5 +66,18 @@ export function vaultPathNoteOf(
   return { file: hit.file, title: hit.name.replace(/\.md$/i, "") };
 }
 
-/** 拦截走系统浏览器的外部链接协议（MarkdownEditor 链接装饰共用同一正则）。 */
-export const EXTERNAL_LINK_RE = /^(https?:|mailto:|xmpp:)/i;
+/** 允许走系统浏览器的外部链接协议。 */
+const EXTERNAL_LINK_RE = /^(https?:|mailto:|xmpp:)/i;
+
+/**
+ * 可否用系统默认程序打开该 URL：仅放行 `EXTERNAL_LINK_RE` 覆盖的协议，其余（`file:`/`javascript:`/
+ * 非法 URL）返回 false。先经 `URL` 解析出协议再判定——前缀正则直接匹配原始串会把
+ * `javascript:alert(1)` 误判为可放行。点击、渲染入口在调用 `openUrl` 前都应先过它。
+ */
+export function isOpenableUrl(raw: string): boolean {
+  try {
+    return EXTERNAL_LINK_RE.test(new URL(raw).protocol);
+  } catch {
+    return false;
+  }
+}

@@ -8,7 +8,7 @@
  */
 import { WidgetType, type EditorView } from "@codemirror/view";
 import katex from "katex";
-import { EXTERNAL_LINK_RE, decodeLinkHref } from "@/utils/markdown";
+import { isOpenableUrl, decodeLinkHref } from "@/utils/markdown";
 import { sanitizeHtmlFragment } from "@/utils/htmlSanitize";
 
 // ===== 共享类型 =====
@@ -529,7 +529,7 @@ export class HtmlWidget extends WidgetType {
       e.preventDefault();
       e.stopPropagation();
       const url = decodeLinkHref(href);
-      if (EXTERNAL_LINK_RE.test(url)) this.opts.onOpenUrl(url);
+      if (isOpenableUrl(url)) this.opts.onOpenUrl(url);
       else if (this.opts.isVaultPathNote?.(url) && this.opts.onOpenVaultPathNote)
         this.opts.onOpenVaultPathNote(url);
     });

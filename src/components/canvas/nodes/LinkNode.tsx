@@ -1,7 +1,7 @@
 /**
  * 链接节点：URL 卡片（对等外部白板格式的 link 节点）。
  *
- * - 图标 + 域名 + 完整 URL，单击卡片在外部浏览器打开（仅 http/https 协议）
+ * - 图标 + 域名 + 完整 URL，单击卡片在外部浏览器打开（仅可外部打开的协议，见 `isOpenableUrl`）
  * - 可拖拽移动 / NodeResizeControl 调整大小
  * - 仅关联边可连（自动分类：link 参与的连线一律为关联自由线，见 2.4）
  */
@@ -11,18 +11,9 @@ import { useAppStore } from "@/stores/appStore";
 import { useCanvasStore } from "@/stores/canvasStore";
 import { DEFAULT_LINK_HEIGHT, DEFAULT_LINK_WIDTH } from "@/constants/canvas";
 import type { LinkFileData } from "@/types";
+import { isOpenableUrl } from "@/utils/markdown";
 import { ConnectionFrame } from "./ConnectionFrame";
 import { ResizeHandle } from "./ResizeHandle";
-
-/** 仅 http/https 链接可点击打开（其余协议/非法 URL 只展示）。 */
-function isOpenableUrl(raw: string): boolean {
-  try {
-    const u = new URL(raw);
-    return u.protocol === "http:" || u.protocol === "https:";
-  } catch {
-    return false;
-  }
-}
 
 function hostOf(raw: string): string {
   try {

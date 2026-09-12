@@ -38,7 +38,7 @@ import {
   blockMathRanges,
   parseBracketLink,
 } from "./markdownWidgets";
-import { EXTERNAL_LINK_RE } from "@/utils/markdown";
+import { isOpenableUrl } from "@/utils/markdown";
 
 // ===== 语法节点名（lezer-markdown，GFM 已启用）=====
 
@@ -456,7 +456,7 @@ export function buildDecorations(
         for (const m of c.marks) marksToShow.add(rangeKey(m));
         continue;
       }
-      if (EXTERNAL_LINK_RE.test(parsed.url)) {
+      if (isOpenableUrl(parsed.url)) {
         // 外链 → 系统浏览器
         pushWidget(
           c.from,
