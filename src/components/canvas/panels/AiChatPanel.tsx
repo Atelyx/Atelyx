@@ -34,6 +34,7 @@ import { useChatPanelStore } from "@/stores/chatPanelStore";
 import { useSettingsStore, selectDefaultModelDisplay } from "@/stores/settingsStore";
 import { useAutoScrollFollow } from "@/hooks/useAutoScrollFollow";
 import {
+  insertMentionTag,
   splitMentions,
   type MentionSeg,
 } from "@/utils/text";
@@ -226,23 +227,27 @@ export function AiChatPanel() {
     void send(text, mentions);
   };
 
-  // 仓库选择器选中 → @标签 插入（@ 到光标间过滤词替换、分隔空格、尾随空格、光标复位，与画布同语义）
+  // 仓库选择器选中 → @标签 插入（@ 到光标间过滤词替换、分隔空格、尾随空格、光标复位，与画布同语义）。
+  // `atIdx`/光标是「待替换区间」的渲染期事实；插入位置在 `setInput(prev => ...)` 内按 `prev` 计算——
+  // 渲染期闭包的 `input` 已含上一次入队结果，两次插入同 tick 到达时会互相覆盖。
   const handleVaultPick = (t: VaultPickTarget) => {
     const caret = textareaRef.current?.selectionStart ?? input.length;
     const insertAt = Math.min(Math.max(atIdx, 0), input.length);
     const end = Math.max(caret, insertAt);
-    const before = input.slice(0, insertAt);
-    const sep = before && !/\s$/.test(before) ? " " : "";
     const label = t.name.toLowerCase().endsWith(".md") ? noteTitleFromFile(t.path) : t.name;
     const mentionText = `@${label}`;
-    setInput((prev) => prev.slice(0, insertAt) + sep + mentionText + " " + prev.slice(end));
+    let caretAfter = 0;
+    setInput((prev) => {
+      const { text, caret: next } = insertMentionTag(prev, insertAt, end, mentionText);
+      caretAfter = next;
+      return text;
+    });
     setMentions((prev) => [...prev, { file: t.path, label }]);
     requestAnimationFrame(() => {
       const ta = textareaRef.current;
       if (ta) {
         ta.focus();
-        const pos = insertAt + sep.length + mentionText.length + 1;
-        ta.setSelectionRange(pos, pos);
+        ta.setSelectionRange(caretAfter, caretAfter);
       }
     });
     setPicker(null);
