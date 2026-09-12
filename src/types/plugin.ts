@@ -138,6 +138,17 @@ export interface PluginIndex {
 /** 插件行的运行阶段。 */
 export type PluginFiberPhase = "pending" | "active" | "failed";
 
+/** 挂载失败阶段（按执行顺序：清单 → 兼容 → 读取 → 转译 → 求值 → 激活）。 */
+export type PluginMountPhase = "manifest" | "compat" | "read" | "transpile" | "eval" | "apply";
+
+/** 分段失败诊断（宿主内部与插件管理页用；插件侧不可见）。 */
+export interface PluginMountFailure {
+  phase: PluginMountPhase;
+  message: string;
+  /** phase = apply 且因 inject 依赖未满足时的缺失服务清单。 */
+  missing?: string[];
+}
+
 /** 已装插件运行记录（pluginStore 用）。 */
 export interface InstalledPlugin {
   id: string;
@@ -150,8 +161,8 @@ export interface InstalledPlugin {
   sourceKind: PluginSourceKind;
   enabled: boolean;
   phase: PluginFiberPhase;
-  /** 加载失败原因。 */
-  error?: string;
+  /** 加载失败诊断（分段 phase + 可读原因 + 可选缺失服务清单）。 */
+  failure?: PluginMountFailure;
 }
 
 /**

@@ -2,7 +2,7 @@
  * 设置 → 插件面板：插件列表（默认组合成员 + 已装插件）+ 市场浏览。
  *
  * - 列表（单表，装配顺序 = 默认组合成员在前）：每行可启停/更新/卸载，展示来源徽标/版本/运行状态/
- *   失败原因/声明与实际调用审计/命令入口；未安装的默认组合成员成灰行，经「恢复默认装配」装回。
+ *   分段失败诊断/声明与实际调用审计/命令入口；未安装的默认组合成员成灰行，经「恢复默认装配」装回。
  * - 替换/增强关系由插件自己在 apply 里经 ctx.slots 的 priority / inject 声明（作者侧决定）：
  *   用户侧只需安装 + 启用，不在管理页暴露行序/实现来源等开发者语义。
  * - 安装入口：市场安装（git clone）之外，支持「从本地文件夹安装」（junction 实时引用）与
@@ -19,7 +19,13 @@ import { DEFAULT_COMPOSITION } from "@/components/plugins/cordis/builtins";
 import { deriveThemeProviders, isThemePluginRow } from "@/utils/pluginTheme";
 import { composePlugins, compositionPackages } from "@/utils/cordis/composition";
 import { errText } from "@/types";
-import { PLUGIN_SCOPE_LABELS, PLUGIN_SOURCE_LABELS, PLUGIN_TYPE_LABELS } from "@/constants/plugins";
+import {
+  PLUGIN_MOUNT_PHASE_LABELS,
+  PLUGIN_MOUNT_PHASE_ORDER,
+  PLUGIN_SCOPE_LABELS,
+  PLUGIN_SOURCE_LABELS,
+  PLUGIN_TYPE_LABELS,
+} from "@/constants/plugins";
 
 type TabMode = "installed" | "market";
 
@@ -178,6 +184,7 @@ export function PluginsSettingsTab() {
           const p = plugins[row.id];
           const declares = p?.manifest.declares ?? [];
           const failed = p?.phase === "failed";
+          const failure = p?.failure;
           const cmds = commands.filter((c) => c.pluginId === row.id);
           const audit = auditByRow.get(row.id);
           const lastTheme = p ? isLastEnabledTheme(p) : false;
@@ -279,9 +286,31 @@ export function PluginsSettingsTab() {
                 )}
               </div>
 
-              {failed && p?.error && (
-                <div className="mt-1.5 text-[11px] break-words" style={{ color: "#f87171" }}>
-                  {p.error}
+              {failed && failure && (
+                <div className="mt-1.5 space-y-1">
+                  <div className="flex flex-wrap gap-1">
+                    {PLUGIN_MOUNT_PHASE_ORDER.map((phase) => (
+                      <span
+                        key={phase}
+                        className="text-[10px] px-1.5 py-0.5 rounded"
+                        style={
+                          phase === failure.phase
+                            ? { color: "#f87171", background: "rgba(248,113,113,0.12)" }
+                            : { color: "var(--text-muted)", background: "var(--bg-secondary)" }
+                        }
+                      >
+                        {PLUGIN_MOUNT_PHASE_LABELS[phase]}
+                      </span>
+                    ))}
+                  </div>
+                  <div className="text-[11px] break-words" style={{ color: "#f87171" }}>
+                    {failure.message}
+                  </div>
+                  {failure.missing && (
+                    <div className="text-[10px] break-words" style={{ color: "var(--text-muted)" }}>
+                      缺失依赖：{failure.missing.join("、")}
+                    </div>
+                  )}
                 </div>
               )}
               {cmds.length > 0 && (
@@ -323,8 +352,22 @@ export function PluginsSettingsTab() {
                   ))}
                 </div>
               )}
-              {audit && (audit.services.length > 0 || audit.events.length > 0) && (
+              {audit && (audit.services.length > 0 || audit.events.length > 0 || audit.calls.length > 0) && (
                 <div className="mt-1.5 flex flex-wrap gap-1">
+                  {audit.calls.map((call) => (
+                    <span
+                      key={`call:${call.service}.${call.method}:${call.summary}`}
+                      className="text-[10px] px-1.5 py-0.5 rounded border"
+                      title={`实际调用：${call.service}.${call.method}`}
+                      style={{
+                        color: "#f59e0b",
+                        borderColor: "var(--border)",
+                        background: "rgba(245,158,11,0.1)",
+                      }}
+                    >
+                      {capabilityLabel(call.service)} · {call.summary}
+                    </span>
+                  ))}
                   {audit.services.map((ns) => (
                     <span
                       key={`svc:${ns}`}

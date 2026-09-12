@@ -61,7 +61,11 @@ describe("用户插件挂载", () => {
     };
     const result = await mountPlugin(kernel, { id: "com.test.dep", apply });
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.reason).toContain("依赖服务未提供：table");
+    if (!result.ok) {
+      expect(result.phase).toBe("apply");
+      expect(result.missing).toEqual(["table"]);
+      expect(result.message).toContain("依赖服务未提供：table");
+    }
   });
 
   it("apply 对象（inject）：依赖满足 → 激活", async () => {
@@ -100,5 +104,40 @@ describe("用户插件挂载", () => {
     expect(vi.mocked(pluginReadEntry)).toHaveBeenCalledWith("com.acme.richnote", "main.js");
     expect(mountedPluginIds(kernel)).toEqual(["com.acme.richnote"]);
     expect(kernel.ctx.get("pkgSvc")).toBeDefined();
+  });
+
+  it("入口读取失败 → 阶段 read", async () => {
+    kernel = createKernel();
+    vi.mocked(pluginReadEntry).mockRejectedValueOnce(new Error("读取插件入口失败：boom"));
+    const result = await mountPluginFromPackage(kernel, "com.test.read", "main.js");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.phase).toBe("read");
+      expect(result.message).toContain("boom");
+    }
+  });
+
+  it("TS 转译失败 → 阶段 transpile", async () => {
+    kernel = createKernel();
+    vi.mocked(pluginReadEntry).mockResolvedValueOnce("const = ;");
+    const result = await mountPluginFromPackage(kernel, "com.test.ts", "main.ts");
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.phase).toBe("transpile");
+  });
+
+  it("求值抛错 / 未导出 apply → 阶段 eval", async () => {
+    kernel = createKernel();
+    vi.mocked(pluginReadEntry).mockResolvedValueOnce("throw new Error('boom')");
+    const thrown = await mountPluginFromPackage(kernel, "com.test.eval", "main.js");
+    expect(thrown.ok).toBe(false);
+    if (!thrown.ok) {
+      expect(thrown.phase).toBe("eval");
+      expect(thrown.message).toContain("boom");
+    }
+
+    vi.mocked(pluginReadEntry).mockResolvedValueOnce("export const x = 1;");
+    const noApply = await mountPluginFromPackage(kernel, "com.test.noapply", "main.js");
+    expect(noApply.ok).toBe(false);
+    if (!noApply.ok) expect(noApply.phase).toBe("eval");
   });
 });

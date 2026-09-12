@@ -80,7 +80,11 @@ describe("内核独立启动（零插件）", () => {
       apply: { inject: ["table"], apply: () => {} },
     });
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.reason).toContain("table");
+    if (!result.ok) {
+      expect(result.phase).toBe("apply");
+      expect(result.missing).toEqual(["table"]);
+      expect(result.message).toContain("table");
+    }
     kernel.dispose();
   });
 });

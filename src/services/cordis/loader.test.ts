@@ -81,7 +81,10 @@ describe("Cordis 挂载器", () => {
     };
     const result = await mountPlugin(k, { id: "builtin.boom", apply: boom });
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.reason).toContain("初始化失败");
+    if (!result.ok) {
+      expect(result.phase).toBe("apply");
+      expect(result.message).toContain("初始化失败");
+    }
     expect(mountedPluginIds(k)).toEqual([]);
     expect(resolveViewKind("loader-boom")).toBeUndefined(); // 失败即撤销已注册贡献
 

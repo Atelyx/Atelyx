@@ -174,6 +174,8 @@ export {
   type PluginIndexEntry,
   type PluginIndex,
   type PluginFiberPhase,
+  type PluginMountPhase,
+  type PluginMountFailure,
   type InstalledPlugin,
   type PluginSourceKind,
   type PluginTableSnapshot,

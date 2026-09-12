@@ -7,7 +7,7 @@
  * 审计归属：contextToPluginId 记录插件上下文 → 插件 id（audit.ts 据此归属服务读/事件订阅）。
  */
 import { Context, FiberState, type Fiber, type Plugin } from "@atelyx/cordis";
-import { errText } from "@/types";
+import { errText, type PluginMountFailure } from "@/types";
 import { forgetPluginAudit } from "./audit";
 import type { Kernel } from "./kernel";
 
@@ -18,8 +18,8 @@ export interface PluginDefinition {
   apply: Plugin;
 }
 
-/** 挂载结果：ok 或失败原因。 */
-export type MountResult = { ok: true } | { ok: false; reason: string };
+/** 挂载结果：ok 或分段失败诊断（phase + 可读原因 + 可选缺失服务清单）。 */
+export type MountResult = { ok: true } | ({ ok: false } & PluginMountFailure);
 
 /** 插件上下文 → 插件 id（审计归属；mount 时经包装 apply 记录，WeakMap 随上下文回收）。 */
 export const contextToPluginId = new WeakMap<object, string>();
@@ -90,6 +90,21 @@ function resolveApply(plugin: Plugin): (ctx: Context, config: unknown) => unknow
   return (typeof plugin === "function" ? plugin : plugin.apply) as (ctx: Context, config: unknown) => unknown;
 }
 
+/** 失败收尾：摘掉挂载句柄 → 撤销 effects → 丢弃审计记录，返回分段诊断。
+ *  失败挂载（apply 读了服务后抛错）同样丢弃审计记录：该 id 不在 mountsOf 里，卸载路径摸不到它，
+ *  留着会与之后成功挂载的读数并集（披露 UI 把旧实现的服务面算到新代码头上）。 */
+async function failMount(
+  kernel: Kernel,
+  id: string,
+  fiber: Fiber,
+  failure: PluginMountFailure,
+): Promise<MountResult> {
+  mountsOf(kernel).delete(id);
+  await disposeFiber(fiber);
+  forgetPluginAudit(id);
+  return { ok: false, ...failure };
+}
+
 /** 挂载单个插件（先撤销旧 fiber 防重复注册）；失败返回可读原因。
  *  同一 id 的并发调用按入队顺序串行执行（队列见 enqueue）。 */
 export function mountPlugin(
@@ -127,18 +142,16 @@ async function mountNow(
     if (fiber.state !== FiberState.ACTIVE) {
       // inject 依赖未满足：插件未激活（apply 未执行），附缺失服务清单。
       const missing = Object.keys(fiber.inject ?? {}).filter((key) => !fiber.store?.[key]);
-      throw new Error(
-        missing.length > 0 ? `依赖服务未提供：${missing.join("、")}` : "插件未激活（依赖服务缺失）",
-      );
+      return failMount(kernel, plugin.id, fiber, {
+        phase: "apply",
+        message:
+          missing.length > 0 ? `依赖服务未提供：${missing.join("、")}` : "插件未激活（依赖服务缺失）",
+        ...(missing.length > 0 ? { missing } : {}),
+      });
     }
     return { ok: true };
   } catch (e) {
-    mountsOf(kernel).delete(plugin.id);
-    await disposeFiber(fiber);
-    // 失败挂载（apply 读了服务后抛错）同样丢弃审计记录：该 id 不在 mountsOf 里，
-    // 卸载路径摸不到它，留着会与之后成功挂载的读数并集（披露 UI 把旧实现的服务面算到新代码头上）。
-    forgetPluginAudit(plugin.id);
-    return { ok: false, reason: errText(e) };
+    return failMount(kernel, plugin.id, fiber, { phase: "apply", message: errText(e) });
   }
 }
 

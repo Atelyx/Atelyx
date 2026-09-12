@@ -15,7 +15,7 @@
 import { create } from "zustand";
 import type { ComponentType } from "react";
 import type { InstalledPlugin, PluginIndexEntry, PluginManifest, PluginPackageJson, PluginScope } from "@/types";
-import { errText, type PluginFiberPhase } from "@/types";
+import { errText, type PluginFiberPhase, type PluginMountFailure } from "@/types";
 import type { AppUiState } from "@/types";
 import {
   pluginInstall,
@@ -371,12 +371,12 @@ function ensureRuntimeChangeEvents(): void {
 }
 
 export const usePluginStore = create<PluginStoreState>()((set, get) => {
-  /** 置插件运行阶段（加载/激活/失败）。 */
-  const syncPhase = (id: string, phase: PluginFiberPhase, error?: string): void => {
+  /** 置插件运行阶段与失败诊断（加载/激活/失败）。 */
+  const syncPhase = (id: string, phase: PluginFiberPhase, failure?: PluginMountFailure): void => {
     set((s) => {
       const cur = s.plugins[id];
       if (!cur) return s;
-      return { plugins: { ...s.plugins, [id]: { ...cur, phase, error } } };
+      return { plugins: { ...s.plugins, [id]: { ...cur, phase, failure } } };
     });
   };
 
@@ -384,32 +384,32 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
   const defaultManifests = (hostVersion: string | null): PluginPackageJson[] =>
     CORDIS_BUILTIN_DEFS.map((d) => builtinManifest(d, hostVersion ?? "0.0.0"));
 
-  /** 拉起单个插件行的运行时：行有落位目录（磁盘包）则读该包入口，否则经实现注册表取编译实现
-   *  （同为「入口解析方式」，与列表的磁盘行优先一致）；失败标 failed + 可读原因。 */
-  const spawn = async (id: string): Promise<void> => {
+  /** 拉起单个插件行的运行时：先做兼容校验；行有落位目录则读包入口，否则取编译实现。 */
+  const spawn = async (id: string, env?: { hostVersion: string | null; platform: string }): Promise<void> => {
     // 先撤销旧运行时（重载防重复注册）。
     await stopPlugin(id);
     try {
       const plugin = get().plugins[id];
-      if (!plugin) throw new Error("插件不存在");
+      if (!plugin) return syncPhase(id, "failed", { phase: "manifest", message: "插件不存在" });
+      const hostVersion = env?.hostVersion ?? (await getAppVersion().catch(() => null));
+      const platform = env?.platform ?? detectPlatform();
+      const compat = pluginCompatibleWithHost(plugin.manifest, hostVersion, platform);
+      if (!compat.ok) return syncPhase(id, "failed", { phase: "compat", message: compat.reason });
       if (plugin.installDir === "") {
         const def = CORDIS_BUILTIN_BY_ID[id];
-        if (!def) throw new Error("实现随应用编译但缺少对应实现定义");
+        if (!def) {
+          return syncPhase(id, "failed", { phase: "manifest", message: "实现随应用编译但缺少对应实现定义" });
+        }
         const result = await mountPlugin(getKernel(), { id, apply: def.apply });
-        if (!result.ok) throw new Error(result.reason);
-        syncPhase(id, "active");
-        return;
+        return syncPhase(id, result.ok ? "active" : "failed", result.ok ? undefined : result);
       }
       // 磁盘包无入口 = 声明式插件（如纯 theme）：置 active 即可（主题提供者经清单消费）。
-      if (!plugin.manifest.main) {
-        syncPhase(id, "active");
-        return;
-      }
+      if (!plugin.manifest.main) return syncPhase(id, "active");
       const result = await mountPluginFromPackage(getKernel(), id, plugin.manifest.main);
-      if (!result.ok) throw new Error(result.reason);
-      syncPhase(id, "active");
+      return syncPhase(id, result.ok ? "active" : "failed", result.ok ? undefined : result);
     } catch (e) {
-      syncPhase(id, "failed", errText(e));
+      // 宿主侧意外错误（内核未就绪等）：归入激活阶段，避免行卡在 pending。
+      syncPhase(id, "failed", { phase: "apply", message: errText(e) });
     }
   };
 
@@ -475,19 +475,12 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
       for (let i = 0; i < mounts.length; i++) {
         if (seq !== loadSeq) return;
         const id = mounts[i];
-        // 加载前兼容校验（契约版本/宿主版本范围/平台）：不兼容的行响亮失败并附原因，不挂载、不阻塞其余行
-        const manifest = get().plugins[id].manifest;
-        const compat = pluginCompatibleWithHost(manifest, hostVersion, platform);
-        if (!compat.ok) {
-          syncPhase(id, "failed", compat.reason);
-          continue;
-        }
         if (useAppStore.getState().entryLoading) {
           useAppStore.getState().reportLoad(
             `加载插件：${get().plugins[id]?.manifest.name ?? id}（${i + 1}/${total}）`,
           );
         }
-        await spawn(id);
+        await spawn(id, { hostVersion, platform });
       }
     },
 
@@ -559,7 +552,9 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
         set((s) => {
           const cur = s.plugins[id];
           if (!cur) return s;
-          return { plugins: { ...s.plugins, [id]: { ...cur, enabled: false, phase: "pending", error: undefined } } };
+          return {
+            plugins: { ...s.plugins, [id]: { ...cur, enabled: false, phase: "pending", failure: undefined } },
+          };
         });
       }
     },

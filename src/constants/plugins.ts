@@ -3,7 +3,7 @@
  * 插件面服务的展示文案与敏感标记见 constants/pluginServices.ts（此处不维护服务词汇表）；
  * 插件目录布局与清单文件名归 Rust 侧（`commands/plugin.rs` 的常量），前端不重复持有。
  */
-import type { PluginBadge, PluginScope, PluginSourceKind, PluginType } from "@/types";
+import type { PluginBadge, PluginMountPhase, PluginScope, PluginSourceKind, PluginType } from "@/types";
 
 /** 官方账号名单：这些账号发布的插件自动带 official 徽标（市场聚合侧同用）。 */
 export const OFFICIAL_PLUGIN_ORGS = ["Atelyx"] as const;
@@ -54,3 +54,23 @@ export const PLUGIN_SOURCE_LABELS: Record<PluginSourceKind, string> = {
   local: "本地目录",
   builtin: "随应用",
 };
+
+/** 挂载失败阶段展示文案（管理页分段展示；与 PluginMountPhase 一一对应）。 */
+export const PLUGIN_MOUNT_PHASE_LABELS: Record<PluginMountPhase, string> = {
+  manifest: "清单",
+  compat: "兼容",
+  read: "读取",
+  transpile: "转译",
+  eval: "求值",
+  apply: "激活",
+};
+
+/** 挂载阶段展示顺序（分段展示按此排列）。 */
+export const PLUGIN_MOUNT_PHASE_ORDER: readonly PluginMountPhase[] = [
+  "manifest",
+  "compat",
+  "read",
+  "transpile",
+  "eval",
+  "apply",
+];

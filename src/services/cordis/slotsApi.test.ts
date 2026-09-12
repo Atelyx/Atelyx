@@ -106,8 +106,8 @@ describe("ctx.slots", () => {
     const result = await mountPlugin(kernel, { id: "com.test.ui", apply });
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.reason).toContain("未声明的槽位");
-      expect(result.reason).toContain("contextmenu/canvas");
+      expect(result.message).toContain("未声明的槽位");
+      expect(result.message).toContain("contextmenu/canvas");
     }
     expect(listSlot("contextmenu/file")).toEqual([]);
   });
@@ -136,8 +136,8 @@ describe("ctx.slots", () => {
     const result = await mountPlugin(kernel, { id: "com.test.ui", apply });
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.reason).toContain("未声明的槽位");
-      expect(result.reason).toContain("toolbar/note/right");
+      expect(result.message).toContain("未声明的槽位");
+      expect(result.message).toContain("toolbar/note/right");
     }
     expect(listSlot("toolbar/notes/right")).toEqual([]);
   });
