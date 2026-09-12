@@ -24,7 +24,7 @@ vendored Cordis 核心源码。只 vendor 核心：本项目无 Node 运行时�
 ## 本地补丁清单
 
 1. `cordis/src/*.ts`：`cosmokit` → `@atelyx/cosmokit`（8 处；机械替换，命名说明见上）。
-2. `cordis/src/index.ts`：补 `export * from './reflect'`（原版索引未导出 reflect；审计机制需包装 `ReflectService.handler`）。其余无。
+2. `cordis/src/index.ts`：补 `export * from './reflect'`（原版索引未导出 reflect；审计机制需包装 `ReflectService.handler`）。该导出由 `src/services/cordis/vendorCore.test.ts` 守卫——删掉即测试红。其余无。
 
 ## 同步流程
 

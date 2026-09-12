@@ -5,7 +5,7 @@
  * 服务提供/读取/撤销、on/once、waterfall 环绕、插件注册随 fiber 卸载可逆撤销。
  * 与 kernel/loader/slotsApi 等测试的分工：那些走宿主封装，本文件只钉 vendor 自身语义。
  */
-import { Context } from "@atelyx/cordis";
+import { Context, ReflectService } from "@atelyx/cordis";
 import { describe, expect, it } from "vitest";
 
 /** typed events 声明合并：扩展点即类型系统（本文件演示合并语法）。 */
@@ -20,6 +20,10 @@ declare module "@atelyx/cordis" {
 }
 
 describe("vendored Cordis 核心行为", () => {
+  it("reflect 导出就绪（审计包装 ReflectService.handler 的依赖）", () => {
+    expect(typeof ReflectService.handler.get).toBe("function");
+  });
+
   it("根 Context 启动且基础服务就绪", () => {
     const ctx = new Context();
     expect(ctx.events).toBeDefined();
