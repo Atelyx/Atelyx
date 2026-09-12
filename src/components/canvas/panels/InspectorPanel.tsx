@@ -42,7 +42,6 @@ import type {
   DetachedWindow,
   LayoutNode,
   MediaData,
-  Message,
   TableData,
   TextData,
   ViewKind,
@@ -104,12 +103,13 @@ function resolveContext(
 /**
  * 对话节点显示名：优先 LLM 自动命名的话题标题（data.title，首轮对话完成后自动命名），
  * 未命名时回退首条 user 消息前缀，无消息时「对话节点」。
+ * 入参是已取出的「首条 user 消息正文」而非消息数组——调用方据此只订阅该字符串，
+ * 父对话流式增量不会让本面板每帧重渲染。
  */
-function conversationDisplayName(node: FlowNode, msgs: Message[] | undefined): string {
+function conversationDisplayName(node: FlowNode, firstUserContent: string | undefined): string {
   const data = node.data as Partial<ConversationData>;
   if (data.title) return data.title;
-  const firstUser = msgs?.find((m) => m.role === "user")?.content;
-  return firstUser ? prefix(firstUser, 16) : "对话节点";
+  return firstUserContent ? prefix(firstUserContent, 16) : "对话节点";
 }
 
 /**
@@ -270,9 +270,14 @@ export function InspectorPanel() {
   // Agent 候选（配置在 设置 → Agent，仓库级 .atelyx/agents.json；发送时实时解析系统提示词/工具）
   const agents = useSettingsStore((s) => s.agents);
   // 分支来源：入边中 type 为 conversation 的父节点（血缘边对话→对话），无则手动创建。
-  // 订阅父对话消息：父节点继续对话后来源显示名响应式刷新
+  // 只订阅父对话「首条 user 消息正文」（字符串，流式增量不改它 → 不重渲染；订阅整个
+  // messagesByConv 数组会每帧刷新面板），用于来源显示名回退
   const parentConv = sources.find((n) => n.type === "conversation");
-  const parentMsgs = useCanvasStore((s) => (parentConv ? s.messagesByConv[parentConv.id] : undefined));
+  const parentFirstUser = useCanvasStore((s) =>
+    parentConv
+      ? s.messagesByConv[parentConv.id]?.find((m) => m.role === "user")?.content
+      : undefined,
+  );
   const { setCenter } = useReactFlow();
 
   // 笔记模式数据：焦点当前笔记（优先级）或选中笔记节点（text + file）
@@ -437,7 +442,7 @@ export function InspectorPanel() {
             </SectionTitle>
             {/* 分支血缘边（对话→对话）的父节点 = 分支来源；无则手动创建 */}
             <div className="text-xs" style={{ color: "var(--text-secondary)" }}>
-              {parentConv ? conversationDisplayName(parentConv, parentMsgs) : "手动创建"}
+              {parentConv ? conversationDisplayName(parentConv, parentFirstUser) : "手动创建"}
             </div>
           </section>
 

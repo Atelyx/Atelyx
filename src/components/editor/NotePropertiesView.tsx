@@ -386,6 +386,8 @@ export function NotePropertiesView({
   const [addStep, setAddStep] = useState<"key" | "value">("key");
   const [newKey, setNewKey] = useState("");
   const [newValue, setNewValue] = useState("");
+  /** 添加属性时键名已存在的提示（存该键名；非空即展示，改键名/关闭表单后清除）。 */
+  const [duplicateKey, setDuplicateKey] = useState<string | null>(null);
   /** 键名建议下拉状态（两段式 key 步）。 */
   const [keySuggestOpen, setKeySuggestOpen] = useState(false);
   const [keySuggestIdx, setKeySuggestIdx] = useState(0);
@@ -549,6 +551,7 @@ export function NotePropertiesView({
     setAddingItem(null);
     setNewKey("");
     setNewValue("");
+    setDuplicateKey(null);
     setAddStep("key");
     setKeySuggestOpen(false);
     setTagSuggestOpen(false);
@@ -557,6 +560,7 @@ export function NotePropertiesView({
 
   const closeAddField = () => {
     setAddOpen(false);
+    setDuplicateKey(null);
     setKeySuggestOpen(false);
     setTagSuggestOpen(false);
   };
@@ -599,6 +603,7 @@ export function NotePropertiesView({
           : newKey.trim();
       if (!k) return;
       setNewKey(k);
+      setDuplicateKey(null);
       setKeySuggestOpen(false);
       setAddStep("value");
       return;
@@ -654,16 +659,20 @@ export function NotePropertiesView({
     else if (e.key === "Escape") closeAddField();
   };
 
-  /** value 步失焦：「点击其他位置」= 结束输入——值非空提交（所有键一致，不丢输入），空则取消表单。 */
+  /** value 步失焦：「点击其他位置」= 结束输入——值非空提交（所有键一致，不丢输入），空则取消表单。
+   *  重名时不退回键名步（`rollbackOnDuplicate: false`）——退回会改变 `addStep`，聚焦 effect 随之重跑
+   *  把焦点抢回键名输入框，用户「点外部关表单」的意图被否决。 */
   const handleValueBlur = () => {
-    if (newValue.trim() !== "") addField();
+    if (newValue.trim() !== "") addField({ rollbackOnDuplicate: false });
     else closeAddField();
   };
 
   /** 添加新属性：Value 含逗号（中英文）自动转数组；空值 = 取消表单（不产生 `key: ""` 垃圾属性）。
    *  徽章类键（tags/aliases/cssclasses）值恒为数组——单个标签也存数组（其余键单值存字符串）。
-   *  键已存在时：徽章键追加进数组（如给已有 tags 补标签）；其余键不覆盖原值（防数据丢失，应走既有行编辑）。 */
-  const addField = () => {
+   *  键已存在时：徽章键追加进数组（如给已有 tags 补标签）；其余键不覆盖原值（防数据丢失），
+   *  默认退回键名步并提示「该属性已存在」——值步的键名胶囊不可改，退回才能改键名；newValue 保留，
+   *  改名后进值步随即带出，不静默丢弃刚输入的值。 */
+  const addField = (opts?: { rollbackOnDuplicate?: boolean }) => {
     const key = newKey.trim();
     if (!key) return;
     if (newValue.trim() === "") {
@@ -674,8 +683,15 @@ export function NotePropertiesView({
     if (key in data) {
       if (isBadgeKey(key) && Array.isArray(data[key])) {
         onUpdate({ ...data, [key]: [...(data[key] as unknown[]), ...parts] });
+        closeAddField();
+        return;
       }
-      closeAddField();
+      if (opts?.rollbackOnDuplicate === false) {
+        closeAddField();
+        return;
+      }
+      setDuplicateKey(key);
+      setAddStep("key");
       return;
     }
     onUpdate({ ...data, [key]: parts.length > 1 || isBadgeKey(key) ? parts : newValue.trim() });
@@ -1050,98 +1066,108 @@ export function NotePropertiesView({
               )}
 
               {/* 底部：添加属性（parseError 时禁用，防 stringify 覆盖格式错误的旧数据）——
-                  两段式：键名 Enter → 键名变胶囊、值输入自动聚焦 → 值 Enter 落盘 */}
+                  两段式：键名 Enter → 键名变胶囊、值输入自动聚焦 → 值 Enter 落盘；
+                  键已存在（非徽章键）时退回键名步并提示，输入值保留待改名后带出 */}
               {addOpen ? (
-                <div className="mt-1.5 flex items-center gap-1.5">
-                  {addStep === "key" ? (
-                    <span className="flex items-center gap-1.5 flex-1 min-w-0">
-                      <input
-                        ref={keyInputRef}
-                        autoFocus
-                        spellCheck={false}
-                        placeholder="属性名"
-                        value={newKey}
-                        onChange={(e) => {
-                          setNewKey(e.target.value);
-                          openKeySuggest();
-                        }}
-                        onFocus={openKeySuggest}
-                        onBlur={closeAddField}
-                        onKeyDown={handleKeyInputKeyDown}
-                        className="flex-1 min-w-0 bg-transparent text-sm outline-none"
-                        style={{ borderBottom: "1px dashed var(--border)" }}
-                      />
-                      {keySuggestOpen && keySuggestions.length > 0 && keySuggestAnchor && (
-                        <PopupLayer
-                          anchor={keySuggestAnchor}
-                          onClose={() => setKeySuggestOpen(false)}
-                          triggerRef={keyInputRef}
-                          widthClass=""
-                          contentClassName="py-0.5"
-                        >
-                          <SuggestionItems
-                            items={keySuggestions}
-                            index={Math.min(keySuggestIdx, keySuggestions.length - 1)}
-                            onHover={setKeySuggestIdx}
-                            onSelect={(k) => {
-                              setNewKey(k);
-                              setKeySuggestOpen(false);
-                              setAddStep("value");
-                            }}
-                          />
-                        </PopupLayer>
-                      )}
-                    </span>
-                  ) : (
-                    <span className="flex items-center gap-1.5 flex-1 min-w-0">
-                      <span
-                        className="w-20 flex-shrink-0 truncate px-1 py-0.5 rounded-sm text-sm leading-none"
-                        style={{ color: "var(--text-muted)" }}
-                        title={newKey}
-                      >
-                        {newKey}
-                      </span>
-                      <input
-                        ref={valueInputRef}
-                        autoFocus
-                        spellCheck={false}
-                        placeholder="属性值（逗号分隔为数组）"
-                        value={newValue}
-                        onChange={(e) => {
-                          setNewValue(e.target.value);
-                          if (newKey === "tags") openTagSuggest();
-                        }}
-                        onFocus={() => {
-                          if (newKey === "tags") openTagSuggest();
-                        }}
-                        onBlur={handleValueBlur}
-                        onKeyDown={handleValueInputKeyDown}
-                        className="flex-1 min-w-0 bg-transparent text-sm outline-none"
-                        style={{ borderBottom: "1px dashed var(--border)" }}
-                      />
-                      {newKey === "tags" &&
-                        tagSuggestOpen &&
-                        tagValueSuggestions.length > 0 &&
-                        tagSuggestAnchor && (
+                <div className="mt-1.5 flex flex-col gap-1">
+                  <div className="flex items-center gap-1.5">
+                    {addStep === "key" ? (
+                      <span className="flex items-center gap-1.5 flex-1 min-w-0">
+                        <input
+                          ref={keyInputRef}
+                          autoFocus
+                          spellCheck={false}
+                          placeholder="属性名"
+                          value={newKey}
+                          onChange={(e) => {
+                            setNewKey(e.target.value);
+                            setDuplicateKey(null);
+                            openKeySuggest();
+                          }}
+                          onFocus={openKeySuggest}
+                          onBlur={closeAddField}
+                          onKeyDown={handleKeyInputKeyDown}
+                          className="flex-1 min-w-0 bg-transparent text-sm outline-none"
+                          style={{ borderBottom: "1px dashed var(--border)" }}
+                        />
+                        {keySuggestOpen && keySuggestions.length > 0 && keySuggestAnchor && (
                           <PopupLayer
-                            anchor={tagSuggestAnchor}
-                            onClose={() => setTagSuggestOpen(false)}
-                            triggerRef={valueInputRef}
+                            anchor={keySuggestAnchor}
+                            onClose={() => setKeySuggestOpen(false)}
+                            triggerRef={keyInputRef}
                             widthClass=""
                             contentClassName="py-0.5"
                           >
                             <SuggestionItems
-                              items={tagValueSuggestions}
-                              index={Math.min(tagSuggestIdx, tagValueSuggestions.length - 1)}
-                              onHover={setTagSuggestIdx}
-                              onSelect={(v) => {
-                                setNewValue((prev) => (prev ? `${prev}，${v}` : v));
-                                setTagSuggestOpen(false);
+                              items={keySuggestions}
+                              index={Math.min(keySuggestIdx, keySuggestions.length - 1)}
+                              onHover={setKeySuggestIdx}
+                              onSelect={(k) => {
+                                setNewKey(k);
+                                setDuplicateKey(null);
+                                setKeySuggestOpen(false);
+                                setAddStep("value");
                               }}
                             />
                           </PopupLayer>
                         )}
-                    </span>
+                      </span>
+                    ) : (
+                      <span className="flex items-center gap-1.5 flex-1 min-w-0">
+                        <span
+                          className="w-20 flex-shrink-0 truncate px-1 py-0.5 rounded-sm text-sm leading-none"
+                          style={{ color: "var(--text-muted)" }}
+                          title={newKey}
+                        >
+                          {newKey}
+                        </span>
+                        <input
+                          ref={valueInputRef}
+                          autoFocus
+                          spellCheck={false}
+                          placeholder="属性值（逗号分隔为数组）"
+                          value={newValue}
+                          onChange={(e) => {
+                            setNewValue(e.target.value);
+                            if (newKey === "tags") openTagSuggest();
+                          }}
+                          onFocus={() => {
+                            if (newKey === "tags") openTagSuggest();
+                          }}
+                          onBlur={handleValueBlur}
+                          onKeyDown={handleValueInputKeyDown}
+                          className="flex-1 min-w-0 bg-transparent text-sm outline-none"
+                          style={{ borderBottom: "1px dashed var(--border)" }}
+                        />
+                        {newKey === "tags" &&
+                          tagSuggestOpen &&
+                          tagValueSuggestions.length > 0 &&
+                          tagSuggestAnchor && (
+                            <PopupLayer
+                              anchor={tagSuggestAnchor}
+                              onClose={() => setTagSuggestOpen(false)}
+                              triggerRef={valueInputRef}
+                              widthClass=""
+                              contentClassName="py-0.5"
+                            >
+                              <SuggestionItems
+                                items={tagValueSuggestions}
+                                index={Math.min(tagSuggestIdx, tagValueSuggestions.length - 1)}
+                                onHover={setTagSuggestIdx}
+                                onSelect={(v) => {
+                                  setNewValue((prev) => (prev ? `${prev}，${v}` : v));
+                                  setTagSuggestOpen(false);
+                                }}
+                              />
+                            </PopupLayer>
+                          )}
+                      </span>
+                    )}
+                  </div>
+                  {duplicateKey !== null && (
+                    <div className="text-xs flex items-center gap-2" style={{ color: "#f87171" }}>
+                      <span className="truncate">属性「{duplicateKey}」已存在，请改键名或编辑该属性</span>
+                    </div>
                   )}
                 </div>
               ) : (
