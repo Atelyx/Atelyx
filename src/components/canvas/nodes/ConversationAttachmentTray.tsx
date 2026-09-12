@@ -26,7 +26,12 @@ export function ConversationAttachmentTray({ attachments, onRemove, onPin }: Pro
           key={att.id}
           className="relative group/att border rounded flex items-center gap-1.5 px-1.5 py-1 text-xs"
           style={{ background: "var(--bg-tertiary)", borderColor: "var(--border)" }}
-          title={att.filename ?? ""}
+          // 非文本内容不注入模型，必须让用户看得懂那个警示图标（否则会以为文件已随消息发出）
+          title={
+            att.parseFailed
+              ? `${att.filename ?? ""}（内容不是文本，不会发送给模型）`
+              : (att.filename ?? "")
+          }
           onContextMenu={(e) => {
             e.preventDefault();
             e.stopPropagation();

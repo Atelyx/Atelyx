@@ -1,9 +1,11 @@
-import { BookmarkPlus, ClipboardCopy, Trash2 } from "lucide-react";
+import { BookmarkPlus, ClipboardCopy, FolderInput, Trash2 } from "lucide-react";
 import { useCallback } from "react";
 import { useCanvasStore } from "@/stores/canvasStore";
 import { useNodeCollab } from "@/hooks/useNodeCollab";
+import { useNotificationStore } from "@/stores/notificationStore";
 import { Menu, MenuDivider, MenuItem } from "@/components/common/Menu";
-import type { TextData } from "@/types";
+import { isTempAttachmentRef } from "@/utils/tempAttachmentPath";
+import type { MediaData, TextData } from "@/types";
 
 interface Props {
   nodeId: string;
@@ -18,6 +20,10 @@ export function NodeContextMenu({ nodeId, x, y, onClose }: Props) {
   // 画布内文本节点（无 file）提供「保存为笔记」入口：落盘生成仓库 .md 并转笔记节点
   const node = nodes.find((n) => n.id === nodeId);
   const isUnsavedText = node?.type === "text" && !(node.data as unknown as TextData).file;
+  // 引用临时附件的媒体节点提供「保存到仓库」入口：复制进仓库附件文件夹并转仓库引用（与「保存为笔记」对称）
+  const isTempMedia =
+    node?.type === "media" &&
+    isTempAttachmentRef((node.data as unknown as MediaData).file);
   // 协作：对话节点被其他对端独占编辑 → 禁删（防误删进行中的编辑；移动/缩放仍允许）
   const { lockedByPeer } = useNodeCollab(nodeId);
   const deleteDisabled = node?.type === "conversation" && lockedByPeer !== null;
@@ -27,6 +33,20 @@ export function NodeContextMenu({ nodeId, x, y, onClose }: Props) {
       .getState()
       .saveTextNodeAsNote(nodeId)
       .catch(() => useCanvasStore.setState({ error: "保存为笔记失败，请重试" }));
+    onClose();
+  }, [nodeId, onClose]);
+
+  const handleSaveMediaToVault = useCallback(() => {
+    void useCanvasStore
+      .getState()
+      .saveMediaToVault(nodeId)
+      .catch((e) => {
+        console.error("保存附件到仓库失败", e);
+        useNotificationStore.getState().notify({
+          level: "error",
+          message: "保存附件到仓库失败，请重试",
+        });
+      });
     onClose();
   }, [nodeId, onClose]);
 
@@ -64,6 +84,17 @@ export function NodeContextMenu({ nodeId, x, y, onClose }: Props) {
             <span className="inline-flex items-center gap-1.5">
               <BookmarkPlus size={14} />
               保存为笔记
+            </span>
+          </MenuItem>
+          <MenuDivider />
+        </>
+      )}
+      {isTempMedia && (
+        <>
+          <MenuItem onClick={handleSaveMediaToVault}>
+            <span className="inline-flex items-center gap-1.5">
+              <FolderInput size={14} />
+              保存到仓库
             </span>
           </MenuItem>
           <MenuDivider />

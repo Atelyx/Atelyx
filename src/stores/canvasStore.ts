@@ -15,10 +15,8 @@ import {
   loadWhiteboardVault,
   persistCanvasVault,
   patchCanvasVault,
-  readAttachmentDataUrl,
   readCanvasVault,
   readNote,
-  recordNoteDiskContent,
   renameCanvasVault,
   writeCanvasVault,
   writeNote,
@@ -26,6 +24,14 @@ import {
   type RuntimeCanvas,
 } from "@/services/vault";
 import { readTableVault } from "@/services/table";
+import {
+  cleanupCanvasTempAttachments,
+  importVaultAttachment,
+  readAttachmentRef,
+  readAttachmentText,
+  writeTempAttachment,
+} from "@/services/tempAttachment";
+import { isTempAttachmentRef } from "@/utils/tempAttachmentPath";
 import { tableToSnapshotText } from "@/utils/table";
 import {
   loadHistory as loadCanvasHistory,
@@ -45,7 +51,7 @@ import {
   serializeNodeForCollab,
   summarizeCanvasSnapshot,
 } from "@/utils/canvasCollab";
-import { toLlmMessages } from "@/services/ai/client";
+import { toLlmMessages, resolveMessageAttachments } from "@/services/ai/client";
 import { abortAutoTitle } from "@/services/ai/autoTitle";
 import { runSearch, resultsToText } from "@/services/search";
 import { runAgentTools, assembleAgentSystemPrompt } from "@/services/ai/tools";
@@ -98,6 +104,7 @@ import { prefix, scanMentionHits } from "@/utils/text";
 import { noteTitleFromFile, remapDirPrefix, sanitizeFilename, siblingPath, tableTitleFromFile } from "@/utils/filename";
 import { useSettingsStore } from "./settingsStore";
 import { useAppStore } from "./appStore";
+import { useNotificationStore } from "./notificationStore";
 import {
   collabSendSink,
   publishCollabPresence,
@@ -281,6 +288,19 @@ interface CanvasState {
    * 节点 data.file 置为生成路径转为笔记节点（后续编辑写回 `.md`）。已是笔记节点则 no-op。
    */
   saveTextNodeAsNote: (nodeId: string) => Promise<void>;
+  /**
+   * 媒体节点（引用临时附件）右键「保存到仓库」：把临时件复制进仓库附件文件夹（附件导入默认文件夹，
+   * 重名加序号），节点 `file` 转为仓库相对路径。已是仓库引用则 no-op。
+   */
+  saveMediaToVault: (nodeId: string) => Promise<void>;
+  /**
+   * 对话节点粘贴/拖入的附件：字节落仓库内临时区（`.atelyx/temp/<canvasKey>/`）并返回引用与
+   * 内容（图片 = dataURL、文本 = 文本），托盘只存引用 + 内容缓存。
+   * `parseFailed` = 内容不是文本（二进制附件）：仍可引用但空载荷、不注入模型。画布未加载时抛错。
+   */
+  attachFileFromDisk: (
+    file: File,
+  ) => Promise<{ file: string; payload: string; parseFailed?: boolean }>;
   // ===== 多人实时协作（presence + canvas-patch 补丁）=====
   /** 本端独占编辑中的对话节点（convId → 获取时间戳 since；锁主判定见 utils/canvasCollab）。 */
   lockedConversations: Record<string, number>;
@@ -410,6 +430,48 @@ let lastSavedNodes: Node[] = [];
 let lastSavedEdges: Edge[] = [];
 let lastSavedMessages: Record<string, Message[]> = {};
 let lastSavedTitle = "";
+
+/** 画布加载世代：每次 load/复位自增。异步补读（媒体内容/消息附件）据此丢弃迟到结果——
+ *  只比 canvasId 挡不住 A→B→A（同一画布 id 会被画布副本复用）。 */
+let canvasLoadGen = 0;
+
+/** 已判定「不是文本」的附件引用（二进制附件）：补读/发送前跳过，避免每次加载与每次发送都做一次
+ *  全量 base64 读取再丢弃。引用是仓库相对路径，同一路径的内容被替换后（罕见）会在下次载入时重判。 */
+const nonTextAttachmentRefs = new Set<string>();
+
+/** 已提示过的「消息附件读回失败」引用：同一附件不重复弹（否则每次发送都弹一次）。随画布加载清空。 */
+const reportedAttachmentReadFailures = new Set<string>();
+
+/** 附件读回失败的用户可见提示（按引用去重）：只写日志等于「用户以为发了、模型其实没收到」。 */
+function reportAttachmentReadFailure(ref: string, error: unknown): void {
+  console.error("消息附件内容读回失败，本次不发送该附件", ref, error);
+  if (reportedAttachmentReadFailures.has(ref)) return;
+  reportedAttachmentReadFailures.add(ref);
+  useNotificationStore.getState().notify({
+    level: "warning",
+    message: `附件「${ref.split("/").pop() ?? ref}」读取失败，本次未发送；请重新添加或移除该附件`,
+  });
+}
+
+/** 按引用读附件内容（消息附件场景）：二进制（不是文本）返回空串并不算失败，读不到才算失败并提示。
+ *  两种失败语义不同（不是文本 = 预期不注入；读不到 = 该让用户知道），不能混成一个错误。 */
+async function readMessageAttachment(ref: string, kind: "image" | "file"): Promise<string> {
+  if (nonTextAttachmentRefs.has(ref)) return "";
+  try {
+    if (kind === "file") {
+      const text = await readAttachmentText(ref);
+      if (text === null) {
+        nonTextAttachmentRefs.add(ref);
+        return "";
+      }
+      return text;
+    }
+    return await readAttachmentRef(ref, kind);
+  } catch (e) {
+    reportAttachmentReadFailure(ref, e);
+    return "";
+  }
+}
 
 /** 把当前运行时状态引用记为「已落盘基线」（load/保存成功后调用）。 */
 function syncLastSaved(): void {
@@ -767,6 +829,11 @@ async function mergeDiskIntoMemory(opts: {
     });
     // 3) 合并产物随下一轮防抖落盘（base 已同步为新磁盘版本，不再误冲突）
     schedulePersist();
+    // 4) 磁盘基底里的媒体节点/消息附件只有引用（内容是按引用读回的运行时缓存）：
+    //    合并后按引用补读一次，否则冲突合并会让预览与气泡图片消失到下次重载
+    canvasLoadGen++;
+    void hydrateMediaNodes();
+    void hydrateMessageAttachments();
   } catch (e) {
     opts.onError(e);
   }
@@ -1122,26 +1189,32 @@ async function buildTextNoteData(file: string, title: string) {
   return { title, file, bodyMd, fileMissing };
 }
 
+/** 图片附件判定：按扩展名（`File.type` 在未知扩展名/部分粘贴源下为空，按 MIME 判会与文件树拖入路径分叉）。 */
+const IMAGE_EXT_RE = /\.(png|jpe?g|webp|gif)$/i;
+function isImageFileName(name: string): boolean {
+  return IMAGE_EXT_RE.test(name);
+}
+
 async function buildMediaData(file: string, name: string): Promise<MediaData | null> {
-  const isImage = /\.(png|jpe?g|webp|gif)$/i.test(name);
-  if (isImage) {
+  if (isImageFileName(name)) {
     try {
-      const thumb = await readAttachmentDataUrl(file);
+      const thumb = await readAttachmentRef(file, "image");
       return { file, kind: "image", mime: inferImageMime(name), thumb, name };
     } catch (e) {
       console.error("读图片附件失败", e);
       return null;
     }
   }
-  // 文本类附件：尝试读内容；二进制读失败标 parseFailed
-  let body: string | undefined;
-  let parseFailed = false;
+  // 文本类附件：读取并严格判定可解码（不是文本 → parseFailed）；读不到文件即失败，
+  // 返回 null 由调用方提示（抛错会变成未处理的 rejection——调用点都是 fire-and-forget）
+  let body: string | null;
   try {
-    body = await readNote(file);
-  } catch {
-    parseFailed = true;
+    body = await readAttachmentText(file);
+  } catch (e) {
+    console.error("读附件失败", file, e);
+    return null;
   }
-  return { file, kind: "file", mime: "text/plain", name, body, parseFailed };
+  return { file, kind: "file", mime: "text/plain", name, body: body ?? undefined, parseFailed: body === null };
 }
 
 async function buildTableData(file: string, title: string) {
@@ -1235,7 +1308,15 @@ async function materializeReferencedFile(conversationId: string, path: string): 
         nodeId = id;
       } else {
         const data = await buildMediaData(path, name);
-        if (!data || !stillOnCanvas()) return;
+        if (!data) {
+          // 与「拖入画布」同口径提示：Agent 读了 @引用附件后本该补出媒体节点，读失败不能静默
+          useNotificationStore.getState().notify({
+            level: "error",
+            message: `无法在画布中添加「${name}」：文件读取失败（可能已被删除或无权限）`,
+          });
+          return;
+        }
+        if (!stillOnCanvas()) return;
         touchRedo();
         useCanvasStore.setState((s) => ({
           nodes: [
@@ -1457,8 +1538,43 @@ async function runStream(conversationId: string): Promise<void> {
         });
       }
     }
-    // 引用已在 send 时固化进 user 消息 content（@引用 路径块 / 非文件节点全文注入），此处不再动态拼接
-    const apiMessages: LlmMessage[] = toLlmMessages(history);
+    // 引用已在 send 时固化进 user 消息 content（@引用 路径块 / 非文件节点全文注入），此处不再动态拼接。
+    // 附件内容不随消息内嵌（画布只存 `file` 引用）：发送前按引用读回，读到的内容回填消息附件缓存，
+    // 同一会话后续发送不再重复读盘。**按附件粒度降级**：单个附件读不到只丢该附件不进请求并提示用户
+    //（抛错会中断整轮，而覆盖整段历史的补齐会让此后每次发送都在同一处失败、对话无法继续）；
+    // 二进制附件（不是文本）按预期不注入模型，不算失败。
+    const resolvedHistory = await resolveMessageAttachments(history, (att) =>
+      readMessageAttachment(att.file as string, att.kind),
+    );
+    if (resolvedHistory !== history) {
+      // 只回填附件缓存（按附件 id 取补齐结果）：整体替换会话数组会抹掉等待期间到达的协作消息，
+      // 也会把期间被对端改过的消息回退成 await 之前的快照（附件读盘可能耗秒级）
+      store.setState((state) => {
+        const resolvedById = new Map(resolvedHistory.map((m) => [m.id, m]));
+        const current = state.messagesByConv[conversationId] ?? [];
+        let changed = false;
+        const merged = current.map((m) => {
+          const resolved = resolvedById.get(m.id);
+          const atts = m.attachments;
+          if (!resolved || !atts?.length) return m;
+          let filled = false;
+          const attachments = atts.map((a, i) => {
+            if (a.payload || !a.file) return a;
+            // 按同下标取补齐结果（resolve 保序）并核对引用，防期间列表变化套错内容
+            const candidate = resolved.attachments?.[i];
+            if (!candidate?.payload || candidate.file !== a.file) return a;
+            filled = true;
+            return { ...a, payload: candidate.payload };
+          });
+          if (!filled) return m;
+          changed = true;
+          return { ...m, attachments };
+        });
+        if (!changed) return state;
+        return { messagesByConv: { ...state.messagesByConv, [conversationId]: merged } };
+      });
+    }
+    const apiMessages: LlmMessage[] = toLlmMessages(resolvedHistory);
     // 系统提示词注入：Agent 引用已注册提示词笔记实时读正文（外部编辑即时生效，读失败静默降级）；
     // 工具含 read_file 时追加「@引用 文件用 read_file 读取」引导。易变上下文（任务清单）走尾部块，
     // 不进系统提示词——系统前缀必须稳定以命中前缀缓存。
@@ -1664,6 +1780,14 @@ async function runStream(conversationId: string): Promise<void> {
       abortControllers.delete(conversationId);
       return;
     }
+    // 失败必须可见：附件按引用读回、Agent 提示词笔记读取等都在这一层抛错，
+    // 只清流式标志会让用户「按了发送但什么都没发生」，节点里留一个空占位。
+    patchAssistant(conversationId, asstId, (m) => ({
+      ...m,
+      content: m.content || `${ERROR_PREFIX} ${e instanceof Error ? e.message : String(e)}`,
+    }));
+    // 错误占位与 onError 路径同口径落盘：只留内存的话重载后这条错误消失、对端也看不到
+    schedulePersist();
     store.setState((state) => ({
       streamingByConv: { ...state.streamingByConv, [conversationId]: false },
     }));
@@ -1829,6 +1953,147 @@ async function refreshFileNodes(
   }
 }
 
+/**
+ * 按引用补读媒体节点的运行时缓存（图片 `thumb` / 文本 `body`）。
+ *
+ * 媒体节点落盘只存 `file` 引用（临时区或仓库附件），内容不内嵌——加载后必须读回才能预览与注入。
+ * 更新走 silent set（不经 `updateNodeData`）：`thumb`/`body` 不参与落盘，进撤销栈会让一次 Ctrl+Z
+ * 变成「撤销图片显示出来」这种无意义动作。读失败标 `fileMissing`，由渲染层给占位提示。
+ *
+ * 补读会重试带 `fileMissing` 的节点：标记只是「上一次读失败」的结论，文件可能已恢复
+ * （例如临时件刚被「保存到仓库」换了引用），永久跳过会让节点一直显示缺失。
+ */
+async function hydrateMediaNodes(): Promise<void> {
+  const startedFor = useCanvasStore.getState().canvasId;
+  const gen = canvasLoadGen;
+  if (!startedFor) return;
+  const targets = useCanvasStore.getState().nodes.filter((n) => {
+    if (n.type !== "media") return false;
+    const md = n.data as unknown as MediaData;
+    return !!md.file && (md.kind === "image" ? !md.thumb : !md.body);
+  });
+  if (targets.length === 0) return;
+  // 记下本次读的引用：应用结果前比对节点当前引用，期间换过引用（如「保存到仓库」）的结果作废
+  const patch = new Map<string, { ref: string; data: Partial<MediaData> }>();
+  await Promise.all(
+    targets.map(async (n) => {
+      const md = n.data as unknown as MediaData;
+      const ref = md.file as string;
+      try {
+        if (md.kind === "image") {
+          patch.set(n.id, {
+            ref,
+            data: { thumb: await readAttachmentRef(ref, "image"), fileMissing: false },
+          });
+        } else {
+          // 文本类：读不到文件算缺失，内容不是文本算「无法解析」（两种提示语义不同）
+          const body = await readAttachmentText(ref);
+          patch.set(n.id, {
+            ref,
+            data:
+              body === null
+                ? { parseFailed: true, body: undefined, fileMissing: false }
+                : { body, parseFailed: false, fileMissing: false },
+          });
+        }
+      } catch (e) {
+        // 读失败必须可见：附件内容缺失是用户可见问题（占位 + 节点提示），不是内部细节
+        console.error("读附件内容失败", ref, e);
+        patch.set(n.id, { ref, data: { fileMissing: true } });
+      }
+    }),
+  );
+  if (patch.size === 0) return;
+  // 期间可能已切画布（画布副本会复用节点 id，迟到结果会命中副本节点）：身份不符即整批丢弃。
+  // 只比 canvasId 不够——A→B→A 回到同一画布时 id 相同，必须连同加载世代一起比。
+  if (useCanvasStore.getState().canvasId !== startedFor || canvasLoadGen !== gen) return;
+  useCanvasStore.setState((s) => ({
+    nodes: s.nodes.map((n) => {
+      const p = patch.get(n.id);
+      const md = n.data as unknown as MediaData;
+      // 引用必须仍是本次读的那个：期间节点换了引用（或已无引用）的结果不得套上去
+      if (!p || md.file !== p.ref) return n;
+      return { ...n, data: { ...n.data, ...p.data } as unknown as Node["data"] };
+    }),
+  }));
+}
+
+/**
+ * 按引用补读对话消息附件的内容缓存（气泡图片/文本正文与「拉出为媒体节点」都依赖它）。
+ *
+ * 附件落盘同样只存 `file` 引用：不回填的话重开画布后历史图片退化成文件名 chip、也无法拉出为节点。
+ * 与媒体节点同节拍执行，共用加载世代守卫（期间切画布则整批丢弃）。
+ */
+async function hydrateMessageAttachments(): Promise<void> {
+  const startedFor = useCanvasStore.getState().canvasId;
+  const gen = canvasLoadGen;
+  if (!startedFor) return;
+  const targets: Array<{ key: string; ref: string; kind: "image" | "file" }> = [];
+  for (const msgs of Object.values(useCanvasStore.getState().messagesByConv)) {
+    for (const m of msgs) {
+      (m.attachments ?? []).forEach((a, i) => {
+        // 键 = 消息 id + 下标（Attachment 没有稳定 id）：应用前再比一次引用，防期间列表变化错位。
+        // 已判定不是文本的引用直接跳过（否则每次加载都对二进制附件做一次全量读取）
+        if (a.file && !a.payload && !nonTextAttachmentRefs.has(a.file)) {
+          targets.push({ key: `${m.id}:${i}`, ref: a.file, kind: a.kind });
+        }
+      });
+    }
+  }
+  if (targets.length === 0) return;
+  const payloads = new Map<string, { ref: string; payload: string }>();
+  await Promise.all(
+    targets.map(async (t) => {
+      try {
+        if (t.kind === "file") {
+          // 不是文本（二进制附件）：按预期不注入模型，不入缓存、不报错（只记一次「已判定非文本」）
+          const text = await readAttachmentText(t.ref);
+          if (text === null) {
+            nonTextAttachmentRefs.add(t.ref);
+            return;
+          }
+          payloads.set(t.key, { ref: t.ref, payload: text });
+          return;
+        }
+        payloads.set(t.key, { ref: t.ref, payload: await readAttachmentRef(t.ref, t.kind) });
+      } catch (e) {
+        // 读失败可见：气泡保留文件名 chip（右键「拉出为媒体节点」会得到无内容节点），留日志可定位
+        console.error("读消息附件内容失败", t.ref, e);
+      }
+    }),
+  );
+  if (payloads.size === 0) return;
+  if (useCanvasStore.getState().canvasId !== startedFor || canvasLoadGen !== gen) return;
+  useCanvasStore.setState((s) => {
+    // 只重建真被改动的会话键：无条件重建整个 messagesByConv 会让每个会话数组换身份，
+    // 保存 diff 会把所有对话节点判为变化（整段历史重写 + 协作广播一遍）
+    let anyChanged = false;
+    const next: Record<string, Message[]> = { ...s.messagesByConv };
+    for (const [convId, msgs] of Object.entries(s.messagesByConv)) {
+      let changed = false;
+      const mapped = msgs.map((m) => {
+        if (!m.attachments?.length) return m;
+        let filled = false;
+        const attachments = m.attachments.map((a, i) => {
+          if (a.payload || !a.file) return a;
+          const hit = payloads.get(`${m.id}:${i}`);
+          if (!hit || hit.ref !== a.file) return a;
+          filled = true;
+          return { ...a, payload: hit.payload };
+        });
+        if (!filled) return m;
+        changed = true;
+        return { ...m, attachments };
+      });
+      if (changed) {
+        next[convId] = mapped;
+        anyChanged = true;
+      }
+    }
+    return anyChanged ? { messagesByConv: next } : s;
+  });
+}
+
 export const useCanvasStore = create<CanvasState>((set, get) => ({
   canvasId: null,
   canvasFile: null,
@@ -1888,6 +2153,13 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
       undoMgr.clear();
       // 已落盘基线 = 加载的磁盘状态（后续保存按引用 diff，未变实体不重写）
       syncLastSaved();
+      // 媒体节点只存引用不内嵌内容：加载后按引用读回图片预览/文本正文（运行时缓存，silent 不进撤销栈）；
+      // 消息附件同节拍回填（否则历史图片退化成文件名 chip、「拉出为媒体节点」得不到内容）
+      canvasLoadGen++;
+      reportedAttachmentReadFailures.clear();
+      nonTextAttachmentRefs.clear();
+      void hydrateMediaNodes();
+      void hydrateMessageAttachments();
       // 恢复补命名：加载后对首个未命名对话节点重试（覆盖上次命名被中断/丢失的窗口；
       // 仅补一个防并发请求轰炸模型端点）；无 title 无消息的节点由消息检查自然跳过
       if (!isWhiteboard) {
@@ -2178,7 +2450,15 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
   },
   addMediaFromVault: async (file, name, position, exact = false) => {
     const data = await buildMediaData(file, name);
-    if (!data) return;
+    // 读不到内容（文件已被删除/不可读）必须让用户知道：调用点都是 fire-and-forget，
+    // 静默 return 等于「拖了没反应」
+    if (!data) {
+      useNotificationStore.getState().notify({
+        level: "error",
+        message: `无法在画布中添加「${name}」：文件读取失败（可能已被删除或无权限）`,
+      });
+      return;
+    }
     // 拖拽落点精确（exact=true 跳过避让）；其他入口走 findFreeSpot 避让
     const spot = exact
       ? position
@@ -2240,13 +2520,17 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
     refreshFileNodes(file, "media", async (targets) => {
       const existing = targets[0]?.data as unknown as MediaData;
       const ids = new Set(targets.map((t) => t.id));
-      if (existing.kind === "image") {
-        const thumb = await readAttachmentDataUrl(file);
-        return (n) => (ids.has(n.id) ? { thumb, fileMissing: false } : null);
-      }
-      const body = await readNote(file);
-      return (n) =>
-        ids.has(n.id) ? { body, parseFailed: false, fileMissing: false } : null;
+      // 引用可能是普通仓库附件（watcher 通知）或未入库临时件：统一按引用读内容
+      const patch =
+        existing.kind === "image"
+          ? { thumb: await readAttachmentRef(file, "image" as const), fileMissing: false }
+          : await (async () => {
+              const body = await readAttachmentText(file);
+              return body === null
+                ? { parseFailed: true, body: undefined, fileMissing: false }
+                : { body, parseFailed: false, fileMissing: false };
+            })();
+      return (n) => (ids.has(n.id) ? patch : null);
     }),
   markFileMissing: (file, kind) => {
     set((s) => ({
@@ -2346,8 +2630,6 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
     const bodyMd = d.bodyMd ?? "";
     try {
       await writeNote(file, bodyMd);
-      // 登记磁盘基线（同 saveNoteContent/saveTextNodeAsNote：应用自写须被外部修改感知识别）
-      recordNoteDiskContent(file, bodyMd);
       // 记初始历史存档点（画布文本转笔记的首次写盘，防该笔记无历史记录；尽力而为）
       void recordHistoryVersion("note", file, { content: bodyMd, action: "edit", coalesceEditMs: 60_000 });
     } catch (e) {
@@ -2358,6 +2640,43 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
     }
     await useVaultStore.getState().loadFiles();
     get().updateNodeData(nodeId, { file });
+  },
+  saveMediaToVault: async (nodeId) => {
+    const node = get().nodes.find((n) => n.id === nodeId);
+    if (!node || node.type !== "media") return;
+    const md = node.data as unknown as MediaData;
+    const ref = md.file;
+    if (!isTempAttachmentRef(ref)) return; // 已是仓库引用 / 无引用
+    // 引用形态转换入 undo 栈：Ctrl+Z 可还原为临时引用（已复制进仓库的文件不删，与「保存为笔记」同语义）
+    get().pushUndo();
+    // 落位名用节点自己的显示名：临时叶子名的内部随机前缀不可反解（随机串字母表含分隔符）
+    const file = await importVaultAttachment(ref as string, md.name || "attachment");
+    set((s) => ({
+      nodes: s.nodes.map((n) =>
+        n.id === nodeId
+          ? { ...n, data: { ...n.data, file } as unknown as Node["data"] }
+          : n,
+      ),
+    }));
+    schedulePersist();
+    // 附件进了仓库目录：刷新文件树让用户看到新文件
+    void useVaultStore.getState().loadFiles();
+  },
+  attachFileFromDisk: async (file) => {
+    const canvasId = get().canvasId;
+    if (!canvasId) throw new Error("画布未加载，无法添加附件");
+    const ref = await writeTempAttachment(canvasId, file.name, file);
+    // 图片判定按扩展名：`File.type` 在未知扩展名/部分粘贴源下为空，按 MIME 判会让同一张图
+    // 在托盘（非文本 → 不注入）与文件树拖入（图片节点）两条路径上行为分叉
+    if (isImageFileName(file.name)) {
+      return { file: ref, payload: await readAttachmentRef(ref, "image") };
+    }
+    // 文本类：读不到文件才上抛（调用方提示失败）；内容不是 UTF-8 文本（PDF/zip 等二进制）返回空载荷 +
+    // parseFailed——附件仍可进托盘/引用，只是不注入模型（空载荷在发送侧被跳过）
+    const text = await readAttachmentText(ref);
+    return text === null
+      ? { file: ref, payload: "", parseFailed: true }
+      : { file: ref, payload: text };
   },
   getReferencedInputs: (conversationId) => {
     const { nodes, edges } = get();
@@ -2567,10 +2886,11 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
       createdAt: userTs,
       attachments: allAttachments.length
         ? allAttachments.map((a) => {
-            const { kind, payload, mime, filename, sourceNodeId } = a;
+            const { kind, payload, file, mime, filename, sourceNodeId } = a;
             return {
               kind,
               payload,
+              ...(file ? { file } : {}),
               mime,
               filename,
               sourceNodeId: sourceNodeId ?? shadowIds.get(a),
@@ -2625,6 +2945,9 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
             type: "media",
             position: spot,
             data: {
+              // 只存引用 + 展示元信息：内容（thumb/body）是按引用读回的运行时缓存，落盘时被剥离；
+              // 是否未入库由引用形态判定（`isTempAttachmentRef`），不另存标记
+              ...(a.file ? { file: a.file } : {}),
               mime: a.mime,
               kind: a.kind,
               name: a.filename,
@@ -2810,9 +3133,23 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
     // 删除当前画布：取消未落盘保存定时器 + 中止流，再复位全部画布态——
     // 否则残留 saveTimer 会重写已删的 .atlx、watcher 事件匹配旧 id 产生误导 reload
     persistCtl.cancel();
+    // 复位前捕获画布身份：临时附件按画布目录归属，回收需要旧 id + 旧路径（复位后两者都没了）。
+    // 回收推后一轮（setTimeout 0）：本函数是切仓库的同步钩子，「清空须在任何 await 之前」是硬约束；
+    // 且此刻旧 .atlx 可能正被删除流程处理，读盘结果更准。
+    const prevId = get().canvasId;
+    const prevFile = get().canvasFile;
+    if (prevId && prevFile) {
+      window.setTimeout(() => {
+        void cleanupCanvasTempAttachments(prevId, prevFile).catch((e) =>
+          console.error("回收画布临时附件失败", e),
+        );
+      }, 0);
+    }
     abortAllStreams();
     groupDragState = null;
     dragInProgress = false;
+    // 复位后 canvasId 归 null，但仍递增世代：在途补读的迟到结果一律作废
+    canvasLoadGen++;
     set({
       canvasId: null,
       canvasFile: null,
@@ -3028,12 +3365,19 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
           //   保留本端值后由 refreshTextContent 读盘补到最新（正文一致则跳过）。
           // - table 节点：快照摘要不在补丁（在共享盘 `.atb`），保留本端既有 snapshot 防画布
           //   节点空白，后续由表格 watcher 分支 refreshTableContent 补读最新。
-          if (node.type === "text" || node.type === "table") {
+          // - media 节点：内容在附件（共享盘/临时区），补丁只带 `file` 引用；保留本端 thumb/body，
+          //   缺失时由下方按引用补读（否则对端节点恒为占位）。
+          if (node.type === "text" || node.type === "table" || node.type === "media") {
             const nodeData = node.data as Record<string, unknown>;
             const localData = nodes[i].data as Record<string, unknown>;
-            const field = node.type === "text" ? "bodyMd" : "snapshot";
-            if (nodeData[field] === undefined && localData[field] !== undefined) {
-              node.data = { ...nodeData, [field]: localData[field] } as unknown as Node["data"];
+            // 引用相同才保留本端按引用读回的运行时缓存：对端换了引用时本端旧内容不得沿用
+            //（否则旧预览会一直留在节点上，补读也因「已有内容」被跳过）
+            if (nodeData.file === localData.file) {
+              for (const field of ["bodyMd", "snapshot", "thumb", "body", "parseFailed"]) {
+                if (nodeData[field] === undefined && localData[field] !== undefined) {
+                  nodeData[field] = localData[field];
+                }
+              }
             }
           }
           nodes[i] = node;
@@ -3087,6 +3431,15 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
     for (const { refreshBodyMdFile } of deserialized) {
       if (refreshBodyMdFile) void get().refreshTextContent(refreshBodyMdFile);
     }
+    // 远端媒体节点的附件在共享盘/临时区（补丁只带引用、且 watcher 过滤隐藏目录不会给临时区事件）：
+    // 有引用而本端无内容即按引用补读一次
+    const mediaRefs = deserialized
+      .map(({ node }) => node)
+      .filter((n) => n.type === "media")
+      .map((n) => n.data as unknown as MediaData)
+      .filter((md) => !!md.file && (md.kind === "image" ? !md.thumb : !md.body))
+      .map((md) => md.file as string);
+    for (const ref of new Set(mediaRefs)) void get().refreshMediaContent(ref);
     // 核心：远端已应用内容对房间已知，推进广播基线，避免被当作本地增量重发全房
     syncBroadcastBaseline();
   },

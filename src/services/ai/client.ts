@@ -126,6 +126,7 @@ function messagesToWire(
 /**
  * 将内部消息（画布 `Message[]` / 对话面板 `EditorChatMessage[]`）转为中性 `LlmMessage[]`。
  * 纯数据转换，不做 I/O。文本/搜索引用在 send 时已拼进 user message content；图片附件 → images，文件附件 → fileTexts。
+ * 附件内容不随消息内嵌，调用方须先按引用补齐（见各 store 的附件补齐步骤）。
  */
 export function toLlmMessages(
   messages: Array<{ role: Role; content: string; attachments?: Attachment[] }>,
@@ -136,6 +137,9 @@ export function toLlmMessages(
         const images: { url: string }[] = [];
         const fileTexts: string[] = [];
         for (const a of m.attachments) {
+          // 内容随消息不内嵌：payload 由调用方按引用补齐后进来。两类都留空守卫——
+          // 空 dataURL 会产出 `image_url:{}`，真实端点按整条请求 400，单张图读失败不该拖垮整轮对话。
+          if (!a.payload) continue;
           if (a.kind === "image") images.push({ url: a.payload });
           else fileTexts.push(a.payload);
         }
@@ -151,6 +155,40 @@ export function toLlmMessages(
     // system / assistant（tool 由引擎直接构造；此处调用方只传 internal role）
     return { role: m.role, text: m.content };
   });
+}
+
+/**
+ * 补齐消息附件内容并返回补齐后的消息数组：只处理「有 `file` 引用且内容缺失」的附件。
+ * 附件字节不随消息内嵌（画布/会话只存引用），发送前必须按引用读回；其余消息原样返回，
+ * 已补齐的附件不重复读盘。返回新数组但复用未变消息引用——调用方据此判「是否需要回写缓存」。
+ */
+export async function resolveMessageAttachments<T extends MessageLike>(
+  messages: T[],
+  readAttachment: (att: Attachment) => Promise<string>,
+): Promise<T[]> {
+  let changed = false;
+  const out = await Promise.all(
+    messages.map(async (m) => {
+      if (m.role !== "user" || !m.attachments?.length) return m;
+      const missing = m.attachments.filter((a) => a.file && !a.payload);
+      if (missing.length === 0) return m;
+      const attachments = await Promise.all(
+        m.attachments.map(async (a) =>
+          a.file && !a.payload ? { ...a, payload: await readAttachment(a) } : a,
+        ),
+      );
+      changed = true;
+      return { ...m, attachments };
+    }),
+  );
+  return changed ? out : messages;
+}
+
+/** `resolveMessageAttachments` 的输入形状（画布 Message / 面板会话消息同构）。 */
+interface MessageLike {
+  role: Role;
+  content: string;
+  attachments?: Attachment[];
 }
 
 /* ------------------------------------------------------------------ */

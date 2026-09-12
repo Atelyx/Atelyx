@@ -119,7 +119,7 @@ export function serializeCanvasSnapshot(
  * - text 无 file = 画布内文本节点：`bodyMd` 随补丁内嵌携带
  * - conversation：嵌入 `messagesByConv[id]` 到 `data.messages`（接收端反解）
  * - group/link/table：与磁盘序列化一致（table 快照在 `.atb`，接收端自行补读）
- * - media/search：原样保留
+ * - media：有引用时剥离 thumb/body（按引用读回），无引用时带上（内容只在此）
  */
 export function serializeNodeForCollab(
   n: Node,
@@ -134,7 +134,10 @@ export function serializeNodeForCollab(
       data = { title: td.title || "未命名", bodyMd: td.bodyMd ?? "" };
     }
   } else if (n.type === "conversation") {
-    data = { ...n.data, messages: messagesByConv[n.id] ?? [] };
+    data = {
+      ...n.data,
+      messages: (messagesByConv[n.id] ?? []).map(stripCollabAttachmentPayload),
+    };
   } else if (n.type === "group") {
     const gd = n.data as unknown as { label?: string; color?: string };
     data = { label: gd.label ?? "分组", color: gd.color };
@@ -143,8 +146,18 @@ export function serializeNodeForCollab(
   } else if (n.type === "table") {
     const td = n.data as unknown as { title?: string; file?: string };
     data = { title: td.title || "未命名", file: td.file };
+  } else if (n.type === "media") {
+    // 媒体节点与落盘同一口径：内容在文件（仓库附件或未入库临时区），只带引用与展示元信息。
+    // 有引用时 thumb/body 是按引用读回的运行时缓存，广播它们等于把图片字节发给同房对端
+    // （与其初衷「只走路径引用」相反）；无引用时内容只存在于节点自身，必须带上。
+    const md = n.data as unknown as { file?: string };
+    const rest = { ...(n.data as unknown as Record<string, unknown>) };
+    if (md.file) {
+      delete rest.thumb;
+      delete rest.body;
+    }
+    data = rest;
   } else {
-    // media/search：原样保留（media 的 thumb/body 已随运行时 data 携带）
     data = { ...n.data };
   }
   return {
@@ -155,6 +168,22 @@ export function serializeNodeForCollab(
     width: n.width,
     height: n.height,
     data: data as unknown as CanvasFileNode["data"],
+  };
+}
+
+/**
+ * 协作补丁里的消息附件内容剥离：只剥**有引用**的附件（内容可按引用读回），
+ * 无引用的附件内容只存在于消息自身，剥掉即让对端拿到一张空图。
+ */
+function stripCollabAttachmentPayload(m: Message): Message {
+  if (!m.attachments?.length) return m;
+  return {
+    ...m,
+    attachments: m.attachments.map((att) => {
+      if (!att.file) return att;
+      const { payload: _dropped, ...rest } = att;
+      return rest;
+    }),
   };
 }
 
@@ -202,13 +231,35 @@ export function deserializeNodeForCollab(fileNode: CanvasFileNode): Deserialized
  * 按 id 合并对话消息：远端为基底，本地独有消息（对端尚未见到的进行中/流式消息）按原序补入。
  * 与 `mergeFromDisk` 的消息合并语义一致——锁模型下对端不会并发写消息，此合并仅兜底保护
  * 本端进行中内容不被对端陈旧节点快照覆盖（如对端移动本端正在生成的节点）。
+ *
+ * 同 id 消息以远端为胜，但**附件内容缓存例外**：`payload` 不随补丁传输（有 `file` 时被剥离），
+ * 它是本端按引用读回的运行时数据——引用相同即沿用本端 payload，否则对端每次发言都会把本端
+ * 已回填的历史气泡图片打回文件名 chip（内容没丢，但要等重载或本端再发才恢复）。
  */
 export function mergeMessages(remote: Message[], local: Message[]): Message[] {
   if (local.length === 0) return remote;
   if (remote.length === 0) return local;
+  const localById = new Map(local.map((m) => [m.id, m]));
+  let changed = false;
+  const merged = remote.map((m) => {
+    const mine = localById.get(m.id);
+    if (!mine?.attachments?.length || !m.attachments?.length) return m;
+    let filled = false;
+    const attachments = m.attachments.map((a, i) => {
+      if (a.payload || !a.file) return a;
+      const counterpart = mine.attachments?.[i];
+      if (!counterpart?.payload || counterpart.file !== a.file) return a;
+      filled = true;
+      return { ...a, payload: counterpart.payload };
+    });
+    if (!filled) return m;
+    changed = true;
+    return { ...m, attachments };
+  });
   const remoteIds = new Set(remote.map((m) => m.id));
   const extras = local.filter((m) => !remoteIds.has(m.id));
-  return extras.length === 0 ? remote : [...remote, ...extras];
+  if (!changed) return extras.length === 0 ? remote : [...remote, ...extras];
+  return extras.length === 0 ? merged : [...merged, ...extras];
 }
 
 /** 计算协作广播补丁（diff + 纯序列化）；无变化返回 null（调用方跳过广播）。 */

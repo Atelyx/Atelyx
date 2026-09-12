@@ -17,6 +17,7 @@ import { DEFAULT_CONVERSATION_WIDTH,
 import { ERROR_PREFIX } from "@/constants/chat";
 import { isAssetConsumed } from "@/utils/consumed";
 import { findFreeSpot } from "@/utils/layout";
+import { useNotificationStore } from "@/stores/notificationStore";
 import {
   mentionTextOf,
   prefix,
@@ -54,18 +55,22 @@ const FALSE = false as const;
 /** 拖线引用队列的空数组占位（selector 稳定引用）。 */
 const EMPTY_PENDING: string[] = [];
 
-/** 附件 → 媒体节点 data（影子节点固定 / 历史附件拉出共用）；参数为结构化最小集，PendingAttachment / Attachment 同构皆可传入 */
+/** 附件 → 媒体节点 data（影子节点固定 / 历史附件拉出共用）；参数为结构化最小集，PendingAttachment / Attachment 同构皆可传入。
+ *  只带 `file` 引用：图片/文本内容由节点渲染按引用读回（内嵌 base64 会让画布文件膨胀）。 */
 function toMediaData(att: {
   mime: string;
   kind: "image" | "file";
-  payload: string;
+  file?: string;
+  payload?: string;
   filename?: string;
   parseFailed?: boolean;
 }): MediaData & Record<string, unknown> {
   return {
+    file: att.file,
     mime: att.mime,
     kind: att.kind,
     name: att.filename,
+    // 内容缓存按引用读回的现有值透传（落盘时被剥离）：无引用（历史内嵌附件）时它就是唯一内容来源
     thumb: att.kind === "image" ? att.payload : undefined,
     body: att.kind === "file" ? att.payload : undefined,
     parseFailed: att.parseFailed,
@@ -73,7 +78,7 @@ function toMediaData(att: {
 }
 
 /**
- * 画布媒体节点 → 待发送托盘附件（图片 = thumb 预览 + 名称；文本类 = 解析出的正文）。
+ * 画布媒体节点 → 待发送托盘附件（只带 `file` 引用 + 已读到的内容缓存）。
  * sourceNodeId 供 DataFlowEdge「已消费」反推与发送后归档影子节点；三处进托盘通道
  * （媒体源连边 / 拖线 / @picker 选中）共用，防各自手写拷贝后行为分叉。
  */
@@ -83,6 +88,7 @@ function mediaAttachmentFrom(n: FlowNode): PendingAttachment {
     id: crypto.randomUUID(),
     kind: md.kind,
     payload: md.kind === "image" ? (md.thumb ?? "") : (md.body ?? ""),
+    ...(md.file ? { file: md.file } : {}),
     mime: md.mime ?? "",
     filename: md.name,
     sourceNodeId: n.id,
@@ -247,21 +253,25 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
     return () => el.removeEventListener("wheel", handler);
   }, []);
 
-  // 画布媒体节点新连入 → 自动进待发送托盘（画布媒体节点通道。
-  // 已通过该对话发送过的附件（含发送时自动归档的影子节点）不再重复进托盘：
-  // 以消息历史中的附件 payload 判定（图片进历史后被重发，无需重复注入）。
+  // 画布媒体节点新连入 → 自动进待发送托盘（画布媒体节点通道）。
+  // 已通过该对话发送过的附件（含发送时自动归档的影子节点）不再重复进托盘：按**引用**判定——
+  // 附件内容不随消息持久化（`payload` 落盘被剥离），引用是重载后仍然稳定的身份。
+  // 消息附件里来自媒体节点的还带 `sourceNodeId`：节点「保存到仓库」会把引用从临时区换成仓库路径，
+  // 只比引用会让同一张图再进一次托盘（源节点身份也要收进判定集合）。
   useEffect(() => {
     setAttachments((prev) => {
-      const sentPayloads = new Set(
+      const sentRefs = new Set(
         (useCanvasStore.getState().messagesByConv[id] ?? []).flatMap((m) =>
-          (m.attachments ?? []).map((a) => a.payload),
+          (m.attachments ?? []).flatMap((a) => [a.file, a.sourceNodeId].filter(Boolean)),
         ),
       );
       const added: PendingAttachment[] = [];
       for (const n of mediaSources) {
         if (prev.some((a) => a.sourceNodeId === n.id)) continue;
+        // 源节点身份优先：该节点发过就不再进托盘（引用可能已被「保存到仓库」换过形态）
+        if (sentRefs.has(n.id)) continue;
         const att = mediaAttachmentFrom(n);
-        if (sentPayloads.has(att.payload)) continue;
+        if (att.file && sentRefs.has(att.file)) continue;
         added.push(att);
       }
       return added.length ? [...prev, ...added] : prev;
@@ -326,43 +336,43 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
     void send(id, text, atts, mts, fms);
   };
 
-  // ===== 附件输入：粘贴 / 拖拽 / 选择文件（临时附件通道） =====
+  // ===== 附件输入：粘贴 / 拖拽 / 选择文件（未入库附件通道） =====
 
-  /** 单文件进托盘：按类型分支读法（图片 = dataURL 预览；文本类 = 读文本，读失败标 parseFailed 仅作画布参考）。 */
+  /** 单文件进托盘：字节落仓库内隐藏临时区（`.atelyx/temp/<canvasKey>/`），托盘只留引用 + 内容缓存。
+   *  不内嵌 base64——图片直接进 `.atlx` 会让画布文件涨到几十 MB。
+   *  读/写失败必须可见：附件是用户显式动作，静默丢弃等于点击无反应。
+   *  内容不是文本（PDF/zip 等）不算失败：空载荷 + `parseFailed` 进托盘（可引用、不注入模型）。 */
   const addFile = (file: File) => {
     // 加附件 = 编辑意图 → 占锁（协作）
     acquireLock();
     const isImage = file.type.startsWith("image/");
-    const reader = new FileReader();
-    reader.onload = () => {
-      setAttachments((prev) => [
-        ...prev,
-        {
-          id: crypto.randomUUID(),
-          kind: isImage ? "image" : "file",
-          payload: reader.result as string,
-          mime: file.type,
-          filename: file.name,
-        },
-      ]);
-    };
-    if (!isImage) {
-      reader.onerror = () => {
+    void (async () => {
+      try {
+        const { file: ref, payload, parseFailed } = await useCanvasStore
+          .getState()
+          .attachFileFromDisk(file);
         setAttachments((prev) => [
           ...prev,
           {
             id: crypto.randomUUID(),
-            kind: "file",
-            payload: "",
+            kind: isImage ? "image" : "file",
+            payload,
+            file: ref,
             mime: file.type,
             filename: file.name,
-            parseFailed: true,
+            ...(parseFailed ? { parseFailed: true } : {}),
           },
         ]);
-      };
-    }
-    if (isImage) reader.readAsDataURL(file);
-    else reader.readAsText(file);
+      } catch (e) {
+        console.error("添加附件失败", e);
+        // 带上具体原因（如「画布未加载」）：固定文案会让用户不知道能不能重试
+        const reason = e instanceof Error && e.message ? `：${e.message}` : "";
+        useNotificationStore.getState().notify({
+          level: "error",
+          message: `附件「${file.name}」添加失败${reason}`,
+        });
+      }
+    })();
   };
 
   /** 多文件批量进托盘（拖拽 / 文件选择共用）。 */
@@ -436,24 +446,32 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
   // ===== @ 提及（反向：手动 @ → 自动建边） =====
 
   /** @标签 原位插入（各插入路径共用同一语义：@ 到光标间过滤词替换、分隔空格、尾随空格、
-   *  光标复位到尾随空格后、关闭选择器）；record 回调登记引用映射（节点 mentions / 纯路径 fileMentions）。 */
+   *  光标复位到尾随空格后、关闭选择器）；record 回调登记引用映射（节点 mentions / 纯路径 fileMentions）。
+   *  插入位置在 `setInput(prev => …)` 内按 `prev` 计算：同一 tick 多条引用入队时（多选拖拽一次引用多个文件）
+   *  后一条必须看到前一条已插入后的文本，用渲染期闭包的 `input` 会让后写覆盖先写、@标签丢失。
+   *  `atIdx`/光标是「待替换区间」的渲染期事实，同 tick 多次插入不会改变它们（每次插入后都会复位选择器）。 */
   const insertMentionLabel = (mentionText: string, record: () => void) => {
     const caret = textareaRef.current?.selectionStart ?? input.length;
     const insertAt = Math.min(Math.max(atIdx, 0), input.length);
     const end = Math.max(caret, insertAt);
-    // 前文非空且不以空白结尾时补分隔空格，标签后恒带一个尾随空格——
-    // 保证胶囊前后为空白区，胶囊背景外扩（.mention-capsule）不遮相邻字符
-    const before = input.slice(0, insertAt);
-    const sep = before && !/\s$/.test(before) ? " " : "";
-    setInput((prev) => prev.slice(0, insertAt) + sep + mentionText + " " + prev.slice(end));
+    let caretAfter = 0;
+    setInput((prev) => {
+      const from = Math.min(Math.max(atIdx, 0), prev.length);
+      const to = Math.min(Math.max(end, from), prev.length);
+      // 前文非空且不以空白结尾时补分隔空格，标签后恒带一个尾随空格——
+      // 保证胶囊前后为空白区，胶囊背景外扩（.mention-capsule）不遮相邻字符
+      const before = prev.slice(0, from);
+      const sep = before && !/\s$/.test(before) ? " " : "";
+      caretAfter = from + sep.length + mentionText.length + 1;
+      return prev.slice(0, from) + sep + mentionText + " " + prev.slice(to);
+    });
     record();
-    // 光标移到尾随空格之后（继续输入不紧贴胶囊），方便继续输入
+    // 光标移到尾随空格之后（继续输入不紧贴胶囊）
     requestAnimationFrame(() => {
       const ta = textareaRef.current;
       if (ta) {
         ta.focus();
-        const pos = insertAt + sep.length + mentionText.length + 1;
-        ta.setSelectionRange(pos, pos);
+        ta.setSelectionRange(caretAfter, caretAfter);
       }
     });
     setPicker(null);

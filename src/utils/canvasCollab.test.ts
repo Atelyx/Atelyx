@@ -128,6 +128,76 @@ describe("computeCanvasCollabPatch", () => {
     expect((filed.data as { file?: string }).file).toBe("笔记/a.md");
     expect(deserializeNodeForCollab(filed).refreshBodyMdFile).toBe("笔记/a.md");
   });
+
+  it("media 有 file 剥离 thumb/body（内容在附件，按引用读回）", () => {
+    const n = { ...node("m1"), type: "media" } as Node;
+    n.data = {
+      file: ".atelyx/temp/abc/att-x.png",
+      mime: "image/png",
+      kind: "image",
+      name: "截图.png",
+      thumb: "data:image/png;base64,AAAA",
+      body: "不该出现的正文",
+    };
+    const baseline = { nodes: [], edges: [], messagesByConv: {}, title: "画布" };
+    const p = computeCanvasCollabPatch({
+      canvasId: "cv",
+      title: "画布",
+      nodes: [n],
+      edges: [],
+      messagesByConv: {},
+      lastSaved: baseline,
+    });
+    const data = p!.upsertNodes[0].data as unknown as Record<string, unknown>;
+    expect(data.file).toBe(".atelyx/temp/abc/att-x.png");
+    expect(data.thumb).toBeUndefined();
+    expect(data.body).toBeUndefined();
+    expect(data.name).toBe("截图.png");
+  });
+
+  it("media 无 file 时保留 thumb/body（内容是唯一副本，剥离即销毁）", () => {
+    const n = { ...node("m1"), type: "media" } as Node;
+    n.data = { mime: "image/png", kind: "image", thumb: "data:image/png;base64,AAAA" };
+    const baseline = { nodes: [], edges: [], messagesByConv: {}, title: "画布" };
+    const p = computeCanvasCollabPatch({
+      canvasId: "cv",
+      title: "画布",
+      nodes: [n],
+      edges: [],
+      messagesByConv: {},
+      lastSaved: baseline,
+    });
+    expect((p!.upsertNodes[0].data as unknown as Record<string, unknown>).thumb).toBe(
+      "data:image/png;base64,AAAA",
+    );
+  });
+
+  it("消息附件有 file 剥离 payload、无 file 保留（内嵌附件唯一副本）", () => {
+    const withFile = {
+      ...msg("m1"),
+      attachments: [
+        { kind: "image" as const, mime: "image/png", file: "附件/a.png", payload: "data:image/png;base64,AAAA" },
+      ],
+    };
+    const embedded = {
+      ...msg("m2"),
+      attachments: [{ kind: "image" as const, mime: "image/png", payload: "data:image/png;base64,BBBB" }],
+    };
+    const c = convNode("c1");
+    const baseline = { nodes: [], edges: [], messagesByConv: {}, title: "画布" };
+    const p = computeCanvasCollabPatch({
+      canvasId: "cv",
+      title: "画布",
+      nodes: [c],
+      edges: [],
+      messagesByConv: { c1: [withFile, embedded] },
+      lastSaved: baseline,
+    });
+    const sent = (p!.upsertNodes[0].data as { messages: Message[] }).messages;
+    expect(sent[0].attachments?.[0].payload).toBeUndefined();
+    expect(sent[0].attachments?.[0].file).toBe("附件/a.png");
+    expect(sent[1].attachments?.[0].payload).toBe("data:image/png;base64,BBBB");
+  });
 });
 
 describe("mergeMessages", () => {
@@ -148,6 +218,42 @@ describe("mergeMessages", () => {
     const remote = [msg("m1"), msg("m2")];
     const merged = mergeMessages(remote, [msg("m1"), msg("m2")]);
     expect(merged.map((m) => m.id)).toEqual(["m1", "m2"]);
+  });
+
+  it("同 id 消息：附件内容缓存沿用本端（远端补丁里 payload 已被剥离）", () => {
+    const attachments = [
+      { kind: "image" as const, mime: "image/png", file: "附件/a.png", payload: "data:image/png;base64,AAAA" },
+    ];
+    const local = [{ ...msg("m1"), attachments }];
+    const remote = [
+      { ...msg("m1"), attachments: attachments.map((a) => ({ ...a, payload: undefined })) },
+    ];
+
+    const merged = mergeMessages(remote, local);
+
+    expect(merged[0].attachments?.[0].payload).toBe("data:image/png;base64,AAAA");
+  });
+
+  it("同 id 消息：远端换了引用则不用本端旧内容", () => {
+    const local = [
+      {
+        ...msg("m1"),
+        attachments: [
+          { kind: "image" as const, mime: "image/png", file: "附件/old.png", payload: "data:old" },
+        ],
+      },
+    ];
+    const remote = [
+      {
+        ...msg("m1"),
+        attachments: [{ kind: "image" as const, mime: "image/png", file: "附件/new.png" }],
+      },
+    ];
+
+    const merged = mergeMessages(remote, local);
+
+    expect(merged[0].attachments?.[0].file).toBe("附件/new.png");
+    expect(merged[0].attachments?.[0].payload).toBeUndefined();
   });
 });
 
