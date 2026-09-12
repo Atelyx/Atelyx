@@ -18,27 +18,32 @@ ctx.effect(() => {
 
 ## 类型化服务：`ctx.<service>.<method>()`
 
+<!-- generated:ctx-api:services:begin -->
+<!-- 本表由 ctx 类型契约自动生成，勿手改；改契约后运行 pnpm run ctx-api 重新生成。 -->
+
 | 服务 | 方法 | 说明 |
 | --- | --- | --- |
-| `ctx.state` | `read(pluginId)` / `write(pluginId, data)` | 插件自持状态（单 JSON 对象，按插件 id 隔离） |
-| `ctx.storage` | `get(pluginId, key)` / `set(pluginId, key, value)` / `delete(pluginId, key)` / `keys(pluginId)` / `clear(pluginId)` | 插件键值存储（按插件 id 隔离，独立于 `ctx.state`；值须 JSON 可序列化） |
-| `ctx.http` | `request({ url, method?, headers?, body? })` | 通用 HTTP 请求（敏感：网络出口；Rust 代理绕 CORS，20s 超时 + 1MB 响应上限，内网/回环地址拒绝） |
-| `ctx.notification` | `notify({ message, title?, level? })` / `dismiss(id)` | 应用内通知（右下角堆叠；`level` = info/success/warning/error，自动消失） |
-| `ctx.app` | `version()` / `platform()` / `openPage(pageId)` | 宿主信息与页面打开 |
-| `ctx.shell` | `exec(opts, handlers?)` | 执行外部程序（敏感：宿主只登记了 shell 解释器，`opts.command` 传 `sh`（Unix，配 `-c`）或 `cmd.exe`（Windows，配 `/C`）；args 全开，等价任意命令执行。传 handlers 流式） |
-| `ctx.vault` | `listFiles/readFile/readFileWindow/listDir/glob/grep/writeFile/editFile/appendFile/renameFile/moveFile/deleteFile/deleteDir/createFolder` | 仓库文件读写（写方法语义与 AI 文件工具一致；失败返回 `{ ok, summary }` 不抛断） |
-| `ctx.dialog` | `pickDirectory()` / `pickFile(filters?)` / `saveFile(opts?)` | 系统对话框（用户取消返回 null） |
-| `ctx.clipboard` | `readText()` / `writeText(text)` / `copyImage(dataUrl)` | 剪贴板读写（敏感） |
-| `ctx.window` | `minimize()` / `toggleMaximize()` / `close()` | 窗口控制 |
-| `ctx.ai` | `chat(req, handlers?)` / `listModels()` / `listAgents()` / `registerTool(opts)` | AI 会话（流式或聚合）、模型/Agent 列表、注册模型可调用的工具；`req.signal` 可中止流式（中止后按 `end` 收敛） |
-| `ctx.collab` | `peers()` / `setPresence(view, file)` | 协作在线状态 |
-| `ctx.canvas` | `snapshot()` / `addNode/updateNode/moveNode/deleteNode/addEdge/deleteEdge/selectNode` | 当前画布读写（由随应用分发的画布插件提供，停用即不可用） |
-| `ctx.table` | `snapshot()` / `updateCell/addRow/removeRow/selectRow/resolveImage` | 当前表格读写（由随应用分发的表格插件提供，停用即不可用） |
-| `ctx.note` | `currentFile()` / `open(file, title)` / `read(file?)` / `write(content)` / `save()` | 当前笔记读写（由随应用分发的笔记插件提供，停用即不可用）。写入 `.md` 时若该笔记正被编辑且有未落盘输入，宿主按「磁盘内容与本地正文不同」转冲突条由用户决策，不会静默覆盖任何一侧 |
-| `ctx.chat` | `sessions()` / `activeSession()` / `isStreaming()` / `openSession(id)` / `startSession()` / `sendMessage(content)` / `stop()` / `deleteSession(id)` | AI 会话管理（由随应用分发的 AI 对话插件提供，停用即不可用） |
-| `ctx.history` | `list(kind, file)` / `rollback(kind, file, seq)` / `repoHistory()` | 领域历史读 + 回滚（`kind` = note/canvas/table） |
-| `ctx.layout` | `activeLayoutId()` / `layouts()` / `addView(panelId, view)` / `op(op)` | 布局读 + 布局操作发布（`op` 与 Rust `LayoutOp` 逐字段对齐；布局权威在 Rust，改布局一律经 `layout_op` 命令） |
-| `ctx.uiState` | `read()` | 应用级 UI 使用状态读（只读非布局字段 + 布局镜像） |
+| `ctx.state` | `read(pluginId: string): Promise<unknown>` / `write(pluginId: string, data: unknown): Promise<void>` | 插件自持状态服务（按插件 id 读写；单 JSON 对象）。 |
+| `ctx.storage` | `get(pluginId: string, key: string): Promise<unknown>` / `set(pluginId: string, key: string, value: unknown): Promise<void>` / `delete(pluginId: string, key: string): Promise<void>` / `keys(pluginId: string): Promise<string[]>` / `clear(pluginId: string): Promise<void>` | 插件键值存储服务（按插件 id 隔离，独立于 `ctx.state`；值须为 JSON 可序列化，整表落 `data/kv.json`）。 |
+| `ctx.http` | `request(req: HttpRequestInput): Promise<HttpResponseResult>` | 通用 HTTP 请求服务（Rust 代理：CORS 绕行 + SSRF 防护；20s 超时 + 1MB 响应上限，内网/回环地址拒绝）。 |
+| `ctx.notification` | `notify(input: NotificationInput): string` / `dismiss(id: string): void` | 应用内通知服务（右下角通知堆叠；`level` = info/success/warning/error，自动消失）。 |
+| `ctx.app` | `version(): Promise<string>` / `platform(): Promise<string>` / `openPage(pageId: string): Promise<boolean>` | 宿主信息服务（版本 / 平台 / 打开插件应用页）。 |
+| `ctx.shell` | `exec(opts: ShellExecOptions, handlers?: ShellStreamHandlers): Promise<ShellExecResult | undefined>` | 外部程序执行服务（敏感：宿主只登记 `sh`（Unix，配 `-c`）/ `cmd.exe`（Windows，配 `/C`），`args` 全开，等价任意命令执行）。 |
+| `ctx.vault` | `listFiles(): Promise<FileTreeNode[]>` / `readFile(file: string): Promise<string>` / `readFileWindow(file: string, opts?: { offset?: number; limit?: number }): Promise<ReadWindowResult>` / `listDir(dir?: string): Promise<ListDirResult>` / `glob(pattern: string, opts?: { path?: string }): Promise<GlobVaultResult>` / `grep(pattern: string, opts?: { path?: string; include?: string }): Promise<GrepVaultResult>` / `writeFile(file: string, content: string): Promise<{ ok: boolean; summary: string }>` / `editFile(file: string, edits: { oldText: string; newText: string }[]): Promise<{ ok: boolean; summary: string }>` / `appendFile(file: string, content: string): Promise<{ ok: boolean; summary: string }>` / `renameFile(oldPath: string, newName: string): Promise<{ ok: boolean; summary: string; actualPath: string }>` / `moveFile(oldPath: string, targetDir: string): Promise<{ ok: boolean; summary: string; actualPath: string }>` / `deleteFile(path: string): Promise<{ ok: boolean; summary: string }>` / `deleteDir(dir: string, force?: boolean): Promise<{ ok: boolean; summary: string; needsConfirm?: boolean; itemCount?: number }>` / `createFolder(dir: string): Promise<{ ok: boolean; summary: string; path: string }>` | 仓库文件读写服务（读写全开；写方法语义与 AI 文件工具一致；失败返回 { ok:false, summary } 不抛断）。 |
+| `ctx.dialog` | `pickDirectory(): Promise<string | null>` / `pickFile(filters?: DialogFilters[]): Promise<string | null>` / `saveFile(opts?: { defaultPath?: string; filters?: DialogFilters[] }): Promise<string | null>` | 系统对话框服务（用户取消返回 null）。 |
+| `ctx.clipboard` | `readText(): Promise<string>` / `writeText(text: string): Promise<void>` / `copyImage(dataUrl: string): Promise<void>` | 剪贴板服务（文本 + 图片 dataURL；敏感：可读写用户剪贴板）。 |
+| `ctx.window` | `minimize(): Promise<void>` / `toggleMaximize(): Promise<void>` / `close(): Promise<void>` | 窗口控制服务（自定义标题栏窗口）。 |
+| `ctx.ai` | `chat(req: ChatRequest, handlers?: ChatStreamHandlers): Promise<ChatResult | undefined>` / `listModels(): Promise<Array<{ providerId: string; providerName: string; modelId: string; label: string }>>` / `listAgents(): Promise<Array<{ id: string; name: string }>>` / `registerTool(opts: PluginToolOptions): () => void` | AI 会话服务：模型/Agent 列表 + 流式对话 + 插件工具贡献；`req.signal` 可中止流式（中止后按 `end` 收敛）。 |
+| `ctx.collab` | `peers(): CollabPeer[]` / `setPresence(view: string | null, file: string | null): void` | 协作在线状态服务（读 peers + 上报本端 presence）。 |
+| `ctx.canvas` | `snapshot(): PluginCanvasSnapshot` / `addNode(node: { type: string; position: { x: number; y: number }; data?: Record<string, unknown> }): string` / `updateNode(nodeId: string, patch: Record<string, unknown>): void` / `moveNode(nodeId: string, position: { x: number; y: number }): void` / `deleteNode(nodeId: string): void` / `addEdge(edge: { source: string; target: string; sourceHandle?: string; targetHandle?: string; directed?: boolean; linkMode?: string; }): string` / `deleteEdge(edgeId: string): void` / `selectNode(nodeId: string | null): void` | 画布数据服务（由随应用分发的画布插件提供，停用即不可用；写方法要求已打开可写画布）。 |
+| `ctx.table` | `snapshot(): PluginTableSnapshot` / `updateCell(rowId: string, fieldId: string, value: CellValue | undefined): void` / `addRow(): void` / `removeRow(rowId: string): void` / `selectRow(rowId: string | null): void` / `resolveImage(entry: string): Promise<string>` | 表格数据服务（由随应用分发的表格插件提供，停用即不可用；写操作要求已接线）。 |
+| `ctx.note` | `currentFile(): string | null` / `open(file: string, title: string): void` / `read(file?: string): Promise<string>` / `write(content: string): Promise<void>` / `save(): Promise<void>` | 笔记内容服务（由随应用分发的笔记插件提供，停用即不可用；读写走当前仓库上下文的编辑器链）。 写入 `.md` 时若该笔记正被编辑且有未落盘输入，按「磁盘与本地正文不同」转冲突条由用户决策，不静默覆盖任何一侧。 |
+| `ctx.chat` | `sessions(): EditorChatSession[]` / `activeSession(): EditorChatSession | null` / `isStreaming(): boolean` / `openSession(id: string): void` / `startSession(): void` / `sendMessage(content: string): Promise<void>` / `stop(): void` / `deleteSession(id: string): void` | AI 会话服务（由随应用分发的 AI 对话插件提供，停用即不可用；会话历史 + 发起/停止会话）。 |
+| `ctx.history` | `list(kind: HistoryKind, file: string): Promise<HistoryVersion[]>` / `rollback(kind: HistoryKind, file: string, seq: number): Promise<void>` / `repoHistory(): RepoHistoryResult | null` | 领域历史服务（笔记/画布/表格的版本历史读 + 回滚）。 |
+| `ctx.layout` | `activeLayoutId(): string | null` / `layouts(): WorkspaceLayout[]` / `addView(panelId: string, view: string): Promise<LayoutOpResult>` / `op(op: LayoutOp): Promise<LayoutOpResult>` | 布局服务（读取布局镜像 + 发布布局操作；`op` 与 Rust `LayoutOp` 逐字段对齐，改布局一律经 `layout_op`，布局权威在 Rust）。 |
+| `ctx.uiState` | `read(): AppUiState` | 应用级 UI 使用状态读服务（只读非布局字段 + 布局镜像）。 |
+| `ctx.slots` | `registerView(opts: RegisterViewOptions): () => void` / `registerTableView(opts: RegisterTableViewOptions): () => void` / `registerNode(opts: RegisterNodeOptions): () => void` / `registerEdge(opts: RegisterEdgeOptions): () => void` / `registerSetting(opts: RegisterSettingOptions): () => void` / `registerAppPage(opts: RegisterAppPageOptions): () => void` / `registerCommand(opts: RegisterCommandOptions): () => void` / `registerThemeSetting(opts: RegisterThemeSettingOptions): () => void` / `registerUi(opts: RegisterUiOptions): () => void` / `registerMenu(opts: RegisterMenuOptions): () => void` / `list(): readonly SlotDeclaration[]` | 插件 UI 注册服务（视图/节点/边/表格视图/设置项/应用页/命令/主题设置项/具名槽位/右键菜单）。 |
+<!-- generated:ctx-api:services:end -->
 
 依赖某个服务时用 apply 对象声明：`{ name, inject: ["table"], apply(ctx) { ... } }`——
 服务缺失（如提供该服务的插件被停用）时插件不激活，管理页显示原因。
@@ -47,19 +52,23 @@ ctx.effect(() => {
 
 领域事件总线（订阅经 `ctx.effect` 包裹随插件撤销）：
 
-| 事件 | 载荷 | 触发时机 |
-| --- | --- | --- |
-| `vault:switch` | `{ root, id }` | 进仓/切仓完成 |
-| `vault:clear` | — | 离开仓库/回启动页：清空仓库上下文 |
-| `canvas:changed` | `{ file }` | 当前画布变更（轻量信号，按需再调 `ctx.canvas.snapshot()`） |
-| `table:changed` | `{ file }` | 当前表格变更（轻量信号） |
-| `collab:changed` | `{ peers }` | 协作在线用户变更 |
-| `vault:changed` | — | 仓库文件树变更 |
-| `note:opened` | `{ file }` | 笔记打开/切换（`file: null` = 关闭当前笔记） |
-| `note:changed` | `{ file }` | 当前笔记保存落盘（轻量信号，按需再读内容） |
-| `chat:started` | `{ sessionId }` | AI 会话请求开始 |
-| `chat:message` | `{ sessionId, role, content }` | AI 会话消息（`role: "user"` 发送时、`"assistant"` 流式完成后） |
-| `chat:finished` | `{ sessionId }` | AI 会话结束（正常/中止/出错统一收敛） |
+<!-- generated:ctx-api:events:begin -->
+<!-- 本表由 ctx 类型契约自动生成，勿手改；改契约后运行 pnpm run ctx-api 重新生成。 -->
+
+| 事件 | 载荷 | 分派 | 说明 |
+| --- | --- | --- | --- |
+| `vault:switch` | `{ root: string; id: string }` | emit | 进仓/切仓完成广播（载荷 { root, id }）。 |
+| `vault:clear` | — | emit | 离开仓库/回启动页：清空仓库上下文（插件据此丢弃 vault 级驻留态）。 |
+| `canvas:changed` | `{ file: string | null }` | emit | 当前画布变更（轻量信号：只带 file，按需再调 ctx.canvas.snapshot()）。 |
+| `table:changed` | `{ file: string | null }` | emit | 当前表格变更（轻量信号）。 |
+| `collab:changed` | `{ peers: CollabPeer[] }` | emit | 协作在线用户变更。 |
+| `vault:changed` | — | emit | 仓库文件树变更。 |
+| `note:opened` | `{ file: string | null }` | emit | 笔记打开/切换（file = null = 关闭当前笔记）。 |
+| `note:changed` | `{ file: string | null }` | emit | 当前笔记内容变更（保存落盘后发出；按需再调 note 服务读内容）。 |
+| `chat:started` | `{ sessionId: string }` | emit | AI 会话开始（发起请求）。 |
+| `chat:message` | `{ sessionId: string; role: "user" | "assistant"; content: string }` | emit | AI 会话消息（角色 + 内容；assistant 消息在流式完成后发出，非逐 token）。 |
+| `chat:finished` | `{ sessionId: string }` | emit | AI 会话结束（正常 / 中止 / 出错统一收敛）。 |
+<!-- generated:ctx-api:events:end -->
 
 ```ts
 ctx.effect(() =>

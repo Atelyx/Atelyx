@@ -94,7 +94,7 @@ export interface StateService {
   write(pluginId: string, data: unknown): Promise<void>;
 }
 
-/** 插件键值存储服务（按插件 id 隔离；值须为 JSON 可序列化，整表落 `data/kv.json`）。 */
+/** 插件键值存储服务（按插件 id 隔离，独立于 `ctx.state`；值须为 JSON 可序列化，整表落 `data/kv.json`）。 */
 export interface StorageService {
   /** 读一个键（不存在 = undefined）。 */
   get(pluginId: string, key: string): Promise<unknown>;
@@ -111,7 +111,7 @@ export interface StorageService {
 /** 通用 HTTP 请求/响应类型：形状定义在 `services/http`（命令封装处），此处只做别名与注入面声明。 */
 export type { HttpRequestInput as HttpRequest, HttpResponseResult as HttpResponse } from "@/services/http";
 
-/** 通用 HTTP 请求服务（Rust 代理：CORS 绕行 + SSRF 防护 + 统一超时/响应上限）。 */
+/** 通用 HTTP 请求服务（Rust 代理：CORS 绕行 + SSRF 防护；20s 超时 + 1MB 响应上限，内网/回环地址拒绝）。 */
 export interface HttpService {
   request(req: HttpRequestInput): Promise<HttpResponseResult>;
 }
@@ -126,7 +126,7 @@ export interface NotificationInput {
   level?: NotificationLevel;
 }
 
-/** 应用内通知服务（右下角通知堆叠；宿主窗口内可见）。 */
+/** 应用内通知服务（右下角通知堆叠；`level` = info/success/warning/error，自动消失）。 */
 export interface NotificationService {
   /** 弹出一条通知，返回通知 id（可据此提前关闭）。level 缺省 info。 */
   notify(input: NotificationInput): string;
@@ -134,7 +134,7 @@ export interface NotificationService {
   dismiss(id: string): void;
 }
 
-/** 宿主信息服务。 */
+/** 宿主信息服务（版本 / 平台 / 打开插件应用页）。 */
 export interface AppService {
   version(): Promise<string>;
   platform(): Promise<string>;
@@ -142,7 +142,7 @@ export interface AppService {
   openPage(pageId: string): Promise<boolean>;
 }
 
-/** 外部程序执行服务（敏感：可执行任意命令）。 */
+/** 外部程序执行服务（敏感：宿主只登记 `sh`（Unix，配 `-c`）/ `cmd.exe`（Windows，配 `/C`），`args` 全开，等价任意命令执行）。 */
 export interface ShellService {
   /** 非流式：聚合输出后一次性返回；传 handlers 则流式（stdout/stderr → chunk）。 */
   exec(opts: ShellExecOptions, handlers?: ShellStreamHandlers): Promise<ShellExecResult | undefined>;
@@ -190,7 +190,7 @@ export interface WindowService {
   close(): Promise<void>;
 }
 
-/** AI 会话服务：模型/Agent 列表 + 流式对话 + 插件工具贡献。 */
+/** AI 会话服务：模型/Agent 列表 + 流式对话 + 插件工具贡献；`req.signal` 可中止流式（中止后按 `end` 收敛）。 */
 export interface AiService {
   /** 流式对话；传 handlers 则经 chunk/end 推送（resolve 时流已收尾），否则返回聚合结果。 */
   chat(req: ChatRequest, handlers?: ChatStreamHandlers): Promise<ChatResult | undefined>;
@@ -206,7 +206,7 @@ export interface CollabService {
   setPresence(view: string | null, file: string | null): void;
 }
 
-/** 画布数据服务（当前打开的画布；写方法要求已打开可写画布）。 */
+/** 画布数据服务（由随应用分发的画布插件提供，停用即不可用；写方法要求已打开可写画布）。 */
 export interface CanvasService {
   snapshot(): PluginCanvasSnapshot;
   addNode(node: { type: string; position: { x: number; y: number }; data?: Record<string, unknown> }): string;
@@ -225,7 +225,7 @@ export interface CanvasService {
   selectNode(nodeId: string | null): void;
 }
 
-/** 表格数据服务（当前打开的表格；写操作要求已接线）。 */
+/** 表格数据服务（由随应用分发的表格插件提供，停用即不可用；写操作要求已接线）。 */
 export interface TableService {
   snapshot(): PluginTableSnapshot;
   updateCell(rowId: string, fieldId: string, value: CellValue | undefined): void;
@@ -236,7 +236,8 @@ export interface TableService {
   resolveImage(entry: string): Promise<string>;
 }
 
-/** 笔记内容服务（当前打开的笔记；读写走当前仓库上下文的编辑器链）。 */
+/** 笔记内容服务（由随应用分发的笔记插件提供，停用即不可用；读写走当前仓库上下文的编辑器链）。
+ *  写入 `.md` 时若该笔记正被编辑且有未落盘输入，按「磁盘与本地正文不同」转冲突条由用户决策，不静默覆盖任何一侧。 */
 export interface NoteService {
   /** 当前打开的笔记路径（相对仓库根；null = 未打开）。 */
   currentFile(): string | null;
@@ -250,7 +251,7 @@ export interface NoteService {
   save(): Promise<void>;
 }
 
-/** AI 会话服务（会话历史 + 发起/停止会话）。 */
+/** AI 会话服务（由随应用分发的 AI 对话插件提供，停用即不可用；会话历史 + 发起/停止会话）。 */
 export interface ChatService {
   /** 会话列表（按最近打开倒序）。 */
   sessions(): EditorChatSession[];
@@ -280,7 +281,7 @@ export interface HistoryService {
   repoHistory(): RepoHistoryResult | null;
 }
 
-/** 布局服务（读取布局镜像 + 发布布局操作；布局权威在 Rust layout.rs）。 */
+/** 布局服务（读取布局镜像 + 发布布局操作；`op` 与 Rust `LayoutOp` 逐字段对齐，改布局一律经 `layout_op`，布局权威在 Rust）。 */
 export interface LayoutService {
   /** 当前激活布局 id。 */
   activeLayoutId(): string | null;
@@ -292,7 +293,7 @@ export interface LayoutService {
   op(op: LayoutOp): Promise<LayoutOpResult>;
 }
 
-/** 应用级 UI 使用状态读服务（非布局字段；只读）。 */
+/** 应用级 UI 使用状态读服务（只读非布局字段 + 布局镜像）。 */
 export interface UiStateService {
   /** 当前 AppUiState（非布局 JS 权威字段 + 布局镜像；只读）。 */
   read(): AppUiState;

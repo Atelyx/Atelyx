@@ -115,7 +115,7 @@ export interface RegisterMenuOptions {
   priority?: number;
 }
 
-/** ctx.slots 服务契约（types.ts 声明合并挂到 Context）。 */
+/** 插件 UI 注册服务（视图/节点/边/表格视图/设置项/应用页/命令/主题设置项/具名槽位/右键菜单）。 */
 export interface SlotsApi {
   registerView(opts: RegisterViewOptions): () => void;
   registerTableView(opts: RegisterTableViewOptions): () => void;
