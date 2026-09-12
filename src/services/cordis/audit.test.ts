@@ -2,17 +2,41 @@
  * 插件审计测试（services/cordis/audit）。
  *
  * 验证「声明 vs 实际」的实际侧：ctx 服务读（包装代理 get，按插件归属）+ 事件订阅
- * （events._hooks 按插件上下文归属）。归属经 loader 挂载时登记的 contextToPluginId。
- * 另锁「服务面清单 ↔ 内核 ctx 服务契约」一致（漂移即失败），以及卸载后记录清理。
+ * （events._hooks 按插件上下文归属）+ 高危调用摘要（脱敏，不含参数原文）。归属经 loader
+ * 挂载时登记的 contextToPluginId。另锁卸载后记录清理。服务面清单与 ctx 契约的一致性由
+ * `scripts/gen-ctx-api.mjs` 门禁把守（`pnpm run ctx-api:check`）。
  */
-import { describe, expect, it, afterEach } from "vitest";
-import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { describe, expect, it, afterEach, vi } from "vitest";
 import type { Context } from "@atelyx/cordis";
 import { getKernel, resetKernel, type Kernel } from "./kernel";
 import { mountPlugin, unmountAll, unmountPlugin } from "./loader";
 import { auditSnapshot, resetAudit } from "./audit";
-import { PLUGIN_SERVICE_NAMES } from "@/constants/pluginServices";
+import { PLUGIN_SENSITIVE_METHODS, PLUGIN_SERVICE_NAMES } from "@/constants/pluginServices";
+
+// 高危服务调用会真的打到 Tauri：替换为无副作用替身，只验证摘要记录。
+vi.mock("@/services/shell", () => ({
+  openInExplorer: () => Promise.resolve(),
+  openUrl: () => Promise.resolve(),
+  runProcess: (
+    _program: string,
+    _args: string[],
+    _options: unknown,
+    handlers: { close: (code: number | null) => void },
+  ) => {
+    handlers.close(0);
+    return { cancel: () => {} };
+  },
+}));
+
+vi.mock("@/services/http", () => ({
+  httpRequest: () => Promise.resolve({ status: 200, headers: {}, body: "", truncated: false }),
+}));
+
+vi.mock("@/services/clipboard", () => ({
+  readClipboardText: () => Promise.resolve(""),
+  writeClipboardText: () => Promise.resolve(),
+  copyImageToClipboard: () => Promise.resolve(),
+}));
 
 declare module "@atelyx/cordis" {
   interface Events {
@@ -103,17 +127,53 @@ describe("插件审计", () => {
     expect(auditSnapshot(kernel.ctx).some((e) => e.pluginId === "builtin.audit")).toBe(false);
   });
 
-  it("服务面清单与内核 ctx 类型声明一致（两处枚举不得漂移）", async () => {
-    // 口径 = `types.ts` 的服务声明（ctx 服务面契约）；kernel 的 provide 面与插件提供的领域服务
-    // 不在本断言范围（服务改名时须同时改 types.ts 与标签清单，否则此测试失败）
-    const typesSource = await readFile(resolve(process.cwd(), "src/services/cordis/types.ts"), "utf8");
-    // 契约声明形态：declare module "@atelyx/cordis" { interface Context { <name>: <Type>; ... } }
-    const declaration = typesSource
-      .split('declare module "@atelyx/cordis"')[1]
-      ?.split("interface Context {")[1]
-      ?.split("}")[0];
-    expect(declaration, "未找到 declare module 内的 interface Context 声明").toBeTruthy();
-    const declared = [...declaration!.matchAll(/^\s*([A-Za-z][A-Za-z0-9]*)\s*:/gmu)].map((m) => m[1]!);
-    expect([...declared].sort()).toEqual([...PLUGIN_SERVICE_NAMES].sort());
+  it("高危服务调用按插件归属记脱敏摘要（只记形状与规模）", async () => {
+    kernel = getKernel();
+    const apply = (ctx: Context) => {
+      void ctx.shell.exec({ command: "cmd.exe", args: ["/C", "echo", "TOP SECRET"] });
+      void ctx.clipboard.writeText("TOP SECRET");
+      void ctx.http.request({
+        url: "https://api.example.com/v1/x?token=SECRET",
+        method: "POST",
+        body: "TOP SECRET",
+      });
+      try {
+        void ctx.vault.writeFile("notes/a.md", "TOP SECRET");
+      } catch {
+        // 写面未接线：摘要应在转发前已记录。
+      }
+    };
+    await mountPlugin(kernel, { id: "builtin.audit", apply });
+    const entry = auditSnapshot(kernel.ctx).find((e) => e.pluginId === "builtin.audit");
+    expect(entry?.calls).toEqual(
+      expect.arrayContaining([
+        { service: "shell", method: "exec", summary: "cmd.exe（3 个参数）" },
+        { service: "clipboard", method: "writeText", summary: "writeText（10 字节）" },
+        { service: "http", method: "request", summary: "POST https://api.example.com/v1/x" },
+        { service: "vault", method: "writeFile", summary: "writeFile notes/a.md" },
+      ]),
+    );
+  });
+
+  it("摘要不泄漏参数原文（正文 / 凭据不进审计）", async () => {
+    kernel = getKernel();
+    const apply = (ctx: Context) => {
+      void ctx.clipboard.writeText("TOP SECRET");
+      void ctx.http.request({ url: "https://api.example.com/v1/x?token=SECRET", body: "TOP SECRET" });
+      try {
+        void ctx.vault.writeFile("notes/a.md", "TOP SECRET");
+      } catch {
+        // 写面未接线：摘要应在转发前已记录。
+      }
+    };
+    await mountPlugin(kernel, { id: "builtin.audit", apply });
+    const entry = auditSnapshot(kernel.ctx).find((e) => e.pluginId === "builtin.audit");
+    const dumped = JSON.stringify(entry);
+    expect(dumped).not.toContain("TOP SECRET");
+    expect(dumped).not.toContain("token");
+  });
+
+  it("方法级敏感面清单不漂移（键须是已登记服务）", () => {
+    expect(Object.keys(PLUGIN_SENSITIVE_METHODS).every((s) => PLUGIN_SERVICE_NAMES.includes(s))).toBe(true);
   });
 });

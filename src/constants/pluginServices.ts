@@ -30,3 +30,17 @@ export const PLUGIN_SERVICE_NAMES: readonly string[] = Object.keys(PLUGIN_SERVIC
 
 /** 敏感服务（审计/披露 UI「敏感」高亮）。 */
 export const PLUGIN_SERVICE_SENSITIVE: ReadonlySet<string> = new Set(["shell", "clipboard", "http"]);
+
+/** 方法级高危面（服务整体敏感之外的单方法；当前 = vault 写）。审计据此记调用摘要，披露 UI 同源。 */
+export const PLUGIN_SENSITIVE_METHODS: Readonly<Record<string, ReadonlySet<string>>> = {
+  vault: new Set([
+    "writeFile",
+    "editFile",
+    "appendFile",
+    "renameFile",
+    "moveFile",
+    "deleteFile",
+    "deleteDir",
+    "createFolder",
+  ]),
+};
