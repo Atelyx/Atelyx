@@ -101,7 +101,7 @@ import {
   readMarketCache,
 } from "@/services/plugins/market";
 import { getAppVersion } from "@/services/app";
-import { pluginCompatibleWithHost, validatePluginManifest } from "@/utils/pluginManifest";
+import { pluginCompatibleWithHost, packageCompatibleWithHost, validatePluginManifest } from "@/utils/pluginManifest";
 import { detectPlatform } from "@/utils/pluginHost";
 
 /** 某视图 kind 的默认实现提供行状态（ViewHost 降级占位用；installed=false = 已卸载）。 */
@@ -188,19 +188,30 @@ export interface PluginInstallResult {
   replaced: boolean;
 }
 
-/** 列表行 → store 条目（清单经前端校验归一化；Rust 侧已滤除损坏清单，回退 cast 仅兜底意外形态）。 */
+/** 列表行 → store 条目（清单经前端校验归一化；清单无效或跨作用域同 id 冲突的行标为失败且
+ *  不进入挂载——spawn 据此拒绝执行，原始清单仅保留供详情展示）。 */
 function toInstalled(row: PluginRow): InstalledPlugin {
   const validated = validatePluginManifest(row.manifest);
-  return {
+  const base = {
     id: row.id,
-    manifest: validated.ok ? validated.manifest : (row.manifest as unknown as PluginManifest),
     scope: row.scope,
     installDir: row.installDir,
     sourceKind: row.sourceKind,
-    enabled: row.enabled,
+    enabled: row.conflict ? false : row.enabled,
     previousVersion: row.previousVersion,
-    phase: "pending",
   };
+  if (!validated.ok) {
+    return {
+      ...base,
+      manifest: row.manifest as unknown as PluginManifest,
+      phase: "failed",
+      failure: { phase: "manifest", message: `插件清单无效：${validated.errors.join("；")}` },
+    };
+  }
+  if (row.conflict) {
+    return { ...base, manifest: validated.manifest, phase: "failed", failure: { phase: "manifest", message: row.conflict } };
+  }
+  return { ...base, manifest: validated.manifest, phase: "pending" };
 }
 
 /** 停止单个插件的运行时（Cordis fiber 卸载，effects 全部撤销）。 */
@@ -235,13 +246,12 @@ const slotViewCache = new WeakMap<ViewSlotContribution, ViewContribution>();
 /** 安装后统一收尾（模块私有）：宿主兼容强制 + 重载；返回落位行（调用方按实际 id 提示）。 */
 async function finishInstall(get: () => PluginStoreState, row: PluginRow): Promise<PluginRow> {
   try {
-    // 宿主兼容强制（清单承诺）：契约版本/宿主版本/平台不匹配即回滚并报错。
-    // 宿主版本读取失败（瞬时 IPC 异常）传 null：跳过版本范围判断，不误删刚装好的插件
+    // 宿主兼容强制：原始清单先归一化再判兼容（版本/平台/契约约束在 atelyx 块里），
+    // 清单无效或宿主版本读取失败（无法核对版本承诺）都不执行，回滚已落盘插件避免「装了一半」留脏。
     const hostVersion = await getAppVersion().catch(() => null);
-    const compat = pluginCompatibleWithHost(row.manifest, hostVersion, detectPlatform());
+    const compat = packageCompatibleWithHost(row.manifest, hostVersion, detectPlatform());
     if (!compat.ok) throw new Error(`无法安装：${compat.reason}`);
   } catch (e) {
-    // 任一检查失败都回滚已落盘插件，避免「装了一半」留脏。
     await pluginUninstall(row.id, row.scope).catch(() => {});
     throw e;
   }
@@ -419,9 +429,10 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
       if (!plugin) return syncPhase(id, "failed", { phase: "manifest", message: "插件不存在" });
       const hostVersion = env?.hostVersion ?? (await getAppVersion().catch(() => null));
       const platform = env?.platform ?? detectPlatform();
-      const compat = pluginCompatibleWithHost(plugin.manifest, hostVersion, platform);
-      if (!compat.ok) return syncPhase(id, "failed", { phase: "compat", message: compat.reason });
       if (plugin.installDir === "") {
+        // 随应用编译行：实现随宿主二进制分发，兼容性由宿主自身保证——宿主版本未知不拦截，契约/平台仍判。
+        const compat = pluginCompatibleWithHost(plugin.manifest, hostVersion, platform);
+        if (!compat.ok) return syncPhase(id, "failed", { phase: "compat", message: compat.reason });
         const def = CORDIS_BUILTIN_BY_ID[id];
         if (!def) {
           return syncPhase(id, "failed", { phase: "manifest", message: "实现随应用编译但缺少对应实现定义" });
@@ -429,6 +440,14 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
         const result = await mountPlugin(getKernel(), { id, apply: def.apply });
         return syncPhase(id, result.ok ? "active" : "failed", result.ok ? undefined : result);
       }
+      // 磁盘包行：实现来自外部，宿主版本未知 = 无法核对清单的版本承诺，一律不挂载；
+      // 清单无效（toInstalled 已诊断）保持原失败态，不进入执行。
+      if (plugin.failure?.phase === "manifest") return;
+      if (hostVersion === null) {
+        return syncPhase(id, "failed", { phase: "compat", message: "无法读取宿主版本，无法核对版本兼容性" });
+      }
+      const compat = pluginCompatibleWithHost(plugin.manifest, hostVersion, platform);
+      if (!compat.ok) return syncPhase(id, "failed", { phase: "compat", message: compat.reason });
       // 磁盘包无入口 = 声明式插件（如纯 theme）：置 active 即可（主题提供者经清单消费）。
       if (!plugin.manifest.main) return syncPhase(id, "active");
       const result = await mountPluginFromPackage(getKernel(), id, plugin.manifest.main);

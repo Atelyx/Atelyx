@@ -13,13 +13,13 @@ vi.mock("@/services/plugins", () => ({
   pluginList: vi.fn(async () => []),
   pluginSeedDefault: vi.fn(),
   pluginSetEnabled: vi.fn(async () => {}),
-  pluginUninstall: vi.fn(),
+  pluginUninstall: vi.fn(async () => {}),
   pluginUpdate: vi.fn(),
   pluginRollback: vi.fn(),
   onPluginChanged: vi.fn(async () => () => {}),
 }));
 
-vi.mock("@/services/app", () => ({ getAppVersion: async () => "0.0.0" }));
+vi.mock("@/services/app", () => ({ getAppVersion: vi.fn(async () => "0.0.0") }));
 
 vi.mock("@/stores/appStore", () => ({
   useAppStore: {
@@ -27,7 +27,8 @@ vi.mock("@/stores/appStore", () => ({
   },
 }));
 
-import { pluginList, pluginRollback, pluginUpdate } from "@/services/plugins";
+import { pluginInstall, pluginList, pluginRollback, pluginUninstall, pluginUpdate } from "@/services/plugins";
+import { getAppVersion } from "@/services/app";
 import { usePluginStore } from "@/stores/pluginStore";
 
 function row(over: Partial<InstalledPlugin> & { id: string }): InstalledPlugin {
@@ -111,6 +112,38 @@ describe("插件行失败诊断", () => {
     expect(p.phase).toBe("failed");
     expect(p.failure?.phase).toBe("compat");
     expect(p.failure?.message).toContain("999");
+  });
+
+  it("跨作用域同 id 冲突行：强制停用、标失败且不进入装配", async () => {
+    const conflict = "app 与仓库作用域存在同 id 插件，双方已停用：请卸载其一后重新启用";
+    const conflictRow = (scope: "app" | "vault") => ({
+      id: "com.test.dupe",
+      name: "Dupe",
+      version: "1.0.0",
+      type: "panel",
+      scope,
+      installDir: `/tmp/dupe-${scope}`,
+      sourceKind: "market",
+      enabled: true,
+      manifest: {
+        name: "com.test.dupe",
+        version: "1.0.0",
+        main: "main.js",
+        atelyx: { name: "Dupe", type: "panel" },
+      },
+      conflict,
+    });
+    vi.mocked(pluginList).mockResolvedValue([
+      conflictRow("app"),
+      conflictRow("vault"),
+    ] as never);
+
+    await usePluginStore.getState().load();
+    const p = usePluginStore.getState().plugins["com.test.dupe"];
+    expect(p.enabled).toBe(false);
+    expect(p.phase).toBe("failed");
+    expect(p.failure?.phase).toBe("manifest");
+    expect(p.failure?.message).toContain("同 id");
   });
 });
 
@@ -203,5 +236,48 @@ describe("插件版本操作运行时恢复", () => {
     await expect(usePluginStore.getState().rollback("com.test.norollback")).rejects.toThrow("没有可回退版本");
     expect(pluginRollback).not.toHaveBeenCalled();
     expect(pluginList).not.toHaveBeenCalled();
+  });
+});
+
+describe("安装收尾的宿主兼容强制", () => {
+  function installedRow(id: string, manifest: PluginPackageJson) {
+    return {
+      id,
+      name: id,
+      version: "1.0.0",
+      type: "panel",
+      scope: "app",
+      installDir: `/tmp/${id}`,
+      sourceKind: "market",
+      enabled: true,
+      manifest,
+    };
+  }
+
+  it("清单 atelyx 块约束不满足 → 回滚卸载并报错（约束不因未归一化而漏判）", async () => {
+    const raw: PluginPackageJson = {
+      name: "com.test.constrained",
+      version: "1.0.0",
+      main: "main.js",
+      atelyx: { name: "C", type: "panel", hostApiVersion: 999 },
+    };
+    vi.mocked(pluginInstall).mockResolvedValueOnce(installedRow("com.test.constrained", raw) as never);
+
+    await expect(usePluginStore.getState().install("com/example", "app")).rejects.toThrow("999");
+    expect(pluginUninstall).toHaveBeenCalledWith("com.test.constrained", "app");
+  });
+
+  it("宿主版本读取失败 → 不安装（fail-closed），回滚并给出可读错误", async () => {
+    vi.mocked(getAppVersion).mockRejectedValueOnce(new Error("ipc down"));
+    const raw: PluginPackageJson = {
+      name: "com.test.noversion",
+      version: "1.0.0",
+      main: "main.js",
+      atelyx: { name: "N", type: "panel" },
+    };
+    vi.mocked(pluginInstall).mockResolvedValueOnce(installedRow("com.test.noversion", raw) as never);
+
+    await expect(usePluginStore.getState().install("com/example", "app")).rejects.toThrow("宿主版本");
+    expect(pluginUninstall).toHaveBeenCalledWith("com.test.noversion", "app");
   });
 });

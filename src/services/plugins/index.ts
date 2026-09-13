@@ -21,6 +21,8 @@ export interface PluginRow {
   manifest: PluginPackageJson;
   /** 可回退到的上一版本（成功回退后为空）。 */
   previousVersion?: string;
+  /** 跨作用域同 id 冲突说明（app 与 vault 同时存在同 id 插件；双方行都携带且强制停用）。 */
+  conflict?: string;
 }
 
 /** 列出全部插件行（先按默认组合清单增量播种随应用分发的行，再列出磁盘包行）。 */
@@ -28,13 +30,13 @@ export function pluginList(defaults: PluginPackageJson[]): Promise<PluginRow[]> 
   return invoke<PluginRow[]>("plugin_list", { defaults });
 }
 
-/** 安装插件：来源为 GitHub `owner/repo`（市场）或完整 git 地址；新装一律停用（含替代同名行），
- *  由用户显式启用；只有更新才沿用原行启停状态。 */
+/** 安装插件：来源为 GitHub `owner/repo`（市场）或完整 git 地址。启用口径：全新 id 落盘停用、
+ *  由用户显式启用；同 id 替换视为实现更新，经安装确认后继承原行启停状态。 */
 export function pluginInstall(repo: string, scope: PluginScope): Promise<PluginRow> {
   return invoke<PluginRow>("plugin_install", { repo, scope });
 }
 
-/** 从本地目录安装插件（junction/符号链接实时引用，源目录改动即时生效；新装同样一律停用）。 */
+/** 从本地目录安装插件（junction/符号链接实时引用，源目录改动即时生效；启用口径同 pluginInstall）。 */
 export function pluginInstallLocal(path: string, scope: PluginScope): Promise<PluginRow> {
   return invoke<PluginRow>("plugin_install_local", { path, scope });
 }

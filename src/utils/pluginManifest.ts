@@ -92,6 +92,21 @@ export function pluginCompatibleWithHost(
   return { ok: true };
 }
 
+/** 安装路径的宿主兼容门槛：原始 package.json 必须先过归一化校验——版本/平台/契约约束写在
+ *  `atelyx` 块里，不归一化就判兼容会全部漏掉；清单非法或宿主版本未知（无法核对版本承诺）一律拒绝。
+ *  通过时返回归一化清单，调用方无需再校验一次。 */
+export function packageCompatibleWithHost(
+  raw: unknown,
+  hostVersion: string | null,
+  platform: string,
+): { ok: true; manifest: PluginManifest } | { ok: false; reason: string } {
+  const validated = validatePluginManifest(raw);
+  if (!validated.ok) return { ok: false, reason: `插件清单无效：${validated.errors.join("；")}` };
+  if (hostVersion === null) return { ok: false, reason: "无法读取宿主版本，无法核对版本兼容性" };
+  const compat = pluginCompatibleWithHost(validated.manifest, hostVersion, platform);
+  return compat.ok ? { ok: true, manifest: validated.manifest } : { ok: false, reason: compat.reason };
+}
+
 /** 校验并归一化插件包清单（package.json）；结构错误返回原因列表。 */
 export function validatePluginManifest(raw: unknown): ManifestValidateResult {
   if (typeof raw !== "object" || raw === null) return { ok: false, errors: ["清单必须是对象"] };

@@ -7,6 +7,7 @@
 import { describe, it, expect } from "vitest";
 import {
   compareVersions,
+  packageCompatibleWithHost,
   pluginCompatibleWithHost,
   pluginIdValid,
   pluginTypeList,
@@ -84,6 +85,42 @@ describe("pluginCompatibleWithHost", () => {
       expect(result.ok, JSON.stringify(bad)).toBe(false);
       if (!result.ok) expect(result.errors.join()).toContain("hostApiVersion");
     }
+  });
+});
+
+describe("packageCompatibleWithHost", () => {
+  it("atelyx 块里的约束被正确读取（顶层同名伪装字段不参与判定）", () => {
+    // 顶层伪装的 atelyxVersionMin 不参与判定：归一化只认 atelyx 块
+    const disguised = validManifest();
+    disguised.atelyxVersionMin = "9.9.9";
+    expect(packageCompatibleWithHost(disguised, "0.4.0", "windows-x64").ok).toBe(true);
+    // 约束写在 atelyx 块内：宿主低于下限 → 拒绝
+    const constrained = validManifest();
+    (constrained.atelyx as Record<string, unknown>).atelyxVersionMin = "9.9.9";
+    const blocked = packageCompatibleWithHost(constrained, "0.4.0", "windows-x64");
+    expect(blocked.ok).toBe(false);
+    if (!blocked.ok) expect(blocked.reason).toContain("9.9.9");
+    // 宿主版本满足下限 → 通过，并返回归一化清单
+    const ok = packageCompatibleWithHost(constrained, "9.9.9", "windows-x64");
+    expect(ok.ok).toBe(true);
+    if (ok.ok) expect(ok.manifest.id).toBe("com.example.todo");
+  });
+  it("清单非法（缺 atelyx 块/主分类未知）拒绝", () => {
+    expect(packageCompatibleWithHost({ name: "com.a.b", version: "1.0.0" }, "1.0.0", "windows-x64").ok).toBe(false);
+    const badType = validManifest();
+    (badType.atelyx as Record<string, unknown>).type = "widget";
+    expect(packageCompatibleWithHost(badType, "1.0.0", "windows-x64").ok).toBe(false);
+  });
+  it("宿主版本未知（null）拒绝（fail-closed）", () => {
+    const result = packageCompatibleWithHost(validManifest(), null, "windows-x64");
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toContain("宿主版本");
+  });
+  it("平台约束按归一化清单判定", () => {
+    const raw = validManifest();
+    (raw.atelyx as Record<string, unknown>).platforms = ["linux-x64"];
+    expect(packageCompatibleWithHost(raw, "1.0.0", "windows-x64").ok).toBe(false);
+    expect(packageCompatibleWithHost(raw, "1.0.0", "linux-x64").ok).toBe(true);
   });
 });
 

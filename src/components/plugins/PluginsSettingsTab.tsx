@@ -139,7 +139,7 @@ export function PluginsSettingsTab() {
       <div className="flex items-center gap-2 mb-3 flex-shrink-0">
         <button
           onClick={() =>
-            void runInstall(() => installLocalFromPicker(), "已从本地文件夹安装（默认未启用，源目录改动即时生效）")
+            void runInstall(() => installLocalFromPicker(), "已从本地文件夹安装（替换行沿用原启用状态，全新插件默认停用；源目录改动即时生效）")
           }
           disabled={installing}
           title="选择本地插件源码目录，实时引用安装（无拷贝，改源码即时生效）"
@@ -156,7 +156,7 @@ export function PluginsSettingsTab() {
             onChange={(e) => setGitUrl(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter") {
-                void runInstall(() => installGit(gitUrl), "已从 Git 地址安装（默认未启用）", () => setGitUrl(""));
+                void runInstall(() => installGit(gitUrl), "已从 Git 地址安装（替换行沿用原启用状态，全新插件默认停用）", () => setGitUrl(""));
               }
             }}
             placeholder="从 Git 地址安装（如 https://github.com/owner/repo）"
@@ -164,7 +164,7 @@ export function PluginsSettingsTab() {
             style={{ borderColor: "var(--border)", color: "var(--text-primary)", background: "var(--bg-primary)" }}
           />
           <button
-            onClick={() => void runInstall(() => installGit(gitUrl), "已从 Git 地址安装（默认未启用）", () => setGitUrl(""))}
+            onClick={() => void runInstall(() => installGit(gitUrl), "已从 Git 地址安装（替换行沿用原启用状态，全新插件默认停用）", () => setGitUrl(""))}
             disabled={installing || !gitUrl.trim()}
             className="px-2.5 py-1.5 rounded border text-xs flex-shrink-0 transition-opacity disabled:opacity-50"
             style={{ borderColor: "var(--border)", color: "var(--text-secondary)" }}

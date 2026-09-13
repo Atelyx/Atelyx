@@ -2,8 +2,8 @@
  * 插件市场浏览：官方索引（CDN）搜索/筛选/安装。
  *
  * - 搜索：名称/id/描述/仓库全文匹配；类型筛选（全部/各类型）；徽标展示（官方/精选）
- * - 安装 = 按 repo 取源码（git clone，无 git 回退 GitHub 源码包），默认未启用，
- *   由「已安装」tab 确认启用；安装前提示社区插件未受官方审查、可访问本地数据
+ * - 安装 = 按 repo 取源码（git clone，无 git 回退 GitHub 源码包）；全新插件默认停用、
+ *   替换行沿用原启用状态，由「已安装」tab 确认启停；安装前提示社区插件未受官方审查、可访问本地数据
  * - 顶部下拉（类型筛选/安装作用域）用统一 DropdownSelect 组件（自绘弹层，非原生 select）
  * 分层：只经 pluginStore 触达插件能力。
  */
@@ -75,10 +75,10 @@ export function MarketplaceSection() {
     try {
       const result = await install(repo, scope);
       const idNote = result.id === entry.id ? "" : `（包内 id 为 ${result.id}，与索引 id ${entry.id} 不同）`;
-      const replacedNote = result.replaced
-        ? "已替代同名行，该行现为停用状态，到「已安装」tab 启用"
+      const enableNote = result.replaced
+        ? "已替代同名行，沿用其原启用状态"
         : "默认未启用，到「已安装」tab 启用";
-      setNotice({ kind: "ok", text: `已安装 ${repo}${idNote}：${replacedNote}` });
+      setNotice({ kind: "ok", text: `已安装 ${repo}${idNote}：${enableNote}` });
     } catch (e) {
       setNotice({ kind: "error", text: `安装失败：${e instanceof Error ? e.message : String(e)}` });
     } finally {
@@ -214,8 +214,8 @@ export function MarketplaceSection() {
               {sameIdRow && !installed && (
                 <div className="mt-1 text-[11px] break-words" style={{ color: "var(--text-muted)" }}>
                   同名 id 行已存在（{PLUGIN_SOURCE_LABELS[sameIdRow.sourceKind]}，按索引自报 id 判定）。
-                  若包内清单 id 与之一致，安装将以本包实现替代该行；新装一律停用（需到「已安装」tab 启用），
-                  实际落位 id 以安装结果提示为准。
+                  若包内清单 id 与之一致，安装将以本包实现替代该行并沿用其原启用状态；全新插件默认停用
+                  （需到「已安装」tab 启用），实际落位 id 以安装结果提示为准。
                   {sameIdRow.installDir === "" && scope === "vault"
                     ? "该行由随应用分发的实现占用：请选「本机」作用域安装。"
                     : ""}
