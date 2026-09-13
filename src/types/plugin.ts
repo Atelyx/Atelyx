@@ -163,6 +163,8 @@ export interface InstalledPlugin {
   phase: PluginFiberPhase;
   /** 加载失败诊断（分段 phase + 可读原因 + 可选缺失服务清单）。 */
   failure?: PluginMountFailure;
+  /** 可回退到的上一版本；仅代码回退，插件 data 保持当前内容。 */
+  previousVersion?: string;
 }
 
 /**

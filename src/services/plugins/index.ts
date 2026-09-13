@@ -4,6 +4,7 @@
  * 运行时（Cordis 内核/挂载器）在 `services/cordis`，不在此层。
  */
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { PluginPackageJson, PluginScope, PluginSourceKind, PluginType } from "@/types";
 
 /** Rust `plugin_list` 返回行（原始清单由前端校验归一化）。 */
@@ -18,6 +19,8 @@ export interface PluginRow {
   sourceKind: PluginSourceKind;
   enabled: boolean;
   manifest: PluginPackageJson;
+  /** 可回退到的上一版本（成功回退后为空）。 */
+  previousVersion?: string;
 }
 
 /** 列出全部插件行（先按默认组合清单增量播种随应用分发的行，再列出磁盘包行）。 */
@@ -54,6 +57,16 @@ export function pluginSeedDefault(entries: PluginPackageJson[]): Promise<void> {
 /** 更新插件（备份 → 安装 → 失败回滚）。 */
 export function pluginUpdate(id: string): Promise<PluginRow> {
   return invoke<PluginRow>("plugin_update", { id });
+}
+
+/** 回退到上一版本；成功后清空回退指针并保留插件数据。 */
+export function pluginRollback(id: string, expectedPreviousVersion: string): Promise<PluginRow> {
+  return invoke<PluginRow>("plugin_rollback", { id, expectedPreviousVersion });
+}
+
+/** 订阅其他窗口完成的插件版本变化；各窗口据此重载自己的运行时。 */
+export function onPluginChanged(handler: (payload: { id: string; scope: PluginScope }) => void): Promise<UnlistenFn> {
+  return listen<{ id: string; scope: PluginScope }>("plugin-changed", (event) => handler(event.payload));
 }
 
 /** 读取插件入口源码（path 缺省 = 清单 main）。 */

@@ -37,11 +37,12 @@ pub fn run() {
                 // 种子化初始 bounds：启动后未移动过时 on_window_event 不触发，拖拽解析读不到
                 layout::seed_window_bounds(app.handle(), "main");
             }
-            // app 作用域插件目录的超龄残留（崩溃遗留的 .install-*/.bak-* 等）后台清理：
-            // vault 作用域要等 open_vault 才知根路径（见 commands::vault::open_vault）
+            // app 作用域插件目录：先对账恢复更新中途崩溃被搬走的插件目录（.bak-* 即时恢复），
+            // 再清扫超龄残留；vault 作用域要等 open_vault 才知根路径（见 commands::vault::open_vault）
             let sweep_app = app.handle().clone();
             std::thread::spawn(move || {
                 if let Ok(dir) = sweep_app.path().app_data_dir() {
+                    commands::plugin::reconcile_plugin_backups(&sweep_app, &dir.join("plugins"));
                     commands::plugin::sweep_plugin_residues(&dir.join("plugins"));
                 }
             });
@@ -158,6 +159,7 @@ pub fn run() {
             commands::plugin::plugin_set_enabled,
             commands::plugin::plugin_seed_default,
             commands::plugin::plugin_update,
+            commands::plugin::plugin_rollback,
             commands::plugin::plugin_read_entry,
             commands::plugin::plugin_read_state,
             commands::plugin::plugin_write_state,

@@ -25,6 +25,8 @@ import {
   pluginSetEnabled,
   pluginUninstall,
   pluginUpdate,
+  pluginRollback,
+  onPluginChanged,
 } from "@/services/plugins";
 import {
   getPluginAppPages,
@@ -136,8 +138,10 @@ interface PluginStoreState {
   uninstall(id: string): Promise<void>;
   /** 启用/停用（启用 = 拉起运行时；停用 = 终止运行时）。 */
   setEnabled(id: string, enabled: boolean): Promise<void>;
-  /** 更新（备份 → 安装 → 失败回滚；成功则重载运行时）。 */
+  /** 更新（保留一代旧代码；成功则重载运行时）。 */
   update(id: string): Promise<void>;
+  /** 回退到上一版本代码，保留插件数据；成功后清空回退指针。 */
+  rollback(id: string): Promise<void>;
   /** 恢复默认装配：补播种已卸载的默认行 + 重载。 */
   restoreDefaultComposition(): Promise<void>;
   /** 插件工具的 UI 元数据（Agent 设置页名册合并；组件经此读取，不直连 services）。 */
@@ -194,6 +198,7 @@ function toInstalled(row: PluginRow): InstalledPlugin {
     installDir: row.installDir,
     sourceKind: row.sourceKind,
     enabled: row.enabled,
+    previousVersion: row.previousVersion,
     phase: "pending",
   };
 }
@@ -201,6 +206,27 @@ function toInstalled(row: PluginRow): InstalledPlugin {
 /** 停止单个插件的运行时（Cordis fiber 卸载，effects 全部撤销）。 */
 async function stopPlugin(id: string): Promise<void> {
   await unmountPlugin(getKernel(), id);
+}
+
+let pluginChangeListenerStarted = false;
+
+/** 本窗口是否有版本操作（更新/回退）在途：在途期间 Rust 广播的 plugin-changed 已由操作内的
+ * 显式重载覆盖，监听器跳过，避免同窗口连跑两次全量重载（多窗口仍各自收到广播并重载）。
+ * 放模块层：监听器是模块级函数（见 ensurePluginChangeListener）。 */
+let versionOpRunning = false;
+
+function ensurePluginChangeListener(): void {
+  if (pluginChangeListenerStarted) return;
+  pluginChangeListenerStarted = true;
+  void onPluginChanged(() => {
+    if (versionOpRunning) return;
+    void usePluginStore.getState().load().catch((error) => {
+      console.error("插件变化后重载失败", error);
+    });
+  }).catch((error) => {
+    pluginChangeListenerStarted = false;
+    console.error("插件变化监听启动失败", error);
+  });
 }
 
 /** slots 视图贡献 → ViewContribution 转换缓存（selector 稳定引用；随贡献对象 GC 自动失效）。 */
@@ -417,13 +443,80 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
   // 槽注册变化（视图槽随 fiber 挂载/撤销）→ uiRevision 驱动视图菜单/面板重渲染。
   onSlotChange(() => set((s) => ({ uiRevision: s.uiRevision + 1 })));
 
-  /** load 序号守卫：并发 load（回启动页 fire-and-forget 与紧接着进仓 load 竞态）时
-   * 只允许最后一次生效，防止旧 load 覆盖插件表后残留孤儿 runtime。 */
-  let loadSeq = 0;
+  /**
+   * 版本操作（更新/回退）共用模板：先执行操作（失败先捕获），无论成败都全量重载
+   * （失败时恢复旧版运行时，避免 enabled 行悬空停机），最后把两类错误聚合抛出。
+   * `label` 用于双失败的合成错误前缀（如「更新失败：…；恢复运行时失败：…」）。
+   */
+  const runVersionOp = async (op: () => Promise<unknown>, label: string): Promise<void> => {
+    let operationError: unknown;
+    try {
+      await op();
+    } catch (e) {
+      operationError = e;
+    }
+    let refreshError: unknown;
+    try {
+      await get().load();
+    } catch (e) {
+      refreshError = e;
+    }
+    if (operationError && refreshError) {
+      throw new Error(`${label}失败：${errText(operationError)}；恢复运行时失败：${errText(refreshError)}`);
+    }
+    if (operationError) throw operationError;
+    if (refreshError) throw refreshError;
+  };
+
+  /** 标记本窗口正在进行版本操作：Rust 广播的 plugin-changed 已由操作内的显式重载覆盖，
+   * 监听器跳过，避免同窗口连跑两次全量重载（多窗口仍各自收到广播并重载）。 */
+  const runVersionOpTracked = async (op: () => Promise<unknown>, label: string): Promise<void> => {
+    versionOpRunning = true;
+    try {
+      await runVersionOp(op, label);
+    } finally {
+      versionOpRunning = false;
+    }
+  };
 
   /** 装配顺序：默认组合成员在前，其余按 id 追加（行有落位目录 → 磁盘入口，否则编译实现）。 */
   const mountIds = (): string[] =>
     mountOrder(composePlugins(DEFAULT_COMPOSITION, compositionPackages(get().plugins)));
+
+  const performLoad = async (): Promise<void> => {
+    ensurePluginChangeListener();
+    setAppPageOpener((pageId) => useAppStore.getState().openPluginPage(pageId));
+    getKernel();
+    ensureVaultWriteAccess();
+    ensureCollabRuntimeAccess();
+    ensureNotificationAccess();
+    ensureSettingsAccess();
+    ensureHistoryAccess();
+    ensureLayoutAccess();
+    ensureUiStateAccess();
+    ensureRuntimeChangeEvents();
+    installCommandHotkeys();
+    const hostVersion = await getAppVersion().catch(() => null);
+    const rows = await pluginList(defaultManifests(hostVersion));
+    await unmountAll(getKernel());
+    const plugins: Record<string, InstalledPlugin> = {};
+    for (const row of rows) plugins[row.id] = toInstalled(row);
+    set({ plugins, initialized: true });
+    set((s) => ({ uiRevision: s.uiRevision + 1 }));
+    const mounts = mountIds();
+    const total = mounts.length;
+    const platform = detectPlatform();
+    for (let i = 0; i < mounts.length; i++) {
+      const id = mounts[i];
+      if (useAppStore.getState().entryLoading) {
+        useAppStore.getState().reportLoad(
+          `加载插件：${get().plugins[id]?.manifest.name ?? id}（${i + 1}/${total}）`,
+        );
+      }
+      await spawn(id, { hostVersion, platform });
+    }
+  };
+  let loadQueue: Promise<void> = Promise.resolve();
 
   return {
     plugins: {},
@@ -438,50 +531,12 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
      * 全量重载：先按默认组合清单播种并取行（失败则旧状态原样保留），再卸载旧运行时与 UI 贡献，
      * 按装配顺序重建。语义 =「重置到当前插件行状态」，可在 boot / 切仓库 / 安装更新后安全重复调用。
      */
-    load: async () => {
-      setAppPageOpener((pageId) => useAppStore.getState().openPluginPage(pageId));
-      // 内核就绪（创建根 Context + 平台服务 + slots 注册 API；幂等单例）。
-      getKernel();
-      // 内核侧数据访问接线（vault 写/协作/ai 配置 + collab/vault 变更事件）：
-      // canvas/table 能力提供者与变更事件随对应插件启停注册（cordis/builtins 的 capability）
-      ensureVaultWriteAccess();
-      ensureCollabRuntimeAccess();
-      ensureNotificationAccess();
-      ensureSettingsAccess();
-      ensureHistoryAccess();
-      ensureLayoutAccess();
-      ensureUiStateAccess();
-      ensureRuntimeChangeEvents();
-      installCommandHotkeys();
-      const seq = ++loadSeq;
-      // 默认组合清单权威在本层（存在/顺序/清单随 App 版本）；Rust 据此播种随应用分发的行。
-      const hostVersion = await getAppVersion().catch(() => null);
-      const rows = await pluginList(defaultManifests(hostVersion));
-      if (seq !== loadSeq) return; // 已有更新的 load 开始，本次作废（防孤儿 runtime）
-      // 清场：卸载内核里全部已挂载 fiber（比按 store 行逐个 stop 更彻底，含已不在行里的残留）。
-      await unmountAll(getKernel());
-      const plugins: Record<string, InstalledPlugin> = {};
-      for (const row of rows) {
-        plugins[row.id] = toInstalled(row);
-      }
-      set({ plugins, initialized: true });
-      // 面板/菜单只订阅 uiRevision：行落定后补发一次，让已渲染的降级占位/菜单按新状态收敛
-      // （全停用行的冷启动无任何注册 notify）。
-      set((s) => ({ uiRevision: s.uiRevision + 1 }));
-      // 装配顺序 = 默认组合成员在前（其提供者先就绪，满足后续行的 inject 依赖）。
-      const mounts = mountIds();
-      const total = mounts.length;
-      const platform = detectPlatform();
-      for (let i = 0; i < mounts.length; i++) {
-        if (seq !== loadSeq) return;
-        const id = mounts[i];
-        if (useAppStore.getState().entryLoading) {
-          useAppStore.getState().reportLoad(
-            `加载插件：${get().plugins[id]?.manifest.name ?? id}（${i + 1}/${total}）`,
-          );
-        }
-        await spawn(id, { hostVersion, platform });
-      }
+    load: () => {
+      // 全量重载串行执行：跨窗口版本事件与当前窗口操作可能同时触发，排队可避免两个 load
+      // 在 unmount/mount 之间交错而留下孤儿 fiber。
+      const next = loadQueue.then(performLoad, performLoad);
+      loadQueue = next.catch(() => {});
+      return next;
     },
 
     install: async (repo, scope) => {
@@ -563,9 +618,17 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
       const p = get().plugins[id];
       if (!p) return;
       await stopPlugin(id);
-      await pluginUpdate(id);
-      // load 按行状态自动重拉（enabled 由状态文件保持），无需再显式 spawn。
-      await get().load();
+      await runVersionOpTracked(() => pluginUpdate(id), "更新");
+    },
+
+    rollback: async (id) => {
+      const p = get().plugins[id];
+      if (!p?.previousVersion) {
+        // 行数据过期（如另一窗口刚完成回退）时给出可见错误，不做静默 no-op
+        throw new Error("插件没有可回退版本，请刷新后重试");
+      }
+      await stopPlugin(id);
+      await runVersionOpTracked(() => pluginRollback(id, p.previousVersion!), "回退");
     },
 
     pluginToolMetas: () => pluginToolMetasSvc(),

@@ -15,6 +15,8 @@ vi.mock("@/services/plugins", () => ({
   pluginSetEnabled: vi.fn(async () => {}),
   pluginUninstall: vi.fn(),
   pluginUpdate: vi.fn(),
+  pluginRollback: vi.fn(),
+  onPluginChanged: vi.fn(async () => () => {}),
 }));
 
 vi.mock("@/services/app", () => ({ getAppVersion: async () => "0.0.0" }));
@@ -25,7 +27,7 @@ vi.mock("@/stores/appStore", () => ({
   },
 }));
 
-import { pluginList } from "@/services/plugins";
+import { pluginList, pluginRollback, pluginUpdate } from "@/services/plugins";
 import { usePluginStore } from "@/stores/pluginStore";
 
 function row(over: Partial<InstalledPlugin> & { id: string }): InstalledPlugin {
@@ -41,8 +43,11 @@ function row(over: Partial<InstalledPlugin> & { id: string }): InstalledPlugin {
 }
 
 beforeEach(() => {
+  vi.clearAllMocks();
   usePluginStore.setState({ plugins: {}, initialized: false });
   vi.mocked(pluginList).mockResolvedValue([]);
+  vi.mocked(pluginUpdate).mockReset();
+  vi.mocked(pluginRollback).mockReset();
 });
 
 describe("插件行失败诊断", () => {
@@ -106,5 +111,97 @@ describe("插件行失败诊断", () => {
     expect(p.phase).toBe("failed");
     expect(p.failure?.phase).toBe("compat");
     expect(p.failure?.message).toContain("999");
+  });
+});
+
+describe("插件版本操作运行时恢复", () => {
+  it("更新失败仍按磁盘重载，避免启用行悬空停机", async () => {
+    usePluginStore.setState({
+      plugins: {
+        "com.test.update": row({ id: "com.test.update", installDir: "/tmp/update", sourceKind: "git" }),
+      },
+    });
+    vi.mocked(pluginUpdate).mockRejectedValueOnce(new Error("更新失败"));
+
+    await expect(usePluginStore.getState().update("com.test.update")).rejects.toThrow("更新失败");
+    expect(pluginList).toHaveBeenCalledTimes(1);
+  });
+
+  it("回退携带确认的目标版本并在成功后重载", async () => {
+    usePluginStore.setState({
+      plugins: {
+        "com.test.rollback": row({
+          id: "com.test.rollback",
+          installDir: "/tmp/rollback",
+          sourceKind: "git",
+          previousVersion: "1.0.0",
+        }),
+      },
+    });
+    vi.mocked(pluginRollback).mockResolvedValueOnce({ id: "com.test.rollback" } as never);
+
+    await usePluginStore.getState().rollback("com.test.rollback");
+    expect(pluginRollback).toHaveBeenCalledWith("com.test.rollback", "1.0.0");
+    expect(pluginList).toHaveBeenCalledTimes(1);
+  });
+
+  it("回退失败仍按磁盘重载，错误原样透传", async () => {
+    usePluginStore.setState({
+      plugins: {
+        "com.test.rollback": row({
+          id: "com.test.rollback",
+          installDir: "/tmp/rollback",
+          sourceKind: "git",
+          previousVersion: "1.0.0",
+        }),
+      },
+    });
+    vi.mocked(pluginRollback).mockRejectedValueOnce(new Error("回退失败"));
+
+    await expect(usePluginStore.getState().rollback("com.test.rollback")).rejects.toThrow("回退失败");
+    expect(pluginList).toHaveBeenCalledTimes(1);
+  });
+
+  it("回退与重载双失败 → 合成错误同时含两类原因", async () => {
+    usePluginStore.setState({
+      plugins: {
+        "com.test.rollback": row({
+          id: "com.test.rollback",
+          installDir: "/tmp/rollback",
+          sourceKind: "git",
+          previousVersion: "1.0.0",
+        }),
+      },
+    });
+    vi.mocked(pluginRollback).mockRejectedValueOnce(new Error("目录不可用"));
+    vi.mocked(pluginList).mockRejectedValueOnce(new Error("状态文件忙"));
+
+    await expect(usePluginStore.getState().rollback("com.test.rollback")).rejects.toThrow(
+      "回退失败：目录不可用；恢复运行时失败：状态文件忙",
+    );
+  });
+
+  it("更新成功后重载且不抛错", async () => {
+    usePluginStore.setState({
+      plugins: {
+        "com.test.update": row({ id: "com.test.update", installDir: "/tmp/update", sourceKind: "git" }),
+      },
+    });
+    vi.mocked(pluginUpdate).mockResolvedValueOnce({ id: "com.test.update" } as never);
+
+    await usePluginStore.getState().update("com.test.update");
+    expect(pluginList).toHaveBeenCalledTimes(1);
+  });
+
+  it("无可回退版本时给出可见错误且不触达命令", async () => {
+    usePluginStore.setState({
+      plugins: {
+        "com.test.norollback": row({ id: "com.test.norollback", installDir: "/tmp/nr", sourceKind: "git" }),
+      },
+    });
+
+    await expect(usePluginStore.getState().rollback("com.test.norollback")).rejects.toThrow("没有可回退版本");
+    expect(pluginRollback).not.toHaveBeenCalled();
+    expect(pluginList).not.toHaveBeenCalled();
   });
 });

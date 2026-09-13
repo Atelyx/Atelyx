@@ -115,7 +115,8 @@ pub fn open_vault(
         let Some(st) = warm_app.try_state::<VaultState>() else {
             return;
         };
-        // vault 作用域插件目录的超龄残留（崩溃遗留的 .install-*/.bak-* 等）随预热线程顺带清理
+        // vault 作用域插件目录：先对账恢复更新中途崩溃被搬走的插件目录，再清扫超龄残留（随预热线程顺带执行）
+        crate::commands::plugin::reconcile_plugin_backups(&warm_app, &warm_root.join(".atelyx/plugins"));
         crate::commands::plugin::sweep_plugin_residues(&warm_root.join(".atelyx/plugins"));
         // 未入库附件临时区的兜底回收：清理「画布已不存在」的超龄目录
         // （崩溃/强杀遗留，画布未走正常关闭路径；正常关闭由 cleanup_canvas_temp_attachments 按引用清单个清）

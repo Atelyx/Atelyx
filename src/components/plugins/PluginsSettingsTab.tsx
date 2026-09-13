@@ -10,18 +10,18 @@
  * 分层：本组件只经 pluginStore 触达插件能力（不直连 services）；列表行推导取自 utils/cordis/composition。
  */
 import { useMemo, useState } from "react";
-import { FolderOpen, GitBranch, RefreshCw, Terminal, Trash2 } from "lucide-react";
+import { FolderOpen, GitBranch, Info, RefreshCw, Trash2 } from "lucide-react";
 import { usePluginStore, type PluginInstallResult } from "@/stores/pluginStore";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
+import { Menu, MenuItem } from "@/components/common/Menu";
 import { ToggleSwitch } from "@/components/common/ToggleSwitch";
+import { PluginDetailsDialog } from "@/components/plugins/PluginDetailsDialog";
 import { MarketplaceSection } from "@/components/plugins/MarketplaceSection";
 import { DEFAULT_COMPOSITION } from "@/components/plugins/cordis/builtins";
 import { deriveThemeProviders, isThemePluginRow } from "@/utils/pluginTheme";
 import { composePlugins, compositionPackages } from "@/utils/cordis/composition";
 import { errText } from "@/types";
 import {
-  PLUGIN_MOUNT_PHASE_LABELS,
-  PLUGIN_MOUNT_PHASE_ORDER,
   PLUGIN_SCOPE_LABELS,
   PLUGIN_SOURCE_LABELS,
   PLUGIN_TYPE_LABELS,
@@ -35,6 +35,7 @@ export function PluginsSettingsTab() {
   usePluginStore((s) => s.uiRevision);
   const setEnabled = usePluginStore((s) => s.setEnabled);
   const update = usePluginStore((s) => s.update);
+  const rollback = usePluginStore((s) => s.rollback);
   const uninstall = usePluginStore((s) => s.uninstall);
   const installLocalFromPicker = usePluginStore((s) => s.installLocalFromPicker);
   const installGit = usePluginStore((s) => s.installGit);
@@ -48,6 +49,9 @@ export function PluginsSettingsTab() {
   const [mode, setMode] = useState<TabMode>("installed");
   const [notice, setNotice] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
   const [confirmUninstall, setConfirmUninstall] = useState<string | null>(null);
+  const [confirmRollback, setConfirmRollback] = useState<string | null>(null);
+  const [detailsId, setDetailsId] = useState<string | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   const [gitUrl, setGitUrl] = useState("");
   const [installing, setInstalling] = useState(false);
 
@@ -82,6 +86,15 @@ export function PluginsSettingsTab() {
     } finally {
       setInstalling(false);
     }
+  };
+
+  /** 回退确认的统一执行入口：清确认态 → 回退 → 成败提示（详情弹窗与行右键两条路径共用）。 */
+  const confirmRollbackFor = (id: string) => {
+    setConfirmRollback(null);
+    void rollback(id).then(
+      () => setNotice({ kind: "ok", text: "插件已回退，当前插件数据已保留" }),
+      (e) => setNotice({ kind: "error", text: errText(e) }),
+    );
   };
 
   return (
@@ -182,17 +195,18 @@ export function PluginsSettingsTab() {
       <div className="space-y-2">
         {rows.map((row) => {
           const p = plugins[row.id];
-          const declares = p?.manifest.declares ?? [];
           const failed = p?.phase === "failed";
-          const failure = p?.failure;
-          const cmds = commands.filter((c) => c.pluginId === row.id);
-          const audit = auditByRow.get(row.id);
           const lastTheme = p ? isLastEnabledTheme(p) : false;
           return (
             <div
               key={row.id}
               className={`rounded border p-3 ${row.installed ? "" : "opacity-60"}`}
               style={{ borderColor: "var(--border)", background: "var(--bg-primary)" }}
+              onContextMenu={(event) => {
+                if (!row.installed) return;
+                event.preventDefault();
+                setContextMenu({ id: row.id, x: event.clientX, y: event.clientY });
+              }}
             >
               <div className="flex items-center gap-2">
                 <div className="flex-1 min-w-0">
@@ -248,6 +262,14 @@ export function PluginsSettingsTab() {
                       title={lastTheme ? LAST_THEME_HINT : row.enabled ? "停用" : "启用"}
                       disabled={lastTheme}
                     />
+                    <button
+                      onClick={() => setDetailsId(row.id)}
+                      title="查看详情"
+                      className="p-1.5 rounded hover:bg-[var(--hover)]"
+                      style={{ color: "var(--text-muted)" }}
+                    >
+                      <Info size={14} />
+                    </button>
                     {p.installDir !== "" && row.sourceKind !== "local" && (
                       <button
                         onClick={() => void update(row.id).catch((e) => setNotice({ kind: "error", text: errText(e) }))}
@@ -286,114 +308,56 @@ export function PluginsSettingsTab() {
                 )}
               </div>
 
-              {failed && failure && (
-                <div className="mt-1.5 space-y-1">
-                  <div className="flex flex-wrap gap-1">
-                    {PLUGIN_MOUNT_PHASE_ORDER.map((phase) => (
-                      <span
-                        key={phase}
-                        className="text-[10px] px-1.5 py-0.5 rounded"
-                        style={
-                          phase === failure.phase
-                            ? { color: "#f87171", background: "rgba(248,113,113,0.12)" }
-                            : { color: "var(--text-muted)", background: "var(--bg-secondary)" }
-                        }
-                      >
-                        {PLUGIN_MOUNT_PHASE_LABELS[phase]}
-                      </span>
-                    ))}
-                  </div>
-                  <div className="text-[11px] break-words" style={{ color: "#f87171" }}>
-                    {failure.message}
-                  </div>
-                  {failure.missing && (
-                    <div className="text-[10px] break-words" style={{ color: "var(--text-muted)" }}>
-                      缺失依赖：{failure.missing.join("、")}
-                    </div>
-                  )}
-                </div>
-              )}
-              {cmds.length > 0 && (
-                <div className="mt-2 flex flex-wrap items-center gap-1">
-                  <Terminal size={12} style={{ color: "var(--text-muted)" }} />
-                  {cmds.map((c) => (
-                    <button
-                      key={c.globalId}
-                      onClick={() =>
-                        void runPluginCommand(c.globalId).then(
-                          () => setNotice({ kind: "ok", text: `命令「${c.label}」已执行` }),
-                          (e) => setNotice({ kind: "error", text: `命令执行失败：${errText(e)}` }),
-                        )
-                      }
-                      title="运行此插件命令"
-                      className="px-1.5 py-0.5 rounded border text-[10px]"
-                      style={{ borderColor: "var(--border)", color: "var(--text-secondary)" }}
-                    >
-                      {c.label}
-                    </button>
-                  ))}
-                </div>
-              )}
-              {declares.length > 0 && (
-                <div className="mt-2 flex flex-wrap gap-1">
-                  {declares.map((ns) => (
-                    <span
-                      key={ns}
-                      className="text-[10px] px-1.5 py-0.5 rounded border"
-                      title={`披露：将访问 ${ns}`}
-                      style={{
-                        color: capabilitySensitive(ns) ? "#f59e0b" : "var(--text-secondary)",
-                        borderColor: "var(--border)",
-                        background: capabilitySensitive(ns) ? "rgba(245,158,11,0.1)" : "transparent",
-                      }}
-                    >
-                      {capabilitySensitive(ns) ? `${capabilityLabel(ns)}（敏感）` : capabilityLabel(ns)}
-                    </span>
-                  ))}
-                </div>
-              )}
-              {audit && (audit.services.length > 0 || audit.events.length > 0 || audit.calls.length > 0) && (
-                <div className="mt-1.5 flex flex-wrap gap-1">
-                  {audit.calls.map((call) => (
-                    <span
-                      key={`call:${call.service}.${call.method}:${call.summary}`}
-                      className="text-[10px] px-1.5 py-0.5 rounded border"
-                      title={`实际调用：${call.service}.${call.method}`}
-                      style={{
-                        color: "#f59e0b",
-                        borderColor: "var(--border)",
-                        background: "rgba(245,158,11,0.1)",
-                      }}
-                    >
-                      {capabilityLabel(call.service)} · {call.summary}
-                    </span>
-                  ))}
-                  {audit.services.map((ns) => (
-                    <span
-                      key={`svc:${ns}`}
-                      className="text-[10px] px-1.5 py-0.5 rounded"
-                      title={`实际访问服务：${ns}`}
-                      style={{ color: "var(--text-muted)", background: "var(--bg-secondary)" }}
-                    >
-                      {capabilityLabel(ns)} · 已访问
-                    </span>
-                  ))}
-                  {audit.events.map((ev) => (
-                    <span
-                      key={`evt:${ev}`}
-                      className="text-[10px] px-1.5 py-0.5 rounded"
-                      title={`实际订阅事件：${ev}`}
-                      style={{ color: "var(--text-muted)", background: "var(--bg-secondary)" }}
-                    >
-                      {ev} · 已订阅
-                    </span>
-                  ))}
-                </div>
-              )}
             </div>
           );
         })}
       </div>
+
+      {contextMenu && plugins[contextMenu.id] && (() => {
+        const target = plugins[contextMenu.id];
+        return (
+          <Menu x={contextMenu.x} y={contextMenu.y} onClose={() => setContextMenu(null)} widthClass="w-44">
+            <MenuItem onClick={() => { setDetailsId(contextMenu.id); setContextMenu(null); }}>
+              <Info size={13} /> 查看详情
+            </MenuItem>
+            {target.previousVersion && (
+              <MenuItem onClick={() => { setConfirmRollback(contextMenu.id); setContextMenu(null); }}>
+                <RefreshCw size={13} /> 回退到 v{target.previousVersion}
+              </MenuItem>
+            )}
+          </Menu>
+        );
+      })()}
+
+      {detailsId && plugins[detailsId] && (
+        <PluginDetailsDialog
+          plugin={plugins[detailsId]}
+          audit={auditByRow.get(detailsId)}
+          commands={commands}
+          capabilityLabel={capabilityLabel}
+          capabilitySensitive={capabilitySensitive}
+          onRunCommand={(globalId) => void runPluginCommand(globalId).then(
+            () => setNotice({ kind: "ok", text: "命令已执行" }),
+            (e) => setNotice({ kind: "error", text: `命令执行失败：${errText(e)}` }),
+          )}
+          onRollback={() => setConfirmRollback(detailsId)}
+          onClose={() => setDetailsId(null)}
+          rollbackConfirm={confirmRollback === detailsId}
+          onConfirmRollback={() => confirmRollbackFor(detailsId)}
+          onCancelRollback={() => setConfirmRollback(null)}
+        />
+      )}
+
+      {confirmRollback && !detailsId && plugins[confirmRollback] && (
+        <ConfirmDialog
+          title={`回退插件「${plugins[confirmRollback].manifest.name}」`}
+          description={`将插件代码恢复到 v${plugins[confirmRollback].previousVersion ?? "上一版本"}，并保留当前插件数据。回退成功后将清空保留版本，是否继续？`}
+          confirmText="回退"
+          danger={false}
+          onConfirm={() => confirmRollbackFor(confirmRollback)}
+          onCancel={() => setConfirmRollback(null)}
+        />
+      )}
 
       {confirmUninstall && (
         <ConfirmDialog
