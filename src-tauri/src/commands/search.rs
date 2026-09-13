@@ -16,7 +16,10 @@ use reqwest::Url;
 use serde::Serialize;
 use tauri::State;
 
-use crate::net_guard::{ensure_local_service_http_url, ensure_public_http_url, redirect_policy};
+use crate::net_guard::{
+    ensure_local_service_http_url, ensure_public_http_url, local_service_dns_resolver,
+    public_dns_resolver, redirect_policy, HostPolicy,
+};
 use crate::vault::{read_vault_config, VaultConfig, VaultState};
 
 /// 单条搜索结果（camelCase 对齐前端 `SearchResultItem`）。
@@ -47,11 +50,21 @@ pub async fn search_web(
 }
 
 /// 带超时的 HTTP 客户端（搜索请求不被挂死；15s 对搜索 API 足够）。
-/// `check` = 重定向每跳复检的地址策略（Tavily 公网 / SearXNG 本机局域网）。
-fn http_client(check: fn(&str) -> Result<Url, String>) -> Result<reqwest::Client, String> {
+/// `policy` = 地址策略（Tavily 公网 / SearXNG 本机局域网）：重定向每跳复检 +
+/// DNS 解析结果逐 IP 过同一策略，两层同口径。
+fn http_client(policy: HostPolicy) -> Result<reqwest::Client, String> {
+    let check: fn(&str) -> Result<Url, String> = match policy {
+        HostPolicy::PublicOnly => ensure_public_http_url,
+        HostPolicy::LocalService => ensure_local_service_http_url,
+    };
+    let resolver = match policy {
+        HostPolicy::PublicOnly => public_dns_resolver(),
+        HostPolicy::LocalService => local_service_dns_resolver(),
+    };
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .redirect(redirect_policy(check))
+        .dns_resolver(resolver)
         .build()
         .map_err(|e| e.to_string())
 }
@@ -61,7 +74,7 @@ async fn tavily_search(config: &VaultConfig, query: &str) -> Result<Vec<SearchRe
     if key.is_empty() {
         return Err("未配置 Tavily API Key（工作区「设置」→ 联网搜索）".to_string());
     }
-    let client = http_client(ensure_public_http_url)?;
+    let client = http_client(HostPolicy::PublicOnly)?;
     let resp = client
         .post("https://api.tavily.com/search")
         .header("Authorization", format!("Bearer {}", key))
@@ -78,7 +91,7 @@ async fn tavily_search(config: &VaultConfig, query: &str) -> Result<Vec<SearchRe
 
 async fn searxng_search(instance_url: &str, query: &str) -> Result<Vec<SearchResultItem>, String> {
     let url = searxng_request_url(instance_url, query)?;
-    let client = http_client(ensure_local_service_http_url)?;
+    let client = http_client(HostPolicy::LocalService)?;
     let resp = client
         .get(url)
         .send()

@@ -30,8 +30,8 @@ tauri-plugin-updater = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# 异步运行时（拖拽看门狗定时器 + 插件 git 命令执行；与 tauri 内置 tokio 同版本统一）
-tokio = { version = "1", features = ["time", "process"] }
+# 异步运行时（拖拽看门狗定时器 + 插件 git 命令执行 + 出网 DNS 解析的阻塞隔离；与 tauri 内置 tokio 同版本统一）
+tokio = { version = "1", features = ["rt", "time", "process"] }
 
 # 附件图片转 dataURL 供前端 MediaNode 显示（文件面板拖附件建节点）
 base64 = "0.22"

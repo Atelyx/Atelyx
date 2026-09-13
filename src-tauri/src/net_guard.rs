@@ -2,10 +2,12 @@
 //!
 //! 两套策略，同一次校验只能择一（见 [`HostPolicy`]）：网页抓取与插件通用 HTTP 走公网策略，
 //! 用户自建的 SearXNG 等本机/局域网服务走 [`HostPolicy::LocalService`]。
-//! 重定向每跳都按同一策略复检：默认重定向策略会默默跟随 302 到被拒地址，绕过入口校验。
-//!
-//! 限制：域名 + DNS rebinding（解析后将内网 IP 返回）场景未做全量地址验证，两套策略都
-//! 只封堵 IP 字面量通路。
+//! 三层边界并存：入口按协议白名单 + IP 字面量判定；重定向每跳复检同一策略；
+//! DNS 解析结果逐 IP 过策略（挂在 reqwest 客户端上，见 [`PolicyDnsResolver`]）——
+//! 域名解析到内网地址与 DNS rebinding 均被拦截，连接只建立到已校验放行的 IP。
+
+use std::net::{SocketAddr, ToSocketAddrs};
+use std::sync::Arc;
 
 use reqwest::Url;
 
@@ -115,6 +117,60 @@ fn redirect_allowed(hops: usize, url: &str, check: fn(&str) -> Result<Url, Strin
     hops < MAX_REDIRECTS && check(url).is_ok()
 }
 
+/// 按策略过滤解析结果：任一 IP 被策略拒绝即整体拒绝（fail-closed，不做部分放行——
+/// 混合结果意味着该域名的地址可信度已不可判），空结果同样拒绝。
+fn filter_resolved_addrs(addrs: &[SocketAddr], policy: HostPolicy) -> Result<Vec<SocketAddr>, String> {
+    if addrs.is_empty() {
+        return Err("域名解析结果为空".to_string());
+    }
+    if addrs.iter().map(|a| a.ip()).any(|ip| blocked_addr(ip, policy)) {
+        return Err(reject_message(policy));
+    }
+    Ok(addrs.to_vec())
+}
+
+/// 同步解析 + 过滤（`getaddrinfo` 是阻塞调用，异步路径须经 `spawn_blocking` 调它）。
+/// host 传 IP 字面量时不会发起真实解析，直接进入过滤。
+fn resolve_and_filter(host: &str, policy: HostPolicy) -> Result<Vec<SocketAddr>, String> {
+    let addrs = (host, 0)
+        .to_socket_addrs()
+        .map_err(|e| format!("域名解析失败：{e}"))?
+        .collect::<Vec<_>>();
+    filter_resolved_addrs(&addrs, policy)
+}
+
+/// 按策略做 DNS 边界校验的 reqwest 解析器：解析结果逐 IP 过策略，任一被拒即拒绝建连。
+/// 挂在客户端上后，每个连接目标（含重定向跳到的新域名）都先解析、后校验、再连接，
+/// 校验与连接使用同一次解析结果——不存在「校验后二次解析」的 rebinding 窗口。
+#[derive(Clone, Copy)]
+pub(crate) struct PolicyDnsResolver {
+    policy: HostPolicy,
+}
+
+impl reqwest::dns::Resolve for PolicyDnsResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let policy = self.policy;
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            // 端口写 0 即可：连接端口由 hyper 按 URL 覆盖，这里只负责地址合法性。
+            let addrs = tokio::task::spawn_blocking(move || resolve_and_filter(&host, policy))
+                .await
+                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { format!("解析任务失败：{e}").into() })??;
+            Ok(Box::new(addrs.into_iter()) as _)
+        })
+    }
+}
+
+/// 公网策略的 DNS 解析器（`fetch_web` / 插件 `http_request` 客户端挂载）。
+pub(crate) fn public_dns_resolver() -> Arc<PolicyDnsResolver> {
+    Arc::new(PolicyDnsResolver { policy: HostPolicy::PublicOnly })
+}
+
+/// 本机/局域网策略的 DNS 解析器（SearXNG 等自建服务客户端挂载）。
+pub(crate) fn local_service_dns_resolver() -> Arc<PolicyDnsResolver> {
+    Arc::new(PolicyDnsResolver { policy: HostPolicy::LocalService })
+}
+
 #[cfg(test)]
 mod net_guard_tests {
     use super::*;
@@ -205,5 +261,40 @@ mod net_guard_tests {
             "http://169.254.169.254/latest/meta-data",
             ensure_local_service_http_url
         ));
+    }
+
+    /// 解析结果过滤：任一 IP 被策略拒绝即整体拒绝；LocalService 放行回环/私网、拒元数据。
+    #[test]
+    fn resolved_addrs_are_filtered_by_policy() {
+        fn addr(ip: &str) -> SocketAddr {
+            SocketAddr::new(ip.parse().unwrap(), 80)
+        }
+        assert!(filter_resolved_addrs(&[addr("93.184.216.34")], HostPolicy::PublicOnly).is_ok());
+        for bad in ["127.0.0.1", "10.0.0.5", "192.168.1.9", "169.254.169.254", "::1", "::ffff:10.0.0.5"] {
+            assert!(
+                filter_resolved_addrs(&[addr(bad)], HostPolicy::PublicOnly).is_err(),
+                "{bad} 应被公网策略拒绝"
+            );
+        }
+        assert!(
+            filter_resolved_addrs(&[addr("127.0.0.1"), addr("192.168.1.9")], HostPolicy::LocalService).is_ok()
+        );
+        assert!(filter_resolved_addrs(&[addr("169.254.169.254")], HostPolicy::LocalService).is_err());
+        // 混合公网 + 内网整体拒绝（fail-closed）；空结果拒绝
+        let mixed = [addr("93.184.216.34"), addr("10.0.0.5")];
+        assert!(filter_resolved_addrs(&mixed, HostPolicy::PublicOnly).is_err());
+        assert!(filter_resolved_addrs(&[], HostPolicy::PublicOnly).is_err());
+    }
+
+    /// 解析 + 过滤直测（IP 字面量不发起真实 DNS）：公网策略拒内网解析结果，本机策略放行回环/私网。
+    #[test]
+    fn literal_host_resolution_goes_through_policy() {
+        assert!(resolve_and_filter("127.0.0.1", HostPolicy::PublicOnly).is_err());
+        assert!(resolve_and_filter("127.0.0.1", HostPolicy::LocalService).is_ok());
+        assert!(resolve_and_filter("192.168.1.9", HostPolicy::LocalService).is_ok());
+        assert!(resolve_and_filter("192.168.1.9", HostPolicy::PublicOnly).is_err());
+        assert!(resolve_and_filter("169.254.169.254", HostPolicy::LocalService).is_err());
+        // 注：不测「域名不存在」的解析失败路径——结果取决于环境 DNS（劫持型解析器会给
+        // 任意域名返回地址），该路径的 fail-closed 行为由 filter_resolved_addrs 纯函数覆盖。
     }
 }

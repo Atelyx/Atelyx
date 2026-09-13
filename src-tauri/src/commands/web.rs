@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use reqwest::header::{ACCEPT, USER_AGENT};
 use serde::{Deserialize, Serialize};
 
-use crate::net_guard::{ensure_public_http_url, redirect_policy};
+use crate::net_guard::{ensure_public_http_url, public_dns_resolver, redirect_policy};
 
 /// 抓取响应上限（字节）。防超大页面/二进制拖死请求，超出即截断。
 const MAX_RESPONSE_BYTES: usize = 1_000_000;
@@ -62,6 +62,7 @@ pub async fn fetch_web(url: String) -> Result<FetchedWebPage, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
         .redirect(redirect_policy(ensure_public_http_url))
+        .dns_resolver(public_dns_resolver())
         .build()
         .map_err(|e| format!("客户端初始化失败：{}", e))?;
     let resp = client
@@ -96,6 +97,7 @@ pub async fn http_request(req: HttpRequest) -> Result<HttpResponse, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
         .redirect(redirect_policy(ensure_public_http_url))
+        .dns_resolver(public_dns_resolver())
         .build()
         .map_err(|e| format!("客户端初始化失败：{}", e))?;
     let mut builder = client.request(method, url);
