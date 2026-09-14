@@ -496,7 +496,7 @@ fn sweep_plugin_residues_with_age(base: &Path, max_age_secs: u64) {
         let removed = if is_dir_link(&meta) {
             remove_link(&path)
         } else if meta.is_dir() {
-            fs::remove_dir_all(&path)
+            remove_plugin_tree(&path)
         } else {
             fs::remove_file(&path)
         };
@@ -1680,6 +1680,54 @@ fn is_dir_link(meta: &fs::Metadata) -> bool {
     meta.file_type().is_symlink()
 }
 
+/// 删除插件目录树：Windows 先递归清只读属性再删——`.git` 内部文件按 POSIX 444（只读）模式入库，
+/// SMB/NAS 服务器会把该模式映射成 Windows 只读位，`remove_dir_all` 遇到即报「拒绝访问」
+/// （本地 NTFS 不映射、复现不出）。清只读只动只读位、不动 ACL；目录链接（junction/符号链接）
+/// 不递归——由调用方走 remove_link_only 单独处理。
+fn remove_plugin_tree(path: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    clear_readonly_recursive(path);
+    fs::remove_dir_all(path)
+}
+
+#[cfg(windows)]
+fn clear_readonly_recursive(path: &Path) {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::fs::MetadataExt;
+
+    // SetFileAttributesW 清掉只读位（保留其余属性）；std 的 Permissions::from_mode 在
+    // Windows stable 不可用（windows_permissions_ext 不稳定），故直接走 winapi。
+    fn set_not_readonly(p: &Path) {
+        use winapi::um::fileapi::{GetFileAttributesW, SetFileAttributesW};
+        use winapi::um::winnt::FILE_ATTRIBUTE_READONLY;
+        let wide: Vec<u16> = p.as_os_str().encode_wide().chain(Some(0)).collect();
+        let attrs = unsafe { GetFileAttributesW(wide.as_ptr()) };
+        if attrs != u32::MAX && attrs & FILE_ATTRIBUTE_READONLY != 0 {
+            unsafe { SetFileAttributesW(wide.as_ptr(), attrs & !FILE_ATTRIBUTE_READONLY) };
+        }
+    }
+
+    fn walk(p: &Path) {
+        if let Ok(meta) = fs::symlink_metadata(p) {
+            if meta.file_attributes() & 0x1 != 0 {
+                // FILE_ATTRIBUTE_READONLY
+                set_not_readonly(p);
+            }
+            if meta.is_dir() {
+                // 不递归进 reparse point：本地来源卸载的 junction 目标不应被清属性/遍历
+                if meta.file_attributes() & 0x400 == 0 {
+                    if let Ok(rd) = fs::read_dir(p) {
+                        for entry in rd.flatten() {
+                            walk(&entry.path());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    walk(path);
+}
+
 /// 仅删除目录链接（junction/符号链接），绝不触碰链接目标；真实目录（状态与目录不一致兜底）整删。
 /// 显式先判链接再删，把「本地来源卸载不误删源目录」从依赖 std 行为变为代码保证。
 /// 错误文案不加「卸载失败：」前缀——调用方（卸载事务）会统一包一层，避免双重前缀。
@@ -1688,7 +1736,7 @@ fn remove_link_only(dir: &Path) -> Result<(), String> {
     if is_dir_link(&meta) {
         remove_link(dir).map_err(|e| e.to_string())
     } else {
-        fs::remove_dir_all(dir).map_err(|e| e.to_string())
+        remove_plugin_tree(dir).map_err(|e| e.to_string())
     }
 }
 
@@ -1743,7 +1791,13 @@ pub fn plugin_uninstall(
             // 副本无本机记录与启用状态，先隔离再删除（删除失败由残留清扫兜底），不动记录行。
             let isolated = dir.with_file_name(residue_name("rm", ""));
             fs::rename(dir, &isolated).map_err(|e| format!("卸载失败：{e}"))?;
-            fs::remove_dir_all(&isolated).map_err(|e| format!("卸载失败：{e}"))?;
+            // 隔离后副本已从扫描中消失，删除失败不报「卸载失败」——留残留由清扫兜底
+            if let Err(e) = remove_plugin_tree(&isolated) {
+                eprintln!(
+                    "[plugin] 删除同步副本隔离目录 {} 失败：{e}；残留由清扫兜底",
+                    isolated.display()
+                );
+            }
             return Ok(());
         }
         UninstallTarget::RecordedRow => {}
@@ -1812,7 +1866,7 @@ pub fn plugin_uninstall(
     }
     if let Some(path) = previous_path {
         if path.exists() {
-            if let Err(e) = fs::remove_dir_all(&path) {
+            if let Err(e) = remove_plugin_tree(&path) {
                 let residue = path.with_file_name(residue_name("rm", ""));
                 if let Err(rename_error) = fs::rename(&path, &residue) {
                     eprintln!(
@@ -1853,11 +1907,18 @@ fn uninstall_dir_transaction(
         }
         return Err(e);
     }
-    // 本地来源只删链接（源目录不动）；其余整目录删除。删除失败不改变已提交的卸载结论。
-    if kind == PluginSourceKind::Local {
-        remove_link_only(&isolated).map_err(|e| format!("卸载失败：{e}"))?;
+    // 本地来源只删链接（源目录不动）；其余整目录删除。目录已隔离、状态已提交，删除失败
+    // 不改变卸载结论——留 `.rm-*` 由残留清扫兜底（防「已卸载却报卸载失败」的误报）。
+    let delete_result = if kind == PluginSourceKind::Local {
+        remove_link_only(&isolated)
     } else {
-        fs::remove_dir_all(&isolated).map_err(|e| format!("卸载失败：{e}"))?;
+        remove_plugin_tree(&isolated).map_err(|e| e.to_string())
+    };
+    if let Err(e) = delete_result {
+        eprintln!(
+            "[plugin] 删除卸载隔离目录 {} 失败：{e}；残留由清扫兜底",
+            isolated.display()
+        );
     }
     Ok(())
 }
@@ -2571,6 +2632,27 @@ mod tests {
         assert!(!plugin_id_valid("com/example"));
         assert!(!plugin_id_valid(".."));
         assert!(!plugin_id_valid("COM.Example"));
+    }
+
+    /// 守护 remove_plugin_tree 在只读文件树上能整树删除（POSIX 444 → SMB 映射的只读位在
+    /// NAS 上会挡 `remove_dir_all`，本地 NTFS 不会——此处只守卫助手行为，NAS 场景已实机复现）。
+    #[cfg(windows)]
+    #[test]
+    fn remove_plugin_tree_clears_readonly_before_delete() {
+        use std::os::windows::ffi::OsStrExt;
+        use winapi::um::fileapi::{GetFileAttributesW, SetFileAttributesW};
+        use winapi::um::winnt::FILE_ATTRIBUTE_READONLY;
+        let dir = std::env::temp_dir().join(format!("atelyx-plugin-rm-ro-{}", nanoid::nanoid!()));
+        std::fs::create_dir_all(dir.join("sub/.git")).unwrap();
+        let ro = dir.join("sub/.git/ro.txt");
+        std::fs::write(&ro, "x").unwrap();
+        // 置只读位（SetFileAttributesW 在原属性上加 READONLY）
+        let wide: Vec<u16> = ro.as_os_str().encode_wide().chain(Some(0)).collect();
+        let attrs = unsafe { GetFileAttributesW(wide.as_ptr()) };
+        assert_ne!(attrs, u32::MAX);
+        unsafe { SetFileAttributesW(wide.as_ptr(), attrs | FILE_ATTRIBUTE_READONLY) };
+        remove_plugin_tree(&dir).unwrap();
+        assert!(!dir.exists());
     }
 
     /// 回退目录命名：点开头不参与插件扫描，且独立于事务残留命名空间（防超龄清扫误删活回退点）。
