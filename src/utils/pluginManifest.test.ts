@@ -13,6 +13,7 @@ import {
   pluginTypeList,
   validatePluginManifest,
 } from "./pluginManifest";
+import { PLUGIN_HOST_API_VERSION } from "@/constants/plugins";
 
 const validManifest = (): Record<string, unknown> => ({
   name: "com.example.todo",
@@ -68,14 +69,14 @@ describe("pluginCompatibleWithHost", () => {
   });
   it("契约版本：缺省视为当前版本，显式不匹配则拒绝并给出所需版本", () => {
     expect(pluginCompatibleWithHost(base, "0.4.0", "windows-x64").ok).toBe(true);
-    expect(pluginCompatibleWithHost({ ...base, hostApiVersion: 1 }, "0.4.0", "windows-x64").ok).toBe(true);
-    const mismatch = pluginCompatibleWithHost({ ...base, hostApiVersion: 2 }, "0.4.0", "windows-x64");
+    expect(pluginCompatibleWithHost({ ...base, hostApiVersion: PLUGIN_HOST_API_VERSION }, "0.4.0", "windows-x64").ok).toBe(true);
+    const mismatch = pluginCompatibleWithHost({ ...base, hostApiVersion: PLUGIN_HOST_API_VERSION + 1 }, "0.4.0", "windows-x64");
     expect(mismatch.ok).toBe(false);
-    if (!mismatch.ok) expect(mismatch.reason).toContain("2");
+    if (!mismatch.ok) expect(mismatch.reason).toContain(String(PLUGIN_HOST_API_VERSION + 1));
   });
   it("宿主版本未知（null）时跳过版本范围判断，契约版本仍校验", () => {
     expect(pluginCompatibleWithHost({ ...base, atelyxVersionMin: "9.9.9" }, null, "windows-x64").ok).toBe(true);
-    expect(pluginCompatibleWithHost({ ...base, hostApiVersion: 2 }, null, "windows-x64").ok).toBe(false);
+    expect(pluginCompatibleWithHost({ ...base, hostApiVersion: PLUGIN_HOST_API_VERSION + 1 }, null, "windows-x64").ok).toBe(false);
   });
   it("hostApiVersion 非数字（字符串/对象）在清单校验即拒绝", () => {
     for (const bad of ["1", null, { major: 1 }, [1]]) {
