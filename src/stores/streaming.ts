@@ -13,6 +13,8 @@
  * 类型全部用中性词汇（LlmMessage/ToolSchema），工具执行走 services/ai/tools 注册表（runAgentTools）。
  */
 import { streamChat, STREAM_IDLE_TIMEOUT_MS } from "@/services/ai/client";
+import { isContextOverflowError } from "@/services/ai/errors";
+import { planOverflowRetry } from "@/utils/agentHistory";
 import { autoTitle, AUTO_NAMING_DELAY_MS } from "@/services/ai/autoTitle";
 import { summarizeAgentTool, summarizePartialAgentTool } from "@/services/ai/tools";
 import { PENDING_RUN_ID_PREFIX } from "@/constants/chat";
@@ -195,6 +197,8 @@ export async function runStreamExchange(
   const hasTools = !!options.tools?.length;
   let truncated = false;
   let promoteNarration = false;
+  // 上下文溢出只折叠重试一次：折叠后仍溢出说明单条结果之外还有别处过长，再重试原样必撞
+  let overflowRetried = false;
   // 轮序号：参数分片缺 id 时合成 id 的唯一性来源（跨轮不撞）
   let roundIndex = 0;
   try {
@@ -203,6 +207,8 @@ export async function runStreamExchange(
       let toolCalls: LlmToolCall[] = [];
       let stopReason: LlmFinishReason | undefined;
       let roundError: Error | null = null;
+      // 本轮是否已产出任何增量：溢出重试只在「请求被整轮拒绝」时进行（已产出再重试会重复输出）
+      let roundProducedOutput = false;
       // 请求发起即开始空闲计时（首个 token 前的等待也受超时保护）
       resetIdle();
       await streamChat(
@@ -219,6 +225,7 @@ export async function runStreamExchange(
         },
         {
           onDelta: (delta) => {
+            roundProducedOutput = true;
             // 工具轮里正文是「叙述」（缓冲后 rAF 合并进 text 步，保留流式打字；最终回答轮由调用方
             // 在 onDone promoteNarration 时提升进 content）；无工具（单轮模式）的正文实时进 content。
             if (hasTools) pendingNarration += delta;
@@ -227,11 +234,13 @@ export async function runStreamExchange(
             resetIdle();
           },
           onReasoningDelta: (text) => {
+            roundProducedOutput = true;
             pendingReasoning += text;
             resetIdle();
             scheduleApply();
           },
           onToolCalls: (tc) => {
+            roundProducedOutput = true;
             toolCalls = tc;
             // 完整调用已到达：把「生成中」行固化为正式 running 行进 allRuns（去重）——
             // 进入执行轮时 runningRuns 同 id 原位替换；截断（max-tokens）路径无执行轮，
@@ -261,6 +270,7 @@ export async function runStreamExchange(
           },
           // 参数增量：喂空闲超时看门狗（长参数生成不误判挂起）+ 累积进当轮槽位（随帧刷「生成中」行）
           onToolCallDelta: (delta) => {
+            roundProducedOutput = true;
             resetIdle();
             if (!hasTools) return;
             const slot = pendingArgs.get(delta.index);
@@ -293,6 +303,16 @@ export async function runStreamExchange(
       clearIdle();
 
       if (roundError) {
+        // 上下文溢出且本轮未产出任何内容：先折叠超长的历史工具结果再试一次（轻量先手，不删消息）。
+        // 折叠无变化（没有超长工具结果）或已重试过 → 交回调用方按溢出提示收尾。
+        if (!overflowRetried && !roundProducedOutput && isContextOverflowError(roundError)) {
+          const plan = planOverflowRetry(apiMessages);
+          if (plan.changed) {
+            overflowRetried = true;
+            apiMessages = plan.messages;
+            continue;
+          }
+        }
         cancelRaf();
         clearIdle();
         options.onError(roundError);

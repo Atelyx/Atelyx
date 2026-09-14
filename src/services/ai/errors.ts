@@ -3,7 +3,8 @@
  *
  * - `LlmError`：AI 请求错误载体，附 `status` 与 `retryAfterMs`（重试策略优先尊重服务端 retry-after）。
  * - 错误判定只有两个出口：传输级可重试（`isTransportRetryable` → `isRetryableError`，供重试策略）
- *   与上下文溢出（`isContextOverflow` → `withOverflowHint` 追加友好提示）；
+ *   与上下文溢出（`isContextOverflowError` → `withOverflowHint` 追加友好提示；调用方据此先折叠超长
+ *   历史工具结果重试一次）；
  *   其余错误（配额耗尽/鉴权失败/参数错误/其余未知）不区分类别，统一不重试、原始文案直出。
  * - 配额/鉴权等终态特征在 `isTransportRetryable` 内优先否决，防止 HTTP 429/5xx 状态兜底误重试。
  *
@@ -92,8 +93,8 @@ export function isRetryableError(err: Error): boolean {
   return isTransportRetryable(err.message);
 }
 
-/** 该错误是否表示上下文溢出（超长请求不再裸报错，降级为友好提示）。 */
-function isContextOverflow(err: Error): boolean {
+/** 该错误是否表示上下文溢出（超长请求不再裸报错，降级为友好提示；调用方据此先折叠超长工具结果重试）。 */
+export function isContextOverflowError(err: Error): boolean {
   return CONTEXT_OVERFLOW_PATTERNS.some((re) => re.test(err.message));
 }
 
@@ -102,7 +103,7 @@ function isContextOverflow(err: Error): boolean {
  * 仅命中溢出判定才包装一次，其余原样返回。
  */
 export function withOverflowHint(err: Error): Error {
-  if (isContextOverflow(err)) {
+  if (isContextOverflowError(err)) {
     return new Error(`${err.message}（${OVERFLOW_HINT}）`);
   }
   return err;

@@ -12,6 +12,7 @@
  */
 import type {
   Attachment,
+  AgentStep,
   Role,
   ReasoningEffort,
   ToolSchema,
@@ -21,6 +22,7 @@ import type {
   LlmToolCall,
   LlmToolCallDelta,
 } from "@/types";
+import { expandAgentStepsToLlmMessages } from "@/utils/agentHistory";
 import { withOverflowHint, toLlmError, isRetryableError, LlmError } from "./errors";
 import { computeRetryDelay, GIVE_UP_RETRY_MS, shouldRetry, sleep } from "./retry";
 
@@ -127,11 +129,19 @@ function messagesToWire(
  * 将内部消息（画布 `Message[]` / 对话面板 `EditorChatMessage[]`）转为中性 `LlmMessage[]`。
  * 纯数据转换，不做 I/O。文本/搜索引用在 send 时已拼进 user message content；图片附件 → images，文件附件 → fileTexts。
  * 附件内容不随消息内嵌，调用方须先按引用补齐（见各 store 的附件补齐步骤）。
+ *
+ * assistant 带 `steps`（Agent 工具步进）时展开为线上工具序列（`tool_calls` + `tool` 结果），
+ * 使上一轮读到的内容进入后续请求历史——工具消息只在展开时构造，调用方不持有 tool 消息。
  */
 export function toLlmMessages(
-  messages: Array<{ role: Role; content: string; attachments?: Attachment[] }>,
+  messages: Array<{
+    role: Role;
+    content: string;
+    attachments?: Attachment[];
+    steps?: AgentStep[];
+  }>,
 ): LlmMessage[] {
-  return messages.map((m): LlmMessage => {
+  return messages.flatMap((m): LlmMessage[] => {
     if (m.role === "user") {
       if (m.attachments?.length) {
         const images: { url: string }[] = [];
@@ -143,17 +153,21 @@ export function toLlmMessages(
           if (a.kind === "image") images.push({ url: a.payload });
           else fileTexts.push(a.payload);
         }
-        return {
-          role: "user",
-          text: m.content,
-          ...(images.length ? { images } : {}),
-          ...(fileTexts.length ? { fileTexts } : {}),
-        };
+        return [
+          {
+            role: "user",
+            text: m.content,
+            ...(images.length ? { images } : {}),
+            ...(fileTexts.length ? { fileTexts } : {}),
+          },
+        ];
       }
-      return { role: "user", text: m.content };
+      return [{ role: "user", text: m.content }];
     }
-    // system / assistant（tool 由引擎直接构造；此处调用方只传 internal role）
-    return { role: m.role, text: m.content };
+    if (m.role === "assistant") {
+      return expandAgentStepsToLlmMessages(m.content, m.steps);
+    }
+    return [{ role: m.role, text: m.content }];
   });
 }
 

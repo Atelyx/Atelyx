@@ -37,6 +37,19 @@ export const LIST_DIR_MAX_ENTRIES = 200;
 /** 单轮内并行安全的工具调用最大在飞数（有界滚动池；1 = 全串行）。 */
 export const MAX_PARALLEL_TOOL_CALLS = 10;
 
+/** 折叠历史工具结果中段时保留的头部字符数（提供开头线索：路径、起始行）。 */
+export const TOOL_RESULT_PRUNE_HEAD_CHARS = 4096;
+
+/** 折叠历史工具结果中段时保留的尾部字符数（提供结尾线索：页脚、结论）。 */
+export const TOOL_RESULT_PRUNE_TAIL_CHARS = 1024;
+
+/** 历史工具结果超过此字符数才折叠中段（随请求重发时用）。
+ * 不变式：头 + 尾 ≤ 阈值，否则折叠后不会变小。 */
+export const TOOL_RESULT_PRUNE_THRESHOLD_CHARS = 8192;
+
+/** 替换被折叠中段的固定标记（模型据此知道内容不完整，可按需重新读取）。 */
+export const TOOL_RESULT_PRUNE_MARKER = "\n\n[... tool result middle pruned ...]\n\n";
+
 /** 相对路径是否含隐藏段：任一段以 `.` 开头（如 `.atelyx/x`、`a/.git/y`、根级 `.gitignore`）。
  * AI 工具完全屏蔽前面带 `.` 的目录/文件，此判定供各工具 validate 兜底（Rust 发现层另有过滤）。
  * 排除 `..`（父目录段）——它由路径穿越校验（safe_join「含越界段」）拒绝，报错语义更准确。 */
@@ -89,7 +102,8 @@ export const DEFAULT_AGENT_TOOLS = AGENT_TOOLS_META.map((t) => t.id);
 /**
  * 系统提示词引导（工具含 read_file 时追加，随每条请求进 system 消息）：
  * @引用 的笔记只带文件路径，模型需用 read_file 按路径读取正文，而不是猜测内容；
- * 目录引用（/ 结尾）先 list_dir 列内容再按需读取。
+ * 目录引用（/ 结尾）先 list_dir 列内容再按需读取。已读取过的文件内容在对话历史中，
+ * 明示「无需重读」以免模型重复读取同一文件。
  */
 export const FILE_REFERENCE_PROMPT =
-  "以 @ 前缀引用的文件是用户明确指定的笔记，其相对仓库根路径列在消息开头「引用文件」列表中。需要其内容时用 read_file 工具读取；在读取之前不要声称已查看过该文件。以 / 结尾的引用是目录：先用 list_dir 工具列出其中的内容（子目录会给出子项数），再按需 read_file；glob 用于按模式检索文件。以 . 开头的目录/文件（如 .git、.atelyx）不可被 AI 工具访问。";
+  "以 @ 前缀引用的文件是用户明确指定的笔记，其相对仓库根路径列在消息开头「引用文件」列表中。需要其内容时用 read_file 工具读取；在读取之前不要声称已查看过该文件。以 / 结尾的引用是目录：先用 list_dir 工具列出其中的内容（子目录会给出子项数），再按需 read_file；glob 用于按模式检索文件。以 . 开头的目录/文件（如 .git、.atelyx）不可被 AI 工具访问。已读取过的文件内容在对话历史中，无需重复读取；仅在需要确认内容是否变更时重读。";

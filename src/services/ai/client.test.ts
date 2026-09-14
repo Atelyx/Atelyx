@@ -183,3 +183,50 @@ describe("附件内容缺失的降级（一条读失败不拖垮整轮）", () =
     expect(resolved).toBe(messages);
   });
 });
+
+describe("toLlmMessages：assistant 的 Agent 工具步展开为线上工具消息", () => {
+  /** 构造画布消息（用完整 Message 形状，覆盖 id/createdAt/steps）。 */
+  function msg(over: Partial<Message> & Pick<Message, "role" | "content">): Message {
+    return { id: "m", createdAt: 0, ...over } as Message;
+  }
+
+  it("带 steps 的 assistant 展开为 tool_calls + tool 结果（上一轮读到的内容进入后续请求）", () => {
+    const llm = toLlmMessages([
+      msg({ id: "u1", role: "user", content: "读一下笔记" }),
+      msg({
+        id: "a1",
+        role: "assistant",
+        content: "读取完成",
+        steps: [
+          {
+            kind: "tool",
+            run: {
+              id: "c1",
+              name: "read_file",
+              argsSummary: "x",
+              status: "done",
+              args: '{"path":"a.md"}',
+              result: "正文",
+            },
+          },
+        ],
+      }),
+    ]);
+    expect(llm).toEqual([
+      { role: "user", text: "读一下笔记" },
+      {
+        role: "assistant",
+        text: null,
+        toolCalls: [{ id: "c1", name: "read_file", arguments: '{"path":"a.md"}' }],
+      },
+      { role: "tool", text: "正文", toolCallId: "c1" },
+      { role: "assistant", text: "读取完成" },
+    ]);
+  });
+
+  it("无 steps 的 assistant 维持单条文本消息", () => {
+    expect(toLlmMessages([msg({ role: "assistant", content: "你好" })])).toEqual([
+      { role: "assistant", text: "你好" },
+    ]);
+  });
+});
