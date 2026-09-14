@@ -4,9 +4,7 @@
  */
 import { useEffect, useRef } from "react";
 import { X, RefreshCw, Terminal } from "lucide-react";
-import type { InstalledPlugin } from "@/types";
-import type { PluginAuditEntry } from "@/services/cordis/audit";
-import type { PluginCommandContribution } from "@/services/cordis/ui";
+import type { InstalledPlugin, PluginAuditEntry, PluginCommandContribution } from "@/types";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 import { PLUGIN_MOUNT_PHASE_LABELS } from "@/constants/plugins";
 

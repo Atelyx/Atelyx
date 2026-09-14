@@ -10,7 +10,7 @@ import type { SlotDeclaration } from "@/constants/slots";
 import { SLOT_DECLARATIONS } from "@/constants/slots";
 import { createKernel, type Kernel } from "./kernel";
 import { mountPlugin, unmountAll } from "./loader";
-import { resolveViewKind, viewKinds, listSlot, registeredSlots } from "./slots";
+import { resolveViewKind, viewKinds, listSlot, registeredSlots, onSlotChange } from "./slots";
 import { getPluginTableView } from "./ui";
 
 let kernel: Kernel | null = null;
@@ -140,5 +140,84 @@ describe("ctx.slots", () => {
       expect(result.message).toContain("toolbar/note/right");
     }
     expect(listSlot("toolbar/notes/right")).toEqual([]);
+  });
+});
+
+describe("载荷与参数契约", () => {
+  it("载荷字段值类型不符即拒绝：数字 label / 非函数 component / 非函数 onClick", async () => {
+    const cases: { name: string; register: (ctx: Context) => void; expect: string }[] = [
+      {
+        name: "数字 label",
+        register: (ctx) => ctx.slots.registerView({ kind: "com.test.t", label: 1 as never, component: () => null }),
+        expect: "label",
+      },
+      {
+        name: "非函数 component",
+        register: (ctx) => ctx.slots.registerView({ kind: "com.test.t", label: "x", component: "nope" as never }),
+        expect: "component",
+      },
+      {
+        name: "非函数 onClick",
+        register: (ctx) => ctx.slots.registerMenu({ target: "canvas", label: "x", onClick: "nope" as never }),
+        expect: "onClick",
+      },
+    ];
+    for (const c of cases) {
+      kernel = createKernel();
+      const result = await mountPlugin(kernel, { id: "com.test.ui", apply: c.register });
+      expect(result.ok, c.name).toBe(false);
+      if (!result.ok) expect(result.message, c.name).toContain("类型不符");
+      expect(viewKinds(), c.name).toEqual([]);
+      await unmountAll(kernel);
+      kernel = null;
+    }
+  });
+
+  it("priority 非数字即拒绝（NaN 含内）", async () => {
+    for (const priority of ["5" as never, Number.NaN as never]) {
+      kernel = createKernel();
+      const result = await mountPlugin(kernel, {
+        id: "com.test.ui",
+        apply: (ctx) => ctx.slots.registerMenu({ target: "canvas", label: "x", onClick: () => undefined, priority }),
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.message).toContain("priority 须为数字");
+      await unmountAll(kernel);
+      kernel = null;
+    }
+  });
+});
+
+describe("槽注册变更通知", () => {
+  it("成功注册通知一次、失败不通知、撤销命中通知一次", async () => {
+    kernel = createKernel();
+    let notified = 0;
+    const unsubscribe = onSlotChange(() => {
+      notified += 1;
+    });
+    const apply = (ctx: Context) => {
+      ctx.slots.registerUi({ slot: "toolbar/files", component: () => null });
+    };
+    await mountPlugin(kernel, { id: "com.test.ui", apply });
+    expect(notified).toBe(1);
+
+    await unmountAll(kernel);
+    kernel = null;
+    expect(notified).toBe(2);
+    unsubscribe();
+  });
+
+  it("注册失败（未声明槽位）不触发通知", async () => {
+    kernel = createKernel();
+    let notified = 0;
+    const unsubscribe = onSlotChange(() => {
+      notified += 1;
+    });
+    await mountPlugin(kernel, {
+      id: "com.test.ui",
+      apply: (ctx) => ctx.slots.registerUi({ slot: "toolbar/none", component: () => null }),
+    });
+    expect(notified).toBe(0);
+    unsubscribe();
   });
 });

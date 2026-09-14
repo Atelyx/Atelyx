@@ -19,26 +19,9 @@ import {
   PLUGIN_SERVICE_SENSITIVE,
 } from "@/constants/pluginServices";
 import type { HttpRequestInput } from "@/services/http";
+import type { PluginAuditCall, PluginAuditEntry } from "@/types";
 import { pluginIdOf } from "./loader";
 import type { ShellExecOptions } from "./types";
-
-/** 一次高危服务调用的脱敏摘要（只记形状与规模，不含参数原文）。 */
-export interface PluginAuditCall {
-  service: string;
-  method: string;
-  summary: string;
-}
-
-/** 单个插件的审计结果。 */
-export interface PluginAuditEntry {
-  pluginId: string;
-  /** 实际读过的 Atelyx ctx 服务名（访问序去重）。 */
-  services: string[];
-  /** 实际订阅过的事件名。 */
-  events: string[];
-  /** 高危服务调用的脱敏摘要（去重，上限 MAX_AUDIT_CALLS）。 */
-  calls: PluginAuditCall[];
-}
 
 /** 纳入审计的 Atelyx 服务面（与展示标签同一清单，避免两处枚举漂移；新增服务面改 constants 一处）。 */
 const ATELYX_SERVICES = new Set(PLUGIN_SERVICE_NAMES);

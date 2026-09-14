@@ -15,7 +15,7 @@
 import { create } from "zustand";
 import type { ComponentType } from "react";
 import type { InstalledPlugin, PluginIndexEntry, PluginManifest, PluginPackageJson, PluginScope } from "@/types";
-import { errText, type PluginFiberPhase, type PluginMountFailure } from "@/types";
+import { errText, type PluginAuditEntry, type PluginCommandContribution, type PluginFiberPhase, type PluginMountFailure } from "@/types";
 import type { AppUiState } from "@/types";
 import {
   pluginInstall,
@@ -50,12 +50,11 @@ import {
   setSettingsAccess,
 } from "@/services/cordis/access";
 import { emitPluginEvent } from "@/services/cordis/events";
-import { auditSnapshot, type PluginAuditEntry } from "@/services/cordis/audit";
+import { auditSnapshot } from "@/services/cordis/audit";
 import { PLUGIN_SERVICE_LABELS, PLUGIN_SERVICE_SENSITIVE } from "@/constants/pluginServices";
 import type { PluginRow } from "@/services/plugins";
 import type {
   PluginAppPageRegistration,
-  PluginCommandContribution,
   PluginSettingRegistration,
   PluginTableViewRegistration,
   ThemeSettingRegistration,

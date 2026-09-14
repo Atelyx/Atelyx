@@ -45,13 +45,8 @@ export interface PluginCommandRegistration {
   shortcut?: string;
 }
 
-/** 插件命令贡献（管理 UI「运行命令」入口：全局 id = `<pluginId>:<命令 id>`）。 */
-export interface PluginCommandContribution {
-  globalId: string;
-  pluginId: string;
-  id: string;
-  label: string;
-}
+/** 插件命令贡献（管理 UI「运行命令」入口：全局 id = `<pluginId>:<命令 id>`）；共享展示契约在 `types/plugin.ts`。 */
+export type { PluginCommandContribution } from "@/types";
 /** 插件表格视图注册（表格编辑器内视图：工具条视图列表合并 + 内容区分派，见 TableEditor）。 */
 export interface PluginTableViewRegistration {
   pluginId: string;

@@ -9,9 +9,11 @@
  * ctx 服务），其领域依赖以显式清单登记——新增依赖会让本测试失败，须在此登记理由。
  * 第二跳同样登记：pluginStore 静态 import `components/plugins/cordis/builtins.tsx`（随应用分发的
  * 插件实现注册表），后者按插件 apply 闭包直接消费领域 store —— 那份依赖单独成清单，同样以测试锁死。
+ * 另守组件/服务两侧边界：components 不得 import services（例外 = 槽位宿主/通知宿主与
+ * builtins 接线跳，显式登记），services 不得 import components（无例外）。
  */
 import { readdir, readFile, stat } from "node:fs/promises";
-import { dirname, relative, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const srcRoot = resolve(process.cwd(), "src");
@@ -65,6 +67,15 @@ const BUILTINS_DOMAIN_DEPS = [
   "calendarStore",
 ];
 
+/** 组件 → 服务例外（登记清单）：槽位宿主/菜单宿主/通知宿主直接消费注册表与运行时（类型与读取调用，
+ *  不含状态管理与渲染混层）；builtins.tsx 是宿主接线的第二跳（随应用分发插件的实现注册表）。 */
+const COMPONENT_TO_SERVICE_EXCEPTIONS = [
+  "components/common/NotificationHost.tsx",
+  "components/plugins/MenuSlot.tsx",
+  "components/plugins/SlotHost.tsx",
+  "components/plugins/cordis/builtins.tsx",
+];
+
 describe("内核路径导入守卫", () => {
   it("内核路径不 import 领域 store", async () => {
     const files = (await Promise.all(KERNEL_PATH.map((entry) => sourcesUnder(resolve(srcRoot, entry))))).flat();
@@ -85,6 +96,35 @@ describe("内核路径导入守卫", () => {
       for (const specifier of await importSpecifiers(file)) {
         if (specifier.startsWith("@/stores/") || specifier.startsWith("../stores/")) {
           offenders.push(`${relative(srcRoot, file)} → ${specifier}`);
+        }
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it("服务层不 import 组件（分层：服务不依赖组件）", async () => {
+    const files = await sourcesUnder(resolve(srcRoot, "services"));
+    const offenders: string[] = [];
+    for (const file of files) {
+      for (const target of await resolvedImports(file)) {
+        if (isUnder(target, "components")) {
+          offenders.push(`${relative(srcRoot, file)} → ${relative(srcRoot, target)}`);
+        }
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it("组件不 import 服务（分层例外仅限已登记清单）", async () => {
+    const files = await sourcesUnder(resolve(srcRoot, "components"));
+    expect(files.length).toBeGreaterThan(0);
+    const offenders: string[] = [];
+    for (const file of files) {
+      const rel = relative(srcRoot, file).replaceAll("\\", "/");
+      if (COMPONENT_TO_SERVICE_EXCEPTIONS.includes(rel)) continue;
+      for (const target of await resolvedImports(file)) {
+        if (isUnder(target, "services")) {
+          offenders.push(`${rel} → ${relative(srcRoot, target)}`);
         }
       }
     }
@@ -147,6 +187,22 @@ async function importSpecifiers(file: string): Promise<string[]> {
     for (const match of source.matchAll(pattern)) out.push(match[1]!);
   }
   return out;
+}
+
+/** 该文件全部可解析的本仓库导入目标（去扩展名绝对路径；裸包名/模板串返回时跳过）。 */
+async function resolvedImports(file: string): Promise<string[]> {
+  const out: string[] = [];
+  for (const specifier of await importSpecifiers(file)) {
+    const target = resolveSpecifier(file, specifier);
+    if (target) out.push(target);
+  }
+  return out;
+}
+
+/** 目标是否位于 srcRoot 下 `dir` 目录内（含以目录本身为目标的 barrel：`@/services`）。 */
+function isUnder(target: string, dir: string): boolean {
+  const rel = relative(resolve(srcRoot, dir), target);
+  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
 /** 说明符 → 去扩展名的绝对路径（非本仓库路径返回 null）。 */

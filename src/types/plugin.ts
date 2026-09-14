@@ -216,3 +216,29 @@ export interface PluginCanvasSnapshot {
   edges: PluginCanvasEdge[];
   selectedNodeId: string | null;
 }
+
+/** 一次高危服务调用的脱敏摘要（只记形状与规模，不含参数原文）。 */
+export interface PluginAuditCall {
+  service: string;
+  method: string;
+  summary: string;
+}
+
+/** 单个插件的审计结果（声明 vs 实际对照的「实际」侧；管理 UI 详情弹窗展示）。 */
+export interface PluginAuditEntry {
+  pluginId: string;
+  /** 实际读过的 Atelyx ctx 服务名（访问序去重）。 */
+  services: string[];
+  /** 实际订阅过的事件名。 */
+  events: string[];
+  /** 高危服务调用的脱敏摘要（去重，上限 MAX_AUDIT_CALLS）。 */
+  calls: PluginAuditCall[];
+}
+
+/** 插件命令贡献（管理 UI「运行命令」入口：全局 id = `<pluginId>:<命令 id>`）。 */
+export interface PluginCommandContribution {
+  globalId: string;
+  pluginId: string;
+  id: string;
+  label: string;
+}

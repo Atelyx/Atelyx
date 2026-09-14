@@ -120,7 +120,17 @@ function assertSlotDeclared(slot: string, cardinality: SlotCardinality, payload:
   assertSlotPayload(slot, decl, payload);
 }
 
-/** 载荷字段契约校验：缺必需字段 / 带未知字段即抛错（治「字段名拼错静默渲染空白」）。 */
+/** 载荷字段的值类型契约（按字段名约定）：槽位字段面小且稳定，无需在声明表逐槽展开。
+ *  `undefined` 不在此判（缺字段由 required 校验负责），只拦「字段给了但类型不符」。 */
+const PAYLOAD_FIELD_TYPES: Record<string, "string" | "function"> = {
+  label: "string",
+  component: "function",
+  render: "function",
+  onClick: "function",
+};
+
+/** 载荷字段契约校验：缺必需字段 / 带未知字段 / 值类型不符即抛错
+ *  （治「字段名拼错静默渲染空白」与「回调传错形态运行时才炸」）。 */
 function assertSlotPayload(slot: string, decl: SlotDeclaration, payload: unknown): void {
   if (typeof payload !== "object" || payload === null) {
     throw new Error(`槽位「${slot}」的载荷须为对象（应为 ${slotPayloadShape(decl)}）`);
@@ -137,6 +147,14 @@ function assertSlotPayload(slot: string, decl: SlotDeclaration, payload: unknown
   if (unknown.length > 0) {
     throw new Error(`槽位「${slot}」的载荷含未知字段：${unknown.join("、")}（应为 ${slotPayloadShape(decl)}）`);
   }
+  const wrongType = Object.keys(record).filter((key) => {
+    const expected = PAYLOAD_FIELD_TYPES[key];
+    if (!expected || record[key] === undefined) return false;
+    return expected === "string" ? typeof record[key] !== "string" : typeof record[key] !== "function";
+  });
+  if (wrongType.length > 0) {
+    throw new Error(`槽位「${slot}」的载荷字段类型不符：${wrongType.join("、")}（应为 ${slotPayloadShape(decl)}）`);
+  }
 }
 
 /** 注册任意槽贡献；返回撤销函数。默认 id = `<pluginId>:<slot>`。
@@ -149,6 +167,10 @@ export function registerSlotContrib(
   opts?: SlotRegisterOptions,
 ): () => void {
   const cardinality = opts?.cardinality ?? "single";
+  // priority 非有限数字会让排序比较不可预期（NaN 恒 false 的静默乱序），直接拒绝。
+  if (opts?.priority !== undefined && (typeof opts.priority !== "number" || Number.isNaN(opts.priority))) {
+    throw new Error(`槽位「${slot}」的 priority 须为数字`);
+  }
   assertSlotDeclared(slot, cardinality, payload);
   const base = opts?.id ?? `${pluginId}:${slot}`;
   let id = base;

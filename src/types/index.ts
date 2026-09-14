@@ -182,6 +182,9 @@ export {
   type PluginCanvasNode,
   type PluginCanvasEdge,
   type PluginCanvasSnapshot,
+  type PluginAuditCall,
+  type PluginAuditEntry,
+  type PluginCommandContribution,
 } from "./plugin";
 
 export type {
