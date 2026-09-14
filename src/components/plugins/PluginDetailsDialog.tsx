@@ -3,10 +3,10 @@
  * 纯 UI 组件：props 与回调通信；回退确认弹窗的状态机由父组件（PluginsSettingsTab）持有。
  */
 import { useEffect, useRef } from "react";
-import { X, RefreshCw, Terminal } from "lucide-react";
+import { Check, Circle, RefreshCw, Terminal, X } from "lucide-react";
 import type { InstalledPlugin, PluginAuditEntry, PluginCommandContribution } from "@/types";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
-import { PLUGIN_MOUNT_PHASE_LABELS } from "@/constants/plugins";
+import { PLUGIN_MOUNT_PHASE_LABELS, PLUGIN_MOUNT_PHASE_ORDER } from "@/constants/plugins";
 
 interface PluginDetailsDialogProps {
   plugin: InstalledPlugin;
@@ -42,6 +42,8 @@ export function PluginDetailsDialog({
   rollbackConfirmRef.current = rollbackConfirm;
   const pluginCommands = commands.filter((command) => command.pluginId === plugin.id);
   const declares = plugin.manifest.declares ?? [];
+  // 挂载失败阶段在六阶段顺序中的下标（progress 条：其前 = 已通过，其后 = 未到达）
+  const failIndex = plugin.failure ? PLUGIN_MOUNT_PHASE_ORDER.indexOf(plugin.failure.phase) : -1;
 
   useEffect(() => {
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -96,7 +98,34 @@ export function PluginDetailsDialog({
 
         {plugin.failure && (
           <div className="mb-4 rounded border p-3" style={{ borderColor: "rgba(248,113,113,0.45)" }}>
-            <div className="text-xs" style={{ color: "#f87171" }}>加载失败 · {PLUGIN_MOUNT_PHASE_LABELS[plugin.failure.phase] ?? plugin.failure.phase}</div>
+            <div className="flex items-center gap-1.5 text-xs" style={{ color: "#f87171" }}>
+              <X size={13} /> 加载失败
+            </div>
+            {/* 六阶段挂载进度：失败阶段之前 = 已通过，失败阶段红底高亮，其后 = 未到达 */}
+            <div className="mt-2 flex flex-wrap items-center gap-1.5">
+              {PLUGIN_MOUNT_PHASE_ORDER.map((phase, i) => {
+                const label = PLUGIN_MOUNT_PHASE_LABELS[phase];
+                if (i === failIndex) {
+                  return (
+                    <span key={phase} className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px]" style={{ background: "rgba(248,113,113,0.12)", color: "#f87171" }}>
+                      <X size={12} /> {label}
+                    </span>
+                  );
+                }
+                if (i < failIndex) {
+                  return (
+                    <span key={phase} className="flex items-center gap-1 text-[11px]" style={{ color: "var(--text-secondary)" }}>
+                      <Check size={12} /> {label}
+                    </span>
+                  );
+                }
+                return (
+                  <span key={phase} className="flex items-center gap-1 text-[11px]" style={{ color: "var(--text-muted)" }}>
+                    <Circle size={10} /> {label}
+                  </span>
+                );
+              })}
+            </div>
             <div className="text-xs mt-1 break-words" style={{ color: "#f87171" }}>{plugin.failure.message}</div>
             {plugin.failure.missing && <div className="text-[11px] mt-1" style={{ color: "var(--text-muted)" }}>缺失依赖：{plugin.failure.missing.join("、")}</div>}
           </div>
