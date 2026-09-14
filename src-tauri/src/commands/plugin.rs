@@ -1724,9 +1724,12 @@ pub fn plugin_uninstall(
     if !plugin_id_valid(&id) {
         return Err("插件不存在".to_string());
     }
-    let pstate = read_plugin_state(&app)?;
     let base = plugin_base_dir(&app, &state, &scope)?;
+    // 状态读必须在 IO 锁内：守恒判定（见 theme_conservation_violation）依赖「读取 → 提交」
+    // 之间状态不被并发命令改动，锁外快照会让守卫基于陈旧启停结论放行。
     let _io_guard = PLUGIN_IO_LOCK.lock().map_err(|_| "插件文件忙，请重试".to_string())?;
+    let pstate = read_plugin_state(&app)?;
+    let theme_ids = enabled_theme_ids(&app, &state, &pstate, Some(&id));
     let record_scope = pstate.sources.get(&id).map(|s| s.scope.as_str());
     // 记录在另一作用域时探测调用方作用域是否确有同 id 目录（外部同步副本 → 只删副本）；
     // 作用域一致或无记录时无需探测，由下方定位逻辑处理。
@@ -1745,9 +1748,6 @@ pub fn plugin_uninstall(
         }
         UninstallTarget::RecordedRow => {}
     }
-    // 守恒守护：卸载「当前启用且为最后一个」的主题插件被拒（与停用同一规则）
-    let target_enabled = pstate.enabled.get(&id).copied().unwrap_or(false);
-    guard_last_enabled_theme_plugin(&app, &state, &pstate, &id, target_enabled)?;
     let source = pstate.sources.get(&id).cloned().unwrap_or_default();
     // 定位待删目录：优先按清单 id 扫描；清单损坏/链接悬空（扫描按 is_dir 判定收不到）时按来源记录的
     // 落位目录名定位（名字经 target_folder_name 同款清理校验，确保仍在插件目录内）。
@@ -1789,7 +1789,11 @@ pub fn plugin_uninstall(
     if let Some(dir) = dir {
         uninstall_dir_transaction(&dir, source.kind, || {
             // 状态清理由锁内读改写完成：目录操作在锁外（可能慢），否则会覆盖并发命令刚写入的字段。
+            // 守恒判定在闭包内对 fresh 复算；失败由事务把目录改名还原（不留幽灵记录）。
             update_plugin_state(&app, |fresh| {
+                if let Some(msg) = theme_conservation_violation(fresh, &theme_ids, &id) {
+                    return Err(msg);
+                }
                 fresh.enabled.remove(&id);
                 fresh.sources.remove(&id);
                 Ok(((), true))
@@ -1798,6 +1802,9 @@ pub fn plugin_uninstall(
     } else {
         // 无落位目录（实现随应用编译 / 目录已不在）：只需清状态记录。
         update_plugin_state(&app, |fresh| {
+            if let Some(msg) = theme_conservation_violation(fresh, &theme_ids, &id) {
+                return Err(msg);
+            }
             fresh.enabled.remove(&id);
             fresh.sources.remove(&id);
             Ok(((), true))
@@ -1872,18 +1879,23 @@ pub fn plugin_set_enabled(
     if enabled && cross_scope_id_conflict(&app, &state, &id) {
         return Err(CROSS_SCOPE_CONFLICT_MESSAGE.to_string());
     }
-    // 守卫读只作决策输入（锁外）；开关变更走锁内读改写，避免覆盖并发命令刚写入的 enabled/sources
-    let pstate = read_plugin_state(&app)?;
-    if !enabled {
-        let target_enabled = pstate.enabled.get(&id).copied().unwrap_or(false);
-        guard_last_enabled_theme_plugin(&app, &state, &pstate, &id, target_enabled)?;
-    }
-    update_plugin_state(&app, |fresh| {
-        if enabled {
+    // 启停全程持 IO 锁：清单读取（主题判定）在临界区内不可变，且与安装/更新/卸载互斥。
+    // 停用的守恒判定在状态锁闭包内对 fresh 复算（见 theme_conservation_violation），
+    // 锁外快照会让两个窗口并发各停一个主题时都看到 2 个主题、最终停到 0。
+    let _io_guard = PLUGIN_IO_LOCK.lock().map_err(|_| "插件文件忙，请重试".to_string())?;
+    if enabled {
+        return update_plugin_state(&app, |fresh| {
             fresh.enabled.insert(id.clone(), true);
-        } else {
-            fresh.enabled.remove(&id);
+            Ok(((), true))
+        });
+    }
+    let pstate = read_plugin_state(&app)?;
+    let theme_ids = enabled_theme_ids(&app, &state, &pstate, Some(&id));
+    update_plugin_state(&app, |fresh| {
+        if let Some(msg) = theme_conservation_violation(fresh, &theme_ids, &id) {
+            return Err(msg);
         }
+        fresh.enabled.remove(&id);
         Ok(((), true))
     })
 }
@@ -1934,29 +1946,50 @@ fn manifest_is_theme(manifest: &Value, id: &str) -> bool {
         })
 }
 
-/// 当前启用中的主题插件数量。
-fn enabled_theme_plugin_count(app: &AppHandle, state: &VaultState, pstate: &PluginState) -> usize {
-    pstate
+/// 主题守恒判定（纯函数，供状态锁闭包内对提交瞬间的 fresh 状态复算）：
+/// 目标当前启用且属于主题插件、而 fresh 里已无**其它**启用主题时返回拒绝说明。
+///
+/// 判定必须发生在状态锁临界区内：两个窗口并发各停一个主题时，锁外快照会让两次守卫
+/// 都看到 2 个主题并各自放行，最终 0 个。`theme_ids` 由调用方在锁外（持 IO 锁）按清单
+/// 预判——IO 锁串行化全部状态变更路径，清单在判定期间不可变；fresh 里新启用的、
+/// 预判集合之外的主题不参与计数（可能低估，只会造成保守拒绝，不会漏放）。
+fn theme_conservation_violation(
+    fresh: &PluginState,
+    theme_ids: &HashSet<String>,
+    id: &str,
+) -> Option<String> {
+    if !theme_ids.contains(id) || !fresh.enabled.get(id).copied().unwrap_or(false) {
+        return None;
+    }
+    let remaining = fresh
         .enabled
         .iter()
-        .filter(|(id, enabled)| **enabled && plugin_is_theme(app, state, pstate, id))
-        .count()
+        .filter(|(tid, enabled)| **enabled && tid.as_str() != id && theme_ids.contains(*tid))
+        .count();
+    (remaining == 0).then(|| "至少保留一个主题插件（可先启用/安装其他主题插件）".to_string())
 }
 
-/// 守恒守护：主题插件必须至少保留一个启用——停用/卸载「当前启用且为最后一个」的主题插件被拒。
-fn guard_last_enabled_theme_plugin(
+/// 预判主题 id 集（须持 IO 锁调用，清单在临界区内不可变）：快照启用行 ∪ `extra`，
+/// 逐个按清单判定主题身份。清单读不到的行判定为非主题（与 `plugin_is_theme` 边界一致：
+/// 损坏插件不参与守恒、可被清理）。
+fn enabled_theme_ids(
     app: &AppHandle,
     state: &VaultState,
     pstate: &PluginState,
-    id: &str,
-    target_enabled: bool,
-) -> Result<(), String> {
-    if target_enabled && plugin_is_theme(app, state, pstate, id)
-        && enabled_theme_plugin_count(app, state, pstate) <= 1
-    {
-        return Err("至少保留一个主题插件（可先启用/安装其他主题插件）".to_string());
+    extra: Option<&str>,
+) -> HashSet<String> {
+    let mut ids: HashSet<String> = pstate
+        .enabled
+        .iter()
+        .filter(|(_, enabled)| **enabled)
+        .map(|(id, _)| id.clone())
+        .collect();
+    if let Some(id) = extra {
+        ids.insert(id.to_string());
     }
-    Ok(())
+    ids.into_iter()
+        .filter(|id| plugin_is_theme(app, state, pstate, id))
+        .collect()
 }
 
 /// 更新插件：按来源分派——git 来源 git pull（失败目录不变）；市场且无 .git 时重新下载源码包替换；
@@ -3047,6 +3080,87 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("atelyx-plugin-{tag}-{nanos}"));
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// 主题守恒判定边界：唯一启用主题拒绝、重复停用放行、非主题放行、
+    /// 按锁内 fresh 状态判定（与锁外快照分叉时不漏判）。
+    #[test]
+    fn theme_conservation_boundary_cases() {
+        let mut state = PluginState::default();
+        state.enabled.insert("builtin.theme".into(), true);
+        state.enabled.insert("com.other.panel".into(), true);
+        let single: HashSet<String> = ["builtin.theme".to_string()].into();
+        // 唯一启用主题停用 → 拒。
+        let err = theme_conservation_violation(&state, &single, "builtin.theme")
+            .expect("唯一启用主题停用应拒绝");
+        assert!(err.contains("至少保留一个主题插件"));
+        // 目标未启用（重复停用）→ no-op 放行。
+        state.enabled.remove("builtin.theme");
+        assert!(theme_conservation_violation(&state, &single, "builtin.theme").is_none());
+        // 目标非主题 → 放行。
+        state.enabled.insert("builtin.theme".into(), true);
+        assert!(theme_conservation_violation(&state, &single, "com.other.panel").is_none());
+        // 两个启用主题停一个 → 放行。
+        state.enabled.insert("com.theme2".into(), true);
+        let both: HashSet<String> =
+            ["builtin.theme".to_string(), "com.theme2".to_string()].into();
+        assert!(theme_conservation_violation(&state, &both, "builtin.theme").is_none());
+        // 锁内 fresh 与锁外快照分叉（快照里的另一主题在 fresh 已停用）→ 按 fresh 拒绝。
+        state.enabled.remove("com.theme2");
+        assert!(theme_conservation_violation(&state, &both, "builtin.theme").is_some());
+        // fresh 新启用了预判集合之外的主题 → 保守拒绝（宁拒勿漏，计数不含未知主题）。
+        let mut state2 = PluginState::default();
+        state2.enabled.insert("builtin.theme".into(), true);
+        state2.enabled.insert("com.sneaky.theme".into(), true);
+        assert!(theme_conservation_violation(&state2, &single, "builtin.theme").is_some());
+    }
+
+    /// 并发停用回归：预置两个启用主题，双线程各自停用一个，
+    /// 恰好一个成功——守卫必须在状态锁临界区内对 fresh 重算才挡得住另一窗口。
+    #[test]
+    fn concurrent_theme_disable_keeps_one_enabled() {
+        let dir = temp_state_dir("theme-conservation");
+        let path = dir.join("plugin-state.json");
+        write_plugin_state_at(
+            &path,
+            &{
+                let mut s = PluginState::default();
+                s.enabled.insert("com.theme.a".into(), true);
+                s.enabled.insert("com.theme.b".into(), true);
+                s
+            },
+        )
+        .unwrap();
+        let themes: std::sync::Arc<HashSet<String>> = std::sync::Arc::new(
+            ["com.theme.a".to_string(), "com.theme.b".to_string()].into(),
+        );
+        let results: Vec<Result<(), String>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = ["com.theme.a", "com.theme.b"]
+                .map(|id| {
+                    let path = path.clone();
+                    let themes = themes.clone();
+                    scope.spawn(move || {
+                        mutate_plugin_state_at(&path, |fresh| {
+                            if let Some(msg) = theme_conservation_violation(fresh, &themes, id) {
+                                return Err(msg);
+                            }
+                            fresh.enabled.remove(id);
+                            Ok(((), true))
+                        })
+                    })
+                })
+                .into_iter()
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1, "恰好一个停用成功");
+        let final_state = read_plugin_state_at(&path).unwrap();
+        assert_eq!(
+            final_state.enabled.values().filter(|e| **e).count(),
+            1,
+            "终态应恰好剩一个启用主题"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// 损坏状态的唯一原文不受读写路径破坏：读取报错、拒绝在损坏态读改写，文件字节保持原样。
