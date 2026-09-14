@@ -42,6 +42,8 @@ import {
 import { installAudit, resetAudit } from "./audit";
 import { pluginIdOf } from "./loader";
 import { createSlotsApi } from "./slotsApi";
+import { createServicesService } from "./services";
+import { nativeInvoke } from "@/services/native";
 import { createHistoryService } from "./history";
 import { createLayoutService } from "./layout";
 import { createUiStateService } from "./uiState";
@@ -54,6 +56,7 @@ import type {
   CollabService,
   DialogService,
   HttpService,
+  NativeService,
   NotificationService,
   ShellExecResult,
   ShellService,
@@ -458,6 +461,15 @@ export function createKernel(): Kernel {
 
   // 插件 UI 注册 API（视图槽/表格视图；经 tracker 绑定调用方插件 fiber）。
   provide("slots", createSlotsApi());
+
+  // 服务注册表查询（ctx.services）：插件发现当前可用服务面与提供者；get 判空读取（可选依赖）。
+  provide("services", createServicesService());
+
+  // 原始 Rust 命令逃生舱（ctx.native.invoke）：未封装命令经此触达，调用形状经审计脱敏记录。
+  const native: NativeService = {
+    invoke: (command, args) => nativeInvoke(command, args),
+  };
+  provide("native", native);
 
   // 领域/布局/UI 状态服务（内核提供，root 作用域；实现 = 注入访问对象，见 access.ts）。
   provide("history", createHistoryService());

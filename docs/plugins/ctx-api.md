@@ -43,10 +43,25 @@ ctx.effect(() => {
 | `ctx.layout` | `activeLayoutId(): string | null` / `layouts(): WorkspaceLayout[]` / `addView(panelId: string, view: string): Promise<LayoutOpResult>` / `op(op: LayoutOp): Promise<LayoutOpResult>` | 布局服务（读取布局镜像 + 发布布局操作；`op` 与 Rust `LayoutOp` 逐字段对齐，改布局一律经 `layout_op`，布局权威在 Rust）。 |
 | `ctx.uiState` | `read(): AppUiState` | 应用级 UI 使用状态读服务（只读非布局字段 + 布局镜像）。 |
 | `ctx.slots` | `registerView(opts: RegisterViewOptions): () => void` / `registerTableView(opts: RegisterTableViewOptions): () => void` / `registerNode(opts: RegisterNodeOptions): () => void` / `registerEdge(opts: RegisterEdgeOptions): () => void` / `registerSetting(opts: RegisterSettingOptions): () => void` / `registerAppPage(opts: RegisterAppPageOptions): () => void` / `registerCommand(opts: RegisterCommandOptions): () => void` / `registerThemeSetting(opts: RegisterThemeSettingOptions): () => void` / `registerUi(opts: RegisterUiOptions): () => void` / `registerMenu(opts: RegisterMenuOptions): () => void` / `list(): readonly SlotDeclaration[]` | 插件 UI 注册服务（视图/节点/边/表格视图/设置项/应用页/命令/主题设置项/具名槽位/右键菜单）。 |
+| `ctx.services` | `list(): ServiceInfo[]` / `get(name: K): Context[K] | undefined` | 服务注册表查询服务（ctx.services）：插件据此发现当前真实可用的服务面与提供者。 宿主内核提供平台服务（无 provider）；插件经 ctx.root.provide 提供的服务带提供者插件 id。 |
+| `ctx.native` | `invoke(command: string, args?: Record<string, unknown>): Promise<unknown>` | 原始 Rust 命令逃生舱（ctx.native.invoke）：未封装的服务能力经此触达，调用进审计。 |
 <!-- generated:ctx-api:services:end -->
 
 依赖某个服务时用 apply 对象声明：`{ name, inject: ["table"], apply(ctx) { ... } }`——
 服务缺失（如提供该服务的插件被停用）时插件不激活，管理页显示原因。
+
+**可选依赖**：inject 值形如 `{ foo: { optional: true } }` 的条目不阻断激活——缺失时 apply
+照常执行，插件在内经 `ctx.services.get("foo")` 判空降级（返回 `undefined`，不抛错）；
+存在时返回该服务对象。**注意**：可选依赖不能直接 `ctx.foo` 属性访问（不在 inject 声明内
+会抛错），一律经 `ctx.services.get("foo")` 读取。
+
+**服务发现**：`ctx.services.list()` 返回当前全部已注册服务面（服务名 + 提供者插件 id；
+宿主内核提供的平台服务无 provider 字段）。插件经 `ctx.provide`（自身 ctx）注册的服务
+带提供者插件 id；服务存在与否随时反映真实运行状态（停用提供插件即消失）。
+
+**原始命令逃生舱**：未封装成 `ctx` 服务的 Rust 命令经 `ctx.native.invoke(command, args)`
+调用（敏感：等价原始命令执行）。调用形状（命令名 + 参数个数）进管理页审计，参数原文
+不进审计。`ctx` 仍是推荐能力面，逃生舱只用于「宿主未开放且必须触达」的场景。
 
 ## 事件：`ctx.events.on` / `ctx.emit`
 
@@ -196,5 +211,5 @@ ctx.ai.registerTool({
 - **替换/增强默认实现**：在 `apply` 里注册同 kind 的视图/节点/边并给更高的 `priority`
   （single 槽 `priority` 高者胜出，同值后者胜）——替换关系由插件自己声明，用户不需要额外配置。
 - **依赖提供者**：用 apply 对象的 `inject` 声明依赖的服务；提供者在默认组合中先挂载，
-  你的插件随后激活。
+  你的插件随后激活。可选依赖见上文「可选依赖」段（`{ foo: { optional: true } }` + `ctx.services.get`）。
 - 行序（装配顺序）由宿主决定，不面向用户配置：默认组合成员在前，其余插件按 id 追加。

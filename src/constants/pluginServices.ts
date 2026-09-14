@@ -23,13 +23,15 @@ export const PLUGIN_SERVICE_LABELS: Record<string, string> = {
   layout: "工作区布局读与操作",
   uiState: "应用级 UI 状态读",
   slots: "插件 UI 注册",
+  services: "服务注册表查询",
+  native: "原始命令调用",
 };
 
 /** 纳入审计/披露的服务面名单（唯一清单：审计侧据此判定「访问了哪个服务」，与展示标签同源）。 */
 export const PLUGIN_SERVICE_NAMES: readonly string[] = Object.keys(PLUGIN_SERVICE_LABELS);
 
 /** 敏感服务（审计/披露 UI「敏感」高亮）。 */
-export const PLUGIN_SERVICE_SENSITIVE: ReadonlySet<string> = new Set(["shell", "clipboard", "http"]);
+export const PLUGIN_SERVICE_SENSITIVE: ReadonlySet<string> = new Set(["shell", "clipboard", "http", "native"]);
 
 /** 方法级高危面（服务整体敏感之外的单方法；当前 = vault 写）。审计据此记调用摘要，披露 UI 同源。 */
 export const PLUGIN_SENSITIVE_METHODS: Readonly<Record<string, ReadonlySet<string>>> = {

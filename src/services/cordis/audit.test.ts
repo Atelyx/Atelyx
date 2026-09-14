@@ -38,6 +38,10 @@ vi.mock("@/services/clipboard", () => ({
   copyImageToClipboard: () => Promise.resolve(),
 }));
 
+vi.mock("@/services/native", () => ({
+  nativeInvoke: vi.fn(async () => "ok"),
+}));
+
 declare module "@atelyx/cordis" {
   interface Events {
     "audit/evt": (msg: string) => void;
@@ -175,5 +179,24 @@ describe("插件审计", () => {
 
   it("方法级敏感面清单不漂移（键须是已登记服务）", () => {
     expect(Object.keys(PLUGIN_SENSITIVE_METHODS).every((s) => PLUGIN_SERVICE_NAMES.includes(s))).toBe(true);
+  });
+
+  it("native.invoke 按插件归属记脱敏摘要（命令名 + 参数个数，参数原文不进审计）", async () => {
+    kernel = getKernel();
+    const apply = (ctx: Context) => {
+      void ctx.native.invoke("search_web", { provider: "tavily", query: "TOP SECRET QUERY" });
+      void ctx.native.invoke("get_app_version");
+    };
+    await mountPlugin(kernel, { id: "builtin.audit", apply });
+    const entry = auditSnapshot(kernel.ctx).find((e) => e.pluginId === "builtin.audit");
+    expect(entry?.calls).toEqual(
+      expect.arrayContaining([
+        { service: "native", method: "invoke", summary: "search_web（2 个参数）" },
+        { service: "native", method: "invoke", summary: "get_app_version（0 个参数）" },
+      ]),
+    );
+    const dumped = JSON.stringify(entry);
+    expect(dumped).not.toContain("TOP SECRET QUERY");
+    expect(dumped).not.toContain("tavily");
   });
 });

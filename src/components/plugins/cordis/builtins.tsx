@@ -56,6 +56,7 @@ import { registerNoteSurface } from "@/utils/noteSurfaceHost";
 import { subscribeVaultEvent } from "@/utils/vaultEvents";
 import { registerViewSlot } from "@/services/cordis/slots";
 import { pluginIdOf } from "@/services/cordis/loader";
+import { registerServiceProvider } from "@/services/cordis/services";
 import { createCanvasService } from "@/services/cordis/canvas";
 import { createTableService } from "@/services/cordis/table";
 import { createNoteService } from "@/services/cordis/note";
@@ -117,6 +118,22 @@ function mountLifecycle(ctx: Context, hooks: DomainLifecycleHooks): void {
 
 function mountWiring(ctx: Context, wire: () => () => void): void {
   ctx.effect(() => wire());
+}
+
+/** 提供 root 作用域类型化服务（其它插件可消费）：`ctx.root.provide` 注册到 root fiber
+ *  （全局可见），提供者归属经登记表补充（root fiber 无插件归属，services.list 据此标 provider）。
+ *  生命周期随调用插件 fiber（ctx.effect），卸载时撤销服务与登记。 */
+function provideRootService(ctx: Context, name: string, factory: () => unknown): void {
+  ctx.effect(() => {
+    // 先构造服务再登记：工厂抛错（如能力未接线）时不留登记残留，effect 失败随 fiber 清空。
+    const service = factory();
+    const unregister = registerServiceProvider(name, pluginIdOf(ctx) ?? "plugin");
+    const dispose = ctx.root.provide(name, service);
+    return () => {
+      unregister();
+      return dispose();
+    };
+  });
 }
 
 function mountVaultEvents(ctx: Context, specs: VaultEventHandlerSpec[]): void {
@@ -282,9 +299,7 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
         useChatPanelStore.getState().applyExternalChatChange(e.path);
       }),
     ],
-    provideService: (ctx) =>
-      // 服务 root 作用域提供（其它插件可消费），生命周期随 builtin 插件 fiber（ctx.effect）
-      ctx.effect(() => ctx.root.provide("chat", createChatService())),
+    provideService: (ctx) => provideRootService(ctx, "chat", () => createChatService()),
   }),
   def({
     id: "builtin.canvas",
@@ -426,9 +441,7 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
         useCanvasStore.setState({ error: e.message });
       }),
     ],
-    provideService: (ctx) =>
-      // 服务在 root 作用域提供（其它插件可消费），生命周期随 builtin 插件 fiber（ctx.effect）
-      ctx.effect(() => ctx.root.provide("canvas", createCanvasService())),
+    provideService: (ctx) => provideRootService(ctx, "canvas", () => createCanvasService()),
   }),
   def({
     id: "builtin.note",
@@ -512,9 +525,7 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
         useNoteCollabStore.getState().disposeDocsUnder(e.oldDir);
       }),
     ],
-    provideService: (ctx) =>
-      // 服务 root 作用域提供（其它插件可消费），生命周期随 builtin 插件 fiber（ctx.effect）
-      ctx.effect(() => ctx.root.provide("note", createNoteService())),
+    provideService: (ctx) => provideRootService(ctx, "note", () => createNoteService()),
   }),
   def({
     id: "builtin.table",
@@ -558,9 +569,7 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
         }
       }),
     ],
-    provideService: (ctx) =>
-      // 服务在 root 作用域提供（其它插件可消费），生命周期随 builtin 插件 fiber（ctx.effect）
-      ctx.effect(() => ctx.root.provide("table", createTableService())),
+    provideService: (ctx) => provideRootService(ctx, "table", () => createTableService()),
   }),
   def({
     id: "builtin.files",

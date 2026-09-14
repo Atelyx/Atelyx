@@ -6,7 +6,7 @@
  * 依赖服务缺失时插件不激活（apply 不执行），挂载器据此返回失败 + 缺失清单（可见化）。
  * 审计归属：contextToPluginId 记录插件上下文 → 插件 id（audit.ts 据此归属服务读/事件订阅）。
  */
-import { Context, FiberState, type Fiber, type Plugin } from "@atelyx/cordis";
+import { Context, FiberState, type Fiber, type Inject, type Plugin } from "@atelyx/cordis";
 import { errText, type PluginMountFailure } from "@/types";
 import { forgetPluginAudit } from "./audit";
 import type { Kernel } from "./kernel";
@@ -16,6 +16,32 @@ export interface PluginDefinition {
   id: string;
   /** Cordis 插件：函数 (ctx, config) 或对象 { apply, inject?, provide?, Config?, name? }。 */
   apply: Plugin;
+}
+
+/** inject 条目值是否为可选标记（`{ optional: true }`）。 */
+function isOptionalInject(value: unknown): boolean {
+  return typeof value === "object" && value !== null && (value as { optional?: unknown }).optional === true;
+}
+
+/** 解析插件 inject：可选标记条目（值形如 `{ optional: true }`）从必需依赖中剥出。
+ *  可选依赖缺失不阻断激活（apply 照常执行），插件在内经 `ctx.services.get(name)` 判空降级；
+ *  剥出名单同时返回（供诊断/文档，缺失不再计入失败 missing）。 */
+export function splitInject(
+  raw: unknown,
+): { required: Inject | undefined; optional: string[] } {
+  if (raw === undefined) return { required: undefined, optional: [] };
+  if (Array.isArray(raw)) return { required: raw as Inject, optional: [] };
+  if (typeof raw !== "object" || raw === null) return { required: undefined, optional: [] };
+  const optional: string[] = [];
+  const required: Record<string, unknown> = {};
+  for (const [name, config] of Object.entries(raw as Record<string, unknown>)) {
+    if (isOptionalInject(config)) optional.push(name);
+    else required[name] = config;
+  }
+  return {
+    required: Object.keys(required).length > 0 ? (required as Inject) : undefined,
+    optional,
+  };
 }
 
 /** 挂载结果：ok 或分段失败诊断（phase + 可读原因 + 可选缺失服务清单）。 */
@@ -124,10 +150,13 @@ async function mountNow(
   await unmountNow(kernel, plugin.id);
   const callback = resolveApply(plugin.apply);
   const metadata = typeof plugin.apply === "object" ? plugin.apply : undefined;
+  // 可选依赖剥出：inject 值形如 { optional: true } 的条目不作为必需依赖传给 cordis
+  // （缺失不置 fiber INACTIVE，apply 照常执行）；插件在内经 ctx.services.get(name) 判空。
+  const { required } = splitInject(metadata?.inject);
   // 包装 apply：登记插件上下文归属（审计用），透传 Cordis 插件元数据（inject 激活语义），再执行真实 apply。
   const wrapped: Plugin = {
     ...(metadata?.name ? { name: metadata.name } : {}),
-    ...(metadata?.inject ? { inject: metadata.inject } : {}),
+    ...(required !== undefined ? { inject: required } : {}),
     ...(metadata?.provide ? { provide: metadata.provide } : {}),
     ...(metadata?.Config ? { Config: metadata.Config } : {}),
     apply: (ctx: Context, pluginConfig?: unknown) => {
@@ -140,7 +169,7 @@ async function mountNow(
   try {
     await fiber.await();
     if (fiber.state !== FiberState.ACTIVE) {
-      // inject 依赖未满足：插件未激活（apply 未执行），附缺失服务清单。
+      // inject 依赖未满足：插件未激活（apply 未执行），附缺失服务清单（可选依赖不在其列）。
       const missing = Object.keys(fiber.inject ?? {}).filter((key) => !fiber.store?.[key]);
       return failMount(kernel, plugin.id, fiber, {
         phase: "apply",

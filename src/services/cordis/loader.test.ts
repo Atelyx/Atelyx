@@ -11,6 +11,7 @@ import {
   contextToPluginId,
   mountPlugin,
   mountedPluginIds,
+  splitInject,
   unmountAll,
   unmountPlugin,
 } from "./loader";
@@ -151,5 +152,28 @@ describe("Cordis 挂载器", () => {
     await unmountAll(k);
     expect(await mounting).toEqual({ ok: true });
     expect(mountedPluginIds(k)).toEqual([]);
+  });
+
+  it("可选依赖剥出：inject 值形如 { optional: true } 的条目缺失不阻断激活", async () => {
+    const k = makeKernel();
+    let applied = false;
+    const apply = {
+      inject: { loaderSvc: { optional: true } },
+      apply: () => {
+        applied = true;
+      },
+    };
+    const result = await mountPlugin(k, { id: "builtin.opt", apply });
+    expect(result).toEqual({ ok: true });
+    expect(applied).toBe(true);
+    await unmountPlugin(k, "builtin.opt");
+  });
+
+  it("splitInject：数组形式全部必需；对象形式剥出可选标记", () => {
+    expect(splitInject(["loaderSvc"])).toEqual({ required: ["loaderSvc"], optional: [] });
+    expect(splitInject({ loaderSvc: null, extra: { optional: true } })).toEqual({
+      required: { loaderSvc: null },
+      optional: ["extra"],
+    });
   });
 });

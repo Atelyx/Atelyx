@@ -90,6 +90,11 @@ function summarizeCall(service: string, method: string, args: unknown[]): string
     const text = args[0];
     return typeof text === "string" ? `${method}（${new TextEncoder().encode(text).length} 字节）` : method;
   }
+  if (service === "native") {
+    const command = args[0];
+    const argCount = args[1] && typeof args[1] === "object" ? Object.keys(args[1]).length : 0;
+    return `${typeof command === "string" ? command : "未知命令"}（${argCount} 个参数）`;
+  }
   if (isSensitiveMethod(service, method)) {
     const path = args[0];
     return typeof path === "string" ? `${method} ${path}` : method;
@@ -98,7 +103,7 @@ function summarizeCall(service: string, method: string, args: unknown[]): string
 }
 
 /** 该插件视角下的服务视图：敏感面多包一层，调用时先记摘要再转发（真实调用抛错也留摘要）。 */
-function wrapSensitiveService(pluginId: string, service: string, target: object): object {
+export function wrapSensitiveService(pluginId: string, service: string, target: object): object {
   return new Proxy(target, {
     get(obj, prop, receiver) {
       const member = Reflect.get(obj, prop, receiver);

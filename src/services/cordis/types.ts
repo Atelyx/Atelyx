@@ -29,6 +29,7 @@ import type {
   RepoHistoryResult,
   WorkspaceLayout,
 } from "@/types";
+import type { Context } from "@atelyx/cordis";
 import type { HistoryKind, HistoryVersion } from "@/services/history";
 import type { HttpRequestInput, HttpResponseResult } from "@/services/http";
 import type { SlotsApi } from "./slotsApi";
@@ -300,6 +301,29 @@ export interface UiStateService {
   read(): AppUiState;
 }
 
+/** 服务注册表条目（ctx.services.list() 返回；提供者 = 注册该服务的插件，缺省 = 宿主内核提供）。 */
+export interface ServiceInfo {
+  /** 服务名（ctx.<name> 的键）。 */
+  name: string;
+  /** 提供者插件 id（宿主内核提供的平台服务无此字段）。 */
+  provider?: string;
+}
+
+/** 服务注册表查询服务（ctx.services）：插件据此发现当前真实可用的服务面与提供者。
+ *  宿主内核提供平台服务（无 provider）；插件经 ctx.root.provide 提供的服务带提供者插件 id。 */
+export interface ServicesService {
+  /** 当前已注册的全部服务面（含提供者插件 id）。 */
+  list(): ServiceInfo[];
+  /** 读取某服务（不存在/未激活 = undefined；可选依赖判空用）。 */
+  get<K extends keyof Context>(name: K): Context[K] | undefined;
+}
+
+/** 原始 Rust 命令逃生舱（ctx.native.invoke）：未封装的服务能力经此触达，调用进审计。 */
+export interface NativeService {
+  /** 调用任意已注册 Rust 命令（敏感：等价原始命令执行；审计记录命令名与参数个数，参数原文不进审计）。 */
+  invoke(command: string, args?: Record<string, unknown>): Promise<unknown>;
+}
+
 /** 声明合并：@atelyx/cordis 的 Context 挂上 Atelyx 服务面与事件表。
  *  canvas/table/note/chat 由对应插件提供（停用即不可用），其余平台服务由内核提供（见 kernel.ts）；
  *  slots 为插件 UI 注册 API（由内核提供，见 slotsApi.ts）。 */
@@ -325,6 +349,8 @@ declare module "@atelyx/cordis" {
     layout: LayoutService;
     uiState: UiStateService;
     slots: SlotsApi;
+    services: ServicesService;
+    native: NativeService;
   }
   interface Events {
     /** 进仓/切仓完成广播（载荷 { root, id }）。@emit */
