@@ -157,27 +157,29 @@ const persistCtl = createPersistController({
     // 未加载或 bootstrap 失败时不补丁：失败时没有磁盘基线可依赖，默认值若落盘会覆盖
     // 磁盘 recentFiles/expanded（取舍：宁可丢弃本次会话补丁，不覆盖既有数据）
     if (!s.loaded || s.loadFailed) return;
+    if (Object.keys(pendingPatch).length === 0) return;
+    const patch = pendingPatch;
+    pendingPatch = {};
     try {
-      await uiStatePatch(nonLayoutPatch(s));
+      await uiStatePatch(patch);
     } catch (e) {
       console.error("补丁应用级 UI 状态失败", e);
+      // 发送失败把本轮字段并回（等待期间的新标记后写胜出），下次防抖窗口重发
+      pendingPatch = { ...patch, ...pendingPatch };
     }
   },
   delay: 400,
 });
 
-/** 非布局字段 → Rust 补丁（只发 JS 拥有的字段；last*File 为 null 时省略——清除走 closeFile 的定向补丁，
- * 常规补丁不携带 null，防撕裂窗口持有的陈旧 null 副本误清主窗口记录；
- * 陈旧非 null 值回写（撕裂窗口副本落后于主窗口）属撕裂窗口架构既有 LWW 限制，未在本次范围处理）。 */
-function nonLayoutPatch(s: UiStateStore): import("@/types").UiStatePatch {
-  return {
-    fileExplorerExpanded: [...s.fileExplorerExpanded],
-    ...(s.lastCanvasFile !== null ? { lastCanvasFile: s.lastCanvasFile } : {}),
-    ...(s.lastNoteFile !== null ? { lastNoteFile: s.lastNoteFile } : {}),
-    ...(s.lastTableFile !== null ? { lastTableFile: s.lastTableFile } : {}),
-    focusedPanelId: s.focusedPanelId,
-    recentFiles: s.recentFiles,
-  };
+/** 待发送的非布局字段补丁（增量：各 setter 只标记自己变更的字段，防抖后合并发送）。 */
+let pendingPatch: import("@/types").UiStatePatch = {};
+
+/** 增量标记非布局补丁字段并调度发送。
+ *  撕裂窗口各自持有独立 store 实例且收不到其他窗口的非布局字段更新——整包回写会让
+ *  本窗口的陈旧副本覆盖主窗口较新的值；只发本窗口真正变更的字段，其余字段不落笔。 */
+function markPatch(fields: import("@/types").UiStatePatch): void {
+  pendingPatch = { ...pendingPatch, ...fields };
+  persistDebounced();
 }
 
 function persistDebounced(): void {
@@ -271,32 +273,27 @@ export const useUiStateStore = create<UiStateStore>((set, get) => {
     },
 
     toggleExpanded: (path) => {
-      set((s) => {
-        const next = new Set(s.fileExplorerExpanded);
-        if (next.has(path)) next.delete(path);
-        else next.add(path);
-        return { fileExplorerExpanded: next };
-      });
-      persistDebounced();
+      const next = new Set(get().fileExplorerExpanded);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      set({ fileExplorerExpanded: next });
+      markPatch({ fileExplorerExpanded: [...next] });
     },
 
     expandDirs: (paths) => {
       if (paths.length === 0) return;
-      set((s) => {
-        const next = new Set(s.fileExplorerExpanded);
-        for (const p of paths) next.add(p);
-        return { fileExplorerExpanded: next };
-      });
-      persistDebounced();
+      const next = new Set(get().fileExplorerExpanded);
+      for (const p of paths) next.add(p);
+      set({ fileExplorerExpanded: next });
+      markPatch({ fileExplorerExpanded: [...next] });
     },
 
     toggleExpandAll: (dirPaths) => {
-      set((s) => {
-        const allExpanded =
-          dirPaths.length > 0 && dirPaths.every((p) => s.fileExplorerExpanded.has(p));
-        return { fileExplorerExpanded: allExpanded ? new Set() : new Set(dirPaths) };
-      });
-      persistDebounced();
+      const allExpanded =
+        dirPaths.length > 0 && dirPaths.every((p) => get().fileExplorerExpanded.has(p));
+      const next = allExpanded ? new Set<string>() : new Set(dirPaths);
+      set({ fileExplorerExpanded: next });
+      markPatch({ fileExplorerExpanded: [...next] });
     },
 
     recordOpenFile: (kind, file) => setLastFile(set, kind, file),
@@ -307,7 +304,7 @@ export const useUiStateStore = create<UiStateStore>((set, get) => {
         ...get().recentFiles.filter((r) => !(r.file === file && r.vaultId === vaultId)),
       ].slice(0, MAX_RECENT_FILES);
       set({ recentFiles: next });
-      persistDebounced();
+      markPatch({ recentFiles: next });
     },
 
     renameLastFile: (kind, oldFile, newFile) => {
@@ -334,7 +331,12 @@ export const useUiStateStore = create<UiStateStore>((set, get) => {
         lastTableFile !== s.lastTableFile;
       if (!changed) return;
       set({ fileExplorerExpanded: expanded, lastCanvasFile, lastNoteFile, lastTableFile });
-      persistDebounced();
+      // 只标记实际变化的字段；last*File 为 null 的字段不标记（陈旧 null 副本不得误清其他窗口记录）。
+      const patch: import("@/types").UiStatePatch = { fileExplorerExpanded: [...expanded] };
+      if (lastCanvasFile !== s.lastCanvasFile && lastCanvasFile !== null) patch.lastCanvasFile = lastCanvasFile;
+      if (lastNoteFile !== s.lastNoteFile && lastNoteFile !== null) patch.lastNoteFile = lastNoteFile;
+      if (lastTableFile !== s.lastTableFile && lastTableFile !== null) patch.lastTableFile = lastTableFile;
+      markPatch(patch);
     },
 
     removeExpandedByDir: (dir) => {
@@ -342,25 +344,22 @@ export const useUiStateStore = create<UiStateStore>((set, get) => {
       const next = new Set([...get().fileExplorerExpanded].filter((p) => p !== dir && !p.startsWith(prefix)));
       if (next.size === get().fileExplorerExpanded.size) return;
       set({ fileExplorerExpanded: next });
-      persistDebounced();
+      markPatch({ fileExplorerExpanded: [...next] });
     },
 
     closeFile: (kind) => {
       setLastFile(set, kind, null);
-      // 常规补丁会省略 null（见 nonLayoutPatch），这里显式补发定向清除补丁，
-      // 让 Rust 侧「上次打开」记录立即失效——否则重启仍会恢复已关闭的文件。
-      // 与 persist 回调同款守卫：bootstrap 失败（loadFailed）时不落盘，防默认态覆盖磁盘真实记录
+      // 用户显式关闭：定向清除补丁让 Rust 侧「上次打开」记录立即失效（否则重启仍会恢复
+      // 已关闭的文件）；常规 setLastFile 路径不携带 null（见 setLastFile），防陈旧副本误清。
       if (get().loaded && !get().loadFailed) {
-        void uiStatePatch({ [LAST_FILE_KEYS[kind]]: null }).catch((e) =>
-          console.error("清除上次打开文件记录失败", e),
-        );
+        markPatch({ [LAST_FILE_KEYS[kind]]: null });
       }
     },
 
     setFocusedPanel: (panelId) => {
       if (get().focusedPanelId === panelId) return;
       set({ focusedPanelId: panelId });
-      persistDebounced();
+      markPatch({ focusedPanelId: panelId });
     },
 
     // ---- 布局操作：全部发命令，模型由 Rust 变更 + 广播收敛 ----
@@ -390,7 +389,7 @@ export const useUiStateStore = create<UiStateStore>((set, get) => {
       // 聚焦面板指向被删面板 → 清空（非布局字段，本地收敛）
       if (get().focusedPanelId === panelId) {
         set({ focusedPanelId: null });
-        persistDebounced();
+        markPatch({ focusedPanelId: null });
       }
     },
 
@@ -410,20 +409,20 @@ export const useUiStateStore = create<UiStateStore>((set, get) => {
     addLayout: () => {
       sendLayoutOp({ op: "addLayout" });
       set({ focusedPanelId: null });
-      persistDebounced();
+      markPatch({ focusedPanelId: null });
     },
     renameLayout: (id, name) => sendLayoutOp({ op: "renameLayout", id, name }),
     deleteLayout: (id) => {
       sendLayoutOp({ op: "deleteLayout", id });
       if (get().activeLayoutId === id) {
         set({ focusedPanelId: null });
-        persistDebounced();
+        markPatch({ focusedPanelId: null });
       }
     },
     activateLayout: (id) => {
       sendLayoutOp({ op: "activateLayout", id });
       set({ focusedPanelId: null });
-      persistDebounced();
+      markPatch({ focusedPanelId: null });
     },
     moveLayout: (fromIndex, toIndex) => sendLayoutOp({ op: "moveLayout", fromIndex, toIndex }),
 
@@ -435,7 +434,8 @@ export const useUiStateStore = create<UiStateStore>((set, get) => {
   };
 });
 
-/** 写上次打开文件字段（kind → 字段映射统一出口：set 后统一走防抖补丁）。 */
+/** 写上次打开文件字段（kind → 字段映射统一出口）。null 只改本地（显式清除由 closeFile 定向
+ * 标记补丁）——非显式关闭路径不得把 null 落盘，防撕裂窗口的陈旧空副本误清其他窗口记录。 */
 function setLastFile(
   set: (partial: Partial<import("zustand").StoreApi<UiStateStore>["getState"]>) => void,
   kind: LastOpenFileKind,
@@ -444,7 +444,7 @@ function setLastFile(
   const patch: Partial<Pick<UiStateStore, "lastCanvasFile" | "lastNoteFile" | "lastTableFile">> = {};
   patch[LAST_FILE_KEYS[kind]] = file;
   set(patch);
-  persistDebounced();
+  if (file !== null) markPatch({ [LAST_FILE_KEYS[kind]]: file });
 }
 
 /** setLayoutSizes 防抖（trailing）：resize 拖拽期间最多几百 ms 一次 IPC。 */
