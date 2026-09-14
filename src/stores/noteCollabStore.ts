@@ -10,6 +10,7 @@
  */
 import { create } from "zustand";
 import type { NoteEditorBinding } from "@/types";
+import { decodeNoteFrame } from "@/services/noteCollab/frame";
 import {
   applyLocalBody,
   bindNoteDoc,
@@ -22,6 +23,7 @@ import {
   receiveAwareness,
   receiveSyncMessage,
   resyncAllNoteDocs,
+  sendNoteRelocate,
   setNoteCollabBroadcast,
   setNoteCollabBindingRefresh,
   unbindNoteDoc,
@@ -35,10 +37,40 @@ import {
   registerCollabTeardown,
   useCollabStore,
 } from "@/stores/collabStore";
+import { useNoteStore } from "@/stores/noteStore";
+import { useNoteUndoStore } from "@/stores/noteUndoStore";
+import { useVaultStore } from "@/stores/vaultStore";
 import { base64ToBytes, bytesToBase64 } from "@/utils/base64";
+import { markCollabNoteRelocate } from "@/utils/noteCollabRelocate";
 
 /** 周期反熵：激活文档定时重发握手，补齐 relay 丢帧或漏收造成的分歧。 */
 const ANTI_ENTROPY_MS = 10_000;
+
+/**
+ * 广播本端笔记换路（改名/移动）：对端据此把该笔记的路径身份跟上（未连接时静默丢弃）。
+ * 帧挤在旧路径的 `note-sync` 通道上——中转服务不透明转发，无需识别新消息类型。
+ */
+export function broadcastNoteRelocate(oldFile: string, newFile: string): void {
+  sendNoteRelocate(oldFile, newFile);
+}
+
+/**
+ * 对端换路：本端按同一簿记跟上（缓存/撤销栈/协作文档/列表/「上次打开」）。
+ * 改名与移动都不区分——路径身份一并迁移，标题由新路径派生。
+ *
+ * 本端正打开该笔记时面板随之切到新路径：复用本地改名同一条「列表变化 → 工作区联动」链路，
+ * 因此重命名记录必须早于列表刷新（见 `vaultStore.adoptRemoteNoteMigration`）。
+ * watcher 随后仍会报「旧路径变化（已不存在）/新路径出现」，窗口内按帧的结果跳过外部修改处理。
+ */
+function adoptRemoteNoteRelocate(oldPath: string, newPath: string): void {
+  markCollabNoteRelocate([oldPath, newPath]);
+  useNoteStore.getState().invalidateNoteCache(oldPath);
+  useNoteUndoStore.getState().renameFile(oldPath, newPath);
+  useNoteCollabStore.getState().disposeDoc(oldPath);
+  void useVaultStore.getState().adoptRemoteNoteMigration(oldPath, newPath).catch((e) => {
+    console.error("协作换路跟随失败", e);
+  });
+}
 
 /** 笔记域协作接线（builtin.note 载荷调用，随插件启停）：
  *  注册 note-sync/note-aware 通道 handler（relay 载荷为不透明 base64，解码与作者解析归本域）、
@@ -50,12 +82,22 @@ export function registerNoteCollabWiring(): () => void {
   offs.push(
     registerCollabChannel("note-sync", (peerId, file, payload) => {
       try {
+        const bytes = base64ToBytes(payload as string);
+        const frame = decodeNoteFrame(bytes);
+        // 换路帧（改名/移动）：本端把路径身份跟上，不进 Yjs 合并链
+        if (frame?.kind === "relocate") {
+          // 通道与载荷路径不符 = 陈旧/串文件载荷，丢弃
+          if (frame.oldPath === file && frame.newPath && frame.newPath !== frame.oldPath) {
+            adoptRemoteNoteRelocate(frame.oldPath, frame.newPath);
+          }
+          return;
+        }
         // 解析发送方身份（历史按操作人署名用：远端合入内容署名发送端而非本端用户）；
         // peers 快照可能已更新/对端离线，查不到时缺省 null（历史回退本端署名）。
         const peer = useCollabStore.getState().peers.find((p) => p.peerId === peerId);
         receiveSyncMessage(
           file,
-          base64ToBytes(payload as string),
+          bytes,
           peerId,
           peer ? { id: `peer-${peerId}`, name: peer.nickname, device: peer.deviceName } : undefined,
         );
@@ -84,6 +126,7 @@ export function registerNoteCollabWiring(): () => void {
   setNoteCollabBroadcast({
     sendSyncMessage: (file, payload) => collabSendSink("note-sync")(file, bytesToBase64(payload)),
     sendAwareness: (file, payload) => collabSendSink("note-aware")(file, bytesToBase64(payload)),
+    sendRelocate: (file, payload) => collabSendSink("note-sync")(file, bytesToBase64(payload)),
   });
   offs.push(() => setNoteCollabBroadcast(null));
   // 撤销 = 笔记退出协作：清空协作文档（与 collab 关闭的拆卸路径幂等重叠）

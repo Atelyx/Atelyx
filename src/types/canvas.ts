@@ -193,6 +193,8 @@ export interface VaultConfig {
   syncKeys?: boolean;
   /** 宽松换行（仓库级，缺省 true）。 */
   softLineBreak?: boolean;
+  /** 页面内标题（仓库级，缺省 false）：开启后笔记正文顶部显示文件名（去扩展名）作为标题。 */
+  inlineTitle?: boolean;
   /** 话题自动命名开关（缺省 = false 不启用）。 */
   autoNamingEnabled?: boolean;
   /** 话题自动命名模型（缺省 = 跟随默认模型；指定后命名用该模型，如 `{ providerId, model }`——话题命名一般用小模型）。 */

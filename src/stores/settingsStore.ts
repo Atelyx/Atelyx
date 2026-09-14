@@ -152,6 +152,8 @@ interface SettingsState {
   setAttachmentFolder: (folder: string | undefined) => Promise<void>;
   /** 设置宽松换行（仓库级，缺省 true）。 */
   setSoftLineBreak: (enabled: boolean) => Promise<void>;
+  /** 设置页面内标题（仓库级，缺省 false）。 */
+  setInlineTitle: (enabled: boolean) => Promise<void>;
   /** 设置进入仓库时是否自动恢复上次打开的文件（应用级；缺省 true = 开启，写 global.json）。 */
   setAutoRestoreFiles: (enabled: boolean) => Promise<void>;
   /** 设置进入仓库时是否自动切到「主页」布局（应用级；缺省 false = 保持恢复上次界面，写 global.json）。 */
@@ -892,6 +894,10 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
 
   setSoftLineBreak: async (enabled) => {
     await commitVault({ softLineBreak: enabled });
+  },
+
+  setInlineTitle: async (enabled) => {
+    await commitVault({ inlineTitle: enabled });
   },
 
   setAutoRestoreFiles: (enabled) =>

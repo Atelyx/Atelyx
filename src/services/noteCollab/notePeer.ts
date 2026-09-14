@@ -513,6 +513,8 @@ export function createNotePeer(deps: NotePeerDeps): NotePeer {
         sendSyncStep1(e);
         return;
       }
+      // 换路帧（改名/移动）不带 CRDT 内容：路径身份迁移归上层接线处理，本状态机不参与
+      if (frame.kind === "relocate") return;
       rememberRoomSeq(file, frame.tag.seq);
       if (!e) return;
       e.touchedAt = Date.now();

@@ -937,6 +937,9 @@ pub struct VaultConfig {
     /// 宽松换行：开启时预览模式单个换行符渲染为换行；关闭时按 Markdown 标准视为空格。缺省 = true（前端默认）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub soft_line_break: Option<bool>,
+    /// 页面内标题：开启后笔记正文顶部显示文件名（不含扩展名）作为标题。缺省 = false（前端默认）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inline_title: Option<bool>,
     /// 话题自动命名开关（缺省 true = 开启）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_naming_enabled: Option<bool>,
@@ -3598,6 +3601,11 @@ mod merge_vault_config_tests {
         let merged = apply(r#"{"未来字段":1,"model":"m1"}"#, r#"{"softLineBreak":true}"#);
         assert_eq!(merged.model.as_deref(), Some("m1"));
         assert_eq!(merged.soft_line_break, Some(true));
+
+        // 布尔开关按 camelCase 键落盘，且补丁只动自身字段（其余字段经合并保留）
+        let merged = apply(r#"{"softLineBreak":false}"#, r#"{"inlineTitle":true}"#);
+        assert_eq!(merged.inline_title, Some(true));
+        assert_eq!(merged.soft_line_break, Some(false));
 
         let merged = apply("这不是 JSON", r#"{"model":"m1"}"#);
         assert_eq!(merged.model.as_deref(), Some("m1"));

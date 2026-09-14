@@ -65,18 +65,48 @@ export function isPendingRenameOldPath(path: string): boolean {
   return pendingRename?.oldFile === path;
 }
 
-/** 最近一次软件内笔记重命名（保留跨渲染周期，供窗口联动区分「重命名」与「真删除」）。 */
-let lastNoteRename: { oldFile: string; newFile: string } | null = null;
-/** 文件若是最近一次重命名的旧路径，返回新路径；否则 null（真删除/外部变化）。 */
-export function lastNoteRenameTarget(oldFile: string): string | null {
-  return lastNoteRename?.oldFile === oldFile ? lastNoteRename.newFile : null;
+/** 软件内路径迁移记录（旧路径 → 新路径；保留跨渲染周期，供窗口联动区分「改名/移动」与「真删除」）。
+ *  按源路径逐条记录而非单槽：同时改名的两份文件互不覆盖（覆盖会让被顶掉那份的联动 effect 判成删除）。
+ *  只增不减会让旧条目永久滞留，故限量 + 旧路径被重新占用即作废（见 loadFiles）。 */
+const RENAME_HISTORY_MAX = 8;
+
+function createRenameHistory(max: number) {
+  /** 旧路径 → 新路径（插入序即登记序，超限丢最旧）。 */
+  const map = new Map<string, string>();
+  return {
+    /** 文件若是记录内某次迁移的旧路径，返回新路径；否则 null（真删除/外部变化）。 */
+    target: (oldFile: string): string | null => map.get(oldFile) ?? null,
+    /** 登记一次迁移。 */
+    remember: (oldFile: string, newFile: string): void => {
+      map.delete(oldFile);
+      map.set(oldFile, newFile);
+      while (map.size > max) {
+        const oldest = map.keys().next().value;
+        if (oldest === undefined) break;
+        map.delete(oldest);
+      }
+    },
+    /** 作废「旧路径已被重新占用」的条目（当前仓库里已有同路径文件 = 该记录不再指代它）。 */
+    forgetReused: (existingFiles: Iterable<string>): void => {
+      if (map.size === 0) return;
+      const existing = new Set(existingFiles);
+      for (const oldFile of [...map.keys()]) {
+        if (existing.has(oldFile)) map.delete(oldFile);
+      }
+    },
+  };
 }
 
-/** 最近一次软件内表格重命名/移动（同 lastNoteRename，供表格窗口联动）。 */
-let lastTableRename: { oldFile: string; newFile: string } | null = null;
-/** 文件若是最近一次表格重命名/移动的旧路径，返回新路径；否则 null。 */
+const noteRenames = createRenameHistory(RENAME_HISTORY_MAX);
+/** 文件若是记录内某次笔记迁移的旧路径，返回新路径；否则 null。 */
+export function lastNoteRenameTarget(oldFile: string): string | null {
+  return noteRenames.target(oldFile);
+}
+
+const tableRenames = createRenameHistory(RENAME_HISTORY_MAX);
+/** 文件若是记录内某次表格迁移的旧路径，返回新路径；否则 null。 */
 export function lastTableRenameTarget(oldFile: string): string | null {
-  return lastTableRename?.oldFile === oldFile ? lastTableRename.newFile : null;
+  return tableRenames.target(oldFile);
 }
 
 /** 软件内正在进行的文件夹重命名（old → new）。watcher 收到旧目录下文件事件时据此跳过（同 pendingRename）。 */
@@ -149,6 +179,10 @@ async function applyNoteFileChange(oldFile: string, newFile: string, newTitle: s
     const { rewritten } = await renameNoteSvc(oldFile, newFile);
     // rename_note 会扫描更新所有 .atlx 的 file 引用（写 .atlx），标记自写抑制 watcher 误报
     markSelfSave();
+    // 记录本次重命名（跨渲染保留）：工作区联动据此把打开的笔记切到新文件，而非误判删除关闭。
+    // 必须早于下面的列表刷新——联动 effect 由列表变化触发，晚记则 effect 先按「已删除」把笔记面板关掉，
+    // 且关掉后 currentNoteFile 为空、effect 早退，再也不会回到新文件（同 applyFolderFileChange 的时序）
+    noteRenames.remember(oldFile, newFile);
     // 磁盘 .atlx 已变：画布订阅者据 `note:renamed|moved` 同步乐观锁基准与节点 file/title，
     // 须在函数返回前完成（下一次自动保存依赖基准已更新）；撤销栈路径迁移同由笔记订阅者承担。
     // `rewritten`（被代写正文的其它笔记）随事件下发：它们的自写回波被上面的抑制窗口吞掉，
@@ -161,8 +195,6 @@ async function applyNoteFileChange(oldFile: string, newFile: string, newTitle: s
       rewritten,
     });
     await useVaultStore.getState().loadFiles();
-    // 记录本次重命名（跨渲染保留）：窗口联动据此把打开的笔记切到新文件，而非误判删除关闭
-    lastNoteRename = { oldFile, newFile };
     // 侧文件先确保在新编码名下（存量旧编码侧文件迁移），再随重命名迁移——
     // Rust remap_sideloads 只按新编码名查找，未迁移则旧文件在重命名后孤儿化
     await migrateHistoryFile("note", oldFile).catch((e) => notifySidecarFailure("笔记重命名后的历史迁移", e));
@@ -216,6 +248,8 @@ async function applyTableFileChange(oldFile: string, newFile: string, newTitle: 
       await moveTableVault(oldFile, newFile);
     }
     markSelfSave();
+    // 记录本次重命名（必须早于下面的列表刷新，同 applyNoteFileChange：联动 effect 由列表变化触发）
+    tableRenames.remember(oldFile, newFile);
     await emitFileEvent({
       kind: newTitle === null ? "table:moved" : "table:renamed",
       oldPath: oldFile,
@@ -223,7 +257,6 @@ async function applyTableFileChange(oldFile: string, newFile: string, newTitle: 
       newTitle,
     });
     await useVaultStore.getState().loadFiles();
-    lastTableRename = { oldFile, newFile };
     // 侧文件先确保在新编码名下，再随重命名迁移（同 applyNoteFileChange）
     await migrateHistoryFile("table", oldFile).catch((e) => notifySidecarFailure("表格重命名后的历史迁移", e));
     // 历史侧文件随迁（表格 kind 目录）；失败不阻塞重命名主流程
@@ -368,6 +401,14 @@ interface VaultFileState {
    * 返回实际落盘路径（被去重时 ≠ 目标名，调用方据此提示）。同 renameNote 更新引用/树/窗口联动。
    */
   moveNote: (oldFile: string, targetDir: string) => Promise<string>;
+  /**
+   * 协作对端改名/移动（换路帧）：本端把该笔记的路径身份跟上。
+   *
+   * 磁盘变更、历史侧文件与仓库配置引用的改写已由改名方在共享盘上完成，本端只更新自身状态——
+   * 重复落盘会用本端陈旧内存覆盖对端刚写的值。重命名记录须早于列表刷新（同本地改名），
+   * 本端正打开该笔记时面板随之切到新路径的联动链路才成立。
+   */
+  adoptRemoteNoteMigration: (oldFile: string, newFile: string) => Promise<void>;
   /** 删除 `.md`（不更新 .atlx 引用，断链由前端 TextNode 显示空正文降级）。 */
   deleteNote: (file: string) => Promise<void>;
   /**
@@ -521,7 +562,13 @@ export const useVaultStore = create<VaultFileState>((set, get) => ({
     try {
       const tree = await listVaultTree();
       if (seq !== loadFilesSeq) return;
-      set({ tree, noteList: collectByExt(tree, ".md"), tableList: collectByExt(tree, ".atb") });
+      const noteList = collectByExt(tree, ".md");
+      const tableList = collectByExt(tree, ".atb");
+      // 迁移记录按磁盘事实作废：旧路径已被重新占用（同名文件）时，它不再指代上次迁走的那份——
+      // 留着会把该新文件的删除误判成那次迁移，把面板切到无关文件、并把挂起输入写进那里
+      noteRenames.forgetReused(noteList.map((n) => n.file));
+      tableRenames.forgetReused(tableList.map((t) => t.file));
+      set({ tree, noteList, tableList });
     } catch (e) {
       console.error("加载仓库文件树失败", e);
     }
@@ -547,6 +594,13 @@ export const useVaultStore = create<VaultFileState>((set, get) => ({
     return moveVaultFile(oldFile, targetDir, (newFile) =>
       applyNoteFileChange(oldFile, newFile, null),
     );
+  },
+
+  adoptRemoteNoteMigration: async (oldFile, newFile) => {
+    // 记录早于列表刷新（联动 effect 由列表变化触发，晚记会被判成外部删除并关掉面板）
+    noteRenames.remember(oldFile, newFile);
+    useUiStateStore.getState().renameLastFile("note", oldFile, newFile);
+    await get().loadFiles();
   },
 
   deleteNote: async (file) => {

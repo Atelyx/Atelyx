@@ -20,6 +20,8 @@ export const NOTE_FRAME_SYNC = 0x03;
 export const NOTE_FRAME_BASELINE = 0x42;
 /** 重同步请求帧类型（relay 缺帧/周期反熵）。 */
 export const NOTE_FRAME_RESYNC = 0x43;
+/** 换路帧类型（笔记改名/移动）。 */
+export const NOTE_FRAME_RELOCATE = 0x44;
 
 /**
  * 基线标签：`seq` 为提案序号（Lamport），`author` 为本会话稳定身份 id，`id` 为基线正文内容标识。
@@ -100,11 +102,27 @@ export function encodeNoteResync(reason: number): Uint8Array {
   return encoding.toUint8Array(encoder);
 }
 
+/**
+ * 换路帧（改名/移动）：旧路径 + 新路径。
+ *
+ * 本帧挤在旧路径的通道上（`file` = 旧路径），因此旧路径也写进帧体：接收方据此核对
+ * 通道与载荷一致（防陈旧/串文件载荷），不一致即丢弃。新标题由接收方从新路径派生
+ * （改名与移动对路径身份的影响相同，无需区分）。
+ */
+export function encodeNoteRelocate(oldPath: string, newPath: string): Uint8Array {
+  const encoder = encoding.createEncoder();
+  encoding.writeVarUint(encoder, NOTE_FRAME_RELOCATE);
+  encoding.writeVarString(encoder, oldPath);
+  encoding.writeVarString(encoder, newPath);
+  return encoding.toUint8Array(encoder);
+}
+
 /** 解码结果（按帧类型区分）。 */
 export type NoteFrame =
   | { kind: "sync"; tag: BaselineTag; payload: Uint8Array }
   | { kind: "baseline"; tag: BaselineTag; baselineText: string; currentText: string }
-  | { kind: "resync"; reason: number };
+  | { kind: "resync"; reason: number }
+  | { kind: "relocate"; oldPath: string; newPath: string };
 
 /** 解析帧：类型/字段不完整或类型未知一律返回 null。 */
 export function decodeNoteFrame(payload: Uint8Array): NoteFrame | null {
@@ -129,6 +147,12 @@ export function decodeNoteFrame(payload: Uint8Array): NoteFrame | null {
       const reason = decoding.readVarUint(decoder);
       if (decoding.hasContent(decoder)) return null;
       return { kind: "resync", reason };
+    }
+    if (kind === NOTE_FRAME_RELOCATE) {
+      const oldPath = decoding.readVarString(decoder);
+      const newPath = decoding.readVarString(decoder);
+      if (decoding.hasContent(decoder)) return null;
+      return { kind: "relocate", oldPath, newPath };
     }
     return null;
   } catch {

@@ -26,11 +26,16 @@ interface SentFrame {
   kind: string;
   tag: { seq: number; author: string; id: string };
   currentText?: string;
+  /** 换路帧：新路径（kind = "relocate"）。 */
+  newPath?: string;
 }
 
 let frames: SentFrame[];
 let awareness: Array<{ file: string; bytes: number }>;
 let rebuilds: Array<{ file: string; text: string }>;
+
+/** 非基线/同步帧（换路、重同步）没有基线标签：占位以统一载体形状。 */
+const EMPTY_TAG = { seq: 0, author: "", id: "" };
 
 function decodeSent(file: string, payload: Uint8Array): SentFrame {
   const frame = decodeNoteFrame(payload);
@@ -39,7 +44,8 @@ function decodeSent(file: string, payload: Uint8Array): SentFrame {
     return { file, kind: "baseline", tag: frame.tag, currentText: frame.currentText };
   }
   if (frame?.kind === "sync") return { file, kind: "sync", tag: frame.tag };
-  return { file, kind: "resync", tag: { seq: 0, author: "", id: "" } };
+  if (frame?.kind === "relocate") return { file, kind: "relocate", tag: EMPTY_TAG, newPath: frame.newPath };
+  return { file, kind: "resync", tag: EMPTY_TAG };
 }
 
 beforeEach(() => {
@@ -50,6 +56,7 @@ beforeEach(() => {
   setNoteCollabBroadcast({
     sendSyncMessage: (file, payload) => frames.push(decodeSent(file, payload)),
     sendAwareness: (file, payload) => awareness.push({ file, bytes: payload.length }),
+    sendRelocate: (file, payload) => frames.push(decodeSent(file, payload)),
   });
   setNoteCollabBindingRefresh((file, doc) => {
     rebuilds.push({ file, text: doc.ytext.toString() });

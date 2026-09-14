@@ -40,7 +40,7 @@ import {
   syncCanvasNodeRefs,
 } from "@/stores/canvasStore";
 import { useTableStore, registerTableCollabWiring, registerTablePluginWiring } from "@/stores/tableStore";
-import { registerNoteCollabWiring, useNoteCollabStore } from "@/stores/noteCollabStore";
+import { broadcastNoteRelocate, registerNoteCollabWiring, useNoteCollabStore } from "@/stores/noteCollabStore";
 import { useChatPanelStore } from "@/stores/chatPanelStore";
 import { useCalendarStore } from "@/stores/calendarStore";
 import { useNoteUndoStore } from "@/stores/noteUndoStore";
@@ -50,6 +50,7 @@ import { registerCollabPresenceProvider } from "@/stores/collabStore";
 import { isPendingFolderRenameOldPath, isPendingRenameOldPath, useVaultStore } from "@/stores/vaultStore";
 import { isSelfSaveEcho } from "@/utils/selfSave";
 import { isCollabCanvasRenamePath } from "@/utils/canvasCollab";
+import { isCollabNoteRelocatePath } from "@/utils/noteCollabRelocate";
 import { tableToSnapshotText } from "@/utils/table";
 import { registerDomainLifecycle } from "@/utils/kernelLifecycle";
 import { registerNoteSurface } from "@/utils/noteSurfaceHost";
@@ -368,6 +369,8 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
       }),
       vaultHandler("note:changed", (e) => {
         if (isPendingRenameOldPath(e.path) || isPendingFolderRenameOldPath(e.path)) return;
+        // 协作换路的回波（对端改名后旧路径消失/新路径出现）：路径身份已由换路帧跟上，别按旧路径重读正文
+        if (isCollabNoteRelocatePath(e.path)) return;
         // 画布上引用该笔记的节点：silent 刷新正文（与 NoteEditor 外部感知相互独立）
         void useCanvasStore.getState().refreshTextContent(e.path);
       }),
@@ -477,6 +480,9 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
     vaultEventHandlers: [
       vaultHandler("note:changed", (e) => {
         if (isPendingRenameOldPath(e.path) || isPendingFolderRenameOldPath(e.path)) return;
+        // 协作换路的回波（对端改名/移动后共享盘上旧路径消失、新路径出现）：路径身份已由换路帧
+        // 跟上，按帧的结果跳过——否则会被判成外部改盘，把刚跟上的编辑面打回
+        if (isCollabNoteRelocatePath(e.path)) return;
         // NoteEditor 感知外部修改：无本地改动实时刷新、有改动提示冲突
         //（markNoteExternallyEdited 始终保留：跨编辑面同步 + 冲突检测必经，不受自写回波影响）
         useNoteStore.getState().markNoteExternallyEdited(e.path);
@@ -488,6 +494,8 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
       // 缓存按路径键存，旧路径可被同名新文件复用，不作废会把已改走/已删的正文串给新笔记；
       // 删除路径的 watcher 事件可能落在自写抑制窗口内被跳过，故与改名同款显式作废
       vaultHandler("note:renamed", (e) => {
+        // 对端可能正打开同一笔记：广播换路，对端据此把路径身份跟上（未连接时静默丢弃）
+        broadcastNoteRelocate(e.oldPath, e.newPath);
         useNoteStore.getState().invalidateNoteCache(e.oldPath);
         // Rust 代写正文的其它笔记（链接改写）：自写回波被抑制窗口吞掉，缓存须显式作废
         for (const file of e.rewritten ?? []) useNoteStore.getState().invalidateNoteCache(file);
@@ -496,6 +504,7 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
         useNoteCollabStore.getState().disposeDoc(e.oldPath);
       }),
       vaultHandler("note:moved", (e) => {
+        broadcastNoteRelocate(e.oldPath, e.newPath);
         useNoteStore.getState().invalidateNoteCache(e.oldPath);
         for (const file of e.rewritten ?? []) useNoteStore.getState().invalidateNoteCache(file);
         useNoteUndoStore.getState().renameFile(e.oldPath, e.newPath);

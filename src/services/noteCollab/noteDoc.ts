@@ -14,6 +14,7 @@ import {
   type NotePeer,
   type NoteRemoteAuthor,
 } from "./notePeer";
+import { encodeNoteRelocate } from "./frame";
 
 export { baselineSeedUpdate };
 export type { NoteIdentity, NoteRemoteAuthor };
@@ -26,6 +27,8 @@ export interface NoteCollabBroadcast {
   sendSyncMessage: (file: string, payload: Uint8Array) => void;
   /** 广播 awareness 更新（y-protocols 编码）。 */
   sendAwareness: (file: string, payload: Uint8Array) => void;
+  /** 广播换路帧（改名/移动；file = 旧路径，未连接时静默丢弃），对端据此跟随切换打开路径。 */
+  sendRelocate: (file: string, payload: Uint8Array) => void;
 }
 
 let broadcast: NoteCollabBroadcast | null = null;
@@ -98,6 +101,11 @@ export function isRemoteNoteApplyActive(): boolean {
 /** 取某文件最近一次远端合入的作者（无 = null）。 */
 export function getLastRemoteAuthor(file: string): NoteRemoteAuthor | null {
   return peer.getLastRemoteAuthor(file);
+}
+
+/** 广播本端换路（改名/移动）：帧挤在旧路径通道上，对端据此跟随（未连接时静默丢弃）。 */
+export function sendNoteRelocate(oldPath: string, newPath: string): void {
+  broadcast?.sendRelocate(oldPath, encodeNoteRelocate(oldPath, newPath));
 }
 
 /** 销毁单文件文档（文件改名/移动/删除：路径即身份，防同名新文件串内容）。 */

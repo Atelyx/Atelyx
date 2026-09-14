@@ -20,6 +20,7 @@ import type { BacklinkRow, CollabPeer } from "@/types";
 import { parseFrontmatter, stringifyFrontmatter } from "@/utils/frontmatter";
 import { noteTitleFromFile } from "@/utils/filename";
 import { NotePropertiesView } from "@/components/editor/NotePropertiesView";
+import { NoteTitle } from "@/components/editor/NoteTitle";
 import { type MarkdownEditorLinks } from "@/components/editor/MarkdownEditor";
 import { NoteBodyEditor } from "@/components/editor/NoteBodyEditor";
 import { HistoryModal } from "@/components/history/HistoryModal";
@@ -69,6 +70,8 @@ export function NoteEditor({ file }: { file: string }) {
   const collabEnabled = useSettingsStore((s) => s.collabEnabled);
   const collabConnected = useCollabStore((s) => s.connected);
   const isCollab = collabEnabled && collabConnected;
+  /** 页面内标题：正文顶部显示文件名（设置 → 编辑器，缺省关）。 */
+  const inlineTitle = useSettingsStore((s) => s.vaultConfig?.inlineTitle ?? false);
   /** 撤销/重做按焦点所在编辑面归属（面板与画布节点共用一套路由）。 */
   useNoteUndoRouting();
   const [preview, setPreview] = useState(true);
@@ -569,6 +572,10 @@ export function NoteEditor({ file }: { file: string }) {
           </span>
         </span>
       </div>
+
+      {/* 页面内标题（设置 → 编辑器开启时）：正文最顶端显示文件名，点击可重命名笔记；
+          读取失败时不显示（此时文件名不属于可信内容） */}
+      {inlineTitle && !loadError && <NoteTitle file={file} />}
 
       {/* 属性区：胶囊行式融入正文顶部（可点击编辑）；渲染/实时预览编辑模式显示，源码模式由 textarea
           显示 YAML 原文不重复显示；无 frontmatter 时也显示空态「添加属性」行（内联添加首个属性）；格式错误时显示红条 */}

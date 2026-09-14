@@ -4,7 +4,7 @@
  * 保留名/尾点规则曾缺失，导致前端预测的落盘名与实际写盘名漂移（画布改名的保存目标指错文件）。
  */
 import { describe, expect, it } from "vitest";
-import { sanitizeFilename } from "./filename";
+import { noteRenameTarget, sanitizeFilename } from "./filename";
 
 describe("sanitizeFilename", () => {
   it("replaces illegal chars and trims", () => {
@@ -23,5 +23,29 @@ describe("sanitizeFilename", () => {
     expect(sanitizeFilename("笔记.")).toBe("笔记._");
     expect(sanitizeFilename("笔记 ")).toBe("笔记");
     expect(sanitizeFilename("笔记")).toBe("笔记");
+  });
+});
+
+describe("noteRenameTarget", () => {
+  it("keeps the directory and appends the .md extension", () => {
+    expect(noteRenameTarget("a/笔记.md", "新名")).toBe("a/新名.md");
+    expect(noteRenameTarget("笔记.md", "新名")).toBe("新名.md");
+  });
+
+  it("sanitizes the title like the rename path does", () => {
+    expect(noteRenameTarget("a/笔记.md", "a:b")).toBe("a/a_b.md");
+    expect(noteRenameTarget("a/笔记.md", "con")).toBe("a/_con.md");
+  });
+
+  it("returns null when the target equals the current path", () => {
+    expect(noteRenameTarget("a/笔记.md", "笔记")).toBeNull();
+    expect(noteRenameTarget("a/笔记.md", " 笔记 ")).toBeNull();
+    // 净化后与原路径相同（非法字符落在原文件名上）同样是无需改动
+    expect(noteRenameTarget("a/a_b.md", "a:b")).toBeNull();
+  });
+
+  it("falls back to 未命名 when the title sanitizes to empty", () => {
+    expect(noteRenameTarget("a/笔记.md", "  ")).toBe("a/未命名.md");
+    expect(noteRenameTarget("a/笔记.md", "///")).toBe("a/___.md");
   });
 });

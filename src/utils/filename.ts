@@ -61,6 +61,19 @@ export function noteTitleFromFile(file: string): string {
   return stripExt(baseName(file));
 }
 
+/**
+ * 笔记改名的目标相对路径（同目录）：净化标题 + 补 `.md`；净化后为空用兜底名「未命名」。
+ * 与 `vaultStore.renameNote` 的重命名骨架同口径（净化规则/兜底名/扩展名一致），
+ * 供调用方在重命名前判定「目标已存在」，而非让链路静默加序号。
+ * 返回 null = 目标与原路径相同（无需改名）。
+ */
+export function noteRenameTarget(file: string, title: string): string | null {
+  const dir = parentDir(file);
+  const name = `${sanitizeFilename(title) || "未命名"}.md`;
+  const target = dir ? `${dir}/${name}` : name;
+  return target === file ? null : target;
+}
+
 /** 表格显示标题：路径末段文件名去 `.atb` 后缀。 */
 export function tableTitleFromFile(file: string): string {
   return stripExt(baseName(file));

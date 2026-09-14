@@ -1,5 +1,5 @@
 /**
- * 笔记协作帧编解码测试（services/noteCollab/frame.ts）：三类帧往返、标签全序、
+ * 笔记协作帧编解码测试（services/noteCollab/frame.ts）：四类帧往返、标签全序、
  * 坏帧（空/截断/未知类型/尾随字节）一律返回 null 而不抛异常。
  */
 import { describe, it, expect } from "vitest";
@@ -9,6 +9,7 @@ import {
   compareTag,
   decodeNoteFrame,
   encodeNoteBaseline,
+  encodeNoteRelocate,
   encodeNoteResync,
   encodeNoteSync,
   sameContent,
@@ -112,5 +113,22 @@ describe("坏帧", () => {
 
   it("opcode 常量互不冲突且与 y-protocols 消息类型错开", () => {
     expect(new Set([NOTE_FRAME_BASELINE, 0, 1, 2]).size).toBe(4);
+  });
+});
+
+describe("换路帧", () => {
+  it("往返：旧路径 + 新路径（含非 ASCII 与子目录）", () => {
+    const frame = decodeNoteFrame(encodeNoteRelocate("笔记/旧 名.md", "子/新名.md"));
+    expect(frame).toEqual({ kind: "relocate", oldPath: "笔记/旧 名.md", newPath: "子/新名.md" });
+  });
+
+  it("不带标题等额外字段：尾随字节即坏帧", () => {
+    const buffer = new Uint8Array([...encodeNoteRelocate("a.md", "b.md"), 9]);
+    expect(decodeNoteFrame(buffer)).toBeNull();
+  });
+
+  it("截断的第二段路径 → null", () => {
+    const full = encodeNoteRelocate("a.md", "新名.md");
+    expect(decodeNoteFrame(full.slice(0, full.length - 1))).toBeNull();
   });
 });
