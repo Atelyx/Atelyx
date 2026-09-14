@@ -1,0 +1,3 @@
+# 锁定工具链版本：满足 crate MSRV（tauri-plugin-updater 要求 ≥ 1.77.2）与当前依赖的可重复构建。
+[toolchain]
+channel = "1.97.1"
