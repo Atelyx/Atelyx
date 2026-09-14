@@ -17,7 +17,7 @@ import {
   copyVaultFolder,
   deleteAttachment,
   deleteFolder as deleteFolderSvc,
-  deleteNote,
+  deleteNote as deleteNoteSvc,
   listVaultTree,
   readAttachmentDataUrl as readAttachmentDataUrlSvc,
   remapSideloads,
@@ -543,7 +543,7 @@ export const useVaultStore = create<VaultFileState>((set, get) => ({
   },
 
   deleteNote: async (file) => {
-    await deleteNote(file);
+    await deleteNoteSvc(file);
     // 文件已删：清掉该文件的撤销栈与挂起输入（防残留内存；挂起输入不清会在下次 flush 时
     // 经 writeNote 重建已删除文件）——归笔记订阅者（`note:deleted` 事件）
     emitVaultEvent({ kind: "note:deleted", path: file });

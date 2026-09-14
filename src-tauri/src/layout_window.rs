@@ -113,7 +113,7 @@ fn sync_detached_bounds(ui: &mut AppUiState, label: &str, b: &WindowBounds) -> b
 }
 
 /// 撕裂窗口标题（Rust 侧占位；窗口 boot 后由前端按激活标签更新）。
-fn title_of_tabs_rust(tabs: &[crate::layout_model::TabItem], active_tab_id: &Option<String>) -> String {
+fn title_of_tabs(tabs: &[crate::layout_model::TabItem], active_tab_id: &Option<String>) -> String {
     let active = tabs.iter().find(|t| Some(&t.id) == active_tab_id.as_ref()).or_else(|| tabs.first());
     active.map(|t| t.view.clone()).unwrap_or_else(|| "面板".to_string())
 }
@@ -164,7 +164,7 @@ fn reconcile_windows_once(app: &AppHandle) {
             crate::commands::windows::create_panel_window_internal(
                 app,
                 &label,
-                &title_of_tabs_rust(&w.tabs, &w.active_tab_id),
+                &title_of_tabs(&w.tabs, &w.active_tab_id),
                 &w.bounds,
             );
         }

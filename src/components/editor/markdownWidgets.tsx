@@ -533,7 +533,11 @@ export class HtmlWidget extends WidgetType {
       else if (this.opts.isVaultPathNote?.(url) && this.opts.onOpenVaultPathNote)
         this.opts.onOpenVaultPathNote(url);
     });
-    // 相对路径图片 → Rust 读 dataURL（外链 https/data/blob 直出）
+    // 相对路径图片 → Rust 读 dataURL（外链 https/data/blob 直出）；取消标记防销毁后回写旧 DOM
+    let imageLoadsCancelled = false;
+    imageLoadCancels.set(el, () => {
+      imageLoadsCancelled = true;
+    });
     for (const img of Array.from(el.querySelectorAll("img[src]"))) {
       const src = img.getAttribute("src") ?? "";
       if (/^(https?:|data:|blob:)/i.test(src)) continue;
@@ -542,6 +546,7 @@ export class HtmlWidget extends WidgetType {
         continue;
       }
       void this.opts.readImage(src).then((dataUrl) => {
+        if (imageLoadsCancelled) return;
         if (dataUrl) img.setAttribute("src", dataUrl);
       });
     }
@@ -554,6 +559,11 @@ export class HtmlWidget extends WidgetType {
       );
     }
     return el;
+  }
+
+  destroy(el: HTMLElement) {
+    imageLoadCancels.get(el)?.();
+    imageLoadCancels.delete(el);
   }
 }
 

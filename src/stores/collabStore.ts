@@ -149,51 +149,51 @@ async function establishConnection(): Promise<void> {
   try {
     connectTransport({
       name: "relay",
-    url: cfg.url,
-    hello: {
-      vaultId: currentVaultId,
-      nickname: cfg.nickname || cfg.deviceName || "用户",
-      color: cfg.color || randomPeerColor(),
-      deviceName: cfg.deviceName,
-      version,
-    },
-    onHelloAck: (peerId) => {
-      myPeerId = peerId;
-      // hello-ack 先于 peers 帧到达（relay 端保证）：立即过滤已收快照里的自己 + 暴露本端 peerId
-      useCollabStore.setState((s) => ({
-        myPeerId: peerId,
-        peers: s.peers.filter((p) => p.peerId !== peerId),
-      }));
-    },
-    onPeers: (peers) =>
-      useCollabStore.setState({ peers: peers.filter((p) => p.peerId !== myPeerId) }),
-    onPeerPresence: (peerId, presence) => {
-      if (peerId === myPeerId) return;
-      useCollabStore.setState((s) => ({
-        peers: s.peers.map((p) => (p.peerId === peerId ? { ...p, presence } : p)),
-      }));
-    },
-    // 服务端 error 帧（协议异常/房间拒绝）：协作是尽力而为的辅助能力，仅记录不打断使用
-    onServerError: (message) => console.warn("协作中转错误：", message),
-    // 本连接接收队列被广播裁剪（消费过慢）→ 帧已丢：与重连同款重新握手补齐；
-    // 服务端按最小间隔下发，本端再合并一波，防「重握手大帧 → 更慢 → 再下发」自激
-    onResync: () => {
-      const now = Date.now();
-      if (now - lastResyncAt < RESYNC_COALESCE_MS) return;
-      lastResyncAt = now;
-      runCollabReconnects();
-    },
-    onStatusChange: (connected) => {
-      useCollabStore.setState({ connected });
-      // 连接建立后补发一次当前 presence：重连/进房间时本端选中立即可见，
-      // 否则要等用户下一次选中变化才广播（hello 已先发，同 TCP FIFO 保证先入房）
-      if (connected) {
-        // 各域重连回调（表格/画布 presence 补发、笔记重新握手等；域经 registerCollabReconnect
-        // 自注册，接线顺序保证画布打开时画布 presence 覆盖表格槽）
+      url: cfg.url,
+      hello: {
+        vaultId: currentVaultId,
+        nickname: cfg.nickname || cfg.deviceName || "用户",
+        color: cfg.color || randomPeerColor(),
+        deviceName: cfg.deviceName,
+        version,
+      },
+      onHelloAck: (peerId) => {
+        myPeerId = peerId;
+        // hello-ack 先于 peers 帧到达（relay 端保证）：立即过滤已收快照里的自己 + 暴露本端 peerId
+        useCollabStore.setState((s) => ({
+          myPeerId: peerId,
+          peers: s.peers.filter((p) => p.peerId !== peerId),
+        }));
+      },
+      onPeers: (peers) =>
+        useCollabStore.setState({ peers: peers.filter((p) => p.peerId !== myPeerId) }),
+      onPeerPresence: (peerId, presence) => {
+        if (peerId === myPeerId) return;
+        useCollabStore.setState((s) => ({
+          peers: s.peers.map((p) => (p.peerId === peerId ? { ...p, presence } : p)),
+        }));
+      },
+      // 服务端 error 帧（协议异常/房间拒绝）：协作是尽力而为的辅助能力，仅记录不打断使用
+      onServerError: (message) => console.warn("协作中转错误：", message),
+      // 本连接接收队列被广播裁剪（消费过慢）→ 帧已丢：与重连同款重新握手补齐；
+      // 服务端按最小间隔下发，本端再合并一波，防「重握手大帧 → 更慢 → 再下发」自激
+      onResync: () => {
+        const now = Date.now();
+        if (now - lastResyncAt < RESYNC_COALESCE_MS) return;
+        lastResyncAt = now;
         runCollabReconnects();
-      }
-    },
-  });
+      },
+      onStatusChange: (connected) => {
+        useCollabStore.setState({ connected });
+        // 连接建立后补发一次当前 presence：重连/进房间时本端选中立即可见，
+        // 否则要等用户下一次选中变化才广播（hello 已先发，同 TCP FIFO 保证先入房）
+        if (connected) {
+          // 各域重连回调（表格/画布 presence 补发、笔记重新握手等；域经 registerCollabReconnect
+          // 自注册，接线顺序保证画布打开时画布 presence 覆盖表格槽）
+          runCollabReconnects();
+        }
+      },
+    });
   } catch (e) {
     // 传输未注册/建连失败：协作是尽力而为的辅助能力，记录后保持未连接（后续 applyConfig/切仓库重试）
     console.warn("协作连接建立失败：", e instanceof Error ? e.message : String(e));

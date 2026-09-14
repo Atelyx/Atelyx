@@ -12,6 +12,8 @@ import { useEffect } from "react";
 import { getOpenNoteSession } from "@/hooks/useNoteBodySession";
 
 function onKeyDown(e: KeyboardEvent): void {
+  // 已被更内层处理的事件不重复消费；IME 组合中的 z/y 是正文输入而非撤销命令
+  if (e.defaultPrevented || e.isComposing) return;
   if (!e.ctrlKey && !e.metaKey) return;
   const key = e.key.toLowerCase();
   if (key !== "z" && key !== "y") return;

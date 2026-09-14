@@ -8,7 +8,7 @@
  * - `messagesToWire` / `toLlmMessages`：中性词 ⇄ 内部消息/线协议的纯转换。
  *
  * 加新供应商 = 按同一中性接缝再实现一个适配器，调用方无感知。
- * key 由用户在设置中填入，本地加密存储，运行时解密到内存。
+ * key 由用户在设置中填入，本适配器只在发请求时经入参拿到明文（存取归 keychain，见 services/keychain）。
  */
 import type {
   Attachment,
