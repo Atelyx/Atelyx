@@ -198,9 +198,20 @@ pub struct FileTreeNode {
     pub children: Vec<FileTreeNode>,
 }
 
+/// 相对路径分隔符归一：`\` → `/`（显式传入的相对路径可能带反斜杠；隐藏段/排除判定
+/// 按统一分隔符切段，防反斜杠路径绕过过滤）。仅含 `\` 时分配，否则零开销借用。
+fn normalize_rel_separators(rel: &str) -> std::borrow::Cow<'_, str> {
+    if rel.contains('\\') {
+        std::borrow::Cow::Owned(rel.replace('\\', "/"))
+    } else {
+        std::borrow::Cow::Borrowed(rel)
+    }
+}
+
 /// 相对路径是否应被过滤：任一路径段以 `.` 开头（隐藏目录/文件，如 `.atelyx`/`.git`/`.obsidian`）
 /// 或精确命中排除文件夹列表。文件树与 watcher 共用此判定，保证显示/监听语义一致。
 pub fn is_excluded_rel(rel: &str, exclude: &[String]) -> bool {
+    let rel = normalize_rel_separators(rel);
     rel.split('/').any(|seg| {
         seg.starts_with('.') || exclude.iter().any(|e| e.as_str() == seg)
     })
@@ -210,6 +221,7 @@ pub fn is_excluded_rel(rel: &str, exclude: &[String]) -> bool {
 /// （glob/grep/list_dir）对隐藏目录完全屏蔽：遍历结果过滤 + 显式把 path/dir 指向隐藏目录时拒绝。
 /// 排除 `..`（父目录段）——它由 safe_join 的越界校验拒绝，报错语义更准确。
 pub(crate) fn has_hidden_segment(rel: &str) -> bool {
+    let rel = normalize_rel_separators(rel);
     rel.split('/').any(|seg| {
         seg.starts_with('.') && !seg.is_empty() && seg != "." && seg != ".."
     })
@@ -1351,6 +1363,22 @@ pub struct ChatMessageRecord {
     pub created_at: i64,
 }
 
+/// 编码一次追加批：分隔符（如需）+ 每条记录 JSON + 换行，拼成单个缓冲区。
+/// 一次 `write_all` 写完本批——共享盘/多设备并发追加时记录不与其它写入端在行中间交错，
+/// 每行仍是完整 JSON 可独立解析（跨批交错只发生在行边界）。
+fn build_chat_append_buffer(records: &[ChatMessageRecord], needs_sep: bool) -> Result<Vec<u8>, String> {
+    let mut buf = Vec::new();
+    if needs_sep {
+        buf.push(b'\n');
+    }
+    for record in records {
+        let line = serde_json::to_string(record).map_err(|e| e.to_string())?;
+        buf.extend_from_slice(line.as_bytes());
+        buf.push(b'\n');
+    }
+    Ok(buf)
+}
+
 /// 追加式写会话消息正文 .jsonl（消息增长场景：前端只传新增记录，每记录一行紧凑 JSON，省全量重拼与 IPC 载荷）。
 /// 真 OS 追加（open append + fsync）而非读-改-写全量重写：多设备并发追加同一会话互不覆盖
 /// （两写皆落、行交错，每行完整 JSON 可独立解析）。写前校验文件以 `\n` 结尾，缺则补 `\n`——
@@ -1381,18 +1409,13 @@ pub fn append_chat_messages_file(
             last[0] != b'\n'
         }
     };
+    let buf = build_chat_append_buffer(records, needs_sep)?;
     let mut handle = std::fs::OpenOptions::new()
         .append(true)
         .open(&path)
         .map_err(|e| e.to_string())?;
-    if needs_sep {
-        handle.write_all(b"\n").map_err(|e| e.to_string())?;
-    }
-    for record in records {
-        let line = serde_json::to_string(record).map_err(|e| e.to_string())?;
-        handle.write_all(line.as_bytes()).map_err(|e| e.to_string())?;
-        handle.write_all(b"\n").map_err(|e| e.to_string())?;
-    }
+    // 本批一次写入：共享盘/多设备并发追加时，本批记录不会与其它写入端在行中间交错
+    handle.write_all(&buf).map_err(|e| e.to_string())?;
     handle.sync_all().map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -1798,6 +1821,7 @@ pub struct BacklinkRow {
 }
 
 /// 单条提取结果：name 与 path 二选一（`[[..]]` 为 name 形式，`[..](..)` 为 path 形式）。
+#[derive(Clone)]
 struct WikiRef {
     name: Option<String>,
     path: Option<String>,
@@ -1846,9 +1870,20 @@ pub fn refresh_wiki_index(
 }
 
 /// 查询反链：`[[name]]` 按笔记名精确匹配；`[label](path)` 按归一化后的完整路径或文件名（basename）匹配
-/// （大小写不敏感兜底：Windows 文件系统不区分大小写）。
+/// （大小写不敏感兜底：Windows 文件系统不区分大小写）。basename 兜底仅在同名唯一时生效——
+/// 多处同名时只认精确路径，防给所有同名笔记误记反链。
 pub fn query_wiki_backlinks(index: &WikiIndex, note_name: &str, note_file: &str) -> Vec<BacklinkRow> {
     let target_basename = note_file.rsplit('/').next().unwrap_or(note_file);
+    // 全仓已索引笔记中同名 basename（大小写不敏感，与下方 eq_ignore_ascii_case 兜底口径一致）恰好一份
+    let basename_unique = index
+        .files
+        .keys()
+        .filter(|rel| {
+            let base = rel.rsplit('/').next().unwrap_or(rel.as_str());
+            base.eq_ignore_ascii_case(target_basename)
+        })
+        .count()
+        == 1;
     let mut rows: Vec<BacklinkRow> = Vec::new();
     for (rel, refs) in &index.refs {
         let hit = refs.iter().any(|r| {
@@ -1858,8 +1893,10 @@ pub fn query_wiki_backlinks(index: &WikiIndex, note_name: &str, note_file: &str)
                 if path == note_file || path.eq_ignore_ascii_case(note_file) {
                     return true;
                 }
-                let base = path.rsplit('/').next().unwrap_or(path.as_str());
-                base == target_basename || base.eq_ignore_ascii_case(target_basename)
+                basename_unique && {
+                    let base = path.rsplit('/').next().unwrap_or(path.as_str());
+                    base == target_basename || base.eq_ignore_ascii_case(target_basename)
+                }
             } else {
                 false
             }
@@ -2794,6 +2831,188 @@ mod hidden_segment_tests {
         assert!(!has_hidden_segment("./a.md"));
         assert!(!has_hidden_segment(".."));
         assert!(!has_hidden_segment("../x"));
+        // 反斜杠分隔符按统一分隔符切段（显式传入的相对路径可能带 `\`，防绕过隐藏判定）
+        assert!(has_hidden_segment(r".atelyx\config.json"));
+        assert!(has_hidden_segment(r"a\.git\config"));
+        assert!(!has_hidden_segment(r"a\b.md"));
+    }
+
+    #[test]
+    fn excludes_backslash_paths() {
+        // 反斜杠路径同样命中隐藏/排除判定（与正斜杠同口径）
+        assert!(is_excluded_rel(r".atelyx\config.json", &[]));
+        assert!(is_excluded_rel(r"docs\.git\config", &[]));
+        assert!(is_excluded_rel(r"a\private\f.md", &["private".to_string()]));
+        assert!(!is_excluded_rel(r"a\public\f.md", &["private".to_string()]));
+        // 正斜杠行为不变
+        assert!(is_excluded_rel("a/.git/config", &[]));
+        assert!(is_excluded_rel("private/f.md", &["private".to_string()]));
+    }
+}
+
+#[cfg(test)]
+mod wiki_backlink_tests {
+    use super::*;
+
+    /// 反链索引（files = 已索引笔记路径；refs = rel 路径 → 该文件提取到的引用）。
+    fn index_with(files: &[&str], refs: &[(&str, Vec<WikiRef>)]) -> WikiIndex {
+        let mut index = WikiIndex::default();
+        for f in files {
+            index
+                .files
+                .insert(f.to_string(), FileStamp { mtime_ms: 0, size: 0 });
+        }
+        for (rel, list) in refs {
+            index.refs.insert(rel.to_string(), list.clone());
+        }
+        index
+    }
+
+    fn path_ref(target: &str) -> WikiRef {
+        WikiRef { name: None, path: Some(target.to_string()) }
+    }
+
+    fn name_ref(target: &str) -> WikiRef {
+        WikiRef { name: Some(target.to_string()), path: None }
+    }
+
+    #[test]
+    fn basename_fallback_only_when_unique() {
+        // 同名 basename 多处：裸文件名链接无法消歧，只认精确路径，不给所有同名笔记误记反链
+        let index = index_with(
+            &["a/note.md", "b/note.md"],
+            &[("a/note.md", vec![path_ref("c/note.md")])],
+        );
+        let rows = query_wiki_backlinks(&index, "note", "a/note.md");
+        assert!(rows.is_empty(), "同名多处时裸名链接不应记为 a/note.md 的反链");
+
+        // 精确路径链接不受唯一性影响
+        let index = index_with(
+            &["a/note.md", "b/note.md"],
+            &[("b/note.md", vec![path_ref("a/note.md")])],
+        );
+        let rows = query_wiki_backlinks(&index, "note", "a/note.md");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].file, "b/note.md");
+    }
+
+    #[test]
+    fn basename_fallback_hits_when_single_note_shares_name() {
+        // 全仓唯一 basename：裸文件名链接消歧成功，计入反链
+        let index = index_with(
+            &["docs/only.md", "other.md"],
+            &[("other.md", vec![path_ref("only.md")])],
+        );
+        let rows = query_wiki_backlinks(&index, "only", "docs/only.md");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].file, "other.md");
+    }
+
+    #[test]
+    fn basename_uniqueness_is_case_insensitive() {
+        // 大小写不同但同名（Windows 视为同名）：仍按多处处理，裸名兜底不生效
+        let index = index_with(
+            &["a/Note.md", "b/note.md"],
+            &[("b/note.md", vec![path_ref("x/note.md")])],
+        );
+        let rows = query_wiki_backlinks(&index, "Note", "a/Note.md");
+        assert!(rows.is_empty(), "跨大小写同名多处时裸名链接不应计入");
+    }
+
+    #[test]
+    fn wiki_name_form_stays_exact() {
+        // `[[name]]` 保持精确匹配（既有语义，防回归）
+        let index = index_with(
+            &["a/note.md"],
+            &[("a/note.md", vec![name_ref("note")])],
+        );
+        assert_eq!(query_wiki_backlinks(&index, "note", "a/note.md").len(), 1);
+        assert!(query_wiki_backlinks(&index, "other", "a/note.md").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod chat_append_tests {
+    use super::*;
+
+    fn record(id: &str, content: &str) -> ChatMessageRecord {
+        ChatMessageRecord {
+            id: id.to_string(),
+            role: "user".to_string(),
+            content: content.to_string(),
+            display_content: None,
+            refs: None,
+            steps: None,
+            created_at: 1,
+        }
+    }
+
+    #[test]
+    fn buffer_is_one_json_line_per_record() {
+        // 无残尾：每记录独立一行，无前导分隔符
+        let buf = build_chat_append_buffer(&[record("a", "你好"), record("b", "x\ny")], false).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2);
+        // 行首是 JSON（`{`），无分隔符前缀
+        assert!(lines[0].starts_with('{'));
+        // 每行都是完整可解析的记录（round-trip 校验字段）
+        let parsed: ChatMessageRecord = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(parsed.id, "a");
+        let parsed: ChatMessageRecord = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(parsed.id, "b");
+    }
+
+    #[test]
+    fn buffer_prepends_separator_when_trailing_line_missing() {
+        // 崩溃残尾（末尾非 `\n`）：先补分隔符，残尾与新记录不粘行
+        let buf = build_chat_append_buffer(&[record("a", "x")], true).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        assert!(text.starts_with('\n'));
+        // 分隔符后的第一条记录独立成行且完整可解析
+        let non_empty: Vec<&str> = text.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(non_empty.len(), 1);
+        let parsed: ChatMessageRecord = serde_json::from_str(non_empty[0]).unwrap();
+        assert_eq!(parsed.id, "a");
+    }
+
+    #[test]
+    fn concurrent_appends_keep_each_line_parseable() {
+        // 并发追加不变量：多端各自 O_APPEND 追加后，每行仍是完整 JSON（无行内交错）、
+        // 消息不丢失。单机并发进程测试（本环境无 SMB/NAS，无法做跨设备双端压测）。
+        let dir = std::env::temp_dir().join(format!("atelyx-chat-append-{}", std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = &dir;
+        let rel = ".atelyx/对话历史/s.md.jsonl";
+        let path = root.join(".atelyx/对话历史").join("s.md.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // 先全量写一个空文件（追加路径要求文件已存在）
+        write_chat_messages_file(root, rel, "").unwrap();
+
+        let total_threads = 8;
+        let per_thread = 20;
+        std::thread::scope(|scope| {
+            for t in 0..total_threads {
+                let rel = rel.to_string();
+                let root = root.clone();
+                scope.spawn(move || {
+                    let records: Vec<ChatMessageRecord> =
+                        (0..per_thread).map(|i| record(&format!("t{t}-{i}"), "并发")).collect();
+                    append_chat_messages_file(&root, &rel, &records).unwrap();
+                });
+            }
+        });
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = content.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines.len(), total_threads * per_thread, "消息不得因交错而丢失/破碎");
+        let mut ids = std::collections::HashSet::new();
+        for line in lines {
+            let parsed: ChatMessageRecord = serde_json::from_str(line).unwrap();
+            ids.insert(parsed.id);
+        }
+        assert_eq!(ids.len(), total_threads * per_thread, "每条记录须完整可解析");
     }
 }
 
