@@ -3500,11 +3500,17 @@ mod copy_folder_tests {
 
     #[cfg(windows)]
     fn link(original: &Path, link_path: &Path, dir: bool) -> bool {
-        if dir {
+        let called = if dir {
             std::os::windows::fs::symlink_dir(original, link_path).is_ok()
         } else {
             std::os::windows::fs::symlink_file(original, link_path).is_ok()
-        }
+        };
+        // 调用成功不等于建成：收紧权限的机器上可能返回 Ok 却只落出普通文件/目录，
+        // 甚至不产生条目。以磁盘事实为准，建不成即按平台不支持跳过。
+        called
+            && std::fs::symlink_metadata(link_path)
+                .map(|meta| meta.file_type().is_symlink())
+                .unwrap_or(false)
     }
 
     #[test]
