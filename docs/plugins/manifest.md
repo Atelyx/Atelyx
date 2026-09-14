@@ -8,6 +8,7 @@
   "name": "com.example.hello",     // 必须：反向域名式稳定标识（发布后不可变；至少两段，小写字母/数字/中划线）
   "version": "1.0.0",              // 必须：语义化版本
   "main": "index.ts",              // 必须：入口（相对插件根目录；.js/.ts/.tsx；纯 theme 插件可省略）
+  "dependencies": { "nanoid": "^5.0.0" }, // 可选：运行时依赖（需同时提交 package-lock.json，见「依赖与打包」）
   "description": "详细描述（markdown）",
   "author": "作者",
   "license": "MIT",
@@ -15,6 +16,7 @@
   "atelyx": {
     "name": "你好工具",              // 显示名（缺省 = name）
     "type": "tool",                 // 必须：主分类（见下表）
+    "bundle": true,                 // 可选：显式要求宿主打包（入口拆成多文件但无依赖时；声明了 dependencies 即自动打包）
     "types": ["tool", "command"],   // 可选：附加分类
     "scope": "app",                 // 可选：app=个人工具（本机，默认）| vault=随仓库共享
     "tagline": "一句话简介",
@@ -52,8 +54,39 @@
 ## 入口
 
 - `main` 指向入口文件（`.js`/`.ts`/`.tsx`，其余扩展名在安装/读取时拒绝），默认导出 `apply(ctx, config)`。
-- TS 入口发布源码即可，宿主内置转译器加载时转译；入口须自包含（无运行时 import）。
+- TS 入口发布源码即可，宿主内置转译器加载时转译；**未打包**的入口须自包含（无运行时 import）。
+- 声明了依赖或开启了打包的插件由宿主打成自包含产物（见下节），此时入口可以拆成多文件、按常规写法
+  `import` 依赖与相邻模块。
 - 纯 theme 插件（`type: "theme"` 且无其他代码类型）可省略 `main`——主题是声明式皮肤。
+
+## 依赖与打包
+
+插件可以只声明标准 npm 依赖，由宿主在**安装/更新时**解析、取件、校验并打进一个自包含产物；
+运行时只求值产物——用户机器不需要 Node/pnpm，启动时也不需要联网。
+
+```jsonc
+{
+  "main": "src/index.ts",
+  "dependencies": { "nanoid": "^5.0.0" },
+  "atelyx": { "type": "tool" }
+}
+```
+
+- 声明 `dependencies` 时**必须同时提交 `package-lock.json`**（npm 7+ 生成）：宿主只照锁文件取件、
+  不做版本区间解析——锁把每个包钉到具体版本与字节摘要，装出来的依赖可复现。
+- 只支持 registry 的 tarball 依赖；`git` / `file` / `link` 来源一律拒绝。只取 `dependencies`：
+  `devDependencies` / `peerDependencies` / `optionalDependencies` 不参与。
+- 入口拆成多文件但不想声明依赖时，用 `atelyx.bundle: true` 显式开启打包（相对 `import` 会被内联）。
+- 产物写在插件目录的 `.atelyx-dist/entry.js`，由宿主生成与维护：**不要手改，也不要提交**它
+  （连同 `node_modules` 一起加进忽略，本地目录来源的实时引用同样会被写入产物）。
+- 取下来的依赖按内容摘要缓存在本机，重复安装与回退不再下载。
+
+产物跑在 WebView 里，所以只有**浏览器可用**的 npm 包能用：依赖 Node 内置模块（`fs`、
+`child_process` 等）、原生扩展（`.node`）、或无法静态解析的 `require(变量)` 的包会在安装阶段失败
+并指认到来源文件。这类需求改用 `ctx.native.invoke`（原始命令逃生舱）或 `ctx.shell.exec`（执行外部程序）。
+
+`react` 与 `react/jsx-runtime` 不需要（也不应）声明为依赖：宿主已提供全局 React，打包时会自动
+接到宿主那一份上，避免同一个界面里出现两份 React。`react-dom` 不在接管范围内，需要就自行声明。
 
 ## 披露 `declares` 与完全自由模型
 

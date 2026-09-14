@@ -3,8 +3,9 @@
  *
  * 链路：Rust `plugin_read_entry` 读取入口 → `.ts/.tsx` 经 esbuild-wasm 转译 ESM → 动态
  * import 求值（WebView 用 blob: URL，node 测试用 data: URL）→ 取默认导出（apply）→
- * mountPlugin 挂载。入口须自包含（无运行时 import/export 依赖；`import type` 为类型注解，
- * 转译时擦除）；入口扩展名在安装/读取时由清单校验限制为 .js/.ts/.tsx。
+ * mountPlugin 挂载。入口取宿主产出的打包产物（自包含 + 已转译）或清单 `main`；未打包的
+ * 入口须自包含（无运行时 import/export 依赖；`import type` 为类型注解，转译时擦除），
+ * 入口扩展名在安装/读取时由清单校验限制为 .js/.ts/.tsx。
  */
 import type { Plugin } from "@atelyx/cordis";
 import { errText } from "@/types";
@@ -36,17 +37,18 @@ export async function evaluatePluginModule(code: string): Promise<unknown> {
   }
 }
 
-/** 挂载插件包实现（入口 = 清单 main；读取 → 转译 → 求值 → 挂载，各段失败归入对应阶段）。 */
-export async function mountPluginFromPackage(kernel: Kernel, id: string, main: string): Promise<MountResult> {
+/** 挂载插件包实现（入口 = 宿主产出的打包产物或清单 main；读取 → 转译 → 求值 → 挂载，
+ *  各段失败归入对应阶段）。打包产物已是自包含 ESM，按 `.js` 原样求值。 */
+export async function mountPluginFromPackage(kernel: Kernel, id: string, entry: string): Promise<MountResult> {
   let code: string;
   try {
-    code = await pluginReadEntry(id, main);
+    code = await pluginReadEntry(id, entry);
   } catch (e) {
     return { ok: false, phase: "read", message: errText(e) };
   }
   let js: string;
   try {
-    js = /\.tsx?$/i.test(main) ? await transpileEsm(code) : code;
+    js = /\.tsx?$/i.test(entry) ? await transpileEsm(code) : code;
   } catch (e) {
     return { ok: false, phase: "transpile", message: errText(e) };
   }

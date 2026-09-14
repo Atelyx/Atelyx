@@ -2,7 +2,8 @@
  * 插件包清单校验与兼容性纯函数测试（utils/pluginManifest）。
  *
  * 覆盖：name 合法性、版本比较、宿主兼容（版本范围/平台）、插件包（package.json + atelyx 块）
- * 校验的必填/可选/归一化、前向兼容（未知附加分类跳过）、declares 服务披露。
+ * 校验的必填/可选/归一化、前向兼容（未知附加分类跳过）、declares 服务披露、
+ * 运行时依赖（dependencies）与显式打包开关（bundle）。
  */
 import { describe, it, expect } from "vitest";
 import {
@@ -180,6 +181,52 @@ describe("validatePluginManifest", () => {
     expect(validatePluginManifest({ ...validManifest(), atelyx: { ...(validManifest().atelyx as Record<string, unknown>), declares: "table" } }).ok).toBe(false);
     expect(validatePluginManifest({ ...validManifest(), atelyx: { ...(validManifest().atelyx as Record<string, unknown>), declares: [""] } }).ok).toBe(false);
     expect(validatePluginManifest({ ...validManifest(), atelyx: { ...(validManifest().atelyx as Record<string, unknown>), declares: [123] } }).ok).toBe(false);
+  });
+  it("dependencies 归一化：保留包名 → 版本；缺省与空表都不带该字段", () => {
+    const declared = validatePluginManifest({
+      ...validManifest(),
+      dependencies: { nanoid: "^5.0.0", "ms": "2.1.3" },
+    });
+    expect(declared.ok).toBe(true);
+    if (!declared.ok) return;
+    expect(declared.manifest.dependencies).toEqual({ nanoid: "^5.0.0", ms: "2.1.3" });
+
+    const absent = validatePluginManifest(validManifest());
+    expect(absent.ok).toBe(true);
+    if (!absent.ok) return;
+    expect(absent.manifest.dependencies).toBeUndefined();
+
+    const empty = validatePluginManifest({ ...validManifest(), dependencies: {} });
+    expect(empty.ok).toBe(true);
+    if (!empty.ok) return;
+    expect(empty.manifest.dependencies).toBeUndefined();
+  });
+  it("dependencies 畸形（非对象/非字符串值/空版本）拒绝", () => {
+    expect(validatePluginManifest({ ...validManifest(), dependencies: ["nanoid"] }).ok).toBe(false);
+    expect(validatePluginManifest({ ...validManifest(), dependencies: { nanoid: 5 } }).ok).toBe(false);
+    expect(validatePluginManifest({ ...validManifest(), dependencies: { nanoid: "  " } }).ok).toBe(false);
+    expect(validatePluginManifest({ ...validManifest(), dependencies: { "": "^1.0.0" } }).ok).toBe(false);
+  });
+  it("bundle 归一化：true 保留、缺省不出现；非布尔拒绝", () => {
+    const flagged = validatePluginManifest({
+      ...validManifest(),
+      atelyx: { ...(validManifest().atelyx as Record<string, unknown>), bundle: true },
+    });
+    expect(flagged.ok).toBe(true);
+    if (!flagged.ok) return;
+    expect(flagged.manifest.bundle).toBe(true);
+
+    const absent = validatePluginManifest(validManifest());
+    expect(absent.ok).toBe(true);
+    if (!absent.ok) return;
+    expect(absent.manifest.bundle).toBeUndefined();
+
+    expect(
+      validatePluginManifest({
+        ...validManifest(),
+        atelyx: { ...(validManifest().atelyx as Record<string, unknown>), bundle: "yes" },
+      }).ok,
+    ).toBe(false);
   });
   it("保留 scope/declares/permissions/platforms/hostApiVersion", () => {
     const result = validatePluginManifest({

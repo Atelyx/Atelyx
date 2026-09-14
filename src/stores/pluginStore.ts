@@ -194,6 +194,7 @@ function toInstalled(row: PluginRow): InstalledPlugin {
     id: row.id,
     scope: row.scope,
     installDir: row.installDir,
+    entry: row.entry,
     sourceKind: row.sourceKind,
     enabled: row.conflict ? false : row.enabled,
     previousVersion: row.previousVersion,
@@ -449,9 +450,11 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
       }
       const compat = pluginCompatibleWithHost(plugin.manifest, hostVersion, platform);
       if (!compat.ok) return syncPhase(id, "failed", { phase: "compat", message: compat.reason });
-      // 磁盘包无入口 = 声明式插件（如纯 theme）：置 active 即可（主题提供者经清单消费）。
-      if (!plugin.manifest.main) return syncPhase(id, "active");
-      const result = await mountPluginFromPackage(getKernel(), id, plugin.manifest.main);
+      // 入口优先级：宿主产出的打包产物 → 清单 main。两者都没有 = 声明式插件（如纯 theme）：
+      // 置 active 即可（主题提供者经清单消费）。
+      const entry = plugin.entry ?? plugin.manifest.main;
+      if (!entry) return syncPhase(id, "active");
+      const result = await mountPluginFromPackage(getKernel(), id, entry);
       return syncPhase(id, result.ok ? "active" : "failed", result.ok ? undefined : result);
     } catch (e) {
       // 宿主侧意外错误（内核未就绪等）：归入激活阶段，避免行卡在 pending。

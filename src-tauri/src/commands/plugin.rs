@@ -98,6 +98,9 @@ pub struct PluginInfo {
     pub install_dir: String,
     pub enabled: bool,
     pub manifest: Value,
+    /// 宿主产出的打包入口（相对插件根）；有产物即用它，无产物用清单 `main`。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entry: Option<String>,
     /// 安装来源类型（管理 UI 展示徽标/更新可用性）。
     pub source_kind: PluginSourceKind,
     /// 可回退到的上一版本；回退成功后该字段清空。
@@ -416,12 +419,12 @@ fn previous_manifest_matches_record(record_id: &str, record_version: &str, manif
         && manifest["version"].as_str().unwrap_or("").trim() == record_version.trim()
 }
 
-/// 复制插件代码目录，不复制 data；候选代码中出现链接时拒绝，避免把插件根外内容带入版本目录。
+/// 复制插件代码目录，不复制 data 与宿主产物；候选代码中出现链接时拒绝，避免把插件根外内容带入版本目录。
 fn copy_plugin_tree(src: &Path, dst: &Path) -> Result<(), String> {
     copy_plugin_tree_inner(src, dst, true)
 }
 
-fn copy_plugin_tree_inner(src: &Path, dst: &Path, skip_root_data: bool) -> Result<(), String> {
+fn copy_plugin_tree_inner(src: &Path, dst: &Path, at_root: bool) -> Result<(), String> {
     let meta = fs::symlink_metadata(src).map_err(|e| format!("读取插件目录失败：{e}"))?;
     if !meta.is_dir() || is_dir_link(&meta) {
         return Err("插件目录不是可复制的实体目录".into());
@@ -430,7 +433,9 @@ fn copy_plugin_tree_inner(src: &Path, dst: &Path, skip_root_data: bool) -> Resul
     for entry in fs::read_dir(src).map_err(|e| format!("读取插件目录失败：{e}"))? {
         let entry = entry.map_err(|e| format!("读取插件目录项失败：{e}"))?;
         let name = entry.file_name();
-        if skip_root_data && name == "data" {
+        // 根级的用户数据与宿主产物都不进候选：data 是用户数据（版本切换时单独搬运），
+        // 产物由候选树上的打包重新生成——复制过来只会白搬一份，还会变成更新候选里的历史产物。
+        if at_root && (name == "data" || name == crate::plugin_build::BUILD_DIR) {
             continue;
         }
         let kind = entry.file_type().map_err(|e| format!("读取插件目录项类型失败：{e}"))?;
@@ -670,6 +675,13 @@ fn is_hidden_dir(dir: &Path) -> bool {
     dir.file_name().and_then(|s| s.to_str()).is_some_and(|s| s.starts_with('.'))
 }
 
+/// 入口相对路径是否为宿主产出的打包产物：分隔符与前导 `./` 归一后比对——调用方可能传等价
+/// 写法，判定必须落在磁盘事实上，否则同一份产物会走到较小的普通入口上限。
+fn is_built_entry(entry: &str) -> bool {
+    let normalized = entry.replace('\\', "/");
+    normalized.strip_prefix("./").unwrap_or(&normalized) == crate::plugin_build::BUILD_ENTRY
+}
+
 /// 从仓库引用/URL 提取目录名（原名 = 仓库名）：
 /// `owner/repo`、`https://…/repo.git`、`git@github.com:owner/repo.git` → `repo`。
 fn repo_folder_name(repo_or_url: &str) -> String {
@@ -851,6 +863,16 @@ fn manifest_valid_or_error(v: &Value) -> Result<(), String> {
             return Err("插件入口须为 .js/.ts/.tsx 文件".to_string());
         }
     }
+    // dependencies（运行时依赖）：必须是「包名 → 版本」的字符串表——宿主据此取件并打包，
+    // 畸形形态（数组/非字符串值）会让取件阶段拿到不可用输入，安装时即拒绝。
+    if let Some(d) = obj.get("dependencies") {
+        let map = d.as_object().ok_or("dependencies 必须是对象")?;
+        for (dep, range) in map {
+            if dep.trim().is_empty() || !range.as_str().is_some_and(|s| !s.trim().is_empty()) {
+                return Err("dependencies 的包名与版本都必须是非空字符串".to_string());
+            }
+        }
+    }
     // atelyx 块：插件元数据（显示名/类型/作用域/披露/主题等）。
     let ax = v
         .get("atelyx")
@@ -875,6 +897,12 @@ fn manifest_valid_or_error(v: &Value) -> Result<(), String> {
     if let Some(d) = ax.get("declares") {
         if !d.is_array() {
             return Err("atelyx.declares 必须是数组".to_string());
+        }
+    }
+    // bundle（显式要求宿主打包）：非布尔即拒绝——静默当缺省会让「声明了要打包」的插件不打包。
+    if let Some(b) = ax.get("bundle") {
+        if !b.is_boolean() {
+            return Err("atelyx.bundle 必须是布尔值".to_string());
         }
     }
     // themes（主题条目）结构校验（与前端 validatePluginManifest 对齐）：畸形形态会让前端
@@ -1173,29 +1201,29 @@ async fn download_zip(client: &reqwest::Client, url: &str, temp: &Path) -> Resul
     Ok(())
 }
 
-// ===== zip 解压 =====
+// ===== 归档解压 =====
 
-/// 净化 zip 条目路径：`/` 与 `\` 都按分隔符处理（防 Unix 下反斜杠文件名绕过穿越检查），
-/// 拒绝 `..`、绝对路径、盘符前缀。
-fn sanitize_zip_entry(name: &str) -> Result<String, String> {
+/// 净化归档条目路径（zip 与 npm tarball 共用）：`/` 与 `\` 都按分隔符处理
+/// （防 Unix 下反斜杠文件名绕过穿越检查），拒绝 `..`、绝对路径、盘符前缀。
+pub(crate) fn sanitize_archive_entry(name: &str) -> Result<String, String> {
     if name.starts_with('/') || name.starts_with('\\') {
-        return Err("zip 条目含绝对路径".into());
+        return Err("归档条目含绝对路径".into());
     }
     let mut out = PathBuf::new();
     for part in name.split(['/', '\\']) {
         match part {
             "" | "." => {}
-            ".." => return Err("zip 条目含 .. 路径".into()),
+            ".." => return Err("归档条目含 .. 路径".into()),
             other => {
                 if other.contains(':') {
-                    return Err("zip 条目含非法路径段".into());
+                    return Err("归档条目含非法路径段".into());
                 }
                 out.push(other);
             }
         }
     }
     if out.as_os_str().is_empty() {
-        return Err("zip 条目路径为空".into());
+        return Err("归档条目路径为空".into());
     }
     Ok(out.to_string_lossy().into_owned())
 }
@@ -1213,7 +1241,7 @@ fn extract_zip_safe(zip_path: &Path, dest: &Path) -> Result<(), String> {
         if entry.size() > MAX_ENTRY_BYTES {
             return Err(format!("插件包条目过大：{}", entry.name()));
         }
-        let clean = sanitize_zip_entry(entry.name())?;
+        let clean = sanitize_archive_entry(entry.name())?;
         let target = dest.join(&clean);
         if entry.is_dir() {
             fs::create_dir_all(&target).map_err(|e| e.to_string())?;
@@ -1277,6 +1305,7 @@ fn plugin_info_from(
         install_dir: dir.to_string_lossy().into_owned(),
         enabled,
         manifest: manifest.clone(),
+        entry: crate::plugin_build::built_entry(dir).map(str::to_string),
         source_kind,
         previous_version: None,
         conflict: None,
@@ -1295,6 +1324,7 @@ fn plugin_info_from_manifest(id: &str, manifest: &Value, scope: &str, source_kin
         install_dir: String::new(),
         enabled,
         manifest: manifest.clone(),
+        entry: None,
         source_kind,
         previous_version: None,
         conflict: None,
@@ -1310,29 +1340,51 @@ fn inherit_enabled(pstate: &mut PluginState, id: &str) -> bool {
     enabled
 }
 
+/// 落位前的廉价预检：装重了要立刻报错，不该先下载/打包再告诉用户先卸载。
+/// 判据是「目标目录已在 / 同 id 目录已在」，与持 IO 锁后的检查同文案——那两道是并发下的判据，
+/// 这里只是为了不在注定失败的安装上白花取件与打包的时间。
+fn precheck_install_target(base: &Path, folder: &str, id: &str) -> Result<(), String> {
+    if base.join(folder).exists() {
+        return Err("同名文件夹已存在，请先卸载".into());
+    }
+    if find_plugin_dir(base, id).is_ok() {
+        return Err("已安装相同 id 的插件，请先卸载".into());
+    }
+    Ok(())
+}
+
 /// 从已就绪的插件源码根目录执行校验 + 原子落位（git clone / 源码包解压共用）。
 /// 目录名 = `folder_name`（原名）；同名目录或同清单 id 目录已存在时报错，先卸载再装。
 /// `base` 由调用方固定（会话守卫复验后传入），不在锁内从可变仓库状态重推导——安装期间
-/// 切仓也不会把旧仓库产物落进新仓。调用方负责清理 `plugin_root` 所在临时目录残留。
-fn install_plugin_dir(
+/// 切仓也不会把旧仓库产物落进新仓。`session_token` 同样由调用方固定：取件与打包是长等待，
+/// 落位前必须再复验一次（见下方注释）。调用方负责清理 `plugin_root` 所在临时目录残留。
+async fn install_plugin_dir(
     app: &AppHandle,
     state: &VaultState,
     base: &Path,
     scope: &str,
+    session_token: &Option<(PathBuf, u64)>,
     source: PluginSource,
     folder_name: &str,
     plugin_root: &Path,
 ) -> Result<PluginInfo, String> {
     fs::create_dir_all(base).map_err(|e| e.to_string())?;
     let manifest = read_manifest(plugin_root)?;
-    let _io_guard = PLUGIN_IO_LOCK.lock().map_err(|_| "插件文件忙，请重试".to_string())?;
     let id = manifest["name"].as_str().unwrap_or("").to_string();
     if !plugin_id_valid(&id) {
         return Err("插件清单 name 非法".into());
     }
+    let folder = target_folder_name(folder_name, &id);
+    precheck_install_target(base, &folder, &id)?;
+    // 依赖取件与打包在候选目录内完成：此刻尚未落位，失败只影响候选目录，当前版本不受影响。
+    // 这步是耗时 I/O（下载 + 打包），放在文件锁之外。
+    crate::plugin_build::prepare_artifact(app, plugin_root, &manifest, true).await?;
+    // 取件/打包期间可能切仓：落位与写状态都在守卫之外，必须在这里复验（base 已固定，
+    // 不会把旧仓库产物落进新仓，但「结果应用在已切走的仓库」同样不接受）。
+    ensure_vault_session(state, session_token.as_ref())?;
+    let _io_guard = PLUGIN_IO_LOCK.lock().map_err(|_| "插件文件忙，请重试".to_string())?;
     let source_kind = source.kind;
 
-    let folder = target_folder_name(folder_name, &id);
     let target = base.join(&folder);
     if target.exists() {
         return Err("同名文件夹已存在，请先卸载".into());
@@ -1538,7 +1590,7 @@ pub async fn plugin_install(
                 scope: scope.clone(),
                 ..Default::default()
             };
-            let result = install_plugin_dir(&app, &state, &base, &scope, source, &repo_folder_name(&repo), &clone_target);
+            let result = install_plugin_dir(&app, &state, &base, &scope, &session_token, source, &repo_folder_name(&repo), &clone_target).await;
             if result.is_err() {
                 let _ = fs::remove_dir_all(&clone_target);
             }
@@ -1557,7 +1609,7 @@ pub async fn plugin_install(
                     scope: scope.clone(),
                     ..Default::default()
                 };
-                let result = install_plugin_dir(&app, &state, &base, &scope, source, &repo_folder_name(&repo), &root);
+                let result = install_plugin_dir(&app, &state, &base, &scope, &session_token, source, &repo_folder_name(&repo), &root).await;
                 // 成功/失败都无条件清理解压临时目录（成功时插件根已移走，残留仅外层包装目录）。
                 let _ = fs::remove_dir_all(&extract_temp);
                 result
@@ -1581,7 +1633,7 @@ pub async fn plugin_install(
         scope: scope.clone(),
         ..Default::default()
     };
-    let result = install_plugin_dir(&app, &state, &base, &scope, source, &repo_folder_name(&repo), &clone_target);
+    let result = install_plugin_dir(&app, &state, &base, &scope, &session_token, source, &repo_folder_name(&repo), &clone_target).await;
     if result.is_err() {
         let _ = fs::remove_dir_all(&clone_target);
     }
@@ -1590,7 +1642,7 @@ pub async fn plugin_install(
 
 /// 从本地目录安装插件（junction/符号链接实时引用，无拷贝；源目录改动即时生效）。
 #[tauri::command]
-pub fn plugin_install_local(
+pub async fn plugin_install_local(
     app: AppHandle,
     state: State<'_, VaultState>,
     path: String,
@@ -1606,9 +1658,8 @@ pub fn plugin_install_local(
     if !plugin_id_valid(&id) {
         return Err("插件清单 name 非法".into());
     }
-
+    // 落位目标先算出来（含规范化后的 base）：取件与打包会写源目录，不该在注定失败的安装上动手。
     let base = plugin_base_dir(&app, &state, &scope)?;
-    let _io_guard = PLUGIN_IO_LOCK.lock().map_err(|_| "插件文件忙，请重试".to_string())?;
     // 源目录与插件目录都规范化后再判包含关系（大小写/长路径前缀差异会导致误判）。
     let base = dunce::canonicalize(&base).unwrap_or(base);
     if src_dir.starts_with(&base) || base.starts_with(&src_dir) {
@@ -1617,6 +1668,17 @@ pub fn plugin_install_local(
     // 目录名 = 源目录原名（非法名回退清单 id）。
     let src_name = src_dir.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
     let folder = target_folder_name(&src_name, &id);
+    precheck_install_target(&base, &folder, &id)?;
+    // 跨作用域同 id 也在这里先拦一道：取件/打包会写开发者源目录，不该在注定失败的安装上动手。
+    ensure_global_id_unique(&app, &state, &scope, &id)?;
+    let session_token = vault_session_token(&state, &scope)?;
+    // 本地来源是开发者的实时引用：依赖取件与打包仍由宿主完成（保证入口与声明一致），
+    // 但不清理其 node_modules——那是开发者自己的目录。
+    crate::plugin_build::prepare_artifact(&app, &src_dir, &manifest, false).await?;
+    // 取件/打包是长等待，落位前复验一次会话（base 已在等待前固定，指向用户确认时那个仓库）。
+    ensure_vault_session(&state, session_token.as_ref())?;
+
+    let _io_guard = PLUGIN_IO_LOCK.lock().map_err(|_| "插件文件忙，请重试".to_string())?;
     let target = base.join(&folder);
     if target.exists() {
         return Err("同名文件夹已存在，请先卸载".into());
@@ -2159,6 +2221,16 @@ pub async fn plugin_update(
         let _ = fs::remove_dir_all(&staging);
         return Err(e);
     }
+    // 在候选树上取依赖并打包：失败即丢弃候选，当前版本与它的产物都不动。
+    if let Err(e) = crate::plugin_build::prepare_artifact(&app, &staging, &manifest, true).await {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(e);
+    }
+    // 取件/打包是长等待，落位前再复验一次会话（上面的复验只覆盖到 git pull 为止）。
+    if let Err(e) = ensure_vault_session(&state, session_token.as_ref()) {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(e);
+    }
     // enabled 以 commit_plugin_update 锁内重读的状态为准（git pull await 期间可能已被并发改动，
     // 命令开头的快照只是守卫输入，不得覆盖锁内结论）。
     let info = commit_plugin_update(&app, &scope, &source, &dir, &staging, &base, &manifest)?;
@@ -2453,6 +2525,16 @@ async fn codeload_update(
         return Err(e);
     }
     let manifest = new_manifest;
+    // 在候选包上取依赖并打包：失败即丢弃候选，当前版本与它的产物都不动。
+    if let Err(e) = crate::plugin_build::prepare_artifact(app, &plugin_root, &manifest, true).await {
+        let _ = fs::remove_dir_all(&extract_temp);
+        return Err(e);
+    }
+    // 取件/打包是长等待，落位前再复验一次会话（上面的复验只覆盖到解压为止）。
+    if let Err(e) = ensure_vault_session(state, session_token.as_ref()) {
+        let _ = fs::remove_dir_all(&extract_temp);
+        return Err(e);
+    }
     let result = commit_plugin_update(app, scope, source, dir, &plugin_root, base, &manifest);
     let _ = fs::remove_dir_all(&extract_temp);
     result
@@ -2494,10 +2576,16 @@ pub fn plugin_read_entry(
     let manifest = read_manifest(&dir)?;
     let main = manifest["main"].as_str().ok_or("清单缺少 main")?;
     let entry = path.as_deref().unwrap_or(main);
+    // 打包产物把整棵依赖内联进单文件，体量自然大于手写入口，故按其自身上限判定。
+    let limit = if is_built_entry(entry) {
+        crate::plugin_build::MAX_BUILT_ENTRY_BYTES
+    } else {
+        MAX_ENTRY_BYTES
+    };
     let entry_path = safe_plugin_path(&dir, entry)?;
     let size = fs::metadata(&entry_path).map_err(|e| format!("读取插件入口失败：{e}"))?.len();
-    if size > MAX_ENTRY_BYTES {
-        return Err(format!("插件入口过大（上限 {} 字节）", MAX_ENTRY_BYTES));
+    if size > limit {
+        return Err(format!("插件入口过大（上限 {limit} 字节）"));
     }
     let data = fs::read(&entry_path).map_err(|e| format!("读取插件入口失败：{e}"))?;
     String::from_utf8(data).map_err(|_| "插件入口不是合法 UTF-8 文本".to_string())
@@ -2800,6 +2888,45 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    /// 更新候选不搬上一版产物：产物由候选树上的打包重新生成，搬过来只会变成候选里的旧产物；
+    /// 非根级的同名目录是插件自己的资源，照常复制。
+    #[test]
+    fn copy_plugin_tree_skips_build_artifact_at_root_only() {
+        let root = std::env::temp_dir().join(format!("atelyx-plugin-copy-artifact-{}", nanoid::nanoid!()));
+        let src = root.join("src");
+        let dst = root.join("dst");
+        let build = crate::plugin_build::BUILD_DIR;
+        fs::create_dir_all(src.join(build)).unwrap();
+        fs::create_dir_all(src.join("nested").join(build)).unwrap();
+        fs::write(src.join(build).join("entry.js"), "old").unwrap();
+        fs::write(src.join("nested").join(build).join("entry.js"), "kept").unwrap();
+        copy_plugin_tree(&src, &dst).unwrap();
+        assert!(!dst.join(build).exists(), "根级产物不应进入更新候选");
+        assert_eq!(fs::read_to_string(dst.join("nested").join(build).join("entry.js")).unwrap(), "kept");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn precheck_install_target_rejects_taken_folder_and_id() {
+        let root = std::env::temp_dir().join(format!("atelyx-plugin-precheck-{}", nanoid::nanoid!()));
+        let base = root.join("plugins");
+        fs::create_dir_all(base.join("taken")).unwrap();
+        assert!(precheck_install_target(&base, "taken", "com.example.a").unwrap_err().contains("同名文件夹"));
+
+        // 同 id 但目录名不同的既有插件：按清单 id 判定
+        let other = base.join("another-name");
+        fs::create_dir_all(&other).unwrap();
+        fs::write(
+            other.join(MANIFEST_FILE),
+            r#"{ "name": "com.example.b", "version": "1.0.0", "main": "i.js", "atelyx": { "type": "tool" } }"#,
+        )
+        .unwrap();
+        assert!(precheck_install_target(&base, "fresh", "com.example.b").unwrap_err().contains("相同 id"));
+
+        assert!(precheck_install_target(&base, "fresh", "com.example.c").is_ok());
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn version_switch_keeps_latest_data_and_one_previous_code() {
         let root = std::env::temp_dir().join(format!("atelyx-plugin-switch-{}", nanoid::nanoid!()));
@@ -3026,15 +3153,15 @@ mod tests {
     fn zip_path_sanitize() {
         // 平台无关断言：`/` 与 `\` 都是分隔符。
         let expected = Path::new("a").join("b").join("package.json");
-        let got = sanitize_zip_entry("a/b/package.json").unwrap();
+        let got = sanitize_archive_entry("a/b/package.json").unwrap();
         assert_eq!(Path::new(&got), expected);
-        assert_eq!(sanitize_zip_entry("./package.json").unwrap(), "package.json");
-        assert!(sanitize_zip_entry("a\\b").is_ok());
-        assert!(sanitize_zip_entry("../evil").is_err());
-        assert!(sanitize_zip_entry("a\\..\\b").is_err());
-        assert!(sanitize_zip_entry("/abs").is_err());
-        assert!(sanitize_zip_entry("C:/x").is_err());
-        assert!(sanitize_zip_entry("").is_err());
+        assert_eq!(sanitize_archive_entry("./package.json").unwrap(), "package.json");
+        assert!(sanitize_archive_entry("a\\b").is_ok());
+        assert!(sanitize_archive_entry("../evil").is_err());
+        assert!(sanitize_archive_entry("a\\..\\b").is_err());
+        assert!(sanitize_archive_entry("/abs").is_err());
+        assert!(sanitize_archive_entry("C:/x").is_err());
+        assert!(sanitize_archive_entry("").is_err());
     }
 
     #[test]

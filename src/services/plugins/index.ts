@@ -16,6 +16,8 @@ export interface PluginRow {
   scope: PluginScope;
   /** 安装目录（空 = 实现随应用编译，无磁盘目录）。 */
   installDir: string;
+  /** 宿主产出的打包入口（相对安装目录）：有产物即用它，无产物用清单 main。 */
+  entry?: string;
   sourceKind: PluginSourceKind;
   enabled: boolean;
   manifest: PluginPackageJson;

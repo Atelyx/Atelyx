@@ -10,6 +10,7 @@ mod layout_model;
 mod layout_persist;
 mod layout_window;
 mod net_guard;
+mod plugin_build;
 mod vault;
 mod watcher;
 

@@ -4,14 +4,16 @@ Atelyx 是插件化平台：插件 = 一个 git 仓库（市场侧以 GitHub 为
 给仓库打上 `atelyx-plugin` topic，即可被市场自动收录，任何 Atelyx 用户都可在应用内的市场中找到并安装。
 
 插件语言支持 **JS / TypeScript**。TS 发布源码即可——宿主在加载时用内置转译器转成浏览器可执行代码，
-无需构建产物；入口须**自包含**（单文件，无运行时 import/export 依赖；`import type` 为类型注解会
-自动擦除）。
+无需自己构建；入口须**自包含**（单文件，无运行时 import/export 依赖；`import type` 为类型注解会
+自动擦除）。要在插件里用 npm 依赖（或把入口拆成多文件）时，在清单声明依赖即可，宿主会在安装时
+把它打成自包含产物（见 [清单 · 依赖与打包](manifest.md)）——用户机器不需要 Node/pnpm。
 
 ## 插件包结构
 
 ```
 你的插件仓库/
 ├── package.json        # 清单（npm 标准字段 + atelyx 块，见 manifest.md）
+├── package-lock.json   # 声明 dependencies 时必须一并提交（宿主照锁文件取件）
 ├── index.ts            # 入口（默认导出 apply(ctx, config)；也可为 index.js）
 └── README.md           # 建议附使用说明
 ```

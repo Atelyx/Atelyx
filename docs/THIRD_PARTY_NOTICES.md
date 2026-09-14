@@ -39,9 +39,13 @@
 | @types/node / react / react-dom | MIT |
 | @vitejs/plugin-react | MIT |
 | autoprefixer / postcss / prettier / tailwindcss / globals | MIT |
+| esbuild | MIT |
 | eslint / eslint-plugin-react-hooks / eslint-plugin-react-refresh | MIT |
 | typescript | Apache-2.0 |
 | typescript-eslint | MIT |
 | vite / vitest | MIT |
+
+> `esbuild` 的原生二进制随应用再分发（`src-tauri/resources/esbuild/`，安装插件时用于把声明的 npm
+> 依赖打成自包含产物）。上表许可与版权声明随该目录的 `LICENSE.md` 一并分发。
 
 

@@ -14,6 +14,10 @@ dist-test.css
 src-tauri/target/
 src-tauri/gen/
 
+# 插件打包器（不入库；构建前由 scripts/sync-esbuild.mjs 从 esbuild 平台包同步）
+src-tauri/resources/esbuild/*
+!src-tauri/resources/esbuild/.gitkeep
+
 # Editor
 .vscode/*
 !.vscode/extensions.json

@@ -84,6 +84,10 @@ export interface PluginManifest {
   platforms?: string[];
   /** 入口（相对插件根目录；.js/.ts/.tsx；纯 theme 插件可省略）。 */
   main?: string;
+  /** 运行时依赖（包名 → 版本）：宿主在安装/更新时按仓库的 package-lock.json 取件并打进自包含产物。 */
+  dependencies?: Record<string, string>;
+  /** 显式要求宿主打包（入口拆成多文件但无依赖时用它；声明了 dependencies 即自动打包）。 */
+  bundle?: boolean;
   /** 披露：将访问的 Atelyx 服务名（管理页「声明 vs 实际」审计对照的声明侧；无运行时门槛）。 */
   declares?: string[];
   /** 权限说明：服务名 → 一句理由（安装/详情展示）。 */
@@ -157,6 +161,8 @@ export interface InstalledPlugin {
   scope: PluginScope;
   /** 安装目录（Rust 返回的绝对路径；本地来源为链接路径；实现随应用编译的行无磁盘目录，为空串）。 */
   installDir: string;
+  /** 宿主产出的打包入口（相对安装目录）：有产物即用它，无产物用清单 main。 */
+  entry?: string;
   /** 来源（中性信息）。 */
   sourceKind: PluginSourceKind;
   enabled: boolean;

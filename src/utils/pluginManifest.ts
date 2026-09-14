@@ -125,6 +125,20 @@ export function validatePluginManifest(raw: unknown): ManifestValidateResult {
     errors.push("main 必须是非空字符串");
   }
 
+  // dependencies（运行时依赖）：宿主按它取件并打包，畸形形态（非对象/非字符串值）在安装时即拒绝。
+  const dependencies = data.dependencies;
+  if (dependencies !== undefined) {
+    if (typeof dependencies !== "object" || dependencies === null || Array.isArray(dependencies)) {
+      errors.push("dependencies 必须是对象");
+    } else {
+      for (const [dep, range] of Object.entries(dependencies as Record<string, unknown>)) {
+        if (dep.trim().length === 0 || typeof range !== "string" || range.trim().length === 0) {
+          errors.push(`dependencies[${dep}] 的包名与版本都必须是非空字符串`);
+        }
+      }
+    }
+  }
+
   // atelyx 块：插件元数据（显示名/类型/作用域/披露/主题等）。
   const atelyx = data.atelyx;
   if (typeof atelyx !== "object" || atelyx === null || Array.isArray(atelyx)) {
@@ -141,6 +155,11 @@ export function validatePluginManifest(raw: unknown): ManifestValidateResult {
     errors.push("hostApiVersion 必须是数字");
   }
 
+  // bundle（显式要求宿主打包）非布尔即拒绝：静默当缺省会让「声明了要打包」的插件不打包。
+  if (ax.bundle !== undefined && typeof ax.bundle !== "boolean") {
+    errors.push("bundle 必须是布尔值");
+  }
+
   if (errors.length > 0) return { ok: false, errors };
 
   const types = normalizeTypes(type as string, ax.types, errors);
@@ -153,6 +172,7 @@ export function validatePluginManifest(raw: unknown): ManifestValidateResult {
   const platforms = normalizeStringList(ax.platforms, "platforms", errors);
   const themes = normalizeThemes(ax.themes, errors);
   const themeOptions = normalizeThemeOptions(ax.themeOptions, errors);
+  const dependenciesDeclared = normalizeDependencies(dependencies);
   if (errors.length > 0) return { ok: false, errors };
 
   const manifest: PluginManifest = {
@@ -161,6 +181,8 @@ export function validatePluginManifest(raw: unknown): ManifestValidateResult {
     version: version as string,
     type: type as PluginType,
     ...(typeof main === "string" && main.trim().length > 0 ? { main } : {}),
+    ...(dependenciesDeclared ? { dependencies: dependenciesDeclared } : {}),
+    ...(ax.bundle === true ? { bundle: true } : {}),
     scope: normalizeScope(ax.scope),
     ...(types.length > 0 ? { types } : {}),
     ...(declares.length > 0 ? { declares } : {}),
@@ -227,6 +249,18 @@ function normalizePermissions(raw: unknown, errors: string[]): Record<string, st
     if (typeof value === "string" && value.trim().length > 0) result[key] = value;
   }
   return result;
+}
+
+/** dependencies 归一化：包名 → 非空版本串；畸形项在校验阶段已报错，此处只保留可用项。 */
+function normalizeDependencies(raw: unknown): Record<string, string> | undefined {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined;
+  const out: Record<string, string> = {};
+  for (const [name, range] of Object.entries(raw as Record<string, unknown>)) {
+    if (name.trim().length > 0 && typeof range === "string" && range.trim().length > 0) {
+      out[name] = range;
+    }
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 function normalizeStringList(raw: unknown, field: string, errors: string[]): string[] {

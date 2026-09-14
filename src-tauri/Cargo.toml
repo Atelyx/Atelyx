@@ -69,6 +69,13 @@ rust_xlsxwriter = "0.80"
 # 插件平台：安装源码包解压（防路径穿越/zip 炸弹；GitHub codeload 自动生成的归档）
 zip = "2"
 
+# 插件依赖获取：npm 注册表的 tarball 是 gzip 压缩的 tar，需自带解压；
+# sha2 用于按 package-lock.json 的 integrity 逐包校验（锁到字节，下载内容不可信）；
+# flate2 走纯 Rust 后端（默认 rust_backend），不引入 zlib C 依赖。
+tar = "0.4"
+flate2 = "1"
+sha2 = "0.10"
+
 [target.'cfg(target_os = "windows")'.dependencies]
 # 跨窗口拖拽释放检测（Windows 专用）：标签拖出窗口后 webview 收不到窗口外 pointerup，
 # 前端轮询 GetAsyncKeyState(VK_LBUTTON) 物理判定鼠标已松开，终止拖拽会话并清除 drop 指示器；

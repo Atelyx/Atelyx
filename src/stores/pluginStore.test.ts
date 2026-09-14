@@ -1,8 +1,9 @@
 /**
- * 插件行状态编排测试（stores/pluginStore）：挂载失败的分段诊断。
+ * 插件行状态编排测试（stores/pluginStore）：挂载失败的分段诊断 + 磁盘包入口选择。
  *
- * store 侧独有的两个阶段（manifest / compat）在此覆盖；read / transpile / eval / apply 四段
- * 在 loader / packageMount 测试里覆盖。插件运行时与 Rust 命令以替身替代，只验证阶段归类。
+ * store 侧独有的阶段（manifest / compat）与入口优先级（宿主产物 → 清单 main → 声明式）在此覆盖；
+ * read / transpile / eval / apply 四段在 loader / packageMount 测试里覆盖。插件运行时与 Rust 命令
+ * 以替身替代，只验证编排结果。
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { InstalledPlugin, PluginPackageJson } from "@/types";
@@ -21,6 +22,18 @@ vi.mock("@/services/plugins", () => ({
 
 vi.mock("@/services/app", () => ({ getAppVersion: vi.fn(async () => "0.0.0") }));
 
+// 挂载链路以替身替代：本文件只验证 store 侧的编排（入口选择、阶段归类），内核不参与。
+vi.mock("@/services/cordis/kernel", () => ({ getKernel: () => ({}) }));
+vi.mock("@/services/cordis/loader", () => ({
+  mountPlugin: vi.fn(async () => ({ ok: true })),
+  unmountPlugin: vi.fn(async () => {}),
+  unmountAll: vi.fn(async () => {}),
+  pluginIdOf: vi.fn(() => undefined),
+}));
+vi.mock("@/services/cordis/packageMount", () => ({
+  mountPluginFromPackage: vi.fn(async () => ({ ok: true })),
+}));
+
 vi.mock("@/stores/appStore", () => ({
   useAppStore: {
     getState: () => ({ entryLoading: false, reportLoad: () => {}, openPluginPage: () => {} }),
@@ -29,6 +42,7 @@ vi.mock("@/stores/appStore", () => ({
 
 import { pluginInstall, pluginList, pluginRollback, pluginUninstall, pluginUpdate } from "@/services/plugins";
 import { getAppVersion } from "@/services/app";
+import { mountPluginFromPackage } from "@/services/cordis/packageMount";
 import { usePluginStore } from "@/stores/pluginStore";
 
 function row(over: Partial<InstalledPlugin> & { id: string }): InstalledPlugin {
@@ -302,5 +316,57 @@ describe("安装收尾的宿主兼容强制", () => {
 
     await expect(usePluginStore.getState().install("com/example", "app")).rejects.toThrow("宿主版本");
     expect(pluginUninstall).toHaveBeenCalledWith("com.test.noversion", "app");
+  });
+});
+
+describe("磁盘包入口选择（宿主产物优先）", () => {
+  const diskRow = (id: string, over: Partial<InstalledPlugin>) =>
+    row({
+      id,
+      installDir: "/tmp/plugin",
+      sourceKind: "market",
+      manifest: {
+        id,
+        name: id,
+        version: "1.0.0",
+        type: "panel",
+        main: "src/index.ts",
+        dependencies: { nanoid: "^5.0.0" },
+      },
+      ...over,
+    });
+
+  it("有打包产物时用产物入口（不再回落清单 main）", async () => {
+    usePluginStore.setState({
+      plugins: { "com.test.dep": diskRow("com.test.dep", { entry: ".atelyx-dist/entry.js" }) },
+    });
+    await usePluginStore.getState().setEnabled("com.test.dep", true);
+    expect(mountPluginFromPackage).toHaveBeenCalledWith(expect.anything(), "com.test.dep", ".atelyx-dist/entry.js");
+    expect(usePluginStore.getState().plugins["com.test.dep"].phase).toBe("active");
+  });
+
+  it("无产物时回落清单 main（未声明依赖的插件行为不变）", async () => {
+    usePluginStore.setState({
+      plugins: {
+        "com.test.plain": diskRow("com.test.plain", {
+          manifest: { id: "com.test.plain", name: "com.test.plain", version: "1.0.0", type: "panel", main: "src/index.ts" },
+        }),
+      },
+    });
+    await usePluginStore.getState().setEnabled("com.test.plain", true);
+    expect(mountPluginFromPackage).toHaveBeenCalledWith(expect.anything(), "com.test.plain", "src/index.ts");
+  });
+
+  it("产物与 main 都缺 → 声明式插件，直接置 active 且不挂载", async () => {
+    usePluginStore.setState({
+      plugins: {
+        "com.test.theme": diskRow("com.test.theme", {
+          manifest: { id: "com.test.theme", name: "com.test.theme", version: "1.0.0", type: "theme" },
+        }),
+      },
+    });
+    await usePluginStore.getState().setEnabled("com.test.theme", true);
+    expect(mountPluginFromPackage).not.toHaveBeenCalled();
+    expect(usePluginStore.getState().plugins["com.test.theme"].phase).toBe("active");
   });
 });
