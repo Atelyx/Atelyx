@@ -45,6 +45,7 @@ import { useAppStore } from "@/stores/appStore";
 import { emitVaultEvent, emitVaultEventAsync, type VaultEvent } from "@/utils/vaultEvents";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useUiStateStore } from "@/stores/uiStateStore";
+import { useNotificationStore } from "@/stores/notificationStore";
 import { baseName, dedupeFilename, parentDir, sanitizeFilename, siblingPath, stripExt } from "@/utils/filename";
 import { errText } from "@/types";
 import type { BacklinkRow, CanvasFileRow, DeleteFolderResult, FileTreeNode, RebuildLinksResult, TagRow, VaultFileChange } from "@/types";
@@ -131,6 +132,12 @@ async function emitFileEvent(event: VaultEvent): Promise<void> {
   }
 }
 
+/** 重命名/移动后的历史侧文件迁移失败不阻塞主流程，但会让版本记录孤儿化——错误须用户可见，不能静默吞掉。 */
+function notifySidecarFailure(what: string, error: unknown): void {
+  console.error(`${what}失败`, error);
+  useNotificationStore.getState().notify({ level: "warning", message: `${what}失败，历史记录可能不完整` });
+}
+
 /**
  * renameNote/moveNote 共用核心：pendingRename 记录 + 服务调用 + 自写抑制 + 自动保存基准 +
  * 画布节点同步（text file）+ 树刷新 + 重命名记录。
@@ -158,9 +165,9 @@ async function applyNoteFileChange(oldFile: string, newFile: string, newTitle: s
     lastNoteRename = { oldFile, newFile };
     // 侧文件先确保在新编码名下（存量旧编码侧文件迁移），再随重命名迁移——
     // Rust remap_sideloads 只按新编码名查找，未迁移则旧文件在重命名后孤儿化
-    await migrateHistoryFile("note", oldFile).catch(() => {});
-    // 历史侧文件随迁（新路径继续累积、旧版本不丢）；失败静默降级，不阻塞重命名主流程
-    await remapSideloads(oldFile, newFile).catch(() => {});
+    await migrateHistoryFile("note", oldFile).catch((e) => notifySidecarFailure("笔记重命名后的历史迁移", e));
+    // 历史侧文件随迁（新路径继续累积、旧版本不丢）；失败不阻塞重命名主流程
+    await remapSideloads(oldFile, newFile).catch((e) => notifySidecarFailure("笔记重命名后的历史迁移", e));
     // 系统提示词标记按路径引用：重命名/移动后同步 promptNotes，防标记指向旧路径失效
     await useSettingsStore.getState().remapPromptNote(oldFile, newFile);
     // Agent 引用的提示词笔记同款同步（agents.json 的 systemPromptFile 指向旧路径失效）
@@ -218,9 +225,9 @@ async function applyTableFileChange(oldFile: string, newFile: string, newTitle: 
     await useVaultStore.getState().loadFiles();
     lastTableRename = { oldFile, newFile };
     // 侧文件先确保在新编码名下，再随重命名迁移（同 applyNoteFileChange）
-    await migrateHistoryFile("table", oldFile).catch(() => {});
-    // 历史侧文件随迁（表格 kind 目录）；失败静默降级
-    await remapSideloads(oldFile, newFile).catch(() => {});
+    await migrateHistoryFile("table", oldFile).catch((e) => notifySidecarFailure("表格重命名后的历史迁移", e));
+    // 历史侧文件随迁（表格 kind 目录）；失败不阻塞重命名主流程
+    await remapSideloads(oldFile, newFile).catch((e) => notifySidecarFailure("表格重命名后的历史迁移", e));
     // 「上次打开」的表格随路径更新（否则下次进入仓库尝试恢复旧路径）
     useUiStateStore.getState().renameLastFile("table", oldFile, newFile);
   } finally {
@@ -242,8 +249,8 @@ async function applyFolderFileChange(
     // 据此把打开的笔记切到新文件，而非误判删除关闭（放 loadFiles/loadList 之后
     // 会留出 IPC await 间隙，联动 effect 先跑导致笔记窗口被误关）
     lastFolderRename = { oldDir, newDir };
-    // 目录下全部历史侧文件随迁（解码文件名按前缀改写）；失败静默降级
-    await remapSideloadsByDir(oldDir, newDir).catch(() => {});
+    // 目录下全部历史侧文件随迁（解码文件名按前缀改写）；失败不阻塞重命名主流程
+    await remapSideloadsByDir(oldDir, newDir).catch((e) => notifySidecarFailure("文件夹重命名后的历史迁移", e));
     // rename_folder 会扫描更新所有 .atlx 的目录前缀引用（写 .atlx），标记自写抑制 watcher 误报
     markSelfSave();
     // 当前画布文件若位于该目录下：先同步打开路径（旧路径已不存在，方法内部自带前缀守卫）；

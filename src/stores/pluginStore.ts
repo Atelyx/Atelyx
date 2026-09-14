@@ -250,7 +250,10 @@ async function finishInstall(get: () => PluginStoreState, row: PluginRow): Promi
     const compat = packageCompatibleWithHost(row.manifest, hostVersion, detectPlatform());
     if (!compat.ok) throw new Error(`无法安装：${compat.reason}`);
   } catch (e) {
-    await pluginUninstall(row.id, row.scope).catch(() => {});
+    // 补偿卸载失败不能静默——否则会把「已完整回滚」伪装成成功；安装错误本身仍由外层 throw 抛给调用方
+    await pluginUninstall(row.id, row.scope).catch((rollbackError) => {
+      console.error("安装兼容检查失败后回滚插件失败", rollbackError);
+    });
     throw e;
   }
   await get().load();

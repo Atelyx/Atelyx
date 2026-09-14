@@ -68,6 +68,12 @@ function notifyGlobalConfigCorrupt(backup: string | null): void {
   });
 }
 
+/** 重命名/移动后的历史侧文件迁移失败不阻塞主流程，但会让版本记录孤儿化——错误须用户可见，不能静默吞掉。 */
+function notifySidecarFailure(what: string, error: unknown): void {
+  console.error(`${what}失败`, error);
+  useNotificationStore.getState().notify({ level: "warning", message: `${what}失败，历史记录可能不完整` });
+}
+
 /**
  * 应用级状态：路由 + 当前仓库 + 画布列表 CRUD。
  *
@@ -697,9 +703,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     // 当前画布磁盘 .atlx 已被 Rust 改（title + 同目录改文件名），同步乐观锁基准防下次保存误冲突
     markSelfSave([row.file, newFile]);
     // 侧文件先确保在新编码名下，再随重命名迁移（同笔记/表格路径）
-    await migrateHistoryFile("canvas", row.file).catch(() => {});
-    // 历史侧文件随迁（画布 kind 目录）；失败静默降级，不阻塞重命名主流程
-    await remapSideloads(row.file, newFile).catch(() => {});
+    await migrateHistoryFile("canvas", row.file).catch((e) => notifySidecarFailure("画布重命名后的历史迁移", e));
+    // 历史侧文件随迁（画布 kind 目录）；失败不阻塞重命名主流程
+    await remapSideloads(row.file, newFile).catch((e) => notifySidecarFailure("画布重命名后的历史迁移", e));
     // 画布运行时引用同步（乐观锁基准 + 打开路径）经仓库事件分发
     emitVaultEvent({ kind: "canvas:renamed", oldPath: row.file, newPath: newFile });
     useUiStateStore.getState().renameLastFile("canvas", row.file, newFile);
@@ -722,9 +728,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
     markSelfSave([row.file, newFile]);
     // 侧文件先确保在新编码名下，再随移动迁移（同 renameCanvas）
-    await migrateHistoryFile("canvas", row.file).catch(() => {});
-    // 历史侧文件随迁（画布 kind 目录）；失败静默降级，不阻塞移动主流程
-    await remapSideloads(row.file, newFile).catch(() => {});
+    await migrateHistoryFile("canvas", row.file).catch((e) => notifySidecarFailure("画布移动后的历史迁移", e));
+    // 历史侧文件随迁（画布 kind 目录）；失败不阻塞移动主流程
+    await remapSideloads(row.file, newFile).catch((e) => notifySidecarFailure("画布移动后的历史迁移", e));
     // 画布运行时引用同步（乐观锁基准 + 打开路径）经仓库事件分发
     emitVaultEvent({ kind: "canvas:moved", oldPath: row.file, newPath: newFile });
     useUiStateStore.getState().renameLastFile("canvas", row.file, newFile);
