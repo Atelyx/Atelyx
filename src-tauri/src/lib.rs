@@ -300,4 +300,46 @@ mod capability_contract_tests {
             );
         }
     }
+
+    /// 打包版 CSP（tauri.conf.json）与开发版 CSP（index.html meta）以追加方式叠加取交集，
+    /// 任一指令只写一处都会在另一形态下收窄。契约：两处的指令集合必须逐条一致。
+    #[test]
+    fn csp_directives_match_between_config_and_index_html() {
+        let parse = |raw: &str| -> std::collections::BTreeMap<String, String> {
+            raw.split(';')
+                .map(str::trim)
+                .filter(|d| !d.is_empty())
+                .map(|d| {
+                    let (name, sources) = d.split_once(' ').unwrap_or((d, ""));
+                    (name.to_string(), sources.trim().to_string())
+                })
+                .collect()
+        };
+        let cfg: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).expect("tauri.conf.json 解析失败");
+        let config_csp = cfg["app"]["security"]["csp"].as_str().expect("app.security.csp 未配置");
+        let html = include_str!("../../index.html");
+        let anchor = html
+            .find("http-equiv=\"Content-Security-Policy\"")
+            .expect("index.html 缺少 CSP meta");
+        let rest = &html[anchor..];
+        let content_start = rest.find("content=\"").expect("CSP meta 缺少 content") + "content=\"".len();
+        let content_end = rest[content_start..].find('"').expect("CSP content 未闭合");
+        let html_csp = &rest[content_start..content_start + content_end];
+
+        let config_map = parse(config_csp);
+        let html_map = parse(html_csp);
+        assert_eq!(
+            config_map.keys().collect::<Vec<_>>(),
+            html_map.keys().collect::<Vec<_>>(),
+            "两处 CSP 的指令集合不一致"
+        );
+        for (name, sources) in &config_map {
+            assert_eq!(
+                sources.split_whitespace().collect::<Vec<_>>(),
+                html_map[name].split_whitespace().collect::<Vec<_>>(),
+                "CSP 指令 {name} 的源列表在两处不一致"
+            );
+        }
+    }
 }
