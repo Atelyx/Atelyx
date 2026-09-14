@@ -72,7 +72,6 @@ import { mountPlugin, unmountAll, unmountPlugin } from "@/services/cordis/loader
 import { mountPluginFromPackage } from "@/services/cordis/packageMount";
 import { resolveViewKind, onSlotChange, viewKinds as slotViewKinds } from "@/services/cordis/slots";
 import type { ViewSlotContribution } from "@/services/cordis/slots";
-import { VIEW_LABELS } from "@/constants/views";
 import { composePlugins, compositionPackages, mountOrder } from "@/utils/cordis/composition";
 import { useCollabStore, publishPluginPresence } from "@/stores/collabStore";
 import { useVaultStore } from "@/stores/vaultStore";
@@ -159,8 +158,6 @@ interface PluginStoreState {
   pluginAppPage(id: string): PluginAppPageRegistration | undefined;
   /** 面板视图候选（内建 + 插件面板）。 */
   pluginViewKinds(): string[];
-  /** 视图显示名（含插件面板，未知视图原样兜底）。 */
-  pluginViewLabel(view: string): string;
   /** 某视图的贡献（统一视图槽注册表；ViewHost 分派用，缺注册 = 空面板占位）。 */
   viewContribution(kind: string): ViewContribution | undefined;
   /** 插件表格视图注册（kind → 注册；TableEditor 视图切换合并）。 */
@@ -674,8 +671,6 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
       // 已挂载的视图槽（启用中的行；停用/卸载随 fiber 撤销自动消失）。
       return slotViewKinds();
     },
-    pluginViewLabel: (view) =>
-      resolveViewKind(view)?.payload.label ?? (VIEW_LABELS as Record<string, string>)[view] ?? view,
     viewContribution: (kind) => {
       // 分派 = slots（统一视图槽注册表）。
       // 转换结果按槽贡献对象缓存：selector 订阅需稳定引用（新对象会触发无限重渲染），

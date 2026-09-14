@@ -5,7 +5,6 @@ import { describe, expect, it, afterEach } from "vitest";
 import type { SlotContribution } from "@/utils/cordis/slots";
 import { pickSlotWinner, sortSlotList } from "@/utils/cordis/slots";
 import {
-  disposePluginSlots,
   listSlot,
   registerNodeSlot,
   registerSlot,
@@ -86,16 +85,6 @@ describe("slots 注册表", () => {
   it("重复注册同一 id 拒绝", () => {
     regView("canvas", "builtin.canvas", "画布");
     expect(() => regView("canvas", "builtin.canvas", "画布")).toThrow("已注册");
-  });
-
-  it("disposePluginSlots 撤销某插件的全部槽贡献", () => {
-    regView("canvas", "builtin.canvas", "画布");
-    regView("table", "builtin.canvas", "表格");
-    regView("search", "builtin.search", "搜索");
-    disposePluginSlots("builtin.canvas");
-    expect(resolveViewKind("canvas")).toBeUndefined();
-    expect(resolveViewKind("table")).toBeUndefined();
-    expect(resolveViewKind("search")?.pluginId).toBe("builtin.search");
   });
 
   it("registeredSlots / listSlot 按槽聚合", () => {

@@ -67,10 +67,6 @@ import {
 } from "@/components/canvas/nodes/TableNode";
 import { NodeContextMenu } from "@/components/canvas/panels/NodeContextMenu";
 import { DataFlowEdge } from "@/components/canvas/edges/DataFlowEdge";
-import {
-  ATELYX_FILE_MIME,
-  type AtelyxFilePayload,
-} from "@/components/canvas/panels/FileExplorerPanel";
 import { PanelPlaceholder } from "@/components/layout/PanelPlaceholder";
 import { Menu, MenuDivider, MenuItem } from "@/components/common/Menu";
 import { PopupLayer } from "@/components/common/PopupLayer";
@@ -135,8 +131,6 @@ export const CanvasView = memo(function CanvasView({
   const onNodeDragStop = useCanvasStore((s) => s.onNodeDragStop);
   const pasteNodes = useCanvasStore((s) => s.pasteNodes);
   const addNode = useCanvasStore((s) => s.addNode);
-  const addTextNoteFromVault = useCanvasStore((s) => s.addTextNoteFromVault);
-  const addMediaFromVault = useCanvasStore((s) => s.addMediaFromVault);
   const canvasFile = useAppStore((s) => s.currentCanvasFile);
   const openTable = useAppStore((s) => s.openTable);
   const convertWhiteboard = useAppStore((s) => s.convertWhiteboard);
@@ -336,51 +330,6 @@ export const CanvasView = memo(function CanvasView({
     },
     [addNode],
   );
-
-  /**
-   * 画布容器原生监听 dragover/drop：绕开 React 合成事件委托（WebView2 中合成事件对
-   * HTML5 DnD 的 preventDefault 不可靠 → drop 不触发 + 禁止光标）。仅消费面板拖拽（自定义
-   * MIME），非面板来源（如节点输入框拖文件）放行给节点自身的 drop 处理。
-   */
-  useEffect(() => {
-    const el = flowWrapperRef.current;
-    if (!el) return;
-    const onDragOver = (e: DragEvent) => e.preventDefault();
-    const onDrop = (e: DragEvent) => {
-      const raw = e.dataTransfer?.getData(ATELYX_FILE_MIME);
-      if (!raw) return; // 非面板来源，放行给节点
-      e.preventDefault();
-      e.stopPropagation();
-      let payload: AtelyxFilePayload;
-      try {
-        payload = JSON.parse(raw) as AtelyxFilePayload;
-      } catch {
-        return;
-      }
-      const pos = screenToFlowPosition({ x: e.clientX, y: e.clientY });
-      if (payload.kind === "note") {
-        void addTextNoteFromVault(
-          payload.file,
-          payload.title ?? payload.name,
-          pos,
-          true,
-        );
-      } else {
-        void addMediaFromVault(payload.file, payload.name, pos, true);
-      }
-    };
-    el.addEventListener("dragover", onDragOver);
-    el.addEventListener("drop", onDrop);
-    return () => {
-      el.removeEventListener("dragover", onDragOver);
-      el.removeEventListener("drop", onDrop);
-    };
-  }, [
-    canvasFile,
-    screenToFlowPosition,
-    addTextNoteFromVault,
-    addMediaFromVault,
-  ]);
 
   const onPaneContextMenu = useCallback(
     (event: React.MouseEvent) => {

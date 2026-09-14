@@ -4,8 +4,7 @@
  * 可注册的槽位以 constants/slots.ts 的声明表为唯一清单：固定具名槽（titlebar/toolbar/
  * panelhead/statusbar/settings）与右键菜单目标（contextmenu/<target>）未声明即注册失败并附近似槽名
  * 提示；开放 kind 槽（view/node/edge/tableview）按前缀放行。
- * 随应用分发的视图/节点/边 = 对应默认组合成员挂载时注册的 single 槽贡献；注册经 ctx.effect 随 fiber 撤销
- * （disposePluginSlots 仅供测试/兜底，正常卸载走 effect 清理）。
+ * 随应用分发的视图/节点/边 = 对应默认组合成员挂载时注册的 single 槽贡献；注册经 ctx.effect 随 fiber 撤销。
  */
 import type { ComponentType, ReactNode } from "react";
 import { VIEW_LABELS } from "@/constants/views";
@@ -59,18 +58,6 @@ export function registerSlot(contrib: SlotContribution): void {
 /** 按 id 撤销单个槽贡献。 */
 export function unregisterSlot(id: string): void {
   if (contributions.delete(id)) notify();
-}
-
-/** 撤销某插件的全部槽贡献（卸载/停用/重载时调用）。 */
-export function disposePluginSlots(pluginId: string): void {
-  let changed = false;
-  for (const [id, c] of contributions) {
-    if (c.pluginId === pluginId) {
-      contributions.delete(id);
-      changed = true;
-    }
-  }
-  if (changed) notify();
 }
 
 /** single 槽解析：胜出贡献（无贡献 = undefined）。 */

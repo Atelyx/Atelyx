@@ -189,14 +189,3 @@ export function registerPluginThemeSetting(
     if (themeSettings.delete(k)) notify();
   };
 }
-
-/** 撤销某插件在主线程平面的全部键值贡献（测试用；正常卸载走各注册的 ctx.effect 撤销）。
- *  视图/节点/边/表格视图槽贡献不在此表（走 slots 注册表，见 disposePluginSlots）。 */
-export function unregisterPluginUi(pluginId: string): void {
-  let changed = false;
-  for (const [k, v] of settings) if (v.pluginId === pluginId) changed = settings.delete(k) || changed;
-  for (const [k, v] of appPages) if (v.pluginId === pluginId) changed = appPages.delete(k) || changed;
-  for (const [k, v] of commands) if (v.pluginId === pluginId) changed = commands.delete(k) || changed;
-  for (const [k, v] of themeSettings) if (v.pluginId === pluginId) changed = themeSettings.delete(k) || changed;
-  if (changed) notify();
-}

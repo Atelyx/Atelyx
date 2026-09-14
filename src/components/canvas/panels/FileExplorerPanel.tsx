@@ -39,20 +39,6 @@ import { SortMenu } from "./file-explorer/SortMenu";
 import { FolderCreateMenu } from "./file-explorer/FolderCreateMenu";
 import { FolderColorMenu } from "./file-explorer/FolderColorMenu";
 
-/** 拖拽负载 MIME，工作区 onDrop 据此识别面板拖来的文件。 */
-export const ATELYX_FILE_MIME = "application/x-atelyx-vault-file";
-
-/** 拖拽负载：标识来源文件类型 + 路径 + 显示名。 */
-export interface AtelyxFilePayload {
-  kind: "note" | "attachment";
-  /** 相对仓库根路径，如 `项目A/foo.md`（任意文件夹） */
-  file: string;
-  /** 文件名（含扩展名） */
-  name: string;
-  /** note 的显示标题（文件名去 .md）；attachment 不填。 */
-  title?: string;
-}
-
 interface PanelProps {
   /** 单击画布行：打开画布并激活画布窗口（页面层包装 openCanvas + setActiveWindow）。 */
   onOpenCanvasFile: (row: CanvasFileRow) => void;
