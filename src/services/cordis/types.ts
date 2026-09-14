@@ -88,24 +88,25 @@ export interface DialogFilters {
   extensions: string[];
 }
 
-/** 插件自持状态服务（按插件 id 读写；单 JSON 对象）。 */
+/** 插件自持状态服务（按调用方插件隔离；单 JSON 对象）。归属 id 由宿主按调用方上下文绑定，API 不暴露。 */
 export interface StateService {
-  read(pluginId: string): Promise<unknown>;
-  write(pluginId: string, data: unknown): Promise<void>;
+  read(): Promise<unknown>;
+  write(data: unknown): Promise<void>;
 }
 
-/** 插件键值存储服务（按插件 id 隔离，独立于 `ctx.state`；值须为 JSON 可序列化，整表落 `data/kv.json`）。 */
+/** 插件键值存储服务（按调用方插件隔离，独立于 `ctx.state`；值须为 JSON 可序列化，整表落 `data/kv.json`）。
+ *  归属 id 由宿主按调用方上下文绑定，API 不暴露。 */
 export interface StorageService {
   /** 读一个键（不存在 = undefined）。 */
-  get(pluginId: string, key: string): Promise<unknown>;
+  get(key: string): Promise<unknown>;
   /** 写一个键（整表原子写）。 */
-  set(pluginId: string, key: string, value: unknown): Promise<void>;
+  set(key: string, value: unknown): Promise<void>;
   /** 删一个键（不存在 = no-op）。 */
-  delete(pluginId: string, key: string): Promise<void>;
+  delete(key: string): Promise<void>;
   /** 全部键名。 */
-  keys(pluginId: string): Promise<string[]>;
+  keys(): Promise<string[]>;
   /** 清空该插件的全部键。 */
-  clear(pluginId: string): Promise<void>;
+  clear(): Promise<void>;
 }
 
 /** 通用 HTTP 请求/响应类型：形状定义在 `services/http`（命令封装处），此处只做别名与注入面声明。 */

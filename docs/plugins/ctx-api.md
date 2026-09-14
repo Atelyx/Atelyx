@@ -23,8 +23,8 @@ ctx.effect(() => {
 
 | 服务 | 方法 | 说明 |
 | --- | --- | --- |
-| `ctx.state` | `read(pluginId: string): Promise<unknown>` / `write(pluginId: string, data: unknown): Promise<void>` | 插件自持状态服务（按插件 id 读写；单 JSON 对象）。 |
-| `ctx.storage` | `get(pluginId: string, key: string): Promise<unknown>` / `set(pluginId: string, key: string, value: unknown): Promise<void>` / `delete(pluginId: string, key: string): Promise<void>` / `keys(pluginId: string): Promise<string[]>` / `clear(pluginId: string): Promise<void>` | 插件键值存储服务（按插件 id 隔离，独立于 `ctx.state`；值须为 JSON 可序列化，整表落 `data/kv.json`）。 |
+| `ctx.state` | `read(): Promise<unknown>` / `write(data: unknown): Promise<void>` | 插件自持状态服务（按调用方插件隔离；单 JSON 对象）。归属 id 由宿主按调用方上下文绑定，API 不暴露。 |
+| `ctx.storage` | `get(key: string): Promise<unknown>` / `set(key: string, value: unknown): Promise<void>` / `delete(key: string): Promise<void>` / `keys(): Promise<string[]>` / `clear(): Promise<void>` | 插件键值存储服务（按调用方插件隔离，独立于 `ctx.state`；值须为 JSON 可序列化，整表落 `data/kv.json`）。 归属 id 由宿主按调用方上下文绑定，API 不暴露。 |
 | `ctx.http` | `request(req: HttpRequestInput): Promise<HttpResponseResult>` | 通用 HTTP 请求服务（Rust 代理：CORS 绕行 + SSRF 防护；20s 超时 + 1MB 响应上限，内网/回环地址拒绝）。 |
 | `ctx.notification` | `notify(input: NotificationInput): string` / `dismiss(id: string): void` | 应用内通知服务（右下角通知堆叠；`level` = info/success/warning/error，自动消失）。 |
 | `ctx.app` | `version(): Promise<string>` / `platform(): Promise<string>` / `openPage(pageId: string): Promise<boolean>` | 宿主信息服务（版本 / 平台 / 打开插件应用页）。 |

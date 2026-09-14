@@ -2,17 +2,35 @@
  * Cordis 内核宿主测试（services/cordis/kernel）。
  *
  * 验证：平台服务提供/撤销、事件发射（emitPluginEvent → ctx.emit）、canvas/table/collab 服务工厂
- * （经注入的访问对象）、懒单例。不触碰 Tauri invoke 路径的服务实现（其与注入访问同源，
- * 由领域侧接线覆盖）。
+ * （经注入的访问对象）、state/storage 按调用方插件隔离（tracker 绑定）、懒单例。
+ * invoke 路径以替身替代，只验证归属 id 的推导与调用面。
  */
 import { Context } from "@atelyx/cordis";
-import { describe, expect, it, afterEach } from "vitest";
+import { describe, expect, it, vi, afterEach } from "vitest";
 import { setPluginCanvasAccess, setPluginCollabAccess, setPluginTableRuntimeAccess } from "./access";
 import { emitPluginEvent, setKernelRef } from "./events";
-import { createKernel, getKernel, resetKernel } from "./kernel";
+import { createKernel, getKernel, resetKernel, type Kernel } from "./kernel";
 import { createCanvasService } from "./canvas";
 import { createTableService } from "./table";
 import { buildAgentTools, pluginToolMetas } from "@/services/ai/tools";
+import { mountPlugin, unmountAll } from "./loader";
+import {
+  pluginReadState,
+  pluginWriteState,
+  pluginKvRead,
+  pluginKvSet,
+  pluginKvDelete,
+  pluginKvWrite,
+} from "@/services/plugins";
+
+vi.mock("@/services/plugins", () => ({
+  pluginReadState: vi.fn(async () => ({ saved: true })),
+  pluginWriteState: vi.fn(async () => {}),
+  pluginKvRead: vi.fn(async () => ({ k: "v" })),
+  pluginKvSet: vi.fn(async () => {}),
+  pluginKvDelete: vi.fn(async () => {}),
+  pluginKvWrite: vi.fn(async () => {}),
+}));
 
 afterEach(() => {
   resetKernel();
@@ -155,5 +173,78 @@ describe("Cordis 内核宿主", () => {
     });
     await expect(fiber.await()).rejects.toThrow("工具名已被占用");
     k.dispose();
+  });
+});
+
+describe("state/storage 按调用方插件隔离", () => {
+  let kernel: Kernel | null = null;
+
+  afterEach(async () => {
+    if (kernel) {
+      await unmountAll(kernel);
+      kernel.dispose();
+      kernel = null;
+    }
+    vi.mocked(pluginReadState).mockClear();
+    vi.mocked(pluginWriteState).mockClear();
+    vi.mocked(pluginKvRead).mockClear();
+    vi.mocked(pluginKvSet).mockClear();
+    vi.mocked(pluginKvDelete).mockClear();
+    vi.mocked(pluginKvWrite).mockClear();
+  });
+
+  it("插件内 ctx.state 读写落到调用方命名空间（id 由宿主推导，API 无 id 参数）", async () => {
+    kernel = createKernel();
+    const reads: Promise<unknown>[] = [];
+    await mountPlugin(kernel, {
+      id: "com.test.a",
+      apply: (ctx) => {
+        reads.push(ctx.state.read());
+        void ctx.state.write({ hello: 1 });
+      },
+    });
+    await Promise.all(reads);
+    expect(pluginReadState).toHaveBeenCalledWith("com.test.a");
+    expect(pluginWriteState).toHaveBeenCalledWith("com.test.a", { hello: 1 });
+  });
+
+  it("ctx.storage 各方法同归属；两个插件各自命中自己的命名空间", async () => {
+    kernel = createKernel();
+    const pending: Promise<unknown>[] = [];
+    await mountPlugin(kernel, {
+      id: "com.test.a",
+      apply: (ctx) => {
+        pending.push(ctx.storage.get("k"));
+        void ctx.storage.set("k", 1);
+        void ctx.storage.delete("k");
+        pending.push(ctx.storage.keys());
+        void ctx.storage.clear();
+      },
+    });
+    await mountPlugin(kernel, {
+      id: "com.test.b",
+      apply: (ctx) => {
+        pending.push(ctx.storage.get("k"));
+        void ctx.state.write({ from: "b" });
+      },
+    });
+    await Promise.all(pending);
+    const kvReadIds = vi.mocked(pluginKvRead).mock.calls.map((c) => c[0]);
+    expect(kvReadIds).toEqual(["com.test.a", "com.test.a", "com.test.b"]);
+    expect(pluginKvSet).toHaveBeenCalledWith("com.test.a", "k", 1);
+    expect(pluginKvSet).toHaveBeenCalledTimes(1);
+    expect(pluginKvDelete).toHaveBeenCalledTimes(1);
+    expect(pluginKvWrite).toHaveBeenCalledTimes(1);
+    expect(pluginKvWrite).toHaveBeenCalledWith("com.test.a", {});
+    expect(pluginWriteState).toHaveBeenCalledTimes(1);
+    expect(pluginWriteState).toHaveBeenCalledWith("com.test.b", { from: "b" });
+  });
+
+  it("非插件上下文访问直接拒绝（无共享命名空间可落）", async () => {
+    kernel = createKernel();
+    expect(() => kernel!.ctx.state.read()).toThrow("只能在插件上下文中使用");
+    expect(() => kernel!.ctx.storage.clear()).toThrow("只能在插件上下文中使用");
+    expect(pluginReadState).not.toHaveBeenCalled();
+    expect(pluginKvWrite).not.toHaveBeenCalled();
   });
 });

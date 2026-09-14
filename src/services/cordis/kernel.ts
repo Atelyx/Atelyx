@@ -40,6 +40,7 @@ import {
   type PluginNotificationAccess,
 } from "./access";
 import { installAudit, resetAudit } from "./audit";
+import { pluginIdOf } from "./loader";
 import { createSlotsApi } from "./slotsApi";
 import { createHistoryService } from "./history";
 import { createLayoutService } from "./layout";
@@ -73,6 +74,24 @@ declare global {
 /** ai 服务实例（tracker 注入调用方插件上下文：registerTool 随其 fiber 撤销）。 */
 interface AiServiceInstance extends AiService {
   ctx: Context;
+}
+
+/** state 服务实例（tracker 注入调用方插件上下文：数据按调用方插件隔离）。 */
+interface StateServiceInstance extends StateService {
+  ctx: Context;
+}
+
+/** storage 服务实例（tracker 注入调用方插件上下文：数据按调用方插件隔离）。 */
+interface StorageServiceInstance extends StorageService {
+  ctx: Context;
+}
+
+/** 调用方插件 id：state/storage 的数据落点由调用方决定，缺归属的访问（非插件上下文）
+ *  直接拒绝——静默落到共享命名空间会制造跨插件数据混写。 */
+function requireCallerPluginId(ctx: Context): string {
+  const id = pluginIdOf(ctx);
+  if (!id) throw new Error("插件状态服务只能在插件上下文中使用");
+  return id;
 }
 
 /** 流句柄（shell/ai 流式：chunk/end/error 帧；已收尾后忽略后续调用）。 */
@@ -164,21 +183,39 @@ export function createKernel(): Kernel {
     disposables.push(ctx.provide(name as never, value as never));
   }
 
+  // state/storage 按调用方插件隔离：tracker 让插件经 ctx.state/ctx.storage 读取时 `this.ctx`
+  // 解析为调用方上下文，归属 id 由宿主推导——API 不暴露 id 参数，伪造他人命名空间无入口
+  // （同 ctx.ai/ctx.slots 的绑定机制）。
   const state: StateService = {
-    read: (pluginId) => pluginReadState(pluginId),
-    write: (pluginId, data) => pluginWriteState(pluginId, data),
+    read(this: StateServiceInstance): Promise<unknown> {
+      return pluginReadState(requireCallerPluginId(this.ctx));
+    },
+    write(this: StateServiceInstance, data: unknown): Promise<void> {
+      return pluginWriteState(requireCallerPluginId(this.ctx), data);
+    },
   };
+  Object.defineProperty(state, symbols.tracker, { value: { property: "ctx" } });
   provide("state", state);
 
-  /** 键值面按插件 id 显式寻址（与 ctx.state 同约定）：服务侧不猜调用方身份；
-   *  单键读改写由 Rust 侧串行完成（并发写不丢键），clear 走整表覆盖。 */
+  // 键值面（与 ctx.state 同口径隔离）：单键读改写由 Rust 侧串行完成（并发写不丢键），clear 走整表覆盖。
   const storage: StorageService = {
-    get: async (pluginId, key) => (await pluginKvRead(pluginId))[key],
-    set: (pluginId, key, value) => pluginKvSet(pluginId, key, value),
-    delete: (pluginId, key) => pluginKvDelete(pluginId, key),
-    keys: async (pluginId) => Object.keys(await pluginKvRead(pluginId)),
-    clear: (pluginId) => pluginKvWrite(pluginId, {}),
+    async get(this: StorageServiceInstance, key: string): Promise<unknown> {
+      return (await pluginKvRead(requireCallerPluginId(this.ctx)))[key];
+    },
+    set(this: StorageServiceInstance, key: string, value: unknown): Promise<void> {
+      return pluginKvSet(requireCallerPluginId(this.ctx), key, value);
+    },
+    delete(this: StorageServiceInstance, key: string): Promise<void> {
+      return pluginKvDelete(requireCallerPluginId(this.ctx), key);
+    },
+    async keys(this: StorageServiceInstance): Promise<string[]> {
+      return Object.keys(await pluginKvRead(requireCallerPluginId(this.ctx)));
+    },
+    clear(this: StorageServiceInstance): Promise<void> {
+      return pluginKvWrite(requireCallerPluginId(this.ctx), {});
+    },
   };
+  Object.defineProperty(storage, symbols.tracker, { value: { property: "ctx" } });
   provide("storage", storage);
 
   const http: HttpService = {
