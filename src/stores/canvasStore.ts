@@ -100,6 +100,9 @@ import {
 } from "./streaming";
 import { isAssetConsumed } from "@/utils/consumed";
 import { appendNarration, appendReasoning, assistantReplyText, fillAssistantReplyText, finalizeReplyText, mergeToolRuns } from "@/utils/agentSteps";
+import { nextCompactionBoundary, splitByCompaction } from "@/utils/compaction";
+import { runCompaction } from "@/services/ai/compaction";
+import { frameCompactionSummary } from "@/constants/compaction";
 import { prefix, scanMentionHits } from "@/utils/text";
 import { noteTitleFromFile, remapDirPrefix, sanitizeFilename, siblingPath, tableTitleFromFile } from "@/utils/filename";
 import { useSettingsStore } from "./settingsStore";
@@ -211,6 +214,8 @@ interface CanvasState {
   messagesByConv: Record<string, Message[]>;
   /** 各对话节点是否正在流式回复 */
   streamingByConv: Record<string, boolean>;
+  /** 压缩中的对话节点 id 集合（手动压缩为独立请求，与流式互斥：压缩期间禁用发送/再压缩）。 */
+  compactingByConv: Record<string, boolean>;
   /** 拖线引用队列：conversationId → 待进输入框 @标签 的节点 id（不立即建边，发送时自动连线） */
   pendingMentionsByConv: Record<string, string[]>;
   /** 全局错误提示（如未配置 AI provider） */
@@ -329,6 +334,11 @@ interface CanvasState {
   ) => Promise<void>;
   /** 重新生成该对话的最后一条 AI 回复（重发最后一条 user 消息，不追加新消息）。 */
   regenerate: (conversationId: string) => Promise<void>;
+  /**
+   * 手动压缩该对话：把当前全部消息交给模型总结成检查点，之后重建请求历史时全部历史由该摘要代替
+   * （消息本体不动，仅其后的新消息按原文追加）。失败/无可压缩/已覆盖末尾均只提示，不写注解。
+   */
+  compactConversation: (conversationId: string) => Promise<void>;
   /**
    * 「回到此处」：截断该消息（含）之后的全部消息，在该处继续对话。
    * 入 undo 栈可撤销（恢复被截断的消息）；已是最末消息则 no-op。
@@ -1512,17 +1522,22 @@ async function runStream(conversationId: string): Promise<void> {
   // 叙述-only 消息（content 为空、正文在 steps 叙述步）先回填 content——
   // 否则空 content 会被下方过滤丢弃，造成多轮上下文断裂
   // 过滤 system 与错误占位 assistant（[错误] 不进 API 历史，避免污染上下文）；
-  // 空占位 assistant（预建 content:"" 的流式占位）也不发送——部分端点对空 content 返回 400
-  const history = store
-    .getState()
-    .messagesByConv[conversationId]
+  // 空占位 assistant（预建 content:"" 的流式占位）也不发送——部分端点对空 content 返回 400，
+  // 但**带 steps 的空正文消息要保留**（工具轮中止/无最终回答时正文为空、工具结果在 steps 里，
+  // 丢掉等于让模型重读）。压缩注解按原始列表定位锚点（与标记行同口径）：锚点及其之前不进请求
+  const { kept, checkpoint } = splitByCompaction(
+    store.getState().messagesByConv[conversationId],
+    nodeData?.compaction,
+  );
+  const history = kept
     .map(fillAssistantReplyText)
     .filter(
       (m) =>
         m.role !== "system" &&
         !(
           m.role === "assistant" &&
-          (m.content.startsWith(ERROR_PREFIX) || m.content === "")
+          (m.content.startsWith(ERROR_PREFIX) ||
+            (m.content === "" && !m.steps?.length))
         ),
     );
 
@@ -1578,6 +1593,10 @@ async function runStream(conversationId: string): Promise<void> {
       });
     }
     const apiMessages: LlmMessage[] = toLlmMessages(resolvedHistory);
+    // 压缩检查点紧随 system 之后：占住被压缩区间在请求历史中的位置，保留段原样跟随其后
+    if (checkpoint) {
+      apiMessages.unshift({ role: "user", text: frameCompactionSummary(checkpoint.summary) });
+    }
     // 系统提示词注入：Agent 引用已注册提示词笔记实时读正文（外部编辑即时生效，读失败静默降级）；
     // 工具含 read_file 时追加「@引用 文件用 read_file 读取」引导。易变上下文（任务清单）走尾部块，
     // 不进系统提示词——系统前缀必须稳定以命中前缀缓存。
@@ -2106,6 +2125,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
   readOnly: false,
   messagesByConv: {},
   streamingByConv: {},
+  compactingByConv: {},
   lockedConversations: {},
   pendingMentionsByConv: {},
   error: null,
@@ -2147,6 +2167,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
         conflictPending: false,
         // 跨画布切换清空 undo/redo 与流式状态：快照含 messages，混用会串画布污染撤销
         streamingByConv: {},
+        compactingByConv: {},
         // 切画布释放本端独占编辑锁（旧画布锁不得带进新画布）
         lockedConversations: {},
         // 引用队列按对话节点 id 记键，跨画布无消费方，一并清空（防跨画布残留）
@@ -2746,6 +2767,8 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
     if (!canvasId) return;
     // 协作独占锁守卫：对话节点被其他对端独占编辑（确定性锁主非本端）时拒绝发送（竞态兜底）
     if (isConversationLockedByPeer(conversationId)) return;
+    // 压缩进行中：压缩是独立模型请求，与发送互斥（UI 已禁用，此为竞态兜底）
+    if (get().compactingByConv[conversationId]) return;
 
     // AI 消息发送不进 Undo 栈（业务操作），但作废 redo：undo 后发送的新消息不得被 Ctrl+Y 抹除
     touchRedo();
@@ -2989,6 +3012,8 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
     const list = get().messagesByConv[conversationId] ?? [];
     // 协作独占锁守卫：同 send（竞态兜底）
     if (isConversationLockedByPeer(conversationId)) return;
+    // 压缩进行中：同 send（竞态兜底）
+    if (get().compactingByConv[conversationId]) return;
     // 重新生成不入 Undo 栈（业务操作），但作废 redo（同 send 语义）
     touchRedo();
     let lastUserIdx = -1;
@@ -3043,8 +3068,109 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
     await runStream(conversationId);
   },
 
+  compactConversation: async (conversationId) => {
+    const state = get();
+    // 与流式互斥：压缩是独立模型请求，流式进行中压缩会让两处状态互相覆盖
+    if (state.streamingByConv[conversationId] || state.compactingByConv[conversationId]) return;
+    // 协作独占锁守卫：锁被对端持有时注解写不进（updateNodeData 会拒绝），提前拦下省一次模型请求
+    if (isConversationLockedByPeer(conversationId)) return;
+    const list = state.messagesByConv[conversationId] ?? [];
+    const nodeData = state.nodes.find((n) => n.id === conversationId)
+      ?.data as Partial<ConversationData> | undefined;
+    const bound = nextCompactionBoundary(list, nodeData?.compaction);
+    if (!bound) {
+      set({
+        error: nodeData?.compaction
+          ? "已压缩到对话末尾，没有新增内容"
+          : "没有可压缩的对话（需要至少一轮问答）",
+      });
+      return;
+    }
+    const resolved = useSettingsStore.getState().resolveChatTarget(
+      nodeData?.providerId || nodeData?.model
+        ? { providerId: nodeData.providerId || undefined, model: nodeData.model || undefined }
+        : null,
+    );
+    if (!resolved.ok) {
+      set({ error: resolved.error });
+      return;
+    }
+    // 喂给压缩模型的 = **当前模型可见历史**（旧摘要 + 未被旧注解覆盖的保留段）截到新边界：
+    // 旧摘要随新内容一起被重新总结（指令要求合并不照抄），不会因为压缩两次而丢掉先前摘要
+    const prior = splitByCompaction(list, nodeData?.compaction);
+    const cutIdx = prior.kept.findIndex((m) => m.id === bound.upToMessageId);
+    const toSummarize: LlmMessage[] = [
+      ...(prior.checkpoint
+        ? [{ role: "user" as const, text: frameCompactionSummary(prior.checkpoint.summary) }]
+        : []),
+      ...toLlmMessages(prior.kept.slice(0, cutIdx + 1)),
+    ];
+    // 与当前会话同源的工具名册：历史含工具消息时带上，请求结构才与最近一次真实请求一致
+    // （控制器与 compactingByConv 置位须在任何 await 之前，否则互斥守卫存在可插入的窗口）
+    const controller = new AbortController();
+    abortControllers.set(conversationId, controller);
+    set({
+      error: null,
+      compactingByConv: { ...get().compactingByConv, [conversationId]: true },
+    });
+    try {
+      const agentReq = await useSettingsStore
+        .getState()
+        .resolveAgentRequest(nodeData?.agentId);
+      // 解析期间节点可能已删除：中止本轮，避免往已删节点写状态
+      if (!get().nodes.some((n) => n.id === conversationId)) return;
+      const result = await runCompaction({
+        baseUrl: resolved.provider.baseUrl,
+        apiKey: resolved.provider.apiKey,
+        model: resolved.model,
+        messages: toSummarize,
+        ...(agentReq?.tools.length ? { tools: agentReq.tools } : {}),
+        signal: controller.signal,
+      });
+      if (!result.ok) {
+        // aborted = 用户主动停止，静默收尾；其余给出可重试提示
+        if (result.reason !== "aborted") {
+          set({
+            error:
+              result.reason === "truncated"
+                ? "压缩失败：摘要超出输出上限被截断，请重试"
+                : result.reason === "empty"
+                  ? "压缩失败：模型未返回摘要内容，请重试"
+                  : `压缩失败：${result.error?.message ?? "请求出错"}`,
+          });
+        }
+        return;
+      }
+      // 节点可能已删除/已切换：写回前复核；锚点消息若已不在（协作补丁/回滚截断）则丢弃本次结果——
+      // 写入死注解只会让下次请求白白退回全历史，静默浪费一次调用
+      if (!get().nodes.some((n) => n.id === conversationId)) return;
+      const current = get().messagesByConv[conversationId] ?? [];
+      if (!current.some((m) => m.id === bound.upToMessageId)) return;
+      get().updateNodeData(conversationId, {
+        compaction: {
+          summary: result.summary,
+          upToMessageId: bound.upToMessageId,
+          messageCount: bound.messageCount,
+          createdAt: Date.now(),
+          providerId: resolved.provider.id,
+          model: resolved.model,
+        },
+      });
+    } finally {
+      if (abortControllers.get(conversationId) === controller) {
+        abortControllers.delete(conversationId);
+      }
+      // 节点已删除：不重建 compactingByConv 键（删除路径已清理，重建会留脏键）
+      if (get().nodes.some((n) => n.id === conversationId)) {
+        set({ compactingByConv: { ...get().compactingByConv, [conversationId]: false } });
+      }
+    }
+  },
+
   rollbackTo: (conversationId, messageId) => {
     const list = get().messagesByConv[conversationId] ?? [];
+    // 压缩进行中：截断会丢掉在途压缩的锚点消息（与 send/regenerate 同口径，竞态兜底）
+    if (get().compactingByConv[conversationId]) return;
     const idx = list.findIndex((m) => m.id === messageId);
     if (idx < 0 || idx === list.length - 1) return;
     get().pushUndo();
@@ -3165,6 +3291,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
       readOnly: false,
       messagesByConv: {},
       streamingByConv: {},
+      compactingByConv: {},
       lockedConversations: {},
       pendingMentionsByConv: {},
       error: null,
@@ -3263,13 +3390,17 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
     // 注意：不清理对话节点的任务清单侧车——本删除可 undo（pushUndo 恢复节点/消息），
     // 若删侧车则 Ctrl+Z 后对话回来但清单永久丢失；孤儿侧车隐藏且无 watcher 回波，可接受。
 
-    // 删除流式中的对话节点：先 abort（否则流无法再被中止，onDone 还会往已删节点写增量）
+    // 删除流式/压缩中的对话节点：先 abort（否则请求无法再被中止，回调还会往已删节点写状态）
     if (deletedConvIds.length) {
       for (const cid of deletedConvIds) abortControllers.get(cid)?.abort();
       set((state) => {
         const next = { ...state.streamingByConv };
-        for (const cid of deletedConvIds) delete next[cid];
-        return { streamingByConv: next };
+        const nextCompacting = { ...state.compactingByConv };
+        for (const cid of deletedConvIds) {
+          delete next[cid];
+          delete nextCompacting[cid];
+        }
+        return { streamingByConv: next, compactingByConv: nextCompacting };
       });
     }
 

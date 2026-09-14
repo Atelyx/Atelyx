@@ -38,7 +38,8 @@ export interface MessageRef {
 
 /**
  * 单次工具调用记录（Agent 模式可视化：消息气泡内展示调用过程与结果摘要）。
- * 仅展示性元数据：不进 API 历史（工具轮消息不落历史，重发仍无状态）。
+ * 展示用元数据，同时是下一轮请求历史重建的工具消息来源（`utils/agentHistory` 按此还原
+ * `tool_calls` + `tool` 结果，使读过内容不必重读）；重发时超长结果会被折叠中段。
  */
 export interface ToolRun {
   /** tool call id（流式累积的 id，跨工具轮唯一） */
@@ -62,7 +63,8 @@ export interface ToolRun {
  * - `text`：某一轮工具的叙述正文（模型在工具轮里说的普通文本，渲染为该步的叙述行、正文样式；
  *   最终回答轮的叙述由 `promoteTrailingNarration` 轮末提升进 content）
  * - `tool`：一次工具调用（含结果详情，可展开）
- * 仅展示性元数据，不进 API 历史（工具轮消息不落历史；叙述-only 消息的 API/复制正文经 `assistantReplyText` 回退）。
+ * 展示用元数据，同时是下一轮请求历史重建的来源（见 `utils/agentHistory` 的
+ * `expandAgentStepsToLlmMessages`）；叙述-only 消息的 API/复制正文经 `assistantReplyText` 回退。
  */
 export type AgentStep =
   | { kind: "reasoning"; text: string }

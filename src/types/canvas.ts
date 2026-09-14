@@ -6,6 +6,7 @@
  * 所有 node/edge/message 有稳定 id，为未来协作增量合并预留。
  */
 import type { Message } from "./message";
+import type { ConversationCompaction } from "./compaction";
 import type { GlobalProvider, ReasoningEffort } from "./provider";
 import type { LinkMode, SearchResultData } from "./node";
 import type { CANVAS_SCHEMA } from "@/constants/canvas";
@@ -50,6 +51,8 @@ export interface ConversationFileData {
   title?: string;
   /** 节点级推理等级（缺省 = 不指定/跟随默认；旧文件无此字段兼容读取）。 */
   reasoningEffort?: ReasoningEffort;
+  /** 会话压缩注解（用户手动触发；随 .atlx 持久化，见 types/node.ts）。 */
+  compaction?: ConversationCompaction;
   messages: Message[];
 }
 

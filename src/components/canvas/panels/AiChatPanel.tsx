@@ -20,6 +20,7 @@ import {
   Cpu,
   FilePlus,
   History,
+  Layers,
   Loader2,
   MessageSquare,
   RefreshCw,
@@ -51,6 +52,8 @@ import { VaultAtPicker, type VaultPickTarget } from "@/components/common/VaultAt
 import { openVaultPath } from "@/components/common/FileKindIcon";
 import { noteTitleFromFile } from "@/utils/filename";
 import { assistantReplyText } from "@/utils/agentSteps";
+import { compactionMarkerIndex } from "@/utils/compaction";
+import { CompactionMarker } from "@/components/common/CompactionMarker";
 import { useVaultLinkHandlers } from "@/hooks/useVaultLinkHandlers";
 import type { EditorChatMessage, EditorChatMessageRef } from "@/types";
 
@@ -99,6 +102,12 @@ export function AiChatPanel() {
   const renameSession = useChatPanelStore((s) => s.renameSession);
   const rollbackTo = useChatPanelStore((s) => s.rollbackTo);
   const regenerate = useChatPanelStore((s) => s.regenerate);
+  const compactSession = useChatPanelStore((s) => s.compactSession);
+  /** 本会话是否正在压缩（store 存的是「压缩中的会话 id」；其他会话压缩时本会话不显示转圈/不禁用）。 */
+  const compactingThis = useChatPanelStore(
+    (s) => s.compacting !== null && s.compacting === s.activeSessionId,
+  );
+  const compactingAny = useChatPanelStore((s) => s.compacting !== null);
   const newSession = useChatPanelStore((s) => s.newSession);
   const openSession = useChatPanelStore((s) => s.openSession);
   const deleteSession = useChatPanelStore((s) => s.deleteSession);
@@ -110,6 +119,8 @@ export function AiChatPanel() {
 
   const active = sessions.find((s) => s.id === activeSessionId);
   const messages = active?.messages ?? EMPTY_MESSAGES;
+  // 压缩标记行插入位（-1 = 无注解/注解失效）：与历史重建同判定
+  const compactionMarkerIdx = compactionMarkerIndex(messages, active?.compaction);
   // 顶部标题：激活会话名（新对话态无会话 → 「新对话」）
   const activeTitle = active?.title || "新对话";
   // Agent：激活会话的会话级引用；新对话态（无激活会话）读 draft（发送首条消息时固化）
@@ -219,7 +230,8 @@ export function AiChatPanel() {
 
   const handleSend = () => {
     const text = input.trim();
-    if (!text || streaming) return;
+    // 压缩进行中拦截在清空草稿之前（与画布 handleSend 同口径；store 侧另有竞态兜底）
+    if (!text || streaming || compactingAny) return;
     setInput("");
     setMentions([]);
     setPicker(null);
@@ -347,6 +359,22 @@ export function AiChatPanel() {
           >
             <History size={15} />
           </button>
+          {/* 压缩会话历史：把对话总结为检查点，压缩后的请求历史由摘要代替（消息本体不动）；
+              仅激活会话有历史时可用；流式/压缩进行中禁用；转圈只显示在真正压缩的会话上 */}
+          <button
+            onClick={() => void compactSession()}
+            disabled={!active || streaming || compactingAny}
+            title={compactingThis ? "正在压缩会话历史…" : "压缩会话历史"}
+            aria-label={compactingThis ? "正在压缩会话历史" : "压缩会话历史"}
+            className="p-1.5 rounded hover:opacity-80 disabled:opacity-40 disabled:cursor-default disabled:hover:opacity-40"
+            style={{ color: "var(--text-secondary)" }}
+          >
+            {compactingThis ? (
+              <Loader2 size={15} className="animate-spin" />
+            ) : (
+              <Layers size={15} />
+            )}
+          </button>
         </div>
       </div>
 
@@ -423,9 +451,13 @@ export function AiChatPanel() {
                 assistantReplyText(m).trim() !== "" &&
                 !m.content.startsWith(ERROR_PREFIX);
               return (
-                <ChatMessageBubble
-                  key={m.id}
-                  role={m.role}
+                <div key={m.id} className="space-y-3">
+                  {/* 压缩标记：插在折叠块之后首条消息之前（被压缩的原文仍显示在标记上方） */}
+                  {i === compactionMarkerIdx && active?.compaction && (
+                    <CompactionMarker compaction={active.compaction} />
+                  )}
+                  <ChatMessageBubble
+                    role={m.role}
                   displayContent={m.role === "user" ? m.displayContent ?? m.content : undefined}
                   refs={m.refs}
                   refKeyOf={refKeyOfPanelRef}
@@ -440,8 +472,14 @@ export function AiChatPanel() {
                   onRollback={rollbackTo}
                   onRegenerate={canRegenerate ? handleRegenerate : undefined}
                 />
+                </div>
               );
             })
+          )}
+
+          {/* 压缩覆盖到对话末尾（刚压缩完的常态）：标记行渲染在列表末尾 */}
+          {compactionMarkerIdx === messages.length && active?.compaction && (
+            <CompactionMarker compaction={active.compaction} />
           )}
         </div>
         {showJumpToBottom && <JumpToBottomButton onClick={jumpToBottom} />}
@@ -487,12 +525,13 @@ export function AiChatPanel() {
           />
 
           <div className="flex-1" />
-          {/* 右：发送 / 停止（图标 only，金色圆钮，流式中切换为停止）——mr-1 右缘留白不顶格 */}
+          {/* 右：发送 / 停止（图标 only，金色圆钮，流式中切换为停止）——mr-1 右缘留白不顶格；
+              任一会话压缩进行中即禁用（压缩与发送共用一个中止句柄，避免静默无效点击） */}
           <button
             onClick={streaming ? stop : handleSend}
-            disabled={!streaming && !input.trim()}
-            title={streaming ? "停止" : "发送 (Enter)"}
-            aria-label={streaming ? "停止" : "发送"}
+            disabled={compactingAny || (!streaming && !input.trim())}
+            title={compactingAny ? "正在压缩会话历史…" : streaming ? "停止" : "发送 (Enter)"}
+            aria-label={compactingAny ? "正在压缩会话历史" : streaming ? "停止" : "发送"}
             className="p-1.5 rounded flex-shrink-0 mr-1 disabled:opacity-40"
             style={{
               background: streaming ? "var(--bg-tertiary)" : "var(--accent)",

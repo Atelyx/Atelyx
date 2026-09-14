@@ -1,7 +1,7 @@
 /**
  * AI 对话面板（右侧边栏）的消息与会话类型。
  * 持久化：以 `.atelyx/对话历史/` 文件夹为真相——每会话一个消息 `.jsonl`（追加式写）+ 可选
- * `.meta.json` 元数据侧车（title/agentId）；会话清单 = 扫目录（无整文件索引，多设备共享文件夹
+ * `.meta.json` 元数据侧车（title/agentId/compaction）；会话清单 = 扫目录（无整文件索引，多设备共享文件夹
  * 实时互见）；面板级覆盖存 `.atelyx/editor-chats-meta.json`。单一全局历史，不按笔记归属。
  *
  * 与画布对话（types/message.ts）的差异：面板是纯文本对话，
@@ -9,6 +9,7 @@
  */
 import { EDITOR_CHATS_META_SCHEMA } from "@/constants/editorChats";
 import type { AgentStep } from "./message";
+import type { ConversationCompaction } from "./compaction";
 import type { ReasoningEffort } from "./provider";
 
 export type EditorChatRole = "user" | "assistant";
@@ -48,7 +49,8 @@ export interface EditorChatMessage {
   content: string;
   /**
    * Agent 步进（assistant 消息展示用，思考与工具交错，每步思考可见）。
-   * 随消息 .jsonl 记录结构化持久化，重开会话恢复展示（含工具步）。
+   * 随消息 .jsonl 记录结构化持久化，重开会话恢复展示（含工具步）；
+   * 同时是下一轮请求历史重建的工具消息来源（见 `utils/agentHistory`）。
    */
   steps?: AgentStep[];
   /**
@@ -70,6 +72,11 @@ export interface ChatSessionMeta {
   title?: string;
   /** 引用的 Agent 配置 id（仓库级 `.atelyx/agents.json`；发送时实时解析系统提示词/工具；缺省 = 按预置「对话」Agent 处理）。 */
   agentId?: string;
+  /**
+   * 会话压缩注解（用户手动触发）：锚点及其之前的消息不进模型请求。
+   * 消息本体不动，仅重建历史时按注解裁剪；锚点缺失即注解失效（见 `splitByCompaction`）。
+   */
+  compaction?: ConversationCompaction;
 }
 
 /** list_chat_sessions 返回行（Rust 扫 `.atelyx/对话历史/` 目录结果）。 */
@@ -88,6 +95,8 @@ export interface EditorChatSession {
   title?: string;
   /** 引用的 Agent 配置 id（同 ChatSessionMeta.agentId）。 */
   agentId?: string;
+  /** 会话压缩注解（同 ChatSessionMeta.compaction；运行时态 + 侧车持久化）。 */
+  compaction?: ConversationCompaction;
   /** 消息正文 .jsonl 相对仓库根路径（`.atelyx/对话历史/<会话 id>.jsonl`）。 */
   file: string;
   /** 首条消息创建时间（运行时派生，不持久化）。 */

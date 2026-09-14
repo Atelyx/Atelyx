@@ -42,6 +42,9 @@ import {
 import { fetchWeb } from "@/services/web";
 import { prefix, scanMentionHits } from "@/utils/text";
 import { appendNarration, appendReasoning, coalesceAgentSteps, fillAssistantReplyText, finalizeReplyText, mergeToolRuns } from "@/utils/agentSteps";
+import { nextCompactionBoundary, splitByCompaction } from "@/utils/compaction";
+import { runCompaction } from "@/services/ai/compaction";
+import { frameCompactionSummary } from "@/constants/compaction";
 import { createPersistController } from "@/utils/persist";
 import { useSettingsStore } from "./settingsStore";
 import { useAppStore } from "./appStore";
@@ -62,6 +65,7 @@ import type {
   ProviderConfig,
   ReasoningEffort,
   ToolSchema,
+  LlmMessage,
 } from "@/types";
 
 /**
@@ -98,6 +102,9 @@ interface ChatPanelState {
   pendingRewrites: NoteRewriteRequest[];
   /** 面板内联错误提示（未配置模型/发送失败等）。 */
   error: string | null;
+  /** 压缩中的会话 id（null = 无）。压缩为独立模型请求、与流式共用一个中止句柄，故守卫是全局的；
+   *  记录 id 只为把转圈/禁用态显示在真正压缩的那个会话上（切到别的会话不误报）。 */
+  compacting: string | null;
   loaded: boolean;
   /** 当前内存会话所属的仓库 ID（load 时记录；flush 写盘前校验归属，防跨仓库搞混）。 */
   sessionVaultId: string | null;
@@ -115,6 +122,11 @@ interface ChatPanelState {
   send: (content: string, refs?: EditorChatMessageRef[]) => Promise<void>;
   /** 重新生成最后一条回复：移除最后 assistant、按 refs 重建最后一条 user 消息注入后重发（同画布 regenerate 语义）。 */
   regenerate: () => Promise<void>;
+  /**
+   * 手动压缩当前会话：把当前全部消息交给模型总结成检查点，之后重建请求历史时全部历史由该摘要代替
+   * （消息本体不动，仅其后的新消息按原文追加）。失败/无可压缩/已覆盖末尾均只提示，不写注解。
+   */
+  compactSession: () => Promise<void>;
   /** 手动重新命名当前会话（按全部会话记录请求命名，立即发出无防限流延迟；失败 error 提示）。 */
   renameSession: () => Promise<void>;
   /** 回到此处：截断到指定 AI 回复（含），之后的消息移除，在此处继续对话。 */
@@ -151,7 +163,7 @@ let abortController: AbortController | null = null;
 let dirty = false;
 /** 需要重写消息 .jsonl 的会话 id 集合（发送/流式结束时标记；persistNow 统一写盘后清空）。 */
 const dirtyMessageFiles = new Set<string>();
-/** 需要重写元数据侧车（.meta.json：title/agentId）的会话 id 集合（改名/换 Agent 时标记）。 */
+/** 需要重写元数据侧车（.meta.json：title/agentId/compaction）的会话 id 集合（改名/换 Agent/压缩时标记）。 */
 const dirtyMetaSessions = new Set<string>();
 /** 面板级覆盖（editor-chats-meta.json）是否有本地改动（setModelOverride/setEffortOverride 标记）。 */
 let overridesDirty = false;
@@ -405,6 +417,7 @@ async function persistNow(guardVaultId?: string | null): Promise<void> {
           id: s.id,
           ...(s.title !== undefined ? { title: s.title } : {}),
           ...(s.agentId !== undefined ? { agentId: s.agentId } : {}),
+          ...(s.compaction ? { compaction: s.compaction } : {}),
         });
         dirtyMetaSessions.delete(id);
       } catch (e) {
@@ -468,6 +481,7 @@ async function applyExternalMessages(id: string, file: string): Promise<void> {
           id,
           ...(meta?.title !== undefined ? { title: meta.title } : {}),
           ...(meta?.agentId !== undefined ? { agentId: meta.agentId } : {}),
+          ...(meta?.compaction ? { compaction: meta.compaction } : {}),
           file,
           createdAt: diskMessages[0]?.createdAt ?? 0,
           updatedAt: diskMessages[diskMessages.length - 1]?.createdAt ?? 0,
@@ -521,6 +535,7 @@ async function applyExternalMeta(id: string): Promise<void> {
             ...s,
             ...(meta.title !== undefined ? { title: meta.title } : {}),
             ...(meta.agentId !== undefined ? { agentId: meta.agentId } : {}),
+            ...(meta.compaction ? { compaction: meta.compaction } : {}),
           }
         : s
     ),
@@ -631,8 +646,12 @@ async function runExchange(
 
   // 历史含刚追加的 user 消息；叙述-only 消息（content 为空、正文在 steps）先回填 content
   // （否则空 content 发给部分端点返回 400）；过滤错误占位防污染上下文，system 提示词置首
-  // （与画布 runStream 同语义）
-  const apiHistory = [...active.messages, userMsg]
+  // （与画布 runStream 同语义）。压缩注解按原始列表定位锚点（与标记行同口径）：锚点及其之前不进请求
+  const { kept, checkpoint } = splitByCompaction(
+    [...active.messages, userMsg],
+    active.compaction,
+  );
+  const apiHistory = kept
     .map(fillAssistantReplyText)
     .filter(
       (m) => !(m.role === "assistant" && m.content.startsWith(ERROR_PREFIX)),
@@ -644,6 +663,9 @@ async function runExchange(
 
   const apiMessages = [
     ...(systemText ? [{ role: "system" as const, text: systemText }] : []),
+    ...(checkpoint
+      ? [{ role: "user" as const, text: frameCompactionSummary(checkpoint.summary) }]
+      : []),
     ...toLlmMessages(apiHistory),
   ];
   // 当前打开笔记以尾部上下文块折叠进末条 user 消息线文：仅当名册含 read_file 时才注入
@@ -863,6 +885,7 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
   draftAgentId: BUILTIN_AGENT_CHAT_ID,
   pendingRewrites: [],
   error: null,
+  compacting: null,
   loaded: false,
   sessionVaultId: null,
 
@@ -914,6 +937,7 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
           id: row.id,
           ...(row.meta?.title !== undefined ? { title: row.meta.title } : {}),
           ...(row.meta?.agentId !== undefined ? { agentId: row.meta.agentId } : {}),
+          ...(row.meta?.compaction ? { compaction: row.meta.compaction } : {}),
           file: row.file,
           createdAt: messages[0]?.createdAt ?? 0,
           updatedAt: messages[messages.length - 1]?.createdAt ?? 0,
@@ -1004,7 +1028,7 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
 
   send: async (content, refs = []) => {
     const trimmed = content.trim();
-    if (!trimmed || get().streaming) return;
+    if (!trimmed || get().streaming || get().compacting) return;
 
     // 让路：中止当前会话的自动命名请求（防其占用后端槽位与新消息排队；不误伤其他会话）
     const sid = get().activeSessionId;
@@ -1061,7 +1085,7 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
 
   regenerate: async () => {
     const s = get();
-    if (s.streaming) return;
+    if (s.streaming || s.compacting) return;
     const session = s.sessions.find((x) => x.id === s.activeSessionId);
     if (!session) return;
     const list = session.messages;
@@ -1102,6 +1126,96 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
     await runExchange({ ...session, messages: base }, { ...userMsg, content: rebuiltContent }, resolved.provider, resolved.model, resolved.reasoningEffort);
   },
 
+  compactSession: async () => {
+    const s = get();
+    // 与流式/重复压缩互斥：压缩是独立模型请求，并发会让状态互相覆盖
+    if (s.streaming || s.compacting) return;
+    const session = s.sessions.find((x) => x.id === s.activeSessionId);
+    if (!session) return;
+    const bound = nextCompactionBoundary(session.messages, session.compaction);
+    if (!bound) {
+      set({
+        error: session.compaction
+          ? "已压缩到对话末尾，没有新增内容"
+          : "没有可压缩的对话（需要至少一轮问答）",
+      });
+      return;
+    }
+    const resolved = resolveProviderModel();
+    if (!resolved) return;
+    // 喂给压缩模型的 = **当前模型可见历史**（旧摘要 + 未被旧注解覆盖的保留段）截到新边界：
+    // 旧摘要随新内容一起被重新总结（指令要求合并不照抄），压缩两次不会丢掉先前摘要
+    const prior = splitByCompaction(session.messages, session.compaction);
+    const cutIdx = prior.kept.findIndex((m) => m.id === bound.upToMessageId);
+    const toSummarize: LlmMessage[] = [
+      ...(prior.checkpoint
+        ? [{ role: "user" as const, text: frameCompactionSummary(prior.checkpoint.summary) }]
+        : []),
+      ...toLlmMessages(prior.kept.slice(0, cutIdx + 1)),
+    ];
+    // 与当前会话同源的工具名册：历史含工具消息时带上，请求结构才与最近一次真实请求一致
+    // （控制器与 compacting 置位须在任何 await 之前，否则互斥守卫存在可插入的窗口）
+    const controller = new AbortController();
+    abortController = controller;
+    set({ error: null, compacting: session.id });
+    try {
+      const agentReq = await useSettingsStore
+        .getState()
+        .resolveAgentRequest(session.agentId);
+      // 解析期间会话可能已删除：中止本轮，避免往已删会话写状态
+      if (!get().sessions.some((x) => x.id === session.id)) return;
+      const result = await runCompaction({
+        baseUrl: resolved.provider.baseUrl,
+        apiKey: resolved.provider.apiKey,
+        model: resolved.model,
+        messages: toSummarize,
+        ...(agentReq?.tools.length ? { tools: agentReq.tools } : {}),
+        signal: controller.signal,
+      });
+      if (!result.ok) {
+        // aborted = 用户主动停止，静默收尾；其余给出可重试提示
+        if (result.reason !== "aborted") {
+          set({
+            error:
+              result.reason === "truncated"
+                ? "压缩失败：摘要超出输出上限被截断，请重试"
+                : result.reason === "empty"
+                  ? "压缩失败：模型未返回摘要内容，请重试"
+                  : `压缩失败：${result.error?.message ?? "请求出错"}`,
+          });
+        }
+        return;
+      }
+      // 会话可能已被删除：写回前复核；锚点消息若已被回滚截断则丢弃本次结果
+      // （写入死注解只会让下次请求白白退回全历史，静默浪费一次调用）
+      const cur = get().sessions.find((x) => x.id === session.id);
+      if (!cur) return;
+      if (!cur.messages.some((m) => m.id === bound.upToMessageId)) return;
+      set({
+        sessions: get().sessions.map((x) =>
+          x.id === session.id
+            ? {
+                ...x,
+                compaction: {
+                  summary: result.summary,
+                  upToMessageId: bound.upToMessageId,
+                  messageCount: bound.messageCount,
+                  createdAt: Date.now(),
+                  providerId: resolved.provider.id,
+                  model: resolved.model,
+                },
+              }
+            : x,
+        ),
+      });
+      // 注解在元数据侧车（.meta.json），随既有 debounce 写盘
+      markMetaDirty(session.id);
+    } finally {
+      if (abortController === controller) abortController = null;
+      set({ compacting: null });
+    }
+  },
+
   renameSession: async () => {
     const s = get();
     const id = s.activeSessionId;
@@ -1135,7 +1249,7 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
   rollbackTo: (messageId) => {
     const s = get();
     const id = s.activeSessionId;
-    if (!id || s.streaming) return;
+    if (!id || s.streaming || s.compacting) return;
     const session = s.sessions.find((x) => x.id === id);
     if (!session) return;
     const idx = session.messages.findIndex((m) => m.id === messageId);

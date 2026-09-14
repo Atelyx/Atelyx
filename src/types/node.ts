@@ -1,5 +1,6 @@
 import type { Edge } from "@xyflow/react";
 import type { ReasoningEffort } from "./provider";
+import type { ConversationCompaction } from "./compaction";
 
 /** 单条搜索结果（AI 自主搜索产物）。 */
 export interface SearchResultItem {
@@ -36,6 +37,11 @@ export interface ConversationData {
   title?: string;
   /** 推理等级（本节点独立，随 .atlx 持久化；下发 `reasoning_effort`。缺省 = 不指定/跟随默认 与 providerId/model 正交独立）。 */
   reasoningEffort?: ReasoningEffort;
+  /**
+   * 会话压缩注解（用户手动触发；随 .atlx 持久化）：锚点及其之前的消息不进模型请求。
+   * 消息本体不动，仅重建历史时按注解裁剪；锚点缺失即注解失效（见 `splitByCompaction`）。
+   */
+  compaction?: ConversationCompaction;
 }
 
 export interface TextData {

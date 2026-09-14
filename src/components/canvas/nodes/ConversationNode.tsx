@@ -1,4 +1,4 @@
-import { Loader2, Lock, Plus, RefreshCw, Scissors, X } from "lucide-react";
+import { Layers, Loader2, Lock, Plus, RefreshCw, Scissors, X } from "lucide-react";
 import { useEffect, useCallback, useMemo, useRef, useState } from "react";
 import { useReactFlow, type NodeProps } from "@xyflow/react";
 import { useShallow } from "zustand/react/shallow";
@@ -49,6 +49,8 @@ import { useInlineEdit } from "@/hooks/useInlineEdit";
 import { useVaultLinkHandlers } from "@/hooks/useVaultLinkHandlers";
 import { useWikiNodeLocate } from "@/hooks/useWikiNodeLocate";
 import { assistantReplyText } from "@/utils/agentSteps";
+import { compactionMarkerIndex } from "@/utils/compaction";
+import { CompactionMarker } from "@/components/common/CompactionMarker";
 
 /** 模块级空消息数组，避免 selector 每次返回新引用导致 React 无限循环。 */
 const EMPTY_MESSAGES: Message[] = [];
@@ -123,6 +125,8 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
     (s) => s.messagesByConv[id] ?? EMPTY_MESSAGES,
   );
   const streaming = useCanvasStore((s) => s.streamingByConv[id] ?? FALSE);
+  const compacting = useCanvasStore((s) => s.compactingByConv[id] ?? FALSE);
+  const compactConversation = useCanvasStore((s) => s.compactConversation);
   // 协作：本节点远端选中/独占锁主/生成中（锁主判定见 useNodeCollab）
   const { lockedByPeer, streamingPeers, iOwnLock } = useNodeCollab(id);
   const collabStreamingPeer = streamingPeers[0];
@@ -142,6 +146,8 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
   const nodeData = useCanvasStore(
     (s) => s.nodes.find((n) => n.id === id)?.data,
   ) as Partial<ConversationData> | undefined;
+  // 压缩标记行插入位（-1 = 无注解/注解失效）：与历史重建同判定
+  const compactionMarkerIdx = compactionMarkerIndex(messages, nodeData?.compaction);
 
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
@@ -322,7 +328,7 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
 
   const handleSend = () => {
     const text = input.trim();
-    if ((!text && attachments.length === 0) || streaming) return;
+    if ((!text && attachments.length === 0) || streaming || compacting) return;
     // 协作锁主校验：非锁主不发送（保留草稿，等锁释放后可继续）
     if (!isOwnLockActive()) return;
     // 持锁发送：流式期间锁持续持有（acquire 幂等，已有锁不刷新 since）
@@ -815,6 +821,28 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
             }}
             title="选择供应商与模型，或单独设置推理等级（留空 = 跟随默认）"
           />
+          {/* 压缩会话历史：把对话总结为检查点，压缩后的请求历史由摘要代替（消息本体不动）；
+              流式/压缩进行中或对端持锁时禁用（持锁时注解写不进，避免点了没反应） */}
+          <button
+            onClick={() => void compactConversation(id)}
+            disabled={streaming || compacting || !!lockedByPeer}
+            title={
+              compacting
+                ? "正在压缩会话历史…"
+                : lockedByPeer
+                  ? "对端正在编辑该对话，暂不可压缩"
+                  : "压缩会话历史"
+            }
+            aria-label={compacting ? "正在压缩会话历史" : "压缩会话历史"}
+            className="nodrag p-0.5 rounded hover:opacity-80 disabled:opacity-50 disabled:cursor-default disabled:hover:opacity-50 flex-shrink-0"
+            style={{ color: "var(--text-muted)" }}
+          >
+            {compacting ? (
+              <Loader2 size={13} className="animate-spin" />
+            ) : (
+              <Layers size={13} />
+            )}
+          </button>
         </div>
       </header>
 
@@ -858,9 +886,13 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
                 assistantReplyText(m).trim() !== "" &&
                 !isStreamingMsg;
               return (
-                <ChatMessageBubble
-                  key={m.id}
-                  role={m.role === "user" ? "user" : "assistant"}
+                <div key={m.id} className="space-y-3">
+                  {/* 压缩标记：插在折叠块之后首条消息之前（被压缩的原文仍显示在标记上方） */}
+                  {i === compactionMarkerIdx && nodeData?.compaction && (
+                    <CompactionMarker compaction={nodeData.compaction} />
+                  )}
+                  <ChatMessageBubble
+                    role={m.role === "user" ? "user" : "assistant"}
                   displayContent={
                     m.role === "user"
                       ? (m.displayContent ?? m.content)
@@ -886,8 +918,14 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
                   onBranch={canBranch ? handleBranch : undefined}
                   stopPropagation
                 />
+                </div>
               );
             })
+          )}
+
+          {/* 压缩覆盖到对话末尾（刚压缩完的常态）：标记行渲染在列表末尾 */}
+          {compactionMarkerIdx === messages.length && nodeData?.compaction && (
+            <CompactionMarker compaction={nodeData.compaction} />
           )}
 
           {canRegenerate && (
@@ -1068,7 +1106,9 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
         ) : (
           <button
             onClick={handleSend}
-            className="px-3 rounded bg-[var(--accent)] text-[var(--accent-fg)] text-xs hover:bg-[var(--accent-hover)] nodrag"
+            disabled={compacting}
+            title={compacting ? "正在压缩会话历史…" : "发送"}
+            className="px-3 rounded bg-[var(--accent)] text-[var(--accent-fg)] text-xs hover:bg-[var(--accent-hover)] nodrag disabled:opacity-40 disabled:hover:bg-[var(--accent)]"
           >
             发送
           </button>

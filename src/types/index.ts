@@ -19,6 +19,8 @@ export type {
   Message,
 } from "./message";
 
+export type { ConversationCompaction } from "./compaction";
+
 export type {
   EditorChatRole,
   EditorChatMessage,

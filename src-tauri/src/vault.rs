@@ -1258,6 +1258,26 @@ pub const EDITOR_CHATS_META_FILE: &str = ".atelyx/editor-chats-meta.json";
 /// editor-chats-meta.json 的 schema 版本（与前端 constants/editorChats.ts 的 EDITOR_CHATS_META_SCHEMA 对齐）。
 pub const EDITOR_CHATS_META_SCHEMA: &str = "atelyx-editor-chats-meta/v1";
 
+/// 会话压缩注解（用户手动触发；边界之前的消息不进模型请求，消息本体不删改）。
+#[derive(Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatCompaction {
+    /// 模型生成的结构化检查点摘要原文（不含框架包裹）。
+    pub summary: String,
+    /// 压缩覆盖到的最后一条消息 id（该条及其之前不进模型历史）。
+    pub up_to_message_id: String,
+    /// 被覆盖的消息条数。
+    pub message_count: u32,
+    /// 生成时间（毫秒时间戳）。
+    pub created_at: i64,
+    /// 生成摘要所用的供应商 id（展示溯源）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<String>,
+    /// 生成摘要所用的模型 id（展示溯源）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
 /// 会话元数据侧车（.atelyx/对话历史/<会话 id>.meta.json）：仅可变会话级字段。
 #[derive(Serialize, Deserialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
@@ -1269,6 +1289,9 @@ pub struct ChatSessionMeta {
     /// 引用的 Agent 配置 id（仓库级 `.atelyx/agents.json`；发送时实时解析系统提示词/工具）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
+    /// 会话压缩注解（缺省 = 未压缩）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction: Option<ChatCompaction>,
 }
 
 /// 面板级模型覆盖（优先于仓库默认模型）。
@@ -3858,5 +3881,49 @@ mod sanitize_filename_tests {
         ] {
             assert_eq!(sanitize_filename(input), expected, "输入 {input:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod chat_session_meta_tests {
+    use super::{ChatCompaction, ChatSessionMeta};
+
+    /// 侧车是按字段白名单序列化的强类型结构（非整对象透传）：新增字段若不同步此结构，
+    /// 前端写入会被 serde 静默丢弃。此用例锁住压缩注解的落盘往返。
+    #[test]
+    fn compaction_survives_roundtrip() {
+        let meta = ChatSessionMeta {
+            id: "s1".to_string(),
+            title: Some("标题".to_string()),
+            agent_id: None,
+            compaction: Some(ChatCompaction {
+                summary: "## 会话主题\n- 摘要".to_string(),
+                up_to_message_id: "m4".to_string(),
+                message_count: 5,
+                created_at: 1_700_000_000_000,
+                provider_id: Some("openai".to_string()),
+                model: Some("gpt-4o".to_string()),
+            }),
+        };
+        let json = serde_json::to_string(&meta).expect("serialize");
+        let back: ChatSessionMeta = serde_json::from_str(&json).expect("deserialize");
+        let compaction = back.compaction.expect("compaction 不得被丢弃");
+        assert_eq!(compaction.summary, "## 会话主题\n- 摘要");
+        assert_eq!(compaction.up_to_message_id, "m4");
+        assert_eq!(compaction.message_count, 5);
+        assert_eq!(back.agent_id, None);
+        // camelCase 线名与前端契约一致
+        assert!(json.contains("\"upToMessageId\""));
+        assert!(json.contains("\"messageCount\""));
+    }
+
+    #[test]
+    fn absent_compaction_is_omitted() {
+        let json = serde_json::to_string(&ChatSessionMeta {
+            id: "s1".to_string(),
+            ..Default::default()
+        })
+        .expect("serialize");
+        assert!(!json.contains("compaction"));
     }
 }
