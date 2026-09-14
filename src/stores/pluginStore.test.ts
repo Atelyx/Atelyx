@@ -10,7 +10,7 @@ import type { InstalledPlugin, PluginPackageJson } from "@/types";
 vi.mock("@/services/plugins", () => ({
   pluginInstall: vi.fn(),
   pluginInstallLocal: vi.fn(),
-  pluginList: vi.fn(async () => []),
+  pluginList: vi.fn(async () => ({ rows: [] })),
   pluginSeedDefault: vi.fn(),
   pluginSetEnabled: vi.fn(async () => {}),
   pluginUninstall: vi.fn(async () => {}),
@@ -45,8 +45,8 @@ function row(over: Partial<InstalledPlugin> & { id: string }): InstalledPlugin {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  usePluginStore.setState({ plugins: {}, initialized: false });
-  vi.mocked(pluginList).mockResolvedValue([]);
+  usePluginStore.setState({ plugins: {}, initialized: false, stateError: null });
+  vi.mocked(pluginList).mockResolvedValue({ rows: [] });
   vi.mocked(pluginUpdate).mockReset();
   vi.mocked(pluginRollback).mockReset();
 });
@@ -67,19 +67,21 @@ describe("插件行失败诊断", () => {
       main: "main.js",
       atelyx: { name: "Old", type: "panel", hostApiVersion: 999 },
     };
-    vi.mocked(pluginList).mockResolvedValue([
-      {
-        id: "com.test.old",
-        name: "Old",
-        version: "1.0.0",
-        type: "panel",
-        scope: "app",
-        installDir: "/tmp/old",
-        sourceKind: "market",
-        enabled: true,
-        manifest,
-      },
-    ]);
+    vi.mocked(pluginList).mockResolvedValue({
+      rows: [
+        {
+          id: "com.test.old",
+          name: "Old",
+          version: "1.0.0",
+          type: "panel",
+          scope: "app",
+          installDir: "/tmp/old",
+          sourceKind: "market",
+          enabled: true,
+          manifest,
+        },
+      ],
+    });
     await usePluginStore.getState().load();
     const p = usePluginStore.getState().plugins["com.test.old"];
     expect(p.phase).toBe("failed");
@@ -114,8 +116,7 @@ describe("插件行失败诊断", () => {
     expect(p.failure?.message).toContain("999");
   });
 
-  it("跨作用域同 id 冲突行：强制停用、标失败且不进入装配", async () => {
-    const conflict = "app 与仓库作用域存在同 id 插件，双方已停用：请卸载其一后重新启用";
+  it("跨作用域同 id 冲突行：强制停用、标失败且不进入装配", async () => {    const conflict = "app 与仓库作用域存在同 id 插件，双方已停用：请卸载其一后重新启用";
     const conflictRow = (scope: "app" | "vault") => ({
       id: "com.test.dupe",
       name: "Dupe",
@@ -133,10 +134,9 @@ describe("插件行失败诊断", () => {
       },
       conflict,
     });
-    vi.mocked(pluginList).mockResolvedValue([
-      conflictRow("app"),
-      conflictRow("vault"),
-    ] as never);
+    vi.mocked(pluginList).mockResolvedValue({
+      rows: [conflictRow("app"), conflictRow("vault")],
+    } as never);
 
     await usePluginStore.getState().load();
     const p = usePluginStore.getState().plugins["com.test.dupe"];
@@ -144,6 +144,29 @@ describe("插件行失败诊断", () => {
     expect(p.phase).toBe("failed");
     expect(p.failure?.phase).toBe("manifest");
     expect(p.failure?.message).toContain("同 id");
+  });
+
+  it("状态降级：stateError 落到 store，停用行不进入装配", async () => {
+    vi.mocked(pluginList).mockResolvedValue({
+      rows: [
+        {
+          id: "com.test.degraded",
+          name: "Degraded",
+          version: "1.0.0",
+          type: "panel",
+          scope: "app",
+          installDir: "/tmp/degraded",
+          sourceKind: "market",
+          enabled: false,
+          manifest: { name: "com.test.degraded", version: "1.0.0", main: "main.js", atelyx: { name: "D", type: "panel" } },
+        },
+      ],
+      stateError: "插件状态文件损坏（原文保留，修复或删除后重试）",
+    });
+    await usePluginStore.getState().load();
+    expect(usePluginStore.getState().stateError).toContain("损坏");
+    expect(usePluginStore.getState().plugins["com.test.degraded"]?.enabled).toBe(false);
+    expect(usePluginStore.getState().plugins["com.test.degraded"]?.phase).toBe("pending");
   });
 });
 

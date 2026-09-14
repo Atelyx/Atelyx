@@ -45,6 +45,7 @@ export function PluginsSettingsTab() {
   const runPluginCommand = usePluginStore((s) => s.runPluginCommand);
   const restoreDefaultComposition = usePluginStore((s) => s.restoreDefaultComposition);
   const pluginAudit = usePluginStore((s) => s.pluginAudit);
+  const stateError = usePluginStore((s) => s.stateError);
 
   const [mode, setMode] = useState<TabMode>("installed");
   const [notice, setNotice] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
@@ -99,6 +100,12 @@ export function PluginsSettingsTab() {
 
   return (
     <section className="flex-1 min-h-0 p-5 overflow-y-auto">
+      {/* 插件状态文件损坏/不可读的降级提示：行全部以停用态展示，修复文件后重载解除。 */}
+      {stateError && (
+        <div className="text-xs mb-3 break-words" style={{ color: "#f87171" }}>
+          {stateError}
+        </div>
+      )}
       {/* 模式切换：已安装 / 市场 */}
       <div className="flex gap-1 mb-4">
         {(

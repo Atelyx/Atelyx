@@ -109,6 +109,17 @@ pub struct PluginInfo {
     pub conflict: Option<String>,
 }
 
+/// `plugin_list` 响应：行清单 + 插件状态健康度。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginListResult {
+    pub rows: Vec<PluginInfo>,
+    /// 插件状态文件不可读/损坏时的诊断（含原因与文件路径）；此时所有行以停用态展示，
+    /// 不落盘、不播种启用行（fail-closed）。`None` = 状态健康。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_error: Option<String>,
+}
+
 /// 成功更新后保留的一代旧代码定位记录（随 `PluginSource` 持久化；回退成功后清空）。
 /// `dir_name` 按不可信输入处理（状态文件可能被篡改）：回退/卸载只用通过
 /// `previous_dir_name_valid` 校验的名字拼路径。
@@ -738,10 +749,10 @@ fn plugin_state_path(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 /// 读插件平台状态。
-/// - `Ok(state)`：文件不存在 = 首次运行（空状态）；解析失败 = 把损坏文件改名备份后按空状态继续
-///   （播种随即按默认组合重建随应用分发的行；备份保留原始文件供排查）。
-/// - `Err(reason)`：文件存在但读不进来（句柄被占用/权限/非 UTF-8）。这种情况**不能**按空状态往下写——
-///   会把启用开关与安装来源整表抹掉，所以写路径必须报错；只读展示路径用 `read_plugin_state_lenient`。
+/// - `Ok(state)`：文件不存在 = 首次运行（空状态）。
+/// - `Err(reason)`：文件存在但读不进来（句柄被占用/权限/非 UTF-8）或内容不是合法 JSON。
+///   损坏原文**原地保留、不做任何改名或改写**，写路径一律拒绝——在唯一原文不可读时
+///   按空状态落盘会把启用开关与安装来源整表抹掉；只读展示路径用 `read_plugin_state_lenient`。
 fn read_plugin_state(app: &AppHandle) -> Result<PluginState, String> {
     read_plugin_state_at(&plugin_state_path(app)?)
 }
@@ -753,26 +764,22 @@ fn read_plugin_state_at(path: &Path) -> Result<PluginState, String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(PluginState::default()),
         Err(e) => return Err(format!("读取插件状态失败（可能被其它程序占用，请重试）：{e}")),
     };
-    match serde_json::from_str(&raw) {
-        Ok(state) => Ok(state),
-        Err(e) => {
-            // 复用 vault 侧的损坏备份助手（同一「改名 + 随机后缀」语义，两处不再各写一份）
-            let note = crate::vault::backup_corrupt_config(path, "plugin")
-                .map_or_else(|| "备份失败".to_string(), |p| format!("已备份为 {}", p.display()));
-            eprintln!("[plugin] 插件状态文件损坏，{note}（按空状态继续）：{e}");
-            Ok(PluginState::default())
-        }
-    }
+    serde_json::from_str(&raw).map_err(|e| {
+        format!(
+            "插件状态文件损坏（原文保留在 {}，修复或删除该文件后重试）：{e}",
+            path.display()
+        )
+    })
 }
 
-/// 只读展示路径的宽松读：读不进来时按空状态展示（前端仍有默认组合行可用），并且调用方不得落盘
+/// 只读展示路径的宽松读：状态不可读时按空状态展示并携带原因，调用方不得落盘
 /// 这份「读失败得出的状态」——否则等于把用户状态清空。
-fn read_plugin_state_lenient(app: &AppHandle) -> (PluginState, bool) {
+fn read_plugin_state_lenient(app: &AppHandle) -> (PluginState, Option<String>) {
     match read_plugin_state(app) {
-        Ok(state) => (state, true),
+        Ok(state) => (state, None),
         Err(e) => {
             eprintln!("[plugin] {e}（本次只作展示用，不落盘）");
-            (PluginState::default(), false)
+            (PluginState::default(), Some(e))
         }
     }
 }
@@ -1386,18 +1393,25 @@ fn mark_cross_scope_conflicts(rows: &mut [PluginInfo], seen_per_scope: &HashMap<
 
 /// 列出全部插件行：先按 `defaults`（默认组合清单）增量播种随应用分发的行，再列出磁盘包行
 /// （app 级恒有；vault 级仅当前仓库；未开仓库时跳过 vault 目录）+ 无同名磁盘包的随应用分发行。
+/// 状态文件不可读时整表降级：行照常列出但全部停用（fail-closed），诊断随 `state_error` 返回，
+/// 且不落盘任何由「读失败得出的状态」、不做孤儿回收（两者的依据都不可信）。
 #[tauri::command]
 pub fn plugin_list(
     app: AppHandle,
     state: State<'_, VaultState>,
     defaults: Vec<Value>,
-) -> Result<Vec<PluginInfo>, String> {
+) -> Result<PluginListResult, String> {
     let _io_guard = PLUGIN_IO_LOCK.lock().map_err(|_| "插件文件忙，请重试".to_string())?;
     // 只读展示路径：读不到状态也不阻断列表（播种只在读成功时落盘，见下）。
-    let (mut pstate, state_readable) = read_plugin_state_lenient(&app);
+    let (mut pstate, state_error) = read_plugin_state_lenient(&app);
     let disk_ids = disk_plugin_ids(&app, &state);
-    // 展示行就地播种（本次调用即可见）。
+    // 展示行就地播种（本次调用即可见）；降级时清空启用表——播种的「默认启用」是健康态语义，
+    // 状态不可读时用户原先停用的行不得重新执行。
     let seeded = seed_default_rows(&mut pstate, &defaults, &disk_ids, false);
+    let state_readable = state_error.is_none();
+    if !state_readable {
+        pstate.enabled.clear();
+    }
     // 落盘走锁内读改写：以最新状态为基础补一遍（幂等），未变不写、写失败不吞
     // （否则用户改动默默不持久化）——转 stderr 日志，列表本身照常返回。
     if state_readable && seeded {
@@ -1416,14 +1430,17 @@ pub fn plugin_list(
 
     let mut scan = |scope: &str, base: &Path| {
         // 孤儿回退目录回收：本命令持 IO 锁，rename 链与状态写都在锁内，
-        // 「磁盘有 `.previous-*`、记录无引用」即崩溃孤儿（见 recycle_orphan_previous_dirs）。
+        // 「磁盘有 `.previous-*`、记录无引用」即崩溃孤儿（见调用点的持锁说明）。
+        // 状态不可读时跳过：引用判定不可信，可能把仍被引用的回退目录当孤儿回收。
         let referenced: HashSet<String> = pstate
             .sources
             .values()
             .filter(|s| s.scope == scope)
             .filter_map(|s| s.previous.as_ref().map(|p| p.dir_name.clone()))
             .collect();
-        recycle_orphan_previous_dirs(base, &referenced);
+        if state_readable {
+            recycle_orphan_previous_dirs(base, &referenced);
+        }
         let Ok(rd) = fs::read_dir(base) else {
             return;
         };
@@ -1472,7 +1489,10 @@ pub fn plugin_list(
 
     mark_cross_scope_conflicts(&mut out, &seen_per_scope);
     out.sort_by(|a, b| a.id.cmp(&b.id));
-    Ok(out)
+    Ok(PluginListResult {
+        rows: out,
+        state_error: if state_readable { None } else { state_error },
+    })
 }
 
 /// 恢复默认装配（用户显式触发）：把 `entries`（默认组合清单）里缺失的行补建回默认启用。
@@ -2434,7 +2454,8 @@ impl Drop for PluginManagementGuard {
     }
 }
 
-/// 读键值表（文件不存在 = 空表；损坏 = 改名备份后按空表继续，同 plugin-state 的降级策略）。
+/// 读键值表（文件不存在 = 空表；内容不是合法 JSON 对象 = 报错，损坏原文原地保留，
+/// 与 plugin-state 同一 fail-closed 口径——按空表降级会让后续写覆盖唯一原文）。
 fn read_kv_file(dir: &Path) -> Result<serde_json::Map<String, Value>, String> {
     let path = safe_plugin_path(dir, "data/kv.json")?;
     let raw = match fs::read_to_string(&path) {
@@ -2444,18 +2465,18 @@ fn read_kv_file(dir: &Path) -> Result<serde_json::Map<String, Value>, String> {
     };
     match serde_json::from_str::<Value>(&raw) {
         Ok(Value::Object(map)) => Ok(map),
-        Ok(_) => Err("插件键值数据必须是 JSON 对象".to_string()),
-        Err(e) => {
-            let note = crate::vault::backup_corrupt_config(&path, "plugin")
-                .map_or_else(|| "备份失败".to_string(), |p| format!("已备份为 {}", p.display()));
-            eprintln!("[plugin] 插件键值数据损坏，{note}（按空表继续）：{e}");
-            Ok(serde_json::Map::new())
-        }
+        Ok(_) => Err(format!("插件键值数据损坏（必须是 JSON 对象，原文保留在 {}）", path.display())),
+        Err(e) => Err(format!(
+            "插件键值数据损坏（原文保留在 {}，修复或删除该文件后重试）：{e}",
+            path.display()
+        )),
     }
 }
 
-/// 写键值表（原子写；调用方须持有 PLUGIN_IO_LOCK）。
+/// 写键值表（原子写；调用方须持有 PLUGIN_IO_LOCK）。覆盖前先确认现表可读——
+/// 损坏原文不得被整表覆盖清掉（读改写路径天然满足，这里把守卫钉在唯一写入口）。
 fn write_kv_file(dir: &Path, map: &serde_json::Map<String, Value>) -> Result<(), String> {
+    read_kv_file(dir)?;
     let data_dir = safe_plugin_path(dir, "data")?;
     fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
     let raw = serde_json::to_string(&Value::Object(map.clone())).map_err(|e| e.to_string())?;
@@ -3014,6 +3035,72 @@ mod tests {
             assert!(final_state.enabled.contains_key(&format!("com.test.e{i}")), "丢了 enabled[{i}]");
             assert!(final_state.sources.contains_key(&format!("com.test.s{i}")), "丢了 sources[{i}]");
         }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 状态/键值损坏用例的隔离临时目录。
+    fn temp_state_dir(tag: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("atelyx-plugin-{tag}-{nanos}"));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// 损坏状态的唯一原文不受读写路径破坏：读取报错、拒绝在损坏态读改写，文件字节保持原样。
+    #[test]
+    fn corrupt_state_read_and_mutate_refuse_and_preserve() {
+        let dir = temp_state_dir("corrupt-state");
+        let path = dir.join("plugin-state.json");
+        let corrupt = "{\"enabled\": tru"; // 截断 JSON
+        fs::write(&path, corrupt).unwrap();
+
+        let err = read_plugin_state_at(&path).err().expect("损坏状态应读取失败");
+        assert!(err.contains("损坏"), "错误应指向损坏：{err}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), corrupt, "原文不得被改名或改写");
+
+        let err = mutate_plugin_state_at(&path, |s| {
+            s.enabled.insert("com.test.x".into(), true);
+            Ok(((), true))
+        })
+        .err()
+        .expect("写事务应拒绝损坏态");
+        assert!(err.contains("损坏"), "写事务应拒绝损坏态：{err}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), corrupt, "原文不得被覆盖");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 修复状态文件后恢复正常读写（用户改好或删掉损坏文件即解除降级）。
+    #[test]
+    fn state_recovers_after_file_fixed() {
+        let dir = temp_state_dir("state-recover");
+        let path = dir.join("plugin-state.json");
+        fs::write(&path, "not json").unwrap();
+        assert!(read_plugin_state_at(&path).is_err());
+
+        fs::write(&path, "{\"enabled\":{\"com.test.x\":true},\"sources\":{},\"seededIds\":[]}").unwrap();
+        let state = read_plugin_state_at(&path).unwrap();
+        assert_eq!(state.enabled.get("com.test.x"), Some(&true));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 损坏键值表的唯一原文不受读写路径破坏：读与整表覆盖写都拒绝，文件字节保持原样。
+    #[test]
+    fn corrupt_kv_read_and_overwrite_refuse_and_preserve() {
+        let dir = temp_state_dir("corrupt-kv");
+        let kv_path = dir.join("data/kv.json");
+        fs::create_dir_all(kv_path.parent().unwrap()).unwrap();
+        let corrupt = "{\"a\": 1";
+        fs::write(&kv_path, corrupt).unwrap();
+
+        assert!(read_kv_file(&dir).is_err());
+        assert_eq!(fs::read_to_string(&kv_path).unwrap(), corrupt, "原文不得被改名或改写");
+
+        let err = write_kv_file(&dir, &serde_json::Map::new()).err().expect("整表覆盖写应拒绝损坏态");
+        assert!(err.contains("损坏"), "整表覆盖写应拒绝损坏态：{err}");
+        assert_eq!(fs::read_to_string(&kv_path).unwrap(), corrupt, "原文不得被覆盖");
         let _ = fs::remove_dir_all(&dir);
     }
 

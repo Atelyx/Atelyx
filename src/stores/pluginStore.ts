@@ -116,6 +116,8 @@ interface PluginStoreState {
   plugins: Record<string, InstalledPlugin>;
   /** 已初始化（应用挂载/进仓后加载一次）。 */
   initialized: boolean;
+  /** 插件状态文件不可读/损坏的诊断（非空 = 全部行以停用态展示的降级态；修复文件后重载解除）。 */
+  stateError: string | null;
   /** UI 注册修订号（主线程插件脚本异步注册到达时自增；依赖插件 UI 的组件据此重渲染）。 */
   uiRevision: number;
   /** 市场索引条目（含徽标合并）。 */
@@ -516,11 +518,14 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
     ensureRuntimeChangeEvents();
     installCommandHotkeys();
     const hostVersion = await getAppVersion().catch(() => null);
-    const rows = await pluginList(defaultManifests(hostVersion));
+    const { rows, stateError } = await pluginList(defaultManifests(hostVersion));
     await unmountAll(getKernel());
     const plugins: Record<string, InstalledPlugin> = {};
     for (const row of rows) plugins[row.id] = toInstalled(row);
-    set({ plugins, initialized: true });
+    set({ plugins, initialized: true, stateError: stateError ?? null });
+    if (stateError) {
+      useNotificationStore.getState().notify({ level: "error", message: stateError });
+    }
     set((s) => ({ uiRevision: s.uiRevision + 1 }));
     const mounts = mountIds();
     const total = mounts.length;
@@ -540,6 +545,7 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
   return {
     plugins: {},
     initialized: false,
+    stateError: null,
     uiRevision: 0,
     marketItems: [],
     marketLoading: false,

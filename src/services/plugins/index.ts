@@ -25,9 +25,17 @@ export interface PluginRow {
   conflict?: string;
 }
 
+/** `plugin_list` 响应：行清单 + 插件状态健康度。 */
+export interface PluginListResult {
+  rows: PluginRow[];
+  /** 插件状态文件不可读/损坏时的诊断；此时所有行以停用态返回（fail-closed，不落盘）。
+   *  修复或删除该文件后下一次列表恢复正常。 */
+  stateError?: string;
+}
+
 /** 列出全部插件行（先按默认组合清单增量播种随应用分发的行，再列出磁盘包行）。 */
-export function pluginList(defaults: PluginPackageJson[]): Promise<PluginRow[]> {
-  return invoke<PluginRow[]>("plugin_list", { defaults });
+export function pluginList(defaults: PluginPackageJson[]): Promise<PluginListResult> {
+  return invoke<PluginListResult>("plugin_list", { defaults });
 }
 
 /** 安装插件：来源为 GitHub `owner/repo`（市场）或完整 git 地址。启用口径：全新 id 落盘停用、
