@@ -178,8 +178,11 @@ pub async fn drag_update(
                 if !inner.loaded {
                     return Ok(());
                 }
-                // 解析中（settle 等待/已进入 drag_end）忽略新 begin——否则会覆写 OS 光标权威坐标
+                // 解析中（settle 等待/已进入 drag_end）：直接建会话会覆写 OS 光标权威坐标，
+                // 且会被随后的收尾一并解析掉。存为 pending，当前收尾完成后接续为新会话
+                // （见 finish_drag 的 apply_pending_start）。
                 if inner.drag_resolving {
+                    inner.pending_start = Some((p, screen_x, screen_y));
                     return Ok(());
                 }
                 // 已有会话：同一次手势的重复 begin（先到先得）保留原会话；身份不同（标签/源窗口变了）
@@ -306,6 +309,28 @@ fn cursor_to_logical(
     (px / sf, py / sf)
 }
 
+/// 收尾完成后接续解析窗口内到达的新 begin：建新会话 + 清旧命中 + 升世代号，
+/// 返回（新世代号, 会话广播）。无 pending 返回 None——调用方按原路径广播 active=false。
+/// 抽成纯函数便于直测（收尾路径要 AppHandle，无 Tauri 运行时不可单测）。
+fn apply_pending_start(inner: &mut LayoutInner) -> Option<(u64, Option<DragBroadcast>)> {
+    let (p, x, y) = inner.pending_start.take()?;
+    inner.drag = Some(DragSession {
+        tab_id: p.tab_id,
+        view: p.view,
+        source_window: p.source_window,
+        source_host: p.source_host,
+        source_width: p.source_width,
+        source_height: p.source_height,
+        screen_x: x,
+        screen_y: y,
+    });
+    // 新会话从干净命中开始（旧手势的命中会误导本次落点解析）
+    inner.drag_hits.clear();
+    inner.drag_move_gen += 1;
+    let gen = inner.drag_move_gen;
+    Some((gen, drag_broadcast_active(inner)))
+}
+
 /// 拖拽结束共享实现（命令与看门狗合流）。
 async fn finish_drag(app: &AppHandle, screen_x: Option<f64>, screen_y: Option<f64>, cancelled: bool) {
     let state = app.state::<LayoutState>();
@@ -366,19 +391,30 @@ async fn finish_drag(app: &AppHandle, screen_x: Option<f64>, screen_y: Option<f6
     if !cancelled {
         inner.dirty = true;
     }
+    // 解析窗口内到达的新 begin 在此接续：直接开启新会话（跳过中间的 active=false 广播——
+    // 前端据广播清拖拽态，跳过后正在进行的下一手势的 dragActive 不被误清），并重建看门狗
+    let resumed = apply_pending_start(&mut inner);
     let ui = inner.ui.clone();
     drop(inner);
     reconcile_panel_windows(app);
     schedule_persist(app, &state);
     broadcast_layout(app, &ui);
-    broadcast_drag(app, &DragBroadcast {
-        active: false,
-        tab_id: None,
-        view: None,
-        screen_x: None,
-        screen_y: None,
-        source_window: None,
-    });
+    match resumed {
+        Some((gen, Some(b))) => {
+            broadcast_drag(app, &b);
+            arm_watchdog(app, gen, Instant::now(), DRAG_IDLE_OUTSIDE_MS);
+        }
+        _ => {
+            broadcast_drag(app, &DragBroadcast {
+                active: false,
+                tab_id: None,
+                view: None,
+                screen_x: None,
+                screen_y: None,
+                source_window: None,
+            });
+        }
+    }
 }
 
 /// 事件驱动 settle：轮询光标所在窗口的命中条目相对广播前快照的变化（新上报/移除），
@@ -947,6 +983,7 @@ mod tests {
             )]),
             drag_move_gen: 0,
             drag_resolving: false,
+            pending_start: None,
         };
         resolve_drag(&mut inner, false);
         let p1 = find_panel(&active_layout(&inner.ui).tree, "p1").unwrap();
@@ -995,6 +1032,7 @@ mod tests {
             drag_hits: HashMap::new(),
             drag_move_gen: 0,
             drag_resolving: false,
+            pending_start: None,
         };
         resolve_drag(&mut inner, false);
         assert_eq!(inner.ui.detached_windows.len(), 1);
@@ -1077,6 +1115,7 @@ mod tests {
             drag_hits: HashMap::new(),
             drag_move_gen: gen,
             drag_resolving: false,
+            pending_start: None,
         }
     }
 
@@ -1101,6 +1140,40 @@ mod tests {
         // 换了标签或换了源窗口：上一轮释放丢了、旧会话不会自愈 → 按新 begin 重建
         assert!(begin_replaces_session(Some(&existing), &start_payload("t-note", "main")));
         assert!(begin_replaces_session(Some(&existing), &start_payload("t-files", "panel-w1")));
+    }
+
+    #[test]
+    fn apply_pending_start_resumes_queued_begin() {
+        let mut inner = inner_with_drag(3, 500.0, 300.0);
+        inner.pending_start = Some((start_payload("t-note", "panel-w1"), 700.0, 400.0));
+        inner.drag_hits.insert(
+            "main".into(),
+            DragHit { zone: DropZone::Center, panel_id: Some("p1".into()), tab_index: None },
+        );
+        let (gen, broadcast) = apply_pending_start(&mut inner).unwrap();
+        // 新会话按 pending 载荷 + 首帧坐标建立
+        let d = inner.drag.as_ref().unwrap();
+        assert_eq!(d.tab_id, "t-note");
+        assert_eq!(d.source_window, "panel-w1");
+        assert_eq!((d.screen_x, d.screen_y), (700.0, 400.0));
+        // 旧命中清空（防误导新会话的落点解析）；pending 被消费
+        assert!(inner.drag_hits.is_empty());
+        assert!(inner.pending_start.is_none());
+        // 世代号 +1，广播为活跃会话（新会话坐标）
+        assert_eq!(gen, 4);
+        let b = broadcast.unwrap();
+        assert!(b.active);
+        assert_eq!(b.tab_id.as_deref(), Some("t-note"));
+        assert_eq!((b.screen_x, b.screen_y), (Some(700.0), Some(400.0)));
+    }
+
+    #[test]
+    fn apply_pending_start_noops_without_pending() {
+        let mut inner = inner_with_drag(3, 500.0, 300.0);
+        assert!(apply_pending_start(&mut inner).is_none());
+        // 无 pending 时不动会话与世代号（原收尾路径继续广播 active=false）
+        assert!(inner.drag.is_some());
+        assert_eq!(inner.drag_move_gen, 3);
     }
 
     #[test]

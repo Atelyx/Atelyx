@@ -17,7 +17,7 @@ use std::sync::Mutex;
 
 use tauri::{AppHandle, Manager, State};
 
-use crate::layout_drag::{DragHit, DragSession};
+use crate::layout_drag::{DragHit, DragSession, DragStartPayload};
 use crate::layout_model::{
     active_layout, apply_tab_group_detached, apply_tab_group_panel, close_panel_op, collect_tabs,
     create_tab, find_panel, find_tab_in_detached, find_tab_in_tree, group_activate_tab,
@@ -70,6 +70,9 @@ pub(crate) struct LayoutInner {
     pub drag_move_gen: u64,
     /// 拖拽结束解析中（防 pointerup/轮询/看门狗并发重复解析）。
     pub drag_resolving: bool,
+    /// 解析窗口内到达的新 begin（拖拽收尾完成后接续为新会话；载荷 + 首帧坐标）。
+    /// 多次 begin 后到覆盖前到——收尾只接续最新的那次手势。
+    pub pending_start: Option<(DragStartPayload, f64, f64)>,
 }
 
 impl LayoutState {
@@ -85,6 +88,7 @@ impl LayoutState {
                 drag_hits: std::collections::HashMap::new(),
                 drag_move_gen: 0,
                 drag_resolving: false,
+                pending_start: None,
             }),
         }
     }
