@@ -4,15 +4,21 @@
 //! 且便于统一超时与大小上限。`fetch_web` 返回 `title` + 正文纯文本，供 AI `fetch_url` 工具
 //! 回填上下文做回答依据；`http_request` 返回状态码 + 响应头 + 原样文本体，供插件访问 HTTP API。
 //!
-//! 边界捕获：非 http/https 拒绝、内网/回环地址拒绝（SSRF 防护，策略见 `net_guard`）、
-//! 方法白名单外拒绝、网络/HTTP 错误返回 Err，前端降级为错误文本。
+//! 边界捕获：非 http/https 拒绝、地址按命令身份分策略（`fetch_web` 公网、`http_request`
+//! 本机/局域网——调用方身份天然按命令分离，插件是可信主体可连本机/局域网服务，
+//! 但云元数据/链路本地仍拒；策略见 `net_guard`）、方法白名单外拒绝、网络/HTTP 错误返回 Err，
+//! 前端降级为错误文本。
 
 use std::collections::HashMap;
 
 use reqwest::header::{ACCEPT, USER_AGENT};
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 
-use crate::net_guard::{ensure_public_http_url, public_dns_resolver, redirect_policy};
+use crate::net_guard::{
+    ensure_local_service_http_url, ensure_public_http_url, local_service_dns_resolver, public_dns_resolver,
+    redirect_policy, HostPolicy,
+};
 
 /// 抓取响应上限（字节）。防超大页面/二进制拖死请求，超出即截断。
 const MAX_RESPONSE_BYTES: usize = 1_000_000;
@@ -54,15 +60,50 @@ pub struct HttpResponse {
     pub truncated: bool,
 }
 
+/// 出网请求类别：地址策略按类别选择（身份天然按命令分离——fetch_web 仅被 AI fetch_url 工具
+/// 消费、http_request 仅被插件 ctx.http 消费，无需身份参数下传）。
+#[derive(Clone, Copy)]
+enum RequestKind {
+    /// 网页抓取（模型工具，可被提示注入诱导）：公网策略，防诱导抓内网。
+    WebFetch,
+    /// 插件通用 HTTP（可信主体）：本机/局域网策略，回环/私网/ULA 放行、云元数据/链路本地仍拒。
+    HttpRequest,
+}
+
+/// 类别 → 地址策略（入口校验与 DNS 解析器共用同一策略，避免两边漂移）。
+fn policy_for(kind: RequestKind) -> HostPolicy {
+    match kind {
+        RequestKind::WebFetch => HostPolicy::PublicOnly,
+        RequestKind::HttpRequest => HostPolicy::LocalService,
+    }
+}
+
+/// 类别 → 入口地址校验函数。
+fn url_check_for(kind: RequestKind) -> fn(&str) -> Result<Url, String> {
+    match policy_for(kind) {
+        HostPolicy::PublicOnly => ensure_public_http_url,
+        HostPolicy::LocalService => ensure_local_service_http_url,
+    }
+}
+
+/// 类别 → DNS 解析器（与入口校验同一策略：解析结果逐 IP 过策略，连接只建立到已校验地址）。
+fn dns_resolver_for(kind: RequestKind) -> std::sync::Arc<crate::net_guard::PolicyDnsResolver> {
+    match policy_for(kind) {
+        HostPolicy::PublicOnly => public_dns_resolver(),
+        HostPolicy::LocalService => local_service_dns_resolver(),
+    }
+}
+
 /// 抓取网页正文（`https://`/`http://`）。
 #[tauri::command]
 pub async fn fetch_web(url: String) -> Result<FetchedWebPage, String> {
-    let parsed = ensure_public_http_url(&url)?;
+    let check = url_check_for(RequestKind::WebFetch);
+    let parsed = check(&url)?;
     // 重定向每跳复检（默认策略会默默跟随 302 到内网地址，绕过入口校验）
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
-        .redirect(redirect_policy(ensure_public_http_url))
-        .dns_resolver(public_dns_resolver())
+        .redirect(redirect_policy(check))
+        .dns_resolver(dns_resolver_for(RequestKind::WebFetch))
         .build()
         .map_err(|e| format!("客户端初始化失败：{}", e))?;
     let resp = client
@@ -89,15 +130,18 @@ pub async fn fetch_web(url: String) -> Result<FetchedWebPage, String> {
 }
 
 /// 通用 HTTP 请求（插件 `ctx.http`）：方法白名单 + 统一超时/响应上限，响应头与正文原样返回。
+/// 走本机/局域网策略（回环/私网放行、云元数据/链路本地仍拒）——插件是可信主体，与模型
+/// 工具的 `fetch_web` 公网限制区分；重定向每跳与 DNS 解析结果同样过该策略。
 #[tauri::command]
 pub async fn http_request(req: HttpRequest) -> Result<HttpResponse, String> {
-    let url = ensure_public_http_url(&req.url)?;
+    let check = url_check_for(RequestKind::HttpRequest);
+    let url = check(&req.url)?;
     let method = normalize_method(req.method.as_deref())?;
-    // 重定向每跳复检（默认策略会默默跟随 302 到内网地址，绕过入口校验）
+    // 重定向每跳复检（默认策略会默默跟随 302 到被拒地址，绕过入口校验）
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
-        .redirect(redirect_policy(ensure_public_http_url))
-        .dns_resolver(public_dns_resolver())
+        .redirect(redirect_policy(check))
+        .dns_resolver(dns_resolver_for(RequestKind::HttpRequest))
         .build()
         .map_err(|e| format!("客户端初始化失败：{}", e))?;
     let mut builder = client.request(method, url);
@@ -312,6 +356,23 @@ fn limit_chars(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod web_tests {
     use super::*;
+
+    #[test]
+    fn request_kind_policy_split_is_by_command_identity() {
+        // 两命令的策略必须不同：http_request 本机/局域网（回环/私网放行、云元数据仍拒），
+        // fetch_web 公网（回环/私网全拒）——身份按命令分离，杜绝模型工具借道内网。
+        assert!(matches!(policy_for(RequestKind::HttpRequest), HostPolicy::LocalService));
+        assert!(matches!(policy_for(RequestKind::WebFetch), HostPolicy::PublicOnly));
+        // 入口校验与 DNS 解析器都从同一 policy_for 派生：两边配对由该单一真源保证。
+        let local = url_check_for(RequestKind::HttpRequest);
+        assert!(local("http://127.0.0.1:11434/").is_ok());
+        assert!(local("http://192.168.1.10:8080/").is_ok());
+        assert!(local("http://169.254.169.254/latest/meta-data").is_err());
+        let public = url_check_for(RequestKind::WebFetch);
+        assert!(public("https://example.com/").is_ok());
+        assert!(public("http://127.0.0.1:11434/").is_err());
+        assert!(public("http://169.254.169.254/latest/meta-data").is_err());
+    }
 
     #[test]
     fn method_whitelist_allows_common_verbs_and_defaults_to_get() {

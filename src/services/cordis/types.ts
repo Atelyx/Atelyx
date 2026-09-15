@@ -188,6 +188,24 @@ export interface VaultService {
   createFolder(dir: string): Promise<{ ok: boolean; summary: string; path: string }>;
 }
 
+/** 仓库外授权目录文件读写服务（外部文件服务面）：方法面与 `vault` 镜像，但入参是绝对路径，
+ *  须落在该插件经用户批准的授权目录内（Rust 侧实时校验，撤销立即失效）。
+ *  插件代码不传插件 id——宿主按当前 fiber 绑定（与 state/storage 同机制）。
+ *  模型工具（AI 文件工具）走 `vault`，结构性够不到本面。 */
+export interface FsService {
+  readFile(path: string): Promise<string>;
+  writeFile(path: string, content: string): Promise<{ ok: boolean; summary: string }>;
+  listDir(path: string): Promise<ListDirResult>;
+  createFolder(path: string): Promise<{ ok: boolean; summary: string; path: string }>;
+  renameFile(path: string, newName: string): Promise<{ ok: boolean; summary: string; actualPath: string }>;
+  moveFile(path: string, targetDir: string): Promise<{ ok: boolean; summary: string; actualPath: string }>;
+  deleteFile(path: string): Promise<{ ok: boolean; summary: string }>;
+  deleteDir(
+    path: string,
+    force?: boolean,
+  ): Promise<{ ok: boolean; summary: string; needsConfirm?: boolean; itemCount?: number }>;
+}
+
 /** 系统对话框服务（用户取消返回 null）。 */
 export interface DialogService {
   pickDirectory(): Promise<string | null>;
@@ -353,6 +371,7 @@ declare module "@atelyx/cordis" {
     app: AppService;
     shell: ShellService;
     vault: VaultService;
+    fs: FsService;
     dialog: DialogService;
     clipboard: ClipboardService;
     window: WindowService;

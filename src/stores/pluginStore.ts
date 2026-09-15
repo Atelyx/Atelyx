@@ -27,9 +27,11 @@ import {
 } from "@/types";
 import type { AppUiState } from "@/types";
 import {
+  pluginApproveDir,
   pluginInstall,
   pluginInstallLocal,
   pluginList,
+  pluginRevokeDir,
   pluginSeedDefault,
   pluginSetEnabled,
   pluginUninstall,
@@ -202,6 +204,10 @@ interface PluginStoreState {
   loadMarket(force?: boolean): Promise<void>;
   /** 某视图 kind 的默认实现提供行状态（组件经此查，不直连 services）；非默认组合提供 = undefined。 */
   viewProviderState(kind: string): ViewProviderState | undefined;
+  /** 批准插件访问一个仓库外目录（只能批准清单声明的目录；结果落 plugin-state，重载入行）。 */
+  approveDir(id: string, dir: string): Promise<void>;
+  /** 撤销插件对一个仓库外目录的访问（撤销即从白名单删除，后续访问立即被拒）。 */
+  revokeDir(id: string, dir: string): Promise<void>;
 }
 
 /** 安装结果：`id` = 包内清单声明的实际落位 id（可能不同于市场索引 id），`replaced` = 是否替代了同名既有行。 */
@@ -222,6 +228,7 @@ function toInstalled(row: PluginRow): InstalledPlugin {
     sourceKind: row.sourceKind,
     enabled: row.conflict ? false : row.enabled,
     previousVersion: row.previousVersion,
+    approvedDirs: row.approvedDirs,
   };
   if (!validated.ok) {
     return {
@@ -720,6 +727,20 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
       if (!p) return;
       await stopPlugin(id);
       await runVersionOpTracked(() => pluginUpdate(id), "更新");
+    },
+
+    approveDir: async (id, dir) => {
+      const p = get().plugins[id];
+      if (!p) return;
+      // 只批已声明目录（Rust 侧强校验）；批准结果存 plugin-state，经重载入行（跨窗口经
+      // plugin-changed 广播一致）。操作窗口内监听器跳过，避免同窗口双重重载。
+      await runVersionOpTracked(() => pluginApproveDir(id, p.scope, dir), "批准目录");
+    },
+
+    revokeDir: async (id, dir) => {
+      const p = get().plugins[id];
+      if (!p) return;
+      await runVersionOpTracked(() => pluginRevokeDir(id, p.scope, dir), "撤销目录");
     },
 
     rollback: async (id) => {

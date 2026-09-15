@@ -16,6 +16,10 @@ interface PluginDetailsDialogProps {
   capabilitySensitive: (name: string) => boolean;
   /** 槽位修改链查询（归属可见：展开某槽看声明方 + 全部贡献/装饰者）。 */
   getSlotChain: (slot: string) => PluginSlotChain;
+  /** 批准插件访问一个仓库外目录（父组件经 pluginStore 执行并回显结果）。 */
+  onApproveDir: (dir: string) => void;
+  /** 撤销插件对一个仓库外目录的访问。 */
+  onRevokeDir: (dir: string) => void;
   onRunCommand: (globalId: string) => void;
   onRollback: () => void;
   onClose: () => void;
@@ -50,6 +54,8 @@ export function PluginDetailsDialog({
   capabilityLabel,
   capabilitySensitive,
   getSlotChain,
+  onApproveDir,
+  onRevokeDir,
   onRunCommand,
   onRollback,
   onClose,
@@ -65,6 +71,18 @@ export function PluginDetailsDialog({
   const [expandedSlot, setExpandedSlot] = useState<string | null>(null);
   const pluginCommands = commands.filter((command) => command.pluginId === plugin.id);
   const declares = plugin.manifest.declares ?? [];
+  // 外部目录授权行 = 清单声明目录（未批准/已批准）∪ 已批准但清单不再声明的目录
+  //（清单更新可能移除声明；已批准记录保留，用户可在此撤销）。
+  // 声明目录去重（清单允许重复声明，UI 按唯一目录渲染）；畸形清单行保留原始清单、
+  // declaredDirs 可能非数组，防御性兜底。
+  const declaredDirs = [...new Set(Array.isArray(plugin.manifest.declaredDirs) ? plugin.manifest.declaredDirs : [])];
+  const approvedSet = new Set(plugin.approvedDirs ?? []);
+  const dirRows = [
+    ...declaredDirs.map((dir) => ({ dir, approved: approvedSet.has(dir), undeclared: false })),
+    ...(plugin.approvedDirs ?? [])
+      .filter((dir) => !declaredDirs.includes(dir))
+      .map((dir) => ({ dir, approved: true, undeclared: true })),
+  ];
   // 挂载失败阶段在六阶段顺序中的下标（progress 条：其前 = 已通过，其后 = 未到达）
   const failIndex = plugin.failure ? PLUGIN_MOUNT_PHASE_ORDER.indexOf(plugin.failure.phase) : -1;
 
@@ -158,6 +176,32 @@ export function PluginDetailsDialog({
           <section className="mb-4">
             <h4 className="text-[11px] font-medium mb-2" style={{ color: "var(--text-muted)" }}>声明能力</h4>
             <div className="flex flex-wrap gap-1">{declares.map((name) => <span key={name} className="text-[10px] px-1.5 py-0.5 rounded border" style={{ color: capabilitySensitive(name) ? "#f59e0b" : "var(--text-secondary)", borderColor: "var(--border)" }}>{capabilityLabel(name)}{capabilitySensitive(name) ? "（敏感）" : ""}</span>)}</div>
+          </section>
+        )}
+
+        {dirRows.length > 0 && (
+          <section className="mb-4">
+            <h4 className="text-[11px] font-medium mb-2" style={{ color: "var(--text-muted)" }}>外部目录访问</h4>
+            <div className="space-y-1 text-[10px]">
+              {dirRows.map((row) => (
+                <div key={row.dir} className="flex items-center gap-2">
+                  <span className="flex-1 min-w-0 break-all" style={{ color: row.approved ? "var(--text-secondary)" : "var(--text-muted)" }}>
+                    {row.dir}
+                    {row.undeclared && <span style={{ color: "#f59e0b" }}>（清单已不再声明）</span>}
+                  </span>
+                  <button
+                    onClick={() => (row.approved ? onRevokeDir(row.dir) : onApproveDir(row.dir))}
+                    className="flex-shrink-0 px-1.5 py-0.5 rounded border text-[10px]"
+                    style={{ borderColor: "var(--border)", color: row.approved ? "var(--text-muted)" : "var(--text-secondary)" }}
+                  >
+                    {row.approved ? "撤销" : "批准"}
+                  </button>
+                </div>
+              ))}
+            </div>
+            <div className="text-[10px] mt-1.5" style={{ color: "var(--text-muted)" }}>
+              `~/` 指用户主目录；批准后插件可经 <code>ctx.fs</code> 读写该目录（绝对路径），撤销立即失效。
+            </div>
           </section>
         )}
 

@@ -110,6 +110,9 @@ pub struct PluginInfo {
     /// 双方行都携带冲突说明并强制以停用态展示，均不进入装配。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub conflict: Option<String>,
+    /// 用户批准的仓库外目录（声明原形，`~/` 形式；见 `atelyx.declaredDirs`，空 = 无授权）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approved_dirs: Option<Vec<String>>,
 }
 
 /// `plugin_list` 响应：行清单 + 插件状态健康度。
@@ -157,6 +160,9 @@ struct PluginSource {
     #[serde(default)]
     previous: Option<PluginPrevious>,
     scope: String,
+    /// 用户批准的仓库外目录（声明原形 `~/` 形式；随插件生灭——卸载即消失，更新保留）。
+    #[serde(default)]
+    approved_dirs: Vec<String>,
 }
 
 /// 插件平台状态（app_data_dir/plugin-state.json）。
@@ -899,6 +905,21 @@ fn manifest_valid_or_error(v: &Value) -> Result<(), String> {
             return Err("atelyx.declares 必须是数组".to_string());
         }
     }
+    // declaredDirs（仓库外目录披露与授权依据）：数组、元素为非空绝对路径或 `~/` 开头
+    //（`~` 由宿主解析为用户主目录；相对路径无基准，拒绝）。批准链「声明 → 用户批准」的
+    // 声明侧就是这里，畸形形态会让授权 UI 无从渲染，安装时从源头拒绝。
+    if let Some(d) = ax.get("declaredDirs") {
+        let arr = d.as_array().ok_or("atelyx.declaredDirs 必须是数组")?;
+        for item in arr {
+            let s = item
+                .as_str()
+                .filter(|s| !s.trim().is_empty())
+                .ok_or("declaredDirs 项必须是非空字符串")?;
+            if !(s == "~" || s.starts_with("~/")) && !Path::new(s).is_absolute() {
+                return Err("declaredDirs 项必须是绝对路径或以 ~/ 开头".to_string());
+            }
+        }
+    }
     // bundle（显式要求宿主打包）：非布尔即拒绝——静默当缺省会让「声明了要打包」的插件不打包。
     if let Some(b) = ax.get("bundle") {
         if !b.is_boolean() {
@@ -1309,6 +1330,7 @@ fn plugin_info_from(
         source_kind,
         previous_version: None,
         conflict: None,
+        approved_dirs: None,
     }
 }
 
@@ -1328,6 +1350,7 @@ fn plugin_info_from_manifest(id: &str, manifest: &Value, scope: &str, source_kin
         source_kind,
         previous_version: None,
         conflict: None,
+        approved_dirs: None,
     }
 }
 
@@ -1516,6 +1539,8 @@ pub fn plugin_list(
             let source_kind = source.map(|s| s.kind).unwrap_or_default();
             let mut info = plugin_info_from(&dir, &manifest, scope, source_kind, enabled);
             info.previous_version = source.and_then(|s| s.previous.as_ref().map(|p| p.version.clone()));
+            info.approved_dirs = source
+                .and_then(|s| (!s.approved_dirs.is_empty()).then(|| s.approved_dirs.clone()));
             out.push(info);
         }
     };
@@ -1536,7 +1561,9 @@ pub fn plugin_list(
             continue;
         }
         let enabled = pstate.enabled.get(id).copied().unwrap_or(false);
-        out.push(plugin_info_from_manifest(id, manifest, &src.scope, src.kind, enabled));
+        let mut info = plugin_info_from_manifest(id, manifest, &src.scope, src.kind, enabled);
+        info.approved_dirs = (!src.approved_dirs.is_empty()).then(|| src.approved_dirs.clone());
+        out.push(info);
     }
 
     mark_cross_scope_conflicts(&mut out, &seen_per_scope);
@@ -2021,6 +2048,121 @@ pub fn plugin_set_enabled(
         fresh.enabled.remove(&id);
         Ok(((), true))
     })
+}
+
+// ===== 仓库外目录授权 =====
+
+/// 清单是否声明该目录（`atelyx.declaredDirs` 精确匹配声明原形，不展开）。
+fn manifest_declares_dir(manifest: &Value, dir: &str) -> bool {
+    manifest
+        .get("atelyx")
+        .and_then(|a| a.get("declaredDirs"))
+        .and_then(|d| d.as_array())
+        .is_some_and(|arr| arr.iter().filter_map(|v| v.as_str()).any(|s| s == dir))
+}
+
+/// 批准插件访问一个仓库外目录：只能批准清单 `atelyx.declaredDirs` 声明过的目录
+///（批准是「声明 → 用户批准」链条的用户侧确认，未声明目录无授权依据）。批准结果按声明
+/// 原形持久化，调用时由 `~` 展开 + canonicalize 校验（见 `approved_dirs_for`）；撤销 = revoke。
+#[tauri::command]
+pub fn plugin_approve_dir(
+    app: AppHandle,
+    state: State<'_, VaultState>,
+    id: String,
+    scope: String,
+    dir: String,
+) -> Result<(), String> {
+    if !plugin_id_valid(&id) {
+        return Err("插件不存在".to_string());
+    }
+    if dir.trim().is_empty() {
+        return Err("目录不能为空".to_string());
+    }
+    // 持 IO 锁期间清单不可变（更新被同一把锁挡住）：清单读锁外取快照即当前声明，
+    // 与安装/更新/卸载互斥，不会批到中途替换的旧清单。
+    let _io_guard = PLUGIN_IO_LOCK.lock().map_err(|_| "插件文件忙，请重试".to_string())?;
+    let pstate = read_plugin_state(&app)?;
+    if !pstate.sources.contains_key(&id) {
+        return Err("插件不存在".to_string());
+    }
+    let Some(manifest) = row_manifest(&app, &state, &pstate, &id) else {
+        return Err("插件不存在".to_string());
+    };
+    if !manifest_declares_dir(&manifest, &dir) {
+        return Err("只能批准清单中已声明的目录".to_string());
+    }
+    update_plugin_state(&app, |fresh| {
+        let changed = apply_approve_dir(fresh, &id, &dir)?;
+        Ok(((), changed))
+    })?;
+    emit_plugin_changed(&app, &id, &scope);
+    Ok(())
+}
+
+/// 批准状态写入（锁内调用）：id 行存在则追加目录，返回是否变化（重复批准 = 无变化不落盘）。
+fn apply_approve_dir(state: &mut PluginState, id: &str, dir: &str) -> Result<bool, String> {
+    let source = state.sources.get_mut(id).ok_or("插件不存在")?;
+    let changed = !source.approved_dirs.iter().any(|d| d == dir);
+    if changed {
+        source.approved_dirs.push(dir.to_string());
+    }
+    Ok(changed)
+}
+
+/// 撤销插件对一个仓库外目录的访问（幂等：未批准也可调用，不报错）。撤销即从白名单删除，
+/// 后续外部文件命令实时查表即失效（无缓存窗口）；批准记录随插件卸载一并消失。
+#[tauri::command]
+pub fn plugin_revoke_dir(
+    app: AppHandle,
+    id: String,
+    scope: String,
+    dir: String,
+) -> Result<(), String> {
+    if !plugin_id_valid(&id) {
+        return Err("插件不存在".to_string());
+    }
+    update_plugin_state(&app, |fresh| {
+        let changed = apply_revoke_dir(fresh, &id, &dir)?;
+        Ok(((), changed))
+    })?;
+    emit_plugin_changed(&app, &id, &scope);
+    Ok(())
+}
+
+/// 撤销状态写入（锁内调用）：移除目录，返回是否变化（未批准目录撤销 = 无变化不落盘）。
+fn apply_revoke_dir(state: &mut PluginState, id: &str, dir: &str) -> Result<bool, String> {
+    let source = state.sources.get_mut(id).ok_or("插件不存在")?;
+    let before = source.approved_dirs.len();
+    source.approved_dirs.retain(|d| d != dir);
+    Ok(source.approved_dirs.len() != before)
+}
+
+/// 某插件当前生效的授权目录（声明原形 → `~` 展开为绝对路径）。外部文件命令族
+/// （commands/external_fs.rs）每次调用前实时查它——撤销立即失效，无缓存窗口；
+/// 插件不存在 = Err（行不存在/已卸载）。
+pub(crate) fn approved_dirs_for(app: &AppHandle, id: &str) -> Result<Vec<PathBuf>, String> {
+    let pstate = read_plugin_state(app)?;
+    let source = pstate.sources.get(id).ok_or("插件不存在")?;
+    if source.approved_dirs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let home = app.path().home_dir().map_err(|e| format!("读取用户主目录失败：{e}"))?;
+    Ok(source
+        .approved_dirs
+        .iter()
+        .map(|d| expand_home_dir(d, &home))
+        .collect())
+}
+
+/// `~/` 前缀展开为绝对路径（`~` 单独或 `~/` 开头 = 用户主目录；其余原样返回）。
+fn expand_home_dir(raw: &str, home: &Path) -> PathBuf {
+    if raw == "~" {
+        home.to_path_buf()
+    } else if let Some(rest) = raw.strip_prefix("~/") {
+        home.join(rest)
+    } else {
+        PathBuf::from(raw)
+    }
 }
 
 /// 基础主题条目 id（浅/深基底；其他插件不得占用，防冒名——与前端 utils/pluginTheme.ts 的
@@ -3828,5 +3970,120 @@ mod tests {
         assert_eq!(residue_stamp_of(".install-abc"), None);
         // `.zip` 后缀不影响解析
         assert_eq!(residue_stamp_of(".download-0-abcdef.zip"), Some(0));
+    }
+
+    // ===== 仓库外目录授权 =====
+
+    #[test]
+    fn manifest_declares_dir_matches_declared_forms() {
+        // `~/` 前缀跨平台合法（`/abs/path` 在 Windows 上不是绝对路径，单独按平台测）
+        let m = json!({
+            "name": "com.example.fs",
+            "version": "1.0.0",
+            "main": "index.js",
+            "atelyx": {
+                "type": "background",
+                "declaredDirs": ["~/Projects/foo", "~"]
+            }
+        });
+        assert!(manifest_valid_or_error(&m).is_ok());
+        assert!(manifest_declares_dir(&m, "~/Projects/foo"));
+        assert!(manifest_declares_dir(&m, "~"));
+        // 未声明 / 无 declaredDirs 字段 / 缺 atelyx 块都返回 false（不是 Err，调用方按拒绝处理）
+        assert!(!manifest_declares_dir(&m, "~/Projects/bar"));
+        assert!(!manifest_declares_dir(&json!({"name":"com.example.fs"}), "~/x"));
+        assert!(!manifest_declares_dir(&json!({}), "~/x"));
+    }
+
+    #[test]
+    fn declared_dirs_manifest_validation() {
+        // `~/` 前缀放行（跨平台）；相对路径、非数组、空项拒绝
+        let ok = json!({
+            "name": "com.example.fs",
+            "version": "1.0.0",
+            "main": "index.js",
+            "atelyx": { "type": "background", "declaredDirs": ["~/a", "~/"] }
+        });
+        assert!(manifest_valid_or_error(&ok).is_ok());
+        // 绝对路径的平台判定（is_absolute 平台相关）：Unix `/` 开头、Windows 盘符各自合法
+        #[cfg(unix)]
+        assert!(manifest_valid_or_error(&json!({
+            "name": "com.example.fs", "version": "1.0.0", "main": "index.js",
+            "atelyx": { "type": "background", "declaredDirs": ["/x/y"] }
+        })).is_ok());
+        #[cfg(windows)]
+        assert!(manifest_valid_or_error(&json!({
+            "name": "com.example.fs", "version": "1.0.0", "main": "index.js",
+            "atelyx": { "type": "background", "declaredDirs": ["C:\\data"] }
+        })).is_ok());
+        for bad in [
+            json!({
+                "name": "com.example.fs", "version": "1.0.0", "main": "index.js",
+                "atelyx": { "type": "background", "declaredDirs": ["relative/path"] }
+            }),
+            json!({
+                "name": "com.example.fs", "version": "1.0.0", "main": "index.js",
+                "atelyx": { "type": "background", "declaredDirs": "~/a" }
+            }),
+            json!({
+                "name": "com.example.fs", "version": "1.0.0", "main": "index.js",
+                "atelyx": { "type": "background", "declaredDirs": [""] }
+            }),
+        ] {
+            assert!(manifest_valid_or_error(&bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn approve_revoke_dir_state_mutation() {
+        let mut state = PluginState::default();
+        state.sources.insert(
+            "com.example.fs".to_string(),
+            PluginSource { scope: "app".to_string(), ..Default::default() },
+        );
+        // 批准：加入；重复批准 = 无变化不落盘
+        assert!(apply_approve_dir(&mut state, "com.example.fs", "~/Projects/foo").unwrap());
+        assert!(!apply_approve_dir(&mut state, "com.example.fs", "~/Projects/foo").unwrap());
+        assert_eq!(state.sources["com.example.fs"].approved_dirs, vec!["~/Projects/foo"]);
+        // 撤销：移除；撤销未批准目录 = 无变化
+        assert!(apply_revoke_dir(&mut state, "com.example.fs", "~/Projects/foo").unwrap());
+        assert!(!apply_revoke_dir(&mut state, "com.example.fs", "~/Projects/foo").unwrap());
+        assert!(state.sources["com.example.fs"].approved_dirs.is_empty());
+        // 行不存在 = Err（卸载后批准/撤销都应拒绝）
+        assert!(apply_approve_dir(&mut state, "com.example.gone", "~/x").is_err());
+        assert!(apply_revoke_dir(&mut state, "com.example.gone", "~/x").is_err());
+    }
+
+    #[test]
+    fn expand_home_dir_resolves_tilde() {
+        let home = Path::new("/home/alice");
+        assert_eq!(expand_home_dir("~/Projects/foo", home), PathBuf::from("/home/alice/Projects/foo"));
+        assert_eq!(expand_home_dir("~", home), PathBuf::from("/home/alice"));
+        assert_eq!(expand_home_dir("/abs/path", home), PathBuf::from("/abs/path"));
+        // Windows 盘符原样（不误当 `~` 前缀）
+        assert_eq!(expand_home_dir("C:\\data", home), PathBuf::from("C:\\data"));
+    }
+
+    #[test]
+    fn approved_dirs_serde_roundtrip() {
+        let mut state = PluginState::default();
+        state.sources.insert(
+            "com.example.fs".to_string(),
+            PluginSource {
+                scope: "app".to_string(),
+                approved_dirs: vec!["~/Projects/foo".to_string(), "/abs".to_string()],
+                ..Default::default()
+            },
+        );
+        let raw = serde_json::to_string(&state).unwrap();
+        assert!(raw.contains("\"approvedDirs\""));
+        let back: PluginState = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            back.sources["com.example.fs"].approved_dirs,
+            vec!["~/Projects/foo", "/abs"]
+        );
+        // 缺省 = 空授权（旧状态文件无字段正常读回）
+        let legacy: PluginState = serde_json::from_str(r#"{"sources":{"com.example.fs":{"scope":"app"}}}"#).unwrap();
+        assert!(legacy.sources["com.example.fs"].approved_dirs.is_empty());
     }
 }

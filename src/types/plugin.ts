@@ -90,6 +90,9 @@ export interface PluginManifest {
   bundle?: boolean;
   /** 披露：将访问的 Atelyx 服务名（管理页「声明 vs 实际」审计对照的声明侧；无运行时门槛）。 */
   declares?: string[];
+  /** 披露 + 授权依据：将访问的仓库外目录（绝对路径或以 `~/` 开头，`~` 由宿主解析为用户主目录）。
+   *  仅披露与授权依据，无运行时门槛；用户逐目录批准后插件才可经 `ctx.fs` 访问。 */
+  declaredDirs?: string[];
   /** 权限说明：服务名 → 一句理由（安装/详情展示）。 */
   permissions?: Record<string, string>;
   /** 声明式主题条目（type 含 theme 时通常携带；必须 ≥1；id 插件内唯一）。 */
@@ -171,6 +174,8 @@ export interface InstalledPlugin {
   failure?: PluginMountFailure;
   /** 可回退到的上一版本；仅代码回退，插件 data 保持当前内容。 */
   previousVersion?: string;
+  /** 用户已批准的仓库外目录（声明原形 `~/` 形式；来自 plugin_list，撤销/卸载即从列表消失）。 */
+  approvedDirs?: string[];
 }
 
 /**

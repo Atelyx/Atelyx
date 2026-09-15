@@ -168,6 +168,16 @@ pub fn run() {
             commands::plugin::plugin_kv_set,
             commands::plugin::plugin_kv_delete,
             commands::plugin::plugin_kv_write,
+            commands::plugin::plugin_approve_dir,
+            commands::plugin::plugin_revoke_dir,
+            commands::external_fs::external_read_file,
+            commands::external_fs::external_write_file,
+            commands::external_fs::external_list_dir,
+            commands::external_fs::external_create_folder,
+            commands::external_fs::external_rename_file,
+            commands::external_fs::external_move_file,
+            commands::external_fs::external_delete_file,
+            commands::external_fs::external_delete_dir,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -38,6 +38,8 @@ export function PluginsSettingsTab() {
   const update = usePluginStore((s) => s.update);
   const rollback = usePluginStore((s) => s.rollback);
   const uninstall = usePluginStore((s) => s.uninstall);
+  const approveDir = usePluginStore((s) => s.approveDir);
+  const revokeDir = usePluginStore((s) => s.revokeDir);
   const installLocalFromPicker = usePluginStore((s) => s.installLocalFromPicker);
   const installGit = usePluginStore((s) => s.installGit);
   const capabilityLabel = usePluginStore((s) => s.capabilityLabel);
@@ -209,6 +211,13 @@ export function PluginsSettingsTab() {
           const p = plugins[row.id];
           const failed = p?.phase === "failed";
           const lastTheme = p ? isLastEnabledTheme(p) : false;
+          // 声明但未批准的仓库外目录数（详情页逐目录批准；行徽标提示有未决授权；
+          // 声明去重防重复计数，畸形清单行的原始 declaredDirs 可能非数组，防御性兜底）
+          const pendingDirs = p
+            ? [...new Set(Array.isArray(p.manifest.declaredDirs) ? p.manifest.declaredDirs : [])].filter(
+                (dir) => !(p.approvedDirs ?? []).includes(dir),
+              ).length
+            : 0;
           return (
             <div
               key={row.id}
@@ -257,6 +266,15 @@ export function PluginsSettingsTab() {
                     {failed && (
                       <span className="text-[10px] px-1.5 py-0.5 rounded" style={{ color: "#f87171", background: "rgba(248,113,113,0.1)" }}>
                         加载失败
+                      </span>
+                    )}
+                    {pendingDirs > 0 && (
+                      <span
+                        className="text-[10px] px-1.5 py-0.5 rounded"
+                        style={{ color: "#f59e0b", background: "rgba(245,158,11,0.1)" }}
+                        title="该插件声明了仓库外目录访问，尚未逐目录批准（详情中可批准/撤销）"
+                      >
+                        {pendingDirs} 个目录待批准
                       </span>
                     )}
                   </div>
@@ -349,6 +367,18 @@ export function PluginsSettingsTab() {
           capabilityLabel={capabilityLabel}
           capabilitySensitive={capabilitySensitive}
           getSlotChain={slotChain}
+          onApproveDir={(dir) =>
+            void approveDir(detailsId, dir).then(
+              () => setNotice({ kind: "ok", text: `已批准目录访问：${dir}` }),
+              (e) => setNotice({ kind: "error", text: errText(e) }),
+            )
+          }
+          onRevokeDir={(dir) =>
+            void revokeDir(detailsId, dir).then(
+              () => setNotice({ kind: "ok", text: `已撤销目录访问：${dir}` }),
+              (e) => setNotice({ kind: "error", text: errText(e) }),
+            )
+          }
           onRunCommand={(globalId) => void runPluginCommand(globalId).then(
             () => setNotice({ kind: "ok", text: "命令已执行" }),
             (e) => setNotice({ kind: "error", text: `命令执行失败：${errText(e)}` }),

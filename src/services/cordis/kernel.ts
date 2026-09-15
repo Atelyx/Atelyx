@@ -20,6 +20,16 @@ import { closeWindow, minimizeWindow, toggleMaximizeWindow } from "@/services/wi
 import { listVaultTree } from "@/services/vault";
 import { pluginKvDelete, pluginKvRead, pluginKvSet, pluginKvWrite, pluginReadState, pluginWriteState } from "@/services/plugins";
 import { httpRequest } from "@/services/http";
+import {
+  externalCreateFolder,
+  externalDeleteDir,
+  externalDeleteFile,
+  externalListDir,
+  externalMoveFile,
+  externalReadFile,
+  externalRenameFile,
+  externalWriteFile,
+} from "@/services/externalFs";
 import { registerPluginTools, unregisterPluginTools } from "@/services/ai/tools";
 import {
   globVault,
@@ -55,6 +65,7 @@ import type {
   ClipboardService,
   CollabService,
   DialogService,
+  FsService,
   HttpService,
   NativeService,
   NotificationService,
@@ -89,11 +100,16 @@ interface StorageServiceInstance extends StorageService {
   ctx: Context;
 }
 
-/** 调用方插件 id：state/storage 的数据落点由调用方决定，缺归属的访问（非插件上下文）
+/** fs 服务实例（tracker 注入调用方插件上下文：授权目录按调用方插件查表）。 */
+interface FsServiceInstance extends FsService {
+  ctx: Context;
+}
+
+/** 调用方插件 id：state/storage/fs 的数据落点与授权查表由调用方决定，缺归属的访问（非插件上下文）
  *  直接拒绝——静默落到共享命名空间会制造跨插件数据混写。 */
 function requireCallerPluginId(ctx: Context): string {
   const id = pluginIdOf(ctx);
-  if (!id) throw new Error("插件状态服务只能在插件上下文中使用");
+  if (!id) throw new Error("插件服务只能在插件上下文中使用");
   return id;
 }
 
@@ -312,6 +328,51 @@ export function createKernel(): Kernel {
     createFolder: (dir) => requireVaultWrite().createFolder(dir),
   };
   provide("vault", vault);
+
+  // 仓库外授权目录文件读写（外部文件服务面）：tracker 绑定调用方插件 id（同 state/storage）——
+  // API 不暴露 id 参数；授权目录由用户逐目录批准（插件详情页），Rust 侧每次调用实时校验、
+  // 撤销立即失效。模型工具走 vault，结构性够不到本面。
+  const fs: FsService = {
+    readFile(this: FsServiceInstance, path) {
+      return externalReadFile(requireCallerPluginId(this.ctx), path);
+    },
+    async writeFile(this: FsServiceInstance, path, content) {
+      await externalWriteFile(requireCallerPluginId(this.ctx), path, content);
+      return { ok: true, summary: `已写入「${path}」` };
+    },
+    listDir(this: FsServiceInstance, path) {
+      return externalListDir(requireCallerPluginId(this.ctx), path);
+    },
+    async createFolder(this: FsServiceInstance, path) {
+      await externalCreateFolder(requireCallerPluginId(this.ctx), path);
+      return { ok: true, summary: `已创建「${path}」`, path };
+    },
+    async renameFile(this: FsServiceInstance, path, newName) {
+      const actualPath = await externalRenameFile(requireCallerPluginId(this.ctx), path, newName);
+      return { ok: true, summary: `已重命名「${path}」`, actualPath };
+    },
+    async moveFile(this: FsServiceInstance, path, targetDir) {
+      const actualPath = await externalMoveFile(requireCallerPluginId(this.ctx), path, targetDir);
+      return { ok: true, summary: `已移动「${path}」`, actualPath };
+    },
+    async deleteFile(this: FsServiceInstance, path) {
+      await externalDeleteFile(requireCallerPluginId(this.ctx), path);
+      return { ok: true, summary: `已删除「${path}」` };
+    },
+    async deleteDir(this: FsServiceInstance, path, force) {
+      const r = await externalDeleteDir(requireCallerPluginId(this.ctx), path, force === true);
+      return {
+        ok: r.deleted,
+        summary: r.deleted
+          ? `已删除目录「${path}」`
+          : `目录非空（${r.itemCount} 项），需确认后删除`,
+        needsConfirm: r.needsConfirm,
+        itemCount: r.itemCount,
+      };
+    },
+  };
+  Object.defineProperty(fs, symbols.tracker, { value: { property: "ctx" } });
+  provide("fs", fs);
 
   const dialog: DialogService = {
     pickDirectory: () => pickDirectory(),

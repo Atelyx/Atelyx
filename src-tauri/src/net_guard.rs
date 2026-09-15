@@ -1,9 +1,9 @@
 //! 出网 http/https 地址校验（`commands/web.rs` 与 `commands/search.rs` 共用）。
 //!
-//! 两套策略，同一次校验只能择一（见 [`HostPolicy`]）：网页抓取与插件通用 HTTP 走公网策略，
-//! 用户自建的 SearXNG 等本机/局域网服务走 [`HostPolicy::LocalService`]。
-//! 三层边界并存：入口按协议白名单 + IP 字面量判定；重定向每跳复检同一策略；
-//! DNS 解析结果逐 IP 过策略（挂在 reqwest 客户端上，见 [`PolicyDnsResolver`]）——
+//! 两套策略，同一次校验只能择一（见 [`HostPolicy`]）：网页抓取 `fetch_web`（模型工具）走公网
+//! 策略，插件通用 HTTP `http_request` 与用户自建的 SearXNG 等本机/局域网服务走
+//! [`HostPolicy::LocalService`]。三层边界并存：入口按协议白名单 + IP 字面量判定；重定向每跳
+//! 复检同一策略；DNS 解析结果逐 IP 过策略（挂在 reqwest 客户端上，见 [`PolicyDnsResolver`]）——
 //! 域名解析到内网地址与 DNS rebinding 均被拦截，连接只建立到已校验放行的 IP。
 
 use std::net::{SocketAddr, ToSocketAddrs};
@@ -14,7 +14,7 @@ use reqwest::Url;
 /// 地址用途策略。
 #[derive(Clone, Copy)]
 pub(crate) enum HostPolicy {
-    /// 公网目标：回环/私网/链路本地/未指定/广播/ULA 一律拒绝（网页抓取与插件通用 HTTP 的边界）。
+    /// 公网目标：回环/私网/链路本地/未指定/广播/ULA 一律拒绝（网页抓取 `fetch_web` 的边界）。
     PublicOnly,
     /// 本机或局域网服务：放行回环与私网/ULA，仅拒链路本地（含云元数据 169.254.169.254）、
     /// 未指定、广播——自建实例常跑在本机 Docker 或局域网主机上。
@@ -50,7 +50,7 @@ pub(crate) fn ensure_http_url(raw: &str, policy: HostPolicy) -> Result<Url, Stri
     Ok(parsed)
 }
 
-/// 公网策略的地址校验（网页抓取 `fetch_web` / 插件 `http_request`）。
+/// 公网策略的地址校验（网页抓取 `fetch_web`）。
 pub(crate) fn ensure_public_http_url(raw: &str) -> Result<Url, String> {
     ensure_http_url(raw, HostPolicy::PublicOnly)
 }
@@ -161,7 +161,7 @@ impl reqwest::dns::Resolve for PolicyDnsResolver {
     }
 }
 
-/// 公网策略的 DNS 解析器（`fetch_web` / 插件 `http_request` 客户端挂载）。
+/// 公网策略的 DNS 解析器（`fetch_web` 客户端挂载）。
 pub(crate) fn public_dns_resolver() -> Arc<PolicyDnsResolver> {
     Arc::new(PolicyDnsResolver { policy: HostPolicy::PublicOnly })
 }

@@ -168,6 +168,7 @@ export function validatePluginManifest(raw: unknown): ManifestValidateResult {
   if (!themeOnly && main === undefined) errors.push("main 不能为空");
 
   const declares = normalizeStringList(ax.declares, "declares", errors);
+  const declaredDirs = normalizeDeclaredDirs(ax.declaredDirs, errors);
   const permissions = normalizePermissions(ax.permissions, errors);
   const platforms = normalizeStringList(ax.platforms, "platforms", errors);
   const themes = normalizeThemes(ax.themes, errors);
@@ -186,6 +187,7 @@ export function validatePluginManifest(raw: unknown): ManifestValidateResult {
     scope: normalizeScope(ax.scope),
     ...(types.length > 0 ? { types } : {}),
     ...(declares.length > 0 ? { declares } : {}),
+    ...(declaredDirs.length > 0 ? { declaredDirs } : {}),
     ...(Object.keys(permissions).length > 0 ? { permissions } : {}),
     ...(platforms.length > 0 ? { platforms } : {}),
     ...(themes ? { themes } : {}),
@@ -270,6 +272,35 @@ function normalizeStringList(raw: unknown, field: string, errors: string[]): str
     return [];
   }
   return raw as string[];
+}
+
+/** declaredDirs 项形态：绝对路径或以 `~/` 开头（`~` 或 `~/` 由宿主解析为用户主目录）。
+ *  相对路径无基准，拒绝；判定与 Rust 侧 manifest 校验对齐（前端宽松启发式：`/` 开头、
+ *  Windows 盘符、UNC 都视为绝对）。 */
+function isDeclaredDirShape(s: string): boolean {
+  return s === "~" || s.startsWith("~/") || s.startsWith("/") || /^[A-Za-z]:[\\/]/.test(s) || s.startsWith("\\\\");
+}
+
+/** declaredDirs 归一化：非空字符串数组、逐项为绝对路径或 `~/` 前缀。 */
+function normalizeDeclaredDirs(raw: unknown, errors: string[]): string[] {
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw)) {
+    errors.push("declaredDirs 必须是数组");
+    return [];
+  }
+  const out: string[] = [];
+  for (const item of raw) {
+    if (typeof item !== "string" || item.trim().length === 0) {
+      errors.push("declaredDirs 项必须是非空字符串");
+      continue;
+    }
+    if (!isDeclaredDirShape(item)) {
+      errors.push("declaredDirs 项必须是绝对路径或以 ~/ 开头");
+      continue;
+    }
+    out.push(item);
+  }
+  return out;
 }
 
 /** themes 归一化：非空数组（每项 id/name/colorScheme/variables），id 插件内唯一；未知字段跳过。 */

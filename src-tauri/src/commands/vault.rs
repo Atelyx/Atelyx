@@ -702,7 +702,7 @@ pub struct ListDirResult {
 #[tauri::command]
 pub fn list_vault_dir(dir: String, state: State<'_, VaultState>) -> Result<ListDirResult, String> {
     let root = state.root()?;
-    list_dir_entries(&list_dir_target(&root, &dir)?, LIST_DIR_MAX_ENTRIES)
+    list_dir_entries(&list_dir_target(&root, &dir)?, LIST_DIR_MAX_ENTRIES, true)
 }
 
 /// 解析列目目标：空串 = 仓库根，其余走 safe_join 并要求确实为目录；指向隐藏目录（. 开头段）拒绝。
@@ -730,19 +730,22 @@ fn normalize_list_dir(dir: &str) -> String {
     s
 }
 
-/// 子目录的直接可见子项数（跳过 `.` 开头隐藏项，与顶层 list_dir 展示口径一致）。
-fn count_visible_children(dir: &Path) -> usize {
+/// 子目录的直接子项数（skip_hidden 时跳过 `.` 开头隐藏项，与顶层 list_dir 展示口径一致）。
+fn count_children(dir: &Path, skip_hidden: bool) -> usize {
     std::fs::read_dir(dir)
         .map(|rd| {
             rd.flatten()
-                .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
+                .filter(|e| !skip_hidden || !e.file_name().to_string_lossy().starts_with('.'))
                 .count()
         })
         .unwrap_or(0)
 }
 
-/// 单层列目核心（max 参数化供测试注入小上限）：目录在前、按名称升序；跳过 `.` 开头隐藏项。
-fn list_dir_entries(dir: &Path, max: usize) -> Result<ListDirResult, String> {
+/// 单层列目核心（max 参数化供测试注入小上限）：目录在前、按名称升序。
+/// `skip_hidden`：仓库列表屏蔽 `.` 开头隐藏项（AI 工具不可见）；仓库外授权目录
+/// （ctx.fs，commands/external_fs.rs）复用本函数但 `skip_hidden=false`——用户批准的真实
+/// 目录含点文件，是正当内容。
+pub(crate) fn list_dir_entries(dir: &Path, max: usize, skip_hidden: bool) -> Result<ListDirResult, String> {
     let mut entries: Vec<ListDirEntry> = Vec::new();
     for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
@@ -750,13 +753,13 @@ fn list_dir_entries(dir: &Path, max: usize) -> Result<ListDirResult, String> {
         let Some(name) = entry.file_name().into_string().ok() else {
             continue;
         };
-        // 隐藏项（. 开头，含 .gitignore 类隐藏文件）对 AI 完全屏蔽
-        if name.starts_with('.') {
+        // 隐藏项（. 开头，含 .gitignore 类隐藏文件）在仓库列表对 AI 完全屏蔽
+        if skip_hidden && name.starts_with('.') {
             continue;
         }
         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
         let (size, children) = if is_dir {
-            (None, Some(count_visible_children(&entry.path())))
+            (None, Some(count_children(&entry.path(), skip_hidden)))
         } else {
             (entry.metadata().ok().map(|md| md.len()), None)
         };
@@ -1643,7 +1646,7 @@ mod list_dir_tests {
         std::fs::write(root.join("b.md"), "hello").unwrap();
         std::fs::write(root.join(".隐藏.md"), "h").unwrap();
         std::fs::create_dir_all(root.join(".atelyx")).unwrap();
-        let r = list_dir_entries(&root, 200).unwrap();
+        let r = list_dir_entries(&root, 200, true).unwrap();
         // 隐藏项（. 开头段）对 AI 完全屏蔽：.隐藏.md 与 .atelyx 均不出现
         assert_eq!(r.total, 2);
         assert!(!r.capped);
@@ -1676,7 +1679,7 @@ mod list_dir_tests {
         for i in 0..5 {
             std::fs::write(root.join(format!("f{i}.txt")), "").unwrap();
         }
-        let r = list_dir_entries(&root, 3).unwrap();
+        let r = list_dir_entries(&root, 3, true).unwrap();
         assert_eq!(r.entries.len(), 3);
         assert_eq!(r.total, 5);
         assert!(r.capped);

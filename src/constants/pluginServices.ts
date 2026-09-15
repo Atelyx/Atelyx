@@ -10,6 +10,7 @@ export const PLUGIN_SERVICE_LABELS: Record<string, string> = {
   app: "宿主信息",
   shell: "执行外部程序",
   vault: "仓库文件读写",
+  fs: "仓库外授权目录读写",
   dialog: "系统对话框",
   clipboard: "剪贴板读写",
   window: "窗口控制",
@@ -31,7 +32,13 @@ export const PLUGIN_SERVICE_LABELS: Record<string, string> = {
 export const PLUGIN_SERVICE_NAMES: readonly string[] = Object.keys(PLUGIN_SERVICE_LABELS);
 
 /** 敏感服务（审计/披露 UI「敏感」高亮）。 */
-export const PLUGIN_SERVICE_SENSITIVE: ReadonlySet<string> = new Set(["shell", "clipboard", "http", "native"]);
+export const PLUGIN_SERVICE_SENSITIVE: ReadonlySet<string> = new Set([
+  "shell",
+  "clipboard",
+  "http",
+  "native",
+  "fs",
+]);
 
 /** 方法级高危面（服务整体敏感之外的单方法；当前 = vault 写）。审计据此记调用摘要，披露 UI 同源。 */
 export const PLUGIN_SENSITIVE_METHODS: Readonly<Record<string, ReadonlySet<string>>> = {
@@ -44,5 +51,16 @@ export const PLUGIN_SENSITIVE_METHODS: Readonly<Record<string, ReadonlySet<strin
     "deleteFile",
     "deleteDir",
     "createFolder",
+  ]),
+  // fs 全部方法都触达仓库外目录：整体披露每次调用的绝对路径摘要
+  fs: new Set([
+    "readFile",
+    "writeFile",
+    "listDir",
+    "createFolder",
+    "renameFile",
+    "moveFile",
+    "deleteFile",
+    "deleteDir",
   ]),
 };

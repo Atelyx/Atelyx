@@ -343,3 +343,31 @@ describe("theme 免 main（纯主题插件无需入口）", () => {
     expect(r.ok).toBe(false);
   });
 });
+
+describe("declaredDirs（仓库外目录声明）", () => {
+  const withDirs = (declaredDirs: unknown) =>
+    validatePluginManifest({
+      ...validManifest(),
+      atelyx: { ...(validManifest().atelyx as Record<string, unknown>), declaredDirs },
+    });
+
+  it("接受绝对路径与 ~/ 前缀，归一化保留", () => {
+    const r = withDirs(["~/Projects/foo", "/abs/path"]);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.manifest.declaredDirs).toEqual(["~/Projects/foo", "/abs/path"]);
+  });
+  it("缺省不写 declaredDirs", () => {
+    expect(validManifest()).not.toHaveProperty("declaredDirs");
+    const r = validatePluginManifest(validManifest());
+    expect(r.ok && r.manifest.declaredDirs).toBeUndefined();
+  });
+  it("拒绝相对路径", () => {
+    expect(withDirs(["relative/path"]).ok).toBe(false);
+  });
+  it("拒绝畸形形态", () => {
+    expect(withDirs("~/a").ok).toBe(false); // 非数组
+    expect(withDirs([""]).ok).toBe(false); // 空项
+    expect(withDirs([42]).ok).toBe(false); // 非字符串
+  });
+});

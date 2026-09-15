@@ -29,6 +29,7 @@ describe("内核独立启动（零插件）", () => {
       "app",
       "shell",
       "vault",
+      "fs",
       "dialog",
       "clipboard",
       "window",
@@ -86,5 +87,13 @@ describe("内核独立启动（零插件）", () => {
       expect(result.message).toContain("table");
     }
     kernel.dispose();
+  });
+
+  it("fs 服务缺调用方归属（非插件上下文）直接拒绝", () => {
+    const { ctx, dispose } = createKernel();
+    const fs = (ctx.get("fs" as never) as unknown) as { readFile: (p: string) => unknown };
+    // 外部目录服务按调用方插件查授权表：非插件上下文无归属，拒绝访问（同 state/storage 口径）
+    expect(() => fs.readFile("/abs/path")).toThrow("只能在插件上下文中使用");
+    dispose();
   });
 });

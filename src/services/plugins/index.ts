@@ -25,6 +25,8 @@ export interface PluginRow {
   previousVersion?: string;
   /** 跨作用域同 id 冲突说明（app 与 vault 同时存在同 id 插件；双方行都携带且强制停用）。 */
   conflict?: string;
+  /** 用户已批准的仓库外目录（声明原形 `~/` 形式；空/缺省 = 无授权）。 */
+  approvedDirs?: string[];
 }
 
 /** `plugin_list` 响应：行清单 + 插件状态健康度。 */
@@ -59,6 +61,16 @@ export function pluginUninstall(id: string, scope: PluginScope): Promise<void> {
 /** 启用/停用插件（前端先确认权限再启用）。 */
 export function pluginSetEnabled(id: string, enabled: boolean): Promise<void> {
   return invoke("plugin_set_enabled", { id, enabled });
+}
+
+/** 批准插件访问一个仓库外目录（只能批准清单 `atelyx.declaredDirs` 声明过的目录）。 */
+export function pluginApproveDir(id: string, scope: PluginScope, dir: string): Promise<void> {
+  return invoke("plugin_approve_dir", { id, scope, dir });
+}
+
+/** 撤销插件对一个仓库外目录的访问（幂等；撤销即从白名单删除，后续访问立即被拒）。 */
+export function pluginRevokeDir(id: string, scope: PluginScope, dir: string): Promise<void> {
+  return invoke("plugin_revoke_dir", { id, scope, dir });
 }
 
 /** 恢复默认装配（补播种缺失的默认组合行；管理 UI「恢复默认装配」入口，调用后重载插件列表）。 */
