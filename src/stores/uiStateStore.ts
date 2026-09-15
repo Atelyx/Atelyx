@@ -49,6 +49,8 @@ interface UiStateStore {
   detachedWindows: DetachedWindow[];
   /** 最近打开的文件（跨仓库记录、按 file+vaultId 去重置顶、上限截断；主页面板按当前仓库过滤）。 */
   recentFiles: RecentFileEntry[];
+  /** single 槽手动胜者覆盖（槽 → 钉住的贡献 id；设置 → 插件里的冲突裁决写入，覆盖 priority 决胜）。 */
+  slotWinnerOverrides: Record<string, string>;
   /** 当前 ui-state 是否已 bootstrap（恢复 effect 依赖它避免在加载前误清状态）。 */
   loaded: boolean;
   /** bootstrap 失败标志（失败时以默认值渲染，但禁止后续 patch 落盘防覆盖磁盘）。 */
@@ -76,6 +78,8 @@ interface UiStateStore {
   closeFile: (kind: LastOpenFileKind) => void;
   /** 设置聚焦面板（点击面板时；null = 无聚焦）。 */
   setFocusedPanel: (panelId: string | null) => void;
+  /** 钉住/取消 single 槽胜者（contribId = 钉住的贡献 id；null = 跟随 priority 决胜）。 */
+  setSlotWinner: (slot: string, contribId: string | null) => void;
 
   /** 添加视图到面板（下拉入口）：组内已有该视图 = 激活；否则新建标签并激活。 */
   addViewToPanel: (panelId: string, view: ViewKind) => void;
@@ -219,6 +223,7 @@ export const useUiStateStore = create<UiStateStore>((set, get) => {
     focusedPanelId: null,
     detachedWindows: [],
     recentFiles: [],
+    slotWinnerOverrides: {},
     loaded: false,
     loadFailed: false,
 
@@ -249,6 +254,12 @@ export const useUiStateStore = create<UiStateStore>((set, get) => {
             ? disk.detachedWindows.filter(isValidDetached)
             : [],
           recentFiles: Array.isArray(disk.recentFiles) ? disk.recentFiles : [],
+          slotWinnerOverrides:
+            disk.slotWinnerOverrides &&
+            typeof disk.slotWinnerOverrides === "object" &&
+            !Array.isArray(disk.slotWinnerOverrides)
+              ? disk.slotWinnerOverrides
+              : {},
           loaded: true,
           loadFailed: false,
         });
@@ -266,6 +277,7 @@ export const useUiStateStore = create<UiStateStore>((set, get) => {
           focusedPanelId: null,
           detachedWindows: [],
           recentFiles: [],
+          slotWinnerOverrides: {},
           loaded: true,
           loadFailed: true,
         });
@@ -360,6 +372,21 @@ export const useUiStateStore = create<UiStateStore>((set, get) => {
       if (get().focusedPanelId === panelId) return;
       set({ focusedPanelId: panelId });
       markPatch({ focusedPanelId: panelId });
+    },
+
+    setSlotWinner: (slot, contribId) => {
+      const cur = get().slotWinnerOverrides;
+      const next = { ...cur };
+      if (contribId === null) {
+        // 槽名是插件任意字符串，用 hasOwn（`in` 会命中原型链属性，如 "constructor"）。
+        if (!Object.hasOwn(next, slot)) return;
+        delete next[slot];
+      } else {
+        if (next[slot] === contribId) return;
+        next[slot] = contribId;
+      }
+      set({ slotWinnerOverrides: next });
+      markPatch({ slotWinnerOverrides: next });
     },
 
     // ---- 布局操作：全部发命令，模型由 Rust 变更 + 广播收敛 ----

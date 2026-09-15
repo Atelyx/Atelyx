@@ -420,6 +420,9 @@ pub async fn ui_state_patch(app: AppHandle, patch: UiStatePatch) -> Result<(), S
     if let Some(v) = patch.recent_files {
         inner.ui.recent_files = v.into_iter().take(MAX_RECENT_FILES).collect();
     }
+    if let Some(v) = patch.slot_winner_overrides {
+        inner.ui.slot_winner_overrides = v;
+    }
     inner.dirty = true;
     drop(inner);
     schedule_persist(&app, &state);

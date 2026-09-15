@@ -39,6 +39,7 @@ beforeEach(async () => {
     focusedPanelId: null,
     detachedWindows: [],
     recentFiles: [],
+    slotWinnerOverrides: {},
     loaded: false,
     loadFailed: false,
   });
@@ -103,5 +104,43 @@ describe("ui-state 增量补丁", () => {
     useUiStateStore.getState().recordOpenFile("canvas", "c.atlx");
     await useUiStateStore.getState().flush();
     expect(uiStatePatch).toHaveBeenCalledWith({ lastCanvasFile: "c.atlx" });
+  });
+});
+
+describe("slotWinnerOverrides（single 槽手动胜者）", () => {
+  it("setSlotWinner 钉住 → 发送覆盖字段；null 删键发空表", async () => {
+    await useUiStateStore.getState().load();
+    useUiStateStore.getState().setSlotWinner("empty/canvas", "com.a:empty/canvas");
+    await flushDebounce();
+    expect(vi.mocked(uiStatePatch).mock.calls[0]![0]!).toEqual({
+      slotWinnerOverrides: { "empty/canvas": "com.a:empty/canvas" },
+    });
+
+    useUiStateStore.getState().setSlotWinner("empty/canvas", null);
+    await flushDebounce();
+    expect(vi.mocked(uiStatePatch).mock.calls[1]![0]!).toEqual({ slotWinnerOverrides: {} });
+  });
+
+  it("setSlotWinner 与同窗其他字段合并为一次补丁（增量语义）", async () => {
+    await useUiStateStore.getState().load();
+    useUiStateStore.getState().setFocusedPanel("p1");
+    useUiStateStore.getState().setSlotWinner("empty/canvas", "com.a:empty/canvas");
+    await flushDebounce();
+    const patch = vi.mocked(uiStatePatch).mock.calls[0]![0]!;
+    expect(Object.keys(patch).sort()).toEqual(["focusedPanelId", "slotWinnerOverrides"]);
+  });
+
+  it("重复钉住同值不触发补丁；load 恢复 bootstrap 的覆盖", async () => {
+    await useUiStateStore.getState().load();
+    useUiStateStore.getState().setSlotWinner("empty/canvas", "com.a:empty/canvas");
+    useUiStateStore.getState().setSlotWinner("empty/canvas", "com.a:empty/canvas");
+    await flushDebounce();
+    expect(vi.mocked(uiStatePatch)).toHaveBeenCalledTimes(1);
+
+    vi.mocked(layoutBootstrap).mockResolvedValueOnce({
+      slotWinnerOverrides: { "empty/canvas": "com.b:empty/canvas" },
+    } as never);
+    await useUiStateStore.getState().load();
+    expect(useUiStateStore.getState().slotWinnerOverrides).toEqual({ "empty/canvas": "com.b:empty/canvas" });
   });
 });

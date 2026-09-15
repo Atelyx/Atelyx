@@ -14,6 +14,7 @@ import { findSlotDeclaration, slotPayloadShape, SLOT_DECLARATIONS } from "@/cons
 import type { SlotDeclaration } from "@/constants/slots";
 import type { SlotCardinality, SlotContribution, SlotDecorator } from "@/utils/cordis/slots";
 import { pickSlotWinner, sortSlotDecorators, sortSlotList } from "@/utils/cordis/slots";
+import type { PluginSlotChain, SlotConflictRow } from "@/types/plugin";
 
 /** 视图槽载荷（view/<kind>）：label + component/render 至少其一（render 优先，重型视图承载宿主面板 id）。 */
 export interface ViewSlotPayload {
@@ -101,8 +102,30 @@ export function listDecorators(slot: string): SlotDecorator[] {
 
 /** single 槽解析：胜出贡献（无贡献 = undefined）。 */
 export function resolveSlot(slot: string): SlotContribution | undefined {
+  const pinned = pinnedWinner(slot);
+  if (pinned) return pinned;
   const list = [...contributions.values()].filter((c) => c.slot === slot);
   return pickSlotWinner(list);
+}
+
+// ===== single 槽胜者用户覆盖（设置 → 插件槽位冲突裁决注入；默认关闭 = 纯 priority 决胜） =====
+
+/** 覆盖源（槽 → 钉住的贡献 id）：由 pluginStore 接线时注入（读应用级 ui-state）。
+ *  services 层不直接依赖 store，与 access.ts 注入点同模式；测试可直设后置空。 */
+type SlotWinnerOverrideSource = (slot: string) => string | null;
+let slotWinnerOverrideSource: SlotWinnerOverrideSource | null = null;
+
+/** 注入/清除胜者覆盖源（null = 关闭覆盖，回退 priority 决胜）。 */
+export function setSlotWinnerOverrideSource(source: SlotWinnerOverrideSource | null): void {
+  slotWinnerOverrideSource = source;
+}
+
+/** 钉住的胜者：覆盖源返回的贡献 id 仍在注册且同槽才生效（被钉者卸载后自动回退 priority）。 */
+function pinnedWinner(slot: string): SlotContribution | undefined {
+  const pinnedId = slotWinnerOverrideSource?.(slot);
+  if (!pinnedId) return undefined;
+  const contrib = contributions.get(pinnedId);
+  return contrib && contrib.slot === slot ? contrib : undefined;
 }
 
 /** list 槽解析：全部贡献按 priority 降序。 */
@@ -113,6 +136,85 @@ export function listSlot(slot: string): SlotContribution[] {
 /** 全部已注册槽名（视图菜单/调试用）。 */
 export function registeredSlots(): string[] {
   return [...new Set([...contributions.values()].map((c) => c.slot))];
+}
+
+/** 全部槽贡献快照（按插件聚合/治理展示用；随 fiber 撤销的贡献自然不在列）。 */
+export function listAllContributions(): SlotContribution[] {
+  return [...contributions.values()];
+}
+
+/** 全部槽装饰器快照（按插件聚合/治理展示用）。 */
+export function listAllDecorators(): SlotDecorator[] {
+  return [...decorators.values()];
+}
+
+/** 载荷展示标签：取 payload 的字符串 label（component 等函数载荷不展示）；无 = undefined。
+ *  审计槽位面与治理展示共用同一提取规则。 */
+export function payloadLabel(payload: unknown): string | undefined {
+  const label = (payload as { label?: unknown } | null)?.label;
+  return typeof label === "string" ? label : undefined;
+}
+
+/** 运行时声明的占用者插件 id（精确 key 或最长前缀命中；无 = null）。 */
+function runtimeDeclarerOf(slot: string): string | null {
+  const exact = [...runtimeDeclarations.values()].find((r) => !r.decl.prefix && r.decl.key === slot);
+  if (exact) return exact.pluginId;
+  const prefixed = [...runtimeDeclarations.values()]
+    .filter((r) => r.decl.prefix === true && slot.startsWith(`${r.decl.key}/`) && slot.length > r.decl.key.length + 1)
+    .sort((a, b) => b.decl.key.length - a.decl.key.length)[0];
+  return prefixed?.pluginId ?? null;
+}
+
+/** 槽位声明方：静态声明表命中 = 宿主；否则运行时声明插件 id（无声明 = 宿主兜底）。 */
+export function slotDeclarer(slot: string): string {
+  return findSlotDeclaration(slot) ? "宿主" : (runtimeDeclarerOf(slot) ?? "宿主");
+}
+
+/** 槽位修改链（归属可见）：声明方 + 全部贡献/装饰者，贡献/装饰各自按 priority 降序。 */
+export function slotChain(slot: string): PluginSlotChain {
+  return {
+    slot,
+    declarer: slotDeclarer(slot),
+    contributors: sortSlotList([...contributions.values()].filter((c) => c.slot === slot)).map((c) => ({
+      id: c.id,
+      pluginId: c.pluginId,
+      priority: c.priority,
+      label: payloadLabel(c.payload),
+    })),
+    decorators: listDecorators(slot).map((d) => ({ id: d.id, pluginId: d.pluginId, priority: d.priority })),
+  };
+}
+
+/** single 槽冲突清单（设置 → 插件冲突裁决）：声明基数为 single 且贡献 ≥2 才出。
+ *  winner = 钉住命中否则 priority 胜出（与 resolveSlot 同口径）；pins 由调用方从应用级 ui-state 传入。 */
+export function slotConflictRows(pins: Record<string, string>): SlotConflictRow[] {
+  const bySlot = new Map<string, SlotContribution[]>();
+  for (const c of contributions.values()) {
+    const arr = bySlot.get(c.slot);
+    if (arr) arr.push(c);
+    else bySlot.set(c.slot, [c]);
+  }
+  const rows: SlotConflictRow[] = [];
+  for (const [slot, contribs] of bySlot) {
+    const decl = findSlotDeclarationRuntime(slot);
+    if (!decl || decl.cardinality !== "single" || contribs.length < 2) continue;
+    // 槽名是插件任意字符串，读钉住须 hasOwn（`pins[slot]` 会命中原型链，如 "constructor"）。
+    const pinnedId = Object.hasOwn(pins, slot) ? pins[slot] : null;
+    const pinnedActive = pinnedId !== null && contribs.some((c) => c.id === pinnedId);
+    rows.push({
+      slot,
+      declarer: slotDeclarer(slot),
+      contributors: sortSlotList(contribs).map((c) => ({
+        id: c.id,
+        pluginId: c.pluginId,
+        priority: c.priority,
+        label: payloadLabel(c.payload),
+      })),
+      pinnedId,
+      winnerId: pinnedActive ? pinnedId : (pickSlotWinner(contribs)?.id ?? null),
+    });
+  }
+  return rows.sort((a, b) => (a.slot < b.slot ? -1 : 1));
 }
 
 /** 全部已注册的视图 kind（槽名剥 `view/` 前缀；视图菜单/选择器用）。 */

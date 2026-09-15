@@ -1,10 +1,11 @@
 /**
- * 插件审计：「声明 vs 实际」的实际侧 = ctx 服务读 + 事件订阅 + 高危调用摘要（按插件归属）。
+ * 插件审计：「声明 vs 实际」的实际侧 = ctx 服务读 + 事件订阅 + 槽位贡献/装饰 + 高危调用摘要（按插件归属）。
  *
  * 机制（不动框架源码）：
  * - 服务读：包装 `ReflectService.handler.get`——插件经 ctx 代理访问服务时记录服务名；
  *   归属 = 挂载器登记的「插件上下文 → 插件 id」（contextToPluginId），宿主侧读（root ctx）
  *   不在登记表内、不记录。
+ * - 槽位贡献/装饰：快照时从槽注册表现扫（与事件同法），随 fiber 撤销自然消失，无需运行时记录。
  * - 高危调用摘要：命中敏感面（服务整体或单方法）的服务换成一层包装视图，调用时只记形状与
  *   规模（程序名 + 参数个数 / 方法 + 主机路径 / 字节数 / 相对路径），参数原文（凭据、正文、
  *   header、body）一律不进审计。
@@ -19,7 +20,13 @@ import {
   PLUGIN_SERVICE_SENSITIVE,
 } from "@/constants/pluginServices";
 import type { HttpRequestInput } from "@/services/http";
-import type { PluginAuditCall, PluginAuditEntry } from "@/types";
+import type {
+  PluginAuditCall,
+  PluginAuditEntry,
+  PluginSlotContributionSummary,
+  PluginSlotDecoratorSummary,
+} from "@/types";
+import { listAllContributions, listAllDecorators, payloadLabel } from "./slots";
 import { pluginIdOf } from "./loader";
 import type { ShellExecOptions } from "./types";
 
@@ -143,7 +150,7 @@ export function installAudit(): () => void {
   };
 }
 
-/** 审计快照：服务读 + 事件订阅按插件聚合（声明对照的实际侧）。 */
+/** 审计快照：服务读 + 事件订阅 + 槽位贡献/装饰按插件聚合（声明对照的实际侧）。 */
 export function auditSnapshot(ctx: Context): PluginAuditEntry[] {
   const ids = new Set<string>(serviceReads.keys());
   const eventsByPlugin = new Map<string, Set<string>>();
@@ -160,6 +167,28 @@ export function auditSnapshot(ctx: Context): PluginAuditEntry[] {
       ids.add(pluginId);
     }
   }
+  // 槽位贡献/装饰从注册表现扫（与事件同法）：随 fiber 撤销的注册自然不在列，无需运行时记录。
+  const slotContribByPlugin = new Map<string, PluginSlotContributionSummary[]>();
+  const slotDecoByPlugin = new Map<string, PluginSlotDecoratorSummary[]>();
+  for (const c of listAllContributions()) {
+    let arr = slotContribByPlugin.get(c.pluginId);
+    if (!arr) {
+      arr = [];
+      slotContribByPlugin.set(c.pluginId, arr);
+    }
+    const label = payloadLabel(c.payload);
+    arr.push({ slot: c.slot, id: c.id, cardinality: c.cardinality, priority: c.priority, ...(label !== undefined ? { label } : {}) });
+    ids.add(c.pluginId);
+  }
+  for (const d of listAllDecorators()) {
+    let arr = slotDecoByPlugin.get(d.pluginId);
+    if (!arr) {
+      arr = [];
+      slotDecoByPlugin.set(d.pluginId, arr);
+    }
+    arr.push({ slot: d.slot, id: d.id, priority: d.priority });
+    ids.add(d.pluginId);
+  }
   const out: PluginAuditEntry[] = [];
   for (const id of ids) {
     out.push({
@@ -167,6 +196,8 @@ export function auditSnapshot(ctx: Context): PluginAuditEntry[] {
       services: [...(serviceReads.get(id) ?? [])],
       events: [...(eventsByPlugin.get(id) ?? [])],
       calls: [...(callsByPlugin.get(id)?.values() ?? [])],
+      slotContributions: slotContribByPlugin.get(id) ?? [],
+      slotDecorators: slotDecoByPlugin.get(id) ?? [],
     });
   }
   return out.sort((a, b) => (a.pluginId < b.pluginId ? -1 : 1));

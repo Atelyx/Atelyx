@@ -16,7 +16,15 @@
 import { create } from "zustand";
 import type { ComponentType } from "react";
 import type { InstalledPlugin, PluginIndexEntry, PluginManifest, PluginPackageJson, PluginScope } from "@/types";
-import { errText, type PluginAuditEntry, type PluginCommandContribution, type PluginFiberPhase, type PluginMountFailure } from "@/types";
+import {
+  errText,
+  type PluginAuditEntry,
+  type PluginCommandContribution,
+  type PluginFiberPhase,
+  type PluginMountFailure,
+  type PluginSlotChain,
+  type SlotConflictRow,
+} from "@/types";
 import type { AppUiState } from "@/types";
 import {
   pluginInstall,
@@ -73,7 +81,14 @@ import { getKernel } from "@/services/cordis/kernel";
 import { installCommandHotkeys } from "@/services/cordis/commandHotkeys";
 import { mountPlugin, unmountAll, unmountPlugin } from "@/services/cordis/loader";
 import { mountPluginFromPackage } from "@/services/cordis/packageMount";
-import { resolveViewKind, onSlotChange, viewKinds as slotViewKinds } from "@/services/cordis/slots";
+import {
+  resolveViewKind,
+  onSlotChange,
+  setSlotWinnerOverrideSource,
+  slotChain as buildSlotChain,
+  slotConflictRows as buildSlotConflictRows,
+  viewKinds as slotViewKinds,
+} from "@/services/cordis/slots";
 import type { ViewSlotContribution } from "@/services/cordis/slots";
 import { composePlugins, compositionPackages, mountOrder } from "@/utils/cordis/composition";
 import { useCollabStore, publishPluginPresence } from "@/stores/collabStore";
@@ -177,8 +192,12 @@ interface PluginStoreState {
   capabilityLabel(namespace: string): string;
   /** 服务是否敏感（展示「敏感」高亮）。 */
   capabilitySensitive(namespace: string): boolean;
-  /** 插件审计快照（实际 = ctx 服务读 + 事件订阅，按插件归属；声明对照的实际侧）。 */
+  /** 插件审计快照（实际 = ctx 服务读 + 事件订阅 + 槽位贡献/装饰，按插件归属；声明对照的实际侧）。 */
   pluginAudit(): PluginAuditEntry[];
+  /** 槽位冲突清单（single 槽多贡献；设置 → 插件的冲突裁决行，经 store 中转组件不直连 services）。 */
+  slotConflictRows(): SlotConflictRow[];
+  /** 槽位修改链（归属可见：声明方 + 全部贡献/装饰者；插件详情弹窗展开用）。 */
+  slotChain(slot: string): PluginSlotChain;
   /** 加载市场索引（缓存未过期直接回缓存；网络失败直接提示失败）。 */
   loadMarket(force?: boolean): Promise<void>;
   /** 某视图 kind 的默认实现提供行状态（组件经此查，不直连 services）；非默认组合提供 = undefined。 */
@@ -396,6 +415,7 @@ function ensureUiStateAccess(): void {
         focusedPanelId: s.focusedPanelId ?? undefined,
         detachedWindows: s.detachedWindows,
         recentFiles: s.recentFiles,
+        slotWinnerOverrides: s.slotWinnerOverrides,
       } as unknown as AppUiState;
     },
   });
@@ -408,6 +428,34 @@ function ensureSlotHostAccess(): void {
   if (slotHostWired) return;
   slotHostWired = true;
   setPluginSlotHostComponent(PluginSlotHost);
+}
+
+/** 槽位胜者覆盖接线守卫：把应用级 ui-state 的「手动胜者」注入 resolveSlot（幂等一次）。
+ *  覆盖变化（设置里切换胜者）按变化槽 bump 修订号——与 onSlotChange 同口径让既有按槽/全局
+ *  订阅宿主自动重取胜者；覆盖是低频手动操作，diff 成本可忽略，不必给每个消费方加新订阅。
+ *  订阅回调里经 usePluginStore.setState 更新（本函数在 store 创建前定义，state 引用须延迟求值）。 */
+let slotOverrideWired = false;
+function ensureSlotOverrideAccess(): void {
+  if (slotOverrideWired) return;
+  slotOverrideWired = true;
+  setSlotWinnerOverrideSource((slot) => {
+    // 槽名是插件任意字符串，读钉住须 hasOwn（裸索引会命中原型链，如 "constructor"）。
+    const overrides = useUiStateStore.getState().slotWinnerOverrides;
+    return Object.hasOwn(overrides, slot) ? overrides[slot] : null;
+  });
+  useUiStateStore.subscribe((state, prev) => {
+    if (state.slotWinnerOverrides === prev.slotWinnerOverrides) return;
+    const changed = new Set([
+      ...Object.keys(state.slotWinnerOverrides),
+      ...Object.keys(prev.slotWinnerOverrides),
+    ]);
+    if (changed.size === 0) return;
+    usePluginStore.setState((s) => {
+      const nextRevs = { ...s.slotRevisions };
+      for (const slot of changed) nextRevs[slot] = (nextRevs[slot] ?? 0) + 1;
+      return { uiRevision: s.uiRevision + 1, slotRevisions: nextRevs };
+    });
+  });
 }
 
 /** 能力变更事件接线守卫：内核侧 store 变更 → emitPluginEvent 通知订阅插件（幂等一次）。
@@ -541,6 +589,7 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
     ensureLayoutAccess();
     ensureUiStateAccess();
     ensureSlotHostAccess();
+    ensureSlotOverrideAccess();
     ensureRuntimeChangeEvents();
     installCommandHotkeys();
     const hostVersion = await getAppVersion().catch(() => null);
@@ -750,6 +799,8 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
     capabilityLabel: (namespace) => PLUGIN_SERVICE_LABELS[namespace] ?? namespace,
     capabilitySensitive: (namespace) => PLUGIN_SERVICE_SENSITIVE.has(namespace),
     pluginAudit: () => auditSnapshot(getKernel().ctx),
+    slotConflictRows: () => buildSlotConflictRows(useUiStateStore.getState().slotWinnerOverrides),
+    slotChain: (slot) => buildSlotChain(slot),
 
     loadMarket: async (force = false) => {
       const cached = readMarketCache();

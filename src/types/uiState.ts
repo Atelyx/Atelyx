@@ -77,6 +77,8 @@ export interface UiStatePatch {
   lastTableFile?: string | null;
   focusedPanelId?: string | null;
   recentFiles?: RecentFileEntry[];
+  /** single 槽手动胜者覆盖（槽 → 钉住的贡献 id；用户级裁决，覆盖 priority 决胜）。 */
+  slotWinnerOverrides?: Record<string, string>;
 }
 
 /** 拖拽转正载荷（源窗口按下超阈值转正时随 `drag_update` 的 start 字段上报；拖拽会话由 Rust 持有）。 */
@@ -136,4 +138,6 @@ export interface AppUiState {
   detachedWindows?: DetachedWindow[];
   /** 最近打开的文件（跨仓库记录、按 file+vaultId 去重置顶、上限截断；缺省 = 无）。 */
   recentFiles?: RecentFileEntry[];
+  /** single 槽手动胜者覆盖（槽 → 钉住的贡献 id；被钉者卸载后读时回退 priority，不主动清键）。 */
+  slotWinnerOverrides?: Record<string, string>;
 }

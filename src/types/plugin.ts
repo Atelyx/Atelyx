@@ -230,6 +230,22 @@ export interface PluginAuditCall {
   summary: string;
 }
 
+/** 单条槽位贡献摘要（审计「实际侧」的槽位面：插件贡献了哪些槽、以什么基数与优先级）。 */
+export interface PluginSlotContributionSummary {
+  slot: string;
+  id: string;
+  cardinality: "single" | "list";
+  priority: number;
+  label?: string;
+}
+
+/** 单条槽位装饰摘要（审计「实际侧」：插件包裹了哪些槽的渲染）。 */
+export interface PluginSlotDecoratorSummary {
+  slot: string;
+  id: string;
+  priority: number;
+}
+
 /** 单个插件的审计结果（声明 vs 实际对照的「实际」侧；管理 UI 详情弹窗展示）。 */
 export interface PluginAuditEntry {
   pluginId: string;
@@ -239,6 +255,10 @@ export interface PluginAuditEntry {
   events: string[];
   /** 高危服务调用的脱敏摘要（去重，上限 MAX_AUDIT_CALLS）。 */
   calls: PluginAuditCall[];
+  /** 实际贡献过的槽位（注册表现扫，随 fiber 撤销消失）。 */
+  slotContributions: PluginSlotContributionSummary[];
+  /** 实际装饰过的槽位（注册表现扫，随 fiber 撤销消失）。 */
+  slotDecorators: PluginSlotDecoratorSummary[];
 }
 
 /** 插件命令贡献（管理 UI「运行命令」入口：全局 id = `<pluginId>:<命令 id>`）。 */
@@ -247,4 +267,35 @@ export interface PluginCommandContribution {
   pluginId: string;
   id: string;
   label: string;
+}
+
+/** 槽位参与者在治理清单中的展示形态（id/pluginId/priority 来自注册表；label 取载荷字符串字段）。 */
+export interface SlotContributorInfo {
+  id: string;
+  pluginId: string;
+  priority: number;
+  label?: string;
+}
+
+/** single 槽冲突行（设置 → 插件槽位冲突裁决：多个插件贡献同一 single 槽时由用户定胜者）。 */
+export interface SlotConflictRow {
+  /** 槽名（如 empty/canvas、view/xxx）。 */
+  slot: string;
+  /** 声明方（宿主槽 = "宿主"；插件自声明槽 = 声明插件 id）。 */
+  declarer: string;
+  /** 该槽全部贡献（priority 降序）。 */
+  contributors: SlotContributorInfo[];
+  /** 用户钉住的贡献 id（无 = null；钉住失效仍保留键，读时回退 priority）。 */
+  pinnedId: string | null;
+  /** 当前生效胜者贡献 id（钉住命中否则 priority 胜出）。 */
+  winnerId: string | null;
+}
+
+/** 槽位修改链（归属可见：该槽谁声明、谁贡献、谁装饰，各按 priority 降序）。 */
+export interface PluginSlotChain {
+  slot: string;
+  /** 声明方（宿主槽 = "宿主"；插件自声明槽 = 声明插件 id）。 */
+  declarer: string;
+  contributors: SlotContributorInfo[];
+  decorators: SlotContributorInfo[];
 }

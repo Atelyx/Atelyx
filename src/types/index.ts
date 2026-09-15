@@ -187,6 +187,11 @@ export {
   type PluginAuditCall,
   type PluginAuditEntry,
   type PluginCommandContribution,
+  type PluginSlotContributionSummary,
+  type PluginSlotDecoratorSummary,
+  type PluginSlotChain,
+  type SlotContributorInfo,
+  type SlotConflictRow,
 } from "./plugin";
 
 export type {

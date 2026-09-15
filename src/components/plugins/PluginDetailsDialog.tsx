@@ -2,9 +2,9 @@
  * 插件详情弹窗：失败诊断 / 声明能力与实际调用对照 / 命令入口 / 回退入口。
  * 纯 UI 组件：props 与回调通信；回退确认弹窗的状态机由父组件（PluginsSettingsTab）持有。
  */
-import { useEffect, useRef } from "react";
-import { Check, Circle, RefreshCw, Terminal, X } from "lucide-react";
-import type { InstalledPlugin, PluginAuditEntry, PluginCommandContribution } from "@/types";
+import { useEffect, useRef, useState } from "react";
+import { Check, ChevronRight, Circle, RefreshCw, Terminal, X } from "lucide-react";
+import type { InstalledPlugin, PluginAuditEntry, PluginCommandContribution, PluginSlotChain } from "@/types";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 import { PLUGIN_MOUNT_PHASE_LABELS, PLUGIN_MOUNT_PHASE_ORDER } from "@/constants/plugins";
 
@@ -14,6 +14,8 @@ interface PluginDetailsDialogProps {
   commands: PluginCommandContribution[];
   capabilityLabel: (name: string) => string;
   capabilitySensitive: (name: string) => boolean;
+  /** 槽位修改链查询（归属可见：展开某槽看声明方 + 全部贡献/装饰者）。 */
+  getSlotChain: (slot: string) => PluginSlotChain;
   onRunCommand: (globalId: string) => void;
   onRollback: () => void;
   onClose: () => void;
@@ -22,12 +24,32 @@ interface PluginDetailsDialogProps {
   onCancelRollback: () => void;
 }
 
+/** 槽位修改链明细（声明方 + 贡献/装饰者列表；挂在展开的槽位行下）。 */
+function SlotChainDetail({ chain }: { chain: PluginSlotChain }) {
+  return (
+    <div className="mt-1.5 ml-3.5 space-y-0.5 border-l pl-2" style={{ borderColor: "var(--border)", color: "var(--text-muted)" }}>
+      <div>声明方：{chain.declarer}</div>
+      {chain.contributors.length > 0 && (
+        <div className="break-words">
+          贡献：{chain.contributors.map((c) => `${c.pluginId}（priority ${c.priority}${c.label ? ` · ${c.label}` : ""}）`).join("、")}
+        </div>
+      )}
+      {chain.decorators.length > 0 && (
+        <div className="break-words">
+          装饰：{chain.decorators.map((d) => `${d.pluginId}（priority ${d.priority}）`).join("、")}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function PluginDetailsDialog({
   plugin,
   audit,
   commands,
   capabilityLabel,
   capabilitySensitive,
+  getSlotChain,
   onRunCommand,
   onRollback,
   onClose,
@@ -40,6 +62,7 @@ export function PluginDetailsDialog({
   const rollbackConfirmRef = useRef(rollbackConfirm);
   onCloseRef.current = onClose;
   rollbackConfirmRef.current = rollbackConfirm;
+  const [expandedSlot, setExpandedSlot] = useState<string | null>(null);
   const pluginCommands = commands.filter((command) => command.pluginId === plugin.id);
   const declares = plugin.manifest.declares ?? [];
   // 挂载失败阶段在六阶段顺序中的下标（progress 条：其前 = 已通过，其后 = 未到达）
@@ -145,6 +168,40 @@ export function PluginDetailsDialog({
               {audit.services.map((name) => <div key={`service:${name}`}>{capabilityLabel(name)} · 已访问</div>)}
               {audit.events.map((name) => <div key={`event:${name}`}>{name} · 已订阅</div>)}
               {audit.calls.map((call) => <div key={`${call.service}.${call.method}:${call.summary}`}>{capabilityLabel(call.service)} · {call.summary}</div>)}
+            </div>
+          </section>
+        )}
+
+        {audit && (audit.slotContributions.length > 0 || audit.slotDecorators.length > 0) && (
+          <section className="mb-4">
+            <h4 className="text-[11px] font-medium mb-2" style={{ color: "var(--text-muted)" }}>槽位贡献与装饰</h4>
+            <div className="space-y-1 text-[10px]" style={{ color: "var(--text-secondary)" }}>
+              {audit.slotContributions.map((c) => (
+                <div key={c.id}>
+                  <button
+                    onClick={() => setExpandedSlot(expandedSlot === c.slot ? null : c.slot)}
+                    className="flex items-center gap-1 hover:opacity-80 text-left"
+                    style={{ color: "var(--text-secondary)" }}
+                  >
+                    <ChevronRight size={12} className={expandedSlot === c.slot ? "rotate-90" : ""} style={{ transition: "transform 0.12s" }} />
+                    {c.slot} · 贡献（{c.cardinality} · priority {c.priority}{c.label ? ` · ${c.label}` : ""}）
+                  </button>
+                  {expandedSlot === c.slot && <SlotChainDetail chain={getSlotChain(c.slot)} />}
+                </div>
+              ))}
+              {audit.slotDecorators.map((d) => (
+                <div key={d.id}>
+                  <button
+                    onClick={() => setExpandedSlot(expandedSlot === d.slot ? null : d.slot)}
+                    className="flex items-center gap-1 hover:opacity-80 text-left"
+                    style={{ color: "var(--text-secondary)" }}
+                  >
+                    <ChevronRight size={12} className={expandedSlot === d.slot ? "rotate-90" : ""} style={{ transition: "transform 0.12s" }} />
+                    {d.slot} · 装饰（priority {d.priority}）
+                  </button>
+                  {expandedSlot === d.slot && <SlotChainDetail chain={getSlotChain(d.slot)} />}
+                </div>
+              ))}
             </div>
           </section>
         )}

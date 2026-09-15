@@ -17,6 +17,7 @@ import { Menu, MenuItem } from "@/components/common/Menu";
 import { ToggleSwitch } from "@/components/common/ToggleSwitch";
 import { PluginDetailsDialog } from "@/components/plugins/PluginDetailsDialog";
 import { MarketplaceSection } from "@/components/plugins/MarketplaceSection";
+import { SlotConflictPanel } from "@/components/plugins/SlotConflictPanel";
 import { DEFAULT_COMPOSITION } from "@/components/plugins/cordis/builtins";
 import { deriveThemeProviders, isThemePluginRow } from "@/utils/pluginTheme";
 import { composePlugins, compositionPackages } from "@/utils/cordis/composition";
@@ -45,6 +46,7 @@ export function PluginsSettingsTab() {
   const runPluginCommand = usePluginStore((s) => s.runPluginCommand);
   const restoreDefaultComposition = usePluginStore((s) => s.restoreDefaultComposition);
   const pluginAudit = usePluginStore((s) => s.pluginAudit);
+  const slotChain = usePluginStore((s) => s.slotChain);
   const stateError = usePluginStore((s) => s.stateError);
 
   const [mode, setMode] = useState<TabMode>("installed");
@@ -180,6 +182,9 @@ export function PluginsSettingsTab() {
           </button>
         </div>
       </div>
+
+      {/* 槽位冲突裁决：single 槽多贡献由用户定胜者；无冲突行时不显示 */}
+      <SlotConflictPanel />
 
       {/* 列表头：随应用分发的默认组合成员默认启用；恢复默认装配补回已卸载成员（不复活停用） */}
       <div className="mb-3 flex items-center justify-between">
@@ -343,6 +348,7 @@ export function PluginsSettingsTab() {
           commands={commands}
           capabilityLabel={capabilityLabel}
           capabilitySensitive={capabilitySensitive}
+          getSlotChain={slotChain}
           onRunCommand={(globalId) => void runPluginCommand(globalId).then(
             () => setNotice({ kind: "ok", text: "命令已执行" }),
             (e) => setNotice({ kind: "error", text: `命令执行失败：${errText(e)}` }),
