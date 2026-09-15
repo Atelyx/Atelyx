@@ -25,6 +25,7 @@ import type {
 import { expandAgentStepsToLlmMessages } from "@/utils/agentHistory";
 import { withOverflowHint, toLlmError, isRetryableError, LlmError } from "./errors";
 import { computeRetryDelay, GIVE_UP_RETRY_MS, shouldRetry, sleep } from "./retry";
+import { runSerialHook } from "@/services/cordis/events";
 
 /** 流式空闲超时：SSE 长时间无新 token 视为挂起（调用方据此自动中止降级，见 streaming.ts）。 */
 export const STREAM_IDLE_TIMEOUT_MS = 60_000;
@@ -398,9 +399,23 @@ export async function streamChat(
   params: ChatParams,
   callbacks: ChatStreamCallbacks,
 ): Promise<void> {
-  const { baseUrl, apiKey, model, messages, temperature, reasoningEffort, maxTokens, signal, tools, retry } = params;
+  const { baseUrl, apiKey, model, temperature, reasoningEffort, maxTokens, signal, tools, retry } = params;
   const url = `${baseUrl.replace(/\/$/, "")}/chat/completions`;
   const maxRetries = retry?.maxRetries ?? 0;
+  // AI 请求前钩子（serial veto/改写，见 events.ts runSerialHook）：改写请求消息 / 阻断本次请求。
+  // 放在重试循环前只发射一次（重试复用改写结果，不重复注入）；veto 按错误收敛、不重试。
+  // 面板/画布/ctx.ai.chat 三条流式路径都收敛于此；工具轮次的每一轮是独立请求，各自注入。
+  // 载荷不含 baseUrl/apiKey（凭据不向事件面暴露）；payload 其余字段只读，改写只开放 messages。
+  const hook = await runSerialHook("ai:before-request", {
+    model,
+    messages: params.messages,
+    tools,
+  });
+  if (hook.vetoed) {
+    callbacks.onError(new Error("AI 请求被插件拒绝"));
+    return;
+  }
+  const messages = hook.payload.messages;
 
   for (let attempt = 0; ; attempt++) {
     let receivedAnyEvent = false;

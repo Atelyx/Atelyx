@@ -6,6 +6,8 @@
  * `write_note` 落假磁盘并可按序注入延迟/失败（模拟慢盘与写盘失败的在途窗口）。
  */
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
+import type { Context } from "@atelyx/cordis";
+import type { Kernel } from "@/services/cordis/kernel";
 
 const h = vi.hoisted(() => ({
   reads: [] as string[],
@@ -22,6 +24,8 @@ const h = vi.hoisted(() => ({
   /** 各次 write_note 的延迟（毫秒）与失败计划（按调用顺序消费，缺省 0/false）。 */
   writeDelays: [] as number[],
   writeFails: [] as boolean[],
+  /** history/note 侧文件的 mock 返回（默认空串 = 空历史；veto 回滚用例注入版本）。 */
+  historyJson: "",
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -33,6 +37,9 @@ vi.mock("@tauri-apps/api/core", () => ({
       const value = h.reads.shift() ?? h.disk[file] ?? "";
       if (delay) await new Promise((r) => setTimeout(r, delay));
       return value;
+    }
+    if (cmd === "read_vault_file" && file.includes("history/note")) {
+      return h.historyJson;
     }
     if (cmd === "write_note") {
       const content = String(args?.content ?? "");
@@ -84,6 +91,7 @@ beforeEach(async () => {
   h.writes = [];
   h.writeDelays = [];
   h.writeFails = [];
+  h.historyJson = "";
   store = await import("./noteSessionStore");
   noteStore = await import("./noteStore");
   notifications = await import("./notificationStore");
@@ -390,7 +398,7 @@ describe("写盘许可（排队期间可取消）", () => {
       .getState()
       .saveNoteContent("a.md", "新内容", () => false);
 
-    expect(written).toBe(false);
+    expect(written.written).toBe(false);
     expect(h.writes).toEqual([]);
     expect(noteStore.useNoteStore.getState().noteContents["a.md"]).toBe("旧内容");
   });
@@ -403,8 +411,8 @@ describe("写盘许可（排队期间可取消）", () => {
       .getState()
       .saveNoteContent("a.md", "第二次", () => false);
 
-    expect(await first).toBe(true);
-    expect(await second).toBe(false);
+    expect((await first).written).toBe(true);
+    expect((await second).written).toBe(false);
     expect(h.writes).toEqual(["第一次"]);
     expect(h.disk["a.md"]).toBe("第一次");
   });
@@ -593,5 +601,159 @@ describe("协作采纳落盘", () => {
     await vi.waitFor(() => expect(session.getState().dirty).toBe(false), { timeout: 3000 });
     expect(h.writes).toEqual(["peer content\n"]);
     expect(h.disk["a.md"]).toBe("peer content\n");
+  });
+});
+
+describe("保存前钩子（note:before-save serial veto/改写）", () => {
+  let kernel: Kernel | null = null;
+
+  /** 挂载一个注册 note:before-save 监听器的插件（apply 自定），返回卸载回调。 */
+  async function mountSaveHook(apply: (ctx: Context) => void): Promise<() => Promise<void>> {
+    const { createKernel } = await import("@/services/cordis/kernel");
+    const { setKernelRef } = await import("@/services/cordis/events");
+    const { mountPlugin, unmountAll } = await import("@/services/cordis/loader");
+    kernel = createKernel();
+    setKernelRef(kernel);
+    const result = await mountPlugin(kernel, { id: "com.test.save-hook", apply });
+    expect(result.ok).toBe(true);
+    return () => unmountAll(kernel!);
+  }
+
+  afterEach(async () => {
+    if (kernel) {
+      const { unmountAll } = await import("@/services/cordis/loader");
+      await unmountAll(kernel);
+      const { setKernelRef } = await import("@/services/cordis/events");
+      setKernelRef(null);
+      kernel.dispose();
+      kernel = null;
+    }
+  });
+
+  it("改写落盘内容：磁盘与返回 = 改写后；会话基线跟随，二次保存不误报冲突", async () => {
+    const unmount = await mountSaveHook((ctx) => {
+      ctx.effect(() =>
+        ctx.events.on("note:before-save", (p) => ({ content: `改写:${p.content}` })),
+      );
+    });
+    // 会话保存：磁盘 = 改写后，会话基线跟随（lastSaved = 实际落盘内容）
+    const session = store.noteSurfaceProvider.open("a.md");
+    session.applyBody("正文");
+    await vi.waitFor(() => expect(h.disk["a.md"]).toBe("改写:正文"), { timeout: 3000 });
+    expect(session.getState().conflict).toBe(false);
+
+    // 二次编辑保存：若基线仍停在原始内容，会把「磁盘=改写后」误判为外部修改弹冲突条
+    session.applyBody("正文 v2");
+    await vi.waitFor(() => expect(h.disk["a.md"]).toBe("改写:正文 v2"), { timeout: 3000 });
+    expect(session.getState().conflict).toBe(false);
+    await unmount();
+  });
+
+  it("veto 保存：不落盘、不写内容缓存、返回 written:false；挂起输入保留待重试", async () => {
+    await mountSaveHook((ctx) => {
+      ctx.effect(() =>
+        ctx.events.on("note:before-save", () => ({ veto: true })),
+      );
+    });
+    const result = await noteStore.useNoteStore.getState().saveNoteContent("a.md", "正文");
+    expect(result.written).toBe(false);
+    expect(result.content).toBe("正文");
+    expect(h.writes).toEqual([]);
+    // veto 在缓存先行之前：未落盘内容不得进缓存（否则重开会话会把它当磁盘基线）
+    expect(noteStore.useNoteStore.getState().noteContents["a.md"]).toBeUndefined();
+    // 会话路径：内容保留在挂起输入，可再次触发保存
+    const session = store.noteSurfaceProvider.open("a.md");
+    session.applyBody("正文");
+    await vi.waitFor(() =>
+      expect(noteStore.useNoteStore.getState().pendingNoteContent["a.md"]).toBe("正文"),
+      { timeout: 3000 },
+    );
+  });
+
+  it("监听器抛错：异常隔离，保存照常（原内容落盘）", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    await mountSaveHook((ctx) => {
+      ctx.effect(() =>
+        ctx.events.on("note:before-save", () => {
+          throw new Error("插件处理失败");
+        }),
+      );
+    });
+    const result = await noteStore.useNoteStore.getState().saveNoteContent("a.md", "正文");
+    expect(result).toEqual({ written: true, content: "正文" });
+    expect(h.writes).toEqual(["正文"]);
+    errorSpy.mockRestore();
+  });
+
+  it("veto 时 flushPendingNotes 保留挂起输入（内容未落盘不清除）", async () => {
+    await mountSaveHook((ctx) => {
+      ctx.effect(() => ctx.events.on("note:before-save", () => ({ veto: true })));
+    });
+    // 注入 noteList 让 flush 走真实写盘链（veto 分支）；否则文件已删守卫会在写盘前跳过
+    const { useVaultStore } = await import("./vaultStore");
+    useVaultStore.setState({ noteList: [{ name: "a", file: "a.md" }] });
+    noteStore.useNoteStore.getState().setPendingNoteContent("a.md", "正文");
+
+    await noteStore.useNoteStore.getState().flushPendingNotes();
+
+    expect(h.writes).toEqual([]);
+    // veto 后内容未落盘：挂起输入必须保留（否则关窗/切仓库时被当已落盘清掉 → 内容丢失）
+    expect(noteStore.useNoteStore.getState().pendingNoteContent["a.md"]).toBe("正文");
+  });
+
+  it("veto 时 noteHistoryRollback 返回 null，不记 restore 版本、不落盘", async () => {
+    await mountSaveHook((ctx) => {
+      ctx.effect(() => ctx.events.on("note:before-save", () => ({ veto: true })));
+    });
+    h.historyJson = JSON.stringify({
+      versions: [
+        {
+          seq: 1,
+          ts: 1,
+          author: { id: "", name: "", device: "" },
+          action: "edit",
+          content: "旧版",
+        },
+      ],
+    });
+
+    const result = await noteStore.useNoteStore.getState().noteHistoryRollback("a.md", 1);
+
+    expect(result).toBeNull();
+    expect(h.writes).toEqual([]);
+  });
+
+  it("veto 时 closeSession（flushPending）不清除挂起输入（未落盘内容保留）", async () => {
+    await mountSaveHook((ctx) => {
+      ctx.effect(() => ctx.events.on("note:before-save", () => ({ veto: true })));
+    });
+    const session = store.noteSurfaceProvider.open("a.md");
+    session.applyBody("正文");
+    await vi.waitFor(() =>
+      expect(noteStore.useNoteStore.getState().pendingNoteContent["a.md"]).toBe("正文"),
+      { timeout: 3000 },
+    );
+
+    // 关会话触发 flushPending 落盘挂起输入：veto 后不得清挂起（会话已关，清了 = 未落盘内容丢失）
+    store.noteSurfaceProvider.close("a.md");
+    await vi.waitFor(() => expect(store.noteSurfaceProvider.get("a.md")).toBeNull());
+    await vi.waitFor(() => expect(h.writes).toEqual([]), { timeout: 3000 });
+    expect(noteStore.useNoteStore.getState().pendingNoteContent["a.md"]).toBe("正文");
+  });
+
+  it("卸载插件后钩子不再生效：保存恢复原样", async () => {
+    const unmount = await mountSaveHook((ctx) => {
+      ctx.effect(() =>
+        ctx.events.on("note:before-save", (p) => ({ content: `改写:${p.content}` })),
+      );
+    });
+    expect(
+      (await noteStore.useNoteStore.getState().saveNoteContent("a.md", "正文")).content,
+    ).toBe("改写:正文");
+
+    await unmount();
+    const result = await noteStore.useNoteStore.getState().saveNoteContent("a.md", "正文");
+    expect(result).toEqual({ written: true, content: "正文" });
+    expect(h.writes).toEqual(["改写:正文", "正文"]);
   });
 });

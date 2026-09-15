@@ -22,7 +22,7 @@ import {
   type HistoryVersion,
 } from "@/services/history";
 import { markSelfSave } from "@/utils/selfSave";
-import { emitPluginEvent } from "@/services/cordis/events";
+import { emitPluginEvent, runSerialHook } from "@/services/cordis/events";
 import { registerDomainLifecycle } from "@/utils/kernelLifecycle";
 import { useVaultStore } from "@/stores/vaultStore";
 
@@ -90,13 +90,14 @@ interface NoteState {
   readNoteContent: (file: string) => Promise<string>;
   /** 直读笔记磁盘全文（绕过内容缓存；外部修改感知/写前校验用真实磁盘）。 */
   readNoteFresh: (file: string) => Promise<string>;
-  /** 写回笔记正文并落盘（缓存先行 + 按文件串行队列）。 */
-  /** 写正文并返回是否真的落盘（`canWrite` 见实现：排队期间可取消）。 */
+  /** 写回笔记正文并落盘（缓存先行 + 按文件串行队列）。返回是否真的落盘与实际落盘内容
+   *  （written = 是否落盘；content = 磁盘真实内容（保存前钩子可能改写）；veto/未写盘 = written false，
+   *   调用方不得推进基线）。 */
   saveNoteContent: (
     file: string,
     content: string,
     canWrite?: () => boolean,
-  ) => Promise<boolean>;
+  ) => Promise<{ written: boolean; content: string }>;
   /** 作废单文件笔记内容缓存（真实外部修改/删除/改名时调用；下次读取走盘）。 */
   invalidateNoteCache: (file: string) => void;
   /** 作废某目录下的全部内容缓存（文件夹改名/移动后该前缀路径不再指代同一批文件）。 */
@@ -152,14 +153,20 @@ export const useNoteStore = create<NoteState>((set, get) => ({
   readNoteFresh: (file) => readNote(file),
 
   /**
-   * 写笔记正文（缓存先行 + 按文件串行队列）。返回是否真的落盘。
+   * 写笔记正文（缓存先行 + 按文件串行队列）。返回是否真的落盘与实际落盘内容。
    *
    * `canWrite`：可在排队期间被取消的落盘许可（笔记会话在写盘排队期间被外部修改打断转冲突时，
    * 这次尚未执行的写盘必须作废——否则它落地时会覆盖刚被识别出来的外部内容，而用户看到的是冲突条）。
    * 取消时同时作废刚写入的内容缓存：缓存若停在未落盘正文上，重开会话会把它当磁盘基线。
    */
   saveNoteContent: async (file, content, canWrite) => {
-    if (canWrite && !canWrite()) return false;
+    if (canWrite && !canWrite()) return { written: false, content };
+    // 保存前钩子（serial veto/改写，见 events.ts runSerialHook）：改写落盘内容 / 阻断本次保存。
+    // 必须在缓存先行（stageNoteContent）之前执行：veto 时不写缓存不落盘，否则缓存停在
+    // 未落盘正文上，重开会话会把它误当磁盘基线（内容回退）。
+    const hook = await runSerialHook("note:before-save", { file, content });
+    if (hook.vetoed) return { written: false, content: hook.payload.content };
+    content = hook.payload.content;
     // 缓存先行（先于异步写盘）：重挂载/跨编辑面读取立即拿到最新内容，消灭「卸载 flush
     // 写盘在途 → 重挂载读陈旧缓存」的闪回/回退窗口（跨布局回退根因之一）。写盘失败时
     // 缓存与编辑器显示一致（均为最新内容），失败由调用方置 error 状态，下次保存重试。
@@ -175,10 +182,10 @@ export const useNoteStore = create<NoteState>((set, get) => ({
       markSelfSave(file);
       written = true;
     });
-    if (!written) return false;
+    if (!written) return { written: false, content };
     // 笔记内容落盘：通知订阅方（note:changed 轻量信号，按需再调 note 服务读内容）。
     emitPluginEvent("note:changed", { file });
-    return true;
+    return { written: true, content };
   },
 
   invalidateNoteCache: (file) =>
@@ -230,8 +237,14 @@ export const useNoteStore = create<NoteState>((set, get) => ({
       try {
         // 走统一写盘链（缓存先行 + 按文件串行队列），落盘后补历史存档点（60s 合并；
         // 与 debounce 路径同内容时 recordHistoryVersion 按内容去重跳过，不产生重复版本）
-        await get().saveNoteContent(file, content);
-        await get().noteHistoryRecord(file, content, "edit");
+        const result = await get().saveNoteContent(file, content);
+        if (!result.written) {
+          // 保存被 veto：内容未落盘，保留挂起输入待重试（防关窗/切仓库时把未落盘输入当已落盘清掉）
+          keep.add(file);
+          continue;
+        }
+        // 历史存档点记磁盘真实内容（保存前钩子可能改写落盘内容），否则版本与磁盘对不上
+        await get().noteHistoryRecord(file, result.content, "edit");
       } catch (e) {
         // 写盘失败：保留条目待重试（防关窗/切仓库场景下未落盘输入永久丢失）
         keep.add(file);
@@ -265,10 +278,13 @@ export const useNoteStore = create<NoteState>((set, get) => ({
     const versions = await loadNoteHistory("note", file);
     const content = versionContentAt(versions, seq);
     if (content == null) return null;
-    await get().saveNoteContent(file, content);
-    // 回滚记一条 restore 版本（滚动恢复点 + 审计「何时回滚到哪」）
-    await recordHistoryVersion("note", file, { content, action: "restore" });
-    return content;
+    const result = await get().saveNoteContent(file, content);
+    // 回滚被 veto/未落盘：不记 restore 版本、不返回未落盘内容（调用方按失败处理，磁盘保持原状）
+    if (!result.written) return null;
+    // 回滚记一条 restore 版本（滚动恢复点 + 审计「何时回滚到哪」）；磁盘真实内容为真相，
+    // 回滚后的编辑器重载也用实际落盘内容（保存前钩子可能改写，编辑器须与磁盘一致）
+    await recordHistoryVersion("note", file, { content: result.content, action: "restore" });
+    return result.content;
   },
 
   externalNoteEdits: {},

@@ -244,12 +244,13 @@ function diskContentOf(rt: SessionRuntime): string {
 }
 
 /** 写盘并登记在途内容（`diskContentOf` 判定用）；结束后仍等于自身才注销——已被更新输入接管则保留。
- *  返回是否真的落盘（`canWrite` 允许调用方在排队期间取消这次写盘，见 noteStore.saveNoteContent）。 */
+ *  返回是否真的落盘与实际落盘内容（`canWrite` 允许调用方在排队期间取消这次写盘，见 noteStore.saveNoteContent；
+ *  保存前钩子可能改写落盘内容，调用方须按返回的 content 推进基线）。 */
 async function writeContent(
   rt: SessionRuntime,
   content: string,
   canWrite?: () => boolean,
-): Promise<boolean> {
+): Promise<{ written: boolean; content: string }> {
   rt.pendingWrite = content;
   try {
     return await useNoteStore.getState().saveNoteContent(rt.file, content, canWrite);
@@ -269,9 +270,9 @@ async function save(rt: SessionRuntime, seq: number): Promise<void> {
   const coAuthors = [...rt.changeAuthors.values()].filter(
     (a) => a.id !== (mainAuthor?.id ?? local.id),
   );
-  const recordHistory = () => {
+  const recordHistory = (savedContent: string) => {
     if (!view(file)) return;
-    void useNoteStore.getState().noteHistoryRecord(file, content, "edit", {
+    void useNoteStore.getState().noteHistoryRecord(file, savedContent, "edit", {
       ...(mainAuthor ? { authorOverride: mainAuthor } : {}),
       ...(coAuthors.length ? { coAuthors } : {}),
     });
@@ -283,12 +284,17 @@ async function save(rt: SessionRuntime, seq: number): Promise<void> {
         return;
       }
       setSaveState(file, "saving");
-      await writeContent(rt, content);
+      const result = await writeContent(rt, content);
       if (runtimeMap.get(file) !== rt) return;
-      rt.lastSaved = content;
-      useNoteCollabStore.getState().notifyNoteDiskWrite(file, bodyLF(content));
+      if (!result.written) {
+        // 保存被 veto/排队取消：内容未落盘，不推进基线、不清理挂起（保留「有未落盘输入」重试）
+        setSaveState(file, "edited");
+        return;
+      }
+      rt.lastSaved = result.content;
+      useNoteCollabStore.getState().notifyNoteDiskWrite(file, bodyLF(result.content));
       finishSave(rt, seq);
-      recordHistory();
+      recordHistory(result.content);
       return;
     }
     const disk = await useNoteStore.getState().readNoteFresh(file);
@@ -307,15 +313,16 @@ async function save(rt: SessionRuntime, seq: number): Promise<void> {
     setSaveState(file, "saving");
     // 写盘许可在排队期间仍会复查：期间磁盘被外部改动并转冲突时，这次尚未落盘的写必须作废，
     // 否则它落地时会覆盖刚识别出来的外部内容（用户看到的是冲突条，磁盘却已被本端改写）
-    const written = await writeContent(rt, content, () => !rt.conflict);
+    const result = await writeContent(rt, content, () => !rt.conflict);
     // 基线推进放在会话/序号守卫之前：磁盘已确认持有本次写入的正文，与会话是否已被新输入接管无关。
     // 若守卫先返回，就会出现「写落地了但基线没跟上」——会话把自己写的盘面当成外部修改，
     // 弹出归因错误的冲突条并暂停自动保存（用户只能靠「重新加载/保留本地」退出）。
-    if (written) rt.lastSaved = content;
+    // 基线记实际落盘内容（保存前钩子可能改写），否则下次保存把磁盘误判为外部修改。
+    if (result.written) rt.lastSaved = result.content;
     if (runtimeMap.get(file) !== rt || seq !== rt.saveSeq) return;
-    if (!written) {
-      // 排队期间被取消（会话已转冲突）：不推进基线；保存状态从「保存中」落到「有未落盘输入」，
-      // 决策交给冲突条
+    if (!result.written) {
+      // 排队期间被取消（会话已转冲突）或保存被 veto：不推进基线；保存状态从「保存中」落到
+      // 「有未落盘输入」，决策交给冲突条/插件
       setSaveState(file, "edited");
       return;
     }
@@ -325,7 +332,7 @@ async function save(rt: SessionRuntime, seq: number): Promise<void> {
     if (rt.conflict) {
       const diskAfter = await useNoteStore.getState().readNoteFresh(file);
       if (runtimeMap.get(file) !== rt) return;
-      if (diskAfter !== content) {
+      if (diskAfter !== result.content) {
         // 本端写落地后磁盘又变了（另有写者随后落盘）：冲突仍然成立，保持冲突态与「有未落盘输入」
         patchView(file, { dirty: true });
         setSaveState(file, "edited");
@@ -338,7 +345,7 @@ async function save(rt: SessionRuntime, seq: number): Promise<void> {
       });
     }
     finishSave(rt, seq);
-    recordHistory();
+    recordHistory(result.content);
   } catch (e) {
     // 会话身份守卫：失败状态只写自己的会话（同路径可能已被新会话接管）
     if (runtimeMap.get(file) !== rt) return;
@@ -487,12 +494,17 @@ async function saveLocalOverExternal(rt: SessionRuntime): Promise<void> {
   const seq = ++rt.saveSeq;
   setSaveState(file, "saving");
   try {
-    await writeContent(rt, content);
+    const result = await writeContent(rt, content);
     if (runtimeMap.get(file) !== rt || seq !== rt.saveSeq) return;
+    if (!result.written) {
+      // 保存被 veto/排队取消：不落盘，冲突态与挂起输入都保留（用户仍可再选保留本地重试）
+      setSaveState(file, "edited");
+      return;
+    }
     // 冲突态只在确认落盘后清除：写盘失败还清掉冲突，等于把「外部已改动」这个事实也一并抹掉
     setConflict(rt, false);
-    rt.lastSaved = content;
-    useNoteCollabStore.getState().notifyNoteDiskWrite(file, bodyLF(content));
+    rt.lastSaved = result.content;
+    useNoteCollabStore.getState().notifyNoteDiskWrite(file, bodyLF(result.content));
     useNoteStore.getState().setPendingNoteContent(file, null);
     patchView(file, { dirty: false });
     setSaveState(file, "saved");
@@ -570,7 +582,10 @@ function flushPending(rt: SessionRuntime): void {
   void useNoteStore
     .getState()
     .saveNoteContent(target, pending)
-    .then(() => {
+    .then((result) => {
+      // 保存被 veto/排队取消：内容未落盘，保留挂起输入（会话已关，下次打开/关窗 flush 再试），
+      // 否则清掉 = 未落盘内容丢失
+      if (!result.written) return;
       if (useNoteStore.getState().pendingNoteContent[file] === pending) {
         useNoteStore.getState().setPendingNoteContent(file, null);
       }

@@ -6,6 +6,8 @@
  * `onToolCallDelta`，`onToolCalls` 仍只在流末触发一次（引擎据此把「生成中」行固化为正式行）。
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { Context } from "@atelyx/cordis";
+import type { Kernel } from "@/services/cordis/kernel";
 import { resolveMessageAttachments, streamChat, streamRequest, toLlmMessages } from "./client";
 import type { LlmStreamEvent, Message } from "@/types";
 
@@ -228,5 +230,85 @@ describe("toLlmMessages：assistant 的 Agent 工具步展开为线上工具消�
     expect(toLlmMessages([msg({ role: "assistant", content: "你好" })])).toEqual([
       { role: "assistant", text: "你好" },
     ]);
+  });
+});
+
+describe("streamChat 请求前钩子（ai:before-request serial veto/改写）", () => {
+  let kernel: Kernel | null = null;
+
+  /** 挂载一个注册 ai:before-request 监听器的插件（apply 自定），返回卸载回调。 */
+  async function mountAiHook(apply: (ctx: Context) => void): Promise<() => Promise<void>> {
+    const { createKernel } = await import("@/services/cordis/kernel");
+    const { setKernelRef } = await import("@/services/cordis/events");
+    const { mountPlugin, unmountAll } = await import("@/services/cordis/loader");
+    kernel = createKernel();
+    setKernelRef(kernel);
+    const result = await mountPlugin(kernel, { id: "com.test.ai-hook", apply });
+    expect(result.ok).toBe(true);
+    return () => unmountAll(kernel!);
+  }
+
+  afterEach(async () => {
+    if (kernel) {
+      const { unmountAll } = await import("@/services/cordis/loader");
+      await unmountAll(kernel);
+      const { setKernelRef } = await import("@/services/cordis/events");
+      setKernelRef(null);
+      kernel.dispose();
+      kernel = null;
+    }
+  });
+
+  it("改写请求消息：fetch 收到的 messages 为改写后（发射一次，重试不重复注入）", async () => {
+    const unmount = await mountAiHook((ctx) => {
+      ctx.effect(() =>
+        ctx.events.on("ai:before-request", (p) => ({
+          messages: [...p.messages, { role: "system", text: "注入上下文" }],
+        })),
+      );
+    });
+    const fetchMock = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        sseResponse([
+          data({ choices: [{ delta: { content: "你" } }] }),
+          data({ choices: [{ delta: {}, finish_reason: "stop" }] }),
+          "data: [DONE]\n\n",
+        ]),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const received: string[] = [];
+    await streamChat(
+      { baseUrl: REQ.url, apiKey: REQ.apiKey, model: REQ.model, messages: [...REQ.messages] },
+      { onDelta: (t) => received.push(t), onDone: () => {}, onError: () => {} },
+    );
+
+    const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body ?? "{}")) as {
+      messages: unknown[];
+    };
+    expect(body.messages).toEqual([
+      { role: "user", content: [{ type: "text", text: "hi" }] },
+      { role: "system", content: "注入上下文" },
+    ]);
+    expect(received).toEqual(["你"]);
+    await unmount();
+  });
+
+  it("veto：不发请求，onError 收到拒绝原因", async () => {
+    const unmount = await mountAiHook((ctx) => {
+      ctx.effect(() => ctx.events.on("ai:before-request", () => ({ veto: true })));
+    });
+    const fetchMock = vi.fn(async () => sseResponse([]));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const errors: string[] = [];
+    await streamChat(
+      { baseUrl: REQ.url, apiKey: REQ.apiKey, model: REQ.model, messages: [...REQ.messages] },
+      { onDelta: () => {}, onDone: () => {}, onError: (e) => errors.push(e.message) },
+    );
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(errors).toEqual(["AI 请求被插件拒绝"]);
+    await unmount();
   });
 });

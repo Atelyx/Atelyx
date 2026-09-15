@@ -27,6 +27,7 @@ import type {
   ReadWindowResult,
   ReasoningEffort,
   RepoHistoryResult,
+  ToolSchema,
   WorkspaceLayout,
 } from "@/types";
 import type { Context } from "@atelyx/cordis";
@@ -59,6 +60,22 @@ export interface ChatStreamHandlers {
   chunk(data: { type: "text" | "reasoning"; text: string }): void;
   end(result: ChatResult): void;
   error(message: string): void;
+}
+
+/** serial 拦截面监听器返回值（`note:before-save` / `ai:before-request`）：veto 阻断管线，改写载荷字段传给下一监听器。 */
+interface SerialHookOutput {
+  /** true = 阻断管线（后续监听器不再执行；保存/请求不落地）。 */
+  veto?: boolean;
+}
+
+/** note:before-save 监听器返回值：content 改写落盘内容（缺省 = 上一值原样）。 */
+export interface NoteBeforeSaveOutput extends SerialHookOutput {
+  content?: string;
+}
+
+/** ai:before-request 监听器返回值：messages 改写请求消息（缺省 = 上一值原样）。 */
+export interface AiBeforeRequestOutput extends SerialHookOutput {
+  messages?: LlmMessage[];
 }
 
 /** shell.exec 选项（command 必填；cwd/env 可选）。 */
@@ -366,7 +383,15 @@ declare module "@atelyx/cordis" {
     /** 仓库文件树变更。@emit */
     "vault:changed": () => void;
 
-    // ===== 领域事件开放（全部 @emit；按需开放 serial/waterfall veto 面） =====
+    // ===== 领域事件开放（emit 广播不可中断；serial 可顺序否决/改写，见 events.ts runSerialHook） =====
+    /** 笔记保存前钩子（serial：顺序执行；返回 { veto } 阻断本次保存，返回 { content } 改写落盘内容）。@serial */
+    "note:before-save": (payload: { file: string; content: string }) => NoteBeforeSaveOutput | void;
+    /** AI 请求发出前钩子（serial：顺序执行；返回 { veto } 阻断本次请求，返回 { messages } 改写请求消息）。@serial */
+    "ai:before-request": (payload: {
+      model: string;
+      messages: LlmMessage[];
+      tools?: ToolSchema[];
+    }) => AiBeforeRequestOutput | void;
     /** 笔记打开/切换（file = null = 关闭当前笔记）。@emit */
     "note:opened": (payload: { file: string | null }) => void;
     /** 当前笔记内容变更（保存落盘后发出；按需再调 note 服务读内容）。@emit */

@@ -78,6 +78,8 @@ ctx.effect(() => {
 | `table:changed` | `{ file: string | null }` | emit | 当前表格变更（轻量信号）。 |
 | `collab:changed` | `{ peers: CollabPeer[] }` | emit | 协作在线用户变更。 |
 | `vault:changed` | — | emit | 仓库文件树变更。 |
+| `note:before-save` | `{ file: string; content: string }` | serial | 笔记保存前钩子（serial：顺序执行；返回 { veto } 阻断本次保存，返回 { content } 改写落盘内容）。 |
+| `ai:before-request` | `{ model: string; messages: LlmMessage[]; tools?: ToolSchema[]; }` | serial | AI 请求发出前钩子（serial：顺序执行；返回 { veto } 阻断本次请求，返回 { messages } 改写请求消息）。 |
 | `note:opened` | `{ file: string | null }` | emit | 笔记打开/切换（file = null = 关闭当前笔记）。 |
 | `note:changed` | `{ file: string | null }` | emit | 当前笔记内容变更（保存落盘后发出；按需再调 note 服务读内容）。 |
 | `chat:started` | `{ sessionId: string }` | emit | AI 会话开始（发起请求）。 |
@@ -93,6 +95,40 @@ ctx.effect(() =>
   }),
 );
 ```
+
+### serial 事件：veto / 改写（`note:before-save`、`ai:before-request`）
+
+serial 事件是宿主管线的**拦截面**：监听器按注册顺序依次执行，返回对象与载荷合并后传给下一个监听器。
+两类返回值：
+
+- `{ veto: true }`：阻断管线——`note:before-save` 时本次保存不落盘（内容保留在挂起输入，不丢）；
+  `ai:before-request` 时本次请求不发出（对话按错误收敛）。后续监听器不再执行。
+- `{ content }` / `{ messages }`：改写管线——把改写后的值传给下一个监听器，最终落盘/发出。
+
+```ts
+// 保存前校验：含敏感词拒绝落盘（建议同时用 ctx.notification 说明原因，宿主不代发提示）
+ctx.effect(() =>
+  ctx.events.on("note:before-save", (p) => {
+    if (p.content.includes("机密")) return { veto: true };
+    return { content: normalize(p.content) }; // 改写落盘内容
+  }),
+);
+
+// AI 请求上下文注入：每次对话请求（含工具轮次）自动附加当前文档内容
+ctx.effect(() =>
+  ctx.events.on("ai:before-request", (p) => {
+    if (p.model === "gpt-4o") return; // 只读参考：model / tools
+    return { messages: [...p.messages, { role: "system", text: "请用中文回答" }] };
+  }),
+);
+```
+
+- **作用域**：`note:before-save` 覆盖所有笔记写盘路径（自动保存 / 会话 flush / 关窗 flush /
+  `ctx.note.write` / 历史回滚 / 冲突保留本地）；`ai:before-request` 覆盖面板、画布与 `ctx.ai.chat`
+  的每次流式请求（工具轮次每轮一次），标题生成等一次性短任务不经此面。
+- **异常隔离**：单个监听器抛错只记录并继续（保存/请求照常，按上一值前进），不会因插件 bug 中断宿主管线。
+- 监听器返回值只改写声明中的字段（`content` / `messages`），载荷其余字段只读；`ai:before-request`
+  载荷不含供应商密钥。
 
 ## UI 注册：`ctx.slots`
 

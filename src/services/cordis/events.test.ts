@@ -6,7 +6,7 @@ import { describe, expect, it, afterEach, vi } from "vitest";
 import type { Context } from "@atelyx/cordis";
 import { createKernel, type Kernel } from "./kernel";
 import { mountPlugin, unmountAll } from "./loader";
-import { emitPluginEvent, setKernelRef } from "./events";
+import { emitPluginEvent, runSerialHook, setKernelRef } from "./events";
 
 let kernel: Kernel | null = null;
 
@@ -90,5 +90,126 @@ describe("领域事件开放", () => {
       expect(call.map((part) => String(part)).join(" ")).toContain("note:changed");
     }
     errorSpy.mockRestore();
+  });
+});
+
+describe("runSerialHook（serial veto/改写分派）", () => {
+  it("内核未建：no-op 原样返回", async () => {
+    const { vetoed, payload } = await runSerialHook("note:before-save", {
+      file: "a.md",
+      content: "x",
+    });
+    expect(vetoed).toBe(false);
+    expect(payload).toEqual({ file: "a.md", content: "x" });
+  });
+
+  it("顺序执行且改写传递：后一个监听器拿到前一个的改写载荷", async () => {
+    const k = await boot();
+    const seen: string[] = [];
+    const apply = (ctx: Context) => {
+      ctx.effect(() =>
+        ctx.events.on("note:before-save", (p) => {
+          seen.push(p.content);
+          return { content: `A:${p.content}` };
+        }),
+      );
+      ctx.effect(() =>
+        ctx.events.on("note:before-save", (p) => {
+          seen.push(p.content);
+          return { content: `B:${p.content}` };
+        }),
+      );
+    };
+    await mountPlugin(k, { id: "com.test.serial", apply });
+
+    const { vetoed, payload } = await runSerialHook("note:before-save", {
+      file: "a.md",
+      content: "x",
+    });
+    expect(vetoed).toBe(false);
+    expect(payload).toEqual({ file: "a.md", content: "B:A:x" });
+    expect(seen).toEqual(["x", "A:x"]);
+  });
+
+  it("veto 短路：返回 { veto: true } 后后续监听器不再执行，载荷停在 veto 前", async () => {
+    const k = await boot();
+    const seen: string[] = [];
+    const apply = (ctx: Context) => {
+      ctx.effect(() =>
+        ctx.events.on("note:before-save", (p) => {
+          seen.push("first");
+          return { content: `改写:${p.content}` };
+        }),
+      );
+      ctx.effect(() =>
+        ctx.events.on("note:before-save", () => {
+          seen.push("veto");
+          return { veto: true };
+        }),
+      );
+      ctx.effect(() =>
+        ctx.events.on("note:before-save", () => {
+          seen.push("third");
+        }),
+      );
+    };
+    await mountPlugin(k, { id: "com.test.veto", apply });
+
+    const { vetoed, payload } = await runSerialHook("note:before-save", {
+      file: "a.md",
+      content: "x",
+    });
+    expect(vetoed).toBe(true);
+    expect(payload.content).toBe("改写:x"); // 停在 veto 前的改写值
+    expect(seen).toEqual(["first", "veto"]); // third 未执行
+  });
+
+  it("监听器抛错：异常隔离，跳过并继续其余监听器，改写链不受影响", async () => {
+    const k = await boot();
+    const errors: unknown[][] = [];
+    const errorSpy = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      errors.push(args);
+    });
+    const apply = (ctx: Context) => {
+      ctx.effect(() =>
+        ctx.events.on("note:before-save", () => {
+          throw new Error("插件抛错");
+        }),
+      );
+      ctx.effect(() =>
+        ctx.events.on("note:before-save", (p) => ({ content: `改写:${p.content}` })),
+      );
+    };
+    await mountPlugin(k, { id: "com.test.err", apply });
+
+    const { vetoed, payload } = await runSerialHook("note:before-save", {
+      file: "a.md",
+      content: "x",
+    });
+    expect(vetoed).toBe(false);
+    expect(payload.content).toBe("改写:x"); // 抛错监听器不参与改写，后续正常
+    expect(errors).toHaveLength(1);
+    expect(errors[0].map((part) => String(part)).join(" ")).toContain("note:before-save");
+    errorSpy.mockRestore();
+  });
+
+  it("卸载后监听器随 fiber 撤销：不再拦截", async () => {
+    const k = await boot();
+    const apply = (ctx: Context) => {
+      ctx.effect(() =>
+        ctx.events.on("note:before-save", (p) => ({ content: `改写:${p.content}` })),
+      );
+    };
+    await mountPlugin(k, { id: "com.test.unload", apply });
+    const hooked = await runSerialHook("note:before-save", { file: "a.md", content: "x" });
+    expect(hooked.payload.content).toBe("改写:x");
+
+    await unmountAll(k);
+    const { vetoed, payload } = await runSerialHook("note:before-save", {
+      file: "a.md",
+      content: "x",
+    });
+    expect(vetoed).toBe(false);
+    expect(payload.content).toBe("x");
   });
 });

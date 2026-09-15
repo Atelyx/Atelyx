@@ -345,8 +345,11 @@ function ensureHistoryAccess(): void {
   setPluginHistoryAccess({
     list: (kind, file) => loadHistory(kind, file),
     rollback: async (kind, file, seq) => {
-      if (kind === "note") await useNoteStore.getState().noteHistoryRollback(file, seq);
-      else if (kind === "canvas") await useCanvasStore.getState().canvasHistoryRollback(file, seq);
+      if (kind === "note") {
+        const result = await useNoteStore.getState().noteHistoryRollback(file, seq);
+        // 回滚被保存前钩子 veto（或目标版本不存在）：回滚未发生，如实抛错让调用插件感知
+        if (result === null) throw new Error("回滚未执行");
+      } else if (kind === "canvas") await useCanvasStore.getState().canvasHistoryRollback(file, seq);
       else await useTableStore.getState().tableHistoryRollback(file, seq);
     },
     repoHistory: () => {

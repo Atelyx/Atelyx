@@ -157,7 +157,9 @@ function wireNoteAccess(): () => void {
     write: async (content) => {
       const target = useAppStore.getState().currentNoteFile;
       if (!target) throw new Error("未打开笔记");
-      await useNoteStore.getState().saveNoteContent(target, content);
+      const result = await useNoteStore.getState().saveNoteContent(target, content);
+      // 保存被其它插件 veto：内容未落盘，如实抛错让调用插件感知（静默当成功会让调用方以为内容已写入）
+      if (!result.written) throw new Error("笔记保存被插件拒绝");
     },
     save: async () => {
       await useNoteStore.getState().flushPendingNotes();

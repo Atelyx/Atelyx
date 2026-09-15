@@ -26,6 +26,44 @@ export function emitPluginEvent(event: string, payload: unknown): void {
   }
 }
 
+/**
+ * serial 拦截面分派（veto / 改写）：顺序 await 每个监听器，监听器返回对象与当前载荷合并
+ * 传给下一监听器（waterfall 传参），`veto: true` 立即短路（bail）；监听器抛错只记录并继续——
+ * 保存/请求管线绝不能因插件监听器抛错而中断，改写失败按原值前进。
+ *
+ * 供领域管线（`note:before-save` / `ai:before-request`，见 types.ts @serial 事件）在关键点调用；
+ * 内核未建时 no-op（原样返回，单测/无插件场景零开销）。
+ * 复用 vendor `dispatch` 取监听器（与下方 emit 隔离同款），短路/改写语义由宿主定义——
+ * vendor `serial` 的 truthy 短路无法表达「返回改写值后继续」。
+ */
+export async function runSerialHook<T extends object>(
+  event: string,
+  payload: T,
+): Promise<{ vetoed: boolean; payload: T }> {
+  if (!kernelRef) return { vetoed: false, payload };
+  const callbacks = kernelRef.ctx.events.dispatch("serial", [event, payload]);
+  let current = payload;
+  for (const cb of callbacks) {
+    try {
+      const result = await cb(current);
+      if (!result || typeof result !== "object") continue;
+      if ((result as { veto?: unknown }).veto === true) {
+        return { vetoed: true, payload: current };
+      }
+      // veto 是控制键，不入载荷（T 无该字段，混入会破坏后续监听器的载荷形状）；
+      // undefined 值（如条件式 `{ content: cond ? x : undefined }`）也不并入——缺省 = 保持上一值
+      current = { ...current };
+      for (const [k, v] of Object.entries(result)) {
+        if (k === "veto" || v === undefined) continue;
+        (current as Record<string, unknown>)[k] = v;
+      }
+    } catch (e) {
+      console.error(`插件监听器处理事件 ${event} 抛错`, e);
+    }
+  }
+  return { vetoed: false, payload: current };
+}
+
 let emitIsolated = false;
 
 /**
