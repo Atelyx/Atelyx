@@ -1,6 +1,6 @@
 /**
  * 右键菜单槽宿主：渲染某菜单目标（contextmenu/<target>）的插件菜单项。
- * 订阅 pluginStore.uiRevision（注册/卸载重渲染）；缺贡献 = null（不显示分隔线）。
+ * 订阅 pluginStore 按槽的修订号（目标变化只重渲染该目标）；缺贡献 = null（不显示分隔线）。
  */
 import type { ReactNode } from "react";
 import { listSlot } from "@/services/cordis/slots";
@@ -15,7 +15,7 @@ interface MenuItemPayload {
 
 /** 渲染某菜单目标的插件菜单项（priority 降序；空 = null）。 */
 export function MenuSlotList({ target }: { target: string }): ReactNode {
-  usePluginStore((s) => s.uiRevision);
+  usePluginStore((s) => s.slotRevisions[`contextmenu/${target}`] ?? 0);
   const items = listSlot(`contextmenu/${target}`) as Array<{ id: string; payload: MenuItemPayload }>;
   if (items.length === 0) return null;
   return (

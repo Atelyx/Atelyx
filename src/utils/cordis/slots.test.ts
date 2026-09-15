@@ -2,12 +2,14 @@
  * slots 代数测试：纯核心（utils/cordis/slots）+ 运行时注册表（services/cordis/slots）。
  */
 import { describe, expect, it, afterEach } from "vitest";
-import type { SlotContribution } from "@/utils/cordis/slots";
-import { pickSlotWinner, sortSlotList } from "@/utils/cordis/slots";
+import type { SlotContribution, SlotDecorator } from "@/utils/cordis/slots";
+import { pickSlotWinner, sortSlotList, sortSlotDecorators } from "@/utils/cordis/slots";
 import {
+  listDecorators,
   listSlot,
   registerNodeSlot,
   registerSlot,
+  registerSlotDecoratorFor,
   registerTableViewSlot,
   registerUiSlot,
   registerViewSlot,
@@ -18,6 +20,7 @@ import {
   resolveViewKind,
   tableViewKinds,
   unregisterSlot,
+  unregisterSlotDecorator,
   viewKinds,
 } from "@/services/cordis/slots";
 
@@ -41,10 +44,27 @@ function regView(kind: string, pluginId: string, label: string): () => void {
   registered.push(`${pluginId}:view/${kind}`);
   return off;
 }
+const deco = (partial: Partial<SlotDecorator> & { id: string }): SlotDecorator => ({
+  pluginId: "p",
+  slot: "toolbar/note/right",
+  priority: 0,
+  wrapper: () => null,
+  ...partial,
+});
+
+/** 已注册装饰器 id 跟踪（afterEach 精确撤销）。 */
+const registeredDecos: string[] = [];
+function regDeco(partial: Partial<SlotDecorator> & { id: string }): void {
+  const d = deco(partial);
+  registerSlotDecoratorFor(d.slot, d.pluginId, d.wrapper, { priority: d.priority, id: d.id });
+  registeredDecos.push(d.id);
+}
 
 afterEach(() => {
   for (const id of registered) unregisterSlot(id);
   registered.length = 0;
+  for (const id of registeredDecos) unregisterSlotDecorator(id);
+  registeredDecos.length = 0;
 });
 
 describe("slots 纯核心", () => {
@@ -62,6 +82,13 @@ describe("slots 纯核心", () => {
     const b = contrib({ id: "b", priority: 5 });
     const c = contrib({ id: "c", priority: 2 });
     expect(sortSlotList([a, b, c]).map((x) => x.id)).toEqual(["b", "c", "a"]);
+  });
+
+  it("装饰器排序：priority 降序（外层 = 高 priority），同优先级保持注册序", () => {
+    const a = deco({ id: "a", priority: 0 });
+    const b = deco({ id: "b", priority: 5 });
+    const c = deco({ id: "c", priority: 2 });
+    expect(sortSlotDecorators([a, b, c]).map((x) => x.id)).toEqual(["b", "c", "a"]);
   });
 });
 
@@ -142,5 +169,21 @@ describe("slots 注册表", () => {
     expect(listSlot("toolbar/note/right")).toHaveLength(2);
     a();
     b();
+  });
+
+  it("装饰器注册/解析/撤销：listDecorators 按槽聚合、priority 降序", () => {
+    regDeco({ id: "p:decorate:toolbar/note/right", priority: 0 });
+    regDeco({ id: "p:decorate:toolbar/note/right:1", priority: 7 });
+    const decos = listDecorators("toolbar/note/right");
+    expect(decos.map((d) => d.priority)).toEqual([7, 0]);
+    expect(listDecorators("toolbar/table/right")).toEqual([]);
+  });
+
+  it("装饰器同插件同槽重复注册 id 自动去重；未声明槽 / 结构敏感槽注册抛错", () => {
+    regDeco({ id: "dup", priority: 0 });
+    regDeco({ id: "dup", priority: 1 });
+    expect(listDecorators("toolbar/note/right")).toHaveLength(2);
+    expect(() => registerSlotDecoratorFor("toolbar/none", "p", () => null)).toThrow(/未声明的槽位/);
+    expect(() => registerSlotDecoratorFor("contextmenu/canvas", "p", () => null)).toThrow(/不可被装饰/);
   });
 });

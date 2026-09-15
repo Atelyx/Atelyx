@@ -660,6 +660,8 @@ export function TableEditor({ panelId }: { panelId: string }) {
         className="flex items-center gap-2 px-3 py-1.5 border-b flex-shrink-0 text-xs"
         style={{ borderColor: "var(--border)", color: "var(--text-secondary)" }}
       >
+        {/* 插件贡献区：表格工具条左侧（list 槽，priority 降序） */}
+        <SlotListMount slot="toolbar/table/left" />
         {/* 视图切换下拉：内置「表格」+ 插件表格视图（内存态不持久化；插件视图随 uiRevision 刷新） */}
         <div className="flex items-center gap-1 flex-shrink-0">
           <span>视图：</span>

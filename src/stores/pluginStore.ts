@@ -118,6 +118,8 @@ interface PluginStoreState {
   stateError: string | null;
   /** UI 注册修订号（主线程插件脚本异步注册到达时自增；依赖插件 UI 的组件据此重渲染）。 */
   uiRevision: number;
+  /** 按槽的注册修订号（槽注册/装饰变化只 bump 对应槽；细粒度槽宿主按槽订阅，防全局重渲染放大）。 */
+  slotRevisions: Record<string, number>;
   /** 市场索引条目（含徽标合并）。 */
   marketItems: PluginIndexEntry[];
   marketLoading: boolean;
@@ -466,8 +468,14 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
   };
 
   onPluginUiChange(() => set((s) => ({ uiRevision: s.uiRevision + 1 })));
-  // 槽注册变化（视图槽随 fiber 挂载/撤销）→ uiRevision 驱动视图菜单/面板重渲染。
-  onSlotChange(() => set((s) => ({ uiRevision: s.uiRevision + 1 })));
+  // 槽注册/装饰变化（视图槽随 fiber 挂载/撤销）→ 全局修订驱动视图菜单/面板重渲染；
+  // 同时 bump 变化槽的局部修订，细粒度槽宿主按槽订阅。
+  onSlotChange((slot) =>
+    set((s) => ({
+      uiRevision: s.uiRevision + 1,
+      slotRevisions: { ...s.slotRevisions, [slot]: (s.slotRevisions[slot] ?? 0) + 1 },
+    })),
+  );
 
   /**
    * 版本操作（更新/回退）共用模板：先执行操作（失败先捕获），无论成败都全量重载
@@ -552,6 +560,7 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
     initialized: false,
     stateError: null,
     uiRevision: 0,
+    slotRevisions: {},
     marketItems: [],
     marketLoading: false,
     marketError: "",

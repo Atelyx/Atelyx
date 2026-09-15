@@ -25,6 +25,7 @@ import { type MarkdownEditorLinks } from "@/components/editor/MarkdownEditor";
 import { NoteBodyEditor } from "@/components/editor/NoteBodyEditor";
 import { HistoryModal } from "@/components/history/HistoryModal";
 import { SlotListMount } from "@/components/plugins/SlotHost";
+import { MenuSlotList } from "@/components/plugins/MenuSlot";
 import { useVaultLinkHandlers } from "@/hooks/useVaultLinkHandlers";
 import { useNoteBodySession } from "@/hooks/useNoteBodySession";
 import { useNoteUndoRouting } from "@/hooks/useNoteUndoRouting";
@@ -466,6 +467,8 @@ export function NoteEditor({ file }: { file: string }) {
         className="px-3 py-1.5 flex items-center gap-1.5 text-xs flex-shrink-0 select-none"
         style={{ borderBottom: "1px solid var(--border)", color: "var(--text-muted)" }}
       >
+        {/* 插件贡献区：笔记工具条左侧（list 槽，priority 降序） */}
+        <SlotListMount slot="toolbar/note/left" />
         <span className="ml-auto flex items-center gap-2 flex-shrink-0">
           {/* 插件贡献区：笔记工具条右侧（list 槽，priority 降序） */}
           <SlotListMount slot="toolbar/note/right" />
@@ -625,36 +628,41 @@ export function NoteEditor({ file }: { file: string }) {
            零跳变、选区/滚动/协作绑定全保留）。只读态 widget 恒渲染（表格/数学/HTML/勾选框等全部显示），
            双击/铅笔进入编辑；编辑器自身样式见 styles/index.css；border 与源码模式对齐（1px），
            accent 高亮 = 进入编辑模式（与源码模式聚焦时一致） */
-        <div
-          data-note-content
-          className="markdown-body flex-1 overflow-auto"
-          style={{
-            background: "var(--bg-primary)",
-            color: "var(--text-primary)",
-            border: preview ? "1px solid var(--input-border)" : "1px solid var(--accent)",
-          }}
-          onDoubleClick={() => {
-            // 只读态双击进入编辑：先清除浏览器默认的双击文本选中（选中单词），再切换，避免残留选中
-            if (!preview) return;
-            window.getSelection()?.removeAllRanges();
-            setPreview(false);
-          }}
-        >
-          <NoteBodyEditor
-            file={file}
-            content={content}
-            syncSeq={view?.syncSeq ?? 0}
-            binding={view?.binding ?? null}
-            editorViewRef={cmViewRef}
-            readOnly={preview}
-            interactiveCheckbox
-            links={noteMarkdownLinks}
-            // 协作挂载分歧：干净 → 采纳 ytext 正文并按内容变更走保存链落盘（协作态编辑面以 ytext
-            // 为文档源，磁盘须随之收敛；磁盘已持有该正文时保存链判无内容可写，不重复写盘）；
-            // 有未落盘编辑 → 本地正文写回 ytext（本地最新者胜）
-            onCollabDivergence={(ytextText) => session?.handleCollabDivergence(ytextText)}
-            onBodyChange={(md) => session?.applyBody(md)}
-          />
+        <div className="flex flex-1 min-h-0">
+          {/* 编辑器 gutter：插件贡献的纵向小部件列（gutter/note 槽；缺贡献不占位，
+              贡献自带列宽与样式——宿主只提供并列排布，避免空槽挤占编辑区） */}
+          <SlotListMount slot="gutter/note" />
+          <div
+            data-note-content
+            className="markdown-body flex-1 min-w-0 overflow-auto"
+            style={{
+              background: "var(--bg-primary)",
+              color: "var(--text-primary)",
+              border: preview ? "1px solid var(--input-border)" : "1px solid var(--accent)",
+            }}
+            onDoubleClick={() => {
+              // 只读态双击进入编辑：先清除浏览器默认的双击文本选中（选中单词），再切换，避免残留选中
+              if (!preview) return;
+              window.getSelection()?.removeAllRanges();
+              setPreview(false);
+            }}
+          >
+            <NoteBodyEditor
+              file={file}
+              content={content}
+              syncSeq={view?.syncSeq ?? 0}
+              binding={view?.binding ?? null}
+              editorViewRef={cmViewRef}
+              readOnly={preview}
+              interactiveCheckbox
+              links={noteMarkdownLinks}
+              // 协作挂载分歧：干净 → 采纳 ytext 正文并按内容变更走保存链落盘（协作态编辑面以 ytext
+              // 为文档源，磁盘须随之收敛；磁盘已持有该正文时保存链判无内容可写，不重复写盘）；
+              // 有未落盘编辑 → 本地正文写回 ytext（本地最新者胜）
+              onCollabDivergence={(ytextText) => session?.handleCollabDivergence(ytextText)}
+              onBodyChange={(md) => session?.applyBody(md)}
+            />
+          </div>
         </div>
       )}
 
@@ -714,29 +722,33 @@ export function NoteEditor({ file }: { file: string }) {
           repositionDeps={[rewriteOpen]}
         >
           {!rewriteOpen ? (
-            hasSelection ? (
-              <>
-                <MenuItem onClick={copySelection}>
-                  <Copy size={14} className="flex-shrink-0" /> 复制
-                </MenuItem>
-                {contentMenu.selectionLive && (
-                  <MenuItem onClick={cutSelection}>
-                    <Scissors size={14} className="flex-shrink-0" /> 剪切
+            <>
+              {hasSelection ? (
+                <>
+                  <MenuItem onClick={copySelection}>
+                    <Copy size={14} className="flex-shrink-0" /> 复制
                   </MenuItem>
-                )}
+                  {contentMenu.selectionLive && (
+                    <MenuItem onClick={cutSelection}>
+                      <Scissors size={14} className="flex-shrink-0" /> 剪切
+                    </MenuItem>
+                  )}
+                  <MenuItem onClick={pasteIntoSelection}>
+                    <ClipboardPaste size={14} className="flex-shrink-0" /> 粘贴
+                  </MenuItem>
+                  <MenuDivider />
+                  <MenuItem onClick={() => setRewriteOpen(true)}>
+                    <Wand2 size={14} className="flex-shrink-0" /> AI 处理
+                  </MenuItem>
+                </>
+              ) : (
                 <MenuItem onClick={pasteIntoSelection}>
                   <ClipboardPaste size={14} className="flex-shrink-0" /> 粘贴
                 </MenuItem>
-                <MenuDivider />
-                <MenuItem onClick={() => setRewriteOpen(true)}>
-                  <Wand2 size={14} className="flex-shrink-0" /> AI 处理
-                </MenuItem>
-              </>
-            ) : (
-              <MenuItem onClick={pasteIntoSelection}>
-                <ClipboardPaste size={14} className="flex-shrink-0" /> 粘贴
-              </MenuItem>
-            )
+              )}
+              {/* 插件贡献区：笔记正文右键菜单（list 槽，priority 降序） */}
+              <MenuSlotList target="note-body" />
+            </>
           ) : (
             <div>
               <textarea

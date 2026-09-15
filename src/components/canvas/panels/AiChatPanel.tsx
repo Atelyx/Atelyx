@@ -40,6 +40,7 @@ import {
   type MentionSeg,
 } from "@/utils/text";
 import { ChatMessageBubble } from "@/components/common/ChatMessageBubble";
+import { SlotListMount } from "@/components/plugins/SlotHost";
 import type { MarkdownEditorLinks } from "@/components/editor/MarkdownEditor";
 import { MentionTextarea } from "@/components/common/MentionTextarea";
 import { JumpToBottomButton } from "@/components/common/JumpToBottomButton";
@@ -375,6 +376,8 @@ export function AiChatPanel() {
               <Layers size={15} />
             )}
           </button>
+          {/* 插件贡献区：AI 对话面板顶部右侧动作区（list 槽，priority 降序） */}
+          <SlotListMount slot="toolbar/aichat/right" />
         </div>
       </div>
 

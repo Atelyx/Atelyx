@@ -12,6 +12,7 @@ export function NoteView() {
   if (!currentNoteFile) {
     return (
       <PanelPlaceholder
+        viewKind="note"
         icon={<FileText size={64} strokeWidth={1.5} />}
         title="打开笔记"
         description="从左侧文件面板或搜索面板单击一个 .md 笔记开始编辑。"

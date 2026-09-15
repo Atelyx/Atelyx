@@ -10,7 +10,7 @@ import type { SlotDeclaration } from "@/constants/slots";
 import { SLOT_DECLARATIONS } from "@/constants/slots";
 import { createKernel, type Kernel } from "./kernel";
 import { mountPlugin, unmountAll } from "./loader";
-import { resolveViewKind, viewKinds, listSlot, registeredSlots, onSlotChange } from "./slots";
+import { resolveViewKind, viewKinds, listSlot, listDecorators, registeredSlots, onSlotChange } from "./slots";
 import { getPluginTableView } from "./ui";
 
 let kernel: Kernel | null = null;
@@ -101,7 +101,7 @@ describe("ctx.slots", () => {
   it("registerMenu 进未声明的菜单目标 → 该行 failed + 提示可用目标", async () => {
     kernel = createKernel();
     const apply = (ctx: Context) => {
-      ctx.slots.registerMenu({ target: "file", label: "打开", onClick: () => undefined });
+      ctx.slots.registerMenu({ target: "unknown", label: "打开", onClick: () => undefined });
     };
     const result = await mountPlugin(kernel, { id: "com.test.ui", apply });
     expect(result.ok).toBe(false);
@@ -109,7 +109,7 @@ describe("ctx.slots", () => {
       expect(result.message).toContain("未声明的槽位");
       expect(result.message).toContain("contextmenu/canvas");
     }
-    expect(listSlot("contextmenu/file")).toEqual([]);
+    expect(listSlot("contextmenu/unknown")).toEqual([]);
   });
 
   it("list：返回宿主槽位声明表（插件可发现可贡献的位置）", async () => {
@@ -188,7 +188,80 @@ describe("载荷与参数契约", () => {
   });
 });
 
+describe("ctx.slots.decorate", () => {
+  it("decorate：向已声明槽注册装饰器 + pluginId 归属；卸载撤销", async () => {
+    kernel = createKernel();
+    const apply = (ctx: Context) => {
+      ctx.slots.decorate({ slot: "toolbar/note/right", wrapper: ({ children }) => children });
+    };
+    await mountPlugin(kernel, { id: "com.test.deco", apply });
+    const decos = listDecorators("toolbar/note/right");
+    expect(decos).toHaveLength(1);
+    expect(decos[0]?.pluginId).toBe("com.test.deco");
+    expect(decos[0]?.slot).toBe("toolbar/note/right");
+
+    await unmountAll(kernel);
+    expect(listDecorators("toolbar/note/right")).toEqual([]);
+  });
+
+  it("decorate：装饰器按 priority 降序（外层 = 高 priority）", async () => {
+    kernel = createKernel();
+    const apply = (ctx: Context) => {
+      ctx.slots.decorate({ slot: "toolbar/note/right", wrapper: () => null, priority: 1 });
+      ctx.slots.decorate({ slot: "toolbar/note/right", wrapper: () => null, priority: 5 });
+    };
+    await mountPlugin(kernel, { id: "com.test.deco", apply });
+    expect(listDecorators("toolbar/note/right").map((d) => d.priority)).toEqual([5, 1]);
+  });
+
+  it("decorate 进未声明的槽 → 该行 failed", async () => {
+    kernel = createKernel();
+    const apply = (ctx: Context) => {
+      ctx.slots.decorate({ slot: "toolbar/none", wrapper: () => null });
+    };
+    const result = await mountPlugin(kernel, { id: "com.test.deco", apply });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.message).toContain("未声明的槽位");
+  });
+
+  it("decorate 结构敏感槽（decoratable:false）→ 该行 failed", async () => {
+    kernel = createKernel();
+    const apply = (ctx: Context) => {
+      ctx.slots.decorate({ slot: "contextmenu/canvas", wrapper: () => null });
+    };
+    const result = await mountPlugin(kernel, { id: "com.test.deco", apply });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.message).toContain("不可被装饰");
+  });
+
+  it("decorate 缺包裹组件 → 拒绝", async () => {
+    kernel = createKernel();
+    const apply = (ctx: Context) => {
+      ctx.slots.decorate({ slot: "toolbar/note/right", wrapper: undefined as never });
+    };
+    const result = await mountPlugin(kernel, { id: "com.test.deco", apply });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.message).toContain("包裹组件");
+  });
+});
+
 describe("槽注册变更通知", () => {
+  it("全局 onSlotChange 收到变化槽名（pluginStore 据此 bump 按槽修订，驱动宿主按槽订阅）", async () => {
+    kernel = createKernel();
+    const seen: string[] = [];
+    const unsubscribe = onSlotChange((slot) => seen.push(slot));
+    await mountPlugin(kernel, {
+      id: "com.test.ui",
+      apply: (ctx) => {
+        ctx.slots.registerUi({ slot: "toolbar/files", component: () => null });
+        ctx.slots.registerUi({ slot: "toolbar/note/right", component: () => null });
+      },
+    });
+    expect(seen).toContain("toolbar/files");
+    expect(seen).toContain("toolbar/note/right");
+    unsubscribe();
+  });
+
   it("成功注册通知一次、失败不通知、撤销命中通知一次", async () => {
     kernel = createKernel();
     let notified = 0;

@@ -42,10 +42,32 @@ describe("槽位声明表", () => {
     expect(findSlotDeclaration("node/anything")?.key).toBe("node");
   });
 
+  it("开放前缀槽：empty/<viewKind> single 替换空态，inspector/<nodeType> list 追加区段", () => {
+    const empty = findSlotDeclaration("empty/canvas");
+    expect(empty?.key).toBe("empty");
+    expect(empty?.cardinality).toBe("single");
+    expect(empty?.required).toEqual(["component"]);
+    const inspector = findSlotDeclaration("inspector/conversation");
+    expect(inspector?.key).toBe("inspector");
+    expect(inspector?.cardinality).toBe("list");
+    expect(inspector?.required).toEqual(["component"]);
+  });
+
+  it("decoratable：结构敏感槽显式 false，普通槽缺省可装饰", () => {
+    expect(findSlotDeclaration("contextmenu/canvas")?.decoratable).toBe(false);
+    expect(findSlotDeclaration("node/x")?.decoratable).toBe(false);
+    expect(findSlotDeclaration("edge/x")?.decoratable).toBe(false);
+    // view/tableview 宿主直接渲染胜出组件（无装饰宿主），声明不可装饰避免 decorate 静默 no-op。
+    expect(findSlotDeclaration("view/x")?.decoratable).toBe(false);
+    expect(findSlotDeclaration("tableview/x")?.decoratable).toBe(false);
+    expect(findSlotDeclaration("toolbar/note/right")?.decoratable).toBeUndefined();
+    expect(findSlotDeclaration("empty/canvas")?.decoratable).toBeUndefined();
+  });
+
   it("未声明的位置无匹配：裸前缀、空 kind、无宿主的菜单目标、未知家族", () => {
     expect(findSlotDeclaration("view")).toBeUndefined();
     expect(findSlotDeclaration("view/")).toBeUndefined();
-    expect(findSlotDeclaration("contextmenu/file")).toBeUndefined();
+    expect(findSlotDeclaration("contextmenu/unknown")).toBeUndefined();
     expect(findSlotDeclaration("toolbar/nope")).toBeUndefined();
     expect(findSlotDeclaration("nosuchfamily/x")).toBeUndefined();
   });
@@ -126,7 +148,7 @@ describe("注册校验", () => {
   it("注册到无宿主的菜单目标 → 抛错并提示已声明的目标", () => {
     expect(() =>
       registerSlotContrib(
-        "contextmenu/file",
+        "contextmenu/unknown",
         "com.test.p",
         { label: "打开", onClick: () => undefined },
         { cardinality: "list" },

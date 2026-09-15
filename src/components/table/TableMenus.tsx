@@ -21,6 +21,7 @@ import {
 import { useEffect, useRef, useState } from "react";
 import { PopupLayer } from "@/components/common/PopupLayer";
 import { Menu, MenuDivider, MenuItem } from "@/components/common/Menu";
+import { MenuSlotList } from "@/components/plugins/MenuSlot";
 import { CALC_TYPE_LABELS, CALC_TYPES_BY_FIELD, FIELD_TYPE_LABELS } from "@/constants/table";
 import { useTableStore } from "@/stores/tableStore";
 import { columnAutoWidth } from "@/utils/table";
@@ -56,6 +57,8 @@ export function CellMenu({
           <Type size={14} /> 格式
         </MenuItem>
       )}
+      {/* 插件贡献区：表格单元格右键菜单（list 槽，priority 降序） */}
+      <MenuSlotList target="table-cell" />
     </Menu>
   );
 }
@@ -302,6 +305,8 @@ export function ColumnMenu({
       <MenuItem onClick={() => { setMode("insertRight"); setDraft(""); }}>
         <ArrowRight size={14} /> 右侧插入字段
       </MenuItem>
+      {/* 插件贡献区：表格列头右键菜单（list 槽，priority 降序） */}
+      <MenuSlotList target="table-column" />
     </Menu>
   );
 }
@@ -362,6 +367,8 @@ export function RowMenu({
       >
         <Trash2 size={14} /> 删除行
       </MenuItem>
+      {/* 插件贡献区：表格行首右键菜单（list 槽，priority 降序） */}
+      <MenuSlotList target="table-row" />
     </Menu>
   );
 }

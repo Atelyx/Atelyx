@@ -9,6 +9,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { Menu, MenuDivider, MenuItem } from "@/components/common/Menu";
+import { MenuSlotList } from "@/components/plugins/MenuSlot";
 
 /** 文件夹右键菜单：新建画布 / 新建笔记 / 新建表格 / 新建文件夹 + 图标颜色 + 创建副本 + 重命名 / 删除（根目录仅新建）。 */
 export function FolderCreateMenu({
@@ -77,6 +78,8 @@ export function FolderCreateMenu({
           </MenuItem>
         </>
       )}
+      {/* 插件贡献区：文件目录行右键菜单（list 槽，priority 降序） */}
+      <MenuSlotList target="folder" />
     </Menu>
   );
 }

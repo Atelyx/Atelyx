@@ -19,6 +19,7 @@ import type { PluginManifest, PluginPackageJson } from "@/types";
 import type { CompositionDefault } from "@/utils/cordis/composition";
 import type { DomainLifecycleHooks } from "@/utils/kernelLifecycle";
 import type { VaultEventHandler, VaultEvent, VaultEventOf } from "@/utils/vaultEvents";
+import type { SlotCardinality } from "@/utils/cordis/slots";
 import { CalendarPanel } from "@/components/calendar/CalendarPanel";
 import { RecentPanel } from "@/components/layout/panels/RecentPanel";
 import { SearchView } from "@/components/layout/views/SearchView";
@@ -55,7 +56,7 @@ import { tableToSnapshotText } from "@/utils/table";
 import { registerDomainLifecycle } from "@/utils/kernelLifecycle";
 import { registerNoteSurface } from "@/utils/noteSurfaceHost";
 import { subscribeVaultEvent } from "@/utils/vaultEvents";
-import { registerViewSlot } from "@/services/cordis/slots";
+import { registerViewSlot, registerUiSlot } from "@/services/cordis/slots";
 import { pluginIdOf } from "@/services/cordis/loader";
 import { registerServiceProvider } from "@/services/cordis/services";
 import { createCanvasService } from "@/services/cordis/canvas";
@@ -64,6 +65,7 @@ import { createNoteService } from "@/services/cordis/note";
 import { createChatService } from "@/services/cordis/chat";
 import { setPluginNoteAccess, setPluginChatAccess } from "@/services/cordis/access";
 import { VIEW_LABELS } from "@/constants/views";
+import { CanvasEmptyState, NoteEmptyState, TableEmptyState } from "@/components/plugins/cordis/emptyStates";
 
 /** 单个视图载荷（无 props 契约的视图组件；重型视图用 render 承载宿主面板 id）。 */
 export interface BuiltinViewPayload {
@@ -109,6 +111,29 @@ function mountViews(ctx: Context, views: BuiltinViewPayload[]): void {
   for (const v of views) {
     ctx.effect(() =>
       registerViewSlot(v.kind, pluginId, { label: v.label, component: v.component, render: v.render }),
+    );
+  }
+}
+
+/** 单条 UI 槽贡献规格（registerUi 的载荷；single 用于替换类槽位如 empty/<kind>）。 */
+export interface BuiltinUiPayload {
+  slot: string;
+  component: ComponentType;
+  /** 槽优先级（list 排序 / single 决胜；缺省 0）。 */
+  priority?: number;
+  /** 基数（缺省 list；替换类槽位如 empty/<viewKind> 传 single）。 */
+  cardinality?: SlotCardinality;
+}
+
+/** 挂载 UI 槽贡献（与外部插件同注册表/同优先级语义；随 fiber 撤销）。 */
+function mountUi(ctx: Context, items: BuiltinUiPayload[]): void {
+  const pluginId = pluginIdOf(ctx) ?? "plugin";
+  for (const item of items) {
+    ctx.effect(() =>
+      registerUiSlot(item.slot, pluginId, { component: item.component }, {
+        priority: item.priority ?? 0,
+        cardinality: item.cardinality,
+      }),
     );
   }
 }
@@ -210,6 +235,8 @@ interface BuiltinDefOptions {
   type: string;
   tagline: string;
   views: BuiltinViewPayload[];
+  /** UI 槽贡献（工具栏/空态/标题栏等；registerUi 语义）。 */
+  ui?: BuiltinUiPayload[];
   lifecycle?: DomainLifecycleHooks;
   /** 能力提供者接线（如 canvas/table 命名空间数据源 + 变更事件；返回 unregister）。 */
   capability?: () => () => void;
@@ -224,6 +251,7 @@ interface BuiltinDefOptions {
 function def(opts: BuiltinDefOptions): CordisBuiltinDef {
   const apply = (ctx: Context): void => {
     mountViews(ctx, opts.views);
+    if (opts.ui) mountUi(ctx, opts.ui);
     if (opts.lifecycle) mountLifecycle(ctx, opts.lifecycle);
     if (opts.capability) mountWiring(ctx, opts.capability);
     if (opts.collabWiring) mountWiring(ctx, opts.collabWiring);
@@ -316,6 +344,7 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
         render: (hostId) => <CanvasView panelId={hostId} />,
       },
     ],
+    ui: [{ slot: "empty/canvas", component: CanvasEmptyState, cardinality: "single" }],
     lifecycle: {
       id: "builtin.canvas",
       flush: async () => {
@@ -454,6 +483,7 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
     type: "panel",
     tagline: "Markdown 笔记编辑器",
     views: [{ kind: "note", label: VIEW_LABELS.note, component: NoteView }],
+    ui: [{ slot: "empty/note", component: NoteEmptyState, cardinality: "single" }],
     lifecycle: {
       id: "builtin.note",
       flush: async () => {
@@ -550,6 +580,7 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
         render: (hostId) => <TableView panelId={hostId} />,
       },
     ],
+    ui: [{ slot: "empty/table", component: TableEmptyState, cardinality: "single" }],
     lifecycle: {
       id: "builtin.table",
       flush: async () => {

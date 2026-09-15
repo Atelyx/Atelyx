@@ -13,6 +13,7 @@ import { useAppStore } from "@/stores/appStore";
 import { usePanelStore } from "@/stores/panelStore";
 import { usePluginStore } from "@/stores/pluginStore";
 import { SlotListMount } from "@/components/plugins/SlotHost";
+import { MenuSlotList } from "@/components/plugins/MenuSlot";
 import { usePopupAnchor } from "@/hooks/usePopupAnchor";
 import { PopupLayer } from "@/components/common/PopupLayer";
 import { Menu as MenuShell, MenuDivider, MenuItem } from "@/components/common/Menu";
@@ -281,6 +282,15 @@ export const PanelTabBar = memo(function PanelTabBar({
       {status}
       {/* 插件贡献区：面板头状态区（list 槽，priority 降序） */}
       <SlotListMount slot="panelhead/status" />
+      {/* 插件贡献区：面板头动作区（list 槽，priority 降序；面板级动作按钮位）。
+          包一层吞掉 contextmenu/click 冒泡——动作按钮的右击不应弹出空白右键视图菜单 */}
+      <span
+        className="flex items-center"
+        onContextMenu={(e) => e.stopPropagation()}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <SlotListMount slot="panelhead/actions" />
+      </span>
 
       {/* ≡ 菜单（右侧；锁定 + 删除面板 + 分割） */}
       <div className="flex-shrink-0">
@@ -390,6 +400,8 @@ export const PanelTabBar = memo(function PanelTabBar({
                 <ChevronRight size={13} />
                 切换标签视图
               </MenuItem>
+              {/* 插件贡献区：面板标签右键菜单（list 槽，priority 降序） */}
+              <MenuSlotList target="panel-tab" />
             </>
           ) : (
             <>

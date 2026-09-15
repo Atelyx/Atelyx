@@ -10,6 +10,7 @@ import { Plus } from "lucide-react";
 import { useRef, useState } from "react";
 import { useUiStateStore } from "@/stores/uiStateStore";
 import { Menu, MenuItem } from "@/components/common/Menu";
+import { MenuSlotList } from "@/components/plugins/MenuSlot";
 import { VaultSwitcher } from "@/components/layout/VaultSwitcher";
 import { HOME_LAYOUT_ID } from "@/types";
 
@@ -238,6 +239,8 @@ export function LayoutTabs() {
               删除
             </MenuItem>
           )}
+          {/* 插件贡献区：布局标签右键菜单（list 槽，priority 降序） */}
+          <MenuSlotList target="layout-tab" />
         </Menu>
       )}
     </div>

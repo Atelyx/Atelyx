@@ -10,6 +10,7 @@
 import { BookmarkMinus, BookmarkPlus, Copy, FileOutput, Pencil, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { Menu, MenuDivider, MenuItem } from "@/components/common/Menu";
+import { MenuSlotList } from "@/components/plugins/MenuSlot";
 
 interface Props {
   x: number;
@@ -133,6 +134,8 @@ export function FileContextMenu({ x, y, onRename, onDuplicate, onDelete, onToggl
               删除
             </span>
           </MenuItem>
+          {/* 插件贡献区：文件行右键菜单（list 槽，priority 降序） */}
+          <MenuSlotList target="file" />
         </>
       )}
     </Menu>

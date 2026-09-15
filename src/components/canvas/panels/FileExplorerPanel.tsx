@@ -147,6 +147,8 @@ export function FileExplorerPanel({ onOpenCanvasFile, onOpenNoteForEdit, onOpenT
     >
       {/* 工具条：排序方式下拉气泡 + 展开/收起全部（图标按钮，切换） */}
       <div className="px-2 py-1.5 border-b flex items-center gap-1" style={{ borderColor: "var(--border)" }}>
+        {/* 插件贡献区：文件面板工具条左侧（list 槽，priority 降序） */}
+        <SlotListMount slot="toolbar/files/left" />
         <button
           onClick={(e) => {
             const rect = e.currentTarget.getBoundingClientRect();

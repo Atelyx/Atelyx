@@ -4,6 +4,7 @@ import { useCanvasStore } from "@/stores/canvasStore";
 import { useNodeCollab } from "@/hooks/useNodeCollab";
 import { useNotificationStore } from "@/stores/notificationStore";
 import { Menu, MenuDivider, MenuItem } from "@/components/common/Menu";
+import { MenuSlotList } from "@/components/plugins/MenuSlot";
 import { isTempAttachmentRef } from "@/utils/tempAttachmentPath";
 import type { MediaData, TextData } from "@/types";
 
@@ -122,6 +123,8 @@ export function NodeContextMenu({ nodeId, x, y, onClose }: Props) {
           删除节点
         </span>
       </MenuItem>
+      {/* 插件贡献区：画布节点右键菜单（list 槽，priority 降序） */}
+      <MenuSlotList target="node" />
     </Menu>
   );
 }

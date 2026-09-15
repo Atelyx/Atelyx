@@ -3,15 +3,15 @@
  *
  * 可注册的槽位以 constants/slots.ts 的声明表为唯一清单：固定具名槽（titlebar/toolbar/
  * panelhead/statusbar/settings）与右键菜单目标（contextmenu/<target>）未声明即注册失败并附近似槽名
- * 提示；开放 kind 槽（view/node/edge/tableview）按前缀放行。
+ * 提示；开放 kind 槽（view/node/edge/tableview/empty/inspector）按前缀放行。
  * 随应用分发的视图/节点/边 = 对应默认组合成员挂载时注册的 single 槽贡献；注册经 ctx.effect 随 fiber 撤销。
  */
 import type { ComponentType, ReactNode } from "react";
 import { VIEW_LABELS } from "@/constants/views";
 import { findSlotDeclaration, slotPayloadShape, suggestSlotNames } from "@/constants/slots";
 import type { SlotDeclaration } from "@/constants/slots";
-import type { SlotCardinality, SlotContribution } from "@/utils/cordis/slots";
-import { pickSlotWinner, sortSlotList } from "@/utils/cordis/slots";
+import type { SlotCardinality, SlotContribution, SlotDecorator } from "@/utils/cordis/slots";
+import { pickSlotWinner, sortSlotDecorators, sortSlotList } from "@/utils/cordis/slots";
 
 /** 视图槽载荷（view/<kind>）：label + component/render 至少其一（render 优先，重型视图承载宿主面板 id）。 */
 export interface ViewSlotPayload {
@@ -34,17 +34,31 @@ export interface ViewContribution {
 export type ViewSlotContribution = SlotContribution<ViewSlotPayload>;
 
 const contributions = new Map<string, SlotContribution>();
+/** 槽装饰器（ctx.slots.decorate 注册；与贡献分开收集，宿主渲染时按链包裹）。 */
+const decorators = new Map<string, SlotDecorator>();
 
-const listeners = new Set<() => void>();
-function notify(): void {
-  for (const listener of listeners) listener();
+/** 每槽装饰器纪元号：任何注册/撤销单调递增。宿主机据此识别「装饰器被重载/重挂」（含同 id 重注册），
+ *  复位其本地剔除记录——仅凭注册集合签名在 React 批处理合并中间渲染时会漏判，纪元号不受此影响。 */
+const decoratorEpochs = new Map<string, number>();
+function bumpDecoratorEpoch(slot: string): void {
+  decoratorEpochs.set(slot, (decoratorEpochs.get(slot) ?? 0) + 1);
 }
 
-/** 订阅槽注册变化（pluginStore 据此刷新 uiRevision，驱动视图菜单/占位重渲染）；返回退订函数。 */
-export function onSlotChange(listener: () => void): () => void {
-  listeners.add(listener);
+/** 某槽装饰器纪元号（宿主机识别注册变化用；无变化 = 0）。 */
+export function decoratorEpochOf(slot: string): number {
+  return decoratorEpochs.get(slot) ?? 0;
+}
+
+const globalListeners = new Set<(slot: string) => void>();
+function notify(slot: string): void {
+  for (const listener of globalListeners) listener(slot);
+}
+
+/** 订阅槽注册/装饰变化（回调收到变化槽名；视图菜单与 pluginStore 的按槽修订据此刷新）。返回退订函数。 */
+export function onSlotChange(listener: (slot: string) => void): () => void {
+  globalListeners.add(listener);
   return () => {
-    listeners.delete(listener);
+    globalListeners.delete(listener);
   };
 }
 
@@ -52,12 +66,35 @@ export function onSlotChange(listener: () => void): () => void {
 export function registerSlot(contrib: SlotContribution): void {
   if (contributions.has(contrib.id)) throw new Error(`槽贡献 ${contrib.id} 已注册`);
   contributions.set(contrib.id, contrib);
-  notify();
+  notify(contrib.slot);
 }
 
 /** 按 id 撤销单个槽贡献。 */
 export function unregisterSlot(id: string): void {
-  if (contributions.delete(id)) notify();
+  const prev = contributions.get(id);
+  if (prev && contributions.delete(id)) notify(prev.slot);
+}
+
+/** 注册槽装饰器（id 全局唯一，重复即拒绝）。 */
+export function registerSlotDecorator(dec: SlotDecorator): void {
+  if (decorators.has(dec.id)) throw new Error(`槽装饰器 ${dec.id} 已注册`);
+  decorators.set(dec.id, dec);
+  bumpDecoratorEpoch(dec.slot);
+  notify(dec.slot);
+}
+
+/** 按 id 撤销单个槽装饰器。 */
+export function unregisterSlotDecorator(id: string): void {
+  const prev = decorators.get(id);
+  if (prev && decorators.delete(id)) {
+    bumpDecoratorEpoch(prev.slot);
+    notify(prev.slot);
+  }
+}
+
+/** 某槽的装饰器链（priority 降序；外层 = 高 priority）。 */
+export function listDecorators(slot: string): SlotDecorator[] {
+  return sortSlotDecorators([...decorators.values()].filter((d) => d.slot === slot));
 }
 
 /** single 槽解析：胜出贡献（无贡献 = undefined）。 */
@@ -177,6 +214,52 @@ export function registerSlotContrib(
   return () => unregisterSlot(id);
 }
 
+/** 槽装饰器注册通用 opts（priority/id）。 */
+export interface SlotDecoratorRegisterOptions {
+  priority?: number;
+  /** 覆盖默认装饰器 id（缺省 `<pluginId>:decorate:<slot>`）。 */
+  id?: string;
+}
+
+/** 槽位装饰校验：未声明即抛错（附近似槽名提示），声明 `decoratable: false` 即抛错
+ *  （结构敏感位置不允许被包裹——包裹会破坏其渲染契约）。抛错随插件 apply 传播 → 行标 failed。 */
+function assertSlotDecoratable(slot: string): void {
+  const decl = findSlotDeclaration(slot);
+  if (!decl) {
+    const hints = suggestSlotNames(slot);
+    const hint = hints.length > 0 ? `；是否想注册：${hints.join("、")}` : "（宿主未渲染该位置）";
+    throw new Error(`未声明的槽位「${slot}」${hint}`);
+  }
+  if (decl.decoratable === false) {
+    throw new Error(`槽位「${slot}」不可被装饰`);
+  }
+}
+
+/** 注册槽装饰器；返回撤销函数。默认 id = `<pluginId>:decorate:<slot>`；同插件同槽重复注册自动加序去重。 */
+export function registerSlotDecoratorFor(
+  slot: string,
+  pluginId: string,
+  wrapper: ComponentType<{ children?: ReactNode }>,
+  opts?: SlotDecoratorRegisterOptions,
+): () => void {
+  if (opts?.priority !== undefined && (typeof opts.priority !== "number" || Number.isNaN(opts.priority))) {
+    throw new Error(`槽位「${slot}」的 priority 须为数字`);
+  }
+  assertSlotDecoratable(slot);
+  const base = opts?.id ?? `${pluginId}:decorate:${slot}`;
+  let id = base;
+  let n = 1;
+  while (decorators.has(id)) id = `${base}:${n++}`;
+  registerSlotDecorator({
+    id,
+    pluginId,
+    slot,
+    priority: opts?.priority ?? 0,
+    wrapper,
+  });
+  return () => unregisterSlotDecorator(id);
+}
+
 /** 注册视图槽贡献（slot = `view/<kind>`）；返回撤销函数。 */
 export function registerViewSlot(
   kind: string,
@@ -257,13 +340,14 @@ export interface UiSlotPayload {
   component: ComponentType;
 }
 
-/** UI 区域槽（titlebar/toolbar/panelhead/settings/statusbar 等）：默认 list（多贡献有序），可指定 single。
- *  右键菜单项不走此 API（载荷不同），见 slotsApi 的 registerMenu。 */
+/** UI 区域槽（titlebar/toolbar/panelhead/settings/statusbar 等）：默认 list（多贡献有序），可指定 single
+ *  （替换类槽位如 empty/<viewKind>）。右键菜单项不走此 API（载荷不同），见 slotsApi 的 registerMenu。 */
 export function registerUiSlot(
   slot: string,
   pluginId: string,
   payload: UiSlotPayload,
   opts?: SlotRegisterOptions,
 ): () => void {
-  return registerSlotContrib(slot, pluginId, payload, { cardinality: "list", ...opts });
+  // cardinality 缺省 list（undefined 显式传入也归 list）：single 槽须声明表基数为 single 且显式指定。
+  return registerSlotContrib(slot, pluginId, payload, { ...opts, cardinality: opts?.cardinality ?? "list" });
 }

@@ -31,6 +31,7 @@ import { useUiStateStore } from "@/stores/uiStateStore";
 import { BUILTIN_AGENT_CHAT_ID } from "@/constants/agents";
 import { DropdownSelect } from "@/components/common/DropdownSelect";
 import { NotePropertiesView } from "@/components/editor/NotePropertiesView";
+import { OpenSlotList } from "@/components/plugins/SlotHost";
 import { useNoteBodySession, useNoteSurface } from "@/hooks/useNoteBodySession";
 import { useVaultTagCandidates } from "@/hooks/useVaultTagCandidates";
 import { parseFrontmatter, stringifyFrontmatter } from "@/utils/frontmatter";
@@ -526,6 +527,8 @@ export function InspectorPanel() {
             </div>
           </section>
         )}
+        {/* 插件贡献区：按节点类型的附加区段（inspector/<nodeType>，list 槽，priority 降序） */}
+        <OpenSlotList slot={`inspector/${node.type}`} />
       </div>
     </div>
   );

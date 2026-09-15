@@ -388,6 +388,7 @@ export const CanvasView = memo(function CanvasView({
   if (!canvasFile) {
     return (
       <PanelPlaceholder
+        viewKind="canvas"
         icon={<Palette size={64} strokeWidth={1.5} />}
         title="打开画布"
         description="从左侧文件面板或搜索面板单击一个 .atlx 画布开始编辑。"
@@ -435,6 +436,8 @@ export const CanvasView = memo(function CanvasView({
             </button>
           </span>
         )}
+        {/* 插件贡献区：画布工具栏左侧（list 槽，priority 降序） */}
+        <SlotListMount slot="toolbar/canvas/left" />
         <span className="flex-1" />
         {/* 协作：同看本画布的在线用户胶囊（用户色点 + 昵称；断开连接自动消失） */}
         {canvasPeers.length > 0 && (
@@ -459,6 +462,8 @@ export const CanvasView = memo(function CanvasView({
             ))}
           </div>
         )}
+        {/* 插件贡献区：画布工具栏右侧（list 槽，priority 降序） */}
+        <SlotListMount slot="toolbar/canvas/right" />
         {/* 「···」更多选项：历史记录入口（统一 usePopupAnchor + PopupLayer 浮层） */}
         <span className="flex-shrink-0">
           <button

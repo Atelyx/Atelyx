@@ -184,7 +184,8 @@ export function ProjectWorkspacePage() {
         >
           <LayoutTabs />
 
-            {/* 右操作区（常驻）：设置 + 全屏（ml-auto 贴右缘，窗口控制在其后） */}
+            {/* 右操作区（常驻）：设置 + 全屏（ml-auto 贴右缘，窗口控制在其后）。
+                设置是核心应用入口，恒宿主渲染、不随插件启停消失；外部插件经 titlebar/right 槽并列贡献 */}
             <div className="ml-auto flex-shrink-0 flex items-center" data-tauri-drag-region>
               {/* 插件贡献区：标题栏右操作区（list 槽，priority 降序；容器避让窗口拖拽） */}
               <span data-tauri-drag-region="false" className="flex items-center">

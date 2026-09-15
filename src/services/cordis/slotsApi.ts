@@ -12,9 +12,10 @@
 import { symbols } from "@atelyx/cordis";
 import type { ComponentType, ReactNode } from "react";
 import type { Context } from "@atelyx/cordis";
+import type { SlotCardinality } from "@/utils/cordis/slots";
 import { SLOT_DECLARATIONS } from "@/constants/slots";
 import type { SlotDeclaration } from "@/constants/slots";
-import { registerViewSlot, registerNodeSlot, registerEdgeSlot, registerTableViewSlot, registerUiSlot, registerSlotContrib } from "./slots";
+import { registerViewSlot, registerNodeSlot, registerEdgeSlot, registerTableViewSlot, registerUiSlot, registerSlotContrib, registerSlotDecoratorFor } from "./slots";
 import { pluginIdOf } from "./loader";
 import {
   registerPluginAppPage,
@@ -92,20 +93,22 @@ export interface RegisterThemeSettingOptions {
 }
 
 /** 通用 UI 区域注册载荷（已声明的具名槽位，如 toolbar/note/right、settings/files；list 槽多贡献有序，
- *  priority 降序）。右键菜单项见 RegisterMenuOptions。 */
+ *  priority 降序；single 槽如 empty/<viewKind> 可指定基数替换）。右键菜单项见 RegisterMenuOptions。 */
 export interface RegisterUiOptions {
   /** 槽名（须在 constants/slots 的声明表内，如 "toolbar/note/right"）。 */
   slot: string;
   /** 渲染组件（无 props 契约）。 */
   component: ComponentType;
-  /** 槽优先级（higher wins；list 槽排序用，缺省 0）。 */
+  /** 槽优先级（higher wins；list 槽排序 / single 槽决胜用，缺省 0）。 */
   priority?: number;
+  /** 基数（缺省 list；single 用于替换类槽位，如 empty/<viewKind> 空态替换——声明表基数为 single 的槽须显式指定）。 */
+  cardinality?: SlotCardinality;
 }
 
 /** 右键菜单项注册载荷（contextmenu/<target> 槽；list 多贡献，priority 降序）。 */
 export interface RegisterMenuOptions {
-  /** 菜单目标。须在 constants/slots 的声明表内（当前：`canvas`）——注册未声明的目标即失败并提示
-   *  可用目标。 */
+  /** 菜单目标。须在 constants/slots 的声明表内登记（canvas/node/file/folder/table-cell/
+   *  table-column/table-row/note-body/panel-tab/layout-tab）——注册未声明的目标即失败并提示可用目标。 */
   target: string;
   /** 菜单项文案。 */
   label: string;
@@ -115,7 +118,17 @@ export interface RegisterMenuOptions {
   priority?: number;
 }
 
-/** 插件 UI 注册服务（视图/节点/边/表格视图/设置项/应用页/命令/主题设置项/具名槽位/右键菜单）。 */
+/** 装饰器注册载荷（ctx.slots.decorate：包裹某槽渲染内容，用于修改宿主面板 UI）。 */
+export interface RegisterDecorateOptions {
+  /** 槽名（须在 constants/slots 的声明表内且可被装饰）。 */
+  slot: string;
+  /** 包裹组件（必须渲染 children——吞掉 children 即「吞掉宿主 UI」，会被校验剔除并回退宿主内容）。 */
+  wrapper: ComponentType<{ children?: ReactNode }>;
+  /** 槽优先级（higher wins；外层 = 高 priority，缺省 0）。 */
+  priority?: number;
+}
+
+/** 插件 UI 注册服务（视图/节点/边/表格视图/设置项/应用页/命令/主题设置项/具名槽位/右键菜单/装饰器）。 */
 export interface SlotsApi {
   registerView(opts: RegisterViewOptions): () => void;
   registerTableView(opts: RegisterTableViewOptions): () => void;
@@ -129,6 +142,9 @@ export interface SlotsApi {
   registerUi(opts: RegisterUiOptions): () => void;
   /** 向右键菜单贡献一个菜单项（label + 回调；list 槽多贡献有序）。 */
   registerMenu(opts: RegisterMenuOptions): () => void;
+  /** 以装饰器包裹某槽的渲染内容（修改宿主面板 UI 的正解；包装是建设性的，替换是破坏性的）。
+   *  装饰链按 priority 降序（外层 = 高 priority），随插件停用经 fiber 撤销。 */
+  decorate(opts: RegisterDecorateOptions): () => void;
   /** 宿主可贡献的槽位清单（声明表：key / 基数 / 载荷字段 / 用途）——插件据此发现能贡献的位置。 */
   list(): readonly SlotDeclaration[];
 }
@@ -181,7 +197,7 @@ export function createSlotsApi(): SlotsApi {
       if (typeof opts.slot !== "string" || opts.slot.length === 0) throw new Error("UI 槽需要非空槽名");
       const ctx = this.ctx;
       const pluginId = pluginIdOfCtx(ctx);
-      return ctx.effect(() => registerUiSlot(opts.slot, pluginId, { component: opts.component }, { priority: opts.priority ?? 0 }));
+      return ctx.effect(() => registerUiSlot(opts.slot, pluginId, { component: opts.component }, { priority: opts.priority ?? 0, cardinality: opts.cardinality }));
     },
     registerMenu(this: SlotsApiInstance, opts: RegisterMenuOptions): () => void {
       if (typeof opts.target !== "string" || opts.target.length === 0) throw new Error("菜单目标需要非空");
@@ -190,6 +206,13 @@ export function createSlotsApi(): SlotsApi {
       return ctx.effect(() =>
         registerSlotContrib(`contextmenu/${opts.target}`, pluginId, { label: opts.label, onClick: opts.onClick }, { cardinality: "list", priority: opts.priority ?? 0 }),
       );
+    },
+    decorate(this: SlotsApiInstance, opts: RegisterDecorateOptions): () => void {
+      if (typeof opts.slot !== "string" || opts.slot.length === 0) throw new Error("装饰器需要非空槽名");
+      if (typeof opts.wrapper !== "function") throw new Error("装饰器需要包裹组件");
+      const ctx = this.ctx;
+      const pluginId = pluginIdOfCtx(ctx);
+      return ctx.effect(() => registerSlotDecoratorFor(opts.slot, pluginId, opts.wrapper, { priority: opts.priority ?? 0 }));
     },
     registerSetting(this: SlotsApiInstance, opts: RegisterSettingOptions): () => void {
       if (typeof opts.key !== "string" || opts.key.length === 0) throw new Error("设置项需要非空 key");

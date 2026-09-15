@@ -27,6 +27,7 @@ export function TableView({ panelId }: { panelId: string }) {
   if (!currentTableFile) {
     return (
       <PanelPlaceholder
+        viewKind="table"
         icon={<TableIcon size={64} strokeWidth={1.5} />}
         title="打开表格"
         description="从左侧文件面板或搜索面板单击一个 .atb 表格开始编辑。"
