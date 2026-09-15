@@ -28,7 +28,7 @@ Atelyx 是插件化平台：插件 = 一个 git 仓库（市场侧以 GitHub 为
 | `ctx.services` | 服务发现：`ctx.services.list()` 返回当前已注册服务面（含提供者插件 id）；`ctx.services.get("foo")` 判空读取（可选依赖用，见 [ctx API](ctx-api.md)） |
 | `ctx.native` | 原始命令逃生舱：`ctx.native.invoke("command", args)` 调用未封装成 ctx 的 Rust 命令（敏感，进审计；见 [ctx API](ctx-api.md)） |
 | `ctx.events` | 领域事件总线：`ctx.events.on("canvas:changed", ...)` 订阅（`table:changed`/`vault:changed` 等，见 [ctx API](ctx-api.md)） |
-| `ctx.slots` | 注册面：`registerView`/`registerTableView`/`registerNode`/`registerEdge`/`registerUi`/`registerMenu`/`registerSetting`/`registerAppPage`/`registerCommand`/`registerThemeSetting`；`list()` 返回宿主可贡献的槽位声明表（见 [ctx API](ctx-api.md)） |
+| `ctx.slots` | 注册面：`registerView`/`registerTableView`/`registerNode`/`registerEdge`/`registerUi`/`registerMenu`/`registerSetting`/`registerAppPage`/`registerCommand`/`registerThemeSetting`；`declare`/`host` 声明并承载插件自有的槽位（见 [自定义槽位指南](custom-slots.md)）；`list()` 返回可贡献的槽位声明表（见 [ctx API](ctx-api.md)） |
 | `ctx.ai` | AI 会话与工具：`ctx.ai.chat(...)` 直连模型；`ctx.ai.registerTool(...)` 贡献模型可调用的工具 |
 | `ctx.effect` | 注册副作用（订阅/接线等），插件停用/卸载时自动撤销——**所有注册都应经它包裹** |
 
@@ -61,3 +61,5 @@ Atelyx 是插件化平台：插件 = 一个 git 仓库（市场侧以 GitHub 为
 本地目录来源的插件在管理页显示「本地目录」徽标且无更新按钮（本身即最新）；Git 来源显示「Git」徽标。可更新的插件成功更新后会保留一代旧代码，插件详情或行右键可执行一次回退；回退只替换代码并保留插件数据，成功后清空保留版本。
 
 [发布检查清单 →](publishing.md)
+
+更多指南：[清单与依赖打包](manifest.md)、[ctx API 参考](ctx-api.md)、[自定义槽位](custom-slots.md)。

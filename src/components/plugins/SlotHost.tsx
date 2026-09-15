@@ -10,7 +10,7 @@
  * 每贡献包 ErrorBoundary（单个崩溃不拖垮宿主）。
  */
 import { Component, useLayoutEffect, useRef, useState, type ComponentType, type ReactNode } from "react";
-import { listDecorators, listSlot, resolveSlot, decoratorEpochOf } from "@/services/cordis/slots";
+import { listDecorators, listSlot, resolveSlot, decoratorEpochOf, findSlotDeclarationRuntime } from "@/services/cordis/slots";
 import type { SlotContribution } from "@/utils/cordis/slots";
 import type { UiSlotPayload } from "@/services/cordis/slots";
 import { usePluginStore } from "@/stores/pluginStore";
@@ -134,6 +134,38 @@ export function EmptyStateMount({ viewKind, fallback }: { viewKind: string; fall
       <ErrorBoundary key={winner.id}>
         <Comp />
       </ErrorBoundary>
+    </SlotDecoratedContent>
+  );
+}
+
+/** 插件侧槽位渲染宿主（ctx.slots.host(slot) 返回的组件）：按声明基数渲染 single 胜出者或全部 list 贡献，
+ *  内容经 SlotDecoratedContent 被装饰器链包裹（与宿主 SlotListMount 同语义，插件面板内复用）。 */
+export function PluginSlotHost({ slot }: { slot: string }): ReactNode {
+  usePluginStore((s) => s.slotRevisions[slot] ?? 0);
+  const decl = findSlotDeclarationRuntime(slot);
+  // host() 调用时已保证声明存在；此处声明缺失只发生在声明方停用后——无契约可依，渲染空。
+  if (!decl) return null;
+  if (decl.cardinality === "single") {
+    const winner = resolveSlot(slot);
+    if (!winner) return null;
+    const Comp = (winner.payload as { component?: ComponentType }).component;
+    if (!Comp) return null;
+    return (
+      <SlotDecoratedContent slot={slot}>
+        <ErrorBoundary key={winner.id}>
+          <Comp />
+        </ErrorBoundary>
+      </SlotDecoratedContent>
+    );
+  }
+  const contribs = listSlot(slot) as SlotContribution<UiSlotPayload>[];
+  if (contribs.length === 0) return null;
+  return (
+    <SlotDecoratedContent slot={slot}>
+      {contribs.map((c) => {
+        const Comp = c.payload.component;
+        return <ErrorBoundary key={c.id}>{Comp ? <Comp /> : null}</ErrorBoundary>;
+      })}
     </SlotDecoratedContent>
   );
 }

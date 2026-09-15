@@ -6,7 +6,7 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { SLOT_DECLARATIONS, findSlotDeclaration, slotPayloadShape, suggestSlotNames } from "@/constants/slots";
+import { SLOT_DECLARATIONS, findSlotDeclaration, slotPayloadShape } from "@/constants/slots";
 import {
   listSlot,
   registeredSlots,
@@ -93,14 +93,6 @@ describe("槽位声明表", () => {
     expect(() => {
       (target as unknown as { scope: string }).scope = "篡改";
     }).toThrow();
-  });
-
-  it("近似槽名提示：同族优先、按公共前缀排序、limit 截断", () => {
-    expect(suggestSlotNames("toolbar/notes/right")[0]).toBe("toolbar/note/right");
-    expect(suggestSlotNames("settings/unknown")).toHaveLength(3);
-    expect(suggestSlotNames("settings/unknown", 1)).toHaveLength(1);
-    expect(suggestSlotNames("toolbar/files", 0)).toEqual([]);
-    expect(suggestSlotNames("nosuchfamily/x")).toEqual([]);
   });
 });
 

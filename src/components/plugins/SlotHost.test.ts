@@ -11,11 +11,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { act } from "react";
 import React from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { SlotDecoratedContent } from "./SlotHost";
+import { SlotDecoratedContent, PluginSlotHost } from "./SlotHost";
 import {
   listDecorators,
+  registerSlotContrib,
   registerSlotDecoratorFor,
   unregisterSlotDecorator,
+  declareSlot,
 } from "@/services/cordis/slots";
 
 // React 18 的 act() 需显式声明测试环境（无全局 setup 文件，测试内声明）。
@@ -38,8 +40,16 @@ function mountDecorated(): HTMLDivElement {
   return container;
 }
 
+/** 已声明的运行时槽位与贡献撤销跟踪（afterEach 精确撤销）。 */
+const declaredRevokes: (() => void)[] = [];
+const contribRevokes: (() => void)[] = [];
+
 afterEach(async () => {
   for (const d of listDecorators("toolbar/note/right")) unregisterSlotDecorator(d.id);
+  for (const off of declaredRevokes) off();
+  declaredRevokes.length = 0;
+  for (const off of contribRevokes) off();
+  contribRevokes.length = 0;
   if (root) {
     await act(async () => {
       root!.unmount();
@@ -174,5 +184,60 @@ describe("SlotDecoratedContent 装饰器校验", () => {
     // 纪元号变化 → 剔除记录复位 → 修复后的装饰器重新包裹内容。
     expect(host.querySelector("#wrapper")).not.toBeNull();
     expect(host.querySelector("#wrapper")?.querySelector("#content")).not.toBeNull();
+  });
+});
+
+describe("PluginSlotHost 插件侧槽位宿主", () => {
+  it("list 槽：渲染全部贡献；贡献撤销后重渲染为空", async () => {
+    declaredRevokes.push(
+      declareSlot({ key: "toolbar/timeline/play", cardinality: "list", required: ["component"] }, "com.a"),
+    );
+    const off = registerSlotContrib(
+      "toolbar/timeline/play",
+      "com.b",
+      { component: () => React.createElement("div", { id: "contrib-b" }, "B") },
+      { cardinality: "list" },
+    );
+    contribRevokes.push(off);
+    const host = mountDecorated();
+    await act(async () => {
+      root!.render(React.createElement(PluginSlotHost, { slot: "toolbar/timeline/play" }));
+    });
+    expect(host.querySelector("#contrib-b")).not.toBeNull();
+
+    // 贡献撤销 → 重新渲染 → 空（声明仍在，但无贡献可渲染）。
+    off();
+    await act(async () => {
+      root!.render(React.createElement(PluginSlotHost, { slot: "toolbar/timeline/play" }));
+    });
+    expect(host.querySelector("#contrib-b")).toBeNull();
+  });
+
+  it("single 槽：只渲染胜出者（高 priority）", async () => {
+    declaredRevokes.push(
+      declareSlot({ key: "gutter/custom", cardinality: "single", required: ["component"] }, "com.a"),
+    );
+    contribRevokes.push(
+      registerSlotContrib(
+        "gutter/custom",
+        "com.low",
+        { component: () => React.createElement("div", { id: "low" }, "低") },
+        { cardinality: "single", priority: 1 },
+      ),
+    );
+    contribRevokes.push(
+      registerSlotContrib(
+        "gutter/custom",
+        "com.high",
+        { component: () => React.createElement("div", { id: "high" }, "高") },
+        { cardinality: "single", priority: 5 },
+      ),
+    );
+    const host = mountDecorated();
+    await act(async () => {
+      root!.render(React.createElement(PluginSlotHost, { slot: "gutter/custom" }));
+    });
+    expect(host.querySelector("#high")).not.toBeNull();
+    expect(host.querySelector("#low")).toBeNull();
   });
 });

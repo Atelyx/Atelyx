@@ -42,7 +42,7 @@ ctx.effect(() => {
 | `ctx.history` | `list(kind: HistoryKind, file: string): Promise<HistoryVersion[]>` / `rollback(kind: HistoryKind, file: string, seq: number): Promise<void>` / `repoHistory(): RepoHistoryResult | null` | 领域历史服务（笔记/画布/表格的版本历史读 + 回滚）。 |
 | `ctx.layout` | `activeLayoutId(): string | null` / `layouts(): WorkspaceLayout[]` / `addView(panelId: string, view: string): Promise<LayoutOpResult>` / `op(op: LayoutOp): Promise<LayoutOpResult>` | 布局服务（读取布局镜像 + 发布布局操作；`op` 与 Rust `LayoutOp` 逐字段对齐，改布局一律经 `layout_op`，布局权威在 Rust）。 |
 | `ctx.uiState` | `read(): AppUiState` | 应用级 UI 使用状态读服务（只读非布局字段 + 布局镜像）。 |
-| `ctx.slots` | `registerView(opts: RegisterViewOptions): () => void` / `registerTableView(opts: RegisterTableViewOptions): () => void` / `registerNode(opts: RegisterNodeOptions): () => void` / `registerEdge(opts: RegisterEdgeOptions): () => void` / `registerSetting(opts: RegisterSettingOptions): () => void` / `registerAppPage(opts: RegisterAppPageOptions): () => void` / `registerCommand(opts: RegisterCommandOptions): () => void` / `registerThemeSetting(opts: RegisterThemeSettingOptions): () => void` / `registerUi(opts: RegisterUiOptions): () => void` / `registerMenu(opts: RegisterMenuOptions): () => void` / `decorate(opts: RegisterDecorateOptions): () => void` / `list(): readonly SlotDeclaration[]` | 插件 UI 注册服务（视图/节点/边/表格视图/设置项/应用页/命令/主题设置项/具名槽位/右键菜单/装饰器）。 |
+| `ctx.slots` | `registerView(opts: RegisterViewOptions): () => void` / `registerTableView(opts: RegisterTableViewOptions): () => void` / `registerNode(opts: RegisterNodeOptions): () => void` / `registerEdge(opts: RegisterEdgeOptions): () => void` / `registerSetting(opts: RegisterSettingOptions): () => void` / `registerAppPage(opts: RegisterAppPageOptions): () => void` / `registerCommand(opts: RegisterCommandOptions): () => void` / `registerThemeSetting(opts: RegisterThemeSettingOptions): () => void` / `registerUi(opts: RegisterUiOptions): () => void` / `registerMenu(opts: RegisterMenuOptions): () => void` / `decorate(opts: RegisterDecorateOptions): () => void` / `declare(opts: RegisterDeclareOptions): () => void` / `host(slot: string): () => ReactNode` / `list(): readonly SlotDeclaration[]` | 插件 UI 注册服务（视图/节点/边/表格视图/设置项/应用页/命令/主题设置项/具名槽位/右键菜单/装饰器）。 |
 | `ctx.services` | `list(): ServiceInfo[]` / `get(name: K): Context[K] | undefined` | 服务注册表查询服务（ctx.services）：插件据此发现当前真实可用的服务面与提供者。 宿主内核提供平台服务（无 provider）；插件经 ctx.root.provide 提供的服务带提供者插件 id。 |
 | `ctx.native` | `invoke(command: string, args?: Record<string, unknown>): Promise<unknown>` | 原始 Rust 命令逃生舱（ctx.native.invoke）：未封装的服务能力经此触达，调用进审计。 |
 <!-- generated:ctx-api:services:end -->
@@ -221,6 +221,35 @@ ctx.slots.registerMenu({
   两者不可混用。
 - 菜单目标须先在声明表登记（`contextmenu/<target>`）：注册未声明的目标即失败并提示可用目标。
   当前宿主渲染点为 `canvas`，可用目标见 `ctx.slots.list()`。
+
+### 插件自声明槽位 `declare` / `host`
+
+插件可以在自己的面板里声明新槽位给其他插件用——槽位注册表成为全局组合织物，UI 扩展不再有宿主/插件分界。
+完整演练见 [自定义槽位指南](custom-slots.md)。
+
+```ts
+// 插件 A：声明 + 承载
+ctx.slots.declare({
+  key: "toolbar/com.example.panel",   // 前缀声明：toolbar/com.example.panel/* 下任意槽可被贡献；也可写精确 key
+  prefix: true,
+  cardinality: "list",       // single 为胜出、list 为多贡献有序（贡献方须按此基数注册）
+  required: ["component"],   // 载荷契约：贡献方必须提供 component 才会被 host 渲染
+});
+const PanelToolbarSlot = ctx.slots.host("toolbar/com.example.panel/export"); // 返回渲染组件
+```
+
+```ts
+// 插件 B：贡献（同一应用内另一插件）
+ctx.slots.registerUi({ slot: "toolbar/com.example.panel/export", component: ExportButton });
+```
+
+- **先到先得**：key 未被宿主或他插件占用即可声明；与既有声明（同名 / 前缀吞并 / 落入他人前缀覆盖集）
+  重叠即失败并**指名占用者插件 id**。宿主已声明的 key 与开放前缀受保护，声明与之重叠同样失败。
+- 声明随插件停用撤销；对声明槽的贡献与声明各自独立撤销——停用声明方后他插件再向该槽贡献会失败
+  （「未声明的槽位」可见，不静默）。
+- `host(slot)` 返回 React 组件（list = 全部贡献按 priority 降序、single = 胜出者），在插件自己渲染的
+  界面里承载他插件贡献；调用时槽须已声明（宿主插件先 `declare` 后 `host`）。贡献按声明的载荷契约校验。
+- 声明同样出现在 `ctx.slots.list()`（合并视图含宿主声明表与插件运行时声明），其他插件可发现并贡献。
 
 ## AI 工具：`ctx.ai.registerTool`
 

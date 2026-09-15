@@ -4,7 +4,9 @@
  * 内核服务（kernel/canvas/table/note/chat/history/layout/uiState）不 import store——pluginStore 与领域 store 经本模块把
  * 当前仓库/画布/表格/协作/ai 配置等运行时数据注入插件面服务；未接线（未进仓/未打开）时
  * getter 返回 null，服务侧据此抛「能力未就绪」。
+ * 组件宿主（ctx.slots.host 返回的槽位渲染组件）同样经本模块注入——services 层不 import components。
  */
+import type { ComponentType } from "react";
 import type {
   AppUiState,
   CellValue,
@@ -305,5 +307,22 @@ export function setPluginUiStateAccess(access: PluginUiStateAccess | null): void
 /** 读取 UI 状态访问（ctx.uiState 服务消费；未接线 = null）。 */
 export function getPluginUiStateAccess(): PluginUiStateAccess | null {
   return uiStateAccess;
+}
+
+/** 槽位宿主组件 props（ctx.slots.host(slot) 返回组件的注入载体：按槽渲染贡献）。 */
+export interface PluginSlotHostProps {
+  slot: string;
+}
+
+let slotHostComponent: ComponentType<PluginSlotHostProps> | null = null;
+
+/** 注入/复位槽位宿主组件（pluginStore.load 时接线；null 复位供测试）。 */
+export function setPluginSlotHostComponent(comp: ComponentType<PluginSlotHostProps> | null): void {
+  slotHostComponent = comp;
+}
+
+/** 读取槽位宿主组件（ctx.slots.host 服务消费；未接线 = null）。 */
+export function getPluginSlotHostComponent(): ComponentType<PluginSlotHostProps> | null {
+  return slotHostComponent;
 }
 

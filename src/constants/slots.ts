@@ -7,7 +7,7 @@
  * 开放 kind 槽（view/node/edge/tableview）按前缀放行：插件可注册任意 kind/type 出现在「添加视图」
  * 菜单与画布节点集合里，这是既有的开放语义，不做逐项白名单。
  * 新增宿主渲染位置时在此登记（缺登记 = 该位置无法被插件贡献）。
- * 表与元素均深冻结：`ctx.slots.list()` 暴露同一引用，冻结防插件运行时改写全局校验依据。
+ * 表与元素均深冻结：`ctx.slots.list()` 暴露「本表 + 插件运行时声明」的合并冻结视图，防插件运行时改写全局校验依据。
  */
 import type { SlotCardinality } from "@/utils/cordis/slots";
 
@@ -147,7 +147,7 @@ const DECLARATIONS: readonly SlotDeclaration[] = [
   },
 ];
 
-/** 槽位声明清单（深冻结：`ctx.slots.list()` 暴露同一引用，冻结防运行时改写）。 */
+/** 宿主槽位声明清单（深冻结；`ctx.slots.list()` 在其上合并插件运行时声明——见 services/cordis/slots）。 */
 export const SLOT_DECLARATIONS: readonly SlotDeclaration[] = Object.freeze(
   DECLARATIONS.map((decl) =>
     Object.freeze({
@@ -172,28 +172,4 @@ export function findSlotDeclaration(slot: string): SlotDeclaration | undefined {
   return SLOT_DECLARATIONS.find(
     (d) => d.prefix === true && slot.startsWith(`${d.key}/`) && slot.length > d.key.length + 1,
   );
-}
-
-/** 近似槽名提示（同族候选按与目标槽名的公共前缀长度降序；注册失败时的可读原因用）。 */
-export function suggestSlotNames(slot: string, limit = 3): string[] {
-  const head = slotHead(slot);
-  const take = Math.max(0, Math.trunc(limit));
-  return SLOT_DECLARATIONS.filter((d) => !d.prefix && d.key.startsWith(`${head}/`))
-    .map((d) => d.key)
-    .sort((a, b) => commonPrefixLength(b, slot) - commonPrefixLength(a, slot))
-    .slice(0, take);
-}
-
-/** 槽名首段（`toolbar/note/right` → `toolbar`；无分隔符时取原名）。 */
-function slotHead(slot: string): string {
-  const at = slot.indexOf("/");
-  return at === -1 ? slot : slot.slice(0, at);
-}
-
-/** 两串公共前缀长度。 */
-function commonPrefixLength(a: string, b: string): number {
-  const max = Math.min(a.length, b.length);
-  let i = 0;
-  while (i < max && a[i] === b[i]) i += 1;
-  return i;
 }

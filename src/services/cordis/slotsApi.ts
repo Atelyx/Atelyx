@@ -10,13 +10,26 @@
  * `list()` 暴露该声明表供插件发现可贡献的位置。
  */
 import { symbols } from "@atelyx/cordis";
+import { createElement } from "react";
 import type { ComponentType, ReactNode } from "react";
 import type { Context } from "@atelyx/cordis";
 import type { SlotCardinality } from "@/utils/cordis/slots";
-import { SLOT_DECLARATIONS } from "@/constants/slots";
 import type { SlotDeclaration } from "@/constants/slots";
-import { registerViewSlot, registerNodeSlot, registerEdgeSlot, registerTableViewSlot, registerUiSlot, registerSlotContrib, registerSlotDecoratorFor } from "./slots";
+import {
+  registerViewSlot,
+  registerNodeSlot,
+  registerEdgeSlot,
+  registerTableViewSlot,
+  registerUiSlot,
+  registerSlotContrib,
+  registerSlotDecoratorFor,
+  declareSlot,
+  findSlotDeclarationRuntime,
+  suggestSlotNamesRuntime,
+  allSlotDeclarations,
+} from "./slots";
 import { pluginIdOf } from "./loader";
+import { getPluginSlotHostComponent } from "./access";
 import {
   registerPluginAppPage,
   registerPluginCommand,
@@ -128,6 +141,28 @@ export interface RegisterDecorateOptions {
   priority?: number;
 }
 
+/** 插件自声明槽位载荷（ctx.slots.declare）：key 先到先得——未被宿主或他插件占用即可声明，
+ *  宿主已声明的 key 与开放前缀受保护（冲突抛错指名占用者）。声明随插件停用撤销；
+ *  其他插件可向声明槽贡献，声明方经 host(slot) 在自己面板内渲染这些贡献。 */
+export interface RegisterDeclareOptions {
+  /** 槽名或前缀名（如 "toolbar/timeline/play"；prefix=true 时写 "toolbar/timeline"）。 */
+  key: string;
+  /** 前缀放行（`<key>/<任意非空>` 均合法，仿宿主开放 kind 槽语义）。 */
+  prefix?: boolean;
+  /** 基数（single 胜出 / list 多贡献有序；贡献方须按此基数注册）。 */
+  cardinality: SlotCardinality;
+  /** 必需载荷字段（贡献方须提供；应含 "component" 才能被 host(slot) 渲染）。 */
+  required: string[];
+  /** 可选载荷字段（与 required 不重叠）。 */
+  optional?: string[];
+  /** 渲染位置（缺省 = 插件声明）。 */
+  scope?: string;
+  /** 用途说明（仅当比 scope 多出信息时才写）。 */
+  summary?: string;
+  /** 是否可被装饰（缺省可装饰）。 */
+  decoratable?: boolean;
+}
+
 /** 插件 UI 注册服务（视图/节点/边/表格视图/设置项/应用页/命令/主题设置项/具名槽位/右键菜单/装饰器）。 */
 export interface SlotsApi {
   registerView(opts: RegisterViewOptions): () => void;
@@ -145,7 +180,14 @@ export interface SlotsApi {
   /** 以装饰器包裹某槽的渲染内容（修改宿主面板 UI 的正解；包装是建设性的，替换是破坏性的）。
    *  装饰链按 priority 降序（外层 = 高 priority），随插件停用经 fiber 撤销。 */
   decorate(opts: RegisterDecorateOptions): () => void;
-  /** 宿主可贡献的槽位清单（声明表：key / 基数 / 载荷字段 / 用途）——插件据此发现能贡献的位置。 */
+  /** 声明一个新的槽位（先到先得：未被宿主或他插件占用即可声明；宿主槽位受保护）。
+   *  声明随插件停用撤销；其他插件可向声明槽贡献，声明方经 host(slot) 在自己面板内渲染。 */
+  declare(opts: RegisterDeclareOptions): () => void;
+  /** 渲染某槽位（已声明的宿主槽或插件槽）的贡献，返回 React 组件：
+   *  list = 全部贡献按 priority 降序，single = 胜出者；供插件在自己面板内承载他插件贡献。
+   *  调用时槽须已声明（宿主插件先 declare 后 host；装配顺序确定，跨插件托管须声明方先挂载）。 */
+  host(slot: string): () => ReactNode;
+  /** 可贡献的槽位清单（宿主声明表 + 插件运行时声明的合并冻结视图）——插件据此发现能贡献的位置。 */
   list(): readonly SlotDeclaration[];
 }
 
@@ -214,6 +256,25 @@ export function createSlotsApi(): SlotsApi {
       const pluginId = pluginIdOfCtx(ctx);
       return ctx.effect(() => registerSlotDecoratorFor(opts.slot, pluginId, opts.wrapper, { priority: opts.priority ?? 0 }));
     },
+    declare(this: SlotsApiInstance, opts: RegisterDeclareOptions): () => void {
+      if (typeof opts.key !== "string" || opts.key.length === 0) throw new Error("槽位声明需要非空 key");
+      const ctx = this.ctx;
+      const pluginId = pluginIdOfCtx(ctx);
+      // 声明抛错随 apply 传播 → 该行 failed（冲突 / 覆盖宿主槽位均可读原因定位）。
+      return ctx.effect(() => declareSlot(opts, pluginId));
+    },
+    host(this: SlotsApiInstance, slot: string): () => ReactNode {
+      if (typeof slot !== "string" || slot.length === 0) throw new Error("槽位宿主需要非空槽名");
+      // 未声明即拒绝：托管一个不存在的槽是编程错误，静默渲染空白会掩盖拼写错误。
+      if (!findSlotDeclarationRuntime(slot)) {
+        const hints = suggestSlotNamesRuntime(slot);
+        const hint = hints.length > 0 ? `；是否想托管：${hints.join("、")}` : "（宿主未渲染该位置）";
+        throw new Error(`未声明的槽位「${slot}」${hint}`);
+      }
+      const Host = getPluginSlotHostComponent();
+      if (!Host) throw new Error("槽位宿主组件未就绪");
+      return () => createElement(Host, { slot });
+    },
     registerSetting(this: SlotsApiInstance, opts: RegisterSettingOptions): () => void {
       if (typeof opts.key !== "string" || opts.key.length === 0) throw new Error("设置项需要非空 key");
       const ctx = this.ctx;
@@ -239,7 +300,7 @@ export function createSlotsApi(): SlotsApi {
       return ctx.effect(() => registerPluginThemeSetting(pluginId, opts.key, opts.label, opts.component));
     },
     list(): readonly SlotDeclaration[] {
-      return SLOT_DECLARATIONS;
+      return allSlotDeclarations();
     },
   };
   Object.defineProperty(api, symbols.tracker, { value: { property: "ctx" } });

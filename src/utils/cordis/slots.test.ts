@@ -5,10 +5,14 @@ import { describe, expect, it, afterEach } from "vitest";
 import type { SlotContribution, SlotDecorator } from "@/utils/cordis/slots";
 import { pickSlotWinner, sortSlotList, sortSlotDecorators } from "@/utils/cordis/slots";
 import {
+  allSlotDeclarations,
+  declareSlot,
+  findSlotDeclarationRuntime,
   listDecorators,
   listSlot,
   registerNodeSlot,
   registerSlot,
+  registerSlotContrib,
   registerSlotDecoratorFor,
   registerTableViewSlot,
   registerUiSlot,
@@ -18,6 +22,7 @@ import {
   resolveSlot,
   resolveTableViewSlot,
   resolveViewKind,
+  suggestSlotNamesRuntime,
   tableViewKinds,
   unregisterSlot,
   unregisterSlotDecorator,
@@ -60,11 +65,21 @@ function regDeco(partial: Partial<SlotDecorator> & { id: string }): void {
   registeredDecos.push(d.id);
 }
 
+/** 已声明的运行时槽位撤销跟踪（afterEach 精确撤销，防跨用例污染声明注册表）。 */
+const declaredSlotRevokes: (() => void)[] = [];
+function regDeclare(opts: Parameters<typeof declareSlot>[0], pluginId = "p"): () => void {
+  const off = declareSlot(opts, pluginId);
+  declaredSlotRevokes.push(off);
+  return off;
+}
+
 afterEach(() => {
   for (const id of registered) unregisterSlot(id);
   registered.length = 0;
   for (const id of registeredDecos) unregisterSlotDecorator(id);
   registeredDecos.length = 0;
+  for (const off of declaredSlotRevokes) off();
+  declaredSlotRevokes.length = 0;
 });
 
 describe("slots 纯核心", () => {
@@ -185,5 +200,125 @@ describe("slots 注册表", () => {
     expect(listDecorators("toolbar/note/right")).toHaveLength(2);
     expect(() => registerSlotDecoratorFor("toolbar/none", "p", () => null)).toThrow(/未声明的槽位/);
     expect(() => registerSlotDecoratorFor("contextmenu/canvas", "p", () => null)).toThrow(/不可被装饰/);
+  });
+});
+
+describe("插件自声明槽位（运行时声明注册表）", () => {
+  it("declareSlot 精确 key：findSlotDeclarationRuntime 命中；撤销后消失；静态声明优先不受影响", () => {
+    const off = regDeclare({ key: "toolbar/timeline/play", cardinality: "list", required: ["component"] });
+    const decl = findSlotDeclarationRuntime("toolbar/timeline/play");
+    expect(decl?.cardinality).toBe("list");
+    expect(decl?.required).toEqual(["component"]);
+    expect(decl?.scope).toContain("插件声明");
+    // 静态声明不受运行时影响
+    expect(findSlotDeclarationRuntime("toolbar/note/right")?.key).toBe("toolbar/note/right");
+    off();
+    expect(findSlotDeclarationRuntime("toolbar/timeline/play")).toBeUndefined();
+  });
+
+  it("declareSlot 前缀放行：命中任意 <key>/<非空>；裸前缀与空 kind 不命中", () => {
+    regDeclare({ key: "toolbar/timeline", prefix: true, cardinality: "list", required: ["component"] });
+    expect(findSlotDeclarationRuntime("toolbar/timeline/play")?.key).toBe("toolbar/timeline");
+    expect(findSlotDeclarationRuntime("toolbar/timeline/controls/export")?.key).toBe("toolbar/timeline");
+    expect(findSlotDeclarationRuntime("toolbar/timeline")).toBeUndefined();
+    expect(findSlotDeclarationRuntime("toolbar/timeline/")).toBeUndefined();
+  });
+
+  it("宿主保护：宿主固定槽 / 宿主开放前缀下的槽 / 吞并宿主 key 的宽前缀均拒绝", () => {
+    expect(() => regDeclare({ key: "toolbar/note/right", cardinality: "list", required: ["component"] })).toThrow(
+      /宿主槽位/,
+    );
+    expect(() =>
+      regDeclare({ key: "view/custom", cardinality: "single", required: ["label"] }),
+    ).toThrow(/宿主槽位/);
+    expect(() =>
+      regDeclare({ key: "toolbar", prefix: true, cardinality: "list", required: ["component"] }),
+    ).toThrow(/宿主槽位/);
+  });
+
+  it("先到先得：同名 / 前缀吞并已占 key / 子前缀均拒绝并指名占用者", () => {
+    regDeclare({ key: "toolbar/timeline/play", cardinality: "list", required: ["component"] }, "com.a");
+    expect(() =>
+      regDeclare({ key: "toolbar/timeline/play", cardinality: "list", required: ["component"] }, "com.b"),
+    ).toThrow(/已被插件 com\.a 声明/);
+    expect(() =>
+      regDeclare({ key: "toolbar/timeline", prefix: true, cardinality: "list", required: ["component"] }, "com.b"),
+    ).toThrow(/已被插件 com\.a 声明/);
+  });
+
+  it("先到先得（前缀先占）：前缀覆盖集内的精确 key / 子前缀被拒", () => {
+    regDeclare({ key: "toolbar/timeline", prefix: true, cardinality: "list", required: ["component"] }, "com.a");
+    expect(() =>
+      regDeclare({ key: "toolbar/timeline/play", cardinality: "list", required: ["component"] }, "com.b"),
+    ).toThrow(/已被插件 com\.a 声明/);
+    expect(() =>
+      regDeclare({ key: "toolbar/timeline/controls", prefix: true, cardinality: "list", required: ["component"] }, "com.b"),
+    ).toThrow(/已被插件 com\.a 声明/);
+  });
+
+  it("互不重叠的声明可共存（同家族不同分支 / 不同家族）", () => {
+    regDeclare({ key: "toolbar/timeline/play", cardinality: "list", required: ["component"] }, "com.a");
+    regDeclare({ key: "toolbar/timeline/controls", cardinality: "list", required: ["component"] }, "com.b");
+    regDeclare({ key: "gutter/custom", cardinality: "single", required: ["component"] }, "com.c");
+    expect(findSlotDeclarationRuntime("toolbar/timeline/play")).toBeDefined();
+    expect(findSlotDeclarationRuntime("toolbar/timeline/controls")).toBeDefined();
+    expect(findSlotDeclarationRuntime("gutter/custom")).toBeDefined();
+  });
+
+  it("声明参数校验：空/畸形 key、无必需字段、字段重复与跨清单重叠、非法基数", () => {
+    expect(() => regDeclare({ key: "", cardinality: "list", required: ["component"] })).toThrow(/非空 key/);
+    expect(() => regDeclare({ key: "/toolbar/x", cardinality: "list", required: ["component"] })).toThrow(/斜杠/);
+    expect(() => regDeclare({ key: "toolbar/x/", cardinality: "list", required: ["component"] })).toThrow(/斜杠/);
+    expect(() => regDeclare({ key: "toolbar//x", cardinality: "list", required: ["component"] })).toThrow(/斜杠/);
+    expect(() => regDeclare({ key: "toolbar/x", cardinality: "list", required: [] })).toThrow(/至少一个必需字段/);
+    expect(() =>
+      regDeclare({ key: "toolbar/x", cardinality: "list", required: ["component", "component"] }),
+    ).toThrow(/重复/);
+    expect(() =>
+      regDeclare({ key: "toolbar/x", cardinality: "list", required: ["component"], optional: ["component"] }),
+    ).toThrow(/重叠/);
+    expect(() =>
+      regDeclare({ key: "toolbar/x", cardinality: "both" as never, required: ["component"] }),
+    ).toThrow(/基数/);
+  });
+
+  it("allSlotDeclarations：静态 + 运行时合并、冻结视图元素不可改写", () => {
+    regDeclare({ key: "toolbar/timeline/play", cardinality: "list", required: ["component"] });
+    const all = allSlotDeclarations();
+    expect(Object.isFrozen(all)).toBe(true);
+    const runtimeDecl = all.find((d) => d.key === "toolbar/timeline/play");
+    expect(runtimeDecl).toBeDefined();
+    expect(Object.isFrozen(runtimeDecl)).toBe(true);
+    expect(() => {
+      (runtimeDecl as unknown as { scope: string }).scope = "篡改";
+    }).toThrow();
+    expect(all.some((d) => d.key === "toolbar/note/right")).toBe(true);
+  });
+
+  it("贡献注册命中运行时声明：基数与载荷契约校验生效；声明撤销后注册失败", () => {
+    regDeclare({ key: "toolbar/timeline/play", cardinality: "list", required: ["component"] }, "com.a");
+    const off = registerSlotContrib("toolbar/timeline/play", "com.b", { component: () => null }, { cardinality: "list" });
+    expect(listSlot("toolbar/timeline/play")).toHaveLength(1);
+    off();
+    expect(listSlot("toolbar/timeline/play")).toEqual([]);
+    expect(() =>
+      registerSlotContrib("toolbar/timeline/play", "com.b", { component: () => null }, { cardinality: "single" }),
+    ).toThrow(/基数/);
+    expect(() => registerSlotContrib("toolbar/timeline/play", "com.b", {}, { cardinality: "list" })).toThrow(
+      /缺少字段：component/,
+    );
+    for (const revoke of declaredSlotRevokes) revoke();
+    declaredSlotRevokes.length = 0;
+    expect(() =>
+      registerSlotContrib("toolbar/timeline/play", "com.b", { component: () => null }, { cardinality: "list" }),
+    ).toThrow(/未声明的槽位/);
+  });
+
+  it("suggestSlotNamesRuntime：静态与运行时提示合并、去重、limit 截断", () => {
+    regDeclare({ key: "toolbar/timeline/play", cardinality: "list", required: ["component"] });
+    expect(suggestSlotNamesRuntime("toolbar/timeline/pla")).toContain("toolbar/timeline/play");
+    // 静态家族提示仍可用
+    expect(suggestSlotNamesRuntime("toolbar/notes/right")[0]).toBe("toolbar/note/right");
+    expect(suggestSlotNamesRuntime("toolbar/timeline/pla", 1)).toHaveLength(1);
   });
 });

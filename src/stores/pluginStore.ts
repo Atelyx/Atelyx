@@ -8,8 +8,9 @@
  * 挂载实现按「入口解析方式」判定——行有落位目录则读该包磁盘入口，否则经随应用分发实现注册表取编译实现。
  * 「谁替换谁」由插件在 apply 里经 ctx.slots 的 priority / inject 声明，组合层不提供行级覆盖。
  * 加载时机：应用挂载/进仓后 `load()` 一次——先按默认组合清单播种并取行，再按装配顺序拉起启用行。
- * 例外说明：本 store 静态 import `components/plugins/cordis/builtins.tsx`（随应用分发插件注册表，
- * 组件层承载组件引用——services 不 import components 的约束所致）；该边经头注释文档化，
+ * 例外说明：本 store 静态 import `components/plugins/cordis/builtins.tsx`（随应用分发插件注册表）与
+ * `components/plugins/SlotHost`（插件侧槽位渲染宿主，经注入点接进内核 slots 服务）——组件层承载组件引用
+ * （services 不 import components 的约束所致）；该边经头注释文档化，
  * 环上跨模块访问均为函数体内延迟求值，无顶层 getState/useXxx（新增顶层触碰会 TDZ 崩溃）。
  */
 import { create } from "zustand";
@@ -45,6 +46,7 @@ import {
   setPluginHistoryAccess,
   setPluginLayoutAccess,
   setPluginNotificationAccess,
+  setPluginSlotHostComponent,
   setPluginUiStateAccess,
   setPluginVaultWriteAccess,
   setSettingsAccess,
@@ -66,6 +68,7 @@ import {
   DEFAULT_COMPOSITION,
   builtinManifest,
 } from "@/components/plugins/cordis/builtins";
+import { PluginSlotHost } from "@/components/plugins/SlotHost";
 import { getKernel } from "@/services/cordis/kernel";
 import { installCommandHotkeys } from "@/services/cordis/commandHotkeys";
 import { mountPlugin, unmountAll, unmountPlugin } from "@/services/cordis/loader";
@@ -398,6 +401,15 @@ function ensureUiStateAccess(): void {
   });
 }
 
+/** 槽位宿主接线守卫：把插件侧槽位渲染宿主（ctx.slots.host 返回的组件）注入内核 slots 服务（幂等一次）。
+ *  宿主组件在 components/plugins/SlotHost，services 层经注入点读取——环上访问全在函数体内延迟求值。 */
+let slotHostWired = false;
+function ensureSlotHostAccess(): void {
+  if (slotHostWired) return;
+  slotHostWired = true;
+  setPluginSlotHostComponent(PluginSlotHost);
+}
+
 /** 能力变更事件接线守卫：内核侧 store 变更 → emitPluginEvent 通知订阅插件（幂等一次）。
  *  canvas/table 变更事件随各自插件启停注册（见 canvasStore/tableStore 的 register*PluginWiring）；
  *  collab/vault 属内核数据访问，常驻。载荷为轻量信号（插件按需再调 snapshot()/取数据）。 */
@@ -528,6 +540,7 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
     ensureHistoryAccess();
     ensureLayoutAccess();
     ensureUiStateAccess();
+    ensureSlotHostAccess();
     ensureRuntimeChangeEvents();
     installCommandHotkeys();
     const hostVersion = await getAppVersion().catch(() => null);

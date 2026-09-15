@@ -2,20 +2,22 @@
  * ctx.slots 注册 API 测试（services/cordis/slotsApi）。
  *
  * 覆盖：插件 apply 内经 ctx.slots.registerView/registerTableView 注册生效、pluginId 归属正确、
- * 卸载随 fiber 撤销（tracker 绑定调用方插件上下文）。
+ * 卸载随 fiber 撤销（tracker 绑定调用方插件上下文）；插件自声明槽（declare）先到先得 +
+ * 宿主保护 + 冲突指名占用者；host(slot) 托管语义。
  */
 import { describe, expect, it, afterEach } from "vitest";
 import type { Context } from "@atelyx/cordis";
 import type { SlotDeclaration } from "@/constants/slots";
-import { SLOT_DECLARATIONS } from "@/constants/slots";
 import { createKernel, type Kernel } from "./kernel";
-import { mountPlugin, unmountAll } from "./loader";
-import { resolveViewKind, viewKinds, listSlot, listDecorators, registeredSlots, onSlotChange } from "./slots";
+import { mountPlugin, unmountAll, unmountPlugin } from "./loader";
+import { resolveViewKind, viewKinds, listSlot, listDecorators, registeredSlots, onSlotChange, findSlotDeclarationRuntime } from "./slots";
 import { getPluginTableView } from "./ui";
+import { setPluginSlotHostComponent } from "./access";
 
 let kernel: Kernel | null = null;
 
 afterEach(async () => {
+  setPluginSlotHostComponent(null);
   if (kernel) {
     await unmountAll(kernel);
     kernel.dispose();
@@ -123,9 +125,9 @@ describe("ctx.slots", () => {
     });
     expect(seen.some((d) => d.key === "toolbar/note/right")).toBe(true);
     expect(seen.some((d) => d.key === "view" && d.prefix === true)).toBe(true);
-    // 返回声明表本身且已冻结：插件改写不了全局校验依据。
-    expect(seen).toBe(SLOT_DECLARATIONS);
+    // 返回冻结合并视图：数组与元素均不可被插件改写（防篡改全局校验依据）。
     expect(Object.isFrozen(seen)).toBe(true);
+    for (const decl of seen) expect(Object.isFrozen(decl), decl.key).toBe(true);
   });
 
   it("registerUi 进未声明的固定槽 → 该行 failed + 可读原因（不静默丢失）", async () => {
@@ -292,5 +294,135 @@ describe("槽注册变更通知", () => {
     });
     expect(notified).toBe(0);
     unsubscribe();
+  });
+});
+
+describe("ctx.slots.declare / host（插件自声明槽位）", () => {
+  it("A 声明 + host + B 贡献：list 生效；停用任一方各自撤销", async () => {
+    kernel = createKernel();
+    setPluginSlotHostComponent(() => null);
+    await mountPlugin(kernel, {
+      id: "com.timeline",
+      apply: (ctx) => {
+        ctx.slots.declare({ key: "toolbar/timeline/play", cardinality: "list", required: ["component"] });
+        const Comp = ctx.slots.host("toolbar/timeline/play");
+        expect(typeof Comp).toBe("function");
+      },
+    });
+    await mountPlugin(kernel, {
+      id: "com.timeline.contrib",
+      apply: (ctx) => {
+        ctx.slots.registerUi({ slot: "toolbar/timeline/play", component: () => null });
+      },
+    });
+    expect(listSlot("toolbar/timeline/play")).toHaveLength(1);
+    // 停用贡献方：贡献撤销，声明仍在（findSlotDeclarationRuntime 命中）。
+    await unmountPlugin(kernel, "com.timeline.contrib");
+    expect(listSlot("toolbar/timeline/play")).toEqual([]);
+    expect(findSlotDeclarationRuntime("toolbar/timeline/play")).toBeDefined();
+    // 停用声明方：声明撤销。
+    await unmountPlugin(kernel, "com.timeline");
+    expect(findSlotDeclarationRuntime("toolbar/timeline/play")).toBeUndefined();
+  });
+
+  it("停用声明方后他插件再向该槽贡献 → 该行 failed（贡献无处归属可见，不静默）", async () => {
+    kernel = createKernel();
+    await mountPlugin(kernel, {
+      id: "com.timeline",
+      apply: (ctx) => {
+        ctx.slots.declare({ key: "toolbar/timeline/play", cardinality: "list", required: ["component"] });
+      },
+    });
+    await unmountPlugin(kernel, "com.timeline");
+    const result = await mountPlugin(kernel, {
+      id: "com.timeline.contrib",
+      apply: (ctx) => {
+        ctx.slots.registerUi({ slot: "toolbar/timeline/play", component: () => null });
+      },
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.message).toContain("未声明的槽位");
+    expect(listSlot("toolbar/timeline/play")).toEqual([]);
+  });
+
+  it("declare 冲突指名占用者：B 声明 A 已占 key → B failed 且消息含 A 的插件 id", async () => {
+    kernel = createKernel();
+    await mountPlugin(kernel, {
+      id: "com.timeline",
+      apply: (ctx) => {
+        ctx.slots.declare({ key: "toolbar/timeline/play", cardinality: "list", required: ["component"] });
+      },
+    });
+    const result = await mountPlugin(kernel, {
+      id: "com.other",
+      apply: (ctx) => {
+        ctx.slots.declare({ key: "toolbar/timeline/play", cardinality: "list", required: ["component"] });
+      },
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.message).toContain("已被插件");
+      expect(result.message).toContain("com.timeline");
+    }
+  });
+
+  it("declare 宿主槽位受保护：宿主固定槽 / 宿主开放前缀均 failed", async () => {
+    kernel = createKernel();
+    for (const key of ["toolbar/note/right", "view/custom"]) {
+      const result = await mountPlugin(kernel, {
+        id: "com.timeline",
+        apply: (ctx) => {
+          ctx.slots.declare({ key, cardinality: "list", required: ["component"] });
+        },
+      });
+      expect(result.ok, key).toBe(false);
+      if (!result.ok) expect(result.message, key).toContain("宿主槽位");
+    }
+  });
+
+  it("前缀声明：toolbar/timeline 前缀下任意槽可被贡献", async () => {
+    kernel = createKernel();
+    await mountPlugin(kernel, {
+      id: "com.timeline",
+      apply: (ctx) => {
+        ctx.slots.declare({ key: "toolbar/timeline", prefix: true, cardinality: "list", required: ["component"] });
+      },
+    });
+    await mountPlugin(kernel, {
+      id: "com.timeline.contrib",
+      apply: (ctx) => {
+        ctx.slots.registerUi({ slot: "toolbar/timeline/play", component: () => null });
+        ctx.slots.registerUi({ slot: "toolbar/timeline/export", component: () => null });
+      },
+    });
+    expect(listSlot("toolbar/timeline/play")).toHaveLength(1);
+    expect(listSlot("toolbar/timeline/export")).toHaveLength(1);
+  });
+
+  it("list()：合并视图含插件运行时声明（先到先得的槽可被发现）", async () => {
+    kernel = createKernel();
+    let seen: readonly SlotDeclaration[] = [];
+    await mountPlugin(kernel, {
+      id: "com.timeline",
+      apply: (ctx) => {
+        ctx.slots.declare({ key: "toolbar/timeline/play", cardinality: "list", required: ["component"] });
+        seen = ctx.slots.list();
+      },
+    });
+    expect(seen.some((d) => d.key === "toolbar/timeline/play")).toBe(true);
+    expect(seen.some((d) => d.key === "toolbar/note/right")).toBe(true);
+    expect(Object.isFrozen(seen)).toBe(true);
+  });
+
+  it("host() 托管未声明的槽 → 该行 failed（拼写错误可见，不静默渲染空白）", async () => {
+    kernel = createKernel();
+    const result = await mountPlugin(kernel, {
+      id: "com.test.ui",
+      apply: (ctx) => {
+        ctx.slots.host("toolbar/none");
+      },
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.message).toContain("未声明的槽位");
   });
 });
