@@ -241,6 +241,7 @@ dependencies = [
  "globset",
  "junction",
  "keyring",
+ "libc",
  "nanoid",
  "notify",
  "notify-debouncer-mini",

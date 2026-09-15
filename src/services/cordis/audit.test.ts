@@ -24,8 +24,9 @@ vi.mock("@/services/shell", () => ({
     handlers: { close: (code: number | null) => void },
   ) => {
     handlers.close(0);
-    return { cancel: () => {} };
+    return Promise.resolve(1234);
   },
+  killProcessTree: () => Promise.resolve(),
 }));
 
 vi.mock("@/services/http", () => ({

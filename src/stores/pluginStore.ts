@@ -80,6 +80,9 @@ import {
 } from "@/components/plugins/cordis/builtins";
 import { PluginSlotHost } from "@/components/plugins/SlotHost";
 import { getKernel } from "@/services/cordis/kernel";
+import { killUnmountedPluginProcesses, killPluginProcesses } from "@/services/cordis/pluginProcesses";
+import { killProcessTree } from "@/services/shell";
+import { mountedPluginIds } from "@/services/cordis/loader";
 import { installCommandHotkeys } from "@/services/cordis/commandHotkeys";
 import { mountPlugin, unmountAll, unmountPlugin } from "@/services/cordis/loader";
 import { mountPluginFromPackage } from "@/services/cordis/packageMount";
@@ -244,9 +247,28 @@ function toInstalled(row: PluginRow): InstalledPlugin {
   return { ...base, manifest: validated.manifest, phase: "pending" };
 }
 
-/** 停止单个插件的运行时（Cordis fiber 卸载，effects 全部撤销）。 */
+/** 停止单个插件的运行时（Cordis fiber 卸载，effects 全部撤销）+ 结束它启动的进程。
+ *
+ *  停用、卸载、更新、回退，以及重挂前的拆除都走这里：进程随插件运行时一起消失。重挂不会
+ *  保留旧进程——插件重跑 `apply` 拿不到上一轮的句柄（句柄随 fiber 闭包销毁），留着只会多出
+ *  一个无人认领的重复服务（同固定端口时新实例还会起不来）。要留活的服务由插件自己用
+ *  「探测已存在实例」的写法处理，宿主不做隐式保留。 */
 async function stopPlugin(id: string): Promise<void> {
-  await unmountPlugin(getKernel(), id);
+  const kernel = getKernel();
+  await unmountPlugin(kernel, id);
+  await endPluginProcesses(kernel.ctx, id);
+}
+
+/** 结束某插件的全部在册进程；失败逐个提示（不阻断停用本身——插件已停，残留交用户处理）。
+ *  服务层只返回结果、不 import store，提示归属由这里决定。 */
+async function endPluginProcesses(ctx: object, id: string): Promise<void> {
+  const outcome = await killPluginProcesses(ctx, id, killProcessTree);
+  if (outcome.failed.length === 0) return;
+  const detail = outcome.failed.map((f) => `pid ${f.pid}：${f.message}`).join("；");
+  useNotificationStore.getState().notify({
+    level: "warning",
+    message: `插件「${id}」的进程未能全部结束：${detail}`,
+  });
 }
 
 let pluginChangeListenerStarted = false;
@@ -496,7 +518,8 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
 
   /** 拉起单个插件行的运行时：先做兼容校验；行有落位目录则读包入口，否则取编译实现。 */
   const spawn = async (id: string, env?: { hostVersion: string | null; platform: string }): Promise<void> => {
-    // 先撤销旧运行时（重载防重复注册）。
+    // 先撤销旧运行时（重载防重复注册）及其进程：新一次 apply 会重新启动自己的服务，
+    // 留着上一轮的进程只会多出一个无人认领的重复实例（见 stopPlugin 注释）。
     await stopPlugin(id);
     try {
       const plugin = get().plugins[id];
@@ -620,6 +643,17 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
         );
       }
       await spawn(id, { hostVersion, platform });
+    }
+    // 收尾：结束「已不在挂载集里」的插件的进程。登记表按内核隔离，所以这里兜住的是两类
+    // 本窗口 unmountAll 覆盖不到的残留：插件被别的窗口停用/卸载（进程仍记在本窗口），以及
+    // apply 抛错导致未挂载的进程。不扫就会留下活过插件的孤儿进程；已挂载插件的进程不动。
+    const leftover = await killUnmountedPluginProcesses(getKernel().ctx, mountedPluginIds(getKernel()), killProcessTree);
+    for (const [id, outcome] of leftover) {
+      const detail = outcome.failed.map((f) => `pid ${f.pid}：${f.message}`).join("；");
+      useNotificationStore.getState().notify({
+        level: "warning",
+        message: `插件「${id}」的残留进程未能结束：${detail}`,
+      });
     }
   };
   let loadQueue: Promise<void> = Promise.resolve();

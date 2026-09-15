@@ -9,8 +9,11 @@
  *   `name`/`cmd`，无通配符）。因此本模块传的 `program` 必须等于 scope 登记的 `name`：
  *   `capabilities/shell-exec-unix.json` 登记 `sh`、`shell-exec-windows.json` 登记 `cmd.exe`，
  *   两者 `args` 全开（插件传 `-c`/`/C <命令>` 即等价任意命令执行）。传未登记的程序会被拒绝。
+ * - 结束进程走 `kill_process_tree` 命令（整棵树），不用 `Child.kill`：插件起的服务通常被
+ *   `sh -c`/`cmd.exe /C` 包一层，只结束包装进程会把真正的服务留成孤儿。
  */
 import { open as shellOpen, Command } from "@tauri-apps/plugin-shell";
+import { invoke } from "@tauri-apps/api/core";
 
 /** 在系统文件管理器中打开路径（目录或文件，选中态）。 */
 export async function openInExplorer(path: string): Promise<void> {
@@ -37,25 +40,28 @@ export interface RunProcessOptions {
   env?: Record<string, string>;
 }
 
-/** 执行外部进程（流式 stdout/stderr + 退出回调）；返回 cancel（kill 进程）。 */
+/** 执行外部进程（流式 stdout/stderr + 退出回调）；返回进程 pid（spawn 成功后 resolve）。
+ *
+ *  pid 是结束进程的唯一可靠凭据（按命令行特征匹配会因启动方式变化失效，且有误杀同目录进程的
+ *  风险），故交给调用方记账。启动失败（未登记的程序等）reject，同时经 `error` 上报同因错误。 */
 export function runProcess(
   program: string,
   args: string[],
   options: RunProcessOptions,
   handlers: ProcessStreamHandlers,
-): { cancel: () => void } {
+): Promise<number> {
   const command = Command.create(program, args, { cwd: options.cwd, env: options.env });
   command.stdout.on("data", (line: string) => handlers.stdout(line));
   command.stderr.on("data", (line: string) => handlers.stderr(line));
   command.on("close", (e: { code: number | null; signal: number | null }) => handlers.close(e.code));
   command.on("error", (e: string) => handlers.error(String(e)));
   const childPromise = command.spawn();
+  // 启动失败同时反映到返回的 promise（调用方 await 得到失败原因）与 error 回调（流式面同口径）
   void childPromise.catch((e) => handlers.error(e instanceof Error ? e.message : String(e)));
-  return {
-    cancel: () => {
-      void childPromise
-        .then((child) => child.kill())
-        .catch(() => {});
-    },
-  };
+  return childPromise.then((child) => child.pid);
+}
+
+/** 结束 pid 及其全部子孙进程（已不存在 = 成功；其余失败 reject 带原因）。 */
+export function killProcessTree(pid: number): Promise<void> {
+  return invoke<void>("kill_process_tree", { pid });
 }

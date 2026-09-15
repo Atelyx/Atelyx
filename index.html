@@ -9,10 +9,15 @@
          以兼容自建 Ollama、局域网 API、SearXNG、协作中转（collab-relay）等。
          http://ipc.localhost 是 Tauri 2 的 IPC 协议地址，必须允许。
          script-src 的 blob: 供插件包入口的 ESM 求值（blob URL 动态 import）；
-         wasm-unsafe-eval 供 esbuild-wasm 转译 TS 插件入口（插件代码在主上下文内执行，安装即授权）。-->
+         wasm-unsafe-eval 供 esbuild-wasm 转译 TS 插件入口（插件代码在主上下文内执行，安装即授权）。
+         frame-src 放行 http(s)：插件面板可内嵌本机/局域网服务的 web 界面（默认回落 default-src
+         会把这类 iframe 挡成空白）。这是**声明而非边界**——iframe 页面是独立源，读不到父文档、
+         也调不到宿主命令（Tauri IPC 按源判权），且内嵌加载不经 net_guard；防笔记正文里的不可信
+         内容靠 DOMPurify 白名单（两个信任级别），不要为此收窄本指令。
+         'self' 须保留：Linux 侧应用源是 tauri://localhost，不在 http/https 内。-->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; img-src 'self' data: blob: https: http:; media-src 'self' data: blob: https: http:; connect-src 'self' http: https: ws: wss: http://ipc.localhost; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' blob: 'wasm-unsafe-eval'"
+      content="default-src 'self'; frame-src 'self' http: https:; img-src 'self' data: blob: https: http:; media-src 'self' data: blob: https: http:; connect-src 'self' http: https: ws: wss: http://ipc.localhost; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' blob: 'wasm-unsafe-eval'"
     />
     <title>Atelyx</title>
   </head>

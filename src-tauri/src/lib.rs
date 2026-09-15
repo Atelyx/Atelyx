@@ -178,6 +178,8 @@ pub fn run() {
             commands::external_fs::external_move_file,
             commands::external_fs::external_delete_file,
             commands::external_fs::external_delete_dir,
+            // 插件托管进程的结束（ctx.shell.spawn 的 cancel + 插件停用时的自动清理）
+            commands::process::kill_process_tree,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -238,7 +240,8 @@ mod capability_contract_tests {
     /// 插件进程执行必须落在带 scope 的能力上：裸权限点只放行命令本身，而 tauri-plugin-shell
     /// 还要按 scope 的 `name` 匹配程序（无通配符），缺 scope 时 `ctx.shell.exec` 仍会被拒。
     /// 这里断言两个平台能力文件各自只在自己的平台上生效、登记了一个 `args` 全开的解释器，
-    /// 且名字与前端会传的程序名一致。
+    /// 且名字与前端会传的程序名一致。`allow-kill` 是插件 shell 面按 pid 结束的能力，宿主自身
+    /// 不再用 `Child.kill`（那只会结束包装进程）——进程树结束走 `kill_process_tree` 命令。
     #[test]
     fn capabilities_scope_shell_execution() {
         for (file, src, expected_name, expected_cmd, expected_platforms) in [
@@ -270,7 +273,7 @@ mod capability_contract_tests {
             let perms = cfg["permissions"].as_array().expect("permissions 缺失");
             assert!(
                 perms.iter().any(|p| p.as_str() == Some("shell:allow-kill")),
-                "{file} 缺少 shell:allow-kill（取消进程需要）"
+                "{file} 缺少 shell:allow-kill（插件按 pid 结束进程的能力）"
             );
             let spawn_scope = perms
                 .iter()

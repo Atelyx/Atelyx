@@ -80,9 +80,14 @@ sha2 = "0.10"
 # 跨窗口拖拽释放检测（Windows 专用）：标签拖出窗口后 webview 收不到窗口外 pointerup，
 # 前端轮询 GetAsyncKeyState(VK_LBUTTON) 物理判定鼠标已松开，终止拖拽会话并清除 drop 指示器；
 # fileapi/winnt：插件卸载前递归清只读位（SMB/NAS 把 POSIX 444 映射成只读位会挡 remove_dir_all）
-winapi = { version = "0.3", features = ["winuser", "fileapi", "winnt"] }
+winapi = { version = "0.3", features = ["winuser", "fileapi", "winnt", "processthreadsapi", "handleapi", "errhandlingapi", "minwinbase"] }
 # 插件平台：本地目录安装的 Windows junction 创建（免管理员；Unix 走 std 符号链接）
 junction = "0.2"
+
+[target.'cfg(unix)'.dependencies]
+# 插件托管进程的结束（commands/process.rs）按 pid 下发 SIGKILL：不走 Command 调 kill(1)
+# ——外部工具不保证存在，且 `libc::kill` 才能按 errno 区分「已不存在」（ESRCH）与真失败。
+libc = "0.2"
 
 [features]
 # 自定义 protocol 用

@@ -26,15 +26,23 @@ vi.mock("@/services/app", () => ({ getAppVersion: vi.fn(async () => "0.0.0") }))
 vi.mock("@/services/dialog", () => ({ pickDirectory: vi.fn() }));
 
 // 挂载链路以替身替代：本文件只验证 store 侧的编排（入口选择、阶段归类），内核不参与。
-vi.mock("@/services/cordis/kernel", () => ({ getKernel: () => ({}) }));
+// 内核对象必须**稳定**（同一 ctx 引用）：插件进程登记表以内核上下文为键，每次返回新对象会让
+// 登记与结束落在不同表上，测不出真实行为。`vi.hoisted` 让 mock 工厂能引用到它。
+const fakeKernel = vi.hoisted(() => ({ ctx: {} }));
+vi.mock("@/services/cordis/kernel", () => ({ getKernel: () => fakeKernel }));
 vi.mock("@/services/cordis/loader", () => ({
   mountPlugin: vi.fn(async () => ({ ok: true })),
   unmountPlugin: vi.fn(async () => {}),
   unmountAll: vi.fn(async () => {}),
+  mountedPluginIds: vi.fn(() => []),
   pluginIdOf: vi.fn(() => undefined),
 }));
 vi.mock("@/services/cordis/packageMount", () => ({
   mountPluginFromPackage: vi.fn(async () => ({ ok: true })),
+}));
+// 结束插件进程会打到 Tauri：替换为替身（进程编排本身在 pluginProcesses 测试里覆盖）。
+vi.mock("@/services/shell", () => ({
+  killProcessTree: vi.fn(async () => {}),
 }));
 
 vi.mock("@/stores/appStore", () => ({
@@ -48,6 +56,9 @@ import type { PluginRow } from "@/services/plugins";
 import { getAppVersion } from "@/services/app";
 import { pickDirectory } from "@/services/dialog";
 import { mountPluginFromPackage } from "@/services/cordis/packageMount";
+import { killProcessTree } from "@/services/shell";
+import { mountedPluginIds } from "@/services/cordis/loader";
+import { trackPluginProcess } from "@/services/cordis/pluginProcesses";
 import { usePluginStore } from "@/stores/pluginStore";
 
 function row(over: Partial<InstalledPlugin> & { id: string }): InstalledPlugin {
@@ -66,6 +77,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   usePluginStore.setState({ plugins: {}, initialized: false, stateError: null });
   vi.mocked(pluginList).mockResolvedValue({ rows: [] });
+  vi.mocked(mountedPluginIds).mockReturnValue([]);
   vi.mocked(pluginUpdate).mockReset();
   vi.mocked(pluginRollback).mockReset();
 });
@@ -462,5 +474,74 @@ describe("安装作用域确认后的落位参数", () => {
     await expect(usePluginStore.getState().pickLocalPluginDir()).resolves.toBe("/tmp/plugin-src");
     vi.mocked(pickDirectory).mockResolvedValueOnce(null);
     await expect(usePluginStore.getState().pickLocalPluginDir()).resolves.toBeNull();
+  });
+});
+
+describe("插件进程随运行时结束", () => {
+  /** 在册一个该插件的进程（登记表以内核上下文为键，与 store 传的同一对象）。 */
+  function track(id: string, pid: number): void {
+    trackPluginProcess(fakeKernel.ctx, id, pid);
+  }
+
+  it("停用插件结束它启动的进程", async () => {
+    usePluginStore.setState({
+      plugins: { "com.test.proc": row({ id: "com.test.proc", enabled: true }) },
+    });
+    track("com.test.proc", 4242);
+
+    await usePluginStore.getState().setEnabled("com.test.proc", false);
+
+    expect(killProcessTree).toHaveBeenCalledWith(4242);
+  });
+
+  it("卸载插件结束它启动的进程", async () => {
+    usePluginStore.setState({
+      plugins: { "com.test.proc-uninstall": row({ id: "com.test.proc-uninstall", enabled: true }) },
+    });
+    track("com.test.proc-uninstall", 4243);
+
+    await usePluginStore.getState().uninstall("com.test.proc-uninstall");
+
+    expect(killProcessTree).toHaveBeenCalledWith(4243);
+  });
+
+  it("全量重载结束仍启用的插件在跑的进程（不跨重载保留）", async () => {
+    // 插件行仍在列表且启用：重挂前的拆除（spawn → stopPlugin）必须结束上一轮进程，
+    // 否则每次重载都会多出一个无人认领的重复服务。
+    vi.mocked(pluginList).mockResolvedValueOnce({
+      rows: [
+        {
+          id: "com.test.proc-mounted",
+          name: "com.test.proc-mounted",
+          version: "1.0.0",
+          type: "panel",
+          scope: "app",
+          installDir: "/tmp/com.test.proc-mounted",
+          sourceKind: "market",
+          enabled: true,
+          manifest: {
+            name: "com.test.proc-mounted",
+            version: "1.0.0",
+            main: "main.js",
+            atelyx: { name: "proc-mounted", type: "panel" },
+          },
+        } as unknown as PluginRow,
+      ],
+    });
+    vi.mocked(mountedPluginIds).mockReturnValueOnce(["com.test.proc-mounted"]);
+    track("com.test.proc-mounted", 4245);
+
+    await usePluginStore.getState().load();
+
+    expect(killProcessTree).toHaveBeenCalledWith(4245);
+  });
+
+  it("全量重载收尾结束未挂载插件的残留进程（含插件已不在列表）", async () => {
+    // 插件行已从列表消失（跨窗口卸载/apply 抛错），但本窗口登记表里还有它的进程
+    track("com.test.proc-reload", 4244);
+
+    await usePluginStore.getState().load();
+
+    expect(killProcessTree).toHaveBeenCalledWith(4244);
   });
 });

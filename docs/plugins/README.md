@@ -32,6 +32,11 @@ Atelyx 是插件化平台：插件 = 一个 git 仓库（市场侧以 GitHub 为
 | `ctx.ai` | AI 会话与工具：`ctx.ai.chat(...)` 直连模型；`ctx.ai.registerTool(...)` 贡献模型可调用的工具 |
 | `ctx.effect` | 注册副作用（订阅/接线等），插件停用/卸载时自动撤销——**所有注册都应经它包裹** |
 
+面板视图里可以直接 `<iframe>` 内嵌本机或局域网服务的 web 界面（宿主 CSP 已放行 http(s) 帧）：
+适合把别人的原生界面搬进面板，代价是读不到该页面的内容——
+需要它的数据时走它自己的接口（`ctx.http`）。注意内嵌加载受目标站点的同源/跨域设置约束，
+和宿主 `ctx.http` 的地址策略无关。
+
 依赖声明用 apply 对象形式：`{ name, inject: ["table"], apply(ctx) { ... } }`——`inject` 声明的
 服务缺失时插件不激活（管理页显示失败原因）；`inject` 值形如 `{ foo: { optional: true } }` 的可选
 依赖缺失不阻断激活，插件在内经 `ctx.services.get("foo")` 判空降级。

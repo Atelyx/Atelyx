@@ -18,6 +18,18 @@ vi.mock("@/services/native", () => ({
   nativeInvoke: vi.fn(async () => "ok"),
 }));
 
+// 外部目录命令会真的打到 Tauri/磁盘：替换为替身，只验证审计摘要记录。
+vi.mock("@/services/externalFs", () => ({
+  externalReadFile: vi.fn(async () => "content"),
+  externalWriteFile: vi.fn(async () => {}),
+  externalListDir: vi.fn(async () => ({ entries: [], total: 0, capped: false })),
+  externalCreateFolder: vi.fn(async () => {}),
+  externalRenameFile: vi.fn(async () => ""),
+  externalMoveFile: vi.fn(async () => ""),
+  externalDeleteFile: vi.fn(async () => {}),
+  externalDeleteDir: vi.fn(async () => ({ deleted: true, needsConfirm: false, itemCount: 0 })),
+}));
+
 vi.mock("@/services/shell", () => ({
   openInExplorer: () => Promise.resolve(),
   openUrl: () => Promise.resolve(),
@@ -28,8 +40,9 @@ vi.mock("@/services/shell", () => ({
     handlers: { close: (code: number | null) => void },
   ) => {
     handlers.close(0);
-    return { cancel: () => {} };
+    return Promise.resolve(1234);
   },
+  killProcessTree: () => Promise.resolve(),
 }));
 
 declare module "@atelyx/cordis" {
@@ -208,5 +221,23 @@ describe("ctx.services.get 敏感面审计", () => {
     const dumped = JSON.stringify(entry);
     expect(dumped).not.toContain("SECRET");
     await unmountPlugin(kernel, "builtin.svc-a");
+  });
+
+  it("带 tracker 的敏感服务（fs）经 services.get 取回后调用照样进审计", async () => {
+    // 该面子带 `symbols.tracker`（授权按调用方查表）：审计包装必须是不带 tracker 的普通对象，
+    // 否则会被框架的 traceable 层再包一次而绕过包装——调用摘要静默丢失。
+    kernel = getKernel();
+    const apply = (ctx: Context) => {
+      const fs = ctx.services.get("fs") as { readFile: (path: string) => Promise<string> };
+      void fs.readFile("/tmp/授权目录/文件.md").catch(() => {});
+    };
+    await mountPlugin(kernel, { id: "builtin.svc-fs", apply });
+    const entry = auditSnapshot(kernel.ctx).find((e) => e.pluginId === "builtin.svc-fs");
+    expect(entry?.calls).toEqual(
+      expect.arrayContaining([
+        { service: "fs", method: "readFile", summary: "readFile /tmp/授权目录/文件.md" },
+      ]),
+    );
+    await unmountPlugin(kernel, "builtin.svc-fs");
   });
 });

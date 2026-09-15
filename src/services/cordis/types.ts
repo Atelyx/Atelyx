@@ -100,6 +100,14 @@ export interface ShellStreamHandlers {
   error(message: string): void;
 }
 
+/** shell.spawn 的进程句柄。 */
+export interface ShellProcessHandle {
+  pid: number;
+  /** 结束该进程及其全部子孙（含 `sh -c`/`cmd.exe /C` 包装出的实际服务进程）。
+   *  进程已退出（或已被结束）时本调用为 no-op；进程已不存在不算失败，其余失败 reject 带原因。 */
+  cancel(): Promise<void>;
+}
+
 /** 系统对话框过滤器数组（{ name, extensions }）。 */
 export interface DialogFilters {
   name: string;
@@ -130,7 +138,10 @@ export interface StorageService {
 /** 通用 HTTP 请求/响应类型：形状定义在 `services/http`（命令封装处），此处只做别名与注入面声明。 */
 export type { HttpRequestInput as HttpRequest, HttpResponseResult as HttpResponse } from "@/services/http";
 
-/** 通用 HTTP 请求服务（Rust 代理：CORS 绕行 + SSRF 防护；20s 超时 + 1MB 响应上限，内网/回环地址拒绝）。 */
+/** 通用 HTTP 请求服务（Rust 代理：CORS 绕行 + URL 协议白名单；20s 超时 + 1MB 响应上限）。
+ *  地址按调用方身份分策略——本服务是插件面（可信主体），走本机/局域网策略：回环/私网/ULA 放行，
+ *  云元数据/链路本地仍拒；模型工具抓取（`fetch_web`）走公网策略。IP 字面量与 DNS 解析结果逐 IP
+ *  同口径校验 + 重定向每跳复检，连接只建立到已校验地址。 */
 export interface HttpService {
   request(req: HttpRequestInput): Promise<HttpResponseResult>;
 }
@@ -161,10 +172,14 @@ export interface AppService {
   openPage(pageId: string): Promise<boolean>;
 }
 
-/** 外部程序执行服务（敏感：宿主只登记 `sh`（Unix，配 `-c`）/ `cmd.exe`（Windows，配 `/C`），`args` 全开，等价任意命令执行）。 */
+/** 外部程序执行服务（敏感：宿主只登记 `sh`（Unix，配 `-c`）/ `cmd.exe`（Windows，配 `/C`），`args` 全开，等价任意命令执行）。
+ *  插件启动的进程按调用方记账，插件停用/卸载时由宿主统一结束（长驻服务不该活过插件本身）。 */
 export interface ShellService {
   /** 非流式：聚合输出后一次性返回；传 handlers 则流式（stdout/stderr → chunk）。 */
   exec(opts: ShellExecOptions, handlers?: ShellStreamHandlers): Promise<ShellExecResult | undefined>;
+  /** 启动进程并立即返回句柄（不等进程结束）——托管长驻服务的可靠停止方式。
+   *  启动失败 reject（同时经 handlers.error 上报同因错误）；此后错误只走 handlers.error。 */
+  spawn(opts: ShellExecOptions, handlers?: ShellStreamHandlers): Promise<ShellProcessHandle>;
 }
 
 /** 仓库文件读写服务（读写全开；写方法语义与 AI 文件工具一致；失败返回 { ok:false, summary } 不抛断）。 */

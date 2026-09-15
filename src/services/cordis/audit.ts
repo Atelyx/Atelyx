@@ -109,19 +109,34 @@ function summarizeCall(service: string, method: string, args: unknown[]): string
   return undefined;
 }
 
-/** 该插件视角下的服务视图：敏感面多包一层，调用时先记摘要再转发（真实调用抛错也留摘要）。 */
+/** 该插件视角下的服务视图：敏感面换成一层包装，调用时先记摘要再转发（真实调用抛错也留摘要）。
+ *
+ *  必须是**不带 tracker 的普通对象**（不能直接包 Proxy 而不遮挡 tracker）：被包装的服务本身多带
+ *  `symbols.tracker`（state/storage/fs/shell 按调用方绑定），而 vendor 的 `getTraceable` 一见
+ *  tracker 就再包一层 traceable——那层解析成员用 `getPropertyDescriptor`，而 `Reflect` 取描述符
+ *  会被 Proxy 转发到 target，直接命中原服务的原始方法，于是**绕过本包装层**（外层 traceable 又
+ *  恰好屏蔽了它的 `get` 陷阱）：结果是经 `ctx.services.get(name)` 取回的敏感服务调用不进审计
+ *  （直接读 `ctx.<name>` 不受影响）。不含 tracker 的普通对象让 vendor 到该层不再重绑，包装
+ *  必定生效；方法转发用读取时得到的成员，调用方绑定已由内部那层完成（`this.ctx` 仍解析为调用方）。
+ *  代价：只搬运函数成员（当前敏感面——shell/clipboard/http/native/fs 整体敏感 + vault 方法级
+ *  敏感——都只有方法，无异形成员被丢）。 */
 export function wrapSensitiveService(pluginId: string, service: string, target: object): object {
-  return new Proxy(target, {
-    get(obj, prop, receiver) {
-      const member = Reflect.get(obj, prop, receiver);
-      if (typeof prop !== "string" || typeof member !== "function") return member;
-      return (...args: unknown[]) => {
-        const summary = summarizeCall(service, prop, args);
-        if (summary !== undefined) recordServiceCall(pluginId, { service, method: prop, summary });
-        return Reflect.apply(member, obj, args);
+  const wrapped: Record<string, unknown> = Object.create(null);
+  let cur: object | null = target;
+  while (cur && cur !== Object.prototype) {
+    for (const key of Reflect.ownKeys(cur)) {
+      if (typeof key !== "string" || key in wrapped) continue;
+      const member = Reflect.get(target, key);
+      if (typeof member !== "function") continue;
+      wrapped[key] = (...args: unknown[]) => {
+        const summary = summarizeCall(service, key, args);
+        if (summary !== undefined) recordServiceCall(pluginId, { service, method: key, summary });
+        return Reflect.apply(member, target, args);
       };
-    },
-  });
+    }
+    cur = Object.getPrototypeOf(cur);
+  }
+  return wrapped;
 }
 
 let installed = false;
