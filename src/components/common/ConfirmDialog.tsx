@@ -4,11 +4,13 @@
  * danger=false 用强调色（如安装第三方代码的知情确认）。
  */
 import { useEffect, useRef } from "react";
+import type { ReactNode } from "react";
 import { AlertTriangle } from "lucide-react";
 
 export function ConfirmDialog({
   title,
   description,
+  children,
   confirmText = "确认",
   cancelText = "取消",
   danger = true,
@@ -17,6 +19,7 @@ export function ConfirmDialog({
 }: {
   title: string;
   description?: string;
+  children?: ReactNode;
   confirmText?: string;
   cancelText?: string;
   danger?: boolean;
@@ -57,6 +60,7 @@ export function ConfirmDialog({
             {description}
           </p>
         )}
+        {children && <div className="mb-3">{children}</div>}
         <div className="flex justify-end gap-2 mt-4">
           <button
             onClick={onCancel}

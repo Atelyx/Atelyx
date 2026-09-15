@@ -23,6 +23,7 @@ vi.mock("@/services/plugins", () => ({
 }));
 
 vi.mock("@/services/app", () => ({ getAppVersion: vi.fn(async () => "0.0.0") }));
+vi.mock("@/services/dialog", () => ({ pickDirectory: vi.fn() }));
 
 // 挂载链路以替身替代：本文件只验证 store 侧的编排（入口选择、阶段归类），内核不参与。
 vi.mock("@/services/cordis/kernel", () => ({ getKernel: () => ({}) }));
@@ -42,9 +43,10 @@ vi.mock("@/stores/appStore", () => ({
   },
 }));
 
-import { pluginApproveDir, pluginInstall, pluginList, pluginRevokeDir, pluginRollback, pluginUninstall, pluginUpdate } from "@/services/plugins";
+import { pluginApproveDir, pluginInstall, pluginInstallLocal, pluginList, pluginRevokeDir, pluginRollback, pluginUninstall, pluginUpdate } from "@/services/plugins";
 import type { PluginRow } from "@/services/plugins";
 import { getAppVersion } from "@/services/app";
+import { pickDirectory } from "@/services/dialog";
 import { mountPluginFromPackage } from "@/services/cordis/packageMount";
 import { usePluginStore } from "@/stores/pluginStore";
 
@@ -422,5 +424,43 @@ describe("仓库外目录授权动作", () => {
     await usePluginStore.getState().revokeDir("com.example.gone", "~/x");
     expect(pluginApproveDir).not.toHaveBeenCalled();
     expect(pluginRevokeDir).not.toHaveBeenCalled();
+  });
+});
+
+describe("安装作用域确认后的落位参数", () => {
+  const installedRow = (id: string): PluginRow => ({
+    id,
+    name: id,
+    version: "1.0.0",
+    type: "panel",
+    scope: "vault",
+    installDir: `/tmp/${id}`,
+    sourceKind: "market",
+    enabled: false,
+    manifest: {
+      name: id,
+      version: "1.0.0",
+      main: "main.js",
+      atelyx: { name: id, type: "panel" },
+    },
+  });
+
+  it("installLocal 透传所选作用域给服务", async () => {
+    vi.mocked(pluginInstallLocal).mockResolvedValueOnce(installedRow("com.test.localscope") as never);
+    await usePluginStore.getState().installLocal("/tmp/src", "vault");
+    expect(pluginInstallLocal).toHaveBeenCalledWith("/tmp/src", "vault");
+  });
+
+  it("installGit 透传归一化地址与所选作用域给服务", async () => {
+    vi.mocked(pluginInstall).mockResolvedValueOnce(installedRow("com.test.git") as never);
+    await usePluginStore.getState().installGit("owner/repo", "vault");
+    expect(pluginInstall).toHaveBeenCalledWith("https://github.com/owner/repo.git", "vault");
+  });
+
+  it("pickLocalPluginDir 返回选择器结果，取消返回 null", async () => {
+    vi.mocked(pickDirectory).mockResolvedValueOnce("/tmp/plugin-src");
+    await expect(usePluginStore.getState().pickLocalPluginDir()).resolves.toBe("/tmp/plugin-src");
+    vi.mocked(pickDirectory).mockResolvedValueOnce(null);
+    await expect(usePluginStore.getState().pickLocalPluginDir()).resolves.toBeNull();
   });
 });

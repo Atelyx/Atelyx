@@ -150,12 +150,12 @@ interface PluginStoreState {
   load(): Promise<void>;
   /** 从 GitHub 仓库安装（repo 为 `owner/repo` 市场引用或完整 git 地址；新装一律停用）。 */
   install(repo: string, scope: PluginScope): Promise<PluginInstallResult>;
-  /** 从本地目录安装（junction/符号链接实时引用，源目录改动即时生效；当前仅 app 级）。 */
-  installLocal(path: string): Promise<PluginInstallResult>;
-  /** 调系统目录选择器选插件源目录并安装；用户取消 = false（未安装）。 */
-  installLocalFromPicker(): Promise<boolean>;
-  /** 从 git 地址安装（git clone，保留 .git 供更新；当前仅 app 级）。 */
-  installGit(url: string): Promise<PluginInstallResult>;
+  /** 从本地目录安装（junction/符号链接实时引用，源目录改动即时生效；作用域由安装确认选择）。 */
+  installLocal(path: string, scope: PluginScope): Promise<PluginInstallResult>;
+  /** 调系统目录选择器选插件源目录；用户取消返回 null（未安装）。 */
+  pickLocalPluginDir(): Promise<string | null>;
+  /** 从 git 地址安装（git clone，保留 .git 供更新；作用域由安装确认选择）。 */
+  installGit(url: string, scope: PluginScope): Promise<PluginInstallResult>;
   /** 卸载（删除目录/链接 + 终止运行时 + 清理状态）。 */
   uninstall(id: string): Promise<void>;
   /** 启用/停用（启用 = 拉起运行时；停用 = 终止运行时）。 */
@@ -656,21 +656,16 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
       return { id: row.id, replaced: before.has(row.id) };
     },
 
-    installLocal: async (path) => {
+    installLocal: async (path, scope) => {
       const before = new Set(Object.keys(get().plugins));
-      const row = await pluginInstallLocal(path, "app");
+      const row = await pluginInstallLocal(path, scope);
       await finishInstall(get, row);
       return { id: row.id, replaced: before.has(row.id) };
     },
 
-    installLocalFromPicker: async () => {
-      const path = await pickDirectorySvc();
-      if (!path) return false;
-      await get().installLocal(path);
-      return true;
-    },
+    pickLocalPluginDir: async () => pickDirectorySvc(),
 
-    installGit: async (url) => {
+    installGit: async (url, scope) => {
       const trimmed = url.trim();
       if (!trimmed) throw new Error("请输入 git 仓库地址");
       // 纯 owner/repo 输入归一化为完整 GitHub 地址（先剥 .git 尾缀防双后缀）：
@@ -681,7 +676,7 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
           ? `https://github.com/${base}.git`
           : trimmed;
       const before = new Set(Object.keys(get().plugins));
-      const row = await pluginInstall(gitRef, "app");
+      const row = await pluginInstall(gitRef, scope);
       await finishInstall(get, row);
       return { id: row.id, replaced: before.has(row.id) };
     },

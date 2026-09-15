@@ -17,11 +17,12 @@ import { Menu, MenuItem } from "@/components/common/Menu";
 import { ToggleSwitch } from "@/components/common/ToggleSwitch";
 import { PluginDetailsDialog } from "@/components/plugins/PluginDetailsDialog";
 import { MarketplaceSection } from "@/components/plugins/MarketplaceSection";
+import { InstallScopeSelector } from "@/components/plugins/InstallScopeSelector";
 import { SlotConflictPanel } from "@/components/plugins/SlotConflictPanel";
 import { DEFAULT_COMPOSITION } from "@/components/plugins/cordis/builtins";
 import { deriveThemeProviders, isThemePluginRow } from "@/utils/pluginTheme";
 import { composePlugins, compositionPackages } from "@/utils/cordis/composition";
-import { errText } from "@/types";
+import { errText, type PluginScope } from "@/types";
 import {
   PLUGIN_SCOPE_LABELS,
   PLUGIN_SOURCE_LABELS,
@@ -40,7 +41,8 @@ export function PluginsSettingsTab() {
   const uninstall = usePluginStore((s) => s.uninstall);
   const approveDir = usePluginStore((s) => s.approveDir);
   const revokeDir = usePluginStore((s) => s.revokeDir);
-  const installLocalFromPicker = usePluginStore((s) => s.installLocalFromPicker);
+  const installLocal = usePluginStore((s) => s.installLocal);
+  const pickLocalPluginDir = usePluginStore((s) => s.pickLocalPluginDir);
   const installGit = usePluginStore((s) => s.installGit);
   const capabilityLabel = usePluginStore((s) => s.capabilityLabel);
   const capabilitySensitive = usePluginStore((s) => s.capabilitySensitive);
@@ -59,6 +61,9 @@ export function PluginsSettingsTab() {
   const [contextMenu, setContextMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   const [gitUrl, setGitUrl] = useState("");
   const [installing, setInstalling] = useState(false);
+  const [pendingLocalPath, setPendingLocalPath] = useState<string | null>(null);
+  const [pendingGitUrl, setPendingGitUrl] = useState<string | null>(null);
+  const [confirmScope, setConfirmScope] = useState<PluginScope>("app");
 
   const rows = useMemo(() => composePlugins(DEFAULT_COMPOSITION, compositionPackages(plugins)), [plugins]);
   // 主题插件守恒（与 Rust 命令校验双保险）：主题插件必须至少保留一个启用——
@@ -100,6 +105,31 @@ export function PluginsSettingsTab() {
       () => setNotice({ kind: "ok", text: "插件已回退，当前插件数据已保留" }),
       (e) => setNotice({ kind: "error", text: errText(e) }),
     );
+  };
+
+  /** 从本地文件夹安装：先选目录，再弹作用域确认（与市场/Git 安装同一模式）。 */
+  const pickLocalDir = async () => {
+    if (installing) return;
+    try {
+      const path = await pickLocalPluginDir();
+      if (!path) return;
+      setConfirmScope("app");
+      setPendingLocalPath(path);
+    } catch (e) {
+      setNotice({ kind: "error", text: errText(e) });
+    }
+  };
+
+  /** 从 Git 地址安装：先校验非空，再弹作用域确认。 */
+  const startGitInstall = () => {
+    const url = gitUrl.trim();
+    if (!url) {
+      setNotice({ kind: "error", text: "请输入 git 仓库地址" });
+      return;
+    }
+    if (installing) return;
+    setConfirmScope("app");
+    setPendingGitUrl(url);
   };
 
   return (
@@ -149,9 +179,7 @@ export function PluginsSettingsTab() {
       {/* 安装入口：本地文件夹（junction 实时引用）+ git 地址（clone） */}
       <div className="flex items-center gap-2 mb-3 flex-shrink-0">
         <button
-          onClick={() =>
-            void runInstall(() => installLocalFromPicker(), "已从本地文件夹安装（替换行沿用原启用状态，全新插件默认停用；源目录改动即时生效）")
-          }
+          onClick={() => void pickLocalDir()}
           disabled={installing}
           title="选择本地插件源码目录，实时引用安装（无拷贝，改源码即时生效）"
           className="flex items-center gap-1.5 px-2.5 py-1.5 rounded border text-xs flex-shrink-0 transition-opacity disabled:opacity-50"
@@ -166,16 +194,14 @@ export function PluginsSettingsTab() {
             value={gitUrl}
             onChange={(e) => setGitUrl(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                void runInstall(() => installGit(gitUrl), "已从 Git 地址安装（替换行沿用原启用状态，全新插件默认停用）", () => setGitUrl(""));
-              }
+              if (e.key === "Enter") startGitInstall();
             }}
             placeholder="从 Git 地址安装（如 https://github.com/owner/repo）"
             className="flex-1 min-w-0 px-2 py-1.5 rounded border text-xs outline-none"
             style={{ borderColor: "var(--border)", color: "var(--text-primary)", background: "var(--bg-primary)" }}
           />
           <button
-            onClick={() => void runInstall(() => installGit(gitUrl), "已从 Git 地址安装（替换行沿用原启用状态，全新插件默认停用）", () => setGitUrl(""))}
+            onClick={() => startGitInstall()}
             disabled={installing || !gitUrl.trim()}
             className="px-2.5 py-1.5 rounded border text-xs flex-shrink-0 transition-opacity disabled:opacity-50"
             style={{ borderColor: "var(--border)", color: "var(--text-secondary)" }}
@@ -422,6 +448,40 @@ export function PluginsSettingsTab() {
           }}
           onCancel={() => setConfirmUninstall(null)}
         />
+      )}
+
+      {(pendingLocalPath || pendingGitUrl) && (
+        <ConfirmDialog
+          title={pendingLocalPath ? "从本地文件夹安装" : "从 Git 地址安装"}
+          description={
+            pendingLocalPath
+              ? "实时引用所选本地目录（无拷贝，源码改动即时生效）。安装到："
+              : "将按地址克隆插件仓库（保留 .git 供更新）。安装到："
+          }
+          confirmText="安装"
+          danger={false}
+          onConfirm={() => {
+            const scope = confirmScope;
+            const path = pendingLocalPath;
+            const git = pendingGitUrl;
+            setPendingLocalPath(null);
+            setPendingGitUrl(null);
+            if (path) {
+              void runInstall(
+                () => installLocal(path, scope),
+                "已从本地文件夹安装（替换行沿用原启用状态，全新插件默认停用；源目录改动即时生效）",
+              );
+            } else if (git) {
+              void runInstall(() => installGit(git, scope), "已从 Git 地址安装（替换行沿用原启用状态，全新插件默认停用）", () => setGitUrl(""));
+            }
+          }}
+          onCancel={() => {
+            setPendingLocalPath(null);
+            setPendingGitUrl(null);
+          }}
+        >
+          <InstallScopeSelector value={confirmScope} onChange={setConfirmScope} />
+        </ConfirmDialog>
       )}
         </>
       )}

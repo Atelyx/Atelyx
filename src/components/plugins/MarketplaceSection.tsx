@@ -3,14 +3,17 @@
  *
  * - 搜索：名称/id/描述/仓库全文匹配；类型筛选（全部/各类型）；徽标展示（官方/精选）
  * - 安装 = 按 repo 取源码（git clone，无 git 回退 GitHub 源码包）；全新插件默认停用、
- *   替换行沿用原启用状态，由「已安装」tab 确认启停；安装前提示社区插件未受官方审查、可访问本地数据
- * - 顶部下拉（类型筛选/安装作用域）用统一 DropdownSelect 组件（自绘弹层，非原生 select）
+ *   替换行沿用原启用状态，由「已安装」tab 确认启停；安装前弹确认（社区插件未经官方审查、
+ *   可访问本地数据 + 作用域选择：本机 / 随仓库共享）
+ * - 顶部下拉（类型筛选）用统一 DropdownSelect 组件（自绘弹层，非原生 select）；
+ *   安装作用域在确认弹窗内选择（InstallScopeSelector）
  * 分层：只经 pluginStore 触达插件能力。
  */
 import { useEffect, useMemo, useState } from "react";
 import { Download, RefreshCw, Star } from "lucide-react";
 import { DropdownSelect } from "@/components/common/DropdownSelect";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
+import { InstallScopeSelector } from "@/components/plugins/InstallScopeSelector";
 import { usePluginStore } from "@/stores/pluginStore";
 import { PLUGIN_BADGE_LABELS, PLUGIN_SOURCE_LABELS, PLUGIN_TYPE_LABELS } from "@/constants/plugins";
 import type { PluginIndexEntry, PluginScope, PluginType } from "@/types";
@@ -28,11 +31,6 @@ const TYPE_FILTERS: { value: PluginType | "all"; label: string }[] = [
   { value: "tableview", label: "表格视图" },
 ];
 
-const SCOPE_OPTIONS: { value: PluginScope; label: string }[] = [
-  { value: "app", label: "本机" },
-  { value: "vault", label: "随仓库共享" },
-];
-
 export function MarketplaceSection() {
   const marketItems = usePluginStore((s) => s.marketItems);
   const marketLoaded = usePluginStore((s) => s.marketLoaded);
@@ -44,10 +42,10 @@ export function MarketplaceSection() {
 
   const [query, setQuery] = useState("");
   const [typeFilter, setTypeFilter] = useState<PluginType | "all">("all");
-  const [scope, setScope] = useState<PluginScope>("app");
   const [installingRepo, setInstallingRepo] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
   const [confirming, setConfirming] = useState<PluginIndexEntry | null>(null);
+  const [confirmScope, setConfirmScope] = useState<PluginScope>("app");
 
   useEffect(() => {
     if (!marketLoaded) void loadMarket();
@@ -67,7 +65,7 @@ export function MarketplaceSection() {
   }, [marketItems, query, typeFilter]);
 
   /** 安装统一入口：按包内实际 id 如实提示（替换了哪一行由落位结果判定，不认索引自报 id）。 */
-  const doInstall = async (entry: PluginIndexEntry): Promise<void> => {
+  const doInstall = async (entry: PluginIndexEntry, scope: PluginScope): Promise<void> => {
     const repo = entry.repo;
     if (installingRepo) return;
     setInstallingRepo(repo);
@@ -86,9 +84,13 @@ export function MarketplaceSection() {
     }
   };
 
+  // 确认中的插件若同 id 行由随应用分发实现占用（行存在且 installDir 为空），vault 安装必被 Rust 拒绝，弹窗内锁定「本机」。
+  const confirmingSameIdRow = confirming ? Object.values(plugins).find((p) => p.id === confirming.id) : undefined;
+  const lockInstallToApp = confirmingSameIdRow !== undefined && confirmingSameIdRow.installDir === "";
+
   return (
     <div className="flex flex-col gap-3 min-h-0">
-      {/* 搜索 / 筛选 / 安装作用域 / 刷新 */}
+      {/* 搜索 / 类型筛选 / 刷新 */}
       <div className="flex gap-2 flex-wrap">
         <input
           value={query}
@@ -102,18 +104,6 @@ export function MarketplaceSection() {
           onChange={(v) => setTypeFilter(v as PluginType | "all")}
           options={TYPE_FILTERS.map((f) => ({ value: f.value, label: f.label }))}
           title="类型筛选"
-          className="text-xs rounded px-2 py-1.5"
-          style={{
-            color: "var(--text-primary)",
-            background: "var(--input-bg)",
-            border: "1px solid var(--input-border)",
-          }}
-        />
-        <DropdownSelect
-          value={scope}
-          onChange={(v) => setScope(v as PluginScope)}
-          options={SCOPE_OPTIONS.map((o) => ({ value: o.value, label: o.label }))}
-          title="安装作用域"
           className="text-xs rounded px-2 py-1.5"
           style={{
             color: "var(--text-primary)",
@@ -201,7 +191,10 @@ export function MarketplaceSection() {
                   </span>
                 ) : (
                   <button
-                    onClick={() => setConfirming(it)}
+                    onClick={() => {
+                      setConfirmScope("app");
+                      setConfirming(it);
+                    }}
                     disabled={installingRepo !== null}
                     className="flex items-center gap-1 px-2.5 py-1.5 rounded text-xs disabled:opacity-50"
                     style={{ background: "var(--accent)", color: "var(--accent-fg)" }}
@@ -216,9 +209,7 @@ export function MarketplaceSection() {
                   同名 id 行已存在（{PLUGIN_SOURCE_LABELS[sameIdRow.sourceKind]}，按索引自报 id 判定）。
                   若包内清单 id 与之一致，安装将以本包实现替代该行并沿用其原启用状态；全新插件默认停用
                   （需到「已安装」tab 启用），实际落位 id 以安装结果提示为准。
-                  {sameIdRow.installDir === "" && scope === "vault"
-                    ? "该行由随应用分发的实现占用：请选「本机」作用域安装。"
-                    : ""}
+                  {sameIdRow.installDir === "" ? "该行由随应用分发的实现占用：安装到「本机」作用域以替代该行。" : ""}
                 </div>
               )}
               {it.tagline && (
@@ -240,10 +231,17 @@ export function MarketplaceSection() {
           onConfirm={() => {
             const entry = confirming;
             setConfirming(null);
-            void doInstall(entry);
+            void doInstall(entry, confirmScope);
           }}
           onCancel={() => setConfirming(null)}
-        />
+        >
+          <InstallScopeSelector
+            value={confirmScope}
+            onChange={setConfirmScope}
+            lockedScope={lockInstallToApp ? "app" : undefined}
+            lockedNote={lockInstallToApp ? "该 id 由随应用分发的实现占用，只能安装到本机" : undefined}
+          />
+        </ConfirmDialog>
       )}
     </div>
   );
