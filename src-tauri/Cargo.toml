@@ -79,14 +79,17 @@ sha2 = "0.10"
 [target.'cfg(target_os = "windows")'.dependencies]
 # 跨窗口拖拽释放检测（Windows 专用）：标签拖出窗口后 webview 收不到窗口外 pointerup，
 # 前端轮询 GetAsyncKeyState(VK_LBUTTON) 物理判定鼠标已松开，终止拖拽会话并清除 drop 指示器；
-# fileapi/winnt：插件卸载前递归清只读位（SMB/NAS 把 POSIX 444 映射成只读位会挡 remove_dir_all）
-winapi = { version = "0.3", features = ["winuser", "fileapi", "winnt", "processthreadsapi", "handleapi", "errhandlingapi", "minwinbase"] }
+# fileapi/winnt：插件卸载前递归清只读位（SMB/NAS 把 POSIX 444 映射成只读位会挡 remove_dir_all）；
+# jobapi2/tlhelp32：插件托管进程的作业对象（创建/配置/加入/结束）与「挂起创建 → 恢复主线程」
+# 让进程创建那一刻就纳入清理范围（见 plugin_process.rs）
+winapi = { version = "0.3", features = ["winuser", "fileapi", "winnt", "processthreadsapi", "handleapi", "errhandlingapi", "minwinbase", "jobapi2", "tlhelp32"] }
 # 插件平台：本地目录安装的 Windows junction 创建（免管理员；Unix 走 std 符号链接）
 junction = "0.2"
 
 [target.'cfg(unix)'.dependencies]
-# 插件托管进程的结束（commands/process.rs）按 pid 下发 SIGKILL：不走 Command 调 kill(1)
-# ——外部工具不保证存在，且 `libc::kill` 才能按 errno 区分「已不存在」（ESRCH）与真失败。
+# 插件托管进程（commands/process.rs 的进程树结束 + plugin_process.rs 的进程组）用 libc 直接下发
+# 信号：不走 Command 调 kill(1)——外部工具不保证存在，且 `libc::kill` 才能按 errno 区分
+# 「已不存在」（ESRCH）与真失败；`setpgid`/`killpg` 亦只有 libc 提供。
 libc = "0.2"
 
 [features]

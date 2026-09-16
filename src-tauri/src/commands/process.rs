@@ -1,20 +1,53 @@
-//! 进程树结束命令（插件托管进程的可靠停止）。
+//! 插件托管进程的命令面：启动（`ctx.shell.exec`/`spawn` 的后端）与按 pid 结束进程树。
 //!
-//! 插件经 `ctx.shell.spawn`/`ctx.shell.exec` 启动的长驻服务，包装层是 `sh -c`（Unix）/
+//! 插件经 `ctx.shell.spawn`/`exec` 启动的长驻服务，包装层是 `sh -c`（Unix）/
 //! `cmd.exe /C`（Windows）——只结束包装进程会把真正的服务留成孤儿（Windows 上尤其确定），
 //! 所以这里按 pid 结束整棵树：Windows 用系统自带 `taskkill /T /F`，Linux 读 `/proc` 收齐
 //! 子孙后从叶到根下发 SIGKILL（先结束父进程会让子孙改挂 init、再也枚举不到）。
 //!
-//! 信任模型与 `commands/external_fs.rs` 同款：命令接受任意 pid，不构成防插件边界——插件本可
-//! 经 `ctx.shell.exec` 跑 `kill`/`taskkill`，原始命令逃生舱 `ctx.native.invoke` 亦全量放行。
-//! 唯一的硬护栏是「不能杀掉整个应用/系统」：pid 0（Unix = 调用方进程组）与超出 i32 范围的
+//! 启动侧（`spawn_plugin_process`）把进程创建收进宿主，好在创建那一刻就定下清理归属：
+//! 作业对象/进程组与随应用退出的收尾见 `plugin_process.rs`。这一层不是沙箱——程序白名单只放行
+//! shell 解释器而参数全开，与 `ctx.shell` 敏感面的信任模型一致。
+//!
+//! `kill_process_tree` 的信任模型与 `commands/external_fs.rs` 同款：命令接受任意 pid，不构成防插件
+//! 边界——插件本可经 `ctx.shell.exec` 跑 `kill`/`taskkill`，原始命令逃生舱 `ctx.native.invoke` 亦全量
+//! 放行。唯一的硬护栏是「不能杀掉整个应用/系统」：pid 0（Unix = 调用方进程组）与超出 i32 范围的
 //! pid（`as i32` 会变成 -1 = 全部进程）在发起任何系统调用之前恒拒。
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use tauri::ipc::Channel;
+use tauri::State;
+
+use crate::plugin_process::{EventSink, PluginProcessHost, ProcessEvent};
+
+// Windows 侧按 pid 结束走 taskkill 子进程
 #[cfg(windows)]
 use std::process::Command;
 // Unix 侧进程树收集用（测试也直接调这两个纯函数，故 test 一并放行，避免 Windows 构建报 dead_code）
 #[cfg(any(unix, test))]
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
+
+/// 启动插件托管进程（`ctx.shell.exec`/`spawn` 的后端），pid 到位即返回。
+///
+/// 程序白名单由 `plugin_process` 校验，进程在创建时就纳入作业对象/进程组，输出与退出经
+/// `on_event` 流式回传。
+#[tauri::command(async)]
+pub fn spawn_plugin_process(
+    host: State<'_, Arc<PluginProcessHost>>,
+    program: String,
+    args: Vec<String>,
+    cwd: Option<String>,
+    env: Option<HashMap<String, String>>,
+    on_event: Channel<ProcessEvent>,
+) -> Result<u32, String> {
+    // 事件直通前端：发送失败（窗口已销毁）不重试，进程的清理不依赖事件送达
+    let sink: EventSink = Arc::new(move |event| {
+        let _ = on_event.send(event);
+    });
+    host.spawn(&program, &args, cwd.as_deref(), env.as_ref(), sink)
+}
 
 /// 结束 pid 及其全部子孙进程。
 ///
@@ -252,24 +285,34 @@ mod tests {
             .expect("起测试进程失败")
     }
 
-    /// 起「包装进程 → 真正服务进程」两层结构，返回（包装进程、可识别真正服务的凭据）。
+    /// 本次用例独占的孙进程 pid 文件路径。
     ///
-    /// 复刻插件的真实形态：直接子进程只是 `sh`/`cmd.exe` 包装，长驻的是它下面的孙进程。
-    /// 只断言包装进程消失不足以证明「进程树结束」（去掉 `/T` 或 `/proc` 收集照样通过），
-    /// 所以让孙进程把自己的 pid 写进临时文件，本用例按该 pid 断言。
-    fn spawn_wrapped_service() -> (std::process::Child, u32) {
-        let pid_file = std::env::temp_dir().join(format!(
-            "atelyx-tree-test-{}-{}",
+    /// 用例并行执行，文件名必须逐个唯一：只用 pid + 毫秒会撞（同一毫秒内起两个用例就共用同一个
+    /// 文件，一方清理会把另一方的 pid 文件删掉，表现为「未取到孙进程 pid」的偶发失败），故加自增序号。
+    fn temp_pid_file() -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static SEQ: AtomicU32 = AtomicU32::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "atelyx-tree-test-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis())
-                .unwrap_or(0)
+                .unwrap_or(0),
+            SEQ.fetch_add(1, Ordering::Relaxed)
         ));
-        let _ = std::fs::remove_file(&pid_file);
+        let _ = std::fs::remove_file(&path);
+        path
+    }
 
+    /// 起「包装进程 → 真正服务进程」两层结构用的启动参数：直接子进程是 `cmd.exe`/`sh` 包装，
+    /// 长驻的是它下面的孙进程（把自己的 pid 写进 `pid_file`）。
+    ///
+    /// 复刻插件的真实形态（`cmd.exe /C <python> main.py`）：只断言包装进程消失不足以证明「进程树
+    /// 结束」（去掉 `/T` 或 `/proc` 收集照样通过），所以让孙进程自报 pid，用例按该 pid 断言。
+    fn wrapped_service_command(pid_file: &std::path::Path) -> (String, Vec<String>) {
         #[cfg(windows)]
-        let mut command = {
+        {
             // 孙进程 = powershell（包装层是 cmd.exe）；写入自身 PID 后常驻。
             // 命令走**脚本文件**而不是 `-Command "…"`：内联命令要穿 cmd.exe 的引号与 `|` 解析，
             // 转义规则随调用方式变化（这是踩过的坑），落文件则命令行只有一个路径参数。
@@ -279,48 +322,85 @@ mod tests {
                 pid_file.display()
             );
             std::fs::write(&script_file, script).expect("写测试脚本失败");
-            let mut c = std::process::Command::new("cmd.exe");
-            c.args([
-                "/C",
-                "powershell",
-                "-NoProfile",
-                "-NonInteractive",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-            ]);
-            c.arg(&script_file);
-            c
-        };
+            let args = vec![
+                "/C".to_string(),
+                "powershell".to_string(),
+                "-NoProfile".to_string(),
+                "-NonInteractive".to_string(),
+                "-ExecutionPolicy".to_string(),
+                "Bypass".to_string(),
+                "-File".to_string(),
+                script_file.to_string_lossy().into_owned(),
+            ];
+            ("cmd.exe".to_string(), args)
+        }
         #[cfg(unix)]
-        let mut command = {
+        {
             let script = format!("sleep 30 & echo $! > '{}'; wait", pid_file.display());
-            let mut c = std::process::Command::new("sh");
-            c.args(["-c", &script]);
-            c
-        };
+            ("sh".to_string(), vec!["-c".to_string(), script])
+        }
+    }
 
-        let child = command
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .expect("起包装进程失败");
-
-        // 孙进程启动并写出 pid 需要一段时间（Windows 上 powershell 启动尤其慢）
-        let mut grandchild = 0u32;
+    /// 等孙进程写出自身 pid（Windows 上 powershell 启动尤其慢）。
+    fn wait_service_pid(pid_file: &std::path::Path) -> u32 {
+        let mut service = 0u32;
         for _ in 0..50 {
-            if let Ok(text) = std::fs::read_to_string(&pid_file) {
+            if let Ok(text) = std::fs::read_to_string(pid_file) {
                 if let Ok(pid) = text.trim().parse::<u32>() {
-                    grandchild = pid;
+                    service = pid;
                     break;
                 }
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
-        let _ = std::fs::remove_file(&pid_file);
+        assert_ne!(service, 0, "未取到孙进程 pid（包装脚本未按预期写出自身 pid）");
+        service
+    }
+
+    /// 清掉包装脚本与 pid 文件（Windows 的 .ps1 与 pid 文件同目录同主名）。
+    fn cleanup_wrapped_files(pid_file: &std::path::Path) {
+        let _ = std::fs::remove_file(pid_file);
         let _ = std::fs::remove_file(pid_file.with_extension("ps1"));
-        assert_ne!(grandchild, 0, "未取到孙进程 pid（包装脚本未按预期写出自身 pid）");
-        (child, grandchild)
+    }
+
+    fn spawn_wrapped_service() -> (std::process::Child, u32) {
+        let pid_file = temp_pid_file();
+        let (program, args) = wrapped_service_command(&pid_file);
+        let child = std::process::Command::new(program)
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("起包装进程失败");
+        let service = wait_service_pid(&pid_file);
+        cleanup_wrapped_files(&pid_file);
+        (child, service)
+    }
+
+    /// 收集宿主上报的进程事件的测试替身。
+    fn event_recorder() -> (Arc<std::sync::Mutex<Vec<ProcessEvent>>>, EventSink) {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink: EventSink = {
+            let seen = seen.clone();
+            Arc::new(move |event| seen.lock().unwrap().push(event))
+        };
+        (seen, sink)
+    }
+
+    /// 等事件里出现退出事件，返回退出码（超时即失败）。
+    fn wait_terminated(seen: &Arc<std::sync::Mutex<Vec<ProcessEvent>>>) -> Option<i32> {
+        for _ in 0..50 {
+            if let Some(ProcessEvent::Terminated { code }) = seen
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|e| matches!(e, ProcessEvent::Terminated { .. }))
+            {
+                return *code;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        None
     }
 
     /// 进程是否仍存在（未被回收的僵尸也算存在，故断言前必须先 wait 收尸）。
@@ -403,5 +483,83 @@ mod tests {
         assert!(windows_process_alive(std::process::id()).unwrap_or(false), "自身进程应判定为存活");
         // 高位的非法 pid：OpenProcess 返回 ERROR_INVALID_PARAMETER
         assert!(!windows_process_alive(0xFFFF_FFF0).unwrap_or(true), "非法 pid 应判定为不存在");
+    }
+
+    /// 宿主启动的进程要能上报输出与退出（`ctx.shell.exec` 的聚合结果建立在这条链上）。
+    #[test]
+    fn spawned_process_reports_output_and_exit() {
+        let host = Arc::new(PluginProcessHost::new());
+        let (seen, sink) = event_recorder();
+        #[cfg(windows)]
+        let (program, args) = ("cmd.exe", vec!["/C".to_string(), "echo hello".to_string()]);
+        #[cfg(unix)]
+        let (program, args) = ("sh", vec!["-c".to_string(), "echo hello".to_string()]);
+
+        let pid = host.spawn(program, &args, None, None, sink).expect("启动进程失败");
+        assert_ne!(pid, 0);
+        assert_eq!(wait_terminated(&seen), Some(0), "应上报正常退出");
+
+        let events = seen.lock().unwrap();
+        let stdout: String = events
+            .iter()
+            .filter_map(|e| match e {
+                ProcessEvent::Stdout { data } => Some(data.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(stdout.contains("hello"), "输出应经回调上报：{stdout:?}（事件 {events:?}）");
+    }
+
+    /// 需求 A 的验收：应用退出时，插件托管进程**整棵树**都不再存在。
+    ///
+    /// 断言的是孙进程（真正的服务）——只结束包装进程的实现在这里必须失败。这是「应用关掉了，
+    /// ComfyUI 还在占端口与显存」的直接守卫。
+    #[test]
+    fn shutdown_terminates_wrapped_service_tree() {
+        let host = Arc::new(PluginProcessHost::new());
+        let (_, sink) = event_recorder();
+        let pid_file = temp_pid_file();
+        let (program, args) = wrapped_service_command(&pid_file);
+
+        let wrapper_pid = host
+            .spawn(&program, &args, None, None, sink)
+            .expect("启动包装进程失败");
+        let service_pid = wait_service_pid(&pid_file);
+        cleanup_wrapped_files(&pid_file);
+        assert!(is_alive(service_pid), "真正服务进程应已启动：{service_pid}");
+
+        host.shutdown_children();
+
+        // 判据取清理前的实测值；失败即清理（别把残留服务留给后续用例/机器）不得覆盖判据，
+        // 否则断言恒真、拿掉作业对象也照样通过
+        let gone = wait_gone(service_pid) && wait_gone(wrapper_pid);
+        if !gone {
+            kill_process_tree(service_pid).ok();
+            kill_process_tree(wrapper_pid).ok();
+        }
+        assert!(
+            gone,
+            "退出收尾后进程仍在运行（包装 {wrapper_pid} / 服务 {service_pid}）：清理没覆盖整棵树"
+        );
+    }
+
+    /// 收尾之后不再接受新进程：否则新进程会落在清理之后、逃过退出收尾。
+    #[test]
+    fn spawn_is_refused_after_shutdown() {
+        let host = Arc::new(PluginProcessHost::new());
+        let (_, sink) = event_recorder();
+        #[cfg(windows)]
+        let (program, args) = ("cmd.exe", vec!["/C".to_string(), "echo x".to_string()]);
+        #[cfg(unix)]
+        let (program, args) = ("sh", vec!["-c".to_string(), "echo x".to_string()]);
+
+        // 先起一个再收尾：收尾前可正常启动
+        host.spawn(program, &args, None, None, sink.clone()).expect("收尾前应能启动");
+        host.shutdown_children();
+
+        let err = host
+            .spawn(program, &args, None, None, sink)
+            .expect_err("收尾后必须拒绝启动新进程");
+        assert!(err.contains("退出"), "错误原因应指明退出中：{err}");
     }
 }

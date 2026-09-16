@@ -78,7 +78,9 @@ export interface AiBeforeRequestOutput extends SerialHookOutput {
   messages?: LlmMessage[];
 }
 
-/** shell.exec 选项（command 必填；cwd/env 可选）。 */
+/** shell.exec 选项（command 必填；cwd/env 可选）。
+ *  `env` 是**追加/覆盖**宿主环境（不传即完全继承宿主的 PATH/TEMP 等——本机服务需要它们）；
+ *  没有「清空环境」的写法，stdin 也不开放（不给子进程写输入）。 */
 export interface ShellExecOptions {
   command: string;
   args?: string[];
@@ -172,13 +174,15 @@ export interface AppService {
   openPage(pageId: string): Promise<boolean>;
 }
 
-/** 外部程序执行服务（敏感：宿主只登记 `sh`（Unix，配 `-c`）/ `cmd.exe`（Windows，配 `/C`），`args` 全开，等价任意命令执行）。
- *  插件启动的进程按调用方记账，插件停用/卸载时由宿主统一结束（长驻服务不该活过插件本身）。 */
+/** 外部程序执行服务（敏感：程序只放行 `sh`（Unix，配 `-c`）/ `cmd.exe`（Windows，配 `/C`），`args` 全开，等价任意命令执行）。
+ *  插件启动的进程按调用方记账：插件停用/卸载时由宿主统一结束，应用退出时也一并结束——长驻服务
+ *  不该活过插件本身，更不该活过应用（被强杀时靠 Windows 作业对象兜底，Unix 该路径不保证）。 */
 export interface ShellService {
   /** 非流式：聚合输出后一次性返回；传 handlers 则流式（stdout/stderr → chunk）。 */
   exec(opts: ShellExecOptions, handlers?: ShellStreamHandlers): Promise<ShellExecResult | undefined>;
   /** 启动进程并立即返回句柄（不等进程结束）——托管长驻服务的可靠停止方式。
-   *  启动失败 reject（同时经 handlers.error 上报同因错误）；此后错误只走 handlers.error。 */
+   *  启动失败 reject（同时经 handlers.error 上报同因错误）；此后错误只走 handlers.error。
+   *  进程创建那一刻即纳入退出清理范围：应用退出（含被强杀，Windows）时随宿主一起结束。 */
   spawn(opts: ShellExecOptions, handlers?: ShellStreamHandlers): Promise<ShellProcessHandle>;
 }
 

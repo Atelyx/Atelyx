@@ -11,13 +11,16 @@ mod layout_persist;
 mod layout_window;
 mod net_guard;
 mod plugin_build;
+mod plugin_process;
 mod vault;
 mod watcher;
+
+use std::sync::Arc;
 
 use tauri::Manager;
 
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_process::init())
@@ -32,6 +35,8 @@ pub fn run() {
             // 布局迷你窗口管理器：布局模型唯一权威，启动即从 ui-state.json 加载
             app.manage(layout::LayoutState::new());
             layout::load_from_disk(app.handle(), &app.state::<layout::LayoutState>());
+            // 插件托管进程：进程创建即纳入作业对象/进程组，随应用退出统一收尾（见 plugin_process.rs）
+            app.manage(Arc::new(plugin_process::PluginProcessHost::new()));
             // 主窗口窗口事件钩子：Moved/Resized → 权威 bounds（拖拽命中/落点解析）
             if let Some(main_win) = app.get_webview_window("main") {
                 main_win.on_window_event(layout::window_event_handler(app.handle(), "main".into()));
@@ -178,11 +183,21 @@ pub fn run() {
             commands::external_fs::external_move_file,
             commands::external_fs::external_delete_file,
             commands::external_fs::external_delete_dir,
-            // 插件托管进程的结束（ctx.shell.spawn 的 cancel + 插件停用时的自动清理）
+            // 插件托管进程的启动与结束（ctx.shell.spawn 的后端 + 按 pid 结束进程树）
+            commands::process::spawn_plugin_process,
             commands::process::kill_process_tree,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    app.run(|handle, event| {
+        // 应用退出：结束全部插件托管进程（进程不该活过应用）。走 Exit 而非 ExitRequested——
+        // 退出请求在关窗守卫里可能被拦下，Exit 才是终态（窗口已全销毁、不再有新进程启动）。
+        // 崩溃与强杀不经过这里，由 Windows 作业对象随句柄关闭兜底（见 plugin_process.rs）。
+        if let tauri::RunEvent::Exit = event {
+            plugin_process::shutdown(handle);
+        }
+    });
 }
 
 #[cfg(test)]
@@ -237,61 +252,47 @@ mod capability_contract_tests {
         }
     }
 
-    /// 插件进程执行必须落在带 scope 的能力上：裸权限点只放行命令本身，而 tauri-plugin-shell
-    /// 还要按 scope 的 `name` 匹配程序（无通配符），缺 scope 时 `ctx.shell.exec` 仍会被拒。
-    /// 这里断言两个平台能力文件各自只在自己的平台上生效、登记了一个 `args` 全开的解释器，
-    /// 且名字与前端会传的程序名一致。`allow-kill` 是插件 shell 面按 pid 结束的能力，宿主自身
-    /// 不再用 `Child.kill`（那只会结束包装进程）——进程树结束走 `kill_process_tree` 命令。
+    /// 插件进程执行走宿主 `spawn_plugin_process`（程序白名单在 Rust 侧 `plugin_process::resolve_program`），
+    /// 为的是在进程创建那一刻就定下清理归属。故 `shell:allow-spawn`/`allow-execute`/`allow-kill` 不得
+    /// 出现在任何能力文件里：那等于敞开一条不进程记账、不随应用退出的执行路径。
+    ///
+    /// 扫整个目录而不是点名某几个文件：换个文件名重新登记 scope 同样是敞开了那条路径。
     #[test]
-    fn capabilities_scope_shell_execution() {
-        for (file, src, expected_name, expected_cmd, expected_platforms) in [
-            (
-                "shell-exec-unix.json",
-                include_str!("../capabilities/shell-exec-unix.json"),
-                "sh",
-                "/bin/sh",
-                ["linux", "macOS"].as_slice(),
-            ),
-            (
-                "shell-exec-windows.json",
-                include_str!("../capabilities/shell-exec-windows.json"),
-                "cmd.exe",
-                "cmd.exe",
-                ["windows"].as_slice(),
-            ),
-        ] {
-            let cfg: serde_json::Value = serde_json::from_str(src).expect("能力文件解析失败");
-            let platforms: Vec<&str> = cfg["platforms"]
-                .as_array()
-                .expect("platforms 缺失")
-                .iter()
-                .filter_map(|v| v.as_str())
-                .collect();
-            for want in expected_platforms {
-                assert!(platforms.contains(want), "{file} 的 platforms 缺 {want}");
+    fn no_shell_process_capabilities() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("capabilities");
+        let mut scanned = 0;
+        for entry in std::fs::read_dir(&dir).expect("capabilities 目录读取失败") {
+            let path = entry.expect("capabilities 目录项读取失败").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
             }
-            let perms = cfg["permissions"].as_array().expect("permissions 缺失");
-            assert!(
-                perms.iter().any(|p| p.as_str() == Some("shell:allow-kill")),
-                "{file} 缺少 shell:allow-kill（插件按 pid 结束进程的能力）"
-            );
-            let spawn_scope = perms
-                .iter()
-                .find(|p| p["identifier"] == "shell:allow-spawn")
-                .and_then(|p| p["allow"].as_array())
-                .unwrap_or_else(|| panic!("{file} 未给 shell:allow-spawn 声明 scope"));
-            let entry = spawn_scope
-                .iter()
-                .find(|e| e["name"] == expected_name)
-                .unwrap_or_else(|| panic!("{file} 未登记程序名 {expected_name}"));
-            assert_eq!(entry["cmd"], expected_cmd, "{file} 的 cmd 不符");
-            // args 全开才能传 `-c`/`/C <命令>`；缺省是拒绝任何参数
-            assert_eq!(entry["args"], serde_json::Value::Bool(true), "{file} 的 args 未全开");
+            scanned += 1;
+            let cfg: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).expect("能力文件读取失败"))
+                    .expect("能力文件解析失败");
+            let Some(perms) = cfg["permissions"].as_array() else {
+                continue;
+            };
+            for perm in perms {
+                // 字符串与带 scope 的对象两种写法都要看
+                let id = perm
+                    .as_str()
+                    .map(str::to_string)
+                    .or_else(|| perm["identifier"].as_str().map(str::to_string));
+                for must_not in ["shell:allow-execute", "shell:allow-spawn", "shell:allow-kill"] {
+                    assert_ne!(
+                        id.as_deref(),
+                        Some(must_not),
+                        "{} 不该出现 {must_not}：插件进程执行走宿主 spawn_plugin_process",
+                        path.display()
+                    );
+                }
+            }
         }
+        assert!(scanned > 0, "capabilities 目录下没有扫到任何能力文件");
     }
 
-    /// `shell:default` 只含 `allow-open`（本地路径靠 `plugins.shell.open` 的 scope 放行），
-    /// 进程执行不得退回裸权限点（字符串与带 scope 的对象两种写法都算）。
+    /// `shell:default` 只含 `allow-open`（本地路径靠 `plugins.shell.open` 的 scope 放行）。
     #[test]
     fn default_capability_keeps_shell_open_only() {
         let cfg: serde_json::Value =
@@ -307,12 +308,6 @@ mod capability_contract_tests {
             })
             .collect();
         assert!(perms.iter().any(|p| p == "shell:default"), "缺少 shell:default（open 依赖）");
-        for must_not in ["shell:allow-execute", "shell:allow-spawn", "shell:allow-kill"] {
-            assert!(
-                !perms.iter().any(|p| p == must_not),
-                "{must_not} 不该出现在默认能力集：进程执行必须带 scope（见 shell-exec-*.json）"
-            );
-        }
     }
 
     /// 打包版 CSP（tauri.conf.json）与开发版 CSP（index.html meta）以追加方式叠加取交集，
