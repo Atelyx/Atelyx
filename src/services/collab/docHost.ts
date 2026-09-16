@@ -61,9 +61,15 @@ export function disconnectTransport(): void {
   activeTransport = null;
 }
 
-/** 出站咽喉：按频道透传（断开时静默丢弃）。 */
-export function sendTransportMessage(channel: CollabChannel, file: string, payload: unknown): void {
-  activeTransport?.sendMessage(channel, file, payload);
+/** 出站咽喉：按频道透传（断开时静默丢弃）。返回是否已投递到传输层（调用方据此感知未连接）。
+ *  `plugin-msg` 的 file 槽 = 插件频道名，targetPeerId 有值 = 定向单播（其余频道忽略）。 */
+export function sendTransportMessage(
+  channel: CollabChannel,
+  file: string,
+  payload: unknown,
+  targetPeerId?: number,
+): boolean {
+  return activeTransport?.sendMessage(channel, file, payload, targetPeerId) ?? false;
 }
 
 /** 出站 presence（断开时静默丢弃）。 */

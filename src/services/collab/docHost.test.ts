@@ -37,7 +37,7 @@ function connectRequest(
 /** 假传输：记录连接参数与出站调用（含调用顺序），暴露入站回调抓手。 */
 function fakeFactory(name: string) {
   const calls = {
-    sendMessage: [] as Array<[string, string, unknown]>,
+    sendMessage: [] as Array<[string, string, unknown, number | undefined]>,
     sendPresence: 0,
     sendBye: 0,
     disconnect: 0,
@@ -52,8 +52,9 @@ function fakeFactory(name: string) {
         sendPresence: () => {
           calls.sendPresence += 1;
         },
-        sendMessage: (channel, file, payload) => {
-          calls.sendMessage.push([channel, file, payload]);
+        sendMessage: (channel, file, payload, targetPeerId) => {
+          calls.sendMessage.push([channel, file, payload, targetPeerId]);
+          return true;
         },
         sendBye: () => {
           calls.sendBye += 1;
@@ -129,8 +130,8 @@ describe("连接与路由", () => {
     expect(first.calls.disconnect).toBe(1);
     // 先 bye（让中转立即踢出，否则旧 peer 要等 30s 心跳超时才消失）再断开
     expect(first.calls.order).toEqual(["bye", "disconnect"]);
-    expect(first.calls.sendMessage).toEqual([["note-sync", "a.md", "one"]]);
-    expect(second.calls.sendMessage).toEqual([["note-sync", "a.md", "two"]]);
+    expect(first.calls.sendMessage).toEqual([["note-sync", "a.md", "one", undefined]]);
+    expect(second.calls.sendMessage).toEqual([["note-sync", "a.md", "two", undefined]]);
   });
 
   it("断开后出站静默丢弃（不再触达旧句柄）", () => {
@@ -144,8 +145,40 @@ describe("连接与路由", () => {
 
     expect(fake.calls.sendBye).toBe(1);
     expect(fake.calls.disconnect).toBe(1);
-    expect(fake.calls.sendMessage).toEqual([["note-sync", "a.md", "before"]]);
+    expect(fake.calls.sendMessage).toEqual([["note-sync", "a.md", "before", undefined]]);
     expect(fake.calls.sendPresence).toBe(0);
+  });
+
+  it("plugin-msg 入站按注册表分发（file 槽 = 插件频道名）", () => {
+    const fake = fakeFactory("fake");
+    transport.registerCollabTransport(fake.factory);
+    const received: Array<[number, string, unknown]> = [];
+    collabHost.registerCollabChannel("plugin-msg", (_peerId, _file, _payload) => {
+      received.push([_peerId, _file, _payload]);
+    });
+
+    host.connectTransport(connectRequest("fake"));
+    fake.options()!.onChannelMessage(7, "plugin-msg", "comfyui.remote", { cmd: "start" });
+
+    expect(received).toEqual([[7, "comfyui.remote", { cmd: "start" }]]);
+  });
+
+  it("出站咽喉返回是否已投递：已连接 true、断开后 false", () => {
+    const fake = fakeFactory("fake");
+    transport.registerCollabTransport(fake.factory);
+    host.connectTransport(connectRequest("fake"));
+    expect(host.sendTransportMessage("note-sync", "a.md", "p")).toBe(true);
+    host.disconnectTransport();
+    expect(host.sendTransportMessage("note-sync", "a.md", "p")).toBe(false);
+    expect(fake.calls.sendMessage).toEqual([["note-sync", "a.md", "p", undefined]]);
+  });
+
+  it("出站咽喉透传定向目标（plugin-msg 单播）", () => {
+    const fake = fakeFactory("fake");
+    transport.registerCollabTransport(fake.factory);
+    host.connectTransport(connectRequest("fake"));
+    host.sendTransportMessage("plugin-msg", "comfyui.remote", { cmd: "stop" }, 9);
+    expect(fake.calls.sendMessage).toEqual([["plugin-msg", "comfyui.remote", { cmd: "stop" }, 9]]);
   });
 
   it("presence 与连通性测试按名透传", async () => {

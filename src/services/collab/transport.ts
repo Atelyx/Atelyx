@@ -5,14 +5,26 @@
  */
 import type { CollabHello, CollabPeer, CollabPresence, RelayTestResult } from "@/types";
 
-/** 透传频道（relay 各消息类型；新传输可按需扩展）。 */
-export type CollabChannel = "note-sync" | "note-aware" | "canvas-patch" | "table-patch";
+/** 透传频道（relay 各消息类型；新传输可按需扩展）。`plugin-msg` 为插件通用消息通道：
+ *  file 槽承载插件频道名，payload 为任意 JSON，可选 targetPeerId 定向单播。 */
+export type CollabChannel =
+  | "note-sync"
+  | "note-aware"
+  | "canvas-patch"
+  | "table-patch"
+  | "plugin-msg";
 
 export interface CollabTransportHandle {
   /** 上报本端 presence（调用方自行节流）。 */
   sendPresence(presence: CollabPresence): void;
-  /** 按频道透传一条消息（relay 不透明转发；断开时静默丢弃）。 */
-  sendMessage(channel: CollabChannel, file: string, payload: unknown): void;
+  /** 按频道透传一条消息（relay 不透明转发；断开时静默丢弃）。返回是否已投递到传输层。
+   *  `plugin-msg` 的 file 槽 = 插件频道名，targetPeerId 有值 = 定向单播（其余频道忽略）。 */
+  sendMessage(
+    channel: CollabChannel,
+    file: string,
+    payload: unknown,
+    targetPeerId?: number,
+  ): boolean;
   /** 主动离开房间（切仓库/关闭应用）。 */
   sendBye(): void;
   /** 断开连接且不再重连。 */

@@ -8,11 +8,15 @@
  * - C→S `presence`：`{ type, file?, selection?, view? }`
  * - C→S `table-patch`：`{ type, file, patch }`（表格增量补丁实时广播，LWW 按 id 应用）
  * - C→S `canvas-patch`：`{ type, file, patch }`（画布增量补丁实时广播，LWW 按 id 应用）
+ * - C→S `plugin-msg`：`{ type, channel, payload, targetPeerId? }`（插件通用消息：payload 任意
+ *   JSON 不透明透传；缺省广播房间内其他成员，targetPeerId 指定时单播只发该 peer）
  * - C→S `ping`（保活）/ `bye`（离开）
  * - S→C `peers`：`{ type, peers: [...] }`（房间成员变化全量推送；成员含 version = 对方应用版本号）
  * - S→C `presence`：`{ type, peerId, presence }`（他人转发）
  * - S→C `table-patch`：`{ type, peerId, file, patch }`（他人补丁转发，不含自己）
  * - S→C `canvas-patch`：`{ type, peerId, file, patch }`（他人补丁转发，不含自己）
+ * - S→C `plugin-msg`：`{ type, peerId, channel, payload }`（他人插件消息转发，不含自己；
+ *   转发帧不携带定向目标，接收方无需知道是否定向）
  * - S→C `resync`：`{ type }`（本连接消费过慢、接收队列被广播裁剪时下发；客户端据此对激活笔记重新握手
  *   索取对端全量状态；补丁域当前只补发 presence，陈旧补丁由后续补丁与磁盘收敛兜底）
  */
@@ -104,6 +108,7 @@ export type CollabServerMessage =
   | { type: "canvas-patch"; peerId: number; file: string; patch: CanvasPatch }
   | { type: "note-sync"; peerId: number; file: string; payload: string }
   | { type: "note-aware"; peerId: number; file: string; payload: string }
+  | { type: "plugin-msg"; peerId: number; channel: string; payload: unknown }
   | { type: "resync" }
   | { type: "pong" }
   | { type: "error"; message: string };
@@ -111,14 +116,17 @@ export type CollabServerMessage =
 export interface CollabRelayHandle {
   /** 上报本端 presence（调用方自行节流）。 */
   sendPresence(presence: CollabPresence): void;
-  /** 广播表格增量补丁（relay 转发给房间内其他成员；未连接时静默丢弃）。 */
-  sendTablePatch(file: string, patch: TablePatch): void;
-  /** 广播画布增量补丁（relay 转发给房间内其他成员；未连接时静默丢弃）。 */
-  sendCanvasPatch(file: string, patch: CanvasPatch): void;
-  /** 广播笔记 Yjs 同步消息（base64，relay 不透明转发；未连接时静默丢弃）。 */
-  sendNoteSync(file: string, payload: string): void;
-  /** 广播笔记 awareness 更新（base64，relay 不透明转发；未连接时静默丢弃）。 */
-  sendNoteAware(file: string, payload: string): void;
+  /** 广播表格增量补丁（relay 转发给房间内其他成员）。返回是否已投递（未连接 = false）。 */
+  sendTablePatch(file: string, patch: TablePatch): boolean;
+  /** 广播画布增量补丁（relay 转发给房间内其他成员）。返回是否已投递（未连接 = false）。 */
+  sendCanvasPatch(file: string, patch: CanvasPatch): boolean;
+  /** 广播笔记 Yjs 同步消息（base64，relay 不透明转发）。返回是否已投递（未连接 = false）。 */
+  sendNoteSync(file: string, payload: string): boolean;
+  /** 广播笔记 awareness 更新（base64，relay 不透明转发）。返回是否已投递（未连接 = false）。 */
+  sendNoteAware(file: string, payload: string): boolean;
+  /** 广播插件消息（payload 任意 JSON 不透明转发；targetPeerId 指定 = 定向单播只发该 peer）。
+   *  返回是否已投递（未连接 = false）。 */
+  sendPluginMsg(channel: string, payload: unknown, targetPeerId?: number): boolean;
   /** 主动离开房间（切仓库/关闭应用）。 */
   sendBye(): void;
   /** 断开连接且不再重连。 */
@@ -140,6 +148,8 @@ export interface CollabRelayOptions {
   onNoteSync: (peerId: number, file: string, payload: string) => void;
   /** 收到他人笔记 awareness 更新（base64 → 调用方解码应用）。 */
   onNoteAware: (peerId: number, file: string, payload: string) => void;
+  /** 收到他人插件消息（payload 任意 JSON；频道与载荷解码归调用方）。 */
+  onPluginMsg: (peerId: number, channel: string, payload: unknown) => void;
   /** 接收队列被广播裁剪（消费过慢）：调用方需重新握手补齐（笔记域索取全量状态）。 */
   onResync: () => void;
   /** 收到服务端 error 帧（协议异常/房间拒绝等）——调用方决定日志或 UI 反馈。 */
@@ -202,6 +212,8 @@ export function connectCollabRelay(opts: CollabRelayOptions): CollabRelayHandle 
         opts.onNoteSync(msg.peerId, msg.file, msg.payload);
       else if (msg.type === "note-aware")
         opts.onNoteAware(msg.peerId, msg.file, msg.payload);
+      else if (msg.type === "plugin-msg")
+        opts.onPluginMsg(msg.peerId, msg.channel, msg.payload);
       else if (msg.type === "resync") opts.onResync();
       else if (msg.type === "pong") {
         // 保活回执：仅刷新 lastMessageAt（staleness 检测用），无其他副作用
@@ -240,20 +252,35 @@ export function connectCollabRelay(opts: CollabRelayOptions): CollabRelayHandle 
       ws.send(JSON.stringify({ type: "presence", ...presence }));
     },
     sendTablePatch: (file, patch) => {
-      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      if (!ws || ws.readyState !== WebSocket.OPEN) return false;
       ws.send(JSON.stringify({ type: "table-patch", file, patch }));
+      return true;
     },
     sendCanvasPatch: (file, patch) => {
-      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      if (!ws || ws.readyState !== WebSocket.OPEN) return false;
       ws.send(JSON.stringify({ type: "canvas-patch", file, patch }));
+      return true;
     },
     sendNoteSync: (file, payload) => {
-      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      if (!ws || ws.readyState !== WebSocket.OPEN) return false;
       ws.send(JSON.stringify({ type: "note-sync", file, payload }));
+      return true;
     },
     sendNoteAware: (file, payload) => {
-      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      if (!ws || ws.readyState !== WebSocket.OPEN) return false;
       ws.send(JSON.stringify({ type: "note-aware", file, payload }));
+      return true;
+    },
+    sendPluginMsg: (channel, payload, targetPeerId) => {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+      ws.send(
+        JSON.stringify(
+          targetPeerId === undefined
+            ? { type: "plugin-msg", channel, payload }
+            : { type: "plugin-msg", channel, payload, targetPeerId },
+        ),
+      );
+      return true;
     },
     sendBye: () => {
       if (ws && ws.readyState === WebSocket.OPEN) {
@@ -289,7 +316,7 @@ export function connectCollabRelay(opts: CollabRelayOptions): CollabRelayHandle 
   };
 }
 
-/** 默认内建传输：relay 工厂（把频道收发映射到现有四个 send* / on* 回调；协议不变）。
+/** 默认内建传输：relay 工厂（把频道收发映射到 relay 各 send* / on* 回调；协议不变）。
  *  模块加载即注册进传输注册表——地址可配置，换后端 = 注册新 factory，域零改动。 */
 export const collabRelayTransport: CollabTransportFactory = {
   name: "relay",
@@ -308,17 +335,21 @@ export const collabRelayTransport: CollabTransportFactory = {
         opts.onChannelMessage(peerId, "note-sync", file, payload),
       onNoteAware: (peerId, file, payload) =>
         opts.onChannelMessage(peerId, "note-aware", file, payload),
+      onPluginMsg: (peerId, channel, payload) =>
+        opts.onChannelMessage(peerId, "plugin-msg", channel, payload),
       onResync: opts.onResync,
       onServerError: opts.onServerError,
       onStatusChange: opts.onStatusChange,
     });
     return {
       sendPresence: (presence) => handle.sendPresence(presence),
-      sendMessage: (channel, file, payload) => {
-        if (channel === "note-sync") handle.sendNoteSync(file, payload as string);
-        else if (channel === "note-aware") handle.sendNoteAware(file, payload as string);
-        else if (channel === "canvas-patch") handle.sendCanvasPatch(file, payload as CanvasPatch);
-        else if (channel === "table-patch") handle.sendTablePatch(file, payload as TablePatch);
+      sendMessage: (channel, file, payload, targetPeerId) => {
+        if (channel === "note-sync") return handle.sendNoteSync(file, payload as string);
+        if (channel === "note-aware") return handle.sendNoteAware(file, payload as string);
+        if (channel === "canvas-patch") return handle.sendCanvasPatch(file, payload as CanvasPatch);
+        if (channel === "table-patch") return handle.sendTablePatch(file, payload as TablePatch);
+        // plugin-msg 的 file 槽承载插件频道名（与笔记 file 路由键角色一致）
+        return handle.sendPluginMsg(file, payload, targetPeerId);
       },
       sendBye: () => handle.sendBye(),
       disconnect: () => handle.disconnect(),

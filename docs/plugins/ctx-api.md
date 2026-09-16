@@ -35,7 +35,7 @@ ctx.effect(() => {
 | `ctx.clipboard` | `readText(): Promise<string>` / `writeText(text: string): Promise<void>` / `copyImage(dataUrl: string): Promise<void>` | 剪贴板服务（文本 + 图片 dataURL；敏感：可读写用户剪贴板）。 |
 | `ctx.window` | `minimize(): Promise<void>` / `toggleMaximize(): Promise<void>` / `close(): Promise<void>` | 窗口控制服务（自定义标题栏窗口）。 |
 | `ctx.ai` | `chat(req: ChatRequest, handlers?: ChatStreamHandlers): Promise<ChatResult | undefined>` / `listModels(): Promise<Array<{ providerId: string; providerName: string; modelId: string; label: string }>>` / `listAgents(): Promise<Array<{ id: string; name: string }>>` / `registerTool(opts: PluginToolOptions): () => void` | AI 会话服务：模型/Agent 列表 + 流式对话 + 插件工具贡献；`req.signal` 可中止流式（中止后按 `end` 收敛）。 |
-| `ctx.collab` | `peers(): CollabPeer[]` / `setPresence(view: string | null, file: string | null): void` | 协作在线状态服务（读 peers + 上报本端 presence）。 |
+| `ctx.collab` | `peers(): CollabPeer[]` / `setPresence(view: string | null, file: string | null): void` / `sendMessage(channel: string, payload: unknown, opts?: { to?: number }): boolean` / `myPeer(): CollabMyPeer` | 协作服务（读 peers + 上报 presence + 插件通用消息收发）。 |
 | `ctx.canvas` | `snapshot(): PluginCanvasSnapshot` / `addNode(node: { type: string; position: { x: number; y: number }; data?: Record<string, unknown> }): string` / `updateNode(nodeId: string, patch: Record<string, unknown>): void` / `moveNode(nodeId: string, position: { x: number; y: number }): void` / `deleteNode(nodeId: string): void` / `addEdge(edge: { source: string; target: string; sourceHandle?: string; targetHandle?: string; directed?: boolean; linkMode?: string; }): string` / `deleteEdge(edgeId: string): void` / `selectNode(nodeId: string | null): void` | 画布数据服务（由随应用分发的画布插件提供，停用即不可用；写方法要求已打开可写画布）。 |
 | `ctx.table` | `snapshot(): PluginTableSnapshot` / `updateCell(rowId: string, fieldId: string, value: CellValue | undefined): void` / `addRow(): void` / `removeRow(rowId: string): void` / `selectRow(rowId: string | null): void` / `resolveImage(entry: string): Promise<string>` | 表格数据服务（由随应用分发的表格插件提供，停用即不可用；写操作要求已接线）。 |
 | `ctx.note` | `currentFile(): string | null` / `open(file: string, title: string): void` / `read(file?: string): Promise<string>` / `write(content: string): Promise<void>` / `save(): Promise<void>` | 笔记内容服务（由随应用分发的笔记插件提供，停用即不可用；读写走当前仓库上下文的编辑器链）。 写入 `.md` 时若该笔记正被编辑且有未落盘输入，按「磁盘与本地正文不同」转冲突条由用户决策，不静默覆盖任何一侧。 |
@@ -78,6 +78,7 @@ ctx.effect(() => {
 | `canvas:changed` | `{ file: string | null }` | emit | 当前画布变更（轻量信号：只带 file，按需再调 ctx.canvas.snapshot()）。 |
 | `table:changed` | `{ file: string | null }` | emit | 当前表格变更（轻量信号）。 |
 | `collab:changed` | `{ peers: CollabPeer[] }` | emit | 协作在线用户变更。 |
+| `collab:message` | `{ peerId: number; channel: string; payload: unknown }` | emit | 收到同房间其他成员经协作通道发来的插件消息（不含自己；payload 为发送方原样透传的 JSON）。 |
 | `vault:changed` | — | emit | 仓库文件树变更。 |
 | `note:before-save` | `{ file: string; content: string }` | serial | 笔记保存前钩子（serial：顺序执行；返回 { veto } 阻断本次保存，返回 { content } 改写落盘内容）。 |
 | `ai:before-request` | `{ model: string; messages: LlmMessage[]; tools?: ToolSchema[]; }` | serial | AI 请求发出前钩子（serial：顺序执行；返回 { veto } 阻断本次请求，返回 { messages } 改写请求消息）。 |

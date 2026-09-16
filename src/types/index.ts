@@ -130,6 +130,7 @@ export type {
   CollabSelection,
   CollabPresence,
   CollabPeer,
+  CollabMyPeer,
   CollabHello,
   CollabLockClaim,
   RelayTestResult,

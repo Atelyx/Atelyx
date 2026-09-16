@@ -23,7 +23,7 @@ import {
   runCollabReconnects,
   runCollabTeardowns,
 } from "@/utils/collabHost";
-import type { CollabPeer, CollabPresence, RelayTestResult } from "@/types";
+import type { CollabMyPeer, CollabPeer, CollabPresence, RelayTestResult } from "@/types";
 
 /** 本端 presence 广播节流（选中高频变化合并，不刷屏 relay）。 */
 const BROADCAST_THROTTLE_MS = 100;
@@ -103,6 +103,23 @@ export function collabSendSink(
   channel: CollabSendChannel,
 ): (file: string, payload: unknown) => void {
   return (file, payload) => sendTransportMessage(channel, file, payload);
+}
+
+/** 插件通用消息发送（`plugin-msg` 通道；传输层 file 槽承载插件频道名）。返回是否已投递到传输层
+ *  （未连接/断开 = false，调用方据此感知消息未发出——协作是尽力而为，不静默）。to 指定 = 定向单播只发该 peer。 */
+export function sendPluginMessage(channel: string, payload: unknown, to?: number): boolean {
+  return sendTransportMessage("plugin-msg", channel, payload, to);
+}
+
+/** 本端身份（peerId 未连接 = null；昵称/颜色/设备名取当前运行时配置，未 init 为空身份）。
+ *  与 peers() 对称，供插件展示「我是谁」/作远程命令的本机标识。 */
+export function getMyPeerInfo(): CollabMyPeer {
+  return {
+    peerId: myPeerId,
+    nickname: runtimeCfg?.nickname || runtimeCfg?.deviceName || "用户",
+    color: runtimeCfg?.color ?? "",
+    deviceName: runtimeCfg?.deviceName ?? "",
+  };
 }
 
 /** 随机分配身份色（未配置时；与强调色体系一致的暖色系，避免刺眼）。设置页「随机」按钮复用。 */

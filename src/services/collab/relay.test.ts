@@ -95,6 +95,7 @@ function connect(onStatusChange?: (connected: boolean) => void): Harness {
     onCanvasPatch: () => {},
     onNoteSync: (peerId, file, payload) => channels.push([peerId, "note-sync", file, payload]),
     onNoteAware: (peerId, file, payload) => channels.push([peerId, "note-aware", file, payload]),
+    onPluginMsg: (peerId, channel, payload) => channels.push([peerId, "plugin-msg", channel, payload]),
     onResync: () => {
       stats.resyncs += 1;
     },
@@ -172,5 +173,75 @@ describe("relay 客户端入站分发", () => {
     h.socket.emit({ type: "note-sync", peerId: 1, file: "a.md", payload: "P" });
     expect(h.stats.resyncs).toBe(1);
     expect(h.channels).toHaveLength(1);
+  });
+});
+
+describe("relay 客户端插件消息收发", () => {
+  it("sendPluginMsg 出站帧：广播不带 targetPeerId，单播携带；返回已投递", () => {
+    const h = connect();
+    h.socket.open();
+    expect(h.handle.sendPluginMsg("comfyui.remote", { cmd: "start" })).toBe(true);
+    expect(h.handle.sendPluginMsg("comfyui.remote", { cmd: "stop" }, 9)).toBe(true);
+    expect(h.socket.sent.slice(1).map((s) => JSON.parse(s))).toEqual([
+      { type: "plugin-msg", channel: "comfyui.remote", payload: { cmd: "start" } },
+      { type: "plugin-msg", channel: "comfyui.remote", payload: { cmd: "stop" }, targetPeerId: 9 },
+    ]);
+  });
+
+  it("断开后 sendPluginMsg 返回 false 且不发帧", () => {
+    const h = connect();
+    h.socket.open();
+    h.socket.close();
+    expect(h.handle.sendPluginMsg("comfyui.remote", {})).toBe(false);
+    expect(h.socket.sent.filter((s) => JSON.parse(s).type !== "hello")).toEqual([]);
+  });
+
+  it("入站 plugin-msg 原样透传到回调（payload 任意 JSON，不含定向信息）", () => {
+    const h = connect();
+    h.socket.open();
+    h.socket.emit({
+      type: "plugin-msg",
+      peerId: 5,
+      channel: "comfyui.remote",
+      payload: { cmd: "start", ts: 1 },
+    });
+    expect(h.channels).toEqual([[5, "plugin-msg", "comfyui.remote", { cmd: "start", ts: 1 }]]);
+  });
+
+  it("既有 send* 返回是否已投递（已连接 = true，断开后 = false）", () => {
+    const h = connect();
+    h.socket.open();
+    expect(h.handle.sendNoteSync("a.md", "AAA=")).toBe(true);
+    expect(h.handle.sendTablePatch("t.atb", { ops: [] } as never)).toBe(true);
+    expect(h.handle.sendCanvasPatch("c.atlx", { nodes: [] } as never)).toBe(true);
+    expect(h.handle.sendNoteAware("a.md", "B")).toBe(true);
+    h.socket.close();
+    expect(h.handle.sendNoteSync("a.md", "AAA=")).toBe(false);
+  });
+
+  it("relay 工厂：sendMessage 分发 plugin-msg（file 槽 = 频道名，透传 target）与入站映射", () => {
+    const onChannel: Array<[number, string, string, unknown]> = [];
+    const handle = mod.collabRelayTransport.connect({
+      url: "ws://relay/ws",
+      hello: { vaultId: "v", nickname: "n", color: "#000", deviceName: "d" },
+      onHelloAck: () => {},
+      onPeers: () => {},
+      onPeerPresence: () => {},
+      onChannelMessage: (peerId, channel, file, payload) => onChannel.push([peerId, channel, file, payload]),
+      onResync: () => {},
+      onServerError: () => {},
+      onStatusChange: () => {},
+    });
+    const socket = FakeWebSocket.instances[FakeWebSocket.instances.length - 1];
+    socket.open();
+    expect(handle.sendMessage("plugin-msg", "comfyui.remote", { cmd: "stop" }, 9)).toBe(true);
+    expect(handle.sendMessage("note-sync", "a.md", "AAA=")).toBe(true);
+    expect(socket.sent.slice(1).map((s) => JSON.parse(s))).toEqual([
+      { type: "plugin-msg", channel: "comfyui.remote", payload: { cmd: "stop" }, targetPeerId: 9 },
+      { type: "note-sync", file: "a.md", payload: "AAA=" },
+    ]);
+    socket.emit({ type: "plugin-msg", peerId: 3, channel: "comfyui.remote", payload: { cmd: "start" } });
+    expect(onChannel).toEqual([[3, "plugin-msg", "comfyui.remote", { cmd: "start" }]]);
+    handle.disconnect();
   });
 });

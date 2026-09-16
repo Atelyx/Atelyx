@@ -10,6 +10,7 @@ import { describe, expect, it, vi, afterEach } from "vitest";
 import { setPluginCanvasAccess, setPluginCollabAccess, setPluginTableRuntimeAccess } from "./access";
 import { emitPluginEvent, setKernelRef } from "./events";
 import { createKernel, getKernel, resetKernel, type Kernel } from "./kernel";
+import { registerCollabChannel, dispatchCollabChannel } from "@/utils/collabHost";
 import { createCanvasService } from "./canvas";
 import { createTableService } from "./table";
 import { buildAgentTools, pluginToolMetas } from "@/services/ai/tools";
@@ -93,16 +94,58 @@ describe("Cordis 内核宿主", () => {
     k.dispose();
   });
 
-  it("collab 服务经注入的访问对象可用", () => {
+  it("collab 服务经注入的访问对象可用（含消息收发与本端身份）", () => {
     const { ctx, dispose } = createKernel();
+    const sent: Array<[string, unknown, number | undefined]> = [];
     const fake = {
       peers: () => [{ id: "p1" }],
       setPresence: (_view: string | null, _file: string | null) => {},
+      sendMessage: (channel: string, payload: unknown, to?: number) => {
+        sent.push([channel, payload, to]);
+        return to !== undefined;
+      },
+      myPeer: () => ({ peerId: 7, nickname: "甲", color: "#000", deviceName: "机器甲" }),
     };
     setPluginCollabAccess(fake as never);
     expect(ctx.collab.peers()).toEqual([{ id: "p1" }]);
     expect(() => ctx.collab.setPresence("canvas", "c.atlx")).not.toThrow();
+    expect(ctx.collab.sendMessage("comfyui.remote", { cmd: "start" })).toBe(false);
+    expect(ctx.collab.sendMessage("comfyui.remote", { cmd: "stop" }, { to: 9 })).toBe(true);
+    expect(sent).toEqual([
+      ["comfyui.remote", { cmd: "start" }, undefined],
+      ["comfyui.remote", { cmd: "stop" }, 9],
+    ]);
+    expect(ctx.collab.myPeer()).toEqual({ peerId: 7, nickname: "甲", color: "#000", deviceName: "机器甲" });
     dispose();
+  });
+
+  it("collab 服务未接线时 sendMessage/myPeer 报错", () => {
+    const { ctx, dispose } = createKernel();
+    expect(() => ctx.collab.sendMessage("c", {})).toThrow("协作能力未就绪");
+    expect(() => ctx.collab.myPeer()).toThrow("协作能力未就绪");
+    dispose();
+  });
+
+  it("plugin-msg 入站经通道注册表广播 collab:message 事件（接线与 pluginStore 同款）", () => {
+    const k = createKernel();
+    setKernelRef(k);
+    // 复刻 pluginStore.ensureRuntimeChangeEvents 的接线：plugin-msg 通道常驻 handler → emitPluginEvent
+    const off = registerCollabChannel("plugin-msg", (peerId, file, payload) =>
+      emitPluginEvent("collab:message", { peerId, channel: file, payload }),
+    );
+    const seen: Array<{ peerId: number; channel: string; payload: unknown }> = [];
+    k.ctx.on("collab:message", (p) => {
+      seen.push(p);
+    });
+    dispatchCollabChannel("plugin-msg", 5, "comfyui.remote", { cmd: "start" });
+    dispatchCollabChannel("plugin-msg", 6, "comfyui.remote", { cmd: "stop" });
+    expect(seen).toEqual([
+      { peerId: 5, channel: "comfyui.remote", payload: { cmd: "start" } },
+      { peerId: 6, channel: "comfyui.remote", payload: { cmd: "stop" } },
+    ]);
+    off();
+    setKernelRef(null);
+    k.dispose();
   });
 
   it("画布/表格服务工厂读取注入的访问对象", () => {

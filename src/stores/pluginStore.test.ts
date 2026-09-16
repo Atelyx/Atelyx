@@ -24,6 +24,8 @@ vi.mock("@/services/plugins", () => ({
 
 vi.mock("@/services/app", () => ({ getAppVersion: vi.fn(async () => "0.0.0") }));
 vi.mock("@/services/dialog", () => ({ pickDirectory: vi.fn() }));
+// 事件发射以替身替代：本文件只验证接线「plugin-msg 入站 → collab:message 发射」，投递本身在 kernel/events 测试覆盖
+vi.mock("@/services/cordis/events", () => ({ emitPluginEvent: vi.fn() }));
 
 // 挂载链路以替身替代：本文件只验证 store 侧的编排（入口选择、阶段归类），内核不参与。
 // 内核对象必须**稳定**（同一 ctx 引用）：插件进程登记表以内核上下文为键，每次返回新对象会让
@@ -59,6 +61,8 @@ import { mountPluginFromPackage } from "@/services/cordis/packageMount";
 import { killProcessTree } from "@/services/shell";
 import { mountedPluginIds } from "@/services/cordis/loader";
 import { trackPluginProcess } from "@/services/cordis/pluginProcesses";
+import { emitPluginEvent } from "@/services/cordis/events";
+import { dispatchCollabChannel } from "@/utils/collabHost";
 import { usePluginStore } from "@/stores/pluginStore";
 
 function row(over: Partial<InstalledPlugin> & { id: string }): InstalledPlugin {
@@ -543,5 +547,20 @@ describe("插件进程随运行时结束", () => {
     await usePluginStore.getState().load();
 
     expect(killProcessTree).toHaveBeenCalledWith(4244);
+  });
+});
+
+describe("协作消息入站事件桥", () => {
+  it("load 常驻接线：plugin-msg 通道入站帧触发 collab:message 事件发射", async () => {
+    await usePluginStore.getState().load();
+    expect(emitPluginEvent).not.toHaveBeenCalled();
+
+    dispatchCollabChannel("plugin-msg", 7, "comfyui.remote", { cmd: "start" });
+
+    expect(emitPluginEvent).toHaveBeenCalledWith("collab:message", {
+      peerId: 7,
+      channel: "comfyui.remote",
+      payload: { cmd: "start" },
+    });
   });
 });

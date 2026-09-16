@@ -593,6 +593,16 @@ export function createKernel(): Kernel {
       if (!access) throw new Error("协作能力未就绪");
       access.setPresence(view, file);
     },
+    sendMessage: (channel, payload, opts) => {
+      const access = getPluginCollabAccess();
+      if (!access) throw new Error("协作能力未就绪");
+      return access.sendMessage(channel, payload, opts?.to);
+    },
+    myPeer: () => {
+      const access = getPluginCollabAccess();
+      if (!access) throw new Error("协作能力未就绪");
+      return access.myPeer();
+    },
   };
   provide("collab", collab);
 

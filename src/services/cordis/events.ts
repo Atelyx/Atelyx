@@ -2,7 +2,7 @@
  * 事件发射：store/插件经此把领域事件投递到内核事件总线（ctx.emit）。
  *
  * typed events 见 types.ts CordisEvents（vault:switch/canvas:changed/table:changed/
- * collab:changed/vault:changed）；内核未建（kernelRef 空）时 no-op——事件只在运行期发射，
+ * collab:changed/collab:message/vault:changed）；内核未建（kernelRef 空）时 no-op——事件只在运行期发射，
  * 正常路径内核已由 pluginStore.load 创建。
  */
 import { EventsService } from "@atelyx/cordis";

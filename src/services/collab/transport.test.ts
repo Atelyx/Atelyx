@@ -34,7 +34,7 @@ const fakeOptions = (): CollabTransportOptions => ({
 function fakeHandle(): CollabTransportHandle {
   return {
     sendPresence: () => {},
-    sendMessage: () => {},
+    sendMessage: () => true,
     sendBye: () => {},
     disconnect: () => {},
   };

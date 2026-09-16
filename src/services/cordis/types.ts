@@ -3,7 +3,7 @@
  *
  * 服务实现 = 宿主侧直连 service 层与注入访问（见 kernel.ts）；本文件只定义类型契约，
  * 插件侧一律经 ctx.<domain>.<method>() 的类型化方法触达。
- * 事件闭集（vault:switch/canvas:changed/table:changed/collab:changed/vault:changed）
+ * 事件闭集（vault:switch/canvas:changed/table:changed/collab:changed/collab:message/vault:changed）
  * 在此声明为 typed event map（@mode 标注分派模式）。
  *
  * 平台服务（state/app/shell/vault/dialog/clipboard/window/ai/collab）与内核领域服务
@@ -12,6 +12,7 @@
 import type {
   AppUiState,
   CellValue,
+  CollabMyPeer,
   CollabPeer,
   EditorChatSession,
   FileTreeNode,
@@ -256,10 +257,15 @@ export interface AiService {
   registerTool(opts: PluginToolOptions): () => void;
 }
 
-/** 协作在线状态服务（读 peers + 上报本端 presence）。 */
+/** 协作服务（读 peers + 上报 presence + 插件通用消息收发）。 */
 export interface CollabService {
   peers(): CollabPeer[];
   setPresence(view: string | null, file: string | null): void;
+  /** 发送插件消息到同房间其他成员：payload 任意 JSON；opts.to 指定 = 定向单播只发该 peer，
+   *  缺省 = 广播。返回是否已投递到传输层（未连接/断开 = false，调用方据此感知消息未发出）。 */
+  sendMessage(channel: string, payload: unknown, opts?: { to?: number }): boolean;
+  /** 本端身份（peerId 未连接 = null；与 peers() 对称）。 */
+  myPeer(): CollabMyPeer;
 }
 
 /** 画布数据服务（由随应用分发的画布插件提供，停用即不可用；写方法要求已打开可写画布）。 */
@@ -418,6 +424,8 @@ declare module "@atelyx/cordis" {
     "table:changed": (payload: { file: string | null }) => void;
     /** 协作在线用户变更。@emit */
     "collab:changed": (payload: { peers: CollabPeer[] }) => void;
+    /** 收到同房间其他成员经协作通道发来的插件消息（不含自己；payload 为发送方原样透传的 JSON）。@emit */
+    "collab:message": (payload: { peerId: number; channel: string; payload: unknown }) => void;
     /** 仓库文件树变更。@emit */
     "vault:changed": () => void;
 

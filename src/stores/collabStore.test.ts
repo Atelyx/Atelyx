@@ -127,3 +127,37 @@ describe("连接与重连补齐", () => {
     expect(afterFirst).toBeLessThan(afterConnect); // 新连接建立确实又跑了一次重连钩子
   });
 });
+
+describe("插件消息发送与本端身份", () => {
+  it("sendPluginMessage 出站：广播/单播帧正确，返回是否已投递", async () => {
+    const socket = await connect();
+    expect(collab.sendPluginMessage("comfyui.remote", { cmd: "start" })).toBe(true);
+    expect(collab.sendPluginMessage("comfyui.remote", { cmd: "stop" }, 9)).toBe(true);
+    expect(socket.sent.slice(1).map((s) => JSON.parse(s))).toEqual([
+      { type: "plugin-msg", channel: "comfyui.remote", payload: { cmd: "start" } },
+      { type: "plugin-msg", channel: "comfyui.remote", payload: { cmd: "stop" }, targetPeerId: 9 },
+    ]);
+  });
+
+  it("sendPluginMessage 断开时返回 false（消息未发出，不静默）", async () => {
+    const socket = await connect();
+    socket.close();
+    expect(collab.sendPluginMessage("comfyui.remote", {})).toBe(false);
+  });
+
+  it("getMyPeerInfo：未 init 空身份，连接后 peerId 来自 hello-ack", async () => {
+    expect(collab.getMyPeerInfo()).toEqual({
+      peerId: null,
+      nickname: "用户",
+      color: "",
+      deviceName: "",
+    });
+    const socket = await connect();
+    socket.emit({ type: "hello-ack", peerId: 7 });
+    expect(collab.getMyPeerInfo()).toMatchObject({
+      peerId: 7,
+      nickname: "甲",
+      deviceName: "机器甲",
+    });
+  });
+});

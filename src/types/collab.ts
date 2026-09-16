@@ -47,6 +47,15 @@ export interface CollabPeer {
   presence: CollabPresence | null;
 }
 
+/** 本端身份（`ctx.collab.myPeer()` 返回；与 `peers()` 形成对称面）。 */
+export interface CollabMyPeer {
+  /** 本连接在房间内的 peerId（未连接 = null）。 */
+  peerId: number | null;
+  nickname: string;
+  color: string;
+  deviceName: string;
+}
+
 /** 连接时的身份声明（hello 消息，进入 vaultId 房间）。 */
 export interface CollabHello {
   vaultId: string;

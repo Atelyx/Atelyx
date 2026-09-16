@@ -10,6 +10,7 @@ import type { ComponentType } from "react";
 import type {
   AppUiState,
   CellValue,
+  CollabMyPeer,
   CollabPeer,
   EditorChatSession,
   LayoutOp,
@@ -55,6 +56,10 @@ export interface PluginCollabAccess {
   peers(): CollabPeer[];
   /** 上报本端 presence（view 为 null = 离开；表格类插件视图 kind 原样透传）。 */
   setPresence(view: string | null, file: string | null): void;
+  /** 发送插件消息（payload 任意 JSON；to 指定 = 定向单播）。返回是否已投递到传输层。 */
+  sendMessage(channel: string, payload: unknown, to?: number): boolean;
+  /** 本端身份（peerId 未连接 = null）。 */
+  myPeer(): CollabMyPeer;
 }
 
 let collabAccess: PluginCollabAccess | null = null;

@@ -19,6 +19,8 @@
 //!   客户端按 file 匹配只应用当前打开的表格）
 //! - C→S `canvas-patch`：`{ type, file, patch }`（画布增量补丁广播；patch 不透明透传，
 //!   客户端按 file 匹配只应用当前打开的画布）
+//! - C→S `plugin-msg`：`{ type, channel, payload, targetPeerId? }`（插件通用消息通道：payload
+//!   任意 JSON 不透明透传，relay 不解析内容；缺省广播房间内其他成员，targetPeerId 指定时单播只发该 peer）
 //! - C→S `ping`（保活）/ `bye`（离开）
 //! - S→C `hello-ack`：`{ type, peerId }`（分配的本连接 id，先于 peers 帧——客户端据此把自己过滤出列表）
 //! - S→C `peers`：`{ type, peers: [{ peerId, nickname, color, deviceName, version?, presence? }] }`
@@ -26,6 +28,8 @@
 //! - S→C `presence`：`{ type, peerId, presence }`（他人 presence 转发，不含自己）
 //! - S→C `table-patch`：`{ type, peerId, file, patch }`（他人补丁转发，不含自己）
 //! - S→C `canvas-patch`：`{ type, peerId, file, patch }`（他人补丁转发，不含自己）
+//! - S→C `plugin-msg`：`{ type, peerId, channel, payload }`（他人插件消息转发，不含自己；
+//!   转发帧不携带定向目标，接收方无需知道是否定向）
 //! - S→C `resync`：`{ type }`（本连接消费过慢、接收队列被广播裁剪时下发；客户端收到后重新握手，
 //!   对全部激活笔记重发 syncStep1 索取对端全量状态。不携带文件信息）
 //! - S→C `error`：`{ type, message }`
@@ -125,9 +129,16 @@ struct ClientMsg {
     /// 表格增量补丁（`table-patch` 消息；不透明透传，relay 不解析内容）。
     #[serde(default)]
     patch: Option<serde_json::Value>,
-    /// 笔记协作同步/awareness（`note-sync`/`note-aware` 消息；Yjs 二进制经 base64 包装，不透明透传）。
+    /// 笔记协作同步/awareness（`note-sync`/`note-aware` 消息；Yjs 二进制经 base64 包装）
+    /// 或插件消息（`plugin-msg` 消息；任意 JSON）载荷。两者都不透明透传，relay 不解析内容。
     #[serde(default)]
-    payload: Option<String>,
+    payload: Option<serde_json::Value>,
+    /// 插件消息频道名（`plugin-msg` 消息；relay 不解析，按频道转发）。
+    #[serde(default)]
+    channel: Option<String>,
+    /// 插件消息定向目标（`plugin-msg` 单播：只转发给该 peer；缺省 = 广播房间内其他成员）。
+    #[serde(default)]
+    target_peer_id: Option<u64>,
 }
 
 #[derive(Serialize, Clone)]
@@ -175,8 +186,12 @@ struct ServerMsg {
     file: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     patch: Option<serde_json::Value>,
+    /// 插件消息频道名（`plugin-msg` 转发帧携带）。
     #[serde(skip_serializing_if = "Option::is_none")]
-    payload: Option<String>,
+    channel: Option<String>,
+    /// 载荷（`note-sync`/`note-aware` 为 base64 字符串，`plugin-msg` 为任意 JSON）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    payload: Option<serde_json::Value>,
 }
 
 fn server_msg(
@@ -186,7 +201,7 @@ fn server_msg(
     presence: Option<Presence>,
     file: Option<String>,
     patch: Option<serde_json::Value>,
-    payload: Option<String>,
+    payload: Option<serde_json::Value>,
 ) -> Arc<String> {
     let json = serde_json::to_string(&ServerMsg {
         kind,
@@ -195,7 +210,24 @@ fn server_msg(
         presence,
         file,
         patch,
+        channel: None,
         payload,
+    })
+    .unwrap();
+    Arc::new(json)
+}
+
+/// 构造插件消息转发帧（`plugin-msg`；转发帧不携带定向目标——接收方无需知道是否定向）。
+fn server_plugin_msg(peer_id: u64, channel: String, payload: serde_json::Value) -> Arc<String> {
+    let json = serde_json::to_string(&ServerMsg {
+        kind: "plugin-msg",
+        peer_id: Some(peer_id),
+        peers: None,
+        presence: None,
+        file: None,
+        patch: None,
+        channel: Some(channel),
+        payload: Some(payload),
     })
     .unwrap();
     Arc::new(json)
@@ -482,7 +514,10 @@ async fn handle_socket(socket: WebSocket, hub: Hub, remote: SocketAddr) {
                     // 笔记协作同步 / awareness：不透明透传（base64 载荷），原样转发房间内其他成员
                     // （客户端按 file 匹配只合入当前打开的笔记）；保持 relay 无状态纯转发
                     "note-sync" | "note-aware" => {
-                        if let (Some(file), Some(payload)) = (msg.file, msg.payload) {
+                        if let (Some(file), Some(payload)) = (
+                            msg.file,
+                            msg.payload.and_then(|p| p.as_str().map(str::to_string)),
+                        ) {
                             let kind: &'static str =
                                 if msg.kind.as_str() == "note-sync" { "note-sync" } else { "note-aware" };
                             debug!(
@@ -501,11 +536,41 @@ async fn handle_socket(socket: WebSocket, hub: Hub, remote: SocketAddr) {
                                 None,
                                 Some(file),
                                 None,
-                                Some(payload),
+                                Some(serde_json::Value::String(payload)),
                             );
                             stats.forwarded_msgs += 1;
                             stats.forwarded_bytes += relayed.len() as u64;
                             forward_to_room(&mut rooms, &vault_id, peer_id, relayed);
+                        }
+                    }
+                    // 插件通用消息：channel + payload 任意 JSON 不透明透传（relay 不解析内容），
+                    // 缺省广播房间内其他成员；带 targetPeerId 时单播只发该 peer（不在线或指向自己即丢弃，
+                    // 与广播「不含自己」语义一致）。日志只记频道/字节数/目标，不记载荷内容（可能含用户文本）。
+                    "plugin-msg" => {
+                        if let (Some(channel), Some(payload)) = (msg.channel, msg.payload) {
+                            let frame = server_plugin_msg(peer_id, channel.clone(), payload);
+                            debug!(
+                                peer_id,
+                                vault_id = %vault_id,
+                                channel = %channel,
+                                target_peer = ?msg.target_peer_id,
+                                bytes = frame.len(),
+                                "插件消息转发",
+                            );
+                            stats.forwarded_msgs += 1;
+                            stats.forwarded_bytes += frame.len() as u64;
+                            let mut rooms = hub.0.lock().unwrap();
+                            if let Some(target) = msg.target_peer_id {
+                                if target != peer_id {
+                                    if let Some(room) = rooms.get(&vault_id) {
+                                        if let Some(peer) = room.get(&target) {
+                                            let _ = peer.tx.send(frame);
+                                        }
+                                    }
+                                }
+                            } else {
+                                forward_to_room(&mut rooms, &vault_id, peer_id, frame);
+                            }
                         }
                     }
                     "bye" => {
@@ -603,7 +668,7 @@ mod tests {
             None,
             Some("notes/a.md".to_string()),
             None,
-            Some("AAA=".to_string()),
+            Some(serde_json::Value::String("AAA=".to_string())),
         );
         let value: serde_json::Value = serde_json::from_str(&note).expect("note 帧须为合法 JSON");
         assert_eq!(value["type"], "note-sync");
@@ -613,6 +678,7 @@ mod tests {
         assert!(value.get("peers").is_none());
         assert!(value.get("presence").is_none());
         assert!(value.get("patch").is_none());
+        assert!(value.get("channel").is_none());
 
         let ack = server_msg("hello-ack", Some(3), None, None, None, None, None);
         let value: serde_json::Value = serde_json::from_str(&ack).expect("hello-ack 须为合法 JSON");
@@ -620,5 +686,25 @@ mod tests {
         assert_eq!(value["peerId"], 3);
         assert!(value.get("file").is_none());
         assert!(value.get("payload").is_none());
+    }
+
+    /// 插件消息转发帧：channel + 任意 JSON payload 平铺携带；转发帧不携带定向目标
+    /// （接收方无需知道是否定向），也不带 peers/presence/file 等无关字段。
+    #[test]
+    fn plugin_msg_frame_carries_channel_and_payload() {
+        let frame = server_plugin_msg(
+            7,
+            "comfyui.remote".to_string(),
+            serde_json::json!({ "cmd": "start" }),
+        );
+        let value: serde_json::Value = serde_json::from_str(&frame).expect("plugin-msg 帧须为合法 JSON");
+        assert_eq!(value["type"], "plugin-msg");
+        assert_eq!(value["peerId"], 7);
+        assert_eq!(value["channel"], "comfyui.remote");
+        assert_eq!(value["payload"], serde_json::json!({ "cmd": "start" }));
+        assert!(value.get("targetPeerId").is_none());
+        assert!(value.get("peers").is_none());
+        assert!(value.get("presence").is_none());
+        assert!(value.get("file").is_none());
     }
 }
