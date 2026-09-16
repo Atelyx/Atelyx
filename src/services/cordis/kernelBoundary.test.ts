@@ -11,6 +11,7 @@
  * 插件实现注册表），后者按插件 apply 闭包直接消费领域 store —— 那份依赖单独成清单，同样以测试锁死。
  * 另守组件/服务两侧边界：components 不得 import services（例外 = 槽位宿主/通知宿主与
  * builtins 接线跳，显式登记），services 不得 import components（无例外）。
+ * 另守对话核心与容器解耦：对话核心能力（stores/chatTurn.ts）不得 import 领域 store。
  */
 import { readdir, readFile, stat } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
@@ -139,6 +140,13 @@ describe("内核路径导入守卫", () => {
   it("插件实现注册表的领域依赖限于已登记清单（宿主接线的第二跳）", async () => {
     const deps = await importedDomainStores(resolve(srcRoot, BUILTINS_EXCEPTION));
     expect([...deps].sort()).toEqual([...BUILTINS_DOMAIN_DEPS].sort());
+  });
+
+  it("AI 对话核心能力不 import 领域 store（能力与容器解耦的可回归证据）", async () => {
+    // 核心只跑一轮对话、不持有消息容器：产出经 types/chatRuntime 的写入器交回消费方，
+    // 故它不得触碰任何领域 store（画布/面板容器由消费方各自写入）
+    const deps = await importedDomainStores(resolve(srcRoot, "stores/chatTurn.ts"));
+    expect(deps).toEqual([]);
   });
 });
 

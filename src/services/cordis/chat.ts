@@ -1,24 +1,16 @@
 /**
- * AI 会话服务提供器（ctx.chat）：由 builtin.aichat 行挂载时经 ctx.provide 提供。
+ * AI 对话能力提供器（ctx.chat）：由随应用分发的对话核心插件在挂载时经 ctx.provide 提供。
  *
- * 实现 = 注入的 AI 会话访问对象（pluginStore 接线填充，见 stores/pluginStore ensureChatAccess）——
- * 停用/卸载 builtin.aichat 时服务随之消失（ctx.effect 撤销）。
+ * 实现 = 核心注册表里的对话运行时（`stores/chatTurn.ts` 构造、`utils/chatRuntimeHost.ts` 注册）——
+ * 停用/卸载对话核心插件时运行时随注册表撤销、服务随 fiber 撤销（ctx.effect 逆序），
+ * 消费方据此降级（面板提示占位、对话节点禁用发送）。
  */
-import { getPluginChatAccess } from "./access";
+import { getChatRuntime } from "@/utils/chatRuntimeHost";
 import type { ChatService } from "./types";
 
-/** 构造 AI 会话服务（要求访问已接线：pluginStore.ensureChatAccess 已填充）。 */
+/** 构造 AI 对话能力（要求对话核心已注册运行时：同一次 apply 里接线在前、提供在后）。 */
 export function createChatService(): ChatService {
-  const access = getPluginChatAccess();
-  if (!access) throw new Error("AI 会话能力未就绪");
-  return {
-    sessions: () => access.sessions(),
-    activeSession: () => access.activeSession(),
-    isStreaming: () => access.isStreaming(),
-    openSession: (id) => access.openSession(id),
-    startSession: () => access.startSession(),
-    sendMessage: (content) => access.sendMessage(content),
-    stop: () => access.stop(),
-    deleteSession: (id) => access.deleteSession(id),
-  };
+  const runtime = getChatRuntime();
+  if (!runtime) throw new Error("AI 对话能力未就绪");
+  return runtime;
 }

@@ -3,7 +3,7 @@ const refKeyOfPanelRef = (r: { label: string }) =>
   (r as unknown as { file: string }).file;
 
 /**
- * 右侧边栏 AI 对话面板。
+ * AI 对话面板。
  *
  * IDE 式侧边聊天，无头样式：
  * - 顶部一行：左侧面板内联错误提示（仅出错时占位）+ 右侧「新建会话 / 历史会话」图标按钮
@@ -16,6 +16,7 @@ const refKeyOfPanelRef = (r: { label: string }) =>
  */
 import {
   AlertCircle,
+  AlertTriangle,
   Bot,
   Cpu,
   FilePlus,
@@ -47,7 +48,8 @@ import { JumpToBottomButton } from "@/components/common/JumpToBottomButton";
 import { DropdownSelect } from "@/components/common/DropdownSelect";
 import { ModelSelect } from "@/components/common/ModelSelect";
 import { PopupLayer } from "@/components/common/PopupLayer";
-import { ERROR_PREFIX } from "@/constants/chat";
+import { CHAT_UNAVAILABLE_TEXT, ERROR_PREFIX } from "@/constants/chat";
+import { useChatRuntime } from "@/hooks/useChatRuntime";
 import { usePopupAnchor } from "@/hooks/usePopupAnchor";
 import { VaultAtPicker, type VaultPickTarget } from "@/components/common/VaultAtPicker";
 import { openVaultPath } from "@/components/common/FileKindIcon";
@@ -120,6 +122,8 @@ export function AiChatPanel() {
 
   const active = sessions.find((s) => s.id === activeSessionId);
   const messages = active?.messages ?? EMPTY_MESSAGES;
+  // 对话能力（对话核心插件提供）：未启用时整面板降级为提示占位
+  const chatRuntime = useChatRuntime();
   // 压缩标记行插入位（-1 = 无注解/注解失效）：与历史重建同判定
   const compactionMarkerIdx = compactionMarkerIndex(messages, active?.compaction);
   // 顶部标题：激活会话名（新对话态无会话 → 「新对话」）
@@ -278,6 +282,19 @@ export function AiChatPanel() {
       });
     }
   };
+
+  // 对话能力未启用（对话核心插件停用）：整面板降级为提示占位（历史会话仍在磁盘，恢复后照常可见）
+  if (!chatRuntime) {
+    return (
+      <div
+        className="h-full flex flex-col items-center justify-center gap-2 px-6 text-center"
+        style={{ background: "var(--bg-secondary)", color: "var(--text-secondary)" }}
+      >
+        <AlertTriangle size={18} />
+        <span className="text-xs">{CHAT_UNAVAILABLE_TEXT}</span>
+      </div>
+    );
+  }
 
   return (
     <div

@@ -4,6 +4,7 @@
  * 回启动页的领域分发必须携带置空前的 vaultId。
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
+import { CHAT_UNAVAILABLE_TEXT } from "@/constants/chat";
 
 const h = vi.hoisted(() => ({ metaWrites: [] as unknown[] }));
 
@@ -92,6 +93,46 @@ describe("回启动页的 flush 契约（appStore.backToVaultSelect → 领域�
       app.useAppStore.getState().backToVaultSelect();
       await vi.waitFor(() => expect(got).toEqual(["v1"]));
       expect(app.useAppStore.getState().vaultId).toBeNull();
+    } finally {
+      off();
+    }
+  });
+});
+
+describe("对话能力缺失/存在时的一致性（运行时判空降级 + 写入器回写）", () => {
+  it("对话核心未启用：发送被拦下并给出可操作提示，不创建空会话", async () => {
+    await loadedInVault("v1");
+    await chat.useChatPanelStore.getState().send("你好");
+    const s = chat.useChatPanelStore.getState();
+    expect(s.sessions).toEqual([]);
+    expect(s.error).toBe(CHAT_UNAVAILABLE_TEXT);
+  });
+
+  it("对话核心启用：本轮产出经写入器落进会话容器，流式态随收尾复位", async () => {
+    const { registerChatRuntime } = await import("@/utils/chatRuntimeHost");
+    await loadedInVault("v1");
+    const off = registerChatRuntime({
+      resolveTarget: () => ({
+        ok: true,
+        provider: { id: "p1", name: "P", baseUrl: "http://x", apiKey: "k", models: [] },
+        model: "m1",
+      }),
+      runTurn: async (req) => {
+        req.sink.update({ content: "答", steps: [] });
+        req.sink.finish({ content: "答", steps: [], removed: false, timedOut: false, aborted: false });
+      },
+      compact: async () => ({ ok: false, aborted: false, message: "不应被调用" }),
+      autoName: async () => "skipped",
+    });
+    try {
+      await chat.useChatPanelStore.getState().send("你好");
+      const s = chat.useChatPanelStore.getState();
+      expect(s.sessions).toHaveLength(1);
+      expect(s.sessions[0].messages.map((m) => [m.role, m.content])).toEqual([
+        ["user", "你好"],
+        ["assistant", "答"],
+      ]);
+      expect(s.streaming).toBe(false);
     } finally {
       off();
     }

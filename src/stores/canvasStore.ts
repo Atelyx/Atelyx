@@ -35,7 +35,6 @@ import { isTempAttachmentRef } from "@/utils/tempAttachmentPath";
 import { tableToSnapshotText } from "@/utils/table";
 import {
   loadHistory as loadCanvasHistory,
-  recordAgentFileWrite,
   recordHistoryVersion,
   versionContentAt,
   type HistoryVersion,
@@ -51,26 +50,10 @@ import {
   serializeNodeForCollab,
   summarizeCanvasSnapshot,
 } from "@/utils/canvasCollab";
-import { toLlmMessages, resolveMessageAttachments } from "@/services/ai/client";
+import { resolveMessageAttachments } from "@/services/ai/client";
 import { abortAutoTitle } from "@/services/ai/autoTitle";
 import { runSearch, resultsToText } from "@/services/search";
-import { runAgentTools, assembleAgentSystemPrompt } from "@/services/ai/tools";
-import {
-  appendVaultFile,
-  editVaultFile,
-  globVault,
-  grepVault,
-  listVaultDir,
-  readVaultFileWindow,
-  writeVaultFile,
-} from "@/services/vault/aiFiles";
-import { readHistoryForAgent } from "@/services/history";
-import {
-  currentTodosBlock,
-  readAgentTodos,
-  writeAgentTodos,
-} from "@/services/vault/agentTodos";
-import { fetchWeb } from "@/services/web";
+import { readAgentTodos, writeAgentTodos } from "@/services/vault/agentTodos";
 import {
   findFreeSpot,
   pickEdgeHandles,
@@ -92,17 +75,11 @@ import {
   DEFAULT_GROUP_WIDTH,
   DEFAULT_GROUP_HEIGHT,
 } from "@/constants/canvas";
-import { ERROR_PREFIX, TIMEOUT_ERROR_TEXT } from "@/constants/chat";
-import {
-  runStreamExchange,
-  decideCleanup,
-  runAutoNaming,
-} from "./streaming";
+import { CHAT_UNAVAILABLE_TEXT, ERROR_PREFIX } from "@/constants/chat";
 import { isAssetConsumed } from "@/utils/consumed";
-import { appendNarration, appendReasoning, assistantReplyText, fillAssistantReplyText, finalizeReplyText, mergeToolRuns } from "@/utils/agentSteps";
+import { assistantReplyText, fillAssistantReplyText } from "@/utils/agentSteps";
 import { nextCompactionBoundary, splitByCompaction } from "@/utils/compaction";
-import { runCompaction } from "@/services/ai/compaction";
-import { frameCompactionSummary } from "@/constants/compaction";
+import { getChatRuntime } from "@/utils/chatRuntimeHost";
 import { prefix, scanMentionHits } from "@/utils/text";
 import { noteTitleFromFile, remapDirPrefix, sanitizeFilename, siblingPath, tableTitleFromFile } from "@/utils/filename";
 import { useSettingsStore } from "./settingsStore";
@@ -125,6 +102,8 @@ import type {
   CanvasEdge,
   CanvasFile,
   CanvasPatch,
+  ChatNamingTarget,
+  ChatTurnSink,
   ConversationData,
   LinkMode,
   PluginCanvasEdge,
@@ -135,8 +114,6 @@ import type {
   Message,
   PendingAttachment,
   SearchResultData,
-  ToolSchema,
-  LlmMessage,
 } from "@/types";
 
 /** Undo/Redo 快照（含 messagesByConv，否则分支撤销时消息状态会撕裂） */
@@ -1428,54 +1405,63 @@ function patchAssistant(
 }
 
 /**
- * LLM 话题自动命名：一轮对话完成后为对话节点生成话题标题。
+ * 对话节点的命名目标（轮末命名由对话核心能力触发，本回调与面板同构）：
  * - 仅对尚无 title 的对话节点命名（首轮完成后一次，之后不覆盖）
- * - 统一走 streaming.ts 的公共命名管线（模型解析/延迟/超时与面板共用）
- * - fire-and-forget：无可用模型/命名失败降级保留占位，不阻塞画布操作
+ * - 节点已删除 = 不命名（核心侧目标已消失，静默跳过）
  */
-async function autoNameConversation(conversationId: string): Promise<void> {
-  await runAutoNaming(
-    {
-      getMessages: () => {
-        const node = findConversationNode(conversationId);
-        if (!node) return [];
-        const msgs = useCanvasStore.getState().messagesByConv[conversationId] ?? [];
-        // 叙述-only 消息（content 为空、正文在 steps）回填正文，供话题命名摘要
-        return msgs.map(fillAssistantReplyText);
-      },
-      isNamed: () => {
-        const node = findConversationNode(conversationId);
-        return !node || !!(node.data as Partial<ConversationData>).title;
-      },
-      applyTitle: (title) => {
-        const node = findConversationNode(conversationId);
-        if (!node) return;
-        useCanvasStore.getState().updateNodeData(conversationId, { title });
-      },
+function conversationNamingTarget(conversationId: string): ChatNamingTarget {
+  return {
+    getMessages: () => {
+      const node = findConversationNode(conversationId);
+      if (!node) return [];
+      const msgs = useCanvasStore.getState().messagesByConv[conversationId] ?? [];
+      // 叙述-only 消息（content 为空、正文在 steps）回填正文，供话题命名摘要
+      return msgs.map(fillAssistantReplyText);
     },
-    // key = 对话节点 id：发送新消息时只中止本节点的命名请求（不误伤其他对话）
-    { key: conversationId },
-  );
+    isNamed: () => {
+      const node = findConversationNode(conversationId);
+      return !node || !!(node.data as Partial<ConversationData>).title;
+    },
+    applyTitle: (title) => {
+      const node = findConversationNode(conversationId);
+      if (!node) return;
+      useCanvasStore.getState().updateNodeData(conversationId, { title });
+    },
+  };
+}
+
+/** 轮次之外的命名触发（加载后恢复补命名）：对话能力未启用时静默跳过。 */
+function requestConversationNaming(conversationId: string): void {
+  const runtime = getChatRuntime();
+  if (!runtime) return;
+  void runtime.autoName(conversationNamingTarget(conversationId), conversationId);
 }
 
 /**
- * 流式执行一轮对话：预建 assistant 消息 → 按注入语义组装 messages → SSE 流式写入。
- * send 与 regenerate 共用（流式输出/停止；引用固化进 user 消息）。
+ * 流式执行一轮对话：预建 assistant 消息 → 校验并读回历史附件 → 交给对话核心能力跑本轮
+ * （提示词/工具/流式/收尾/命名）→ 产出经写入器写回节点消息表。send 与 regenerate 共用。
  *
  * 性能与状态正确性要点：
- * - onDelta 用 rAF 合并高频 token，避免每 token 一次 setState 卡 UI。
- * - abort/空回复：移除占位 assistant，避免残留空气泡（streamChat 在 abort 时走 onDone）。
+ * - 增量写入用 rAF 合并（核心侧完成），每帧一次 setState，不逐 token 写。
+ * - abort/空回复：收尾结果 removed 时移除占位 assistant，避免残留空气泡。
  * - 错误：占位 assistant 写入 `[错误] …` 并随 .atlx 持久化；下次请求历史过滤此类消息，不污染上下文。
  * - 持久化：messages 嵌在对话节点 data 内，随 schedulePersist 增量补丁写 .atlx（仅变化实体）。
+ * - 节点已删除：迟到回调与收尾写入一律丢弃（不重建 messagesByConv 键，防孤儿消息复活）。
  */
 async function runStream(conversationId: string): Promise<void> {
   const store = useCanvasStore;
 
+  // 对话能力未启用（对话核心插件停用）：如实提示并中止本轮，不建空气泡
+  const runtime = getChatRuntime();
+  if (!runtime) {
+    store.setState({ error: CHAT_UNAVAILABLE_TEXT });
+    return;
+  }
   // 节点级 provider/model 优先，未指定则跟随仓库默认；解析失败（供应商已删/未配置）提示并中止，
-  // 不静默回落默认——统一走 settingsStore.resolveChatTarget（与 AI 对话面板同源）
+  // 不静默回落默认——统一走对话核心的解析（与 AI 对话面板同源）
   const nodeData = store.getState().nodes.find((n) => n.id === conversationId)
     ?.data as Partial<ConversationData> | undefined;
-  const resolved = useSettingsStore.getState().resolveChatTarget(
+  const resolved = runtime.resolveTarget(
     nodeData?.providerId || nodeData?.model
       ? {
           providerId: nodeData.providerId || undefined,
@@ -1488,9 +1474,9 @@ async function runStream(conversationId: string): Promise<void> {
     return;
   }
   const { provider, model } = resolved;
-  // 发送起始清上次错误（与 chatPanelStore.runExchange 对称：搜索源等已配置后不滞留旧横幅）
+  // 发送起始清上次错误（与 chatPanelStore 对称：搜索源等已配置后不滞留旧横幅）
   store.setState({ error: null });
-  // 推理等级为节点级独立覆盖（与 provider/model 正交，resolveChatTarget 不产 effort）；缺省 = 不指定（跟随默认，不下发 reasoning_effort）
+  // 推理等级为节点级独立覆盖（与 provider/model 正交，resolveTarget 不产 effort）；缺省 = 不指定（跟随默认，不下发 reasoning_effort）
   const reasoningEffort = nodeData?.reasoningEffort;
 
   // 预创建 assistant 消息（流式追加内容）
@@ -1518,53 +1504,20 @@ async function runStream(conversationId: string): Promise<void> {
   const controller = new AbortController();
   abortControllers.set(conversationId, controller);
 
-  // 引用已在 send 时固化进 user 消息 content（@引用 路径块 / 非文件节点全文注入），此处不再动态拼接
-  // 叙述-only 消息（content 为空、正文在 steps 叙述步）先回填 content——
-  // 否则空 content 会被下方过滤丢弃，造成多轮上下文断裂
-  // 过滤 system 与错误占位 assistant（[错误] 不进 API 历史，避免污染上下文）；
-  // 空占位 assistant（预建 content:"" 的流式占位）也不发送——部分端点对空 content 返回 400，
-  // 但**带 steps 的空正文消息要保留**（工具轮中止/无最终回答时正文为空、工具结果在 steps 里，
-  // 丢掉等于让模型重读）。压缩注解按原始列表定位锚点（与标记行同口径）：锚点及其之前不进请求
-  const { kept, checkpoint } = splitByCompaction(
-    store.getState().messagesByConv[conversationId],
-    nodeData?.compaction,
-  );
-  const history = kept
-    .map(fillAssistantReplyText)
-    .filter(
-      (m) =>
-        m.role !== "system" &&
-        !(
-          m.role === "assistant" &&
-          (m.content.startsWith(ERROR_PREFIX) ||
-            (m.content === "" && !m.steps?.length))
-        ),
-    );
-
+  // 引用已在 send 时固化进 user 消息 content（@引用 路径块 / 非文件节点全文注入），此处不再动态拼接。
+  // 附件内容不随消息内嵌（画布只存 `file` 引用）：发送前按引用读回，读到的内容回填消息附件缓存，
+  // 同一会话后续发送不再重复读盘。**按附件粒度降级**：单个附件读不到只丢该附件不进请求并提示用户
+  //（抛错会中断整轮，而覆盖整段历史的补齐会让此后每次发送都在同一处失败、对话无法继续）；
+  // 二进制附件（不是文本）按预期不注入模型，不算失败。只读进请求的消息（压缩注解之外的不读）。
   try {
-    // 系统提示词 + 工具：按 Agent 实时解析（配置在 设置 → Agent，引用已注册提示词笔记实时读正文注入）。
-    // 缺省（未选 Agent）= 预置「对话」；Agent 缺失（已删）降级为普通对话。
-    const agentReq = await useSettingsStore
-      .getState()
-      .resolveAgentRequest(nodeData?.agentId);
-    let tools: ToolSchema[] = [];
-    if (agentReq) {
-      tools = agentReq.tools;
-      if (agentReq.skippedWebSearch) {
-        store.setState({
-          error: "未配置搜索源（设置 → 联网搜索），本次对话未启用联网搜索",
-        });
-      }
-    }
-    // 引用已在 send 时固化进 user 消息 content（@引用 路径块 / 非文件节点全文注入），此处不再动态拼接。
-    // 附件内容不随消息内嵌（画布只存 `file` 引用）：发送前按引用读回，读到的内容回填消息附件缓存，
-    // 同一会话后续发送不再重复读盘。**按附件粒度降级**：单个附件读不到只丢该附件不进请求并提示用户
-    //（抛错会中断整轮，而覆盖整段历史的补齐会让此后每次发送都在同一处失败、对话无法继续）；
-    // 二进制附件（不是文本）按预期不注入模型，不算失败。
-    const resolvedHistory = await resolveMessageAttachments(history, (att) =>
+    const { kept } = splitByCompaction(
+      store.getState().messagesByConv[conversationId] ?? [],
+      nodeData?.compaction,
+    );
+    const resolvedHistory = await resolveMessageAttachments(kept, (att) =>
       readMessageAttachment(att.file as string, att.kind),
     );
-    if (resolvedHistory !== history) {
+    if (resolvedHistory !== kept) {
       // 只回填附件缓存（按附件 id 取补齐结果）：整体替换会话数组会抹掉等待期间到达的协作消息，
       // 也会把期间被对端改过的消息回退成 await 之前的快照（附件读盘可能耗秒级）
       store.setState((state) => {
@@ -1572,14 +1525,14 @@ async function runStream(conversationId: string): Promise<void> {
         const current = state.messagesByConv[conversationId] ?? [];
         let changed = false;
         const merged = current.map((m) => {
-          const resolved = resolvedById.get(m.id);
+          const resolvedMsg = resolvedById.get(m.id);
           const atts = m.attachments;
-          if (!resolved || !atts?.length) return m;
+          if (!resolvedMsg || !atts?.length) return m;
           let filled = false;
           const attachments = atts.map((a, i) => {
             if (a.payload || !a.file) return a;
             // 按同下标取补齐结果（resolve 保序）并核对引用，防期间列表变化套错内容
-            const candidate = resolved.attachments?.[i];
+            const candidate = resolvedMsg.attachments?.[i];
             if (!candidate?.payload || candidate.file !== a.file) return a;
             filled = true;
             return { ...a, payload: candidate.payload };
@@ -1592,209 +1545,6 @@ async function runStream(conversationId: string): Promise<void> {
         return { messagesByConv: { ...state.messagesByConv, [conversationId]: merged } };
       });
     }
-    const apiMessages: LlmMessage[] = toLlmMessages(resolvedHistory);
-    // 压缩检查点紧随 system 之后：占住被压缩区间在请求历史中的位置，保留段原样跟随其后
-    if (checkpoint) {
-      apiMessages.unshift({ role: "user", text: frameCompactionSummary(checkpoint.summary) });
-    }
-    // 系统提示词注入：Agent 引用已注册提示词笔记实时读正文（外部编辑即时生效，读失败静默降级）；
-    // 工具含 read_file 时追加「@引用 文件用 read_file 读取」引导。易变上下文（任务清单）走尾部块，
-    // 不进系统提示词——系统前缀必须稳定以命中前缀缓存。
-    const systemPrompt = assembleAgentSystemPrompt(agentReq?.systemPrompt, tools);
-    if (systemPrompt) {
-      apiMessages.unshift({ role: "system", text: systemPrompt });
-    }
-    // 当前任务清单（todo_write 开启时）以尾部 user 消息块带出：清单不变则逐字稳定 → 前缀缓存命中
-    const todosBlock = tools.some((t) => t.name === "todo_write")
-      ? currentTodosBlock(await readAgentTodos(conversationId))
-      : "";
-    if (todosBlock) {
-      const last = apiMessages[apiMessages.length - 1];
-      last.text += `\n\n${todosBlock}`;
-    }
-    await runStreamExchange({
-      provider,
-      model,
-      ...(reasoningEffort ? { reasoningEffort } : {}),
-      apiMessages,
-      ...(tools.length ? { tools } : {}),
-      signal: controller.signal,
-      // 增量写入占位消息（引擎 rAF 合并后每帧调用）
-      applyBatch: ({ content, reasoning }) => {
-        patchAssistant(conversationId, asstId, (m) => ({
-          ...m,
-          ...(content ? { content: m.content + content } : {}),
-          // 思考增量流入 steps（最后思考步拼接 / 工具轮之间自然分隔）
-          ...(reasoning
-            ? { steps: appendReasoning(m.steps ?? [], reasoning) }
-            : {}),
-        }));
-      },
-      onError: (err) => {
-        // 节点已删除：abort 后回调迟到，不再写错误占位（messagesByConv 键已随删除清理）
-        if (!findConversationNode(conversationId)) {
-          abortControllers.delete(conversationId);
-          return;
-        }
-        // 流式结果落盘属业务数据变更：作废 redo（undo 后流式回复不得被 Ctrl+Y 抹除）
-        touchRedo();
-        // 不静默降级：请求失败如实报错（[错误] 占位显示服务端具体信息，便于定位）
-        patchAssistant(conversationId, asstId, (m) => ({
-          ...m,
-          content: m.content || `${ERROR_PREFIX} ${err.message}`,
-        }));
-        store.setState((state) => ({
-          streamingByConv: { ...state.streamingByConv, [conversationId]: false },
-        }));
-        // 持久化错误占位（[错误] 前缀会在下次请求历史中被过滤，不污染上下文）
-        schedulePersist();
-        abortControllers.delete(conversationId);
-      },
-      onDone: ({ reasoning, timedOut, truncated, promoteNarration }) => {
-        // 节点已删除：丢弃流收尾写入（防孤儿消息随补丁落盘），键已随删除清理
-        if (!findConversationNode(conversationId)) {
-          abortControllers.delete(conversationId);
-          return;
-        }
-        // 流式结果落盘属业务数据变更：作废 redo（undo 后流式回复不得被 Ctrl+Y 抹除）
-        touchRedo();
-        // 空回复移除占位；超时且回答未产出写超时降级（保留思考）；否则正常复位。
-        // 用占位消息的实际 content/steps 判定（叙述提升/工具步骤已在其内），而非引擎 totals
-        const m = store
-          .getState()
-          .messagesByConv[conversationId]?.find((mm) => mm.id === asstId);
-        if (!m) {
-          // 流式中消息已被移除（极端竞态）：仅复位 streaming 态，不重建键
-          store.setState((state) => ({
-            streamingByConv: {
-              ...state.streamingByConv,
-              [conversationId]: false,
-            },
-          }));
-          schedulePersist();
-          abortControllers.delete(conversationId);
-          return;
-        }
-        // onDone 最终化：最终回答轮叙述提升进 content + 输出上限截断提示（画布/面板共用）
-        const finalized = finalizeReplyText({
-          content: m.content,
-          steps: m.steps ?? [],
-          promoteNarration,
-          truncated,
-        });
-        const decision = decideCleanup(
-          finalized.content,
-          reasoning,
-          timedOut,
-          finalized.steps.length > 0,
-        );
-        if (decision.kind === "remove") {
-          // 空回复：移除占位 assistant，避免残留空气泡
-          patchAssistant(conversationId, asstId, () => null);
-        } else {
-          patchAssistant(conversationId, asstId, (mm) => ({
-            ...mm,
-            content:
-              decision.kind === "timeout-error"
-                ? `${ERROR_PREFIX} ${TIMEOUT_ERROR_TEXT}`
-                : finalized.content,
-            steps: finalized.steps,
-          }));
-        }
-        store.setState((state) => ({
-          streamingByConv: { ...state.streamingByConv, [conversationId]: false },
-        }));
-        // messages 随 .atlx 增量补丁落盘（流式结束统一写，不逐 token 写）
-        schedulePersist();
-        abortControllers.delete(conversationId);
-      },
-      // 工具调用过程可视化：全量累积 runs 合并进占位消息 steps（思考→工具交错，随消息落 .atlx）
-      onToolRuns: (runs) => {
-        patchAssistant(conversationId, asstId, (m) => ({
-          ...m,
-          steps: mergeToolRuns(m.steps ?? [], runs),
-        }));
-      },
-      // 工具轮叙述正文进 steps（渲染为该步的「思考行」）
-      onNarration: (text) => {
-        patchAssistant(conversationId, asstId, (m) => ({
-          ...m,
-          steps: appendNarration(m.steps ?? [], text),
-        }));
-      },
-      executeTools: (calls) =>
-        // 公共工具执行器（画布/面板共用）；差异仅产物节点：画布建搜索/写笔记节点，面板不建
-        runAgentTools(
-          calls,
-          {
-            signal: controller.signal,
-            capabilities: {
-              search: (query) => runSearch(useSettingsStore.getState().searchConfig, query),
-              readFile: (path, opts) =>
-                readVaultFileWindow(path, opts).then((res) => {
-                  // @引用 的文件被 Agent 实际读取 → 消费物质化：画布落引用节点 + 连已消费边（幂等）
-                  if (
-                    isRefCoveredPath(
-                      useCanvasStore.getState().messagesByConv[conversationId] ?? [],
-                      path,
-                    )
-                  ) {
-                    void materializeReferencedFile(conversationId, path);
-                  }
-                  return res;
-                }),
-              glob: (pattern, opts) => globVault(pattern, opts),
-              grep: (pattern, opts) => grepVault(pattern, opts),
-              listDir: (dir) => listVaultDir(dir),
-              renameFile: (oldPath, newName) => useVaultStore.getState().renameFile(oldPath, newName),
-              moveFile: (oldPath, targetDir) => useVaultStore.getState().moveFile(oldPath, targetDir),
-              deleteFile: (path) => useVaultStore.getState().deleteFile(path),
-              deleteDir: (dir, force) =>
-                useVaultStore.getState().deleteFolder(dir, force).then((r) => ({
-                  ok: r.deleted,
-                  summary: r.deleted
-                    ? `已删除目录「${dir}」`
-                    : r.needsConfirm
-                      ? `目录非空（${r.itemCount} 项）`
-                      : "删除目录失败",
-                  needsConfirm: r.needsConfirm,
-                  itemCount: r.itemCount,
-                })),
-              readHistory: (path, opts) => readHistoryForAgent(path, opts),
-              appendFile: (path, content) =>
-                appendVaultFile(path, content).then((res) => {
-                  if (res.ok) void recordAgentFileWrite(path);
-                  return res;
-                }),
-              writeTodos: (todos) => writeAgentTodos(conversationId, todos),
-              writeFile: (path, content) => writeVaultFile(path, content).then(() => {
-                // Agent 协作历史：AI 写文件以 Agent 身份记入对应 kind 的历史（fire-and-forget）
-                void recordAgentFileWrite(path, content);
-                return { ok: true, summary: `已写入「${path}」` };
-              }),
-              editFile: (path, edits) => editVaultFile(path, edits).then((res) => {
-                if (res.ok) void recordAgentFileWrite(path);
-                return res;
-              }),
-              fetchUrl: fetchWeb,
-            },
-          },
-          {
-            onToolResult: (name, result) => {
-              if (name === "web_search" && result.ok && result.data) {
-                const d = result.data as SearchResultData;
-                createSearchNode(conversationId, d.query, d);
-              } else if (name === "write_file" && result.ok && result.data) {
-                const { path } = result.data as { path: string };
-                if (/\.md$/i.test(path)) {
-                  const title = (path.split("/").pop() ?? path).replace(/\.md$/i, "");
-                  createWriteNoteNode(conversationId, path, title);
-                }
-              }
-            },
-          },
-        ),
-    });
   } catch (e) {
     console.error("流式请求失败", e);
     // 节点已删除：不重建 streamingByConv 键（删除已清理），仅收掉 controller
@@ -1802,19 +1552,115 @@ async function runStream(conversationId: string): Promise<void> {
       abortControllers.delete(conversationId);
       return;
     }
-    // 失败必须可见：附件按引用读回、Agent 提示词笔记读取等都在这一层抛错，
-    // 只清流式标志会让用户「按了发送但什么都没发生」，节点里留一个空占位。
+    // 失败必须可见：附件按引用读回等都在这一层抛错，只清流式标志会让用户
+    // 「按了发送但什么都没发生」，节点里留一个空占位
     patchAssistant(conversationId, asstId, (m) => ({
       ...m,
       content: m.content || `${ERROR_PREFIX} ${e instanceof Error ? e.message : String(e)}`,
     }));
-    // 错误占位与 onError 路径同口径落盘：只留内存的话重载后这条错误消失、对端也看不到
+    // 错误占位与 fail 路径同口径落盘：只留内存的话重载后这条错误消失、对端也看不到
     schedulePersist();
     store.setState((state) => ({
       streamingByConv: { ...state.streamingByConv, [conversationId]: false },
     }));
     abortControllers.delete(conversationId);
+    return;
   }
+
+  // 写入器：核心把本轮产出交回节点消息表；节点存在性守卫、协作态与落盘调度在此处理
+  const sink: ChatTurnSink = {
+    update: ({ content, steps }) => {
+      patchAssistant(conversationId, asstId, (m) => ({ ...m, content, steps }));
+    },
+    notice: (message) => store.setState({ error: message }),
+    finish: (result) => {
+      // 节点已删除：丢弃流收尾写入（防孤儿消息随补丁落盘），键已随删除清理
+      if (!findConversationNode(conversationId)) {
+        abortControllers.delete(conversationId);
+        return;
+      }
+      // 流式结果落盘属业务数据变更：作废 redo（undo 后流式回复不得被 Ctrl+Y 抹除）
+      touchRedo();
+      if (result.removed) {
+        // 空回复：移除占位 assistant，避免残留空气泡
+        patchAssistant(conversationId, asstId, () => null);
+      } else {
+        patchAssistant(conversationId, asstId, (m) => ({
+          ...m,
+          content: result.content,
+          steps: result.steps,
+        }));
+      }
+      store.setState((state) => ({
+        streamingByConv: { ...state.streamingByConv, [conversationId]: false },
+      }));
+      // messages 随 .atlx 增量补丁落盘（流式结束统一写，不逐 token 写）
+      schedulePersist();
+      abortControllers.delete(conversationId);
+    },
+    fail: (err) => {
+      // 节点已删除：abort 后回调迟到，不再写错误占位（messagesByConv 键已随删除清理）
+      if (!findConversationNode(conversationId)) {
+        abortControllers.delete(conversationId);
+        return;
+      }
+      // 流式结果落盘属业务数据变更：作废 redo（undo 后流式回复不得被 Ctrl+Y 抹除）
+      touchRedo();
+      // 不静默降级：请求失败如实报错（[错误] 占位显示服务端具体信息，便于定位）
+      patchAssistant(conversationId, asstId, (m) => ({
+        ...m,
+        content: m.content || `${ERROR_PREFIX} ${err.message}`,
+      }));
+      store.setState((state) => ({
+        streamingByConv: { ...state.streamingByConv, [conversationId]: false },
+      }));
+      // 持久化错误占位（[错误] 前缀会在下次请求历史中被过滤，不污染上下文）
+      schedulePersist();
+      abortControllers.delete(conversationId);
+    },
+  };
+
+  await runtime.runTurn({
+    targetId: conversationId,
+    target: { provider, model },
+    history: store.getState().messagesByConv[conversationId] ?? [],
+    ...(reasoningEffort ? { reasoningEffort } : {}),
+    ...(nodeData?.agentId !== undefined ? { agentId: nodeData.agentId } : {}),
+    ...(nodeData?.compaction ? { compaction: nodeData.compaction } : {}),
+    signal: controller.signal,
+    sink,
+    naming: conversationNamingTarget(conversationId),
+    hooks: {
+      // @引用 的文件被 Agent 实际读取 → 消费物质化：画布落引用节点 + 连已消费边（幂等）
+      capabilities: (standard) => ({
+        readFile: (path, opts) =>
+          standard.readFile!(path, opts).then((res) => {
+            if (
+              isRefCoveredPath(
+                useCanvasStore.getState().messagesByConv[conversationId] ?? [],
+                path,
+              )
+            ) {
+              void materializeReferencedFile(conversationId, path);
+            }
+            return res;
+          }),
+      }),
+      // 工具产物节点：搜索节点 / 写笔记产物节点（面板不建，故下沉为消费方钩子）
+      onToolResult: (name, result) => {
+        if (name === "web_search" && result.ok && result.data) {
+          const d = result.data as SearchResultData;
+          createSearchNode(conversationId, d.query, d);
+        } else if (name === "write_file" && result.ok && result.data) {
+          const { path } = result.data as { path: string };
+          if (/\.md$/i.test(path)) {
+            const title = (path.split("/").pop() ?? path).replace(/\.md$/i, "");
+            createWriteNoteNode(conversationId, path, title);
+          }
+        }
+      },
+    },
+  });
 }
 
 function nowId() {
@@ -2192,7 +2038,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
             n.type === "conversation" &&
             !(n.data as Partial<ConversationData>).title,
         );
-        if (unnamed) void autoNameConversation(unnamed.id);
+        if (unnamed) requestConversationNaming(unnamed.id);
       }
     } catch (e) {
       console.error("加载画布失败", e);
@@ -2773,9 +2619,6 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
     // AI 消息发送不进 Undo 栈（业务操作），但作废 redo：undo 后发送的新消息不得被 Ctrl+Y 抹除
     touchRedo();
 
-    // 让路：中止本对话的自动命名请求（防其占用后端槽位与新消息排队；不误伤其他对话的命名）
-    abortAutoTitle(conversationId);
-
     // 发送时自动连线（防御）：输入框 @提及 但尚未建边的引用此刻建立边（正常路径拖线/@picker 已立即建边，
     // 此处仅兜底异常路径）；源节点已被删除的提及不再建边（否则产生悬空边），该引用随之下沉丢弃
     const edgesNow = get().edges;
@@ -3003,9 +2846,8 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
       }
     }
 
+    // 轮末话题自动命名由对话核心能力触发（fire-and-forget，不阻塞发送返回）
     await runStream(conversationId);
-    // LLM 话题自动命名（首轮完成；fire-and-forget 不阻塞发送返回）
-    void autoNameConversation(conversationId);
   },
 
   regenerate: async (conversationId) => {
@@ -3086,7 +2928,13 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
       });
       return;
     }
-    const resolved = useSettingsStore.getState().resolveChatTarget(
+    // 对话能力未启用（对话核心插件停用）：压缩属对话能力，如实提示
+    const runtime = getChatRuntime();
+    if (!runtime) {
+      set({ error: CHAT_UNAVAILABLE_TEXT });
+      return;
+    }
+    const resolved = runtime.resolveTarget(
       nodeData?.providerId || nodeData?.model
         ? { providerId: nodeData.providerId || undefined, model: nodeData.model || undefined }
         : null,
@@ -3095,18 +2943,9 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
       set({ error: resolved.error });
       return;
     }
-    // 喂给压缩模型的 = **当前模型可见历史**（旧摘要 + 未被旧注解覆盖的保留段）截到新边界：
-    // 旧摘要随新内容一起被重新总结（指令要求合并不照抄），不会因为压缩两次而丢掉先前摘要
-    const prior = splitByCompaction(list, nodeData?.compaction);
-    const cutIdx = prior.kept.findIndex((m) => m.id === bound.upToMessageId);
-    const toSummarize: LlmMessage[] = [
-      ...(prior.checkpoint
-        ? [{ role: "user" as const, text: frameCompactionSummary(prior.checkpoint.summary) }]
-        : []),
-      ...toLlmMessages(prior.kept.slice(0, cutIdx + 1)),
-    ];
-    // 与当前会话同源的工具名册：历史含工具消息时带上，请求结构才与最近一次真实请求一致
-    // （控制器与 compactingByConv 置位须在任何 await 之前，否则互斥守卫存在可插入的窗口）
+    // 摘要生成走对话核心能力（喂给模型的 = 当前可见历史截到新边界，旧摘要一并重新总结，不照抄）；
+    // 注解写回与锚点复核留在本 store
+    //（控制器与 compactingByConv 置位须在任何 await 之前，否则互斥守卫存在可插入的窗口）
     const controller = new AbortController();
     abortControllers.set(conversationId, controller);
     set({
@@ -3114,31 +2953,17 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
       compactingByConv: { ...get().compactingByConv, [conversationId]: true },
     });
     try {
-      const agentReq = await useSettingsStore
-        .getState()
-        .resolveAgentRequest(nodeData?.agentId);
-      // 解析期间节点可能已删除：中止本轮，避免往已删节点写状态
-      if (!get().nodes.some((n) => n.id === conversationId)) return;
-      const result = await runCompaction({
-        baseUrl: resolved.provider.baseUrl,
-        apiKey: resolved.provider.apiKey,
-        model: resolved.model,
-        messages: toSummarize,
-        ...(agentReq?.tools.length ? { tools: agentReq.tools } : {}),
+      const result = await runtime.compact({
+        target: { provider: resolved.provider, model: resolved.model },
+        messages: list,
+        ...(nodeData?.compaction ? { compaction: nodeData.compaction } : {}),
+        upToMessageId: bound.upToMessageId,
+        ...(nodeData?.agentId !== undefined ? { agentId: nodeData.agentId } : {}),
         signal: controller.signal,
       });
       if (!result.ok) {
         // aborted = 用户主动停止，静默收尾；其余给出可重试提示
-        if (result.reason !== "aborted") {
-          set({
-            error:
-              result.reason === "truncated"
-                ? "压缩失败：摘要超出输出上限被截断，请重试"
-                : result.reason === "empty"
-                  ? "压缩失败：模型未返回摘要内容，请重试"
-                  : `压缩失败：${result.error?.message ?? "请求出错"}`,
-          });
-        }
+        if (!result.aborted) set({ error: result.message });
         return;
       }
       // 节点可能已删除/已切换：写回前复核；锚点消息若已不在（协作补丁/回滚截断）则丢弃本次结果——
@@ -3152,8 +2977,8 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
           upToMessageId: bound.upToMessageId,
           messageCount: bound.messageCount,
           createdAt: Date.now(),
-          providerId: resolved.provider.id,
-          model: resolved.model,
+          providerId: result.providerId,
+          model: result.model,
         },
       });
     } finally {

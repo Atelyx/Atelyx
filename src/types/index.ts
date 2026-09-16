@@ -22,6 +22,23 @@ export type {
 export type { ConversationCompaction } from "./compaction";
 
 export type {
+  ChatTargetSelection,
+  ChatTurnTarget,
+  ChatTurnMessage,
+  ChatCapabilityOverrides,
+  ChatTurnHooks,
+  ChatTurnSink,
+  ChatTurnOutcome,
+  ChatNamingTarget,
+  ChatAutoNameResult,
+  ChatAutoNameOptions,
+  ChatTurnRequest,
+  ChatCompactRequest,
+  ChatCompactResult,
+  ChatRuntime,
+} from "./chatRuntime";
+
+export type {
   EditorChatRole,
   EditorChatMessage,
   EditorChatMessageRef,

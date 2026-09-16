@@ -19,7 +19,7 @@ export const PLUGIN_SERVICE_LABELS: Record<string, string> = {
   canvas: "画布数据",
   table: "表格数据",
   note: "当前笔记读写",
-  chat: "AI 会话面板",
+  chat: "AI 对话能力",
   history: "领域历史读与回滚",
   layout: "工作区布局读与操作",
   uiState: "应用级 UI 状态读",

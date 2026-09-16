@@ -1,4 +1,4 @@
-import { Layers, Loader2, Lock, Plus, RefreshCw, Scissors, X } from "lucide-react";
+import { AlertTriangle, Layers, Loader2, Lock, Plus, RefreshCw, Scissors, X } from "lucide-react";
 import { useEffect, useCallback, useMemo, useRef, useState } from "react";
 import { useReactFlow, type NodeProps } from "@xyflow/react";
 import { useShallow } from "zustand/react/shallow";
@@ -7,6 +7,7 @@ import { useCanvasStore, nodeFileOf } from "@/stores/canvasStore";
 import { useCollabStore } from "@/stores/collabStore";
 import { useSettingsStore, selectDefaultModelDisplay } from "@/stores/settingsStore";
 import { useNodeCollab } from "@/hooks/useNodeCollab";
+import { useChatRuntime } from "@/hooks/useChatRuntime";
 import { resolveLockState } from "@/utils/canvasCollab";
 import { useAutoScrollFollow } from "@/hooks/useAutoScrollFollow";
 import { DEFAULT_CONVERSATION_WIDTH,
@@ -14,7 +15,7 @@ import { DEFAULT_CONVERSATION_WIDTH,
   DEFAULT_TEXT_NODE_WIDTH,
   DEFAULT_TEXT_NODE_HEIGHT,
 } from "@/constants/canvas";
-import { ERROR_PREFIX } from "@/constants/chat";
+import { CHAT_UNAVAILABLE_TEXT, ERROR_PREFIX } from "@/constants/chat";
 import { isAssetConsumed } from "@/utils/consumed";
 import { findFreeSpot } from "@/utils/layout";
 import { useNotificationStore } from "@/stores/notificationStore";
@@ -141,6 +142,9 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
   const addEdge = useCanvasStore((s) => s.addEdge);
   const updateNodeData = useCanvasStore((s) => s.updateNodeData);
   const { fitView } = useReactFlow();
+  // 对话能力（对话核心插件提供）：未启用时输入区降级为提示条，历史消息仍可读
+  const chatRuntime = useChatRuntime();
+  const chatAvailable = chatRuntime !== null;
   const providers = useSettingsStore((s) => s.config.providers);
   const defaultModelDisplay = useSettingsStore(selectDefaultModelDisplay);
   const nodeData = useCanvasStore(
@@ -329,6 +333,8 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
   const handleSend = () => {
     const text = input.trim();
     if ((!text && attachments.length === 0) || streaming || compacting) return;
+    // 对话能力未启用（对话核心插件停用）：不发送，保留草稿（输入区已换成提示条，此处为兜底）
+    if (!chatAvailable) return;
     // 协作锁主校验：非锁主不发送（保留草稿，等锁释放后可继续）
     if (!isOwnLockActive()) return;
     // 持锁发送：流式期间锁持续持有（acquire 幂等，已有锁不刷新 since）
@@ -710,6 +716,8 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
     !!last &&
     last.role === "assistant" &&
     !streaming &&
+    // 对话能力未启用时无「重新生成」可言（避免点了只弹错误）
+    chatAvailable &&
     !last.content.startsWith(ERROR_PREFIX);
   // 输入框 overlay 分段：@提及 → 圆角标签段（可删除），其余普通文本段（含纯路径引用 file:<path>）
   const segments = splitMentions(input, [
@@ -998,6 +1006,15 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
               ? `${lockedByPeer.nickname} 正在生成…（只读）`
               : `${lockedByPeer.nickname} 正在编辑…（只读）`}
           </span>
+        </div>
+      ) : !chatAvailable ? (
+        /* 对话能力未启用（对话核心插件停用）→ 提示条：历史消息仍可读，输入/发送不可用 */
+        <div
+          className="nodrag border-t px-3 py-2 flex items-center gap-1.5 text-xs"
+          style={{ borderColor: "var(--border)", color: "var(--text-secondary)" }}
+        >
+          <AlertTriangle size={13} className="flex-shrink-0" />
+          <span className="truncate">{CHAT_UNAVAILABLE_TEXT}</span>
         </div>
       ) : (
       <div

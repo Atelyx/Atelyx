@@ -11,41 +11,15 @@ import {
   appendChatMessages,
   deleteChatMessages,
 } from "@/services/vault";
-import { toLlmMessages } from "@/services/ai/client";
 import { abortAutoTitle } from "@/services/ai/autoTitle";
-import { emitPluginEvent } from "@/services/cordis/events";
-import { ERROR_PREFIX, TIMEOUT_ERROR_TEXT } from "@/constants/chat";
+import { deleteAgentTodos } from "@/services/vault/agentTodos";
+import { CHAT_UNAVAILABLE_TEXT, ERROR_PREFIX } from "@/constants/chat";
 import { BUILTIN_AGENT_CHAT_ID } from "@/constants/agents";
-import {
-  runStreamExchange,
-  decideCleanup,
-  runAutoNaming,
-} from "./streaming";
-import { runAgentTools, assembleAgentSystemPrompt } from "@/services/ai/tools";
-import { runSearch } from "@/services/search";
-import { readHistoryForAgent, recordAgentFileWrite } from "@/services/history";
-import {
-  appendVaultFile,
-  editVaultFile,
-  globVault,
-  grepVault,
-  listVaultDir,
-  readVaultFileWindow,
-  writeVaultFile,
-} from "@/services/vault/aiFiles";
-import {
-  currentTodosBlock,
-  deleteAgentTodos,
-  readAgentTodos,
-  writeAgentTodos,
-} from "@/services/vault/agentTodos";
-import { fetchWeb } from "@/services/web";
 import { prefix, scanMentionHits } from "@/utils/text";
-import { appendNarration, appendReasoning, coalesceAgentSteps, fillAssistantReplyText, finalizeReplyText, mergeToolRuns } from "@/utils/agentSteps";
-import { nextCompactionBoundary, splitByCompaction } from "@/utils/compaction";
-import { runCompaction } from "@/services/ai/compaction";
-import { frameCompactionSummary } from "@/constants/compaction";
+import { coalesceAgentSteps, fillAssistantReplyText } from "@/utils/agentSteps";
+import { nextCompactionBoundary } from "@/utils/compaction";
 import { createPersistController } from "@/utils/persist";
+import { getChatRuntime } from "@/utils/chatRuntimeHost";
 import { useSettingsStore } from "./settingsStore";
 import { useAppStore } from "./appStore";
 import { useVaultStore } from "./vaultStore";
@@ -56,6 +30,10 @@ import {
   CHAT_META_EXT,
 } from "@/constants/editorChats";
 import type {
+  ChatNamingTarget,
+  ChatRuntime,
+  ChatTurnSink,
+  ChatTurnTarget,
   EditorChatMessage,
   EditorChatMessageRef,
   EditorChatModelOverride,
@@ -64,8 +42,6 @@ import type {
   NoteRewriteRequest,
   ProviderConfig,
   ReasoningEffort,
-  ToolSchema,
-  LlmMessage,
 } from "@/types";
 
 /**
@@ -77,10 +53,11 @@ import type {
  * 笔记上下文两条路径：@引用（手动拖入，发送时就地替换注入）+ 当前打开笔记尾部上下文块（runExchange 注入，ephemeral 不落盘）。
  * 多设备共享同一仓库文件夹时，新建/删除/改名/消息经 watcher 内容比对合并实时互见（见 applyExternalChatChange）。
  *
- * 与画布对话（canvasStore.runStream）的差异：
- * - 面板一次只流式一个会话（单输入框）；工具循环与画布共用 runStreamExchange（Agent 模式开关控制）
+ * 与画布对话（canvasStore）的差异：
+ * - 面板一次只流式一个会话（单输入框）；对话编排（提示词/工具/流式/收尾/命名）由对话核心能力
+ *   承担（`stores/chatTurn.ts`，经 `utils/chatRuntimeHost` 取用），本 store 只管容器、落盘与面板态
  * - 错误占位沿用 `[错误]` 前缀过滤约定（ERROR_PREFIX，见 constants/chat.ts）
- * - provider/model 解析：`settingsStore.resolveChatTarget(modelOverride)`（面板覆盖 → 跟随仓库默认，与画布同源）
+ * - provider/model 解析：对话核心能力的 resolveTarget（面板覆盖 → 跟随仓库默认，与画布同源）
  * - 持久化 debounce 500ms：消息纯增长只追加新增记录（每记录一行 JSON），元数据/覆盖变化写对应小文件；
  *   自写与外部写经 watcher 内容比对判别（无时间窗误判）
  */
@@ -294,27 +271,30 @@ function applySessionTitle(sessionId: string, title: string): void {
   markMetaDirty(sessionId);
 }
 
+/** 面板会话的命名目标（轮末自动命名与手动重新命名共用）。 */
+function sessionNamingTarget(sessionId: string): ChatNamingTarget {
+  return {
+    getMessages: () => {
+      const s = useChatPanelStore.getState().sessions.find((x) => x.id === sessionId);
+      // 叙述-only 消息（content 为空、正文在 steps）回填正文，供话题命名摘要
+      return (s?.messages ?? []).map(fillAssistantReplyText);
+    },
+    isNamed: () => autoNamedSessions.has(sessionId),
+    applyTitle: (title) => applySessionTitle(sessionId, title),
+  };
+}
+
 /**
- * LLM 话题自动命名：一轮对话完成后为会话生成话题标题。
- * - 统一走 streaming.ts 的公共命名管线（模型解析/延迟/超时与画布共用）
- * - 失败（含被 abortAutoTitle 中止）不登记——降级保留首条消息前缀，下轮对话完成/进入仓库时自动重试
+ * 话题自动命名：一轮对话完成后为会话生成话题标题（轮次结束由对话核心能力触发）。
+ * - 命名管线走对话核心能力（模型解析/延迟/超时与画布共用），失败含被 abortAutoTitle 中止
+ * - 失败不登记——降级保留首条消息前缀，下轮对话完成/进入仓库时自动重试
  * - 命名只改侧车 title（消息 .jsonl 文件名 = 会话 id，不随标题变）
- * - fire-and-forget：关闭/无可用模型/命名失败降级保留占位标题，不阻塞对话
+ * - fire-and-forget：对话能力未启用/无可用模型/命名失败一律降级保留占位标题，不阻塞对话
  */
 async function autoNameSession(sessionId: string): Promise<void> {
-  await runAutoNaming(
-    {
-      getMessages: () => {
-        const s = useChatPanelStore.getState().sessions.find((x) => x.id === sessionId);
-        // 叙述-only 消息（content 为空、正文在 steps）回填正文，供话题命名摘要
-        return (s?.messages ?? []).map(fillAssistantReplyText);
-      },
-      isNamed: () => autoNamedSessions.has(sessionId),
-      applyTitle: (title) => applySessionTitle(sessionId, title),
-    },
-    // key = 会话 id：发送新消息/手动接管时只中止本会话的命名请求（不误伤其他会话）
-    { key: sessionId },
-  );
+  const runtime = getChatRuntime();
+  if (!runtime) return;
+  await runtime.autoName(sessionNamingTarget(sessionId), sessionId);
 }
 
 /** debounce 500ms 写盘（读最新 state；`messageSessionId` = 本次改动涉及的会话，其消息 .jsonl 需重写）。 */
@@ -543,18 +523,18 @@ async function applyExternalMeta(id: string): Promise<void> {
 }
 
 /**
- * 解析当前对话的 provider/model（画布/面板同源实现，见 settingsStore.resolveChatTarget）：
+ * 解析当前对话的 provider/model（走对话核心能力的解析，与画布/插件同源）：
  * - 面板覆盖 {providerId, model} → 跟随仓库默认（默认模型反查所属供应商）
  * 覆盖供应商已删：清空失效覆盖（含持久化）并提示，本次不发送（不静默回落默认）。
  * 失败已写 error，返回 null。
  */
-function resolveProviderModel(): {
+function resolveProviderModel(runtime: ChatRuntime): {
   provider: ProviderConfig;
   model: string;
   reasoningEffort?: ReasoningEffort;
 } | null {
   const ov = useChatPanelStore.getState().modelOverride;
-  const resolved = useSettingsStore.getState().resolveChatTarget(ov);
+  const resolved = runtime.resolveTarget(ov);
   if (!resolved.ok) {
     if (resolved.reason === "provider-missing") {
       // provider-missing 只可能在 ov 非空时返回（见 resolveChatTarget）；清空失效覆盖并说明已恢复跟随默认
@@ -573,29 +553,39 @@ function resolveProviderModel(): {
   };
 }
 
-/**
- * 当前打开笔记的尾部上下文块：随请求折叠进末条 user 消息线文（ephemeral，不入会话存储）。
- * 引导模型视相关性用 read_file 读取（read_file 随 Agent 勾选在名册内时生效；关闭后模型无读取能力）。
- */
-function currentNoteContextBlock(file: string, title: string): string {
-  const label = title ? `（${title}）` : "";
-  return [
-    "<context>",
-    `用户当前打开的笔记：\`${file}\`${label}。若与本次对话相关，用 read_file 工具按此路径读取正文；读取之前不要声称已查看过该文件。`,
-    "</context>",
-  ].join("\n");
+/** 占位消息写入：按会话定位并 patch（会话已删 = 丢弃，防孤儿消息复活）。 */
+function patchSessionMessage(
+  sessionId: string,
+  messageId: string,
+  patch: (m: EditorChatMessage) => EditorChatMessage | null,
+): void {
+  useChatPanelStore.setState((state) => ({
+    sessions: state.sessions.map((s) =>
+      s.id !== sessionId
+        ? s
+        : {
+            ...s,
+            messages: s.messages.flatMap((m) => {
+              if (m.id !== messageId) return [m];
+              const next = patch(m);
+              return next ? [next] : [];
+            }),
+          }
+    ),
+  }));
 }
 
 /**
  * 执行一轮流式对话（send 与 regenerate 共用）：
- * 追加 user 消息 + 空占位 assistant → SSE 流式写入（content/思考双通道 rAF 合并）→ 清理。
- * 空闲超时/错误占位/空回复移除与画布 runStream 语义一致。
+ * 追加 user 消息 + 空占位 assistant → 交给对话核心能力跑本轮（提示词/工具/流式/收尾/命名）→
+ * 产出经写入器写回会话容器（本函数只管容器与落盘，编排在核心）。
+ * 对话能力未启用时调用方在进入前拦下（见 send/regenerate）。
  */
 async function runExchange(
   active: EditorChatSession,
   userMsg: EditorChatMessage,
-  provider: ProviderConfig,
-  model: string,
+  runtime: ChatRuntime,
+  target: ChatTurnTarget,
   reasoningEffort?: ReasoningEffort,
 ): Promise<void> {
   const now = Date.now();
@@ -619,259 +609,57 @@ async function runExchange(
     streaming: true,
     error: null,
   });
-  // 领域事件（状态提交后发出，订阅方读到的是已含本 user 消息的最新会话）：会话请求开始 + 用户消息。
-  emitPluginEvent("chat:started", { sessionId: active.id });
-  emitPluginEvent("chat:message", { sessionId: active.id, role: "user", content: userMsg.displayContent ?? userMsg.content });
   schedulePersist(active.id);
 
   const controller = new AbortController();
   abortController = controller;
 
-  // 系统提示词 + 工具：按 Agent 实时解析（配置在 设置 → Agent，引用已注册提示词笔记实时读正文注入）。
-  // 缺省（未选 Agent）= 预置「对话」；Agent 缺失（已删）降级为普通对话。
-  const agentReq = await useSettingsStore
-    .getState()
-    .resolveAgentRequest(updated.agentId);
-  let systemPrompt: string | undefined;
-  let tools: ToolSchema[] = [];
-  if (agentReq) {
-    systemPrompt = agentReq.systemPrompt;
-    tools = agentReq.tools;
-    if (agentReq.skippedWebSearch) {
-      useChatPanelStore.setState({
-        error: "未配置搜索源（设置 → 联网搜索），本次对话未启用联网搜索",
-      });
-    }
-  }
-
-  // 历史含刚追加的 user 消息；叙述-only 消息（content 为空、正文在 steps）先回填 content
-  // （否则空 content 发给部分端点返回 400）；过滤错误占位防污染上下文，system 提示词置首
-  // （与画布 runStream 同语义）。压缩注解按原始列表定位锚点（与标记行同口径）：锚点及其之前不进请求
-  const { kept, checkpoint } = splitByCompaction(
-    [...active.messages, userMsg],
-    active.compaction,
-  );
-  const apiHistory = kept
-    .map(fillAssistantReplyText)
-    .filter(
-      (m) => !(m.role === "assistant" && m.content.startsWith(ERROR_PREFIX)),
-    );
-
-  // 系统提示词：Agent 提示词 + 引用文件读取引导（工具含 read_file 时追加「@引用 文件用 read_file 读取」）
-  // 易变上下文（当前笔记/任务清单）走尾部 user 消息块，不进系统提示词（保前缀缓存命中）
-  const systemText = assembleAgentSystemPrompt(systemPrompt, tools);
-
-  const apiMessages = [
-    ...(systemText ? [{ role: "system" as const, text: systemText }] : []),
-    ...(checkpoint
-      ? [{ role: "user" as const, text: frameCompactionSummary(checkpoint.summary) }]
-      : []),
-    ...toLlmMessages(apiHistory),
-  ];
-  // 当前打开笔记以尾部上下文块折叠进末条 user 消息线文：仅当名册含 read_file 时才注入
-  // （模型才有能力读取，避免教唆用不存在的工具）；块不落历史（ephemeral），历史逐字节稳定
-  // 复现 → 前缀缓存命中至该消息原文，仅块本身 token 不命中；regenerate 同经此处 → 每次请求按当下打开
-  // 的笔记注入（无笔记则按条件不注入）。
-  const { currentNoteFile, currentNoteTitle } = useAppStore.getState();
-  if (currentNoteFile && tools.some((t) => t.name === "read_file")) {
-    const last = apiMessages[apiMessages.length - 1];
-    last.text += `\n\n${currentNoteContextBlock(currentNoteFile, currentNoteTitle)}`;
-  }
-  // 当前任务清单（todo_write 工具开启时）同以尾部上下文块带出：清单不变则逐字稳定 → 前缀缓存命中；
-  // 清单变化（模型更新过 todo）只影响尾块 token，不打断系统前缀缓存
-  const todosBlock = tools.some((t) => t.name === "todo_write")
-    ? currentTodosBlock(await readAgentTodos(active.id))
-    : "";
-  if (todosBlock) {
-    const last = apiMessages[apiMessages.length - 1];
-    last.text += `\n\n${todosBlock}`;
-  }
-
-  await runStreamExchange({
-    provider,
-    model,
-    ...(reasoningEffort ? { reasoningEffort } : {}),
-    apiMessages,
-    ...(tools.length ? { tools } : {}),
-    signal: controller.signal,
-    applyBatch: ({ content, reasoning }) => {
-      useChatPanelStore.setState((state) => ({
-        sessions: state.sessions.map((s) =>
-          s.id === active.id
-            ? {
-                ...s,
-                messages: s.messages.map((m) =>
-                  m.id === asstMsg.id
-                    ? {
-                        ...m,
-                        ...(content ? { content: m.content + content } : {}),
-                        // 思考增量流入 steps（最后思考步拼接 / 工具轮之间自然分隔）
-                        ...(reasoning
-                          ? { steps: appendReasoning(m.steps ?? [], reasoning) }
-                          : {}),
-                      }
-                    : m
-                ),
-              }
-            : s
-        ),
-      }));
+  // 写入器：核心把本轮产出交回会话容器；存在性守卫（会话已删）与落盘调度在此处理
+  const sink: ChatTurnSink = {
+    update: ({ content, steps }) => {
+      patchSessionMessage(active.id, asstMsg.id, (m) => ({ ...m, content, steps }));
     },
-    // 工具调用过程可视化：全量累积 runs 合并进占位消息 steps（思考→工具交错，工具步随消息 .jsonl 记录落盘）
-    onToolRuns: (runs) => {
-      useChatPanelStore.setState((state) => ({
-        sessions: state.sessions.map((s) =>
-          s.id === active.id
-            ? {
-                ...s,
-                messages: s.messages.map((m) =>
-                  m.id === asstMsg.id
-                    ? { ...m, steps: mergeToolRuns(m.steps ?? [], runs) }
-                    : m
-                ),
-              }
-            : s
-        ),
-      }));
-    },
-    // 工具轮叙述正文进 steps（渲染为该步的「思考行」）
-    onNarration: (text) => {
-      useChatPanelStore.setState((state) => ({
-        sessions: state.sessions.map((s) =>
-          s.id === active.id
-            ? {
-                ...s,
-                messages: s.messages.map((m) =>
-                  m.id === asstMsg.id
-                    ? { ...m, steps: appendNarration(m.steps ?? [], text) }
-                    : m
-                ),
-              }
-            : s
-        ),
-      }));
-    },
-    onError: (err) => {
-      // 不静默降级：占位写入 [错误]（下次请求历史过滤，不污染上下文）
-      useChatPanelStore.setState((state) => ({
-        sessions: state.sessions.map((s) =>
-          s.id === active.id
-            ? {
-                ...s,
-                messages: s.messages.map((m) =>
-                  m.id === asstMsg.id
-                    ? { ...m, content: m.content || `${ERROR_PREFIX} ${err.message}` }
-                    : m
-                ),
-              }
-            : s
-        ),
-        streaming: false,
-      }));
-      schedulePersist(active.id);
-      void autoNameSession(active.id);
-      // 会话轮次结束（出错收敛也通知订阅方，与 正常/中止 语义一致）。
-      emitPluginEvent("chat:finished", { sessionId: active.id });
-      abortController = null;
-    },
-    onDone: ({ content, reasoning, timedOut, truncated, promoteNarration }) => {
-      // 空回复移除占位；超时且回答未产出写超时降级（保留思考）；否则正常保留。
-      // 用占位消息的实际 content/steps 判定（叙述提升/工具步骤已在其内），而非引擎 totals
-      const m = useChatPanelStore
-        .getState()
-        .sessions.find((s) => s.id === active.id)
-        ?.messages.find((mm) => mm.id === asstMsg.id);
-      // onDone 最终化：最终回答轮叙述提升进 content + 输出上限截断提示（画布/面板共用）
-      const finalized = finalizeReplyText({
-        content: m?.content ?? content,
-        steps: m?.steps ?? [],
-        promoteNarration,
-        truncated,
-      });
-      const decision = decideCleanup(
-        finalized.content,
-        reasoning,
-        timedOut,
-        finalized.steps.length > 0,
-      );
-      useChatPanelStore.setState((state) => {
-        const sess = state.sessions.find((s) => s.id === active.id);
-        if (!sess) return { streaming: false };
-        let messages = sess.messages;
-        if (decision.kind === "timeout-error") {
-          messages = messages.map((m) =>
-            m.id === asstMsg.id
-              ? { ...m, content: `${ERROR_PREFIX} ${TIMEOUT_ERROR_TEXT}` }
-              : m
-          );
-        } else if (decision.kind === "remove") {
-          messages = messages.filter((m) => m.id !== asstMsg.id);
-        } else {
-          messages = messages.map((m) =>
-            m.id === asstMsg.id
-              ? { ...m, content: finalized.content, steps: finalized.steps }
-              : m
-          );
-        }
-        return {
-          sessions: state.sessions.map((s) =>
-            s.id === active.id ? { ...s, messages } : s
-          ),
-          streaming: false,
-        };
-      });
-      schedulePersist(active.id);
-      void autoNameSession(active.id);
-      // 领域事件：assistant 完成消息（保留分支才有最终内容；超时/移除分支不入列）+ 会话轮次结束。
-      if (decision.kind !== "timeout-error" && decision.kind !== "remove" && finalized.content) {
-        emitPluginEvent("chat:message", { sessionId: active.id, role: "assistant", content: finalized.content });
+    notice: (message) => useChatPanelStore.setState({ error: message }),
+    finish: (result) => {
+      if (result.removed) {
+        // 空回复：移除占位，避免残留空气泡
+        patchSessionMessage(active.id, asstMsg.id, () => null);
+      } else {
+        patchSessionMessage(active.id, asstMsg.id, (m) => ({
+          ...m,
+          content: result.content,
+          steps: result.steps,
+        }));
       }
-      emitPluginEvent("chat:finished", { sessionId: active.id });
-      abortController = null;
+      useChatPanelStore.setState({ streaming: false });
+      schedulePersist(active.id);
+      if (abortController === controller) abortController = null;
     },
-    executeTools: (calls) =>
-      // 公共工具执行器（画布/面板共用）；面板无画布上下文，不建产物节点
-      runAgentTools(calls, {
-        signal: controller.signal,
-        capabilities: {
-          search: (query) => runSearch(useSettingsStore.getState().searchConfig, query),
-          readFile: (path, opts) => readVaultFileWindow(path, opts),
-          glob: (pattern, opts) => globVault(pattern, opts),
-          grep: (pattern, opts) => grepVault(pattern, opts),
-          listDir: (dir) => listVaultDir(dir),
-          renameFile: (oldPath, newName) => useVaultStore.getState().renameFile(oldPath, newName),
-          moveFile: (oldPath, targetDir) => useVaultStore.getState().moveFile(oldPath, targetDir),
-          deleteFile: (path) => useVaultStore.getState().deleteFile(path),
-          deleteDir: (dir, force) =>
-            useVaultStore.getState().deleteFolder(dir, force).then((r) => ({
-              ok: r.deleted,
-              summary: r.deleted
-                ? `已删除目录「${dir}」`
-                : r.needsConfirm
-                  ? `目录非空（${r.itemCount} 项）`
-                  : "删除目录失败",
-              needsConfirm: r.needsConfirm,
-              itemCount: r.itemCount,
-            })),
-          readHistory: (path, opts) => readHistoryForAgent(path, opts),
-          appendFile: (path, content) =>
-            appendVaultFile(path, content).then((res) => {
-              if (res.ok) void recordAgentFileWrite(path);
-              return res;
-            }),
-          writeTodos: (todos) => writeAgentTodos(active.id, todos),
-          writeFile: (path, content) => writeVaultFile(path, content).then(() => {
-            // Agent 协作历史：AI 写文件以 Agent 身份记入对应 kind 的历史（fire-and-forget）
-            void recordAgentFileWrite(path, content);
-            return { ok: true, summary: `已写入「${path}」` };
-          }),
-          editFile: (path, edits) => editVaultFile(path, edits).then((res) => {
-            if (res.ok) void recordAgentFileWrite(path);
-            return res;
-          }),
-          fetchUrl: fetchWeb,
-        },
-      }),
+    fail: (err) => {
+      // 不静默降级：占位写入 [错误]（下次请求历史过滤，不污染上下文）
+      patchSessionMessage(active.id, asstMsg.id, (m) => ({
+        ...m,
+        content: m.content || `${ERROR_PREFIX} ${err.message}`,
+      }));
+      useChatPanelStore.setState({ streaming: false });
+      schedulePersist(active.id);
+      if (abortController === controller) abortController = null;
+    },
+  };
+
+  await runtime.runTurn({
+    targetId: active.id,
+    target,
+    // 历史含刚追加的 user 消息（消息本体即中性字段，核心直接读）
+    history: updated.messages,
+    ...(reasoningEffort ? { reasoningEffort } : {}),
+    ...(updated.agentId !== undefined ? { agentId: updated.agentId } : {}),
+    ...(active.compaction ? { compaction: active.compaction } : {}),
+    // 面板把当前打开的笔记当隐式上下文（画布对话节点用显式 @引用/连边，不开此开关）
+    includeCurrentNote: true,
+    signal: controller.signal,
+    sink,
+    naming: sessionNamingTarget(active.id),
   });
 }
 
@@ -1030,11 +818,14 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
     const trimmed = content.trim();
     if (!trimmed || get().streaming || get().compacting) return;
 
-    // 让路：中止当前会话的自动命名请求（防其占用后端槽位与新消息排队；不误伤其他会话）
-    const sid = get().activeSessionId;
-    if (sid) abortAutoTitle(sid);
+    // 对话能力未启用（对话核心插件停用）：如实提示，不进入本轮（不创建空会话）
+    const runtime = getChatRuntime();
+    if (!runtime) {
+      set({ error: CHAT_UNAVAILABLE_TEXT });
+      return;
+    }
 
-    const resolved = resolveProviderModel();
+    const resolved = resolveProviderModel(runtime);
     if (!resolved) return;
 
     // 确保有激活会话：新对话态（null）时创建会话并激活——标题/消息 .jsonl 路径在首条消息确定；
@@ -1080,7 +871,13 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
       createdAt: Date.now(),
     };
 
-    await runExchange(active, userMsg, resolved.provider, resolved.model, resolved.reasoningEffort);
+    await runExchange(
+      active,
+      userMsg,
+      runtime,
+      { provider: resolved.provider, model: resolved.model },
+      resolved.reasoningEffort,
+    );
   },
 
   regenerate: async () => {
@@ -1088,6 +885,11 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
     if (s.streaming || s.compacting) return;
     const session = s.sessions.find((x) => x.id === s.activeSessionId);
     if (!session) return;
+    const runtime = getChatRuntime();
+    if (!runtime) {
+      set({ error: CHAT_UNAVAILABLE_TEXT });
+      return;
+    }
     const list = session.messages;
     let lastUserIdx = -1;
     let lastAsstIdx = -1;
@@ -1098,7 +900,7 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
     }
     if (lastUserIdx < 0) return;
 
-    const resolved = resolveProviderModel();
+    const resolved = resolveProviderModel(runtime);
     if (!resolved) return;
 
     const userMsg = list[lastUserIdx];
@@ -1123,7 +925,13 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
       });
       schedulePersist(session.id);
     }
-    await runExchange({ ...session, messages: base }, { ...userMsg, content: rebuiltContent }, resolved.provider, resolved.model, resolved.reasoningEffort);
+    await runExchange(
+      { ...session, messages: base },
+      { ...userMsg, content: rebuiltContent },
+      runtime,
+      { provider: resolved.provider, model: resolved.model },
+      resolved.reasoningEffort,
+    );
   },
 
   compactSession: async () => {
@@ -1141,49 +949,31 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
       });
       return;
     }
-    const resolved = resolveProviderModel();
+    // 对话能力未启用（对话核心插件停用）：压缩属对话能力，如实提示
+    const runtime = getChatRuntime();
+    if (!runtime) {
+      set({ error: CHAT_UNAVAILABLE_TEXT });
+      return;
+    }
+    const resolved = resolveProviderModel(runtime);
     if (!resolved) return;
-    // 喂给压缩模型的 = **当前模型可见历史**（旧摘要 + 未被旧注解覆盖的保留段）截到新边界：
-    // 旧摘要随新内容一起被重新总结（指令要求合并不照抄），压缩两次不会丢掉先前摘要
-    const prior = splitByCompaction(session.messages, session.compaction);
-    const cutIdx = prior.kept.findIndex((m) => m.id === bound.upToMessageId);
-    const toSummarize: LlmMessage[] = [
-      ...(prior.checkpoint
-        ? [{ role: "user" as const, text: frameCompactionSummary(prior.checkpoint.summary) }]
-        : []),
-      ...toLlmMessages(prior.kept.slice(0, cutIdx + 1)),
-    ];
-    // 与当前会话同源的工具名册：历史含工具消息时带上，请求结构才与最近一次真实请求一致
-    // （控制器与 compacting 置位须在任何 await 之前，否则互斥守卫存在可插入的窗口）
+    // 控制器与 compacting 置位须在任何 await 之前，否则互斥守卫存在可插入的窗口
     const controller = new AbortController();
     abortController = controller;
     set({ error: null, compacting: session.id });
     try {
-      const agentReq = await useSettingsStore
-        .getState()
-        .resolveAgentRequest(session.agentId);
-      // 解析期间会话可能已删除：中止本轮，避免往已删会话写状态
-      if (!get().sessions.some((x) => x.id === session.id)) return;
-      const result = await runCompaction({
-        baseUrl: resolved.provider.baseUrl,
-        apiKey: resolved.provider.apiKey,
-        model: resolved.model,
-        messages: toSummarize,
-        ...(agentReq?.tools.length ? { tools: agentReq.tools } : {}),
+      // 摘要生成走对话核心能力（旧摘要随新内容一并重新总结，不照抄）；注解写回与锚点复核留在本 store
+      const result = await runtime.compact({
+        target: { provider: resolved.provider, model: resolved.model },
+        messages: session.messages,
+        ...(session.compaction ? { compaction: session.compaction } : {}),
+        upToMessageId: bound.upToMessageId,
+        ...(session.agentId !== undefined ? { agentId: session.agentId } : {}),
         signal: controller.signal,
       });
       if (!result.ok) {
         // aborted = 用户主动停止，静默收尾；其余给出可重试提示
-        if (result.reason !== "aborted") {
-          set({
-            error:
-              result.reason === "truncated"
-                ? "压缩失败：摘要超出输出上限被截断，请重试"
-                : result.reason === "empty"
-                  ? "压缩失败：模型未返回摘要内容，请重试"
-                  : `压缩失败：${result.error?.message ?? "请求出错"}`,
-          });
-        }
+        if (!result.aborted) set({ error: result.message });
         return;
       }
       // 会话可能已被删除：写回前复核；锚点消息若已被回滚截断则丢弃本次结果
@@ -1201,8 +991,8 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
                   upToMessageId: bound.upToMessageId,
                   messageCount: bound.messageCount,
                   createdAt: Date.now(),
-                  providerId: resolved.provider.id,
-                  model: resolved.model,
+                  providerId: result.providerId,
+                  model: result.model,
                 },
               }
             : x,
@@ -1220,11 +1010,16 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
     const s = get();
     const id = s.activeSessionId;
     if (!id || s.streaming || !s.sessions.some((x) => x.id === id)) return;
+    const runtime = getChatRuntime();
+    if (!runtime) {
+      set({ error: CHAT_UNAVAILABLE_TEXT });
+      return;
+    }
     // 手动接管：中止本会话在途的自动命名请求（防同一会话重复请求；延迟中未发出的由 isNamed 二次校验兜底跳过）
     abortAutoTitle(id);
     // 重新命名：全量会话记录（不截断）、立即请求（无 3s 防限流延迟——用户主动点击期待即时反馈）、
     // 不受「话题自动命名」开关限制；成功后登记防自动命名重复覆盖
-    const result = await runAutoNaming(
+    const result = await runtime.autoName(
       {
         getMessages: () => {
           const cur = useChatPanelStore.getState().sessions.find((x) => x.id === id);
@@ -1233,6 +1028,7 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
         isNamed: () => false,
         applyTitle: (title) => applySessionTitle(id, title),
       },
+      id,
       { delayMs: 0, maxChars: Infinity, ignoreToggle: true },
     );
     // 反馈：真失败（请求出错）可重试；未配置模型提示配置；跳过（无消息/被中止）静默

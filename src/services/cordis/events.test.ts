@@ -46,10 +46,10 @@ describe("领域事件开放", () => {
     expect(result.ok).toBe(true);
 
     emitPluginEvent("note:changed", { file: "笔记.md" });
-    emitPluginEvent("chat:message", { sessionId: "s1", role: "assistant", content: "hi" });
+    emitPluginEvent("chat:message", { targetId: "t1", role: "assistant", content: "hi" });
     expect(received).toHaveLength(2);
     expect(received[0]).toMatchObject({ event: "note:changed", payload: { file: "笔记.md" } });
-    expect(received[1]).toMatchObject({ event: "chat:message", payload: { sessionId: "s1", role: "assistant", content: "hi" } });
+    expect(received[1]).toMatchObject({ event: "chat:message", payload: { targetId: "t1", role: "assistant", content: "hi" } });
 
     // 卸载：subscriptions 随 fiber dispose 撤销。
     await unmountAll(k);

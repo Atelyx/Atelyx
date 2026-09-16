@@ -20,9 +20,10 @@ import { summarizeAgentTool, summarizePartialAgentTool } from "@/services/ai/too
 import { PENDING_RUN_ID_PREFIX } from "@/constants/chat";
 import { useSettingsStore } from "./settingsStore";
 import type {
+  ChatAutoNameResult,
+  ChatNamingTarget,
   ProviderConfig,
   ReasoningEffort,
-  Role,
   ToolSchema,
   ToolExecResult,
   LlmMessage,
@@ -452,22 +453,15 @@ export function decideCleanup(
 }
 
 /**
- * 话题命名目标（画布对话节点 / AI 对话面板会话的差异由回调注入，命名管线共用一份）。
- * 回调在延迟后与写回前被重取——命名期间的新消息纳入摘要、已命名/已删除则不写。
+ * 话题命名目标（画布对话节点 / AI 对话面板会话的差异由回调注入，命名管线共用一份）——
+ * 契约见 types/chatRuntime.ts 的 `ChatNamingTarget`：回调在延迟后与写回前被重取，
+ * 命名期间的新消息纳入摘要、已命名/已删除则不写。
  */
-interface AutoNameTarget {
-  /** 重取当前消息列表（延迟后调用；目标已消失返回空数组）。 */
-  getMessages: () => Array<{ role: Role; displayContent?: string; content: string }>;
-  /** 是否已被命名（画布 = 节点 title 非空；面板 = 已登记成功命名）。 */
-  isNamed: () => boolean;
-  /** 写回标题（画布 = updateNodeData；面板 = 更新会话 + 登记 + 落盘）。 */
-  applyTitle: (title: string) => void;
-}
 
-type AutoNamingResult = "ok" | "skipped" | "failed";
+type AutoNamingResult = ChatAutoNameResult;
 
 /**
- * 公共话题命名管线（画布/面板共用，两 store 的 autoNameConversation/autoNameSession 均收敛于此）：
+ * 公共话题命名管线（画布/面板共用，命名经对话核心能力的 autoName 触达）：
  * 解析命名模型（设置指定 → 仓库默认；关闭/未配置返回 skipped）→ 可选延迟（缺省 3s 防限流；
  * 重新命名传 0 立即发出）→ 消息检查（user + assistant 各一）→ LLM 生成（超时 60s /
  * 可选全量历史）→ 二次校验未命名再写回。
@@ -476,7 +470,7 @@ type AutoNamingResult = "ok" | "skipped" | "failed";
  * `ignoreToggle` = 重新命名：不受「话题自动命名」开关限制（用户显式请求）。
  */
 export async function runAutoNaming(
-  target: AutoNameTarget,
+  target: ChatNamingTarget,
   opts?: { delayMs?: number; maxChars?: number; ignoreToggle?: boolean; key?: string },
 ): Promise<AutoNamingResult> {
   const named = useSettingsStore.getState().resolveAutoNamingModel(opts?.ignoreToggle);

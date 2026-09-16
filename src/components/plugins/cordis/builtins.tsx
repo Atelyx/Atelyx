@@ -7,7 +7,8 @@
  * - 视图贡献 → view/<kind> 槽（single；重型视图 render(hostId) 承载宿主面板 id）；
  * - 领域生命周期钩子（flush/切仓库/释放视图）经 kernelLifecycle 注册，随 fiber 撤销；
  * - 能力提供者 / 协作域接线 / 仓库事件订阅经 ctx.effect 注册（apply 中途抛错/卸载均自动撤销）；
- * - builtin.canvas/table/note/chat 额外提供 ctx.canvas/ctx.table/ctx.note/ctx.chat 类型化服务（停用即消失）。
+ * - builtin.canvas/table/note/chatcore 额外提供 ctx.canvas/ctx.table/ctx.note/ctx.chat 类型化服务（停用即消失）；
+ *   其中 chatcore 是能力行（无视图）：提供 AI 对话运行时，面板行与画布对话节点经注册表消费它。
  *
  * 数组顺序 = 领域生命周期钩子的 flush 注册序（对齐既有注册序）；也是默认组合的装配顺序。
  * 本模块被 pluginStore 静态 import，环内所有跨模块访问均为函数体内延迟求值（无顶层
@@ -63,7 +64,9 @@ import { createCanvasService } from "@/services/cordis/canvas";
 import { createTableService } from "@/services/cordis/table";
 import { createNoteService } from "@/services/cordis/note";
 import { createChatService } from "@/services/cordis/chat";
-import { setPluginNoteAccess, setPluginChatAccess } from "@/services/cordis/access";
+import { createChatRuntime } from "@/stores/chatTurn";
+import { setPluginNoteAccess } from "@/services/cordis/access";
+import { registerChatRuntime } from "@/utils/chatRuntimeHost";
 import { VIEW_LABELS } from "@/constants/views";
 import { CanvasEmptyState, NoteEmptyState, TableEmptyState } from "@/components/plugins/cordis/emptyStates";
 
@@ -210,23 +213,13 @@ function wireNoteSurface(): () => void {
   };
 }
 
-/** AI 会话能力接线（builtin.aichat 的 capability）：把会话历史 + 发起/停止注入 ctx.chat 数据源；
- *  返回 unregister（停用/卸载复位访问）。 */
-function wireChatAccess(): () => void {
-  setPluginChatAccess({
-    sessions: () => useChatPanelStore.getState().sessions,
-    activeSession: () => {
-      const s = useChatPanelStore.getState();
-      return s.sessions.find((x) => x.id === s.activeSessionId) ?? null;
-    },
-    isStreaming: () => useChatPanelStore.getState().streaming,
-    openSession: (id) => useChatPanelStore.getState().openSession(id),
-    startSession: () => useChatPanelStore.getState().newSession(),
-    sendMessage: (content) => useChatPanelStore.getState().send(content),
-    stop: () => useChatPanelStore.getState().stop(),
-    deleteSession: (id) => useChatPanelStore.getState().deleteSession(id),
-  });
-  return () => setPluginChatAccess(null);
+/**
+ * AI 对话核心接线（builtin.chatcore 的 capability）：把对话运行时（一轮对话编排 + 压缩 + 命名）
+ * 注册进注册表——面板会话与画布对话节点经 `utils/chatRuntimeHost` 取用，插件经 ctx.chat 取用。
+ * 返回 unregister（停用/卸载复位注册表，消费方随之降级为「能力未启用」）。
+ */
+function wireChatRuntime(): () => void {
+  return registerChatRuntime(createChatRuntime());
 }
 
 interface BuiltinDefOptions {
@@ -294,13 +287,22 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
     },
   }),
   def({
-    id: "builtin.aichat",
-    name: "AI 对话",
+    id: "builtin.chatcore",
+    name: "AI 对话核心",
+    type: "background",
+    tagline: "为面板、对话节点与插件提供 AI 对话能力",
+    views: [], // 能力行 = 纯声明式（无视图载荷）：注册对话运行时并提供 ctx.chat，停用即不可用
+    capability: wireChatRuntime,
+    provideService: (ctx) => provideRootService(ctx, "chat", () => createChatService()),
+  }),
+  def({
+    id: "builtin.chatpanel",
+    name: "AI 对话面板",
     type: "panel",
     tagline: "AI 对话会话面板",
     views: [{ kind: "aichat", label: VIEW_LABELS.aichat, component: AiChatView }],
     lifecycle: {
-      id: "builtin.aichat",
+      id: "builtin.chatpanel",
       flush: async (ctx) => {
         await useChatPanelStore.getState().flush(ctx.vaultId);
       },
@@ -322,7 +324,6 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
         await useChatPanelStore.getState().flush(useAppStore.getState().vaultId);
       },
     },
-    capability: wireChatAccess,
     vaultEventHandlers: [
       vaultHandler("chat:changed", (e) => {
         // AI 对话历史（.atelyx/对话历史/*.jsonl|*.meta.json）：外部变更内容比对合并，
@@ -330,7 +331,6 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
         useChatPanelStore.getState().applyExternalChatChange(e.path);
       }),
     ],
-    provideService: (ctx) => provideRootService(ctx, "chat", () => createChatService()),
   }),
   def({
     id: "builtin.canvas",

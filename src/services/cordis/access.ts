@@ -12,7 +12,6 @@ import type {
   CellValue,
   CollabMyPeer,
   CollabPeer,
-  EditorChatSession,
   LayoutOp,
   LayoutOpResult,
   PluginCanvasSnapshot,
@@ -230,30 +229,6 @@ export function setPluginNoteAccess(access: PluginNoteAccess | null): void {
 /** 读取笔记能力访问（ctx.note 服务消费；未接线 = null）。 */
 export function getPluginNoteAccess(): PluginNoteAccess | null {
   return noteAccess;
-}
-
-/** AI 会话能力访问（ctx.chat 的 store 数据源；pluginStore 接线注入）。 */
-export interface PluginChatAccess {
-  sessions(): EditorChatSession[];
-  activeSession(): EditorChatSession | null;
-  isStreaming(): boolean;
-  openSession(id: string): void;
-  startSession(): void;
-  sendMessage(content: string): Promise<void>;
-  stop(): void;
-  deleteSession(id: string): void;
-}
-
-let chatAccess: PluginChatAccess | null = null;
-
-/** 注入/复位 AI 会话能力访问（pluginStore 接线；null 复位供测试）。 */
-export function setPluginChatAccess(access: PluginChatAccess | null): void {
-  chatAccess = access;
-}
-
-/** 读取 AI 会话能力访问（ctx.chat 服务消费；未接线 = null）。 */
-export function getPluginChatAccess(): PluginChatAccess | null {
-  return chatAccess;
 }
 
 /** 领域历史能力访问（ctx.history 的 store/service 数据源；pluginStore 接线注入）。

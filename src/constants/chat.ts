@@ -17,3 +17,6 @@ export const TRUNCATED_TEXT = "回复被截断（达到输出上限，已保留�
  * 已结算的终态合成行（如「已中断」）作为历史记录保留。
  */
 export const PENDING_RUN_ID_PREFIX = "pending:";
+
+/** 对话能力不可用时的提示（对话核心插件停用时，面板占位与发送守卫共用同一文案）。 */
+export const CHAT_UNAVAILABLE_TEXT = "AI 对话能力未启用：请到 设置 → 插件 启用「AI 对话核心」";

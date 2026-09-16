@@ -89,7 +89,7 @@ export function ProjectWorkspacePage() {
   }, [vaultTableList, currentTableFile]);
 
   // AI 对话面板会话与表格改动落盘：进仓库读盘 + 离开（回仓库选择页/切仓库）时 flush 防 debounce 丢改动，
-  // 均已归入领域生命周期注册表分发（builtin.aichat 的 onVaultEntered/onVaultExit、builtin.table 的 onVaultExit）
+  // 均已归入领域生命周期注册表分发（builtin.chatpanel 的 onVaultEntered/onVaultExit、builtin.table 的 onVaultExit）
 
   // 历史记录作者登记（应用级全局，三 kind——画布/笔记/表格——共用同一身份）：
   // 身份随协作昵称/设备名变化刷新；未打开笔记时画布/表格历史也能正确署名

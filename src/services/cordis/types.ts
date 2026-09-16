@@ -12,9 +12,16 @@
 import type {
   AppUiState,
   CellValue,
+  ChatAutoNameOptions,
+  ChatAutoNameResult,
+  ChatCompactRequest,
+  ChatCompactResult,
+  ChatNamingTarget,
+  ChatTargetResult,
+  ChatTargetSelection,
+  ChatTurnRequest,
   CollabMyPeer,
   CollabPeer,
-  EditorChatSession,
   FileTreeNode,
   GlobVaultResult,
   GrepVaultResult,
@@ -313,24 +320,22 @@ export interface NoteService {
   save(): Promise<void>;
 }
 
-/** AI 会话服务（由随应用分发的 AI 对话插件提供，停用即不可用；会话历史 + 发起/停止会话）。 */
+/** AI 对话能力（由随应用分发的对话核心插件提供，停用即不可用）：用宿主配置的模型/Agent/工具跑一轮对话。
+ *  核心只跑一轮——消息容器与落盘留在调用方（插件自带容器），流式与收尾经 `ChatTurnSink` 交回。
+ *  类型面与宿主内部消费方同一份契约（见 types/chatRuntime.ts 的 `ChatRuntime`）。 */
 export interface ChatService {
-  /** 会话列表（按最近打开倒序）。 */
-  sessions(): EditorChatSession[];
-  /** 当前激活会话（无 = null）。 */
-  activeSession(): EditorChatSession | null;
-  /** 是否正在流式生成。 */
-  isStreaming(): boolean;
-  /** 激活指定会话。 */
-  openSession(id: string): void;
-  /** 切到新对话态（真正会话在首条消息发送时创建）。 */
-  startSession(): void;
-  /** 发送用户消息（会话流式生成；失败 throw）。 */
-  sendMessage(content: string): Promise<void>;
-  /** 中止当前流式生成。 */
-  stop(): void;
-  /** 删除会话（含侧文件；异步落盘，失败仅日志）。 */
-  deleteSession(id: string): void;
+  /** 解析对话目标（未指定 = 跟随仓库默认；失败给可展示文案）。 */
+  resolveTarget(selection?: ChatTargetSelection | null): ChatTargetResult;
+  /** 跑一轮对话（流式 + 工具循环 + 收尾 + 命名），产出经 `req.sink` 交回。 */
+  runTurn(req: ChatTurnRequest): Promise<void>;
+  /** 生成压缩摘要（只出文本，写回容器由调用方负责）。 */
+  compact(req: ChatCompactRequest): Promise<ChatCompactResult>;
+  /** 话题命名（轮末自动命名与手动重新命名共用）。 */
+  autoName(
+    naming: ChatNamingTarget,
+    targetId: string,
+    opts?: ChatAutoNameOptions,
+  ): Promise<ChatAutoNameResult>;
 }
 
 /** 领域历史服务（笔记/画布/表格的版本历史读 + 回滚）。 */
@@ -442,12 +447,12 @@ declare module "@atelyx/cordis" {
     "note:opened": (payload: { file: string | null }) => void;
     /** 当前笔记内容变更（保存落盘后发出；按需再调 note 服务读内容）。@emit */
     "note:changed": (payload: { file: string | null }) => void;
-    /** AI 会话开始（发起请求）。@emit */
-    "chat:started": (payload: { sessionId: string }) => void;
-    /** AI 会话消息（角色 + 内容；assistant 消息在流式完成后发出，非逐 token）。@emit */
-    "chat:message": (payload: { sessionId: string; role: "user" | "assistant"; content: string }) => void;
-    /** AI 会话结束（正常 / 中止 / 出错统一收敛）。@emit */
-    "chat:finished": (payload: { sessionId: string }) => void;
+    /** AI 对话轮次开始（发起请求）。@emit */
+    "chat:started": (payload: { targetId: string }) => void;
+    /** AI 对话消息（角色 + 内容；assistant 消息在流式完成后发出，非逐 token）。@emit */
+    "chat:message": (payload: { targetId: string; role: "user" | "assistant"; content: string }) => void;
+    /** AI 对话轮次结束（正常 / 中止 / 出错统一收敛）。@emit */
+    "chat:finished": (payload: { targetId: string }) => void;
   }
 }
 
