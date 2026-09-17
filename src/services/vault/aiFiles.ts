@@ -1,20 +1,20 @@
 /**
  * AI 文件工具的仓库能力（read_file / append_file / edit_file / write_file 的落地）。
  *
- * - `readVaultFile`/`writeVaultFile`：读/写仓库内**任意文本文件**（安全边界 = 仓库根，
- *   Rust `safe_join` 校验 + 原子写 + 自动建父目录）。
+ * - `readVaultFile`/`writeVaultFile`：读/写仓库内**任意文本文件**（个人仓库安全边界 = 仓库根，
+ *   Rust `safe_join` 校验 + 原子写 + 自动建父目录）；I/O 经内容面按激活仓库取后端。
  * - `appendVaultFile`：追加内容到已存在文本文件（读全文 → 拼接 → 原子写；不存在/超限拒绝）。
  * - `editVaultFile`：行级修改（oldText 唯一精确匹配、块间不重叠，全部校验通过后统一替换），
  *   按路径定位（通用，不只 .md），复用笔记行级替换的校验语义。
  */
-import { invoke } from "@tauri-apps/api/core";
 import { READ_WINDOW_DEFAULT_LINES } from "@/constants/tools";
 import { errText } from "@/types";
 import type { GlobVaultResult, GrepVaultResult, ListDirResult, ReadWindowResult } from "@/types";
+import { getActiveContentBackend } from "@/services/content/factory";
 
 /** 读仓库内任意文本文件（相对仓库根路径；超出仓库根/不存在抛错，由调用方降级）。 */
 export async function readVaultFile(file: string): Promise<string> {
-  return invoke<string>("read_vault_file", { file });
+  return getActiveContentBackend().readFile(file);
 }
 
 /** 分页读仓库内任意文本文件：返回带绝对行号的窗口（offset 1-based 默认 1；limit 默认 2000 行）。
@@ -23,8 +23,7 @@ export async function readVaultFileWindow(
   file: string,
   opts?: { offset?: number; limit?: number },
 ): Promise<ReadWindowResult> {
-  return invoke<ReadWindowResult>("read_vault_file_window", {
-    file,
+  return getActiveContentBackend().readFileWindow(file, {
     offset: opts?.offset ?? 1,
     limit: opts?.limit ?? READ_WINDOW_DEFAULT_LINES,
   });
@@ -36,15 +35,15 @@ export async function readVaultFileWindow(
  * 不按「应用自写」放行（放行会让本地未落盘输入静默盖掉刚写进去的正文）。
  */
 export async function writeVaultFile(file: string, content: string): Promise<void> {
-  await invoke("write_vault_file", { file, content });
+  await getActiveContentBackend().writeFile(file, content);
 }
 
 /**
- * 删除仓库内任意文件（通用单文件删除命令封装；历史侧文件存量迁移清理用）。
- * 文件不存在时命令层报错，由调用方降级。
+ * 删除仓库内任意文件（通用单文件删除封装；历史侧文件存量迁移清理用）。
+ * 文件不存在时后端报错，由调用方降级。
  */
 export async function deleteVaultFile(file: string): Promise<void> {
-  await invoke("delete_note", { file });
+  await getActiveContentBackend().deleteNote(file);
 }
 
 interface FileEditEntry {
@@ -57,7 +56,7 @@ export async function globVault(
   pattern: string,
   opts?: { path?: string },
 ): Promise<GlobVaultResult> {
-  return invoke<GlobVaultResult>("glob_vault", { pattern, path: opts?.path });
+  return getActiveContentBackend().glob(pattern, opts);
 }
 
 /** grep 检索（AI grep 工具后端）：正则搜仓库文件内容，返回匹配行（上限内联 + total）。 */
@@ -65,16 +64,12 @@ export async function grepVault(
   pattern: string,
   opts?: { path?: string; include?: string },
 ): Promise<GrepVaultResult> {
-  return invoke<GrepVaultResult>("grep_vault", {
-    pattern,
-    path: opts?.path,
-    include: opts?.include,
-  });
+  return getActiveContentBackend().grep(pattern, opts);
 }
 
 /** 单层列出目录条目（AI list_dir 工具后端）：目录在前、不含 `.` 开头隐藏项，子目录带子项数。dir 缺省 = 仓库根。 */
 export async function listVaultDir(dir?: string): Promise<ListDirResult> {
-  return invoke<ListDirResult>("list_vault_dir", { dir: dir ?? "" });
+  return getActiveContentBackend().listDir(dir);
 }
 
 /**

@@ -1,34 +1,33 @@
 /**
  * 多维表格（.atb）文件读写 service。
  *
- * 命令对应 `src-tauri/src/commands/table.rs`，类型对齐 `types/table.ts`。
- * 重命名/移动由 Rust 扫描所有 .atlx 同步 table 节点 file 引用（链接维护）。
+ * 内容 I/O 经内容面按激活仓库取后端（services/content）；类型对齐 `types/table.ts`。
+ * 重命名/移动由后端扫描所有 .atlx 同步 table 节点 file 引用（链接维护）。
  */
 import { invoke } from "@tauri-apps/api/core";
-import { computeTablePatch, normalizeTableRow } from "@/utils/table";
+import { computeTablePatch } from "@/utils/table";
+import { getActiveContentBackend } from "@/services/content/factory";
 import type { TableCreateResult, TableField, TableFile, TableRow } from "@/types";
 
 /** 新建空表格（自带一个「名称」文本字段），返回 { id, file }（dir 空 = 根目录）。 */
 export async function createTableVault(title: string, dir: string): Promise<TableCreateResult> {
-  return invoke<TableCreateResult>("create_table_vault", { title, dir });
+  return getActiveContentBackend().createTable(title, dir);
 }
 
-/** 读 .atb 文件（按相对仓库根路径）。磁盘→前端的唯一咽喉：图片单元格旧形态 string[]
- * 在此归一化为 ImageCellValue（内存/历史比对恒为新形态；旧文件未编辑行磁盘保持旧形态）。 */
+/** 读 .atb 文件（按相对仓库根路径）。行归一化（图片单元格旧形态 → 内存形态）在后端读路径完成。 */
 export async function readTableVault(file: string): Promise<TableFile> {
-  const t = await invoke<TableFile>("read_table_vault", { file });
-  return { ...t, rows: t.rows.map(normalizeTableRow) };
+  return getActiveContentBackend().readTable(file);
 }
 
 /** 写 .atb 文件（原子写；title 变更自动改文件名并同步画布引用）。
- * `baseUpdatedAt`：乐观并发基准（加载时的磁盘 updatedAt），磁盘版本更新则 Rust 拒绝。
+ * `baseUpdatedAt`：乐观并发基准（加载时的磁盘 updatedAt），磁盘版本更新则后端拒绝。
  * 返回写入后的 updatedAt（秒），前端保存成功后用它同步乐观锁基准。 */
 export async function writeTableVault(
   table: TableFile,
   file: string,
   baseUpdatedAt?: number,
 ): Promise<number> {
-  return invoke<number>("write_table_vault", { table, file, baseUpdatedAt });
+  return getActiveContentBackend().writeTable(table, file, baseUpdatedAt);
 }
 
 /** 增量保存基线快照（与当前运行时状态按引用 diff：未变实体引用相同，O(N) 指针比对无深比较）。 */
@@ -58,27 +57,22 @@ export async function patchTableVault(opts: {
   // diff 计算与协作实时广播共用同一纯函数（顺序变化也在此捕获，见 utils/table.ts）
   const patch = computeTablePatch({ tableId, fields, rows, lastSaved });
   if (!patch) return null;
-  return invoke<{ updatedAt: number; file: string }>("patch_table_vault", {
-    patch,
-    file,
-    baseUpdatedAt,
-    force,
-  });
+  return getActiveContentBackend().patchTable(patch, file, baseUpdatedAt, force);
 }
 
 /** 重命名表格（更新 .atb 内 title + 同目录改文件名 + 同步画布 table 节点引用）。 */
 export async function renameTableVault(file: string, newTitle: string): Promise<void> {
-  await invoke("rename_table_vault", { file, newTitle });
+  await getActiveContentBackend().renameTable(file, newTitle);
 }
 
 /** 移动表格文件到新路径（跨目录 + 同步画布 table 节点引用）。 */
 export async function moveTableVault(oldFile: string, newFile: string): Promise<void> {
-  await invoke("move_table_vault", { oldFile, newFile });
+  await getActiveContentBackend().moveTable(oldFile, newFile);
 }
 
 /** 删除表格文件（不更新 .atlx 引用，画布 table 节点断链降级）。 */
 export async function deleteTableVault(file: string): Promise<void> {
-  await invoke("delete_table_vault", { file });
+  await getActiveContentBackend().deleteTable(file);
 }
 
 /**
@@ -90,7 +84,7 @@ export async function importTableImage(
   src: string,
   tableId: string,
 ): Promise<string> {
-  return invoke<string>("import_table_image_vault", { src, tableId });
+  return getActiveContentBackend().importTableImage(src, tableId);
 }
 
 /**
@@ -99,7 +93,7 @@ export async function importTableImage(
  * 切表/关闭时该表撤销栈与显示缓存已清，无跨会话恢复路径。返回删除文件数。
  */
 export async function cleanupTableAttachments(file: string): Promise<number> {
-  return invoke<number>("cleanup_table_attachments_vault", { file });
+  return getActiveContentBackend().cleanupTableAttachments(file);
 }
 
 /** 保存 dataURL 图片到系统 Downloads 文件夹（放大预览右键「下载」用；重名自动加序号）。 */

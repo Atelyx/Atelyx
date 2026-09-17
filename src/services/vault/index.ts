@@ -1,7 +1,8 @@
 /**
- * 仓库文件读写 service。
+ * 仓库文件 service：仓库内容 I/O 的 store/视图侧入口 + 运行时 ↔ 磁盘格式转换。
  *
- * 文件化仓库的唯一前端 I/O 出口。
+ * 内容 I/O（树/读/写/补丁/结构变更/历史/附件/索引）经内容面按激活仓库取后端（services/content），
+ * 本文件保留消费方函数签名并承担画布等格式的运行时转换；`.atelyx` 元数据与仓库开关仍直连命令。
  * 命令对应 `src-tauri/src/commands/vault.rs`，类型对齐 `types/canvas.ts`。
  *
  * text 节点 bodyMd 的剥离/填充在此层组合。
@@ -9,6 +10,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { Edge, Node } from "@xyflow/react";
 import { CANVAS_SCHEMA } from "@/constants/canvas";
+import { getActiveContentBackend } from "@/services/content/factory";
 import {
   baseName,
   dedupeFilename,
@@ -66,24 +68,24 @@ export async function openVault(path: string): Promise<VaultInfo> {
 
 /** 枚举当前仓库的画布列表（按 updatedAt 倒序）。 */
 export async function listCanvasesVault(): Promise<CanvasFileRow[]> {
-  return invoke<CanvasFileRow[]>("list_canvases_vault");
+  return getActiveContentBackend().listCanvases();
 }
 
 /** 读 .atlx 文件（按相对仓库根路径，如 `项目A/方案.atlx`）。 */
 export async function readCanvasVault(file: string): Promise<CanvasFile> {
-  return invoke<CanvasFile>("read_canvas_vault", { file });
+  return getActiveContentBackend().readCanvas(file);
 }
 
 /** 写 .atlx 文件（整体原子写；title 改了会自动重命名文件到同目录新名）。
  * `file`：画布相对仓库根路径（前端持有，画布任意文件夹存放）。
- * `baseUpdatedAt`：乐观并发基准（加载时的磁盘 updatedAt），磁盘版本更新则 Rust 拒绝。
+ * `baseUpdatedAt`：乐观并发基准（加载时的磁盘 updatedAt），磁盘版本更新则后端拒绝。
  * 返回写入后的 updatedAt（秒），前端保存成功后用它同步乐观锁基准。 */
 export async function writeCanvasVault(
   canvas: CanvasFile,
   file: string,
   baseUpdatedAt?: number,
 ): Promise<number> {
-  return invoke<number>("write_canvas_vault", { canvas, file, baseUpdatedAt });
+  return getActiveContentBackend().writeCanvas(canvas, file, baseUpdatedAt);
 }
 
 /** 重命名画布（更新 .atlx 内 title + 同目录重命名文件，按当前文件路径）。 */
@@ -91,7 +93,7 @@ export async function renameCanvasVault(
   file: string,
   newTitle: string,
 ): Promise<void> {
-  await invoke("rename_canvas_vault", { file, newTitle });
+  await getActiveContentBackend().renameCanvas(file, newTitle);
 }
 
 /** 移动画布文件到新路径（跨目录；画布无外部引用，不更新任何 .atlx）。 */
@@ -99,40 +101,40 @@ export async function moveCanvasVault(
   oldFile: string,
   newFile: string,
 ): Promise<void> {
-  await invoke("move_canvas_vault", { oldFile, newFile });
+  await getActiveContentBackend().moveCanvas(oldFile, newFile);
 }
 
 /** 删除画布 .atlx 文件（不删 笔记/附件，文件可跨画布共享）。 */
 export async function deleteCanvasVault(file: string): Promise<void> {
-  await invoke("delete_canvas_vault", { file });
+  await getActiveContentBackend().deleteCanvas(file);
 }
 
 /** 读 .md 笔记（按相对仓库根路径，如 `笔记/xxx.md`）。 */
 export async function readNote(file: string): Promise<string> {
-  return invoke<string>("read_note", { file });
+  return getActiveContentBackend().readNote(file);
 }
 
-/** 查询反链（`[[笔记名]]` 或 `[label](基于仓库的路径)` 两种写法；Rust 侧索引缓存 + 指纹增量刷新）。 */
+/** 查询反链（`[[笔记名]]` 或 `[label](基于仓库的路径)` 两种写法；本地仓库由 Rust 侧索引缓存 + 指纹增量刷新）。 */
 export async function scanWikiBacklinks(
   noteName: string,
   noteFile: string,
 ): Promise<BacklinkRow[]> {
-  return invoke<BacklinkRow[]>("scan_wiki_backlinks", { noteName, noteFile });
+  return getActiveContentBackend().scanBacklinks(noteName, noteFile);
 }
 
-/** 全仓库标签词汇表（frontmatter `tags` + 正文内联 `#标签`；Rust 侧索引缓存 + 指纹增量刷新）。 */
+/** 全仓库标签词汇表（frontmatter `tags` + 正文内联 `#标签`；本地仓库由 Rust 侧索引缓存 + 指纹增量刷新）。 */
 export async function scanVaultTags(): Promise<TagRow[]> {
-  return invoke<TagRow[]>("scan_vault_tags");
+  return getActiveContentBackend().scanTags();
 }
 
-/** 一键重建内部链接：全仓库 .md 统一规范为 `[名](基于仓库的路径)`（Rust 侧字节级跨度改写 + 原子写）。 */
+/** 一键重建内部链接：全仓库 .md 统一规范为 `[名](基于仓库的路径)`（字节级跨度改写 + 原子写）。 */
 export async function rebuildInternalLinks(): Promise<RebuildLinksResult> {
-  return invoke<RebuildLinksResult>("rebuild_internal_links");
+  return getActiveContentBackend().rebuildLinks();
 }
 
 /** 写 .md 笔记（原子写，自动建父目录）。 */
 export async function writeNote(file: string, content: string): Promise<void> {
-  await invoke("write_note", { file, content });
+  await getActiveContentBackend().writeNote(file, content);
 }
 
 /**
@@ -146,16 +148,16 @@ export async function renameNote(
   oldFile: string,
   newFile: string,
 ): Promise<LinkRewriteResult> {
-  return invoke<LinkRewriteResult>("rename_note", { oldFile, newFile });
+  return getActiveContentBackend().renameNote(oldFile, newFile);
 }
 /** 删除 .md 笔记（不更新 .atlx 引用）。 */
 export async function deleteNote(file: string): Promise<void> {
-  await invoke("delete_note", { file });
+  await getActiveContentBackend().deleteNote(file);
 }
 
 /** 删除附件（不更新 .atlx 引用）。 */
 export async function deleteAttachment(file: string): Promise<void> {
-  await invoke("delete_attachment", { file });
+  await getActiveContentBackend().deleteAttachment(file);
 }
 
 /**
@@ -167,7 +169,7 @@ export async function copyVaultFile(
   oldFile: string,
   newFile: string,
 ): Promise<void> {
-  await invoke("copy_vault_file", { oldFile, newFile });
+  await getActiveContentBackend().copyFile(oldFile, newFile);
 }
 
 /** 复制文件夹为同父目录副本（递归复制全部内容；新路径须由调用方 dedupe 防重名）。 */
@@ -175,7 +177,7 @@ export async function copyVaultFolder(
   oldDir: string,
   newDir: string,
 ): Promise<void> {
-  await invoke("copy_vault_folder", { oldDir, newDir });
+  await getActiveContentBackend().copyFolder(oldDir, newDir);
 }
 
 /**
@@ -187,12 +189,12 @@ export async function renameAttachment(
   oldFile: string,
   newFile: string,
 ): Promise<void> {
-  await invoke("rename_attachment", { oldFile, newFile });
+  await getActiveContentBackend().renameAttachment(oldFile, newFile);
 }
 
 /** 读附件为 dataURL（`data:<mime>;base64,...`），仅图片扩展名支持；其他抛错由调用方走文本分支。 */
 export async function readAttachmentDataUrl(file: string): Promise<string> {
-  return invoke<string>("read_attachment_data_url", { file });
+  return getActiveContentBackend().readAttachmentDataUrl(file);
 }
 
 /**
@@ -317,17 +319,17 @@ export async function createCanvasVault(
   title: string,
   dir: string,
 ): Promise<CanvasCreateResult> {
-  return invoke<CanvasCreateResult>("create_canvas_vault", { title, dir });
+  return getActiveContentBackend().createCanvas(title, dir);
 }
 
 /** 枚举仓库文件树（文件面板全仓库树；跳过隐藏/排除目录与 `.tmp`）。 */
 export async function listVaultTree(): Promise<FileTreeNode[]> {
-  return invoke<FileTreeNode[]>("list_vault_tree");
+  return getActiveContentBackend().listTree();
 }
 
 /** 新建文件夹（相对仓库根路径，如 `项目A/素材`），自动建父目录；返回相对路径。 */
 export async function createFolder(dir: string): Promise<string> {
-  return invoke<string>("create_folder", { dir });
+  return getActiveContentBackend().createFolder(dir);
 }
 
 /** 删除文件夹（相对仓库根路径）。force=false 空目录直接删，非空返回 needsConfirm 供弹窗；确认后 force=true 递归删。 */
@@ -335,7 +337,7 @@ export async function deleteFolder(
   dir: string,
   force: boolean,
 ): Promise<DeleteFolderResult> {
-  return invoke<DeleteFolderResult>("delete_folder", { dir, force });
+  return getActiveContentBackend().deleteFolder(dir, force);
 }
 
 /**
@@ -346,7 +348,7 @@ export async function renameFolder(
   oldDir: string,
   newDir: string,
 ): Promise<LinkRewriteResult> {
-  return invoke<LinkRewriteResult>("rename_folder", { oldDir, newDir });
+  return getActiveContentBackend().renameFolder(oldDir, newDir);
 }
 
 /**
@@ -357,14 +359,14 @@ export async function renameFolder(
  * 源不存在（无历史）静默跳过、目标已存在跳过，不阻塞重命名主流程。
  */
 export async function remapSideloads(oldFile: string, newFile: string): Promise<void> {
-  await invoke("remap_sideloads", { oldFile, newFile });
+  await getActiveContentBackend().remapSideloads(oldFile, newFile);
 }
 
 /**
  * 迁移某文件夹下全部历史侧文件到新目录前缀（文件夹重命名后调用，语义同 remapSideloads）。
  */
 export async function remapSideloadsByDir(oldDir: string, newDir: string): Promise<void> {
-  await invoke("remap_sideloads_by_dir", { oldDir, newDir });
+  await getActiveContentBackend().remapSideloadsByDir(oldDir, newDir);
 }
 
 // ===== 运行时 ↔ 磁盘格式转换 =====
@@ -644,11 +646,7 @@ export async function patchCanvasVault(opts: {
     // title 只随真实变化携带（Rust 据此改文件名；避免每次保存触发路径校验与重命名扫描）
     ...(title !== lastSaved.title ? { title } : {}),
   };
-  return invoke<{ updatedAt: number; file: string }>("patch_canvas_vault", {
-    patch,
-    file,
-    baseUpdatedAt,
-  });
+  return getActiveContentBackend().patchCanvas(patch, file, baseUpdatedAt);
 }
 
 /** 加载画布（运行时格式，供 canvasStore.load 消费）。file = 相对仓库根路径。 */
@@ -681,9 +679,9 @@ export async function persistCanvasVault(
 
 // ===== 外部白板格式（.canvas，只读查看 + 转换为画布）=====
 
-/** 读 .canvas 文件原文（按相对仓库根路径；无写命令——白板格式保持只读）。 */
+/** 读 .canvas 文件原文（按相对仓库根路径；无写方法——白板格式保持只读）。 */
 export async function readWhiteboardVault(file: string): Promise<string> {
-  return invoke<string>("read_note", { file });
+  return readNote(file);
 }
 
 /**

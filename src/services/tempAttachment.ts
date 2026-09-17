@@ -10,10 +10,10 @@
  *
  * 引用形态判定（`isTempAttachmentRef`）在 `utils/tempAttachmentPath`（纯函数，无 I/O）。
  */
-import { invoke } from "@tauri-apps/api/core";
 import { TEMP_ATTACHMENT_DIR } from "@/utils/tempAttachmentPath";
 import { bytesToBase64 } from "@/utils/base64";
 import { readAttachmentDataUrl } from "@/services/vault";
+import { getActiveContentBackend } from "@/services/content/factory";
 
 /**
  * 附件字节写入临时区，返回仓库相对路径引用。
@@ -25,11 +25,7 @@ export async function writeTempAttachment(
   source: File,
 ): Promise<string> {
   const bytes = new Uint8Array(await source.arrayBuffer());
-  return invoke<string>("write_temp_attachment", {
-    canvasId,
-    fileName,
-    base64Data: bytesToBase64(bytes),
-  });
+  return getActiveContentBackend().writeTempAttachment(canvasId, fileName, bytesToBase64(bytes));
 }
 
 /**
@@ -84,10 +80,7 @@ export async function readAttachmentText(ref: string): Promise<string | null> {
  * `fileName` = 附件显示名（调用方手上就有）：后端据此定落位名，不去反解临时叶子名里的随机前缀。
  */
 export async function importVaultAttachment(ref: string, fileName: string): Promise<string> {
-  const result = await invoke<{ file: string }>("import_vault_attachment", {
-    rel: ref,
-    fileName,
-  });
+  const result = await getActiveContentBackend().importAttachment(ref, fileName);
   return result.file;
 }
 
@@ -99,7 +92,7 @@ export async function cleanupCanvasTempAttachments(
   canvasId: string,
   canvasFile: string,
 ): Promise<number> {
-  return invoke<number>("cleanup_canvas_temp_attachments", { canvasId, canvasFile });
+  return getActiveContentBackend().cleanupCanvasTempAttachments(canvasId, canvasFile);
 }
 
 export { TEMP_ATTACHMENT_DIR };

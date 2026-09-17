@@ -12,6 +12,7 @@ import {
   convertWhiteboardToAtlx,
   remapSideloads,
 } from "@/services/vault";
+import { activateContentVault, deactivateContentVault } from "@/services/content/factory";
 import {
   readGlobalConfig,
   updateGlobalConfig,
@@ -412,6 +413,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       // 经领域生命周期注册表分发（canvas/table/aichat/calendar/note 各钩子按注册序执行，失败快速传播）
       await flushAllDomains({ vaultId: get().vaultId });
       const info = await openVault(root);
+      // 激活内容面仓库身份（root 绝对路径）：此后内容 I/O 按激活仓库取后端
+      activateContentVault({ kind: "local", root: info.root });
       // 配置损坏已由 open_vault 备份（它紧接着就会用新 vaultId 覆盖原路径，之后再读只会读到合法文件）
       if (info.configCorruptBackup) {
         useNotificationStore.getState().notify({
@@ -518,6 +521,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       console.error("退出仓库领域清理失败", e),
     );
     useSettingsStore.getState().clearVaultConfig();
+    // 内容面退出激活态：无激活身份时内容 I/O 回落 localBackend（root 无关，语义不变）
+    deactivateContentVault();
     // 清设置弹窗（防止下次进入工作区残留重开）
     set({ settingsModal: null });
     set({
