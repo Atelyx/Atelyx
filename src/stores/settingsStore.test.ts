@@ -21,7 +21,7 @@ const h = vi.hoisted(() => ({
   setKeyCalls: [] as string[],
   failGetKey: false,
   failSetKey: false,
-  keyOf: (a: Record<string, unknown>) => `${String(a.vaultId)}:${String(a.providerId)}`,
+  keyOf: (a: Record<string, unknown>) => `${String(a.vaultRoot)}:${String(a.providerId)}`,
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -113,13 +113,13 @@ beforeEach(async () => {
   await import("./pluginStore");
   const app = await import("./appStore");
   settings = await import("./settingsStore");
-  app.useAppStore.setState({ vaultId: "v1" });
+  app.useAppStore.setState({ vaultRoot: "v1" });
 });
 
 describe("syncKeys 关闭时的明文 key 边界", () => {
   it("persist 写盘路径（改供应商）顺手抹掉磁盘残留的明文 key", async () => {
     h.vaultConfig = {
-      vaultId: "v1",
+      vaultRoot: "v1",
       providers: [{ id: "p1", name: "A", baseUrl: "u", models: [] }],
       search: { provider: "tavily", tavilyApiKey: "tvly-secret" },
     };
@@ -141,7 +141,7 @@ describe("syncKeys 关闭时的明文 key 边界", () => {
 
   it("残留 key 只删一次：写盘后再改字段的补丁不再携带删键指令", async () => {
     h.vaultConfig = {
-      vaultId: "v1",
+      vaultRoot: "v1",
       providers: [{ id: "p1", name: "A", baseUrl: "u", models: [] }],
       search: { provider: "tavily", tavilyApiKey: "tvly-secret" },
     };
@@ -155,7 +155,7 @@ describe("syncKeys 关闭时的明文 key 边界", () => {
   });
 
   it("改排序只发排序一个字段（磁盘无残留 key 时其余字段由 Rust 侧按磁盘合并保留）", async () => {
-    h.vaultConfig = { vaultId: "v1", search: { provider: "tavily" } };
+    h.vaultConfig = { vaultRoot: "v1", search: { provider: "tavily" } };
     await settings.useSettingsStore.getState().loadVaultConfig();
     await settings.useSettingsStore.getState().setFileExplorerSort("name-asc");
 
@@ -164,7 +164,7 @@ describe("syncKeys 关闭时的明文 key 边界", () => {
   });
 
   it("改 SearXNG 地址不会把 config.json 里残留的明文 key 写回（并显式删键）", async () => {
-    h.vaultConfig = { vaultId: "v1", search: { provider: "tavily", tavilyApiKey: "tvly-secret" } };
+    h.vaultConfig = { vaultRoot: "v1", search: { provider: "tavily", tavilyApiKey: "tvly-secret" } };
     await settings.useSettingsStore.getState().loadVaultConfig();
     await settings.useSettingsStore
       .getState()
@@ -179,7 +179,7 @@ describe("syncKeys 关闭时的明文 key 边界", () => {
 
   it("syncKeys 开启时 key 随仓库落盘（不得误剥离）", async () => {
     h.vaultConfig = {
-      vaultId: "v1",
+      vaultRoot: "v1",
       syncKeys: true,
       search: { provider: "tavily", tavilyApiKey: "tvly-secret" },
     };
@@ -192,7 +192,7 @@ describe("syncKeys 关闭时的明文 key 边界", () => {
   });
 
   it("关闭时残留 key 采纳进本机 keychain（不静默丢弃）", async () => {
-    h.vaultConfig = { vaultId: "v1", search: { provider: "tavily", tavilyApiKey: "tvly-stray" } };
+    h.vaultConfig = { vaultRoot: "v1", search: { provider: "tavily", tavilyApiKey: "tvly-stray" } };
     await settings.useSettingsStore.getState().loadVaultConfig();
 
     expect(h.setKeyCalls).toEqual(["v1:search-tavily"]);
@@ -202,7 +202,7 @@ describe("syncKeys 关闭时的明文 key 边界", () => {
 
   it("keychain 读失败时仍能采纳残留 key，且不阻断加载", async () => {
     h.failGetKey = true;
-    h.vaultConfig = { vaultId: "v1", search: { provider: "tavily", tavilyApiKey: "tvly-stray" } };
+    h.vaultConfig = { vaultRoot: "v1", search: { provider: "tavily", tavilyApiKey: "tvly-stray" } };
 
     await settings.useSettingsStore.getState().loadVaultConfig();
 
@@ -211,7 +211,7 @@ describe("syncKeys 关闭时的明文 key 边界", () => {
 
   it("keychain 回写失败只记日志，不阻断加载也不丢内存 key", async () => {
     h.failSetKey = true;
-    h.vaultConfig = { vaultId: "v1", search: { provider: "tavily", tavilyApiKey: "tvly-stray" } };
+    h.vaultConfig = { vaultRoot: "v1", search: { provider: "tavily", tavilyApiKey: "tvly-stray" } };
 
     await settings.useSettingsStore.getState().loadVaultConfig();
 
@@ -220,7 +220,7 @@ describe("syncKeys 关闭时的明文 key 边界", () => {
 
   it("关闭 syncKeys 开关时写盘剥离 key 并回写 keychain", async () => {
     h.vaultConfig = {
-      vaultId: "v1",
+      vaultRoot: "v1",
       syncKeys: true,
       search: { provider: "tavily", tavilyApiKey: "tvly-secret" },
     };
@@ -239,7 +239,7 @@ describe("syncKeys 关闭时的明文 key 边界", () => {
   it("合并补丁语义：显式 null 删键、省略键保留磁盘现值", async () => {
     // 与 Rust 侧 merge_vault_config 同语义的最小实现：只要补丁语义不被破坏，本用例就能拦住回归
     h.vaultConfig = {
-      vaultId: "v1",
+      vaultRoot: "v1",
       syncKeys: true,
       fileExplorerSort: "name-asc",
       search: { provider: "tavily", tavilyApiKey: "tvly-secret" },
@@ -252,12 +252,12 @@ describe("syncKeys 关闭时的明文 key 边界", () => {
     expect("tavilyApiKey" in search).toBe(false);
     // 未出现在补丁里的字段保留磁盘值（这正是撕裂窗口不覆盖主窗口配置的依据）
     expect(disk.fileExplorerSort).toBe("name-asc");
-    expect(disk.vaultId).toBe("v1");
+    expect(disk.vaultRoot).toBe("v1");
   });
 
   it("清空 Tavily key（syncKeys 开启）也走显式 null 删键", async () => {
     h.vaultConfig = {
-      vaultId: "v1",
+      vaultRoot: "v1",
       syncKeys: true,
       search: { provider: "tavily", tavilyApiKey: "tvly-secret" },
     };
@@ -270,7 +270,7 @@ describe("syncKeys 关闭时的明文 key 边界", () => {
 
   it("本机 keychain 已有 key 时不覆盖", async () => {
     h.keychain.set("v1:search-tavily", "tvly-local");
-    h.vaultConfig = { vaultId: "v1", search: { provider: "tavily", tavilyApiKey: "tvly-stray" } };
+    h.vaultConfig = { vaultRoot: "v1", search: { provider: "tavily", tavilyApiKey: "tvly-stray" } };
     await settings.useSettingsStore.getState().loadVaultConfig();
 
     expect(h.setKeyCalls).toEqual([]);
@@ -280,7 +280,7 @@ describe("syncKeys 关闭时的明文 key 边界", () => {
 
 describe("脏门控与字段级补丁（撕裂窗口覆盖防护）", () => {
   it("无变化时 flush 不写盘", async () => {
-    h.vaultConfig = { vaultId: "v1", providers: [{ id: "p1", name: "A", baseUrl: "u", models: [] }] };
+    h.vaultConfig = { vaultRoot: "v1", providers: [{ id: "p1", name: "A", baseUrl: "u", models: [] }] };
     await settings.useSettingsStore.getState().loadVaultConfig();
 
     await settings.useSettingsStore.getState().flush();
@@ -290,7 +290,7 @@ describe("脏门控与字段级补丁（撕裂窗口覆盖防护）", () => {
 
   it("仓库配置加载失败时不写盘（内存是默认值，落盘会抹掉磁盘配置）", async () => {
     const app = await import("./appStore");
-    app.useAppStore.setState({ vaultId: "v2" });
+    app.useAppStore.setState({ vaultRoot: "v2" });
     // 未对本仓库调用 loadVaultConfig：loadedForVaultId 仍是 null
     await settings.useSettingsStore.getState().updateProvider("p9", { name: "x" });
     await settings.useSettingsStore.getState().flush();
@@ -299,7 +299,7 @@ describe("脏门控与字段级补丁（撕裂窗口覆盖防护）", () => {
   });
 
   it("重复改同一值时只在首次写盘", async () => {
-    h.vaultConfig = { vaultId: "v1", providers: [{ id: "p1", name: "A", baseUrl: "u", models: [] }] };
+    h.vaultConfig = { vaultRoot: "v1", providers: [{ id: "p1", name: "A", baseUrl: "u", models: [] }] };
     await settings.useSettingsStore.getState().loadVaultConfig();
 
     await settings.useSettingsStore.getState().updateProvider("p1", { name: "B" });
@@ -315,7 +315,7 @@ describe("脏门控与字段级补丁（撕裂窗口覆盖防护）", () => {
     // 撕裂窗口场景：本窗口内存里 fileExplorerSort 陈旧（"mtime-desc"），主窗口已改成 "name-asc"。
     // 本窗口改供应商时补丁只带 providers，不得把陈旧的排序写回去。
     h.vaultConfig = {
-      vaultId: "v1",
+      vaultRoot: "v1",
       fileExplorerSort: "mtime-desc",
       providers: [{ id: "p1", name: "A", baseUrl: "u", models: [] }],
     };
@@ -343,7 +343,7 @@ describe("配置损坏的可见性", () => {
 
   it("正常读取不弹通知", async () => {
     const notifications = await import("./notificationStore");
-    h.vaultConfig = { vaultId: "v1" };
+    h.vaultConfig = { vaultRoot: "v1" };
     await settings.useSettingsStore.getState().loadVaultConfig();
 
     expect(notifications.useNotificationStore.getState().items).toHaveLength(0);
@@ -351,7 +351,7 @@ describe("配置损坏的可见性", () => {
 
   it("写盘路径发现原文损坏（后端已备份）也弹通知", async () => {
     const notifications = await import("./notificationStore");
-    h.vaultConfig = { vaultId: "v1" };
+    h.vaultConfig = { vaultRoot: "v1" };
     await settings.useSettingsStore.getState().loadVaultConfig();
     h.patchCorruptBackup = "config.json.corrupt-write";
 

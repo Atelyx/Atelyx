@@ -33,7 +33,6 @@ export type PanelLayoutOp =
   | { op: "addView"; view: ViewKind };
 
 export interface OpenFileChangedPayload {
-  vaultId: string | null;
   vaultRoot: string | null;
   vaultName: string;
   currentCanvasFile: string | null;

@@ -304,24 +304,24 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
     lifecycle: {
       id: "builtin.chatpanel",
       flush: async (ctx) => {
-        await useChatPanelStore.getState().flush(ctx.vaultId);
+        await useChatPanelStore.getState().flush(ctx.vaultRoot);
       },
       onVaultEntered: async (ctx) => {
         // 进仓后读盘加载 AI 会话（force：真实切换强制重读，防幂等守卫跳过旧会话）
-        await useChatPanelStore.getState().load(ctx.vaultId, true);
+        await useChatPanelStore.getState().load(ctx.vaultRoot, true);
       },
       onVaultExit: async (ctx) => {
-        // 必须用 ctx.vaultId：分发晚于 store 置空，回读 store 会拿到 null 而被仓库守卫丢弃
-        await useChatPanelStore.getState().flush(ctx.vaultId);
+        // 必须用 ctx.vaultRoot：分发晚于 store 置空，回读 store 会拿到 null 而被仓库守卫丢弃
+        await useChatPanelStore.getState().flush(ctx.vaultRoot);
       },
       onViewGained: (view) => {
         if (view !== "aichat") return;
         // 撕裂出去的 AI 会话视图回归主窗口：重读盘（面板窗口可能已改会话）
-        void useChatPanelStore.getState().load(useAppStore.getState().vaultId);
+        void useChatPanelStore.getState().load(useAppStore.getState().vaultRoot);
       },
       releaseView: async (view) => {
         if (view !== "aichat") return;
-        await useChatPanelStore.getState().flush(useAppStore.getState().vaultId);
+        await useChatPanelStore.getState().flush(useAppStore.getState().vaultRoot);
       },
     },
     vaultEventHandlers: [
@@ -349,9 +349,6 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
       id: "builtin.canvas",
       flush: async () => {
         await useCanvasStore.getState().flush();
-      },
-      onVaultLeaving: () => {
-        useCanvasStore.getState().resetCanvasState();
       },
       releaseView: async (view) => {
         if (view !== "canvas") return;
@@ -488,13 +485,6 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
       id: "builtin.note",
       flush: async () => {
         await useNoteStore.getState().flushPendingNotes();
-      },
-      onVaultLeaving: () => {
-        // 切仓库清空笔记撤销栈与编辑会话（防同路径串文件）；笔记运行时态的清态由 noteStore 自注册承担
-        useNoteUndoStore.getState().clearAll();
-        closeAllNoteSessions();
-        // 协作文档以「仓库内相对路径」为身份：跨仓库同名路径不得复用旧文档（CRDT 状态与基线序号一并清空）
-        useNoteCollabStore.getState().clear();
       },
       onVaultExit: async () => {
         await useNoteStore.getState().flushPendingNotes();

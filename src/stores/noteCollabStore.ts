@@ -40,6 +40,7 @@ import {
 import { useNoteStore } from "@/stores/noteStore";
 import { useNoteUndoStore } from "@/stores/noteUndoStore";
 import { useVaultStore } from "@/stores/vaultStore";
+import { registerDomainLifecycle } from "@/utils/kernelLifecycle";
 import { base64ToBytes, bytesToBase64 } from "@/utils/base64";
 import { markCollabNoteRelocate } from "@/utils/noteCollabRelocate";
 
@@ -230,4 +231,15 @@ setNoteCollabBindingRefresh((file, doc) => {
       ? { bindings: { ...s.bindings, [file]: { ytext: doc.ytext, awareness: doc.awareness } } }
       : s,
   );
+});
+
+/**
+ * 切仓库清空全部协作文档：在模块加载时注册，不挂笔记插件的生命周期钩子——
+ * 笔记插件停用期间内核照常切仓库，协作文档以「仓库内相对路径」为身份，
+ * 跨仓库同名路径复用旧文档会把 CRDT 状态与基线序号串给新仓库。
+ * 这是本 store 自身的数据边界（非领域事件反应），故不随插件启停撤销。
+ */
+registerDomainLifecycle({
+  id: "noteCollabStore",
+  onVaultLeaving: () => useNoteCollabStore.getState().clear(),
 });

@@ -138,7 +138,7 @@ function FileGroup({
 
 /** 仓库历史面板：按文件分组的版本流（可折叠 + 只列最近文件）。 */
 export function RepoHistoryPanel() {
-  const vaultId = useAppStore((s) => s.vaultId);
+  const vaultRoot = useAppStore((s) => s.vaultRoot);
   const entries = useRepoHistoryStore((s) => s.entries);
   const loading = useRepoHistoryStore((s) => s.loading);
   const [historyTarget, setHistoryTarget] = useState<{ kind: "note" | "canvas" | "table"; file: string } | null>(null);
@@ -150,7 +150,7 @@ export function RepoHistoryPanel() {
     void useRepoHistoryStore.getState().load();
     setExpandedFiles(new Set());
     setShowAllFiles(false);
-  }, [vaultId]);
+  }, [vaultRoot]);
 
   const groups = useMemo(() => {
     const map = new Map<string, VersionGroup>();

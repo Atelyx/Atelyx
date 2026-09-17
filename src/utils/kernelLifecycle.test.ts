@@ -31,7 +31,7 @@ describe("领域生命周期注册表", () => {
         order.push("a.entered");
       },
       onVaultExit: async (ctx) => {
-        order.push(`a.exit:${ctx.vaultId}`);
+        order.push(`a.exit:${ctx.vaultRoot}`);
       },
       releaseView: async (v) => {
         order.push(`a.release:${v}`);
@@ -53,7 +53,7 @@ describe("领域生命周期注册表", () => {
       },
     });
 
-    await flushAllDomains({ vaultId: "v1" });
+    await flushAllDomains({ vaultRoot: "v1" });
     expect(order).toEqual(["a.flush", "b.flush"]);
 
     order.length = 0;
@@ -61,11 +61,11 @@ describe("领域生命周期注册表", () => {
     expect(order).toEqual(["a.leaving"]);
 
     order.length = 0;
-    await notifyVaultEntered({ vaultId: "v1" });
+    await notifyVaultEntered({ vaultRoot: "v1" });
     expect(order).toEqual(["a.entered"]);
 
     order.length = 0;
-    await notifyVaultExit({ vaultId: "v1" });
+    await notifyVaultExit({ vaultRoot: "v1" });
     expect(order).toEqual(["a.exit:v1"]);
 
     order.length = 0;
@@ -95,17 +95,17 @@ describe("领域生命周期注册表", () => {
         calls.push("second");
       },
     });
-    await flushAllDomains({ vaultId: null });
+    await flushAllDomains({ vaultRoot: null });
     expect(calls).toEqual(["second"]); // 同 id 覆盖，旧注册被顶替
 
     r1(); // 撤销旧句柄不应误删新注册（按引用守卫）
     calls.length = 0;
-    await flushAllDomains({ vaultId: null });
+    await flushAllDomains({ vaultRoot: null });
     expect(calls).toEqual(["second"]);
 
     r2();
     calls.length = 0;
-    await flushAllDomains({ vaultId: null });
+    await flushAllDomains({ vaultRoot: null });
     expect(calls).toEqual([]);
 
     unregisterDomainLifecycle("x"); // 幂等
@@ -126,7 +126,7 @@ describe("领域生命周期注册表", () => {
         after.push("after");
       },
     });
-    await expect(flushAllDomains({ vaultId: null })).rejects.toThrow("flush 失败");
+    await expect(flushAllDomains({ vaultRoot: null })).rejects.toThrow("flush 失败");
     expect(after).toEqual([]);
     r1();
     unregisterDomainLifecycle("after");
@@ -136,25 +136,25 @@ describe("领域生命周期注册表", () => {
     unregisterDomainLifecycle("a");
     unregisterDomainLifecycle("b");
     unregisterDomainLifecycle("x");
-    await expect(flushAllDomains({ vaultId: null })).resolves.toBeUndefined();
+    await expect(flushAllDomains({ vaultRoot: null })).resolves.toBeUndefined();
     expect(hasDomainLifecycle("any")).toBe(false);
     notifyVaultLeaving();
-    await notifyVaultEntered({ vaultId: "v" });
-    await notifyVaultExit({ vaultId: null });
+    await notifyVaultEntered({ vaultRoot: "v" });
+    await notifyVaultExit({ vaultRoot: null });
     await releaseView("table");
     notifyViewGained("canvas");
     notifyViewRemoved("note");
   });
 
-  it("分发上下文透传 vaultId；未实现字段跳过", async () => {
+  it("分发上下文透传 vaultRoot；未实现字段跳过", async () => {
     const got: unknown[] = [];
     const r = registerDomainLifecycle({
       id: "ctx",
       flush: async (ctx) => {
-        got.push(ctx.vaultId);
+        got.push(ctx.vaultRoot);
       },
     });
-    await flushAllDomains({ vaultId: "vault-42" });
+    await flushAllDomains({ vaultRoot: "vault-42" });
     expect(got).toEqual(["vault-42"]);
     r();
     unregisterDomainLifecycle("ctx");
@@ -165,24 +165,24 @@ describe("领域生命周期注册表", () => {
     const r = registerDomainLifecycle({
       id: "entered",
       onVaultEntered: async (ctx) => {
-        got.push(ctx.vaultId);
+        got.push(ctx.vaultRoot);
       },
     });
-    await notifyVaultEntered({ vaultId: "vault-7" });
+    await notifyVaultEntered({ vaultRoot: "vault-7" });
     expect(got).toEqual(["vault-7"]);
     r();
     unregisterDomainLifecycle("entered");
   });
 
-  it("回启动页清理透传切换前的 vaultId（钩子不回读 store）", async () => {
+  it("回启动页清理透传切换前的 vaultRoot（钩子不回读 store）", async () => {
     const got: unknown[] = [];
     const r = registerDomainLifecycle({
       id: "exit",
       onVaultExit: async (ctx) => {
-        got.push(ctx.vaultId);
+        got.push(ctx.vaultRoot);
       },
     });
-    await notifyVaultExit({ vaultId: "vault-9" });
+    await notifyVaultExit({ vaultRoot: "vault-9" });
     expect(got).toEqual(["vault-9"]);
     r();
     unregisterDomainLifecycle("exit");

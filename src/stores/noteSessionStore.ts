@@ -12,6 +12,7 @@ import type { NoteBodySession, NoteBodySessionView, NoteSurfaceProvider } from "
 import { parseFrontmatter } from "@/utils/frontmatter";
 import { noteTitleFromFile } from "@/utils/filename";
 import { notifyNoteSurfaceChange } from "@/utils/noteSurfaceHost";
+import { registerDomainLifecycle } from "@/utils/kernelLifecycle";
 import { useNoteStore, type NoteSaveStatus } from "@/stores/noteStore";
 import { useNoteUndoStore } from "@/stores/noteUndoStore";
 import { useNoteCollabStore } from "@/stores/noteCollabStore";
@@ -761,4 +762,14 @@ useCollabStore.subscribe((s, prev) => {
 
 useSettingsStore.subscribe((s, prev) => {
   if (s.collabEnabled !== prev.collabEnabled) syncCollabBindings();
+});
+
+/**
+ * 切仓库关闭全部编辑会话：在模块加载时注册，不挂笔记插件的生命周期钩子——
+ * 笔记插件停用期间内核照常切仓库，残留的旧仓库会话会把挂起输入按旧仓库路径写进新仓库同路径文件。
+ * 这是本 store 自身的数据边界（非领域事件反应），故不随插件启停撤销。
+ */
+registerDomainLifecycle({
+  id: "noteSessionStore",
+  onVaultLeaving: () => closeAllNoteSessions(),
 });

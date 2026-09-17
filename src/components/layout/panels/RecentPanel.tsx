@@ -1,6 +1,6 @@
 /**
  * 最近打开面板（主页）：当前仓库最近打开的文件（去重置顶、上限），点击打开。
- * 数据来自 uiStateStore.recentFiles（应用级、跨仓库记录），此处按当前 vaultId 过滤；
+ * 数据来自 uiStateStore.recentFiles（应用级、跨仓库记录），此处按当前仓库身份过滤；
  * 文件已被删除/移动 → 置灰不可点（惰性清理由下次打开去重自然覆盖）。
  */
 import { Clock } from "lucide-react";
@@ -21,7 +21,7 @@ function collectPaths(nodes: FileTreeNode[], out: Set<string>): void {
 }
 
 export function RecentPanel() {
-  const vaultId = useAppStore((s) => s.vaultId);
+  const vaultRoot = useAppStore((s) => s.vaultRoot);
   const canvases = useAppStore((s) => s.canvases);
   const recentFiles = useUiStateStore((s) => s.recentFiles);
   const tree = useVaultStore((s) => s.tree);
@@ -35,9 +35,9 @@ export function RecentPanel() {
   const rows = useMemo(
     () =>
       recentFiles
-        .filter((r) => r.vaultId === vaultId)
+        .filter((r) => r.root === vaultRoot)
         .sort((a, b) => b.openedAt - a.openedAt),
-    [recentFiles, vaultId],
+    [recentFiles, vaultRoot],
   );
 
   return (
@@ -67,7 +67,7 @@ export function RecentPanel() {
               (r.kind === "canvas" ? canvases.some((c) => c.file === r.file) : true);
             return (
               <button
-                key={`${r.vaultId}-${r.file}`}
+                key={`${r.root}-${r.file}`}
                 disabled={!alive}
                 onClick={() => openFileByKind(r.file, r.kind)}
                 className="w-full flex items-center gap-1.5 text-xs px-1.5 py-1 rounded text-left disabled:opacity-40 disabled:cursor-default hover:opacity-80"

@@ -8,6 +8,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
 type CollabStore = typeof import("./collabStore");
 type AppStore = typeof import("./appStore");
+type SettingsStore = typeof import("./settingsStore");
 type CollabHost = typeof import("@/utils/collabHost");
 
 /** 假 WebSocket：捕获出站帧、暴露入站入口。 */
@@ -51,6 +52,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 let collab: CollabStore;
 let app: AppStore;
+let settings: SettingsStore;
 let collabHost: CollabHost;
 let reconnects = 0;
 let offReconnect: (() => void) | null = null;
@@ -68,6 +70,7 @@ beforeEach(async () => {
     clearTimeout: () => {},
   });
   app = await import("./appStore");
+  settings = await import("./settingsStore");
   collabHost = await import("@/utils/collabHost");
   offReconnect = collabHost.registerCollabReconnect(() => {
     reconnects += 1;
@@ -82,7 +85,9 @@ afterEach(() => {
 
 /** 建立连接并返回假 socket（`init` 内有 await 版本号，故等待实例出现）。 */
 async function connect(): Promise<FakeWebSocket> {
-  app.useAppStore.setState({ vaultId: "vault-1" });
+  // 房间号来自仓库配置（settingsStore.vaultConfig.vaultId）：进仓 = 置 vaultRoot + 加载出房间号
+  app.useAppStore.setState({ vaultRoot: "E:/vault-1" });
+  settings.useSettingsStore.setState({ vaultConfig: { vaultId: "vault-1" } });
   collab.useCollabStore.getState().init({
     enabled: true,
     url: "ws://relay/ws",

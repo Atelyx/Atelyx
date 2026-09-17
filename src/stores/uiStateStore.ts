@@ -47,7 +47,7 @@ interface UiStateStore {
   focusedPanelId: string | null;
   /** 撕裂窗口列表镜像（Rust 权威；应用级、跨布局共享）。 */
   detachedWindows: DetachedWindow[];
-  /** 最近打开的文件（跨仓库记录、按 file+vaultId 去重置顶、上限截断；主页面板按当前仓库过滤）。 */
+  /** 最近打开的文件（跨仓库记录、按 file+仓库身份去重置顶、上限截断；主页面板按当前仓库过滤）。 */
   recentFiles: RecentFileEntry[];
   /** single 槽手动胜者覆盖（槽 → 钉住的贡献 id；设置 → 插件里的冲突裁决写入，覆盖 priority 决胜）。 */
   slotWinnerOverrides: Record<string, string>;
@@ -66,8 +66,8 @@ interface UiStateStore {
   toggleExpandAll: (dirPaths: string[]) => void;
   /** 记录打开的画布/笔记/表格文件（lastCanvasFile/lastNoteFile/lastTableFile，kind 区分）。 */
   recordOpenFile: (kind: LastOpenFileKind, file: string) => void;
-  /** 记录最近打开的文件（recentFiles：去重置顶 + 截断；kind 与 vaultId 由调用方提供）。 */
-  recordRecentFile: (file: string, kind: RecentFileEntry["kind"], vaultId: string) => void;
+  /** 记录最近打开的文件（recentFiles：去重置顶 + 截断；kind 与仓库身份由调用方提供）。 */
+  recordRecentFile: (file: string, kind: RecentFileEntry["kind"], root: string) => void;
   /** 画布/笔记/表格重命名/移动后同步上次打开记录（旧路径命中才更新，kind 区分）。 */
   renameLastFile: (kind: LastOpenFileKind, oldFile: string, newFile: string) => void;
   /** 文件夹重命名后同步展开集合/上次打开文件（`oldDir/` 前缀 → `newDir/`）。 */
@@ -310,10 +310,10 @@ export const useUiStateStore = create<UiStateStore>((set, get) => {
 
     recordOpenFile: (kind, file) => setLastFile(set, kind, file),
 
-    recordRecentFile: (file, kind, vaultId) => {
+    recordRecentFile: (file, kind, root) => {
       const next = [
-        { file, kind, vaultId, openedAt: Date.now() },
-        ...get().recentFiles.filter((r) => !(r.file === file && r.vaultId === vaultId)),
+        { file, kind, root, openedAt: Date.now() },
+        ...get().recentFiles.filter((r) => !(r.file === file && r.root === root)),
       ].slice(0, MAX_RECENT_FILES);
       set({ recentFiles: next });
       markPatch({ recentFiles: next });

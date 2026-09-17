@@ -42,7 +42,7 @@ beforeEach(async () => {
   h.disk = "";
   h.writes = [];
   const app = await import("./appStore");
-  app.useAppStore.setState({ vaultId: "v1" });
+  app.useAppStore.setState({ vaultRoot: "v1" });
   calendar = await import("./calendarStore");
 });
 
@@ -93,7 +93,7 @@ describe("日历日程写盘脏门控", () => {
     expect(h.writes).toHaveLength(1);
 
     const app = await import("./appStore");
-    app.useAppStore.setState({ vaultId: "v2" });
+    app.useAppStore.setState({ vaultRoot: "v2" });
     await calendar.useCalendarStore.getState().load();
     calendar.useCalendarStore.getState().addItem("2026-02-02", "第二仓库");
     await settle();

@@ -1,8 +1,8 @@
 /**
  * 协作运行时（DocHost 的 store 门面）：连接策略 + 同仓库在线用户列表。
  *
- * 配置（开关/地址/昵称/颜色）来自 settingsStore 应用级配置；房间按 appStore.vaultId 划分，
- * 切仓库换房（bye + 重连新 hello）。传输/入站路由/出站咽喉归内核 DocHost
+ * 配置（开关/地址/昵称/颜色）来自 settingsStore 应用级配置；房间按仓库配置里的 vaultId 划分
+ * （config.json 随共享文件夹同步，保证多机同文件夹进同一房间），切仓库换房（bye + 重连新 hello）。传输/入站路由/出站咽喉归内核 DocHost
  * （services/collab/docHost.ts）：本 store 只做「何时连/断/换房」策略与 presence 节流调度、
  * peers/myPeerId 状态镜像；画布/笔记/表格域的协作接线（消息通道/重连/拆卸/presence 合并/
  * 广播注入）随插件启停经各域 `register*CollabWiring` 注册到 collabHost 注册表。本 store 不 import 任何域 store。
@@ -17,6 +17,9 @@ import {
   type CollabChannel,
 } from "@/services/collab/docHost";
 import { useAppStore } from "@/stores/appStore";
+// 环上依赖：settingsStore 静态 import 本模块（applyConfig）；此处只在函数体内惰性读仓库配置
+// （房间号随 config.json 加载/清空），不得在模块求值期访问
+import { useSettingsStore } from "@/stores/settingsStore";
 import { getAppVersion } from "@/services/app";
 import {
   mergeCollabPresence,
@@ -63,7 +66,6 @@ interface CollabStoreState {
 
 /** 当前运行时配置（init/applyConfig 更新；连接按它建立）。 */
 let runtimeCfg: CollabInitConfig | null = null;
-let currentVaultId: string | null = null;
 /** 本连接在房间内的 peerId（hello-ack 分配；据此把自己过滤出 peers，防自己出现在在线列表/高亮）。 */
 let myPeerId: number | null = null;
 /** 节流广播暂存（节流窗口内的最新 presence）。 */
@@ -156,10 +158,12 @@ async function establishConnection(): Promise<void> {
   lastPresenceBase = null;
   useCollabStore.setState({ connected: false, peers: [] });
   // 序号须先于早退判断递增：await 版本号期间若有禁用协作/地址清空/回启动页等早退调用，
-  // 也必须作废在途请求——否则旧请求恢复后仍用已失效配置建连（幽灵连接 / 发出 vaultId:null）
+  // 也必须作废在途请求——否则旧请求恢复后仍用已失效配置建连（幽灵连接 / 发出空房间号）
   const seq = ++connSeq;
   const cfg = runtimeCfg;
-  if (!cfg?.enabled || !cfg.url || !currentVaultId) return;
+  // 房间号读仓库配置（loadVaultConfig/clearVaultConfig 更新）：null = 未进仓/配置未就绪，不连接
+  const room = useSettingsStore.getState().vaultConfig?.vaultId ?? null;
+  if (!cfg?.enabled || !cfg.url || !room) return;
   // 应用版本随 hello 上报（协作房间展示各成员版本）；版本运行期不变，仅首次真实读取，失败降级省略
   const version = await appVersionOnce();
   if (seq !== connSeq) return; // 期间有更新的连接请求（applyConfig/切仓库/早退），放弃本次
@@ -168,7 +172,7 @@ async function establishConnection(): Promise<void> {
       name: "relay",
       url: cfg.url,
       hello: {
-        vaultId: currentVaultId,
+        vaultId: room,
         nickname: cfg.nickname || cfg.deviceName || "用户",
         color: cfg.color || randomPeerColor(),
         deviceName: cfg.deviceName,
@@ -267,16 +271,18 @@ export function publishCollabPresence(base: CollabPresence): void {
   schedulePresenceBroadcast(base);
 }
 
-// 切仓库（vaultId 变化）→ 换房间重连；无仓库（回启动页）→ 断开。
+// 切仓库（房间号随仓库配置变化）→ 换房间重连；无仓库（回启动页）→ 断开。
 // 注册推迟到 init（防循环 import 链中模块未完成初始化即调用 store）
 function ensureSubscriptions(): void {
   if (subscribed) return;
   subscribed = true;
+  // 进仓/回启动页（vaultRoot 变化）与仓库配置加载/清空（房间号随 vaultConfig 变化）都会换房：
+  // 任一变化即按当前房间号重建连接（establishConnection 内部先 bye 再断开）
   useAppStore.subscribe((s, prev) => {
-    if (s.vaultId !== prev.vaultId) {
-      currentVaultId = s.vaultId;
-      void establishConnection();
-    }
+    if (s.vaultRoot !== prev.vaultRoot) void establishConnection();
+  });
+  useSettingsStore.subscribe((s, prev) => {
+    if (s.vaultConfig !== prev.vaultConfig) void establishConnection();
   });
 }
 
@@ -288,7 +294,6 @@ export const useCollabStore = create<CollabStoreState>((set) => ({
   init: (cfg) => {
     ensureSubscriptions();
     runtimeCfg = { ...cfg, color: cfg.color || randomPeerColor() };
-    currentVaultId = useAppStore.getState().vaultId;
     // 各域广播钩子由域接线注入（ensure*CollabWiring，经 collabSendSink → DocHost 出站咽喉，
     // 重连后自动指向新连接，无需重注入）
     void establishConnection();

@@ -338,9 +338,15 @@ export const useNoteStore = create<NoteState>((set, get) => ({
   reset: () => {
     // 挂起输入已在切仓库前 flush 落盘，这里只清残留（含 flush 后、切仓库前的新输入）：
     // 必须与调用方同步完成，防旧仓库内容经已切换的仓库根写进新仓库同路径文件。
-    // 冲突/保存状态同属按文件的旧仓库运行时态，一并清（残留会让新仓库同路径误显冲突条、
-    // 并让 flushPendingNotes 永久跳过该文件）
-    set({ noteContents: {}, pendingNoteContent: {}, noteConflicts: {}, noteSaveStates: {} });
+    // 冲突/保存状态/外部修改序号同属按文件的旧仓库运行时态，一并清（残留会让新仓库
+    // 同路径误显冲突条或误报外部修改，并让 flushPendingNotes 永久跳过该文件）
+    set({
+      noteContents: {},
+      pendingNoteContent: {},
+      noteConflicts: {},
+      noteSaveStates: {},
+      externalNoteEdits: {},
+    });
   },
 }));
 

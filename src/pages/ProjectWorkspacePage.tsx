@@ -34,7 +34,7 @@ export function ProjectWorkspacePage() {
   const currentCanvasFile = useAppStore((s) => s.currentCanvasFile);
   const currentNoteFile = useAppStore((s) => s.currentNoteFile);
   const currentTableFile = useAppStore((s) => s.currentTableFile);
-  const vaultId = useAppStore((s) => s.vaultId);
+  const vaultRoot = useAppStore((s) => s.vaultRoot);
 
   const vaultNoteList = useVaultStore((s) => s.noteList);
   const vaultTableList = useVaultStore((s) => s.tableList);
@@ -161,7 +161,7 @@ export function ProjectWorkspacePage() {
     if (ui.workspaceLayouts.some((l) => l.id === HOME_LAYOUT_ID)) {
       ui.activateLayout(HOME_LAYOUT_ID);
     }
-  }, [defaultHomeLayout, vaultId, uiLoaded]);
+  }, [defaultHomeLayout, vaultRoot, uiLoaded]);
 
   /** 全屏切换（视图控制图标，经 store 转发到 services）。 */
   const handleToggleFullscreen = () => {

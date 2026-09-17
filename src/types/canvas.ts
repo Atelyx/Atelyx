@@ -184,9 +184,9 @@ export interface VaultConfig {
   excludeFolders?: string[];
   /** 附件导入默认文件夹（相对仓库根，可含子路径如 `assets/img`；缺省/空 = 仓库根目录）。 */
   attachmentFolder?: string;
-  /** 仓库级 AI 供应商列表（磁盘格式默认无 key；key 走 keychain 条目 `provider-<vaultId>-<id>`，开启 syncKeys 后随仓库落盘）。 */
+  /** 仓库级 AI 供应商列表（磁盘格式默认无 key；key 走 keychain 条目（按仓库身份哈希隔离），开启 syncKeys 后随仓库落盘）。 */
   providers?: GlobalProvider[];
-  /** 仓库级搜索源配置（Tavily key 默认走 keychain 条目 `provider-<vaultId>-search-tavily`；开启 syncKeys 后随仓库落盘）。 */
+  /** 仓库级搜索源配置（Tavily key 默认走 keychain 条目（按仓库身份哈希隔离）；开启 syncKeys 后随仓库落盘）。 */
   search?: GlobalSearchConfig;
   /** API key 是否随仓库保存（多设备同步）：开启后 provider/Tavily key 明文写入本文件，随仓库同步；
    * 缺省 false = key 仅存本机 keychain（按仓库隔离）。开启有泄露风险（仓库被公开/云盘共享）。 */
@@ -199,7 +199,7 @@ export interface VaultConfig {
   autoNamingEnabled?: boolean;
   /** 话题自动命名模型（缺省 = 跟随默认模型；指定后命名用该模型，如 `{ providerId, model }`——话题命名一般用小模型）。 */
   autoNamingModel?: { providerId: string; model: string };
-  /** 仓库稳定 ID（首次 open_vault 生成、之后固定；keychain 条目按它隔离，写盘必须保留）。 */
+  /** 协作房间号（首次打开生成、之后固定，随仓库文件夹同步；共享盘协作据此划分房间，写盘必须保留）。 */
   vaultId?: string;
 }
 
@@ -210,14 +210,12 @@ export interface VaultConfigRead {
   corruptBackup: string | null;
 }
 
-/** open_vault 返回的仓库信息。 */
+/** open_vault 返回的仓库信息（仓库身份 = root 绝对路径）。 */
 export interface VaultInfo {
   /** 仓库根绝对路径 */
   root: string;
   /** 仓库名（文件夹名） */
   name: string;
-  /** 仓库稳定 ID（`.atelyx/config.json` 的 vaultId，首次打开生成、之后固定；仓库归属识别用）。 */
-  id: string;
   /** 非空 = `.atelyx/config.json` 原文损坏、已按该文件名备份并按空配置继续（用户可见提示据此弹出）。 */
   configCorruptBackup: string | null;
 }
@@ -260,7 +258,7 @@ export interface LinkRewriteResult {
 export type SearchProvider = "tavily" | "searxng";
 
 /** 仓库级搜索源配置（.atelyx/config.json 的 VaultConfig.search）。
- * Tavily key 默认走 keychain 条目 `provider-<vaultId>-search-tavily`，不落文件；
+ * Tavily key 默认走 keychain 条目（按仓库身份哈希隔离），不落文件；
  * 仅 syncKeys 开启时随仓库落盘 `tavilyApiKey`（多设备同步）。 */
 export interface GlobalSearchConfig {
   /** 搜索源：Tavily API / SearXNG 自建实例。 */

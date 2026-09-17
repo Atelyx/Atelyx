@@ -1,10 +1,10 @@
 /**
  * 日历（主页）store：手动日程（`.atelyx/calendar.json` 仓库级）+ 带日期笔记（只读）。
  *
- * 手动日程 CRUD 防抖落盘；写盘按「已加载仓库」归属校验（loadedForVault），
+ * 手动日程 CRUD 防抖落盘；写盘按「已加载仓库」归属校验（loadedForRoot），
  * 切仓库前须先 flush（appStore.selectVault 已接）防防抖窗口内把旧仓库日程写进新仓库。
  * 带日期笔记来自 `services/home.listDatedNotes`（frontmatter date/due），随 load 一并刷新。
- * 性能：同仓库会话内缓存（loadedForVault），主页面板随布局切换反复挂载时，已缓存仓库
+ * 性能：同仓库会话内缓存（loadedForRoot），主页面板随布局切换反复挂载时，已缓存仓库
  * 仅后台静默重扫带日期笔记；手动日程 items 为 store 实时态（防抖落盘），刷新不重读磁盘
  * 防覆盖在途编辑。加载失败静默降级为空（尽力而为，不阻塞面板）。
  */
@@ -26,7 +26,7 @@ interface CalendarState {
   items: CalendarItem[];
   datedNotes: DatedNote[];
   /** 已加载的仓库 id（null = 未加载；persist 归属校验用）。 */
-  loadedForVault: string | null;
+  loadedForRoot: string | null;
   /** 重载（切仓库/面板挂载时调用；先清空防旧仓库数据闪现）。 */
   load: () => Promise<void>;
   addItem: (date: string, title: string, note?: string, color?: string) => void;
@@ -59,7 +59,7 @@ const persistCtl = createPersistController({
   persist: async () => {
     const s = useCalendarStore.getState();
     // 跨仓库守卫：未加载（首启/已清空）不写
-    if (!s.loadedForVault) return;
+    if (!s.loadedForRoot) return;
     const snapshot = JSON.stringify(s.items);
     // 无脏：内存日程与上次落盘一致，不写盘（首载基线由 load 建立，故「加载后立即写」不会发生）
     if (snapshot === persistedItems) return;
@@ -77,17 +77,17 @@ const persistCtl = createPersistController({
 export const useCalendarStore = create<CalendarState>((set, get) => ({
   items: [],
   datedNotes: [],
-  loadedForVault: null,
+  loadedForRoot: null,
 
   load: async () => {
-    const vaultId = useAppStore.getState().vaultId;
-    if (!vaultId) return;
-    if (get().loadedForVault === vaultId) {
+    const vaultRoot = useAppStore.getState().vaultRoot;
+    if (!vaultRoot) return;
+    if (get().loadedForRoot === vaultRoot) {
       // 同仓库已缓存：再进主页不清空不转圈，仅后台静默重扫带日期笔记（只读视图可能滞后）；
       // 手动日程 items 为 store 实时态（防抖落盘），不重读磁盘，防覆盖在途编辑。
       try {
         const datedNotes = await listDatedNotes();
-        if (useAppStore.getState().vaultId === vaultId) set({ datedNotes });
+        if (useAppStore.getState().vaultRoot === vaultRoot) set({ datedNotes });
       } catch (e) {
         console.error("刷新日历笔记失败", e);
       }
@@ -95,19 +95,19 @@ export const useCalendarStore = create<CalendarState>((set, get) => ({
     }
     // 首载/切仓库：清残留 debounce（双保险防旧 timer 写新仓库）+ 清空防旧仓库数据闪现
     persistCtl.cancel();
-    set({ loadedForVault: null, items: [], datedNotes: [] });
+    set({ loadedForRoot: null, items: [], datedNotes: [] });
     persistedItems = null;
     try {
       const [items, datedNotes] = await Promise.all([readCalendarItems(), listDatedNotes()]);
       // 竞态守卫：等待期间用户可能已切仓库
-      if (useAppStore.getState().vaultId !== vaultId) return;
-      set({ items, datedNotes, loadedForVault: vaultId });
+      if (useAppStore.getState().vaultRoot !== vaultRoot) return;
+      set({ items, datedNotes, loadedForRoot: vaultRoot });
       // 脏门控基线 = 刚落盘的磁盘内容：加载本身不产生写盘
       persistedItems = JSON.stringify(items);
     } catch (e) {
       console.error("加载日历失败", e);
-      if (useAppStore.getState().vaultId === vaultId) {
-        set({ items: [], datedNotes: [], loadedForVault: vaultId });
+      if (useAppStore.getState().vaultRoot === vaultRoot) {
+        set({ items: [], datedNotes: [], loadedForRoot: vaultRoot });
       }
     }
   },

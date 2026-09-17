@@ -1413,5 +1413,7 @@ registerDomainLifecycle({
     undoMgr.clear();
     resetTableState(null);
     syncLastSaved();
+    // 图片显示缓存按仓库相对路径键存：跨仓库同路径复用会显示旧仓库的图，随切换一并清空
+    clearTableImageCache();
   },
 });

@@ -4,7 +4,7 @@
  * 搜索请求统一走 Tauri Rust 代理（`search_web` 命令）：
  * - **SearXNG**：自建实例无内置 CORS，浏览器/WebView 前端直 fetch 必被拦截，须 Rust 侧请求；
  * - **Tavily**：官方 best practice 要求 API key 不暴露在客户端代码——key 由 Rust 从
- *   keychain（`provider-search-tavily`）读取，前端不接触 key。
+ *   keychain（按仓库身份哈希隔离的 `search-tavily` 条目）读取，前端不接触 key。
  *
  * 统一返回 `SearchResultItem[]`（title / url / snippet），供 SearchResultNode 渲染与
  * function calling 工具回填。边界捕获：搜索失败返回错误文本，不抛异常（失败降级不阻塞对话）。

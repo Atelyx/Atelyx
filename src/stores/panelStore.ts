@@ -292,7 +292,6 @@ export function titleOfTabs(tabs: TabItem[], activeTabId: string | null): string
 function currentOpenFilePayload(): bus.OpenFileChangedPayload {
   const s = useAppStore.getState();
   return {
-    vaultId: s.vaultId,
     vaultRoot: s.vaultRoot,
     vaultName: s.vaultName,
     currentCanvasFile: s.currentCanvasFile,
@@ -433,7 +432,6 @@ export const usePanelStore = create<PanelStore>((set, get) => {
     contextAnswered = true;
     const app = useAppStore.getState();
     useAppStore.setState({
-      vaultId: payload.vaultId,
       vaultRoot: payload.vaultRoot,
       vaultName: payload.vaultName,
       currentCanvasFile: payload.currentCanvasFile,
@@ -443,17 +441,21 @@ export const usePanelStore = create<PanelStore>((set, get) => {
       currentTableTitle: payload.currentTableTitle,
     });
     // 仓库上下文到达（切仓库或启动请求应答）：按需加载仓库级配置/文件树/领域仓库上下文
-    if (payload.vaultId !== app.vaultId) {
-      if (payload.vaultId) {
+    if (payload.vaultRoot !== app.vaultRoot) {
+      // 撕裂窗口同样必须先清上一个仓库的 per-file 状态（与主窗口 selectVault 同一清理点）：
+      // 撕裂窗口的笔记缓存/撤销栈/画布运行时/视口缓存是独立 webview 实例，残留会串进新仓库同路径文件；
+      // 首次 bootstrap 应答时无旧状态，清空为 no-op。同步执行，先于下方任何加载。
+      kernelLifecycle.notifyVaultLeaving();
+      if (payload.vaultRoot) {
         void useSettingsStore.getState().loadVaultConfig();
         void useVaultStore.getState().loadFiles();
       }
-      // AI 会话换仓库读盘（含 vaultId 置空 = 回启动页场景）经生命周期注册表分发
+      // AI 会话换仓库读盘（含 vaultRoot 置空 = 回启动页场景）经生命周期注册表分发
       void kernelLifecycle
-        .notifyVaultEntered({ vaultId: payload.vaultId })
+        .notifyVaultEntered({ vaultRoot: payload.vaultRoot })
         .catch((e) => console.error("撕裂窗口加载领域仓库上下文失败", e));
       // 撕裂窗口插件运行时随仓库上下文重载（与主窗口 selectVault/backToVaultSelect 时机一致）：
-      // vaultId 置空（回启动页）也 load——此时只扫 app 插件，自然卸载 vault 插件；
+      // vaultRoot 置空（回启动页）也 load——此时只扫 app 插件，自然卸载 vault 插件；
       // 插件事件（vault:switch/clear）按窗口隔离不跨窗口转发，撕裂窗口插件经重载兜底
       void usePluginStore.getState().load().catch((e) => console.error("撕裂窗口加载插件失败", e));
       // 协作宿主重算（仓库房间变化）
@@ -546,7 +548,7 @@ export const usePanelStore = create<PanelStore>((set, get) => {
       // 当前打开文件 + 仓库信息广播（撕裂窗口镜像文件状态/切仓库换上下文用）
       useAppStore.subscribe((s, prev) => {
         if (
-          s.vaultId !== prev.vaultId ||
+          s.vaultRoot !== prev.vaultRoot ||
           s.currentCanvasFile !== prev.currentCanvasFile ||
           s.currentNoteFile !== prev.currentNoteFile ||
           s.currentTableFile !== prev.currentTableFile ||
@@ -598,9 +600,9 @@ export const usePanelStore = create<PanelStore>((set, get) => {
           get().syncCollabHost();
         }
       });
-      // 仓库切换（vaultId 变化）→ 协作重算
+      // 仓库切换（vaultRoot 变化）→ 协作重算
       useAppStore.subscribe((s, prev) => {
-        if (s.vaultId !== prev.vaultId) get().syncCollabHost();
+        if (s.vaultRoot !== prev.vaultRoot) get().syncCollabHost();
       });
     },
 

@@ -61,6 +61,8 @@ import {
   collectGroupMembers,
 } from "@/utils/layout";
 import { createPersistController } from "@/utils/persist";
+import { registerDomainLifecycle } from "@/utils/kernelLifecycle";
+import { clearCanvasViewportCache } from "@/services/viewHandoff";
 import { markSelfSave } from "@/utils/selfSave";
 import { createUndoManager } from "@/utils/undoStack";
 import { inferImageMime } from "@/utils/whiteboard";
@@ -3406,3 +3408,17 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
     syncBroadcastBaseline();
   },
 }));
+
+/**
+ * 切仓库清空画布运行时与视口交接缓存：在模块加载时注册，不挂画布插件的生命周期钩子——
+ * 画布插件停用期间内核照常切仓库，残留的 canvasFile/乐观锁基准会让防抖保存按旧仓库路径
+ * 写进新仓库同路径文件；视口缓存按文件路径键存，跨仓库同路径复用会恢复错视口。
+ * 这是本 store 自身的数据边界（非领域事件反应），故不随插件启停撤销。
+ */
+registerDomainLifecycle({
+  id: "canvasStore",
+  onVaultLeaving: () => {
+    useCanvasStore.getState().resetCanvasState();
+    clearCanvasViewportCache();
+  },
+});

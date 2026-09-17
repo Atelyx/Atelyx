@@ -50,7 +50,7 @@ function cycleColor(c: string): string {
 }
 
 export function CalendarPanel() {
-  const vaultId = useAppStore((s) => s.vaultId);
+  const vaultRoot = useAppStore((s) => s.vaultRoot);
   const openNote = useAppStore((s) => s.openNote);
   const items = useCalendarStore((s) => s.items);
   const datedNotes = useCalendarStore((s) => s.datedNotes);
@@ -65,7 +65,7 @@ export function CalendarPanel() {
     void useCalendarStore.getState().load();
     void useRepoHistoryStore.getState().load();
     setSelectedDate(null);
-  }, [vaultId]);
+  }, [vaultRoot]);
 
   const now = new Date();
   const [viewYear, setViewYear] = useState(now.getFullYear());

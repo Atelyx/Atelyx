@@ -18,8 +18,8 @@ export interface RecentFileEntry {
   /** 相对仓库根路径。 */
   file: string;
   kind: "canvas" | "note" | "table";
-  /** 归属仓库 id（vaultId；打开时按当前仓库记录）。 */
-  vaultId: string;
+  /** 归属仓库身份（root 绝对路径；打开时按当前仓库记录）。 */
+  root: string;
   /** 打开时间戳（ms）。 */
   openedAt: number;
 }
@@ -136,7 +136,7 @@ export interface AppUiState {
   focusedPanelId?: string;
   /** 撕裂出去的独立窗口（应用级、跨布局共享；缺省 = 无）。 */
   detachedWindows?: DetachedWindow[];
-  /** 最近打开的文件（跨仓库记录、按 file+vaultId 去重置顶、上限截断；缺省 = 无）。 */
+  /** 最近打开的文件（跨仓库记录、按 file+仓库身份去重置顶、上限截断；缺省 = 无）。 */
   recentFiles?: RecentFileEntry[];
   /** single 槽手动胜者覆盖（槽 → 钉住的贡献 id；被钉者卸载后读时回退 priority，不主动清键）。 */
   slotWinnerOverrides?: Record<string, string>;

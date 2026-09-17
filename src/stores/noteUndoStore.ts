@@ -1,7 +1,7 @@
 /**
  * 笔记撤销栈运行时（会话内内存驻留，不落盘）。
  *
- * 生命周期：栈只在内存——退出软件与切仓库（vaultId 变化，防跨仓库同路径
+ * 生命周期：栈只在内存——退出软件与切仓库（仓库身份变化，防跨仓库同路径
  * 串文件）时 clearAll()；切笔记、模式切换（预览↔编辑/源码）、布局/面板重挂载等一切
  * 会话内操作不清栈。
  *
@@ -14,6 +14,7 @@
  */
 import { create } from "zustand";
 import { createNoteUndoStack, type NoteUndoStack } from "@/services/noteUndo";
+import { registerDomainLifecycle } from "@/utils/kernelLifecycle";
 
 interface NoteUndoState {
   stacks: Record<string, NoteUndoStack>;
@@ -71,3 +72,13 @@ export const useNoteUndoStore = create<NoteUndoState>((set, get) => ({
 
   clearAll: () => set({ stacks: {} }),
 }));
+
+/**
+ * 切仓库清空全部撤销栈：在模块加载时注册，不挂笔记插件的生命周期钩子——
+ * 笔记插件停用期间内核照常切仓库，残留的旧仓库撤销栈会把旧内容恢复进新仓库同路径笔记。
+ * 这是本 store 自身的数据边界（非领域事件反应），故不随插件启停撤销。
+ */
+registerDomainLifecycle({
+  id: "noteUndoStore",
+  onVaultLeaving: () => useNoteUndoStore.getState().clearAll(),
+});

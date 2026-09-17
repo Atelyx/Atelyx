@@ -10,32 +10,40 @@
 //! `config.json`（`vault.rs` 的 `VaultProvider.api_key` 为可选字段，默认不落盘 = 类型层守边界）。
 //!
 //! service = `com.atelyx.app`（keychain 条目的独立命名空间，与 tauri.conf.json 的 identifier 无关），
-//! username = `provider-<vaultId>-<providerId>`（**按仓库隔离**：各仓库独立 key，
-//! 与仓库级配置 `VaultConfig.providers` 配套；Tavily key 的 providerId 传 `search-tavily`）。
+//! username = `provider-<sha256(root)>-<providerId>`（仓库身份 = root 绝对路径，条目名取其
+//! SHA-256 哈希：路径长且含分隔符，不能直接作条目名；哈希隔离保证复制的仓库与原件互不共条目）。
+//! 与仓库级配置 `VaultConfig.providers` 配套；Tavily key 的 providerId 传 `search-tavily`。
 
 use keyring::Entry;
+use sha2::{Digest, Sha256};
 
 /// keychain 的 service 名（keychain 条目的独立命名空间，不随应用 identifier 变化）。
 const SERVICE: &str = "com.atelyx.app";
 
-/// 按仓库 + provider id 构造 keychain username（key 按仓库隔离，防跨仓库搞混）。
-fn username_for(vault_id: &str, provider_id: &str) -> String {
-    format!("provider-{}-{}", vault_id, provider_id)
+/// 仓库身份（root 绝对路径）→ keychain 条目名段：SHA-256 十六进制（64 字符，长度与字符集稳定）。
+fn root_hash(vault_root: &str) -> String {
+    let digest = Sha256::digest(vault_root.as_bytes());
+    format!("{digest:x}")
+}
+
+/// 按仓库身份 + provider id 构造 keychain username（key 按仓库隔离，防跨仓库搞混）。
+fn username_for(vault_root: &str, provider_id: &str) -> String {
+    format!("provider-{}-{}", root_hash(vault_root), provider_id)
 }
 
 /// 保存 API key 到 keychain（按仓库 + provider id）。
 /// 空串会覆盖旧值（前端删除 key 时传空串即可，无需调 delete）。
 #[tauri::command]
-pub fn set_api_key(vault_id: String, provider_id: String, key: String) -> Result<(), String> {
-    let entry = Entry::new(SERVICE, &username_for(&vault_id, &provider_id)).map_err(|e| e.to_string())?;
+pub fn set_api_key(vault_root: String, provider_id: String, key: String) -> Result<(), String> {
+    let entry = Entry::new(SERVICE, &username_for(&vault_root, &provider_id)).map_err(|e| e.to_string())?;
     entry.set_password(&key).map_err(|e| e.to_string())
 }
 
 /// 读取仓库内 provider 的 API key。
 /// 条目不存在（NoEntry）返回空串，与「未设置 key」语义一致；keychain 故障返回 Err。
 #[tauri::command]
-pub fn get_api_key(vault_id: String, provider_id: String) -> Result<String, String> {
-    let entry = Entry::new(SERVICE, &username_for(&vault_id, &provider_id)).map_err(|e| e.to_string())?;
+pub fn get_api_key(vault_root: String, provider_id: String) -> Result<String, String> {
+    let entry = Entry::new(SERVICE, &username_for(&vault_root, &provider_id)).map_err(|e| e.to_string())?;
     match entry.get_password() {
         Ok(s) => Ok(s),
         Err(keyring::Error::NoEntry) => Ok(String::new()),
@@ -45,11 +53,30 @@ pub fn get_api_key(vault_id: String, provider_id: String) -> Result<String, Stri
 
 /// 删除仓库内 provider 的 keychain 条目（幂等：条目不存在视为成功）。
 #[tauri::command]
-pub fn delete_api_key(vault_id: String, provider_id: String) -> Result<(), String> {
-    let entry = Entry::new(SERVICE, &username_for(&vault_id, &provider_id)).map_err(|e| e.to_string())?;
+pub fn delete_api_key(vault_root: String, provider_id: String) -> Result<(), String> {
+    let entry = Entry::new(SERVICE, &username_for(&vault_root, &provider_id)).map_err(|e| e.to_string())?;
     match entry.delete_credential() {
         Ok(()) => Ok(()),
         Err(keyring::Error::NoEntry) => Ok(()),
         Err(e) => Err(e.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn root_hash_is_stable_hex_and_differs_per_root() {
+        let a = root_hash("E:/repo");
+        assert_eq!(a, root_hash("E:/repo"));
+        assert_ne!(a, root_hash("E:/repo-copy"));
+        assert_eq!(a.len(), 64);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        // SHA-256("") = e3b0c4…（公开向量）：锁定算法为小写十六进制 SHA-256，防回归成其他摘要
+        assert_eq!(
+            root_hash(""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
     }
 }

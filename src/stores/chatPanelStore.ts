@@ -84,11 +84,11 @@ interface ChatPanelState {
   compacting: string | null;
   loaded: boolean;
   /** 当前内存会话所属的仓库 ID（load 时记录；flush 写盘前校验归属，防跨仓库搞混）。 */
-  sessionVaultId: string | null;
+  sessionVaultRoot: string | null;
 
-  /** 进仓库时加载：读盘历史会话 + 进入新对话态（默认显示新的空对话，不恢复上次激活会话）。vaultId = 当前仓库稳定 ID。
-   * `force`：真实仓库切换时传 true——绕过「已加载该仓库」幂等守卫强制重读盘（防 sessionVaultId 巧合等于目标时把切换当冗余跳过，面板停留在旧会话）。 */
-  load: (vaultId: string | null, force?: boolean) => Promise<void>;
+  /** 进仓库时加载：读盘历史会话 + 进入新对话态（默认显示新的空对话，不恢复上次激活会话）。vaultRoot = 当前仓库身份（root 绝对路径）。
+   * `force`：真实仓库切换时传 true——绕过「已加载该仓库」幂等守卫强制重读盘（防 sessionVaultRoot 巧合等于目标时把切换当冗余跳过，面板停留在旧会话）。 */
+  load: (vaultRoot: string | null, force?: boolean) => Promise<void>;
   /** 切到新对话态（activeSessionId = null，不创建空会话对象）——发送首条消息时才真正创建会话。 */
   newSession: () => void;
   /** 切换到历史会话（内存 updatedAt 置顶排序；「最近使用」不持久化，重启后按最近对话排序）。 */
@@ -129,9 +129,9 @@ interface ChatPanelState {
   /** watcher 收到 `.atelyx/对话历史/` 文件事件：内容比对合并（新会话/新消息/改名/删除跨设备实时互见；幂等、不置脏）。 */
   applyExternalChatChange: (file: string) => void;
   /** 立即落盘并返回写盘 Promise（可等待——切换仓库前必须先等旧会话写完，防写进新仓库）。
-   * `vaultId` = 期望写入的仓库 ID：与内存会话所属仓库（sessionVaultId）不匹配则跳过（防跨仓库污染）。
+   * `vaultRoot` = 期望写入的仓库身份（root 绝对路径）：与内存会话所属仓库（sessionVaultRoot）不匹配则跳过（防跨仓库污染）。
    * 无本地改动（dirty=false）也跳过（外部删除会话文件后切仓库不写回覆盖）。 */
-  flush: (vaultId: string | null) => Promise<void>;
+  flush: (vaultRoot: string | null) => Promise<void>;
 }
 
 let abortController: AbortController | null = null;
@@ -320,8 +320,8 @@ function markOverridesDirty() {
 
 /**
  * 写盘。`guardVaultId`：切仓库前 flush 传入的「期望仓库 ID」——
- * 内存会话属于其他仓库时（sessionVaultId 不匹配）绝不写，防跨仓库污染。
- * 定时写盘不传（sessionVaultId 随 load 已同步为当前仓库）。
+ * 内存会话属于其他仓库时（sessionVaultRoot 不匹配）绝不写，防跨仓库污染。
+ * 定时写盘不传（sessionVaultRoot 随 load 已同步为当前仓库）。
  */
 async function persistNow(guardVaultId?: string | null): Promise<void> {
   const versionAtStart = persistCtl.version;
@@ -332,7 +332,7 @@ async function persistNow(guardVaultId?: string | null): Promise<void> {
   // 仓库归属校验：flush 传入的期望仓库 ≠ 内存会话所属仓库 → 不写（防跨仓库搞混）
   if (
     guardVaultId !== undefined &&
-    guardVaultId !== useChatPanelStore.getState().sessionVaultId
+    guardVaultId !== useChatPanelStore.getState().sessionVaultRoot
   ) {
     return;
   }
@@ -675,15 +675,15 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
   error: null,
   compacting: null,
   loaded: false,
-  sessionVaultId: null,
+  sessionVaultRoot: null,
 
-  load: async (vaultId, force = false) => {
-    // 幂等：内存会话已属于目标仓库（sessionVaultId 为权威）则跳过——防多调用方重复读盘
-    // + 二次 load 覆盖进行中会话改动；真实换仓库（sessionVaultId ≠ 目标）必重载；
+  load: async (vaultRoot, force = false) => {
+    // 幂等：内存会话已属于目标仓库（sessionVaultRoot 为权威）则跳过——防多调用方重复读盘
+    // + 二次 load 覆盖进行中会话改动；真实换仓库（sessionVaultRoot ≠ 目标）必重载；
     // `force`（selectVault 真实切换传入）绕过守卫强制重读盘。
     const st = useChatPanelStore.getState();
-    const prevVault = st.sessionVaultId;
-    if (!force && st.loaded && prevVault === vaultId) {
+    const prevVault = st.sessionVaultRoot;
+    if (!force && st.loaded && prevVault === vaultRoot) {
       return;
     }
     // 清残留 debounce timer（防旧仓库 timer 写新仓库状态）+ 脏会话标记
@@ -707,7 +707,7 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
       pendingMentions: [],
       pendingRewrites: [],
       streaming: false,
-      ...(force || prevVault !== vaultId ? { sessions: [], activeSessionId: null } : {}),
+      ...(force || prevVault !== vaultRoot ? { sessions: [], activeSessionId: null } : {}),
     });
     try {
       // 读面板级覆盖（设备偏好）
@@ -734,7 +734,7 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
       }
       // 切仓库竞态守卫：后台填充链与 VaultSwitcher 快速切换并发时，
       // 旧仓库读取结果不得覆盖新仓库的会话（等待期间已切走则丢弃）
-      if (useAppStore.getState().vaultId !== vaultId) return;
+      if (useAppStore.getState().vaultRoot !== vaultRoot) return;
       // 新仓库干净状态：清脏标记（旧仓库未写完的改动不再写回）
       dirty = false;
       set({
@@ -742,7 +742,7 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
         // 新对话态：打开面板默认是空对话，历史会话从历史浮层手动打开；
         // Agent draft 默认预置「对话」（内存态），切仓库重置
         activeSessionId: null,
-        sessionVaultId: vaultId,
+        sessionVaultRoot: vaultRoot,
         modelOverride: f.modelOverride,
         effortOverride: f.effortOverride ?? null,
         draftAgentId: BUILTIN_AGENT_CHAT_ID,
@@ -762,7 +762,7 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
       if (unnamed) void autoNameSession(unnamed.id);
     } catch (e) {
       console.error("读取 AI 对话会话失败", e);
-      if (useAppStore.getState().vaultId !== vaultId) return;
+      if (useAppStore.getState().vaultRoot !== vaultRoot) return;
       set({ loaded: true, error: "读取 AI 对话会话失败" });
     }
   },
@@ -1127,9 +1127,9 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
 
   clearPendingRewrites: () => set({ pendingRewrites: [] }),
 
-  flush: (vaultId) => {
+  flush: (vaultRoot) => {
     // 无本地改动不写盘：外部删除会话文件后切仓库/退出，不把内存副本写回（覆盖删除）
     if (!dirty) return Promise.resolve();
-    return persistCtl.flush(vaultId);
+    return persistCtl.flush(vaultRoot);
   },
 }));

@@ -105,8 +105,6 @@ interface AppState {
   reportLoad: (label: string) => void;
   /** 结束加载会话（幂等；只收 active，步骤清单保留到下一次 beginLoad 重置）。 */
   endLoad: () => void;
-  /** 当前仓库稳定 ID（`.atelyx/config.json` 的 vaultId；chatPanelStore 等据此识别仓库归属）。 */
-  vaultId: string | null;
   /** 最近打开的仓库列表（按最近打开倒序） */
   recentVaults: RecentVault[];
   currentCanvasId: string | null;
@@ -270,7 +268,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   vaultName: "",
   entryLoading: false,
   loadSteps: [],
-  vaultId: null,
   recentVaults: [],
   currentCanvasId: null,
   currentCanvasFile: null,
@@ -409,9 +406,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     try {
       // 切换前先落盘旧仓库的全部领域编辑并**等待写盘完成**：openVault 会把 VaultState.root 切到新仓库，
       // 若 fire-and-forget 直接放行，写盘可能晚于 open_vault 执行、把旧仓库内容写进新仓库（跨仓库污染）。
-      // 领域 store 无改动则不写（脏门控，见各自 flush）；chatPanel 额外传当前仓库 vaultId 做归属校验。
+      // 领域 store 无改动则不写（脏门控，见各自 flush）；chatPanel 额外传当前仓库 root 做归属校验。
       // 经领域生命周期注册表分发（canvas/table/aichat/calendar/note 各钩子按注册序执行，失败快速传播）
-      await flushAllDomains({ vaultId: get().vaultId });
+      await flushAllDomains({ vaultRoot: get().vaultRoot });
       const info = await openVault(root);
       // 激活内容面仓库身份（root 绝对路径）：此后内容 I/O 按激活仓库取后端
       activateContentVault({ kind: "local", root: info.root });
@@ -431,7 +428,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       set({
         vaultRoot: info.root,
         vaultName: info.name,
-        vaultId: info.id,
         recentVaults: recents,
         canvases: [],
         currentCanvasId: null,
@@ -472,8 +468,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       get().reportLoad("加载 AI 会话");
       try {
         // 领域仓库上下文（AI 会话读盘等）经注册表分发；aichat 钩子 force：真实仓库切换，
-        // 强制重读盘（防 sessionVaultId 巧合等于目标时被幂等守卫跳过，面板停留在旧仓库会话）
-        await notifyVaultEntered({ vaultId: info.id });
+        // 强制重读盘（防 sessionVaultRoot 巧合等于目标时被幂等守卫跳过，面板停留在旧仓库会话）
+        await notifyVaultEntered({ vaultRoot: info.root });
       } catch (e) {
         console.error("加载领域仓库上下文失败", e);
       }
@@ -487,7 +483,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
       // 全部加载完成（含插件）才进入仓库：切换工作区视图，窗口形态随 view 统一应用
       set({ view: "workspace" });
-      emitPluginEvent("vault:switch", { root: info.root, id: info.id });
+      emitPluginEvent("vault:switch", { root: info.root });
       return true;
     } catch (e) {
       console.error("打开仓库失败", e);
@@ -515,9 +511,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   backToVaultSelect: () => {
     // 回启动页：AI 会话/日历日程/笔记挂起输入/表格改动落盘防 debounce 丢改动（root 未切换，写旧仓库
     // 安全；冲突未决/已删文件条目由 flushPendingNotes 内部保留）。经注册表分发（fire-and-forget）。
-    // vaultId 在置空前同步捕获随 ctx 传入：分发是 async 循环，钩子被调用时 store 里的 vaultId 已为 null。
-    const exitingVaultId = get().vaultId;
-    void notifyVaultExit({ vaultId: exitingVaultId }).catch((e) =>
+    // vaultRoot 在置空前同步捕获随 ctx 传入：分发是 async 循环，钩子被调用时 store 里的 vaultRoot 已为 null。
+    const exitingVaultRoot = get().vaultRoot;
+    void notifyVaultExit({ vaultRoot: exitingVaultRoot }).catch((e) =>
       console.error("退出仓库领域清理失败", e),
     );
     useSettingsStore.getState().clearVaultConfig();
@@ -529,7 +525,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       view: "vaultSelect",
       vaultRoot: null,
       vaultName: "",
-      vaultId: null,
       canvases: [],
       currentCanvasId: null,
       currentCanvasFile: null,
@@ -554,7 +549,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     // 领域 store 全部 pending 改动（画布/表格/AI 会话/日历/笔记挂起输入）经生命周期注册表分发；
     // 笔记编辑器挂起的 debounce 输入（组件内 timer，不走 store）也在笔记钩子内统一落盘 +
     // 补历史存档点，防关窗/切仓库/AI 重命名移动删除前丢最后 500ms 输入
-    await flushAllDomains({ vaultId: get().vaultId });
+    await flushAllDomains({ vaultRoot: get().vaultRoot });
     await useUiStateStore.getState().flush();
     await useSettingsStore.getState().flush();
     // 协作连接收尾不在此处（本函数启动自动更新检查时也会调用）：dispose 会断开会话内协作连接
@@ -616,12 +611,12 @@ export const useAppStore = create<AppState>((set, get) => ({
   closeSettings: () => set({ settingsModal: null }),
 
   loadList: async () => {
-    const vaultId = get().vaultId;
+    const vaultRoot = get().vaultRoot;
     try {
       const canvases = await listCanvasesVault();
       // 切仓库竞态守卫：等待期间用户可能已切到新仓库（后台填充链与 VaultSwitcher 快速切换并发），
       // 旧仓库的扫描结果不得覆盖新仓库的列表
-      if (get().vaultId !== vaultId) return;
+      if (get().vaultRoot !== vaultRoot) return;
       set({ canvases });
     } catch (e) {
       console.error("加载画布列表失败", e);
@@ -632,8 +627,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     // 记录「上次打开」供下次进入仓库恢复（画布窗口已无标签概念，打开即唯一文件状态）
     useUiStateStore.getState().recordOpenFile("canvas", row.file);
     // 记录最近打开（主页面板「最近打开」数据源）
-    const vaultId = get().vaultId;
-    if (vaultId) useUiStateStore.getState().recordRecentFile(row.file, "canvas", vaultId);
+    const vaultRoot = get().vaultRoot;
+    if (vaultRoot) useUiStateStore.getState().recordRecentFile(row.file, "canvas", vaultRoot);
   },
   closeCanvas: () => {
     set({ currentCanvasId: null, currentCanvasFile: null });
@@ -644,8 +639,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   openNote: (file, title) => {
     set({ currentNoteFile: file, currentNoteTitle: title });
     useUiStateStore.getState().recordOpenFile("note", file);
-    const vaultId = get().vaultId;
-    if (vaultId) useUiStateStore.getState().recordRecentFile(file, "note", vaultId);
+    const vaultRoot = get().vaultRoot;
+    if (vaultRoot) useUiStateStore.getState().recordRecentFile(file, "note", vaultRoot);
     emitPluginEvent("note:opened", { file });
   },
   closeNote: () => {
@@ -656,8 +651,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   openTable: (file, title) => {
     set({ currentTableFile: file, currentTableTitle: title });
     useUiStateStore.getState().recordOpenFile("table", file);
-    const vaultId = get().vaultId;
-    if (vaultId) useUiStateStore.getState().recordRecentFile(file, "table", vaultId);
+    const vaultRoot = get().vaultRoot;
+    if (vaultRoot) useUiStateStore.getState().recordRecentFile(file, "table", vaultRoot);
     // 内容加载由 TableView 自载（同 CanvasView：openCanvas 不加载，视图挂载时按文件读盘）——
     // 撕裂窗口只镜像文件路径，须由视图统一承担加载；此处不 load 防主窗口切表时重复读盘
   },

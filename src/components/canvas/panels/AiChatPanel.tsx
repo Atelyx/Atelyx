@@ -211,7 +211,7 @@ export function AiChatPanel() {
   useEffect(() => {
     if (!vaultRoot) return;
     closeHistory();
-    void useChatPanelStore.getState().load(useAppStore.getState().vaultId);
+    void useChatPanelStore.getState().load(useAppStore.getState().vaultRoot);
   }, [vaultRoot, closeHistory]);
 
   // 智能滚动跟随：贴底自动跟随新消息；上翻停止跟随 + 「新消息」回底按钮（与画布对话节点共用 hook）

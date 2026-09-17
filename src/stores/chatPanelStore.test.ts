@@ -1,7 +1,7 @@
 /**
  * AI 对话面板写盘契约测试（stores/chatPanelStore.ts 的 flush → persistNow + 回启动页分发）。
  * 只覆盖不依赖真实仓库 I/O 的语义：flush 传入的期望仓库必须与内存会话所属仓库一致才落盘；
- * 回启动页的领域分发必须携带置空前的 vaultId。
+ * 回启动页的领域分发必须携带置空前的 vaultRoot。
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { CHAT_UNAVAILABLE_TEXT } from "@/constants/chat";
@@ -26,11 +26,11 @@ type AppStore = typeof import("./appStore");
 let chat: ChatStore;
 let app: AppStore;
 
-/** 进仓并让内存会话归属 v1（load 后 sessionVaultId = v1、loaded = true）。 */
-async function loadedInVault(vaultId: string): Promise<void> {
-  app.useAppStore.setState({ vaultId });
-  await chat.useChatPanelStore.getState().load(vaultId, true);
-  expect(chat.useChatPanelStore.getState().sessionVaultId).toBe(vaultId);
+/** 进仓并让内存会话归属 v1（load 后 sessionVaultRoot = v1、loaded = true）。 */
+async function loadedInVault(vaultRoot: string): Promise<void> {
+  app.useAppStore.setState({ vaultRoot });
+  await chat.useChatPanelStore.getState().load(vaultRoot, true);
+  expect(chat.useChatPanelStore.getState().sessionVaultRoot).toBe(vaultRoot);
 }
 
 beforeEach(async () => {
@@ -70,8 +70,8 @@ describe("flush 的仓库归属守卫", () => {
   });
 
   it("未加载（loaded=false）时不落盘，防空态覆盖磁盘历史", async () => {
-    // 只置 sessionVaultId：让 loaded 成为唯一拦截条件（否则仓库守卫会先拦下，测不到该分支）
-    chat.useChatPanelStore.setState({ sessionVaultId: "v1" });
+    // 只置 sessionVaultRoot：让 loaded 成为唯一拦截条件（否则仓库守卫会先拦下，测不到该分支）
+    chat.useChatPanelStore.setState({ sessionVaultRoot: "v1" });
     chat.useChatPanelStore.getState().setModelOverride({ providerId: "p", model: "m" });
     await chat.useChatPanelStore.getState().flush("v1");
     expect(h.metaWrites).toHaveLength(0);
@@ -79,20 +79,20 @@ describe("flush 的仓库归属守卫", () => {
 });
 
 describe("回启动页的 flush 契约（appStore.backToVaultSelect → 领域钩子）", () => {
-  it("钩子收到置空前的 vaultId（分发晚于 store 置空，不得回读 store）", async () => {
+  it("钩子收到置空前的 vaultRoot（分发晚于 store 置空，不得回读 store）", async () => {
     const lifecycle = await import("@/utils/kernelLifecycle");
-    app.useAppStore.setState({ vaultId: "v1" });
+    app.useAppStore.setState({ vaultRoot: "v1" });
     const got: (string | null)[] = [];
     const off = lifecycle.registerDomainLifecycle({
       id: "test.exit-flush",
       onVaultExit: async (ctx) => {
-        got.push(ctx.vaultId);
+        got.push(ctx.vaultRoot);
       },
     });
     try {
       app.useAppStore.getState().backToVaultSelect();
       await vi.waitFor(() => expect(got).toEqual(["v1"]));
-      expect(app.useAppStore.getState().vaultId).toBeNull();
+      expect(app.useAppStore.getState().vaultRoot).toBeNull();
     } finally {
       off();
     }

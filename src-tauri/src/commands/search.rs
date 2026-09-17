@@ -5,7 +5,7 @@
 //!   `Access-Control-Allow-Origin` 拦截（官方架构即「放反代后面」）；Rust 代理天然绕过。
 //! - **Tavily**：官方 best practice 明确 API key 不应暴露在客户端代码；key 优先从仓库
 //!   `config.json` 的 `search.tavilyApiKey` 读取（`syncKeys` 开启时随仓库落盘、多设备共享），
-//!   为空则回退 keychain 条目 `provider-<vaultId>-search-tavily`（默认模式，按仓库隔离）；不落 WebView。
+//!   为空则回退 keychain 条目 `provider-<sha256(root)>-search-tavily`（默认模式，按仓库隔离）；不落 WebView。
 //!
 //! 边界捕获：网络/HTTP 错误返回 Err，前端 `runSearch` 降级为 `SearchResultData.error`
 //! （失败降级不阻塞对话，）。
@@ -40,10 +40,10 @@ pub async fn search_web(
     searxng_url: Option<String>,
 ) -> Result<Vec<SearchResultItem>, String> {
     let root = state.root()?;
-    // 仓库配置读一次：Tavily key（syncKeys 开启时随仓库落盘）与 vault_id（keychain 回退用）
+    // 仓库配置读一次：Tavily key（syncKeys 开启时随仓库落盘；关时回退 keychain，按仓库身份哈希取条目）
     let config = read_vault_config(&root)?;
     match provider.as_str() {
-        "tavily" => tavily_search(&config, &query).await,
+        "tavily" => tavily_search(root.to_str().unwrap_or_default(), &config, &query).await,
         "searxng" => searxng_search(searxng_url.unwrap_or_default().as_str(), &query).await,
         other => Err(format!("未知搜索源：{}", other)),
     }
@@ -69,8 +69,12 @@ fn http_client(policy: HostPolicy) -> Result<reqwest::Client, String> {
         .map_err(|e| e.to_string())
 }
 
-async fn tavily_search(config: &VaultConfig, query: &str) -> Result<Vec<SearchResultItem>, String> {
-    let key = get_tavily_key(config)?;
+async fn tavily_search(
+    root: &str,
+    config: &VaultConfig,
+    query: &str,
+) -> Result<Vec<SearchResultItem>, String> {
+    let key = get_tavily_key(root, config)?;
     if key.is_empty() {
         return Err("未配置 Tavily API Key（工作区「设置」→ 联网搜索）".to_string());
     }
@@ -157,14 +161,13 @@ fn file_tavily_key(config: &VaultConfig) -> Option<&str> {
 }
 
 /// 读 Tavily key：`syncKeys` 开启时取仓库 config.json 的 `search.tavilyApiKey`；
-/// 否则取 keychain 条目 `provider-<vaultId>-search-tavily`（默认模式，按仓库隔离）。
-fn get_tavily_key(config: &VaultConfig) -> Result<String, String> {
+/// 否则取 keychain 条目（默认模式，按仓库身份 = root 哈希隔离，见 keychain 模块）。
+fn get_tavily_key(root: &str, config: &VaultConfig) -> Result<String, String> {
     if let Some(k) = file_tavily_key(config) {
         return Ok(k.to_string());
     }
-    let vault_id = config.vault_id.as_deref().unwrap_or_default();
     // keychain 读写统一走 keychain 模块（同 service/username 拼法、NoEntry → 空串语义一致）
-    crate::commands::keychain::get_api_key(vault_id.to_string(), "search-tavily".to_string())
+    crate::commands::keychain::get_api_key(root.to_string(), "search-tavily".to_string())
 }
 
 /// 构造 SearXNG 查询 URL（实例地址先过本机/局域网策略，再拼 `/search` 与查询串）。

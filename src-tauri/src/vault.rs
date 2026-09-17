@@ -866,7 +866,7 @@ pub struct VaultModel {
 }
 
 /// 仓库级 AI 供应商（磁盘格式，默认**不含 api_key**——key 走 keychain 条目
-/// `provider-<vaultId>-<id>`；仅 `syncKeys` 开启时随仓库落盘 apiKey，多设备同步）。
+/// `provider-<sha256(root)>-<id>`；仅 `syncKeys` 开启时随仓库落盘 apiKey，多设备同步）。
 /// 运行时含 key 的 `ProviderConfig` 由前端 `settingsStore` 填充。
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -883,7 +883,7 @@ pub struct VaultProvider {
 }
 
 /// 仓库级搜索源配置（默认**不含 API key**——Tavily key 走 keychain 条目
-/// `provider-<vaultId>-search-tavily`；仅 `syncKeys` 开启时随仓库落盘 tavily_api_key）。
+/// `provider-<sha256(root)>-search-tavily`；仅 `syncKeys` 开启时随仓库落盘 tavily_api_key）。
 #[derive(Serialize, Deserialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct VaultSearchConfig {
@@ -910,12 +910,12 @@ pub struct VaultConfig {
     /// 仓库级默认模型所属供应商（与 model 配对固定供应商；旧配置缺省 = 前端按 model 名反查首个命中，重选后落盘）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_provider_id: Option<String>,
-    /// 仓库级 AI 供应商列表（默认无 key；key 走 keychain 条目 `provider-<vaultId>-<id>`，
+    /// 仓库级 AI 供应商列表（默认无 key；key 走 keychain 条目 `provider-<sha256(root)>-<id>`，
     /// `syncKeys` 开启时随仓库落盘 apiKey）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub providers: Option<Vec<VaultProvider>>,
     /// 仓库级搜索源配置（默认无 key；Tavily key 走 keychain 条目
-    /// `provider-<vaultId>-search-tavily`，`syncKeys` 开启时随仓库落盘 tavily_api_key）。
+    /// `provider-<sha256(root)>-search-tavily`，`syncKeys` 开启时随仓库落盘 tavily_api_key）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub search: Option<VaultSearchConfig>,
     /// API key 是否随仓库保存（多设备同步）：开启后 key 明文落盘本文件随仓库同步；

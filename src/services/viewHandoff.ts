@@ -47,6 +47,11 @@ export function emitCanvasViewportHandoff(file: string | null): void {
   void emit("view-handoff", { file, viewport: vp });
 }
 
+/** 清空本窗口缓存的全部画布视口（切仓库时调用：视口按文件路径缓存，跨仓库同路径不得复用）。 */
+export function clearCanvasViewportCache(): void {
+  viewports.clear();
+}
+
 /** 订阅「本画布视口交接到达」（目标窗口画布挂载后到达时补恢复；返回取消订阅函数）。 */
 export function onCanvasViewportHandoff(fn: (file: string, vp: Viewport) => void): () => void {
   ensureSubscribed();

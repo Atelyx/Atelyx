@@ -13,9 +13,9 @@
  */
 import type { ViewKind } from "@/types";
 
-/** 进仓/切仓库生命周期分发上下文（当前仓库 vaultId；vaultId 为 null = 未进仓/回启动页）。 */
+/** 进仓/切仓库生命周期分发上下文（当前仓库身份 = root 绝对路径；null = 未进仓/回启动页）。 */
 export interface VaultLifecycleContext {
-  vaultId: string | null;
+  vaultRoot: string | null;
 }
 
 /** 单领域生命周期钩子（按领域插件 id 注册；无对应能力时字段省略）。 */
@@ -29,7 +29,7 @@ export interface DomainLifecycleHooks {
   /** 进入仓库后加载仓库上下文（文件树/列表刷新完成后；如 AI 会话读盘）。 */
   onVaultEntered?: (ctx: VaultLifecycleContext) => Promise<void>;
   /** 回启动页/退出仓库清理（如会话类状态落盘；调用方按需 fire-and-forget）。
-   *  只能用 ctx.vaultId 定位所属仓库（调用方已把 store 里的 vaultId 置空）。 */
+   *  只能用 ctx.vaultRoot 定位所属仓库（调用方已把 store 里的 vaultRoot 置空）。 */
   onVaultExit?: (ctx: VaultLifecycleContext) => Promise<void>;
   /** 视图离开本窗口（撕裂出去/面板关闭）：flush 落盘 + 清内存；钩子自行判断是否处理该 view。 */
   releaseView?: (view: ViewKind) => Promise<void>;
@@ -84,7 +84,7 @@ export async function notifyVaultEntered(ctx: VaultLifecycleContext): Promise<vo
 }
 
 /** 回启动页/退出仓库清理（按注册序 await；调用方可 fire-and-forget）。
- *  ctx 的 vaultId 由调用方在置空前同步捕获——分发是 async 循环，钩子被调用时 store 可能已清空。 */
+ *  ctx 的 vaultRoot 由调用方在置空前同步捕获——分发是 async 循环，钩子被调用时 store 可能已清空。 */
 export async function notifyVaultExit(ctx: VaultLifecycleContext): Promise<void> {
   for (const h of hooks.values()) {
     if (!h.onVaultExit) continue;
