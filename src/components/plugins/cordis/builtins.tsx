@@ -281,9 +281,6 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
       flush: async () => {
         await useCalendarStore.getState().flush();
       },
-      onVaultExit: async () => {
-        await useCalendarStore.getState().flush();
-      },
     },
   }),
   def({
@@ -309,10 +306,6 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
       onVaultEntered: async (ctx) => {
         // 进仓后读盘加载 AI 会话（force：真实切换强制重读，防幂等守卫跳过旧会话）
         await useChatPanelStore.getState().load(ctx.vaultRoot, true);
-      },
-      onVaultExit: async (ctx) => {
-        // 必须用 ctx.vaultRoot：分发晚于 store 置空，回读 store 会拿到 null 而被仓库守卫丢弃
-        await useChatPanelStore.getState().flush(ctx.vaultRoot);
       },
       onViewGained: (view) => {
         if (view !== "aichat") return;
@@ -486,9 +479,6 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
       flush: async () => {
         await useNoteStore.getState().flushPendingNotes();
       },
-      onVaultExit: async () => {
-        await useNoteStore.getState().flushPendingNotes();
-      },
     },
     capability: () => {
       const offAccess = wireNoteAccess();
@@ -574,9 +564,6 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
     lifecycle: {
       id: "builtin.table",
       flush: async () => {
-        await useTableStore.getState().flush();
-      },
-      onVaultExit: async () => {
         await useTableStore.getState().flush();
       },
       releaseView: async (view) => {

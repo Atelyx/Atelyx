@@ -3,7 +3,7 @@
  * 再次点击关闭。`align="bottom"` 用于固定向上弹出的触发器（底边贴触发器顶边），
  * 缺省 = 向下弹出 + 下方空间不足向上翻转（flipY = 触发器顶边）。
  *
- * 供 DropdownSelect / VaultSwitcher / 历史会话按钮等
+ * 供 DropdownSelect / 历史会话按钮等
  * 所有「锚定按钮弹出」的浮层共用，消除各自手写 anchor 状态的重复。
  */
 import { useCallback, useState } from "react";

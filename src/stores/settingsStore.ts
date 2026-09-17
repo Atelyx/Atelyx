@@ -95,8 +95,6 @@ interface SettingsState {
   load: () => Promise<void>;
   /** 打开仓库后读 `.atelyx/config.json`（AI 供应商/搜索源等仓库级配置）+ keychain 填充 key。由 appStore.selectVault 调用。 */
   loadVaultConfig: () => Promise<void>;
-  /** 返回仓库选择页时清空仓库级状态（应用级外观保留）。由 appStore.backToVaultSelect 调用。 */
-  clearVaultConfig: () => void;
   /** 设搜索源（仓库级，写 .atelyx/config.json）。 */
   setSearchConfig: (patch: Partial<GlobalSearchConfig>) => Promise<void>;
   /** 设 Tavily API key（仓库级；syncKeys 关 = 写 keychain（按仓库身份哈希隔离），开 = 随 config.json 落盘；空串删除）。 */
@@ -297,7 +295,7 @@ function configDigest(cfg: AiConfig): string {
   );
 }
 
-/** 丢弃写盘基线：切仓库/回启动页后下次进入必写。 */
+/** 丢弃写盘基线：切仓库后下次进入必写。 */
 function resetPersistBaseline(): void {
   loadedForVaultRoot = null;
   persistedDigest = "";
@@ -707,19 +705,6 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         message: "仓库配置读取失败：供应商与 API key 的修改不会保存，请重新打开仓库后再试",
       });
     }
-  },
-
-  clearVaultConfig: () => {
-    resetPersistBaseline();
-    set({
-      vaultConfig: null,
-      config: DEFAULT_AI_CONFIG,
-      searchConfig: { provider: "tavily", searxngUrl: "" },
-      tavilyKey: "",
-      promptNotes: [],
-      agents: [],
-      folderColors: {},
-    });
   },
 
   // 话题自动命名模型解析：设置页指定（autoNamingModel）→ 仓库默认模型（vaultConfig.model）；

@@ -39,7 +39,7 @@ pub struct VaultState {
     pub table_cache: Mutex<HashMap<String, CachedFile<TableFile>>>,
 }
 
-/// 一次仓库会话：根路径 + 该仓库生效的文件面板配置（open_vault/ensure_default_vault 时从配置解析）。
+/// 一次仓库会话：根路径 + 该仓库生效的文件面板配置（open_vault 时从配置解析）。
 pub struct VaultSession {
     pub root: PathBuf,
     /// 排除文件夹名列表（任何层级的同名文件夹不显示/不监听，`excludeFolders` 配置）。

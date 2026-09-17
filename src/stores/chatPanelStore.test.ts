@@ -1,7 +1,6 @@
 /**
- * AI 对话面板写盘契约测试（stores/chatPanelStore.ts 的 flush → persistNow + 回启动页分发）。
+ * AI 对话面板写盘契约测试（stores/chatPanelStore.ts 的 flush → persistNow）。
  * 只覆盖不依赖真实仓库 I/O 的语义：flush 传入的期望仓库必须与内存会话所属仓库一致才落盘；
- * 回启动页的领域分发必须携带置空前的 vaultRoot。
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { CHAT_UNAVAILABLE_TEXT } from "@/constants/chat";
@@ -75,27 +74,6 @@ describe("flush 的仓库归属守卫", () => {
     chat.useChatPanelStore.getState().setModelOverride({ providerId: "p", model: "m" });
     await chat.useChatPanelStore.getState().flush("v1");
     expect(h.metaWrites).toHaveLength(0);
-  });
-});
-
-describe("回启动页的 flush 契约（appStore.backToVaultSelect → 领域钩子）", () => {
-  it("钩子收到置空前的 vaultRoot（分发晚于 store 置空，不得回读 store）", async () => {
-    const lifecycle = await import("@/utils/kernelLifecycle");
-    app.useAppStore.setState({ vaultRoot: "v1" });
-    const got: (string | null)[] = [];
-    const off = lifecycle.registerDomainLifecycle({
-      id: "test.exit-flush",
-      onVaultExit: async (ctx) => {
-        got.push(ctx.vaultRoot);
-      },
-    });
-    try {
-      app.useAppStore.getState().backToVaultSelect();
-      await vi.waitFor(() => expect(got).toEqual(["v1"]));
-      expect(app.useAppStore.getState().vaultRoot).toBeNull();
-    } finally {
-      off();
-    }
   });
 });
 

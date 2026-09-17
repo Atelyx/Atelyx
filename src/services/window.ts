@@ -5,8 +5,6 @@ import { getCurrentWindow, type Window } from "@tauri-apps/api/window";
 import { LogicalSize } from "@tauri-apps/api/dpi";
 import { invoke } from "@tauri-apps/api/core";
 
-/** 启动页窗口尺寸（固定、不可调整）。 */
-const STARTUP_WINDOW = { width: 960, height: 640 };
 /** 工作区窗口尺寸（默认与最小一致：不可缩小到默认以下）。 */
 const WORKSPACE_WINDOW = { width: 1440, height: 900 };
 
@@ -54,18 +52,7 @@ export async function toggleFullscreen(): Promise<void> {
   await win.setFullscreen(!fs);
 }
 
-/** 进入启动页：退出全屏/最大化 → 移除最小尺寸约束 → 固定尺寸且不可调整（内容自适应）。 */
-export async function applyStartupWindow(): Promise<void> {
-  const win = getCurrentWindow();
-  if (await win.isFullscreen()) await win.setFullscreen(false);
-  if (await win.isMaximized()) await win.unmaximize();
-  await win.setMinSize(null);
-  await win.setResizable(false);
-  // 首启时窗口已按启动页尺寸居中创建，此调用为 no-op；从工作区返回时才真正收缩居中
-  await setSizeCentered(win, STARTUP_WINDOW.width, STARTUP_WINDOW.height);
-}
-
-/** 进入工作区：恢复可调整；窗口小于默认时放大到默认；最小尺寸 = 默认（不可缩小）。 */
+/** 应用工作区形态：恢复可调整；窗口小于默认时放大到默认；最小尺寸 = 默认（不可缩小）。 */
 export async function applyWorkspaceWindow(): Promise<void> {
   const win = getCurrentWindow();
   await win.setResizable(true);

@@ -6,7 +6,6 @@ import { describe, it, expect } from "vitest";
 import {
   flushAllDomains,
   notifyVaultEntered,
-  notifyVaultExit,
   notifyVaultLeaving,
   notifyViewGained,
   notifyViewRemoved,
@@ -17,7 +16,7 @@ import {
 } from "./kernelLifecycle";
 
 describe("领域生命周期注册表", () => {
-  it("按注册序分发 flush / entered / exit / leaving / releaseView / 视图进出", async () => {
+  it("按注册序分发 flush / entered / leaving / releaseView / 视图进出", async () => {
     const order: string[] = [];
     const a = registerDomainLifecycle({
       id: "a",
@@ -29,9 +28,6 @@ describe("领域生命周期注册表", () => {
       },
       onVaultEntered: async () => {
         order.push("a.entered");
-      },
-      onVaultExit: async (ctx) => {
-        order.push(`a.exit:${ctx.vaultRoot}`);
       },
       releaseView: async (v) => {
         order.push(`a.release:${v}`);
@@ -63,10 +59,6 @@ describe("领域生命周期注册表", () => {
     order.length = 0;
     await notifyVaultEntered({ vaultRoot: "v1" });
     expect(order).toEqual(["a.entered"]);
-
-    order.length = 0;
-    await notifyVaultExit({ vaultRoot: "v1" });
-    expect(order).toEqual(["a.exit:v1"]);
 
     order.length = 0;
     await releaseView("canvas");
@@ -140,7 +132,6 @@ describe("领域生命周期注册表", () => {
     expect(hasDomainLifecycle("any")).toBe(false);
     notifyVaultLeaving();
     await notifyVaultEntered({ vaultRoot: "v" });
-    await notifyVaultExit({ vaultRoot: null });
     await releaseView("table");
     notifyViewGained("canvas");
     notifyViewRemoved("note");
@@ -172,20 +163,6 @@ describe("领域生命周期注册表", () => {
     expect(got).toEqual(["vault-7"]);
     r();
     unregisterDomainLifecycle("entered");
-  });
-
-  it("回启动页清理透传切换前的 vaultRoot（钩子不回读 store）", async () => {
-    const got: unknown[] = [];
-    const r = registerDomainLifecycle({
-      id: "exit",
-      onVaultExit: async (ctx) => {
-        got.push(ctx.vaultRoot);
-      },
-    });
-    await notifyVaultExit({ vaultRoot: "vault-9" });
-    expect(got).toEqual(["vault-9"]);
-    r();
-    unregisterDomainLifecycle("exit");
   });
 
   it("releaseView 只调用实现了 releaseView 的钩子（各自判断 view）", async () => {

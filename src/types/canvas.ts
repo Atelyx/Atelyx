@@ -220,7 +220,7 @@ export interface VaultInfo {
   configCorruptBackup: string | null;
 }
 
-/** 最近打开的仓库（存全局 global.json，启动页展示）。 */
+/** 最近打开的仓库（存全局 global.json，文件面板列表层展示）。 */
 export interface RecentVault {
   /** 仓库根绝对路径 */
   root: string;

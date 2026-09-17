@@ -15,7 +15,7 @@ import { noteTitleFromFile, stripExt, tableTitleFromFile } from "@/utils/filenam
 import type { CanvasFileRow, FileExplorerSortKey, FileTreeNode } from "@/types";
 import type { Editing, MenuTarget } from "./actions";
 
-interface FileTreeProps {
+export interface FileTreeProps {
   nodes: FileTreeNode[];
   depth: number;
   /** 该层所属目录（根目录 = ""，供「在目标文件夹新建草稿」落点判定）。 */

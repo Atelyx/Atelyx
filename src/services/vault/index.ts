@@ -309,11 +309,6 @@ export async function deleteChatMessages(file: string): Promise<void> {
   await invoke("delete_chat_messages", { file });
 }
 
-/** 确保默认仓库已打开（首启 bootstrap：无最近仓库时建默认仓库并打开）。 */
-export async function ensureDefaultVault(): Promise<VaultInfo> {
-  return invoke<VaultInfo>("ensure_default_vault");
-}
-
 /** 新建空画布，返回 { id, file }（file = 相对仓库根路径，前端打开/保存用；dir 空 = 根目录）。 */
 export async function createCanvasVault(
   title: string,

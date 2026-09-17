@@ -7,12 +7,11 @@ import {
   moveCanvasVault,
   readCanvasVault,
   writeCanvasVault,
-  ensureDefaultVault,
   openVault,
   convertWhiteboardToAtlx,
   remapSideloads,
 } from "@/services/vault";
-import { activateContentVault, deactivateContentVault } from "@/services/content/factory";
+import { activateContentVault } from "@/services/content/factory";
 import {
   readGlobalConfig,
   updateGlobalConfig,
@@ -28,7 +27,6 @@ import { markSelfSave } from "@/utils/selfSave";
 import {
   flushAllDomains,
   notifyVaultEntered,
-  notifyVaultExit,
   notifyVaultLeaving,
   releaseView,
 } from "@/utils/kernelLifecycle";
@@ -38,7 +36,7 @@ import { getAppVersion as getVersionSvc } from "@/services/app";
 import { openInExplorer as openInExplorerSvc, openUrl as openUrlSvc } from "@/services/shell";
 import { readClipboardText as readClipboardTextSvc, writeClipboardText as writeClipboardTextSvc } from "@/services/clipboard";
 import { pickDirectory as pickDirectorySvc } from "@/services/dialog";
-import { applyStartupWindow as applyStartupWindowSvc, applyWorkspaceWindow as applyWorkspaceWindowSvc, closeWindow as closeWindowSvc, minimizeWindow as minimizeWindowSvc, onCloseRequested as onCloseRequestedSvc, toggleFullscreen as toggleFullscreenSvc, toggleMaximizeWindow as toggleMaximizeWindowSvc } from "@/services/window";
+import { applyWorkspaceWindow as applyWorkspaceWindowSvc, closeWindow as closeWindowSvc, minimizeWindow as minimizeWindowSvc, onCloseRequested as onCloseRequestedSvc, toggleFullscreen as toggleFullscreenSvc, toggleMaximizeWindow as toggleMaximizeWindowSvc } from "@/services/window";
 import { checkAndAutoUpdate as checkAndAutoUpdateSvc, checkForUpdate as checkForUpdateSvc, installUpdate as installUpdateSvc } from "@/services/updater";
 import { emitPluginEvent } from "@/services/cordis/events";
 import { usePluginStore } from "@/stores/pluginStore";
@@ -76,19 +74,12 @@ function notifySidecarFailure(what: string, error: unknown): void {
 }
 
 /**
- * 应用级状态：路由 + 当前仓库 + 画布列表 CRUD。
+ * 应用级状态：当前仓库 + 画布列表 CRUD。
  *
- * 两视图路由：
- * - vaultSelect：启动页 = 仓库选择，展示最近仓库，打开/新建仓库
- * - workspace：画布工作区（左文件面板 + 右画布；无当前画布时占位引导）
- *
- * 选仓库后直达 workspace（currentCanvasId=null 占位），画布管理收进左栏文件面板。
- * 首启无最近仓库时 ensureDefaultVault 建默认仓库并登记。
+ * 启动即工作区：仓库的入口与管理在文件面板仓库树（仓库为顶级条目），
+ * 无激活仓库时树区空态引导创建；当前仓库由 selectVault 单点进入（flush → 清理 → 换 root）。
  */
-type View = "vaultSelect" | "workspace";
-
 interface AppState {
-  view: View;
   /** 插件应用页面 id（非空 = 插件全页接管，渲染注册的插件页面替代工作区；app 页面/模式）。 */
   pluginPage: string | null;
   /** 当前仓库根路径（workspace 期间有效） */
@@ -97,6 +88,9 @@ interface AppState {
   vaultName: string;
   /** 全屏加载进行中（boot 异步 + selectVault 全程；App 据此渲染加载屏，插件逐项上报据此门控）。 */
   entryLoading: boolean;
+  /** 面板内切换进行中的目标仓库 root（null = 空闲）。仓库树据此在目标行显示加载动画并禁点；
+   *  兼作 selectVault 的重入守卫（切换不再有整屏加载屏兜底，防并发重入）。 */
+  switchingVaultRoot: string | null;
   /** 加载步骤清单（已完成 + 当前进行中的标签，顺序；LoadingScreen 渲染步骤提示）。 */
   loadSteps: string[];
   /** 开始一次加载会话（幂等：已激活不重置；boot 先 begin，selectVault 复用）。 */
@@ -130,7 +124,7 @@ interface AppState {
   /** 新版本下载安装中（available 后点「下载并安装」）。 */
   installing: boolean;
 
-  /** 应用挂载时调用一次：加载最近仓库，首启建默认仓库。返回本次应自动进入的仓库 root（null = 不自动进入）。 */
+  /** 应用挂载时调用一次：读取最近仓库列表。返回本次应自动进入的仓库 root（null = 无仓库，停留空态）。 */
   init: () => Promise<string | null>;
   /** 设自动检查更新（应用级，写 global.json；不随仓库同步）。 */
   setAutoUpdate: (enabled: boolean) => Promise<void>;
@@ -140,10 +134,8 @@ interface AppState {
   installUpdate: () => Promise<void>;
   /** 打开仓库：openVault + 登记最近 + 进画布工作区（占位态）。成功返回 true。 */
   selectVault: (root: string) => Promise<boolean>;
-  /** 从最近列表移除某仓库（不删文件）。 */
+  /** 从最近列表移除某仓库（不删文件；移除当前激活仓库不影响激活态）。 */
   removeRecentVault: (root: string) => Promise<void>;
-  /** 返回仓库选择页（VaultSwitcher「管理仓库」入口）。 */
-  backToVaultSelect: () => void;
   /** 打开插件应用页面（全页接管；仅工作区视图生效）。 */
   openPluginPage: (id: string) => void;
   /** 退出插件应用页面（回到工作区）。 */
@@ -167,15 +159,14 @@ interface AppState {
   readClipboardText: () => Promise<string>;
   /** 写纯文本到系统剪贴板。 */
   writeClipboardText: (text: string) => Promise<void>;
-  /** 应用版本号（启动页展示用）。 */
+  /** 应用版本号（关于页展示用）。 */
   getAppVersion: () => Promise<string>;
   /** 窗口控制（自定义标题栏按钮/全屏）：全部经 services 层转发。 */
   minimizeWindow: () => Promise<void>;
   toggleMaximizeWindow: () => Promise<void>;
   closeWindow: () => Promise<void>;
   toggleFullscreen: () => Promise<void>;
-  /** 窗口形态切换（view effect 用）：启动页固定 960×640 不可调整 / 工作区恢复可调整。 */
-  applyStartupWindow: () => Promise<void>;
+  /** 窗口形态应用（boot 末尾统一调用一次）：可调整 + 最小尺寸 = 默认。 */
   applyWorkspaceWindow: () => Promise<void>;
   /** 设置弹窗状态（null = 关闭；tab 为可选初始 tab，缺省 = 通用）。 */
   settingsModal: { tab?: string } | null;
@@ -262,11 +253,11 @@ function canvasesInDir(dir: string, excludeFile?: string): CanvasFileRow[] {
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
-  view: "vaultSelect",
   pluginPage: null,
   vaultRoot: null,
   vaultName: "",
   entryLoading: false,
+  switchingVaultRoot: null,
   loadSteps: [],
   recentVaults: [],
   currentCanvasId: null,
@@ -309,38 +300,13 @@ export const useAppStore = create<AppState>((set, get) => ({
         message: `全局配置读取失败，本次以空配置启动：${e instanceof Error ? e.message : String(e)}`,
       });
     }
-    if (recents.length === 0) {
-      // 首启无最近仓库 → ensureDefaultVault 建默认仓库并登记；
-      // 本次不自动进入，展示启动页让用户选择/新建仓库
-      try {
-        const info = await ensureDefaultVault();
-        // 默认仓库也可能是损坏配置（Rust 两条路径都回传备份名）：与 selectVault 同口径提示
-        if (info.configCorruptBackup) {
-          useNotificationStore.getState().notify({
-            level: "error",
-            message: `仓库配置文件已损坏，原文备份为 .atelyx/${info.configCorruptBackup}：供应商、默认模型与 API key 需重新配置`,
-          });
-        }
-        const now = Math.floor(Date.now() / 1000);
-        recents = bumpRecentVault(recents, info, now);
-        // 同一流程上面刚读过全局配置并消费过损坏提示，这里不再重复消费返回的备份名
-        await updateGlobalConfig({ recentVaults: recents });
-      } catch (e) {
-        console.error("初始化默认仓库失败", e);
-        // 与 open_vault 失败同口径：默认仓库建不起来时用户停在启动页、列表为空，必须说明原因
-        useNotificationStore.getState().notify({
-          level: "error",
-          message: `初始化默认仓库失败：${e instanceof Error ? e.message : String(e)}`,
-        });
-      }
-    } else {
-      // 非首启：recentVaults[0] = 最近打开（selectVault 时置顶）= 上次所在仓库，
-      // 启动时跳过启动页直接进入；仓库路径失效时 selectVault 失败自动回退启动页
+    if (recents.length > 0) {
+      // recentVaults[0] = 最近打开（selectVault 时置顶）= 上次所在仓库，启动时直接进入；
+      // 仓库路径失效时 selectVault 失败停留未激活态（文件面板树区空态引导）
       autoEnterRoot = recents[0].root;
     }
     set({
       recentVaults: recents,
-      view: "vaultSelect",
       autoUpdate: autoUpdate,
     });
     // 应用级 UI 使用状态（布局/展开/上次文件）启动加载一次，之后跨仓库共享。
@@ -398,9 +364,12 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   selectVault: async (root) => {
-    // 快速连续切换时仅最后一次调用有权 endLoad（finally 守卫）
+    // 重入守卫：切换进行中的再次调用直接忽略——面板内切换工作区保持可见，
+    // 防并发重入的屏障职责由此承担（仓库树同时据 switchingVaultRoot 禁点全部行）
+    if (get().switchingVaultRoot) return false;
     const seq = ++vaultSwitchSeq;
-    // 全屏加载会话：进入仓库期间逐步上报加载项；boot 已 begin 时幂等不重置
+    set({ switchingVaultRoot: root });
+    // 全屏加载会话：boot 期间渲染加载屏；面板内切换不再整屏替换，仅插件步骤上报仍经此门控
     get().beginLoad();
     get().reportLoad("打开仓库");
     try {
@@ -424,7 +393,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       // set + 清空须在下一个 await 之前同步完成，双保险防跨仓库写入：
       // 1) NoteEditor debounce timer 是 macrotask，openVault→set 间无 await 则无隙可乘；
       // 2) 清空 noteList 先于 React 提交卸载（见下方注释），cleanup 的 stillExists 守卫必跳过。
-      // 注意 view 不在此切：进仓门控「全部加载完（含插件）再进入仓库」，工作区视图在末尾统一切换
       set({
         vaultRoot: info.root,
         vaultName: info.name,
@@ -474,27 +442,28 @@ export const useAppStore = create<AppState>((set, get) => ({
         console.error("加载领域仓库上下文失败", e);
       }
       // 插件平台：切仓库后全量重载（load 内部先卸载旧贡献，再按新仓库上下文重建 app+vault 插件）；
-      // 加载完成后再切工作区视图 + 广播 vault:switch，保证订阅方是已就绪的后台插件。
+      // 加载完成后再广播 vault:switch，保证订阅方是已就绪的后台插件。
       get().reportLoad("加载插件");
       try {
         await usePluginStore.getState().load();
       } catch (e) {
         console.error("加载插件失败", e);
       }
-      // 全部加载完成（含插件）才进入仓库：切换工作区视图，窗口形态随 view 统一应用
-      set({ view: "workspace" });
       emitPluginEvent("vault:switch", { root: info.root });
       return true;
     } catch (e) {
       console.error("打开仓库失败", e);
-      // 失败必须可见（含「配置损坏且备份失败」这类后端拒绝继续的情形）：否则用户只看到回到启动页
+      // 失败必须可见：无激活仓库时文件面板停留树区空态，用户只看通知
       useNotificationStore.getState().notify({
         level: "error",
         message: `打开仓库失败：${e instanceof Error ? e.message : String(e)}`,
       });
       return false;
     } finally {
-      if (seq === vaultSwitchSeq) get().endLoad();
+      if (seq === vaultSwitchSeq) {
+        get().endLoad();
+        set({ switchingVaultRoot: null });
+      }
     }
   },
 
@@ -506,39 +475,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       console.error("更新最近仓库列表失败", e);
     }
     set({ recentVaults: recents });
-  },
-
-  backToVaultSelect: () => {
-    // 回启动页：AI 会话/日历日程/笔记挂起输入/表格改动落盘防 debounce 丢改动（root 未切换，写旧仓库
-    // 安全；冲突未决/已删文件条目由 flushPendingNotes 内部保留）。经注册表分发（fire-and-forget）。
-    // vaultRoot 在置空前同步捕获随 ctx 传入：分发是 async 循环，钩子被调用时 store 里的 vaultRoot 已为 null。
-    const exitingVaultRoot = get().vaultRoot;
-    void notifyVaultExit({ vaultRoot: exitingVaultRoot }).catch((e) =>
-      console.error("退出仓库领域清理失败", e),
-    );
-    useSettingsStore.getState().clearVaultConfig();
-    // 内容面退出激活态：无激活身份时内容 I/O 回落 localBackend（root 无关，语义不变）
-    deactivateContentVault();
-    // 清设置弹窗（防止下次进入工作区残留重开）
-    set({ settingsModal: null });
-    set({
-      view: "vaultSelect",
-      vaultRoot: null,
-      vaultName: "",
-      canvases: [],
-      currentCanvasId: null,
-      currentCanvasFile: null,
-      currentNoteFile: null,
-      currentNoteTitle: "",
-      currentTableFile: null,
-      currentTableTitle: "",
-      pluginPage: null,
-    });
-    // 插件事件先发（存活插件先收到「清上下文」通知），再卸载重载——
-    // 否则 load 开头会同步卸载全部 runtime，vault:clear 发出时已无订阅者。
-    emitPluginEvent("vault:clear", {});
-    // 插件平台：回启动页后卸载 vault 级插件、保留 app 级插件（load 全量重载，root 已空则只扫 app 目录）。
-    void usePluginStore.getState().load().catch(() => {});
   },
 
   openPluginPage: (id) => set({ pluginPage: id }),
@@ -603,7 +539,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   toggleMaximizeWindow: () => toggleMaximizeWindowSvc(),
   closeWindow: () => closeWindowSvc(),
   toggleFullscreen: () => toggleFullscreenSvc(),
-  applyStartupWindow: () => applyStartupWindowSvc(),
   applyWorkspaceWindow: () => applyWorkspaceWindowSvc(),
 
   settingsModal: null,
@@ -614,7 +549,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     const vaultRoot = get().vaultRoot;
     try {
       const canvases = await listCanvasesVault();
-      // 切仓库竞态守卫：等待期间用户可能已切到新仓库（后台填充链与 VaultSwitcher 快速切换并发），
+      // 切仓库竞态守卫：等待期间用户可能已切到新仓库（后台填充链与面板快速切换并发），
       // 旧仓库的扫描结果不得覆盖新仓库的列表
       if (get().vaultRoot !== vaultRoot) return;
       set({ canvases });

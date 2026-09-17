@@ -1204,35 +1204,6 @@ pub fn delete_chat_messages(state: State<'_, VaultState>, file: String) -> Resul
     delete_chat_messages_file(&root, &file)
 }
 
-/// 确保默认仓库已打开（首启 bootstrap：无最近仓库时建默认仓库并打开）。
-///
-/// 流程：已打开则返回 → 否则建 `app_data_dir/default-vault` → 初始化目录 →
-/// 设为当前仓库 + 启动文件监听。
-#[tauri::command]
-pub fn ensure_default_vault(
-    app_handle: AppHandle,
-    state: State<'_, VaultState>,
-) -> Result<VaultInfo, String> {
-    // 已打开则直接返回（重新读配置拿 id；缺失时补生成，与 open_vault 语义一致）
-    if let Ok(root) = state.root() {
-        let (vault_id, _, corrupt_backup) = ensure_vault_id_on_disk(&root)?;
-        return Ok(vault_info_from(root, vault_id, corrupt_backup));
-    }
-    let app_data_dir = app_handle
-        .path()
-        .app_data_dir()
-        .map_err(|e| e.to_string())?;
-    let default_root = app_data_dir.join("default-vault");
-    if !default_root.exists() {
-        std::fs::create_dir_all(&default_root).map_err(|e| e.to_string())?;
-    }
-    // 与 open_vault 一致：dunce::canonicalize → 先启监听再切 state，保证存/回传格式统一
-    let default_root = dunce::canonicalize(&default_root)
-        .map_err(|e| format!("默认仓库路径不可达：{} ({e})", default_root.display()))?;
-    let (vault_id, _, corrupt_backup) = activate_vault(&app_handle, &state, &default_root)?;
-    Ok(vault_info_from(default_root, vault_id, corrupt_backup))
-}
-
 /// 新建空画布，返回 `{ id, file }`（file = 相对仓库根路径，前端打开/保存用）。
 #[tauri::command]
 pub fn create_canvas_vault(
@@ -1315,7 +1286,7 @@ fn ensure_vault_id_on_disk(root: &Path) -> Result<(String, Vec<String>, Option<S
     Ok((vault_id, exclude_folders, corrupt_backup))
 }
 
-/// 仓库激活公共流程（open_vault / ensure_default_vault 共用）：保障 vault_id → init 目录 →
+/// 仓库激活公共流程（open_vault）：保障 vault_id → init 目录 →
 /// 先启监听再切 state（watcher 失败降级为警告，不阻塞打开——大仓库递归监听可能超 OS watch
 /// 上限（Linux inotify max_user_watches），仓库仍可打开，实时同步降级为手动刷新）。
 /// root 必须已完成 dunce::canonicalize（两调用方均为先归一化再激活，保证存/回传格式统一）。

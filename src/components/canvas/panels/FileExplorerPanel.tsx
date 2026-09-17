@@ -1,8 +1,11 @@
 /**
- * 仓库文件管理面板（全仓库树）。
+ * 仓库文件管理面板（仓库树）：仓库 = 树的顶级条目，与文件树无缝同构。
  *
- * 工作区左栏，树状展示仓库内全部文件夹与文件（跳过隐藏 `.` 开头目录与排除文件夹，
- * 见 `.atelyx/config.json` 的 `excludeFolders`），支持展开折叠、排序下拉、
+ * 激活仓库行高亮（与当前打开文件同色）并就地展开其文件树（见 `VaultRows`），其余仓库收起；
+ * 点击其他仓库 = 激活切换（完整切换流程，切换后该仓库行经最近排序置顶、容器滚回顶部）。
+ * 工具条承载仓库级入口：打开文件夹为仓库。无仓库时树区空态引导打开。
+ * 无仓库时树区空态引导创建；树内操作（跳过隐藏 `.` 开头目录与排除文件夹，
+ * 见 `.atelyx/config.json` 的 `excludeFolders`）支持展开折叠、排序下拉、
  * 文件夹行右键新建（画布 / 笔记 / 文件夹，inline 输入框 Enter 创建，落该文件夹；
  * 文件树空白处右键 = 落仓库根目录）+ 创建副本 / 重命名 / 删除（空目录直接删，非空弹窗确认递归删）、
  * 文件行右键创建副本 / 重命名 / 删除（菜单内确认）。
@@ -11,7 +14,7 @@
  * - 单击 `.atlx` → 打开画布；单击 `.md` → 打开笔记编辑器；`.md`/附件拖到画布 → 建节点
  * - `.atlx` / `.md` 均可位于任意文件夹（无固定 画布/笔记/附件 目录）
  *
- * 分层：用 `vaultStore`（文件树/笔记 CRUD）+ `appStore`（画布 CRUD/切换）+ `canvasStore`（建节点），
+ * 分层：用 `vaultStore`（文件树/笔记 CRUD）+ `appStore`（画布 CRUD/切换/建仓）+ `canvasStore`（建节点），
  * 不直调 service。canvas 相关的定位动作走 props 回调。
  *
  * 递归树渲染 / 指针拖拽 / 文件操作 hooks / 菜单组件 / 纯函数见 `./file-explorer/`。
@@ -20,8 +23,9 @@ import {
   ArrowUpDown,
   ChevronsDownUp,
   ChevronsUpDown,
+  FolderOpen,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAppStore } from "@/stores/appStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useUiStateStore } from "@/stores/uiStateStore";
@@ -34,10 +38,10 @@ import type { CanvasFileRow } from "@/types";
 import { collectDirPaths, DEFAULT_SORT_KEY, isSortKey } from "./file-explorer/sort";
 import { useCommitEditing, useDuplicateAction, type Editing, type MenuTarget } from "./file-explorer/actions";
 import { useVaultDrag } from "./file-explorer/useVaultDrag";
-import { FileTree } from "./file-explorer/FileTree";
 import { SortMenu } from "./file-explorer/SortMenu";
 import { FolderCreateMenu } from "./file-explorer/FolderCreateMenu";
 import { FolderColorMenu } from "./file-explorer/FolderColorMenu";
+import { VaultRows } from "./file-explorer/VaultRows";
 
 interface PanelProps {
   /** 单击画布行：打开画布并激活画布窗口（页面层包装 openCanvas + setActiveWindow）。 */
@@ -55,6 +59,7 @@ interface PanelProps {
 }
 
 export function FileExplorerPanel({ onOpenCanvasFile, onOpenNoteForEdit, onOpenTableFile, openedNoteFile, openedTableFile, onConvertWhiteboard }: PanelProps) {
+  const vaultRoot = useAppStore((s) => s.vaultRoot);
   const tree = useVaultStore((s) => s.tree);
   const loadFiles = useVaultStore((s) => s.loadFiles);
   const deleteFolder = useVaultStore((s) => s.deleteFolder);
@@ -117,8 +122,43 @@ export function FileExplorerPanel({ onOpenCanvasFile, onOpenNoteForEdit, onOpenT
   const sortKey = isSortKey(vaultSort) ? vaultSort : DEFAULT_SORT_KEY;
 
   useEffect(() => {
-    void loadFiles();
-  }, [loadFiles]);
+    if (vaultRoot) void loadFiles();
+  }, [loadFiles, vaultRoot]);
+
+  // 仓库树：激活仓库行收起集合（面板挂载期间记忆；切换仓库后新激活仓库默认展开）
+  const [collapsedVaults, setCollapsedVaults] = useState<Set<string>>(new Set());
+  const toggleVaultCollapsed = useCallback((root: string) => {
+    setCollapsedVaults((prev) => {
+      const next = new Set(prev);
+      if (next.has(root)) next.delete(root);
+      else next.add(root);
+      return next;
+    });
+  }, []);
+
+  const pickVaultDirectory = useAppStore((s) => s.pickVaultDirectory);
+  const selectVault = useAppStore((s) => s.selectVault);
+  const recentVaults = useAppStore((s) => s.recentVaults);
+  const switchingVaultRoot = useAppStore((s) => s.switchingVaultRoot);
+  // 切换进行中禁掉打开入口，防在切换中叠一次进仓
+  const openFolderBusy = switchingVaultRoot !== null;
+
+  /** 打开文件夹为仓库（系统目录选择器；进仓成功后文件树随 vaultRoot 加载）。 */
+  const openFolderAsVault = useCallback(async () => {
+    if (openFolderBusy) return;
+    try {
+      const path = await pickVaultDirectory();
+      if (path) await selectVault(path);
+    } catch (e) {
+      console.error("选择文件夹失败", e);
+    }
+  }, [openFolderBusy, pickVaultDirectory, selectVault]);
+
+  // 树容器：切换仓库后滚回顶部——激活仓库行经最近排序已是第一行，展开的文件树随即从容器顶开始
+  const treeScrollRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    treeScrollRef.current?.scrollTo({ top: 0 });
+  }, [vaultRoot]);
 
   // 右键菜单
   const [menu, setMenu] = useState<{ x: number; y: number; target: MenuTarget } | null>(null);
@@ -145,10 +185,19 @@ export function FileExplorerPanel({ onOpenCanvasFile, onOpenNoteForEdit, onOpenT
       className="h-full flex flex-col text-sm overflow-hidden"
       style={{ background: "var(--bg-secondary)", color: "var(--text-primary)" }}
     >
-      {/* 工具条：排序方式下拉气泡 + 展开/收起全部（图标按钮，切换） */}
+      {/* 工具条：新建仓库 / 打开文件夹（仓库级入口）+ 排序方式下拉气泡 + 展开/收起全部 */}
       <div className="px-2 py-1.5 border-b flex items-center gap-1" style={{ borderColor: "var(--border)" }}>
         {/* 插件贡献区：文件面板工具条左侧（list 槽，priority 降序） */}
         <SlotListMount slot="toolbar/files/left" />
+        <button
+          onClick={() => void openFolderAsVault()}
+          className="flex items-center justify-center w-7 h-7 rounded hover:bg-[var(--hover)]"
+          style={{ color: "var(--text-muted)" }}
+          title="打开文件夹为仓库"
+          disabled={openFolderBusy}
+        >
+          <FolderOpen size={15} />
+        </button>
         <button
           onClick={(e) => {
             const rect = e.currentTarget.getBoundingClientRect();
@@ -197,42 +246,69 @@ export function FileExplorerPanel({ onOpenCanvasFile, onOpenNoteForEdit, onOpenT
         </div>
       )}
 
-      {/* 文件树空白处右键 = 在仓库根目录新建（画布/笔记/文件夹，inline 输入，Enter 创建） */}
-      {/* 树容器（左右留白 px-2：条目不顶格，两侧空白 = 拖拽移根落点） */}
+      {/* 树容器：仓库 = 顶级条目（激活仓库高亮展开其文件树），空白处右键 = 在仓库根目录新建 */}
       <div
+        ref={treeScrollRef}
         className="flex-1 overflow-auto py-1 px-2"
         data-dir=""
         style={{ background: dropDir === "" ? "color-mix(in srgb, var(--accent) 25%, transparent)" : undefined }}
         onContextMenu={(e) => {
+          // 无激活仓库无根目录可建：拦截原生菜单保持全面板右键行为一致
           e.preventDefault();
+          if (!vaultRoot) return;
           e.stopPropagation();
           setMenu({ x: e.clientX, y: e.clientY, target: { kind: "folder", dir: "" } });
         }}
       >
-        <ul>
-          <FileTree
-            nodes={tree}
-            depth={0}
-            parentDir=""
-            sortKey={sortKey}
-            expanded={expanded}
-            toggleExpanded={toggleExpanded}
-            editing={editing}
-            onEditingChange={setEditing}
-            onCommitEditing={commitEditing}
-            dropDir={dropDir}
-            folderColors={folderColors}
-            currentCanvasFile={currentCanvasFile}
-            openedNoteFile={openedNoteFile}
-            openedTableFile={openedTableFile}
-            canvasRowOf={canvasRowOf}
-            startPotentialDrag={startPotentialDrag}
-            onOpenCanvasFile={onOpenCanvasFile}
-            onOpenNoteForEdit={onOpenNoteForEdit}
-            onOpenTableFile={onOpenTableFile}
-            onOpenMenu={openMenu}
-          />
-        </ul>
+        {recentVaults.length === 0 ? (
+          <div className="flex flex-col items-center justify-center gap-3 py-14 text-center">
+            <p className="text-sm" style={{ color: "var(--text-secondary)" }}>
+              还没有仓库
+            </p>
+            <p className="text-xs" style={{ color: "var(--text-muted)" }}>
+              打开一个文件夹作为仓库（可用工具条的打开按钮，或此处）。
+            </p>
+            <button
+              onClick={() => void openFolderAsVault()}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded text-xs border"
+              style={{ borderColor: "var(--border)", color: "var(--text-secondary)" }}
+            >
+              <FolderOpen size={13} />
+              打开文件夹
+            </button>
+          </div>
+        ) : (
+          <ul>
+            <VaultRows
+              vaults={recentVaults}
+              vaultRoot={vaultRoot}
+              switchingTo={switchingVaultRoot}
+              onEnter={(root) => void selectVault(root)}
+              collapsedVaults={collapsedVaults}
+              toggleVaultCollapsed={toggleVaultCollapsed}
+              tree={tree}
+              fileTree={{
+                sortKey,
+                expanded,
+                toggleExpanded,
+                editing,
+                onEditingChange: setEditing,
+                onCommitEditing: commitEditing,
+                dropDir,
+                folderColors,
+                currentCanvasFile,
+                openedNoteFile,
+                openedTableFile,
+                canvasRowOf,
+                startPotentialDrag,
+                onOpenCanvasFile,
+                onOpenNoteForEdit,
+                onOpenTableFile,
+                onOpenMenu: openMenu,
+              }}
+            />
+          </ul>
+        )}
       </div>
 
       {/* 拖拽幽灵（pointer 模拟拖拽时跟随鼠标；下方追加悬停目标的动作提示） */}

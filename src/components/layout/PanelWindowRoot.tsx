@@ -49,7 +49,7 @@ export function PanelWindowRoot() {
     void usePanelStore.getState().initPanel();
     void useSettingsStore.getState().load();
     // 撕裂窗口是独立 webview：本窗口的插件运行时（各行视图贡献）须各自 load 拉起——
-    // 切仓库时 panelStore 会再按 open-file-changed load，此处覆盖冷启动（启动页恢复的窗口）。
+    // 切仓库时 panelStore 会再按 open-file-changed load，此处覆盖冷启动（boot 自动进仓前恢复的窗口）。
     void usePluginStore.getState().load().catch((e) => console.error("撕裂窗口加载插件失败", e));
   }, []);
 

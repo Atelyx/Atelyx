@@ -12,7 +12,7 @@ export function TitleBarControls({
   onClose,
 }: {
   onMinimize: () => void;
-  /** 不传 = 隐藏最大化按钮（固定尺寸窗口最大化无意义，如启动页）。 */
+  /** 不传 = 隐藏最大化按钮（固定尺寸窗口最大化无意义）。 */
   onMaximize?: () => void;
   onClose: () => void;
 }) {

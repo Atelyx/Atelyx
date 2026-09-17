@@ -419,10 +419,8 @@ declare module "@atelyx/cordis" {
     native: NativeService;
   }
   interface Events {
-    /** 进仓/切仓完成广播（载荷 { root, id }）。@emit */
-    "vault:switch": (payload: { root: string; id: string }) => void;
-    /** 离开仓库/回启动页：清空仓库上下文（插件据此丢弃 vault 级驻留态）。@emit */
-    "vault:clear": () => void;
+    /** 进仓/切仓完成广播（载荷 { root }）。@emit */
+    "vault:switch": (payload: { root: string }) => void;
     /** 当前画布变更（轻量信号：只带 file，按需再调 ctx.canvas.snapshot()）。@emit */
     "canvas:changed": (payload: { file: string | null }) => void;
     /** 当前表格变更（轻量信号）。@emit */

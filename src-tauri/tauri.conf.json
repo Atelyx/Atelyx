@@ -13,10 +13,10 @@
     "windows": [
       {
         "title": "Atelyx",
-        "width": 960,
-        "height": 640,
-        "minWidth": 960,
-        "minHeight": 600,
+        "width": 1440,
+        "height": 900,
+        "minWidth": 1440,
+        "minHeight": 900,
         "resizable": true,
         "fullscreen": false,
         "decorations": false,

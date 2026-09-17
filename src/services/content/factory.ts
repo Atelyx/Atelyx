@@ -35,7 +35,7 @@ export function activateContentVault(identity: VaultIdentity, backend?: ContentB
   activeKey = key;
 }
 
-/** 退出激活态（回启动页等；内容 I/O 随即回落 localBackend）。 */
+/** 退出激活态（内容 I/O 随即回落 localBackend）。 */
 export function deactivateContentVault(): void {
   activeKey = null;
 }

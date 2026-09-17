@@ -6,7 +6,7 @@
  * 文件打开/关闭/恢复联动在此层（跨 store 一致性），视图渲染全在面板内部。
  */
 import { Maximize, Settings } from "lucide-react";
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { useAppStore } from "@/stores/appStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useUiStateStore } from "@/stores/uiStateStore";
@@ -88,8 +88,8 @@ export function ProjectWorkspacePage() {
     }
   }, [vaultTableList, currentTableFile]);
 
-  // AI 对话面板会话与表格改动落盘：进仓库读盘 + 离开（回仓库选择页/切仓库）时 flush 防 debounce 丢改动，
-  // 均已归入领域生命周期注册表分发（builtin.chatpanel 的 onVaultEntered/onVaultExit、builtin.table 的 onVaultExit）
+  // AI 对话面板会话与表格改动落盘：进仓库读盘 + 切仓库时 flush 防 debounce 丢改动，
+  // 均已归入领域生命周期注册表分发（builtin.chatpanel 的 onVaultEntered、各域 flush）
 
   // 历史记录作者登记（应用级全局，三 kind——画布/笔记/表格——共用同一身份）：
   // 身份随协作昵称/设备名变化刷新；未打开笔记时画布/表格历史也能正确署名
@@ -151,12 +151,15 @@ export function ProjectWorkspacePage() {
     currentTableFile,
   ]);
 
-  /** 「进仓库时打开主页」开关：每次进入仓库（挂载/切仓库）若开启则激活主页布局。
-   * 依赖 uiLoaded：ui-state 从磁盘加载完成前不得激活——否则随后 load 会用磁盘 activeLayoutId 覆盖。 */
+  /** 「进仓库时打开主页」开关：仅在本次运行的首次进仓生效（boot 自动进仓，或从空态创建/进入
+   *  第一个仓库）；面板内切换仓库不生效——切换保持当前布局，打断位置违背切换的连续性预期。
+   *  依赖 uiLoaded：ui-state 从磁盘加载完成前不得激活——否则随后 load 会用磁盘 activeLayoutId 覆盖。 */
   const defaultHomeLayout = useSettingsStore((s) => s.defaultHomeLayout);
+  const homeAppliedRef = useRef(false);
   useEffect(() => {
-    if (!defaultHomeLayout) return;
-    if (!uiLoaded) return;
+    if (homeAppliedRef.current) return;
+    if (!defaultHomeLayout || !uiLoaded || !vaultRoot) return;
+    homeAppliedRef.current = true;
     const ui = useUiStateStore.getState();
     if (ui.workspaceLayouts.some((l) => l.id === HOME_LAYOUT_ID)) {
       ui.activateLayout(HOME_LAYOUT_ID);

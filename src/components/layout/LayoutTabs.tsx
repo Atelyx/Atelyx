@@ -1,5 +1,5 @@
 /**
- * 标题栏左侧：仓库切换按钮（`VaultSwitcher`，当前仓库名）+ 布局 tab 条（切换/右键/双击重命名/pointer 排序/新建）。
+ * 标题栏左侧：应用标识（图标 + 软件名，纯展示）+ 布局 tab 条（切换/右键/双击重命名/pointer 排序/新建）。
  *
  * - 布局 tab：点击切换；**右键菜单**（重命名 inline / 删除红字，最后一个布局不可删）；
  *   双击重命名保留；**pointer 模拟拖拽排序**（WebView2 HTML5 DnD 不可靠）——
@@ -11,8 +11,8 @@ import { useRef, useState } from "react";
 import { useUiStateStore } from "@/stores/uiStateStore";
 import { Menu, MenuItem } from "@/components/common/Menu";
 import { MenuSlotList } from "@/components/plugins/MenuSlot";
-import { VaultSwitcher } from "@/components/layout/VaultSwitcher";
 import { HOME_LAYOUT_ID } from "@/types";
+import appIcon from "@/assets/icon.svg";
 
 /** 拖拽判定阈值（px）：低于视为点击，不进入拖动模式。 */
 const DRAG_THRESHOLD = 4;
@@ -99,8 +99,13 @@ export function LayoutTabs() {
 
   return (
     <div className="flex items-center gap-1 h-full flex-shrink-0 select-none" data-tauri-drag-region>
-      {/* 仓库切换按钮（点击弹出已添加仓库列表 + 管理仓库） */}
-      <VaultSwitcher />
+      {/* 应用标识（纯展示，不可点） */}
+      <div className="flex items-center gap-1.5 px-2 h-8 flex-shrink-0" data-tauri-drag-region>
+        <img src={appIcon} alt="" draggable={false} className="w-4 h-4 rounded select-none" />
+        <span className="text-xs font-medium" style={{ color: "var(--text-secondary)" }}>
+          Atelyx
+        </span>
+      </div>
 
       <div className="flex items-stretch gap-1" data-tauri-drag-region>
         {layouts.map((l, index) => {

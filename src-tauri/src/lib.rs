@@ -96,7 +96,6 @@ pub fn run() {
             commands::vault::write_chat_messages,
             commands::vault::append_chat_messages,
             commands::vault::delete_chat_messages,
-            commands::vault::ensure_default_vault,
             commands::vault::create_canvas_vault,
             // 仓库文件管理（全仓库文件树 + 建文件夹 + 删改 + 附件 dataURL + 链接维护）
             commands::vault::list_vault_tree,

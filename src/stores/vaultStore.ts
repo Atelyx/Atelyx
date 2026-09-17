@@ -500,7 +500,7 @@ interface VaultFileState {
   historySetAuthor: (name: string, device: string) => void;
   /**
    * 仓库文件监听启停（幂等）：订阅 Rust watcher 事件并按 kind 分发到各 store。
-   * 工作区挂载时 enable（App.tsx 调），回启动页 disable。分层：订阅副作用归 store，组件不直连 service。
+   * 工作区挂载且有激活仓库时 enable（App.tsx 调），无激活仓库 disable。分层：订阅副作用归 store，组件不直连 service。
    */
   startFileWatcher: (enabled: boolean) => void;
 }

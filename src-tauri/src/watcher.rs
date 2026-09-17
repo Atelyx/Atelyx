@@ -3,7 +3,7 @@
 //! notify 6 + notify-debouncer-mini **递归监听整个仓库根**（仓库为自由文件夹结构，
 //! 不再只监听 画布/笔记/附件 三目录）。事件 debounce 300ms 后 emit `"vault-file-changed"` 到前端。
 //! 仓库切换时整体替换 debouncer（drop 旧的 → new 新的），由 `commands/vault.rs` 的
-//! `open_vault`/`ensure_default_vault` 在设仓库根后调用 `start`。
+//! `open_vault` 在设仓库根后调用 `start`。
 //!
 //! 递归监听 + 路径段过滤（隐藏 `.` 开头 / 排除文件夹）保证：
 //! - 仓库内任意路径的移动/增删/编辑都能实时推送（修复旧版「外部编辑器移动笔记不刷新」——
@@ -77,7 +77,7 @@ pub fn start(app: AppHandle, root: PathBuf, exclude: Vec<String>) -> Result<(), 
     .map_err(|e| e.to_string())?;
 
     // 2. 递归监听整个仓库根（仓库自由文件夹结构；`.atelyx`/隐藏/排除目录由 dispatch 过滤；
-    //    root 由调用方保证存在——open_vault 校验过目录，ensure_default_vault 创建后归一化）
+    //    root 由调用方保证存在——open_vault 校验过目录）
     debouncer
         .watcher()
         .watch(&root, notify::RecursiveMode::Recursive)

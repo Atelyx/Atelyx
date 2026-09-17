@@ -157,11 +157,11 @@ async function establishConnection(): Promise<void> {
   // 最近一次上报基底同理失效：换房后 republishPresence 不得拿旧仓库的聚焦文件成帧
   lastPresenceBase = null;
   useCollabStore.setState({ connected: false, peers: [] });
-  // 序号须先于早退判断递增：await 版本号期间若有禁用协作/地址清空/回启动页等早退调用，
+  // 序号须先于早退判断递增：await 版本号期间若有禁用协作/地址清空/未进仓等早退调用，
   // 也必须作废在途请求——否则旧请求恢复后仍用已失效配置建连（幽灵连接 / 发出空房间号）
   const seq = ++connSeq;
   const cfg = runtimeCfg;
-  // 房间号读仓库配置（loadVaultConfig/clearVaultConfig 更新）：null = 未进仓/配置未就绪，不连接
+  // 房间号读仓库配置（loadVaultConfig 更新）：null = 未进仓/配置未就绪，不连接
   const room = useSettingsStore.getState().vaultConfig?.vaultId ?? null;
   if (!cfg?.enabled || !cfg.url || !room) return;
   // 应用版本随 hello 上报（协作房间展示各成员版本）；版本运行期不变，仅首次真实读取，失败降级省略
@@ -271,12 +271,12 @@ export function publishCollabPresence(base: CollabPresence): void {
   schedulePresenceBroadcast(base);
 }
 
-// 切仓库（房间号随仓库配置变化）→ 换房间重连；无仓库（回启动页）→ 断开。
+// 切仓库（房间号随仓库配置变化）→ 换房间重连；无激活仓库 → 断开。
 // 注册推迟到 init（防循环 import 链中模块未完成初始化即调用 store）
 function ensureSubscriptions(): void {
   if (subscribed) return;
   subscribed = true;
-  // 进仓/回启动页（vaultRoot 变化）与仓库配置加载/清空（房间号随 vaultConfig 变化）都会换房：
+  // 进仓/回到无激活仓库（vaultRoot 变化）与仓库配置加载/清空（房间号随 vaultConfig 变化）都会换房：
   // 任一变化即按当前房间号重建连接（establishConnection 内部先 bye 再断开）
   useAppStore.subscribe((s, prev) => {
     if (s.vaultRoot !== prev.vaultRoot) void establishConnection();

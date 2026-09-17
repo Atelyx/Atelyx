@@ -450,13 +450,13 @@ export const usePanelStore = create<PanelStore>((set, get) => {
         void useSettingsStore.getState().loadVaultConfig();
         void useVaultStore.getState().loadFiles();
       }
-      // AI 会话换仓库读盘（含 vaultRoot 置空 = 回启动页场景）经生命周期注册表分发
+      // AI 会话换仓库读盘（含 vaultRoot 置空 = 未激活仓库场景）经生命周期注册表分发
       void kernelLifecycle
         .notifyVaultEntered({ vaultRoot: payload.vaultRoot })
         .catch((e) => console.error("撕裂窗口加载领域仓库上下文失败", e));
-      // 撕裂窗口插件运行时随仓库上下文重载（与主窗口 selectVault/backToVaultSelect 时机一致）：
-      // vaultRoot 置空（回启动页）也 load——此时只扫 app 插件，自然卸载 vault 插件；
-      // 插件事件（vault:switch/clear）按窗口隔离不跨窗口转发，撕裂窗口插件经重载兜底
+      // 撕裂窗口插件运行时随仓库上下文重载（与主窗口 selectVault 时机一致）：
+      // vaultRoot 置空（未激活仓库）也 load——此时只扫 app 插件，自然卸载 vault 插件；
+      // 插件事件（vault:switch）按窗口隔离不跨窗口转发，撕裂窗口插件经重载兜底
       void usePluginStore.getState().load().catch((e) => console.error("撕裂窗口加载插件失败", e));
       // 协作宿主重算（仓库房间变化）
       get().syncCollabHost();

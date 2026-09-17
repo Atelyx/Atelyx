@@ -732,7 +732,7 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
           messages,
         });
       }
-      // 切仓库竞态守卫：后台填充链与 VaultSwitcher 快速切换并发时，
+      // 切仓库竞态守卫：后台填充链与面板快速切换并发时，
       // 旧仓库读取结果不得覆盖新仓库的会话（等待期间已切走则丢弃）
       if (useAppStore.getState().vaultRoot !== vaultRoot) return;
       // 新仓库干净状态：清脏标记（旧仓库未写完的改动不再写回）
