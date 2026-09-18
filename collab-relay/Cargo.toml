@@ -2,13 +2,31 @@
 name = "collab-relay"
 version = "0.1.0"
 edition = "2021"
-description = "Atelyx 局域网协作中转：无状态 WebSocket hub，按仓库转发 presence（在线用户 + 选中状态）"
+description = "Atelyx 协作服务端：账号 / 空间 / 成员 / 内容真源（文件树）/ 派生索引 / WS 实时频道"
 
 [dependencies]
 axum = { version = "0.8", features = ["ws"] }
+axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
+# rustls 的 crypto provider 显式锁 ring（reqwest 的 rustls-tls 同为 ring；两个 provider 并存时 rustls 拒绝自动抉择）
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 futures-util = { version = "0.3.31", features = ["sink"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+# 账号：argon2 密码哈希（含 salt 随机源）+ 令牌摘要 sha2 + 随机 id rand
+argon2 = "0.5"
+rand = "0.8"
+sha2 = "0.10"
+# 内容检索：globset（glob 模式，`**/` 任意深度语义）+ regex（内容正则）——与客户端检索同引擎同语义
+globset = "0.4"
+regex = "1"
+# dunce::canonicalize（Windows 去 `\\?\` 前缀），与客户端路径归一化同口径
+dunce = "1"
+
+[dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio-tungstenite = "0.24"
+tempfile = "3"
+rcgen = "0.13"

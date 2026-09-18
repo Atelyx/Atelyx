@@ -4,10 +4,18 @@ services:
     container_name: atelyx-collab-relay
     restart: unless-stopped
     environment:
-      - PORT=17701
+      - PORT=11224
       # 日志级别（默认 info；调试看转发明细用 collab_relay=debug）
       - RUST_LOG=${RUST_LOG:-info}
       # 可选：json 切结构化行输出，便于 docker logs 采集
       - LOG_FORMAT=${LOG_FORMAT:-}
+      # 数据目录（容器内路径）：账号 / 空间名册 / 空间内容都在卷里，备份 = 拷卷
+      - DATA_DIR=/data
+      # 可选 TLS（PEM 证书与私钥的容器内路径，二者齐备即启 HTTPS/WSS）：
+      # 证书请先放入挂载卷（如 ./data/certs/），再设置 TLS_CERT=/data/certs/cert.pem、TLS_KEY=/data/certs/key.pem
+      - TLS_CERT=${TLS_CERT:-}
+      - TLS_KEY=${TLS_KEY:-}
     ports:
-      - "17701:17701"
+      - "11224:11224"
+    volumes:
+      - ./data:/data

@@ -55,7 +55,7 @@ pub struct GlobalConfig {
     /// 协作中转（collab-relay）开关（应用级）。缺省 None = 关闭。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collab_enabled: Option<bool>,
-    /// 协作中转地址（如 `ws://192.168.1.10:17701/ws`）。缺省 None = 未配置。
+    /// 协作中转地址（如 `ws://192.168.1.10:11224/ws`）。缺省 None = 未配置。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collab_relay_url: Option<String>,
     /// 协作显示昵称（空 = 设备名兜底）。

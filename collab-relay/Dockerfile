@@ -10,5 +10,5 @@ RUN cargo build --release
 FROM alpine:3.20
 RUN apk add --no-cache ca-certificates
 COPY --from=build /app/target/release/collab-relay /usr/local/bin/collab-relay
-EXPOSE 17701
+EXPOSE 11224
 CMD ["collab-relay"]
