@@ -1,9 +1,8 @@
 // @vitest-environment jsdom
 /**
- * 市场安装作用域确认测试（components/plugins/MarketplaceSection）。
+ * 市场安装确认测试（components/plugins/MarketplaceSection）。
  *
- * 覆盖：点安装弹出确认（默认本机）→ 选「随仓库共享」后继续安装把作用域传给 store；
- * 同 id 行被随应用分发实现占用（installDir 为空）时确认弹窗锁定「本机」并说明（vault 必被 Rust 拒绝）。
+ * 覆盖：点安装弹出确认，继续安装把 repo 传给 store；已有同名 id 行时按钮/提示进入替换态。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act } from "react";
@@ -23,7 +22,7 @@ const mock = vi.hoisted(() => {
     marketLoading: boolean;
     marketError: string | null;
     loadMarket: (force?: boolean) => void;
-    install: (repo: string, scope: string) => Promise<{ id: string; replaced: boolean }>;
+    install: (repo: string) => Promise<{ id: string; replaced: boolean }>;
     plugins: Record<string, InstalledPlugin>;
   } = {
     marketItems: [],
@@ -100,48 +99,24 @@ function dialogConfirmButton(): HTMLButtonElement {
   return btn as HTMLButtonElement;
 }
 
-function scopeRadios(): HTMLButtonElement[] {
-  return Array.from(container!.querySelectorAll('button[role="radio"]')) as HTMLButtonElement[];
-}
-
-describe("MarketplaceSection 安装作用域确认", () => {
-  it("点安装弹出确认（默认本机），继续安装把作用域传给 store", async () => {
+describe("MarketplaceSection 安装确认", () => {
+  it("点安装弹出确认，继续安装把 repo 传给 store", async () => {
     mountSection();
     act(() => {
       installButton().dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
-    const radios = scopeRadios();
-    expect(radios.length).toBe(2);
-    expect(radios[0].getAttribute("aria-checked")).toBe("true");
+    expect(container!.textContent).toContain("社区插件未经官方审查");
     await act(async () => {
       dialogConfirmButton().dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
-    expect(mock.market.install).toHaveBeenCalledWith("owner/market", "app");
+    expect(mock.market.install).toHaveBeenCalledWith("owner/market");
   });
 
-  it("确认弹窗内选「随仓库共享」后按 vault 安装", async () => {
-    mountSection();
-    act(() => {
-      installButton().dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    });
-    const radios = scopeRadios();
-    expect(radios[1].disabled).toBe(false);
-    act(() => {
-      radios[1].dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    });
-    expect(scopeRadios()[1].getAttribute("aria-checked")).toBe("true");
-    await act(async () => {
-      dialogConfirmButton().dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    });
-    expect(mock.market.install).toHaveBeenCalledWith("owner/market", "vault");
-  });
-
-  it("同 id 行由随应用分发实现占用时锁定「本机」并说明", async () => {
+  it("已有同名 id 行时按钮进入替换态，安装沿用原行", async () => {
     mock.market.plugins = {
       "com.test.market": {
         id: "com.test.market",
         manifest: { id: "com.test.market", name: "市场插件", version: "1.0.0", type: "panel" },
-        scope: "app",
         installDir: "",
         sourceKind: "builtin",
         enabled: false,
@@ -149,15 +124,14 @@ describe("MarketplaceSection 安装作用域确认", () => {
       },
     };
     mountSection();
+    expect(installButton().textContent).toContain("替换同名");
+    expect(container!.textContent).toContain("同名 id 行已存在");
     act(() => {
       installButton().dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
-    const radios = scopeRadios();
-    expect(radios[1].disabled).toBe(true);
-    expect(container!.textContent).toContain("只能安装到本机");
     await act(async () => {
       dialogConfirmButton().dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
-    expect(mock.market.install).toHaveBeenCalledWith("owner/market", "app");
+    expect(mock.market.install).toHaveBeenCalledWith("owner/market");
   });
 });

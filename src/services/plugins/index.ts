@@ -5,7 +5,7 @@
  */
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { PluginPackageJson, PluginScope, PluginSourceKind, PluginType } from "@/types";
+import type { PluginPackageJson, PluginSourceKind, PluginType } from "@/types";
 
 /** Rust `plugin_list` 返回行（原始清单由前端校验归一化）。 */
 export interface PluginRow {
@@ -13,7 +13,6 @@ export interface PluginRow {
   name: string;
   version: string;
   type: PluginType;
-  scope: PluginScope;
   /** 安装目录（空 = 实现随应用编译，无磁盘目录）。 */
   installDir: string;
   /** 宿主产出的打包入口（相对安装目录）：有产物即用它，无产物用清单 main。 */
@@ -23,7 +22,7 @@ export interface PluginRow {
   manifest: PluginPackageJson;
   /** 可回退到的上一版本（成功回退后为空）。 */
   previousVersion?: string;
-  /** 跨作用域同 id 冲突说明（app 与 vault 同时存在同 id 插件；双方行都携带且强制停用）。 */
+  /** 同 id 行冲突说明（Rust 标记；双方行都携带且强制停用）。 */
   conflict?: string;
   /** 用户已批准的仓库外目录（声明原形 `~/` 形式；空/缺省 = 无授权）。 */
   approvedDirs?: string[];
@@ -35,6 +34,9 @@ export interface PluginListResult {
   /** 插件状态文件不可读/损坏时的诊断；此时所有行以停用态返回（fail-closed，不落盘）。
    *  修复或删除该文件后下一次列表恢复正常。 */
   stateError?: string;
+  /** 仍保留随仓库安装插件目录（`<root>/.atelyx/plugins` 非空）的仓库根：随仓库安装已不再支持，
+   *  其中的插件不会加载，由调用方汇总提示；空/缺省 = 无。 */
+  legacyVaultPluginRoots?: string[];
 }
 
 /** 列出全部插件行（先按默认组合清单增量播种随应用分发的行，再列出磁盘包行）。 */
@@ -44,18 +46,18 @@ export function pluginList(defaults: PluginPackageJson[]): Promise<PluginListRes
 
 /** 安装插件：来源为 GitHub `owner/repo`（市场）或完整 git 地址。启用口径：全新 id 落盘停用、
  *  由用户显式启用；同 id 替换视为实现更新，经安装确认后继承原行启停状态。 */
-export function pluginInstall(repo: string, scope: PluginScope): Promise<PluginRow> {
-  return invoke<PluginRow>("plugin_install", { repo, scope });
+export function pluginInstall(repo: string): Promise<PluginRow> {
+  return invoke<PluginRow>("plugin_install", { repo });
 }
 
 /** 从本地目录安装插件（junction/符号链接实时引用，源目录改动即时生效；启用口径同 pluginInstall）。 */
-export function pluginInstallLocal(path: string, scope: PluginScope): Promise<PluginRow> {
-  return invoke<PluginRow>("plugin_install_local", { path, scope });
+export function pluginInstallLocal(path: string): Promise<PluginRow> {
+  return invoke<PluginRow>("plugin_install_local", { path });
 }
 
 /** 卸载插件（删安装目录/链接 + 清理状态记录；无落位目录的行只清记录）。 */
-export function pluginUninstall(id: string, scope: PluginScope): Promise<void> {
-  return invoke("plugin_uninstall", { id, scope });
+export function pluginUninstall(id: string): Promise<void> {
+  return invoke("plugin_uninstall", { id });
 }
 
 /** 启用/停用插件（前端先确认权限再启用）。 */
@@ -64,13 +66,13 @@ export function pluginSetEnabled(id: string, enabled: boolean): Promise<void> {
 }
 
 /** 批准插件访问一个仓库外目录（只能批准清单 `atelyx.declaredDirs` 声明过的目录）。 */
-export function pluginApproveDir(id: string, scope: PluginScope, dir: string): Promise<void> {
-  return invoke("plugin_approve_dir", { id, scope, dir });
+export function pluginApproveDir(id: string, dir: string): Promise<void> {
+  return invoke("plugin_approve_dir", { id, dir });
 }
 
 /** 撤销插件对一个仓库外目录的访问（幂等；撤销即从白名单删除，后续访问立即被拒）。 */
-export function pluginRevokeDir(id: string, scope: PluginScope, dir: string): Promise<void> {
-  return invoke("plugin_revoke_dir", { id, scope, dir });
+export function pluginRevokeDir(id: string, dir: string): Promise<void> {
+  return invoke("plugin_revoke_dir", { id, dir });
 }
 
 /** 恢复默认装配（补播种缺失的默认组合行；管理 UI「恢复默认装配」入口，调用后重载插件列表）。 */
@@ -89,8 +91,8 @@ export function pluginRollback(id: string, expectedPreviousVersion: string): Pro
 }
 
 /** 订阅其他窗口完成的插件版本变化；各窗口据此重载自己的运行时。 */
-export function onPluginChanged(handler: (payload: { id: string; scope: PluginScope }) => void): Promise<UnlistenFn> {
-  return listen<{ id: string; scope: PluginScope }>("plugin-changed", (event) => handler(event.payload));
+export function onPluginChanged(handler: (payload: { id: string }) => void): Promise<UnlistenFn> {
+  return listen<{ id: string }>("plugin-changed", (event) => handler(event.payload));
 }
 
 /** 读取插件入口源码（path 缺省 = 清单 main）。 */

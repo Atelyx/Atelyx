@@ -64,11 +64,11 @@ import { trackPluginProcess } from "@/services/cordis/pluginProcesses";
 import { emitPluginEvent } from "@/services/cordis/events";
 import { dispatchCollabChannel } from "@/utils/collabHost";
 import { usePluginStore } from "@/stores/pluginStore";
+import { useNotificationStore } from "@/stores/notificationStore";
 
 function row(over: Partial<InstalledPlugin> & { id: string }): InstalledPlugin {
   return {
     manifest: { id: over.id, name: over.id, version: "1.0.0", type: "panel" },
-    scope: "app",
     installDir: "",
     sourceKind: "builtin",
     enabled: false,
@@ -109,7 +109,6 @@ describe("插件行失败诊断", () => {
           name: "Old",
           version: "1.0.0",
           type: "panel",
-          scope: "app",
           installDir: "/tmp/old",
           sourceKind: "market",
           enabled: true,
@@ -151,14 +150,14 @@ describe("插件行失败诊断", () => {
     expect(p.failure?.message).toContain("999");
   });
 
-  it("跨作用域同 id 冲突行：强制停用、标失败且不进入装配", async () => {    const conflict = "app 与仓库作用域存在同 id 插件，双方已停用：请卸载其一后重新启用";
-    const conflictRow = (scope: "app" | "vault") => ({
+  it("同 id 冲突行：强制停用、标失败且不进入装配", async () => {
+    const conflict = "同 id 插件存在冲突行，双方已停用：请卸载其一后重新启用";
+    const conflictRow = {
       id: "com.test.dupe",
       name: "Dupe",
       version: "1.0.0",
       type: "panel",
-      scope,
-      installDir: `/tmp/dupe-${scope}`,
+      installDir: "/tmp/dupe",
       sourceKind: "market",
       enabled: true,
       manifest: {
@@ -168,9 +167,9 @@ describe("插件行失败诊断", () => {
         atelyx: { name: "Dupe", type: "panel" },
       },
       conflict,
-    });
+    };
     vi.mocked(pluginList).mockResolvedValue({
-      rows: [conflictRow("app"), conflictRow("vault")],
+      rows: [conflictRow],
     } as never);
 
     await usePluginStore.getState().load();
@@ -181,6 +180,31 @@ describe("插件行失败诊断", () => {
     expect(p.failure?.message).toContain("同 id");
   });
 
+  it("随仓库插件目录仍在：汇总提示且不进入列表", async () => {
+    vi.mocked(pluginList).mockResolvedValue({
+      rows: [],
+      legacyVaultPluginRoots: ["E:/vaults/notes", "E:/vaults/work"],
+    });
+    const notify = vi.spyOn(useNotificationStore.getState(), "notify");
+
+    await usePluginStore.getState().load();
+
+    expect(notify).toHaveBeenCalledWith(
+      expect.objectContaining({
+        level: "warning",
+        message: expect.stringContaining("E:/vaults/notes"),
+      }),
+    );
+    notify.mockRestore();
+  });
+
+  it("无随仓库插件目录：不发汇总提示", async () => {
+    const notify = vi.spyOn(useNotificationStore.getState(), "notify");
+    await usePluginStore.getState().load();
+    expect(notify).not.toHaveBeenCalled();
+    notify.mockRestore();
+  });
+
   it("状态降级：stateError 落到 store，停用行不进入装配", async () => {
     vi.mocked(pluginList).mockResolvedValue({
       rows: [
@@ -189,7 +213,6 @@ describe("插件行失败诊断", () => {
           name: "Degraded",
           version: "1.0.0",
           type: "panel",
-          scope: "app",
           installDir: "/tmp/degraded",
           sourceKind: "market",
           enabled: false,
@@ -304,7 +327,6 @@ describe("安装收尾的宿主兼容强制", () => {
       name: id,
       version: "1.0.0",
       type: "panel",
-      scope: "app",
       installDir: `/tmp/${id}`,
       sourceKind: "market",
       enabled: true,
@@ -321,8 +343,8 @@ describe("安装收尾的宿主兼容强制", () => {
     };
     vi.mocked(pluginInstall).mockResolvedValueOnce(installedRow("com.test.constrained", raw) as never);
 
-    await expect(usePluginStore.getState().install("com/example", "app")).rejects.toThrow("999");
-    expect(pluginUninstall).toHaveBeenCalledWith("com.test.constrained", "app");
+    await expect(usePluginStore.getState().install("com/example")).rejects.toThrow("999");
+    expect(pluginUninstall).toHaveBeenCalledWith("com.test.constrained");
   });
 
   it("宿主版本读取失败 → 不安装（fail-closed），回滚并给出可读错误", async () => {
@@ -335,8 +357,8 @@ describe("安装收尾的宿主兼容强制", () => {
     };
     vi.mocked(pluginInstall).mockResolvedValueOnce(installedRow("com.test.noversion", raw) as never);
 
-    await expect(usePluginStore.getState().install("com/example", "app")).rejects.toThrow("宿主版本");
-    expect(pluginUninstall).toHaveBeenCalledWith("com.test.noversion", "app");
+    await expect(usePluginStore.getState().install("com/example")).rejects.toThrow("宿主版本");
+    expect(pluginUninstall).toHaveBeenCalledWith("com.test.noversion");
   });
 });
 
@@ -399,12 +421,11 @@ describe("仓库外目录授权动作", () => {
     main: "index.js",
     atelyx: { type: "background", declaredDirs: ["~/Projects/foo"] },
   });
-  const fsRow = (over: Partial<{ scope: "app" | "vault"; approvedDirs: string[] }> = {}): PluginRow => ({
+  const fsRow = (over: Partial<{ approvedDirs: string[] }> = {}): PluginRow => ({
     id: "com.test.fs",
     name: "FS",
     version: "1.0.0",
     type: "background",
-    scope: over.scope ?? "vault",
     installDir: "/tmp/fs",
     sourceKind: "git",
     enabled: false,
@@ -412,26 +433,26 @@ describe("仓库外目录授权动作", () => {
     ...(over.approvedDirs ? { approvedDirs: over.approvedDirs } : {}),
   });
 
-  it("approveDir 按行 scope 调用服务，重载后行携带批准目录", async () => {
+  it("approveDir 调用服务，重载后行携带批准目录", async () => {
     // 首次列表无批准；批准后 Rust 落盘返回带 approvedDirs 的行（重载由 runVersionOp 触发）
     vi.mocked(pluginList)
       .mockResolvedValueOnce({ rows: [fsRow()] })
       .mockResolvedValueOnce({ rows: [fsRow({ approvedDirs: ["~/Projects/foo"] })] });
     await usePluginStore.getState().load();
     await usePluginStore.getState().approveDir("com.test.fs", "~/Projects/foo");
-    expect(pluginApproveDir).toHaveBeenCalledWith("com.test.fs", "vault", "~/Projects/foo");
+    expect(pluginApproveDir).toHaveBeenCalledWith("com.test.fs", "~/Projects/foo");
     expect(usePluginStore.getState().plugins["com.test.fs"]?.approvedDirs).toEqual(["~/Projects/foo"]);
   });
 
-  it("revokeDir 按行 scope 调用服务，重载后行移除该目录", async () => {
+  it("revokeDir 调用服务，重载后行移除该目录", async () => {
     // 撤销前列表带 approvedDirs；撤销后 Rust 落盘返回不带该目录的行（重载由 runVersionOp 触发）
     vi.mocked(pluginList)
-      .mockResolvedValueOnce({ rows: [fsRow({ scope: "app", approvedDirs: ["~/Projects/foo"] })] })
-      .mockResolvedValueOnce({ rows: [fsRow({ scope: "app" })] });
+      .mockResolvedValueOnce({ rows: [fsRow({ approvedDirs: ["~/Projects/foo"] })] })
+      .mockResolvedValueOnce({ rows: [fsRow()] });
     await usePluginStore.getState().load();
     expect(usePluginStore.getState().plugins["com.test.fs"]?.approvedDirs).toEqual(["~/Projects/foo"]);
     await usePluginStore.getState().revokeDir("com.test.fs", "~/Projects/foo");
-    expect(pluginRevokeDir).toHaveBeenCalledWith("com.test.fs", "app", "~/Projects/foo");
+    expect(pluginRevokeDir).toHaveBeenCalledWith("com.test.fs", "~/Projects/foo");
     expect(usePluginStore.getState().plugins["com.test.fs"]?.approvedDirs).toBeUndefined();
   });
 
@@ -443,13 +464,12 @@ describe("仓库外目录授权动作", () => {
   });
 });
 
-describe("安装作用域确认后的落位参数", () => {
+describe("安装落位", () => {
   const installedRow = (id: string): PluginRow => ({
     id,
     name: id,
     version: "1.0.0",
     type: "panel",
-    scope: "vault",
     installDir: `/tmp/${id}`,
     sourceKind: "market",
     enabled: false,
@@ -461,16 +481,16 @@ describe("安装作用域确认后的落位参数", () => {
     },
   });
 
-  it("installLocal 透传所选作用域给服务", async () => {
+  it("installLocal 透传本地路径给服务", async () => {
     vi.mocked(pluginInstallLocal).mockResolvedValueOnce(installedRow("com.test.localscope") as never);
-    await usePluginStore.getState().installLocal("/tmp/src", "vault");
-    expect(pluginInstallLocal).toHaveBeenCalledWith("/tmp/src", "vault");
+    await usePluginStore.getState().installLocal("/tmp/src");
+    expect(pluginInstallLocal).toHaveBeenCalledWith("/tmp/src");
   });
 
-  it("installGit 透传归一化地址与所选作用域给服务", async () => {
+  it("installGit 透传归一化地址给服务", async () => {
     vi.mocked(pluginInstall).mockResolvedValueOnce(installedRow("com.test.git") as never);
-    await usePluginStore.getState().installGit("owner/repo", "vault");
-    expect(pluginInstall).toHaveBeenCalledWith("https://github.com/owner/repo.git", "vault");
+    await usePluginStore.getState().installGit("owner/repo");
+    expect(pluginInstall).toHaveBeenCalledWith("https://github.com/owner/repo.git");
   });
 
   it("pickLocalPluginDir 返回选择器结果，取消返回 null", async () => {
@@ -519,7 +539,6 @@ describe("插件进程随运行时结束", () => {
           name: "com.test.proc-mounted",
           version: "1.0.0",
           type: "panel",
-          scope: "app",
           installDir: "/tmp/com.test.proc-mounted",
           sourceKind: "market",
           enabled: true,

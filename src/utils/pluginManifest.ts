@@ -6,7 +6,6 @@
  */
 import {
   type PluginManifest,
-  type PluginScope,
   type PluginType,
   type ThemeDefinition,
 } from "@/types";
@@ -184,7 +183,6 @@ export function validatePluginManifest(raw: unknown): ManifestValidateResult {
     ...(typeof main === "string" && main.trim().length > 0 ? { main } : {}),
     ...(dependenciesDeclared ? { dependencies: dependenciesDeclared } : {}),
     ...(ax.bundle === true ? { bundle: true } : {}),
-    scope: normalizeScope(ax.scope),
     ...(types.length > 0 ? { types } : {}),
     ...(declares.length > 0 ? { declares } : {}),
     ...(declaredDirs.length > 0 ? { declaredDirs } : {}),
@@ -374,8 +372,4 @@ function normalizeVarTable(raw: unknown): Record<string, string> | undefined {
     if (typeof value === "string") out[key] = value;
   }
   return out;
-}
-
-function normalizeScope(rawScope: unknown): PluginScope {
-  return rawScope === "vault" ? "vault" : "app";
 }

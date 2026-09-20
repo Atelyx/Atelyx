@@ -17,14 +17,12 @@ import { Menu, MenuItem } from "@/components/common/Menu";
 import { ToggleSwitch } from "@/components/common/ToggleSwitch";
 import { PluginDetailsDialog } from "@/components/plugins/PluginDetailsDialog";
 import { MarketplaceSection } from "@/components/plugins/MarketplaceSection";
-import { InstallScopeSelector } from "@/components/plugins/InstallScopeSelector";
 import { SlotConflictPanel } from "@/components/plugins/SlotConflictPanel";
 import { DEFAULT_COMPOSITION } from "@/components/plugins/cordis/builtins";
 import { deriveThemeProviders, isThemePluginRow } from "@/utils/pluginTheme";
 import { composePlugins, compositionPackages } from "@/utils/cordis/composition";
-import { errText, type PluginScope } from "@/types";
+import { errText } from "@/types";
 import {
-  PLUGIN_SCOPE_LABELS,
   PLUGIN_SOURCE_LABELS,
   PLUGIN_TYPE_LABELS,
 } from "@/constants/plugins";
@@ -63,7 +61,6 @@ export function PluginsSettingsTab() {
   const [installing, setInstalling] = useState(false);
   const [pendingLocalPath, setPendingLocalPath] = useState<string | null>(null);
   const [pendingGitUrl, setPendingGitUrl] = useState<string | null>(null);
-  const [confirmScope, setConfirmScope] = useState<PluginScope>("app");
 
   const rows = useMemo(() => composePlugins(DEFAULT_COMPOSITION, compositionPackages(plugins)), [plugins]);
   // 主题插件守恒（与 Rust 命令校验双保险）：主题插件必须至少保留一个启用——
@@ -107,20 +104,19 @@ export function PluginsSettingsTab() {
     );
   };
 
-  /** 从本地文件夹安装：先选目录，再弹作用域确认（与市场/Git 安装同一模式）。 */
+  /** 从本地文件夹安装：先选目录，再弹安装确认（与市场/Git 安装同一模式）。 */
   const pickLocalDir = async () => {
     if (installing) return;
     try {
       const path = await pickLocalPluginDir();
       if (!path) return;
-      setConfirmScope("app");
       setPendingLocalPath(path);
     } catch (e) {
       setNotice({ kind: "error", text: errText(e) });
     }
   };
 
-  /** 从 Git 地址安装：先校验非空，再弹作用域确认。 */
+  /** 从 Git 地址安装：先校验非空，再弹安装确认。 */
   const startGitInstall = () => {
     const url = gitUrl.trim();
     if (!url) {
@@ -128,7 +124,6 @@ export function PluginsSettingsTab() {
       return;
     }
     if (installing) return;
-    setConfirmScope("app");
     setPendingGitUrl(url);
   };
 
@@ -306,7 +301,7 @@ export function PluginsSettingsTab() {
                   </div>
                   <div className="text-[11px] truncate" style={{ color: "var(--text-muted)" }}>
                     {row.id}
-                    {row.installed ? ` · ${PLUGIN_SCOPE_LABELS[p.scope]} · v${row.version}` : " · 默认插件（已卸载）"}
+                    {row.installed ? ` · v${row.version}` : " · 默认插件（已卸载）"}
                     {row.tagline ? ` · ${row.tagline}` : ""}
                   </div>
                 </div>
@@ -455,33 +450,30 @@ export function PluginsSettingsTab() {
           title={pendingLocalPath ? "从本地文件夹安装" : "从 Git 地址安装"}
           description={
             pendingLocalPath
-              ? "实时引用所选本地目录（无拷贝，源码改动即时生效）。安装到："
-              : "将按地址克隆插件仓库（保留 .git 供更新）。安装到："
+              ? "实时引用所选本地目录（无拷贝，源码改动即时生效）。"
+              : "将按地址克隆插件仓库（保留 .git 供更新）。"
           }
           confirmText="安装"
           danger={false}
           onConfirm={() => {
-            const scope = confirmScope;
             const path = pendingLocalPath;
             const git = pendingGitUrl;
             setPendingLocalPath(null);
             setPendingGitUrl(null);
             if (path) {
               void runInstall(
-                () => installLocal(path, scope),
+                () => installLocal(path),
                 "已从本地文件夹安装（替换行沿用原启用状态，全新插件默认停用；源目录改动即时生效）",
               );
             } else if (git) {
-              void runInstall(() => installGit(git, scope), "已从 Git 地址安装（替换行沿用原启用状态，全新插件默认停用）", () => setGitUrl(""));
+              void runInstall(() => installGit(git), "已从 Git 地址安装（替换行沿用原启用状态，全新插件默认停用）", () => setGitUrl(""));
             }
           }}
           onCancel={() => {
             setPendingLocalPath(null);
             setPendingGitUrl(null);
           }}
-        >
-          <InstallScopeSelector value={confirmScope} onChange={setConfirmScope} />
-        </ConfirmDialog>
+        />
       )}
         </>
       )}

@@ -300,21 +300,23 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
     views: [{ kind: "aichat", label: VIEW_LABELS.aichat, component: AiChatView }],
     lifecycle: {
       id: "builtin.chatpanel",
-      flush: async (ctx) => {
-        await useChatPanelStore.getState().flush(ctx.vaultRoot);
+      flush: async () => {
+        // 归属校验在 store 内按身份键做（当前激活身份 ≠ 内存会话所属身份 → 不写）
+        await useChatPanelStore.getState().flush();
       },
-      onVaultEntered: async (ctx) => {
-        // 进仓后读盘加载 AI 会话（force：真实切换强制重读，防幂等守卫跳过旧会话）
-        await useChatPanelStore.getState().load(ctx.vaultRoot, true);
+      onVaultEntered: async () => {
+        // 进仓后读盘加载 AI 会话（force：真实切换强制重读，防幂等守卫跳过旧会话）；
+        // 目标身份取调用时的激活仓库身份键（空间模式下 root 恒 null，不按 root 判别）
+        await useChatPanelStore.getState().load(true);
       },
       onViewGained: (view) => {
         if (view !== "aichat") return;
         // 撕裂出去的 AI 会话视图回归主窗口：重读盘（面板窗口可能已改会话）
-        void useChatPanelStore.getState().load(useAppStore.getState().vaultRoot);
+        void useChatPanelStore.getState().load();
       },
       releaseView: async (view) => {
         if (view !== "aichat") return;
-        await useChatPanelStore.getState().flush(useAppStore.getState().vaultRoot);
+        await useChatPanelStore.getState().flush();
       },
     },
     vaultEventHandlers: [
@@ -658,7 +660,6 @@ export function builtinManifest(def: CordisBuiltinDef, version: string): PluginP
   const atelyx: Record<string, unknown> = {
     name: def.name,
     type: def.type,
-    scope: "app",
     tagline: def.tagline,
     author: "Atelyx",
     license: "MIT",

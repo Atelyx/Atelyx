@@ -1,5 +1,5 @@
 /**
- * 插件平台 store：插件行状态（app + 当前仓库 vault）+ 组合层（默认组合 + 已装行）+ 生命周期编排。
+ * 插件平台 store：插件行状态（应用级）+ 组合层（默认组合 + 已装行）+ 生命周期编排。
  *
  * 分层：本 store 是插件相关状态的唯一出口——组件不直连 `services/plugins`；
  * 插件运行时（Cordis 内核/挂载器/注册表）在 `services/cordis`，组合层推导在 `utils/cordis/composition`，
@@ -15,7 +15,7 @@
  */
 import { create } from "zustand";
 import type { ComponentType } from "react";
-import type { InstalledPlugin, PluginIndexEntry, PluginManifest, PluginPackageJson, PluginScope } from "@/types";
+import type { InstalledPlugin, PluginIndexEntry, PluginManifest, PluginPackageJson } from "@/types";
 import {
   errText,
   type PluginAuditEntry,
@@ -158,13 +158,13 @@ interface PluginStoreState {
   /** 加载插件行并按装配顺序拉起运行时。 */
   load(): Promise<void>;
   /** 从 GitHub 仓库安装（repo 为 `owner/repo` 市场引用或完整 git 地址；新装一律停用）。 */
-  install(repo: string, scope: PluginScope): Promise<PluginInstallResult>;
-  /** 从本地目录安装（junction/符号链接实时引用，源目录改动即时生效；作用域由安装确认选择）。 */
-  installLocal(path: string, scope: PluginScope): Promise<PluginInstallResult>;
+  install(repo: string): Promise<PluginInstallResult>;
+  /** 从本地目录安装（junction/符号链接实时引用，源目录改动即时生效）。 */
+  installLocal(path: string): Promise<PluginInstallResult>;
   /** 调系统目录选择器选插件源目录；用户取消返回 null（未安装）。 */
   pickLocalPluginDir(): Promise<string | null>;
-  /** 从 git 地址安装（git clone，保留 .git 供更新；作用域由安装确认选择）。 */
-  installGit(url: string, scope: PluginScope): Promise<PluginInstallResult>;
+  /** 从 git 地址安装（git clone，保留 .git 供更新）。 */
+  installGit(url: string): Promise<PluginInstallResult>;
   /** 卸载（删除目录/链接 + 终止运行时 + 清理状态）。 */
   uninstall(id: string): Promise<void>;
   /** 启用/停用（启用 = 拉起运行时；停用 = 终止运行时）。 */
@@ -225,13 +225,12 @@ export interface PluginInstallResult {
   replaced: boolean;
 }
 
-/** 列表行 → store 条目（清单经前端校验归一化；清单无效或跨作用域同 id 冲突的行标为失败且
+/** 列表行 → store 条目（清单经前端校验归一化；清单无效或同 id 冲突的行标为失败且
  *  不进入挂载——spawn 据此拒绝执行，原始清单仅保留供详情展示）。 */
 function toInstalled(row: PluginRow): InstalledPlugin {
   const validated = validatePluginManifest(row.manifest);
   const base = {
     id: row.id,
-    scope: row.scope,
     installDir: row.installDir,
     entry: row.entry,
     sourceKind: row.sourceKind,
@@ -311,7 +310,7 @@ async function finishInstall(get: () => PluginStoreState, row: PluginRow): Promi
     if (!compat.ok) throw new Error(`无法安装：${compat.reason}`);
   } catch (e) {
     // 补偿卸载失败不能静默——否则会把「已完整回滚」伪装成成功；安装错误本身仍由外层 throw 抛给调用方
-    await pluginUninstall(row.id, row.scope).catch((rollbackError) => {
+    await pluginUninstall(row.id).catch((rollbackError) => {
       console.error("安装兼容检查失败后回滚插件失败", rollbackError);
     });
     throw e;
@@ -637,7 +636,15 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
     ensureRuntimeChangeEvents();
     installCommandHotkeys();
     const hostVersion = await getAppVersion().catch(() => null);
-    const { rows, stateError } = await pluginList(defaultManifests(hostVersion));
+    const { rows, stateError, legacyVaultPluginRoots } = await pluginList(defaultManifests(hostVersion));
+    // 随仓库安装的插件目录不再受支持（插件统一应用级加载）：Rust 侧探测到仍在的目录时汇总提示，
+    // 保留「装了但看不到」的可解释性，不静默。
+    if (legacyVaultPluginRoots?.length) {
+      useNotificationStore.getState().notify({
+        level: "warning",
+        message: `以下仓库仍保留随仓库安装的插件目录（<仓库>/.atelyx/plugins），其中的插件不会加载：${legacyVaultPluginRoots.join("；")}。如需使用请以应用级重新安装，确认无用后可删除目录`,
+      });
+    }
     await unmountAll(getKernel());
     const plugins: Record<string, InstalledPlugin> = {};
     for (const row of rows) plugins[row.id] = toInstalled(row);
@@ -695,25 +702,25 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
       return next;
     },
 
-    install: async (repo, scope) => {
+    install: async (repo) => {
       const before = new Set(Object.keys(get().plugins));
-      const row = await pluginInstall(repo, scope);
+      const row = await pluginInstall(repo);
       await finishInstall(get, row);
       // 替换判定按「包内实际 id」对安装前快照比对：市场索引 id 与包内 name 不一致时，
       // 只认后者才能如实提示被替代的行
       return { id: row.id, replaced: before.has(row.id) };
     },
 
-    installLocal: async (path, scope) => {
+    installLocal: async (path) => {
       const before = new Set(Object.keys(get().plugins));
-      const row = await pluginInstallLocal(path, scope);
+      const row = await pluginInstallLocal(path);
       await finishInstall(get, row);
       return { id: row.id, replaced: before.has(row.id) };
     },
 
     pickLocalPluginDir: async () => pickDirectorySvc(),
 
-    installGit: async (url, scope) => {
+    installGit: async (url) => {
       const trimmed = url.trim();
       if (!trimmed) throw new Error("请输入 git 仓库地址");
       // 纯 owner/repo 输入归一化为完整 GitHub 地址（先剥 .git 尾缀防双后缀）：
@@ -724,7 +731,7 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
           ? `https://github.com/${base}.git`
           : trimmed;
       const before = new Set(Object.keys(get().plugins));
-      const row = await pluginInstall(gitRef, scope);
+      const row = await pluginInstall(gitRef);
       await finishInstall(get, row);
       return { id: row.id, replaced: before.has(row.id) };
     },
@@ -734,7 +741,7 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
       if (!p) return;
       // Rust 先行（含守恒校验等拒绝路径）：失败抛错时本地运行时保持完好、状态一致；
       // 成功后再终止运行时与贡献、删除 store 行（默认组合成员卸载后仍在列表中成灰行）。
-      await pluginUninstall(id, p.scope);
+      await pluginUninstall(id);
       await stopPlugin(id);
       set((s) => {
         const plugins = { ...s.plugins };
@@ -777,13 +784,13 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
       if (!p) return;
       // 只批已声明目录（Rust 侧强校验）；批准结果存 plugin-state，经重载入行（跨窗口经
       // plugin-changed 广播一致）。操作窗口内监听器跳过，避免同窗口双重重载。
-      await runVersionOpTracked(() => pluginApproveDir(id, p.scope, dir), "批准目录");
+      await runVersionOpTracked(() => pluginApproveDir(id, dir), "批准目录");
     },
 
     revokeDir: async (id, dir) => {
       const p = get().plugins[id];
       if (!p) return;
-      await runVersionOpTracked(() => pluginRevokeDir(id, p.scope, dir), "撤销目录");
+      await runVersionOpTracked(() => pluginRevokeDir(id, dir), "撤销目录");
     },
 
     rollback: async (id) => {

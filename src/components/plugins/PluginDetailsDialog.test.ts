@@ -32,7 +32,6 @@ function plugin(over: {
       type: "background",
       ...(over.declaredDirs ? { declaredDirs: over.declaredDirs } : {}),
     },
-    scope: "app",
     installDir: "/tmp/fs",
     sourceKind: "git",
     enabled: false,

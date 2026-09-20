@@ -133,7 +133,6 @@ describe("validatePluginManifest", () => {
     if (!result.ok) return;
     expect(result.manifest.id).toBe("com.example.todo");
     expect(result.manifest.name).toBe("示例插件");
-    expect(result.manifest.scope).toBe("app");
     expect(result.manifest.types).toEqual(["tool"]);
     expect(result.manifest.declares).toBeUndefined();
   });
@@ -228,12 +227,11 @@ describe("validatePluginManifest", () => {
       }).ok,
     ).toBe(false);
   });
-  it("保留 scope/declares/permissions/platforms/hostApiVersion", () => {
+  it("保留 declares/permissions/platforms/hostApiVersion", () => {
     const result = validatePluginManifest({
       ...validManifest(),
       atelyx: {
         ...(validManifest().atelyx as Record<string, unknown>),
-        scope: "vault",
         declares: ["table", "shell"],
         permissions: { shell: "执行打包命令" },
         platforms: ["windows-x64"],
@@ -242,7 +240,6 @@ describe("validatePluginManifest", () => {
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.manifest.scope).toBe("vault");
     expect(result.manifest.declares).toEqual(["table", "shell"]);
     expect(result.manifest.permissions).toEqual({ shell: "执行打包命令" });
     expect(result.manifest.platforms).toEqual(["windows-x64"]);
