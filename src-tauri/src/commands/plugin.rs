@@ -1,9 +1,8 @@
 //! 插件平台命令：安装/卸载/启用/更新/读取入口与插件数据。
 //!
 //! 存储布局：
-//! - app 级插件：`app_data_dir/plugins/<目录>/`（个人工具，本机）
-//! - vault 级插件：`<仓库根>/.atelyx/plugins/<目录>/`（随仓库共享）
-//! - 状态：`app_data_dir/plugin-state.json`（每 id：enabled 开关 + 行来源 kind/scope/落位目录名 +
+//! - 插件：`app_data_dir/plugins/<目录>/`（本机）
+//! - 状态：`app_data_dir/plugin-state.json`（每 id：enabled 开关 + 行来源 kind/落位目录名 +
 //!   可选一代回退目录与版本 + 随应用分发行的清单 + 已播种 id 记录）
 //!
 //! 身份模型：插件身份 = 清单 `package.json` 的 `name`（反向域名，仍校验）；**目录名 = 原名**（本地
@@ -32,9 +31,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Manager};
 
-use crate::vault::{atomic_write, VaultState};
+use crate::vault::atomic_write;
 
 /// 插件包清单文件名（插件根目录）。
 const MANIFEST_FILE: &str = "package.json";
@@ -94,7 +93,6 @@ pub struct PluginInfo {
     pub version: String,
     #[serde(rename = "type")]
     pub kind: String,
-    pub scope: String,
     pub install_dir: String,
     pub enabled: bool,
     pub manifest: Value,
@@ -106,10 +104,6 @@ pub struct PluginInfo {
     /// 可回退到的上一版本；回退成功后该字段清空。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub previous_version: Option<String>,
-    /// 跨作用域同 id 冲突（外部同步可能让 app 与 vault 同时出现同 id 插件）：
-    /// 双方行都携带冲突说明并强制以停用态展示，均不进入装配。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub conflict: Option<String>,
     /// 用户批准的仓库外目录（声明原形，`~/` 形式；见 `atelyx.declaredDirs`，空 = 无授权）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approved_dirs: Option<Vec<String>>,
@@ -124,6 +118,10 @@ pub struct PluginListResult {
     /// 不落盘、不播种启用行（fail-closed）。`None` = 状态健康。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state_error: Option<String>,
+    /// 仍保留随仓库安装插件目录（`<root>/.atelyx/plugins` 下有插件目录）的仓库根：随仓库安装
+    /// 已不再支持，这些目录中的插件不会加载，前端据此汇总提示。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub legacy_vault_plugin_roots: Vec<String>,
 }
 
 /// 成功更新后保留的一代旧代码定位记录（随 `PluginSource` 持久化；回退成功后清空）。
@@ -159,7 +157,6 @@ struct PluginSource {
     /// 成功更新后保留的一代旧代码；回退成功后清空。
     #[serde(default)]
     previous: Option<PluginPrevious>,
-    scope: String,
     /// 用户批准的仓库外目录（声明原形 `~/` 形式；随插件生灭——卸载即消失，更新保留）。
     #[serde(default)]
     approved_dirs: Vec<String>,
@@ -177,43 +174,6 @@ struct PluginState {
     /// ——卸载保持卸载、停用保持停用；恢复由用户显式触发）。
     #[serde(default)]
     seeded_ids: Vec<String>,
-}
-
-/// 跨作用域 id 全局唯一：同 id 已存在于另一作用域时拒绝安装（store/enabled/运行时均按裸 id
-/// 寻址，双作用域并存会互相踩踏；随仓库同步的重复由扫描兜底展示，安装路径从源头禁止）。
-/// 「实现随应用编译的行」同占 app 作用域：来源记录按裸 id 单条保存，被 vault 级包覆盖后该行
-/// 在别的仓库无处重建（既不列出也恢复不回），故同 id 的 vault 级安装一并拒绝——想替换随应用
-/// 分发的实现请选「本机」作用域（磁盘包覆盖该实现）。
-fn ensure_global_id_unique(app: &AppHandle, state: &VaultState, scope: &str, id: &str) -> Result<(), String> {
-    for other in ["app", "vault"] {
-        if other == scope {
-            continue;
-        }
-        if let Ok(b) = plugin_base_dir(app, state, other) {
-            if find_plugin_dir(&b, id).is_ok() {
-                return Err("已安装相同 id 的插件（另一作用域），请先卸载".into());
-            }
-        }
-        if other == "app" && has_compiled_row(app, state, id)? {
-            return Err("该 id 由随应用分发的插件占用（实现随应用编译）：请选「本机」作用域安装以替代该行".into());
-        }
-    }
-    Ok(())
-}
-
-/// 是否存在「以随应用编译实现呈现」的行：无落位目录，或落位目录当前不可见但宿主清单已存
-/// （`plugin_list` 对这两类行同样以 `install_dir` 空 = 编译实现列出，判定口径必须与展示一致）。
-fn has_compiled_row(app: &AppHandle, state: &VaultState, id: &str) -> Result<bool, String> {
-    let Some(src) = read_plugin_state(app)?.sources.get(id).cloned() else {
-        return Ok(false);
-    };
-    if src.dir_name.is_empty() {
-        return Ok(true);
-    }
-    let dir_visible = plugin_base_dir(app, state, &src.scope)
-        .ok()
-        .is_some_and(|base| find_plugin_dir(&base, id).is_ok());
-    Ok(!dir_visible && src.manifest.is_some())
 }
 
 // ===== 默认组合播种（随应用分发的行） =====
@@ -264,7 +224,6 @@ fn seed_default_rows(pstate: &mut PluginState, defaults: &[Value], disk_ids: &Ha
                     id.clone(),
                     PluginSource {
                         kind: PluginSourceKind::Builtin,
-                        scope: "app".to_string(),
                         manifest: Some(entry.clone()),
                         ..Default::default()
                     },
@@ -301,80 +260,9 @@ fn seed_default_rows(pstate: &mut PluginState, defaults: &[Value], disk_ids: &Ha
     changed
 }
 
-fn plugin_base_dir(app: &AppHandle, state: &VaultState, scope: &str) -> Result<PathBuf, String> {
-    match scope {
-        "app" => {
-            let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-            Ok(dir.join("plugins"))
-        }
-        "vault" => {
-            let root = state.root()?;
-            Ok(root.join(".atelyx/plugins"))
-        }
-        other => Err(format!("未知插件作用域：{other}")),
-    }
-}
-
-/// vault 级长操作在 await 前后必须仍属于同一仓库会话，避免把旧仓库结果提交到新会话状态。
-fn vault_session_token(state: &VaultState, scope: &str) -> Result<Option<(PathBuf, u64)>, String> {
-    if scope != "vault" {
-        return Ok(None);
-    }
-    let (root, _, generation) = state.session_snapshot()?;
-    Ok(Some((root, generation)))
-}
-
-/// 会话令牌比对：root 与世代都一致才算同一仓库会话（提取为纯函数，便于单测覆盖比较逻辑）。
-fn vault_session_current(expected: &(PathBuf, u64), actual: &(PathBuf, Vec<String>, u64)) -> bool {
-    actual.0 == expected.0 && expected.1 == actual.2
-}
-
-fn ensure_vault_session(state: &VaultState, expected: Option<&(PathBuf, u64)>) -> Result<(), String> {
-    let Some(expected) = expected else {
-        return Ok(());
-    };
-    let snapshot = state.session_snapshot()?;
-    if !vault_session_current(expected, &snapshot) {
-        return Err("操作期间仓库已切换，本次结果未应用".into());
-    }
-    Ok(())
-}
-
-/// 安装会话守卫失败后的收尾：清掉本次在原会话 base 下产生的临时目录，返回会话错误。
-/// （不落位、不写状态——旧仓库的产物不得进入新会话。）
-fn discard_session_orphan(temp_dir: &Path, err: String) -> String {
-    let _ = fs::remove_dir_all(temp_dir);
-    err
-}
-
-/// 卸载目标。
-enum UninstallTarget<'a> {
-    /// 记录行（无记录的手工目录，或记录作用域与调用方一致）：走「隔离 → 清状态 → 删除」完整事务。
-    RecordedRow,
-    /// 外部同步副本（记录在另一作用域，调用方作用域确有同 id 落位目录）：只删该副本目录，
-    /// 状态记录属于另一作用域的行，保持不变——这是跨作用域冲突从管理页解除的通路。
-    SyncCopy(&'a Path),
-}
-
-/// 卸载目标判定（提取为纯函数便于单测）：来源记录是作用域权威——无记录或记录与调用方
-/// 作用域一致时整行卸载；记录在另一作用域而调用方作用域确有同 id 目录时视为外部同步副本；
-/// 该作用域没有副本 = 认错了行，拒绝（防传错/伪造 scope 删错作用域目录）。
-fn resolve_uninstall_target<'a>(
-    record_scope: Option<&str>,
-    caller_scope: &str,
-    dir_in_caller_scope: Option<&'a Path>,
-) -> Result<UninstallTarget<'a>, String> {
-    match record_scope {
-        None => Ok(UninstallTarget::RecordedRow),
-        Some(s) if s == caller_scope => Ok(UninstallTarget::RecordedRow),
-        Some(recorded) => match dir_in_caller_scope {
-            Some(dir) => Ok(UninstallTarget::SyncCopy(dir)),
-            None => Err(format!(
-                "该插件安装在{}作用域，请从对应作用域卸载",
-                if recorded == "vault" { "仓库" } else { "应用" }
-            )),
-        },
-    }
+fn plugin_base_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(dir.join("plugins"))
 }
 
 /// 安装/更新中途崩溃留下的临时与备份条目最大存活时长（秒）。
@@ -615,8 +503,8 @@ fn recycle_orphan_previous_dirs(base: &Path, referenced: &HashSet<String>) {
     }
 }
 
-/// 磁盘包 id 集（app + vault 两个作用域；未开仓库时只算 app）。
-fn disk_plugin_ids(app: &AppHandle, state: &VaultState) -> HashSet<String> {
+/// 磁盘包 id 集（app_data_dir 插件目录）。
+fn disk_plugin_ids(app: &AppHandle) -> HashSet<String> {
     let mut ids = HashSet::new();
     let mut collect = |base: &Path| {
         let Ok(rd) = fs::read_dir(base) else {
@@ -630,32 +518,13 @@ fn disk_plugin_ids(app: &AppHandle, state: &VaultState) -> HashSet<String> {
             }
         }
     };
-    if let Ok(base) = plugin_base_dir(app, state, "app") {
+    if let Ok(base) = plugin_base_dir(app) {
         collect(&base);
-    }
-    if let Ok(root) = state.root() {
-        collect(&root.join(".atelyx/plugins"));
     }
     ids
 }
 
-/// 同 id 是否同时落位于 app 与 vault 两个作用域（外部同步可造成；安装路径被
-/// `ensure_global_id_unique` 从源头禁止）。冲突期间启用/停用一律拒绝，防用户
-/// 「已启用」却因冲突行强制停用而不生效的困惑。
-fn cross_scope_id_conflict(app: &AppHandle, state: &VaultState, id: &str) -> bool {
-    ["app", "vault"]
-        .iter()
-        .filter(|scope| {
-            plugin_base_dir(app, state, scope)
-                .ok()
-                .and_then(|base| find_plugin_dir(&base, id).ok())
-                .is_some()
-        })
-        .count()
-        > 1
-}
-
-/// 在作用域插件目录下按清单 id 定位插件目录（目录名任意，身份以清单 id 为准）。
+/// 在插件目录下按清单 id 定位插件目录（目录名任意，身份以清单 id 为准）。
 /// 跳过点开头目录（临时/隐藏）与清单损坏目录；同 id 多目录时按目录名排序命中「第一个」。
 fn find_plugin_dir(base: &Path, id: &str) -> Result<PathBuf, String> {
     let rd = fs::read_dir(base).map_err(|_| "插件不存在".to_string())?;
@@ -879,7 +748,7 @@ fn manifest_valid_or_error(v: &Value) -> Result<(), String> {
             }
         }
     }
-    // atelyx 块：插件元数据（显示名/类型/作用域/披露/主题等）。
+    // atelyx 块：插件元数据（显示名/类型/披露/主题等）。
     let ax = v
         .get("atelyx")
         .and_then(|a| a.as_object())
@@ -1301,8 +1170,8 @@ fn locate_plugin_root(extract_dir: &Path) -> Result<PathBuf, String> {
 
 // ===== 安装 / 卸载 / 更新 =====
 
-fn emit_plugin_changed(app: &AppHandle, id: &str, scope: &str) {
-    if let Err(e) = app.emit("plugin-changed", serde_json::json!({ "id": id, "scope": scope })) {
+fn emit_plugin_changed(app: &AppHandle, id: &str) {
+    if let Err(e) = app.emit("plugin-changed", serde_json::json!({ "id": id })) {
         eprintln!("[plugin] 广播插件变化失败：{e}");
     }
 }
@@ -1311,7 +1180,6 @@ fn emit_plugin_changed(app: &AppHandle, id: &str, scope: &str) {
 fn plugin_info_from(
     dir: &Path,
     manifest: &Value,
-    scope: &str,
     source_kind: PluginSourceKind,
     enabled: bool,
 ) -> PluginInfo {
@@ -1322,34 +1190,30 @@ fn plugin_info_from(
         name: display,
         version: manifest["version"].as_str().unwrap_or("").to_string(),
         kind: manifest["atelyx"]["type"].as_str().unwrap_or("").to_string(),
-        scope: scope.to_string(),
         install_dir: dir.to_string_lossy().into_owned(),
         enabled,
         manifest: manifest.clone(),
         entry: crate::plugin_build::built_entry(dir).map(str::to_string),
         source_kind,
         previous_version: None,
-        conflict: None,
         approved_dirs: None,
     }
 }
 
 /// 由清单构建随应用分发行的运行信息（无磁盘目录：install_dir 空 = 实现随应用编译）。
-fn plugin_info_from_manifest(id: &str, manifest: &Value, scope: &str, source_kind: PluginSourceKind, enabled: bool) -> PluginInfo {
+fn plugin_info_from_manifest(id: &str, manifest: &Value, source_kind: PluginSourceKind, enabled: bool) -> PluginInfo {
     let display = manifest["atelyx"]["name"].as_str().unwrap_or(id).to_string();
     PluginInfo {
         id: id.to_string(),
         name: display,
         version: manifest["version"].as_str().unwrap_or("").to_string(),
         kind: manifest["atelyx"]["type"].as_str().unwrap_or("").to_string(),
-        scope: scope.to_string(),
         install_dir: String::new(),
         enabled,
         manifest: manifest.clone(),
         entry: None,
         source_kind,
         previous_version: None,
-        conflict: None,
         approved_dirs: None,
     }
 }
@@ -1378,15 +1242,9 @@ fn precheck_install_target(base: &Path, folder: &str, id: &str) -> Result<(), St
 
 /// 从已就绪的插件源码根目录执行校验 + 原子落位（git clone / 源码包解压共用）。
 /// 目录名 = `folder_name`（原名）；同名目录或同清单 id 目录已存在时报错，先卸载再装。
-/// `base` 由调用方固定（会话守卫复验后传入），不在锁内从可变仓库状态重推导——安装期间
-/// 切仓也不会把旧仓库产物落进新仓。`session_token` 同样由调用方固定：取件与打包是长等待，
-/// 落位前必须再复验一次（见下方注释）。调用方负责清理 `plugin_root` 所在临时目录残留。
 async fn install_plugin_dir(
     app: &AppHandle,
-    state: &VaultState,
     base: &Path,
-    scope: &str,
-    session_token: &Option<(PathBuf, u64)>,
     source: PluginSource,
     folder_name: &str,
     plugin_root: &Path,
@@ -1402,9 +1260,6 @@ async fn install_plugin_dir(
     // 依赖取件与打包在候选目录内完成：此刻尚未落位，失败只影响候选目录，当前版本不受影响。
     // 这步是耗时 I/O（下载 + 打包），放在文件锁之外。
     crate::plugin_build::prepare_artifact(app, plugin_root, &manifest, true).await?;
-    // 取件/打包期间可能切仓：落位与写状态都在守卫之外，必须在这里复验（base 已固定，
-    // 不会把旧仓库产物落进新仓，但「结果应用在已切走的仓库」同样不接受）。
-    ensure_vault_session(state, session_token.as_ref())?;
     let _io_guard = PLUGIN_IO_LOCK.lock().map_err(|_| "插件文件忙，请重试".to_string())?;
     let source_kind = source.kind;
 
@@ -1412,11 +1267,10 @@ async fn install_plugin_dir(
     if target.exists() {
         return Err("同名文件夹已存在，请先卸载".into());
     }
-    // 同清单 id 冲突：作用域下已有同 id 插件目录（目录名可不同）。
+    // 同清单 id 冲突：插件目录下已有同 id 插件目录（目录名可不同）。
     if find_plugin_dir(&base, &id).is_ok() {
         return Err("已安装相同 id 的插件，请先卸载".into());
     }
-    ensure_global_id_unique(app, state, scope, &id)?;
     // 原子落位：改名为目标目录。
     let move_result = fs::rename(plugin_root, &target);
     move_result.map_err(|e| format!("安装失败：{e}"))?;
@@ -1440,46 +1294,43 @@ async fn install_plugin_dir(
         }
     };
 
-    Ok(plugin_info_from(&target, &manifest, scope, source_kind, enabled))
+    Ok(plugin_info_from(&target, &manifest, source_kind, enabled))
 }
 
 // ===== 命令 =====
 
-/// 跨作用域同 id 冲突说明（list 行携带；双方一致，便于前端把同 id 两行合并为一条冲突行展示）。
-const CROSS_SCOPE_CONFLICT_MESSAGE: &str = "app 与仓库作用域存在同 id 插件，双方已停用：请卸载其一后重新启用";
-
-/// 跨作用域同 id 冲突标记：外部同步（仓库被 Git/云盘共享）可能让 app 与 vault 同时出现
-/// 同 id 插件，而状态与运行时都按裸 id 寻址——双方并存会互相踩踏。两行都显式标记冲突并
-/// 强制以停用态展示（不采用隐式 app 优先/vault 优先），由用户卸载其一解除。
-fn mark_cross_scope_conflicts(rows: &mut [PluginInfo], seen_per_scope: &HashMap<String, HashSet<String>>) {
-    let mut id_scope_count: HashMap<&String, usize> = HashMap::new();
-    for ids in seen_per_scope.values() {
-        for id in ids {
-            *id_scope_count.entry(id).or_default() += 1;
+/// 仍保留随仓库安装插件目录（`<root>/.atelyx/plugins` 下有插件目录）的仓库根。
+/// 目录是磁盘事实、不随 plugin-state 写回丢失（状态里旧 scope 标记会被 serde 丢弃，不能作判据）；
+/// 目录缺失 = 该仓库从无随仓库插件（多数情况），其它读失败记日志跳过该仓库。
+fn roots_with_legacy_plugin_dirs(roots: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for root in roots {
+        let dir = Path::new(root).join(".atelyx").join("plugins");
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                eprintln!("[plugin] 探测随仓库插件目录失败（{}）：{e}", dir.display());
+                continue;
+            }
+        };
+        if entries.flatten().any(|e| e.path().is_dir()) {
+            out.push(root.clone());
         }
     }
-    for row in rows.iter_mut() {
-        if id_scope_count.get(&row.id).copied().unwrap_or(0) > 1 {
-            row.conflict = Some(CROSS_SCOPE_CONFLICT_MESSAGE.to_string());
-            row.enabled = false;
-        }
-    }
+    out
 }
 
 /// 列出全部插件行：先按 `defaults`（默认组合清单）增量播种随应用分发的行，再列出磁盘包行
-/// （app 级恒有；vault 级仅当前仓库；未开仓库时跳过 vault 目录）+ 无同名磁盘包的随应用分发行。
+/// + 无同名磁盘包的随应用分发行。
 /// 状态文件不可读时整表降级：行照常列出但全部停用（fail-closed），诊断随 `state_error` 返回，
 /// 且不落盘任何由「读失败得出的状态」、不做孤儿回收（两者的依据都不可信）。
 #[tauri::command]
-pub fn plugin_list(
-    app: AppHandle,
-    state: State<'_, VaultState>,
-    defaults: Vec<Value>,
-) -> Result<PluginListResult, String> {
+pub fn plugin_list(app: AppHandle, defaults: Vec<Value>) -> Result<PluginListResult, String> {
     let _io_guard = PLUGIN_IO_LOCK.lock().map_err(|_| "插件文件忙，请重试".to_string())?;
     // 只读展示路径：读不到状态也不阻断列表（播种只在读成功时落盘，见下）。
     let (mut pstate, state_error) = read_plugin_state_lenient(&app);
-    let disk_ids = disk_plugin_ids(&app, &state);
+    let disk_ids = disk_plugin_ids(&app);
     // 展示行就地播种（本次调用即可见）；降级时清空启用表——播种的「默认启用」是健康态语义，
     // 状态不可读时用户原先停用的行不得重新执行。
     let seeded = seed_default_rows(&mut pstate, &defaults, &disk_ids, false);
@@ -1499,86 +1350,82 @@ pub fn plugin_list(
     }
 
     let mut out: Vec<PluginInfo> = Vec::new();
-    // 作用域各自的已见 id：同作用域内同 id 多目录只收第一个，防身份错乱；
-    // 跨作用域不静默去重——同 id 并存时两行都显式标记冲突（见 mark_cross_scope_conflicts）。
-    let mut seen_per_scope: HashMap<String, HashSet<String>> = HashMap::new();
 
-    let mut scan = |scope: &str, base: &Path| {
-        // 孤儿回退目录回收：本命令持 IO 锁，rename 链与状态写都在锁内，
-        // 「磁盘有 `.previous-*`、记录无引用」即崩溃孤儿（见调用点的持锁说明）。
-        // 状态不可读时跳过：引用判定不可信，可能把仍被引用的回退目录当孤儿回收。
-        let referenced: HashSet<String> = pstate
-            .sources
-            .values()
-            .filter(|s| s.scope == scope)
-            .filter_map(|s| s.previous.as_ref().map(|p| p.dir_name.clone()))
-            .collect();
+    // 孤儿回退目录回收：本命令持 IO 锁，rename 链与状态写都在锁内，
+    // 「磁盘有 `.previous-*`、记录无引用」即崩溃孤儿（见调用点的持锁说明）。
+    // 状态不可读时跳过：引用判定不可信，可能把仍被引用的回退目录当孤儿回收。
+    let referenced: HashSet<String> = pstate
+        .sources
+        .values()
+        .filter_map(|s| s.previous.as_ref().map(|p| p.dir_name.clone()))
+        .collect();
+    if let Ok(base) = plugin_base_dir(&app) {
         if state_readable {
-            recycle_orphan_previous_dirs(base, &referenced);
+            recycle_orphan_previous_dirs(&base, &referenced);
         }
-        let Ok(rd) = fs::read_dir(base) else {
-            return;
-        };
-        let mut dirs: Vec<PathBuf> = rd
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.is_dir() && !is_hidden_dir(p))
-            .collect();
-        dirs.sort(); // 稳定遍历顺序：同 id 多目录时「第一个」可复现（与 find_plugin_dir 一致）
-        let seen = seen_per_scope.entry(scope.to_string()).or_default();
-        for dir in dirs {
-            let Ok(manifest) = read_manifest(&dir) else {
-                continue; // 损坏插件跳过展示（管理 UI 仍可整体删除目录）
-            };
-            let id = manifest["name"].as_str().unwrap_or("").to_string();
-            if !plugin_id_valid(&id) || !seen.insert(id.clone()) {
-                continue;
+        if let Ok(rd) = fs::read_dir(&base) {
+            // 已见 id 集：同 id 多目录只收第一个，防身份错乱。
+            let mut seen: HashSet<String> = HashSet::new();
+            let mut dirs: Vec<PathBuf> = rd
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.is_dir() && !is_hidden_dir(p))
+                .collect();
+            dirs.sort(); // 稳定遍历顺序：同 id 多目录时「第一个」可复现（与 find_plugin_dir 一致）
+            for dir in dirs {
+                let Ok(manifest) = read_manifest(&dir) else {
+                    continue; // 损坏插件跳过展示（管理 UI 仍可整体删除目录）
+                };
+                let id = manifest["name"].as_str().unwrap_or("").to_string();
+                if !plugin_id_valid(&id) || !seen.insert(id.clone()) {
+                    continue;
+                }
+                let enabled = pstate.enabled.get(&id).copied().unwrap_or(false);
+                let source = pstate.sources.get(&id);
+                let source_kind = source.map(|s| s.kind).unwrap_or_default();
+                let mut info = plugin_info_from(&dir, &manifest, source_kind, enabled);
+                info.previous_version = source.and_then(|s| s.previous.as_ref().map(|p| p.version.clone()));
+                info.approved_dirs = source
+                    .and_then(|s| (!s.approved_dirs.is_empty()).then(|| s.approved_dirs.clone()));
+                out.push(info);
             }
-            let enabled = pstate.enabled.get(&id).copied().unwrap_or(false);
-            let source = pstate.sources.get(&id);
-            let source_kind = source.map(|s| s.kind).unwrap_or_default();
-            let mut info = plugin_info_from(&dir, &manifest, scope, source_kind, enabled);
-            info.previous_version = source.and_then(|s| s.previous.as_ref().map(|p| p.version.clone()));
-            info.approved_dirs = source
-                .and_then(|s| (!s.approved_dirs.is_empty()).then(|| s.approved_dirs.clone()));
-            out.push(info);
         }
-    };
-
-    // 磁盘行优先：同名磁盘包覆盖随应用分发的实现（随应用分发行不再列出）。
-    if let Ok(base) = plugin_base_dir(&app, &state, "app") {
-        scan("app", &base);
-    }
-    if let Ok(root) = state.root() {
-        scan("vault", &root.join(".atelyx/plugins"));
     }
     // 随应用分发的行：有清单且无同名磁盘包的来源记录。
     for (id, src) in &pstate.sources {
         let Some(manifest) = &src.manifest else {
             continue;
         };
-        if seen_per_scope.values().any(|ids| ids.contains(id)) {
+        if out.iter().any(|row| &row.id == id) {
             continue;
         }
         let enabled = pstate.enabled.get(id).copied().unwrap_or(false);
-        let mut info = plugin_info_from_manifest(id, manifest, &src.scope, src.kind, enabled);
+        let mut info = plugin_info_from_manifest(id, manifest, src.kind, enabled);
         info.approved_dirs = (!src.approved_dirs.is_empty()).then(|| src.approved_dirs.clone());
         out.push(info);
     }
 
-    mark_cross_scope_conflicts(&mut out, &seen_per_scope);
     out.sort_by(|a, b| a.id.cmp(&b.id));
+    // 随仓库插件目录探测（提示用，见 roots_with_legacy_plugin_dirs）：读全局配置失败不阻断列表，只记日志。
+    let known_roots: Vec<String> = match crate::commands::global::read_global_config(app.clone()) {
+        Ok(read) => read.config.recent_vaults.into_iter().map(|v| v.root).collect(),
+        Err(e) => {
+            eprintln!("[plugin] 读取全局配置失败，跳过随仓库插件目录探测：{e}");
+            Vec::new()
+        }
+    };
     Ok(PluginListResult {
         rows: out,
         state_error: if state_readable { None } else { state_error },
+        legacy_vault_plugin_roots: roots_with_legacy_plugin_dirs(&known_roots),
     })
 }
 
 /// 恢复默认装配（用户显式触发）：把 `entries`（默认组合清单）里缺失的行补建回默认启用。
 /// 已存在的行（启用/停用）保持现状，不覆盖用户改动。
 #[tauri::command]
-pub fn plugin_seed_default(app: AppHandle, state: State<'_, VaultState>, entries: Vec<Value>) -> Result<(), String> {
-    let disk_ids = disk_plugin_ids(&app, &state);
+pub fn plugin_seed_default(app: AppHandle, entries: Vec<Value>) -> Result<(), String> {
+    let disk_ids = disk_plugin_ids(&app);
     update_plugin_state(&app, |pstate| {
         let changed = seed_default_rows(pstate, &entries, &disk_ids, true);
         Ok(((), changed))
@@ -1589,35 +1436,23 @@ pub fn plugin_seed_default(app: AppHandle, state: State<'_, VaultState>, entries
 /// 全新 id 落盘停用、由用户显式启用；同 id 替换视为实现更新，经安装确认后继承原行启用状态。
 /// 市场来源优先 git clone，本机无 git 时回退 GitHub 自动生成的源码包；
 /// 手动 git 地址必须有 git。id 以清单为准，repo 只做获取定位。
-/// 仓库会话守卫：base 与会话令牌在下载/clone 前固定，每个 await 后复验——安装期间切仓时
-/// 只清理本次在原会话下产生的临时产物，不落位、不写状态。
 #[tauri::command]
-pub async fn plugin_install(
-    app: AppHandle,
-    state: State<'_, VaultState>,
-    repo: String,
-    scope: String,
-) -> Result<PluginInfo, String> {
+pub async fn plugin_install(app: AppHandle, repo: String) -> Result<PluginInfo, String> {
     let _operation_guard = PluginManagementGuard::acquire()?;
-    let session_token = vault_session_token(&state, &scope)?;
-    let base = plugin_base_dir(&app, &state, &scope)?;
+    let base = plugin_base_dir(&app)?;
     fs::create_dir_all(&base).map_err(|e| e.to_string())?;
 
     if is_github_repo_ref(&repo) {
         // 市场来源：优先 git clone，无 git 回退源码包。
         if git_available().await {
             let clone_target = git_clone_to(&base, &format!("https://github.com/{repo}.git")).await?;
-            if let Err(e) = ensure_vault_session(&state, session_token.as_ref()) {
-                return Err(discard_session_orphan(&clone_target, e));
-            }
             let source = PluginSource {
                 repo: repo.clone(),
                 dir_name: String::new(), // 落位时由 install_plugin_dir 写入
                 kind: PluginSourceKind::Market,
-                scope: scope.clone(),
                 ..Default::default()
             };
-            let result = install_plugin_dir(&app, &state, &base, &scope, &session_token, source, &repo_folder_name(&repo), &clone_target).await;
+            let result = install_plugin_dir(&app, &base, source, &repo_folder_name(&repo), &clone_target).await;
             if result.is_err() {
                 let _ = fs::remove_dir_all(&clone_target);
             }
@@ -1626,17 +1461,13 @@ pub async fn plugin_install(
         // 无 git：回退 GitHub 源码包（作者零操作，非 Release 资产）。
         return match codeload_extract_to(&base, &repo).await {
             Ok((root, extract_temp)) => {
-                if let Err(e) = ensure_vault_session(&state, session_token.as_ref()) {
-                    return Err(discard_session_orphan(&extract_temp, e));
-                }
                 let source = PluginSource {
                     repo: repo.clone(),
                     dir_name: String::new(), // 落位时由 install_plugin_dir 写入
                     kind: PluginSourceKind::Market,
-                    scope: scope.clone(),
                     ..Default::default()
                 };
-                let result = install_plugin_dir(&app, &state, &base, &scope, &session_token, source, &repo_folder_name(&repo), &root).await;
+                let result = install_plugin_dir(&app, &base, source, &repo_folder_name(&repo), &root).await;
                 // 成功/失败都无条件清理解压临时目录（成功时插件根已移走，残留仅外层包装目录）。
                 let _ = fs::remove_dir_all(&extract_temp);
                 result
@@ -1651,16 +1482,12 @@ pub async fn plugin_install(
         return Err("未检测到 git 命令，请安装 Git 或改用本地文件夹安装".into());
     }
     let clone_target = git_clone_to(&base, &repo).await?;
-    if let Err(e) = ensure_vault_session(&state, session_token.as_ref()) {
-        return Err(discard_session_orphan(&clone_target, e));
-    }
     let source = PluginSource {
         dir_name: String::new(), // 落位时由 install_plugin_dir 写入
         kind: PluginSourceKind::Git,
-        scope: scope.clone(),
         ..Default::default()
     };
-    let result = install_plugin_dir(&app, &state, &base, &scope, &session_token, source, &repo_folder_name(&repo), &clone_target).await;
+    let result = install_plugin_dir(&app, &base, source, &repo_folder_name(&repo), &clone_target).await;
     if result.is_err() {
         let _ = fs::remove_dir_all(&clone_target);
     }
@@ -1669,12 +1496,7 @@ pub async fn plugin_install(
 
 /// 从本地目录安装插件（junction/符号链接实时引用，无拷贝；源目录改动即时生效）。
 #[tauri::command]
-pub async fn plugin_install_local(
-    app: AppHandle,
-    state: State<'_, VaultState>,
-    path: String,
-    scope: String,
-) -> Result<PluginInfo, String> {
+pub async fn plugin_install_local(app: AppHandle, path: String) -> Result<PluginInfo, String> {
     let _operation_guard = PluginManagementGuard::acquire()?;
     let src_dir = dunce::canonicalize(&path).map_err(|e| format!("路径无效：{e}"))?;
     if !src_dir.is_dir() {
@@ -1686,7 +1508,7 @@ pub async fn plugin_install_local(
         return Err("插件清单 name 非法".into());
     }
     // 落位目标先算出来（含规范化后的 base）：取件与打包会写源目录，不该在注定失败的安装上动手。
-    let base = plugin_base_dir(&app, &state, &scope)?;
+    let base = plugin_base_dir(&app)?;
     // 源目录与插件目录都规范化后再判包含关系（大小写/长路径前缀差异会导致误判）。
     let base = dunce::canonicalize(&base).unwrap_or(base);
     if src_dir.starts_with(&base) || base.starts_with(&src_dir) {
@@ -1696,25 +1518,19 @@ pub async fn plugin_install_local(
     let src_name = src_dir.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
     let folder = target_folder_name(&src_name, &id);
     precheck_install_target(&base, &folder, &id)?;
-    // 跨作用域同 id 也在这里先拦一道：取件/打包会写开发者源目录，不该在注定失败的安装上动手。
-    ensure_global_id_unique(&app, &state, &scope, &id)?;
-    let session_token = vault_session_token(&state, &scope)?;
     // 本地来源是开发者的实时引用：依赖取件与打包仍由宿主完成（保证入口与声明一致），
     // 但不清理其 node_modules——那是开发者自己的目录。
     crate::plugin_build::prepare_artifact(&app, &src_dir, &manifest, false).await?;
-    // 取件/打包是长等待，落位前复验一次会话（base 已在等待前固定，指向用户确认时那个仓库）。
-    ensure_vault_session(&state, session_token.as_ref())?;
 
     let _io_guard = PLUGIN_IO_LOCK.lock().map_err(|_| "插件文件忙，请重试".to_string())?;
     let target = base.join(&folder);
     if target.exists() {
         return Err("同名文件夹已存在，请先卸载".into());
     }
-    // 同清单 id 冲突：作用域下已有同 id 插件目录（目录名可不同）。
+    // 同清单 id 冲突：插件目录下已有同 id 插件目录（目录名可不同）。
     if find_plugin_dir(&base, &id).is_ok() {
         return Err("已安装相同 id 的插件，请先卸载".into());
     }
-    ensure_global_id_unique(&app, &state, &scope, &id)?;
     fs::create_dir_all(&base).map_err(|e| e.to_string())?;
     create_plugin_link(&src_dir, &target)?;
 
@@ -1726,7 +1542,6 @@ pub async fn plugin_install_local(
             PluginSource {
                 dir_name: folder.clone(),
                 kind: PluginSourceKind::Local,
-                scope: scope.clone(),
                 ..Default::default()
             },
         );
@@ -1743,7 +1558,7 @@ pub async fn plugin_install_local(
         }
     };
 
-    Ok(plugin_info_from(&target, &manifest, &scope, PluginSourceKind::Local, enabled))
+    Ok(plugin_info_from(&target, &manifest, PluginSourceKind::Local, enabled))
 }
 
 /// 创建目录链接：Windows 用 junction（免管理员），其余平台用符号链接。
@@ -1847,50 +1662,21 @@ fn remove_link(link: &Path) -> std::io::Result<()> {
 
 /// 卸载插件：本地来源只删链接（源目录不动，链接悬空也能删）；其余删除整个插件目录；
 /// 无落位目录的行（实现随应用编译）只清状态记录与启用开关。
-/// 被拒的情形：最后一个启用的主题插件（守恒）、未开仓库/未知作用域、落位目录不可达（网络路径离线）、磁盘删除失败。
+/// 被拒的情形：最后一个启用的主题插件（守恒）、落位目录不可达（网络路径离线）、磁盘删除失败。
 #[tauri::command]
-pub fn plugin_uninstall(
-    app: AppHandle,
-    state: State<'_, VaultState>,
-    id: String,
-    scope: String,
-) -> Result<(), String> {
+pub fn plugin_uninstall(app: AppHandle, id: String) -> Result<(), String> {
     let _operation_guard = PluginManagementGuard::acquire()?;
     // id 视为不可信输入：非法 id 直接拒绝（防来源记录被篡改时 target_folder_name 回退 join(id)
     // 把含分隔符的 id 拼进插件目录内任意子路径）。
     if !plugin_id_valid(&id) {
         return Err("插件不存在".to_string());
     }
-    let base = plugin_base_dir(&app, &state, &scope)?;
+    let base = plugin_base_dir(&app)?;
     // 状态读必须在 IO 锁内：守恒判定（见 theme_conservation_violation）依赖「读取 → 提交」
     // 之间状态不被并发命令改动，锁外快照会让守卫基于陈旧启停结论放行。
     let _io_guard = PLUGIN_IO_LOCK.lock().map_err(|_| "插件文件忙，请重试".to_string())?;
     let pstate = read_plugin_state(&app)?;
-    let theme_ids = enabled_theme_ids(&app, &state, &pstate, Some(&id));
-    let record_scope = pstate.sources.get(&id).map(|s| s.scope.as_str());
-    // 记录在另一作用域时探测调用方作用域是否确有同 id 目录（外部同步副本 → 只删副本）；
-    // 作用域一致或无记录时无需探测，由下方定位逻辑处理。
-    let probe = if record_scope.is_some_and(|s| s != scope) {
-        find_plugin_dir(&base, &id).ok()
-    } else {
-        None
-    };
-    match resolve_uninstall_target(record_scope, &scope, probe.as_deref())? {
-        UninstallTarget::SyncCopy(dir) => {
-            // 副本无本机记录与启用状态，先隔离再删除（删除失败由残留清扫兜底），不动记录行。
-            let isolated = dir.with_file_name(residue_name("rm", ""));
-            fs::rename(dir, &isolated).map_err(|e| format!("卸载失败：{e}"))?;
-            // 隔离后副本已从扫描中消失，删除失败不报「卸载失败」——留残留由清扫兜底
-            if let Err(e) = remove_plugin_tree(&isolated) {
-                eprintln!(
-                    "[plugin] 删除同步副本隔离目录 {} 失败：{e}；残留由清扫兜底",
-                    isolated.display()
-                );
-            }
-            return Ok(());
-        }
-        UninstallTarget::RecordedRow => {}
-    }
+    let theme_ids = enabled_theme_ids(&app, &pstate, Some(&id));
     let source = pstate.sources.get(&id).cloned().unwrap_or_default();
     // 定位待删目录：优先按清单 id 扫描；清单损坏/链接悬空（扫描按 is_dir 判定收不到）时按来源记录的
     // 落位目录名定位（名字经 target_folder_name 同款清理校验，确保仍在插件目录内）。
@@ -2012,22 +1798,12 @@ fn uninstall_dir_transaction(
     Ok(())
 }
 
-/// 启用/停用插件（前端先确认权限再启用；vault 级插件卸载/禁用不清仓库内文件）。
+/// 启用/停用插件（前端先确认权限再启用）。
 #[tauri::command]
-pub fn plugin_set_enabled(
-    app: AppHandle,
-    state: State<'_, VaultState>,
-    id: String,
-    enabled: bool,
-) -> Result<(), String> {
+pub fn plugin_set_enabled(app: AppHandle, id: String, enabled: bool) -> Result<(), String> {
     // id 校验与其它入口同口径：非法 id 不往 enabled 表写垃圾键。
     if !plugin_id_valid(&id) {
         return Err("插件不存在".to_string());
-    }
-    // 跨作用域同 id 冲突期间拒绝启用（挂载会与另一作用域副本互相踩踏）；停用放行——
-    // 冲突行在列表以停用态展示，停用是解除冲突的常规路径之一。
-    if enabled && cross_scope_id_conflict(&app, &state, &id) {
-        return Err(CROSS_SCOPE_CONFLICT_MESSAGE.to_string());
     }
     // 启停全程持 IO 锁：清单读取（主题判定）在临界区内不可变，且与安装/更新/卸载互斥。
     // 停用的守恒判定在状态锁闭包内对 fresh 复算（见 theme_conservation_violation），
@@ -2040,7 +1816,7 @@ pub fn plugin_set_enabled(
         });
     }
     let pstate = read_plugin_state(&app)?;
-    let theme_ids = enabled_theme_ids(&app, &state, &pstate, Some(&id));
+    let theme_ids = enabled_theme_ids(&app, &pstate, Some(&id));
     update_plugin_state(&app, |fresh| {
         if let Some(msg) = theme_conservation_violation(fresh, &theme_ids, &id) {
             return Err(msg);
@@ -2065,13 +1841,7 @@ fn manifest_declares_dir(manifest: &Value, dir: &str) -> bool {
 ///（批准是「声明 → 用户批准」链条的用户侧确认，未声明目录无授权依据）。批准结果按声明
 /// 原形持久化，调用时由 `~` 展开 + canonicalize 校验（见 `approved_dirs_for`）；撤销 = revoke。
 #[tauri::command]
-pub fn plugin_approve_dir(
-    app: AppHandle,
-    state: State<'_, VaultState>,
-    id: String,
-    scope: String,
-    dir: String,
-) -> Result<(), String> {
+pub fn plugin_approve_dir(app: AppHandle, id: String, dir: String) -> Result<(), String> {
     if !plugin_id_valid(&id) {
         return Err("插件不存在".to_string());
     }
@@ -2085,7 +1855,7 @@ pub fn plugin_approve_dir(
     if !pstate.sources.contains_key(&id) {
         return Err("插件不存在".to_string());
     }
-    let Some(manifest) = row_manifest(&app, &state, &pstate, &id) else {
+    let Some(manifest) = row_manifest(&app, &pstate, &id) else {
         return Err("插件不存在".to_string());
     };
     if !manifest_declares_dir(&manifest, &dir) {
@@ -2095,7 +1865,7 @@ pub fn plugin_approve_dir(
         let changed = apply_approve_dir(fresh, &id, &dir)?;
         Ok(((), changed))
     })?;
-    emit_plugin_changed(&app, &id, &scope);
+    emit_plugin_changed(&app, &id);
     Ok(())
 }
 
@@ -2112,12 +1882,7 @@ fn apply_approve_dir(state: &mut PluginState, id: &str, dir: &str) -> Result<boo
 /// 撤销插件对一个仓库外目录的访问（幂等：未批准也可调用，不报错）。撤销即从白名单删除，
 /// 后续外部文件命令实时查表即失效（无缓存窗口）；批准记录随插件卸载一并消失。
 #[tauri::command]
-pub fn plugin_revoke_dir(
-    app: AppHandle,
-    id: String,
-    scope: String,
-    dir: String,
-) -> Result<(), String> {
+pub fn plugin_revoke_dir(app: AppHandle, id: String, dir: String) -> Result<(), String> {
     if !plugin_id_valid(&id) {
         return Err("插件不存在".to_string());
     }
@@ -2125,7 +1890,7 @@ pub fn plugin_revoke_dir(
         let changed = apply_revoke_dir(fresh, &id, &dir)?;
         Ok(((), changed))
     })?;
-    emit_plugin_changed(&app, &id, &scope);
+    emit_plugin_changed(&app, &id);
     Ok(())
 }
 
@@ -2174,9 +1939,9 @@ const BUILTIN_BASE_THEME_IDS: [&str; 2] = ["light", "dark"];
 const BASE_THEME_PLUGIN_ID: &str = "builtin.theme";
 
 /// 行清单解析：磁盘包读磁盘清单；随应用分发的行读来源记录里保存的清单。
-fn row_manifest(app: &AppHandle, state: &VaultState, pstate: &PluginState, id: &str) -> Option<Value> {
+fn row_manifest(app: &AppHandle, pstate: &PluginState, id: &str) -> Option<Value> {
     let source = pstate.sources.get(id)?;
-    let base = plugin_base_dir(app, state, &source.scope).ok()?;
+    let base = plugin_base_dir(app).ok()?;
     if let Ok(dir) = find_plugin_dir(&base, id) {
         if let Ok(manifest) = read_manifest(&dir) {
             return Some(manifest);
@@ -2189,8 +1954,8 @@ fn row_manifest(app: &AppHandle, state: &VaultState, pstate: &PluginState, id: &
 /// 基础主题提供者自身声明基底条目，不受该过滤影响（与前端派生口径一致）。
 /// 边界：清单读不到（目录缺失/清单损坏）降级为 false——损坏插件不参与守恒、可被停用/卸载清理，
 /// 避免用户被损坏插件困住（前端此时回退基底主题，不崩溃）。
-fn plugin_is_theme(app: &AppHandle, state: &VaultState, pstate: &PluginState, id: &str) -> bool {
-    row_manifest(app, state, pstate, id).is_some_and(|m| manifest_is_theme(&m, id))
+fn plugin_is_theme(app: &AppHandle, pstate: &PluginState, id: &str) -> bool {
+    row_manifest(app, pstate, id).is_some_and(|m| manifest_is_theme(&m, id))
 }
 
 /// 清单主题判定（与前端 utils/pluginTheme.ts 的派生口径一致）：
@@ -2237,12 +2002,7 @@ fn theme_conservation_violation(
 /// 预判主题 id 集（须持 IO 锁调用，清单在临界区内不可变）：快照启用行 ∪ `extra`，
 /// 逐个按清单判定主题身份。清单读不到的行判定为非主题（与 `plugin_is_theme` 边界一致：
 /// 损坏插件不参与守恒、可被清理）。
-fn enabled_theme_ids(
-    app: &AppHandle,
-    state: &VaultState,
-    pstate: &PluginState,
-    extra: Option<&str>,
-) -> HashSet<String> {
+fn enabled_theme_ids(app: &AppHandle, pstate: &PluginState, extra: Option<&str>) -> HashSet<String> {
     let mut ids: HashSet<String> = pstate
         .enabled
         .iter()
@@ -2253,18 +2013,14 @@ fn enabled_theme_ids(
         ids.insert(id.to_string());
     }
     ids.into_iter()
-        .filter(|id| plugin_is_theme(app, state, pstate, id))
+        .filter(|id| plugin_is_theme(app, pstate, id))
         .collect()
 }
 
 /// 更新插件：按来源分派——git 来源 git pull（失败目录不变）；市场且无 .git 时重新下载源码包替换；
 /// 本地目录实时引用无需更新（返回当前信息）。
 #[tauri::command]
-pub async fn plugin_update(
-    app: AppHandle,
-    state: State<'_, VaultState>,
-    id: String,
-) -> Result<PluginInfo, String> {
+pub async fn plugin_update(app: AppHandle, id: String) -> Result<PluginInfo, String> {
     let _operation_guard = PluginManagementGuard::acquire()?;
     // id 校验与其它入口同口径：非法 id 按不存在处理（来源记录按裸 id 寻址）。
     if !plugin_id_valid(&id) {
@@ -2276,29 +2032,27 @@ pub async fn plugin_update(
         .get(&id)
         .cloned()
         .ok_or("插件无安装来源，无法更新（请先卸载重装）")?;
-    let scope = source.scope.clone();
-    let session_token = vault_session_token(&state, &scope)?;
     // 无落位目录 = 实现随应用编译：版本随 App 走，无独立更新；返回当前信息。
     if source.dir_name.is_empty() {
         let Some(manifest) = source.manifest else {
             return Err("插件不存在".into());
         };
         let enabled = pstate.enabled.get(&id).copied().unwrap_or(false);
-        return Ok(plugin_info_from_manifest(&id, &manifest, &scope, source.kind, enabled));
+        return Ok(plugin_info_from_manifest(&id, &manifest, source.kind, enabled));
     }
-    let base = plugin_base_dir(&app, &state, &scope)?;
+    let base = plugin_base_dir(&app)?;
     let dir = find_plugin_dir(&base, &id)?;
 
     // 本地目录实时引用：目录即源码，无更新概念；重读清单返回当前信息。
     if source.kind == PluginSourceKind::Local {
         let manifest = read_manifest(&dir)?;
         let enabled = pstate.enabled.get(&id).copied().unwrap_or(false);
-        return Ok(plugin_info_from(&dir, &manifest, &scope, PluginSourceKind::Local, enabled));
+        return Ok(plugin_info_from(&dir, &manifest, PluginSourceKind::Local, enabled));
     }
     // 源码包装的市场插件（无 git 环境安装，无 .git）：重新下载源码包替换。
     if source.kind == PluginSourceKind::Market && !dir.join(".git").exists() {
-        let info = codeload_update(&app, &state, &session_token, &scope, &source, &dir, &base).await?;
-        emit_plugin_changed(&app, &id, &scope);
+        let info = codeload_update(&app, &source, &dir, &base).await?;
+        emit_plugin_changed(&app, &id);
         return Ok(info);
     }
 
@@ -2344,7 +2098,7 @@ pub async fn plugin_update(
         let _ = fs::remove_dir_all(&staging);
         let manifest = read_manifest(&dir)?;
         let enabled = pstate.enabled.get(&id).copied().unwrap_or(false);
-        let mut info = plugin_info_from(&dir, &manifest, &scope, source.kind, enabled);
+        let mut info = plugin_info_from(&dir, &manifest, source.kind, enabled);
         info.previous_version = source.previous.as_ref().map(|p| p.version.clone());
         return Ok(info);
     }
@@ -2359,25 +2113,16 @@ pub async fn plugin_update(
         let _ = fs::remove_dir_all(&staging);
         return Err("插件 id 已变更，无法更新".into());
     }
-    if let Err(e) = ensure_vault_session(&state, session_token.as_ref()) {
-        let _ = fs::remove_dir_all(&staging);
-        return Err(e);
-    }
     // 在候选树上取依赖并打包：失败即丢弃候选，当前版本与它的产物都不动。
     if let Err(e) = crate::plugin_build::prepare_artifact(&app, &staging, &manifest, true).await {
         let _ = fs::remove_dir_all(&staging);
         return Err(e);
     }
-    // 取件/打包是长等待，落位前再复验一次会话（上面的复验只覆盖到 git pull 为止）。
-    if let Err(e) = ensure_vault_session(&state, session_token.as_ref()) {
-        let _ = fs::remove_dir_all(&staging);
-        return Err(e);
-    }
     // enabled 以 commit_plugin_update 锁内重读的状态为准（git pull await 期间可能已被并发改动，
     // 命令开头的快照只是守卫输入，不得覆盖锁内结论）。
-    let info = commit_plugin_update(&app, &scope, &source, &dir, &staging, &base, &manifest)?;
+    let info = commit_plugin_update(&app, &source, &dir, &staging, &base, &manifest)?;
     let _ = fs::remove_dir_all(&staging);
-    emit_plugin_changed(&app, &id, &scope);
+    emit_plugin_changed(&app, &id);
     Ok(info)
 }
 
@@ -2510,12 +2255,7 @@ fn rollback_plugin_dirs(
 
 /// 回退到上一代代码；成功后丢弃被替换的新代码，不回退插件 data。
 #[tauri::command]
-pub async fn plugin_rollback(
-    app: AppHandle,
-    state: State<'_, VaultState>,
-    id: String,
-    expected_previous_version: String,
-) -> Result<PluginInfo, String> {
+pub async fn plugin_rollback(app: AppHandle, id: String, expected_previous_version: String) -> Result<PluginInfo, String> {
     let _operation_guard = PluginManagementGuard::acquire()?;
     // id 校验与其它入口同口径：非法 id 按不存在处理（来源记录按裸 id 寻址）。
     if !plugin_id_valid(&id) {
@@ -2527,12 +2267,8 @@ pub async fn plugin_rollback(
     if previous.version.trim() != expected_previous_version.trim() {
         return Err("可回退版本已变化，请刷新详情后重试".into());
     }
-    let session_token = vault_session_token(&state, &source.scope)?;
-    let base = plugin_base_dir(&app, &state, &source.scope)?;
+    let base = plugin_base_dir(&app)?;
     let _io_guard = PLUGIN_IO_LOCK.lock().map_err(|_| "插件文件忙，请重试".to_string())?;
-    // await 后重新确认会话：previous 记录属于最后一次更新发生时的仓库会话，`.previous-*`
-    // 目录随仓库同步——期间切仓/关仓时不得把回退作用到另一个仓库的同名插件上。
-    ensure_vault_session(&state, session_token.as_ref())?;
     let current = find_plugin_dir(&base, &id)?;
     // 目录名只认本实现生成的形态，且必须对应当前落位目录名：状态记录按可能被篡改处理，
     // 防 `.previous-../x` 之类被拼到 base 之外，或指向别的插件的回退目录。
@@ -2564,15 +2300,14 @@ pub async fn plugin_rollback(
             Ok(((), true))
         })
     })?;
-    emit_plugin_changed(&app, &id, &source.scope);
-    Ok(plugin_info_from(&current, &previous_manifest, &source.scope, source.kind, enabled))
+    emit_plugin_changed(&app, &id);
+    Ok(plugin_info_from(&current, &previous_manifest, source.kind, enabled))
 }
 
 /// 把当前代码与候选代码交换，并把当前 data 搬到新代码中。
 /// 状态提交失败时按相反顺序恢复，旧回退点不受影响。
 fn commit_plugin_update(
     app: &AppHandle,
-    scope: &str,
     source: &PluginSource,
     current: &Path,
     candidate: &Path,
@@ -2596,12 +2331,11 @@ fn commit_plugin_update(
             let Some(fresh_source) = fresh.sources.get_mut(&id) else {
                 return Err("插件来源记录不存在".into());
             };
-            fresh_source.scope = scope.to_string();
             fresh_source.previous = Some(previous_record.clone());
             Ok(((), true))
         })
     })?;
-    let mut info = plugin_info_from(current, manifest, scope, source.kind, enabled);
+    let mut info = plugin_info_from(current, manifest, source.kind, enabled);
     info.previous_version = Some(previous_record.version);
     Ok(info)
 }
@@ -2609,9 +2343,6 @@ fn commit_plugin_update(
 /// 源码包装的市场插件更新：重新下载源码包替换（备份 → 落位 → 失败回滚）。
 async fn codeload_update(
     app: &AppHandle,
-    state: &VaultState,
-    session_token: &Option<(PathBuf, u64)>,
-    scope: &str,
     source: &PluginSource,
     dir: &Path,
     base: &Path,
@@ -2662,43 +2393,23 @@ async fn codeload_update(
         return Err("插件 id 已变更，无法原地更新（请先卸载重装）".into());
     }
     // 保持原目录名落位（原名 = 当前目录名）。候选包不携带用户数据。
-    if let Err(e) = ensure_vault_session(state, session_token.as_ref()) {
-        let _ = fs::remove_dir_all(&extract_temp);
-        return Err(e);
-    }
     let manifest = new_manifest;
     // 在候选包上取依赖并打包：失败即丢弃候选，当前版本与它的产物都不动。
     if let Err(e) = crate::plugin_build::prepare_artifact(app, &plugin_root, &manifest, true).await {
         let _ = fs::remove_dir_all(&extract_temp);
         return Err(e);
     }
-    // 取件/打包是长等待，落位前再复验一次会话（上面的复验只覆盖到解压为止）。
-    if let Err(e) = ensure_vault_session(state, session_token.as_ref()) {
-        let _ = fs::remove_dir_all(&extract_temp);
-        return Err(e);
-    }
-    let result = commit_plugin_update(app, scope, source, dir, &plugin_root, base, &manifest);
+    let result = commit_plugin_update(app, source, dir, &plugin_root, base, &manifest);
     let _ = fs::remove_dir_all(&extract_temp);
     result
 }
 
-/// 定位插件目录：优先按状态里的安装来源（scope），缺失时回退扫描两作用域按 id 定位
-/// （vault 级插件随仓库同步到新机器时 sources 记录在本机不存在，仍应可读可运行）。
-pub(crate) fn resolve_plugin_dir(app: &AppHandle, state: &VaultState, id: &str) -> Result<(PathBuf, String), String> {
+/// 定位插件目录（app_data_dir 插件目录内按清单 id 扫描，目录名任意，身份以清单 id 为准）。
+pub(crate) fn resolve_plugin_dir(app: &AppHandle, id: &str) -> Result<PathBuf, String> {
     if plugin_id_valid(id) {
-        // 状态读取失败不阻断定位：下面还有按两作用域扫描的兜底（随仓库同步过来的插件本机无来源记录）。
-        if let Some(src) = read_plugin_state(app).ok().and_then(|s| s.sources.get(id).cloned()) {
-            if let Ok(base) = plugin_base_dir(app, state, &src.scope) {
-                if let Ok(dir) = find_plugin_dir(&base, id) {
-                    return Ok((dir, src.scope.clone()));
-                }
-            }
-        }
-        for scope in ["app", "vault"] {
-            if let Ok(base) = plugin_base_dir(app, state, scope) {
-                if let Ok(dir) = find_plugin_dir(&base, id) {
-                    return Ok((dir, scope.to_string()));
-                }
+        if let Ok(base) = plugin_base_dir(app) {
+            if let Ok(dir) = find_plugin_dir(&base, id) {
+                return Ok(dir);
             }
         }
     }
@@ -2707,14 +2418,9 @@ pub(crate) fn resolve_plugin_dir(app: &AppHandle, state: &VaultState, id: &str) 
 
 /// 读取插件入口 JS（供宿主求值加载；限制在插件根目录内）。path 缺省 = 清单 main。
 #[tauri::command]
-pub fn plugin_read_entry(
-    app: AppHandle,
-    state: State<'_, VaultState>,
-    id: String,
-    path: Option<String>,
-) -> Result<String, String> {
+pub fn plugin_read_entry(app: AppHandle, id: String, path: Option<String>) -> Result<String, String> {
     let _guard = PLUGIN_IO_LOCK.lock().map_err(|_| "插件文件忙，请重试".to_string())?;
-    let (dir, _scope) = resolve_plugin_dir(&app, &state, &id)?;
+    let dir = resolve_plugin_dir(&app, &id)?;
     let manifest = read_manifest(&dir)?;
     let main = manifest["main"].as_str().ok_or("清单缺少 main")?;
     let entry = path.as_deref().unwrap_or(main);
@@ -2735,19 +2441,19 @@ pub fn plugin_read_entry(
 
 /// 读取插件自持数据（单 JSON 对象，原子写落盘）。
 #[tauri::command]
-pub fn plugin_read_state(app: AppHandle, state: State<'_, VaultState>, id: String) -> Result<Value, String> {
+pub fn plugin_read_state(app: AppHandle, id: String) -> Result<Value, String> {
     let _guard = PLUGIN_IO_LOCK.lock().map_err(|_| "插件文件忙，请重试".to_string())?;
-    let (dir, _scope) = resolve_plugin_dir(&app, &state, &id)?;
+    let dir = resolve_plugin_dir(&app, &id)?;
     let path = safe_plugin_path(&dir, "data/state.json")?;
     let raw = fs::read_to_string(&path).unwrap_or_else(|_| "{}".to_string());
     serde_json::from_str(&raw).map_err(|e| format!("插件数据损坏：{e}"))
 }
 
-/// 写入插件自持数据（原子写；vault 级插件的随仓库共享）。
+/// 写入插件自持数据（原子写落盘）。
 #[tauri::command]
-pub fn plugin_write_state(app: AppHandle, state: State<'_, VaultState>, id: String, data: Value) -> Result<(), String> {
+pub fn plugin_write_state(app: AppHandle, id: String, data: Value) -> Result<(), String> {
     let _guard = PLUGIN_IO_LOCK.lock().map_err(|_| "插件文件忙，请重试".to_string())?;
-    let (dir, _scope) = resolve_plugin_dir(&app, &state, &id)?;
+    let dir = resolve_plugin_dir(&app, &id)?;
     let data_dir = safe_plugin_path(&dir, "data")?;
     fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
     let path = data_dir.join("state.json");
@@ -2809,23 +2515,17 @@ fn write_kv_file(dir: &Path, map: &serde_json::Map<String, Value>) -> Result<(),
 
 /// 读取插件键值存储（单 JSON 对象，独立于 state.json；键值面见 ctx.storage）。
 #[tauri::command]
-pub fn plugin_kv_read(app: AppHandle, state: State<'_, VaultState>, id: String) -> Result<Value, String> {
+pub fn plugin_kv_read(app: AppHandle, id: String) -> Result<Value, String> {
     let _guard = PLUGIN_IO_LOCK.lock().map_err(|_| "插件文件忙，请重试".to_string())?;
-    let (dir, _scope) = resolve_plugin_dir(&app, &state, &id)?;
+    let dir = resolve_plugin_dir(&app, &id)?;
     Ok(Value::Object(read_kv_file(&dir)?))
 }
 
 /// 写一个键（Rust 侧完成读改写：调用方无需整表往返，并发写不会互相丢键）。
 #[tauri::command]
-pub fn plugin_kv_set(
-    app: AppHandle,
-    state: State<'_, VaultState>,
-    id: String,
-    key: String,
-    value: Value,
-) -> Result<(), String> {
+pub fn plugin_kv_set(app: AppHandle, id: String, key: String, value: Value) -> Result<(), String> {
     let _guard = PLUGIN_IO_LOCK.lock().map_err(|_| "插件文件忙，请重试".to_string())?;
-    let (dir, _scope) = resolve_plugin_dir(&app, &state, &id)?;
+    let dir = resolve_plugin_dir(&app, &id)?;
     let mut map = read_kv_file(&dir)?;
     map.insert(key, value);
     write_kv_file(&dir, &map)
@@ -2833,9 +2533,9 @@ pub fn plugin_kv_set(
 
 /// 删一个键（不存在 = no-op）。
 #[tauri::command]
-pub fn plugin_kv_delete(app: AppHandle, state: State<'_, VaultState>, id: String, key: String) -> Result<(), String> {
+pub fn plugin_kv_delete(app: AppHandle, id: String, key: String) -> Result<(), String> {
     let _guard = PLUGIN_IO_LOCK.lock().map_err(|_| "插件文件忙，请重试".to_string())?;
-    let (dir, _scope) = resolve_plugin_dir(&app, &state, &id)?;
+    let dir = resolve_plugin_dir(&app, &id)?;
     let mut map = read_kv_file(&dir)?;
     map.remove(&key);
     write_kv_file(&dir, &map)
@@ -2843,10 +2543,10 @@ pub fn plugin_kv_delete(app: AppHandle, state: State<'_, VaultState>, id: String
 
 /// 整表覆盖写（ctx.storage.clear 用）。
 #[tauri::command]
-pub fn plugin_kv_write(app: AppHandle, state: State<'_, VaultState>, id: String, data: Value) -> Result<(), String> {
+pub fn plugin_kv_write(app: AppHandle, id: String, data: Value) -> Result<(), String> {
     let map = data.as_object().ok_or_else(|| "键值表必须是 JSON 对象".to_string())?.clone();
     let _guard = PLUGIN_IO_LOCK.lock().map_err(|_| "插件文件忙，请重试".to_string())?;
-    let (dir, _scope) = resolve_plugin_dir(&app, &state, &id)?;
+    let dir = resolve_plugin_dir(&app, &id)?;
     write_kv_file(&dir, &map)
 }
 
@@ -2942,75 +2642,6 @@ mod tests {
             "1.2.3",
             &json!({ "version": "1.2.3" })
         ));
-    }
-
-    /// 卸载目标判定：记录一致或无记录 → 整行卸载；记录在另一作用域且调用方作用域确有目录
-    /// → 只删同步副本；该作用域无目录 = 认错行 → 拒绝。
-    #[test]
-    fn uninstall_target_resolution() {
-        assert!(matches!(
-            resolve_uninstall_target(Some("app"), "app", None),
-            Ok(UninstallTarget::RecordedRow)
-        ));
-        // 无记录（手工目录 / 随仓库同步来的行在本机无记录）：按调用方 scope 整行处理
-        assert!(matches!(
-            resolve_uninstall_target(None, "vault", None),
-            Ok(UninstallTarget::RecordedRow)
-        ));
-        // 记录在另一作用域：有副本 → 只删副本；无副本 → 拒绝
-        let copy = Path::new("/plugins/app/com.example.x");
-        assert!(matches!(
-            resolve_uninstall_target(Some("app"), "vault", Some(copy)),
-            Ok(UninstallTarget::SyncCopy(_))
-        ));
-        assert!(resolve_uninstall_target(Some("app"), "vault", None).is_err());
-        assert!(resolve_uninstall_target(Some("vault"), "app", None).is_err());
-    }
-
-    /// 跨作用域同 id：双方行都标记冲突并强制停用；单作用域独有的行不受影响。
-    #[test]
-    fn cross_scope_duplicate_ids_mark_conflict_on_both_rows() {
-        let manifest = json!({ "name": "com.example.dupe", "version": "1.0.0", "atelyx": { "name": "D", "type": "panel" } });
-        let mut rows = vec![
-            plugin_info_from_manifest("com.example.dupe", &manifest, "app", PluginSourceKind::Market, true),
-            plugin_info_from_manifest("com.example.dupe", &manifest, "vault", PluginSourceKind::Market, true),
-            plugin_info_from_manifest("com.example.only", &manifest, "vault", PluginSourceKind::Market, true),
-        ];
-        let mut seen_per_scope: HashMap<String, HashSet<String>> = HashMap::new();
-        seen_per_scope.insert("app".to_string(), HashSet::from(["com.example.dupe".to_string()]));
-        seen_per_scope.insert(
-            "vault".to_string(),
-            HashSet::from(["com.example.dupe".to_string(), "com.example.only".to_string()]),
-        );
-        mark_cross_scope_conflicts(&mut rows, &seen_per_scope);
-        for row in rows.iter().take(2) {
-            assert_eq!(row.conflict.as_deref(), Some(CROSS_SCOPE_CONFLICT_MESSAGE));
-            assert!(!row.enabled);
-        }
-        assert!(rows[2].conflict.is_none());
-        assert!(rows[2].enabled);
-    }
-
-    /// 会话令牌比对：root 与世代任一变化都视为不同会话。
-    #[test]
-    fn vault_session_comparison() {
-        let root_a = TempDir::new("session-a");
-        let root_b = TempDir::new("session-b");
-        let expected = (root_a.to_path_buf(), 7u64);
-        assert!(vault_session_current(&expected, &(root_a.to_path_buf(), vec![], 7)));
-        assert!(!vault_session_current(&expected, &(root_b.to_path_buf(), vec![], 7)));
-        assert!(!vault_session_current(&expected, &(root_a.to_path_buf(), vec![], 8)));
-    }
-
-    /// 安装会话守卫失败收尾：本次临时目录被清理，会话错误原样返回（不落位不写状态的前提）。
-    #[test]
-    fn session_orphan_is_discarded_with_original_error() {
-        let tmp = TempDir::new("install-session-orphan");
-        let orphan = tmp.join(".install-orphan");
-        fs::create_dir_all(orphan.join("plugin")).unwrap();
-        let err = discard_session_orphan(&orphan, "操作期间仓库已切换".to_string());
-        assert_eq!(err, "操作期间仓库已切换");
-        assert!(!orphan.exists());
     }
 
     #[test]
@@ -3688,7 +3319,6 @@ mod tests {
         let mut atelyx = json!({
             "name": format!("显示名-{id}"),
             "type": kind,
-            "scope": "app",
             "tagline": "一句话",
             "author": "Atelyx",
             "license": "MIT",
@@ -3737,7 +3367,6 @@ mod tests {
         let info = plugin_info_from_manifest(
             "builtin.note",
             s.sources["builtin.note"].manifest.as_ref().unwrap(),
-            "app",
             PluginSourceKind::Builtin,
             true,
         );
@@ -3754,7 +3383,7 @@ mod tests {
         let mut s = PluginState::default();
         s.sources.insert(
             "builtin.search".into(),
-            PluginSource { kind: PluginSourceKind::Builtin, scope: "app".into(), ..Default::default() },
+            PluginSource { kind: PluginSourceKind::Builtin, ..Default::default() },
         );
         s.enabled.insert("builtin.search".into(), false);
         let entries = default_entries(&["builtin.search"]);
@@ -3771,7 +3400,6 @@ mod tests {
             "builtin.retired".into(),
             PluginSource {
                 kind: PluginSourceKind::Builtin,
-                scope: "app".into(),
                 manifest: Some(raw_manifest("builtin.retired", "panel", None)),
                 ..Default::default()
             },
@@ -3793,7 +3421,6 @@ mod tests {
             "builtin.search".into(),
             PluginSource {
                 kind: PluginSourceKind::Builtin,
-                scope: "app".into(),
                 manifest: Some(raw_manifest("builtin.search", "panel", None)),
                 ..Default::default()
             },
@@ -3826,7 +3453,7 @@ mod tests {
         s.seeded_ids = vec!["builtin.search".into(), "builtin.note".into()];
         s.sources.insert(
             "builtin.search".into(),
-            PluginSource { kind: PluginSourceKind::Builtin, scope: "app".into(), ..Default::default() },
+            PluginSource { kind: PluginSourceKind::Builtin, ..Default::default() },
         );
         seed_default_rows(&mut s, &entries, &HashSet::new(), false);
         assert!(!s.sources.contains_key("builtin.note"));
@@ -4039,7 +3666,7 @@ mod tests {
         let mut state = PluginState::default();
         state.sources.insert(
             "com.example.fs".to_string(),
-            PluginSource { scope: "app".to_string(), ..Default::default() },
+            PluginSource::default(),
         );
         // 批准：加入；重复批准 = 无变化不落盘
         assert!(apply_approve_dir(&mut state, "com.example.fs", "~/Projects/foo").unwrap());
@@ -4070,7 +3697,6 @@ mod tests {
         state.sources.insert(
             "com.example.fs".to_string(),
             PluginSource {
-                scope: "app".to_string(),
                 approved_dirs: vec!["~/Projects/foo".to_string(), "/abs".to_string()],
                 ..Default::default()
             },
@@ -4082,8 +3708,24 @@ mod tests {
             back.sources["com.example.fs"].approved_dirs,
             vec!["~/Projects/foo", "/abs"]
         );
-        // 缺省 = 空授权（旧状态文件无字段正常读回）
+        // 缺省 = 空授权（旧状态文件无字段正常读回，多余键如 scope 由 serde 忽略）
         let legacy: PluginState = serde_json::from_str(r#"{"sources":{"com.example.fs":{"scope":"app"}}}"#).unwrap();
         assert!(legacy.sources["com.example.fs"].approved_dirs.is_empty());
+    }
+
+    #[test]
+    fn legacy_vault_plugin_dirs_probe() {
+        let dir = std::env::temp_dir().join(format!("atelyx-legacy-plugins-{}", nanoid::nanoid!(10)));
+        // 有插件目录（随仓库安装形态）= 命中；空插件目录 / 无插件目录 / 仓库不存在 = 不命中
+        fs::create_dir_all(dir.join("vault-a/.atelyx/plugins/com.example.p")).unwrap();
+        fs::create_dir_all(dir.join("vault-b/.atelyx/plugins")).unwrap();
+        fs::create_dir_all(dir.join("vault-c")).unwrap();
+        let root = |name: &str| dir.join(name).to_string_lossy().into_owned();
+        let roots = vec![root("vault-a"), root("vault-b"), root("vault-c"), root("vault-d")];
+        assert_eq!(roots_with_legacy_plugin_dirs(&roots), vec![root("vault-a")]);
+        // 散落文件不算插件（只认目录）
+        fs::write(dir.join("vault-b/.atelyx/plugins/notes.txt"), b"x").unwrap();
+        assert!(roots_with_legacy_plugin_dirs(&roots[1..]).is_empty());
+        fs::remove_dir_all(&dir).ok();
     }
 }

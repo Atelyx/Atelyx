@@ -43,8 +43,7 @@ pub fn run() {
                 // 种子化初始 bounds：启动后未移动过时 on_window_event 不触发，拖拽解析读不到
                 layout::seed_window_bounds(app.handle(), "main");
             }
-            // app 作用域插件目录：先对账恢复更新中途崩溃被搬走的插件目录（.bak-* 即时恢复），
-            // 再清扫超龄残留；vault 作用域要等 open_vault 才知根路径（见 commands::vault::open_vault）
+            // 插件目录：先对账恢复更新中途崩溃被搬走的插件目录（.bak-* 即时恢复），再清扫超龄残留
             let sweep_app = app.handle().clone();
             std::thread::spawn(move || {
                 if let Ok(dir) = sweep_app.path().app_data_dir() {
@@ -126,12 +125,20 @@ pub fn run() {
             // 全局配置（global.json，最近仓库列表等）
             commands::global::read_global_config,
             commands::global::write_global_config,
+            // 全局配置补丁（锁内读-合并-原子写，跨窗口并发不互相覆盖）
+            commands::global::patch_global_config,
+            // 协作空间仓库级配置补丁（global.json spaceConfigs 按 serverKey 字段级合并）
+            commands::global::space_config_patch,
             // 本机设备名（协作身份默认值）
             commands::global::get_hostname,
             // API key 安全存储（OS keychain，见 commands/keychain.rs）
             commands::keychain::set_api_key,
             commands::keychain::get_api_key,
             commands::keychain::delete_api_key,
+            // 通用应用秘密（协作令牌等，任意 name 隔离，见 commands/keychain.rs）
+            commands::keychain::set_app_secret,
+            commands::keychain::get_app_secret,
+            commands::keychain::delete_app_secret,
             // 仓库文件检索（AI glob/grep 工具后端：模式发现路径 / 正则搜内容）
             commands::filesearch::glob_vault,
             commands::filesearch::grep_vault,

@@ -29,7 +29,7 @@ use crate::vault::{
     read_vault_config_with_backup,
     refresh_wiki_index, rename_folder as rename_folder_impl, rename_note_file, rel_with_new_title,
     resolve_link_target, rewrite_internal_links, safe_join, same_physical_file,
-    sanitize_filename, walk_md_in, write_canvas_file, write_note as write_note_file, write_vault_config as write_vault_config_file,
+    sanitize_filename, walk_md_in, write_canvas_file, write_note as write_note_file,
     patch_vault_config,
     aggregate_tag_counts, refresh_tag_index,
     list_chat_sessions_file,
@@ -69,8 +69,6 @@ pub struct VaultInfo {
     pub root: String,
     /// 仓库名（文件夹名）
     pub name: String,
-    /// 仓库稳定 ID（`.atelyx/config.json` 的 vaultId，首次打开生成、之后固定）。
-    pub id: String,
     /// 非空 = `config.json` 原文损坏、已按该文件名备份并按空配置继续（前端据此提示用户重新配置）
     pub config_corrupt_backup: Option<String>,
 }
@@ -86,7 +84,6 @@ pub struct VaultConfigRead {
 
 /// 打开仓库：设当前仓库根 + 初始化目录结构 + 启动文件监听 + 返回仓库信息。
 /// root 经 dunce::canonicalize 存储（去 Windows `\\?\` 前缀，统一路径格式，与 watcher/路径校验语义一致）。
-/// `vaultId`（`.atelyx/config.json`）首次打开生成、之后固定，前端据此识别仓库归属（防跨仓库搞混）。
 #[tauri::command]
 pub fn open_vault(
     path: String,
@@ -98,7 +95,7 @@ pub fn open_vault(
         return Err(format!("仓库路径不是文件夹：{}", path));
     }
     let root = dunce::canonicalize(&raw).map_err(|e| format!("仓库路径不可达：{} ({e})", path))?;
-    let (vault_id, exclude_folders, corrupt_backup) = activate_vault(&app, &state, &root)?;
+    let (exclude_folders, corrupt_backup) = activate_vault(&app, &state, &root)?;
     // 反链/标签索引后台预热：把唯一一次全量扫描（读全部 .md 提取引用/标签）塞进「进入仓库」阶段，不阻塞打开；
     // 失败静默——首次查询会懒构建兜底（索引幂等可重建）。锁 poison 在此同样容忍：后台预热非关键路径。
     // 世代与 root 必须成对取得（`session_snapshot` 在同一把 session 锁内读三者）：快速连续切仓库时
@@ -106,7 +103,7 @@ pub fn open_vault(
     let (snap_root, _, warm_generation) = state.session_snapshot()?;
     if snap_root != root {
         // 已被另一次 open_vault 接管：本轮不预热（索引由那次或首次查询懒构建）
-        return Ok(vault_info_from(root, vault_id, corrupt_backup));
+        return Ok(vault_info_from(root, corrupt_backup));
     }
     let warm_app = app.clone();
     let warm_root = root.clone();
@@ -115,15 +112,12 @@ pub fn open_vault(
         let Some(st) = warm_app.try_state::<VaultState>() else {
             return;
         };
-        // vault 作用域插件目录：先对账恢复更新中途崩溃被搬走的插件目录，再清扫超龄残留（随预热线程顺带执行）
-        crate::commands::plugin::reconcile_plugin_backups(&warm_app, &warm_root.join(".atelyx/plugins"));
-        crate::commands::plugin::sweep_plugin_residues(&warm_root.join(".atelyx/plugins"));
         // 未入库附件临时区的兜底回收：清理「画布已不存在」的超龄目录
         // （崩溃/强杀遗留，画布未走正常关闭路径；正常关闭由 cleanup_canvas_temp_attachments 按引用清单个清）
         crate::commands::temp_attachment::sweep_orphan_temp_dirs(&warm_root);
         warm_indexes(&st, &warm_root, &warm_exclude, warm_generation);
     });
-    Ok(vault_info_from(root, vault_id, corrupt_backup))
+    Ok(vault_info_from(root, corrupt_backup))
 }
 
 /// 后台预热反链与标签索引：**先在锁外构建完整索引，再取锁安装**。
@@ -1249,59 +1243,33 @@ pub struct CanvasCreateResult {
 
 // ===== 内部辅助 =====
 
-/// 仓库稳定 ID：读配置的 vaultId（存量仓库缺失则生成 nanoid），保证同一仓库 ID 恒定、仓库间互不混淆。
-/// 返回 `(id, 是否新建)`——仅新建时才需写盘，避免每次打开重写 config.json 的 IO 噪声。
-fn ensure_vault_id(config: &mut VaultConfig) -> (String, bool) {
-    if let Some(id) = &config.vault_id {
-        if !id.trim().is_empty() {
-            return (id.clone(), false);
-        }
-    }
-    let id = nanoid!();
-    config.vault_id = Some(id.clone());
-    (id, true)
-}
-
 /// 从路径构造 VaultInfo（仓库名经 `vault_display_name`，兼容网络共享根等 `file_name()` 取不到的场景）。
-fn vault_info_from(root: PathBuf, id: String, config_corrupt_backup: Option<String>) -> VaultInfo {
+fn vault_info_from(root: PathBuf, config_corrupt_backup: Option<String>) -> VaultInfo {
     VaultInfo {
         root: root.to_string_lossy().to_string(),
         name: crate::vault::vault_display_name(&root),
-        id,
         config_corrupt_backup,
     }
 }
 
-/// 仓库稳定 ID 保障 + 生效文件面板配置读取（激活流程与「已打开」快路径共用）：
-/// 读配置 → 缺失生成 nanoid → 仅新建时落盘（失败不阻塞打开——下次打开会补写，内存值本轮回调已生效）。
-/// 返回 (vault_id, exclude_folders, 损坏备份文件名)。备份名必须往上传：配置损坏时本函数紧接着就会
-/// 用「只剩 vaultId」的新配置覆盖原路径，前端若另起一次读命令只会读到这份合法新文件、永远发现不了损坏。
-fn ensure_vault_id_on_disk(root: &Path) -> Result<(String, Vec<String>, Option<String>), String> {
-    let (mut config, corrupt_backup) = read_vault_config_with_backup(root)?;
-    let (vault_id, vault_id_new) = ensure_vault_id(&mut config);
-    let exclude_folders = config.exclude_folders.clone().unwrap_or_default();
-    if vault_id_new {
-        let _ = write_vault_config_file(root, &config);
-    }
-    Ok((vault_id, exclude_folders, corrupt_backup))
-}
-
-/// 仓库激活公共流程（open_vault）：保障 vault_id → init 目录 →
+/// 仓库激活公共流程（open_vault）：读生效配置 → init 目录 →
 /// 先启监听再切 state（watcher 失败降级为警告，不阻塞打开——大仓库递归监听可能超 OS watch
 /// 上限（Linux inotify max_user_watches），仓库仍可打开，实时同步降级为手动刷新）。
-/// root 必须已完成 dunce::canonicalize（两调用方均为先归一化再激活，保证存/回传格式统一）。
+/// root 必须已完成 dunce::canonicalize（调用方先归一化再激活，保证存/回传格式统一）。
+/// 配置损坏时备份名上传（前端据此提示；只读不写——config.json 由前端字段级补丁单一写盘）。
 fn activate_vault(
     app_handle: &AppHandle,
     state: &State<'_, VaultState>,
     root: &Path,
-) -> Result<(String, Vec<String>, Option<String>), String> {
-    let (vault_id, exclude_folders, corrupt_backup) = ensure_vault_id_on_disk(root)?;
+) -> Result<(Vec<String>, Option<String>), String> {
+    let (config, corrupt_backup) = read_vault_config_with_backup(root)?;
+    let exclude_folders = config.exclude_folders.clone().unwrap_or_default();
     init_vault_dirs(root)?;
     if let Err(e) = watcher::start(app_handle.clone(), root.to_path_buf(), exclude_folders.clone()) {
         eprintln!("文件监听启动失败（仓库仍可打开，实时同步降级）：{e}");
     }
     state.set(root.to_path_buf(), exclude_folders.clone())?;
-    Ok((vault_id, exclude_folders, corrupt_backup))
+    Ok((exclude_folders, corrupt_backup))
 }
 
 /// 保存名冲突守卫（画布/表格保存命令共用）：新路径已被另一文件占用（解析出的稳定 id 不同，
@@ -1460,48 +1428,6 @@ fn remap_dir_refs_in_canvas(canvas: &mut CanvasFile, old_dir: &str, new_dir: &st
         }
     }
     changed
-}
-
-#[cfg(test)]
-mod ensure_vault_id_tests {
-    use super::*;
-    use crate::vault::test_support::TempDir;
-
-    /// 仓库配置损坏时，激活路径必须把备份名带出来（前端据此提示用户），并补出可用的 vaultId。
-    /// 这条覆盖的是「open_vault 先消费损坏、前端再读只会读到合法新文件」的时序——只测读命令看不出来。
-    #[test]
-    fn corrupt_config_is_reported_and_replaced_with_new_vault_id() {
-        let root = TempDir::new("ensure-vault-id-corrupt");
-        let dir = root.join(".atelyx");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("config.json"), "{ 这不是 JSON").unwrap();
-
-        let (vault_id, _exclude, backup) = ensure_vault_id_on_disk(&root).unwrap();
-
-        let backup = backup.expect("损坏必须回传备份名");
-        assert!(dir.join(&backup).is_file(), "原文要留档");
-        assert!(!vault_id.is_empty());
-        // 补出的配置含 vaultId，且原路径已让开（后续读路径读到的是这份合法文件）
-        let on_disk = crate::vault::read_vault_config(&root).unwrap();
-        assert_eq!(on_disk.vault_id.as_deref(), Some(vault_id.as_str()));
-    }
-
-    #[test]
-    fn healthy_config_reports_no_backup() {
-        let root = TempDir::new("ensure-vault-id-ok");
-        let dir = root.join(".atelyx");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("config.json"),
-            r#"{"vaultId":"fixed-id","fileExplorerSort":"name"}"#,
-        )
-        .unwrap();
-
-        let (vault_id, _exclude, backup) = ensure_vault_id_on_disk(&root).unwrap();
-
-        assert_eq!(vault_id, "fixed-id");
-        assert!(backup.is_none());
-    }
 }
 
 #[cfg(test)]

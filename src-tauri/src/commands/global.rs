@@ -1,17 +1,20 @@
 //! 全局配置命令（应用级数据）。
 //!
 //! 读写 `app_data_dir/global.json`：**应用级配置**——最近打开仓库列表 + 自动更新开关 +
-//! 界面外观（主题/字号/字体）+ 自动恢复上次打开文件。
-//! AI 供应商 / 搜索源已仓库化（`vault.rs` 的 `VaultConfig.providers/search`），
-//! 不再由本文件承载；API key 永不落文件（仅存 keychain，见 `commands/keychain.rs`）。
+//! 界面外观（主题/字号/字体）+ 自动恢复上次打开文件 + 协作空间仓库级配置（`spaceConfigs`，
+//! 键 = `serverUrl#spaceId`）。
+//! 个人仓库的 AI 供应商 / 搜索源在 `vault.rs` 的 `VaultConfig.providers/search`；
+//! 协作空间仓库无本地 `.atelyx`，其配置本体随空间身份存 `spaceConfigs`（API key 仍只进
+//! keychain，条目身份 `space:<serverUrl>#<spaceId>`，见 `commands/keychain.rs`）。
 //! 字段只按当前形状读写；文件里出现未知字段时由 serde 忽略（不报错、不写回）。
 //!
 //! 另有 `app_data_dir/ui-state.json`（应用级 UI 使用状态：工作区布局 + 上次打开文件 +
 //! 文件面板展开；本机独有、不随仓库同步，由 `crate::layout` 迷你窗口管理器单一写者
 //! 承载，见 `layout.rs`）。
 //!
-//! 整文件读写 + 原子写（写 `.tmp` → rename）。前端用 `updateGlobalConfig`（read-modify-write）
-//! 而非直接 `write_global_config`，避免覆盖其他字段。
+//! 整文件读写 + 原子写（写 `.tmp` → rename）。前端写入统一走补丁命令：
+//! `updateGlobalConfig` → `patch_global_config`（锁内读-合并-写）、空间配置 → `space_config_patch`
+//! ——跨窗口（主/撕裂窗口各有独立 webview）并发整文件写会互相覆盖丢字段，合并必须在后端单点完成。
 
 use std::path::{Path, PathBuf};
 
@@ -25,6 +28,17 @@ pub struct RecentVault {
     pub root: String,
     pub name: String,
     pub last_opened_at: i64,
+}
+
+/// 协作空间仓库条目（应用级：最近打开的空间仓库；与 space_servers 登录清单区分）。
+#[derive(Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SpaceEntry {
+    pub server_url: String,
+    pub space_id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opened_at: Option<i64>,
 }
 
 /// 全局配置根结构（**应用级**：最近仓库列表 + 自动更新开关 + 界面外观（主题/字号/字体）+
@@ -52,12 +66,9 @@ pub struct GlobalConfig {
     /// 进入仓库时自动恢复上次打开的文件。缺省 None = true（前端默认）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_restore_files: Option<bool>,
-    /// 协作中转（collab-relay）开关（应用级）。缺省 None = 关闭。
+    /// 协作开关（进入协作空间时是否建立实时连接；个人仓库无协作概念）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collab_enabled: Option<bool>,
-    /// 协作中转地址（如 `ws://192.168.1.10:11224/ws`）。缺省 None = 未配置。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub collab_relay_url: Option<String>,
     /// 协作显示昵称（空 = 设备名兜底）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collab_nickname: Option<String>,
@@ -67,6 +78,20 @@ pub struct GlobalConfig {
     /// 进入仓库时自动切到「主页」布局。缺省 None = false（保持恢复上次界面）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_home_layout: Option<bool>,
+    /// 登录过的协作服务器地址清单（应用级；由前端 space 登录态维护，去重）。
+    /// 缺省空 = 未登录过任何协作服务器；旧文件无此字段照常读取（serde default）。
+    #[serde(default)]
+    pub space_servers: Vec<String>,
+    /// 最近打开的协作空间仓库列表（应用级；与 space_servers 登录清单区分）。
+    /// 缺省空 = 未打开过任何协作空间仓库；旧文件无此字段照常读取（serde default）。
+    #[serde(default)]
+    pub spaces: Vec<SpaceEntry>,
+    /// 协作空间仓库级配置（应用级；键 = `serverUrl#spaceId`，值为该空间的
+    /// 供应商/搜索源/默认模型等配置本体）。缺省空 = 尚无空间配置；旧文件照常读取（serde default）。
+    /// 空间内的排序/排除夹在服务端 team meta，不经本字段；API key 仍只进 keychain
+    /// （条目身份 `space:<serverUrl>#<spaceId>`），永不落这里。
+    #[serde(default)]
+    pub space_configs: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 /// `read_global_config` 的返回：全局配置 + 损坏备份文件名（`None` = 正常读取）。
@@ -129,42 +154,42 @@ fn normalize_and_dedupe_vaults(mut recents: Vec<RecentVault>) -> Vec<RecentVault
     recents
 }
 
+/// 读全局配置原文（文件不存在返回空配置；解析失败先备份原文再降级为空配置）。
+/// 返回（配置, 损坏备份文件名）。备份失败返回 Err——留不下原文就继续按空配置走，
+/// 调用方随后的写回会覆盖原文，既无备份也无从告知。
+fn read_global_config_with_backup(path: &Path) -> Result<(GlobalConfig, Option<String>), String> {
+    if !path.exists() {
+        return Ok((GlobalConfig::default(), None));
+    }
+    let data = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    match serde_json::from_str::<GlobalConfig>(&data) {
+        Ok(c) => Ok((c, None)),
+        Err(e) => {
+            // 为什么解析失败要先备份：读到的空配置会参与后续写盘——不备份就等于
+            // 「一次外部编辑/磁盘异常静默清空最近仓库/主题/字号/协作地址」。备份走改名
+            // （原文完整保留，可人工取回）；备份文件名一并回传，前端能据此说明原因。
+            let Some(backup) = crate::vault::backup_corrupt_config(path, "global") else {
+                return Err(format!(
+                    "全局配置已损坏且原文备份失败，已中止读取以免覆盖原文（{}）：{e}",
+                    path.display()
+                ));
+            };
+            eprintln!(
+                "[global] 全局配置损坏，已备份为 {}（按空配置继续）：{e}",
+                backup.display()
+            );
+            let name = backup.file_name().map(|n| n.to_string_lossy().into_owned());
+            Ok((GlobalConfig::default(), name))
+        }
+    }
+}
+
 /// 读全局配置（文件不存在返回空配置；解析失败先备份原文再降级）。
 /// 返回前对 recentVaults 归一化去重，兼容旧版本写入的 `\\?\` 前缀脏数据。
-///
-/// 为什么解析失败要先备份：本文件由 `updateGlobalConfig` 做 read-modify-write，读到的空配置会被
-/// 原样写回——不备份就等于「一次外部编辑/磁盘异常静默清空最近仓库/主题/字号/协作地址」。
-/// 备份走改名（原文完整保留，可人工取回）；备份文件名一并回传，读到空配置时前端能说明原因。
-/// **备份失败即报错**（与 `config.json` 读路径同口径）：留不下原文就继续按空配置走，
-/// 调用方紧接着的 read-modify-write 会把原文整体覆盖——既无备份也无从告知。
 #[tauri::command]
 pub fn read_global_config(app: AppHandle) -> Result<GlobalConfigRead, String> {
     let path = global_config_path(&app)?;
-    let mut corrupt_backup: Option<String> = None;
-    let mut config = if !path.exists() {
-        GlobalConfig::default()
-    } else {
-        let data = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-        match serde_json::from_str::<GlobalConfig>(&data) {
-            Ok(c) => c,
-            Err(e) => {
-                let Some(backup) = crate::vault::backup_corrupt_config(&path, "global") else {
-                    return Err(format!(
-                        "全局配置已损坏且原文备份失败（{}），已中止读取以免覆盖原文：{e}",
-                        path.display()
-                    ));
-                };
-                eprintln!(
-                    "[global] 全局配置损坏，已备份为 {}（按空配置继续）：{e}",
-                    backup.display()
-                );
-                corrupt_backup = backup
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned());
-                GlobalConfig::default()
-            }
-        }
-    };
+    let (mut config, corrupt_backup) = read_global_config_with_backup(&path)?;
     config.recent_vaults = normalize_and_dedupe_vaults(config.recent_vaults);
     Ok(GlobalConfigRead {
         config,
@@ -180,4 +205,141 @@ pub fn write_global_config(app: AppHandle, mut config: GlobalConfig) -> Result<(
     let path = global_config_path(&app)?;
     let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
     crate::vault::atomic_write(&path, &json)
+}
+
+/// global.json 的进程内写互斥：补丁命令是「读文件 → 合并 → 写回」三步，
+/// 并发调用（主窗口/撕裂窗口各有独立 webview 前端，跨窗口无共享）若不互斥，
+/// 后写者会基于旧读数覆盖先写者的补丁（丢字段）。
+static PATCH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 把空间配置补丁应用到 `spaceConfigs[server_key]`（RFC 7386：补丁值 `null` = 删除该键、
+/// 对象 = 递归合并、数组/标量 = 整体替换，与 `vault_config_patch` 同语义）。
+/// 存量条目非对象 = 损坏形态，直接报错不写盘——静默跳过会让用户以为已保存。
+fn apply_space_config_patch(
+    config: &mut GlobalConfig,
+    server_key: &str,
+    patch: &serde_json::Value,
+) -> Result<(), String> {
+    let patch_obj = patch
+        .as_object()
+        .ok_or_else(|| "空间配置补丁必须是 JSON 对象".to_string())?;
+    let entry = config
+        .space_configs
+        .entry(server_key.to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    match entry {
+        serde_json::Value::Object(map) => {
+            crate::vault::merge_json_objects(map, patch_obj);
+            Ok(())
+        }
+        _ => Err(format!(
+            "空间配置 {server_key} 不是 JSON 对象，无法合并补丁；请删除该空间的本机配置后重试"
+        )),
+    }
+}
+
+/// 以字段级合并补丁写某协作空间的仓库级配置（`global.json` 的 `spaceConfigs[serverKey]`）。
+/// 整条命令在互斥锁内完成读-改-写并原子落盘——空间配置的合并在后端单点完成，
+/// 跨窗口并发不互相覆盖。
+/// 原文损坏先备份再按空基线合并（与 `vault_config_patch` 同口径：留不下原文就继续覆盖等于一次性抹掉）。
+#[tauri::command]
+pub fn space_config_patch(
+    app: AppHandle,
+    server_key: String,
+    patch: serde_json::Value,
+) -> Result<(), String> {
+    let _guard = PATCH_LOCK
+        .lock()
+        .map_err(|_| "全局配置写锁不可用".to_string())?;
+    let path = global_config_path(&app)?;
+    let (mut config, _) = read_global_config_with_backup(&path)
+        .map_err(|e| format!("读取全局配置失败：{e}"))?;
+    apply_space_config_patch(&mut config, &server_key, &patch)?;
+    let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
+    crate::vault::atomic_write(&path, &json)
+}
+
+/// 全局配置补丁写（应用级写入单点）：读盘 → 顶层合并 → 原子写 → 返回写后完整配置
+/// （含本次读到的损坏备份文件名）。整条命令在互斥锁内完成，跨窗口并发补丁不再互相覆盖。
+///
+/// 为什么是顶层浅替换（补丁键覆盖同名字段、`null` 删除该键）而非 RFC 7386 深合并：
+/// themeSettings 的删键语义依赖整字段替换（前端先在内存里删好键再整对象提交），
+/// 深合并会让「删除的键」从旧值里复活；顶层字段全部由前端整对象提交，浅替换与
+/// 原 read-modify-write 行为逐字段一致。空间配置（spaceConfigs）的按键级合并走
+/// `space_config_patch`，不经本命令。
+#[tauri::command]
+pub fn patch_global_config(app: AppHandle, patch: serde_json::Value) -> Result<GlobalConfigRead, String> {
+    let _guard = PATCH_LOCK
+        .lock()
+        .map_err(|_| "全局配置写锁不可用".to_string())?;
+    let patch_obj = patch
+        .as_object()
+        .ok_or_else(|| "全局配置补丁必须是 JSON 对象".to_string())?;
+    let path = global_config_path(&app)?;
+    let (config, corrupt_backup) = read_global_config_with_backup(&path)?;
+    // 经 serde_json::Value 应用补丁：未知补丁键在反序列化回 GlobalConfig 时被忽略（与读路径同口径），
+    // 补丁值类型不匹配则报错不写盘（失败不得静默）
+    let mut root = serde_json::to_value(&config).map_err(|e| e.to_string())?;
+    let root_obj = root
+        .as_object_mut()
+        .ok_or_else(|| "全局配置序列化异常".to_string())?;
+    for (key, value) in patch_obj {
+        if value.is_null() {
+            root_obj.remove(key);
+        } else {
+            root_obj.insert(key.clone(), value.clone());
+        }
+    }
+    let mut config: GlobalConfig =
+        serde_json::from_value(root).map_err(|e| format!("全局配置补丁字段类型不匹配：{e}"))?;
+    config.recent_vaults = normalize_and_dedupe_vaults(config.recent_vaults);
+    let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
+    crate::vault::atomic_write(&path, &json)?;
+    Ok(GlobalConfigRead {
+        config,
+        corrupt_backup,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::apply_space_config_patch;
+    use serde_json::json;
+
+    #[test]
+    fn space_patch_merges_and_replaces() {
+        let mut config = super::GlobalConfig::default();
+        apply_space_config_patch(&mut config, "http://s#sp1", &json!({ "theme": "dark", "sync": "on" })).unwrap();
+        apply_space_config_patch(&mut config, "http://s#sp1", &json!({ "sync": "off" })).unwrap();
+        assert_eq!(config.space_configs["http://s#sp1"]["theme"], "dark", "未提及键应保留");
+        assert_eq!(config.space_configs["http://s#sp1"]["sync"], "off", "提及键应被覆盖");
+    }
+
+    #[test]
+    fn space_patch_null_deletes_key() {
+        let mut config = super::GlobalConfig::default();
+        apply_space_config_patch(&mut config, "k", &json!({ "a": { "x": 1 } })).unwrap();
+        apply_space_config_patch(&mut config, "k", &json!({ "a": null })).unwrap();
+        assert!(config.space_configs["k"].get("a").is_none(), "补丁值 null 应删键");
+    }
+
+    #[test]
+    fn space_patch_rejects_non_object_entry() {
+        let mut config = super::GlobalConfig::default();
+        config
+            .space_configs
+            .insert("bad".to_string(), json!("损坏的标量"));
+        let err = apply_space_config_patch(&mut config, "bad", &json!({ "a": 1 }))
+            .expect_err("非对象存量条目应报错");
+        assert!(err.contains("不是 JSON 对象"), "错误消息应可定位：{err}");
+        assert_eq!(config.space_configs["bad"], json!("损坏的标量"), "报错路径不得改写存量条目");
+    }
+
+    #[test]
+    fn space_patch_rejects_non_object_patch() {
+        let mut config = super::GlobalConfig::default();
+        let err = apply_space_config_patch(&mut config, "k", &json!([1, 2]))
+            .expect_err("非对象补丁应报错");
+        assert!(err.contains("JSON 对象"), "错误消息应可定位：{err}");
+    }
 }

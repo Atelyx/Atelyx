@@ -930,10 +930,6 @@ pub struct VaultConfig {
     /// 附件导入默认文件夹（相对仓库根，可含子路径如 `assets/img`；缺省/空 = 仓库根目录）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachment_folder: Option<String>,
-    /// 仓库稳定 ID（首次 open_vault 生成，之后固定；进仓库时动态读取，
-    /// 用于前端识别「内存会话/画布状态属于哪个仓库」，防跨仓库搞混）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub vault_id: Option<String>,
     /// 宽松换行：开启时预览模式单个换行符渲染为换行；关闭时按 Markdown 标准视为空格。缺省 = true（前端默认）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub soft_line_break: Option<bool>,
@@ -977,11 +973,10 @@ pub fn read_vault_config(root: &Path) -> Result<VaultConfig, String> {
 /// 读仓库级配置，并带回「损坏备份文件名」（`None` = 未发生损坏）。
 ///
 /// 解析失败先备份原文再降级：仓库配置由前端做「读 → 改 → 写」与字段级合并补丁，读到的空配置参与
-/// 后续写盘——不备份就等于「一次外部编辑/磁盘异常静默清空供应商/默认模型/vaultId」（vaultId 丢失还会
-/// 让下次 open_vault 重新生成 ID、keychain 条目失配）。
+/// 后续写盘——不备份就等于「一次外部编辑/磁盘异常静默清空供应商/默认模型」。
 /// 备份文件名回传调用方：读到的空配置会让用户看到「设置全没了」，必须能告知原因与备份位置。
 /// **备份失败即报错**（与补丁写路径同口径）：留不下原文还按空配置继续，调用方紧接着就会用
-/// 「只剩 vaultId」的配置覆盖它——原文既没留档、用户也没被告知。
+/// 空配置覆盖它——原文既没留档、用户也没被告知。
 pub fn read_vault_config_with_backup(root: &Path) -> Result<(VaultConfig, Option<String>), String> {
     let path = root.join(".atelyx").join(VAULT_CONFIG_FILE);
     if !path.exists() {
@@ -1060,7 +1055,7 @@ fn guard_stale_key_deletion(base_json: &str, patch: &serde_json::Value) -> serde
 /// 的字段必须保留**磁盘上的当前值**。撕裂窗口持独立 store 副本，其内存态可能落后于主窗口刚写入的值；
 /// 若以内存态为基线整文件写，会把主窗口的改动整片抹掉（供应商丢失即此因）。
 ///
-/// 基线损坏**不得当空配置继续**：那会把「仅含补丁字段」的配置写回，其余字段（providers/model/vaultId…）
+/// 基线损坏**不得当空配置继续**：那会把「仅含补丁字段」的配置写回，其余字段（providers/model…）
 /// 永久删除且不留档（前端只在进仓时读一次配置，之后文件被外部改坏不会有第二次读来触发备份）。
 /// 故这里与读路径同口径：先备份原文，再按空基线继续——用户下次改动设置时重新配置，但原文可人工取回。
 /// 损坏判定走类型级反序列化（不只「是不是 JSON」）：合法 JSON 但字段类型错（`{"providers":"oops"}`）
@@ -1121,7 +1116,8 @@ pub fn merge_vault_config(base_json: &str, patch: &serde_json::Value) -> Result<
 }
 
 /// 递归合并：`null` 删键，两侧同为对象则下钻，其余以补丁值覆盖。
-fn merge_json_objects(
+/// pub(crate)：global.json 的空间配置补丁（`space_config_patch`）复用同一合并语义。
+pub(crate) fn merge_json_objects(
     target: &mut serde_json::Map<String, serde_json::Value>,
     patch: &serde_json::Map<String, serde_json::Value>,
 ) {

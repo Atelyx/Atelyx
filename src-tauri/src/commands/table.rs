@@ -395,28 +395,28 @@ fn resolve_table_image_bytes(root: &std::path::Path, entry: &str) -> Result<Vec<
     }
 }
 
-/// 把系统文件选择器选中的图片复制为表格附件，返回相对仓库根路径。
+/// 把本机图片（前端读好的 base64 字节 + 文件名）落为表格附件，返回相对仓库根路径。
 /// 文件名 = `img-<nanoid>.<ext>`（每次导入唯一：删除后重导不覆盖旧文件、不撞缓存/撤销引用；
 /// 与迁移的确定性命名 `img-<rowId>-<fieldId>-<idx>` 前缀不同，互不冲突）。
-/// 路径来自 OS 对话框（用户显式选择），非仓库内路径不走 safe_join（同旧 read_external_image_data_url）。
+/// 字节由前端经 IPC 传输而非后端读本机路径：协作空间后端同样消费前端 base64（路径对服务端不可达），
+/// 两侧调用形状保持一致。
 #[tauri::command]
 pub fn import_table_image_vault(
-    src: String,
+    file_name: String,
+    data: String,
     table_id: String,
     state: State<'_, VaultState>,
 ) -> Result<String, String> {
     let root = state.root()?;
-    let src_path = std::path::Path::new(&src);
-    if !src_path.is_file() {
-        return Err(format!("文件不存在：{}", src));
-    }
-    let ext = mime_from_ext(&src)
+    let ext = mime_from_ext(&file_name)
         .and_then(ext_from_mime)
-        .ok_or_else(|| format!("非图片文件：{}", src))?;
+        .ok_or_else(|| format!("非图片文件：{}", file_name))?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data.as_bytes())
+        .map_err(|e| format!("图片数据解码失败：{e}"))?;
     let rel = format!("{}/img-{}.{}", table_attachments_rel(&table_id), nanoid!(), ext);
     let dest = safe_join(&root, &rel, true)?;
-    // 唯一名不可能已存在；直接复制
-    std::fs::copy(&src_path, &dest).map_err(|e| format!("复制图片失败：{e}"))?;
+    std::fs::write(&dest, bytes).map_err(|e| format!("写入图片失败：{e}"))?;
     Ok(rel)
 }
 
