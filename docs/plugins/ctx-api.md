@@ -73,7 +73,7 @@ ctx.effect(() => {
 
 | 事件 | 载荷 | 分派 | 说明 |
 | --- | --- | --- | --- |
-| `vault:switch` | `{ root: string }` | emit | 进仓/切仓完成广播（载荷 { root }）。 |
+| `vault:switch` | `{ root: string | null }` | emit | 进仓/切仓完成广播（载荷 { root }；root null = 协作空间仓库，无本地 root）。 |
 | `canvas:changed` | `{ file: string | null }` | emit | 当前画布变更（轻量信号：只带 file，按需再调 ctx.canvas.snapshot()）。 |
 | `table:changed` | `{ file: string | null }` | emit | 当前表格变更（轻量信号）。 |
 | `collab:changed` | `{ peers: CollabPeer[] }` | emit | 协作在线用户变更。 |

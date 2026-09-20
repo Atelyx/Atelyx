@@ -29,8 +29,8 @@ Day-to-day work often means switching between several tools: writing in one app,
 - **One workbench for common work** — conversations, notes, tables, files, and search open side by side in a single workbench; tabs dock, panels tear off into independent windows, and layouts combine freely. The built-in features are themselves plugins: they can be disabled or replaced, and the workbench form is not predetermined.
 - **AI assistance everywhere** — AI is embedded in conversations, notes, tables, files, and search, ready as you work without switching to a separate AI tool. You lead the work; AI assists.
 - **Reusable assets** — search results, distilled paragraphs, and pasted materials settle into reusable assets that plug into any conversation.
-- **LAN collaboration** — peers see each other in real time over the LAN: co-editing a note, co-editing a canvas, co-viewing a table. Who is looking at what, and where their selection is, is visible to members in real time.
-- **Files are the vault** — no database; canvases, notes, and attachments are plain files: accumulable, backup-able, Git-syncable, and openable in external editors with real-time sync back.
+- **LAN collaboration** — open a collaborative space on your own server: peers see each other in real time, co-editing a note, co-editing a canvas, co-viewing a table. Works out of the box on a LAN, with the server holding the single source of truth.
+- **Files are the vault** — personal vaults have no database: canvases, notes, and attachments are plain local files — accumulable, backup-able, Git-syncable, and openable in external editors with real-time sync back. Both vault kinds sit side by side in the file panel.
 
 ## Installation
 
@@ -56,7 +56,7 @@ pnpm run check       # full gate: typecheck + ESLint + frontend tests + cargo te
 
 Atelyx consists of a kernel and plugins: the kernel handles windows, layout, and plugin loading; capabilities are provided as plugins. The bundled plugins that ship with the app use the same mounting mechanism as third-party plugins — no privileges, and they can be disabled or replaced. The plugin kernel is built on the Cordis base (reversible effects + typed events), sharing its origin with [deepseek-harness](https://github.com/deepseek-ai/deepseek-harness); the two differ in positioning — deepseek-harness is an Agent runtime, while Atelyx is a desktop workbench for humans.
 
-A plugin is a Git repository: declare its entry, capabilities, and scope in the `atelyx` block of `package.json`, push it to GitHub, and tag it with the `atelyx-plugin` topic — the plugin marketplace picks it up automatically. See the [plugin development guide](docs/plugins/README.md).
+A plugin is a Git repository: declare its entry and capabilities in the `atelyx` block of `package.json`, push it to GitHub, and tag it with the `atelyx-plugin` topic — the plugin marketplace picks it up automatically. See the [plugin development guide](docs/plugins/README.md).
 
 ## Contributing
 

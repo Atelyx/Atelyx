@@ -5,7 +5,8 @@ import path from "node:path";
 export default defineConfig({
   test: {
     environment: "node",
-    include: ["src/**/*.test.ts"],
+    // .test.tsx = 组件测试（文件内 @vitest-environment jsdom 逐文件声明 DOM 环境）
+    include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
     pool: "forks",
   },
   resolve: {
