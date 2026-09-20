@@ -26,7 +26,7 @@ import type {
   TableFile,
   TagRow,
 } from "@/types";
-import type { ContentBackend } from "./contract";
+import type { ContentBackend, TableImageSource } from "./contract";
 
 export const localBackend: ContentBackend = {
   // ===== 树与列举 =====
@@ -129,7 +129,12 @@ export const localBackend: ContentBackend = {
     invoke<string>("write_temp_attachment", { canvasId, fileName, base64Data }),
   importAttachment: (rel, fileName) =>
     invoke<{ file: string }>("import_vault_attachment", { rel, fileName }),
-  importTableImage: (src, tableId) => invoke<string>("import_table_image_vault", { src, tableId }),
+  importTableImage: (image: TableImageSource, tableId) =>
+    invoke<string>("import_table_image_vault", {
+      fileName: image.fileName,
+      data: image.base64Data,
+      tableId,
+    }),
   cleanupCanvasTempAttachments: (canvasId, canvasFile) =>
     invoke<number>("cleanup_canvas_temp_attachments", { canvasId, canvasFile }),
   cleanupTableAttachments: (file) => invoke<number>("cleanup_table_attachments_vault", { file }),

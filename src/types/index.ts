@@ -61,6 +61,8 @@ export type {
 
 export type { AgentConfig } from "./agent";
 
+export type { DeviceInfo, InviteInfo } from "./space";
+
 export {
   type CanvasFile,
   type CanvasFileNode,
@@ -83,6 +85,7 @@ export {
   type VaultConfigRead,
   type VaultInfo,
   type RecentVault,
+  type RecentSpace,
   type BacklinkRow,
   type LinkRewriteResult,
   type RebuildLinksResult,
@@ -150,7 +153,6 @@ export type {
   CollabMyPeer,
   CollabHello,
   CollabLockClaim,
-  RelayTestResult,
 } from "./collab";
 
 export {
@@ -185,7 +187,6 @@ export type {
 
 export {
   type PluginType,
-  type PluginScope,
   type PluginPackageJson,
   type PluginManifest,
   type PluginThemeOptions,

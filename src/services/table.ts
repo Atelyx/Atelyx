@@ -7,6 +7,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { computeTablePatch } from "@/utils/table";
 import { getActiveContentBackend } from "@/services/content/factory";
+import type { TableImageSource } from "@/services/content/contract";
 import type { TableCreateResult, TableField, TableFile, TableRow } from "@/types";
 
 /** 新建空表格（自带一个「名称」文本字段），返回 { id, file }（dir 空 = 根目录）。 */
@@ -76,15 +77,15 @@ export async function deleteTableVault(file: string): Promise<void> {
 }
 
 /**
- * 把系统文件选择器选中的图片复制为表格附件（`.atelyx/attachments/<tableId>/` 隐藏目录，
- * 图片字节不随 .atb 内嵌），返回唯一相对路径供单元格引用（每次导入新文件，
- * 删除后重导不覆盖旧文件、不撞显示缓存）。
+ * 把本机图片（前端读为 base64 的字节 + 文件名）落为表格附件，返回唯一相对路径供单元格引用
+ * （每次导入新文件，删除后重导不覆盖旧文件、不撞显示缓存）。
+ * 字节由前端读出后传输：协作空间里本机路径对服务端不可达，个人仓库与空间共用同一形状。
  */
 export async function importTableImage(
-  src: string,
+  image: TableImageSource,
   tableId: string,
 ): Promise<string> {
-  return getActiveContentBackend().importTableImage(src, tableId);
+  return getActiveContentBackend().importTableImage(image, tableId);
 }
 
 /**

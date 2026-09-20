@@ -199,8 +199,6 @@ export interface VaultConfig {
   autoNamingEnabled?: boolean;
   /** 话题自动命名模型（缺省 = 跟随默认模型；指定后命名用该模型，如 `{ providerId, model }`——话题命名一般用小模型）。 */
   autoNamingModel?: { providerId: string; model: string };
-  /** 协作房间号（首次打开生成、之后固定，随仓库文件夹同步；共享盘协作据此划分房间，写盘必须保留）。 */
-  vaultId?: string;
 }
 
 /** `read_vault_config` 的返回：仓库配置 + 损坏备份文件名（null = 正常读取）。 */
@@ -228,6 +226,18 @@ export interface RecentVault {
   name: string;
   /** 最近打开时间（unix 秒） */
   lastOpenedAt: number;
+}
+
+/** 最近打开的协作空间仓库（存全局 global.json，与 spaceServers 登录清单区分：此处是打开过的空间条目）。 */
+export interface RecentSpace {
+  /** 协作服务器地址 */
+  serverUrl: string;
+  /** 空间 id */
+  spaceId: string;
+  /** 空间名 */
+  name: string;
+  /** 最近打开时间（unix 秒） */
+  openedAt?: number;
 }
 
 /** 反链行：引用方笔记的相对仓库根路径 + 标题（scan_wiki_backlinks 返回）。 */
@@ -295,14 +305,20 @@ export interface GlobalConfig {
   autoRestoreFiles?: boolean;
   /** 进入仓库时自动切到「主页」布局。缺省 = false（保持恢复上次界面）。 */
   defaultHomeLayout?: boolean;
-  /** 协作中转（collab-relay）开关。缺省 = false（关闭）。 */
+  /** 协作空间频道开关。缺省 = false（关闭）。 */
   collabEnabled?: boolean;
-  /** 协作中转地址（如 ws://192.168.1.10:17701/ws）。 */
-  collabRelayUrl?: string;
   /** 协作显示昵称（空 = 设备名兜底）。 */
   collabNickname?: string;
   /** 协作身份色（hex；空 = 随机分配）。 */
   collabColor?: string;
+  /** 登录过的协作服务器地址清单（应用级；由 space 登录态维护，去重）。 */
+  spaceServers?: string[];
+  /** 最近打开的协作空间仓库列表（应用级；与 spaceServers 登录清单区分）。 */
+  spaces?: RecentSpace[];
+  /** 协作空间仓库级配置（应用级，键 = `serverUrl#spaceId`）：空间内供应商/搜索源/默认模型等
+   *  配置本体存本机（空间仓库无本地 `.atelyx`）；写盘经 Rust `space_config_patch` 按
+   *  serverKey 字段级合并。排序/排除夹/提示词/Agent 在服务端 team meta，不经本字段。 */
+  spaceConfigs?: Record<string, VaultConfig>;
 }
 
 /** `read_global_config` 的返回：全局配置 + 损坏备份文件名（null = 正常读取）。 */

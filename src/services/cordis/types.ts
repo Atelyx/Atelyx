@@ -419,8 +419,8 @@ declare module "@atelyx/cordis" {
     native: NativeService;
   }
   interface Events {
-    /** 进仓/切仓完成广播（载荷 { root }）。@emit */
-    "vault:switch": (payload: { root: string }) => void;
+    /** 进仓/切仓完成广播（载荷 { root }；root null = 协作空间仓库，无本地 root）。@emit */
+    "vault:switch": (payload: { root: string | null }) => void;
     /** 当前画布变更（轻量信号：只带 file，按需再调 ctx.canvas.snapshot()）。@emit */
     "canvas:changed": (payload: { file: string | null }) => void;
     /** 当前表格变更（轻量信号）。@emit */

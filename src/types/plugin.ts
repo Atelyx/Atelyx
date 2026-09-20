@@ -20,9 +20,6 @@ export type PluginType =
   | "background" // 后台常驻服务（无界面）
   | "tableview"; // 表格编辑器内的多维表格视图
 
-/** 安装作用域：app=个人工具（本机，默认）；vault=随仓库共享。 */
-export type PluginScope = "app" | "vault";
-
 /** 插件来源（中性信息：展示徽标 + 更新渠道分派；不构成类别，不参与装配/权限判定）。 */
 export type PluginSourceKind = "market" | "git" | "local" | "builtin";
 
@@ -53,7 +50,7 @@ export interface PluginThemeOptions {
 
 /**
  * 插件包原始清单（插件根目录 `package.json` 的原始形状）：`name` = 插件 id（反向域名）、
- * `version`、`main` + 嵌套 `atelyx` 块（显示名/类型/作用域/披露/主题声明等）。
+ * `version`、`main` + 嵌套 `atelyx` 块（显示名/类型/披露/主题声明等）。
  * 跨 Rust 边界的形态（列表返回行与默认组合播种都用它）；行对象经 `utils/pluginManifest`
  * 归一化为 `PluginManifest` 后供前端消费。
  */
@@ -74,8 +71,6 @@ export interface PluginManifest {
   type: PluginType;
   /** 全部分类（含主分类，去重；缺省 = [type]）。 */
   types?: PluginType[];
-  /** 安装作用域，缺省 app。 */
-  scope?: PluginScope;
   /** 兼容的宿主版本下限（缺省不限制）。 */
   atelyxVersionMin?: string;
   /** 兼容的宿主版本上限（不含，缺省不限制）。 */
@@ -160,8 +155,6 @@ export interface PluginMountFailure {
 export interface InstalledPlugin {
   id: string;
   manifest: PluginManifest;
-  /** 归一化作用域（缺省 app）。 */
-  scope: PluginScope;
   /** 安装目录（Rust 返回的绝对路径；本地来源为链接路径；实现随应用编译的行无磁盘目录，为空串）。 */
   installDir: string;
   /** 宿主产出的打包入口（相对安装目录）：有产物即用它，无产物用清单 main。 */

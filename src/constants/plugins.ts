@@ -3,7 +3,7 @@
  * 插件面服务的展示文案与敏感标记见 constants/pluginServices.ts（此处不维护服务词汇表）；
  * 插件目录布局与清单文件名归 Rust 侧（`commands/plugin.rs` 的常量），前端不重复持有。
  */
-import type { PluginBadge, PluginMountPhase, PluginScope, PluginSourceKind, PluginType } from "@/types";
+import type { PluginBadge, PluginMountPhase, PluginSourceKind, PluginType } from "@/types";
 
 /** 官方账号名单：这些账号发布的插件自动带 official 徽标（市场聚合侧同用）。 */
 export const OFFICIAL_PLUGIN_ORGS = ["Atelyx"] as const;
@@ -33,12 +33,6 @@ export const PLUGIN_TYPE_LABELS: Record<PluginType, string> = {
   command: "命令/快捷键",
   background: "后台服务",
   tableview: "表格视图",
-};
-
-/** 插件作用域展示文案。 */
-export const PLUGIN_SCOPE_LABELS: Record<PluginScope, string> = {
-  app: "本机",
-  vault: "随仓库共享",
 };
 
 /** 插件徽标展示文案。 */

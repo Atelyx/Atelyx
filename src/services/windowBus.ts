@@ -10,6 +10,7 @@
  *   主窗口以 `open-file-changed` 应答——窗口 boot 可能晚于主窗口的上下文广播）
  */
 import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type { VaultIdentity } from "@/services/content/contract";
 import type { DropZone, ViewKind } from "@/types";
 
 /** 一次命中的 drop 目标（本窗口本地计算；指示器渲染用——落点解析在 Rust）。 */
@@ -34,6 +35,9 @@ export type PanelLayoutOp =
 
 export interface OpenFileChangedPayload {
   vaultRoot: string | null;
+  /** 当前激活仓库身份（local/space；null = 未激活）。撕裂窗口是独立 webview，
+   *  内容面激活态不跨窗口共享，据此自建对应后端（见 factory.activateContentIdentity）。 */
+  vaultIdentity: VaultIdentity | null;
   vaultName: string;
   currentCanvasFile: string | null;
   currentNoteFile: string | null;

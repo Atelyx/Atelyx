@@ -1,6 +1,6 @@
 /**
- * 协作（presence）类型：与 collab-relay 的 JSON 协议对齐（camelCase 透传）。
- * 本端选中状态经节流广播给同仓库在线用户，远端按此渲染高亮。
+ * 协作（presence）类型：与协作空间频道的 JSON 协议对齐（camelCase 透传）。
+ * 本端选中状态经节流广播给同空间在线设备，远端按此渲染高亮。
  */
 import type { TableSelection } from "@/types/table";
 
@@ -11,7 +11,7 @@ import type { TableSelection } from "@/types/table";
 export type CollabSelection = TableSelection | { kind: "node"; nodeId: string };
 
 /** 画布对话节点独占编辑锁声明（presence 携带）。
- * 确定性锁主判定 = since 最小；同 since 按 peerId 递增取小（relay 全局递增分配，确定性）。 */
+ * 确定性锁主判定 = since 最小；同 since 按 peerId 递增取小（服务端全局递增分配，确定性）。 */
 export interface CollabLockClaim {
   /** 对话节点 id。 */
   id: string;
@@ -36,13 +36,13 @@ export interface CollabPresence {
   editingNotes?: string[];
 }
 
-/** 房间（同仓库 vaultId）内一个在线用户。 */
+/** 当前空间内一个在线设备。 */
 export interface CollabPeer {
   peerId: number;
   nickname: string;
   color: string;
   deviceName: string;
-  /** 该成员使用的应用版本号（hello 携带；旧客户端/旧中转缺省）。 */
+  /** 该成员使用的应用版本号（hello 携带；旧客户端/旧服务端缺省）。 */
   version?: string;
   presence: CollabPresence | null;
 }
@@ -56,18 +56,15 @@ export interface CollabMyPeer {
   deviceName: string;
 }
 
-/** 连接时的身份声明（hello 消息，进入 vaultId 房间）。 */
+/** 连接时的身份声明（hello 消息首帧）：space 带 spaceId 与登录令牌。 */
 export interface CollabHello {
-  vaultId: string;
+  /** 协作空间 id（`/ws/space` 入房，服务端房间 = space:<spaceId>）。 */
+  spaceId?: string;
+  /** 空间登录令牌（`/ws/space` 鉴权；仅随 hello 帧发送，不写日志）。 */
+  token?: string;
   nickname: string;
   color: string;
   deviceName: string;
   /** 本端应用版本号（协作房间展示各成员版本；旧客户端可缺省）。 */
   version?: string;
-}
-
-/** 连通性测试结果（设置页「检查连接」展示）。 */
-export interface RelayTestResult {
-  ok: boolean;
-  message: string;
 }

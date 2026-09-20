@@ -21,6 +21,7 @@ const srcRoot = resolve(process.cwd(), "src");
 
 /** 领域 store（领域功能运行时状态；内核路径不得 import）。
  *  内核自带的 store（appStore/panelStore/uiStateStore/settingsStore/collabStore/notificationStore 等）不在名单内。
+ *  spaceDirectoryStore = 协作空间目录/成员/邀请的 UI 数据编排（仅组件消费，无内核路径依赖，入清单保持领域 store 完整）。
  *  局限：经中间模块间接 re-export、非 ESM 的 require 已在扫描范围内，模板串/变量说明符不在。 */
 const DOMAIN_STORES = [
   "canvasStore",
@@ -32,6 +33,8 @@ const DOMAIN_STORES = [
   "noteSessionStore",
   "calendarStore",
   "repoHistoryStore",
+  "spaceAuthStore",
+  "spaceDirectoryStore",
 ] as const;
 
 /** 内核启动/组合路径：进程启动、页面装配、服务层、内核注册表 + 内核 store。 */
@@ -47,6 +50,12 @@ const KERNEL_PATH = [
   "stores/uiStateStore.ts",
   "stores/vaultStore.ts",
 ];
+
+/** appStore（内核路径内）显式登记的领域依赖（新增须在此登记并说明理由）：
+ *  spaceAuthStore = 协作空间进入流程（selectSpace 的会话校验 restore/getServer）所需登录态，
+ *  空间进入无法绕开会话判权，经注入点拆出只会复制 service 编排。 */
+const APP_STORE_EXCEPTION = "stores/appStore.ts";
+const APP_STORE_DOMAIN_DEPS = ["spaceAuthStore"];
 
 /** 宿主接线模块（显式例外）：领域 store 仅用于把数据源注入内核 ctx 服务。 */
 const HOST_WIRING_EXCEPTION = "stores/pluginStore.ts";
@@ -83,8 +92,11 @@ describe("内核路径导入守卫", () => {
     expect(files.length).toBeGreaterThan(0);
     const offenders: string[] = [];
     for (const file of files) {
+      const rel = relative(srcRoot, file).replaceAll("\\", "/");
       for (const store of await importedDomainStores(file)) {
-        offenders.push(`${relative(srcRoot, file)} → ${store}`);
+        // appStore 的空间进入流程依赖已显式登记（见 APP_STORE_DOMAIN_DEPS）
+        if (rel === APP_STORE_EXCEPTION && APP_STORE_DOMAIN_DEPS.includes(store)) continue;
+        offenders.push(`${rel} → ${store}`);
       }
     }
     expect(offenders).toEqual([]);

@@ -133,3 +133,6 @@ export const IMAGE_SWIPE_EDGE_DAMPING = 0.35;
 export const IMAGE_GRID_WIDE_MIN = 200;
 /** 九宫格单图方块最大宽度（px）。 */
 export const IMAGE_GRID_SINGLE_MAX = 160;
+/** 单个图片文件导入上限（字节）：与服务端单文件写限额（按解码后字节计）一致；
+ * 前端在读取/传输前预检拒绝，超限文件不发起网络传输。 */
+export const TABLE_IMAGE_MAX_BYTES = 50 * 1024 * 1024;

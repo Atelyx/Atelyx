@@ -30,3 +30,26 @@ export async function getApiKey(vaultRoot: string, providerId: string): Promise<
 export async function deleteApiKey(vaultRoot: string, providerId: string): Promise<void> {
   await invoke("delete_api_key", { vaultRoot, providerId });
 }
+
+/**
+ * 保存通用应用秘密到 keychain（按 `name` 隔离，不落文件）。
+ * 对应 Rust `commands/keychain.rs` 的 `set_app_secret`：`name` 在 Rust 侧经哈希后作 keychain 条目名，
+ * 任意字串（`space-token-<...>` 等）均可安全使用，无需调用方做路径/字符约束。
+ * 空串覆盖旧值（删除即传空串）。
+ */
+export async function setAppSecret(name: string, value: string): Promise<void> {
+  await invoke("set_app_secret", { name, value });
+}
+
+/**
+ * 读取通用应用秘密。`name` 对应条目不存在返回空串（与「未设置」语义一致）；
+ * keychain 故障时 reject（同 provider key，不降级为明文）。
+ */
+export async function getAppSecret(name: string): Promise<string> {
+  return invoke<string>("get_app_secret", { name });
+}
+
+/** 删除通用应用秘密 keychain 条目（幂等，条目不存在不报错）。 */
+export async function deleteAppSecret(name: string): Promise<void> {
+  await invoke("delete_app_secret", { name });
+}

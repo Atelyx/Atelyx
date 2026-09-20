@@ -35,6 +35,12 @@ export type VaultIdentity =
   | { kind: "local"; root: string }
   | { kind: "space"; serverUrl: string; spaceId: string };
 
+/** 表格图片导入源：本机文件字节由前端读为 base64（路径在协作空间不可达，字节统一经前端传输）。 */
+export interface TableImageSource {
+  fileName: string;
+  base64Data: string;
+}
+
 export interface ContentBackend {
   // ===== 树与列举 =====
   /** 全仓库文件树（跳过隐藏/排除目录与临时文件）。 */
@@ -133,8 +139,8 @@ export interface ContentBackend {
   writeTempAttachment(canvasId: string, fileName: string, base64Data: string): Promise<string>;
   /** 把未入库附件复制进仓库附件文件夹，返回仓库相对路径。 */
   importAttachment(rel: string, fileName: string): Promise<{ file: string }>;
-  /** 把系统文件选择器选中的图片复制为表格附件，返回唯一相对路径供单元格引用。 */
-  importTableImage(src: string, tableId: string): Promise<string>;
+  /** 把本机图片（base64 字节 + 文件名）落为表格附件，返回唯一相对路径供单元格引用。 */
+  importTableImage(image: TableImageSource, tableId: string): Promise<string>;
   /** 按引用回收某画布的未入库附件，返回删除文件数。 */
   cleanupCanvasTempAttachments(canvasId: string, canvasFile: string): Promise<number>;
   /** 回收表格孤儿图片附件，返回删除文件数。 */

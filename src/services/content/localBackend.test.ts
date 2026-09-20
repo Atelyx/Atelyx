@@ -271,9 +271,9 @@ const MAPPING: Array<{
   },
   {
     name: "importTableImage",
-    call: (b) => b.importTableImage("C:/pic.png", "table1"),
+    call: (b) => b.importTableImage({ fileName: "pic.png", base64Data: "aGVsbG8=" }, "table1"),
     cmd: "import_table_image_vault",
-    args: { src: "C:/pic.png", tableId: "table1" },
+    args: { fileName: "pic.png", data: "aGVsbG8=", tableId: "table1" },
     returns: ".atelyx/attachments/table1/pic.png",
   },
   {
