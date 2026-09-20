@@ -3,13 +3,36 @@
 //! 每个用例独立临时数据目录 + 真实端口，进程内起服务器，用真实 HTTP / WS 客户端完整打请求链路，
 //! 不 mock 路由与鉴权层。
 
+use std::collections::HashSet;
 use std::path::Path;
+use std::sync::Mutex;
 use std::time::Duration;
 
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine as _;
+use futures_util::future::join_all;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
+
+/// 限额 override（set_size_limit_override）是进程级全局：并行测试互踩（如 1MB 大 value 写入
+/// 撞上 1KB 测试上限）。涉及 override 与大 value 的测试都持这把锁串行执行。
+static TEST_SERIAL: Mutex<()> = Mutex::new(());
+
+/// 限额 override 的作用域守卫：构造即设置、drop 即复位，panic 路径也不残留脏限额。
+struct SizeLimitOverride;
+impl SizeLimitOverride {
+    fn set(file: Option<usize>, meta: Option<usize>) -> Self {
+        collab_relay::set_size_limit_override(file, meta);
+        Self
+    }
+}
+impl Drop for SizeLimitOverride {
+    fn drop(&mut self) {
+        collab_relay::set_size_limit_override(None, None);
+    }
+}
 
 // ===== 脚手架 =====
 
@@ -346,8 +369,9 @@ async fn invite_expiry_max_uses_and_revocation() {
     assert_eq!(status, 404);
     let (status, _) = ctx.post("/api/invites/accept", Some(&d_token), json!({ "code": "no-such-code" })).await;
     assert_eq!(status, 404);
-    let (status, _) = ctx.post(&format!("/api/spaces/{space_id}/invites"), Some(&a_token), json!({ "role": "viewer" })).await;
-    assert_eq!(status, 400, "viewer 角色未启用，签发应被拒");
+    let (status, invite) = ctx.post(&format!("/api/spaces/{space_id}/invites"), Some(&a_token), json!({ "role": "viewer" })).await;
+    assert_eq!(status, 200, "viewer 角色可签发邀请");
+    assert_eq!(invite["role"], "viewer");
 }
 
 #[tokio::test]
@@ -545,11 +569,6 @@ async fn ws_space_channel_auth_and_presence() {
     let mut fake = ws_connect(&ctx.base, "/ws/space", json!({ "type": "hello", "spaceId": space_id, "token": "bogus", "nickname": "x" })).await;
     let err = next_frame(&mut fake).await;
     assert_eq!(err["type"], "error");
-
-    // 旧中转端点不受影响：vaultId 房间照常工作
-    let mut legacy = ws_connect(&ctx.base, "/ws", json!({ "type": "hello", "vaultId": "legacy-room", "nickname": "老客户端", "color": "#000000", "deviceName": "L" })).await;
-    let ack = next_frame(&mut legacy).await;
-    assert_eq!(ack["type"], "hello-ack");
 }
 
 // ===== 持久化 =====
@@ -682,4 +701,1168 @@ async fn adopt_existing_folder_as_space() {
         .post("/api/spaces", Some(&a_token), json!({ "name": "x", "path": vault_root.join("笔记").to_string_lossy() }))
         .await;
     assert_eq!(status, 400, "与其他空间内容根互相嵌套应被拒");
+}
+
+// ===== 空间配置落点（键值元数据） =====
+
+/// 在共享空间内签发 viewer 邀请并让第四人接受，返回其令牌。A 为 owner，B 为 editor。
+async fn add_viewer(ctx: &Ctx, space_id: &str) -> (String, String, String) {
+    let a = {
+        let (status, body) = ctx.post("/api/auth/login", None, json!({ "username": "alice", "password": "pass-123456" })).await;
+        assert_eq!(status, 200);
+        body["token"].as_str().unwrap().to_string()
+    };
+    let b = {
+        let (status, body) = ctx.post("/api/auth/login", None, json!({ "username": "bob", "password": "pass-123456" })).await;
+        assert_eq!(status, 200);
+        body["token"].as_str().unwrap().to_string()
+    };
+    let (_, invite) = ctx
+        .post(&format!("/api/spaces/{space_id}/invites"), Some(&a), json!({ "role": "viewer" }))
+        .await;
+    let code = invite["code"].as_str().unwrap().to_string();
+    let d_token = register(ctx, "dave").await;
+    let (status, accepted) = ctx.post("/api/invites/accept", Some(&d_token), json!({ "code": code })).await;
+    assert_eq!(status, 200);
+    assert_eq!(accepted["role"], "viewer");
+    (a, b, d_token)
+}
+
+#[tokio::test]
+async fn space_meta_write_read_merge_and_delete() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let space_id = setup_two_members(&ctx, "alice", "bob").await;
+    let (a_token, b_token, _) = add_viewer(&ctx, &space_id).await;
+
+    // 写多个键 → 读回一致
+    let (status, w) = ctx
+        .send(reqwest::Method::PATCH, &format!("/api/spaces/{space_id}/meta"), Some(&a_token), Some(json!({ "values": { "theme": "dark", "sync": "on" } })), &[])
+        .await;
+    assert_eq!(status, 200, "owner 写空间元信息应成功：{w}");
+    let (status, r) = ctx.get(&format!("/api/spaces/{space_id}/meta"), Some(&b_token), &[]).await;
+    assert_eq!(status, 200);
+    assert_eq!(r["values"]["theme"], "dark");
+    assert_eq!(r["values"]["sync"], "on");
+
+    // PATCH 合并：只更新 sync，theme 保留
+    let (status, _) = ctx
+        .send(reqwest::Method::PATCH, &format!("/api/spaces/{space_id}/meta"), Some(&a_token), Some(json!({ "values": { "sync": "off" } })), &[])
+        .await;
+    assert_eq!(status, 200);
+    let (_, r) = ctx.get(&format!("/api/spaces/{space_id}/meta"), Some(&b_token), &[]).await;
+    assert_eq!(r["values"]["theme"], "dark", "未提及键应保留");
+    assert_eq!(r["values"]["sync"], "off", "提及键应被覆盖");
+
+    // 删单键 → 读不到
+    let (status, _) = ctx
+        .send(reqwest::Method::DELETE, &format!("/api/spaces/{space_id}/meta"), Some(&a_token), None, &[("key", "theme")])
+        .await;
+    assert_eq!(status, 200);
+    let (_, r) = ctx.get(&format!("/api/spaces/{space_id}/meta"), Some(&b_token), &[]).await;
+    assert!(r["values"].get("theme").is_none(), "删除后不应存在：{r}");
+    assert_eq!(r["values"]["sync"], "off");
+    // 删不存在的键 → 404
+    let (status, _) = ctx
+        .send(reqwest::Method::DELETE, &format!("/api/spaces/{space_id}/meta"), Some(&a_token), None, &[("key", "nope")])
+        .await;
+    assert_eq!(status, 404);
+}
+
+#[tokio::test]
+async fn meta_permission_and_user_scope_isolation() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let space_id = setup_two_members(&ctx, "alice", "bob").await;
+    let (a_token, b_token, d_token) = add_viewer(&ctx, &space_id).await;
+    let c_token = register(&ctx, "carol").await; // 非成员
+
+    // 非成员全部 meta 操作被拒
+    for m in [reqwest::Method::GET, reqwest::Method::PATCH, reqwest::Method::DELETE] {
+        let (status, _) = match m {
+            reqwest::Method::GET => ctx.get(&format!("/api/spaces/{space_id}/meta"), Some(&c_token), &[]).await,
+            reqwest::Method::PATCH => ctx
+                .send(m.clone(), &format!("/api/spaces/{space_id}/meta"), Some(&c_token), Some(json!({ "values": { "x": "1" } })), &[])
+                .await,
+            _ => ctx
+                .send(m.clone(), &format!("/api/spaces/{space_id}/meta"), Some(&c_token), None, &[("key", "x")])
+                .await,
+        };
+        assert_eq!(status, 403, "非成员应被拒：{m}");
+    }
+
+    // viewer：读可以，写/删被拒
+    let (status, _) = ctx.get(&format!("/api/spaces/{space_id}/meta"), Some(&d_token), &[]).await;
+    assert_eq!(status, 200, "viewer 可读");
+    let (status, _) = ctx
+        .send(reqwest::Method::PATCH, &format!("/api/spaces/{space_id}/meta"), Some(&d_token), Some(json!({ "values": { "x": "1" } })), &[])
+        .await;
+    assert_eq!(status, 403, "viewer 不可写空间元信息");
+    let (status, _) = ctx
+        .send(reqwest::Method::DELETE, &format!("/api/spaces/{space_id}/meta"), Some(&d_token), None, &[("key", "x")])
+        .await;
+    assert_eq!(status, 403, "viewer 不可删空间元信息");
+
+    // meta/me：两人同名键互不可见、互不可写（目录按成员 id 隔离）
+    let (status, _) = ctx
+        .send(reqwest::Method::PATCH, &format!("/api/spaces/{space_id}/meta/me"), Some(&a_token), Some(json!({ "values": { "theme": "alice-dark" } })), &[])
+        .await;
+    assert_eq!(status, 200);
+    let (status, _) = ctx
+        .send(reqwest::Method::PATCH, &format!("/api/spaces/{space_id}/meta/me"), Some(&b_token), Some(json!({ "values": { "theme": "bob-light" } })), &[])
+        .await;
+    assert_eq!(status, 200);
+    let (_, ra) = ctx.get(&format!("/api/spaces/{space_id}/meta/me"), Some(&a_token), &[]).await;
+    assert_eq!(ra["values"]["theme"], "alice-dark", "只应见本人键");
+    let (_, rb) = ctx.get(&format!("/api/spaces/{space_id}/meta/me"), Some(&b_token), &[]).await;
+    assert_eq!(rb["values"]["theme"], "bob-light");
+    // B 用自己令牌读不到 A 的键内容（目录隔离，天然互不可写他人命名空间）
+    let (_, rb2) = ctx.get(&format!("/api/spaces/{space_id}/meta/me"), Some(&b_token), &[]).await;
+    assert_ne!(rb2["values"]["theme"], "alice-dark");
+}
+
+#[tokio::test]
+async fn meta_key_validation_rejects_traversal_and_illegal() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let space_id = setup_two_members(&ctx, "alice", "bob").await;
+    let a_token = {
+        let (status, body) = ctx.post("/api/auth/login", None, json!({ "username": "alice", "password": "pass-123456" })).await;
+        assert_eq!(status, 200);
+        body["token"].as_str().unwrap().to_string()
+    };
+    for bad in ["../escape", "a/../../b", "/abs", "C:\\x", ".hidden", "a/..", "a//b", "sp ace", "a/.. ", "a./b", "tailing.", "a/con/b", "COM1", "lpt3/x"] {
+        let (status, _) = ctx
+            .send(reqwest::Method::PATCH, &format!("/api/spaces/{space_id}/meta"), Some(&a_token), Some(json!({ "values": { bad: "v" } })), &[])
+            .await;
+        assert_eq!(status, 400, "非法 key 应被拒：{bad}");
+    }
+    // 合法含层级/点的键通过（段中/段尾的点允许，仅以 . 开头/结尾的段被禁）
+    for ok in ["chat/abc", "config.json", "a.b/c", "notes/v1"] {
+        let (status, _) = ctx
+            .send(reqwest::Method::PATCH, &format!("/api/spaces/{space_id}/meta"), Some(&a_token), Some(json!({ "values": { ok: "v" } })), &[])
+            .await;
+        assert_eq!(status, 200, "合法 key 应通过：{ok}");
+    }
+    // 尾点键 roundtrip 被拒：Windows 会剥离文件名尾点，原样落盘会让回读与原 key 错位
+    let (status, _) = ctx
+        .send(reqwest::Method::PATCH, &format!("/api/spaces/{space_id}/meta"), Some(&a_token), Some(json!({ "values": { "tailing.": "v" } })), &[])
+        .await;
+    assert_eq!(status, 400, "尾点键写入应被拒");
+}
+
+#[tokio::test]
+async fn meta_value_roundtrip_newline_chinese_and_large() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let space_id = setup_two_members(&ctx, "alice", "bob").await;
+    let a_token = {
+        let (status, body) = ctx.post("/api/auth/login", None, json!({ "username": "alice", "password": "pass-123456" })).await;
+        assert_eq!(status, 200);
+        body["token"].as_str().unwrap().to_string()
+    };
+    // 换行 + 中文；value 原文落盘（非 JSON 包装）
+    let value = "第一行\n第二行\t制表\n中文标点：，。、\n{\"json\":\"可整体当字符串存\"}";
+    let (status, _) = ctx
+        .send(reqwest::Method::PATCH, &format!("/api/spaces/{space_id}/meta"), Some(&a_token), Some(json!({ "values": { "config": value } })), &[])
+        .await;
+    assert_eq!(status, 200);
+    let (_, r) = ctx.get(&format!("/api/spaces/{space_id}/meta"), Some(&a_token), &[]).await;
+    assert_eq!(r["values"]["config"], value, "含换行/中文/类 JSON 的 value 应原样回读");
+
+    // 1MB 大字符串往返一致
+    let big = "x".repeat(1024 * 1024);
+    let (status, _) = ctx
+        .send(reqwest::Method::PATCH, &format!("/api/spaces/{space_id}/meta"), Some(&a_token), Some(json!({ "values": { "big": big } })), &[])
+        .await;
+    assert_eq!(status, 200, "1MB value 应在 10MB 上限内通过");
+    let (_, r) = ctx.get(&format!("/api/spaces/{space_id}/meta"), Some(&a_token), &[]).await;
+    assert_eq!(r["values"]["big"], "x".repeat(1024 * 1024));
+}
+
+#[tokio::test]
+async fn content_and_meta_size_limits_enforced() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let space_id = setup_two_members(&ctx, "alice", "bob").await;
+    let a_token = {
+        let (status, body) = ctx.post("/api/auth/login", None, json!({ "username": "alice", "password": "pass-123456" })).await;
+        assert_eq!(status, 200);
+        body["token"].as_str().unwrap().to_string()
+    };
+    let b_token = {
+        let (status, body) = ctx.post("/api/auth/login", None, json!({ "username": "bob", "password": "pass-123456" })).await;
+        assert_eq!(status, 200);
+        body["token"].as_str().unwrap().to_string()
+    };
+
+    // 内容写：覆盖单文件上限为 1KB，超限被拒且消息明确
+    let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let _override = SizeLimitOverride::set(Some(1024), None);
+    let big = "y".repeat(2048);
+    let (status, body) = ctx
+        .put(&format!("/api/spaces/{space_id}/file"), Some(&a_token), json!({ "path": "big.md", "content": big }))
+        .await;
+    assert_eq!(status, 400, "超限写入应被拒");
+    assert!(body["error"].as_str().unwrap().contains("文件过大"), "错误消息应明确：{body}");
+    // 限额内通过
+    let (status, _) = ctx
+        .put(&format!("/api/spaces/{space_id}/file"), Some(&b_token), json!({ "path": "small.md", "content": "ok" }))
+        .await;
+    assert_eq!(status, 200, "限额内写入应成功");
+    drop(_override);
+
+    // meta value：覆盖单键值上限为 1KB，超限被拒且消息明确
+    let _override = SizeLimitOverride::set(None, Some(1024));
+    let big = "z".repeat(2048);
+    let (status, body) = ctx
+        .send(reqwest::Method::PATCH, &format!("/api/spaces/{space_id}/meta"), Some(&a_token), Some(json!({ "values": { "k": big } })), &[])
+        .await;
+    assert_eq!(status, 400, "超限配置值应被拒");
+    assert!(body["error"].as_str().unwrap().contains("配置值过大"), "错误消息应明确：{body}");
+    // 限额内通过
+    let (status, _) = ctx
+        .send(reqwest::Method::PATCH, &format!("/api/spaces/{space_id}/meta"), Some(&a_token), Some(json!({ "values": { "k": "ok" } })), &[])
+        .await;
+    assert_eq!(status, 200);
+    drop(_override);
+}
+
+#[tokio::test]
+async fn viewer_role_read_only_semantics() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let space_id = setup_two_members(&ctx, "alice", "bob").await;
+    let (a_token, _, d_token) = add_viewer(&ctx, &space_id).await;
+
+    // owner 先写一份内容供 viewer 读
+    let (status, _) = ctx
+        .put(&format!("/api/spaces/{space_id}/file"), Some(&a_token), json!({ "path": "笔记/方案.md", "content": "# 方案" }))
+        .await;
+    assert_eq!(status, 200);
+
+    // viewer 写内容被拒（403），读内容放行（200）
+    let (status, w) = ctx
+        .put(&format!("/api/spaces/{space_id}/file"), Some(&d_token), json!({ "path": "笔记/越权.md", "content": "x" }))
+        .await;
+    assert_eq!(status, 403, "viewer 写内容应被拒：{w}");
+    let (status, r) = ctx.get(&format!("/api/spaces/{space_id}/file"), Some(&d_token), &[("path", "笔记/方案.md")]).await;
+    assert_eq!(status, 200, "viewer 读内容应放行");
+    assert_eq!(r["content"], "# 方案");
+
+    // viewer 写团队 meta 被拒（403），写自己 meta/me 放行（200）
+    let (status, _) = ctx
+        .send(reqwest::Method::PATCH, &format!("/api/spaces/{space_id}/meta"), Some(&d_token), Some(json!({ "values": { "sort": "x" } })), &[])
+        .await;
+    assert_eq!(status, 403, "viewer 写团队元信息应被拒");
+    let (status, _) = ctx
+        .send(reqwest::Method::PATCH, &format!("/api/spaces/{space_id}/meta/me"), Some(&d_token), Some(json!({ "values": { "theme": "viewer-dark" } })), &[])
+        .await;
+    assert_eq!(status, 200, "viewer 写自身 user 元信息应放行");
+
+    // viewer 可读成员名册（对空间内成员可见，viewer 只读）
+    let (status, members) = ctx.get(&format!("/api/spaces/{space_id}/members"), Some(&d_token), &[]).await;
+    assert_eq!(status, 200, "viewer 读成员名册应放行");
+    let rows = members.as_array().unwrap();
+    assert_eq!(rows.len(), 3);
+    assert!(rows.iter().any(|m| m["role"] == "viewer"));
+}
+
+// ===== 内容写入中心化（补丁端点 / 定序 / 乐观锁 / 广播）=====
+
+/// 登录既有账号取令牌（用户名/密码由建号处保证）。
+async fn login_as(ctx: &Ctx, username: &str) -> String {
+    let (status, body) = ctx
+        .post("/api/auth/login", None, json!({ "username": username, "password": "pass-123456" }))
+        .await;
+    assert_eq!(status, 200);
+    body["token"].as_str().unwrap().to_string()
+}
+
+fn canvas_doc(id: &str, title: &str, nodes: Value) -> Value {
+    json!({
+        "schema": "atelyx-canvas/v1",
+        "id": id,
+        "title": title,
+        "nodes": nodes,
+        "edges": [],
+        "createdAt": 1000,
+        "updatedAt": 1000
+    })
+}
+
+fn text_node(id: &str, x: f64) -> Value {
+    json!({ "id": id, "type": "text", "x": x, "y": 0.0, "data": { "bodyMd": format!("节点{id}") } })
+}
+
+fn table_doc(id: &str, title: &str, fields: Value, rows: Value) -> Value {
+    json!({
+        "schema": "atelyx-table/v1",
+        "id": id,
+        "title": title,
+        "fields": fields,
+        "rows": rows,
+        "createdAt": 1000,
+        "updatedAt": 1000
+    })
+}
+
+/// 读空间文件并按 JSON 解析（画布/表格用例的内容断言入口）。
+async fn read_json(ctx: &Ctx, token: &str, space_id: &str, path: &str) -> Value {
+    let (status, body) = ctx
+        .get(&format!("/api/spaces/{space_id}/file"), Some(token), &[("path", path)])
+        .await;
+    assert_eq!(status, 200, "读取 {path} 应成功：{body}");
+    serde_json::from_str(body["content"].as_str().expect("内容须为字符串")).expect("文件须为合法 JSON")
+}
+
+#[tokio::test]
+async fn canvas_patch_merge_conflict_and_rename() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let space_id = setup_two_members(&ctx, "alice", "bob").await;
+    let a = login_as(&ctx, "alice").await;
+    let (_, _, viewer) = add_viewer(&ctx, &space_id).await;
+
+    let file = "画布/设计.atlx";
+    let (status, _) = ctx
+        .put(
+            &format!("/api/spaces/{space_id}/file"),
+            Some(&a),
+            json!({ "path": file, "content": canvas_doc("cv-1", "设计", json!([text_node("n1", 1.0)])).to_string() }),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let url = format!("/api/spaces/{space_id}/patches/canvas");
+
+    // upsert 新节点：按 id 追加
+    let patch = json!({ "id": "cv-1", "upsertNodes": [text_node("n2", 2.0)] });
+    let (status, resp) = ctx.post(&url, Some(&a), json!({ "path": file, "patch": patch })).await;
+    assert_eq!(status, 200, "补丁应成功：{resp}");
+    assert_eq!(resp["file"], file, "无改名时路径不变：{resp}");
+    assert!(resp["updatedAt"].is_number());
+    let doc = read_json(&ctx, &a, &space_id, file).await;
+    let ids: Vec<&str> = doc["nodes"].as_array().unwrap().iter().map(|n| n["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, vec!["n1", "n2"]);
+
+    // upsert 更新既有节点：整节点替换（非字段级合并）
+    let mut updated = text_node("n1", 10.0);
+    updated["data"] = json!({ "bodyMd": "替换后" });
+    let patch = json!({ "id": "cv-1", "upsertNodes": [updated] });
+    let (status, _) = ctx.post(&url, Some(&a), json!({ "path": file, "patch": patch })).await;
+    assert_eq!(status, 200);
+    let doc = read_json(&ctx, &a, &space_id, file).await;
+    assert_eq!(doc["nodes"].as_array().unwrap().len(), 2);
+    let n1 = doc["nodes"].as_array().unwrap().iter().find(|n| n["id"] == "n1").unwrap();
+    assert_eq!(n1["x"], 10.0);
+    assert_eq!(n1["data"]["bodyMd"], "替换后");
+
+    // 删除（含不存在的 id：幂等不报错）
+    let patch = json!({ "id": "cv-1", "removedNodeIds": ["n2", "ghost"], "removedEdgeIds": ["ghost-edge"] });
+    let (status, body) = ctx.post(&url, Some(&a), json!({ "path": file, "patch": patch })).await;
+    assert_eq!(status, 200, "含不存在 id 的删除应幂等成功：{body}");
+    let doc = read_json(&ctx, &a, &space_id, file).await;
+    let ids: Vec<&str> = doc["nodes"].as_array().unwrap().iter().map(|n| n["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, vec!["n1"]);
+
+    // patch.id 与文件内画布 id 不符 → 400
+    let patch = json!({ "id": "other-canvas", "upsertNodes": [text_node("n9", 9.0)] });
+    let (status, body) = ctx.post(&url, Some(&a), json!({ "path": file, "patch": patch })).await;
+    assert_eq!(status, 400, "补丁与文件不匹配应 400：{body}");
+
+    // baseUpdatedAt 过期 → 409，body 带当前 updatedAt；带当前基准 → 200
+    let patch = json!({ "id": "cv-1", "upsertNodes": [text_node("n3", 3.0)] });
+    let (status, body) = ctx.post(&url, Some(&a), json!({ "path": file, "patch": patch, "baseUpdatedAt": 0 })).await;
+    assert_eq!(status, 409, "过期基准应 409：{body}");
+    assert!(body["error"].is_string(), "冲突 body 应带 error：{body}");
+    assert!(body["updatedAt"].as_i64().unwrap() > 0, "冲突 body 应带当前 updatedAt：{body}");
+    let base = body["updatedAt"].as_i64().unwrap();
+    let (status, _) = ctx.post(&url, Some(&a), json!({ "path": file, "patch": patch, "baseUpdatedAt": base })).await;
+    assert_eq!(status, 200, "以冲突返回的 updatedAt 为基准应成功");
+
+    // title 变更 → 同目录改名，返回新路径，旧文件不存在
+    let patch = json!({ "id": "cv-1", "title": "新设计", "upsertNodes": [] });
+    let (status, resp) = ctx.post(&url, Some(&a), json!({ "path": file, "patch": patch })).await;
+    assert_eq!(status, 200, "改名补丁应成功：{resp}");
+    assert_eq!(resp["file"], "画布/新设计.atlx");
+    let (status, _) = ctx.get(&format!("/api/spaces/{space_id}/file"), Some(&a), &[("path", file)]).await;
+    assert_eq!(status, 404, "旧路径应不存在");
+    let doc = read_json(&ctx, &a, &space_id, "画布/新设计.atlx").await;
+    assert_eq!(doc["title"], "新设计");
+
+    // 目标文件损坏 → 400 明确报错，不静默覆盖
+    let bad = "坏文件.atlx";
+    let (status, _) = ctx
+        .put(&format!("/api/spaces/{space_id}/file"), Some(&a), json!({ "path": bad, "content": "not json{{{" }))
+        .await;
+    assert_eq!(status, 200);
+    let patch = json!({ "id": "cv-1", "upsertNodes": [] });
+    let (status, body) = ctx.post(&url, Some(&a), json!({ "path": bad, "patch": patch })).await;
+    assert_eq!(status, 400, "损坏文件应 400：{body}");
+    assert!(body["error"].is_string());
+
+    // viewer 发补丁 → 403
+    let patch = json!({ "id": "cv-1", "upsertNodes": [] });
+    let (status, _) = ctx
+        .post(&url, Some(&viewer), json!({ "path": "画布/新设计.atlx", "patch": patch }))
+        .await;
+    assert_eq!(status, 403, "viewer 发补丁应被拒");
+}
+
+#[tokio::test]
+async fn table_patch_merge_order_and_force() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let space_id = setup_two_members(&ctx, "alice", "bob").await;
+    let a = login_as(&ctx, "alice").await;
+
+    let file = "表格/任务.atb";
+    let fields = json!([
+        { "id": "f1", "name": "名称", "type": "text" },
+        { "id": "f2", "name": "状态", "type": "text" }
+    ]);
+    let rows = json!([
+        { "id": "r1", "values": { "f1": "任务一" } },
+        { "id": "r2", "values": { "f1": "任务二" } }
+    ]);
+    let (status, _) = ctx
+        .put(
+            &format!("/api/spaces/{space_id}/file"),
+            Some(&a),
+            json!({ "path": file, "content": table_doc("tb-1", "任务", fields, rows).to_string() }),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let url = format!("/api/spaces/{space_id}/patches/table");
+
+    // upsert 字段/行 + rowOrder：未出现 id（r2）保持相对顺序置尾
+    let patch = json!({
+        "id": "tb-1",
+        "upsertFields": [ { "id": "f3", "name": "优先级", "type": "text" } ],
+        "upsertRows": [ { "id": "r3", "values": { "f1": "任务三" } } ],
+        "rowOrder": ["r3", "r1"]
+    });
+    let (status, resp) = ctx.post(&url, Some(&a), json!({ "path": file, "patch": patch })).await;
+    assert_eq!(status, 200, "补丁应成功：{resp}");
+    assert_eq!(resp["file"], file);
+    let doc = read_json(&ctx, &a, &space_id, file).await;
+    let row_ids: Vec<&str> = doc["rows"].as_array().unwrap().iter().map(|r| r["id"].as_str().unwrap()).collect();
+    assert_eq!(row_ids, vec!["r3", "r1", "r2"], "rowOrder 未出现 id 应置尾：{doc}");
+    let field_ids: Vec<&str> = doc["fields"].as_array().unwrap().iter().map(|f| f["id"].as_str().unwrap()).collect();
+    assert_eq!(field_ids, vec!["f1", "f2", "f3"]);
+
+    // fieldOrder 重排：未出现 id 置尾
+    let patch = json!({ "id": "tb-1", "fieldOrder": ["f3", "f2"] });
+    let (status, _) = ctx.post(&url, Some(&a), json!({ "path": file, "patch": patch })).await;
+    assert_eq!(status, 200);
+    let doc = read_json(&ctx, &a, &space_id, file).await;
+    let field_ids: Vec<&str> = doc["fields"].as_array().unwrap().iter().map(|f| f["id"].as_str().unwrap()).collect();
+    assert_eq!(field_ids, vec!["f3", "f2", "f1"]);
+
+    // 两个未出现 id 保持相对顺序置尾：当前行序 [r3, r1, r2]，rowOrder 只含 r2 → r2, r3, r1
+    let patch = json!({ "id": "tb-1", "rowOrder": ["r2"] });
+    let (status, _) = ctx.post(&url, Some(&a), json!({ "path": file, "patch": patch })).await;
+    assert_eq!(status, 200);
+    let doc = read_json(&ctx, &a, &space_id, file).await;
+    let row_ids: Vec<&str> = doc["rows"].as_array().unwrap().iter().map(|r| r["id"].as_str().unwrap()).collect();
+    assert_eq!(row_ids, vec!["r2", "r3", "r1"]);
+
+    // 删行
+    let patch = json!({ "id": "tb-1", "removedRowIds": ["r1"] });
+    let (status, _) = ctx.post(&url, Some(&a), json!({ "path": file, "patch": patch })).await;
+    assert_eq!(status, 200);
+    let doc = read_json(&ctx, &a, &space_id, file).await;
+    let row_ids: Vec<&str> = doc["rows"].as_array().unwrap().iter().map(|r| r["id"].as_str().unwrap()).collect();
+    assert_eq!(row_ids, vec!["r2", "r3"]);
+
+    // baseUpdatedAt 冲突 → 409；force=true 跳过冲突检查 → 200
+    let patch = json!({ "id": "tb-1", "upsertRows": [ { "id": "r4", "values": { "f1": "任务四" } } ] });
+    let (status, body) = ctx
+        .post(&url, Some(&a), json!({ "path": file, "patch": patch, "baseUpdatedAt": 0 }))
+        .await;
+    assert_eq!(status, 409, "过期基准应 409：{body}");
+    assert!(body["updatedAt"].as_i64().unwrap() > 0);
+    let (status, resp) = ctx
+        .post(&url, Some(&a), json!({ "path": file, "patch": patch, "baseUpdatedAt": 0, "force": true }))
+        .await;
+    assert_eq!(status, 200, "force 应跳过冲突检查：{resp}");
+    let doc = read_json(&ctx, &a, &space_id, file).await;
+    let row_ids: Vec<&str> = doc["rows"].as_array().unwrap().iter().map(|r| r["id"].as_str().unwrap()).collect();
+    assert!(row_ids.contains(&"r4"), "force 补丁应已落地：{doc}");
+
+    // patch.id 不匹配 → 400
+    let patch = json!({ "id": "other-table", "upsertRows": [] });
+    let (status, body) = ctx.post(&url, Some(&a), json!({ "path": file, "patch": patch })).await;
+    assert_eq!(status, 400, "补丁与文件不匹配应 400：{body}");
+}
+
+#[tokio::test]
+async fn same_path_writes_serialize_no_lost_update() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let space_id = setup_two_members(&ctx, "alice", "bob").await;
+    let a = login_as(&ctx, "alice").await;
+
+    let file = "并发.atlx";
+    let (status, _) = ctx
+        .put(
+            &format!("/api/spaces/{space_id}/file"),
+            Some(&a),
+            json!({ "path": file, "content": canvas_doc("cv-1", "并发", json!([text_node("n1", 1.0)])).to_string() }),
+        )
+        .await;
+    assert_eq!(status, 200);
+
+    // 同路径并发 8 个补丁各 upsert 一个新节点：串行读改写 → 全部保留（无丢失更新）
+    let url = format!("/api/spaces/{space_id}/patches/canvas");
+    let patch_futs = (0..8u32).map(|i| {
+        let ctx = &ctx;
+        let a = &a;
+        let url = &url;
+        async move {
+            let patch = json!({ "id": "cv-1", "upsertNodes": [text_node(&format!("p{i}"), i as f64)] });
+            ctx.post(url, Some(a), json!({ "path": file, "patch": patch })).await
+        }
+    });
+    let results = join_all(patch_futs).await;
+    for (status, body) in &results {
+        assert_eq!(*status, 200, "并发补丁应全部成功：{body}");
+    }
+    let doc = read_json(&ctx, &a, &space_id, file).await;
+    let ids: Vec<&str> = doc["nodes"].as_array().unwrap().iter().map(|n| n["id"].as_str().unwrap()).collect();
+    assert_eq!(ids.len(), 9, "n1 + 8 个并发新增节点应全部在场（串行合并不丢更新）：{ids:?}");
+    for i in 0..8u32 {
+        assert!(ids.contains(&&*format!("p{i}")), "p{i} 不应丢失：{ids:?}");
+    }
+
+    // 补丁与整写混发同路径：最终文件为某一写者的完整内容（原子写无交叉），始终可解析且 id 不变
+    let whole = canvas_doc("cv-1", "并发", json!([text_node("n1", 1.0), text_node("pW", 50.0)])).to_string();
+    let file_url = format!("/api/spaces/{space_id}/file");
+    let put_fut = ctx.put(&file_url, Some(&a), json!({ "path": file, "content": whole }));
+    let patch_fut = async {
+        let patch = json!({ "id": "cv-1", "upsertNodes": [text_node("pM", 60.0)] });
+        ctx.post(&url, Some(&a), json!({ "path": file, "patch": patch })).await
+    };
+    let (put_result, patch_result) = futures_util::future::join(put_fut, patch_fut).await;
+    for (status, body) in [put_result, patch_result] {
+        assert_eq!(status, 200, "混发写应全部成功：{body}");
+    }
+    let doc = read_json(&ctx, &a, &space_id, file).await;
+    assert_eq!(doc["id"], "cv-1", "文件始终完整（无交叉损坏）：{doc}");
+    let ids: Vec<&str> = doc["nodes"].as_array().unwrap().iter().map(|n| n["id"].as_str().unwrap()).collect();
+    let patch_won = ids.contains(&"pM");
+    let whole_won = ids.contains(&"pW") && ids.len() == 2;
+    assert!(patch_won || whole_won, "最终内容应为补丁结果或整写结果之一：{ids:?}");
+
+    // 同路径并发整写：最终内容 = 某一写者的完整内容，无交叉拼接
+    let put_futs = (0..6u32).map(|i| {
+        let ctx = &ctx;
+        let a = &a;
+        let space_id = &space_id;
+        async move {
+            let content = format!("内容-{i}");
+            (
+                content.clone(),
+                ctx.put(
+                    &format!("/api/spaces/{space_id}/file"),
+                    Some(a),
+                    json!({ "path": "并发笔记.md", "content": content }),
+                )
+                .await,
+            )
+        }
+    });
+    for (_, (status, body)) in join_all(put_futs).await {
+        assert_eq!(status, 200, "并发整写应全部成功：{body}");
+    }
+    let (_, body) = ctx.get(&format!("/api/spaces/{space_id}/file"), Some(&a), &[("path", "并发笔记.md")]).await;
+    let final_content = body["content"].as_str().unwrap();
+    assert!(
+        (0..6u32).map(|i| format!("内容-{i}")).any(|c| c == final_content),
+        "最终内容应为某一写者的完整内容：{final_content}"
+    );
+}
+
+#[tokio::test]
+async fn patch_landing_broadcasts_frame_to_room() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let space_id = setup_two_members(&ctx, "alice", "bob").await;
+    let a = login_as(&ctx, "alice").await;
+
+    // WS 客户端入房（同一令牌 = 模拟发起成员自己的实时频道连接：广播含发送方自身）
+    let mut ws = ws_connect(
+        &ctx.base,
+        "/ws/space",
+        json!({ "type": "hello", "spaceId": space_id, "token": a, "nickname": "爱丽丝", "color": "#ff0000", "deviceName": "A机" }),
+    )
+    .await;
+    let ack = next_frame(&mut ws).await;
+    assert_eq!(ack["type"], "hello-ack");
+
+    let file = "广播.atlx";
+    let (status, _) = ctx
+        .put(
+            &format!("/api/spaces/{space_id}/file"),
+            Some(&a),
+            json!({ "path": file, "content": canvas_doc("cv-1", "广播", json!([text_node("n1", 1.0)])).to_string() }),
+        )
+        .await;
+    assert_eq!(status, 200);
+
+    // HTTP 画布补丁落地 → 房间收到同形状帧 {type, file, patch}
+    let patch = json!({ "id": "cv-1", "upsertNodes": [text_node("n2", 2.0)] });
+    let (status, _) = ctx
+        .post(&format!("/api/spaces/{space_id}/patches/canvas"), Some(&a), json!({ "path": file, "patch": patch }))
+        .await;
+    assert_eq!(status, 200);
+    let mut frame = next_frame(&mut ws).await;
+    for _ in 0..5 {
+        if frame["type"] == "canvas-patch" {
+            break;
+        }
+        frame = next_frame(&mut ws).await;
+    }
+    assert_eq!(frame["type"], "canvas-patch", "应收到画布补丁广播帧：{frame}");
+    assert_eq!(frame["file"], file);
+    assert_eq!(frame["patch"]["id"], "cv-1");
+    assert_eq!(frame["patch"]["upsertNodes"].as_array().unwrap().len(), 1);
+    assert_eq!(frame["patch"]["upsertNodes"][0]["id"], "n2");
+
+    // 表格补丁同型（文件名与标题一致，无改名路径漂移）
+    let tfile = "广播表.atb";
+    let (status, _) = ctx
+        .put(
+            &format!("/api/spaces/{space_id}/file"),
+            Some(&a),
+            json!({ "path": tfile, "content": table_doc("tb-1", "广播表", json!([{ "id": "f1", "name": "名称", "type": "text" }]), json!([])).to_string() }),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let tpatch = json!({ "id": "tb-1", "upsertRows": [ { "id": "r1", "values": { "f1": "一行" } } ] });
+    let (status, _) = ctx
+        .post(&format!("/api/spaces/{space_id}/patches/table"), Some(&a), json!({ "path": tfile, "patch": tpatch }))
+        .await;
+    assert_eq!(status, 200);
+    let mut frame = next_frame(&mut ws).await;
+    for _ in 0..5 {
+        if frame["type"] == "table-patch" {
+            break;
+        }
+        frame = next_frame(&mut ws).await;
+    }
+    assert_eq!(frame["type"], "table-patch", "应收到表格补丁广播帧：{frame}");
+    assert_eq!(frame["file"], tfile);
+    assert_eq!(frame["patch"]["id"], "tb-1");
+}
+
+#[tokio::test]
+async fn write_file_optimistic_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let space_id = setup_two_members(&ctx, "alice", "bob").await;
+    let a = login_as(&ctx, "alice").await;
+    let url = format!("/api/spaces/{space_id}/file");
+
+    let (status, w) = ctx.put(&url, Some(&a), json!({ "path": "笔记/a.md", "content": "v1" })).await;
+    assert_eq!(status, 200);
+    let base = w["updatedAt"].as_i64().unwrap();
+
+    // 过期基准 → 409，body 带当前 updatedAt
+    let (status, body) = ctx.put(&url, Some(&a), json!({ "path": "笔记/a.md", "content": "v2", "baseUpdatedAt": 0 })).await;
+    assert_eq!(status, 409, "过期基准应 409：{body}");
+    assert!(body["error"].is_string());
+    assert!(body["updatedAt"].as_i64().unwrap() >= base);
+
+    // 当前基准 → 200；缺省 = 无条件写
+    let (status, _) = ctx.put(&url, Some(&a), json!({ "path": "笔记/a.md", "content": "v2", "baseUpdatedAt": base })).await;
+    assert_eq!(status, 200, "以当前 updatedAt 为基准应成功");
+    let (status, _) = ctx.put(&url, Some(&a), json!({ "path": "笔记/a.md", "content": "v3" })).await;
+    assert_eq!(status, 200, "缺省 baseUpdatedAt 应无条件写");
+    let (_, body) = ctx.get(&url, Some(&a), &[("path", "笔记/a.md")]).await;
+    assert_eq!(body["content"], "v3");
+}
+
+/// 同秒两次写必须靠版本号互相识别：mtime 整秒截断下第二次写会带着恰等于当前版本的
+/// 基准漏判冲突、静默覆盖第一次写入（修复目标场景）。
+#[tokio::test]
+async fn same_second_writes_conflict_by_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let space_id = setup_two_members(&ctx, "alice", "bob").await;
+    let a = login_as(&ctx, "alice").await;
+    let url = format!("/api/spaces/{space_id}/file");
+
+    let (status, w) = ctx.put(&url, Some(&a), json!({ "path": "笔记/b.md", "content": "v1" })).await;
+    assert_eq!(status, 200);
+    let v1 = w["updatedAt"].as_i64().unwrap();
+    let (_, r) = ctx.get(&url, Some(&a), &[("path", "笔记/b.md")]).await;
+    assert_eq!(r["updatedAt"], v1, "读返回的 updatedAt 应与写返回的版本同源闭环：{r}");
+
+    // 写者 A 以当前版本为基准成功写入（即使与上一次写落在同一秒，版本也必须推进）
+    let (status, w2) = ctx
+        .put(&url, Some(&a), json!({ "path": "笔记/b.md", "content": "v2", "baseUpdatedAt": v1 }))
+        .await;
+    assert_eq!(status, 200, "以当前版本为基准应成功：{w2}");
+    let v2 = w2["updatedAt"].as_i64().unwrap();
+    assert!(v2 > v1, "版本必须严格单调递增（同秒内也不停滞）：{v1} -> {v2}");
+
+    // 写者 B 仍持同一旧基准（= A 写入前拿到的版本）→ 409，body 带当前版本
+    let (status, body) = ctx
+        .put(&url, Some(&a), json!({ "path": "笔记/b.md", "content": "v2-覆盖", "baseUpdatedAt": v1 }))
+        .await;
+    assert_eq!(status, 409, "同秒内他人写入后旧基准应 409：{body}");
+    assert_eq!(body["updatedAt"], v2, "冲突 body 应带当前版本供刷新基准：{body}");
+    let (_, r) = ctx.get(&url, Some(&a), &[("path", "笔记/b.md")]).await;
+    assert_eq!(r["content"], "v2", "被 409 拒绝的写不得落盘：{r}");
+
+    // 补丁端点同判据：以旧版本为基准的补丁 409，刷新基准后成功
+    let cfile = "画布/版本.atlx";
+    let (status, _) = ctx
+        .put(
+            &url,
+            Some(&a),
+            json!({ "path": cfile, "content": canvas_doc("cv-v", "版本", json!([text_node("n1", 1.0)])).to_string() }),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let patch_url = format!("/api/spaces/{space_id}/patches/canvas");
+    let patch = json!({ "id": "cv-v", "upsertNodes": [text_node("n2", 2.0)] });
+    let (status, p1) = ctx.post(&patch_url, Some(&a), json!({ "path": cfile, "patch": patch })).await;
+    assert_eq!(status, 200, "首次补丁（无基准）应成功：{p1}");
+    let pv1 = p1["updatedAt"].as_i64().unwrap();
+    let (status, body) = ctx
+        .post(&patch_url, Some(&a), json!({ "path": cfile, "patch": patch, "baseUpdatedAt": pv1 - 1 }))
+        .await;
+    assert_eq!(status, 409, "补丁旧基准应 409：{body}");
+    assert_eq!(body["updatedAt"], pv1);
+    let (status, p2) = ctx
+        .post(&patch_url, Some(&a), json!({ "path": cfile, "patch": patch, "baseUpdatedAt": pv1 }))
+        .await;
+    assert_eq!(status, 200, "以当前版本为基准的补丁应成功：{p2}");
+    assert!(p2["updatedAt"].as_i64().unwrap() > pv1);
+}
+
+/// 改名边界：Windows 保留名净化（与客户端同口径）、同名异 id 拒绝覆盖、case-only 改名豁免。
+#[tokio::test]
+async fn rename_edges_reserved_name_id_conflict_and_case_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let space_id = setup_two_members(&ctx, "alice", "bob").await;
+    let a = login_as(&ctx, "alice").await;
+    let put = |path: String, id: String, title: String| {
+        let ctx = &ctx;
+        let a = &a;
+        let space_id = &space_id;
+        async move {
+            ctx.put(
+                &format!("/api/spaces/{space_id}/file"),
+                Some(a),
+                json!({ "path": path, "content": canvas_doc(&id, &title, json!([])).to_string() }),
+            )
+            .await
+        }
+    };
+    let patch_title = |path: String, id: String, title: String| {
+        let ctx = &ctx;
+        let a = &a;
+        let url = format!("/api/spaces/{space_id}/patches/canvas");
+        async move {
+            ctx.post(&url, Some(a), json!({ "path": path, "patch": { "id": id, "title": title } }))
+                .await
+        }
+    };
+
+    // title = "con"（Windows 保留名）：落地文件名净化为 _CON.atlx，与客户端 sanitize 同口径
+    //（保留名不能直接建文件，走 title 改名触发 sanitize）
+    let (status, _) = put("画布/旧名.atlx".into(), "cv-con".into(), "旧名".into()).await;
+    assert_eq!(status, 200);
+    let (status, resp) = patch_title("画布/旧名.atlx".into(), "cv-con".into(), "CON".into()).await;
+    assert_eq!(status, 200, "保留名补丁应成功：{resp}");
+    assert_eq!(resp["file"], "画布/_CON.atlx", "保留名应加前缀净化：{resp}");
+
+    // 同名异 id：乙改名撞上甲已占用的名称 → 409，不静默覆盖
+    let (status, _) = put("画布/甲.atlx".into(), "cv-a".into(), "甲".into()).await;
+    assert_eq!(status, 200);
+    let (status, _) = put("画布/乙.atlx".into(), "cv-b".into(), "乙".into()).await;
+    assert_eq!(status, 200);
+    let (status, body) = patch_title("画布/乙.atlx".into(), "cv-b".into(), "甲".into()).await;
+    assert_eq!(status, 409, "同名异 id 改名应 409：{body}");
+    assert!(body["error"].as_str().unwrap().contains("名冲突"), "409 body 应说明名冲突：{body}");
+    let doc = read_json(&ctx, &a, &space_id, "画布/甲.atlx").await;
+    assert_eq!(doc["id"], "cv-a", "被撞名的既有画布不得被覆盖：{doc}");
+
+    // case-only 改名（Case → case）：大小写不敏感文件系统上指向同一物理文件，豁免名冲突成功
+    let (status, _) = put("画布/Case.atlx".into(), "cv-case".into(), "Case".into()).await;
+    assert_eq!(status, 200);
+    let (status, resp) = patch_title("画布/Case.atlx".into(), "cv-case".into(), "case".into()).await;
+    assert_eq!(status, 200, "case-only 改名应成功（同一物理文件豁免）：{resp}");
+    assert_eq!(resp["file"], "画布/case.atlx");
+    let doc = read_json(&ctx, &a, &space_id, "画布/case.atlx").await;
+    assert_eq!(doc["title"], "case");
+    // 画布列表口径：同目录只剩一个物理文件（无同 id 双文件歧义）
+    let (_, tree) = ctx.get(&format!("/api/spaces/{space_id}/tree"), Some(&a), &[]).await;
+    let dir_node = tree
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["path"] == "画布")
+        .expect("画布目录应在树中");
+    let names: Vec<&str> = dir_node["children"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    let case_count = names.iter().filter(|n| n.eq_ignore_ascii_case("case.atlx")).count();
+    assert_eq!(case_count, 1, "case-only 改名后应只有一个物理文件：{names:?}");
+}
+
+#[tokio::test]
+async fn meta_single_key_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let space_id = setup_two_members(&ctx, "alice", "bob").await;
+    let a_token = {
+        let (status, body) = ctx.post("/api/auth/login", None, json!({ "username": "alice", "password": "pass-123456" })).await;
+        assert_eq!(status, 200);
+        body["token"].as_str().unwrap().to_string()
+    };
+    let b_token = {
+        let (status, body) = ctx.post("/api/auth/login", None, json!({ "username": "bob", "password": "pass-123456" })).await;
+        assert_eq!(status, 200);
+        body["token"].as_str().unwrap().to_string()
+    };
+
+    let (status, _) = ctx
+        .send(reqwest::Method::PATCH, &format!("/api/spaces/{space_id}/meta"), Some(&a_token), Some(json!({ "values": { "theme": "dark", "sync": "on" } })), &[])
+        .await;
+    assert_eq!(status, 200);
+
+    // 单键读：存在 → { value }
+    let (status, r) = ctx.get(&format!("/api/spaces/{space_id}/meta"), Some(&b_token), &[("key", "theme")]).await;
+    assert_eq!(status, 200);
+    assert_eq!(r["value"], "dark", "单键读应返回 value 字段：{r}");
+    // 不存在 → 404
+    let (status, _) = ctx.get(&format!("/api/spaces/{space_id}/meta"), Some(&b_token), &[("key", "nope")]).await;
+    assert_eq!(status, 404, "单键读不存在的键应 404");
+    // 非法 key → 400（与写路径同口径）
+    let (status, _) = ctx.get(&format!("/api/spaces/{space_id}/meta"), Some(&b_token), &[("key", "bad key")]).await;
+    assert_eq!(status, 400, "单键读非法 key 应 400");
+
+    // meta/me 同口径：写本人键后单键读回
+    let (status, _) = ctx
+        .send(reqwest::Method::PATCH, &format!("/api/spaces/{space_id}/meta/me"), Some(&b_token), Some(json!({ "values": { "mine": "yes" } })), &[])
+        .await;
+    assert_eq!(status, 200);
+    let (status, r) = ctx.get(&format!("/api/spaces/{space_id}/meta/me"), Some(&b_token), &[("key", "mine")]).await;
+    assert_eq!(status, 200);
+    assert_eq!(r["value"], "yes");
+    let (status, _) = ctx.get(&format!("/api/spaces/{space_id}/meta/me"), Some(&b_token), &[("key", "nope")]).await;
+    assert_eq!(status, 404);
+
+    // 不带 key 保持全量 {values}
+    let (status, r) = ctx.get(&format!("/api/spaces/{space_id}/meta"), Some(&b_token), &[]).await;
+    assert_eq!(status, 200);
+    assert_eq!(r["values"]["theme"], "dark");
+    assert_eq!(r["values"]["sync"], "on");
+}
+
+// ===== 二进制附件（base64 读写 / 保留目录）=====
+
+#[tokio::test]
+async fn binary_file_base64_roundtrip() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let space_id = setup_two_members(&ctx, "alice", "bob").await;
+    let a = login_as(&ctx, "alice").await;
+    let url = format!("/api/spaces/{space_id}/file");
+
+    // 混合字节：0x00 / 0xFF / PNG 魔数片段 / 中文 UTF-8
+    let mut bytes: Vec<u8> = vec![0x00, 0xFF, 0x89, b'P', b'N', b'G', 0x0D, 0x0A];
+    bytes.extend_from_slice("中文混合字节".as_bytes());
+    bytes.push(0xFF);
+    bytes.push(0x00);
+    let encoded = B64.encode(&bytes);
+
+    let (status, w) = ctx
+        .put(&url, Some(&a), json!({ "path": "附件/图片.png", "content": encoded, "encoding": "base64" }))
+        .await;
+    assert_eq!(status, 200, "base64 写入应成功：{w}");
+    assert!(w["updatedAt"].is_number());
+
+    let (status, r) = ctx
+        .get(&url, Some(&a), &[("path", "附件/图片.png"), ("encoding", "base64")])
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(r["encoding"], "base64");
+    assert!(r["updatedAt"].is_number());
+    let decoded = B64.decode(r["content"].as_str().expect("content 须为字符串")).unwrap();
+    assert_eq!(decoded, bytes, "base64 读写应逐字节一致");
+
+    // 磁盘真相：落盘字节与写入字节逐字节一致
+    let on_disk = std::fs::read(
+        dir.path().join("spaces").join(&space_id).join("附件").join("图片.png"),
+    )
+    .unwrap();
+    assert_eq!(on_disk, bytes);
+
+    // 缺省读保持文本行为：响应形状不变（无 encoding 字段），二进制按替换字符容错
+    let (status, r) = ctx.get(&url, Some(&a), &[("path", "附件/图片.png")]).await;
+    assert_eq!(status, 200);
+    assert!(r.get("encoding").is_none(), "缺省读不应带 encoding 字段：{r}");
+    assert!(r["updatedAt"].is_number());
+
+    // 非法 base64 / 未知编码 → 400，不静默
+    let (status, body) = ctx
+        .put(&url, Some(&a), json!({ "path": "坏.png", "content": "!!!不是base64!!!", "encoding": "base64" }))
+        .await;
+    assert_eq!(status, 400, "非法 base64 应 400：{body}");
+    let (status, body) = ctx
+        .put(&url, Some(&a), json!({ "path": "x.md", "content": "t", "encoding": "hex" }))
+        .await;
+    assert_eq!(status, 400, "写未知编码应 400：{body}");
+    let (status, _) = ctx.get(&url, Some(&a), &[("path", "附件/图片.png"), ("encoding", "hex")]).await;
+    assert_eq!(status, 400, "读未知编码应 400");
+}
+
+/// base64 写与文本写共用同一把路径锁与版本表：同路径并发混写不交叉损坏、
+/// 限额按解码后字节、乐观锁跨编码生效。
+#[tokio::test]
+async fn base64_write_shares_path_lock_limit_and_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let space_id = setup_two_members(&ctx, "alice", "bob").await;
+    let a = login_as(&ctx, "alice").await;
+    let url = format!("/api/spaces/{space_id}/file");
+    let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+
+    // 同路径 base64 写与文本写并发混发：最终内容 = 某一写者的完整内容（路径锁互斥，无交叉拼接）
+    let file = "混发.bin";
+    let text_payload = "文本写者完整内容-".repeat(40);
+    let mut bin: Vec<u8> = vec![0x00, 0xFF];
+    bin.extend_from_slice("二进制写者完整内容".as_bytes());
+    let bin_b64 = B64.encode(&bin);
+    let futs = (0..8u32).map(|i| {
+        let ctx = &ctx;
+        let a = &a;
+        let url = &url;
+        let text = format!("{}{}", text_payload, i);
+        let bin_b64 = bin_b64.clone();
+        async move {
+            if i % 2 == 0 {
+                ctx.put(url, Some(a), json!({ "path": file, "content": text })).await
+            } else {
+                ctx.put(url, Some(a), json!({ "path": file, "content": bin_b64, "encoding": "base64" })).await
+            }
+        }
+    });
+    for (status, body) in join_all(futs).await {
+        assert_eq!(status, 200, "并发混写应全部成功：{body}");
+    }
+    let (_, r) = ctx.get(&url, Some(&a), &[("path", file), ("encoding", "base64")]).await;
+    let final_bytes = B64.decode(r["content"].as_str().expect("content 须为字符串")).unwrap();
+    let mut expected: HashSet<Vec<u8>> = (0..8u32)
+        .step_by(2)
+        .map(|i| format!("{}{}", text_payload, i).into_bytes())
+        .collect();
+    expected.insert(bin.clone());
+    assert!(expected.contains(&final_bytes), "最终内容应为某一写者的完整内容（无交叉损坏）");
+
+    // 限额按解码后字节生效：override 1KB，2048 字节二进制（base64 串约 2.7KB）被拒且消息明确
+    let _override = SizeLimitOverride::set(Some(1024), None);
+    let big = vec![0xABu8; 2048];
+    let (status, body) = ctx
+        .put(&url, Some(&a), json!({ "path": "超限.bin", "content": B64.encode(&big), "encoding": "base64" }))
+        .await;
+    assert_eq!(status, 400, "超限 base64 写应按解码后字节被拒：{body}");
+    assert!(body["error"].as_str().unwrap().contains("文件过大"), "错误消息应明确：{body}");
+    drop(_override);
+    drop(_serial);
+
+    // 乐观锁对 base64 写生效：过期基准 409（带当前 updatedAt），当前基准成功
+    let (status, w) = ctx
+        .put(&url, Some(&a), json!({ "path": "锁.bin", "content": B64.encode(b"v1"), "encoding": "base64" }))
+        .await;
+    assert_eq!(status, 200);
+    let base = w["updatedAt"].as_i64().unwrap();
+    let (status, body) = ctx
+        .put(&url, Some(&a), json!({ "path": "锁.bin", "content": B64.encode(b"v2"), "encoding": "base64", "baseUpdatedAt": 0 }))
+        .await;
+    assert_eq!(status, 409, "base64 写过期基准应 409：{body}");
+    assert!(body["updatedAt"].as_i64().unwrap() >= base);
+    let (status, _) = ctx
+        .put(&url, Some(&a), json!({ "path": "锁.bin", "content": B64.encode(b"v2"), "encoding": "base64", "baseUpdatedAt": base }))
+        .await;
+    assert_eq!(status, 200, "以当前版本为基准的 base64 写应成功");
+    let (_, r) = ctx.get(&url, Some(&a), &[("path", "锁.bin"), ("encoding", "base64")]).await;
+    assert_eq!(B64.decode(r["content"].as_str().unwrap()).unwrap(), b"v2");
+
+    // 跨编码共享版本表：文本写的版本作为 base64 写的基准仍然生效（同路径互斥同表）
+    let (status, w) = ctx.put(&url, Some(&a), json!({ "path": "锁2.bin", "content": "t1" })).await;
+    assert_eq!(status, 200);
+    let base = w["updatedAt"].as_i64().unwrap();
+    let (status, _) = ctx
+        .put(&url, Some(&a), json!({ "path": "锁2.bin", "content": B64.encode(b"b1"), "encoding": "base64", "baseUpdatedAt": base }))
+        .await;
+    assert_eq!(status, 200, "文本写版本应可作为 base64 写基准");
+    let (status, body) = ctx
+        .put(&url, Some(&a), json!({ "path": "锁2.bin", "content": "t2", "baseUpdatedAt": base }))
+        .await;
+    assert_eq!(status, 409, "base64 写之后文本写旧基准应 409：{body}");
+}
+
+/// 保留目录：树 / glob / grep / 标签索引不出现；文件读写 API 正常可达（含 base64 二进制）。
+#[tokio::test]
+async fn reserved_media_dir_hidden_but_reachable() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let space_id = setup_two_members(&ctx, "alice", "bob").await;
+    let a = login_as(&ctx, "alice").await;
+    let url = format!("/api/spaces/{space_id}/file");
+    let media = collab_relay::fsops::RESERVED_MEDIA_DIR;
+
+    // 文本写与 base64 写进保留目录照常可达
+    let (status, _) = ctx
+        .put(&url, Some(&a), json!({ "path": format!("{media}/index.json"), "content": "{\"v\":1}" }))
+        .await;
+    assert_eq!(status, 200, "保留目录文本写应可达");
+    let bin: Vec<u8> = vec![0x00, 0xFF, 0x89, b'P', b'N', b'G'];
+    let (status, _) = ctx
+        .put(&url, Some(&a), json!({ "path": format!("{media}/图片.png"), "content": B64.encode(&bin), "encoding": "base64" }))
+        .await;
+    assert_eq!(status, 200, "保留目录 base64 写应可达");
+    let (status, _) = ctx
+        .put(&url, Some(&a), json!({ "path": format!("{media}/标签.md"), "content": "#媒体\n#内部标签\n" }))
+        .await;
+    assert_eq!(status, 200);
+
+    // 读写可达：二进制逐字节一致，文本原样回读
+    let (status, r) = ctx
+        .get(&url, Some(&a), &[("path", &format!("{media}/图片.png")), ("encoding", "base64")])
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(B64.decode(r["content"].as_str().unwrap()).unwrap(), bin);
+    let (status, r) = ctx.get(&url, Some(&a), &[("path", &format!("{media}/index.json"))]).await;
+    assert_eq!(status, 200);
+    assert_eq!(r["content"], "{\"v\":1}");
+
+    // 树不出现
+    let (status, tree) = ctx.get(&format!("/api/spaces/{space_id}/tree"), Some(&a), &[]).await;
+    assert_eq!(status, 200);
+    let tree_str = serde_json::to_string(&tree).unwrap();
+    assert!(!tree_str.contains(media), "保留目录不进树：{tree_str}");
+
+    // glob 不出现；显式指向保留目录被拒（与隐藏目录同口径）
+    let (status, g) = ctx.post(&format!("/api/spaces/{space_id}/glob"), Some(&a), json!({ "pattern": "*.png" })).await;
+    assert_eq!(status, 200);
+    assert_eq!(g["total"], 0, "保留目录不进 glob：{g}");
+    let (status, _) = ctx
+        .post(&format!("/api/spaces/{space_id}/glob"), Some(&a), json!({ "pattern": "*.png", "path": media }))
+        .await;
+    assert_eq!(status, 400, "检索不可显式指向保留目录");
+
+    // grep 不出现
+    let (status, grep) = ctx
+        .post(&format!("/api/spaces/{space_id}/grep"), Some(&a), json!({ "pattern": "内部标签" }))
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(grep["total"], 0, "保留目录不进 grep：{grep}");
+
+    // 标签索引不出现
+    let (status, tags) = ctx.get(&format!("/api/spaces/{space_id}/tags"), Some(&a), &[]).await;
+    assert_eq!(status, 200);
+    assert!(
+        !tags.as_array().unwrap().iter().any(|t| t["tag"] == "内部标签"),
+        "保留目录不进标签索引：{tags}"
+    );
+}
+
+/// 保留媒体目录枚举端点：递归列文件（name 相对查询前缀 + 字节大小）、空目录 / 不存在
+/// 返回空 entries、穿越与普通内容路径 400、viewer 可读。
+#[tokio::test]
+async fn media_list_enumerates_reserved_dir_safely() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let space_id = setup_two_members(&ctx, "alice", "bob").await;
+    let a = login_as(&ctx, "alice").await;
+    let (_, _, viewer) = add_viewer(&ctx, &space_id).await;
+    let file_url = format!("/api/spaces/{space_id}/file");
+    let url = format!("/api/spaces/{space_id}/media/list");
+    let media = collab_relay::fsops::RESERVED_MEDIA_DIR;
+
+    // 造数据：保留目录根一个文件 + 子目录两层各一个文件（size = 内容字节数）+ 一个空目录
+    for (path, content) in [
+        (format!("{media}/top.bin"), "12345"),
+        (format!("{media}/临时/inner.txt"), "xy"),
+        (format!("{media}/临时/sub/deep.txt"), "abcdef"),
+    ] {
+        let (status, w) = ctx.put(&file_url, Some(&a), json!({ "path": path, "content": content })).await;
+        assert_eq!(status, 200, "保留目录写应可达：{w}");
+    }
+    let (status, _) = ctx
+        .post(&format!("/api/spaces/{space_id}/folder"), Some(&a), json!({ "path": format!("{media}/empty") }))
+        .await;
+    assert_eq!(status, 200);
+
+    // 全量枚举：递归含子目录，只列文件不列目录，name 相对保留目录根
+    let (status, body) = ctx.get(&url, Some(&a), &[]).await;
+    assert_eq!(status, 200, "全量枚举应成功：{body}");
+    let entries = body["entries"].as_array().unwrap();
+    let find = |name: &str| {
+        entries
+            .iter()
+            .find(|e| e["name"] == name)
+            .cloned()
+            .unwrap_or(Value::Null)
+    };
+    assert_eq!(find("top.bin")["size"], 5);
+    assert_eq!(find("临时/inner.txt")["size"], 2);
+    assert_eq!(find("临时/sub/deep.txt")["size"], 6);
+    assert_eq!(entries.len(), 3, "只列文件不列目录：{entries:?}");
+
+    // 带 path 枚举子目录：name 相对查询前缀
+    let (status, body) = ctx.get(&url, Some(&a), &[("path", &format!("{media}/临时"))]).await;
+    assert_eq!(status, 200, "子目录枚举应成功：{body}");
+    let names: Vec<&str> = body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["inner.txt", "sub/deep.txt"]);
+
+    // 空目录与不存在的路径 → 空 entries
+    let (status, body) = ctx.get(&url, Some(&a), &[("path", &format!("{media}/empty"))]).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["entries"].as_array().unwrap().len(), 0, "空目录应空 entries：{body}");
+    let (status, body) = ctx.get(&url, Some(&a), &[("path", &format!("{media}/不存在"))]).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["entries"].as_array().unwrap().len(), 0, "不存在的路径应空 entries：{body}");
+
+    // 越界 path：穿越段 400
+    let (status, body) = ctx.get(&url, Some(&a), &[("path", "../../notes/x")]).await;
+    assert_eq!(status, 400, "穿越路径应 400：{body}");
+
+    // 普通内容路径不可由此端点访问：存在的普通目录与文件、不存在的普通路径均 400
+    let (status, _) = ctx
+        .put(&file_url, Some(&a), json!({ "path": "笔记/普通.md", "content": "普通" }))
+        .await;
+    assert_eq!(status, 200);
+    for p in ["笔记/普通.md", "笔记", "普通区"] {
+        let (status, body) = ctx.get(&url, Some(&a), &[("path", p)]).await;
+        assert_eq!(status, 400, "普通内容路径 {p} 应被拒：{body}");
+    }
+    // 保留目录名的相似前缀不误放行
+    let (status, body) = ctx.get(&url, Some(&a), &[("path", &format!("{media}X/f"))]).await;
+    assert_eq!(status, 400, "保留目录名相似前缀应被拒：{body}");
+
+    // viewer 可读（与内容读一致）
+    let (status, body) = ctx.get(&url, Some(&viewer), &[]).await;
+    assert_eq!(status, 200, "viewer 应可枚举保留目录：{body}");
+    assert_eq!(body["entries"].as_array().unwrap().len(), 3);
+
+    // 非成员 403
+    let (status, _) = ctx.get(&url, None, &[]).await;
+    assert_eq!(status, 401);
 }

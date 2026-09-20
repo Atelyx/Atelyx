@@ -21,6 +21,7 @@ use std::sync::Arc;
 
 use axum::http::StatusCode;
 
+use crate::fsops::file_mtime_secs;
 use crate::index::SpaceIndex;
 use crate::ws::Hub;
 use crate::ApiError;
@@ -33,6 +34,8 @@ use sha2::{Digest, Sha256};
 pub const ROLE_OWNER: &str = "owner";
 /// 空间读写角色：内容读写。
 pub const ROLE_EDITOR: &str = "editor";
+/// 空间只读角色：内容/索引/团队元数据只读；自身 user 元数据可写；可读成员名册、可入实时频道。
+pub const ROLE_VIEWER: &str = "viewer";
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct User {
@@ -109,6 +112,63 @@ struct ServerStateInner {
     index_cache: Mutex<HashMap<String, SpaceIndex>>,
     /// WS 房间表：`/ws` 与 `/ws/space` 两个入口共用一套房间机制。
     pub hub: Hub,
+    /// 内容写按路径串行化的锁表（整文件写与补丁端点共用）。
+    path_locks: PathLocks,
+    /// 内容乐观锁版本表（key = 空间 id + 相对路径；只在内存，重启后从 mtime 起步）。
+    content_versions: Mutex<HashMap<String, i64>>,
+}
+
+/// 内容写并发模型：同一路径同时只允许一个写者——读改写（读文件 → 合并 → 原子写）
+/// 全程在锁内完成，两个并发写严格按到达序先后落地，后写者基于前写者的结果，无交叉损坏；
+/// 跨路径不互斥。每路径一把异步锁（等待者让出任务而非阻塞线程），条目在无任何
+/// 持有/等待者后从表内摘除，防长期运行无界增长。
+pub(crate) struct PathLocks {
+    map: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+}
+
+/// 持有期间独占该路径的写权；释放时（Drop）顺带摘除无主条目。
+pub(crate) struct PathLockGuard {
+    map: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+    key: String,
+    // 手动管理释放顺序：先真正释放写锁、再查引用计数摘条目（字段先于 Drop 体析构会看不到真实计数）
+    guard: std::mem::ManuallyDrop<tokio::sync::OwnedMutexGuard<()>>,
+}
+
+impl PathLocks {
+    pub(crate) fn new() -> Self {
+        Self { map: Arc::new(Mutex::new(HashMap::new())) }
+    }
+
+    /// 取 `key`（空间 id + 相对路径）对应的锁并等待持有。
+    pub(crate) async fn lock(&self, key: &str) -> PathLockGuard {
+        let entry = {
+            let mut map = self.map.lock().unwrap();
+            map.entry(key.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        let guard = entry.clone().lock_owned().await;
+        PathLockGuard {
+            map: self.map.clone(),
+            key: key.to_string(),
+            guard: std::mem::ManuallyDrop::new(guard),
+        }
+    }
+}
+
+impl Drop for PathLockGuard {
+    fn drop(&mut self) {
+        // 先释放写锁，引用计数才反映真实的等待者数量
+        unsafe { std::mem::ManuallyDrop::drop(&mut self.guard) };
+        // 摘除判定在表锁内完成：其余取锁者要么已克隆走 Arc（计数 > 1，不摘），
+        // 要么尚未取表锁（自会插入新条目），不存在「条目被摘而旧锁仍在服」的窗口
+        let mut map = self.map.lock().unwrap();
+        if let Some(entry) = map.get(&self.key) {
+            if Arc::strong_count(entry) == 1 {
+                map.remove(&self.key);
+            }
+        }
+    }
 }
 
 /// unix 秒时刻。
@@ -137,6 +197,33 @@ pub fn token_hash(token: &str) -> String {
     hasher.update(token.as_bytes());
     let digest = hasher.finalize();
     digest.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// 单键值字节上限默认值（配置类 value，过大拖累整目录读取与序列化）。
+pub const DEFAULT_MAX_META_VALUE_BYTES: usize = 10 * 1024 * 1024;
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+// 测试用覆盖：进程内全局，0 = 走默认值。集成测试经 set_size_limit_override 调小以低成本验证限额。
+static FILE_LIMIT_OVERRIDE: AtomicUsize = AtomicUsize::new(0);
+static META_LIMIT_OVERRIDE: AtomicUsize = AtomicUsize::new(0);
+
+/// 测试用：临时覆盖单文件 / 单键值字节上限（传 None 恢复默认）。
+pub fn set_size_limit_override(file: Option<usize>, meta: Option<usize>) {
+    FILE_LIMIT_OVERRIDE.store(file.unwrap_or(0), Ordering::SeqCst);
+    META_LIMIT_OVERRIDE.store(meta.unwrap_or(0), Ordering::SeqCst);
+}
+
+/// 当前生效的单文件字节上限（默认值来自 content::MAX_FILE_BYTES，可被测试覆盖）。
+pub fn max_file_bytes() -> usize {
+    let v = FILE_LIMIT_OVERRIDE.load(Ordering::SeqCst);
+    if v == 0 { crate::content::MAX_FILE_BYTES } else { v }
+}
+
+/// 当前生效的单键值字节上限。
+pub fn max_meta_value_bytes() -> usize {
+    let v = META_LIMIT_OVERRIDE.load(Ordering::SeqCst);
+    if v == 0 { DEFAULT_MAX_META_VALUE_BYTES } else { v }
 }
 
 /// 原子写 JSON 文件（临时文件 + rename，防半截文件）。
@@ -172,6 +259,8 @@ impl ServerState {
                 persistent: Mutex::new(inner),
                 index_cache: Mutex::new(HashMap::new()),
                 hub: Hub::default(),
+                path_locks: PathLocks::new(),
+                content_versions: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -246,9 +335,50 @@ impl ServerState {
         &self.inner.index_cache
     }
 
-    /// WS 房间表句柄（`/ws` 与 `/ws/space` 两个入口共用）。
+    /// WS 房间表句柄（空间频道 `/ws/space` 入房用）。
     pub(crate) fn hub(&self) -> Hub {
         self.inner.hub.clone()
+    }
+
+    /// 内容写按路径串行化的锁（同路径互斥、跨路径无碍；key = 空间 id + 相对路径，
+    /// 不同空间的同形路径互不阻塞）。
+    pub(crate) async fn path_lock(&self, space_id: &str, rel: &str) -> PathLockGuard {
+        self.inner.path_locks.lock(&format!("{space_id}/{rel}")).await
+    }
+
+    /// 当前生效的内容版本（乐观锁判据）：已登记版本与磁盘 mtime 取较大者。
+    /// 不用裸 mtime 判冲突：mtime 只有整秒精度，同一秒内他人写入后 mtime == 基准，
+    /// 过期基准会漏判 409、静默覆盖对方内容；版本号每次写入严格 +1，同秒内也互相可辨。
+    /// mtime 仍参与取 max，是为了让绕过服务端的磁盘直改（只动 mtime）也能触发冲突。
+    pub(crate) fn content_version(&self, space_id: &str, rel: &str, path: &Path) -> i64 {
+        let registered = self
+            .inner
+            .content_versions
+            .lock()
+            .unwrap()
+            .get(&format!("{space_id}/{rel}"))
+            .copied()
+            .unwrap_or(0);
+        registered.max(file_mtime_secs(path))
+    }
+
+    /// 成功写入后推进版本：结果严格大于 `seed`（写入前经冲突检查发出去的判据值）与
+    /// 写后磁盘 mtime，保证同秒内先后两次写也能被对方的过期基准识别。
+    /// 服务重启后表为空，版本从 mtime 起步——mtime 只增，单调语义不回退。
+    pub(crate) fn advance_content_version(&self, space_id: &str, rel: &str, path: &Path, seed: i64) -> i64 {
+        let mut map = self.inner.content_versions.lock().unwrap();
+        let key = format!("{space_id}/{rel}");
+        let registered = map.get(&key).copied().unwrap_or(0);
+        let mtime = file_mtime_secs(path);
+        let next = registered.max(seed).max(mtime) + 1;
+        map.insert(key, next);
+        next
+    }
+
+    /// 撤销某路径的版本登记（title 改名落点漂移时清旧路径，防长期运行表无界增长；
+    /// 版本号按「已确认磁盘内容」单调推进，撤掉后新文件从 mtime 起步仍是单调不回退）。
+    pub(crate) fn retire_content_version(&self, space_id: &str, rel: &str) {
+        self.inner.content_versions.lock().unwrap().remove(&format!("{space_id}/{rel}"));
     }
 
     /// 默认布局的空间内容根（未收编目录时的落点）。

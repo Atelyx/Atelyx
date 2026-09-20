@@ -24,6 +24,11 @@ impl fmt::Display for JoinError {
 /// 空间根（内容文件树根）。
 pub struct SpaceRoot(pub PathBuf);
 
+/// 保留目录：空间内的内部内容区（附件临时区、表格图片等按需拉取的媒体）。
+/// 以隐藏段（`.` 前缀）命名——目录遍历的隐藏项过滤天然把它排除在树 / glob / grep /
+/// 反链标签索引之外；文件读写 API 不做隐藏段限制，按相对路径正常可达。
+pub const RESERVED_MEDIA_DIR: &str = ".space-media";
+
 impl SpaceRoot {
     /// 校验相对路径安全并 join 空间根。`create_parents`：写路径父目录不存在时先建
     /// （否则父目录 canonicalize 必失败，「自动建父目录」不可达）。

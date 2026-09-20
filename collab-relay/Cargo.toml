@@ -24,6 +24,8 @@ globset = "0.4"
 regex = "1"
 # dunce::canonicalize（Windows 去 `\\?\` 前缀），与客户端路径归一化同口径
 dunce = "1"
+# 附件/媒体二进制的 base64 传输编码（读端点编码原始字节、写端点解码落盘）
+base64 = "0.22"
 
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

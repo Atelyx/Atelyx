@@ -225,6 +225,7 @@ dependencies = [
  "argon2",
  "axum",
  "axum-server",
+ "base64",
  "dunce",
  "futures-util",
  "globset",

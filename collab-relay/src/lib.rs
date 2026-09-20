@@ -1,9 +1,8 @@
 //! Atelyx 协作服务端（库入口）。
 //!
-//! 单进程承载两套面：
-//! - 空间面：`/api/*`（HTTP JSON：账号 / 空间 / 成员 / 邀请 / 内容 / 索引）+ `/ws/space`
-//!   （凭令牌订阅空间频道）。内容真源在服务器数据目录的文件树上，权限在服务端强制校验。
-//! - 中转面：`/ws` 房间转发（presence / 补丁 / 笔记同步 / 插件消息，无鉴权，局域网信任）。
+//! 实时协作统一走空间频道 `/ws/space`（凭令牌订阅空间房间），配合 `/api/*`
+//! （HTTP JSON：账号 / 空间 / 成员 / 邀请 / 内容 / 索引）。内容真源在服务器数据目录的
+//! 文件树上，权限在服务端强制校验。
 //!
 //! 数据目录（`DATA_DIR`，默认 `./data`）：结构化元数据 JSON（accounts / sessions / spaces /
 //! invites，每次变更原子写整文件）+ `spaces/<id>/` 内容文件树。备份 = 拷目录。
@@ -13,7 +12,8 @@ pub mod auth;
 pub mod content;
 pub mod fsops;
 pub mod index;
-pub mod relay;
+pub mod meta;
+pub mod patches;
 pub mod space_ws;
 pub mod spaces;
 pub mod state;
@@ -26,6 +26,8 @@ use axum::Router;
 use tokio::net::TcpListener;
 
 pub use state::ServerState;
+// 测试用：临时覆盖单文件 / 单键值字节上限
+pub use state::set_size_limit_override;
 
 /// 可选 TLS 的证书与私钥路径（部署方提供 PEM 文件；缺省 = 明文 HTTP，供本地开发与测试）。
 pub struct TlsPaths {
@@ -62,17 +64,38 @@ pub fn build_app(state: ServerState) -> Router {
         .route("/api/spaces/{space_id}/rename", post(content::rename))
         .route("/api/spaces/{space_id}/copy", post(content::copy))
         .route(
+            "/api/spaces/{space_id}/patches/canvas",
+            post(patches::patch_canvas),
+        )
+        .route(
+            "/api/spaces/{space_id}/patches/table",
+            post(patches::patch_table),
+        )
+        .route(
             "/api/spaces/{space_id}/folder",
             post(content::create_folder).delete(content::delete_folder),
         )
+        // 保留媒体目录枚举（客户端临时附件回收）
+        .route("/api/spaces/{space_id}/media/list", get(content::media_list))
         // 派生索引与扫描
         .route("/api/spaces/{space_id}/backlinks", get(index::backlinks))
         .route("/api/spaces/{space_id}/tags", get(index::tags))
         .route("/api/spaces/{space_id}/glob", post(index::glob))
         .route("/api/spaces/{space_id}/grep", post(index::grep))
-        // 实时：空间频道（带鉴权）与无鉴权中转
+        // 空间配置落点（键值元数据）
+        .route(
+            "/api/spaces/{space_id}/meta",
+            get(meta::get_space_meta).patch(meta::patch_space_meta).delete(meta::delete_space_meta),
+        )
+        .route(
+            "/api/spaces/{space_id}/meta/me",
+            get(meta::get_user_meta).patch(meta::patch_user_meta).delete(meta::delete_user_meta),
+        )
+        // 实时：空间频道（带鉴权）
         .route("/ws/space", get(space_ws::upgrade))
-        .route("/ws", get(relay::upgrade))
+        // 请求体上限 = 50MB 单文件上限（content::MAX_FILE_BYTES）× base64 膨胀 4/3（约 66.7MB）
+        // + JSON 字符串转义与请求包装余量，取 96MB，使自有大小校验（按解码后字节）先于框架拦截生效
+        .layer(axum::extract::DefaultBodyLimit::max(96 * 1024 * 1024))
         .with_state(state)
 }
 

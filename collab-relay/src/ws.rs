@@ -1,8 +1,8 @@
-//! WS 房间机制（presence / 补丁 / 笔记同步 / 插件消息转发），供两个入口共用：
-//! `/ws`（报仓库 id 入房，无鉴权）与 `/ws/space`（凭令牌入空间频道）。
+//! WS 共享房间机制（presence / 补丁 / 笔记同步 / 插件消息转发），
+//! 空间频道 `/ws/space` 的底层：鉴权由 space_ws 完成后，入房与转发全走本模块。
 //!
 //! 协议（JSON over WS，字段 camelCase）：
-//! - C→S `hello`：`{ type, vaultId|spaceId, token?, nickname, color, deviceName, version? }`（首条必发）
+//! - C→S `hello`：`{ type, spaceId, token, nickname, color, deviceName, version? }`（首条必发）
 //! - C→S `presence`：`{ type, file?, selection?, view?, openFiles?, lockedNodes?, streamingNodeIds?, editingNotes? }`
 //! - C→S `table-patch` / `canvas-patch`：`{ type, file, patch }`（不透明透传）
 //! - C→S `note-sync` / `note-aware`：`{ type, file, payload }`（base64 载荷不透明透传）
@@ -237,6 +237,22 @@ fn resync_due(last: Option<Instant>, now: Instant) -> bool {
     match last {
         None => true,
         Some(at) => now.saturating_duration_since(at) >= RESYNC_MIN_INTERVAL,
+    }
+}
+
+/// 服务端主动向房间广播补丁帧（HTTP 补丁端点落地成功后调用）。发给房间内全部成员的
+/// WS 连接，含发起写入者自己——发起者经 HTTP 保存、无转发帧可回声，客户端按稳定 id
+/// 幂等合并，自收无副作用；房间为空或个别投递失败只记日志：真源已落盘，广播失败
+/// 不回滚落地。
+pub(crate) fn broadcast_patch(hub: &Hub, room_id: &str, kind: &'static str, file: &str, patch: serde_json::Value) {
+    let payload = server_msg(kind, None, None, None, Some(file.to_string()), Some(patch), None);
+    let rooms = hub.0.lock().unwrap();
+    if let Some(room) = rooms.get(room_id) {
+        for peer in room.values() {
+            if peer.tx.send(payload.clone()).is_err() {
+                debug!(room = %room_id, kind = %kind, "补丁帧投递失败（接收端已关闭）");
+            }
+        }
     }
 }
 

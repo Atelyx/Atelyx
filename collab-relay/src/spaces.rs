@@ -1,9 +1,9 @@
 //! 空间 / 成员 / 邀请：建空间、我的空间（可见性隔离）、改名、转让 owner、
 //! 成员名册、邀请码（角色 + 过期 + 次数上限）与接受邀请。
 //!
-//! 可见性隔离：空间列表只返回自己参与的空间；成员名册只对空间内成员可见。
-//! 角色两档：owner（改名/邀请/移除成员/转让）与 editor（内容读写），邀请角色只接受
-//! editor。空间未提供删除端点。
+//! 可见性隔离：空间列表只返回自己参与的空间；成员名册只对空间内成员可见（viewer 只读可看）。
+//! 角色三档：owner（改名/邀请/移除成员/转让）、editor（内容读写）、viewer（内容/索引/团队
+//! 元数据只读，自身 user 元数据可写）。空间未提供删除端点。
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -13,7 +13,7 @@ use serde_json::json;
 
 use crate::auth::AuthUser;
 use crate::state::{
-    now_secs, random_hex, Member, ServerState, Space, ROLE_EDITOR, ROLE_OWNER,
+    now_secs, random_hex, Member, ServerState, Space, ROLE_EDITOR, ROLE_OWNER, ROLE_VIEWER,
 };
 use crate::{ApiError, ApiResult};
 
@@ -35,8 +35,11 @@ fn valid_name(name: &str) -> bool {
     !name.trim().is_empty() && name.chars().count() <= NAME_MAX
 }
 
+/// 全部角色清单（「任意成员可做」的闸门统一用这份清单；新角色加入时须同步）。
+pub(crate) const ALL_ROLES: &[&str] = &[ROLE_OWNER, ROLE_EDITOR, ROLE_VIEWER];
+
 /// 查空间（404 = 空间不存在，不区分「无权限」防探测）。
-fn space_of<'a>(p: &'a crate::state::Persisted, space_id: &str) -> Result<&'a Space, ApiError> {
+pub(crate) fn space_of<'a>(p: &'a crate::state::Persisted, space_id: &str) -> Result<&'a Space, ApiError> {
     p.spaces.iter().find(|s| s.id == space_id).ok_or_else(|| not_found("空间不存在"))
 }
 
@@ -46,7 +49,7 @@ fn space_of_mut<'a>(p: &'a mut crate::state::Persisted, space_id: &str) -> Resul
 }
 
 /// 要求调用方是成员且角色在允许清单内（403 = 非成员或角色不足，统一口径）。
-fn require_role<'a>(space: &'a Space, user_id: &str, allowed: &[&str]) -> Result<&'a Member, ApiError> {
+pub(crate) fn require_role<'a>(space: &'a Space, user_id: &str, allowed: &[&str]) -> Result<&'a Member, ApiError> {
     let member = space
         .members
         .iter()
@@ -232,7 +235,8 @@ pub async fn list_members(
 ) -> ApiResult<Json<serde_json::Value>> {
     let members = state.read(|p| {
         let space = space_of(p, &space_id)?;
-        require_role(space, &user.user_id, &[ROLE_OWNER, ROLE_EDITOR])?;
+        // 成员名册对空间内成员可见（viewer 只读），与「名册只对成员可见」的隔离口径一致
+        require_role(space, &user.user_id, ALL_ROLES)?;
         let rows = space
             .members
             .iter()
@@ -297,8 +301,8 @@ pub async fn create_invite(
     Path(space_id): Path<String>,
     Json(body): Json<CreateInviteBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    if body.role != ROLE_EDITOR {
-        return Err(bad_request("邀请角色只支持 editor"));
+    if body.role != ROLE_EDITOR && body.role != ROLE_VIEWER {
+        return Err(bad_request("邀请角色只支持 editor 或 viewer"));
     }
     if let Some(n) = body.max_uses {
         if n == 0 {

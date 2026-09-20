@@ -1,5 +1,7 @@
-//! 空间实时频道（`/ws/space`）：凭令牌订阅空间房间。转发语义与 `/ws` 一致；
-//! 差别在入口鉴权——hello 必须携带有效令牌且调用方是该空间成员，否则 error 帧后断开。
+//! 空间实时频道（`/ws/space`）：凭令牌订阅空间房间，底层复用 ws.rs 的共享房间机制
+//! （入房 / presence / 补丁 / 笔记同步 / 插件消息转发 / 心跳 / resync）。
+//! 本模块只负责入口鉴权——hello 必须携带有效令牌且调用方是该空间成员
+//! （viewer 可入房只读接收，写权限由各写端点闸门负责），否则 error 帧后断开。
 
 use std::net::SocketAddr;
 
@@ -9,7 +11,7 @@ use axum::response::IntoResponse;
 use serde::Deserialize;
 use tracing::warn;
 
-use crate::state::{token_hash, ServerState, ROLE_EDITOR, ROLE_OWNER};
+use crate::state::{token_hash, ServerState};
 use crate::ws::{run_room_connection, PeerMeta, HEARTBEAT_TIMEOUT};
 
 pub async fn upgrade(
@@ -66,7 +68,7 @@ async fn handle(mut socket: WebSocket, state: ServerState, remote: SocketAddr) {
         }
     };
 
-    // 鉴权：令牌 → 会话 → 用户；成员资格 → 入房。失败 = error 帧后断开。
+    // 鉴权：令牌 → 会话 → 用户；成员资格 → 入房（viewer 亦可，只读接收）。失败 = error 帧后断开。
     let identity = state.authenticate(&token_hash(&hello.token));
     let Some(identity) = identity else {
         warn!(%remote, "空间频道：无效令牌，拒绝连接");
@@ -79,18 +81,15 @@ async fn handle(mut socket: WebSocket, state: ServerState, remote: SocketAddr) {
             .iter()
             .find(|s| s.id == hello.space_id)
             .and_then(|s| s.members.iter().find(|m| m.user_id == identity.user_id));
-        let role_ok = member
-            .map(|m| m.role == ROLE_OWNER || m.role == ROLE_EDITOR)
-            .unwrap_or(false);
         let name = p
             .users
             .iter()
             .find(|u| u.id == identity.user_id)
             .map(|u| u.display_name.clone());
-        (member.is_some(), role_ok, name)
+        (member.is_some(), name)
     });
-    let (is_member, role_ok, display_name) = membership;
-    if !is_member || !role_ok {
+    let (is_member, display_name) = membership;
+    if !is_member {
         warn!(user_id = %identity.user_id, space_id = %hello.space_id, "空间频道：非成员，拒绝连接");
         let _ = socket.send(Message::text(crate::ws::peer_error("不是该空间成员"))).await;
         return;
