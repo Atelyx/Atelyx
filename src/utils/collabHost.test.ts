@@ -1,7 +1,8 @@
 /**
  * 协作域接线注册表纯函数测试（utils/collabHost.ts）。
  * 覆盖通道注册/覆盖/未注册静默丢弃与分发传参、presence provider 依次合并、
- * 重连/拆卸钩子按注册序运行。注册表为模块级单例，每测试 vi.resetModules 隔离。
+ * 重连/拆卸钩子按注册序运行、身份→传输目标解析（resolveCollabTarget）。
+ * 注册表为模块级单例，每测试 vi.resetModules 隔离。
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import type { CollabPresence } from "@/types";
@@ -139,5 +140,70 @@ describe("撤销（随插件启停）", () => {
     off1();
     host.runCollabReconnects();
     expect(order).toEqual(["b"]);
+  });
+});
+
+describe("resolveCollabTarget（身份→传输选择）", () => {
+  const collab = {
+    enabled: true,
+    nickname: "n",
+    color: "#000",
+    deviceName: "d",
+    version: "1.0.0",
+  };
+
+  function makeDeps(overrides?: Partial<Parameters<typeof host.resolveCollabTarget>[0]>) {
+    return {
+      identity: null,
+      collab: { ...collab },
+      getToken: vi.fn(async () => "tok-123"),
+      spaceWsUrl: vi.fn((serverUrl: string) => serverUrl.replace(/^http/, "ws") + "/ws/space"),
+      ...overrides,
+    };
+  }
+
+  it("无身份（未进仓）→ null，不触取令牌", async () => {
+    const deps = makeDeps();
+    await expect(host.resolveCollabTarget(deps)).resolves.toBeNull();
+    expect(deps.getToken).not.toHaveBeenCalled();
+    expect(deps.spaceWsUrl).not.toHaveBeenCalled();
+  });
+
+  it("协作开关关闭 → 不连接", async () => {
+    await expect(
+      host.resolveCollabTarget(
+        makeDeps({
+          identity: { kind: "space", serverUrl: "http://s:11224", spaceId: "sp1" },
+          collab: { ...collab, enabled: false },
+        }),
+      ),
+    ).resolves.toBeNull();
+  });
+
+  it("local 身份（个人仓库）→ null，不触取空间令牌", async () => {
+    const deps = makeDeps({ identity: { kind: "local", root: "C:/v" } });
+    await expect(host.resolveCollabTarget(deps)).resolves.toBeNull();
+    expect(deps.getToken).not.toHaveBeenCalled();
+    expect(deps.spaceWsUrl).not.toHaveBeenCalled();
+  });
+
+  it("space 身份 → space 工厂：url 经 spaceWsUrl(serverUrl)，hello.spaceId/token 正确", async () => {
+    const deps = makeDeps({
+      identity: { kind: "space", serverUrl: "http://s:11224", spaceId: "sp1" },
+    });
+    await expect(host.resolveCollabTarget(deps)).resolves.toEqual({
+      transport: "space",
+      url: "ws://s:11224/ws/space",
+      hello: {
+        spaceId: "sp1",
+        token: "tok-123",
+        nickname: "n",
+        color: "#000",
+        deviceName: "d",
+        version: "1.0.0",
+      },
+    });
+    expect(deps.getToken).toHaveBeenCalledWith("http://s:11224");
+    expect(deps.spaceWsUrl).toHaveBeenCalledWith("http://s:11224");
   });
 });

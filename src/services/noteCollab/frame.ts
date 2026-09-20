@@ -18,7 +18,7 @@ import * as encoding from "lib0/encoding";
 export const NOTE_FRAME_SYNC = 0x03;
 /** 基线通告帧类型（携带基线全文）。 */
 export const NOTE_FRAME_BASELINE = 0x42;
-/** 重同步请求帧类型（relay 缺帧/周期反熵）。 */
+/** 重同步请求帧类型（传输缺帧/周期反熵）。 */
 export const NOTE_FRAME_RESYNC = 0x43;
 /** 换路帧类型（笔记改名/移动）。 */
 export const NOTE_FRAME_RELOCATE = 0x44;
@@ -94,7 +94,7 @@ export function encodeNoteBaseline(
   return encoding.toUint8Array(encoder);
 }
 
-/** 重同步请求帧：reason 取调用方语义（0 = relay 缺帧，1 = 周期反熵）。 */
+/** 重同步请求帧：reason 取调用方语义（0 = 传输缺帧，1 = 周期反熵）。 */
 export function encodeNoteResync(reason: number): Uint8Array {
   const encoder = encoding.createEncoder();
   encoding.writeVarUint(encoder, NOTE_FRAME_RESYNC);

@@ -1,6 +1,6 @@
 /**
  * 协作传输宿主测试（services/collab/docHost.ts）：传输工厂查表与连接替换、入站频道消息
- * 路由到领域注册表、出站咽喉断开时静默丢弃、重同步提示透传、连通性测试透传。
+ * 路由到领域注册表、出站咽喉断开时静默丢弃、重同步提示透传。
  * 文档实例生命周期归各领域服务自持（如 noteDoc），本模块只做句柄与路由。
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
@@ -14,7 +14,7 @@ let host: DocHostMod;
 let transport: TransportMod;
 let collabHost: CollabHostMod;
 
-const HELLO = { vaultId: "v", nickname: "昵称", color: "#000000", deviceName: "设备" };
+const HELLO = { spaceId: "sp1", token: "tok", nickname: "昵称", color: "#000000", deviceName: "设备" };
 
 /** 补齐连接请求必填回调（本测试只关心入站路由与出站咽喉）。 */
 function connectRequest(
@@ -66,7 +66,6 @@ function fakeFactory(name: string) {
         },
       };
     },
-    testConnection: async (url) => ({ ok: true, message: `已连接 ${url}` }),
   };
   return { factory, calls, options: () => options };
 }
@@ -128,7 +127,7 @@ describe("连接与路由", () => {
 
     expect(first.calls.sendBye).toBe(1);
     expect(first.calls.disconnect).toBe(1);
-    // 先 bye（让中转立即踢出，否则旧 peer 要等 30s 心跳超时才消失）再断开
+    // 先 bye（让服务端立即踢出，否则旧 peer 要等 30s 心跳超时才消失）再断开
     expect(first.calls.order).toEqual(["bye", "disconnect"]);
     expect(first.calls.sendMessage).toEqual([["note-sync", "a.md", "one", undefined]]);
     expect(second.calls.sendMessage).toEqual([["note-sync", "a.md", "two", undefined]]);
@@ -181,15 +180,11 @@ describe("连接与路由", () => {
     expect(fake.calls.sendMessage).toEqual([["plugin-msg", "comfyui.remote", { cmd: "stop" }, 9]]);
   });
 
-  it("presence 与连通性测试按名透传", async () => {
+  it("presence 出站经咽喉透传", () => {
     const fake = fakeFactory("fake");
     transport.registerCollabTransport(fake.factory);
     host.connectTransport(connectRequest("fake"));
     host.sendTransportPresence({ file: "a.md", selection: null, view: "note" });
     expect(fake.calls.sendPresence).toBe(1);
-    await expect(host.testTransport("fake", "ws://x/ws")).resolves.toEqual({
-      ok: true,
-      message: "已连接 ws://x/ws",
-    });
   });
 });

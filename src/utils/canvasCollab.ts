@@ -2,7 +2,7 @@
  * 画布多人实时协作纯函数：引用 diff / 纯序列化 / 消息合并 / 锁主判定。
  *
  * 与磁盘保存同源但不带副作用——`diffCanvasEntities` 被 `patchCanvasVault`（磁盘）与协作广播
- * （relay `canvas-patch`）共用；`serializeNodeForCollab` 是 `toFileNode` 的纯版本（**不触发
+ * （`canvas-patch` 帧）共用；`serializeNodeForCollab` 是 `toFileNode` 的纯版本（**不触发
  * `.md` 写入**——协作广播绝不能因广播而写文件）。接收端经 `deserializeNodeForCollab` 反解回
  * 运行时形态（conversation 的 `data.messages` 拆回 `messagesByConv` 并剥离）。
  *

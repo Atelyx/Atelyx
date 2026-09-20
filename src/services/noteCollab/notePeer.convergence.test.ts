@@ -55,7 +55,7 @@ interface Cluster {
   deliver: () => number;
   text: (index: number, file?: string) => string;
   tag: (index: number) => BaselineTag | null;
-  /** 丢弃全部在途帧（模拟 relay 广播裁剪或隔离某方向流量）。 */
+  /** 丢弃全部在途帧（模拟服务端广播裁剪或隔离某方向流量）。 */
   dropAll: () => void;
 }
 

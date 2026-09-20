@@ -2,7 +2,7 @@
  * 笔记协作接线（模块级单例）：把 `notePeer` 的可实例化状态机接到应用的广播与重建回调上，
  * 对上层（`stores/noteCollabStore`）暴露稳定的函数面。
  *
- * 网络收发经 `noteCollabStore` 接线注入的广播钩子完成，本模块不直连 relay；
+ * 网络收发经 `noteCollabStore` 接线注入的广播钩子完成，本模块不直连传输层；
  * 文档被整体重建（采纳对端基线）时经 `onBindingRefresh` 通知 store 刷新绑定，
  * 使编辑面随 ytext/awareness 引用变化重绑。
  */
@@ -123,7 +123,7 @@ export function destroyAllNoteDocs(): void {
   peer.destroyAll();
 }
 
-/** 重连/relay 缺帧/周期反熵：对所有激活文档重发 syncStep1 索取对端全量状态。 */
+/** 重连/传输缺帧/周期反熵：对所有激活文档重发 syncStep1 索取对端全量状态。 */
 export function resyncAllNoteDocs(): void {
   peer.resyncActive();
 }

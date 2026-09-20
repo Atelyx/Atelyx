@@ -1,11 +1,13 @@
 /**
- * 协作运行时（DocHost 的 store 门面）：连接策略 + 同仓库在线用户列表。
+ * 协作运行时（DocHost 的 store 门面）：连接策略 + 当前空间在线设备列表。
  *
- * 配置（开关/地址/昵称/颜色）来自 settingsStore 应用级配置；房间按仓库配置里的 vaultId 划分
- * （config.json 随共享文件夹同步，保证多机同文件夹进同一房间），切仓库换房（bye + 重连新 hello）。传输/入站路由/出站咽喉归内核 DocHost
- * （services/collab/docHost.ts）：本 store 只做「何时连/断/换房」策略与 presence 节流调度、
- * peers/myPeerId 状态镜像；画布/笔记/表格域的协作接线（消息通道/重连/拆卸/presence 合并/
- * 广播注入）随插件启停经各域 `register*CollabWiring` 注册到 collabHost 注册表。本 store 不 import 任何域 store。
+ * 协作只存在于协作空间（服务端真源）：配置（开关/昵称/颜色）来自 settingsStore 应用级配置，
+ * 连接目标按激活仓库身份解析（utils/collabHost 的 resolveCollabTarget）——协作空间身份按
+ * spaceId 入房、令牌随连接触取；个人仓库/未进仓不连接。切换仓库身份断开旧连接（bye + 重连）。
+ * 传输/入站路由/出站咽喉归内核 DocHost（services/collab/docHost.ts）：本 store 只做
+ * 「何时连/断/换房」策略与 presence 节流调度、peers/myPeerId 状态镜像；画布/笔记/表格域的协作
+ * 接线（消息通道/重连/拆卸/presence 合并/广播注入）随插件启停经各域 `register*CollabWiring`
+ * 注册到 collabHost 注册表。本 store 不 import 任何域 store。
  */
 import { create } from "zustand";
 import {
@@ -13,48 +15,47 @@ import {
   disconnectTransport,
   sendTransportMessage,
   sendTransportPresence,
-  testTransport,
   type CollabChannel,
 } from "@/services/collab/docHost";
 import { useAppStore } from "@/stores/appStore";
-// 环上依赖：settingsStore 静态 import 本模块（applyConfig）；此处只在函数体内惰性读仓库配置
-// （房间号随 config.json 加载/清空），不得在模块求值期访问
-import { useSettingsStore } from "@/stores/settingsStore";
 import { getAppVersion } from "@/services/app";
+import { getToken } from "@/services/space/auth";
+// 空间传输工厂随本模块加载注册进传输注册表（连接按身份选中 space 工厂）
+import { spaceWsUrl } from "@/services/collab/spaceTransport";
 import {
   mergeCollabPresence,
+  resolveCollabTarget,
   runCollabReconnects,
   runCollabTeardowns,
+  type CollabTarget,
 } from "@/utils/collabHost";
-import type { CollabMyPeer, CollabPeer, CollabPresence, RelayTestResult } from "@/types";
+import { getPluginNotificationAccess } from "@/services/cordis/access";
+import type { CollabMyPeer, CollabPeer, CollabPresence } from "@/types";
 
-/** 本端 presence 广播节流（选中高频变化合并，不刷屏 relay）。 */
+/** 本端 presence 广播节流（选中高频变化合并，不刷屏传输层）。 */
 const BROADCAST_THROTTLE_MS = 100;
 /** 传输侧缺帧提示（resync）合并窗口：一波缺帧只做一次全量重握手，其余由周期反熵兜底。 */
 const RESYNC_COALESCE_MS = 3_000;
 
 export interface CollabInitConfig {
   enabled: boolean;
-  url: string;
   nickname: string;
   color: string;
   deviceName: string;
 }
 
 interface CollabStoreState {
-  /** 是否已连接 relay（连接中/断线重连 = false）。 */
+  /** 是否已连接协作传输（连接中/断线重连 = false）。 */
   connected: boolean;
-  /** 当前房间（同仓库 vaultId）在线用户列表。 */
+  /** 当前空间在线设备列表。 */
   peers: CollabPeer[];
   /** 本连接在房间内的 peerId（hello-ack 分配；锁主判定/过滤自己用，未连接 = null）。 */
   myPeerId: number | null;
 
   /** 应用启动时调用：载入配置并建立连接（无配置 = 不连）。 */
   init: (cfg: CollabInitConfig) => void;
-  /** 设置变更（开关/地址/昵称/颜色）：重建连接。 */
+  /** 设置变更（开关/昵称/颜色）：重建连接。 */
   applyConfig: (patch: Partial<Omit<CollabInitConfig, "deviceName">>) => void;
-  /** 检查中转连通性（设置页「检查连接」）：按输入地址一次性探测 relay，不影响常驻连接。 */
-  testConnection: (rawUrl: string) => Promise<RelayTestResult>;
   /**
    * 上报当前打开的笔记（协作 presence，view=note）：对端据此在笔记头显示「正在编辑」协作者列表。
    * 传 null = 离开笔记（清远端高亮），与表格 presence 共用节流通道（后上报者生效）。
@@ -73,7 +74,7 @@ let pendingPresence: CollabPresence | null = null;
 let broadcastTimer: number | null = null;
 /** 最近一次按服务端缺帧提示做全量重握手的时刻（合并窗口内忽略后续提示）。 */
 let lastResyncAt = 0;
-/** 表格/appStore 订阅只注册一次（init 时，确保各 store 模块已完成初始化——防循环 import 未完成期调用）。 */
+/** appStore 订阅只注册一次（init 时，确保各 store 模块已完成初始化——防循环 import 未完成期调用）。 */
 let subscribed = false;
 /** 应用版本号（运行期不变）：随 hello 上报协作房间展示各成员版本；首次读取后缓存，读取失败降级 undefined。 */
 let appVersionPromise: Promise<string | undefined> | null = null;
@@ -86,6 +87,32 @@ void appVersionOnce();
 /** 连接建立序号：快速连续 applyConfig/切仓库时，await 版本号期间可能交错两次建立请求，
  *  后一次须作废前一次（否则旧连接泄漏无人管理）。 */
 let connSeq = 0;
+
+/** 服务端 error 帧的用户可见提示合并窗口：鉴权拒绝等错误会随每次重连重放，同因提示不刷屏。 */
+const SERVER_ERROR_NOTIFY_COALESCE_MS = 60_000;
+let lastServerErrorAt = 0;
+let lastServerErrorMessage = "";
+
+/** 按当前身份与配置解析连接目标（建连与重连刷新共用）：space = space 工厂按 spaceId 入房，
+ *  每次解析触取登录令牌——身份/令牌/配置变化自动生效；local/无身份/协作关闭 = 不连接（null）。 */
+async function resolveCurrentTarget(): Promise<CollabTarget | null> {
+  const cfg = runtimeCfg;
+  if (!cfg) return null;
+  // 应用版本随 hello 上报（协作房间展示各成员版本）；版本运行期不变，仅首次真实读取，失败降级省略
+  const version = await appVersionOnce();
+  return resolveCollabTarget({
+    identity: useAppStore.getState().vaultIdentity ?? null,
+    collab: {
+      enabled: cfg.enabled,
+      nickname: cfg.nickname || cfg.deviceName || "用户",
+      color: cfg.color || randomPeerColor(),
+      deviceName: cfg.deviceName,
+      version,
+    },
+    getToken,
+    spaceWsUrl,
+  });
+}
 
 // ===== 域接线注册表（画布/笔记/表格域经此自注册路由/重连/拆卸/presence 合并；宿主保持域无关） =====
 // 注册表本体在 utils/collabHost（纯数据容器可直测）；本模块 re-export 注册 API 供域接线调用，
@@ -130,22 +157,8 @@ export function randomPeerColor(): string {
   return palette[Math.floor(Math.random() * palette.length)];
 }
 
-/** 中转地址规范化：补协议（ws://）与 /ws 路径（relay 唯一路由），
- *  如 `192.168.1.10:17701` → `ws://192.168.1.10:17701/ws`；空/无法解析的输入原样返回。 */
-export function normalizeRelayUrl(raw: string): string {
-  const input = raw.trim();
-  if (!input) return "";
-  const withProto = /^wss?:\/\//i.test(input) ? input : `ws://${input}`;
-  try {
-    const u = new URL(withProto);
-    return `${u.protocol}//${u.host}/ws`;
-  } catch {
-    return withProto;
-  }
-}
-
 async function establishConnection(): Promise<void> {
-  // 先发 bye 再断开（切仓库换房）：relay 收到 bye 立即踢出，否则旧 peer 要等 30s 心跳
+  // 先发 bye 再断开（切换身份换房）：服务端收到 bye 立即踢出，否则旧 peer 要等 30s 心跳
   // 超时才消失，期间对端列表可见幽灵用户（dispose 路径同样先 bye，见 dispose）
   disconnectTransport();
   // 换连接即重新计时：上一个连接刚接受过 resync 不应吞掉新连接的首个 resync
@@ -157,30 +170,28 @@ async function establishConnection(): Promise<void> {
   // 最近一次上报基底同理失效：换房后 republishPresence 不得拿旧仓库的聚焦文件成帧
   lastPresenceBase = null;
   useCollabStore.setState({ connected: false, peers: [] });
-  // 序号须先于早退判断递增：await 版本号期间若有禁用协作/地址清空/未进仓等早退调用，
+  // 序号须先于早退判断递增：await 版本号/令牌期间若有禁用协作/切换身份等早退调用，
   // 也必须作废在途请求——否则旧请求恢复后仍用已失效配置建连（幽灵连接 / 发出空房间号）
   const seq = ++connSeq;
-  const cfg = runtimeCfg;
-  // 房间号读仓库配置（loadVaultConfig 更新）：null = 未进仓/配置未就绪，不连接
-  const room = useSettingsStore.getState().vaultConfig?.vaultId ?? null;
-  if (!cfg?.enabled || !cfg.url || !room) return;
-  // 应用版本随 hello 上报（协作房间展示各成员版本）；版本运行期不变，仅首次真实读取，失败降级省略
-  const version = await appVersionOnce();
-  if (seq !== connSeq) return; // 期间有更新的连接请求（applyConfig/切仓库/早退），放弃本次
+  if (!runtimeCfg) return;
+  const target = await resolveCurrentTarget();
+  // await 版本号/令牌期间有更新的连接请求（applyConfig/切身份/早退）则放弃本次——
+  // 不复查会拿已失效的配置建连（幽灵连接/发出空房间号）
+  if (seq !== connSeq) return;
+  if (!target) return;
   try {
     connectTransport({
-      name: "relay",
-      url: cfg.url,
-      hello: {
-        vaultId: room,
-        nickname: cfg.nickname || cfg.deviceName || "用户",
-        color: cfg.color || randomPeerColor(),
-        deviceName: cfg.deviceName,
-        version,
+      name: target.transport,
+      url: target.url,
+      hello: target.hello,
+      // 断线重连前重解析连接目标：身份/令牌/配置已变自动生效；不可再连（null）= 放弃重连
+      refreshHello: async () => {
+        const fresh = await resolveCurrentTarget();
+        return fresh?.hello ?? null;
       },
       onHelloAck: (peerId) => {
         myPeerId = peerId;
-        // hello-ack 先于 peers 帧到达（relay 端保证）：立即过滤已收快照里的自己 + 暴露本端 peerId
+        // hello-ack 先于 peers 帧到达（服务端保证）：立即过滤已收快照里的自己 + 暴露本端 peerId
         useCollabStore.setState((s) => ({
           myPeerId: peerId,
           peers: s.peers.filter((p) => p.peerId !== peerId),
@@ -194,8 +205,24 @@ async function establishConnection(): Promise<void> {
           peers: s.peers.map((p) => (p.peerId === peerId ? { ...p, presence } : p)),
         }));
       },
-      // 服务端 error 帧（协议异常/房间拒绝）：协作是尽力而为的辅助能力，仅记录不打断使用
-      onServerError: (message) => console.warn("协作中转错误：", message),
+      // 服务端 error 帧（鉴权拒绝/协议异常）：协作是尽力而为的辅助能力，不打断使用，
+      // 但必须用户可见（同因错误随重连重放，合并窗口内不刷屏）
+      onServerError: (message) => {
+        console.warn("协作服务错误：", message);
+        const now = Date.now();
+        if (
+          message === lastServerErrorMessage &&
+          now - lastServerErrorAt < SERVER_ERROR_NOTIFY_COALESCE_MS
+        ) {
+          return;
+        }
+        lastServerErrorAt = now;
+        lastServerErrorMessage = message;
+        getPluginNotificationAccess()?.notify({
+          level: "error",
+          message: `协作连接被服务器拒绝：${message}`,
+        });
+      },
       // 本连接接收队列被广播裁剪（消费过慢）→ 帧已丢：与重连同款重新握手补齐；
       // 服务端按最小间隔下发，本端再合并一波，防「重握手大帧 → 更慢 → 再下发」自激
       onResync: () => {
@@ -271,18 +298,15 @@ export function publishCollabPresence(base: CollabPresence): void {
   schedulePresenceBroadcast(base);
 }
 
-// 切仓库（房间号随仓库配置变化）→ 换房间重连；无激活仓库 → 断开。
+// 切换仓库身份（进仓/回到无仓库/进入或切换协作空间）→ 重建或断开连接；
 // 注册推迟到 init（防循环 import 链中模块未完成初始化即调用 store）
 function ensureSubscriptions(): void {
   if (subscribed) return;
   subscribed = true;
-  // 进仓/回到无激活仓库（vaultRoot 变化）与仓库配置加载/清空（房间号随 vaultConfig 变化）都会换房：
-  // 任一变化即按当前房间号重建连接（establishConnection 内部先 bye 再断开）
+  // 身份对象变化即重建连接（establishConnection 内部先 bye 再断开；
+  // 解析结果为 null 时等价于断开——个人仓库/未进仓无协作）
   useAppStore.subscribe((s, prev) => {
-    if (s.vaultRoot !== prev.vaultRoot) void establishConnection();
-  });
-  useSettingsStore.subscribe((s, prev) => {
-    if (s.vaultConfig !== prev.vaultConfig) void establishConnection();
+    if (s.vaultIdentity !== prev.vaultIdentity) void establishConnection();
   });
 }
 
@@ -308,12 +332,6 @@ export const useCollabStore = create<CollabStoreState>((set) => ({
       color: patch.color || runtimeCfg.color,
     };
     void establishConnection();
-  },
-
-  testConnection: async (rawUrl) => {
-    const url = normalizeRelayUrl(rawUrl);
-    if (!url) return { ok: false, message: "请先填写中转地址" };
-    return testTransport("relay", url);
   },
 
   notePresence: (file) =>

@@ -46,7 +46,7 @@ const BASELINE_SEED_CLIENT_ID = 1;
 /** 远端合入 origin 标记：本端 applyUpdate 用它，doc 'update' 事件据此跳过回发。 */
 const REMOTE_ORIGIN = "note-collab-remote";
 
-/** 本端 awareness（光标/选中）广播节流：高频合并，防止每次选区变化刷屏 relay。 */
+/** 本端 awareness（光标/选中）广播节流：高频合并，防止每次选区变化刷屏传输层。 */
 const AWARE_THROTTLE_MS = 100;
 
 /** 异基线帧触发回通告的最小间隔（防同一文件在收敛窗口内刷屏）。 */
@@ -68,7 +68,7 @@ export function baselineSeedUpdate(text: string): Uint8Array {
   return update;
 }
 
-/** 远端合入作者（历史按操作人署名用：协作对端经 relay 广播的内容变化，作者 = 发送端身份）。 */
+/** 远端合入作者（历史按操作人署名用：协作对端经广播通道送达的内容变化，作者 = 发送端身份）。 */
 export interface NoteRemoteAuthor {
   id: string;
   name: string;
@@ -126,7 +126,7 @@ export interface NotePeer {
   ): void;
   /** 合入远端 awareness（只应用不回发）。 */
   applyRemoteAwareness(file: string, payload: Uint8Array): void;
-  /** 对全部激活文档重发 syncStep1（重连/relay 缺帧/周期反熵）。 */
+  /** 对全部激活文档重发 syncStep1（重连/传输缺帧/周期反熵）。 */
   resyncActive(): void;
   /** 当前是否正在应用远端 Yjs update（编辑面据此区分远端合入与本地编辑）。 */
   isRemoteApplying(): boolean;

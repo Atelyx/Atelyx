@@ -125,4 +125,49 @@ describe("笔记读写链 × 空间 stub 后端", () => {
     expect(stubB.files.get("已有.md")).toBe("B 仓库正文");
     expect(stub.files.get("已有.md")).toBe("A 仓库正文");
   });
+
+  it("写盘在途 + 切仓库：排队的旧仓库写被身份守卫作废，不落新仓库", async () => {
+    const { activateContentVault } = await import("@/services/content/factory");
+    const { saveNoteContent, reset } = noteStore.useNoteStore.getState();
+    stub.writeDelayMs = 50;
+    const first = saveNoteContent("已有.md", "旧仓库新正文"); // 排队即捕获归属（旧仓库）
+    const second = saveNoteContent("已有.md", "排队的旧正文"); // 排在其后，同属旧仓库
+    // 等第一笔真正进入在途窗口（后端写延迟 50ms），期间切换到新空间仓库
+    // （与切仓库流程同序：激活新身份 + 同步 reset）；stub 默认身份两实例相同，
+    // 须给 B 独立 spaceId 才能让身份键真正区分两仓库
+    await new Promise((r) => setTimeout(r, 10));
+    const stubB = stubMod.createSpaceStubBackend();
+    activateContentVault(
+      { kind: "space", serverUrl: "stub://space", spaceId: "stub-space-b" },
+      stubB.backend,
+    );
+    reset();
+    await first;
+    // 在途第一笔在切换前已开写（后端已定为旧仓库）：归旧仓库落盘
+    expect(stub.files.get("已有.md")).toBe("旧仓库新正文");
+    // 排队项执行时激活身份已换：作废（written false），内容既不落新仓库也不重写旧仓库
+    await expect(second).resolves.toEqual({ written: false, content: "排队的旧正文" });
+    expect(stubB.files.get("已有.md")).toBeUndefined();
+  });
+
+  it("空间错误形态（SpaceApiError）写失败：会话错误状态可见、挂起输入保留", async () => {
+    const sessionStore = await import("./noteSessionStore");
+    const { SpaceApiError } = await import("@/services/space/client");
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    stub.backend.writeNote = () =>
+      Promise.reject(
+        new SpaceApiError({
+          message: "协作服务器 http://s 返回 403：无编辑权限",
+          status: 403,
+          code: "http",
+          serverMessage: "无编辑权限",
+          url: "http://s/api/spaces/SP/file",
+        }),
+      );
+    const session = sessionStore.noteSurfaceProvider.open("已有.md");
+    session.applyBody("会失败的正文");
+    await vi.waitFor(() => expect(session.getState().error).toBe(true), { timeout: 3000 });
+    expect(noteStore.useNoteStore.getState().pendingNoteContent["已有.md"]).toBe("会失败的正文");
+    consoleSpy.mockRestore();
+  });
 });

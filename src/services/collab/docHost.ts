@@ -1,7 +1,7 @@
 /**
  * 协作文档宿主 DocHost（内核，域无关）：协作传输的活动句柄与入站路由。
  *
- * - 组合传输注册表（transport.ts，默认内建 relay）与域接线注册表（utils/collabHost）：
+ * - 组合传输注册表（transport.ts，空间工厂由 spaceTransport.ts 注册）与域接线注册表（utils/collabHost）：
  *   活动传输句柄由本模块持有（collabStore 是 store 门面，经 connectTransport/send* 管理）；
  * - 入站频道消息统一路由到 collabHost 通道注册表（各域 handler 自注册）；
  * - 出站经 send* 咽喉（断开时静默丢弃）；
@@ -12,16 +12,13 @@
  * 文档实例的生命周期（引用计数/创建/重建/销毁）由各领域服务自持（如 noteDoc 的 per-file Y.Doc）。
  */
 import { dispatchCollabChannel } from "@/utils/collabHost";
-import type { CollabPresence, RelayTestResult } from "@/types";
+import type { CollabPresence } from "@/types";
 import {
   connectCollabTransport,
-  testCollabTransport,
   type CollabChannel,
   type CollabTransportHandle,
   type CollabTransportOptions,
 } from "./transport";
-// 装配默认内建传输：relay.ts 模块加载时注册 collabRelayTransport（无环——relay 只依赖 transport）
-import "@/services/collab/relay";
 
 export type { CollabChannel } from "./transport";
 
@@ -43,6 +40,7 @@ export function connectTransport(req: ConnectTransportRequest): void {
   activeTransport = connectCollabTransport(req.name, {
     url: req.url,
     hello: req.hello,
+    refreshHello: req.refreshHello,
     onHelloAck: req.onHelloAck,
     onPeers: req.onPeers,
     onPeerPresence: req.onPeerPresence,
@@ -75,10 +73,5 @@ export function sendTransportMessage(
 /** 出站 presence（断开时静默丢弃）。 */
 export function sendTransportPresence(presence: CollabPresence): void {
   activeTransport?.sendPresence(presence);
-}
-
-/** 按名测试传输连通性（设置页「检查连接」用）。 */
-export function testTransport(name: string, url: string): Promise<RelayTestResult> {
-  return testCollabTransport(name, url);
 }
 

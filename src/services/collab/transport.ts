@@ -1,11 +1,11 @@
 /**
  * 协作传输接口（内核，域无关）：传输 = 连接/房间/presence/频道收发的可注册后端。
- * 默认内建 relay 实现（relay.ts 的 `collabRelayTransport` 工厂，模块加载即注册）；
+ * 空间传输工厂（spaceTransport.ts 的 `spaceCollabTransport`，模块加载即注册）；
  * 换协作后端 = 注册新 factory（connect 返回同接口 handle），画布/笔记/表格零改动。
  */
-import type { CollabHello, CollabPeer, CollabPresence, RelayTestResult } from "@/types";
+import type { CollabHello, CollabPeer, CollabPresence } from "@/types";
 
-/** 透传频道（relay 各消息类型；新传输可按需扩展）。`plugin-msg` 为插件通用消息通道：
+/** 透传频道（传输层消息类型；新传输可按需扩展）。`plugin-msg` 为插件通用消息通道：
  *  file 槽承载插件频道名，payload 为任意 JSON，可选 targetPeerId 定向单播。 */
 export type CollabChannel =
   | "note-sync"
@@ -17,7 +17,7 @@ export type CollabChannel =
 export interface CollabTransportHandle {
   /** 上报本端 presence（调用方自行节流）。 */
   sendPresence(presence: CollabPresence): void;
-  /** 按频道透传一条消息（relay 不透明转发；断开时静默丢弃）。返回是否已投递到传输层。
+  /** 按频道透传一条消息（传输层不透明转发；断开时静默丢弃）。返回是否已投递到传输层。
    *  `plugin-msg` 的 file 槽 = 插件频道名，targetPeerId 有值 = 定向单播（其余频道忽略）。 */
   sendMessage(
     channel: CollabChannel,
@@ -34,6 +34,9 @@ export interface CollabTransportHandle {
 export interface CollabTransportOptions {
   url: string;
   hello: CollabHello;
+  /** 重连前刷新 hello（身份/令牌/配置变化后自动生效）；返回 null = 放弃重连并正常收尾。
+   *  可选：不提供 = 重连沿用构造时的 hello。 */
+  refreshHello?: () => Promise<CollabHello | null>;
   /** 收到 hello-ack（分配的 peerId）——据此把自己过滤出 peers 列表。 */
   onHelloAck(peerId: number): void;
   onPeers(peers: CollabPeer[]): void;
@@ -49,8 +52,6 @@ export interface CollabTransportOptions {
 export interface CollabTransportFactory {
   name: string;
   connect(opts: CollabTransportOptions): CollabTransportHandle;
-  /** 可选：一次性连通性测试（设置页「检查连接」用）。 */
-  testConnection?(url: string): Promise<RelayTestResult>;
 }
 
 const collabTransports = new Map<string, CollabTransportFactory>();
@@ -68,12 +69,4 @@ export function connectCollabTransport(
   const factory = collabTransports.get(name);
   if (!factory) throw new Error(`协作传输未注册：${name}`);
   return factory.connect(opts);
-}
-
-/** 按名测试连通性（传输不支持或无 testConnection 时报错）。 */
-export function testCollabTransport(name: string, url: string): Promise<RelayTestResult> {
-  const factory = collabTransports.get(name);
-  if (!factory) throw new Error(`协作传输未注册：${name}`);
-  if (!factory.testConnection) throw new Error(`传输不支持连接测试：${name}`);
-  return factory.testConnection(url);
 }

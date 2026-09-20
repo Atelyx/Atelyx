@@ -14,6 +14,7 @@ import {
   readNote,
   writeNote,
 } from "@/services/vault";
+import { getActiveVaultIdentity, identityKeyOf } from "@/services/content/factory";
 import {
   loadHistory as loadNoteHistory,
   recordHistoryVersion,
@@ -161,6 +162,9 @@ export const useNoteStore = create<NoteState>((set, get) => ({
    */
   saveNoteContent: async (file, content, canWrite) => {
     if (canWrite && !canWrite()) return { written: false, content };
+    // 写盘归属在调用时刻定死（先于任何 await）：串行队列跨切换在途，执行时再取激活身份
+    // 会拿到新仓库的后端，把旧仓库正文写进新仓库同路径文件（identityKeyOf 对空间身份同样成立）
+    const identityAtStart = identityKeyOf(getActiveVaultIdentity());
     // 保存前钩子（serial veto/改写，见 events.ts runSerialHook）：改写落盘内容 / 阻断本次保存。
     // 必须在缓存先行（stageNoteContent）之前执行：veto 时不写缓存不落盘，否则缓存停在
     // 未落盘正文上，重开会话会把它误当磁盘基线（内容回退）。
@@ -174,6 +178,11 @@ export const useNoteStore = create<NoteState>((set, get) => ({
     let written = false;
     await withNoteWriteQueue(file, async () => {
       if (canWrite && !canWrite()) {
+        get().invalidateNoteCache(file);
+        return;
+      }
+      if (identityKeyOf(getActiveVaultIdentity()) !== identityAtStart) {
+        // 切仓库竞态：本次写属于旧仓库，作废（缓存一并作废，防残留被当磁盘基线）
         get().invalidateNoteCache(file);
         return;
       }

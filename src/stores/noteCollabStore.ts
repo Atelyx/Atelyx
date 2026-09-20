@@ -44,12 +44,12 @@ import { registerDomainLifecycle } from "@/utils/kernelLifecycle";
 import { base64ToBytes, bytesToBase64 } from "@/utils/base64";
 import { markCollabNoteRelocate } from "@/utils/noteCollabRelocate";
 
-/** 周期反熵：激活文档定时重发握手，补齐 relay 丢帧或漏收造成的分歧。 */
+/** 周期反熵：激活文档定时重发握手，补齐传输丢帧或漏收造成的分歧。 */
 const ANTI_ENTROPY_MS = 10_000;
 
 /**
  * 广播本端笔记换路（改名/移动）：对端据此把该笔记的路径身份跟上（未连接时静默丢弃）。
- * 帧挤在旧路径的 `note-sync` 通道上——中转服务不透明转发，无需识别新消息类型。
+ * 帧挤在旧路径的 `note-sync` 通道上——服务端不透明转发，无需识别新消息类型。
  */
 export function broadcastNoteRelocate(oldFile: string, newFile: string): void {
   sendNoteRelocate(oldFile, newFile);
@@ -74,7 +74,7 @@ function adoptRemoteNoteRelocate(oldPath: string, newPath: string): void {
 }
 
 /** 笔记域协作接线（builtin.note 载荷调用，随插件启停）：
- *  注册 note-sync/note-aware 通道 handler（relay 载荷为不透明 base64，解码与作者解析归本域）、
+ *  注册 note-sync/note-aware 通道 handler（载荷为不透明 base64，解码与作者解析归本域）、
  *  重连重握手、周期反熵、拆卸清理与广播钩子注入（经 collabSendSink 惰性读宿主 handle：断开时 no-op、
  *  重连后自动指向新连接，无需重注入）；返回撤销函数（停用/卸载时撤销注册 + 复位广播钩子 + 清空协作文档）。
  *  依赖方向：collabStore 不 import 本模块，本模块经注册表单向回注（无环）。 */
@@ -118,7 +118,7 @@ export function registerNoteCollabWiring(): () => void {
   );
   // 重连后对激活文档重发 syncStep1 重新握手（对端需重新拿全量状态收敛）
   offs.push(registerCollabReconnect(() => resyncAllNoteDocs()));
-  // 周期反熵：relay 广播裁剪（Lagged）等造成的缺帧由定时握手兜底补齐。
+  // 周期反熵：服务端广播裁剪（Lagged）等造成的缺帧由定时握手兜底补齐。
   // 用宿主全局 setInterval 而非 window.*：该接线在 node 测试环境同样被挂载与拆卸
   const entropyTimer = setInterval(() => resyncAllNoteDocs(), ANTI_ENTROPY_MS);
   offs.push(() => clearInterval(entropyTimer));
