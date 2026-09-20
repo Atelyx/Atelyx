@@ -13,6 +13,16 @@ const h = vi.hoisted(() => ({
   failing: new Set<string>(),
   calls: [] as { cmd: string; args: Record<string, unknown> }[],
   results: new Map<string, unknown>(),
+  /** 空间内容后端的树数据/错误与 getTree 调用计数（mock createSpaceClient）。 */
+  spaceTree: [] as unknown[],
+  spaceTreeError: null as Error | null,
+  spaceGetTreeCalls: 0,
+  /** 空间内容文件（相对路径 → 文本），供 listCanvases/createCanvas/补丁链读写。 */
+  spaceFiles: new Map<string, string>(),
+  /** 空间写入记录（PUT /file 载荷）。 */
+  spaceWrites: [] as Record<string, unknown>[],
+  /** 空间画布补丁记录（POST /patches/canvas 载荷）。 */
+  spacePatchBodies: [] as Record<string, unknown>[],
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -22,9 +32,65 @@ vi.mock("@tauri-apps/api/core", () => ({
     if (h.results.has(cmd)) return h.results.get(cmd);
     if (cmd === "create_canvas_vault") return { id: "c9", file: "新画布.atlx" };
     if (cmd === "list_canvases_vault") return [];
+    // keychain 应用秘密：空间会话恢复用（token 条目 → 令牌；user 条目 → 用户 JSON）
+    if (cmd === "get_app_secret") {
+      const name = String(args?.name ?? "");
+      if (name.startsWith("space-token-")) return "tok";
+      if (name.startsWith("space-user-")) {
+        return JSON.stringify({ userId: "u1", username: "alice", displayName: "Alice" });
+      }
+      return "";
+    }
     return "";
   },
 }));
+
+vi.mock("@/services/space/client", () => {
+  class SpaceApiError extends Error {
+    readonly status: number;
+    constructor(status: number, message: string) {
+      super(message);
+      this.status = status;
+    }
+  }
+  return {
+    SpaceApiError,
+    createSpaceClient: () => ({
+      auth: {
+        listDevices: async () => [],
+      },
+      content: {
+        getTree: async () => {
+          h.spaceGetTreeCalls += 1;
+          if (h.spaceTreeError) throw h.spaceTreeError;
+          return h.spaceTree;
+        },
+        readFile: async (_spaceId: string, path: string) => {
+          const content = h.spaceFiles.get(path);
+          if (content === undefined) {
+            throw new SpaceApiError(404, `文件不存在：${path}`);
+          }
+          return { content, updatedAt: 100 };
+        },
+        writeFile: async (_spaceId: string, body: Record<string, unknown>) => {
+          h.spaceWrites.push(body);
+          h.spaceFiles.set(String(body.path), String(body.content));
+          return { updatedAt: 101, path: body.path };
+        },
+        patchCanvas: async (_spaceId: string, body: Record<string, unknown>) => {
+          h.spacePatchBodies.push(body);
+          return { updatedAt: 102, file: body.path, conflict: false };
+        },
+        glob: async (_spaceId: string, body: { pattern: string }) => {
+          // 仅测试用 patterns（**/*.atlx 形态）：取最后一段扩展名过滤
+          const ext = body.pattern.slice(body.pattern.lastIndexOf("."));
+          const paths = [...h.spaceFiles.keys()].filter((p) => p.endsWith(ext));
+          return { paths, total: paths.length };
+        },
+      },
+    }),
+  };
+});
 
 type AppStore = typeof import("./appStore");
 type NotificationStore = typeof import("./notificationStore");
@@ -40,11 +106,26 @@ beforeEach(async () => {
   h.failing = new Set();
   h.calls = [];
   h.results = new Map();
+  h.spaceTree = [];
+  h.spaceTreeError = null;
+  h.spaceGetTreeCalls = 0;
+  h.spaceFiles = new Map();
+  h.spaceWrites = [];
+  h.spacePatchBodies = [];
   await import("./noteSessionStore");
   await import("./pluginStore");
   app = await import("./appStore");
   notifications = await import("./notificationStore");
 });
+
+/** 种子空间登录态（绕开 restore 的 keychain/网络路径；restored=true 时 restore 幂等跳过）。 */
+async function seedSpaceSession(serverUrl = "http://s"): Promise<void> {
+  const auth = await import("./spaceAuthStore");
+  auth.useSpaceAuthStore.setState({
+    restored: true,
+    servers: [{ serverUrl, userId: "u1", username: "alice", displayName: "Alice" }],
+  });
+}
 
 describe("画布 CRUD 失败契约", () => {
   it("createCanvas 失败 reject（失败信号必须显式，不得返回伪成功值）", async () => {
@@ -125,10 +206,10 @@ describe("启动与建仓流程", () => {
 
   it("有最近仓库：返回最近仓库 root 供自动进入，不写 global.json", async () => {
     seedGlobalConfig([{ root: "E:/v1", name: "v1", lastOpenedAt: 1 }]);
-    const autoEnterRoot = await app.useAppStore.getState().init();
-    expect(autoEnterRoot).toBe("E:/v1");
+    const autoEnter = await app.useAppStore.getState().init();
+    expect(autoEnter).toEqual({ kind: "local", root: "E:/v1" });
     expect(app.useAppStore.getState().recentVaults[0]?.root).toBe("E:/v1");
-    expect(h.calls.some((c) => c.cmd === "write_global_config")).toBe(false);
+    expect(h.calls.some((c) => c.cmd === "patch_global_config")).toBe(false);
   });
 
   it("selectVault 失败：返回 false、停留在未激活态（仓库树据 vaultRoot 判定）", async () => {
@@ -181,5 +262,147 @@ describe("启动与建仓流程", () => {
     } finally {
       off();
     }
+  });
+});
+
+/** 种子含协作空间的全局配置。 */
+function seedGlobalConfigWithSpaces(spaces: unknown[], spaceServers: string[] = []): void {
+  h.results.set("read_global_config", {
+    config: { recentVaults: [], spaces, spaceServers },
+    corruptBackup: null,
+  });
+}
+
+describe("boot 空间自动进入", () => {
+  it("最近条目为空间且会话失效：静默跳过自动进入、无错误通知", async () => {
+    // 无 spaceServers 清单 → restore 无会话可恢复 → getServer 未命中
+    seedGlobalConfigWithSpaces([{ serverUrl: "http://s", spaceId: "sp1", name: "空间", openedAt: 200 }]);
+    const target = await app.useAppStore.getState().init();
+    expect(target).toBeNull();
+    const levels = notifications.useNotificationStore.getState().items.map((n) => n.level);
+    expect(levels).not.toContain("error");
+    // 未发起任何空间内容请求
+    expect(h.spaceGetTreeCalls).toBe(0);
+  });
+
+  it("最近条目为空间且会话有效：返回空间条目供自动进入", async () => {
+    seedGlobalConfigWithSpaces(
+      [{ serverUrl: "http://s", spaceId: "sp1", name: "空间", openedAt: 200 }],
+      ["http://s"],
+    );
+    const target = await app.useAppStore.getState().init();
+    expect(target).toEqual({
+      kind: "space",
+      entry: { serverUrl: "http://s", spaceId: "sp1", name: "空间", openedAt: 200 },
+    });
+  });
+
+  it("本地仓库更新时优先本地：空间更旧不改变自动进入目标", async () => {
+    h.results.set("read_global_config", {
+      config: {
+        recentVaults: [{ root: "E:/v1", name: "v1", lastOpenedAt: 300 }],
+        spaces: [{ serverUrl: "http://s", spaceId: "sp1", name: "空间", openedAt: 200 }],
+        spaceServers: ["http://s"],
+      },
+      corruptBackup: null,
+    });
+    const target = await app.useAppStore.getState().init();
+    expect(target).toEqual({ kind: "local", root: "E:/v1" });
+  });
+});
+
+describe("selectSpace 激活分流", () => {
+  const entry = { serverUrl: "http://s", spaceId: "sp1", name: "空间" };
+
+  it("会话无效：返回 need-login、不激活、无空间 I/O、不调 openVault", async () => {
+    seedGlobalConfig([]);
+    const factory = await import("@/services/content/factory");
+    const before = factory.getActiveContentBackend();
+    const result = await app.useAppStore.getState().selectSpace(entry);
+    expect(result).toBe("need-login");
+    expect(app.useAppStore.getState().vaultIdentity).toBeNull();
+    expect(app.useAppStore.getState().vaultRoot).toBeNull();
+    expect(factory.getActiveContentBackend()).toBe(before);
+    expect(h.spaceGetTreeCalls).toBe(0);
+    expect(h.calls.some((c) => c.cmd === "open_vault")).toBe(false);
+  });
+
+  it("服务端不可达：停留未激活态 + 用户可见通知（不静默）", async () => {
+    await seedSpaceSession();
+    h.spaceTreeError = new Error("无法连接协作服务器 http://s");
+    const factory = await import("@/services/content/factory");
+    const before = factory.getActiveContentBackend();
+    const result = await app.useAppStore.getState().selectSpace(entry);
+    expect(result).toBe("error");
+    const levels = notifications.useNotificationStore.getState().items.map((n) => n.level);
+    expect(levels).toContain("error");
+    expect(app.useAppStore.getState().vaultIdentity).toBeNull();
+    expect(factory.getActiveContentBackend()).toBe(before);
+  });
+
+  it("成功路径：激活空间身份 + 树与画布列表经空间后端加载 + recentSpaces 置顶落盘", async () => {
+    await seedSpaceSession();
+    h.spaceTree = [{ name: "a.md", path: "a.md", isDir: false, updatedAt: 1, children: [] }];
+    // 磁盘上已有一块画布：selectSpace 的画布列表加载（glob → 逐个读）应把它填进 canvases
+    h.spaceFiles.set(
+      "画布.atlx",
+      JSON.stringify({ schema: 1, id: "c1", title: "画布", nodes: [], edges: [], createdAt: 0, updatedAt: 5 }),
+    );
+    const result = await app.useAppStore.getState().selectSpace(entry);
+    expect(result).toBe("ok");
+    expect(app.useAppStore.getState().vaultIdentity).toEqual({
+      kind: "space",
+      serverUrl: "http://s",
+      spaceId: "sp1",
+    });
+    expect(app.useAppStore.getState().vaultName).toBe("空间");
+    expect(app.useAppStore.getState().vaultRoot).toBeNull();
+    // 文件树经空间内容后端加载（预检 + loadFiles 共两次 getTree）
+    const vaultStore = await import("./vaultStore");
+    expect(vaultStore.useVaultStore.getState().tree[0]?.path).toBe("a.md");
+    // 画布列表经空间后端 listCanvases 加载（selectSpace 后 canvases 非空）
+    expect(app.useAppStore.getState().canvases).toEqual([
+      { id: "c1", title: "画布", file: "画布.atlx", updatedAt: 5 },
+    ]);
+    // 激活后端确为空间后端：再拉一次树走 mock client 而非本地 IPC
+    const factory = await import("@/services/content/factory");
+    const callsBefore = h.spaceGetTreeCalls;
+    await factory.getActiveContentBackend().listTree();
+    expect(h.spaceGetTreeCalls).toBe(callsBefore + 1);
+    // recentSpaces 置顶 + 落盘 global.json（patch_global_config 补丁携带 spaces）
+    expect(app.useAppStore.getState().recentSpaces[0]?.spaceId).toBe("sp1");
+    const write = h.calls.filter((c) => c.cmd === "patch_global_config").at(-1);
+    const patch = write?.args.patch as { spaces?: { spaceId: string }[] };
+    expect(patch.spaces?.[0]?.spaceId).toBe("sp1");
+  });
+
+  it("空间内新建画布：createCanvas 落盘空间 → 列表/树刷新 → 增量保存链走空间补丁端点", async () => {
+    await seedSpaceSession();
+    await app.useAppStore.getState().selectSpace(entry);
+    const created = await app.useAppStore.getState().createCanvas("新画布", "");
+    // 新建走空间后端（PUT /file 直写最小磁盘 JSON，不经本地 Tauri 命令）
+    expect(h.calls.some((c) => c.cmd === "create_canvas_vault")).toBe(false);
+    expect(h.spaceWrites).toHaveLength(1);
+    const disk = JSON.parse(String(h.spaceWrites[0].content)) as { id: string; title: string };
+    expect(disk.title).toBe("新画布");
+    expect(created).toEqual({ id: disk.id, file: "新画布.atlx", title: "新画布" });
+    // 列表/树已刷新：画布出现在 canvases（updatedAt 取 readFile 响应的乐观锁基准）
+    expect(app.useAppStore.getState().canvases.map((c) => c.file)).toContain("新画布.atlx");
+    // 增量保存链：patchCanvasVault → 空间补丁端点，乐观锁基准透传（title 变化随补丁携带）
+    const { patchCanvasVault } = await import("@/services/vault");
+    const result = await patchCanvasVault({
+      file: created.file,
+      canvasId: created.id,
+      title: "改名",
+      nodes: [],
+      edges: [],
+      messagesByConv: {},
+      lastSaved: { nodes: [], edges: [], messagesByConv: {}, title: "新画布" },
+      baseUpdatedAt: 100,
+    });
+    expect(result).toEqual({ updatedAt: 102, file: "新画布.atlx" });
+    expect(h.spacePatchBodies).toHaveLength(1);
+    expect(h.spacePatchBodies[0].path).toBe("新画布.atlx");
+    expect(h.spacePatchBodies[0].baseUpdatedAt).toBe(100);
   });
 });

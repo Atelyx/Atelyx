@@ -15,7 +15,7 @@ export function useDraftSync<T>(value: T): [T, (v: T) => void] {
   return [draft, setDraft];
 }
 
-/** 防抖提交草稿：拖动/连续 onChange 场景（取色器），防抖 delay 后落盘（避免每帧一次配置原子写/relay 重连）。
+/** 防抖提交草稿：拖动/连续 onChange 场景（取色器），防抖 delay 后落盘（避免每帧一次配置原子写/连接重建）。
  *  组件卸载时若有未触发的防抖提交，立即补交最后一次改动（防抖草稿随组件生命周期，切走不丢最后一次输入）。 */
 export function useDebouncedDraft<T>(
   init: T,

@@ -74,6 +74,9 @@ export const ImageCell = memo(function ImageCell({ field, row }: Props) {
   // 当前图即时渲染（未及预载/单图路径）；已预载则用 srcMap
   const currentSrc = useTableImageSrc(images[cur] ?? "");
 
+  // 本机图片选择输入：File 交给 store（字节由前端读 base64 后落附件目录）
+  const imageInputRef = useRef<HTMLInputElement>(null);
+
   // setState 稳定引用：作为 onCurChange 下传给模式组件，供 document 级监听器长期持有
   const commitTo = useCallback((i: number) => setIdx(i), []);
 
@@ -96,8 +99,19 @@ export const ImageCell = memo(function ImageCell({ field, row }: Props) {
       // 占位（流内 min-h-8）撑起 td 最小高度；按钮 absolute 铺满 td（td relative）垂直居中，
       // 行高更高时按钮随单元格整体居中
       <div className="group min-h-8 p-1">
+        <input
+          ref={imageInputRef}
+          type="file"
+          accept="image/png,image/jpeg,image/webp,image/gif"
+          className="hidden"
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (file) void addImageToCell(row.id, field.id, file);
+            e.target.value = "";
+          }}
+        />
         <button
-          onClick={() => void addImageToCell(row.id, field.id)}
+          onClick={() => imageInputRef.current?.click()}
           className="absolute inset-0 w-full h-full flex items-center justify-center rounded opacity-0 group-hover:opacity-100 transition-opacity hover:bg-[var(--hover)]"
           style={{ color: "var(--text-muted)" }}
           title="添加图片"
@@ -175,7 +189,7 @@ export const ImageCell = memo(function ImageCell({ field, row }: Props) {
           <button
             onClick={(e) => {
               e.stopPropagation();
-              void addImageToCell(row.id, field.id);
+              imageInputRef.current?.click();
             }}
             className="w-5 h-5 flex items-center justify-center rounded-full"
             style={{ background: "rgba(0,0,0,0.6)", color: "#fff" }}

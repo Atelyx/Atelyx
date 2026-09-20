@@ -50,7 +50,9 @@ function cycleColor(c: string): string {
 }
 
 export function CalendarPanel() {
-  const vaultRoot = useAppStore((s) => s.vaultRoot);
+  // 重载按仓库身份触发（身份键语义）：空间模式下 vaultRoot 恒 null，按 root 依赖会让
+  // 空间 A→B 切换时不触发重载、面板停留在 A 的数据
+  const vaultIdentity = useAppStore((s) => s.vaultIdentity);
   const openNote = useAppStore((s) => s.openNote);
   const items = useCalendarStore((s) => s.items);
   const datedNotes = useCalendarStore((s) => s.datedNotes);
@@ -65,7 +67,7 @@ export function CalendarPanel() {
     void useCalendarStore.getState().load();
     void useRepoHistoryStore.getState().load();
     setSelectedDate(null);
-  }, [vaultRoot]);
+  }, [vaultIdentity]);
 
   const now = new Date();
   const [viewYear, setViewYear] = useState(now.getFullYear());

@@ -73,6 +73,7 @@ function MainWorkspaceApp() {
   const pluginPage = useAppStore((s) => s.pluginPage);
   const vaultRoot = useAppStore((s) => s.vaultRoot);
   const init = useAppStore((s) => s.init);
+  const selectSpace = useAppStore((s) => s.selectSpace);
   const loadSettings = useSettingsStore((s) => s.load);
   useAppearance();
 
@@ -119,15 +120,18 @@ function MainWorkspaceApp() {
       void applyWindowShape().then(() => setBooting(false));
     }, 5000);
     void (async () => {
-      const autoEnterRoot = await init();
+      const autoEnter = await init();
       app.reportLoad("加载应用设置");
       await loadSettings();
       // 面板运行时初始化（协作连接改由 panelStore.syncCollabHost 按视图归属驱动）
       app.reportLoad("初始化窗口与面板");
       await usePanelStore.getState().initMain();
-      if (autoEnterRoot) {
+      if (autoEnter?.kind === "local") {
         // 进仓门控在 selectVault 内：全部加载完成（含插件）后才进入仓库
-        await useAppStore.getState().selectVault(autoEnterRoot);
+        await useAppStore.getState().selectVault(autoEnter.root);
+      } else if (autoEnter?.kind === "space") {
+        // 最近条目是协作空间：会话无效时 selectSpace 返回 need-login，静默停留未激活态
+        await selectSpace(autoEnter.entry);
       } else {
         // 无最近仓库（进工作区空态）：selectVault 不会执行，这里补一次插件加载——
         // 否则 app 级插件（如主题）不生效。
@@ -151,7 +155,7 @@ function MainWorkspaceApp() {
       app.endLoad();
       setBooting(false);
     });
-  }, [init, loadSettings]);
+  }, [init, selectSpace, loadSettings]);
 
   return (
     <Suspense fallback={<LoadingScreen />}>

@@ -1036,7 +1036,7 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
         />
         <button
           onClick={() => fileInputRef.current?.click()}
-          className="px-2 rounded text-sm nodrag hover:opacity-80"
+          className="px-2 rounded text-sm nodrag hover:opacity-80 disabled:opacity-40 disabled:cursor-not-allowed"
           style={{
             color: "var(--text-secondary)",
             background: "var(--bg-tertiary)",

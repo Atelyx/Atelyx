@@ -11,14 +11,18 @@ import {
   convertWhiteboardToAtlx,
   remapSideloads,
 } from "@/services/vault";
-import { activateContentVault } from "@/services/content/factory";
+import { activateContentVault, createSpaceBackendRegistration, identityKeyOf } from "@/services/content/factory";
+import { createSpaceContentBackend } from "@/services/content/spaceContent";
+import type { VaultIdentity } from "@/services/content/contract";
 import {
   readGlobalConfig,
   updateGlobalConfig,
   bumpRecentVault,
+  bumpRecentSpace,
   removeRecentVault as dropVaultFromRecents,
 } from "@/services/global";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { useSpaceAuthStore } from "@/stores/spaceAuthStore";
 import { useVaultStore } from "@/stores/vaultStore";
 import { useUiStateStore } from "@/stores/uiStateStore";
 import { useCollabStore } from "@/stores/collabStore";
@@ -41,7 +45,7 @@ import { checkAndAutoUpdate as checkAndAutoUpdateSvc, checkForUpdate as checkFor
 import { emitPluginEvent } from "@/services/cordis/events";
 import { usePluginStore } from "@/stores/pluginStore";
 import { useNotificationStore } from "@/stores/notificationStore";
-import type { CanvasFileRow, RecentVault } from "@/types";
+import type { CanvasFileRow, RecentSpace, RecentVault } from "@/types";
 
 /** 手动检查更新状态（设置页「关于」tab 用）。 */
 type UpdateStatus =
@@ -67,6 +71,15 @@ function notifyGlobalConfigCorrupt(backup: string | null): void {
   });
 }
 
+/** selectSpace 结果：ok = 已进入；need-login = 该服务器无有效会话（停留未激活，调用方引导登录）；
+ *  error = 服务端不可达/非成员（已通知）或切换重入被拒。 */
+export type SpaceEnterResult = "ok" | "need-login" | "error";
+
+/** init 自动进入目标：本地仓库按 root 进入，协作空间按条目进入（boot 据此分派 selectVault/selectSpace）。 */
+export type AutoEnterTarget =
+  | { kind: "local"; root: string }
+  | { kind: "space"; entry: RecentSpace };
+
 /** 重命名/移动后的历史侧文件迁移失败不阻塞主流程，但会让版本记录孤儿化——错误须用户可见，不能静默吞掉。 */
 function notifySidecarFailure(what: string, error: unknown): void {
   console.error(`${what}失败`, error);
@@ -82,8 +95,11 @@ function notifySidecarFailure(what: string, error: unknown): void {
 interface AppState {
   /** 插件应用页面 id（非空 = 插件全页接管，渲染注册的插件页面替代工作区；app 页面/模式）。 */
   pluginPage: string | null;
-  /** 当前仓库根路径（workspace 期间有效） */
+  /** 当前仓库根路径（workspace 期间有效；协作空间仓库无本地 root，恒为 null） */
   vaultRoot: string | null;
+  /** 当前激活仓库身份（与 vaultRoot 并列：local 时 root 一致；space 时 root 为 null）。
+   *  撕裂窗口经 open-file-changed 广播镜像此身份自建内容后端。 */
+  vaultIdentity: VaultIdentity | null;
   /** 当前仓库名（显示用） */
   vaultName: string;
   /** 全屏加载进行中（boot 异步 + selectVault 全程；App 据此渲染加载屏，插件逐项上报据此门控）。 */
@@ -101,6 +117,8 @@ interface AppState {
   endLoad: () => void;
   /** 最近打开的仓库列表（按最近打开倒序） */
   recentVaults: RecentVault[];
+  /** 最近打开的协作空间仓库列表（按最近打开倒序；global.json `spaces` 字段镜像） */
+  recentSpaces: RecentSpace[];
   currentCanvasId: string | null;
   /** 当前画布磁盘路径（相对仓库根；打开/保存/重命名/删除按此路径）。 */
   currentCanvasFile: string | null;
@@ -124,8 +142,8 @@ interface AppState {
   /** 新版本下载安装中（available 后点「下载并安装」）。 */
   installing: boolean;
 
-  /** 应用挂载时调用一次：读取最近仓库列表。返回本次应自动进入的仓库 root（null = 无仓库，停留空态）。 */
-  init: () => Promise<string | null>;
+  /** 应用挂载时调用一次：读取最近仓库列表。返回本次应自动进入的目标（null = 无仓库，停留空态）。 */
+  init: () => Promise<AutoEnterTarget | null>;
   /** 设自动检查更新（应用级，写 global.json；不随仓库同步）。 */
   setAutoUpdate: (enabled: boolean) => Promise<void>;
   /** 手动检查新版本（设置页「关于」）；结果写入 updateStatus/updateLatestVersion/updateError。 */
@@ -134,6 +152,12 @@ interface AppState {
   installUpdate: () => Promise<void>;
   /** 打开仓库：openVault + 登记最近 + 进画布工作区（占位态）。成功返回 true。 */
   selectVault: (root: string) => Promise<boolean>;
+  /**
+   * 进入协作空间仓库（无本地 root，不调 openVault）：flush 旧仓库 → 校验会话 → 拉树预检 →
+   * 激活空间内容后端 → 清旧仓库状态 → 加载（文件树；画布列表空间不支持跳过）。
+   * need-login = 无有效会话（未激活，UI 引导登录）；error = 服务端不可达/非成员（已通知，停留未激活）。
+   */
+  selectSpace: (entry: { serverUrl: string; spaceId: string; name: string }) => Promise<SpaceEnterResult>;
   /** 从最近列表移除某仓库（不删文件；移除当前激活仓库不影响激活态）。 */
   removeRecentVault: (root: string) => Promise<void>;
   /** 打开插件应用页面（全页接管；仅工作区视图生效）。 */
@@ -255,11 +279,13 @@ function canvasesInDir(dir: string, excludeFile?: string): CanvasFileRow[] {
 export const useAppStore = create<AppState>((set, get) => ({
   pluginPage: null,
   vaultRoot: null,
+  vaultIdentity: null,
   vaultName: "",
   entryLoading: false,
   switchingVaultRoot: null,
   loadSteps: [],
   recentVaults: [],
+  recentSpaces: [],
   currentCanvasId: null,
   currentCanvasFile: null,
   currentNoteFile: null,
@@ -282,14 +308,16 @@ export const useAppStore = create<AppState>((set, get) => ({
   reportLoad: (label) => set((s) => ({ loadSteps: [...s.loadSteps, label] })),
   endLoad: () => set({ entryLoading: false }),
 
-  init: async (): Promise<string | null> => {
+  init: async (): Promise<AutoEnterTarget | null> => {
     get().reportLoad("读取全局配置");
     let recents: RecentVault[] = [];
-    let autoEnterRoot: string | null = null;
+    let spaces: RecentSpace[] = [];
+    let autoEnter: AutoEnterTarget | null = null;
     let autoUpdate = false;
     try {
       const { config: cfg, corruptBackup } = await readGlobalConfig();
       recents = cfg.recentVaults;
+      spaces = cfg.spaces ?? [];
       autoUpdate = cfg.autoUpdate ?? false;
       notifyGlobalConfigCorrupt(corruptBackup);
     } catch (e) {
@@ -300,20 +328,41 @@ export const useAppStore = create<AppState>((set, get) => ({
         message: `全局配置读取失败，本次以空配置启动：${e instanceof Error ? e.message : String(e)}`,
       });
     }
-    if (recents.length > 0) {
+    // 空间自动进入前先恢复登录态（restore 幂等；本地-only 用户服务器清单为空，零网络开销）。
+    // 恢复失败（网络等）视同无会话：自动进入静默跳过，不报错刷屏
+    if (spaces.length > 0) {
+      get().reportLoad("恢复协作空间登录");
+      try {
+        await useSpaceAuthStore.getState().restore();
+      } catch (e) {
+        console.error("恢复协作空间会话失败", e);
+      }
+    }
+    // 本地最近仓库与最近空间按打开时间取最近；最近是空间且会话无效时静默跳过自动进入
+    //（停留未激活态，文件面板空态引导重新进入），不弹错误通知
+    const lastVault = recents[0];
+    const lastSpace = spaces[0];
+    const vaultAt = lastVault?.lastOpenedAt ?? -1;
+    const spaceAt = lastSpace?.openedAt ?? -1;
+    if (lastSpace && (spaceAt > vaultAt || !lastVault)) {
+      if (useSpaceAuthStore.getState().getServer(lastSpace.serverUrl)) {
+        autoEnter = { kind: "space", entry: lastSpace };
+      }
+    } else if (lastVault) {
       // recentVaults[0] = 最近打开（selectVault 时置顶）= 上次所在仓库，启动时直接进入；
       // 仓库路径失效时 selectVault 失败停留未激活态（文件面板树区空态引导）
-      autoEnterRoot = recents[0].root;
+      autoEnter = { kind: "local", root: lastVault.root };
     }
     set({
       recentVaults: recents,
+      recentSpaces: spaces,
       autoUpdate: autoUpdate,
     });
     // 应用级 UI 使用状态（布局/展开/上次文件）启动加载一次，之后跨仓库共享。
     // 等待完成：进仓门控「全部加载完再进入」涵盖布局状态，恢复上次打开文件依赖 loaded。
     get().reportLoad("加载布局与使用状态");
     await useUiStateStore.getState().load();
-    return autoEnterRoot;
+    return autoEnter;
   },
 
   setAutoUpdate: async (enabled) => {
@@ -350,7 +399,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ installing: true, updateError: "" });
     try {
       // 更新安装后 relaunch 重启：先落盘全部 pending 改动，防 debounce 保存随 webview 销毁丢失
-      // （协作连接无需在此 dispose：安装成功后进程退出，relay 按 TCP 断开即移除 peer）
+      // （协作连接无需在此 dispose：安装成功后进程退出，服务端按 TCP 断开即移除 peer）
       await useAppStore.getState().flushAllPending();
       await installUpdateSvc();
     } catch (e) {
@@ -381,7 +430,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       const info = await openVault(root);
       // 激活内容面仓库身份（root 绝对路径）：此后内容 I/O 按激活仓库取后端
       activateContentVault({ kind: "local", root: info.root });
-      // 配置损坏已由 open_vault 备份（它紧接着就会用新 vaultId 覆盖原路径，之后再读只会读到合法文件）
+      // 配置损坏已由 open_vault 备份（它紧接着就会重写原路径的配置文件，之后再读只会读到合法内容）
       if (info.configCorruptBackup) {
         useNotificationStore.getState().notify({
           level: "error",
@@ -395,6 +444,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       // 2) 清空 noteList 先于 React 提交卸载（见下方注释），cleanup 的 stillExists 守卫必跳过。
       set({
         vaultRoot: info.root,
+        vaultIdentity: { kind: "local", root: info.root },
         vaultName: info.name,
         recentVaults: recents,
         canvases: [],
@@ -436,7 +486,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       get().reportLoad("加载 AI 会话");
       try {
         // 领域仓库上下文（AI 会话读盘等）经注册表分发；aichat 钩子 force：真实仓库切换，
-        // 强制重读盘（防 sessionVaultRoot 巧合等于目标时被幂等守卫跳过，面板停留在旧仓库会话）
+        // 强制重读盘（防会话身份键巧合等于目标时被幂等守卫跳过，面板停留在旧仓库会话）
         await notifyVaultEntered({ vaultRoot: info.root });
       } catch (e) {
         console.error("加载领域仓库上下文失败", e);
@@ -459,6 +509,114 @@ export const useAppStore = create<AppState>((set, get) => ({
         message: `打开仓库失败：${e instanceof Error ? e.message : String(e)}`,
       });
       return false;
+    } finally {
+      if (seq === vaultSwitchSeq) {
+        get().endLoad();
+        set({ switchingVaultRoot: null });
+      }
+    }
+  },
+
+  /**
+   * 进入协作空间仓库。时序与 selectVault 对齐：
+   * flush 旧仓库（await，落盘在途先清零）→ 会话校验（网络 await，期间新输入进各领域挂起缓冲）
+   * → 拉树预检（网络 await，失败停留原状态）→ 激活空间后端 → **同步**（下一个 await 之前）
+   * set 切换态 + 清空文件树/当前文件 + notifyVaultLeaving 清 per-file 运行时——
+   * 与 selectVault 同一防跨仓库守卫。空间路径不调 openVault（Rust 本地 root 不变），
+   * 即便有漏网写入也落在旧仓库，不会污染空间。
+   */
+  selectSpace: async (entry) => {
+    // 重入守卫（同 selectVault）：切换进行中直接拒绝；守卫值无本地 root，
+    // 仓库树按 root 禁点匹配不到该行也无碍（守卫职责是防并发重入，不是 UI 定位）
+    if (get().switchingVaultRoot) return "error";
+    const seq = ++vaultSwitchSeq;
+    set({ switchingVaultRoot: `space:${entry.serverUrl}#${entry.spaceId}` });
+    get().beginLoad();
+    get().reportLoad("打开协作空间");
+    try {
+      // 切换前先落盘旧仓库全部领域编辑并等待写盘完成（同 selectVault：flush 失败快速传播，中止切换）
+      await flushAllDomains({ vaultRoot: get().vaultRoot });
+      // 会话校验：restore 幂等（已恢复过直接返回），无有效令牌即 need-login（不进入激活态，UI 引导登录）
+      get().reportLoad("校验空间会话");
+      try {
+        await useSpaceAuthStore.getState().restore();
+      } catch (e) {
+        console.error("恢复协作空间会话失败", e);
+      }
+      if (!useSpaceAuthStore.getState().getServer(entry.serverUrl)) {
+        return "need-login";
+      }
+      // 拉树预检：服务端不可达/非成员在这里暴露，激活态保持原样（停留未激活或旧仓库）。
+      // 预检用临时后端实例，激活走 createSpaceBackendRegistration（按身份 key 复用共享后端）
+      get().reportLoad("连接协作空间");
+      try {
+        await createSpaceContentBackend(entry.serverUrl, entry.spaceId).listTree();
+      } catch (e) {
+        console.error("连接协作空间失败", e);
+        useNotificationStore.getState().notify({
+          level: "error",
+          message: `无法打开协作空间：${e instanceof Error ? e.message : String(e)}`,
+        });
+        return "error";
+      }
+      // 成功：激活空间内容后端，随后同步完成全部切换态——set 与清理都在下一个 await 之前
+      const registration = createSpaceBackendRegistration(entry.serverUrl, entry.spaceId);
+      registration.activate();
+      const now = Math.floor(Date.now() / 1000);
+      const spaces = bumpRecentSpace(get().recentSpaces, { ...entry, openedAt: now }, now);
+      set({
+        vaultIdentity: registration.identity,
+        vaultRoot: null,
+        vaultName: entry.name,
+        recentSpaces: spaces,
+        canvases: [],
+        currentCanvasId: null,
+        currentCanvasFile: null,
+        currentNoteFile: null,
+        currentNoteTitle: "",
+        currentTableFile: null,
+        currentTableTitle: "",
+      });
+      // 立即清空旧仓库文件树 + 撤销栈/笔记运行时态（同步执行，同 selectVault 防跨仓库守卫）
+      useVaultStore.setState({ tree: [], noteList: [], tableList: [] });
+      notifyVaultLeaving();
+      // recentSpaces 落盘 global.json（失败不阻塞切换，同 recentVaults）
+      try {
+        notifyGlobalConfigCorrupt(await updateGlobalConfig({ spaces }));
+      } catch (e) {
+        console.error("登记最近空间失败", e);
+      }
+      // 仓库级配置按身份分流（metadata 层）：local = config.json；space = spaceConfigs + team meta
+      get().reportLoad("加载仓库配置");
+      try {
+        await useSettingsStore.getState().loadVaultConfig();
+      } catch (e) {
+        console.error("加载仓库配置失败", e);
+      }
+      // 文件树与画布列表随切换等待完成（空间后端支持全量方法，与本地同链路）：
+      // 门控「全部加载完再进入」，加载屏覆盖到数据就绪。加载失败不连带跳过其余步骤
+      get().reportLoad("加载文件树与画布列表");
+      try {
+        await refreshCanvasAndTree();
+      } catch (e) {
+        console.error("加载文件树/画布列表失败", e);
+      }
+      // 领域仓库上下文（AI 会话读盘等）：空间无本地 root，传 null（会话域按未激活处理）
+      get().reportLoad("加载 AI 会话");
+      try {
+        await notifyVaultEntered({ vaultRoot: null });
+      } catch (e) {
+        console.error("加载领域仓库上下文失败", e);
+      }
+      // 插件平台：全量重载（同 selectVault；加载完成后再广播 vault:switch）
+      get().reportLoad("加载插件");
+      try {
+        await usePluginStore.getState().load();
+      } catch (e) {
+        console.error("加载插件失败", e);
+      }
+      emitPluginEvent("vault:switch", { root: null });
+      return "ok";
     } finally {
       if (seq === vaultSwitchSeq) {
         get().endLoad();
@@ -490,7 +648,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     await useSettingsStore.getState().flush();
     // 协作连接收尾不在此处（本函数启动自动更新检查时也会调用）：dispose 会断开会话内协作连接
     // 且清空 runtimeCfg，之后 applyConfig 全部失效、状态永久未连接。dispose 只由关窗守卫
-    // （真退出）显式调用发 bye；更新 relaunch 场景进程退出即断，relay 按 TCP 断开立即移除 peer
+    // （真退出）显式调用发 bye；更新 relaunch 场景进程退出即断，服务端按 TCP 断开立即移除 peer
   },
 
   installCloseGuard: () => {
@@ -498,7 +656,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     closeGuardInstalled = true;
     void onCloseRequestedSvc(async () => {
       await useAppStore.getState().flushAllPending();
-      // 关窗 = 真退出：发 bye 离开协作房间并停止重连，防 relay 侧 30s 心跳残留幽灵在线
+      // 关窗 = 真退出：发 bye 离开协作房间并停止重连，防服务端 30s 心跳残留幽灵在线
       useCollabStore.getState().dispose();
     });
   },
@@ -546,12 +704,14 @@ export const useAppStore = create<AppState>((set, get) => ({
   closeSettings: () => set({ settingsModal: null }),
 
   loadList: async () => {
-    const vaultRoot = get().vaultRoot;
+    // 竞态守卫按仓库身份比较（非 vaultRoot）：空间仓库无本地 root（恒 null），
+    // root 比较防不住「列表在途时切到另一个空间」的旧数据覆盖
+    const identity = identityKeyOf(get().vaultIdentity);
     try {
       const canvases = await listCanvasesVault();
-      // 切仓库竞态守卫：等待期间用户可能已切到新仓库（后台填充链与面板快速切换并发），
+      // 等待期间用户可能已切到新仓库（后台填充链与面板快速切换并发），
       // 旧仓库的扫描结果不得覆盖新仓库的列表
-      if (get().vaultRoot !== vaultRoot) return;
+      if (identityKeyOf(get().vaultIdentity) !== identity) return;
       set({ canvases });
     } catch (e) {
       console.error("加载画布列表失败", e);

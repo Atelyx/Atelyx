@@ -1,6 +1,16 @@
 import { create } from "zustand";
 import { getApiKey, setApiKey, deleteApiKey } from "@/services/keychain";
-import { readAgents, readFolderColors, readNote, readPromptNotes, readVaultConfig, patchVaultConfig, writeAgents, writeFolderColors, writePromptNotes } from "@/services/vault";
+import {
+  readAgents,
+  readFolderColors,
+  readVaultConfig,
+  patchVaultConfig,
+  writeAgents,
+  writeFolderColors,
+  writePromptNotes,
+  readPromptNotes,
+} from "@/services/metadata";
+import { readNote } from "@/services/vault";
 import { fetchProviderModels } from "@/services/ai/client";
 import { buildAgentTools } from "@/services/ai/tools";
 import { getHostname, readGlobalConfig, updateGlobalConfig } from "@/services/global";
@@ -31,10 +41,15 @@ import { createPersistController } from "@/utils/persist";
 /**
  * 设置 store（供应商/搜索源等仓库化，界面外观应用级）。
  *
- * 仓库级配置（`.atelyx/config.json`）：AI 供应商 + 默认模型 + 搜索源 +
- * 文件面板排序/排除文件夹/附件文件夹等按仓库独立；API key 默认走 keychain 条目
- * keychain 条目按仓库身份（root 绝对路径）哈希隔离；开启 `syncKeys`
- * （「API key 随仓库保存」，多设备同步）后 key 明文随 config.json 落盘。
+ * 仓库级配置按激活仓库身份双源分发（读写都经 services/metadata）：
+ * - 个人仓库：`.atelyx/config.json`（AI 供应商 + 默认模型 + 搜索源 + 排序/排除夹/附件夹）+
+ *   独立文件（prompt-notes/agents/folder-colors）；API key 默认走 keychain，
+ *   条目按仓库身份（root 绝对路径）哈希隔离；开启 `syncKeys`（「API key 随仓库保存」，多设备同步）
+ *   后 key 明文随 config.json 落盘。
+ * - 协作空间：供应商/搜索源/默认模型等配置本体存本机 global.json `spaceConfigs`
+ *   （键 = `serverUrl#spaceId`，Rust 按键字段级合并补丁）；排序/排除夹/文件夹颜色/提示词/Agent
+ *   为服务端空间 meta（提示词与 Agent 只读团队层，写被拒并通知）；keychain 条目身份
+ *   `space:<serverUrl>#<spaceId>`；空间内不启用残留明文 key 清理（配置不经多设备同步）。
  * 应用级配置（`app_data_dir/global.json`，随 `updateGlobalConfig` 落盘）：主题 +
  * 强调色 + 字号/字体 + 自动恢复上次打开文件，跨仓库共享。
  *
@@ -67,10 +82,8 @@ interface SettingsState {
   autoRestoreFiles: boolean;
   /** 进入仓库时自动切到「主页」布局（应用级，存 global.json；缺省 false = 保持恢复上次界面）。 */
   defaultHomeLayout: boolean;
-  /** 协作中转（collab-relay）开关（应用级，存 global.json；缺省 false = 关闭）。 */
+  /** 协作空间连接开关（应用级，存 global.json；缺省 false = 关闭，作用于协作空间频道）。 */
   collabEnabled: boolean;
-  /** 协作中转地址（应用级，如 ws://192.168.1.10:17701/ws）。 */
-  collabRelayUrl: string;
   /** 协作显示昵称（空 = 设备名兜底）。 */
   collabNickname: string;
   /** 协作身份色（hex；空 = 随机分配）。 */
@@ -156,11 +169,9 @@ interface SettingsState {
   setAutoRestoreFiles: (enabled: boolean) => Promise<void>;
   /** 设置进入仓库时是否自动切到「主页」布局（应用级；缺省 false = 保持恢复上次界面，写 global.json）。 */
   setDefaultHomeLayout: (enabled: boolean) => Promise<void>;
-  /** 更新协作配置（应用级）：内存 + global.json 落盘 + 重建 relay 连接。 */
+  /** 更新协作配置（应用级）：内存 + global.json 落盘 + 重建协作连接。 */
   setCollabConfig: (
-    patch: Partial<
-      Pick<SettingsState, "collabEnabled" | "collabRelayUrl" | "collabNickname" | "collabColor">
-    >,
+    patch: Partial<Pick<SettingsState, "collabEnabled" | "collabNickname" | "collabColor">>,
   ) => Promise<void>;
   /** 注册/注销系统提示词笔记（数组含该路径则移除，否则添加；写 .atelyx/prompt-notes.json）。 */
   togglePromptNote: (file: string) => Promise<void>;
@@ -217,9 +228,22 @@ function toGlobalSearchConfig(
   return rest;
 }
 
-/** 当前仓库身份 = root 绝对路径（keychain 条目按它哈希隔离用；设置入口只在工作区，必有当前仓库）。 */
+/** 当前仓库身份的 keychain 条目前缀：local = root 绝对路径；space = `space:<serverUrl>#<spaceId>`
+ * （Rust 侧对整串取哈希隔离，空间与本地仓库、不同空间互不共条目；设置入口只在工作区，必有身份）。 */
 function currentVaultRoot(): string {
-  return useAppStore.getState().vaultRoot ?? "";
+  const app = useAppStore.getState();
+  const id = app.vaultIdentity;
+  if (id?.kind === "space") return `space:${id.serverUrl}#${id.spaceId}`;
+  return app.vaultRoot ?? "";
+}
+
+/** 写盘守卫键：local = root 绝对路径；space = `space:<serverUrl>#<spaceId>`。
+ * 未激活身份（启动早期/测试）按 vaultRoot 兜底，保持 root 守卫语义。 */
+function activeGuardKey(): string | null {
+  const app = useAppStore.getState();
+  const id = app.vaultIdentity;
+  if (id?.kind === "space") return `space:${id.serverUrl}#${id.spaceId}`;
+  return app.vaultRoot;
 }
 
 /**
@@ -268,9 +292,9 @@ type VaultConfigPatch = {
   [K in keyof VaultConfig]?: NonNullable<VaultConfig[K]> | null;
 };
 
-/** 已加载配置的仓库 id（null = 未加载/加载失败）。脏门控与写盘归属守卫共用：
+/** 已加载配置的仓库守卫键（activeGuardKey()；null = 未加载/加载失败）。脏门控与写盘归属守卫共用：
  * 加载失败时为空，写盘一律跳过——此时内存是默认值，落盘会把磁盘上真实配置抹掉。 */
-let loadedForVaultRoot: string | null = null;
+let loadedForVault: string | null = null;
 
 /** 上一次成功持久化的配置摘要（providers 含 key）。空 = 无基线（下次必写）。
  * 判「有脏」不能只看 config.json：非同步模式下 key 不落文件，纯改 key 时磁盘内容不变，
@@ -297,7 +321,7 @@ function configDigest(cfg: AiConfig): string {
 
 /** 丢弃写盘基线：切仓库后下次进入必写。 */
 function resetPersistBaseline(): void {
-  loadedForVaultRoot = null;
+  loadedForVault = null;
   persistedDigest = "";
   persistedKeys = new Map();
   strayTavilyKeyOnDisk = false;
@@ -330,15 +354,18 @@ async function writeVaultPatch(patch: Record<string, unknown>): Promise<void> {
   }
 }
 
-/** 全量持久化：把当前供应商配置补丁进 `.atelyx/config.json` + 按 syncKeys 决定 key 落盘
- * （开 = key 随 config.json 落盘多设备同步；关 = key 写 keychain 按仓库隔离）。
+/** 全量持久化：把当前供应商配置补丁进仓库级配置 + 按 syncKeys 决定 key 落盘
+ * （开 = key 随配置落盘多设备同步；关 = key 写 keychain 按仓库身份隔离）。
+ * 落盘目标按激活仓库身份分发（metadata 层：local = config.json；space = spaceConfigs + team meta）。
  * 无脏（与上次成功持久化内容一致）直接返回，不写盘也不写 keychain。 */
 async function persist(cfg: AiConfig): Promise<void> {
   // 捕获仓库快照：persist 是异步的（debounce 自动触发），期间用户可能已切换仓库，
-  // 防 A 仓库的配置覆盖 B 仓库 config.json、A 的 key 写进 B 的 keychain 条目
-  const vaultRoot = currentVaultRoot();
+  // 防 A 仓库的配置覆盖 B 仓库的配置、A 的 key 写进 B 的 keychain 条目。
+  // 守卫键与 keychain 身份都在 await 前捕获：写盘在途期间切换仓库，本次写仍落旧身份自己的存储。
+  const guardKey = activeGuardKey();
+  const vaultAtCapture = currentVaultRoot();
   // 未进仓库或仓库配置未成功加载（内存为默认值）时不写：否则会抹掉磁盘上的真实配置
-  if (!vaultRoot || loadedForVaultRoot !== vaultRoot) return;
+  if (!guardKey || loadedForVault !== guardKey) return;
   const digest = configDigest(cfg);
   if (digest === persistedDigest) return;
   const base = useSettingsStore.getState().vaultConfig ?? {};
@@ -346,15 +373,19 @@ async function persist(cfg: AiConfig): Promise<void> {
   // 只发 providers 一个字段：其余字段保留磁盘当前值（同一仓库的其他写者/撕裂窗口可能刚改过）
   const providers = cfg.providers.length ? cfg.providers : null;
   // 写盘前同步校验仓库未变；已切换则丢弃本次持久化（loadVaultConfig 已加载新仓库）
-  if (currentVaultRoot() !== vaultRoot) return;
+  if (activeGuardKey() !== guardKey) return;
   await writeVaultPatch(cleanVaultPatch({ providers }));
+  // keychain 写按捕获身份（vaultAtCapture）归属：数据属于写盘开始时的那个仓库，
+  // 写盘在途期间切换不影响归属正确性（跳过反而会丢旧仓库的 key）
+  if (!syncKeys) await persistKeys(vaultAtCapture, cfg.providers);
+  // 写盘在途期间切换仓库：内存回填与基线推进必须复检身份键——旧仓库的 providers 不得
+  // 回填进新仓库的设置态；基线推进会让新仓库的下一次写盘被脏门控误跳过
+  if (activeGuardKey() !== guardKey) return;
   // 内存基线在 await 之后按「当前状态」重取：等待 IPC 期间可能已有别的 commitVault 落进内存，
   // 用 await 之前捕获的旧 base 覆盖会把那次改动回滚掉（磁盘无碍，但设置页显示回退）
   useSettingsStore.setState((s) => ({
     vaultConfig: { ...(s.vaultConfig ?? {}), providers: providers ?? undefined },
   }));
-  // syncKeys 开启时 key 已随 config.json 落盘，无需再写 keychain
-  if (!syncKeys) await persistKeys(vaultRoot, cfg.providers);
   persistedDigest = digest;
 }
 
@@ -511,7 +542,6 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   autoRestoreFiles: true,
   defaultHomeLayout: false,
   collabEnabled: false,
-  collabRelayUrl: "",
   collabNickname: "",
   collabColor: "",
   deviceName: "",
@@ -535,7 +565,6 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     let autoRestoreFiles = true;
     let defaultHomeLayout = false;
     let collabEnabled = false;
-    let collabRelayUrl = "";
     let collabNickname = "";
     let collabColor = "";
     let deviceName = "";
@@ -553,7 +582,6 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       autoRestoreFiles = cfg.autoRestoreFiles ?? true;
       defaultHomeLayout = cfg.defaultHomeLayout ?? false;
       collabEnabled = cfg.collabEnabled ?? false;
-      collabRelayUrl = cfg.collabRelayUrl ?? "";
       collabNickname = cfg.collabNickname ?? "";
       collabColor = cfg.collabColor ?? "";
     } catch (e) {
@@ -579,7 +607,6 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       autoRestoreFiles,
       defaultHomeLayout,
       collabEnabled,
-      collabRelayUrl,
       collabNickname,
       collabColor,
       deviceName,
@@ -594,10 +621,14 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   loadVaultConfig: async () => {
     // 基线随仓库重置：新仓库的配置与上一仓库无关，下次写盘必须发生
     resetPersistBaseline();
+    const guardKey = activeGuardKey();
+    const isSpace = useAppStore.getState().vaultIdentity?.kind === "space";
     try {
+      // metadata 层按身份分流：local = .atelyx/config.json；space = global.json spaceConfigs
+      // （配置本体，缺失 = 默认配置）+ 服务端 team meta（排序/排除夹团队共享）
       const { config: vc, corruptBackup } = await readVaultConfig();
-      const vaultRoot = currentVaultRoot();
-      // 仓库级 AI 供应商：syncKeys 开 = key 随仓库落盘直读 config（多设备共享）；关 = 从 keychain 按仓库隔离填充
+      const vaultAtCapture = currentVaultRoot();
+      // 仓库级 AI 供应商：syncKeys 开 = key 随仓库落盘直读配置（多设备共享）；关 = 从 keychain 按仓库身份隔离填充
       const providers = await Promise.all(
         (vc.providers ?? []).map(async (p): Promise<ProviderConfig> => {
           let apiKey = "";
@@ -605,7 +636,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
             apiKey = p.apiKey ?? "";
           } else {
             try {
-              apiKey = await getApiKey(vaultRoot, p.id);
+              apiKey = await getApiKey(vaultAtCapture, p.id);
             } catch (e) {
               console.error("keychain 读取失败", p.id, e);
             }
@@ -614,7 +645,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         }),
       );
       const config: AiConfig = { providers };
-      // 搜索源：syncKeys 开 = 直读 config 内 tavilyApiKey；关 = 剥离明文 key 后取配置 + keychain 条目取 key
+      // 搜索源：syncKeys 开 = 直读配置内 tavilyApiKey；关 = 剥离明文 key 后取配置 + keychain 条目取 key
       const searchConfig: GlobalSearchConfig = toGlobalSearchConfig(vc.search, !!vc.syncKeys) ?? {
         provider: "tavily",
         searxngUrl: "",
@@ -624,32 +655,35 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         tavilyKey = searchConfig.tavilyApiKey ?? "";
       } else {
         try {
-          tavilyKey = await getApiKey(vaultRoot, "search-tavily");
+          tavilyKey = await getApiKey(vaultAtCapture, "search-tavily");
         } catch (e) {
           console.error("keychain 读取失败 search-tavily", e);
         }
         // 配置里残留明文 key（曾在开启状态下落盘、之后 syncKeys 关闭或手工改回）：采纳为本机 keychain
         // 条目——与「关闭 = 剥离配置文件并回写 keychain」同语义，避免用户已配置的 key 被静默丢弃。
         // 文件里那份残留不参与取用（Rust 侧同样只在 syncKeys 开启时读文件内 key），
-        // 置位标记后由下一次任意仓库级写盘经 cleanVaultPatch 显式删键
-        const strayKey = vc.search?.tavilyApiKey?.trim();
-        strayTavilyKeyOnDisk = !!strayKey;
-        if (!tavilyKey && strayKey) {
-          tavilyKey = strayKey;
-          await setApiKey(vaultRoot, "search-tavily", strayKey).catch((e) =>
-            console.error("keychain 回写失败 search-tavily", e),
-          );
+        // 置位标记后由下一次任意仓库级写盘经 cleanVaultPatch 显式删键。
+        // 空间配置存本机 global.json（不经多设备同步），无残留明文 key 场景，整段跳过
+        if (!isSpace) {
+          const strayKey = vc.search?.tavilyApiKey?.trim();
+          strayTavilyKeyOnDisk = !!strayKey;
+          if (!tavilyKey && strayKey) {
+            tavilyKey = strayKey;
+            await setApiKey(vaultAtCapture, "search-tavily", strayKey).catch((e) =>
+              console.error("keychain 回写失败 search-tavily", e),
+            );
+          }
         }
       }
-      // 系统提示词标记独立落盘 .atelyx/prompt-notes.json（config.json 只存仓库配置）
+      // 系统提示词标记（空间内为只读团队层，读到的团队数据不落本机）
       let promptNotes: string[] = [];
       try {
         promptNotes = await readPromptNotes();
       } catch (e) {
         console.error("读取系统提示词标记失败", e);
       }
-      // Agent 配置独立落盘 .atelyx/agents.json（config.json 只存仓库配置）；
-      // 预置 Agent（builtin 不可删）缺失即补入并落盘（首次种子/手删补齐），保证默认必现
+      // Agent 配置（空间内为只读团队层）；预置 Agent（builtin 不可删）缺失即补入内存保证默认必现。
+      // 空间内不落盘：写会被 metadata 层拒绝并弹「团队统一维护」通知，种子补齐不是用户操作，不该弹
       let agents: AgentConfig[] = [];
       try {
         agents = await readAgents();
@@ -661,10 +695,12 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       );
       if (missingBuiltins.length) {
         agents = [...missingBuiltins, ...agents];
-        // 首次种子/补齐预置：await 落盘（防迟到的写盘用旧列表覆盖用户刚做的增改）
-        await writeAgents(agents).catch((e) => console.error("写入预置 Agent 失败", e));
+        if (!isSpace) {
+          // 首次种子/补齐预置：await 落盘（防迟到的写盘用旧列表覆盖用户刚做的增改）
+          await writeAgents(agents).catch((e) => console.error("写入预置 Agent 失败", e));
+        }
       }
-      // 文件夹图标颜色独立落盘 .atelyx/folder-colors.json（config.json 只存仓库配置）
+      // 文件夹图标颜色（空间内为 team meta `folder-colors`）
       let folderColors: Record<string, string> = {};
       try {
         folderColors = await readFolderColors();
@@ -689,12 +725,12 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         });
       }
       // 只有走到这里才算「加载成功」：写盘守卫据此判定，加载失败时内存是默认值，落盘会抹掉磁盘配置
-      loadedForVaultRoot = vaultRoot;
+      loadedForVault = guardKey;
       persistedDigest = configDigest(config);
       // 只有走 keychain 的仓库才建基线：syncKeys 开启时内存 key 来自配置文件，
       // 把它写进「keychain 已写入」基线会让「关闭开关」时的回写被误跳过（本机 keychain 残留旧值）。
       persistedKeys = new Map(
-        vc.syncKeys ? [] : providers.map((p) => [`${vaultRoot}:${p.id}`, p.apiKey]),
+        vc.syncKeys ? [] : providers.map((p) => [`${vaultAtCapture}:${p.id}`, p.apiKey]),
       );
     } catch (e) {
       console.error("读取仓库级配置失败", e);
@@ -894,18 +930,18 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   setCollabConfig: async (patch) => {
     set(patch);
     try {
+      // 空值显式发 null：补丁通道里 null = 删键；发 undefined 会在序列化时缺席，
+      // 被服务端「缺键 = 保留旧值」语义吞掉，关掉的协作配置重启后回弹
       notifyGlobalConfigCorrupt(
         await updateGlobalConfig({
-          collabEnabled: get().collabEnabled || undefined,
-          collabRelayUrl: get().collabRelayUrl || undefined,
-          collabNickname: get().collabNickname || undefined,
-          collabColor: get().collabColor || undefined,
+          collabEnabled: get().collabEnabled || null,
+          collabNickname: get().collabNickname || null,
+          collabColor: get().collabColor || null,
         }),
       );
-      // 配置变更即时生效：重建 relay 连接（开关/地址/身份变化）
+      // 配置变更即时生效：重建协作连接（开关/身份变化）
       useCollabStore.getState().applyConfig({
         enabled: get().collabEnabled,
-        url: get().collabRelayUrl,
         nickname: get().collabNickname,
         color: get().collabColor,
       });
@@ -918,47 +954,51 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     await commitVault({ attachmentFolder: folder || null });
   },
 
-  /** 注册/注销系统提示词笔记：数组含该路径则移除，否则添加（空数组也落盘保持文件干净，独立于 config.json）。 */
+  /** 注册/注销系统提示词笔记：数组含该路径则移除，否则添加（空数组也落盘保持文件干净，独立于 config.json）。
+   *  写成功才更新内存：空间内写被 metadata 层拒绝（只读团队层）、本地写盘失败时，内存不产生虚假可编辑态。 */
   togglePromptNote: async (file) => {
     const marked = get().promptNotes.includes(file);
     const next = marked
       ? get().promptNotes.filter((f) => f !== file)
       : [...get().promptNotes, file];
-    set({ promptNotes: next });
     try {
       await writePromptNotes(next);
     } catch (e) {
       console.error("保存系统提示词标记失败", e);
+      return;
     }
+    set({ promptNotes: next });
   },
 
-  /** 笔记重命名/移动后同步标记路径（旧路径未标记时 no-op）。 */
+  /** 笔记重命名/移动后同步标记路径（旧路径未标记时 no-op；写成功才更新内存，同 togglePromptNote）。 */
   remapPromptNote: async (oldFile, newFile) => {
     const marked = get().promptNotes;
     if (!marked.includes(oldFile)) return;
     const next = marked.map((f) => (f === oldFile ? newFile : f));
-    set({ promptNotes: next });
     try {
       await writePromptNotes(next);
     } catch (e) {
       console.error("保存系统提示词标记失败", e);
+      return;
     }
+    set({ promptNotes: next });
   },
 
-  /** 文件夹重命名后同步标记路径（`oldDir/` 前缀命中才更新）。 */
+  /** 文件夹重命名后同步标记路径（`oldDir/` 前缀命中才更新；写成功才更新内存，同 togglePromptNote）。 */
   remapPromptNotesByDir: async (oldDir, newDir) => {
     const marked = get().promptNotes;
     const next = marked.map((f) => remapDirPrefix(f, oldDir, newDir));
     if (next.every((f, i) => f === marked[i])) return;
-    set({ promptNotes: next });
     try {
       await writePromptNotes(next);
     } catch (e) {
       console.error("保存系统提示词标记失败", e);
+      return;
     }
+    set({ promptNotes: next });
   },
 
-  /** Agent 配置落盘统一入口（各 CRUD 收敛于此；失败仅记日志不打断 UI）。 */
+  /** Agent 配置落盘统一入口（各 CRUD 收敛于此；写成功才更新内存——空间内写被拒/本地写失败时不产生虚假可编辑态）。 */
   addAgent: async () => {
     const id = crypto.randomUUID();
     const agent: AgentConfig = {
@@ -966,23 +1006,26 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       name: "新 Agent",
       tools: [...DEFAULT_AGENT_TOOLS],
     };
-    set({ agents: [...get().agents, agent] });
+    const next = [...get().agents, agent];
     try {
-      await writeAgents(get().agents);
+      await writeAgents(next);
     } catch (e) {
       console.error("保存 Agent 配置失败", e);
+      return id;
     }
+    set({ agents: next });
     return id;
   },
 
   updateAgent: async (id, patch) => {
     const next = get().agents.map((a) => (a.id === id ? { ...a, ...patch } : a));
-    set({ agents: next });
     try {
       await writeAgents(next);
     } catch (e) {
       console.error("保存 Agent 配置失败", e);
+      return;
     }
+    set({ agents: next });
   },
 
   removeAgent: async (id) => {
@@ -990,12 +1033,13 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     const target = get().agents.find((a) => a.id === id);
     if (target?.builtin) return;
     const next = get().agents.filter((a) => a.id !== id);
-    set({ agents: next });
     try {
       await writeAgents(next);
     } catch (e) {
       console.error("保存 Agent 配置失败", e);
+      return;
     }
+    set({ agents: next });
   },
 
   duplicateAgent: async (id) => {
@@ -1008,12 +1052,14 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       // 副本是普通用户 Agent（可删除），不继承预置标记
       builtin: undefined,
     };
-    set({ agents: [...get().agents, copy] });
+    const next = [...get().agents, copy];
     try {
-      await writeAgents(get().agents);
+      await writeAgents(next);
     } catch (e) {
       console.error("保存 Agent 配置失败", e);
+      return;
     }
+    set({ agents: next });
   },
 
   resolveAgentRequest: async (agentId) => {
@@ -1044,22 +1090,23 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     return { systemPrompt, tools, skippedWebSearch };
   },
 
-  /** 笔记重命名/移动后同步 Agent 引用的提示词笔记路径（旧路径未被引用时 no-op）。 */
+  /** 笔记重命名/移动后同步 Agent 引用的提示词笔记路径（旧路径未被引用时 no-op；写成功才更新内存）。 */
   remapAgentPromptNote: async (oldFile, newFile) => {
     const agents = get().agents;
     if (!agents.some((a) => a.systemPromptFile === oldFile)) return;
     const next = agents.map((a) =>
       a.systemPromptFile === oldFile ? { ...a, systemPromptFile: newFile } : a,
     );
-    set({ agents: next });
     try {
       await writeAgents(next);
     } catch (e) {
       console.error("保存 Agent 配置失败", e);
+      return;
     }
+    set({ agents: next });
   },
 
-  /** 文件夹重命名后同步 Agent 引用的提示词笔记路径前缀（`oldDir/` 前缀命中才更新）。 */
+  /** 文件夹重命名后同步 Agent 引用的提示词笔记路径前缀（`oldDir/` 前缀命中才更新；写成功才更新内存）。 */
   remapAgentPromptNotesByDir: async (oldDir, newDir) => {
     const agents = get().agents;
     let changed = false;
@@ -1074,29 +1121,32 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       return a;
     });
     if (!changed) return;
-    set({ agents: next });
     try {
       await writeAgents(next);
     } catch (e) {
       console.error("保存 Agent 配置失败", e);
+      return;
     }
+    set({ agents: next });
   },
 
-  /** 设文件夹图标颜色（dir = 相对仓库根路径；color = hex 色，undefined = 清除还原默认；空映射也落盘保持文件干净）。 */
+  /** 设文件夹图标颜色（dir = 相对仓库根路径，color = hex 色；undefined = 清除还原默认，写 .atelyx/folder-colors.json）。
+   *  写成功才更新内存：空间内写被服务端拒绝（无编辑权限）时不产生虚假可编辑态。 */
   setFolderColor: async (dir, color) => {
     const cur = get().folderColors;
     const next = { ...cur };
     if (color) next[dir] = color;
     else delete next[dir];
-    set({ folderColors: next });
     try {
       await writeFolderColors(next);
     } catch (e) {
       console.error("保存文件夹图标颜色失败", e);
+      return;
     }
+    set({ folderColors: next });
   },
 
-  /** 文件夹重命名/移动后同步颜色键（`oldDir/` 前缀命中才更新）。 */
+  /** 文件夹重命名/移动后同步颜色键（`oldDir/` 前缀命中才更新；写成功才更新内存，同 setFolderColor）。 */
   remapFolderColorsByDir: async (oldDir, newDir) => {
     const cur = get().folderColors;
     const keys = Object.keys(cur);
@@ -1111,12 +1161,13 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       }
     }
     if (!changed) return;
-    set({ folderColors: next });
     try {
       await writeFolderColors(next);
     } catch (e) {
       console.error("保存文件夹图标颜色失败", e);
+      return;
     }
+    set({ folderColors: next });
   },
 
   setSearchConfig: async (patch) => {

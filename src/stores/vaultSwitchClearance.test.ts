@@ -16,11 +16,14 @@ const h = vi.hoisted(() => ({
   disk: {} as Record<string, string>,
   /** 按命令名记录的调用清单（断言图片缓存清理 = 同路径二次解析必须再次发 IPC）。 */
   calls: [] as string[],
+  /** 按命令名固定的返回值（open_vault 等需要结构化结果时使用）。 */
+  results: new Map<string, unknown>(),
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: async (cmd: string, args?: Record<string, unknown>) => {
     h.calls.push(cmd);
+    if (h.results.has(cmd)) return h.results.get(cmd);
     const file = String(args?.file ?? "");
     if (cmd === "read_note") return h.disk[file] ?? "";
     if (cmd === "write_note") {
@@ -30,6 +33,14 @@ vi.mock("@tauri-apps/api/core", () => ({
     if (cmd === "read_attachment_data_url") return "data:image/png;base64,QUJD";
     return "";
   },
+}));
+
+/** 空间内容后端的传输层替身：树恒为空，成功语义（本文件只关心清理时序，不关心树内容）。 */
+vi.mock("@/services/space/client", () => ({
+  createSpaceClient: () => ({
+    auth: { listDevices: async () => [] },
+    content: { getTree: async () => [] },
+  }),
 }));
 
 type KernelLifecycle = typeof import("@/utils/kernelLifecycle");
@@ -56,6 +67,7 @@ beforeEach(async () => {
   vi.resetModules();
   h.disk = {};
   h.calls = [];
+  h.results = new Map();
   kernel = await import("@/utils/kernelLifecycle");
   // 各领域 store 在模块加载时自注册 onVaultLeaving——导入即完成注册。
   // 次序约束：noteSessionStore 须最先（其模块级 subscribe 依赖 noteStore 完成求值，
@@ -69,6 +81,39 @@ beforeEach(async () => {
   tableImageCache = await import("@/services/tableImageCache");
   viewHandoff = await import("@/services/viewHandoff");
 });
+
+/** 种子协作空间登录态（绕开 restore 的 keychain/网络路径；restored=true 时 restore 幂等跳过）。 */
+async function seedSpaceSession(): Promise<void> {
+  const auth = await import("./spaceAuthStore");
+  auth.useSpaceAuthStore.setState({
+    restored: true,
+    servers: [{ serverUrl: "http://s", userId: "u1", username: "alice", displayName: "Alice" }],
+  });
+}
+
+/** 全部 per-file 状态为空的总断言（与上方逐条用例同口径，供真实切换流程复用）。 */
+function assertAllPerFileStateCleared(): void {
+  const s = noteStore.useNoteStore.getState();
+  expect(s.noteContents).toEqual({});
+  expect(s.pendingNoteContent).toEqual({});
+  expect(s.noteConflicts).toEqual({});
+  expect(s.noteSaveStates).toEqual({});
+  expect(s.externalNoteEdits).toEqual({});
+  expect(Object.keys(noteUndoStore.useNoteUndoStore.getState().stacks)).toEqual([]);
+  expect(noteCollabStore.useNoteCollabStore.getState().bindings).toEqual({});
+  expect(noteSessionStore.openNoteSessionFiles()).toEqual([]);
+  const c = canvasStore.useCanvasStore.getState();
+  expect(c.canvasFile).toBeNull();
+  expect(c.dirty).toBe(false);
+  expect(c.baseUpdatedAt).toBe(0);
+  const t = tableStore.useTableStore.getState();
+  expect(t.tableFile).toBeNull();
+  expect(t.dirty).toBe(false);
+  expect(t.baseUpdatedAt).toBe(0);
+  expect(t.saving).toBe(false);
+  expect(t.conflictPending).toBe(false);
+  expect(viewHandoff.getCachedCanvasViewport("a.atlx")).toBeNull();
+}
 
 /** 把全部领域的 per-file 状态种子化（模拟旧仓库内编辑过的现场）。 */
 async function seedAllDomains(): Promise<void> {
@@ -96,8 +141,11 @@ async function seedAllDomains(): Promise<void> {
     saving: true,
     conflictPending: true,
   });
-  // 表格图片显示缓存（真实读取一次入缓存）
-  await tableImageCache.resolveTableImageUrl(".atelyx/attachments/t1/pic.png");
+  // 表格图片显示缓存（真实读取一次入缓存；空间后端无附件读取，种子失败可容忍——
+  // 缓存保持为空不影响「已清」断言）
+  await tableImageCache
+    .resolveTableImageUrl(".atelyx/attachments/t1/pic.png")
+    .catch(() => undefined);
   // 画布视口交接缓存
   viewHandoff.cacheCanvasViewport("a.atlx", { x: 1, y: 2, zoom: 1 });
 }
@@ -150,5 +198,98 @@ describe("切换激活仓库清理（notifyVaultLeaving 总断言）", () => {
   it("切换后画布视口交接缓存为空", () => {
     kernel.notifyVaultLeaving();
     expect(viewHandoff.getCachedCanvasViewport("a.atlx")).toBeNull();
+  });
+});
+
+/** 图片显示缓存清理断言：切换后同路径图片必须重新发 IPC（缓存已清）。
+ *  仅适用于激活后端支持附件读取的场景（local）。 */
+async function assertImageCacheCleared(): Promise<void> {
+  const callsBefore = h.calls.filter((c) => c === "read_attachment_data_url").length;
+  await tableImageCache.resolveTableImageUrl(".atelyx/attachments/t1/pic.png");
+  expect(h.calls.filter((c) => c === "read_attachment_data_url").length).toBe(callsBefore + 1);
+}
+
+/** 图片显示缓存清理断言（空间目标）：空间后端没有附件读取，再次解析触达后端即拒绝；
+ *  缓存若未清会直接命中返回、不会触达后端。 */
+async function assertImageCacheClearedForSpace(): Promise<void> {
+  await expect(
+    tableImageCache.resolveTableImageUrl(".atelyx/attachments/t1/pic.png"),
+  ).rejects.toThrow();
+}
+
+describe("三向切换清理（selectSpace/selectVault 真实流程）", () => {
+  it("local → space：切换后全部 per-file 状态为空", async () => {
+    await seedAllDomains();
+    await seedSpaceSession();
+    const app = await import("./appStore");
+    const result = await app.useAppStore.getState().selectSpace({
+      serverUrl: "http://s",
+      spaceId: "sp1",
+      name: "空间",
+    });
+    expect(result).toBe("ok");
+    assertAllPerFileStateCleared();
+    await assertImageCacheClearedForSpace();
+  });
+
+  it("space → space：切换后全部 per-file 状态为空", async () => {
+    await seedSpaceSession();
+    const app = await import("./appStore");
+    const enter = await app.useAppStore.getState().selectSpace({
+      serverUrl: "http://s",
+      spaceId: "sp1",
+      name: "空间",
+    });
+    expect(enter).toBe("ok");
+    await seedAllDomains();
+    const result = await app.useAppStore.getState().selectSpace({
+      serverUrl: "http://s",
+      spaceId: "sp2",
+      name: "空间二",
+    });
+    expect(result).toBe("ok");
+    expect(app.useAppStore.getState().vaultIdentity).toEqual({
+      kind: "space",
+      serverUrl: "http://s",
+      spaceId: "sp2",
+    });
+    assertAllPerFileStateCleared();
+    await assertImageCacheClearedForSpace();
+  });
+
+  it("space → local：切换后全部 per-file 状态为空", async () => {
+    await seedSpaceSession();
+    const app = await import("./appStore");
+    h.results.set("open_vault", { root: "E:/v1", name: "v1", configCorruptBackup: null });
+    const enter = await app.useAppStore.getState().selectSpace({
+      serverUrl: "http://s",
+      spaceId: "sp1",
+      name: "空间",
+    });
+    expect(enter).toBe("ok");
+    await seedAllDomains();
+    h.results.set("open_vault", { root: "E:/v2", name: "v2", configCorruptBackup: null });
+    const result = await app.useAppStore.getState().selectVault("E:/v2");
+    expect(result).toBe(true);
+    expect(app.useAppStore.getState().vaultIdentity).toEqual({ kind: "local", root: "E:/v2" });
+    assertAllPerFileStateCleared();
+    await assertImageCacheCleared();
+  });
+});
+
+describe("撕裂窗口身份激活（activateContentIdentity）", () => {
+  it("收到空间身份后 getActiveContentBackend 返回空间后端（listTree 走 mock client）", async () => {
+    const factory = await import("@/services/content/factory");
+    factory.activateContentIdentity({ kind: "space", serverUrl: "http://s", spaceId: "sp1" });
+    await expect(factory.getActiveContentBackend().listTree()).resolves.toEqual([]);
+  });
+
+  it("本地身份 = localBackend；null = 退出激活回落 localBackend", async () => {
+    const factory = await import("@/services/content/factory");
+    const { localBackend } = await import("@/services/content/local");
+    factory.activateContentIdentity({ kind: "local", root: "E:/v1" });
+    expect(factory.getActiveContentBackend()).toBe(localBackend);
+    factory.activateContentIdentity(null);
+    expect(factory.getActiveContentBackend()).toBe(localBackend);
   });
 });

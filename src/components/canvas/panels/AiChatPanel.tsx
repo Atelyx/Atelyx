@@ -118,7 +118,8 @@ export function AiChatPanel() {
   const setModelOverride = useChatPanelStore((s) => s.setModelOverride);
   const setEffortOverride = useChatPanelStore((s) => s.setEffortOverride);
   const clearError = useChatPanelStore((s) => s.clearError);
-  const vaultRoot = useAppStore((s) => s.vaultRoot);
+  // 会话落盘失败状态条（退避重试期间持续可见；成功落盘自动清除）
+  const persistError = useChatPanelStore((s) => s.persistError);
 
   const active = sessions.find((s) => s.id === activeSessionId);
   const messages = active?.messages ?? EMPTY_MESSAGES;
@@ -207,12 +208,14 @@ export function AiChatPanel() {
 
   // 挂载/重挂对齐会话（不 force，load 幂等守卫兜底）：面板重挂（布局切换/关闭再打开）不得
   // 清空进行中会话——流式引擎在 store 层持续运行，重挂后原样续上；仓库真实切换时
-  // sessionVaultId 不匹配，load 自会完整重读盘（覆盖 selectVault 中途异常跳过的场景）
+  // sessionVaultKey 不匹配，load 自会完整重读盘（覆盖 selectVault/selectSpace 中途异常跳过的场景）。
+  // 门控按仓库身份（空间模式下 vaultRoot 恒 null，按 root 门控会让空间内面板不加载会话）
+  const vaultIdentity = useAppStore((s) => s.vaultIdentity);
   useEffect(() => {
-    if (!vaultRoot) return;
+    if (!vaultIdentity) return;
     closeHistory();
-    void useChatPanelStore.getState().load(useAppStore.getState().vaultRoot);
-  }, [vaultRoot, closeHistory]);
+    void useChatPanelStore.getState().load();
+  }, [vaultIdentity, closeHistory]);
 
   // 智能滚动跟随：贴底自动跟随新消息；上翻停止跟随 + 「新消息」回底按钮（与画布对话节点共用 hook）
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -313,20 +316,23 @@ export function AiChatPanel() {
             className="flex-shrink-0"
             style={{ color: "var(--text-muted)" }}
           />
-          {error ? (
+          {error || persistError ? (
             <span
               className="flex items-center gap-1 min-w-0 text-xs"
               style={{ color: "#f87171" }}
+              title={persistError && !error ? `失败于 ${new Date(persistError.at).toLocaleTimeString()}` : undefined}
             >
               <AlertCircle size={13} className="flex-shrink-0" />
-              <span className="truncate">{error}</span>
-              <button
-                onClick={clearError}
-                title="清除"
-                className="p-0.5 hover:opacity-70 flex-shrink-0"
-              >
-                <X size={12} />
-              </button>
+              <span className="truncate">{error ?? persistError?.message}</span>
+              {error && (
+                <button
+                  onClick={clearError}
+                  title="清除"
+                  className="p-0.5 hover:opacity-70 flex-shrink-0"
+                >
+                  <X size={12} />
+                </button>
+              )}
             </span>
           ) : (
             <>

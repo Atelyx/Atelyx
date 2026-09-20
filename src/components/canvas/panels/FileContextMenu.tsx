@@ -11,6 +11,8 @@ import { BookmarkMinus, BookmarkPlus, Copy, FileOutput, Pencil, Trash2 } from "l
 import { useState } from "react";
 import { Menu, MenuDivider, MenuItem } from "@/components/common/Menu";
 import { MenuSlotList } from "@/components/plugins/MenuSlot";
+import { useIsSpaceVault } from "@/hooks/useIsSpaceVault";
+import { SPACE_UNSUPPORTED_NOTICE } from "@/constants/space";
 
 interface Props {
   x: number;
@@ -32,6 +34,8 @@ interface Props {
 
 export function FileContextMenu({ x, y, onRename, onDuplicate, onDelete, onTogglePrompt, promptMarked, onConvert, onClose }: Props) {
   const [confirming, setConfirming] = useState(false);
+  // 协作空间内提示词标记只读：入口禁用防「写被拒不回滚」的虚假可编辑态
+  const isSpaceVault = useIsSpaceVault();
 
   return (
     <Menu
@@ -90,11 +94,12 @@ export function FileContextMenu({ x, y, onRename, onDuplicate, onDelete, onToggl
           {onTogglePrompt && (
             <>
               <MenuItem
+                disabled={isSpaceVault}
                 onClick={() => {
                   onTogglePrompt();
                   onClose();
                 }}
-                title={promptMarked ? "注销后不再出现在系统提示词候选中" : "注册后可作为对话/面板的系统提示词"}
+                title={isSpaceVault ? SPACE_UNSUPPORTED_NOTICE : promptMarked ? "注销后不再出现在系统提示词候选中" : "注册后可作为对话/面板的系统提示词"}
               >
                 <span className="inline-flex items-center gap-1.5">
                   {promptMarked ? <BookmarkMinus size={14} /> : <BookmarkPlus size={14} />}

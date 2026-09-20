@@ -11,6 +11,8 @@ import { ChevronDown, ChevronRight, ExternalLink, History, RefreshCw } from "luc
 import { useEffect, useMemo, useState } from "react";
 import { useAppStore } from "@/stores/appStore";
 import { useRepoHistoryStore } from "@/stores/repoHistoryStore";
+import { useIsSpaceVault } from "@/hooks/useIsSpaceVault";
+import { SPACE_UNSUPPORTED_NOTICE } from "@/constants/space";
 import { FileKindIcon, openFileByKind } from "@/components/common/FileKindIcon";
 import { HistoryModal, ACTION_LABEL } from "@/components/history/HistoryModal";
 import { noteTitleFromFile } from "@/utils/filename";
@@ -141,6 +143,8 @@ export function RepoHistoryPanel() {
   const vaultRoot = useAppStore((s) => s.vaultRoot);
   const entries = useRepoHistoryStore((s) => s.entries);
   const loading = useRepoHistoryStore((s) => s.loading);
+  // 激活仓库为协作空间：版本流读本地历史侧文件，空间无本地数据——整面板降级为空态提示
+  const isSpaceVault = useIsSpaceVault();
   const [historyTarget, setHistoryTarget] = useState<{ kind: "note" | "canvas" | "table"; file: string } | null>(null);
   const [expandedFiles, setExpandedFiles] = useState<Set<string>>(new Set());
   const [showAllFiles, setShowAllFiles] = useState(false);
@@ -196,9 +200,13 @@ export function RepoHistoryPanel() {
         )}
       </div>
 
-      {/* 按文件分组的版本流 */}
+      {/* 按文件分组的版本流（协作空间无本地历史侧文件：整面板降级为提示空态） */}
       <div className="flex-1 min-h-0 overflow-auto p-2 space-y-1">
-        {visibleGroups.length === 0 ? (
+        {isSpaceVault ? (
+          <div className="py-8 text-center text-xs" style={{ color: "var(--text-muted)" }}>
+            {SPACE_UNSUPPORTED_NOTICE}
+          </div>
+        ) : visibleGroups.length === 0 ? (
           <div className="py-8 text-center text-xs" style={{ color: "var(--text-muted)" }}>
             {loading ? "加载中…" : "暂无版本历史（编辑保存后自动记录）"}
           </div>

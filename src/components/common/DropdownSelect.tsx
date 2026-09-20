@@ -31,6 +31,8 @@ interface Props {
   prefixIcon?: ReactNode;
   /** options 为空时弹层内显示的占位提示（缺省 = 不显示提示，空列表）。 */
   emptyText?: ReactNode;
+  /** 禁用态（灰显不可点，如空间内只读层入口）。 */
+  disabled?: boolean;
   /** 触发按钮样式（尺寸/颜色/边框等），完全覆盖组件默认结构类之外的样式。 */
   className?: string;
   style?: CSSProperties;
@@ -44,6 +46,7 @@ export function DropdownSelect({
   placeholder,
   prefixIcon,
   emptyText,
+  disabled,
   className,
   style,
   title,
@@ -59,10 +62,11 @@ export function DropdownSelect({
         ref={triggerRef}
         type="button"
         onClick={toggle}
+        disabled={disabled}
         title={title}
         aria-haspopup="listbox"
         aria-expanded={!!anchor}
-        className={`flex items-center gap-1 min-w-0 cursor-pointer outline-none focus:ring-1 focus:ring-[var(--accent)] ${className ?? ""}`}
+        className={`flex items-center gap-1 min-w-0 cursor-pointer outline-none focus:ring-1 focus:ring-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-50 ${className ?? ""}`}
         style={style}
       >
         {prefixIcon}

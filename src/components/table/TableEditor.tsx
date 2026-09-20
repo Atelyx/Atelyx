@@ -29,6 +29,8 @@ import { useUiStateStore } from "@/stores/uiStateStore";
 import { usePluginStore } from "@/stores/pluginStore";
 import { TableCell, clearCell, navigateCell, navDirection } from "@/components/table/TableCell";
 import { useCollabStore } from "@/stores/collabStore";
+import { useIsSpaceVault } from "@/hooks/useIsSpaceVault";
+import { SPACE_UNSUPPORTED_NOTICE } from "@/constants/space";
 import type { CollabPeer } from "@/types";
 import {
   AddFieldMenu,
@@ -80,6 +82,8 @@ function PluginTableViewMount({ kind }: { kind: string }) {
 
 /** 表格编辑器：panelId 用于聚焦判定（撤销/重做快捷键门控，同画布快捷键惯例）。 */
 export function TableEditor({ panelId }: { panelId: string }) {
+  // 激活仓库为协作空间：历史入口禁用（能力降级门控）
+  const isSpaceVault = useIsSpaceVault();
   const fields = useTableStore((s) => s.fields);
   const rows = useTableStore((s) => s.rows);
   const selection = useTableStore((s) => s.selection);
@@ -729,13 +733,14 @@ export function TableEditor({ panelId }: { panelId: string }) {
             widthClass="w-36"
           >
             <button
-              className="w-full flex items-center gap-2 px-2 py-1.5 text-xs hover:opacity-80"
+              className="w-full flex items-center gap-2 px-2 py-1.5 text-xs hover:opacity-80 disabled:cursor-not-allowed disabled:opacity-40"
               style={{ color: "var(--text-primary)" }}
               onClick={() => {
                 moreMenu.close();
                 setHistoryOpen(true);
               }}
-              title="查看本表格的历史版本并回滚"
+              disabled={isSpaceVault}
+              title={isSpaceVault ? SPACE_UNSUPPORTED_NOTICE : "查看本表格的历史版本并回滚"}
             >
               <span className="w-3.5 flex-shrink-0" />
               历史记录

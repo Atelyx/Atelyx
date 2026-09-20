@@ -41,6 +41,8 @@ import {
 } from "@/stores/panelStore";
 import { useCanvasHotkeys } from "@/hooks/useCanvasHotkeys";
 import { useNoteUndoRouting } from "@/hooks/useNoteUndoRouting";
+import { useIsSpaceVault } from "@/hooks/useIsSpaceVault";
+import { SPACE_UNSUPPORTED_NOTICE } from "@/constants/space";
 import {
   DEFAULT_CONVERSATION_HEIGHT,
   DEFAULT_CONVERSATION_WIDTH,
@@ -122,6 +124,8 @@ export const CanvasView = memo(function CanvasView({
   const nodes = useCanvasStore((s) => s.nodes);
   const edges = useCanvasStore((s) => s.edges);
   const readOnly = useCanvasStore((s) => s.readOnly);
+  // 激活仓库为协作空间：历史入口禁用（能力降级门控）
+  const isSpaceVault = useIsSpaceVault();
   const onNodesChange = useCanvasStore((s) => s.onNodesChange);
   const onEdgesChange = useCanvasStore((s) => s.onEdgesChange);
   const onConnect = useCanvasStore((s) => s.onConnect);
@@ -488,8 +492,14 @@ export const CanvasView = memo(function CanvasView({
                 moreMenu.close();
                 setHistoryOpen(true);
               }}
-              disabled={readOnly}
-              title={readOnly ? "只读白板（外部白板格式）无历史记录" : "查看本画布的历史版本并回滚"}
+              disabled={readOnly || isSpaceVault}
+              title={
+                isSpaceVault
+                  ? SPACE_UNSUPPORTED_NOTICE
+                  : readOnly
+                    ? "只读白板（外部白板格式）无历史记录"
+                    : "查看本画布的历史版本并回滚"
+              }
             >
               <span className="w-3.5 flex-shrink-0" />
               历史记录

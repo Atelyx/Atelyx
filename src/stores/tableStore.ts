@@ -8,7 +8,7 @@
  * 数据边界：切仓库清空运行时态（见文件末尾自注册的 `onVaultLeaving`）。
  */
 import { create } from "zustand";
-import { CALC_TYPES_BY_FIELD, TABLE_SCHEMA } from "@/constants/table";
+import { CALC_TYPES_BY_FIELD, TABLE_SCHEMA, TABLE_IMAGE_MAX_BYTES } from "@/constants/table";
 import {
   cleanupTableAttachments,
   exportTableXlsx,
@@ -19,7 +19,8 @@ import {
   writeTableVault,
 } from "@/services/table";
 import { copyImageToClipboard as copyImageSvc, readClipboardText, writeClipboardText } from "@/services/clipboard";
-import { pickFile, saveFile } from "@/services/dialog";
+import { saveFile } from "@/services/dialog";
+import { bytesToBase64 } from "@/utils/base64";
 import {
   loadHistory as loadTableHistory,
   recordHistoryVersion,
@@ -114,8 +115,8 @@ interface TableStoreState {
   /** 对当前选中区域应用单元格样式（patch = 增量，undefined 键 = 清除该项；null = 清除全部格式）。
    *  布尔切换语义由调用方按汇总态决定传 true/undefined（mixed 一律传 true 拉齐）。一步撤销。 */
   applyCellStyle: (patch: Partial<CellStyle> | null) => void;
-  /** 图片单元格追加图片（系统文件选择器 → 附件路径引用）。 */
-  addImageToCell: (rowId: string, fieldId: string) => Promise<void>;
+  /** 图片单元格追加图片（本机图片文件 → 附件路径引用；File 由组件的文件选择输入提供）。 */
+  addImageToCell: (rowId: string, fieldId: string, file: File) => Promise<void>;
   /** 图片单元格移除指定下标图片。 */
   removeImageAt: (rowId: string, fieldId: string, index: number) => void;
   /** 图片单元格切换展示模式（单图轮播 ⇄ 九宫格，按单元格记忆；一次切换 = 一步撤销）。 */
@@ -180,7 +181,7 @@ interface TableStoreState {
   abortCellEdit: () => void;
   /** 协作实时广播钩子注入（collabStore init 时设置；null = 协作未启用，不广播）。 */
   setCollabBroadcast: (fn: ((file: string, patch: TablePatch) => void) | null) => void;
-  /** 应用远端协作者的增量补丁（relay 收到 table-patch 时调用）：纯内存合并（与 Rust 合并同语义），
+  /** 应用远端协作者的增量补丁（收到 table-patch 帧时调用）：纯内存合并（与 Rust 合并同语义），
    * 不置脏/不入撤销栈/不触发保存——落盘由发送方负责，本端下次保存经 diff 幂等收敛。 */
   applyRemotePatch: (file: string, patch: TablePatch) => void;
   /** 读取表格历史版本列表（缺失/损坏 → 空数组，尽力而为）。 */
@@ -928,15 +929,23 @@ export const useTableStore = create<TableStoreState>((set, get) => ({
     schedulePersist();
   },
 
-  addImageToCell: async (rowId, fieldId) => {
+  addImageToCell: async (rowId, fieldId, file) => {
     const { id, tableFile } = get();
     if (!tableFile) return;
+    // 大小预检在读取/上传前：超限文件读成 base64 传到服务端才被拒是纯浪费，且服务端 413 对用户不可读
+    if (file.size > TABLE_IMAGE_MAX_BYTES) {
+      console.error(`添加图片失败：图片超过 ${TABLE_IMAGE_MAX_BYTES} 字节上限`);
+      set({ error: `图片超过 ${Math.floor(TABLE_IMAGE_MAX_BYTES / 1024 / 1024)}MB 上限，无法导入` });
+      return;
+    }
     try {
-      const src = await pickFile([{ name: "图片", extensions: ["png", "jpg", "jpeg", "webp", "gif"] }]);
-      if (!src) return;
-      // 图片字节落 `.atelyx/attachments/<tableId>/`（隐藏目录：watcher/文件树零噪声），
+      // 图片字节由前端读为 base64 再落附件目录（协作空间里本机路径对服务端不可达），
       // 单元格只存唯一路径引用——保存补丁不含图片字节（大表保存提速）
-      const rel = await importTableImage(src, id);
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const rel = await importTableImage(
+        { fileName: file.name, base64Data: bytesToBase64(bytes) },
+        id,
+      );
       // 图片增删 = 独立操作，一次一个撤销单元（读盘成功、变更前入栈）
       undoMgr.push();
       const current = get().rows.find((r) => r.id === rowId)?.values[fieldId];

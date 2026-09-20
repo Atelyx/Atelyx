@@ -24,7 +24,9 @@ export type MenuTarget =
   | { kind: "canvas"; row: CanvasFileRow }
   | { kind: "note"; file: string; name: string }
   | { kind: "table"; file: string; name: string }
-  | { kind: "attachment"; file: string; name: string };
+  | { kind: "attachment"; file: string; name: string }
+  /** 协作空间条目（列表层空间区；role = 本账号在该空间的成员角色）。 */
+  | { kind: "space"; serverUrl: string; spaceId: string; name: string; role: string };
 
 /** inline 输入行（行内重命名 / 文件夹下新建）。 */
 export type Editing =
@@ -120,7 +122,7 @@ export function useDuplicateAction(onNotice: (message: string) => void) {
         } else if (t.kind === "table") {
           const newFile = await duplicateTable(t.file);
           onNotice(`已创建副本「${baseName(newFile)}」`);
-        } else {
+        } else if (t.kind === "attachment") {
           const newFile = await duplicateAttachment(t.file);
           onNotice(`已创建副本「${baseName(newFile)}」`);
         }

@@ -29,6 +29,7 @@ import { useCollabStore } from "@/stores/collabStore";
 import { useVaultStore } from "@/stores/vaultStore";
 import { useNotificationStore } from "@/stores/notificationStore";
 import * as kernelLifecycle from "@/utils/kernelLifecycle";
+import { activateContentIdentity, identityKeyOf } from "@/services/content/factory";
 import { collectTabs, findViewHost } from "@/utils/workspaceLayout";
 import { pluginViewLabel } from "@/services/cordis/slots";
 import {
@@ -293,6 +294,7 @@ function currentOpenFilePayload(): bus.OpenFileChangedPayload {
   const s = useAppStore.getState();
   return {
     vaultRoot: s.vaultRoot,
+    vaultIdentity: s.vaultIdentity,
     vaultName: s.vaultName,
     currentCanvasFile: s.currentCanvasFile,
     currentNoteFile: s.currentNoteFile,
@@ -425,7 +427,7 @@ export const usePanelStore = create<PanelStore>((set, get) => {
     void onDragSession(onDragSessionState).catch((e) => console.error("订阅拖拽会话广播失败", e));
   };
 
-  /** 仓库上下文应答处理器（`open-file-changed`）：镜像当前仓库/打开文件，并按需加载仓库级配置、
+  /** 仓库上下文应答处理器（`open-file-changed`）：镜像当前仓库/身份/打开文件，并按需加载仓库级配置、
    *  文件树、领域仓库上下文与插件运行时。注册归 initPanel 的一次性接线（重复注册会让每次广播
    *  按份数重复触发整条重载链）。 */
   const applyOpenFileContext = (payload: OpenFileChangedPayload): void => {
@@ -433,6 +435,7 @@ export const usePanelStore = create<PanelStore>((set, get) => {
     const app = useAppStore.getState();
     useAppStore.setState({
       vaultRoot: payload.vaultRoot,
+      vaultIdentity: payload.vaultIdentity,
       vaultName: payload.vaultName,
       currentCanvasFile: payload.currentCanvasFile,
       currentNoteFile: payload.currentNoteFile,
@@ -440,17 +443,24 @@ export const usePanelStore = create<PanelStore>((set, get) => {
       currentNoteTitle: payload.currentNoteTitle,
       currentTableTitle: payload.currentTableTitle,
     });
-    // 仓库上下文到达（切仓库或启动请求应答）：按需加载仓库级配置/文件树/领域仓库上下文
-    if (payload.vaultRoot !== app.vaultRoot) {
-      // 撕裂窗口同样必须先清上一个仓库的 per-file 状态（与主窗口 selectVault 同一清理点）：
+    // 仓库上下文到达（切仓库/切空间或启动请求应答）：按需加载。身份是激活的唯一判据
+    // （空间仓库 vaultRoot 恒为 null，不能只比 vaultRoot）
+    if (identityKeyOf(payload.vaultIdentity) !== identityKeyOf(app.vaultIdentity)) {
+      // 撕裂窗口同样必须先清上一个仓库的 per-file 状态（与主窗口 selectVault/selectSpace 同一清理点）：
       // 撕裂窗口的笔记缓存/撤销栈/画布运行时/视口缓存是独立 webview 实例，残留会串进新仓库同路径文件；
       // 首次 bootstrap 应答时无旧状态，清空为 no-op。同步执行，先于下方任何加载。
       kernelLifecycle.notifyVaultLeaving();
-      if (payload.vaultRoot) {
-        void useSettingsStore.getState().loadVaultConfig();
+      // 激活本窗口内容面身份（独立 webview 不共享激活态）：空间 = 同参空间后端，
+      // 本地 = localBackend，null = 退出激活（I/O 回落 localBackend，与现状一致）
+      activateContentIdentity(payload.vaultIdentity);
+      if (payload.vaultRoot || payload.vaultIdentity) {
+        if (payload.vaultRoot) {
+          // 仓库级配置仅本地仓库加载（空间路径暂无配置双源，读本地会失败）
+          void useSettingsStore.getState().loadVaultConfig();
+        }
         void useVaultStore.getState().loadFiles();
       }
-      // AI 会话换仓库读盘（含 vaultRoot 置空 = 未激活仓库场景）经生命周期注册表分发
+      // AI 会话换仓库读盘（含未激活仓库场景）经生命周期注册表分发
       void kernelLifecycle
         .notifyVaultEntered({ vaultRoot: payload.vaultRoot })
         .catch((e) => console.error("撕裂窗口加载领域仓库上下文失败", e));
@@ -545,9 +555,11 @@ export const usePanelStore = create<PanelStore>((set, get) => {
       syncFromUi();
       subscribeDragSession();
 
-      // 当前打开文件 + 仓库信息广播（撕裂窗口镜像文件状态/切仓库换上下文用）
+      // 当前打开文件 + 仓库信息广播（撕裂窗口镜像文件状态/切仓库换上下文用）。
+      // 身份变化必须触发广播：空间仓库 vaultRoot 恒为 null，space→space 切换只体现在 vaultIdentity
       useAppStore.subscribe((s, prev) => {
         if (
+          identityKeyOf(s.vaultIdentity) !== identityKeyOf(prev.vaultIdentity) ||
           s.vaultRoot !== prev.vaultRoot ||
           s.currentCanvasFile !== prev.currentCanvasFile ||
           s.currentNoteFile !== prev.currentNoteFile ||
@@ -592,7 +604,6 @@ export const usePanelStore = create<PanelStore>((set, get) => {
       useSettingsStore.subscribe((s, prev) => {
         if (
           s.collabEnabled !== prev.collabEnabled ||
-          s.collabRelayUrl !== prev.collabRelayUrl ||
           s.collabNickname !== prev.collabNickname ||
           s.collabColor !== prev.collabColor ||
           s.deviceName !== prev.deviceName
@@ -600,9 +611,14 @@ export const usePanelStore = create<PanelStore>((set, get) => {
           get().syncCollabHost();
         }
       });
-      // 仓库切换（vaultRoot 变化）→ 协作重算
+      // 仓库切换（身份变化，含 vaultRoot 不变的空间→空间）→ 协作重算
       useAppStore.subscribe((s, prev) => {
-        if (s.vaultRoot !== prev.vaultRoot) get().syncCollabHost();
+        if (
+          identityKeyOf(s.vaultIdentity) !== identityKeyOf(prev.vaultIdentity) ||
+          s.vaultRoot !== prev.vaultRoot
+        ) {
+          get().syncCollabHost();
+        }
       });
     },
 
@@ -840,7 +856,6 @@ export const usePanelStore = create<PanelStore>((set, get) => {
         // 此处只需按当前布局是否承载协作视图连接宿主
         collab.init({
           enabled: true,
-          url: st.collabRelayUrl,
           nickname: st.collabNickname,
           color: st.collabColor,
           deviceName: st.deviceName,

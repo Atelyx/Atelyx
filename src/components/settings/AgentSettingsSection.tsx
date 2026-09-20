@@ -18,6 +18,8 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { usePluginStore } from "@/stores/pluginStore";
 import { DropdownSelect } from "@/components/common/DropdownSelect";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
+import { useIsSpaceVault } from "@/hooks/useIsSpaceVault";
+import { SPACE_UNSUPPORTED_NOTICE } from "@/constants/space";
 import {
   AGENT_TOOLS_META,
   AGENT_TOOL_CATEGORIES,
@@ -34,6 +36,7 @@ function ToolCategoryGroup({
   enabled,
   searchReady,
   collapsed,
+  disabled,
   onToggle,
   onToggleAll,
   onToggleCollapsed,
@@ -43,6 +46,8 @@ function ToolCategoryGroup({
   enabled: Set<string>;
   searchReady: boolean;
   collapsed: boolean;
+  /** 空间内只读层：勾选入口禁用。 */
+  disabled?: boolean;
   onToggle: (id: string) => void;
   onToggleAll: () => void;
   onToggleCollapsed: () => void;
@@ -104,7 +109,8 @@ function ToolCategoryGroup({
                   type="checkbox"
                   checked={on}
                   onChange={() => onToggle(t.id)}
-                  className="w-3.5 h-3.5 flex-shrink-0 accent-[var(--accent)]"
+                  disabled={disabled}
+                  className="w-3.5 h-3.5 flex-shrink-0 accent-[var(--accent)] disabled:cursor-not-allowed"
                 />
                 <span className="flex items-center gap-1.5">
                   {t.label}
@@ -130,6 +136,9 @@ export function AgentSettingsSection() {
   const removeAgent = useSettingsStore((s) => s.removeAgent);
   const duplicateAgent = useSettingsStore((s) => s.duplicateAgent);
   const promptNotes = useSettingsStore((s) => s.promptNotes);
+  // 激活仓库为协作空间：Agent 由团队统一维护（只读层）——写入口全部禁用并提示，
+  // 不发起会被 metadata 层拒绝的写入（拒绝虽会通知并回滚，但虚假可编辑态本身就是误导）
+  const isSpaceVault = useIsSpaceVault();
   // 订阅插件运行时：插件启停/卸载变化触发本组件重渲染（插件工具表在服务层，非响应式，
   // 靠 pluginStore 收敛驱动重算；插件工具注册也经 pluginStore 的 UI 注册变更通知驱动重渲染）。
   usePluginStore((s) => s.plugins);
@@ -231,7 +240,9 @@ export function AgentSettingsSection() {
         </div>
         <button
           onClick={() => void handleAdd()}
-          className="flex items-center gap-1 text-xs rounded px-2.5 py-1.5 flex-shrink-0 hover:opacity-80"
+          disabled={isSpaceVault}
+          title={isSpaceVault ? SPACE_UNSUPPORTED_NOTICE : undefined}
+          className="flex items-center gap-1 text-xs rounded px-2.5 py-1.5 flex-shrink-0 hover:opacity-80 disabled:cursor-not-allowed disabled:opacity-50"
           style={{ background: "var(--accent)", color: "var(--accent-fg)" }}
         >
           <Plus size={12} />
@@ -296,8 +307,9 @@ export function AgentSettingsSection() {
                   e.stopPropagation();
                   void duplicateAgent(a.id);
                 }}
+                disabled={isSpaceVault}
                 title="复制 Agent"
-                className="p-1 rounded hover:opacity-70 flex-shrink-0 opacity-0 group-hover:opacity-100"
+                className="p-1 rounded hover:opacity-70 flex-shrink-0 opacity-0 group-hover:opacity-100 disabled:cursor-not-allowed"
                 style={{ color: "var(--text-muted)" }}
               >
                 <Copy size={12} />
@@ -310,8 +322,9 @@ export function AgentSettingsSection() {
                     handleSelect(a.id);
                     setConfirmDelete(true);
                   }}
+                  disabled={isSpaceVault}
                   title="删除 Agent"
-                  className="p-1 rounded hover:opacity-70 flex-shrink-0 opacity-0 group-hover:opacity-100"
+                  className="p-1 rounded hover:opacity-70 flex-shrink-0 opacity-0 group-hover:opacity-100 disabled:cursor-not-allowed"
                   style={{ color: "#f87171" }}
                 >
                   <Trash2 size={12} />
@@ -374,6 +387,8 @@ export function AgentSettingsSection() {
                 ]}
                 emptyText="暂无已注册提示词（在文件面板右键笔记 → 注册为提示词）"
                 placeholder="选择提示词笔记"
+                disabled={isSpaceVault}
+                title={isSpaceVault ? SPACE_UNSUPPORTED_NOTICE : undefined}
                 className="w-full text-sm rounded px-2 py-1"
                 style={{
                   color: "var(--text-secondary)",
@@ -406,6 +421,7 @@ export function AgentSettingsSection() {
                     enabled={new Set(selected.tools)}
                     searchReady={searchReady}
                     collapsed={collapsedCats[cat.key]}
+                    disabled={isSpaceVault}
                     onToggle={toggleTool}
                     onToggleAll={() => toggleCategoryAll(cat.key)}
                     onToggleCollapsed={() =>

@@ -299,7 +299,7 @@ interface CanvasState {
   clearConversationLocks: () => void;
   /** 协作实时广播钩子注入（collabStore init 时设置；null = 协作未启用，不广播）。 */
   setCollabBroadcast: (fn: ((file: string, patch: CanvasPatch) => void) | null) => void;
-  /** 应用远端画布补丁（relay `canvas-patch`）：按 id LWW 合并，不置脏/不入撤销栈/不触发保存。 */
+  /** 应用远端画布补丁（`canvas-patch` 帧）：按 id LWW 合并，不置脏/不入撤销栈/不触发保存。 */
   applyRemoteCanvasPatch: (file: string, patch: CanvasPatch) => void;
   /** Rust 侧改过当前画布磁盘 .atlx 后同步乐观锁基准（重命名笔记/附件/画布），防下次保存被误判「已被外部修改」。 */
   syncBaseUpdatedAt: () => Promise<void>;

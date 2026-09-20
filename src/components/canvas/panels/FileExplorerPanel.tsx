@@ -30,6 +30,8 @@ import { useAppStore } from "@/stores/appStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useUiStateStore } from "@/stores/uiStateStore";
 import { useVaultStore } from "@/stores/vaultStore";
+import { useSpaceAuthStore } from "@/stores/spaceAuthStore";
+import { useSpaceDirectoryStore } from "@/stores/spaceDirectoryStore";
 import { SlotListMount } from "@/components/plugins/SlotHost";
 import { FileContextMenu } from "@/components/canvas/panels/FileContextMenu";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
@@ -42,6 +44,10 @@ import { SortMenu } from "./file-explorer/SortMenu";
 import { FolderCreateMenu } from "./file-explorer/FolderCreateMenu";
 import { FolderColorMenu } from "./file-explorer/FolderColorMenu";
 import { VaultRows } from "./file-explorer/VaultRows";
+import { SpaceRows, type SpaceEntry } from "./file-explorer/SpaceRows";
+import { SpaceMenu } from "./file-explorer/SpaceMenu";
+import { SpaceMembersDialog } from "./file-explorer/SpaceMembersDialog";
+import { SpaceInviteDialog } from "./file-explorer/SpaceInviteDialog";
 
 interface PanelProps {
   /** 单击画布行：打开画布并激活画布窗口（页面层包装 openCanvas + setActiveWindow）。 */
@@ -138,8 +144,53 @@ export function FileExplorerPanel({ onOpenCanvasFile, onOpenNoteForEdit, onOpenT
 
   const pickVaultDirectory = useAppStore((s) => s.pickVaultDirectory);
   const selectVault = useAppStore((s) => s.selectVault);
+  const selectSpace = useAppStore((s) => s.selectSpace);
   const recentVaults = useAppStore((s) => s.recentVaults);
+  const recentSpaces = useAppStore((s) => s.recentSpaces);
+  const vaultIdentity = useAppStore((s) => s.vaultIdentity);
   const switchingVaultRoot = useAppStore((s) => s.switchingVaultRoot);
+  // 空间区数据：登录服务器 + 各服务器空间列表（组件不直调 service，经 spaceDirectoryStore 编排）
+  const authServers = useSpaceAuthStore((s) => s.servers);
+  const spacesByServer = useSpaceDirectoryStore((s) => s.spacesByServer);
+  const loadingByServer = useSpaceDirectoryStore((s) => s.loadingByServer);
+  const errorByServer = useSpaceDirectoryStore((s) => s.errorByServer);
+  const loadServerSpaces = useSpaceDirectoryStore((s) => s.loadServerSpaces);
+  const renameSpace = useSpaceDirectoryStore((s) => s.renameSpace);
+  const forgetSpace = useSpaceDirectoryStore((s) => s.forgetSpace);
+
+  // 已登录服务器的空间列表加载（登录态变化即刷新；失败可见，重连/操作会重拉）
+  useEffect(() => {
+    for (const s of authServers) void loadServerSpaces(s.serverUrl);
+  }, [authServers, loadServerSpaces]);
+
+  /** 空间区合并条目：服务端列表（按登录服务器展开）在前，最近条目兜底补齐
+   *  （服务端未加载/加载失败/非本机最近的空间仍可见可点）。key = serverUrl#spaceId 去重。 */
+  const spaceEntries = useMemo<SpaceEntry[]>(() => {
+    const map = new Map<string, SpaceEntry>();
+    for (const s of authServers) {
+      for (const sum of spacesByServer[s.serverUrl] ?? []) {
+        map.set(`${s.serverUrl}#${sum.spaceId}`, {
+          serverUrl: s.serverUrl,
+          spaceId: sum.spaceId,
+          name: sum.name,
+          role: sum.role,
+        });
+      }
+    }
+    for (const r of recentSpaces) {
+      const key = `${r.serverUrl}#${r.spaceId}`;
+      if (!map.has(key)) {
+        map.set(key, { serverUrl: r.serverUrl, spaceId: r.spaceId, name: r.name, role: "" });
+      }
+    }
+    return [...map.values()];
+  }, [authServers, spacesByServer, recentSpaces]);
+
+  const hasServers = authServers.length > 0;
+  const spaceListLoading = authServers.some((s) => loadingByServer[s.serverUrl]);
+  const spaceListError =
+    authServers.map((s) => errorByServer[s.serverUrl]).find((e): e is string => !!e) ?? null;
+
   // 切换进行中禁掉打开入口，防在切换中叠一次进仓
   const openFolderBusy = switchingVaultRoot !== null;
 
@@ -179,6 +230,57 @@ export function FileExplorerPanel({ onOpenCanvasFile, onOpenNoteForEdit, onOpenT
     canvases.find((c) => c.file === path);
 
   const openMenu = useCallback((x: number, y: number, target: MenuTarget) => setMenu({ x, y, target }), []);
+
+  // ===== 空间区交互状态 =====
+  // 行内重命中的空间条目 key（serverUrl#spaceId）
+  const [renamingSpaceKey, setRenamingSpaceKey] = useState<string | null>(null);
+  // 成员管理 / 邀请码弹窗
+  const [spaceDialog, setSpaceDialog] = useState<{
+    kind: "members" | "invite";
+    serverUrl: string;
+    spaceId: string;
+    name: string;
+  } | null>(null);
+  // 断开连接确认（仅移除本机最近条目，不删服务端数据）
+  const [removingSpace, setRemovingSpace] = useState<{ serverUrl: string; spaceId: string; name: string } | null>(null);
+
+  /** 空间行内重命名提交：renameSpace 失败可见（服务端拒绝/网络）。 */
+  const handleSpaceRenameCommit = useCallback(
+    (key: string, name: string) => {
+      const idx = key.indexOf("#");
+      const serverUrl = key.slice(0, idx);
+      const spaceId = key.slice(idx + 1);
+      setRenamingSpaceKey(null);
+      renameSpace(serverUrl, spaceId, name)
+        .then(() => setNotice("空间已重命名"))
+        .catch((e) => {
+          console.error("重命名空间失败", e);
+          setNotice(`重命名失败：${e instanceof Error ? e.message : String(e)}`);
+        });
+    },
+    [renameSpace],
+  );
+
+  /** 内嵌文件树的公共属性（本地仓库行与空间条目同构复用）。 */
+  const fileTreeProps = {
+    sortKey,
+    expanded,
+    toggleExpanded,
+    editing,
+    onEditingChange: setEditing,
+    onCommitEditing: commitEditing,
+    dropDir,
+    folderColors,
+    currentCanvasFile,
+    openedNoteFile,
+    openedTableFile,
+    canvasRowOf,
+    startPotentialDrag,
+    onOpenCanvasFile,
+    onOpenNoteForEdit,
+    onOpenTableFile,
+    onOpenMenu: openMenu,
+  };
 
   return (
     <div
@@ -260,7 +362,7 @@ export function FileExplorerPanel({ onOpenCanvasFile, onOpenNoteForEdit, onOpenT
           setMenu({ x: e.clientX, y: e.clientY, target: { kind: "folder", dir: "" } });
         }}
       >
-        {recentVaults.length === 0 ? (
+        {recentVaults.length === 0 && spaceEntries.length === 0 && !hasServers ? (
           <div className="flex flex-col items-center justify-center gap-3 py-14 text-center">
             <p className="text-sm" style={{ color: "var(--text-secondary)" }}>
               还没有仓库
@@ -287,25 +389,22 @@ export function FileExplorerPanel({ onOpenCanvasFile, onOpenNoteForEdit, onOpenT
               collapsedVaults={collapsedVaults}
               toggleVaultCollapsed={toggleVaultCollapsed}
               tree={tree}
-              fileTree={{
-                sortKey,
-                expanded,
-                toggleExpanded,
-                editing,
-                onEditingChange: setEditing,
-                onCommitEditing: commitEditing,
-                dropDir,
-                folderColors,
-                currentCanvasFile,
-                openedNoteFile,
-                openedTableFile,
-                canvasRowOf,
-                startPotentialDrag,
-                onOpenCanvasFile,
-                onOpenNoteForEdit,
-                onOpenTableFile,
-                onOpenMenu: openMenu,
-              }}
+              fileTree={fileTreeProps}
+            />
+            <SpaceRows
+              entries={spaceEntries}
+              hasServers={hasServers}
+              loading={spaceListLoading}
+              listError={spaceListError}
+              identity={vaultIdentity}
+              switchingTo={switchingVaultRoot}
+              tree={tree}
+              fileTree={fileTreeProps}
+              renamingKey={renamingSpaceKey}
+              onRenameCommit={handleSpaceRenameCommit}
+              onRenameCancel={() => setRenamingSpaceKey(null)}
+              onNotice={setNotice}
+              onOpenMenu={openMenu}
             />
           </ul>
         )}
@@ -385,8 +484,64 @@ export function FileExplorerPanel({ onOpenCanvasFile, onOpenNoteForEdit, onOpenT
         />
       )}
 
+      {/* 空间条目右键菜单：重新连接 / 重命名 / 成员管理 / 邀请码 / 断开连接 */}
+      {menu?.target.kind === "space" && (() => {
+        const t = menu.target;
+        return (
+          <SpaceMenu
+            serverUrl={t.serverUrl}
+            spaceId={t.spaceId}
+            name={t.name}
+            role={t.role}
+            x={menu.x}
+            y={menu.y}
+            onClose={() => setMenu(null)}
+            onRename={() => setRenamingSpaceKey(`${t.serverUrl}#${t.spaceId}`)}
+            onMembers={() => setSpaceDialog({ kind: "members", serverUrl: t.serverUrl, spaceId: t.spaceId, name: t.name })}
+            onInvite={() => setSpaceDialog({ kind: "invite", serverUrl: t.serverUrl, spaceId: t.spaceId, name: t.name })}
+            onDisconnect={() => setRemovingSpace({ serverUrl: t.serverUrl, spaceId: t.spaceId, name: t.name })}
+            onReconnect={() => {
+              void selectSpace({ serverUrl: t.serverUrl, spaceId: t.spaceId, name: t.name });
+            }}
+          />
+        );
+      })()}
+
+      {/* 成员管理 / 邀请码弹窗（操作经 spaceDirectoryStore，失败弹窗内可见） */}
+      {spaceDialog?.kind === "members" && (
+        <SpaceMembersDialog
+          serverUrl={spaceDialog.serverUrl}
+          spaceId={spaceDialog.spaceId}
+          spaceName={spaceDialog.name}
+          onClose={() => setSpaceDialog(null)}
+        />
+      )}
+      {spaceDialog?.kind === "invite" && (
+        <SpaceInviteDialog
+          serverUrl={spaceDialog.serverUrl}
+          spaceId={spaceDialog.spaceId}
+          spaceName={spaceDialog.name}
+          onClose={() => setSpaceDialog(null)}
+        />
+      )}
+
+      {/* 断开连接确认：只移除本机最近条目，不影响服务端空间与其成员 */}
+      {removingSpace && (
+        <ConfirmDialog
+          title={`断开协作空间「${removingSpace.name}」？`}
+          description="只从本机列表移除该空间入口，不影响服务器上的空间与数据；需要时可通过邀请码重新加入。"
+          confirmText="断开"
+          onCancel={() => setRemovingSpace(null)}
+          onConfirm={() => {
+            const { serverUrl, spaceId } = removingSpace;
+            setRemovingSpace(null);
+            void forgetSpace(serverUrl, spaceId).catch(() => setNotice("断开失败，请重试"));
+          }}
+        />
+      )}
+
       {/* 文件行右键菜单：重命名 / 删除（菜单内确认） */}
-      {menu && menu.target.kind !== "folder" && (() => {
+      {menu && menu.target.kind !== "folder" && menu.target.kind !== "space" && (() => {
         const t = menu.target;
         return (
           <FileContextMenu
