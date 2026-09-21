@@ -11,7 +11,7 @@ import { useAppStore } from "@/stores/appStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useUiStateStore } from "@/stores/uiStateStore";
 import { useVaultStore, lastFolderRenameTarget, lastNoteRenameTarget, lastTableRenameTarget } from "@/stores/vaultStore";
-import { SettingsModal } from "@/components/settings/SettingsModal";
+import { SettingsModal, VaultSettingsModal } from "@/components/settings/SettingsModal";
 import { TitleBarControls } from "@/components/common/TitleBarControls";
 import { LayoutTabs } from "@/components/layout/LayoutTabs";
 import { WorkspaceGrid } from "@/components/layout/WorkspaceGrid";
@@ -29,6 +29,9 @@ export function ProjectWorkspacePage() {
   const settingsModal = useAppStore((s) => s.settingsModal);
   const openSettings = useAppStore((s) => s.openSettings);
   const closeSettings = useAppStore((s) => s.closeSettings);
+  // 仓库设置弹窗（文件面板仓库行/空间行右键打开；目标可为未激活的仓库）
+  const vaultSettingsModal = useAppStore((s) => s.vaultSettingsModal);
+  const closeVaultSettings = useAppStore((s) => s.closeVaultSettings);
 
   // 当前打开文件状态（面板渲染入口；打开动作在 appStore，联动 effect 在此层）
   const currentCanvasFile = useAppStore((s) => s.currentCanvasFile);
@@ -228,6 +231,12 @@ export function ProjectWorkspacePage() {
 
       {settingsModal && (
         <SettingsModal initialTab={settingsModal.tab} onClose={closeSettings} />
+      )}
+      {vaultSettingsModal && (
+        <VaultSettingsModal
+          target={vaultSettingsModal.target}
+          onClose={closeVaultSettings}
+        />
       )}
     </div>
   );

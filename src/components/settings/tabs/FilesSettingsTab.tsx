@@ -1,11 +1,12 @@
 import { SettingCard } from "@/components/settings/SettingCard";
 import { SlotListMount } from "@/components/plugins/SlotHost";
-import { useSettingsStore } from "@/stores/settingsStore";
+import { useSettingsStore, selectEditingVaultConfig } from "@/stores/settingsStore";
 import { useDraftSync } from "@/hooks/useDraftSync";
 
-/** 文件与路径面板（仓库级）：草稿自持 + blur 提交（避免每键一次 IPC），直接订阅 store。 */
+/** 文件与路径面板（仓库级）：草稿自持 + blur 提交（避免每键一次 IPC），直接订阅 store。
+ *  经编辑目标选择器取值——仓库设置弹窗可编辑非激活仓库。 */
 export function FilesSettingsTab() {
-  const vaultConfig = useSettingsStore((s) => s.vaultConfig);
+  const vaultConfig = useSettingsStore(selectEditingVaultConfig);
   const setExcludeFolders = useSettingsStore((s) => s.setExcludeFolders);
   const setAttachmentFolder = useSettingsStore((s) => s.setAttachmentFolder);
 

@@ -17,8 +17,9 @@ const FONT_OPTIONS: { label: string; value: string }[] = [
   { label: "等宽", value: "Consolas, 'Courier New', monospace" },
 ];
 
-/** 通用面板（应用级外观 + 仓库级 key 同步开关）：草稿与状态自持，直接订阅 store。
- * 主题模式与强调色已迁至「主题」tab（主题插件 + 设置项），此处只保留字号/字体等。 */
+/** 通用面板（应用级外观）：草稿与状态自持，直接订阅 store。
+ * 主题模式与强调色在「主题」tab（主题插件 + 设置项），仓库级开关在「仓库设置」里。
+ * 此处只放跨仓库共享的应用级项：字号/字体/自动恢复/主页布局/自动更新。 */
 export function GeneralSettingsTab() {
   // 应用级外观（跨仓库共享，global.json）：字号 / 字体 / 自动恢复 / 主页布局 / 自动更新
   const fontSize = useSettingsStore((s) => s.fontSize);
@@ -31,10 +32,6 @@ export function GeneralSettingsTab() {
   const setDefaultHomeLayout = useSettingsStore((s) => s.setDefaultHomeLayout);
   const autoUpdate = useAppStore((s) => s.autoUpdate);
   const setAutoUpdate = useAppStore((s) => s.setAutoUpdate);
-  // API key 随仓库保存（仓库级）
-  const vaultConfig = useSettingsStore((s) => s.vaultConfig);
-  const setSyncKeys = useSettingsStore((s) => s.setSyncKeys);
-  const syncKeys = !!vaultConfig?.syncKeys;
 
   // 字号用本地草稿 + blur 提交：受控 + 范围校验会拒绝输入中间态（如敲 "1" 准备输 15）导致无法输入
   const [fontSizeDraft, setFontSizeDraft] = useDraftSync(
@@ -129,18 +126,6 @@ export function GeneralSettingsTab() {
           checked={autoUpdate}
           onChange={(v) => void setAutoUpdate(v)}
           title="自动更新"
-        />
-      </SettingCard>
-
-      {/* API key 随仓库保存（仓库级）：开 = key 明文随 config.json 同步多设备；关 = 仅存本机钥匙串 */}
-      <SettingCard
-        title="API key 随仓库保存"
-        description="key 随仓库同步共用；仓库公开/共享时可能泄露"
-      >
-        <ToggleSwitch
-          checked={syncKeys}
-          onChange={(v) => void setSyncKeys(v)}
-          title="API key 随仓库保存"
         />
       </SettingCard>
 

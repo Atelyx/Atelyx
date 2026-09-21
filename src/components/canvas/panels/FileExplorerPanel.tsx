@@ -147,6 +147,7 @@ export function FileExplorerPanel({ onOpenCanvasFile, onOpenNoteForEdit, onOpenT
   const pickVaultDirectory = useAppStore((s) => s.pickVaultDirectory);
   const selectVault = useAppStore((s) => s.selectVault);
   const selectSpace = useAppStore((s) => s.selectSpace);
+  const openVaultSettings = useAppStore((s) => s.openVaultSettings);
   const recentVaults = useAppStore((s) => s.recentVaults);
   const recentSpaces = useAppStore((s) => s.recentSpaces);
   const vaultIdentity = useAppStore((s) => s.vaultIdentity);
@@ -498,6 +499,15 @@ export function FileExplorerPanel({ onOpenCanvasFile, onOpenNoteForEdit, onOpenT
             x={menu.x}
             y={menu.y}
             onClose={() => setMenu(null)}
+            onSettings={() =>
+              openVaultSettings({
+                kind: "space",
+                serverUrl: t.serverUrl,
+                spaceId: t.spaceId,
+                name: t.name,
+                role: t.role,
+              })
+            }
             onRename={() => setRenamingSpaceKey(`${t.serverUrl}#${t.spaceId}`)}
             onMembers={() => setSpaceDialog({ kind: "members", serverUrl: t.serverUrl, spaceId: t.spaceId, name: t.name })}
             onInvite={() => setSpaceDialog({ kind: "invite", serverUrl: t.serverUrl, spaceId: t.spaceId, name: t.name })}

@@ -14,12 +14,18 @@
  */
 import { ChevronDown, ChevronRight, Copy, Plus, Sparkles, Trash2 } from "lucide-react";
 import { useLayoutEffect, useEffect, useRef, useState } from "react";
-import { useSettingsStore } from "@/stores/settingsStore";
+import {
+  useSettingsStore,
+  selectEditingAgents,
+  selectEditingPromptNotes,
+  selectEditingSearchConfig,
+  selectEditingTavilyKey,
+} from "@/stores/settingsStore";
 import { usePluginStore } from "@/stores/pluginStore";
 import { DropdownSelect } from "@/components/common/DropdownSelect";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
-import { useIsSpaceVault } from "@/hooks/useIsSpaceVault";
-import { SPACE_UNSUPPORTED_NOTICE } from "@/constants/space";
+import { useEditingTargetFlags } from "@/hooks/useEditingTarget";
+import { SPACE_TEAM_SHARED_NOTICE, SPACE_VIEWER_NOTICE } from "@/constants/space";
 import {
   AGENT_TOOLS_META,
   AGENT_TOOL_CATEGORIES,
@@ -130,15 +136,15 @@ function ToolCategoryGroup({
 }
 
 export function AgentSettingsSection() {
-  const agents = useSettingsStore((s) => s.agents);
+  const agents = useSettingsStore(selectEditingAgents);
   const addAgent = useSettingsStore((s) => s.addAgent);
   const updateAgent = useSettingsStore((s) => s.updateAgent);
   const removeAgent = useSettingsStore((s) => s.removeAgent);
   const duplicateAgent = useSettingsStore((s) => s.duplicateAgent);
-  const promptNotes = useSettingsStore((s) => s.promptNotes);
-  // 激活仓库为协作空间：Agent 由团队统一维护（只读层）——写入口全部禁用并提示，
-  // 不发起会被 metadata 层拒绝的写入（拒绝虽会通知并回滚，但虚假可编辑态本身就是误导）
-  const isSpaceVault = useIsSpaceVault();
+  const promptNotes = useSettingsStore(selectEditingPromptNotes);
+  // 协作空间内 Agent 与提示词库为团队共享（写服务端团队元数据，全体成员可见）：所有者/编辑者可改，
+  // 查看者不可改（服务端按角色裁决，UI 只对查看者禁用）
+  const { isSpace: targetIsSpace, viewerOnly } = useEditingTargetFlags();
   // 订阅插件运行时：插件启停/卸载变化触发本组件重渲染（插件工具表在服务层，非响应式，
   // 靠 pluginStore 收敛驱动重算；插件工具注册也经 pluginStore 的 UI 注册变更通知驱动重渲染）。
   usePluginStore((s) => s.plugins);
@@ -147,8 +153,8 @@ export function AgentSettingsSection() {
     ...usePluginStore.getState().pluginToolMetas(),
   ];
   // 搜索源就绪状态（订阅字段而非 isSearchConfigured 函数引用，配置变化即时刷新提示）
-  const searchConfig = useSettingsStore((s) => s.searchConfig);
-  const tavilyKey = useSettingsStore((s) => s.tavilyKey);
+  const searchConfig = useSettingsStore(selectEditingSearchConfig);
+  const tavilyKey = useSettingsStore(selectEditingTavilyKey);
   const searchReady =
     searchConfig.provider === "tavily"
       ? !!tavilyKey
@@ -194,9 +200,11 @@ export function AgentSettingsSection() {
     setSelectedId(id);
   };
 
-  // 勾选/全选从 store 最新态读 tools 计算整表替换（避免渲染闭包过期导致连续切换丢勾选）
+  // 勾选/全选从 store 最新态读 tools 计算整表替换（避免渲染闭包过期导致连续切换丢勾选）；
+  // 读数必须与写路径同源（编辑目标：仓库设置弹窗里可能是非激活仓库），否则会拿激活仓库的
+  // 工具集当基线算差集，把结果写进另一个仓库
   const currentAgentTools = () =>
-    useSettingsStore.getState().agents.find((a) => a.id === selectedId)?.tools ?? [];
+    selectEditingAgents(useSettingsStore.getState()).find((a) => a.id === selectedId)?.tools ?? [];
 
   const toggleTool = (id: string) => {
     const cur = currentAgentTools();
@@ -237,11 +245,19 @@ export function AgentSettingsSection() {
             <Sparkles size={14} style={{ color: "var(--accent)" }} />
             Agent
           </div>
+          {targetIsSpace && (
+            <p
+              className="text-xs mt-1"
+              style={{ color: viewerOnly ? "#f59e0b" : "var(--text-muted)" }}
+            >
+              {viewerOnly ? SPACE_VIEWER_NOTICE : SPACE_TEAM_SHARED_NOTICE}
+            </p>
+          )}
         </div>
         <button
           onClick={() => void handleAdd()}
-          disabled={isSpaceVault}
-          title={isSpaceVault ? SPACE_UNSUPPORTED_NOTICE : undefined}
+          disabled={viewerOnly}
+          title={viewerOnly ? SPACE_VIEWER_NOTICE : undefined}
           className="flex items-center gap-1 text-xs rounded px-2.5 py-1.5 flex-shrink-0 hover:opacity-80 disabled:cursor-not-allowed disabled:opacity-50"
           style={{ background: "var(--accent)", color: "var(--accent-fg)" }}
         >
@@ -307,7 +323,7 @@ export function AgentSettingsSection() {
                   e.stopPropagation();
                   void duplicateAgent(a.id);
                 }}
-                disabled={isSpaceVault}
+                disabled={viewerOnly}
                 title="复制 Agent"
                 className="p-1 rounded hover:opacity-70 flex-shrink-0 opacity-0 group-hover:opacity-100 disabled:cursor-not-allowed"
                 style={{ color: "var(--text-muted)" }}
@@ -322,7 +338,7 @@ export function AgentSettingsSection() {
                     handleSelect(a.id);
                     setConfirmDelete(true);
                   }}
-                  disabled={isSpaceVault}
+                  disabled={viewerOnly}
                   title="删除 Agent"
                   className="p-1 rounded hover:opacity-70 flex-shrink-0 opacity-0 group-hover:opacity-100 disabled:cursor-not-allowed"
                   style={{ color: "#f87171" }}
@@ -355,8 +371,10 @@ export function AgentSettingsSection() {
                 value={nameDraft}
                 onChange={(e) => setNameDraft(e.target.value)}
                 onBlur={commitName}
+                disabled={viewerOnly}
+                title={viewerOnly ? SPACE_VIEWER_NOTICE : undefined}
                 placeholder="如：写作助手"
-                className="w-full max-w-[280px] text-sm rounded px-2 py-1 outline-none"
+                className="w-full max-w-[280px] text-sm rounded px-2 py-1 outline-none disabled:opacity-50"
                 style={{
                   color: "var(--text-primary)",
                   background: "var(--input-bg)",
@@ -387,8 +405,8 @@ export function AgentSettingsSection() {
                 ]}
                 emptyText="暂无已注册提示词（在文件面板右键笔记 → 注册为提示词）"
                 placeholder="选择提示词笔记"
-                disabled={isSpaceVault}
-                title={isSpaceVault ? SPACE_UNSUPPORTED_NOTICE : undefined}
+                disabled={viewerOnly}
+                title={viewerOnly ? SPACE_VIEWER_NOTICE : undefined}
                 className="w-full text-sm rounded px-2 py-1"
                 style={{
                   color: "var(--text-secondary)",
@@ -421,7 +439,7 @@ export function AgentSettingsSection() {
                     enabled={new Set(selected.tools)}
                     searchReady={searchReady}
                     collapsed={collapsedCats[cat.key]}
-                    disabled={isSpaceVault}
+                    disabled={viewerOnly}
                     onToggle={toggleTool}
                     onToggleAll={() => toggleCategoryAll(cat.key)}
                     onToggleCollapsed={() =>

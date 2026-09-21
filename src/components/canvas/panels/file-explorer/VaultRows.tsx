@@ -3,16 +3,17 @@
  *
  * 激活仓库行高亮（与当前打开文件同色）并就地展开其文件树，其余仓库收起；
  * 点击其他仓库 = 激活切换（完整切换流程），点击激活仓库行 = 展开/收起其文件树；
- * 右键菜单：在文件管理器中打开 / 从列表移除（不删文件、不影响激活态）。
+ * 右键菜单：仓库设置（打开该仓库的仓库设置，未激活的仓库同样可编辑）/ 在文件管理器中打开 /
+ * 从列表移除（不删文件、不影响激活态）。菜单壳用 `common/Menu`（悬停高亮/钳制/Esc 关闭同全项目）。
  *
- * 分层：只读 appStore + 调 selectVault / removeRecentVault / openInExplorer。
+ * 分层：只读 appStore + 调 selectVault / removeRecentVault / openInExplorer / openVaultSettings。
  */
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
-import { ChevronDown, ChevronRight, HardDrive, Loader2 } from "lucide-react";
+import { ChevronDown, ChevronRight, HardDrive, Loader2, Settings2 } from "lucide-react";
 import { useAppStore } from "@/stores/appStore";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
-import { useClampedMenuPosition } from "@/hooks/useClampedMenuPosition";
+import { Menu, MenuItem } from "@/components/common/Menu";
 import type { RecentVault, FileTreeNode } from "@/types";
 import type { FileTreeProps } from "./FileTree";
 import { FileTree } from "./FileTree";
@@ -36,9 +37,10 @@ interface VaultRowsProps {
   fileTree: VaultTreeProps;
 }
 
-/** 仓库行右键菜单（独立组件承载钳制定位：实测尺寸须在挂载后计算）。 */
+/** 仓库行右键菜单（公共菜单壳：悬停高亮/视口钳制/Esc 与外点关闭统一在这里）。 */
 function VaultMenu({
   root,
+  name,
   active,
   switching,
   x,
@@ -47,6 +49,7 @@ function VaultMenu({
   onRemove,
 }: {
   root: string;
+  name: string;
   /** 该仓库是否为当前激活仓库（激活仓库不可移出列表，否则树中无其条目而它仍激活）。 */
   active: boolean;
   /** 该仓库是否为切换进行中的目标（切换中移除会让激活行失去列表条目）。 */
@@ -57,35 +60,46 @@ function VaultMenu({
   onRemove: (root: string) => void;
 }) {
   const openInExplorer = useAppStore((s) => s.openInExplorer);
-  const { ref, pos } = useClampedMenuPosition(x, y, [root]);
+  const openVaultSettings = useAppStore((s) => s.openVaultSettings);
 
   return (
-    <div
-      ref={ref}
-      className="fixed z-50 rounded-md shadow-2xl py-1 min-w-[180px]"
-      style={{ left: pos.x, top: pos.y, background: "var(--bg-tertiary)", border: "1px solid var(--border)" }}
-      data-vault-menu
-    >
-      <button
+    <Menu x={x} y={y} onClose={onClose} widthClass="w-48" stopPointerDown>
+      <MenuItem
+        onClick={() => {
+          // 目标是这一行（激活与否都可编辑）：激活仓库直接编辑激活态，其余走设置会话
+          openVaultSettings({ kind: "local", root, name });
+          onClose();
+        }}
+      >
+        <span className="inline-flex items-center gap-1.5">
+          <Settings2 size={14} />
+          仓库设置
+        </span>
+      </MenuItem>
+      <MenuItem
         onClick={() => {
           void openInExplorer(root);
           onClose();
         }}
-        className="w-full text-left px-3 py-1.5 text-sm hover:bg-[var(--hover)]"
-        style={{ color: "var(--text-primary)" }}
       >
         在文件管理器中打开
-      </button>
-      <button
-        onClick={() => onRemove(root)}
+      </MenuItem>
+      <MenuItem
+        danger
         disabled={active || switching}
-        title={active ? "当前激活的仓库不能移出列表，先切换到其他仓库" : switching ? "正在切换到该仓库" : undefined}
-        className="w-full text-left px-3 py-1.5 text-sm hover:bg-[var(--hover)] disabled:opacity-40 disabled:hover:bg-transparent disabled:cursor-default"
-        style={{ color: "#f87171" }}
+        noDisabledCursor
+        title={
+          active
+            ? "当前激活的仓库不能移出列表，先切换到其他仓库"
+            : switching
+              ? "正在切换到该仓库"
+              : undefined
+        }
+        onClick={() => onRemove(root)}
       >
         从列表移除
-      </button>
-    </div>
+      </MenuItem>
+    </Menu>
   );
 }
 
@@ -93,16 +107,6 @@ export function VaultRows({ vaults, vaultRoot, switchingTo, onEnter, collapsedVa
   const [menu, setMenu] = useState<{ root: string; x: number; y: number } | null>(null);
   const [removing, setRemoving] = useState<string | null>(null);
   const removeRecentVault = useAppStore((s) => s.removeRecentVault);
-
-  // 点击菜单/行外部关闭右键菜单（data-vault-menu 区域内不关）
-  useEffect(() => {
-    if (!menu) return;
-    const close = (e: MouseEvent) => {
-      if (!(e.target as HTMLElement).closest("[data-vault-menu]")) setMenu(null);
-    };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
-  }, [menu]);
 
   const onRowContextMenu = (e: ReactPointerEvent | React.MouseEvent, root: string) => {
     e.preventDefault();
@@ -160,6 +164,7 @@ export function VaultRows({ vaults, vaultRoot, switchingTo, onEnter, collapsedVa
       {menu && (
         <VaultMenu
           root={menu.root}
+          name={vaults.find((v) => v.root === menu.root)?.name ?? menu.root}
           active={menu.root === vaultRoot}
           switching={menu.root === switchingTo}
           x={menu.x}
