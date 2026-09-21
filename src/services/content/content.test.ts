@@ -483,12 +483,15 @@ function setupSpaceServer(init?: {
   files?: Record<string, string>;
   b64?: Record<string, string>;
   media?: Record<string, Array<{ name: string; size: number }>>;
+  /** 团队元数据键值（GET /meta；附件入库目录等设定来自这里）。 */
+  metaValues?: Record<string, string>;
   /** 补丁端点返回的实际路径（缺省 = 请求路径；表格改名漂移用）。 */
   patchFile?: string;
 }) {
   const files = new Map(Object.entries(init?.files ?? {}));
   const b64 = new Map(Object.entries(init?.b64 ?? {}));
   const media = new Map(Object.entries(init?.media ?? {}));
+  const metaValues = init?.metaValues ?? {};
   let patchFile = init?.patchFile;
   calls = [];
   const writes: Array<{ path: string; encoding?: string }> = [];
@@ -586,6 +589,9 @@ function setupSpaceServer(init?: {
       const path = u.searchParams.get("path") ?? "";
       const entries = media.get(path);
       return entries === undefined ? notFound() : ok({ entries });
+    }
+    if (p === "/meta" && method === "GET") {
+      return ok({ values: metaValues });
     }
     if (p.endsWith("/patches/canvas") || p.endsWith("/patches/table")) {
       return ok({ updatedAt: 7, file: patchFile ?? (body as { path: string }).path });
@@ -747,6 +753,33 @@ describe("附件：base64 读写与入库", () => {
     const r = await backend().importAttachment(".space-media/temp/c1/att-x-图.png", "图.png");
     expect(r.file).toBe("attachments/图.png");
     expect(server.b64.get("attachments/图.png")).toBe(btoa("img"));
+  });
+
+  it("importAttachment：按团队元数据「附件文件夹」设定落位（重名仍追加序号，不覆盖）", async () => {
+    const server = setupSpaceServer({
+      metaValues: { "attachment-folder": JSON.stringify("素材/图片") },
+      b64: {
+        ".space-media/temp/c1/att-x-图.png": btoa("img"),
+        "素材/图片/图.png": btoa("old"),
+      },
+    });
+    const r = await backend().importAttachment(".space-media/temp/c1/att-x-图.png", "图.png");
+    expect(r.file).toBe("素材/图片/图 (1).png");
+    expect(server.b64.get("素材/图片/图 (1).png")).toBe(btoa("img"));
+    expect(server.b64.get("素材/图片/图.png")).toBe(btoa("old"));
+  });
+
+  it("importAttachment：附件文件夹设定非法（隐藏目录/通配符/绝对路径/越界）即拒绝，不落盘", async () => {
+    for (const bad of [".space-media/x", "./.space-media", ".hidden", "素材*", "C:/素材", "../外"]) {
+      const server = setupSpaceServer({
+        metaValues: { "attachment-folder": JSON.stringify(bad) },
+        b64: { ".space-media/temp/c1/att-x-图.png": btoa("img") },
+      });
+      await expect(
+        backend().importAttachment(".space-media/temp/c1/att-x-图.png", "图.png"),
+      ).rejects.toThrow("附件文件夹设定无效");
+      expect(server.writes.some((w) => w.path.endsWith("图.png"))).toBe(false);
+    }
   });
 
   it("importTableImage：base64 源唯一命名写入表格媒体目录；非图片源拒绝", async () => {

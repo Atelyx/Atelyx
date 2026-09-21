@@ -8,7 +8,8 @@
  * 空间内媒体目录约定（服务端保留目录，树/索引不出现在结果中、读写可达）：
  * - 画布未入库临时附件：`.space-media/temp/<canvasId>/<fileName>`
  * - 表格图片：`.space-media/tables/<tableId>/<fileName>`
- * - 入库附件：`attachments/<fileName>`（固定目录；空间内附件夹设定不适用）
+ * - 入库附件：`<附件文件夹>/<fileName>`（团队元数据 `attachment-folder` 设定，未配置 = `attachments/`；
+ *   既有附件不因改动设定而迁移——引用是相对路径，改设定只影响之后入库的文件）
  *
  * 乐观锁冲突（写/补丁 409）镜像本地 Tauri 字符串错误形态（「画布/表格已被外部修改，请重载后再编辑」，
  * 与 Rust 命令文案逐字一致）：store 的冲突分支按错误文案判定（`includes("已被外部修改")`），
@@ -29,6 +30,7 @@
  */
 import { READ_WINDOW_DEFAULT_LINES } from "@/constants/tools";
 import { CANVAS_SCHEMA } from "@/constants/canvas";
+import { SPACE_TEAM_META, spaceMetaScalar } from "@/constants/spaceMeta";
 import { TABLE_SCHEMA } from "@/constants/table";
 import { baseName, parentDir, sanitizeFilename, stripExt } from "@/utils/filename";
 import { normalizeTableRow } from "@/utils/table";
@@ -100,8 +102,31 @@ function pathLevelError(e: SpaceApiError): string {
 const SPACE_MEDIA_DIR = ".space-media";
 const SPACE_TEMP_DIR = `${SPACE_MEDIA_DIR}/temp`;
 const SPACE_TABLE_MEDIA_DIR = `${SPACE_MEDIA_DIR}/tables`;
-/** 空间内入库附件固定目录（本地「附件导入默认文件夹」设定在空间内不适用）。 */
-const SPACE_ATTACHMENT_DIR = "attachments";
+/** 入库附件的兜底目录（未配置「附件文件夹」时的落位）。 */
+const SPACE_DEFAULT_ATTACHMENT_DIR = "attachments";
+
+/**
+ * 入库附件的目标目录：读团队元数据 `attachment-folder`（「附件文件夹」设定，与本地同语义）。
+ *
+ * 只接受仓库内普通相对目录——绝对路径、`..` 段、隐藏段（含服务端保留目录 `.space-media`）、
+ * 以及 glob 元字符一律拒绝并抛错：隐藏目录不参与文件树与索引（附件落进去等于找不到），
+ * 重名枚举按 glob 模式查已有附件、元字符会命中别的目录（同名附件会被当不存在而覆盖，附件丢失
+ * 不可接受）。拒绝时报错而非回落默认目录：回落会让用户的设定静默失效，落错位置且无人知晓。
+ */
+function attachmentDirFromMeta(raw: string | undefined): string {
+  const configured = spaceMetaScalar(raw).trim().replace(/^[/\\]+|[/\\]+$/g, "");
+  if (!configured) return SPACE_DEFAULT_ATTACHMENT_DIR;
+  const invalid =
+    /^[a-zA-Z]:/.test(configured) ||
+    configured.split(/[/\\]/).some((seg) => seg === "" || seg.startsWith(".")) ||
+    /[*?[\]{}]/.test(configured);
+  if (invalid) {
+    throw new Error(
+      `协作空间的附件文件夹设定无效：${configured}（请填写仓库内相对目录，不要用隐藏目录或通配符）`,
+    );
+  }
+  return configured;
+}
 
 /** 按扩展名推 mime（仅图片，与本地 readAttachmentDataUrl 同口径；其余回落 application/octet-stream）。 */
 function mimeFromExt(file: string): string {
@@ -781,15 +806,15 @@ export function createSpaceContentBackend(serverUrl: string, spaceId: string): C
     throw new Error(`复制文件 id 重生成失败，已删除副本：${file}（原因：${reason}）`);
   }
 
-  /** 入库附件唯一落位路径：`attachments/<基础名>`，重名追加 ` (n)`（与本地 unique_attachment_rel 同口径，不覆盖已有附件）。 */
-  async function uniqueAttachmentRel(fileName: string): Promise<string> {
+  /** 入库附件唯一落位路径：`<附件目录>/<基础名>`，重名追加 ` (n)`（与本地 unique_attachment_rel 同口径，不覆盖已有附件）。 */
+  async function uniqueAttachmentRel(dir: string, fileName: string): Promise<string> {
     const dot = fileName.lastIndexOf(".");
     const hasExt = dot > 0 && dot < fileName.length - 1;
     const stem = hasExt ? fileName.slice(0, dot) : fileName;
     const ext = hasExt ? fileName.slice(dot + 1) : null;
     const withExt = (name: string) => (ext ? `${name}.${ext}` : name);
-    // 重名枚举走内容面 glob：attachments/ 是仓库可见目录，media/list 对其拒绝（仅允许 .space-media/ 内）
-    const res = await client.content.glob(spaceId, { pattern: `${SPACE_ATTACHMENT_DIR}/*` });
+    // 重名枚举走内容面 glob：附件目录是仓库可见目录，media/list 对其拒绝（仅允许 .space-media/ 内）
+    const res = await client.content.glob(spaceId, { pattern: `${dir}/*` });
     const existing = new Set(res.paths.map((p) => baseName(p)));
     let leaf = withExt(stem);
     let n = 1;
@@ -797,7 +822,7 @@ export function createSpaceContentBackend(serverUrl: string, spaceId: string): C
       leaf = withExt(`${stem} (${n})`);
       n += 1;
     }
-    return `${SPACE_ATTACHMENT_DIR}/${leaf}`;
+    return `${dir}/${leaf}`;
   }
 
   /**
@@ -1129,12 +1154,16 @@ export function createSpaceContentBackend(serverUrl: string, spaceId: string): C
       await writeBase64File(rel, base64Data);
       return rel;
     },
-    // 入库：复制临时件进固定附件目录（重名追加 ` (n)`），画布改用返回路径引用。
-    // 与本地 import_vault_attachment 同语义：复制而非移动——临时件可能被多个节点引用
-    //（节点复制粘贴），当场删源会断链；残留临时件由画布关闭时的按引用清理回收。
+    // 入库：复制临时件进「附件文件夹」设定的目录（未配置 = `attachments/`；重名追加 ` (n)`），
+    // 画布改用返回路径引用。与本地 import_vault_attachment 同语义：复制而非移动——临时件可能被
+    // 多个节点引用（节点复制粘贴），当场删源会断链；残留临时件由画布关闭时的按引用清理回收。
     async importAttachment(rel: string, fileName: string): Promise<{ file: string }> {
       const data = await readFileBase64(rel);
-      const target = await uniqueAttachmentRel(sanitizeTempFileName(fileName));
+      const meta = await client.meta.getSpaceMeta(spaceId);
+      const target = await uniqueAttachmentRel(
+        attachmentDirFromMeta(meta.values?.[SPACE_TEAM_META.attachmentFolder]),
+        sanitizeTempFileName(fileName),
+      );
       await writeBase64File(target, data);
       return { file: target };
     },
