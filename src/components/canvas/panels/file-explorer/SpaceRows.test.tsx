@@ -160,6 +160,56 @@ describe("SpaceRows 创建与加入", () => {
       expect(onNotice).toHaveBeenCalledWith(expect.stringContaining("加入失败"));
     });
   });
+
+  it("打开文件夹：路径末段作空间名，携带 rootPath 创建并直接进入", async () => {
+    const createSpace = vi
+      .fn()
+      .mockResolvedValue({ spaceId: "sp-dir", name: "team-library", role: "owner" });
+    useSpaceDirectoryStore.setState({ createSpace });
+    selectSpaceMock.mockResolvedValue("ok");
+    renderRows();
+    fireEvent.click(screen.getByText("打开文件夹"));
+    const input = screen.getByPlaceholderText(/服务器上文件夹的绝对路径/);
+    fireEvent.change(input, { target: { value: "/mnt/team-library" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => {
+      expect(createSpace).toHaveBeenCalledWith(SERVER, "team-library", "/mnt/team-library");
+      expect(selectSpaceMock).toHaveBeenCalledWith({
+        serverUrl: SERVER,
+        spaceId: "sp-dir",
+        name: "team-library",
+      });
+    });
+  });
+
+  it("打开文件夹：非绝对路径不发请求，提示可见", async () => {
+    const createSpace = vi.fn();
+    useSpaceDirectoryStore.setState({ createSpace });
+    const { onNotice } = renderRows();
+    fireEvent.click(screen.getByText("打开文件夹"));
+    const input = screen.getByPlaceholderText(/服务器上文件夹的绝对路径/);
+    fireEvent.change(input, { target: { value: "team-library" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => {
+      expect(onNotice).toHaveBeenCalledWith(expect.stringContaining("绝对路径"));
+    });
+    expect(createSpace).not.toHaveBeenCalled();
+    expect(selectSpaceMock).not.toHaveBeenCalled();
+  });
+
+  it("打开文件夹：服务器拒绝收编时错误提示可见", async () => {
+    useSpaceDirectoryStore.setState({
+      createSpace: vi.fn().mockRejectedValue(new Error("内容根与数据目录互相嵌套")),
+    });
+    const { onNotice } = renderRows();
+    fireEvent.click(screen.getByText("打开文件夹"));
+    const input = screen.getByPlaceholderText(/服务器上文件夹的绝对路径/);
+    fireEvent.change(input, { target: { value: "/mnt/team-library" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => {
+      expect(onNotice).toHaveBeenCalledWith(expect.stringContaining("打开文件夹失败"));
+    });
+  });
 });
 
 describe("SpaceRows 无登录引导", () => {

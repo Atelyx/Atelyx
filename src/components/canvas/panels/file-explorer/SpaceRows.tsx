@@ -8,7 +8,7 @@
  * 分层：只调 appStore / spaceDirectoryStore 动作，不直调 service。
  */
 import { useEffect, useMemo, useState } from "react";
-import { ChevronDown, ChevronRight, Cloud, Loader2, Plus, Ticket } from "lucide-react";
+import { ChevronDown, ChevronRight, Cloud, FolderOpen, Loader2, Plus, Ticket } from "lucide-react";
 import { useAppStore } from "@/stores/appStore";
 import { useSpaceAuthStore } from "@/stores/spaceAuthStore";
 import { useSpaceDirectoryStore } from "@/stores/spaceDirectoryStore";
@@ -63,9 +63,10 @@ export function SpaceRows({ entries, hasServers, loading, listError, identity, s
 
   // 激活空间行收起集合（面板挂载期间记忆；与本地仓库行同语义）
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
-  // 内联输入态：创建空间（输入空间名）/ 加入（输入邀请码）
+  // 内联输入态：创建空间（输入空间名）/ 加入（输入邀请码）/ 打开文件夹（输入服务器路径收编为空间）
   const [creating, setCreating] = useState(false);
   const [joining, setJoining] = useState(false);
+  const [opening, setOpening] = useState(false);
   const [draft, setDraft] = useState("");
   // 多服务器时的目标服务器（单服务器免选）
   const [serverPick, setServerPick] = useState<string>("");
@@ -112,6 +113,30 @@ export function SpaceRows({ entries, hasServers, loading, listError, identity, s
     }
   };
 
+  /** 打开服务器文件夹为协作空间：空间名取路径末段，创建即收编（服务端就地纳管不搬移），
+   *  成功后与创建空间同流程直接进入。 */
+  const submitOpenFolder = async () => {
+    const path = draft.trim();
+    if (!path || !targetServer) return;
+    if (!path.startsWith("/") || path === "/") {
+      onNotice("请输入服务器上文件夹的绝对路径（以 / 开头）");
+      return;
+    }
+    setBusy(true);
+    try {
+      const name = path.split("/").filter(Boolean).pop() ?? path;
+      const created = await createSpace(targetServer, name, path);
+      setOpening(false);
+      setDraft("");
+      await selectSpace({ serverUrl: targetServer, spaceId: created.spaceId, name: created.name });
+    } catch (e) {
+      console.error("打开服务器文件夹失败", e);
+      onNotice(`打开文件夹失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const submitJoin = async () => {
     const code = draft.trim();
     if (!code || !targetServer) return;
@@ -129,7 +154,7 @@ export function SpaceRows({ entries, hasServers, loading, listError, identity, s
     }
   };
 
-  const serverPicker = servers.length > 1 && (creating || joining) && (
+  const serverPicker = servers.length > 1 && (creating || joining || opening) && (
     <select
       value={targetServer}
       onChange={(e) => setServerPick(e.target.value)}
@@ -242,20 +267,25 @@ export function SpaceRows({ entries, hasServers, loading, listError, identity, s
               空间列表加载失败：{listError}
             </div>
           )}
-          {creating || joining ? (
+          {creating || joining || opening ? (
             <div className="flex items-center gap-1.5 px-2 py-1 flex-wrap">
               {serverPicker}
-              <div className="flex-1 min-w-[80px]">
+              <div className={opening ? "flex-1 min-w-[180px]" : "flex-1 min-w-[80px]"}>
                 <InlineInput
                   value={draft}
                   onChange={setDraft}
-                  onCommit={() => void (creating ? submitCreate() : submitJoin())}
+                  onCommit={() =>
+                    void (creating ? submitCreate() : opening ? submitOpenFolder() : submitJoin())
+                  }
                   onCancel={() => {
                     setCreating(false);
                     setJoining(false);
+                    setOpening(false);
                     setDraft("");
                   }}
-                  placeholder={creating ? "空间名称" : "邀请码"}
+                  placeholder={
+                    creating ? "空间名称" : opening ? "服务器上文件夹的绝对路径，如 /mnt/team-library" : "邀请码"
+                  }
                 />
               </div>
               {busy && <Loader2 size={13} className="animate-spin flex-shrink-0" style={{ color: "var(--text-muted)" }} />}
@@ -278,6 +308,21 @@ export function SpaceRows({ entries, hasServers, loading, listError, identity, s
               <button
                 onClick={() => {
                   setCreating(false);
+                  setJoining(false);
+                  setOpening(true);
+                  setDraft("");
+                }}
+                disabled={loading}
+                className="flex items-center gap-1 px-1 py-0.5 rounded hover:bg-[var(--hover)] disabled:opacity-40"
+                title="把服务器上已有文件夹收编为协作空间（就地纳管，文件不搬移）"
+              >
+                <FolderOpen size={12} />
+                打开文件夹
+              </button>
+              <button
+                onClick={() => {
+                  setCreating(false);
+                  setOpening(false);
                   setJoining(true);
                   setDraft("");
                 }}

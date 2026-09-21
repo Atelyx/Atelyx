@@ -56,10 +56,11 @@ interface SpaceDirectoryState {
   requestLogin: (prompt: SpaceLoginPrompt) => void;
   /** 清除引导（登录成功/用户关闭时）。 */
   clearLoginPrompt: () => void;
-  /** 在某服务器创建空间；成功后刷新列表并返回新空间摘要。
+  /** 在某服务器创建空间；`rootPath` 传入服务器上已有文件夹的绝对路径时就地收编（不搬移文件）。
+   *  成功后刷新列表并返回新空间摘要。
    *  只回 `{ spaceId, name }`：创建接口不返回 role/ownerUserId/createdAt（列表刷新后由 spacesByServer 提供完整字段），
    *  消费方（SpaceRows 创建后直接进空间）也只用 id/name——不合成占位字段冒充完整摘要。 */
-  createSpace: (serverUrl: string, name: string) => Promise<{ spaceId: string; name: string }>;
+  createSpace: (serverUrl: string, name: string, rootPath?: string) => Promise<{ spaceId: string; name: string }>;
   /** 用邀请码加入某服务器的空间；成功后刷新列表。 */
   acceptInvite: (serverUrl: string, code: string) => Promise<AcceptInviteResult>;
   /** 重命名空间（服务端 + 最近条目镜像同步）。 */
@@ -126,8 +127,10 @@ export const useSpaceDirectoryStore = create<SpaceDirectoryState>((set, get) => 
   requestLogin: (prompt) => set({ loginPrompt: prompt }),
   clearLoginPrompt: () => set({ loginPrompt: null }),
 
-  createSpace: async (serverUrl, name) => {
-    const created = await client(serverUrl).spaces.create({ name });
+  createSpace: async (serverUrl, name, rootPath) => {
+    const created = await client(serverUrl).spaces.create(
+      rootPath ? { name, path: rootPath } : { name },
+    );
     await get().loadServerSpaces(serverUrl);
     return { spaceId: created.spaceId, name: created.name };
   },
