@@ -1056,11 +1056,37 @@ pub fn vault_config_patch(
     patch_vault_config(&root, &patch)
 }
 
+/// 读任意仓库的仓库级配置（root 显式）：设置页可编辑非当前激活仓库，此时不能用 `state.root()`。
+/// 语义与 `read_vault_config` 完全一致（含损坏备份口径），只是落点由传入 root 决定。
+#[tauri::command]
+pub fn read_vault_config_at(root: String) -> Result<VaultConfigRead, String> {
+    let root = resolve_vault_root(&root)?;
+    let (config, corrupt_backup) = read_vault_config_with_backup(&root)?;
+    Ok(VaultConfigRead { config, corrupt_backup })
+}
+
+/// 写任意仓库的仓库级配置（root 显式，语义与 `vault_config_patch` 一致）。
+/// 文件名固定为 `.atelyx/config.json`——本命令不接受任意文件路径，避免成为「任意路径写文件」的原语。
+#[tauri::command]
+pub fn vault_config_patch_at(
+    root: String,
+    patch: serde_json::Value,
+) -> Result<Option<String>, String> {
+    let root = resolve_vault_root(&root)?;
+    patch_vault_config(&root, &patch)
+}
+
 /// 读系统提示词标记列表（.atelyx/prompt-notes.json，不存在/损坏返回空）。
 #[tauri::command]
 pub fn read_prompt_notes(state: State<'_, VaultState>) -> Result<Vec<String>, String> {
     let root = state.root()?;
     read_prompt_notes_file(&root)
+}
+
+/// 读任意仓库的系统提示词标记列表（root 显式；设置页编辑非当前激活仓库时用，语义同上）。
+#[tauri::command]
+pub fn read_prompt_notes_at(root: String) -> Result<Vec<String>, String> {
+    read_prompt_notes_file(&resolve_vault_root(&root)?)
 }
 
 /// 写系统提示词标记列表（原子写 .atelyx/prompt-notes.json，独立于 config.json）。
@@ -1088,6 +1114,18 @@ pub fn write_agents(
 ) -> Result<(), String> {
     let root = state.root()?;
     write_agents_file(&root, &agents)
+}
+
+/// 读任意仓库的 Agent 配置（root 显式；设置页可编辑非当前激活仓库，语义同 `read_agents`）。
+#[tauri::command]
+pub fn read_agents_at(root: String) -> Result<Vec<AgentConfig>, String> {
+    read_agents_file(&resolve_vault_root(&root)?)
+}
+
+/// 写任意仓库的 Agent 配置（root 显式；文件名固定 `.atelyx/agents.json`，语义同 `write_agents`）。
+#[tauri::command]
+pub fn write_agents_at(root: String, agents: Vec<AgentConfig>) -> Result<(), String> {
+    write_agents_file(&resolve_vault_root(&root)?, &agents)
 }
 
 /// 读文件夹图标颜色映射（.atelyx/folder-colors.json，不存在/损坏返回空）。
@@ -1242,6 +1280,17 @@ pub struct CanvasCreateResult {
 }
 
 // ===== 内部辅助 =====
+
+/// 归一化显式传入的仓库 root（`*_at` 系列命令用）：必须是已存在的文件夹，并以
+/// `dunce::canonicalize` 统一路径格式（与 `open_vault` 激活流程同口径，避免 Windows
+/// `\\?\` 前缀/短名导致同一仓库出现两种键，落点判断与 keychain 身份都按归一化后的路径走）。
+fn resolve_vault_root(root: &str) -> Result<PathBuf, String> {
+    let raw = PathBuf::from(root);
+    if !raw.is_dir() {
+        return Err(format!("仓库路径不是文件夹：{root}"));
+    }
+    dunce::canonicalize(&raw).map_err(|e| format!("仓库路径不可达：{root} ({e})"))
+}
 
 /// 从路径构造 VaultInfo（仓库名经 `vault_display_name`，兼容网络共享根等 `file_name()` 取不到的场景）。
 fn vault_info_from(root: PathBuf, config_corrupt_backup: Option<String>) -> VaultInfo {
@@ -1581,5 +1630,48 @@ mod list_dir_tests {
         assert_eq!(r.total, 5);
         assert!(r.capped);
         std::fs::remove_dir_all(&root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod resolve_vault_root_tests {
+    use super::*;
+
+    /// 临时目录（纳秒级命名防碰撞；测试自清理）。
+    fn tmp_dir(tag: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("atelyx-resolve-root-{tag}-{nanos}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn rejects_missing_path_and_file() {
+        let dir = tmp_dir("missing");
+        let missing = dir.join("不存在");
+        assert!(resolve_vault_root(&missing.to_string_lossy())
+            .unwrap_err()
+            .contains("不是文件夹"));
+        let file = dir.join("a.txt");
+        std::fs::write(&file, "x").unwrap();
+        assert!(resolve_vault_root(&file.to_string_lossy())
+            .unwrap_err()
+            .contains("不是文件夹"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn canonicalizes_existing_dir() {
+        // 尾部分隔符与 `.` 段收敛到同一路径：显式 root 与激活流程同口径，同一仓库只有一个身份键
+        let dir = tmp_dir("ok");
+        let messy = format!("{}/.", dir.to_string_lossy());
+        assert_eq!(
+            resolve_vault_root(&messy).unwrap(),
+            dunce::canonicalize(&dir).unwrap()
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

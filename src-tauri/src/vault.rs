@@ -1010,6 +1010,23 @@ pub fn write_vault_config(root: &Path, config: &VaultConfig) -> Result<(), Strin
     atomic_write(&path, &json)
 }
 
+/// 配置补丁写盘的按路径互斥锁表：`patch_vault_config` 是「读—合并—写」三步，
+/// 两个写入者（多窗口设置页、另一个仓库的设置在途写）交错会让先写者的字段被后写者的旧基线覆盖。
+/// 锁只覆盖该文件的读改写过程，不进任何长期状态；条目按路径保留（每条仅一把空锁，量级可忽略）。
+static CONFIG_PATCH_LOCKS: OnceLock<Mutex<HashMap<PathBuf, std::sync::Arc<Mutex<()>>>>> =
+    OnceLock::new();
+
+/// 取某个配置文件的写锁（同一路径共享一把；调用方持锁覆盖整个读改动周期，不可在持锁期间 await）。
+fn config_patch_lock(path: &Path) -> std::sync::Arc<Mutex<()>> {
+    let table = CONFIG_PATCH_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    // 锁表自身的锁必须短暂：中毒（持锁者 panic）时取回内层继续，不让一次 panic 永久拒绝写盘
+    let mut table = table.lock().unwrap_or_else(|e| e.into_inner());
+    table
+        .entry(path.to_path_buf())
+        .or_insert_with(|| std::sync::Arc::new(Mutex::new(())))
+        .clone()
+}
+
 /// 删除「残留明文 key」的指令只在合并后仍不是同步模式时生效。
 ///
 /// 该指令来自前端**加载时**对文件的观察（见 stores/settingsStore 的 `strayTavilyKeyOnDisk`）：
@@ -1063,6 +1080,9 @@ fn guard_stale_key_deletion(base_json: &str, patch: &serde_json::Value) -> serde
 /// 留不下原文就继续覆盖，等于把用户配置一次性抹掉且无从取回。
 pub fn patch_vault_config(root: &Path, patch: &serde_json::Value) -> Result<Option<String>, String> {
     let path = root.join(".atelyx").join(VAULT_CONFIG_FILE);
+    // 读—合并—写整体持锁（同路径串行）：并发的两次补丁不会各自基于旧基线合并，谁都不会丢字段
+    let lock = config_patch_lock(&path);
+    let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
     let mut corrupt_backup: Option<String> = None;
     let base = match std::fs::read_to_string(&path) {
         Ok(raw) => {
@@ -1116,7 +1136,6 @@ pub fn merge_vault_config(base_json: &str, patch: &serde_json::Value) -> Result<
 }
 
 /// 递归合并：`null` 删键，两侧同为对象则下钻，其余以补丁值覆盖。
-/// pub(crate)：global.json 的空间配置补丁（`space_config_patch`）复用同一合并语义。
 pub(crate) fn merge_json_objects(
     target: &mut serde_json::Map<String, serde_json::Value>,
     patch: &serde_json::Map<String, serde_json::Value>,
@@ -3638,8 +3657,48 @@ mod merge_vault_config_tests {
     }
 
     #[test]
-    fn patch_reports_corrupt_base_and_keeps_backup() {
-        let root = TempDir::new("vault-config-patch-corrupt");
+    fn concurrent_patches_keep_every_field() {
+        // 补丁是「读—合并—写」：并发写同一配置文件时若不串行，后写者会用自己的旧基线覆盖先写者的字段。
+        // 每个线程改一个不同字段，全部字段都必须留下。
+        let root = TempDir::new("vault-config-patch-concurrent");
+        std::fs::create_dir_all(root.join(".atelyx")).unwrap();
+        let patches: Vec<serde_json::Value> = [
+            r#"{"model":"m1"}"#,
+            r#"{"modelProviderId":"p1"}"#,
+            r#"{"attachmentFolder":"附件"}"#,
+            r#"{"excludeFolders":["草稿"]}"#,
+            r#"{"fileExplorerSort":"name"}"#,
+            r#"{"inlineTitle":true}"#,
+            r#"{"softLineBreak":true}"#,
+            r#"{"autoNamingEnabled":true}"#,
+        ]
+        .iter()
+        .map(|s| serde_json::from_str(s).unwrap())
+        .collect();
+        let handles: Vec<_> = patches
+            .into_iter()
+            .map(|patch| {
+                let dir: PathBuf = root.to_path_buf();
+                std::thread::spawn(move || patch_vault_config(&dir, &patch).unwrap())
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let on_disk = read_vault_config(&root).unwrap();
+        assert_eq!(on_disk.model.as_deref(), Some("m1"));
+        assert_eq!(on_disk.model_provider_id.as_deref(), Some("p1"));
+        assert_eq!(on_disk.attachment_folder.as_deref(), Some("附件"));
+        assert_eq!(on_disk.exclude_folders.unwrap(), vec!["草稿".to_string()]);
+        assert_eq!(on_disk.file_explorer_sort.as_deref(), Some("name"));
+        assert_eq!(on_disk.inline_title, Some(true));
+        assert_eq!(on_disk.soft_line_break, Some(true));
+        assert_eq!(on_disk.auto_naming_enabled, Some(true));
+    }
+
+    #[test]
+    fn patch_reports_corrupt_base_and_keeps_backup() {        let root = TempDir::new("vault-config-patch-corrupt");
         let dir = root.join(".atelyx");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("config.json"), "{ 这不是 JSON").unwrap();

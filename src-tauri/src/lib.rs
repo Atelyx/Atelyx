@@ -75,14 +75,19 @@ pub fn run() {
             commands::vault::rename_note,
             commands::vault::read_vault_config,
             commands::vault::vault_config_patch,
+            commands::vault::read_vault_config_at,
+            commands::vault::vault_config_patch_at,
             // 未入库附件（粘贴/拖入先落仓库内隐藏临时区，画布只存路径引用）
             commands::temp_attachment::write_temp_attachment,
             commands::temp_attachment::import_vault_attachment,
             commands::temp_attachment::cleanup_canvas_temp_attachments,
             commands::vault::read_prompt_notes,
+            commands::vault::read_prompt_notes_at,
             commands::vault::write_prompt_notes,
             commands::vault::read_agents,
             commands::vault::write_agents,
+            commands::vault::read_agents_at,
+            commands::vault::write_agents_at,
             commands::vault::read_folder_colors,
             commands::vault::write_folder_colors,
             commands::vault::list_chat_sessions,
@@ -127,8 +132,6 @@ pub fn run() {
             commands::global::write_global_config,
             // 全局配置补丁（锁内读-合并-原子写，跨窗口并发不互相覆盖）
             commands::global::patch_global_config,
-            // 协作空间仓库级配置补丁（global.json spaceConfigs 按 serverKey 字段级合并）
-            commands::global::space_config_patch,
             // 本机设备名（协作身份默认值）
             commands::global::get_hostname,
             // API key 安全存储（OS keychain，见 commands/keychain.rs）
