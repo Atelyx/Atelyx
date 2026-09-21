@@ -3,7 +3,8 @@
  *
  * 激活仓库行高亮（与当前打开文件同色）并就地展开其文件树（见 `VaultRows`），其余仓库收起；
  * 点击其他仓库 = 激活切换（完整切换流程，切换后该仓库行经最近排序置顶、容器滚回顶部）。
- * 工具条承载仓库级入口：打开文件夹为仓库。无仓库时树区空态引导打开。
+ * 工具条承载仓库级入口：打开文件夹为仓库、新增协作空间（浮层内切创建 / 纳管服务器文件夹 /
+ * 输邀请码加入三条途径）。无仓库时树区空态引导打开。
  * 无仓库时树区空态引导创建；树内操作（跳过隐藏 `.` 开头目录与排除文件夹，
  * 见 `.atelyx/config.json` 的 `excludeFolders`）支持展开折叠、排序下拉、
  * 文件夹行右键新建（画布 / 笔记 / 文件夹，inline 输入框 Enter 创建，落该文件夹；
@@ -45,6 +46,7 @@ import { FolderCreateMenu } from "./file-explorer/FolderCreateMenu";
 import { FolderColorMenu } from "./file-explorer/FolderColorMenu";
 import { VaultRows } from "./file-explorer/VaultRows";
 import { SpaceRows, type SpaceEntry } from "./file-explorer/SpaceRows";
+import { SpaceAddPopover } from "./file-explorer/SpaceAddPopover";
 import { SpaceMenu } from "./file-explorer/SpaceMenu";
 import { SpaceMembersDialog } from "./file-explorer/SpaceMembersDialog";
 import { SpaceInviteDialog } from "./file-explorer/SpaceInviteDialog";
@@ -287,7 +289,7 @@ export function FileExplorerPanel({ onOpenCanvasFile, onOpenNoteForEdit, onOpenT
       className="h-full flex flex-col text-sm overflow-hidden"
       style={{ background: "var(--bg-secondary)", color: "var(--text-primary)" }}
     >
-      {/* 工具条：新建仓库 / 打开文件夹（仓库级入口）+ 排序方式下拉气泡 + 展开/收起全部 */}
+      {/* 工具条：打开文件夹（仓库级入口）+ 新增协作空间 + 排序方式下拉气泡 + 展开/收起全部 */}
       <div className="px-2 py-1.5 border-b flex items-center gap-1" style={{ borderColor: "var(--border)" }}>
         {/* 插件贡献区：文件面板工具条左侧（list 槽，priority 降序） */}
         <SlotListMount slot="toolbar/files/left" />
@@ -300,6 +302,7 @@ export function FileExplorerPanel({ onOpenCanvasFile, onOpenNoteForEdit, onOpenT
         >
           <FolderOpen size={15} />
         </button>
+        <SpaceAddPopover onNotice={setNotice} />
         <button
           onClick={(e) => {
             const rect = e.currentTarget.getBoundingClientRect();
@@ -403,7 +406,6 @@ export function FileExplorerPanel({ onOpenCanvasFile, onOpenNoteForEdit, onOpenT
               renamingKey={renamingSpaceKey}
               onRenameCommit={handleSpaceRenameCommit}
               onRenameCancel={() => setRenamingSpaceKey(null)}
-              onNotice={setNotice}
               onOpenMenu={openMenu}
             />
           </ul>

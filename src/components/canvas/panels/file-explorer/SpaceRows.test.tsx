@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 /**
- * 文件面板空间区：点击三分支（ok / need-login / error）、创建空间与加入邀请码调用链、
- * 无登录引导。appStore 以最小 zustand 替身注入（selectSpace/openSettings 可断言）。
+ * 文件面板空间区：点击三分支（ok / need-login / error）、无登录引导、无条目时的去向提示。
+ * appStore 以最小 zustand 替身注入（selectSpace/openSettings 可断言）。
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react";
@@ -47,7 +47,6 @@ const baseFileTree = {
 } as never;
 
 function renderRows(entries: SpaceEntry[] = [ENTRY]) {
-  const onNotice = vi.fn();
   render(
     <ul>
       <SpaceRows
@@ -62,12 +61,10 @@ function renderRows(entries: SpaceEntry[] = [ENTRY]) {
         renamingKey={null}
         onRenameCommit={vi.fn()}
         onRenameCancel={vi.fn()}
-        onNotice={onNotice}
         onOpenMenu={vi.fn()}
       />
     </ul>,
   );
-  return { onNotice };
 }
 
 beforeEach(() => {
@@ -83,8 +80,6 @@ beforeEach(() => {
     revokeDevice: vi.fn().mockResolvedValue(undefined),
   });
   useSpaceDirectoryStore.setState({
-    createSpace: vi.fn(),
-    acceptInvite: vi.fn(),
     requestLogin: vi.fn(),
     loginPrompt: null,
   });
@@ -131,84 +126,13 @@ describe("SpaceRows 点击进入", () => {
   });
 });
 
-describe("SpaceRows 创建与加入", () => {
-  it("创建空间：输入名称 Enter → createSpace → 携新空间调用 selectSpace 直接进入", async () => {
-    const createSpace = vi.fn().mockResolvedValue({ spaceId: "sp-new", name: "新空间", role: "owner" });
-    useSpaceDirectoryStore.setState({ createSpace });
-    selectSpaceMock.mockResolvedValue("ok");
-    renderRows();
-    fireEvent.click(screen.getByText("创建空间"));
-    const input = screen.getByPlaceholderText("空间名称");
-    fireEvent.change(input, { target: { value: "新空间" } });
-    fireEvent.keyDown(input, { key: "Enter" });
-    await waitFor(() => {
-      expect(createSpace).toHaveBeenCalledWith(SERVER, "新空间");
-      expect(selectSpaceMock).toHaveBeenCalledWith({ serverUrl: SERVER, spaceId: "sp-new", name: "新空间" });
-    });
-  });
-
-  it("加入邀请码：输入 code Enter → acceptInvite，失败时提示可见", async () => {
-    const acceptInvite = vi.fn().mockRejectedValue(new Error("邀请码无效"));
-    useSpaceDirectoryStore.setState({ acceptInvite });
-    const { onNotice } = renderRows();
-    fireEvent.click(screen.getByText("输入邀请码"));
-    const input = screen.getByPlaceholderText("邀请码");
-    fireEvent.change(input, { target: { value: "CODE-1" } });
-    fireEvent.keyDown(input, { key: "Enter" });
-    await waitFor(() => {
-      expect(acceptInvite).toHaveBeenCalledWith(SERVER, "CODE-1");
-      expect(onNotice).toHaveBeenCalledWith(expect.stringContaining("加入失败"));
-    });
-  });
-
-  it("打开文件夹：路径末段作空间名，携带 rootPath 创建并直接进入", async () => {
-    const createSpace = vi
-      .fn()
-      .mockResolvedValue({ spaceId: "sp-dir", name: "team-library", role: "owner" });
-    useSpaceDirectoryStore.setState({ createSpace });
-    selectSpaceMock.mockResolvedValue("ok");
-    renderRows();
-    fireEvent.click(screen.getByText("打开文件夹"));
-    const input = screen.getByPlaceholderText(/服务器上文件夹的绝对路径/);
-    fireEvent.change(input, { target: { value: "/mnt/team-library" } });
-    fireEvent.keyDown(input, { key: "Enter" });
-    await waitFor(() => {
-      expect(createSpace).toHaveBeenCalledWith(SERVER, "team-library", "/mnt/team-library");
-      expect(selectSpaceMock).toHaveBeenCalledWith({
-        serverUrl: SERVER,
-        spaceId: "sp-dir",
-        name: "team-library",
-      });
-    });
-  });
-
-  it("打开文件夹：非绝对路径不发请求，提示可见", async () => {
-    const createSpace = vi.fn();
-    useSpaceDirectoryStore.setState({ createSpace });
-    const { onNotice } = renderRows();
-    fireEvent.click(screen.getByText("打开文件夹"));
-    const input = screen.getByPlaceholderText(/服务器上文件夹的绝对路径/);
-    fireEvent.change(input, { target: { value: "team-library" } });
-    fireEvent.keyDown(input, { key: "Enter" });
-    await waitFor(() => {
-      expect(onNotice).toHaveBeenCalledWith(expect.stringContaining("绝对路径"));
-    });
-    expect(createSpace).not.toHaveBeenCalled();
-    expect(selectSpaceMock).not.toHaveBeenCalled();
-  });
-
-  it("打开文件夹：服务器拒绝收编时错误提示可见", async () => {
-    useSpaceDirectoryStore.setState({
-      createSpace: vi.fn().mockRejectedValue(new Error("内容根与数据目录互相嵌套")),
-    });
-    const { onNotice } = renderRows();
-    fireEvent.click(screen.getByText("打开文件夹"));
-    const input = screen.getByPlaceholderText(/服务器上文件夹的绝对路径/);
-    fireEvent.change(input, { target: { value: "/mnt/team-library" } });
-    fireEvent.keyDown(input, { key: "Enter" });
-    await waitFor(() => {
-      expect(onNotice).toHaveBeenCalledWith(expect.stringContaining("打开文件夹失败"));
-    });
+describe("SpaceRows 列表状态", () => {
+  it("已登录但无空间：给出工具条去向提示，本区不再承载内联新增入口", () => {
+    renderRows([]);
+    expect(screen.getByText(/还没有协作空间/)).toBeTruthy();
+    expect(screen.queryByText("创建空间")).toBeNull();
+    expect(screen.queryByText("打开文件夹")).toBeNull();
+    expect(screen.queryByText("输入邀请码")).toBeNull();
   });
 });
 
@@ -229,7 +153,6 @@ describe("SpaceRows 无登录引导", () => {
           renamingKey={null}
           onRenameCommit={vi.fn()}
           onRenameCancel={vi.fn()}
-          onNotice={vi.fn()}
           onOpenMenu={vi.fn()}
         />
       </ul>,
