@@ -17,6 +17,8 @@ const space = vi.hoisted(() => {
     /** 非空时 getMyMeta 挂起，直到 resolveGate（模拟读在途期间身份切换）。 */
     holdMyMeta: null as Promise<void> | null,
     resolveGate: null as (() => void) | null,
+    /** 非空时 team meta 写入抛该消息（模拟 viewer 被服务端拒绝/掉线）。 */
+    failPatch: null as string | null,
   };
   function makeClient(_serverUrl: string) {
     const meta = {
@@ -26,6 +28,7 @@ const space = vi.hoisted(() => {
       },
       patchSpaceMeta: async (_spaceId: string, body: { values: Record<string, string> }) => {
         state.calls.push({ group: "meta", method: "patchSpaceMeta", args: [body] });
+        if (state.failPatch) throw new Error(state.failPatch);
         Object.assign(state.teamValues, body.values);
         return {};
       },
@@ -71,8 +74,8 @@ const h = vi.hoisted(() => {
     /** 挂起 space_config_patch 的应答（身份中途切换测试用）。 */
     holdSpacePatch: null as Promise<void> | null,
     localCalls: [] as Array<{ cmd: string; args: Record<string, unknown> }>,
-    /** read_global_config 返回的 spaceConfigs（测试注入）。 */
-    globalSpaceConfigs: {} as Record<string, unknown>,
+    /** keychain 条目（get_api_key 返回）。 */
+    keychain: {} as Record<string, string>,
   };
   return { state };
 });
@@ -89,7 +92,9 @@ vi.mock("@tauri-apps/api/core", () => ({
         if (h.state.holdSpacePatch) await h.state.holdSpacePatch;
         return null;
       case "read_global_config":
-        return { config: { spaceConfigs: h.state.globalSpaceConfigs }, corruptBackup: null };
+        return { config: {}, corruptBackup: null };
+      case "get_api_key":
+        return h.state.keychain[`${String(a.vaultRoot)}:${String(a.providerId)}`] ?? "";
       case "write_global_config":
         return null;
       // 本地命令：录制即直通（本地分支只断言「转发了对应命令」）
@@ -104,7 +109,6 @@ let metadata: typeof import("./index");
 let factory: typeof import("@/services/content/factory");
 
 const SPACE_IDENTITY = { kind: "space" as const, serverUrl: "http://s1", spaceId: "sp1" };
-const SERVER_KEY = "http://s1#sp1";
 
 beforeEach(async () => {
   vi.resetModules();
@@ -113,10 +117,11 @@ beforeEach(async () => {
   space.state.calls = [];
   space.state.holdMyMeta = null;
   space.state.resolveGate = null;
+  space.state.failPatch = null;
   h.state.spaceConfigPatches = [];
   h.state.holdSpacePatch = null;
   h.state.localCalls = [];
-  h.state.globalSpaceConfigs = {};
+  h.state.keychain = {};
   factory = await import("@/services/content/factory");
   metadata = await import("./index");
 });
@@ -139,18 +144,47 @@ describe("team meta 分发（sort/exclusions/folder-colors/prompt-notes/agents�
     expect(await metadata.readAgents()).toEqual([{ id: "a1", name: "团队", tools: [] }]);
   });
 
-  it("空间内写 prompt-notes / agents 被拒：通知可见且不写", async () => {
+  it("空间内写 prompt-notes / agents 落团队元数据（写权限由服务端按角色裁决）", async () => {
+    factory.activateContentIdentity(SPACE_IDENTITY);
+
+    await metadata.writePromptNotes(["x.md"]);
+    await metadata.writeAgents([{ id: "a", name: "n", tools: [] }]);
+
+    expect(space.state.teamValues["prompt-notes"]).toBe(JSON.stringify(["x.md"]));
+    expect(space.state.teamValues["agents"]).toBe(
+      JSON.stringify([{ id: "a", name: "n", tools: [] }]),
+    );
+    // 写入走 team meta 的 PATCH（不是本地文件命令），空间与本地互不串
+    expect(
+      space.state.calls.filter((c) => c.method === "patchSpaceMeta").length,
+    ).toBe(2);
+    expect(h.state.localCalls.length).toBe(0);
+  });
+
+  it("空间内写被服务端拒绝（如查看者）：通知可见并如实抛错，不静默丢弃", async () => {
     factory.activateContentIdentity(SPACE_IDENTITY);
     const { items } = await hookNotifications();
+    space.state.failPatch = "需要所有者或编辑者权限";
 
-    await expect(metadata.writePromptNotes(["x.md"])).rejects.toThrow("协作空间内由团队统一维护");
-    await expect(metadata.writeAgents([{ id: "a", name: "n", tools: [] }])).rejects.toThrow(
-      "协作空间内由团队统一维护",
+    await expect(
+      metadata.writeAgents([{ id: "a", name: "n", tools: [] }]),
+    ).rejects.toThrow("需要所有者或编辑者权限");
+    expect(space.state.teamValues["agents"]).toBeUndefined();
+    expect(items.some((n) => n.message.includes("协作空间元数据保存失败"))).toBe(true);
+  });
+
+  it("显式空间目标写 agents：按目标身份落该空间的团队元数据", async () => {    // 未激活任何仓库：写入目标必须自带 serverUrl/spaceId（按目标而非激活身份取连接）
+    await metadata.writeAgents([{ id: "b", name: "外部", tools: [] }], {
+      kind: "space",
+      serverUrl: "http://s2",
+      spaceId: "sp2",
+      name: "外部空间",
+      role: "editor",
+    });
+    expect(space.state.teamValues["agents"]).toBe(
+      JSON.stringify([{ id: "b", name: "外部", tools: [] }]),
     );
-
-    expect(space.state.calls.filter((c) => c.method.startsWith("patch")).length).toBe(0);
-    expect(items.length).toBe(2);
-    expect(items[0].message).toContain("协作空间内由团队统一维护");
+    expect(h.state.localCalls.length).toBe(0);
   });
 
   it("folderColors 空间往返：写 = team meta PATCH，读 = team meta 解析", async () => {
@@ -162,9 +196,11 @@ describe("team meta 分发（sort/exclusions/folder-colors/prompt-notes/agents�
     expect(await metadata.readFolderColors()).toEqual({ "目录A/": "#ff0000" });
   });
 
-  it("patchVaultConfig（空间）：排序/排除夹落 team meta，其余字段落 spaceConfigs 补丁", async () => {
+  it("patchVaultConfig（空间）：排序/排除夹与 AI 字段各落自己的团队键（不写本机 spaceConfigs）", async () => {
     factory.activateContentIdentity(SPACE_IDENTITY);
-    h.state.globalSpaceConfigs = { [SERVER_KEY]: {} };
+    space.state.teamValues["ai-providers"] = JSON.stringify([
+      { id: "p1", name: "A", baseUrl: "u", models: [], apiKey: "sk-1" },
+    ]);
 
     await metadata.patchVaultConfig({
       fileExplorerSort: "name-asc",
@@ -174,18 +210,26 @@ describe("team meta 分发（sort/exclusions/folder-colors/prompt-notes/agents�
 
     const metaPatch = space.state.calls.find((c) => c.method === "patchSpaceMeta");
     expect(metaPatch).toBeDefined();
+    // AI 配置按字段分键：只写本次改动的模型键，供应商键原样不动
     expect((metaPatch!.args[0] as { values: Record<string, string> }).values).toEqual({
       sort: JSON.stringify("name-asc"),
       exclusions: JSON.stringify(["草稿"]),
+      "ai-model": JSON.stringify("m1"),
     });
-    expect(h.state.spaceConfigPatches).toHaveLength(1);
-    expect(h.state.spaceConfigPatches[0]).toEqual({
-      serverKey: SERVER_KEY,
-      patch: { model: "m1" },
-    });
+    expect(space.state.teamValues["ai-providers"]).toBe(
+      JSON.stringify([{ id: "p1", name: "A", baseUrl: "u", models: [], apiKey: "sk-1" }]),
+    );
+    expect(h.state.spaceConfigPatches).toHaveLength(0);
   });
 
-  it("patchVaultConfig（空间）：excludeFolders 清空 = 删 team meta 键；附件夹设定不适用直接丢弃", async () => {
+  it("patchVaultConfig（空间）：syncKeys 无对应设定被忽略，不产生任何写", async () => {
+    factory.activateContentIdentity(SPACE_IDENTITY);
+    await metadata.patchVaultConfig({ syncKeys: true });
+    expect(space.state.calls.filter((c) => c.method.startsWith("patch")).length).toBe(0);
+    expect(h.state.spaceConfigPatches).toHaveLength(0);
+  });
+
+  it("patchVaultConfig（空间）：excludeFolders 清空 = 删 team meta 键；附件夹设定落 team meta", async () => {
     factory.activateContentIdentity(SPACE_IDENTITY);
     space.state.teamValues["exclusions"] = JSON.stringify(["旧"]);
 
@@ -193,27 +237,70 @@ describe("team meta 分发（sort/exclusions/folder-colors/prompt-notes/agents�
 
     expect(space.state.teamValues["exclusions"]).toBeUndefined();
     expect(space.state.calls.some((c) => c.method === "deleteSpaceMeta")).toBe(true);
-    // 不适用字段不产生任何写
+    expect(space.state.teamValues["attachment-folder"]).toBe(JSON.stringify("assets"));
+    // 附件夹有专属落点（team meta），不进 spaceConfigs 补丁
     expect(h.state.spaceConfigPatches).toHaveLength(0);
   });
 
-  it("readVaultConfig（空间）= spaceConfigs 本体 + team meta sort/exclusions 合并", async () => {
+  it("readVaultConfig（空间）= 团队元数据 AI 配置本体 + sort/exclusions/attachment-folder 合并", async () => {
     factory.activateContentIdentity(SPACE_IDENTITY);
-    h.state.globalSpaceConfigs = {
-      [SERVER_KEY]: {
-        providers: [{ id: "p1", name: "A", baseUrl: "u", models: [] }],
-        model: "m1",
-      },
-    };
+    space.state.teamValues["ai-providers"] = JSON.stringify([
+      { id: "p1", name: "A", baseUrl: "u", models: [], apiKey: "sk-1" },
+    ]);
+    space.state.teamValues["ai-model"] = JSON.stringify("m1");
     space.state.teamValues.sort = JSON.stringify("name-desc");
     space.state.teamValues.exclusions = JSON.stringify(["tmp"]);
+    space.state.teamValues["attachment-folder"] = JSON.stringify("素材");
 
     const { config, corruptBackup } = await metadata.readVaultConfig();
     expect(corruptBackup).toBeNull();
     expect(config.model).toBe("m1");
     expect(config.fileExplorerSort).toBe("name-desc");
     expect(config.excludeFolders).toEqual(["tmp"]);
-    expect(config.providers).toEqual([{ id: "p1", name: "A", baseUrl: "u", models: [] }]);
+    expect(config.attachmentFolder).toBe("素材");
+    // key 随团队配置本体一起读回（服务端统一承载，不落本机 keychain）
+    expect(config.providers).toEqual([
+      { id: "p1", name: "A", baseUrl: "u", models: [], apiKey: "sk-1" },
+    ]);
+  });
+
+  it("显式目标：本地仓库走 *_at 命令（root 透传），不读激活仓库的状态", async () => {
+    const target = { kind: "local", root: "E:/其他仓库", name: "其他" } as const;
+    await metadata.readVaultConfig(target);
+    await metadata.patchVaultConfig({ model: "m2" }, target);
+    await metadata.readAgents(target);
+    await metadata.readPromptNotes(target);
+
+    const at = (cmd: string) => h.state.localCalls.find((c) => c.cmd === cmd);
+    expect(at("read_vault_config_at")?.args).toEqual({ root: "E:/其他仓库" });
+    expect(at("vault_config_patch_at")?.args).toEqual({
+      root: "E:/其他仓库",
+      patch: { model: "m2" },
+    });
+    expect(at("read_agents_at")?.args).toEqual({ root: "E:/其他仓库" });
+    expect(at("read_prompt_notes_at")?.args).toEqual({ root: "E:/其他仓库" });
+    // 不带目标的调用仍走激活仓库命令
+    expect(h.state.localCalls.some((c) => c.cmd === "read_vault_config")).toBe(false);
+  });
+
+  it("显式目标：协作空间按目标身份读写（无需先把该空间设为激活）", async () => {
+    // 激活身份为空：目标必须自己带 serverUrl/spaceId
+    const target = {
+      kind: "space",
+      serverUrl: "http://s2",
+      spaceId: "sp2",
+      name: "外部空间",
+      role: "editor",
+    } as const;
+    space.state.teamValues["ai-model"] = JSON.stringify("m9");
+    space.state.teamValues.sort = JSON.stringify("name-asc");
+
+    const { config } = await metadata.readVaultConfig(target);
+    expect(config.model).toBe("m9");
+    expect(config.fileExplorerSort).toBe("name-asc");
+
+    await metadata.patchVaultConfig({ excludeFolders: ["草稿"] }, target);
+    expect(space.state.teamValues.exclusions).toBe(JSON.stringify(["草稿"]));
   });
 });
 

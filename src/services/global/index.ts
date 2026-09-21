@@ -90,17 +90,3 @@ export async function updateGlobalConfig(
   const { corruptBackup } = await invoke<GlobalConfigRead>("patch_global_config", { patch });
   return corruptBackup;
 }
-
-/**
- * 按字段级合并补丁写某协作空间的仓库级配置（`global.json` 的 `spaceConfigs[serverKey]`）：
- * 补丁值 `null` 删键、对象递归合并、数组/标量整体替换（与 `vault_config_patch` 同语义）。
- * 读-改-写合并在 Rust 侧单条命令内互斥完成（与 `updateGlobalConfig` 的 `patch_global_config`
- * 同一把锁），空间配置的按键级合并必须走这里——顶层补丁不做键内深合并。
- */
-export async function patchSpaceConfig(
-  serverKey: string,
-  patch: Record<string, unknown>,
-): Promise<void> {
-  await invoke("space_config_patch", { serverKey, patch });
-}
-

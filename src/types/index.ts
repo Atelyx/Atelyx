@@ -61,6 +61,8 @@ export type {
 
 export type { AgentConfig } from "./agent";
 
+export type { VaultSettingsTarget } from "./settings";
+
 export type { DeviceInfo, InviteInfo } from "./space";
 
 export {

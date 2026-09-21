@@ -315,10 +315,6 @@ export interface GlobalConfig {
   spaceServers?: string[];
   /** 最近打开的协作空间仓库列表（应用级；与 spaceServers 登录清单区分）。 */
   spaces?: RecentSpace[];
-  /** 协作空间仓库级配置（应用级，键 = `serverUrl#spaceId`）：空间内供应商/搜索源/默认模型等
-   *  配置本体存本机（空间仓库无本地 `.atelyx`）；写盘经 Rust `space_config_patch` 按
-   *  serverKey 字段级合并。排序/排除夹/提示词/Agent 在服务端 team meta，不经本字段。 */
-  spaceConfigs?: Record<string, VaultConfig>;
 }
 
 /** `read_global_config` 的返回：全局配置 + 损坏备份文件名（null = 正常读取）。 */

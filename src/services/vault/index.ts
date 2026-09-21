@@ -216,11 +216,28 @@ export async function patchVaultConfig(patch: Record<string, unknown>): Promise<
   return invoke<string | null>("vault_config_patch", { patch });
 }
 
+/** 读任意仓库的仓库级配置（root 显式）：设置页编辑非当前激活仓库时用，语义同 `readVaultConfig`。 */
+export async function readVaultConfigAt(root: string): Promise<VaultConfigRead> {
+  return invoke<VaultConfigRead>("read_vault_config_at", { root });
+}
+
+/** 写任意仓库的仓库级配置（root 显式，字段级合并补丁）：语义同 `patchVaultConfig`。 */
+export async function patchVaultConfigAt(
+  root: string,
+  patch: Record<string, unknown>,
+): Promise<string | null> {
+  return invoke<string | null>("vault_config_patch_at", { root, patch });
+}
+
 /** 读系统提示词标记列表（.atelyx/prompt-notes.json，不存在/损坏返回空）。 */
 export async function readPromptNotes(): Promise<string[]> {
   return invoke<string[]>("read_prompt_notes");
 }
 
+/** 读任意仓库的系统提示词标记列表（root 显式；设置页编辑非当前激活仓库时用）。 */
+export async function readPromptNotesAt(root: string): Promise<string[]> {
+  return invoke<string[]>("read_prompt_notes_at", { root });
+}
 /** 写系统提示词标记列表（原子写 .atelyx/prompt-notes.json，独立于 config.json）。 */
 export async function writePromptNotes(files: string[]): Promise<void> {
   await invoke("write_prompt_notes", { files });
@@ -234,6 +251,16 @@ export async function readAgents(): Promise<AgentConfig[]> {
 /** 写 Agent 配置列表（原子写 .atelyx/agents.json，独立于 config.json）。 */
 export async function writeAgents(agents: AgentConfig[]): Promise<void> {
   await invoke("write_agents", { agents });
+}
+
+/** 读任意仓库的 Agent 配置列表（root 显式；设置页编辑非当前激活仓库时用）。 */
+export async function readAgentsAt(root: string): Promise<AgentConfig[]> {
+  return invoke<AgentConfig[]>("read_agents_at", { root });
+}
+
+/** 写任意仓库的 Agent 配置列表（root 显式；语义同 `writeAgents`）。 */
+export async function writeAgentsAt(root: string, agents: AgentConfig[]): Promise<void> {
+  await invoke("write_agents_at", { root, agents });
 }
 
 /** 读文件夹图标颜色映射（.atelyx/folder-colors.json，相对仓库根路径 → hex 色；不存在/损坏返回空）。 */

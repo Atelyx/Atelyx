@@ -1,16 +1,21 @@
 /**
- * 元数据双源分发层：`.atelyx` 元数据与配置的读写按激活仓库身份分发。
+ * 元数据双源分发层：`.atelyx` 元数据与配置的读写按仓库身份分发。
+ *
+ * 仓库级读写统一接受可选目标（`VaultSettingsTarget`）：缺省 = 当前激活仓库；
+ * 显式目标 = 设置页正在编辑的那个仓库（可以是列表里未激活的仓库，由文件面板的仓库行/空间行打开），
+ * 此时 local 走 `*_at` 命令（root 显式），space 按目标身份取连接与空间 meta。
+ * 激活仓库与显式目标走同一份实现，不存在「激活专用」的第二条路径。
  *
  * 个人仓库（local）→ 既有本地 Tauri 命令（services/vault 的函数面原样直通）；
  * 协作空间（space）→ 服务端 meta 分组（services/space/client）：
- * - team 层（space meta，团队共享）：排序 `sort` / 排除夹 `exclusions` /
- *   文件夹颜色 `folder-colors` / 提示词标记 `prompt-notes` / Agent 配置 `agents`（后两者只读）；
+ * - team 层（space meta，团队共享）：AI 配置本体（供应商/模型/搜索源，按字段分键，含 API key）/
+ *   排序 `sort` / 排除夹 `exclusions` / 附件夹 `attachment-folder` / 文件夹颜色 `folder-colors` /
+ *   提示词标记 `prompt-notes` / Agent 配置 `agents`；写权限由服务端按角色裁决
+ *   （owner/editor 可写，viewer 拒绝），客户端不另行拦截；
  * - user 层（meta/me，个人）：对话历史 `chat/messages/<id>`、`chat/sessions/<id>`、
- *   `chat/editor-meta`、日历 `calendar`、待办 `todos/<encodeURIComponent(id)>`；
- * - 供应商/搜索源/默认模型等配置本体 → 本机 global.json `spaceConfigs`（services/global
- *   的 `patchSpaceConfig`，Rust 侧按 serverKey 字段级合并）；API key 仍只进 keychain。
+ *   `chat/editor-meta`、日历 `calendar`、待办 `todos/<encodeURIComponent(id)>`。
  *
- * 空间写失败与被拒操作（只读团队层写入）都经 cordis access 注入点弹通知，不静默；
+ * 空间写失败与写被服务端拒绝（如 viewer 改团队层）都经 cordis access 注入点弹通知，不静默；
  * 配置补丁路径例外——该路径的错误由 settingsStore 的写盘入口统一通知，避免双重弹窗。
  * 读改写场景（对话追加）在写前校验激活身份未变，切换后的在途写直接丢弃。
  */
@@ -18,17 +23,17 @@ import { getActiveVaultIdentity, identityKeyOf } from "@/services/content/factor
 import { createSpaceClient, type SpaceClient } from "@/services/space/client";
 import { getToken } from "@/services/space/auth";
 import {
-  patchSpaceConfig,
-  readGlobalConfig,
-  spaceKey as globalSpaceKey,
-} from "@/services/global";
-import {
   readVaultConfig as readLocalVaultConfig,
+  readVaultConfigAt as readLocalVaultConfigAt,
   patchVaultConfig as patchLocalVaultConfig,
+  patchVaultConfigAt as patchLocalVaultConfigAt,
   readPromptNotes as readLocalPromptNotes,
+  readPromptNotesAt as readLocalPromptNotesAt,
   writePromptNotes as writeLocalPromptNotes,
   readAgents as readLocalAgents,
+  readAgentsAt as readLocalAgentsAt,
   writeAgents as writeLocalAgents,
+  writeAgentsAt as writeLocalAgentsAt,
   readFolderColors as readLocalFolderColors,
   writeFolderColors as writeLocalFolderColors,
   listChatSessions as listLocalChatSessions,
@@ -51,6 +56,7 @@ import {
   EDITOR_CHATS_META_SCHEMA,
 } from "@/constants/editorChats";
 import { CALENDAR_FILE } from "@/constants/calendar";
+import { SPACE_TEAM_META, spaceMetaScalar } from "@/constants/spaceMeta";
 import { getPluginNotificationAccess } from "@/services/cordis/access";
 import type {
   AgentConfig,
@@ -60,15 +66,20 @@ import type {
   EditorChatMessage,
   VaultConfig,
   VaultConfigRead,
+  VaultSettingsTarget,
 } from "@/types";
 
-// ===== 空间 meta 键名（team 层 + user 层）=====
+// ===== 空间 meta 键名（team 层）=====
+// 键名常量在 constants/spaceMeta 一处定义（内容后端消费附件夹设定时复用同一份）。
 
-const TEAM_SORT = "sort";
-const TEAM_EXCLUSIONS = "exclusions";
-const TEAM_FOLDER_COLORS = "folder-colors";
-const TEAM_PROMPT_NOTES = "prompt-notes";
-const TEAM_AGENTS = "agents";
+const TEAM_SORT = SPACE_TEAM_META.sort;
+const TEAM_EXCLUSIONS = SPACE_TEAM_META.exclusions;
+const TEAM_ATTACHMENT_FOLDER = SPACE_TEAM_META.attachmentFolder;
+const TEAM_FOLDER_COLORS = SPACE_TEAM_META.folderColors;
+const TEAM_PROMPT_NOTES = SPACE_TEAM_META.promptNotes;
+const TEAM_AGENTS = SPACE_TEAM_META.agents;
+
+// ===== 空间 meta 键名（user 层）=====
 const MY_CALENDAR = "calendar";
 const MY_EDITOR_META = "chat/editor-meta";
 const MY_CHAT_MESSAGES_PREFIX = "chat/messages/";
@@ -185,106 +196,179 @@ async function deleteMyValue(
   }
 }
 
-/** 只读团队层写拒绝：通知可见 + 抛错（提示词/Agent 在空间内由团队统一维护）。 */
-function rejectTeamWrite(): never {
-  const message = "协作空间内由团队统一维护，暂不可修改";
-  getPluginNotificationAccess()?.notify({ level: "warning", message });
-  throw new Error(message);
-}
+// ===== 仓库级配置（providers/model 等本体 + sort/exclusions/attachment-folder）=====
 
-// ===== 仓库级配置（providers/model 等本体 + sort/exclusions）=====
+const TEAM_AI_PROVIDERS = SPACE_TEAM_META.aiProviders;
+const TEAM_AI_MODEL = SPACE_TEAM_META.aiModel;
+const TEAM_AI_MODEL_PROVIDER = SPACE_TEAM_META.aiModelProvider;
+const TEAM_AI_AUTO_NAMING_ENABLED = SPACE_TEAM_META.aiAutoNamingEnabled;
+const TEAM_AI_AUTO_NAMING_MODEL = SPACE_TEAM_META.aiAutoNamingModel;
+const TEAM_AI_SEARCH = SPACE_TEAM_META.aiSearch;
 
 /**
- * 读仓库级配置：local = `.atelyx/config.json`；
- * space = 本机 global.json `spaceConfigs`（配置本体，缺失 = 默认配置）+ 服务端 team meta
- * （sort/exclusions 团队共享）合并。corruptBackup 仅本地路径有语义。
+ * 空间 AI 配置字段 → 团队元数据键（按字段分键：一次改动只写自己那一个键，
+ * 两人同时改不同字段互不覆盖，也不需要「读—合并—写」）。
  */
-export async function readVaultConfig(): Promise<VaultConfigRead> {
-  const identity = spaceIdentity();
+const AI_CONFIG_KEYS: Record<string, string> = {
+  providers: TEAM_AI_PROVIDERS,
+  model: TEAM_AI_MODEL,
+  modelProviderId: TEAM_AI_MODEL_PROVIDER,
+  autoNamingEnabled: TEAM_AI_AUTO_NAMING_ENABLED,
+  autoNamingModel: TEAM_AI_AUTO_NAMING_MODEL,
+  search: TEAM_AI_SEARCH,
+};
+
+/**
+ * 读仓库级配置：`target` 缺省 = 当前激活仓库。
+ * - local（含显式目标）：`.atelyx/config.json`（显式目标走 `_at` 命令，可读未激活仓库）；
+ * - space：服务端团队元数据——AI 配置本体（按字段分键，含 API key）+ 排序/排除夹/附件夹。
+ * corruptBackup 仅本地路径有语义。
+ */
+export async function readVaultConfig(target?: VaultSettingsTarget): Promise<VaultConfigRead> {
+  if (target?.kind === "local") return readLocalVaultConfigAt(target.root);
+  const identity =
+    target?.kind === "space"
+      ? { serverUrl: target.serverUrl, spaceId: target.spaceId }
+      : spaceIdentity();
   if (!identity) return readLocalVaultConfig();
-  const { config: global } = await readGlobalConfig();
-  const base = (global.spaceConfigs?.[globalSpaceKey(identity.serverUrl, identity.spaceId)] ??
-    {}) as VaultConfig;
   const team = await getTeamValues(identity);
-  const config: VaultConfig = { ...base };
+  const config: VaultConfig = {};
+  if (team[TEAM_AI_PROVIDERS] !== undefined) {
+    config.providers = parseJson<VaultConfig["providers"]>(team[TEAM_AI_PROVIDERS], []);
+  }
+  if (team[TEAM_AI_MODEL] !== undefined) {
+    config.model = spaceMetaScalar(team[TEAM_AI_MODEL]) || undefined;
+  }
+  if (team[TEAM_AI_MODEL_PROVIDER] !== undefined) {
+    config.modelProviderId = spaceMetaScalar(team[TEAM_AI_MODEL_PROVIDER]) || undefined;
+  }
+  if (team[TEAM_AI_AUTO_NAMING_ENABLED] !== undefined) {
+    config.autoNamingEnabled = parseJson<boolean | undefined>(
+      team[TEAM_AI_AUTO_NAMING_ENABLED],
+      undefined,
+    );
+  }
+  if (team[TEAM_AI_AUTO_NAMING_MODEL] !== undefined) {
+    config.autoNamingModel = parseJson<VaultConfig["autoNamingModel"]>(
+      team[TEAM_AI_AUTO_NAMING_MODEL],
+      undefined,
+    );
+  }
+  if (team[TEAM_AI_SEARCH] !== undefined) {
+    config.search = parseJson<VaultConfig["search"]>(team[TEAM_AI_SEARCH], undefined);
+  }
   if (team[TEAM_SORT] !== undefined) {
     config.fileExplorerSort = parseJson(team[TEAM_SORT], config.fileExplorerSort);
   }
   if (team[TEAM_EXCLUSIONS] !== undefined) {
     config.excludeFolders = parseJson<string[]>(team[TEAM_EXCLUSIONS], []);
   }
+  if (team[TEAM_ATTACHMENT_FOLDER] !== undefined) {
+    // 标量键用容错读取（服务端可被手工改动，裸串照原样取用），与内容后端入库时同一口径
+    const folder = spaceMetaScalar(team[TEAM_ATTACHMENT_FOLDER]).trim();
+    config.attachmentFolder = folder || undefined;
+  }
   return { config, corruptBackup: null };
 }
 
 /**
- * 字段级合并补丁写仓库级配置。local = `vault_config_patch`（Rust 按字段合并）；
- * space 按归属拆分：fileExplorerSort/excludeFolders → team meta（sort/exclusions 键，
- * `null` = 删键），attachmentFolder 空间内不适用（无本地附件目录，静默丢弃），
- * 其余字段 → `space_config_patch`（global.json `spaceConfigs` 按 serverKey 字段级合并）。
- * 返回损坏备份文件名（仅本地路径可能非空；空间配置损坏由 global 读路径备份提示）。
+ * 字段级合并补丁写仓库级配置：`target` 缺省 = 当前激活仓库。
+ * local = `vault_config_patch[_at]`（Rust 按字段合并）；
+ * space 按字段拆到各自的团队键（`null` = 删键；AI 配置按字段分键，无需读—合并—写）；
+ * `syncKeys` 在空间无意义（key 由团队元数据承载），忽略。
+ * 返回损坏备份文件名（仅本地路径可能非空）。
  */
-export async function patchVaultConfig(patch: Record<string, unknown>): Promise<string | null> {
-  const identity = spaceIdentity();
+export async function patchVaultConfig(
+  patch: Record<string, unknown>,
+  target?: VaultSettingsTarget,
+): Promise<string | null> {
+  if (target?.kind === "local") return patchLocalVaultConfigAt(target.root, patch);
+  const identity =
+    target?.kind === "space"
+      ? { serverUrl: target.serverUrl, spaceId: target.spaceId }
+      : spaceIdentity();
   if (!identity) return patchLocalVaultConfig(patch);
   const metaValues: Record<string, string> = {};
   const metaDeletes: string[] = [];
-  const rest: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(patch)) {
-    if (key === "fileExplorerSort") {
-      if (value === null) metaDeletes.push(TEAM_SORT);
-      else metaValues[TEAM_SORT] = JSON.stringify(value);
-    } else if (key === "excludeFolders") {
-      if (value === null) metaDeletes.push(TEAM_EXCLUSIONS);
-      else metaValues[TEAM_EXCLUSIONS] = JSON.stringify(value);
-    } else if (key === "attachmentFolder") {
-      // 空间无本地附件目录，该设定不适用：丢弃不报错（读侧同样不会有值）
-      continue;
-    } else {
-      rest[key] = value;
-    }
+    // 字段 → 团队键：AI 配置按字段分键、排序/排除夹/附件夹各有独立键；其余键（如 syncKeys）空间无对应设定，忽略
+    const metaKey =
+      AI_CONFIG_KEYS[key] ??
+      (key === "fileExplorerSort"
+        ? TEAM_SORT
+        : key === "excludeFolders"
+          ? TEAM_EXCLUSIONS
+          : key === "attachmentFolder"
+            ? TEAM_ATTACHMENT_FOLDER
+            : undefined);
+    if (!metaKey) continue;
+    if (value === undefined) continue;
+    if (value === null) metaDeletes.push(metaKey);
+    else metaValues[metaKey] = JSON.stringify(value);
   }
+  // 删除走无通知原语：本路径（配置补丁）的错误由 settingsStore 的写盘入口统一通知，
+  // patchTeamValue 会再弹一次造成双重通知
   for (const key of metaDeletes) {
-    // 删除走无通知原语：本路径（配置补丁）的错误由 settingsStore 的写盘入口统一通知，
-    // patchTeamValue 会再弹一次造成双重通知
     await clientFor(identity.serverUrl).meta.deleteSpaceMeta(identity.spaceId, key);
   }
   if (Object.keys(metaValues).length) {
     await clientFor(identity.serverUrl).meta.patchSpaceMeta(identity.spaceId, { values: metaValues });
   }
-  if (Object.keys(rest).length) {
-    await patchSpaceConfig(globalSpaceKey(identity.serverUrl, identity.spaceId), rest);
-  }
   return null;
 }
 
+
 // ===== 提示词标记 / Agent / 文件夹颜色 =====
 
-/** 读系统提示词标记：local = `.atelyx/prompt-notes.json`；space = team meta `prompt-notes`。 */
-export async function readPromptNotes(): Promise<string[]> {
-  const identity = spaceIdentity();
+/** 读系统提示词标记：local = `.atelyx/prompt-notes.json`（显式目标走 `_at` 命令）；
+ *  space = team meta `prompt-notes`。 */
+export async function readPromptNotes(target?: VaultSettingsTarget): Promise<string[]> {
+  if (target?.kind === "local") return readLocalPromptNotesAt(target.root);
+  const identity =
+    target?.kind === "space"
+      ? { serverUrl: target.serverUrl, spaceId: target.spaceId }
+      : spaceIdentity();
   if (!identity) return readLocalPromptNotes();
   const team = await getTeamValues(identity);
   return parseJson<string[]>(team[TEAM_PROMPT_NOTES], []);
 }
 
-/** 写系统提示词标记：local 原样；space = 只读团队层，通知并拒绝。 */
+/** 写系统提示词标记：local 原样；space = 团队元数据 `prompt-notes`（owner/editor 可写，viewer 由服务端拒绝）。
+ *  不接受目标参数：注册/注销与改名的路径同步只发生在当前激活仓库的文件树操作里，
+ *  没有「在设置弹窗里改另一个仓库的提示词标记」这种入口。 */
 export async function writePromptNotes(files: string[]): Promise<void> {
-  if (spaceIdentity()) rejectTeamWrite();
-  return writeLocalPromptNotes(files);
+  const identity = spaceIdentity();
+  if (!identity) return writeLocalPromptNotes(files);
+  await patchTeamValue(identity, TEAM_PROMPT_NOTES, JSON.stringify(files));
 }
 
-/** 读 Agent 配置：local = `.atelyx/agents.json`；space = team meta `agents`。 */
-export async function readAgents(): Promise<AgentConfig[]> {
-  const identity = spaceIdentity();
+/** 读 Agent 配置：local = `.atelyx/agents.json`（显式目标走 `_at` 命令）；
+ *  space = team meta `agents`。 */
+export async function readAgents(target?: VaultSettingsTarget): Promise<AgentConfig[]> {
+  if (target?.kind === "local") return readLocalAgentsAt(target.root);
+  const identity =
+    target?.kind === "space"
+      ? { serverUrl: target.serverUrl, spaceId: target.spaceId }
+      : spaceIdentity();
   if (!identity) return readLocalAgents();
   const team = await getTeamValues(identity);
   return parseJson<AgentConfig[]>(team[TEAM_AGENTS], []);
 }
 
-/** 写 Agent 配置：local 原样；space = 只读团队层，通知并拒绝。 */
-export async function writeAgents(agents: AgentConfig[]): Promise<void> {
-  if (spaceIdentity()) rejectTeamWrite();
-  return writeLocalAgents(agents);
+/** 写 Agent 配置：local 原样（显式目标走 `_at` 命令）；
+ *  space = 团队元数据 `agents`（owner/editor 可写，viewer 由服务端拒绝）。
+ *  整表替换（服务端元数据无字段级合并）：同一时刻两人各改一次时后写者覆盖，与文件夹颜色同口径。 */
+export async function writeAgents(
+  agents: AgentConfig[],
+  target?: VaultSettingsTarget,
+): Promise<void> {
+  if (target?.kind === "local") return writeLocalAgentsAt(target.root, agents);
+  const identity =
+    target?.kind === "space"
+      ? { serverUrl: target.serverUrl, spaceId: target.spaceId }
+      : spaceIdentity();
+  if (!identity) return writeLocalAgents(agents);
+  await patchTeamValue(identity, TEAM_AGENTS, JSON.stringify(agents));
 }
 
 /** 读文件夹颜色映射：local = `.atelyx/folder-colors.json`；space = team meta `folder-colors`。 */
