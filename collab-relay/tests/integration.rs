@@ -1866,3 +1866,53 @@ async fn media_list_enumerates_reserved_dir_safely() {
     let (status, _) = ctx.get(&url, None, &[]).await;
     assert_eq!(status, 401);
 }
+
+// ===== CORS（桌面 WebView 跨源直连）=====
+
+/// WebView（origin = tauri.localhost）跨源请求先发预检 OPTIONS：服务端必须 200 应答并放行
+/// POST / content-type / authorization；实际跨源请求的响应须携带 allow-origin，
+/// 否则浏览器引擎直接中断请求（Failed to fetch）。
+#[tokio::test]
+async fn cors_preflight_and_cross_origin_requests_allowed() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+
+    // 预检：模拟 WebView origin + 实际请求形态（JSON 体 + Bearer 头）
+    let pre = ctx
+        .http
+        .request(reqwest::Method::OPTIONS, format!("{}/api/auth/register", ctx.base))
+        .header("Origin", "http://tauri.localhost")
+        .header("Access-Control-Request-Method", "POST")
+        .header("Access-Control-Request-Headers", "content-type, authorization")
+        .send()
+        .await
+        .expect("预检请求失败");
+    assert_eq!(pre.status(), 200, "预检必须 200 放行");
+    let h = pre.headers();
+    assert_eq!(h.get("access-control-allow-origin").and_then(|v| v.to_str().ok()), Some("*"));
+    let methods = h.get("access-control-allow-methods").and_then(|v| v.to_str().ok()).unwrap_or("");
+    assert!(methods == "*" || methods.split(',').any(|m| m.trim() == "POST"), "预检应放行 POST：{methods}");
+    let allow = h
+        .get("access-control-allow-headers")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    assert!(allow.contains("content-type"), "预检应放行 content-type：{allow}");
+    assert!(allow.contains("authorization"), "预检应放行 authorization：{allow}");
+
+    // 实际跨源请求：响应必须携带 allow-origin，否则浏览器引擎丢弃响应
+    let res = ctx
+        .http
+        .post(format!("{}/api/auth/register", ctx.base))
+        .header("Origin", "http://tauri.localhost")
+        .json(&json!({ "username": "cors_user", "password": "pass-123456" }))
+        .send()
+        .await
+        .expect("跨源注册请求失败");
+    assert!(res.status().is_success(), "跨源注册应成功");
+    assert_eq!(
+        res.headers().get("access-control-allow-origin").and_then(|v| v.to_str().ok()),
+        Some("*"),
+        "实际响应应携带 allow-origin"
+    );
+}

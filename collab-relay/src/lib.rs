@@ -21,6 +21,7 @@ pub mod ws;
 
 use std::net::SocketAddr;
 
+use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
 use axum::routing::{delete, get, post};
 use axum::Router;
 use tokio::net::TcpListener;
@@ -96,6 +97,16 @@ pub fn build_app(state: ServerState) -> Router {
         // 请求体上限 = 50MB 单文件上限（content::MAX_FILE_BYTES）× base64 膨胀 4/3（约 66.7MB）
         // + JSON 字符串转义与请求包装余量，取 96MB，使自有大小校验（按解码后字节）先于框架拦截生效
         .layer(axum::extract::DefaultBodyLimit::max(96 * 1024 * 1024))
+        // 桌面端 WebView（origin = tauri.localhost）跨源直连本服务，带 JSON 体 / Bearer 头的请求
+        // 会先发 CORS 预检；无 CORS 应答时浏览器引擎直接中断请求（Failed to fetch）。
+        // 客户端不用 cookie 凭据（鉴权走 Authorization 头），放开任意 origin / 方法即安全；
+        // allow-headers 显式列出（`*` 通配在部分实现里不覆盖 Authorization）。
+        .layer(
+            tower_http::cors::CorsLayer::new()
+                .allow_origin(tower_http::cors::Any)
+                .allow_methods(tower_http::cors::Any)
+                .allow_headers([CONTENT_TYPE, AUTHORIZATION]),
+        )
         .with_state(state)
 }
 
