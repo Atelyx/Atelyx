@@ -45,7 +45,7 @@ import { checkAndAutoUpdate as checkAndAutoUpdateSvc, checkForUpdate as checkFor
 import { emitPluginEvent } from "@/services/cordis/events";
 import { usePluginStore } from "@/stores/pluginStore";
 import { useNotificationStore } from "@/stores/notificationStore";
-import type { CanvasFileRow, RecentSpace, RecentVault } from "@/types";
+import type { CanvasFileRow, RecentSpace, RecentVault, VaultSettingsTarget } from "@/types";
 
 /** 手动检查更新状态（设置页「关于」tab 用）。 */
 type UpdateStatus =
@@ -198,6 +198,13 @@ interface AppState {
   openSettings: (tab?: string) => void;
   /** 关闭设置弹窗。 */
   closeSettings: () => void;
+  /** 仓库设置弹窗状态（null = 关闭；target = 被编辑的仓库，可为列表里未激活的仓库）。 */
+  vaultSettingsModal: { target: VaultSettingsTarget } | null;
+  /** 打开仓库设置（文件面板的仓库行 / 空间行右键入口）：
+   *  记录目标并让 settingsStore 建编辑会话（目标是激活仓库时直接编辑激活态，不建会话）。 */
+  openVaultSettings: (target: VaultSettingsTarget) => void;
+  /** 关闭仓库设置（会话在途写落盘后销毁，见 settingsStore.closeVaultSettingsSession）。 */
+  closeVaultSettings: () => void;
 
   loadList: () => Promise<void>;
   /** 打开画布（树行携带 id + file）：设置全局文件状态并记录「上次打开」（uiState）。 */
@@ -455,6 +462,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         currentTableFile: null,
         currentTableTitle: "",
       });
+      // 仓库设置弹窗对应「打开时那个仓库」：激活态已变，弹窗与会话一并关闭（同批同步执行）
+      if (get().vaultSettingsModal) get().closeVaultSettings();
       // 立即清空旧仓库文件树 + 撤销栈/笔记运行时态（**必须在任何 await 之前**）：
       // NoteEditor 随 currentNoteFile 置空而卸载，其 cleanup 按「noteList 是否仍含该文件」决定是否
       // flush——若此处落后于下一个 await（React 提交卸载），noteList 还是旧仓库列表，cleanup 会把
@@ -580,13 +589,15 @@ export const useAppStore = create<AppState>((set, get) => ({
       // 立即清空旧仓库文件树 + 撤销栈/笔记运行时态（同步执行，同 selectVault 防跨仓库守卫）
       useVaultStore.setState({ tree: [], noteList: [], tableList: [] });
       notifyVaultLeaving();
+      // 仓库设置弹窗对应「打开时那个仓库」：激活态已变，弹窗与会话一并关闭
+      if (get().vaultSettingsModal) get().closeVaultSettings();
       // recentSpaces 落盘 global.json（失败不阻塞切换，同 recentVaults）
       try {
         notifyGlobalConfigCorrupt(await updateGlobalConfig({ spaces }));
       } catch (e) {
         console.error("登记最近空间失败", e);
       }
-      // 仓库级配置按身份分流（metadata 层）：local = config.json；space = spaceConfigs + team meta
+      // 仓库级配置按身份分流（metadata 层）：local = config.json；space = 服务端团队元数据
       get().reportLoad("加载仓库配置");
       try {
         await useSettingsStore.getState().loadVaultConfig();
@@ -702,6 +713,16 @@ export const useAppStore = create<AppState>((set, get) => ({
   settingsModal: null,
   openSettings: (tab) => set({ settingsModal: tab ? { tab } : {} }),
   closeSettings: () => set({ settingsModal: null }),
+
+  vaultSettingsModal: null,
+  openVaultSettings: (target) => {
+    set({ vaultSettingsModal: { target } });
+    void useSettingsStore.getState().openVaultSettingsSession(target);
+  },
+  closeVaultSettings: () => {
+    set({ vaultSettingsModal: null });
+    void useSettingsStore.getState().closeVaultSettingsSession();
+  },
 
   loadList: async () => {
     // 竞态守卫按仓库身份比较（非 vaultRoot）：空间仓库无本地 root（恒 null），

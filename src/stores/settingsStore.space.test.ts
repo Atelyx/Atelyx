@@ -2,8 +2,9 @@
  * settingsStore 协作空间分流契约测试（stores/settingsStore.ts 空间分支）。
  *
  * 覆盖：loadVaultConfig 按身份取数（local = config.json + keychain root 条目；
- * space = global.json spaceConfigs + 服务端 team meta + keychain 空间条目）；
- * local→space→local 配置互不串味；persist 空间路径落 spaceConfigs / team meta；
+ * space = 服务端团队元数据：AI 配置按字段分键（含 key）+ sort/exclusions + Agent/提示词）；
+ * local→space→local 配置互不串味；persist 空间路径落团队元数据（不写本机 spaceConfigs/keychain、
+ * 不碰本地 config.json）；「API key 随仓库保存」在空间无意义（不产生任何写）；
  * 写盘在途期间身份切换不污染新身份的存储。
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
@@ -15,6 +16,9 @@ const space = vi.hoisted(() => {
     teamValues: {} as Record<string, string>,
     myValues: {} as Record<string, string>,
     patchSpaceCalls: [] as Array<{ values: Record<string, string> }>,
+    /** 挂起 patchSpaceMeta 应答（在途写守卫测试）。 */
+    holdPatch: null as Promise<void> | null,
+    releasePatch: null as (() => void) | null,
   };
   function makeClient(_serverUrl: string) {
     return {
@@ -25,6 +29,7 @@ const space = vi.hoisted(() => {
         getSpaceMeta: async () => ({ values: { ...state.teamValues } }),
         patchSpaceMeta: async (_spaceId: string, body: { values: Record<string, string> }) => {
           state.patchSpaceCalls.push(body);
+          if (state.holdPatch) await state.holdPatch;
           Object.assign(state.teamValues, body.values);
           return {};
         },
@@ -57,17 +62,12 @@ const h = vi.hoisted(() => {
     vaultConfig: {} as Record<string, unknown>,
     /** global.json 内容（read_global_config 返回）。 */
     globalConfig: {} as Record<string, unknown>,
-    /** space_config_patch 收到的补丁。 */
+    /** space_config_patch 收到的补丁（空间 AI 配置已不落本机，正常路径应为 0 条）。 */
     spaceConfigPatches: [] as Array<{ serverKey: string; patch: Record<string, unknown> }>,
     /** vault_config_patch 收到的补丁（空间下不得出现）。 */
     vaultPatches: [] as Record<string, unknown>[],
-    /** write_global_config 收到的整文件（空间分流不得整文件覆盖）。 */
-    globalWrites: [] as Record<string, unknown>[],
     keychain: new Map<string, string>(),
     keyWrites: [] as string[],
-    /** 挂起 space_config_patch 应答（在途写守卫测试）。 */
-    holdSpacePatch: null as Promise<void> | null,
-    releaseSpacePatch: null as (() => void) | null,
   };
   return { state };
 });
@@ -84,14 +84,12 @@ vi.mock("@tauri-apps/api/core", () => ({
       case "read_global_config":
         return { config: h.state.globalConfig, corruptBackup: null };
       case "write_global_config":
-        h.state.globalWrites.push(a.config as Record<string, unknown>);
         return null;
       case "space_config_patch":
         h.state.spaceConfigPatches.push({
           serverKey: String(a.serverKey),
           patch: a.patch as Record<string, unknown>,
         });
-        if (h.state.holdSpacePatch) await h.state.holdSpacePatch;
         return null;
       case "get_api_key":
         return h.state.keychain.get(`${String(a.vaultRoot)}:${String(a.providerId)}`) ?? "";
@@ -120,23 +118,40 @@ let app: typeof import("./appStore");
 let factory: typeof import("@/services/content/factory");
 
 const SPACE = { kind: "space" as const, serverUrl: "http://s1", spaceId: "sp1" };
-const SERVER_KEY = "http://s1#sp1";
 const SPACE_KEYCHAIN = "space:http://s1#sp1";
+
+/** 读团队 AI 配置（按字段分键）。 */
+function teamAi(): {
+  providers?: Array<Record<string, unknown>>;
+  model?: string;
+  modelProviderId?: string;
+  search?: { tavilyApiKey?: string };
+} {
+  const read = (key: string): unknown => {
+    const raw = space.state.teamValues[key];
+    return raw === undefined ? undefined : JSON.parse(raw);
+  };
+  return {
+    providers: read("ai-providers") as Array<Record<string, unknown>> | undefined,
+    model: read("ai-model") as string | undefined,
+    modelProviderId: read("ai-model-provider") as string | undefined,
+    search: read("ai-search") as { tavilyApiKey?: string } | undefined,
+  };
+}
 
 beforeEach(async () => {
   vi.resetModules();
   space.state.teamValues = {};
   space.state.myValues = {};
   space.state.patchSpaceCalls = [];
+  space.state.holdPatch = null;
+  space.state.releasePatch = null;
   h.state.vaultConfig = {};
   h.state.globalConfig = {};
   h.state.spaceConfigPatches = [];
   h.state.vaultPatches = [];
-  h.state.globalWrites = [];
   h.state.keychain = new Map();
   h.state.keyWrites = [];
-  h.state.holdSpacePatch = null;
-  h.state.releaseSpacePatch = null;
   await import("./noteSessionStore");
   await import("./pluginStore");
   app = await import("./appStore");
@@ -155,42 +170,40 @@ function enterLocal(root: string): void {
 }
 
 describe("loadVaultConfig 空间分流", () => {
-  it("space = spaceConfigs 本体 + team meta sort/exclusions + keychain 空间条目", async () => {
+  it("space = 团队元数据 AI 配置本体（含 key）+ sort/exclusions + 提示词标记", async () => {
     enterSpace();
-    h.state.globalConfig = {
-      spaceConfigs: {
-        [SERVER_KEY]: {
-          providers: [{ id: "p1", name: "空间供应商", baseUrl: "u", models: [] }],
-          model: "m1",
-          modelProviderId: "p1",
-        },
-      },
-    };
+    space.state.teamValues["ai-providers"] = JSON.stringify([
+      { id: "p1", name: "空间供应商", baseUrl: "u", models: [], apiKey: "sk-team" },
+    ]);
+    space.state.teamValues["ai-model"] = JSON.stringify("m1");
+    space.state.teamValues["ai-model-provider"] = JSON.stringify("p1");
     space.state.teamValues.sort = JSON.stringify("name-asc");
     space.state.teamValues.exclusions = JSON.stringify(["草稿"]);
     space.state.teamValues["prompt-notes"] = JSON.stringify(["笔记/团队提示词.md"]);
-    h.state.keychain.set(`${SPACE_KEYCHAIN}:p1`, "sk-space");
+    // 本机 keychain 里的同名条目不该被采用（空间 key 由团队层承载）
+    h.state.keychain.set(`${SPACE_KEYCHAIN}:p1`, "sk-local");
 
     await settings.useSettingsStore.getState().loadVaultConfig();
 
     const s = settings.useSettingsStore.getState();
     expect(s.config.providers[0].name).toBe("空间供应商");
-    expect(s.config.providers[0].apiKey).toBe("sk-space");
+    expect(s.config.providers[0].apiKey).toBe("sk-team");
     expect(s.vaultConfig?.model).toBe("m1");
     expect(s.vaultConfig?.fileExplorerSort).toBe("name-asc");
     expect(s.vaultConfig?.excludeFolders).toEqual(["草稿"]);
     expect(s.promptNotes).toEqual(["笔记/团队提示词.md"]);
   });
 
-  it("spaceConfigs 缺失条目 = 默认配置（不报错、可写盘）", async () => {
+  it("团队层尚无 AI 配置 = 空配置（不报错、可写盘）", async () => {
     enterSpace();
     await settings.useSettingsStore.getState().loadVaultConfig();
 
-    const s = settings.useSettingsStore.getState();
-    expect(s.config.providers).toEqual([]);
+    expect(settings.useSettingsStore.getState().config.providers).toEqual([]);
     await settings.useSettingsStore.getState().addProvider();
     await settings.useSettingsStore.getState().flush();
-    expect(h.state.spaceConfigPatches).toHaveLength(1);
+    expect(space.state.patchSpaceCalls).toHaveLength(1);
+    expect(teamAi().providers).toHaveLength(1);
+    expect(h.state.spaceConfigPatches).toHaveLength(0);
   });
 
   it("local→space→local 配置互不串味（两套预置数据断言）", async () => {
@@ -198,16 +211,11 @@ describe("loadVaultConfig 空间分流", () => {
       providers: [{ id: "pl", name: "本地供应商", baseUrl: "u", models: [] }],
       model: "local-m",
     };
-    h.state.globalConfig = {
-      spaceConfigs: {
-        [SERVER_KEY]: {
-          providers: [{ id: "ps", name: "空间供应商", baseUrl: "u", models: [] }],
-          model: "space-m",
-        },
-      },
-    };
+    space.state.teamValues["ai-providers"] = JSON.stringify([
+      { id: "ps", name: "空间供应商", baseUrl: "u", models: [], apiKey: "key-space" },
+    ]);
+    space.state.teamValues["ai-model"] = JSON.stringify("space-m");
     h.state.keychain.set("E:\\v1:pl", "key-local");
-    h.state.keychain.set(`${SPACE_KEYCHAIN}:ps`, "key-space");
 
     enterLocal("E:\\v1");
     await settings.useSettingsStore.getState().loadVaultConfig();
@@ -234,65 +242,84 @@ describe("loadVaultConfig 空间分流", () => {
 describe("persist 空间分流", () => {
   beforeEach(() => {
     enterSpace();
-    h.state.globalConfig = {
-      spaceConfigs: {
-        [SERVER_KEY]: {
-          providers: [{ id: "p1", name: "A", baseUrl: "u", models: [] }],
-          model: "m1",
-          fileExplorerSort: "mtime-desc",
-        },
-      },
-    };
+    space.state.teamValues["ai-providers"] = JSON.stringify([
+      { id: "p1", name: "A", baseUrl: "u", models: [], apiKey: "sk-team" },
+    ]);
+    space.state.teamValues["ai-model"] = JSON.stringify("m1");
+    space.state.teamValues.sort = JSON.stringify("mtime-desc");
   });
 
-  it("供应商改动落 spaceConfigs（space_config_patch），不整文件写 global.json、不碰本地 config.json", async () => {
+  it("供应商改动落团队元数据（含 key），不写本机 spaceConfigs 与本地 config.json", async () => {
     await settings.useSettingsStore.getState().loadVaultConfig();
     await settings.useSettingsStore.getState().updateProvider("p1", { name: "B" });
     await settings.useSettingsStore.getState().flush();
 
-    expect(h.state.spaceConfigPatches).toHaveLength(1);
-    expect(h.state.spaceConfigPatches[0].serverKey).toBe(SERVER_KEY);
-    expect(h.state.spaceConfigPatches[0].patch).toEqual({
-      providers: [{ id: "p1", name: "B", baseUrl: "u", models: [] }],
-    });
+    expect(teamAi().providers).toEqual([
+      { id: "p1", name: "B", baseUrl: "u", models: [], apiKey: "sk-team" },
+    ]);
+    expect(h.state.spaceConfigPatches).toHaveLength(0);
     expect(h.state.vaultPatches).toHaveLength(0);
-    expect(h.state.globalWrites).toHaveLength(0);
+    expect(h.state.keyWrites).toEqual([]);
   });
 
-  it("排序改动落 team meta（sort 键），不产生 spaceConfigs 补丁", async () => {
+  it("AI 配置按字段分键：改默认模型只写模型键，供应商键不动", async () => {
+    await settings.useSettingsStore.getState().loadVaultConfig();
+    await settings.useSettingsStore.getState().setVaultModel({ providerId: "p1", model: "m2" });
+
+    const ai = teamAi();
+    expect(ai.model).toBe("m2");
+    expect(ai.modelProviderId).toBe("p1");
+    expect(ai.providers).toEqual([
+      { id: "p1", name: "A", baseUrl: "u", models: [], apiKey: "sk-team" },
+    ]);
+  });
+
+  it("排序改动落 sort 键，不产生 spaceConfigs 补丁", async () => {
     await settings.useSettingsStore.getState().loadVaultConfig();
     await settings.useSettingsStore.getState().setFileExplorerSort("name-asc");
 
-    expect(space.state.patchSpaceCalls).toHaveLength(1);
-    expect(space.state.patchSpaceCalls[0].values).toEqual({ sort: JSON.stringify("name-asc") });
+    expect(space.state.patchSpaceCalls.at(-1)?.values).toEqual({
+      sort: JSON.stringify("name-asc"),
+    });
     expect(h.state.spaceConfigPatches).toHaveLength(0);
   });
 
-  it("keychain 条目按空间身份隔离（space:<serverUrl>#<spaceId>）", async () => {
+  it("Tavily key 落团队元数据（不进本机 keychain）", async () => {
     await settings.useSettingsStore.getState().loadVaultConfig();
     await settings.useSettingsStore.getState().setTavilyKey("tvly-123");
+    await settings.useSettingsStore.getState().flush();
 
-    expect(h.state.keyWrites).toContain(`${SPACE_KEYCHAIN}:search-tavily`);
-    expect(h.state.keychain.get(`${SPACE_KEYCHAIN}:search-tavily`)).toBe("tvly-123");
+    expect(teamAi().search?.tavilyApiKey).toBe("tvly-123");
+    expect(h.state.keyWrites).toEqual([]);
+  });
+
+  it("「API key 随仓库保存」在空间无意义：开关不产生任何写", async () => {
+    await settings.useSettingsStore.getState().loadVaultConfig();
+    await settings.useSettingsStore.getState().setSyncKeys(true);
+    await settings.useSettingsStore.getState().flush();
+
+    expect(space.state.patchSpaceCalls).toHaveLength(0);
+    expect(h.state.spaceConfigPatches).toHaveLength(0);
+    expect(h.state.keyWrites).toEqual([]);
+    expect(settings.useSettingsStore.getState().vaultConfig?.syncKeys).toBeUndefined();
   });
 
   it("写盘在途期间身份切换：写落旧空间身份，不污染新身份的存储", async () => {
     await settings.useSettingsStore.getState().loadVaultConfig();
-    h.state.holdSpacePatch = new Promise<void>((r) => (h.state.releaseSpacePatch = r));
+    space.state.holdPatch = new Promise<void>((r) => (space.state.releasePatch = r));
 
     void settings.useSettingsStore.getState().updateProvider("p1", { name: "B" });
     const flushP = settings.useSettingsStore.getState().flush();
-    // 等写盘真正在途（space_config_patch 已收到补丁并被挂起）
-    await vi.waitFor(() => expect(h.state.spaceConfigPatches).toHaveLength(1));
+    // 等写盘真正在途（team meta 已收到补丁并被挂起）
+    await vi.waitFor(() => expect(space.state.patchSpaceCalls.length).toBeGreaterThan(0));
     // 写盘在途：切到本地仓库
     enterLocal("E:\\v2");
-    h.state.releaseSpacePatch!();
+    space.state.releasePatch!();
     await flushP;
-    // 让后续 keychain 写入落地
-    await new Promise((r) => setTimeout(r, 0));
 
-    expect(h.state.spaceConfigPatches).toHaveLength(1);
-    expect(h.state.spaceConfigPatches[0].serverKey).toBe(SERVER_KEY);
+    expect(teamAi().providers).toEqual([
+      { id: "p1", name: "B", baseUrl: "u", models: [], apiKey: "sk-team" },
+    ]);
     // 新仓库身份零写入：无本地 config 补丁、无新身份 keychain 条目
     expect(h.state.vaultPatches).toHaveLength(0);
     expect(h.state.keyWrites.every((k) => !k.startsWith("E:\\v2:"))).toBe(true);
