@@ -58,7 +58,8 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable --now atelyx-server
+systemctl enable atelyx-server
+systemctl restart atelyx-server
 
 echo "----------------------------------------"
 echo "Atelyx 协作服务端已启动"
