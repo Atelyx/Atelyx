@@ -17,6 +17,9 @@
  * 并发安全：读改写整文件（同事写同一侧文件为罕见边界，后写者胜，容忍偶发丢版本）。
  */
 import { deleteVaultFile, readVaultFile, writeVaultFile } from "@/services/vault/aiFiles";
+import { getActiveVaultIdentity } from "@/services/content/factory";
+import { createSpaceClient } from "@/services/space/client";
+import { getToken } from "@/services/space/auth";
 import type { AgentHistoryReadResult } from "@/types";
 
 /** 历史作用的文件类型（决定侧文件路径与扩展名识别）。 */
@@ -234,6 +237,80 @@ function mergeCoAuthors(
   return merged;
 }
 
+/** 追加版本的入参（本地与空间两条路径共用同一形状）。 */
+export interface RecordVersionOptions {
+  content: string;
+  action: HistoryAction;
+  note?: string;
+  maxVersions?: number;
+  coalesceEditMs?: number;
+  /** 侧文件字节预算（缺省 HISTORY_BYTE_BUDGET；测试注入小值验证剪枝）。 */
+  byteBudget?: number;
+  /** 作者覆盖（Agent 工具写入等非当前用户来源）。 */
+  authorOverride?: HistoryAuthor;
+  /** 协作并发存档点内的其他参与作者（主 author 之外；多协作者同时编辑合并进同一版本时记录）。 */
+  coAuthors?: HistoryAuthor[];
+  /** 版本摘要生成（缺省 = 行级 diff）；prev = 上一版本全文（首版为空串）。表格/画布传实体级摘要。 */
+  summarize?: (prev: string, next: string) => string;
+}
+
+/**
+ * 空间路径追加版本：把「判据 + 意图」交给服务端，在服务端同一路径串行锁内完成
+ * 「判重 / 同作者连续编辑合并 / 追加 / 剪枝 / 原子写」——多端并发保存时不丢版本。
+ * 本地路径的算法在这里不适用：各自「读—改—写」整个侧文件会互相覆盖。
+ *
+ * 摘要在这里按客户端读到的上一版全文算好传入（服务端不感知内容格式）：读可能滞后于
+ * 服务端最新版，故摘要属**展示信息**，略滞后可接受；版本内容与序号以服务端为准。
+ *
+ * 失败静默降级（与本地路径同契约）：历史是独立的审计轴，记录失败不得把「保存成功」
+ * 升级成「保存失败」——调用方（笔记挂起输入落盘、画布/表格保存在途、Agent 工具写入）
+ * 都按「历史尽力而为」处理，抛错会让已落盘内容被当成未落盘而反复重试。
+ */
+async function recordVersionRemote(
+  identity: { serverUrl: string; spaceId: string },
+  kind: HistoryKind,
+  file: string,
+  opts: RecordVersionOptions,
+): Promise<void> {
+  const author = opts.authorOverride ?? myAuthor;
+  const summaryOf = (prev: string, next: string): string =>
+    opts.summarize ? opts.summarize(prev, next) : diffSummary(prev, next);
+  // 上一版全文仅供摘要：读失败/无历史时按首版（prev = 空串）处理
+  let prev = "";
+  try {
+    const { versions } = await loadVersions(kind, file);
+    const last = versions[versions.length - 1];
+    const coalesce =
+      !!opts.coalesceEditMs &&
+      opts.action === "edit" &&
+      last?.action === "edit" &&
+      last.author.id === author.id &&
+      Date.now() - last.ts < opts.coalesceEditMs;
+    prev = coalesce ? (versions[versions.length - 2]?.content ?? "") : (last?.content ?? "");
+  } catch {
+    // 摘要尽力而为：读失败按首版处理，不影响服务端版本正确性
+  }
+  try {
+    const client = createSpaceClient(identity.serverUrl, () => getToken(identity.serverUrl));
+    await client.content.historyRecord(identity.spaceId, {
+      kind,
+      file,
+      content: opts.content,
+      action: opts.action,
+      author,
+      summary: summaryOf(prev, opts.content),
+      ...(opts.note ? { note: opts.note } : {}),
+      ...(opts.coAuthors && opts.coAuthors.length ? { coAuthors: opts.coAuthors } : {}),
+      ...(opts.coalesceEditMs ? { coalesceEditMs: opts.coalesceEditMs } : {}),
+      ...(opts.maxVersions ? { maxVersions: opts.maxVersions } : {}),
+      byteBudget: opts.byteBudget ?? HISTORY_BYTE_BUDGET,
+    });
+  } catch (e) {
+    // 历史写入失败（网络/权限/服务端错误）不阻塞编辑：留下可定位日志后降级
+    console.error(`空间历史记录失败（${kind} ${file}）`, e);
+  }
+}
+
 /**
  * 追加一个历史版本（版本边界）。内容与上一版本相同的 no-op 直接跳过（防重复存档点）。
  * maxVersions = 0 表示全留（默认）；>0 时保留最近 N 版（剪枝，防无限膨胀）。
@@ -244,22 +321,13 @@ function mergeCoAuthors(
 export async function recordHistoryVersion(
   kind: HistoryKind,
   file: string,
-  opts: {
-    content: string;
-    action: HistoryAction;
-    note?: string;
-    maxVersions?: number;
-    coalesceEditMs?: number;
-    /** 侧文件字节预算（缺省 HISTORY_BYTE_BUDGET；测试注入小值验证剪枝）。 */
-    byteBudget?: number;
-    /** 作者覆盖（Agent 工具写入等非当前用户来源）。 */
-    authorOverride?: HistoryAuthor;
-    /** 协作并发存档点内的其他参与作者（主 author 之外；多协作者同时编辑合并进同一版本时记录）。 */
-    coAuthors?: HistoryAuthor[];
-    /** 版本摘要生成（缺省 = 行级 diff）；prev = 上一版本全文（首版为空串）。表格/画布传实体级摘要。 */
-    summarize?: (prev: string, next: string) => string;
-  },
+  opts: RecordVersionOptions,
 ): Promise<void> {
+  const identity = getActiveVaultIdentity();
+  if (identity?.kind === "space") {
+    await recordVersionRemote(identity, kind, file, opts);
+    return;
+  }
   const { versions, fromLegacy } = await loadVersions(kind, file);
   const last = versions[versions.length - 1];
   if (last && last.content === opts.content && last.action === opts.action) {

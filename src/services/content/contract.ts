@@ -15,6 +15,7 @@ import type {
   CanvasFile,
   CanvasFileRow,
   CanvasPatch,
+  DatedNote,
   DeleteFolderResult,
   FileTreeNode,
   GlobVaultResult,
@@ -157,4 +158,8 @@ export interface ContentBackend {
   grep(pattern: string, opts?: { path?: string; include?: string }): Promise<GrepVaultResult>;
   /** 仓库历史聚合（版本流 + 按日计数）。 */
   repoHistoryAggregate(): Promise<RepoHistoryResult>;
+
+  // ===== 主页聚合 =====
+  /** 扫描全仓 `.md` frontmatter 的 `date`/`due`（带日期笔记，自动进日历）。 */
+  listDatedNotes(): Promise<DatedNote[]>;
 }

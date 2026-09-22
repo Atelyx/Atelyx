@@ -104,6 +104,7 @@ export function createSpaceStubBackend() {
     glob: () => Promise.reject(noImpl("glob")),
     grep: () => Promise.reject(noImpl("grep")),
     repoHistoryAggregate: () => Promise.reject(noImpl("repoHistoryAggregate")),
+    listDatedNotes: () => Promise.reject(noImpl("listDatedNotes")),
   };
 
   const identity: VaultIdentity = {

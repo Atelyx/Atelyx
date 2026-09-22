@@ -3,9 +3,9 @@
 //! 搜索统一走 Rust 侧请求，理由：
 //! - **SearXNG**：自建实例无内置 CORS 支持，浏览器/WebView 前端直 fetch 必被
 //!   `Access-Control-Allow-Origin` 拦截（官方架构即「放反代后面」）；Rust 代理天然绕过。
-//! - **Tavily**：官方 best practice 明确 API key 不应暴露在客户端代码；key 优先从仓库
-//!   `config.json` 的 `search.tavilyApiKey` 读取（`syncKeys` 开启时随仓库落盘、多设备共享），
-//!   为空则回退 keychain 条目 `provider-<sha256(root)>-search-tavily`（默认模式，按仓库隔离）；不落 WebView。
+//! - **Tavily**：请求走 Rust 侧构造（不落 WebView 代码），key 由前端传入——key 的落点与
+//!   取值（keychain 条目 / `syncKeys` 落盘 / 协作空间团队元数据）统一由前端配置层处理，
+//!   本命令不读仓库配置、不依赖本地仓库根（协作空间无本地 root，按 root 读会取到上一个仓库的残留）。
 //!
 //! 边界捕获：网络/HTTP 错误返回 Err，前端 `runSearch` 降级为 `SearchResultData.error`
 //! （失败降级不阻塞对话，）。
@@ -14,13 +14,11 @@
 
 use reqwest::Url;
 use serde::Serialize;
-use tauri::State;
 
 use crate::net_guard::{
     ensure_local_service_http_url, ensure_public_http_url, local_service_dns_resolver,
     public_dns_resolver, redirect_policy, HostPolicy,
 };
-use crate::vault::{read_vault_config, VaultConfig, VaultState};
 
 /// 单条搜索结果（camelCase 对齐前端 `SearchResultItem`）。
 #[derive(Serialize)]
@@ -31,19 +29,17 @@ pub struct SearchResultItem {
     pub snippet: String,
 }
 
-/// 执行搜索（Tavily / SearXNG，按 provider 分发）。key 与 URL 均由 Rust 侧处理。
+/// 执行搜索（Tavily / SearXNG，按 provider 分发）。key 与实例地址由前端配置层传值、
+/// Rust 侧只做请求与地址校验（不读仓库配置，本地与协作空间同一路径）。
 #[tauri::command]
 pub async fn search_web(
-    state: State<'_, VaultState>,
     provider: String,
     query: String,
     searxng_url: Option<String>,
+    tavily_key: Option<String>,
 ) -> Result<Vec<SearchResultItem>, String> {
-    let root = state.root()?;
-    // 仓库配置读一次：Tavily key（syncKeys 开启时随仓库落盘；关时回退 keychain，按仓库身份哈希取条目）
-    let config = read_vault_config(&root)?;
     match provider.as_str() {
-        "tavily" => tavily_search(root.to_str().unwrap_or_default(), &config, &query).await,
+        "tavily" => tavily_search(tavily_key.unwrap_or_default().as_str(), &query).await,
         "searxng" => searxng_search(searxng_url.unwrap_or_default().as_str(), &query).await,
         other => Err(format!("未知搜索源：{}", other)),
     }
@@ -69,12 +65,7 @@ fn http_client(policy: HostPolicy) -> Result<reqwest::Client, String> {
         .map_err(|e| e.to_string())
 }
 
-async fn tavily_search(
-    root: &str,
-    config: &VaultConfig,
-    query: &str,
-) -> Result<Vec<SearchResultItem>, String> {
-    let key = get_tavily_key(root, config)?;
+async fn tavily_search(key: &str, query: &str) -> Result<Vec<SearchResultItem>, String> {
     if key.is_empty() {
         return Err("未配置 Tavily API Key（工作区「设置」→ 联网搜索）".to_string());
     }
@@ -146,30 +137,6 @@ fn parse_results(results: Option<&serde_json::Value>) -> Vec<SearchResultItem> {
         .unwrap_or_default()
 }
 
-/// 文件内 Tavily key：仅 `syncKeys` 开启（key 随仓库落盘多设备共享）时可采用。关闭时 key 只存
-/// 本机 keychain，文件内残留（跨设备同步/手工编辑遗留）不得参与取用——否则用户在设置里换 key
-/// （关闭态只写 keychain）后，搜索仍会拿文件里的旧 key。
-fn file_tavily_key(config: &VaultConfig) -> Option<&str> {
-    if config.sync_keys != Some(true) {
-        return None;
-    }
-    config
-        .search
-        .as_ref()
-        .and_then(|s| s.tavily_api_key.as_deref())
-        .filter(|k| !k.is_empty())
-}
-
-/// 读 Tavily key：`syncKeys` 开启时取仓库 config.json 的 `search.tavilyApiKey`；
-/// 否则取 keychain 条目（默认模式，按仓库身份 = root 哈希隔离，见 keychain 模块）。
-fn get_tavily_key(root: &str, config: &VaultConfig) -> Result<String, String> {
-    if let Some(k) = file_tavily_key(config) {
-        return Ok(k.to_string());
-    }
-    // keychain 读写统一走 keychain 模块（同 service/username 拼法、NoEntry → 空串语义一致）
-    crate::commands::keychain::get_api_key(root.to_string(), "search-tavily".to_string())
-}
-
 /// 构造 SearXNG 查询 URL（实例地址先过本机/局域网策略，再拼 `/search` 与查询串）。
 fn searxng_request_url(instance_url: &str, query: &str) -> Result<Url, String> {
     let base = instance_url.trim();
@@ -191,7 +158,6 @@ fn searxng_request_url(instance_url: &str, query: &str) -> Result<Url, String> {
 #[cfg(test)]
 mod search_tests {
     use super::*;
-    use crate::vault::VaultSearchConfig;
 
     #[test]
     fn searxng_url_builds_path_and_query() {
@@ -229,36 +195,13 @@ mod search_tests {
         assert!(searxng_request_url("192.168.1.10:8080", "q").is_err());
     }
 
-    /// 构造只带搜索 key / syncKeys 的配置（其余字段走默认）。
-    fn config_with(sync_keys: Option<bool>, tavily_api_key: Option<&str>) -> VaultConfig {
-        VaultConfig {
-            sync_keys,
-            search: Some(VaultSearchConfig {
-                tavily_api_key: tavily_api_key.map(|k| k.to_string()),
-                ..Default::default()
-            }),
-            ..Default::default()
-        }
-    }
-
     #[test]
-    fn file_tavily_key_requires_sync_keys() {
-        // 关闭/缺省 syncKeys：文件内 key 不参与取用（key 只在 keychain）
-        assert_eq!(file_tavily_key(&config_with(Some(false), Some("tvly-file"))), None);
-        assert_eq!(file_tavily_key(&config_with(None, Some("tvly-file"))), None);
-        // 开启：文件内 key 即真相
-        assert_eq!(
-            file_tavily_key(&config_with(Some(true), Some("tvly-file"))),
-            Some("tvly-file")
-        );
-        // 空串/无 search 段视为未配置
-        assert_eq!(file_tavily_key(&config_with(Some(true), Some(""))), None);
-        assert_eq!(
-            file_tavily_key(&VaultConfig {
-                sync_keys: Some(true),
-                ..Default::default()
-            }),
-            None
-        );
+    fn tavily_search_rejects_empty_key() {
+        // key 由前端传入；空 key 明确报错而非发出无凭据请求
+        let err = match tauri::async_runtime::block_on(tavily_search("", "q")) {
+            Err(e) => e,
+            Ok(_) => panic!("空 key 应报错"),
+        };
+        assert!(err.contains("未配置 Tavily API Key"), "{err}");
     }
 }

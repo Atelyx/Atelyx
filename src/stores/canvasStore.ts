@@ -3167,7 +3167,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
   },
   retrySearch: async (nodeId, query) => {
     const settings = useSettingsStore.getState();
-    const data = await runSearch(settings.searchConfig, query);
+    const data = await runSearch(settings.searchConfig, query, settings.tavilyKey);
     // runSearch 不抛异常（失败降级为 error 字段），直接覆盖节点 data 并落盘
     get().updateNodeData(nodeId, { ...data, query });
   },

@@ -10,7 +10,9 @@
 
 pub mod auth;
 pub mod content;
+pub mod dated_notes;
 pub mod fsops;
+pub mod history;
 pub mod index;
 pub mod meta;
 pub mod patches;
@@ -83,6 +85,11 @@ pub fn build_app(state: ServerState) -> Router {
         .route("/api/spaces/{space_id}/tags", get(index::tags))
         .route("/api/spaces/{space_id}/glob", post(index::glob))
         .route("/api/spaces/{space_id}/grep", post(index::grep))
+        // 文件历史（版本侧文件：追加走每路径串行锁内合并，聚合供历史面板与活动密度）
+        .route("/api/spaces/{space_id}/history/record", post(history::record_history))
+        .route("/api/spaces/{space_id}/history/aggregate", get(history::aggregate_history))
+        // 带日期笔记（主页日历；扫 .md frontmatter date/due，尊重团队排除文件夹）
+        .route("/api/spaces/{space_id}/dated-notes", get(dated_notes::dated_notes))
         // 空间配置落点（键值元数据）
         .route(
             "/api/spaces/{space_id}/meta",

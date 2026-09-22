@@ -53,6 +53,7 @@ import type {
   GlobVaultResult,
   GrepVaultResult,
   CanvasPatch,
+  DatedNote,
   TablePatch,
 } from "@/types";
 import type { DeviceInfo, InviteInfo } from "@/types/space";
@@ -195,6 +196,8 @@ export interface DeleteFolderBody {
 export interface DeleteFolderResult {
   needsConfirm?: boolean;
   deleted?: boolean;
+  /** 递归条目数（含隐藏项；删除确认弹窗文案用）。 */
+  itemCount?: number;
 }
 
 /** 媒体目录单层条目（`GET /media/list`，保留媒体目录枚举；树端点不含隐藏目录）。 */
@@ -248,7 +251,57 @@ export interface SpaceClient {
     tags(spaceId: string): Promise<TagRow[]>;
     glob(spaceId: string, body: { pattern: string; path?: string }): Promise<GlobVaultResult>;
     grep(spaceId: string, body: { pattern: string; path?: string; include?: string }): Promise<GrepVaultResult>;
+    /** 追加一个历史版本（服务端在同一路径串行锁内合并，多端并发不丢版本）。 */
+    historyRecord(spaceId: string, body: HistoryRecordBody): Promise<unknown>;
+    /** 聚合全空间历史（版本流 + 全量版本时间戳）。 */
+    historyAggregate(spaceId: string): Promise<SpaceHistoryAggregate>;
+    /** 扫描带日期笔记（frontmatter date/due；尊重团队排除文件夹）。 */
+    datedNotes(spaceId: string): Promise<DatedNote[]>;
   };
+}
+
+/** 历史版本作者（与 `services/history` 的 HistoryAuthor 同形状）。 */
+export interface HistoryRecordAuthor {
+  id: string;
+  name: string;
+  device: string;
+}
+
+/** `POST /history/record` 请求体（judgement 判据由客户端表达，服务端不感知内容格式）。 */
+export interface HistoryRecordBody {
+  kind: "note" | "canvas" | "table";
+  file: string;
+  content: string;
+  action: "edit" | "restore";
+  author: HistoryRecordAuthor;
+  summary?: string;
+  note?: string;
+  coAuthors?: HistoryRecordAuthor[];
+  /** >0 时「上一版为同作者 edit 且在窗口内」就地滑动更新（版本粒度，不逐键）。 */
+  coalesceEditMs?: number;
+  /** >0 时保留最近 N 版。 */
+  maxVersions?: number;
+  /** 侧文件字节预算（超限从最旧剪枝）。 */
+  byteBudget?: number;
+}
+
+/** 历史版本行（聚合返回，不含全文）。 */
+export interface SpaceHistoryEntry {
+  file: string;
+  kind: string;
+  ts: number;
+  authorId: string;
+  authorName: string;
+  authorDevice: string;
+  action: string;
+  summary?: string;
+  note?: string;
+}
+
+/** `GET /history/aggregate` 返回：版本流（ts 倒序、上限）+ 全量版本时间戳。 */
+export interface SpaceHistoryAggregate {
+  entries: SpaceHistoryEntry[];
+  timestamps: number[];
 }
 
 /** 从非 2xx 响应体提取服务端错误消息（优先 `{"error":...}` / `{"message":...}`）与原始 JSON 体。 */
@@ -451,6 +504,11 @@ export function createSpaceClient(serverUrl: string, getToken: () => Promise<str
       tags: (spaceId) => request<TagRow[]>("GET", `/spaces/${spaceId}/tags`),
       glob: (spaceId, body) => request<GlobVaultResult>("POST", `/spaces/${spaceId}/glob`, { body }),
       grep: (spaceId, body) => request<GrepVaultResult>("POST", `/spaces/${spaceId}/grep`, { body }),
+      historyRecord: (spaceId, body) =>
+        request<unknown>("POST", `/spaces/${spaceId}/history/record`, { body }),
+      historyAggregate: (spaceId) =>
+        request<SpaceHistoryAggregate>("GET", `/spaces/${spaceId}/history/aggregate`),
+      datedNotes: (spaceId) => request<DatedNote[]>("GET", `/spaces/${spaceId}/dated-notes`),
     },
   };
 }

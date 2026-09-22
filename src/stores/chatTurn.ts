@@ -83,7 +83,10 @@ function appendTailBlock(messages: LlmMessage[], block: string): void {
  */
 function standardToolCapabilities(targetId: string): ToolCapabilities {
   return {
-    search: (query) => runSearch(useSettingsStore.getState().searchConfig, query),
+    search: (query) => {
+      const s = useSettingsStore.getState();
+      return runSearch(s.searchConfig, query, s.tavilyKey);
+    },
     readFile: (path, opts) => readVaultFileWindow(path, opts),
     glob: (pattern, opts) => globVault(pattern, opts),
     grep: (pattern, opts) => grepVault(pattern, opts),

@@ -319,6 +319,13 @@ const MAPPING: Array<{
     args: {},
     returns: { entries: [], dailyCounts: [] },
   },
+  {
+    name: "listDatedNotes",
+    call: (b) => b.listDatedNotes(),
+    cmd: "list_dated_notes",
+    args: {},
+    returns: [],
+  },
 ];
 
 describe("localBackend 契约符合性", () => {

@@ -258,3 +258,60 @@ describe("recordAgentFileWrite", () => {
     expect(vs[0].content).toBe('{"schema":"atelyx-table/v1"}');
   });
 });
+
+describe("空间仓库：版本追加经服务端路径锁内合并", () => {
+  it("激活空间身份时 recordHistoryVersion 走 history/record（不写本地侧文件）", async () => {
+    const { activateContentIdentity, deactivateContentVault } = await import("@/services/content/factory");
+    const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({
+        url: String(url),
+        body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>,
+      });
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+    try {
+      activateContentIdentity({ kind: "space", serverUrl: "http://s", spaceId: "sp" });
+      memory.set(F, "旧正文");
+      await recordHistoryVersion("note", F, { content: "新正文", action: "edit", coalesceEditMs: 60_000 });
+    } finally {
+      globalThis.fetch = realFetch;
+      deactivateContentVault();
+    }
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe("http://s/api/spaces/sp/history/record");
+    expect(calls[0].body).toMatchObject({
+      kind: "note",
+      file: F,
+      content: "新正文",
+      action: "edit",
+      coalesceEditMs: 60_000,
+    });
+    // 本地侧文件未被触碰
+    expect(memory.get(historyPathFor("note", F))).toBeUndefined();
+  });
+
+  it("服务端记录失败静默降级（不把「保存成功」升级成「保存失败」）", async () => {
+    const { activateContentIdentity, deactivateContentVault } = await import("@/services/content/factory");
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ error: "服务端错误" }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      })) as typeof fetch;
+    try {
+      activateContentIdentity({ kind: "space", serverUrl: "http://s", spaceId: "sp" });
+      // 不抛：历史是独立审计轴，调用方（笔记挂起输入落盘等）按「尽力而为」处理
+      await expect(
+        recordHistoryVersion("note", F, { content: "新正文", action: "edit" }),
+      ).resolves.toBeUndefined();
+    } finally {
+      globalThis.fetch = realFetch;
+      deactivateContentVault();
+    }
+  });
+});

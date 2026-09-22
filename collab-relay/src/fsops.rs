@@ -85,8 +85,20 @@ pub fn is_excluded_name(name: &str) -> bool {
     (name.starts_with('.') && name.len() > 1) || name.ends_with(".tmp")
 }
 
-/// 读取目录条目（相对路径 + 是否目录），应用统一过滤（隐藏项 / `.tmp`）。
-pub fn read_dir_filtered(dir: &Path, rel: &str) -> Result<Vec<(String, bool)>, String> {
+/// 单段名是否命中团队排除名单（任意层级同名项不显示、不被索引；与客户端个人仓库的
+/// `excludeFolders` 完全同口径——按段名匹配，文件与目录一视同仁）。
+pub fn is_excluded_folder(name: &str, exclude_folders: &[String]) -> bool {
+    exclude_folders.iter().any(|f| f == name)
+}
+
+/// 读取目录条目（相对路径 + 是否目录），应用统一过滤（隐藏项 / `.tmp` / 团队排除名单）。
+/// `exclude_folders` 为团队层排除名单（个人仓库由 Rust 侧 `excludeFolders` 按同一「段名匹配」
+/// 口径过滤；名字虽为文件夹，语义与本地一致——同名文件同样隐藏）。
+pub fn read_dir_filtered(
+    dir: &Path,
+    rel: &str,
+    exclude_folders: &[String],
+) -> Result<Vec<(String, bool)>, String> {
     let mut out: Vec<(String, bool)> = vec![];
     for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
@@ -94,25 +106,30 @@ pub fn read_dir_filtered(dir: &Path, rel: &str) -> Result<Vec<(String, bool)>, S
             Some(n) => n.to_string(),
             None => continue,
         };
-        if is_excluded_name(&name) {
+        if is_excluded_name(&name) || is_excluded_folder(&name, exclude_folders) {
             continue;
         }
-        let child_rel = if rel.is_empty() { name.clone() } else { format!("{rel}/{name}") };
         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        let child_rel = if rel.is_empty() { name.clone() } else { format!("{rel}/{name}") };
         out.push((child_rel, is_dir));
     }
     Ok(out)
 }
 
-/// 递归枚举文件（相对路径 + mtime unix 秒；过滤规则同上）。
-pub fn walk_files(root: &Path, rel: &str, out: &mut Vec<(String, i64)>) -> Result<(), String> {
+/// 递归枚举文件（相对路径 + mtime unix 秒；过滤规则同上，含排除文件夹）。
+pub fn walk_files(
+    root: &Path,
+    rel: &str,
+    exclude_folders: &[String],
+    out: &mut Vec<(String, i64)>,
+) -> Result<(), String> {
     let dir = if rel.is_empty() { root.to_path_buf() } else { root.join(rel) };
-    let mut entries = read_dir_filtered(&dir, rel)?;
+    let mut entries = read_dir_filtered(&dir, rel, exclude_folders)?;
     // 按名排序保证遍历顺序确定（read_dir 顺序由文件系统决定）
     entries.sort_by(|a, b| a.0.cmp(&b.0));
     for (child_rel, is_dir) in entries {
         if is_dir {
-            walk_files(root, &child_rel, out)?;
+            walk_files(root, &child_rel, exclude_folders, out)?;
         } else {
             // 先取 mtime 再 move：元组按序求值，先 move 会让 mtime 计算借用失效
             let mtime = file_mtime_secs(&root.join(&child_rel));

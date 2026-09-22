@@ -6,9 +6,8 @@
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { TreeNode } from "@/services/space/client";
-import type { ContentBackend } from "./contract";
 import type { GrepMatchRow } from "@/types";
-import { createSpaceContentBackend, UnsupportedInSpaceError } from "./spaceContent";
+import { createSpaceContentBackend } from "./spaceContent";
 import { createSpaceBackendRegistration } from "./factory";
 import { bytesToBase64 } from "@/utils/base64";
 import { SpaceApiError } from "@/services/space/client";
@@ -24,11 +23,13 @@ const SPACE = "SP";
 interface State {
   tree?: TreeNode[];
   files?: Record<string, { content: string; updatedAt: number }>;
-  folderDelete?: { deleted?: boolean; needsConfirm?: boolean };
+  folderDelete?: { deleted?: boolean; needsConfirm?: boolean; itemCount?: number };
   grep?: Record<string, GrepMatchRow[]>;
   backlinks?: unknown[];
   tags?: unknown[];
   globPaths?: string[];
+  historyAggregate?: { entries: unknown[]; timestamps: number[] };
+  datedNotes?: unknown[];
 }
 
 let calls: Array<{ method: string; url: string; body?: unknown }>;
@@ -61,6 +62,12 @@ function responder(state: State) {
     } else if (path.endsWith("/glob")) {
       const paths = state.globPaths ?? [];
       return { body: { root: (body as { path?: string }).path ?? "", paths, total: paths.length, capped: false } };
+    } else if (path.endsWith("/history/aggregate")) {
+      return { body: state.historyAggregate ?? { entries: [], timestamps: [] } };
+    } else if (path.endsWith("/dated-notes")) {
+      return { body: state.datedNotes ?? [] };
+    } else if (path.endsWith("/history/record")) {
+      return { body: { ok: true } };
     }
     return { body: {} };
   };
@@ -333,23 +340,38 @@ describe("索引方法透传", () => {
   });
 });
 
-describe("不支持方法与无操作", () => {
-  const unsupportedMethods: Array<[string, (b: ContentBackend) => Promise<unknown>]> = [
-    ["repoHistoryAggregate", (b) => b.repoHistoryAggregate()],
-  ];
-
-  for (const [feature, call] of unsupportedMethods) {
-    it(`${feature} 抛 UnsupportedInSpaceError 且 feature 正确`, async () => {
-      setupFetch({});
-      const b = backend();
-      const err = (await call(b).catch((e) => e)) as UnsupportedInSpaceError;
-      expect(err).toBeInstanceOf(UnsupportedInSpaceError);
-      expect(err.feature).toBe(feature);
-      expect(err.message).toBe("协作空间暂不支持该功能");
+describe("历史聚合与带日期笔记", () => {
+  it("repoHistoryAggregate 透传服务端版本流，时间戳按本机时区归日", async () => {
+    const ts1 = new Date(2024, 2, 1, 10, 0, 0).getTime();
+    const ts2 = new Date(2024, 2, 1, 18, 0, 0).getTime();
+    const ts3 = new Date(2024, 2, 2, 9, 0, 0).getTime();
+    setupFetch({
+      historyAggregate: {
+        entries: [
+          { file: "a.md", kind: "note", ts: ts1, authorId: "u", authorName: "甲", authorDevice: "d", action: "edit" },
+        ],
+        timestamps: [ts1, ts2, ts3],
+      },
     });
-  }
+    const res = await backend().repoHistoryAggregate();
+    expect(res.entries).toHaveLength(1);
+    // 同一本机日的两个版本归一天、次日独立
+    expect(res.dailyCounts).toEqual([
+      { date: "2024-03-01", count: 2 },
+      { date: "2024-03-02", count: 1 },
+    ]);
+  });
 
-  it("remapSideloads / remapSideloadsByDir 静默成功（空间无历史侧文件）", async () => {
+  it("listDatedNotes 透传服务端扫描结果", async () => {
+    setupFetch({ datedNotes: [{ file: "n.md", title: "n", date: "2024-01-01", due: null }] });
+    expect(await backend().listDatedNotes()).toEqual([
+      { file: "n.md", title: "n", date: "2024-01-01", due: null },
+    ]);
+  });
+});
+
+describe("不支持方法与无操作", () => {
+  it("remapSideloads / remapSideloadsByDir 静默成功（侧文件迁移由服务端在改名时完成）", async () => {
     setupFetch({});
     const b = backend();
     await expect(b.remapSideloads("a.md", "b.md")).resolves.toBeUndefined();
@@ -360,14 +382,14 @@ describe("不支持方法与无操作", () => {
 });
 
 describe("结构变更透传", () => {
-  it("deleteFolder 映射 needsConfirm / deleted", async () => {
-    setupFetch({ folderDelete: { needsConfirm: true } });
+  it("deleteFolder 映射 needsConfirm / deleted / itemCount", async () => {
+    setupFetch({ folderDelete: { needsConfirm: true, itemCount: 3 } });
     const r = await backend().deleteFolder("非空", false);
-    expect(r).toEqual({ deleted: false, needsConfirm: true, itemCount: 0 });
+    expect(r).toEqual({ deleted: false, needsConfirm: true, itemCount: 3 });
     // force=true 递归删
-    setupFetch({ folderDelete: { deleted: true } });
+    setupFetch({ folderDelete: { deleted: true, itemCount: 3 } });
     const r2 = await backend().deleteFolder("非空", true);
-    expect(r2).toEqual({ deleted: true, needsConfirm: false, itemCount: 0 });
+    expect(r2).toEqual({ deleted: true, needsConfirm: false, itemCount: 3 });
   });
 
   it("createFolder 返回路径", async () => {
@@ -375,9 +397,12 @@ describe("结构变更透传", () => {
     expect(await backend().createFolder("d/e")).toBe("d/e");
   });
 
-  it("renameCanvas 退化为纯路径重命名（标题按文件名推算）", async () => {
-    setupFetch({});
+  it("renameCanvas 更新 .atlx 内 title 后同目录改名", async () => {
+    setupFetch({ files: { "c.atlx": { content: '{"schema":"x","id":"id1","title":"旧名"}', updatedAt: 7 } } });
     await backend().renameCanvas("c.atlx", "新名");
+    const write = calls.find((c) => c.method === "PUT" && c.url.endsWith("/file"));
+    expect((write?.body as { path: string }).path).toBe("c.atlx");
+    expect(JSON.parse((write?.body as { content: string }).content).title).toBe("新名");
     const rename = calls.find((c) => c.url.endsWith("/rename"));
     expect(rename?.body).toEqual({ oldPath: "c.atlx", newPath: "新名.atlx" });
   });

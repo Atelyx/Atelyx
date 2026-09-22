@@ -19,6 +19,7 @@ import {
   writeTableVault,
 } from "@/services/table";
 import { copyImageToClipboard as copyImageSvc, readClipboardText, writeClipboardText } from "@/services/clipboard";
+import { readAttachmentDataUrl as readAttachmentDataUrlSvc } from "@/services/vault";
 import { saveFile } from "@/services/dialog";
 import { bytesToBase64 } from "@/utils/base64";
 import {
@@ -41,6 +42,7 @@ import {
 import { createPersistController } from "@/utils/persist";
 import { createUndoManager } from "@/utils/undoStack";
 import { registerDomainLifecycle } from "@/utils/kernelLifecycle";
+import { useNotificationStore } from "@/stores/notificationStore";
 import {
   applyPasteGrid,
   buildPluginTableSnapshot,
@@ -62,6 +64,7 @@ import type {
   CellStyle,
   CellValue,
   FieldType,
+  ImageCellValue,
   TableField,
   TableFile,
   TablePatch,
@@ -404,6 +407,47 @@ function buildTableSnapshot(extra?: Partial<TableFile>): TableFile {
     updatedAt: Date.now(),
     ...extra,
   };
+}
+
+/**
+ * 把快照内图片单元格的路径引用替换为 dataURL（导出前调用）：Rust 导出命令对 `data:` 前缀条目
+ * 直接解码，故本机与协作空间同一路径（空间附件不在本机磁盘，只有经内容面读回才拿得到字节）。
+ *
+ * 快照的 `rows` 与 store 实时态共享引用（`buildTableSnapshot` 直接把 state.rows 放进快照），
+ * 因此必须写时克隆：就地改会让 dataURL 进入内存态，被下一次防抖保存落盘并随协作补丁广播
+ * （丢路径引用、膨胀文件）。只替换每格首图（Rust 导出多图单元格只取首图）。
+ * 返回读取失败的图片数（调用方据此给用户可见提示，缺图不静默）。
+ */
+async function inlineImageCellsForExport(snapshot: TableFile): Promise<number> {
+  const imageFieldIds = snapshot.fields.filter((f) => f.type === "image").map((f) => f.id);
+  if (imageFieldIds.length === 0) return 0;
+  let failed = 0;
+  const rows: TableRow[] = [];
+  for (const row of snapshot.rows) {
+    let values = row.values;
+    for (const fieldId of imageFieldIds) {
+      const cell = values[fieldId];
+      if (typeof cell !== "object" || cell === null) continue;
+      const images = (cell as ImageCellValue).images;
+      if (!Array.isArray(images) || images.length === 0) continue;
+      const first = images[0];
+      if (typeof first !== "string" || first.startsWith("data:")) continue;
+      let dataUrl: string;
+      try {
+        dataUrl = await readAttachmentDataUrlSvc(first);
+      } catch (e) {
+        failed += 1;
+        console.error(`导出 xlsx：读取图片失败：${first}`, e);
+        continue;
+      }
+      // 首次真要改该行时克隆 values（未改动的行保持原引用）
+      if (values === row.values) values = { ...row.values };
+      values[fieldId] = { ...(cell as ImageCellValue), images: [dataUrl, ...images.slice(1)] };
+    }
+    rows.push(values === row.values ? row : { ...row, values });
+  }
+  snapshot.rows = rows;
+  return failed;
 }
 
 /**
@@ -1019,10 +1063,18 @@ export const useTableStore = create<TableStoreState>((set, get) => ({
       });
       if (!target) return false;
       // 对话框等待期间内存可能被协作补丁改写：沿用弹出前捕获的内容导出
-      await exportTableXlsx(
-        buildTableSnapshot({ id, title, fields, rows, updatedAt: baseUpdatedAt }),
-        target,
-      );
+      const snapshot = buildTableSnapshot({ id, title, fields, rows, updatedAt: baseUpdatedAt });
+      // 图片字节经内容面读回（本机与协作空间同一路径）：导出命令只认 dataURL 或本地仓库附件路径，
+      // 空间仓库的附件不在本机磁盘，须先解析为 dataURL 再交给导出（多图单元格只导首图）
+      const failedImages = await inlineImageCellsForExport(snapshot);
+      await exportTableXlsx(snapshot, target);
+      // 缺图不静默：导出成功但部分图片读不回来时明确告知用户（导出文件已落盘）
+      if (failedImages > 0) {
+        useNotificationStore.getState().notify({
+          level: "warning",
+          message: `导出完成，但有 ${failedImages} 张图片读取失败未嵌入`,
+        });
+      }
       return true;
     } catch (e) {
       console.error("导出 xlsx 失败", e);

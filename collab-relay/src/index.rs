@@ -28,11 +28,13 @@ use crate::{ApiError, ApiResult};
 
 // ===== 索引缓存（进程内，随空间内容重建，不持久化） =====
 
-/// 单空间的派生索引（反链 + 标签）。
+/// 单空间的派生索引（反链 + 标签）。`exclude_folders` 记录构建本缓存时的团队排除名单：
+/// 名单变化时整份作废重建（否则被排除目录的陈旧条目会残留在索引里）。
 #[derive(Default)]
 pub struct SpaceIndex {
     wiki: WikiIndex,
     tags: TagIndex,
+    exclude_folders: Vec<String>,
 }
 
 // ===== 反链索引 =====
@@ -68,9 +70,9 @@ struct WikiIndex {
 }
 
 /// 增量刷新：stat 遍历（快），只重读指纹变化的文件；消失文件剔除。
-fn refresh_wiki_index(root: &FsPath, index: &mut WikiIndex) -> Result<(), String> {
+fn refresh_wiki_index(root: &FsPath, exclude_folders: &[String], index: &mut WikiIndex) -> Result<(), String> {
     let mut seen: HashSet<String> = HashSet::new();
-    walk_md_in(root, "", &mut |rel, path| {
+    walk_md_in(root, "", exclude_folders, &mut |rel, path| {
         seen.insert(rel.to_string());
         let Some(stamp) = file_stamp(path) else {
             return Ok(());
@@ -130,15 +132,20 @@ fn query_wiki_backlinks(index: &WikiIndex, note_name: &str, note_file: &str) -> 
     rows
 }
 
-/// 递归遍历空间 .md（与文件树同过滤：跳过隐藏目录）。
-fn walk_md_in(root: &FsPath, rel: &str, f: &mut dyn FnMut(&str, &FsPath) -> Result<(), String>) -> Result<(), String> {
+/// 递归遍历空间 .md（与文件树同过滤：跳过隐藏目录与团队排除文件夹）。
+fn walk_md_in(
+    root: &FsPath,
+    rel: &str,
+    exclude_folders: &[String],
+    f: &mut dyn FnMut(&str, &FsPath) -> Result<(), String>,
+) -> Result<(), String> {
     let dir = if rel.is_empty() { root.to_path_buf() } else { root.join(rel) };
     if !dir.exists() {
         return Ok(());
     }
-    for (child_rel, is_dir) in read_dir_filtered(&dir, rel)? {
+    for (child_rel, is_dir) in read_dir_filtered(&dir, rel, exclude_folders)? {
         if is_dir {
-            walk_md_in(root, &child_rel, f)?;
+            walk_md_in(root, &child_rel, exclude_folders, f)?;
         } else if child_rel.ends_with(".md") {
             f(&child_rel, &root.join(&child_rel))?;
         }
@@ -169,9 +176,9 @@ struct TagIndex {
     tags: HashMap<String, HashSet<String>>,
 }
 
-fn refresh_tag_index(root: &FsPath, index: &mut TagIndex) -> Result<(), String> {
+fn refresh_tag_index(root: &FsPath, exclude_folders: &[String], index: &mut TagIndex) -> Result<(), String> {
     let mut seen: HashSet<String> = HashSet::new();
-    walk_md_in(root, "", &mut |rel, path| {
+    walk_md_in(root, "", exclude_folders, &mut |rel, path| {
         seen.insert(rel.to_string());
         let Some(stamp) = file_stamp(path) else {
             return Ok(());
@@ -595,6 +602,7 @@ fn collect_glob_files(
     base_rel: &str,
     base_is_file: bool,
     matcher: &GlobMatcher,
+    exclude_folders: &[String],
 ) -> Result<Vec<(String, i64)>, String> {
     if base_is_file {
         let mut out = Vec::new();
@@ -604,7 +612,7 @@ fn collect_glob_files(
         return Ok(out);
     }
     let mut out = Vec::new();
-    crate::fsops::walk_files(root, base_rel, &mut out)?;
+    crate::fsops::walk_files(root, base_rel, exclude_folders, &mut out)?;
     out.retain(|(rel, _)| matcher.is_match(rel));
     Ok(out)
 }
@@ -687,6 +695,7 @@ fn scan_for_matches(
     is_file: bool,
     re: &Regex,
     include: Option<&GlobMatcher>,
+    exclude_folders: &[String],
     retained: &mut Vec<GrepMatchRow>,
     total: &mut usize,
 ) -> Result<(), String> {
@@ -697,7 +706,7 @@ fn scan_for_matches(
         return Ok(());
     }
     let mut files = Vec::new();
-    crate::fsops::walk_files(root, base_rel, &mut files)?;
+    crate::fsops::walk_files(root, base_rel, exclude_folders, &mut files)?;
     for (rel, _) in files {
         if include.map(|m| m.is_match(&rel)).unwrap_or(true) {
             scan_file(root, &rel, re, retained, total);
@@ -711,18 +720,23 @@ fn scan_for_matches(
 /// 取（或懒建）空间的派生索引并增量刷新。刷新是 stat 遍历 + 变化文件重读；
 /// 缓存为全局单锁（所有空间串行刷新），且持锁做阻塞文件 I/O——目标规模（≤30 人内容量）
 /// 下延迟可忽略，不值得为此引入分空间锁或后台任务。
+/// 团队排除名单变化时整份缓存作废重建（成员改了排除夹后索引立即收敛，不留陈旧条目）。
 fn with_space_index<R>(
     state: &ServerState,
     space_id: &str,
     root: &FsPath,
     f: impl FnOnce(&mut SpaceIndex) -> R,
 ) -> R {
+    let exclude = crate::meta::space_exclusions(state.data_dir(), space_id);
     let mut caches = state.inner_index_cache().lock().unwrap();
     let index = caches.entry(space_id.to_string()).or_default();
-    if let Err(e) = refresh_wiki_index(root, &mut index.wiki) {
+    if index.exclude_folders != exclude {
+        *index = SpaceIndex { exclude_folders: exclude.clone(), ..Default::default() };
+    }
+    if let Err(e) = refresh_wiki_index(root, &exclude, &mut index.wiki) {
         tracing::warn!(space_id = %space_id, "反链索引刷新失败：{e}");
     }
-    if let Err(e) = refresh_tag_index(root, &mut index.tags) {
+    if let Err(e) = refresh_tag_index(root, &exclude, &mut index.tags) {
         tracing::warn!(space_id = %space_id, "标签索引刷新失败：{e}");
     }
     f(index)
@@ -775,7 +789,8 @@ pub async fn glob(
     let root = member_root(&state, &space_id, &user)?;
     let matcher = build_glob_matcher(&body.pattern).map_err(|e| ApiError(StatusCode::BAD_REQUEST, e))?;
     let (base_rel, base_is_file) = resolve_base(&root, body.path.as_deref()).map_err(|e| ApiError(StatusCode::BAD_REQUEST, e))?;
-    let mut entries = collect_glob_files(&root.0, &base_rel, base_is_file, &matcher)
+    let exclude = crate::meta::space_exclusions(state.data_dir(), &space_id);
+    let mut entries = collect_glob_files(&root.0, &base_rel, base_is_file, &matcher, &exclude)
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     entries.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
     let total = entries.len();
@@ -807,9 +822,10 @@ pub async fn grep(
         None => None,
     };
     let (base_rel, base_is_file) = resolve_base(&root, body.path.as_deref()).map_err(|e| ApiError(StatusCode::BAD_REQUEST, e))?;
+    let exclude = crate::meta::space_exclusions(state.data_dir(), &space_id);
     let mut retained: Vec<GrepMatchRow> = Vec::new();
     let mut total = 0usize;
-    scan_for_matches(&root.0, &base_rel, base_is_file, &re, include_matcher.as_ref(), &mut retained, &mut total)
+    scan_for_matches(&root.0, &base_rel, base_is_file, &re, include_matcher.as_ref(), &exclude, &mut retained, &mut total)
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let capped = total > retained.len();
     tracing::debug!(space_id = %space_id, pattern_len = body.pattern.len(), total, "grep 完成");

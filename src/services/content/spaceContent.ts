@@ -1,9 +1,8 @@
 /**
  * 协作空间内容后端：内容面契约 → 协作服务端 API（services/space/client 的 content 分组）。
  *
- * 当前覆盖：笔记域 + 画布/表格读写/补丁 + 附件/临时区/入库 + 结构变更（含引用同步）+ 索引。
- * 历史侧文件与仓库历史聚合不支持（`remapSideloads*` 为静默成功、`repoHistoryAggregate` 抛
- * `UnsupportedInSpaceError`），UI 据此禁用入口。
+ * 当前覆盖：笔记域 + 画布/表格读写/补丁 + 附件/临时区/入库 + 结构变更（含引用同步）+ 索引
+ * + 文件历史（追加经服务端 `history/record` 在路径锁内合并，聚合经 `history/aggregate`）。
  *
  * 空间内媒体目录约定（服务端保留目录，树/索引不出现在结果中、读写可达）：
  * - 画布未入库临时附件：`.space-media/temp/<canvasId>/<fileName>`
@@ -38,6 +37,7 @@ import type {
   CanvasCreateResult,
   CanvasFile,
   CanvasFileRow,
+  DailyCount,
   DeleteFolderResult,
   FileTreeNode,
   LinkRewriteResult,
@@ -45,6 +45,8 @@ import type {
   ListDirResult,
   ReadWindowResult,
   RebuildLinksResult,
+  RepoHistoryEntry,
+  RepoHistoryResult,
   TableCreateResult,
   TableFile,
 } from "@/types";
@@ -57,20 +59,6 @@ import {
 } from "@/services/space/client";
 import { getToken } from "@/services/space/auth";
 import type { ContentBackend, TableImageSource } from "./contract";
-
-/** 协作空间暂不支持的契约方法统一抛此错误，携带方法名供 UI 判定禁用入口。 */
-export class UnsupportedInSpaceError extends Error {
-  readonly feature: string;
-  constructor(feature: string) {
-    super("协作空间暂不支持该功能");
-    this.name = "UnsupportedInSpaceError";
-    this.feature = feature;
-  }
-}
-
-function unsupported(feature: string): UnsupportedInSpaceError {
-  return new UnsupportedInSpaceError(feature);
-}
 
 /** 409 冲突镜像的本地 Tauri 字符串错误文案（须与 Rust 命令逐字一致，见文件头注释）。 */
 function conflictError(kind: "画布" | "表格"): string {
@@ -1026,12 +1014,34 @@ export function createSpaceContentBackend(serverUrl: string, spaceId: string): C
       }
       return { rewritten };
     },
-    // renameCanvas：空间内无 .atlx 标题字段可改，退化为纯路径重命名（标题按文件名推算）。
+    // renameCanvas：更新 .atlx 内 title 后同目录改文件名（与本地 rename_canvas_vault 同语义）。
+    // 标题即文件名是仓库不变式；两次 HTTP 无法成事务，故改名失败时回滚 title（回滚也失败则
+    // 保留可定位日志），避免留下「标题已改、文件名未改」的持久半状态。调用方已按同目录去重
+    // 保证新名不撞兄弟画布。
     async renameCanvas(file: string, newTitle: string): Promise<void> {
+      const { data, updatedAt } = await readEntityJson(file, "画布");
+      const oldTitle = typeof data.title === "string" ? data.title : stripExt(baseName(file));
       const dir = file.includes("/") ? file.slice(0, file.lastIndexOf("/")) : "";
-      const name = `${newTitle}.atlx`;
-      const newFile = dir ? `${dir}/${name}` : name;
-      await client.content.rename(spaceId, { oldPath: file, newPath: newFile });
+      const newFile = siblingEntityPath(dir, newTitle, "atlx");
+      // 写 title 经冲突镜像包装（409 文案与本地一致）；同时推进 updatedAt（本地 rename_canvas_vault
+      // 会改 updated_at，画布列表按它排序，不改则空间内重命名不置顶）
+      const stamped = { ...data, title: newTitle, updatedAt: Math.floor(Date.now() / 1000) };
+      await writeEntityWithBase(file, stamped, updatedAt, "画布");
+      if (newFile === file) return;
+      try {
+        await client.content.rename(spaceId, { oldPath: file, newPath: newFile });
+      } catch (e) {
+        // 改名失败：把 title 回滚为原名，保持「标题 = 文件名」不变式（回滚失败只记录，不掩盖原错误）
+        try {
+          await client.content.writeFile(spaceId, {
+            path: file,
+            content: JSON.stringify({ ...data, title: oldTitle }),
+          });
+        } catch (rollbackErr) {
+          console.error(`画布改名失败后回滚标题亦失败：${file}`, rollbackErr);
+        }
+        throw e;
+      }
     },
     moveCanvas: (oldFile, newFile) =>
       client.content.rename(spaceId, { oldPath: oldFile, newPath: newFile }),
@@ -1072,11 +1082,11 @@ export function createSpaceContentBackend(serverUrl: string, spaceId: string): C
     deleteTable: (file) => client.content.deleteFile(spaceId, file),
     async deleteFolder(dir: string, force: boolean): Promise<DeleteFolderResult> {
       const res = await client.content.deleteFolder(spaceId, { path: dir, force });
-      // 服务端仅返回 deleted / needsConfirm；空间无递归计数，itemCount 置 0（UI 仅作非空提示）
+      // itemCount 由服务端递归统计（含隐藏项，与本地 count_dir_items 同口径）
       return {
         deleted: res.deleted ?? false,
         needsConfirm: res.needsConfirm ?? false,
-        itemCount: 0,
+        itemCount: res.itemCount ?? 0,
       };
     },
     async createFolder(dir: string): Promise<string> {
@@ -1142,7 +1152,9 @@ export function createSpaceContentBackend(serverUrl: string, spaceId: string): C
       return { scanned: res.paths.length, modified, links };
     },
 
-    // ===== 历史（协作空间无历史端点）=====
+    // ===== 历史侧文件迁移（服务端在内容改名/移动时自行迁移，客户端无需动作）=====
+    // 本地这两步由客户端在 rename/move 后调用（Rust remap_sideloads）；空间里服务端
+    // 知道每次改名（见 collab-relay history::remap_after_rename），客户端调用为无操作。
     remapSideloads: () => Promise.resolve(),
     remapSideloadsByDir: () => Promise.resolve(),
 
@@ -1265,7 +1277,29 @@ export function createSpaceContentBackend(serverUrl: string, spaceId: string): C
       include: opts?.include,
     }),
 
-    // ===== 历史聚合（服务端无对应端点）=====
-    repoHistoryAggregate: () => Promise.reject(unsupported("repoHistoryAggregate")),
+    // ===== 历史聚合（服务端扫侧文件返回版本流 + 全量时间戳；按本机时区归日在此完成）=====
+    repoHistoryAggregate: async (): Promise<RepoHistoryResult> => {
+      const res = await client.content.historyAggregate(spaceId);
+      return { entries: res.entries as RepoHistoryEntry[], dailyCounts: countByLocalDay(res.timestamps) };
+    },
+
+    // ===== 主页聚合 =====
+    // 带日期笔记由服务端扫 .md frontmatter（尊重团队排除文件夹），与本地同口径
+    listDatedNotes: () => client.content.datedNotes(spaceId),
   };
+}
+
+/** 版本时间戳 → 按本机时区归日的计数（与本地 Rust `list_repo_history` 同口径：日期按本机时区）。
+ * 时间戳为毫秒 epoch；缺失/非法值跳过。 */
+function countByLocalDay(timestamps: number[]): DailyCount[] {
+  const counts = new Map<string, number>();
+  for (const ts of timestamps) {
+    if (!Number.isFinite(ts)) continue;
+    const d = new Date(ts);
+    const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([date, count]) => ({ date, count }))
+    .sort((a, b) => a.date.localeCompare(b.date));
 }

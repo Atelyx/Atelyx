@@ -29,8 +29,6 @@ import { MenuSlotList } from "@/components/plugins/MenuSlot";
 import { useVaultLinkHandlers } from "@/hooks/useVaultLinkHandlers";
 import { useNoteBodySession } from "@/hooks/useNoteBodySession";
 import { useNoteUndoRouting } from "@/hooks/useNoteUndoRouting";
-import { useIsSpaceVault } from "@/hooks/useIsSpaceVault";
-import { SPACE_UNSUPPORTED_NOTICE } from "@/constants/space";
 import { usePopupAnchor } from "@/hooks/usePopupAnchor";
 import { useVaultTagCandidates } from "@/hooks/useVaultTagCandidates";
 import { PopupLayer } from "@/components/common/PopupLayer";
@@ -70,8 +68,6 @@ export function NoteEditor({ file }: { file: string }) {
   // 保存状态存 noteStore（面板 header 展示；会话写入，本组件只读）
   const noteSaveStatus = useNoteStore((s) => s.noteSaveStates[file]);
   const loadError = noteSaveStatus?.loadError ?? false;
-  // 激活仓库为协作空间：历史/附件等未开放能力入口禁用（统一门控）
-  const isSpaceVault = useIsSpaceVault();
   const collabEnabled = useSettingsStore((s) => s.collabEnabled);
   const collabConnected = useCollabStore((s) => s.connected);
   const isCollab = collabEnabled && collabConnected;
@@ -570,8 +566,7 @@ export function NoteEditor({ file }: { file: string }) {
                   menu.close();
                   setHistoryOpen(true);
                 }}
-                disabled={isSpaceVault}
-                title={isSpaceVault ? SPACE_UNSUPPORTED_NOTICE : "查看本笔记的历史版本并回滚"}
+                title="查看本笔记的历史版本并回滚"
               >
                 <span className="w-3.5 flex-shrink-0" />
                 历史记录

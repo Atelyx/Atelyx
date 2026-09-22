@@ -249,11 +249,13 @@ async fn two_accounts_share_space_with_content_ops() {
         .await;
     assert_eq!(status, 200);
     assert_eq!(del["needsConfirm"], true);
+    assert_eq!(del["itemCount"], 1, "非空目录应回报递归条目数：{del}");
     let (status, del) = ctx
         .send(reqwest::Method::DELETE, &format!("/api/spaces/{space_id}/folder"), Some(&a_token), Some(json!({ "path": "归档", "force": true })), &[])
         .await;
     assert_eq!(status, 200);
     assert_eq!(del["deleted"], true);
+    assert_eq!(del["itemCount"], 1);
     let (status, _) = ctx.get(&format!("/api/spaces/{space_id}/file"), Some(&a_token), &[("path", "归档/旧方案.md")]).await;
     assert_eq!(status, 404);
 
@@ -483,10 +485,310 @@ async fn derived_indexes_on_space_content() {
     assert!(matches.iter().any(|m| m["path"] == "笔记/备忘.md"), "{grep}");
 }
 
+// ===== 团队排除文件夹（任意层级同名目录不进树/索引/检索） =====
+
+#[tokio::test]
+async fn team_exclusions_hide_folders_across_tree_and_search() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let space_id = setup_two_members(&ctx, "alice", "bob").await;
+    let a_token = {
+        let (status, body) = ctx.post("/api/auth/login", None, json!({ "username": "alice", "password": "pass-123456" })).await;
+        assert_eq!(status, 200);
+        body["token"].as_str().unwrap().to_string()
+    };
+
+    // 可见文件 + 两个同名「草稿」目录（根级与嵌套），各含一篇带标签的笔记
+    // + 一个与排除名同名的无扩展名文件（段名匹配与本地个人仓库同口径：同名文件也隐藏）
+    //   —— 放在另一父目录，避免与同名目录同父冲突
+    for (path, content) in [
+        ("笔记/正式.md", "#正式 正文"),
+        ("草稿/秘密.md", "#草稿标签 不应出现"),
+        ("笔记/草稿/深.md", "#草稿标签 不应出现"),
+        ("素材/草稿", "#草稿标签 不应出现"),
+    ] {
+        let (status, _) = ctx
+            .put(&format!("/api/spaces/{space_id}/file"), Some(&a_token), json!({ "path": path, "content": content }))
+            .await;
+        assert_eq!(status, 200);
+    }
+
+    // 未设排除：目录与标签都在
+    let (_, tree) = ctx.get(&format!("/api/spaces/{space_id}/tree"), Some(&a_token), &[]).await;
+    assert!(tree.as_array().unwrap().iter().any(|n| n["name"] == "草稿"));
+    let (_, tags) = ctx.get(&format!("/api/spaces/{space_id}/tags"), Some(&a_token), &[]).await;
+    assert!(tags.as_array().unwrap().iter().any(|t| t["tag"] == "草稿标签"));
+
+    // 写入团队层排除名单
+    let (status, _) = ctx
+        .send(
+            reqwest::Method::PATCH,
+            &format!("/api/spaces/{space_id}/meta"),
+            Some(&a_token),
+            Some(json!({ "values": { "exclusions": "[\"草稿\"]" } })),
+            &[],
+        )
+        .await;
+    assert_eq!(status, 200, "设置排除名单应成功");
+
+    // 树：任意层级的「草稿」目录都不出现；同名文件（不同父目录）同样不出现
+    fn tree_has(nodes: &Value, pred: &dyn Fn(&Value) -> bool) -> bool {
+        let mut stack: Vec<&Value> = nodes.as_array().map(|a| a.iter().collect()).unwrap_or_default();
+        while let Some(n) = stack.pop() {
+            if pred(n) {
+                return true;
+            }
+            if let Some(children) = n["children"].as_array() {
+                stack.extend(children.iter());
+            }
+        }
+        false
+    }
+    let (_, tree) = ctx.get(&format!("/api/spaces/{space_id}/tree"), Some(&a_token), &[]).await;
+    assert!(!tree_has(&tree, &|n| n["name"] == "草稿"), "排除目录不应出现在树中：{tree}");
+    assert!(
+        !tree_has(&tree, &|n| n["path"] == "素材/草稿"),
+        "与排除名相同的文件也应被排除：{tree}"
+    );
+
+    // 索引：被排除目录里的标签不计入
+    let (_, tags) = ctx.get(&format!("/api/spaces/{space_id}/tags"), Some(&a_token), &[]).await;
+    assert!(
+        !tags.as_array().unwrap().iter().any(|t| t["tag"] == "草稿标签"),
+        "排除目录标签不应计入：{tags}"
+    );
+    assert!(tags.as_array().unwrap().iter().any(|t| t["tag"] == "正式"), "可见文件标签仍在：{tags}");
+
+    // glob：排除目录内文件不命中
+    let (_, g) = ctx.post(&format!("/api/spaces/{space_id}/glob"), Some(&a_token), json!({ "pattern": "*.md" })).await;
+    assert!(
+        !g["paths"].as_array().unwrap().iter().any(|p| p.as_str().unwrap().contains("草稿")),
+        "排除目录不应进 glob：{g}"
+    );
+
+    // grep：排除目录内内容不命中
+    let (_, grep) = ctx
+        .post(&format!("/api/spaces/{space_id}/grep"), Some(&a_token), json!({ "pattern": "不应出现", "include": "*.md" }))
+        .await;
+    assert_eq!(grep["total"], 0, "排除目录内容不应进 grep：{grep}");
+
+    // 清除排名单 → 目录与标签重新出现
+    let (status, _) = ctx
+        .send(reqwest::Method::DELETE, &format!("/api/spaces/{space_id}/meta"), Some(&a_token), None, &[("key", "exclusions")])
+        .await;
+    assert_eq!(status, 200);
+    let (_, tree) = ctx.get(&format!("/api/spaces/{space_id}/tree"), Some(&a_token), &[]).await;
+    assert!(tree_has(&tree, &|n| n["name"] == "草稿"), "清除排除后目录应回来：{tree}");
+    let (_, tags) = ctx.get(&format!("/api/spaces/{space_id}/tags"), Some(&a_token), &[]).await;
+    assert!(tags.as_array().unwrap().iter().any(|t| t["tag"] == "草稿标签"), "清除排除后标签应回来：{tags}");
+}
+
+// ===== 文件历史（追加 / 聚合 / 重命名迁移） =====
+
+#[tokio::test]
+async fn history_record_aggregate_and_rename_migration() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let space_id = setup_two_members(&ctx, "alice", "bob").await;
+    let a_token = {
+        let (status, body) = ctx.post("/api/auth/login", None, json!({ "username": "alice", "password": "pass-123456" })).await;
+        assert_eq!(status, 200);
+        body["token"].as_str().unwrap().to_string()
+    };
+    let author = json!({ "id": "dev-1", "name": "甲", "device": "dev-1" });
+    let record = |file: &str, content: &str, action: &str, coalesce: i64| {
+        let ctx = &ctx;
+        let token = a_token.clone();
+        let space = space_id.clone();
+        let author = author.clone();
+        let file = file.to_string();
+        let content = content.to_string();
+        let action = action.to_string();
+        async move {
+            ctx.post(
+                &format!("/api/spaces/{space}/history/record"),
+                Some(&token),
+                json!({
+                    "kind": "note",
+                    "file": file,
+                    "content": content,
+                    "action": action,
+                    "author": author,
+                    "summary": "摘要",
+                    "coalesceEditMs": coalesce,
+                }),
+            )
+            .await
+        }
+    };
+
+    // 首版 + 第二版（作者相同、coalesce=0 不合并）
+    let (status, _) = record("笔记/a.md", "v1", "edit", 0).await;
+    assert_eq!(status, 200, "首次记录应成功");
+    let (status, _) = record("笔记/a.md", "v2", "edit", 0).await;
+    assert_eq!(status, 200);
+
+    // 内容 no-op：不新增版本
+    let (status, body) = record("笔记/a.md", "v2", "edit", 0).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["skipped"], true, "同内容应跳过：{body}");
+
+    // coalesce 窗口内同作者连续编辑：就地滑动更新（seq 不变、版本数不增）
+    let (status, _) = record("笔记/a.md", "v3", "edit", 60_000).await;
+    assert_eq!(status, 200);
+
+    // 聚合：版本流 + 时间戳（v1 与滑动更新后的 v3 = 两版）
+    let (status, agg) = ctx
+        .get(&format!("/api/spaces/{space_id}/history/aggregate"), Some(&a_token), &[])
+        .await;
+    assert_eq!(status, 200);
+    let entries = agg["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 2, "v1 + coalesce 后的 v3 = 两版：{agg}");
+    assert_eq!(entries[0]["file"], "笔记/a.md");
+    assert!(entries[0]["ts"].as_i64().unwrap() >= entries[1]["ts"].as_i64().unwrap(), "ts 倒序");
+    assert_eq!(agg["timestamps"].as_array().unwrap().len(), 2);
+
+    // 重命名：侧文件随迁（改名后聚合仍能找到该文件的新路径）
+    let (status, _) = ctx
+        .put(
+            &format!("/api/spaces/{space_id}/file"),
+            Some(&a_token),
+            json!({ "path": "笔记/a.md", "content": "v3" }),
+        )
+        .await;
+    assert_eq!(status, 200, "先落内容文件，重命名需源存在");
+    let (status, _) = ctx
+        .post(
+            &format!("/api/spaces/{space_id}/rename"),
+            Some(&a_token),
+            json!({ "oldPath": "笔记/a.md", "newPath": "笔记/b.md" }),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let (_, agg) = ctx
+        .get(&format!("/api/spaces/{space_id}/history/aggregate"), Some(&a_token), &[])
+        .await;
+    assert_eq!(agg["entries"].as_array().unwrap().len(), 2, "改名后历史应随迁：{agg}");
+    assert!(
+        agg["entries"].as_array().unwrap().iter().all(|e| e["file"] == "笔记/b.md"),
+        "历史文件路径应指向新名：{agg}"
+    );
+
+    // 文件夹改名：其下文件的侧文件按目录前缀迁移（聚合里的路径同步改写）
+    let (status, _) = ctx
+        .put(
+            &format!("/api/spaces/{space_id}/file"),
+            Some(&a_token),
+            json!({ "path": "笔记/子/c.md", "content": "c1" }),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let (status, _) = ctx
+        .post(
+            &format!("/api/spaces/{space_id}/history/record"),
+            Some(&a_token),
+            json!({
+                "kind": "note", "file": "笔记/子/c.md", "content": "c1", "action": "edit", "author": author
+            }),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let (status, _) = ctx
+        .post(
+            &format!("/api/spaces/{space_id}/rename"),
+            Some(&a_token),
+            json!({ "oldPath": "笔记/子", "newPath": "笔记/孙" }),
+        )
+        .await;
+    assert_eq!(status, 200, "目录改名应成功");
+    let (_, agg) = ctx
+        .get(&format!("/api/spaces/{space_id}/history/aggregate"), Some(&a_token), &[])
+        .await;
+    assert!(
+        agg["entries"].as_array().unwrap().iter().any(|e| e["file"] == "笔记/孙/c.md"),
+        "目录改名后子文件历史应随迁：{agg}"
+    );
+    assert!(
+        !agg["entries"].as_array().unwrap().iter().any(|e| e["file"] == "笔记/子/c.md"),
+        "不应残留旧目录路径的历史：{agg}"
+    );
+}
+
+#[tokio::test]
+async fn history_record_rejected_for_viewer() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let space_id = setup_two_members(&ctx, "alice", "bob").await;
+    let (_owner_token, _b_token, viewer_token) = add_viewer(&ctx, &space_id).await;
+    let (status, _) = ctx
+        .post(
+            &format!("/api/spaces/{space_id}/history/record"),
+            Some(&viewer_token),
+            json!({
+                "kind": "note", "file": "a.md", "content": "x", "action": "edit",
+                "author": { "id": "v", "name": "查看者", "device": "d" }
+            }),
+        )
+        .await;
+    assert_eq!(status, 403, "查看者不得写历史");
+}
+
+// ===== 带日期笔记 =====
+
+#[tokio::test]
+async fn dated_notes_scans_frontmatter() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let space_id = setup_two_members(&ctx, "alice", "bob").await;
+    let a_token = {
+        let (status, body) = ctx.post("/api/auth/login", None, json!({ "username": "alice", "password": "pass-123456" })).await;
+        assert_eq!(status, 200);
+        body["token"].as_str().unwrap().to_string()
+    };
+    for (path, content) in [
+        ("会议.md", "---\ndate: 2024-05-01\ndue: \"2024-05-03\"\n---\n正文"),
+        ("无日期.md", "---\ntitle: x\n---\n正文"),
+        ("草稿/隐藏.md", "---\ndate: 2024-06-01\n---\n正文"),
+    ] {
+        let (status, _) = ctx
+            .put(&format!("/api/spaces/{space_id}/file"), Some(&a_token), json!({ "path": path, "content": content }))
+            .await;
+        assert_eq!(status, 200);
+    }
+    let (status, notes) = ctx
+        .get(&format!("/api/spaces/{space_id}/dated-notes"), Some(&a_token), &[])
+        .await;
+    assert_eq!(status, 200);
+    let arr = notes.as_array().unwrap();
+    // 未设排除：两篇带日期笔记都入选（无日期那篇不入选）
+    assert_eq!(arr.len(), 2, "带日期的笔记入选、无日期的不入选：{notes}");
+    let meeting = arr.iter().find(|n| n["file"] == "会议.md").expect("会议.md 应入选");
+    assert_eq!(meeting["date"], "2024-05-01");
+    assert_eq!(meeting["due"], "2024-05-03");
+    assert!(arr.iter().any(|n| n["file"] == "草稿/隐藏.md"), "未设排除时草稿也入选：{notes}");
+
+    // 设置排除后：排除目录内的带日期笔记不入选
+    let (status, _) = ctx
+        .send(
+            reqwest::Method::PATCH,
+            &format!("/api/spaces/{space_id}/meta"),
+            Some(&a_token),
+            Some(json!({ "values": { "exclusions": "[\"草稿\"]" } })),
+            &[],
+        )
+        .await;
+    assert_eq!(status, 200);
+    let (_, notes) = ctx
+        .get(&format!("/api/spaces/{space_id}/dated-notes"), Some(&a_token), &[])
+        .await;
+    let arr = notes.as_array().unwrap();
+    assert_eq!(arr.len(), 1, "排除后仅剩会议.md：{notes}");
+    assert!(arr.iter().all(|n| n["file"] != "草稿/隐藏.md"));
+}
+
 // ===== WS 空间频道 =====
 
 type WsStream = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
-
 async fn ws_connect(base: &str, path: &str, hello: Value) -> WsStream {
     let url = format!("{}{path}", base.replacen("http", "ws", 1));
     let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.expect("WS 连接失败");

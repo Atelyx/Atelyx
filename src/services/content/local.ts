@@ -13,6 +13,7 @@ import type {
   CanvasCreateResult,
   CanvasFile,
   CanvasFileRow,
+  DatedNote,
   DeleteFolderResult,
   FileTreeNode,
   GlobVaultResult,
@@ -151,4 +152,7 @@ export const localBackend: ContentBackend = {
       include: opts?.include,
     }),
   repoHistoryAggregate: () => invoke<RepoHistoryResult>("list_repo_history"),
+
+  // ===== 主页聚合 =====
+  listDatedNotes: () => invoke<DatedNote[]>("list_dated_notes"),
 };

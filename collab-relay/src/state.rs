@@ -71,8 +71,8 @@ pub struct Space {
     pub created_at: i64,
     pub members: Vec<Member>,
     /// 收编的既有目录（绝对路径）。None = 默认布局（数据目录下 spaces/<id>/）。
-    /// 内容文件树与个人仓库同构（自由文件夹的 .md/.atlx/.atb）；目录里若残留 .atelyx/
-    /// 属迁移态遗留——隐藏目录不进树/索引，服务端与客户端均不读写它。
+    /// 内容文件树与个人仓库同构（自由文件夹的 .md/.atlx/.atb）；隐藏目录 `.atelyx/`
+    /// 只承载随内容走的历史侧文件（不进树/索引/检索，见 history 模块）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root_path: Option<String>,
 }

@@ -90,7 +90,9 @@ pub async fn tree(
     Path(space_id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let root = member_root(&state, &space_id, &user)?;
-    let nodes = list_tree_in(&root.0, "").map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    // 团队层排除文件夹：任意层级同名目录不进树（与个人仓库 `excludeFolders` 同语义）
+    let exclude = crate::meta::space_exclusions(state.data_dir(), &space_id);
+    let nodes = list_tree_in(&root.0, "", &exclude).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(serde_json::to_value(nodes).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?))
 }
 
@@ -104,12 +106,12 @@ struct TreeNode {
     children: Vec<TreeNode>,
 }
 
-fn list_tree_in(root: &std::path::Path, rel: &str) -> Result<Vec<TreeNode>, String> {
+fn list_tree_in(root: &std::path::Path, rel: &str, exclude_folders: &[String]) -> Result<Vec<TreeNode>, String> {
     let dir = if rel.is_empty() { root.to_path_buf() } else { root.join(rel) };
     let mut nodes: Vec<TreeNode> = vec![];
-    for (child_rel, is_dir) in read_dir_filtered(&dir, rel)? {
+    for (child_rel, is_dir) in read_dir_filtered(&dir, rel, exclude_folders)? {
         let path = root.join(&child_rel);
-        let children = if is_dir { list_tree_in(root, &child_rel)? } else { vec![] };
+        let children = if is_dir { list_tree_in(root, &child_rel, exclude_folders)? } else { vec![] };
         nodes.push(TreeNode {
             name: child_rel.rsplit('/').next().unwrap_or(&child_rel).to_string(),
             path: child_rel,
@@ -243,12 +245,18 @@ pub async fn rename(
     if !from.exists() {
         return Err(not_found("源路径不存在"));
     }
+    // 目录判定须在改名之前取（改完旧路径已不存在）
+    let from_is_dir = from.is_dir();
     let to = root.join(&body.new_path, true).map_err(join_err)?;
     if to.exists() {
         return Err(ApiError(StatusCode::CONFLICT, format!("目标已存在：{}", body.new_path)));
     }
     std::fs::rename(&from, &to)
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("重命名失败：{e}")))?;
+    // 历史侧文件随内容改名 / 移动迁移：服务端知道每次改名，比客户端 watcher 可靠；
+    // 迁移在每侧文件锁内进行（与历史追加互斥，防旧名侧文件被并发重建）；
+    // 失败静默（历史尽力而为，不阻塞重命名主流程）
+    crate::history::remap_after_rename(&state, &space_id, &root, &body.old_path, &body.new_path, from_is_dir).await;
     tracing::info!(space_id = %space_id, from = %body.old_path, to = %body.new_path, "内容重命名");
     Ok(Json(json!({})))
 }
@@ -345,6 +353,8 @@ pub struct DeleteFolderBody {
 }
 
 /// 删文件夹：非空且未 force 时返回 `needsConfirm`（由调用方二次确认后带 force 重发）。
+/// 两者都带 `itemCount` 递归条目数（含隐藏项，与客户端 `count_dir_items` 同口径）——
+/// 删除确认弹窗按它显示「包含 N 个文件/文件夹」。
 pub async fn delete_folder(
     State(state): State<ServerState>,
     user: AuthUser,
@@ -359,14 +369,31 @@ pub async fn delete_folder(
     if !path.is_dir() {
         return Err(not_found("文件夹不存在"));
     }
-    let empty = std::fs::read_dir(&path).map(|mut d| d.next().is_none()).unwrap_or(false);
+    let item_count = count_dir_items(&path);
+    let empty = item_count == 0;
     if !empty && !body.force {
-        return Ok(Json(json!({ "needsConfirm": true })));
+        return Ok(Json(json!({ "needsConfirm": true, "itemCount": item_count })));
     }
     let result = if empty { std::fs::remove_dir(&path) } else { std::fs::remove_dir_all(&path) };
     result.map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("删除失败：{e}")))?;
     tracing::info!(space_id = %space_id, path = %body.path, "文件夹删除");
-    Ok(Json(json!({ "deleted": true })))
+    Ok(Json(json!({ "deleted": true, "itemCount": item_count })))
+}
+
+/// 递归统计目录内条目数（含隐藏文件与子目录；删除确认弹窗文案用）。
+/// 遍历失败按已数到的部分返回（确认文案尽力而为，不因个别不可读子项挡住删除流程）。
+fn count_dir_items(dir: &std::path::Path) -> usize {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut count = 0;
+    for entry in rd.flatten() {
+        count += 1;
+        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            count += count_dir_items(&entry.path());
+        }
+    }
+    count
 }
 
 #[derive(Deserialize)]

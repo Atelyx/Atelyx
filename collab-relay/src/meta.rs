@@ -121,6 +121,28 @@ fn user_scope_root(data_dir: &FsPath, space_id: &str, user_id: &str) -> PathBuf 
     data_dir.join("meta").join(space_id).join("user").join(user_id)
 }
 
+/// 团队层排除文件夹名单的键名（与客户端 `constants/spaceMeta.ts` 的同一份定义对应；
+/// 服务端其余元数据键不设白名单，此键因被内容端点消费而具名）。
+const TEAM_EXCLUSIONS_KEY: &str = "exclusions";
+
+/// 读空间团队层的排除文件夹名单（内容端点按它过滤文件树/索引，镜像个人仓库的
+/// `excludeFolders` 语义）：真源是团队元数据（空间无 `.atelyx/config.json`）。
+/// 按单键直读（`<data>/meta/<space>/space/exclusions.json`），不扫全量 scope——
+/// 后者在任一无关键损坏时返回读失败（本函数只能降级空名单），会让排除名单在请求间闪烁，
+/// 也顺带读入 `ai-providers` 等含明文 key 的无关键。缺失/损坏/解析失败一律返回空
+/// （排错配置不阻塞读取，与元数据读取容错同口径）。
+pub(crate) fn space_exclusions(data_dir: &FsPath, space_id: &str) -> Vec<String> {
+    let root = space_scope_root(data_dir, space_id);
+    // 键名固定合法（无隐藏段/保留名），key_to_path 不会失败；防御性降级空名单
+    let Ok(path) = key_to_path(&root, TEAM_EXCLUSIONS_KEY) else {
+        return vec![];
+    };
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return vec![];
+    };
+    serde_json::from_str::<Vec<String>>(&raw).unwrap_or_default()
+}
+
 /// 读某 scope 全量键值（目录不存在 = 空 map）。遍历复用 fsops::walk_files（屏蔽隐藏项与 `.tmp` 临时件）。
 fn list_scope(root: &FsPath) -> Result<HashMap<String, String>, ApiError> {
     let mut out: HashMap<String, String> = HashMap::new();
@@ -128,7 +150,8 @@ fn list_scope(root: &FsPath) -> Result<HashMap<String, String>, ApiError> {
         return Ok(out);
     }
     let mut files: Vec<(String, i64)> = vec![];
-    walk_files(root, "", &mut files).map_err(internal)?;
+    // 元数据目录无排除文件夹概念（非空间内容树），传空名单
+    walk_files(root, "", &[], &mut files).map_err(internal)?;
     for (rel, _) in files {
         // 文件均以为 .json 结尾；剥掉后缀回得原始 key（内容不强制 JSON，后缀仅作标记）
         let key = rel.strip_suffix(".json").unwrap_or(&rel);

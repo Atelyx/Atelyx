@@ -4,15 +4,13 @@
  * 收起态显示「最近版本」一行概览，展开态列出该文件全部版本（时间/作者/行为/摘要，点击开 HistoryModal）。
  * 默认只列最近编辑的若干文件（可「显示全部」）。
  *
- * 数据来自 repoHistoryStore（Rust 聚合 `.atelyx/history/` 全部版本，ts 倒序、上限）。
+ * 数据来自 repoHistoryStore（按仓库身份经内容面聚合全部版本，ts 倒序、上限）。
  * 不含「最近文件活动」区——最近文件统一由「最近打开」面板承载，避免与主页重复。
  */
 import { ChevronDown, ChevronRight, ExternalLink, History, RefreshCw } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { useAppStore } from "@/stores/appStore";
+import { useAppStore, selectVaultIdentityKey } from "@/stores/appStore";
 import { useRepoHistoryStore } from "@/stores/repoHistoryStore";
-import { useIsSpaceVault } from "@/hooks/useIsSpaceVault";
-import { SPACE_UNSUPPORTED_NOTICE } from "@/constants/space";
 import { FileKindIcon, openFileByKind } from "@/components/common/FileKindIcon";
 import { HistoryModal, ACTION_LABEL } from "@/components/history/HistoryModal";
 import { noteTitleFromFile } from "@/utils/filename";
@@ -140,11 +138,9 @@ function FileGroup({
 
 /** 仓库历史面板：按文件分组的版本流（可折叠 + 只列最近文件）。 */
 export function RepoHistoryPanel() {
-  const vaultRoot = useAppStore((s) => s.vaultRoot);
+  const vaultIdentityKey = useAppStore(selectVaultIdentityKey);
   const entries = useRepoHistoryStore((s) => s.entries);
   const loading = useRepoHistoryStore((s) => s.loading);
-  // 激活仓库为协作空间：版本流读本地历史侧文件，空间无本地数据——整面板降级为空态提示
-  const isSpaceVault = useIsSpaceVault();
   const [historyTarget, setHistoryTarget] = useState<{ kind: "note" | "canvas" | "table"; file: string } | null>(null);
   const [expandedFiles, setExpandedFiles] = useState<Set<string>>(new Set());
   const [showAllFiles, setShowAllFiles] = useState(false);
@@ -154,7 +150,7 @@ export function RepoHistoryPanel() {
     void useRepoHistoryStore.getState().load();
     setExpandedFiles(new Set());
     setShowAllFiles(false);
-  }, [vaultRoot]);
+  }, [vaultIdentityKey]);
 
   const groups = useMemo(() => {
     const map = new Map<string, VersionGroup>();
@@ -200,13 +196,9 @@ export function RepoHistoryPanel() {
         )}
       </div>
 
-      {/* 按文件分组的版本流（协作空间无本地历史侧文件：整面板降级为提示空态） */}
+      {/* 按文件分组的版本流 */}
       <div className="flex-1 min-h-0 overflow-auto p-2 space-y-1">
-        {isSpaceVault ? (
-          <div className="py-8 text-center text-xs" style={{ color: "var(--text-muted)" }}>
-            {SPACE_UNSUPPORTED_NOTICE}
-          </div>
-        ) : visibleGroups.length === 0 ? (
+        {visibleGroups.length === 0 ? (
           <div className="py-8 text-center text-xs" style={{ color: "var(--text-muted)" }}>
             {loading ? "加载中…" : "暂无版本历史（编辑保存后自动记录）"}
           </div>

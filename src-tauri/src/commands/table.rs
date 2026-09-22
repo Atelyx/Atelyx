@@ -384,12 +384,15 @@ fn table_attachments_rel(table_id: &str) -> String {
     format!(".atelyx/attachments/{table_id}")
 }
 
-/// 图片条目字节：遗留内嵌 dataURL → base64 解码；外置路径引用 → 读仓库附件（safe_join 校验）。
-/// xlsx 导出用；非 dataURL 条目按相对仓库根路径解析。
-fn resolve_table_image_bytes(root: &std::path::Path, entry: &str) -> Result<Vec<u8>, String> {
+/// 图片条目字节：内嵌 dataURL → base64 解码；外置路径引用 → 读仓库附件（safe_join 校验）。
+/// `root` 为 None（协作空间会话无本地仓库根）时路径引用无法解析，返回错误由调用方跳过该图。
+/// 导出前端已把路径引用就地换成 dataURL（见 `tableStore.inlineImageCellsForExport`），
+/// 所以纯空间会话亦能带图导出；路径分支只服务旧快照/未内联的调用方。
+fn resolve_table_image_bytes(root: Option<&std::path::Path>, entry: &str) -> Result<Vec<u8>, String> {
     if entry.starts_with("data:") {
         data_url_to_bytes(entry).ok_or_else(|| "图片数据解码失败".to_string())
     } else {
+        let root = root.ok_or_else(|| "图片为仓库路径引用且当前无本地仓库根，无法读取".to_string())?;
         let path = safe_join(root, entry, false)?;
         std::fs::read(&path).map_err(|e| format!("读取图片失败：{} ({e})", entry))
     }
@@ -423,7 +426,8 @@ pub fn import_table_image_vault(
 /// 导出表格为 .xlsx（目标路径来自系统保存对话框，任意位置可写）。
 /// 列 = 字段顺序，表头 = 字段名（金色底 + 粗体 + 全表边框 + 冻结首行）；
 /// image 字段嵌入单元格首图（等比缩至 140x90），text 换行，number/duration 数值，其余文本。
-/// 图片条目兼容两种形态：遗留内嵌 dataURL 直接解码；外置附件路径按仓库根读取。
+/// 图片条目两种形态：dataURL 直接解码；外置附件路径按本地仓库根读取——协作空间会话无本地
+/// 仓库根，故不在此硬要求 root（前端导出前已把路径引用换成 dataURL）。
 #[tauri::command]
 pub fn export_table_xlsx(
     table: TableFile,
@@ -432,7 +436,7 @@ pub fn export_table_xlsx(
 ) -> Result<(), String> {
     use rust_xlsxwriter::{Format, FormatBorder, Image, Workbook};
 
-    let root = state.root()?;
+    let root = state.root().ok();
     let mut workbook = Workbook::new();
     let sheet = workbook.add_worksheet();
     sheet
@@ -465,7 +469,7 @@ pub fn export_table_xlsx(
                 // 多图单元格只导首图；dataURL/附件路径 → 字节 → 等比缩至 140x90 嵌入（行高撑开）
                 "image" => {
                     if let Some(url) = image_cell_entries(value).first().copied() {
-                        if let Ok(bytes) = resolve_table_image_bytes(&root, url) {
+                        if let Ok(bytes) = resolve_table_image_bytes(root.as_deref(), url) {
                             if let Ok(mut img) = Image::new_from_buffer(&bytes) {
                                 img = img.set_scale_to_size(140, 90, true);
                                 if sheet.insert_image(excel_row, col, &img).is_ok() {

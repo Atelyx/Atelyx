@@ -1,12 +1,18 @@
 /**
- * 图片单元格导入的大小预检：超过单文件字节上限的图片必须在读取/上传前拒绝——
- * 读成 base64 再被服务端按解码后字节拒绝是纯浪费，且服务端状态码对用户不可读。
+ * 表格图片相关：单元格导入的大小预检 + xlsx 导出前把图片路径经内容面读回为 dataURL。
+ * 预检理由：超过单文件字节上限的图片必须在读取/上传前拒绝——读成 base64 再被服务端按
+ * 解码后字节拒绝是纯浪费，且服务端状态码对用户不可读。
+ * 导出内联理由：导出命令只认 dataURL 或本地仓库附件路径；协作空间附件不在本机磁盘，
+ * 须先解析为 dataURL 再交给导出（本机与空间同一路径）。
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { TABLE_IMAGE_MAX_BYTES } from "@/constants/table";
 
 const h = vi.hoisted(() => ({
   importTableImage: vi.fn(),
+  exportTableXlsx: vi.fn(),
+  readAttachmentDataUrl: vi.fn(),
+  saveFile: vi.fn(),
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -27,8 +33,16 @@ vi.mock("@/services/table", () => ({
   writeTableVault: vi.fn(),
   patchTableVault: vi.fn(async () => null),
   cleanupTableAttachments: vi.fn(async () => 0),
-  exportTableXlsx: vi.fn(),
+  exportTableXlsx: h.exportTableXlsx,
   saveImageToDownloads: vi.fn(),
+}));
+
+vi.mock("@/services/vault", () => ({
+  readAttachmentDataUrl: h.readAttachmentDataUrl,
+}));
+
+vi.mock("@/services/dialog", () => ({
+  saveFile: h.saveFile,
 }));
 
 type TableStore = typeof import("./tableStore");
@@ -38,6 +52,9 @@ let table: TableStore;
 beforeEach(async () => {
   vi.resetModules();
   h.importTableImage.mockReset();
+  h.exportTableXlsx.mockReset();
+  h.readAttachmentDataUrl.mockReset();
+  h.saveFile.mockReset();
   // 先起 collabStore 再取 tableStore：tableStore 的协作接线在模块加载期读 collabStore 服务面
   await import("./collabStore");
   table = await import("./tableStore");
@@ -75,6 +92,38 @@ describe("addImageToCell 大小预检", () => {
       images: [".space-media/tables/t1/img-x.png"],
     });
     // 取消导入落盘触发的防抖保存 timer，不跨测试残留
+    table.useTableStore.getState().clear();
+  });
+});
+
+describe("exportXlsx 图片内联", () => {
+  it("路径引用经内容面读回 dataURL 后交给导出，且不改动内存态（快照写时克隆）", async () => {
+    h.saveFile.mockResolvedValue("C:/out.xlsx");
+    h.readAttachmentDataUrl.mockResolvedValue("data:image/png;base64,AAAA");
+    table.useTableStore.setState({
+      rows: [{ id: "r1", values: { f1: { images: ["attachments/a.png"] } } }] as never,
+    });
+
+    expect(await table.useTableStore.getState().exportXlsx()).toBe(true);
+
+    expect(h.readAttachmentDataUrl).toHaveBeenCalledWith("attachments/a.png");
+    const snapshot = h.exportTableXlsx.mock.calls[0][0] as { rows: { values: Record<string, unknown> }[] };
+    expect(snapshot.rows[0].values.f1).toEqual({ images: ["data:image/png;base64,AAAA"] });
+    // 内存态仍是路径引用：就地改会把 dataURL 落盘并随协作补丁广播
+    expect(table.useTableStore.getState().rows[0].values.f1).toEqual({
+      images: ["attachments/a.png"],
+    });
+    table.useTableStore.getState().clear();
+  });
+
+  it("已是 dataURL 的条目不再读回（零多余 I/O）", async () => {
+    h.saveFile.mockResolvedValue("C:/out.xlsx");
+    table.useTableStore.setState({
+      rows: [{ id: "r1", values: { f1: { images: ["data:image/png;base64,BBBB"] } } }] as never,
+    });
+
+    expect(await table.useTableStore.getState().exportXlsx()).toBe(true);
+    expect(h.readAttachmentDataUrl).not.toHaveBeenCalled();
     table.useTableStore.getState().clear();
   });
 });
