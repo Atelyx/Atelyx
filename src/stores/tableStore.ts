@@ -118,8 +118,9 @@ interface TableStoreState {
   /** 对当前选中区域应用单元格样式（patch = 增量，undefined 键 = 清除该项；null = 清除全部格式）。
    *  布尔切换语义由调用方按汇总态决定传 true/undefined（mixed 一律传 true 拉齐）。一步撤销。 */
   applyCellStyle: (patch: Partial<CellStyle> | null) => void;
-  /** 图片单元格追加图片（本机图片文件 → 附件路径引用；File 由组件的文件选择输入提供）。 */
-  addImageToCell: (rowId: string, fieldId: string, file: File) => Promise<void>;
+  /** 图片单元格追加图片（本机图片文件 → 附件路径引用；File 由组件的文件选择输入提供，可一次多选）。
+   *  整批一次导入 = 一步撤销；单张超限/导入失败只丢弃该张，其余按选择顺序追加。 */
+  addImagesToCell: (rowId: string, fieldId: string, files: File[]) => Promise<void>;
   /** 图片单元格移除指定下标图片。 */
   removeImageAt: (rowId: string, fieldId: string, index: number) => void;
   /** 图片单元格切换展示模式（单图轮播 ⇄ 九宫格，按单元格记忆；一次切换 = 一步撤销）。 */
@@ -191,6 +192,16 @@ interface TableStoreState {
   tableHistoryLoad: (file: string) => Promise<HistoryVersion[]>;
   /** 回滚表格到指定版本：写回快照 + 重载内存 + 记 restore 版本；成功返回快照内容，失败返回 null。 */
   tableHistoryRollback: (file: string, seq: number) => Promise<string | null>;
+}
+
+/** 批量导入的失败原因串：超限与导入失败分别计数，供用户可读提示（两类都为 0 时不产生串）。 */
+function batchImageFailureReason(tooLargeCount: number, failedCount: number): string {
+  const parts: string[] = [];
+  if (tooLargeCount > 0) {
+    parts.push(`${tooLargeCount} 张超过 ${Math.floor(TABLE_IMAGE_MAX_BYTES / 1024 / 1024)}MB 上限`);
+  }
+  if (failedCount > 0) parts.push(`${failedCount} 张导入失败`);
+  return parts.join("，");
 }
 
 /** 撤销快照：fields + rows（含 id/calcType/width/height/options/values，id 保真——撤销后选中引用不悬空）。 */
@@ -973,34 +984,53 @@ export const useTableStore = create<TableStoreState>((set, get) => ({
     schedulePersist();
   },
 
-  addImageToCell: async (rowId, fieldId, file) => {
+  addImagesToCell: async (rowId, fieldId, files) => {
     const { id, tableFile } = get();
-    if (!tableFile) return;
-    // 大小预检在读取/上传前：超限文件读成 base64 传到服务端才被拒是纯浪费，且服务端 413 对用户不可读
-    if (file.size > TABLE_IMAGE_MAX_BYTES) {
-      console.error(`添加图片失败：图片超过 ${TABLE_IMAGE_MAX_BYTES} 字节上限`);
-      set({ error: `图片超过 ${Math.floor(TABLE_IMAGE_MAX_BYTES / 1024 / 1024)}MB 上限，无法导入` });
+    if (!tableFile || files.length === 0) return;
+    // 逐张导入（结果顺序 = 选择顺序）；单张超限/失败只丢该张，不整批回滚
+    const imported: string[] = [];
+    let tooLarge = 0;
+    let failed = 0;
+    for (const file of files) {
+      // 大小预检在读取/上传前：超限文件读成 base64 传到服务端才被拒是纯浪费，且服务端 413 对用户不可读
+      if (file.size > TABLE_IMAGE_MAX_BYTES) {
+        console.error(`添加图片失败：${file.name} 超过 ${TABLE_IMAGE_MAX_BYTES} 字节上限`);
+        tooLarge++;
+        continue;
+      }
+      try {
+        // 图片字节由前端读为 base64 再落附件目录（协作空间里本机路径对服务端不可达），
+        // 单元格只存唯一路径引用——保存补丁不含图片字节（大表保存提速）
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        imported.push(
+          await importTableImage({ fileName: file.name, base64Data: bytesToBase64(bytes) }, id),
+        );
+      } catch (e) {
+        console.error(`添加图片失败：${file.name}`, e);
+        failed++;
+      }
+    }
+    if (imported.length === 0) {
+      set({ error: `${batchImageFailureReason(tooLarge, failed)}，图片未添加` });
       return;
     }
-    try {
-      // 图片字节由前端读为 base64 再落附件目录（协作空间里本机路径对服务端不可达），
-      // 单元格只存唯一路径引用——保存补丁不含图片字节（大表保存提速）
-      const bytes = new Uint8Array(await file.arrayBuffer());
-      const rel = await importTableImage(
-        { fileName: file.name, base64Data: bytesToBase64(bytes) },
-        id,
-      );
-      // 图片增删 = 独立操作，一次一个撤销单元（读盘成功、变更前入栈）
-      undoMgr.push();
-      const current = get().rows.find((r) => r.id === rowId)?.values[fieldId];
-      const prev = typeof current === "object" && current !== null ? current : undefined;
-      const images = prev ? [...prev.images] : [];
-      images.push(rel);
-      // display 是按单元格记忆的展示偏好，增删图片不得重置
-      get().updateCell(rowId, fieldId, { ...prev, images });
-    } catch (e) {
-      console.error("添加图片失败", e);
-      set({ error: "添加图片失败，请重试" });
+    // 竞态守卫：逐张导入期间可能已切换表格，旧表的附件路径不得写进新表的行（同写盘路径 :500）
+    const now = get();
+    if (now.tableFile !== tableFile) return;
+    // 整批一次导入 = 一步撤销（读盘全部成功、变更前入栈）
+    undoMgr.push();
+    const current = now.rows.find((r) => r.id === rowId)?.values[fieldId];
+    const prev = typeof current === "object" && current !== null ? current : undefined;
+    const images = prev ? [...prev.images] : [];
+    images.push(...imported);
+    // display 是按单元格记忆的展示偏好，增删图片不得重置
+    get().updateCell(rowId, fieldId, { ...prev, images });
+    if (tooLarge > 0 || failed > 0) {
+      // 部分失败不静默，且不能走 error：变更已触发防抖保存，保存成功会把 error 清掉（同导出缺图提示）
+      useNotificationStore.getState().notify({
+        level: "warning",
+        message: `${batchImageFailureReason(tooLarge, failed)}，其余图片已添加`,
+      });
     }
   },
 
@@ -1010,7 +1040,7 @@ export const useTableStore = create<TableStoreState>((set, get) => ({
     undoMgr.push();
     const images = [...current.images];
     images.splice(index, 1);
-    get().updateCell(rowId, fieldId, { ...current, images }); // 保留 display（同 addImageToCell）
+    get().updateCell(rowId, fieldId, { ...current, images }); // 保留 display（同 addImagesToCell）
   },
 
   toggleImageDisplay: (rowId, fieldId) => {

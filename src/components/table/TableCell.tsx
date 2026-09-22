@@ -16,7 +16,7 @@
  * 拼音首字母）不丢失。IME 组合必须起始于真实输入元素：组合在无输入元素的文档上开始，
  * 首键会被当纯字母提交、后续才正常。
  *
- * 纯 UI：值读写经 store（updateCell/addImageToCell/removeImageAt）；
+ * 纯 UI：值读写经 store（updateCell/addImagesToCell/removeImageAt）；
  * 单元格选中（selectCell）由 TableEditor 的 td 层 pointer 手势统一处理。
  */
 import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";

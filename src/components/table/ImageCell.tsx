@@ -11,9 +11,11 @@
  *   useTableImageSrc 立即渲染。
  * - 放大预览：portal 到 body（逃离表格 CSS zoom 缩放包装层）；连续打开以序号守卫，
  *   仅最新请求落地（防并发解析互相覆盖）。
- * - hover 按钮组：左上角 = 展示模式切换（多图时）+ 追加图片；右上角 = 移除当前图（仅轮播，
- *   九宫格无移除入口）。
- * - 值读写经 store（addImageToCell/removeImageAt/toggleImageDisplay/reorderImages）；
+ * - hover 按钮组：左上角 = 展示模式切换（多图时）+ 追加图片（可多选）；右上角 = 移除当前图
+ *   （仅轮播，九宫格无移除入口）。
+ * - 文件选择输入由两个分支共用同一个 ref，故必须在两处都在场（只挂一支会让另一支的 click
+ *   落到空 ref 上，静默无反应）。
+ * - 值读写经 store（addImagesToCell/removeImageAt/toggleImageDisplay/reorderImages）；
  *   单元格值经 normalizeImageValue 读取（磁盘/远端旧形态与脏值统一归一，勿内联 typeof 判定）。
  */
 import { GalleryHorizontal, ImagePlus, LayoutGrid, Plus, X } from "lucide-react";
@@ -44,7 +46,7 @@ export const ImageCell = memo(function ImageCell({ field, row }: Props) {
   const images = cell.images;
   const gridMode = cell.display === "grid";
   const title = useTableStore((s) => s.title);
-  const addImageToCell = useTableStore((s) => s.addImageToCell);
+  const addImagesToCell = useTableStore((s) => s.addImagesToCell);
   const removeImageAt = useTableStore((s) => s.removeImageAt);
   const toggleImageDisplay = useTableStore((s) => s.toggleImageDisplay);
 
@@ -74,8 +76,24 @@ export const ImageCell = memo(function ImageCell({ field, row }: Props) {
   // 当前图即时渲染（未及预载/单图路径）；已预载则用 srcMap
   const currentSrc = useTableImageSrc(images[cur] ?? "");
 
-  // 本机图片选择输入：File 交给 store（字节由前端读 base64 后落附件目录）
+  // 本机图片选择输入：File 交给 store（字节由前端读 base64 后落附件目录）。
+  // 必须两个分支都渲染——两个添加入口共用这一个 ref，只挂一支会让另一支点击静默失效；
+  // 多选整批交给 store（一次选择 = 一步撤销）。
   const imageInputRef = useRef<HTMLInputElement>(null);
+  const imageInput = (
+    <input
+      ref={imageInputRef}
+      type="file"
+      accept="image/png,image/jpeg,image/webp,image/gif"
+      multiple
+      className="hidden"
+      onChange={(e) => {
+        const files = Array.from(e.target.files ?? []);
+        e.target.value = "";
+        if (files.length > 0) void addImagesToCell(row.id, field.id, files);
+      }}
+    />
+  );
 
   // setState 稳定引用：作为 onCurChange 下传给模式组件，供 document 级监听器长期持有
   const commitTo = useCallback((i: number) => setIdx(i), []);
@@ -99,17 +117,7 @@ export const ImageCell = memo(function ImageCell({ field, row }: Props) {
       // 占位（流内 min-h-8）撑起 td 最小高度；按钮 absolute 铺满 td（td relative）垂直居中，
       // 行高更高时按钮随单元格整体居中
       <div className="group min-h-8 p-1">
-        <input
-          ref={imageInputRef}
-          type="file"
-          accept="image/png,image/jpeg,image/webp,image/gif"
-          className="hidden"
-          onChange={(e) => {
-            const file = e.target.files?.[0];
-            if (file) void addImageToCell(row.id, field.id, file);
-            e.target.value = "";
-          }}
-        />
+        {imageInput}
         <button
           onClick={() => imageInputRef.current?.click()}
           className="absolute inset-0 w-full h-full flex items-center justify-center rounded opacity-0 group-hover:opacity-100 transition-opacity hover:bg-[var(--hover)]"
@@ -144,6 +152,7 @@ export const ImageCell = memo(function ImageCell({ field, row }: Props) {
 
   return (
     <>
+      {imageInput}
       {/* 撑高层：只给自适应行一个固有高度（固定行高由 tr height 保证），不参与定位与交互 */}
       {!fixedHeight && <div style={{ height: sizerHeight }} />}
       {/* 展示层：absolute 以 td 为定位上下文（td relative），铺满单元格并随行高伸展 */}
