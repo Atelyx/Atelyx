@@ -37,7 +37,7 @@ export function ProjectWorkspacePage() {
   const currentCanvasFile = useAppStore((s) => s.currentCanvasFile);
   const currentNoteFile = useAppStore((s) => s.currentNoteFile);
   const currentTableFile = useAppStore((s) => s.currentTableFile);
-  const vaultRoot = useAppStore((s) => s.vaultRoot);
+  const hasVaultIdentity = useAppStore((s) => s.vaultIdentity !== null);
 
   const vaultNoteList = useVaultStore((s) => s.noteList);
   const vaultTableList = useVaultStore((s) => s.tableList);
@@ -156,18 +156,19 @@ export function ProjectWorkspacePage() {
 
   /** 「进仓库时打开主页」开关：仅在本次运行的首次进仓生效（boot 自动进仓，或从空态创建/进入
    *  第一个仓库）；面板内切换仓库不生效——切换保持当前布局，打断位置违背切换的连续性预期。
-   *  依赖 uiLoaded：ui-state 从磁盘加载完成前不得激活——否则随后 load 会用磁盘 activeLayoutId 覆盖。 */
+   *  依赖 uiLoaded：ui-state 从磁盘加载完成前不得激活——否则随后 load 会用磁盘 activeLayoutId 覆盖。
+   *  门控按「有激活仓库身份」——协作空间无本地 root，按 vaultRoot 会让开关在空间内不生效。 */
   const defaultHomeLayout = useSettingsStore((s) => s.defaultHomeLayout);
   const homeAppliedRef = useRef(false);
   useEffect(() => {
     if (homeAppliedRef.current) return;
-    if (!defaultHomeLayout || !uiLoaded || !vaultRoot) return;
+    if (!defaultHomeLayout || !uiLoaded || !hasVaultIdentity) return;
     homeAppliedRef.current = true;
     const ui = useUiStateStore.getState();
     if (ui.workspaceLayouts.some((l) => l.id === HOME_LAYOUT_ID)) {
       ui.activateLayout(HOME_LAYOUT_ID);
     }
-  }, [defaultHomeLayout, vaultRoot, uiLoaded]);
+  }, [defaultHomeLayout, hasVaultIdentity, uiLoaded]);
 
   /** 全屏切换（视图控制图标，经 store 转发到 services）。 */
   const handleToggleFullscreen = () => {

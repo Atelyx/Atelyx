@@ -5,7 +5,7 @@
  */
 import { Clock } from "lucide-react";
 import { useMemo } from "react";
-import { useAppStore } from "@/stores/appStore";
+import { useAppStore, selectVaultIdentityKey } from "@/stores/appStore";
 import { useUiStateStore } from "@/stores/uiStateStore";
 import { useVaultStore } from "@/stores/vaultStore";
 import { FileKindIcon, openFileByKind } from "@/components/common/FileKindIcon";
@@ -21,8 +21,8 @@ function collectPaths(nodes: FileTreeNode[], out: Set<string>): void {
 }
 
 export function RecentPanel() {
-  const vaultRoot = useAppStore((s) => s.vaultRoot);
   const canvases = useAppStore((s) => s.canvases);
+  const vaultKey = useAppStore(selectVaultIdentityKey);
   const recentFiles = useUiStateStore((s) => s.recentFiles);
   const tree = useVaultStore((s) => s.tree);
 
@@ -32,12 +32,13 @@ export function RecentPanel() {
     return set;
   }, [tree]);
 
+  // 按仓库身份键过滤（local = root；space = `space:<serverUrl>#<spaceId>`）
   const rows = useMemo(
     () =>
       recentFiles
-        .filter((r) => r.root === vaultRoot)
+        .filter((r) => r.vaultKey === vaultKey)
         .sort((a, b) => b.openedAt - a.openedAt),
-    [recentFiles, vaultRoot],
+    [recentFiles, vaultKey],
   );
 
   return (
@@ -67,7 +68,7 @@ export function RecentPanel() {
               (r.kind === "canvas" ? canvases.some((c) => c.file === r.file) : true);
             return (
               <button
-                key={`${r.root}-${r.file}`}
+                key={`${r.vaultKey}-${r.file}`}
                 disabled={!alive}
                 onClick={() => openFileByKind(r.file, r.kind)}
                 className="w-full flex items-center gap-1.5 text-xs px-1.5 py-1 rounded text-left disabled:opacity-40 disabled:cursor-default hover:opacity-80"

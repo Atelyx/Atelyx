@@ -66,8 +66,8 @@ interface UiStateStore {
   toggleExpandAll: (dirPaths: string[]) => void;
   /** 记录打开的画布/笔记/表格文件（lastCanvasFile/lastNoteFile/lastTableFile，kind 区分）。 */
   recordOpenFile: (kind: LastOpenFileKind, file: string) => void;
-  /** 记录最近打开的文件（recentFiles：去重置顶 + 截断；kind 与仓库身份由调用方提供）。 */
-  recordRecentFile: (file: string, kind: RecentFileEntry["kind"], root: string) => void;
+  /** 记录最近打开的文件（recentFiles：去重置顶 + 截断；kind 与仓库身份键由调用方提供）。 */
+  recordRecentFile: (file: string, kind: RecentFileEntry["kind"], vaultKey: string) => void;
   /** 画布/笔记/表格重命名/移动后同步上次打开记录（旧路径命中才更新，kind 区分）。 */
   renameLastFile: (kind: LastOpenFileKind, oldFile: string, newFile: string) => void;
   /** 文件夹重命名后同步展开集合/上次打开文件（`oldDir/` 前缀 → `newDir/`）。 */
@@ -310,10 +310,10 @@ export const useUiStateStore = create<UiStateStore>((set, get) => {
 
     recordOpenFile: (kind, file) => setLastFile(set, kind, file),
 
-    recordRecentFile: (file, kind, root) => {
+    recordRecentFile: (file, kind, vaultKey) => {
       const next = [
-        { file, kind, root, openedAt: Date.now() },
-        ...get().recentFiles.filter((r) => !(r.file === file && r.root === root)),
+        { file, kind, vaultKey, openedAt: Date.now() },
+        ...get().recentFiles.filter((r) => !(r.file === file && r.vaultKey === vaultKey)),
       ].slice(0, MAX_RECENT_FILES);
       set({ recentFiles: next });
       markPatch({ recentFiles: next });

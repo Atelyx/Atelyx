@@ -742,9 +742,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ currentCanvasId: row.id, currentCanvasFile: row.file });
     // 记录「上次打开」供下次进入仓库恢复（画布窗口已无标签概念，打开即唯一文件状态）
     useUiStateStore.getState().recordOpenFile("canvas", row.file);
-    // 记录最近打开（主页面板「最近打开」数据源）
-    const vaultRoot = get().vaultRoot;
-    if (vaultRoot) useUiStateStore.getState().recordRecentFile(row.file, "canvas", vaultRoot);
+    // 记录最近打开（主页面板「最近打开」数据源；按仓库身份键归属——空间无本地 root）
+    const identity = identityKeyOf(get().vaultIdentity);
+    if (get().vaultIdentity) useUiStateStore.getState().recordRecentFile(row.file, "canvas", identity);
   },
   closeCanvas: () => {
     set({ currentCanvasId: null, currentCanvasFile: null });
@@ -755,8 +755,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   openNote: (file, title) => {
     set({ currentNoteFile: file, currentNoteTitle: title });
     useUiStateStore.getState().recordOpenFile("note", file);
-    const vaultRoot = get().vaultRoot;
-    if (vaultRoot) useUiStateStore.getState().recordRecentFile(file, "note", vaultRoot);
+    if (get().vaultIdentity) {
+      useUiStateStore
+        .getState()
+        .recordRecentFile(file, "note", identityKeyOf(get().vaultIdentity));
+    }
     emitPluginEvent("note:opened", { file });
   },
   closeNote: () => {
@@ -767,8 +770,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   openTable: (file, title) => {
     set({ currentTableFile: file, currentTableTitle: title });
     useUiStateStore.getState().recordOpenFile("table", file);
-    const vaultRoot = get().vaultRoot;
-    if (vaultRoot) useUiStateStore.getState().recordRecentFile(file, "table", vaultRoot);
+    if (get().vaultIdentity) {
+      useUiStateStore
+        .getState()
+        .recordRecentFile(file, "table", identityKeyOf(get().vaultIdentity));
+    }
     // 内容加载由 TableView 自载（同 CanvasView：openCanvas 不加载，视图挂载时按文件读盘）——
     // 撕裂窗口只镜像文件路径，须由视图统一承担加载；此处不 load 防主窗口切表时重复读盘
   },
@@ -940,3 +946,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 }));
+
+/** 激活仓库的身份键（local = `local:<root>`；space = `space:<serverUrl>#<spaceId>`；未激活 = `"none"`）。
+ *  组件/面板按此过滤跨仓库记录（最近打开），空间无本地 root 不能按 root 比对。 */
+export function selectVaultIdentityKey(s: Pick<AppState, "vaultIdentity">): string {
+  return identityKeyOf(s.vaultIdentity);
+}

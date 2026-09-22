@@ -18,8 +18,9 @@ export interface RecentFileEntry {
   /** 相对仓库根路径。 */
   file: string;
   kind: "canvas" | "note" | "table";
-  /** 归属仓库身份（root 绝对路径；打开时按当前仓库记录）。 */
-  root: string;
+  /** 归属仓库身份键（local = root 绝对路径；space = `space:<serverUrl>#<spaceId>`；
+   *  打开时按当前仓库记录——空间无本地 root，不能按 root 过滤）。 */
+  vaultKey: string;
   /** 打开时间戳（ms）。 */
   openedAt: number;
 }
