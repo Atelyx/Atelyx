@@ -191,10 +191,6 @@ export interface VaultConfig {
   /** API key 是否随仓库保存（多设备同步）：开启后 provider/Tavily key 明文写入本文件，随仓库同步；
    * 缺省 false = key 仅存本机 keychain（按仓库隔离）。开启有泄露风险（仓库被公开/云盘共享）。 */
   syncKeys?: boolean;
-  /** 宽松换行（仓库级，缺省 true）。 */
-  softLineBreak?: boolean;
-  /** 页面内标题（仓库级，缺省 false）：开启后笔记正文顶部显示文件名（去扩展名）作为标题。 */
-  inlineTitle?: boolean;
   /** 话题自动命名开关（缺省 = false 不启用）。 */
   autoNamingEnabled?: boolean;
   /** 话题自动命名模型（缺省 = 跟随默认模型；指定后命名用该模型，如 `{ providerId, model }`——话题命名一般用小模型）。 */
@@ -305,6 +301,12 @@ export interface GlobalConfig {
   autoRestoreFiles?: boolean;
   /** 进入仓库时自动切到「主页」布局。缺省 = false（保持恢复上次界面）。 */
   defaultHomeLayout?: boolean;
+  /** 宽松换行（应用级显示偏好）：开启时预览模式单个换行符渲染为换行；关闭时按 Markdown
+   *  标准视为空格。缺省 = true。 */
+  softLineBreak?: boolean;
+  /** 页面内标题（应用级显示偏好）：开启后笔记正文顶部显示文件名（不含扩展名）作为标题。
+   *  缺省 = false。 */
+  inlineTitle?: boolean;
   /** 协作空间频道开关。缺省 = false（关闭）。 */
   collabEnabled?: boolean;
   /** 协作显示昵称（空 = 设备名兜底）。 */

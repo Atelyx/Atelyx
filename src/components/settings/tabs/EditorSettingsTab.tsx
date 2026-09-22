@@ -1,22 +1,15 @@
 import { useState } from "react";
-import { ToggleSwitch } from "@/components/common/ToggleSwitch";
 import { SettingCard } from "@/components/settings/SettingCard";
 import { SlotListMount } from "@/components/plugins/SlotHost";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
-import { useSettingsStore, selectEditingVaultConfig, selectVaultSettingsSession } from "@/stores/settingsStore";
+import { useSettingsStore, selectVaultSettingsSession } from "@/stores/settingsStore";
 import { useVaultStore } from "@/stores/vaultStore";
 
-/** 编辑器面板（仓库级）：宽松换行/页面内标题直接订阅 store，重建内部链接流程自持。
- *  经编辑目标选择器取值——仓库设置弹窗可编辑非激活仓库。 */
+/** 编辑器面板（仓库级）：重建内部链接流程自持。
+ *  经编辑目标选择器取会话——仓库设置弹窗可编辑非激活仓库。
+ *  宽松换行/页面内标题是应用级显示偏好（「设置 → 编辑器」，落 global.json），不在此。 */
 export function EditorSettingsTab() {
-  const vaultConfig = useSettingsStore(selectEditingVaultConfig);
   const session = useSettingsStore(selectVaultSettingsSession);
-  const setSoftLineBreak = useSettingsStore((s) => s.setSoftLineBreak);
-  const setInlineTitle = useSettingsStore((s) => s.setInlineTitle);
-  /** 宽松换行：缺省开启。 */
-  const softLineBreak = vaultConfig?.softLineBreak ?? true;
-  /** 页面内标题：缺省关闭。 */
-  const inlineTitle = vaultConfig?.inlineTitle ?? false;
 
   // 重建内部链接改写的是**仓库内容**（全仓 .md），依赖激活仓库的扫描与写盘链路：
   // 正在编辑非激活仓库时不可执行（先切换到该仓库）。
@@ -48,30 +41,6 @@ export function EditorSettingsTab() {
   return (
     <>
       <section className="flex-1 p-5 overflow-auto space-y-4">
-        {/* 宽松换行 */}
-        <SettingCard
-          title="宽松换行"
-          description="单个换行显示为换行；关闭 = 按 Markdown 标准需空行换行"
-        >
-          <ToggleSwitch
-            checked={softLineBreak}
-            onChange={(v) => void setSoftLineBreak(v)}
-            title="宽松换行"
-          />
-        </SettingCard>
-
-        {/* 页面内标题 */}
-        <SettingCard
-          title="页面内标题"
-          description="将文件名作为标题：笔记正文顶部显示文件名（不含扩展名），点击标题可直接重命名笔记"
-        >
-          <ToggleSwitch
-            checked={inlineTitle}
-            onChange={(v) => void setInlineTitle(v)}
-            title="页面内标题（将文件名作为标题）"
-          />
-        </SettingCard>
-
         {/* 内部链接：一键重建为标准 Markdown 写法（批量改写，需确认；仅对当前激活仓库可用） */}
         <SettingCard
           title="内部链接"

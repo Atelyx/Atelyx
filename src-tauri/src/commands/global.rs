@@ -77,6 +77,14 @@ pub struct GlobalConfig {
     /// 进入仓库时自动切到「主页」布局。缺省 None = false（保持恢复上次界面）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_home_layout: Option<bool>,
+    /// 宽松换行（应用级显示偏好）：开启时预览模式单个换行符渲染为换行；关闭时按 Markdown
+    /// 标准视为空格。缺省 None = true（前端默认）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub soft_line_break: Option<bool>,
+    /// 页面内标题（应用级显示偏好）：开启后笔记正文顶部显示文件名（不含扩展名）作为标题。
+    /// 缺省 None = false（前端默认）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inline_title: Option<bool>,
     /// 登录过的协作服务器地址清单（应用级；由前端 space 登录态维护，去重）。
     /// 缺省空 = 未登录过任何协作服务器；旧文件无此字段照常读取（serde default）。
     #[serde(default)]

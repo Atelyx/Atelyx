@@ -83,6 +83,10 @@ interface SettingsState {
   autoRestoreFiles: boolean;
   /** 进入仓库时自动切到「主页」布局（应用级，存 global.json；缺省 false = 保持恢复上次界面）。 */
   defaultHomeLayout: boolean;
+  /** 宽松换行（应用级显示偏好，存 global.json；缺省 true = 单个换行渲染为换行）。 */
+  softLineBreak: boolean;
+  /** 页面内标题（应用级显示偏好，存 global.json；缺省 false = 不显示）。 */
+  inlineTitle: boolean;
   /** 协作空间连接开关（应用级，存 global.json；缺省 false = 关闭，作用于协作空间频道）。 */
   collabEnabled: boolean;
   /** 协作显示昵称（空 = 设备名兜底）。 */
@@ -172,9 +176,9 @@ interface SettingsState {
   setExcludeFolders: (folders: string[]) => Promise<void>;
   /** 设置附件导入默认文件夹（仓库级；undefined = 仓库根目录）。 */
   setAttachmentFolder: (folder: string | undefined) => Promise<void>;
-  /** 设置宽松换行（仓库级，缺省 true）。 */
+  /** 设置宽松换行（应用级显示偏好，缺省 true，写 global.json）。 */
   setSoftLineBreak: (enabled: boolean) => Promise<void>;
-  /** 设置页面内标题（仓库级，缺省 false）。 */
+  /** 设置页面内标题（应用级显示偏好，缺省 false，写 global.json）。 */
   setInlineTitle: (enabled: boolean) => Promise<void>;
   /** 设置进入仓库时是否自动恢复上次打开的文件（应用级；缺省 true = 开启，写 global.json）。 */
   setAutoRestoreFiles: (enabled: boolean) => Promise<void>;
@@ -1276,6 +1280,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   fontFamily: undefined,
   autoRestoreFiles: true,
   defaultHomeLayout: false,
+  softLineBreak: true,
+  inlineTitle: false,
   collabEnabled: false,
   collabNickname: "",
   collabColor: "",
@@ -1300,6 +1306,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     let fontFamily: string | undefined;
     let autoRestoreFiles = true;
     let defaultHomeLayout = false;
+    let softLineBreak = true;
+    let inlineTitle = false;
     let collabEnabled = false;
     let collabNickname = "";
     let collabColor = "";
@@ -1317,6 +1325,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       fontFamily = cfg.fontFamily;
       autoRestoreFiles = cfg.autoRestoreFiles ?? true;
       defaultHomeLayout = cfg.defaultHomeLayout ?? false;
+      softLineBreak = cfg.softLineBreak ?? true;
+      inlineTitle = cfg.inlineTitle ?? false;
       collabEnabled = cfg.collabEnabled ?? false;
       collabNickname = cfg.collabNickname ?? "";
       collabColor = cfg.collabColor ?? "";
@@ -1342,6 +1352,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       fontFamily,
       autoRestoreFiles,
       defaultHomeLayout,
+      softLineBreak,
+      inlineTitle,
       collabEnabled,
       collabNickname,
       collabColor,
@@ -1628,13 +1640,11 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     await commitVaultRouted({ excludeFolders: folders.length ? folders : null });
   },
 
-  setSoftLineBreak: async (enabled) => {
-    await commitVaultRouted({ softLineBreak: enabled });
-  },
+  setSoftLineBreak: (enabled) =>
+    commitGlobal({ softLineBreak: enabled }, "保存宽松换行配置失败"),
 
-  setInlineTitle: async (enabled) => {
-    await commitVaultRouted({ inlineTitle: enabled });
-  },
+  setInlineTitle: (enabled) =>
+    commitGlobal({ inlineTitle: enabled }, "保存页面内标题配置失败"),
 
   setAutoRestoreFiles: (enabled) =>
     commitGlobal({ autoRestoreFiles: enabled }, "保存自动恢复配置失败"),

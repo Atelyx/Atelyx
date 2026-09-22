@@ -202,9 +202,9 @@ ctx.slots.registerUi({ slot: "settings/files", component: AttachmentRulesBlock }
 - `ctx.slots.list()` 返回声明表（key / 基数 / 载荷字段 / 用途），据此发现可贡献的位置。
 - 已接入的槽位：`toolbar/note/right`、`toolbar/table/right`、`toolbar/files`、`statusbar/canvas`、
   `panelhead/status`、`titlebar/right`，以及设置页区块——应用级「设置」弹窗里的
-  `settings/general`、`settings/theme`、`settings/collab`，仓库级「仓库设置」弹窗里的
-  `settings/modelServices`、`settings/search`、`settings/files`、`settings/editor`
-  （区块自行负责标题与卡片外观，可用 CSS 变量 `--bg-*`/`--border-*`/`--text-*`）。
+  `settings/general`、`settings/theme`、`settings/collab`、`settings/editorPrefs`，仓库级
+  「仓库设置」弹窗里的 `settings/modelServices`、`settings/search`、`settings/files`、
+  `settings/editor`（区块自行负责标题与卡片外观，可用 CSS 变量 `--bg-*`/`--border-*`/`--text-*`）。
 - 宿主侧 `SlotListMount`/`SlotMount`（`components/plugins/SlotHost.tsx`）读取并渲染对应槽位。
 
 ### 右键菜单项 `registerMenu`

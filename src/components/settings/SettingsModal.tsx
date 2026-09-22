@@ -38,6 +38,7 @@ import { CollabSettingsTab } from "@/components/settings/tabs/CollabSettingsTab"
 import { ModelServicesSettingsTab } from "@/components/settings/tabs/ModelServicesSettingsTab";
 import { FilesSettingsTab } from "@/components/settings/tabs/FilesSettingsTab";
 import { EditorSettingsTab } from "@/components/settings/tabs/EditorSettingsTab";
+import { EditorPreferencesTab } from "@/components/settings/tabs/EditorPreferencesTab";
 import { SearchSettingsTab } from "@/components/settings/tabs/SearchSettingsTab";
 import { PluginsSettingsTab } from "@/components/plugins/PluginsSettingsTab";
 import { ErrorBoundary } from "@/components/common/ErrorBoundary";
@@ -45,7 +46,7 @@ import { usePluginStore } from "@/stores/pluginStore";
 import { useSettingsStore, selectVaultSettingsSession } from "@/stores/settingsStore";
 import type { VaultSettingsTarget } from "@/types";
 
-type AppTab = "general" | "theme" | "collab" | "plugins" | "about";
+type AppTab = "general" | "theme" | "collab" | "editor" | "plugins" | "about";
 type VaultTab = "providers" | "modelServices" | "agents" | "search" | "files" | "editor";
 
 /** 应用级 tab（跨仓库共享，落 global.json）。 */
@@ -53,6 +54,7 @@ const APP_TABS: { key: AppTab; label: string; icon: LucideIcon }[] = [
   { key: "general", label: "通用", icon: Settings },
   { key: "theme", label: "主题", icon: Palette },
   { key: "collab", label: "多人协作", icon: Users },
+  { key: "editor", label: "编辑器", icon: PenLine },
   { key: "plugins", label: "插件", icon: Puzzle },
   { key: "about", label: "关于", icon: Info },
 ];
@@ -232,6 +234,9 @@ export function SettingsModal({ onClose, initialTab }: { onClose: () => void; in
       ) : tab === "collab" ? (
         /* ===== 多人协作（应用级） ===== */
         <CollabSettingsTab />
+      ) : tab === "editor" ? (
+        /* ===== 编辑器：应用级显示偏好（宽松换行/页面内标题） ===== */
+        <EditorPreferencesTab />
       ) : tab === "about" ? (
         /* ===== 关于面板：Logo + 版本号 + 检查更新 ===== */
         <AboutSection />

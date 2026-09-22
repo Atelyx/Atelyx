@@ -389,7 +389,7 @@ export function MarkdownView({
   onMentionClick,
   className,
 }: MarkdownViewProps) {
-  const softLineBreak = useSettingsStore((s) => s.vaultConfig?.softLineBreak ?? true);
+  const softLineBreak = useSettingsStore((s) => s.softLineBreak);
   const displayText = softLineBreak ? text : collapseSoftLineBreaks(text);
   const [syncSeq, setSyncSeq] = useState(0);
   const lastTextRef = useRef(displayText);

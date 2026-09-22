@@ -13,6 +13,7 @@ const h = vi.hoisted(() => {
     configs: {} as Record<string, Record<string, unknown>>,
     agents: {} as Record<string, unknown[]>,
     patchCalls: [] as Array<{ root?: string; patch: Record<string, unknown> }>,
+    globalPatches: [] as Array<Record<string, unknown>>,
     spaceConfigPatches: [] as Array<{ serverKey: string; patch: Record<string, unknown> }>,
     keychain: new Map<string, string>(),
     readCalls: [] as string[],
@@ -75,6 +76,9 @@ vi.mock("@tauri-apps/api/core", () => ({
         });
         return null;
       case "read_global_config":
+        return { config: {}, corruptBackup: null };
+      case "patch_global_config":
+        h.state.globalPatches.push(a.patch as Record<string, unknown>);
         return { config: {}, corruptBackup: null };
       case "read_agents":
         return h.state.agents.v1 ?? [];
@@ -277,10 +281,22 @@ describe("会话写入", () => {
   it("目标是激活仓库时写盘仍走激活链路（vault_config_patch，不带 root）", async () => {
     await settings.useSettingsStore.getState().loadVaultConfig();
     await settings.useSettingsStore.getState().openVaultSettingsSession({ ...ACTIVE });
-    await settings.useSettingsStore.getState().setSoftLineBreak(false);
+    await settings.useSettingsStore.getState().setAttachmentFolder("附件");
 
-    expect(settings.useSettingsStore.getState().vaultConfig?.softLineBreak).toBe(false);
-    expect(h.state.patchCalls).toEqual([{ patch: { softLineBreak: false } }]);
+    expect(settings.useSettingsStore.getState().vaultConfig?.attachmentFolder).toBe("附件");
+    expect(h.state.patchCalls).toEqual([{ patch: { attachmentFolder: "附件" } }]);
+  });
+
+  it("应用级显示偏好改走 global.json，不落仓库配置", async () => {
+    await settings.useSettingsStore.getState().loadVaultConfig();
+    await settings.useSettingsStore.getState().openVaultSettingsSession({ ...OTHER });
+    await settings.useSettingsStore.getState().setSoftLineBreak(false);
+    await settings.useSettingsStore.getState().setInlineTitle(true);
+
+    expect(settings.useSettingsStore.getState().softLineBreak).toBe(false);
+    expect(settings.useSettingsStore.getState().inlineTitle).toBe(true);
+    expect(h.state.patchCalls).toEqual([]);
+    expect(h.state.globalPatches).toEqual([{ softLineBreak: false }, { inlineTitle: true }]);
   });
 });
 

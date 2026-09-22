@@ -54,6 +54,7 @@ const FIXED_SLOTS: Record<string, string> = {
   "settings/general": "通用设置页追加区块",
   "settings/theme": "主题设置页追加区块",
   "settings/collab": "多人协作设置页追加区块",
+  "settings/editorPrefs": "编辑器设置页（应用级显示偏好）追加区块",
   "settings/editor": "仓库设置 · 编辑器页追加区块",
   "settings/modelServices": "仓库设置 · 模型服务页追加区块",
   "settings/files": "仓库设置 · 文件与路径页追加区块",

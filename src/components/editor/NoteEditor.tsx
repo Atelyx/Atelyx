@@ -75,8 +75,8 @@ export function NoteEditor({ file }: { file: string }) {
   const collabEnabled = useSettingsStore((s) => s.collabEnabled);
   const collabConnected = useCollabStore((s) => s.connected);
   const isCollab = collabEnabled && collabConnected;
-  /** 页面内标题：正文顶部显示文件名（设置 → 编辑器，缺省关）。 */
-  const inlineTitle = useSettingsStore((s) => s.vaultConfig?.inlineTitle ?? false);
+  /** 页面内标题：正文顶部显示文件名（应用级显示偏好，设置 → 编辑器，缺省关）。 */
+  const inlineTitle = useSettingsStore((s) => s.inlineTitle);
   /** 撤销/重做按焦点所在编辑面归属（面板与画布节点共用一套路由）。 */
   useNoteUndoRouting();
   const [preview, setPreview] = useState(true);

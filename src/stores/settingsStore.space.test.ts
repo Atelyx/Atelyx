@@ -66,6 +66,8 @@ const h = vi.hoisted(() => {
     spaceConfigPatches: [] as Array<{ serverKey: string; patch: Record<string, unknown> }>,
     /** vault_config_patch 收到的补丁（空间下不得出现）。 */
     vaultPatches: [] as Record<string, unknown>[],
+    /** patch_global_config 收到的补丁（应用级显示偏好落点）。 */
+    globalPatches: [] as Record<string, unknown>[],
     keychain: new Map<string, string>(),
     keyWrites: [] as string[],
   };
@@ -82,6 +84,9 @@ vi.mock("@tauri-apps/api/core", () => ({
         h.state.vaultPatches.push(a.patch as Record<string, unknown>);
         return null;
       case "read_global_config":
+        return { config: h.state.globalConfig, corruptBackup: null };
+      case "patch_global_config":
+        h.state.globalPatches.push(a.patch as Record<string, unknown>);
         return { config: h.state.globalConfig, corruptBackup: null };
       case "write_global_config":
         return null;
@@ -150,6 +155,7 @@ beforeEach(async () => {
   h.state.globalConfig = {};
   h.state.spaceConfigPatches = [];
   h.state.vaultPatches = [];
+  h.state.globalPatches = [];
   h.state.keychain = new Map();
   h.state.keyWrites = [];
   await import("./noteSessionStore");
@@ -323,5 +329,26 @@ describe("persist 空间分流", () => {
     // 新仓库身份零写入：无本地 config 补丁、无新身份 keychain 条目
     expect(h.state.vaultPatches).toHaveLength(0);
     expect(h.state.keyWrites.every((k) => !k.startsWith("E:\\v2:"))).toBe(true);
+  });
+});
+
+describe("应用级显示偏好在空间内不被吞", () => {
+  beforeEach(() => {
+    enterSpace();
+  });
+
+  it("宽松换行/页面内标题在空间下写 global.json（不落团队元数据、不丢）", async () => {
+    await settings.useSettingsStore.getState().loadVaultConfig();
+
+    await settings.useSettingsStore.getState().setSoftLineBreak(false);
+    await settings.useSettingsStore.getState().setInlineTitle(true);
+
+    // 应用级落盘：两条 patch_global_config，且不产生任何仓库级写
+    expect(h.state.globalPatches).toEqual([{ softLineBreak: false }, { inlineTitle: true }]);
+    expect(space.state.patchSpaceCalls).toHaveLength(0);
+    expect(h.state.vaultPatches).toHaveLength(0);
+    // 内存态即时生效（跨仓库共享）
+    expect(settings.useSettingsStore.getState().softLineBreak).toBe(false);
+    expect(settings.useSettingsStore.getState().inlineTitle).toBe(true);
   });
 });
