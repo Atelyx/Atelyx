@@ -31,8 +31,8 @@ export async function readVaultFileWindow(
 
 /**
  * 写仓库内任意文本文件（原子写 + 自动建父目录）。
- * 打开的笔记会话按磁盘内容事实收敛：写的内容与本地未落盘正文不同即转冲突条由用户决策，
- * 不按「应用自写」放行（放行会让本地未落盘输入静默盖掉刚写进去的正文）。
+ * 打开的笔记会话按磁盘内容事实收敛：写的内容与本地未落盘正文一致则对齐基线并清脏；
+ * 不一致且会话有待落盘输入时保留本地输入，由后续自动保存写盘（整文件写 = 后写者胜）。
  */
 export async function writeVaultFile(file: string, content: string): Promise<void> {
   await getActiveContentBackend().writeFile(file, content);

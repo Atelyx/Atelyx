@@ -34,7 +34,7 @@ export interface PanelTabBarProps {
   usedViews: ViewKind[];
   /** 删除面板可用性（最后一个面板不可删；撕裂窗口恒可删 = 关闭窗口）。 */
   canDeletePanel: boolean;
-  /** 状态指示（画布/表格/笔记保存/冲突等，宿主传入）。 */
+  /** 状态指示（画布/表格/笔记保存状态等，宿主传入）。 */
   status?: ReactNode;
   /** 视图切换/添加：组内已有该视图 = 激活；否则添加为本组标签。 */
   onPickView: (view: ViewKind) => void;

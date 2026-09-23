@@ -226,12 +226,10 @@ export function NoteEditor({ file }: { file: string }) {
     setPendingMenu(null);
   }, [file]);
 
-  // 卸载/切走：只清面板展示用的保存状态与冲突条请求（未落盘输入的 flush 归会话）；
-  // 冲突标志按文件保留——它代表「有未决冲突 + 挂起输入」，面板卸载不代表冲突已解决
+  // 卸载/切走：只清面板展示用的保存状态（未落盘输入的 flush 归会话）
   useEffect(
     () => () => {
       useNoteStore.getState().setNoteSaveState(file, null);
-      useNoteStore.getState().clearNoteConflictResolveReq(file);
     },
     [file],
   );
@@ -266,7 +264,7 @@ export function NoteEditor({ file }: { file: string }) {
     return { from, to, text: view.state.sliceDoc(from, to) };
   };
 
-  /** 编辑面区间替换原语：源码 textarea 以会话当前全文拼接走 handleChange（自动保存/冲突门控/
+  /** 编辑面区间替换原语：源码 textarea 以会话当前全文拼接走 handleChange（自动保存/
    *  协作 syncLocalBody 全复用；命令式取值防 await 剪贴板 IPC 窗口内的击键被旧闭包内容丢弃）；
    *  CodeMirror dispatch（经 onBodyChange → 自动保存/协作同步/撤销栈）。 */
   const editEditorRange = (from: number, to: number, ins: string) => {
@@ -396,7 +394,7 @@ export function NoteEditor({ file }: { file: string }) {
     [isCollab, collabPeers, file],
   );
 
-  /** 面板编辑提交：新 data 拼回完整 content，走既有 handleChange（debounce 保存/冲突条/外部感知全复用，零新机制）。 */
+  /** 面板编辑提交：新 data 拼回完整 content，走既有 handleChange（debounce 保存/外部感知全复用，零新机制）。 */
   const handlePropertiesUpdate = (next: Record<string, unknown>) => {
     try {
       handleChange(stringifyFrontmatter(next, parsed.body));

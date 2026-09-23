@@ -3,7 +3,7 @@
  *
  * hostId = 面板 id 或撕裂窗口 id（画布/表格聚焦门控用）。各视图内容由全局 store
  * 驱动（画布/表格/笔记打开文件状态），本组件只做分派；`ViewStatusIndicator` 供
- * 面板头/撕裂窗口头渲染保存/冲突/错误状态。
+ * 面板头/撕裂窗口头渲染保存/错误状态。
  *
  * 分派模型：所有视图经统一视图贡献注册表分派（默认组合与用户插件同表）——
  * 内核不硬编码视图，只做渲染宿主。重型视图（画布/表格）经贡献的 `render(hostId)`
@@ -103,46 +103,17 @@ export const ViewHost = memo(function ViewHost({ view, hostId }: { view: ViewKin
   return <ViewContributionMount kind={view} hostId={hostId} />;
 });
 
-/** 画布视图状态指示（无当前画布不显示；冲突 > 错误 > 保存状态）。 */
+/** 画布视图状态指示（无当前画布不显示；错误 > 保存状态）。 */
 function CanvasStatusIndicator() {
   const canvasId = useCanvasStore((s) => s.canvasId);
   const canvasFile = useAppStore((s) => s.currentCanvasFile);
   const loading = useCanvasStore((s) => s.loading);
   const saving = useCanvasStore((s) => s.saving);
   const readOnly = useCanvasStore((s) => s.readOnly);
-  const conflictPending = useCanvasStore((s) => s.conflictPending);
-  const mergeFromDisk = useCanvasStore((s) => s.mergeFromDisk);
-  const reloadFromDisk = useCanvasStore((s) => s.reloadFromDisk);
   const error = useCanvasStore((s) => s.error);
   const clearError = useCanvasStore((s) => s.clearError);
   const load = useCanvasStore((s) => s.load);
   if (!canvasId) return null;
-  if (conflictPending) {
-    return (
-      <span
-        className="flex items-center gap-1 px-1.5 py-0.5 rounded flex-shrink-0"
-        style={{ color: "#f59e0b", background: "rgba(245,158,11,0.1)" }}
-      >
-        <span className="truncate max-w-[150px]">画布与外部修改冲突</span>
-        <button
-          onClick={() => void mergeFromDisk()}
-          className="px-1 rounded hover:opacity-80"
-          style={{ background: "rgba(245,158,11,0.2)", color: "#f59e0b" }}
-          title="以磁盘为基底保留本地新增内容（重叠以磁盘为准）"
-        >
-          合并
-        </button>
-        <button
-          onClick={() => void reloadFromDisk()}
-          className="px-1 rounded hover:opacity-80"
-          style={{ background: "rgba(245,158,11,0.2)", color: "#f59e0b" }}
-          title="丢弃本地改动，加载磁盘最新内容"
-        >
-          重载
-        </button>
-      </span>
-    );
-  }
   if (error) {
     return (
       <span
@@ -177,41 +148,13 @@ function CanvasStatusIndicator() {
   );
 }
 
-/** 表格视图状态指示（无当前表格不显示；冲突 > 错误 > 保存状态）。 */
+/** 表格视图状态指示（无当前表格不显示；错误 > 保存状态）。 */
 function TableStatusIndicator() {
   const currentTableFile = useAppStore((s) => s.currentTableFile);
   const saving = useTableStore((s) => s.saving);
-  const conflictPending = useTableStore((s) => s.conflictPending);
-  const resolveConflict = useTableStore((s) => s.resolveConflict);
   const error = useTableStore((s) => s.error);
   const clearError = useTableStore((s) => s.clearError);
   if (!currentTableFile) return null;
-  if (conflictPending) {
-    return (
-      <span
-        className="flex items-center gap-1 px-1.5 py-0.5 rounded flex-shrink-0"
-        style={{ color: "#f59e0b", background: "rgba(245,158,11,0.1)" }}
-      >
-        <span className="truncate max-w-[150px]">表格与外部修改冲突</span>
-        <button
-          onClick={() => void resolveConflict(false)}
-          className="px-1 rounded hover:opacity-80"
-          style={{ background: "rgba(245,158,11,0.2)", color: "#f59e0b" }}
-          title="丢弃本地改动，加载磁盘最新内容"
-        >
-          重新加载
-        </button>
-        <button
-          onClick={() => void resolveConflict(true)}
-          className="px-1 rounded hover:opacity-80"
-          style={{ background: "rgba(245,158,11,0.2)", color: "#f59e0b" }}
-          title="用本地内容覆盖磁盘（外部改动丢失）"
-        >
-          保留本地
-        </button>
-      </span>
-    );
-  }
   if (error) {
     return (
       <span
@@ -237,39 +180,11 @@ function TableStatusIndicator() {
   );
 }
 
-/** 笔记视图状态指示（无当前笔记不显示；冲突 > 保存状态）。 */
+/** 笔记视图状态指示（无当前笔记不显示；保存状态）。 */
 function NoteStatusIndicator() {
   const currentNoteFile = useAppStore((s) => s.currentNoteFile);
-  const conflict = useNoteStore((s) => (currentNoteFile ? s.noteConflicts[currentNoteFile] : false));
   const status = useNoteStore((s) => (currentNoteFile ? s.noteSaveStates[currentNoteFile] : undefined));
-  const resolveNoteConflict = useNoteStore((s) => s.resolveNoteConflict);
   if (!currentNoteFile) return null;
-  if (conflict) {
-    return (
-      <span
-        className="flex items-center gap-1 px-1.5 py-0.5 rounded flex-shrink-0"
-        style={{ color: "#f59e0b", background: "rgba(245,158,11,0.1)" }}
-      >
-        <span className="truncate max-w-[150px]">外部已修改此文件</span>
-        <button
-          onClick={() => resolveNoteConflict(currentNoteFile, false)}
-          className="px-1 rounded hover:opacity-80"
-          style={{ background: "rgba(245,158,11,0.2)", color: "#f59e0b" }}
-          title="丢弃本地改动，加载外部最新内容"
-        >
-          重新加载
-        </button>
-        <button
-          onClick={() => resolveNoteConflict(currentNoteFile, true)}
-          className="px-1 rounded hover:opacity-80"
-          style={{ background: "rgba(245,158,11,0.2)", color: "#f59e0b" }}
-          title="用本地内容覆盖外部修改并立即保存"
-        >
-          保留本地
-        </button>
-      </span>
-    );
-  }
   if (!status) return null;
   const text = status.loadError
     ? "读取失败"
@@ -295,7 +210,7 @@ function NoteStatusIndicator() {
 
 /** 按视图类型分派状态指示（view 变化 = 子组件类型切换，各子组件 hooks 固定）。
  *  画布/表格/笔记视图由随应用分发的插件提供：其行停用/卸载（贡献缺失）时面板已是降级占位，
- *  状态指示一并隐藏，不显示过期的保存/冲突状态。订阅 uiRevision 使同一窗口内插件启停
+ *  状态指示一并隐藏，不显示过期的保存状态。订阅 uiRevision 使同一窗口内插件启停
  *  也能收敛。注意：Tauri 各窗口是独立 WebView（各自 pluginStore/视图注册表，windowBus
  *  无插件状态广播），主窗口启停插件不会同步到撕裂窗口——撕裂窗口仅在其自身动作下收敛。 */
 export function ViewStatusIndicator({ view }: { view: ViewKind }) {

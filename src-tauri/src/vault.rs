@@ -16,7 +16,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 /// 磁盘文件缓存条目：mtime（纳秒）+ 长度作失效指纹——外部编辑/同步盘改动命中指纹变化，
-/// 命中克隆免每次保存重读重解析（乐观锁检查 + createdAt 保留 + 补丁基底共用）。
+/// 命中克隆免每次保存重读重解析（createdAt 保留 + 补丁基底共用）。
 pub struct CachedFile<T> {
     mtime_nanos: u128,
     len: u64,
@@ -1548,7 +1548,7 @@ pub fn list_chat_sessions_file(root: &Path) -> Result<Vec<ChatSessionRow>, Strin
 // ===== 工具 =====
 
 /// 原子写：写唯一临时文件 → fsync → rename 覆盖目标 → fsync 父目录。
-/// - 临时名带纳秒时间戳 + 进程内序号：并发写同一目标不交叉同一 tmp（乐观锁 TOCTOU 之外的最后防线）；
+/// - 临时名带纳秒时间戳 + 进程内序号：并发写同一目标不交叉同一 tmp；
 ///   保持 `.tmp` 扩展名，让 watcher 能过滤自写副产物。
 /// - 写后 sync_all：崩溃/断电时 rename 已提交但数据未刷盘会丢最后一次保存。
 /// - 任一步失败都清理临时文件，避免残留。

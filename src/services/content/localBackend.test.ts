@@ -104,13 +104,11 @@ const MAPPING: Array<{
       b.writeCanvas(
         { id: "1", title: "c", nodes: [], edges: [], createdAt: 0, updatedAt: 1, schema: CANVAS_SCHEMA },
         "c.atlx",
-        5,
       ),
     cmd: "write_canvas_vault",
     args: {
       canvas: { id: "1", title: "c", nodes: [], edges: [], createdAt: 0, updatedAt: 1, schema: CANVAS_SCHEMA },
       file: "c.atlx",
-      baseUpdatedAt: 5,
     },
     returns: 9,
   },
@@ -120,13 +118,11 @@ const MAPPING: Array<{
       b.writeTable(
         { id: "t", title: "表", schema: TABLE_SCHEMA, fields: [], rows: [], createdAt: 0, updatedAt: 1 },
         "t.atb",
-        5,
       ),
     cmd: "write_table_vault",
     args: {
       table: { id: "t", title: "表", schema: TABLE_SCHEMA, fields: [], rows: [], createdAt: 0, updatedAt: 1 },
       file: "t.atb",
-      baseUpdatedAt: 5,
     },
     returns: 9,
   },
@@ -146,12 +142,11 @@ const MAPPING: Array<{
   },
   {
     name: "patchCanvas",
-    call: (b) => b.patchCanvas({ id: "1", upsertNodes: [], removedNodeIds: [], upsertEdges: [], removedEdgeIds: [] }, "c.atlx", 5),
+    call: (b) => b.patchCanvas({ id: "1", upsertNodes: [], removedNodeIds: [], upsertEdges: [], removedEdgeIds: [] }, "c.atlx"),
     cmd: "patch_canvas_vault",
     args: {
       patch: { id: "1", upsertNodes: [], removedNodeIds: [], upsertEdges: [], removedEdgeIds: [] },
       file: "c.atlx",
-      baseUpdatedAt: 5,
     },
     returns: { updatedAt: 9, file: "c.atlx" },
   },
@@ -161,15 +156,11 @@ const MAPPING: Array<{
       b.patchTable(
         { id: "t", upsertFields: [], removedFieldIds: [], upsertRows: [], removedRowIds: [] },
         "t.atb",
-        5,
-        false,
       ),
     cmd: "patch_table_vault",
     args: {
       patch: { id: "t", upsertFields: [], removedFieldIds: [], upsertRows: [], removedRowIds: [] },
       file: "t.atb",
-      baseUpdatedAt: 5,
-      force: false,
     },
     returns: { updatedAt: 9, file: "t.atb" },
   },

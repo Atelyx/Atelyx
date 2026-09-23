@@ -1,5 +1,5 @@
 /**
- * 笔记编辑器运行时态：内容缓存 + 挂起输入 + 保存/冲突状态 + 外部修改序号 + 版本历史。
+ * 笔记编辑器运行时态：内容缓存 + 挂起输入 + 保存状态 + 外部修改序号 + 版本历史。
  *
  * 职责：仓库文件层（vaultStore）只留文件树与文件 CRUD，笔记编辑面的运行时态与写盘链归本 store——
  * 写盘链 = **缓存先行**（先于异步写盘更新内容缓存，防重挂载读到陈旧缓存闪回/回退）+ **按文件串行写盘队列**
@@ -50,9 +50,6 @@ function withNoteWriteQueue(file: string, fn: () => Promise<void>): Promise<void
 /** 笔记内容缓存上限（FIFO 淘汰最旧；防大笔记常驻内存无限膨胀，切仓库清空）。 */
 const MAX_NOTE_CACHE = 30;
 
-/** 冲突解决请求序号（全局单调，见 resolveNoteConflict）。 */
-let conflictResolveSeq = 0;
-
 /** 写入单文件笔记缓存并淘汰最旧（重复写入 = 移除旧条目再追加，FIFO 顺序近似最近使用）。 */
 function cacheNoteContent(
   cache: Record<string, string>,
@@ -89,15 +86,14 @@ interface NoteState {
   flushPendingNotes: () => Promise<void>;
   /** 读笔记正文（编辑会话加载用；组件不直调 service，走本 store）。 */
   readNoteContent: (file: string) => Promise<string>;
-  /** 直读笔记磁盘全文（绕过内容缓存；外部修改感知/写前校验用真实磁盘）。 */
+  /** 直读笔记磁盘全文（绕过内容缓存；外部修改感知需要真实磁盘）。 */
   readNoteFresh: (file: string) => Promise<string>;
   /** 写回笔记正文并落盘（缓存先行 + 按文件串行队列）。返回是否真的落盘与实际落盘内容
-   *  （written = 是否落盘；content = 磁盘真实内容（保存前钩子可能改写）；veto/未写盘 = written false，
+   *  （written = 是否落盘；content = 磁盘真实内容（保存前钩子可能改写）；veto = written false，
    *   调用方不得推进基线）。 */
   saveNoteContent: (
     file: string,
     content: string,
-    canWrite?: () => boolean,
   ) => Promise<{ written: boolean; content: string }>;
   /** 作废单文件笔记内容缓存（真实外部修改/删除/改名时调用；下次读取走盘）。 */
   invalidateNoteCache: (file: string) => void;
@@ -116,7 +112,8 @@ interface NoteState {
   noteHistoryLoad: (file: string) => Promise<HistoryVersion[]>;
   /** 回滚笔记到指定版本：写回磁盘 + 记一条 restore 版本；返回回滚后的全文（供编辑器重载），失败返回 null。 */
   noteHistoryRollback: (file: string, seq: number) => Promise<string | null>;
-  /** 外部修改的笔记（file → 递增序号）。NoteEditor 订阅感知外部变更：无本地改动时实时刷新，有改动时提示冲突。 */
+  /** 外部修改的笔记（file → 递增序号）。编辑会话订阅感知外部变更：无未落盘输入时采纳磁盘内容，
+   *  有未落盘输入时保留本地输入（下一次自动保存按整文件写覆盖磁盘）。 */
   externalNoteEdits: Record<string, number>;
   /** watcher 收到 `.md` 外部变化事件时 bump 序号（软件内重命名旧路径事件由调用方跳过）。 */
   markNoteExternallyEdited: (file: string) => void;
@@ -124,16 +121,6 @@ interface NoteState {
   noteSaveStates: Record<string, NoteSaveStatus>;
   /** 更新笔记编辑器保存状态（null = 清除）。 */
   setNoteSaveState: (file: string, status: NoteSaveStatus | null) => void;
-  /** 笔记编辑器冲突状态（file → 是否冲突；面板 header 读取，编辑器卸载/切文件时清除）。 */
-  noteConflicts: Record<string, boolean>;
-  /** 更新笔记编辑器冲突状态（false = 清除）。 */
-  setNoteConflict: (file: string, conflict: boolean) => void;
-  /** 笔记冲突解决请求（file → 递增序号 + 解决方式；面板 header 按钮发请求，NoteEditor 订阅执行）。 */
-  noteConflictResolveReq: Record<string, { seq: number; keepLocal: boolean }>;
-  /** 请求解决笔记冲突（keepLocal = 保留本地并保存；false = 重新加载丢弃本地）。 */
-  resolveNoteConflict: (file: string, keepLocal: boolean) => void;
-  /** 清除笔记冲突解决请求（编辑器卸载时调用，防残留）。 */
-  clearNoteConflictResolveReq: (file: string) => void;
   /** 切仓库清态（openVault 后、下一个 await 前由领域生命周期钩子同步调用）：清空内容缓存与挂起输入。 */
   reset: () => void;
 }
@@ -156,12 +143,10 @@ export const useNoteStore = create<NoteState>((set, get) => ({
   /**
    * 写笔记正文（缓存先行 + 按文件串行队列）。返回是否真的落盘与实际落盘内容。
    *
-   * `canWrite`：可在排队期间被取消的落盘许可（笔记会话在写盘排队期间被外部修改打断转冲突时，
-   * 这次尚未执行的写盘必须作废——否则它落地时会覆盖刚被识别出来的外部内容，而用户看到的是冲突条）。
-   * 取消时同时作废刚写入的内容缓存：缓存若停在未落盘正文上，重开会话会把它当磁盘基线。
+   * 不做写盘前磁盘基准比对：整文件写 = 后写者胜，同一笔记的并发保存按调用序落盘（队列保证），
+   * 谁的内容最后调用谁就是磁盘最终内容。
    */
-  saveNoteContent: async (file, content, canWrite) => {
-    if (canWrite && !canWrite()) return { written: false, content };
+  saveNoteContent: async (file, content) => {
     // 写盘归属在调用时刻定死（先于任何 await）：串行队列跨切换在途，执行时再取激活身份
     // 会拿到新仓库的后端，把旧仓库正文写进新仓库同路径文件（identityKeyOf 对空间身份同样成立）
     const identityAtStart = identityKeyOf(getActiveVaultIdentity());
@@ -177,10 +162,6 @@ export const useNoteStore = create<NoteState>((set, get) => ({
     get().stageNoteContent(file, content);
     let written = false;
     await withNoteWriteQueue(file, async () => {
-      if (canWrite && !canWrite()) {
-        get().invalidateNoteCache(file);
-        return;
-      }
       if (identityKeyOf(getActiveVaultIdentity()) !== identityAtStart) {
         // 切仓库竞态：本次写属于旧仓库，作废（缓存一并作废，防残留被当磁盘基线）
         get().invalidateNoteCache(file);
@@ -230,14 +211,9 @@ export const useNoteStore = create<NoteState>((set, get) => ({
 
   flushPendingNotes: async () => {
     const pending = get().pendingNoteContent;
-    // 失败/冲突未决/文件已删的条目不清除（保留给下一轮或用户决策），其余落盘后清除
+    // 失败/文件已删的条目不清除（保留给下一轮），其余落盘后清除
     const keep = new Set<string>();
     for (const [file, content] of Object.entries(pending)) {
-      // 冲突未决（外部已修改、用户未选择「重新加载/保留本地」）：不覆盖外部修改，保留待决策
-      if (get().noteConflicts[file]) {
-        keep.add(file);
-        continue;
-      }
       // 文件已从列表消失（已被删除，cleanup 同款 stillExists 守卫）：不重建已删除文件
       if (!useVaultStore.getState().noteList.some((n) => n.file === file)) {
         keep.add(file);
@@ -315,44 +291,14 @@ export const useNoteStore = create<NoteState>((set, get) => ({
       return { noteSaveStates: { ...s.noteSaveStates, [file]: status } };
     }),
 
-  noteConflicts: {},
-
-  setNoteConflict: (file, conflict) =>
-    set((s) => {
-      const next = { ...s.noteConflicts };
-      if (conflict) next[file] = true;
-      else delete next[file];
-      return { noteConflicts: next };
-    }),
-
-  noteConflictResolveReq: {},
-
-  // 请求序号全局单调（不随条目清除归零）：会话按「已处理的最大序号」判断新请求，
-  // 清除条目后从头计数会让会话误判为已处理过而吞掉按钮点击
-  resolveNoteConflict: (file, keepLocal) =>
-    set((s) => ({
-      noteConflictResolveReq: {
-        ...s.noteConflictResolveReq,
-        [file]: { seq: ++conflictResolveSeq, keepLocal },
-      },
-    })),
-
-  clearNoteConflictResolveReq: (file) =>
-    set((s) => {
-      const next = { ...s.noteConflictResolveReq };
-      delete next[file];
-      return { noteConflictResolveReq: next };
-    }),
-
   reset: () => {
     // 挂起输入已在切仓库前 flush 落盘，这里只清残留（含 flush 后、切仓库前的新输入）：
     // 必须与调用方同步完成，防旧仓库内容经已切换的仓库根写进新仓库同路径文件。
-    // 冲突/保存状态/外部修改序号同属按文件的旧仓库运行时态，一并清（残留会让新仓库
-    // 同路径误显冲突条或误报外部修改，并让 flushPendingNotes 永久跳过该文件）
+    // 保存状态/外部修改序号同属按文件的旧仓库运行时态，一并清（残留会让新仓库同路径
+    // 误报外部修改，并让 flushPendingNotes 永久跳过该文件）
     set({
       noteContents: {},
       pendingNoteContent: {},
-      noteConflicts: {},
       noteSaveStates: {},
       externalNoteEdits: {},
     });

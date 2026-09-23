@@ -165,7 +165,7 @@ export interface MarkdownEditorLinks {
 interface Props {
   /** 当前正文（挂载时初始注入；外部同步时 replaceAll 的目标）。 */
   body: string;
-  /** 非用户编辑的内容更新序号（外部修改/冲突重载/加载完成时编辑面递增），变化即同步编辑器。 */
+  /** 非用户编辑的内容更新序号（外部修改/加载完成时编辑面递增），变化即同步编辑器。 */
   syncSeq: number;
   /** 用户编辑回调：输出编辑器当前全文 markdown 正文。只读态仍可传（勾选框 toggle 上报走保存链）。 */
   onBodyChange?: (markdown: string) => void;
@@ -352,7 +352,7 @@ export function MarkdownEditor({
     view.dispatch({ effects: readOnlyEffect.of(readOnly) });
   }, [readOnly]);
 
-  // 外部同步：非用户编辑的 content 更新（watcher 外部修改 / 冲突重载 / 加载完成）。
+  // 外部同步：非用户编辑的 content 更新（watcher 外部修改 / 加载完成）。
   // 协作模式下不禁用：远端合入经 ytext 进视图（updateListener 上报），此处仅处理非协作场景。
   useEffect(() => {
     if (syncSeq === 0 || syncSeq === syncSeqRef.current) return;

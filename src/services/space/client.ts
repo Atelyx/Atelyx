@@ -17,7 +17,7 @@ const REQUEST_TIMEOUT_MS = 30_000;
  * 协作空间请求错误载体。
  * `status`：HTTP 状态码（0 = 未达服务端，网络/超时）；`code`：失败类别；
  * `serverMessage`：服务端返回的可读消息（网络/超时为空串）；`serverBody`：服务端
- * 错误体原始 JSON（网络/超时为 null，供 409 冲突等需要从体里取字段的端点用）。
+ * 错误体原始 JSON（网络/超时为 null；需要从错误体读取字段的端点用）。
  * 消息含「服务器地址 + 状态码 + 服务端错误消息」，便于定位。
  */
 export class SpaceApiError extends Error {
@@ -128,14 +128,14 @@ export interface TreeNode {
   name: string;
   path: string;
   isDir: boolean;
-  /** 文件 mtime unix 秒（展示/排序用；与乐观锁版本号无关）。 */
+  /** 文件 mtime unix 秒（展示/排序用元数据）。 */
   updatedAt: number;
   children: TreeNode[];
 }
 
 export interface FileContent {
   content: string;
-  /** 服务端内容版本号（乐观锁判据，与写/补丁返回值同源；不是文件 mtime）。 */
+  /** 文件 mtime（unix 秒，展示/排序用元数据）。 */
   updatedAt: number;
   /** base64 读回时服务端回显 `base64`。 */
   encoding?: "base64";
@@ -151,28 +151,23 @@ export interface WriteFileBody {
   content: string;
   /** 缺省 = content 按文本落盘；`base64` = content 为标准 base64，服务端解码后按字节落盘（限额按解码后字节计）。 */
   encoding?: "base64";
-  /** 乐观并发基准：服务端内容版本更新则拒绝（409），不传 = 跳过冲突检查。 */
-  baseUpdatedAt?: number;
 }
 
 export interface PatchCanvasBody {
   path: string;
   patch: CanvasPatch;
-  baseUpdatedAt?: number;
 }
 
 export interface PatchTableBody {
   path: string;
   patch: TablePatch;
-  baseUpdatedAt?: number;
-  /** 跳过冲突检查强制覆盖（冲突条「保留本地并保存」用）。 */
-  force?: boolean;
 }
 
-/** 补丁端点结果：200 → 成功（含写入后内容版本与实际路径）；409 → 冲突（不抛错，updatedAt = 服务端当前版本）。 */
-export type SpacePatchResult =
-  | { conflict: false; updatedAt: number; file: string }
-  | { conflict: true; updatedAt?: number };
+/** 补丁端点结果：写入后 mtime（展示用）与实际落盘路径（title 改名漂移时为新路径）。 */
+export interface SpacePatchResult {
+  updatedAt: number;
+  file: string;
+}
 
 export interface RenameBody {
   oldPath: string;
@@ -428,28 +423,19 @@ export function createSpaceClient(serverUrl: string, getToken: () => Promise<str
     }
   }
 
-  /** 补丁端点通用：200 → 成功结果；409 → 冲突结果（不抛错，冲突由调用方按语义消费）；
-   *  其余错误照常归一化抛 SpaceApiError（如 patch.id 不匹配 400）。 */
+  /** 补丁端点通用：成功结果含写入后 mtime 与实际落盘路径；错误照常归一化抛 SpaceApiError
+   *  （如 patch.id 与文件不符 400）。 */
   async function patchRequest(
     spaceId: string,
     kind: "canvas" | "table",
     body: PatchCanvasBody | PatchTableBody,
   ): Promise<SpacePatchResult> {
-    try {
-      const res = await request<{ updatedAt: number; file: string }>(
-        "POST",
-        `/spaces/${spaceId}/patches/${kind}`,
-        { body },
-      );
-      return { conflict: false, updatedAt: res.updatedAt, file: res.file };
-    } catch (err) {
-      if (err instanceof SpaceApiError && err.status === 409) {
-        const b = err.serverBody as { updatedAt?: unknown } | null;
-        const updatedAt = typeof b?.updatedAt === "number" ? b.updatedAt : undefined;
-        return { conflict: true, ...(updatedAt !== undefined ? { updatedAt } : {}) };
-      }
-      throw err;
-    }
+    const res = await request<{ updatedAt: number; file: string }>(
+      "POST",
+      `/spaces/${spaceId}/patches/${kind}`,
+      { body },
+    );
+    return { updatedAt: res.updatedAt, file: res.file };
   }
 
   return {

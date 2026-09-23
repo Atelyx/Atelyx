@@ -55,27 +55,16 @@ export const localBackend: ContentBackend = {
   // ===== 写 =====
   writeFile: (file, content) => invoke("write_vault_file", { file, content }).then(() => undefined),
   writeNote: (file, content) => invoke("write_note", { file, content }).then(() => undefined),
-  writeCanvas: (canvas, file, baseUpdatedAt) =>
-    invoke<number>("write_canvas_vault", { canvas, file, baseUpdatedAt }),
-  writeTable: (table, file, baseUpdatedAt) =>
-    invoke<number>("write_table_vault", { table, file, baseUpdatedAt }),
+  writeCanvas: (canvas, file) => invoke<number>("write_canvas_vault", { canvas, file }),
+  writeTable: (table, file) => invoke<number>("write_table_vault", { table, file }),
   createCanvas: (title, dir) => invoke<CanvasCreateResult>("create_canvas_vault", { title, dir }),
   createTable: (title, dir) => invoke<TableCreateResult>("create_table_vault", { title, dir }),
 
   // ===== 增量补丁 =====
-  patchCanvas: (patch, file, baseUpdatedAt) =>
-    invoke<{ updatedAt: number; file: string } | null>("patch_canvas_vault", {
-      patch,
-      file,
-      baseUpdatedAt,
-    }),
-  patchTable: (patch, file, baseUpdatedAt, force) =>
-    invoke<{ updatedAt: number; file: string } | null>("patch_table_vault", {
-      patch,
-      file,
-      baseUpdatedAt,
-      force,
-    }),
+  patchCanvas: (patch, file) =>
+    invoke<{ updatedAt: number; file: string } | null>("patch_canvas_vault", { patch, file }),
+  patchTable: (patch, file) =>
+    invoke<{ updatedAt: number; file: string } | null>("patch_table_vault", { patch, file }),
 
   // ===== 结构变更 =====
   renameNote: (oldFile, newFile) => invoke<LinkRewriteResult>("rename_note", { oldFile, newFile }),

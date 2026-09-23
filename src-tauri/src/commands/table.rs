@@ -14,7 +14,7 @@ use tauri::{Manager, State};
 
 use crate::commands::vault::{
     collect_ref_updates, ensure_no_id_conflict, flush_canvas_updates, mime_from_ext,
-    remove_replaced_file,
+    remove_replaced_file, PatchWriteResult,
 };
 use crate::vault::{
     cache_evict_table, cache_put_table, delete_vault_file, read_table_file, read_table_file_cached,
@@ -81,14 +81,12 @@ pub fn read_table_vault(file: String, state: State<'_, VaultState>) -> Result<Ta
 }
 
 /// 写 .atb 文件（整体原子写；title 改了会自动重命名文件到同目录新名并同步画布 table 节点引用）。
-/// `base_updated_at`：乐观并发基准（加载时的磁盘 updatedAt），磁盘版本更新则拒绝写（None = 不检查）。
-/// 返回写入的 updated_at，前端保存成功后同步乐观锁基准。
-/// 乐观锁检查与 createdAt 保留共走一次带缓存读（指纹校验失效，外部改动即时感知）。
+/// 返回落盘后的 updated_at（前端据此更新本地时间戳）。
+/// createdAt 保留走一次带缓存读（指纹校验失效，外部改动即时感知）。
 #[tauri::command]
 pub fn write_table_vault(
     mut table: TableFile,
     file: String,
-    base_updated_at: Option<i64>,
     state: State<'_, VaultState>,
 ) -> Result<i64, String> {
     let root = state.root()?;
@@ -106,15 +104,10 @@ pub fn write_table_vault(
         &table.title,
     )?;
     let now = Utc::now().timestamp();
-    // 乐观并发 + createdAt 保留共读一次（缓存命中免重读；文件缺失 = 新表用 now）
+    // createdAt 保留：读一次磁盘（缓存命中免重读；文件缺失 = 新表用 now）
     if old_path.exists() {
         let (_, disk) = read_table_file_cached(&state, &root, &file)
             .map_err(|e| format!("磁盘表格文件损坏，无法保存：{} ({e})", old_path.display()))?;
-        if let Some(base) = base_updated_at {
-            if disk.updated_at > base {
-                return Err("表格已被外部修改，请重载后再编辑".to_string());
-            }
-        }
         table.created_at = disk.created_at;
     } else {
         table.created_at = now;
@@ -138,18 +131,15 @@ pub fn write_table_vault(
 }
 
 /// 增量保存 .atb（自动保存主路径）：只写变化/新增/删除的字段与行（前端按引用 diff 计算补丁），
-/// 按稳定 id 合并到磁盘全量文件——乐观锁 / createdAt 保留 / title 重命名（同步画布引用）/
+/// 按稳定 id 合并到磁盘全量文件——createdAt 保留 / title 重命名（同步画布引用）/
 /// 原子写语义与 write_table_vault 一致，IPC 载荷从整表缩到变化行/字段（image dataURL 不重传）。
-/// `force` = 保留本地（绕过乐观锁强制覆盖，冲突条「保留本地并保存」用）。
 /// 返回 (updatedAt, 写盘后的相对路径)——title 变更重命名文件时前端按新路径更新 tableFile。
 #[tauri::command]
 pub fn patch_table_vault(
     patch: TablePatch,
     file: String,
-    base_updated_at: Option<i64>,
-    force: bool,
     state: State<'_, VaultState>,
-) -> Result<(i64, String), String> {
+) -> Result<PatchWriteResult, String> {
     let root = state.root()?;
     let old_path = safe_join(&root, &file, false)?;
     // 磁盘文件缺失（外部删除）：补丁只有变化实体，重建会丢未变化部分——拒绝并回退全量写
@@ -180,14 +170,6 @@ pub fn patch_table_vault(
         )?;
     }
     let now = Utc::now().timestamp();
-    // 乐观并发：磁盘版本比前端基准新 → 拒绝覆盖（force = 保留本地强制覆盖）；缓存已按指纹保证磁盘最新
-    if !force {
-        if let Some(base) = base_updated_at {
-            if table.updated_at > base {
-                return Err("表格已被外部修改，请重载后再编辑".to_string());
-            }
-        }
-    }
     // 按稳定 id 合并（removed 幂等；upsert 覆盖同 id 或追加）
     let removed_fields: HashSet<&String> = patch.removed_field_ids.iter().collect();
     table.fields.retain(|f| !removed_fields.contains(&f.id));
@@ -226,7 +208,7 @@ pub fn patch_table_vault(
         remove_replaced_file(&old_path, &new_path, "表格")?;
     }
     cache_put_table(&state, &new_path, &new_rel, &table);
-    Ok((now, new_rel))
+    Ok(PatchWriteResult { updated_at: now, file: new_rel })
 }
 
 /// 重命名表格：更新 .atb 内 title + 同目录重命名文件 + 扫描所有 .atlx 更新 table 节点引用。

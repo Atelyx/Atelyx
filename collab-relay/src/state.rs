@@ -21,7 +21,6 @@ use std::sync::Arc;
 
 use axum::http::StatusCode;
 
-use crate::fsops::file_mtime_secs;
 use crate::index::SpaceIndex;
 use crate::ws::Hub;
 use crate::ApiError;
@@ -114,8 +113,6 @@ struct ServerStateInner {
     pub hub: Hub,
     /// 内容写按路径串行化的锁表（整文件写与补丁端点共用）。
     path_locks: PathLocks,
-    /// 内容乐观锁版本表（key = 空间 id + 相对路径；只在内存，重启后从 mtime 起步）。
-    content_versions: Mutex<HashMap<String, i64>>,
 }
 
 /// 内容写并发模型：同一路径同时只允许一个写者——读改写（读文件 → 合并 → 原子写）
@@ -260,7 +257,6 @@ impl ServerState {
                 index_cache: Mutex::new(HashMap::new()),
                 hub: Hub::default(),
                 path_locks: PathLocks::new(),
-                content_versions: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -344,41 +340,6 @@ impl ServerState {
     /// 不同空间的同形路径互不阻塞）。
     pub(crate) async fn path_lock(&self, space_id: &str, rel: &str) -> PathLockGuard {
         self.inner.path_locks.lock(&format!("{space_id}/{rel}")).await
-    }
-
-    /// 当前生效的内容版本（乐观锁判据）：已登记版本与磁盘 mtime 取较大者。
-    /// 不用裸 mtime 判冲突：mtime 只有整秒精度，同一秒内他人写入后 mtime == 基准，
-    /// 过期基准会漏判 409、静默覆盖对方内容；版本号每次写入严格 +1，同秒内也互相可辨。
-    /// mtime 仍参与取 max，是为了让绕过服务端的磁盘直改（只动 mtime）也能触发冲突。
-    pub(crate) fn content_version(&self, space_id: &str, rel: &str, path: &Path) -> i64 {
-        let registered = self
-            .inner
-            .content_versions
-            .lock()
-            .unwrap()
-            .get(&format!("{space_id}/{rel}"))
-            .copied()
-            .unwrap_or(0);
-        registered.max(file_mtime_secs(path))
-    }
-
-    /// 成功写入后推进版本：结果严格大于 `seed`（写入前经冲突检查发出去的判据值）与
-    /// 写后磁盘 mtime，保证同秒内先后两次写也能被对方的过期基准识别。
-    /// 服务重启后表为空，版本从 mtime 起步——mtime 只增，单调语义不回退。
-    pub(crate) fn advance_content_version(&self, space_id: &str, rel: &str, path: &Path, seed: i64) -> i64 {
-        let mut map = self.inner.content_versions.lock().unwrap();
-        let key = format!("{space_id}/{rel}");
-        let registered = map.get(&key).copied().unwrap_or(0);
-        let mtime = file_mtime_secs(path);
-        let next = registered.max(seed).max(mtime) + 1;
-        map.insert(key, next);
-        next
-    }
-
-    /// 撤销某路径的版本登记（title 改名落点漂移时清旧路径，防长期运行表无界增长；
-    /// 版本号按「已确认磁盘内容」单调推进，撤掉后新文件从 mtime 起步仍是单调不回退）。
-    pub(crate) fn retire_content_version(&self, space_id: &str, rel: &str) {
-        self.inner.content_versions.lock().unwrap().remove(&format!("{space_id}/{rel}"));
     }
 
     /// 默认布局的空间内容根（未收编目录时的落点）。

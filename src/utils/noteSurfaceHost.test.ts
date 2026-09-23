@@ -13,7 +13,6 @@ const stub = (): NoteSurfaceProvider => ({
     throw new Error("未预期调用");
   },
   get: () => null,
-  isConflicted: () => false,
   close: () => {},
 });
 

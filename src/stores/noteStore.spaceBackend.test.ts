@@ -1,6 +1,6 @@
 /**
  * 笔记域读写链在空间形态后端上的压测：内容面激活 stub 后端后，
- * 真实 noteStore 读写链（缓存先行 + 按文件串行队列 + canWrite 落盘许可 + 失败不静默）
+ * 真实 noteStore 读写链（缓存先行 + 按文件串行队列 + 失败不静默）
  * 全部经契约落在 stub 内存树上——验证契约能表达空间语义，且既有写盘语义不因后端改变。
  * 不 mock Tauri invoke：链路上出现任何契约外 I/O 即失败（invoke mock 记录并拒绝）。
  */
@@ -73,17 +73,6 @@ describe("笔记读写链 × 空间 stub 后端", () => {
     expect(stub.files.get("已有.md")).toBe("第三版");
     // 末三条 = 三次保存按调用序完成（首条是 beforeEach 的预置种子写入）
     expect(stub.writeOrder.slice(-3)).toEqual(["已有.md", "已有.md", "已有.md"]);
-  });
-
-  it("canWrite 撤销落盘许可：不落盘且缓存作废（重读走后端）", async () => {
-    const { saveNoteContent, readNoteContent } = noteStore.useNoteStore.getState();
-    let permit = true;
-    const saving = saveNoteContent("已有.md", "被取消的正文", () => permit);
-    permit = false;
-    await expect(saving).resolves.toEqual({ written: false, content: "被取消的正文" });
-    expect(stub.files.get("已有.md")).toBe("预置正文");
-    expect(await readNoteContent("已有.md")).toBe("预置正文");
-    expect(stub.reads).toBe(1);
   });
 
   it("后端写失败如实抛出（不静默），前序失败不阻断本序", async () => {

@@ -51,16 +51,14 @@ describe("切仓库清空表格运行时态", () => {
     expect(hasDomainLifecycle("tableStore")).toBe(true);
   });
 
-  it("清掉 tableFile/dirty/conflictPending 并取消未落盘的防抖保存", async () => {
+  it("清掉 tableFile/dirty 并取消未落盘的防抖保存", async () => {
     table.useTableStore.setState({
       tableFile: "旧仓库/表.atb",
       id: "t1",
       title: "表",
       fields: [{ id: "f1", name: "列", type: "text" }] as never,
       rows: [{ id: "r1", values: { f1: "x" } }] as never,
-      baseUpdatedAt: 1,
       dirty: true,
-      conflictPending: true,
       error: "写盘失败",
       selectedRowId: "r1",
     });
@@ -70,7 +68,6 @@ describe("切仓库清空表格运行时态", () => {
     const s = table.useTableStore.getState();
     expect(s.tableFile).toBeNull();
     expect(s.dirty).toBe(false);
-    expect(s.conflictPending).toBe(false);
     expect(s.error).toBeNull();
     expect(s.selectedRowId).toBeNull();
     expect(s.fields).toEqual([]);

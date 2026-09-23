@@ -50,15 +50,6 @@ export function useNoteBodySession(
   return { session, view };
 }
 
-/** 该笔记是否有未决冲突（会话关闭后仍为真）；供非常开会话的编辑面（如画布节点）显示提示。 */
-export function useNoteConflicted(file: string | null): boolean {
-  const getSnapshot = useCallback(
-    () => (file ? getNoteSurface()?.isConflicted(file) ?? false : false),
-    [file],
-  );
-  return useSyncExternalStore(onNoteSurfaceChange, getSnapshot, getSnapshot);
-}
-
 /** 命令式取已打开的会话（不改变引用计数）；用于按焦点归属的快捷键路由。 */
 export function getOpenNoteSession(file: string): NoteBodySession | null {
   return getNoteSurface()?.get(file) ?? null;

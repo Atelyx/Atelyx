@@ -180,7 +180,7 @@ export function sameIdSequence(a: { id: string }[], b: { id: string }[]): boolea
 }
 
 /** 按 id 序重排（rank = id → 位置）：未出现在 rank 中的实体（对端并发新增）保持相对顺序置尾。
- * 与 Rust `reorder_by` 同语义；合并产物重排（applyLocalOrder）与远端补丁 order 应用（reorderByIds）共用。 */
+ * 与 Rust `reorder_by` 同语义；远端补丁 order 应用与导出快照排序共用。 */
 export function reorderByRank<T extends { id: string }>(items: T[], rank: ReadonlyMap<string, number>): T[] {
   const known: T[] = [];
   const unknown: T[] = [];

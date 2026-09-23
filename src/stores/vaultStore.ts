@@ -183,8 +183,8 @@ async function applyNoteFileChange(oldFile: string, newFile: string, newTitle: s
     // 必须早于下面的列表刷新——联动 effect 由列表变化触发，晚记则 effect 先按「已删除」把笔记面板关掉，
     // 且关掉后 currentNoteFile 为空、effect 早退，再也不会回到新文件（同 applyFolderFileChange 的时序）
     noteRenames.remember(oldFile, newFile);
-    // 磁盘 .atlx 已变：画布订阅者据 `note:renamed|moved` 同步乐观锁基准与节点 file/title，
-    // 须在函数返回前完成（下一次自动保存依赖基准已更新）；撤销栈路径迁移同由笔记订阅者承担。
+    // 磁盘 .atlx 已变：画布订阅者据 `note:renamed|moved` 同步节点 file/title，
+    // 须在函数返回前完成（下一次自动保存依赖引用已更新）；撤销栈路径迁移同由笔记订阅者承担。
     // `rewritten`（被代写正文的其它笔记）随事件下发：它们的自写回波被上面的抑制窗口吞掉，
     // 订阅方只能据此作废其正文缓存。
     await emitFileEvent({
@@ -222,7 +222,7 @@ async function applyAttachmentFileChange(
     await renameAttachmentSvc(oldFile, newFile);
     // rename_attachment 会扫描更新所有 .atlx 的 media 引用（写 .atlx），标记自写抑制 watcher 误报
     markSelfSave();
-    // 磁盘 .atlx 已变：画布订阅者同步乐观锁基准 + 引用该附件的 media 节点 file（防回写覆盖旧值）
+    // 磁盘 .atlx 已变：画布订阅者同步引用该附件的 media 节点 file（防回写覆盖旧值）
     await emitFileEvent({
       kind,
       oldPath: oldFile,
@@ -236,7 +236,7 @@ async function applyAttachmentFileChange(
 
 /**
  * renameTable/moveTable 共用核心：pendingRename 记录 + 服务调用 + 自写抑制 + 树刷新 + 重命名记录；
- * 画布 table 节点引用同步与乐观锁基准由画布订阅者据事件承担（模式同 applyNoteFileChange）。
+ * 画布 table 节点引用同步由画布订阅者据事件承担（模式同 applyNoteFileChange）。
  * 服务命令内部已按 title/新路径扫描更新全部 .atlx 的 table 节点引用。
  */
 async function applyTableFileChange(oldFile: string, newFile: string, newTitle: string | null): Promise<void> {
@@ -287,8 +287,7 @@ async function applyFolderFileChange(
     // rename_folder 会扫描更新所有 .atlx 的目录前缀引用（写 .atlx），标记自写抑制 watcher 误报
     markSelfSave();
     // 当前画布文件若位于该目录下：先同步打开路径（旧路径已不存在，方法内部自带前缀守卫）；
-    // 画布订阅者再同步其运行时路径/乐观锁基准/节点前缀引用（磁盘 .atlx 已被 rename_folder 更新
-    // updatedAt，防下次保存误判「已被外部修改」）
+    // 画布订阅者再同步其运行时路径/节点前缀引用（磁盘 .atlx 已被 rename_folder 更新）
     useAppStore.getState().renameCurrentCanvasFile(oldDir, newDir);
     // `rewritten`（被代写正文的笔记，可能在目录前缀之外）随事件下发：自写回波被抑制窗口吞掉，
     // 订阅方只能据此作废其正文缓存

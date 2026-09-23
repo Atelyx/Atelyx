@@ -12,7 +12,7 @@
  * - `emitVaultEvent`：同步按注册序投递（watcher 信号泵用；领域反应的 await 不阻塞投递方，
  *   与既有「泵内 fire-and-forget」语义一致）；
  * - `emitVaultEventAsync`：逐个 await handler（文件动作路径用；领域反应须在调用方继续前完成，
- *   如画布乐观锁基准同步不得晚于后续自动保存）。
+ *   如画布节点引用同步不得晚于后续自动保存）。
  * 两种口径的订阅方异常都逐个隔离：`emitVaultEvent` 记日志后继续（订阅方的缺陷不得改变文件动作
  * 本身的成败，也不得饿死同级订阅方）；`emitVaultEventAsync` 隔离投递后汇总抛错，由调用方决定上报。
  * 纯数据容器 + 纯函数，无 store/service 依赖，可直测（模式同 utils/collabHost.ts）。

@@ -21,14 +21,9 @@ export async function readTableVault(file: string): Promise<TableFile> {
 }
 
 /** 写 .atb 文件（原子写；title 变更自动改文件名并同步画布引用）。
- * `baseUpdatedAt`：乐观并发基准（加载时的磁盘 updatedAt），磁盘版本更新则后端拒绝。
- * 返回写入后的 updatedAt（秒），前端保存成功后用它同步乐观锁基准。 */
-export async function writeTableVault(
-  table: TableFile,
-  file: string,
-  baseUpdatedAt?: number,
-): Promise<number> {
-  return getActiveContentBackend().writeTable(table, file, baseUpdatedAt);
+ * 返回写入后的 updatedAt（秒，展示用时间戳）。 */
+export async function writeTableVault(table: TableFile, file: string): Promise<number> {
+  return getActiveContentBackend().writeTable(table, file);
 }
 
 /** 增量保存基线快照（与当前运行时状态按引用 diff：未变实体引用相同，O(N) 指针比对无深比较）。 */
@@ -43,7 +38,6 @@ export interface TableSaveSnapshot {
  * 顺序变化（排序/插列）经 `fieldOrder`/`rowOrder` 携带。
  * 空补丁返回 null——调用方跳过 IPC（磁盘已一致）。
  * 返回写入后的 { updatedAt, file }（title 变更重命名时 file = 新相对路径）。
- * `force` = 保留本地（绕过乐观锁强制覆盖，冲突条「保留本地并保存」用）。
  */
 export async function patchTableVault(opts: {
   file: string;
@@ -51,14 +45,12 @@ export async function patchTableVault(opts: {
   fields: TableField[];
   rows: TableRow[];
   lastSaved: TableSaveSnapshot;
-  baseUpdatedAt: number;
-  force: boolean;
 }): Promise<{ updatedAt: number; file: string } | null> {
-  const { file, tableId, fields, rows, lastSaved, baseUpdatedAt, force } = opts;
+  const { file, tableId, fields, rows, lastSaved } = opts;
   // diff 计算与协作实时广播共用同一纯函数（顺序变化也在此捕获，见 utils/table.ts）
   const patch = computeTablePatch({ tableId, fields, rows, lastSaved });
   if (!patch) return null;
-  return getActiveContentBackend().patchTable(patch, file, baseUpdatedAt, force);
+  return getActiveContentBackend().patchTable(patch, file);
 }
 
 /** 重命名表格（更新 .atb 内 title + 同目录改文件名 + 同步画布 table 节点引用）。 */

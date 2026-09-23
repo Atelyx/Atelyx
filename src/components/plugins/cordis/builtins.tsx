@@ -374,16 +374,12 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
         }
         // 自写回波 / 协作重命名回波 / 协作对端在场 → 内容已由本端写盘或广播应用进内存，跳过重载：
         // 对端在场时磁盘合法落后于广播（500ms 防抖落盘 + 300ms watcher 延迟），重载会用陈旧盘回退
-        // 已应用内容，且 reloadFromDisk→load 杀进行中 AI 流/清锁/清撤销（画布版闪烁/运行态破坏根因）；
-        // 磁盘收敛由下次保存的乐观锁自动三方合并负责（canvasStore.handleSaveConflict）。
-        // 真实外部修改（无对端在场）才重载。
+        // 已应用内容，且 reloadFromDisk→load 杀进行中 AI 流/清锁/清撤销（画布版闪烁/运行态破坏根因）。
         if (isSelfSaveEcho(e.path) || isCollabCanvasRenamePath(e.path) || hasCollabPeerOnCanvas(e.path)) {
           return;
         }
-        if (store.dirty) {
-          // 本地有未保存改动：自动重载会丢改动，改为冲突提示让用户决策
-          useCanvasStore.setState({ conflictPending: true });
-        } else {
+        // 有未保存改动不重载（会丢改动）：磁盘分歧由下次保存按稳定 id 合并落盘自然收敛
+        if (!store.dirty) {
           // 无未保存改动：安全自动重载磁盘最新内容
           void store.reloadFromDisk();
         }
@@ -438,8 +434,7 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
       }),
       vaultHandler("canvas:renamed", async (e) => {
         try {
-          // 磁盘 .atlx 已被重命名：同步当前画布乐观锁基准 + 打开路径（防回写旧路径/乐观锁误冲突）
-          await useCanvasStore.getState().syncBaseUpdatedAt();
+          // 磁盘 .atlx 已被重命名：同步当前画布打开路径（防下次保存回写旧路径）
           if (useAppStore.getState().currentCanvasFile === e.oldPath) {
             useCanvasStore.setState({ canvasFile: e.newPath });
           }
@@ -449,7 +444,6 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
       }),
       vaultHandler("canvas:moved", async (e) => {
         try {
-          await useCanvasStore.getState().syncBaseUpdatedAt();
           if (useAppStore.getState().currentCanvasFile === e.oldPath) {
             useCanvasStore.setState({ canvasFile: e.newPath });
           }
@@ -497,8 +491,8 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
         // 协作换路的回波（对端改名/移动后共享盘上旧路径消失、新路径出现）：路径身份已由换路帧
         // 跟上，按帧的结果跳过——否则会被判成外部改盘，把刚跟上的编辑面打回
         if (isCollabNoteRelocatePath(e.path)) return;
-        // NoteEditor 感知外部修改：无本地改动实时刷新、有改动提示冲突
-        //（markNoteExternallyEdited 始终保留：跨编辑面同步 + 冲突检测必经，不受自写回波影响）
+        // NoteEditor 感知外部修改：无本地改动实时刷新、有未落盘输入保留本地输入
+        //（markNoteExternallyEdited 始终保留：跨编辑面同步的必经信号，不受自写回波影响）
         useNoteStore.getState().markNoteExternallyEdited(e.path);
         // 真实外部修改（非本端自写回波，含画布/AI 写 .md）：作废笔记内容缓存，下次读取走盘
         //（自写回波缓存已由 saveNoteContent 同步，不另行作废防缓存失效后重读盘）
@@ -579,8 +573,8 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
     vaultEventHandlers: [
       vaultHandler("table:changed", (e) => {
         if (isPendingRenameOldPath(e.path) || isPendingFolderRenameOldPath(e.path)) return;
-        // 当前打开的表格：干净 → 读盘内容比对判别（自写回放/已应用的对端写入跳过，真实外部修改静默重载）；
-        // 有脏 → 不弹冲突条——防抖保存 ≤500ms 内触发，乐观锁 + 自动三方合并收敛（冲突条仅作兜底）
+        // 当前打开的表格：干净 → 读盘内容比对判别（自写回放/已应用的对端写入跳过，内容不同则静默重载）；
+        // 有脏 → 不重载（防抖保存 ≤500ms 内触发，按稳定 id 合并落盘自然收敛）
         void useTableStore.getState().syncFromDiskIfChanged(e.path);
       }),
       vaultHandler("table:deleted", (e) => {

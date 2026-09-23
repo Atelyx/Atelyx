@@ -78,14 +78,9 @@ export async function readCanvasVault(file: string): Promise<CanvasFile> {
 
 /** 写 .atlx 文件（整体原子写；title 改了会自动重命名文件到同目录新名）。
  * `file`：画布相对仓库根路径（前端持有，画布任意文件夹存放）。
- * `baseUpdatedAt`：乐观并发基准（加载时的磁盘 updatedAt），磁盘版本更新则后端拒绝。
- * 返回写入后的 updatedAt（秒），前端保存成功后用它同步乐观锁基准。 */
-export async function writeCanvasVault(
-  canvas: CanvasFile,
-  file: string,
-  baseUpdatedAt?: number,
-): Promise<number> {
-  return getActiveContentBackend().writeCanvas(canvas, file, baseUpdatedAt);
+ * 返回写入后的 updatedAt（秒，展示用时间戳）。 */
+export async function writeCanvasVault(canvas: CanvasFile, file: string): Promise<number> {
+  return getActiveContentBackend().writeCanvas(canvas, file);
 }
 
 /** 重命名画布（更新 .atlx 内 title + 同目录重命名文件，按当前文件路径）。 */
@@ -401,7 +396,7 @@ export interface RuntimeCanvas {
   nodes: Node[];
   edges: Edge[];
   messagesByConv: Record<string, Message[]>;
-  /** 磁盘版本（updatedAt，乐观并发 baseUpdatedAt 基准）。 */
+  /** 磁盘版本戳（updatedAt，展示/排序用元数据）。 */
   updatedAt: number;
 }
 
@@ -617,7 +612,7 @@ export interface CanvasSaveSnapshot {
 
 /**
  * 增量保存画布（自动保存主路径）：与上次保存快照按引用 diff，只序列化变化/新增/删除的实体，
- * 经 `patch_canvas_vault` 按稳定 id 合并到磁盘全量文件（乐观锁语义同全量写）。
+ * 经 `patch_canvas_vault` 按稳定 id 合并到磁盘全量文件。
  * 空补丁（无变化实体）返回 null——调用方跳过 IPC（磁盘已一致）。
  * 返回写入后的 { updatedAt, file }（title 变更重命名时 file = 新相对路径）。
  */
@@ -629,9 +624,8 @@ export async function patchCanvasVault(opts: {
   edges: CanvasEdge[];
   messagesByConv: Record<string, Message[]>;
   lastSaved: CanvasSaveSnapshot;
-  baseUpdatedAt: number;
 }): Promise<{ updatedAt: number; file: string } | null> {
-  const { file, canvasId, title, nodes, edges, messagesByConv, lastSaved, baseUpdatedAt } = opts;
+  const { file, canvasId, title, nodes, edges, messagesByConv, lastSaved } = opts;
   // 引用 diff（与协作广播同源，见 utils/canvasCollab）：未变实体引用相同即未变化。
   // 对话节点消息变化时节点引用不变，messagesByConv 引用变化同样计入 upsert。
   const { upsertNodeIds, removedNodeIds, upsertEdgeIds, removedEdgeIds } = diffCanvasEntities(
@@ -668,7 +662,7 @@ export async function patchCanvasVault(opts: {
     // title 只随真实变化携带（Rust 据此改文件名；避免每次保存触发路径校验与重命名扫描）
     ...(title !== lastSaved.title ? { title } : {}),
   };
-  return getActiveContentBackend().patchCanvas(patch, file, baseUpdatedAt);
+  return getActiveContentBackend().patchCanvas(patch, file);
 }
 
 /** 加载画布（运行时格式，供 canvasStore.load 消费）。file = 相对仓库根路径。 */
@@ -678,8 +672,7 @@ export async function loadCanvasVault(file: string): Promise<RuntimeCanvas> {
 }
 
 /** 持久化画布（运行时 → 磁盘，含 text 写 .md + messages 嵌入）。
- * `file`：画布相对仓库根路径；`baseUpdatedAt`：乐观并发基准，透传 Rust 做版本检查。
- * 返回写入后的磁盘 updatedAt（秒）。 */
+ * `file`：画布相对仓库根路径。返回写入后的磁盘 updatedAt（秒）。 */
 export async function persistCanvasVault(
   canvasId: string,
   file: string,
@@ -687,7 +680,6 @@ export async function persistCanvasVault(
   nodes: Node[],
   edges: CanvasEdge[],
   messagesByConv: Record<string, Message[]>,
-  baseUpdatedAt: number,
 ): Promise<number> {
   const canvasFile = await runtimeToCanvasFile(
     canvasId,
@@ -696,7 +688,7 @@ export async function persistCanvasVault(
     edges,
     messagesByConv,
   );
-  return writeCanvasVault(canvasFile, file, baseUpdatedAt);
+  return writeCanvasVault(canvasFile, file);
 }
 
 // ===== 外部白板格式（.canvas，只读查看 + 转换为画布）=====
@@ -709,7 +701,7 @@ export async function readWhiteboardVault(file: string): Promise<string> {
 /**
  * 加载白板为运行时画布（只读查看用）。
  * 映射规则见 `utils/whiteboard.ts`：id = 文件路径（稳定身份）、title = 文件名去扩展名、
- * 边为无向边。`updatedAt` 为 0（只读不参与乐观锁）。
+ * 边为无向边。`updatedAt` 为 0（只读不落盘）。
  */
 export async function loadWhiteboardVault(
   file: string,
@@ -729,7 +721,7 @@ export async function loadWhiteboardVault(
 /**
  * 转换为 .atlx 画布（生成同目录副本，原 .canvas 保留不动，单向转换）。
  * 同名自动加序号（`siblingTitles` = 同目录现有 .atlx 标题，供去重）；
- * 写盘走 `write_canvas_vault`（新文件路径不存在，冲突检查天然通过）。
+ * 写盘走 `write_canvas_vault`（新文件路径不存在，按标题落盘新文件）。
  * 返回画布行（调用方用于打开）。
  */
 export async function convertWhiteboardToAtlx(

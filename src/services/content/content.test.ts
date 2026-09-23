@@ -175,7 +175,7 @@ describe("读/写/删透传与错误传播", () => {
 });
 
 describe("画布/表格写路径与增量补丁", () => {
-  /** 固定状态码回包：409/400 分支测试用（成功分支走 setupFetch）。 */
+  /** 固定状态码回包：错误分支测试用（成功分支走 setupFetch）。 */
   function setupFetchStatus(status: number, body: unknown) {
     calls = [];
     const fn = async (url: string, init?: RequestInit) => {
@@ -190,20 +190,16 @@ describe("画布/表格写路径与增量补丁", () => {
     vi.stubGlobal("fetch", fn);
   }
 
-  it("writeCanvas：PUT /file 序列化 .atlx 全量 + baseUpdatedAt 透传，返回 updatedAt", async () => {
+  it("writeCanvas：PUT /file 序列化 .atlx 全量，返回 updatedAt", async () => {
     setupFetch({});
     const canvas = { id: "c1", title: "画布" } as never;
-    const updatedAt = await backend().writeCanvas(canvas, "c.atlx", 10);
+    const updatedAt = await backend().writeCanvas(canvas, "c.atlx");
     expect(updatedAt).toBe(1);
     const write = calls.find((c) => c.method === "PUT");
-    expect(write?.body).toEqual({
-      path: "c.atlx",
-      content: JSON.stringify(canvas),
-      baseUpdatedAt: 10,
-    });
+    expect(write?.body).toEqual({ path: "c.atlx", content: JSON.stringify(canvas) });
   });
 
-  it("writeTable：baseUpdatedAt 缺省时不携带该字段", async () => {
+  it("writeTable：PUT /file 序列化 .atb 全量", async () => {
     setupFetch({});
     const table = { id: "t1", title: "表格" } as never;
     await backend().writeTable(table, "t.atb");
@@ -211,64 +207,28 @@ describe("画布/表格写路径与增量补丁", () => {
     expect(write?.body).toEqual({ path: "t.atb", content: JSON.stringify(table) });
   });
 
-  it("writeCanvas 冲突（409）抛本地同形错误，store 冲突分支可判定", async () => {
-    setupFetchStatus(409, { error: "版本冲突", updatedAt: 99 });
-    const err = await backend()
-      .writeCanvas({ id: "c1" } as never, "c.atlx", 10)
-      .catch((e) => e);
-    expect(typeof err).toBe("string");
-    expect(err).toBe("画布已被外部修改，请重载后再编辑");
-  });
-
-  it("writeTable 冲突（409）抛本地同形错误", async () => {
-    setupFetchStatus(409, { error: "版本冲突", updatedAt: 99 });
-    const err = await backend()
-      .writeTable({ id: "t1" } as never, "t.atb", 10)
-      .catch((e) => e);
-    expect(typeof err).toBe("string");
-    expect(err).toBe("表格已被外部修改，请重载后再编辑");
-  });
-
   it("patchCanvas：POST /patches/canvas，成功返回 {updatedAt, file}", async () => {
     setupFetch({});
     const patch = { id: "c1" } as never;
-    const result = await backend().patchCanvas(patch, "c.atlx", 10);
+    const result = await backend().patchCanvas(patch, "c.atlx");
     expect(result).toEqual({ updatedAt: 7, file: "c.atlx" });
     const call = calls.find((c) => c.url.endsWith("/patches/canvas"));
     expect(call?.method).toBe("POST");
-    expect(call?.body).toEqual({ path: "c.atlx", patch, baseUpdatedAt: 10 });
+    expect(call?.body).toEqual({ path: "c.atlx", patch });
   });
 
-  it("patchTable：POST /patches/table，force 透传", async () => {
+  it("patchTable：POST /patches/table，成功返回落盘后路径", async () => {
     setupFetch({});
     const patch = { id: "t1" } as never;
-    await backend().patchTable(patch, "t.atb", 3, true);
+    await backend().patchTable(patch, "t.atb");
     const call = calls.find((c) => c.url.endsWith("/patches/table"));
-    expect(call?.body).toEqual({ path: "t.atb", patch, baseUpdatedAt: 3, force: true });
-  });
-
-  it("patchCanvas 冲突（409）抛本地同形错误（与 Tauri 补丁冲突一致走抛错分支）", async () => {
-    setupFetchStatus(409, { error: "版本冲突", updatedAt: 99 });
-    const err = await backend()
-      .patchCanvas({ id: "c1" } as never, "c.atlx", 10)
-      .catch((e) => e);
-    expect(typeof err).toBe("string");
-    expect(err).toBe("画布已被外部修改，请重载后再编辑");
-  });
-
-  it("patchTable 冲突（409）抛本地同形错误", async () => {
-    setupFetchStatus(409, { error: "版本冲突", updatedAt: 99 });
-    const err = await backend()
-      .patchTable({ id: "t1" } as never, "t.atb", 10, false)
-      .catch((e) => e);
-    expect(typeof err).toBe("string");
-    expect(err).toBe("表格已被外部修改，请重载后再编辑");
+    expect(call?.body).toEqual({ path: "t.atb", patch });
   });
 
   it("patchCanvas 400（patch.id 不匹配）按 SpaceApiError 如实抛出", async () => {
     setupFetchStatus(400, { error: "补丁身份不匹配" });
     const err = await backend()
-      .patchCanvas({ id: "别的画布" } as never, "c.atlx", 10)
+      .patchCanvas({ id: "别的画布" } as never, "c.atlx")
       .catch((e) => e);
     expect(err).toBeInstanceOf(SpaceApiError);
     expect((err as SpaceApiError).status).toBe(400);
@@ -277,7 +237,7 @@ describe("画布/表格写路径与增量补丁", () => {
   it("patchCanvas 404（文件被外部删除）抛本地逐字字符串，store 据此回退全量写", async () => {
     setupFetchStatus(404, { error: "画布文件不存在（已从磁盘删除）" });
     const err = await backend()
-      .patchCanvas({ id: "c1" } as never, "c.atlx", 10)
+      .patchCanvas({ id: "c1" } as never, "c.atlx")
       .catch((e) => e);
     expect(typeof err).toBe("string");
     expect(err).toBe("画布文件不存在（已从磁盘删除）");
@@ -286,7 +246,7 @@ describe("画布/表格写路径与增量补丁", () => {
   it("patchTable 404（文件被外部删除）抛本地逐字字符串", async () => {
     setupFetchStatus(404, { error: "表格文件不存在（已从磁盘删除）" });
     const err = await backend()
-      .patchTable({ id: "t1" } as never, "t.atb", 10, false)
+      .patchTable({ id: "t1" } as never, "t.atb")
       .catch((e) => e);
     expect(typeof err).toBe("string");
     expect(err).toBe("表格文件不存在（已从磁盘删除）");
@@ -295,7 +255,7 @@ describe("画布/表格写路径与增量补丁", () => {
   it("writeCanvas 404（路径级错误）抛字符串（与本地 Tauri 字符串错误形态一致）", async () => {
     setupFetchStatus(404, { error: "路径不存在：c.atlx (os error 3)" });
     const err = await backend()
-      .writeCanvas({ id: "c1" } as never, "c.atlx", 10)
+      .writeCanvas({ id: "c1" } as never, "c.atlx")
       .catch((e) => e);
     expect(typeof err).toBe("string");
     expect(err).toBe("路径不存在：c.atlx (os error 3)");
@@ -643,7 +603,7 @@ function canvasJson(nodes: Array<Record<string, unknown>>, extra: Record<string,
 }
 
 describe("画布/表格读与列举", () => {
-  it("readCanvas：JSON 解析 + updatedAt 取 readFile 响应（乐观锁基准）", async () => {
+  it("readCanvas：JSON 解析 + updatedAt 取 readFile 响应（文件 mtime）", async () => {
     setupSpaceServer({
       files: { "目录/画布.atlx": JSON.stringify({ id: "c1", title: "画布", updatedAt: 99, nodes: [] }) },
     });
@@ -997,7 +957,7 @@ describe("表格改名/附件改名的画布引用同步", () => {
       },
       patchFile: "目录/新名.atb",
     });
-    const r = await backend().patchTable({ id: "t1" } as never, "目录/旧名.atb", 3, false);
+    const r = await backend().patchTable({ id: "t1" } as never, "目录/旧名.atb");
     expect(r).toEqual({ updatedAt: 7, file: "目录/新名.atb" });
     const canvas = JSON.parse(server.files.get("画布.atlx")!);
     expect(canvas.nodes[0].data.file).toBe("目录/新名.atb");

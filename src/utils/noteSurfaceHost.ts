@@ -27,7 +27,7 @@ export function getNoteSurface(): NoteSurfaceProvider | null {
   return provider;
 }
 
-/** 订阅提供者状态变化（可用性、笔记冲突集合）；返回退订函数。 */
+/** 订阅提供者状态变化（可用性、批量关会话等）；返回退订函数。 */
 export function onNoteSurfaceChange(listener: () => void): () => void {
   listeners.add(listener);
   return () => {
@@ -35,7 +35,7 @@ export function onNoteSurfaceChange(listener: () => void): () => void {
   };
 }
 
-/** 提供者状态变化后通知消费者重读（冲突集合变化、批量关会话等）。 */
+/** 提供者状态变化后通知消费者重读（可用性变化、批量关会话等）。 */
 export function notifyNoteSurfaceChange(): void {
   notify();
 }

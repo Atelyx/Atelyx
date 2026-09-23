@@ -38,7 +38,7 @@ ctx.effect(() => {
 | `ctx.collab` | `peers(): CollabPeer[]` / `setPresence(view: string | null, file: string | null): void` / `sendMessage(channel: string, payload: unknown, opts?: { to?: number }): boolean` / `myPeer(): CollabMyPeer` | 协作服务（读 peers + 上报 presence + 插件通用消息收发）。 |
 | `ctx.canvas` | `snapshot(): PluginCanvasSnapshot` / `addNode(node: { type: string; position: { x: number; y: number }; data?: Record<string, unknown> }): string` / `updateNode(nodeId: string, patch: Record<string, unknown>): void` / `moveNode(nodeId: string, position: { x: number; y: number }): void` / `deleteNode(nodeId: string): void` / `addEdge(edge: { source: string; target: string; sourceHandle?: string; targetHandle?: string; directed?: boolean; linkMode?: string; }): string` / `deleteEdge(edgeId: string): void` / `selectNode(nodeId: string | null): void` | 画布数据服务（由随应用分发的画布插件提供，停用即不可用；写方法要求已打开可写画布）。 |
 | `ctx.table` | `snapshot(): PluginTableSnapshot` / `updateCell(rowId: string, fieldId: string, value: CellValue | undefined): void` / `addRow(): void` / `removeRow(rowId: string): void` / `selectRow(rowId: string | null): void` / `resolveImage(entry: string): Promise<string>` | 表格数据服务（由随应用分发的表格插件提供，停用即不可用；写操作要求已接线）。 |
-| `ctx.note` | `currentFile(): string | null` / `open(file: string, title: string): void` / `read(file?: string): Promise<string>` / `write(content: string): Promise<void>` / `save(): Promise<void>` | 笔记内容服务（由随应用分发的笔记插件提供，停用即不可用；读写走当前仓库上下文的编辑器链）。 写入 `.md` 时若该笔记正被编辑且有未落盘输入，按「磁盘与本地正文不同」转冲突条由用户决策，不静默覆盖任何一侧。 |
+| `ctx.note` | `currentFile(): string | null` / `open(file: string, title: string): void` / `read(file?: string): Promise<string>` / `write(content: string): Promise<void>` / `save(): Promise<void>` | 笔记内容服务（由随应用分发的笔记插件提供，停用即不可用；读写走当前仓库上下文的编辑器链）。 写入 `.md` 为整文件写（后写者胜）：该笔记若正被编辑且有待落盘输入，其后续自动保存会把本地 输入写盘，覆盖本次写入的内容。 |
 | `ctx.chat` | `resolveTarget(selection?: ChatTargetSelection | null): ChatTargetResult` / `runTurn(req: ChatTurnRequest): Promise<void>` / `compact(req: ChatCompactRequest): Promise<ChatCompactResult>` / `autoName(naming: ChatNamingTarget, targetId: string, opts?: ChatAutoNameOptions): Promise<ChatAutoNameResult>` | AI 对话能力（由随应用分发的对话核心插件提供，停用即不可用）：用宿主配置的模型/Agent/工具跑一轮对话。 核心只跑一轮——消息容器与落盘留在调用方（插件自带容器），流式与收尾经 `ChatTurnSink` 交回。 类型面与宿主内部消费方同一份契约（见 types/chatRuntime.ts 的 `ChatRuntime`）。 |
 | `ctx.history` | `list(kind: HistoryKind, file: string): Promise<HistoryVersion[]>` / `rollback(kind: HistoryKind, file: string, seq: number): Promise<void>` / `repoHistory(): RepoHistoryResult | null` | 领域历史服务（笔记/画布/表格的版本历史读 + 回滚）。 |
 | `ctx.layout` | `activeLayoutId(): string | null` / `layouts(): WorkspaceLayout[]` / `addView(panelId: string, view: string): Promise<LayoutOpResult>` / `op(op: LayoutOp): Promise<LayoutOpResult>` | 布局服务（读取布局镜像 + 发布布局操作；`op` 与 Rust `LayoutOp` 逐字段对齐，改布局一律经 `layout_op`，布局权威在 Rust）。 |
@@ -125,7 +125,7 @@ ctx.effect(() =>
 ```
 
 - **作用域**：`note:before-save` 覆盖所有笔记写盘路径（自动保存 / 会话 flush / 关窗 flush /
-  `ctx.note.write` / 历史回滚 / 冲突保留本地）；`ai:before-request` 覆盖面板、画布与 `ctx.ai.chat`
+  `ctx.note.write` / 历史回滚）；`ai:before-request` 覆盖面板、画布与 `ctx.ai.chat`
   的每次流式请求（工具轮次每轮一次），标题生成等一次性短任务不经此面。
 - **异常隔离**：单个监听器抛错只记录并继续（保存/请求照常，按上一值前进），不会因插件 bug 中断宿主管线。
 - 监听器返回值只改写声明中的字段（`content` / `messages`），载荷其余字段只读；`ai:before-request`

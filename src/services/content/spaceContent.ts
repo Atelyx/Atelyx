@@ -10,10 +10,7 @@
  * - 入库附件：`<附件文件夹>/<fileName>`（团队元数据 `attachment-folder` 设定，未配置 = `attachments/`；
  *   既有附件不因改动设定而迁移——引用是相对路径，改设定只影响之后入库的文件）
  *
- * 乐观锁冲突（写/补丁 409）镜像本地 Tauri 字符串错误形态（「画布/表格已被外部修改，请重载后再编辑」，
- * 与 Rust 命令文案逐字一致）：store 的冲突分支按错误文案判定（`includes("已被外部修改")`），
- * 形态不一致会让空间路径静默落进普通保存失败分支、丢失自动合并/冲突条行为。
- * 补丁端点 404（磁盘文件已被外部删除）同样镜像本地逐字文案——store 据此回退全量写；
+ * 补丁端点 404（文件已被删除）镜像本地命令逐字文案——store 据此回退全量写；
  * 整文件写 404（路径级错误）镜像服务端消息（本地 safe_join 文案同形）。
  *
  * 引用改写（renameNote/renameFolder/表格与附件引用同步）前端复刻本地引擎的最小确定规则集：
@@ -59,11 +56,6 @@ import {
 } from "@/services/space/client";
 import { getToken } from "@/services/space/auth";
 import type { ContentBackend, TableImageSource } from "./contract";
-
-/** 409 冲突镜像的本地 Tauri 字符串错误文案（须与 Rust 命令逐字一致，见文件头注释）。 */
-function conflictError(kind: "画布" | "表格"): string {
-  return `${kind}已被外部修改，请重载后再编辑`;
-}
 
 /**
  * 服务端 404 → 本地同形字符串错误：本地 Tauri 命令错误均为字符串形态，store 的回退分支
@@ -814,25 +806,17 @@ export function createSpaceContentBackend(serverUrl: string, spaceId: string): C
   }
 
   /**
-   * 整体写画布/表格（带乐观锁基准）：内容序列化为 .atlx/.atb 全量 JSON 走 PUT /file。
-   * 409 冲突镜像成本地同形字符串错误（store 冲突分支按文案判定），其余错误如实抛出。
+   * 整体写画布/表格：内容序列化为 .atlx/.atb 全量 JSON 走 PUT /file，返回写入后的 mtime 戳。
+   * 404 = 路径级错误（父目录缺失/不可达），镜像本地字符串形态；其余错误如实抛出。
    */
-  async function writeEntityWithBase(
-    file: string,
-    entity: unknown,
-    baseUpdatedAt: number | undefined,
-    kind: "画布" | "表格",
-  ): Promise<number> {
+  async function writeEntity(file: string, entity: unknown): Promise<number> {
     try {
       const res = await client.content.writeFile(spaceId, {
         path: file,
         content: JSON.stringify(entity),
-        ...(baseUpdatedAt !== undefined ? { baseUpdatedAt } : {}),
       });
       return res.updatedAt;
     } catch (e) {
-      if (e instanceof SpaceApiError && e.status === 409) throw conflictError(kind);
-      // 404 = 路径级错误（父目录缺失/不可达）：镜像本地字符串形态，store 统一按字符串错误处理
       if (e instanceof SpaceApiError && e.status === 404) throw pathLevelError(e);
       throw e;
     }
@@ -874,7 +858,7 @@ export function createSpaceContentBackend(serverUrl: string, spaceId: string): C
     // ===== 读（画布/表格/附件）=====
     async readCanvas(file: string): Promise<CanvasFile> {
       const { data, updatedAt } = await readEntityJson(file, "画布");
-      // updatedAt 取 readFile 响应（服务端内容版本号）：store 把它当乐观锁基准传回 write/patch
+      // updatedAt 取 readFile 响应（服务端文件 mtime，展示/排序用元数据）
       return { ...(data as unknown as CanvasFile), updatedAt };
     },
     async readTable(file: string): Promise<TableFile> {
@@ -915,11 +899,9 @@ export function createSpaceContentBackend(serverUrl: string, spaceId: string): C
     writeFile: writeFileContent,
     writeNote: writeFileContent,
 
-    // ===== 写（画布/表格整体写，乐观锁基准透传服务端）=====
-    writeCanvas: (canvas, file, baseUpdatedAt) =>
-      writeEntityWithBase(file, canvas, baseUpdatedAt, "画布"),
-    writeTable: (table, file, baseUpdatedAt) =>
-      writeEntityWithBase(file, table, baseUpdatedAt, "表格"),
+    // ===== 写（画布/表格整体写）=====
+    writeCanvas: (canvas, file) => writeEntity(file, canvas),
+    writeTable: (table, file) => writeEntity(file, table),
     // 新建：最小磁盘 JSON 直接走 PUT /file（服务端写自动建父目录，无需先建夹）；
     // id 用 crypto.randomUUID（本地为 nanoid——同为不透明唯一串，协作按 id 相等性合并，形态无耦合）。
     async createCanvas(title: string, dir: string): Promise<CanvasCreateResult> {
@@ -958,15 +940,10 @@ export function createSpaceContentBackend(serverUrl: string, spaceId: string): C
       return { id, file };
     },
 
-    // ===== 增量补丁（409 冲突 / 404 文件缺失均镜像本地同形错误，成功返回写入后 {updatedAt, file}）=====
-    patchCanvas: async (patch, file, baseUpdatedAt) => {
+    // ===== 增量补丁（404 文件缺失镜像本地同形错误，成功返回写入后 {updatedAt, file}）=====
+    patchCanvas: async (patch, file) => {
       try {
-        const res = await client.content.patchCanvas(spaceId, {
-          path: file,
-          patch,
-          ...(baseUpdatedAt !== undefined ? { baseUpdatedAt } : {}),
-        });
-        if (res.conflict) throw conflictError("画布");
+        const res = await client.content.patchCanvas(spaceId, { path: file, patch });
         return { updatedAt: res.updatedAt, file: res.file };
       } catch (e) {
         // 文件被外部删除：store 按此字符串回退全量写（与本地 Tauri 命令文案逐字一致）
@@ -974,15 +951,9 @@ export function createSpaceContentBackend(serverUrl: string, spaceId: string): C
         throw e;
       }
     },
-    patchTable: async (patch, file, baseUpdatedAt, force) => {
+    patchTable: async (patch, file) => {
       try {
-        const res = await client.content.patchTable(spaceId, {
-          path: file,
-          patch,
-          ...(baseUpdatedAt !== undefined ? { baseUpdatedAt } : {}),
-          ...(force ? { force: true } : {}),
-        });
-        if (res.conflict) throw conflictError("表格");
+        const res = await client.content.patchTable(spaceId, { path: file, patch });
         // 表格改名漂移（title 变更 = 同目录改文件名）：服务端补丁只改文件本身，
         // 画布 table 节点引用同步由客户端改写补齐（对应本地 patch_table_vault 内的引用扫描）
         if (res.file !== file) await rewriteCanvasRefs(file, res.file);
@@ -1019,14 +990,14 @@ export function createSpaceContentBackend(serverUrl: string, spaceId: string): C
     // 保留可定位日志），避免留下「标题已改、文件名未改」的持久半状态。调用方已按同目录去重
     // 保证新名不撞兄弟画布。
     async renameCanvas(file: string, newTitle: string): Promise<void> {
-      const { data, updatedAt } = await readEntityJson(file, "画布");
+      const { data } = await readEntityJson(file, "画布");
       const oldTitle = typeof data.title === "string" ? data.title : stripExt(baseName(file));
       const dir = file.includes("/") ? file.slice(0, file.lastIndexOf("/")) : "";
       const newFile = siblingEntityPath(dir, newTitle, "atlx");
-      // 写 title 经冲突镜像包装（409 文案与本地一致）；同时推进 updatedAt（本地 rename_canvas_vault
-      // 会改 updated_at，画布列表按它排序，不改则空间内重命名不置顶）
+      // 同时推进 updatedAt（本地 rename_canvas_vault 会改 updated_at，画布列表按它排序，
+      // 不改则空间内重命名不置顶）
       const stamped = { ...data, title: newTitle, updatedAt: Math.floor(Date.now() / 1000) };
-      await writeEntityWithBase(file, stamped, updatedAt, "画布");
+      await writeEntity(file, stamped);
       if (newFile === file) return;
       try {
         await client.content.rename(spaceId, { oldPath: file, newPath: newFile });

@@ -1270,7 +1270,7 @@ async fn viewer_role_read_only_semantics() {
     assert!(rows.iter().any(|m| m["role"] == "viewer"));
 }
 
-// ===== 内容写入中心化（补丁端点 / 定序 / 乐观锁 / 广播）=====
+// ===== 内容写入中心化（补丁端点 / 定序 / 广播）=====
 
 /// 登录既有账号取令牌（用户名/密码由建号处保证）。
 async fn login_as(ctx: &Ctx, username: &str) -> String {
@@ -1319,7 +1319,7 @@ async fn read_json(ctx: &Ctx, token: &str, space_id: &str, path: &str) -> Value 
 }
 
 #[tokio::test]
-async fn canvas_patch_merge_conflict_and_rename() {
+async fn canvas_patch_merge_and_rename() {
     let dir = tempfile::tempdir().unwrap();
     let ctx = Ctx::new(spawn_server(dir.path()).await);
     let space_id = setup_two_members(&ctx, "alice", "bob").await;
@@ -1372,16 +1372,6 @@ async fn canvas_patch_merge_conflict_and_rename() {
     let (status, body) = ctx.post(&url, Some(&a), json!({ "path": file, "patch": patch })).await;
     assert_eq!(status, 400, "补丁与文件不匹配应 400：{body}");
 
-    // baseUpdatedAt 过期 → 409，body 带当前 updatedAt；带当前基准 → 200
-    let patch = json!({ "id": "cv-1", "upsertNodes": [text_node("n3", 3.0)] });
-    let (status, body) = ctx.post(&url, Some(&a), json!({ "path": file, "patch": patch, "baseUpdatedAt": 0 })).await;
-    assert_eq!(status, 409, "过期基准应 409：{body}");
-    assert!(body["error"].is_string(), "冲突 body 应带 error：{body}");
-    assert!(body["updatedAt"].as_i64().unwrap() > 0, "冲突 body 应带当前 updatedAt：{body}");
-    let base = body["updatedAt"].as_i64().unwrap();
-    let (status, _) = ctx.post(&url, Some(&a), json!({ "path": file, "patch": patch, "baseUpdatedAt": base })).await;
-    assert_eq!(status, 200, "以冲突返回的 updatedAt 为基准应成功");
-
     // title 变更 → 同目录改名，返回新路径，旧文件不存在
     let patch = json!({ "id": "cv-1", "title": "新设计", "upsertNodes": [] });
     let (status, resp) = ctx.post(&url, Some(&a), json!({ "path": file, "patch": patch })).await;
@@ -1412,7 +1402,7 @@ async fn canvas_patch_merge_conflict_and_rename() {
 }
 
 #[tokio::test]
-async fn table_patch_merge_order_and_force() {
+async fn table_patch_merge_order() {
     let dir = tempfile::tempdir().unwrap();
     let ctx = Ctx::new(spawn_server(dir.path()).await);
     let space_id = setup_two_members(&ctx, "alice", "bob").await;
@@ -1476,21 +1466,6 @@ async fn table_patch_merge_order_and_force() {
     let doc = read_json(&ctx, &a, &space_id, file).await;
     let row_ids: Vec<&str> = doc["rows"].as_array().unwrap().iter().map(|r| r["id"].as_str().unwrap()).collect();
     assert_eq!(row_ids, vec!["r2", "r3"]);
-
-    // baseUpdatedAt 冲突 → 409；force=true 跳过冲突检查 → 200
-    let patch = json!({ "id": "tb-1", "upsertRows": [ { "id": "r4", "values": { "f1": "任务四" } } ] });
-    let (status, body) = ctx
-        .post(&url, Some(&a), json!({ "path": file, "patch": patch, "baseUpdatedAt": 0 }))
-        .await;
-    assert_eq!(status, 409, "过期基准应 409：{body}");
-    assert!(body["updatedAt"].as_i64().unwrap() > 0);
-    let (status, resp) = ctx
-        .post(&url, Some(&a), json!({ "path": file, "patch": patch, "baseUpdatedAt": 0, "force": true }))
-        .await;
-    assert_eq!(status, 200, "force 应跳过冲突检查：{resp}");
-    let doc = read_json(&ctx, &a, &space_id, file).await;
-    let row_ids: Vec<&str> = doc["rows"].as_array().unwrap().iter().map(|r| r["id"].as_str().unwrap()).collect();
-    assert!(row_ids.contains(&"r4"), "force 补丁应已落地：{doc}");
 
     // patch.id 不匹配 → 400
     let patch = json!({ "id": "other-table", "upsertRows": [] });
@@ -1656,93 +1631,6 @@ async fn patch_landing_broadcasts_frame_to_room() {
     assert_eq!(frame["type"], "table-patch", "应收到表格补丁广播帧：{frame}");
     assert_eq!(frame["file"], tfile);
     assert_eq!(frame["patch"]["id"], "tb-1");
-}
-
-#[tokio::test]
-async fn write_file_optimistic_lock() {
-    let dir = tempfile::tempdir().unwrap();
-    let ctx = Ctx::new(spawn_server(dir.path()).await);
-    let space_id = setup_two_members(&ctx, "alice", "bob").await;
-    let a = login_as(&ctx, "alice").await;
-    let url = format!("/api/spaces/{space_id}/file");
-
-    let (status, w) = ctx.put(&url, Some(&a), json!({ "path": "笔记/a.md", "content": "v1" })).await;
-    assert_eq!(status, 200);
-    let base = w["updatedAt"].as_i64().unwrap();
-
-    // 过期基准 → 409，body 带当前 updatedAt
-    let (status, body) = ctx.put(&url, Some(&a), json!({ "path": "笔记/a.md", "content": "v2", "baseUpdatedAt": 0 })).await;
-    assert_eq!(status, 409, "过期基准应 409：{body}");
-    assert!(body["error"].is_string());
-    assert!(body["updatedAt"].as_i64().unwrap() >= base);
-
-    // 当前基准 → 200；缺省 = 无条件写
-    let (status, _) = ctx.put(&url, Some(&a), json!({ "path": "笔记/a.md", "content": "v2", "baseUpdatedAt": base })).await;
-    assert_eq!(status, 200, "以当前 updatedAt 为基准应成功");
-    let (status, _) = ctx.put(&url, Some(&a), json!({ "path": "笔记/a.md", "content": "v3" })).await;
-    assert_eq!(status, 200, "缺省 baseUpdatedAt 应无条件写");
-    let (_, body) = ctx.get(&url, Some(&a), &[("path", "笔记/a.md")]).await;
-    assert_eq!(body["content"], "v3");
-}
-
-/// 同秒两次写必须靠版本号互相识别：mtime 整秒截断下第二次写会带着恰等于当前版本的
-/// 基准漏判冲突、静默覆盖第一次写入（修复目标场景）。
-#[tokio::test]
-async fn same_second_writes_conflict_by_version() {
-    let dir = tempfile::tempdir().unwrap();
-    let ctx = Ctx::new(spawn_server(dir.path()).await);
-    let space_id = setup_two_members(&ctx, "alice", "bob").await;
-    let a = login_as(&ctx, "alice").await;
-    let url = format!("/api/spaces/{space_id}/file");
-
-    let (status, w) = ctx.put(&url, Some(&a), json!({ "path": "笔记/b.md", "content": "v1" })).await;
-    assert_eq!(status, 200);
-    let v1 = w["updatedAt"].as_i64().unwrap();
-    let (_, r) = ctx.get(&url, Some(&a), &[("path", "笔记/b.md")]).await;
-    assert_eq!(r["updatedAt"], v1, "读返回的 updatedAt 应与写返回的版本同源闭环：{r}");
-
-    // 写者 A 以当前版本为基准成功写入（即使与上一次写落在同一秒，版本也必须推进）
-    let (status, w2) = ctx
-        .put(&url, Some(&a), json!({ "path": "笔记/b.md", "content": "v2", "baseUpdatedAt": v1 }))
-        .await;
-    assert_eq!(status, 200, "以当前版本为基准应成功：{w2}");
-    let v2 = w2["updatedAt"].as_i64().unwrap();
-    assert!(v2 > v1, "版本必须严格单调递增（同秒内也不停滞）：{v1} -> {v2}");
-
-    // 写者 B 仍持同一旧基准（= A 写入前拿到的版本）→ 409，body 带当前版本
-    let (status, body) = ctx
-        .put(&url, Some(&a), json!({ "path": "笔记/b.md", "content": "v2-覆盖", "baseUpdatedAt": v1 }))
-        .await;
-    assert_eq!(status, 409, "同秒内他人写入后旧基准应 409：{body}");
-    assert_eq!(body["updatedAt"], v2, "冲突 body 应带当前版本供刷新基准：{body}");
-    let (_, r) = ctx.get(&url, Some(&a), &[("path", "笔记/b.md")]).await;
-    assert_eq!(r["content"], "v2", "被 409 拒绝的写不得落盘：{r}");
-
-    // 补丁端点同判据：以旧版本为基准的补丁 409，刷新基准后成功
-    let cfile = "画布/版本.atlx";
-    let (status, _) = ctx
-        .put(
-            &url,
-            Some(&a),
-            json!({ "path": cfile, "content": canvas_doc("cv-v", "版本", json!([text_node("n1", 1.0)])).to_string() }),
-        )
-        .await;
-    assert_eq!(status, 200);
-    let patch_url = format!("/api/spaces/{space_id}/patches/canvas");
-    let patch = json!({ "id": "cv-v", "upsertNodes": [text_node("n2", 2.0)] });
-    let (status, p1) = ctx.post(&patch_url, Some(&a), json!({ "path": cfile, "patch": patch })).await;
-    assert_eq!(status, 200, "首次补丁（无基准）应成功：{p1}");
-    let pv1 = p1["updatedAt"].as_i64().unwrap();
-    let (status, body) = ctx
-        .post(&patch_url, Some(&a), json!({ "path": cfile, "patch": patch, "baseUpdatedAt": pv1 - 1 }))
-        .await;
-    assert_eq!(status, 409, "补丁旧基准应 409：{body}");
-    assert_eq!(body["updatedAt"], pv1);
-    let (status, p2) = ctx
-        .post(&patch_url, Some(&a), json!({ "path": cfile, "patch": patch, "baseUpdatedAt": pv1 }))
-        .await;
-    assert_eq!(status, 200, "以当前版本为基准的补丁应成功：{p2}");
-    assert!(p2["updatedAt"].as_i64().unwrap() > pv1);
 }
 
 /// 改名边界：Windows 保留名净化（与客户端同口径）、同名异 id 拒绝覆盖、case-only 改名豁免。
@@ -1928,10 +1816,9 @@ async fn binary_file_base64_roundtrip() {
     assert_eq!(status, 400, "读未知编码应 400");
 }
 
-/// base64 写与文本写共用同一把路径锁与版本表：同路径并发混写不交叉损坏、
-/// 限额按解码后字节、乐观锁跨编码生效。
+/// base64 写与文本写共用同一把路径锁：同路径并发混写不交叉损坏、限额按解码后字节。
 #[tokio::test]
-async fn base64_write_shares_path_lock_limit_and_version() {
+async fn base64_write_shares_path_lock_and_limit() {
     let dir = tempfile::tempdir().unwrap();
     let ctx = Ctx::new(spawn_server(dir.path()).await);
     let space_id = setup_two_members(&ctx, "alice", "bob").await;
@@ -1981,37 +1868,6 @@ async fn base64_write_shares_path_lock_limit_and_version() {
     assert!(body["error"].as_str().unwrap().contains("文件过大"), "错误消息应明确：{body}");
     drop(_override);
     drop(_serial);
-
-    // 乐观锁对 base64 写生效：过期基准 409（带当前 updatedAt），当前基准成功
-    let (status, w) = ctx
-        .put(&url, Some(&a), json!({ "path": "锁.bin", "content": B64.encode(b"v1"), "encoding": "base64" }))
-        .await;
-    assert_eq!(status, 200);
-    let base = w["updatedAt"].as_i64().unwrap();
-    let (status, body) = ctx
-        .put(&url, Some(&a), json!({ "path": "锁.bin", "content": B64.encode(b"v2"), "encoding": "base64", "baseUpdatedAt": 0 }))
-        .await;
-    assert_eq!(status, 409, "base64 写过期基准应 409：{body}");
-    assert!(body["updatedAt"].as_i64().unwrap() >= base);
-    let (status, _) = ctx
-        .put(&url, Some(&a), json!({ "path": "锁.bin", "content": B64.encode(b"v2"), "encoding": "base64", "baseUpdatedAt": base }))
-        .await;
-    assert_eq!(status, 200, "以当前版本为基准的 base64 写应成功");
-    let (_, r) = ctx.get(&url, Some(&a), &[("path", "锁.bin"), ("encoding", "base64")]).await;
-    assert_eq!(B64.decode(r["content"].as_str().unwrap()).unwrap(), b"v2");
-
-    // 跨编码共享版本表：文本写的版本作为 base64 写的基准仍然生效（同路径互斥同表）
-    let (status, w) = ctx.put(&url, Some(&a), json!({ "path": "锁2.bin", "content": "t1" })).await;
-    assert_eq!(status, 200);
-    let base = w["updatedAt"].as_i64().unwrap();
-    let (status, _) = ctx
-        .put(&url, Some(&a), json!({ "path": "锁2.bin", "content": B64.encode(b"b1"), "encoding": "base64", "baseUpdatedAt": base }))
-        .await;
-    assert_eq!(status, 200, "文本写版本应可作为 base64 写基准");
-    let (status, body) = ctx
-        .put(&url, Some(&a), json!({ "path": "锁2.bin", "content": "t2", "baseUpdatedAt": base }))
-        .await;
-    assert_eq!(status, 409, "base64 写之后文本写旧基准应 409：{body}");
 }
 
 /// 保留目录：树 / glob / grep / 标签索引不出现；文件读写 API 正常可达（含 base64 二进制）。

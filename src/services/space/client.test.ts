@@ -185,66 +185,28 @@ describe("增量补丁端点", () => {
     vi.stubGlobal("fetch", fetchMock);
     const client = createSpaceClient(SERVER, async () => TOKEN);
     const patch = { id: "c1" } as never;
-    const result = await client.content.patchCanvas("sp1", {
-      path: "c.atlx",
-      patch,
-      baseUpdatedAt: 10,
-    });
-    expect(result).toEqual({ conflict: false, updatedAt: 42, file: "新.atlx" });
+    const result = await client.content.patchCanvas("sp1", { path: "c.atlx", patch });
+    expect(result).toEqual({ updatedAt: 42, file: "新.atlx" });
     const [url, init] = lastCall(fetchMock);
     expect(url).toBe("http://192.168.1.10:11224/api/spaces/sp1/patches/canvas");
     expect(init.method).toBe("POST");
-    expect(JSON.parse(init.body as string)).toEqual({ path: "c.atlx", patch, baseUpdatedAt: 10 });
+    expect(JSON.parse(init.body as string)).toEqual({ path: "c.atlx", patch });
   });
 
-  it("patchTable 200 返回成功结果，force 透传", async () => {
+  it("patchTable 200 返回成功结果与落盘后路径", async () => {
     const fetchMock = vi.fn(async () => jsonResponse({ updatedAt: 7, file: "t.atb" }));
     vi.stubGlobal("fetch", fetchMock);
     const client = createSpaceClient(SERVER, async () => TOKEN);
     const patch = { id: "t1" } as never;
-    const result = await client.content.patchTable("sp1", {
-      path: "t.atb",
-      patch,
-      baseUpdatedAt: 3,
-      force: true,
-    });
-    expect(result).toEqual({ conflict: false, updatedAt: 7, file: "t.atb" });
+    const result = await client.content.patchTable("sp1", { path: "t.atb", patch });
+    expect(result).toEqual({ updatedAt: 7, file: "t.atb" });
     const [url, init] = lastCall(fetchMock);
     expect(url).toBe("http://192.168.1.10:11224/api/spaces/sp1/patches/table");
     expect(init.method).toBe("POST");
-    expect(JSON.parse(init.body as string)).toEqual({
-      path: "t.atb",
-      patch,
-      baseUpdatedAt: 3,
-      force: true,
-    });
+    expect(JSON.parse(init.body as string)).toEqual({ path: "t.atb", patch });
   });
 
-  it("409 冲突不抛错，返回 conflict 结果并携带服务端 updatedAt", async () => {
-    const fetchMock = vi.fn(async () =>
-      jsonResponse({ error: "文件已被他人修改", updatedAt: 99 }, 409),
-    );
-    vi.stubGlobal("fetch", fetchMock);
-    const client = createSpaceClient(SERVER, async () => TOKEN);
-    const result = await client.content.patchCanvas("sp1", {
-      path: "c.atlx",
-      patch: { id: "c1" } as never,
-    });
-    expect(result).toEqual({ conflict: true, updatedAt: 99 });
-  });
-
-  it("409 体缺 updatedAt 时 conflict 结果不带该字段", async () => {
-    const fetchMock = vi.fn(async () => jsonResponse({ error: "冲突" }, 409));
-    vi.stubGlobal("fetch", fetchMock);
-    const client = createSpaceClient(SERVER, async () => TOKEN);
-    const result = await client.content.patchTable("sp1", {
-      path: "t.atb",
-      patch: { id: "t1" } as never,
-    });
-    expect(result).toEqual({ conflict: true });
-  });
-
-  it("非 409 错误照常抛 SpaceApiError（如 patch.id 不匹配 400）", async () => {
+  it("补丁端点错误照常抛 SpaceApiError（如 patch.id 不匹配 400）", async () => {
     const fetchMock = vi.fn(async () =>
       jsonResponse({ error: "补丁身份不匹配" }, 400),
     );

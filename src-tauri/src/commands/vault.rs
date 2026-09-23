@@ -221,14 +221,11 @@ pub fn read_canvas_vault(file: String, state: State<'_, VaultState>) -> Result<C
 /// 写 .atlx 文件（整体原子写；title 改了会自动重命名文件到同目录新名）。
 /// 自动更新 updated_at；保留原 created_at（从磁盘读，新画布用 now）。
 /// `file`：画布相对仓库根路径（前端持有，画布任意文件夹存放）。
-/// `base_updated_at`：前端基于的磁盘版本（加载时的 updatedAt）。磁盘版本更新则拒绝写
-/// （乐观并发，防多用户/外部同步静默覆盖丢更新）；None = 不检查。
-/// 乐观锁检查与 createdAt 保留共走一次带缓存读（指纹校验失效，外部改动即时感知）。
+/// createdAt 保留走一次带缓存读（指纹校验失效，外部改动即时感知）。
 #[tauri::command]
 pub fn write_canvas_vault(
     mut canvas: CanvasFile,
     file: String,
-    base_updated_at: Option<i64>,
     state: State<'_, VaultState>,
 ) -> Result<i64, String> {
     let root = state.root()?;
@@ -247,15 +244,10 @@ pub fn write_canvas_vault(
         &canvas.title,
     )?;
     let now = Utc::now().timestamp();
-    // 乐观并发 + createdAt 保留共读一次（缓存命中免重读；文件缺失 = 新画布用 now）
+    // createdAt 保留：读一次磁盘（缓存命中免重读；文件缺失 = 新画布用 now）
     if old_path.exists() {
         let (_, disk) = read_canvas_file_cached(&state, &root, &file)
             .map_err(|e| format!("磁盘画布文件损坏，无法保存：{} ({e})", old_path.display()))?;
-        if let Some(base) = base_updated_at {
-            if disk.updated_at > base {
-                return Err("画布已被外部修改，请重载后再编辑".to_string());
-            }
-        }
         canvas.created_at = disk.created_at;
     } else {
         canvas.created_at = now;
@@ -266,24 +258,20 @@ pub fn write_canvas_vault(
     let new_rel = rel_with_new_title(&file, &canvas.title, "atlx");
     cache_evict_canvas(&state, &file);
     cache_put_canvas(&state, &new_path, &new_rel, &canvas);
-    // 返回写入的 updated_at，前端保存成功后同步乐观锁基准（防下次保存误判冲突）
+    // 返回落盘后的 updated_at（前端据此更新本地时间戳）
     Ok(now)
 }
 
 /// 增量保存 .atlx（自动保存主路径）：只写变化/新增/删除的实体（前端按引用 diff 计算补丁），
-/// 按稳定 id 合并到磁盘全量文件——乐观锁 / createdAt 保留 / title 重命名 / 原子写语义
-/// 与 write_canvas_vault 完全一致，IPC 载荷从整画布缩到变化实体。
+/// 按稳定 id 合并到磁盘全量文件——createdAt 保留 / title 重命名 / 原子写语义
+/// 与 write_canvas_vault 一致，IPC 载荷从整画布缩到变化实体。
 /// 返回 (updatedAt, 写盘后的相对路径)——title 变更重命名文件时前端按新路径更新 canvasFile。
-/// 冲突策略（与表格的 force「保留本地」不对称，属有意设计）：画布冲突一律报错，由前端提示
-/// 「重载（丢本地）或合并（mergeFromDisk 三方合并）」——画布是拓扑+消息的复合体，
-/// 无表格行级 LWW 的明确语义，不做静默覆盖。
 #[tauri::command]
 pub fn patch_canvas_vault(
     patch: CanvasPatch,
     file: String,
-    base_updated_at: Option<i64>,
     state: State<'_, VaultState>,
-) -> Result<(i64, String), String> {
+) -> Result<PatchWriteResult, String> {
     let root = state.root()?;
     let old_path = safe_join(&root, &file, false)?;
     // 磁盘文件缺失（外部删除）：补丁只有变化实体，重建会丢未变化部分——拒绝并回退全量写
@@ -314,12 +302,6 @@ pub fn patch_canvas_vault(
         )?;
     }
     let now = Utc::now().timestamp();
-    // 乐观并发：磁盘版本比前端基准新 → 拒绝覆盖（缓存已按指纹保证磁盘最新）
-    if let Some(base) = base_updated_at {
-        if canvas.updated_at > base {
-            return Err("画布已被外部修改，请重载后再编辑".to_string());
-        }
-    }
     // 按稳定 id 合并（removed 幂等；upsert 覆盖同 id 或追加）
     let removed_nodes: HashSet<&String> = patch.removed_node_ids.iter().collect();
     canvas.nodes.retain(|n| !removed_nodes.contains(&n.id));
@@ -342,7 +324,16 @@ pub fn patch_canvas_vault(
     remove_replaced_file(&old_path, &new_path, "画布")?;
     cache_evict_canvas(&state, &file);
     cache_put_canvas(&state, &new_path, &new_rel, &canvas);
-    Ok((now, new_rel))
+    Ok(PatchWriteResult { updated_at: now, file: new_rel })
+}
+
+/// 增量补丁写入结果：写入后的 `updated_at` 与**落盘后**的相对路径（title 变更改了文件名，
+/// 前端据此把打开路径同步到新落点，否则下一轮补丁会写已被改名删除的旧路径）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PatchWriteResult {
+    pub updated_at: i64,
+    pub file: String,
 }
 
 /// 重命名画布：更新 .atlx 内 title + 同目录重命名文件（按当前文件路径）。

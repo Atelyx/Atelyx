@@ -3,9 +3,7 @@
 //!
 //! 合并语义：removed 幂等（缺 id 不报错）；upsert 覆盖同 id 或追加；fieldOrder/rowOrder
 //! 为 id 全序重排（未出现的 id 保持相对顺序置尾——排序是数组属性，id 合并无法表达）；
-//! 补丁 id 与文件内 id 不符 = 补丁属于另一文件，拒绝（防串文件混写）；baseUpdatedAt 为
-//! 乐观锁基准（与服务端内容版本号比较，基准小于当前版本 = 已被他人改过，409 拒绝覆盖；
-//! 判据不用裸 mtime——整秒精度在同秒连写下漏判，见 `state::content_version`）；title 变更 =
+//! 补丁 id 与文件内 id 不符 = 补丁属于另一文件，拒绝（防串文件混写）；title 变更 =
 //! 同目录改文件名（返回新路径），同名异 id 拒绝覆盖防静默丢失；文件损坏明确 400，不静默重建。
 //!
 //! 并发模型：补丁与整文件写共用每路径一把的异步锁（见 `state::PathLocks`），锁内完成
@@ -23,7 +21,7 @@ use serde_json::json;
 
 use crate::auth::AuthUser;
 use crate::content::{join_err, write_root};
-use crate::fsops::atomic_write;
+use crate::fsops::{atomic_write, file_mtime_secs};
 use crate::state::{internal, now_secs};
 use crate::{ApiError, ServerState};
 
@@ -276,25 +274,11 @@ fn bad_request(message: &str) -> ApiError {
     ApiError(StatusCode::BAD_REQUEST, message.to_string())
 }
 
-/// 乐观锁冲突响应（409）：error + 当前内容版本，客户端据此刷新基准重试。
-pub(crate) fn conflict(updated_at: i64) -> Response {
-    (
-        StatusCode::CONFLICT,
-        Json(json!({
-            "error": "文件已被其他成员或外部修改，请重载后再保存",
-            "updatedAt": updated_at
-        })),
-    )
-        .into_response()
-}
-
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CanvasPatchBody {
     path: String,
     patch: serde_json::Value,
-    #[serde(default)]
-    base_updated_at: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -302,11 +286,6 @@ pub struct CanvasPatchBody {
 pub struct TablePatchBody {
     path: String,
     patch: serde_json::Value,
-    #[serde(default)]
-    base_updated_at: Option<i64>,
-    /// 冲突条「保留本地并保存」用：跳过 baseUpdatedAt 冲突检查强制覆盖。
-    #[serde(default)]
-    force: bool,
 }
 
 fn parse_patch<T: serde::de::DeserializeOwned>(raw: &serde_json::Value, what: &str) -> Result<T, ApiError> {
@@ -413,13 +392,6 @@ pub async fn patch_canvas(
     if patch.id != canvas.id {
         return Err(bad_request("补丁与文件不匹配：补丁属于另一画布，已中止保存"));
     }
-    // 乐观锁：基准小于服务端内容版本 = 已被他人改过（版本号判据，同秒连写也能识别）
-    let current = state.content_version(&space_id, &body.path, &path);
-    if let Some(base) = body.base_updated_at {
-        if base < current {
-            return Ok(conflict(current));
-        }
-    }
     if let Some(title) = &patch.title {
         canvas.title = title.clone();
     }
@@ -439,19 +411,14 @@ pub async fn patch_canvas(
     canvas.updated_at = now_secs();
     write_canvas_file(&new_path, &canvas)?;
     remove_replaced_file(&path, &new_path, "画布")?;
-    // 版本记在落地后的最终路径上（title 改名后客户端按新路径续传基准）；seed 带入
-    // 旧路径判据值，保证改名不回退；旧路径登记撤销防版本表无界增长
-    let version = state.advance_content_version(&space_id, &new_rel, &new_path, current);
-    if new_rel != body.path {
-        state.retire_content_version(&space_id, &body.path);
-    }
     // 落地后向空间房间广播补丁帧（与客户端 WS 透传帧同形状）；失败只记日志不回滚——真源已落盘
     ws_broadcast(&state, &space_id, "canvas-patch", &new_rel, body.patch);
     tracing::info!(space_id = %space_id, path = %new_rel, "画布补丁落地");
-    Ok(Json(json!({ "updatedAt": version, "file": new_rel })).into_response())
+    let updated_at = file_mtime_secs(&new_path);
+    Ok(Json(json!({ "updatedAt": updated_at, "file": new_rel })).into_response())
 }
 
-/// 表格补丁端点：同画布，多 `force`（跳过乐观锁冲突检查）。
+/// 表格补丁端点：锁内 读 → 校验 → 合并 → 原子写 → 广播（与画布同构）。
 pub async fn patch_table(
     State(state): State<ServerState>,
     user: AuthUser,
@@ -468,15 +435,6 @@ pub async fn patch_table(
     let mut table = read_table_file(&path)?;
     if patch.id != table.id {
         return Err(bad_request("补丁与文件不匹配：补丁属于另一表格，已中止保存"));
-    }
-    // force = 保留本地强制覆盖（冲突条「保留本地并保存」用）
-    let current = state.content_version(&space_id, &body.path, &path);
-    if !body.force {
-        if let Some(base) = body.base_updated_at {
-            if base < current {
-                return Ok(conflict(current));
-            }
-        }
     }
     if let Some(title) = &patch.title {
         table.title = title.clone();
@@ -497,14 +455,10 @@ pub async fn patch_table(
     table.updated_at = now_secs();
     write_table_file(&new_path, &table)?;
     remove_replaced_file(&path, &new_path, "表格")?;
-    // 版本语义与画布补丁一致：记在最终路径、seed 带旧路径判据值、改名后撤旧登记
-    let version = state.advance_content_version(&space_id, &new_rel, &new_path, current);
-    if new_rel != body.path {
-        state.retire_content_version(&space_id, &body.path);
-    }
     ws_broadcast(&state, &space_id, "table-patch", &new_rel, body.patch);
     tracing::info!(space_id = %space_id, path = %new_rel, "表格补丁落地");
-    Ok(Json(json!({ "updatedAt": version, "file": new_rel })).into_response())
+    let updated_at = file_mtime_secs(&new_path);
+    Ok(Json(json!({ "updatedAt": updated_at, "file": new_rel })).into_response())
 }
 
 fn ws_broadcast(state: &ServerState, space_id: &str, kind: &'static str, file: &str, patch: serde_json::Value) {

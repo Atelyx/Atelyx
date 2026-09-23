@@ -229,7 +229,7 @@ export function deserializeNodeForCollab(fileNode: CanvasFileNode): Deserialized
 
 /**
  * 按 id 合并对话消息：远端为基底，本地独有消息（对端尚未见到的进行中/流式消息）按原序补入。
- * 与 `mergeFromDisk` 的消息合并语义一致——锁模型下对端不会并发写消息，此合并仅兜底保护
+ * 远端为基底 + 本地独有消息按 id 补入——锁模型下对端不会并发写消息，此合并仅兜底保护
  * 本端进行中内容不被对端陈旧节点快照覆盖（如对端移动本端正在生成的节点）。
  *
  * 同 id 消息以远端为胜，但**附件内容缓存例外**：`payload` 不随补丁传输（有 `file` 时被剥离），
@@ -319,7 +319,7 @@ export {
 
 /** 协作画布重命名抑制窗口（ms）：对端收到远端 title 补丁已同步新路径，watcher 收到
  * 旧路径 delete / 新路径 create 事件时在窗口内跳过 reload/conflict（内容已由补丁应用，
- * 含本地脏编辑不丢，待下次保存走乐观锁自动合并收敛）。仿 utils/selfSave 的时间窗模式。 */
+ * 含本地脏编辑不丢，磁盘分歧由下次保存按稳定 id 合并落盘收敛）。仿 utils/selfSave 的时间窗模式。 */
 const COLLAB_RENAME_SUPPRESS_MS = 10_000;
 const collabRenameAt = new Map<string, number>();
 

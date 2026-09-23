@@ -1,7 +1,7 @@
 /**
  * 多维表格编辑器（表格视图）。
  *
- * 布局：工具条（视图切换 / 导出；冲突/错误/保存状态在面板 header）→ 表格主体（行号列 + 列头 + 类型化单元格）→
+ * 布局：工具条（视图切换 / 导出；错误/保存状态在面板 header）→ 表格主体（行号列 + 列头 + 类型化单元格）→
  * 行尾「+ 新行」→ 底部横向滑动条 → 状态栏（列自动计算，整格点击选类型 + 实时结果）。
  *
  * 交互要点：
@@ -19,7 +19,7 @@
  *   （`ColumnMenu`/`RowMenu`/`SelectAllMenu`）提供列宽/行高自适应与左右插入字段。
  * - 状态栏：每列整格 hover 高亮可点击（未设置留空），弹出计算类型菜单（固定向上弹出，
  *   底边贴点击位置不遮住点击处）；已设置列居中显示「类型 + 结果」。
- * - 冲突/错误/保存状态在面板 header 展示（`PanelFrame` 读 tableStore）。
+ * - 错误/保存状态在面板 header 展示（`PanelFrame` 读 tableStore）。
  * - 弹层菜单（字段/列/行/整表/状态栏）见 `TableMenus.tsx`。
  */
 import { GripVertical, MoreHorizontal, MoveDiagonal, Plus, Sigma } from "lucide-react";
@@ -655,7 +655,7 @@ export function TableEditor({ panelId }: { panelId: string }) {
 
   return (
     <div className="h-full flex flex-col" style={{ background: "var(--bg-primary)" }}>
-      {/* 工具条（冲突/错误/保存状态均在面板 header） */}
+      {/* 工具条（错误/保存状态均在面板 header） */}
       <div
         className="flex items-center gap-2 px-3 py-1.5 border-b flex-shrink-0 text-xs"
         style={{ borderColor: "var(--border)", color: "var(--text-secondary)" }}

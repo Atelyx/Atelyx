@@ -140,15 +140,9 @@ pub struct WriteBody {
     path: String,
     content: String,
     /// 缺省 = content 按文本落盘；`base64` = content 为标准 base64，服务端解码后按字节落盘
-    /// （附件/媒体二进制写入口）。字节限额与乐观锁均按解码后的磁盘字节数计。
+    /// （附件/媒体二进制写入口）。字节限额按解码后的磁盘字节数计。
     #[serde(default)]
     encoding: Option<String>,
-    /// 乐观锁基准（上次读到的 updatedAt = 服务端内容版本号）；提供且服务端版本更新 → 409
-    /// 拒绝覆盖（防多端/外部同步静默丢更新）；缺省 = 无条件写（笔记整文件保存语义不变）。
-    /// 判据用版本号而非裸 mtime：mtime 只有整秒精度，同秒内他人写入后 mtime == 基准会漏判
-    /// （见 state::content_version）。
-    #[serde(default)]
-    base_updated_at: Option<i64>,
 }
 
 /// 读文本文件（非 UTF-8 字节按替换字符容错）。
@@ -164,24 +158,23 @@ pub async fn read_file(
         return Err(not_found("文件不存在"));
     }
     let bytes = std::fs::read(&path).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("读取失败：{e}")))?;
-    // updatedAt 返回内容版本号（与写/补丁的冲突判据同源闭环），不是裸 mtime
-    let version = state.content_version(&space_id, &query.path, &path);
+    // updatedAt = 文件 mtime 秒（元数据；不再参与任何冲突判定）
+    let updated_at = file_mtime_secs(&path);
     match query.encoding.as_deref() {
         None => {
             let content = String::from_utf8_lossy(&bytes).into_owned();
-            Ok(Json(json!({ "content": content, "updatedAt": version })))
+            Ok(Json(json!({ "content": content, "updatedAt": updated_at })))
         }
         Some("base64") => Ok(Json(json!({
             "content": BASE64.encode(&bytes),
-            "updatedAt": version,
+            "updatedAt": updated_at,
             "encoding": "base64",
         }))),
         Some(other) => Err(bad_request(&format!("不支持的编码：{other}"))),
     }
 }
 
-/// 写文本文件（原子写；自动建父目录；路径已存在目录则拒绝）。
-/// 乐观锁基准过期返回 409（body 带当前 updatedAt）。与补丁端点共用每路径写锁，
+/// 写文本文件（原子写；自动建父目录；路径已存在目录则拒绝）。与补丁端点共用每路径写锁，
 /// 同路径并发写严格按到达序落地。
 pub async fn write_file(
     State(state): State<ServerState>,
@@ -211,19 +204,13 @@ pub async fn write_file(
     if path.is_dir() {
         return Err(bad_request("目标已是目录"));
     }
-    // 同路径写串行化：锁内完成乐观锁判定与落盘（判定基于锁内的磁盘事实）
+    // 同路径写串行化：锁内完成落盘，同路径并发写严格按到达序执行
     let _lock = state.path_lock(&space_id, &body.path).await;
-    let current = state.content_version(&space_id, &body.path, &path);
-    if let Some(base) = body.base_updated_at {
-        if path.exists() && base < current {
-            return Ok(crate::patches::conflict(current));
-        }
-    }
     atomic_write(&path, &bytes)
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let version = state.advance_content_version(&space_id, &body.path, &path, current);
+    let updated_at = file_mtime_secs(&path);
     tracing::info!(space_id = %space_id, path = %body.path, bytes = bytes.len(), "内容写入");
-    Ok(Json(json!({ "updatedAt": version })).into_response())
+    Ok(Json(json!({ "updatedAt": updated_at })).into_response())
 }
 
 #[derive(Deserialize)]

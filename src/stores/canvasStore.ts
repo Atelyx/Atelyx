@@ -15,13 +15,11 @@ import {
   loadWhiteboardVault,
   persistCanvasVault,
   patchCanvasVault,
-  readCanvasVault,
   readNote,
   renameCanvasVault,
   writeCanvasVault,
   writeNote,
   deleteNote,
-  type RuntimeCanvas,
 } from "@/services/vault";
 import { readTableVault } from "@/services/table";
 import {
@@ -203,10 +201,6 @@ interface CanvasState {
   saving: boolean;
   /** 是否有未保存变更（watcher 判断能否安全自动重载的依据）。 */
   dirty: boolean;
-  /** 本地未保存改动与外部修改/磁盘版本冲突（提示用户重载，不自动覆盖或丢弃）。 */
-  conflictPending: boolean;
-  /** 乐观并发基准：加载时的磁盘 updatedAt，保存时透传 Rust 检查。 */
-  baseUpdatedAt: number;
   load: (id: string) => Promise<void>;
   /** 更新画布标题 */
   renameCanvas: (title: string) => Promise<void>;
@@ -301,8 +295,6 @@ interface CanvasState {
   setCollabBroadcast: (fn: ((file: string, patch: CanvasPatch) => void) | null) => void;
   /** 应用远端画布补丁（`canvas-patch` 帧）：按 id LWW 合并，不置脏/不入撤销栈/不触发保存。 */
   applyRemoteCanvasPatch: (file: string, patch: CanvasPatch) => void;
-  /** Rust 侧改过当前画布磁盘 .atlx 后同步乐观锁基准（重命名笔记/附件/画布），防下次保存被误判「已被外部修改」。 */
-  syncBaseUpdatedAt: () => Promise<void>;
   /** 发送消息到指定对话节点，可携带待发送附件与 @提及；fileMentions = 纯路径引用（仓库文件/文件夹，画布无对应节点）。 */
   send: (
     conversationId: string,
@@ -371,8 +363,6 @@ interface CanvasState {
   reloadFromDisk: () => Promise<void>;
   /** 立即落盘当前画布（切画布/切仓库/关窗前调用，防 debounce 窗口内丢改动；无脏不写）。 */
   flush: () => Promise<boolean>;
-  /** 冲突合并：以磁盘最新为基底，保留本地新增节点/边/消息（重叠以磁盘为准），合并后落盘。 */
-  mergeFromDisk: () => Promise<void>;
   /** 清空当前画布运行时状态（删除当前画布时调用：取消保存定时器 + 中止流 + 复位全部画布态）。 */
   resetCanvasState: () => void;
   /** 读取画布历史版本列表（缺失/损坏 → 空数组，尽力而为）。 */
@@ -402,7 +392,7 @@ const undoMgr = createUndoManager<Snapshot>({
 
 // ===== 自写回放抑制（watcher）=====
 // 写盘/CRUD 完成时按「文件路径」记录时刻；watcher 收到同路径事件且在抑制窗口内 → 视为自写回放，
-// 不弹「已被外部修改」误提示。重命名/移动类操作经 Rust 扫盘改写多个 .atlx（前端不知全集），
+// 不按外部改动触发重载。重命名/移动类操作经 Rust 扫盘改写多个 .atlx（前端不知全集），
 // 用全局标记兜底。.md/附件事件不抑制（刷新幂等，silent 更新不 persist）。
 // 实现见 utils/selfSave.ts（画布/表格/面板/配置共用，防职责挂靠本 store 造成跨 store 反向依赖）。
 
@@ -513,9 +503,8 @@ function isConversationLockedByPeer(conversationId: string): boolean {
   return owner !== null && !lockedByMe;
 }
 
-/** 协作对端是否同画布在线（presence.file 命中当前画布 + view=canvas）：共享盘保存竞争时据此
- * 自动三方合并（与表格 hasCollabPeerOnTable 同策略）；无对端 = 外部编辑 → 保持冲突条；
- * 亦用于 watcher 判别「磁盘写入是对端保存的广播回放（内容已应用，不得重载破坏运行态）」。 */
+/** 协作对端是否同画布在线（presence.file 命中当前画布 + view=canvas）：磁盘写入是对端保存的
+ *  广播回放（内容已应用进内存）时据此跳过重载，防用陈旧盘回退运行态或误触冲突条。 */
 export function hasCollabPeerOnCanvas(file: string): boolean {
   return useCollabStore
     .getState()
@@ -524,7 +513,7 @@ export function hasCollabPeerOnCanvas(file: string): boolean {
 
 /** 仓库文件重命名/移动后同步画布引用：磁盘 .atlx 已被 Rust 改写（rename_note/rename_table/
  *  rename_attachment 扫描全部 .atlx），内存不同步会在下次自动保存把旧路径回写覆盖，也会让
- *  watcher 旧路径事件误标节点缺失。同步乐观锁基准一并推进，防保存被「已被外部修改」拒绝。
+ *  watcher 旧路径事件误标节点缺失。
  *  newTitle 为 null = 移动（只改 file，标题不变）。 */
 export async function syncCanvasNodeRefs(
   oldPath: string,
@@ -532,7 +521,6 @@ export async function syncCanvasNodeRefs(
   newTitle: string | null,
   nodeType: "text" | "media" | "table",
 ): Promise<void> {
-  await useCanvasStore.getState().syncBaseUpdatedAt();
   const canvasState = useCanvasStore.getState();
   for (const n of canvasState.nodes) {
     if (n.type !== nodeType) continue;
@@ -545,13 +533,12 @@ export async function syncCanvasNodeRefs(
 }
 
 /** 文件夹重命名/移动后同步画布引用：打开路径改前缀（旧路径已不存在，防 reload 读旧路径）+
- *  乐观锁基准 + 目录下 text/media 节点引用前缀（磁盘已被 rename_folder 整体改写）。 */
+ *  目录下 text/media 节点引用前缀（磁盘已被 rename_folder 整体改写）。 */
 export async function syncCanvasDirRefs(oldDir: string, newDir: string): Promise<void> {
   const canvasFile = useCanvasStore.getState().canvasFile;
   if (canvasFile?.startsWith(`${oldDir}/`)) {
     useCanvasStore.setState({ canvasFile: remapDirPrefix(canvasFile, oldDir, newDir) });
   }
-  await useCanvasStore.getState().syncBaseUpdatedAt();
   const canvasState = useCanvasStore.getState();
   for (const n of canvasState.nodes) {
     const d = n.data as { file?: string };
@@ -740,126 +727,6 @@ export function registerCanvasPluginWiring(): () => void {
 }
 
 /**
- * 三方合并：磁盘为基底 + 本地独有节点/边 + 本地独有消息按 id 补入（重叠同 id 以磁盘为准，
- * 防静默覆盖外部修改）。mergeFromDisk（手动）与协作自动合并（handleSaveConflict）共用。
- */
-function mergeCanvasWithDisk(
-  disk: RuntimeCanvas,
-  localNodes: Node[],
-  localEdges: CanvasEdge[],
-  localMessages: Record<string, Message[]>,
-): { nodes: Node[]; edges: CanvasEdge[]; messagesByConv: Record<string, Message[]> } {
-  const diskNodeIds = new Set(disk.nodes.map((n) => n.id));
-  const diskEdgeIds = new Set(disk.edges.map((e) => e.id));
-  const nodes = [...disk.nodes, ...localNodes.filter((n) => !diskNodeIds.has(n.id))];
-  const edges = [...disk.edges, ...localEdges.filter((e) => !diskEdgeIds.has(e.id))];
-  const messagesByConv: Record<string, Message[]> = { ...disk.messagesByConv };
-  for (const [convId, msgs] of Object.entries(localMessages)) {
-    // mergeMessages = 远端（磁盘）为基底 + 本地独有消息按 id 补入，与协作消息合并同源
-    const merged = mergeMessages(disk.messagesByConv[convId] ?? [], msgs);
-    if (merged.length) messagesByConv[convId] = merged;
-  }
-  return { nodes, edges, messagesByConv };
-}
-
-/**
- * 磁盘基底合并共享骨架（协作自动合并 handleSaveConflict / 手动合并 mergeFromDisk 共用）：
- * 读盘 → 竞态守卫 → 磁盘基底入内存 + 同步落盘/广播基线 → 本地独有实体按 id 补入 → 防抖落盘。
- * - guardBasis：入口捕获的画布身份，await 读盘后校验未切换/未清空即放弃（旧画布的磁盘内容
- *   不得写进新画布，与 persistNow.finish 的守卫同策略——否则 local 已是新画布、data 是旧画布，
- *   交叉污染）；null = 调用方自行保证读盘窗口内画布不变，不做守卫。
- * - captureLocal：本地态捕获时机由调用方定义——自动合并取读盘后的最新内存态（缩小 await
- *   窗口内新编辑丢失的竞态窗口）；手动合并取入口态（先中止流再读盘，流回调不会再写内存）。
- * - clearUndo：整体替换消息状态的路径须清撤销栈（栈内旧消息快照不再适用）。
- */
-async function mergeDiskIntoMemory(opts: {
-  canvasFile: string;
-  guardBasis: { canvasFile: string; canvasId: string | null } | null;
-  clearUndo: boolean;
-  resetLoading: boolean;
-  captureLocal: () => {
-    nodes: Node[];
-    edges: CanvasEdge[];
-    messagesByConv: Record<string, Message[]>;
-  };
-  onError: (e: unknown) => void;
-}): Promise<void> {
-  try {
-    const data = await loadCanvasVault(opts.canvasFile);
-    if (opts.guardBasis) {
-      const cur = useCanvasStore.getState();
-      if (
-        cur.canvasFile !== opts.guardBasis.canvasFile ||
-        cur.canvasId !== opts.guardBasis.canvasId
-      ) {
-        return;
-      }
-    }
-    const local = opts.captureLocal();
-    // 1) 以磁盘为基底入内存 + 落盘/广播基线（后续合并补丁只含本地独有实体，引用 diff）
-    useCanvasStore.setState({
-      canvasId: data.id,
-      canvasTitle: data.title,
-      nodes: data.nodes,
-      edges: data.edges,
-      messagesByConv: data.messagesByConv,
-      baseUpdatedAt: data.updatedAt,
-      conflictPending: false,
-      dirty: false,
-      ...(opts.resetLoading ? { loading: false } : {}),
-    });
-    if (opts.clearUndo) undoMgr.clear();
-    syncLastSaved();
-    // 2) 合并本地独有实体回内存（基线仍为磁盘基底 → diff 非空，本地改动不丢）
-    const merged = mergeCanvasWithDisk(data, local.nodes, local.edges, local.messagesByConv);
-    useCanvasStore.setState({
-      nodes: merged.nodes,
-      edges: merged.edges,
-      messagesByConv: merged.messagesByConv,
-      conflictPending: false,
-      dirty: true,
-    });
-    // 3) 合并产物随下一轮防抖落盘（base 已同步为新磁盘版本，不再误冲突）
-    schedulePersist();
-    // 4) 磁盘基底里的媒体节点/消息附件只有引用（内容是按引用读回的运行时缓存）：
-    //    合并后按引用补读一次，否则冲突合并会让预览与气泡图片消失到下次重载
-    canvasLoadGen++;
-    void hydrateMediaNodes();
-    void hydrateMessageAttachments();
-  } catch (e) {
-    opts.onError(e);
-  }
-}
-
-/**
- * 乐观锁冲突处理：协作对端同画布在场 → 自动三方合并收敛（共享盘多人保存竞争，避免冲突条
- * 满天飞，与表格 retryMergePersist 同策略）；否则弹冲突条（外部编辑，保持原行为不静默覆盖）。
- * 自动合并不中止进行中的流（本地消息按 id 补入保留，流续写照常）；合并产物随下一轮防抖落盘。
- */
-async function handleSaveConflict(): Promise<void> {
-  const { canvasFile, canvasId } = useCanvasStore.getState();
-  if (!canvasFile || !hasCollabPeerOnCanvas(canvasFile)) {
-    useCanvasStore.setState({ conflictPending: true });
-    return;
-  }
-  await mergeDiskIntoMemory({
-    canvasFile,
-    guardBasis: { canvasFile, canvasId },
-    clearUndo: false,
-    resetLoading: false,
-    // 读盘完成后立刻快照本地（缩小 await 窗口内新编辑丢失的竞态窗口）
-    captureLocal: () => {
-      const cur = useCanvasStore.getState();
-      return { nodes: cur.nodes, edges: cur.edges, messagesByConv: cur.messagesByConv };
-    },
-    onError: (e) => {
-      console.error("协作自动合并失败", e);
-      useCanvasStore.setState({ conflictPending: true });
-    },
-  });
-}
-
-/**
  * 记录画布历史版本（保存成功后的存档点）：以内存运行时内容构建 `.atlx` 格式快照 → 记一条 edit
  * 版本（60s 内连续编辑合并为一版，不逐键）。快照取内存且**纯序列化**（`serializeCanvasSnapshot`
  * 不写 `.md`——若用 toFileNode 路径，延迟执行时可能把旧正文写回共享盘覆盖新编辑；历史尽力而为，
@@ -890,34 +757,23 @@ function recordCanvasHistory(file: string): void {
  */
 async function persistNow(): Promise<void> {
   const versionAtStart = persistCtl.version;
-  const {
-    canvasId,
-    canvasFile,
-    canvasTitle,
-    nodes,
-    edges,
-    messagesByConv,
-    baseUpdatedAt,
-  } = useCanvasStore.getState();
+  const { canvasId, canvasFile, canvasTitle, nodes, edges, messagesByConv } =
+    useCanvasStore.getState();
   if (!canvasId || !canvasFile) return;
-  // 写盘成功后的统一收尾：先抑制回放（watcher 同路径事件 2s 窗口），再同步新路径/
-  // 乐观锁基准/快照/脏标志。updatedAt = null 表示空补丁（磁盘未动，无需标记自写）。
-  const finish = (updatedAt: number | null, newFile?: string) => {
-    if (updatedAt !== null) {
+  // 写盘成功后的统一收尾：先抑制回放（watcher 同路径事件 2s 窗口），再同步 title 改名后的落地
+  // 路径（不同步会让下一轮写已被改名删除的旧路径 → 404 回退全量写，凭空多出一个画布文件），
+  // 最后按本轮是否已被新变更接续决定收尾方式。written = false 表示空补丁（磁盘未动）。
+  const finish = (written: boolean, newFile?: string) => {
+    if (written) {
       markSelfSave(
         newFile && newFile !== canvasFile ? [canvasFile, newFile] : canvasFile,
       );
     }
     // 竞态守卫：await 期间可能已切换画布/清空状态（load 异步读盘），旧画布的写盘结果
-    // 不得覆盖新画布的乐观锁基准/脏标记（否则新画布下次保存被误判冲突、脏编辑被吞）
+    // 不得覆盖新画布的脏标记/路径（否则新画布下次保存写错文件、脏编辑被吞）
     const cur = useCanvasStore.getState();
     if (cur.canvasId !== canvasId || cur.canvasFile !== canvasFile) return;
-    if (persistCtl.version !== versionAtStart) {
-      // 写盘期间有新变更（已挂新 timer）：保留 dirty，由下一轮 timer 再写盘，防本次成功吞掉新编辑；
-      // 不推进快照/基准——下一轮 diff 仍以旧快照为基线（已写盘部分重发同内容 upsert，幂等）
-      useCanvasStore.setState({ saving: false });
-      return;
-    }
+    // 落地路径先于并发判断：本轮写盘已经发生，改名落点是既成事实，必须照常同步
     if (newFile && newFile !== canvasFile) {
       // title 变更导致路径漂移：同步 canvasFile + appStore.currentCanvasFile（同源）
       useCanvasStore.setState({ canvasFile: newFile });
@@ -925,25 +781,21 @@ async function persistNow(): Promise<void> {
         useAppStore.setState({ currentCanvasFile: newFile });
       }
     }
-    if (updatedAt !== null) {
-      // 同步乐观锁基准为本次写入的磁盘版本，避免下次保存误判冲突
-      useCanvasStore.setState({ baseUpdatedAt: updatedAt });
+    if (persistCtl.version !== versionAtStart) {
+      // 写盘期间有新变更（已挂新 timer）：保留 dirty，由下一轮 timer 再写盘，防本次成功吞掉新编辑；
+      // 不推进快照——下一轮 diff 仍以旧快照为基线（已写盘部分重发同内容 upsert，幂等）
+      useCanvasStore.setState({ saving: false });
+      return;
     }
     useCanvasStore.setState({ error: null, dirty: false, saving: false });
     // 存档点：以当前内容快照记历史（60s 内连续编辑合并为一版；fire-and-forget 不阻塞保存流程）
-    if (updatedAt !== null) recordCanvasHistory(newFile ?? canvasFile);
+    if (written) recordCanvasHistory(newFile ?? canvasFile);
     syncLastSaved();
   };
   const reportError = (e: unknown) => {
     useCanvasStore.setState({ saving: false });
-    if (typeof e === "string" && e.includes("已被外部修改")) {
-      // 乐观锁冲突：协作对端同画布在场 → 自动三方合并（共享盘保存竞争，见 handleSaveConflict）；
-      // 否则不覆盖磁盘，提示用户重载（本地改动保留在内存供查看）
-      void handleSaveConflict();
-    } else {
-      console.error("自动保存失败", e);
-      useCanvasStore.setState({ error: "自动保存失败，请检查磁盘空间或权限" });
-    }
+    console.error("自动保存失败", e);
+    useCanvasStore.setState({ error: "自动保存失败，请检查磁盘空间或权限" });
   };
   try {
     const result = await patchCanvasVault({
@@ -959,23 +811,14 @@ async function persistNow(): Promise<void> {
         messagesByConv: lastSavedMessages,
         title: lastSavedTitle,
       },
-      baseUpdatedAt,
     });
-    finish(result ? result.updatedAt : null, result?.file);
+    finish(result !== null, result?.file);
   } catch (e) {
     if (typeof e === "string" && e.includes("画布文件不存在（已从磁盘删除）")) {
-      // 磁盘文件被外部删除：补丁只含变化实体，重建会丢未变化部分——回退全量写（与旧行为一致）
+      // 文件已被删除：补丁只含变化实体，重建会丢未变化部分——回退全量写
       try {
-        const newUpdatedAt = await persistCanvasVault(
-          canvasId,
-          canvasFile,
-          canvasTitle,
-          nodes,
-          edges,
-          messagesByConv,
-          baseUpdatedAt,
-        );
-        finish(newUpdatedAt);
+        await persistCanvasVault(canvasId, canvasFile, canvasTitle, nodes, edges, messagesByConv);
+        finish(true);
       } catch (e2) {
         reportError(e2);
       }
@@ -1018,6 +861,25 @@ function schedulePersist() {
     if (patch) collabBroadcast(st.canvasFile, patch);
   }
   persistCtl.schedule();
+}
+
+/**
+ * 该节点变更是否需要落盘：只有会产生可落盘字段的变更才算。
+ * - 纯选中（select）不落盘：点选/框选不应触发 .atlx 写入与「保存中」闪烁；
+ * - 拖拽进行中的 position 不落盘（dragStop 统一保存一次）；
+ * - resize 进行中（resizing: true）不落盘（结束事件由 onNodesChange 上方分支处理）；
+ * - 纯测量回填（dimensions 且无 resizing/setAttributes：React Flow 挂载后与内容高度变化后
+ *   回填 `measured`）只改内存 measured，不落盘——否则每次打开画布都会整包重写一次
+ *   （空间里要把全部节点与消息重传一遍）。
+ */
+function changeNeedsPersist(c: NodeChange, draggingNow: boolean): boolean {
+  if (c.type === "select") return false;
+  if (c.type === "position" && (c.dragging || draggingNow)) return false;
+  if (c.type === "dimensions") {
+    if (c.resizing === true) return false;
+    if (c.resizing === undefined && !c.setAttributes) return false;
+  }
+  return true;
 }
 
 /** 边锚点自适应：按两节点中心相对方位重写 handle（与 ConnectionFrame 命名对齐）。 */
@@ -1981,8 +1843,6 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
   loading: false,
   saving: false,
   dirty: false,
-  conflictPending: false,
-  baseUpdatedAt: 0,
   load: async (file) => {
     // 切换画布前先落盘旧画布未保存改动（防 debounce 窗口内丢改动；无脏不写）。
     // 仅 cancel 不够：500ms 窗口内的编辑会随切换丢失；flush 内部已清保存 timer，
@@ -2009,10 +1869,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
         edges: data.edges,
         readOnly: isWhiteboard,
         messagesByConv: data.messagesByConv,
-        // 乐观并发基准 = 磁盘版本；加载后本地与磁盘一致
-        baseUpdatedAt: data.updatedAt,
         dirty: false,
-        conflictPending: false,
         // 跨画布切换清空 undo/redo 与流式状态：快照含 messages，混用会串画布污染撤销
         streamingByConv: {},
         compactingByConv: {},
@@ -2057,22 +1914,20 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
     set({ canvasTitle: title });
     try {
       await renameCanvasVault(canvasFile, title);
-      // 同目录改文件名：先算新路径再标记自写（旧路径删除 + 新路径创建两路事件一并抑制），
-      // 并同步乐观锁基准防下次保存误冲突
+      // 同目录改文件名：先算新路径再标记自写（旧路径删除 + 新路径创建两路事件一并抑制）
       const newFile = siblingPath(
         canvasFile,
         `${sanitizeFilename(title)}.atlx`,
       );
       markSelfSave([canvasFile, newFile]);
-      // 同步 canvasFile 到新路径（防下次保存写旧路径 → createdAt 重置/乐观锁失效/
-      // 外部修改失配）；appStore.currentCanvasFile 同源（打开路径/文件面板高亮），一并同步
+      // 同步 canvasFile 到新路径（防下次保存写旧路径 → createdAt 重置）；
+      // appStore.currentCanvasFile 同源（打开路径/文件面板高亮），一并同步
       set({ canvasFile: newFile });
       if (useAppStore.getState().currentCanvasFile === canvasFile) {
         useAppStore.setState({ currentCanvasFile: newFile });
       }
       // 文件已由 Rust 改名：同步标题基线，下次保存不再携带 title（无冗余重命名扫描）
       lastSavedTitle = title;
-      await get().syncBaseUpdatedAt();
     } catch (e) {
       console.error("重命名失败", e);
     }
@@ -2120,18 +1975,10 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
         return;
       }
     }
-    // 纯选中变化（select）不落盘：点选/框选节点不应触发 .atlx 写入与「保存中」闪烁。
     // 拖拽进行中的 position 变更不落盘（dragStop 统一保存一次）；resize 进行中的
     // dimensions 变更不落盘（resizing:false 结束事件已在上方处理）——拖动不松手不再持续保存
     const draggingNow = dragInProgress;
-    if (
-      changesNow.some(
-        (c) =>
-          c.type !== "select" &&
-          !(c.type === "position" && (c.dragging || draggingNow)) &&
-          !(c.type === "dimensions" && c.resizing === true),
-      )
-    ) {
+    if (changesNow.some((c) => changeNeedsPersist(c, draggingNow))) {
       schedulePersist();
     }
   },
@@ -2423,8 +2270,8 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
   reloadFromDisk: async () => {
     const { canvasFile } = get();
     if (!canvasFile) return;
-    // 重载后与磁盘一致：清冲突与脏标记（本地未保存改动被丢弃，由用户确认后调用）
-    set({ conflictPending: false, dirty: false });
+    // 重载后与磁盘一致：清脏标记（本地未保存改动被丢弃，由调用方确认后调用）
+    set({ dirty: false });
     await get().load(canvasFile);
   },
 
@@ -2440,31 +2287,6 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
     return true;
   },
 
-  mergeFromDisk: async () => {
-    const { canvasFile } = get();
-    if (!canvasFile) return;
-    const localNodes = get().nodes;
-    const localEdges = get().edges;
-    const localMessages = get().messagesByConv;
-    // 中止进行中的流与命名：合并整体替换消息状态，流继续写只会静默丢失（与 load 同策略）。
-    // 不复用 load()——其内部 flush 会在合并前重触发冲突检测写盘、自动命名会发 LLM 请求，
-    // 均属越界副作用；这里只做「读盘 + 同步基线 + 合并」。
-    abortAllStreams();
-    abortAutoTitle();
-    groupDragState = null;
-    dragInProgress = false;
-    await mergeDiskIntoMemory({
-      canvasFile,
-      guardBasis: null,
-      clearUndo: true,
-      resetLoading: true,
-      captureLocal: () => ({ nodes: localNodes, edges: localEdges, messagesByConv: localMessages }),
-      onError: (e) => {
-        console.error("合并磁盘失败", e);
-        useCanvasStore.setState({ error: "合并磁盘失败，请重试" });
-      },
-    });
-  },
   addEdge: (edge) => {
     get().pushUndo();
     const edges = [...get().edges, withHandles(edge, get().nodes)];
@@ -2481,16 +2303,6 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
     );
     set({ nodes });
     schedulePersist();
-  },
-  syncBaseUpdatedAt: async () => {
-    const canvasFile = get().canvasFile;
-    if (!canvasFile) return;
-    try {
-      const disk = await readCanvasVault(canvasFile);
-      set({ baseUpdatedAt: disk.updatedAt });
-    } catch {
-      // 画布被外部删除等情况：保持现状，reload/切换路径会处理
-    }
   },
   saveTextNodeAsNote: async (nodeId) => {
     const node = get().nodes.find((n) => n.id === nodeId);
@@ -3125,8 +2937,6 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
       selectedNodeId: null,
       saving: false,
       dirty: false,
-      conflictPending: false,
-      baseUpdatedAt: 0,
     });
     undoMgr.clear();
     syncLastSaved();
@@ -3147,9 +2957,9 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
         file.split("/").pop()?.replace(/\.atlx$/i, "") ?? snapshot.title;
       // 取消挂起的防抖保存：回滚写盘后旧 timer 不得把恢复前内容写回
       persistCtl.cancel();
-      // 全量写回快照（baseUpdatedAt 缺省 = 绕过乐观锁——回滚是显式覆盖，显式用户意图）
-      await writeCanvasVault({ ...snapshot, title: currentTitle }, file, undefined);
-      // 抑制 watcher 回波，然后重载内存（含乐观锁基准与撤销栈重置，同冲突「重载」语义）
+      // 全量写回快照（回滚是显式覆盖，显式用户意图）
+      await writeCanvasVault({ ...snapshot, title: currentTitle }, file);
+      // 抑制 watcher 回波，然后重载内存（重置脏标记与撤销栈）
       markSelfSave(file);
       set({ dirty: false });
       await get().reloadFromDisk();
@@ -3411,7 +3221,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 
 /**
  * 切仓库清空画布运行时与视口交接缓存：在模块加载时注册，不挂画布插件的生命周期钩子——
- * 画布插件停用期间内核照常切仓库，残留的 canvasFile/乐观锁基准会让防抖保存按旧仓库路径
+ * 画布插件停用期间内核照常切仓库，残留的 canvasFile/落盘基线会让防抖保存按旧仓库路径
  * 写进新仓库同路径文件；视口缓存按文件路径键存，跨仓库同路径复用会恢复错视口。
  * 这是本 store 自身的数据边界（非领域事件反应），故不随插件启停撤销。
  */

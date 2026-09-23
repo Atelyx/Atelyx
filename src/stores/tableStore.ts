@@ -1,8 +1,8 @@
 /**
- * 多维表格（.atb）运行时状态：当前打开的表格内容 + 防抖保存 + 外部修改冲突。
+ * 多维表格（.atb）运行时状态：当前打开的表格内容 + 防抖保存。
  *
  * 保存管线对齐 canvasStore：debounce 500ms 原子写 + `markSelfSave` 抑制 watcher 回放 +
- * 乐观锁 `baseUpdatedAt`（磁盘版本更新则拒绝覆盖，冲突提示条由页面层展示）。
+ * 按稳定 id 的增量补丁（服务端/本地命令各自合并落盘）。
  * 窗口槽/恢复/重命名联动由页面层（ProjectWorkspacePage）编排，本 store 只管内容与持久化。
  * title 变更走 `vaultStore.renameTable`（Rust 改文件名 + 同步画布引用），本 store 不直接改 title。
  * 数据边界：切仓库清空运行时态（见文件末尾自注册的 `onVaultLeaving`）。
@@ -52,7 +52,6 @@ import {
   normalizeTableRow,
   parseTsv,
   reorderByRank,
-  sameIdSequence,
   selectionRegion,
   styleEqual,
   summarizeTableSnapshot,
@@ -83,12 +82,8 @@ interface TableStoreState {
   title: string;
   fields: TableField[];
   rows: TableRow[];
-  /** 乐观并发基准（加载时的磁盘 updatedAt；保存成功后同步为写入版本）。 */
-  baseUpdatedAt: number;
   dirty: boolean;
   saving: boolean;
-  /** 外部修改 + 本地有未保存改动：冲突提示条由用户决定（重载丢弃本地）。 */
-  conflictPending: boolean;
   error: string | null;
   /** 选中行（表格/时间线视图联动；null = 无选中）。 */
   selectedRowId: string | null;
@@ -98,21 +93,19 @@ interface TableStoreState {
   /** 最近一次撤销回退的编辑会话单元格（undo 弹掉会话入口时置位；TableCell 按布尔 selector 订阅回退草稿，无关撤销为 null）。 */
   undoResetCell: { rowId: string; fieldId: string } | null;
 
-  /** 打开表格：读盘填充 + 同步乐观锁基准。失败时 error 提示（文件已删/损坏降级不崩溃）。 */
+  /** 打开表格：读盘填充。失败时 error 提示（文件已删/损坏降级不崩溃）。 */
   load: (file: string) => Promise<void>;
   /** 外部修改后重载磁盘最新内容（无本地改动时 watcher 调用）。 */
   reloadFromDisk: () => Promise<void>;
   /** 外部写入后按内容比对决定是否重载（协作对端在场 / 自写回放 / 读盘与内存一致 → 跳过）。
    *  仅当前打开且无脏改动时生效；读失败（文件被外部删除等）干净态下走 reloadFromDisk 的错误路径降级提示。 */
   syncFromDiskIfChanged: (file: string) => Promise<void>;
-  /** 冲突处理：keepLocal=true 保留本地并保存（绕过乐观锁覆盖磁盘）；false 重载丢弃本地。 */
-  resolveConflict: (keepLocal: boolean) => Promise<void>;
   /** 清空运行时状态（切仓库/关窗口/删除文件时调用：取消保存定时器，防残留 timer 重写已删文件）。 */
   clear: () => void;
   /** 关闭错误提示。 */
   clearError: () => void;
-  /** 立即落盘（卸载/切仓库前 flush；无改动不写）。force = 保留本地（绕过乐观锁强制覆盖，冲突条「保留本地并保存」用）。 */
-  flush: (force?: boolean) => Promise<boolean>;
+  /** 立即落盘（卸载/切仓库前 flush；无改动不写）。 */
+  flush: () => Promise<boolean>;
 
   updateCell: (rowId: string, fieldId: string, value: CellValue | undefined) => void;
   /** 对当前选中区域应用单元格样式（patch = 增量，undefined 键 = 清除该项；null = 清除全部格式）。
@@ -304,104 +297,6 @@ function selectionStaleForSets(
 }
 
 /**
- * 合并产物按本地 id 序重排（本地相对「合并前基线」顺序变化时调用——排序 LWW 胜出；
- * order 未出现的实体（对端并发新增）保持相对顺序置尾）。本地未改顺序则原样返回（跟随磁盘排序）。
- */
-function applyLocalOrder<T extends { id: string }>(merged: T[], local: T[], baseline: T[]): T[] {
-  if (sameIdSequence(local, baseline)) return merged;
-  return reorderByRank(merged, new Map(local.map((x, i) => [x.id, i] as const)));
-}
-
-/**
- * 乐观锁冲突（磁盘版本新于基准）自动合并重试：重读磁盘 → 以磁盘为基底应用本地增量
- * （同实体 = 本地后写者胜 LWW；本地删除生效；磁盘删除而本地未改 = 跟随磁盘不复活），
- * 合并结果写回内存并以磁盘为保存基线重发补丁——他人改动保留、本地改动落上，不再弹冲突条。
- * 未变实体直接引用磁盘对象，重发补丁引用 diff 天然只含真实增量。
- * 顺序变化（排序/插列）按本地 id 序重排后随补丁重发（同实体 LWW 语义）。
- * 重读失败/身份不匹配/再次并发冲突 → 抛错回落冲突提示（用户手动决策）。
- */
-async function retryMergePersist(
-  file: string,
-  finish: (updatedAt: number | null, newFile?: string) => void,
-): Promise<void> {
-  const disk = await readTableVault(file);
-  // 读盘期间可能已继续编辑/切换表格：以**最新**本地状态为合并基准（用旧引用会覆盖新编辑），
-  // 且已不在原表则放弃合并（内存不得污染新表状态）
-  const s = useTableStore.getState();
-  if (s.tableFile !== file) return;
-  if (disk.id !== s.id) throw new Error("磁盘表格身份不匹配，已中止合并保存");
-  const localFields = new Map(s.fields.map((f) => [f.id, f]));
-  const localRows = new Map(s.rows.map((r) => [r.id, r]));
-  const changedFieldIds = new Set(
-    s.fields
-      .filter((f) => {
-        const ls = lastSavedFields.find((x) => x.id === f.id);
-        return !ls || ls !== f;
-      })
-      .map((f) => f.id),
-  );
-  const changedRowIds = new Set(
-    s.rows
-      .filter((r) => {
-        const ls = lastSavedRows.find((x) => x.id === r.id);
-        return !ls || ls !== r;
-      })
-      .map((r) => r.id),
-  );
-  const removedFieldIds = new Set(
-    lastSavedFields.filter((f) => !localFields.has(f.id)).map((f) => f.id),
-  );
-  const removedRowIds = new Set(
-    lastSavedRows.filter((r) => !localRows.has(r.id)).map((r) => r.id),
-  );
-  const mergedFields = disk.fields.filter((f) => !removedFieldIds.has(f.id));
-  for (let i = 0; i < mergedFields.length; i++) {
-    const f = mergedFields[i];
-    const local = localFields.get(f.id);
-    if (local && changedFieldIds.has(f.id)) mergedFields[i] = local;
-  }
-  const mergedRows = disk.rows.filter((r) => !removedRowIds.has(r.id));
-  for (let i = 0; i < mergedRows.length; i++) {
-    const r = mergedRows[i];
-    const local = localRows.get(r.id);
-    if (local && changedRowIds.has(r.id)) mergedRows[i] = local;
-  }
-  // 纯本地新增（磁盘无 + 基线无）补进末尾；磁盘删除的实体本地未删（含已修改）也跟随磁盘——
-  // 删除冲突优先（防幽灵行复活），本地对已删实体的编辑视为随删除放弃
-  for (const f of s.fields) {
-    if (!disk.fields.some((x) => x.id === f.id) && !lastSavedFields.some((x) => x.id === f.id)) {
-      mergedFields.push(f);
-    }
-  }
-  for (const r of s.rows) {
-    if (!disk.rows.some((x) => x.id === r.id) && !lastSavedRows.some((x) => x.id === r.id)) {
-      mergedRows.push(r);
-    }
-  }
-  // 顺序变化（排序/插列）：本地相对合并前基线改过顺序 → 合并产物按本地 id 序重排，
-  // 重发补丁携带 order（本地排序 LWW 胜出，对端新增置尾）；未改顺序则跟随磁盘排序
-  const mergedFieldsFinal = applyLocalOrder(mergedFields, s.fields, lastSavedFields);
-  const mergedRowsFinal = applyLocalOrder(mergedRows, s.rows, lastSavedRows);
-  // 写回内存前最后守卫：计算期间切表则放弃（补丁不重发，冲突留给下次保存）
-  if (useTableStore.getState().tableFile !== file) return;
-  useTableStore.setState({ fields: mergedFieldsFinal, rows: mergedRowsFinal });
-  lastSavedFields = disk.fields;
-  lastSavedRows = disk.rows;
-  // 合并产物（远端磁盘内容 + 本端已广播增量）对房间已知：推进广播基线防其被重发全房
-  syncBroadcastBaseline();
-  const result = await patchTableVault({
-    file,
-    tableId: disk.id,
-    fields: mergedFieldsFinal,
-    rows: mergedRowsFinal,
-    lastSaved: { fields: disk.fields, rows: disk.rows },
-    baseUpdatedAt: disk.updatedAt,
-    force: false,
-  });
-  finish(result ? result.updatedAt : null, result?.file);
-}
-
-/**
  * 从当前内存内容构建 `.atb` 全量快照（历史存档/磁盘全量重建/xlsx 导出三处收敛）：
  * schema/id/title/fields/rows 取当前 state，createdAt: 0 = 快照展示占位（磁盘真实 createdAt
  * 由 write_table_vault 落盘保留）；updatedAt 缺省 = 当前时间，extra 覆盖个别字段。
@@ -481,68 +376,52 @@ function recordTableHistory(file: string): void {
 
 /**
  * 防抖持久化控制器：写盘期间又有新变更（persistCtl.version 已变）则保留 dirty，
- * 由下一轮 timer 再写，防写盘成功回调吞掉新编辑。force = 保留本地（绕过乐观锁强制覆盖）。
+ * 由下一轮 timer 再写，防写盘成功回调吞掉新编辑。
  * 增量保存：与 lastSaved 快照按引用 diff，只写变化实体（见 patchTableVault）；
  * 空补丁（撤销回退到已存状态等）跳过 IPC 仅清脏标志。
  */
-const persistCtl = createPersistController<boolean>({
-  persist: async (force = false) => {
+const persistCtl = createPersistController({
+  persist: async () => {
     const versionAtStart = persistCtl.version;
-    const { tableFile, id, fields, rows, baseUpdatedAt } = useTableStore.getState();
+    const { tableFile, id, fields, rows } = useTableStore.getState();
     if (!tableFile) return;
-    // 写盘成功后的统一收尾（markSelfSave 先于守卫：写已发生，watcher 回放须抑制）
-    const finish = (updatedAt: number | null, newFile?: string) => {
-      if (updatedAt !== null) {
+    // 写盘成功后的统一收尾（markSelfSave 先于守卫：写已发生，watcher 回放须抑制）：
+    // 先同步 title 改名后的落地路径（不同步会让下一轮写已被改名删除的旧路径），
+    // 最后按本轮是否被新变更接续收尾。written = false 表示空补丁（磁盘未动）。
+    const finish = (written: boolean, newFile?: string) => {
+      if (written) {
         markSelfSave(newFile && newFile !== tableFile ? [tableFile, newFile] : tableFile);
       }
       // 竞态守卫：await 期间可能已切换表格（load 替换了状态），旧表的写盘结果不得覆盖新表
-      // 的乐观锁基准/脏标记（否则新表下次保存被误判冲突、脏编辑被吞）
+      // 的脏标记/路径（否则新表下次保存写错文件、脏编辑被吞）
       if (useTableStore.getState().tableFile !== tableFile) return;
+      // 落地路径先于并发判断：本轮写盘已经发生，改名落点是既成事实，必须照常同步
+      if (newFile && newFile !== tableFile) {
+        useTableStore.setState({ tableFile: newFile });
+      }
       if (persistCtl.version !== versionAtStart) {
         // 写盘期间有新变更（已挂新 timer）：保留 dirty，由下一轮 timer 再写盘
         useTableStore.setState({ saving: false });
         return;
       }
-      if (newFile && newFile !== tableFile) {
-        useTableStore.setState({ tableFile: newFile });
-      }
-      useTableStore.setState({
-        ...(updatedAt !== null ? { baseUpdatedAt: updatedAt } : {}),
-        dirty: false,
-        saving: false,
-        error: null,
-        // 保存/自动合并成功 = 冲突已解决：清掉此前合并失败置位的冲突条（自愈，
-        // 用户无需手动点掉；真实合并失败时 reportError 会再次置位）
-        conflictPending: false,
-      });
+      useTableStore.setState({ dirty: false, saving: false, error: null });
       // 存档点：以当前内容快照记历史（60s 内连续编辑合并为一版；fire-and-forget 不阻塞保存流程）
-      if (updatedAt !== null) recordTableHistory(newFile ?? tableFile);
+      if (written) recordTableHistory(newFile ?? tableFile);
       syncLastSaved();
     };
     const reportError = (e: unknown) => {
-      const msg = typeof e === "string" ? e : e instanceof Error ? e.message : String(e);
-      if (msg.includes("已被外部修改")) {
-        // 自动合并兜底失败（重发补丁仍冲突的并发窗口）：提示用户重载/强制保存
-        useTableStore.setState({ conflictPending: true, saving: false });
-      } else {
-        console.error("表格自动保存失败", e);
-        useTableStore.setState({ error: "自动保存失败，请检查磁盘空间或权限", saving: false });
-      }
+      console.error("表格自动保存失败", e);
+      useTableStore.setState({ error: "自动保存失败，请检查磁盘空间或权限", saving: false });
     };
-    /** 磁盘文件被外部删除：补丁只含变化实体，重建会丢未变化部分——回退全量写（与旧行为一致）。
-     * 主补丁路径与乐观锁合并路径共用（合并路径读盘时同样可能遇到文件已删）。
+    /** 文件已被删除：补丁只含变化实体，重建会丢未变化部分——回退全量写。
      * 必须读最新 state：await 主补丁期间用户可能又有新编辑，写起始快照会把 stale 内容
      * 短暂覆盖磁盘；同时防切表后把新表内容写进旧文件（tableFile 变了即放弃，与 finish 守卫同语义）。 */
     const rewriteFull = async (): Promise<void> => {
       try {
         const latest = useTableStore.getState();
         if (latest.tableFile !== tableFile) return;
-        const updatedAt = await writeTableVault(
-          buildTableSnapshot(),
-          tableFile,
-          force ? undefined : latest.baseUpdatedAt,
-        );
-        finish(updatedAt);
+        await writeTableVault(buildTableSnapshot(), tableFile);
+        finish(true);
       } catch (e2) {
         reportError(e2);
       }
@@ -554,29 +433,11 @@ const persistCtl = createPersistController<boolean>({
         fields,
         rows,
         lastSaved: { fields: lastSavedFields, rows: lastSavedRows },
-        baseUpdatedAt,
-        force,
       });
-      finish(result ? result.updatedAt : null, result?.file);
+      finish(result !== null, result?.file);
     } catch (e) {
       if (typeof e === "string" && e.includes("表格文件不存在（已从磁盘删除）")) {
         await rewriteFull();
-      } else if (typeof e === "string" && e.includes("已被外部修改")) {
-        // 乐观锁冲突：自动三方合并（磁盘基底 + 本地增量 LWW）重发补丁；
-        // 合并本身失败/再冲突（并发窗口）→ 回落冲突提示由用户决策
-        try {
-          await retryMergePersist(tableFile, finish);
-        } catch (mergeErr) {
-          if (
-            typeof mergeErr === "string" &&
-            mergeErr.includes("表格文件不存在（已从磁盘删除）")
-          ) {
-            // 合并读盘时磁盘文件已被外部删除：同样回退全量重建
-            await rewriteFull();
-          } else {
-            reportError(mergeErr);
-          }
-        }
       } else {
         reportError(e);
       }
@@ -636,7 +497,7 @@ function syncLastSaved(): void {
   syncBroadcastBaseline();
 }
 
-/** 把当前运行时 fields/rows 引用记为「协作广播基线」。应用远端补丁/冲突合并改写内存态后调用，
+/** 把当前运行时 fields/rows 引用记为「协作广播基线」。应用远端补丁改写内存态后调用，
  * 使该内容不再被当作本地增量重发全房（远端内容对房间是已知的）。 */
 function syncBroadcastBaseline(): void {
   const s = useTableStore.getState();
@@ -645,8 +506,8 @@ function syncBroadcastBaseline(): void {
 }
 
 /**
- * 复位表格运行时态（load 失败降级 / clear 清空共用同一份 13 字段字面量，防两处漂移）：
- * tableFile 清空后不可写回，选中/冲突/编辑回退标记一并归零。error = 本次复位的原因文案（null = 正常清空）。
+ * 复位表格运行时态（load 失败降级 / clear 清空共用同一份字段字面量，防两处漂移）：
+ * tableFile 清空后不可写回，选中/编辑回退标记一并归零。error = 本次复位的原因文案（null = 正常清空）。
  */
 function resetTableState(error: string | null): void {
   useTableStore.setState({
@@ -655,10 +516,8 @@ function resetTableState(error: string | null): void {
     title: "",
     fields: [],
     rows: [],
-    baseUpdatedAt: 0,
     dirty: false,
     saving: false,
-    conflictPending: false,
     error,
     selectedRowId: null,
     selection: null,
@@ -805,10 +664,8 @@ export const useTableStore = create<TableStoreState>((set, get) => ({
   title: "",
   fields: [],
   rows: [],
-  baseUpdatedAt: 0,
   dirty: false,
   saving: false,
-  conflictPending: false,
   error: null,
   selectedRowId: null,
   selection: null,
@@ -821,7 +678,7 @@ export const useTableStore = create<TableStoreState>((set, get) => ({
     undoMgr.clear();
     abortEditSession();
     // 离开旧表：先落盘再回收其孤儿图片附件——防抖窗口内新导入的图片引用尚未写盘，
-    // 直接按磁盘引用集合回收会把它误判孤儿删掉（丢图）；flush 失败（乐观锁冲突等）时
+    // 直接按磁盘引用集合回收会把它误判孤儿删掉（丢图）；flush 失败时
     // 磁盘集合同样可能缺本地引用，跳过回收留到下次切表；协作对端同表在线也跳过（见
     // hasCollabPeerOnTable）。切表即清空旧表撤销栈与显示缓存，会话内删除的图片此刻才
     // 没有恢复路径，回收安全（读盘失败保守跳过，不阻塞打开）
@@ -851,10 +708,8 @@ export const useTableStore = create<TableStoreState>((set, get) => ({
         title: table.title,
         fields: table.fields,
         rows: table.rows,
-        baseUpdatedAt: table.updatedAt,
         dirty: false,
         saving: false,
-        conflictPending: false,
         error: null,
         selectedRowId: null,
         selection: null,
@@ -872,18 +727,16 @@ export const useTableStore = create<TableStoreState>((set, get) => ({
   reloadFromDisk: async () => {
     const file = get().tableFile;
     if (!file) return;
-    // load 会清 dirty/冲突并同步乐观锁基准（磁盘即最新）
+    // load 会清 dirty 并重置落盘基线（磁盘即最新）
     await get().load(file);
   },
 
   syncFromDiskIfChanged: async (file) => {
     // 协作对端同表在场 → 跳过读比重载：广播比落盘先到（编辑即达 vs 500ms 防抖落盘 + watcher 延迟），
-    // 磁盘合法落后于内存，重载会用陈旧盘回退已应用的对端补丁（闪烁/永久回退根因）；
-    // 磁盘收敛由下次保存的乐观锁自动三方合并负责（retryMergePersist）
+    // 磁盘合法落后于内存，重载会用陈旧盘回退已应用的对端补丁（闪烁/永久回退根因）
     if (hasCollabPeerOnTable(file)) return;
     // 自写回放（本端刚写盘，内容已知）跳过读比：省去每次保存后的整表读盘 + 深比
-    //（大表图片多时 .atb 可达数十 MB，保存后卡顿主因）；自写窗口内（markSelfSave 2s）
-    // 的外部编辑可能漏检，由乐观锁 + 自动三方合并兜底收敛
+    //（大表图片多时 .atb 可达数十 MB，保存后卡顿主因）
     if (isSelfSaveEcho(file)) return;
     try {
       const disk = await readTableVault(file);
@@ -895,15 +748,6 @@ export const useTableStore = create<TableStoreState>((set, get) => ({
     } catch {
       const s = get();
       if (s.tableFile === file && !s.dirty) void s.reloadFromDisk();
-    }
-  },
-
-  resolveConflict: async (keepLocal) => {
-    set({ conflictPending: false });
-    if (keepLocal) {
-      await get().flush(true);
-    } else {
-      await get().reloadFromDisk();
     }
   },
 
@@ -928,14 +772,14 @@ export const useTableStore = create<TableStoreState>((set, get) => ({
 
   clearError: () => set({ error: null }),
 
-  flush: async (force = false) => {
+  flush: async () => {
     const { tableFile, dirty } = get();
     // 无脏/未打开：复位 saving（schedulePersist 曾置位但 timer 内无改动可写，防状态卡死）
     if (!tableFile || !dirty) {
       set({ saving: false });
       return false;
     }
-    await persistCtl.flush(force);
+    await persistCtl.flush();
     return true;
   },
 
@@ -1084,7 +928,7 @@ export const useTableStore = create<TableStoreState>((set, get) => ({
   },
 
   exportXlsx: async () => {
-    const { tableFile, id, title, fields, rows, baseUpdatedAt } = get();
+    const { tableFile, id, title, fields, rows } = get();
     if (!tableFile) return false;
     try {
       const target = await saveFile({
@@ -1093,7 +937,7 @@ export const useTableStore = create<TableStoreState>((set, get) => ({
       });
       if (!target) return false;
       // 对话框等待期间内存可能被协作补丁改写：沿用弹出前捕获的内容导出
-      const snapshot = buildTableSnapshot({ id, title, fields, rows, updatedAt: baseUpdatedAt });
+      const snapshot = buildTableSnapshot({ id, title, fields, rows });
       // 图片字节经内容面读回（本机与协作空间同一路径）：导出命令只认 dataURL 或本地仓库附件路径，
       // 空间仓库的附件不在本机磁盘，须先解析为 dataURL 再交给导出（多图单元格只导首图）
       const failedImages = await inlineImageCellsForExport(snapshot);
@@ -1468,9 +1312,9 @@ export const useTableStore = create<TableStoreState>((set, get) => ({
       if (!snapshot || snapshot.schema !== TABLE_SCHEMA) return null;
       // 取消挂起的防抖保存：回滚写盘后旧 timer 不得把恢复前内容写回
       persistCtl.cancel();
-      // 全量写回快照（baseUpdatedAt 缺省 = 绕过乐观锁——回滚是显式覆盖，显式用户意图）
+      // 全量写回快照（回滚是显式覆盖，显式用户意图）
       await writeTableVault(snapshot, file);
-      // 抑制 watcher 回波，然后重载内存（含乐观锁基准与撤销栈重置，同冲突「重新加载」语义）
+      // 抑制 watcher 回波，然后重载内存（重置脏标记与撤销栈）
       markSelfSave(file);
       set({ dirty: false });
       await get().reloadFromDisk();
@@ -1491,7 +1335,7 @@ export const useTableStore = create<TableStoreState>((set, get) => ({
 /**
  * 切仓库清空表格运行时态：在模块加载时注册，不挂表格插件的生命周期钩子——
  * 表格插件停用期间内核照常切仓库，残留的 tableFile/dirty 会让旧表的防抖保存按**旧仓库相对路径**
- * 写进新仓库同名文件（跨仓库污染），也会让新仓库同路径表格误显冲突条。
+ * 写进新仓库同名文件（跨仓库污染）。
  * 这是本 store 自身的数据边界（非领域事件反应），故不随插件启停撤销。
  * 不走 `clear()`：那会顺带回收附件（按旧仓库相对路径，此时不可取）；切仓库只需清内存态。
  */

@@ -79,7 +79,7 @@ vi.mock("@/services/space/client", () => {
         },
         patchCanvas: async (_spaceId: string, body: Record<string, unknown>) => {
           h.spacePatchBodies.push(body);
-          return { updatedAt: 102, file: body.path, conflict: false };
+          return { updatedAt: 102, file: body.path };
         },
         glob: async (_spaceId: string, body: { pattern: string }) => {
           // 仅测试用 patterns（**/*.atlx 形态）：取最后一段扩展名过滤
@@ -386,9 +386,9 @@ describe("selectSpace 激活分流", () => {
     const disk = JSON.parse(String(h.spaceWrites[0].content)) as { id: string; title: string };
     expect(disk.title).toBe("新画布");
     expect(created).toEqual({ id: disk.id, file: "新画布.atlx", title: "新画布" });
-    // 列表/树已刷新：画布出现在 canvases（updatedAt 取 readFile 响应的乐观锁基准）
+    // 列表/树已刷新：画布出现在 canvases（updatedAt 取 readFile 响应的文件 mtime）
     expect(app.useAppStore.getState().canvases.map((c) => c.file)).toContain("新画布.atlx");
-    // 增量保存链：patchCanvasVault → 空间补丁端点，乐观锁基准透传（title 变化随补丁携带）
+    // 增量保存链：patchCanvasVault → 空间补丁端点（title 变化随补丁携带）
     const { patchCanvasVault } = await import("@/services/vault");
     const result = await patchCanvasVault({
       file: created.file,
@@ -398,11 +398,9 @@ describe("selectSpace 激活分流", () => {
       edges: [],
       messagesByConv: {},
       lastSaved: { nodes: [], edges: [], messagesByConv: {}, title: "新画布" },
-      baseUpdatedAt: 100,
     });
     expect(result).toEqual({ updatedAt: 102, file: "新画布.atlx" });
     expect(h.spacePatchBodies).toHaveLength(1);
     expect(h.spacePatchBodies[0].path).toBe("新画布.atlx");
-    expect(h.spacePatchBodies[0].baseUpdatedAt).toBe(100);
   });
 });

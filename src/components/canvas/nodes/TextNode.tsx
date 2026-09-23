@@ -16,7 +16,7 @@ import { ConnectionFrame } from "./ConnectionFrame";
 import { useInlineEdit } from "@/hooks/useInlineEdit";
 import { useVaultLinkHandlers } from "@/hooks/useVaultLinkHandlers";
 import { useWikiNodeLocate } from "@/hooks/useWikiNodeLocate";
-import { useNoteBodySession, useNoteConflicted, useNoteSurface } from "@/hooks/useNoteBodySession";
+import { useNoteBodySession, useNoteSurface } from "@/hooks/useNoteBodySession";
 import { NoteBodyEditor } from "@/components/editor/NoteBodyEditor";
 import {
   MarkdownEditor,
@@ -144,9 +144,6 @@ export function TextNode({ id, data, width, height, selected }: NodeProps) {
   );
   const hasFrontmatter = !!parsed?.fmPrefix;
   const previewBody = parsed ? parsed.body : bodyMd || "*（空）*";
-  /** 冲突未决（外部已修改、自动保存已暂停）：节点内提示，解决入口在笔记面板。
-   *  取自会话注册表而非会话视图——会话随退出编辑关闭，冲突可能仍未解决。 */
-  const conflicted = useNoteConflicted(file ?? null);
 
   return (
     <div
@@ -223,21 +220,6 @@ export function TextNode({ id, data, width, height, selected }: NodeProps) {
               style={{ background: p.color }}
             />
           ))}
-          {/* 冲突未决：自动保存已暂停，解决入口在笔记面板 */}
-          {conflicted && file && (
-            <button
-              type="button"
-              title="外部已修改，自动保存已暂停；在笔记面板处理"
-              onClick={(e) => {
-                e.stopPropagation();
-                useAppStore.getState().openNote(file, title || "未命名");
-              }}
-              className="rounded p-0.5 hover:bg-[var(--bg-tertiary)] transition-colors"
-              style={{ color: "#f59e0b" }}
-            >
-              <AlertTriangle size={13} />
-            </button>
-          )}
           {/* 有属性：跳笔记面板编辑（节点内只渲染正文） */}
           {hasFrontmatter && file && (
             <button

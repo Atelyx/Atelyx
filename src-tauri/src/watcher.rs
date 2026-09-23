@@ -18,7 +18,7 @@
 //! `path.tmp` → rename）同样会触发事件——后端**不做**自写回放抑制（除 `.tmp` 副产物过滤外），
 //! 抑制完全由前端承担：前端 `utils/selfSave.ts` 的 `markSelfSave`/`isSelfSaveEcho`
 //! （写盘后 2s 窗口内同路径事件视为自写回波跳过）。改动本文件的事件过滤时须同步核对
-//! 前端抑制逻辑，防自写事件引发「已被外部修改」误提示。
+//! 前端抑制逻辑，防自写事件被前端误判为外部改动。
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;

@@ -70,29 +70,25 @@ export interface ContentBackend {
   writeFile(file: string, content: string): Promise<void>;
   /** 写 .md 笔记（原子写，自动建父目录）。 */
   writeNote(file: string, content: string): Promise<void>;
-  /** 写 .atlx 画布（整体原子写）；`baseUpdatedAt` = 乐观并发基准，磁盘更新则后端拒绝。
-   *  返回写入后的 updatedAt（秒）。 */
-  writeCanvas(canvas: CanvasFile, file: string, baseUpdatedAt?: number): Promise<number>;
-  /** 写 .atb 表格（整体原子写；乐观锁语义同 writeCanvas）。 */
-  writeTable(table: TableFile, file: string, baseUpdatedAt?: number): Promise<number>;
+  /** 写 .atlx 画布（整体原子写；title 变更即同目录改名）。返回写入后的 updatedAt（秒，展示用时间戳）。 */
+  writeCanvas(canvas: CanvasFile, file: string): Promise<number>;
+  /** 写 .atb 表格（整体原子写；语义同 writeCanvas）。 */
+  writeTable(table: TableFile, file: string): Promise<number>;
   /** 新建空画布，返回 { id, file }（file = 相对仓库根路径；dir 空 = 根目录）。 */
   createCanvas(title: string, dir: string): Promise<CanvasCreateResult>;
   /** 新建空表格，返回 { id, file }。 */
   createTable(title: string, dir: string): Promise<TableCreateResult>;
 
   // ===== 增量补丁 =====
-  /** 画布增量补丁按稳定 id 合并落盘（乐观锁语义同 writeCanvas）；返回写入后的 { updatedAt, file }。 */
+  /** 画布增量补丁按稳定 id 合并落盘；返回写入后的 { updatedAt, file }（file = 落盘后的相对路径，改名漂移用）。 */
   patchCanvas(
     patch: CanvasPatch,
     file: string,
-    baseUpdatedAt: number,
   ): Promise<{ updatedAt: number; file: string } | null>;
-  /** 表格增量补丁按稳定 id 合并落盘；`force` = 绕过乐观锁强制覆盖（冲突条「保留本地并保存」用）。 */
+  /** 表格增量补丁按稳定 id 合并落盘（field/row 全序重排随补丁携带）；返回同 patchCanvas。 */
   patchTable(
     patch: TablePatch,
     file: string,
-    baseUpdatedAt: number,
-    force: boolean,
   ): Promise<{ updatedAt: number; file: string } | null>;
 
   // ===== 结构变更 =====

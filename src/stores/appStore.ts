@@ -821,14 +821,13 @@ export const useAppStore = create<AppState>((set, get) => ({
       throw e;
     }
     const newFile = siblingPath(row.file, `${sanitizeFilename(actual)}.atlx`);
-    // 重命名后文件名变了：先算新路径再标记自写（旧路径删除 + 新路径创建事件一并抑制），
-    // 当前画布磁盘 .atlx 已被 Rust 改（title + 同目录改文件名），同步乐观锁基准防下次保存误冲突
+    // 重命名后文件名变了：先算新路径再标记自写（旧路径删除 + 新路径创建事件一并抑制）
     markSelfSave([row.file, newFile]);
     // 侧文件先确保在新编码名下，再随重命名迁移（同笔记/表格路径）
     await migrateHistoryFile("canvas", row.file).catch((e) => notifySidecarFailure("画布重命名后的历史迁移", e));
     // 历史侧文件随迁（画布 kind 目录）；失败不阻塞重命名主流程
     await remapSideloads(row.file, newFile).catch((e) => notifySidecarFailure("画布重命名后的历史迁移", e));
-    // 画布运行时引用同步（乐观锁基准 + 打开路径）经仓库事件分发
+    // 画布运行时引用同步（打开路径）经仓库事件分发
     emitVaultEvent({ kind: "canvas:renamed", oldPath: row.file, newPath: newFile });
     useUiStateStore.getState().renameLastFile("canvas", row.file, newFile);
     await refreshCanvasAndTree();
@@ -853,7 +852,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     await migrateHistoryFile("canvas", row.file).catch((e) => notifySidecarFailure("画布移动后的历史迁移", e));
     // 历史侧文件随迁（画布 kind 目录）；失败不阻塞移动主流程
     await remapSideloads(row.file, newFile).catch((e) => notifySidecarFailure("画布移动后的历史迁移", e));
-    // 画布运行时引用同步（乐观锁基准 + 打开路径）经仓库事件分发
+    // 画布运行时引用同步（打开路径）经仓库事件分发
     emitVaultEvent({ kind: "canvas:moved", oldPath: row.file, newPath: newFile });
     useUiStateStore.getState().renameLastFile("canvas", row.file, newFile);
     await refreshCanvasAndTree();
