@@ -39,7 +39,7 @@ import {
   registerCollabReconnect,
   useCollabStore,
 } from "@/stores/collabStore";
-import { createPersistController } from "@/utils/persist";
+import { createPersistController, advanceBaselineRefs } from "@/utils/persist";
 import { createUndoManager } from "@/utils/undoStack";
 import { registerDomainLifecycle } from "@/utils/kernelLifecycle";
 import { useNotificationStore } from "@/stores/notificationStore";
@@ -503,6 +503,30 @@ function syncBroadcastBaseline(): void {
   const s = useTableStore.getState();
   broadcastBaselineFields = s.fields;
   broadcastBaselineRows = s.rows;
+}
+
+/**
+ * 把远端补丁（含自收回放）覆盖的实体推进落盘基线：补丁到达即服务端已落地（服务端落地后才
+ * 广播），基线按补丁推进到服务端当前状态——upsert 实体取应用补丁后的内存引用（与内存同引用，
+ * 按引用 diff 判定已落盘不重发），removed 实体剔除，fieldOrder/rowOrder 随补丁重排。
+ * 只重写补丁触及的实体：本端未保存改动不在补丁内，基线保留其旧引用，下一次保存仍会按引用
+ * diff 发出（全量同步会把未保存内容误标已落盘，存在未保存改动期间只能按补丁推进）。
+ * 须在补丁应用（set）之后调用。
+ */
+function advanceSavedBaselineForPatch(patch: TablePatch): void {
+  const s = useTableStore.getState();
+  const fieldRefById = new Map(s.fields.map((f) => [f.id, f] as const));
+  const rowRefById = new Map(s.rows.map((r) => [r.id, r] as const));
+  const removedFieldIds = new Set(patch.removedFieldIds);
+  const removedRowIds = new Set(patch.removedRowIds);
+  let fields = lastSavedFields.filter((f) => !removedFieldIds.has(f.id));
+  let rows = lastSavedRows.filter((r) => !removedRowIds.has(r.id));
+  advanceBaselineRefs(fields, patch.upsertFields.map((f) => f.id), fieldRefById);
+  advanceBaselineRefs(rows, patch.upsertRows.map((r) => r.id), rowRefById);
+  if (patch.fieldOrder) fields = reorderByIds(fields, patch.fieldOrder);
+  if (patch.rowOrder) rows = reorderByIds(rows, patch.rowOrder);
+  lastSavedFields = fields;
+  lastSavedRows = rows;
 }
 
 /**
@@ -1289,14 +1313,19 @@ export const useTableStore = create<TableStoreState>((set, get) => ({
           st.selectedRowId && removedRowIds.has(st.selectedRowId) ? null : st.selectedRowId,
       };
     });
-    // 核心：远端已应用内容对房间已知，推进广播基线，避免被当作本地增量重发全房
-    syncBroadcastBaseline();
-    // 版本守卫洞加固：本端有未保存改动（dirty）时重挂一次保存调度——在途保存捕获的是
-    // 「未含远端补丁」的旧状态，写盘后 finish() 会因 persistCtl.version 未变而标干净并
-    // 把 lastSaved 推进到磁盘之前（污染磁盘，经对端 watcher 重载使对端丢内容）。
-    // 重挂使版本变化 → 保持 dirty，由下一轮 timer 带上远端内容重写。仅 dirty 时重挂：
-    // 干净接收端不触发保存（无广播回环，与「接收端不落盘」约定一致）。
-    if (get().dirty) persistCtl.schedule();
+    // 基线推进：补丁内容已由服务端落地（服务端落地后才广播，帧无 peerId、含发起者自己——
+    // 自收回放与远端补丁走同一路径）。补丁覆盖的实体随补丁推进落盘基线，否则应用翻新的引用
+    // 被当增量重发 → 服务端再落地再回放，成环不止。本端未保存改动不在补丁内，基线保持其
+    // 旧引用，下一轮保存照常发出。
+    if (get().dirty) {
+      advanceSavedBaselineForPatch(patch);
+      syncBroadcastBaseline();
+      // 在途保存捕获的是补丁应用前的旧状态：重挂使版本变化 → 收尾保持 dirty；
+      // 下一轮 diff 以推进后的基线为准，不重发补丁内实体（无其他变更时空补丁直接清脏，不产生写盘）。
+      persistCtl.schedule();
+    } else {
+      syncLastSaved();
+    }
   },
 
   tableHistoryLoad: (file) => loadTableHistory("table", file),

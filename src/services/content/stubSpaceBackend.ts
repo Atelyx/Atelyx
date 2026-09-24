@@ -21,8 +21,8 @@ export function createSpaceStubBackend() {
   const writeOrder: string[] = [];
   const failContents = new Set<string>();
   const state = { reads: 0, writeDelayMs: 0 };
-  /** 实体写盘记录（画布/表格，按请求顺序）：测试据此断言写盘次序与串行化。 */
-  const entityWrites: { kind: "canvas" | "table"; file: string }[] = [];
+  /** 实体写盘记录（画布/表格，按请求顺序）：测试据此断言写盘次序与串行化；补丁写带 patch 原文。 */
+  const entityWrites: { kind: "canvas" | "table"; file: string; patch?: unknown }[] = [];
 
   /** 落盘（标题改名时旧路径删除），返回落盘戳（毫秒秒级，仅供契约形状）。 */
   function commit(file: string, nextFile: string, content: string): number {
@@ -151,7 +151,7 @@ export function createSpaceStubBackend() {
     createTable: () => Promise.reject(noImpl("createTable")),
 
     async patchCanvas(patch, file) {
-      entityWrites.push({ kind: "canvas", file });
+      entityWrites.push({ kind: "canvas", file, patch });
       await delayWrite();
       if (!files.has(file)) throw missingError("画布");
       const canvas = readEntity<CanvasFile>(file, "画布");
@@ -164,7 +164,7 @@ export function createSpaceStubBackend() {
       return { updatedAt: commit(file, nextFile, JSON.stringify(canvas)), file: nextFile };
     },
     async patchTable(patch, file) {
-      entityWrites.push({ kind: "table", file });
+      entityWrites.push({ kind: "table", file, patch });
       await delayWrite();
       if (!files.has(file)) throw missingError("表格");
       const table = readEntity<TableFile>(file, "表格");

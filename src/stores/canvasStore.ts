@@ -58,7 +58,7 @@ import {
   rectOf,
   collectGroupMembers,
 } from "@/utils/layout";
-import { createPersistController } from "@/utils/persist";
+import { createPersistController, advanceBaselineRefs } from "@/utils/persist";
 import { registerDomainLifecycle } from "@/utils/kernelLifecycle";
 import { clearCanvasViewportCache } from "@/services/viewHandoff";
 import { markSelfSave } from "@/utils/selfSave";
@@ -480,6 +480,43 @@ function syncBroadcastBaseline(): void {
   broadcastBaselineEdges = s.edges;
   broadcastBaselineMessages = s.messagesByConv;
   broadcastBaselineTitle = s.canvasTitle;
+}
+
+/**
+ * 把远端补丁（含自收回放）覆盖的实体推进落盘基线：补丁到达即服务端已落地（服务端落地后才
+ * 广播），基线按补丁推进到服务端当前状态——upsert 实体取应用补丁后的内存引用（与内存同引用，
+ * 按引用 diff 判定已落盘不重发），removed 实体剔除，conversation 消息推进到补丁携带的远端
+ * 数组（本地独有消息不在其内，经引用 diff 在下一次保存正常发出），title 变化随补丁推进。
+ * 只重写补丁触及的实体：本端未保存改动不在补丁内，基线保留其旧引用，下一次保存仍会按引用
+ * diff 发出（全量同步会把未保存内容误标已落盘，存在未保存改动期间只能按补丁推进）。
+ * 须在补丁应用（set）之后调用。
+ */
+function advanceSavedBaselineForCanvasPatch(
+  patch: CanvasPatch,
+  deserialized: ReturnType<typeof deserializeNodeForCollab>[],
+): void {
+  const s = useCanvasStore.getState();
+  const nodeRefById = new Map(s.nodes.map((n) => [n.id, n] as const));
+  const edgeRefById = new Map(s.edges.map((e) => [e.id, e] as const));
+  const removedNodeIds = new Set(patch.removedNodeIds);
+  const removedEdgeIds = new Set(patch.removedEdgeIds);
+  const nodes = lastSavedNodes.filter((n) => !removedNodeIds.has(n.id));
+  const edges = lastSavedEdges.filter((e) => !removedEdgeIds.has(e.id));
+  advanceBaselineRefs(nodes, patch.upsertNodes.map((n) => n.id), nodeRefById);
+  advanceBaselineRefs(edges, patch.upsertEdges.map((e) => e.id), edgeRefById);
+  const messages = { ...lastSavedMessages };
+  for (const id of patch.removedNodeIds) delete messages[id];
+  for (const { node, messages: remoteMessages } of deserialized) {
+    if (node.type !== "conversation" || remoteMessages === undefined) continue;
+    // 补丁携带的远端消息数组即服务端事实；应用路径 mergeMessages 在本地无独有消息时
+    // 原样返回该引用，基线与内存同引用即不重发
+    messages[node.id] = remoteMessages;
+  }
+  lastSavedNodes = nodes;
+  lastSavedEdges = edges;
+  lastSavedMessages = messages;
+  // 与应用路径的改名判定同口径（truthy）：空串 title 不改名也不推进基线，防基线与内存漂移
+  if (patch.title) lastSavedTitle = patch.title;
 }
 
 /** 协作实时广播钩子（collabStore.init 注入，dispose 清空；null = 协作未启用，不广播）。 */
@@ -3214,8 +3251,19 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
       .filter((md) => !!md.file && (md.kind === "image" ? !md.thumb : !md.body))
       .map((md) => md.file as string);
     for (const ref of new Set(mediaRefs)) void get().refreshMediaContent(ref);
-    // 核心：远端已应用内容对房间已知，推进广播基线，避免被当作本地增量重发全房
-    syncBroadcastBaseline();
+    // 基线推进：补丁内容已由服务端落地（服务端落地后才广播，帧无 peerId、含发起者自己——
+    // 自收回放与远端补丁走同一路径）。补丁覆盖的实体随补丁推进落盘基线，否则应用翻新的引用
+    // 被当增量重发 → 服务端再落地再回放，成环不止。本端未保存改动不在补丁内，基线保持其
+    // 旧引用，下一轮保存照常发出。
+    if (get().dirty) {
+      advanceSavedBaselineForCanvasPatch(patch, deserialized);
+      syncBroadcastBaseline();
+      // 在途保存捕获的是补丁应用前的旧状态：重挂使版本变化 → 收尾保持 dirty；
+      // 下一轮 diff 以推进后的基线为准，不重发补丁内实体（无其他变更时空补丁直接清脏，不产生写盘）。
+      persistCtl.schedule();
+    } else {
+      syncLastSaved();
+    }
   },
 }));
 

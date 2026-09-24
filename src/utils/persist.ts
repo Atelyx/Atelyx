@@ -67,3 +67,29 @@ export function createPersistController(opts: {
     },
   };
 }
+
+/**
+ * 把落盘基线数组按补丁 upsert 的 id 推进：同 id 覆盖为「应用补丁后的内存引用」，新 id 追加置尾
+ * （与补丁应用同序）。基线实体与内存同引用，按引用 diff 才能判定「已落盘、无需重发」。
+ * 协作补丁回放防重发专用：补丁到达即服务端已落地（服务端落地后才广播），基线只吃补丁内实体，
+ * 本端未保存改动不在补丁内、保留旧引用，下一次保存仍会按引用 diff 发出。
+ */
+export function advanceBaselineRefs<T extends { id: string }>(
+  list: T[],
+  upsertIds: string[],
+  refById: Map<string, T>,
+): void {
+  const indexById = new Map(list.map((item, i) => [item.id, i] as const));
+  for (const id of upsertIds) {
+    const ref = refById.get(id);
+    // 防御：补丁已应用则内存必含该 id；缺引用时跳过，该实体下一轮重发一次幂等收敛
+    if (!ref) continue;
+    const i = indexById.get(id);
+    if (i === undefined) {
+      indexById.set(id, list.length);
+      list.push(ref);
+    } else {
+      list[i] = ref;
+    }
+  }
+}
