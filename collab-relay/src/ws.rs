@@ -241,9 +241,9 @@ fn resync_due(last: Option<Instant>, now: Instant) -> bool {
 }
 
 /// 服务端主动向房间广播补丁帧（HTTP 补丁端点落地成功后调用）。发给房间内全部成员的
-/// WS 连接，含发起写入者自己——发起者经 HTTP 保存、无转发帧可回声，客户端按稳定 id
-/// 幂等合并，自收无副作用；房间为空或个别投递失败只记日志：真源已落盘，广播失败
-/// 不回滚落地。
+/// WS 连接，含发起写入者自己——发起者经 HTTP 保存、无转发帧可回声，收到的是落地广播帧；
+/// 帧无 peerId，客户端按远端补丁同一路径幂等应用。房间为空或个别投递失败只记日志：
+/// 真源已落盘，广播失败不回滚落地。
 pub(crate) fn broadcast_patch(hub: &Hub, room_id: &str, kind: &'static str, file: &str, patch: serde_json::Value) {
     let payload = server_msg(kind, None, None, None, Some(file.to_string()), Some(patch), None);
     let rooms = hub.0.lock().unwrap();
