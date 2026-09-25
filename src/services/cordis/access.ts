@@ -59,6 +59,8 @@ export interface PluginCollabAccess {
   sendMessage(channel: string, payload: unknown, to?: number): boolean;
   /** 本端身份（peerId 未连接 = null）。 */
   myPeer(): CollabMyPeer;
+  /** 插件协作意愿声明：计数 +1，返回幂等的释放函数（撤销声明）。计数变化由 panelStore 订阅重评估连接。 */
+  acquire(): () => void;
 }
 
 let collabAccess: PluginCollabAccess | null = null;

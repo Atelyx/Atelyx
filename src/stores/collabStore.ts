@@ -51,15 +51,20 @@ interface CollabStoreState {
   peers: CollabPeer[];
   /** 本连接在房间内的 peerId（hello-ack 分配；锁主判定/过滤自己用，未连接 = null）。 */
   myPeerId: number | null;
+  /** 活跃的插件协作声明数（插件经 ctx.collab.acquire 声明；> 0 时宿主为本窗口维持协作连接）。 */
+  pluginDemand: number;
 
   /** 应用启动时调用：载入配置并建立连接（无配置 = 不连）。 */
   init: (cfg: CollabInitConfig) => void;
   /** 设置变更（开关/昵称/颜色）：重建连接。 */
   applyConfig: (patch: Partial<Omit<CollabInitConfig, "deviceName">>) => void;
   /**
-   * 上报当前打开的笔记（协作 presence，view=note）：对端据此在笔记头显示「正在编辑」协作者列表。
-   * 传 null = 离开笔记（清远端高亮），与表格 presence 共用节流通道（后上报者生效）。
+   * 插件声明需要协作通道：计数 +1 并返回释放函数（幂等，重复调用为 no-op）。
+   * 计数变化由 panelStore 订阅，重评估本窗口是否维持协作连接；插件停用/卸载随 fiber 撤销释放。
    */
+  retainPluginDemand(): () => void;
+  /** 上报当前打开的笔记（协作 presence，view=note）：对端据此在笔记头显示「正在编辑」协作者列表。
+   *  传 null = 离开笔记（清远端高亮），与表格 presence 共用节流通道（后上报者生效）。 */
   notePresence: (file: string | null) => void;
   /** 断开连接并停止广播（应用退出）。 */
   dispose: () => void;
@@ -87,6 +92,8 @@ void appVersionOnce();
 /** 连接建立序号：快速连续 applyConfig/切仓库时，await 版本号期间可能交错两次建立请求，
  *  后一次须作废前一次（否则旧连接泄漏无人管理）。 */
 let connSeq = 0;
+/** 活跃的插件协作声明数（retainPluginDemand 维护；与连接状态无关，dispose 不清）。 */
+let pluginDemandCount = 0;
 
 /** 服务端 error 帧的用户可见提示合并窗口：鉴权拒绝等错误会随每次重连重放，同因提示不刷屏。 */
 const SERVER_ERROR_NOTIFY_COALESCE_MS = 60_000;
@@ -314,6 +321,20 @@ export const useCollabStore = create<CollabStoreState>((set) => ({
   connected: false,
   peers: [],
   myPeerId: null,
+  pluginDemand: 0,
+
+  retainPluginDemand: () => {
+    pluginDemandCount += 1;
+    set({ pluginDemand: pluginDemandCount });
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      // Math.max 兜底：释放函数逃逸出插件生命周期被多余调用时不把计数打成负数
+      pluginDemandCount = Math.max(0, pluginDemandCount - 1);
+      set({ pluginDemand: pluginDemandCount });
+    };
+  },
 
   init: (cfg) => {
     ensureSubscriptions();

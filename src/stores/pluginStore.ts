@@ -357,7 +357,7 @@ function ensureVaultWriteAccess(): void {
   });
 }
 
-/** 协作能力接线守卫：把在线用户/presence/插件消息收发/本端身份暴露给内核 `collab` 服务（幂等一次）。 */
+/** 协作能力接线守卫：把在线用户/presence/插件消息收发/本端身份/协作意愿声明暴露给内核 `collab` 服务（幂等一次）。 */
 let collabRuntimeWired = false;
 function ensureCollabRuntimeAccess(): void {
   if (collabRuntimeWired) return;
@@ -367,6 +367,7 @@ function ensureCollabRuntimeAccess(): void {
     setPresence: (view, file) => publishPluginPresence(view, file),
     sendMessage: (channel, payload, to) => sendPluginMessage(channel, payload, to),
     myPeer: () => getMyPeerInfo(),
+    acquire: () => useCollabStore.getState().retainPluginDemand(),
   });
 }
 

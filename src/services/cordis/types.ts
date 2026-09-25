@@ -273,6 +273,10 @@ export interface CollabService {
   sendMessage(channel: string, payload: unknown, opts?: { to?: number }): boolean;
   /** 本端身份（peerId 未连接 = null；与 peers() 对称）。 */
   myPeer(): CollabMyPeer;
+  /** 声明本插件需要协作通道，返回释放函数（撤销声明；随插件 fiber 撤销调用）。
+   *  存在活跃声明时宿主为本窗口维持协作连接，其余连接条件不变——插件的协作需求宿主
+   *  看不到，不经此声明，承载插件面板的窗口不会建立连接，ctx.collab 收发恒不可用。 */
+  acquire(): () => void;
 }
 
 /** 画布数据服务（由随应用分发的画布插件提供，停用即不可用；写方法要求已打开可写画布）。 */

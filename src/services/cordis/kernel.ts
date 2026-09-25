@@ -603,6 +603,11 @@ export function createKernel(): Kernel {
       if (!access) throw new Error("协作能力未就绪");
       return access.myPeer();
     },
+    acquire: () => {
+      const access = getPluginCollabAccess();
+      if (!access) throw new Error("协作能力未就绪");
+      return access.acquire();
+    },
   };
   provide("collab", collab);
 

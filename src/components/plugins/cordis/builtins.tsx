@@ -235,6 +235,9 @@ interface BuiltinDefOptions {
   capability?: () => () => void;
   /** 协作域接线（返回 unregister）。 */
   collabWiring?: () => () => void;
+  /** 声明需要协作通道（apply 时经 ctx.collab.acquire 声明，随 fiber 撤销释放；
+   *  宿主按活跃声明决定是否为本窗口维持协作连接——与用户插件的声明机制一视同仁）。 */
+  needsCollab?: boolean;
   vaultEventHandlers?: VaultEventHandlerSpec[];
   /** 提供类型化 ctx 服务（须在 capability 接线之后执行——服务构造读取已接线的访问）。 */
   provideService?: (ctx: Context) => void;
@@ -248,6 +251,7 @@ function def(opts: BuiltinDefOptions): CordisBuiltinDef {
     if (opts.lifecycle) mountLifecycle(ctx, opts.lifecycle);
     if (opts.capability) mountWiring(ctx, opts.capability);
     if (opts.collabWiring) mountWiring(ctx, opts.collabWiring);
+    if (opts.needsCollab) mountWiring(ctx, () => ctx.collab.acquire());
     if (opts.vaultEventHandlers) mountVaultEvents(ctx, opts.vaultEventHandlers);
     opts.provideService?.(ctx);
   };
@@ -332,6 +336,7 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
     name: "画布",
     type: "panel",
     tagline: "有向图对话画布",
+    needsCollab: true,
     views: [
       {
         kind: "canvas",
@@ -468,6 +473,7 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
     name: "笔记",
     type: "panel",
     tagline: "Markdown 笔记编辑器",
+    needsCollab: true,
     views: [{ kind: "note", label: VIEW_LABELS.note, component: NoteView }],
     ui: [{ slot: "empty/note", component: NoteEmptyState, cardinality: "single" }],
     lifecycle: {
@@ -549,6 +555,7 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
     name: "表格",
     type: "panel",
     tagline: "多维表格编辑器",
+    needsCollab: true,
     views: [
       {
         kind: "table",
@@ -605,6 +612,7 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
     name: "协作房间",
     type: "panel",
     tagline: "协作在线用户面板",
+    needsCollab: true,
     views: [{ kind: "collabroom", label: VIEW_LABELS.collabroom, component: CollabRoomPanel }],
   }),
   def({

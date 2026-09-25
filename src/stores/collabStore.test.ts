@@ -266,3 +266,33 @@ describe("插件消息发送与本端身份", () => {
     });
   });
 });
+
+describe("插件协作意愿声明", () => {
+  it("retain 计数递增，释放递减；多次声明按计数合并", () => {
+    const releaseA = collab.useCollabStore.getState().retainPluginDemand();
+    const releaseB = collab.useCollabStore.getState().retainPluginDemand();
+    expect(collab.useCollabStore.getState().pluginDemand).toBe(2);
+    releaseA();
+    expect(collab.useCollabStore.getState().pluginDemand).toBe(1);
+    releaseB();
+    expect(collab.useCollabStore.getState().pluginDemand).toBe(0);
+  });
+
+  it("释放函数幂等：重复调用不产生负数或额外递减", () => {
+    const release = collab.useCollabStore.getState().retainPluginDemand();
+    expect(collab.useCollabStore.getState().pluginDemand).toBe(1);
+    release();
+    release();
+    expect(collab.useCollabStore.getState().pluginDemand).toBe(0);
+  });
+
+  it("dispose 只断连接不清意愿：插件仍在运行时声明保持有效", async () => {
+    await connectSpace();
+    const release = collab.useCollabStore.getState().retainPluginDemand();
+    collab.useCollabStore.getState().dispose();
+    expect(collab.useCollabStore.getState().connected).toBe(false);
+    expect(collab.useCollabStore.getState().pluginDemand).toBe(1);
+    release();
+    expect(collab.useCollabStore.getState().pluginDemand).toBe(0);
+  });
+});

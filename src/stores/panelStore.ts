@@ -30,7 +30,7 @@ import { useVaultStore } from "@/stores/vaultStore";
 import { useNotificationStore } from "@/stores/notificationStore";
 import * as kernelLifecycle from "@/utils/kernelLifecycle";
 import { activateContentIdentity, identityKeyOf } from "@/services/content/factory";
-import { collectTabs, findViewHost } from "@/utils/workspaceLayout";
+import { collectTabs } from "@/utils/workspaceLayout";
 import { pluginViewLabel } from "@/services/cordis/slots";
 import {
   cacheCanvasViewport as cacheCanvasViewportSvc,
@@ -206,6 +206,13 @@ function subscribeLayoutMirror(fn: () => void): () => void {
     ) {
       fn();
     }
+  });
+}
+
+/** 插件协作意愿变化 → 重评估本窗口是否维持协作连接（两条窗口初始化路径共用）。 */
+function subscribePluginDemand(): void {
+  useCollabStore.subscribe((s, prev) => {
+    if (s.pluginDemand !== prev.pluginDemand) usePanelStore.getState().syncCollabHost();
   });
 }
 
@@ -552,6 +559,7 @@ export const usePanelStore = create<PanelStore>((set, get) => {
         get().syncCollabHost();
       };
       subscribeLayoutMirror(syncFromUi);
+      subscribePluginDemand();
       syncFromUi();
       subscribeDragSession();
 
@@ -663,6 +671,7 @@ export const usePanelStore = create<PanelStore>((set, get) => {
         panelWired = true;
         followWindowMoves();
         subscribeLayoutMirror(syncFromUi);
+        subscribePluginDemand();
         subscribeDragSession();
         // 应答监听必须先于请求注册（listen 是异步 IPC 注册，先发请求会丢应答）
         contextListener = bus.onOpenFileChanged(applyOpenFileContext);
@@ -839,28 +848,19 @@ export const usePanelStore = create<PanelStore>((set, get) => {
         if (collab.connected) collab.dispose();
         return;
       }
-      const mirror = get().layoutMirror;
-      if (!mirror) return;
-      // 协作宿主 = 本窗口渲染了协作相关视图才连接（每个窗口独立持有连接）：
-      // 画布/笔记/表格显示远端 presence，协作房间面板本身也需要在线成员列表。
-      // 只统计「视图贡献存在」的相关视图（领域插件停用/卸载后其视图为降级占位，不算协作相关）
-      const candidates: ViewKind[] = ["canvas", "table", "note", "collabroom"];
-      const relevant = candidates.filter(
-        (v) => usePluginStore.getState().viewContribution(v) !== undefined,
-      );
-      const isHost = relevant.some(
-        (v) => findViewHost(mirror.activeTree, mirror.detachedWindows, v) === get().windowId,
-      );
-      if (isHost && !collab.connected) {
-        // 域协作接线随插件启停注册（cordis/builtins 的 collabWiring，pluginStore.spawn 时注册），
-        // 此处只需按当前布局是否承载协作视图连接宿主
-        collab.init({
-          enabled: true,
-          nickname: st.collabNickname,
-          color: st.collabColor,
-          deviceName: st.deviceName,
-        });
-      } else if (!isHost && collab.connected) {
+      // 协作宿主 = 本窗口有插件声明需要协作通道（每个窗口独立持有连接）。
+      // 协作需求宿主无从得知，一律由插件（内置领域插件与用户插件一视同仁）经
+      // ctx.collab.acquire 声明：计数在 collabStore，随插件启停变化，变化即重评估。
+      if (collab.pluginDemand > 0) {
+        if (!collab.connected) {
+          collab.init({
+            enabled: true,
+            nickname: st.collabNickname,
+            color: st.collabColor,
+            deviceName: st.deviceName,
+          });
+        }
+      } else if (collab.connected) {
         collab.dispose();
       }
     },
