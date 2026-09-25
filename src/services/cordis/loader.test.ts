@@ -154,6 +154,25 @@ describe("Cordis 挂载器", () => {
     expect(mountedPluginIds(k)).toEqual([]);
   });
 
+  it("unmountAll 带 skip：保活插件原地保留（服务不撤），其余全部卸载", async () => {
+    const k = makeKernel();
+    await mountPlugin(k, {
+      id: "builtin.keep",
+      apply: (ctx) => ctx.provide("loaderSvc", { ping: () => "pong" }),
+    });
+    await mountPlugin(k, {
+      id: "builtin.other",
+      apply: (ctx) => ctx.effect(() => registerViewSlot("loader-skip-other", "builtin.other", { label: "其他" })),
+    });
+    await unmountAll(k, new Set(["builtin.keep"]));
+    expect(mountedPluginIds(k)).toEqual(["builtin.keep"]);
+    expect(k.ctx.get("loaderSvc")).toBeDefined();
+    expect(resolveViewKind("loader-skip-other")).toBeUndefined();
+    await unmountAll(k);
+    expect(mountedPluginIds(k)).toEqual([]);
+    expect(k.ctx.get("loaderSvc")).toBeUndefined();
+  });
+
   it("可选依赖剥出：inject 值形如 { optional: true } 的条目缺失不阻断激活", async () => {
     const k = makeKernel();
     let applied = false;

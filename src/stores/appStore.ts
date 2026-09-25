@@ -501,10 +501,10 @@ export const useAppStore = create<AppState>((set, get) => ({
         console.error("加载领域仓库上下文失败", e);
       }
       // 插件平台：切仓库后全量重载（load 内部先卸载旧贡献，再按新仓库上下文重建 app+vault 插件）；
-      // 加载完成后再广播 vault:switch，保证订阅方是已就绪的后台插件。
+      // 加载完成后再广播 vault:switch，保证订阅方是已就绪的后台插件。声明切仓库保活的插件跳过重建。
       get().reportLoad("加载插件");
       try {
-        await usePluginStore.getState().load();
+        await usePluginStore.getState().load("vault-switch");
       } catch (e) {
         console.error("加载插件失败", e);
       }
@@ -622,7 +622,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       // 插件平台：全量重载（同 selectVault；加载完成后再广播 vault:switch）
       get().reportLoad("加载插件");
       try {
-        await usePluginStore.getState().load();
+        await usePluginStore.getState().load("vault-switch");
       } catch (e) {
         console.error("加载插件失败", e);
       }

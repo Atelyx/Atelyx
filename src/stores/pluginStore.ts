@@ -138,6 +138,11 @@ interface ViewProviderState {
   installed: boolean;
 }
 
+/** 全量重载的触发原因。`"vault-switch"` = 切仓库触发：声明「切仓库保活」（清单
+ *  `keepMountedOnVaultSwitch`）的插件跳过清场与重挂，运行时与托管进程原地保留；
+ *  其余触发原因（启动/插件变化/版本操作/安装）一律全量重建。 */
+export type PluginLoadReason = "vault-switch";
+
 interface PluginStoreState {
   /** 插件行（按 id；运行时阶段/审计与列表行合并）。 */
   plugins: Record<string, InstalledPlugin>;
@@ -156,7 +161,7 @@ interface PluginStoreState {
   /** 市场是否已加载过（UI 据此显示加载/空态）。 */
   marketLoaded: boolean;
   /** 加载插件行并按装配顺序拉起运行时。 */
-  load(): Promise<void>;
+  load(reason?: PluginLoadReason): Promise<void>;
   /** 从 GitHub 仓库安装（repo 为 `owner/repo` 市场引用或完整 git 地址；新装一律停用）。 */
   install(repo: string): Promise<PluginInstallResult>;
   /** 从本地目录安装（junction/符号链接实时引用，源目录改动即时生效）。 */
@@ -250,6 +255,22 @@ function toInstalled(row: PluginRow): InstalledPlugin {
     return { ...base, manifest: validated.manifest, phase: "failed", failure: { phase: "manifest", message: row.conflict } };
   }
   return { ...base, manifest: validated.manifest, phase: "pending" };
+}
+
+/** 切仓库保活集合：声明 keepMountedOnVaultSwitch 的健康启用行 ∩ 当前已挂载插件。
+ *  清单无效/冲突行（failed）与停用行不保活——停用行继续运行违背停用语义；未挂载的 id
+ *  没有可保留的运行时，自然不保活。 */
+function collectKeepMounted(
+  plugins: Record<string, InstalledPlugin>,
+  mounted: readonly string[],
+): Set<string> {
+  const keep = new Set<string>();
+  for (const id of mounted) {
+    const plugin = plugins[id];
+    if (!plugin || plugin.phase !== "pending" || !plugin.enabled) continue;
+    if (plugin.manifest.keepMountedOnVaultSwitch === true) keep.add(id);
+  }
+  return keep;
 }
 
 /** 停止单个插件的运行时（Cordis fiber 卸载，effects 全部撤销）+ 结束它启动的进程。
@@ -621,7 +642,7 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
   const mountIds = (): string[] =>
     mountOrder(composePlugins(DEFAULT_COMPOSITION, compositionPackages(get().plugins)));
 
-  const performLoad = async (): Promise<void> => {
+  const performLoad = async (reason?: PluginLoadReason): Promise<void> => {
     ensurePluginChangeListener();
     setAppPageOpener((pageId) => useAppStore.getState().openPluginPage(pageId));
     getKernel();
@@ -646,9 +667,15 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
         message: `以下仓库仍保留随仓库安装的插件目录（<仓库>/.atelyx/plugins），其中的插件不会加载：${legacyVaultPluginRoots.join("；")}。如需使用请以应用级重新安装，确认无用后可删除目录`,
       });
     }
-    await unmountAll(getKernel());
     const plugins: Record<string, InstalledPlugin> = {};
     for (const row of rows) plugins[row.id] = toInstalled(row);
+    // 切仓库保活：仅此原因豁免——声明保活的健康启用行且当前真实挂载的插件，清场/重挂/收尾全部跳过，
+    // 运行时、UI 贡献与托管进程原地保留（行 phase 直接置 active，运行时未动）。停用/卸载/更新/
+    // 安装等其余重载原因不豁免：插件行状态可能已变，全量重建才是对那些场景的正确响应。
+    const keepMounted =
+      reason === "vault-switch" ? collectKeepMounted(plugins, mountedPluginIds(getKernel())) : new Set<string>();
+    for (const id of keepMounted) plugins[id] = { ...plugins[id], phase: "active" };
+    await unmountAll(getKernel(), keepMounted);
     set({ plugins, initialized: true, stateError: stateError ?? null });
     if (stateError) {
       useNotificationStore.getState().notify({ level: "error", message: stateError });
@@ -659,6 +686,7 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
     const platform = detectPlatform();
     for (let i = 0; i < mounts.length; i++) {
       const id = mounts[i];
+      if (keepMounted.has(id)) continue;
       if (useAppStore.getState().entryLoading) {
         useAppStore.getState().reportLoad(
           `加载插件：${get().plugins[id]?.manifest.name ?? id}（${i + 1}/${total}）`,
@@ -695,10 +723,11 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
      * 全量重载：先按默认组合清单播种并取行（失败则旧状态原样保留），再卸载旧运行时与 UI 贡献，
      * 按装配顺序重建。语义 =「重置到当前插件行状态」，可在 boot / 切仓库 / 安装更新后安全重复调用。
      */
-    load: () => {
+    load: (reason?: PluginLoadReason) => {
       // 全量重载串行执行：跨窗口版本事件与当前窗口操作可能同时触发，排队可避免两个 load
-      // 在 unmount/mount 之间交错而留下孤儿 fiber。
-      const next = loadQueue.then(performLoad, performLoad);
+      // 在 unmount/mount 之间交错而留下孤儿 fiber。reason 显式透传（不走函数引用直传，
+      // 防止队列 rejection 值被误当参数）；保活判定在队列内执行时进行，集合取当时的挂载状态。
+      const next = loadQueue.then(() => performLoad(reason), () => performLoad(reason));
       loadQueue = next.catch(() => {});
       return next;
     },

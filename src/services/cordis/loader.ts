@@ -202,10 +202,12 @@ async function unmountNow(kernel: Kernel, id: string): Promise<void> {
 /** 卸载当前全部已挂载插件（重载清场；pluginStore.load 用）。
  *  逐个 id 走同一队列（与在途挂载同序，不会交错删掉刚建好的 fiber）；id 集合取调用时的
  *  「已挂载 ∪ 已入队」——不追调用之后新入队的挂载：那是并发的另一次 load 自己的职责，
- *  多轮追猎会把它刚挂上的 fiber 卸掉（行标 active 而运行时空缺）。 */
-export async function unmountAll(kernel: Kernel): Promise<void> {
+ *  多轮追猎会把它刚挂上的 fiber 卸掉（行标 active 而运行时空缺）。
+ *  `skip` 内的 id 原地保留（保活重载：插件声明跨仓库保活时跳过清场，ctx/托管进程不动）。 */
+export async function unmountAll(kernel: Kernel, skip?: ReadonlySet<string>): Promise<void> {
   const ids = new Set([...mountsOf(kernel).keys(), ...queueOf(kernel).keys()]);
   for (const id of ids) {
+    if (skip?.has(id)) continue;
     await unmountPlugin(kernel, id);
   }
 }
