@@ -193,6 +193,9 @@ pub fn run() {
             commands::external_fs::external_move_file,
             commands::external_fs::external_delete_file,
             commands::external_fs::external_delete_dir,
+            commands::external_fs::external_private_dir,
+            commands::external_fs::external_write_file_base64,
+            commands::external_fs::external_read_file_data_url,
             // 插件托管进程的启动与结束（ctx.shell.spawn 的后端 + 按 pid 结束进程树）
             commands::process::spawn_plugin_process,
             commands::process::kill_process_tree,
