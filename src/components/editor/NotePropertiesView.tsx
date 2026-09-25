@@ -13,6 +13,8 @@
  * - 数组项/徽章输入含中英文逗号自动拆分为多项提交（单值字段不拆）。
  * - 两段式添加：键名 Enter → 键名变胶囊、值输入自动聚焦 → 值 Enter 落盘；键名输入弹常用键名建议
  *   （COMMON_PROPERTY_KEYS 子串过滤、排除已有，↑↓ 选择）。
+ * 空态（无任何属性）由调用方选择：编辑器正文顶部传 hideWhenEmpty 整块不渲染（添加入口在「···」菜单，
+ * 经 openAddSignal 请求打开表单）；属性面板缺省显示「添加属性」入口。
  * - tags 输入候选：全仓库标签词汇表（tagCandidates，NoteEditor 按需加载），子串过滤、排除已有、
  *   ↑↓ 选择、Enter 选中提交、Esc 先关建议再取消。
  */
@@ -53,6 +55,11 @@ interface Props {
   tagCandidates: string[];
   /** tags 输入首次打开时触发加载（NoteEditor 调 vaultStore.loadVaultTags）。 */
   onRequestTagCandidates?: () => void;
+  /** 无属性且表单未开且无格式错误时整块不渲染（编辑器正文顶部：新笔记不常驻添加入口）；
+   *  缺省 = 显示「添加属性」入口（属性面板）。 */
+  hideWhenEmpty?: boolean;
+  /** 外部打开「添加属性」表单的请求序号：每次自增触发一次打开（「···」菜单入口）；0 = 无请求。 */
+  openAddSignal?: number;
 }
 
 /** 编辑槽位：键槽（part=key）或值槽（part=value，数组项带 index）。 */
@@ -374,6 +381,8 @@ export function NotePropertiesView({
   onOpenSource,
   tagCandidates,
   onRequestTagCandidates,
+  hideWhenEmpty,
+  openAddSignal,
 }: Props) {
   /** 折叠状态（默认展开；点击标题栏切换，仅内存态不持久化）。 */
   const [collapsed, setCollapsed] = useState(false);
@@ -426,6 +435,13 @@ export function NotePropertiesView({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [addOpen, addStep]);
+
+  /** 外部请求打开添加表单（序号变化 = 新的一次请求；0 = 无请求不触发）。同时展开折叠区，
+   *  保证折叠状态下经「···」菜单打开的表单可见。 */
+  useEffect(() => {
+    if (!openAddSignal) return;
+    openAddField();
+  }, [openAddSignal]);
 
   /** 线性槽位序：每个属性 = 键槽 + 值槽（数组每项一槽）。 */
   const buildSlots = (list: [string, unknown][]): Slot[] => {
@@ -549,6 +565,7 @@ export function NotePropertiesView({
   const openAddField = () => {
     setEditing(null);
     setAddingItem(null);
+    setCollapsed(false);
     setNewKey("");
     setNewValue("");
     setDuplicateKey(null);
@@ -968,6 +985,10 @@ export function NotePropertiesView({
   );
 
   const hasProps = entries.length > 0;
+
+  /** 空态隐藏（编辑器正文顶部）：无属性、表单未开且无格式错误时不渲染，新笔记顶部不留常驻入口。
+   *  所有 Hook 在上方，此处返回 null 仅省略渲染，组件保持挂载（openAddSignal 仍可打开表单）。 */
+  if (hideWhenEmpty && !hasProps && !addOpen && !parseError) return null;
 
   return (
     <div

@@ -104,6 +104,8 @@ export function NoteEditor({ file }: { file: string }) {
   const cmViewRef = useRef<EditorView | null>(null);
   /** 历史记录面板开关（「···」更多选项入口）。 */
   const [historyOpen, setHistoryOpen] = useState(false);
+  /** 「添加笔记属性」请求序号：菜单每次点击自增，NotePropertiesView 据此打开添加表单。 */
+  const [addPropsSeq, setAddPropsSeq] = useState(0);
   /** 剪贴板操作内联提示（底部状态条展示，自动清除；失败是罕见边界，不为此引入 toast 基建）。 */
   const [clipHint, setClipHint] = useState<string | null>(null);
   const clipHintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -441,14 +443,6 @@ export function NoteEditor({ file }: { file: string }) {
     };
   }, [file, noteName]);
 
-  /** 「添加笔记属性」= 一键插入 frontmatter 格式模板（`---\n---\n` 包裹区），用户自行填写；
-   * 已有 frontmatter 或格式错误时不重复插入。CRLF 文件用 \r\n 模板，防换行混用。 */
-  const addFrontmatterTemplate = () => {
-    if (!parsed.ok || parsed.fmPrefix !== "") return;
-    const eol = content.includes("\r\n") ? "\r\n" : "\n";
-    handleChange("---" + eol + "---" + eol + eol + content);
-  };
-
   /** 菜单打开时是否捕获到选区（第一级菜单形态：完整菜单 vs 仅粘贴）。 */
   const hasSelection = !!contentMenu?.text.trim();
 
@@ -534,10 +528,12 @@ export function NoteEditor({ file }: { file: string }) {
                 className="w-full flex items-center gap-2 px-2 py-1.5 text-xs hover:opacity-80"
                 style={{ color: "var(--text-primary)" }}
                 onClick={() => {
-                  addFrontmatterTemplate();
+                  // 源码模式下属性区不渲染：先切回实时预览，表单才有着落
+                  setSourceMode(false);
+                  setAddPropsSeq((n) => n + 1);
                   menu.close();
                 }}
-                title="在内容顶部插入 frontmatter 格式模板（---\\n---\\n），自行填写属性"
+                title="打开添加属性表单：填写属性名与值，保存时自动写入 frontmatter"
               >
                 {/* 图标列占位与「源码模式」对齐（Check 图标列同宽） */}
                 <span className="w-3.5 flex-shrink-0" />
@@ -579,7 +575,7 @@ export function NoteEditor({ file }: { file: string }) {
       {inlineTitle && !loadError && <NoteTitle file={file} />}
 
       {/* 属性区：胶囊行式融入正文顶部（可点击编辑）；渲染/实时预览编辑模式显示，源码模式由 textarea
-          显示 YAML 原文不重复显示；无 frontmatter 时也显示空态「添加属性」行（内联添加首个属性）；格式错误时显示红条 */}
+          显示 YAML 原文不重复显示；无属性时整块不渲染（添加首属性经「···」菜单打开表单）；格式错误时显示红条 */}
       {!sourceMode && !loadError && (
         <NotePropertiesView
           data={parsed.data}
@@ -588,6 +584,8 @@ export function NoteEditor({ file }: { file: string }) {
           onOpenSource={() => setSourceMode(true)}
           tagCandidates={tagCandidates}
           onRequestTagCandidates={requestTagCandidates}
+          hideWhenEmpty
+          openAddSignal={addPropsSeq}
         />
       )}
 
