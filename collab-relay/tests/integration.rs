@@ -88,6 +88,20 @@ impl Ctx {
     async fn get(&self, path: &str, token: Option<&str>, query: &[(&str, &str)]) -> (u16, Value) {
         self.send(reqwest::Method::GET, path, token, None, query).await
     }
+
+    /// GET 原始响应（页面等非 JSON 资源）：状态码 + content-type + 响应体文本。
+    async fn get_page(&self, path: &str) -> (u16, String, String) {
+        let resp = self.http.get(format!("{}{path}", self.base)).send().await.expect("请求失败");
+        let status = resp.status().as_u16();
+        let content_type = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        let body = resp.text().await.unwrap_or_default();
+        (status, content_type, body)
+    }
     async fn post(&self, path: &str, token: Option<&str>, body: Value) -> (u16, Value) {
         self.send(reqwest::Method::POST, path, token, Some(body), &[]).await
     }
@@ -337,19 +351,34 @@ async fn non_member_and_insufficient_role_rejected() {
 #[tokio::test]
 async fn invite_expiry_max_uses_and_revocation() {
     let dir = tempfile::tempdir().unwrap();
+    // 已过期邀请只能由时间流逝产生（签发校验挡住 0/负时长）：启动前预置一条过期记录。
+    // 过期判定在空间查找之前，无需预置对应空间与账号。
+    std::fs::write(
+        dir.path().join("invites.json"),
+        serde_json::to_string(&json!([{
+            "code": "expired-code",
+            "space_id": "space-seed",
+            "role": "editor",
+            "created_by": "seed",
+            "created_at": 0,
+            "expires_at": 1,
+            "max_uses": null,
+            "used_count": 0,
+        }]))
+        .unwrap(),
+    )
+    .unwrap();
     let ctx = Ctx::new(spawn_server(dir.path()).await);
     let a_token = register(&ctx, "alice").await;
     let (_, body) = ctx.post("/api/spaces", Some(&a_token), json!({ "name": "s" })).await;
     let space_id = body["spaceId"].as_str().unwrap().to_string();
 
     // 过期邀请 → 410
-    let (_, invite) = ctx
-        .post(&format!("/api/spaces/{space_id}/invites"), Some(&a_token), json!({ "role": "editor", "expiresInHours": -1 }))
-        .await;
-    let expired = invite["code"].as_str().unwrap().to_string();
     let c_token = register(&ctx, "carol").await;
-    let (status, _) = ctx.post("/api/invites/accept", Some(&c_token), json!({ "code": expired })).await;
-    assert_eq!(status, 410);
+    let (status, body) = ctx
+        .post("/api/invites/accept", Some(&c_token), json!({ "code": "expired-code" }))
+        .await;
+    assert_eq!(status, 410, "{body}");
 
     // 次数用尽 → 409
     let (_, invite) = ctx
@@ -2073,4 +2102,297 @@ async fn cors_preflight_and_cross_origin_requests_allowed() {
         Some("*"),
         "实际响应应携带 allow-origin"
     );
+}
+
+// ===== 内置管理台（WebUI）与服务器管理员 =====
+
+/// 管理台页面：`GET /` 返回完整 HTML（浏览器打开服务器地址即达）。
+#[tokio::test]
+async fn webui_page_served_at_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let (status, content_type, body) = ctx.get_page("/").await;
+    assert_eq!(status, 200);
+    assert!(content_type.starts_with("text/html"), "页面应按 HTML 返回：{content_type}");
+    assert!(body.contains("<html"), "应返回完整页面文档");
+}
+
+/// 管理员认定：用户数组首位（最早注册者）。status 登录即可见并回报 isAdmin；
+/// 管理员端点对首位放行、后来者与未登录拒绝。
+#[tokio::test]
+async fn first_registered_user_is_admin() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let a = register(&ctx, "alice").await;
+    let b = register(&ctx, "bob").await;
+
+    // status：登录可见；首个注册者即管理员
+    let (status, body) = ctx.get("/api/server/status", Some(&a), &[]).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["isAdmin"], true);
+    assert!(!body["version"].as_str().unwrap().is_empty());
+    assert!(body["startedAt"].is_number());
+    assert!(body["onlineConnections"].is_number(), "在线连接数字段应存在：{body}");
+    let (status, body) = ctx.get("/api/server/status", Some(&b), &[]).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["isAdmin"], false);
+    let (status, _) = ctx.get("/api/server/status", None, &[]).await;
+    assert_eq!(status, 401);
+
+    // 全服用户列表：首位可读，含管理员标注与会话/空间计数；后来者与未登录拒绝
+    let (status, users) = ctx.get("/api/admin/users", Some(&a), &[]).await;
+    assert_eq!(status, 200, "{users}");
+    let rows = users.as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().any(|u| u["username"] == "alice" && u["isAdmin"] == true));
+    assert!(rows.iter().any(|u| u["username"] == "bob" && u["isAdmin"] == false));
+    assert!(rows.iter().all(|u| u.get("passwordHash").is_none()), "不得泄露哈希字段：{rows:?}");
+    let (status, _) = ctx.get("/api/admin/users", Some(&b), &[]).await;
+    assert_eq!(status, 403);
+    let (status, _) = ctx.get("/api/admin/users", None, &[]).await;
+    assert_eq!(status, 401);
+}
+
+/// 管理员重置密码：参数与目标校验（过短 400 / 不存在 404 / 非管理员 403）；
+/// 重置联动吊销目标用户全部会话，新密码可登录、旧密码不可用。
+#[tokio::test]
+async fn admin_reset_password_revokes_all_sessions() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let a = register(&ctx, "alice").await;
+    let (status, reg) = ctx
+        .post("/api/auth/register", None, json!({ "username": "bob", "password": "pass-123456" }))
+        .await;
+    assert_eq!(status, 200);
+    let bob_id = reg["userId"].as_str().unwrap().to_string();
+    let b1 = reg["token"].as_str().unwrap().to_string();
+    let (status, login) = ctx
+        .post("/api/auth/login", None, json!({ "username": "bob", "password": "pass-123456", "deviceName": "第二台" }))
+        .await;
+    assert_eq!(status, 200);
+    let b2 = login["token"].as_str().unwrap().to_string();
+    for t in [&b1, &b2] {
+        let (status, _) = ctx.get("/api/auth/devices", Some(t), &[]).await;
+        assert_eq!(status, 200, "重置前会话应有效");
+    }
+
+    // 参数与权限校验
+    let (status, _) = ctx
+        .post(&format!("/api/admin/users/{bob_id}/reset-password"), Some(&a), json!({ "newPassword": "123" }))
+        .await;
+    assert_eq!(status, 400, "过短密码应 400");
+    let (status, _) = ctx
+        .post(&format!("/api/admin/users/{bob_id}/reset-password"), Some(&a), json!({ "newPassword": "x".repeat(129) }))
+        .await;
+    assert_eq!(status, 400, "过长密码应 400");
+    let (status, _) = ctx
+        .post("/api/admin/users/no-such-user/reset-password", Some(&a), json!({ "newPassword": "new-pass-888" }))
+        .await;
+    assert_eq!(status, 404, "目标不存在应 404");
+    let (status, _) = ctx
+        .post(&format!("/api/admin/users/{bob_id}/reset-password"), Some(&b1), json!({ "newPassword": "new-pass-888" }))
+        .await;
+    assert_eq!(status, 403, "非管理员应 403");
+
+    // 重置 → 全部旧会话失效，新密码可登录，旧密码不可用
+    let (status, body) = ctx
+        .post(&format!("/api/admin/users/{bob_id}/reset-password"), Some(&a), json!({ "newPassword": "new-pass-888" }))
+        .await;
+    assert_eq!(status, 200, "{body}");
+    for t in [&b1, &b2] {
+        let (status, _) = ctx.get("/api/auth/devices", Some(t), &[]).await;
+        assert_eq!(status, 401, "重置密码后旧会话应失效");
+    }
+    let (status, body) = ctx
+        .post("/api/auth/login", None, json!({ "username": "bob", "password": "new-pass-888" }))
+        .await;
+    assert_eq!(status, 200, "新密码应可登录：{body}");
+    let (status, _) = ctx.post("/api/auth/login", None, json!({ "username": "bob", "password": "pass-123456" })).await;
+    assert_eq!(status, 401, "旧密码应失效");
+}
+
+/// 管理员吊销某用户全部会话：返回吊销数，目标会话全部失效；非管理员 403、目标不存在 404。
+#[tokio::test]
+async fn admin_revoke_user_sessions() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let a = register(&ctx, "alice").await;
+    let (status, reg) = ctx
+        .post("/api/auth/register", None, json!({ "username": "bob", "password": "pass-123456" }))
+        .await;
+    assert_eq!(status, 200);
+    let bob_id = reg["userId"].as_str().unwrap().to_string();
+    let b1 = reg["token"].as_str().unwrap().to_string();
+    let (status, login) = ctx
+        .post("/api/auth/login", None, json!({ "username": "bob", "password": "pass-123456" }))
+        .await;
+    assert_eq!(status, 200);
+    let b2 = login["token"].as_str().unwrap().to_string();
+
+    let (status, _) = ctx.delete(&format!("/api/admin/users/{bob_id}/sessions"), Some(&b1)).await;
+    assert_eq!(status, 403, "非管理员应 403");
+    let (status, _) = ctx.delete("/api/admin/users/no-such-user/sessions", Some(&a)).await;
+    assert_eq!(status, 404, "目标不存在应 404");
+
+    let (status, body) = ctx.delete(&format!("/api/admin/users/{bob_id}/sessions"), Some(&a)).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["revoked"], 2, "应回报吊销数：{body}");
+    for t in [&b1, &b2] {
+        let (status, _) = ctx.get("/api/auth/devices", Some(t), &[]).await;
+        assert_eq!(status, 401, "吊销后原会话应失效");
+    }
+
+    // 二次吊销幂等：无可吊销会话，revoked = 0
+    let (status, body) = ctx.delete(&format!("/api/admin/users/{bob_id}/sessions"), Some(&a)).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["revoked"], 0, "二次吊销应幂等：{body}");
+}
+
+/// 管理员空间视图：全部空间 + 成员数 + 目录占用字节（含已写文件）；非管理员 403。
+#[tokio::test]
+async fn admin_spaces_list_all_with_sizes() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let space_id = setup_two_members(&ctx, "alice", "bob").await;
+    let a = login_as(&ctx, "alice").await;
+    let b = login_as(&ctx, "bob").await;
+    let (status, _) = ctx
+        .put(&format!("/api/spaces/{space_id}/file"), Some(&a), json!({ "path": "方案.md", "content": "# 方案\n正文内容" }))
+        .await;
+    assert_eq!(status, 200);
+
+    let (status, spaces) = ctx.get("/api/admin/spaces", Some(&a), &[]).await;
+    assert_eq!(status, 200, "{spaces}");
+    let rows = spaces.as_array().unwrap();
+    assert_eq!(rows.len(), 1, "管理员应看到全服空间：{rows:?}");
+    let row = &rows[0];
+    assert_eq!(row["spaceId"], space_id);
+    assert_eq!(row["memberCount"], 2);
+    assert_eq!(row["ownerUsername"], "alice");
+    assert!(row["sizeBytes"].as_u64().unwrap() > 0, "占用应含已写文件：{row}");
+    assert!(!row["rootPath"].as_str().unwrap().is_empty());
+
+    let (status, _) = ctx.get("/api/admin/spaces", Some(&b), &[]).await;
+    assert_eq!(status, 403, "非管理员应 403");
+    let (status, _) = ctx.get("/api/admin/spaces", None, &[]).await;
+    assert_eq!(status, 401);
+}
+
+/// 管理台页面安全响应头：CSP 最小集 + nosniff + DENY + no-referrer。
+#[tokio::test]
+async fn webui_page_sends_security_headers() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let resp = ctx.http.get(format!("{}/", ctx.base)).send().await.expect("请求失败");
+    let h = resp.headers();
+    let csp = h.get("content-security-policy").and_then(|v| v.to_str().ok()).unwrap_or_default();
+    assert!(csp.contains("default-src 'none'"), "CSP 应含 default-src 'none'：{csp}");
+    assert!(csp.contains("frame-ancestors 'none'"), "CSP 应禁被嵌入：{csp}");
+    assert!(csp.contains("connect-src 'self'"), "CSP 应限接口直连：{csp}");
+    assert_eq!(h.get("x-content-type-options").and_then(|v| v.to_str().ok()), Some("nosniff"));
+    assert_eq!(h.get("x-frame-options").and_then(|v| v.to_str().ok()), Some("DENY"));
+    assert_eq!(h.get("referrer-policy").and_then(|v| v.to_str().ok()), Some("no-referrer"));
+}
+
+/// 邀请码有效时长边界：0 / 负数 / 超上限 / 前端典型溢出量级 400，边界值 1 与 87600 放行。
+#[tokio::test]
+async fn invite_duration_range_validated() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let space_id = setup_two_members(&ctx, "alice", "bob").await;
+    let a = login_as(&ctx, "alice").await;
+    let url = format!("/api/spaces/{space_id}/invites");
+    for hours in [0i64, -5, 87_601, 9_000_000_000_000_000] {
+        let (status, body) = ctx.post(&url, Some(&a), json!({ "role": "viewer", "expiresInHours": hours })).await;
+        assert_eq!(status, 400, "非法时长 {hours} 应 400：{body}");
+    }
+    for hours in [1i64, 87_600] {
+        let (status, body) = ctx.post(&url, Some(&a), json!({ "role": "viewer", "expiresInHours": hours })).await;
+        assert_eq!(status, 200, "边界时长 {hours} 应放行：{body}");
+    }
+}
+
+/// 吊销会话踢实时连接：已建立的 `/ws/space` 连接在其所属会话被吊销后收到失效
+/// error 帧并被断开（管理台重置密码 / 吊销会话共用同一踢连接机制）。
+#[tokio::test]
+async fn session_revocation_kicks_live_ws_connections() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let space_id = setup_two_members(&ctx, "alice", "bob").await;
+    let a = login_as(&ctx, "alice").await; // 首位注册者 = 管理员
+    let b = login_as(&ctx, "bob").await;
+    let (_, users) = ctx.get("/api/admin/users", Some(&a), &[]).await;
+    let bob_id = users
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|u| u["username"] == "bob")
+        .expect("用户列表应含 bob")["userId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let mut b_ws = ws_connect(
+        &ctx.base,
+        "/ws/space",
+        json!({ "type": "hello", "spaceId": space_id, "token": b, "nickname": "鲍勃", "color": "#00ff00", "deviceName": "B机" }),
+    )
+    .await;
+    let ack = next_frame(&mut b_ws).await;
+    assert_eq!(ack["type"], "hello-ack", "{ack}");
+
+    // 吊销 bob 全部会话 → 在途 WS 连接收到失效帧后断开（先排掉入房触发的 peers 快照）
+    let (status, body) = ctx.delete(&format!("/api/admin/users/{bob_id}/sessions"), Some(&a)).await;
+    assert_eq!(status, 200, "{body}");
+    let mut kicked = None;
+    for _ in 0..10 {
+        let f = next_frame(&mut b_ws).await;
+        if f["type"] == "peers" {
+            // peers 快照不得携带所属会话 id（仅服务端踢连接用，不外泄）
+            assert!(
+                f["peers"].as_array().unwrap().iter().all(|p| p.get("sessionId").is_none()),
+                "peers 帧不应含 sessionId：{f}"
+            );
+            continue;
+        }
+        if f["type"] == "error" {
+            kicked = Some(f);
+            break;
+        }
+    }
+    let frame = kicked.expect("被吊销会话的连接应收到失效 error 帧");
+    assert!(frame["message"].as_str().unwrap().contains("登录状态已失效"), "{frame}");
+    let mut closed = false;
+    for _ in 0..3 {
+        match tokio::time::timeout(Duration::from_secs(5), b_ws.next()).await {
+            Ok(None) => { closed = true; break; }
+            Ok(Some(Ok(Message::Close(_)))) => { closed = true; break; }
+            Ok(Some(Ok(_))) => continue,
+            Ok(Some(Err(_))) => { closed = true; break; }
+            Err(_) => break,
+        }
+    }
+    assert!(closed, "被吊销会话的连接应被断开");
+
+    // 已吊销会话的令牌重连必须被拒（会话已删时鉴权层回「无效令牌」；鉴权与入房之间
+    // 被吊销的窄窗口由入房回查回「登录状态已失效」——两层取决于时序，只锁最终语义）
+    let mut rejoin = ws_connect(
+        &ctx.base,
+        "/ws/space",
+        json!({ "type": "hello", "spaceId": space_id, "token": b, "nickname": "鲍勃", "color": "#00ff00", "deviceName": "B机" }),
+    )
+    .await;
+    let first = next_frame(&mut rejoin).await;
+    assert_eq!(first["type"], "error", "已吊销会话重连应被拒：{first}");
+    let mut closed = false;
+    for _ in 0..3 {
+        match tokio::time::timeout(Duration::from_secs(5), rejoin.next()).await {
+            Ok(None) => { closed = true; break; }
+            Ok(Some(Ok(Message::Close(_)))) => { closed = true; break; }
+            Ok(Some(Ok(_))) => continue,
+            Ok(Some(Err(_))) => { closed = true; break; }
+            Err(_) => break,
+        }
+    }
+    assert!(closed, "已吊销会话的重连应被断开");
 }

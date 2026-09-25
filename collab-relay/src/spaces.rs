@@ -287,13 +287,18 @@ pub async fn remove_member(
 #[serde(rename_all = "camelCase")]
 pub struct CreateInviteBody {
     role: String,
-    /// 有效时长（小时）；缺省 = 长期有效。
+    /// 有效时长（小时）；缺省 = 长期有效。范围见 INVITE_MIN_HOURS / INVITE_MAX_HOURS。
     #[serde(default)]
     expires_in_hours: Option<i64>,
     /// 次数上限；缺省 = 不限。
     #[serde(default)]
     max_uses: Option<u32>,
 }
+
+/// 邀请码有效时长边界（小时）：下限挡 0 与负数（无意义时长），上限 10 年
+/// （同时保证秒数换算不溢出）。
+pub const INVITE_MIN_HOURS: i64 = 1;
+pub const INVITE_MAX_HOURS: i64 = 10 * 8760;
 
 pub async fn create_invite(
     State(state): State<ServerState>,
@@ -307,6 +312,14 @@ pub async fn create_invite(
     if let Some(n) = body.max_uses {
         if n == 0 {
             return Err(bad_request("次数上限至少为 1"));
+        }
+    }
+    if let Some(h) = body.expires_in_hours {
+        if !(INVITE_MIN_HOURS..=INVITE_MAX_HOURS).contains(&h) {
+            return Err(bad_request(&format!(
+                "有效时长须在 {}–{} 小时之间",
+                INVITE_MIN_HOURS, INVITE_MAX_HOURS
+            )));
         }
     }
     let invite = crate::state::Invite {
