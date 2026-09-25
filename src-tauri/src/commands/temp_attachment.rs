@@ -18,7 +18,7 @@ use base64::Engine;
 use serde::Serialize;
 use tauri::State;
 
-use crate::vault::{atomic_write, safe_join, VaultState};
+use crate::vault::{atomic_write, atomic_write_bytes, safe_join, VaultState};
 
 /// 未入库临时附件的目录（相对仓库根）。
 pub const TEMP_ATTACHMENT_DIR: &str = ".atelyx/temp";
@@ -80,22 +80,6 @@ pub fn write_temp_attachment(
     ensure_canvas_marker(&root, &canvas_id);
     atomic_write_bytes(&path, &bytes)?;
     Ok(rel)
-}
-
-/// 原子写二进制（`atomic_write` 面向文本；附件字节走同一套 tmp → rename + fsync 语义）。
-fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let tmp = PathBuf::from(format!("{}.{}.tmp", path.display(), nanoid::nanoid!()));
-    if let Some(parent) = tmp.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("创建附件目录失败：{e}"))?;
-    }
-    let written = std::fs::write(&tmp, bytes).and_then(|_| std::fs::rename(&tmp, path));
-    match written {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let _ = std::fs::remove_file(&tmp);
-            Err(format!("写入临时附件失败：{e}"))
-        }
-    }
 }
 
 /// 临时文件名净化：只保留叶子名（去掉调用方可能带的路径段），替换分隔符与非法字符。

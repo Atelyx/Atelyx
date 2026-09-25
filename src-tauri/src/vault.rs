@@ -1568,7 +1568,13 @@ pub fn list_chat_sessions_file(root: &Path) -> Result<Vec<ChatSessionRow>, Strin
 /// - 任一步失败都清理临时文件，避免残留。
 /// pub(crate)：commands/global.rs 的全局配置/UI 状态写盘复用（保证全项目同一 durability 语义）。
 pub(crate) fn atomic_write(path: &Path, content: &str) -> Result<(), String> {
-    let tmp = write_tmp(path, content)?;
+    atomic_write_bytes(path, content.as_bytes())
+}
+
+/// 原子写字节（atomic_write 的字节形态，同一套 tmp → rename + fsync 语义）。
+/// pub(crate)：附件二进制与插件外部文件命令的写盘复用（保证全项目同一 durability 语义）。
+pub(crate) fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let tmp = write_tmp(path, bytes)?;
     std::fs::rename(&tmp, path).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
         format!("写入失败：{e}")
@@ -1581,7 +1587,7 @@ pub(crate) fn atomic_write(path: &Path, content: &str) -> Result<(), String> {
 static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// 写临时文件（建父目录 → 写入 → fsync），返回 tmp 路径；写入期任一步失败即清理 tmp。
-fn write_tmp(path: &Path, content: &str) -> Result<PathBuf, String> {
+fn write_tmp(path: &Path, content: &[u8]) -> Result<PathBuf, String> {
     use std::io::Write;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -1594,7 +1600,7 @@ fn write_tmp(path: &Path, content: &str) -> Result<PathBuf, String> {
     let tmp = PathBuf::from(format!("{}.{}.{}.tmp", path.display(), nanos, seq));
     let write = || -> std::io::Result<()> {
         let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(content.as_bytes())?;
+        f.write_all(content)?;
         f.sync_all()
     };
     match write() {
@@ -2567,7 +2573,7 @@ pub(crate) fn flush_md_updates(root: &Path, updates: &[(String, String)]) -> Res
                 return Err(e);
             }
         };
-        match write_tmp(&target, content) {
+        match write_tmp(&target, content.as_bytes()) {
             Ok(tmp) => staged.push((tmp, target)),
             Err(e) => {
                 discard(&staged);
