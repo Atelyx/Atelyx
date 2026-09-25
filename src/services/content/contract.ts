@@ -56,6 +56,8 @@ export interface ContentBackend {
   readFileWindow(file: string, opts?: { offset?: number; limit?: number }): Promise<ReadWindowResult>;
   /** 读 .md 笔记正文。 */
   readNote(file: string): Promise<string>;
+  /** 文件是否存在（元数据查询不读内容，不限文件类型；文件或所在目录已删除 = false，路径非法抛错）。 */
+  fileExists(file: string): Promise<boolean>;
   /** 读 .atlx 画布（磁盘格式）。 */
   readCanvas(file: string): Promise<CanvasFile>;
   /** 读 .atb 表格（行已归一化到内存形态）。 */

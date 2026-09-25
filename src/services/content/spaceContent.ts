@@ -854,6 +854,8 @@ export function createSpaceContentBackend(serverUrl: string, spaceId: string): C
       };
     },
     readNote: readFileContent,
+    // 存在性校验复用 404 判定（读全文换取零新端点；被引用文件体量小，代价可忽略）
+    fileExists,
 
     // ===== 读（画布/表格/附件）=====
     async readCanvas(file: string): Promise<CanvasFile> {

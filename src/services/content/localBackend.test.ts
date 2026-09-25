@@ -71,6 +71,7 @@ const MAPPING: Array<{
     args: { file: "a.txt", offset: 3, limit: 7 },
   },
   { name: "readNote", call: (b) => b.readNote("a.md"), cmd: "read_note", args: { file: "a.md" }, returns: "正文" },
+  { name: "fileExists", call: (b) => b.fileExists("a.md"), cmd: "file_exists", args: { file: "a.md" }, returns: true },
   {
     name: "readCanvas",
     call: (b) => b.readCanvas("c.atlx"),

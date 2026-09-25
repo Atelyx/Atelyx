@@ -109,6 +109,11 @@ export async function readNote(file: string): Promise<string> {
   return getActiveContentBackend().readNote(file);
 }
 
+/** 查询文件是否存在（元数据查询不读内容，不限文件类型；文件或所在目录已删除 = false）。 */
+export async function fileExists(file: string): Promise<boolean> {
+  return getActiveContentBackend().fileExists(file);
+}
+
 /** 查询反链（`[[笔记名]]` 或 `[label](基于仓库的路径)` 两种写法；本地仓库由 Rust 侧索引缓存 + 指纹增量刷新）。 */
 export async function scanWikiBacklinks(
   noteName: string,

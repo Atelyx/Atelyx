@@ -122,6 +122,8 @@ export function createSpaceStubBackend() {
       state.reads += 1;
       return Promise.resolve(readText(file));
     },
+    // 元数据查询不计入 reads（reads 表达内容读，既有断言按内容读计数）
+    fileExists: (file) => Promise.resolve(files.has(file)),
     readCanvas: (file) => {
       const canvas = readEntity<CanvasFile>(file, "画布");
       if (canvas.schema !== CANVAS_SCHEMA) throw new Error(`画布 schema 不匹配：${file}`);

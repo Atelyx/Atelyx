@@ -43,6 +43,7 @@ export const localBackend: ContentBackend = {
       limit: opts?.limit ?? READ_WINDOW_DEFAULT_LINES,
     }),
   readNote: (file) => invoke<string>("read_note", { file }),
+  fileExists: (file) => invoke<boolean>("file_exists", { file }),
   readCanvas: (file) => invoke<CanvasFile>("read_canvas_vault", { file }),
   async readTable(file) {
     const t = await invoke<TableFile>("read_table_vault", { file });

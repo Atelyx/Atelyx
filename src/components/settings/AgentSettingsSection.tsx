@@ -174,6 +174,12 @@ export function AgentSettingsSection() {
 
   const selected = agents.find((a) => a.id === selectedId) ?? null;
 
+  // 进入 Agent 页时清理失效提示词：注册列表与 Agent 引用中指向已删除笔记的路径
+  // （幂等自愈动作，action 内部处理会话目标跳过 / 校验与写盘失败降级，不阻塞面板渲染）
+  useEffect(() => {
+    void useSettingsStore.getState().pruneMissingPromptNotes();
+  }, []);
+
   // 选中变化/外部删除 → 同步名称草稿；选中项已被删除/不存在时清空选择
   useEffect(() => {
     if (selected) {

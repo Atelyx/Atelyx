@@ -174,6 +174,33 @@ describe("读/写/删透传与错误传播", () => {
   });
 });
 
+describe("fileExists（存在性校验）", () => {
+  /** 固定状态码回包：fileExists 按 404 判定缺失，需状态码可控（成功/500 分支同款）。 */
+  function setupFetchStatus(status: number, body: unknown) {
+    const fn = async () =>
+      new Response(JSON.stringify(body), {
+        status,
+        headers: { "Content-Type": "application/json" },
+      });
+    vi.stubGlobal("fetch", fn);
+  }
+
+  it("文件存在（200）返回 true", async () => {
+    setupFetchStatus(200, { content: "正文", updatedAt: 1 });
+    await expect(backend().fileExists("笔记/a.md")).resolves.toBe(true);
+  });
+
+  it("404（文件已删除）返回 false", async () => {
+    setupFetchStatus(404, { error: "文件不存在" });
+    await expect(backend().fileExists("gone.md")).resolves.toBe(false);
+  });
+
+  it("其他错误如实抛出（不确定缺失不得当缺失清理）", async () => {
+    setupFetchStatus(500, { error: "服务端故障" });
+    await expect(backend().fileExists("a.md")).rejects.toThrow();
+  });
+});
+
 describe("画布/表格写路径与增量补丁", () => {
   /** 固定状态码回包：错误分支测试用（成功分支走 setupFetch）。 */
   function setupFetchStatus(status: number, body: unknown) {

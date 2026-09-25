@@ -10,7 +10,7 @@ import {
   writePromptNotes,
   readPromptNotes,
 } from "@/services/metadata";
-import { readNote } from "@/services/vault";
+import { fileExists, readNote } from "@/services/vault";
 import { fetchProviderModels } from "@/services/ai/client";
 import { buildAgentTools } from "@/services/ai/tools";
 import { getHostname, readGlobalConfig, updateGlobalConfig } from "@/services/global";
@@ -213,6 +213,11 @@ interface SettingsState {
   remapAgentPromptNote: (oldFile: string, newFile: string) => Promise<void>;
   /** 文件夹重命名后同步 Agent 引用的提示词笔记路径前缀（写 .atelyx/agents.json）。 */
   remapAgentPromptNotesByDir: (oldDir: string, newDir: string) => Promise<void>;
+  /**
+   * 清理失效提示词（进入 Agent 设置页时触发）：注册列表与 Agent 引用中指向已不存在笔记的路径一并移除。
+   * 仅激活仓库生效（非激活目标的编辑会话跳过）；存在性按内容面元数据查询判定，查询失败视为存在。
+   */
+  pruneMissingPromptNotes: () => Promise<void>;
   /** 设置文件夹图标颜色（dir = 相对仓库根路径，color = hex 色；undefined = 清除还原默认，写 .atelyx/folder-colors.json）。 */
   setFolderColor: (dir: string, color: string | undefined) => Promise<void>;
   /** 文件夹重命名/移动后同步颜色键（`oldDir/` 前缀 → `newDir/`，写 .atelyx/folder-colors.json）。 */
@@ -614,6 +619,9 @@ export interface VaultSettingsSession {
 
 /** 会话自增号（关闭重开仍是同一目标的旧异步结果不得装进新会话）。 */
 let settingsSessionSeq = 0;
+
+/** 失效提示词清理的在途标记（重入守卫：幂等清理并发跑只会重复写同值）。 */
+let pruningPromptNotes = false;
 
 /** 激活仓库的目标身份（未进仓 = null）。未激活身份（启动早期/测试）按 vaultRoot 兜底。 */
 function activeSettingsTarget(): VaultSettingsTarget | null {
@@ -1826,6 +1834,71 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       return;
     }
     set({ agents: next });
+  },
+
+  /**
+   * 清理失效提示词：注册列表与 Agent 引用中指向已不存在笔记的路径一并移除（进入 Agent 设置页时触发）。
+   * 口径：
+   * - 仅激活仓库：非激活目标的编辑会话没有跨仓库读笔记的能力，也没有提示词标记的修改入口，直接跳过；
+   * - 只认磁盘事实：存在性走内容面元数据查询，查询失败的路径视为存在（不确定不删，防网络抖动误清团队标记）；
+   * - 写盘前重取最新内存态应用缺失集合（校验在途期间的其他增删不被本次清理覆盖），写成功才更新内存；
+   * - Agent 引用清理与注册列表清理对称（同重命名同步的组合），写失败不回滚注册列表——下次进入再收敛。
+   */
+  pruneMissingPromptNotes: async () => {
+    if (editingSession()) return;
+    if (pruningPromptNotes) return;
+    pruningPromptNotes = true;
+    try {
+      const s = get();
+      // Agent 引用路径可能不在注册列表（注册被注销后引用仍在），一并纳入校验
+      const referenced = s.agents
+        .map((a) => a.systemPromptFile)
+        .filter((f): f is string => !!f && !s.promptNotes.includes(f));
+      const paths = [...new Set([...s.promptNotes, ...referenced])];
+      if (paths.length === 0) return;
+      const checks = await Promise.all(
+        paths.map(async (file) => {
+          try {
+            return await fileExists(file);
+          } catch (e) {
+            console.warn("提示词笔记存在性校验失败，本次跳过清理", file, e);
+            return true;
+          }
+        }),
+      );
+      const missing = new Set(paths.filter((_, i) => !checks[i]));
+      if (missing.size === 0) return;
+      // 写盘前重取最新态应用缺失集合：校验在途期间的其他增删不被本次清理覆盖
+      const latestNotes = get().promptNotes;
+      const nextNotes = latestNotes.filter((f) => !missing.has(f));
+      const agents = get().agents;
+      const nextAgents = agents.map((a) =>
+        a.systemPromptFile && missing.has(a.systemPromptFile)
+          ? { ...a, systemPromptFile: undefined }
+          : a,
+      );
+      const agentsCleared = nextAgents.filter((a, i) => a !== agents[i]).length;
+      const notesCleared = latestNotes.length - nextNotes.length;
+      if (notesCleared === 0 && agentsCleared === 0) return;
+      if (notesCleared > 0) {
+        try {
+          await writePromptNotes(nextNotes);
+        } catch (e) {
+          console.error("清理失效提示词标记失败", e);
+          return;
+        }
+        set({ promptNotes: nextNotes });
+      }
+      // Agent 引用清理与注册列表清理对称（同重命名同步的组合）；
+      // 引用写失败不回滚注册列表——已清的标记保持清理，残留引用下次进入再收敛
+      if (agentsCleared > 0 && !(await writeEditingAgents(nextAgents))) return;
+      const parts: string[] = [];
+      if (notesCleared > 0) parts.push(`已清理 ${notesCleared} 条失效提示词标记`);
+      if (agentsCleared > 0) parts.push(`移除 ${agentsCleared} 个 Agent 的提示词引用`);
+      useNotificationStore.getState().notify({ level: "info", message: `${parts.join("，")}` });
+    } finally {
+      pruningPromptNotes = false;
+    }
   },
 
   /** 设文件夹图标颜色（dir = 相对仓库根路径，color = hex 色；undefined = 清除还原默认，写 .atelyx/folder-colors.json）。
