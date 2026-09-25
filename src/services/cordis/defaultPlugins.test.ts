@@ -7,9 +7,14 @@
  * - 用户插件经 priority 替换默认实现（作者侧声明，用户只需安装 + 启用）
  * - 对话能力行与面板行分离：能力行注册运行时并提供 ctx.chat，面板行只贡献视图
  */
-import { describe, expect, it, afterEach } from "vitest";
+import { describe, expect, it, afterEach, beforeEach } from "vitest";
 import type { Context } from "@atelyx/cordis";
-import { setPluginCanvasAccess, setPluginTableRuntimeAccess } from "./access";
+import {
+  setPluginCanvasAccess,
+  setPluginCollabAccess,
+  setPluginTableRuntimeAccess,
+  type PluginCollabAccess,
+} from "./access";
 import { CORDIS_BUILTIN_DEFS, DEFAULT_COMPOSITION } from "@/components/plugins/cordis/builtins";
 import { createKernel, type Kernel } from "./kernel";
 import { mountPlugin, mountedPluginIds, unmountAll } from "./loader";
@@ -39,6 +44,20 @@ async function mountAll(kernel: Kernel, all: CompositionPackage[] = packages) {
 
 let kernel: Kernel | null = null;
 
+/** 宿主协作接线替身（= pluginStore.ensureCollabRuntimeAccess 的测试形态）：
+ *  画布/笔记/表格/协作房间的 apply 期声明协作意愿，access 未接线时 apply 直接失败。 */
+const collabAccessStub: PluginCollabAccess = {
+  peers: () => [],
+  setPresence: () => {},
+  sendMessage: () => false,
+  myPeer: () => ({ peerId: null, nickname: "", color: "", deviceName: "" }),
+  acquire: () => () => {},
+};
+
+beforeEach(() => {
+  setPluginCollabAccess(collabAccessStub);
+});
+
 afterEach(async () => {
   if (kernel) {
     await unmountAll(kernel);
@@ -47,6 +66,7 @@ afterEach(async () => {
   }
   setPluginCanvasAccess(null);
   setPluginTableRuntimeAccess(null);
+  setPluginCollabAccess(null);
 });
 
 describe("随应用分发插件挂载集成", () => {
