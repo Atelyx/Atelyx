@@ -10,7 +10,7 @@ export const PLUGIN_SERVICE_LABELS: Record<string, string> = {
   app: "宿主信息",
   shell: "执行外部程序",
   vault: "仓库文件读写",
-  fs: "仓库外授权目录读写",
+  fs: "仓库外文件与私有目录读写",
   dialog: "系统对话框",
   clipboard: "剪贴板读写",
   window: "窗口控制",
@@ -62,5 +62,8 @@ export const PLUGIN_SENSITIVE_METHODS: Readonly<Record<string, ReadonlySet<strin
     "moveFile",
     "deleteFile",
     "deleteDir",
+    "privateDir",
+    "writeFileBase64",
+    "readFileDataUrl",
   ]),
 };

@@ -216,8 +216,9 @@ export interface VaultService {
 }
 
 /** 仓库外授权目录文件读写服务（外部文件服务面）：方法面与 `vault` 镜像，但入参是绝对路径，
- *  须落在该插件经用户批准的授权目录内（Rust 侧实时校验，撤销立即失效）。
- *  插件代码不传插件 id——宿主按当前 fiber 绑定（与 state/storage 同机制）。
+ *  须落在该插件经用户批准的授权目录或其私有文件目录内（Rust 侧实时校验，撤销立即失效）。
+ *  私有目录（`privateDir()`）不须授权即可读写，随插件卸载清除、更新保留——插件生成文件的
+ *  自有落点。插件代码不传插件 id——宿主按当前 fiber 绑定（与 state/storage 同机制）。
  *  模型工具（AI 文件工具）走 `vault`，结构性够不到本面。 */
 export interface FsService {
   readFile(path: string): Promise<string>;
@@ -231,6 +232,12 @@ export interface FsService {
     path: string,
     force?: boolean,
   ): Promise<{ ok: boolean; summary: string; needsConfirm?: boolean; itemCount?: number }>;
+  /** 本插件私有文件目录的绝对路径（不存在则创建）。 */
+  privateDir(): Promise<string>;
+  /** 字节形态写文件（base64 进出；原子写，mime 无关——字节原样落盘）。 */
+  writeFileBase64(path: string, base64Data: string): Promise<{ ok: boolean; summary: string }>;
+  /** 读文件为 dataURL（mime 按扩展名推断，未知扩展名 = application/octet-stream）。 */
+  readFileDataUrl(path: string): Promise<string>;
 }
 
 /** 系统对话框服务（用户取消返回 null）。 */

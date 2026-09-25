@@ -26,9 +26,12 @@ import {
   externalDeleteFile,
   externalListDir,
   externalMoveFile,
+  externalPrivateDir,
   externalReadFile,
+  externalReadFileDataUrl,
   externalRenameFile,
   externalWriteFile,
+  externalWriteFileBase64,
 } from "@/services/externalFs";
 import { registerPluginTools, unregisterPluginTools } from "@/services/ai/tools";
 import {
@@ -451,6 +454,18 @@ export function createKernel(): Kernel {
         needsConfirm: r.needsConfirm,
         itemCount: r.itemCount,
       };
+    },
+    privateDir(this: FsServiceInstance) {
+      return externalPrivateDir(requireCallerPluginId(this.ctx));
+    },
+    writeFileBase64(this: FsServiceInstance, path, base64Data) {
+      // 非 async：归属校验同步抛出（非插件上下文立刻拒绝，不落成静默 rejection）
+      return externalWriteFileBase64(requireCallerPluginId(this.ctx), path, base64Data).then(
+        () => ({ ok: true, summary: `已写入「${path}」` }),
+      );
+    },
+    readFileDataUrl(this: FsServiceInstance, path) {
+      return externalReadFileDataUrl(requireCallerPluginId(this.ctx), path);
     },
   };
   Object.defineProperty(fs, symbols.tracker, { value: { property: "ctx" } });

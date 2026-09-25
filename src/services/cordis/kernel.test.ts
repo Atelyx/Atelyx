@@ -23,6 +23,11 @@ import {
   pluginKvDelete,
   pluginKvWrite,
 } from "@/services/plugins";
+import {
+  externalPrivateDir,
+  externalWriteFileBase64,
+  externalReadFileDataUrl,
+} from "@/services/externalFs";
 
 vi.mock("@/services/plugins", () => ({
   pluginReadState: vi.fn(async () => ({ saved: true })),
@@ -31,6 +36,20 @@ vi.mock("@/services/plugins", () => ({
   pluginKvSet: vi.fn(async () => {}),
   pluginKvDelete: vi.fn(async () => {}),
   pluginKvWrite: vi.fn(async () => {}),
+}));
+
+vi.mock("@/services/externalFs", () => ({
+  externalReadFile: vi.fn(async () => ""),
+  externalWriteFile: vi.fn(async () => {}),
+  externalListDir: vi.fn(async () => ({ entries: [], total: 0, capped: false })),
+  externalCreateFolder: vi.fn(async () => {}),
+  externalRenameFile: vi.fn(async () => ""),
+  externalMoveFile: vi.fn(async () => ""),
+  externalDeleteFile: vi.fn(async () => {}),
+  externalDeleteDir: vi.fn(async () => ({ deleted: true, needsConfirm: false, itemCount: 0 })),
+  externalPrivateDir: vi.fn(async () => "C:/plugins/data/files"),
+  externalWriteFileBase64: vi.fn(async () => {}),
+  externalReadFileDataUrl: vi.fn(async () => "data:image/png;base64,AA=="),
 }));
 
 afterEach(() => {
@@ -289,5 +308,55 @@ describe("state/storage 按调用方插件隔离", () => {
     expect(() => kernel!.ctx.storage.clear()).toThrow("只能在插件上下文中使用");
     expect(pluginReadState).not.toHaveBeenCalled();
     expect(pluginKvWrite).not.toHaveBeenCalled();
+  });
+});
+
+describe("fs 服务按调用方插件绑定", () => {
+  let kernel: Kernel | null = null;
+
+  afterEach(async () => {
+    if (kernel) {
+      await unmountAll(kernel);
+      kernel.dispose();
+      kernel = null;
+    }
+    vi.mocked(externalPrivateDir).mockClear();
+    vi.mocked(externalWriteFileBase64).mockClear();
+    vi.mocked(externalReadFileDataUrl).mockClear();
+  });
+
+  it("插件内 ctx.fs 私有目录与二进制方法带调用方插件 id 调用底层命令（writeFileBase64 包 { ok, summary }）", async () => {
+    kernel = createKernel();
+    const pending: Promise<unknown>[] = [];
+    let privateDir: unknown;
+    let writeResult: unknown;
+    let dataUrl: unknown;
+    await mountPlugin(kernel, {
+      id: "com.test.fs",
+      apply: (ctx) => {
+        pending.push(ctx.fs.privateDir().then((p) => (privateDir = p)));
+        pending.push(
+          ctx.fs.writeFileBase64("E:/p/img.png", "QUJD").then((r) => {
+            writeResult = r;
+          }),
+        );
+        pending.push(ctx.fs.readFileDataUrl("E:/p/img.png").then((u) => (dataUrl = u)));
+      },
+    });
+    await Promise.all(pending);
+    expect(externalPrivateDir).toHaveBeenCalledWith("com.test.fs");
+    expect(externalWriteFileBase64).toHaveBeenCalledWith("com.test.fs", "E:/p/img.png", "QUJD");
+    expect(externalReadFileDataUrl).toHaveBeenCalledWith("com.test.fs", "E:/p/img.png");
+    expect(privateDir).toBe("C:/plugins/data/files");
+    expect(writeResult).toEqual({ ok: true, summary: "已写入「E:/p/img.png」" });
+    expect(dataUrl).toBe("data:image/png;base64,AA==");
+  });
+
+  it("非插件上下文访问 fs 直接拒绝（归属 id 推导不到）", async () => {
+    kernel = createKernel();
+    expect(() => kernel!.ctx.fs.privateDir()).toThrow("只能在插件上下文中使用");
+    expect(() => kernel!.ctx.fs.writeFileBase64("E:/x", "QQ==")).toThrow("只能在插件上下文中使用");
+    expect(() => kernel!.ctx.fs.readFileDataUrl("E:/x")).toThrow("只能在插件上下文中使用");
+    expect(externalPrivateDir).not.toHaveBeenCalled();
   });
 });

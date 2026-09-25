@@ -52,3 +52,19 @@ export interface ExternalDeleteDirResult {
 export function externalDeleteDir(pluginId: string, path: string, force: boolean): Promise<ExternalDeleteDirResult> {
   return invoke<ExternalDeleteDirResult>("external_delete_dir", { pluginId, path, force });
 }
+
+/** 返回当前插件的私有文件目录绝对路径（不存在则创建）；私有目录在插件 data/files 下，
+ *  授权目录之外无条件可达，其余 fs 命令把它并入安全根即可读写。 */
+export function externalPrivateDir(pluginId: string): Promise<string> {
+  return invoke<string>("external_private_dir", { pluginId });
+}
+
+/** 写仓库外授权文件（字节形态，base64 进出；原子写 + 补齐授权根内缺失的父目录）。 */
+export function externalWriteFileBase64(pluginId: string, path: string, base64Data: string): Promise<void> {
+  return invoke("external_write_file_base64", { pluginId, path, base64Data });
+}
+
+/** 读仓库外授权文件为 dataURL（mime 按扩展名推断，未知扩展名 = application/octet-stream）。 */
+export function externalReadFileDataUrl(pluginId: string, path: string): Promise<string> {
+  return invoke<string>("external_read_file_data_url", { pluginId, path });
+}
