@@ -88,6 +88,10 @@ export interface PluginManifest {
   /** 披露 + 授权依据：将访问的仓库外目录（绝对路径或以 `~/` 开头，`~` 由宿主解析为用户主目录）。
    *  仅披露与授权依据，无运行时门槛；用户逐目录批准后插件才可经 `ctx.fs` 访问。 */
   declaredDirs?: string[];
+  /** 切仓库保活声明（默认关闭）：声明后切仓库触发的插件全量重载跳过本插件——运行时、
+   *  UI 贡献与托管进程原地保留，apply 不重跑（仓库感知走 vault:switch 事件）。
+   *  停用 / 卸载 / 更新 / 跨窗口变化仍正常重建并结束进程。 */
+  keepMountedOnVaultSwitch?: boolean;
   /** 权限说明：服务名 → 一句理由（安装/详情展示）。 */
   permissions?: Record<string, string>;
   /** 声明式主题条目（type 含 theme 时通常携带；必须 ≥1；id 插件内唯一）。 */

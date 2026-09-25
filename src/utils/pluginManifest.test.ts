@@ -227,6 +227,27 @@ describe("validatePluginManifest", () => {
       }).ok,
     ).toBe(false);
   });
+  it("keepMountedOnVaultSwitch 归一化：true 保留、缺省不出现；非布尔拒绝", () => {
+    const flagged = validatePluginManifest({
+      ...validManifest(),
+      atelyx: { ...(validManifest().atelyx as Record<string, unknown>), keepMountedOnVaultSwitch: true },
+    });
+    expect(flagged.ok).toBe(true);
+    if (!flagged.ok) return;
+    expect(flagged.manifest.keepMountedOnVaultSwitch).toBe(true);
+
+    const absent = validatePluginManifest(validManifest());
+    expect(absent.ok).toBe(true);
+    if (!absent.ok) return;
+    expect(absent.manifest.keepMountedOnVaultSwitch).toBeUndefined();
+
+    expect(
+      validatePluginManifest({
+        ...validManifest(),
+        atelyx: { ...(validManifest().atelyx as Record<string, unknown>), keepMountedOnVaultSwitch: 1 },
+      }).ok,
+    ).toBe(false);
+  });
   it("保留 declares/permissions/platforms/hostApiVersion", () => {
     const result = validatePluginManifest({
       ...validManifest(),

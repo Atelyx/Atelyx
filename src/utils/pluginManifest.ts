@@ -159,6 +159,11 @@ export function validatePluginManifest(raw: unknown): ManifestValidateResult {
     errors.push("bundle 必须是布尔值");
   }
 
+  // keepMountedOnVaultSwitch（切仓库保活）非布尔即拒绝：静默当缺省会让「声明了保活」的插件被重载收掉托管进程。
+  if (ax.keepMountedOnVaultSwitch !== undefined && typeof ax.keepMountedOnVaultSwitch !== "boolean") {
+    errors.push("keepMountedOnVaultSwitch 必须是布尔值");
+  }
+
   if (errors.length > 0) return { ok: false, errors };
 
   const types = normalizeTypes(type as string, ax.types, errors);
@@ -183,6 +188,7 @@ export function validatePluginManifest(raw: unknown): ManifestValidateResult {
     ...(typeof main === "string" && main.trim().length > 0 ? { main } : {}),
     ...(dependenciesDeclared ? { dependencies: dependenciesDeclared } : {}),
     ...(ax.bundle === true ? { bundle: true } : {}),
+    ...(ax.keepMountedOnVaultSwitch === true ? { keepMountedOnVaultSwitch: true } : {}),
     ...(types.length > 0 ? { types } : {}),
     ...(declares.length > 0 ? { declares } : {}),
     ...(declaredDirs.length > 0 ? { declaredDirs } : {}),
