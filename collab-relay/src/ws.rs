@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message, WebSocket};
 use serde::{Deserialize, Serialize};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 use futures_util::{SinkExt, StreamExt};
 use tracing::{debug, info, trace, warn};
 
@@ -37,6 +37,29 @@ static NEXT_PEER_ID: AtomicU64 = AtomicU64::new(1);
 #[derive(Clone, Default)]
 pub struct Hub(Arc<Mutex<HashMap<String, Room>>>);
 
+impl Hub {
+    /// 全部房间的连接总数（管理台运行状态展示；每在线端一条连接）。
+    pub(crate) fn total_connections(&self) -> usize {
+        self.0.lock().unwrap().values().map(|room| room.len()).sum()
+    }
+
+    /// 断开属于给定设备会话的全部实时连接（吊销会话/重置密码后调用）：
+    /// 对命中连接置踢信号，由连接自身投递失效帧并走离场收尾。返回命中连接数。
+    pub(crate) fn kick_sessions(&self, session_ids: &[String]) -> usize {
+        let mut kicked = 0;
+        let rooms = self.0.lock().unwrap();
+        for room in rooms.values() {
+            for peer in room.values() {
+                if session_ids.contains(&peer.session_id) {
+                    let _ = peer.kick_tx.send(true);
+                    kicked += 1;
+                }
+            }
+        }
+        kicked
+    }
+}
+
 /// 房间 = 同一房间 id 的在线连接；每连接一个 broadcast 通道（转发出站消息）。
 type Room = HashMap<u64, PeerEntry>;
 
@@ -47,6 +70,10 @@ struct PeerEntry {
     version: Option<String>,
     presence: Option<Presence>,
     tx: broadcast::Sender<Arc<String>>,
+    /// 所属设备会话（Hub::kick_sessions 按此匹配踢连接；不进 peers 快照广播）。
+    session_id: String,
+    /// 踢连接信号：置 true 即断开该连接（会话被吊销/重置密码时由管理端点触发）。
+    kick_tx: watch::Sender<bool>,
 }
 
 /// 单连接收发计数（离场随总结日志输出，用于定位流量异常/刷屏客户端）。
@@ -64,6 +91,8 @@ pub struct PeerMeta {
     pub color: String,
     pub device_name: String,
     pub version: Option<String>,
+    /// 所属设备会话（吊销会话时按此踢连接）。
+    pub session_id: String,
 }
 
 #[derive(Deserialize)]
@@ -256,17 +285,24 @@ pub(crate) fn broadcast_patch(hub: &Hub, room_id: &str, kind: &'static str, file
     }
 }
 
-/// 已验证的连接进入房间：hello-ack → 入房广播 → 消息循环 → 离场收尾。
-/// 鉴权由调用方在进入本函数之前完成。
+/// 已验证的连接进入房间：hello-ack → 入房广播 → 会话有效性回查 → 消息循环 → 离场收尾。
+/// 鉴权由调用方在进入本函数之前完成；`session_alive` 回查设备会话是否仍有效
+/// （鉴权与入房之间会话可能已被吊销，kick_sessions 触及不到尚未入房的连接）。
 pub(crate) async fn run_room_connection(
     socket: WebSocket,
     hub: Hub,
     remote: SocketAddr,
     room_id: String,
     meta: PeerMeta,
+    session_alive: impl Fn(&str) -> bool,
 ) {
     let (mut sink, mut stream) = socket.split();
     let started_at = Instant::now();
+    // 踢连接信号（会话被吊销时 Hub::kick_sessions 置 true）
+    let (kick_tx, mut kick_rx) = watch::channel(false);
+    let kick_frame: Arc<String> = Arc::new(
+        serde_json::json!({ "type": "error", "message": "登录状态已失效，连接已断开" }).to_string(),
+    );
 
     let peer_id = NEXT_PEER_ID.fetch_add(1, Ordering::Relaxed);
     let mut stats = ConnStats::default();
@@ -310,6 +346,7 @@ pub(crate) async fn run_room_connection(
     let nickname = meta.nickname.clone();
     let device_name = meta.device_name.clone();
     let version = meta.version.clone();
+    let session_id = meta.session_id.clone();
     {
         let mut rooms = hub.0.lock().unwrap();
         let room = rooms.entry(room_id.clone()).or_default();
@@ -322,6 +359,8 @@ pub(crate) async fn run_room_connection(
                 version: meta.version,
                 presence: None,
                 tx: btx.clone(),
+                session_id: meta.session_id,
+                kick_tx,
             },
         );
         info!(
@@ -336,10 +375,28 @@ pub(crate) async fn run_room_connection(
         );
         broadcast_peers(&rooms, &room_id);
     }
+    // 入房后回查会话有效性：鉴权与入房之间会话可能已被吊销（kick_sessions 只触及已入房
+    // 连接），此处回查补上这一窗口；入房之后的吊销由踢信号（watch）覆盖，两段合起来无空档
+    let mut kicked = !session_alive(&session_id);
+    if kicked {
+        let _ = btx.send(kick_frame.clone());
+    }
 
-    // 消息循环：30s 无消息（心跳超时）断开
-    loop {
-        let recv = tokio::time::timeout(HEARTBEAT_TIMEOUT, stream.next()).await;
+    // 消息循环：30s 无消息（心跳超时）断开；会话被吊销时投递失效帧后断开
+    while !kicked {
+        let recv = tokio::select! {
+            r = tokio::time::timeout(HEARTBEAT_TIMEOUT, stream.next()) => r,
+            _ = kick_rx.changed() => {
+                if *kick_rx.borrow_and_update() {
+                    // 失效帧经自身广播通道投递（发送任务负责写 socket），随后走离场收尾
+                    let _ = btx.send(kick_frame.clone());
+                    kicked = true;
+                    break;
+                }
+                // 非踢信号（防御性：发送方只写 true），继续等消息
+                continue;
+            }
+        };
         match recv {
             Err(_) => {
                 warn!(peer_id, room = %room_id, "心跳超时（30s 无消息），断开");
@@ -508,6 +565,7 @@ pub(crate) async fn run_room_connection(
     info!(
         peer_id,
         room = %room_id,
+        kicked,
         duration_ms = started_at.elapsed().as_millis() as u64,
         received_msgs = stats.received_msgs,
         received_bytes = stats.received_bytes,
@@ -515,7 +573,10 @@ pub(crate) async fn run_room_connection(
         forwarded_bytes = stats.forwarded_bytes,
         "协作者连接结束",
     );
-    send_task.abort();
+    // 先丢弃本端发送者：发送任务排空已入队帧（含失效帧）后收到 Closed 自行结束。
+    // 限时兜底——对端异常卡住写侧时不拖住连接收尾（超时即分离任务，socket 关闭）
+    drop(btx);
+    let _ = tokio::time::timeout(Duration::from_secs(2), send_task).await;
 }
 
 #[cfg(test)]

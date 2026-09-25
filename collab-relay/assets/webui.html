@@ -1,0 +1,596 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Atelyx 协作服务端 · 管理台</title>
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    --bg: #f4f5f7; --panel: #ffffff; --text: #1c2130; --muted: #667085;
+    --border: #e4e7ec; --accent: #2f6fed; --accent-weak: #eaf1fe;
+    --danger: #d92d20; --danger-weak: #fdecea; --ok: #12805c; --ok-weak: #e7f6f0;
+    --owner: #7c3aed; --owner-weak: #f3ecfe; --mono: ui-monospace, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #131519; --panel: #1b1e24; --text: #e5e8ee; --muted: #98a1b0;
+      --border: #2a2f3a; --accent: #6ea1ff; --accent-weak: #1d2b45;
+      --danger: #f97066; --danger-weak: #3a2124; --ok: #4ade80; --ok-weak: #17301f;
+      --owner: #b492ff; --owner-weak: #2a2140;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  }
+  .hidden { display: none !important; }
+  button {
+    font: inherit; color: var(--text); background: var(--panel);
+    border: 1px solid var(--border); border-radius: 6px; padding: 4px 12px; cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary:hover { opacity: .88; color: #fff; }
+  button.danger { color: var(--danger); }
+  button.danger:hover { border-color: var(--danger); }
+  button.small { padding: 2px 8px; font-size: 12px; }
+  input, select {
+    font: inherit; color: var(--text); background: var(--panel);
+    border: 1px solid var(--border); border-radius: 6px; padding: 5px 10px;
+  }
+  input:focus, select:focus { outline: none; border-color: var(--accent); }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  td.wrap, .mono-path { white-space: normal; word-break: break-all; }
+  .mono-path { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+  .muted { color: var(--muted); }
+  .mono { font-family: var(--mono); font-size: 13px; }
+  code {
+    font-family: var(--mono); font-size: 13px; background: var(--accent-weak);
+    color: var(--accent); padding: 2px 8px; border-radius: 5px;
+  }
+  main { max-width: 980px; margin: 0 auto; padding: 0 20px 60px; }
+  header.bar {
+    max-width: 980px; margin: 0 auto; padding: 18px 20px;
+    display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  }
+  header.bar h1 { font-size: 17px; margin: 0; }
+  .header-right { display: flex; align-items: center; gap: 10px; }
+  section { margin-top: 26px; }
+  section h2 { font-size: 15px; margin: 0 0 12px; display: flex; align-items: center; gap: 12px; }
+  section h3 { font-size: 13px; color: var(--muted); margin: 18px 0 8px; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+  .card-label { font-size: 12px; color: var(--muted); }
+  .card-value { font-size: 18px; margin-top: 4px; }
+  .badge {
+    display: inline-block; font-size: 11px; padding: 1px 8px; border-radius: 999px;
+    background: var(--accent-weak); color: var(--accent);
+  }
+  .badge.owner { background: var(--owner-weak); color: var(--owner); }
+  .badge.editor { background: var(--accent-weak); color: var(--accent); }
+  .badge.viewer { background: var(--border); color: var(--muted); }
+  .badge.ok { background: var(--ok-weak); color: var(--ok); }
+  .space-card { margin-bottom: 14px; }
+  .space-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .space-head .name { font-weight: 600; font-size: 15px; }
+  .space-head .spacer { flex: 1; }
+  details { margin-top: 10px; border-top: 1px dashed var(--border); padding-top: 10px; }
+  details summary { cursor: pointer; color: var(--muted); font-size: 13px; user-select: none; }
+  details[open] summary { margin-bottom: 8px; }
+  .invite-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 8px 0 12px; }
+  .invite-form input { width: 170px; }
+  .row-actions { display: flex; gap: 6px; }
+  .login-wrap {
+    min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px;
+  }
+  .login-card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 32px 36px; width: 340px; display: flex; flex-direction: column; gap: 14px;
+  }
+  .login-card h1 { font-size: 18px; margin: 0; text-align: center; }
+  .login-card p { margin: 0; text-align: center; }
+  .login-card label { display: flex; flex-direction: column; gap: 5px; font-size: 13px; color: var(--muted); }
+  .error { color: var(--danger); font-size: 13px; }
+  #toast {
+    position: fixed; left: 50%; bottom: 34px; transform: translateX(-50%);
+    background: var(--panel); border: 1px solid var(--border); color: var(--text);
+    border-radius: 8px; padding: 9px 18px; box-shadow: 0 6px 24px rgba(0,0,0,.18);
+    max-width: 80vw; z-index: 10;
+  }
+  #toast.err { border-color: var(--danger); color: var(--danger); }
+  .empty { color: var(--muted); padding: 12px 0; }
+</style>
+</head>
+<body>
+
+<div id="login" class="login-wrap hidden">
+  <form id="login-form" class="login-card" autocomplete="on">
+    <h1>Atelyx 协作服务端</h1>
+    <p class="muted">使用账号密码登录管理台</p>
+    <label>用户名
+      <input id="login-username" autocomplete="username" required>
+    </label>
+    <label>密码
+      <input id="login-password" type="password" autocomplete="current-password" required>
+    </label>
+    <button type="submit" class="primary">登录</button>
+    <p id="login-error" class="error hidden"></p>
+  </form>
+</div>
+
+<header class="bar hidden" id="topbar">
+  <h1>Atelyx 协作服务端</h1>
+  <div class="header-right">
+    <span id="who" class="muted"></span>
+    <button id="btn-refresh">刷新</button>
+    <button id="btn-logout">退出登录</button>
+  </div>
+</header>
+
+<main id="app" class="hidden">
+  <section>
+    <h2>运行状态</h2>
+    <div class="cards">
+      <div class="card"><div class="card-label">服务端版本</div><div class="card-value mono" id="ov-version">–</div></div>
+      <div class="card"><div class="card-label">启动时刻</div><div class="card-value" id="ov-started" style="font-size:14px">–</div></div>
+      <div class="card"><div class="card-label">在线连接</div><div class="card-value" id="ov-online">–</div></div>
+    </div>
+  </section>
+
+  <section id="admin-section" class="hidden">
+    <h2>全服管理</h2>
+    <h3>用户</h3>
+    <div class="panel" style="overflow-x:auto"><table id="admin-users"></table></div>
+    <h3>全部空间</h3>
+    <div class="panel" style="overflow-x:auto"><table id="admin-spaces"></table></div>
+  </section>
+
+  <section>
+    <h2>我的空间
+      <button class="small" data-act="space-new">新建空间</button>
+    </h2>
+    <div class="panel" style="margin-bottom:14px">
+      <span class="muted">用邀请码加入：</span>
+      <input id="join-code" placeholder="邀请码" style="width:180px">
+      <button data-act="join-invite">加入</button>
+    </div>
+    <div id="spaces-list"></div>
+  </section>
+
+  <section>
+    <h2>我的设备</h2>
+    <div class="panel" style="overflow-x:auto"><table id="devices"></table></div>
+  </section>
+</main>
+
+<div id="toast" class="hidden"></div>
+
+<script>
+'use strict';
+
+var TOKEN_KEY = 'atelyx-webui-token';
+var NAME_KEY = 'atelyx-webui-name';
+var token = localStorage.getItem(TOKEN_KEY) || '';
+var myName = localStorage.getItem(NAME_KEY) || '';
+var adminFlag = false;
+// 邀请码有效时长边界（小时），与服务端校验一致
+var INVITE_MIN_HOURS = 1;
+var INVITE_MAX_HOURS = 87600;
+// 防重复提交：动作在途时忽略新的动作触发（双击不再创建两个空间/邀请码）
+var actionBusy = false;
+// 登录在途标志（独立于 actionBusy：登录前页面处于登录态，两个入口不交叉）
+var loginBusy = false;
+// 次数上限取值上限（与服务端 u32 一致）
+var INVITE_MAX_USES = 4294967295;
+
+function $(id) { return document.getElementById(id); }
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+  });
+}
+
+function fmtBytes(n) {
+  if (n == null) return '–';
+  var units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  var i = 0, v = n;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return (i === 0 ? v : v.toFixed(1)) + ' ' + units[i];
+}
+
+function fmtTime(sec) {
+  if (!sec) return '–';
+  var d = new Date(sec * 1000);
+  var p = function (x) { return (x < 10 ? '0' : '') + x; };
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) +
+    ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+}
+
+var toastTimer = null;
+function toast(msg, isErr) {
+  var el = $('toast');
+  el.textContent = msg;
+  el.classList.toggle('err', !!isErr);
+  el.classList.remove('hidden');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(function () { el.classList.add('hidden'); }, 3600);
+}
+
+function roleBadge(role) {
+  return '<span class="badge ' + esc(role) + '">' + esc(role) + '</span>';
+}
+
+// 统一请求原语：返回 { ok, status, data }，不做登录态处理。
+// 网络层失败（连不上、中断）抛错并转成可读提示——浏览器原生的 "Failed to fetch"
+// 对使用者没有信息量。
+async function rawApi(method, path, body, authToken) {
+  var opts = { method: method, headers: {} };
+  if (authToken) opts.headers['Authorization'] = 'Bearer ' + authToken;
+  if (body !== undefined) {
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(body);
+  }
+  var resp;
+  try {
+    resp = await fetch(path, opts);
+  } catch (e) {
+    throw new Error('网络请求失败：无法连接服务端');
+  }
+  var text = await resp.text();
+  var data = null;
+  if (text) { try { data = JSON.parse(text); } catch (e) { data = null; } }
+  return { ok: resp.ok, status: resp.status, data: data };
+}
+
+// 已登录态的 API 调用：401 即清除本地登录态并回到登录页
+async function api(method, path, body) {
+  var r = await rawApi(method, path, body, token);
+  if (r.status === 401) {
+    logout(false);
+    throw new Error('登录状态已失效，请重新登录');
+  }
+  if (!r.ok) throw new Error((r.data && r.data.error) || ('请求失败（HTTP ' + r.status + '）'));
+  return r.data;
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch (e) {
+    // 非安全上下文（明文 HTTP）没有 navigator.clipboard：退回临时文本域
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); } catch (e2) {}
+    document.body.removeChild(ta);
+  }
+}
+
+async function guard(fn) {
+  try { await fn(); } catch (e) { if (token) toast(e.message, true); }
+}
+
+function showLogin() {
+  $('login').classList.remove('hidden');
+  $('topbar').classList.add('hidden');
+  $('app').classList.add('hidden');
+  $('login-error').classList.add('hidden');
+}
+
+function showApp() {
+  $('login').classList.add('hidden');
+  $('topbar').classList.remove('hidden');
+  $('app').classList.remove('hidden');
+  $('who').textContent = myName || '';
+}
+
+function logout(callServer) {
+  if (callServer) {
+    var t = token;
+    if (t) {
+      fetch('/api/auth/logout', {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + t }
+      }).catch(function () {});
+    }
+  }
+  token = '';
+  myName = '';
+  adminFlag = false;
+  localStorage.removeItem(TOKEN_KEY);
+  localStorage.removeItem(NAME_KEY);
+  showLogin();
+}
+
+// ===== 各区块加载与渲染 =====
+
+function loadAll() {
+  guard(loadStatus).then(function () { if (adminFlag) guard(loadAdmin); });
+  guard(loadSpaces);
+  guard(loadDevices);
+}
+
+async function loadStatus() {
+  var s = await api('GET', '/api/server/status');
+  adminFlag = !!s.isAdmin;
+  $('ov-version').textContent = s.version || '–';
+  $('ov-started').textContent = fmtTime(s.startedAt);
+  $('ov-online').textContent = s.onlineConnections == null ? '–' : s.onlineConnections;
+  $('admin-section').classList.toggle('hidden', !adminFlag);
+}
+
+async function loadAdmin() {
+  var users = await api('GET', '/api/admin/users');
+  var rows = users.map(function (u) {
+    return '<tr>' +
+      '<td>' + esc(u.username) + (u.isAdmin ? ' <span class="badge owner">管理员</span>' : '') + '</td>' +
+      '<td>' + esc(u.displayName) + '</td>' +
+      '<td class="muted">' + fmtTime(u.createdAt) + '</td>' +
+      '<td>' + u.sessionCount + '</td>' +
+      '<td>' + u.spaceCount + '</td>' +
+      '<td><div class="row-actions">' +
+      '<button class="small" data-act="user-reset" data-id="' + esc(u.userId) + '" data-name="' + esc(u.username) + '">重置密码</button>' +
+      '<button class="small danger" data-act="user-revoke" data-id="' + esc(u.userId) + '" data-name="' + esc(u.username) + '">吊销会话</button>' +
+      '</div></td>' +
+      '</tr>';
+  }).join('');
+  $('admin-users').innerHTML =
+    '<thead><tr><th>用户名</th><th>显示名</th><th>注册时间</th><th>会话</th><th>空间</th><th>操作</th></tr></thead>' +
+    '<tbody>' + rows + '</tbody>';
+
+  var spaces = await api('GET', '/api/admin/spaces');
+  var srows = spaces.map(function (sp) {
+    return '<tr>' +
+      '<td>' + esc(sp.name) + '</td>' +
+      '<td>' + esc(sp.ownerUsername) + '</td>' +
+      '<td>' + sp.memberCount + '</td>' +
+      '<td>' + fmtBytes(sp.sizeBytes) + '</td>' +
+      '<td class="mono-path" style="max-width:260px">' + esc(sp.rootPath) + '</td>' +
+      '<td class="muted">' + fmtTime(sp.createdAt) + '</td>' +
+      '</tr>';
+  }).join('');
+  $('admin-spaces').innerHTML =
+    '<thead><tr><th>空间</th><th>Owner</th><th>成员</th><th>占用</th><th>内容根</th><th>创建时间</th></tr></thead>' +
+    '<tbody>' + (srows || '<tr><td colspan="6" class="empty">暂无空间</td></tr>') + '</tbody>';
+}
+
+function inviteRow(sp, iv) {
+  return '<tr>' +
+    '<td><code>' + esc(iv.code) + '</code> <button class="small" data-act="copy-code" data-code="' + esc(iv.code) + '">复制</button></td>' +
+    '<td>' + roleBadge(iv.role) + '</td>' +
+    '<td class="muted">' + (iv.expiresAt ? fmtTime(iv.expiresAt) : '长期有效') + '</td>' +
+    '<td>' + (iv.maxUses == null ? '不限' : iv.usedCount + ' / ' + iv.maxUses) + '</td>' +
+    '<td><button class="small danger" data-act="invite-revoke" data-space="' + esc(sp.spaceId) + '" data-code="' + esc(iv.code) + '">吊销</button></td>' +
+    '</tr>';
+}
+
+function memberRow(m) {
+  return '<tr>' +
+    '<td>' + esc(m.displayName || m.username) + '</td>' +
+    '<td class="muted">' + esc(m.username) + '</td>' +
+    '<td>' + roleBadge(m.role) + '</td>' +
+    '<td class="muted">' + fmtTime(m.joinedAt) + '</td>' +
+    '</tr>';
+}
+
+function spaceCard(sp, members, invites) {
+  var isOwner = sp.role === 'owner';
+  var html = '<div class="panel space-card">' +
+    '<div class="space-head">' +
+    '<span class="name">' + esc(sp.name) + '</span>' +
+    roleBadge(sp.role) +
+    '<span class="spacer"></span>' +
+    (isOwner ? '<button class="small" data-act="space-rename" data-id="' + esc(sp.spaceId) + '" data-name="' + esc(sp.name) + '">改名</button>' : '') +
+    '</div>';
+
+  html += '<details open><summary>成员（' + members.length + '）</summary>' +
+    '<table><thead><tr><th>显示名</th><th>用户名</th><th>角色</th><th>加入时间</th></tr></thead><tbody>' +
+    members.map(memberRow).join('') +
+    '</tbody></table></details>';
+
+  if (isOwner) {
+    var inviteRows = (invites && invites.map)
+      ? invites.map(function (iv) { return inviteRow(sp, iv); }).join('')
+      : '';
+    html += '<details><summary>邀请码' + (invites ? '（' + invites.length + '）' : '') + '</summary>' +
+      '<div class="invite-form" data-space="' + esc(sp.spaceId) + '">' +
+      '<select data-field="role"><option value="editor">可编辑（editor）</option><option value="viewer">只读（viewer）</option></select>' +
+      '<input data-field="hours" type="number" min="1" placeholder="有效时长（小时，空=长期）">' +
+      '<input data-field="maxUses" type="number" min="1" placeholder="次数上限（空=不限）">' +
+      '<button class="small primary" data-act="invite-create">签发邀请码</button>' +
+      '</div>' +
+      '<table><thead><tr><th>邀请码</th><th>角色</th><th>有效期</th><th>已用次数</th><th>操作</th></tr></thead><tbody>' +
+      (inviteRows || '<tr><td colspan="5" class="empty">暂无邀请码</td></tr>') +
+      '</tbody></table></details>';
+  }
+  return html + '</div>';
+}
+
+async function loadSpaces() {
+  var spaces = await api('GET', '/api/spaces');
+  var cards = await Promise.all(spaces.map(async function (sp) {
+    try {
+      var members = await api('GET', '/api/spaces/' + sp.spaceId + '/members');
+      var invites = null;
+      if (sp.role === 'owner') {
+        try { invites = await api('GET', '/api/spaces/' + sp.spaceId + '/invites'); }
+        catch (e) { invites = []; }
+      }
+      return spaceCard(sp, members, invites);
+    } catch (e) {
+      return '<div class="panel space-card"><div class="space-head"><span class="name">' +
+        esc(sp.name) + '</span><span class="error">' + esc(e.message) + '</span></div></div>';
+    }
+  }));
+  $('spaces-list').innerHTML = cards.join('') ||
+    '<div class="panel"><span class="empty">还没有参与任何空间：新建一个，或用邀请码加入。</span></div>';
+}
+
+async function loadDevices() {
+  var devices = await api('GET', '/api/auth/devices');
+  var rows = devices.map(function (d) {
+    return '<tr>' +
+      '<td>' + esc(d.deviceName) + '</td>' +
+      '<td class="muted">' + fmtTime(d.createdAt) + '</td>' +
+      '<td class="muted">' + fmtTime(d.lastSeenAt) + '</td>' +
+      '<td>' + (d.current ? '<span class="badge ok">当前会话</span>' :
+        '<button class="small danger" data-act="device-revoke" data-id="' + esc(d.id) + '">吊销</button>') + '</td>' +
+      '</tr>';
+  }).join('');
+  $('devices').innerHTML =
+    '<thead><tr><th>设备</th><th>登录时间</th><th>最近活跃</th><th>操作</th></tr></thead>' +
+    '<tbody>' + (rows || '<tr><td colspan="4" class="empty">暂无设备会话</td></tr>') + '</tbody>';
+}
+
+// ===== 动作（事件委托） =====
+
+// 数字输入解析：空串 = 缺省（null）；非正整数 = NaN（由调用方显式报错，不静默当缺省）
+function parseCount(v) {
+  var s = String(v).trim();
+  if (!s) return null;
+  var n = Number(s);
+  return Number.isInteger(n) && n > 0 ? n : NaN;
+}
+
+document.addEventListener('click', async function (ev) {
+  var btn = ev.target.closest('[data-act]');
+  if (!btn) return;
+  if (actionBusy) return;
+  actionBusy = true;
+  var act = btn.getAttribute('data-act');
+  try {
+    if (act === 'space-new') {
+      var name = prompt('空间名称（不超过 64 字）：');
+      if (!name || !name.trim()) return;
+      await api('POST', '/api/spaces', { name: name.trim() });
+      toast('空间已创建');
+      await guard(loadSpaces);
+
+    } else if (act === 'join-invite') {
+      var code = $('join-code').value.trim();
+      if (!code) return;
+      var r = await api('POST', '/api/invites/accept', { code: code });
+      $('join-code').value = '';
+      toast('已加入空间「' + (r.name || '') + '」（' + (r.role || '') + '）');
+      await guard(loadSpaces);
+
+    } else if (act === 'space-rename') {
+      var cur = btn.getAttribute('data-name');
+      var next = prompt('新的空间名称：', cur);
+      if (!next || !next.trim() || next.trim() === cur) return;
+      await api('PATCH', '/api/spaces/' + btn.getAttribute('data-id'), { name: next.trim() });
+      toast('已改名');
+      await guard(loadSpaces);
+
+    } else if (act === 'invite-create') {
+      var form = btn.closest('.invite-form');
+      var hours = parseCount(form.querySelector('[data-field="hours"]').value);
+      var maxUses = parseCount(form.querySelector('[data-field="maxUses"]').value);
+      if (Number.isNaN(hours) || (hours !== null && (hours < INVITE_MIN_HOURS || hours > INVITE_MAX_HOURS))) {
+        toast('有效时长须为 ' + INVITE_MIN_HOURS + '–' + INVITE_MAX_HOURS + ' 之间的整数小时（留空 = 长期有效）', true);
+        return;
+      }
+      if (Number.isNaN(maxUses) || (maxUses !== null && (maxUses < 1 || maxUses > INVITE_MAX_USES))) {
+        toast('次数上限须为 1–' + INVITE_MAX_USES + ' 之间的整数（留空 = 不限）', true);
+        return;
+      }
+      var body = { role: form.querySelector('[data-field="role"]').value };
+      if (hours !== null) body.expiresInHours = hours;
+      if (maxUses !== null) body.maxUses = maxUses;
+      var created = await api('POST', '/api/spaces/' + form.getAttribute('data-space') + '/invites', body);
+      await copyText(created.code);
+      toast('邀请码已签发并复制：' + created.code);
+      await guard(loadSpaces);
+
+    } else if (act === 'invite-revoke') {
+      if (!confirm('吊销邀请码 ' + btn.getAttribute('data-code') + '？')) return;
+      await api('DELETE', '/api/spaces/' + btn.getAttribute('data-space') + '/invites/' + btn.getAttribute('data-code'));
+      toast('邀请码已吊销');
+      await guard(loadSpaces);
+
+    } else if (act === 'copy-code') {
+      await copyText(btn.getAttribute('data-code'));
+      toast('已复制');
+
+    } else if (act === 'device-revoke') {
+      if (!confirm('吊销该设备会话？该设备将退出登录。')) return;
+      await api('DELETE', '/api/auth/devices/' + btn.getAttribute('data-id'));
+      toast('会话已吊销');
+      await guard(loadDevices);
+
+    } else if (act === 'user-reset') {
+      var uname = btn.getAttribute('data-name');
+      var pwd = prompt('为用户「' + uname + '」设置新密码（6–128 字节）：');
+      if (!pwd) return;
+      if (!confirm('重置后该用户全部设备会话将被吊销，确定？')) return;
+      await api('POST', '/api/admin/users/' + btn.getAttribute('data-id') + '/reset-password', { newPassword: pwd });
+      toast('密码已重置，其全部会话已吊销');
+      await guard(loadAdmin);
+
+    } else if (act === 'user-revoke') {
+      var target = btn.getAttribute('data-name');
+      if (!confirm('将用户「' + target + '」的全部设备踢下线？')) return;
+      var rr = await api('DELETE', '/api/admin/users/' + btn.getAttribute('data-id') + '/sessions');
+      toast('已吊销 ' + (rr.revoked || 0) + ' 个会话');
+      await guard(loadAdmin);
+    }
+  } catch (e) {
+    if (token) toast(e.message, true);
+  } finally {
+    actionBusy = false;
+  }
+});
+
+// ===== 登录与启动 =====
+
+$('login-form').addEventListener('submit', async function (ev) {
+  ev.preventDefault();
+  if (loginBusy) return;
+  loginBusy = true;
+  var username = $('login-username').value.trim();
+  var password = $('login-password').value;
+  var errEl = $('login-error');
+  errEl.classList.add('hidden');
+  try {
+    // 登录请求不走 api()：未登录时的 401 是业务结果（用户名或密码错误），不触发登出清理
+    var r = await rawApi('POST', '/api/auth/login', {
+      username: username,
+      password: password,
+      deviceName: '网页管理台'
+    }, '');
+    if (!r.ok) throw new Error((r.data && r.data.error) || ('登录失败（HTTP ' + r.status + '）'));
+    token = r.data.token;
+    myName = r.data.displayName || r.data.username || username;
+    localStorage.setItem(TOKEN_KEY, token);
+    localStorage.setItem(NAME_KEY, myName);
+    showApp();
+    loadAll();
+  } catch (e) {
+    errEl.textContent = e.message;
+    errEl.classList.remove('hidden');
+  } finally {
+    loginBusy = false;
+  }
+});
+
+$('btn-logout').addEventListener('click', function () { logout(true); });
+$('btn-refresh').addEventListener('click', loadAll);
+
+if (token) {
+  showApp();
+  loadAll();
+} else {
+  showLogin();
+}
+</script>
+</body>
+</html>

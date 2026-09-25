@@ -110,7 +110,10 @@ async fn handle(mut socket: WebSocket, state: ServerState, remote: SocketAddr) {
             color: hello.color,
             device_name: hello.device_name,
             version: hello.version,
+            session_id: identity.session_id,
         },
+        // 入房后回查：会话在鉴权与入房之间可能已被吊销（如管理台刚执行重置密码/吊销）
+        |session_id: &str| state.read(|p| p.sessions.iter().any(|s| s.id == session_id)),
     )
     .await;
 }

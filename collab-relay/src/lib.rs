@@ -8,6 +8,7 @@
 //! invites，每次变更原子写整文件）+ `spaces/<id>/` 内容文件树。备份 = 拷目录。
 //! 日志只记元数据不记内容（密码 / 令牌 / 正文一律不入日志）。
 
+pub mod admin;
 pub mod auth;
 pub mod content;
 pub mod dated_notes;
@@ -19,6 +20,7 @@ pub mod patches;
 pub mod space_ws;
 pub mod spaces;
 pub mod state;
+pub mod webui;
 pub mod ws;
 
 use std::net::SocketAddr;
@@ -40,6 +42,14 @@ pub struct TlsPaths {
 
 pub fn build_app(state: ServerState) -> Router {
     Router::new()
+        // 内置管理台（浏览器打开服务器地址即达；页面调同一批 API）
+        .route("/", get(webui::page))
+        // 运行状态与管理员端点（管理员 = 用户数组首位，见 admin 模块）
+        .route("/api/server/status", get(admin::server_status))
+        .route("/api/admin/users", get(admin::list_users))
+        .route("/api/admin/users/{user_id}/reset-password", post(admin::reset_password))
+        .route("/api/admin/users/{user_id}/sessions", delete(admin::revoke_user_sessions))
+        .route("/api/admin/spaces", get(admin::list_spaces))
         // 账号
         .route("/api/auth/register", post(auth::register))
         .route("/api/auth/login", post(auth::login))

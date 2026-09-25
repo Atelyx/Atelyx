@@ -106,6 +106,8 @@ pub struct ServerState {
 
 struct ServerStateInner {
     data_dir: PathBuf,
+    /// 进程启动时刻（unix 秒；管理台运行状态展示用）。
+    started_at: i64,
     persistent: Mutex<Persisted>,
     /// 派生索引缓存（空间 id → 反链/标签索引；纯内存只读派生，可随时重建，不落盘）。
     index_cache: Mutex<HashMap<String, SpaceIndex>>,
@@ -253,6 +255,7 @@ impl ServerState {
         Self {
             inner: Arc::new(ServerStateInner {
                 data_dir: data_dir.to_path_buf(),
+                started_at: now_secs(),
                 persistent: Mutex::new(inner),
                 index_cache: Mutex::new(HashMap::new()),
                 hub: Hub::default(),
@@ -324,6 +327,11 @@ impl ServerState {
             }
         }
         Ok(out)
+    }
+
+    /// 进程启动时刻（unix 秒）。
+    pub(crate) fn started_at(&self) -> i64 {
+        self.inner.started_at
     }
 
     /// 派生索引缓存句柄（index 模块经此刷新与查询）。

@@ -18,8 +18,8 @@ use crate::state::{now_secs, random_hex, token_hash, ServerState, Session, User}
 use crate::{ApiError, ApiResult};
 
 const USERNAME_MAX: usize = 32;
-const PASSWORD_MIN: usize = 6;
-const PASSWORD_MAX: usize = 128;
+pub(crate) const PASSWORD_MIN: usize = 6;
+pub(crate) const PASSWORD_MAX: usize = 128;
 
 /// 用户名：1–32 位 ASCII 字母 / 数字 / `_` / `-`（表名与 URL 片段友好，不含空白）。
 fn valid_username(name: &str) -> bool {
@@ -28,7 +28,7 @@ fn valid_username(name: &str) -> bool {
         && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
-fn hash_password(password: &str) -> Result<String, ApiError> {
+pub(crate) fn hash_password(password: &str) -> Result<String, ApiError> {
     let salt = SaltString::generate(&mut OsRng);
     Argon2::default()
         .hash_password(password.as_bytes(), &salt)
