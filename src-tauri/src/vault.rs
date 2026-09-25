@@ -309,13 +309,9 @@ fn rel_last_seg(rel: &str) -> &str {
 
 // ===== 路径校验 =====
 
-/// 校验相对路径安全并 join 仓库根，返回绝对路径（安全 12）。
-/// 拒绝绝对路径 / `..` / 根目录 / 盘符前缀（Windows 下 `PathBuf::join` 遇绝对路径会整体替换，
-/// 仅拦 `..` 可被 `C:\x`、`\\server\x`、`\x` 绕过）；join 后再 dunce::canonicalize 父目录
-/// 校验落在仓库根内（同时覆盖符号链接逃逸）。文件可能不存在，故只校验父目录。
-/// `create_parents`：写路径（write_note / rename 目标）父目录不存在时先建目录
-/// （否则 canonicalize 父目录必失败，`write_note` 注释声明的「自动建父目录」不可达）。
-pub(crate) fn safe_join(root: &Path, file: &str, create_parents: bool) -> Result<PathBuf, String> {
+/// 相对路径组件校验：拒绝空路径 / 绝对路径 / `..` / 根目录 / 盘符前缀，返回净化后的相对路径
+/// （Windows 下 `PathBuf::join` 遇绝对路径会整体替换，仅拦 `..` 可被 `C:\x`、`\\server\x`、`\x` 绕过）。
+fn validate_relative_path(file: &str) -> Result<PathBuf, String> {
     if file.is_empty() {
         return Err("非法路径：空路径".to_string());
     }
@@ -333,6 +329,16 @@ pub(crate) fn safe_join(root: &Path, file: &str, create_parents: bool) -> Result
             }
         }
     }
+    Ok(clean)
+}
+
+/// 校验相对路径安全并 join 仓库根，返回绝对路径（安全 12）。
+/// join 后再 dunce::canonicalize 父目录校验落在仓库根内（同时覆盖符号链接逃逸）。
+/// 文件可能不存在，故只校验父目录。
+/// `create_parents`：写路径（write_note / rename 目标）父目录不存在时先建目录
+/// （否则 canonicalize 父目录必失败，`write_note` 注释声明的「自动建父目录」不可达）。
+pub(crate) fn safe_join(root: &Path, file: &str, create_parents: bool) -> Result<PathBuf, String> {
+    let clean = validate_relative_path(file)?;
     let joined = root.join(clean);
     let root_canon = dunce::canonicalize(root).map_err(|_| "仓库根不可达".to_string())?;
     // 最终文件已存在时校验其真实路径仍在仓库根内：目录级穿越已由组件过滤 + 父目录
@@ -355,6 +361,14 @@ pub(crate) fn safe_join(root: &Path, file: &str, create_parents: bool) -> Result
         return Err(format!("路径越界：{}", file));
     }
     Ok(joined)
+}
+
+/// 文件是否存在（仅元数据查询，不读内容；不限文件类型）：文件不存在（含所在目录被删）返回 false。
+/// 不做父目录可达性校验（与 safe_join 的差异点）：存在性判定的对象是文件本身，
+/// 父目录缺失本身就该回答「不存在」；路径组件过滤与 safe_join 同口径。
+pub(crate) fn file_exists(root: &Path, file: &str) -> Result<bool, String> {
+    let clean = validate_relative_path(file)?;
+    Ok(root.join(clean).is_file())
 }
 
 // ===== 仓库初始化 =====

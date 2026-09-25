@@ -26,7 +26,7 @@ use crate::vault::{
     init_vault_dirs, list_canvas_files,
     list_vault_tree as list_vault_tree_impl, markdown_link_path, read_canvas_file,
     read_canvas_file_cached, read_file_bytes, read_note as read_note_file,
-    read_vault_config_with_backup,
+    file_exists as file_exists_impl, read_vault_config_with_backup,
     refresh_wiki_index, rename_folder as rename_folder_impl, rename_note_file, rel_with_new_title,
     resolve_link_target, rewrite_internal_links, safe_join, same_physical_file,
     sanitize_filename, walk_md_in, write_canvas_file, write_note as write_note_file,
@@ -411,6 +411,14 @@ pub fn delete_canvas_vault(file: String, state: State<'_, VaultState>) -> Result
 pub fn read_note(file: String, state: State<'_, VaultState>) -> Result<String, String> {
     let root = state.root()?;
     read_note_file(&root, &file)
+}
+
+/// 查询文件是否存在（元数据查询不读内容，不限文件类型；文件或所在目录已删除返回 false，路径非法报错）。
+/// 供按路径引用的配置（提示词注册标记 / Agent 提示词引用等）做失效校验。
+#[tauri::command]
+pub fn file_exists(file: String, state: State<'_, VaultState>) -> Result<bool, String> {
+    let root = state.root()?;
+    file_exists_impl(&root, &file)
 }
 
 /// 查询反链（`[[note_name]]` 或 `[label](基于仓库的路径)` 两种写法；索引缓存 + 指纹增量刷新）。
