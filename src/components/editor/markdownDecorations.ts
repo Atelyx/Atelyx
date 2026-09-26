@@ -88,6 +88,12 @@ function fencedCodeContent(src: string): string {
   return lines.join("\n");
 }
 
+/** 围栏代码块首行 → 语言名（info string 首个空白分隔词；无语言 = 空串）。 */
+export function fencedCodeLang(src: string): string {
+  const first = src.split("\n")[0] ?? "";
+  return /^[`~]{3,}\s*(\S*)/.exec(first)?.[1] ?? "";
+}
+
 /** 点击纵向比例 → 块源码对应行起点（纯函数，可单测）：
  *  frac 0..1 映射到块首行..末行（末行含行尾时按行数钳制），供块级 widget 点击定位。 */
 export function sourceLineAtFraction(state: EditorState, from: number, to: number, frac: number): number {
@@ -421,7 +427,10 @@ export function buildDecorations(
         span.from,
         span.to,
         Decoration.replace({
-          widget: new CodeBlockWidget(fencedCodeContent(doc.sliceString(f.from, f.to))),
+          widget: new CodeBlockWidget(
+            fencedCodeContent(doc.sliceString(f.from, f.to)),
+            fencedCodeLang(doc.sliceString(f.from, f.to)),
+          ),
           block: true,
         }),
       );

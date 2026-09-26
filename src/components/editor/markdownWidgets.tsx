@@ -435,7 +435,8 @@ export class CalloutBadgeWidget extends WidgetType {
   }
 }
 
-/** 表格 block widget：源码整表替换为 `<table>`；单元格内容取原文（含 markdown 标记，不渲染行内格式）；
+/** 表格 block widget：源码整表替换为 `<table>`，外裹专属横向滚动容器（超宽时表格下方出滚动条，
+ *  不撑宽整条消息）；单元格内容取原文（含 markdown 标记，不渲染行内格式）；
  * 点击（onEdit）把光标送入表格源码起点 → 可编辑态撕掉 widget 露源码。
  * eq 必须覆盖 onEdit 有无：CM 按 eq 决定是否复用旧 DOM，漏比会在只读↔编辑翻转后留下无监听器的旧表。 */
 export class TableWidget extends WidgetType {
@@ -451,12 +452,15 @@ export class TableWidget extends WidgetType {
   }
 
   toDOM(view: EditorView) {
+    const wrap = document.createElement("div");
+    wrap.className = "md-editor-table-wrap";
     const table = document.createElement("table");
     table.className = "md-editor-table";
     const lines = this.source.split("\n").filter((l) => l.trim() !== "");
     if (lines.length < 2) {
       table.textContent = this.source;
-      return table;
+      wrap.appendChild(table);
+      return wrap;
     }
     const splitRow = (l: string) => l.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => c.trim());
     const header = splitRow(lines[0] ?? "");
@@ -486,10 +490,11 @@ export class TableWidget extends WidgetType {
       tbody.appendChild(tr);
     }
     table.appendChild(tbody);
+    wrap.appendChild(table);
     if (this.onEdit) {
       onLeftClick(table, (e) => this.onEdit?.(e, table, view));
     }
-    return table;
+    return wrap;
   }
 }
 
@@ -620,24 +625,43 @@ export class FootnoteDefWidget extends WidgetType {
   }
 }
 
-/** 围栏代码块 widget（只读面）：整块替换为盒装 `<pre><code>` + 右上角复制按钮，``` 标记不显示。 */
+/** 复制/已复制按钮图标（lucide copy/check 同款路径）：widget 为原生 DOM 构建，
+ *  内联静态 SVG 字符串（fill none + stroke currentColor，颜色随按钮文字色）。 */
+const COPY_ICON_SVG =
+  '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>';
+const CHECK_ICON_SVG =
+  '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>';
+
+/** 围栏代码块 widget（只读面）：标题栏（语言名 + 常驻图标复制按钮）+ 盒装 `<pre><code>`，``` 标记不显示。
+ *  代码不换行，横向滚动与限高纵向滚动都收敛在代码块内部（宽度外约束依赖编辑器的
+ *  .cm-content min-width: 0，见 MarkdownEditor editorTheme）。 */
 export class CodeBlockWidget extends WidgetType {
-  constructor(private readonly code: string) {
+  constructor(
+    private readonly code: string,
+    private readonly lang: string,
+  ) {
     super();
   }
 
   eq(other: CodeBlockWidget) {
-    return other.code === this.code;
+    return other.code === this.code && other.lang === this.lang;
   }
 
   toDOM() {
     const box = document.createElement("div");
     box.className = "md-editor-code-block";
+    const head = document.createElement("div");
+    head.className = "md-editor-code-head";
+    const lang = document.createElement("span");
+    lang.className = "md-editor-code-lang";
+    lang.textContent = this.lang || "代码";
+    head.appendChild(lang);
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "md-editor-code-copy";
-    btn.textContent = "复制";
+    btn.innerHTML = COPY_ICON_SVG;
     btn.title = "复制代码";
+    btn.setAttribute("aria-label", "复制代码");
     let timer: number | undefined;
     btn.addEventListener("mousedown", (e) => e.stopPropagation());
     btn.addEventListener("click", (e) => {
@@ -646,19 +670,22 @@ export class CodeBlockWidget extends WidgetType {
       void navigator.clipboard
         .writeText(this.code)
         .then(() => {
-          btn.textContent = "已复制";
+          btn.innerHTML = CHECK_ICON_SVG;
+          btn.classList.add("md-editor-code-copy-done");
           window.clearTimeout(timer);
           timer = window.setTimeout(() => {
-            btn.textContent = "复制";
+            btn.innerHTML = COPY_ICON_SVG;
+            btn.classList.remove("md-editor-code-copy-done");
           }, 1500);
         })
         .catch(() => {});
     });
+    head.appendChild(btn);
+    box.appendChild(head);
     const pre = document.createElement("pre");
     const code = document.createElement("code");
     code.textContent = this.code;
     pre.appendChild(code);
-    box.appendChild(btn);
     box.appendChild(pre);
     return box;
   }

@@ -505,39 +505,75 @@ body {
 .cm-readonly .mention-capsule {
   cursor: pointer !important;
 }
-/* 围栏代码块（只读面 widget）：盒装 + 右上角悬浮复制按钮 */
+/* 围栏代码块（只读面 widget）：标题栏（语言名 + 常驻复制按钮）+ 盒装代码区。
+   代码不换行，横向滚动与限高纵向滚动收敛在代码块内部；
+   宽度外约束依赖 editorTheme 的 .cm-content min-width: 0（否则 widget 内容宽撑宽整条消息） */
 .md-editor-code-block {
-  position: relative;
   margin: 0.4em 0;
+  max-width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--code-bg);
+  overflow: hidden;
+}
+.md-editor-code-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.2rem 0.5rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-tertiary);
+}
+.md-editor-code-lang {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .md-editor-code-block pre {
-  @apply rounded p-2 overflow-x-auto text-xs;
-  background: var(--code-bg);
-  color: var(--highlight-text);
-  border: 1px solid var(--border);
+  @apply p-2 text-xs;
+  max-height: 300px;
+  overflow: auto;
   margin: 0;
+  color: var(--highlight-text);
+  background: transparent;
+  border: none;
 }
 .md-editor-code-block code {
   @apply bg-transparent p-0;
   color: var(--highlight-text);
 }
 .md-editor-code-copy {
-  position: absolute;
-  top: 0.35rem;
-  right: 0.35rem;
-  z-index: 1;
-  padding: 0.1rem 0.45rem;
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  padding: 0.15rem;
   border-radius: 4px;
-  font-size: 0.75rem;
   color: var(--text-secondary);
   background: var(--bg-tertiary);
   border: 1px solid var(--border);
-  opacity: 0;
-  transition: opacity 0.15s;
   cursor: pointer;
 }
-.md-editor-code-block:hover .md-editor-code-copy {
-  opacity: 1;
+/* 已复制反馈：图标换为对勾并着强调色 */
+.md-editor-code-copy-done {
+  color: var(--accent);
+}
+/* markdown 表格 widget（预览/只读面渲染形态）：专属横向滚动容器（表格超宽时在其下方出滚动条，
+   不撑宽整条消息） */
+.md-editor-table-wrap {
+  max-width: 100%;
+  margin: 0.25rem 0;
+  overflow-x: auto;
+}
+.md-editor-table-wrap > table.md-editor-table {
+  margin: 0;
+}
+/* raw HTML 块级 widget：内容超宽时块内滚动（宽度外约束同代码块，防止溢出绘制到相邻行） */
+.md-editor-html {
+  overflow-x: auto;
 }
 /* raw HTML 渲染（白名单清洗后）：kbd/details/dl/媒体排版 */
 .md-editor-html kbd {

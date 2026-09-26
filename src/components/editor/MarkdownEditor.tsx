@@ -109,6 +109,9 @@ const editorTheme = EditorView.theme({
   ".cm-content": {
     padding: "0 1rem",
     caretColor: "var(--accent)",
+    // 允许内容层收缩到视口宽：块级 widget（代码块/表格/HTML 块）自带横向滚动，
+    // 否则 widget 内容宽会把 flex-shrink:0 的内容层撑宽，横向滚动条挂到整条消息上
+    minWidth: 0,
   },
   ".cm-cursor": { borderLeftColor: "var(--accent)", borderLeftWidth: "1.5px" },
   "&.cm-focused": { outline: "none" },
