@@ -10,10 +10,11 @@
  * 协作空间（space）→ 服务端 meta 分组（services/space/client）：
  * - team 层（space meta，团队共享）：AI 配置本体（供应商/模型/搜索源，按字段分键，含 API key）/
  *   排序 `sort` / 排除夹 `exclusions` / 附件夹 `attachment-folder` / 文件夹颜色 `folder-colors` /
- *   提示词标记 `prompt-notes` / Agent 配置 `agents`；写权限由服务端按角色裁决
- *   （owner/editor 可写，viewer 拒绝），客户端不另行拦截；
+ *   提示词标记 `prompt-notes` / Agent 配置 `agents` / 日历日程 `calendar`；写权限由服务端按角色裁决
+ *   （owner/editor 可写，viewer 拒绝），客户端不另行拦截。团队层写/删落地后服务端向空间房间广播
+ *   `meta-changed` 帧（只带键名），日历域据此回读磁盘真源刷新；
  * - user 层（meta/me，个人）：对话历史 `chat/messages/<id>`、`chat/sessions/<id>`、
- *   `chat/editor-meta`、日历 `calendar`、待办 `todos/<encodeURIComponent(id)>`。
+ *   `chat/editor-meta`、待办 `todos/<encodeURIComponent(id)>`。
  *
  * 空间写失败与写被服务端拒绝（如 viewer 改团队层）都经 cordis access 注入点弹通知，不静默；
  * 配置补丁路径例外——该路径的错误由 settingsStore 的写盘入口统一通知，避免双重弹窗。
@@ -78,9 +79,9 @@ const TEAM_ATTACHMENT_FOLDER = SPACE_TEAM_META.attachmentFolder;
 const TEAM_FOLDER_COLORS = SPACE_TEAM_META.folderColors;
 const TEAM_PROMPT_NOTES = SPACE_TEAM_META.promptNotes;
 const TEAM_AGENTS = SPACE_TEAM_META.agents;
+const TEAM_CALENDAR = SPACE_TEAM_META.calendar;
 
 // ===== 空间 meta 键名（user 层）=====
-const MY_CALENDAR = "calendar";
 const MY_EDITOR_META = "chat/editor-meta";
 const MY_CHAT_MESSAGES_PREFIX = "chat/messages/";
 const MY_CHAT_SESSIONS_PREFIX = "chat/sessions/";
@@ -551,10 +552,10 @@ export async function deleteChatMessages(file: string): Promise<void> {
   await deleteMyValue(identity, `${MY_CHAT_MESSAGES_PREFIX}${chatSessionIdFromMessageFile(file)}`);
 }
 
-// ===== 日历（user meta `calendar`）=====
+// ===== 日历（团队 meta `calendar`）=====
 
 /** 读日历日程 JSON 原文：local = `.atelyx/calendar.json`（缺失/读失败 = null，调用方降级空日程）；
- * space = user meta `calendar`（缺失 = null）。 */
+ * space = 团队 meta `calendar`（缺失 = null；团队共享，owner/editor 可写）。 */
 export async function readCalendarRaw(): Promise<string | null> {
   const identity = spaceIdentity();
   if (!identity) {
@@ -564,15 +565,16 @@ export async function readCalendarRaw(): Promise<string | null> {
       return null;
     }
   }
-  const values = await getMyValues(identity);
-  return values[MY_CALENDAR] ?? null;
+  const values = await getTeamValues(identity);
+  return values[TEAM_CALENDAR] ?? null;
 }
 
-/** 写日历日程 JSON 原文（local = `.atelyx/calendar.json` 原子写；space = PATCH user meta `calendar`）。 */
+/** 写日历日程 JSON 原文（local = `.atelyx/calendar.json` 原子写；space = PATCH 团队 meta `calendar`，
+ * 服务端落地后向空间房间广播变更帧）。 */
 export async function writeCalendarRaw(content: string): Promise<void> {
   const identity = spaceIdentity();
   if (!identity) return writeVaultFile(CALENDAR_FILE, content);
-  await patchMyValue(identity, MY_CALENDAR, content);
+  await patchTeamValue(identity, TEAM_CALENDAR, content);
 }
 
 // ===== AI 任务清单（user meta `todos/<id>`）=====

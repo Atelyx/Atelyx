@@ -304,7 +304,7 @@ describe("team meta 分发（sort/exclusions/folder-colors/prompt-notes/agents�
   });
 });
 
-describe("user meta 分发（chat/calendar/todos）", () => {
+describe("user meta 分发（chat/todos）", () => {
   beforeEach(() => {
     factory.activateContentIdentity(SPACE_IDENTITY);
   });
@@ -378,15 +378,6 @@ describe("user meta 分发（chat/calendar/todos）", () => {
     expect(space.state.myValues["chat/messages/s1"]).toBeUndefined();
   });
 
-  it("日历往返：写 = user meta 键 calendar，读缺失返回 null", async () => {
-    await metadata.writeCalendarRaw("{\"schema\":\"atelyx-calendar/v1\",\"items\":[]}");
-    expect(space.state.myValues["calendar"]).toBe("{\"schema\":\"atelyx-calendar/v1\",\"items\":[]}");
-    expect(await metadata.readCalendarRaw()).toBe("{\"schema\":\"atelyx-calendar/v1\",\"items\":[]}");
-
-    space.state.myValues = {};
-    expect(await metadata.readCalendarRaw()).toBeNull();
-  });
-
   it("待办按会话 id 隔离：键 todos/<encodeURIComponent(id)>，删除幂等", async () => {
     await metadata.writeSessionTodosRaw("会话/1", "{\"todos\":[]}");
     expect(space.state.myValues[`todos/${encodeURIComponent("会话/1")}`]).toBe("{\"todos\":[]}");
@@ -394,6 +385,22 @@ describe("user meta 分发（chat/calendar/todos）", () => {
 
     await metadata.deleteSessionTodosRaw("会话/1");
     expect(space.state.myValues[`todos/${encodeURIComponent("会话/1")}`]).toBeUndefined();
+  });
+});
+
+describe("团队 meta 分发（日历）", () => {
+  beforeEach(() => {
+    factory.activateContentIdentity(SPACE_IDENTITY);
+  });
+
+  it("日历往返：写 = 团队 meta 键 calendar，读缺失返回 null", async () => {
+    await metadata.writeCalendarRaw("{\"schema\":\"atelyx-calendar/v1\",\"items\":[]}");
+    expect(space.state.teamValues["calendar"]).toBe("{\"schema\":\"atelyx-calendar/v1\",\"items\":[]}");
+    expect(space.state.calls.some((c) => c.method === "patchMyMeta")).toBe(false);
+    expect(await metadata.readCalendarRaw()).toBe("{\"schema\":\"atelyx-calendar/v1\",\"items\":[]}");
+
+    space.state.teamValues = {};
+    expect(await metadata.readCalendarRaw()).toBeNull();
   });
 });
 

@@ -27,6 +27,8 @@ export const SPACE_TEAM_META = {
   promptNotes: "prompt-notes",
   /** Agent 配置（对应 `.atelyx/agents.json`）。 */
   agents: "agents",
+  /** 日历手动日程（对应 `.atelyx/calendar.json`；写/删落地后服务端广播 `meta-changed` 帧）。 */
+  calendar: "calendar",
 } as const;
 
 /**
