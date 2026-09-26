@@ -40,6 +40,39 @@ describe("通道注册与分发", () => {
   });
 });
 
+describe("团队 meta 变更订阅与分发", () => {
+  it("注册后分发：handler 收到键名", () => {
+    const keys: string[] = [];
+    host.registerCollabMetaChanged((key) => keys.push(key));
+    host.dispatchCollabMetaChanged("calendar");
+    expect(keys).toEqual(["calendar"]);
+  });
+
+  it("多 handler 各自消费，撤销后不再收到", () => {
+    const first = vi.fn();
+    const second = vi.fn();
+    const offFirst = host.registerCollabMetaChanged(first);
+    host.registerCollabMetaChanged(second);
+    offFirst();
+    host.dispatchCollabMetaChanged("calendar");
+    expect(first).not.toHaveBeenCalled();
+    expect(second).toHaveBeenCalledTimes(1);
+  });
+
+  it("同一引用重复注册：撤销一路不影响另一路（按引用守卫）", () => {
+    const fn = vi.fn();
+    const offA = host.registerCollabMetaChanged(fn);
+    host.registerCollabMetaChanged(fn);
+    offA();
+    host.dispatchCollabMetaChanged("calendar");
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
+
+  it("无 handler 分发静默丢弃（不抛错）", () => {
+    expect(() => host.dispatchCollabMetaChanged("calendar")).not.toThrow();
+  });
+});
+
 describe("presence 合并", () => {
   const base: CollabPresence = { file: "a.md", selection: null, view: "note" };
 

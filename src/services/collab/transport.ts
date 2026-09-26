@@ -43,6 +43,8 @@ export interface CollabTransportOptions {
   onPeerPresence(peerId: number, presence: CollabPresence): void;
   /** 频道消息入站（payload 不透明，解码归接收域；peerId 供发送方身份解析）。 */
   onChannelMessage(peerId: number, channel: CollabChannel, file: string, payload: unknown): void;
+  /** 团队 meta 落地广播帧入站（服务端单向、无 peerId，只带键名）：消费方回读磁盘真源。 */
+  onMetaChanged(key: string): void;
   /** 传输侧提示本端接收队列过慢（帧被裁剪）：调用方需重新握手补齐（笔记域索取全量状态）。 */
   onResync(): void;
   onServerError(message: string): void;

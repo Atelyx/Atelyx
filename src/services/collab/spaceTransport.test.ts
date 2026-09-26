@@ -81,6 +81,7 @@ interface Harness {
   statuses: boolean[];
   errors: string[];
   acks: number[];
+  metaChanged: string[];
 }
 
 const spaceHello = {
@@ -97,6 +98,7 @@ function connect(refreshHello?: () => Promise<CollabHello | null>): Harness {
   const statuses: boolean[] = [];
   const errors: string[] = [];
   const acks: number[] = [];
+  const metaChanged: string[] = [];
   const handle = mod.spaceCollabTransport.connect({
     url: "ws://server:11224/ws/space",
     hello: { ...spaceHello },
@@ -106,12 +108,13 @@ function connect(refreshHello?: () => Promise<CollabHello | null>): Harness {
     onPeerPresence: () => {},
     onChannelMessage: (peerId, channel, file, payload) =>
       channels.push([peerId, channel, file, payload]),
+    onMetaChanged: (key) => metaChanged.push(key),
     onResync: () => {},
     onServerError: (message) => errors.push(message),
     onStatusChange: (connected) => statuses.push(connected),
   });
   const socket = FakeWebSocket.instances[FakeWebSocket.instances.length - 1];
-  return { handle, socket, channels, statuses, errors, acks };
+  return { handle, socket, channels, statuses, errors, acks, metaChanged };
 }
 
 describe("spaceWsUrl", () => {
@@ -186,6 +189,13 @@ describe("space 传输频道收发", () => {
     ]);
   });
 
+  it("meta-changed 落地广播帧（无 peerId）分发到 onMetaChanged", () => {
+    const h = connect();
+    h.socket.open();
+    h.socket.emit({ type: "meta-changed", key: "calendar" });
+    expect(h.metaChanged).toEqual(["calendar"]);
+  });
+
   it("sendMessage 出站映射：note-sync 原样、plugin-msg 的 file 槽 = 频道名（可定向）", () => {
     const h = connect();
     h.socket.open();
@@ -211,6 +221,7 @@ describe("space 传输频道收发", () => {
       onPeers: () => {},
       onPeerPresence: () => {},
       onChannelMessage: () => {},
+      onMetaChanged: () => {},
       onResync: () => {},
       onServerError: () => {},
       onStatusChange: () => {},

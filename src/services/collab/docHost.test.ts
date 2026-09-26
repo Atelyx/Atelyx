@@ -114,6 +114,16 @@ describe("连接与路由", () => {
     expect(resyncs).toBe(1);
   });
 
+  it("团队 meta 变更帧：入站自动路由到 collabHost 注册表（与频道路由对称，调用方无需接线）", () => {
+    const fake = fakeFactory("fake");
+    transport.registerCollabTransport(fake.factory);
+    const keys: string[] = [];
+    collabHost.registerCollabMetaChanged((key) => keys.push(key));
+    host.connectTransport(connectRequest("fake"));
+    fake.options()!.onMetaChanged("calendar");
+    expect(keys).toEqual(["calendar"]);
+  });
+
   it("重复连接：旧句柄先 bye + disconnect，出站改走新句柄", () => {
     const first = fakeFactory("first");
     const second = fakeFactory("second");

@@ -26,6 +26,7 @@ const fakeOptions = (): CollabTransportOptions => ({
   onPeers: () => {},
   onPeerPresence: () => {},
   onChannelMessage: () => {},
+  onMetaChanged: () => {},
   onResync: () => {},
   onServerError: () => {},
   onStatusChange: () => {},

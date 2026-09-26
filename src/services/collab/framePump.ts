@@ -6,7 +6,7 @@
  * - C→S `hello`（首条必发）/ `presence` / `table-patch` / `canvas-patch` /
  *   `note-sync` / `note-aware` / `plugin-msg` / `ping` / `bye`
  * - S→C `peers`（成员全量）/ `hello-ack`（分配 peerId）/ `presence` / 各频道转发帧 /
- *   `resync`（接收队列被裁剪）/ `pong` / `error`
+ *   `meta-changed`（团队 meta 落地广播，只带键名）/ `resync`（接收队列被裁剪）/ `pong` / `error`
  */
 import type { CanvasPatch, CollabHello, CollabPeer, CollabPresence, TablePatch } from "@/types";
 import type { CollabTransportHandle, CollabTransportOptions } from "./transport";
@@ -27,6 +27,7 @@ type CollabServerMessage =
   | { type: "note-sync"; peerId: number; file: string; payload: string }
   | { type: "note-aware"; peerId: number; file: string; payload: string }
   | { type: "plugin-msg"; peerId: number; channel: string; payload: unknown }
+  | { type: "meta-changed"; key: string }
   | { type: "resync" }
   | { type: "pong" }
   | { type: "error"; message: string };
@@ -42,6 +43,8 @@ interface CollabFramePumpCallbacks {
   onNoteSync: (peerId: number, file: string, payload: string) => void;
   onNoteAware: (peerId: number, file: string, payload: string) => void;
   onPluginMsg: (peerId: number, channel: string, payload: unknown) => void;
+  /** 收到团队 meta 落地广播帧（服务端单向，无 peerId）：只带键名，值由消费方回读磁盘真源。 */
+  onMetaChanged: (key: string) => void;
   /** 接收队列被广播裁剪（消费过慢）：调用方需重新握手补齐。 */
   onResync: () => void;
   /** 收到服务端 error 帧（协议异常/鉴权拒绝等）——调用方决定日志或 UI 反馈。 */
@@ -136,6 +139,7 @@ function connectFramePump(opts: CollabFramePumpOptions): CollabFramePumpHandle {
         opts.onNoteAware(msg.peerId, msg.file, msg.payload);
       else if (msg.type === "plugin-msg")
         opts.onPluginMsg(msg.peerId, msg.channel, msg.payload);
+      else if (msg.type === "meta-changed") opts.onMetaChanged(msg.key);
       else if (msg.type === "resync") opts.onResync();
       else if (msg.type === "pong") {
         // 保活回执：仅刷新 lastMessageAt（staleness 检测用），无其他副作用
@@ -276,6 +280,7 @@ export function connectChannelPump(opts: CollabTransportOptions): CollabTranspor
       opts.onChannelMessage(peerId, "note-aware", file, payload),
     onPluginMsg: (peerId, channel, payload) =>
       opts.onChannelMessage(peerId, "plugin-msg", channel, payload),
+    onMetaChanged: opts.onMetaChanged,
     onResync: opts.onResync,
     onServerError: opts.onServerError,
     onStatusChange: opts.onStatusChange,

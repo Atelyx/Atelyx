@@ -3,7 +3,8 @@
  *
  * - 组合传输注册表（transport.ts，空间工厂由 spaceTransport.ts 注册）与域接线注册表（utils/collabHost）：
  *   活动传输句柄由本模块持有（collabStore 是 store 门面，经 connectTransport/send* 管理）；
- * - 入站频道消息统一路由到 collabHost 通道注册表（各域 handler 自注册）；
+ * - 入站统一路由到 collabHost 注册表：peer 频道消息走通道注册表，服务端单向 meta-changed 帧
+ *   走团队 meta 变更注册表（各域 handler 自注册）；
  * - 出站经 send* 咽喉（断开时静默丢弃）；
  * - 传输侧报告接收队列过慢（帧被裁剪）时回调 `onResync`，由调用方按域补齐
  *   （笔记域重新握手索取全量状态；补丁域只补发 presence，陈旧补丁由后续补丁与下次保存的
@@ -11,7 +12,7 @@
  *
  * 文档实例的生命周期（引用计数/创建/重建/销毁）由各领域服务自持（如 noteDoc 的 per-file Y.Doc）。
  */
-import { dispatchCollabChannel } from "@/utils/collabHost";
+import { dispatchCollabChannel, dispatchCollabMetaChanged } from "@/utils/collabHost";
 import type { CollabPresence } from "@/types";
 import {
   connectCollabTransport,
@@ -25,9 +26,9 @@ export type { CollabChannel } from "./transport";
 /** 活动传输句柄（重连时替换；断开 = null）。 */
 let activeTransport: CollabTransportHandle | null = null;
 
-/** 建连请求（传输名 + 连接参数；onChannelMessage 由 DocHost 内部接通道注册表，调用方不必提供）。 */
+/** 建连请求（传输名 + 连接参数；入站路由由 DocHost 内部接 collabHost 注册表，调用方不必提供）。 */
 export interface ConnectTransportRequest
-  extends Omit<CollabTransportOptions, "onChannelMessage"> {
+  extends Omit<CollabTransportOptions, "onChannelMessage" | "onMetaChanged"> {
   name: string;
 }
 
@@ -46,6 +47,7 @@ export function connectTransport(req: ConnectTransportRequest): void {
     onPeerPresence: req.onPeerPresence,
     onChannelMessage: (peerId, channel, file, payload) =>
       dispatchCollabChannel(channel, peerId, file, payload),
+    onMetaChanged: dispatchCollabMetaChanged,
     onResync: req.onResync,
     onServerError: req.onServerError,
     onStatusChange: req.onStatusChange,

@@ -34,6 +34,24 @@ export function dispatchCollabChannel(
   collabChannels.get(channel)?.(peerId, file, payload);
 }
 
+// ===== 团队 meta 变更（服务端单向广播帧，与 peer 转发频道分列） =====
+
+const collabMetaChangedHandlers: Array<(key: string) => void> = [];
+
+/** 注册团队 meta 变更 handler（收到落地广播帧后由域自行回读磁盘真源并按键过滤；返回撤销函数，按引用守卫）。 */
+export function registerCollabMetaChanged(fn: (key: string) => void): () => void {
+  collabMetaChangedHandlers.push(fn);
+  return () => {
+    const i = collabMetaChangedHandlers.indexOf(fn);
+    if (i >= 0) collabMetaChangedHandlers.splice(i, 1);
+  };
+}
+
+/** 团队 meta 变更分发（无 handler 时静默丢弃）。 */
+export function dispatchCollabMetaChanged(key: string): void {
+  for (const fn of [...collabMetaChangedHandlers]) fn(key);
+}
+
 /** 带序钩子（priority 升序运行；同 priority 按注册序）。 */
 interface OrderedHook<F> {
   fn: F;
