@@ -2,11 +2,14 @@
  * 日历（主页）store：手动日程（仓库级）+ 带日期笔记（只读）。
  *
  * 手动日程 CRUD 防抖落盘，落盘位置按激活仓库身份分流（services/metadata）：
- * 个人仓库 = `.atelyx/calendar.json`；协作空间 = user meta 键 `calendar`。
- * 写盘按「已加载仓库身份」归属校验（loadedFor），切仓库前须先 flush
+ * 个人仓库 = `.atelyx/calendar.json`；协作空间 = 团队 meta 键 `calendar`（全员共享，
+ * 写权限服务端按角色裁决）。写盘按「已加载仓库身份」归属校验（loadedFor），切仓库前须先 flush
  * （appStore.selectVault/selectSpace 已接）防防抖窗口内把旧仓库日程写进新仓库。
  * 身份判别一律用身份键（identityKeyOf）：空间模式 vaultRoot 恒为 null，
  * 按 root 比对会让空间 A→B 切换时在途读不被丢弃、A 的数据写进 B。
+ * 协作空间内多人并发编辑按整文件后写者胜收敛：服务端写/删落地后广播 `meta-changed` 帧，
+ * 本域订阅（registerCalendarCollabWiring）回读磁盘真源——本地干净（无未落盘改动）才采纳，
+ * 本地脏时忽略（保留用户输入，随后落盘覆盖远端）；等待期间切仓库或产生本地编辑同样不采纳。
  * 带日期笔记来自 `services/home.listDatedNotes`（frontmatter date/due），随 load 一并刷新。
  * 性能：同仓库会话内缓存（loadedFor），主页面板随布局切换反复挂载时，已缓存仓库
  * 仅后台静默重扫带日期笔记；手动日程 items 为 store 实时态（防抖落盘），刷新不重读磁盘
@@ -14,14 +17,16 @@
  */
 import { create } from "zustand";
 import { CALENDAR_SCHEMA } from "@/constants/calendar";
+import { SPACE_TEAM_META } from "@/constants/spaceMeta";
 import { readCalendarRaw, writeCalendarRaw } from "@/services/metadata";
 import { identityKeyOf } from "@/services/content/factory";
 import { listDatedNotes, type DatedNote } from "@/services/home";
 import { createPersistController } from "@/utils/persist";
+import { registerCollabMetaChanged } from "@/utils/collabHost";
 import { useAppStore } from "@/stores/appStore";
 import type { CalendarItem } from "@/types";
 
-/** 日历磁盘格式（个人仓库 `.atelyx/calendar.json` / 空间 user meta `calendar` 共用）。 */
+/** 日历磁盘格式（个人仓库 `.atelyx/calendar.json` / 空间团队 meta `calendar` 共用）。 */
 interface CalendarFile {
   schema: typeof CALENDAR_SCHEMA;
   items: CalendarItem[];
@@ -49,13 +54,21 @@ interface CalendarState {
   flush: () => Promise<void>;
 }
 
+/** 读手动日程 JSON 原文解析为条目（原文缺失 → 空列表；损坏 → 空列表，与 load 的容错同口径）。 */
+function parseCalendarItems(raw: string | null): CalendarItem[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as CalendarFile;
+    return Array.isArray(parsed.items) ? parsed.items : [];
+  } catch {
+    return [];
+  }
+}
+
 /** 读手动日程（缺失/损坏 → 空列表）。 */
 async function readCalendarItems(): Promise<CalendarItem[]> {
   try {
-    const raw = await readCalendarRaw();
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as CalendarFile;
-    return Array.isArray(parsed.items) ? parsed.items : [];
+    return parseCalendarItems(await readCalendarRaw());
   } catch {
     return [];
   }
@@ -120,6 +133,8 @@ export const useCalendarStore = create<CalendarState>((set, get) => ({
       console.error("加载日历失败", e);
       if (calendarGuardKey() === guardKey) {
         set({ items: [], datedNotes: [], loadedFor: guardKey });
+        // 基线对齐内存空态：加载失败后远端变更帧仍可采纳（自愈入口），否则脏检查恒不通过
+        persistedItems = JSON.stringify([]);
       }
     }
   },
@@ -155,3 +170,44 @@ export const useCalendarStore = create<CalendarState>((set, get) => ({
     await persistCtl.flush();
   },
 }));
+
+/**
+ * 采纳团队层远端日历（`meta-changed` 帧）：本空间已加载且整个读盘窗口内基线无推进时，回读磁盘
+ * 真源采纳（快照一致 = 自回声/无变化，不重渲染）。「基线无推进」= 发起读前记下落盘基线，
+ * 读返回后基线未变且内存仍等于该基线——期间发生过落盘（本地编辑写盘/并发采纳）或产生未落盘
+ * 编辑，本次读发起早于落盘、结果不可信，一律丢弃；丢弃后由本次落盘触发的服务端自回声帧再次
+ * 进入本函数，以干净状态采纳最新磁盘真源自愈。读失败保持现状（等下一帧或重新加载，不因一次
+ * 网络抖动清空视图）。写盘被服务端拒绝（viewer）且本地脏态未消除期间，脏检查恒不通过、
+ * 推送被忽略，视图与远端脱节直至编辑成功重试或重新加载——保存失败已有通知可见。
+ */
+async function adoptRemoteCalendar(): Promise<void> {
+  const s = useCalendarStore.getState();
+  const guardKey = s.loadedFor;
+  if (!guardKey) return;
+  const baselineAtStart = persistedItems;
+  if (JSON.stringify(s.items) !== baselineAtStart) return;
+  let raw: string | null;
+  try {
+    raw = await readCalendarRaw();
+  } catch (e) {
+    console.error("同步共享日历失败", e);
+    return;
+  }
+  const latest = useCalendarStore.getState();
+  if (latest.loadedFor !== guardKey) return;
+  if (persistedItems !== baselineAtStart) return;
+  if (JSON.stringify(latest.items) !== baselineAtStart) return;
+  const items = parseCalendarItems(raw);
+  const snapshot = JSON.stringify(items);
+  if (snapshot === persistedItems) return;
+  useCalendarStore.setState({ items });
+  persistedItems = snapshot;
+}
+
+/** 日历域协作接线（builtin.calendar 载荷调用，随插件启停）：订阅团队日历落地广播帧。 */
+export function registerCalendarCollabWiring(): () => void {
+  return registerCollabMetaChanged((key) => {
+    if (key !== SPACE_TEAM_META.calendar) return;
+    void adoptRemoteCalendar();
+  });
+}

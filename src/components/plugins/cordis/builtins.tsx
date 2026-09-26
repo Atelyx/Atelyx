@@ -44,7 +44,7 @@ import {
 import { useTableStore, registerTableCollabWiring, registerTablePluginWiring } from "@/stores/tableStore";
 import { broadcastNoteRelocate, registerNoteCollabWiring, useNoteCollabStore } from "@/stores/noteCollabStore";
 import { useChatPanelStore } from "@/stores/chatPanelStore";
-import { useCalendarStore } from "@/stores/calendarStore";
+import { useCalendarStore, registerCalendarCollabWiring } from "@/stores/calendarStore";
 import { useNoteUndoStore } from "@/stores/noteUndoStore";
 import { useNoteStore } from "@/stores/noteStore";
 import { closeAllNoteSessions, noteSurfaceProvider, openNoteSessionFiles } from "@/stores/noteSessionStore";
@@ -286,6 +286,10 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
         await useCalendarStore.getState().flush();
       },
     },
+    // 共享日历依赖 meta-changed 帧互见：日历须自行声明协作需求，
+    // 否则其余协作插件全停用/未挂载时连接被拆除，订阅静默失同步
+    needsCollab: true,
+    collabWiring: registerCalendarCollabWiring,
   }),
   def({
     id: "builtin.chatcore",
