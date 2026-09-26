@@ -1662,6 +1662,66 @@ async fn patch_landing_broadcasts_frame_to_room() {
     assert_eq!(frame["patch"]["id"], "tb-1");
 }
 
+/// 团队 meta 写/删落地 → 房间收到 meta-changed 帧（含写入者自身，只带键名）；
+/// user 层（meta/me）写不广播。
+#[tokio::test]
+async fn team_meta_landing_broadcasts_meta_changed_frame() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let space_id = setup_two_members(&ctx, "alice", "bob").await;
+    let a = login_as(&ctx, "alice").await;
+
+    let mut ws = ws_connect(
+        &ctx.base,
+        "/ws/space",
+        json!({ "type": "hello", "spaceId": space_id, "token": a, "nickname": "爱丽丝", "color": "#ff0000", "deviceName": "A机" }),
+    )
+    .await;
+    let ack = next_frame(&mut ws).await;
+    assert_eq!(ack["type"], "hello-ack");
+
+    // 团队层 PATCH 落地 → 房间收到 meta-changed（逐键一帧）
+    let (status, _) = ctx
+        .send(reqwest::Method::PATCH, &format!("/api/spaces/{space_id}/meta"), Some(&a), Some(json!({ "values": { "calendar": "{\"items\":[]}", "sort": "\"name-asc\"" } })), &[])
+        .await;
+    assert_eq!(status, 200);
+    let mut seen: Vec<String> = Vec::new();
+    for _ in 0..10 {
+        let frame = next_frame(&mut ws).await;
+        if frame["type"] == "meta-changed" {
+            seen.push(frame["key"].as_str().unwrap().to_string());
+            if seen.len() == 2 {
+                break;
+            }
+        }
+    }
+    seen.sort();
+    assert_eq!(seen, vec!["calendar".to_string(), "sort".to_string()], "应逐键收到 meta-changed 帧");
+
+    // 团队层删单键 → 一帧 meta-changed
+    let (status, _) = ctx
+        .send(reqwest::Method::DELETE, &format!("/api/spaces/{space_id}/meta"), Some(&a), None, &[("key", "calendar")])
+        .await;
+    assert_eq!(status, 200);
+    let mut frame = next_frame(&mut ws).await;
+    for _ in 0..5 {
+        if frame["type"] == "meta-changed" {
+            break;
+        }
+        frame = next_frame(&mut ws).await;
+    }
+    assert_eq!(frame["type"], "meta-changed", "删除落地应广播 meta-changed：{frame}");
+    assert_eq!(frame["key"], "calendar");
+
+    // user 层写（meta/me）不广播
+    let (status, _) = ctx
+        .send(reqwest::Method::PATCH, &format!("/api/spaces/{space_id}/meta/me"), Some(&a), Some(json!({ "values": { "chat/messages/x": "m" } })), &[])
+        .await;
+    assert_eq!(status, 200);
+    let quiet = tokio::time::timeout(std::time::Duration::from_millis(300), next_frame(&mut ws)).await;
+    assert!(quiet.is_err(), "user 层写不应产生广播帧");
+}
+
 /// 改名边界：Windows 保留名净化（与客户端同口径）、同名异 id 拒绝覆盖、case-only 改名豁免。
 #[tokio::test]
 async fn rename_edges_reserved_name_id_conflict_and_case_only() {

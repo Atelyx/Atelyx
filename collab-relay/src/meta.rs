@@ -4,7 +4,8 @@
 //! 文件内容即 value 原文（UTF-8 文本，非 JSON 包装）；扩展名 `.json` 仅为与数据目录其他文件一致。
 //! 原子写复用 fsops::atomic_write（temp + rename），避免半截文件；目录不存在即空 map。
 //! 权限：space scope 任意成员可读，仅 owner/editor 可写；user scope 任意成员可读写自己那份。
-//! 非成员一律拒绝（与内容端点同口径）。
+//! 非成员一律拒绝（与内容端点同口径）。space scope 写/删落地成功后向 `space:<id>` 房间广播
+//! `meta-changed` 帧（只带键名），客户端回读磁盘真源；user scope 为个人数据，不广播。
 
 use std::collections::HashMap;
 use std::path::Path as FsPath;
@@ -248,8 +249,10 @@ pub async fn patch_space_meta(
     require_writer(&state, &space_id, &user)?;
     validate_values(&body.values)?;
     let root = space_scope_root(state.data_dir(), &space_id);
+    // 逐键写成功即广播：中途失败时已落盘键已通知、失败键未写无状态变化，两端口径一致
     for (key, value) in &body.values {
         write_key(&root, key, value)?;
+        crate::ws::broadcast_meta_changed(&state.hub(), &format!("space:{space_id}"), key);
     }
     tracing::info!(space_id = %space_id, keys = body.values.len(), "空间元信息写入");
     Ok(Json(json!({ "updated": body.values.len() })))
@@ -275,6 +278,7 @@ pub async fn delete_space_meta(
         return Err(not_found("键不存在"));
     }
     std::fs::remove_file(&path).map_err(|e| internal(format!("删除失败：{e}")))?;
+    crate::ws::broadcast_meta_changed(&state.hub(), &format!("space:{space_id}"), &query.key);
     Ok(Json(json!({ "deleted": true })))
 }
 

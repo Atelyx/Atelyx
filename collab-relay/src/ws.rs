@@ -9,7 +9,8 @@
 //! - C→S `plugin-msg`：`{ type, channel, payload, targetPeerId? }`（广播/定向单播）
 //! - C→S `ping`（保活，回 `pong` 广播）/ `bye`（离开）
 //! - S→C `hello-ack`：`{ type, peerId }`（先于 peers 帧——客户端据此把自己过滤出列表）
-//! - S→C `peers` / `presence` / 各转发帧（不含自己）/ `resync`（慢消费者重新握手）/ `error`
+//! - S→C `peers` / `presence` / 各转发帧（不含自己）/ `meta-changed`（团队 meta 落地广播，含写入者，
+//!   只带 `key` 不带值）/ `resync`（慢消费者重新握手）/ `error`
 //!
 //! 日志红线：转发内容（patch / Yjs payload / selection）只记字节数不记内容。
 
@@ -183,6 +184,9 @@ struct ServerMsg {
     /// 载荷（`note-sync`/`note-aware` 为 base64 字符串，`plugin-msg` 为任意 JSON）。
     #[serde(skip_serializing_if = "Option::is_none")]
     payload: Option<serde_json::Value>,
+    /// 元数据键名（`meta-changed` 落地广播帧携带；只广播键名，值由客户端回读磁盘真源）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    key: Option<String>,
 }
 
 fn server_msg(
@@ -203,6 +207,7 @@ fn server_msg(
         patch,
         channel: None,
         payload,
+        key: None,
     })
     .unwrap();
     Arc::new(json)
@@ -219,6 +224,7 @@ fn server_plugin_msg(peer_id: u64, channel: String, payload: serde_json::Value) 
         patch: None,
         channel: Some(channel),
         payload: Some(payload),
+        key: None,
     })
     .unwrap();
     Arc::new(json)
@@ -280,6 +286,34 @@ pub(crate) fn broadcast_patch(hub: &Hub, room_id: &str, kind: &'static str, file
         for peer in room.values() {
             if peer.tx.send(payload.clone()).is_err() {
                 debug!(room = %room_id, kind = %kind, "补丁帧投递失败（接收端已关闭）");
+            }
+        }
+    }
+}
+
+/// 服务端主动向房间广播元数据变更帧（团队层 meta 写/删端点落地成功后调用）。发给房间内全部成员，
+/// 含发起写入者自己——发起者经 HTTP 保存、无转发帧可回声，收到的是落地广播帧；帧只带键名不带值，
+/// 客户端据此回读磁盘真源。房间为空或个别投递失败只记日志：真源已落盘，广播失败不回滚落地。
+pub(crate) fn broadcast_meta_changed(hub: &Hub, room_id: &str, key: &str) {
+    let payload: Arc<String> = Arc::new(
+        serde_json::to_string(&ServerMsg {
+            kind: "meta-changed",
+            peer_id: None,
+            peers: None,
+            presence: None,
+            file: None,
+            patch: None,
+            channel: None,
+            payload: None,
+            key: Some(key.to_string()),
+        })
+        .unwrap(),
+    );
+    let rooms = hub.0.lock().unwrap();
+    if let Some(room) = rooms.get(room_id) {
+        for peer in room.values() {
+            if peer.tx.send(payload.clone()).is_err() {
+                debug!(room = %room_id, key = %key, "meta 变更帧投递失败（接收端已关闭）");
             }
         }
     }
@@ -649,5 +683,59 @@ mod tests {
         assert!(value.get("peers").is_none());
         assert!(value.get("presence").is_none());
         assert!(value.get("file").is_none());
+    }
+
+    /// meta 变更广播帧：只带键名（值由客户端回读磁盘真源），不带 peerId 与其他字段。
+    #[test]
+    fn meta_changed_frame_carries_key_only() {
+        let json = serde_json::to_string(&ServerMsg {
+            kind: "meta-changed",
+            peer_id: None,
+            peers: None,
+            presence: None,
+            file: None,
+            patch: None,
+            channel: None,
+            payload: None,
+            key: Some("calendar".to_string()),
+        })
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).expect("meta-changed 帧须为合法 JSON");
+        assert_eq!(value["type"], "meta-changed");
+        assert_eq!(value["key"], "calendar");
+        assert_eq!(value.as_object().map(|o| o.len()), Some(2));
+    }
+
+    /// 广播按房间投递给房间内全部成员；无关房间与空房间不投递、不报错。
+    #[test]
+    fn broadcast_meta_changed_reaches_room_members() {
+        let hub = Hub::default();
+        let make_peer = |tx: broadcast::Sender<Arc<String>>, session: &str| PeerEntry {
+            nickname: session.to_string(),
+            color: String::new(),
+            device_name: String::new(),
+            version: None,
+            presence: None,
+            tx,
+            session_id: session.to_string(),
+            kick_tx: watch::channel(false).0,
+        };
+        let (tx_a, mut rx_a) = broadcast::channel::<Arc<String>>(16);
+        let (tx_b, mut rx_b) = broadcast::channel::<Arc<String>>(16);
+        hub.0.lock().unwrap().insert(
+            "space:s1".to_string(),
+            HashMap::from([(1u64, make_peer(tx_a, "s-a")), (2u64, make_peer(tx_b, "s-b"))]),
+        );
+        hub.0.lock().unwrap().insert("space:s2".to_string(), HashMap::new());
+
+        broadcast_meta_changed(&hub, "space:s1", "calendar");
+
+        let frame_a = rx_a.try_recv().expect("房间内成员 a 应收到广播帧");
+        let frame_b = rx_b.try_recv().expect("房间内成员 b 应收到广播帧");
+        let value: serde_json::Value = serde_json::from_str(&frame_a).unwrap();
+        assert_eq!(value["type"], "meta-changed");
+        assert_eq!(value["key"], "calendar");
+        assert_eq!(*frame_b, *frame_a, "同一房间收到的是同一帧");
+        assert!(rx_a.try_recv().is_err(), "不应有额外帧");
     }
 }
