@@ -28,7 +28,7 @@ export function emitPluginEvent(event: string, payload: unknown): void {
 
 /**
  * serial 拦截面分派（veto / 改写）：顺序 await 每个监听器，监听器返回对象与当前载荷合并
- * 传给下一监听器（waterfall 传参），`veto: true` 立即短路（bail）；监听器抛错只记录并继续——
+ * 传给下一监听器，`veto: true` 立即短路（bail）；监听器抛错只记录并继续——
  * 保存/请求管线绝不能因插件监听器抛错而中断，改写失败按原值前进。
  *
  * 供领域管线（`note:before-save` / `ai:before-request`，见 types.ts @serial 事件）在关键点调用；
@@ -70,7 +70,7 @@ let emitIsolated = false;
  * 逐监听器异常隔离：包装 `EventsService.emit`，单个监听器抛错（或返回 rejected Promise）
  * 只记录并继续投递给其余监听器。
  *
- * 为什么必须在宿主侧做：vendor 的 `emit` 是 `map(cb => cb(...args))`——一个监听器抛错即中断，
+ * 为什么必须在宿主侧做：vendor 的 `emit` 逐个调用监听器、不做异常隔离——一个监听器抛错即中断，
  * 同事件其余插件的监听器被静默跳过（且调用方看不到），故不能只依赖 vendor 行为，也不改 vendor
  * （vendor 保持上游 commit）。包装保持 vendor 的派发语义（同一 `dispatch("emit", args)` 取回调），
  * 只把「逐个调用」换成「逐个隔离调用」；`internal/*` 同样只是不打断其余，判定语义不变。

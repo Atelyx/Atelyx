@@ -6,7 +6,7 @@ vendored Cordis 核心源码。只 vendor 核心：本项目无 Node 运行时�
 
 | 目录 | 来源 | 版本 | 上游仓库 | commit |
 | --- | --- | --- | --- | --- |
-| `cordis/` | 原版上游 | `4.0.0-rc.7` | https://github.com/cordiverse/cordis (`packages/core`) | `56b3d4f725681cf4556c1a8695a709cc3b6eed74` |
+| `cordis/` | 原版上游 | `4.0.0-rc.10` | https://github.com/cordiverse/cordis (`packages/core`) | `f8ea3cd50f1a5724e8e715995bcde131c9c12b2c` |
 | `cosmokit/` | 原版上游 | `1.8.1` | https://github.com/shigma/cosmokit | `02e691c5aa7f37f6e0b1cee7ee8f4a21c2e34507` |
 
 ## 导入映射
@@ -25,6 +25,8 @@ vendored Cordis 核心源码。只 vendor 核心：本项目无 Node 运行时�
 
 1. `cordis/src/*.ts`：`cosmokit` → `@atelyx/cosmokit`（8 处；机械替换，命名说明见上）。
 2. `cordis/src/index.ts`：补 `export * from './reflect'`（原版索引未导出 reflect；审计机制需包装 `ReflectService.handler`）。该导出由 `src/services/cordis/vendorCore.test.ts` 守卫——删掉即测试红。其余无。
+
+落盘编码：除 `index.ts` 外均带 UTF-8 BOM（上游无 BOM）；行尾随工作区（git 按 `.gitattributes` 归一化为 LF）。同步落盘时保持原样，避免无关 diff。
 
 ## 同步流程
 

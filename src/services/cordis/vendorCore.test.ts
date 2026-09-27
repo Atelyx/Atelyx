@@ -19,7 +19,7 @@ declare module "@atelyx/cordis" {
   }
   interface Events {
     "vendor/emit": (msg: string) => void;
-    "vendor/wf": (value: string, next: (value?: string) => string) => string;
+    "vendor/wf": (value: string, next: () => string) => string;
   }
 }
 
@@ -57,11 +57,23 @@ describe("vendored Cordis 核心行为", () => {
     expect(seen).toEqual(["on:a", "once:a", "on:b"]);
   });
 
-  it("waterfall 环绕：next 续链", () => {
+  it("waterfall 环绕：钩子收相同参数，结果经返回值回传", () => {
     const ctx = new Context();
-    ctx.on("vendor/wf", (value, next) => `[${next(value)}]`);
-    const result = ctx.waterfall("vendor/wf", "v", (value) => `${value}!`);
-    expect(result).toBe("[v!]");
+    ctx.on("vendor/wf", (value, next) => `${value}+${next()}`);
+    ctx.on("vendor/wf", (value, next) => `${value}+${next()}`);
+    const result = ctx.waterfall("vendor/wf", "v", () => "end");
+    expect(result).toBe("v+v+end");
+  });
+
+  it("waterfall：同一钩子内 next() 调用两次抛错", () => {
+    const ctx = new Context();
+    ctx.on("vendor/wf", (_value, next) => {
+      next();
+      return next();
+    });
+    expect(() => ctx.waterfall("vendor/wf", "v", () => "end")).toThrow(
+      "next() called multiple times",
+    );
   });
 
   it("插件挂载 + 注册随 fiber 卸载可逆撤销", async () => {
