@@ -87,7 +87,7 @@ const MY_CHAT_MESSAGES_PREFIX = "chat/messages/";
 const MY_CHAT_SESSIONS_PREFIX = "chat/sessions/";
 const MY_TODOS_PREFIX = "todos/";
 
-/** 本地待办清单目录（与本地对话历史的隐藏目录约定一致，文件树/watcher 均排除）。 */
+/** 本地待办清单目录（与本地对话历史的隐藏目录约定一致，文件树排除）。 */
 const TODOS_DIR = ".atelyx/todos";
 
 // ===== 身份与客户端 =====

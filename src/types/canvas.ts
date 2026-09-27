@@ -250,12 +250,13 @@ export interface RebuildLinksResult {
   modified: number;
   /** 改写的链接处数 */
   links: number;
+  /** 实际写回修改的文件相对路径清单（与 modified 对应；前端据此投递软件内变更信号） */
+  rewritten: string[];
 }
 
 /**
  * 链接维护的副作用报告（rename_note / rename_folder 返回）：本次被 Rust 代写正文的 `.md` 相对路径清单。
- * 这些文件的自写回波被调用方的抑制窗口吞掉，订阅方只能据此作废其正文缓存
- * （见 `VaultActionEvent.rewritten`）。
+ * 这些文件没有独立的软件内变更信号，订阅方须据此作废其正文缓存（见 `VaultActionEvent.rewritten`）。
  */
 export interface LinkRewriteResult {
   rewritten: string[];

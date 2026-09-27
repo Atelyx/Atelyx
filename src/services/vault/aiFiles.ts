@@ -11,6 +11,7 @@ import { READ_WINDOW_DEFAULT_LINES } from "@/constants/tools";
 import { errText } from "@/types";
 import type { GlobVaultResult, GrepVaultResult, ListDirResult, ReadWindowResult } from "@/types";
 import { getActiveContentBackend } from "@/services/content/factory";
+import { emitVaultEvent } from "@/utils/vaultEvents";
 
 /** 读仓库内任意文本文件（相对仓库根路径；超出仓库根/不存在抛错，由调用方降级）。 */
 export async function readVaultFile(file: string): Promise<string> {
@@ -33,9 +34,15 @@ export async function readVaultFileWindow(
  * 写仓库内任意文本文件（原子写 + 自动建父目录）。
  * 打开的笔记会话按磁盘内容事实收敛：写的内容与本地未落盘正文一致则对齐基线并清脏；
  * 不一致且会话有待落盘输入时保留本地输入，由后续自动保存写盘（整文件写 = 后写者胜）。
+ *
+ * 写 `.md` 落盘后投递 `note:changed`（utils/vaultEvents 总线）：笔记域据此作废内容缓存并
+ * 收敛编辑面。事件源是应用自身的写路径（edit/append 经本函数单点覆盖），不涉及磁盘监听。
  */
 export async function writeVaultFile(file: string, content: string): Promise<void> {
   await getActiveContentBackend().writeFile(file, content);
+  if (file.toLowerCase().endsWith(".md")) {
+    emitVaultEvent({ kind: "note:changed", path: file });
+  }
 }
 
 /**

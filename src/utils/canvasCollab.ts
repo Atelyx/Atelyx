@@ -115,7 +115,7 @@ export function serializeCanvasSnapshot(
 
 /**
  * 运行时节点 → 协作补丁节点（`toFileNode` 的纯版本，无 `.md` 写副作用）：
- * - text 有 file = 笔记节点：正文在共享盘 `.md`（对端靠 watcher 同步），只携带结构 `{title, file}`
+ * - text 有 file = 笔记节点：正文在共享盘 `.md`（不随补丁携带，对端按需读取），只携带结构 `{title, file}`
  * - text 无 file = 画布内文本节点：`bodyMd` 随补丁内嵌携带
  * - conversation：嵌入 `messagesByConv[id]` 到 `data.messages`（接收端反解）
  * - group/link/table：与磁盘序列化一致（table 快照在 `.atb`，接收端自行补读）
@@ -316,26 +316,6 @@ export {
   resolveCollabLock as resolveLockState,
   type LockResolution,
 } from "@/services/collab/locks";
-
-/** 协作画布重命名抑制窗口（ms）：对端收到远端 title 补丁已同步新路径，watcher 收到
- * 旧路径 delete / 新路径 create 事件时在窗口内跳过 reload/conflict（内容已由补丁应用，
- * 含本地脏编辑不丢，磁盘分歧由下次保存按稳定 id 合并落盘收敛）。仿 utils/selfSave 的时间窗模式。 */
-const COLLAB_RENAME_SUPPRESS_MS = 10_000;
-const collabRenameAt = new Map<string, number>();
-
-/** 登记协作重命名涉及的文件路径（旧 + 新），watcher 据此跳过（见 canvasStore.applyRemoteCanvasPatch）。 */
-export function markCollabCanvasRename(paths: string[]): void {
-  const now = Date.now();
-  for (const [p, at] of collabRenameAt) {
-    if (now - at >= COLLAB_RENAME_SUPPRESS_MS) collabRenameAt.delete(p);
-  }
-  for (const p of paths) collabRenameAt.set(p, now);
-}
-
-/** watcher 画布分支判断该路径事件是否为协作重命名的回波（窗口内 = 跳过 reload/conflict）。 */
-export function isCollabCanvasRenamePath(path: string): boolean {
-  return Date.now() - (collabRenameAt.get(path) ?? 0) < COLLAB_RENAME_SUPPRESS_MS;
-}
 
 // ===== 历史版本摘要 / diff（画布历史面板可读化）=====
 

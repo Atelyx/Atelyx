@@ -40,7 +40,6 @@ import {
 import {
   computeCanvasCollabPatch,
   deserializeNodeForCollab,
-  markCollabCanvasRename,
   mergeMessages,
   resolveLockState,
   serializeCanvasSnapshot,
@@ -61,7 +60,6 @@ import {
 import { createPersistController, advanceBaselineRefs } from "@/utils/persist";
 import { registerDomainLifecycle } from "@/utils/kernelLifecycle";
 import { clearCanvasViewportCache } from "@/services/viewHandoff";
-import { markSelfSave } from "@/utils/selfSave";
 import { createUndoManager } from "@/utils/undoStack";
 import { inferImageMime } from "@/utils/whiteboard";
 import {
@@ -199,7 +197,7 @@ interface CanvasState {
   error: string | null;
   loading: boolean;
   saving: boolean;
-  /** 是否有未保存变更（watcher 判断能否安全自动重载的依据）。 */
+  /** 是否有未保存变更（能否安全自动重载的依据）。 */
   dirty: boolean;
   load: (id: string) => Promise<void>;
   /** 更新画布标题 */
@@ -338,8 +336,8 @@ interface CanvasState {
   redo: () => void;
   /** 保存当前快照到 undo 栈（清空 redo 栈）。内部方法，外部也可调用。 */
   pushUndo: () => void;
-  // ===== watcher：外部编辑实时同步 + 断链降级 =====
-  /** 查找引用某附件路径的 media 节点 id（对称 findTextNoteByFile，watcher 定位用）。 */
+  // ===== 引用文件读取刷新（打开/重读时读盘；读失败降级「文件缺失」占位） =====
+  /** 查找引用某附件路径的 media 节点 id（对称 findTextNoteByFile）。 */
   findMediaNoteByFile: (file: string) => string | null;
   /**
    * silent 刷新 text 节点正文（重读 `.md`，不 persist 避免回环）。
@@ -351,15 +349,9 @@ interface CanvasState {
    * 读失败 → markFileMissing。
    */
   refreshMediaContent: (file: string) => Promise<void>;
-  /**
-   * silent 刷新 table 节点快照（重读 `.atb`，不 persist 避免回环）。
-   * 读失败 → markFileMissing。无引用节点时 no-op。
-   * opts.snapshot：调用方已持有最新内容（打开表格自写回波用内存字段/行构建）→ 免整表读盘。
-   */
-  refreshTableContent: (file: string, opts?: { snapshot?: string }) => Promise<void>;
-  /** 标记某 file 引用缺失（删除/重命名事件用，不删节点保留位置与边）。 */
+  /** 标记某 file 引用缺失（读失败降级用，不删节点保留位置与边）。 */
   markFileMissing: (file: string, kind: "text" | "media" | "table") => void;
-  /** 重载当前画布（外部修改自动重载时调用，读磁盘最新内容）。 */
+  /** 重载当前画布（外部修改后手动重开/程序化重读时调用，读磁盘最新内容）。 */
   reloadFromDisk: () => Promise<void>;
   /** 立即落盘当前画布（切画布/切仓库/关窗前调用，防 debounce 窗口内丢改动；无脏不写）。 */
   flush: () => Promise<boolean>;
@@ -389,12 +381,6 @@ const undoMgr = createUndoManager<Snapshot>({
       messagesByConv: entry.messagesByConv,
     }),
 });
-
-// ===== 自写回放抑制（watcher）=====
-// 写盘/CRUD 完成时按「文件路径」记录时刻；watcher 收到同路径事件且在抑制窗口内 → 视为自写回放，
-// 不按外部改动触发重载。重命名/移动类操作经 Rust 扫盘改写多个 .atlx（前端不知全集），
-// 用全局标记兜底。.md/附件事件不抑制（刷新幂等，silent 更新不 persist）。
-// 实现见 utils/selfSave.ts（画布/表格/面板/配置共用，防职责挂靠本 store 造成跨 store 反向依赖）。
 
 /** 非 pushUndo 的数据变更后调用：作废 redo 栈。
  * 标准撤销语义——undo 后产生任何新变更，Ctrl+Y 不得再恢复旧快照（否则新消息会被 redo 从内存与磁盘抹掉）。 */
@@ -540,17 +526,8 @@ function isConversationLockedByPeer(conversationId: string): boolean {
   return owner !== null && !lockedByMe;
 }
 
-/** 协作对端是否同画布在线（presence.file 命中当前画布 + view=canvas）：磁盘写入是对端保存的
- *  广播回放（内容已应用进内存）时据此跳过重载，防用陈旧盘回退运行态或误触冲突条。 */
-export function hasCollabPeerOnCanvas(file: string): boolean {
-  return useCollabStore
-    .getState()
-    .peers.some((p) => p.presence?.file === file && p.presence?.view === "canvas");
-}
-
 /** 仓库文件重命名/移动后同步画布引用：磁盘 .atlx 已被 Rust 改写（rename_note/rename_table/
- *  rename_attachment 扫描全部 .atlx），内存不同步会在下次自动保存把旧路径回写覆盖，也会让
- *  watcher 旧路径事件误标节点缺失。
+ *  rename_attachment 扫描全部 .atlx），内存不同步会在下次自动保存把旧路径回写覆盖。
  *  newTitle 为 null = 移动（只改 file，标题不变）。 */
 export async function syncCanvasNodeRefs(
   oldPath: string,
@@ -797,15 +774,10 @@ async function persistNow(): Promise<void> {
   const { canvasId, canvasFile, canvasTitle, nodes, edges, messagesByConv } =
     useCanvasStore.getState();
   if (!canvasId || !canvasFile) return;
-  // 写盘成功后的统一收尾：先抑制回放（watcher 同路径事件 2s 窗口），再同步 title 改名后的落地
-  // 路径（不同步会让下一轮写已被改名删除的旧路径 → 404 回退全量写，凭空多出一个画布文件），
-  // 最后按本轮是否已被新变更接续决定收尾方式。written = false 表示空补丁（磁盘未动）。
+  // 写盘成功后的统一收尾：同步 title 改名后的落地路径（不同步会让下一轮写已被改名删除的
+  // 旧路径 → 404 回退全量写，凭空多出一个画布文件），最后按本轮是否已被新变更接续决定收尾方式。
+  // written = false 表示空补丁（磁盘未动）。
   const finish = (written: boolean, newFile?: string) => {
-    if (written) {
-      markSelfSave(
-        newFile && newFile !== canvasFile ? [canvasFile, newFile] : canvasFile,
-      );
-    }
     // 竞态守卫：await 期间可能已切换画布/清空状态（load 异步读盘），旧画布的写盘结果
     // 不得覆盖新画布的脏标记/路径（否则新画布下次保存写错文件、脏编辑被吞）
     const cur = useCanvasStore.getState();
@@ -1951,12 +1923,11 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
     set({ canvasTitle: title });
     try {
       await renameCanvasVault(canvasFile, title);
-      // 同目录改文件名：先算新路径再标记自写（旧路径删除 + 新路径创建两路事件一并抑制）
+      // 同目录改文件名：先算新路径
       const newFile = siblingPath(
         canvasFile,
         `${sanitizeFilename(title)}.atlx`,
       );
-      markSelfSave([canvasFile, newFile]);
       // 同步 canvasFile 到新路径（防下次保存写旧路径 → createdAt 重置）；
       // appStore.currentCanvasFile 同源（打开路径/文件面板高亮），一并同步
       set({ canvasFile: newFile });
@@ -2257,17 +2228,11 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
       data: data as unknown as Node["data"],
     });
   },
-  refreshTableContent: (file, opts) =>
-    refreshFileNodes(file, "table", async (targets) => {
-      const snapshot = opts?.snapshot ?? tableToSnapshotText(await readTableVault(file));
-      const ids = new Set(targets.map((t) => t.id));
-      return (n) => (ids.has(n.id) ? { snapshot, fileMissing: false } : null);
-    }),
   refreshTextContent: (file) =>
     refreshFileNodes(file, "text", async (targets) => {
       // 节点正文只是渲染缓存（编辑中正文以编辑会话为源），故一律读到磁盘最新再逐节点比对：
-      // 正文一致即不返回补丁（防每次 note:changed 都换节点引用）；并发两次读盘时较旧回落属瞬时现象，
-      // 下一次事件或重新进入编辑即自愈
+      // 正文一致即不返回补丁（防引用漂移）；并发两次读盘时较旧回落属瞬时现象，
+      // 重新打开或编辑即自愈
       const bodyMd = await readNote(file);
       const ids = new Set(targets.map((t) => t.id));
       return (n) =>
@@ -2279,7 +2244,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
     refreshFileNodes(file, "media", async (targets) => {
       const existing = targets[0]?.data as unknown as MediaData;
       const ids = new Set(targets.map((t) => t.id));
-      // 引用可能是普通仓库附件（watcher 通知）或未入库临时件：统一按引用读内容
+      // 引用可能是普通仓库附件或未入库临时件：统一按引用读内容
       const patch =
         existing.kind === "image"
           ? { thumb: await readAttachmentRef(file, "image" as const), fileMissing: false }
@@ -2939,7 +2904,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
   },
   resetCanvasState: () => {
     // 删除当前画布：取消未落盘保存定时器 + 中止流，再复位全部画布态——
-    // 否则残留 saveTimer 会重写已删的 .atlx、watcher 事件匹配旧 id 产生误导 reload
+    // 否则残留 saveTimer 会重写已删的 .atlx
     persistCtl.cancel();
     // 复位前捕获画布身份：临时附件按画布目录归属，回收需要旧 id + 旧路径（复位后两者都没了）。
     // 回收推后一轮（setTimeout 0）：本函数是切仓库的同步钩子，「清空须在任何 await 之前」是硬约束；
@@ -2996,8 +2961,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
       persistCtl.cancel();
       // 全量写回快照（回滚是显式覆盖，显式用户意图）
       await writeCanvasVault({ ...snapshot, title: currentTitle }, file);
-      // 抑制 watcher 回波，然后重载内存（重置脏标记与撤销栈）
-      markSelfSave(file);
+      // 重载内存（重置脏标记与撤销栈）
       set({ dirty: false });
       await get().reloadFromDisk();
       // 回滚记一条 restore 版本（滚动恢复点 + 审计「何时回滚到哪」）
@@ -3062,7 +3026,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
       .filter((n) => nodeIds.has(n.id) && n.type === "conversation")
       .map((n) => n.id);
     // 注意：不清理对话节点的任务清单侧车——本删除可 undo（pushUndo 恢复节点/消息），
-    // 若删侧车则 Ctrl+Z 后对话回来但清单永久丢失；孤儿侧车隐藏且无 watcher 回波，可接受。
+    // 若删侧车则 Ctrl+Z 后对话回来但清单永久丢失；孤儿侧车隐藏，可接受。
 
     // 删除流式/压缩中的对话节点：先 abort（否则请求无法再被中止，回调还会往已删节点写状态）
     if (deletedConvIds.length) {
@@ -3158,12 +3122,10 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
     const removedEdgeIds = new Set(patch.removedEdgeIds);
     // 反解远端节点（conversation 提取 messages / text 标记补读正文 / group 补 zIndex）
     const deserialized = patch.upsertNodes.map(deserializeNodeForCollab);
-    // 重命名（title 变化）：同步 canvasTitle + 路径漂移（canvasFile/appStore.currentCanvasFile）+
-    // 登记协作重命名抑制（watcher 旧 delete/新 create 事件跳过 reload/conflict，防本地脏编辑被重载打断）
+    // 重命名（title 变化）：同步 canvasTitle + 路径漂移（canvasFile/appStore.currentCanvasFile）
     let renameNewFile: string | null = null;
     if (patch.title && patch.title !== s.canvasTitle && s.canvasFile) {
       renameNewFile = siblingPath(s.canvasFile, `${sanitizeFilename(patch.title)}.atlx`);
-      markCollabCanvasRename([s.canvasFile, renameNewFile]);
     }
     set((st) => {
       // 与 Rust patch_canvas_vault 同语义：removed 过滤 → upsert 按 id 覆盖/追加
@@ -3175,7 +3137,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
           // - 文件型 text 节点：正文在共享盘 `.md`，补丁只带 { title, file } 不带 bodyMd。
           //   保留本端值后由 refreshTextContent 读盘补到最新（正文一致则跳过）。
           // - table 节点：快照摘要不在补丁（在共享盘 `.atb`），保留本端既有 snapshot 防画布
-          //   节点空白，后续由表格 watcher 分支 refreshTableContent 补读最新。
+          //   节点空白（对端表格变更不实时补读，重开画布时读盘）。
           // - media 节点：内容在附件（共享盘/临时区），补丁只带 `file` 引用；保留本端 thumb/body，
           //   缺失时由下方按引用补读（否则对端节点恒为占位）。
           if (node.type === "text" || node.type === "table" || node.type === "media") {
@@ -3242,7 +3204,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
     for (const { refreshBodyMdFile } of deserialized) {
       if (refreshBodyMdFile) void get().refreshTextContent(refreshBodyMdFile);
     }
-    // 远端媒体节点的附件在共享盘/临时区（补丁只带引用、且 watcher 过滤隐藏目录不会给临时区事件）：
+    // 远端媒体节点的附件在共享盘/临时区（补丁只带引用）：
     // 有引用而本端无内容即按引用补读一次
     const mediaRefs = deserialized
       .map(({ node }) => node)

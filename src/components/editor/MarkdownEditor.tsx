@@ -462,7 +462,7 @@ export function MarkdownEditor({
     view.dispatch({ effects: readOnlyEffect.of(readOnly) });
   }, [readOnly]);
 
-  // 外部同步：非用户编辑的 content 更新（watcher 外部修改 / 加载完成）。
+  // 外部同步：非用户编辑的 content 更新（软件内写落点信号 / 加载完成）。
   // 协作模式下不禁用：远端合入经 ytext 进视图（updateListener 上报），此处仅处理非协作场景。
   useEffect(() => {
     if (syncSeq === 0 || syncSeq === syncSeqRef.current) return;

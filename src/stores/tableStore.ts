@@ -1,7 +1,7 @@
 /**
  * 多维表格（.atb）运行时状态：当前打开的表格内容 + 防抖保存。
  *
- * 保存管线对齐 canvasStore：debounce 500ms 原子写 + `markSelfSave` 抑制 watcher 回放 +
+ * 保存管线对齐 canvasStore：debounce 500ms 原子写 +
  * 按稳定 id 的增量补丁（服务端/本地命令各自合并落盘）。
  * 窗口槽/恢复/重命名联动由页面层（ProjectWorkspacePage）编排，本 store 只管内容与持久化。
  * title 变更走 `vaultStore.renameTable`（Rust 改文件名 + 同步画布引用），本 store 不直接改 title。
@@ -28,7 +28,6 @@ import {
   versionContentAt,
   type HistoryVersion,
 } from "@/services/history";
-import { isSelfSaveEcho, markSelfSave } from "@/utils/selfSave";
 import { clearTableImageCache } from "@/services/tableImageCache";
 import { emitPluginEvent } from "@/services/cordis/events";
 import { setPluginTableRuntimeAccess, type PluginTableRuntimeAccess } from "@/services/cordis/access";
@@ -55,7 +54,6 @@ import {
   selectionRegion,
   styleEqual,
   summarizeTableSnapshot,
-  tablesEqual,
   type TableRegion,
 } from "@/utils/table";
 import type {
@@ -95,11 +93,8 @@ interface TableStoreState {
 
   /** 打开表格：读盘填充。失败时 error 提示（文件已删/损坏降级不崩溃）。 */
   load: (file: string) => Promise<void>;
-  /** 外部修改后重载磁盘最新内容（无本地改动时 watcher 调用）。 */
+  /** 重载磁盘最新内容（重开/程序化重读时调用）。 */
   reloadFromDisk: () => Promise<void>;
-  /** 外部写入后按内容比对决定是否重载（协作对端在场 / 自写回放 / 读盘与内存一致 → 跳过）。
-   *  仅当前打开且无脏改动时生效；读失败（文件被外部删除等）干净态下走 reloadFromDisk 的错误路径降级提示。 */
-  syncFromDiskIfChanged: (file: string) => Promise<void>;
   /** 清空运行时状态（切仓库/关窗口/删除文件时调用：取消保存定时器，防残留 timer 重写已删文件）。 */
   clear: () => void;
   /** 关闭错误提示。 */
@@ -385,13 +380,9 @@ const persistCtl = createPersistController({
     const versionAtStart = persistCtl.version;
     const { tableFile, id, fields, rows } = useTableStore.getState();
     if (!tableFile) return;
-    // 写盘成功后的统一收尾（markSelfSave 先于守卫：写已发生，watcher 回放须抑制）：
-    // 先同步 title 改名后的落地路径（不同步会让下一轮写已被改名删除的旧路径），
+    // 写盘成功后的统一收尾：先同步 title 改名后的落地路径（不同步会让下一轮写已被改名删除的旧路径），
     // 最后按本轮是否被新变更接续收尾。written = false 表示空补丁（磁盘未动）。
     const finish = (written: boolean, newFile?: string) => {
-      if (written) {
-        markSelfSave(newFile && newFile !== tableFile ? [tableFile, newFile] : tableFile);
-      }
       // 竞态守卫：await 期间可能已切换表格（load 替换了状态），旧表的写盘结果不得覆盖新表
       // 的脏标记/路径（否则新表下次保存写错文件、脏编辑被吞）
       if (useTableStore.getState().tableFile !== tableFile) return;
@@ -550,8 +541,7 @@ function resetTableState(error: string | null): void {
 }
 
 /** 协作对端是否同表在线：其内存/撤销栈可能仍引用附件文件（共享盘文件多人共用），
- * 本端单方回收会使其破图——有对端在线时跳过回收（磁盘堆积可接受，数据安全优先）；
- * 亦用于 watcher 判别「磁盘写入是对端保存的广播回放（内容已应用，不得重载回退）」。 */
+ * 本端单方回收会使其破图——有对端在线时跳过回收（磁盘堆积可接受，数据安全优先）。 */
 export function hasCollabPeerOnTable(file: string): boolean {
   return useCollabStore.getState().peers.some((p) => p.presence?.file === file);
 }
@@ -753,26 +743,6 @@ export const useTableStore = create<TableStoreState>((set, get) => ({
     if (!file) return;
     // load 会清 dirty 并重置落盘基线（磁盘即最新）
     await get().load(file);
-  },
-
-  syncFromDiskIfChanged: async (file) => {
-    // 协作对端同表在场 → 跳过读比重载：广播比落盘先到（编辑即达 vs 500ms 防抖落盘 + watcher 延迟），
-    // 磁盘合法落后于内存，重载会用陈旧盘回退已应用的对端补丁（闪烁/永久回退根因）
-    if (hasCollabPeerOnTable(file)) return;
-    // 自写回放（本端刚写盘，内容已知）跳过读比：省去每次保存后的整表读盘 + 深比
-    //（大表图片多时 .atb 可达数十 MB，保存后卡顿主因）
-    if (isSelfSaveEcho(file)) return;
-    try {
-      const disk = await readTableVault(file);
-      // 读盘期间可能已切表/产生脏改动：以最新状态守卫，防误重载覆盖新编辑
-      const s = get();
-      if (s.tableFile !== file || s.dirty) return;
-      if (tablesEqual(disk, { fields: s.fields, rows: s.rows })) return;
-      void s.reloadFromDisk();
-    } catch {
-      const s = get();
-      if (s.tableFile === file && !s.dirty) void s.reloadFromDisk();
-    }
   },
 
   clear: () => {
@@ -1343,8 +1313,7 @@ export const useTableStore = create<TableStoreState>((set, get) => ({
       persistCtl.cancel();
       // 全量写回快照（回滚是显式覆盖，显式用户意图）
       await writeTableVault(snapshot, file);
-      // 抑制 watcher 回波，然后重载内存（重置脏标记与撤销栈）
-      markSelfSave(file);
+      // 重载内存（重置脏标记与撤销栈）
       set({ dirty: false });
       await get().reloadFromDisk();
       // 回滚记一条 restore 版本（滚动恢复点 + 审计「何时回滚到哪」）

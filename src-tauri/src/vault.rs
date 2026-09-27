@@ -93,7 +93,7 @@ impl VaultState {
         Ok((session.root.clone(), session.exclude_folders.clone(), generation))
     }
 
-    /// 设置当前仓库会话（canonicalize 消除 `..`/符号链接，保证 safe_join 校验与 watcher 语义一致；
+    /// 设置当前仓库会话（canonicalize 消除 `..`/符号链接，保证 safe_join 校验语义一致；
     /// 用 dunce 去除 Windows `\\?\` 长路径前缀，保证存/回传给前端的路径格式统一）。
     /// 同时清空反链索引缓存并递增会话世代：不同仓库的索引不混用（查询时懒重建），
     /// 且锁外构建中的索引据世代判定作废（见 `generation`）。
@@ -209,7 +209,7 @@ fn normalize_rel_separators(rel: &str) -> std::borrow::Cow<'_, str> {
 }
 
 /// 相对路径是否应被过滤：任一路径段以 `.` 开头（隐藏目录/文件，如 `.atelyx`/`.git`/`.obsidian`）
-/// 或精确命中排除文件夹列表。文件树与 watcher 共用此判定，保证显示/监听语义一致。
+/// 或精确命中排除文件夹列表。文件树与全仓库扫描共用此判定，保证显示/扫描语义一致。
 pub fn is_excluded_rel(rel: &str, exclude: &[String]) -> bool {
     let rel = normalize_rel_separators(rel);
     rel.split('/').any(|seg| {
@@ -1038,8 +1038,7 @@ fn config_patch_lock(path: &Path) -> std::sync::Arc<Mutex<()>> {
 /// 删除「残留明文 key」的指令只在合并后仍不是同步模式时生效。
 ///
 /// 该指令来自前端**加载时**对文件的观察（见 stores/settingsStore 的 `strayTavilyKeyOnDisk`）：
-/// 期间文件可能已被别的设备改成 `syncKeys: true` 并写入合法 key（`.atelyx` 没有 watcher，
-/// 前端内存不会更新）。只认磁盘事实——合并后仍是同步模式就不接受这次删键，防把别的设备刚写入的
+/// 期间文件可能已被别的设备改成 `syncKeys: true` 并写入合法 key，而前端内存不会随之更新。只认磁盘事实——合并后仍是同步模式就不接受这次删键，防把别的设备刚写入的
 /// key 抹掉；用户显式关闭开关时补丁同时带 `syncKeys: false`，删除照常生效。
 fn guard_stale_key_deletion(base_json: &str, patch: &serde_json::Value) -> serde_json::Value {
     let Some(patch_obj) = patch.as_object() else {
@@ -1264,10 +1263,9 @@ pub fn write_folder_colors_file(
 
 // ===== AI 对话面板会话（.atelyx/对话历史/*.jsonl + *.meta.json）=====
 // 以对话历史文件夹为真相：每会话 = 一个消息 .jsonl（真追加式）+ 可选 .meta.json 元数据侧车，
-// 会话清单 = 扫目录（无整文件索引）——多设备并发新建/删除/改名互不覆盖、经 watcher 实时互见。
+// 会话清单 = 扫目录（无整文件索引）——多设备并发新建/删除/改名互不覆盖（各自追加自己的会话文件）。
 // 元数据侧车只在改名/换 Agent 时写；消息正文文件为纯追加（截断场景除外）。
-// 不含 API key（key 只进全局 keychain）。.atelyx/ 为隐藏目录（文件树不显示），
-// watcher 仅放行 对话历史/*.jsonl 与 *.meta.json（见 watcher.rs），其余自写无回环。
+// 不含 API key（key 只进全局 keychain）。.atelyx/ 为隐藏目录（文件树不显示）。
 
 /// 会话消息正文 .jsonl 目录（相对仓库根）。
 pub const CHAT_HISTORY_DIR: &str = ".atelyx/对话历史";
@@ -1562,8 +1560,7 @@ pub fn list_chat_sessions_file(root: &Path) -> Result<Vec<ChatSessionRow>, Strin
 // ===== 工具 =====
 
 /// 原子写：写唯一临时文件 → fsync → rename 覆盖目标 → fsync 父目录。
-/// - 临时名带纳秒时间戳 + 进程内序号：并发写同一目标不交叉同一 tmp；
-///   保持 `.tmp` 扩展名，让 watcher 能过滤自写副产物。
+/// - 临时名带纳秒时间戳 + 进程内序号：并发写同一目标不交叉同一 tmp。
 /// - 写后 sync_all：崩溃/断电时 rename 已提交但数据未刷盘会丢最后一次保存。
 /// - 任一步失败都清理临时文件，避免残留。
 /// pub(crate)：commands/global.rs 的全局配置/UI 状态写盘复用（保证全项目同一 durability 语义）。

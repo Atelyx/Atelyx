@@ -3,7 +3,7 @@
  *
  * 职责：持有全仓库文件树（`list_vault_tree`，跳过隐藏/排除目录），封装文件管理面板用的
  * 新建/重命名/删除，调 `services/vault`。canvases 列表仍由 `appStore` 维护（与画布 CRUD 同源）。
- * watcher 事件到达时调 `loadFiles` 刷新树。
+ * 文件动作（改名/移动/删除）完成后由本 store 刷新树；外部改动经打开/重读路径感知。
  *
  * 无固定 画布/笔记/附件 目录：`.md` 笔记可在任意文件夹，`file` 字段即相对仓库根路径
  * （如 `项目A/提示词.md`），不用目录名拼接。
@@ -39,8 +39,6 @@ import {
   renameTableVault,
   writeTableVault,
 } from "@/services/table";
-import { subscribeVaultFileChanges } from "@/services/watcher";
-import { isSelfSaveEcho, markSelfSave } from "@/utils/selfSave";
 import { useAppStore } from "@/stores/appStore";
 import { emitVaultEvent, emitVaultEventAsync, type VaultEvent } from "@/utils/vaultEvents";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -48,22 +46,12 @@ import { useUiStateStore } from "@/stores/uiStateStore";
 import { useNotificationStore } from "@/stores/notificationStore";
 import { baseName, dedupeFilename, parentDir, sanitizeFilename, siblingPath, stripExt } from "@/utils/filename";
 import { errText } from "@/types";
-import type { BacklinkRow, CanvasFileRow, DeleteFolderResult, FileTreeNode, RebuildLinksResult, TagRow, VaultFileChange } from "@/types";
+import type { BacklinkRow, CanvasFileRow, DeleteFolderResult, FileTreeNode, RebuildLinksResult, TagRow } from "@/types";
 
 /**
  * 文本节点 `.md` 文件名约定：`<sanitized-title>.md`（标题即文件名，无 id 后缀）。
  * 同名由 `dedupeFilename` 自动加序号（-2、-3）。重命名同步更新 .atlx 引用。
  */
-
-/**
- * 软件内正在进行的重命名（old → new）。renameNote/renameAttachment 记录，
- * watcher 收到旧路径的删除事件时据此跳过（file 引用已同步，防误标文件缺失）。
- * 谓词供领域订阅者判定（内核只提供事实，不代领域决定是否跳过）。
- */
-let pendingRename: { oldFile: string; newFile: string } | null = null;
-export function isPendingRenameOldPath(path: string): boolean {
-  return pendingRename?.oldFile === path;
-}
 
 /** 软件内路径迁移记录（旧路径 → 新路径；保留跨渲染周期，供窗口联动区分「改名/移动」与「真删除」）。
  *  按源路径逐条记录而非单槽：同时改名的两份文件互不覆盖（覆盖会让被顶掉那份的联动 effect 判成删除）。
@@ -109,14 +97,7 @@ export function lastTableRenameTarget(oldFile: string): string | null {
   return tableRenames.target(oldFile);
 }
 
-/** 软件内正在进行的文件夹重命名（old → new）。watcher 收到旧目录下文件事件时据此跳过（同 pendingRename）。 */
-let pendingFolderRename: { oldDir: string; newDir: string } | null = null;
-/** 路径是否位于最近一次软件内文件夹重命名的旧目录下（watcher 旧路径事件跳过重读）。 */
-export function isPendingFolderRenameOldPath(path: string): boolean {
-  return pendingFolderRename !== null && path.startsWith(`${pendingFolderRename.oldDir}/`);
-}
-
-/** 最近一次软件内文件夹重命名（保留跨渲染周期，供窗口联动区分「重命名」与「真删除」）。 */
+/** 软件内路径迁移记录（旧路径 → 新路径；保留跨渲染周期，供窗口联动区分「重命名」与「真删除」）。 */
 let lastFolderRename: { oldDir: string; newDir: string } | null = null;
 /** 文件若位于最近一次文件夹重命名的旧目录下，返回 remap 后新路径；否则 null。 */
 export function lastFolderRenameTarget(file: string): string | null {
@@ -139,15 +120,8 @@ function canvasRowOf(file: string): CanvasFileRow {
   return { id: "", title: stripExt(baseName(file)), file, updatedAt: 0 };
 }
 
-/** loadFiles 并发守卫：递增序号，仅最后一次发起者的扫描结果落盘（后台填充与 watcher 触发并发时防旧结果覆盖）。 */
+/** loadFiles 并发守卫：递增序号，仅最后一次发起者的扫描结果落盘（后台填充与并发触发时防旧结果覆盖）。 */
 let loadFilesSeq = 0;
-
-/** 文件监听订阅状态（startFileWatcher 幂等启停用）。
- * watcherGen = 订阅代数：每次启/停递增，在途订阅完成时校验代数一致才保留——
- * 防「enable → disable → enable」竞态下旧订阅结果覆盖新订阅、前一个 unlisten 丢失泄漏（双监听常驻）。 */
-let watcherActive = false;
-let watcherUnlisten: (() => void) | undefined;
-let watcherGen = 0;
 
 /**
  * 投递文件动作事件：领域反应失败不阻断内核簿记。
@@ -169,46 +143,38 @@ function notifySidecarFailure(what: string, error: unknown): void {
 }
 
 /**
- * renameNote/moveNote 共用核心：pendingRename 记录 + 服务调用 + 自写抑制 + 自动保存基准 +
- * 画布节点同步（text file）+ 树刷新 + 重命名记录。
+ * renameNote/moveNote 共用核心：服务调用 + 自动保存基准 + 画布节点同步（text file）+
+ * 树刷新 + 重命名记录。
  * newTitle 为 null = 移动（title 不变，只改 file）；否则 = 重命名（title 一并更新）。
  */
 async function applyNoteFileChange(oldFile: string, newFile: string, newTitle: string | null): Promise<void> {
-  pendingRename = { oldFile, newFile };
-  try {
-    const { rewritten } = await renameNoteSvc(oldFile, newFile);
-    // rename_note 会扫描更新所有 .atlx 的 file 引用（写 .atlx），标记自写抑制 watcher 误报
-    markSelfSave();
-    // 记录本次重命名（跨渲染保留）：工作区联动据此把打开的笔记切到新文件，而非误判删除关闭。
-    // 必须早于下面的列表刷新——联动 effect 由列表变化触发，晚记则 effect 先按「已删除」把笔记面板关掉，
-    // 且关掉后 currentNoteFile 为空、effect 早退，再也不会回到新文件（同 applyFolderFileChange 的时序）
-    noteRenames.remember(oldFile, newFile);
-    // 磁盘 .atlx 已变：画布订阅者据 `note:renamed|moved` 同步节点 file/title，
-    // 须在函数返回前完成（下一次自动保存依赖引用已更新）；撤销栈路径迁移同由笔记订阅者承担。
-    // `rewritten`（被代写正文的其它笔记）随事件下发：它们的自写回波被上面的抑制窗口吞掉，
-    // 订阅方只能据此作废其正文缓存。
-    await emitFileEvent({
-      kind: newTitle === null ? "note:moved" : "note:renamed",
-      oldPath: oldFile,
-      newPath: newFile,
-      newTitle,
-      rewritten,
-    });
-    await useVaultStore.getState().loadFiles();
-    // 侧文件先确保在新编码名下（存量旧编码侧文件迁移），再随重命名迁移——
-    // Rust remap_sideloads 只按新编码名查找，未迁移则旧文件在重命名后孤儿化
-    await migrateHistoryFile("note", oldFile).catch((e) => notifySidecarFailure("笔记重命名后的历史迁移", e));
-    // 历史侧文件随迁（新路径继续累积、旧版本不丢）；失败不阻塞重命名主流程
-    await remapSideloads(oldFile, newFile).catch((e) => notifySidecarFailure("笔记重命名后的历史迁移", e));
-    // 系统提示词标记按路径引用：重命名/移动后同步 promptNotes，防标记指向旧路径失效
-    await useSettingsStore.getState().remapPromptNote(oldFile, newFile);
-    // Agent 引用的提示词笔记同款同步（agents.json 的 systemPromptFile 指向旧路径失效）
-    await useSettingsStore.getState().remapAgentPromptNote(oldFile, newFile);
-    // 「上次打开」的笔记随路径更新（否则下次进入仓库尝试恢复旧路径）
-    useUiStateStore.getState().renameLastFile("note", oldFile, newFile);
-  } finally {
-    pendingRename = null;
-  }
+  const { rewritten } = await renameNoteSvc(oldFile, newFile);
+  // 记录本次重命名（跨渲染保留）：工作区联动据此把打开的笔记切到新文件，而非误判删除关闭。
+  // 必须早于下面的列表刷新——联动 effect 由列表变化触发，晚记则 effect 先按「已删除」把笔记面板关掉，
+  // 且关掉后 currentNoteFile 为空、effect 早退，再也不会回到新文件（同 applyFolderFileChange 的时序）
+  noteRenames.remember(oldFile, newFile);
+  // 磁盘 .atlx 已变：画布订阅者据 `note:renamed|moved` 同步节点 file/title，
+  // 须在函数返回前完成（下一次自动保存依赖引用已更新）；撤销栈路径迁移同由笔记订阅者承担。
+  // `rewritten`（被代写正文的其它笔记）随事件下发：订阅方据此作废其正文缓存。
+  await emitFileEvent({
+    kind: newTitle === null ? "note:moved" : "note:renamed",
+    oldPath: oldFile,
+    newPath: newFile,
+    newTitle,
+    rewritten,
+  });
+  await useVaultStore.getState().loadFiles();
+  // 侧文件先确保在新编码名下（存量旧编码侧文件迁移），再随重命名迁移——
+  // Rust remap_sideloads 只按新编码名查找，未迁移则旧文件在重命名后孤儿化
+  await migrateHistoryFile("note", oldFile).catch((e) => notifySidecarFailure("笔记重命名后的历史迁移", e));
+  // 历史侧文件随迁（新路径继续累积、旧版本不丢）；失败不阻塞重命名主流程
+  await remapSideloads(oldFile, newFile).catch((e) => notifySidecarFailure("笔记重命名后的历史迁移", e));
+  // 系统提示词标记按路径引用：重命名/移动后同步 promptNotes，防标记指向旧路径失效
+  await useSettingsStore.getState().remapPromptNote(oldFile, newFile);
+  // Agent 引用的提示词笔记同款同步（agents.json 的 systemPromptFile 指向旧路径失效）
+  await useSettingsStore.getState().remapAgentPromptNote(oldFile, newFile);
+  // 「上次打开」的笔记随路径更新（否则下次进入仓库尝试恢复旧路径）
+  useUiStateStore.getState().renameLastFile("note", oldFile, newFile);
 }
 
 /** renameAttachment/moveAttachment 共用核心（media 节点 file 同步归画布订阅者）。 */
@@ -217,96 +183,75 @@ async function applyAttachmentFileChange(
   newFile: string,
   kind: "attachment:renamed" | "attachment:moved",
 ): Promise<void> {
-  pendingRename = { oldFile, newFile };
-  try {
-    await renameAttachmentSvc(oldFile, newFile);
-    // rename_attachment 会扫描更新所有 .atlx 的 media 引用（写 .atlx），标记自写抑制 watcher 误报
-    markSelfSave();
-    // 磁盘 .atlx 已变：画布订阅者同步引用该附件的 media 节点 file（防回写覆盖旧值）
-    await emitFileEvent({
-      kind,
-      oldPath: oldFile,
-      newPath: newFile,
-    });
-    await useVaultStore.getState().loadFiles();
-  } finally {
-    pendingRename = null;
-  }
+  await renameAttachmentSvc(oldFile, newFile);
+  // 磁盘 .atlx 已变：画布订阅者同步引用该附件的 media 节点 file（防回写覆盖旧值）
+  await emitFileEvent({
+    kind,
+    oldPath: oldFile,
+    newPath: newFile,
+  });
+  await useVaultStore.getState().loadFiles();
 }
 
 /**
- * renameTable/moveTable 共用核心：pendingRename 记录 + 服务调用 + 自写抑制 + 树刷新 + 重命名记录；
+ * renameTable/moveTable 共用核心：服务调用 + 树刷新 + 重命名记录；
  * 画布 table 节点引用同步由画布订阅者据事件承担（模式同 applyNoteFileChange）。
  * 服务命令内部已按 title/新路径扫描更新全部 .atlx 的 table 节点引用。
  */
 async function applyTableFileChange(oldFile: string, newFile: string, newTitle: string | null): Promise<void> {
-  pendingRename = { oldFile, newFile };
-  try {
-    if (newTitle !== null) {
-      await renameTableVault(oldFile, newTitle);
-    } else {
-      await moveTableVault(oldFile, newFile);
-    }
-    markSelfSave();
-    // 记录本次重命名（必须早于下面的列表刷新，同 applyNoteFileChange：联动 effect 由列表变化触发）
-    tableRenames.remember(oldFile, newFile);
-    await emitFileEvent({
-      kind: newTitle === null ? "table:moved" : "table:renamed",
-      oldPath: oldFile,
-      newPath: newFile,
-      newTitle,
-    });
-    await useVaultStore.getState().loadFiles();
-    // 侧文件先确保在新编码名下，再随重命名迁移（同 applyNoteFileChange）
-    await migrateHistoryFile("table", oldFile).catch((e) => notifySidecarFailure("表格重命名后的历史迁移", e));
-    // 历史侧文件随迁（表格 kind 目录）；失败不阻塞重命名主流程
-    await remapSideloads(oldFile, newFile).catch((e) => notifySidecarFailure("表格重命名后的历史迁移", e));
-    // 「上次打开」的表格随路径更新（否则下次进入仓库尝试恢复旧路径）
-    useUiStateStore.getState().renameLastFile("table", oldFile, newFile);
-  } finally {
-    pendingRename = null;
+  if (newTitle !== null) {
+    await renameTableVault(oldFile, newTitle);
+  } else {
+    await moveTableVault(oldFile, newFile);
   }
+  // 记录本次重命名（必须早于下面的列表刷新，同 applyNoteFileChange：联动 effect 由列表变化触发）
+  tableRenames.remember(oldFile, newFile);
+  await emitFileEvent({
+    kind: newTitle === null ? "table:moved" : "table:renamed",
+    oldPath: oldFile,
+    newPath: newFile,
+    newTitle,
+  });
+  await useVaultStore.getState().loadFiles();
+  // 侧文件先确保在新编码名下，再随重命名迁移（同 applyNoteFileChange）
+  await migrateHistoryFile("table", oldFile).catch((e) => notifySidecarFailure("表格重命名后的历史迁移", e));
+  // 历史侧文件随迁（表格 kind 目录）；失败不阻塞重命名主流程
+  await remapSideloads(oldFile, newFile).catch((e) => notifySidecarFailure("表格重命名后的历史迁移", e));
+  // 「上次打开」的表格随路径更新（否则下次进入仓库尝试恢复旧路径）
+  useUiStateStore.getState().renameLastFile("table", oldFile, newFile);
 }
 
-/** renameFolder/moveFolder 共用核心：pendingFolderRename 记录 + 服务调用 + 自写抑制 + 树/列表刷新；
+/** renameFolder/moveFolder 共用核心：服务调用 + 树/列表刷新；
  *  画布打开路径与节点引用的前缀同步归画布订阅者（据 `folder:renamed|moved` 事件）。 */
 async function applyFolderFileChange(
   oldDir: string,
   newDir: string,
   kind: "folder:renamed" | "folder:moved",
 ): Promise<void> {
-  pendingFolderRename = { oldDir, newDir };
-  try {
-    const { rewritten } = await renameFolderSvc(oldDir, newDir);
-    // 立即记录本次重命名/移动（跨渲染保留）：目录已移动，后续任何渲染间隙的窗口联动
-    // 据此把打开的笔记切到新文件，而非误判删除关闭（放 loadFiles/loadList 之后
-    // 会留出 IPC await 间隙，联动 effect 先跑导致笔记窗口被误关）
-    lastFolderRename = { oldDir, newDir };
-    // 目录下全部历史侧文件随迁（解码文件名按前缀改写）；失败不阻塞重命名主流程
-    await remapSideloadsByDir(oldDir, newDir).catch((e) => notifySidecarFailure("文件夹重命名后的历史迁移", e));
-    // rename_folder 会扫描更新所有 .atlx 的目录前缀引用（写 .atlx），标记自写抑制 watcher 误报
-    markSelfSave();
-    // 当前画布文件若位于该目录下：先同步打开路径（旧路径已不存在，方法内部自带前缀守卫）；
-    // 画布订阅者再同步其运行时路径/节点前缀引用（磁盘 .atlx 已被 rename_folder 更新）
-    useAppStore.getState().renameCurrentCanvasFile(oldDir, newDir);
-    // `rewritten`（被代写正文的笔记，可能在目录前缀之外）随事件下发：自写回波被抑制窗口吞掉，
-    // 订阅方只能据此作废其正文缓存
-    await emitFileEvent({
-      kind,
-      oldDir,
-      newDir,
-      rewritten,
-    });
-    // 系统提示词标记 / 文件夹图标颜色 / 展开集合 / 上次打开文件：前缀同步（防标记与恢复指向失效路径）
-    await useSettingsStore.getState().remapPromptNotesByDir(oldDir, newDir);
-    await useSettingsStore.getState().remapAgentPromptNotesByDir(oldDir, newDir);
-    await useSettingsStore.getState().remapFolderColorsByDir(oldDir, newDir);
-    useUiStateStore.getState().renameByDir(oldDir, newDir);
-    await useVaultStore.getState().loadFiles();
-    await useAppStore.getState().loadList();
-  } finally {
-    pendingFolderRename = null;
-  }
+  const { rewritten } = await renameFolderSvc(oldDir, newDir);
+  // 立即记录本次重命名/移动（跨渲染保留）：目录已移动，后续任何渲染间隙的窗口联动
+  // 据此把打开的笔记切到新文件，而非误判删除关闭（放 loadFiles/loadList 之后
+  // 会留出 IPC await 间隙，联动 effect 先跑导致笔记窗口被误关）
+  lastFolderRename = { oldDir, newDir };
+  // 目录下全部历史侧文件随迁（解码文件名按前缀改写）；失败不阻塞重命名主流程
+  await remapSideloadsByDir(oldDir, newDir).catch((e) => notifySidecarFailure("文件夹重命名后的历史迁移", e));
+  // 当前画布文件若位于该目录下：先同步打开路径（旧路径已不存在，方法内部自带前缀守卫）；
+  // 画布订阅者再同步其运行时路径/节点前缀引用（磁盘 .atlx 已被 rename_folder 更新）
+  useAppStore.getState().renameCurrentCanvasFile(oldDir, newDir);
+  // `rewritten`（被代写正文的笔记，可能在目录前缀之外）随事件下发：订阅方据此作废其正文缓存
+  await emitFileEvent({
+    kind,
+    oldDir,
+    newDir,
+    rewritten,
+  });
+  // 系统提示词标记 / 文件夹图标颜色 / 展开集合 / 上次打开文件：前缀同步（防标记与恢复指向失效路径）
+  await useSettingsStore.getState().remapPromptNotesByDir(oldDir, newDir);
+  await useSettingsStore.getState().remapAgentPromptNotesByDir(oldDir, newDir);
+  await useSettingsStore.getState().remapFolderColorsByDir(oldDir, newDir);
+  useUiStateStore.getState().renameByDir(oldDir, newDir);
+  await useVaultStore.getState().loadFiles();
+  await useAppStore.getState().loadList();
 }
 
 /** 递归提取树中指定扩展名的文件（.md 笔记 / .atb 表格两个收集器共用，仅扩展名不同）。 */
@@ -382,7 +327,7 @@ interface VaultFileState {
   vaultTags: TagRow[] | null;
   /** 拉取全仓库标签词汇表（失败静默置 null，调用方降级为无候选）。 */
   loadVaultTags: () => Promise<void>;
-  /** 拉取全仓库文件树（watcher 事件/挂载时调用）。canvases 走 appStore.loadList。 */
+  /** 拉取全仓库文件树（挂载与文件动作后调用）。canvases 走 appStore.loadList。 */
   loadFiles: () => Promise<void>;
   /**
    * 新建空 `.md` 笔记，返回相对路径（`<dir>/<name>.md`，dir 空 = 根目录；同名自动加序号）。
@@ -497,11 +442,6 @@ interface VaultFileState {
   readAttachmentDataUrl: (file: string) => Promise<string>;
   /** 设置历史记录作者（进入仓库/身份变化时调用；画布/笔记/表格共用的署名）。 */
   historySetAuthor: (name: string, device: string) => void;
-  /**
-   * 仓库文件监听启停（幂等）：订阅 Rust watcher 事件并按 kind 分发到各 store。
-   * 工作区挂载且有激活仓库时 enable（App.tsx 调），无激活仓库 disable。分层：订阅副作用归 store，组件不直连 service。
-   */
-  startFileWatcher: (enabled: boolean) => void;
 }
 
 /**
@@ -857,62 +797,11 @@ export const useVaultStore = create<VaultFileState>((set, get) => ({
     }
   },
   rebuildInternalLinks: async () => {
-    // 代写产生的 watcher 事件未被自写抑制（此处不调 markSelfSave）：正文缓存由订阅方按事件作废
+    // 改写的笔记清单由 service 层投递软件内变更信号（正文缓存作废）
     return rebuildInternalLinksSvc();
   },
   readAttachmentDataUrl: (file) => readAttachmentDataUrlSvc(file),
 
   historySetAuthor: (name, device) =>
     setHistoryAuthor({ id: device || name, name: name || device || "用户", device: device || "" }),
-
-  startFileWatcher: (enabled) => {
-    // 幂等：同一状态重复调用不动作（App 的 view effect 可能多次触发相同值）
-    if (enabled === watcherActive) return;
-    if (!enabled) {
-      watcherGen++;
-      watcherUnlisten?.();
-      watcherUnlisten = undefined;
-      watcherActive = false;
-      return;
-    }
-    watcherActive = true;
-    const gen = ++watcherGen;
-    // 订阅是异步的（listen 往返），期间若被 disable/重新 enable（gen 已递增），
-    // 完成时按代数丢弃本次订阅——否则旧订阅覆盖 watcherUnlisten 导致前一个泄漏常驻
-    void (async () => {
-      const unlisten = await subscribeVaultFileChanges((c: VaultFileChange) => {
-        // 内核只做两件事：①不改文件树的内容写（自写回波）跳过全树重扫；②把变化投给领域订阅者。
-        // 领域反应（重载/冲突/预览刷新/外部编辑标记/会话合并）与「重命名中旧路径」的抑制判定
-        // 归各领域自身（各 kind 口径不同，统一过滤会改变行为）。
-        if (c.kind === "chat") {
-          // AI 对话历史（.atelyx/对话历史/*.jsonl|*.meta.json）：不刷文件树（.atelyx/ 不在树内）
-          emitVaultEvent({ kind: "chat:changed", path: c.path });
-          return;
-        }
-        if (c.kind === "note") {
-          emitVaultEvent({ kind: "note:changed", path: c.path });
-          if (!isSelfSaveEcho(c.path)) void get().loadFiles();
-          return;
-        }
-        if (c.kind === "table") {
-          emitVaultEvent({ kind: "table:changed", path: c.path });
-          if (!isSelfSaveEcho(c.path)) void get().loadFiles();
-          return;
-        }
-        if (c.kind === "canvas") {
-          // 「当前画布」判据与「是否刷列表/文件树」同属画布域知识（含重载/冲突决策），统一归画布订阅者
-          emitVaultEvent({ kind: "canvas:changed", path: c.path });
-          return;
-        }
-        // attachment：画布媒体节点预览刷新归画布订阅者；树结构可能变化，一律重扫
-        emitVaultEvent({ kind: "attachment:changed", path: c.path });
-        void get().loadFiles();
-      });
-      if (gen !== watcherGen) {
-        unlisten();
-      } else {
-        watcherUnlisten = unlisten;
-      }
-    })();
-  },
 }));

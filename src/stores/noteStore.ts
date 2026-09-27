@@ -22,7 +22,6 @@ import {
   type HistoryAuthor,
   type HistoryVersion,
 } from "@/services/history";
-import { markSelfSave } from "@/utils/selfSave";
 import { emitPluginEvent, runSerialHook } from "@/services/cordis/events";
 import { registerDomainLifecycle } from "@/utils/kernelLifecycle";
 import { useVaultStore } from "@/stores/vaultStore";
@@ -112,10 +111,10 @@ interface NoteState {
   noteHistoryLoad: (file: string) => Promise<HistoryVersion[]>;
   /** 回滚笔记到指定版本：写回磁盘 + 记一条 restore 版本；返回回滚后的全文（供编辑器重载），失败返回 null。 */
   noteHistoryRollback: (file: string, seq: number) => Promise<string | null>;
-  /** 外部修改的笔记（file → 递增序号）。编辑会话订阅感知外部变更：无未落盘输入时采纳磁盘内容，
-   *  有未落盘输入时保留本地输入（下一次自动保存按整文件写覆盖磁盘）。 */
+  /** 软件内 `.md` 写落点投递的变更信号（file → 递增序号）。编辑会话订阅收敛：
+   *  无未落盘输入时采纳磁盘内容，有未落盘输入时保留本地输入（下一次自动保存按整文件写覆盖磁盘）。 */
   externalNoteEdits: Record<string, number>;
-  /** watcher 收到 `.md` 外部变化事件时 bump 序号（软件内重命名旧路径事件由调用方跳过）。 */
+  /** `.md` 写落点投递变更信号时 bump 序号（见 aiFiles.writeVaultFile / rebuildInternalLinks）。 */
   markNoteExternallyEdited: (file: string) => void;
   /** 笔记编辑器保存状态（file → 状态；面板 header 读取，编辑器卸载/切文件时清除）。 */
   noteSaveStates: Record<string, NoteSaveStatus>;
@@ -168,8 +167,6 @@ export const useNoteStore = create<NoteState>((set, get) => ({
         return;
       }
       await writeNote(file, content);
-      // 标记路径级自写回波：watcher 收到同路径事件后跳过无关的全树重扫（内容编辑不改文件树）
-      markSelfSave(file);
       written = true;
     });
     if (!written) return { written: false, content };

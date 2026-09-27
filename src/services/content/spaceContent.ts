@@ -1102,6 +1102,7 @@ export function createSpaceContentBackend(serverUrl: string, spaceId: string): C
       const resolve = (name: string) => resolveLinkTarget(name, exact, byBasename);
       let modified = 0;
       let links = 0;
+      const rewritten: string[] = [];
       for (const file of res.paths) {
         let content: string;
         try {
@@ -1115,6 +1116,7 @@ export function createSpaceContentBackend(serverUrl: string, spaceId: string): C
           try {
             await writeFileContent(file, next);
             modified += 1;
+            rewritten.push(file);
           } catch (e) {
             // 单文件写回失败跳过不阻塞其余（与本地「重建写回失败跳过该文件」同口径），
             // 但失败本身不可静默：留下可定位日志
@@ -1122,7 +1124,7 @@ export function createSpaceContentBackend(serverUrl: string, spaceId: string): C
           }
         }
       }
-      return { scanned: res.paths.length, modified, links };
+      return { scanned: res.paths.length, modified, links, rewritten };
     },
 
     // ===== 历史侧文件迁移（服务端在内容改名/移动时自行迁移，客户端无需动作）=====

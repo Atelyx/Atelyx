@@ -2,7 +2,7 @@
  * 表格工具纯函数测试（utils/table）。
  *
  * 覆盖历史版本可读化（`diffTableVersions`/`summarizeTableSnapshot`）、图片值归一化与双形态
- * 比对、磁盘/内存内容比对（`tablesEqual`）、选中区域归约与复制粘贴
+ * 比对、选中区域归约与复制粘贴
  * （`selectionRegion`/`parseTsv`/`buildRegionTsv`/`applyPasteGrid`）。
  */
 import { describe, it, expect } from "vitest";
@@ -17,7 +17,6 @@ import {
   parseTsv,
   selectionRegion,
   summarizeTableSnapshot,
-  tablesEqual,
 } from "./table";
 import type { CellValue, CollabPeer, TableField, TableRow } from "@/types";
 
@@ -122,52 +121,7 @@ describe("cellValueEqual 图片值口径", () => {
   });
 });
 
-describe("tablesEqual（watcher 回放判别：磁盘 vs 内存）", () => {
-  const fields = [field("f1", "镜号"), field("f2", "状态")];
-  const rows = [row("r1", { f1: "01", f2: "待拍" })];
-
-  it("一致 → true（自写回放/已广播应用的对端写入，跳过重载）", () => {
-    expect(tablesEqual({ fields, rows }, { fields, rows })).toBe(true);
-  });
-
-  it("磁盘落后于内存（对端陈旧保存缺最新单元格）→ false——这正是协作闪烁的触发条件，watcher 靠协作对端守卫跳过重载", () => {
-    // 内存已应用对端广播（f2 已改为「已拍」），磁盘还是对端保存捕获的旧值（「待拍」）
-    const disk = { fields, rows: [row("r1", { f1: "01", f2: "待拍" })] };
-    const memory = { fields, rows: [row("r1", { f1: "01", f2: "已拍" })] };
-    expect(tablesEqual(disk, memory)).toBe(false);
-  });
-
-  it("磁盘新于内存（漏收广播/外部修改新增单元格）→ false——仍需重载收敛", () => {
-    const disk = { fields, rows: [row("r1", { f1: "01", f2: "已拍" })] };
-    const memory = { fields, rows: [row("r1", { f1: "01", f2: "待拍" })] };
-    expect(tablesEqual(disk, memory)).toBe(false);
-  });
-
-  it("行序变化 → false（顺序是数组属性，引用 diff 不可见，须显式比对）", () => {
-    const disk = { fields, rows: [row("r2", { f1: "02" }), row("r1", { f1: "01" })] };
-    const memory = { fields, rows: [row("r1", { f1: "01" }), row("r2", { f1: "02" })] };
-    expect(tablesEqual(disk, memory)).toBe(false);
-  });
-
-  it("undefined 键 ≈ 缺失键 → true（序列化丢空/缺省键不误判为外部修改）", () => {
-    const disk = { fields, rows: [{ id: "r1", values: { f1: "01", f2: undefined } }] };
-    const memory = { fields, rows: [row("r1", { f1: "01" })] };
-    expect(tablesEqual(disk, memory)).toBe(true);
-  });
-
-  it("行高/列宽缺省 ≈ 显式 undefined → true；实际不同 → false", () => {
-    const disk = { fields, rows: [{ id: "r1", values: { f1: "01" }, height: 40 }] };
-    const memory = { fields, rows: [{ id: "r1", values: { f1: "01" } }] };
-    expect(tablesEqual(disk, memory)).toBe(false);
-    const disk2 = { fields: [field("f1", "镜号")], rows: [] };
-    const memory2 = { fields: [{ ...field("f1", "镜号"), width: undefined }], rows: [] };
-    expect(tablesEqual(disk2, memory2)).toBe(true);
-  });
-});
-
-describe("图片值归一化与双形态比对", () => {
-  const imgField: TableField = { id: "f1", name: "分镜图", type: "image" };
-
+describe("图片值归一化", () => {
   it("normalizeTableRow：旧形态 string[] → { images }；新形态/无图片值行原引用保留（零拷贝）", () => {
     const oldRow = { id: "r1", values: { f1: ["img-1.png", "img-2.png"] } } as unknown as TableRow;
     expect(normalizeTableRow(oldRow).values.f1).toEqual({ images: ["img-1.png", "img-2.png"] });
@@ -175,43 +129,6 @@ describe("图片值归一化与双形态比对", () => {
     expect(normalizeTableRow(newRow)).toBe(newRow);
     const plain: TableRow = { id: "r3", values: { f2: "文本" } };
     expect(normalizeTableRow(plain)).toBe(plain);
-  });
-
-  it("tablesEqual：磁盘旧形态 string[] vs 内存新形态 → true（自写回波不得误判为外部修改触发重载）", () => {
-    // 磁盘原始 JSON（旧形态）在运行时被标注为 TableRow，此处断言表达同一事实
-    const disk = {
-      fields: [imgField],
-      rows: [{ id: "r1", values: { f1: ["img-1.png"] } }],
-    } as unknown as { fields: TableField[]; rows: TableRow[] };
-    const memory = {
-      fields: [imgField],
-      rows: [{ id: "r1", values: { f1: { images: ["img-1.png"] } } }],
-    };
-    expect(tablesEqual(disk, memory)).toBe(true);
-  });
-
-  it("tablesEqual：九宫格标记差异 → false（display 变化须落盘/同步）", () => {
-    const disk = { fields: [imgField], rows: [{ id: "r1", values: { f1: { images: ["img-1.png"] } } }] };
-    const memory = {
-      fields: [imgField],
-      rows: [{ id: "r1", values: { f1: { images: ["img-1.png"], display: "grid" as const } } }],
-    };
-    expect(tablesEqual(disk, memory)).toBe(false);
-  });
-
-  it("tablesEqual：空图（磁盘旧形态 [] vs 内存空图对象）→ true；图片列表不同 → false", () => {
-    const disk = {
-      fields: [imgField],
-      rows: [{ id: "r1", values: { f1: [] } }],
-    } as unknown as { fields: TableField[]; rows: TableRow[] };
-    const memory = { fields: [imgField], rows: [{ id: "r1", values: { f1: { images: [] } } }] };
-    expect(tablesEqual(disk, memory)).toBe(true);
-    const disk2 = {
-      fields: [imgField],
-      rows: [{ id: "r1", values: { f1: ["img-1.png"] } }],
-    } as unknown as { fields: TableField[]; rows: TableRow[] };
-    const memory2 = { fields: [imgField], rows: [{ id: "r1", values: { f1: { images: ["img-2.png"] } } }] };
-    expect(tablesEqual(disk2, memory2)).toBe(false);
   });
 });
 

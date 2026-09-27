@@ -49,11 +49,6 @@ keyring = "4"
 # rustls-tls 避免 Linux 打包依赖系统 openssl。
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
-# 仓库文件监听（外部编辑实时同步 + 断链降级）
-# notify-debouncer-mini 合并原子写/编辑器多次保存的噪声事件（300ms 窗口）
-notify = "6"
-notify-debouncer-mini = "0.4"
-
 # Windows 路径归一化：std::fs::canonicalize 在 Windows 返回 `\\?\` 长路径前缀，
 # dunce::canonicalize 去除前缀、保持标准 Windows 路径（E:\xxx），跨平台同语义
 dunce = "1"

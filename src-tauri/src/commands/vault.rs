@@ -59,7 +59,6 @@ const READ_WINDOW_MAX_BYTES: usize = 200_000;
 /// edit_file 等内部「整读全文再改」路径的宽松防御上限（防对超大文件整读回填上下文拖死；
 /// 非强制拒绝，仅防病态输入）。分页工具 read_file 走 read_vault_file_window，不受此限。
 const EDIT_READ_MAX_BYTES: usize = 5_000_000;
-use crate::watcher;
 
 /// `open_vault` 返回的仓库信息。
 #[derive(Serialize)]
@@ -82,8 +81,8 @@ pub struct VaultConfigRead {
     pub corrupt_backup: Option<String>,
 }
 
-/// 打开仓库：设当前仓库根 + 初始化目录结构 + 启动文件监听 + 返回仓库信息。
-/// root 经 dunce::canonicalize 存储（去 Windows `\\?\` 前缀，统一路径格式，与 watcher/路径校验语义一致）。
+/// 打开仓库：设当前仓库根 + 初始化目录结构 + 返回仓库信息。
+/// root 经 dunce::canonicalize 存储（去 Windows `\\?\` 前缀，统一路径格式，与路径校验语义一致）。
 #[tauri::command]
 pub fn open_vault(
     path: String,
@@ -95,7 +94,7 @@ pub fn open_vault(
         return Err(format!("仓库路径不是文件夹：{}", path));
     }
     let root = dunce::canonicalize(&raw).map_err(|e| format!("仓库路径不可达：{} ({e})", path))?;
-    let (exclude_folders, corrupt_backup) = activate_vault(&app, &state, &root)?;
+    let (exclude_folders, corrupt_backup) = activate_vault(&state, &root)?;
     // 反链/标签索引后台预热：把唯一一次全量扫描（读全部 .md 提取引用/标签）塞进「进入仓库」阶段，不阻塞打开；
     // 失败静默——首次查询会懒构建兜底（索引幂等可重建）。锁 poison 在此同样容忍：后台预热非关键路径。
     // 世代与 root 必须成对取得（`session_snapshot` 在同一把 session 锁内读三者）：快速连续切仓库时
@@ -445,7 +444,8 @@ pub fn scan_vault_tags(state: State<'_, VaultState>) -> Result<Vec<TagRow>, Stri
     with_tag_index(&state, &root, &exclude, generation, aggregate_tag_counts)
 }
 
-/// 重建内部链接的结果统计。
+/// 重建内部链接的结果统计。`rewritten` = 实际写回修改的文件相对路径清单，
+/// 前端据此向笔记域投递软件内变更信号（作废内容缓存）。
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RebuildLinksResult {
@@ -455,6 +455,8 @@ pub struct RebuildLinksResult {
     pub modified: u32,
     /// 改写的链接处数
     pub links: u32,
+    /// 实际写回修改的文件相对路径清单（与 modified 对应）
+    pub rewritten: Vec<String>,
 }
 
 /// 一键重建内部链接（设置 → 编辑器）：全仓库 .md 统一规范为标准 Markdown 写法
@@ -485,6 +487,7 @@ pub fn rebuild_internal_links(
         |name: &str| resolve_link_target(name, &exact, &by_basename);
     let mut modified = 0u32;
     let mut links = 0u32;
+    let mut rewritten: Vec<String> = vec![];
     for (rel, path) in &files {
         let content = match std::fs::read_to_string(path) {
             Ok(c) => c,
@@ -498,12 +501,14 @@ pub fn rebuild_internal_links(
                 continue;
             }
             modified += 1;
+            rewritten.push(rel.clone());
         }
     }
     Ok(RebuildLinksResult {
         scanned: files.len() as u32,
         modified,
         links,
+        rewritten,
     })
 }
 
@@ -774,7 +779,7 @@ pub(crate) fn list_dir_entries(dir: &Path, max: usize, skip_hidden: bool) -> Res
 }
 
 /// 链接维护的副作用报告：本次被改写的 `.md` 相对路径清单。
-/// 前端据此作废这些笔记的正文缓存（它们的 watcher 回波落在自写抑制窗口内，拿不到变更事件）。
+/// 前端据此作废这些笔记的正文缓存（被代写文件没有独立的软件内变更信号）。
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LinkRewriteResult {
@@ -1300,22 +1305,16 @@ fn vault_info_from(root: PathBuf, config_corrupt_backup: Option<String>) -> Vaul
     }
 }
 
-/// 仓库激活公共流程（open_vault）：读生效配置 → init 目录 →
-/// 先启监听再切 state（watcher 失败降级为警告，不阻塞打开——大仓库递归监听可能超 OS watch
-/// 上限（Linux inotify max_user_watches），仓库仍可打开，实时同步降级为手动刷新）。
+/// 仓库激活公共流程（open_vault）：读生效配置 → init 目录 → 切 state。
 /// root 必须已完成 dunce::canonicalize（调用方先归一化再激活，保证存/回传格式统一）。
 /// 配置损坏时备份名上传（前端据此提示；只读不写——config.json 由前端字段级补丁单一写盘）。
 fn activate_vault(
-    app_handle: &AppHandle,
     state: &State<'_, VaultState>,
     root: &Path,
 ) -> Result<(Vec<String>, Option<String>), String> {
     let (config, corrupt_backup) = read_vault_config_with_backup(root)?;
     let exclude_folders = config.exclude_folders.clone().unwrap_or_default();
     init_vault_dirs(root)?;
-    if let Err(e) = watcher::start(app_handle.clone(), root.to_path_buf(), exclude_folders.clone()) {
-        eprintln!("文件监听启动失败（仓库仍可打开，实时同步降级）：{e}");
-    }
     state.set(root.to_path_buf(), exclude_folders.clone())?;
     Ok((exclude_folders, corrupt_backup))
 }

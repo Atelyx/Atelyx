@@ -29,6 +29,7 @@ import {
   serializeEdgeForCollab,
 } from "@/utils/canvasCollab";
 import { coalesceAgentSteps, normalizeAgentSteps } from "@/utils/agentSteps";
+import { emitVaultEvent } from "@/utils/vaultEvents";
 import { readTableVault } from "@/services/table";
 import {
   type CanvasFile,
@@ -127,9 +128,14 @@ export async function scanVaultTags(): Promise<TagRow[]> {
   return getActiveContentBackend().scanTags();
 }
 
-/** 一键重建内部链接：全仓库 .md 统一规范为 `[名](基于仓库的路径)`（字节级跨度改写 + 原子写）。 */
+/** 一键重建内部链接：全仓库 .md 统一规范为 `[名](基于仓库的路径)`（字节级跨度改写 + 原子写）。
+ *  对实际改写的文件逐个投递 `note:changed`（软件内写落点信号，笔记域据此作废内容缓存）。 */
 export async function rebuildInternalLinks(): Promise<RebuildLinksResult> {
-  return getActiveContentBackend().rebuildLinks();
+  const result = await getActiveContentBackend().rebuildLinks();
+  for (const file of result.rewritten) {
+    emitVaultEvent({ kind: "note:changed", path: file });
+  }
+  return result;
 }
 
 /** 写 .md 笔记（原子写，自动建父目录）。 */
@@ -140,7 +146,7 @@ export async function writeNote(file: string, content: string): Promise<void> {
 /**
  * 重命名 .md 笔记 + 扫描所有 .atlx 更新 text 节点 file 引用（链接维护）。
  * 返回被改写的 `.md` 相对路径清单（内部链接归一化，见 `LinkRewriteResult`）——
- * 调用方据此作废这些笔记的正文缓存（其 watcher 回波被自写抑制窗口吞掉）。
+ * 这些代写没有独立变更信号，调用方据此把清单随改名事件下发，订阅方据其作废正文缓存。
  * @param oldFile 相对仓库根路径，如 `笔记/old.md`
  * @param newFile 相对仓库根路径，如 `笔记/new.md`
  */

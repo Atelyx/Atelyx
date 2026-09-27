@@ -2,7 +2,6 @@ import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { ReactFlowProvider } from "@xyflow/react";
 import { useAppStore } from "@/stores/appStore";
 import { useSettingsStore } from "@/stores/settingsStore";
-import { useVaultStore } from "@/stores/vaultStore";
 import { usePluginStore } from "@/stores/pluginStore";
 import { PanelWindowRoot } from "@/components/layout/PanelWindowRoot";
 import { ErrorBoundary } from "@/components/common/ErrorBoundary";
@@ -71,7 +70,6 @@ function PluginPageMount({ pageId }: { pageId: string }) {
 /** 主窗口应用主体（工作区 + booting 流程）。 */
 function MainWorkspaceApp() {
   const pluginPage = useAppStore((s) => s.pluginPage);
-  const vaultRoot = useAppStore((s) => s.vaultRoot);
   const init = useAppStore((s) => s.init);
   const selectSpace = useAppStore((s) => s.selectSpace);
   const loadSettings = useSettingsStore((s) => s.load);
@@ -96,12 +94,6 @@ function MainWorkspaceApp() {
   useEffect(() => {
     useAppStore.getState().installCloseGuard();
   }, []);
-
-  // 仓库文件监听：激活仓库期间订阅；无激活仓库（树区空态）时无 root 可监听，保持停止。
-  // 订阅副作用归 vaultStore（分层：组件不直连 service），store 内幂等
-  useEffect(() => {
-    useVaultStore.getState().startFileWatcher(vaultRoot !== null);
-  }, [vaultRoot]);
 
   // 应用挂载：init 读取最近仓库，loadSettings 加载应用级外观配置，
   // selectVault 进入仓库后由 loadVaultConfig 填充仓库级配置（AI 供应商/搜索源 + keychain key）。

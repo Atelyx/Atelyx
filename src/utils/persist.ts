@@ -8,7 +8,7 @@
  * 并发时后到者会基于前一次写盘之前的旧内容重算增量，丢掉前一次已落盘的内容。排队后每次写读到的
  * 都是前一次落盘之后的最新状态与基线。
  *
- * 各 store 保留自有语义（dirty 判定 / 写盘基线 / watcher 回环抑制 / 仓库归属校验），写在 persist 回调里。
+ * 各 store 保留自有语义（dirty 判定 / 写盘基线 / 仓库归属校验），写在 persist 回调里。
  */
 export interface PersistController {
   /** 变更后调度：代数 +1 并重置 debounce timer（timer 到点调 persist()）。 */

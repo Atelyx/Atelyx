@@ -938,7 +938,7 @@ describe("rebuildLinks", () => {
       },
     });
     const r = await backend().rebuildLinks();
-    expect(r).toEqual({ scanned: 3, modified: 1, links: 3 });
+    expect(r).toEqual({ scanned: 3, modified: 1, links: 3, rewritten: ["d.md"] });
     expect(server.files.get("d.md")).toBe(
       [
         "见 [note-a](note-a.md) 与 [别名](notes/note-b.md) 与 [missing]()",

@@ -146,8 +146,6 @@ export type {
   TableCreateResult,
 } from "./table";
 
-export type { VaultFileChange } from "./watcher";
-
 export type {
   CollabSelection,
   CollabPresence,

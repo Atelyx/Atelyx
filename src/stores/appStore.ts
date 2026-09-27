@@ -27,7 +27,6 @@ import { useVaultStore } from "@/stores/vaultStore";
 import { useUiStateStore } from "@/stores/uiStateStore";
 import { useCollabStore } from "@/stores/collabStore";
 import { migrateHistoryFile } from "@/services/history";
-import { markSelfSave } from "@/utils/selfSave";
 import {
   flushAllDomains,
   notifyVaultEntered,
@@ -803,7 +802,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       console.error("新建画布失败", e);
       throw e;
     }
-    markSelfSave(created.file);
     await refreshCanvasAndTree();
     return { id: created.id, file: created.file, title: actual };
   },
@@ -821,8 +819,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       throw e;
     }
     const newFile = siblingPath(row.file, `${sanitizeFilename(actual)}.atlx`);
-    // 重命名后文件名变了：先算新路径再标记自写（旧路径删除 + 新路径创建事件一并抑制）
-    markSelfSave([row.file, newFile]);
     // 侧文件先确保在新编码名下，再随重命名迁移（同笔记/表格路径）
     await migrateHistoryFile("canvas", row.file).catch((e) => notifySidecarFailure("画布重命名后的历史迁移", e));
     // 历史侧文件随迁（画布 kind 目录）；失败不阻塞重命名主流程
@@ -847,7 +843,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       console.error("移动画布失败", e);
       throw e;
     }
-    markSelfSave([row.file, newFile]);
     // 侧文件先确保在新编码名下，再随移动迁移（同 renameCanvas）
     await migrateHistoryFile("canvas", row.file).catch((e) => notifySidecarFailure("画布移动后的历史迁移", e));
     // 历史侧文件随迁（画布 kind 目录）；失败不阻塞移动主流程
@@ -862,19 +857,16 @@ export const useAppStore = create<AppState>((set, get) => ({
     // 同名自动加序号（同目录），返回实际标题供 UI 提醒
     const siblings = canvasesInDir(parentDir(row.file)).map((c) => c.title);
     const actual = dedupeFilename(row.title, siblings);
-    let target: string;
     try {
       // 读磁盘原文 → 重写 id/title → 写新文件（write 的落盘路径由 title 决定，与 siblingPath 一致）
       const canvas = await readCanvasVault(row.file);
       canvas.id = crypto.randomUUID();
       canvas.title = actual;
-      target = siblingPath(row.file, `${sanitizeFilename(actual)}.atlx`);
-      await writeCanvasVault(canvas, target);
+      await writeCanvasVault(canvas, siblingPath(row.file, `${sanitizeFilename(actual)}.atlx`));
     } catch (e) {
       console.error("复制画布失败", e);
       throw e;
     }
-    markSelfSave(target);
     await refreshCanvasAndTree();
     return actual;
   },
@@ -886,10 +878,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       console.error("删除失败", e);
       throw e;
     }
-    markSelfSave(row.file);
     const { currentCanvasId, currentCanvasFile } = get();
     // 删除的是当前画布（id 或路径命中——AI 工具等调用方可能只有 file 无真实 id）：清空 canvasStore
-    // （含未落盘 saveTimer / 进行中的流），否则残留 timer 会重写已删文件、watcher 事件匹配旧 id 产生误导 reload
+    // （含未落盘 saveTimer / 进行中的流），否则残留 timer 会重写已删文件
     const isCurrent = row.id === currentCanvasId || row.file === currentCanvasFile;
     // 当前画布复位运行时（防残留 saveTimer 重写已删文件）：经仓库事件分发（handler 按当前文件匹配，
     // 须在下方置空 currentCanvasFile 前发出）
@@ -933,7 +924,6 @@ export const useAppStore = create<AppState>((set, get) => ({
     const siblings = canvasesInDir(parentDir(file)).map((c) => c.title);
     try {
       const row = await convertWhiteboardToAtlx(file, title, siblings);
-      markSelfSave(row.file);
       // 转换生成了新 .atlx：刷新两个数据源后打开新画布
       await refreshCanvasAndTree();
       get().openCanvas(row);

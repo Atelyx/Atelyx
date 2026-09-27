@@ -11,7 +11,6 @@
  *   按需加载仓库级配置/文件树/AI 会话）
  * - 关闭：installPanelCloseGuard（flush 托管视图 → notifyPanelClosed 上报 Rust → 销毁，守卫收在 panelStore）
  * - 外观/配置：与主窗口一致（useAppearance + settingsStore.load() 读盘）
- * - watcher：订阅仓库文件变化（画布/表格/笔记跨窗口写盘经 watcher + 乐观合并收敛）
  */
 import { useEffect, useMemo } from "react";
 import { LayoutTemplate, TriangleAlert } from "lucide-react";
@@ -20,7 +19,6 @@ import { titleOfTabs, usePanelStore } from "@/stores/panelStore";
 import { usePluginStore } from "@/stores/pluginStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useUiStateStore } from "@/stores/uiStateStore";
-import { useVaultStore } from "@/stores/vaultStore";
 import { PanelTabBar } from "@/components/layout/PanelTabBar";
 import { ViewHost, ViewStatusIndicator } from "@/components/layout/ViewHost";
 import { DragGhost } from "@/components/layout/DragGhost";
@@ -44,18 +42,13 @@ export function PanelWindowRoot() {
   const toggleMaximizeWindow = useAppStore((s) => s.toggleMaximizeWindow);
   const closeWindow = useAppStore((s) => s.closeWindow);
 
-  // 初始化：面板角色 bootstrap（布局快照 + 广播订阅）+ 外观/配置读盘 + 插件运行时 + watcher 订阅
+  // 初始化：面板角色 bootstrap（布局快照 + 广播订阅）+ 外观/配置读盘 + 插件运行时
   useEffect(() => {
     void usePanelStore.getState().initPanel();
     void useSettingsStore.getState().load();
     // 撕裂窗口是独立 webview：本窗口的插件运行时（各行视图贡献）须各自 load 拉起——
     // 切仓库时 panelStore 会再按 open-file-changed load，此处覆盖冷启动（boot 自动进仓前恢复的窗口）。
     void usePluginStore.getState().load().catch((e) => console.error("撕裂窗口加载插件失败", e));
-  }, []);
-
-  useEffect(() => {
-    useVaultStore.getState().startFileWatcher(true);
-    return () => useVaultStore.getState().startFileWatcher(false);
   }, []);
 
   // 关闭守卫（收进 panelStore.installPanelCloseGuard：flush 托管视图 → 上报关闭 → 销毁；幂等防重复订阅）

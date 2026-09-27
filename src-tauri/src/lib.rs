@@ -1,5 +1,5 @@
 //! Atelyx Tauri 后端入口。
-//! 负责命令注册与仓库/watcher 状态托管。
+//! 负责命令注册与仓库状态托管。
 //!
 //! 文件化仓库（`vault.rs`）为唯一存储出口。
 
@@ -13,7 +13,6 @@ mod net_guard;
 mod plugin_build;
 mod plugin_process;
 mod vault;
-mod watcher;
 
 use std::sync::Arc;
 
@@ -30,8 +29,6 @@ pub fn run() {
             app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
             // 仓库化：注册当前仓库根路径状态（初始为 None，open_vault 时设置）
             app.manage(vault::VaultState::default());
-            // 文件监听：持有当前仓库的 notify debouncer，open_vault 时启动
-            app.manage(watcher::WatcherState::default());
             // 布局迷你窗口管理器：布局模型唯一权威，启动即从 ui-state.json 加载
             app.manage(layout::LayoutState::new());
             layout::load_from_disk(app.handle(), &app.state::<layout::LayoutState>());

@@ -6,7 +6,7 @@
  * 路径放仓库内（而非应用数据目录）换来三件事不必另造一套边界：
  * - 读回复用仓库附件读命令（`read_attachment_data_url`，`safe_join` 自带越界校验）；
  * - 回收天然按仓库归属（不会跨仓库误删其它仓库画布的附件）；
- * - 与表格图片（`.atelyx/attachments/<tableId>/`）同族，文件树与 watcher 天然跳过。
+ * - 与表格图片（`.atelyx/attachments/<tableId>/`）同族，文件树天然跳过。
  *
  * 引用形态判定（`isTempAttachmentRef`）在 `utils/tempAttachmentPath`（纯函数，无 I/O）。
  */

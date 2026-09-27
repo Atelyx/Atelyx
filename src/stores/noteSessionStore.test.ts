@@ -314,7 +314,7 @@ describe("外部修改处理", () => {
     session.applyBody("本地第一版");
     await vi.waitFor(() => expect(h.writeStarted).toHaveLength(1), { timeout: 3000 });
     session.applyBody("本地第二版");
-    // 应用内写者（flush 链）写下与本地正文相同的内容：watcher 回波会看到 disk === current.content
+    // 应用内写者（flush 链）写下与本地正文相同的内容：外部变更信号应用后 disk === current.content
     h.disk["a.md"] = "本地第二版";
     h.reads.push("本地第二版");
     noteStore.useNoteStore.getState().markNoteExternallyEdited("a.md");

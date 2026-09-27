@@ -35,7 +35,6 @@ import { RepoHistoryPanel } from "@/components/history/RepoHistoryPanel";
 import { useAppStore } from "@/stores/appStore";
 import {
   useCanvasStore,
-  hasCollabPeerOnCanvas,
   registerCanvasCollabWiring,
   registerCanvasPluginWiring,
   syncCanvasDirRefs,
@@ -49,11 +48,6 @@ import { useNoteUndoStore } from "@/stores/noteUndoStore";
 import { useNoteStore } from "@/stores/noteStore";
 import { closeAllNoteSessions, noteSurfaceProvider, openNoteSessionFiles } from "@/stores/noteSessionStore";
 import { registerCollabPresenceProvider } from "@/stores/collabStore";
-import { isPendingFolderRenameOldPath, isPendingRenameOldPath, useVaultStore } from "@/stores/vaultStore";
-import { isSelfSaveEcho } from "@/utils/selfSave";
-import { isCollabCanvasRenamePath } from "@/utils/canvasCollab";
-import { isCollabNoteRelocatePath } from "@/utils/noteCollabRelocate";
-import { tableToSnapshotText } from "@/utils/table";
 import { registerDomainLifecycle } from "@/utils/kernelLifecycle";
 import { registerNoteSurface } from "@/utils/noteSurfaceHost";
 import { subscribeVaultEvent } from "@/utils/vaultEvents";
@@ -327,13 +321,6 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
         await useChatPanelStore.getState().flush();
       },
     },
-    vaultEventHandlers: [
-      vaultHandler("chat:changed", (e) => {
-        // AI 对话历史（.atelyx/对话历史/*.jsonl|*.meta.json）：外部变更内容比对合并，
-        // 新会话/新消息/改名/删除经此实时互见（自写回波由 chatPanelStore 内容比对判别）
-        useChatPanelStore.getState().applyExternalChatChange(e.path);
-      }),
-    ],
   }),
   def({
     id: "builtin.canvas",
@@ -367,56 +354,6 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
     capability: registerCanvasPluginWiring,
     collabWiring: registerCanvasCollabWiring,
     vaultEventHandlers: [
-      vaultHandler("canvas:changed", (e) => {
-        const store = useCanvasStore.getState();
-        // 按文件路径匹配当前画布（画布任意文件夹存放，路径即磁盘身份）；
-        // 文件夹重命名期间旧路径删除事件：canvasFile 尚未 remap（Rust 移动目录可能慢于 300ms debounce），
-        // 跳过重读防误触 reloadFromDisk 读已不存在的旧路径
-        if (e.path !== store.canvasFile || isPendingFolderRenameOldPath(e.path)) {
-          // 非当前画布：外部新建/删除/重命名画布（含协作重命名的旧路径删除事件）→ 刷新列表 + 文件树。
-          // 自写回放跳过：画布 CRUD 已在 appStore 内主动刷新两数据源
-          if (!isSelfSaveEcho(e.path)) {
-            void useAppStore.getState().loadList();
-            void useVaultStore.getState().loadFiles();
-          }
-          return;
-        }
-        // 自写回波 / 协作重命名回波 / 协作对端在场 → 内容已由本端写盘或广播应用进内存，跳过重载：
-        // 对端在场时磁盘合法落后于广播（500ms 防抖落盘 + 300ms watcher 延迟），重载会用陈旧盘回退
-        // 已应用内容，且 reloadFromDisk→load 杀进行中 AI 流/清锁/清撤销（画布版闪烁/运行态破坏根因）。
-        if (isSelfSaveEcho(e.path) || isCollabCanvasRenamePath(e.path) || hasCollabPeerOnCanvas(e.path)) {
-          return;
-        }
-        // 有未保存改动不重载（会丢改动）：磁盘分歧由下次保存按稳定 id 合并落盘自然收敛
-        if (!store.dirty) {
-          // 无未保存改动：安全自动重载磁盘最新内容
-          void store.reloadFromDisk();
-        }
-        // 当前画布内容被外部改写：仅列表行 updatedAt 排序可能变化，刷新列表即可（纯内容写不改文件树）
-        void useAppStore.getState().loadList();
-      }),
-      vaultHandler("note:changed", (e) => {
-        if (isPendingRenameOldPath(e.path) || isPendingFolderRenameOldPath(e.path)) return;
-        // 协作换路的回波（对端改名后旧路径消失/新路径出现）：路径身份已由换路帧跟上，别按旧路径重读正文
-        if (isCollabNoteRelocatePath(e.path)) return;
-        // 画布上引用该笔记的节点：silent 刷新正文（与 NoteEditor 外部感知相互独立）
-        void useCanvasStore.getState().refreshTextContent(e.path);
-      }),
-      vaultHandler("table:changed", (e) => {
-        if (isPendingRenameOldPath(e.path) || isPendingFolderRenameOldPath(e.path)) return;
-        // 画布上引用该表格的节点：silent 刷新快照。打开表格的自写回波直接用内存内容构建快照
-        //（磁盘 == 内存），免再整表读盘。
-        const store = useTableStore.getState();
-        const snapshot =
-          isSelfSaveEcho(e.path) && e.path === store.tableFile
-            ? tableToSnapshotText({ fields: store.fields, rows: store.rows })
-            : undefined;
-        void useCanvasStore.getState().refreshTableContent(e.path, snapshot ? { snapshot } : {});
-      }),
-      vaultHandler("attachment:changed", (e) => {
-        if (isPendingRenameOldPath(e.path) || isPendingFolderRenameOldPath(e.path)) return;
-        void useCanvasStore.getState().refreshMediaContent(e.path);
-      }),
       vaultHandler("note:renamed", async (e) => {
         await syncCanvasNodeRefs(e.oldPath, e.newPath, e.newTitle ?? null, "text");
       }),
@@ -496,26 +433,19 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
     },
     collabWiring: registerNoteCollabWiring,
     vaultEventHandlers: [
+      // 软件内 `.md` 写落点信号（AI 文件工具/插件写盘、重建链接改写，见 services/vault/aiFiles.ts）：
+      // 作废内容缓存 + bump 外部变更序号，编辑会话据此收敛（无未落盘输入采纳磁盘、有则保留本地输入）
       vaultHandler("note:changed", (e) => {
-        if (isPendingRenameOldPath(e.path) || isPendingFolderRenameOldPath(e.path)) return;
-        // 协作换路的回波（对端改名/移动后共享盘上旧路径消失、新路径出现）：路径身份已由换路帧
-        // 跟上，按帧的结果跳过——否则会被判成外部改盘，把刚跟上的编辑面打回
-        if (isCollabNoteRelocatePath(e.path)) return;
-        // NoteEditor 感知外部修改：无本地改动实时刷新、有未落盘输入保留本地输入
-        //（markNoteExternallyEdited 始终保留：跨编辑面同步的必经信号，不受自写回波影响）
         useNoteStore.getState().markNoteExternallyEdited(e.path);
-        // 真实外部修改（非本端自写回波，含画布/AI 写 .md）：作废笔记内容缓存，下次读取走盘
-        //（自写回波缓存已由 saveNoteContent 同步，不另行作废防缓存失效后重读盘）
-        if (!isSelfSaveEcho(e.path)) useNoteStore.getState().invalidateNoteCache(e.path);
+        useNoteStore.getState().invalidateNoteCache(e.path);
       }),
       // 路径迁移/消失：撤销栈随路径迁移（撤销历史不因改名丢失、旧键不滞留内存），正文缓存按旧路径作废。
-      // 缓存按路径键存，旧路径可被同名新文件复用，不作废会把已改走/已删的正文串给新笔记；
-      // 删除路径的 watcher 事件可能落在自写抑制窗口内被跳过，故与改名同款显式作废
+      // 缓存按路径键存，旧路径可被同名新文件复用，不作废会把已改走/已删的正文串给新笔记
       vaultHandler("note:renamed", (e) => {
         // 对端可能正打开同一笔记：广播换路，对端据此把路径身份跟上（未连接时静默丢弃）
         broadcastNoteRelocate(e.oldPath, e.newPath);
         useNoteStore.getState().invalidateNoteCache(e.oldPath);
-        // Rust 代写正文的其它笔记（链接改写）：自写回波被抑制窗口吞掉，缓存须显式作废
+        // Rust 代写正文的其它笔记（链接改写）无独立变更信号，缓存在此作废
         for (const file of e.rewritten ?? []) useNoteStore.getState().invalidateNoteCache(file);
         useNoteUndoStore.getState().renameFile(e.oldPath, e.newPath);
         // 协作文档以路径为身份：旧路径文档随迁作废（同名新文件不得复用其 CRDT 状态）
@@ -582,12 +512,6 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
     capability: registerTablePluginWiring,
     collabWiring: registerTableCollabWiring,
     vaultEventHandlers: [
-      vaultHandler("table:changed", (e) => {
-        if (isPendingRenameOldPath(e.path) || isPendingFolderRenameOldPath(e.path)) return;
-        // 当前打开的表格：干净 → 读盘内容比对判别（自写回放/已应用的对端写入跳过，内容不同则静默重载）；
-        // 有脏 → 不重载（防抖保存 ≤500ms 内触发，按稳定 id 合并落盘自然收敛）
-        void useTableStore.getState().syncFromDiskIfChanged(e.path);
-      }),
       vaultHandler("table:deleted", (e) => {
         // 打开的表格文件已被删除：只清内存态（flush 会写回重建已删文件）
         if (useAppStore.getState().currentTableFile === e.path) {

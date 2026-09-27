@@ -1,7 +1,6 @@
 import { create } from "zustand";
 import {
   listChatSessions,
-  readChatSessionMeta,
   writeChatSessionMeta,
   deleteChatSessionMeta,
   readEditorChatsMeta,
@@ -54,15 +53,14 @@ import type {
  * 协作空间内同一套读写签名经 services/metadata 分发到 user meta（`chat/messages/<id>`、
  * `chat/sessions/<id>`、`chat/editor-meta`），`file` 仍按本地路径约定回填，消费方无感。
  * 笔记上下文两条路径：@引用（手动拖入，发送时就地替换注入）+ 当前打开笔记尾部上下文块（runExchange 注入，ephemeral 不落盘）。
- * 多设备共享同一仓库文件夹时，新建/删除/改名/消息经 watcher 内容比对合并实时互见（见 applyExternalChatChange）。
+ * 会话清单与内容以磁盘为真相，重进仓库/切回面板时读盘刷新（外部与跨设备变更不实时互见）。
  *
  * 与画布对话（canvasStore）的差异：
  * - 面板一次只流式一个会话（单输入框）；对话编排（提示词/工具/流式/收尾/命名）由对话核心能力
  *   承担（`stores/chatTurn.ts`，经 `utils/chatRuntimeHost` 取用），本 store 只管容器、落盘与面板态
  * - 错误占位沿用 `[错误]` 前缀过滤约定（ERROR_PREFIX，见 constants/chat.ts）
  * - provider/model 解析：对话核心能力的 resolveTarget（面板覆盖 → 跟随仓库默认，与画布同源）
- * - 持久化 debounce 500ms：消息纯增长只追加新增记录（每记录一行 JSON），元数据/覆盖变化写对应小文件；
- *   自写与外部写经 watcher 内容比对判别（无时间窗误判）
+ * - 持久化 debounce 500ms：消息纯增长只追加新增记录（每记录一行 JSON），元数据/覆盖变化写对应小文件
  */
 
 interface ChatPanelState {
@@ -99,7 +97,7 @@ interface ChatPanelState {
   newSession: () => void;
   /** 切换到历史会话（内存 updatedAt 置顶排序；「最近使用」不持久化，重启后按最近对话排序）。 */
   openSession: (id: string) => void;
-  /** 删除会话（删的是当前激活会话时回落新对话态；同时删其消息 .jsonl 与元数据侧车，删除经 watcher 跨设备传播）。 */
+  /** 删除会话（删的是当前激活会话时回落新对话态；同时删其消息 .jsonl 与元数据侧车）。 */
   deleteSession: (id: string) => void;
   /** 发送消息到当前激活会话（refs = 输入框内的 @引用笔记，发送时就地替换注入笔记全文）。 */
   send: (content: string, refs?: EditorChatMessageRef[]) => Promise<void>;
@@ -132,8 +130,6 @@ interface ChatPanelState {
   setEffortOverride: (effort: ReasoningEffort | null) => void;
   /** 清除面板内联错误。 */
   clearError: () => void;
-  /** watcher 收到 `.atelyx/对话历史/` 文件事件：内容比对合并（新会话/新消息/改名/删除跨设备实时互见；幂等、不置脏）。 */
-  applyExternalChatChange: (file: string) => void;
   /** 立即落盘并返回写盘 Promise（可等待——切换仓库前必须先等旧会话写完，防写进新仓库）。
    * 归属校验按身份键：当前激活身份键与内存会话所属身份键（sessionVaultKey）不一致则跳过（防跨仓库污染）。
    * 无本地改动（dirty=false）也跳过（外部删除会话文件后切仓库不写回覆盖）。 */
@@ -422,7 +418,6 @@ async function persistNow(): Promise<void> {
     }),
   );
   // 2) 写脏会话的元数据侧车（.meta.json：title/agentId）。写成功才移除——失败保留待下次重试。
-  //    无整文件索引：多设备并发写互不覆盖，其余设备经 watcher 内容比对合并实时互见。
   const pendingMeta = [...dirtyMetaSessions];
   await Promise.all(
     pendingMeta.map(async (id) => {
@@ -476,104 +471,6 @@ async function persistNow(): Promise<void> {
       useChatPanelStore.setState({ persistError: null });
     }
   }
-}
-
-/**
- * watcher 消息事件（`.atelyx/对话历史/<id>.jsonl`）：内容比对合并——
- * 磁盘含内存未知消息 id → 并入（磁盘顺序为基底、内存独有消息补尾部）+ 清基线（下次全量重写收敛）；
- * 磁盘 ⊆ 内存 → 自写回波，跳过；文件已删 → 移除会话（删除跨设备传播，本端进行中/未落盘会话保留）；
- * 会话不在内存 → 新会话（读侧车元数据后加入）。
- */
-async function applyExternalMessages(id: string, file: string): Promise<void> {
-  const jsonl = await readChatMessages(file).catch(() => null);
-  const state = useChatPanelStore.getState();
-  const idx = state.sessions.findIndex((s) => s.id === id);
-  if (jsonl === null) {
-    // 文件已删（外部删除）：本端进行中（流式）/未落盘（脏消息）的会话保留，防误删本地工作；
-    // 其余移除——删除经此跨设备传播
-    if (idx >= 0) {
-      const active = state.activeSessionId;
-      if ((state.streaming && active === id) || dirtyMessageFiles.has(id)) return;
-      dirtyMetaSessions.delete(id);
-      messageBaseline.delete(id);
-      // 函数式更新：防与其他 watcher 事件的并发 setState 相互覆盖（丢弃另一事件的合并）
-      useChatPanelStore.setState((st) => ({
-        sessions: st.sessions.filter((x) => x.id !== id),
-      }));
-    }
-    return;
-  }
-  const diskMessages = parseChatMessages(jsonl);
-  if (idx < 0) {
-    // 新会话：读侧车元数据（失败缺省）后加入内存（不置脏——磁盘已是权威，不写回）
-    const meta = await readChatSessionMeta(chatMetaFilePath(id)).catch(() => null);
-    messageBaseline.set(id, diskMessages);
-    useChatPanelStore.setState((st) => ({
-      sessions: [
-        ...st.sessions,
-        {
-          id,
-          ...(meta?.title !== undefined ? { title: meta.title } : {}),
-          ...(meta?.agentId !== undefined ? { agentId: meta.agentId } : {}),
-          ...(meta?.compaction ? { compaction: meta.compaction } : {}),
-          file,
-          createdAt: diskMessages[0]?.createdAt ?? 0,
-          updatedAt: diskMessages[diskMessages.length - 1]?.createdAt ?? 0,
-          messages: diskMessages,
-        },
-      ],
-    }));
-    return;
-  }
-  const current = state.sessions[idx];
-  const hasNew = diskMessages.some(
-    (m) => !current.messages.some((cm) => cm.id === m.id),
-  );
-  if (!hasNew) return; // 自写回波或磁盘 ⊆ 内存：无新内容
-  const diskIds = new Set(diskMessages.map((m) => m.id));
-  // 并入对端消息后基线失效：下次写盘全量重写，防追加丢对端内容
-  messageBaseline.delete(id);
-  // 函数式更新 + 最新内存作基底：防与其他 watcher 事件/流式的并发 setState 互相覆盖——
-  // 内存独有消息必须从最新 state 取，否则会把等待期间新流出的 token 一并丢掉
-  useChatPanelStore.setState((st) => {
-    const cur = st.sessions.find((s) => s.id === id);
-    if (!cur) return {};
-    const merged = [
-      ...diskMessages,
-      ...cur.messages.filter((m) => !diskIds.has(m.id)),
-    ];
-    return {
-      sessions: st.sessions.map((s) =>
-        s.id === id
-          ? {
-              ...s,
-              messages: merged,
-              updatedAt: merged[merged.length - 1]?.createdAt ?? s.updatedAt,
-            }
-          : s
-      ),
-    };
-  });
-}
-
-/** watcher 元数据事件（`.atelyx/对话历史/<id>.meta.json`）：磁盘侧车 title/agentId 并入内存（会话级 LWW，最后写者胜）。 */
-async function applyExternalMeta(id: string): Promise<void> {
-  const meta = await readChatSessionMeta(chatMetaFilePath(id)).catch(() => null);
-  if (!meta || meta.id !== id) return;
-  const state = useChatPanelStore.getState();
-  if (!state.sessions.some((s) => s.id === id)) return; // .jsonl 事件会负责加会话
-  useChatPanelStore.setState((st) => ({
-    sessions: st.sessions.map((s) =>
-      s.id === id
-        ? {
-            ...s,
-            ...(meta.title !== undefined ? { title: meta.title } : {}),
-            ...(meta.agentId !== undefined ? { agentId: meta.agentId } : {}),
-            ...(meta.compaction ? { compaction: meta.compaction } : {}),
-          }
-        : s
-    ),
-  }));
 }
 
 /**
@@ -853,7 +750,7 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
     dirtyMetaSessions.delete(id); // 不再重写已删会话的元数据侧车
     messageBaseline.delete(id);
     if (target?.file) {
-      // 立即删消息 .jsonl + 元数据侧车（异步，失败仅记日志——删除 = 删文件，跨设备经 watcher 传播）
+      // 立即删消息 .jsonl + 元数据侧车（异步，失败仅记日志——删除 = 删文件）
       void deleteChatMessages(target.file).catch((e) =>
         console.error("删除会话消息文件失败", e),
       );
@@ -1131,7 +1028,7 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
           s.id === current.activeSessionId ? { ...s, agentId: id } : s
         ),
       });
-      // 会话级 Agent 变化写元数据侧车（跨设备经 watcher 实时传播）
+      // 会话级 Agent 变化写元数据侧车
       markMetaDirty(current.activeSessionId);
     } else {
       // 新对话态：暂存待用，发送首条消息创建会话时固化（见 send）
@@ -1150,23 +1047,6 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
   },
 
   clearError: () => set({ error: null }),
-
-  applyExternalChatChange: (file) => {
-    // watcher 收到 .atelyx/对话历史/ 文件事件（消息或元数据侧车）：内容比对合并，
-    // 自写与外部写用内容比对判别（无 2s 时间窗误判——多设备同路径互写不误伤）
-    if (!useChatPanelStore.getState().loaded) return;
-    const isMeta = file.endsWith(CHAT_META_EXT);
-    const ext = isMeta ? CHAT_META_EXT : CHAT_MESSAGE_EXT;
-    if (!file.endsWith(ext)) return;
-    const stem = file.slice(0, -ext.length);
-    const id = stem.slice(stem.lastIndexOf("/") + 1);
-    if (!id) return;
-    if (isMeta) {
-      void applyExternalMeta(id);
-    } else {
-      void applyExternalMessages(id, file);
-    }
-  },
 
   queueMention: (ref) => {
     set((state) => ({

@@ -42,7 +42,6 @@ import { useNoteUndoStore } from "@/stores/noteUndoStore";
 import { useVaultStore } from "@/stores/vaultStore";
 import { registerDomainLifecycle } from "@/utils/kernelLifecycle";
 import { base64ToBytes, bytesToBase64 } from "@/utils/base64";
-import { markCollabNoteRelocate } from "@/utils/noteCollabRelocate";
 
 /** 周期反熵：激活文档定时重发握手，补齐传输丢帧或漏收造成的分歧。 */
 const ANTI_ENTROPY_MS = 10_000;
@@ -61,10 +60,8 @@ export function broadcastNoteRelocate(oldFile: string, newFile: string): void {
  *
  * 本端正打开该笔记时面板随之切到新路径：复用本地改名同一条「列表变化 → 工作区联动」链路，
  * 因此重命名记录必须早于列表刷新（见 `vaultStore.adoptRemoteNoteMigration`）。
- * watcher 随后仍会报「旧路径变化（已不存在）/新路径出现」，窗口内按帧的结果跳过外部修改处理。
  */
 function adoptRemoteNoteRelocate(oldPath: string, newPath: string): void {
-  markCollabNoteRelocate([oldPath, newPath]);
   useNoteStore.getState().invalidateNoteCache(oldPath);
   useNoteUndoStore.getState().renameFile(oldPath, newPath);
   useNoteCollabStore.getState().disposeDoc(oldPath);

@@ -25,7 +25,6 @@ import { useAppStore } from "@/stores/appStore";
 import { registerNoteCollabWiring } from "@/stores/noteCollabStore";
 import { dispatchCollabChannel } from "@/utils/collabHost";
 import { bytesToBase64 } from "@/utils/base64";
-import { isCollabNoteRelocatePath } from "@/utils/noteCollabRelocate";
 import { noteTitleFromFile } from "@/utils/filename";
 import { encodeNoteRelocate } from "@/services/noteCollab/frame";
 
@@ -117,7 +116,7 @@ describe("协作对端换路", () => {
     offWiring();
   });
 
-  it("收到换路帧：本端打开的同一笔记跟随到新路径，并抑制 watcher 回波", async () => {
+  it("收到换路帧：本端打开的同一笔记跟随到新路径", async () => {
     await openNoteAt("笔记/a.md");
     h.tree = treeOf(["笔记/新名.md"]);
 
@@ -133,9 +132,6 @@ describe("协作对端换路", () => {
     );
     expect(useAppStore.getState().currentNoteTitle).toBe("新名");
     expect(lastNoteRenameTarget("笔记/a.md")).toBe("笔记/新名.md");
-    // watcher 随后仍会报旧路径变化/新路径出现：窗口内按帧的结果跳过外部修改处理
-    expect(isCollabNoteRelocatePath("笔记/a.md")).toBe(true);
-    expect(isCollabNoteRelocatePath("笔记/新名.md")).toBe(true);
   });
 
   it("通道与载荷路径不符的帧丢弃（陈旧/串文件载荷不动本端）", async () => {
@@ -151,7 +147,6 @@ describe("协作对端换路", () => {
 
     await Promise.resolve();
     expect(useAppStore.getState().currentNoteFile).toBe("隔离/旧.md");
-    expect(isCollabNoteRelocatePath("隔离/旧.md")).toBe(false);
   });
 
   it("本端未打开该笔记：路径身份跟上但不谈跟随切换", async () => {

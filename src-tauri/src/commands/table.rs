@@ -360,7 +360,7 @@ fn image_cell_entries(value: &serde_json::Value) -> Vec<&str> {
 }
 
 /// 表格附件目录（相对仓库根）：`.atelyx/attachments/<tableId>/`。隐藏目录（`.` 开头）——
-/// watcher / 文件树 / 全仓库扫描天然跳过，图片写盘零回波、零树噪声。
+/// 文件树 / 全仓库扫描天然跳过，图片写盘零树噪声。
 /// 图片字节不随 .atb 内嵌，单元格只存路径引用（大表多图免每次保存全量序列化图片）。
 fn table_attachments_rel(table_id: &str) -> String {
     format!(".atelyx/attachments/{table_id}")

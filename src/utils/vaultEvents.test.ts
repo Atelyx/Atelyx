@@ -19,25 +19,25 @@ describe("仓库文件事件发射器", () => {
 
   it("按 kind 隔离：其他 kind 不触发；未注册 kind 静默丢弃", () => {
     let called = 0;
-    const off = onVaultEvent("table:changed", () => {
+    const off = onVaultEvent("note:renamed", () => {
       called++;
     });
     emitVaultEvent({ kind: "note:changed", path: "n.md" });
-    emitVaultEvent({ kind: "table:changed", path: "t.atb" });
+    emitVaultEvent({ kind: "note:renamed", oldPath: "a.md", newPath: "b.md" });
     expect(called).toBe(1);
     off();
-    emitVaultEvent({ kind: "table:changed", path: "t.atb" });
+    emitVaultEvent({ kind: "note:renamed", oldPath: "a.md", newPath: "b.md" });
     expect(called).toBe(1);
   });
 
   it("撤销幂等；全部撤销后注册表清空", () => {
     let called = 0;
-    const off = onVaultEvent("chat:changed", () => {
+    const off = onVaultEvent("note:deleted", () => {
       called++;
     });
     off();
     off();
-    emitVaultEvent({ kind: "chat:changed", path: ".atelyx/x.jsonl" });
+    emitVaultEvent({ kind: "note:deleted", path: "n.md" });
     expect(called).toBe(0);
   });
 
@@ -57,21 +57,21 @@ describe("仓库文件事件发射器", () => {
 
   it("订阅方同步抛错被隔离：后续订阅方仍收到，且不外传给调用方", () => {
     const after: string[] = [];
-    const off1 = onVaultEvent("canvas:changed", () => {
+    const off1 = onVaultEvent("note:changed", () => {
       throw new Error("handler 失败");
     });
-    const off2 = onVaultEvent("canvas:changed", () => after.push("after"));
-    expect(() => emitVaultEvent({ kind: "canvas:changed", path: "c.atlx" })).not.toThrow();
+    const off2 = onVaultEvent("note:changed", () => after.push("after"));
+    expect(() => emitVaultEvent({ kind: "note:changed", path: "n.md" })).not.toThrow();
     expect(after).toEqual(["after"]);
     off1();
     off2();
   });
 
   it("订阅方返回被拒 Promise 也不外传给调用方", () => {
-    const off = onVaultEvent("table:changed", async () => {
+    const off = onVaultEvent("note:changed", async () => {
       throw new Error("async handler 失败");
     });
-    expect(() => emitVaultEvent({ kind: "table:changed", path: "t.atb" })).not.toThrow();
+    expect(() => emitVaultEvent({ kind: "note:changed", path: "n.md" })).not.toThrow();
     off();
   });
 });

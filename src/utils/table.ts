@@ -1,5 +1,5 @@
 /**
- * 表格工具纯函数：列宽自适应、内容快照注入、状态栏列自动计算、增量补丁计算、磁盘/内存内容比对、
+ * 表格工具纯函数：列宽自适应、内容快照注入、状态栏列自动计算、增量补丁计算、
  * 图片值归一化（磁盘/远端旧形态 → ImageCellValue，内存恒新形态）、选中区域归约与复制粘贴（TSV）。
  *
  * - `fieldDefaultWidth`：列宽按字段名自适应（CJK 双宽，钳制 [MIN_COL_WIDTH, MAX_COL_WIDTH]）。
@@ -7,7 +7,6 @@
  *   多行文本压单行空格；超行数截断标注）。入参须为归一化内存态，勿直接喂磁盘原始 JSON。
  * - `computeColumnCalc`：按字段 calcType 统计全列，返回显示文本（数字统计 / 非空计数）。
  * - `computeTablePatch`：增量补丁计算（保存写盘与协作实时广播共用）。
- * - `tablesEqual`：磁盘表格与内存内容比对（watcher 回放判别）。
  * - `selectionRegion`：选中范围 → 矩形区域（复制/粘贴/清空/协作高亮/右键命中统一复用）。
  * - `buildRegionTsv`/`parseTsv`/`applyPasteGrid`：选中区域 ↔ 剪贴板 TSV ↔ 网格回写。
  */
@@ -249,7 +248,7 @@ export function computeTablePatch(opts: {
   };
 }
 
-// ===== 磁盘/内存内容比对（watcher 回放判别）=====
+// ===== 单元格值相等（编辑变更判定/清空跳过/历史 diff 共用口径）=====
 
 /** 字符串数组相等；空数组与 undefined 视为等价（序列化丢空/缺省键不误判为外部修改）。 */
 function stringArrayEqual(a: string[] | undefined, b: string[] | undefined): boolean {
@@ -275,7 +274,7 @@ function imageViewOf(v: CellValue): ImageCellValue | null {
 /**
  * 单元格值相等（数组按项比较；空值 ≈ undefined，同 stringArrayEqual 口径）。
  * 图片值两侧各自归一化后比较——磁盘旧行（string[]）与内存新行（{images}）判定相等，
- * 防 watcher 自写回波被误判为外部修改触发重载。
+ * 序列化形态差异不得被误判为实际内容变化。
  */
 export function cellValueEqual(a: CellValue | undefined, b: CellValue | undefined): boolean {
   const ia = a === undefined ? null : imageViewOf(a);
@@ -326,18 +325,6 @@ export function styleEqual(a: CellStyle | undefined, b: CellStyle | undefined): 
     (na.font ?? undefined) === (nb.font ?? undefined) &&
     (na.size ?? undefined) === (nb.size ?? undefined)
   );
-}
-
-/** 行样式映射相等（缺 key ≈ undefined；空映射 ≈ undefined，序列化丢空不误判）。 */
-function styleMapEqual(
-  a: Record<string, CellStyle> | undefined,
-  b: Record<string, CellStyle> | undefined,
-): boolean {
-  const keys = new Set([...Object.keys(a ?? {}), ...Object.keys(b ?? {})]);
-  for (const k of keys) {
-    if (!styleEqual(a?.[k], b?.[k])) return false;
-  }
-  return true;
 }
 
 /** 选区样式汇总（气泡格式工具栏三态来源）：逐属性判定——某属性在选区全体同值 → 该值
@@ -391,61 +378,6 @@ export function selectionStyleSummary(
     font: valueState((st) => st?.font),
     size: valueState((st) => st?.size),
   };
-}
-
-/** 行的「已定义值」映射（显式 undefined 键 ≈ 缺失——序列化时被丢弃，不能当作差异）。 */
-function definedValues(r: TableRow): Map<string, CellValue> {
-  const m = new Map<string, CellValue>();
-  for (const [k, v] of Object.entries(r.values)) {
-    if (v !== undefined) m.set(k, v);
-  }
-  return m;
-}
-
-function fieldEqual(a: TableField, b: TableField): boolean {
-  return (
-    a.id === b.id &&
-    a.name === b.name &&
-    a.type === b.type &&
-    (a.width ?? undefined) === (b.width ?? undefined) &&
-    (a.calcType ?? undefined) === (b.calcType ?? undefined) &&
-    stringArrayEqual(a.options, b.options)
-  );
-}
-
-function rowEqual(a: TableRow, b: TableRow): boolean {
-  if (
-    a.id !== b.id ||
-    (a.height ?? undefined) !== (b.height ?? undefined) ||
-    !styleMapEqual(a.styles, b.styles)
-  ) {
-    return false;
-  }
-  const am = definedValues(a);
-  const bm = definedValues(b);
-  if (am.size !== bm.size) return false;
-  for (const [k, v] of am) {
-    if (!bm.has(k) || !cellValueEqual(v, bm.get(k))) return false;
-  }
-  return true;
-}
-
-/**
- * 磁盘表格与内存运行时内容比对（watcher 回放判别）：id 序列逐位一致 + 逐实体结构相等
- * （undefined ≈ 缺省键、options/values 逐项深比，不依赖键序）。一致 = 自写回放或已广播
- * 应用的对端写入 → 跳过重载（保护撤销栈/选中态）；不一致 = 真实外部修改。
- */
-export function tablesEqual(
-  disk: { fields: TableField[]; rows: TableRow[] },
-  memory: { fields: TableField[]; rows: TableRow[] },
-): boolean {
-  if (!sameIdSequence(disk.fields, memory.fields) || !sameIdSequence(disk.rows, memory.rows)) {
-    return false;
-  }
-  return (
-    disk.fields.every((f, i) => fieldEqual(f, memory.fields[i])) &&
-    disk.rows.every((r, i) => rowEqual(r, memory.rows[i]))
-  );
 }
 
 // ===== 历史版本摘要 / diff（表格历史面板可读化）=====
