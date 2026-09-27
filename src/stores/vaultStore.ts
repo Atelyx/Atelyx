@@ -195,8 +195,6 @@ async function applyNoteFileChange(oldFile: string, newFile: string, newTitle: s
       rewritten,
     });
     await useVaultStore.getState().loadFiles();
-    // 重命名/移动改变笔记路径：自动把全仓内部链接规范为标准 Markdown 写法（防抖）
-    normalizeInternalLinksSoon();
     // 侧文件先确保在新编码名下（存量旧编码侧文件迁移），再随重命名迁移——
     // Rust remap_sideloads 只按新编码名查找，未迁移则旧文件在重命名后孤儿化
     await migrateHistoryFile("note", oldFile).catch((e) => notifySidecarFailure("笔记重命名后的历史迁移", e));
@@ -305,8 +303,6 @@ async function applyFolderFileChange(
     await useSettingsStore.getState().remapFolderColorsByDir(oldDir, newDir);
     useUiStateStore.getState().renameByDir(oldDir, newDir);
     await useVaultStore.getState().loadFiles();
-    // 目录内笔记路径全部变化：自动规范全仓内部链接（防抖）
-    normalizeInternalLinksSoon();
     await useAppStore.getState().loadList();
   } finally {
     pendingFolderRename = null;
@@ -327,21 +323,6 @@ function collectByExt(
     }
   }
   return out;
-}
-
-/**
- * 内部链接自动规范化（防抖合并连续的文件增删移动操作）：复用 Rust 重建，把全仓
- * `[[名字]]`/无后缀路径等写法统一为标准 Markdown `[名](路径)`（目标缺失 → `[名]()`），
- * 只写有变化的文件（原子写）。仅个人仓库——协作空间内容在服务端，重建不覆盖。
- * 重建对正在编辑的笔记是外部写入：有未落盘输入时本地内容胜出（改动随下次操作再规范）。
- */
-let normalizeLinksTimer: ReturnType<typeof setTimeout> | null = null;
-function normalizeInternalLinksSoon(): void {
-  if (normalizeLinksTimer) clearTimeout(normalizeLinksTimer);
-  normalizeLinksTimer = setTimeout(() => {
-    normalizeLinksTimer = null;
-    void rebuildInternalLinksSvc().catch((e) => console.error("自动规范内部链接失败", e));
-  }, 1500);
 }
 
 /** 按相对路径查树节点（dir = "" 返回根容器）。 */
@@ -599,8 +580,6 @@ export const useVaultStore = create<VaultFileState>((set, get) => ({
     const file = dir ? `${dir}/${name}` : name;
     await writeNote(file, "");
     await get().loadFiles();
-    // 新笔记使别处指向该名字的链接可解析：自动规范为标准 Markdown 写法（防抖）
-    normalizeInternalLinksSoon();
     return file;
   },
 
