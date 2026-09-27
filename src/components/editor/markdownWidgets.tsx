@@ -30,9 +30,14 @@ export interface DecorationOptions {
   readImage: (src: string) => Promise<string | null>;
   isVaultPathNote?: (href: string) => boolean;
   onOpenVaultPathNote?: (href: string) => void;
-  onCreateNote?: (name: string) => void;
+  onCreateNote?: (name: string) => Promise<string | null>;
+  /** 打开快捷新建的笔记（渲染层回填完成后调用；实现 = openNote(file, name)）。 */
+  onOpenCreatedNote?: (file: string, name: string) => void;
   /** wiki 链接打开笔记（画布不可定位时 / 笔记编辑器无定位能力时）。 */
   onOpenNote?: (name: string) => void;
+  /** wiki 目标是否命中仓库笔记：false 且 onCreateNote 存在 → 缺失样式 + 点击快捷新建；
+   *  未提供 = 不做缺失判定（保持打开/展示原行为）。 */
+  resolveWikiNote?: (value: string) => boolean;
   isLocatable?: (value: string) => boolean;
   onLocate?: (value: string) => void;
   /** @引用 胶囊（用户消息 displayContent 内的 `@label` → 胶囊，点击定位/打开）。 */
@@ -200,13 +205,20 @@ function onLeftClick(el: HTMLElement, run: (e: MouseEvent) => void, skip?: (e: M
 
 export type LinkKind = "external" | "wiki" | "path" | "create";
 
+/** 链接点击上下文：实时 view 与 widget 自身 DOM——快捷新建回填需按点击落点重定位链接区间
+ *  （构建期捕获的区间会随文档变更过期）。 */
+export interface LinkClickContext {
+  view: EditorView;
+  el: HTMLElement;
+}
+
 /** 链接 widget：样式化可点击；光标进入链接范围后装饰失效、显示原文。 */
 export class LinkWidget extends WidgetType {
   constructor(
     private readonly text: string,
     private readonly url: string,
     private readonly kind: LinkKind,
-    private readonly onClick: () => void,
+    private readonly onClick: (ctx: LinkClickContext) => void,
   ) {
     super();
   }
@@ -215,7 +227,7 @@ export class LinkWidget extends WidgetType {
     return other.text === this.text && other.url === this.url && other.kind === this.kind;
   }
 
-  toDOM() {
+  toDOM(view: EditorView) {
     const span = document.createElement("span");
     span.textContent = this.text;
     span.title = this.url;
@@ -228,7 +240,7 @@ export class LinkWidget extends WidgetType {
           : "md-editor-internal-link";
     }
     // 仅左键打开：右键由正文右键菜单接管，不能同时拉起系统浏览器
-    onLeftClick(span, () => this.onClick());
+    onLeftClick(span, () => this.onClick({ view, el: span }));
     return span;
   }
 }

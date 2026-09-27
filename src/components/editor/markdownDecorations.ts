@@ -19,6 +19,7 @@ import {
   type DecorationOptions,
   type RangeInfo,
   type BlockEditHandler,
+  type LinkClickContext,
   LinkWidget,
   ImageWidget,
   CheckboxWidget,
@@ -33,12 +34,13 @@ import {
   FootnoteDefWidget,
   MentionWidget,
   CodeBlockWidget,
+  isSafeVaultRelPath,
   inlineTagRanges,
   inlineMathRanges,
   blockMathRanges,
   parseBracketLink,
 } from "./markdownWidgets";
-import { isOpenableUrl } from "@/utils/markdown";
+import { decodeLinkHref, isOpenableUrl, creatableLinkRangeInLine, encodeMarkdownLinkHref } from "@/utils/markdown";
 
 // ===== 语法节点名（lezer-markdown，GFM 已启用）=====
 
@@ -125,6 +127,82 @@ export function taskMarkerRange(lineText: string, lineFrom: number): RangeInfo |
   if (!m) return null;
   const from = lineFrom + m.index;
   return { from, to: from + m[0].length };
+}
+
+/** 链接当前区间定位（快捷新建回填用）：构建期区间源码未变直接用；已随文档变更过期时
+ *  按 widget DOM 所在行重扫可新建链接，原文仍须与构建期一致（防同段落改写后错认）。
+ *  视图失效（widget 已销毁等）返回 null。 */
+function locateCreatableRange(
+  view: EditorView,
+  el: HTMLElement,
+  link: { source: string; from: number; to: number },
+): RangeInfo | null {
+  try {
+    const state = view.state;
+    if (state.sliceDoc(link.from, link.to) === link.source) return { from: link.from, to: link.to };
+    const pos = view.posAtDOM(el, 0);
+    const line = state.doc.lineAt(pos);
+    const hit = creatableLinkRangeInLine(line.text, pos - line.from);
+    if (!hit) return null;
+    const from = line.from + hit.start;
+    const to = line.from + hit.end;
+    return state.sliceDoc(from, to) === link.source ? { from, to } : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 快捷新建点击流程：创建笔记 →（可编辑面）把链接源文回填为路径链接 → 打开新笔记。
+ *  回填定位见 locateCreatableRange（点击当刻定位，创建完成后原文未变才替换）。
+ *  打开必须晚于回填：openNote 会切换编辑面文档，先打开会让回填写进错误文档
+ *  （或因区间越界静默失败）。只读面（对话气泡/预览）无保存链，跳过回填只创建并打开。
+ *  回填定位失败/区间被改（罕见并发）仅跳过回填，不阻断建链与打开。 */
+function createNoteFromLink(
+  ctx: LinkClickContext,
+  createNote: (name: string) => Promise<string | null>,
+  openCreated: ((file: string, name: string) => void) | undefined,
+  readOnly: boolean,
+  link: { name: string; label: string; source: string; from: number; to: number },
+): void {
+  const { view, el } = ctx;
+  const range = locateCreatableRange(view, el, link);
+  void createNote(link.name)
+    .then((file) => {
+      if (!file) return;
+      if (!readOnly && range && view.state.sliceDoc(range.from, range.to) === link.source) {
+        const insert = `[${link.label}](${encodeMarkdownLinkHref(file)})`;
+        view.dispatch({
+          changes: { from: range.from, to: range.to, insert },
+          selection: { anchor: range.from + insert.length },
+          scrollIntoView: true,
+        });
+      }
+      openCreated?.(file, link.name);
+    })
+    .catch(() => {});
+}
+
+/** 未命中路径链接点击：按链接路径创建笔记。文本即目标路径，无需回填——创建后
+ *  派发一次选区事务触发装饰重建，链接随即收敛为可打开形态，再打开新笔记。
+ *  视图失效仅跳过重建，不阻断建链与打开。 */
+function createNoteAtPath(
+  ctx: LinkClickContext,
+  createNote: (name: string) => Promise<string | null>,
+  openCreated: ((file: string, name: string) => void) | undefined,
+  url: string,
+): void {
+  const { view } = ctx;
+  void createNote(url)
+    .then((file) => {
+      if (!file) return;
+      try {
+        view.dispatch({ selection: { anchor: view.state.selection.main.anchor } });
+      } catch {
+        // 视图已失效（widget 卸载等）：跳过重建，链接下次装饰重建时自然收敛
+      }
+      openCreated?.(file, url);
+    })
+    .catch(() => {});
 }
 
 export function buildDecorations(
@@ -462,7 +540,18 @@ export function buildDecorations(
           : text;
       const parsed = c.name === "Autolink" ? { label: inner, url: inner } : parseBracketLink(text);
       if (!parsed) {
-        for (const m of c.marks) marksToShow.add(rangeKey(m));
+        // 引用链接形态（`[文字]`/`[a][b]`，lezer 也解析为 Link 节点）无点击语义，
+        // 不产出 widget 保持原样；其配色由语法高亮层决定（不做链接染色）
+        for (const m of c.marks) {
+          marksToShow.add(rangeKey(m));
+          // LinkMark 经语法高亮染为次要色（tags.processingInstruction → muted），
+          // 无链接语义的形态用内联样式中和回正文色（内联样式优先级高于高亮类）
+          widgetEntries.push({
+            from: m.from,
+            to: m.to,
+            dec: Decoration.mark({ attributes: { style: "color: var(--text-primary)" } }),
+          });
+        }
         continue;
       }
       if (isOpenableUrl(parsed.url)) {
@@ -477,12 +566,22 @@ export function buildDecorations(
           }),
         );
       } else if (parsed.url === "" && parsed.label && opts.onCreateNote) {
-        // `[名]()` 空路径 = 快捷新建同名笔记（label 为空时不产出 widget，保持原文）
+        // `[名]()` 空路径 = 快捷新建同名笔记（label 为空时不产出 widget，保持原文）；
+        // 创建成功后把链接源文回填为路径链接（否则链接永远指向新建，重复点击会重复建文件）
+        const createNote = opts.onCreateNote;
         pushWidget(
           c.from,
           c.to,
           Decoration.replace({
-            widget: new LinkWidget(parsed.label, "", "create", () => opts.onCreateNote?.(parsed.label)),
+            widget: new LinkWidget(parsed.label, "", "create", (ctx) =>
+              createNoteFromLink(ctx, createNote, opts.onOpenCreatedNote, opts.readOnly, {
+                name: parsed.label,
+                label: parsed.label,
+                source: text,
+                from: c.from,
+                to: c.to,
+              }),
+            ),
           }),
         );
       } else if (opts.isVaultPathNote?.(parsed.url) && opts.onOpenVaultPathNote) {
@@ -496,6 +595,60 @@ export function buildDecorations(
             ),
           }),
         );
+      } else if (
+        opts.onOpenVaultPathNote &&
+        parsed.url !== "" &&
+        !parsed.url.startsWith("<") &&
+        opts.isVaultPathNote?.(decodeLinkHref(parsed.url) + ".md")
+      ) {
+        // 无 .md 后缀的路径链接按「路径 + .md」解析命中（[链接](链接) → 链接.md）→ 内部链接打开
+        const href = decodeLinkHref(parsed.url) + ".md";
+        pushWidget(
+          c.from,
+          c.to,
+          Decoration.replace({
+            widget: new LinkWidget(parsed.label || parsed.url, href, "path", () =>
+              opts.onOpenVaultPathNote?.(href),
+            ),
+          }),
+        );
+      } else if (
+        opts.onCreateNote &&
+        parsed.url !== "" &&
+        !parsed.url.startsWith("<") &&
+        isSafeVaultRelPath(decodeLinkHref(parsed.url))
+      ) {
+        const createNote = opts.onCreateNote;
+        const target = decodeLinkHref(parsed.url);
+        if (/\.md$/i.test(target)) {
+          // .md 路径链接目标不存在：缺失样式 + 点击按路径创建，创建后文本即解析，无需回填
+          pushWidget(
+            c.from,
+            c.to,
+            Decoration.replace({
+              widget: new LinkWidget(parsed.label || parsed.url, parsed.url, "create", (ctx) =>
+                createNoteAtPath(ctx, createNote, opts.onOpenCreatedNote, target),
+              ),
+            }),
+          );
+        } else {
+          // 无后缀路径：创建 `路径.md` 并回填把 href 补全后缀（否则链接永不解析）
+          pushWidget(
+            c.from,
+            c.to,
+            Decoration.replace({
+              widget: new LinkWidget(parsed.label || parsed.url, parsed.url, "create", (ctx) =>
+                createNoteFromLink(ctx, createNote, opts.onOpenCreatedNote, opts.readOnly, {
+                  name: target + ".md",
+                  label: parsed.label || parsed.url,
+                  source: text,
+                  from: c.from,
+                  to: c.to,
+                }),
+              ),
+            }),
+          );
+        }
       } else {
         // 非外链/非内部链接：标记保持原文，不隐藏
         for (const m of c.marks) marksToShow.add(rangeKey(m));
@@ -573,7 +726,8 @@ export function buildDecorations(
   });
 
   // wiki 链接 `[[标题|别名]]`（lezer 不识别的语法，按行正则匹配；光标行显示原文；
-  //  画布可定位 → 定位；否则打开笔记；无打开能力 → 纯展示）
+  //  优先级：画布可定位 → 定位；命中仓库笔记 → 打开；提供了解析器且未命中 → 缺失样式
+  //  + 点击快捷新建同名笔记（别名语法取 `|` 前目标名）；无解析器/无新建能力 → 原行为）
   forEachLine((line) => {
     const re = /\[\[([^\]|]*?)(?:\|([^\]]*?))?\]\]/g;
     let match: RegExpExecArray | null;
@@ -588,14 +742,33 @@ export function buildDecorations(
         pushWidget(from, to, Decoration.replace({
           widget: new LinkWidget(label, target, "wiki", () => opts.onLocate?.(target)),
         }));
-      } else if (opts.onOpenNote) {
-        pushWidget(from, to, Decoration.replace({
-          widget: new LinkWidget(label, target, "wiki", () => opts.onOpenNote?.(target)),
-        }));
       } else {
-        pushWidget(from, to, Decoration.replace({
-          widget: new LinkWidget(label, target, "wiki", () => {}),
-        }));
+        const resolved = opts.resolveWikiNote ? opts.resolveWikiNote(target) : true;
+        if (resolved && opts.onOpenNote) {
+          pushWidget(from, to, Decoration.replace({
+            widget: new LinkWidget(label, target, "wiki", () => opts.onOpenNote?.(target)),
+          }));
+        } else if (!resolved && opts.onCreateNote) {
+          // 未命中仓库笔记：缺失样式 + 点击快捷新建（别名语法取 `|` 前目标名），
+          // 创建成功后回填为路径链接
+          const createNote = opts.onCreateNote;
+          const source = doc.sliceString(from, to);
+          pushWidget(from, to, Decoration.replace({
+            widget: new LinkWidget(label, "", "create", (ctx) =>
+              createNoteFromLink(ctx, createNote, opts.onOpenCreatedNote, opts.readOnly, {
+                name: target,
+                label,
+                source,
+                from,
+                to,
+              }),
+            ),
+          }));
+        } else {
+          pushWidget(from, to, Decoration.replace({
+            widget: new LinkWidget(label, target, "wiki", () => {}),
+          }));
+        }
       }
     }
   });

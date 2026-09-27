@@ -153,16 +153,24 @@ export function AiChatPanel() {
   };
   // assistant/user 消息的链接/定位回调：hook 统一 useMemo 稳定化（气泡 memo 生效前提）。
   // 回调全部来自 useVaultLinkHandlers（useCallback 稳定 + 内部 getState 实时读 noteList），无需响应 noteList 变化重建
-  const { handleOpenWikiNote, isVaultPathNote, handleOpenVaultPathNote, handleCreateNote } =
-    useVaultLinkHandlers();
+  const {
+    resolveWikiNote,
+    handleOpenWikiNote,
+    isVaultPathNote,
+    handleOpenVaultPathNote,
+    handleCreateNote,
+    openCreatedNote,
+  } = useVaultLinkHandlers();
   const chatMarkdownLinks = useMemo<MarkdownEditorLinks>(
     () => ({
       onOpenNote: handleOpenWikiNote,
+      resolveWikiNote,
       isVaultPathNote,
       onOpenVaultPathNote: handleOpenVaultPathNote,
       onCreateNote: handleCreateNote,
+      onOpenCreatedNote: openCreatedNote,
     }),
-    [handleOpenWikiNote, isVaultPathNote, handleOpenVaultPathNote, handleCreateNote],
+    [resolveWikiNote, handleOpenWikiNote, isVaultPathNote, handleOpenVaultPathNote, handleCreateNote, openCreatedNote],
   );
   // 气泡操作回调稳定化（memo 生效前提）；rollbackTo 为 store action 引用恒稳定，onRollback 直传
   const handleRegenerate = useCallback(() => void regenerate(), [regenerate]);

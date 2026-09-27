@@ -409,17 +409,25 @@ export function NoteEditor({ file }: { file: string }) {
   const { tagCandidates, requestTagCandidates } = useVaultTagCandidates();
 
   /** 笔记链接打开/新建（公共接线簇，见 hooks/useVaultLinkHandlers；本编辑器不做画布定位）。 */
-  const { handleOpenWikiNote, isVaultPathNote, handleOpenVaultPathNote, handleCreateNote } =
-    useVaultLinkHandlers();
+  const {
+    resolveWikiNote,
+    handleOpenWikiNote,
+    isVaultPathNote,
+    handleOpenVaultPathNote,
+    handleCreateNote,
+    openCreatedNote,
+  } = useVaultLinkHandlers();
   // 统一渲染引擎的链接/定位回调（回调全部稳定化，防随输入重建装饰）
   const noteMarkdownLinks: MarkdownEditorLinks = useMemo(
     () => ({
       onOpenNote: handleOpenWikiNote,
+      resolveWikiNote,
       isVaultPathNote,
       onOpenVaultPathNote: handleOpenVaultPathNote,
       onCreateNote: handleCreateNote,
+      onOpenCreatedNote: openCreatedNote,
     }),
-    [handleOpenWikiNote, isVaultPathNote, handleOpenVaultPathNote, handleCreateNote],
+    [resolveWikiNote, handleOpenWikiNote, isVaultPathNote, handleOpenVaultPathNote, handleCreateNote, openCreatedNote],
   );
 
   /** 反链：全仓库 .md 中引用本文档的笔记（自身排除）；索引缓存 + 指纹增量刷新，扫描开销毫秒级。

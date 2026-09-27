@@ -51,6 +51,10 @@ import { useAppStore } from "@/stores/appStore";
 import { useVaultStore } from "@/stores/vaultStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { collapseSoftLineBreaks } from "@/utils/softLineBreak";
+import { encodeMarkdownLinkHref } from "@/utils/markdown";
+import type { PopupAnchor } from "@/components/common/PopupLayer";
+import { WikiLinkPicker } from "@/components/editor/WikiLinkPicker";
+import { wikiLinkTriggerContext } from "@/components/editor/wikiLinkContext";
 import type { DecorationOptions } from "./markdownWidgets";
 import { buildDecorations, livePreviewNeedsRebuild } from "./markdownDecorations";
 
@@ -76,7 +80,8 @@ const highlightStyle = HighlightStyle.define([
   { tag: tags.emphasis, fontStyle: "italic" },
   { tag: tags.strikethrough, textDecoration: "line-through" },
   { tag: tags.quote, color: "var(--text-secondary)" },
-  { tag: tags.link, color: "var(--accent)" },
+  // 链接着色归装饰层 widget（可点击才染色）：引用形态 `[文字]` 不在此染色，
+  // 避免「看起来是链接但点不动」的歧义
   { tag: tags.url, color: "var(--text-muted)" },
   { tag: tags.monospace, fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" },
   { tag: tags.processingInstruction, color: "var(--text-muted)" },
@@ -159,10 +164,23 @@ function livePreview(
 export interface MarkdownEditorLinks {
   isVaultPathNote?: (href: string) => boolean;
   onOpenVaultPathNote?: (href: string) => void;
-  onCreateNote?: (name: string) => void;
+  /** 快捷新建同名笔记，返回新文件相对路径（失败 = null）。只创建不打开——
+   *  打开归 onOpenCreatedNote（必须晚于回填，防先切走编辑面导致回填写进错误文档）。 */
+  onCreateNote?: (name: string) => Promise<string | null>;
+  /** 打开快捷新建的笔记（回填完成后由渲染层调用）。 */
+  onOpenCreatedNote?: (file: string, name: string) => void;
   onOpenNote?: (name: string) => void;
+  /** wiki 目标是否命中仓库笔记（未提供 = 渲染层不做缺失判定，行为同命中打开）。 */
+  resolveWikiNote?: (value: string) => boolean;
   isLocatable?: (value: string) => boolean;
   onLocate?: (value: string) => void;
+}
+
+/** 双链候选浮层状态：from = 触发符（`[[`/`【【`）起点文档偏移，query = 当前过滤词，anchor = 光标实时坐标。 */
+interface WikiPickerState {
+  from: number;
+  query: string;
+  anchor: PopupAnchor;
 }
 
 interface Props {
@@ -234,6 +252,85 @@ export function MarkdownEditor({
   onMentionClickRef.current = onMentionClick;
   /** 只读当前应用值（初始 = 挂载 prop；后续经 effect 同步到视图）。 */
   const readOnlyAppliedRef = useRef(readOnly);
+
+  // ===== `[[` / `【【` 双链候选浮层 =====
+
+  /** 浮层状态（null = 关闭）；wikiPickerRef 供回调读取当前状态镜像。 */
+  const [wikiPicker, setWikiPicker] = useState<WikiPickerState | null>(null);
+  const wikiPickerRef = useRef<WikiPickerState | null>(null);
+  wikiPickerRef.current = wikiPicker;
+  /** Esc/外点关闭后记录关闭时的触发符起点：同一上下文内保持关闭（粘滞，不打断手动输入），
+   *  上下文退出（光标移出/片段失效）后重置，新起触发符或移出再回光标复开。 */
+  const wikiDismissedFromRef = useRef<number | null>(null);
+
+  /** 关闭浮层（Esc/外点）：记下当前触发符起点进入粘滞关闭。 */
+  const closeWikiPicker = useCallback(() => {
+    const picker = wikiPickerRef.current;
+    if (picker) wikiDismissedFromRef.current = picker.from;
+    setWikiPicker(null);
+  }, []);
+
+  /** 选中候选：把触发片段（`[[查询词` / `【【查询词`）原地替换为路径链接，光标落链接末尾。
+   *  显示名 = 文件名去扩展名；label 段剥除 `[`/`]`（`]` 会提前闭合链接文本导致解析失败）。 */
+  const pickWikiTarget = useCallback((file: string, name: string) => {
+    const view = viewRef.current;
+    const picker = wikiPickerRef.current;
+    if (!view || !picker) return;
+    const label = name.replace(/\.md$/i, "").replace(/[[\]]/g, "");
+    const insert = `[${label}](${encodeMarkdownLinkHref(file)})`;
+    const head = view.state.selection.main.head;
+    view.dispatch({
+      changes: { from: picker.from, to: head, insert },
+      selection: { anchor: picker.from + insert.length },
+      scrollIntoView: true,
+    });
+    view.focus();
+    setWikiPicker(null);
+  }, []);
+
+  /** 每次编辑器更新后同步浮层开关：编辑态 + 光标选区 + 光标处于未闭合 `[[查询词`
+   *  上下文即开启并锚定光标实时坐标；状态无实质变化时返回原引用避免无谓重渲染。 */
+  const syncWikiPicker = useCallback((update: { state: EditorState; view: EditorView }) => {
+    const state = update.state;
+    const close = () => {
+      wikiDismissedFromRef.current = null;
+      setWikiPicker((prev) => (prev ? null : prev));
+    };
+    if (state.readOnly || !state.selection.main.empty) {
+      close();
+      return;
+    }
+    const pos = state.selection.main.head;
+    const ctx = wikiLinkTriggerContext(state, pos);
+    if (!ctx) {
+      close();
+      return;
+    }
+    const from = ctx.from;
+    if (wikiDismissedFromRef.current === from) {
+      // 粘滞关闭中：保持关闭，不重置粘滞点（同一段内继续键入/回删仍不打扰）
+      setWikiPicker((prev) => (prev ? null : prev));
+      return;
+    }
+    const coords = update.view.coordsAtPos(pos);
+    if (!coords) {
+      close();
+      return;
+    }
+    const anchor: PopupAnchor = { x: coords.left, y: coords.bottom + 4, flipY: coords.top - 8 };
+    setWikiPicker((prev) => {
+      if (
+        prev &&
+        prev.from === from &&
+        prev.query === ctx.query &&
+        prev.anchor.x === anchor.x &&
+        prev.anchor.y === anchor.y
+      ) {
+        return prev;
+      }
+      return { from, query: ctx.query, anchor };
+    });
+  }, []);
 
   /** 程序化写入：抑制回放后全量替换（CRLF 注入前规范化为 LF）——注入的 dispatch 同步触发
    *  updateListener，置位 suppress 防注入被当作用户编辑上报。 */
@@ -317,6 +414,10 @@ export function MarkdownEditor({
               onBodyChangeRef.current(update.state.doc.toString());
             }
           }),
+          // 双链候选浮层同步（程序化注入期间不响应：全量替换不应误触发）
+          EditorView.updateListener.of((update) => {
+            if (!suppressRef.current) syncWikiPicker(update);
+          }),
         ],
       }),
     });
@@ -342,9 +443,9 @@ export function MarkdownEditor({
       if (editorViewRef) editorViewRef.current = null;
       view.destroy();
     };
-    // collab 切换（重建视图）依赖其引用；applyBody 为稳定回调；editorViewRef 为父组件 useRef（引用稳定，
-    // 仅为 exhaustive-deps 合规列入，不会触发重建）；localHistory 只在挂载配置生效，运行期不变
-  }, [applyBody, collab, editorViewRef, localHistory]);
+    // collab 切换（重建视图）依赖其引用；applyBody/syncWikiPicker 为稳定回调；editorViewRef 为父组件
+    // useRef（引用稳定，仅为 exhaustive-deps 合规列入，不会触发重建）；localHistory 只在挂载配置生效
+  }, [applyBody, collab, editorViewRef, localHistory, syncWikiPicker]);
 
   // 只读切换：同一视图翻转（不重建 → 选区/滚动/协作绑定保留），装饰经 readOnlyEffect 同步
   useEffect(() => {
@@ -363,7 +464,20 @@ export function MarkdownEditor({
     applyBody(bodyRef.current);
   }, [syncSeq, applyBody]);
 
-  return <div ref={hostRef} className={className} data-markdown-editor />;
+  return (
+    <>
+      <div ref={hostRef} className={className} data-markdown-editor />
+      {wikiPicker && (
+        <WikiLinkPicker
+          query={wikiPicker.query}
+          anchor={wikiPicker.anchor}
+          onPick={pickWikiTarget}
+          onCreate={links?.onCreateNote}
+          onClose={closeWikiPicker}
+        />
+      )}
+    </>
+  );
 }
 
 // ===== 只读展示面封装（画布文本节点 / 对话气泡 / AI 面板）=====

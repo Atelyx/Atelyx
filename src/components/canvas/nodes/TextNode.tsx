@@ -122,17 +122,21 @@ export function TextNode({ id, data, width, height, selected }: NodeProps) {
   // [[wiki 链接]] 定位 + 笔记链接打开/新建（公共接线簇，见 hooks/useWikiNodeLocate、useVaultLinkHandlers）
   const { isWikiLocatable, handleLocateWiki } = useWikiNodeLocate();
   const {
+    resolveWikiNote,
     handleOpenWikiNote,
     isVaultPathNote,
     handleOpenVaultPathNote,
     handleCreateNote,
+    openCreatedNote,
   } = useVaultLinkHandlers();
   // 统一渲染引擎的链接/定位回调（回调全部稳定，防随内容重建装饰）
   const textMarkdownLinks: MarkdownEditorLinks = {
     onOpenNote: handleOpenWikiNote,
+    resolveWikiNote,
     isVaultPathNote,
     onOpenVaultPathNote: handleOpenVaultPathNote,
     onCreateNote: handleCreateNote,
+    onOpenCreatedNote: openCreatedNote,
     isLocatable: isWikiLocatable,
     onLocate: handleLocateWiki,
   };

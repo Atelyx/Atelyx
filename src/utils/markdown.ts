@@ -69,6 +69,57 @@ export function vaultPathNoteOf(
 /** 允许走系统浏览器的外部链接协议。 */
 const EXTERNAL_LINK_RE = /^(https?:|mailto:|xmpp:)/i;
 
+/** `[label](href)` 插入用 href 编码：仅转义破坏行内链接解析的 ASCII 字符——
+ *  `%` 先行转义保证解码往返无歧义，空格会截断 URL 组、括号会提前闭合链接；
+ *  中文等合法字符保留原样。与 Rust 反链扫描和前端 `vaultPathNoteOf` 的 percent
+ *  解码契约一致（两侧均先解码再匹配路径）。 */
+export function encodeMarkdownLinkHref(path: string): string {
+  return path
+    .replace(/%/g, "%25")
+    .replace(/ /g, "%20")
+    .replace(/\(/g, "%28")
+    .replace(/\)/g, "%29");
+}
+
+/**
+ * 光标前 wiki 链接候选上下文：`before` = 光标所在行光标前文本，`after` = 光标后文本
+ * （均相对本行）。光标处于未闭合的 `[[查询词` / `【【查询词` 片段内时返回
+ * `{ from, query }`（from = 触发符在 before 内的下标，query = 触发符到光标之间的查询词）。
+ * 不触发的情形：触发符后已闭合（after 以 `]]` 或 `】】` 起始）；片段含闭合括号
+ * （`[` `]` `【` `】`）、别名分隔 `|` 或换行。 */
+export function wikiLinkContextAt(before: string, after: string): { from: number; query: string } | null {
+  const m = /(?:\[\[|【【)([^[\]【】\n|]*)$/.exec(before);
+  if (!m) return null;
+  if (/^(?:\]\]|】】)/.test(after)) return null;
+  const query = m[1] ?? "";
+  return { from: before.length - query.length - 2, query };
+}
+
+/**
+ * 行内可新建链接（未闭合 wiki `[[目标|别名]]` 或空路径链接 `[label]()`）定位：
+ * 返回包含 rel（点击落点的行内偏移，落点对齐区间末端也算命中）的区间与显示名。
+ * 供快捷新建回填按点击落点重扫链接当前区间（构建期区间已随文档变更过期时的兜底）；
+ * 与装饰层的 wiki / 空链接判定同语义（wiki 目标非空、空链接 label 非空）。 */
+export function creatableLinkRangeInLine(
+  lineText: string,
+  rel: number,
+): { start: number; end: number; label: string } | null {
+  const hits: { start: number; end: number; label: string }[] = [];
+  const wikiRe = /\[\[([^\]|]*?)(?:\|([^\]]*?))?\]\]/g;
+  let m: RegExpExecArray | null;
+  while ((m = wikiRe.exec(lineText))) {
+    const target = (m[1] ?? "").trim();
+    if (!target) continue;
+    hits.push({ start: m.index, end: m.index + m[0].length, label: (m[2] ?? "").trim() || target });
+  }
+  const emptyRe = /\[([^\]\n]*)\]\(\s*\)/g;
+  while ((m = emptyRe.exec(lineText))) {
+    if (!(m[1] ?? "").trim()) continue;
+    hits.push({ start: m.index, end: m.index + m[0].length, label: m[1] ?? "" });
+  }
+  return hits.find((r) => rel >= r.start && rel <= r.end) ?? null;
+}
+
 /**
  * 可否用系统默认程序打开该 URL：仅放行 `EXTERNAL_LINK_RE` 覆盖的协议，其余（`file:`/`javascript:`/
  * 非法 URL）返回 false。先经 `URL` 解析出协议再判定——前缀正则直接匹配原始串会把

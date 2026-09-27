@@ -1,13 +1,14 @@
 /**
- * buildDecorations 回归测试（纯 state 侧，无 DOM）：
+ * buildDecorations 回归测试（纯 state 侧 + 快捷新建回填的 jsdom 视图测试）：
  * 覆盖全语法混合文档，验证装饰构建不抛 RangeSetBuilder 排序错误、
  * 各类 widget/行装饰都能产出（防排序/重叠类回归）。
  */
+/** @vitest-environment jsdom */
 import { describe, expect, it } from "vitest";
 import { EditorState, StateEffect, type Extension } from "@codemirror/state";
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { syntaxTree } from "@codemirror/language";
-import type { DecorationSet } from "@codemirror/view";
+import { EditorView, type DecorationSet } from "@codemirror/view";
 import {
   buildDecorations,
   blockLineAtEdge,
@@ -23,6 +24,7 @@ import {
   LinkWidget,
   parseBracketLink,
   type DecorationOptions,
+  type LinkClickContext,
 } from "./markdownWidgets";
 
 const opts: DecorationOptions = {
@@ -35,6 +37,9 @@ const opts: DecorationOptions = {
   mentions: [{ key: "n1", label: "文件A" }],
   onMentionClick: () => {},
 };
+
+/** 无视图点击上下文：回填定位对失效视图安全返回 null（仅验证点击回调通路时使用）。 */
+const noViewCtx = { view: null, el: null } as unknown as LinkClickContext;
 
 function build(md: string, readOnly = true): DecorationSet {
   const state = EditorState.create({
@@ -71,8 +76,13 @@ function linkWidgets(decs: DecorationSet, len: number): LinkWidget[] {
 }
 
 /** LinkWidget 私有字段的只读视口（测试内窥视模式与点击回调，不改生产可见性）。 */
-function linkInfo(w: LinkWidget): { text: string; url: string; kind: string; click: () => void } {
-  const v = w as unknown as { text: string; url: string; kind: string; onClick: () => void };
+function linkInfo(w: LinkWidget): { text: string; url: string; kind: string; click: (ctx: LinkClickContext) => void } {
+  const v = w as unknown as {
+    text: string;
+    url: string;
+    kind: string;
+    onClick: (ctx: LinkClickContext) => void;
+  };
   return { text: v.text, url: v.url, kind: v.kind, click: v.onClick };
 }
 
@@ -116,6 +126,12 @@ const MIXED_DOC = [
   "用户消息 @文件A 结尾",
 ].join("\n");
 
+/** jsdom 的 Range 未实现 getClientRects（CM 测量需要）：补空实现防未捕获异常。 */
+Object.defineProperty(Range.prototype, "getClientRects", {
+  value: () => [],
+  configurable: true,
+});
+
 describe("buildDecorations", () => {
   it("混合语法文档构建不抛错（只读）", () => {
     expect(() => build(MIXED_DOC)).not.toThrow();
@@ -149,7 +165,7 @@ describe("图片渲染", () => {
 });
 
 describe("括号链接与 `[名]()` 快捷新建（URL 可空）", () => {
-  function buildWithCreate(md: string, onCreateNote: (label: string) => void): DecorationSet {
+  function buildWithCreate(md: string, onCreateNote: DecorationOptions["onCreateNote"]): DecorationSet {
     const state = EditorState.create({
       doc: md,
       extensions: [markdown({ addKeymap: false, base: markdownLanguage })],
@@ -157,37 +173,44 @@ describe("括号链接与 `[名]()` 快捷新建（URL 可空）", () => {
     return buildDecorations(state, { ...opts, onCreateNote }, () => {});
   }
 
-  it("混合语法文档中的 `[新建]()` 产出可点击 create widget，点击回调收到 label", () => {
+  it("混合语法文档中的 `[新建]()` 产出可点击 create widget，点击回调收到 label", async () => {
     const created: string[] = [];
-    const links = linkWidgets(buildWithCreate(MIXED_DOC, (l) => created.push(l)), MIXED_DOC.length).map(linkInfo);
+    const links = linkWidgets(
+      buildWithCreate(MIXED_DOC, (l) => {
+        created.push(l);
+        return Promise.resolve(null);
+      }),
+      MIXED_DOC.length,
+    ).map(linkInfo);
     const create = links.filter((l) => l.kind === "create");
     expect(create).toHaveLength(1);
     expect(create[0]).toMatchObject({ text: "新建", url: "" });
-    create[0].click();
+    create[0].click(noViewCtx);
+    await new Promise((r) => setTimeout(r, 0));
     expect(created).toEqual(["新建"]);
   });
 
   it("`[名]( )` 空白路径 trim 后同样走 create", () => {
     const doc = "[新建]( )";
-    const links = linkWidgets(buildWithCreate(doc, () => {}), doc.length).map(linkInfo);
+    const links = linkWidgets(buildWithCreate(doc, async () => null), doc.length).map(linkInfo);
     expect(links.filter((l) => l.kind === "create")).toHaveLength(1);
   });
 
   it("`[]()` 空 label 不产出 create widget（避免建出无名笔记）", () => {
     const doc = "[]()";
-    const links = linkWidgets(buildWithCreate(doc, () => {}), doc.length).map(linkInfo);
+    const links = linkWidgets(buildWithCreate(doc, async () => null), doc.length).map(linkInfo);
     expect(links.some((l) => l.kind === "create")).toBe(false);
   });
 
   it("`[x](<url>)` 尖括号形式 URL 非空，不产出 create widget", () => {
     const doc = "[x](<https://e.com>)";
-    const links = linkWidgets(buildWithCreate(doc, () => {}), doc.length).map(linkInfo);
+    const links = linkWidgets(buildWithCreate(doc, async () => null), doc.length).map(linkInfo);
     expect(links.some((l) => l.kind === "create")).toBe(false);
   });
 
   it("`[点我](https://example.com)` 仍渲染为外链 widget", () => {
     const doc = "[点我](https://example.com)";
-    const links = linkWidgets(buildWithCreate(doc, () => {}), doc.length).map(linkInfo);
+    const links = linkWidgets(buildWithCreate(doc, async () => null), doc.length).map(linkInfo);
     expect(links.map((l) => l.kind)).toEqual(["external"]);
     expect(links[0].text).toBe("点我");
   });
@@ -201,6 +224,309 @@ describe("括号链接与 `[名]()` 快捷新建（URL 可空）", () => {
     // 尖括号形式原样保留 `<...>`（非空 url，不判成空路径；也因此不会被当作外链前缀）
     expect(parseBracketLink("[a](<https://e.com>)")).toEqual({ label: "a", url: "<https://e.com>" });
     expect(parseBracketLink("不是链接")).toBeNull();
+  });
+});
+
+describe("wiki 链接缺失态（未命中笔记 → 点击快捷新建 + 回填路径）", () => {
+  function buildWiki(
+    md: string,
+    extra: Partial<DecorationOptions>,
+  ): DecorationSet {
+    const state = EditorState.create({
+      doc: md,
+      extensions: [markdown({ addKeymap: false, base: markdownLanguage })],
+    });
+    return buildDecorations(state, { ...opts, ...extra }, () => {});
+  }
+
+  it("提供 resolveWikiNote 且未命中 + onCreateNote → create widget，点击回调收到目标名", async () => {
+    const created: string[] = [];
+    const doc = "引用 [[缺失笔记]] 结尾";
+    const links = linkWidgets(
+      buildWiki(doc, {
+        resolveWikiNote: () => false,
+        onCreateNote: (n) => {
+          created.push(n);
+          return Promise.resolve(null);
+        },
+      }),
+      doc.length,
+    ).map(linkInfo);
+    expect(links).toHaveLength(1);
+    expect(links[0]).toMatchObject({ text: "缺失笔记", url: "", kind: "create" });
+    links[0].click(noViewCtx);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(created).toEqual(["缺失笔记"]);
+  });
+
+  it("resolveWikiNote 命中 → 正常 wiki 打开 widget（kind wiki），不产 create", () => {
+    const doc = "引用 [[已有笔记]] 结尾";
+    const links = linkWidgets(
+      buildWiki(doc, { resolveWikiNote: () => true, onOpenNote: () => {} }),
+      doc.length,
+    ).map(linkInfo);
+    expect(links).toHaveLength(1);
+    expect(links[0]).toMatchObject({ text: "已有笔记", kind: "wiki" });
+  });
+
+  it("别名语法缺失态：显示别名，点击新建用 `|` 前目标名", async () => {
+    const created: string[] = [];
+    const doc = "引用 [[目标笔记|别名]] 结尾";
+    const links = linkWidgets(
+      buildWiki(doc, {
+        resolveWikiNote: () => false,
+        onCreateNote: (n) => {
+          created.push(n);
+          return Promise.resolve(null);
+        },
+      }),
+      doc.length,
+    ).map(linkInfo);
+    expect(links[0]).toMatchObject({ text: "别名", url: "", kind: "create" });
+    links[0].click(noViewCtx);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(created).toEqual(["目标笔记"]);
+  });
+
+  it("未提供 resolveWikiNote → 维持原行为（onOpenNote 打开 widget，不判缺失）", () => {
+    const doc = "引用 [[任意目标]] 结尾";
+    const links = linkWidgets(
+      buildWiki(doc, { onOpenNote: () => {}, onCreateNote: async () => null }),
+      doc.length,
+    ).map(linkInfo);
+    expect(links).toHaveLength(1);
+    expect(links[0].kind).toBe("wiki");
+  });
+
+  function mountView(md: string, anchor = 0): EditorView {
+    const parent = document.createElement("div");
+    document.body.appendChild(parent);
+    const state = EditorState.create({
+      doc: md,
+      selection: { anchor },
+      extensions: [markdown({ addKeymap: false, base: markdownLanguage })],
+    });
+    return new EditorView({ state, parent });
+  }
+
+  it("空链接点击新建后，源文回填为路径链接并打开新笔记", async () => {
+    const view = mountView("[新建]()");
+    const opened: [string, string][] = [];
+    const decs = buildDecorations(
+      view.state,
+      {
+        ...opts,
+        readOnly: false,
+        onCreateNote: (n) => Promise.resolve(`dir/${n}.md`),
+        onOpenCreatedNote: (file, name) => opened.push([file, name]),
+      },
+      () => {},
+    );
+    const create = linkWidgets(decs, 6).map(linkInfo)[0];
+    create.click({ view, el: document.createElement("span") });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(view.state.doc.toString()).toBe("[新建](dir/新建.md)");
+    expect(opened).toEqual([["dir/新建.md", "新建"]]);
+    view.destroy();
+  });
+
+  it("空链接后随正文时回填同样生效", async () => {
+    const doc = "[新建]() 后面还有文字";
+    const view = mountView(doc, 0);
+    const decs = buildDecorations(
+      view.state,
+      {
+        ...opts,
+        readOnly: false,
+        onCreateNote: (n) => Promise.resolve(`dir/${n}.md`),
+        onOpenCreatedNote: () => {},
+      },
+      () => {},
+    );
+    const create = linkWidgets(decs, doc.length).map(linkInfo)[0];
+    expect(create).toBeDefined();
+    create.click({ view, el: document.createElement("span") });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(view.state.doc.toString()).toBe("[新建](dir/新建.md) 后面还有文字");
+    view.destroy();
+  });
+
+  it("未命中 wiki 点击新建后回填，链接随即指向新笔记", async () => {
+    const doc = "引用 [[缺失笔记]] 结尾\n";
+    // 光标落在第二行：可编辑态光标行显示原文（wiki 装饰在光标行不渲染），须移出才能取到 widget
+    const view = mountView(doc, doc.length);
+    const decs = buildDecorations(
+      view.state,
+      {
+        ...opts,
+        readOnly: false,
+        resolveWikiNote: () => false,
+        onCreateNote: (n) => Promise.resolve(`${n}.md`),
+        onOpenCreatedNote: () => {},
+      },
+      () => {},
+    );
+    const w = linkWidgets(decs, doc.length).map(linkInfo)[0];
+    w.click({ view, el: document.createElement("span") });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(view.state.doc.toString()).toBe("引用 [缺失笔记](缺失笔记.md) 结尾\n");
+    view.destroy();
+  });
+
+  it("创建期间区间原文被改动 → 跳过回填不盲改，但仍创建并打开", async () => {
+    const view = mountView("[新建]()");
+    const opened: string[] = [];
+    const decs = buildDecorations(
+      view.state,
+      {
+        ...opts,
+        readOnly: false,
+        onOpenCreatedNote: (file) => opened.push(file),
+        onCreateNote: (n) => {
+          // 模拟创建期间用户在前方插入文本，构建期区间随之失效
+          view.dispatch({ changes: { from: 0, insert: "前缀" } });
+          return Promise.resolve(`${n}.md`);
+        },
+      },
+      () => {},
+    );
+    const create = linkWidgets(decs, 6).map(linkInfo)[0];
+    create.click({ view, el: document.createElement("span") });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(view.state.doc.toString()).toBe("前缀[新建]()");
+    expect(opened).toEqual(["新建.md"]);
+    view.destroy();
+  });
+
+  it("只读面（对话气泡/预览）跳过回填：仅创建并打开，不改写展示文本", async () => {
+    const view = mountView("[新建]()");
+    const opened: string[] = [];
+    const decs = buildDecorations(
+      view.state,
+      {
+        ...opts,
+        readOnly: true,
+        onOpenCreatedNote: (file) => opened.push(file),
+        onCreateNote: (n) => Promise.resolve(`${n}.md`),
+      },
+      () => {},
+    );
+    const create = linkWidgets(decs, 6).map(linkInfo)[0];
+    create.click({ view, el: document.createElement("span") });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(view.state.doc.toString()).toBe("[新建]()");
+    expect(opened).toEqual(["新建.md"]);
+    view.destroy();
+  });
+
+  it("未命中路径链接 → create widget（url 保留原路径），点击按路径创建且不回填", async () => {
+    const doc = "见 [双向链接](笔记/双向链接.md) 一节";
+    const created: string[] = [];
+    const opened: [string, string][] = [];
+    const view = mountView(doc);
+    const decs = buildDecorations(
+      view.state,
+      {
+        ...opts,
+        onCreateNote: (n) => {
+          created.push(n);
+          return Promise.resolve(n);
+        },
+        onOpenCreatedNote: (file, name) => opened.push([file, name]),
+      },
+      () => {},
+    );
+    const links = linkWidgets(decs, doc.length).map(linkInfo);
+    expect(links).toHaveLength(1);
+    expect(links[0]).toMatchObject({ text: "双向链接", url: "笔记/双向链接.md", kind: "create" });
+    links[0].click({ view, el: document.createElement("span") });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(created).toEqual(["笔记/双向链接.md"]);
+    expect(view.state.doc.toString()).toBe(doc);
+    expect(opened).toEqual([["笔记/双向链接.md", "笔记/双向链接.md"]]);
+    view.destroy();
+  });
+
+  it("路径链接含 `..` → 保持原文不产出 create widget；无后缀路径可创建", () => {
+    const doc = "[逃逸](../x.md) 与 [无后缀](notes/x)";
+    const links = linkWidgets(buildWiki(doc, { onCreateNote: async () => null }), doc.length).map(linkInfo);
+    expect(links.filter((l) => l.url === "../x.md")).toHaveLength(0);
+    const noExt = links.filter((l) => l.url === "notes/x");
+    expect(noExt).toHaveLength(1);
+    expect(noExt[0].kind).toBe("create");
+  });
+
+  it("`[[文字]]` 片段不按引用链接处理（交 wiki 分支）", () => {
+    const doc = "引用 [[文字]] 结尾";
+    const links = linkWidgets(
+      buildWiki(doc, { resolveWikiNote: () => false, onCreateNote: async () => null }),
+      doc.length,
+    ).map(linkInfo);
+    expect(links).toHaveLength(1);
+    expect(links[0].kind).toBe("create");
+  });
+
+  it("单层 [文字]（引用形态）不产出任何链接 widget", () => {
+    const doc = "引用 [文字] 结尾";
+    const links = linkWidgets(
+      buildWiki(doc, { resolveWikiNote: () => false, onCreateNote: async () => null }),
+      doc.length,
+    ).map(linkInfo);
+    expect(links).toHaveLength(0);
+  });
+
+  it("单层 [文字] 的括号加内联样式中和次要色（覆盖 LinkMark 高亮）", () => {
+    const doc = "引用 [文字] 结尾";
+    const decs = build(doc);
+    const neutralized: string[] = [];
+    decs.between(0, doc.length, (from, to, dec) => {
+      const style = (dec as unknown as { spec?: { attributes?: { style?: string } } }).spec?.attributes?.style;
+      if (style?.includes("var(--text-primary)")) neutralized.push(`${from}-${to}`);
+    });
+    // `[` 与 `]` 两个 LinkMark 区间都被中和（Link 节点 [3,7] 的两端）
+    expect(neutralized).toEqual(["3-4", "6-7"]);
+  });
+
+  it("无后缀路径链接按「路径 + .md」解析命中 → 打开 widget", () => {
+    const doc = "见 [链接](链接) 一节";
+    const opened: string[] = [];
+    const links = linkWidgets(
+      buildWiki(doc, {
+        isVaultPathNote: (href) => href === "链接.md",
+        onOpenVaultPathNote: (href) => opened.push(href),
+      }),
+      doc.length,
+    ).map(linkInfo);
+    expect(links).toHaveLength(1);
+    expect(links[0]).toMatchObject({ text: "链接", url: "链接.md", kind: "path" });
+    links[0].click(noViewCtx);
+    expect(opened).toEqual(["链接.md"]);
+  });
+
+  it("无后缀路径链接未命中 → 点击创建 路径.md 并回填补全后缀", async () => {
+    const doc = "见 [文字](后面有文字的话) 一节\n";
+    const created: string[] = [];
+    const view = mountView(doc, doc.length);
+    const decs = buildDecorations(
+      view.state,
+      {
+        ...opts,
+        readOnly: false,
+        onCreateNote: (n) => {
+          created.push(n);
+          return Promise.resolve(n);
+        },
+        onOpenCreatedNote: () => {},
+      },
+      () => {},
+    );
+    const w = linkWidgets(decs, doc.length).map(linkInfo)[0];
+    expect(w).toMatchObject({ text: "文字", kind: "create" });
+    w.click({ view, el: document.createElement("span") });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(created).toEqual(["后面有文字的话.md"]);
+    expect(view.state.doc.toString()).toBe("见 [文字](后面有文字的话.md) 一节\n");
+    view.destroy();
   });
 });
 

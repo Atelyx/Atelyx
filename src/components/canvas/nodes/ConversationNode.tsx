@@ -686,10 +686,12 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
   // [[wiki 链接]] 定位 + 笔记链接打开/新建（公共接线簇，见 hooks/useWikiNodeLocate、useVaultLinkHandlers）
   const { isWikiLocatable, handleLocateWiki } = useWikiNodeLocate();
   const {
+    resolveWikiNote,
     handleOpenWikiNote,
     isVaultPathNote,
     handleOpenVaultPathNote,
     handleCreateNote,
+    openCreatedNote,
   } = useVaultLinkHandlers();
 
   // ===== 渲染 =====
@@ -698,13 +700,15 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
   const messageMarkdownLinks = useMemo<MarkdownEditorLinks>(
     () => ({
       onOpenNote: handleOpenWikiNote,
+      resolveWikiNote,
       isVaultPathNote,
       onOpenVaultPathNote: handleOpenVaultPathNote,
       onCreateNote: handleCreateNote,
+      onOpenCreatedNote: openCreatedNote,
       isLocatable: isWikiLocatable,
       onLocate: handleLocateWiki,
     }),
-    [handleOpenWikiNote, isVaultPathNote, handleOpenVaultPathNote, handleCreateNote, isWikiLocatable, handleLocateWiki],
+    [resolveWikiNote, handleOpenWikiNote, isVaultPathNote, handleOpenVaultPathNote, handleCreateNote, openCreatedNote, isWikiLocatable, handleLocateWiki],
   );
   const handleRollback = useCallback(
     (messageId: string) => rollbackTo(id, messageId),
