@@ -443,7 +443,8 @@ describe("wiki 链接缺失态（未命中笔记 → 点击快捷新建 + 回填
     await new Promise((r) => setTimeout(r, 0));
     expect(created).toEqual(["笔记/双向链接.md"]);
     expect(view.state.doc.toString()).toBe(doc);
-    expect(opened).toEqual([["笔记/双向链接.md", "笔记/双向链接.md"]]);
+    // 打开回调：file = 实际落盘路径，name = 笔记显示名（非原始路径串）
+    expect(opened).toEqual([["笔记/双向链接.md", "双向链接"]]);
     view.destroy();
   });
 
@@ -454,6 +455,12 @@ describe("wiki 链接缺失态（未命中笔记 → 点击快捷新建 + 回填
     const noExt = links.filter((l) => l.url === "notes/x");
     expect(noExt).toHaveLength(1);
     expect(noExt[0].kind).toBe("create");
+  });
+
+  it("锚点与非 .md 后缀的目标保持原文，不产出 create widget", () => {
+    const doc = "[目录](#section) 与 [手册](docs/manual.pdf)";
+    const links = linkWidgets(buildWiki(doc, { onCreateNote: async () => null }), doc.length).map(linkInfo);
+    expect(links).toHaveLength(0);
   });
 
   it("`[[文字]]` 片段不按引用链接处理（交 wiki 分支）", () => {

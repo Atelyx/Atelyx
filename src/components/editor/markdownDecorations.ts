@@ -41,6 +41,7 @@ import {
   parseBracketLink,
 } from "./markdownWidgets";
 import { decodeLinkHref, isOpenableUrl, creatableLinkRangeInLine, encodeMarkdownLinkHref } from "@/utils/markdown";
+import { noteTitleFromFile } from "@/utils/filename";
 
 // ===== 语法节点名（lezer-markdown，GFM 已启用）=====
 
@@ -152,11 +153,38 @@ function locateCreatableRange(
   }
 }
 
+/** 无 .md 后缀的路径链接按「路径 + .md」解析命中（[链接](链接) → 链接.md）→ 内部链接打开 */
+function isNotePathHit(opts: DecorationOptions, url: string): boolean {
+  if (url === "" || url.startsWith("<")) return false;
+  return !!opts.onOpenVaultPathNote && !!opts.isVaultPathNote?.(url + ".md");
+}
+
+/** 链接路径是否可作为「未命中的笔记目标」来创建：干净仓库相对路径，且后缀要么没有、
+ *  要么是 .md；锚点（`#片段`）与外部/附件后缀（.pdf 等）保持原文，不产出可新建 widget。 */
+function isNoteCreatableHref(url: string): boolean {
+  if (url === "" || url.startsWith("<") || url.startsWith("#")) return false;
+  const hasExt = /\.[a-z0-9]+$/i.test(url);
+  return isSafeVaultRelPath(url) && (!hasExt || /\.md$/i.test(url));
+}
+
 /** 快捷新建点击流程：创建笔记 →（可编辑面）把链接源文回填为路径链接 → 打开新笔记。
  *  回填定位见 locateCreatableRange（点击当刻定位，创建完成后原文未变才替换）。
  *  打开必须晚于回填：openNote 会切换编辑面文档，先打开会让回填写进错误文档
  *  （或因区间越界静默失败）。只读面（对话气泡/预览）无保存链，跳过回填只创建并打开。
  *  回填定位失败/区间被改（罕见并发）仅跳过回填，不阻断建链与打开。 */
+/** 点击在途的 widget（防创建窗口内重复点击建出第二篇笔记，先建的变无入链孤儿）；
+ *  按 widget DOM 身份去重，无 DOM 的调用上下文（纯逻辑用例）不做去重。 */
+const creatingWidgets = new WeakSet<HTMLElement>();
+function beginCreate(el: HTMLElement | null): boolean {
+  if (!el) return true;
+  if (creatingWidgets.has(el)) return false;
+  creatingWidgets.add(el);
+  return true;
+}
+function endCreate(el: HTMLElement | null): void {
+  if (el) creatingWidgets.delete(el);
+}
+
 function createNoteFromLink(
   ctx: LinkClickContext,
   createNote: (name: string) => Promise<string | null>,
@@ -165,21 +193,27 @@ function createNoteFromLink(
   link: { name: string; label: string; source: string; from: number; to: number },
 ): void {
   const { view, el } = ctx;
+  if (!beginCreate(el)) return;
   const range = locateCreatableRange(view, el, link);
   void createNote(link.name)
     .then((file) => {
       if (!file) return;
       if (!readOnly && range && view.state.sliceDoc(range.from, range.to) === link.source) {
         const insert = `[${link.label}](${encodeMarkdownLinkHref(file)})`;
-        view.dispatch({
-          changes: { from: range.from, to: range.to, insert },
-          selection: { anchor: range.from + insert.length },
-          scrollIntoView: true,
-        });
+        try {
+          view.dispatch({
+            changes: { from: range.from, to: range.to, insert },
+            selection: { anchor: range.from + insert.length },
+            scrollIntoView: true,
+          });
+        } catch {
+          // 视图已失效/正在重绘：跳过回填（笔记仍打开），不让异常吞掉打开
+        }
       }
-      openCreated?.(file, link.name);
+      openCreated?.(file, noteTitleFromFile(file));
     })
-    .catch(() => {});
+    .catch(() => {})
+    .finally(() => endCreate(el));
 }
 
 /** 未命中路径链接点击：按链接路径创建笔记。文本即目标路径，无需回填——创建后
@@ -191,7 +225,8 @@ function createNoteAtPath(
   openCreated: ((file: string, name: string) => void) | undefined,
   url: string,
 ): void {
-  const { view } = ctx;
+  const { view, el } = ctx;
+  if (!beginCreate(el)) return;
   void createNote(url)
     .then((file) => {
       if (!file) return;
@@ -200,9 +235,10 @@ function createNoteAtPath(
       } catch {
         // 视图已失效（widget 卸载等）：跳过重建，链接下次装饰重建时自然收敛
       }
-      openCreated?.(file, url);
+      openCreated?.(file, noteTitleFromFile(file));
     })
-    .catch(() => {});
+    .catch(() => {})
+    .finally(() => endCreate(el));
 }
 
 export function buildDecorations(
@@ -595,13 +631,7 @@ export function buildDecorations(
             ),
           }),
         );
-      } else if (
-        opts.onOpenVaultPathNote &&
-        parsed.url !== "" &&
-        !parsed.url.startsWith("<") &&
-        opts.isVaultPathNote?.(decodeLinkHref(parsed.url) + ".md")
-      ) {
-        // 无 .md 后缀的路径链接按「路径 + .md」解析命中（[链接](链接) → 链接.md）→ 内部链接打开
+      } else if (isNotePathHit(opts, decodeLinkHref(parsed.url))) {
         const href = decodeLinkHref(parsed.url) + ".md";
         pushWidget(
           c.from,
@@ -615,8 +645,7 @@ export function buildDecorations(
       } else if (
         opts.onCreateNote &&
         parsed.url !== "" &&
-        !parsed.url.startsWith("<") &&
-        isSafeVaultRelPath(decodeLinkHref(parsed.url))
+        isNoteCreatableHref(decodeLinkHref(parsed.url))
       ) {
         const createNote = opts.onCreateNote;
         const target = decodeLinkHref(parsed.url);
