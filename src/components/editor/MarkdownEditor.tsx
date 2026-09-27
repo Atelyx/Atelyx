@@ -279,6 +279,12 @@ export function MarkdownEditor({
     const label = name.replace(/\.md$/i, "").replace(/[[\]]/g, "");
     const insert = `[${label}](${encodeMarkdownLinkHref(file)})`;
     const head = view.state.selection.main.head;
+    // 提交前重新校验触发片段仍在原位（外部同步整篇替换期间浮层不刷新，缓存的 from 会指向旧文档）
+    const ctx = wikiLinkTriggerContext(view.state, head);
+    if (!ctx || ctx.from !== picker.from) {
+      setWikiPicker(null);
+      return;
+    }
     view.dispatch({
       changes: { from: picker.from, to: head, insert },
       selection: { anchor: picker.from + insert.length },

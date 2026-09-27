@@ -37,6 +37,8 @@ export function WikiLinkPicker({ query, anchor, onPick, onCreate, onClose }: Pro
   // active 供键盘监听读取（ref 避免监听随 active 每击键重绑）
   const activeRef = useRef(active);
   activeRef.current = active;
+  /** 新建笔记在途（防创建窗口内重复点击建出第二篇笔记）。 */
+  const creatingRef = useRef(false);
 
   // 文件名子串过滤（忽略大小写），保持 noteList 树序
   const candidates = useMemo(() => {
@@ -45,28 +47,37 @@ export function WikiLinkPicker({ query, anchor, onPick, onCreate, onClose }: Pro
     return matched.slice(0, MAX_CANDIDATES);
   }, [noteList, query]);
 
-  // 新建项：onCreate 可用 + 查询词非空 + 无同名笔记命中（有同名 = 已存在，不重复建）
+  // 新建项：onCreate 可用 + 查询词非空 + 无同名笔记命中（大小写不敏感：Windows/APFS 上
+  // `NOTE` 与已有的 `note.md` 是同一文件，放行新建会用空内容覆盖已有笔记）
   const trimmed = query.trim();
-  const canCreate =
-    !!onCreate && trimmed !== "" && !noteList.some((n) => n.name.replace(/\.md$/i, "") === trimmed);
+  const nameEquals = (n: string) => n.replace(/\.md$/i, "").toLowerCase() === trimmed.toLowerCase();
+  const canCreate = !!onCreate && trimmed !== "" && !noteList.some((n) => nameEquals(n.name));
 
   const items = useMemo<PickerItem[]>(() => {
     const notes: PickerItem[] = candidates.map((n) => ({ kind: "note", file: n.file, name: n.name }));
     return canCreate ? [...notes, { kind: "create", name: trimmed }] : notes;
   }, [candidates, canCreate, trimmed]);
 
-  // 选中项：笔记直选；新建项创建成功后按新文件路径走同一回填插入
+  /** 选中项：笔记直选；新建项创建成功后按新文件路径走同一回填插入（在途期间忽略重复点击）。 */
   const pickItem = useCallback(
     (it: PickerItem | undefined) => {
-      if (!it) return;
+      if (!it || creatingRef.current) return;
       if (it.kind === "note") {
         onPick(it.file, it.name);
         return;
       }
-      void onCreate?.(it.name).then((file) => {
-        if (!file) return;
-        onPick(file, file.split("/").pop()?.replace(/\.md$/i, "") ?? it.name);
-      });
+      creatingRef.current = true;
+      void onCreate?.(it.name)
+        .then((file) => {
+          // 创建失败（无权限/路径非法）：保持浮层打开可重试
+          if (!file) return;
+          // 显示名取实际落盘文件（被去重/净化时 ≠ 查询词）
+          onPick(file, file.split("/").pop()?.replace(/\.md$/i, "") ?? it.name);
+        })
+        .catch(() => {})
+        .finally(() => {
+          creatingRef.current = false;
+        });
     },
     [onPick, onCreate],
   );
