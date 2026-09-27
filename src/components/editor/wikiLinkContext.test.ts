@@ -7,10 +7,9 @@ import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { syntaxTree } from "@codemirror/language";
 import { wikiLinkTriggerContext } from "./wikiLinkContext";
 
-function stateOf(md: string, pos?: number): EditorState {
+function stateOf(md: string): EditorState {
   return EditorState.create({
     doc: md,
-    ...(pos === undefined ? {} : { selection: { anchor: pos } }),
     extensions: [markdown({ addKeymap: false, base: markdownLanguage })],
   });
 }

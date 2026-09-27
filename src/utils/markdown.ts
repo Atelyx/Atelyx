@@ -5,7 +5,7 @@
  * 统一 CodeMirror 单引擎（`MarkdownEditor` 编辑 / `MarkdownView` 只读，widget 与装饰构建见
  * `components/editor/` 下 `markdownWidgets.tsx` + `markdownDecorations.ts`）。
  * 本文件仅保留与渲染无关的纯解析工具：外部链接协议判定、wiki/仓库路径链接解析、
- * 链接 href 解码。安全清洗（raw HTML 白名单）见 `utils/htmlSanitize.ts`。
+ * 链接 href 编解码、双链候选触发上下文检测、按点击落点反查行内可新建链接区间。安全清洗（raw HTML 白名单）见 `utils/htmlSanitize.ts`。
  */
 import { baseName, sanitizeFilename } from "@/utils/filename";
 
