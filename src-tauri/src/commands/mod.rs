@@ -15,3 +15,5 @@ pub mod temp_attachment;
 pub mod vault;
 pub mod web;
 pub mod windows;
+
+pub(crate) mod content_broadcast;

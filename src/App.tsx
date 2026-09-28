@@ -3,6 +3,7 @@ import { ReactFlowProvider } from "@xyflow/react";
 import { useAppStore } from "@/stores/appStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { usePluginStore } from "@/stores/pluginStore";
+import { subscribeCrossWindowWrites } from "@/stores/contentWriteBridge";
 import { PanelWindowRoot } from "@/components/layout/PanelWindowRoot";
 import { ErrorBoundary } from "@/components/common/ErrorBoundary";
 import { LoadingScreen } from "@/components/common/LoadingScreen";
@@ -203,6 +204,9 @@ export default function App() {
     document.addEventListener("contextmenu", suppress);
     return () => document.removeEventListener("contextmenu", suppress);
   }, []);
+
+  // 跨窗口写盘感知桥（两窗口角色都需要：撕裂窗口也会写盘）。随窗口生命周期注册/撤销。
+  useEffect(() => subscribeCrossWindowWrites(), []);
 
   return (
     <ReactFlowProvider>

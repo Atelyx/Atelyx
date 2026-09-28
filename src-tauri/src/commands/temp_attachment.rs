@@ -107,6 +107,7 @@ fn sanitize_temp_file_name(file_name: &str) -> String {
 /// ——随机串的字母表含 `-`，按分隔符切会把随机串尾段当成名字的一部分。
 #[tauri::command]
 pub fn import_vault_attachment(
+    window: tauri::WebviewWindow,
     rel: String,
     file_name: String,
     state: State<'_, VaultState>,
@@ -123,6 +124,11 @@ pub fn import_vault_attachment(
         unique_attachment_rel(&root, folder.as_deref(), &sanitize_temp_file_name(&file_name))?;
     let dest = safe_join(&root, &target_rel, true)?;
     std::fs::copy(&src, &dest).map_err(|e| format!("复制附件失败：{e}"))?;
+    super::content_broadcast::broadcast_content_changes(
+        &window,
+        &root.to_string_lossy(),
+        vec![super::content_broadcast::ContentChange::write(&target_rel)],
+    );
     Ok(AttachmentImportResult { file: target_rel })
 }
 

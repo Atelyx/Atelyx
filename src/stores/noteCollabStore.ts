@@ -60,8 +60,9 @@ export function broadcastNoteRelocate(oldFile: string, newFile: string): void {
  *
  * 本端正打开该笔记时面板随之切到新路径：复用本地改名同一条「列表变化 → 工作区联动」链路，
  * 因此重命名记录必须早于列表刷新（见 `vaultStore.adoptRemoteNoteMigration`）。
+ * 跨窗口写盘桥（另一窗口改名/移动本窗口打开中的笔记）复用同一簿记，见 stores/contentWriteBridge。
  */
-function adoptRemoteNoteRelocate(oldPath: string, newPath: string): void {
+export function adoptRemoteNoteRelocate(oldPath: string, newPath: string): void {
   useNoteStore.getState().invalidateNoteCache(oldPath);
   useNoteUndoStore.getState().renameFile(oldPath, newPath);
   useNoteCollabStore.getState().disposeDoc(oldPath);

@@ -10,8 +10,9 @@ use base64::Engine;
 use chrono::Utc;
 use nanoid::nanoid;
 use serde::Serialize;
-use tauri::{Manager, State};
+use tauri::{Manager, State, WebviewWindow};
 
+use super::content_broadcast::{broadcast_content_changes, ContentChange};
 use crate::commands::vault::{
     collect_ref_updates, ensure_no_id_conflict, flush_canvas_updates, mime_from_ext,
     remove_replaced_file, PatchWriteResult,
@@ -85,6 +86,7 @@ pub fn read_table_vault(file: String, state: State<'_, VaultState>) -> Result<Ta
 /// createdAt 保留走一次带缓存读（指纹校验失效，外部改动即时感知）。
 #[tauri::command]
 pub fn write_table_vault(
+    window: WebviewWindow,
     mut table: TableFile,
     file: String,
     state: State<'_, VaultState>,
@@ -127,6 +129,13 @@ pub fn write_table_vault(
     }
     cache_evict_table(&state, &file);
     cache_put_table(&state, &new_path, &new_rel, &table);
+    // title 漂移 = 写盘同时改名：接收方先跟路径再对账
+    let change = if new_rel == file {
+        ContentChange::write(&file)
+    } else {
+        ContentChange::write_drifted(&new_rel, &file)
+    };
+    broadcast_content_changes(&window, &root.to_string_lossy(), vec![change]);
     Ok(now)
 }
 
@@ -136,6 +145,7 @@ pub fn write_table_vault(
 /// 返回 (updatedAt, 写盘后的相对路径)——title 变更重命名文件时前端按新路径更新 tableFile。
 #[tauri::command]
 pub fn patch_table_vault(
+    window: WebviewWindow,
     patch: TablePatch,
     file: String,
     state: State<'_, VaultState>,
@@ -208,6 +218,13 @@ pub fn patch_table_vault(
         remove_replaced_file(&old_path, &new_path, "表格")?;
     }
     cache_put_table(&state, &new_path, &new_rel, &table);
+    // title 漂移 = 写盘同时改名：接收方先跟路径再对账
+    let change = if new_rel == file {
+        ContentChange::write(&file)
+    } else {
+        ContentChange::write_drifted(&new_rel, &file)
+    };
+    broadcast_content_changes(&window, &root.to_string_lossy(), vec![change]);
     Ok(PatchWriteResult { updated_at: now, file: new_rel })
 }
 
@@ -215,6 +232,7 @@ pub fn patch_table_vault(
 /// 事务模式同 rename_note：预扫描 → 改名 → 统一写回，写回失败回滚文件。
 #[tauri::command]
 pub fn rename_table_vault(
+    window: WebviewWindow,
     file: String,
     new_title: String,
     state: State<'_, VaultState>,
@@ -254,6 +272,13 @@ pub fn rename_table_vault(
         }
         return Err(format!("更新画布引用失败，重命名已回滚（请重试）：{e}"));
     }
+    // 路径漂移 = 迁移（接收方跟路径后重读）；同名落点也是内容改写（title/updated_at），按写盘广播
+    let change = if new_rel != file {
+        ContentChange::rename(&file, &new_rel)
+    } else {
+        ContentChange::write(&file)
+    };
+    broadcast_content_changes(&window, &root.to_string_lossy(), vec![change]);
     Ok(())
 }
 
@@ -261,6 +286,7 @@ pub fn rename_table_vault(
 /// （与 rename_table_vault 对称；rename_note_file 复用通用移动：路径校验 + 防覆盖）。
 #[tauri::command]
 pub fn move_table_vault(
+    window: WebviewWindow,
     old_file: String,
     new_file: String,
     state: State<'_, VaultState>,
@@ -272,6 +298,11 @@ pub fn move_table_vault(
         let _ = rename_note_file(&root, &new_file, &old_file);
         return Err(format!("更新画布引用失败，移动已回滚（请重试）：{e}"));
     }
+    broadcast_content_changes(
+        &window,
+        &root.to_string_lossy(),
+        vec![ContentChange::rename(&old_file, &new_file)],
+    );
     Ok(())
 }
 

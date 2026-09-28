@@ -17,7 +17,9 @@ use base64::Engine;
 use chrono::Utc;
 use nanoid::nanoid;
 use serde::Serialize;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Manager, State, WebviewWindow};
+
+use super::content_broadcast::{broadcast_content_changes, ContentChange};
 
 use crate::vault::{
     append_chat_messages_file, cache_put_canvas, collect_md_link_updates,
@@ -223,6 +225,7 @@ pub fn read_canvas_vault(file: String, state: State<'_, VaultState>) -> Result<C
 /// createdAt 保留走一次带缓存读（指纹校验失效，外部改动即时感知）。
 #[tauri::command]
 pub fn write_canvas_vault(
+    window: WebviewWindow,
     mut canvas: CanvasFile,
     file: String,
     state: State<'_, VaultState>,
@@ -257,6 +260,13 @@ pub fn write_canvas_vault(
     let new_rel = rel_with_new_title(&file, &canvas.title, "atlx");
     cache_evict_canvas(&state, &file);
     cache_put_canvas(&state, &new_path, &new_rel, &canvas);
+    // title 漂移 = 写盘同时改名：接收方先跟路径再对账
+    let change = if new_rel == file {
+        ContentChange::write(&file)
+    } else {
+        ContentChange::write_drifted(&new_rel, &file)
+    };
+    broadcast_content_changes(&window, &root.to_string_lossy(), vec![change]);
     // 返回落盘后的 updated_at（前端据此更新本地时间戳）
     Ok(now)
 }
@@ -267,6 +277,7 @@ pub fn write_canvas_vault(
 /// 返回 (updatedAt, 写盘后的相对路径)——title 变更重命名文件时前端按新路径更新 canvasFile。
 #[tauri::command]
 pub fn patch_canvas_vault(
+    window: WebviewWindow,
     patch: CanvasPatch,
     file: String,
     state: State<'_, VaultState>,
@@ -323,6 +334,13 @@ pub fn patch_canvas_vault(
     remove_replaced_file(&old_path, &new_path, "画布")?;
     cache_evict_canvas(&state, &file);
     cache_put_canvas(&state, &new_path, &new_rel, &canvas);
+    // title 漂移 = 写盘同时改名：接收方先跟路径再对账
+    let change = if new_rel == file {
+        ContentChange::write(&file)
+    } else {
+        ContentChange::write_drifted(&new_rel, &file)
+    };
+    broadcast_content_changes(&window, &root.to_string_lossy(), vec![change]);
     Ok(PatchWriteResult { updated_at: now, file: new_rel })
 }
 
@@ -338,6 +356,7 @@ pub struct PatchWriteResult {
 /// 重命名画布：更新 .atlx 内 title + 同目录重命名文件（按当前文件路径）。
 #[tauri::command]
 pub fn rename_canvas_vault(
+    window: WebviewWindow,
     file: String,
     new_title: String,
     state: State<'_, VaultState>,
@@ -365,12 +384,19 @@ pub fn rename_canvas_vault(
     // 先写新文件再删旧文件，保证不丢数据
     write_canvas_file(&new_path, &canvas)?;
     remove_replaced_file(&old_path, &new_path, "画布")?;
+    let new_rel = rel_with_new_title(&file, &canvas.title, "atlx");
     // 重命名路径变化：清旧缓存键 + 新路径按新指纹入缓存
     if new_path != old_path {
         cache_evict_canvas(&state, &file);
-        let new_rel = rel_with_new_title(&file, &canvas.title, "atlx");
         cache_put_canvas(&state, &new_path, &new_rel, &canvas);
     }
+    // 路径漂移 = 迁移（接收方跟路径后重读）；同名落点也是内容改写（title/updated_at），按写盘广播
+    let change = if new_path != old_path {
+        ContentChange::rename(&file, &new_rel)
+    } else {
+        ContentChange::write(&file)
+    };
+    broadcast_content_changes(&window, &root.to_string_lossy(), vec![change]);
     Ok(())
 }
 
@@ -378,6 +404,7 @@ pub fn rename_canvas_vault(
 /// 无需更新任何 .atlx；前端负责同步 canvases 列表 / currentCanvasFile 路径。
 #[tauri::command]
 pub fn move_canvas_vault(
+    window: WebviewWindow,
     old_file: String,
     new_file: String,
     state: State<'_, VaultState>,
@@ -386,6 +413,11 @@ pub fn move_canvas_vault(
     rename_note_file(&root, &old_file, &new_file)?;
     // 移动路径变化：清旧路径缓存键（新路径下次读盘自然入缓存）
     cache_evict_canvas(&state, &old_file);
+    broadcast_content_changes(
+        &window,
+        &root.to_string_lossy(),
+        vec![ContentChange::rename(&old_file, &new_file)],
+    );
     Ok(())
 }
 
@@ -465,6 +497,7 @@ pub struct RebuildLinksResult {
 /// 其余内容字节级原样保留；只写有变化的文件（原子写）。单文件失败跳过不阻塞其余。
 #[tauri::command]
 pub fn rebuild_internal_links(
+    window: WebviewWindow,
     state: State<'_, VaultState>,
 ) -> Result<RebuildLinksResult, String> {
     let root = state.root()?;
@@ -504,6 +537,11 @@ pub fn rebuild_internal_links(
             rewritten.push(rel.clone());
         }
     }
+    broadcast_content_changes(
+        &window,
+        &root.to_string_lossy(),
+        rewritten.iter().cloned().map(ContentChange::write).collect(),
+    );
     Ok(RebuildLinksResult {
         scanned: files.len() as u32,
         modified,
@@ -515,12 +553,15 @@ pub fn rebuild_internal_links(
 /// 写 .md 笔记（原子写，自动建父目录）。
 #[tauri::command]
 pub fn write_note(
+    window: WebviewWindow,
     file: String,
     content: String,
     state: State<'_, VaultState>,
 ) -> Result<(), String> {
     let root = state.root()?;
-    write_note_file(&root, &file, &content)
+    write_note_file(&root, &file, &content)?;
+    broadcast_content_changes(&window, &root.to_string_lossy(), vec![ContentChange::write(&file)]);
+    Ok(())
 }
 
 /// 读仓库内任意文本文件全文（安全边界 = 仓库根，safe_join 校验；非 UTF-8 返回替换字符容错）。
@@ -546,12 +587,15 @@ pub fn read_vault_file(file: String, state: State<'_, VaultState>) -> Result<Str
 /// 隐藏目录屏蔽由前端工具 validate 层强制（内部能力如任务清单为刻意豁免），本命令层不做路径过滤。
 #[tauri::command]
 pub fn write_vault_file(
+    window: WebviewWindow,
     file: String,
     content: String,
     state: State<'_, VaultState>,
 ) -> Result<(), String> {
     let root = state.root()?;
-    write_note_file(&root, &file, &content)
+    write_note_file(&root, &file, &content)?;
+    broadcast_content_changes(&window, &root.to_string_lossy(), vec![ContentChange::write(&file)]);
+    Ok(())
 }
 
 // ===== AI read_file 分页窗口 =====
@@ -792,6 +836,7 @@ pub struct LinkRewriteResult {
 /// .md 链接维护只认规范路径形态（`[x](旧路径)`）——编码等非规范形态由「重建内部链接」归一后纳入维护。
 #[tauri::command]
 pub fn rename_note(
+    window: WebviewWindow,
     old_file: String,
     new_file: String,
     state: State<'_, VaultState>,
@@ -830,6 +875,10 @@ pub fn rename_note(
         let _ = rename_note_file(&root, &new_file, &old_file);
         return Err(format!("更新笔记内部链接失败，重命名已回滚（请重试）：{e}"));
     }
+    // 广播迁移 + 被代写正文的清单（链接改写），接收窗口据此换路并作废对应缓存
+    let mut changes = vec![ContentChange::rename(&old_file, &new_file)];
+    changes.extend(pending_md.iter().map(|(rel, _)| ContentChange::write(rel)));
+    broadcast_content_changes(&window, &root.to_string_lossy(), changes);
     Ok(LinkRewriteResult {
         rewritten: pending_md.into_iter().map(|(rel, _)| rel).collect(),
     })
@@ -918,6 +967,7 @@ pub fn delete_folder(
 /// 扫描或写回失败时回滚目录移动（部分画布引用可能已写回，错误信息如实说明）。
 #[tauri::command]
 pub fn rename_folder(
+    window: WebviewWindow,
     old_dir: String,
     new_dir: String,
     state: State<'_, VaultState>,
@@ -962,6 +1012,10 @@ pub fn rename_folder(
         let _ = rename_folder_impl(&root, &new_dir, &old_dir);
         return Err(format!("更新笔记内部链接失败，重命名已回滚（请重试）：{e}"));
     }
+    // 广播目录迁移 + 被代写正文的清单（链接改写），接收窗口据此按前缀换路并作废对应缓存
+    let mut changes = vec![ContentChange::rename(&old_dir, &new_dir)];
+    changes.extend(pending_md.iter().map(|(rel, _)| ContentChange::write(rel)));
+    broadcast_content_changes(&window, &root.to_string_lossy(), changes);
     Ok(LinkRewriteResult {
         rewritten: pending_md.into_iter().map(|(rel, _)| rel).collect(),
     })
@@ -995,6 +1049,7 @@ pub fn remap_sideloads_by_dir(
 /// 重命名附件 + 扫描所有 .atlx 更新 media 节点 file 引用（链接维护，与 rename_note 对称）。
 #[tauri::command]
 pub fn rename_attachment(
+    window: WebviewWindow,
     old_file: String,
     new_file: String,
     state: State<'_, VaultState>,
@@ -1006,6 +1061,11 @@ pub fn rename_attachment(
         let _ = rename_note_file(&root, &new_file, &old_file);
         return Err(format!("更新画布引用失败，重命名已回滚（请重试）：{e}"));
     }
+    broadcast_content_changes(
+        &window,
+        &root.to_string_lossy(),
+        vec![ContentChange::rename(&old_file, &new_file)],
+    );
     Ok(())
 }
 
