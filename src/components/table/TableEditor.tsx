@@ -22,7 +22,7 @@
  * - 错误/保存状态在面板 header 展示（`PanelFrame` 读 tableStore）。
  * - 弹层菜单（字段/列/行/整表/状态栏）见 `TableMenus.tsx`。
  */
-import { GripVertical, MoreHorizontal, MoveDiagonal, Plus, Sigma } from "lucide-react";
+import { GripVertical, MoreHorizontal, MoveDiagonal, Plus, Redo2, Sigma, Undo2 } from "lucide-react";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTableStore } from "@/stores/tableStore";
 import { useUiStateStore } from "@/stores/uiStateStore";
@@ -711,6 +711,27 @@ export function TableEditor({ panelId }: { panelId: string }) {
         )}
         {/* 插件贡献区：表格工具条右侧（list 槽，priority 降序） */}
         <SlotListMount slot="toolbar/table/right" />
+        {/* 触屏无快捷键：撤销/重做屏幕入口（桌面隐藏，快捷键已够用） */}
+        <span className="hidden [@media(hover:none)]:flex items-center gap-1 flex-shrink-0">
+          <button
+            onClick={() => useTableStore.getState().undo()}
+            title="撤销"
+            aria-label="撤销"
+            className="p-0.5 rounded hover:opacity-80"
+            style={{ color: "var(--text-muted)" }}
+          >
+            <Undo2 size={14} />
+          </button>
+          <button
+            onClick={() => useTableStore.getState().redo()}
+            title="重做"
+            aria-label="重做"
+            className="p-0.5 rounded hover:opacity-80"
+            style={{ color: "var(--text-muted)" }}
+          >
+            <Redo2 size={14} />
+          </button>
+        </span>
         {/* 「···」更多选项：历史记录 + 导出 xlsx（统一 usePopupAnchor + PopupLayer 浮层） */}
         <span className="flex-shrink-0">
           <button

@@ -331,7 +331,7 @@ export function AgentSettingsSection() {
                 }}
                 disabled={viewerOnly}
                 title="复制 Agent"
-                className="p-1 rounded hover:opacity-70 flex-shrink-0 opacity-0 group-hover:opacity-100 disabled:cursor-not-allowed"
+                className="p-1 rounded hover:opacity-70 flex-shrink-0 opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 disabled:cursor-not-allowed"
                 style={{ color: "var(--text-muted)" }}
               >
                 <Copy size={12} />
@@ -346,7 +346,7 @@ export function AgentSettingsSection() {
                   }}
                   disabled={viewerOnly}
                   title="删除 Agent"
-                  className="p-1 rounded hover:opacity-70 flex-shrink-0 opacity-0 group-hover:opacity-100 disabled:cursor-not-allowed"
+                  className="p-1 rounded hover:opacity-70 flex-shrink-0 opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 disabled:cursor-not-allowed"
                   style={{ color: "#f87171" }}
                 >
                   <Trash2 size={12} />

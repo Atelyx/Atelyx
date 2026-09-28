@@ -111,6 +111,7 @@ export function WikiLinkPicker({ query, anchor, onPick, onCreate, onClose }: Pro
         e.stopPropagation();
         pickItem(items[activeRef.current]);
       } else if (e.key === "Escape") {
+        if (e.isComposing) return;
         e.stopPropagation();
         onClose();
       }

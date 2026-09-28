@@ -42,6 +42,9 @@ import { EditorPreferencesTab } from "@/components/settings/tabs/EditorPreferenc
 import { SearchSettingsTab } from "@/components/settings/tabs/SearchSettingsTab";
 import { PluginsSettingsTab } from "@/components/plugins/PluginsSettingsTab";
 import { ErrorBoundary } from "@/components/common/ErrorBoundary";
+import { MobileNavDrawer, type MobileNavItem } from "@/components/layout/MobileNavDrawer";
+import { useMediaQuery, NARROW_QUERY } from "@/hooks/useMediaQuery";
+import { useBackHandler } from "@/hooks/useBackHandler";
 import { usePluginStore } from "@/stores/pluginStore";
 import { useSettingsStore, selectVaultSettingsSession } from "@/stores/settingsStore";
 import type { VaultSettingsTarget } from "@/types";
@@ -112,23 +115,39 @@ function SettingsShell({
 }) {
   /** 左侧标签栏折叠状态（折叠后仅显示图标）。 */
   const [tabsCollapsed, setTabsCollapsed] = useState(false);
+  const narrow = useMediaQuery(NARROW_QUERY);
+  useBackHandler(true, () => {
+    onClose();
+    return true;
+  });
+
+  /** 窄屏导航抽屉条目（图标尺寸与宽屏 tab 栏一致，由抽屉自行排布）。 */
+  const navItems: MobileNavItem[] = tabs.map((item) => ({
+    key: item.key,
+    label: item.label,
+    icon: <item.icon size={16} />,
+  }));
 
   return (
     <div
-      className="fixed inset-0 bg-black/60 flex items-center justify-center z-50"
-      onClick={onClose}
+      className={narrow ? "fixed inset-0 z-50 flex" : "fixed inset-0 bg-black/60 flex items-center justify-center z-50"}
+      onClick={narrow ? undefined : onClose}
     >
       <div
-        className="rounded-lg w-[840px] h-[80vh] flex flex-col border shadow-2xl"
+        className={narrow ? "flex-1 min-w-0 flex flex-col" : "rounded-lg w-[840px] h-[80vh] flex flex-col border shadow-2xl"}
         style={{
           background: "var(--bg-secondary)",
           borderColor: "var(--border)",
+          paddingBottom: narrow ? "env(safe-area-inset-bottom)" : undefined,
         }}
         onClick={(e) => e.stopPropagation()}
       >
         <header
           className="px-5 py-3 border-b flex items-center justify-between"
-          style={{ borderColor: "var(--border)" }}
+          style={{
+            borderColor: "var(--border)",
+            paddingTop: narrow ? "calc(env(safe-area-inset-top) + 0.75rem)" : undefined,
+          }}
         >
           <div className="min-w-0">
             <h2 className="font-semibold truncate" style={{ color: "var(--text-primary)" }}>
@@ -155,44 +174,51 @@ function SettingsShell({
           </div>
         )}
 
-        {/* 左侧 tab 栏（可折叠）+ 右侧内容区 */}
-        <div className="flex flex-1 overflow-hidden">
-          <aside
-            className={`flex flex-col border-r shrink-0 transition-[width] ${tabsCollapsed ? "w-11" : "w-40"}`}
-            style={{ borderColor: "var(--border)" }}
-          >
-            <div className="flex-1 overflow-auto p-2 space-y-1">
-              {tabs.map((item) => (
-                <button
-                  key={item.key}
-                  onClick={() => onTabChange(item.key)}
-                  title={item.label}
-                  className={`w-full flex items-center gap-2 px-2.5 py-2 rounded text-sm transition ${
-                    tabsCollapsed ? "justify-center px-0" : ""
-                  } ${
-                    tab === item.key
-                      ? "bg-[var(--accent)] text-[var(--accent-fg)]"
-                      : "text-[var(--text-secondary)] hover:bg-[var(--hover)]"
-                  }`}
-                >
-                  <item.icon size={14} className="shrink-0" />
-                  {!tabsCollapsed && <span className="truncate">{item.label}</span>}
-                </button>
-              ))}
-            </div>
-            <button
-              onClick={() => setTabsCollapsed((v) => !v)}
-              title={tabsCollapsed ? "展开标签栏" : "折叠标签栏"}
-              className={`m-2 flex items-center gap-1 rounded px-2 py-1.5 text-xs text-[var(--text-secondary)] hover:bg-[var(--hover)] ${
-                tabsCollapsed ? "justify-center" : ""
-              }`}
+        {/* 窄屏 = 全屏 + 导航抽屉（与工作区同一套交互）；宽屏 = 左侧可折叠 tab 栏 */}
+        {narrow ? (
+          <div className="flex-1 min-h-0 flex">
+            <MobileNavDrawer items={navItems} active={tab} onSelect={onTabChange} applySafeArea={false} />
+            <div className="flex-1 min-w-0 flex flex-col overflow-hidden">{children}</div>
+          </div>
+        ) : (
+          <div className="flex flex-1 overflow-hidden">
+            <aside
+              className={`flex flex-col border-r shrink-0 transition-[width] ${tabsCollapsed ? "w-11" : "w-40"}`}
+              style={{ borderColor: "var(--border)" }}
             >
-              {tabsCollapsed ? <ChevronRight size={14} /> : <ChevronLeft size={14} />}
-              {!tabsCollapsed && "折叠"}
-            </button>
-          </aside>
-          <div className="flex-1 min-w-0 flex flex-col overflow-hidden">{children}</div>
-        </div>
+              <div className="flex-1 overflow-auto p-2 space-y-1">
+                {tabs.map((item) => (
+                  <button
+                    key={item.key}
+                    onClick={() => onTabChange(item.key)}
+                    title={item.label}
+                    className={`w-full flex items-center gap-2 px-2.5 py-2 rounded text-sm transition ${
+                      tabsCollapsed ? "justify-center px-0" : ""
+                    } ${
+                      tab === item.key
+                        ? "bg-[var(--accent)] text-[var(--accent-fg)]"
+                        : "text-[var(--text-secondary)] hover:bg-[var(--hover)]"
+                    }`}
+                  >
+                    <item.icon size={14} className="shrink-0" />
+                    {!tabsCollapsed && <span className="truncate">{item.label}</span>}
+                  </button>
+                ))}
+              </div>
+              <button
+                onClick={() => setTabsCollapsed((v) => !v)}
+                title={tabsCollapsed ? "展开标签栏" : "折叠标签栏"}
+                className={`m-2 flex items-center gap-1 rounded px-2 py-1.5 text-xs text-[var(--text-secondary)] hover:bg-[var(--hover)] ${
+                  tabsCollapsed ? "justify-center" : ""
+                }`}
+              >
+                {tabsCollapsed ? <ChevronRight size={14} /> : <ChevronLeft size={14} />}
+                {!tabsCollapsed && "折叠"}
+              </button>
+            </aside>
+            <div className="flex-1 min-w-0 flex flex-col overflow-hidden">{children}</div>
+          </div>
+        )}
       </div>
     </div>
   );

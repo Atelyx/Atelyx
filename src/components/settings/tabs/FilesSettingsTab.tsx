@@ -44,7 +44,7 @@ export function FilesSettingsTab() {
             if (e.key === "Enter") (e.target as HTMLInputElement).blur();
           }}
           placeholder="如：Archive, templates"
-          className="w-[260px] text-sm rounded px-2 py-1 outline-none focus:ring-1 focus:ring-[var(--accent)]"
+          className="w-[260px] max-w-full text-sm rounded px-2 py-1 outline-none focus:ring-1 focus:ring-[var(--accent)]"
           style={{
             color: "var(--text-secondary)",
             background: "var(--input-bg)",
@@ -65,7 +65,7 @@ export function FilesSettingsTab() {
             if (e.key === "Enter") (e.target as HTMLInputElement).blur();
           }}
           placeholder="如：assets 或 素材/图片"
-          className="w-[260px] text-sm rounded px-2 py-1 outline-none focus:ring-1 focus:ring-[var(--accent)]"
+          className="w-[260px] max-w-full text-sm rounded px-2 py-1 outline-none focus:ring-1 focus:ring-[var(--accent)]"
           style={{
             color: "var(--text-secondary)",
             background: "var(--input-bg)",

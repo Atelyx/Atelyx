@@ -48,7 +48,7 @@ export function SearchSettingsTab() {
             onChange={(e) => setKeyDraft(e.target.value)}
             onBlur={() => void setTavilyKey(keyDraft.trim())}
             placeholder="tvly-..."
-            className="text-sm rounded px-2 py-1 outline-none w-[260px]"
+            className="text-sm rounded px-2 py-1 outline-none w-[260px] max-w-full"
             style={{
               color: "var(--text-primary)",
               background: "var(--input-bg)",
@@ -65,7 +65,7 @@ export function SearchSettingsTab() {
               void setSearchConfig({ searxngUrl: e.target.value })
             }
             placeholder="https://searx.example.com"
-            className="text-sm rounded px-2 py-1 outline-none w-[260px]"
+            className="text-sm rounded px-2 py-1 outline-none w-[260px] max-w-full"
             style={{
               color: "var(--text-primary)",
               background: "var(--input-bg)",

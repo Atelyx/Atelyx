@@ -6,7 +6,7 @@
  * 正文内容、保存、协作与撤销归 `stores/noteSessionStore` 的编辑会话（与画布文本节点共用同一会话），
  * 本组件只做面板 chrome 与交互编排。
  */
-import { Check, ClipboardPaste, Copy, MoreHorizontal, Pencil, Scissors, Wand2 } from "lucide-react";
+import { Check, ClipboardPaste, Copy, MoreHorizontal, Pencil, Redo2, Scissors, Undo2, Wand2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { EditorView } from "@codemirror/view";
 import { useNoteStore } from "@/stores/noteStore";
@@ -27,7 +27,7 @@ import { HistoryModal } from "@/components/history/HistoryModal";
 import { SlotListMount } from "@/components/plugins/SlotHost";
 import { MenuSlotList } from "@/components/plugins/MenuSlot";
 import { useVaultLinkHandlers } from "@/hooks/useVaultLinkHandlers";
-import { useNoteBodySession } from "@/hooks/useNoteBodySession";
+import { useNoteBodySession, getOpenNoteSession } from "@/hooks/useNoteBodySession";
 import { useNoteUndoRouting } from "@/hooks/useNoteUndoRouting";
 import { usePopupAnchor } from "@/hooks/usePopupAnchor";
 import { useVaultTagCandidates } from "@/hooks/useVaultTagCandidates";
@@ -506,6 +506,27 @@ export function NoteEditor({ file }: { file: string }) {
               双击内容进入编辑模式
             </span>
           )}
+          {/* 触屏无快捷键：撤销/重做屏幕入口（桌面隐藏，快捷键已够用） */}
+          <span className="hidden [@media(hover:none)]:flex items-center gap-1 flex-shrink-0">
+            <button
+              onClick={() => getOpenNoteSession(file)?.undo()}
+              title="撤销"
+              aria-label="撤销"
+              className="p-0.5 rounded hover:opacity-80"
+              style={{ color: "var(--text-muted)" }}
+            >
+              <Undo2 size={14} />
+            </button>
+            <button
+              onClick={() => getOpenNoteSession(file)?.redo()}
+              title="重做"
+              aria-label="重做"
+              className="p-0.5 rounded hover:opacity-80"
+              style={{ color: "var(--text-muted)" }}
+            >
+              <Redo2 size={14} />
+            </button>
+          </span>
           {/* 固定笔图标：未进入编辑（预览态）淡色，进入编辑后金色高亮（表达激活态） */}
           <button
             onClick={() => setPreview((v) => !v)}

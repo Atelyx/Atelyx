@@ -2,7 +2,8 @@
 <html lang="zh-CN" class="dark">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- viewport-fit=cover：让内容铺满屏幕，由安全区变量（env(safe-area-inset-*)）避让系统栏 -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <!-- 空 favicon：避免控制台 favicon.ico 404 -->
     <link rel="icon" href="data:," />
     <!-- CSP：本地单用户应用，connect-src 放宽允许任意 http/https 与 ws/wss，

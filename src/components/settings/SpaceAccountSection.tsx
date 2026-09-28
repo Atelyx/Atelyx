@@ -110,7 +110,7 @@ function ServerList() {
   if (servers.length === 0) return null;
 
   return (
-    <div className="flex flex-col gap-1.5 w-[340px]">
+    <div className="flex flex-col gap-1.5 w-full max-w-[340px]">
       {error && (
         <span className="text-xs" style={{ color: "#f87171" }}>
           {error}
@@ -173,7 +173,7 @@ export function SpaceAccountSection() {
       <div className="flex flex-col gap-3">
         {loginPrompt && (
           <div
-            className="flex items-center gap-2 text-xs px-2 py-1.5 rounded w-[340px]"
+            className="flex items-center gap-2 text-xs px-2 py-1.5 rounded w-full max-w-[340px]"
             style={{ background: "color-mix(in srgb, var(--accent) 12%, transparent)", color: "var(--text-primary)" }}
           >
             <span className="flex-1">登录后将继续打开协作空间 {loginPrompt.retry?.name ?? ""}</span>

@@ -386,6 +386,8 @@ export function MarkdownEditor({
       onMentionClick: onMentionClickRef.current,
       focusEditor: () => viewRef.current?.focus(),
     });
+    /** 输入法组合态（跨事务记忆：视图 updateListener 里判组合结束）。 */
+    let composing = false;
     const view = new EditorView({
       parent: host,
       state: EditorState.create({
@@ -420,9 +422,19 @@ export function MarkdownEditor({
               onBodyChangeRef.current(update.state.doc.toString());
             }
           }),
-          // 双链候选浮层同步（程序化注入期间不响应：全量替换不应误触发）
+          // 双链候选浮层同步（程序化注入期间不响应：全量替换不应误触发；输入法组合期不弹候选，避免打断上屏）
           EditorView.updateListener.of((update) => {
-            if (!suppressRef.current) syncWikiPicker(update);
+            if (!suppressRef.current && !update.view.composing) syncWikiPicker(update);
+            // 组合结束（composing 由真转假）补一次装饰重建：组合期的变更被 livePreviewNeedsRebuild
+            // 按组合标记跳过，CM 的收尾事务同样可能带该标记，故在此显式补一次（复用只读效果触发重建，值不变）
+            if (composing && !update.view.composing) {
+              const view = update.view;
+              queueMicrotask(() => {
+                if (viewRef.current !== view) return;
+                view.dispatch({ effects: readOnlyEffect.of(view.state.field(roField)) });
+              });
+            }
+            composing = update.view.composing;
           }),
         ],
       }),

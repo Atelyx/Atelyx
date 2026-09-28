@@ -237,7 +237,7 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
       </div>
       {/* 气泡下方操作按钮组：复制（全部消息）+ 回到此处（完整 AI 回复），hover 浮现 */}
       <div
-        className={`nodrag absolute top-full mt-0.5 flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-60 hover:!opacity-100 z-10 ${isUser ? "right-0" : "left-0"}`}
+        className={`nodrag absolute top-full mt-0.5 flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-60 [@media(hover:none)]:opacity-100 hover:!opacity-100 z-10 ${isUser ? "right-0" : "left-0"}`}
         {...stopProps}
       >
         <button

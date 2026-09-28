@@ -17,7 +17,8 @@ android {
     compileSdk = 36
     namespace = "com.atelyx.desktop"
     defaultConfig {
-        manifestPlaceholders["usesCleartextTraffic"] = "false"
+        // 明文放行：协作服务端多为局域网 http://<ip>:<port>，地址由用户自填无法预置白名单
+        manifestPlaceholders["usesCleartextTraffic"] = "true"
         applicationId = "com.atelyx.desktop"
         minSdk = 35
         targetSdk = 36
@@ -26,7 +27,6 @@ android {
     }
     buildTypes {
         getByName("debug") {
-            manifestPlaceholders["usesCleartextTraffic"] = "true"
             isDebuggable = true
             isJniDebuggable = true
             isMinifyEnabled = false

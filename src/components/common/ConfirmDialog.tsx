@@ -6,6 +6,7 @@
 import { useEffect, useRef } from "react";
 import type { ReactNode } from "react";
 import { AlertTriangle } from "lucide-react";
+import { useBackHandler } from "@/hooks/useBackHandler";
 
 export function ConfirmDialog({
   title,
@@ -38,6 +39,12 @@ export function ConfirmDialog({
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  // 返回键取消
+  useBackHandler(true, () => {
+    onCancelRef.current();
+    return true;
+  });
+
   return (
     <div
       className="fixed inset-0 z-[200] flex items-center justify-center"
@@ -45,7 +52,7 @@ export function ConfirmDialog({
       onClick={onCancel}
     >
       <div
-        className="w-80 rounded-lg border shadow-xl p-4"
+        className="w-80 max-w-[calc(100vw-2rem)] rounded-lg border shadow-xl p-4"
         style={{ background: "var(--bg-secondary)", borderColor: "var(--border)" }}
         onClick={(e) => e.stopPropagation()}
       >

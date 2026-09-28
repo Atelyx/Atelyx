@@ -824,7 +824,7 @@ export function NotePropertiesView({
           >
             #{String(item)}
             <button
-              className="ml-1 align-middle opacity-0 group-hover:opacity-100 hover:text-red-400"
+              className="ml-1 align-middle opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 hover:text-red-400"
               onClick={(e) => {
                 e.stopPropagation();
                 removeArrayItem(key, i);
@@ -871,7 +871,7 @@ export function NotePropertiesView({
             <span className="opacity-60 mr-0.5">#</span>
             {item}
             <button
-              className="ml-1 align-middle opacity-0 group-hover:opacity-100 hover:text-red-400"
+              className="ml-1 align-middle opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 hover:text-red-400"
               onClick={(e) => {
                 e.stopPropagation();
                 removeArrayItem(key, i);
@@ -949,7 +949,7 @@ export function NotePropertiesView({
             <span className="truncate">{String(item)}</span>
             {/* 删除钮恒显示（非字符串项也可删，删数组元素不破坏 YAML 类型） */}
             <button
-              className="ml-auto opacity-0 group-hover:opacity-100 hover:text-red-400 flex-shrink-0"
+              className="ml-auto opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 hover:text-red-400 flex-shrink-0"
               onClick={(e) => {
                 e.stopPropagation();
                 removeArrayItem(key, i);
@@ -1073,7 +1073,7 @@ export function NotePropertiesView({
                             </span>
                           )}
                           <button
-                            className="opacity-0 group-hover:opacity-100 hover:text-red-400 flex-shrink-0"
+                            className="opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 hover:text-red-400 flex-shrink-0"
                             onClick={() => removeField(key)}
                             title="删除属性"
                           >

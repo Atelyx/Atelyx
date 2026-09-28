@@ -714,6 +714,15 @@ describe("livePreviewNeedsRebuild（装饰重建判定）", () => {
     expect(livePreviewNeedsRebuild(tr, roEffect)).toBe(true);
   });
 
+  it("输入法组合期（input.type.compose）→ 不重建（防打断候选字上屏）", () => {
+    const tr = stateWithLanguage(langA).update({
+      changes: { from: 0, insert: "中" },
+      userEvent: "input.type.compose",
+    });
+    expect(tr.docChanged).toBe(true);
+    expect(livePreviewNeedsRebuild(tr, roEffect)).toBe(false);
+  });
+
   it("显式选区变化 → 重建", () => {
     const tr = stateWithLanguage(langA).update({ selection: { anchor: 1 } });
     expect(livePreviewNeedsRebuild(tr, roEffect)).toBe(true);

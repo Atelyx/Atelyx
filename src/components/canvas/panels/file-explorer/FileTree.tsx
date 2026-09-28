@@ -5,6 +5,7 @@ import {
   FileText,
   Folder,
   LayoutDashboard,
+  MoreHorizontal,
   Paperclip,
   StickyNote,
   Table,
@@ -149,6 +150,20 @@ export function FileTree(props: FileTreeProps) {
                   <span className="flex items-center">{isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</span>
                   <Folder size={14} style={{ color: folderColors?.[node.path] ?? "var(--text-muted)" }} />
                   <span className="flex-1 truncate text-xs" style={{ color: "var(--text-primary)" }}>{node.name}</span>
+                  {/* 操作菜单入口：仅触屏显示——触屏长按已让位给起拖，菜单需显式入口（桌面保留原右键） */}
+                  <button
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      const r = e.currentTarget.getBoundingClientRect();
+                      onOpenMenu(r.left, r.bottom + 2, { kind: "folder", dir: node.path });
+                    }}
+                    aria-label="文件夹操作"
+                    className="w-6 h-6 hidden [@media(hover:none)]:flex items-center justify-center rounded flex-shrink-0"
+                    style={{ color: "var(--text-muted)" }}
+                  >
+                    <MoreHorizontal size={14} />
+                  </button>
                 </div>
               )}
               {isExpanded && (
@@ -190,6 +205,15 @@ export function FileTree(props: FileTreeProps) {
                 : editing?.kind === "attachment" && editing.file === node.path
                   ? editing
                   : null;
+        /** 该行的菜单目标（右键与触屏「⋯」入口共用同一份判定）。 */
+        const menuTarget: MenuTarget =
+          isCanvas && row
+            ? { kind: "canvas", row }
+            : isNote
+              ? { kind: "note", file: node.path, name: node.name }
+              : isTable
+                ? { kind: "table", file: node.path, name: node.name }
+                : { kind: "attachment", file: node.path, name: node.name };
         return (
           <li key={node.path}>
             {editingThis ? (
@@ -226,15 +250,7 @@ export function FileTree(props: FileTreeProps) {
                 onContextMenu={(e) => {
                   e.preventDefault();
                   e.stopPropagation();
-                  if (isCanvas && row) {
-                    onOpenMenu(e.clientX, e.clientY, { kind: "canvas", row });
-                  } else if (isNote) {
-                    onOpenMenu(e.clientX, e.clientY, { kind: "note", file: node.path, name: node.name });
-                  } else if (isTable) {
-                    onOpenMenu(e.clientX, e.clientY, { kind: "table", file: node.path, name: node.name });
-                  } else {
-                    onOpenMenu(e.clientX, e.clientY, { kind: "attachment", file: node.path, name: node.name });
-                  }
+                  onOpenMenu(e.clientX, e.clientY, menuTarget);
                 }}
               >
                 {isCanvas ? (
@@ -255,6 +271,20 @@ export function FileTree(props: FileTreeProps) {
                 >
                   {isCanvas ? "ATLX" : isWhiteboard ? "CANVAS" : isNote ? "MD" : isTable ? "ATB" : upperExt(node.name)}
                 </span>
+                {/* 操作菜单入口：仅触屏显示——触屏长按已让位给起拖，菜单需显式入口（桌面保留原右键） */}
+                <button
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    const r = e.currentTarget.getBoundingClientRect();
+                    onOpenMenu(r.left, r.bottom + 2, menuTarget);
+                  }}
+                  aria-label="文件操作"
+                  className="w-6 h-6 hidden [@media(hover:none)]:flex items-center justify-center rounded flex-shrink-0"
+                  style={{ color: "var(--text-muted)" }}
+                >
+                  <MoreHorizontal size={14} />
+                </button>
               </div>
             )}
           </li>

@@ -947,6 +947,9 @@ export function buildDecorations(
 
 /** 实时预览装饰是否需要重建。
  *
+ *  输入法组合期（`input.type.compose`）一律不重建：组合期间增删装饰 DOM 会打断候选字上屏；
+ *  组合结束后由视图补一次强制重建（见 MarkdownEditor 的 compositionend）。
+ *
  *  判定必须含**语法树推进**：CodeMirror 的后台解析补完只派发 `Language.setState` 效果事务
  *  （docChanged 为 false、无 selection），仅看前三条会漏掉它，装饰便只反映 `LanguageState.init`
  *  同步解析的前 ~3000 字符——文档尾部的标题/链接/表格/围栏码等因此保持源码可见。
@@ -955,6 +958,7 @@ export function livePreviewNeedsRebuild(
   tr: Transaction,
   readOnlyEffect: StateEffectType<boolean>,
 ): boolean {
+  if (tr.isUserEvent("input.type.compose")) return false;
   return (
     tr.docChanged ||
     tr.selection !== undefined ||

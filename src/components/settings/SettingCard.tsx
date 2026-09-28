@@ -1,4 +1,4 @@
-/** 设置项卡片（设置页统一样式基准）：左侧标题 + 描述，右侧控件。 */
+/** 设置项卡片（设置页统一样式基准）：宽屏 = 左标题描述 + 右控件；窄屏 = 上下堆叠。 */
 export function SettingCard({
   title,
   description,
@@ -10,7 +10,7 @@ export function SettingCard({
 }) {
   return (
     <div
-      className="flex items-center justify-between p-3 rounded-lg border gap-3"
+      className="flex flex-col items-stretch gap-2 p-3 rounded-lg border sm:flex-row sm:items-center sm:justify-between sm:gap-3"
       style={{
         background: "var(--bg-primary)",
         borderColor: "var(--border)",

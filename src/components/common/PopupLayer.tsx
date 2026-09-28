@@ -17,6 +17,7 @@ import { createPortal } from "react-dom";
 import type { ReactNode, RefObject } from "react";
 import { useClampedMenuPosition } from "@/hooks/useClampedMenuPosition";
 import { useDismissOnOutside } from "@/hooks/useDismissOnOutside";
+import { useBackHandler } from "@/hooks/useBackHandler";
 
 /** 弹层锚点：触发器 rect 或点击坐标；flipY = 向上翻转锚点（仅 align="top" 用）。 */
 export interface PopupAnchor {
@@ -68,6 +69,11 @@ export function PopupLayer({
     align === "top" ? { flipY: anchor?.flipY } : { alignBottom: true },
   );
   useDismissOnOutside(onClose, ref, triggerRef);
+  // 返回键优先关掉最上层浮层（后开先关）
+  useBackHandler(!!anchor, () => {
+    onClose();
+    return true;
+  });
 
   if (!anchor) return null;
   return createPortal(

@@ -13,6 +13,7 @@ import {
 } from "@/stores/spaceDirectoryStore";
 import { useSpaceAuthStore } from "@/stores/spaceAuthStore";
 import { useAppStore } from "@/stores/appStore";
+import { useBackHandler } from "@/hooks/useBackHandler";
 
 export type SpaceAuthMode = "login" | "register";
 
@@ -38,6 +39,12 @@ export function SpaceAuthDialog({ mode, onClose }: Props) {
   const [confirmPassword, setConfirmPassword] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [error, setError] = useState<string | null>(null);
+
+  // 返回键先关登录弹窗
+  useBackHandler(true, () => {
+    onClose();
+    return true;
+  });
 
   const submit = async () => {
     const addr = serverUrl.trim();
@@ -78,7 +85,7 @@ export function SpaceAuthDialog({ mode, onClose }: Props) {
       <div
         role="dialog"
         aria-label={mode === "login" ? "登录协作服务器" : "注册协作空间账号"}
-        className="w-[380px] rounded-lg border shadow-xl"
+        className="w-[380px] max-w-[calc(100vw-2rem)] rounded-lg border shadow-xl"
         style={{ background: "var(--bg-secondary)", borderColor: "var(--border)" }}
         onClick={(e) => e.stopPropagation()}
       >

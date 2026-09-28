@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { useReactFlow } from "@xyflow/react";
 import { useCanvasStore } from "@/stores/canvasStore";
@@ -6,6 +6,11 @@ import { useChatPanelStore } from "@/stores/chatPanelStore";
 import { baseName, noteTitleFromFile, tableTitleFromFile } from "@/utils/filename";
 import { useHandleMoveFile, type DragSession } from "./actions";
 import type { FileTreeNode } from "@/types";
+
+/** 触屏起拖需长按达到的时长（按住不动才进入拖拽，否则让位于列表滚动）。 */
+const TOUCH_ARM_MS = 400;
+/** 触屏长按期间的容许抖动，超过视为滚动意图。 */
+const TOUCH_MOVE_TOLERANCE_PX = 8;
 
 /** 拖拽幽灵（pointer 模拟拖拽时跟随鼠标；下方追加悬停目标的动作提示）。 */
 export interface DragGhost {
@@ -31,13 +36,47 @@ export function useVaultDrag(onNotice: (message: string) => void) {
   /** 拖拽悬停可交互目标的提示文本（幽灵下方显示）；null = 无目标。 */
   const [dragHint, setDragHint] = useState<string | null>(null);
   const dragHintRef = useRef<string | null>(null);
+  /** 触屏长按计时器（未成立前移动即作废）。 */
+  const armTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  /** 触屏会话是否仍在等待长按成立。 */
+  const pendingTouchRef = useRef(false);
+
+  // 触屏拖拽期间阻止列表滚动：touch-action 在手势开始后不可改，只能拦截 touchmove；
+  // 仅在长按成立后挂载，避免常驻非被动监听拖慢全局滚动
+  const touchMoveGuard = useCallback((e: TouchEvent) => {
+    if (dragRef.current?.active) e.preventDefault();
+  }, []);
+
+  /** 清空拖拽会话与长按计时（松手/取消/放弃起拖共用）。 */
+  const resetDrag = useCallback(() => {
+    document.removeEventListener("touchmove", touchMoveGuard);
+    if (armTimerRef.current !== undefined) {
+      clearTimeout(armTimerRef.current);
+      armTimerRef.current = undefined;
+    }
+    pendingTouchRef.current = false;
+    dragRef.current = null;
+    setDragGhost(null);
+    dropDirRef.current = null;
+    setDropDir(null);
+    dragHintRef.current = null;
+    setDragHint(null);
+    document.body.style.cursor = "";
+  }, [touchMoveGuard]);
 
   // 全局 pointermove/up：位移超 5px 进入拖拽（显示幽灵）；松手在文件夹行 = 移动文件，落点在 .react-flow 内 = 建节点
   useEffect(() => {
+    /** 触屏长按成立后松手仍会派生一次 click（打开文件/切换目录），抑制这一次抬起。 */
+    let suppressClickUntil = 0;
     const onMove = (e: PointerEvent) => {
       const d = dragRef.current;
       if (!d) return;
       const dist = Math.hypot(e.clientX - d.startX, e.clientY - d.startY);
+      // 触屏长按未成立前的移动 = 滚动意图，放弃起拖
+      if (pendingTouchRef.current) {
+        if (dist > TOUCH_MOVE_TOLERANCE_PX) resetDrag();
+        return;
+      }
       if (d.active || dist > 5) {
         // 位置变化超 2px 才 setState（pointermove 高频触发，节流避免每帧重渲染整个面板）
         const moved = !d.active || Math.hypot(e.clientX - d.x, e.clientY - d.y) > 2;
@@ -80,14 +119,10 @@ export function useVaultDrag(onNotice: (message: string) => void) {
     };
     const onUp = (e: PointerEvent) => {
       const d = dragRef.current;
-      dragRef.current = null;
-      setDragGhost(null);
-      dropDirRef.current = null;
-      setDropDir(null);
-      dragHintRef.current = null;
-      setDragHint(null);
-      document.body.style.cursor = "";
-      if (!d?.active) return;
+      const wasActive = !!d?.active;
+      if (wasActive && e.pointerType === "touch") suppressClickUntil = Date.now() + 400;
+      resetDrag();
+      if (!d || !wasActive) return;
       const target = document.elementFromPoint(e.clientX, e.clientY);
       // 拖入右侧 AI 对话面板输入框（data-chat-input）：任意文件/文件夹 → @引用 入队（AiChatPanel 消费后显示 @标签；
       // 发送只并路径进「引用文件」块，模型 read_file/glob 按需读取）
@@ -113,21 +148,35 @@ export function useVaultDrag(onNotice: (message: string) => void) {
         else void addMediaFromVault(d.file, d.name, pos, true);
       }
     };
+    // 抑制长按拖拽抬起派生的 click（捕获阶段拦在 React 根容器之前）
+    const onClickCapture = (e: MouseEvent) => {
+      if (Date.now() >= suppressClickUntil) return;
+      suppressClickUntil = 0;
+      e.stopPropagation();
+      e.preventDefault();
+    };
     document.addEventListener("pointermove", onMove);
     document.addEventListener("pointerup", onUp);
+    document.addEventListener("pointercancel", resetDrag);
+    document.addEventListener("click", onClickCapture, true);
     return () => {
       document.removeEventListener("pointermove", onMove);
       document.removeEventListener("pointerup", onUp);
-      document.body.style.cursor = "";
+      document.removeEventListener("pointercancel", resetDrag);
+      document.removeEventListener("click", onClickCapture, true);
+      resetDrag();
     };
-  }, [screenToFlowPosition, addTextNoteFromVault, addMediaFromVault, addTableFromVault, handleMoveFile]);
+  }, [screenToFlowPosition, addTextNoteFromVault, addMediaFromVault, addTableFromVault, handleMoveFile, resetDrag]);
 
-  /** 行按下（左键）记录潜在拖拽会话（文件夹/画布/笔记/附件均可拖：移动到文件夹；文件还可拖到画布建节点）；位移超阈值才真正拖拽。 */
+  /** 行按下（左键）记录潜在拖拽会话（文件夹/画布/笔记/附件均可拖：移动到文件夹；文件还可拖到画布建节点）。
+   *  鼠标：位移超阈值即拖拽；触屏：长按成立后才进入拖拽态（否则让位于列表滚动）。 */
   const startPotentialDrag = (e: ReactPointerEvent, node: FileTreeNode) => {
     if (e.button !== 0) return;
     e.preventDefault(); // 阻止文本选择干扰
+
+    let session: DragSession;
     if (node.isDir) {
-      dragRef.current = {
+      session = {
         kind: "folder",
         file: node.path,
         name: node.name,
@@ -137,29 +186,47 @@ export function useVaultDrag(onNotice: (message: string) => void) {
         x: e.clientX,
         y: e.clientY,
       };
+    } else {
+      // 外部白板（.canvas）与 .atlx 同归 canvas 类：拖到画布不建节点（只支持移动到文件夹）
+      const lower = node.name.toLowerCase();
+      const isCanvasFile = lower.endsWith(".atlx") || lower.endsWith(".canvas");
+      const kind: DragSession["kind"] = isCanvasFile
+        ? "canvas"
+        : lower.endsWith(".md")
+          ? "note"
+          : lower.endsWith(".atb")
+            ? "table"
+            : "attachment";
+      session = {
+        kind,
+        file: node.path,
+        name: node.name,
+        title: kind === "note" ? noteTitleFromFile(node.path) : kind === "table" ? tableTitleFromFile(node.path) : undefined,
+        startX: e.clientX,
+        startY: e.clientY,
+        active: false,
+        x: e.clientX,
+        y: e.clientY,
+      };
+    }
+
+    dragRef.current = session;
+    if (e.pointerType !== "touch") {
+      pendingTouchRef.current = false;
       return;
     }
-    // 外部白板（.canvas）与 .atlx 同归 canvas 类：拖到画布不建节点（只支持移动到文件夹）
-    const lower = node.name.toLowerCase();
-    const isCanvasFile = lower.endsWith(".atlx") || lower.endsWith(".canvas");
-    const kind = isCanvasFile
-      ? "canvas"
-      : lower.endsWith(".md")
-        ? "note"
-        : lower.endsWith(".atb")
-          ? "table"
-          : "attachment";
-    dragRef.current = {
-      kind,
-      file: node.path,
-      name: node.name,
-      title: kind === "note" ? noteTitleFromFile(node.path) : kind === "table" ? tableTitleFromFile(node.path) : undefined,
-      startX: e.clientX,
-      startY: e.clientY,
-      active: false,
-      x: e.clientX,
-      y: e.clientY,
-    };
+    // 触屏：长按成立才起拖，成立前移动（滚动）由 onMove 作废
+    pendingTouchRef.current = true;
+    if (armTimerRef.current !== undefined) clearTimeout(armTimerRef.current);
+    armTimerRef.current = setTimeout(() => {
+      armTimerRef.current = undefined;
+      const d = dragRef.current;
+      if (!d || !pendingTouchRef.current) return;
+      pendingTouchRef.current = false;
+      dragRef.current = { ...d, active: true };
+      document.addEventListener("touchmove", touchMoveGuard, { passive: false });
+      setDragGhost({ label: d.title ?? d.name, x: d.startX, y: d.startY });
+    }, TOUCH_ARM_MS);
   };
 
   return { dragGhost, dropDir, dragHint, startPotentialDrag };

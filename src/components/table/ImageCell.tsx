@@ -120,7 +120,7 @@ export const ImageCell = memo(function ImageCell({ field, row }: Props) {
         {imageInput}
         <button
           onClick={() => imageInputRef.current?.click()}
-          className="absolute inset-0 w-full h-full flex items-center justify-center rounded opacity-0 group-hover:opacity-100 transition-opacity hover:bg-[var(--hover)]"
+          className="absolute inset-0 w-full h-full flex items-center justify-center rounded opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 transition-opacity hover:bg-[var(--hover)]"
           style={{ color: "var(--text-muted)" }}
           title="添加图片"
         >
@@ -181,7 +181,7 @@ export const ImageCell = memo(function ImageCell({ field, row }: Props) {
           />
         )}
         {/* 左上角 hover：模式切换（多图）/ 追加；右上角 hover：移除当前图（仅轮播，九宫格无移除入口） */}
-        <div className="absolute top-1 left-1 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+        <div className="absolute top-1 left-1 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 transition-opacity">
           {multi && (
             <button
               onClick={(e) => {
@@ -208,7 +208,7 @@ export const ImageCell = memo(function ImageCell({ field, row }: Props) {
           </button>
         </div>
         {!gridMode && (
-          <div className="absolute top-1 right-1 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+          <div className="absolute top-1 right-1 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 transition-opacity">
             <button
               onClick={(e) => {
                 e.stopPropagation();
