@@ -15,7 +15,7 @@ export interface PlatformCapabilities {
   multiWindow: boolean;
   /** 窗口控制（最小化/最大化/自绘标题栏/全屏/关闭守卫）。 */
   windowControls: boolean;
-  /** 目录选择器（桌面 = 系统原生；移动端自研目录浏览落地前视为缺失）。 */
+  /** 目录选择器（桌面 = 系统原生文件夹选择器；移动端无系统选择器，改用自研目录浏览 UI）。 */
   directoryPicker: boolean;
   /** 凭据存储（桌面 = OS keychain；移动端 = 系统级安全存储，接口一致）。 */
   credentialStorage: boolean;
@@ -23,6 +23,8 @@ export interface PlatformCapabilities {
   autoUpdate: boolean;
   /** 进程执行与插件依赖打包（移动端不存在，缺失显式可见）。 */
   processExecution: boolean;
+  /** 插件外部目录授权（清单声明仓库外目录并逐目录批准；移动端不提供）。 */
+  pluginExternalDirs: boolean;
   /** 磁盘文件监听（两端均无：外部改动在打开/重读时感知）。 */
   fileWatching: boolean;
 }
@@ -42,6 +44,7 @@ export function platformCapabilities(): PlatformCapabilities {
       credentialStorage: true,
       autoUpdate: false,
       processExecution: false,
+      pluginExternalDirs: false,
       fileWatching: false,
     };
   }
@@ -52,6 +55,7 @@ export function platformCapabilities(): PlatformCapabilities {
     credentialStorage: true,
     autoUpdate: true,
     processExecution: true,
+    pluginExternalDirs: true,
     fileWatching: false,
   };
 }

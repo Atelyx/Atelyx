@@ -12,6 +12,7 @@
 import { useMemo, useState } from "react";
 import { FolderOpen, GitBranch, Info, RefreshCw, Trash2 } from "lucide-react";
 import { usePluginStore, type PluginInstallResult } from "@/stores/pluginStore";
+import { useAppStore } from "@/stores/appStore";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 import { Menu, MenuItem } from "@/components/common/Menu";
 import { ToggleSwitch } from "@/components/common/ToggleSwitch";
@@ -31,6 +32,8 @@ type TabMode = "installed" | "market";
 
 export function PluginsSettingsTab() {
   const plugins = usePluginStore((s) => s.plugins);
+  // 平台能力（外部目录授权 / 进程执行在移动端不提供）：经 appStore 读取，保持组件不直连 services
+  const capabilities = useAppStore((s) => s.platform.capabilities);
   // 订阅 UI 注册修订号：插件 UI 平面命令异步注册/卸载变化触发重渲染（命令列表在服务层非响应式）。
   usePluginStore((s) => s.uiRevision);
   const setEnabled = usePluginStore((s) => s.setEnabled);
@@ -387,6 +390,8 @@ export function PluginsSettingsTab() {
           commands={commands}
           capabilityLabel={capabilityLabel}
           capabilitySensitive={capabilitySensitive}
+          externalDirsAvailable={capabilities.pluginExternalDirs}
+          shellAvailable={capabilities.processExecution}
           getSlotChain={slotChain}
           onApproveDir={(dir) =>
             void approveDir(detailsId, dir).then(

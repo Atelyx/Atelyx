@@ -20,6 +20,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml && cargo test --manifest-path collab-relay/Cargo.toml",
+    "android:16kb": "node scripts/check-android-16kb.mjs",
     "check": "pnpm run build:vendor && pnpm run typecheck && pnpm run ctx-api:check && pnpm run lint && pnpm run test && pnpm run test:rust"
   },
   "dependencies": {

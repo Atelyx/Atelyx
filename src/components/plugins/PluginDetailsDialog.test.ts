@@ -21,6 +21,7 @@ const onRevokeDir = vi.fn();
 function plugin(over: {
   declaredDirs?: string[];
   approvedDirs?: string[];
+  declares?: string[];
   phase?: InstalledPlugin["phase"];
 } = {}): InstalledPlugin {
   return {
@@ -31,6 +32,7 @@ function plugin(over: {
       version: "1.0.0",
       type: "background",
       ...(over.declaredDirs ? { declaredDirs: over.declaredDirs } : {}),
+      ...(over.declares ? { declares: over.declares } : {}),
     },
     installDir: "/tmp/fs",
     sourceKind: "git",
@@ -60,7 +62,10 @@ afterEach(async () => {
   }
 });
 
-function mountDialog(p: InstalledPlugin): HTMLDivElement {
+function mountDialog(
+  p: InstalledPlugin,
+  caps: { externalDirsAvailable?: boolean; shellAvailable?: boolean } = {},
+): HTMLDivElement {
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -71,6 +76,8 @@ function mountDialog(p: InstalledPlugin): HTMLDivElement {
         commands: [],
         capabilityLabel: (n: string) => n,
         capabilitySensitive: () => false,
+        externalDirsAvailable: caps.externalDirsAvailable ?? true,
+        shellAvailable: caps.shellAvailable ?? true,
         getSlotChain: (slot: string): PluginSlotChain => ({
           slot,
           declarer: "宿主",
@@ -167,5 +174,25 @@ describe("PluginDetailsDialog 外部目录访问区", () => {
     );
     const revoke = [...el.querySelectorAll("button")].filter((b) => b.textContent === "撤销");
     expect(revoke).toHaveLength(1);
+  });
+
+  it("本平台不提供外部目录授权：只给说明，不渲染批准/撤销按钮", () => {
+    const el = mountDialog(plugin({ declaredDirs: ["~/Projects/foo"] }), { externalDirsAvailable: false });
+    expect(el.textContent).toContain("外部目录访问");
+    expect(el.textContent).toContain("当前平台不提供外部目录访问");
+    expect([...el.querySelectorAll("button")].filter((b) => b.textContent === "批准")).toHaveLength(0);
+    expect([...el.querySelectorAll("button")].filter((b) => b.textContent === "撤销")).toHaveLength(0);
+  });
+
+  it("本平台无进程执行：声明的 shell 标注本平台不可用", () => {
+    const el = mountDialog(plugin({ declares: ["shell"] }), { shellAvailable: false });
+    expect(el.textContent).toContain("shell");
+    expect(el.textContent).toContain("本平台不可用");
+  });
+
+  it("本平台有进程执行：声明的 shell 不加不可用标注", () => {
+    const el = mountDialog(plugin({ declares: ["shell"] }), { shellAvailable: true });
+    expect(el.textContent).toContain("shell");
+    expect(el.textContent).not.toContain("本平台不可用");
   });
 });

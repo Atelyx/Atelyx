@@ -5,7 +5,7 @@
  * ——撕裂窗口是独立 webview，通知不跨窗口共享）。自动消失由宿主组件按 timeoutMs 计时。
  */
 import { create } from "zustand";
-import type { NotificationInput, NotificationLevel } from "@/services/cordis/types";
+import type { NotificationAction, NotificationInput, NotificationLevel } from "@/services/cordis/types";
 
 export type { NotificationLevel };
 
@@ -15,8 +15,13 @@ export interface NotificationItem {
   /** 可选标题（无标题时只显示正文）。 */
   title?: string;
   message: string;
-  /** 自动消失毫秒数（宿主组件据此计时）。 */
+  /**
+   * 自动消失毫秒数（宿主组件据此计时）。
+   * 带 `action` 的通知恒不自动消失（`timeoutMs` 被忽略），需用户点动作或手动关闭。
+   */
   timeoutMs: number;
+  /** 可选动作按钮（用户需明确处理的通知）。 */
+  action?: NotificationAction;
 }
 
 /** 自动消失时长：错误留久一些（8s），其余 4s。 */
@@ -38,10 +43,20 @@ interface NotificationState {
 export const useNotificationStore = create<NotificationState>()((set) => ({
   items: [],
 
-  notify: ({ message, title, level = "info" }) => {
+  notify: ({ message, title, level = "info", action }) => {
     const id = crypto.randomUUID();
     set((s) => ({
-      items: [...s.items, { id, level, ...(title ? { title } : {}), message, timeoutMs: AUTO_DISMISS_MS[level] }],
+      items: [
+        ...s.items,
+        {
+          id,
+          level,
+          ...(title ? { title } : {}),
+          message,
+          timeoutMs: AUTO_DISMISS_MS[level],
+          ...(action ? { action } : {}),
+        },
+      ],
     }));
     return id;
   },

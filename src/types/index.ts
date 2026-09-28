@@ -132,6 +132,8 @@ export type { DatedNote, RepoHistoryEntry, DailyCount, RepoHistoryResult } from 
 
 export type { TagRow } from "./tags";
 
+export type { AbsoluteDirEntry, AbsoluteDirListing } from "./mobile";
+
 export type {
   FieldType,
   CalcType,

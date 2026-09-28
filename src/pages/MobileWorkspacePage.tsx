@@ -6,6 +6,7 @@
  * 文件生命周期联动与桌面共用（useWorkspaceFileEffects）；打开文件切到对应视图（启动恢复
  * 发生在挂载前，不劫持「最近打开」启动页）。
  * 返回键逐层返回在此接线（安卓壳层经 window.__atelyxAndroidBack 调用）。
+ * 安卓首次启动渲染存储授权引导：本地仓库要选设备文件夹需先手动开启「所有文件访问权限」。
  */
 import { Settings } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -16,6 +17,7 @@ import { useNotificationStore } from "@/stores/notificationStore";
 import { SettingsModal, VaultSettingsModal } from "@/components/settings/SettingsModal";
 import { MobileNavDrawer, type MobileNavItem } from "@/components/layout/MobileNavDrawer";
 import { MobileVaultSwitcher } from "@/components/layout/MobileVaultSwitcher";
+import { MobileLocalVaultDialog } from "@/components/layout/MobileLocalVaultDialog";
 import { ViewHost, viewMetaFor } from "@/components/layout/ViewHost";
 import { useWorkspaceFileEffects } from "@/hooks/useWorkspaceFileEffects";
 import { runBackHandlers } from "@/utils/mobileBack";
@@ -170,6 +172,14 @@ export function MobileWorkspacePage() {
   // 触屏长按 → 右键菜单（复用既有 onContextMenu 处理器）
   useEffect(() => installLongPressContextMenu(), []);
 
+  // 首次启动的存储授权引导（安卓：本地仓库需要「所有文件访问权限」，只能引导用户手动开启）
+  const isAndroid = useAppStore((s) => s.platform.isAndroid);
+  const androidStorageOnboarded = useAppStore((s) => s.androidStorageOnboarded);
+  const [showStorageGuide, setShowStorageGuide] = useState(false);
+  useEffect(() => {
+    if (isAndroid && !androidStorageOnboarded) setShowStorageGuide(true);
+  }, [isAndroid, androidStorageOnboarded]);
+
   return (
     <div className="h-full w-full flex" style={{ background: "var(--bg-primary)" }}>
       <MobileNavDrawer items={tabs} active={activeView} onSelect={setActiveView} />
@@ -214,6 +224,15 @@ export function MobileWorkspacePage() {
 
       {settingsModal && (
         <SettingsModal initialTab={settingsModal.tab} onClose={closeSettings} />
+      )}
+      {showStorageGuide && (
+        <MobileLocalVaultDialog
+          firstRun
+          onClose={() => {
+            setShowStorageGuide(false);
+            void useAppStore.getState().setAndroidStorageOnboarded(true);
+          }}
+        />
       )}
       {vaultSettingsModal && (
         <VaultSettingsModal

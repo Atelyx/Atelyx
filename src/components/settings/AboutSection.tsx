@@ -27,6 +27,8 @@ export function AboutSection() {
   const installUpdate = useAppStore((s) => s.installUpdate);
   const getAppVersion = useAppStore((s) => s.getAppVersion);
   const openUrl = useAppStore((s) => s.openUrl);
+  /** 安卓无 updater：新版本只能打开下载地址，由用户手动安装（平台事实经 store 读取）。 */
+  const isAndroid = useAppStore((s) => s.platform.isAndroid);
 
   const [version, setVersion] = useState("");
   useEffect(() => {
@@ -88,7 +90,7 @@ export function AboutSection() {
             ) : (
               <Download size={14} />
             )}
-            {installing ? "安装中…" : "下载并安装"}
+            {installing ? (isAndroid ? "打开中…" : "安装中…") : isAndroid ? "下载新版本" : "下载并安装"}
           </button>
         ) : (
           <button
@@ -124,7 +126,8 @@ export function AboutSection() {
             className="text-xs max-w-[420px] text-center"
             style={{ color: "var(--text-muted)" }}
           >
-            发现新版本 {updateLatestVersion}；安装完成后将自动重启应用
+            发现新版本 {updateLatestVersion}
+            {isAndroid ? "；将打开下载页，安装包需自行安装" : "；安装完成后将自动重启应用"}
           </p>
         )}
         {updateStatus === "error" && (

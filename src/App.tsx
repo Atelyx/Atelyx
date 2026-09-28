@@ -9,7 +9,7 @@ import { LoadingScreen } from "@/components/common/LoadingScreen";
 import { NotificationHost } from "@/components/common/NotificationHost";
 import { useAppearance } from "@/hooks/useAppearance";
 import { getCurrentWindowLabel } from "@/services/window";
-import { platformCapabilities } from "@/services/platform";
+import { platformCapabilities, isAndroidPlatform } from "@/services/platform";
 import { layoutReconcile } from "@/services/layout";
 import { PANEL_LABEL_PREFIX, usePanelStore } from "@/stores/panelStore";
 
@@ -30,6 +30,8 @@ const MobileWorkspacePage = lazy(async () => {
 /** 平台能力（运行期内恒定，模块级取一次）。 */
 const MULTI_WINDOW = platformCapabilities().multiWindow;
 const AUTO_UPDATE = platformCapabilities().autoUpdate;
+/** 安卓端无 updater：启动时改为检查新版本并提示下载。 */
+const ANDROID = isAndroidPlatform();
 
 /** 窗口形态应用串行队列：多次触发（含 boot 末尾）时按序执行，队列 promise 因内层 catch 永不 reject。 */
 let windowShapeQueue: Promise<void> = Promise.resolve();
@@ -151,6 +153,9 @@ function MainWorkspaceApp() {
       // 协作连接收尾不随 flush 执行，见 appStore.flushAllPending 注释）。移动端无 updater。
       if (AUTO_UPDATE && useAppStore.getState().autoUpdate) {
         void useAppStore.getState().runAutoUpdate();
+      } else if (ANDROID) {
+        // 安卓无 updater：启动检查一次，发现新版本提示用户去下载（不自动安装）
+        void useAppStore.getState().promptUpdateOnStartup();
       }
     })().finally(async () => {
       settled = true;

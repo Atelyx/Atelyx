@@ -2,14 +2,15 @@
  * 移动端仓库/空间切换入口：顶栏当前仓库名点击唤出，列出最近仓库与最近协作空间。
  *
  * 本地仓库直接切换；协作空间走 selectSpace，无有效会话时与文件面板同一引导（预填地址 + 打开设置）。
- * 手机上暂不提供新增本地仓库（目录选择器在移动端不可用）。
+ * 「添加本地仓库」走自研目录浏览（安卓无系统文件夹选择器），权限与回落口径由入口对话框说明。
  */
-import { useRef } from "react";
-import { ChevronDown, Cloud, HardDrive, Server } from "lucide-react";
+import { useRef, useState } from "react";
+import { ChevronDown, Cloud, FolderPlus, HardDrive, Server } from "lucide-react";
 import { useAppStore } from "@/stores/appStore";
 import { useSpaceDirectoryStore } from "@/stores/spaceDirectoryStore";
 import { PopupLayer } from "@/components/common/PopupLayer";
 import { MenuDivider, MenuItem } from "@/components/common/Menu";
+import { MobileLocalVaultDialog } from "@/components/layout/MobileLocalVaultDialog";
 import { usePopupAnchor } from "@/hooks/usePopupAnchor";
 import type { RecentSpace } from "@/types";
 
@@ -24,6 +25,8 @@ export function MobileVaultSwitcher({ label }: { label: string }) {
   const selectVault = useAppStore((s) => s.selectVault);
   const selectSpace = useAppStore((s) => s.selectSpace);
   const openSettings = useAppStore((s) => s.openSettings);
+
+  const [addLocal, setAddLocal] = useState(false);
 
   const empty = recentVaults.length === 0 && recentSpaces.length === 0;
 
@@ -106,6 +109,15 @@ export function MobileVaultSwitcher({ label }: { label: string }) {
         <MenuItem
           onClick={() => {
             close();
+            setAddLocal(true);
+          }}
+        >
+          <FolderPlus size={14} className="shrink-0" />
+          添加本地仓库…
+        </MenuItem>
+        <MenuItem
+          onClick={() => {
+            close();
             openSettings("collab");
           }}
         >
@@ -113,6 +125,7 @@ export function MobileVaultSwitcher({ label }: { label: string }) {
           连接服务器…
         </MenuItem>
       </PopupLayer>
+      {addLocal && <MobileLocalVaultDialog onClose={() => setAddLocal(false)} />}
     </>
   );
 }

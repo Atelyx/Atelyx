@@ -10,6 +10,7 @@ import {
   type ThemeDefinition,
 } from "@/types";
 import { PLUGIN_HOST_API_VERSION } from "@/constants/plugins";
+import { ANDROID_PLATFORM } from "@/utils/pluginHost";
 
 export type ManifestValidateResult =
   | { ok: true; manifest: PluginManifest }
@@ -64,11 +65,19 @@ function parseVersion(value: string): number[] {
   });
 }
 
-/** 插件是否兼容当前宿主（契约版本 + 版本范围 + 平台）。
+/** 插件是否兼容当前宿主（契约版本 + 版本范围 + 平台 + 平台能力）。
  *  `hostVersion` 为 null = 宿主版本读取失败（IPC 瞬时异常）：跳过版本范围判断（不误判），
- *  契约版本与平台判断仍生效——它们不依赖 IPC 结果。 */
+ *  契约版本、平台与平台能力判断仍生效——它们不依赖 IPC 结果。 */
 export function pluginCompatibleWithHost(
-  manifest: Pick<PluginManifest, "atelyxVersionMin" | "atelyxVersionMax" | "platforms" | "hostApiVersion">,
+  manifest: Pick<
+    PluginManifest,
+    | "atelyxVersionMin"
+    | "atelyxVersionMax"
+    | "platforms"
+    | "hostApiVersion"
+    | "dependencies"
+    | "bundle"
+  >,
   hostVersion: string | null,
   platform: string,
 ): { ok: true } | { ok: false; reason: string } {
@@ -80,6 +89,14 @@ export function pluginCompatibleWithHost(
   }
   if (manifest.platforms && manifest.platforms.length > 0 && !manifest.platforms.includes(platform)) {
     return { ok: false, reason: `不支持当前平台（${platform}）` };
+  }
+  // 依赖取件与打包走宿主内置打包器，移动端没有该链路：带依赖或显式要求宿主打包的插件
+  // 在移动端一律装不上。装在安装期拦下并给可读原因，不留到加载期静默失败。
+  if (
+    platform === ANDROID_PLATFORM &&
+    (Object.keys(manifest.dependencies ?? {}).length > 0 || manifest.bundle === true)
+  ) {
+    return { ok: false, reason: "当前平台不支持带依赖的插件" };
   }
   if (hostVersion === null) return { ok: true };
   if (manifest.atelyxVersionMin && compareVersions(hostVersion, manifest.atelyxVersionMin) < 0) {

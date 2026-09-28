@@ -23,7 +23,7 @@
     "tagline": "一句话简介",
     "atelyxVersionMin": "0.5.0",    // 可选：兼容的宿主版本下限
     // "atelyxVersionMax": "0.6.0", // 可选：兼容的宿主版本上限（不含）
-    "platforms": ["windows-x64"],   // 可选：目标平台，缺省全平台
+    "platforms": ["windows-x64"],   // 可选：目标平台（windows-x64 / linux-x64 / android），缺省全平台
     "declares": ["table"],          // 可选：披露将访问的 Atelyx 服务（管理页「声明 vs 实际」审计对照的声明侧）
     "declaredDirs": ["~/Projects/my-app"], // 可选：披露并请求访问的仓库外目录（绝对路径或以 ~/ 开头；逐目录经用户批准后可用，见「外部目录访问」）
     "permissions": { "table": "读取当前打开的表格数据" }, // 可选：服务名 → 一句理由（安装/详情展示）
@@ -81,6 +81,8 @@
 - 入口拆成多文件但不想声明依赖时，用 `atelyx.bundle: true` 显式开启打包（相对 `import` 会被内联）。
 - 产物写在插件目录的 `.atelyx-dist/entry.js`，由宿主生成与维护：**不要手改，也不要提交**它
   （连同 `node_modules` 一起加进忽略，本地目录来源的实时引用同样会被写入产物）。
+- **安卓端不支持依赖打包**：声明了 `dependencies`（或 `atelyx.bundle: true`）的插件在安卓上会被
+  拒绝安装并给出原因；要跨平台分发，请让插件保持纯 TS、无 npm 依赖（入口本身仍可在安卓上转译）。
 - 取下来的依赖按内容摘要缓存在本机，重复安装与回退不再下载。
 
 产物跑在 WebView 里，所以只有**浏览器可用**的 npm 包能用：依赖 Node 内置模块（`fs`、
@@ -150,7 +152,7 @@
 - `hostApiVersion`：插件契约版本（`ctx` 服务面与 `ui` 注册面的语义版本，与宿主 App 版本解耦）。
   **缺省视为当前契约版本**；显式声明且与宿主不同时，安装与加载都会被拒绝并提示所需版本——
   这样破坏性契约变更会响亮失败，而不是静默坏掉。当前契约版本为 1。
-- `platforms`：`windows-x64` / `linux-x64`，缺省全平台。
+- `platforms`：`windows-x64` / `linux-x64` / `android`，缺省全平台。
 
 ## 作用域
 

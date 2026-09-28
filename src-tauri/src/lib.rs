@@ -3,6 +3,8 @@
 //!
 //! 文件化仓库（`vault.rs`）为唯一存储出口。
 
+#[cfg(target_os = "android")]
+mod android_bridge;
 mod commands;
 mod layout;
 mod layout_drag;
@@ -206,6 +208,13 @@ pub fn run() {
             // 插件托管进程的启动与结束（ctx.shell.spawn 的后端 + 按 pid 结束进程树）
             commands::process::spawn_plugin_process,
             commands::process::kill_process_tree,
+            // 移动端专属（安卓本地仓库：存储权限、私有回落目录、自研目录浏览；桌面端一律拒绝）
+            commands::mobile::android_has_all_files_access,
+            commands::mobile::android_request_all_files_access,
+            commands::mobile::android_open_url,
+            commands::mobile::android_private_vault_path,
+            commands::mobile::android_storage_root,
+            commands::mobile::list_absolute_dir,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

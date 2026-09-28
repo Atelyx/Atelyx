@@ -288,6 +288,8 @@ export interface GlobalConfig {
   recentVaults: RecentVault[];
   /** 自动检查更新（应用级）：开启后每次启动应用静默检查新版本并自动安装。缺省 = false（关闭）。 */
   autoUpdate?: boolean;
+  /** 首次启动的存储授权引导是否已展示（移动端本地仓库用）。缺省 = false。 */
+  androidStorageOnboarded?: boolean;
   /** 激活的主题插件 id（global.json）。缺省 = 默认主题插件；
    * 主题条目/设置项见 utils/pluginTheme 与 types/plugin.ts。 */
   theme?: string;

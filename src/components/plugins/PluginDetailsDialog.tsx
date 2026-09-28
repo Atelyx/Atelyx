@@ -14,6 +14,10 @@ interface PluginDetailsDialogProps {
   commands: PluginCommandContribution[];
   capabilityLabel: (name: string) => string;
   capabilitySensitive: (name: string) => boolean;
+  /** 外部目录授权在本平台是否可用（移动端不提供）。 */
+  externalDirsAvailable: boolean;
+  /** 进程执行（声明里的 `shell`）在本平台是否可用。 */
+  shellAvailable: boolean;
   /** 槽位修改链查询（归属可见：展开某槽看声明方 + 全部贡献/装饰者）。 */
   getSlotChain: (slot: string) => PluginSlotChain;
   /** 批准插件访问一个仓库外目录（父组件经 pluginStore 执行并回显结果）。 */
@@ -53,6 +57,8 @@ export function PluginDetailsDialog({
   commands,
   capabilityLabel,
   capabilitySensitive,
+  externalDirsAvailable,
+  shellAvailable,
   getSlotChain,
   onApproveDir,
   onRevokeDir,
@@ -64,6 +70,9 @@ export function PluginDetailsDialog({
   onCancelRollback,
 }: PluginDetailsDialogProps) {
   const closeRef = useRef<HTMLButtonElement>(null);
+  /** 声明能力在本平台是否可用：只列有平台差异的能力（如 shell = 进程执行），其余不受平台影响。 */
+  const declaredCapabilityAvailable = (name: string): boolean =>
+    name === "shell" ? shellAvailable : true;
   const onCloseRef = useRef(onClose);
   const rollbackConfirmRef = useRef(rollbackConfirm);
   onCloseRef.current = onClose;
@@ -175,33 +184,41 @@ export function PluginDetailsDialog({
         {declares.length > 0 && (
           <section className="mb-4">
             <h4 className="text-[11px] font-medium mb-2" style={{ color: "var(--text-muted)" }}>声明能力</h4>
-            <div className="flex flex-wrap gap-1">{declares.map((name) => <span key={name} className="text-[10px] px-1.5 py-0.5 rounded border" style={{ color: capabilitySensitive(name) ? "#f59e0b" : "var(--text-secondary)", borderColor: "var(--border)" }}>{capabilityLabel(name)}{capabilitySensitive(name) ? "（敏感）" : ""}</span>)}</div>
+            <div className="flex flex-wrap gap-1">{declares.map((name) => <span key={name} className="text-[10px] px-1.5 py-0.5 rounded border" style={{ color: capabilitySensitive(name) ? "#f59e0b" : "var(--text-secondary)", borderColor: "var(--border)" }}>{capabilityLabel(name)}{capabilitySensitive(name) ? "（敏感）" : ""}{declaredCapabilityAvailable(name) ? "" : "（本平台不可用）"}</span>)}</div>
           </section>
         )}
 
         {dirRows.length > 0 && (
           <section className="mb-4">
             <h4 className="text-[11px] font-medium mb-2" style={{ color: "var(--text-muted)" }}>外部目录访问</h4>
-            <div className="space-y-1 text-[10px]">
-              {dirRows.map((row) => (
-                <div key={row.dir} className="flex items-center gap-2">
-                  <span className="flex-1 min-w-0 break-all" style={{ color: row.approved ? "var(--text-secondary)" : "var(--text-muted)" }}>
-                    {row.dir}
-                    {row.undeclared && <span style={{ color: "#f59e0b" }}>（清单已不再声明）</span>}
-                  </span>
-                  <button
-                    onClick={() => (row.approved ? onRevokeDir(row.dir) : onApproveDir(row.dir))}
-                    className="flex-shrink-0 px-1.5 py-0.5 rounded border text-[10px]"
-                    style={{ borderColor: "var(--border)", color: row.approved ? "var(--text-muted)" : "var(--text-secondary)" }}
-                  >
-                    {row.approved ? "撤销" : "批准"}
-                  </button>
+            {externalDirsAvailable ? (
+              <>
+                <div className="space-y-1 text-[10px]">
+                  {dirRows.map((row) => (
+                    <div key={row.dir} className="flex items-center gap-2">
+                      <span className="flex-1 min-w-0 break-all" style={{ color: row.approved ? "var(--text-secondary)" : "var(--text-muted)" }}>
+                        {row.dir}
+                        {row.undeclared && <span style={{ color: "#f59e0b" }}>（清单已不再声明）</span>}
+                      </span>
+                      <button
+                        onClick={() => (row.approved ? onRevokeDir(row.dir) : onApproveDir(row.dir))}
+                        className="flex-shrink-0 px-1.5 py-0.5 rounded border text-[10px]"
+                        style={{ borderColor: "var(--border)", color: row.approved ? "var(--text-muted)" : "var(--text-secondary)" }}
+                      >
+                        {row.approved ? "撤销" : "批准"}
+                      </button>
+                    </div>
+                  ))}
                 </div>
-              ))}
-            </div>
-            <div className="text-[10px] mt-1.5" style={{ color: "var(--text-muted)" }}>
-              `~/` 指用户主目录；批准后插件可经 <code>ctx.fs</code> 读写该目录（绝对路径），撤销立即失效。
-            </div>
+                <div className="text-[10px] mt-1.5" style={{ color: "var(--text-muted)" }}>
+                  `~/` 指用户主目录；批准后插件可经 <code>ctx.fs</code> 读写该目录（绝对路径），撤销立即失效。
+                </div>
+              </>
+            ) : (
+              <div className="text-[10px] leading-relaxed" style={{ color: "var(--text-muted)" }}>
+                该插件声明了仓库外目录，但当前平台不提供外部目录访问。
+              </div>
+            )}
           </section>
         )}
 

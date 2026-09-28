@@ -141,6 +141,12 @@ pub async fn prepare_artifact(
     let bundle_requested = manifest["atelyx"]["bundle"].as_bool() == Some(true);
     let build_dir = plugin_root.join(BUILD_DIR);
 
+    // 移动端没有内置打包器（依赖取件 + esbuild 是桌面链路）：带依赖或显式要求宿主打包的插件
+    // 装不上。在本函数早退分支之前拒绝——此处是全部安装/更新路径的唯一咽喉。
+    if cfg!(target_os = "android") && (!deps.is_empty() || bundle_requested) {
+        return Err("当前平台不支持带依赖的插件".into());
+    }
+
     if deps.is_empty() && !bundle_requested {
         remove_build_dir(&build_dir)?;
         return Ok(());

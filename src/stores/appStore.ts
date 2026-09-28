@@ -40,7 +40,9 @@ import { openInExplorer as openInExplorerSvc, openUrl as openUrlSvc } from "@/se
 import { readClipboardText as readClipboardTextSvc, writeClipboardText as writeClipboardTextSvc } from "@/services/clipboard";
 import { pickDirectory as pickDirectorySvc } from "@/services/dialog";
 import { applyWorkspaceWindow as applyWorkspaceWindowSvc, closeWindow as closeWindowSvc, minimizeWindow as minimizeWindowSvc, onCloseRequested as onCloseRequestedSvc, toggleFullscreen as toggleFullscreenSvc, toggleMaximizeWindow as toggleMaximizeWindowSvc } from "@/services/window";
-import { checkAndAutoUpdate as checkAndAutoUpdateSvc, checkForUpdate as checkForUpdateSvc, installUpdate as installUpdateSvc } from "@/services/updater";
+import { checkAndAutoUpdate as checkAndAutoUpdateSvc, checkForUpdate as checkForUpdateSvc, checkUpdateOnStartup as checkUpdateOnStartupSvc, installUpdate as installUpdateSvc } from "@/services/updater";
+import { isAndroidPlatform, platformCapabilities } from "@/services/platform";
+import type { PlatformCapabilities } from "@/services/platform";
 import { emitPluginEvent } from "@/services/cordis/events";
 import { usePluginStore } from "@/stores/pluginStore";
 import { useNotificationStore } from "@/stores/notificationStore";
@@ -132,6 +134,11 @@ interface AppState {
   canvases: CanvasFileRow[];
   /** 自动检查更新（应用级，存 global.json；缺省 false = 关闭，关闭时完全不联网检查）。 */
   autoUpdate: boolean;
+  /** 首次启动的存储授权引导是否已展示（应用级，存 global.json；移动端本地仓库用）。 */
+  androidStorageOnboarded: boolean;
+  /** 平台信息（运行期内恒定）：能力表 + 是否安卓。
+   *  组件层经 store 读取平台分支所需的事实（组件不 import services，见分层约束）。 */
+  platform: { isAndroid: boolean; capabilities: PlatformCapabilities };
   /** 手动检查更新状态（设置页「关于」tab；运行期状态不持久化）。 */
   updateStatus: UpdateStatus;
   /** 检查到的新版本号（status = available 时有效）。 */
@@ -145,6 +152,8 @@ interface AppState {
   init: () => Promise<AutoEnterTarget | null>;
   /** 设自动检查更新（应用级，写 global.json；不随仓库同步）。 */
   setAutoUpdate: (enabled: boolean) => Promise<void>;
+  /** 标记存储授权引导已展示（应用级，写 global.json；不随仓库同步）。 */
+  setAndroidStorageOnboarded: (shown: boolean) => Promise<void>;
   /** 手动检查新版本（设置页「关于」）；结果写入 updateStatus/updateLatestVersion/updateError。 */
   checkForUpdates: () => Promise<void>;
   /** 下载并安装已发现的新版本；成功后 relaunch 重启。 */
@@ -171,6 +180,8 @@ interface AppState {
   installCloseGuard: () => void;
   /** 静默自动更新链路（启动时 autoUpdate 开启才调用）：先落盘再检查安装，失败静默降级。 */
   runAutoUpdate: () => Promise<void>;
+  /** 启动检查更新并提示下载（安卓：无 updater，只提示不自动装）。 */
+  promptUpdateOnStartup: () => Promise<void>;
 
   /** 调系统目录选择器，选中路径（用户取消返回 null）。 */
   pickVaultDirectory: () => Promise<string | null>;
@@ -300,6 +311,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   currentTableTitle: "",
   canvases: [],
   autoUpdate: false,
+  androidStorageOnboarded: false,
+  platform: { isAndroid: isAndroidPlatform(), capabilities: platformCapabilities() },
   updateStatus: "idle",
   updateLatestVersion: "",
   updateError: "",
@@ -320,11 +333,13 @@ export const useAppStore = create<AppState>((set, get) => ({
     let spaces: RecentSpace[] = [];
     let autoEnter: AutoEnterTarget | null = null;
     let autoUpdate = false;
+    let androidStorageOnboarded = false;
     try {
       const { config: cfg, corruptBackup } = await readGlobalConfig();
       recents = cfg.recentVaults;
       spaces = cfg.spaces ?? [];
       autoUpdate = cfg.autoUpdate ?? false;
+      androidStorageOnboarded = cfg.androidStorageOnboarded ?? false;
       notifyGlobalConfigCorrupt(corruptBackup);
     } catch (e) {
       console.error("读取全局配置失败", e);
@@ -363,6 +378,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       recentVaults: recents,
       recentSpaces: spaces,
       autoUpdate: autoUpdate,
+      androidStorageOnboarded: androidStorageOnboarded,
     });
     // 应用级 UI 使用状态（布局/展开/上次文件）启动加载一次，之后跨仓库共享。
     // 等待完成：进仓门控「全部加载完再进入」涵盖布局状态，恢复上次打开文件依赖 loaded。
@@ -377,6 +393,15 @@ export const useAppStore = create<AppState>((set, get) => ({
       notifyGlobalConfigCorrupt(await updateGlobalConfig({ autoUpdate: enabled }));
     } catch (e) {
       console.error("保存自动更新配置失败", e);
+    }
+  },
+
+  setAndroidStorageOnboarded: async (shown) => {
+    set({ androidStorageOnboarded: shown });
+    try {
+      notifyGlobalConfigCorrupt(await updateGlobalConfig({ androidStorageOnboarded: shown }));
+    } catch (e) {
+      console.error("保存存储引导状态失败", e);
     }
   },
 
@@ -408,6 +433,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       // （协作连接无需在此 dispose：安装成功后进程退出，服务端按 TCP 断开即移除 peer）
       await useAppStore.getState().flushAllPending();
       await installUpdateSvc();
+      // 安卓端只打开下载地址（无 updater，不会重启），复位按钮状态；桌面端安装后即重启，无需复位
+      if (isAndroidPlatform()) set({ installing: false, updateStatus: "idle" });
     } catch (e) {
       console.error("安装更新失败", e);
       set({
@@ -680,6 +707,16 @@ export const useAppStore = create<AppState>((set, get) => ({
     } catch (e) {
       console.error("自动更新失败（静默降级，下次启动再试）", e);
     }
+  },
+
+  promptUpdateOnStartup: async () => {
+    const result = await checkUpdateOnStartupSvc();
+    if (!result) return;
+    useNotificationStore.getState().notify({
+      level: "info",
+      message: `发现新版本 ${result.latestVersion}，可下载安装包手动更新。`,
+      action: { label: "去下载", onClick: () => void useAppStore.getState().installUpdate() },
+    });
   },
 
   pickVaultDirectory: () => pickDirectorySvc(),

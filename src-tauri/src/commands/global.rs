@@ -50,6 +50,9 @@ pub struct GlobalConfig {
     /// 自动检查更新（应用级）：开启后每次启动应用静默检查新版本并自动安装。缺省 None = 关闭。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_update: Option<bool>,
+    /// 首次启动的存储授权引导是否已展示（移动端本地仓库用；缺省 None = 未展示）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub android_storage_onboarded: Option<bool>,
     /// 应用级激活的主题插件 id。缺失时前端默认取默认主题插件。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theme: Option<String>,

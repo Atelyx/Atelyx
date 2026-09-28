@@ -68,6 +68,21 @@ describe("pluginCompatibleWithHost", () => {
     expect(pluginCompatibleWithHost({ ...base, platforms: ["linux-x64"] }, "0.4.0", "windows-x64").ok).toBe(false);
     expect(pluginCompatibleWithHost({ ...base, platforms: ["windows-x64", "linux-x64"] }, "0.4.0", "windows-x64").ok).toBe(true);
   });
+  it("安卓平台串命中清单 platforms", () => {
+    expect(pluginCompatibleWithHost({ ...base, platforms: ["android"] }, "0.4.0", "android").ok).toBe(true);
+    expect(
+      pluginCompatibleWithHost({ ...base, platforms: ["windows-x64", "linux-x64"] }, "0.4.0", "android").ok,
+    ).toBe(false);
+  });
+  it("安卓：带依赖或要求宿主打包的插件不兼容，桌面不受影响", () => {
+    const deps = { dependencies: { "some-pkg": "^1.0.0" } };
+    expect(pluginCompatibleWithHost(base, "0.4.0", "android").ok).toBe(true);
+    const blocked = pluginCompatibleWithHost({ ...base, ...deps }, "0.4.0", "android");
+    expect(blocked.ok).toBe(false);
+    if (!blocked.ok) expect(blocked.reason).toContain("依赖");
+    expect(pluginCompatibleWithHost({ ...base, bundle: true }, "0.4.0", "android").ok).toBe(false);
+    expect(pluginCompatibleWithHost({ ...base, ...deps }, "0.4.0", "windows-x64").ok).toBe(true);
+  });
   it("契约版本：缺省视为当前版本，显式不匹配则拒绝并给出所需版本", () => {
     expect(pluginCompatibleWithHost(base, "0.4.0", "windows-x64").ok).toBe(true);
     expect(pluginCompatibleWithHost({ ...base, hostApiVersion: PLUGIN_HOST_API_VERSION }, "0.4.0", "windows-x64").ok).toBe(true);

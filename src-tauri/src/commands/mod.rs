@@ -6,6 +6,7 @@ pub mod filesearch;
 pub mod global;
 pub mod home;
 pub mod keychain;
+pub mod mobile;
 pub mod plugin;
 pub mod process;
 pub mod search;

@@ -58,6 +58,7 @@ import { trackPendingLaunch, trackPluginProcess, untrackPluginProcess } from "./
 import { createSlotsApi } from "./slotsApi";
 import { createServicesService } from "./services";
 import { nativeInvoke } from "@/services/native";
+import { platformCapabilities } from "@/services/platform";
 import { createHistoryService } from "./history";
 import { createLayoutService } from "./layout";
 import { createUiStateService } from "./uiState";
@@ -89,6 +90,11 @@ declare global {
     React?: typeof React;
   }
 }
+
+/** 进程执行能力（桌面有 / 移动端无）。缺失必须显式可见：调用即以可读错误拒绝，不静默失效。 */
+const PROCESS_EXECUTION = platformCapabilities().processExecution;
+/** `ctx.shell` 在无进程执行能力平台上的拒绝原因（插件按错误处理，宿主不做隐式降级）。 */
+const SHELL_UNAVAILABLE = "当前平台不支持进程执行";
 
 /** ai 服务实例（tracker 注入调用方插件上下文：registerTool 随其 fiber 撤销）。 */
 interface AiServiceInstance extends AiService {
@@ -316,6 +322,7 @@ export function createKernel(): Kernel {
 
   const shell: ShellService = {
     exec(this: ShellServiceInstance, opts, handlers) {
+      if (!PROCESS_EXECUTION) return Promise.reject(new Error(SHELL_UNAVAILABLE));
       const pluginId = requireCallerPluginId(this.ctx);
       if (!handlers) {
         // 非流式：聚合输出后一次性返回。
@@ -357,6 +364,7 @@ export function createKernel(): Kernel {
       });
     },
     spawn(this: ShellServiceInstance, opts, handlers) {
+      if (!PROCESS_EXECUTION) return Promise.reject(new Error(SHELL_UNAVAILABLE));
       const pluginId = requireCallerPluginId(this.ctx);
       const sink = makeStreamSink(
         handlers

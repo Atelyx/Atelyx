@@ -29,13 +29,15 @@ export function NotificationHost() {
   );
 }
 
-/** 单条通知：挂载即按 timeoutMs 计时自动消失；手关闭立即消失。 */
+/** 单条通知：挂载即按 timeoutMs 计时自动消失；带动作的通知不自动消失；手关闭立即消失。 */
 function NotificationCard({ item }: { item: NotificationItem }) {
   const dismiss = useNotificationStore((s) => s.dismiss);
   useEffect(() => {
+    // 带动作的通知不自动消失：用户需看到并处理动作入口（关闭由用户手动触发）
+    if (item.action) return;
     const timer = setTimeout(() => dismiss(item.id), item.timeoutMs);
     return () => clearTimeout(timer);
-  }, [item.id, item.timeoutMs, dismiss]);
+  }, [item.id, item.timeoutMs, item.action, dismiss]);
 
   const { icon: Icon, color } = LEVEL_STYLES[item.level];
   return (
@@ -54,6 +56,19 @@ function NotificationCard({ item }: { item: NotificationItem }) {
         <div className="text-[12px] break-words" style={{ color: "var(--text-secondary)" }}>
           {item.message}
         </div>
+        {item.action && (
+          <button
+            type="button"
+            onClick={() => {
+              item.action?.onClick();
+              dismiss(item.id);
+            }}
+            className="mt-1.5 px-2 py-0.5 rounded text-[11px] font-medium"
+            style={{ background: "var(--accent)", color: "var(--accent-fg)" }}
+          >
+            {item.action.label}
+          </button>
+        )}
       </div>
       <button
         type="button"

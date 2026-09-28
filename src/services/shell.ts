@@ -13,14 +13,23 @@
  */
 import { open as shellOpen } from "@tauri-apps/plugin-shell";
 import { invoke, Channel } from "@tauri-apps/api/core";
+import { isAndroidPlatform } from "@/services/platform";
+import { openExternalUrl } from "@/services/mobilePlatform";
 
 /** 在系统文件管理器中打开路径（目录或文件，选中态）。 */
 export async function openInExplorer(path: string): Promise<void> {
+  // 安卓没有文件管理器概念（应用私有目录不可见、共享存储无「选中」语义），显式拒绝不静默
+  if (isAndroidPlatform()) throw new Error("当前平台不支持在文件管理器中打开");
   await shellOpen(path);
 }
 
-/** 用系统默认程序打开外部 URL（http/https/mailto 等；webview 不导航）。 */
+/** 用系统默认程序打开外部 URL（http/https/mailto 等；webview 不导航）。
+ *  安卓端 shell 插件未注册（桌面专有），走原生 Intent。 */
 export async function openUrl(url: string): Promise<void> {
+  if (isAndroidPlatform()) {
+    await openExternalUrl(url);
+    return;
+  }
   await shellOpen(url);
 }
 

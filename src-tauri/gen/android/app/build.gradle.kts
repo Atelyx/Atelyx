@@ -13,6 +13,15 @@ val tauriProperties = Properties().apply {
     }
 }
 
+val appVersionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")
+
+val keystoreProperties = Properties().apply {
+    val propFile = rootProject.file("keystore.properties")
+    if (propFile.exists()) {
+        propFile.inputStream().use { load(it) }
+    }
+}
+
 android {
     compileSdk = 36
     namespace = "com.atelyx.desktop"
@@ -23,7 +32,31 @@ android {
         minSdk = 35
         targetSdk = 36
         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
-        versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")
+        versionName = appVersionName
+    }
+    // 发布形态 = 单文件覆盖全部 ABI（fat APK）。显式声明而非沿用 rust 插件的默认列表，
+    // 避免 CLI 的 --target 参数改写 ABI 过滤后，产物内容与包名里的 universal 不符
+    productFlavors {
+        getByName("universal") {
+            ndk {
+                abiFilters.clear()
+                abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
+            }
+        }
+    }
+    signingConfigs {
+        if (keystoreProperties.isNotEmpty()) {
+            // 显式核对四项：缺项时给可读错误，避免构建到一半才因空值失败
+            listOf("storeFile", "storePassword", "keyAlias", "keyPassword").forEach { key ->
+                check(keystoreProperties.getProperty(key) != null) { "keystore.properties 缺少 $key" }
+            }
+            create("release") {
+                storeFile = file(keystoreProperties.getProperty("storeFile"))
+                storePassword = keystoreProperties.getProperty("storePassword")
+                keyAlias = keystoreProperties.getProperty("keyAlias")
+                keyPassword = keystoreProperties.getProperty("keyPassword")
+            }
+        }
     }
     buildTypes {
         getByName("debug") {
@@ -38,15 +71,26 @@ android {
         }
         getByName("release") {
             isMinifyEnabled = true
+            // 显式列举而非递归拾取：tauri 生成物在源码树里，用 fileTree 还会顺带扫到 build 目录的产物
             proguardFiles(
-                *fileTree(".") { include("**/*.pro") }
-                    .plus(getDefaultProguardFile("proguard-android-optimize.txt"))
-                    .toList().toTypedArray()
+                *listOf(
+                    file("src/main/java/com/atelyx/desktop/generated/proguard-wry.pro"),
+                    file("proguard-tauri.pro"),
+                    file("proguard-rules.pro"),
+                ).plus(getDefaultProguardFile("proguard-android-optimize.txt"))
+                    .toTypedArray()
             )
+            // 有签名配置才关联；缺失时保持未签名（开发构建不因缺密钥而失败）
+            signingConfigs.findByName("release")?.let { signingConfig = it }
         }
     }
+    // Java 与 Kotlin 目标版本需一致显式声明：AGP 8 起两者不再联动，只改一处会仍停留在 8
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
     kotlinOptions {
-        jvmTarget = "1.8"
+        jvmTarget = "17"
     }
     buildFeatures {
         buildConfig = true
@@ -55,6 +99,15 @@ android {
     sourceSets {
         getByName("main") {
             res.setSrcDirs(listOf("src/main/res", "../../../icons/android"))
+        }
+    }
+    // 发布名自带版本与架构，上传 Release 不必手工改名（debug 产物保持 AGP 默认名）
+    applicationVariants.all {
+        if (buildType.name == "release") {
+            outputs.forEach { output ->
+                (output as com.android.build.gradle.internal.api.BaseVariantOutputImpl)
+                    .outputFileName = "Atelyx_${appVersionName}.apk"
+            }
         }
     }
 }

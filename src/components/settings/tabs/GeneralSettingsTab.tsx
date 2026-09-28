@@ -32,6 +32,8 @@ export function GeneralSettingsTab() {
   const setDefaultHomeLayout = useSettingsStore((s) => s.setDefaultHomeLayout);
   const autoUpdate = useAppStore((s) => s.autoUpdate);
   const setAutoUpdate = useAppStore((s) => s.setAutoUpdate);
+  /** 自动更新能力（桌面有 / 移动端无；经 store 读取，守「组件不 import services」分层）。 */
+  const autoUpdateSupported = useAppStore((s) => s.platform.capabilities.autoUpdate);
 
   // 字号用本地草稿 + blur 提交：受控 + 范围校验会拒绝输入中间态（如敲 "1" 准备输 15）导致无法输入
   const [fontSizeDraft, setFontSizeDraft] = useDraftSync(
@@ -117,15 +119,21 @@ export function GeneralSettingsTab() {
         />
       </SettingCard>
 
-      {/* 自动更新（应用级，global.json）：开启后启动时静默检查新版本并自动安装 */}
+      {/* 自动更新（应用级，global.json）：开启后启动时静默检查新版本并自动安装。
+          移动端无 updater（不支持自动安装），开关置禁用，启动改为检查并提示下载。 */}
       <SettingCard
         title="自动更新"
-        description="启动时自动检查新版本并安装；关闭 = 不联网检查"
+        description={
+          autoUpdateSupported
+            ? "启动时自动检查新版本并安装；关闭 = 不联网检查"
+            : "当前平台不支持自动安装，启动时只检查并提示下载"
+        }
       >
         <ToggleSwitch
           checked={autoUpdate}
           onChange={(v) => void setAutoUpdate(v)}
-          title="自动更新"
+          title={autoUpdateSupported ? "自动更新" : "当前平台不支持自动更新"}
+          disabled={!autoUpdateSupported}
         />
       </SettingCard>
 

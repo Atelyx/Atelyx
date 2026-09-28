@@ -108,22 +108,20 @@ mod platform_backend {
     }
 }
 
-/// 安卓凭据桥：JNIEnv + Activity 只在 webview 线程可得，经 with_webview → JniHandle::exec
-/// 投递执行并经通道回传；命令为异步变体 + 阻塞线程池等待（安卓上同步命令跑在主线程，
-/// 同步等待桥回调会与主线程排空互等死锁）。
+/// 安卓凭据桥：JNI 管道（webview 线程投递 / ClassLoader 解析 / 异常提取清除 / 超时口径）
+/// 统一在 `crate::android_bridge`，本模块只拼 SecretStore 的静态方法调用。
 #[cfg(target_os = "android")]
 mod keystore_bridge {
-    use jni::objects::{JClass, JObject, JValue};
-    use jni::objects::JString;
+    use jni::objects::{JObject, JString, JValue};
     use jni::JNIEnv;
-    use std::sync::mpsc;
-    use std::time::Duration;
-    use tauri::Manager;
+
+    use crate::android_bridge;
 
     /// Kotlin 桥类（随安卓工程分发，见 gen/android 的 SecretStore.kt）。
     const BRIDGE_CLASS: &str = "com.atelyx.desktop.SecretStore";
-    /// 桥响应超时（Keystore 首次建钥 + 加密 prefs 初始化在百毫秒级，10s 已含冷启动余量）。
-    const CALL_TIMEOUT: Duration = Duration::from_secs(10);
+    /// 错误前缀：投递/超时用前者，调用失败用后者（与既有用户可见文案一致）。
+    const BRIDGE_LABEL: &str = "凭据存储桥";
+    const CALL_FAILED_LABEL: &str = "凭据存储桥调用失败";
 
     /// 桥操作（与 SecretStore.kt 的静态方法一一对应）。
     pub enum BridgeOp {
@@ -133,49 +131,18 @@ mod keystore_bridge {
     }
 
     /// 经 webview JNI 线程同步调用桥：Set/Delete 返回空串，Get 返回值（不存在 = 空串）。
-    /// JNI 句柄只在平台 webview 载荷上可得：with_webview 拿到 PlatformWebview，再经
-    /// JniHandle::exec 投递到 webview 线程执行并经通道回传。
     pub fn call(app: &tauri::AppHandle, op: BridgeOp, username: &str) -> Result<String, String> {
-        let window = app.get_webview_window("main").ok_or("主 WebView 未就绪")?;
-        let (tx, rx) = mpsc::channel();
         let username = username.to_string();
-        window
-            .with_webview(move |platform| {
-                platform.jni_handle().exec(
-                    move |env: &mut JNIEnv, activity: &JObject, _webview: &JObject| {
-                        // 错误映射在此做：JNIEnv 只在本闭包内有效（Java 异常的提取与清除同此）
-                        let _ = tx.send(
-                            run_op(env, activity, op, &username)
-                                .map_err(|e| jni_error_message(env, e)),
-                        );
-                    },
-                );
-            })
-            .map_err(|e| format!("凭据存储桥投递失败：{e}"))?;
-        match rx.recv_timeout(CALL_TIMEOUT) {
-            Ok(result) => result,
-            Err(mpsc::RecvTimeoutError::Timeout) => Err("凭据存储桥响应超时".to_string()),
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                Err("凭据存储桥执行线程异常退出".to_string())
-            }
-        }
+        android_bridge::with_activity(app, BRIDGE_LABEL, move |env, activity, _webview| {
+            // 错误映射在此做：JNIEnv 只在本闭包内有效（Java 异常的提取与清除同此）
+            run_op(env, activity, op, &username)
+                .map_err(|e| android_bridge::jni_error_message(env, CALL_FAILED_LABEL, e))
+        })
     }
 
-    /// 单次桥调用：经 Activity 的 ClassLoader 解析桥类（原生线程 FindClass 命不中应用类加载器）。
+    /// 单次桥调用。
     fn run_op(env: &mut JNIEnv, activity: &JObject, op: BridgeOp, username: &str) -> jni::errors::Result<String> {
-        let loader = env
-            .call_method(activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])?
-            .l()?;
-        let class_name = env.new_string(BRIDGE_CLASS)?;
-        let class: JClass = env
-            .call_method(
-                loader,
-                "loadClass",
-                "(Ljava/lang/String;)Ljava/lang/Class;",
-                &[(&class_name).into()],
-            )?
-            .l()?
-            .into();
+        let class = android_bridge::load_bridge_class(env, activity, BRIDGE_CLASS)?;
         let key = env.new_string(username)?;
         match op {
             BridgeOp::Set(value) => {
@@ -223,31 +190,6 @@ mod keystore_bridge {
                 Ok(String::new())
             }
         }
-    }
-
-    /// JNI 错误转消息：Java 异常挂起时提取其文本并清除（残留挂起异常会让 webview 线程
-    /// 后续 JNI 调用崩溃），其余错误原样。
-    fn jni_error_message(env: &mut JNIEnv, e: jni::errors::Error) -> String {
-        if env.exception_check().unwrap_or(false) {
-            let detail = env
-                .exception_occurred()
-                .ok()
-                .and_then(|t| {
-                    let throwable: JObject = t.into();
-                    env.call_method(throwable, "toString", "()Ljava/lang/String;", &[]).ok()
-                })
-                .and_then(|v| v.l().ok())
-                .and_then(|o| {
-                    let s = JString::from(o);
-                    env.get_string(&s).ok().map(|j| j.to_string_lossy().into_owned())
-                })
-                .unwrap_or_default();
-            let _ = env.exception_clear();
-            if !detail.is_empty() {
-                return format!("凭据存储桥调用失败：{e}（{detail}）");
-            }
-        }
-        format!("凭据存储桥调用失败：{e}")
     }
 }
 

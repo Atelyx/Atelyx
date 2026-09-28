@@ -159,11 +159,18 @@ export interface HttpService {
 /** 通知级别（ctx.notification、access 注入与宿主通知组件共用）。 */
 export type NotificationLevel = "info" | "success" | "warning" | "error";
 
+/** 通知上的可选动作（如「下载」）：带动作的通知不自动消失，需用户明确处理或关闭。 */
+export interface NotificationAction {
+  label: string;
+  onClick: () => void;
+}
+
 /** 通知输入（宿主与插件共用同一形状）。 */
 export interface NotificationInput {
   message: string;
   title?: string;
   level?: NotificationLevel;
+  action?: NotificationAction;
 }
 
 /** 应用内通知服务（右下角通知堆叠；`level` = info/success/warning/error，自动消失）。 */
