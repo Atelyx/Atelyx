@@ -471,8 +471,9 @@ function syncBroadcastBaseline(): void {
 /**
  * 把远端补丁（含自收回放）覆盖的实体推进落盘基线：补丁到达即服务端已落地（服务端落地后才
  * 广播），基线按补丁推进到服务端当前状态——upsert 实体取应用补丁后的内存引用（与内存同引用，
- * 按引用 diff 判定已落盘不重发），removed 实体剔除，conversation 消息推进到补丁携带的远端
- * 数组（本地独有消息不在其内，经引用 diff 在下一次保存正常发出），title 变化随补丁推进。
+ * 按引用 diff 判定已落盘不重发），removed 实体剔除，conversation 消息推进到应用后的内存数组
+ * （合并吸收了本地独有消息时取远端数组，独有消息经引用 diff 在下一次保存正常发出），
+ * title 变化随补丁推进。
  * 只重写补丁触及的实体：本端未保存改动不在补丁内，基线保留其旧引用，下一次保存仍会按引用
  * diff 发出（全量同步会把未保存内容误标已落盘，存在未保存改动期间只能按补丁推进）。
  * 须在补丁应用（set）之后调用。
@@ -494,9 +495,17 @@ function advanceSavedBaselineForCanvasPatch(
   for (const id of patch.removedNodeIds) delete messages[id];
   for (const { node, messages: remoteMessages } of deserialized) {
     if (node.type !== "conversation" || remoteMessages === undefined) continue;
-    // 补丁携带的远端消息数组即服务端事实；应用路径 mergeMessages 在本地无独有消息时
-    // 原样返回该引用，基线与内存同引用即不重发
-    messages[node.id] = remoteMessages;
+    // 补丁携带的远端消息数组即服务端事实；基线推进到应用后的内存数组（payload 回填等运行时
+    // 缓存翻新的引用与内存同引用才不重发）。合并结果吸收了本地独有消息（id 不在远端数组内，
+    // 尚未落盘）时仍取远端数组：独有消息须经引用 diff 在下一次保存正常发出。
+    const applied = s.messagesByConv[node.id];
+    if (applied === undefined) {
+      messages[node.id] = remoteMessages;
+      continue;
+    }
+    const remoteIds = new Set(remoteMessages.map((m) => m.id));
+    const hasLocalOnly = applied.some((m) => !remoteIds.has(m.id));
+    messages[node.id] = hasLocalOnly ? remoteMessages : applied;
   }
   lastSavedNodes = nodes;
   lastSavedEdges = edges;
@@ -3133,6 +3142,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
       for (const { node } of deserialized) {
         const i = nodes.findIndex((x) => x.id === node.id);
         if (i >= 0) {
+          const localNode = nodes[i];
           // 远端结构补丁省略、由接收端自行补读的内容，覆盖前保留本端既有值防瞬时空白：
           // - 文件型 text 节点：正文在共享盘 `.md`，补丁只带 { title, file } 不带 bodyMd。
           //   保留本端值后由 refreshTextContent 读盘补到最新（正文一致则跳过）。
@@ -3142,7 +3152,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
           //   缺失时由下方按引用补读（否则对端节点恒为占位）。
           if (node.type === "text" || node.type === "table" || node.type === "media") {
             const nodeData = node.data as Record<string, unknown>;
-            const localData = nodes[i].data as Record<string, unknown>;
+            const localData = localNode.data as Record<string, unknown>;
             // 引用相同才保留本端按引用读回的运行时缓存：对端换了引用时本端旧内容不得沿用
             //（否则旧预览会一直留在节点上，补读也因「已有内容」被跳过）
             if (nodeData.file === localData.file) {
@@ -3152,6 +3162,13 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
                 }
               }
             }
+          }
+          // 保留本端测量结果：远端反解节点不带 measured，直接替换会被 React Flow 判定未测量
+          // 而重测并生成新节点对象——基线推进后引用再次漂移，回声路径下一轮保存把回放实体
+          // 当增量重发成环。measured 是纯运行时测量缓存（不序列化、不参与内容 diff），沿用
+          // 本端值；节点真实尺寸变化仍由渲染层按 DOM 实测正常回填。
+          if (node.measured === undefined && localNode.measured) {
+            node.measured = localNode.measured;
           }
           nodes[i] = node;
         } else {

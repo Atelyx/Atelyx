@@ -9,8 +9,10 @@
  * - 协作补丁回放（服务端落地后广播含发起者自己）应用后，补丁覆盖的实体随补丁推进落盘基线：
  *   回放落在写盘在途窗口内（服务端先广播后返回响应）也不重发回放实体——否则每次保存全量重传成环；
  * - 远端已落地实体在写盘在途到达时不被客户端重发，磁盘收敛到两端内容；
- * - conversation 消息基线随补丁推进（mergeMessages 本地无独有消息时原样返回远端引用），
- *   对话节点不被反复重发。
+ * - conversation 消息基线随补丁推进（本地无独有消息时推进到合并后的内存数组，payload 回填
+ *   翻新的引用不重发对话节点）；
+ * - 回声应用保留节点 `measured`（React Flow 对缺 `measured` 的替换节点会重测翻新引用），
+ *   回放实体不被当增量重发成环。
  *
  * 后端用 stub 空间后端（内存树 + 稳定 id 合并补丁），与真实后端同语义的部分才被断言。
  */
@@ -221,6 +223,45 @@ describe("协作补丁回放与落盘基线", () => {
     expect(second?.upsertNodes.map((n) => n.id)).toEqual(["n2"]);
   });
 
+  it("回声应用保留节点 measured：重测不漂移引用，不把回放实体当增量重发", async () => {
+    stub.seed(FILE, canvasJson([textNode("n1", "节点一"), textNode("n2", "节点二")]));
+    await openCanvas();
+    // 挂载后 React Flow 测量回填 measured（纯测量变更不落盘）
+    canvas.useCanvasStore.getState().onNodesChange([
+      { id: "n1", type: "dimensions", dimensions: { width: 200, height: 120 } },
+      { id: "n2", type: "dimensions", dimensions: { width: 200, height: 120 } },
+    ]);
+    stub.writeDelayMs = 50;
+
+    canvas.useCanvasStore.getState().updateNodeData("n1", { title: "改一" });
+    await vi.advanceTimersByTimeAsync(500); // 第一次写在途（含挂载测量翻新的 n1、n2）
+    const landed = JSON.parse(JSON.stringify(canvasWrites()[0]?.patch)) as CanvasPatch;
+    canvas.useCanvasStore.getState().applyRemoteCanvasPatch(FILE, landed);
+    // 回声节点必须保留测量结果：React Flow 对带 measured 的节点不重测
+    expect(canvas.useCanvasStore.getState().nodes.map((n) => n.measured)).toEqual([
+      { width: 200, height: 120 },
+      { width: 200, height: 120 },
+    ]);
+    // React Flow 对缺 measured 的替换节点重测并派发 dimensions（带 measured 则不重测）——
+    // 按此如实模拟重测对引用的影响
+    const unmeasured = canvas.useCanvasStore.getState().nodes.filter((n) => !n.measured);
+    if (unmeasured.length > 0) {
+      canvas.useCanvasStore.getState().onNodesChange(
+        unmeasured.map((n) => ({
+          id: n.id,
+          type: "dimensions" as const,
+          dimensions: { width: 200, height: 120 },
+        })),
+      );
+    }
+
+    await vi.advanceTimersByTimeAsync(200); // 第一次写落地
+    await vi.advanceTimersByTimeAsync(700); // 重挂的下一轮
+    // 丢失的 measured 被重测回填会再次翻新引用：被当增量重发 → 再落地再回放，成环不止
+    expect(canvasWrites()).toHaveLength(1);
+    expect(canvas.useCanvasStore.getState().dirty).toBe(false);
+  });
+
   it("写盘在途收到远端补丁：远端已落地实体不重发，磁盘收敛到两端内容", async () => {
     await openCanvas();
     stub.writeDelayMs = 50;
@@ -298,6 +339,51 @@ describe("协作补丁回放与落盘基线", () => {
     await vi.advanceTimersByTimeAsync(700); // 重挂的下一轮
     // 消息基线随回放推进（mergeMessages 本地无独有消息时原样返回远端引用）：
     // 对话节点不得被重发，否则每轮回放再翻新消息引用，成环不止
+    expect(canvasWrites()).toHaveLength(1);
+
+    // 基线只吃补丁内实体：后续真实编辑仍正常落盘，且不捎带对话节点
+    canvas.useCanvasStore.getState().updateNodeData("n2", { title: "改二" });
+    await vi.advanceTimersByTimeAsync(500);
+    const second = canvasWrites()[1]?.patch as CanvasPatch | undefined;
+    expect(second).toBeDefined();
+    expect(second?.upsertNodes.map((n) => n.id)).toEqual(["n2"]);
+  });
+
+  it("带附件消息的回声应用：payload 回填翻新的消息数组不把对话节点当增量重发", async () => {
+    stub.seed(FILE, canvasJson([textNode("n1", "节点一"), textNode("n2", "节点二")]));
+    await openCanvas();
+    // 预置对话节点（补丁不传输附件 payload，消息只有 file 引用）
+    canvas.useCanvasStore.getState().applyRemoteCanvasPatch(FILE, {
+      id: "c1",
+      upsertNodes: [
+        { id: "cv1", type: "conversation", x: 0, y: 0, data: { messages: [msg("m1")] } },
+      ],
+      removedNodeIds: [],
+      upsertEdges: [],
+      removedEdgeIds: [],
+    } as unknown as CanvasPatch);
+    stub.writeDelayMs = 50;
+
+    // 本端按引用读回附件 payload（渲染需要）并新增一条消息 → 下一次保存携带对话节点
+    const hydrated: Message = {
+      ...msg("m1"),
+      attachments: [
+        { kind: "image", mime: "image/png", file: "附件/a.png", payload: "data:image/png;base64,AAAA" },
+      ],
+    };
+    canvas.useCanvasStore.setState({ messagesByConv: { cv1: [hydrated, msg("m2")] } });
+    canvas.useCanvasStore.getState().updateNodeData("n1", { title: "改一" });
+    await vi.advanceTimersByTimeAsync(500); // 保存发出：补丁含 n1 + cv1（payload 已剥离）
+    const first = canvasWrites()[0]?.patch as CanvasPatch | undefined;
+    expect(first).toBeDefined();
+    expect(first?.upsertNodes.map((n) => n.id)).toEqual(["n1", "cv1"]);
+    const landed = JSON.parse(JSON.stringify(first)) as CanvasPatch;
+    canvas.useCanvasStore.getState().applyRemoteCanvasPatch(FILE, landed); // 回声（写盘在途，dirty）
+
+    await vi.advanceTimersByTimeAsync(200); // 第一次写落地
+    await vi.advanceTimersByTimeAsync(700); // 重挂的下一轮
+    // 回声应用 mergeMessages 回填本端 payload 产生新数组：基线必须推进到应用后的内存数组，
+    // 否则对话节点每轮被当增量重发，成环不止
     expect(canvasWrites()).toHaveLength(1);
 
     // 基线只吃补丁内实体：后续真实编辑仍正常落盘，且不捎带对话节点
