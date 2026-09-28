@@ -42,7 +42,11 @@ pub use crate::layout_drag::{
 };
 pub use crate::layout_model::WindowBounds;
 pub use crate::layout_persist::load_from_disk;
+// 窗口事件钩子是桌面语义（移动端单窗口无 Moved/Resized 事件源），随实现一同分档
+#[cfg(desktop)]
 pub use crate::layout_window::{seed_window_bounds, window_event_handler, PANEL_LABEL_PREFIX};
+#[cfg(not(desktop))]
+pub use crate::layout_window::{seed_window_bounds, PANEL_LABEL_PREFIX};
 
 // ===== 托管状态 =====
 

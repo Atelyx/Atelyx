@@ -15,6 +15,8 @@ pub const PANEL_LABEL_PREFIX: &str = "panel-";
 
 /// 窗口事件钩子（Moved/Resized → 权威 bounds 注册表 + 撕裂窗口模型 bounds 同步）。
 /// 在 setup 为主窗口注册，在 create_panel_window_internal 为撕裂窗口注册。
+/// 窗口事件是桌面语义（移动端单窗口无移动/缩放），移动端不编译。
+#[cfg(desktop)]
 pub fn window_event_handler(app: &AppHandle, label: String) -> impl Fn(&tauri::WindowEvent) + Send + 'static {
     let app = app.clone();
     move |event: &tauri::WindowEvent| {
