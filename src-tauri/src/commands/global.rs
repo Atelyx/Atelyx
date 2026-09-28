@@ -108,8 +108,34 @@ pub struct GlobalConfigRead {
 }
 
 /// 获取本机设备名（协作身份默认值：昵称留空时前端用它兜底展示）。
+/// 安卓没有用户可设主机名：经系统能力桥取设备型号；桥不可用或型号为空回落通用兜底，
+/// 该回落即此命令的既定语义（展示用途，不上报错误）。
 #[tauri::command]
-pub fn get_hostname() -> String {
+pub async fn get_hostname(app: AppHandle) -> String {
+    #[cfg(target_os = "android")]
+    {
+        super::mobile::bridge_device_name(app)
+            .await
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(fallback_hostname)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        desktop_hostname().unwrap_or_else(fallback_hostname)
+    }
+}
+
+/// 协作身份兜底名（各平台取不到设备名时的统一回落）。
+fn fallback_hostname() -> String {
+    "Atelyx 用户".to_string()
+}
+
+/// 桌面主机名：环境变量优先（Windows），无则读内核 hostname（Linux）。
+#[cfg(not(target_os = "android"))]
+fn desktop_hostname() -> Option<String> {
     ["COMPUTERNAME", "HOSTNAME"]
         .iter()
         .find_map(|k| std::env::var(k).ok())
@@ -117,8 +143,8 @@ pub fn get_hostname() -> String {
             std::fs::read_to_string("/proc/sys/kernel/hostname")
                 .ok()
                 .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
         })
-        .unwrap_or_else(|| "Atelyx 用户".to_string())
 }
 
 fn global_config_path(app: &AppHandle) -> Result<PathBuf, String> {

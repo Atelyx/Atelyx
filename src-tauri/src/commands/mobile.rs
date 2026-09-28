@@ -1,4 +1,4 @@
-//! 移动端专属命令：安卓本地仓库所需的系统能力与目录浏览。
+//! 移动端专属命令：安卓系统能力（设备名 / 存储授权 / 目录浏览）与外部 URL 打开。
 //!
 //! 桌面端不提供这些能力（一律返回可读错误，不静默失败）：桌面选目录走系统原生弹窗、
 //! 仓库根由用户直接指定，无需系统级存储授权，也没有「打开系统设置页」这类交互。
@@ -136,6 +136,30 @@ pub async fn android_open_url(app: AppHandle, url: String) -> Result<(), String>
 fn external_url_allowed(url: &str) -> bool {
     let scheme = url.split(':').next().unwrap_or("").trim().to_ascii_lowercase();
     matches!(scheme.as_str(), "http" | "https" | "mailto" | "tel" | "xmpp")
+}
+
+/// 经系统能力桥取设备型号（协作身份默认值）。失败原样上抛，由调用方决定回落口径。
+#[cfg(target_os = "android")]
+pub(crate) async fn bridge_device_name(app: AppHandle) -> Result<String, String> {
+    bridge_call(app, |env, activity, _webview| {
+        use jni::objects::JValue;
+        let class = load_bridge(env, activity)?;
+        env.call_static_method(
+            class,
+            "deviceName",
+            "(Landroid/content/Context;)Ljava/lang/String;",
+            &[JValue::Object(activity)],
+        )
+        .and_then(|v| v.l())
+        .map_err(|e| crate::android_bridge::jni_error_message(env, CALL_FAILED_LABEL, e))
+        .and_then(|s| {
+            let jstr = jni::objects::JString::from(s);
+            env.get_string(&jstr)
+                .map(|j| j.to_string_lossy().into_owned())
+                .map_err(|e| crate::android_bridge::jni_error_message(env, CALL_FAILED_LABEL, e))
+        })
+    })
+    .await
 }
 
 /// 外部存储根目录（已授予「所有文件访问权限」时的目录浏览起点）。

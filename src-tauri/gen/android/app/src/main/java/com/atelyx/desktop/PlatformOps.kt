@@ -4,15 +4,20 @@ import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.os.Environment
 import android.provider.Settings
 
 /**
- * 系统能力桥：存储授权状态/申请与外部 URL 打开。
+ * 系统能力桥：设备名、存储授权状态/申请与外部 URL 打开。
  * Rust 侧（commands/mobile.rs）经 webview JNI 线程调用本类静态方法；
  * 类名与方法签名是跨语言契约，改名须同步 Rust 侧与 proguard 保留规则。
  */
 object PlatformOps {
+  /** 设备名（协作身份默认值）：安卓无用户可设主机名，用设备型号代替。 */
+  @JvmStatic
+  fun deviceName(context: Context): String = Build.MODEL.trim()
+
   /** 「所有文件访问权限」（MANAGE_EXTERNAL_STORAGE）是否已授予。 */
   @JvmStatic
   fun hasAllFilesAccess(context: Context): Boolean = Environment.isExternalStorageManager()
