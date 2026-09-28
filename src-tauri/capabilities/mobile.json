@@ -1,0 +1,17 @@
+{
+  "$schema": "../gen/schemas/mobile-schema.json",
+  "identifier": "mobile",
+  "description": "移动端权限：单窗口壳，无桌面窗口控制/自动更新/进程类能力",
+  "platforms": ["android", "iOS"],
+  "windows": ["*"],
+  "permissions": [
+    "core:default",
+    "core:image:default",
+    "core:event:default",
+    "core:app:allow-version",
+    "dialog:default",
+    "clipboard-manager:allow-read-text",
+    "clipboard-manager:allow-write-text",
+    "clipboard-manager:allow-write-image"
+  ]
+}

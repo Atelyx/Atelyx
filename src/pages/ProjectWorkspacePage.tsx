@@ -3,21 +3,20 @@
  *
  * 全局 chrome：标题栏（仓库名 + 布局 tabs + 右操作区（设置/全屏/窗口控制））。
  * 面板网格由 `WorkspaceGrid` 按激活布局渲染，
- * 文件打开/关闭/恢复联动在此层（跨 store 一致性），视图渲染全在面板内部。
+ * 文件打开/关闭/恢复联动在 `useWorkspaceFileEffects`（跨 store 一致性），视图渲染全在面板内部。
  */
 import { Maximize, Settings } from "lucide-react";
 import { useEffect, useRef } from "react";
 import { useAppStore } from "@/stores/appStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useUiStateStore } from "@/stores/uiStateStore";
-import { useVaultStore, lastFolderRenameTarget, lastNoteRenameTarget, lastTableRenameTarget } from "@/stores/vaultStore";
 import { SettingsModal, VaultSettingsModal } from "@/components/settings/SettingsModal";
 import { TitleBarControls } from "@/components/common/TitleBarControls";
 import { LayoutTabs } from "@/components/layout/LayoutTabs";
 import { WorkspaceGrid } from "@/components/layout/WorkspaceGrid";
 import { SlotListMount } from "@/components/plugins/SlotHost";
-import { noteTitleFromFile, tableTitleFromFile } from "@/utils/filename";
-import { HOME_LAYOUT_ID, type FileTreeNode } from "@/types";
+import { useWorkspaceFileEffects } from "@/hooks/useWorkspaceFileEffects";
+import { HOME_LAYOUT_ID } from "@/types";
 
 export function ProjectWorkspacePage() {
   const toggleFullscreen = useAppStore((s) => s.toggleFullscreen);
@@ -33,21 +32,11 @@ export function ProjectWorkspacePage() {
   const vaultSettingsModal = useAppStore((s) => s.vaultSettingsModal);
   const closeVaultSettings = useAppStore((s) => s.closeVaultSettings);
 
-  // 当前打开文件状态（面板渲染入口；打开动作在 appStore，联动 effect 在此层）
-  const currentCanvasFile = useAppStore((s) => s.currentCanvasFile);
-  const currentNoteFile = useAppStore((s) => s.currentNoteFile);
-  const currentTableFile = useAppStore((s) => s.currentTableFile);
+  // 当前激活仓库身份（「进仓库时打开主页」门控）
   const hasVaultIdentity = useAppStore((s) => s.vaultIdentity !== null);
 
-  const vaultNoteList = useVaultStore((s) => s.noteList);
-  const vaultTableList = useVaultStore((s) => s.tableList);
-
-  // 应用级 UI 使用状态：上次打开的画布/笔记/表格，进仓库自动恢复
-  const uiLoaded = useUiStateStore((s) => s.loaded);
-  const lastCanvasFile = useUiStateStore((s) => s.lastCanvasFile);
-  const lastNoteFile = useUiStateStore((s) => s.lastNoteFile);
-  const lastTableFile = useUiStateStore((s) => s.lastTableFile);
-  const autoRestoreFiles = useSettingsStore((s) => s.autoRestoreFiles);
+  // 文件生命周期联动（改名跟随/自动恢复/历史署名，桌面与移动端共用）
+  useWorkspaceFileEffects();
 
   // 当前打开的文件状态与激活布局（面板网格渲染入口）
   const activeLayoutId = useUiStateStore((s) => s.activeLayoutId);
@@ -57,107 +46,14 @@ export function ProjectWorkspacePage() {
     return layout.tree;
   });
 
-  // 当前打开的笔记从列表消失 → 区分处理：软件内重命名/文件夹重命名（切到新文件）；真删除/外部删除（关闭笔记）
-  useEffect(() => {
-    if (!currentNoteFile) return;
-    const stillExists = vaultNoteList.some((n) => n.file === currentNoteFile);
-    if (!stillExists) {
-      const newFile =
-        lastNoteRenameTarget(currentNoteFile) ?? lastFolderRenameTarget(currentNoteFile);
-      if (newFile) {
-        useAppStore.getState().openNote(
-          newFile,
-          noteTitleFromFile(newFile),
-        );
-      } else {
-        useAppStore.getState().closeNote();
-      }
-    }
-  }, [vaultNoteList, currentNoteFile]);
-  // 当前打开的表格从列表消失 → 同笔记：软件内重命名/文件夹重命名切到新文件（重载内容）；
-  // 真删除/外部删除静默关闭（不 flush——防写回重建已删文件，只清内存态）
-  useEffect(() => {
-    if (!currentTableFile) return;
-    const stillExists = vaultTableList.some((t) => t.file === currentTableFile);
-    if (!stillExists) {
-      const newFile =
-        lastTableRenameTarget(currentTableFile) ?? lastFolderRenameTarget(currentTableFile);
-      if (newFile) {
-        const newTitle = tableTitleFromFile(newFile);
-        useAppStore.getState().openTable(newFile, newTitle);
-      } else {
-        useAppStore.getState().closeTableSilent();
-      }
-    }
-  }, [vaultTableList, currentTableFile]);
-
   // AI 对话面板会话与表格改动落盘：进仓库读盘 + 切仓库时 flush 防 debounce 丢改动，
   // 均已归入领域生命周期注册表分发（builtin.chatpanel 的 onVaultEntered、各域 flush）
-
-  // 历史记录作者登记（应用级全局，三 kind——画布/笔记/表格——共用同一身份）：
-  // 身份随协作昵称/设备名变化刷新；未打开笔记时画布/表格历史也能正确署名
-  const collabNickname = useSettingsStore((s) => s.collabNickname);
-  const collabDevice = useSettingsStore((s) => s.deviceName);
-  useEffect(() => {
-    useVaultStore.getState().historySetAuthor(
-      collabNickname || collabDevice || "用户",
-      collabDevice || "",
-    );
-  }, [collabNickname, collabDevice]);
-
-  /** 进仓库后恢复上次打开的文件（设置「自动恢复上次打开的文件」开启时）。
-   * 依赖 uiLoaded（uiState 已从磁盘加载）+ canvases/noteList（文件树已刷新）就绪后才执行，
-   * 文件已被外部删除/移动则静默跳过（降级占位，不报错）。
-   * openCanvas/openNote/openTable 内部记录「上次打开」；聚焦由 WorkspaceGrid 兜底。 */
-  useEffect(() => {
-    if (!uiLoaded) return;
-    if (!autoRestoreFiles) return;
-    const store = useAppStore.getState();
-    // 画布：lastCanvasFile 能在当前画布列表命中才打开（文件缺失/已删除则跳过）；
-    // 外部白板（.canvas）不在画布列表，从文件树命中后合成行打开（只读查看）
-    if (lastCanvasFile && !store.currentCanvasFile) {
-      const row = store.canvases.find((c) => c.file === lastCanvasFile);
-      if (row) {
-        store.openCanvas(row);
-      } else if (lastCanvasFile.toLowerCase().endsWith(".canvas")) {
-        const hit = findFileInTree(useVaultStore.getState().tree, lastCanvasFile);
-        if (hit) {
-          store.openCanvas({
-            id: hit.path,
-            title: hit.name.replace(/\.canvas$/i, ""),
-            file: hit.path,
-            updatedAt: hit.updatedAt,
-          });
-        }
-      }
-    }
-    // 笔记：lastNoteFile 能在笔记列表命中才打开（文件缺失/已删除则跳过）
-    if (lastNoteFile && !store.currentNoteFile) {
-      const note = vaultNoteList.find((n) => n.file === lastNoteFile);
-      if (note) store.openNote(note.file, note.name.replace(/\.md$/i, ""));
-    }
-    // 表格：lastTableFile 能在表格列表命中才打开（文件缺失/已删除则跳过）
-    if (lastTableFile && !store.currentTableFile) {
-      const table = vaultTableList.find((t) => t.file === lastTableFile);
-      if (table) store.openTable(table.file, table.name.replace(/\.atb$/i, ""));
-    }
-  }, [
-    uiLoaded,
-    autoRestoreFiles,
-    lastCanvasFile,
-    lastNoteFile,
-    lastTableFile,
-    vaultNoteList,
-    vaultTableList,
-    currentCanvasFile,
-    currentNoteFile,
-    currentTableFile,
-  ]);
 
   /** 「进仓库时打开主页」开关：仅在本次运行的首次进仓生效（boot 自动进仓，或从空态创建/进入
    *  第一个仓库）；面板内切换仓库不生效——切换保持当前布局，打断位置违背切换的连续性预期。
    *  依赖 uiLoaded：ui-state 从磁盘加载完成前不得激活——否则随后 load 会用磁盘 activeLayoutId 覆盖。
    *  门控按「有激活仓库身份」——协作空间无本地 root，按 vaultRoot 会让开关在空间内不生效。 */
+  const uiLoaded = useUiStateStore((s) => s.loaded);
   const defaultHomeLayout = useSettingsStore((s) => s.defaultHomeLayout);
   const homeAppliedRef = useRef(false);
   useEffect(() => {
@@ -241,16 +137,4 @@ export function ProjectWorkspacePage() {
       )}
     </div>
   );
-}
-
-/** 在文件树中按相对路径查找文件（恢复上次打开的外部白板用，.canvas 不在画布列表）。 */
-function findFileInTree(nodes: FileTreeNode[], path: string): FileTreeNode | null {
-  for (const n of nodes) {
-    if (n.path === path) return n;
-    if (n.isDir) {
-      const hit = findFileInTree(n.children, path);
-      if (hit) return hit;
-    }
-  }
-  return null;
 }

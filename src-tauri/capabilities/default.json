@@ -1,7 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "默认权限：允许核心插件使用",
+  "description": "默认权限：允许核心插件使用（桌面平台；移动端权限见 mobile.json）",
+  "platforms": ["windows", "linux", "macOS"],
   "windows": ["*"],
   "permissions": [
     "core:default",

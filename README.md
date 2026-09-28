@@ -55,12 +55,15 @@ Atelyx 是一款以人为本的可拓展桌面工作台：对话、笔记、表�
 
 前置要求：Node.js 20.19+、pnpm 10、Rust（stable）、Tauri 2 系统依赖（见 [Tauri 官方文档](https://v2.tauri.app/start/prerequisites/)）。从源码构建见下文「开发命令」。
 
+构建 Android 版需额外安装 JDK 21、Android SDK（platform-tools / platforms;android-35 / build-tools）与 NDK r28+，并添加 Rust 安卓目标：`rustup target add aarch64-linux-android`。
+
 ## 开发命令
 
 ```bash
 pnpm install         # 安装前端依赖
-pnpm run tauri:dev   # 启动开发（自动开 Vite + Tauri 窗口）
-pnpm run tauri:build # 打包
+pnpm run tauri:dev   # 启动桌面开发（自动开 Vite + Tauri 窗口）
+pnpm run tauri:build # 桌面打包
+pnpm tauri android build --target aarch64 --debug   # Android APK（aarch64 真机包）
 pnpm run check       # 完整门禁：类型检查 + ESLint + 前端测试 + cargo test
 ```
 

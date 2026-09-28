@@ -12,7 +12,8 @@ dist-test.css
 
 # Tauri
 src-tauri/target/
-src-tauri/gen/
+# gen/schemas = 能力文件 schema 生成物；gen/android 原生工程入库（构建产物由其内 .gitignore 排除）
+src-tauri/gen/schemas/
 
 # 插件打包器（不入库；构建前由 scripts/sync-esbuild.mjs 从 esbuild 平台包同步）
 src-tauri/resources/esbuild/*

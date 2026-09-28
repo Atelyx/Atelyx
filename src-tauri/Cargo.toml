@@ -7,10 +7,11 @@ edition = "2021"
 # tauri-plugin-updater 要求 Rust >= 1.77.2
 rust-version = "1.77.2"
 
-# 库定义，供 tauri-build 引用（桌面端应用，rlib 足够）
+# 库定义，供 tauri-build 引用：rlib 供桌面应用链接；cdylib 供安卓动态链接；
+# staticlib 供移动端静态链接（tauri mobile 工程约定）
 [lib]
 name = "atelyx_lib"
-crate-type = ["rlib"]
+crate-type = ["rlib", "cdylib", "staticlib"]
 
 [build-dependencies]
 tauri-build = { version = "2.0", features = [] }
@@ -18,13 +19,8 @@ tauri-build = { version = "2.0", features = [] }
 [dependencies]
 tauri = { version = "2.1", features = [] }
 tauri-plugin-dialog = "2.0"
-tauri-plugin-shell = "2.0"
-# 自动更新完成后的应用重启（relaunch；v2 起 core API 不再含 process）
-tauri-plugin-process = "2"
 # 剪贴板写入（表格图片复制：前端 canvas 解码 RGBA → 核心 image 资源 → 本插件 arboard 写系统剪贴板）
 tauri-plugin-clipboard-manager = "2"
-# 自动检查更新：check/downloadAndInstall/签名校验（GitHub Release 静态 latest.json，见 4.18）
-tauri-plugin-updater = "2"
 
 # 序列化
 serde = { version = "1", features = ["derive"] }
@@ -39,10 +35,6 @@ base64 = "0.22"
 # 工具
 nanoid = "0.4"
 chrono = "0.4"
-
-# API key 安全存储（OS keychain：Windows Credential Manager / Linux Secret Service / macOS Keychain）
-# 安全红线：API key 仅存 keychain，永不落仓库文件或 global.json
-keyring = "4"
 
 # 联网搜索代理：SearXNG 自建实例无内置 CORS，前端直 fetch 必被拦截，
 # Tavily key 按官方 best practice 不应暴露给 WebView——搜索统一走 Rust 侧请求。
@@ -70,6 +62,21 @@ zip = "2"
 tar = "0.4"
 flate2 = "1"
 sha2 = "0.10"
+
+# 桌面平台专属依赖（桌面壳与凭据实现；这些能力在移动端不存在，不参与其编译）
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-shell = "2.0"
+# 自动更新完成后的应用重启（relaunch；v2 起 core API 不再含 process）
+tauri-plugin-process = "2"
+# 自动检查更新：check/downloadAndInstall/签名校验（GitHub Release 静态 latest.json，见 4.18）
+tauri-plugin-updater = "2"
+# API key 安全存储（OS keychain：Windows Credential Manager / Linux Secret Service / macOS Keychain）
+# 安全红线：API key 仅存 keychain，永不落仓库文件或 global.json
+keyring = "4"
+
+# 安卓凭据存储的 JNI 调用（经 webview JNI 线程调 Kotlin 桥 SecretStore：Keystore + 加密 SharedPreferences）
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # 跨窗口拖拽释放检测（Windows 专用）：标签拖出窗口后 webview 收不到窗口外 pointerup，

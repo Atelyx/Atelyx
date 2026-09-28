@@ -1,9 +1,16 @@
 /**
  * 当前窗口控制 service（decorations: false 自定义标题栏/全屏用）。
+ *
+ * 窗口控制属桌面专有能力：调用点先查能力表（services/platform），移动端一律 no-op，
+ * 不把不支持的原生窗口 API 打进安卓 WebView。
  */
 import { getCurrentWindow, type Window } from "@tauri-apps/api/window";
 import { LogicalSize } from "@tauri-apps/api/dpi";
 import { invoke } from "@tauri-apps/api/core";
+import { platformCapabilities } from "@/services/platform";
+
+/** 窗口控制是否可用（模块级恒定：能力表运行期内不变）。 */
+const WINDOW_CONTROLS = platformCapabilities().windowControls;
 
 /** 工作区窗口尺寸（默认与最小一致：不可缩小到默认以下）。 */
 const WORKSPACE_WINDOW = { width: 1440, height: 900 };
@@ -16,24 +23,29 @@ async function setSizeCentered(win: Window, width: number, height: number): Prom
   await win.center();
 }
 
-/** 最小化当前窗口。 */
+/** 最小化当前窗口（移动端无窗口控制，no-op）。 */
 export function minimizeWindow(): Promise<void> {
+  if (!WINDOW_CONTROLS) return Promise.resolve();
   return getCurrentWindow().minimize();
 }
 
-/** 最大化 / 还原当前窗口。 */
+/** 最大化 / 还原当前窗口（移动端 no-op）。 */
 export function toggleMaximizeWindow(): Promise<void> {
+  if (!WINDOW_CONTROLS) return Promise.resolve();
   return getCurrentWindow().toggleMaximize();
 }
 
-/** 关闭当前窗口。 */
+/** 关闭当前窗口（移动端无窗口语义，no-op）。 */
 export function closeWindow(): Promise<void> {
+  if (!WINDOW_CONTROLS) return Promise.resolve();
   return getCurrentWindow().close();
 }
 
 /** 注册窗口关闭请求监听：先阻止默认关闭，await 回调（落盘等）后真正销毁窗口。
- * 返回取消订阅函数；仅在回调完成后销毁，防 debounce 窗口内丢改动。 */
+ * 返回取消订阅函数；仅在回调完成后销毁，防 debounce 窗口内丢改动。
+ * 移动端无「关窗」语义，不注册。 */
 export async function onCloseRequested(handler: () => Promise<void>): Promise<() => void> {
+  if (!WINDOW_CONTROLS) return () => {};
   const win = getCurrentWindow();
   return win.onCloseRequested(async (event) => {
     event.preventDefault();
@@ -45,15 +57,18 @@ export async function onCloseRequested(handler: () => Promise<void>): Promise<()
   });
 }
 
-/** 切换全屏（视图控制图标用）。 */
+/** 切换全屏（视图控制图标用；移动端 no-op）。 */
 export async function toggleFullscreen(): Promise<void> {
+  if (!WINDOW_CONTROLS) return;
   const win = getCurrentWindow();
   const fs = await win.isFullscreen();
   await win.setFullscreen(!fs);
 }
 
-/** 应用工作区形态：恢复可调整；窗口小于默认时放大到默认；最小尺寸 = 默认（不可缩小）。 */
+/** 应用工作区形态：恢复可调整；窗口小于默认时放大到默认；最小尺寸 = 默认（不可缩小）。
+ * 移动端窗口尺寸由系统管理，no-op。 */
 export async function applyWorkspaceWindow(): Promise<void> {
+  if (!WINDOW_CONTROLS) return;
   const win = getCurrentWindow();
   await win.setResizable(true);
   const minSize = new LogicalSize(WORKSPACE_WINDOW.width, WORKSPACE_WINDOW.height);
@@ -72,20 +87,24 @@ export async function applyWorkspaceWindow(): Promise<void> {
   await win.setMinSize(minSize);
 }
 
-/** 读取当前窗口屏幕位置（logical px；屏幕坐标换算用）。 */
+/** 读取当前窗口屏幕位置（logical px；屏幕坐标换算用）。
+ * 移动端无跨窗口坐标语义，恒返回原点（调用方均为桌面拖拽路径）。 */
 export async function getCurrentOuterPosition(): Promise<{ x: number; y: number }> {
+  if (!WINDOW_CONTROLS) return { x: 0, y: 0 };
   const win = getCurrentWindow();
   const pos = await win.outerPosition();
   return pos.toLogical(await win.scaleFactor());
 }
 
-/** 监听当前窗口移动（缓存窗口位置用；返回取消订阅函数）。 */
+/** 监听当前窗口移动（缓存窗口位置用；返回取消订阅函数）。移动端 no-op。 */
 export async function onWindowMoved(handler: () => void): Promise<() => void> {
+  if (!WINDOW_CONTROLS) return () => {};
   return getCurrentWindow().onMoved(handler);
 }
 
-/** 设置当前窗口标题（撕裂窗口随激活标签更新）。 */
+/** 设置当前窗口标题（撕裂窗口随激活标签更新）。移动端无撕裂窗口，no-op。 */
 export async function setWindowTitle(title: string): Promise<void> {
+  if (!WINDOW_CONTROLS) return;
   await getCurrentWindow().setTitle(title);
 }
 

@@ -180,13 +180,30 @@ struct PluginState {
 // 默认组合清单（行定义 + 各行的清单）由前端随 `plugin_list(defaults)` 交给本层，本层不做类别区分：
 // 只按 id 增量补建「无磁盘目录的实现随应用编译」的行，并保存清单（供列行、主题守恒判定消费）。
 
+/// 移动端默认不启用的默认组合行（领域功能取舍走组合层：行默认关、用户可在插件管理里
+/// 手动启用；桌面端全量启用）。插件 `apply` 内不做平台分支——行要么挂、要么不挂。
+const MOBILE_DISABLED_DEFAULTS: &[&str] = &[
+    "builtin.search",
+    "builtin.calendar",
+    "builtin.canvas",
+    "builtin.inspector",
+    "builtin.collabroom",
+    "builtin.repohistory",
+];
+
+/// 播种行的默认启用状态（移动端裁剪清单生效，桌面恒启用；仅首次播种生效，不覆盖用户启停）。
+fn seed_default_enabled(id: &str) -> bool {
+    !((cfg!(target_os = "android") || cfg!(target_os = "ios"))
+        && MOBILE_DISABLED_DEFAULTS.contains(&id))
+}
+
 /// 逐条播种默认组合行（纯状态变换；返回是否改了状态——未变则不落盘，避免每次列表都写文件）：
 /// - 磁盘已有同 id 包 → 记已播种、不建行（同名磁盘包覆盖随应用分发的实现）；
 /// - 已有行（含旧状态里无清单的行）→ 刷新清单（版本/声明随 App 更新），保留启停状态。同名磁盘包
 ///   的目录当前不可见时（外部删除/在别的仓库）清单也在此刷新：该行随即以「实现随应用编译」继续
 ///   可用（默认功能自愈），卸载按「有清单无目录 = 只清记录」收尾——不会留下卸不掉的行；
 /// - 已播种且无对应行（被卸载）→ 保持卸载；`restore` 时补建回默认（用户显式触发的恢复）；
-/// - 其余 → 建行（来源 Builtin、无落位目录、默认启用）；
+/// - 其余 → 建行（来源 Builtin、无落位目录，默认启停按 `seed_default_enabled`）；
 /// - 本次清单里已不存在的随应用分发行 → 连同播种标记清理（退役行不留残渣）。
 /// 清单来自宿主自身，只校验 id（行的键与定位依据）；缺失/非法 id 的条目跳过。
 fn seed_default_rows(pstate: &mut PluginState, defaults: &[Value], disk_ids: &HashSet<String>, restore: bool) -> bool {
@@ -228,7 +245,7 @@ fn seed_default_rows(pstate: &mut PluginState, defaults: &[Value], disk_ids: &Ha
                         ..Default::default()
                     },
                 );
-                pstate.enabled.insert(id.clone(), true);
+                pstate.enabled.insert(id.clone(), seed_default_enabled(&id));
                 seeded.insert(id);
                 changed = true;
             }
@@ -3312,6 +3329,40 @@ mod tests {
         ids.iter()
             .map(|id| raw_manifest(id, "panel", None))
             .collect()
+    }
+
+    /// 播种默认启停（本机桌面编译）：全部行默认启用；裁剪清单 = 6 行全集且全部是
+    /// 随应用分发行 id（拼错 id 会让移动端该裁的行没裁、不该动的行被裁）。
+    #[test]
+    fn seed_default_enabled_desktop_all_enabled_and_mobile_list_valid() {
+        for id in [
+            "builtin.search",
+            "builtin.recent",
+            "builtin.calendar",
+            "builtin.chatcore",
+            "builtin.chatpanel",
+            "builtin.canvas",
+            "builtin.note",
+            "builtin.table",
+            "builtin.files",
+            "builtin.inspector",
+            "builtin.collabroom",
+            "builtin.repohistory",
+            "builtin.theme",
+        ] {
+            assert!(seed_default_enabled(id), "桌面端 {id} 应默认启用");
+        }
+        assert_eq!(
+            MOBILE_DISABLED_DEFAULTS,
+            &[
+                "builtin.search",
+                "builtin.calendar",
+                "builtin.canvas",
+                "builtin.inspector",
+                "builtin.collabroom",
+                "builtin.repohistory",
+            ]
+        );
     }
 
     /// 原始插件包清单（name = id；显示名/类型/主题声明在 atelyx 块）。

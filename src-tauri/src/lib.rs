@@ -18,14 +18,22 @@ use std::sync::Arc;
 
 use tauri::Manager;
 
+/// 应用入口：桌面由 lib/main 调用；移动端由 tauri mobile 生成的原生工程经 JNI 调起
+/// （mobile_entry_point 导出宿主入口）。
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let app = tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init());
+    // 桌面壳专属插件：shell（系统打开）/ process（更新后重启）；移动端无对应实现，不注册
+    #[cfg(desktop)]
+    let builder = builder
         .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_process::init())
-        .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_process::init());
+    let app = builder
         .setup(|app| {
-            // 自动检查更新（tauri-plugin-updater，endpoints/pubkey 见 tauri.conf.json）
+            // 自动检查更新（tauri-plugin-updater，endpoints/pubkey 见 tauri.conf.json；移动端无 updater，改提示下载）
+            #[cfg(desktop)]
             app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
             // 仓库化：注册当前仓库根路径状态（初始为 None，open_vault 时设置）
             app.manage(vault::VaultState::default());
@@ -34,7 +42,9 @@ pub fn run() {
             layout::load_from_disk(app.handle(), &app.state::<layout::LayoutState>());
             // 插件托管进程：进程创建即纳入作业对象/进程组，随应用退出统一收尾（见 plugin_process.rs）
             app.manage(Arc::new(plugin_process::PluginProcessHost::new()));
-            // 主窗口窗口事件钩子：Moved/Resized → 权威 bounds（拖拽命中/落点解析）
+            // 主窗口窗口事件钩子：Moved/Resized → 权威 bounds（拖拽命中/落点解析）。
+            // 桌面专属：移动端单窗口无移动/缩放语义
+            #[cfg(desktop)]
             if let Some(main_win) = app.get_webview_window("main") {
                 main_win.on_window_event(layout::window_event_handler(app.handle(), "main".into()));
                 // 种子化初始 bounds：启动后未移动过时 on_window_event 不触发，拖拽解析读不到

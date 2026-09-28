@@ -239,6 +239,7 @@ dependencies = [
  "dunce",
  "flate2",
  "globset",
+ "jni 0.21.1",
  "junction",
  "keyring",
  "libc",

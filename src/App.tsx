@@ -9,6 +9,7 @@ import { LoadingScreen } from "@/components/common/LoadingScreen";
 import { NotificationHost } from "@/components/common/NotificationHost";
 import { useAppearance } from "@/hooks/useAppearance";
 import { getCurrentWindowLabel } from "@/services/window";
+import { platformCapabilities } from "@/services/platform";
 import { layoutReconcile } from "@/services/layout";
 import { PANEL_LABEL_PREFIX, usePanelStore } from "@/stores/panelStore";
 
@@ -19,6 +20,16 @@ const ProjectWorkspacePage = lazy(async () => {
   const mod = await import("@/pages/ProjectWorkspacePage");
   return { default: mod.ProjectWorkspacePage };
 });
+
+// 移动端单栏壳（页面形态按平台二选一，均 lazy；平台能力运行期内恒定）
+const MobileWorkspacePage = lazy(async () => {
+  const mod = await import("@/pages/MobileWorkspacePage");
+  return { default: mod.MobileWorkspacePage };
+});
+
+/** 平台能力（运行期内恒定，模块级取一次）。 */
+const MULTI_WINDOW = platformCapabilities().multiWindow;
+const AUTO_UPDATE = platformCapabilities().autoUpdate;
 
 /** 窗口形态应用串行队列：多次触发（含 boot 末尾）时按序执行，队列 promise 因内层 catch 永不 reject。 */
 let windowShapeQueue: Promise<void> = Promise.resolve();
@@ -130,13 +141,15 @@ function MainWorkspaceApp() {
         await usePluginStore.getState().load().catch(() => {});
       }
       // 撕裂窗口恢复：进仓库后由 Rust 调和补建持久化撕裂窗口的 OS 窗口；撕裂窗口自行
-      // bootstrap 拉布局快照 + 订阅 layout-broadcast 广播渲染
-      app.reportLoad("还原布局窗口");
-      await layoutReconcile();
+      // bootstrap 拉布局快照 + 订阅 layout-broadcast 广播渲染。移动端单窗口，无撕裂窗口。
+      if (MULTI_WINDOW) {
+        app.reportLoad("还原布局窗口");
+        await layoutReconcile();
+      }
       // 自动更新（应用级，global.json）：开启时启动静默检查一次，失败静默跳过。
       // 走 store 包装（runAutoUpdate 内部先 flush 全部 pending 改动再检查安装，重启不丢数据；
-      // 协作连接收尾不随 flush 执行，见 appStore.flushAllPending 注释）
-      if (useAppStore.getState().autoUpdate) {
+      // 协作连接收尾不随 flush 执行，见 appStore.flushAllPending 注释）。移动端无 updater。
+      if (AUTO_UPDATE && useAppStore.getState().autoUpdate) {
         void useAppStore.getState().runAutoUpdate();
       }
     })().finally(async () => {
@@ -155,18 +168,22 @@ function MainWorkspaceApp() {
         <LoadingScreen />
       ) : pluginPage ? (
         <PluginPageMount pageId={pluginPage} />
-      ) : (
+      ) : MULTI_WINDOW ? (
         <ProjectWorkspacePage />
+      ) : (
+        <MobileWorkspacePage />
       )}
     </Suspense>
   );
 }
 
-/** 应用入口：按窗口 label 分流——主窗口走完整启动流程；撕裂窗口只渲染单面板。
- * 撕裂窗口不执行 init/selectVault/自动更新等主窗口专属逻辑（面板角色由 panelStore 管理）。
- * label 读取失败（IPC/init 脚本异常）时降级为主窗口角色并打日志，绝不白屏。 */
+/** 应用入口：按窗口 label 与平台能力分流——桌面主窗口走完整启动流程，桌面撕裂窗口只渲染
+ * 单面板；移动端恒为主窗口（单栏壳）。撕裂窗口不执行 init/selectVault/自动更新等主窗口
+ * 专属逻辑（面板角色由 panelStore 管理）。label 读取失败（IPC/init 脚本异常）时降级为主
+ * 窗口角色并打日志，绝不白屏。 */
 export default function App() {
   const [isPanel] = useState(() => {
+    if (!MULTI_WINDOW) return false;
     try {
       return getCurrentWindowLabel().startsWith(PANEL_LABEL_PREFIX);
     } catch (e) {

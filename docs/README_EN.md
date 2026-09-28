@@ -55,12 +55,15 @@ Download the installer for your platform from [GitHub Releases](https://github.c
 
 Prerequisites: Node.js 20.19+, pnpm 10, Rust (stable), Tauri 2 system dependencies (see [Tauri docs](https://v2.tauri.app/start/prerequisites/)). To build from source, see "Development" below.
 
+Building the Android version additionally requires JDK 21, the Android SDK (platform-tools / platforms;android-35 / build-tools) and NDK r28+, plus the Rust Android target: `rustup target add aarch64-linux-android`.
+
 ## Development
 
 ```bash
 pnpm install         # install frontend dependencies
-pnpm run tauri:dev   # start dev (Vite + Tauri window)
-pnpm run tauri:build # build installers
+pnpm run tauri:dev   # start desktop dev (Vite + Tauri window)
+pnpm run tauri:build # build desktop installers
+pnpm tauri android build --target aarch64 --debug   # Android APK (aarch64 device build)
 pnpm run check       # full gate: typecheck + ESLint + frontend tests + cargo test
 ```
 
