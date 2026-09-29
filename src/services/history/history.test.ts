@@ -205,8 +205,8 @@ describe("recordHistoryVersion / loadHistory", () => {
     expect((await loadHistory("note", ascii)).map((v) => v.content)).toEqual(["v1"]);
   });
 
-  it("表格单元格存档点（recordTableHistory 同款内存快照）可记录并读回", async () => {
-    // 模拟 tableStore.recordTableHistory：以内存 fields/rows 构建 `.atb` 格式快照
+  it("表格单元格存档点（tableStore 同款内存快照）可记录并读回", async () => {
+    // 模拟 tableStore 保存收尾：以内存 fields/rows 构建 `.atb` 格式快照记历史
     const snapshot = {
       schema: "atelyx-table/v1",
       id: "tbl-1",

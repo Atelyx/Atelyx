@@ -356,14 +356,12 @@ async function inlineImageCellsForExport(snapshot: TableFile): Promise<number> {
 }
 
 /**
- * 记录表格历史版本（保存成功后的存档点）：以内存当前内容构建 `.atb` 格式快照 → 记一条 edit 版本
- * （60s 内连续编辑合并为一版，不逐键）。快照取内存（与保存同源，免每次存档多一次读盘 IPC——
- * 历史尽力而为，不阻塞保存流程）。
+ * 按本轮写盘快照记历史：快照是 persist 开始时捕获的状态 = 本轮真实落盘的内容；不能取收尾时
+ * 的内存——await 期间内存可能已被协作回放/新编辑改写，超前于磁盘会让历史回滚错位。
+ * file 是本轮写盘路径（收尾路径跟随已同步），调用方已做切表守卫。60s 内连续编辑合并为一版，
+ * 不逐键；fire-and-forget 不阻塞保存流程。
  */
-function recordTableHistory(file: string): void {
-  const s = useTableStore.getState();
-  if (s.tableFile !== file) return; // 切表竞态：只记当前表格
-  const snapshot = buildTableSnapshot();
+function recordTableHistorySnapshot(file: string, snapshot: TableFile): void {
   void recordHistoryVersion("table", file, {
     content: JSON.stringify(snapshot),
     action: "edit",
@@ -384,8 +382,12 @@ const persistCtl = createPersistController({
     const versionAtStart = persistCtl.version;
     const { tableFile, id, fields, rows } = useTableStore.getState();
     if (!tableFile) return;
+    // 本轮写盘内容快照（persist 开始时同步捕获）：收尾记历史用——
+    // await 期间内存可能已被协作回放/新编辑改写，不能取收尾时的内存
+    const snapshotAtStart = buildTableSnapshot();
     // 写盘成功后的统一收尾：先同步 title 改名后的落地路径（不同步会让下一轮写已被改名删除的旧路径），
-    // 最后按本轮是否被新变更接续收尾。written = false 表示空补丁（磁盘未动）。
+    // 再记历史（只绑定「本轮真实落盘」这一事实，与收尾走哪条出口无关），最后按本轮是否被
+    // 新变更接续收尾。written = false 表示空补丁（磁盘未动，不记历史）。
     const finish = (written: boolean, newFile?: string) => {
       // 竞态守卫：await 期间可能已切换表格（load 替换了状态），旧表的写盘结果不得覆盖新表
       // 的脏标记/路径（否则新表下次保存写错文件、脏编辑被吞）
@@ -394,14 +396,15 @@ const persistCtl = createPersistController({
       if (newFile && newFile !== tableFile) {
         useTableStore.setState({ tableFile: newFile });
       }
+      if (written) recordTableHistorySnapshot(newFile ?? tableFile, snapshotAtStart);
       if (persistCtl.version !== versionAtStart) {
-        // 写盘期间有新变更（已挂新 timer）：保留 dirty，由下一轮 timer 再写盘
+        // 写盘期间有新变更（已挂新 timer）：保留 dirty，由下一轮 timer 再写盘，防本次成功
+        // 吞掉新编辑；不推进快照——下一轮 diff 仍以旧快照为基线（已写盘部分重发同内容
+        // upsert，幂等）。历史已按本轮落盘快照记过，不随出口丢失
         useTableStore.setState({ saving: false });
         return;
       }
       useTableStore.setState({ dirty: false, saving: false, error: null });
-      // 存档点：以当前内容快照记历史（60s 内连续编辑合并为一版；fire-and-forget 不阻塞保存流程）
-      if (written) recordTableHistory(newFile ?? tableFile);
       syncLastSaved();
     };
     const reportError = (e: unknown) => {
