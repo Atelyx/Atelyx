@@ -23,7 +23,13 @@ vi.mock("@tauri-apps/api/core", () => ({
 import { lastFolderRenameTarget, lastNoteRenameTarget, useVaultStore } from "@/stores/vaultStore";
 import { useAppStore } from "@/stores/appStore";
 import { registerNoteCollabWiring } from "@/stores/noteCollabStore";
-import { dispatchCollabChannel } from "@/utils/collabHost";
+import { registerCollabRenamed } from "@/stores/collabStore";
+import { dispatchCollabChannel, dispatchCollabRenamed } from "@/utils/collabHost";
+import {
+  followRemoteNoteDirRename,
+  noteSurfaceProvider,
+  openNoteSessionFiles,
+} from "@/stores/noteSessionStore";
 import { bytesToBase64 } from "@/utils/base64";
 import { noteTitleFromFile } from "@/utils/filename";
 import { encodeNoteRelocate } from "@/services/noteCollab/frame";
@@ -162,6 +168,69 @@ describe("协作对端换路", () => {
     );
 
     await vi.waitFor(() => expect(lastNoteRenameTarget("笔记/a.md")).toBe("笔记/新名.md"));
+    expect(useAppStore.getState().currentNoteFile).toBeNull();
+  });
+});
+
+describe("协作远端文件夹改名（renamed 帧）", () => {
+  let offs: Array<() => void>;
+
+  beforeEach(() => {
+    // 组合与笔记域实际接线一致（builtins 的 collabWiring）：协作接线 + renamed 帧跟随注册
+    offs = [registerNoteCollabWiring(), registerCollabRenamed(followRemoteNoteDirRename)];
+  });
+
+  afterEach(() => {
+    for (const off of offs) off();
+    for (const file of openNoteSessionFiles()) noteSurfaceProvider.close(file);
+  });
+
+  it("远端改文件夹名：打开中的笔记跟随到新目录", async () => {
+    await openNoteAt("目录/a.md");
+    noteSurfaceProvider.open("目录/a.md");
+    h.tree = treeOf(["新目录/a.md"]);
+
+    dispatchCollabRenamed("目录", "新目录");
+
+    await vi.waitFor(() =>
+      expect(useAppStore.getState().currentNoteFile).toBe("新目录/a.md"),
+    );
+    expect(useAppStore.getState().currentNoteTitle).toBe("a");
+    expect(lastNoteRenameTarget("目录/a.md")).toBe("新目录/a.md");
+  });
+
+  it("远端移动文件夹：打开中的笔记同样跟随", async () => {
+    await openNoteAt("目录/a.md");
+    noteSurfaceProvider.open("目录/a.md");
+    h.tree = treeOf(["父/目录/a.md"]);
+
+    dispatchCollabRenamed("目录", "父/目录");
+
+    await vi.waitFor(() =>
+      expect(useAppStore.getState().currentNoteFile).toBe("父/目录/a.md"),
+    );
+  });
+
+  it("打开中的笔记不在旧目录下：不动", async () => {
+    await openNoteAt("其他/b.md");
+    noteSurfaceProvider.open("其他/b.md");
+    h.tree = treeOf(["其他/b.md"]);
+
+    dispatchCollabRenamed("目录", "新目录");
+
+    await Promise.resolve();
+    expect(useAppStore.getState().currentNoteFile).toBe("其他/b.md");
+  });
+
+  it("本端未打开旧目录下的笔记：不产生换路记录", async () => {
+    // 独立路径：重命名记录是模块级跨用例保留的，前面用例记过的路径在此不成立
+    h.tree = treeOf([]);
+    await useVaultStore.getState().loadFiles();
+
+    dispatchCollabRenamed("隔离目录", "新隔离目录");
+
+    await Promise.resolve();
+    expect(lastNoteRenameTarget("隔离目录/a.md")).toBeNull();
     expect(useAppStore.getState().currentNoteFile).toBeNull();
   });
 });

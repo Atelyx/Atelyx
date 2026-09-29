@@ -14,10 +14,11 @@ import { notifyNoteSurfaceChange } from "@/utils/noteSurfaceHost";
 import { registerDomainLifecycle } from "@/utils/kernelLifecycle";
 import { useNoteStore, type NoteSaveStatus } from "@/stores/noteStore";
 import { useNoteUndoStore } from "@/stores/noteUndoStore";
-import { useNoteCollabStore } from "@/stores/noteCollabStore";
+import { adoptRemoteNoteRelocate, useNoteCollabStore } from "@/stores/noteCollabStore";
 import { republishPresence, useCollabStore } from "@/stores/collabStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { lastFolderRenameTarget, lastNoteRenameTarget, useVaultStore } from "@/stores/vaultStore";
+import { remapDirPrefix } from "@/utils/filename";
 
 /** 输入落盘防抖：连续输入合并为一次写盘。 */
 const SAVE_DEBOUNCE_MS = 500;
@@ -587,6 +588,25 @@ export function closeAllNoteSessions(): void {
 /** 本端已打开编辑面的笔记（协作 presence 上报用）。 */
 export function openNoteSessionFiles(): string[] {
   return [...runtimeMap.keys()];
+}
+
+/**
+ * 远端文件夹改名/移动跟随（协作 renamed 帧，旧路径为目录）：打开中笔记按旧目录前缀换路
+ * （adoptRemoteNoteRelocate 同一簿记：缓存/撤销栈/协作文档/列表/面板联动），旧/新目录前缀的
+ * 正文缓存一并作废——对齐本地 folder:renamed 事件的笔记域处理。单文件改名/移动由 note-sync
+ * 换路帧跟随（见 note:renamed|moved 事件处理），此处不处理精确命中。发起端回放帧：本地联动
+ * 已完成时前缀不再命中 = no-op；本地联动是异步链，帧先到时会对同一迁移多触发一轮簿记——
+ * 各簿记幂等（撤销栈键已迁/文档已销毁/重命名记录同键覆盖），多余成本仅为一次树重读。
+ */
+export function followRemoteNoteDirRename(oldDir: string, newDir: string): void {
+  useNoteStore.getState().invalidateNoteCacheUnder(oldDir);
+  useNoteStore.getState().invalidateNoteCacheUnder(newDir);
+  const prefix = `${oldDir}/`;
+  for (const open of openNoteSessionFiles()) {
+    if (open.startsWith(prefix)) {
+      adoptRemoteNoteRelocate(open, remapDirPrefix(open, oldDir, newDir));
+    }
+  }
 }
 
 export const noteSurfaceProvider: NoteSurfaceProvider = {

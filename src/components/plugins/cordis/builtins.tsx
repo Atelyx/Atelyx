@@ -46,8 +46,8 @@ import { useChatPanelStore } from "@/stores/chatPanelStore";
 import { useCalendarStore, registerCalendarCollabWiring } from "@/stores/calendarStore";
 import { useNoteUndoStore } from "@/stores/noteUndoStore";
 import { useNoteStore } from "@/stores/noteStore";
-import { closeAllNoteSessions, noteSurfaceProvider, openNoteSessionFiles } from "@/stores/noteSessionStore";
-import { registerCollabPresenceProvider } from "@/stores/collabStore";
+import { closeAllNoteSessions, followRemoteNoteDirRename, noteSurfaceProvider, openNoteSessionFiles } from "@/stores/noteSessionStore";
+import { registerCollabPresenceProvider, registerCollabRenamed } from "@/stores/collabStore";
 import { registerDomainLifecycle } from "@/utils/kernelLifecycle";
 import { registerNoteSurface } from "@/utils/noteSurfaceHost";
 import { subscribeVaultEvent } from "@/utils/vaultEvents";
@@ -431,7 +431,16 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
         offAccess();
       };
     },
-    collabWiring: registerNoteCollabWiring,
+    collabWiring: () => {
+      // 笔记域协作接线 + 远端改名/移动跟随注册：renamed 帧旧路径为目录前缀时打开中笔记换路
+      // （单文件换路由 note-sync 换路帧覆盖，见下方 note:renamed|moved 事件的 broadcastNoteRelocate）
+      const offWiring = registerNoteCollabWiring();
+      const offRenamed = registerCollabRenamed(followRemoteNoteDirRename);
+      return () => {
+        offRenamed();
+        offWiring();
+      };
+    },
     vaultEventHandlers: [
       // 软件内 `.md` 写落点信号（AI 文件工具/插件写盘、重建链接改写，见 services/vault/aiFiles.ts）：
       // 作废内容缓存 + bump 外部变更序号，编辑会话据此收敛（无未落盘输入采纳磁盘、有则保留本地输入）
