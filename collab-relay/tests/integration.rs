@@ -1770,6 +1770,122 @@ async fn rename_landing_broadcasts_renamed_frame() {
     assert_eq!(frame["payload"]["newPath"], "表格/新名.atb");
 }
 
+/// 表格/画布的历史记录随改名迁移 + 改名后继续记录（编辑→记录→改名→迁移→再编辑→再记录→聚合可见）。
+#[tokio::test]
+async fn table_and_canvas_history_follows_rename() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let space_id = setup_two_members(&ctx, "alice", "bob").await;
+    let a = login_as(&ctx, "alice").await;
+    let author = json!({ "id": "dev-1", "name": "甲", "device": "dev-1" });
+    let file_url = format!("/api/spaces/{space_id}/file");
+    let record_url = format!("/api/spaces/{space_id}/history/record");
+    let record = |file: String, content: String| {
+        let ctx = &ctx;
+        let a = a.clone();
+        let url = record_url.clone();
+        let author = author.clone();
+        async move {
+            ctx.post(
+                &url,
+                Some(&a),
+                json!({
+                    "kind": "table", "file": file, "content": content,
+                    "action": "edit", "author": author, "coalesceEditMs": 0
+                }),
+            )
+            .await
+        }
+    };
+
+    let path_a = "表格/旧名.atb";
+    let fields = json!([{ "id": "f1", "name": "名称", "type": "text" }]);
+    let rows = json!([{ "id": "r1", "values": { "f1": "一" } }]);
+    let (status, body) = ctx
+        .put(
+            &file_url,
+            Some(&a),
+            json!({ "path": path_a, "content": table_doc("tb-1", "旧名", fields, rows).to_string() }),
+        )
+        .await;
+    assert_eq!(status, 200, "建表应成功：{body}");
+    // 改名前两次编辑记录
+    let (status, _) = record(path_a.to_string(), "v1".to_string()).await;
+    assert_eq!(status, 200);
+    let (status, _) = record(path_a.to_string(), "v2".to_string()).await;
+    assert_eq!(status, 200);
+
+    // 改名（客户端 renameTable 语义：title 已写入文件内容 → 文件名与 title 一致）
+    let path_b = "表格/新名.atb";
+    let (status, _) = ctx
+        .post(
+            &format!("/api/spaces/{space_id}/rename"),
+            Some(&a),
+            json!({ "oldPath": path_a, "newPath": path_b }),
+        )
+        .await;
+    assert_eq!(status, 200);
+
+    // 改名后继续编辑记录：新路径侧文件应包含迁移来的旧版本 + 新版本
+    let (status, _) = record(path_b.to_string(), "v3".to_string()).await;
+    assert_eq!(status, 200);
+    let (_, agg) = ctx
+        .get(&format!("/api/spaces/{space_id}/history/aggregate"), Some(&a), &[])
+        .await;
+    let entries = agg["entries"].as_array().unwrap();
+    let table_entries: Vec<&Value> = entries.iter().filter(|e| e["file"] == path_b).collect();
+    assert!(
+        !table_entries.is_empty(),
+        "改名后表格历史应随迁且新编辑可记录：{agg}"
+    );
+    assert!(
+        !entries.iter().any(|e| e["file"] == path_a),
+        "旧路径不应残留历史侧文件：{agg}"
+    );
+
+    // 画布同构抽查：改名后记录 + 聚合可见
+    let canvas_a = "画布/画.atlx";
+    let (status, _) = ctx
+        .put(
+            &file_url,
+            Some(&a),
+            json!({ "path": canvas_a, "content": canvas_doc("cv-1", "画", json!([])).to_string() }),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let (status, _) = ctx
+        .post(
+            &record_url,
+            Some(&a),
+            json!({
+                "kind": "canvas", "file": canvas_a, "content": "c1",
+                "action": "edit", "author": author, "coalesceEditMs": 0
+            }),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let canvas_b = "画布/新画.atlx";
+    let (status, _) = ctx
+        .post(
+            &format!("/api/spaces/{space_id}/rename"),
+            Some(&a),
+            json!({ "oldPath": canvas_a, "newPath": canvas_b }),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let (_, agg) = ctx
+        .get(&format!("/api/spaces/{space_id}/history/aggregate"), Some(&a), &[])
+        .await;
+    assert!(
+        agg["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["file"] == canvas_b),
+        "画布改名后历史应随迁：{agg}"
+    );
+}
+
 /// 团队 meta 写/删落地 → 房间收到 meta-changed 帧（含写入者自身，只带键名）；
 /// user 层（meta/me）写不广播。
 #[tokio::test]
