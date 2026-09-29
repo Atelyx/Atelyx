@@ -44,6 +44,8 @@ import { useTableStore, registerTableCollabWiring, registerTablePluginWiring } f
 import { broadcastNoteRelocate, registerNoteCollabWiring, useNoteCollabStore } from "@/stores/noteCollabStore";
 import { useChatPanelStore } from "@/stores/chatPanelStore";
 import { useCalendarStore, registerCalendarCollabWiring } from "@/stores/calendarStore";
+import { useSettingsStore } from "@/stores/settingsStore";
+import { useUiStateStore } from "@/stores/uiStateStore";
 import { useNoteUndoStore } from "@/stores/noteUndoStore";
 import { useNoteStore } from "@/stores/noteStore";
 import { closeAllNoteSessions, followRemoteNoteDirRename, noteSurfaceProvider, openNoteSessionFiles } from "@/stores/noteSessionStore";
@@ -536,6 +538,14 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
     type: "panel",
     tagline: "仓库文件树面板",
     views: [{ kind: "files", label: VIEW_LABELS.files, component: FilesView }],
+    collabWiring: () =>
+      // 远端改名/移动跟随（renamed 帧无 peerId、含发起者回放——本端已迁移，重复迁移为 no-op）：
+      // 目录前缀类设置（文件夹颜色/提示词标记/Agent 提示词文件）只迁内存（真源已由发起方写好），
+      // 展开集合/上次打开走 uiState 同步（含跨窗口 patch）
+      registerCollabRenamed((oldPath, newPath) => {
+        useSettingsStore.getState().followRemotePathRename(oldPath, newPath);
+        useUiStateStore.getState().renameByDir(oldPath, newPath);
+      }),
   }),
   def({
     id: "builtin.inspector",
