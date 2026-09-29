@@ -5,7 +5,7 @@
  * meta 三方法的请求形状（路径 + 查询 + 体）与服务端契约一致。
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createSpaceClient, SpaceApiError } from "./client";
+import { createSpaceClient, setSpaceSessionExpiredHandler, SpaceApiError } from "./client";
 
 const SERVER = "http://192.168.1.10:11224";
 const TOKEN = "tok-123";
@@ -129,6 +129,52 @@ describe("错误归一化", () => {
     expect(err.status).toBe(0);
     expect(err.code).toBe("timeout");
     expect(err.message).toContain("超时");
+  });
+});
+
+describe("会话失效回调", () => {
+  afterEach(() => {
+    setSpaceSessionExpiredHandler(null);
+  });
+
+  it("带令牌的非 auth 请求 401：触发失效回调并携带服务器地址与所携令牌，错误照常抛出", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ error: "未认证或会话已失效" }), { status: 401 })),
+    );
+    const expired: Array<[string, string]> = [];
+    setSpaceSessionExpiredHandler((serverUrl, token) => expired.push([serverUrl, token]));
+    const client = createSpaceClient(SERVER, async () => TOKEN);
+
+    const err = (await client.spaces.list().catch((e) => e)) as SpaceApiError;
+    expect(err.status).toBe(401);
+    expect(expired).toEqual([[SERVER, TOKEN]]);
+  });
+
+  it("auth 端点 401 不触发（restore 校验等属正常失败路径）", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ error: "未认证" }), { status: 401 })),
+    );
+    const expired: string[] = [];
+    setSpaceSessionExpiredHandler((serverUrl) => expired.push(serverUrl));
+    const client = createSpaceClient(SERVER, async () => TOKEN);
+
+    await expect(client.auth.listDevices()).rejects.toMatchObject({ status: 401 });
+    expect(expired).toEqual([]);
+  });
+
+  it("未携带令牌的 401 不触发（无会话即无失效）", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ error: "未认证" }), { status: 401 })),
+    );
+    const expired: string[] = [];
+    setSpaceSessionExpiredHandler((serverUrl) => expired.push(serverUrl));
+    const client = createSpaceClient(SERVER, async () => "");
+
+    await expect(client.spaces.list()).rejects.toMatchObject({ status: 401 });
+    expect(expired).toEqual([]);
   });
 });
 

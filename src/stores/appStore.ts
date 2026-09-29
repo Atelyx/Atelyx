@@ -26,6 +26,8 @@ import { useSpaceAuthStore } from "@/stores/spaceAuthStore";
 import { useVaultStore } from "@/stores/vaultStore";
 import { useUiStateStore } from "@/stores/uiStateStore";
 import { useCollabStore } from "@/stores/collabStore";
+import { discardLocalSession, getToken } from "@/services/space/auth";
+import { setSpaceSessionExpiredHandler } from "@/services/space/client";
 import { migrateHistoryFile } from "@/services/history";
 import {
   flushAllDomains,
@@ -61,6 +63,9 @@ let closeGuardInstalled = false;
 
 /** selectVault 并发序号：快速连续切换时仅最后一次调用有权清除切换读条（finally 守卫）。 */
 let vaultSwitchSeq = 0;
+
+/** 会话失效收口进行中的 claim（serverUrl+token）：同批并发 401 去重，编排完成后释放。 */
+const expiredSessionClaims = new Set<string>();
 
 /** 全局配置损坏（原文已备份）的用户可见提示：读到空配置会连带重置最近仓库与外观，
  *  只写日志等于用户看到「东西全没了」却不知原因。备份文件在应用数据目录（与 global.json 同目录）。 */
@@ -166,6 +171,16 @@ interface AppState {
    * need-login = 无有效会话（未激活，UI 引导登录）；error = 服务端不可达/非成员（已通知，停留未激活）。
    */
   selectSpace: (entry: { serverUrl: string; spaceId: string; name: string }) => Promise<SpaceEnterResult>;
+  /**
+   * 会话中途失效统一收口（空间 HTTP 401 触发，见 services/space/client 注入点）：
+   * failedToken = 触发请求实际携带的令牌。先做两类守卫再清会话——
+   * 1. 无该服务器会话条目：未登录或已收口过（首次收口即剔除条目，同因 401 只处理一次）；
+   * 2. 当前令牌 ≠ failedToken：重登录后旧在途请求的迟到 401，不得清掉新会话。
+   * 收口本体：清该服务器本地会话（内存条目 + keychain + spaceServers 清单）+ 用户可见通知 +
+   * 激活中的是该服务器空间时退出激活态回未激活空态（不 flush——会话已死，一切写盘必被
+   * 401 拒绝；协作连接随 vaultIdentity 复位自然断开，插件层随 vault:switch 重载）。
+   */
+  expireSpaceSession: (serverUrl: string, failedToken: string) => void;
   /** 从最近列表移除某仓库（不删文件；移除当前激活仓库不影响激活态）。 */
   removeRecentVault: (root: string) => Promise<void>;
   /** 打开插件应用页面（全页接管；仅工作区视图生效）。 */
@@ -662,6 +677,60 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
+  expireSpaceSession: (serverUrl, failedToken) => {
+    // 同步 claim：同批并发 401（同一令牌）只允许一次收口编排，通知不重复
+    const claimKey = `${serverUrl}\u0000${failedToken}`;
+    if (expiredSessionClaims.has(claimKey)) return;
+    expiredSessionClaims.add(claimKey);
+    void (async () => {
+      try {
+        const auth = useSpaceAuthStore.getState();
+        // 无会话条目 = 未登录或已收口过：401 按普通错误由调用方呈现，这里不动作（同因去重）
+        if (!auth.getServer(serverUrl)) return;
+        // 当前令牌与触发请求携带的令牌不符 = 重登录后旧在途请求的迟到 401，不得清掉新会话
+        if ((await getToken(serverUrl)) !== failedToken) return;
+        void discardLocalSession(serverUrl);
+        auth.dropServer(serverUrl);
+        useNotificationStore.getState().notify({
+          level: "error",
+          message: "协作登录已失效，请重新登录",
+        });
+        // 正在切换仓库时不动激活态——例外：切往同一服务器的空间（其会话同死，切换的预检
+        // 必然 401 失败，此处退出激活态使终态一致）；其余目标（本地仓库/他服务器空间）由
+        // 切换流程自身的结果决定，不被空间会话失效牵连
+        const switching = get().switchingVaultRoot;
+        if (switching && !switching.startsWith(`space:${serverUrl}#`)) return;
+        const identity = get().vaultIdentity;
+        if (identity?.kind !== "space" || identity.serverUrl !== serverUrl) return;
+        // 退出激活态回未激活空态（清理口径同 selectSpace 进入前的复位；不 flush 见接口注释）
+        set({
+          vaultIdentity: null,
+          vaultRoot: null,
+          vaultName: "",
+          canvases: [],
+          currentCanvasId: null,
+          currentCanvasFile: null,
+          currentNoteFile: null,
+          currentNoteTitle: "",
+          currentTableFile: null,
+          currentTableTitle: "",
+        });
+        useVaultStore.setState({ tree: [], noteList: [], tableList: [] });
+        notifyVaultLeaving();
+        if (get().vaultSettingsModal) get().closeVaultSettings();
+        // 插件层感知仓库上下文消失（同切换语义；失败静默降级，下次切换再重载）
+        try {
+          await usePluginStore.getState().load("vault-switch");
+        } catch (e) {
+          console.error("加载插件失败", e);
+        }
+        emitPluginEvent("vault:switch", { root: null });
+      } finally {
+        expiredSessionClaims.delete(claimKey);
+      }
+    })();
+  },
+
   removeRecentVault: async (root) => {
     const recents = dropVaultFromRecents(get().recentVaults, root);
     try {
@@ -982,3 +1051,9 @@ export const useAppStore = create<AppState>((set, get) => ({
 export function selectVaultIdentityKey(s: Pick<AppState, "vaultIdentity">): string {
   return identityKeyOf(s.vaultIdentity);
 }
+
+// 会话中途失效统一收口的注入：空间 HTTP 客户端 401（带令牌、非鉴权端点）→ expireSpaceSession。
+// 模块级注册（随本 store 在每个窗口加载），撕裂窗口的空间请求同样被收口覆盖。
+setSpaceSessionExpiredHandler((serverUrl, token) =>
+  useAppStore.getState().expireSpaceSession(serverUrl, token),
+);

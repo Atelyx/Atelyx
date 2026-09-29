@@ -120,6 +120,8 @@ const space = vi.hoisted(() => {
 });
 
 vi.mock("@/services/space/client", () => ({
+  // 会话失效回调注入点（appStore 模块加载时注册；本文件不产生真实 401）
+  setSpaceSessionExpiredHandler: () => undefined,
   createSpaceClient: () => ({
     auth: {},
     spaces: {},

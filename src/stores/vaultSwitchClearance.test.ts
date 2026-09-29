@@ -37,6 +37,8 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 /** 空间内容后端的传输层替身：树恒为空，成功语义（本文件只关心清理时序，不关心树内容）。 */
 vi.mock("@/services/space/client", () => ({
+  // 会话失效回调注入点（appStore 模块加载时注册；本文件不产生真实 401）
+  setSpaceSessionExpiredHandler: () => undefined,
   createSpaceClient: () => ({
     auth: { listDevices: async () => [] },
     content: { getTree: async () => [] },

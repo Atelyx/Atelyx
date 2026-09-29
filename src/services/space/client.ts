@@ -317,6 +317,23 @@ async function parseServerResponse(res: Response): Promise<{ message: string; bo
   return { message: text.slice(0, 500), body };
 }
 
+// ===== 会话失效回调（注入点，收口编排归上层） =====
+
+/** 会话失效 handler：serverUrl 标识哪台服务器失效，token 为该请求实际携带的令牌
+ *  （注册方据此区分「当前会话失效」与「重登录前旧请求的迟到 401」）。 */
+type SessionExpiredHandler = (serverUrl: string, token: string) => void;
+
+let sessionExpiredHandler: SessionExpiredHandler | null = null;
+
+/**
+ * 注册会话失效 handler（应用侧一次性注册；传 null 撤销）。
+ * 触发口径见 request()：带令牌的非 `/auth/*` 请求收到 401 时——登录/注册/登出/设备管理等
+ * 鉴权端点与未携带令牌的请求不在其列（登录预检/未登录的 401 是正常失败路径，不是「中途失效」）。
+ */
+export function setSpaceSessionExpiredHandler(handler: SessionExpiredHandler | null): void {
+  sessionExpiredHandler = handler;
+}
+
 export interface CreateSpaceClientOptions {
   /** 取当前 Bearer 令牌（每次鉴权请求前调用；登录/注册端点传空串即不携带）。 */
   getToken: () => Promise<string>;
@@ -354,8 +371,21 @@ export function createSpaceClient(serverUrl: string, getToken: () => Promise<str
     }
 
     const headers: Record<string, string> = { "Content-Type": "application/json" };
+    let token = "";
     if (opts?.auth !== false) {
-      const token = await getToken();
+      // 令牌读取失败（keychain IPC 异常）也归一化为网络类错误：本客户端全部失败
+      // 统一成 SpaceApiError，调用方按 status/code 分类不因错误形态分裂
+      try {
+        token = await getToken();
+      } catch (e) {
+        throw new SpaceApiError({
+          message: `读取协作会话令牌失败：${e instanceof Error ? e.message : String(e)}`,
+          status: 0,
+          code: "network",
+          serverMessage: "",
+          url: url.toString(),
+        });
+      }
       if (token) headers["Authorization"] = `Bearer ${token}`;
     }
 
@@ -396,6 +426,15 @@ export function createSpaceClient(serverUrl: string, getToken: () => Promise<str
         message: "",
         body: null,
       }));
+      // 会话中途失效统一收口的触发点：携带了令牌、目标不是鉴权端点的 401。
+      // 处理异常隔离：收口 handler 的缺陷不改变错误本身的抛出与形态。
+      if (res.status === 401 && token && !path.startsWith("/auth/") && sessionExpiredHandler) {
+        try {
+          sessionExpiredHandler(serverUrl, token);
+        } catch (e) {
+          console.error("空间会话失效收口失败", e);
+        }
+      }
       throw new SpaceApiError({
         message: `协作服务器 ${serverUrl} 返回 ${res.status}：${serverMessage}`,
         status: res.status,

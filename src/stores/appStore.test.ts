@@ -55,6 +55,9 @@ vi.mock("@/services/space/client", () => {
   }
   return {
     SpaceApiError,
+    // 会话失效回调注入点（appStore 模块加载时注册；mock 客户端不产生真实 401，收口行为由
+    // expireSpaceSession 动作用例直接驱动）
+    setSpaceSessionExpiredHandler: () => undefined,
     createSpaceClient: () => ({
       auth: {
         listDevices: async () => [],
@@ -402,5 +405,91 @@ describe("selectSpace 激活分流", () => {
     expect(result).toEqual({ updatedAt: 102, file: "新画布.atlx" });
     expect(h.spacePatchBodies).toHaveLength(1);
     expect(h.spacePatchBodies[0].path).toBe("新画布.atlx");
+  });
+});
+
+describe("会话中途失效收口（expireSpaceSession）", () => {
+  const entry = { serverUrl: "http://s", spaceId: "sp1", name: "空间" };
+  // invoke mock 的 keychain 替身返回的令牌值（expireSpaceSession 以它校验令牌一致性）
+  const TOKEN = "tok";
+
+  it("激活中收口：清该服务器会话（内存 + keychain）+ 用户可见通知 + 退出激活态回空态", async () => {
+    await seedSpaceSession();
+    h.spaceTree = [{ name: "a.md", path: "a.md", isDir: false, updatedAt: 1, children: [] }];
+    expect(await app.useAppStore.getState().selectSpace(entry)).toBe("ok");
+
+    app.useAppStore.getState().expireSpaceSession("http://s", TOKEN);
+
+    // 激活态退出：身份/仓库名清空，文件树与打开文件清空（收口体异步编排，等待落定）
+    await vi.waitFor(() => {
+      expect(app.useAppStore.getState().vaultIdentity).toBeNull();
+      expect(app.useAppStore.getState().vaultName).toBe("");
+    });
+    const vaultStore = await import("./vaultStore");
+    expect(vaultStore.useVaultStore.getState().tree).toEqual([]);
+    // 内存会话条目剔除 + keychain 本地会话清理（token/user 条目删除）
+    const auth = await import("./spaceAuthStore");
+    expect(auth.useSpaceAuthStore.getState().getServer("http://s")).toBeUndefined();
+    await vi.waitFor(() => {
+      const deleted = h.calls
+        .filter((c) => c.cmd === "delete_app_secret")
+        .map((c) => String(c.args.name));
+      expect(deleted.some((n) => n.startsWith("space-token-"))).toBe(true);
+      expect(deleted.some((n) => n.startsWith("space-user-"))).toBe(true);
+    });
+    // 用户可见通知（失败不得静默）
+    const messages = notifications.useNotificationStore.getState().items.map((n) => n.message);
+    expect(messages.some((m) => m.includes("协作登录已失效"))).toBe(true);
+  });
+
+  it("无会话条目（未登录/已收口过）：不动作不通知（同因去重）", async () => {
+    // 无条目守卫在收口体的首个 await 之前，同步完成（claim 已释放）
+    app.useAppStore.getState().expireSpaceSession("http://s", TOKEN);
+
+    expect(app.useAppStore.getState().vaultIdentity).toBeNull();
+    const messages = notifications.useNotificationStore.getState().items.map((n) => n.message);
+    expect(messages.some((m) => m.includes("协作登录已失效"))).toBe(false);
+    expect(h.calls.some((c) => c.cmd === "get_app_secret")).toBe(false);
+    expect(h.calls.some((c) => c.cmd === "delete_app_secret")).toBe(false);
+  });
+
+  it("失效的是其他服务器：当前激活的空间不受影响", async () => {
+    await seedSpaceSession();
+    h.spaceTree = [{ name: "a.md", path: "a.md", isDir: false, updatedAt: 1, children: [] }];
+    expect(await app.useAppStore.getState().selectSpace(entry)).toBe("ok");
+
+    app.useAppStore.getState().expireSpaceSession("http://other", TOKEN);
+    // 无条目守卫在收口体的首个 await 之前，同步完成
+
+    expect(app.useAppStore.getState().vaultIdentity).toEqual({
+      kind: "space",
+      serverUrl: "http://s",
+      spaceId: "sp1",
+    });
+    // 无该服务器的收口通知（selectSpace 自身的无关通知不算）
+    const messages = notifications.useNotificationStore.getState().items.map((n) => n.message);
+    expect(messages.some((m) => m.includes("协作登录已失效"))).toBe(false);
+  });
+
+  it("迟到的旧令牌 401（已重登录）：不清掉新会话", async () => {
+    await seedSpaceSession();
+    h.spaceTree = [{ name: "a.md", path: "a.md", isDir: false, updatedAt: 1, children: [] }];
+    expect(await app.useAppStore.getState().selectSpace(entry)).toBe("ok");
+
+    // 触发令牌与当前会话令牌不符（模拟重登录后旧在途请求的迟到 401）
+    app.useAppStore.getState().expireSpaceSession("http://s", "expired-old-token");
+    await vi.waitFor(() => expect(h.calls.some((c) => c.cmd === "get_app_secret")).toBe(true));
+
+    // 新会话完整保留：身份、内存条目与 keychain 均不动，无收口通知
+    expect(app.useAppStore.getState().vaultIdentity).toEqual({
+      kind: "space",
+      serverUrl: "http://s",
+      spaceId: "sp1",
+    });
+    const auth = await import("./spaceAuthStore");
+    expect(auth.useSpaceAuthStore.getState().getServer("http://s")).toBeDefined();
+    expect(h.calls.some((c) => c.cmd === "delete_app_secret")).toBe(false);
+    const messages = notifications.useNotificationStore.getState().items.map((n) => n.message);
+    expect(messages.some((m) => m.includes("协作登录已失效"))).toBe(false);
   });
 });

@@ -44,6 +44,9 @@ interface SpaceAuthState {
   login: (serverUrl: string, username: string, password: string, deviceName?: string, displayName?: string) => Promise<SpaceServerEntry>;
   register: (serverUrl: string, username: string, password: string, deviceName?: string, displayName?: string) => Promise<SpaceServerEntry>;
   logout: (serverUrl: string) => Promise<void>;
+  /** 会话中途失效收口：剔除某服务器的内存会话条目（keychain/清单由 auth.discardLocalSession 清）。
+   *  条目剔除后同因 401 再进来时查无条目，收口自然去重。 */
+  dropServer: (serverUrl: string) => void;
   /** 某服务器的设备会话列表（设置区设备管理用）。 */
   listDevices: (serverUrl: string) => Promise<DeviceInfo[]>;
   /** 吊销某设备会话（踢下线）。 */
@@ -126,6 +129,10 @@ export const useSpaceAuthStore = create<SpaceAuthState>((set, get) => ({
 
   logout: async (serverUrl) => {
     await authLogout(serverUrl);
+    set((s) => ({ servers: s.servers.filter((e) => e.serverUrl !== serverUrl) }));
+  },
+
+  dropServer: (serverUrl) => {
     set((s) => ({ servers: s.servers.filter((e) => e.serverUrl !== serverUrl) }));
   },
 
