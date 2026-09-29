@@ -93,7 +93,9 @@ describe("笔记读写链 × 空间 stub 后端", () => {
     setPendingNoteContent("已有.md", "挂起的正文");
     await flushPendingNotes();
     expect(stub.files.get("已有.md")).toBe("挂起的正文");
-    expect(h.calls).toEqual([]);
+    // 空间身份下补历史存档点走服务端：令牌按真源从 keychain 回源属契约内 I/O，
+    // 其余 Tauri 命令不得出现（内容 I/O 全部由 stub 后端承载）
+    expect(h.calls.filter((c) => c.cmd !== "get_app_secret")).toEqual([]);
   });
 
   it("切仓库交叉：切后 reset 同步清缓存，新读写路由到新后端（旧内容不串味）", async () => {

@@ -42,7 +42,7 @@ function userEntryName(serverUrl: string): Promise<string> {
 }
 
 function makeClient(serverUrl: string): SpaceClient {
-  return createSpaceClient(serverUrl, async () => tokenCache.get(serverUrl) ?? "");
+  return createSpaceClient(serverUrl, () => getToken(serverUrl));
 }
 
 async function saveSession(serverUrl: string, token: string, user: Omit<SpaceUserInfo, "serverUrl">): Promise<void> {
@@ -53,6 +53,17 @@ async function saveSession(serverUrl: string, token: string, user: Omit<SpaceUse
 async function clearSession(serverUrl: string): Promise<void> {
   await deleteAppSecret(await tokenEntryName(serverUrl));
   await deleteAppSecret(await userEntryName(serverUrl));
+}
+
+/**
+ * 清某服务器的本地会话：内存令牌缓存 + keychain 令牌/身份条目 + spaceServers 清单剔除。
+ * 「会话已确定失效」的统一本地清理（服务端已拒绝该会话，无需再调 logout）——
+ * 启动 restore 的失效分支与会话中途失效收口（appStore）共用。
+ */
+export async function discardLocalSession(serverUrl: string): Promise<void> {
+  tokenCache.delete(serverUrl);
+  await clearSession(serverUrl).catch(() => undefined);
+  await removeServerFromList(serverUrl).catch(() => undefined);
 }
 
 /** 探测服务器可达：能拿到任何 HTTP 响应（含 401/5xx）即视为可达；仅网络/超时（status 0）抛错。 */
@@ -169,9 +180,8 @@ export async function restoreSession(serverUrl: string): Promise<SpaceUserInfo |
   const userRaw = await getAppSecret(await userEntryName(serverUrl));
   if (!userRaw) {
     // 孤儿令牌：令牌在但用户身份条目缺失（半写入/被手工清理），会话永远无法恢复——
-    // 对齐 401 分支清理本地残留（令牌 + 身份 + 服务器清单），不留每次启动空恢复的孤儿
-    await clearSession(serverUrl).catch(() => undefined);
-    await removeServerFromList(serverUrl).catch(() => undefined);
+    // 清理口径与会话失效一致（discardLocalSession），不留每次启动空恢复的孤儿
+    await discardLocalSession(serverUrl);
     return null;
   }
   let user: Omit<SpaceUserInfo, "serverUrl">;
@@ -188,10 +198,8 @@ export async function restoreSession(serverUrl: string): Promise<SpaceUserInfo |
     if (err instanceof Error && (err as SpaceApiError).name === "SpaceApiError") {
       const e = err as SpaceApiError;
       if (e.status === 401 || e.status === 403) {
-        tokenCache.delete(serverUrl);
-        await clearSession(serverUrl).catch(() => undefined);
-        // 会话失效：从 spaceServers 清单剔除并落盘（与 login/logout 一致，由本 service 维护清单）
-        await removeServerFromList(serverUrl).catch(() => undefined);
+        // 会话失效：清本地残留（令牌 + 身份 + 服务器清单，与中途失效收口同一清理）
+        await discardLocalSession(serverUrl);
         return null;
       }
     }
@@ -208,9 +216,15 @@ export async function revokeDevice(serverUrl: string, sessionId: string): Promis
 }
 
 /**
- * 取当前令牌（供空间内容后端随请求附加 Authorization）。
- * 会话经 keychain 缓存于内存，未登录返回空串（客户端据此不携带令牌）。
+ * 取当前令牌（供空间内容后端与 HTTP 客户端随请求附加 Authorization）。
+ * 内存缓存未命中时回源 keychain（keychain 是真源）——任意窗口（主窗口/撕裂窗口各自一份
+ * 内存缓存）首次取令牌自动可用，无需依赖启动 restore 填充；读到的令牌入缓存，每窗口
+ * 每服务器仅多一次 keychain IPC。未登录（keychain 无令牌）返回空串，客户端据此不携带令牌。
  */
 export async function getToken(serverUrl: string): Promise<string> {
-  return tokenCache.get(serverUrl) ?? "";
+  const cached = tokenCache.get(serverUrl);
+  if (cached) return cached;
+  const token = await getAppSecret(await tokenEntryName(serverUrl));
+  if (token) tokenCache.set(serverUrl, token);
+  return token;
 }

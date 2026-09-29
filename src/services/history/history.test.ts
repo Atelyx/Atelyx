@@ -28,6 +28,14 @@ vi.mock("@/services/vault/aiFiles", () => ({
     return Promise.resolve();
   },
 }));
+// keychain 替身：空间路径的令牌按真源回源（缓存 miss → keychain）
+vi.mock("@/services/keychain", () => ({
+  getAppSecret: vi.fn(async (name: string) =>
+    String(name).startsWith("space-token-") ? "tok-h" : "",
+  ),
+  setAppSecret: vi.fn(async () => undefined),
+  deleteAppSecret: vi.fn(async () => undefined),
+}));
 
 import {
   historyPathFor,
@@ -262,12 +270,13 @@ describe("recordAgentFileWrite", () => {
 describe("空间仓库：版本追加经服务端路径锁内合并", () => {
   it("激活空间身份时 recordHistoryVersion 走 history/record（不写本地侧文件）", async () => {
     const { activateContentIdentity, deactivateContentVault } = await import("@/services/content/factory");
-    const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const calls: Array<{ url: string; body: Record<string, unknown>; auth?: string }> = [];
     const realFetch = globalThis.fetch;
     globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
       calls.push({
         url: String(url),
         body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>,
+        auth: (init?.headers as Record<string, string>)?.["Authorization"],
       });
       return new Response(JSON.stringify({ ok: true }), {
         status: 200,
@@ -284,6 +293,8 @@ describe("空间仓库：版本追加经服务端路径锁内合并", () => {
     }
     expect(calls).toHaveLength(1);
     expect(calls[0].url).toBe("http://s/api/spaces/sp/history/record");
+    // 令牌经 keychain 回源后随请求携带（空令牌不发请求头，会被服务端 401 拒绝）
+    expect(calls[0].auth).toBe("Bearer tok-h");
     expect(calls[0].body).toMatchObject({
       kind: "note",
       file: F,

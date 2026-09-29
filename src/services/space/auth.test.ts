@@ -20,7 +20,7 @@ vi.mock("@/services/global", () => ({
 
 import { getAppSecret, setAppSecret, deleteAppSecret } from "@/services/keychain";
 import { readGlobalConfig, updateGlobalConfig } from "@/services/global";
-import { login, register, logout, restoreSession } from "./auth";
+import { login, register, logout, restoreSession, getToken } from "./auth";
 
 const SERVER = "http://192.168.1.10:11224";
 
@@ -140,5 +140,40 @@ describe("logout", () => {
     expect(deleteAppSecret).toHaveBeenCalled();
     expect((deleteAppSecret as ReturnType<typeof vi.fn>).mock.calls.some((c) => String(c[0]).startsWith("space-token-"))).toBe(true);
     expect(updateGlobalConfig).toHaveBeenCalledWith({ spaceServers: [] });
+  });
+});
+
+describe("getToken", () => {
+  // 独立服务器地址：本文件其他用例（login/restore 等）会填同一模块级缓存，且用例间
+  // 「回源后入缓存」会互相污染——每用例一个地址，保证缓存状态符合用例前提
+  const SERVER_MISS = "http://192.168.1.20:11224";
+  const SERVER_CACHED = "http://192.168.1.21:11224";
+  const SERVER_EMPTY = "http://192.168.1.22:11224";
+
+  it("缓存未命中回源 keychain：读到令牌入缓存并返回", async () => {
+    (getAppSecret as ReturnType<typeof vi.fn>).mockImplementation(async (name: string) => {
+      if (String(name).startsWith("space-token-")) return "tok-kc";
+      return "";
+    });
+
+    await expect(getToken(SERVER_MISS)).resolves.toBe("tok-kc");
+  });
+
+  it("回源后令牌入缓存：再次取值不再读 keychain", async () => {
+    (getAppSecret as ReturnType<typeof vi.fn>).mockImplementation(async (name: string) => {
+      if (String(name).startsWith("space-token-")) return "tok-kc";
+      return "";
+    });
+    await getToken(SERVER_CACHED);
+
+    (getAppSecret as ReturnType<typeof vi.fn>).mockClear();
+    await expect(getToken(SERVER_CACHED)).resolves.toBe("tok-kc");
+    expect(getAppSecret).not.toHaveBeenCalled();
+  });
+
+  it("keychain 无令牌：返回空串（客户端据此不携带 Authorization）", async () => {
+    (getAppSecret as ReturnType<typeof vi.fn>).mockResolvedValue("");
+
+    await expect(getToken(SERVER_EMPTY)).resolves.toBe("");
   });
 });
