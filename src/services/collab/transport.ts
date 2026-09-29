@@ -28,6 +28,8 @@ export interface CollabTransportHandle {
   ): boolean;
   /** 本连接已收到的最大插件帧序号（可靠补投对账基准；未收到过 = null）。 */
   pluginSeq(): number | null;
+  /** 连接是否已永久收尾（disconnect 调用或重连放弃）：收尾的句柄不得再被当作可复用连接。 */
+  isClosed(): boolean;
   /** 主动离开房间（切仓库/关闭应用）。 */
   sendBye(): void;
   /** 断开连接且不再重连。 */
@@ -50,6 +52,8 @@ export interface CollabTransportOptions {
   onChannelMessage(peerId: number, channel: CollabChannel, file: string, payload: unknown): void;
   /** 团队 meta 落地广播帧入站（服务端单向、无 peerId，只带键名）：消费方回读磁盘真源。 */
   onMetaChanged(key: string): void;
+  /** 改名/移动落地广播帧入站（服务端单向、无 peerId，含发起者回放）：打开中的文件切到新路径。 */
+  onRenamed(oldPath: string, newPath: string): void;
   /** 传输侧提示本端接收队列过慢（帧被裁剪）：调用方需重新握手补齐（笔记域索取全量状态）。 */
   onResync(): void;
   onServerError(message: string): void;

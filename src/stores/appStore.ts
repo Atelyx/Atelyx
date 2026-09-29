@@ -843,6 +843,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     return { id: created.id, file: created.file, title: actual };
   },
   renameCanvas: async (row, title) => {
+    // 防抖窗口内的未落盘编辑先落盘：改名迁移磁盘路径，后补的保存会打到旧路径重建旧文件
+    await useAppStore.getState().flushAllPending();
     // 同名自动加序号（排除自身，同目录），返回实际标题供 UI 提醒
     const siblings = canvasesInDir(parentDir(row.file))
       .map((c) => c.title)
@@ -873,6 +875,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     const safe = dedupeFilename(name, siblings);
     const newFile = targetDir ? `${targetDir}/${safe}` : safe;
     if (newFile === row.file) return row.file;
+    // 未落盘编辑先落盘（原因同 renameCanvas）
+    await useAppStore.getState().flushAllPending();
     try {
       await moveCanvasVault(row.file, newFile);
     } catch (e) {

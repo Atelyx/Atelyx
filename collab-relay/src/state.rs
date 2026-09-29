@@ -115,6 +115,8 @@ struct ServerStateInner {
     pub hub: Hub,
     /// 内容写按路径串行化的锁表（整文件写与补丁端点共用）。
     path_locks: PathLocks,
+    /// 空间级结构锁表（补丁与改名/移动串行化；与 path_locks 独立成表，键不含路径）。
+    structure_locks: PathLocks,
 }
 
 /// 内容写并发模型：同一路径同时只允许一个写者——读改写（读文件 → 合并 → 原子写）
@@ -260,6 +262,7 @@ impl ServerState {
                 index_cache: Mutex::new(HashMap::new()),
                 hub: Hub::default(),
                 path_locks: PathLocks::new(),
+                structure_locks: PathLocks::new(),
             }),
         }
     }
@@ -348,6 +351,14 @@ impl ServerState {
     /// 不同空间的同形路径互不阻塞）。
     pub(crate) async fn path_lock(&self, space_id: &str, rel: &str) -> PathLockGuard {
         self.inner.path_locks.lock(&format!("{space_id}/{rel}")).await
+    }
+
+    /// 空间级结构锁：补丁端点与改名端点都先取本锁再取路径锁。补丁按文件内 title 推导落盘
+    /// 路径，可能对请求路径之外的第二条路径写/删——与改名的双路径锁若各自按不同顺序两两取锁
+    /// 无法静态排出全局顺序（第二把锁的 key 要读了文件才知道），统一先串行到本锁上消解死锁，
+    /// 顺带把「补丁漂移」与「改名」完全互斥。持有时长为单请求处理窗口（毫秒级）。
+    pub(crate) async fn structure_lock(&self, space_id: &str) -> PathLockGuard {
+        self.inner.structure_locks.lock(space_id).await
     }
 
     /// 默认布局的空间内容根（未收编目录时的落点）。

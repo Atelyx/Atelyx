@@ -36,8 +36,12 @@ import {
   publishCollabPresence,
   registerCollabChannel,
   registerCollabReconnect,
+  registerCollabRenamed,
   useCollabStore,
 } from "@/stores/collabStore";
+import { useAppStore } from "@/stores/appStore";
+import { useUiStateStore } from "@/stores/uiStateStore";
+import { tableTitleFromFile, remapDirPrefix } from "@/utils/filename";
 import { createPersistController, advanceBaselineRefs } from "@/utils/persist";
 import { createUndoManager } from "@/utils/undoStack";
 import { registerDomainLifecycle } from "@/utils/kernelLifecycle";
@@ -546,6 +550,30 @@ export function hasCollabPeerOnTable(file: string): boolean {
   return useCollabStore.getState().peers.some((p) => p.presence?.file === file);
 }
 
+/**
+ * 远端改名/移动跟随（协作 renamed 帧）：打开中的表格即时切到新路径——内存内容、脏标记
+ * 与落盘基线不动（改名不改内容，挂起编辑随下一轮保存落到新路径）。不同步会在树刷新后
+ * 误判删除静默关表（挂起编辑丢弃），且在途保存打旧路径（404 整写兜底会复活旧文件）。
+ * 旧路径前缀命中 = 远端文件夹改名/移动，路径前缀整体迁移。
+ */
+export function followRemoteTableRename(oldPath: string, newPath: string): void {
+  const s = useTableStore.getState();
+  if (!s.tableFile) return;
+  const next =
+    s.tableFile === oldPath
+      ? newPath
+      : s.tableFile.startsWith(`${oldPath}/`)
+        ? remapDirPrefix(s.tableFile, oldPath, newPath)
+        : null;
+  if (next === null || next === s.tableFile) return;
+  const title = tableTitleFromFile(next);
+  useTableStore.setState({ tableFile: next, title });
+  if (useAppStore.getState().currentTableFile === s.tableFile) {
+    useAppStore.setState({ currentTableFile: next, currentTableTitle: title });
+  }
+  useUiStateStore.getState().renameLastFile("table", s.tableFile, next);
+}
+
 /** 表格域协作接线（builtin.table 载荷调用，随插件启停）：注册 table-patch 通道 handler、
  *  presence 订阅、重连补发表格 presence、广播钩子注入（经 collabSendSink 惰性读宿主 handle：
  *  断开时 no-op、重连后自动指向新连接）；返回撤销函数（停用/卸载时撤销注册 + 复位广播钩子）。
@@ -575,6 +603,8 @@ export function registerTableCollabWiring(): () => void {
       publishCollabPresence({ file: ts.tableFile, selection: ts.selection, view: ts.view });
     }),
   );
+  // 远端改名/移动跟随（renamed 帧无 peerId、含发起者回放——本端已跟随，重复跟随为 no-op）
+  offs.push(registerCollabRenamed(followRemoteTableRename));
   // 广播钩子注入（schedulePersist 计算补丁后回调；宿主 handle 为模块级，重连自动生效）
   useTableStore.getState().setCollabBroadcast((file, patch) => {
     collabSendSink("table-patch")(file, patch);

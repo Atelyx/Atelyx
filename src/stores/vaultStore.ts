@@ -148,6 +148,9 @@ function notifySidecarFailure(what: string, error: unknown): void {
  * newTitle 为 null = 移动（title 不变，只改 file）；否则 = 重命名（title 一并更新）。
  */
 async function applyNoteFileChange(oldFile: string, newFile: string, newTitle: string | null): Promise<void> {
+  // 防抖窗口内的未落盘编辑先落盘：改名/移动迁移磁盘路径，后补的保存会打到旧路径
+  // （协作空间补丁 404 后的整写兜底会复活旧文件，本地仓库同理重建已迁走文件）
+  await useAppStore.getState().flushAllPending();
   const { rewritten } = await renameNoteSvc(oldFile, newFile);
   // 记录本次重命名（跨渲染保留）：工作区联动据此把打开的笔记切到新文件，而非误判删除关闭。
   // 必须早于下面的列表刷新——联动 effect 由列表变化触发，晚记则 effect 先按「已删除」把笔记面板关掉，
@@ -199,6 +202,8 @@ async function applyAttachmentFileChange(
  * 服务命令内部已按 title/新路径扫描更新全部 .atlx 的 table 节点引用。
  */
 async function applyTableFileChange(oldFile: string, newFile: string, newTitle: string | null): Promise<void> {
+  // 防抖窗口内的未落盘编辑先落盘（原因同 applyNoteFileChange）
+  await useAppStore.getState().flushAllPending();
   if (newTitle !== null) {
     await renameTableVault(oldFile, newTitle);
   } else {
@@ -228,6 +233,8 @@ async function applyFolderFileChange(
   newDir: string,
   kind: "folder:renamed" | "folder:moved",
 ): Promise<void> {
+  // 目录内文件的未落盘编辑先落盘（原因同 applyNoteFileChange：目录迁走后旧路径保存会重建旧文件）
+  await useAppStore.getState().flushAllPending();
   const { rewritten } = await renameFolderSvc(oldDir, newDir);
   // 立即记录本次重命名/移动（跨渲染保留）：目录已移动，后续任何渲染间隙的窗口联动
   // 据此把打开的笔记切到新文件，而非误判删除关闭（放 loadFiles/loadList 之后

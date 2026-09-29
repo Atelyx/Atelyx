@@ -229,21 +229,45 @@ pub async fn rename(
 ) -> ApiResult<Json<serde_json::Value>> {
     let root = write_root(&state, &space_id, &user)?;
     let from = root.join(&body.old_path, false).map_err(join_err)?;
-    if !from.exists() {
-        return Err(not_found("源路径不存在"));
-    }
-    // 目录判定须在改名之前取（改完旧路径已不存在）
-    let from_is_dir = from.is_dir();
     let to = root.join(&body.new_path, true).map_err(join_err)?;
-    if to.exists() {
-        return Err(ApiError(StatusCode::CONFLICT, format!("目标已存在：{}", body.new_path)));
+    // 结构锁 → 双路径锁（按 key 字典序取锁防死锁）：检查到 fs::rename 全程在锁内。
+    // 补丁端点的「锁内读 → 合并 → 写」窗口若与改名互不互斥，在途补丁会在改名后落盘，
+    // 把旧路径文件原样重建（同 id 双文件，旧文件名复活）；结构锁同时消解补丁漂移场景下
+    // 跨路径写/删与改名的取锁顺序问题。
+    let _structure = state.structure_lock(&space_id).await;
+    let from_is_dir;
+    {
+        let (lock_from, lock_to) = if body.old_path <= body.new_path {
+            (
+                state.path_lock(&space_id, &body.old_path).await,
+                state.path_lock(&space_id, &body.new_path).await,
+            )
+        } else {
+            (
+                state.path_lock(&space_id, &body.new_path).await,
+                state.path_lock(&space_id, &body.old_path).await,
+            )
+        };
+        if !from.exists() {
+            return Err(not_found("源路径不存在"));
+        }
+        // 目录判定须在改名之前取（改完旧路径已不存在）
+        from_is_dir = from.is_dir();
+        if to.exists() {
+            return Err(ApiError(StatusCode::CONFLICT, format!("目标已存在：{}", body.new_path)));
+        }
+        std::fs::rename(&from, &to).map_err(|e| {
+            ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("重命名失败：{e}"))
+        })?;
+        drop(lock_to);
+        drop(lock_from);
     }
-    std::fs::rename(&from, &to)
-        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("重命名失败：{e}")))?;
     // 历史侧文件随内容改名 / 移动迁移：服务端知道每次改名，比客户端 watcher 可靠；
     // 迁移在每侧文件锁内进行（与历史追加互斥，防旧名侧文件被并发重建）；
     // 失败静默（历史尽力而为，不阻塞重命名主流程）
     crate::history::remap_after_rename(&state, &space_id, &root, &body.old_path, &body.new_path, from_is_dir).await;
+    // 落地后向空间房间广播改名帧（结构锁内发出）；失败只记日志不回滚——真源已落盘
+    crate::ws::broadcast_rename(&state.hub(), &format!("space:{space_id}"), &body.old_path, &body.new_path);
     tracing::info!(space_id = %space_id, from = %body.old_path, to = %body.new_path, "内容重命名");
     Ok(Json(json!({})))
 }

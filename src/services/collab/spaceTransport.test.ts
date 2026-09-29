@@ -82,6 +82,7 @@ interface Harness {
   errors: string[];
   acks: number[];
   metaChanged: string[];
+  renamed: Array<[string, string]>;
 }
 
 const spaceHello = {
@@ -99,6 +100,7 @@ function connect(refreshHello?: () => Promise<CollabHello | null>): Harness {
   const errors: string[] = [];
   const acks: number[] = [];
   const metaChanged: string[] = [];
+  const renamed: Array<[string, string]> = [];
   const handle = mod.spaceCollabTransport.connect({
     url: "ws://server:11224/ws/space",
     hello: { ...spaceHello },
@@ -109,12 +111,13 @@ function connect(refreshHello?: () => Promise<CollabHello | null>): Harness {
     onChannelMessage: (peerId, channel, file, payload) =>
       channels.push([peerId, channel, file, payload]),
     onMetaChanged: (key) => metaChanged.push(key),
+    onRenamed: (oldPath, newPath) => renamed.push([oldPath, newPath]),
     onResync: () => {},
     onServerError: (message) => errors.push(message),
     onStatusChange: (connected) => statuses.push(connected),
   });
   const socket = FakeWebSocket.instances[FakeWebSocket.instances.length - 1];
-  return { handle, socket, channels, statuses, errors, acks, metaChanged };
+  return { handle, socket, channels, statuses, errors, acks, metaChanged, renamed };
 }
 
 describe("spaceWsUrl", () => {
@@ -196,6 +199,13 @@ describe("space 传输频道收发", () => {
     expect(h.metaChanged).toEqual(["calendar"]);
   });
 
+  it("renamed 落地广播帧（无 peerId）分发到 onRenamed", () => {
+    const h = connect();
+    h.socket.open();
+    h.socket.emit({ type: "renamed", payload: { oldPath: "a.atb", newPath: "b.atb" } });
+    expect(h.renamed).toEqual([["a.atb", "b.atb"]]);
+  });
+
   it("sendMessage 出站映射：note-sync 原样、plugin-msg 的 file 槽 = 频道名（可定向）", () => {
     const h = connect();
     h.socket.open();
@@ -222,6 +232,7 @@ describe("space 传输频道收发", () => {
       onPeerPresence: () => {},
       onChannelMessage: () => {},
       onMetaChanged: () => {},
+      onRenamed: () => {},
       onResync: () => {},
       onServerError: () => {},
       onStatusChange: () => {},

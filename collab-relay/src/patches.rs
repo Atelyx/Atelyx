@@ -380,7 +380,9 @@ pub async fn patch_canvas(
 ) -> Result<Response, ApiError> {
     let root = write_root(&state, &space_id, &user)?;
     let path = root.join(&body.path, false).map_err(join_err)?;
-    // 同路径写串行化：与整文件写共用每路径锁（改名落点不在此锁内，与客户端语义一致）
+    // 结构锁 → 同路径锁：补丁可能按文件内 title 把文件漂移落盘到第二条路径（写新删旧），
+    // 与改名端点互斥（改名同样持结构锁 + 双路径锁），防在途改名/补丁互相重建对方路径的文件
+    let _structure = state.structure_lock(&space_id).await;
     let _lock = state.path_lock(&space_id, &body.path).await;
     // 磁盘文件缺失：补丁只有变化实体，重建会丢未变化部分——拒绝
     if !path.is_file() {
@@ -427,6 +429,8 @@ pub async fn patch_table(
 ) -> Result<Response, ApiError> {
     let root = write_root(&state, &space_id, &user)?;
     let path = root.join(&body.path, false).map_err(join_err)?;
+    // 结构锁 → 同路径锁（与画布补丁同构，见上）
+    let _structure = state.structure_lock(&space_id).await;
     let _lock = state.path_lock(&space_id, &body.path).await;
     if !path.is_file() {
         return Err(crate::content::not_found("表格文件不存在（已从磁盘删除）"));

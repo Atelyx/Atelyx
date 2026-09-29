@@ -1503,6 +1503,67 @@ async fn table_patch_merge_order() {
 }
 
 #[tokio::test]
+async fn rename_and_patch_concurrent_no_duplicate_files() {
+    // 改名与补丁并发（多轮压测）：两者互斥（结构锁 + 双路径锁），旧路径不得被在途补丁的
+    // 「检查→读→写」窗口原样重建——那会产生同 id 双文件（旧文件名复活）
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let space_id = setup_two_members(&ctx, "alice", "bob").await;
+    let a = login_as(&ctx, "alice").await;
+
+    let fields = json!([{ "id": "f1", "name": "名称", "type": "text" }]);
+    let rows = json!([{ "id": "r1", "values": { "f1": "任务一" } }]);
+    let patch = json!({
+        "id": "tb-1",
+        "upsertRows": [ { "id": "r2", "values": { "f1": "任务二" } } ]
+    });
+    let file_url = format!("/api/spaces/{space_id}/file");
+    let patch_url = format!("/api/spaces/{space_id}/patches/table");
+    let rename_url = format!("/api/spaces/{space_id}/rename");
+
+    // 多轮压测（竞态窗口极窄，确定性复现以客户端测试为准；本测试作回归守卫）
+    for round in 0..30u32 {
+        // 文件名与内部 title 一致（仓库不变式，与修复后的客户端行为一致）
+        let path_a = format!("表格/表{round}.atb");
+        let path_b = format!("表格/表{round}改.atb");
+        let (status, body) = ctx
+            .put(
+                &file_url,
+                Some(&a),
+                json!({ "path": path_a.clone(), "content": table_doc("tb-1", &format!("表{round}"), fields.clone(), rows.clone()).to_string() }),
+            )
+            .await;
+        assert_eq!(status, 200, "建表应成功：{body}");
+
+        // 同一文件上并发改名 + 补丁
+        let rename_fut = ctx.post(
+            &rename_url,
+            Some(&a),
+            json!({ "oldPath": &path_a, "newPath": &path_b }),
+        );
+        let patch_fut = ctx.post(&patch_url, Some(&a), json!({ "path": &path_a, "patch": patch }));
+        let (rename_result, patch_result) = futures_util::future::join(rename_fut, patch_fut).await;
+        assert_eq!(rename_result.0, 200, "改名应成功：{}", rename_result.1);
+        assert!(
+            patch_result.0 == 200 || patch_result.0 == 404,
+            "补丁应成功或报文件不存在：{}",
+            patch_result.1
+        );
+
+        // 收敛不变式：旧路径必须消失、新路径恰有一份同 id 文件
+        let (a_status, _) = ctx.get(&file_url, Some(&a), &[("path", &path_a)]).await;
+        assert_eq!(a_status, 404, "旧路径 {path_a} 不得被并发补丁重建");
+        let doc = read_json(&ctx, &a, &space_id, &path_b).await;
+        assert_eq!(doc["id"], "tb-1");
+        if patch_result.0 == 200 {
+            // 补丁先于改名落地：改名把补丁结果一并搬走，r2 必须在场
+            let row_ids: Vec<&str> = doc["rows"].as_array().unwrap().iter().map(|r| r["id"].as_str().unwrap()).collect();
+            assert!(row_ids.contains(&"r2"), "补丁先落地时 r2 不应丢失：{doc}");
+        }
+    }
+}
+
+#[tokio::test]
 async fn same_path_writes_serialize_no_lost_update() {
     let dir = tempfile::tempdir().unwrap();
     let ctx = Ctx::new(spawn_server(dir.path()).await);
@@ -1660,6 +1721,53 @@ async fn patch_landing_broadcasts_frame_to_room() {
     assert_eq!(frame["type"], "table-patch", "应收到表格补丁广播帧：{frame}");
     assert_eq!(frame["file"], tfile);
     assert_eq!(frame["patch"]["id"], "tb-1");
+}
+
+/// 内容改名/移动落地 → 房间收到 renamed 帧（含发起者自身）：客户端据此把打开中的文件
+/// 即时切到新路径，不再依赖滞后的文件树刷新（滞后感知会误判删除并静默关闭打开的文件）。
+#[tokio::test]
+async fn rename_landing_broadcasts_renamed_frame() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let space_id = setup_two_members(&ctx, "alice", "bob").await;
+    let a = login_as(&ctx, "alice").await;
+
+    let mut ws = ws_connect(
+        &ctx.base,
+        "/ws/space",
+        json!({ "type": "hello", "spaceId": space_id, "token": a, "nickname": "爱丽丝", "color": "#ff0000", "deviceName": "A机" }),
+    )
+    .await;
+    let ack = next_frame(&mut ws).await;
+    assert_eq!(ack["type"], "hello-ack");
+
+    let (status, _) = ctx
+        .put(
+            &format!("/api/spaces/{space_id}/file"),
+            Some(&a),
+            json!({ "path": "表格/旧名.atb", "content": "x" }),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let (status, _) = ctx
+        .post(
+            &format!("/api/spaces/{space_id}/rename"),
+            Some(&a),
+            json!({ "oldPath": "表格/旧名.atb", "newPath": "表格/新名.atb" }),
+        )
+        .await;
+    assert_eq!(status, 200);
+
+    let mut frame = next_frame(&mut ws).await;
+    for _ in 0..5 {
+        if frame["type"] == "renamed" {
+            break;
+        }
+        frame = next_frame(&mut ws).await;
+    }
+    assert_eq!(frame["type"], "renamed", "应收到改名落地广播帧：{frame}");
+    assert_eq!(frame["payload"]["oldPath"], "表格/旧名.atb");
+    assert_eq!(frame["payload"]["newPath"], "表格/新名.atb");
 }
 
 /// 团队 meta 写/删落地 → 房间收到 meta-changed 帧（含写入者自身，只带键名）；

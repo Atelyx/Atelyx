@@ -93,6 +93,7 @@ function connect(opts?: { pluginLastSeq?: number | null }) {
     pluginLastSeq: opts?.pluginLastSeq,
     onHelloAck: () => {},
     onPeers: () => {},
+    onRenamed: () => {},
     onPeerPresence: () => {},
     onChannelMessage: (peerId, channel, file, payload) => {
       if (channel === "plugin-msg") channelMessages.push([peerId, file, payload]);

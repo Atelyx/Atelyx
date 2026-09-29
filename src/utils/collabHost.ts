@@ -88,6 +88,24 @@ export function dispatchCollabMetaChanged(key: string): void {
   for (const fn of [...collabMetaChangedHandlers]) fn(key);
 }
 
+// ===== 远端改名/移动（服务端单向广播帧，与 peer 转发频道分列） =====
+
+const collabRenamedHandlers: Array<(oldPath: string, newPath: string) => void> = [];
+
+/** 注册远端改名/移动 handler（rename 端点落地广播；各域据此把打开中的文件切到新路径。返回撤销函数，按引用守卫）。 */
+export function registerCollabRenamed(fn: (oldPath: string, newPath: string) => void): () => void {
+  collabRenamedHandlers.push(fn);
+  return () => {
+    const i = collabRenamedHandlers.indexOf(fn);
+    if (i >= 0) collabRenamedHandlers.splice(i, 1);
+  };
+}
+
+/** 远端改名/移动分发（无 handler 时静默丢弃）。 */
+export function dispatchCollabRenamed(oldPath: string, newPath: string): void {
+  for (const fn of [...collabRenamedHandlers]) fn(oldPath, newPath);
+}
+
 /** 带序钩子（priority 升序运行；同 priority 按注册序）。 */
 interface OrderedHook<F> {
   fn: F;

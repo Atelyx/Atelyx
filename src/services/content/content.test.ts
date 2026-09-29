@@ -499,12 +499,15 @@ function setupSpaceServer(init?: {
   metaValues?: Record<string, string>;
   /** 补丁端点返回的实际路径（缺省 = 请求路径；表格改名漂移用）。 */
   patchFile?: string;
+  /** rename 端点结果：error = 拒绝且不移动；move-then-error = 已移动但响应失败（模拟竞态下"实际生效、客户端收到错误"）。 */
+  renameOutcome?: "ok" | "error" | "move-then-error";
 }) {
   const files = new Map(Object.entries(init?.files ?? {}));
   const b64 = new Map(Object.entries(init?.b64 ?? {}));
   const media = new Map(Object.entries(init?.media ?? {}));
   const metaValues = init?.metaValues ?? {};
   let patchFile = init?.patchFile;
+  const renameOutcome = init?.renameOutcome ?? "ok";
   calls = [];
   const writes: Array<{ path: string; encoding?: string }> = [];
   const deletes: string[] = [];
@@ -548,15 +551,18 @@ function setupSpaceServer(init?: {
     }
     if (p === "/rename" && method === "POST") {
       const { oldPath, newPath } = body as { oldPath: string; newPath: string };
-      for (const map of [files, b64]) {
-        for (const key of [...map.keys()]) {
-          if (key === oldPath || key.startsWith(`${oldPath}/`)) {
-            map.set(key.replace(oldPath, newPath), map.get(key)!);
-            map.delete(key);
+      if (renameOutcome !== "error") {
+        for (const map of [files, b64]) {
+          for (const key of [...map.keys()]) {
+            if (key === oldPath || key.startsWith(`${oldPath}/`)) {
+              map.set(key.replace(oldPath, newPath), map.get(key)!);
+              map.delete(key);
+            }
           }
         }
       }
-      return ok({});
+      if (renameOutcome === "ok") return ok({});
+      return ok({ error: "改名失败" }, 500);
     }
     if (p === "/copy" && method === "POST") {
       const { fromPath, toPath } = body as { fromPath: string; toPath: string };
@@ -1008,6 +1014,54 @@ describe("表格改名/附件改名的画布引用同步", () => {
     expect(server.files.has("新表_名.atb")).toBe(true);
     const canvas = JSON.parse(server.files.get("画布.atlx")!);
     expect(canvas.nodes[0].data.file).toBe("新表_名.atb");
+  });
+
+  it("renameTable：先把新标题写进 .atb 再改名（title=文件名不变式，防服务端按旧 title 把补丁落回旧路径）", async () => {
+    const server = setupSpaceServer({
+      files: {
+        "目录/旧名.atb": JSON.stringify({ schema: "atelyx-table/v1", id: "t1", title: "旧名" }),
+      },
+    });
+    await backend().renameTable("目录/旧名.atb", "新名");
+    const putIdx = calls.findIndex(
+      (c) => c.method === "PUT" && (c.body as { path: string }).path === "目录/旧名.atb",
+    );
+    const renameIdx = calls.findIndex((c) => c.url.endsWith("/rename"));
+    expect(putIdx).toBeGreaterThanOrEqual(0);
+    expect(putIdx).toBeLessThan(renameIdx);
+    expect(JSON.parse(server.files.get("目录/新名.atb")!).title).toBe("新名");
+  });
+
+  it("renameTable：改名失败且旧路径仍在 → 回滚 title，保持 title=文件名", async () => {
+    const server = setupSpaceServer({
+      files: { "旧名.atb": JSON.stringify({ id: "t1", title: "旧名" }) },
+      renameOutcome: "error",
+    });
+    await expect(backend().renameTable("旧名.atb", "新名")).rejects.toThrow();
+    expect(JSON.parse(server.files.get("旧名.atb")!).title).toBe("旧名");
+  });
+
+  it("renameTable：改名请求已生效但响应失败（源已不在）→ 不回滚写，防复活旧文件", async () => {
+    const server = setupSpaceServer({
+      files: { "旧名.atb": JSON.stringify({ id: "t1", title: "旧名" }) },
+      renameOutcome: "move-then-error",
+    });
+    await expect(backend().renameTable("旧名.atb", "新名")).rejects.toThrow();
+    expect(server.files.has("旧名.atb")).toBe(false);
+    expect(JSON.parse(server.files.get("新名.atb")!).title).toBe("新名");
+    // 旧路径仅应有改名前那一次 title 写入，不得出现回滚写（复活）
+    expect(server.writes.filter((w) => w.path === "旧名.atb")).toHaveLength(1);
+  });
+
+  it("renameCanvas：改名请求已生效但响应失败 → 不回滚写，防复活旧文件", async () => {
+    const server = setupSpaceServer({
+      files: { "旧名.atlx": canvasJson([], { title: "旧名" }) },
+      renameOutcome: "move-then-error",
+    });
+    await expect(backend().renameCanvas("旧名.atlx", "新名")).rejects.toThrow();
+    expect(server.files.has("旧名.atlx")).toBe(false);
+    // 旧路径仅应有改名前那一次 title 写入，不得出现回滚写（复活）
+    expect(server.writes.filter((w) => w.path === "旧名.atlx")).toHaveLength(1);
   });
 
   it("renameAttachment：改名 + 画布 media 节点 file 引用同步", async () => {

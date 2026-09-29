@@ -82,6 +82,7 @@ import { prefix, scanMentionHits } from "@/utils/text";
 import { noteTitleFromFile, remapDirPrefix, sanitizeFilename, siblingPath, tableTitleFromFile } from "@/utils/filename";
 import { useSettingsStore } from "./settingsStore";
 import { useAppStore } from "./appStore";
+import { useUiStateStore } from "./uiStateStore";
 import { useNotificationStore } from "./notificationStore";
 import {
   collabSendSink,
@@ -89,6 +90,7 @@ import {
   registerCollabChannel,
   registerCollabPresenceProvider,
   registerCollabReconnect,
+  registerCollabRenamed,
   registerCollabTeardown,
   useCollabStore,
 } from "./collabStore";
@@ -571,6 +573,44 @@ export async function syncCanvasDirRefs(oldDir: string, newDir: string): Promise
   }
 }
 
+/**
+ * 远端改名/移动跟随（协作 renamed 帧）：打开画布的路径即时切到新路径（防下次补丁保存
+ * 回写旧路径）+ 打开画布内节点 file 引用同步（renamer 已改写磁盘全部 .atlx，内存不同步
+ * 会在下次补丁保存把旧引用写回）。旧路径前缀命中 = 远端文件夹改名/移动，前缀整体迁移。
+ */
+export function followRemoteCanvasRename(oldPath: string, newPath: string): void {
+  const canvasState = useCanvasStore.getState();
+  const canvasFile = canvasState.canvasFile;
+  if (canvasFile) {
+    const next =
+      canvasFile === oldPath
+        ? newPath
+        : canvasFile.startsWith(`${oldPath}/`)
+          ? remapDirPrefix(canvasFile, oldPath, newPath)
+          : null;
+    if (next !== null && next !== canvasFile) {
+      useCanvasStore.setState({ canvasFile: next });
+      if (useAppStore.getState().currentCanvasFile === canvasFile) {
+        useAppStore.setState({ currentCanvasFile: next });
+      }
+      useUiStateStore.getState().renameLastFile("canvas", canvasFile, next);
+    }
+  }
+  for (const n of canvasState.nodes) {
+    const d = n.data as { file?: string };
+    if (!d.file) continue;
+    const fileNext =
+      d.file === oldPath
+        ? newPath
+        : d.file.startsWith(`${oldPath}/`)
+          ? remapDirPrefix(d.file, oldPath, newPath)
+          : null;
+    if (fileNext !== null && fileNext !== d.file) {
+      canvasState.updateNodeData(n.id, { file: fileNext });
+    }
+  }
+}
+
 /** 画布域协作接线（builtin.canvas 载荷调用，随插件启停）：注册 canvas-patch 通道 handler、
  *  presence 锁/流式合并 provider、重连补发画布 presence、presence 订阅、拆卸清理与广播钩子
  *  注入（经 collabSendSink 惰性读宿主 handle：断开时 no-op、重连后自动指向新连接）；
@@ -584,6 +624,8 @@ export function registerCanvasCollabWiring(): () => void {
       useCanvasStore.getState().applyRemoteCanvasPatch(file, patch as CanvasPatch);
     }),
   );
+  // 远端改名/移动跟随（renamed 帧无 peerId、含发起者回放——本端已跟随，重复跟随为 no-op）
+  offs.push(registerCollabRenamed(followRemoteCanvasRename));
   // 画布锁/流式跨视图保活：无论当前 view 槽（table/note/canvas）为何，都合并 canvas 的
   // 独占编辑锁与生成中节点——用户在看表格/笔记期间其画布锁仍对端可见，对话节点持续只读
   offs.push(

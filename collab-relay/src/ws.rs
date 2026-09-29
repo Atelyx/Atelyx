@@ -398,6 +398,30 @@ pub(crate) fn broadcast_patch(hub: &Hub, room_id: &str, kind: &'static str, file
     }
 }
 
+/// 服务端主动向房间广播改名帧（rename 端点落地成功后调用）。发给房间内全部成员，含发起者
+/// 自己——发起者已本地跟随，重复跟随为 no-op。客户端据此把打开中的文件即时切到新路径，
+/// 不再依赖滞后的文件树刷新（滞后感知会误判删除并静默关闭打开的文件）。房间为空或个别
+/// 投递失败只记日志：真源已落盘，广播失败不回滚落地。
+pub(crate) fn broadcast_rename(hub: &Hub, room_id: &str, old_path: &str, new_path: &str) {
+    let payload = server_msg(
+        "renamed",
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(serde_json::json!({ "oldPath": old_path, "newPath": new_path })),
+    );
+    let rooms = hub.0.lock().unwrap();
+    if let Some(room) = rooms.get(room_id) {
+        for peer in room.peers.values() {
+            if peer.tx.send(payload.clone()).is_err() {
+                debug!(room = %room_id, "改名帧投递失败（接收端已关闭）");
+            }
+        }
+    }
+}
+
 /// 服务端主动向房间广播元数据变更帧（团队层 meta 写/删端点落地成功后调用）。发给房间内全部成员，
 /// 含发起写入者自己——发起者经 HTTP 保存、无转发帧可回声，收到的是落地广播帧；帧只带键名不带值，
 /// 客户端据此回读磁盘真源。房间为空或个别投递失败只记日志：真源已落盘，广播失败不回滚落地。

@@ -34,6 +34,7 @@ type CollabServerMessage =
   | { type: "note-aware"; peerId: number; file: string; payload: string }
   | { type: "plugin-msg"; peerId: number; channel: string; payload: unknown; seq?: number }
   | { type: "meta-changed"; key: string }
+  | { type: "renamed"; payload: { oldPath: string; newPath: string } }
   | { type: "resync" }
   | { type: "pong" }
   | { type: "error"; message: string };
@@ -52,6 +53,8 @@ interface CollabFramePumpCallbacks {
   onPluginMsg: (peerId: number, channel: string, payload: unknown) => void;
   /** 收到团队 meta 落地广播帧（服务端单向，无 peerId）：只带键名，值由消费方回读磁盘真源。 */
   onMetaChanged: (key: string) => void;
+  /** 收到改名/移动落地广播帧（服务端单向，无 peerId，含发起者回放）：打开中的文件据此切到新路径。 */
+  onRenamed: (oldPath: string, newPath: string) => void;
   /** 传输侧提示本端接收队列过慢（帧被裁剪）：调用方需重新握手补齐。 */
   onResync: () => void;
   /** 收到服务端 error 帧（协议异常/鉴权拒绝等）——调用方决定日志或 UI 反馈。 */
@@ -86,6 +89,8 @@ interface CollabFramePumpHandle {
   sendPluginMsg(channel: string, payload: unknown, targetPeerId?: number): boolean;
   /** 本连接已收到的最大插件帧序号（可靠补投对账基准；未收到过 = null）。 */
   pluginSeq(): number | null;
+  /** 连接是否已永久收尾（disconnect 调用或重连放弃）。 */
+  isClosed(): boolean;
   /** 主动离开房间（切仓库/关闭应用）。 */
   sendBye(): void;
   /** 断开连接且不再重连。 */
@@ -344,6 +349,7 @@ function connectFramePump(opts: CollabFramePumpOptions): CollabFramePumpHandle {
       else if (msg.type === "plugin-msg") {
         trackPluginSeq(msg.seq, msg.peerId, msg.channel, msg.payload);
       } else if (msg.type === "meta-changed") opts.onMetaChanged(msg.key);
+      else if (msg.type === "renamed") opts.onRenamed(msg.payload.oldPath, msg.payload.newPath);
       else if (msg.type === "resync") opts.onResync();
       else if (msg.type === "pong") {
         // 保活回执：仅刷新 lastMessageAt（staleness 检测用），无其他副作用
@@ -440,6 +446,7 @@ function connectFramePump(opts: CollabFramePumpOptions): CollabFramePumpHandle {
       return true;
     },
     pluginSeq: () => pluginSeq,
+    isClosed: () => closed,
     sendBye: () => {
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: "bye" }));
@@ -496,6 +503,7 @@ export function connectChannelPump(opts: CollabTransportOptions): CollabTranspor
     onPluginMsg: (peerId, channel, payload) =>
       opts.onChannelMessage(peerId, "plugin-msg", channel, payload),
     onMetaChanged: opts.onMetaChanged,
+    onRenamed: opts.onRenamed,
     onResync: opts.onResync,
     onServerError: opts.onServerError,
     onStatusChange: opts.onStatusChange,
@@ -503,6 +511,7 @@ export function connectChannelPump(opts: CollabTransportOptions): CollabTranspor
   return {
     sendPresence: (presence) => pump.sendPresence(presence),
     pluginSeq: () => pump.pluginSeq(),
+    isClosed: () => pump.isClosed(),
     sendMessage: (channel, file, payload, targetPeerId) => {
       if (channel === "note-sync") return pump.sendNoteSync(file, payload as string);
       if (channel === "note-aware") return pump.sendNoteAware(file, payload as string);

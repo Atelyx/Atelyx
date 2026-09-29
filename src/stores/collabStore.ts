@@ -15,6 +15,7 @@ import {
   disconnectTransport,
   sendTransportMessage,
   sendTransportPresence,
+  transportMatchesConnection,
   type CollabChannel,
 } from "@/services/collab/docHost";
 import { useAppStore } from "@/stores/appStore";
@@ -101,6 +102,14 @@ const SERVER_ERROR_NOTIFY_COALESCE_MS = 60_000;
 let lastServerErrorAt = 0;
 let lastServerErrorMessage = "";
 
+/** 会话内稳定的随机身份色（未配置颜色时用）：每次解析都重新随机会让 hello 漂移——
+ *  重复建连请求的复用判定失效、每次重连房间内变色，故首取后缓存。 */
+let cachedRandomColor: string | null = null;
+function randomColorOnce(): string {
+  if (!cachedRandomColor) cachedRandomColor = randomPeerColor();
+  return cachedRandomColor;
+}
+
 /** 按当前身份与配置解析连接目标（建连与重连刷新共用）：space = space 工厂按 spaceId 入房，
  *  每次解析触取登录令牌——身份/令牌/配置变化自动生效；local/无身份/协作关闭 = 不连接（null）。 */
 async function resolveCurrentTarget(): Promise<CollabTarget | null> {
@@ -113,7 +122,7 @@ async function resolveCurrentTarget(): Promise<CollabTarget | null> {
     collab: {
       enabled: cfg.enabled,
       nickname: cfg.nickname || cfg.deviceName || "用户",
-      color: cfg.color || randomPeerColor(),
+      color: cfg.color || randomColorOnce(),
       deviceName: cfg.deviceName,
       version,
     },
@@ -129,6 +138,7 @@ export {
   registerCollabChannel,
   registerCollabPresenceProvider,
   registerCollabReconnect,
+  registerCollabRenamed,
   registerCollabTeardown,
   dispatchPluginChannel,
 } from "@/utils/collabHost";
@@ -167,9 +177,30 @@ export function randomPeerColor(): string {
 }
 
 async function establishConnection(): Promise<void> {
-  // 先发 bye 再断开（切换身份换房）：服务端收到 bye 立即踢出，否则旧 peer 要等 30s 心跳
-  // 超时才消失，期间对端列表可见幽灵用户（dispose 路径同样先 bye，见 dispose）
-  disconnectTransport();
+  // 序号先于任何 await 递增：await 版本号/令牌期间若有禁用协作/切换身份等早退调用，
+  // 也必须作废在途请求——否则旧请求恢复后仍用已失效配置建连（幽灵连接 / 发出空房间号）
+  const seq = ++connSeq;
+  const target = await resolveCurrentTarget();
+  // await 版本号/令牌期间有更新的连接请求（applyConfig/切身份/早退）则放弃本次
+  if (seq !== connSeq) return;
+  if (!target) {
+    // 协作停用/身份未就绪：拆掉在途或已连的旧连接（不再重连）并复位状态
+    disconnectTransport();
+    // 换连接即重新计时：上一个连接刚接受过 resync 不应吞掉新连接的首个 resync
+    lastResyncAt = 0;
+    // 断线/重连期间清空在线列表与身份（残留旧 peers 会误导远端高亮）
+    myPeerId = null;
+    // 丢弃节流窗口内未发出的陈旧 presence（切仓库后旧文件的选中不得发进新房间）
+    pendingPresence = null;
+    // 最近一次上报基底同理失效：换房后 republishPresence 不得拿旧仓库的聚焦文件成帧
+    lastPresenceBase = null;
+    useCollabStore.setState({ connected: false, peers: [] });
+    return;
+  }
+  // 目标未变且连接在途/已连：跳过拆建。启动期协作宿主初始化被高频重复触发（插件 demand
+  // 翻转/布局镜像同步等），每次拆建都会杀掉上一条握手中的连接（服务端只见 hello 前的
+  // Close 帧），无谓重连还伴随状态抖动
+  if (transportMatchesConnection(target.url, target.hello)) return;
   // 换连接即重新计时：上一个连接刚接受过 resync 不应吞掉新连接的首个 resync
   lastResyncAt = 0;
   // 断线/重连期间清空在线列表与身份（残留旧 peers 会误导远端高亮）
@@ -179,15 +210,6 @@ async function establishConnection(): Promise<void> {
   // 最近一次上报基底同理失效：换房后 republishPresence 不得拿旧仓库的聚焦文件成帧
   lastPresenceBase = null;
   useCollabStore.setState({ connected: false, peers: [] });
-  // 序号须先于早退判断递增：await 版本号/令牌期间若有禁用协作/切换身份等早退调用，
-  // 也必须作废在途请求——否则旧请求恢复后仍用已失效配置建连（幽灵连接 / 发出空房间号）
-  const seq = ++connSeq;
-  if (!runtimeCfg) return;
-  const target = await resolveCurrentTarget();
-  // await 版本号/令牌期间有更新的连接请求（applyConfig/切身份/早退）则放弃本次——
-  // 不复查会拿已失效的配置建连（幽灵连接/发出空房间号）
-  if (seq !== connSeq) return;
-  if (!target) return;
   try {
     connectTransport({
       name: target.transport,

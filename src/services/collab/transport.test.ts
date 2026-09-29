@@ -27,6 +27,7 @@ const fakeOptions = (): CollabTransportOptions => ({
   onPeerPresence: () => {},
   onChannelMessage: () => {},
   onMetaChanged: () => {},
+  onRenamed: () => {},
   onResync: () => {},
   onServerError: () => {},
   onStatusChange: () => {},
@@ -37,6 +38,7 @@ function fakeHandle(): CollabTransportHandle {
     sendPresence: () => {},
     sendMessage: () => true,
     pluginSeq: () => null,
+    isClosed: () => false,
     sendBye: () => {},
     disconnect: () => {},
   };

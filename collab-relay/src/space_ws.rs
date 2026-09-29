@@ -50,8 +50,13 @@ async fn handle(mut socket: WebSocket, state: ServerState, remote: SocketAddr) {
                 return;
             }
         },
-        Ok(Some(Ok(_))) => {
-            warn!(%remote, "首条消息非文本帧，拒绝连接");
+        Ok(Some(Ok(msg))) => {
+            // Close/Ping/Pong：客户端在握手期作废在途连接（建立即关）或协议栈控制帧——
+            // 正常生命周期，降噪归 debug；Binary 才是真异常（等 hello 时收到数据帧）
+            match msg {
+                Message::Binary(_) => warn!(%remote, "hello 前收到二进制帧，拒绝连接"),
+                _ => tracing::debug!(%remote, "hello 前连接关闭（Close/Ping/Pong 帧）"),
+            }
             return;
         }
         Ok(Some(Err(_))) => {

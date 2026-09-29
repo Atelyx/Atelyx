@@ -1004,24 +1004,49 @@ export function createSpaceContentBackend(serverUrl: string, spaceId: string): C
       try {
         await client.content.rename(spaceId, { oldPath: file, newPath: newFile });
       } catch (e) {
-        // 改名失败：把 title 回滚为原名，保持「标题 = 文件名」不变式（回滚失败只记录，不掩盖原错误）
-        try {
-          await client.content.writeFile(spaceId, {
-            path: file,
-            content: JSON.stringify({ ...data, title: oldTitle }),
-          });
-        } catch (rollbackErr) {
-          console.error(`画布改名失败后回滚标题亦失败：${file}`, rollbackErr);
+        // 改名失败：旧路径仍在才回滚 title，保持「标题 = 文件名」不变式（源已消失 = 竞态下
+        // 文件已被移走，磁盘不变式已成立，回滚写反而复活旧文件；回滚失败只记录，不掩盖原错误）
+        if (await fileExists(file)) {
+          try {
+            await client.content.writeFile(spaceId, {
+              path: file,
+              content: JSON.stringify({ ...data, title: oldTitle }),
+            });
+          } catch (rollbackErr) {
+            console.error(`画布改名失败后回滚标题亦失败：${file}`, rollbackErr);
+          }
         }
         throw e;
       }
     },
     moveCanvas: (oldFile, newFile) =>
       client.content.rename(spaceId, { oldPath: oldFile, newPath: newFile }),
-    // renameTable：同目录改文件名 + 同步画布 table 节点引用（引用改写复用 collect_ref_updates 语义）。
+    // renameTable：先把新标题写进 .atb 再同目录改文件名 + 同步画布 table 节点引用。
+    // title=文件名是仓库不变式：服务端补丁按文件内 title 推导落盘路径，只改文件名不写 title
+    // 会让改名后第一次保存被服务端弹回旧名（新名文件被删、旧名文件复活）。两次 HTTP 无法成
+    // 事务，故改名失败时回滚 title——仅当旧路径仍在（源已消失 = 竞态下文件已被移走，磁盘
+    // 不变式已成立，回滚写反而复活旧文件）；回滚失败只记录，不掩盖原错误。
     async renameTable(file: string, newTitle: string): Promise<void> {
+      const { data } = await readEntityJson(file, "表格");
+      const oldTitle = typeof data.title === "string" ? data.title : stripExt(baseName(file));
       const newFile = siblingEntityPath(parentDir(file), newTitle, "atb");
-      await client.content.rename(spaceId, { oldPath: file, newPath: newFile });
+      await writeEntity(file, { ...data, title: newTitle });
+      if (newFile === file) return;
+      try {
+        await client.content.rename(spaceId, { oldPath: file, newPath: newFile });
+      } catch (e) {
+        if (await fileExists(file)) {
+          try {
+            await client.content.writeFile(spaceId, {
+              path: file,
+              content: JSON.stringify({ ...data, title: oldTitle }),
+            });
+          } catch (rollbackErr) {
+            console.error(`表格改名失败后回滚标题亦失败：${file}`, rollbackErr);
+          }
+        }
+        throw e;
+      }
       await rewriteCanvasRefs(file, newFile);
     },
     async moveTable(oldFile: string, newFile: string): Promise<void> {

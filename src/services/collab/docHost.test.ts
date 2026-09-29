@@ -54,6 +54,7 @@ function fakeFactory(name: string) {
           calls.sendPresence += 1;
         },
         pluginSeq: () => seq,
+        isClosed: () => false,
         sendMessage: (channel, file, payload, targetPeerId) => {
           calls.sendMessage.push([channel, file, payload, targetPeerId]);
           return true;
