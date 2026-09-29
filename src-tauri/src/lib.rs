@@ -3,6 +3,11 @@
 //!
 //! 文件化仓库（`vault.rs`）为唯一存储出口。
 
+// Windows 上 MSVC 链接 dll 时会顺带产出导入库并向 stdout 打印「正在创建库 …dll.lib 和对象
+// …dll.exp」（/NOLOGO 也不抑制），rustc 把这段输出当 linker_messages 警告上报；属预期行为，
+// 关掉该 lint。
+#![allow(linker_messages)]
+
 #[cfg(target_os = "android")]
 mod android_bridge;
 mod commands;
