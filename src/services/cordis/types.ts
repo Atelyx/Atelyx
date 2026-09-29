@@ -3,8 +3,8 @@
  *
  * 服务实现 = 宿主侧直连 service 层与注入访问（见 kernel.ts）；本文件只定义类型契约，
  * 插件侧一律经 ctx.<domain>.<method>() 的类型化方法触达。
- * 事件闭集（vault:switch/canvas:changed/table:changed/collab:changed/collab:message/vault:changed）
- * 在此声明为 typed event map（@mode 标注分派模式）。
+ * 事件闭集（vault:switch/canvas:changed/table:changed/collab:changed/collab:reconnected/
+ * collab:resync/vault:changed）在此声明为 typed event map（@mode 标注分派模式）。
  *
  * 平台服务（state/app/shell/vault/dialog/clipboard/window/ai/collab）与内核领域服务
  * （history/layout/uiState）由内核提供；canvas/table/note/chat 由对应插件提供（停用即不可用）。
@@ -282,9 +282,16 @@ export interface AiService {
 export interface CollabService {
   peers(): CollabPeer[];
   setPresence(view: string | null, file: string | null): void;
-  /** 发送插件消息到同房间其他成员：payload 任意 JSON；opts.to 指定 = 定向单播只发该 peer，
-   *  缺省 = 广播。返回是否已投递到传输层（未连接/断开 = false，调用方据此感知消息未发出）。 */
+  /** 发送插件消息到同房间其他成员：payload 为任意 JSON 或二进制（Uint8Array，传输层按二进制帧直传）。
+   *  channel 是本插件的逻辑频道名，宿主自动加插件命名空间（线路名 = `插件id:频道`，跨插件撞名不串台）。
+   *  opts.to 指定 = 定向单播只发该 peer，缺省 = 广播。返回是否已投递到传输层（未连接/断开 = false，
+   *  调用方据此感知消息未发出）。通道为尽力而为语义；断线/裁剪丢帧经 collab:reconnected /
+   *  collab:resync 事件感知后自行补发。 */
   sendMessage(channel: string, payload: unknown, opts?: { to?: number }): boolean;
+  /** 订阅本插件的协作频道（线路名 = `本插件id:channel`），返回退订函数（随插件 fiber 撤销）。
+   *  handler 只收到已订阅频道的入站消息（其他插件频道与未订阅频道不投递，跨插件撞名不串台）；
+   *  payload 为发送方原样透传的 JSON 值或二进制 Uint8Array；不含本端自己发出的消息。 */
+  subscribe(channel: string, handler: (peerId: number, payload: unknown) => void): () => void;
   /** 本端身份（peerId 未连接 = null；与 peers() 对称）。 */
   myPeer(): CollabMyPeer;
   /** 声明本插件需要协作通道，返回释放函数（撤销声明；随插件 fiber 撤销调用）。
@@ -446,8 +453,10 @@ declare module "@atelyx/cordis" {
     "table:changed": (payload: { file: string | null }) => void;
     /** 协作在线用户变更。@emit */
     "collab:changed": (payload: { peers: CollabPeer[] }) => void;
-    /** 收到同房间其他成员经协作通道发来的插件消息（不含自己；payload 为发送方原样透传的 JSON）。@emit */
-    "collab:message": (payload: { peerId: number; channel: string; payload: unknown }) => void;
+    /** 协作连接建立（含首连进房与断线重连）：插件据此补发同步状态与 presence。@emit */
+    "collab:reconnected": (payload: Record<string, never>) => void;
+    /** 协作接收队列被裁剪（本端消费过慢，帧已丢）：插件据此重新对账/补发状态。@emit */
+    "collab:resync": (payload: Record<string, never>) => void;
     /** 仓库文件树变更。@emit */
     "vault:changed": () => void;
 

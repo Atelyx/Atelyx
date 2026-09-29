@@ -7,14 +7,21 @@
 //! - C→S `table-patch` / `canvas-patch`：`{ type, file, patch }`（不透明透传）
 //! - C→S `note-sync` / `note-aware`：`{ type, file, payload }`（base64 载荷不透明透传）
 //! - C→S `plugin-msg`：`{ type, channel, payload, targetPeerId? }`（广播/定向单播）
+//! - C→S `plugin-replay`：`{ type, after }`（可靠补投：回放 seq > after 的缓存广播帧）
 //! - C→S `ping`（保活，回 `pong` 广播）/ `bye`（离开）
-//! - S→C `hello-ack`：`{ type, peerId }`（先于 peers 帧——客户端据此把自己过滤出列表）
-//! - S→C `peers` / `presence` / 各转发帧（不含自己）/ `meta-changed`（团队 meta 落地广播，含写入者，
-//!   只带 `key` 不带值）/ `resync`（慢消费者重新握手）/ `error`
+//! - C→S 二进制帧：插件消息二进制载荷直传（布局见 `parse_plugin_binary`），与 `plugin-msg` 同语义
+//! - S→C `hello-ack`：`{ type, peerId, pluginSeq }`（先于 peers 帧——客户端据此把自己过滤出列表；
+//!   pluginSeq = 房间插件帧序号头，客户端据此判定序号空间是否重置）
+//! - S→C `peers` / `presence` / 各转发帧（不含自己；`plugin-msg` 广播帧带房间级序号 `seq`）/
+//!   `meta-changed`（团队 meta 落地广播，含写入者，只带 `key` 不带值）/ `resync`（慢消费者重新握手）/ `error`
+//!
+//! 插件消息可靠有序：广播帧按房间级单调 seq 分配并进环形缓存（条数/字节双上限，超限逐出最旧），
+//! 重连后按 `plugin-replay` 的 after 回放缺帧（回放帧与直播帧同通道保序）；定向单播为尽力而为，
+//! 不占序号不入缓存。房间清空时缓存随之移除。
 //!
 //! 日志红线：转发内容（patch / Yjs payload / selection）只记字节数不记内容。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -41,7 +48,7 @@ pub struct Hub(Arc<Mutex<HashMap<String, Room>>>);
 impl Hub {
     /// 全部房间的连接总数（管理台运行状态展示；每在线端一条连接）。
     pub(crate) fn total_connections(&self) -> usize {
-        self.0.lock().unwrap().values().map(|room| room.len()).sum()
+        self.0.lock().unwrap().values().map(|room| room.peers.len()).sum()
     }
 
     /// 断开属于给定设备会话的全部实时连接（吊销会话/重置密码后调用）：
@@ -50,7 +57,7 @@ impl Hub {
         let mut kicked = 0;
         let rooms = self.0.lock().unwrap();
         for room in rooms.values() {
-            for peer in room.values() {
+            for peer in room.peers.values() {
                 if session_ids.contains(&peer.session_id) {
                     let _ = peer.kick_tx.send(true);
                     kicked += 1;
@@ -61,8 +68,66 @@ impl Hub {
     }
 }
 
-/// 房间 = 同一房间 id 的在线连接；每连接一个 broadcast 通道（转发出站消息）。
-type Room = HashMap<u64, PeerEntry>;
+/// 下行帧（文本 = JSON 协议帧；二进制 = 插件消息二进制载荷直传）。
+#[derive(Clone)]
+pub(crate) enum WireFrame {
+    Text(Arc<String>),
+    Binary(Arc<Vec<u8>>),
+}
+
+impl WireFrame {
+    fn len(&self) -> usize {
+        match self {
+            WireFrame::Text(s) => s.len(),
+            WireFrame::Binary(b) => b.len(),
+        }
+    }
+}
+
+/// WireFrame → axum WS 消息（发送任务与兜底帧共用）。
+fn wire_to_message(frame: &WireFrame) -> Message {
+    match frame {
+        WireFrame::Text(s) => Message::text((**s).clone()),
+        WireFrame::Binary(b) => Message::Binary(b.as_ref().clone().into()),
+    }
+}
+
+/// 房间 = 在线连接 + 插件广播帧缓存（可靠补投）。
+#[derive(Default)]
+struct Room {
+    peers: HashMap<u64, PeerEntry>,
+    /// 房间级插件帧序号（单调递增；广播帧分配并缓存，单播帧不占序号不入缓存）。
+    plugin_seq: u64,
+    /// 近期广播插件帧缓存（可靠补投）：条数/字节双上限，超限逐出最旧。
+    plugin_cache: VecDeque<CachedPluginFrame>,
+    plugin_cache_bytes: usize,
+}
+
+/// 插件帧缓存上限（条数）：补投单批 ≤ 本值 < 出站广播通道容量（256），回放不会自我拥塞。
+const PLUGIN_CACHE_MAX_ENTRIES: usize = 128;
+/// 插件帧缓存上限（字节）：防大载荷刷爆内存，与条数上限先到先逐出。
+const PLUGIN_CACHE_MAX_BYTES: usize = 4 * 1024 * 1024;
+
+struct CachedPluginFrame {
+    seq: u64,
+    frame: WireFrame,
+}
+
+impl Room {
+    /// 追加缓存一条广播插件帧（超限逐出最旧，缓存保持 seq 升序）。
+    fn cache_plugin_frame(&mut self, seq: u64, frame: WireFrame) {
+        self.plugin_cache_bytes += frame.len();
+        self.plugin_cache.push_back(CachedPluginFrame { seq, frame });
+        while self.plugin_cache.len() > PLUGIN_CACHE_MAX_ENTRIES
+            || self.plugin_cache_bytes > PLUGIN_CACHE_MAX_BYTES
+        {
+            let Some(oldest) = self.plugin_cache.pop_front() else {
+                break;
+            };
+            self.plugin_cache_bytes -= oldest.frame.len();
+        }
+    }
+}
 
 struct PeerEntry {
     nickname: String,
@@ -70,7 +135,7 @@ struct PeerEntry {
     device_name: String,
     version: Option<String>,
     presence: Option<Presence>,
-    tx: broadcast::Sender<Arc<String>>,
+    tx: broadcast::Sender<WireFrame>,
     /// 所属设备会话（Hub::kick_sessions 按此匹配踢连接；不进 peers 快照广播）。
     session_id: String,
     /// 踢连接信号：置 true 即断开该连接（会话被吊销/重置密码时由管理端点触发）。
@@ -131,6 +196,9 @@ pub(crate) struct ClientMsg {
     /// 插件消息定向目标（单播：只转发给该 peer；缺省 = 广播房间内其他成员）。
     #[serde(default)]
     pub target_peer_id: Option<u64>,
+    /// 可靠补投请求（`plugin-replay`）：客户端已收到的房间级插件帧序号，回放 seq > after 的缓存帧。
+    #[serde(default)]
+    pub after: Option<u64>,
 }
 
 #[derive(Serialize, Clone)]
@@ -184,6 +252,12 @@ struct ServerMsg {
     /// 载荷（`note-sync`/`note-aware` 为 base64 字符串，`plugin-msg` 为任意 JSON）。
     #[serde(skip_serializing_if = "Option::is_none")]
     payload: Option<serde_json::Value>,
+    /// 插件广播帧的房间级序号（可靠补投对账；单播帧不携带）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    seq: Option<u64>,
+    /// 房间插件帧序号头（`hello-ack` 携带；客户端据此判定序号空间是否重置）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    plugin_seq: Option<u64>,
     /// 元数据键名（`meta-changed` 落地广播帧携带；只广播键名，值由客户端回读磁盘真源）。
     #[serde(skip_serializing_if = "Option::is_none")]
     key: Option<String>,
@@ -197,8 +271,8 @@ fn server_msg(
     file: Option<String>,
     patch: Option<serde_json::Value>,
     payload: Option<serde_json::Value>,
-) -> Arc<String> {
-    let json = serde_json::to_string(&ServerMsg {
+) -> WireFrame {
+    WireFrame::Text(server_text_msg(ServerMsg {
         kind,
         peer_id,
         peers,
@@ -207,15 +281,42 @@ fn server_msg(
         patch,
         channel: None,
         payload,
+        seq: None,
+        plugin_seq: None,
         key: None,
-    })
-    .unwrap();
-    Arc::new(json)
+    }))
 }
 
-/// 构造插件消息转发帧（转发帧不携带定向目标——接收方无需知道是否定向）。
-fn server_plugin_msg(peer_id: u64, channel: String, payload: serde_json::Value) -> Arc<String> {
-    let json = serde_json::to_string(&ServerMsg {
+fn server_text_msg(msg: ServerMsg) -> Arc<String> {
+    Arc::new(serde_json::to_string(&msg).unwrap())
+}
+
+/// 构造 hello-ack（分配 peerId + 房间插件序号头；客户端据此过滤自己并判定序号空间）。
+fn server_hello_ack(peer_id: u64, plugin_seq: u64) -> WireFrame {
+    WireFrame::Text(server_text_msg(ServerMsg {
+        kind: "hello-ack",
+        peer_id: Some(peer_id),
+        peers: None,
+        presence: None,
+        file: None,
+        patch: None,
+        channel: None,
+        payload: None,
+        seq: None,
+        plugin_seq: Some(plugin_seq),
+        key: None,
+    }))
+}
+
+/// 构造插件消息转发帧（转发帧不携带定向目标——接收方无需知道是否定向）；
+/// seq = 房间级序号（广播帧携带，单播帧 None）。
+fn server_plugin_msg(
+    peer_id: u64,
+    channel: String,
+    payload: serde_json::Value,
+    seq: Option<u64>,
+) -> WireFrame {
+    WireFrame::Text(server_text_msg(ServerMsg {
         kind: "plugin-msg",
         peer_id: Some(peer_id),
         peers: None,
@@ -224,10 +325,10 @@ fn server_plugin_msg(peer_id: u64, channel: String, payload: serde_json::Value) 
         patch: None,
         channel: Some(channel),
         payload: Some(payload),
+        seq,
+        plugin_seq: None,
         key: None,
-    })
-    .unwrap();
-    Arc::new(json)
+    }))
 }
 
 pub(crate) fn peer_error(text: &str) -> String {
@@ -240,6 +341,7 @@ fn broadcast_peers(rooms: &HashMap<String, Room>, room_id: &str) {
         return;
     };
     let peers: Vec<PeerInfo> = room
+        .peers
         .iter()
         .map(|(id, p)| PeerInfo {
             peer_id: *id,
@@ -251,15 +353,20 @@ fn broadcast_peers(rooms: &HashMap<String, Room>, room_id: &str) {
         })
         .collect();
     let payload = server_msg("peers", None, Some(peers), None, None, None, None);
-    for p in room.values() {
+    for p in room.peers.values() {
         let _ = p.tx.send(payload.clone());
     }
 }
 
 /// 把已构建的转发帧送房间内除发送者外的全部成员（presence/补丁/笔记同步共用转发循环）。
-fn forward_to_room(rooms: &mut HashMap<String, Room>, room_id: &str, sender_id: u64, payload: Arc<String>) {
+fn forward_to_room(
+    rooms: &mut HashMap<String, Room>,
+    room_id: &str,
+    sender_id: u64,
+    payload: WireFrame,
+) {
     if let Some(room) = rooms.get_mut(room_id) {
-        for (id, peer) in room.iter() {
+        for (id, peer) in room.peers.iter() {
             if *id != sender_id {
                 let _ = peer.tx.send(payload.clone());
             }
@@ -283,7 +390,7 @@ pub(crate) fn broadcast_patch(hub: &Hub, room_id: &str, kind: &'static str, file
     let payload = server_msg(kind, None, None, None, Some(file.to_string()), Some(patch), None);
     let rooms = hub.0.lock().unwrap();
     if let Some(room) = rooms.get(room_id) {
-        for peer in room.values() {
+        for peer in room.peers.values() {
             if peer.tx.send(payload.clone()).is_err() {
                 debug!(room = %room_id, kind = %kind, "补丁帧投递失败（接收端已关闭）");
             }
@@ -295,28 +402,97 @@ pub(crate) fn broadcast_patch(hub: &Hub, room_id: &str, kind: &'static str, file
 /// 含发起写入者自己——发起者经 HTTP 保存、无转发帧可回声，收到的是落地广播帧；帧只带键名不带值，
 /// 客户端据此回读磁盘真源。房间为空或个别投递失败只记日志：真源已落盘，广播失败不回滚落地。
 pub(crate) fn broadcast_meta_changed(hub: &Hub, room_id: &str, key: &str) {
-    let payload: Arc<String> = Arc::new(
-        serde_json::to_string(&ServerMsg {
-            kind: "meta-changed",
-            peer_id: None,
-            peers: None,
-            presence: None,
-            file: None,
-            patch: None,
-            channel: None,
-            payload: None,
-            key: Some(key.to_string()),
-        })
-        .unwrap(),
-    );
+    let payload = WireFrame::Text(server_text_msg(ServerMsg {
+        kind: "meta-changed",
+        peer_id: None,
+        peers: None,
+        presence: None,
+        file: None,
+        patch: None,
+        channel: None,
+        payload: None,
+        seq: None,
+        plugin_seq: None,
+        key: Some(key.to_string()),
+    }));
     let rooms = hub.0.lock().unwrap();
     if let Some(room) = rooms.get(room_id) {
-        for peer in room.values() {
+        for peer in room.peers.values() {
             if peer.tx.send(payload.clone()).is_err() {
                 debug!(room = %room_id, key = %key, "meta 变更帧投递失败（接收端已关闭）");
             }
         }
     }
+}
+
+// ===== 插件消息二进制帧编解码（与前端 framePump.ts 逐字节同构） =====
+// 布局（小端）：[0]=kind(1) [1]=flags(bit0=有 targetPeerId) [2..3]=channel 字节长
+// [channel utf8] [8B seq] [8B targetPeerId（flags.bit0 时）] [8B senderPeerId] [payload 原样字节]。
+
+const PLUGIN_BINARY_KIND: u8 = 1;
+const PLUGIN_BINARY_HAS_TARGET: u8 = 0b1;
+/// 帧头：kind(1) + flags(1) + channel 字节长(2)。
+const PLUGIN_BINARY_HEADER: usize = 4;
+/// channel 之后的固定尾段：seq(8) + senderPeerId(8)。
+const PLUGIN_BINARY_TAIL: usize = 8 + 8;
+
+/// 解析后的二进制插件帧。
+struct BinaryPluginFrame {
+    channel: String,
+    payload: Vec<u8>,
+    seq: u64,
+    target_peer_id: Option<u64>,
+    sender_peer_id: u64,
+}
+
+/// 解析二进制插件帧（kind 不符 / channel 非 UTF-8 / 长度不足返回 None，调用方忽略）。
+fn parse_plugin_binary(data: &[u8]) -> Option<BinaryPluginFrame> {
+    if data.len() < PLUGIN_BINARY_HEADER || data[0] != PLUGIN_BINARY_KIND {
+        return None;
+    }
+    let name_len = u16::from_le_bytes([data[2], data[3]]) as usize;
+    if PLUGIN_BINARY_HEADER + name_len + 8 > data.len() {
+        return None;
+    }
+    let channel =
+        String::from_utf8(data[PLUGIN_BINARY_HEADER..PLUGIN_BINARY_HEADER + name_len].to_vec())
+            .ok()?;
+    let mut offset = PLUGIN_BINARY_HEADER + name_len;
+    let read_u64 = |off: usize| -> Option<u64> {
+        data.get(off..off + 8)?.try_into().ok().map(u64::from_le_bytes)
+    };
+    let seq = read_u64(offset)?;
+    offset += 8;
+    let mut target_peer_id = None;
+    if data[1] & PLUGIN_BINARY_HAS_TARGET != 0 {
+        target_peer_id = Some(read_u64(offset)?);
+        offset += 8;
+    }
+    let sender_peer_id = read_u64(offset)?;
+    offset += 8;
+    Some(BinaryPluginFrame {
+        channel,
+        payload: data[offset..].to_vec(),
+        seq,
+        target_peer_id,
+        sender_peer_id,
+    })
+}
+
+/// 构建下行二进制插件帧（seq/sender 由服务端回填；转发帧不携带定向目标）。
+fn build_plugin_binary(frame: &BinaryPluginFrame) -> Vec<u8> {
+    let name = frame.channel.as_bytes();
+    let mut out = Vec::with_capacity(
+        PLUGIN_BINARY_HEADER + name.len() + PLUGIN_BINARY_TAIL + frame.payload.len(),
+    );
+    out.push(PLUGIN_BINARY_KIND);
+    out.push(0); // 下行不带定向目标
+    out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+    out.extend_from_slice(name);
+    out.extend_from_slice(&frame.seq.to_le_bytes());
+    out.extend_from_slice(&frame.sender_peer_id.to_le_bytes());
+    out.extend_from_slice(&frame.payload);
+    out
 }
 
 /// 已验证的连接进入房间：hello-ack → 入房广播 → 会话有效性回查 → 消息循环 → 离场收尾。
@@ -334,13 +510,13 @@ pub(crate) async fn run_room_connection(
     let started_at = Instant::now();
     // 踢连接信号（会话被吊销时 Hub::kick_sessions 置 true）
     let (kick_tx, mut kick_rx) = watch::channel(false);
-    let kick_frame: Arc<String> = Arc::new(
+    let kick_frame = WireFrame::Text(Arc::new(
         serde_json::json!({ "type": "error", "message": "登录状态已失效，连接已断开" }).to_string(),
-    );
+    ));
 
     let peer_id = NEXT_PEER_ID.fetch_add(1, Ordering::Relaxed);
     let mut stats = ConnStats::default();
-    let (btx, _) = broadcast::channel::<Arc<String>>(256);
+    let (btx, _) = broadcast::channel::<WireFrame>(256);
     // 后台转发必须先就位（订阅 receiver），再入房广播——否则本连接的首次 peers 帧
     // （含自己）在 send_task 启动前被 send 丢弃（broadcast 无 receiver 时 send 直接 Err）
     let mut btx_rx = btx.subscribe();
@@ -348,8 +524,8 @@ pub(crate) async fn run_room_connection(
         let mut last_resync: Option<Instant> = None;
         loop {
             match btx_rx.recv().await {
-                Ok(payload) => {
-                    if sink.send(Message::text((*payload).clone())).await.is_err() {
+                Ok(frame) => {
+                    if sink.send(wire_to_message(&frame)).await.is_err() {
                         debug!(peer_id, "发送失败，客户端断开");
                         break;
                     }
@@ -363,7 +539,7 @@ pub(crate) async fn run_room_connection(
                         last_resync = Some(Instant::now());
                         warn!(peer_id, "下发 resync：客户端需重新握手补齐被裁剪的状态");
                         let resync = server_msg("resync", None, None, None, None, None, None);
-                        if sink.send(Message::text((*resync).clone())).await.is_err() {
+                        if sink.send(wire_to_message(&resync)).await.is_err() {
                             debug!(peer_id, "发送失败，客户端断开");
                             break;
                         }
@@ -374,17 +550,16 @@ pub(crate) async fn run_room_connection(
             }
         }
     });
-    // 先告知本连接自己的 peerId（客户端据此把自己过滤出 peers），再广播全量快照——
-    // 顺序颠倒会让客户端收到含自己的 peers 帧时还无法识别自己（一帧闪现）
-    let _ = btx.send(server_msg("hello-ack", Some(peer_id), None, None, None, None, None));
     let nickname = meta.nickname.clone();
     let device_name = meta.device_name.clone();
     let version = meta.version.clone();
     let session_id = meta.session_id.clone();
     {
+        // 入房 + hello-ack 同锁内完成：hello-ack 先于 peers 帧（客户端据此把自己过滤出列表），
+        // 并带房间插件序号头（客户端据此判定序号空间是否重置）
         let mut rooms = hub.0.lock().unwrap();
         let room = rooms.entry(room_id.clone()).or_default();
-        room.insert(
+        room.peers.insert(
             peer_id,
             PeerEntry {
                 nickname: meta.nickname,
@@ -397,6 +572,7 @@ pub(crate) async fn run_room_connection(
                 kick_tx,
             },
         );
+        let _ = btx.send(server_hello_ack(peer_id, room.plugin_seq));
         info!(
             peer_id,
             room = %room_id,
@@ -404,7 +580,7 @@ pub(crate) async fn run_room_connection(
             device_name = %device_name,
             version = version.as_deref().unwrap_or(""),
             %remote,
-            room_size = room.len(),
+            room_size = room.peers.len(),
             "协作者加入房间",
         );
         broadcast_peers(&rooms, &room_id);
@@ -478,7 +654,7 @@ pub(crate) async fn run_room_connection(
                         );
                         let mut rooms = hub.0.lock().unwrap();
                         if let Some(room) = rooms.get_mut(&room_id) {
-                            if let Some(peer) = room.get_mut(&peer_id) {
+                            if let Some(peer) = room.peers.get_mut(&peer_id) {
                                 peer.presence = Some(presence.clone());
                             }
                             let payload =
@@ -531,33 +707,71 @@ pub(crate) async fn run_room_connection(
                             forward_to_room(&mut rooms, &room_id, peer_id, relayed);
                         }
                     }
-                    // 插件通用消息：channel + payload 任意 JSON 不透明透传（不解析内容），
-                    // 缺省广播房间内其他成员；带 targetPeerId 时单播只发该 peer（不在线或指向自己
-                    // 即丢弃，与广播「不含自己」语义一致）。日志只记频道/字节数/目标，不记载荷内容。
+                    // 插件通用消息：channel + payload 任意 JSON 不透明透传（不解析内容）。
+                    // 广播帧分配房间级 seq 并入缓存（可靠补投，同锁内「缓存+转发」保证序）；
+                    // 带 targetPeerId 的单播为尽力而为（不占序号不入缓存），目标不在线或指向自己
+                    // 即丢弃，与广播「不含自己」语义一致。日志只记频道/字节数/目标，不记载荷内容。
                     "plugin-msg" => {
                         if let (Some(channel), Some(payload)) = (msg.channel, msg.payload) {
-                            let frame = server_plugin_msg(peer_id, channel.clone(), payload);
+                            // 空频道与二进制路径同口径拒绝（正常客户端经宿主命名空间不会发出）
+                            if channel.is_empty() {
+                                continue;
+                            }
                             debug!(
                                 peer_id,
                                 room = %room_id,
                                 channel = %channel,
                                 target_peer = ?msg.target_peer_id,
-                                bytes = frame.len(),
+                                bytes = text.len(),
                                 "插件消息转发",
                             );
                             stats.forwarded_msgs += 1;
-                            stats.forwarded_bytes += frame.len() as u64;
                             let mut rooms = hub.0.lock().unwrap();
-                            if let Some(target) = msg.target_peer_id {
-                                if target != peer_id {
-                                    if let Some(room) = rooms.get(&room_id) {
-                                        if let Some(peer) = room.get(&target) {
-                                            let _ = peer.tx.send(frame);
+                            match msg.target_peer_id {
+                                Some(target) => {
+                                    if target != peer_id {
+                                        if let Some(room) = rooms.get(&room_id) {
+                                            if let Some(peer) = room.peers.get(&target) {
+                                                let frame =
+                                                    server_plugin_msg(peer_id, channel, payload, None);
+                                                stats.forwarded_bytes += frame.len() as u64;
+                                                let _ = peer.tx.send(frame);
+                                            }
                                         }
                                     }
                                 }
-                            } else {
-                                forward_to_room(&mut rooms, &room_id, peer_id, frame);
+                                None => {
+                                    if let Some(room) = rooms.get_mut(&room_id) {
+                                        room.plugin_seq += 1;
+                                        let seq = room.plugin_seq;
+                                        let frame =
+                                            server_plugin_msg(peer_id, channel, payload, Some(seq));
+                                        stats.forwarded_bytes += frame.len() as u64;
+                                        room.cache_plugin_frame(seq, frame.clone());
+                                        for (id, peer) in room.peers.iter() {
+                                            if *id != peer_id {
+                                                let _ = peer.tx.send(frame.clone());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // 可靠补投：回放 seq > after 的缓存广播帧（经本连接出站通道，与直播帧保序）。
+                    // 回放上限 = 缓存条数上限 < 通道容量，回放本身不会触发 Lagged。
+                    "plugin-replay" => {
+                        if let Some(after) = msg.after {
+                            let mut rooms = hub.0.lock().unwrap();
+                            if let Some(room) = rooms.get_mut(&room_id) {
+                                let mut replayed = 0usize;
+                                for cached in &room.plugin_cache {
+                                    if cached.seq > after {
+                                        let _ = btx.send(cached.frame.clone());
+                                        replayed += 1;
+                                    }
+                                }
+                                debug!(peer_id, room = %room_id, after, replayed, "插件帧补投");
                             }
                         }
                     }
@@ -577,19 +791,71 @@ pub(crate) async fn run_room_connection(
                     }
                 }
             }
+            Ok(Some(Ok(Message::Binary(data)))) => {
+                stats.received_msgs += 1;
+                stats.received_bytes += data.len() as u64;
+                // 二进制帧 = 插件消息二进制载荷直传：广播帧分配房间级 seq 并入缓存（可靠补投），
+                // 单播帧尽力而为；畸形/未知帧与 JSON 未知类型同口径忽略（只记字节数）
+                let Some(mut frame) = parse_plugin_binary(&data) else {
+                    debug!(peer_id, bytes = data.len(), "忽略无法解析的二进制帧");
+                    continue;
+                };
+                if frame.channel.is_empty() {
+                    continue;
+                }
+                debug!(
+                    peer_id,
+                    room = %room_id,
+                    channel = %frame.channel,
+                    target_peer = ?frame.target_peer_id,
+                    bytes = data.len(),
+                    "插件二进制消息转发",
+                );
+                stats.forwarded_msgs += 1;
+                frame.sender_peer_id = peer_id;
+                let mut rooms = hub.0.lock().unwrap();
+                match frame.target_peer_id {
+                    Some(target) => {
+                        if target != peer_id {
+                            if let Some(room) = rooms.get(&room_id) {
+                                if let Some(peer) = room.peers.get(&target) {
+                                    frame.seq = 0;
+                                    let wire = WireFrame::Binary(Arc::new(build_plugin_binary(&frame)));
+                                    stats.forwarded_bytes += wire.len() as u64;
+                                    let _ = peer.tx.send(wire);
+                                }
+                            }
+                        }
+                    }
+                    None => {
+                        if let Some(room) = rooms.get_mut(&room_id) {
+                            room.plugin_seq += 1;
+                            frame.seq = room.plugin_seq;
+                            let wire = WireFrame::Binary(Arc::new(build_plugin_binary(&frame)));
+                            stats.forwarded_bytes += wire.len() as u64;
+                            room.cache_plugin_frame(frame.seq, wire.clone());
+                            for (id, peer) in room.peers.iter() {
+                                if *id != peer_id {
+                                    let _ = peer.tx.send(wire.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             Ok(Some(Ok(_))) => {
-                debug!(peer_id, "忽略二进制/关闭帧");
+                debug!(peer_id, "忽略非文本帧");
                 continue;
             }
         }
     }
 
-    // 离开：移出房间 + 广播更新后的 peers（房间空则整体移除）
+    // 离开：移出房间 + 广播更新后的 peers（房间空则整体移除，插件帧缓存随之丢弃）
     {
         let mut rooms = hub.0.lock().unwrap();
         if let Some(room) = rooms.get_mut(&room_id) {
-            room.remove(&peer_id);
-            if room.is_empty() {
+            room.peers.remove(&peer_id);
+            if room.peers.is_empty() {
                 rooms.remove(&room_id);
             } else {
                 broadcast_peers(&rooms, &room_id);
@@ -617,11 +883,32 @@ pub(crate) async fn run_room_connection(
 mod tests {
     use super::*;
 
+    /// 测试辅助：按客户端上行格式编码二进制插件帧（seq/sender 置 0，可选定向目标）。
+    fn encode_client_plugin_binary(channel: &str, payload: &[u8], target: Option<u64>) -> Vec<u8> {
+        let name = channel.as_bytes();
+        let mut out =
+            Vec::with_capacity(PLUGIN_BINARY_HEADER + name.len() + PLUGIN_BINARY_TAIL + payload.len());
+        out.push(PLUGIN_BINARY_KIND);
+        out.push(if target.is_some() { PLUGIN_BINARY_HAS_TARGET } else { 0 });
+        out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        out.extend_from_slice(name);
+        out.extend_from_slice(&0u64.to_le_bytes()); // seq：服务端分配
+        if let Some(t) = target {
+            out.extend_from_slice(&t.to_le_bytes());
+        }
+        out.extend_from_slice(&0u64.to_le_bytes()); // senderPeerId：服务端回填
+        out.extend_from_slice(payload);
+        out
+    }
+
     /// resync 是纯类型帧：客户端只据 `type` 重新握手，帧内不带任何多余字段。
     #[test]
     fn resync_frame_carries_type_only() {
         let frame = server_msg("resync", None, None, None, None, None, None);
-        let value: serde_json::Value = serde_json::from_str(&frame).expect("resync 帧须为合法 JSON");
+        let WireFrame::Text(frame) = &frame else {
+            panic!("resync 帧应为文本帧");
+        };
+        let value: serde_json::Value = serde_json::from_str(frame).expect("resync 帧须为合法 JSON");
         assert_eq!(value["type"], "resync");
         assert_eq!(value.as_object().map(|o| o.len()), Some(1));
     }
@@ -651,7 +938,10 @@ mod tests {
             None,
             Some(serde_json::Value::String("AAA=".to_string())),
         );
-        let value: serde_json::Value = serde_json::from_str(&note).expect("note 帧须为合法 JSON");
+        let WireFrame::Text(note) = &note else {
+            panic!("note 帧应为文本帧");
+        };
+        let value: serde_json::Value = serde_json::from_str(note).expect("note 帧须为合法 JSON");
         assert_eq!(value["type"], "note-sync");
         assert_eq!(value["peerId"], 7);
         assert_eq!(value["file"], "notes/a.md");
@@ -662,27 +952,105 @@ mod tests {
         assert!(value.get("channel").is_none());
 
         let ack = server_msg("hello-ack", Some(3), None, None, None, None, None);
-        let value: serde_json::Value = serde_json::from_str(&ack).expect("hello-ack 须为合法 JSON");
+        let WireFrame::Text(ack) = &ack else {
+            panic!("hello-ack 帧应为文本帧");
+        };
+        let value: serde_json::Value = serde_json::from_str(ack).expect("hello-ack 须为合法 JSON");
         assert_eq!(value["type"], "hello-ack");
         assert_eq!(value["peerId"], 3);
         assert!(value.get("file").is_none());
         assert!(value.get("payload").is_none());
     }
 
-    /// 插件消息转发帧：channel + 任意 JSON payload 平铺携带；转发帧不携带定向目标
-    /// （接收方无需知道是否定向），也不带 peers/presence/file 等无关字段。
+    /// 插件消息转发帧：channel + 任意 JSON payload 平铺携带；广播帧带房间级 seq，
+    /// 单播帧不带 seq；转发帧不携带定向目标（接收方无需知道是否定向），
+    /// 也不带 peers/presence/file 等无关字段。
     #[test]
     fn plugin_msg_frame_carries_channel_and_payload() {
-        let frame = server_plugin_msg(7, "comfyui.remote".to_string(), serde_json::json!({ "cmd": "start" }));
-        let value: serde_json::Value = serde_json::from_str(&frame).expect("plugin-msg 帧须为合法 JSON");
+        let frame = server_plugin_msg(7, "comfyui.remote".to_string(), serde_json::json!({ "cmd": "start" }), Some(42));
+        let WireFrame::Text(text) = &frame else {
+            panic!("插件 JSON 帧应为文本帧");
+        };
+        let value: serde_json::Value = serde_json::from_str(text).expect("plugin-msg 帧须为合法 JSON");
         assert_eq!(value["type"], "plugin-msg");
         assert_eq!(value["peerId"], 7);
         assert_eq!(value["channel"], "comfyui.remote");
         assert_eq!(value["payload"], serde_json::json!({ "cmd": "start" }));
+        assert_eq!(value["seq"], 42);
         assert!(value.get("targetPeerId").is_none());
         assert!(value.get("peers").is_none());
         assert!(value.get("presence").is_none());
         assert!(value.get("file").is_none());
+
+        let unicast = server_plugin_msg(7, "comfyui.remote".to_string(), serde_json::json!(1), None);
+        let WireFrame::Text(text) = &unicast else {
+            panic!("插件 JSON 帧应为文本帧");
+        };
+        let value: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert!(value.get("seq").is_none(), "单播帧不携带房间级 seq");
+    }
+
+    /// 二进制插件帧编解码往返：channel/payload/seq/sender/target 原样还原；载荷不经任何转码。
+    #[test]
+    fn plugin_binary_frame_roundtrip() {
+        let payload: Vec<u8> = (0u8..=255).cycle().take(1024).collect();
+        let encoded = encode_client_plugin_binary("com.x.whiteboard:wb", &payload, Some(9));
+        let parsed = parse_plugin_binary(&encoded).expect("合法帧应可解析");
+        assert_eq!(parsed.channel, "com.x.whiteboard:wb");
+        assert_eq!(parsed.payload, payload);
+        assert_eq!(parsed.target_peer_id, Some(9));
+        assert_eq!(parsed.seq, 0, "客户端发送帧 seq 置 0（服务端分配）");
+        assert_eq!(parsed.sender_peer_id, 0);
+
+        // 下行帧：seq/sender 回填，不带定向目标
+        let down = BinaryPluginFrame {
+            channel: parsed.channel.clone(),
+            payload: parsed.payload.clone(),
+            seq: 5,
+            target_peer_id: None,
+            sender_peer_id: 12,
+        };
+        let encoded = build_plugin_binary(&down);
+        let parsed = parse_plugin_binary(&encoded).expect("下行帧应可解析");
+        assert_eq!(parsed.channel, "com.x.whiteboard:wb");
+        assert_eq!(parsed.payload, payload);
+        assert_eq!(parsed.seq, 5);
+        assert_eq!(parsed.sender_peer_id, 12);
+        assert_eq!(parsed.target_peer_id, None);
+    }
+
+    /// 畸形二进制帧恒拒（不 panic）：截断/未知 kind/坏 channel 编码返回 None。
+    #[test]
+    fn plugin_binary_frame_rejects_malformed() {
+        let full = encode_client_plugin_binary("ch", &[1, 2, 3], None);
+        assert!(parse_plugin_binary(&full).is_some());
+        for cut in [0, 1, 10, PLUGIN_BINARY_HEADER - 1, PLUGIN_BINARY_HEADER + 1] {
+            assert!(
+                parse_plugin_binary(&full[..cut.min(full.len())]).is_none(),
+                "截断到 {cut} 字节应拒绝"
+            );
+        }
+        let mut bad_kind = full.clone();
+        bad_kind[0] = 9;
+        assert!(parse_plugin_binary(&bad_kind).is_none(), "未知 kind 应拒绝");
+        let mut bad_utf8 = full.clone();
+        bad_utf8[4] = 0xff;
+        assert!(parse_plugin_binary(&bad_utf8).is_none(), "坏 channel 编码应拒绝");
+    }
+
+    /// 插件帧缓存逐出：条数超限逐出最旧，seq 升序保持。
+    #[test]
+    fn plugin_cache_evicts_oldest() {
+        let mut room = Room::default();
+        for seq in 1..=(PLUGIN_CACHE_MAX_ENTRIES as u64 + 10) {
+            room.cache_plugin_frame(seq, server_msg("plugin-msg", None, None, None, None, None, None));
+        }
+        assert_eq!(room.plugin_cache.len(), PLUGIN_CACHE_MAX_ENTRIES);
+        let seqs: Vec<u64> = room.plugin_cache.iter().map(|c| c.seq).collect();
+        let mut sorted = seqs.clone();
+        sorted.sort_unstable();
+        assert_eq!(seqs, sorted, "缓存保持 seq 升序");
+        assert_eq!(seqs[0], 11, "最旧的 1..10 已逐出");
     }
 
     /// meta 变更广播帧：只带键名（值由客户端回读磁盘真源），不带 peerId 与其他字段。
@@ -697,6 +1065,8 @@ mod tests {
             patch: None,
             channel: None,
             payload: None,
+            seq: None,
+            plugin_seq: None,
             key: Some("calendar".to_string()),
         })
         .unwrap();
@@ -710,7 +1080,7 @@ mod tests {
     #[test]
     fn broadcast_meta_changed_reaches_room_members() {
         let hub = Hub::default();
-        let make_peer = |tx: broadcast::Sender<Arc<String>>, session: &str| PeerEntry {
+        let make_peer = |tx: broadcast::Sender<WireFrame>, session: &str| PeerEntry {
             nickname: session.to_string(),
             color: String::new(),
             device_name: String::new(),
@@ -720,22 +1090,34 @@ mod tests {
             session_id: session.to_string(),
             kick_tx: watch::channel(false).0,
         };
-        let (tx_a, mut rx_a) = broadcast::channel::<Arc<String>>(16);
-        let (tx_b, mut rx_b) = broadcast::channel::<Arc<String>>(16);
+        let (tx_a, mut rx_a) = broadcast::channel::<WireFrame>(16);
+        let (tx_b, mut rx_b) = broadcast::channel::<WireFrame>(16);
         hub.0.lock().unwrap().insert(
             "space:s1".to_string(),
-            HashMap::from([(1u64, make_peer(tx_a, "s-a")), (2u64, make_peer(tx_b, "s-b"))]),
+            Room {
+                peers: HashMap::from([(1u64, make_peer(tx_a, "s-a")), (2u64, make_peer(tx_b, "s-b"))]),
+                ..Room::default()
+            },
         );
-        hub.0.lock().unwrap().insert("space:s2".to_string(), HashMap::new());
+        hub.0
+            .lock()
+            .unwrap()
+            .insert("space:s2".to_string(), Room::default());
 
         broadcast_meta_changed(&hub, "space:s1", "calendar");
 
         let frame_a = rx_a.try_recv().expect("房间内成员 a 应收到广播帧");
         let frame_b = rx_b.try_recv().expect("房间内成员 b 应收到广播帧");
-        let value: serde_json::Value = serde_json::from_str(&frame_a).unwrap();
+        let WireFrame::Text(text_a) = &frame_a else {
+            panic!("meta 帧应为文本帧");
+        };
+        let value: serde_json::Value = serde_json::from_str(text_a).unwrap();
         assert_eq!(value["type"], "meta-changed");
         assert_eq!(value["key"], "calendar");
-        assert_eq!(*frame_b, *frame_a, "同一房间收到的是同一帧");
+        match (&frame_a, &frame_b) {
+            (WireFrame::Text(a), WireFrame::Text(b)) => assert_eq!(a, b, "同一房间收到的是同一帧"),
+            _ => panic!("meta 帧应为文本帧"),
+        }
         assert!(rx_a.try_recv().is_err(), "不应有额外帧");
     }
 }

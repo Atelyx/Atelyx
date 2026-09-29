@@ -30,6 +30,7 @@ import {
   type CollabTarget,
 } from "@/utils/collabHost";
 import { getPluginNotificationAccess } from "@/services/cordis/access";
+import { emitPluginEvent } from "@/services/cordis/events";
 import type { CollabMyPeer, CollabPeer, CollabPresence } from "@/types";
 
 /** 本端 presence 广播节流（选中高频变化合并，不刷屏传输层）。 */
@@ -129,6 +130,7 @@ export {
   registerCollabPresenceProvider,
   registerCollabReconnect,
   registerCollabTeardown,
+  dispatchPluginChannel,
 } from "@/utils/collabHost";
 
 /** 可透传的发送通道（单源：继承自 DocHost/传输层 CollabChannel）。 */
@@ -231,11 +233,13 @@ async function establishConnection(): Promise<void> {
         });
       },
       // 本连接接收队列被广播裁剪（消费过慢）→ 帧已丢：与重连同款重新握手补齐；
-      // 服务端按最小间隔下发，本端再合并一波，防「重握手大帧 → 更慢 → 再下发」自激
+      // 服务端按最小间隔下发，本端再合并一波，防「重握手大帧 → 更慢 → 再下发」自激。
+      // 插件通道无重握手兜底，丢帧经 collab:resync 事件开放给插件自行补发状态（不静默）
       onResync: () => {
         const now = Date.now();
         if (now - lastResyncAt < RESYNC_COALESCE_MS) return;
         lastResyncAt = now;
+        emitPluginEvent("collab:resync", {});
         runCollabReconnects();
       },
       onStatusChange: (connected) => {
@@ -243,6 +247,8 @@ async function establishConnection(): Promise<void> {
         // 连接建立后补发一次当前 presence：重连/进房间时本端选中立即可见，
         // 否则要等用户下一次选中变化才广播（hello 已先发，同 TCP FIFO 保证先入房）
         if (connected) {
+          // 连接建立（含首连进房与断线重连）开放为插件事件：插件据此补发同步状态与 presence
+          emitPluginEvent("collab:reconnected", {});
           // 各域重连回调（表格/画布 presence 补发、笔记重新握手等；域经 registerCollabReconnect
           // 自注册，接线顺序保证画布打开时画布 presence 覆盖表格槽）
           runCollabReconnects();

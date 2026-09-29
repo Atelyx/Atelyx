@@ -34,6 +34,42 @@ export function dispatchCollabChannel(
   collabChannels.get(channel)?.(peerId, file, payload);
 }
 
+// ===== 插件频道订阅注册表（ctx.collab.subscribe 的落点） =====
+// 线路频道名 = `${pluginId}:${channel}`（宿主按调用方插件自动加命名空间，跨插件撞名不串台）；
+// 入站只投递已订阅 handler，未订阅频道不产生任何调用。
+
+/** 插件频道订阅 handler（peerId 供发送方身份解析；payload 为发送方原样透传的 JSON 值或二进制 Uint8Array）。 */
+export type PluginChannelHandler = (peerId: number, payload: unknown) => void;
+
+const pluginChannels = new Map<string, PluginChannelHandler[]>();
+
+/** 注册插件频道订阅（同频道多订阅者依次投递）；返回撤销函数（按引用守卫，幂等）。 */
+export function registerPluginChannel(wireChannel: string, handler: PluginChannelHandler): () => void {
+  const list = pluginChannels.get(wireChannel);
+  if (list) list.push(handler);
+  else pluginChannels.set(wireChannel, [handler]);
+  return () => {
+    const list = pluginChannels.get(wireChannel);
+    if (!list) return;
+    const i = list.indexOf(handler);
+    if (i >= 0) list.splice(i, 1);
+    if (list.length === 0) pluginChannels.delete(wireChannel);
+  };
+}
+
+/** 插件频道入站投递（未订阅频道不投递）；逐 handler 异常隔离，单插件处理异常不连坐他人。 */
+export function dispatchPluginChannel(peerId: number, wireChannel: string, payload: unknown): void {
+  const list = pluginChannels.get(wireChannel);
+  if (!list) return;
+  for (const handler of [...list]) {
+    try {
+      handler(peerId, payload);
+    } catch (e) {
+      console.warn(`插件频道处理异常（${wireChannel}）：`, e instanceof Error ? e.message : String(e));
+    }
+  }
+}
+
 // ===== 团队 meta 变更（服务端单向广播帧，与 peer 转发频道分列） =====
 
 const collabMetaChangedHandlers: Array<(key: string) => void> = [];

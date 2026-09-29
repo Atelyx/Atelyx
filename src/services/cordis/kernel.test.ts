@@ -10,11 +10,11 @@ import { describe, expect, it, vi, afterEach } from "vitest";
 import { setPluginCanvasAccess, setPluginCollabAccess, setPluginTableRuntimeAccess } from "./access";
 import { emitPluginEvent, setKernelRef } from "./events";
 import { createKernel, getKernel, resetKernel, type Kernel } from "./kernel";
-import { registerCollabChannel, dispatchCollabChannel } from "@/utils/collabHost";
+import { dispatchPluginChannel } from "@/utils/collabHost";
 import { createCanvasService } from "./canvas";
 import { createTableService } from "./table";
 import { buildAgentTools, pluginToolMetas } from "@/services/ai/tools";
-import { mountPlugin, unmountAll } from "./loader";
+import { mountPlugin, unmountAll, unmountPlugin } from "./loader";
 import {
   pluginReadState,
   pluginWriteState,
@@ -113,58 +113,11 @@ describe("Cordis 内核宿主", () => {
     k.dispose();
   });
 
-  it("collab 服务经注入的访问对象可用（含消息收发与本端身份）", () => {
-    const { ctx, dispose } = createKernel();
-    const sent: Array<[string, unknown, number | undefined]> = [];
-    const fake = {
-      peers: () => [{ id: "p1" }],
-      setPresence: (_view: string | null, _file: string | null) => {},
-      sendMessage: (channel: string, payload: unknown, to?: number) => {
-        sent.push([channel, payload, to]);
-        return to !== undefined;
-      },
-      myPeer: () => ({ peerId: 7, nickname: "甲", color: "#000", deviceName: "机器甲" }),
-    };
-    setPluginCollabAccess(fake as never);
-    expect(ctx.collab.peers()).toEqual([{ id: "p1" }]);
-    expect(() => ctx.collab.setPresence("canvas", "c.atlx")).not.toThrow();
-    expect(ctx.collab.sendMessage("comfyui.remote", { cmd: "start" })).toBe(false);
-    expect(ctx.collab.sendMessage("comfyui.remote", { cmd: "stop" }, { to: 9 })).toBe(true);
-    expect(sent).toEqual([
-      ["comfyui.remote", { cmd: "start" }, undefined],
-      ["comfyui.remote", { cmd: "stop" }, 9],
-    ]);
-    expect(ctx.collab.myPeer()).toEqual({ peerId: 7, nickname: "甲", color: "#000", deviceName: "机器甲" });
-    dispose();
-  });
-
-  it("collab 服务未接线时 sendMessage/myPeer 报错", () => {
+  it("collab 服务未接线时报错", () => {
     const { ctx, dispose } = createKernel();
     expect(() => ctx.collab.sendMessage("c", {})).toThrow("协作能力未就绪");
     expect(() => ctx.collab.myPeer()).toThrow("协作能力未就绪");
     dispose();
-  });
-
-  it("plugin-msg 入站经通道注册表广播 collab:message 事件（接线与 pluginStore 同款）", () => {
-    const k = createKernel();
-    setKernelRef(k);
-    // 复刻 pluginStore.ensureRuntimeChangeEvents 的接线：plugin-msg 通道常驻 handler → emitPluginEvent
-    const off = registerCollabChannel("plugin-msg", (peerId, file, payload) =>
-      emitPluginEvent("collab:message", { peerId, channel: file, payload }),
-    );
-    const seen: Array<{ peerId: number; channel: string; payload: unknown }> = [];
-    k.ctx.on("collab:message", (p) => {
-      seen.push(p);
-    });
-    dispatchCollabChannel("plugin-msg", 5, "comfyui.remote", { cmd: "start" });
-    dispatchCollabChannel("plugin-msg", 6, "comfyui.remote", { cmd: "stop" });
-    expect(seen).toEqual([
-      { peerId: 5, channel: "comfyui.remote", payload: { cmd: "start" } },
-      { peerId: 6, channel: "comfyui.remote", payload: { cmd: "stop" } },
-    ]);
-    off();
-    setKernelRef(null);
-    k.dispose();
   });
 
   it("画布/表格服务工厂读取注入的访问对象", () => {
@@ -308,6 +261,94 @@ describe("state/storage 按调用方插件隔离", () => {
     expect(() => kernel!.ctx.storage.clear()).toThrow("只能在插件上下文中使用");
     expect(pluginReadState).not.toHaveBeenCalled();
     expect(pluginKvWrite).not.toHaveBeenCalled();
+  });
+});
+
+describe("collab 按调用方插件绑定频道", () => {
+  let kernel: Kernel | null = null;
+
+  const fakeAccess = () => ({
+    peers: () => [],
+    setPresence: () => {},
+    sendMessage: () => false,
+    myPeer: () => ({ peerId: null, nickname: "", color: "", deviceName: "" }),
+    acquire: () => () => {},
+  });
+
+  afterEach(async () => {
+    if (kernel) {
+      await unmountAll(kernel);
+      kernel.dispose();
+      kernel = null;
+    }
+    setPluginCollabAccess(null);
+  });
+
+  it("sendMessage 频道按调用方插件命名空间（线路名 = 插件id:频道）", async () => {
+    kernel = createKernel();
+    const sent: Array<[string, unknown, number | undefined]> = [];
+    setPluginCollabAccess({
+      ...fakeAccess(),
+      sendMessage: (channel: string, payload: unknown, to?: number) => {
+        sent.push([channel, payload, to]);
+        return to !== undefined;
+      },
+      myPeer: () => ({ peerId: 7, nickname: "甲", color: "#000", deviceName: "机器甲" }),
+    } as never);
+    const result = await mountPlugin(kernel, {
+      id: "com.test.a",
+      apply: (ctx) => {
+        expect(ctx.collab.myPeer()).toEqual({
+          peerId: 7,
+          nickname: "甲",
+          color: "#000",
+          deviceName: "机器甲",
+        });
+        ctx.collab.sendMessage("ch", { cmd: "start" });
+        ctx.collab.sendMessage("ch", { cmd: "stop" }, { to: 9 });
+      },
+    });
+    expect(result.ok).toBe(true);
+    expect(sent).toEqual([
+      ["com.test.a:ch", { cmd: "start" }, undefined],
+      ["com.test.a:ch", { cmd: "stop" }, 9],
+    ]);
+  });
+
+  it("subscribe 只收已订阅线路频道（撞名不串台），随插件卸载撤销", async () => {
+    kernel = createKernel();
+    setPluginCollabAccess(fakeAccess() as never);
+    const received: Array<[number, unknown]> = [];
+    const result = await mountPlugin(kernel, {
+      id: "com.test.a",
+      apply: (ctx) => {
+        ctx.collab.subscribe("ch", (peerId, payload) => received.push([peerId, payload]));
+      },
+    });
+    expect(result.ok).toBe(true);
+    // 命中订阅：线路频道 = 插件id:频道（入站统一经 dispatchPluginChannel 投递）
+    dispatchPluginChannel(5, "com.test.a:ch", { n: 1 });
+    expect(received).toEqual([[5, { n: 1 }]]);
+    // 其他插件同名频道不串台；未订阅频道不投递
+    dispatchPluginChannel(6, "com.test.b:ch", { n: 2 });
+    dispatchPluginChannel(7, "com.test.a:other", { n: 3 });
+    expect(received).toEqual([[5, { n: 1 }]]);
+    // 卸载撤销订阅（fiber effects 清理）
+    await unmountPlugin(kernel, "com.test.a");
+    dispatchPluginChannel(8, "com.test.a:ch", { n: 4 });
+    expect(received).toEqual([[5, { n: 1 }]]);
+  });
+
+  it("subscribe 频道名非法（含命名空间分隔符）即挂载失败", async () => {
+    kernel = createKernel();
+    setPluginCollabAccess(fakeAccess() as never);
+    const result = await mountPlugin(kernel, {
+      id: "com.test.a",
+      apply: (ctx) => {
+        ctx.collab.subscribe("a:b", () => {});
+      },
+    });
+    expect(result.ok).toBe(false);
   });
 });
 

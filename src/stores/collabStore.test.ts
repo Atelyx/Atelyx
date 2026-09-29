@@ -6,6 +6,7 @@
  * 传输层帧序与分发由 `services/collab/spaceTransport.test.ts` 覆盖，本文件只测 store 策略。
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { emitPluginEvent } from "@/services/cordis/events";
 
 type CollabStore = typeof import("./collabStore");
 type AppStore = typeof import("./appStore");
@@ -52,6 +53,10 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 vi.mock("@/services/space/auth", () => ({
   getToken: vi.fn(async () => "tok-123"),
+}));
+
+vi.mock("@/services/cordis/events", () => ({
+  emitPluginEvent: vi.fn(),
 }));
 
 let collab: CollabStore;
@@ -294,5 +299,21 @@ describe("插件协作意愿声明", () => {
     expect(collab.useCollabStore.getState().pluginDemand).toBe(1);
     release();
     expect(collab.useCollabStore.getState().pluginDemand).toBe(0);
+  });
+});
+
+describe("插件协作感知事件", () => {
+  it("连接建立发射 collab:reconnected（含首连进房）", async () => {
+    const socket = await connectSpace();
+    socket.open();
+    expect(vi.mocked(emitPluginEvent).mock.calls.some(([e]) => e === "collab:reconnected")).toBe(true);
+  });
+
+  it("服务端缺帧提示过合并窗口后发射 collab:resync（丢帧不静默）", async () => {
+    const socket = await connectSpace();
+    socket.open();
+    vi.mocked(emitPluginEvent).mockClear();
+    socket.emit({ type: "resync" });
+    expect(vi.mocked(emitPluginEvent)).toHaveBeenCalledWith("collab:resync", {});
   });
 });

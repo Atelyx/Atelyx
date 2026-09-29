@@ -2456,3 +2456,124 @@ async fn session_revocation_kicks_live_ws_connections() {
     }
     assert!(closed, "已吊销会话的重连应被断开");
 }
+
+// ===== 插件消息通道（二进制直传 + seq 可靠补投） =====
+
+/// 按客户端上行格式编码二进制插件帧（kind=1，seq/sender 置 0，可选定向目标）。
+fn client_plugin_binary(channel: &str, payload: &[u8], target: Option<u64>) -> Vec<u8> {
+    let name = channel.as_bytes();
+    let mut out = Vec::with_capacity(4 + name.len() + 16 + payload.len());
+    out.push(1u8);
+    out.push(if target.is_some() { 0b1 } else { 0 });
+    out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+    out.extend_from_slice(name);
+    out.extend_from_slice(&0u64.to_le_bytes()); // seq：服务端分配
+    if let Some(t) = target {
+        out.extend_from_slice(&t.to_le_bytes());
+    }
+    out.extend_from_slice(&0u64.to_le_bytes()); // senderPeerId：服务端回填
+    out.extend_from_slice(payload);
+    out
+}
+
+/// 读下一帧，跳过无关帧（peers/pong 等）直到指定 type。
+async fn next_frame_of(ws: &mut WsStream, kind: &str) -> Value {
+    for _ in 0..20 {
+        let frame = next_frame(ws).await;
+        if frame["type"] == kind {
+            return frame;
+        }
+    }
+    panic!("等待 {kind} 帧超时");
+}
+
+/// 读下一帧并按服务端下行二进制插件帧布局解析（kind=1，不带定向目标）。
+async fn next_binary_plugin_frame(ws: &mut WsStream) -> (String, Vec<u8>, u64, u64) {
+    for _ in 0..20 {
+        let raw = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("等待二进制帧超时")
+            .expect("流结束")
+            .expect("帧错误");
+        let data = match raw {
+            Message::Binary(data) => data,
+            _ => continue,
+        };
+        assert_eq!(data[0], 1, "二进制插件帧 kind 应为 1");
+        let name_len = u16::from_le_bytes([data[2], data[3]]) as usize;
+        let channel = String::from_utf8(data[4..4 + name_len].to_vec()).unwrap();
+        let seq = u64::from_le_bytes(data[4 + name_len..12 + name_len].try_into().unwrap());
+        let sender = u64::from_le_bytes(data[12 + name_len..20 + name_len].try_into().unwrap());
+        return (channel, data[20 + name_len..].to_vec(), seq, sender);
+    }
+    panic!("等待二进制插件帧超时");
+}
+
+#[tokio::test]
+async fn ws_plugin_msg_binary_and_reliable_replay() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let a_token = register(&ctx, "alice").await;
+    let (_, body) = ctx.post("/api/spaces", Some(&a_token), json!({ "name": "项目空间" })).await;
+    let space_id = body["spaceId"].as_str().unwrap().to_string();
+    let (_, invite) = ctx
+        .post(&format!("/api/spaces/{space_id}/invites"), Some(&a_token), json!({ "role": "editor" }))
+        .await;
+    let code = invite["code"].as_str().unwrap().to_string();
+    let b_token = register(&ctx, "bob").await;
+    ctx.post("/api/invites/accept", Some(&b_token), json!({ "code": code })).await;
+    let mut a = ws_connect(&ctx.base, "/ws/space", json!({ "type": "hello", "spaceId": space_id, "token": a_token, "nickname": "爱丽丝" })).await;
+    let ack = next_frame(&mut a).await;
+    assert_eq!(ack["type"], "hello-ack");
+    let a_peer = ack["peerId"].as_u64().unwrap();
+    let mut b = ws_connect(&ctx.base, "/ws/space", json!({ "type": "hello", "spaceId": space_id, "token": b_token, "nickname": "鲍勃" })).await;
+    let ack_b = next_frame(&mut b).await;
+    assert_eq!(ack_b["type"], "hello-ack");
+    let b_peer = ack_b["peerId"].as_u64().unwrap();
+
+    // JSON 广播：B 收到的转发帧带房间级 seq（从 1 起单调）与发送方 peerId
+    a.send(Message::text(json!({ "type": "plugin-msg", "channel": "com.a:ch", "payload": { "n": 1 } }).to_string())).await.unwrap();
+    let msg = next_frame_of(&mut b, "plugin-msg").await;
+    assert_eq!(msg["peerId"], a_peer);
+    assert_eq!(msg["channel"], "com.a:ch");
+    assert_eq!(msg["payload"], json!({ "n": 1 }));
+    assert_eq!(msg["seq"], 1);
+
+    // 二进制广播：载荷原样还原，seq 递进，sender 回填
+    let payload: Vec<u8> = (0u8..=255).collect();
+    a.send(Message::Binary(client_plugin_binary("com.a:bin", &payload, None))).await.unwrap();
+    let (channel, got, seq, sender) = next_binary_plugin_frame(&mut b).await;
+    assert_eq!(channel, "com.a:bin");
+    assert_eq!(got, payload, "二进制载荷往返无损");
+    assert_eq!(seq, 2);
+    assert_eq!(sender, a_peer);
+
+    // 定向单播（JSON 与二进制）：只发目标 peer；单播帧不携带房间级 seq
+    a.send(Message::text(json!({ "type": "plugin-msg", "channel": "com.a:ch", "payload": "hi", "targetPeerId": b_peer }).to_string())).await.unwrap();
+    let unicast = next_frame_of(&mut b, "plugin-msg").await;
+    assert_eq!(unicast["payload"], "hi");
+    assert!(unicast.get("seq").is_none(), "单播帧不占房间序号");
+    a.send(Message::Binary(client_plugin_binary("com.a:bin", &[7u8], Some(b_peer)))).await.unwrap();
+    let (_, got, seq, sender) = next_binary_plugin_frame(&mut b).await;
+    assert_eq!(got, vec![7u8]);
+    assert_eq!(seq, 0, "单播二进制帧 seq 置 0");
+    assert_eq!(sender, a_peer);
+
+    // 断线重连补投：B 离线期间 A 再广播两条（seq 3、4），B 重连后按 after=2 补齐且按序到达
+    drop(b);
+    a.send(Message::text(json!({ "type": "plugin-msg", "channel": "com.a:ch", "payload": { "n": 3 } }).to_string())).await.unwrap();
+    a.send(Message::Binary(client_plugin_binary("com.a:bin", &[1, 2, 3], None))).await.unwrap();
+    // 等 B 旧连接离场（离场不影响已分配的 seq：广播帧恒入缓存）
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let mut b2 = ws_connect(&ctx.base, "/ws/space", json!({ "type": "hello", "spaceId": space_id, "token": b_token, "nickname": "鲍勃2" })).await;
+    let ack_re = next_frame(&mut b2).await;
+    assert_eq!(ack_re["type"], "hello-ack");
+    assert_eq!(ack_re["pluginSeq"], 4, "序号头 = B 离线期间已推进的房间序号");
+    b2.send(Message::text(json!({ "type": "plugin-replay", "after": 2 }).to_string())).await.unwrap();
+    let replay_json = next_frame_of(&mut b2, "plugin-msg").await;
+    assert_eq!(replay_json["seq"], 3);
+    assert_eq!(replay_json["payload"], json!({ "n": 3 }));
+    let (_, replay_payload, replay_seq, _) = next_binary_plugin_frame(&mut b2).await;
+    assert_eq!(replay_seq, 4);
+    assert_eq!(replay_payload, vec![1, 2, 3]);
+}

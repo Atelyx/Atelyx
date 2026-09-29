@@ -103,6 +103,7 @@ import {
   sendPluginMessage,
   getMyPeerInfo,
   registerCollabChannel,
+  dispatchPluginChannel,
 } from "@/stores/collabStore";
 import { useVaultStore } from "@/stores/vaultStore";
 import { useNoteStore } from "@/stores/noteStore";
@@ -522,8 +523,8 @@ function ensureSlotOverrideAccess(): void {
 /** 能力变更事件接线守卫：内核侧 store 变更 → emitPluginEvent 通知订阅插件（幂等一次）。
  *  canvas/table 变更事件随各自插件启停注册（见 canvasStore/tableStore 的 register*PluginWiring）；
  *  collab/vault 属内核数据访问，常驻。载荷为轻量信号（插件按需再调 snapshot()/取数据）。
- *  插件通用消息入站（plugin-msg 通道）同样在此接线：collabHost 通道 → 内核事件广播，
- *  handler 常驻内核不随插件启停（多插件监听经事件总线 fan-out，通道注册表单 handler 语义）。 */
+ *  插件通用消息入站（plugin-msg 通道）同样在此接线：collabHost 通道 → 插件频道订阅注册表
+ *  （ctx.collab.subscribe 的落点），handler 常驻内核不随插件启停（投递过滤由订阅注册表承担）。 */
 let runtimeEventsWired = false;
 function ensureRuntimeChangeEvents(): void {
   if (runtimeEventsWired) return;
@@ -534,9 +535,9 @@ function ensureRuntimeChangeEvents(): void {
   useVaultStore.subscribe((s, prev) => {
     if (s.tree !== prev.tree) emitPluginEvent("vault:changed", {});
   });
-  // 入站帧的 file 槽承载插件频道名（与笔记 file 路由键角色一致），事件载荷按 channel 命名
+  // 入站帧的 file 槽承载插件线路频道名（插件id:逻辑频道），按订阅注册表投递（未订阅频道不投递）
   registerCollabChannel("plugin-msg", (peerId, file, payload) =>
-    emitPluginEvent("collab:message", { peerId, channel: file, payload }),
+    dispatchPluginChannel(peerId, file, payload),
   );
 }
 

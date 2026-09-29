@@ -240,3 +240,44 @@ describe("resolveCollabTarget（身份→传输选择）", () => {
     expect(deps.spaceWsUrl).toHaveBeenCalledWith("http://s:11224");
   });
 });
+
+describe("插件频道订阅注册表", () => {
+  it("同频道多订阅者依次投递；未订阅频道不投递", () => {
+    const a = vi.fn();
+    const b = vi.fn();
+    host.registerPluginChannel("com.a:ch", a);
+    host.registerPluginChannel("com.a:ch", b);
+    host.dispatchPluginChannel(5, "com.a:ch", { n: 1 });
+    expect(a).toHaveBeenCalledWith(5, { n: 1 });
+    expect(b).toHaveBeenCalledWith(5, { n: 1 });
+    a.mockClear();
+    b.mockClear();
+    host.dispatchPluginChannel(6, "com.b:ch", { n: 2 });
+    expect(a).not.toHaveBeenCalled();
+    expect(b).not.toHaveBeenCalled();
+  });
+
+  it("撤销订阅按引用移除且幂等；全部撤销后频道条目清空", () => {
+    const a = vi.fn();
+    const b = vi.fn();
+    const offA = host.registerPluginChannel("ch", a);
+    host.registerPluginChannel("ch", b);
+    offA();
+    offA();
+    host.dispatchPluginChannel(1, "ch", "x");
+    expect(a).not.toHaveBeenCalled();
+    expect(b).toHaveBeenCalledWith(1, "x");
+  });
+
+  it("handler 异常隔离：单个订阅者抛错不连坐其余订阅者", () => {
+    const bad = vi.fn(() => {
+      throw new Error("处理失败");
+    });
+    const good = vi.fn();
+    host.registerPluginChannel("ch", bad);
+    host.registerPluginChannel("ch", good);
+    expect(() => host.dispatchPluginChannel(1, "ch", "x")).not.toThrow();
+    expect(bad).toHaveBeenCalledTimes(1);
+    expect(good).toHaveBeenCalledTimes(1);
+  });
+});

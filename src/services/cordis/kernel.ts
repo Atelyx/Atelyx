@@ -34,6 +34,7 @@ import {
   externalWriteFileBase64,
 } from "@/services/externalFs";
 import { registerPluginTools, unregisterPluginTools } from "@/services/ai/tools";
+import { registerPluginChannel } from "@/utils/collabHost";
 import {
   globVault,
   grepVault,
@@ -121,12 +122,25 @@ interface ShellServiceInstance extends ShellService {
   ctx: Context;
 }
 
+/** collab 服务实例（tracker 注入调用方插件上下文：频道命名空间与订阅归属由调用方决定）。 */
+interface CollabServiceInstance extends CollabService {
+  ctx: Context;
+}
+
 /** 调用方插件 id：state/storage/fs 的数据落点与授权查表由调用方决定，缺归属的访问（非插件上下文）
  *  直接拒绝——静默落到共享命名空间会制造跨插件数据混写。 */
 function requireCallerPluginId(ctx: Context): string {
   const id = pluginIdOf(ctx);
   if (!id) throw new Error("插件服务只能在插件上下文中使用");
   return id;
+}
+
+/** 插件频道线路名 = 插件 id + ":" + 逻辑频道名：命名空间分隔符，跨插件撞名不串台。
+ *  channel 须为非空字符串且不含 ":"（保留分隔符），非法输入直接拒绝（不静默改写）。 */
+function pluginWireChannel(pluginId: string, channel: string): string {
+  if (typeof channel !== "string" || channel === "") throw new Error("协作频道名须为非空字符串");
+  if (channel.includes(":")) throw new Error('协作频道名不能包含 ":"（命名空间保留分隔符）');
+  return `${pluginId}:${channel}`;
 }
 
 /** 流句柄（shell/ai 流式：chunk/end/error 帧；已收尾后忽略后续调用）。 */
@@ -616,10 +630,17 @@ export function createKernel(): Kernel {
       if (!access) throw new Error("协作能力未就绪");
       access.setPresence(view, file);
     },
-    sendMessage: (channel, payload, opts) => {
+    sendMessage(this: CollabServiceInstance, channel, payload, opts) {
       const access = getPluginCollabAccess();
       if (!access) throw new Error("协作能力未就绪");
-      return access.sendMessage(channel, payload, opts?.to);
+      const wire = pluginWireChannel(requireCallerPluginId(this.ctx), channel);
+      return access.sendMessage(wire, payload, opts?.to);
+    },
+    subscribe(this: CollabServiceInstance, channel, handler) {
+      if (typeof handler !== "function") throw new Error("协作频道订阅需要处理函数");
+      const wire = pluginWireChannel(requireCallerPluginId(this.ctx), channel);
+      const ctx = this.ctx;
+      return ctx.effect(() => registerPluginChannel(wire, handler));
     },
     myPeer: () => {
       const access = getPluginCollabAccess();
@@ -632,6 +653,8 @@ export function createKernel(): Kernel {
       return access.acquire();
     },
   };
+  // tracker：插件经 ctx.collab 读取时 `this.ctx` 解析为调用方上下文（sendMessage/subscribe 按调用方绑定）。
+  Object.defineProperty(collab, symbols.tracker, { value: { property: "ctx" } });
   provide("collab", collab);
 
   const notification: NotificationService = {

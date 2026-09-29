@@ -24,7 +24,7 @@ vi.mock("@/services/plugins", () => ({
 
 vi.mock("@/services/app", () => ({ getAppVersion: vi.fn(async () => "0.0.0") }));
 vi.mock("@/services/dialog", () => ({ pickDirectory: vi.fn() }));
-// 事件发射以替身替代：本文件只验证接线「plugin-msg 入站 → collab:message 发射」，投递本身在 kernel/events 测试覆盖
+// 事件发射以替身替代：本文件只验证接线「plugin-msg 入站 → 插件频道订阅注册表投递」，投递本身在 collabHost/kernel 测试覆盖
 vi.mock("@/services/cordis/events", () => ({ emitPluginEvent: vi.fn() }));
 
 // 挂载链路以替身替代：本文件只验证 store 侧的编排（入口选择、阶段归类），内核不参与。
@@ -62,7 +62,7 @@ import { killProcessTree } from "@/services/shell";
 import { mountedPluginIds } from "@/services/cordis/loader";
 import { trackPluginProcess } from "@/services/cordis/pluginProcesses";
 import { emitPluginEvent } from "@/services/cordis/events";
-import { dispatchCollabChannel } from "@/utils/collabHost";
+import { dispatchCollabChannel, registerPluginChannel } from "@/utils/collabHost";
 import { usePluginStore } from "@/stores/pluginStore";
 import { useNotificationStore } from "@/stores/notificationStore";
 
@@ -569,17 +569,21 @@ describe("插件进程随运行时结束", () => {
   });
 });
 
-describe("协作消息入站事件桥", () => {
-  it("load 常驻接线：plugin-msg 通道入站帧触发 collab:message 事件发射", async () => {
+describe("协作插件消息入站桥", () => {
+  it("load 常驻接线：plugin-msg 入站帧按订阅注册表投递（不经事件广播）", async () => {
     await usePluginStore.getState().load();
     expect(emitPluginEvent).not.toHaveBeenCalled();
 
-    dispatchCollabChannel("plugin-msg", 7, "comfyui.remote", { cmd: "start" });
-
-    expect(emitPluginEvent).toHaveBeenCalledWith("collab:message", {
-      peerId: 7,
-      channel: "comfyui.remote",
-      payload: { cmd: "start" },
-    });
+    const received: Array<[number, unknown]> = [];
+    const off = registerPluginChannel("com.test.a:ch", (peerId, payload) =>
+      received.push([peerId, payload]),
+    );
+    dispatchCollabChannel("plugin-msg", 7, "com.test.a:ch", { cmd: "start" });
+    expect(received).toEqual([[7, { cmd: "start" }]]);
+    // 未订阅频道不投递（无调用、无事件）
+    dispatchCollabChannel("plugin-msg", 8, "com.test.b:ch", { cmd: "x" });
+    expect(received).toEqual([[7, { cmd: "start" }]]);
+    expect(emitPluginEvent).not.toHaveBeenCalled();
+    off();
   });
 });

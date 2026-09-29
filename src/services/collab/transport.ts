@@ -6,7 +6,8 @@
 import type { CollabHello, CollabPeer, CollabPresence } from "@/types";
 
 /** 透传频道（传输层消息类型；新传输可按需扩展）。`plugin-msg` 为插件通用消息通道：
- *  file 槽承载插件频道名，payload 为任意 JSON，可选 targetPeerId 定向单播。 */
+ *  file 槽承载插件线路频道名（`插件id:逻辑频道`），payload 为任意 JSON 或二进制 Uint8Array
+ *  （二进制经 WebSocket 二进制帧直传），可选 targetPeerId 定向单播。 */
 export type CollabChannel =
   | "note-sync"
   | "note-aware"
@@ -18,13 +19,15 @@ export interface CollabTransportHandle {
   /** 上报本端 presence（调用方自行节流）。 */
   sendPresence(presence: CollabPresence): void;
   /** 按频道透传一条消息（传输层不透明转发；断开时静默丢弃）。返回是否已投递到传输层。
-   *  `plugin-msg` 的 file 槽 = 插件频道名，targetPeerId 有值 = 定向单播（其余频道忽略）。 */
+   *  `plugin-msg` 的 file 槽 = 插件线路频道名，targetPeerId 有值 = 定向单播（其余频道忽略）。 */
   sendMessage(
     channel: CollabChannel,
     file: string,
     payload: unknown,
     targetPeerId?: number,
   ): boolean;
+  /** 本连接已收到的最大插件帧序号（可靠补投对账基准；未收到过 = null）。 */
+  pluginSeq(): number | null;
   /** 主动离开房间（切仓库/关闭应用）。 */
   sendBye(): void;
   /** 断开连接且不再重连。 */
@@ -37,6 +40,8 @@ export interface CollabTransportOptions {
   /** 重连前刷新 hello（身份/令牌/配置变化后自动生效）；返回 null = 放弃重连并正常收尾。
    *  可选：不提供 = 重连沿用构造时的 hello。 */
   refreshHello?: () => Promise<CollabHello | null>;
+  /** 上次收到的房间级插件帧序号（可靠补投对账基准；换房 = null，由调用方跨连接维护）。 */
+  pluginLastSeq?: number | null;
   /** 收到 hello-ack（分配的 peerId）——据此把自己过滤出 peers 列表。 */
   onHelloAck(peerId: number): void;
   onPeers(peers: CollabPeer[]): void;

@@ -36,6 +36,7 @@ function fakeHandle(): CollabTransportHandle {
   return {
     sendPresence: () => {},
     sendMessage: () => true,
+    pluginSeq: () => null,
     sendBye: () => {},
     disconnect: () => {},
   };

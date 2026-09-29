@@ -44,6 +44,7 @@ function fakeFactory(name: string) {
     order: [] as string[],
   };
   let options: CollabTransportOptions | null = null;
+  let seq: number | null = null;
   const factory: CollabTransportFactory = {
     name,
     connect: (opts) => {
@@ -52,6 +53,7 @@ function fakeFactory(name: string) {
         sendPresence: () => {
           calls.sendPresence += 1;
         },
+        pluginSeq: () => seq,
         sendMessage: (channel, file, payload, targetPeerId) => {
           calls.sendMessage.push([channel, file, payload, targetPeerId]);
           return true;
@@ -67,7 +69,7 @@ function fakeFactory(name: string) {
       };
     },
   };
-  return { factory, calls, options: () => options };
+  return { factory, calls, options: () => options, setSeq: (s: number | null) => (seq = s) };
 }
 
 beforeEach(async () => {
@@ -196,5 +198,29 @@ describe("连接与路由", () => {
     host.connectTransport(connectRequest("fake"));
     host.sendTransportPresence({ file: "a.md", selection: null, view: "note" });
     expect(fake.calls.sendPresence).toBe(1);
+  });
+
+  it("连接替换前捕获旧句柄插件序号：同房重连作为补投基线下传", () => {
+    const first = fakeFactory("first");
+    const second = fakeFactory("second");
+    transport.registerCollabTransport(first.factory);
+    transport.registerCollabTransport(second.factory);
+
+    host.connectTransport(connectRequest("first"));
+    first.setSeq(10);
+    host.connectTransport(connectRequest("second"));
+    expect(second.options()!.pluginLastSeq).toBe(10);
+  });
+
+  it("换房（hello.spaceId 变化）序号基线重置（房间序号空间失效）", () => {
+    const first = fakeFactory("first");
+    const second = fakeFactory("second");
+    transport.registerCollabTransport(first.factory);
+    transport.registerCollabTransport(second.factory);
+
+    host.connectTransport(connectRequest("first"));
+    first.setSeq(10);
+    host.connectTransport({ ...connectRequest("second"), hello: { ...HELLO, spaceId: "sp2" } });
+    expect(second.options()!.pluginLastSeq).toBeNull();
   });
 });
