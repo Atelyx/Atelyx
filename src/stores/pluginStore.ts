@@ -37,6 +37,7 @@ import {
   pluginUninstall,
   pluginUpdate,
   pluginRollback,
+  pluginRebuildLocal,
   onPluginChanged,
 } from "@/services/plugins";
 import {
@@ -178,6 +179,8 @@ interface PluginStoreState {
   update(id: string): Promise<void>;
   /** 回退到上一版本代码，保留插件数据；成功后清空回退指针。 */
   rollback(id: string): Promise<void>;
+  /** 重载本地插件：重跑打包并重新挂载本插件，使源码改动生效（其余插件运行时不动）。 */
+  reload(id: string): Promise<void>;
   /** 恢复默认装配：补播种已卸载的默认行 + 重载。 */
   restoreDefaultComposition(): Promise<void>;
   /** 插件工具的 UI 元数据（Agent 设置页名册合并；组件经此读取，不直连 services）。 */
@@ -627,16 +630,19 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
     if (refreshError) throw refreshError;
   };
 
-  /** 标记本窗口正在进行版本操作：Rust 广播的 plugin-changed 已由操作内的显式重载覆盖，
+  /** 标记本窗口正在进行版本操作：Rust 广播的 plugin-changed 已由操作内的显式刷新覆盖，
    * 监听器跳过，避免同窗口连跑两次全量重载（多窗口仍各自收到广播并重载）。 */
-  const runVersionOpTracked = async (op: () => Promise<unknown>, label: string): Promise<void> => {
+  const runTracked = async (op: () => Promise<void>): Promise<void> => {
     versionOpRunning = true;
     try {
-      await runVersionOp(op, label);
+      await op();
     } finally {
       versionOpRunning = false;
     }
   };
+
+  const runVersionOpTracked = async (op: () => Promise<unknown>, label: string): Promise<void> =>
+    runTracked(() => runVersionOp(op, label));
 
   /** 装配顺序：默认组合成员在前，其余按 id 追加（行有落位目录 → 磁盘入口，否则编译实现）。 */
   const mountIds = (): string[] =>
@@ -831,6 +837,55 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
       }
       await stopPlugin(id);
       await runVersionOpTracked(() => pluginRollback(id, p.previousVersion!), "回退");
+    },
+
+    reload: async (id) => {
+      const p = get().plugins[id];
+      if (!p || p.installDir === "" || p.sourceKind !== "local") {
+        throw new Error("只有本地目录安装的插件支持重载");
+      }
+      // 只对本插件停旧挂新（全量 load 会重启全部插件）；广播抑制与版本操作同口径——
+      // 重打包成功后 Rust 会广播 plugin-changed，本窗口不再触发一次全量重载。
+      await runTracked(async () => {
+        await stopPlugin(id);
+        let row: PluginRow | undefined;
+        let rebuildError: unknown;
+        try {
+          row = await pluginRebuildLocal(id);
+        } catch (e) {
+          rebuildError = e;
+        }
+        // 重打包耗时期间该行可能已被启停改动：以当前行状态为准——已停用即到此为止
+        //（停用语义已由启停操作完成），不把插件重新挂起来。
+        const current = get().plugins[id];
+        if (!current || !current.enabled) return;
+        if (!row) {
+          // 重打包失败：运行时已停、新代码未生效。行转失败态可见（启用状态未动，
+          // 修复源码后可直接再点重载），错误上抛给调用方提示。
+          set((s) => {
+            const cur = s.plugins[id];
+            if (!cur) return s;
+            return {
+              plugins: {
+                ...s.plugins,
+                [id]: { ...cur, phase: "failed", failure: { phase: "apply", message: errText(rebuildError) } },
+              },
+            };
+          });
+          throw rebuildError;
+        }
+        const rebuilt = row;
+        // 用重打包后的返回行刷新本行（版本/入口产物可能已变；enabled 以本窗口当前
+        // 行状态为准——Rust 返回的是打包期间点到的快照），再重新挂载；
+        // 挂载失败由 spawn 落失败态，不再上抛。
+        set((s) => ({ plugins: { ...s.plugins, [id]: { ...toInstalled(rebuilt), enabled: true } } }));
+        await spawn(id);
+        // 挂载失败如实上抛（行上已有分段诊断）：新代码没跑起来就不算重载成功。
+        const mounted = get().plugins[id];
+        if (mounted?.phase === "failed") {
+          throw new Error(mounted.failure?.message ?? "重载后挂载失败");
+        }
+      });
     },
 
     pluginToolMetas: () => pluginToolMetasSvc(),

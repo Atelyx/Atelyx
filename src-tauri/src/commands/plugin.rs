@@ -2304,6 +2304,35 @@ pub async fn plugin_rollback(app: AppHandle, id: String, expected_previous_versi
     Ok(plugin_info_from(&current, &previous_manifest, source.kind, enabled))
 }
 
+/// 重载本地插件：对实时引用的源目录重读清单并重跑依赖取件与打包，开发者改动的
+/// 源码与依赖在下次挂载生效。链接与用户数据不动、启用状态不变；成功后广播
+/// plugin-changed，各窗口重载运行时挂上新产物。
+#[tauri::command]
+pub async fn plugin_rebuild_local(app: AppHandle, id: String) -> Result<PluginInfo, String> {
+    let _operation_guard = PluginManagementGuard::acquire()?;
+    // id 校验与其它入口同口径：非法 id 按不存在处理（来源记录按裸 id 寻址）。
+    if !plugin_id_valid(&id) {
+        return Err("插件不存在".to_string());
+    }
+    let is_local = {
+        let pstate = read_plugin_state(&app)?;
+        pstate.sources.get(&id).map(|s| s.kind) == Some(PluginSourceKind::Local)
+    };
+    if !is_local {
+        return Err("只有本地目录安装的插件支持重载".to_string());
+    }
+    let base = plugin_base_dir(&app)?;
+    let dir = find_plugin_dir(&base, &id)?;
+    let manifest = read_manifest(&dir)?;
+    // 打包每次从干净目录重建产物（依赖声明变化时产物随之出现/消失）；依赖取件有
+    // 内容寻址缓存，未动依赖的重载只重跑打包本身。与安装同口径不持 IO 锁过 await。
+    crate::plugin_build::prepare_artifact(&app, &dir, &manifest, false).await?;
+    // 启用状态在打包后重读：打包耗时期间用户可能已启停，返回值不得携带过期快照。
+    let enabled = read_plugin_state(&app)?.enabled.get(&id).copied().unwrap_or(false);
+    emit_plugin_changed(&app, &id);
+    Ok(plugin_info_from(&dir, &manifest, PluginSourceKind::Local, enabled))
+}
+
 /// 把当前代码与候选代码交换，并把当前 data 搬到新代码中。
 /// 状态提交失败时按相反顺序恢复，旧回退点不受影响。
 fn commit_plugin_update(

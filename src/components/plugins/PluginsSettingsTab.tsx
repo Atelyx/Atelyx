@@ -1,7 +1,7 @@
 /**
  * 设置 → 插件面板：插件列表（默认组合成员 + 已装插件）+ 市场浏览。
  *
- * - 列表（单表，装配顺序 = 默认组合成员在前）：每行可启停/更新/卸载，展示来源徽标/版本/运行状态/
+ * - 列表（单表，装配顺序 = 默认组合成员在前）：每行可启停/重载（本地插件）/更新/卸载，展示来源徽标/版本/运行状态/
  *   分段失败诊断/声明与实际调用审计/命令入口；未安装的默认组合成员成灰行，经「恢复默认装配」装回。
  * - 替换/增强关系由插件自己在 apply 里经 ctx.slots 的 priority / inject 声明（作者侧决定）：
  *   用户侧只需安装 + 启用，不在管理页暴露行序/实现来源等开发者语义。
@@ -10,7 +10,7 @@
  * 分层：本组件只经 pluginStore 触达插件能力（不直连 services）；列表行推导取自 utils/cordis/composition。
  */
 import { useMemo, useState } from "react";
-import { FolderOpen, GitBranch, Info, RefreshCw, Trash2 } from "lucide-react";
+import { FolderOpen, GitBranch, Info, RefreshCw, RotateCw, Trash2 } from "lucide-react";
 import { usePluginStore, type PluginInstallResult } from "@/stores/pluginStore";
 import { useAppStore } from "@/stores/appStore";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
@@ -39,6 +39,7 @@ export function PluginsSettingsTab() {
   const setEnabled = usePluginStore((s) => s.setEnabled);
   const update = usePluginStore((s) => s.update);
   const rollback = usePluginStore((s) => s.rollback);
+  const reload = usePluginStore((s) => s.reload);
   const uninstall = usePluginStore((s) => s.uninstall);
   const approveDir = usePluginStore((s) => s.approveDir);
   const revokeDir = usePluginStore((s) => s.revokeDir);
@@ -324,6 +325,22 @@ export function PluginsSettingsTab() {
                     >
                       <Info size={14} />
                     </button>
+                    {row.sourceKind === "local" && (
+                      <button
+                        onClick={() =>
+                          void reload(row.id).then(
+                            () => setNotice({ kind: "ok", text: "插件已重载，源码改动已生效" }),
+                            (e) => setNotice({ kind: "error", text: errText(e) }),
+                          )
+                        }
+                        disabled={!row.enabled}
+                        title={row.enabled ? "重载：重跑打包并重新挂载，使源码改动生效" : "启用后可重载"}
+                        className="p-1.5 rounded hover:bg-[var(--hover)] disabled:opacity-50"
+                        style={{ color: "var(--text-muted)" }}
+                      >
+                        <RotateCw size={14} />
+                      </button>
+                    )}
                     {p.installDir !== "" && row.sourceKind !== "local" && (
                       <button
                         onClick={() => void update(row.id).catch((e) => setNotice({ kind: "error", text: errText(e) }))}

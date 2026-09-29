@@ -185,6 +185,7 @@ pub fn run() {
             commands::plugin::plugin_seed_default,
             commands::plugin::plugin_update,
             commands::plugin::plugin_rollback,
+            commands::plugin::plugin_rebuild_local,
             commands::plugin::plugin_read_entry,
             commands::plugin::plugin_read_state,
             commands::plugin::plugin_write_state,

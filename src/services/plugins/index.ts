@@ -90,6 +90,11 @@ export function pluginRollback(id: string, expectedPreviousVersion: string): Pro
   return invoke<PluginRow>("plugin_rollback", { id, expectedPreviousVersion });
 }
 
+/** 重载本地插件：对源目录重跑依赖取件与打包（产物从干净目录重建），成功后广播 plugin-changed。 */
+export function pluginRebuildLocal(id: string): Promise<PluginRow> {
+  return invoke<PluginRow>("plugin_rebuild_local", { id });
+}
+
 /** 订阅其他窗口完成的插件版本变化；各窗口据此重载自己的运行时。 */
 export function onPluginChanged(handler: (payload: { id: string }) => void): Promise<UnlistenFn> {
   return listen<{ id: string }>("plugin-changed", (event) => handler(event.payload));
