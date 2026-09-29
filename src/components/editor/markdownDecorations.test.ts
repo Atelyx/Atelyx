@@ -714,13 +714,13 @@ describe("livePreviewNeedsRebuild（装饰重建判定）", () => {
     expect(livePreviewNeedsRebuild(tr, roEffect)).toBe(true);
   });
 
-  it("输入法组合期（input.type.compose）→ 不重建（防打断候选字上屏）", () => {
+  it("输入法组合期（input.type.compose）→ 重建（文档在组合期持续变化，跳过会让装饰错位于新文档）", () => {
     const tr = stateWithLanguage(langA).update({
       changes: { from: 0, insert: "中" },
       userEvent: "input.type.compose",
     });
     expect(tr.docChanged).toBe(true);
-    expect(livePreviewNeedsRebuild(tr, roEffect)).toBe(false);
+    expect(livePreviewNeedsRebuild(tr, roEffect)).toBe(true);
   });
 
   it("显式选区变化 → 重建", () => {
