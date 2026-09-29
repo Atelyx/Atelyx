@@ -792,17 +792,31 @@ export function registerCanvasPluginWiring(): () => void {
 }
 
 /**
- * 记录画布历史版本（保存成功后的存档点）：以内存运行时内容构建 `.atlx` 格式快照 → 记一条 edit
- * 版本（60s 内连续编辑合并为一版，不逐键）。快照取内存且**纯序列化**（`serializeCanvasSnapshot`
- * 不写 `.md`——若用 toFileNode 路径，延迟执行时可能把旧正文写回共享盘覆盖新编辑；历史尽力而为，
- * 不阻塞保存流程）。
+ * 按本轮写盘快照记历史：快照是 persist 开始时捕获的状态 = 本轮真实落盘的内容；不能取收尾时
+ * 的内存——await 期间内存可能已被协作回放/新编辑改写，超前于磁盘会让历史回滚错位。
+ * file 是本轮写盘路径（收尾路径跟随已同步），调用方已做切画布守卫。
+ * 快照**纯序列化**（`serializeCanvasSnapshot` 不写 `.md`——若走 toFileNode 路径，延迟执行时
+ * 可能把旧正文写回共享盘覆盖新编辑）；60s 内连续编辑合并为一版，不逐键；fire-and-forget
+ * 不阻塞保存流程。
  */
-function recordCanvasHistory(file: string): void {
-  const s = useCanvasStore.getState();
-  if (s.canvasFile !== file || !s.canvasId) return; // 切画布/未打开竞态：只记当前画布
-  const { canvasId, canvasTitle, nodes, edges, messagesByConv } = s;
+function recordCanvasHistorySnapshot(
+  file: string,
+  snapshotState: {
+    canvasId: string;
+    canvasTitle: string;
+    nodes: CanvasState["nodes"];
+    edges: CanvasState["edges"];
+    messagesByConv: CanvasState["messagesByConv"];
+  },
+): void {
   const content = JSON.stringify(
-    serializeCanvasSnapshot(canvasId, canvasTitle, nodes, edges, messagesByConv),
+    serializeCanvasSnapshot(
+      snapshotState.canvasId,
+      snapshotState.canvasTitle,
+      snapshotState.nodes,
+      snapshotState.edges,
+      snapshotState.messagesByConv,
+    ),
   );
   void recordHistoryVersion("canvas", file, {
     content,
@@ -826,8 +840,9 @@ async function persistNow(): Promise<void> {
     useCanvasStore.getState();
   if (!canvasId || !canvasFile) return;
   // 写盘成功后的统一收尾：同步 title 改名后的落地路径（不同步会让下一轮写已被改名删除的
-  // 旧路径 → 404 回退全量写，凭空多出一个画布文件），最后按本轮是否已被新变更接续决定收尾方式。
-  // written = false 表示空补丁（磁盘未动）。
+  // 旧路径 → 404 回退全量写，凭空多出一个画布文件），再记历史（只绑定「本轮真实落盘」这一
+  // 事实，与收尾走哪条出口无关），最后按本轮是否已被新变更接续决定收尾方式。
+  // written = false 表示空补丁（磁盘未动，不记历史）。
   const finish = (written: boolean, newFile?: string) => {
     // 竞态守卫：await 期间可能已切换画布/清空状态（load 异步读盘），旧画布的写盘结果
     // 不得覆盖新画布的脏标记/路径（否则新画布下次保存写错文件、脏编辑被吞）
@@ -841,15 +856,23 @@ async function persistNow(): Promise<void> {
         useAppStore.setState({ currentCanvasFile: newFile });
       }
     }
+    if (written) {
+      recordCanvasHistorySnapshot(newFile ?? canvasFile, {
+        canvasId,
+        canvasTitle,
+        nodes,
+        edges,
+        messagesByConv,
+      });
+    }
     if (persistCtl.version !== versionAtStart) {
-      // 写盘期间有新变更（已挂新 timer）：保留 dirty，由下一轮 timer 再写盘，防本次成功吞掉新编辑；
-      // 不推进快照——下一轮 diff 仍以旧快照为基线（已写盘部分重发同内容 upsert，幂等）
+      // 写盘期间有新变更（已挂新 timer）：保留 dirty，由下一轮 timer 再写盘，防本次成功
+      // 吞掉新编辑；不推进快照——下一轮 diff 仍以旧快照为基线（已写盘部分重发同内容
+      // upsert，幂等）。历史已按本轮落盘快照记过，不随出口丢失
       useCanvasStore.setState({ saving: false });
       return;
     }
     useCanvasStore.setState({ error: null, dirty: false, saving: false });
-    // 存档点：以当前内容快照记历史（60s 内连续编辑合并为一版；fire-and-forget 不阻塞保存流程）
-    if (written) recordCanvasHistory(newFile ?? canvasFile);
     syncLastSaved();
   };
   const reportError = (e: unknown) => {
