@@ -222,10 +222,10 @@ export interface VaultService {
   createFolder(dir: string): Promise<{ ok: boolean; summary: string; path: string }>;
 }
 
-/** 仓库外授权目录文件读写服务（外部文件服务面）：方法面与 `vault` 镜像，但入参是绝对路径，
- *  须落在该插件经用户批准的授权目录或其私有文件目录内（Rust 侧实时校验，撤销立即失效）。
- *  私有目录（`privateDir()`）不须授权即可读写，随插件卸载清除、更新保留——插件生成文件的
- *  自有落点。插件代码不传插件 id——宿主按当前 fiber 绑定（与 state/storage 同机制）。
+/** 仓库外文件读写服务（外部文件服务面）：方法面与 `vault` 镜像，但入参是绝对路径、
+ *  作用域为仓库外任意路径（无目录授权门槛；调用经审计按调用方插件记录方法与路径）。
+ *  私有目录（`privateDir()`）为插件自有落点，随插件卸载清除、更新保留。插件代码不传
+ *  插件 id——宿主按当前 fiber 绑定（与 state/storage 同机制）。
  *  模型工具（AI 文件工具）走 `vault`，结构性够不到本面。 */
 export interface FsService {
   readFile(path: string): Promise<string>;

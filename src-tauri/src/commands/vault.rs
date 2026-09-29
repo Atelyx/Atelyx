@@ -784,7 +784,7 @@ fn count_children(dir: &Path, skip_hidden: bool) -> usize {
 }
 
 /// 单层列目核心（max 参数化供测试注入小上限）：目录在前、按名称升序。
-/// `skip_hidden`：仓库列表屏蔽 `.` 开头隐藏项（AI 工具不可见）；仓库外授权目录
+/// `skip_hidden`：仓库列表屏蔽 `.` 开头隐藏项（AI 工具不可见）；仓库外文件面
 /// （ctx.fs，commands/external_fs.rs）复用本函数但 `skip_hidden=false`——用户批准的真实
 /// 目录含点文件，是正当内容。
 pub(crate) fn list_dir_entries(dir: &Path, max: usize, skip_hidden: bool) -> Result<ListDirResult, String> {

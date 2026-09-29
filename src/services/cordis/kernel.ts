@@ -112,7 +112,7 @@ interface StorageServiceInstance extends StorageService {
   ctx: Context;
 }
 
-/** fs 服务实例（tracker 注入调用方插件上下文：授权目录按调用方插件查表）。 */
+/** fs 服务实例（tracker 注入调用方插件上下文：调用归属按调用方插件审计）。 */
 interface FsServiceInstance extends FsService {
   ctx: Context;
 }
@@ -436,38 +436,47 @@ export function createKernel(): Kernel {
   };
   provide("vault", vault);
 
-  // 仓库外授权目录文件读写（外部文件服务面）：tracker 绑定调用方插件 id（同 state/storage）——
-  // API 不暴露 id 参数；授权目录由用户逐目录批准（插件详情页），Rust 侧每次调用实时校验、
-  // 撤销立即失效。模型工具走 vault，结构性够不到本面。
+  // 仓库外文件读写（外部文件服务面）：作用域为任意绝对路径、无目录授权门槛（插件与宿主
+  // 同 realm，事前授权不构成可信边界；调用经 audit 层按调用方插件记录方法与路径，详情页可见）。
+  // 每方法先取调用方插件 id：非插件上下文同步拒绝——fs 面只对插件开放；id 不入命令参数，
+  // 私有目录（privateDir）按它定位。模型工具走 vault，结构性够不到本面。
   const fs: FsService = {
     readFile(this: FsServiceInstance, path) {
-      return externalReadFile(requireCallerPluginId(this.ctx), path);
+      requireCallerPluginId(this.ctx);
+      return externalReadFile(path);
     },
     async writeFile(this: FsServiceInstance, path, content) {
-      await externalWriteFile(requireCallerPluginId(this.ctx), path, content);
+      requireCallerPluginId(this.ctx);
+      await externalWriteFile(path, content);
       return { ok: true, summary: `已写入「${path}」` };
     },
     listDir(this: FsServiceInstance, path) {
-      return externalListDir(requireCallerPluginId(this.ctx), path);
+      requireCallerPluginId(this.ctx);
+      return externalListDir(path);
     },
     async createFolder(this: FsServiceInstance, path) {
-      await externalCreateFolder(requireCallerPluginId(this.ctx), path);
+      requireCallerPluginId(this.ctx);
+      await externalCreateFolder(path);
       return { ok: true, summary: `已创建「${path}」`, path };
     },
     async renameFile(this: FsServiceInstance, path, newName) {
-      const actualPath = await externalRenameFile(requireCallerPluginId(this.ctx), path, newName);
+      requireCallerPluginId(this.ctx);
+      const actualPath = await externalRenameFile(path, newName);
       return { ok: true, summary: `已重命名「${path}」`, actualPath };
     },
     async moveFile(this: FsServiceInstance, path, targetDir) {
-      const actualPath = await externalMoveFile(requireCallerPluginId(this.ctx), path, targetDir);
+      requireCallerPluginId(this.ctx);
+      const actualPath = await externalMoveFile(path, targetDir);
       return { ok: true, summary: `已移动「${path}」`, actualPath };
     },
     async deleteFile(this: FsServiceInstance, path) {
-      await externalDeleteFile(requireCallerPluginId(this.ctx), path);
+      requireCallerPluginId(this.ctx);
+      await externalDeleteFile(path);
       return { ok: true, summary: `已删除「${path}」` };
     },
     async deleteDir(this: FsServiceInstance, path, force) {
-      const r = await externalDeleteDir(requireCallerPluginId(this.ctx), path, force === true);
+      requireCallerPluginId(this.ctx);
+      const r = await externalDeleteDir(path, force === true);
       return {
         ok: r.deleted,
         summary: r.deleted
@@ -481,13 +490,15 @@ export function createKernel(): Kernel {
       return externalPrivateDir(requireCallerPluginId(this.ctx));
     },
     writeFileBase64(this: FsServiceInstance, path, base64Data) {
+      requireCallerPluginId(this.ctx);
       // 非 async：归属校验同步抛出（非插件上下文立刻拒绝，不落成静默 rejection）
-      return externalWriteFileBase64(requireCallerPluginId(this.ctx), path, base64Data).then(
+      return externalWriteFileBase64(path, base64Data).then(
         () => ({ ok: true, summary: `已写入「${path}」` }),
       );
     },
     readFileDataUrl(this: FsServiceInstance, path) {
-      return externalReadFileDataUrl(requireCallerPluginId(this.ctx), path);
+      requireCallerPluginId(this.ctx);
+      return externalReadFileDataUrl(path);
     },
   };
   Object.defineProperty(fs, symbols.tracker, { value: { property: "ctx" } });

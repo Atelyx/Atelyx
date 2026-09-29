@@ -386,8 +386,8 @@ describe("fs 服务按调用方插件绑定", () => {
     });
     await Promise.all(pending);
     expect(externalPrivateDir).toHaveBeenCalledWith("com.test.fs");
-    expect(externalWriteFileBase64).toHaveBeenCalledWith("com.test.fs", "E:/p/img.png", "QUJD");
-    expect(externalReadFileDataUrl).toHaveBeenCalledWith("com.test.fs", "E:/p/img.png");
+    expect(externalWriteFileBase64).toHaveBeenCalledWith("E:/p/img.png", "QUJD");
+    expect(externalReadFileDataUrl).toHaveBeenCalledWith("E:/p/img.png");
     expect(privateDir).toBe("C:/plugins/data/files");
     expect(writeResult).toEqual({ ok: true, summary: "已写入「E:/p/img.png」" });
     expect(dataUrl).toBe("data:image/png;base64,AA==");

@@ -193,8 +193,6 @@ pub fn run() {
             commands::plugin::plugin_kv_set,
             commands::plugin::plugin_kv_delete,
             commands::plugin::plugin_kv_write,
-            commands::plugin::plugin_approve_dir,
-            commands::plugin::plugin_revoke_dir,
             commands::external_fs::external_read_file,
             commands::external_fs::external_write_file,
             commands::external_fs::external_list_dir,

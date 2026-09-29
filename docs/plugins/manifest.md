@@ -25,7 +25,6 @@
     // "atelyxVersionMax": "0.6.0", // 可选：兼容的宿主版本上限（不含）
     "platforms": ["windows-x64"],   // 可选：目标平台（windows-x64 / linux-x64 / android），缺省全平台
     "declares": ["table"],          // 可选：披露将访问的 Atelyx 服务（管理页「声明 vs 实际」审计对照的声明侧）
-    "declaredDirs": ["~/Projects/my-app"], // 可选：披露并请求访问的仓库外目录（绝对路径或以 ~/ 开头；逐目录经用户批准后可用，见「外部目录访问」）
     "permissions": { "table": "读取当前打开的表格数据" }, // 可选：服务名 → 一句理由（安装/详情展示）
     "hostApiVersion": 1,            // 可选：插件契约版本（与宿主 App 版本解耦）
     "themes": [                     // 可选（type 含 theme 时）：声明式主题条目，无需代码
@@ -125,25 +124,23 @@
 它只用于管理页与审计对照展示，少报/漏报不会拦住任何调用，安全责任落在用户知情（安装警告）。
 宿主服务里的敏感项（如 `shell`/`clipboard`）在管理页以「敏感」高亮。
 
-## 外部目录与私有文件访问（`declaredDirs` + `ctx.fs`）
+## 仓库外文件访问与私有目录（`ctx.fs`）
 
-仓库内文件走 `ctx.vault`（相对仓库根的路径）。仓库**外**目录需要显式声明并经用户批准：
+仓库内文件走 `ctx.vault`（相对仓库根的路径）。仓库**外**文件走 `ctx.fs`，按**绝对路径**读写：
 
-- **声明**：`atelyx.declaredDirs` 列绝对路径或以 `~/` 开头（`~` 由宿主解析为用户主目录；相对路径无基准，安装时拒绝）。
-- **批准**：管理页插件详情「外部目录访问」区逐目录批准；只能批准清单里声明过的目录。批准结果持久化（跨更新保留、卸载即消失、跨窗口一致）。
-- **访问**：批准后插件经 `ctx.fs` 读写该目录——方法面与 `ctx.vault` 镜像（`readFile`/`writeFile`/`listDir`/`createFolder`/`renameFile`/`moveFile`/`deleteFile`/`deleteDir`），入参为绝对路径，须落在已批准目录内（含子目录，符号链接越出即拒）。插件代码不传插件 id——宿主按调用方自动绑定。
-- **二进制**：`writeFileBase64(path, base64Data)` 原子写字节（base64 进出，字节原样落盘，与编码无关）；`readFileDataUrl(path)` 读为 dataURL（mime 按扩展名推断，未知扩展名按 `application/octet-stream`）。两者同样受授权目录约束，也用于私有目录。
-- **撤销**：详情页撤销后立即失效（每次调用实时校验，无缓存窗口）。
-- 模型工具（AI 文件工具）走 `ctx.vault`，不会触达 `ctx.fs` 的授权目录。
+- **作用域**：`ctx.fs` 无目录授权门槛，方法面与 `ctx.vault` 镜像（`readFile`/`writeFile`/`listDir`/`createFolder`/`renameFile`/`moveFile`/`deleteFile`/`deleteDir`），入参为绝对路径（须规范化，不接受 `..` 段与相对路径）。插件代码不传插件 id——宿主按调用方自动绑定。插件经此能触达用户机器上任意文件，发布前想清楚是否值得。
+- **审计**：`fs` 属敏感服务，调用按调用方插件记录方法与路径（去重后的调用形态，非逐次完整日志），管理页插件详情「实际访问与调用」可见。
+- **二进制**：`writeFileBase64(path, base64Data)` 原子写字节（base64 进出，字节原样落盘，与编码无关）；`readFileDataUrl(path)` 读为 dataURL（mime 按扩展名推断，未知扩展名按 `application/octet-stream`）。
+- 模型工具（AI 文件工具）走 `ctx.vault`，限仓库根内，结构性够不到 `ctx.fs`。
 
 ### 插件私有目录（`ctx.fs.privateDir()`）
 
-`privateDir()` 返回本插件专属目录的绝对路径（不存在则创建），**无需批准**——它就是插件自己的
+`privateDir()` 返回本插件专属目录的绝对路径（不存在则创建）——它就是插件自己的
 落点，`ctx.fs` 全部方法（含二进制读写）对它开放，同样不开放给其他插件。目录位于插件数据的
 `data/files/` 下：随插件卸载一并清除、更新保留。适合存放插件生成的文件——例如生成图片后**当下**
 把字节写入私有目录，跨重启可读；不要把生成产物放在外部程序的临时目录里再指望它常驻。
 
-- 声明 `fs` 服务（`declares` 里列 `fs`）后即可调用，无需在 `declaredDirs` 里申报私有目录。
+- 声明 `fs` 服务（`declares` 里列 `fs`）后即可调用。
 - 插件键值存储（`data/state.json` / `data/kv.json`）在私有目录之外，`ctx.fs` 摸不到它们。
 
 ## 宿主兼容

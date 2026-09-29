@@ -17,8 +17,6 @@ vi.mock("@/services/plugins", () => ({
   pluginUninstall: vi.fn(async () => {}),
   pluginUpdate: vi.fn(),
   pluginRollback: vi.fn(),
-  pluginApproveDir: vi.fn(async () => {}),
-  pluginRevokeDir: vi.fn(async () => {}),
   onPluginChanged: vi.fn(async () => () => {}),
 }));
 
@@ -53,7 +51,7 @@ vi.mock("@/stores/appStore", () => ({
   },
 }));
 
-import { pluginApproveDir, pluginInstall, pluginInstallLocal, pluginList, pluginRevokeDir, pluginRollback, pluginUninstall, pluginUpdate } from "@/services/plugins";
+import { pluginInstall, pluginInstallLocal, pluginList, pluginRollback, pluginUninstall, pluginUpdate } from "@/services/plugins";
 import type { PluginRow } from "@/services/plugins";
 import { getAppVersion } from "@/services/app";
 import { pickDirectory } from "@/services/dialog";
@@ -411,56 +409,6 @@ describe("磁盘包入口选择（宿主产物优先）", () => {
     await usePluginStore.getState().setEnabled("com.test.theme", true);
     expect(mountPluginFromPackage).not.toHaveBeenCalled();
     expect(usePluginStore.getState().plugins["com.test.theme"].phase).toBe("active");
-  });
-});
-
-describe("仓库外目录授权动作", () => {
-  const fsManifest = (): PluginPackageJson => ({
-    name: "com.test.fs",
-    version: "1.0.0",
-    main: "index.js",
-    atelyx: { type: "background", declaredDirs: ["~/Projects/foo"] },
-  });
-  const fsRow = (over: Partial<{ approvedDirs: string[] }> = {}): PluginRow => ({
-    id: "com.test.fs",
-    name: "FS",
-    version: "1.0.0",
-    type: "background",
-    installDir: "/tmp/fs",
-    sourceKind: "git",
-    enabled: false,
-    manifest: fsManifest(),
-    ...(over.approvedDirs ? { approvedDirs: over.approvedDirs } : {}),
-  });
-
-  it("approveDir 调用服务，重载后行携带批准目录", async () => {
-    // 首次列表无批准；批准后 Rust 落盘返回带 approvedDirs 的行（重载由 runVersionOp 触发）
-    vi.mocked(pluginList)
-      .mockResolvedValueOnce({ rows: [fsRow()] })
-      .mockResolvedValueOnce({ rows: [fsRow({ approvedDirs: ["~/Projects/foo"] })] });
-    await usePluginStore.getState().load();
-    await usePluginStore.getState().approveDir("com.test.fs", "~/Projects/foo");
-    expect(pluginApproveDir).toHaveBeenCalledWith("com.test.fs", "~/Projects/foo");
-    expect(usePluginStore.getState().plugins["com.test.fs"]?.approvedDirs).toEqual(["~/Projects/foo"]);
-  });
-
-  it("revokeDir 调用服务，重载后行移除该目录", async () => {
-    // 撤销前列表带 approvedDirs；撤销后 Rust 落盘返回不带该目录的行（重载由 runVersionOp 触发）
-    vi.mocked(pluginList)
-      .mockResolvedValueOnce({ rows: [fsRow({ approvedDirs: ["~/Projects/foo"] })] })
-      .mockResolvedValueOnce({ rows: [fsRow()] });
-    await usePluginStore.getState().load();
-    expect(usePluginStore.getState().plugins["com.test.fs"]?.approvedDirs).toEqual(["~/Projects/foo"]);
-    await usePluginStore.getState().revokeDir("com.test.fs", "~/Projects/foo");
-    expect(pluginRevokeDir).toHaveBeenCalledWith("com.test.fs", "~/Projects/foo");
-    expect(usePluginStore.getState().plugins["com.test.fs"]?.approvedDirs).toBeUndefined();
-  });
-
-  it("行不存在时批准/撤销为 no-op（不调服务不报错）", async () => {
-    await usePluginStore.getState().approveDir("com.example.gone", "~/x");
-    await usePluginStore.getState().revokeDir("com.example.gone", "~/x");
-    expect(pluginApproveDir).not.toHaveBeenCalled();
-    expect(pluginRevokeDir).not.toHaveBeenCalled();
   });
 });
 

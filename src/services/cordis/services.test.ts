@@ -224,18 +224,18 @@ describe("ctx.services.get 敏感面审计", () => {
   });
 
   it("带 tracker 的敏感服务（fs）经 services.get 取回后调用照样进审计", async () => {
-    // 该面子带 `symbols.tracker`（授权按调用方查表）：审计包装必须是不带 tracker 的普通对象，
+    // 该面子带 `symbols.tracker`（归属按调用方 fiber 绑定）：审计包装必须是不带 tracker 的普通对象，
     // 否则会被框架的 traceable 层再包一次而绕过包装——调用摘要静默丢失。
     kernel = getKernel();
     const apply = (ctx: Context) => {
       const fs = ctx.services.get("fs") as { readFile: (path: string) => Promise<string> };
-      void fs.readFile("/tmp/授权目录/文件.md").catch(() => {});
+      void fs.readFile("/tmp/external/文件.md").catch(() => {});
     };
     await mountPlugin(kernel, { id: "builtin.svc-fs", apply });
     const entry = auditSnapshot(kernel.ctx).find((e) => e.pluginId === "builtin.svc-fs");
     expect(entry?.calls).toEqual(
       expect.arrayContaining([
-        { service: "fs", method: "readFile", summary: "readFile /tmp/授权目录/文件.md" },
+        { service: "fs", method: "readFile", summary: "readFile /tmp/external/文件.md" },
       ]),
     );
     await unmountPlugin(kernel, "builtin.svc-fs");

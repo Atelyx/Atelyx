@@ -23,8 +23,6 @@ export interface PlatformCapabilities {
   autoUpdate: boolean;
   /** 进程执行与插件依赖打包（移动端不存在，缺失显式可见）。 */
   processExecution: boolean;
-  /** 插件外部目录授权（清单声明仓库外目录并逐目录批准；移动端不提供）。 */
-  pluginExternalDirs: boolean;
   /** 磁盘文件监听（两端均无：外部改动在打开/重读时感知）。 */
   fileWatching: boolean;
 }
@@ -44,7 +42,6 @@ export function platformCapabilities(): PlatformCapabilities {
       credentialStorage: true,
       autoUpdate: false,
       processExecution: false,
-      pluginExternalDirs: false,
       fileWatching: false,
     };
   }
@@ -55,7 +52,6 @@ export function platformCapabilities(): PlatformCapabilities {
     credentialStorage: true,
     autoUpdate: true,
     processExecution: true,
-    pluginExternalDirs: true,
     fileWatching: false,
   };
 }

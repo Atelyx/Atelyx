@@ -85,9 +85,6 @@ export interface PluginManifest {
   bundle?: boolean;
   /** 披露：将访问的 Atelyx 服务名（管理页「声明 vs 实际」审计对照的声明侧；无运行时门槛）。 */
   declares?: string[];
-  /** 披露 + 授权依据：将访问的仓库外目录（绝对路径或以 `~/` 开头，`~` 由宿主解析为用户主目录）。
-   *  仅披露与授权依据，无运行时门槛；用户逐目录批准后插件才可经 `ctx.fs` 访问。 */
-  declaredDirs?: string[];
   /** 切仓库保活声明（默认关闭）：声明后切仓库触发的插件全量重载跳过本插件——运行时、
    *  UI 贡献与托管进程原地保留，apply 不重跑（仓库感知走 vault:switch 事件）。
    *  停用 / 卸载 / 更新 / 跨窗口变化仍正常重建并结束进程。 */
@@ -171,8 +168,6 @@ export interface InstalledPlugin {
   failure?: PluginMountFailure;
   /** 可回退到的上一版本；仅代码回退，插件 data 保持当前内容。 */
   previousVersion?: string;
-  /** 用户已批准的仓库外目录（声明原形 `~/` 形式；来自 plugin_list，撤销/卸载即从列表消失）。 */
-  approvedDirs?: string[];
 }
 
 /**

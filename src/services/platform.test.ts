@@ -38,7 +38,6 @@ describe("内核能力层", () => {
         credentialStorage: true,
         autoUpdate: true,
         processExecution: true,
-        pluginExternalDirs: true,
         fileWatching: false,
       });
     }
@@ -56,7 +55,6 @@ describe("内核能力层", () => {
       credentialStorage: true,
       autoUpdate: false,
       processExecution: false,
-      pluginExternalDirs: false,
       fileWatching: false,
     });
   });
