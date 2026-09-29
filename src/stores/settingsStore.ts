@@ -36,7 +36,7 @@ import { DEFAULT_AI_CONFIG } from "@/constants/ai";
 import { DEFAULT_AGENT_TOOLS } from "@/constants/tools";
 import { BUILTIN_AGENTS, BUILTIN_AGENT_CHAT_ID } from "@/constants/agents";
 import { PROVIDER_PRESETS } from "@/constants/providers";
-import { remapDirPrefix } from "@/utils/filename";
+import { remapDirKey, remapDirPrefix } from "@/utils/filename";
 import { modelDisplayLabel } from "@/utils/text";
 import { createPersistController } from "@/utils/persist";
 
@@ -220,8 +220,15 @@ interface SettingsState {
   pruneMissingPromptNotes: () => Promise<void>;
   /** 设置文件夹图标颜色（dir = 相对仓库根路径，color = hex 色；undefined = 清除还原默认，写 .atelyx/folder-colors.json）。 */
   setFolderColor: (dir: string, color: string | undefined) => Promise<void>;
-  /** 文件夹重命名/移动后同步颜色键（`oldDir/` 前缀 → `newDir/`，写 .atelyx/folder-colors.json）。 */
+  /** 文件夹重命名/移动后同步颜色键（目录键精确或 `oldDir/` 前缀命中才更新，写 .atelyx/folder-colors.json）。 */
   remapFolderColorsByDir: (oldDir: string, newDir: string) => Promise<void>;
+  /**
+   * 远端重命名/移动跟随（协作 renamed 帧）：目录前缀类设置（文件夹颜色 / 提示词标记 /
+   * Agent 提示词文件）的键随新路径迁移。只更新内存、不写真源——真源已由发起方写好
+   * （空间 = 团队 meta，个人仓库无远端帧），本地写盘会与发起方竞争且 viewer 无写权；
+   * 键未命中（含发起方回放帧、内存未加载）时为 no-op。
+   */
+  followRemotePathRename: (oldPath: string, newPath: string) => void;
   /** 立即落盘当前配置（关窗/切仓库前 flush，防 debounce 窗口内丢设置）。 */
   flush: () => Promise<void>;
 }
@@ -1917,19 +1924,16 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     set({ folderColors: next });
   },
 
-  /** 文件夹重命名/移动后同步颜色键（`oldDir/` 前缀命中才更新；写成功才更新内存，同 setFolderColor）。 */
+  /** 文件夹重命名/移动后同步颜色键（目录键精确或 `oldDir/` 前缀命中才更新；写成功才更新内存，同 setFolderColor）。 */
   remapFolderColorsByDir: async (oldDir, newDir) => {
     const cur = get().folderColors;
     const keys = Object.keys(cur);
     const next: Record<string, string> = {};
     let changed = false;
     for (const k of keys) {
-      if (k === oldDir || k.startsWith(`${oldDir}/`)) {
-        next[remapDirPrefix(k, oldDir, newDir)] = cur[k];
-        changed = true;
-      } else {
-        next[k] = cur[k];
-      }
+      const nk = remapDirKey(k, oldDir, newDir);
+      if (nk !== k) changed = true;
+      next[nk] = cur[k];
     }
     if (!changed) return;
     try {
@@ -1939,6 +1943,38 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       return;
     }
     set({ folderColors: next });
+  },
+
+  followRemotePathRename: (oldPath, newPath) => {
+    // 文件夹颜色：目录键精确或前缀命中迁移（单文件改名帧对目录键为不命中 no-op）
+    const colors = get().folderColors;
+    const nextColors: Record<string, string> = {};
+    let colorsChanged = false;
+    for (const [k, v] of Object.entries(colors)) {
+      const nk = remapDirKey(k, oldPath, newPath);
+      if (nk !== k) colorsChanged = true;
+      nextColors[nk] = v;
+    }
+    // 提示词标记：文件键精确（该笔记本身被改名）或前缀（所在文件夹被改名）命中迁移
+    const marked = get().promptNotes;
+    const nextMarked = marked.map((f) => remapDirKey(f, oldPath, newPath));
+    const markedChanged = nextMarked.some((f, i) => f !== marked[i]);
+    // Agent 引用的提示词笔记路径：命中规则同提示词标记
+    const agents = get().agents;
+    let agentsChanged = false;
+    const nextAgents = agents.map((a) => {
+      if (!a.systemPromptFile) return a;
+      const nf = remapDirKey(a.systemPromptFile, oldPath, newPath);
+      if (nf === a.systemPromptFile) return a;
+      agentsChanged = true;
+      return { ...a, systemPromptFile: nf };
+    });
+    if (!colorsChanged && !markedChanged && !agentsChanged) return;
+    set({
+      ...(colorsChanged ? { folderColors: nextColors } : null),
+      ...(markedChanged ? { promptNotes: nextMarked } : null),
+      ...(agentsChanged ? { agents: nextAgents } : null),
+    });
   },
 
   setSearchConfig: async (patch) => {

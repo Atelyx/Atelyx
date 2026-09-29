@@ -4,7 +4,7 @@
  * 保留名/尾点规则曾缺失，导致前端预测的落盘名与实际写盘名漂移（画布改名的保存目标指错文件）。
  */
 import { describe, expect, it } from "vitest";
-import { noteRenameTarget, sanitizeFilename } from "./filename";
+import { noteRenameTarget, remapDirKey, sanitizeFilename } from "./filename";
 
 describe("sanitizeFilename", () => {
   it("replaces illegal chars and trims", () => {
@@ -47,5 +47,19 @@ describe("noteRenameTarget", () => {
   it("falls back to 未命名 when the title sanitizes to empty", () => {
     expect(noteRenameTarget("a/笔记.md", "  ")).toBe("a/未命名.md");
     expect(noteRenameTarget("a/笔记.md", "///")).toBe("a/___.md");
+  });
+});
+
+describe("remapDirKey", () => {
+  it("migrates the directory's own key (exact match) and all descendant keys", () => {
+    expect(remapDirKey("目录", "目录", "新目录")).toBe("新目录");
+    expect(remapDirKey("目录/子", "目录", "新目录")).toBe("新目录/子");
+    expect(remapDirKey("目录/子/孙", "目录", "新目录")).toBe("新目录/子/孙");
+  });
+
+  it("leaves unrelated keys and prefix-lookalikes untouched", () => {
+    expect(remapDirKey("其他", "目录", "新目录")).toBe("其他");
+    // 目录名是别的键的前缀但不带分隔符：不得误命中
+    expect(remapDirKey("目录扩展/子", "目录", "新目录")).toBe("目录扩展/子");
   });
 });

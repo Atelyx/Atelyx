@@ -17,7 +17,7 @@
  * 不直调 `services`。防抖 400ms（同 settingsStore.persistDebounced 模式）。
  */
 import { create } from "zustand";
-import { remapDirPrefix } from "@/utils/filename";
+import { remapDirKey } from "@/utils/filename";
 import { createPersistController } from "@/utils/persist";
 import { layoutBootstrap, layoutFlush, layoutOp, onLayoutBroadcast, uiStatePatch } from "@/services/layout";
 import {
@@ -70,7 +70,7 @@ interface UiStateStore {
   recordRecentFile: (file: string, kind: RecentFileEntry["kind"], vaultKey: string) => void;
   /** 画布/笔记/表格重命名/移动后同步上次打开记录（旧路径命中才更新，kind 区分）。 */
   renameLastFile: (kind: LastOpenFileKind, oldFile: string, newFile: string) => void;
-  /** 文件夹重命名后同步展开集合/上次打开文件（`oldDir/` 前缀 → `newDir/`）。 */
+  /** 文件夹重命名/移动后同步展开集合/上次打开文件（目录键精确或 `oldDir/` 前缀命中 → 换新路径）。 */
   renameByDir: (oldDir: string, newDir: string) => void;
   /** 文件夹删除后清理展开集合中该目录及子目录条目。 */
   removeExpandedByDir: (dir: string) => void;
@@ -329,13 +329,13 @@ export const useUiStateStore = create<UiStateStore>((set, get) => {
       let expandedChanged = false;
       const expanded = new Set<string>();
       for (const p of s.fileExplorerExpanded) {
-        const next = remapDirPrefix(p, oldDir, newDir);
+        const next = remapDirKey(p, oldDir, newDir);
         if (next !== p) expandedChanged = true;
         expanded.add(next);
       }
-      const lastCanvasFile = s.lastCanvasFile ? remapDirPrefix(s.lastCanvasFile, oldDir, newDir) : null;
-      const lastNoteFile = s.lastNoteFile ? remapDirPrefix(s.lastNoteFile, oldDir, newDir) : null;
-      const lastTableFile = s.lastTableFile ? remapDirPrefix(s.lastTableFile, oldDir, newDir) : null;
+      const lastCanvasFile = s.lastCanvasFile ? remapDirKey(s.lastCanvasFile, oldDir, newDir) : null;
+      const lastNoteFile = s.lastNoteFile ? remapDirKey(s.lastNoteFile, oldDir, newDir) : null;
+      const lastTableFile = s.lastTableFile ? remapDirKey(s.lastTableFile, oldDir, newDir) : null;
       const changed =
         expandedChanged ||
         lastCanvasFile !== s.lastCanvasFile ||

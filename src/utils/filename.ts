@@ -99,3 +99,13 @@ export function remapDirPrefix(path: string, oldDir: string, newDir: string): st
   const prefix = `${oldDir}/`;
   return path.startsWith(prefix) ? `${newDir}/${path.slice(prefix.length)}` : path;
 }
+
+/**
+ * 目录重命名后 remap 目录键（键 = 目录路径本身或其子路径，如文件夹颜色映射、展开集合的条目）：
+ * `oldDir` 精确命中 → `newDir`；`oldDir/` 前缀命中 → 整体换前缀；否则原样返回。
+ * 与 `remapDirPrefix` 的差异：目录自身的键（精确相等）也参与迁移——纯前缀改写只覆盖子路径。
+ */
+export function remapDirKey(key: string, oldDir: string, newDir: string): string {
+  if (key === oldDir) return newDir;
+  return remapDirPrefix(key, oldDir, newDir);
+}
