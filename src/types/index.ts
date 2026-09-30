@@ -223,3 +223,14 @@ export type {
   NoteBodySession,
   NoteSurfaceProvider,
 } from "./noteSurface";
+
+export type {
+  RangeInfo,
+  LinkForm,
+  InlineSpan,
+  MarkdownBlock,
+  MarkdownDocument,
+  MarkdownLinkResolver,
+  ParseOptions,
+  RenderOptions,
+} from "./markdown";

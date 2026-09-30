@@ -63,6 +63,7 @@ import { platformCapabilities } from "@/services/platform";
 import { createHistoryService } from "./history";
 import { createLayoutService } from "./layout";
 import { createUiStateService } from "./uiState";
+import { createMarkdownService } from "./markdown";
 import { installEventIsolation, setKernelRef } from "./events";
 import type {
   AiService,
@@ -690,6 +691,10 @@ export function createKernel(): Kernel {
   provide("history", createHistoryService());
   provide("layout", createLayoutService());
   provide("uiState", createUiStateService());
+
+  // Markdown 渲染服务（内核提供，root 作用域）：能力来自框架无关内核，不依赖任何插件行，
+  // 停用笔记/表格等插件后仍可用（插件可据此渲染自己的 Markdown 内容）。
+  provide("markdown", createMarkdownService());
 
   return {
     ctx,

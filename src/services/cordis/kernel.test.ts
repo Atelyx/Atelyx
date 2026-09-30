@@ -60,7 +60,7 @@ afterEach(() => {
 });
 
 describe("Cordis 内核宿主", () => {
-  it("createKernel 提供平台服务（state/storage/http/notification/app/shell/vault/dialog/clipboard/window/ai/collab）", () => {
+  it("createKernel 提供平台服务（state/storage/http/notification/app/shell/vault/dialog/clipboard/window/ai/collab/markdown）", () => {
     const { ctx, dispose } = createKernel();
     expect(ctx).toBeInstanceOf(Context);
     for (const name of [
@@ -76,12 +76,14 @@ describe("Cordis 内核宿主", () => {
       "window",
       "ai",
       "collab",
+      "markdown",
     ]) {
       expect(ctx.get(name as never), name).toBeDefined();
     }
     dispose();
     expect(ctx.get("state" as never)).toBeUndefined();
     expect(ctx.get("vault" as never)).toBeUndefined();
+    expect(ctx.get("markdown" as never)).toBeUndefined();
   });
 
   it("事件发射：emitPluginEvent → ctx.emit（typed event）", () => {

@@ -5,7 +5,7 @@
  * store 层清空；预览↔编辑切换、源码切换、切笔记、布局/面板重挂载等一切会话内操作都不清栈。
  * 每文件独立实例，按 file 键严格隔离，互不混淆。
  *
- * 合并语义对齐 CodeMirror history 的「打字成组」：一次输入组（recordEdit 间隔 < coalesceMs）
+ * 打字成组：连续输入（recordEdit 间隔 < coalesceMs）并为一次输入组，
  * 只入栈**组起点前的全文**一条——撤销一步回到整段输入之前，而非逐键；组内后续输入不新增条目。
  * 与 utils/undoStack.ts（画布/表格快照式栈）语义一致：push 清空 redo、undo/redo 弹栈互放。
  *

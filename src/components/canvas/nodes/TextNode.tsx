@@ -1,7 +1,7 @@
 import { AlertTriangle, Eye, FileText, Pencil, SlidersHorizontal, StickyNote } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { NodeProps } from "@xyflow/react";
-import type { EditorView } from "@codemirror/view";
+import type { MarkdownEditorHandle } from "@/components/editor/MarkdownEditor";
 import type { TextData } from "@/types";
 import { useCanvasStore } from "@/stores/canvasStore";
 import { useCollabStore } from "@/stores/collabStore";
@@ -54,7 +54,7 @@ export function TextNode({ id, data, width, height, selected }: NodeProps) {
   );
 
   const editRootRef = useRef<HTMLDivElement>(null);
-  const cmViewRef = useRef<EditorView | null>(null);
+  const cmViewRef = useRef<MarkdownEditorHandle | null>(null);
   const enterEdit = () => {
     // 编辑中重复进入（内容区双击选词会冒泡到双击处理器）：保持当前草稿，绝不重置
     if (editing) return;
@@ -87,7 +87,7 @@ export function TextNode({ id, data, width, height, selected }: NodeProps) {
   const exitEditRef = useRef(exitEdit);
   exitEditRef.current = exitEdit;
   /** 编辑态点节点外退出：按节点容器命中判定（容器内交互——属性小标/协作徽标/编辑按钮——不退出；
-   *  CodeMirror 失焦会被这些交互误触发，不能用 blur）。 */
+   *  这些交互会使输入面失焦，用 blur 判定会误退出）。 */
   useEffect(() => {
     if (!editing) return;
     const onDocMouseDown = (e: MouseEvent) => {
@@ -96,8 +96,10 @@ export function TextNode({ id, data, width, height, selected }: NodeProps) {
       if (target?.closest?.("[data-popup-layer]")) return;
       exitEditRef.current();
     };
-    document.addEventListener("mousedown", onDocMouseDown);
-    return () => document.removeEventListener("mousedown", onDocMouseDown);
+    // 捕获阶段判定：活动块切换会同步重建正文 DOM，冒泡到 document 时命中节点已脱离
+    // 文档树，contains 会把节点内的点击误判为外点；捕获阶段先于任何 DOM 改动观测
+    document.addEventListener("mousedown", onDocMouseDown, true);
+    return () => document.removeEventListener("mousedown", onDocMouseDown, true);
   }, [editing]);
 
   /** 确认重命名：笔记节点 renameNote 改名 + 扫全部 .atlx 更新引用；画布内文本节点只改标题（无仓库文件） */

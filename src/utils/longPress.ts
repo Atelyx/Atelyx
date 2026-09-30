@@ -13,8 +13,7 @@ const CLICK_SUPPRESS_MS = 800;
 const NATIVE_GUARD_MS = 1000;
 /** 不合成右键菜单的区域：可编辑区保留系统长按（选词/粘贴）；可拖拽的文件树行用长按起拖（见 useVaultDrag）。
  *  树容器（data-dir=""，仅作落点）不在其列，长按仍唤出空白区菜单。 */
-const SKIP_SELECTOR =
-  ".cm-editor, input, textarea, [contenteditable='true'], [data-file], [data-dir]:not([data-dir=''])";
+const SKIP_SELECTOR = "input, textarea, [contenteditable='true'], [data-file], [data-dir]:not([data-dir=''])";
 
 export function installLongPressContextMenu(): () => void {
   let timer: ReturnType<typeof setTimeout> | undefined;

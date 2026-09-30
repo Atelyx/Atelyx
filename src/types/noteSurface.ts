@@ -8,7 +8,7 @@
 import type { Text as YText } from "yjs";
 import type { Awareness } from "y-protocols/awareness";
 
-/** 协作态正文绑定（下发给 MarkdownEditor 做 y-codemirror 绑定）。 */
+/** 协作态正文绑定（下发给 MarkdownEditor 做 Y.Text 绑定）。 */
 export interface NoteEditorBinding {
   ytext: YText;
   awareness: Awareness;

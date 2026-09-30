@@ -1,11 +1,10 @@
 /**
- * 笔记正文编辑面：会话全文的正文（不含 frontmatter）交给统一 CodeMirror 引擎渲染与编辑。
+ * 笔记正文编辑面：会话全文的正文（不含 frontmatter）交给统一 Markdown 引擎渲染与编辑。
  * 笔记面板与画布文本节点共用本组件；保存、协作绑定、撤销都在会话里，这里只渲染与提交。
  */
 
 import { useMemo, type RefObject } from "react";
-import type { EditorView } from "@codemirror/view";
-import { MarkdownEditor, type MarkdownEditorLinks } from "@/components/editor/MarkdownEditor";
+import { MarkdownEditor, type MarkdownEditorHandle, type MarkdownEditorLinks } from "@/components/editor/MarkdownEditor";
 import type { NoteEditorBinding } from "@/types/noteSurface";
 import { parseFrontmatter } from "@/utils/frontmatter";
 
@@ -18,7 +17,7 @@ interface Props {
   readOnly?: boolean;
   interactiveCheckbox?: boolean;
   links?: MarkdownEditorLinks;
-  editorViewRef?: RefObject<EditorView | null>;
+  editorViewRef?: RefObject<MarkdownEditorHandle | null>;
   /** 正文（LF）变更提交给会话。 */
   onBodyChange: (bodyLF: string) => void;
   /** 协作挂载时 ytext 与正文分歧（参数 = ytext 正文 LF）。 */

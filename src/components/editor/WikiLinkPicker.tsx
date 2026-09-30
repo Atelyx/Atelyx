@@ -4,7 +4,7 @@
  * 查询词无同名笔记命中且 onCreate 可用时，列表末尾追加「新建笔记」项——选中即创建
  * 并按新文件路径回填插入链接。
  * 键盘：↑/↓ 循环高亮、Enter 选中、Esc 关闭——document 捕获阶段拦截，
- * 防方向键/Enter 落入 CodeMirror（移动光标/换行）；IME 组合期按键不拦截。
+ * 防方向键/Enter 落入编辑输入面（移动光标/换行）；IME 组合期按键不拦截。
  * 壳 = PopupLayer（portal + 实测钳制/翻转 + 外点关闭）；关闭语义（粘滞等）归调用方。
  */
 import { FileText, Plus } from "lucide-react";

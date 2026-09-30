@@ -29,6 +29,7 @@ import type {
   LayoutOpResult,
   ListDirResult,
   LlmMessage,
+  MarkdownDocument,
   PluginCanvasSnapshot,
   PluginTableSnapshot,
   PluginToolOptions,
@@ -347,6 +348,25 @@ export interface NoteService {
   save(): Promise<void>;
 }
 
+/** 插件侧 Markdown 渲染选项（框架无关；链接形态判定等宿主语义不暴露给插件）。 */
+export interface PluginMarkdownOptions {
+  /** 是否启用 KaTeX（缺省启用；关闭时数学回显源码）。 */
+  katex?: boolean;
+  /** `@label` 胶囊候选。 */
+  mentions?: { key: string; label: string }[];
+}
+
+/** Markdown 渲染服务（内核平台能力，恒可用）：与编辑器同一内核，
+ *  纯文本进、规格/DOM/已清洗 HTML 出，渲染结果与应用内展示一致。 */
+export interface MarkdownService {
+  /** 渲染为已清洗 HTML（raw HTML 经白名单清洗，可直接挂入插件 UI）。 */
+  renderHtml(markdown: string, options?: PluginMarkdownOptions): string;
+  /** 解析为文档规格（块 + 行内片段；偏移基于源文本，便于插件做定位）。 */
+  parse(markdown: string, options?: PluginMarkdownOptions): MarkdownDocument;
+  /** 渲染为文档片段（无 DOM 环境返回 null）。 */
+  renderToFragment(markdown: string, options?: PluginMarkdownOptions): DocumentFragment | null;
+}
+
 /** AI 对话能力（由随应用分发的对话核心插件提供，停用即不可用）：用宿主配置的模型/Agent/工具跑一轮对话。
  *  核心只跑一轮——消息容器与落盘留在调用方（插件自带容器），流式与收尾经 `ChatTurnSink` 交回。
  *  类型面与宿主内部消费方同一份契约（见 types/chatRuntime.ts 的 `ChatRuntime`）。 */
@@ -442,6 +462,7 @@ declare module "@atelyx/cordis" {
     canvas: CanvasService;
     table: TableService;
     note: NoteService;
+    markdown: MarkdownService;
     chat: ChatService;
     history: HistoryService;
     layout: LayoutService;

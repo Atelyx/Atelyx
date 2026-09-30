@@ -1,14 +1,14 @@
 /**
  * `.md` 笔记编辑器（未打开画布时单击笔记打开）。
  *
- * 占据主编辑区（画布位置）：顶部文件操作条，正文 = 统一 CodeMirror 引擎
+ * 占据主编辑区（画布位置）：顶部文件操作条，正文 = 统一分块 Markdown 引擎
  * （默认只读实时视图，双击/铅笔进入实时预览编辑；「···」菜单切源码模式 textarea）。
  * 正文内容、保存、协作与撤销归 `stores/noteSessionStore` 的编辑会话（与画布文本节点共用同一会话），
  * 本组件只做面板 chrome 与交互编排。
  */
 import { Check, ClipboardPaste, Copy, MoreHorizontal, Pencil, Redo2, Scissors, Undo2, Wand2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { EditorView } from "@codemirror/view";
+import type { MarkdownEditorHandle } from "@/components/editor/MarkdownEditor";
 import { useNoteStore } from "@/stores/noteStore";
 import { useVaultStore } from "@/stores/vaultStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -76,7 +76,7 @@ export function NoteEditor({ file }: { file: string }) {
   /** 撤销/重做按焦点所在编辑面归属（面板与画布节点共用一套路由）。 */
   useNoteUndoRouting();
   const [preview, setPreview] = useState(true);
-  /** 源码模式：编辑区显示完整 Markdown 源码 textarea；不勾选 = 实时预览编辑（CodeMirror）。 */
+  /** 源码模式：编辑区显示完整 Markdown 源码 textarea；不勾选 = 实时预览编辑（分块引擎）。 */
   const [sourceMode, setSourceMode] = useState(false);
   /** 右上角「···」更多选项弹层（统一 usePopupAnchor + PopupLayer）。 */
   const menuTriggerRef = useRef<HTMLButtonElement>(null);
@@ -100,8 +100,8 @@ export function NoteEditor({ file }: { file: string }) {
     y: number;
     text: string;
   } | null>(null);
-  /** 编辑器实例（MarkdownEditor 外抛）：剪切/粘贴按 CodeMirror 当前选区操作。 */
-  const cmViewRef = useRef<EditorView | null>(null);
+  /** 编辑器句柄（MarkdownEditor 外抛）：剪切/粘贴按当前选区操作。 */
+  const cmViewRef = useRef<MarkdownEditorHandle | null>(null);
   /** 历史记录面板开关（「···」更多选项入口）。 */
   const [historyOpen, setHistoryOpen] = useState(false);
   /** 「添加笔记属性」请求序号：菜单每次点击自增，NotePropertiesView 据此打开添加表单。 */
@@ -173,8 +173,10 @@ export function NoteEditor({ file }: { file: string }) {
         setPendingMenu(null);
       }
     };
-    document.addEventListener("mousedown", onDocMouseDown);
-    return () => document.removeEventListener("mousedown", onDocMouseDown);
+    // 捕获阶段判定：活动块切换会同步重建正文 DOM，冒泡到 document 时命中节点已脱离
+    // 文档树，contains 会把编辑器内的点击误判为外点；捕获阶段先于任何 DOM 改动观测
+    document.addEventListener("mousedown", onDocMouseDown, true);
+    return () => document.removeEventListener("mousedown", onDocMouseDown, true);
   }, []);
 
   /** 待弹出右键菜单 → 延迟 PENDING_MENU_DELAY_MS 待编辑器挂载/重挂载/selectionchange 全部收敛后，
@@ -197,17 +199,14 @@ export function NoteEditor({ file }: { file: string }) {
       }
       const view = cmViewRef.current;
       if (!view) return false;
-      const docText = view.state.doc.toString();
-      // precise=false：坐标未被视口 DOM 覆盖（如文末空白）时返回就近估算位置而非 null
-      const refPos = view.posAtCoords({ x: pending.x, y: pending.y }, false);
+      const docText = view.getText();
+      // 落点未被视口 DOM 覆盖（如文末空白）时取就近估算位置
+      const refPos = view.posAtCoords(pending.x, pending.y) ?? 0;
       // 渲染文本与源码可能有差异（加粗标记/实体等），原文匹配不到退回去掉首尾空白再试
       const needle = docText.includes(pending.text) ? pending.text : pending.text.trim();
       const located = needle ? locateSelectionInDoc(docText, needle, refPos) : null;
-      view.dispatch(
-        located
-          ? { selection: { anchor: located.from, head: located.to }, scrollIntoView: true }
-          : { selection: { anchor: refPos }, scrollIntoView: true },
-      );
+      if (located) view.setSelection(located.from, located.to);
+      else view.setSelection(refPos, refPos);
       view.focus();
       return !!located;
     };
@@ -262,13 +261,13 @@ export function NoteEditor({ file }: { file: string }) {
     }
     const view = cmViewRef.current;
     if (!view) return null;
-    const { from, to } = view.state.selection.main;
-    return { from, to, text: view.state.sliceDoc(from, to) };
+    const { from, to } = view.getSelection();
+    return { from, to, text: view.getText().slice(from, to) };
   };
 
   /** 编辑面区间替换原语：源码 textarea 以会话当前全文拼接走 handleChange（自动保存/
    *  协作 syncLocalBody 全复用；命令式取值防 await 剪贴板 IPC 窗口内的击键被旧闭包内容丢弃）；
-   *  CodeMirror dispatch（经 onBodyChange → 自动保存/协作同步/撤销栈）。 */
+   *  分块引擎走句柄 replaceRange（经 onBodyChange → 自动保存/协作同步/撤销栈）。 */
   const editEditorRange = (from: number, to: number, ins: string) => {
     if (sourceMode) {
       const ta = editorRootRef.current?.querySelector("textarea");
@@ -281,16 +280,12 @@ export function NoteEditor({ file }: { file: string }) {
     } else {
       const view = cmViewRef.current;
       if (!view) return;
-      view.dispatch({
-        changes: { from, to, insert: ins },
-        selection: { anchor: from + ins.length },
-        scrollIntoView: true,
-      });
+      view.replaceRange(from, to, ins);
       view.focus();
     }
   };
 
-  /** 无选区插入（空白处粘贴）：源码 textarea 插到光标处；CodeMirror 先把光标移到右键位置再插入
+  /** 无选区插入（空白处粘贴）：源码 textarea 插到光标处；分块引擎先把光标移到右键位置再插入
    *  （光标可能停在陈旧位置或刚进入编辑态的文档起点）。 */
   const insertAtCaret = (ins: string) => {
     if (sourceMode) {
@@ -300,11 +295,9 @@ export function NoteEditor({ file }: { file: string }) {
     } else {
       const view = cmViewRef.current;
       if (!view) return;
-      // contentMenu 判空仅为 TS 收窄（菜单项点击时恒非空）；precise=false 让未覆盖坐标取就近估算
-      const clicked = contentMenu
-        ? view.posAtCoords({ x: contentMenu.x, y: contentMenu.y }, false)
-        : null;
-      const at = clicked ?? view.state.selection.main.head;
+      // contentMenu 判空仅为 TS 收窄（菜单项点击时恒非空）；未覆盖坐标取就近估算
+      const clicked = contentMenu ? view.posAtCoords(contentMenu.x, contentMenu.y) : null;
+      const at = clicked ?? view.getSelection().from;
       editEditorRange(at, at, ins);
     }
   };
@@ -649,7 +642,7 @@ export function NoteEditor({ file }: { file: string }) {
           }}
         />
       ) : (
-        /* 只读实时视图 / 实时预览编辑：同一 CodeMirror 引擎，readOnly 动态切换（不重建 → 预览⇄编辑
+        /* 只读实时视图 / 实时预览编辑：同一分块引擎，readOnly 动态切换（不重建 → 预览⇄编辑
            零跳变、选区/滚动/协作绑定全保留）。只读态 widget 恒渲染（表格/数学/HTML/勾选框等全部显示），
            双击/铅笔进入编辑；编辑器自身样式见 styles/index.css；border 与源码模式对齐（1px），
            accent 高亮 = 进入编辑模式（与源码模式聚焦时一致） */

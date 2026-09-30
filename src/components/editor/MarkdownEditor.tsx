@@ -1,182 +1,51 @@
 /**
- * 统一 Markdown 渲染引擎（CodeMirror 6 实时预览编辑 + 只读视图）。
+ * 统一 Markdown 渲染/编辑引擎（分块 DOM 视图层）。
  *
- * 架构：文档模型 = 纯文本（与文件正文逐字节一致），编辑永不改写内容——「实时预览」是
- * 纯视觉装饰层（buildDecorations → markdownWidgets），每次击键/光标移动/只读切换实时重算。
- * 不存在「序列化回写」环节，编辑行为不会规范化正文。
+ * 文档模型 = 纯文本正文（与文件正文逐字节一致）。渲染走框架无关内核
+ * （`utils/markdownCore`：文本 → 块/行内规格 → DOM），编辑面不引入 HTML 往返。
  *
- * 使用形态：
- * - 笔记编辑：`readOnly` 动态切换（同一 EditorView 经 StateEffect 翻转，不重建 → 预览⇄编辑
- *   零跳变、选区/滚动/协作绑定全保留）；勾选框 toggle 经 onBodyChange 上报走保存链。
- * - 只读展示面（画布文本节点/对话气泡）：`MarkdownView` 薄封装，readOnly + 禁用勾选框。
+ * 编辑形态：光标所在块与代码块显示源码，其余块照常渲染；整篇源码由一个隐藏 textarea
+ * 承载，因此输入法组合、方向键、Home/End、跨块选区、剪贴板复制（得到源码）全部沿用
+ * 浏览器原生行为；光标与选区由本组件按源偏移在渲染结果上测量后自绘。
  *
- * 语法：GFM（base = markdownLanguage，解锁表格/任务/删除线/Autolink）+ 自定义扩展
- * （wiki/标签/高亮/注释/数学/raw HTML/callout/脚注/图片尺寸），见 markdownDecorations.ts。
+ * 只读形态（`readOnly`）：同一渲染器全量出渲染结果，不挂输入焦点——因此「预览 ⇄ 编辑」
+ * 共用同一容器与同一内核，切换时只换活动块的呈现，滚动位置保留。
  *
- * 安全：装饰层只出 class + textContent / 已清洗 HTML（HtmlWidget），从不注入未清洗 HTML；
- * 链接点击经 shell 打开系统程序，webview 不导航。
- *
- * 与 frontmatter 解耦：只编辑正文 body，`onBodyChange` 输出完整正文 markdown，
- * 由编辑面用 `fmPrefix + body` 拼回完整 content（frontmatter 原样保留）。
+ * 安全：渲染产物只出 class + textContent / 已清洗 HTML（raw HTML 经 `utils/htmlSanitize`）。
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  EditorState,
-  StateEffect,
-  StateField,
-  Transaction,
-  type Extension,
-  type TransactionSpec,
-} from "@codemirror/state";
-import {
-  EditorView,
-  keymap,
-  type DecorationSet,
-} from "@codemirror/view";
-import {
-  HighlightStyle,
-  syntaxHighlighting,
-} from "@codemirror/language";
-import {
-  markdown,
-  markdownKeymap,
-  markdownLanguage,
-} from "@codemirror/lang-markdown";
-import { languages } from "@codemirror/language-data";
-import { defaultKeymap, history } from "@codemirror/commands";
-import { tags } from "@lezer/highlight";
-import type { NoteEditorBinding } from "@/types";
-import { yCollab } from "y-codemirror.next";
 import { useAppStore } from "@/stores/appStore";
 import { useVaultStore } from "@/stores/vaultStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { collapseSoftLineBreaks } from "@/utils/softLineBreak";
-import { encodeMarkdownLinkHref } from "@/utils/markdown";
-import type { PopupAnchor } from "@/components/common/PopupLayer";
+import { renderMarkdownEditHtml, renderMarkdownToHtml } from "@/utils/markdownCore";
+import { encodeMarkdownLinkHref, wikiLinkContextAt } from "@/utils/markdown";
 import { WikiLinkPicker } from "@/components/editor/WikiLinkPicker";
-import { wikiLinkTriggerContext } from "@/components/editor/wikiLinkContext";
-import type { DecorationOptions } from "./markdownWidgets";
-import { buildDecorations, livePreviewNeedsRebuild } from "./markdownDecorations";
+import type { PopupAnchor } from "@/components/common/PopupLayer";
+import { createLinkResolver, type MarkdownEditorLinks } from "./markdownLinks";
+import { attachMarkdownInteractions, decorateMarkdownControls, hydrateMarkdownImages } from "./markdownInteractions";
+import { blockAtOffset, buildSourceIndex, caretRect, pointToOffset, rangeRects, type SourceIndex } from "./markdownSourceMap";
+import { CaretOverlay, MarkdownEditSink, type RemoteCursor } from "./markdownInput";
+import type { Transaction } from "yjs";
+import type { NoteEditorBinding } from "@/types/noteSurface";
 
-// ===== 只读动态切换（同一视图不重建）=====
+export type { MarkdownEditorLinks } from "./markdownLinks";
 
-/** 只读翻转效果：dispatch 即切换，roField 与装饰同步重建。 */
-const readOnlyEffect = StateEffect.define<boolean>();
-
-/** 只读态视图 class：CSS 依此隐藏原生编辑光标、光标样式改 default（远程协作光标/选区保留）。
- * 走 EditorView.editorAttributes（函数源）而非插件 classList：CM 的 updateAttrs 每次以固定 class
- * 串整体 setAttribute，classList 加的类会在聚焦（class 串变化）瞬间被整段覆盖抹掉。 */
-const readOnlyClass = EditorView.editorAttributes.of((view) => ({
-  class: view.state.readOnly ? "cm-readonly" : "",
-}));
-
-// ===== 主题 =====
-
-/** 语法高亮色板：全部映射现有主题 CSS 变量（浅/深主题自动跟随，无需额外配置）。
- * 语言 token（keyword/string/number 等）供围栏代码块语法色，替代内置高亮主题的角色。 */
-const highlightStyle = HighlightStyle.define([
-  { tag: tags.heading, fontWeight: "600", color: "var(--text-primary)" },
-  { tag: tags.strong, fontWeight: "600" },
-  { tag: tags.emphasis, fontStyle: "italic" },
-  { tag: tags.strikethrough, textDecoration: "line-through" },
-  { tag: tags.quote, color: "var(--text-secondary)" },
-  // 链接着色归装饰层 widget（可点击才染色）：引用形态 `[文字]` 不在此染色，
-  // 避免「看起来是链接但点不动」的歧义
-  { tag: tags.url, color: "var(--text-muted)" },
-  { tag: tags.monospace, fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" },
-  { tag: tags.processingInstruction, color: "var(--text-muted)" },
-  { tag: tags.comment, color: "var(--text-muted)" },
-  { tag: tags.labelName, color: "var(--text-muted)" },
-  { tag: tags.string, color: "var(--text-secondary)" },
-  // 语言 token（代码块语法色）
-  { tag: [tags.keyword, tags.controlKeyword, tags.moduleKeyword], color: "var(--accent)" },
-  { tag: [tags.string, tags.regexp, tags.character], color: "var(--highlight-code)" },
-  { tag: [tags.number, tags.bool, tags.null, tags.atom], color: "var(--highlight-code)" },
-  { tag: [tags.variableName, tags.propertyName], color: "var(--text-primary)" },
-  { tag: [tags.typeName, tags.className, tags.namespace], color: "var(--accent-hover)" },
-  { tag: [tags.function(tags.variableName), tags.function(tags.propertyName)], color: "var(--accent)" },
-  { tag: [tags.operator, tags.punctuation, tags.bracket, tags.brace, tags.paren], color: "var(--text-secondary)" },
-]);
-
-const editorTheme = EditorView.theme({
-  "&": {
-    height: "100%",
-    backgroundColor: "transparent",
-    color: "var(--text-primary)",
-    // 与只读视图 text-sm（0.875rem）对齐，避免切换模式时字体跳动
-    fontSize: "0.875rem",
-  },
-  ".cm-scroller": {
-    fontFamily: "inherit",
-    lineHeight: "1.625",
-    padding: "1rem 0",
-  },
-  ".cm-content": {
-    padding: "0 1rem",
-    caretColor: "var(--accent)",
-    // 允许内容层收缩到视口宽：块级 widget（代码块/表格/HTML 块）自带横向滚动，
-    // 否则 widget 内容宽会把 flex-shrink:0 的内容层撑宽，横向滚动条挂到整条消息上
-    minWidth: 0,
-  },
-  ".cm-cursor": { borderLeftColor: "var(--accent)", borderLeftWidth: "1.5px" },
-  "&.cm-focused": { outline: "none" },
-  ".cm-selectionBackground, &.cm-focused .cm-selectionBackground, ::selection": {
-    backgroundColor: "color-mix(in srgb, var(--accent) 25%, transparent)",
-  },
-  ".cm-gutters": { display: "none" },
-});
-
-// ===== 实时预览装饰 StateField =====
-
-/** 实时预览装饰：文档/选区/只读切换/语法树推进时全量重建（笔记规模下开销可忽略）。
- * 用 StateField + EditorView.decorations.from 而非 ViewPlugin：block 装饰（表格/公式/横隔条）
- * 只能经 standard decorations 提供，ViewPlugin 提供会抛 RangeError。 */
-function livePreview(
-  buildOpts: (readOnly: boolean) => DecorationOptions,
-  dispatchRef: { current: (spec: TransactionSpec) => void },
-  roField: StateField<boolean>,
-): Extension {
-  return StateField.define<DecorationSet>({
-    create(state) {
-      return buildDecorations(
-        state,
-        buildOpts(state.field(roField)),
-        (spec) => dispatchRef.current(spec),
-      );
-    },
-    update(value, tr) {
-      if (livePreviewNeedsRebuild(tr, readOnlyEffect)) {
-        return buildDecorations(
-          tr.state,
-          buildOpts(tr.state.field(roField)),
-          (spec) => dispatchRef.current(spec),
-        );
-      }
-      return value;
-    },
-    provide: (f) => EditorView.decorations.from(f),
-  });
+/** 编辑器句柄：宿主做划词剪切/粘贴/定位等命令式操作时使用。 */
+export interface MarkdownEditorHandle {
+  /** 当前正文（LF）。 */
+  getText(): string;
+  /** 当前选区（源偏移）。 */
+  getSelection(): { from: number; to: number };
+  /** 设置选区并聚焦。 */
+  setSelection(from: number, to: number): void;
+  /** 替换区间（走用户编辑链：onBodyChange 上报）。 */
+  replaceRange(from: number, to: number, text: string): void;
+  /** 视口坐标 → 源偏移（未命中返回 null）。 */
+  posAtCoords(x: number, y: number): number | null;
+  focus(): void;
 }
 
-// ===== 组件 =====
-
-/** 链接/定位回调（与 useVaultLinkHandlers + 画布 useWikiNodeLocate 对齐）。 */
-export interface MarkdownEditorLinks {
-  isVaultPathNote?: (href: string) => boolean;
-  onOpenVaultPathNote?: (href: string) => void;
-  /** 快捷新建同名笔记，返回新文件相对路径（失败 = null）。只创建不打开——
-   *  打开归 onOpenCreatedNote（必须晚于回填，防先切走编辑面导致回填写进错误文档）。 */
-  onCreateNote?: (name: string) => Promise<string | null>;
-  /** 打开快捷新建的笔记（回填完成后由渲染层调用）。 */
-  onOpenCreatedNote?: (file: string, name: string) => void;
-  onOpenNote?: (name: string) => void;
-  /** wiki 目标是否命中仓库笔记（未提供 = 渲染层不做缺失判定，行为同命中打开）。 */
-  resolveWikiNote?: (value: string) => boolean;
-  isLocatable?: (value: string) => boolean;
-  onLocate?: (value: string) => void;
-}
-
-/** 双链候选浮层状态：from = 触发符（`[[`/`【【`）起点文档偏移，query = 当前过滤词，anchor = 光标实时坐标。 */
 interface WikiPickerState {
   from: number;
   query: string;
@@ -184,34 +53,68 @@ interface WikiPickerState {
 }
 
 interface Props {
-  /** 当前正文（挂载时初始注入；外部同步时 replaceAll 的目标）。 */
+  /** 当前正文（挂载时初始注入；外部同步时以 syncSeq 触发回灌）。 */
   body: string;
-  /** 非用户编辑的内容更新序号（外部修改/加载完成时编辑面递增），变化即同步编辑器。 */
+  /** 非用户编辑的内容更新序号（外部修改/加载完成时递增），变化即同步编辑器。 */
   syncSeq: number;
-  /** 用户编辑回调：输出编辑器当前全文 markdown 正文。只读态仍可传（勾选框 toggle 上报走保存链）。 */
+  /** 用户编辑回调：输出编辑器当前全文 markdown 正文。 */
   onBodyChange?: (markdown: string) => void;
-  /** 协作绑定：提供时进入 Yjs 协同编辑（y-codemirror 绑 Y.Text + 远端光标）；
-   *  缺省 = 本地单写者纯文本编辑。撤销键不在本组件绑定（见 hooks/useNoteUndoRouting）。 */
+  /** 协作绑定（Y.Text 全文 + awareness）：本地编辑按最小差量写回 ytext，远端更新直接回灌。 */
   collab?: NoteEditorBinding;
-  /** 编辑器实例外抛（编辑面划词右键剪切/粘贴按选区 dispatch 用）；创建后赋值、卸载置 null。 */
-  editorViewRef?: { current: EditorView | null };
-  /** 协作挂载时 ytext 与 body 分歧的处置（编辑面注入；参数 = ytext 正文 LF）。 */
+  /** 编辑器句柄外抛（编辑面划词右键操作按选区 dispatch 用）。 */
+  editorViewRef?: { current: MarkdownEditorHandle | null };
+  /** 协作挂载时 ytext 与 body 分歧的处置。 */
   onCollabDivergence?: (ytextText: string) => void;
-  /** 只读（默认实时视图/画布/对话展示面）：停用光标行显示原文规则，widget 恒渲染；可动态切换不重建。 */
+  /** 只读展示面：全量渲染、不参与编辑。 */
   readOnly?: boolean;
-  /** 本地历史（CM 内 undo/redo）：仅无文件编辑面（画布内文本节点草稿）用——笔记面板/笔记节点
-   *  的撤销归按文件持久栈（见 hooks/useNoteUndoRouting），两者同时存在会双撤销。 */
+  /** 本地原生撤销（无文件编辑面，如画布内文本节点草稿）。 */
   localHistory?: boolean;
-  /** 任务勾选框可点（笔记可点写回；画布/对话只读展示面禁用态）。 */
+  /** 任务勾选框可点（笔记可点写回；只读展示面禁用态）。 */
   interactiveCheckbox?: boolean;
-  /** 链接/定位回调（wiki/仓库路径/空链接新建/画布定位）。 */
   links?: MarkdownEditorLinks;
-  /** @引用 胶囊（用户消息 displayContent 内 `@label` → 胶囊，点击定位/打开）。 */
   mentions?: { key: string; label: string }[];
   onMentionClick?: (key: string, label: string) => void;
-  /** 宿主容器 class（笔记传 h-full；只读展示面随内容高度）。 */
   className?: string;
 }
+
+/** 单块最小差量（公共前后缀）：本地编辑落到 Y.Text 时只改变化区间，避免整篇重写造成并发重复。 */
+function singleHunk(base: string, next: string): { at: number; remove: number; insert: string } | null {
+  if (base === next) return null;
+  let head = 0;
+  while (head < base.length && head < next.length && base[head] === next[head]) head++;
+  let baseEnd = base.length;
+  let nextEnd = next.length;
+  while (baseEnd > head && nextEnd > head && base[baseEnd - 1] === next[nextEnd - 1]) {
+    baseEnd--;
+    nextEnd--;
+  }
+  return { at: head, remove: baseEnd - head, insert: next.slice(head, nextEnd) };
+}
+
+/** 差量偏移映射：`at` 之前的偏移不动，之后的按插删长度平移，落在删区内的贴到插入末端。 */
+function mapOffsetByHunk(hunk: { at: number; remove: number; insert: string } | null, offset: number, length: number): number {
+  if (!hunk) return Math.min(offset, length);
+  if (offset <= hunk.at) return offset;
+  if (offset >= hunk.at + hunk.remove) return offset + (hunk.insert.length - hunk.remove);
+  return hunk.at + hunk.insert.length;
+}
+
+/** `caretPositionFromPoint` 双分支（WebKit 只实现 `caretRangeFromPoint`）。 */
+function caretPointAt(x: number, y: number): { node: Node; offset: number } | null {
+  const doc = document as Document & {
+    caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null;
+    caretRangeFromPoint?: (x: number, y: number) => Range | null;
+  };
+  if (typeof doc.caretPositionFromPoint === "function") {
+    const hit = doc.caretPositionFromPoint(x, y);
+    if (hit) return { node: hit.offsetNode, offset: hit.offset };
+  }
+  const range = doc.caretRangeFromPoint?.(x, y);
+  return range ? { node: range.startContainer, offset: range.startOffset } : null;
+}
+
+/** 原生表单控件：点击语义归浏览器（聚焦/勾选），不落光标、不接管拖选。 */
+const NATIVE_CONTROL_SELECTOR = "input, textarea, select, button";
 
 export function MarkdownEditor({
   body,
@@ -229,250 +132,487 @@ export function MarkdownEditor({
   className = "h-full",
 }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
-  const viewRef = useRef<EditorView | null>(null);
-  /** 装饰 widget 的 dispatch 转发：StateField 闭包捕获 ref 而非函数，view 创建后赋值才有效。 */
-  const dispatchRef = useRef<(spec: TransactionSpec) => void>(() => {});
-  /** 程序化注入的回放抑制：applyBody 的 dispatch 同步触发 updateListener，写入期间置位吞掉回放。 */
-  const suppressRef = useRef(false);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const sinkRef = useRef<MarkdownEditSink | null>(null);
+  const overlayRef = useRef<CaretOverlay | null>(null);
+  const indexRef = useRef<SourceIndex | null>(null);
+  const textRef = useRef(body.replace(/\r\n/g, "\n"));
+  const selRef = useRef({ from: 0, to: 0 });
+  const activeBlockRef = useRef<number | null>(null);
+  const dragRef = useRef<{ anchor: number } | null>(null);
+  const composingRef = useRef(false);
   const syncSeqRef = useRef(syncSeq);
-  /** 回调/body/选项经 ref 转发：create 闭包在挂载时构建一次，捕获不到后续渲染的最新值。 */
-  const onBodyChangeRef = useRef(onBodyChange);
-  onBodyChangeRef.current = onBodyChange;
+  const collabRef = useRef(collab);
+  collabRef.current = collab;
   const onCollabDivergenceRef = useRef(onCollabDivergence);
   onCollabDivergenceRef.current = onCollabDivergence;
-  const bodyRef = useRef(body);
-  bodyRef.current = body;
+
+  /** 回调与模式经 ref 转发：视图只挂载一次，需取到最新值且不因它们重挂。 */
   const linksRef = useRef(links);
   linksRef.current = links;
-  const interactiveRef = useRef(interactiveCheckbox);
-  interactiveRef.current = interactiveCheckbox;
   const mentionsRef = useRef(mentions);
   mentionsRef.current = mentions;
+  const onBodyChangeRef = useRef(onBodyChange);
+  onBodyChangeRef.current = onBodyChange;
   const onMentionClickRef = useRef(onMentionClick);
   onMentionClickRef.current = onMentionClick;
-  /** 只读当前应用值（初始 = 挂载 prop；后续经 effect 同步到视图）。 */
-  const readOnlyAppliedRef = useRef(readOnly);
+  const readOnlyRef = useRef(readOnly);
+  readOnlyRef.current = readOnly;
+  const interactiveRef = useRef(interactiveCheckbox);
+  interactiveRef.current = interactiveCheckbox;
 
-  // ===== `[[` / `【【` 双链候选浮层 =====
-
-  /** 浮层状态（null = 关闭）；wikiPickerRef 供回调读取当前状态镜像。 */
   const [wikiPicker, setWikiPicker] = useState<WikiPickerState | null>(null);
   const wikiPickerRef = useRef<WikiPickerState | null>(null);
   wikiPickerRef.current = wikiPicker;
-  /** Esc/外点关闭后记录关闭时的触发符起点：同一上下文内保持关闭（粘滞，不打断手动输入），
-   *  上下文退出（光标移出/片段失效）后重置，新起触发符或移出再回光标复开。 */
   const wikiDismissedFromRef = useRef<number | null>(null);
 
-  /** 关闭浮层（Esc/外点）：记下当前触发符起点进入粘滞关闭。 */
-  const closeWikiPicker = useCallback(() => {
-    const picker = wikiPickerRef.current;
-    if (picker) wikiDismissedFromRef.current = picker.from;
-    setWikiPicker(null);
-  }, []);
-
-  /** 选中候选：把触发片段（`[[查询词` / `【【查询词`）原地替换为路径链接，光标落链接末尾。
-   *  显示名 = 文件名去扩展名；label 段剥除 `[`/`]`（`]` 会提前闭合链接文本导致解析失败）。 */
-  const pickWikiTarget = useCallback((file: string, name: string) => {
-    const view = viewRef.current;
-    const picker = wikiPickerRef.current;
-    if (!view || !picker) return;
-    const label = name.replace(/\.md$/i, "").replace(/[[\]]/g, "");
-    const insert = `[${label}](${encodeMarkdownLinkHref(file)})`;
-    const head = view.state.selection.main.head;
-    // 提交前重新校验触发片段仍在原位（外部同步整篇替换期间浮层不刷新，缓存的 from 会指向旧文档）
-    const ctx = wikiLinkTriggerContext(view.state, head);
-    if (!ctx || ctx.from !== picker.from) {
-      setWikiPicker(null);
-      return;
-    }
-    view.dispatch({
-      changes: { from: picker.from, to: head, insert },
-      selection: { anchor: picker.from + insert.length },
-      scrollIntoView: true,
-    });
-    view.focus();
-    setWikiPicker(null);
-  }, []);
-
-  /** 每次编辑器更新后同步浮层开关：编辑态 + 光标选区 + 光标处于未闭合 `[[查询词`
-   *  上下文即开启并锚定光标实时坐标；状态无实质变化时返回原引用避免无谓重渲染。 */
-  const syncWikiPicker = useCallback((update: { state: EditorState; view: EditorView }) => {
-    const state = update.state;
-    const close = () => {
-      wikiDismissedFromRef.current = null;
-      setWikiPicker((prev) => (prev ? null : prev));
-    };
-    if (state.readOnly || !state.selection.main.empty) {
-      close();
-      return;
-    }
-    const pos = state.selection.main.head;
-    const ctx = wikiLinkTriggerContext(state, pos);
-    if (!ctx) {
-      close();
-      return;
-    }
-    const from = ctx.from;
-    if (wikiDismissedFromRef.current === from) {
-      // 粘滞关闭中：保持关闭，不重置粘滞点（同一段内继续键入/回删仍不打扰）
-      setWikiPicker((prev) => (prev ? null : prev));
-      return;
-    }
-    const coords = update.view.coordsAtPos(pos);
-    if (!coords) {
-      close();
-      return;
-    }
-    const anchor: PopupAnchor = { x: coords.left, y: coords.bottom + 4, flipY: coords.top - 8 };
-    setWikiPicker((prev) => {
-      if (
-        prev &&
-        prev.from === from &&
-        prev.query === ctx.query &&
-        prev.anchor.x === anchor.x &&
-        prev.anchor.y === anchor.y
-      ) {
-        return prev;
-      }
-      return { from, query: ctx.query, anchor };
-    });
-  }, []);
-
-  /** 程序化写入：抑制回放后全量替换（CRLF 注入前规范化为 LF）——注入的 dispatch 同步触发
-   *  updateListener，置位 suppress 防注入被当作用户编辑上报。 */
-  const applyBody = useCallback((md: string) => {
-    const view = viewRef.current;
-    if (!view) return;
-    const normalized = md.replace(/\r\n/g, "\n");
-    suppressRef.current = true;
-    view.dispatch({
-      changes: { from: 0, to: view.state.doc.length, insert: normalized },
-      // 外部同步不进撤销栈：Ctrl+Z 不应回滚到注入前的内容（与用户编辑隔离）
-      annotations: [Transaction.addToHistory.of(false)],
-    });
-    suppressRef.current = false;
-  }, []);
-
-  // 创建编辑器（`new EditorView` 同步完成，无需 StrictMode 异步守卫；卸载即 destroy）
-  useEffect(() => {
-    const host = hostRef.current;
-    if (!host) return;
-    /** 只读状态字段：提供 EditorState.readOnly 拦截用户输入；装饰层经它同步 readOnly 渲染模式。
-     * 初始值取挂载时 readOnly（笔记打开默认只读、MarkdownView 恒只读），后续由 effect 翻转。 */
-    const roField = StateField.define<boolean>({
-      create: () => readOnlyAppliedRef.current,
-      update(value, tr) {
-        for (const e of tr.effects) if (e.is(readOnlyEffect)) return e.value;
-        return value;
-      },
-      provide: (f) => EditorState.readOnly.from(f),
-    });
-    /** 装饰选项工厂：每次重建装饰时取最新 ref（vaultRoot/回调经 store 实时读，防闭包陈旧）。 */
-    const buildOpts = (ro: boolean): DecorationOptions => ({
-      vaultRoot: useAppStore.getState().vaultRoot,
-      readOnly: ro,
-      interactiveCheckbox: interactiveRef.current,
-      onOpenUrl: (url) => void useAppStore.getState().openUrl(url),
-      onOpenPath: (path) => void useAppStore.getState().openInExplorer(path),
-      readImage: async (src) => {
+  const getOptions = useCallback(
+    () => ({
+      links: linksRef.current,
+      onOpenUrl: (url: string) => void useAppStore.getState().openUrl(url),
+      readImage: async (src: string): Promise<string | null> => {
         try {
           return await useVaultStore.getState().readAttachmentDataUrl(src);
         } catch {
           return null;
         }
       },
-      ...linksRef.current,
-      mentions: mentionsRef.current,
       onMentionClick: onMentionClickRef.current,
-      focusEditor: () => viewRef.current?.focus(),
-    });
-    const view = new EditorView({
-      parent: host,
-      state: EditorState.create({
-        // 协作模式以收敛态 ytext 为编辑模型源（body 可能因预览期远端改动而滞后），
-        // 非协作退回原逻辑用 body 初始化。
-        doc: collab
-          ? collab.ytext.toString()
-          : bodyRef.current.replace(/\r\n/g, "\n"),
-        extensions: [
-          // addKeymap: false——Enter/Backspace 绑定统一由 keymap.of 组合提供；
-          // base = markdownLanguage（GFM：表格/任务/删除线/Autolink 全量解锁）
-          markdown({
-            codeLanguages: languages,
-            addKeymap: false,
-            base: markdownLanguage,
-          }),
-          EditorView.lineWrapping,
-          // keymap 协作/非协作一致（协作只多 yCollab 绑定，行为不因协作开关分叉）：
-          // 撤销/重做不在 CM 内绑定——笔记编辑面的撤销统一由窗口级路由接按文件持久栈
-          // （CM 内置 history 随 EditorView 销毁丢失）；无文件编辑面（画布内文本节点草稿）
-          // 没有该持久栈，故由 localHistory 单独提供 CM 内撤销
-          keymap.of([...markdownKeymap, ...defaultKeymap]),
-          ...(localHistory ? [history()] : []),
-          ...(collab ? [yCollab(collab.ytext, collab.awareness)] : []),
-          syntaxHighlighting(highlightStyle),
-          editorTheme,
-          roField,
-          readOnlyClass,
-          livePreview(buildOpts, dispatchRef, roField),
-          EditorView.updateListener.of((update) => {
-            if (update.docChanged && !suppressRef.current && onBodyChangeRef.current) {
-              onBodyChangeRef.current(update.state.doc.toString());
-            }
-          }),
-          // 双链候选浮层同步（程序化注入期间不响应：全量替换不应误触发；输入法组合期不弹候选，避免拼音字母触发浮层）
-          EditorView.updateListener.of((update) => {
-            if (!suppressRef.current && !update.view.composing) syncWikiPicker(update);
-          }),
-        ],
-      }),
-    });
-    viewRef.current = view;
-    dispatchRef.current = (spec) => view.dispatch(spec);
-    if (editorViewRef) editorViewRef.current = view;
-    if (collab) {
-      // 协作：ytext 已作编辑模型源，不再用 body 覆盖。若 ytext 与 body 相悖
-      // （预览期远端已改写本端未感知 / 本地有未落盘编辑）→ 交父级处置：干净收敛
-      // content 到 ytext、有未落盘编辑则本地正文写回 ytext（防陈旧基线回退本地输入）。
-      if (collab.ytext.toString() !== bodyRef.current.replace(/\r\n/g, "\n")) {
-        onCollabDivergenceRef.current?.(collab.ytext.toString());
+    }),
+    [],
+  );
+
+  /** 内容重绘（结构变化：文本变更 / 活动块切换 / 只读翻转）。 */
+  const renderContent = useCallback(
+    (text: string, activeOffset: number | undefined): void => {
+      const content = contentRef.current;
+      if (!content) return;
+      const scrollTop = scrollRef.current?.scrollTop ?? 0;
+      const base = { resolveLink: createLinkResolver(linksRef.current), mentions: mentionsRef.current };
+      content.innerHTML = readOnlyRef.current
+        ? renderMarkdownToHtml(text, base)
+        : renderMarkdownEditHtml(text, { ...base, offsets: true, activeOffset });
+      const index = buildSourceIndex(content);
+      indexRef.current = index;
+      activeBlockRef.current = activeOffset === undefined ? null : blockAtOffset(index, activeOffset)?.from ?? null;
+      // 任务勾选框：可编辑面解除禁用（点击切换源码），只读面保持禁用展示
+      if (!readOnlyRef.current && interactiveRef.current) {
+        for (const box of Array.from(content.querySelectorAll("input.md-editor-checkbox"))) {
+          box.removeAttribute("disabled");
+        }
       }
-    } else {
-      // 非协作：初始注入挂载时的 body（原行为）
-      applyBody(bodyRef.current);
+      if (scrollRef.current) scrollRef.current.scrollTop = scrollTop;
+      hydrateMarkdownImages(content, getOptions);
+      decorateMarkdownControls(content);
+    },
+    [getOptions],
+  );
+
+  /**
+   * 视觉重绘（仅光标/选区：不重建内容 DOM）。followCaret = 光标移出可视区时滚动跟随，
+   * 只用于本端光标移动（键盘导航/输入）；scroll 重绘等被动路径绝不反调 scrollTop，
+   * 否则容器的自由滚动会被拉回光标处。
+   */
+  const drawOverlay = useCallback((from: number, to: number, focus: boolean, followCaret = false): void => {
+    const index = indexRef.current;
+    const overlay = overlayRef.current;
+    if (!index || !overlay) return;
+    // 绘制层是内容容器的兄弟节点（不随内容替换销毁），坐标以它自身为原点
+    const origin = overlay.el.getBoundingClientRect();
+    overlay.setSelectionRects(rangeRects(index, from, to), origin);
+    const caret = focus && !readOnlyRef.current ? caretRect(index, from) : null;
+    overlay.setCaretRect(caret, origin);
+    // 隐藏输入面按宿主坐标定位，让输入法候选框跟随真实光标
+    sinkRef.current?.moveTo(
+      caret ? { left: caret.left - origin.left, top: caret.top - origin.top, height: caret.height } : null,
+    );
+    if (followCaret && caret) {
+      // 光标移出可视区时把内容滚回来（隐藏输入面不会带动滚动）
+      const scroll = scrollRef.current;
+      if (scroll) {
+        const box = scroll.getBoundingClientRect();
+        if (caret.top < box.top) scroll.scrollTop -= box.top - caret.top + 8;
+        else if (caret.bottom > box.bottom) scroll.scrollTop += caret.bottom - box.bottom + 8;
+      }
     }
-    return () => {
-      // 卸载即销毁：doc 变更已由 updateListener 实时上报（applyBody 注入经 suppress 抑制），
-      // 无需兜底上报——所有变更在发生当刻即完成回调，卸载不产生额外 onBodyChange
-      viewRef.current = null;
-      dispatchRef.current = () => {};
-      if (editorViewRef) editorViewRef.current = null;
-      view.destroy();
+  }, []);
+
+  /** 绘制协作者光标（awareness 的 selection/cursor 字段；本端 clientID 跳过）。 */
+  const drawRemoteCursors = useCallback((): void => {
+    const awareness = collabRef.current?.awareness;
+    const index = indexRef.current;
+    const overlay = overlayRef.current;
+    if (!awareness || !index || !overlay) return;
+    const origin = overlay.el.getBoundingClientRect();
+    const cursors: RemoteCursor[] = [];
+    for (const [clientId, state] of awareness.getStates()) {
+      if (clientId === awareness.clientID) continue;
+      const raw = (state as { selection?: { anchor: number; head?: number }; cursor?: { anchor: number } }).selection
+        ?? (state as { cursor?: { anchor: number } }).cursor;
+      if (!raw || typeof raw.anchor !== "number") continue;
+      const user = (state as { user?: { name?: string; color?: string } }).user;
+      cursors.push({ rect: caretRect(index, raw.anchor), label: user?.name ?? "", color: user?.color ?? "var(--accent)" });
+    }
+    overlayRef.current?.setRemoteCursors(cursors, origin);
+  }, []);
+
+  /** 光标是否落在不回显候选的语法区间（代码 / raw HTML）：此时不弹双链候选。 */
+  const inOpaqueRegion = useCallback((offset: number): boolean => {
+    const index = indexRef.current;
+    if (!index) return false;
+    const block = blockAtOffset(index, offset);
+    const kind = block?.el.getAttribute("data-md-kind");
+    if (kind === "fencedCode" || kind === "indentedCode" || kind === "htmlBlock") return true;
+    return index.atomics.some((atomic) => atomic.from <= offset && offset <= atomic.to && atomic.el.tagName === "CODE");
+  }, []);
+
+  const applySelection = useCallback(
+    (from: number, to: number, focus: boolean): void => {
+      selRef.current = { from, to };
+      const index = indexRef.current;
+      const hitBlock = index ? blockAtOffset(index, from)?.from ?? null : null;
+      // 落点在块外（文末/块间空隙）不切换活动块：保持当前块的源码态，避免整篇翻回渲染
+      const nextBlock = hitBlock ?? activeBlockRef.current;
+      // 活动块变化才重建内容（该块要在源码与渲染之间切换）
+      if (!readOnlyRef.current && nextBlock !== activeBlockRef.current) renderContent(textRef.current, nextBlock ?? undefined);
+      drawOverlay(from, to, focus, true);
+      // 广播本端光标/选区（字段与既有协作端约定一致；节流由协作传输层负责）
+      collabRef.current?.awareness.setLocalStateField("selection", { anchor: from, head: to });
+      if (readOnlyRef.current) {
+        setWikiPicker((prev) => (prev ? null : prev));
+        return;
+      }
+      const text = textRef.current;
+      if (to !== from || composingRef.current || inOpaqueRegion(from)) {
+        wikiDismissedFromRef.current = null;
+        setWikiPicker((prev) => (prev ? null : prev));
+        return;
+      }
+      const lineStart = text.lastIndexOf("\n", Math.max(0, from - 1)) + 1;
+      const lineEnd = text.indexOf("\n", from);
+      const ctx = wikiLinkContextAt(text.slice(lineStart, from), text.slice(from, lineEnd === -1 ? text.length : lineEnd));
+      if (!ctx) {
+        wikiDismissedFromRef.current = null;
+        setWikiPicker((prev) => (prev ? null : prev));
+        return;
+      }
+      const triggerFrom = lineStart + ctx.from;
+      if (wikiDismissedFromRef.current === triggerFrom) {
+        setWikiPicker((prev) => (prev ? null : prev));
+        return;
+      }
+      const caret = index ? caretRect(index, from) : null;
+      if (!caret) return;
+      const anchor: PopupAnchor = { x: caret.left, y: caret.bottom + 4, flipY: caret.top - 8 };
+      setWikiPicker((prev) =>
+        prev && prev.from === triggerFrom && prev.query === ctx.query && prev.anchor.x === anchor.x && prev.anchor.y === anchor.y
+          ? prev
+          : { from: triggerFrom, query: ctx.query, anchor },
+      );
+    },
+    [drawOverlay, inOpaqueRegion, renderContent],
+  );
+
+  /**
+   * 本地编辑提交：先更新本地正文真相，再按最小差量写回 ytext（协作态）。
+   * 顺序不可反——ytext 写回会同步触发 observe，若本地真相滞后会被误判为远端更新而全量重同步、回拨光标。
+   */
+  const commitLocalEdit = useCallback((next: string): void => {
+    const base = textRef.current;
+    if (next === base) return;
+    textRef.current = next;
+    const binding = collabRef.current;
+    if (!binding) return;
+    const hunk = singleHunk(base, next);
+    if (!hunk) return;
+    const ytext = binding.ytext;
+    const apply = () => {
+      if (hunk.remove > 0) ytext.delete(hunk.at, hunk.remove);
+      if (hunk.insert) ytext.insert(hunk.at, hunk.insert);
     };
-    // collab 切换（重建视图）依赖其引用；applyBody/syncWikiPicker 为稳定回调；editorViewRef 为父组件
-    // useRef（引用稳定，仅为 exhaustive-deps 合规列入，不会触发重建）；localHistory 只在挂载配置生效
-  }, [applyBody, collab, editorViewRef, localHistory, syncWikiPicker]);
+    if (ytext.doc) ytext.doc.transact(apply);
+    else apply();
+  }, []);
 
-  // 只读切换：同一视图翻转（不重建 → 选区/滚动/协作绑定保留），装饰经 readOnlyEffect 同步
+  /** 用新正文替换全文（程序化编辑：句柄、勾选框、候选插入共用）。 */
+  const applyText = useCallback(
+    (next: string, caretAt: number): void => {
+      commitLocalEdit(next);
+      sinkRef.current?.setText(next);
+      renderContent(next, caretAt);
+      sinkRef.current?.setSelection(caretAt, caretAt, false);
+      drawOverlay(caretAt, caretAt, true, true);
+      onBodyChangeRef.current?.(next);
+    },
+    [commitLocalEdit, drawOverlay, renderContent],
+  );
+
+  // ===== 输入面挂载（一次）=====
   useEffect(() => {
-    if (readOnly === readOnlyAppliedRef.current) return;
-    readOnlyAppliedRef.current = readOnly;
-    const view = viewRef.current;
-    if (!view) return;
-    view.dispatch({ effects: readOnlyEffect.of(readOnly) });
-  }, [readOnly]);
+    const host = hostRef.current;
+    const content = contentRef.current;
+    if (!host || !content) return;
+    const detachInteractions = attachMarkdownInteractions(content, getOptions);
+    // 绘制层挂到宿主（与内容容器同级）：内容每次整篇重绘都不会把它一起清掉
+    const overlay = new CaretOverlay(host);
+    overlayRef.current = overlay;
+    const sink = new MarkdownEditSink(
+      host,
+      {
+        onTextChange: (text) => {
+          // 文本未变化（如部分浏览器在 compositionend 后补发的 input）为幂等事件，跳过
+          if (text === textRef.current) return;
+          commitLocalEdit(text);
+          const selection = sink.selection;
+          selRef.current = selection;
+          renderContent(text, selection.from);
+          drawOverlay(selection.from, selection.to, true, true);
+          onBodyChangeRef.current?.(text);
+        },
+        onSelectionChange: (from, to) => {
+          if (readOnlyRef.current) return;
+          applySelection(from, to, document.hasFocus());
+        },
+        onCompositionChange: (composing) => {
+          composingRef.current = composing;
+        },
+      },
+      { interceptHistory: !localHistory },
+    );
+    sinkRef.current = sink;
+    // 挂载即把当前正文注入输入面：输入面 value 就是文档模型，等外部 syncSeq 首递增兜底
+    // 会让 syncSeq 恒定的编辑面（画布内文本节点）在首次击键时按「空 → 全文」差量清掉正文
+    sink.setText(textRef.current);
+    renderContent(textRef.current, undefined);
 
-  // 外部同步：非用户编辑的 content 更新（软件内写落点信号 / 加载完成）。
-  // 协作模式下不禁用：远端合入经 ytext 进视图（updateListener 上报），此处仅处理非协作场景。
+    /** 焦点/滚动变化后重绘（隐藏输入面不带动滚动，滚动时需按当前选区重算位置）。 */
+    const refreshOverlay = (): void => {
+      const selection = selRef.current;
+      // 与选区回调的焦点判定一致：窗口失焦时自绘光标同样隐藏
+      drawOverlay(selection.from, selection.to, document.hasFocus() && document.activeElement === sink.el);
+    };
+    const scrollEl = scrollRef.current;
+    scrollEl?.addEventListener("scroll", refreshOverlay, { passive: true });
+    sink.el.addEventListener("focus", refreshOverlay);
+    sink.el.addEventListener("blur", refreshOverlay);
+
+    // 拖选释放兜底挂 window：松开在编辑面之外（拖出窗口/落在不冒泡的兄弟节点）时
+    // 宿主的 onMouseUp 收不到，拖选锚点不清除会导致悬停持续改写选区
+    const clearDrag = (): void => {
+      dragRef.current = null;
+    };
+    window.addEventListener("mouseup", clearDrag);
+
+    return () => {
+      window.removeEventListener("mouseup", clearDrag);
+      scrollEl?.removeEventListener("scroll", refreshOverlay);
+      sink.el.removeEventListener("focus", refreshOverlay);
+      sink.el.removeEventListener("blur", refreshOverlay);
+      detachInteractions();
+      overlay.destroy();
+      sink.destroy();
+      overlayRef.current = null;
+      sinkRef.current = null;
+      indexRef.current = null;
+      activeBlockRef.current = null;
+    };
+    // localHistory 为挂载期配置，只在挂载时生效
+  }, [applySelection, commitLocalEdit, drawOverlay, getOptions, localHistory, renderContent]);
+
+  // 只读翻转：内容形态变化，重建一次（容器不重建，滚动保留）
+  useEffect(() => {
+    renderContent(textRef.current, readOnly ? undefined : selRef.current.from);
+    drawOverlay(selRef.current.from, selRef.current.to, false);
+  }, [readOnly, renderContent, drawOverlay]);
+
+  // 外部同步（加载完成 / 撤销回放 / 协作收敛）：写入权威文本，选区按差量映射避免落在错位内容处
   useEffect(() => {
     if (syncSeq === 0 || syncSeq === syncSeqRef.current) return;
     syncSeqRef.current = syncSeq;
-    applyBody(bodyRef.current);
-  }, [syncSeq, applyBody]);
+    const normalized = body.replace(/\r\n/g, "\n");
+    const hunk = singleHunk(textRef.current, normalized);
+    const next = {
+      from: mapOffsetByHunk(hunk, selRef.current.from, normalized.length),
+      to: mapOffsetByHunk(hunk, selRef.current.to, normalized.length),
+    };
+    textRef.current = normalized;
+    sinkRef.current?.setText(normalized);
+    selRef.current = next;
+    sinkRef.current?.setSelection(next.from, next.to, false);
+    renderContent(normalized, readOnly ? undefined : next.from);
+    drawOverlay(next.from, next.to, false);
+  }, [syncSeq, body, readOnly, renderContent, drawOverlay]);
 
+  // 只读面的正文直接随 props 变化重绘（无 syncSeq 通道）
+  useEffect(() => {
+    if (!readOnly) return;
+    const normalized = body.replace(/\r\n/g, "\n");
+    if (normalized === textRef.current) return;
+    textRef.current = normalized;
+    renderContent(normalized, undefined);
+  }, [body, readOnly, renderContent]);
+
+  // ===== 协作绑定：Y.Text ↔ 本地正文 + awareness 远端光标 =====
+  useEffect(() => {
+    if (!collab) return;
+    const { ytext, awareness } = collab;
+    // 挂载分歧：ytext 与正文相悖 → 交父级处置（干净则收敛到 ytext，有未落盘输入则本地写回）
+    if (ytext.toString() !== textRef.current) {
+      onCollabDivergenceRef.current?.(ytext.toString());
+    }
+    /** 远端合入：整篇对齐，并把本地选区按最小差量映射，避免光标跳走。
+     *  本地事务（本端编辑写回 ytext）不走此路径：本地正文在提交时已对齐。 */
+    const applyRemote = (_ytext: unknown, transaction: Transaction): void => {
+      if (transaction.local) return;
+      const remote = ytext.toString();
+      if (remote === textRef.current) return;
+      const base = textRef.current;
+      const hunk = singleHunk(base, remote);
+      const selection = selRef.current;
+      const next = {
+        from: mapOffsetByHunk(hunk, selection.from, remote.length),
+        to: mapOffsetByHunk(hunk, selection.to, remote.length),
+      };
+      textRef.current = remote;
+      selRef.current = next;
+      sinkRef.current?.setText(remote);
+      sinkRef.current?.setSelection(next.from, next.to, false);
+      renderContent(remote, next.from);
+      drawOverlay(next.from, next.to, document.hasFocus());
+      onBodyChangeRef.current?.(remote);
+    };
+    ytext.observe(applyRemote);
+    awareness.on("change", drawRemoteCursors);
+    drawRemoteCursors();
+    return () => {
+      ytext.unobserve(applyRemote);
+      awareness.off("change", drawRemoteCursors);
+    };
+  }, [collab, drawOverlay, drawRemoteCursors, renderContent]);
+
+  // ===== 落点换算 =====
+  const offsetAtPoint = useCallback((x: number, y: number): number | null => {
+    const content = contentRef.current;
+    const index = indexRef.current;
+    if (!content || !index) return null;
+    const hit = caretPointAt(x, y);
+    if (!hit || !content.contains(hit.node)) return null;
+    const direct = pointToOffset(index, hit.node, hit.offset);
+    if (direct !== null) return direct;
+    const el = hit.node.nodeType === Node.ELEMENT_NODE ? (hit.node as Element) : hit.node.parentElement;
+    const block = el?.closest("[data-md-block]");
+    const from = block ? Number(block.getAttribute("data-md-from")) : NaN;
+    return Number.isFinite(from) ? from : null;
+  }, []);
+
+  // ===== 编辑命令：任务勾选框切换 =====
+  const onHostMouseDown = useCallback(
+    (event: React.MouseEvent) => {
+      if (event.button !== 0) return;
+      const target = event.target as Element | null;
+      const checkbox = target?.closest("input.md-editor-checkbox");
+      if (checkbox) {
+        event.preventDefault();
+        event.stopPropagation();
+        const item = checkbox.closest("[data-md-from]");
+        const from = item ? Number(item.getAttribute("data-md-from")) : NaN;
+        if (!Number.isFinite(from)) return;
+        const raw = textRef.current.slice(from, from + 200);
+        const m = /([-+*]|\d+[.)])[ \t]+\[( |x)\]/.exec(raw);
+        if (!m) return;
+        const marker = from + m.index + m[0].length - 2;
+        const next = textRef.current.slice(0, marker) + (m[2] === "x" ? " " : "x") + textRef.current.slice(marker + 1);
+        applyText(next, marker);
+        return;
+      }
+      // 原生表单控件交给浏览器；其余（含链接/图片/胶囊）统一接管：preventDefault 掉原生
+      // 拖选后由自绘选区负责（否则控件区域原生选区与自绘选区双轨并存），点击激活仍走 click 委托
+      if (target?.closest(NATIVE_CONTROL_SELECTOR)) return;
+      // 落点换算不到（如内容下方的空白区）时落到正文末尾，与编辑器惯例一致
+      const offset = offsetAtPoint(event.clientX, event.clientY) ?? textRef.current.length;
+      event.preventDefault();
+      dragRef.current = { anchor: offset };
+      sinkRef.current?.setSelection(offset, offset);
+    },
+    [applyText, offsetAtPoint],
+  );
+
+  const onHostMouseMove = useCallback(
+    (event: React.MouseEvent) => {
+      if (!dragRef.current) return;
+      // 主键已释放（如拖选在编辑面外松开）则终止拖选，防止悬停持续改写选区
+      if (!(event.buttons & 1)) {
+        dragRef.current = null;
+        return;
+      }
+      const offset = offsetAtPoint(event.clientX, event.clientY);
+      if (offset === null) return;
+      const anchor = dragRef.current.anchor;
+      sinkRef.current?.setSelection(Math.min(anchor, offset), Math.max(anchor, offset), false);
+    },
+    [offsetAtPoint],
+  );
+
+  const onHostMouseUp = useCallback(() => {
+    dragRef.current = null;
+  }, []);
+
+  // ===== 编辑器句柄 =====
+  useEffect(() => {
+    if (!editorViewRef) return;
+    editorViewRef.current = {
+      getText: () => textRef.current,
+      getSelection: () => ({ ...selRef.current }),
+      setSelection: (from, to) => sinkRef.current?.setSelection(from, to),
+      replaceRange: (from, to, text) => {
+        const next = textRef.current.slice(0, from) + text + textRef.current.slice(to);
+        applyText(next, from + text.length);
+      },
+      posAtCoords: (x, y) => offsetAtPoint(x, y),
+      focus: () => sinkRef.current?.focus(),
+    };
+    return () => {
+      editorViewRef.current = null;
+    };
+  }, [editorViewRef, applyText, offsetAtPoint]);
+
+  // ===== 双链候选 ====
+  const closeWikiPicker = useCallback(() => {
+    const picker = wikiPickerRef.current;
+    if (picker) wikiDismissedFromRef.current = picker.from;
+    setWikiPicker(null);
+  }, []);
+
+  const pickWikiTarget = useCallback(
+    (file: string, name: string) => {
+      const picker = wikiPickerRef.current;
+      if (!picker) return;
+      const label = name.replace(/\.md$/i, "").replace(/[[\]]/g, "");
+      const insert = `[${label}](${encodeMarkdownLinkHref(file)})`;
+      const head = selRef.current.from;
+      applyText(textRef.current.slice(0, picker.from) + insert + textRef.current.slice(head), picker.from + insert.length);
+      setWikiPicker(null);
+    },
+    [applyText],
+  );
+
+  const editable = !readOnly;
   return (
     <>
-      <div ref={hostRef} className={className} data-markdown-editor />
+      <div
+        ref={hostRef}
+        className={className}
+        data-markdown-editor
+        data-editable={editable || undefined}
+        onMouseDown={editable ? onHostMouseDown : undefined}
+        onMouseMove={editable ? onHostMouseMove : undefined}
+        onMouseUp={editable ? onHostMouseUp : undefined}
+      >
+        <div ref={scrollRef} className="md-edit-scroll">
+          <div ref={contentRef} className="md-edit-content markdown-body" />
+        </div>
+      </div>
       {wikiPicker && (
         <WikiLinkPicker
           query={wikiPicker.query}
@@ -489,45 +629,24 @@ export function MarkdownEditor({
 // ===== 只读展示面封装（画布文本节点 / 对话气泡 / AI 面板）=====
 
 interface MarkdownViewProps {
-  /** 静态正文（更新走 applyBody，不回调）。 */
+  /** 静态正文（随 props 变化重绘）。 */
   text: string;
-  /** 链接/定位回调（与 MarkdownEditor 同构）。 */
   links?: MarkdownEditorLinks;
-  /** 任务勾选框禁用态展示（缺省 true = 画布/对话只读面）。 */
-  interactiveCheckbox?: boolean;
-  /** @引用 胶囊（用户消息 `@label` → 胶囊）。 */
   mentions?: { key: string; label: string }[];
   onMentionClick?: (key: string, label: string) => void;
-  /** 宿主容器 class（缺省随内容高度）。 */
   className?: string;
 }
 
-/** 只读 Markdown 渲染（与实时预览编辑同一引擎，渲染完全一致）。
- * 宽松换行关闭（softLineBreak=false）时，只读展示面折叠段内单换行为空格（见 utils/softLineBreak）。 */
-export function MarkdownView({
-  text,
-  links,
-  interactiveCheckbox = false,
-  mentions,
-  onMentionClick,
-  className,
-}: MarkdownViewProps) {
+/** 只读 Markdown 渲染（与编辑面同一引擎与内核，渲染完全一致）。
+ * 宽松换行关闭（softLineBreak=false）时折叠段内单换行为空格（见 utils/softLineBreak）。 */
+export function MarkdownView({ text, links, mentions, onMentionClick, className }: MarkdownViewProps) {
   const softLineBreak = useSettingsStore((s) => s.softLineBreak);
   const displayText = softLineBreak ? text : collapseSoftLineBreaks(text);
-  const [syncSeq, setSyncSeq] = useState(0);
-  const lastTextRef = useRef(displayText);
-  useEffect(() => {
-    if (displayText !== lastTextRef.current) {
-      lastTextRef.current = displayText;
-      setSyncSeq((s) => s + 1);
-    }
-  }, [displayText]);
   return (
     <MarkdownEditor
       body={displayText}
-      syncSeq={syncSeq}
+      syncSeq={0}
       readOnly
-      interactiveCheckbox={interactiveCheckbox}
       links={links}
       mentions={mentions}
       onMentionClick={onMentionClick}

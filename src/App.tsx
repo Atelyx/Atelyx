@@ -14,7 +14,7 @@ import { platformCapabilities, isAndroidPlatform } from "@/services/platform";
 import { layoutReconcile } from "@/services/layout";
 import { PANEL_LABEL_PREFIX, usePanelStore } from "@/stores/panelStore";
 
-// 页面 lazy 分割：主包不含 CodeMirror/KaTeX/高亮语言包等重库，LoadingScreen 更快出现。
+// 页面 lazy 分割：主包不含 KaTeX/高亮语言包等重库，LoadingScreen 更快出现。
 // ReactFlowProvider 留在 App 层（页面组件自身的 useReactFlow hooks 需要它在组件外；
 // React Flow 因 canvasStore 依赖本就在主包，不额外增加首屏体积）。
 const ProjectWorkspacePage = lazy(async () => {

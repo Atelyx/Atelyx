@@ -2,7 +2,7 @@
  * 笔记协作运行时：每笔记 `Y.Doc` 生命周期的单例编排（组件不直连 service 的桥）。
  *
  * 笔记编辑会话（协作态）经本 store 绑定/解绑协作文档，并把绑定对象（ytext + awareness）
- * 以会话状态下发给编辑面做 y-codemirror 绑定；保存仍走 noteStore（收敛后全文写盘）。
+ * 以会话状态下发给编辑面做 Y.Text 绑定；保存仍走 noteStore（收敛后全文写盘）。
  * 本 store 只做生命周期与身份登记；网络收发经 `registerNoteCollabWiring` 注册到协作宿主
  * （collabStore 通道注册表 + 发送 sink 注入，见下方接线）。
  *

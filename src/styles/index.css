@@ -341,16 +341,90 @@ body {
 .markdown-body ol {
   list-style: decimal;
 }
+/* 内核列表的圆点/序号由 md-editor-list-marker 自绘（有序项保留源序号），关闭原生 marker
+   防双重显示；raw HTML 中的列表不带该类，仍走原生 marker */
+.markdown-body ul.md-editor-list,
+.markdown-body ol.md-editor-list {
+  list-style: none;
+}
 /* 任务列表行不显示圆点（GitHub 同款） */
 .markdown-body li:has(input[type="checkbox"]) {
   list-style: none;
 }
 
-/* ===== 实时预览编辑器（NoteEditor 编辑模式，CodeMirror 6）=====
-   文本即真相：编辑器只显示原文 + 渲染装饰层，样式全部走主题变量（浅/深自动跟随）。
-   EditorView.theme 在组件内定义，这里只补 widget 与补充样式。 */
+/* ===== 统一 Markdown 引擎（分块渲染 + 自绘光标/选区）=====
+   文本即真相：正文为纯文本，渲染由分块视图层产出；样式全部走主题变量（浅/深自动跟随）。 */
 [data-markdown-editor] {
+  position: relative;
   min-height: 100%;
+}
+/* 可编辑面文本光标兜底（只读面不带 data-editable，宿主各自的 cursor 语义不受影响） */
+[data-markdown-editor][data-editable] {
+  cursor: text;
+}
+
+/* 分块渲染编辑面：滚动容器 + 相对定位内容（自绘光标/选区按内容坐标绝对定位） */
+.md-edit-scroll {
+  height: 100%;
+  overflow: auto;
+}
+.md-edit-content {
+  position: relative;
+  min-height: 100%;
+  padding: 1rem;
+}
+/* 光标所在块与代码块回显源码：保留换行与缩进，长行折行 */
+.md-editor-source {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.md-caret-layer,
+.md-selection-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.md-selection-rect {
+  position: absolute;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--accent) 25%, transparent);
+}
+.md-caret {
+  position: absolute;
+  width: 1.5px;
+  background: var(--accent);
+  animation: md-caret-blink 1s steps(2, start) infinite;
+}
+/* 协作者光标：实色条 + 昵称标签（颜色来自对方用户色） */
+.md-remote-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.md-remote-caret {
+  position: absolute;
+  width: 2px;
+  border-radius: 1px;
+}
+.md-remote-caret-label {
+  position: absolute;
+  left: 0;
+  top: -1.05em;
+  padding: 0 4px;
+  border-radius: 3px;
+  font-size: 0.7em;
+  line-height: 1.4;
+  color: #fff;
+  white-space: nowrap;
+}
+@keyframes md-caret-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
 }
 
 /* @引用 胶囊（输入框 overlay 内）：span 本体背景 + box-shadow 均随行 fragment 逐段绘制——
@@ -372,7 +446,7 @@ body {
   background: color-mix(in srgb, var(--accent) 35%, transparent);
 }
 
-/* 笔记编辑器内容区（预览/源码/实时预览编辑）选区：与 CodeMirror 编辑态选区色对齐（accent 25% 半透明） */
+/* 笔记编辑器内容区（预览/源码/实时预览编辑）选区：accent 25% 半透明，与编辑面选区一致 */
 [data-note-content]::selection,
 [data-note-content] ::selection {
   background: color-mix(in srgb, var(--accent) 25%, transparent);
@@ -398,7 +472,7 @@ body {
   color: var(--text-muted);
   border-bottom: 1px dashed currentColor;
 }
-/* 列表标记（无序小圆点 / 有序序号）：随标记隐藏后补位显示，不可选中 */
+/* 列表标记（无序小圆点 / 有序序号）：替代源文本 marker 的自绘形态，不可选中 */
 .md-editor-list-marker {
   color: var(--text-muted);
   user-select: none;
@@ -460,8 +534,8 @@ body {
   font-style: italic;
   white-space: pre;
 }
-/* callout 徽章（替换 `> [!type]`）+ 引用块行着色（md-callout/md-quote 打在 .cm-line 上，
-   callout 类型色板复用下方 .callout-* 变量，经行装饰 class 继承到徽章） */
+/* callout 徽章（替换 `> [!type]`）+ 引用块着色（md-callout/md-quote 打在 blockquote 上，
+   callout 类型色板复用下方 .callout-* 变量） */
 .md-editor-callout-badge {
   display: inline-block;
   margin-right: 0.35em;
@@ -475,39 +549,18 @@ body {
   background: color-mix(in srgb, var(--callout-color, var(--accent)) 16%, transparent);
   user-select: none;
 }
-.cm-line.md-callout {
+blockquote.md-callout {
   border-left: 3px solid var(--callout-color, var(--accent));
   background: var(--callout-bg);
   padding-left: 0.6em;
 }
-.cm-line.md-quote {
+blockquote.md-quote {
   border-left: 3px solid var(--border);
   padding-left: 0.8em;
   color: var(--text-secondary);
 }
-/* 只读态：默认光标 + 隐藏原生编辑光标（点击不出现闪烁编辑指示；选区保留可拖选复制）。
-   原生 caret 是 contenteditable 的浏览器默认渲染，须经 caret-color: transparent 压掉
-   （本引擎未启用 drawSelection，无 CM 自绘 .cm-cursor 元素，故不存在针对它的规则）。 */
-.cm-readonly .cm-content,
-.cm-readonly .cm-line,
-.cm-readonly .cm-scroller {
-  cursor: default !important;
-}
-.cm-readonly .cm-content,
-.cm-readonly .cm-line {
-  caret-color: transparent !important;
-}
-/* 只读态仍可交互的 widget 保持 pointer 光标 */
-.cm-readonly .md-editor-checkbox,
-.cm-readonly .md-editor-link,
-.cm-readonly .md-editor-internal-link,
-.cm-readonly .md-editor-code-copy,
-.cm-readonly .mention-capsule {
-  cursor: pointer !important;
-}
 /* 围栏代码块（只读面 widget）：标题栏（语言名 + 常驻复制按钮）+ 盒装代码区。
-   代码不换行，横向滚动与限高纵向滚动收敛在代码块内部；
-   宽度外约束依赖 editorTheme 的 .cm-content min-width: 0（否则 widget 内容宽撑宽整条消息） */
+   代码不换行，横向滚动与限高纵向滚动收敛在代码块内部 */
 .md-editor-code-block {
   margin: 0.4em 0;
   max-width: 100%;
@@ -734,7 +787,7 @@ body {
   text-overflow: ellipsis;
 }
 /* callout 类型色板：note/abstract/info/todo 蓝青系，tip/success 绿，warning 橙，danger 系红，example 紫，quote 灰
-   （--callout-color 供 .cm-line.md-callout 行着色 + .md-editor-callout-badge 徽章继承） */
+   （--callout-color 供 blockquote.md-callout 着色 + .md-editor-callout-badge 徽章继承） */
 .callout-note {
   --callout-color: #448aff;
 }

@@ -184,7 +184,7 @@ function commit(rt: SessionRuntime, content: string, syncDoc: boolean): void {
   }
   patchView(file, { content, dirty: true });
   ensureCollabBinding(rt);
-  // 源码模式/属性区等整篇入口：正文须写回 ytext（实时预览编辑已由 yCollab 同步）
+  // 整篇入口（源码模式/属性区）：正文须写回 ytext（编辑面自身的键入已按最小差量直接写回）
   if (syncDoc && currentBinding(file)) {
     useNoteCollabStore.getState().syncLocalBody(file, bodyLF(content));
   }

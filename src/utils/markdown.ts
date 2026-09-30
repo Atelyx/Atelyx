@@ -1,9 +1,8 @@
 /**
  * Markdown 链接工具（统一渲染引擎与仓库链接处理的公共解析）。
  *
- * 渲染管线说明：全部渲染面（笔记只读/实时预览编辑、画布文本节点、对话气泡、AI 面板）
- * 统一 CodeMirror 单引擎（`MarkdownEditor` 编辑 / `MarkdownView` 只读，widget 与装饰构建见
- * `components/editor/` 下 `markdownWidgets.tsx` + `markdownDecorations.ts`）。
+ * 渲染管线说明：全部渲染面（笔记编辑/只读、画布文本节点、对话气泡、AI 面板）统一
+ * `MarkdownEditor` 单引擎，渲染走 `utils/markdownCore`。
  * 本文件仅保留与渲染无关的纯解析工具：外部链接协议判定、wiki/仓库路径链接解析、
  * 链接 href 编解码、双链候选触发上下文检测、按点击落点反查行内可新建链接区间。安全清洗（raw HTML 白名单）见 `utils/htmlSanitize.ts`。
  */
