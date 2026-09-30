@@ -16,7 +16,7 @@
  * - `.atlx` / `.md` 均可位于任意文件夹（无固定 画布/笔记/附件 目录）
  *
  * 分层：用 `vaultStore`（文件树/笔记 CRUD）+ `appStore`（画布 CRUD/切换/建仓）+ `canvasStore`（建节点），
- * 不直调 service。canvas 相关的定位动作走 props 回调。
+ * 不直调 service。打开画布/笔记/表格统一经 `useFileNavigation`；白板转换经 props 回调。
  *
  * 递归树渲染 / 指针拖拽 / 文件操作 hooks / 菜单组件 / 纯函数见 `./file-explorer/`。
  */
@@ -52,12 +52,6 @@ import { SpaceMembersDialog } from "./file-explorer/SpaceMembersDialog";
 import { SpaceInviteDialog } from "./file-explorer/SpaceInviteDialog";
 
 interface PanelProps {
-  /** 单击画布行：打开画布并激活画布窗口（页面层包装 openCanvas + setActiveWindow）。 */
-  onOpenCanvasFile: (row: CanvasFileRow) => void;
-  /** 单击 `.md`：在工作区主编辑区打开笔记编辑器。 */
-  onOpenNoteForEdit: (file: string, title: string) => void;
-  /** 单击 `.atb`：在工作区主编辑区打开表格编辑器。 */
-  onOpenTableFile: (file: string, title: string) => void;
   /** 当前笔记窗口打开的文件（相对仓库根路径）；笔记区用它高亮当前打开的行（与画布区对称）。 */
   openedNoteFile: string | null;
   /** 当前表格窗口打开的文件（相对仓库根路径）；表格行高亮用（与笔记区对称）。 */
@@ -66,7 +60,7 @@ interface PanelProps {
   onConvertWhiteboard: (file: string) => void;
 }
 
-export function FileExplorerPanel({ onOpenCanvasFile, onOpenNoteForEdit, onOpenTableFile, openedNoteFile, openedTableFile, onConvertWhiteboard }: PanelProps) {
+export function FileExplorerPanel({ openedNoteFile, openedTableFile, onConvertWhiteboard }: PanelProps) {
   const vaultRoot = useAppStore((s) => s.vaultRoot);
   const tree = useVaultStore((s) => s.tree);
   const loadFiles = useVaultStore((s) => s.loadFiles);
@@ -224,8 +218,6 @@ export function FileExplorerPanel({ onOpenCanvasFile, onOpenNoteForEdit, onOpenT
   const commitEditing = useCommitEditing({
     onNotice: setNotice,
     onEditingChange: setEditing,
-    onOpenCanvasFile,
-    onOpenTableFile,
   });
 
   /** 画布行：从 canvases 列表按 file 找（扫描失败/损坏 .atlx 不在列表，无 row 不提供画布操作）。 */
@@ -279,9 +271,6 @@ export function FileExplorerPanel({ onOpenCanvasFile, onOpenNoteForEdit, onOpenT
     openedTableFile,
     canvasRowOf,
     startPotentialDrag,
-    onOpenCanvasFile,
-    onOpenNoteForEdit,
-    onOpenTableFile,
     onOpenMenu: openMenu,
   };
 

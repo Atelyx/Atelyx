@@ -3,6 +3,7 @@ import { useAppStore } from "@/stores/appStore";
 import { useUiStateStore } from "@/stores/uiStateStore";
 import { useVaultStore } from "@/stores/vaultStore";
 import { baseName, noteTitleFromFile, tableTitleFromFile } from "@/utils/filename";
+import { useFileNavigation } from "@/hooks/useFileNavigation";
 import type { CanvasFileRow } from "@/types";
 
 /** 拖拽会话（pointer 模拟拖拽期间的状态，见 useVaultDrag）。 */
@@ -142,19 +143,14 @@ interface CommitEditingOptions {
   onNotice: (message: string) => void;
   /** 结束 inline 编辑态（提交/取消后清空）。 */
   onEditingChange: (e: Editing | null) => void;
-  /** 新建画布成功后打开画布（页面层包装 openCanvas + setActiveWindow）。 */
-  onOpenCanvasFile: (row: CanvasFileRow) => void;
-  /** 新建表格成功后打开表格。 */
-  onOpenTableFile: (file: string, title: string) => void;
 }
 
 /** 提交 inline 输入（新建/重命名），返回是否继续保留编辑态。 */
 export function useCommitEditing({
   onNotice,
   onEditingChange,
-  onOpenCanvasFile,
-  onOpenTableFile,
 }: CommitEditingOptions) {
+  const nav = useFileNavigation();
   const canvases = useAppStore((s) => s.canvases);
   const createCanvas = useAppStore((s) => s.createCanvas);
   const renameCanvas = useAppStore((s) => s.renameCanvas);
@@ -195,7 +191,7 @@ export function useCommitEditing({
         } else if (e.kind === "creating") {
           if (e.type === "canvas") {
             const { id, file, title } = await createCanvas(v, e.dir);
-            onOpenCanvasFile({ id, file, title, updatedAt: 0 });
+            nav.openCanvasRow({ id, file, title, updatedAt: 0 });
             if (title !== v) onNotice(`「${v}」已存在，已创建为「${title}」`);
           } else if (e.type === "note") {
             const file = await createNote(v, e.dir);
@@ -204,7 +200,7 @@ export function useCommitEditing({
           } else if (e.type === "table") {
             const { file, title } = await createTable(v, e.dir);
             if (title !== v) onNotice(`「${v}」已存在，已创建为「${title}」`);
-            if (file) onOpenTableFile(file, title);
+            if (file) nav.openTable(file);
           } else {
             const dirPath = e.dir ? `${e.dir}/${v}` : v;
             await createFolder(dirPath);
@@ -215,7 +211,7 @@ export function useCommitEditing({
         onNotice("操作失败，请重试");
       }
     },
-    [canvases, createCanvas, renameCanvas, createNote, renameNote, createTable, renameTable, renameAttachment, createFolder, renameFolder, onNotice, onEditingChange, onOpenCanvasFile, onOpenTableFile],
+    [canvases, createCanvas, renameCanvas, createNote, renameNote, createTable, renameTable, renameAttachment, createFolder, renameFolder, onNotice, onEditingChange, nav],
   );
 
   return commitEditing;

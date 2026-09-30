@@ -37,9 +37,6 @@ const fileTree = {
   openedTableFile: null,
   canvasRowOf: () => undefined,
   startPotentialDrag: vi.fn(),
-  onOpenCanvasFile: vi.fn(),
-  onOpenNoteForEdit: vi.fn(),
-  onOpenTableFile: vi.fn(),
   onOpenMenu: vi.fn(),
 } as never;
 

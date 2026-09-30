@@ -12,7 +12,7 @@ import {
 } from "lucide-react";
 import { InlineInput } from "./InlineInput";
 import { sortChildren, upperExt } from "./sort";
-import { noteTitleFromFile, stripExt, tableTitleFromFile } from "@/utils/filename";
+import { useFileNavigation } from "@/hooks/useFileNavigation";
 import type { CanvasFileRow, FileExplorerSortKey, FileTreeNode } from "@/types";
 import type { Editing, MenuTarget } from "./actions";
 
@@ -35,9 +35,6 @@ export interface FileTreeProps {
   openedTableFile: string | null;
   canvasRowOf: (path: string) => CanvasFileRow | undefined;
   startPotentialDrag: (e: ReactPointerEvent, node: FileTreeNode) => void;
-  onOpenCanvasFile: (row: CanvasFileRow) => void;
-  onOpenNoteForEdit: (file: string, title: string) => void;
-  onOpenTableFile: (file: string, title: string) => void;
   onOpenMenu: (x: number, y: number, target: MenuTarget) => void;
 }
 
@@ -60,11 +57,9 @@ export function FileTree(props: FileTreeProps) {
     openedTableFile,
     canvasRowOf,
     startPotentialDrag,
-    onOpenCanvasFile,
-    onOpenNoteForEdit,
-    onOpenTableFile,
     onOpenMenu,
   } = props;
+  const nav = useFileNavigation();
 
   // 新建草稿输入行：渲染在目标文件夹 children 顶部（根目录 = 树顶部）
   const sorted = sortChildren(nodes, sortKey);
@@ -103,9 +98,6 @@ export function FileTree(props: FileTreeProps) {
     openedTableFile,
     canvasRowOf,
     startPotentialDrag,
-    onOpenCanvasFile,
-    onOpenNoteForEdit,
-    onOpenTableFile,
     onOpenMenu,
   };
 
@@ -235,17 +227,10 @@ export function FileTree(props: FileTreeProps) {
                 data-file={node.path}
                 onPointerDown={(e) => startPotentialDrag(e, node)}
                 onClick={() => {
-                  if (isCanvas && row) onOpenCanvasFile(row);
-                  else if (isWhiteboard) {
-                    // 外部白板：合成行打开（id = 路径 = 运行时身份，只读查看）
-                    onOpenCanvasFile({
-                      id: node.path,
-                      title: stripExt(node.name),
-                      file: node.path,
-                      updatedAt: node.updatedAt,
-                    });
-                  } else if (isNote) onOpenNoteForEdit(node.path, noteTitleFromFile(node.path));
-                  else if (isTable) onOpenTableFile(node.path, tableTitleFromFile(node.path));
+                  if (isCanvas && row) nav.openCanvasRow(row);
+                  else if (isWhiteboard) nav.openWhiteboard(node.path);
+                  else if (isNote) nav.openNote(node.path);
+                  else if (isTable) nav.openTable(node.path);
                 }}
                 onContextMenu={(e) => {
                   e.preventDefault();

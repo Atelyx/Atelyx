@@ -42,7 +42,6 @@ const baseFileTree = {
   openedTableFile: null,
   canvasRowOf: () => undefined,
   startPotentialDrag: vi.fn(),
-  onOpenNoteForEdit: vi.fn(),
   onOpenMenu: vi.fn(),
 } as never;
 

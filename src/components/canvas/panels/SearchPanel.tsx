@@ -6,15 +6,16 @@
  * （不区分大小写子串匹配，内存过滤无 debounce），结果扁平行点击打开画布/笔记
  * （与文件面板单击行为一致，附件不可点）。
  *
- * 分层：走 `vaultStore`（文件树）+ `appStore`（画布行）+ props 回调打开文件。
+ * 分层：走 `vaultStore`（文件树）+ `appStore`（画布行），打开统一经 `useFileNavigation`。
  */
 import { Check, ChevronDown, FileText, LayoutDashboard, Paperclip, Search, StickyNote, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Menu, MenuItem } from "@/components/common/Menu";
 import { useAppStore } from "@/stores/appStore";
 import { useVaultStore } from "@/stores/vaultStore";
-import { parentDir, noteTitleFromFile, stripExt } from "@/utils/filename";
-import type { CanvasFileRow, FileTreeNode } from "@/types";
+import { useFileNavigation } from "@/hooks/useFileNavigation";
+import { parentDir } from "@/utils/filename";
+import type { FileTreeNode } from "@/types";
 
 /** 搜索模式列表：当前仅「按文件名」支持，其余为后续模式占位。 */
 const SEARCH_MODES: { key: string; label: string; supported: boolean }[] = [
@@ -33,18 +34,10 @@ function collectFiles(nodes: FileTreeNode[]): FileTreeNode[] {
   return out;
 }
 
-interface SearchPanelProps {
-  /** 单击画布结果行：打开画布并激活画布窗口（与文件面板同一入口）。 */
-  onOpenCanvasFile: (row: CanvasFileRow) => void;
-  /** 单击 `.md` 结果行：打开笔记窗口。 */
-  onOpenNoteForEdit: (file: string, title: string) => void;
-  /** 单击 `.atb` 结果行：打开表格窗口。 */
-  onOpenTableFile: (file: string, title: string) => void;
-}
-
-export function SearchPanel({ onOpenCanvasFile, onOpenNoteForEdit, onOpenTableFile }: SearchPanelProps) {
+export function SearchPanel() {
   const tree = useVaultStore((s) => s.tree);
   const canvases = useAppStore((s) => s.canvases);
+  const nav = useFileNavigation();
 
   const [mode, setMode] = useState(SEARCH_MODES[0].key);
   const [query, setQuery] = useState("");
@@ -63,23 +56,18 @@ export function SearchPanel({ onOpenCanvasFile, onOpenNoteForEdit, onOpenTableFi
     return collectFiles(tree).filter((f) => f.name.toLowerCase().includes(q));
   }, [tree, query]);
 
-  /** 单击结果行：画布/白板/笔记打开（同文件面板），附件无动作。 */
+  /** 单击结果行：画布/白板/笔记/表格打开（同文件面板），附件无动作。 */
   const openResult = (node: FileTreeNode) => {
-    if (node.name.toLowerCase().endsWith(".atlx")) {
+    const lower = node.name.toLowerCase();
+    if (lower.endsWith(".atlx")) {
       const row = canvases.find((c) => c.file === node.path);
-      if (row) onOpenCanvasFile(row);
-    } else if (node.name.toLowerCase().endsWith(".canvas")) {
-      // 外部白板：合成行打开（只读查看）
-      onOpenCanvasFile({
-        id: node.path,
-        title: stripExt(node.name),
-        file: node.path,
-        updatedAt: node.updatedAt,
-      });
-    } else if (node.name.toLowerCase().endsWith(".md")) {
-      onOpenNoteForEdit(node.path, noteTitleFromFile(node.path));
-    } else if (node.name.toLowerCase().endsWith(".atb")) {
-      onOpenTableFile(node.path, node.name.replace(/\.atb$/i, ""));
+      if (row) nav.openCanvasRow(row);
+    } else if (lower.endsWith(".canvas")) {
+      nav.openWhiteboard(node.path);
+    } else if (lower.endsWith(".md")) {
+      nav.openNote(node.path);
+    } else if (lower.endsWith(".atb")) {
+      nav.openTable(node.path);
     }
   };
 

@@ -61,10 +61,7 @@ import { LinkNode } from "@/components/canvas/nodes/LinkNode";
 import { withCollab } from "@/components/canvas/nodes/withCollab";
 import { useCollabStore } from "@/stores/collabStore";
 import { usePluginStore } from "@/stores/pluginStore";
-import {
-  OPEN_TABLE_EVENT,
-  TableNode,
-} from "@/components/canvas/nodes/TableNode";
+import { TableNode } from "@/components/canvas/nodes/TableNode";
 import { NodeContextMenu } from "@/components/canvas/panels/NodeContextMenu";
 import { DataFlowEdge } from "@/components/canvas/edges/DataFlowEdge";
 import { PanelPlaceholder } from "@/components/layout/PanelPlaceholder";
@@ -132,7 +129,6 @@ export const CanvasView = memo(function CanvasView({
   const pasteNodes = useCanvasStore((s) => s.pasteNodes);
   const addNode = useCanvasStore((s) => s.addNode);
   const canvasFile = useAppStore((s) => s.currentCanvasFile);
-  const openTable = useAppStore((s) => s.openTable);
   const convertWhiteboard = useAppStore((s) => s.convertWhiteboard);
   const focusedPanelId = useUiStateStore((s) => s.focusedPanelId);
   // 节点组件表 = 内建 + 插件注册（插件节点：注册的组件渲染；插件停用后该类型节点按 React Flow
@@ -373,17 +369,6 @@ export const CanvasView = memo(function CanvasView({
   const handlePaneClick = useCallback(() => {
     selectNode(null);
   }, [selectNode]);
-
-  // 画布表格节点「打开表格」按钮 → 打开表格面板（ReactFlow 节点无法经 props 回调，走事件桥接）
-  useEffect(() => {
-    const onOpenTable = (e: Event) => {
-      const detail = (e as CustomEvent).detail as
-        { file: string; title: string } | undefined;
-      if (detail?.file) openTable(detail.file, detail.title ?? "表格");
-    };
-    window.addEventListener(OPEN_TABLE_EVENT, onOpenTable);
-    return () => window.removeEventListener(OPEN_TABLE_EVENT, onOpenTable);
-  }, [openTable]);
 
   if (!canvasFile) {
     return (

@@ -3,11 +3,10 @@
  *
  * 引用模型同笔记节点：`.atlx` 只存 `{title, file}`，内容快照（snapshot）运行时从
  * `.atb` 读取（打开/重读时读盘），持久化时剥离。
- * 快照可被 @提及 / 连边接入对话注入（AI 读取表格内容生成参考图提示词等）。
+ * 快照可被 @提及 / 连边接入对话注入。
  *
- * 交互：header 标题双击重命名（renameTable 同步画布引用）；「打开表格」按钮 →
- * 派发 `atelyx:open-table` 自定义事件（页面层监听打开表格窗口——ReactFlow 节点
- * 无法经 props 回调，走事件桥接）。
+ * 交互：header 标题双击重命名（renameTable 同步画布引用）；「打开表格」按钮与底部行
+ * 经 `useFileNavigation` 打开表格窗口（组件本层调 appStore）。
  */
 import { AlertTriangle, Table as TableIcon, ExternalLink } from "lucide-react";
 import type { NodeProps } from "@xyflow/react";
@@ -20,15 +19,14 @@ import {
   DEFAULT_TABLE_NODE_WIDTH,
 } from "@/constants/canvas";
 import { tableTitleFromFile } from "@/utils/filename";
+import { useFileNavigation } from "@/hooks/useFileNavigation";
 import { ResizeHandle } from "./ResizeHandle";
 import { ConnectionFrame } from "./ConnectionFrame";
-
-/** 打开表格窗口事件（detail = { file, title }；页面层 ProjectWorkspacePage 监听）。 */
-export const OPEN_TABLE_EVENT = "atelyx:open-table";
 
 export function TableNode({ id, data, width, height, selected }: NodeProps) {
   const { title, file, snapshot, fileMissing } = data as unknown as TableData;
   const readOnly = useCanvasStore((s) => s.readOnly);
+  const nav = useFileNavigation();
   // 标题双击 inline 编辑（公共 useInlineEdit：Enter/失焦提交，Esc 取消并拦 blur 误提交）
   const renameEdit = useInlineEdit({
     value: title ?? "",
@@ -56,11 +54,7 @@ export function TableNode({ id, data, width, height, selected }: NodeProps) {
 
   const openTableWindow = () => {
     if (fileMissing || readOnly) return;
-    window.dispatchEvent(
-      new CustomEvent(OPEN_TABLE_EVENT, {
-        detail: { file, title: title || "表格" },
-      }),
-    );
+    nav.openTable(file);
   };
 
   // 快照预览：字段行 + 前 3 数据行（注入文本完整走 snapshot，此处仅摘要展示）
