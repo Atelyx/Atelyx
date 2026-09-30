@@ -825,6 +825,108 @@ pub(crate) fn regenerate_ids(node: &LayoutNode) -> LayoutNode {
     }
 }
 
+// ===== 插件默认布局规格 =====
+
+/// 插件默认布局规格节点（`ctx.layout.declareDefaultLayout` 载荷）。插件只描述结构与视图 kind，
+/// 面板/标签 id 由宿主实例化时生成——插件不经手 nanoid。
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum LayoutSpecNode {
+    /// 分割节点：方向 + 子树 + 占比（尺寸规则与 `LayoutNode::Split` 一致）。
+    #[serde(rename = "split")]
+    Split {
+        #[serde(rename = "direction")]
+        direction: String,
+        #[serde(rename = "children")]
+        children: Vec<LayoutSpecNode>,
+        #[serde(rename = "sizes")]
+        sizes: Vec<f64>,
+    },
+    /// 面板节点：按顺序放置的视图 kind（首个为激活标签）。
+    #[serde(rename = "panel")]
+    Panel {
+        #[serde(rename = "views")]
+        views: Vec<String>,
+    },
+}
+
+/// 规格形状上限：插件声明的默认布局与用户布局同受形状守卫约束，防病态规格撑爆布局树。
+const SPEC_MAX_DEPTH: usize = 16;
+const SPEC_MAX_PANELS: usize = 32;
+const SPEC_MAX_VIEWS_PER_PANEL: usize = 16;
+/// 默认布局名的字节上限（多字节字符按字节计，与 plugin_id_valid 的口径一致）。
+pub(crate) const SPEC_MAX_NAME_BYTES: usize = 64;
+
+/// 校验规格：方向合法、各 Split 尺寸形状合法、每个面板视图非空、深度/面板数在上限内。
+pub(crate) fn layout_spec_valid(node: &LayoutSpecNode) -> bool {
+    fn check(node: &LayoutSpecNode, depth: usize, panels: &mut usize) -> bool {
+        if depth > SPEC_MAX_DEPTH {
+            return false;
+        }
+        match node {
+            LayoutSpecNode::Panel { views } => {
+                *panels += 1;
+                *panels <= SPEC_MAX_PANELS
+                    && !views.is_empty()
+                    && views.len() <= SPEC_MAX_VIEWS_PER_PANEL
+                    && views.iter().all(|v| !v.is_empty())
+            }
+            LayoutSpecNode::Split { direction, children, sizes } => {
+                (direction == "horizontal" || direction == "vertical")
+                    && sizes_valid_for(sizes, children.len())
+                    && children.iter().all(|c| check(c, depth + 1, panels))
+            }
+        }
+    }
+    let mut panels = 0usize;
+    check(node, 0, &mut panels)
+}
+
+/// 收集规格中的全部视图 kind（「用户布局已含插件视图」守卫的扫描面）。
+pub(crate) fn layout_spec_views(node: &LayoutSpecNode) -> Vec<String> {
+    fn collect(node: &LayoutSpecNode, out: &mut Vec<String>) {
+        match node {
+            LayoutSpecNode::Panel { views } => out.extend(views.iter().cloned()),
+            LayoutSpecNode::Split { children, .. } => children.iter().for_each(|c| collect(c, out)),
+        }
+    }
+    let mut out = Vec::new();
+    collect(node, &mut out);
+    out
+}
+
+/// 实例化规格为布局树（面板/标签 id 在此生成）。
+pub(crate) fn instantiate_layout_spec(node: &LayoutSpecNode) -> LayoutNode {
+    match node {
+        LayoutSpecNode::Panel { views } => {
+            let tabs: Vec<TabItem> = views.iter().map(|v| create_tab(v)).collect();
+            let active_tab_id = tabs.first().map(|t| t.id.clone());
+            LayoutNode::Panel { id: nanoid!(), tabs, active_tab_id }
+        }
+        LayoutSpecNode::Split { direction, children, sizes } => LayoutNode::Split {
+            id: nanoid!(),
+            direction: direction.clone(),
+            children: children.iter().map(instantiate_layout_spec).collect(),
+            sizes: sizes.clone(),
+        },
+    }
+}
+
+/// 布局名去重：与既有布局重名时追加「 N」序号（默认布局名由插件提供，可能与用户布局重名）。
+pub(crate) fn unique_layout_name(names: &[String], base: &str) -> String {
+    if !names.iter().any(|n| n == base) {
+        return base.to_string();
+    }
+    let mut n = 2usize;
+    loop {
+        let candidate = format!("{base} {n}");
+        if !names.iter().any(|name| name == &candidate) {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
 // ===== 单元测试 =====
 
 #[cfg(test)]
@@ -1033,5 +1135,90 @@ mod tests {
         assert_eq!(ui.active_layout_id.as_deref(), Some(HOME_LAYOUT_ID));
         // 撕裂窗口空条目过滤
         assert!(ui.detached_windows.is_empty());
+    }
+
+    // ---- 插件默认布局规格 ----
+
+    fn spec_panel(views: &[&str]) -> LayoutSpecNode {
+        LayoutSpecNode::Panel { views: views.iter().map(|v| v.to_string()).collect() }
+    }
+
+    #[test]
+    fn layout_spec_validation() {
+        assert!(layout_spec_valid(&spec_panel(&["note"])));
+        assert!(layout_spec_valid(&LayoutSpecNode::Split {
+            direction: "horizontal".into(),
+            children: vec![spec_panel(&["files"]), spec_panel(&["note", "aichat"])],
+            sizes: vec![30.0, 70.0],
+        }));
+        // 方向非法 / 空视图 / 尺寸形状非法 / 空面板
+        assert!(!layout_spec_valid(&LayoutSpecNode::Split {
+            direction: "diagonal".into(),
+            children: vec![spec_panel(&["note"])],
+            sizes: vec![100.0],
+        }));
+        assert!(!layout_spec_valid(&spec_panel(&[""])));
+        assert!(!layout_spec_valid(&spec_panel(&[])));
+        assert!(!layout_spec_valid(&LayoutSpecNode::Split {
+            direction: "horizontal".into(),
+            children: vec![spec_panel(&["note"]), spec_panel(&["aichat"])],
+            sizes: vec![50.0],
+        }));
+        // 深度超限
+        let mut deep = spec_panel(&["note"]);
+        for _ in 0..(SPEC_MAX_DEPTH + 2) {
+            deep = LayoutSpecNode::Split { direction: "horizontal".into(), children: vec![deep], sizes: vec![50.0, 50.0] };
+        }
+        assert!(!layout_spec_valid(&deep));
+    }
+
+    #[test]
+    fn instantiate_layout_spec_generates_ids_and_active_tab() {
+        let spec = LayoutSpecNode::Split {
+            direction: "vertical".into(),
+            children: vec![spec_panel(&["files"]), spec_panel(&["note", "aichat"])],
+            sizes: vec![20.0, 80.0],
+        };
+        let tree = instantiate_layout_spec(&spec);
+        match &tree {
+            LayoutNode::Split { direction, children, sizes, .. } => {
+                assert_eq!(direction, "vertical");
+                assert_eq!(sizes, &vec![20.0, 80.0]);
+                assert_eq!(children.len(), 2);
+                match &children[1] {
+                    LayoutNode::Panel { tabs, active_tab_id, .. } => {
+                        let views: Vec<&str> = tabs.iter().map(|t| t.view.as_str()).collect();
+                        assert_eq!(views, vec!["note", "aichat"]);
+                        assert_eq!(active_tab_id.as_deref(), Some(tabs[0].id.as_str()));
+                        // 全部 id 非空
+                        assert!(tabs.iter().all(|t| !t.id.is_empty()));
+                    }
+                    _ => panic!("expected panel"),
+                }
+            }
+            _ => panic!("expected split"),
+        }
+        // 再次实例化 id 全部重新生成
+        let again = instantiate_layout_spec(&spec);
+        assert_ne!(tree.node_id(), again.node_id());
+    }
+
+    #[test]
+    fn layout_spec_views_collects_panels() {
+        let spec = LayoutSpecNode::Split {
+            direction: "horizontal".into(),
+            children: vec![spec_panel(&["files"]), spec_panel(&["note", "aichat"])],
+            sizes: vec![50.0, 50.0],
+        };
+        assert_eq!(layout_spec_views(&spec), vec!["files", "note", "aichat"]);
+    }
+
+    #[test]
+    fn unique_layout_name_appends_sequence_on_conflict() {
+        let names = vec!["主页".to_string(), "画布".to_string()];
+        assert_eq!(unique_layout_name(&names, "LLaMA"), "LLaMA");
+        assert_eq!(unique_layout_name(&names, "画布"), "画布 2");
+        let names = vec!["画布".to_string(), "画布 2".to_string(), "画布 3".to_string()];
+        assert_eq!(unique_layout_name(&names, "画布"), "画布 4");
     }
 }

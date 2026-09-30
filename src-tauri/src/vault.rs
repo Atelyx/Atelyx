@@ -1776,7 +1776,7 @@ pub fn copy_folder(root: &Path, old_dir: &str, new_dir: &str) -> Result<(), Stri
 /// 递归复制目录内容（含隐藏文件与子目录；链接一律跳过——Unix 符号链接与 Windows 符号链接/
 /// 目录联接都由 `DirEntry::file_type`（不跟随链接）报为链接。`fs::copy` 会跟随链接，
 /// 把仓库外文件的内容复制进仓库；链接到目录则整个复制失败）。
-fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
+pub(crate) fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;

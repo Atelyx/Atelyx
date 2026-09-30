@@ -70,6 +70,28 @@ export interface SplitNode {
 
 export type LayoutNode = PanelNode | SplitNode;
 
+/** 插件默认布局规格节点：插件只描述结构与视图 kind，面板/标签 id 由宿主实例化时生成。 */
+export type PluginLayoutSpecNode =
+  | {
+      kind: "split";
+      direction: SplitDirection;
+      children: PluginLayoutSpecNode[];
+      /** 各子树的相对尺寸（百分比，长度 = children 长度，和 > 0）。 */
+      sizes: number[];
+    }
+  | {
+      kind: "panel";
+      /** 按顺序放置的视图 kind（首个为激活标签；非空）。 */
+      views: ViewKind[];
+    };
+
+/** 插件声明的默认布局（`ctx.layout.declareDefaultLayout` 载荷；宿主追加为布局列表新条目）。 */
+export interface PluginDefaultLayoutSpec {
+  /** 布局名（非空，≤ 64 字节；与既有布局重名时宿主追加序号）。 */
+  name: string;
+  tree: PluginLayoutSpecNode;
+}
+
 /** 一套命名布局（布局列表的一项；只管主窗口面板树，撕裂窗口见 `DetachedWindow`）。 */
 export interface WorkspaceLayout {
   id: string;

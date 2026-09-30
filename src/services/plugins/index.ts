@@ -5,7 +5,7 @@
  */
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { PluginPackageJson, PluginSourceKind, PluginType } from "@/types";
+import type { PluginLayoutSpecNode, PluginPackageJson, PluginSourceKind, PluginType } from "@/types";
 
 /** Rust `plugin_list` 返回行（原始清单由前端校验归一化）。 */
 export interface PluginRow {
@@ -24,6 +24,8 @@ export interface PluginRow {
   previousVersion?: string;
   /** 同 id 行冲突说明（Rust 标记；双方行都携带且强制停用）。 */
   conflict?: string;
+  /** 非致命警示（当前仅重装恢复保留数据未完成时给出；数据留在保留区）。 */
+  warning?: string;
 }
 
 /** `plugin_list` 响应：行清单 + 插件状态健康度。 */
@@ -53,9 +55,16 @@ export function pluginInstallLocal(path: string): Promise<PluginRow> {
   return invoke<PluginRow>("plugin_install_local", { path });
 }
 
-/** 卸载插件（删安装目录/链接 + 清理状态记录；无落位目录的行只清记录）。 */
-export function pluginUninstall(id: string): Promise<void> {
-  return invoke("plugin_uninstall", { id });
+/** 卸载插件（删安装目录/链接 + 清理状态记录；无落位目录的行只清记录）。
+ *  keepData 为真时把插件目录的 data/（ctx.state / ctx.storage / ctx.fs.privateDir 落盘）
+ *  搬到保留区，重装同 id 自动搬回；本地链接来源忽略（源目录数据不受卸载影响）。 */
+export function pluginUninstall(id: string, keepData?: boolean): Promise<void> {
+  return invoke("plugin_uninstall", { id, keepData: keepData ?? false });
+}
+
+/** 应用插件声明的默认布局（每插件一次性：Rust 侧判定标记与既有布局后追加，不激活）。 */
+export function pluginApplyDefaultLayout(pluginId: string, name: string, tree: PluginLayoutSpecNode): Promise<void> {
+  return invoke("plugin_apply_default_layout", { id: pluginId, name, tree });
 }
 
 /** 启用/停用插件（前端先确认权限再启用）。 */

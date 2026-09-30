@@ -124,6 +124,8 @@ export {
   type LayoutNode,
   type WorkspaceLayout,
   type DetachedWindow,
+  type PluginLayoutSpecNode,
+  type PluginDefaultLayoutSpec,
 } from "./workspaceLayout";
 
 export type { CalendarItem } from "./calendar";

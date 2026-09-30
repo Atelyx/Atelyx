@@ -15,6 +15,7 @@ import type {
   LayoutOp,
   LayoutOpResult,
   PluginCanvasSnapshot,
+  PluginDefaultLayoutSpec,
   PluginTableSnapshot,
   RepoHistoryResult,
   WorkspaceLayout,
@@ -260,6 +261,8 @@ export interface PluginLayoutAccess {
   layouts(): WorkspaceLayout[];
   addView(panelId: string, view: string): Promise<LayoutOpResult>;
   op(op: LayoutOp): Promise<LayoutOpResult>;
+  /** 应用插件声明的默认布局（Rust 侧一次性判定 + 追加；失败由实现层通知用户）。 */
+  applyDefaultLayout(pluginId: string, spec: PluginDefaultLayoutSpec): Promise<void>;
 }
 
 let layoutAccess: PluginLayoutAccess | null = null;

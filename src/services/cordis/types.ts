@@ -37,6 +37,7 @@ import type {
   RepoHistoryResult,
   ToolSchema,
   WorkspaceLayout,
+  PluginDefaultLayoutSpec,
 } from "@/types";
 import type { Context } from "@atelyx/cordis";
 import type { HistoryKind, HistoryVersion } from "@/services/history";
@@ -384,6 +385,11 @@ export interface LayoutService {
   addView(panelId: string, view: string): Promise<LayoutOpResult>;
   /** 发布布局操作（`LayoutOp` 与 Rust `LayoutOp` 逐字段对齐，命令层全量受理；布局权威在 Rust）。 */
   op(op: LayoutOp): Promise<LayoutOpResult>;
+  /** 声明插件默认布局（每插件一次性生效）：宿主把规格实例化为布局列表新条目追加（不激活、
+   *  不改既有布局）；用户任一布局已含规格中的视图时不追加。声明随插件停用撤销（已追加的
+   *  布局保留为普通用户布局）。布局名非法 / 规格树缺失随声明同步抛错（插件行标 failed）；
+   *  规格形状非法由 Rust 侧校验拒绝，经应用通知可见、不阻断插件其余注册。 */
+  declareDefaultLayout(spec: PluginDefaultLayoutSpec): () => void;
 }
 
 /** 应用级 UI 使用状态读服务（只读非布局字段 + 布局镜像）。 */

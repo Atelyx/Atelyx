@@ -34,6 +34,12 @@ use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::vault::atomic_write;
+use crate::layout::LayoutState;
+use crate::layout_model::{
+    collect_tabs, instantiate_layout_spec, layout_spec_valid, layout_spec_views,
+    unique_layout_name, LayoutSpecNode, WorkspaceLayout, SPEC_MAX_NAME_BYTES,
+};
+use crate::layout_persist::{broadcast_layout, schedule_persist};
 
 /// 插件包清单文件名（插件根目录）。
 const MANIFEST_FILE: &str = "package.json";
@@ -104,6 +110,9 @@ pub struct PluginInfo {
     /// 可回退到的上一版本；回退成功后该字段清空。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub previous_version: Option<String>,
+    /// 非致命警示（当前仅重装恢复保留数据未完成时给出；数据留在保留区，前端提示用户）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 /// `plugin_list` 响应：行清单 + 插件状态健康度。
@@ -168,6 +177,9 @@ struct PluginState {
     /// ——卸载保持卸载、停用保持停用；恢复由用户显式触发）。
     #[serde(default)]
     seeded_ids: Vec<String>,
+    /// 已应用过默认布局的插件 id（每插件一次性：用户删掉该布局不再补；重装清掉来源记录后重新提供）。
+    #[serde(default)]
+    default_layout_done: Vec<String>,
 }
 
 // ===== 默认组合播种（随应用分发的行） =====
@@ -1175,6 +1187,7 @@ fn plugin_info_from(
         entry: crate::plugin_build::built_entry(dir).map(str::to_string),
         source_kind,
         previous_version: None,
+        warning: None,
     }
 }
 
@@ -1192,6 +1205,7 @@ fn plugin_info_from_manifest(id: &str, manifest: &Value, source_kind: PluginSour
         entry: None,
         source_kind,
         previous_version: None,
+        warning: None,
     }
 }
 
@@ -1271,7 +1285,13 @@ async fn install_plugin_dir(
         }
     };
 
-    Ok(plugin_info_from(&target, &manifest, source_kind, enabled))
+    // 状态已提交，安装事实成立；此刻把保留区数据搬回（若有）——放在提交之后而非落位之前，
+    // 防「状态写失败回滚整目录」连带吞掉刚恢复的用户数据。失败只警示不阻断安装。
+    let retention_base = retention_base_for(app)?;
+    let warning = restore_retained_data(&retention_base, &id, &target);
+    let mut info = plugin_info_from(&target, &manifest, source_kind, enabled);
+    info.warning = warning;
+    Ok(info)
 }
 
 // ===== 命令 =====
@@ -1532,7 +1552,12 @@ pub async fn plugin_install_local(app: AppHandle, path: String) -> Result<Plugin
         }
     };
 
-    Ok(plugin_info_from(&target, &manifest, PluginSourceKind::Local, enabled))
+    // 状态已提交；把保留区数据搬回落位链接（读写跟随链接落到源目录），失败只警示不阻断安装。
+    let retention_base = retention_base_for(&app)?;
+    let warning = restore_retained_data(&retention_base, &id, &target);
+    let mut info = plugin_info_from(&target, &manifest, PluginSourceKind::Local, enabled);
+    info.warning = warning;
+    Ok(info)
 }
 
 /// 创建目录链接：Windows 用 junction（免管理员），其余平台用符号链接。
@@ -1636,9 +1661,12 @@ fn remove_link(link: &Path) -> std::io::Result<()> {
 
 /// 卸载插件：本地来源只删链接（源目录不动，链接悬空也能删）；其余删除整个插件目录；
 /// 无落位目录的行（实现随应用编译）只清状态记录与启用开关。
+/// `keep_data` 为真时先把插件目录的 `data/`（ctx.state / ctx.storage / ctx.fs.privateDir 落盘）
+/// 搬到保留区 `app_data_dir/plugin-data/<id>/` 再删目录，重装同 id 时搬回；本地来源忽略
+/// （数据在源目录内，随卸载天然保留）。
 /// 被拒的情形：最后一个启用的主题插件（守恒）、落位目录不可达（网络路径离线）、磁盘删除失败。
 #[tauri::command]
-pub fn plugin_uninstall(app: AppHandle, id: String) -> Result<(), String> {
+pub fn plugin_uninstall(app: AppHandle, id: String, keep_data: Option<bool>) -> Result<(), String> {
     let _operation_guard = PluginManagementGuard::acquire()?;
     // id 视为不可信输入：非法 id 直接拒绝（防来源记录被篡改时 target_folder_name 回退 join(id)
     // 把含分隔符的 id 拼进插件目录内任意子路径）。
@@ -1689,8 +1717,15 @@ pub fn plugin_uninstall(app: AppHandle, id: String) -> Result<(), String> {
         .as_ref()
         .filter(|p| previous_dir_name_valid(&p.dir_name))
         .map(|p| base.join(&p.dir_name));
+    // 保留数据的落点：保留区按插件 id（已过 plugin_id_valid，安全路径片段）而非落位目录名寻址。
+    // 本地来源不保留：卸载只删链接，源目录（含 data/）原样留存。
+    let keep_data_dir = match (keep_data.unwrap_or(false), source.kind) {
+        (true, PluginSourceKind::Local) => None,
+        (true, _) => Some(retention_dir_for(&app, &id)?),
+        (false, _) => None,
+    };
     if let Some(dir) = dir {
-        uninstall_dir_transaction(&dir, source.kind, || {
+        uninstall_dir_transaction(&dir, source.kind, keep_data_dir.as_deref(), || {
             // 状态清理由锁内读改写完成：目录操作在锁外（可能慢），否则会覆盖并发命令刚写入的字段。
             // 守恒判定在闭包内对 fresh 复算；失败由事务把目录改名还原（不留幽灵记录）。
             update_plugin_state(&app, |fresh| {
@@ -1699,6 +1734,8 @@ pub fn plugin_uninstall(app: AppHandle, id: String) -> Result<(), String> {
                 }
                 fresh.enabled.remove(&id);
                 fresh.sources.remove(&id);
+                // 默认布局一次性标记随卸载清除：重装同 id 重新提供
+                fresh.default_layout_done.retain(|x| x != &id);
                 Ok(((), true))
             })
         })?;
@@ -1710,6 +1747,7 @@ pub fn plugin_uninstall(app: AppHandle, id: String) -> Result<(), String> {
             }
             fresh.enabled.remove(&id);
             fresh.sources.remove(&id);
+            fresh.default_layout_done.retain(|x| x != &id);
             Ok(((), true))
         })?;
     }
@@ -1730,7 +1768,8 @@ pub fn plugin_uninstall(app: AppHandle, id: String) -> Result<(), String> {
 }
 
 /// 卸载的「删目录 + 清状态」两步事务：先把落位目录改名为同目录 `.rm-*`（隔离态，可补偿），
-/// 再写状态，最后才真正删除隔离目录。
+/// 再写状态，最后才真正删除隔离目录。`keep_data_dir` 给定时在删除前把隔离目录的 `data/`
+/// 搬到该保留区路径（见 `retain_plugin_data`）。
 ///
 /// 为什么不能先删目录再写状态：两步之间崩溃/写失败会留下「目录已删、`sources[id]` 仍在」的记录；
 /// 而 `plugin_list` 要求可展示的落位目录或宿主清单才列出行，用户看到的是行消失 + 再卸载报「插件不存在」，
@@ -1740,19 +1779,46 @@ pub fn plugin_uninstall(app: AppHandle, id: String) -> Result<(), String> {
 fn uninstall_dir_transaction(
     dir: &Path,
     kind: PluginSourceKind,
+    keep_data_dir: Option<&Path>,
     clear_state: impl FnOnce() -> Result<(), String>,
 ) -> Result<(), String> {
     let isolated = dir.with_file_name(residue_name("rm", ""));
     if let Err(e) = fs::rename(dir, &isolated) {
         return Err(format!("卸载失败：{e}"));
     }
+    // 保留数据在删目录前搬出；失败 = 目录还原、卸载未发生（可原样重试）。
+    let mut data_retained = false;
+    if let Some(retention) = keep_data_dir {
+        match retain_plugin_data(&isolated, retention) {
+            Ok(moved) => data_retained = moved,
+            Err(e) => {
+                if let Err(back) = fs::rename(&isolated, dir) {
+                    eprintln!(
+                        "[plugin] 保留数据失败且目录还原失败（残留 {}）：{back}",
+                        isolated.display()
+                    );
+                }
+                return Err(format!("保留插件数据失败：{e}"));
+            }
+        }
+    }
     if let Err(e) = clear_state() {
-        // 补偿：目录改名还原，状态未变——用户可原样重试（不留幽灵记录）
+        // 补偿：目录改名还原，状态未变——用户可原样重试（不留幽灵记录）；
+        // 已搬出的保留数据同步搬回，搬回失败时数据留在保留区（不丢，记日志可定位）。
+        // 必须先还原目录再搬数据：数据落点是 <目录>/data，目录还在 .rm-* 名下时落点不存在。
         if let Err(back) = fs::rename(&isolated, dir) {
             eprintln!(
                 "[plugin] 卸载状态写失败且目录还原失败（残留 {}）：{back}",
                 isolated.display()
             );
+        }
+        if let (true, Some(retention)) = (data_retained, keep_data_dir) {
+            if let Err(back) = fs::rename(retention, dir.join("data")) {
+                eprintln!(
+                    "[plugin] 卸载补偿时保留数据 {} 搬回失败：{back}；数据留在保留区",
+                    retention.display()
+                );
+            }
         }
         return Err(e);
     }
@@ -1770,6 +1836,100 @@ fn uninstall_dir_transaction(
         );
     }
     Ok(())
+}
+
+/// 插件数据保留区根：`app_data_dir/plugin-data`。保留区按插件 id 寻址（已过 `plugin_id_valid`，
+/// 纯小写字母数字连字符、无路径分隔符，做路径键不会逃出保留区根）；根目录在恢复完成后尽力清空。
+fn retention_base_for(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map_err(|e| format!("读取应用数据目录失败：{e}"))
+        .map(|dir| dir.join("plugin-data"))
+}
+
+fn retention_dir_for(app: &AppHandle, id: &str) -> Result<std::path::PathBuf, String> {
+    Ok(retention_base_for(app)?.join(id))
+}
+
+/// 把隔离目录的 `data/` 搬到保留区，返回是否真的搬了（无 data 目录 = 没有可保留的用户数据）。
+/// 保留区已有同 id 旧保留（上轮保留后未重装）时先改名让位、新数据落位成功后再删——
+/// 旧保留可能是某轮数据的唯一副本，不得在任何失败路径上先于新数据落位被删除。
+fn retain_plugin_data(isolated_dir: &Path, retention: &Path) -> Result<bool, String> {
+    let data = isolated_dir.join("data");
+    if !data.exists() {
+        return Ok(false);
+    }
+    if let Some(parent) = retention.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("创建保留区目录失败：{e}"))?;
+    }
+    let stale = retention.with_file_name({
+        let mut name = retention.file_name().unwrap_or_default().to_os_string();
+        name.push(".old");
+        name
+    });
+    let had_stale = retention.exists();
+    if had_stale {
+        fs::rename(retention, &stale).map_err(|e| format!("旧保留区让位失败：{e}"))?;
+    }
+    match fs::rename(&data, retention) {
+        Ok(()) => {
+            if had_stale {
+                if let Err(e) = fs::remove_dir_all(&stale) {
+                    eprintln!("[plugin] 清理旧保留区 {} 失败：{e}", stale.display());
+                }
+            }
+            Ok(true)
+        }
+        Err(e) => {
+            if had_stale {
+                let _ = fs::rename(&stale, retention);
+            }
+            Err(format!("搬出插件数据失败：{e}"))
+        }
+    }
+}
+
+/// 重装同 id 后把保留区数据搬回新落位目录的 `data/`，成功后清掉空保留区根。
+/// 返回给用户的警示（保留区留存的原因）；数据任何失败路径都留在保留区，不丢。
+fn restore_retained_data(retention_base: &Path, id: &str, target_dir: &Path) -> Option<String> {
+    let retention = retention_base.join(id);
+    if !retention.is_dir() {
+        return None;
+    }
+    let data = target_dir.join("data");
+    if data.exists() {
+        return Some("检测到该插件保留过数据，但插件目录已有 data 目录；保留的数据原样留存于 plugin-data 目录".into());
+    }
+    // 同卷优先 rename（原子）；跨卷（本地链接源目录在另一块盘）回退为「复制到落位目录内临时名
+    // → 同卷改名」，复制失败时清掉半成品，保留区原样留存可重试。
+    let moved = if fs::rename(&retention, &data).is_ok() {
+        true
+    } else {
+        let staging = target_dir.join(".data-restore-tmp");
+        let copied = crate::vault::copy_dir_all(&retention, &staging)
+            .and_then(|_| fs::rename(&staging, &data))
+            .map_err(|e| e.to_string());
+        if copied.is_err() {
+            let _ = fs::remove_dir_all(&staging);
+            eprintln!(
+                "[plugin] 恢复保留数据 {} 失败：{}；保留区原样留存",
+                retention.display(),
+                copied.unwrap_err()
+            );
+            return Some("恢复保留的插件数据失败，数据原样留存于 plugin-data 目录".into());
+        }
+        true
+    };
+    if moved {
+        // rename 路径保留区已整体搬走，无需再删；复制路径才清原目录
+        if retention.exists() {
+            if let Err(e) = fs::remove_dir_all(&retention) {
+                eprintln!("[plugin] 清理已恢复的保留区 {} 失败：{e}", retention.display());
+            }
+        }
+        let _ = fs::remove_dir(retention_base);
+    }
+    None
 }
 
 /// 启用/停用插件（前端先确认权限再启用）。
@@ -1796,6 +1956,74 @@ pub fn plugin_set_enabled(app: AppHandle, id: String, enabled: bool) -> Result<(
             return Err(msg);
         }
         fresh.enabled.remove(&id);
+        Ok(((), true))
+    })
+}
+
+/// 应用插件声明的默认布局（每插件一次性）：
+/// - 标记已记 → 什么都不做（用户删掉该布局后不补；重装插件清掉来源记录后重新提供）；
+/// - 用户任一布局或撕裂窗口已含规格中的任一视图 → 只补标记（用户已自行排布，不再追加）；
+/// - 否则实例化规格追加为布局列表新条目（不激活、不改任何既有布局）。
+/// 检查、追加、补标记在同一命令内完成：多窗口并发声明不会重复追加；「追加后、补标记前崩溃」
+/// 由视图扫描兜底（下次声明时视图已在 → 只补标记），同样不会重复。补标记在前两步之后：
+/// 失败（规格被拒/锁不可得）时不留标记，插件下次声明可重试。
+#[tauri::command]
+pub fn plugin_apply_default_layout(
+    app: AppHandle,
+    id: String,
+    name: String,
+    tree: LayoutSpecNode,
+) -> Result<(), String> {
+    if !plugin_id_valid(&id) {
+        return Err("插件不存在".to_string());
+    }
+    let trimmed = name.trim();
+    if trimmed.is_empty() || trimmed.len() > SPEC_MAX_NAME_BYTES {
+        return Err("默认布局名非法".to_string());
+    }
+    if !layout_spec_valid(&tree) {
+        return Err("默认布局规格非法".to_string());
+    }
+    let _io_guard = PLUGIN_IO_LOCK.lock().map_err(|_| "插件文件忙，请重试".to_string())?;
+    if read_plugin_state(&app)?.default_layout_done.iter().any(|x| x == &id) {
+        return Ok(());
+    }
+    let layout_state = app.state::<LayoutState>();
+    let mut inner = layout_state.inner.lock().map_err(|e| e.to_string())?;
+    // 布局态未从磁盘加载时不落任何改动（与 layout_op 同守卫）：此刻的内存态是默认值，
+    // 写入会被下一次 bootstrap 用磁盘真相覆盖，补标记反而会把「从未应用」记成「已应用」。
+    if !inner.loaded {
+        return Ok(());
+    }
+    let spec_views = layout_spec_views(&tree);
+    let view_in_use = inner.ui.workspace_layouts.iter().any(|l| {
+        let mut tabs = Vec::new();
+        collect_tabs(&l.tree, &mut tabs);
+        tabs.iter().any(|t| spec_views.iter().any(|v| v == &t.view))
+    }) || inner
+        .ui
+        .detached_windows
+        .iter()
+        .flat_map(|w| &w.tabs)
+        .any(|t| spec_views.iter().any(|v| v == &t.view));
+    if !view_in_use {
+        let names: Vec<String> = inner.ui.workspace_layouts.iter().map(|l| l.name.clone()).collect();
+        let layout = WorkspaceLayout {
+            id: nanoid::nanoid!(),
+            name: unique_layout_name(&names, trimmed),
+            tree: instantiate_layout_spec(&tree),
+        };
+        inner.ui.workspace_layouts.push(layout);
+        inner.dirty = true;
+        let ui = inner.ui.clone();
+        drop(inner);
+        schedule_persist(&app, &layout_state);
+        broadcast_layout(&app, &ui);
+    }
+    update_plugin_state(&app, |pstate| {
+        if !pstate.default_layout_done.contains(&id) {
+            pstate.default_layout_done.push(id.clone());
+        }
         Ok(((), true))
     })
 }
@@ -3431,7 +3659,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("package.json"), "{}").unwrap();
 
-        let err = uninstall_dir_transaction(&dir, PluginSourceKind::Market, || {
+        let err = uninstall_dir_transaction(&dir, PluginSourceKind::Market, None, || {
             Err("状态文件写失败".to_string())
         })
         .unwrap_err();
@@ -3451,7 +3679,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let cleared = std::cell::Cell::new(false);
 
-        uninstall_dir_transaction(&dir, PluginSourceKind::Market, || {
+        uninstall_dir_transaction(&dir, PluginSourceKind::Market, None, || {
             cleared.set(true);
             Ok(())
         })
@@ -3460,6 +3688,120 @@ mod tests {
         assert!(cleared.get());
         assert!(!dir.exists());
         assert!(fs::read_dir(&*tmp).unwrap().flatten().next().is_none());
+    }
+
+    #[test]
+    fn uninstall_with_keep_data_moves_data_to_retention() {
+        let tmp = TempDir::new("uninstall-keep");
+        let retention_base = tmp.join("plugin-data");
+        let retention = retention_base.join("com.acme.todo");
+        let dir = tmp.join("com.acme.todo");
+        fs::create_dir_all(dir.join("data")).unwrap();
+        fs::write(dir.join("main.js"), "code").unwrap();
+        fs::write(dir.join("data/state.json"), "user-data").unwrap();
+
+        uninstall_dir_transaction(&dir, PluginSourceKind::Market, Some(&retention), || Ok(()))
+            .unwrap();
+
+        // 目录整删，数据落在保留区按 id 寻址
+        assert!(!dir.exists());
+        assert_eq!(fs::read_to_string(retention.join("state.json")).unwrap(), "user-data");
+        assert!(!retention.join("main.js").exists());
+        assert!(fs::read_dir(&*tmp).unwrap().flatten().all(|e| {
+            !e.file_name().to_string_lossy().starts_with(".rm-")
+        }));
+    }
+
+    #[test]
+    fn uninstall_keep_data_state_failure_restores_data_into_dir() {
+        let tmp = TempDir::new("uninstall-keep-rollback");
+        let retention = tmp.join("plugin-data").join("com.acme.todo");
+        let dir = tmp.join("com.acme.todo");
+        fs::create_dir_all(dir.join("data")).unwrap();
+        fs::write(dir.join("data/state.json"), "user-data").unwrap();
+
+        let err = uninstall_dir_transaction(&dir, PluginSourceKind::Market, Some(&retention), || {
+            Err("状态文件写失败".to_string())
+        })
+        .unwrap_err();
+
+        assert!(err.contains("状态文件写失败"));
+        // 目录与数据都还原原状，可原样重试
+        assert_eq!(fs::read_to_string(dir.join("data/state.json")).unwrap(), "user-data");
+        assert!(!retention.exists());
+    }
+
+    #[test]
+    fn uninstall_keep_data_without_data_dir_retains_nothing() {
+        let tmp = TempDir::new("uninstall-keep-empty");
+        let retention = tmp.join("plugin-data").join("com.acme.todo");
+        let dir = tmp.join("com.acme.todo");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("main.js"), "code").unwrap();
+
+        uninstall_dir_transaction(&dir, PluginSourceKind::Market, Some(&retention), || Ok(()))
+            .unwrap();
+
+        // 无 data 目录 = 无用户数据可保留，保留区不得凭空创建
+        assert!(!dir.exists());
+        assert!(!retention.exists());
+    }
+
+    #[test]
+    fn uninstall_keep_data_replaces_stale_retention_only_after_new_data_landed() {
+        let tmp = TempDir::new("uninstall-keep-stale");
+        let retention = tmp.join("plugin-data").join("com.acme.todo");
+        fs::create_dir_all(&retention).unwrap();
+        fs::write(retention.join("state.json"), "old-data").unwrap();
+        let dir = tmp.join("com.acme.todo");
+        fs::create_dir_all(dir.join("data")).unwrap();
+        fs::write(dir.join("data/state.json"), "new-data").unwrap();
+
+        uninstall_dir_transaction(&dir, PluginSourceKind::Market, Some(&retention), || Ok(()))
+            .unwrap();
+
+        // 新数据落位后旧保留才被清理；旧数据让位是改名而非先删，失败路径可还原
+        assert_eq!(fs::read_to_string(retention.join("state.json")).unwrap(), "new-data");
+        let parent = retention.parent().unwrap();
+        assert!(fs::read_dir(parent).unwrap().flatten().all(|e| {
+            !e.file_name().to_string_lossy().ends_with(".old")
+        }));
+    }
+
+    #[test]
+    fn restore_retained_data_moves_back_into_fresh_dir() {
+        let tmp = TempDir::new("restore-retained");
+        let retention_base = tmp.join("plugin-data");
+        let retention = retention_base.join("com.acme.todo");
+        fs::create_dir_all(&retention).unwrap();
+        fs::write(retention.join("state.json"), "user-data").unwrap();
+        let target = tmp.join("fresh");
+        fs::create_dir_all(&target).unwrap();
+
+        let warning = restore_retained_data(&retention_base, "com.acme.todo", &target);
+
+        assert!(warning.is_none());
+        assert_eq!(fs::read_to_string(target.join("data/state.json")).unwrap(), "user-data");
+        assert!(!retention.exists());
+    }
+
+    #[test]
+    fn restore_retained_data_keeps_retention_when_target_has_data() {
+        let tmp = TempDir::new("restore-retained-conflict");
+        let retention_base = tmp.join("plugin-data");
+        let retention = retention_base.join("com.acme.todo");
+        fs::create_dir_all(&retention).unwrap();
+        fs::write(retention.join("state.json"), "user-data").unwrap();
+        let target = tmp.join("fresh");
+        fs::create_dir_all(target.join("data")).unwrap();
+        fs::write(target.join("data/state.json"), "packaged").unwrap();
+
+        let warning = restore_retained_data(&retention_base, "com.acme.todo", &target);
+
+        // 目标已有 data 目录（包自带或并发安装）：保留区原样留存，警示可见，数据不丢
+        assert!(warning.is_some());
+        assert_eq!(fs::read_to_string(retention.join("state.json")).unwrap(), "user-data");
+        assert_eq!(fs::read_to_string(target.join("data/state.json")).unwrap(), "packaged");
     }
 
     #[test]

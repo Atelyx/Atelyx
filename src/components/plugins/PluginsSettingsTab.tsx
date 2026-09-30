@@ -17,6 +17,7 @@ import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 import { Menu, MenuItem } from "@/components/common/Menu";
 import { ToggleSwitch } from "@/components/common/ToggleSwitch";
 import { PluginDetailsDialog } from "@/components/plugins/PluginDetailsDialog";
+import { PluginUninstallDialog } from "@/components/plugins/PluginUninstallDialog";
 import { MarketplaceSection } from "@/components/plugins/MarketplaceSection";
 import { SlotConflictPanel } from "@/components/plugins/SlotConflictPanel";
 import { DEFAULT_COMPOSITION } from "@/components/plugins/cordis/builtins";
@@ -87,7 +88,9 @@ export function PluginsSettingsTab() {
     try {
       const done = await action();
       if (done !== false) {
-        setNotice({ kind: "ok", text: okText });
+        // 安装结果的警示（如保留数据未完整恢复）优先于成功文案，不能被成功提示吞掉
+        const warning = (done as PluginInstallResult | undefined)?.warning;
+        setNotice({ kind: warning ? "error" : "ok", text: warning ?? okText });
         onOk?.();
       }
     } catch (e) {
@@ -414,7 +417,25 @@ export function PluginsSettingsTab() {
         />
       )}
 
-      {confirmUninstall && (
+      {confirmUninstall && (plugins[confirmUninstall]?.installDir !== "" && plugins[confirmUninstall]?.sourceKind !== "local" ? (
+        // 有落位目录的仓库/Git 来源：三选一（保留配置卸载为默认；本地链接行数据在源目录内、
+        // 随应用分发行无磁盘数据，两者卸载不涉及保留问题，维持确认/取消）
+        <PluginUninstallDialog
+          title={`卸载插件「${plugins[confirmUninstall]?.manifest.name ?? confirmUninstall}」`}
+          description="卸载后插件贡献的功能随即移除。保留配置卸载会把插件数据搬到保留区，重装同 id 插件时自动恢复；彻底卸载则连同数据一并删除、不可恢复。"
+          onKeepData={() => {
+            const id = confirmUninstall;
+            setConfirmUninstall(null);
+            void uninstall(id, true).catch((e) => setNotice({ kind: "error", text: errText(e) }));
+          }}
+          onDeleteAll={() => {
+            const id = confirmUninstall;
+            setConfirmUninstall(null);
+            void uninstall(id, false).catch((e) => setNotice({ kind: "error", text: errText(e) }));
+          }}
+          onCancel={() => setConfirmUninstall(null)}
+        />
+      ) : (
         <ConfirmDialog
           title={`卸载插件「${plugins[confirmUninstall]?.manifest.name ?? confirmUninstall}」`}
           description={
@@ -422,9 +443,7 @@ export function PluginsSettingsTab() {
               ? isThemePluginRow(plugins[confirmUninstall]!)
                 ? "将移除该默认主题插件（实现随应用编译；可经「恢复默认装配」装回）。主题随即切回剩余的主题插件。"
                 : "将移除该默认插件（实现随应用编译；可经「恢复默认装配」装回）。其视图随即从工作区移除。"
-              : plugins[confirmUninstall]?.sourceKind === "local"
-                ? "将移除该插件的目录链接，本地源目录本身不受影响。插件贡献的功能随即移除。"
-                : "将删除插件目录与本地状态，插件贡献的功能随即移除。此操作不可撤销。"
+              : "将移除该插件的目录链接，本地源目录本身不受影响。插件贡献的功能随即移除。"
           }
           confirmText="卸载"
           onConfirm={() => {
@@ -434,7 +453,7 @@ export function PluginsSettingsTab() {
           }}
           onCancel={() => setConfirmUninstall(null)}
         />
-      )}
+      ))}
 
       {(pendingLocalPath || pendingGitUrl) && (
         <ConfirmDialog

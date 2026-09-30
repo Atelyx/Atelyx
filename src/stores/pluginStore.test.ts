@@ -17,6 +17,7 @@ vi.mock("@/services/plugins", () => ({
   pluginUninstall: vi.fn(async () => {}),
   pluginUpdate: vi.fn(),
   pluginRollback: vi.fn(),
+  pluginApplyDefaultLayout: vi.fn(async () => {}),
   onPluginChanged: vi.fn(async () => () => {}),
 }));
 
@@ -342,7 +343,8 @@ describe("安装收尾的宿主兼容强制", () => {
     vi.mocked(pluginInstall).mockResolvedValueOnce(installedRow("com.test.constrained", raw) as never);
 
     await expect(usePluginStore.getState().install("com/example")).rejects.toThrow("999");
-    expect(pluginUninstall).toHaveBeenCalledWith("com.test.constrained");
+    // 回滚卸载保留数据：安装命令可能已把保留区数据搬回新目录的 data/，直接删会丢用户数据
+    expect(pluginUninstall).toHaveBeenCalledWith("com.test.constrained", true);
   });
 
   it("宿主版本读取失败 → 不安装（fail-closed），回滚并给出可读错误", async () => {
@@ -356,7 +358,7 @@ describe("安装收尾的宿主兼容强制", () => {
     vi.mocked(pluginInstall).mockResolvedValueOnce(installedRow("com.test.noversion", raw) as never);
 
     await expect(usePluginStore.getState().install("com/example")).rejects.toThrow("宿主版本");
-    expect(pluginUninstall).toHaveBeenCalledWith("com.test.noversion");
+    expect(pluginUninstall).toHaveBeenCalledWith("com.test.noversion", true);
   });
 });
 

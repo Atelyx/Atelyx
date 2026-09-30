@@ -73,7 +73,12 @@ export function MarketplaceSection() {
       const enableNote = result.replaced
         ? "已替代同名行，沿用其原启用状态"
         : "默认未启用，到「已安装」tab 启用";
-      setNotice({ kind: "ok", text: `已安装 ${repo}${idNote}：${enableNote}` });
+      // 保留数据恢复等非致命警示优先于成功文案，不能被成功提示吞掉
+      setNotice(
+        result.warning
+          ? { kind: "error", text: result.warning }
+          : { kind: "ok", text: `已安装 ${repo}${idNote}：${enableNote}` },
+      );
     } catch (e) {
       setNotice({ kind: "error", text: `安装失败：${e instanceof Error ? e.message : String(e)}` });
     } finally {

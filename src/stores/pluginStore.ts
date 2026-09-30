@@ -37,6 +37,7 @@ import {
   pluginRollback,
   pluginRebuildLocal,
   onPluginChanged,
+  pluginApplyDefaultLayout,
 } from "@/services/plugins";
 import {
   getPluginAppPages,
@@ -170,8 +171,9 @@ interface PluginStoreState {
   pickLocalPluginDir(): Promise<string | null>;
   /** 从 git 地址安装（git clone，保留 .git 供更新）。 */
   installGit(url: string): Promise<PluginInstallResult>;
-  /** 卸载（删除目录/链接 + 终止运行时 + 清理状态）。 */
-  uninstall(id: string): Promise<void>;
+  /** 卸载（删除目录/链接 + 终止运行时 + 清理状态）；keepData 为真时保留插件数据
+   *  （搬到保留区，重装同 id 自动恢复；本地链接来源忽略——源目录数据不受卸载影响）。 */
+  uninstall(id: string, keepData?: boolean): Promise<void>;
   /** 启用/停用（启用 = 拉起运行时；停用 = 终止运行时）。 */
   setEnabled(id: string, enabled: boolean): Promise<void>;
   /** 更新（保留一代旧代码；成功则重载运行时）。 */
@@ -222,10 +224,12 @@ interface PluginStoreState {
   viewProviderState(kind: string): ViewProviderState | undefined;
 }
 
-/** 安装结果：`id` = 包内清单声明的实际落位 id（可能不同于市场索引 id），`replaced` = 是否替代了同名既有行。 */
+/** 安装结果：`id` = 包内清单声明的实际落位 id（可能不同于市场索引 id），`replaced` = 是否替代了同名既有行，
+ *  `warning` = 非致命警示（如保留数据未完整恢复；数据留在保留区）。 */
 export interface PluginInstallResult {
   id: string;
   replaced: boolean;
+  warning?: string;
 }
 
 /** 列表行 → store 条目（清单经前端校验归一化；清单无效或同 id 冲突的行标为失败且
@@ -327,8 +331,9 @@ async function finishInstall(get: () => PluginStoreState, row: PluginRow): Promi
     const compat = packageCompatibleWithHost(row.manifest, hostVersion, detectPlatform());
     if (!compat.ok) throw new Error(`无法安装：${compat.reason}`);
   } catch (e) {
-    // 补偿卸载失败不能静默——否则会把「已完整回滚」伪装成成功；安装错误本身仍由外层 throw 抛给调用方
-    await pluginUninstall(row.id).catch((rollbackError) => {
+    // 补偿卸载失败不能静默——否则会把「已完整回滚」伪装成成功；安装错误本身仍由外层 throw 抛给调用方。
+    // 保留数据卸载：此刻保留区可能已搬回新目录的 data/（安装命令提交后才搬回），再删就是丢用户数据。
+    await pluginUninstall(row.id, true).catch((rollbackError) => {
       console.error("安装兼容检查失败后回滚插件失败", rollbackError);
     });
     throw e;
@@ -449,6 +454,19 @@ function ensureLayoutAccess(): void {
     layouts: () => useUiStateStore.getState().workspaceLayouts,
     addView: (panelId, view) => layoutOp({ op: "addView", panelId, view }),
     op: (op) => layoutOp(op),
+    // 默认布局应用失败不阻断插件其余注册，但要用户可见（数据面之外的布局诉求落空）
+    applyDefaultLayout: async (pluginId, spec) => {
+      try {
+        await pluginApplyDefaultLayout(pluginId, spec.name, spec.tree);
+      } catch (e) {
+        console.error("应用插件默认布局失败", e);
+        useNotificationStore.getState().notify({
+          level: "warning",
+          title: "插件默认布局未生效",
+          message: errText(e),
+        });
+      }
+    },
   });
 }
 
@@ -738,14 +756,14 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
       await finishInstall(get, row);
       // 替换判定按「包内实际 id」对安装前快照比对：市场索引 id 与包内 name 不一致时，
       // 只认后者才能如实提示被替代的行
-      return { id: row.id, replaced: before.has(row.id) };
+      return { id: row.id, replaced: before.has(row.id), warning: row.warning };
     },
 
     installLocal: async (path) => {
       const before = new Set(Object.keys(get().plugins));
       const row = await pluginInstallLocal(path);
       await finishInstall(get, row);
-      return { id: row.id, replaced: before.has(row.id) };
+      return { id: row.id, replaced: before.has(row.id), warning: row.warning };
     },
 
     pickLocalPluginDir: async () => pickDirectorySvc(),
@@ -763,15 +781,15 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
       const before = new Set(Object.keys(get().plugins));
       const row = await pluginInstall(gitRef);
       await finishInstall(get, row);
-      return { id: row.id, replaced: before.has(row.id) };
+      return { id: row.id, replaced: before.has(row.id), warning: row.warning };
     },
 
-    uninstall: async (id) => {
+    uninstall: async (id, keepData) => {
       const p = get().plugins[id];
       if (!p) return;
       // Rust 先行（含守恒校验等拒绝路径）：失败抛错时本地运行时保持完好、状态一致；
       // 成功后再终止运行时与贡献、删除 store 行（默认组合成员卸载后仍在列表中成灰行）。
-      await pluginUninstall(id);
+      await pluginUninstall(id, keepData);
       await stopPlugin(id);
       set((s) => {
         const plugins = { ...s.plugins };

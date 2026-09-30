@@ -187,6 +187,7 @@ pub fn run() {
             commands::plugin::plugin_install_local,
             commands::plugin::plugin_uninstall,
             commands::plugin::plugin_set_enabled,
+            commands::plugin::plugin_apply_default_layout,
             commands::plugin::plugin_seed_default,
             commands::plugin::plugin_update,
             commands::plugin::plugin_rollback,
