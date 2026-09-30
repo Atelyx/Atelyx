@@ -803,7 +803,9 @@ pub(crate) fn list_dir_entries(dir: &Path, max: usize, skip_hidden: bool) -> Res
         let (size, children) = if is_dir {
             (None, Some(count_children(&entry.path(), skip_hidden)))
         } else {
-            (entry.metadata().ok().map(|md| md.len()), None)
+            // 大小必须走 fs::metadata（GetFileAttributesExW）：DirEntry::metadata() 读的是目录枚举快照，
+            // Windows 上对「正被其它进程打开写入」的文件是懒更新的，会一直停在创建时的值（常见为 0）。
+            (std::fs::metadata(entry.path()).ok().map(|md| md.len()), None)
         };
         entries.push(ListDirEntry {
             name,
