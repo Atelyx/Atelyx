@@ -26,7 +26,6 @@
 | lib0 | MIT |
 | lucide-react | ISC |
 | react / react-dom | MIT |
-| react-resizable-panels | MIT |
 | y-codemirror.next / y-protocols / yjs | MIT |
 | zustand | MIT |
 | @standard-schema/spec | MIT |
