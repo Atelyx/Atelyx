@@ -4,6 +4,8 @@ RUN apk add --no-cache musl-dev
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+# 管理台页面在编译期嵌入（src/webui.rs 的 include_str!），构建阶段必须可见
+COPY assets ./assets
 RUN cargo build --release
 
 # 运行阶段（最小 alpine，单二进制 ~5MB）

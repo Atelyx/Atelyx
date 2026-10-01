@@ -2562,6 +2562,106 @@ async fn admin_spaces_list_all_with_sizes() {
     assert_eq!(status, 401);
 }
 
+/// 服务日志端点：仅管理员可读（未登录 401 / 非管理员 403，实时流同口径）；
+/// 级别参数非法即 400，limit 越界被夹取不报错。
+#[tokio::test]
+async fn admin_logs_endpoint_guards_access() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let a = register(&ctx, "alice").await;
+    let b = register(&ctx, "bob").await;
+
+    let (status, body) = ctx.get("/api/admin/logs", Some(&a), &[]).await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body["entries"].is_array(), "应返回日志窗口：{body}");
+    assert!(body["latest"].is_u64() && body["first"].is_u64(), "应回报游标边界：{body}");
+
+    let (status, body) = ctx.get("/api/admin/logs", Some(&a), &[("level", "warn")]).await;
+    assert_eq!(status, 200, "合法级别应放行：{body}");
+    let (status, body) = ctx.get("/api/admin/logs", Some(&a), &[("level", "verbose")]).await;
+    assert_eq!(status, 400, "非法级别应 400：{body}");
+    let (status, body) = ctx.get("/api/admin/logs", Some(&a), &[("limit", "0")]).await;
+    assert_eq!(status, 200, "limit 越界应夹取而非报错：{body}");
+
+    for path in ["/api/admin/logs", "/api/admin/logs/stream"] {
+        let (status, _) = ctx.get(path, Some(&b), &[]).await;
+        assert_eq!(status, 403, "{path} 非管理员应 403");
+        let (status, _) = ctx.get(path, None, &[]).await;
+        assert_eq!(status, 401, "{path} 未登录应 401");
+    }
+}
+
+/// 服务日志采集与实时流：注册等操作产生的 tracing 事件可经窗口端点读回，
+/// 实时流按 SSE 帧逐条下发（帧负载即日志条目）。
+#[tokio::test]
+async fn admin_logs_capture_and_stream() {
+    ensure_log_capture();
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let a = register(&ctx, "alice").await;
+
+    let (status, body) = ctx.get("/api/admin/logs", Some(&a), &[("level", "info")]).await;
+    assert_eq!(status, 200, "{body}");
+    let entries = body["entries"].as_array().unwrap();
+    assert!(!entries.is_empty(), "应采集到服务端已产生的事件：{body}");
+    let entry = &entries[entries.len() - 1];
+    assert!(entry["seq"].as_u64().unwrap() > 0);
+    assert!(entry["ts"].as_i64().unwrap() > 0);
+    let level = entry["level"].as_str().unwrap();
+    assert!(["info", "warn", "error"].contains(&level), "info 下限不应出现更低级别：{level}");
+    assert!(!entry["message"].as_str().unwrap().is_empty());
+
+    // 实时流：先建流，再触发一条日志，读取到对应 SSE 帧
+    let resp = ctx
+        .http
+        .get(format!("{}/api/admin/logs/stream?level=info", ctx.base))
+        .bearer_auth(&a)
+        .send()
+        .await
+        .expect("连接日志流失败");
+    assert_eq!(resp.status(), 200);
+    let ctype = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or_default();
+    assert!(ctype.starts_with("text/event-stream"), "应按 SSE 返回：{ctype}");
+    let mut stream = resp.bytes_stream();
+    let (status, _) = ctx.post("/api/spaces", Some(&a), json!({ "name": "日志流空间" })).await;
+    assert_eq!(status, 200);
+
+    let mut buf = String::new();
+    let mut frame: Option<Value> = None;
+    while frame.is_none() {
+        let chunk = tokio::time::timeout(Duration::from_secs(5), stream.next())
+            .await
+            .expect("等待日志帧超时")
+            .expect("日志流意外结束")
+            .expect("日志流读取失败");
+        buf.push_str(&String::from_utf8_lossy(&chunk));
+        while let Some(end) = buf.find("\n\n") {
+            let raw = buf[..end].to_string();
+            buf = buf[end + 2..].to_string();
+            // 只认 data 帧（keep-alive 是注释帧，首个完整帧之前的半截帧解析失败即跳过）
+            if let Some(rest) = raw.strip_prefix("data:") {
+                if let Ok(v) = serde_json::from_str::<Value>(rest.trim()) {
+                    frame = Some(v);
+                    break;
+                }
+            }
+        }
+    }
+    let frame = frame.unwrap();
+    assert!(frame["seq"].as_u64().unwrap() > 0, "帧应带序号：{frame}");
+    assert!(!frame["message"].as_str().unwrap().is_empty(), "帧应带消息：{frame}");
+}
+
+/// 采集层挂在进程级订阅器上：日志事件默认被丢弃，测试里挂一次才能验证采集与流式下发。
+fn ensure_log_capture() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::util::SubscriberInitExt;
+        let _ = tracing_subscriber::registry().with(collab_relay::logs::layer()).try_init();
+    });
+}
+
 /// 管理台页面安全响应头：CSP 最小集 + nosniff + DENY + no-referrer。
 #[tokio::test]
 async fn webui_page_sends_security_headers() {

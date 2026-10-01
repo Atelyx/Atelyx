@@ -30,7 +30,8 @@ dunce = "1"
 base64 = "0.22"
 
 [dev-dependencies]
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# stream：集成测试需按帧读取 SSE 响应体（日志实时流）
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 tokio-tungstenite = "0.24"
 tempfile = "3"
 rcgen = "0.13"

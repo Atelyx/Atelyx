@@ -1,17 +1,24 @@
-//! 服务器管理员端点：运行状态、全服用户与空间视图、重置密码与吊销会话。
+//! 服务器管理员端点：运行状态、服务日志、全服用户与空间视图、重置密码与吊销会话。
 //!
 //! 管理员认定：用户数组首位（注册按序追加且无重排，首位即最早注册的账号），派生
 //! 判定不落字段。管理员能力只覆盖账号处置与全服只读视图，不放宽空间内部的角色
 //! 校验（owner/editor/viewer 照常生效）。账号处置仅「重置密码」与「吊销会话」，
 //! 不提供删除/禁用账号与删除空间——数据处置须有完整的连带规则，当前服务端不做。
 
-use axum::extract::{Path, State};
+use std::collections::VecDeque;
+use std::convert::Infallible;
+
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::Json;
+use futures_util::stream::{self, Stream};
 use serde::Deserialize;
 use serde_json::json;
+use tokio::sync::broadcast;
 
 use crate::auth::{self, AuthUser};
+use crate::logs::{self, LogEntry};
 use crate::state::{Persisted, ServerState};
 use crate::{ApiError, ApiResult};
 
@@ -45,6 +52,97 @@ pub async fn server_status(
         "onlineConnections": online,
         "isAdmin": admin,
     })))
+}
+
+#[derive(Deserialize)]
+pub struct LogsQuery {
+    /// 只返回序号大于它的条目（实时增量；缺省取最新窗口）。
+    after: Option<u64>,
+    /// 返回条数上限（缺省 300，最大 2000 = 缓冲容量）。仅窗口端点使用；
+    /// 实时流固定按上限分批取，不受此参数影响。
+    limit: Option<usize>,
+    /// 级别下限（trace/debug/info/warn/error，缺省不限）。
+    level: Option<String>,
+}
+
+/// 级别过滤参数 → 级别序号；非法取值即拒绝（静默按默认值会让人以为过滤生效了）。
+fn parse_level(level: &Option<String>) -> Result<usize, ApiError> {
+    match level.as_deref() {
+        None => Ok(0),
+        Some(name) => logs::level_index(name).ok_or_else(|| {
+            ApiError(StatusCode::BAD_REQUEST, "level 取值须为 trace/debug/info/warn/error".to_string())
+        }),
+    }
+}
+
+/// 服务日志窗口（管理员）：进程内采集缓冲，按游标增量取或取最新若干条。
+/// 采集范围由服务端 `RUST_LOG` 决定，级别下限只是在此之上的再过滤。
+pub async fn query_logs(
+    State(state): State<ServerState>,
+    user: AuthUser,
+    Query(q): Query<LogsQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(&state, &user)?;
+    let min_level = parse_level(&q.level)?;
+    let limit = q.limit.unwrap_or(logs::DEFAULT_LIMIT).clamp(1, logs::MAX_LIMIT);
+    let page = logs::query(q.after, min_level, limit);
+    Ok(Json(json!({
+        "latest": page.latest,
+        "first": page.first,
+        "entries": page.entries,
+    })))
+}
+
+/// 日志实时流（管理员）：SSE，每条事件一个日志条目。
+///
+/// 条目内容一律按游标从采集缓冲读取，订阅到的信号只用于唤醒——因此信号合并、
+/// 订阅端落后都不会丢条目（缓冲容量内的条目必达，更早的被环覆盖属预期）。
+pub async fn stream_logs(
+    State(state): State<ServerState>,
+    user: AuthUser,
+    Query(q): Query<LogsQuery>,
+) -> ApiResult<Sse<impl Stream<Item = Result<Event, Infallible>>>> {
+    require_admin(&state, &user)?;
+    let min_level = parse_level(&q.level)?;
+    // 先订阅再读缓冲：订阅之后写入的条目一定能被唤醒取到，事件流首尾不空档
+    let rx = logs::subscribe();
+    let pending: VecDeque<LogEntry> =
+        logs::query(q.after, min_level, logs::MAX_LIMIT).entries.into();
+    let stream = stream::unfold(
+        LogStream { rx, min_level, last_seq: q.after.unwrap_or(0), pending },
+        |mut st| async move {
+            loop {
+                if let Some(entry) = st.pending.pop_front() {
+                    st.last_seq = entry.seq;
+                    return Some((Ok(log_event(&entry)), st));
+                }
+                // 缓冲追赶（含落后于信号后的补取）：游标之后还有条目就继续发
+                st.pending =
+                    logs::query(Some(st.last_seq), st.min_level, logs::MAX_LIMIT).entries.into();
+                if !st.pending.is_empty() {
+                    continue;
+                }
+                match st.rx.recv().await {
+                    Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => return None,
+                }
+            }
+        },
+    );
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+struct LogStream {
+    rx: broadcast::Receiver<()>,
+    min_level: usize,
+    /// 已发出条目的最大序号（下次从它之后取）。
+    last_seq: u64,
+    pending: VecDeque<LogEntry>,
+}
+
+/// 条目 → SSE 事件。条目是标量字段结构体，序列化不会失败。
+fn log_event(entry: &LogEntry) -> Event {
+    Event::default().json_data(entry).expect("日志条目序列化不应失败")
 }
 
 /// 全服用户列表（管理员）：账号信息 + 会话数 + 参与空间数。不含任何哈希与令牌材料。

@@ -15,6 +15,7 @@ pub mod dated_notes;
 pub mod fsops;
 pub mod history;
 pub mod index;
+pub mod logs;
 pub mod meta;
 pub mod patches;
 pub mod space_ws;
@@ -50,6 +51,9 @@ pub fn build_app(state: ServerState) -> Router {
         .route("/api/admin/users/{user_id}/reset-password", post(admin::reset_password))
         .route("/api/admin/users/{user_id}/sessions", delete(admin::revoke_user_sessions))
         .route("/api/admin/spaces", get(admin::list_spaces))
+        // 服务日志（进程内采集缓冲；窗口读取 + SSE 实时流）
+        .route("/api/admin/logs", get(admin::query_logs))
+        .route("/api/admin/logs/stream", get(admin::stream_logs))
         // 账号
         .route("/api/auth/register", post(auth::register))
         .route("/api/auth/login", post(auth::login))

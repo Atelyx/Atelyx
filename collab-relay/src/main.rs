@@ -6,7 +6,8 @@
 //! - `TLS_CERT` + `TLS_KEY`：PEM 证书与私钥路径，二者齐备即启 HTTPS/WSS（缺省明文 HTTP，
 //!   供本地开发与测试；局域网跨进程传密码应启用 TLS）
 //!
-//! 日志：tracing 结构化输出（stderr / `docker logs`）。级别由 `RUST_LOG` 控制（默认 info），
+//! 日志：tracing 结构化输出（stderr / `docker logs`），同时经采集层写入进程内环形缓冲
+//! （管理台「服务日志」面板读取，重启清空）。级别由 `RUST_LOG` 控制（默认 info），
 //! `LOG_FORMAT=json` 切 JSON 行输出便于采集。
 
 use std::path::PathBuf;
@@ -43,16 +44,27 @@ fn main() {
 
 /// 日志初始化：RUST_LOG 控制级别（默认 info），非 TTY（Docker）自动去 ANSI 颜色，
 /// `LOG_FORMAT=json` 切 JSON 行输出便于采集。
+///
+/// 两级出口：控制台照旧输出，同时经采集层写入进程内环形缓冲（管理台「服务日志」
+/// 面板读取；重启清空，不落磁盘）。因此面板可见范围 = RUST_LOG 放行的范围。
 fn init_logging() {
     use std::io::IsTerminal;
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let logs_layer = collab_relay::logs::layer();
     if std::env::var("LOG_FORMAT").as_deref() == Ok("json") {
-        tracing_subscriber::fmt().json().with_env_filter(filter).init();
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(logs_layer)
+            .with(tracing_subscriber::fmt::layer().json())
+            .init();
     } else {
-        tracing_subscriber::fmt()
-            .with_ansi(std::io::stderr().is_terminal())
-            .with_env_filter(filter)
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(logs_layer)
+            .with(tracing_subscriber::fmt::layer().with_ansi(std::io::stderr().is_terminal()))
             .init();
     }
 }
