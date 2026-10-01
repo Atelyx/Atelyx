@@ -16,9 +16,7 @@
 Atelyx 是一款以人为本的可拓展桌面工作台：对话、笔记、表格、文件在同一工作台；自建服务端即可开启多人实时协作。应用本体是极薄的内核，对话、笔记、表格、画布、搜索、日历等功能由随应用分发的插件实现，可停用、可被第三方插件替换——目标是探索 AI 时代协作与工作的新范式。
 </p>
 
-<span style="background:#D4AF37;color:#1C1C1E;border-radius:999px;padding:4px 18px;font-size:13px;font-weight:700;margin:0 4px">Windows</span>
-<span style="border:1px solid #5a5a5e;color:#9a9a9e;border-radius:999px;padding:3px 17px;font-size:13px;font-weight:600;margin:0 4px">Linux · Wayland</span>
-<span style="border:1px solid #5a5a5e;color:#9a9a9e;border-radius:999px;padding:3px 17px;font-size:13px;font-weight:600;margin:0 4px">Apache-2.0</span>
+<span style="background:#D4AF37;color:#1C1C1E;border-radius:999px;padding:4px 18px;font-size:13px;font-weight:700;margin:0 4px">Windows</span> <span style="border:1px solid #5a5a5e;color:#9a9a9e;border-radius:999px;padding:3px 17px;font-size:13px;font-weight:600;margin:0 4px">Linux · Wayland</span> <span style="border:1px solid #5a5a5e;color:#9a9a9e;border-radius:999px;padding:3px 17px;font-size:13px;font-weight:600;margin:0 4px">Apache-2.0</span>
 
 </div>
 
@@ -48,10 +46,10 @@ Atelyx 是一款以人为本的可拓展桌面工作台：对话、笔记、表�
 
 从 [GitHub Releases](https://github.com/Atelyx/Atelyx/releases) 下载对应平台安装包：
 
-| 平台 | 安装包 |
-| --- | --- |
-| Windows 10/11（x64） | `.exe` 安装包（支持应用内自动更新） |
-| Linux（Wayland 原生，兼容 X11） | 源码构建 |
+| 平台                       | 安装包                   |
+| ------------------------ | --------------------- |
+| Windows 10/11（x64）       | `.exe` 安装包（支持应用内自动更新） |
+| Linux（Wayland 原生，兼容 X11） | 源码构建                  |
 
 前置要求：Node.js 20.19+、pnpm 10、Rust（stable）、Tauri 2 系统依赖（见 [Tauri 官方文档](https://v2.tauri.app/start/prerequisites/)）。从源码构建见下文「开发命令」。
 
@@ -63,7 +61,7 @@ Atelyx 是一款以人为本的可拓展桌面工作台：对话、笔记、表�
 pnpm install         # 安装前端依赖
 pnpm run tauri:dev   # 启动桌面开发（自动开 Vite + Tauri 窗口）
 pnpm run tauri:build # 桌面打包
-pnpm tauri android build --target aarch64 --debug   # Android APK（aarch64 真机包）
+pnpm tauri android build # Android APK
 pnpm run check       # 完整门禁：类型检查 + ESLint + 前端测试 + cargo test
 ```
 

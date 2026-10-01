@@ -63,7 +63,7 @@ Building the Android version additionally requires JDK 21, the Android SDK (plat
 pnpm install         # install frontend dependencies
 pnpm run tauri:dev   # start desktop dev (Vite + Tauri window)
 pnpm run tauri:build # build desktop installers
-pnpm tauri android build --target aarch64 --debug   # Android APK (aarch64 device build)
+pnpm tauri android build # Android APK
 pnpm run check       # full gate: typecheck + ESLint + frontend tests + cargo test
 ```
 
