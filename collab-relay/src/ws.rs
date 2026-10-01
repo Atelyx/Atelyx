@@ -51,20 +51,48 @@ impl Hub {
         self.0.lock().unwrap().values().map(|room| room.peers.len()).sum()
     }
 
-    /// 断开属于给定设备会话的全部实时连接（吊销会话/重置密码后调用）：
-    /// 对命中连接置踢信号，由连接自身投递失效帧并走离场收尾。返回命中连接数。
-    pub(crate) fn kick_sessions(&self, session_ids: &[String]) -> usize {
+    /// 断开属于给定设备会话的实时连接（吊销会话/重置密码/移出空间后调用）：
+    /// `room_id` 有值 = 只踢该房间（移出空间只断本空间连接，同会话在其他空间的连接不受影响）；
+    /// 对命中连接置踢信号与原因，由连接自身投递失效帧并走离场收尾。返回命中连接数。
+    pub(crate) fn kick_sessions(
+        &self,
+        room_id: Option<&str>,
+        session_ids: &[String],
+        reason: KickReason,
+    ) -> usize {
         let mut kicked = 0;
         let rooms = self.0.lock().unwrap();
-        for room in rooms.values() {
+        for (id, room) in rooms.iter() {
+            if let Some(want) = room_id {
+                if id != want {
+                    continue;
+                }
+            }
             for peer in room.peers.values() {
                 if session_ids.contains(&peer.session_id) {
-                    let _ = peer.kick_tx.send(true);
+                    let _ = peer.kick_tx.send(Some(reason));
                     kicked += 1;
                 }
             }
         }
         kicked
+    }
+}
+
+/// 踢连接原因：决定下发给被踢端的失效帧文案——会话失效与被移出空间不是同一件事，
+/// 用同一句话会让被移除者以为自己的登录出了问题。
+#[derive(Clone, Copy)]
+pub(crate) enum KickReason {
+    SessionRevoked,
+    SpaceMemberRemoved,
+}
+
+impl KickReason {
+    fn message(self) -> &'static str {
+        match self {
+            KickReason::SessionRevoked => "登录状态已失效，连接已断开",
+            KickReason::SpaceMemberRemoved => "你已不在该空间，连接已断开",
+        }
     }
 }
 
@@ -138,8 +166,8 @@ struct PeerEntry {
     tx: broadcast::Sender<WireFrame>,
     /// 所属设备会话（Hub::kick_sessions 按此匹配踢连接；不进 peers 快照广播）。
     session_id: String,
-    /// 踢连接信号：置 true 即断开该连接（会话被吊销/重置密码时由管理端点触发）。
-    kick_tx: watch::Sender<bool>,
+    /// 踢连接信号（Some = 原因）：会话被吊销/移出空间时由 Hub 触发。
+    kick_tx: watch::Sender<Option<KickReason>>,
 }
 
 /// 单连接收发计数（离场随总结日志输出，用于定位流量异常/刷屏客户端）。
@@ -532,11 +560,13 @@ pub(crate) async fn run_room_connection(
 ) {
     let (mut sink, mut stream) = socket.split();
     let started_at = Instant::now();
-    // 踢连接信号（会话被吊销时 Hub::kick_sessions 置 true）
-    let (kick_tx, mut kick_rx) = watch::channel(false);
-    let kick_frame = WireFrame::Text(Arc::new(
-        serde_json::json!({ "type": "error", "message": "登录状态已失效，连接已断开" }).to_string(),
-    ));
+    // 踢连接信号（会话被吊销/移出空间时由 Hub::kick_sessions 置原因）
+    let (kick_tx, mut kick_rx) = watch::channel::<Option<KickReason>>(None);
+    let kick_frame = |reason: KickReason| {
+        WireFrame::Text(Arc::new(
+            serde_json::json!({ "type": "error", "message": reason.message() }).to_string(),
+        ))
+    };
 
     let peer_id = NEXT_PEER_ID.fetch_add(1, Ordering::Relaxed);
     let mut stats = ConnStats::default();
@@ -613,7 +643,7 @@ pub(crate) async fn run_room_connection(
     // 连接），此处回查补上这一窗口；入房之后的吊销由踢信号（watch）覆盖，两段合起来无空档
     let mut kicked = !session_alive(&session_id);
     if kicked {
-        let _ = btx.send(kick_frame.clone());
+        let _ = btx.send(kick_frame(KickReason::SessionRevoked));
     }
 
     // 消息循环：30s 无消息（心跳超时）断开；会话被吊销时投递失效帧后断开
@@ -621,13 +651,13 @@ pub(crate) async fn run_room_connection(
         let recv = tokio::select! {
             r = tokio::time::timeout(HEARTBEAT_TIMEOUT, stream.next()) => r,
             _ = kick_rx.changed() => {
-                if *kick_rx.borrow_and_update() {
+                if let Some(reason) = *kick_rx.borrow_and_update() {
                     // 失效帧经自身广播通道投递（发送任务负责写 socket），随后走离场收尾
-                    let _ = btx.send(kick_frame.clone());
+                    let _ = btx.send(kick_frame(reason));
                     kicked = true;
                     break;
                 }
-                // 非踢信号（防御性：发送方只写 true），继续等消息
+                // 非踢信号（防御性：发送方只写 Some），继续等消息
                 continue;
             }
         };
@@ -1112,7 +1142,7 @@ mod tests {
             presence: None,
             tx,
             session_id: session.to_string(),
-            kick_tx: watch::channel(false).0,
+            kick_tx: watch::channel(None).0,
         };
         let (tx_a, mut rx_a) = broadcast::channel::<WireFrame>(16);
         let (tx_b, mut rx_b) = broadcast::channel::<WireFrame>(16);

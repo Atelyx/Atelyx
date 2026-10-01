@@ -20,6 +20,7 @@ use tokio::sync::broadcast;
 use crate::auth::{self, AuthUser};
 use crate::logs::{self, LogEntry};
 use crate::state::{Persisted, ServerState};
+use crate::ws::KickReason;
 use crate::{ApiError, ApiResult};
 
 /// 调用方是否为服务器管理员（用户数组首位 = 最早注册的账号）。
@@ -211,7 +212,7 @@ pub async fn reset_password(
         Ok(ids)
     })?;
     // 吊销只删会话记录，已建立的实时频道连接凭入房时的会话 id 主动断开
-    let kicked = state.hub().kick_sessions(&revoked_sessions);
+    let kicked = state.hub().kick_sessions(None, &revoked_sessions, KickReason::SessionRevoked);
     tracing::info!(target_user = %user_id, sessions = revoked_sessions.len(), kicked, "管理员重置密码（联动吊销其全部会话）");
     Ok(Json(json!({})))
 }
@@ -238,7 +239,7 @@ pub async fn revoke_user_sessions(
         p.sessions.retain(|s| s.user_id != user_id);
         Ok((ids.len(), ids))
     })?;
-    let kicked = state.hub().kick_sessions(&session_ids);
+    let kicked = state.hub().kick_sessions(None, &session_ids, KickReason::SessionRevoked);
     tracing::info!(target_user = %user_id, revoked, kicked, "管理员吊销用户全部会话");
     Ok(Json(json!({ "revoked": revoked })))
 }

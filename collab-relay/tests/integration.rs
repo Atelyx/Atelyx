@@ -2826,6 +2826,78 @@ async fn session_revocation_kicks_live_ws_connections() {
     assert!(closed, "已吊销会话的重连应被断开");
 }
 
+#[tokio::test]
+async fn removed_member_ws_kicked_and_rejoin_rejected() {
+    // 成员资格只在入房时校验：移除成员必须同时踢掉其已建立的实时连接，
+    // 否则其继续接收房间内的笔记同步/补丁广播（含笔记正文），也可继续向房间注入帧
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let space_id = setup_two_members(&ctx, "alice", "bob").await;
+    let a = login_as(&ctx, "alice").await;
+    let b = login_as(&ctx, "bob").await;
+
+    let (status, members) = ctx.get(&format!("/api/spaces/{space_id}/members"), Some(&a), &[]).await;
+    assert_eq!(status, 200, "{members}");
+    let bob_id = members
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["username"] == "bob")
+        .expect("名册应含 bob")["userId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let mut b_ws = ws_connect(
+        &ctx.base,
+        "/ws/space",
+        json!({ "type": "hello", "spaceId": space_id, "token": b, "nickname": "鲍勃", "color": "#00ff00", "deviceName": "B机" }),
+    )
+    .await;
+    let ack = next_frame(&mut b_ws).await;
+    assert_eq!(ack["type"], "hello-ack", "{ack}");
+
+    let (status, body) = ctx.delete(&format!("/api/spaces/{space_id}/members/{bob_id}"), Some(&a)).await;
+    assert_eq!(status, 200, "{body}");
+
+    // 被移除者收到失效帧（文案区分于会话吊销）后连接断开
+    let mut kicked = None;
+    for _ in 0..10 {
+        let f = next_frame(&mut b_ws).await;
+        if f["type"] == "peers" {
+            continue;
+        }
+        if f["type"] == "error" {
+            kicked = Some(f);
+            break;
+        }
+    }
+    let frame = kicked.expect("被移除成员的连接应收到失效 error 帧");
+    assert!(frame["message"].as_str().unwrap().contains("不在该空间"), "{frame}");
+    let mut closed = false;
+    for _ in 0..3 {
+        match tokio::time::timeout(Duration::from_secs(5), b_ws.next()).await {
+            Ok(None) => { closed = true; break; }
+            Ok(Some(Ok(Message::Close(_)))) => { closed = true; break; }
+            Ok(Some(Ok(_))) => continue,
+            Ok(Some(Err(_))) => { closed = true; break; }
+            Err(_) => break,
+        }
+    }
+    assert!(closed, "被移除成员的连接应被断开");
+
+    // 账号令牌仍有效（未吊销会话），但重连因成员校验失败被拒
+    let mut rejoin = ws_connect(
+        &ctx.base,
+        "/ws/space",
+        json!({ "type": "hello", "spaceId": space_id, "token": b, "nickname": "鲍勃", "color": "#00ff00", "deviceName": "B机" }),
+    )
+    .await;
+    let first = next_frame(&mut rejoin).await;
+    assert_eq!(first["type"], "error", "被移除成员重连应被拒：{first}");
+    assert!(first["message"].as_str().unwrap().contains("不是该空间成员"), "{first}");
+}
+
 // ===== 插件消息通道（二进制直传 + seq 可靠补投） =====
 
 /// 按客户端上行格式编码二进制插件帧（kind=1，seq/sender 置 0，可选定向目标）。

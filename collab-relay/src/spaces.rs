@@ -15,6 +15,7 @@ use crate::auth::AuthUser;
 use crate::state::{
     now_secs, random_hex, Member, ServerState, Space, ROLE_EDITOR, ROLE_OWNER, ROLE_VIEWER,
 };
+use crate::ws::KickReason;
 use crate::{ApiError, ApiResult};
 
 const NAME_MAX: usize = 64;
@@ -279,7 +280,18 @@ pub async fn remove_member(
         space.members.retain(|m| m.user_id != target);
         Ok(())
     })?;
-    tracing::info!(space_id = %space_id, "成员移除");
+    // 成员资格只在入房时校验：不踢连接，被移除者会继续接收房间内的笔记同步/补丁广播
+    // （含笔记正文），也可继续向房间注入帧。按该用户全部设备会话踢其在本空间的连接
+    // （同会话在其他空间的连接不受影响），重连会因成员校验失败被拒。
+    let session_ids: Vec<String> = state.read(|p| {
+        p.sessions.iter().filter(|s| s.user_id == target).map(|s| s.id.clone()).collect()
+    });
+    let kicked = state.hub().kick_sessions(
+        Some(&format!("space:{space_id}")),
+        &session_ids,
+        KickReason::SpaceMemberRemoved,
+    );
+    tracing::info!(space_id = %space_id, member = %target, kicked, "成员移除");
     Ok(Json(json!({})))
 }
 
