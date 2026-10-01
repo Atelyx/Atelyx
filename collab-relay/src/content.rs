@@ -230,6 +230,14 @@ pub async fn rename(
     let root = write_root(&state, &space_id, &user)?;
     let from = root.join(&body.old_path, false).map_err(join_err)?;
     let to = root.join(&body.new_path, true).map_err(join_err)?;
+    // 同路径改名 = 无操作，必须早于取锁：路径锁按 key 复用同一把 tokio Mutex（不可重入），
+    // 对同一路径取两次会永久挂起，且挂起时仍持结构锁，连带阻塞该空间全部改名与补丁
+    if body.old_path == body.new_path {
+        if !from.exists() {
+            return Err(not_found("源路径不存在"));
+        }
+        return Ok(Json(json!({})));
+    }
     // 结构锁 → 双路径锁（按 key 字典序取锁防死锁）：检查到 fs::rename 全程在锁内。
     // 补丁端点的「锁内读 → 合并 → 写」窗口若与改名互不互斥，在途补丁会在改名后落盘，
     // 把旧路径文件原样重建（同 id 双文件，旧文件名复活）；结构锁同时消解补丁漂移场景下

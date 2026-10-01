@@ -1564,6 +1564,51 @@ async fn rename_and_patch_concurrent_no_duplicate_files() {
 }
 
 #[tokio::test]
+async fn rename_same_path_is_noop_without_deadlock() {
+    // 路径锁按 key 复用同一把不可重入的异步锁：同路径改名若走到取锁分支会取两次同一把锁
+    // 永久挂起，且挂起时仍持结构锁 → 该空间此后全部改名/补丁阻塞
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let space_id = setup_two_members(&ctx, "alice", "bob").await;
+    let a = login_as(&ctx, "alice").await;
+
+    let file = "笔记/同路径.md";
+    let (status, body) = ctx
+        .put(
+            &format!("/api/spaces/{space_id}/file"),
+            Some(&a),
+            json!({ "path": file, "content": "内容" }),
+        )
+        .await;
+    assert_eq!(status, 200, "建文件应成功：{body}");
+
+    let rename_url = format!("/api/spaces/{space_id}/rename");
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        ctx.post(&rename_url, Some(&a), json!({ "oldPath": file, "newPath": file })),
+    )
+    .await
+    .expect("同路径改名不得挂起");
+    assert_eq!(result.0, 200, "同路径改名应为无操作成功：{}", result.1);
+
+    // 结构锁未被占用：后续改名与读取照常
+    let (status, body) = ctx
+        .post(&rename_url, Some(&a), json!({ "oldPath": file, "newPath": "笔记/改名后.md" }))
+        .await;
+    assert_eq!(status, 200, "同路径改名后应仍可正常改名：{body}");
+    let (status, _) = ctx
+        .get(&format!("/api/spaces/{space_id}/file"), Some(&a), &[("path", "笔记/改名后.md")])
+        .await;
+    assert_eq!(status, 200, "改名结果应落在新路径");
+
+    // 源不存在时同路径改名仍报 404（无操作不等于无校验）
+    let (status, _) = ctx
+        .post(&rename_url, Some(&a), json!({ "oldPath": "笔记/不存在.md", "newPath": "笔记/不存在.md" }))
+        .await;
+    assert_eq!(status, 404);
+}
+
+#[tokio::test]
 async fn same_path_writes_serialize_no_lost_update() {
     let dir = tempfile::tempdir().unwrap();
     let ctx = Ctx::new(spawn_server(dir.path()).await);
