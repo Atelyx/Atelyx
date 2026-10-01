@@ -206,8 +206,10 @@ function paragraphInRange(ctx: Ctx, from: number, to: number): MarkdownBlock {
 
 /**
  * 段落按交叠的数学区间切分：未消费的区间依次消费为 mathBlock，区间之间与之外的残余
- * 保持为段落；段落完全落在已消费的跨段区间内时返回 null（调用方整段跳过，防重复渲染）。
- * mathRanges 按源文本顺序，遇起点越过段落末尾即可停止。
+ * 保持为段落；已被先前段落消费的跨段区间只跳过它在本段的覆盖部分，其后的残余文本照常
+ * 输出（区间可能只盖住本段开头，整段丢弃会吃掉区间外的正文）。调用方只在存在交叠区间时
+ * 调用，故本函数必定产出「覆盖之外的全部残余」，不丢文本。mathRanges 按源文本顺序，
+ * 遇起点越过段落末尾即可停止。
  */
 function paragraphSegments(
   ctx: Ctx,
@@ -215,23 +217,24 @@ function paragraphSegments(
   to: number,
   mathRanges: RangeInfo[],
   usedMath: Set<number>,
-): MarkdownBlock[] | null {
+): MarkdownBlock[] {
   const out: MarkdownBlock[] = [];
   let cursor = from;
-  let hit = false;
   for (let i = 0; i < mathRanges.length; i++) {
-    if (usedMath.has(i)) continue;
     const r = mathRanges[i]!;
     if (r.to <= cursor) continue;
     if (r.from >= to) break;
-    hit = true;
+    if (usedMath.has(i)) {
+      cursor = Math.max(cursor, r.to);
+      if (cursor >= to) break;
+      continue;
+    }
     if (r.from > cursor) out.push(paragraphInRange(ctx, cursor, r.from));
     usedMath.add(i);
     out.push(mathBlockOf(ctx, r));
     cursor = Math.max(cursor, r.to);
     if (cursor >= to) break;
   }
-  if (!hit) return null;
   if (cursor < to) out.push(paragraphInRange(ctx, cursor, to));
   return out;
 }
@@ -260,9 +263,8 @@ export function parseMarkdown(source: string, options: ParseOptions = {}): Markd
     if (node.type.name === "Paragraph") {
       const overlapped = mathRanges.some((r) => node!.from < r.to && node!.to > r.from);
       if (overlapped) {
-        // 交叠区间均已被先前段落消费时（跨段区间）残余内容在其覆盖内，整段跳过
-        const segs = paragraphSegments(ctx, node.from, node.to, mathRanges, usedMath);
-        if (segs) blocks.push(...segs);
+        // 已被先前段落消费的区间只跳过覆盖部分，本段其余残余（含跨段区间之后的正文）照常输出
+        blocks.push(...paragraphSegments(ctx, node.from, node.to, mathRanges, usedMath));
         node = node.nextSibling;
         continue;
       }

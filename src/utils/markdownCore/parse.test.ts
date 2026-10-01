@@ -301,9 +301,17 @@ describe("parseMarkdown 嵌套与边界回归", () => {
     expect(textOf(doc)).toContain("text");
   });
 
-  it("跨段数学区间由首个交叠段落消费，覆盖内段落不重复渲染", () => {
+  it("跨段数学区间只跳过覆盖部分，区间外的残余文本不丢", () => {
+    // 区间 [0,7) 由首段消费，第二段仅开头的 `$$` 落在区间内，尾部 y 必须保留为段落
     const doc = parseMarkdown("$$x\n\n$$y\n");
-    expect(doc.blocks.map((b) => b.kind)).toEqual(["mathBlock"]);
+    expect(doc.blocks.map((b) => b.kind)).toEqual(["mathBlock", "paragraph"]);
+    expect(textOf(doc)).toContain("y");
+
+    // 完全落在区间内的段落仍被跳过（其内容属于数学块，不得重复渲染）
+    const nested = parseMarkdown("$$x\n\nmiddle\n\n$$y\n");
+    expect(nested.blocks.map((b) => b.kind)).toEqual(["mathBlock", "paragraph"]);
+    expect(textOf(nested)).not.toContain("middle");
+    expect(textOf(nested)).toContain("y");
   });
 
   it("表格行以 \\| 结尾且无闭合定界管道时转义仍还原为字面竖线", () => {
