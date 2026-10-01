@@ -2,10 +2,10 @@
  * 源文本偏移 ↔ 渲染 DOM 的映射（编辑面专用）。
  *
  * 内核在 `offsets` 模式下给块容器与行内元素打了 `data-md-from/to`：
- * - 「线性片段」：元素只含一个文本节点且文本长度等于源区间长度（纯文本 span、代码正文），
- *   区间内每个字符都能一一对应；
- * - 「原子片段」：行内代码 / 数学 / 图片 / 标签 / 链接等标记被隐藏的替换形态，源区间与可见
- *   文本长度不等，按整体取边界（光标落在其起点或终点）。
+ * - 「线性片段」：元素只含一个文本节点且文本长度等于源区间长度（纯文本 span、源标记 span、
+ *   代码正文），区间内每个字符都能一一对应；
+ * - 「原子片段」：源区间与可见文本长度不等的替换形态（数学 / 图片 / 标签 / 胶囊 / 空标签回退成
+ *   地址的链接）与零宽锚（空行行元素、空项内容锚、代码末尾空行），按整体取边界。
  *
  * 光标与选区的绘制、点击落点换算都基于本模块；映射只依赖 DOM 结构，不依赖布局测量。
  */
@@ -28,10 +28,18 @@ export interface SourceBlock {
   readonly el: Element;
 }
 
+/** 标记宿主：直接含源标记字符的元素（块或行内），揭示时给它切 `md-reveal`。 */
+export interface SourceOwner {
+  readonly from: number;
+  readonly to: number;
+  readonly el: Element;
+}
+
 export interface SourceIndex {
   readonly runs: SourceRun[];
   readonly atomics: AtomicSpan[];
   readonly blocks: SourceBlock[];
+  readonly owners: SourceOwner[];
 }
 
 function num(el: Element, name: string): number | null {
@@ -41,11 +49,28 @@ function num(el: Element, name: string): number | null {
   return Number.isFinite(value) ? value : null;
 }
 
+/**
+ * 文本节点是否只含空白：列表项内容与首个嵌套子块之间的缩进空白标记。
+ * 它渲染在上一行的行尾，源偏移却落在下一行的缩进上——命中它定落点会把光标带到下一行行首，
+ * 故点击命中与几何兜底都把它排除在落点之外（零宽锚含 U+200B，不算空白，仍可作落点）。
+ */
+export function isBlankTextNode(node: Text): boolean {
+  return !/\S/.test(node.data);
+}
+
 /** 扫描渲染容器，建立偏移索引（内容每次替换后重建）。 */
 export function buildSourceIndex(root: HTMLElement): SourceIndex {
   const runs: SourceRun[] = [];
   const atomics: AtomicSpan[] = [];
   const blocks: SourceBlock[] = [];
+  const owners: SourceOwner[] = [];
+
+  for (const el of Array.from(root.querySelectorAll<HTMLElement>("[data-md-own]"))) {
+    const from = num(el, "data-md-from");
+    const to = num(el, "data-md-to");
+    if (from === null || to === null) continue;
+    owners.push({ from, to, el });
+  }
 
   for (const el of Array.from(root.querySelectorAll<HTMLElement>("[data-md-from]"))) {
     const from = num(el, "data-md-from");
@@ -68,11 +93,18 @@ export function buildSourceIndex(root: HTMLElement): SourceIndex {
   runs.sort((a, b) => a.from - b.from);
   atomics.sort((a, b) => a.from - b.from);
   blocks.sort((a, b) => a.from - b.from);
-  return { runs, atomics, blocks };
+  return { runs, atomics, blocks, owners };
 }
 
 /** 源偏移 → DOM 文本位置。落在原子片段内时贴到其起点（终点处贴终点）。 */
 export function offsetToPoint(index: SourceIndex, offset: number): { node: Node; offset: number } | null {
+  // 优先取区间内的片段（左闭右开）：偏移落在两段边界上时取后一段——后一段的起点与前一段
+  // 的终点同处（相邻），而前一段可能是默认隐藏的源标记（display:none 量不出光标矩形）
+  for (const run of index.runs) {
+    if (offset >= run.from && offset < run.to) {
+      return { node: run.node, offset: offset - run.from };
+    }
+  }
   for (const run of index.runs) {
     if (offset >= run.from && offset <= run.to) {
       return { node: run.node, offset: offset - run.from };
@@ -112,6 +144,15 @@ export function pointToOffset(index: SourceIndex, node: Node, localOffset: numbe
     if (atomic.el === node || atomic.el.contains(node)) {
       return atomic.from;
     }
+  }
+  // 命中渲染件内部（图片 / 公式 / 徽标等自身不带文本的节点）：落到其宿主区间的起点——
+  // 否则点击会一路冒泡到块起点，落点偏离被点的那一处
+  if (node.nodeType === Node.ELEMENT_NODE || node.parentElement) {
+    const host = (node.nodeType === Node.ELEMENT_NODE ? (node as Element) : node.parentElement!)?.closest(
+      "[data-md-from]",
+    );
+    const from = host ? num(host, "data-md-from") : null;
+    if (from !== null) return from;
   }
   return null;
 }
@@ -165,5 +206,51 @@ export function blockAtOffset(index: SourceIndex, offset: number): SourceBlock |
       if (!best || block.to - block.from < best.to - best.from) best = block;
     }
   }
+  return best;
+}
+
+/** 点击坐标最近的可见片段（含矩形）：点击兜底用。 */
+export interface NearestSpan {
+  readonly from: number;
+  readonly to: number;
+  readonly rect: DOMRect;
+}
+
+/**
+ * 点击坐标最近的可见片段：先贴近所在行（垂直距离），同行再贴近水平位置。
+ * 命中的不是文本节点时（缩进悬挂位、行间留白、块内边距、浮动标记、绘制层）用它来定落点——
+ * 只按 DOM 祖先取块起点会让「点这一行」跳到别的行（如点嵌套列表项跳到下一行行首）。
+ * 明显落在内容下方空白区（超过一行高）时返回 null，由调用方按「文末」处理；
+ * 无布局测量能力的环境（如 jsdom）返回 null。
+ */
+export function nearestSpanAt(index: SourceIndex, x: number, y: number): NearestSpan | null {
+  const candidates: NearestSpan[] = [];
+  for (const run of index.runs) {
+    // 只含空白的片段（列表项缩进空白标记）渲染在上一行行尾，不作落点
+    if (isBlankTextNode(run.node)) continue;
+    const el = run.node.parentElement;
+    if (el) candidates.push({ from: run.from, to: run.to, rect: el.getBoundingClientRect() });
+  }
+  for (const atomic of index.atomics) {
+    candidates.push({ from: atomic.from, to: atomic.to, rect: atomic.el.getBoundingClientRect() });
+  }
+  let best: NearestSpan | null = null;
+  let bestDy = Infinity;
+  let bestDx = Infinity;
+  let bottom = -Infinity;
+  for (const candidate of candidates) {
+    const { rect } = candidate;
+    // 默认隐藏的源标记量不出矩形，不能作落点
+    if (rect.height === 0 && rect.width === 0) continue;
+    if (rect.bottom > bottom) bottom = rect.bottom;
+    const dy = y < rect.top ? rect.top - y : y > rect.bottom ? y - rect.bottom : 0;
+    const dx = x < rect.left ? rect.left - x : x > rect.right ? x - rect.right : 0;
+    if (best === null || dy < bestDy - 0.5 || (dy < bestDy + 0.5 && dx < bestDx)) {
+      best = candidate;
+      bestDy = dy;
+      bestDx = dx;
+    }
+  }
+  if (!best || y > bottom + 8) return null;
   return best;
 }

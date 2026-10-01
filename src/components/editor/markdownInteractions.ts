@@ -84,6 +84,8 @@ function handleWikiLink(el: HTMLElement, target: string, links: MarkdownEditorLi
 
 function findLinkElement(target: EventTarget | null, container: HTMLElement): HTMLElement | null {
   let node = target instanceof Element ? target : null;
+  // 揭示态的源标记（`](地址)`、`##` 等）是可编辑的源文本：点击落光标，不触发渲染件的动作
+  if (node?.closest(".md-marker")) return null;
   while (node && node !== container) {
     if (
       node.hasAttribute("data-md-href") ||

@@ -373,19 +373,40 @@ body {
   min-height: 100%;
   padding: 1rem;
 }
-/* 光标所在块与代码块回显源码：保留换行与缩进，长行折行 */
+/* 富装饰块（表格 / raw HTML / 缩进代码）整块回显源码：保留换行与缩进，长行折行 */
 .md-editor-source {
   white-space: pre-wrap;
   word-break: break-word;
 }
-/* 列表项源码态：回显区负外边距延伸到 marker 悬挂位（列表容器的 padding-left 预留区），
-   源码 marker 字符与圆点/序号同位，渲染 ⇄ 源码切换不横移 */
+/* 列表项内的源码回显：负外边距延伸到 marker 悬挂位（列表容器的 padding-left 预留区） */
 .markdown-body .md-editor-list > li > .md-editor-source {
   margin-left: -1.25em;
+}
+/* 源标记字符：默认隐藏（不占位、不参与命中测试）；宿主拿到 md-reveal 才显形。
+   标记字符常驻 DOM，揭示只切 class——不重建 DOM，编辑态与只读态视觉一致 */
+.md-marker {
+  display: none;
+}
+[data-md-own].md-reveal > .md-marker {
+  display: inline;
+}
+/* 揭示时让位的渲染件：图片、公式、脚注角标、callout 徽标、代码块标题栏等是源文本的
+   「替换形态」，源标记显形后与它同现即重复 */
+[data-md-own].md-reveal > .md-yield,
+.md-editor-math.md-reveal > .katex,
+.md-editor-math.md-reveal > .katex-display {
+  display: none;
 }
 /* 空行行元素：一个源码空行 = 一行高（1.625em，与正文行高一致），编辑态零宽锚承载光标 */
 .md-editor-gap {
   height: 1.625em;
+}
+/* 输入法组合中的未上屏文本：就地显示在正文偏移处，下划线标示尚未提交 */
+.md-composition {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  text-decoration-thickness: 1px;
+  text-decoration-color: var(--accent);
 }
 .md-caret-layer,
 .md-selection-layer {
@@ -481,14 +502,36 @@ body {
   color: var(--text-muted);
   border-bottom: 1px dashed currentColor;
 }
-/* 列表标记（无序小圆点 / 有序序号）：替代源文本 marker 的自绘形态，不可选中。
+/* 列表标记（无序小圆点 / 有序序号 / 揭示态的源标记）：替代源文本 marker 的自绘形态，不可选中。
    浮动悬挂于容器缩进区（列表容器的 padding-left 预留），不占内容流——
-   项首为块级内容（标题/引用/代码块等）时 marker 仍与首行同行，不产生孤立行 */
-.md-editor-list-marker {
+   项首为块级内容（标题/引用/代码块等）时 marker 仍与首行同行，不产生孤立行。
+   最小宽度 = 悬挂区宽度：圆点 / 序号 / 源标记同宽同左缘，揭示切换不横移；
+   更宽的标记（"- [ ] "）按实际宽度把内容推开，不叠字 */
+/* 悬挂的只有项自己的标记（li 的首个子元素）；项内其余标记（子块缩进空白）随内容流走 */
+.md-editor-list-marker,
+.markdown-body .md-editor-list > li > .md-marker:first-child {
   float: left;
+  min-width: 1.25em;
   margin-left: -1.25em;
   color: var(--text-muted);
   user-select: none;
+  white-space: pre;
+}
+/* 无序项的小圆点：画在悬挂位左缘，与揭示态的源标记 "- " 对齐——不写字形是因为
+   各平台回退字体对 "•" 的字宽与墨迹位置不同（全角字形墨迹居中，会整体偏右） */
+.md-editor-list-bullet::before {
+  content: "";
+  display: inline-block;
+  width: 0.3em;
+  height: 0.3em;
+  border-radius: 50%;
+  background: currentColor;
+  vertical-align: 0.06em;
+}
+/* 揭示时圆点/序号/任务框让位给源标记（同一悬挂位） */
+[data-md-own].md-reveal > .md-editor-list-marker,
+[data-md-own].md-reveal > input.md-editor-checkbox {
+  display: none;
 }
 /* `---` 横隔条：block widget 整行替换，widget 高度 = 行高（1.625em），线垂直居中 */
 .md-editor-divider {
@@ -504,6 +547,16 @@ body {
   width: 100%;
   border-top: 1px solid var(--border);
 }
+/* 揭示态：源标记 `---` 显形占整行，分隔线让位（否则线与标记并排、两者同现） */
+.md-editor-divider.md-reveal {
+  display: block;
+  height: auto;
+  min-height: 1.625em;
+  pointer-events: auto;
+}
+.md-editor-divider.md-reveal::before {
+  display: none;
+}
 .md-editor-image {
   display: inline-block;
   vertical-align: middle;
@@ -518,11 +571,18 @@ body {
   color: var(--text-muted);
   font-style: italic;
 }
+/* 任务勾选框：与圆点/源标记同处悬挂槽位。不浮动——浮动元素忽略 vertical-align、会被顶到
+   行顶，也吃不到槽位的 min-width（原生框被拉宽后字形居中、偏离槽位左缘）；改为固定 1em 见方，
+   用「负左外边距 + 右补差」把 1.25em 悬挂槽补平（框宽 1em + 补差 0.25em），
+   文字左缘与其它列表项一致，隐藏态/揭示态都不横移 */
 .md-editor-checkbox {
-  margin: 0 4px 0 0;
+  width: 1em;
+  height: 1em;
+  margin: 0 0.25em 0 -1.25em;
   vertical-align: middle;
   accent-color: var(--accent);
   cursor: pointer;
+  user-select: none;
 }
 /* ==高亮== 内文 mark（定界符已隐藏） */
 .md-highlight {
@@ -590,6 +650,29 @@ blockquote.md-quote {
   padding: 0.2rem 0.5rem;
   border-bottom: 1px solid var(--border);
   background: var(--bg-tertiary);
+}
+/* 围栏行自身作揭示宿主的标记（见渲染层 selfOwned）：显形后盒装外框让位，
+   代码与其余源码行一样平铺；光标在代码正文里时不显围栏，块仍是可编辑的渲染态 */
+.md-marker.md-reveal {
+  display: inline;
+}
+/* 代码块的源码态是整块的：任一围栏显形时两行围栏一起显形（外框与标题栏下面一起让位），
+   不出现只显出一半的半截源码 */
+.md-editor-code-block:has(.md-marker.md-reveal) > .md-marker {
+  display: inline;
+}
+.md-editor-code-block:has(.md-marker.md-reveal) {
+  border: 0;
+  border-radius: 0;
+  background: none;
+  overflow: visible;
+}
+.md-editor-code-block:has(.md-marker.md-reveal) > .md-editor-code-head {
+  display: none;
+}
+/* 代码块末尾空行：一行高，与代码区行高一致（pre 为 text-xs，行高 1rem） */
+.md-editor-code-blank {
+  height: 1rem;
 }
 .md-editor-code-lang {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;

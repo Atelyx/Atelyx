@@ -4,7 +4,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { renderMarkdownToHtml } from "@/utils/markdownCore";
-import { blockAtOffset, buildSourceIndex, offsetToPoint, pointToOffset } from "./markdownSourceMap";
+import { blockAtOffset, buildSourceIndex, nearestSpanAt, offsetToPoint, pointToOffset } from "./markdownSourceMap";
 
 function mount(source: string): { root: HTMLElement; index: ReturnType<typeof buildSourceIndex> } {
   const root = document.createElement("div");
@@ -16,19 +16,37 @@ describe("buildSourceIndex", () => {
   it("线性文本片段与块都被收录，容器元素不重复计入", () => {
     const { index } = mount("para **bold** end");
     expect(index.blocks).toHaveLength(1);
-    // 「para 」「bold」「 end」三段线性文本（strong 为容器，不自成片段）
-    expect(index.runs.map((r) => r.node.length)).toEqual([5, 4, 4]);
+    // 「para 」「**」「bold」「**」「 end」（strong 为容器，不自成片段；标记字符也是片段）
+    expect(index.runs.map((r) => r.node.length)).toEqual([5, 2, 4, 2, 4]);
     expect(index.atomics).toHaveLength(0);
   });
 
-  it("隐藏标记的替换形态按原子片段处理（行内代码）", () => {
+  it("行内代码：定界反引号与代码正文各自成片段（可逐字符定位）", () => {
     const { index } = mount("a `code` b");
-    expect(index.atomics).toHaveLength(1);
-    expect(index.atomics[0]?.el.tagName).toBe("CODE");
+    expect(index.atomics).toHaveLength(0);
+    expect(index.runs.map((r) => r.node.data)).toEqual(["a ", "`", "code", "`", " b"]);
+  });
+
+  it("标记宿主被收录（段落可带行前缀标记，故段落也是宿主）", () => {
+    const { index } = mount("para **bold** end");
+    expect(index.owners.map((o) => o.el.tagName)).toEqual(["P", "STRONG"]);
   });
 });
 
 describe("偏移 ↔ DOM 映射", () => {
+  it("围栏末尾空行：光标落在空行锚上而非代码文本末端（几何可测）", () => {
+    // 源码 "```\nx\n\n```"：正文 x（4..5）、末尾换行（5）、空行起点（6）
+    const { index } = mount("```\nx\n\n```");
+    const blank = offsetToPoint(index, 6);
+    expect(blank).not.toBeNull();
+    expect((blank!.node.parentElement as HTMLElement).className).toBe("md-editor-code-blank");
+    // 末行行尾（5）仍落在代码文本上，两处是彼此独立的落点
+    const codeEnd = offsetToPoint(index, 5);
+    expect(codeEnd!.node.textContent).toBe("x");
+    expect((codeEnd!.node.parentElement as Element).closest("code")).not.toBeNull();
+    expect(codeEnd!.node).not.toBe(blank!.node);
+  });
+
   const source = "para **bold** end";
   const { index } = mount(source);
 
@@ -46,13 +64,13 @@ describe("偏移 ↔ DOM 映射", () => {
     }
   });
 
-  it("落在原子片段内贴到边界", () => {
+  it("定界反引号可直接落点（标记字符进 DOM，不再贴到片段边界）", () => {
     const { index: codeIndex } = mount("a `code` b");
-    const atomic = codeIndex.atomics[0]!;
-    const point = offsetToPoint(codeIndex, atomic.from + 2);
-    expect(point).not.toBeNull();
-    // 贴到原子片段起点（源码下一个字符位于 `code` 之前）
-    expect(pointToOffset(codeIndex, point!.node, point!.offset)).toBe(atomic.from);
+    for (const offset of [2, 3, 7, 8]) {
+      const point = offsetToPoint(codeIndex, offset);
+      expect(point, `offset ${offset}`).not.toBeNull();
+      expect(pointToOffset(codeIndex, point!.node, point!.offset), `offset ${offset}`).toBe(offset);
+    }
   });
 
   it("空行行元素各自锚到其零宽字符（光标驻留与点击直接落在对应空行上）", () => {
@@ -73,5 +91,34 @@ describe("偏移 ↔ DOM 映射", () => {
     const second = blockAtOffset(multi, multi.blocks[1]!.from + 1);
     expect(first?.from).toBe(multi.blocks[0]?.from);
     expect(second?.from).toBe(multi.blocks[1]?.from);
+  });
+});
+
+describe("nearestSpanAt 点击兜底", () => {
+  /** 无布局环境给元素挂上矩形；只测几何规则本身。 */
+  function stubRect(el: Element, left: number, top: number, right: number, bottom: number): void {
+    el.getBoundingClientRect = () =>
+      ({
+        left,
+        top,
+        right,
+        bottom,
+        width: right - left,
+        height: bottom - top,
+        x: left,
+        y: top,
+        toJSON: () => ({}),
+      }) as DOMRect;
+  }
+
+  it("只含空白的片段不作落点：它渲染在上一行行尾，源偏移却属于下一行的缩进", () => {
+    // 源码 "- 项目二\n  - 嵌套项目"：项内容 2..5，缩进空白 6..8，子项标记 8..10
+    const { index } = mount("- 项目二\n  - 嵌套项目");
+    const content = index.runs.find((run) => run.from === 2)!;
+    const indent = index.runs.find((run) => run.from === 6 && run.to === 8)!;
+    stubRect(content.node.parentElement!, 40, 0, 94, 20);
+    // 缩进空白标记渲染在项内容行尾（点击它右侧一带时几何上最近）
+    stubRect(indent.node.parentElement!, 94, 0, 104, 20);
+    expect(nearestSpanAt(index, 100, 10)).toMatchObject({ from: 2, to: 5 });
   });
 });

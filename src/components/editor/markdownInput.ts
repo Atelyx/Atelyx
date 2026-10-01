@@ -9,38 +9,60 @@
  *   避免浏览器自身撤销与本应用撤销栈各撤一次。
  */
 
+/** 输入法组合中的未上屏文本：`at` 为起始偏移，`remove` 为被它替换掉的正文长度。 */
+export interface CompositionText {
+  at: number;
+  text: string;
+  remove: number;
+}
+
 export interface EditSinkCallbacks {
   /** 文本变更（含输入法上屏）；来自用户输入。 */
   onTextChange(text: string): void;
-  /** 选区变更（源偏移）。 */
+  /** 选区变更（源偏移，组合期已折算回正文坐标）。 */
   onSelectionChange(from: number, to: number): void;
-  /** 输入法组合开关（组合期抑制外部回灌与候选浮层）。 */
-  onCompositionChange(composing: boolean): void;
+  /** 输入法组合态：`preedit` 为未上屏文本（组合结束为 null）；组合期为真时调用方不应回灌正文。 */
+  onCompositionChange(composing: boolean, preedit: CompositionText | null): void;
 }
 
 /**
  * 列表行 Enter 的文本变换：光标所在行是列表标记行时延续该项——
  * 无序沿用同字符、有序序号 +1（保留定界符）、任务项带空任务框，缩进保持同级；
- * 空项（标记后无内容）Enter 清掉整行标记退出列表。
- * 非列表标记行返回 null（走浏览器默认换行）。
+ * 空项亦然（继续列表），退出列表靠退格删掉标记。
+ * 光标停在标记本身之前（行首）时返回 null：那是「在标记前换行」，再续一个标记会拆出嵌套列表。
  */
 export function listEnterEdit(text: string, from: number): { text: string; cursor: number } | null {
   const lineStart = text.lastIndexOf("\n", Math.max(0, from - 1)) + 1;
   const lineEnd = text.indexOf("\n", from) === -1 ? text.length : text.indexOf("\n", from);
-  const m = /^(\s*)([-+*]|(\d+)([.)]))[ \t]+(\[[ xX]\][ \t]+)?/.exec(text.slice(lineStart, lineEnd));
+  // 标记后的空格按「一个以上或行尾」判定：`-` 独占一行是合法项，`-foo` 不是
+  const m = /^(\s*)([-+*]|(\d+)([.)]))(?:[ \t]+|$)(\[[ xX]\][ \t]*)?/.exec(text.slice(lineStart, lineEnd));
   if (!m) return null;
+  if (from < lineStart + m[0].length) return null;
   const indent = m[1] ?? "";
   const marker = m[2]!;
   const num = m[3];
   const delim = m[4];
   const task = m[5];
-  if (text.slice(lineStart + m[0].length, lineEnd).trim() === "") {
-    // 空项 Enter 退出列表：整行标记清掉，光标到行首
-    return { text: text.slice(0, lineStart) + text.slice(lineEnd), cursor: lineStart };
-  }
   const nextMarker = num !== undefined && delim !== undefined ? `${Number(num) + 1}${delim}` : marker;
   const insert = `\n${indent}${nextMarker} ${task ? "[ ] " : ""}`;
   return { text: text.slice(0, from) + insert + text.slice(from), cursor: from + insert.length };
+}
+
+/**
+ * 空列表项行上的退格变换：行内只有标记（无内容）且光标落在标记之内或之后时，一次删掉整段标记
+ * （缩进 + 标记 + 标记后空格 + 任务框），留下一行空行、光标到行首——光标已经在行首时再退格
+ * 走浏览器的「并进上一行」，于是「回车新建空项 → 退格」不会在源码里残留标记，两次退格又能
+ * 把这一行收掉。其余情况返回 null（逐字符退格交浏览器）。
+ */
+export function listBackspaceEdit(text: string, from: number): { text: string; cursor: number } | null {
+  const lineStart = text.lastIndexOf("\n", Math.max(0, from - 1)) + 1;
+  const lineEnd = text.indexOf("\n", from) === -1 ? text.length : text.indexOf("\n", from);
+  const m = /^(\s*)([-+*]|(\d+)[.)])(?:[ \t]+|$)(\[[ xX]\][ \t]*)?$/.exec(text.slice(lineStart, lineEnd));
+  if (!m) return null;
+  const markerEnd = lineStart + m[0].length;
+  // 光标已在行首：这一下该并进上一行（交浏览器）；光标在标记之内或标记之后都算「删这个空项」
+  if (from <= lineStart || from > markerEnd) return null;
+  return { text: text.slice(0, lineStart) + text.slice(markerEnd), cursor: lineStart };
 }
 
 /** 按元素当前字体以 pre 布局测量文本宽度（与 textarea 内部行内布局同构）。 */
@@ -81,6 +103,11 @@ export class MarkdownEditSink {
   readonly el: HTMLTextAreaElement;
   #callbacks: EditSinkCallbacks;
   #composing = false;
+  /** 组合起点（正文坐标）：输入面 value 组合期已含未上屏文本，用它折回正文偏移。 */
+  #composeAt = 0;
+  /** 组合替换掉的正文终点（通常等于起点；有选区时大于起点）。 */
+  #composeTo = 0;
+  #preedit = "";
   #applyingExternal = false;
   /** 原生历史开关：按文件撤销栈接管时关（画布草稿等无宿主撤销链的场景保留原生撤销）。 */
   #interceptHistory: boolean;
@@ -102,6 +129,7 @@ export class MarkdownEditSink {
 
     el.addEventListener("input", this.#onInput);
     el.addEventListener("compositionstart", this.#onCompositionStart);
+    el.addEventListener("compositionupdate", this.#onCompositionUpdate);
     el.addEventListener("compositionend", this.#onCompositionEnd);
     el.addEventListener("keydown", this.#onKeyDown, true);
     document.addEventListener("selectionchange", this.#onSelectionChange);
@@ -111,8 +139,28 @@ export class MarkdownEditSink {
     return this.#composing;
   }
 
+  get preedit(): CompositionText | null {
+    return this.#composing
+      ? { at: this.#composeAt, text: this.#preedit, remove: Math.max(0, this.#composeTo - this.#composeAt) }
+      : null;
+  }
+
+  /** 选区（正文坐标）：组合期输入面选区落在未上屏文本上，折算回组合起点。 */
   get selection(): { from: number; to: number } {
-    return { from: this.el.selectionStart ?? 0, to: this.el.selectionEnd ?? 0 };
+    const raw = { from: this.el.selectionStart ?? 0, to: this.el.selectionEnd ?? 0 };
+    if (!this.#composing) return raw;
+    return { from: this.#toCommitted(raw.from), to: this.#toCommitted(raw.to) };
+  }
+
+  /**
+   * 输入面坐标 → 正文坐标。组合期 value = 正文前段 + 未上屏文本 + 正文后段，
+   * 未上屏文本占据的区间整体折叠到组合起点，被替换的正文区间按长度补回。
+   */
+  #toCommitted(valueOffset: number): number {
+    const composed = this.#composeAt + this.#preedit.length;
+    if (valueOffset <= this.#composeAt) return valueOffset;
+    if (valueOffset < composed) return this.#composeAt;
+    return valueOffset - composed + this.#composeTo;
   }
 
   /** 写入权威文本（外部同步/程序化替换）：不触发 onTextChange，尽量保留选区。 */
@@ -124,7 +172,8 @@ export class MarkdownEditSink {
     const max = text.length;
     this.el.setSelectionRange(Math.min(from, max), Math.min(to, max));
     this.#applyingExternal = false;
-    this.#callbacks.onSelectionChange(this.el.selectionStart ?? 0, this.el.selectionEnd ?? 0);
+    const { from: restFrom, to: restTo } = this.selection;
+    this.#callbacks.onSelectionChange(restFrom, restTo);
     this.syncScroll();
   }
 
@@ -181,6 +230,7 @@ export class MarkdownEditSink {
   destroy(): void {
     this.el.removeEventListener("input", this.#onInput);
     this.el.removeEventListener("compositionstart", this.#onCompositionStart);
+    this.el.removeEventListener("compositionupdate", this.#onCompositionUpdate);
     this.el.removeEventListener("compositionend", this.#onCompositionEnd);
     this.el.removeEventListener("keydown", this.#onKeyDown, true);
     document.removeEventListener("selectionchange", this.#onSelectionChange);
@@ -194,15 +244,27 @@ export class MarkdownEditSink {
     this.#callbacks.onTextChange(this.el.value);
   };
 
-  #onCompositionStart = (): void => {
+  /** 组合开始：此刻 value 仍是正文，选区即被组合替换的正文区间。 */
+  #onCompositionStart = (event: CompositionEvent): void => {
     this.#composing = true;
-    this.#callbacks.onCompositionChange(true);
+    this.#composeAt = Math.min(this.el.selectionStart ?? 0, this.el.selectionEnd ?? 0);
+    this.#composeTo = Math.max(this.el.selectionStart ?? 0, this.el.selectionEnd ?? 0);
+    this.#preedit = event.data ?? "";
+    this.#callbacks.onCompositionChange(true, this.preedit);
     this.syncScroll();
+  };
+
+  /** 组合串增长/变化：上报未上屏文本，编辑面据此就地显示（此时不落正文）。 */
+  #onCompositionUpdate = (event: CompositionEvent): void => {
+    if (!this.#composing) return;
+    this.#preedit = event.data ?? "";
+    this.#callbacks.onCompositionChange(true, this.preedit);
   };
 
   #onCompositionEnd = (): void => {
     this.#composing = false;
-    this.#callbacks.onCompositionChange(false);
+    this.#preedit = "";
+    this.#callbacks.onCompositionChange(false, null);
     this.#callbacks.onTextChange(this.el.value);
   };
 
@@ -216,7 +278,8 @@ export class MarkdownEditSink {
 
   #onSelectionChange = (): void => {
     if (document.activeElement !== this.el) return;
-    this.#callbacks.onSelectionChange(this.el.selectionStart ?? 0, this.el.selectionEnd ?? 0);
+    const { from, to } = this.selection;
+    this.#callbacks.onSelectionChange(from, to);
     this.syncScroll();
   };
 }

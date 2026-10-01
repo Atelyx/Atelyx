@@ -3,7 +3,14 @@
  * React 视图与编辑面统一从这里消费，勿绕过内核直连第三方解析器。
  */
 export { parseMarkdown, isSafeVaultRelPath } from "./parse";
-export { renderMarkdownToHtml, renderMarkdownEditHtml } from "./render";
+export {
+  renderMarkdownToHtml,
+  renderMarkdownEditHtml,
+  renderMarkdownChunks,
+  renderMarkdownEditChunks,
+  RAW_SOURCE_KINDS,
+} from "./render";
+export type { EditRenderOptions, EditRenderResult, RenderChunk } from "./render";
 
 export type {
   InlineSpan,

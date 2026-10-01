@@ -61,6 +61,17 @@ function locateSelectionInDoc(
   return best;
 }
 
+/** 源码第 line 行（0 起）的起始偏移；超过末行时返回末行起点。 */
+function sourceOffsetAtLine(text: string, line: number): number {
+  let offset = 0;
+  for (let i = 0; i < line; i++) {
+    const nl = text.indexOf("\n", offset);
+    if (nl === -1) return offset;
+    offset = nl + 1;
+  }
+  return offset;
+}
+
 export function NoteEditor({ file }: { file: string }) {
   /** 正文编辑会话：全文、保存、协作绑定与撤销都在会话里（画布文本节点共用同一篇的会话）。 */
   const { session, view } = useNoteBodySession(file);
@@ -102,6 +113,8 @@ export function NoteEditor({ file }: { file: string }) {
   } | null>(null);
   /** 编辑器句柄（MarkdownEditor 外抛）：剪切/粘贴按当前选区操作。 */
   const cmViewRef = useRef<MarkdownEditorHandle | null>(null);
+  /** 切换模式时对齐到顶部的源码偏移：两种形态各自是独立视图，切过去要落在原处而非文首。 */
+  const viewAnchorRef = useRef<number | null>(null);
   /** 历史记录面板开关（「···」更多选项入口）。 */
   const [historyOpen, setHistoryOpen] = useState(false);
   /** 「添加笔记属性」请求序号：菜单每次点击自增，NotePropertiesView 据此打开添加表单。 */
@@ -264,6 +277,40 @@ export function NoteEditor({ file }: { file: string }) {
     const { from, to } = view.getSelection();
     return { from, to, text: view.getText().slice(from, to) };
   };
+
+  /** 切换源码模式：两种形态是各自独立的视图（textarea / 分块引擎），直接切换会停在文首，
+   *  故切换前记下对侧视图顶部的源码偏移，挂载后由下方 effect 对齐回去。 */
+  const toggleSourceMode = () => {
+    if (sourceMode) {
+      const ta = editorRootRef.current?.querySelector("textarea");
+      const lineHeight = ta ? parseFloat(getComputedStyle(ta).lineHeight) : Number.NaN;
+      viewAnchorRef.current =
+        ta && lineHeight > 0
+          ? sourceOffsetAtLine(content, Math.floor(ta.scrollTop / lineHeight))
+          : null;
+    } else {
+      const scroller = editorRootRef.current?.querySelector<HTMLElement>(".md-edit-scroll");
+      if (scroller) {
+        const rect = scroller.getBoundingClientRect();
+        viewAnchorRef.current = cmViewRef.current?.posAtCoords(rect.left + 24, rect.top + 2) ?? null;
+      }
+    }
+    setSourceMode((v) => !v);
+  };
+
+  /** 切模式后把新视图滚到切换前的位置：分块视图按源偏移定位，源码视图按行高折算。 */
+  useEffect(() => {
+    const anchor = viewAnchorRef.current;
+    if (anchor === null) return;
+    viewAnchorRef.current = null;
+    if (!sourceMode) {
+      cmViewRef.current?.scrollToOffset(anchor);
+      return;
+    }
+    const ta = editorRootRef.current?.querySelector("textarea");
+    const lineHeight = ta ? parseFloat(getComputedStyle(ta).lineHeight) : Number.NaN;
+    if (ta && lineHeight > 0) ta.scrollTop = (content.slice(0, anchor).match(/\n/g) ?? []).length * lineHeight;
+  }, [sourceMode, content]);
 
   /** 编辑面区间替换原语：源码 textarea 以会话当前全文拼接走 handleChange（自动保存/
    *  协作 syncLocalBody 全复用；命令式取值防 await 剪贴板 IPC 窗口内的击键被旧闭包内容丢弃）；
@@ -565,7 +612,7 @@ export function NoteEditor({ file }: { file: string }) {
                 className="w-full flex items-center gap-2 px-2 py-1.5 text-xs hover:opacity-80"
                 style={{ color: "var(--text-primary)" }}
                 onClick={() => {
-                  setSourceMode((v) => !v);
+                  toggleSourceMode();
                   menu.close();
                 }}
                 title="源码模式：编辑区显示 Markdown 源码"

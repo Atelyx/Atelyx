@@ -1,8 +1,72 @@
+// @vitest-environment jsdom
 /**
- * 列表行 Enter 文本变换单测：延续项标记 / 空项退出列表 / 非列表行走默认。
+ * 输入面单测：列表行 Enter/退格的文本变换，以及输入法组合态（未上屏文本 + 选区折算）。
  */
 import { describe, expect, it } from "vitest";
-import { listEnterEdit } from "./markdownInput";
+import { listBackspaceEdit, listEnterEdit, MarkdownEditSink, type CompositionText } from "./markdownInput";
+
+/** 组装输入面；`onCompositionChange` 记录每次组合态上报。 */
+function mountSink(value: string, caret: number) {
+  const host = document.createElement("div");
+  const reports: (CompositionText | null)[] = [];
+  const sink = new MarkdownEditSink(host, {
+    onTextChange: () => {},
+    onSelectionChange: () => {},
+    onCompositionChange: (_composing, preedit) => reports.push(preedit),
+  });
+  sink.setText(value);
+  sink.el.setSelectionRange(caret, caret);
+  return { sink, reports };
+}
+
+/** jsdom 未实现 CompositionEvent：用普通事件携带 data 字段。 */
+function emitComposition(el: HTMLTextAreaElement, type: string, data: string): void {
+  const event = new Event(type);
+  Object.defineProperty(event, "data", { value: data });
+  el.dispatchEvent(event);
+}
+
+describe("输入法组合态", () => {
+  it("组合期间上报未上屏文本及其正文起点", () => {
+    const { sink, reports } = mountSink("甲乙", 1);
+    emitComposition(sink.el, "compositionstart", "");
+    expect(sink.preedit).toEqual({ at: 1, text: "", remove: 0 });
+    sink.el.value = "甲ni乙"; // 输入面 value 组合期已含未上屏文本
+    emitComposition(sink.el, "compositionupdate", "ni");
+    expect(sink.preedit).toEqual({ at: 1, text: "ni", remove: 0 });
+    expect(reports.at(-1)).toEqual({ at: 1, text: "ni", remove: 0 });
+  });
+
+  it("组合替换选区：上报被替换正文长度（编辑面据此不再渲染旧文字）", () => {
+    const { sink } = mountSink("甲乙丙", 1);
+    sink.el.setSelectionRange(1, 3); // 选中「乙丙」后起组合
+    emitComposition(sink.el, "compositionstart", "");
+    sink.el.value = "甲ni";
+    emitComposition(sink.el, "compositionupdate", "ni");
+    expect(sink.preedit).toEqual({ at: 1, text: "ni", remove: 2 });
+  });
+
+  it("组合期选区折算回正文坐标（光标不被未上屏文本推走）", () => {
+    const { sink } = mountSink("甲乙", 1);
+    emitComposition(sink.el, "compositionstart", "");
+    sink.el.value = "甲ni乙";
+    emitComposition(sink.el, "compositionupdate", "ni");
+    sink.el.setSelectionRange(3, 3); // 光标在未上屏文本之后（value 坐标）
+    expect(sink.selection).toEqual({ from: 1, to: 1 });
+  });
+
+  it("组合替换选区时按被替换长度补回正文坐标", () => {
+    const { sink } = mountSink("甲乙丙", 1);
+    sink.el.setSelectionRange(1, 2); // 选中「乙」后起组合
+    emitComposition(sink.el, "compositionstart", "乙");
+    sink.el.value = "甲ni丙";
+    emitComposition(sink.el, "compositionupdate", "ni");
+    sink.el.setSelectionRange(3, 3);
+    expect(sink.selection).toEqual({ from: 2, to: 2 });
+    emitComposition(sink.el, "compositionend", "ni");
+    expect(sink.preedit).toBeNull();
+  });
+});
 
 describe("listEnterEdit", () => {
   it("无序项尾 Enter 延续同字符标记", () => {
@@ -34,21 +98,45 @@ describe("listEnterEdit", () => {
     expect(edit).toEqual({ text: "- 甲\n- 乙", cursor: 6 });
   });
 
-  it("空项 Enter 退出列表：整行标记清掉，光标到行首", () => {
+  it("空项 Enter 继续列表：新开一个同级空项，光标落在其上", () => {
     const text = "- 甲\n- ";
     const edit = listEnterEdit(text, text.length);
-    expect(edit).toEqual({ text: "- 甲\n", cursor: 4 });
+    expect(edit).toEqual({ text: "- 甲\n- \n- ", cursor: 9 });
   });
 
-  it("缩进空项退出后不留缩进", () => {
+  it("缩进空项 Enter 同样延续，缩进保持同级", () => {
     const text = "  - ";
     const edit = listEnterEdit(text, text.length);
-    expect(edit).toEqual({ text: "", cursor: 0 });
+    expect(edit).toEqual({ text: "  - \n  - ", cursor: 9 });
   });
 
   it("非列表标记行返回 null（走默认换行）", () => {
     expect(listEnterEdit("普通段落", 4)).toBeNull();
     // 松散项的续行（无标记）不延续列表
     expect(listEnterEdit("- 甲\n续行", 7)).toBeNull();
+    // 光标停在标记之前/之中：在标记前换行，续标记会拆出嵌套列表
+    expect(listEnterEdit("- 甲", 0)).toBeNull();
+    expect(listEnterEdit("- 甲", 1)).toBeNull();
+    expect(listEnterEdit("  1. 甲", 3)).toBeNull();
+  });
+});
+
+describe("listBackspaceEdit", () => {
+  it("空项标记之后退格：整段标记一次删掉，留下一行空行、光标到行首", () => {
+    expect(listBackspaceEdit("- 甲\n- ", 6)).toEqual({ text: "- 甲\n", cursor: 4 });
+    expect(listBackspaceEdit("  - ", 4)).toEqual({ text: "", cursor: 0 });
+    expect(listBackspaceEdit("- [ ] ", 6)).toEqual({ text: "", cursor: 0 });
+    expect(listBackspaceEdit("1. ", 3)).toEqual({ text: "", cursor: 0 });
+  });
+
+  it("有内容的项、光标在行首：返回 null（逐字符退格 / 并进上一行交浏览器）", () => {
+    expect(listBackspaceEdit("- 甲", 3)).toBeNull();
+    expect(listBackspaceEdit("普通段落", 4)).toBeNull();
+    // 行首：这一下该并进上一行，由浏览器原生完成
+    expect(listBackspaceEdit("- ", 0)).toBeNull();
+    // 标记之内（`-` 与空格之间）同样算「删这个空项」
+    expect(listBackspaceEdit("- ", 1)).toEqual({ text: "", cursor: 0 });
+    // 标记后无空格的行（`-` 独占一行）同样在标记之内/之后触发
+    expect(listBackspaceEdit("-", 1)).toEqual({ text: "", cursor: 0 });
   });
 });

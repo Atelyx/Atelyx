@@ -4,12 +4,16 @@
  * 文档模型 = 纯文本正文（与文件正文逐字节一致）。渲染走框架无关内核
  * （`utils/markdownCore`：文本 → 块/行内规格 → DOM），编辑面不引入 HTML 往返。
  *
- * 编辑形态：光标所在块与代码块显示源码，其余块照常渲染；整篇源码由一个隐藏 textarea
- * 承载，因此输入法组合、方向键、Home/End、跨块选区、剪贴板复制（得到源码）全部沿用
- * 浏览器原生行为；光标与选区由本组件按源偏移在渲染结果上测量后自绘。
+ * 编辑形态：所有块都按渲染态出，源码里的标记字符（`**`、`- `、`##` 等）常驻 DOM 但默认隐藏；
+ * 光标进入某个块或某个行内元素时，只给它的宿主切 `md-reveal`，标记显形——揭示不重建 DOM，
+ * 编辑态与只读态视觉一致，移光标只改 class。整篇源码由一个隐藏 textarea 承载，输入法组合、
+ * 方向键、Home/End、跨块选区、剪贴板复制（得到源码）沿用浏览器原生行为；光标与选区自绘。
  *
- * 只读形态（`readOnly`）：同一渲染器全量出渲染结果，不挂输入焦点——因此「预览 ⇄ 编辑」
- * 共用同一容器与同一内核，切换时只换活动块的呈现，滚动位置保留。
+ * 内容按顶层分片增量替换（见 {@link patchChunks}），因此击键只重建变化的块、未变的块
+ * 连同已加载图片原样保留；输入法未上屏文本由内核就地插入渲染，组合期不落正文。
+ *
+ * 只读形态（`readOnly`）：同一渲染器全量出渲染结果、不产出标记字符、不挂输入焦点——因此
+ * 「预览 ⇄ 编辑」共用同一容器与同一内核，视觉一致，切换时只换标记是否有，滚动位置保留。
  *
  * 安全：渲染产物只出 class + textContent / 已清洗 HTML（raw HTML 经 `utils/htmlSanitize`）。
  */
@@ -18,14 +22,31 @@ import { useAppStore } from "@/stores/appStore";
 import { useVaultStore } from "@/stores/vaultStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { collapseSoftLineBreaks } from "@/utils/softLineBreak";
-import { renderMarkdownEditHtml, renderMarkdownToHtml } from "@/utils/markdownCore";
+import { RAW_SOURCE_KINDS, renderMarkdownChunks, renderMarkdownEditChunks, type RenderChunk } from "@/utils/markdownCore";
 import { encodeMarkdownLinkHref, wikiLinkContextAt } from "@/utils/markdown";
 import { WikiLinkPicker } from "@/components/editor/WikiLinkPicker";
 import type { PopupAnchor } from "@/components/common/PopupLayer";
 import { createLinkResolver, type MarkdownEditorLinks } from "./markdownLinks";
 import { attachMarkdownInteractions, decorateMarkdownControls, hydrateMarkdownImages } from "./markdownInteractions";
-import { blockAtOffset, buildSourceIndex, caretRect, pointToOffset, rangeRects, type SourceIndex } from "./markdownSourceMap";
-import { CaretOverlay, MarkdownEditSink, listEnterEdit, type RemoteCursor } from "./markdownInput";
+import {
+  blockAtOffset,
+  buildSourceIndex,
+  caretRect,
+  isBlankTextNode,
+  nearestSpanAt,
+  offsetToPoint,
+  pointToOffset,
+  rangeRects,
+  type SourceIndex,
+} from "./markdownSourceMap";
+import {
+  CaretOverlay,
+  MarkdownEditSink,
+  listBackspaceEdit,
+  listEnterEdit,
+  type CompositionText,
+  type RemoteCursor,
+} from "./markdownInput";
 import type { Transaction } from "yjs";
 import type { NoteEditorBinding } from "@/types/noteSurface";
 
@@ -43,6 +64,8 @@ export interface MarkdownEditorHandle {
   replaceRange(from: number, to: number, text: string): void;
   /** 视口坐标 → 源偏移（未命中返回 null）。 */
   posAtCoords(x: number, y: number): number | null;
+  /** 滚动到源偏移所在行（对齐到内容区顶部）；无布局环境不动作。 */
+  scrollToOffset(offset: number): void;
   focus(): void;
 }
 
@@ -116,6 +139,96 @@ function caretPointAt(x: number, y: number): { node: Node; offset: number } | nu
 /** 原生表单控件：点击语义归浏览器（聚焦/勾选），不落光标、不接管拖选。 */
 const NATIVE_CONTROL_SELECTOR = "input, textarea, select, button";
 
+/** 源偏移属性（编辑面标注）：比对内容时须先剥离，偏移平移不算内容变化。 */
+const OFFSET_ATTR_RE = / data-md-(?:from|to)="\d+"/g;
+
+/**
+ * 分片内容。用户文本与 raw HTML 中的引号恒被转义、`data-*` 恒被清洗剥除，
+ * 故该模式只会命中内核自己标注的偏移属性。
+ */
+function chunkContent(html: string): string {
+  return html.replace(OFFSET_ATTR_RE, "");
+}
+
+/** 两个分片内容是否相同（偏移数字不同不算变化）。 */
+function sameChunk(a: RenderChunk, b: RenderChunk): boolean {
+  return a.html === b.html || chunkContent(a.html) === chunkContent(b.html);
+}
+
+/** 内容未变、只是随前文增删整体平移的分片：就地改偏移属性，不重建 DOM。 */
+function shiftChunkOffsets(node: Element, delta: number): void {
+  if (delta === 0) return;
+  for (const el of [node, ...Array.from(node.querySelectorAll("[data-md-from]"))]) {
+    const from = el.getAttribute("data-md-from");
+    if (from !== null) el.setAttribute("data-md-from", String(Number(from) + delta));
+    const to = el.getAttribute("data-md-to");
+    if (to !== null) el.setAttribute("data-md-to", String(Number(to) + delta));
+  }
+}
+
+/**
+ * 按分片增量替换内容：内容相同的分片原样保留（DOM 节点与已加载的图片、代码块按钮、
+ * 空行零宽锚都不重建），只增删改真正变化的分片；被保留的分片偏移随文档平移，
+ * 就地改属性（data-* 改动不触发重排）。就地编辑、跨块移光标、整行增删都只影响局部。
+ *
+ * 分片与容器的元素子节点一一对应（容器子节点只由本函数写入），故按序对齐即可：
+ * 逐位相同则保留，否则用前后各一格的探测区分「删除旧分片 / 插入新分片 / 原位替换」。
+ */
+function patchChunks(content: HTMLElement, prev: readonly RenderChunk[], next: readonly RenderChunk[]): void {
+  const template = document.createElement("template");
+  const elementOf = (html: string): Element | null => {
+    template.innerHTML = html;
+    return template.content.firstElementChild;
+  };
+  let node: ChildNode | null = content.firstChild;
+  let i = 0;
+  let j = 0;
+  while (i < prev.length || j < next.length) {
+    if (i < prev.length && j < next.length && sameChunk(prev[i]!, next[j]!)) {
+      shiftChunkOffsets(node as Element, next[j]!.from - prev[i]!.from);
+      node = node!.nextSibling;
+      i++;
+      j++;
+      continue;
+    }
+    // 下一旧分片与当前新分片相同：当前旧分片被删除
+    if (i + 1 < prev.length && j < next.length && sameChunk(prev[i + 1]!, next[j]!)) {
+      const dead = node!;
+      node = dead.nextSibling;
+      dead.remove();
+      i++;
+      continue;
+    }
+    // 当前旧分片与下一新分片相同：当前新分片是插入
+    if (i < prev.length && j + 1 < next.length && sameChunk(prev[i]!, next[j + 1]!)) {
+      const inserted = elementOf(next[j]!.html);
+      if (inserted) content.insertBefore(inserted, node);
+      j++;
+      continue;
+    }
+    if (i < prev.length && j < next.length) {
+      const dead = node!;
+      node = dead.nextSibling;
+      const replacement = elementOf(next[j]!.html);
+      if (replacement) dead.replaceWith(replacement);
+      else dead.remove();
+      i++;
+      j++;
+      continue;
+    }
+    if (i < prev.length) {
+      const dead = node!;
+      node = dead.nextSibling;
+      dead.remove();
+      i++;
+      continue;
+    }
+    const appended = elementOf(next[j]!.html);
+    if (appended) content.insertBefore(appended, node);
+    j++;
+  }
+}
+
 export function MarkdownEditor({
   body,
   syncSeq,
@@ -137,11 +250,15 @@ export function MarkdownEditor({
   const sinkRef = useRef<MarkdownEditSink | null>(null);
   const overlayRef = useRef<CaretOverlay | null>(null);
   const indexRef = useRef<SourceIndex | null>(null);
+  /** 当前 DOM 对应的分片列表（增量替换的比对基线）。 */
+  const chunksRef = useRef<readonly RenderChunk[]>([]);
   const textRef = useRef(body.replace(/\r\n/g, "\n"));
   const selRef = useRef({ from: 0, to: 0 });
   const activeBlockRef = useRef<number | null>(null);
   const dragRef = useRef<{ anchor: number } | null>(null);
   const composingRef = useRef(false);
+  /** 输入法组合中的未上屏文本（就地渲染在正文偏移处，位置随正文重排）。 */
+  const compositionRef = useRef<CompositionText | null>(null);
   const syncSeqRef = useRef(syncSeq);
   const collabRef = useRef(collab);
   collabRef.current = collab;
@@ -183,35 +300,51 @@ export function MarkdownEditor({
     [],
   );
 
-  /** 内容重绘（结构变化：文本变更 / 活动块切换 / 只读翻转）。 */
+  /**
+   * 揭示：光标所在块（含各层祖先）与所在行内元素切 `md-reveal`，标记字符显形；其余保持渲染。
+   * 只切 class、不重建 DOM——所以移光标没有重绘、编辑态与只读态视觉一致。
+   * offset 为 null 表示不揭示任何处（未聚焦 / 只读面）。
+   */
+  const revealAt = useCallback((offset: number | null): void => {
+    const index = indexRef.current;
+    if (!index) return;
+    for (const owner of index.owners) {
+      owner.el.classList.toggle("md-reveal", offset !== null && offset >= owner.from && offset <= owner.to);
+    }
+  }, []);
+
+  /** 内容重绘（结构变化：文本变更 / 富装饰块进出 / 只读翻转）。 */
   const renderContent = useCallback(
     (text: string, activeOffset: number | undefined): void => {
       const content = contentRef.current;
       if (!content) return;
       const scrollTop = scrollRef.current?.scrollTop ?? 0;
       const base = { resolveLink: createLinkResolver(linksRef.current), mentions: mentionsRef.current };
-      const paint = (offset: number | undefined): SourceIndex => {
-        content.innerHTML = readOnlyRef.current
-          ? renderMarkdownToHtml(text, base)
-          : renderMarkdownEditHtml(text, { ...base, offsets: true, activeOffset: offset });
-        const built = buildSourceIndex(content);
-        indexRef.current = built;
-        return built;
-      };
-      let index = paint(activeOffset);
-      // 光标不在任何块内（块间空行）时沿用上一活动块重绘：Enter 开新行/空行处输入后不整篇翻回渲染；
-      // 光标命中块时以新文本的块结构为准（插入可能拆分/合并块，旧偏移的归属已不可靠）
-      let activeFrom: number | null = null;
-      if (activeOffset !== undefined) {
-        const inBlock = blockAtOffset(index, activeOffset)?.from;
-        if (inBlock !== undefined) {
-          activeFrom = inBlock;
-        } else if (activeBlockRef.current !== null) {
-          activeFrom = activeBlockRef.current;
-          index = paint(activeFrom);
-        }
+      // 活动块由内核按新文本的块结构一次定下（光标不落在任何块内时沿用上一活动块），
+      // 因此这里只重绘一次：块拆分/合并后旧偏移的归属已不可靠，须以新结构为准
+      if (readOnlyRef.current) {
+        const chunks = renderMarkdownChunks(text, base);
+        patchChunks(content, chunksRef.current, chunks);
+        chunksRef.current = chunks;
+        activeBlockRef.current = null;
+      } else {
+        const result = renderMarkdownEditChunks(text, {
+          ...base,
+          offsets: true,
+          activeOffset,
+          // 仅当调用方给出了明确光标偏移（输入 / 程序化替换）才沿用上一活动块：
+          // 传 undefined 表示「光标已不在任何块内」，此时不应再回显任何块
+          fallbackOffset: activeOffset === undefined ? undefined : activeBlockRef.current ?? undefined,
+          composition: compositionRef.current ?? undefined,
+        });
+        patchChunks(content, chunksRef.current, result.chunks);
+        chunksRef.current = result.chunks;
+        activeBlockRef.current = result.activeBlock;
       }
-      activeBlockRef.current = activeFrom;
+      indexRef.current = buildSourceIndex(content);
+      // 焦点判定与刷新路径保持一致：输入面未聚焦时不揭示任何块
+      const editing = !readOnlyRef.current && document.activeElement === sinkRef.current?.el;
+      revealAt(editing ? selRef.current.from : null);
       // 任务勾选框：可编辑面解除禁用（点击切换源码），只读面保持禁用展示
       if (!readOnlyRef.current && interactiveRef.current) {
         for (const box of Array.from(content.querySelectorAll("input.md-editor-checkbox"))) {
@@ -222,7 +355,7 @@ export function MarkdownEditor({
       hydrateMarkdownImages(content, getOptions);
       decorateMarkdownControls(content);
     },
-    [getOptions],
+    [getOptions, revealAt],
   );
 
   /**
@@ -237,7 +370,15 @@ export function MarkdownEditor({
     // 绘制层是内容容器的兄弟节点（不随内容替换销毁），坐标以它自身为原点
     const origin = overlay.el.getBoundingClientRect();
     overlay.setSelectionRects(rangeRects(index, from, to), origin);
-    const caret = focus && !readOnlyRef.current ? caretRect(index, from) : null;
+    // 组合期光标跟在未上屏文本之后（该文本不是正文，无源偏移，只能按元素右缘取位）
+    const composingEl = compositionRef.current ? contentRef.current?.querySelector(".md-composition") : null;
+    const composingRect = composingEl?.getBoundingClientRect();
+    const caret =
+      focus && !readOnlyRef.current
+        ? composingRect
+          ? new DOMRect(composingRect.right, composingRect.top, 0, composingRect.height)
+          : caretRect(index, from)
+        : null;
     overlay.setCaretRect(caret, origin);
     // 隐藏输入面按宿主坐标定位，让输入法候选框跟随真实光标
     sinkRef.current?.moveTo(
@@ -280,18 +421,25 @@ export function MarkdownEditor({
     const block = blockAtOffset(index, offset);
     const kind = block?.el.getAttribute("data-md-kind");
     if (kind === "fencedCode" || kind === "indentedCode" || kind === "htmlBlock") return true;
-    return index.atomics.some((atomic) => atomic.from <= offset && offset <= atomic.to && atomic.el.tagName === "CODE");
+    // 行内代码与围栏代码内的整段都是字面内容，不参与双链候选
+    const point = offsetToPoint(index, offset);
+    return point?.node.parentElement?.closest("code, pre") != null;
   }, []);
 
   const applySelection = useCallback(
     (from: number, to: number, focus: boolean): void => {
       selRef.current = { from, to };
-      const index = indexRef.current;
-      const hitBlock = index ? blockAtOffset(index, from)?.from ?? null : null;
-      // 落点在块外（文末/块间空隙）不切换活动块：保持当前块的源码态，避免整篇翻回渲染
-      const nextBlock = hitBlock ?? activeBlockRef.current;
-      // 活动块变化才重建内容（该块要在源码与渲染之间切换）
-      if (!readOnlyRef.current && nextBlock !== activeBlockRef.current) renderContent(textRef.current, nextBlock ?? undefined);
+      const hit = indexRef.current ? blockAtOffset(indexRef.current, from) : null;
+      // 只有富装饰块（表格 / raw HTML / 缩进代码）整块回显源码，进出它们才需要重绘；
+      // 其余块一律只切揭示 class——移光标不重建 DOM
+      const kind = hit?.el.getAttribute("data-md-kind") ?? null;
+      const rawFrom = kind !== null && RAW_SOURCE_KINDS.has(kind) ? hit!.from : null;
+      if (!readOnlyRef.current && rawFrom !== activeBlockRef.current) {
+        activeBlockRef.current = rawFrom;
+        renderContent(textRef.current, from);
+      } else {
+        revealAt(focus && !readOnlyRef.current ? from : null);
+      }
       drawOverlay(from, to, focus, true);
       // 广播本端光标/选区（字段与既有协作端约定一致；节流由协作传输层负责）
       collabRef.current?.awareness.setLocalStateField("selection", { anchor: from, head: to });
@@ -318,7 +466,7 @@ export function MarkdownEditor({
         setWikiPicker((prev) => (prev ? null : prev));
         return;
       }
-      const caret = index ? caretRect(index, from) : null;
+      const caret = indexRef.current ? caretRect(indexRef.current, from) : null;
       if (!caret) return;
       const anchor: PopupAnchor = { x: caret.left, y: caret.bottom + 4, flipY: caret.top - 8 };
       setWikiPicker((prev) =>
@@ -327,7 +475,7 @@ export function MarkdownEditor({
           : { from: triggerFrom, query: ctx.query, anchor },
       );
     },
-    [drawOverlay, inOpaqueRegion, renderContent],
+    [drawOverlay, inOpaqueRegion, renderContent, revealAt],
   );
 
   /**
@@ -390,8 +538,12 @@ export function MarkdownEditor({
           if (readOnlyRef.current) return;
           applySelection(from, to, document.hasFocus());
         },
-        onCompositionChange: (composing) => {
+        onCompositionChange: (composing, preedit) => {
           composingRef.current = composing;
+          compositionRef.current = preedit;
+          // 未上屏文本就地参与渲染，故组合串每次变化都要按当前正文重绘一次
+          renderContent(textRef.current, activeBlockRef.current ?? undefined);
+          drawOverlay(selRef.current.from, selRef.current.to, true);
         },
       },
       { interceptHistory: !localHistory },
@@ -405,8 +557,11 @@ export function MarkdownEditor({
     /** 焦点/滚动变化后重绘（隐藏输入面不带动滚动，滚动时需按当前选区重算位置）。 */
     const refreshOverlay = (): void => {
       const selection = selRef.current;
-      // 与选区回调的焦点判定一致：窗口失焦时自绘光标同样隐藏
-      drawOverlay(selection.from, selection.to, document.hasFocus() && document.activeElement === sink.el);
+      // 与选区回调的焦点判定一致：窗口失焦时自绘光标同样隐藏、标记也不揭示
+      const focused = document.hasFocus() && document.activeElement === sink.el;
+      // 先揭示再量光标：光标落在隐藏标记里时，显形后才有可测的矩形
+      revealAt(focused ? selection.from : null);
+      drawOverlay(selection.from, selection.to, focused);
     };
     const scrollEl = scrollRef.current;
     scrollEl?.addEventListener("scroll", refreshOverlay, { passive: true });
@@ -434,7 +589,7 @@ export function MarkdownEditor({
       activeBlockRef.current = null;
     };
     // localHistory 为挂载期配置，只在挂载时生效
-  }, [applySelection, commitLocalEdit, drawOverlay, getOptions, localHistory, renderContent]);
+  }, [applySelection, commitLocalEdit, drawOverlay, getOptions, localHistory, renderContent, revealAt]);
 
   // 只读翻转：内容形态变化，重建一次（容器不重建，滚动保留）
   useEffect(() => {
@@ -513,13 +668,27 @@ export function MarkdownEditor({
     const index = indexRef.current;
     if (!content || !index) return null;
     const hit = caretPointAt(x, y);
-    if (!hit || !content.contains(hit.node)) return null;
-    const el = hit.node.nodeType === Node.ELEMENT_NODE ? (hit.node as Element) : hit.node.parentElement;
-    const direct = pointToOffset(index, hit.node, hit.offset);
-    if (direct !== null) return direct;
-    const block = el?.closest("[data-md-block]");
-    const from = block ? Number(block.getAttribute("data-md-from")) : NaN;
-    return Number.isFinite(from) ? from : null;
+    // 命中文本节点：偏移最精确（线性片段逐字符对应）；只含空白的片段除外——它渲染在上一行
+    // 行尾（列表项缩进空白），源偏移却属于下一行的缩进，按它定落点会跳到下一行行首，改走几何兜底
+    if (
+      hit &&
+      content.contains(hit.node) &&
+      hit.node.nodeType === Node.TEXT_NODE &&
+      !isBlankTextNode(hit.node as Text)
+    ) {
+      const direct = pointToOffset(index, hit.node, hit.offset);
+      if (direct !== null) return direct;
+    }
+    // 命中的是元素（缩进悬挂位、行间留白、块内边距、浮动标记、渲染件、绘制层）：按几何取
+    // 最近片段，把探测点夹进该片段的水平范围再探一次；直接按 DOM 祖先取块起点会让
+    // 「点这一行」跳到别的行（如点嵌套列表项落到下一行行首）
+    const near = nearestSpanAt(index, x, y);
+    if (!near) return null;
+    const probeX = Math.min(Math.max(x, near.rect.left + 1), Math.max(near.rect.left + 1, near.rect.right - 1));
+    const again = caretPointAt(probeX, near.rect.top + near.rect.height / 2);
+    const offset = again ? pointToOffset(index, again.node, again.offset) : null;
+    if (offset !== null && offset >= near.from && offset <= near.to) return offset;
+    return x <= near.rect.left ? near.from : near.to;
   }, []);
 
   // ===== 编辑命令：任务勾选框切换 =====
@@ -586,6 +755,14 @@ export function MarkdownEditor({
         applyText(next, from + text.length);
       },
       posAtCoords: (x, y) => offsetAtPoint(x, y),
+      scrollToOffset: (offset) => {
+        const index = indexRef.current;
+        const scroller = scrollRef.current;
+        if (!index || !scroller) return;
+        const rect = caretRect(index, offset);
+        if (!rect) return;
+        scroller.scrollTop += rect.top - scroller.getBoundingClientRect().top;
+      },
       focus: () => sinkRef.current?.focus(),
     };
     return () => {
@@ -613,21 +790,27 @@ export function MarkdownEditor({
     [applyText],
   );
 
-  /** 列表行 Enter：光标在列表标记行时延续项标记（空项 Enter 退出列表），其余交浏览器原生换行。 */
+  /**
+   * 列表行按键接管（其余按键全部交浏览器原生处理）：
+   * - Enter：光标在列表标记行时延续项标记（空项同样延续）；
+   * - 退格：光标恰好停在空项标记之后时一次删掉整段标记，使「回车新建空项 → 退格」不残留标记。
+   */
   const onHostKeyDown = useCallback(
     (event: React.KeyboardEvent) => {
-      if (event.key !== "Enter" || event.shiftKey) return;
-      // 组合期 Enter 是输入法确认键，不拦
+      if (event.shiftKey) return;
+      const key = event.key;
+      if (key !== "Enter" && key !== "Backspace") return;
+      // 组合期这两个键是输入法的确认/删除键，不拦
       if (event.nativeEvent.isComposing || composingRef.current) return;
       if (readOnlyRef.current) return;
       const target = event.target as Element | null;
       // 输入面（textarea）的按键正是编辑路径本身；其余原生控件上的按键不拦
       if (target && target !== sinkRef.current?.el && target.closest(NATIVE_CONTROL_SELECTOR)) return;
       const { from, to } = selRef.current;
-      if (to !== from) return; // 有选区：删除选区后换行走浏览器原生行为
+      if (to !== from) return; // 有选区：删除选区后换行/退格走浏览器原生行为
       const block = indexRef.current ? blockAtOffset(indexRef.current, from) : null;
       if (block?.el.getAttribute("data-md-kind") !== "list") return;
-      const edit = listEnterEdit(textRef.current, from);
+      const edit = key === "Enter" ? listEnterEdit(textRef.current, from) : listBackspaceEdit(textRef.current, from);
       if (!edit) return;
       event.preventDefault();
       applyText(edit.text, edit.cursor);

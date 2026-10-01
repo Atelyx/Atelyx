@@ -387,6 +387,34 @@ function footnoteDefOf(node: SyntaxNode, ctx: Ctx): { block: MarkdownBlock; next
   };
 }
 
+/**
+ * 引用块内每一行的 `>` 前缀范围（含前置缩进与标记后空格）。
+ * 块级节点只按首行定位，续行的 `>` 会落进子块区间而被当成正文，须按范围剔除。
+ */
+function quoteLinePrefixes(source: string, from: number, to: number): RangeInfo[] {
+  const out: RangeInfo[] = [];
+  let lineStart = from;
+  while (lineStart < to) {
+    const lineEnd = Math.min(lineEndAt(source, lineStart), to);
+    const m = /^[ \t]*>[ \t>]*/.exec(source.slice(lineStart, lineEnd));
+    if (m) out.push({ from: lineStart, to: lineStart + m[0].length });
+    if (lineEnd >= to) break;
+    lineStart = lineEnd + 1;
+  }
+  return out;
+}
+
+/** 剔除落在子块区间内的引用行前缀：只影响带行内片段的子块，容器自身的首行前缀不在其区间内。 */
+function stripQuotePrefixes(children: MarkdownBlock[], prefixes: readonly RangeInfo[], source: string): void {
+  if (prefixes.length === 0) return;
+  for (let i = 0; i < children.length; i++) {
+    const child = children[i]!;
+    if (!("inline" in child)) continue;
+    const inner = prefixes.filter((p) => p.from >= child.from && p.to <= child.to);
+    if (inner.length > 0) children[i] = { ...child, inline: stripRanges(child.inline, inner, source) };
+  }
+}
+
 function blockquoteBlock(node: SyntaxNode, ctx: Ctx): MarkdownBlock {
   const children: MarkdownBlock[] = [];
   for (let c = node.firstChild; c; c = c.nextSibling) {
@@ -394,6 +422,7 @@ function blockquoteBlock(node: SyntaxNode, ctx: Ctx): MarkdownBlock {
     const b = blockOf(c, ctx);
     if (b) children.push(b);
   }
+  stripQuotePrefixes(children, quoteLinePrefixes(ctx.source, node.from, node.to), ctx.source);
   const lineEnd = lineEndAt(ctx.source, node.from);
   const line = ctx.source.slice(node.from, lineEnd);
   const m = /^[ \t]*>[ \t]*\[!([a-z][a-z0-9-]*)\]([+-])?\s*/i.exec(line);
@@ -451,8 +480,8 @@ function listItemChildBlocks(item: SyntaxNode, ctx: Ctx): MarkdownBlock[] {
 function fencedCodeBlock(node: SyntaxNode, source: string): MarkdownBlock {
   let lang = "";
   const content: string[] = [];
-  let contentFrom = node.to;
-  let contentTo = node.to;
+  let contentFrom = -1;
+  let contentTo = -1;
   for (let c = node.firstChild; c; c = c.nextSibling) {
     if (c.type.name === "CodeInfo" && !lang) lang = source.slice(c.from, c.to).trim();
     if (c.type.name === "CodeText") {
@@ -460,6 +489,13 @@ function fencedCodeBlock(node: SyntaxNode, source: string): MarkdownBlock {
       contentTo = c.to;
       content.push(source.slice(c.from, c.to));
     }
+  }
+  // 空正文没有 CodeText 子节点：内容区间取开围栏行之后的空区间——否则区间会落到块尾，
+  // 渲染层据此算出的开围栏标记会吞掉整块、闭围栏标记消失（无正文时也应有独立的围栏标记）
+  if (contentFrom < 0) {
+    const lineEnd = source.indexOf("\n", node.from);
+    contentFrom = lineEnd === -1 ? node.to : lineEnd + 1;
+    contentTo = contentFrom;
   }
   return {
     kind: "fencedCode",
