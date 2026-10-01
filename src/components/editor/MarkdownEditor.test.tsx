@@ -362,3 +362,28 @@ describe("列表行 Enter 延续", () => {
     expect(onChange).not.toHaveBeenCalled();
   });
 });
+
+describe("任务勾选框点击写回", () => {
+  it("大写 [X] 的已勾选任务项点击后写回未勾选", () => {
+    const onChange = vi.fn();
+    const { container } = render(
+      <MarkdownEditor body={"- [X] 甲"} syncSeq={0} readOnly={false} onBodyChange={onChange} />,
+    );
+    const checkbox = container.querySelector("input.md-editor-checkbox") as HTMLInputElement;
+    expect(checkbox).not.toBeNull();
+    expect(checkbox.checked).toBe(true); // 解析侧按大小写不敏感判定，大写同样渲染为已勾选
+    fireEvent.mouseDown(checkbox, { button: 0 });
+    expect(onChange.mock.calls.at(-1)?.[0]).toBe("- [ ] 甲");
+  });
+
+  it("未勾选任务项点击后写回小写 x", () => {
+    const onChange = vi.fn();
+    const { container } = render(
+      <MarkdownEditor body={"- [ ] 甲"} syncSeq={0} readOnly={false} onBodyChange={onChange} />,
+    );
+    const checkbox = container.querySelector("input.md-editor-checkbox") as HTMLInputElement;
+    expect(checkbox.checked).toBe(false);
+    fireEvent.mouseDown(checkbox, { button: 0 });
+    expect(onChange.mock.calls.at(-1)?.[0]).toBe("- [x] 甲");
+  });
+});

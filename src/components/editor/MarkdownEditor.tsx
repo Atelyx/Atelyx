@@ -704,10 +704,11 @@ export function MarkdownEditor({
         const from = item ? Number(item.getAttribute("data-md-from")) : NaN;
         if (!Number.isFinite(from)) return;
         const raw = textRef.current.slice(from, from + 200);
-        const m = /([-+*]|\d+[.)])[ \t]+\[( |x)\]/.exec(raw);
+        // 大小写不敏感：内核按 /x/i 判定勾选态，`[X]` 也渲染为已勾选，点击必须能切回来
+        const m = /([-+*]|\d+[.)])[ \t]+\[( |x)\]/i.exec(raw);
         if (!m) return;
         const marker = from + m.index + m[0].length - 2;
-        const next = textRef.current.slice(0, marker) + (m[2] === "x" ? " " : "x") + textRef.current.slice(marker + 1);
+        const next = textRef.current.slice(0, marker) + (m[2].toLowerCase() === "x" ? " " : "x") + textRef.current.slice(marker + 1);
         applyText(next, marker);
         return;
       }
