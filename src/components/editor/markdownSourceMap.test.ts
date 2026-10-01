@@ -55,6 +55,18 @@ describe("偏移 ↔ DOM 映射", () => {
     expect(pointToOffset(codeIndex, point!.node, point!.offset)).toBe(atomic.from);
   });
 
+  it("空行行元素各自锚到其零宽字符（光标驻留与点击直接落在对应空行上）", () => {
+    const { index } = mount("甲\n\n\n乙");
+    const gaps = index.atomics.filter((a) => a.from === a.to);
+    expect(gaps).toHaveLength(2);
+    // 每个空行的偏移各自锚到自己的行元素（无几何换算）
+    for (const gap of gaps) {
+      const point = offsetToPoint(index, gap.from);
+      expect(point?.node, `offset ${gap.from}`).toBe(gap.el.firstChild);
+      expect(pointToOffset(index, point!.node, point!.offset)).toBe(gap.from);
+    }
+  });
+
   it("blockAtOffset 命中所在块", () => {
     const { index: multi } = mount("para\n\nsecond");
     const first = blockAtOffset(multi, 1);

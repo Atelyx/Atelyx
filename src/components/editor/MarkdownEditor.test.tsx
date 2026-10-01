@@ -121,3 +121,25 @@ describe("外点判定与活动块重建的时序", () => {
     expect(hits).toEqual([true, false]);
   });
 });
+
+describe("列表行 Enter 延续", () => {
+  /** 聚焦输入面并把光标移到指定偏移（经 document selectionchange 驱动 applySelection）。 */
+  function moveCaret(ta: HTMLTextAreaElement, offset: number): void {
+    ta.focus();
+    ta.setSelectionRange(offset, offset);
+    document.dispatchEvent(new Event("selectionchange"));
+  }
+
+  it("输入面上的 Enter 不被原生控件守卫排除：列表行拆分并延续标记", () => {
+    const onChange = vi.fn();
+    const { container } = render(
+      <MarkdownEditor body={"- 甲项\n- 乙项"} syncSeq={0} readOnly={false} onBodyChange={onChange} />,
+    );
+    const ta = container.querySelector("textarea") as HTMLTextAreaElement;
+    moveCaret(ta, 3); // "- 甲|项"
+    fireEvent.keyDown(ta, { key: "Enter" });
+    expect(onChange).toHaveBeenCalled();
+    const latest = onChange.mock.calls.at(-1)?.[0] as string;
+    expect(latest).toBe("- 甲\n- 项\n- 乙项");
+  });
+});

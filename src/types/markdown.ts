@@ -24,10 +24,10 @@ export type InlineSpan =
   | { kind: "code"; from: number; to: number; text: string }
   | { kind: "mathInline"; from: number; to: number; tex: string }
   | { kind: "comment"; from: number; to: number }
-  | { kind: "link"; from: number; to: number; href: string; label: string; form: LinkForm }
+  | { kind: "link"; from: number; to: number; href: string; label: string; form: LinkForm; title: string | null }
   | { kind: "autolink"; from: number; to: number; href: string; label: string }
   | { kind: "wiki"; from: number; to: number; target: string; label: string }
-  | { kind: "image"; from: number; to: number; src: string; alt: string; width: string | null; height: string | null }
+  | { kind: "image"; from: number; to: number; src: string; alt: string; width: string | null; height: string | null; title: string | null }
   | { kind: "tag"; from: number; to: number; tag: string }
   | { kind: "footnoteRef"; from: number; to: number; label: string }
   | { kind: "mention"; from: number; to: number; key: string; label: string }

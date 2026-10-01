@@ -18,6 +18,48 @@ export interface EditSinkCallbacks {
   onCompositionChange(composing: boolean): void;
 }
 
+/**
+ * 列表行 Enter 的文本变换：光标所在行是列表标记行时延续该项——
+ * 无序沿用同字符、有序序号 +1（保留定界符）、任务项带空任务框，缩进保持同级；
+ * 空项（标记后无内容）Enter 清掉整行标记退出列表。
+ * 非列表标记行返回 null（走浏览器默认换行）。
+ */
+export function listEnterEdit(text: string, from: number): { text: string; cursor: number } | null {
+  const lineStart = text.lastIndexOf("\n", Math.max(0, from - 1)) + 1;
+  const lineEnd = text.indexOf("\n", from) === -1 ? text.length : text.indexOf("\n", from);
+  const m = /^(\s*)([-+*]|(\d+)([.)]))[ \t]+(\[[ xX]\][ \t]+)?/.exec(text.slice(lineStart, lineEnd));
+  if (!m) return null;
+  const indent = m[1] ?? "";
+  const marker = m[2]!;
+  const num = m[3];
+  const delim = m[4];
+  const task = m[5];
+  if (text.slice(lineStart + m[0].length, lineEnd).trim() === "") {
+    // 空项 Enter 退出列表：整行标记清掉，光标到行首
+    return { text: text.slice(0, lineStart) + text.slice(lineEnd), cursor: lineStart };
+  }
+  const nextMarker = num !== undefined && delim !== undefined ? `${Number(num) + 1}${delim}` : marker;
+  const insert = `\n${indent}${nextMarker} ${task ? "[ ] " : ""}`;
+  return { text: text.slice(0, from) + insert + text.slice(from), cursor: from + insert.length };
+}
+
+/** 按元素当前字体以 pre 布局测量文本宽度（与 textarea 内部行内布局同构）。 */
+function measurePreWidth(el: HTMLTextAreaElement, text: string): number {
+  const style = getComputedStyle(el);
+  const probe = document.createElement("span");
+  probe.style.cssText = "position:absolute;top:-9999px;white-space:pre;";
+  probe.style.fontFamily = style.fontFamily;
+  probe.style.fontSize = style.fontSize;
+  probe.style.fontWeight = style.fontWeight;
+  probe.style.fontStyle = style.fontStyle;
+  probe.style.letterSpacing = style.letterSpacing;
+  probe.textContent = text;
+  document.body.appendChild(probe);
+  const width = probe.offsetWidth;
+  probe.remove();
+  return width;
+}
+
 const SINK_STYLE = [
   "position:absolute",
   "top:0",
@@ -42,6 +84,8 @@ export class MarkdownEditSink {
   #applyingExternal = false;
   /** 原生历史开关：按文件撤销栈接管时关（画布草稿等无宿主撤销链的场景保留原生撤销）。 */
   #interceptHistory: boolean;
+  /** 内部行高缓存（white-space:pre 下每行等高，字体不变则恒定）。 */
+  #lineH: number | null = null;
 
   constructor(host: HTMLElement, callbacks: EditSinkCallbacks, options: { interceptHistory?: boolean } = {}) {
     this.#callbacks = callbacks;
@@ -81,6 +125,7 @@ export class MarkdownEditSink {
     this.el.setSelectionRange(Math.min(from, max), Math.min(to, max));
     this.#applyingExternal = false;
     this.#callbacks.onSelectionChange(this.el.selectionStart ?? 0, this.el.selectionEnd ?? 0);
+    this.syncScroll();
   }
 
   /** 程序化设置选区（点击落点/外部定位）；focus=true 时把焦点交给输入面。 */
@@ -92,14 +137,41 @@ export class MarkdownEditSink {
     if (focus && document.activeElement !== this.el) this.el.focus({ preventScroll: true });
     this.el.setSelectionRange(start, end);
     this.#callbacks.onSelectionChange(start, end);
+    this.syncScroll();
   }
 
-  /** 把输入面挪到光标矩形处，让输入法候选框跟随真实光标位置（矩形为编辑面宿主坐标）。 */
-  moveTo(rect: { left: number; top: number; height: number } | null): void {
+  /** 把输入面挪到光标矩形处，让输入法候选框跟随真实光标位置（矩形为编辑面宿主坐标）。
+   *  高度由 syncScroll 按内部行高管理（滚动窗口须容纳整行，末行才能对齐）。 */
+  moveTo(rect: { left: number; top: number } | null): void {
     if (!rect) return;
     this.el.style.left = `${Math.round(rect.left)}px`;
     this.el.style.top = `${Math.round(rect.top)}px`;
-    this.el.style.height = `${Math.max(1, Math.round(rect.height))}px`;
+  }
+
+  /**
+   * 内部滚动对齐：输入法候选窗锚定 textarea 内组合光标的视口坐标。textarea
+   * （white-space:pre）内部按换行符分行、行内横向展开——光标的内部坐标 =
+   * 前置行数 × 行高 + 行内前置文本宽，两者都会让候选窗偏离 moveTo 定位的光标处。
+   * 把内部滚动滚到光标行列，其视口坐标即贴回原点；行高按内容总高 / 总行数实测缓存，
+   * 行内宽度按输入面当前字体测量（与内部布局同构的 pre 布局）。
+   */
+  syncScroll(): void {
+    const el = this.el;
+    const value = el.value;
+    if (!value) return;
+    if (this.#lineH === null) {
+      const totalLines = (value.match(/\n/g) ?? []).length + 1;
+      this.#lineH = el.scrollHeight / totalLines;
+      // 滚动窗口至少容纳一行：文档末行也能滚到光标视口顶（height 过小会被 maxScroll 钳制）
+      el.style.height = `${this.#lineH}px`;
+    }
+    const at = Math.max(el.selectionStart ?? 0, el.selectionEnd ?? 0);
+    const before = value.slice(0, at);
+    const targetTop = (before.match(/\n/g) ?? []).length * this.#lineH;
+    const lineStart = before.lastIndexOf("\n") + 1;
+    const targetLeft = lineStart < at ? measurePreWidth(el, value.slice(lineStart, at)) : 0;
+    if (Math.abs(el.scrollTop - targetTop) >= 1) el.scrollTop = targetTop;
+    if (Math.abs(el.scrollLeft - targetLeft) >= 1) el.scrollLeft = targetLeft;
   }
 
   focus(): void {
@@ -125,6 +197,7 @@ export class MarkdownEditSink {
   #onCompositionStart = (): void => {
     this.#composing = true;
     this.#callbacks.onCompositionChange(true);
+    this.syncScroll();
   };
 
   #onCompositionEnd = (): void => {
@@ -144,6 +217,7 @@ export class MarkdownEditSink {
   #onSelectionChange = (): void => {
     if (document.activeElement !== this.el) return;
     this.#callbacks.onSelectionChange(this.el.selectionStart ?? 0, this.el.selectionEnd ?? 0);
+    this.syncScroll();
   };
 }
 

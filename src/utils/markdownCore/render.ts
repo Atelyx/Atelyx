@@ -7,7 +7,7 @@
  */
 import katex from "katex";
 import { sanitizeHtmlFragment } from "@/utils/htmlSanitize";
-import type { InlineSpan, MarkdownBlock, RenderOptions } from "@/types/markdown";
+import type { InlineSpan, MarkdownBlock, MarkdownListItem, RenderOptions } from "@/types/markdown";
 import { parseMarkdown, parseInlineRange } from "./parse";
 
 /** KaTeX 渲染结果按输入缓存（上限 300，与既有做法一致）；空串 = 解析失败。 */
@@ -29,10 +29,65 @@ function renderKatexHtml(tex: string, display: boolean): string {
 
 export function renderMarkdownToHtml(source: string, options: RenderOptions = {}): string {
   const doc = parseMarkdown(source, options);
-  return doc.blocks.map((b) => renderBlock(b, options, doc.source)).join("");
+  return renderDocument(doc.blocks, doc.source, options, (b) => renderBlock(b, options, doc.source));
 }
 
-/** 块以源码形态渲染（编辑面用：光标所在块与代码块回显 markdown 原文，便于直接改标记）。 */
+/**
+ * 文档级渲染：块间空行之外，文首/文末的源码空行同样渲染为行元素——
+ * 文末按 Enter 开出的空行有真实行高与光标锚（只在块间渲染时文末新行无处显示）。
+ */
+function renderDocument(
+  blocks: readonly MarkdownBlock[],
+  source: string,
+  options: RenderOptions,
+  renderOne: (block: MarkdownBlock) => string,
+): string {
+  if (blocks.length === 0) return renderBlankLines(source, 0, source.length, options);
+  let html = renderBlankLines(source, 0, blocks[0]!.from, options);
+  html += renderBlocks(blocks, source, options, renderOne);
+  html += renderBlankLines(source, blocks[blocks.length - 1]!.to, source.length, options);
+  return html;
+}
+
+/**
+ * 块序列渲染：相邻块之间的源码空行渲染为真实空行行元素（所见即所得——源码怎么空行，
+ * 渲染就逐行怎么间隔；块级垂直外边距不参与，垂直间距 = 空行数 × 行高）。
+ * 顶层、引用内、列表项段落间共用。
+ */
+function renderBlocks(
+  blocks: readonly MarkdownBlock[],
+  source: string,
+  options: RenderOptions,
+  renderOne: (block: MarkdownBlock) => string,
+): string {
+  let html = "";
+  let prev: MarkdownBlock | null = null;
+  for (const block of blocks) {
+    if (prev) html += renderBlankLines(source, prev.to, block.from, options);
+    html += renderOne(block);
+    prev = block;
+  }
+  return html;
+}
+
+/** 空行行元素：每个源码空行一个一行高的真实行。编辑态带该空行的源偏移（点区间）
+ *  与零宽字符锚——光标驻留、点击命中都直接落在空行上，无需几何换算。
+ *  首段 = 前块行尾残余、末段 = 后块首行前缀；纯空白行与引用的空延续行（`>`）都算空行。 */
+function renderBlankLines(source: string, from: number, to: number, options: RenderOptions): string {
+  const lines = source.slice(from, to).split("\n");
+  let html = "";
+  let offset = from;
+  for (let i = 1; i < lines.length - 1; i++) {
+    offset += lines[i - 1]!.length + 1;
+    if (!/^[\s>]*$/.test(lines[i]!)) continue;
+    const at = options.offsets ? ` data-md-from="${offset}" data-md-to="${offset}"` : "";
+    const anchor = options.offsets ? "\u200B" : "";
+    html += `<div class="md-editor-gap"${at}>${anchor}</div>`;
+  }
+  return html;
+}
+
+/** 块以源码形态渲染（编辑面用：光标所在块回显 markdown 原文，便于直接改标记）。 */
 function renderBlockSource(block: { from: number; to: number; kind: string }, source: string, options: RenderOptions): string {
   const raw = source.slice(block.from, block.to);
   const inner = options.offsets
@@ -42,7 +97,7 @@ function renderBlockSource(block: { from: number; to: number; kind: string }, so
 }
 
 /**
- * 编辑形态渲染：光标所在块与代码块显示源码、其余块渲染——与只读形态共用同一套块渲染器，
+ * 编辑形态渲染：光标所在块显示源码、其余块渲染——与只读形态共用同一套块渲染器，
  * 因此「预览 ⇄ 编辑」只切换活动块的呈现，不产生两套视觉。
  */
 export function renderMarkdownEditHtml(
@@ -50,14 +105,15 @@ export function renderMarkdownEditHtml(
   options: RenderOptions & { activeOffset?: number } = {},
 ): string {
   const doc = parseMarkdown(source, options);
-  return doc.blocks
-    .map((block) => {
-      const active =
-        options.activeOffset !== undefined && options.activeOffset >= block.from && options.activeOffset <= block.to;
-      const code = block.kind === "fencedCode" || block.kind === "indentedCode";
-      return active || code ? renderBlockSource(block, source, options) : renderBlock(block, options, doc.source);
-    })
-    .join("");
+  return renderDocument(doc.blocks, doc.source, options, (block) => {
+    const activeOffset = options.activeOffset;
+    const active = activeOffset !== undefined && activeOffset >= block.from && activeOffset <= block.to;
+    // 列表项级编辑：活动判定细到项（嵌套下探到最小项；空项恒渲染态显示 marker），只有所在项回显源码
+    if (active && block.kind === "list") {
+      return renderList(block, options, doc.source, blockAttrs(block, options), activeOffset);
+    }
+    return active ? renderBlockSource(block, source, options) : renderBlock(block, options, doc.source);
+  });
 }
 
 /** 编辑面定位属性：offsets 关闭时为空串，插件侧拿到的 HTML 与只读渲染完全一致。 */
@@ -72,7 +128,7 @@ function blockAttrs(block: { from: number; to: number; kind: string }, options: 
     : "";
 }
 
-function renderBlock(block: MarkdownBlock, options: RenderOptions, source: string): string {
+function renderBlock(block: MarkdownBlock, options: RenderOptions, source: string, activeOffset?: number): string {
   const at = blockAttrs(block, options);
   switch (block.kind) {
     case "heading":
@@ -80,7 +136,11 @@ function renderBlock(block: MarkdownBlock, options: RenderOptions, source: strin
     case "paragraph":
       return `<p${at}>${renderSpans(block.inline, options, source)}</p>`;
     case "blockquote": {
-      const inner = block.children.map((c) => renderBlock(c, options, source)).join("");
+      // 引用维持整块源码态（嵌套在列表项内时由项级渲染递归传入活动偏移）
+      if (activeOffset !== undefined && activeOffset >= block.from && activeOffset <= block.to) {
+        return renderBlockSource(block, source, options);
+      }
+      const inner = renderBlocks(block.children, source, options, (c) => renderBlock(c, options, source, activeOffset));
       if (block.callout) {
         const badge = `<span class="md-editor-callout-badge">${escapeHtml(block.callout)}</span>`;
         return `<blockquote class="md-callout callout-${escapeHtml(block.callout)}"${at}>${badge}${inner}</blockquote>`;
@@ -88,7 +148,7 @@ function renderBlock(block: MarkdownBlock, options: RenderOptions, source: strin
       return `<blockquote class="md-quote"${at}>${inner}</blockquote>`;
     }
     case "list":
-      return renderList(block, options, source, at);
+      return renderList(block, options, source, at, activeOffset);
     case "fencedCode":
       return renderCodeBlock(block, options, at);
     case "indentedCode":
@@ -113,35 +173,98 @@ function renderBlock(block: MarkdownBlock, options: RenderOptions, source: strin
  * 列表渲染：圆点/序号由自绘 `md-editor-list-marker` 承载（有序项保留源序号），容器打上
  * `md-editor-list` 类供样式层关闭原生 marker（防双重显示；raw HTML 中的列表不受影响）。
  * 项内容 = 剥标记后的首段行内片段 + 递归渲染的嵌套子块。
+ * 项间源码空行折算为真实空行行元素（与块间同语义）；编辑态传 activeOffset 时逐项判定活动，
+ * 光标落在嵌套子列表的项内时让位给那一项，只有最小项回显源码，其余项保持渲染；
+ * 空项（只有标记无内容）恒渲染态，自绘 marker 即输入 "- "/"1. " 的即时反馈。
  */
 function renderList(
   block: Extract<MarkdownBlock, { kind: "list" }>,
   options: RenderOptions,
   source: string,
   containerAttrs: string,
+  activeOffset?: number,
 ): string {
   const tag = block.ordered ? "ol" : "ul";
-  const items = block.items.map((item, index) => {
-    const raw = source.slice(item.from, item.to);
-    const m = /^[ \t]*([-+*]|\d+[.)])[ \t]+(\[[ xX]\][ \t]+)?/.exec(raw);
-    const contentFrom = item.from + (m ? m[0].length : 0);
-    // 首段内容止于第一个嵌套子块起点（无子块则到项尾），嵌套块自身递归渲染
-    const contentTo = item.children[0]?.from ?? item.to;
-    const content = renderSpans(
-      parseInlineRange(source, contentFrom, Math.max(contentFrom, contentTo), options),
-      options,
-      source,
-    );
-    const inner = item.children.map((c) => renderBlock(c, options, source)).join("");
-    const itemAttrs = offsetAttrs(options, item.from, item.to);
-    if (item.task) {
-      const checked = item.checked ? " checked" : "";
-      return `<li${itemAttrs}><input type="checkbox" class="md-editor-checkbox"${checked} disabled>${content}${inner}</li>`;
+  const parts: string[] = [];
+  block.items.forEach((item, index) => {
+    if (index > 0) {
+      const prev = block.items[index - 1]!;
+      parts.push(renderBlankLines(source, prev.to, item.from, options));
     }
-    const marker = block.ordered ? m?.[1] ?? `${index + 1}.` : "•";
-    return `<li${itemAttrs}><span class="md-editor-list-marker">${escapeHtml(marker)}</span>${content}${inner}</li>`;
+    const isActive =
+      activeOffset !== undefined &&
+      activeOffset >= item.from &&
+      activeOffset <= item.to &&
+      !activeInNestedItem(activeOffset, item) &&
+      !itemIsEmpty(source, item);
+    parts.push(
+      isActive
+        ? `<li${blockAttrs({ ...item, kind: "list" }, options)}>${renderBlockSource({ ...item, kind: "list" }, source, options)}</li>`
+        : renderListItem(item, block, index, options, source, activeOffset),
+    );
   });
-  return `<${tag} class="md-editor-list"${containerAttrs}>${items.join("")}</${tag}>`;
+  return `<${tag} class="md-editor-list"${containerAttrs}>${parts.join("")}</${tag}>`;
+}
+
+/** 列表项标记（含任务框）：项内容剥取与空项判定共用。 */
+const ITEM_MARKER_RE = /^[ \t]*([-+*]|\d+[.)])[ \t]+(\[[ xX]\][ \t]+)?/;
+
+/** 项是否只有标记无内容：空项保持渲染态（源码态没有可编辑的内容）。 */
+function itemIsEmpty(source: string, item: MarkdownListItem): boolean {
+  const m = ITEM_MARKER_RE.exec(source.slice(item.from, item.to));
+  if (!m) return false;
+  const contentEnd = item.children[0]?.from ?? item.to;
+  return source.slice(item.from + m[0].length, contentEnd).trim() === "";
+}
+
+/** 活动偏移是否落在项内嵌套列表的某个子项中（引用内的列表同样下探）。 */
+function activeInNestedItem(offset: number, item: MarkdownListItem): boolean {
+  return item.children.some((child) => nestedItemContains(offset, child));
+}
+
+function nestedItemContains(offset: number, block: MarkdownBlock): boolean {
+  if (block.kind === "list") {
+    return block.items.some(
+      (it) => (offset >= it.from && offset <= it.to) || activeInNestedItem(offset, it),
+    );
+  }
+  if (block.kind === "blockquote") {
+    return block.children.some((child) => nestedItemContains(offset, child));
+  }
+  return false;
+}
+
+/** 单个列表项渲染：li 带项级块标记（编辑面的活动判定与偏移映射细到项）。 */
+function renderListItem(
+  item: MarkdownListItem,
+  block: Extract<MarkdownBlock, { kind: "list" }>,
+  index: number,
+  options: RenderOptions,
+  source: string,
+  activeOffset?: number,
+): string {
+  const raw = source.slice(item.from, item.to);
+  const m = ITEM_MARKER_RE.exec(raw);
+  const contentFrom = item.from + (m ? m[0].length : 0);
+  // 首段内容止于第一个嵌套子块起点（无子块则到项尾），嵌套块自身递归渲染
+  const contentTo = item.children[0]?.from ?? item.to;
+  // 空项编辑态放零宽锚：渲染态下光标可驻留项内容位，输入即落于此
+  const content =
+    options.offsets && itemIsEmpty(source, item)
+      ? `<span data-md-from="${contentFrom}" data-md-to="${contentFrom}">\u200B</span>`
+      : renderSpans(
+          parseInlineRange(source, contentFrom, Math.max(contentFrom, contentTo), options),
+          options,
+          source,
+        );
+  const inner = renderBlocks(item.children, source, options, (c) => renderBlock(c, options, source, activeOffset));
+  const itemAttrs = blockAttrs({ ...item, kind: "list" }, options);
+  if (item.task) {
+    const checked = item.checked ? " checked" : "";
+    return `<li${itemAttrs}><input type="checkbox" class="md-editor-checkbox"${checked} disabled>${content}${inner}</li>`;
+  }
+  const marker = block.ordered ? m?.[1] ?? `${index + 1}.` : "•";
+  return `<li${itemAttrs}><span class="md-editor-list-marker">${escapeHtml(marker)}</span>${content}${inner}</li>`;
 }
 
 function renderCodeBlock(block: Extract<MarkdownBlock, { kind: "fencedCode" }>, options: RenderOptions, attrs: string): string {
@@ -238,13 +361,14 @@ function renderLink(span: Extract<InlineSpan, { kind: "link" }>, source: string,
   const at = offsetAttrs(options, span.from, span.to);
   const href = escapeHtml(span.href);
   const label = escapeHtml(span.label);
+  const tip = escapeHtml(span.title ?? span.href);
   switch (span.form) {
     case "external":
-      return `<span class="md-editor-link"${at} data-md-href="${href}" title="${href}">${label}</span>`;
+      return `<span class="md-editor-link"${at} data-md-href="${href}" title="${tip}">${label}</span>`;
     case "path":
-      return `<span class="md-editor-internal-link"${at} data-md-href="${href}">${label}</span>`;
+      return `<span class="md-editor-internal-link"${at} data-md-href="${href}" title="${tip}">${label}</span>`;
     case "create":
-      return `<span class="md-editor-internal-link md-editor-internal-link-missing"${at} data-md-href="${href}">${label}</span>`;
+      return `<span class="md-editor-internal-link md-editor-internal-link-missing"${at} data-md-href="${href}" title="${tip}">${label}</span>`;
     case "wiki":
       return `<span class="md-editor-internal-link"${at} data-md-wiki="${href}">${label}</span>`;
     default:
@@ -259,7 +383,7 @@ function renderImage(span: Extract<InlineSpan, { kind: "image" }>, options: Rend
   const attrs = [
     `data-md-src="${escapeHtml(span.src)}"`,
     `data-md-alt="${escapeHtml(span.alt)}"`,
-    `title="${escapeHtml(span.alt || span.src)}"`,
+    `title="${escapeHtml(span.title || span.alt || span.src)}"`,
   ];
   if (options.offsets) {
     attrs.unshift(`data-md-from="${span.from}"`, `data-md-to="${span.to}"`);

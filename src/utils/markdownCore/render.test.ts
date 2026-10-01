@@ -4,7 +4,7 @@
  * 覆盖类名契约、文本转义、raw HTML 清洗（script/on* 剥除）。
  */
 import { describe, expect, it } from "vitest";
-import { renderMarkdownToHtml } from "./render";
+import { renderMarkdownEditHtml, renderMarkdownToHtml } from "./render";
 
 const options = {
   mentions: [{ key: "u1", label: "Alice" }],
@@ -121,6 +121,25 @@ describe("renderMarkdownToHtml 转义与清洗", () => {
     expect(out).not.toContain("<script");
     expect(out).not.toContain("alert(1)");
   });
+
+  it("行内 HTML 注释隐藏（注释内容不渲染，首尾文本保留）", () => {
+    const out = renderMarkdownToHtml("前文 <!-- 注释内容 --> 后文");
+    expect(out).not.toContain("注释内容");
+    expect(out).toContain("前文");
+    expect(out).toContain("后文");
+  });
+
+  it("列表项内的行内 HTML 注释隐藏", () => {
+    const out = renderMarkdownToHtml("- 注释：<!-- 这是注释，不会显示 -->\n");
+    expect(out).not.toContain("这是注释");
+    expect(out).toContain("注释：");
+  });
+
+  it("链接与图片的源码 title 透传到 title 属性", () => {
+    const out = renderMarkdownToHtml('[示例](https://a.com "站点标题")\n\n![替代](https://b.com/i.png "图片标题")');
+    expect(out).toContain('title="站点标题"');
+    expect(out).toContain('title="图片标题"');
+  });
 });
 
 describe("renderMarkdownToHtml 编辑面偏移模式", () => {
@@ -147,6 +166,131 @@ describe("renderMarkdownToHtml 编辑面偏移模式", () => {
   });
 });
 
+describe("renderMarkdownToHtml 空行行元素", () => {
+  it("块间每个源码空行渲染为一个真实行元素（所见即所得，间距 = 空行数 × 行高）", () => {
+    const out = renderMarkdownToHtml("甲\n\n\n\n乙");
+    expect(out).toBe('<p>甲</p>' + '<div class="md-editor-gap"></div>'.repeat(3) + '<p>乙</p>');
+  });
+
+  it("单个空行同样是一个行元素", () => {
+    const out = renderMarkdownToHtml("甲\n\n乙");
+    expect(out).toBe('<p>甲</p><div class="md-editor-gap"></div><p>乙</p>');
+  });
+
+  it("相邻块之间无空行时不插入行元素", () => {
+    const out = renderMarkdownToHtml("````js\nx\n````\n甲");
+    expect(out).not.toContain("md-editor-gap");
+  });
+
+  it("偏移模式每个空行带自己的点区间与零宽锚（光标可驻留、点击直接命中该空行）", () => {
+    const out = renderMarkdownToHtml("甲\n\n\n乙", { offsets: true });
+    expect(out).toBe(
+      '<p data-md-block data-md-kind="paragraph" data-md-from="0" data-md-to="1">' +
+        '<span data-md-from="0" data-md-to="1">甲</span></p>' +
+        '<div class="md-editor-gap" data-md-from="2" data-md-to="2">\u200B</div>' +
+        '<div class="md-editor-gap" data-md-from="3" data-md-to="3">\u200B</div>' +
+        '<p data-md-block data-md-kind="paragraph" data-md-from="4" data-md-to="5">' +
+        '<span data-md-from="4" data-md-to="5">乙</span></p>',
+    );
+  });
+
+  it("CRLF 行尾残余不影响空行计数", () => {
+    const out = renderMarkdownToHtml("甲\r\n\r\n\r\n乙");
+    expect(out.match(/md-editor-gap/g) ?? []).toHaveLength(2);
+  });
+
+  it("引用内的段落间空行同样渲染为行元素", () => {
+    const quote = renderMarkdownToHtml("> 甲\n>\n> 乙");
+    expect(quote.match(/md-editor-gap/g) ?? []).toHaveLength(1);
+  });
+
+  it("松散列表项的续段空行不渲染行元素（解析层把续段并入单一段落，项内无块间隙）", () => {
+    const loose = renderMarkdownToHtml("- 甲\n\n  乙");
+    expect(loose.match(/md-editor-gap/g) ?? []).toHaveLength(0);
+  });
+
+  it("文档首部的空行同样渲染为行元素（文首 Enter 开出的新行可见）", () => {
+    const out = renderMarkdownToHtml("\n\n甲");
+    expect(out).toBe('<div class="md-editor-gap"></div><p>甲</p>');
+  });
+
+  it("文档尾部的空行同样渲染为行元素（文末 Enter 开出的新行可见，光标有落点）", () => {
+    const out = renderMarkdownToHtml("甲\n\n");
+    expect(out).toBe('<p>甲</p><div class="md-editor-gap"></div>');
+  });
+
+  it("文末单个换行（正常文件结尾）不产生多余空行", () => {
+    const out = renderMarkdownToHtml("甲\n");
+    expect(out).toBe("<p>甲</p>");
+  });
+
+  it("首尾空行在偏移模式带点区间与零宽锚", () => {
+    const head = renderMarkdownToHtml("\n\n甲", { offsets: true });
+    expect(head).toContain('<div class="md-editor-gap" data-md-from="1" data-md-to="1">\u200B</div>');
+    const tail = renderMarkdownToHtml("甲\n\n", { offsets: true });
+    expect(tail).toContain('<div class="md-editor-gap" data-md-from="2" data-md-to="2">\u200B</div>');
+  });
+});
+
+describe("renderMarkdownToHtml 列表项级编辑", () => {
+  it("列表项间空行同样渲染为行元素（与块间同语义）", () => {
+    const out = renderMarkdownToHtml("- 甲\n\n\n- 乙\n");
+    expect(out.match(/md-editor-gap/g) ?? []).toHaveLength(2);
+  });
+
+  it("空项（只有标记）编辑态恒渲染态：自绘 marker 在、内容位放零宽锚、不回显源码", () => {
+    const src = "- 甲\n- ";
+    const out = renderMarkdownEditHtml(src, { offsets: true, activeOffset: src.length });
+    expect(out).toContain('<span class="md-editor-list-marker">•</span>');
+    expect(out).not.toContain("md-editor-source");
+    // 光标驻留点 = 空项内容位（输入即落于此）
+    expect(out).toMatch(/<span data-md-from="\d+" data-md-to="\d+">\u200B<\/span>/);
+  });
+
+  it("编辑态列表逐项活动：所在项回显源码、其余项保持渲染", () => {
+    const src = "- 甲\n- 乙\n- 丙";
+    const out = renderMarkdownEditHtml(src, { offsets: true, activeOffset: 5 });
+    expect(out).toMatch(
+      /<li data-md-block data-md-kind="list" data-md-from="\d+" data-md-to="\d+"><div class="md-editor-source" data-md-block data-md-kind="list" data-md-from="\d+" data-md-to="\d+"><span data-md-from="\d+" data-md-to="\d+">- 乙<\/span><\/div><\/li>/,
+    );
+    expect(out).not.toContain("- 甲</span></div></li>");
+    expect(out).not.toContain("- 丙</span></div></li>");
+  });
+
+  it("编辑态渲染项也带项级块标记（活动判定与偏移映射细到项）", () => {
+    const out = renderMarkdownEditHtml("- 甲\n- 乙", { offsets: true, activeOffset: 5 });
+    expect(out).toMatch(/<li data-md-block data-md-kind="list" data-md-from="\d+" data-md-to="\d+"><span class="md-editor-list-marker">/);
+  });
+
+  it("代码块随活动判定：光标不在时保持渲染，光标进入才回显源码", () => {
+    const src = "```js\nconst x = 1;\n```";
+    const idle = renderMarkdownEditHtml(src, { offsets: true });
+    expect(idle).toContain("md-editor-code-head");
+    const active = renderMarkdownEditHtml(src, { offsets: true, activeOffset: 8 });
+    expect(active).toContain('<div class="md-editor-source"');
+    expect(active).toContain("```js");
+  });
+
+  it("嵌套列表下探到最小项：光标在子项内时仅子项回显源码，父项保持渲染", () => {
+    const src = "- 甲\n  - 乙\n- 丙";
+    const out = renderMarkdownEditHtml(src, { offsets: true, activeOffset: src.indexOf("乙") });
+    expect(out).toMatch(
+      /<li data-md-block data-md-kind="list" data-md-from="\d+" data-md-to="\d+"><div class="md-editor-source" data-md-block data-md-kind="list" data-md-from="\d+" data-md-to="\d+"><span data-md-from="\d+" data-md-to="\d+">- 乙<\/span><\/div><\/li>/,
+    );
+    expect(out).not.toContain("- 甲</span></div></li>");
+    expect(out).not.toContain("- 丙</span></div></li>");
+  });
+
+  it("引用内的列表同样下探：光标在引用内列表项时引用整块源码、外层项保持渲染", () => {
+    const src = "- 甲\n  > 引文\n  > - 内项";
+    const out = renderMarkdownEditHtml(src, { offsets: true, activeOffset: src.indexOf("内项") });
+    // 外层项保持渲染（marker 在），引用整块回显源码（无渲染形态包装，与顶层活动块一致）
+    expect(out).toContain('<span class="md-editor-list-marker">•</span>');
+    expect(out).not.toContain('<blockquote class="md-quote"');
+    expect(out).toMatch(/<div class="md-editor-source" data-md-block data-md-kind="blockquote" data-md-from="\d+" data-md-to="\d+">/);
+  });
+});
+
 describe("renderMarkdownToHtml 列表与边界回归", () => {
   it("列表容器带 md-editor-list 类（样式层据此关闭原生 marker 防双重显示）", () => {
     const out = renderMarkdownToHtml("- item\n- [x] done\n\n1. one\n");
@@ -168,6 +312,13 @@ describe("renderMarkdownToHtml 列表与边界回归", () => {
     expect(out).toContain("inner");
     expect(out).not.toContain("- inner");
     expect(out).not.toContain("- deep");
+  });
+
+  it("列表项内嵌标题：marker 与标题块为相邻兄弟，标题文本不重复", () => {
+    const out = renderMarkdownToHtml("- ### 卡片笔记法 概述\n");
+    expect(out).toBe(
+      '<ul class="md-editor-list"><li><span class="md-editor-list-marker">•</span><h3>卡片笔记法 概述</h3></li></ul>',
+    );
   });
 
   it("数学区间外的段落尾随文本保留", () => {

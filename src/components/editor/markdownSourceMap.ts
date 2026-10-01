@@ -79,10 +79,15 @@ export function offsetToPoint(index: SourceIndex, offset: number): { node: Node;
     }
   }
   for (const atomic of index.atomics) {
+    // 零宽锚片段（空行行元素 / 空项内容锚）：点区间无真文本，光标驻留在其零宽字符处
+    if (atomic.from === atomic.to) {
+      if (offset === atomic.from && atomic.el.firstChild) return { node: atomic.el.firstChild, offset: 0 };
+      continue;
+    }
     if (offset > atomic.from && offset <= atomic.to) {
-      // 原子片段内部没有可落点，贴到最近边界
-      const atEnd = offset === atomic.to;
-      const point = offsetToPoint(index, atEnd ? atomic.to : atomic.from);
+      // 原子片段内部没有可落点：起点贴起点，终点落兜底（终点不会再有更近的文本边界）
+      if (offset === atomic.to) continue;
+      const point = offsetToPoint(index, atomic.from);
       if (point) return point;
     }
   }

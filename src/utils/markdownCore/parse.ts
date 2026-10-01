@@ -48,12 +48,13 @@ export function inlineTagRanges(lineText: string, lineFrom: number): RangeInfo[]
 
 /** `[text](url)` / `![alt](url)`（含可选 title）解析；不匹配返回 null（保持原文）。
  *  URL 可空：`[名]()` 是「快捷新建同名笔记」语法，故两个正则的 URL 组都允许零字符。 */
-export function parseBracketLink(text: string): { label: string; url: string } | null {
+export function parseBracketLink(text: string): { label: string; url: string; title: string | null } | null {
   const m =
-    /^\[([^\]]*)\]\(([^)\s]*)(?:\s+["'`][^"'`]*["'`])?\)$/.exec(text) ||
+    /^\[([^\]]*)\]\(([^)\s]*)(?:\s+(["'`][^"'`]*["'`]))?\)$/.exec(text) ||
     /^\[([^\]]*)\]\(([^)]*)\)$/.exec(text);
   if (!m) return null;
-  return { label: m[1] ?? "", url: m[2]?.trim() ?? "" };
+  const quoted = m[3];
+  return { label: m[1] ?? "", url: m[2]?.trim() ?? "", title: quoted ? quoted.slice(1, -1) : null };
 }
 
 /** 行内数学 `$...$` 匹配区间（单 `$` 定界、内容不跨行、非 `$$`、内容不以空格起止）；
@@ -154,6 +155,7 @@ const ATOM_TYPES = new Set([
   ...CONTAINER_TYPES,
   ...LEAF_TYPES,
   "HTMLTag",
+  "Comment",
   "HardBreak",
   "Entity",
   "Escape",
@@ -653,6 +655,9 @@ function atomOf(node: SyntaxNode, ctx: Ctx): Candidate | null {
       const text = ctx.source.slice(from, to);
       return { from, to, span: { kind: "autolink", from, to, href: text, label: text } };
     }
+    case "Comment":
+      // 行内 HTML 注释与 `%%注释%%` 同语义：承载内容但不渲染
+      return { from, to, span: { kind: "comment", from, to } };
     case "HardBreak":
       return { from, to, span: { kind: "hardBreak", from, to } };
     case "Entity":
@@ -682,6 +687,7 @@ function linkSpan(node: SyntaxNode, ctx: Ctx): InlineSpan | null {
     href: parsed.url,
     label: parsed.label || parsed.url,
     form: classifyLink(parsed.label, parsed.url, ctx.options),
+    title: parsed.title,
   };
 }
 
@@ -708,7 +714,7 @@ function imageSpan(node: SyntaxNode, source: string): InlineSpan | null {
       height = parts[1] ?? null;
     }
   }
-  return { kind: "image", from: node.from, to: node.to, src: parsed.url, alt, width, height };
+  return { kind: "image", from: node.from, to: node.to, src: parsed.url, alt, width, height, title: parsed.title };
 }
 
 /** 围栏行内代码去定界反引号（`` ` `` 数量可不等）。 */

@@ -25,7 +25,7 @@ import type { PopupAnchor } from "@/components/common/PopupLayer";
 import { createLinkResolver, type MarkdownEditorLinks } from "./markdownLinks";
 import { attachMarkdownInteractions, decorateMarkdownControls, hydrateMarkdownImages } from "./markdownInteractions";
 import { blockAtOffset, buildSourceIndex, caretRect, pointToOffset, rangeRects, type SourceIndex } from "./markdownSourceMap";
-import { CaretOverlay, MarkdownEditSink, type RemoteCursor } from "./markdownInput";
+import { CaretOverlay, MarkdownEditSink, listEnterEdit, type RemoteCursor } from "./markdownInput";
 import type { Transaction } from "yjs";
 import type { NoteEditorBinding } from "@/types/noteSurface";
 
@@ -190,12 +190,28 @@ export function MarkdownEditor({
       if (!content) return;
       const scrollTop = scrollRef.current?.scrollTop ?? 0;
       const base = { resolveLink: createLinkResolver(linksRef.current), mentions: mentionsRef.current };
-      content.innerHTML = readOnlyRef.current
-        ? renderMarkdownToHtml(text, base)
-        : renderMarkdownEditHtml(text, { ...base, offsets: true, activeOffset });
-      const index = buildSourceIndex(content);
-      indexRef.current = index;
-      activeBlockRef.current = activeOffset === undefined ? null : blockAtOffset(index, activeOffset)?.from ?? null;
+      const paint = (offset: number | undefined): SourceIndex => {
+        content.innerHTML = readOnlyRef.current
+          ? renderMarkdownToHtml(text, base)
+          : renderMarkdownEditHtml(text, { ...base, offsets: true, activeOffset: offset });
+        const built = buildSourceIndex(content);
+        indexRef.current = built;
+        return built;
+      };
+      let index = paint(activeOffset);
+      // 光标不在任何块内（块间空行）时沿用上一活动块重绘：Enter 开新行/空行处输入后不整篇翻回渲染；
+      // 光标命中块时以新文本的块结构为准（插入可能拆分/合并块，旧偏移的归属已不可靠）
+      let activeFrom: number | null = null;
+      if (activeOffset !== undefined) {
+        const inBlock = blockAtOffset(index, activeOffset)?.from;
+        if (inBlock !== undefined) {
+          activeFrom = inBlock;
+        } else if (activeBlockRef.current !== null) {
+          activeFrom = activeBlockRef.current;
+          index = paint(activeFrom);
+        }
+      }
+      activeBlockRef.current = activeFrom;
       // 任务勾选框：可编辑面解除禁用（点击切换源码），只读面保持禁用展示
       if (!readOnlyRef.current && interactiveRef.current) {
         for (const box of Array.from(content.querySelectorAll("input.md-editor-checkbox"))) {
@@ -225,7 +241,7 @@ export function MarkdownEditor({
     overlay.setCaretRect(caret, origin);
     // 隐藏输入面按宿主坐标定位，让输入法候选框跟随真实光标
     sinkRef.current?.moveTo(
-      caret ? { left: caret.left - origin.left, top: caret.top - origin.top, height: caret.height } : null,
+      caret ? { left: caret.left - origin.left, top: caret.top - origin.top } : null,
     );
     if (followCaret && caret) {
       // 光标移出可视区时把内容滚回来（隐藏输入面不会带动滚动）
@@ -498,9 +514,9 @@ export function MarkdownEditor({
     if (!content || !index) return null;
     const hit = caretPointAt(x, y);
     if (!hit || !content.contains(hit.node)) return null;
+    const el = hit.node.nodeType === Node.ELEMENT_NODE ? (hit.node as Element) : hit.node.parentElement;
     const direct = pointToOffset(index, hit.node, hit.offset);
     if (direct !== null) return direct;
-    const el = hit.node.nodeType === Node.ELEMENT_NODE ? (hit.node as Element) : hit.node.parentElement;
     const block = el?.closest("[data-md-block]");
     const from = block ? Number(block.getAttribute("data-md-from")) : NaN;
     return Number.isFinite(from) ? from : null;
@@ -597,6 +613,28 @@ export function MarkdownEditor({
     [applyText],
   );
 
+  /** 列表行 Enter：光标在列表标记行时延续项标记（空项 Enter 退出列表），其余交浏览器原生换行。 */
+  const onHostKeyDown = useCallback(
+    (event: React.KeyboardEvent) => {
+      if (event.key !== "Enter" || event.shiftKey) return;
+      // 组合期 Enter 是输入法确认键，不拦
+      if (event.nativeEvent.isComposing || composingRef.current) return;
+      if (readOnlyRef.current) return;
+      const target = event.target as Element | null;
+      // 输入面（textarea）的按键正是编辑路径本身；其余原生控件上的按键不拦
+      if (target && target !== sinkRef.current?.el && target.closest(NATIVE_CONTROL_SELECTOR)) return;
+      const { from, to } = selRef.current;
+      if (to !== from) return; // 有选区：删除选区后换行走浏览器原生行为
+      const block = indexRef.current ? blockAtOffset(indexRef.current, from) : null;
+      if (block?.el.getAttribute("data-md-kind") !== "list") return;
+      const edit = listEnterEdit(textRef.current, from);
+      if (!edit) return;
+      event.preventDefault();
+      applyText(edit.text, edit.cursor);
+    },
+    [applyText],
+  );
+
   const editable = !readOnly;
   return (
     <>
@@ -608,6 +646,7 @@ export function MarkdownEditor({
         onMouseDown={editable ? onHostMouseDown : undefined}
         onMouseMove={editable ? onHostMouseMove : undefined}
         onMouseUp={editable ? onHostMouseUp : undefined}
+        onKeyDown={editable ? onHostKeyDown : undefined}
       >
         <div ref={scrollRef} className="md-edit-scroll">
           <div ref={contentRef} className="md-edit-content markdown-body" />
