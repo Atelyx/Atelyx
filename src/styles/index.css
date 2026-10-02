@@ -514,8 +514,12 @@ body {
   min-width: 1.25em;
   margin-left: -1.25em;
   color: var(--text-muted);
-  user-select: none;
   white-space: pre;
+}
+/* 自绘圆点/序号是渲染件、不可选中；揭示态的源标记是真实源码字符，
+   与其余源标记一致可选可复制（自绘选区与剪贴板复制据此取得 "- "） */
+.md-editor-list-marker {
+  user-select: none;
 }
 /* 无序项的小圆点：画在悬挂位左缘，与揭示态的源标记 "- " 对齐——不写字形是因为
    各平台回退字体对 "•" 的字宽与墨迹位置不同（全角字形墨迹居中，会整体偏右） */
