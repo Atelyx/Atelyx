@@ -794,7 +794,7 @@ export function NotePropertiesView({
           />
         ) : (
           <button
-            className="flex-1 min-w-0 truncate text-left text-sm leading-none py-0.5 px-1 rounded-sm hover:bg-[var(--hover)] hover:opacity-90 cursor-pointer transition-colors"
+            className="flex-1 min-w-0 truncate text-left text-sm leading-none py-0.5 px-1 rounded-[var(--radius-sm)] hover:bg-[var(--hover)] hover:opacity-90 cursor-pointer transition-colors"
             style={{ color: "var(--text-muted)" }}
             onClick={(e) => {
               keyChipWidthRef.current = e.currentTarget.offsetWidth;
@@ -824,7 +824,7 @@ export function NotePropertiesView({
           >
             #{String(item)}
             <button
-              className="ml-1 align-middle opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 hover:text-red-400"
+              className="ml-1 align-middle opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 hover:text-[var(--danger)]"
               onClick={(e) => {
                 e.stopPropagation();
                 removeArrayItem(key, i);
@@ -871,7 +871,7 @@ export function NotePropertiesView({
             <span className="opacity-60 mr-0.5">#</span>
             {item}
             <button
-              className="ml-1 align-middle opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 hover:text-red-400"
+              className="ml-1 align-middle opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 hover:text-[var(--danger)]"
               onClick={(e) => {
                 e.stopPropagation();
                 removeArrayItem(key, i);
@@ -949,7 +949,7 @@ export function NotePropertiesView({
             <span className="truncate">{String(item)}</span>
             {/* 删除钮恒显示（非字符串项也可删，删数组元素不破坏 YAML 类型） */}
             <button
-              className="ml-auto opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 hover:text-red-400 flex-shrink-0"
+              className="ml-auto opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 hover:text-[var(--danger)] flex-shrink-0"
               onClick={(e) => {
                 e.stopPropagation();
                 removeArrayItem(key, i);
@@ -1015,11 +1015,11 @@ export function NotePropertiesView({
       >
         <div className={hasProps ? "overflow-hidden" : undefined}>
           {parseError ? (
-            <div className="text-xs py-1 flex items-center gap-2" style={{ color: "#f87171" }}>
+            <div className="text-xs py-1 flex items-center gap-2" style={{ color: "var(--danger)" }}>
               <span>YAML 格式错误，请检查（属性面板暂不可编辑）</span>
               <button
                 className="px-1.5 py-0.5 rounded border hover:opacity-80 flex-shrink-0"
-                style={{ borderColor: "#f87171" }}
+                style={{ borderColor: "var(--danger)" }}
                 onClick={onOpenSource}
                 title="切换到源码模式查看并修复 YAML"
               >
@@ -1073,7 +1073,7 @@ export function NotePropertiesView({
                             </span>
                           )}
                           <button
-                            className="opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 hover:text-red-400 flex-shrink-0"
+                            className="opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 hover:text-[var(--danger)] flex-shrink-0"
                             onClick={() => removeField(key)}
                             title="删除属性"
                           >
@@ -1136,7 +1136,7 @@ export function NotePropertiesView({
                     ) : (
                       <span className="flex items-center gap-1.5 flex-1 min-w-0">
                         <span
-                          className="w-20 flex-shrink-0 truncate px-1 py-0.5 rounded-sm text-sm leading-none"
+                          className="w-20 flex-shrink-0 truncate px-1 py-0.5 rounded-[var(--radius-sm)] text-sm leading-none"
                           style={{ color: "var(--text-muted)" }}
                           title={newKey}
                         >
@@ -1186,7 +1186,7 @@ export function NotePropertiesView({
                     )}
                   </div>
                   {duplicateKey !== null && (
-                    <div className="text-xs flex items-center gap-2" style={{ color: "#f87171" }}>
+                    <div className="text-xs flex items-center gap-2" style={{ color: "var(--danger)" }}>
                       <span className="truncate">属性「{duplicateKey}」已存在，请改键名或编辑该属性</span>
                     </div>
                   )}

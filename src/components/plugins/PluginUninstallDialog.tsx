@@ -45,12 +45,12 @@ export function PluginUninstallDialog({
       onClick={onCancel}
     >
       <div
-        className="w-80 max-w-[calc(100vw-2rem)] rounded-lg border shadow-xl p-4"
-        style={{ background: "var(--bg-secondary)", borderColor: "var(--border)" }}
+        className="w-80 max-w-[calc(100vw-2rem)] rounded-[var(--radius-lg)] border shadow-[var(--shadow-pop)] p-4"
+        style={{ background: "var(--bg-overlay)", borderColor: "var(--border)" }}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-start gap-2 mb-2">
-          <AlertTriangle size={16} className="mt-0.5 flex-shrink-0" style={{ color: "#f59e0b" }} />
+          <AlertTriangle size={16} className="mt-0.5 flex-shrink-0" style={{ color: "var(--warning)" }} />
           <h3 className="text-sm font-medium leading-5" style={{ color: "var(--text-primary)" }}>
             {title}
           </h3>
@@ -68,7 +68,7 @@ export function PluginUninstallDialog({
           </button>
           <button
             onClick={onDeleteAll}
-            className="px-3 py-1.5 text-xs rounded bg-red-600 hover:bg-red-500 text-white"
+            className="px-3 py-1.5 text-xs rounded bg-[var(--danger-fill)] hover:opacity-90 text-white"
           >
             彻底卸载（删除全部数据）
           </button>

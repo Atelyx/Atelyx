@@ -31,12 +31,12 @@ export function DragGhost() {
       }}
     >
       <div
-        className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs border"
+        className="flex items-center gap-1.5 px-2.5 py-1 rounded-[var(--radius-sm)] text-xs border"
         style={{
-          background: "var(--bg-secondary)",
+          background: "var(--bg-overlay)",
           borderColor: "var(--accent)",
           color: "var(--text-primary)",
-          boxShadow: "0 4px 12px rgba(0,0,0,0.25)",
+          boxShadow: "var(--shadow-pop)",
         }}
       >
         {meta.icon}

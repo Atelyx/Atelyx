@@ -85,8 +85,8 @@ export function SpaceAuthDialog({ mode, onClose }: Props) {
       <div
         role="dialog"
         aria-label={mode === "login" ? "登录协作服务器" : "注册协作空间账号"}
-        className="w-[380px] max-w-[calc(100vw-2rem)] rounded-lg border shadow-xl"
-        style={{ background: "var(--bg-secondary)", borderColor: "var(--border)" }}
+        className="w-[380px] max-w-[calc(100vw-2rem)] rounded-[var(--radius-lg)] border shadow-[var(--shadow-pop)]"
+        style={{ background: "var(--bg-overlay)", borderColor: "var(--border)" }}
         onClick={(e) => e.stopPropagation()}
       >
         <header className="px-4 py-3 border-b flex items-center justify-between" style={{ borderColor: "var(--border)" }}>
@@ -102,7 +102,7 @@ export function SpaceAuthDialog({ mode, onClose }: Props) {
           {loginPrompt?.retry && (
             <div
               className="flex items-center gap-2 text-xs px-2 py-1.5 rounded"
-              style={{ background: "color-mix(in srgb, var(--accent) 12%, transparent)", color: "var(--text-primary)" }}
+              style={{ background: "var(--accent-soft)", color: "var(--text-primary)" }}
             >
               <span className="flex-1">登录后将继续打开协作空间 {loginPrompt.retry.name}</span>
               <button onClick={clearLoginPrompt} title="取消引导" style={{ color: "var(--text-muted)" }}>
@@ -158,7 +158,7 @@ export function SpaceAuthDialog({ mode, onClose }: Props) {
             />
           )}
           {error && (
-            <span className="text-xs" style={{ color: "#f87171" }}>
+            <span className="text-xs" style={{ color: "var(--danger)" }}>
               {error}
             </span>
           )}

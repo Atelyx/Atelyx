@@ -123,7 +123,7 @@ export function ProviderSettingsSection() {
         {isSpace ? (
           <p
             className="text-xs py-1"
-            style={{ color: viewerOnly ? "#f59e0b" : "var(--text-muted)" }}
+            style={{ color: viewerOnly ? "var(--warning)" : "var(--text-muted)" }}
           >
             {viewerOnly ? SPACE_VIEWER_NOTICE : SPACE_TEAM_AI_NOTICE}
           </p>
@@ -156,11 +156,11 @@ function ProviderCard({
   return (
     <button
       onClick={onClick}
-      className={`w-full text-left px-3 py-2 rounded-lg border transition ${
+      className={`w-full text-left px-3 py-2 rounded-[var(--radius-md)] border transition ${
         active ? "" : "hover:bg-[var(--hover)]"
       }`}
       style={{
-        background: active ? "color-mix(in srgb, var(--accent) 12%, transparent)" : "var(--bg-primary)",
+        background: active ? "var(--accent-soft)" : "var(--bg-tertiary)",
         borderColor: active ? "var(--accent)" : "var(--border)",
       }}
     >
@@ -372,7 +372,7 @@ function ProviderForm({
         {test.status === "ok" && (
           <p
             className="text-xs mt-1.5 flex items-center gap-1"
-            style={{ color: "#4ade80" }}
+            style={{ color: "var(--success)" }}
           >
             <CheckCircle2 size={12} className="flex-shrink-0" />
             连接成功 · {test.latencyMs}ms
@@ -381,7 +381,7 @@ function ProviderForm({
         {test.status === "fail" && (
           <p
             className="text-xs mt-1.5 flex items-start gap-1 max-h-20 overflow-auto break-all"
-            style={{ color: "#fca5a5" }}
+            style={{ color: "var(--danger)" }}
           >
             <XCircle size={12} className="mt-0.5 flex-shrink-0" />
             <span>{test.message}</span>
@@ -419,7 +419,7 @@ function ProviderForm({
         {fetchError && (
           <p
             className="text-xs mt-1.5 flex items-start gap-1 max-h-20 overflow-auto break-all"
-            style={{ color: "#fca5a5" }}
+            style={{ color: "var(--danger)" }}
           >
             <XCircle size={12} className="mt-0.5 flex-shrink-0" />
             <span>获取失败：{fetchError}</span>
@@ -535,7 +535,7 @@ function ProviderForm({
       >
         <button
           onClick={onRemove}
-          className="px-3 py-1.5 rounded text-red-400 text-sm hover:bg-red-900/30"
+          className="px-3 py-1.5 rounded text-[var(--danger)] text-sm hover:bg-[color-mix(in_srgb,var(--danger)_12%,transparent)]"
         >
           删除
         </button>

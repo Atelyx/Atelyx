@@ -99,8 +99,8 @@ export function PluginDetailsDialog({
       aria-label={`${plugin.manifest.name}插件详情`}
     >
       <div
-        className="w-[min(38rem,calc(100vw-2rem))] max-h-[calc(100vh-2rem)] overflow-y-auto rounded-lg border shadow-xl p-4"
-        style={{ background: "var(--bg-secondary)", borderColor: "var(--border)" }}
+        className="w-[min(38rem,calc(100vw-2rem))] max-h-[calc(100vh-2rem)] overflow-y-auto rounded-[var(--radius-lg)] border shadow-[var(--shadow-pop)] p-4"
+        style={{ background: "var(--bg-overlay)", borderColor: "var(--border)" }}
         onClick={(event) => event.stopPropagation()}
       >
         <div className="flex items-start gap-3 mb-4">
@@ -126,8 +126,8 @@ export function PluginDetailsDialog({
         )}
 
         {plugin.failure && (
-          <div className="mb-4 rounded border p-3" style={{ borderColor: "rgba(248,113,113,0.45)" }}>
-            <div className="flex items-center gap-1.5 text-xs" style={{ color: "#f87171" }}>
+          <div className="mb-4 rounded border p-3" style={{ borderColor: "color-mix(in srgb, var(--danger) 45%, transparent)" }}>
+            <div className="flex items-center gap-1.5 text-xs" style={{ color: "var(--danger)" }}>
               <X size={13} /> 加载失败
             </div>
             {/* 六阶段挂载进度：失败阶段之前 = 已通过，失败阶段红底高亮，其后 = 未到达 */}
@@ -136,7 +136,7 @@ export function PluginDetailsDialog({
                 const label = PLUGIN_MOUNT_PHASE_LABELS[phase];
                 if (i === failIndex) {
                   return (
-                    <span key={phase} className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px]" style={{ background: "rgba(248,113,113,0.12)", color: "#f87171" }}>
+                    <span key={phase} className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px]" style={{ background: "color-mix(in srgb, var(--danger) 12%, transparent)", color: "var(--danger)" }}>
                       <X size={12} /> {label}
                     </span>
                   );
@@ -155,7 +155,7 @@ export function PluginDetailsDialog({
                 );
               })}
             </div>
-            <div className="text-xs mt-1 break-words" style={{ color: "#f87171" }}>{plugin.failure.message}</div>
+            <div className="text-xs mt-1 break-words" style={{ color: "var(--danger)" }}>{plugin.failure.message}</div>
             {plugin.failure.missing && <div className="text-[11px] mt-1" style={{ color: "var(--text-muted)" }}>缺失依赖：{plugin.failure.missing.join("、")}</div>}
           </div>
         )}
@@ -163,7 +163,7 @@ export function PluginDetailsDialog({
         {declares.length > 0 && (
           <section className="mb-4">
             <h4 className="text-[11px] font-medium mb-2" style={{ color: "var(--text-muted)" }}>声明能力</h4>
-            <div className="flex flex-wrap gap-1">{declares.map((name) => <span key={name} className="text-[10px] px-1.5 py-0.5 rounded border" style={{ color: capabilitySensitive(name) ? "#f59e0b" : "var(--text-secondary)", borderColor: "var(--border)" }}>{capabilityLabel(name)}{capabilitySensitive(name) ? "（敏感）" : ""}{declaredCapabilityAvailable(name) ? "" : "（本平台不可用）"}</span>)}</div>
+            <div className="flex flex-wrap gap-1">{declares.map((name) => <span key={name} className="text-[10px] px-1.5 py-0.5 rounded border" style={{ color: capabilitySensitive(name) ? "var(--warning)" : "var(--text-secondary)", borderColor: "var(--border)" }}>{capabilityLabel(name)}{capabilitySensitive(name) ? "（敏感）" : ""}{declaredCapabilityAvailable(name) ? "" : "（本平台不可用）"}</span>)}</div>
           </section>
         )}
 

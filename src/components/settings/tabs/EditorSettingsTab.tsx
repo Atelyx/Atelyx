@@ -57,7 +57,7 @@ export function EditorSettingsTab() {
                 <span
                   className="block mt-1"
                   style={{
-                    color: rebuildState.error ? "#f87171" : undefined,
+                    color: rebuildState.error ? "var(--danger)" : undefined,
                   }}
                 >
                   {rebuildState.error ?? rebuildState.message}
@@ -69,8 +69,8 @@ export function EditorSettingsTab() {
           <button
             className="px-3 py-1.5 text-xs rounded border flex-shrink-0 hover:opacity-80 disabled:opacity-50"
             style={{
-              borderColor: "#f87171",
-              color: "#f87171",
+              borderColor: "var(--danger)",
+              color: "var(--danger)",
             }}
             disabled={rebuilding || !canRebuild}
             onClick={() => setRebuildConfirm(true)}

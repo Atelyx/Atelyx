@@ -14,9 +14,9 @@ export function JumpToBottomButton({
   return (
     <button
       onClick={onClick}
-      className={`absolute bottom-2 left-1/2 -translate-x-1/2 flex items-center gap-1 text-xs rounded-full px-2.5 py-1 shadow-lg hover:opacity-80 ${className ?? ""}`}
+      className={`absolute bottom-2 left-1/2 -translate-x-1/2 flex items-center gap-1 text-xs rounded-full px-2.5 py-1 shadow-[var(--shadow-pop)] hover:opacity-80 ${className ?? ""}`}
       style={{
-        background: "var(--bg-secondary)",
+        background: "var(--bg-overlay)",
         border: "1px solid var(--border)",
         color: "var(--text-secondary)",
       }}

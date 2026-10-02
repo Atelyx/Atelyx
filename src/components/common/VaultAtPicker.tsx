@@ -117,8 +117,8 @@ export function VaultAtPicker({ query, canvasFiles, x, y, openUp, yBottom, onPic
   return (
     <div
       ref={ref}
-      className="absolute z-50 border rounded shadow-lg py-1 w-72 max-h-64 overflow-auto nowheel"
-      style={{ ...style, background: "var(--bg-secondary)", borderColor: "var(--border)" }}
+      className="absolute z-50 border rounded shadow-[var(--shadow-pop)] py-1 w-72 max-h-64 overflow-auto nowheel"
+      style={{ ...style, background: "var(--bg-overlay)", borderColor: "var(--border)" }}
       onClick={(e) => e.stopPropagation()}
     >
       {candidates.length === 0 ? (
@@ -135,7 +135,7 @@ export function VaultAtPicker({ query, canvasFiles, x, y, openUp, yBottom, onPic
               onMouseEnter={() => setActive(i)}
               className="w-full text-left px-3 py-1.5 text-sm block"
               style={{
-                color: isActive ? "#fff" : "var(--text-primary)",
+                color: isActive ? "var(--accent-fg)" : "var(--text-primary)",
                 background: isActive ? "var(--accent)" : undefined,
               }}
               title={t.path}

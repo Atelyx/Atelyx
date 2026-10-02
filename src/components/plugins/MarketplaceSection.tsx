@@ -95,7 +95,7 @@ export function MarketplaceSection() {
           onChange={(e) => setQuery(e.target.value)}
           placeholder="搜索插件（名称 / id / 描述 / 仓库）"
           className="flex-1 min-w-[180px] px-2.5 py-1.5 rounded text-xs border outline-none"
-          style={{ background: "var(--bg-primary)", borderColor: "var(--border)", color: "var(--text-primary)" }}
+          style={{ background: "var(--input-bg)", borderColor: "var(--input-border)", color: "var(--text-primary)" }}
         />
         <DropdownSelect
           value={typeFilter}
@@ -120,12 +120,12 @@ export function MarketplaceSection() {
       </div>
 
       {marketError && (
-        <div className="text-xs" style={{ color: "#f59e0b" }}>
+        <div className="text-xs" style={{ color: "var(--warning)" }}>
           {marketError}
         </div>
       )}
       {notice && (
-        <div className="text-xs break-words" style={{ color: notice.kind === "ok" ? "var(--text-secondary)" : "#f87171" }}>
+        <div className="text-xs break-words" style={{ color: notice.kind === "ok" ? "var(--text-secondary)" : "var(--danger)" }}>
           {notice.text}
         </div>
       )}
@@ -155,7 +155,7 @@ export function MarketplaceSection() {
             <div
               key={it.repo}
               className="rounded border p-3"
-              style={{ borderColor: "var(--border)", background: "var(--bg-primary)" }}
+              style={{ borderColor: "var(--border-subtle)", background: "var(--bg-tertiary)" }}
             >
               <div className="flex items-center gap-2">
                 <div className="flex-1 min-w-0">

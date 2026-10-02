@@ -46,11 +46,11 @@ export function CollabSettingsTab() {
           {collabEnabled && (
             <span
               className="flex items-center gap-1.5 text-xs"
-              style={{ color: collabConnected ? "#22c55e" : "var(--text-muted)" }}
+              style={{ color: collabConnected ? "var(--success)" : "var(--text-muted)" }}
             >
               <span
                 className="w-1.5 h-1.5 rounded-full"
-                style={{ background: collabConnected ? "#22c55e" : "var(--text-muted)" }}
+                style={{ background: collabConnected ? "var(--success)" : "var(--text-muted)" }}
               />
               {collabConnected ? "已连接" : "未连接"}
             </span>

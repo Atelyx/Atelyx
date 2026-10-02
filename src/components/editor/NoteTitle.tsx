@@ -97,7 +97,7 @@ export function NoteTitle({ file }: { file: string }) {
         />
       )}
       {notice && (
-        <div className="text-xs mt-1" style={{ color: "#f87171" }}>
+        <div className="text-xs mt-1" style={{ color: "var(--danger)" }}>
           {notice}
         </div>
       )}

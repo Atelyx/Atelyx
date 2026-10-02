@@ -17,7 +17,7 @@ export function SlotConflictPanel() {
   if (rows.length === 0) return null;
 
   return (
-    <div className="mb-4 rounded border p-3" style={{ borderColor: "var(--border)", background: "var(--bg-primary)" }}>
+    <div className="mb-4 rounded border p-3" style={{ borderColor: "var(--border-subtle)", background: "var(--bg-tertiary)" }}>
       <div className="text-[11px] font-medium mb-2" style={{ color: "var(--text-muted)" }}>
         槽位冲突（多个插件贡献同一位置，选择显示哪个）
       </div>
@@ -40,7 +40,7 @@ export function SlotConflictPanel() {
                   value={row.pinnedId ?? ""}
                   onChange={(e) => setSlotWinner(row.slot, e.target.value || null)}
                   className="flex-1 min-w-0 px-2 py-1 rounded border text-xs outline-none"
-                  style={{ borderColor: "var(--border)", color: "var(--text-primary)", background: "var(--bg-primary)" }}
+                  style={{ borderColor: "var(--input-border)", color: "var(--text-primary)", background: "var(--input-bg)" }}
                 >
                   <option value="">跟随优先级（默认）</option>
                   {pinnedStale && (
@@ -56,7 +56,7 @@ export function SlotConflictPanel() {
                 </select>
               </div>
               {pinnedStale && (
-                <div className="text-[10px] mt-1" style={{ color: "#f59e0b" }}>
+                <div className="text-[10px] mt-1" style={{ color: "var(--warning)" }}>
                   钉住的贡献已卸载，当前按 priority 胜出：{winner?.label ? `${winner.label} · ` : ""}{winner?.pluginId ?? "无"}
                 </div>
               )}

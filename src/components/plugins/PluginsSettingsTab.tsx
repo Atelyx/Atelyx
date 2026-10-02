@@ -136,7 +136,7 @@ export function PluginsSettingsTab() {
     <section className="flex-1 min-h-0 p-5 overflow-y-auto">
       {/* 插件状态文件损坏/不可读的降级提示：行全部以停用态展示，修复文件后重载解除。 */}
       {stateError && (
-        <div className="text-xs mb-3 break-words" style={{ color: "#f87171" }}>
+        <div className="text-xs mb-3 break-words" style={{ color: "var(--danger)" }}>
           {stateError}
         </div>
       )}
@@ -171,7 +171,7 @@ export function PluginsSettingsTab() {
       {notice && (
         <div
           className="text-xs mb-3 break-words"
-          style={{ color: notice.kind === "ok" ? "var(--text-secondary)" : "#f87171" }}
+          style={{ color: notice.kind === "ok" ? "var(--text-secondary)" : "var(--danger)" }}
         >
           {notice.text}
         </div>
@@ -198,7 +198,7 @@ export function PluginsSettingsTab() {
             }}
             placeholder="从 Git 地址安装（如 https://github.com/owner/repo）"
             className="flex-1 min-w-0 px-2 py-1.5 rounded border text-xs outline-none"
-            style={{ borderColor: "var(--border)", color: "var(--text-primary)", background: "var(--bg-primary)" }}
+            style={{ borderColor: "var(--input-border)", color: "var(--text-primary)", background: "var(--input-bg)" }}
           />
           <button
             onClick={() => startGitInstall()}
@@ -241,7 +241,7 @@ export function PluginsSettingsTab() {
             <div
               key={row.id}
               className={`rounded border p-3 ${row.installed ? "" : "opacity-60"}`}
-              style={{ borderColor: "var(--border)", background: "var(--bg-primary)" }}
+              style={{ borderColor: "var(--border-subtle)", background: "var(--bg-tertiary)" }}
               onContextMenu={(event) => {
                 if (!row.installed) return;
                 event.preventDefault();
@@ -283,7 +283,7 @@ export function PluginsSettingsTab() {
                       </span>
                     )}
                     {failed && (
-                      <span className="text-[10px] px-1.5 py-0.5 rounded" style={{ color: "#f87171", background: "rgba(248,113,113,0.1)" }}>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded" style={{ color: "var(--danger)", background: "color-mix(in srgb, var(--danger) 10%, transparent)" }}>
                         加载失败
                       </span>
                     )}

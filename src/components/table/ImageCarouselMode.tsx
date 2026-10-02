@@ -329,7 +329,7 @@ export const ImageCarouselMode = memo(function ImageCarouselMode({
                   }
                   onCurChange(j);
                 }}
-                className="flex-shrink-0 rounded-[4px] overflow-hidden border-2 cursor-pointer"
+                className="flex-shrink-0 rounded-[var(--radius-sm)] overflow-hidden border-2 cursor-pointer"
                 style={{
                   width: IMAGE_QUEUE_THUMB_SIZE,
                   height: IMAGE_QUEUE_THUMB_SIZE,
@@ -343,7 +343,7 @@ export const ImageCarouselMode = memo(function ImageCarouselMode({
                   transition: isDragged ? "none" : "transform 150ms ease-out",
                   position: "relative",
                   zIndex: isDragged ? 10 : undefined,
-                  boxShadow: isDragged ? "0 4px 12px rgba(0,0,0,0.35)" : undefined,
+                  boxShadow: isDragged ? "var(--shadow-pop)" : undefined,
                 }}
                 title={`第 ${slot + 1} 张`}
               >

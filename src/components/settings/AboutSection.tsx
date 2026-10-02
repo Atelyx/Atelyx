@@ -62,7 +62,7 @@ export function AboutSection() {
           src={appIcon}
           alt="Atelyx"
           draggable={false}
-          className="relative w-16 h-16 rounded-xl shadow-lg ring-1 ring-white/10 select-none"
+          className="relative w-16 h-16 rounded-xl shadow-[var(--shadow-pop)] ring-1 ring-white/10 select-none"
         />
       </div>
       <h3
@@ -115,7 +115,7 @@ export function AboutSection() {
         {updateStatus === "upToDate" && (
           <p
             className="text-xs flex items-center gap-1"
-            style={{ color: "#4ade80" }}
+            style={{ color: "var(--success)" }}
           >
             <CheckCircle2 size={12} className="flex-shrink-0" />
             已是最新版本
@@ -134,7 +134,7 @@ export function AboutSection() {
           <div className="flex flex-col items-center gap-1 w-full max-w-[480px]">
             <p
               className="text-xs flex items-center gap-1"
-              style={{ color: "#f87171" }}
+              style={{ color: "var(--danger)" }}
             >
               <AlertCircle size={12} className="flex-shrink-0" />
               检查更新失败

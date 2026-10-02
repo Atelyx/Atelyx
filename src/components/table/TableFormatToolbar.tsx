@@ -35,7 +35,7 @@ type FlagKey = "b" | "i" | "u" | "s";
 /** 触发按钮三态样式：true = 实心强调；"mixed" = 淡强调 + 圆点；false = 默认。 */
 function flagButtonStyle(state: boolean | "mixed") {
   if (state === true) return { background: "var(--accent)", color: "var(--accent-fg)" };
-  if (state === "mixed") return { background: "color-mix(in srgb, var(--accent) 15%, transparent)", color: "var(--accent)" };
+  if (state === "mixed") return { background: "var(--accent-soft)", color: "var(--accent)" };
   return undefined;
 }
 
@@ -178,7 +178,7 @@ export function TableFormatToolbar({ anchor, onClose }: Props) {
     <div
       ref={posRef}
       data-table-format-bar
-      className="fixed z-50 flex items-center gap-0.5 px-1.5 py-1 rounded-lg border shadow-xl"
+      className="fixed z-50 flex items-center gap-0.5 px-1.5 py-1 rounded-[var(--radius-md)] border shadow-[var(--shadow-pop)]"
       style={{ left: pos.x, top: pos.y, background: "var(--bg-secondary)", borderColor: "var(--border)" }}
     >
       {/* 字体 */}
@@ -262,7 +262,7 @@ export function TableFormatToolbar({ anchor, onClose }: Props) {
             style={{ color: open ? "var(--accent)" : "var(--text-secondary)" }}
           >
             <span
-              className="block w-3.5 h-3.5 rounded-[3px] border border-[var(--border)]"
+              className="block w-3.5 h-3.5 rounded-[var(--radius-sm)] border border-[var(--border)]"
               style={{
                 background:
                   summary.bg === "mixed"

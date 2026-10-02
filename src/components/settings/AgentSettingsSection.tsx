@@ -254,7 +254,7 @@ export function AgentSettingsSection() {
           {targetIsSpace && (
             <p
               className="text-xs mt-1"
-              style={{ color: viewerOnly ? "#f59e0b" : "var(--text-muted)" }}
+              style={{ color: viewerOnly ? "var(--warning)" : "var(--text-muted)" }}
             >
               {viewerOnly ? SPACE_VIEWER_NOTICE : SPACE_TEAM_SHARED_NOTICE}
             </p>
@@ -276,7 +276,7 @@ export function AgentSettingsSection() {
       <div className="flex-1 min-h-0 flex gap-3">
         {/* 左侧：Agent 列表（预置 Agent 不显示删除按钮） */}
         <div
-          className="w-52 shrink-0 rounded-lg border overflow-auto"
+          className="w-52 shrink-0 rounded-[var(--radius-md)] border overflow-auto"
           style={{
             borderColor: "var(--border)",
             background: "var(--bg-primary)",
@@ -347,7 +347,7 @@ export function AgentSettingsSection() {
                   disabled={viewerOnly}
                   title="删除 Agent"
                   className="p-1 rounded hover:opacity-70 flex-shrink-0 opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 disabled:cursor-not-allowed"
-                  style={{ color: "#f87171" }}
+                  style={{ color: "var(--danger)" }}
                 >
                   <Trash2 size={12} />
                 </button>
@@ -359,7 +359,7 @@ export function AgentSettingsSection() {
         {/* 右侧：编辑器（即时生效；名称 blur 提交） */}
         {selected && (
           <div
-            className="flex-1 min-w-0 rounded-lg border p-4 overflow-auto"
+            className="flex-1 min-w-0 rounded-[var(--radius-md)] border p-4 overflow-auto"
             style={{
               borderColor: "var(--border)",
               background: "var(--bg-primary)",

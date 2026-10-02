@@ -222,7 +222,7 @@ export const ImageGridMode = memo(function ImageGridMode({
         createPortal(
           <div
             ref={shadowRef}
-            className="pointer-events-none rounded overflow-hidden shadow-2xl"
+            className="pointer-events-none rounded overflow-hidden shadow-[var(--shadow-pop)]"
             style={{
               position: "fixed",
               left: gPosRef.current.x,

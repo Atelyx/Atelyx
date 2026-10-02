@@ -47,7 +47,7 @@ function DeviceList({ serverUrl }: { serverUrl: string }) {
   return (
     <div className="mt-1.5 ml-4 space-y-1 border-l pl-3" style={{ borderColor: "var(--border)" }}>
       {error && (
-        <div className="text-xs" style={{ color: "#f87171" }}>
+        <div className="text-xs" style={{ color: "var(--danger)" }}>
           {error}
         </div>
       )}
@@ -68,7 +68,7 @@ function DeviceList({ serverUrl }: { serverUrl: string }) {
             disabled={revoking !== null}
             title="吊销该设备会话（下次使用需重新登录）"
             className="ml-auto flex-shrink-0 px-1.5 py-0.5 rounded hover:bg-[var(--hover)] disabled:opacity-40"
-            style={{ color: "#f87171" }}
+            style={{ color: "var(--danger)" }}
           >
             踢下线
           </button>
@@ -112,7 +112,7 @@ function ServerList() {
   return (
     <div className="flex flex-col gap-1.5 w-full max-w-[340px]">
       {error && (
-        <span className="text-xs" style={{ color: "#f87171" }}>
+        <span className="text-xs" style={{ color: "var(--danger)" }}>
           {error}
         </span>
       )}
@@ -138,7 +138,7 @@ function ServerList() {
               disabled={loggingOut !== null}
               title="退出该服务器登录"
               className="flex items-center gap-1 flex-shrink-0 px-1.5 py-0.5 rounded hover:bg-[var(--hover)] disabled:opacity-40"
-              style={{ color: "#f87171" }}
+              style={{ color: "var(--danger)" }}
             >
               {loggingOut === s.serverUrl ? (
                 <Loader2 size={11} className="animate-spin" />
@@ -174,7 +174,7 @@ export function SpaceAccountSection() {
         {loginPrompt && (
           <div
             className="flex items-center gap-2 text-xs px-2 py-1.5 rounded w-full max-w-[340px]"
-            style={{ background: "color-mix(in srgb, var(--accent) 12%, transparent)", color: "var(--text-primary)" }}
+            style={{ background: "var(--accent-soft)", color: "var(--text-primary)" }}
           >
             <span className="flex-1">登录后将继续打开协作空间 {loginPrompt.retry?.name ?? ""}</span>
             <button onClick={clearLoginPrompt} title="取消引导" style={{ color: "var(--text-muted)" }}>

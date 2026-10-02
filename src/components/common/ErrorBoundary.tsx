@@ -49,10 +49,10 @@ function ErrorFallback({ error }: { error: Error }) {
         <pre
           className="mt-3 text-xs text-left whitespace-pre-wrap break-all overflow-auto"
           style={{
-            color: "#f87171",
+            color: "var(--danger)",
             background: "var(--bg-secondary)",
             border: "1px solid var(--border)",
-            borderRadius: 6,
+            borderRadius: "var(--radius-sm)",
             padding: 8,
             maxHeight: 200,
           }}
