@@ -457,6 +457,11 @@ body {
   max-width: var(--note-line-width, 780px);
   margin: 0 auto;
 }
+/* 只读嵌入面（对话气泡等宿主自己已带内边距）：正文的 1rem 内边距会与宿主内边距二次叠加，
+   把气泡撑成大方盒，AI 回复还会整体内缩、与思考块/工具行不对齐 */
+.md-embed .md-edit-content {
+  padding: 0;
+}
 /* 富装饰块（表格 / raw HTML / 缩进代码）整块回显源码：保留换行与缩进，长行折行 */
 .md-editor-source {
   white-space: pre-wrap;

@@ -572,7 +572,7 @@ export function AiChatPanel() {
           <div
             ref={scrollRef}
             onScroll={handleScroll}
-            className="flex-1 overflow-auto px-3 py-3 space-y-3 min-h-0"
+            className="flex-1 overflow-auto px-3 py-3 space-y-1 min-h-0"
           >
             {messages.length === 0 ? (
               <div className="h-full flex flex-col items-center justify-center gap-2 text-xs select-none" style={{ color: "var(--text-muted)" }}>

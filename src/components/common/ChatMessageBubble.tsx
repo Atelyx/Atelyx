@@ -37,10 +37,12 @@ import type { AgentStep, Attachment, ToolRun } from "@/types";
 import { MarkdownView, type MarkdownEditorLinks } from "@/components/editor/MarkdownEditor";
 
 /** 两入口恒同值的气泡样式（画布/面板同款）：模块级单例，memo 浅比较引用恒稳定。
- *  user 气泡抬起一档（raised 底 + 细边）；assistant 不画气泡卡，最终答复直接作正文铺在面板底上。 */
-const USER_BUBBLE_CLASS = "bg-[var(--bg-tertiary)] rounded-bubble border px-3 py-2";
+ *  user 气泡抬起一档（raised 底 + 细边），按内容收缩且最长 85%——右侧对齐，对侧留白。
+ *  assistant 不画气泡卡，最终答复作正文铺在面板底上，占满容器内容宽度（左右靠容器内边距留白，
+ *  不顶格）；若同样按内容收缩，长段落会被压成窄条、右半屏空着。 */
+const USER_BUBBLE_CLASS = "bg-[var(--bg-tertiary)] rounded-bubble border px-3 py-2 max-w-[85%]";
 /** 文本排版两入口恒同值：assistant 无气泡卡，仍需自带字号/行高（不能只靠宿主容器的 text-sm）。 */
-const ASSISTANT_BUBBLE_CLASS = "min-w-0 text-sm leading-relaxed";
+const ASSISTANT_BUBBLE_CLASS = "min-w-0 text-sm leading-relaxed w-full";
 /** 流式且无内容时的占位（画布/面板同款）。 */
 const STREAMING_PLACEHOLDER = (
   <span
@@ -141,9 +143,9 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
     : {};
 
   return (
-    <div className={`group relative flex ${isUser ? "justify-end" : "justify-start"}`}>
+    <div className={`group flex flex-col ${isUser ? "items-end" : "items-start"}`}>
       <div
-        className={`relative max-w-[85%] text-sm leading-relaxed min-w-0 ${isUser ? USER_BUBBLE_CLASS : ASSISTANT_BUBBLE_CLASS}`}
+        className={`text-sm leading-relaxed min-w-0 ${isUser ? USER_BUBBLE_CLASS : ASSISTANT_BUBBLE_CLASS}`}
         style={{
           userSelect: "text",
           WebkitUserSelect: "text",
@@ -190,6 +192,7 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
               links={markdownLinks}
               mentions={mentionRefs}
               onMentionClick={onRefChipClick}
+              className="md-embed"
             />
           </div>
         ) : (
@@ -227,15 +230,17 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
                 <MarkdownView
                   text={content || (stepGroups.length === 0 ? "..." : "")}
                   links={markdownLinks}
+                  className="md-embed"
                 />
               </>
             )}
           </div>
         )}
       </div>
-      {/* 气泡下方操作按钮组：复制（全部消息）+ 回到此处（完整 AI 回复），hover 浮现 */}
+      {/* 气泡下方操作按钮组：复制（全部消息）+ 回到此处（完整 AI 回复），hover 浮现。
+          在流内占位（恒高）而非绝对定位——脱流后按钮会盖住下一条消息（下一条是用户气泡时尤其明显） */}
       <div
-        className={`nodrag absolute top-full mt-0.5 flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-60 [@media(hover:none)]:opacity-100 hover:!opacity-100 z-10 ${isUser ? "right-0" : "left-0"}`}
+        className={`nodrag h-5 flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-60 [@media(hover:none)]:opacity-100 hover:!opacity-100 ${isUser ? "justify-end" : "justify-start"}`}
         {...stopProps}
       >
         <button
@@ -290,7 +295,7 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
 function NarrationLine({ text, links }: { text: string; links?: MarkdownEditorLinks }) {
   return (
     <div className="markdown-body max-w-none break-words rounded px-1.5 py-1">
-      <MarkdownView text={text} links={links} />
+      <MarkdownView text={text} links={links} className="md-embed" />
     </div>
   );
 }

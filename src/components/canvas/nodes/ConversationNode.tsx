@@ -903,7 +903,7 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
       >
         <div
           ref={scrollRef}
-          className={`nodrag nowheel overflow-auto px-3 pt-2 pb-6 space-y-3 ${hasFixedHeight ? "flex-1 min-h-0" : "max-h-[300px]"}`}
+          className={`nodrag nowheel overflow-auto px-3 pt-2 pb-6 space-y-1 ${hasFixedHeight ? "flex-1 min-h-0" : "max-h-[300px]"}`}
           onScroll={handleScroll}
           onContextMenu={handleMessagesCtx}
         >
