@@ -562,6 +562,8 @@ export function TableEditor({ panelId }: { panelId: string }) {
   // ===== 选中高亮（互斥：单元格/框选 = td 内描边；行/列/整表 = 淡金背景）=====
   const rowHighlighted = (rowId: string): boolean =>
     selection?.kind === "row" ? selection.rowId === rowId : selection?.kind === "all";
+  /** 行选中左轨（仅整行选中；全选不逐行画轨，防满屏条纹噪声）。 */
+  const rowRail = (rowId: string): boolean => selection?.kind === "row" && selection.rowId === rowId;
   const colHighlighted = (fieldId: string): boolean =>
     selection?.kind === "column" ? selection.fieldId === fieldId : selection?.kind === "all";
   const cellSelected = (rowId: string, fieldId: string): boolean =>
@@ -682,13 +684,16 @@ export function TableEditor({ panelId }: { panelId: string }) {
         {view === "table" && (
           <span
             className="flex-shrink-0 tabular-nums"
-            style={{ color: "var(--text-muted)" }}
+            style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}
             title="Ctrl+滚轮缩放表格视图"
           >
             {Math.round(zoom * 100)}%
           </span>
         )}
-        <span className="flex-shrink-0" style={{ color: "var(--text-muted)" }}>
+        <span
+          className="flex-shrink-0"
+          style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}
+        >
           {rows.length} 行 · {fields.length} 列
         </span>
         {/* 协作：同看本表格的在线用户胶囊（点击定位其选中位置；断开连接自动消失） */}
@@ -836,10 +841,11 @@ export function TableEditor({ panelId }: { panelId: string }) {
               {fields.map((f) => (
                 <th
                   key={f.id}
-                  className="border-b border-r align-middle px-1.5 py-1 sticky top-0 z-10 group relative"
+                  className="border-b border-r align-middle px-1.5 py-1 sticky top-0 z-10 group relative h-8 text-xs font-medium"
                   style={{
                     background: colHighlighted(f.id) ? "color-mix(in srgb, var(--accent) 8%, transparent)" : "var(--bg-secondary)",
                     borderColor: "var(--border)",
+                    color: "var(--text-secondary)",
                   }}
                   onClick={() => selectField(f.id)}
                   onContextMenu={(e) => {
@@ -850,7 +856,7 @@ export function TableEditor({ panelId }: { panelId: string }) {
                   title="单击选中整列"
                 >
                   <div className="flex items-center gap-1 min-w-0">
-                    <span className="truncate flex-1 font-normal cursor-default" title={f.name}>
+                    <span className="truncate flex-1 cursor-default" title={f.name}>
                       {f.name}
                     </span>
                     <button
@@ -912,7 +918,11 @@ export function TableEditor({ panelId }: { panelId: string }) {
                   {/* 行首：行号 + 拖拽手柄 + 底部行高拖拽手柄（行菜单走右键） */}
                   <td
                     className="relative border-b border-r px-1 text-center"
-                    style={{ borderColor: "var(--border)" }}
+                    style={{
+                      borderColor: "var(--border)",
+                      // 行选中：左侧强调色轨道（与淡底一同表达选中，不只靠色）
+                      boxShadow: rowRail(row.id) ? "inset 2px 0 0 var(--accent)" : undefined,
+                    }}
                     onContextMenu={(e) => {
                       e.preventDefault();
                       selectRow(row.id);
@@ -922,7 +932,10 @@ export function TableEditor({ panelId }: { panelId: string }) {
                   >
                     {/* absolute 铺满 td：序号 + 拖拽手柄随行高垂直居中（行高拖拽手柄在其下层仍可交互） */}
                     <div className="absolute inset-0 flex items-center justify-center gap-0.5">
-                      <span className="text-[10px]" style={{ color: "var(--text-muted)" }}>
+                      <span
+                        className="text-[11px]"
+                        style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}
+                      >
                         {i + 1}
                       </span>
                       <button
@@ -1033,7 +1046,11 @@ export function TableEditor({ panelId }: { panelId: string }) {
                   title={f.calcType ? `${CALC_TYPE_LABELS[f.calcType]}：${result ?? "—"}` : "选择计算类型"}
                 >
                   {result !== null && (
-                    <span className="truncate text-xs" style={{ color: "var(--text-primary)" }} title={result}>
+                    <span
+                      className="truncate text-xs"
+                      style={{ color: "var(--text-primary)", fontFamily: "var(--font-mono)" }}
+                      title={result}
+                    >
                       {f.calcType ? `${CALC_TYPE_LABELS[f.calcType]} ${result}` : result}
                     </span>
                   )}

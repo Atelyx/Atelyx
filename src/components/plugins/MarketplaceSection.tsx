@@ -9,7 +9,24 @@
  * 分层：只经 pluginStore 触达插件能力。
  */
 import { useEffect, useMemo, useState } from "react";
-import { Download, RefreshCw, Star } from "lucide-react";
+import {
+  AppWindow,
+  Boxes,
+  Check,
+  Download,
+  LayoutPanelTop,
+  Palette,
+  Puzzle,
+  RefreshCw,
+  Server,
+  Shield,
+  SlidersHorizontal,
+  Star,
+  Table2,
+  Terminal,
+  Wrench,
+  type LucideIcon,
+} from "lucide-react";
 import { DropdownSelect } from "@/components/common/DropdownSelect";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 import { usePluginStore } from "@/stores/pluginStore";
@@ -28,6 +45,22 @@ const TYPE_FILTERS: { value: PluginType | "all"; label: string }[] = [
   { value: "background", label: "后台服务" },
   { value: "tableview", label: "表格视图" },
 ];
+
+/** 插件类型 → 卡片图标（类型徽标之外的视觉区分）。 */
+const TYPE_ICONS: Record<PluginType, LucideIcon> = {
+  tool: Wrench,
+  panel: LayoutPanelTop,
+  app: AppWindow,
+  node: Boxes,
+  theme: Palette,
+  setting: SlidersHorizontal,
+  command: Terminal,
+  background: Server,
+  tableview: Table2,
+};
+
+/** 卡片胶囊徽标统一尺寸。 */
+const TAG_CLASS = "inline-flex items-center gap-1 h-5 px-2 rounded-full text-[11px] font-medium whitespace-nowrap";
 
 export function MarketplaceSection() {
   const marketItems = usePluginStore((s) => s.marketItems);
@@ -130,8 +163,8 @@ export function MarketplaceSection() {
         </div>
       )}
 
-      {/* 插件列表 */}
-      <div className="flex-1 min-h-0 overflow-auto space-y-2">
+      {/* 插件卡片网格 */}
+      <div className="flex-1 min-h-0 overflow-auto">
         {marketLoading && filtered.length === 0 && (
           <div className="text-sm py-8 text-center" style={{ color: "var(--text-muted)" }}>
             加载市场…
@@ -142,79 +175,130 @@ export function MarketplaceSection() {
             没有匹配的插件
           </div>
         )}
-        {filtered.map((it) => {
-          // 同 id 不同作者仓库是不同插件（徽标/安装均按 repo 锚定）：key 与安装态判定都按 repo。
-          const installed = Object.values(plugins).some((p) => {
-            if (p.id !== it.id) return false;
-            const folder = p.installDir.split(/[\\/]/).pop() ?? "";
-            return folder === it.repo.split("/")[1];
-          });
-          // 同名 id 已有行（随应用分发或已安装）：安装将以本包实现替代那一行。
-          const sameIdRow = Object.values(plugins).find((p) => p.id === it.id);
-          return (
-            <div
-              key={it.repo}
-              className="rounded border p-3"
-              style={{ borderColor: "var(--border-subtle)", background: "var(--bg-tertiary)" }}
-            >
-              <div className="flex items-center gap-2">
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-medium truncate" style={{ color: "var(--text-primary)" }}>
+        <div
+          className="grid gap-3 pb-2"
+          style={{ gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))" }}
+        >
+          {filtered.map((it) => {
+            // 同 id 不同作者仓库是不同插件（徽标/安装均按 repo 锚定）：key 与安装态判定都按 repo。
+            const installed = Object.values(plugins).some((p) => {
+              if (p.id !== it.id) return false;
+              const folder = p.installDir.split(/[\\/]/).pop() ?? "";
+              return folder === it.repo.split("/")[1];
+            });
+            // 同名 id 已有行（随应用分发或已安装）：安装将以本包实现替代那一行。
+            const sameIdRow = Object.values(plugins).find((p) => p.id === it.id);
+            const Icon = (it.type && TYPE_ICONS[it.type]) || Puzzle;
+            return (
+              <div
+                key={it.repo}
+                className="flex flex-col gap-3 rounded-[var(--radius-md)] border border-[var(--border)] p-3 transition-colors bg-[var(--bg-tertiary)] hover:border-[var(--border-strong)]"
+              >
+                {/* 图标 + 名称/作者 + 徽标 */}
+                <div className="flex items-start gap-3">
+                  <div
+                    className="w-9 h-9 shrink-0 grid place-items-center rounded-[var(--radius-sm)]"
+                    style={{ background: "var(--bg-overlay)", border: "1px solid var(--border)", color: "var(--accent)" }}
+                  >
+                    <Icon size={18} />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="text-sm font-medium truncate" style={{ color: "var(--text-primary)" }}>
                       {it.name}
+                    </div>
+                    <div
+                      className="text-[11px] font-mono truncate mt-0.5"
+                      style={{ color: "var(--text-muted)" }}
+                      title={`${it.repo} · ${it.id}`}
+                    >
+                      {it.repo}
+                    </div>
+                  </div>
+                  {it.badge && (
+                    <span
+                      className={TAG_CLASS}
+                      style={{
+                        color: it.badge === "official" ? "var(--accent)" : "var(--info)",
+                        background:
+                          it.badge === "official"
+                            ? "var(--accent-soft)"
+                            : "color-mix(in srgb, var(--info) 12%, transparent)",
+                        border: `1px solid ${
+                          it.badge === "official"
+                            ? "color-mix(in srgb, var(--accent) 32%, transparent)"
+                            : "color-mix(in srgb, var(--info) 30%, transparent)"
+                        }`,
+                      }}
+                    >
+                      {it.badge === "official" ? <Shield size={11} /> : <Star size={11} />}
+                      {PLUGIN_BADGE_LABELS[it.badge]}
                     </span>
-                    {it.badge && (
+                  )}
+                </div>
+
+                {/* 简介 */}
+                <div className="text-xs leading-[18px] min-h-[36px]" style={{ color: "var(--text-secondary)" }}>
+                  {it.tagline || it.description || "暂无简介"}
+                </div>
+
+                {sameIdRow && !installed && (
+                  <div className="text-[11px] break-words" style={{ color: "var(--text-muted)" }}>
+                    同名 id 行已存在（{PLUGIN_SOURCE_LABELS[sameIdRow.sourceKind]}，按索引自报 id 判定）。
+                    若包内清单 id 与之一致，安装将以本包实现替代该行并沿用其原启用状态；全新插件默认停用
+                    （需到「已安装」tab 启用），实际落位 id 以安装结果提示为准。
+                    {sameIdRow.installDir === "" ? "该行由随应用分发的实现占用：安装将整体替代该行。" : ""}
+                  </div>
+                )}
+
+                {/* 类型 / 星标 + 安装动作 */}
+                <div
+                  className="mt-auto flex items-center gap-2 pt-3 border-t"
+                  style={{ borderColor: "var(--border-subtle)" }}
+                >
+                  <span
+                    className={TAG_CLASS}
+                    style={{ color: "var(--text-secondary)", background: "var(--bg-overlay)", border: "1px solid var(--border)" }}
+                  >
+                    {it.type ? PLUGIN_TYPE_LABELS[it.type] : "插件"}
+                  </span>
+                  <span
+                    className={`${TAG_CLASS} font-mono`}
+                    style={{ color: "var(--text-muted)", background: "var(--bg-overlay)", border: "1px solid var(--border)" }}
+                    title="星标数"
+                  >
+                    <Star size={11} />
+                    {it.stars}
+                  </span>
+                  <div className="ml-auto">
+                    {installed ? (
                       <span
-                        className="text-[10px] px-1.5 py-0.5 rounded"
+                        className={TAG_CLASS}
                         style={{
-                          color: it.badge === "official" ? "var(--accent)" : "var(--warning)",
-                          background: it.badge === "official" ? "var(--accent-soft)" : "color-mix(in srgb, var(--warning) 12%, transparent)",
+                          color: "var(--success)",
+                          background: "color-mix(in srgb, var(--success) 10%, transparent)",
+                          border: "1px solid color-mix(in srgb, var(--success) 30%, transparent)",
                         }}
                       >
-                        {PLUGIN_BADGE_LABELS[it.badge]}
+                        <Check size={11} />
+                        已安装
                       </span>
+                    ) : (
+                      <button
+                        onClick={() => setConfirming(it)}
+                        disabled={installingRepo !== null}
+                        className="inline-flex items-center gap-1 h-6 px-2.5 rounded-[var(--radius-sm)] text-xs disabled:opacity-50"
+                        style={{ background: "var(--accent)", color: "var(--accent-fg)" }}
+                      >
+                        <Download size={13} />
+                        {installingRepo === it.repo ? "安装中…" : sameIdRow ? "安装（替换同名）" : "安装"}
+                      </button>
                     )}
                   </div>
-                  <div className="text-[11px] truncate flex items-center gap-1" style={{ color: "var(--text-muted)" }}>
-                    <span className="truncate">
-                      {it.type ? PLUGIN_TYPE_LABELS[it.type] : "插件"} · {it.repo} · {it.id}
-                    </span>
-                    <Star size={11} className="flex-shrink-0" />
-                    <span className="flex-shrink-0">{it.stars}</span>
-                  </div>
                 </div>
-                {installed ? (
-                  <span className="text-[11px] px-2 py-1 rounded" style={{ color: "var(--text-secondary)" }}>
-                    已安装
-                  </span>
-                ) : (
-                  <button
-                    onClick={() => setConfirming(it)}
-                    disabled={installingRepo !== null}
-                    className="flex items-center gap-1 px-2.5 py-1.5 rounded text-xs disabled:opacity-50"
-                    style={{ background: "var(--accent)", color: "var(--accent-fg)" }}
-                  >
-                    <Download size={13} />
-                    {installingRepo === it.repo ? "安装中…" : sameIdRow ? "安装（替换同名）" : "安装"}
-                  </button>
-                )}
               </div>
-              {sameIdRow && !installed && (
-                <div className="mt-1 text-[11px] break-words" style={{ color: "var(--text-muted)" }}>
-                  同名 id 行已存在（{PLUGIN_SOURCE_LABELS[sameIdRow.sourceKind]}，按索引自报 id 判定）。
-                  若包内清单 id 与之一致，安装将以本包实现替代该行并沿用其原启用状态；全新插件默认停用
-                  （需到「已安装」tab 启用），实际落位 id 以安装结果提示为准。
-                  {sameIdRow.installDir === "" ? "该行由随应用分发的实现占用：安装将整体替代该行。" : ""}
-                </div>
-              )}
-              {it.tagline && (
-                <div className="mt-1 text-xs break-words" style={{ color: "var(--text-secondary)" }}>
-                  {it.tagline}
-                </div>
-              )}
-            </div>
-          );
-        })}
+            );
+          })}
+        </div>
       </div>
 
       {confirming && (

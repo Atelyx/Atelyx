@@ -13,6 +13,7 @@ import type { NodeProps } from "@xyflow/react";
 import type { SearchResultData, SearchResultItem } from "@/types";
 import { useCanvasStore } from "@/stores/canvasStore";
 import { useAppStore } from "@/stores/appStore";
+import { NODE_TYPE_BAR_CLASS, NODE_TYPE_COLORS } from "@/constants/canvas";
 import { isOpenableUrl } from "@/utils/markdown";
 import { ConnectionFrame } from "./ConnectionFrame";
 import { ResizeHandle } from "./ResizeHandle";
@@ -97,14 +98,15 @@ export function SearchResultNode({ id, data, height, selected }: NodeProps) {
 
   return (
     <div
-      className="rounded-md shadow-lg border flex flex-col text-sm"
+      className="rounded-md border flex flex-col text-sm"
       style={{
         width: 280,
         height: height ?? undefined,
         minWidth: 220,
         minHeight: 120,
-        background: "var(--bg-card)",
+        background: "var(--bg-secondary)",
         borderColor: selected ? "var(--accent)" : "var(--border)",
+        boxShadow: "var(--shadow-pop)",
         cursor: "default",
         position: "relative",
       }}
@@ -113,11 +115,16 @@ export function SearchResultNode({ id, data, height, selected }: NodeProps) {
       <header
         className="px-3 py-2 border-b rounded-t-md flex items-center gap-1.5"
         style={{
-          borderColor: "var(--border)",
-          background: "var(--bg-card)",
+          borderColor: "var(--border-subtle)",
+          background: "var(--bg-tertiary)",
           cursor: "grab",
         }}
       >
+        {/* 类型标识：3px 色条（搜索） */}
+        <span
+          className={NODE_TYPE_BAR_CLASS}
+          style={{ background: NODE_TYPE_COLORS.search }}
+        />
         <Search
           size={13}
           className="flex-shrink-0"

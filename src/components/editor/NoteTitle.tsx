@@ -70,7 +70,7 @@ export function NoteTitle({ file }: { file: string }) {
     <div className="flex-shrink-0 px-4 pt-3 pb-1">
       {draft === null ? (
         <button
-          className="w-full text-left text-2xl font-semibold truncate rounded cursor-text hover:opacity-80"
+          className="w-full text-left text-[20px] leading-7 font-semibold tracking-[-0.01em] truncate rounded cursor-text hover:opacity-80"
           style={{ color: "var(--text-primary)" }}
           onClick={beginEdit}
           title="点击重命名笔记"
@@ -92,7 +92,7 @@ export function NoteTitle({ file }: { file: string }) {
             if (e.key === "Enter") finishEdit(true);
             else if (e.key === "Escape") finishEdit(false);
           }}
-          className="w-full bg-transparent outline-none text-2xl font-semibold"
+          className="w-full bg-transparent outline-none text-[20px] leading-7 font-semibold tracking-[-0.01em]"
           style={{ color: "var(--text-primary)", borderBottom: "1px dashed var(--border)" }}
         />
       )}

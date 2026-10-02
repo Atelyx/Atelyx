@@ -545,45 +545,48 @@ export const CanvasView = memo(function CanvasView({
                 aria-label="显示网格"
                 onClick={() => setShowGrid((v) => !v)}
                 style={{
-                  width: 36,
-                  height: 36,
+                  width: 32,
+                  height: 32,
                   color: showGrid ? "var(--accent)" : undefined,
                 }}
               >
-                <Grid3x3 size={18} />
+                <Grid3x3 size={16} />
               </ControlButton>
               <ControlButton
                 title={snapEnabled ? "关闭网格吸附" : "开启网格吸附"}
                 aria-label="网格吸附"
                 onClick={() => setSnapEnabled((v) => !v)}
                 style={{
-                  width: 36,
-                  height: 36,
+                  width: 32,
+                  height: 32,
                   color: snapEnabled ? "var(--accent)" : undefined,
                 }}
               >
-                <Magnet size={18} />
+                <Magnet size={16} />
               </ControlButton>
             </div>
           </FlowPanel>
-          {/* 左下角按钮组：放大/缩小/适应视图（bottom 上调避开状态栏统计） */}
-          <FlowPanel position="bottom-left" style={{ bottom: 32 }}>
+          {/* 左下角按钮组：放大/缩小/适应视图（与右下小地图同为画布浮层控件，尺寸统一） */}
+          <FlowPanel position="bottom-left" style={{ bottom: 14 }}>
             <div className="react-flow__controls">
               <ControlButton
                 title="放大 (+)"
                 onClick={() => zoomIn({ duration: 150 })}
+                style={{ width: 32, height: 32 }}
               >
                 <Plus size={16} />
               </ControlButton>
               <ControlButton
                 title="缩小 (-)"
                 onClick={() => zoomOut({ duration: 150 })}
+                style={{ width: 32, height: 32 }}
               >
                 <Minus size={16} />
               </ControlButton>
               <ControlButton
                 title="适应视图"
                 onClick={() => fitView({ duration: 200, padding: 0.15 })}
+                style={{ width: 32, height: 32 }}
               >
                 <Maximize size={16} />
               </ControlButton>
@@ -597,22 +600,29 @@ export const CanvasView = memo(function CanvasView({
             onClick={(_, position) =>
               setCenter(position.x, position.y, { duration: 200 })
             }
-            style={{ bottom: 16, right: 16, width: 170, height: 130 }}
+            style={{ bottom: 14, right: 14, width: 170, height: 130 }}
           />
         </ReactFlow>
+      </div>
 
-        {/* 左下角状态栏：统计（右下角让位 MiniMap；网格按钮已并入左下角按钮组） */}
-        <div
-          className="absolute bottom-1.5 left-3 z-10 text-[11px] select-none inline-flex items-center gap-1.5"
-          style={{ color: "var(--text-muted)" }}
-        >
-          <span>
-            {nodes.length} 个节点 · {edges.length} 条连线
-          </span>
-          <ZoomBadge />
-          {/* 插件贡献区：画布状态条（list 槽，priority 降序） */}
-          <SlotListMount slot="statusbar/canvas" />
-        </div>
+      {/* 画布状态栏：节点/连线计数 + 缩放。
+          保存态不放这里——面板头 ViewStatusIndicator 已是唯一出处，此处重复会出现两条「保存中…」 */}
+      <div
+        className="flex items-center gap-2 px-3 py-1.5 border-t flex-shrink-0 text-[11px] select-none"
+        style={{
+          background: "var(--bg-secondary)",
+          borderColor: "var(--border-subtle)",
+          color: "var(--text-muted)",
+        }}
+      >
+        <span className="font-mono">{nodes.length} 节点</span>
+        <span className="w-px h-3 flex-shrink-0" style={{ background: "var(--border)" }} />
+        <span className="font-mono">{edges.length} 连线</span>
+        <span className="w-px h-3 flex-shrink-0" style={{ background: "var(--border)" }} />
+        <ZoomBadge />
+        <span className="flex-1" />
+        {/* 插件贡献区：画布状态条（list 槽，priority 降序） */}
+        <SlotListMount slot="statusbar/canvas" />
       </div>
 
       {/* 画布空白处右键菜单 */}
@@ -721,5 +731,5 @@ export const CanvasView = memo(function CanvasView({
 /** 缩放百分比指示（独立小组件订阅 viewport，避免平移/缩放导致整个页面重渲染）。 */
 function ZoomBadge() {
   const { zoom } = useViewport();
-  return <span>{Math.round(zoom * 100)}%</span>;
+  return <span className="font-mono">{Math.round(zoom * 100)}%</span>;
 }

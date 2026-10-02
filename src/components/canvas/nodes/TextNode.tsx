@@ -11,6 +11,8 @@ import { ResizeHandle } from "./ResizeHandle";
 import {
   DEFAULT_TEXT_NODE_HEIGHT,
   DEFAULT_TEXT_NODE_WIDTH,
+  NODE_TYPE_BAR_CLASS,
+  NODE_TYPE_COLORS,
 } from "@/constants/canvas";
 import { ConnectionFrame } from "./ConnectionFrame";
 import { useInlineEdit } from "@/hooks/useInlineEdit";
@@ -154,14 +156,15 @@ export function TextNode({ id, data, width, height, selected }: NodeProps) {
   return (
     <div
       ref={editRootRef}
-      className="rounded-md shadow-lg border flex flex-col text-sm"
+      className="rounded-md border flex flex-col text-sm"
       style={{
         width: width ?? DEFAULT_TEXT_NODE_WIDTH,
         height: height ?? DEFAULT_TEXT_NODE_HEIGHT,
         minWidth: 200,
         minHeight: 100,
-        background: "var(--bg-card)",
+        background: "var(--bg-secondary)",
         borderColor: selected ? "var(--accent)" : "var(--border)",
+        boxShadow: "var(--shadow-pop)",
         // 未保存的画布内文本节点用虚线边框与笔记节点（实线）区分
         borderStyle: isSaved ? "solid" : "dashed",
         position: "relative",
@@ -173,10 +176,16 @@ export function TextNode({ id, data, width, height, selected }: NodeProps) {
         className="px-3 py-1.5 border-b rounded-t-md text-xs font-medium flex-shrink-0 flex items-center justify-between gap-1"
         style={{
           cursor: "grab",
-          borderColor: "var(--border)",
+          borderColor: "var(--border-subtle)",
+          background: "var(--bg-tertiary)",
           color: "var(--text-secondary)",
         }}
       >
+        {/* 类型标识：3px 色条（文本） */}
+        <span
+          className={NODE_TYPE_BAR_CLASS}
+          style={{ background: NODE_TYPE_COLORS.text }}
+        />
         <span className="inline-flex items-center gap-1 min-w-0 flex-1 overflow-hidden">
           {isSaved ? (
             <StickyNote size={14} className="flex-shrink-0" />

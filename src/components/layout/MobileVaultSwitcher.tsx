@@ -5,7 +5,7 @@
  * 「添加本地仓库」走自研目录浏览（安卓无系统文件夹选择器），权限与回落口径由入口对话框说明。
  */
 import { useRef, useState } from "react";
-import { ChevronDown, Cloud, FolderPlus, HardDrive, Server } from "lucide-react";
+import { BookOpen, ChevronDown, Cloud, FolderPlus, HardDrive, Server } from "lucide-react";
 import { useAppStore } from "@/stores/appStore";
 import { useSpaceDirectoryStore } from "@/stores/spaceDirectoryStore";
 import { PopupLayer } from "@/components/common/PopupLayer";
@@ -30,6 +30,9 @@ export function MobileVaultSwitcher({ label }: { label: string }) {
 
   const empty = recentVaults.length === 0 && recentSpaces.length === 0;
 
+  // 顶栏标题前缀图标：区分个人仓库 / 协作空间（未进仓库用中性图标）
+  const VaultIcon = identity?.kind === "space" ? Cloud : identity?.kind === "local" ? HardDrive : BookOpen;
+
   const enterSpace = async (entry: RecentSpace) => {
     const result = await selectSpace({
       serverUrl: entry.serverUrl,
@@ -50,12 +53,13 @@ export function MobileVaultSwitcher({ label }: { label: string }) {
       <button
         ref={triggerRef}
         onClick={toggle}
-        className="flex-1 min-w-0 flex items-center gap-1 h-10 px-2 rounded-sm"
+        className="flex-1 min-w-0 flex items-center gap-1.5 h-11 px-3 text-sm font-semibold rounded-sm"
         style={{ color: "var(--text-primary)" }}
         aria-haspopup="menu"
         aria-expanded={!!anchor}
       >
-        <span className="text-sm truncate">{label}</span>
+        <VaultIcon size={14} className="flex-shrink-0" style={{ color: "var(--accent)" }} />
+        <span className="truncate">{label}</span>
         <ChevronDown size={14} className="flex-shrink-0" style={{ color: "var(--text-muted)" }} />
       </button>
       <PopupLayer anchor={anchor} onClose={close} triggerRef={triggerRef} widthClass="w-64">
@@ -72,6 +76,7 @@ export function MobileVaultSwitcher({ label }: { label: string }) {
               disabled={!!switching}
               noDisabledCursor
               title={v.root}
+              className="h-12 gap-2.5"
               style={active ? { color: "var(--accent)" } : undefined}
               onClick={() => {
                 close();
@@ -94,6 +99,7 @@ export function MobileVaultSwitcher({ label }: { label: string }) {
               disabled={!!switching}
               noDisabledCursor
               title={`${s.name}（${s.serverUrl}）`}
+              className="h-12 gap-2.5"
               style={active ? { color: "var(--accent)" } : undefined}
               onClick={() => {
                 close();
@@ -107,6 +113,7 @@ export function MobileVaultSwitcher({ label }: { label: string }) {
         })}
         <MenuDivider />
         <MenuItem
+          className="h-12 gap-2.5"
           onClick={() => {
             close();
             setAddLocal(true);
@@ -116,6 +123,7 @@ export function MobileVaultSwitcher({ label }: { label: string }) {
           添加本地仓库…
         </MenuItem>
         <MenuItem
+          className="h-12 gap-2.5"
           onClick={() => {
             close();
             openSettings("collab");

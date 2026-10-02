@@ -43,6 +43,7 @@ export function EditorSettingsTab() {
       <section className="flex-1 p-5 overflow-auto space-y-4">
         {/* 内部链接：一键重建为标准 Markdown 写法（批量改写，需确认；仅对当前激活仓库可用） */}
         <SettingCard
+          danger
           title="内部链接"
           description={
             <span>

@@ -104,8 +104,9 @@ export function SpaceRows({ entries, hasServers, loading, listError, identity, s
               </div>
             ) : (
               <div
-                className="flex items-center gap-1 px-2 py-1 min-h-8 select-none cursor-default rounded-sm hover:bg-[var(--hover)]"
+                className="flex items-center gap-2 px-2 py-1 min-h-8 select-none cursor-default rounded-sm hover:bg-[var(--hover)]"
                 style={{
+                  // 与本地仓库行同语义：整行强调色底，坐实一级条目
                   background: active ? "color-mix(in srgb, var(--accent) 20%, transparent)" : undefined,
                 }}
                 title={`${entry.name}（${entry.serverUrl}）`}
@@ -128,26 +129,26 @@ export function SpaceRows({ entries, hasServers, loading, listError, identity, s
                   onOpenMenu(e.clientX, e.clientY, { kind: "space", ...entry });
                 }}
               >
-                <span className="flex items-center">{expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</span>
+                <span className="flex items-center" style={{ color: "var(--text-muted)" }}>{expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</span>
                 {switching ? (
                   <Loader2 size={14} className="animate-spin" style={{ color: "var(--accent)" }} />
                 ) : (
                   <Cloud size={14} style={{ color: active ? "var(--accent)" : "var(--text-muted)" }} />
                 )}
-                <span className="flex-1 truncate text-xs" style={{ color: "var(--text-primary)" }}>
+                <span className="flex-1 truncate text-xs font-medium" style={{ color: "var(--text-primary)" }}>
                   {entry.name}
                 </span>
-                <span className="flex-shrink-0 text-[10px] truncate max-w-[45%]" style={{ color: "var(--text-muted)" }} title={entry.serverUrl}>
+                <span className="flex-shrink-0 text-[10px] truncate max-w-[45%]" style={{ fontFamily: "var(--font-mono)", color: "var(--text-muted)" }} title={entry.serverUrl}>
                   {entry.serverUrl}
                 </span>
               </div>
             )}
             {expanded && (
               <ul className="relative">
-                {/* 展开指示线：与仓库行/文件夹行同位 */}
+                {/* 展开指示线：与仓库行/文件夹行同位（空间行 px-2 + chevron 半宽 7） */}
                 <div
                   className="absolute top-0 bottom-0 w-px pointer-events-none z-10"
-                  style={{ left: 13, background: "var(--text-muted)", opacity: 0.6 }}
+                  style={{ left: 15, background: "var(--text-muted)", opacity: 0.6 }}
                 />
                 <FileTree nodes={tree} depth={1} parentDir="" {...fileTree} />
               </ul>

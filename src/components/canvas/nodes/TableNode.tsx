@@ -17,6 +17,8 @@ import { useInlineEdit } from "@/hooks/useInlineEdit";
 import {
   DEFAULT_TABLE_NODE_HEIGHT,
   DEFAULT_TABLE_NODE_WIDTH,
+  NODE_TYPE_BAR_CLASS,
+  NODE_TYPE_COLORS,
 } from "@/constants/canvas";
 import { tableTitleFromFile } from "@/utils/filename";
 import { useFileNavigation } from "@/hooks/useFileNavigation";
@@ -63,14 +65,15 @@ export function TableNode({ id, data, width, height, selected }: NodeProps) {
 
   return (
     <div
-      className="rounded-md shadow-lg border flex flex-col text-sm"
+      className="rounded-md border flex flex-col text-sm"
       style={{
         width: width ?? DEFAULT_TABLE_NODE_WIDTH,
         height: height ?? DEFAULT_TABLE_NODE_HEIGHT,
         minWidth: 240,
         minHeight: 120,
-        background: "var(--bg-card)",
+        background: "var(--bg-secondary)",
         borderColor: selected ? "var(--accent)" : "var(--border)",
+        boxShadow: "var(--shadow-pop)",
         position: "relative",
       }}
     >
@@ -80,10 +83,16 @@ export function TableNode({ id, data, width, height, selected }: NodeProps) {
         className="px-3 py-1.5 border-b rounded-t-md text-xs font-medium flex-shrink-0 flex items-center justify-between gap-1"
         style={{
           cursor: "grab",
-          borderColor: "var(--border)",
+          borderColor: "var(--border-subtle)",
+          background: "var(--bg-tertiary)",
           color: "var(--text-secondary)",
         }}
       >
+        {/* 类型标识：3px 色条（表格） */}
+        <span
+          className={NODE_TYPE_BAR_CLASS}
+          style={{ background: NODE_TYPE_COLORS.table }}
+        />
         <span className="inline-flex items-center gap-1 min-w-0 flex-1 overflow-hidden">
           <TableIcon size={14} className="flex-shrink-0" />
           {renameEdit.editing ? (
@@ -164,7 +173,7 @@ export function TableNode({ id, data, width, height, selected }: NodeProps) {
         <div
           className="px-3 py-1 border-t rounded-b-md text-[10px] flex items-center justify-between flex-shrink-0"
           style={{
-            borderColor: "var(--border)",
+            borderColor: "var(--border-subtle)",
             color: "var(--text-muted)",
             cursor: "pointer",
           }}

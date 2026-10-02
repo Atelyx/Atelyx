@@ -40,23 +40,26 @@ export function MobileDirectoryBrowser({
     >
       <div
         className="flex-shrink-0 flex items-center gap-2 px-2 h-12 border-b"
-        style={{ borderColor: "var(--border)", background: "var(--bg-secondary)" }}
+        style={{ borderColor: "var(--border-subtle)", background: "var(--bg-secondary)" }}
       >
         <button
           onClick={onClose}
-          className="w-9 h-9 flex items-center justify-center rounded flex-shrink-0"
+          className="w-11 h-11 flex items-center justify-center rounded-sm flex-shrink-0"
           style={{ color: "var(--text-secondary)" }}
           aria-label="关闭"
         >
           <X size={18} />
         </button>
-        <span className="flex-1 min-w-0 truncate text-xs" style={{ color: "var(--text-secondary)" }}>
+        <span
+          className="flex-1 min-w-0 truncate text-xs"
+          style={{ color: "var(--text-secondary)", fontFamily: "var(--font-mono)" }}
+        >
           {listing?.path ?? "…"}
         </span>
         <button
           onClick={() => listing?.parent && onEnter(listing.parent)}
           disabled={!listing?.parent}
-          className="w-9 h-9 flex items-center justify-center rounded flex-shrink-0 disabled:opacity-40"
+          className="w-11 h-11 flex items-center justify-center rounded-sm flex-shrink-0 disabled:opacity-40"
           style={{ color: "var(--text-secondary)" }}
           aria-label="返回上级"
         >
@@ -88,7 +91,7 @@ export function MobileDirectoryBrowser({
               onClick={() => onEnter(entry.path)}
               disabled={!entry.readable}
               title={entry.path}
-              className="w-full flex items-center gap-2.5 px-3 h-11 text-left disabled:opacity-40"
+              className="w-full flex items-center gap-2.5 px-3 h-12 text-left rounded-sm disabled:opacity-40"
               style={{ color: "var(--text-secondary)" }}
             >
               <Folder size={16} className="flex-shrink-0" style={{ color: "var(--text-muted)" }} />
@@ -100,7 +103,7 @@ export function MobileDirectoryBrowser({
       <div
         className="flex-shrink-0 p-2 border-t"
         style={{
-          borderColor: "var(--border)",
+          borderColor: "var(--border-subtle)",
           background: "var(--bg-secondary)",
           paddingBottom: "calc(env(safe-area-inset-bottom) + 0.5rem)",
         }}
@@ -108,7 +111,7 @@ export function MobileDirectoryBrowser({
         <button
           onClick={() => listing && onPick(listing.path)}
           disabled={!listing}
-          className="w-full h-10 rounded text-sm font-medium disabled:opacity-50"
+          className="w-full h-11 rounded-sm text-sm font-medium disabled:opacity-50"
           style={{ background: "var(--accent)", color: "var(--accent-fg)" }}
         >
           选用此文件夹

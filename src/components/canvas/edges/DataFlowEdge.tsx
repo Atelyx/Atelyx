@@ -23,7 +23,7 @@ import type { LinkMode } from "@/types";
 
 /** 数据流箭头色（金色，跟随主题 --accent）与关联箭头色（灰，与关联边描边同源变量）。 */
 const GOLD = "var(--accent)";
-const GRAY = "var(--xy-edge-stroke-default, #94a3b8)";
+const GRAY = "var(--xy-edge-stroke-default)";
 
 /** 箭头 defs（orient auto-start-reverse：marker-start 端点自动反向，供双向箭头复用）。 */
 function ArrowDef({ id, color }: { id: string; color: string }) {
@@ -119,8 +119,8 @@ export function DataFlowEdge({
         style={{
           stroke,
           strokeWidth: selected ? 2 : 1.5,
-          // 虚线 = 未消费的资产引用边（8 4）；其余实线不设 strokeDasharray
-          strokeDasharray: dashed ? "8 4" : undefined,
+          // 虚线 = 未消费的资产引用边（5 5）；其余实线不设 strokeDasharray
+          strokeDasharray: dashed ? "5 5" : undefined,
         }}
       />
       <EdgeLabelRenderer>

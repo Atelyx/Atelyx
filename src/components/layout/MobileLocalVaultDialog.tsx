@@ -85,8 +85,8 @@ export function MobileLocalVaultDialog({
       aria-label="本地仓库"
     >
       <div
-        className="w-[min(28rem,100%)] rounded-lg border p-4"
-        style={{ background: "var(--bg-secondary)", borderColor: "var(--border)" }}
+        className="w-[min(28rem,100%)] rounded-lg border shadow-[var(--shadow-pop)] p-4"
+        style={{ background: "var(--bg-overlay)", borderColor: "var(--border)" }}
       >
         <div className="flex items-start gap-2">
           <h3 className="flex-1 text-sm font-medium" style={{ color: "var(--text-primary)" }}>
@@ -94,7 +94,7 @@ export function MobileLocalVaultDialog({
           </h3>
           <button
             onClick={onClose}
-            className="p-1 rounded"
+            className="w-11 h-11 flex items-center justify-center rounded-sm"
             style={{ color: "var(--text-muted)" }}
             aria-label="关闭"
           >
@@ -102,7 +102,7 @@ export function MobileLocalVaultDialog({
           </button>
         </div>
 
-        <p className="mt-2 text-xs leading-relaxed" style={{ color: "var(--text-secondary)" }}>
+        <p className="mt-2 text-sm leading-relaxed" style={{ color: "var(--text-secondary)" }}>
           本地仓库是一个存放笔记、表格与画布的文件夹。要选择设备上的任意文件夹，需要先在系统设置里开启
           「所有文件访问权限」——该权限无法弹窗申请，只能手动打开开关。
         </p>
@@ -126,7 +126,7 @@ export function MobileLocalVaultDialog({
             <button
               onClick={() => void openBrowser()}
               disabled={busy}
-              className="flex items-center justify-center gap-1.5 h-10 rounded text-sm font-medium disabled:opacity-60"
+              className="flex items-center justify-center gap-1.5 h-11 rounded-sm text-sm font-medium disabled:opacity-60"
               style={{ background: "var(--accent)", color: "var(--accent-fg)" }}
             >
               <FolderOpen size={14} /> 从设备选择文件夹
@@ -136,7 +136,7 @@ export function MobileLocalVaultDialog({
             <>
               <button
                 onClick={() => void requestPermission()}
-                className="flex items-center justify-center gap-1.5 h-10 rounded text-sm font-medium"
+                className="flex items-center justify-center gap-1.5 h-11 rounded-sm text-sm font-medium"
                 style={{ background: "var(--accent)", color: "var(--accent-fg)" }}
               >
                 <ShieldCheck size={14} /> 开启所有文件访问权限
@@ -144,12 +144,12 @@ export function MobileLocalVaultDialog({
               <button
                 onClick={() => void enterPrivateVault()}
                 disabled={busy}
-                className="flex items-center justify-center gap-1.5 h-10 rounded text-sm border disabled:opacity-60"
+                className="flex items-center justify-center gap-1.5 h-11 rounded-sm text-sm border disabled:opacity-60"
                 style={{ borderColor: "var(--border)", color: "var(--text-secondary)" }}
               >
                 <HardDrive size={14} /> 使用应用私有目录
               </button>
-              <p className="text-[11px] leading-relaxed" style={{ color: "var(--text-muted)" }}>
+              <p className="text-xs leading-relaxed" style={{ color: "var(--text-muted)" }}>
                 私有目录仅本应用可见，其他应用与电脑都无法访问，内容无法导出。
               </p>
             </>
@@ -157,7 +157,7 @@ export function MobileLocalVaultDialog({
         </div>
 
         {error && (
-          <p className="mt-3 text-[11px] break-words" style={{ color: "var(--danger)" }}>
+          <p className="mt-3 text-xs break-words" style={{ color: "var(--danger)" }}>
             {error}
           </p>
         )}
@@ -165,7 +165,7 @@ export function MobileLocalVaultDialog({
         {firstRun && (
           <button
             onClick={onClose}
-            className="mt-4 w-full h-9 rounded text-xs"
+            className="mt-4 w-full h-11 rounded-sm text-sm"
             style={{ color: "var(--text-muted)" }}
           >
             稍后再说

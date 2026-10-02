@@ -1,4 +1,14 @@
-import { AlertTriangle, Layers, Loader2, Lock, Plus, RefreshCw, Scissors, X } from "lucide-react";
+import {
+  AlertTriangle,
+  Layers,
+  Loader2,
+  Lock,
+  MessageSquare,
+  Plus,
+  RefreshCw,
+  Scissors,
+  X,
+} from "lucide-react";
 import { useEffect, useCallback, useMemo, useRef, useState } from "react";
 import { useReactFlow, type NodeProps } from "@xyflow/react";
 import { useShallow } from "zustand/react/shallow";
@@ -14,6 +24,8 @@ import { DEFAULT_CONVERSATION_WIDTH,
   DEFAULT_CONVERSATION_HEIGHT,
   DEFAULT_TEXT_NODE_WIDTH,
   DEFAULT_TEXT_NODE_HEIGHT,
+  NODE_TYPE_BAR_CLASS,
+  NODE_TYPE_COLORS,
 } from "@/constants/canvas";
 import { CHAT_UNAVAILABLE_TEXT, ERROR_PREFIX } from "@/constants/chat";
 import { isAssetConsumed } from "@/utils/consumed";
@@ -732,14 +744,15 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
   return (
     <div
       ref={nodeRef}
-      className="rounded-md shadow-lg border flex flex-col text-sm"
+      className="rounded-md border flex flex-col text-sm"
       style={{
         width: width ?? 420,
         height: height ?? undefined,
         minWidth: 280,
         minHeight: 150,
-        background: "var(--bg-card)",
+        background: "var(--bg-secondary)",
         borderColor: selected ? "var(--accent)" : "var(--border)",
+        boxShadow: "var(--shadow-pop)",
         cursor: "default",
         position: "relative",
       }}
@@ -750,10 +763,20 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
         className="px-3 py-2 border-b rounded-t-md flex items-center gap-2"
         style={{
           cursor: "grab",
-          borderColor: "var(--border)",
-          background: "var(--bg-card)",
+          borderColor: "var(--border-subtle)",
+          background: "var(--bg-tertiary)",
         }}
       >
+        {/* 类型标识：3px 色条（对话） */}
+        <span
+          className={NODE_TYPE_BAR_CLASS}
+          style={{ background: NODE_TYPE_COLORS.conversation }}
+        />
+        <MessageSquare
+          size={13}
+          className="flex-shrink-0"
+          style={{ color: "var(--text-secondary)" }}
+        />
         {/* 标题：双击 inline 编辑（nodrag + stopPropagation 防触发节点拖拽） */}
         {titleEdit.editing ? (
           <input

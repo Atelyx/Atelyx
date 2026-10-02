@@ -17,6 +17,7 @@ const refKeyOfPanelRef = (r: { label: string }) =>
 import {
   AlertCircle,
   AlertTriangle,
+  ArrowUp,
   Bot,
   Cpu,
   FilePlus,
@@ -25,7 +26,6 @@ import {
   Loader2,
   MessageSquare,
   RefreshCw,
-  SendHorizontal,
   Square,
   Trash2,
   X,
@@ -519,66 +519,23 @@ export function AiChatPanel() {
         {showJumpToBottom && <JumpToBottomButton onClick={jumpToBottom} />}
       </div>
 
-      {/* 底部输入区：textarea + 内部底部工具条（左：提示词/模型；右：发送） */}
-      <div className="border-t flex-shrink-0" style={{ borderColor: "var(--border)" }}>
-        {/* textarea + 内部工具条（absolute 叠放，textarea 有 pb 留白） */}
-        <div className="relative">
-          {/* 输入框内底部工具条：左 Agent/模型；右 发送/停止 */}
-          <div className="absolute inset-x-0 bottom-3 z-10 px-1.5 flex items-center gap-0.5">
-          {/* Agent 选择：选中的 Agent 提供系统提示词与工具（发送时实时解析）；缺省「对话」= 普通对话 */}
-          <DropdownSelect
-            value={agentId ?? ""}
-            onChange={(v) => setAgentId(v || undefined)}
-            options={agents.map((a) => ({ value: a.id, label: a.name }))}
-            // 未选择（旧数据/清空）= 缺省「对话」：占位显示对话、运行时按「对话」解析
-            placeholder="对话"
-            emptyText="暂无 Agent（设置 → Agent 新建）"
-            prefixIcon={<Bot size={13} className="flex-shrink-0" />}
-            title={agentId ? `Agent：${agents.find((a) => a.id === agentId)?.name ?? ""}` : "Agent：对话（缺省，普通对话；系统提示词与工具在 设置 → Agent 中配置）"}
-            className="px-1.5 py-1 rounded text-xs hover:opacity-80 w-28 min-w-0"
-            style={{ color: "var(--text-secondary)" }}
-          />
-
-          {/* 模型选择：两级菜单（模型 / 推理等级子面板，PopupLayer 统一弹层壳） */}
-          <ModelSelect
-            providers={providers}
-            providerId={modelOverride?.providerId}
-            model={modelOverride?.model}
-            effort={effortOverride ?? undefined}
-            onSelectModel={(sel) =>
-              sel
-                ? setModelOverride({ providerId: sel.providerId, model: sel.model })
-                : setModelOverride(null)
-            }
-            onSelectEffort={(effort) => setEffortOverride(effort ?? null)}
-            defaultModelDisplay={defaultModelDisplay}
-            prefixIcon={<Cpu size={13} className="flex-shrink-0" />}
-            title={modelOverride ? `模型：${modelOverride.model}` : "模型：跟随仓库默认（点击选择/设置推理等级）"}
-            className="px-1.5 py-1 rounded text-xs hover:opacity-80 w-28 min-w-0"
-            style={{ color: "var(--text-secondary)" }}
-          />
-
-          <div className="flex-1" />
-          {/* 右：发送 / 停止（图标 only，金色圆钮，流式中切换为停止）——mr-1 右缘留白不顶格；
-              任一会话压缩进行中即禁用（压缩与发送共用一个中止句柄，避免静默无效点击） */}
-          <button
-            onClick={streaming ? stop : handleSend}
-            disabled={compactingAny || (!streaming && !input.trim())}
-            title={compactingAny ? "正在压缩会话历史…" : streaming ? "停止" : "发送 (Enter)"}
-            aria-label={compactingAny ? "正在压缩会话历史" : streaming ? "停止" : "发送"}
-            className="p-1.5 rounded flex-shrink-0 mr-1 disabled:opacity-40"
-            style={{
-              background: streaming ? "var(--bg-tertiary)" : "var(--accent)",
-              color: streaming ? "var(--text-secondary)" : "var(--accent-fg)",
-            }}
-          >
-            {streaming ? <Square size={13} /> : <SendHorizontal size={13} />}
-          </button>
-        </div>
-
+      {/* 底部输入区：不铺底色、只用一条 1px 上边分隔——输入框是这里唯一的「盒子」，
+          底栏若再铺一层底色就与输入框叠成两个盒子 */}
+      <div
+        className="border-t flex-shrink-0 px-3 pt-2.5 pb-3"
+        style={{ borderColor: "var(--border-subtle)" }}
+      >
         {/* 输入框（data-chat-input = 文件面板拖拽文件/文件夹的落点：拖入即 @引用）：
-        overlay 渲染 @标签（透明 textarea 承载输入，滚动同步 transform）；键入 @ 唤起仓库选择器 */}
-        <div className="relative" data-chat-input ref={inputWrapRef}>
+        overlay 渲染 @标签（透明 textarea 承载输入，滚动同步 transform）；键入 @ 唤起仓库选择器。
+        输入框是输入区唯一的盒子，内部纵向三段常规流：输入面 → 分隔线 → 工具排
+        （工具排走常规流而非绝对定位——绝对定位会与超出的输入文字叠在一起） */}
+        <div
+          // 边框恒定不改：聚焦转金边在深底上呈"发光"观感，且叠加 2px 光环会形成同心双线，故聚焦不做边框变化
+          className="relative rounded-[var(--radius-md)] border border-[var(--border)]"
+          data-chat-input
+          ref={inputWrapRef}
+          style={{ background: "var(--bg-sunken)" }}
+        >
           {picker && (
             <VaultAtPicker
               x={picker.x}
@@ -629,9 +586,63 @@ export function AiChatPanel() {
             spellCheck={false}
             placeholder="输入消息，@ 引用文件，Enter 发送，Shift+Enter 换行"
             rows={5}
-            overlayClassName="z-0 px-2 pt-3 pb-12 text-sm leading-relaxed"
-            textareaClassName="w-full px-2 pt-3 pb-12 text-sm leading-relaxed"
+            overlayClassName="z-0 px-2 pt-3 pb-2 text-sm leading-relaxed"
+            // focus:shadow-none 压掉全局 textarea:focus 的 2px 焦点环：输入面撑满输入盒内部，
+            // 该环会紧贴盒子的 1px 金边形成同心双线；此处的聚焦提示由外层盒的边转金承担
+            textareaClassName="w-full px-2 pt-3 pb-2 text-sm leading-relaxed focus:shadow-none"
           />
+
+          {/* 工具排（盒子内底部，与输入面同属一块、不画分隔线）：左 Agent/模型；右 发送/停止 */}
+          <div className="flex items-center gap-2 px-2 pt-1 pb-2">
+          {/* Agent 选择：选中的 Agent 提供系统提示词与工具（发送时实时解析）；缺省「对话」= 普通对话 */}
+          <DropdownSelect
+            value={agentId ?? ""}
+            onChange={(v) => setAgentId(v || undefined)}
+            options={agents.map((a) => ({ value: a.id, label: a.name }))}
+            // 未选择（旧数据/清空）= 缺省「对话」：占位显示对话、运行时按「对话」解析
+            placeholder="对话"
+            emptyText="暂无 Agent（设置 → Agent 新建）"
+            prefixIcon={<Bot size={13} className="flex-shrink-0" />}
+            title={agentId ? `Agent：${agents.find((a) => a.id === agentId)?.name ?? ""}` : "Agent：对话（缺省，普通对话；系统提示词与工具在 设置 → Agent 中配置）"}
+            // 无边框幽灵态 + 按内容定宽：宽度只包住文字（不撑满），空间不足时才收缩、由标签自身截断
+            className="h-6 px-2 rounded-[var(--radius-sm)] text-[11px] hover:bg-[var(--bg-tertiary)] min-w-0"
+            style={{ color: "var(--text-secondary)" }}
+          />
+
+          {/* 模型选择：两级菜单（模型 / 推理等级子面板，PopupLayer 统一弹层壳） */}
+          <ModelSelect
+            providers={providers}
+            providerId={modelOverride?.providerId}
+            model={modelOverride?.model}
+            effort={effortOverride ?? undefined}
+            onSelectModel={(sel) =>
+              sel
+                ? setModelOverride({ providerId: sel.providerId, model: sel.model })
+                : setModelOverride(null)
+            }
+            onSelectEffort={(effort) => setEffortOverride(effort ?? null)}
+            defaultModelDisplay={defaultModelDisplay}
+            prefixIcon={<Cpu size={13} className="flex-shrink-0" />}
+            title={modelOverride ? `模型：${modelOverride.model}` : "模型：跟随仓库默认（点击选择/设置推理等级）"}
+            // 模型名最长：同按内容定宽——面板够宽就完整显示且不再拉宽，不够才收缩截断
+            className="h-6 px-2 rounded-[var(--radius-sm)] text-[11px] hover:bg-[var(--bg-tertiary)] min-w-0"
+            style={{ color: "var(--text-secondary)" }}
+          />
+          {/* 右：发送 / 停止（图标 only，金色圆钮，流式中切换为停止）——mr-1 右缘留白不顶格；
+              任一会话压缩进行中即禁用（压缩与发送共用一个中止句柄，避免静默无效点击） */}
+          <button
+            onClick={streaming ? stop : handleSend}
+            disabled={compactingAny || (!streaming && !input.trim())}
+            title={compactingAny ? "正在压缩会话历史…" : streaming ? "停止" : "发送 (Enter)"}
+            aria-label={compactingAny ? "正在压缩会话历史" : streaming ? "停止" : "发送"}
+            className="w-7 h-7 ml-auto rounded-[var(--radius-sm)] inline-flex items-center justify-center flex-shrink-0 disabled:opacity-40"
+            style={{
+              background: streaming ? "var(--bg-tertiary)" : "var(--accent)",
+              color: streaming ? "var(--text-secondary)" : "var(--accent-fg)",
+            }}
+          >
+            {streaming ? <Square size={12} /> : <ArrowUp size={13} />}
+          </button>
         </div>
         </div>
       </div>

@@ -9,7 +9,8 @@
  * 安卓首次启动渲染存储授权引导：本地仓库要选设备文件夹需先手动开启「所有文件访问权限」。
  */
 import { Settings } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { cloneElement, useEffect, useRef, useState } from "react";
+import type { ReactElement } from "react";
 import { useAppStore } from "@/stores/appStore";
 import { useUiStateStore } from "@/stores/uiStateStore";
 import { usePluginStore } from "@/stores/pluginStore";
@@ -49,7 +50,9 @@ function buildTabs(): MobileNavItem[] {
   ];
   return ordered.map((kind) => {
     const meta = viewMetaFor(kind);
-    return { key: kind, label: meta.label, icon: meta.icon };
+    // 窄栏/抽屉图标按移动端档 16px（VIEW_META 默认 13 是桌面面板标签尺寸）
+    const icon = cloneElement(meta.icon as ReactElement<{ size?: number }>, { size: 16 });
+    return { key: kind, label: meta.label, icon };
   });
 }
 
@@ -187,21 +190,21 @@ export function MobileWorkspacePage() {
       <div className="flex-1 min-w-0 flex flex-col">
         {/* 顶栏：仓库/空间切换 + 设置入口（设置是核心应用入口，恒宿主渲染） */}
         <div
-          className="flex-shrink-0 flex items-center gap-1 pl-1 pr-1 select-none"
+          className="flex-shrink-0 flex items-center gap-2 px-2 min-h-12 select-none"
           style={{
             background: "var(--bg-secondary)",
-            borderBottom: "1px solid var(--border)",
+            borderBottom: "1px solid var(--border-subtle)",
             paddingTop: "env(safe-area-inset-top)",
           }}
         >
           <MobileVaultSwitcher label={vaultName} />
           <button
             onClick={() => openSettings()}
-            className="w-10 h-10 flex items-center justify-center rounded-sm flex-shrink-0"
+            className="w-11 h-11 flex items-center justify-center rounded-sm flex-shrink-0"
             style={{ color: "var(--text-secondary)" }}
             aria-label="设置"
           >
-            <Settings size={18} />
+            <Settings size={16} />
           </button>
         </div>
 

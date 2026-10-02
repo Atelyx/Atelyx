@@ -37,14 +37,15 @@ export function ThinkingBlock({
   }, [summary, streaming]);
   return (
     <div
-      className="mb-1.5 rounded border-l-2 pl-2 text-xs"
-      style={{ borderColor: "var(--border)", color: "var(--text-secondary)" }}
+      className="mb-2 overflow-hidden rounded-[var(--radius-md)] border text-xs"
+      style={{ borderColor: "var(--border-subtle)", background: "var(--bg-secondary)" }}
     >
+      {/* 头部条（下沉面）：折叠态即思考摘要行 */}
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        className="relative flex w-full items-center gap-1 text-left select-none leading-4 py-0.5"
-        style={{ color: "var(--text-muted)" }}
+        className="relative flex h-7 w-full items-center gap-1.5 px-2.5 text-left select-none"
+        style={{ background: "var(--bg-sunken)", color: "var(--text-muted)" }}
       >
         {streaming && !open && <span className="thinking-sweep-bar" aria-hidden />}
         {open ? (
@@ -75,8 +76,8 @@ export function ThinkingBlock({
       </button>
       {open && (
         <div
-          className="whitespace-pre-wrap break-words mt-1 max-h-48 overflow-y-auto"
-          style={{ color: "var(--text-secondary)" }}
+          className="whitespace-pre-wrap break-words max-h-48 overflow-y-auto px-3 py-2 leading-5"
+          style={{ color: "var(--text-secondary)", borderTop: "1px solid var(--border-subtle)" }}
         >
           {text}
         </div>

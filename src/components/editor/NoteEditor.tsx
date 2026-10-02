@@ -643,24 +643,28 @@ export function NoteEditor({ file }: { file: string }) {
         </span>
       </div>
 
-      {/* 页面内标题（设置 → 编辑器开启时）：正文最顶端显示文件名，点击可重命名笔记；
-          读取失败时不显示（此时文件名不属于可信内容） */}
-      {inlineTitle && !loadError && <NoteTitle file={file} />}
+      {/* 正文列：标题与属性区与正文同列居中（正文最大行宽见 styles/index.css .note-body）。
+          源码模式也保持同列，切模式不产生横向跳变 */}
+      <div className="mx-auto w-full max-w-[780px] flex-shrink-0">
+        {/* 页面内标题（设置 → 编辑器开启时）：正文最顶端显示文件名，点击可重命名笔记；
+            读取失败时不显示（此时文件名不属于可信内容） */}
+        {inlineTitle && !loadError && <NoteTitle file={file} />}
 
-      {/* 属性区：胶囊行式融入正文顶部（可点击编辑）；渲染/实时预览编辑模式显示，源码模式由 textarea
-          显示 YAML 原文不重复显示；无属性时整块不渲染（添加首属性经「···」菜单打开表单）；格式错误时显示红条 */}
-      {!sourceMode && !loadError && (
-        <NotePropertiesView
-          data={parsed.data}
-          parseError={!parsed.ok}
-          onUpdate={handlePropertiesUpdate}
-          onOpenSource={() => setSourceMode(true)}
-          tagCandidates={tagCandidates}
-          onRequestTagCandidates={requestTagCandidates}
-          hideWhenEmpty
-          openAddSignal={addPropsSeq}
-        />
-      )}
+        {/* 属性区：胶囊行式融入正文顶部（可点击编辑）；渲染/实时预览编辑模式显示，源码模式由 textarea
+            显示 YAML 原文不重复显示；无属性时整块不渲染（添加首属性经「···」菜单打开表单）；格式错误时显示红条 */}
+        {!sourceMode && !loadError && (
+          <NotePropertiesView
+            data={parsed.data}
+            parseError={!parsed.ok}
+            onUpdate={handlePropertiesUpdate}
+            onOpenSource={() => setSourceMode(true)}
+            tagCandidates={tagCandidates}
+            onRequestTagCandidates={requestTagCandidates}
+            hideWhenEmpty
+            openAddSignal={addPropsSeq}
+          />
+        )}
+      </div>
 
       {loadError ? (
         <div className="flex-1 flex items-center justify-center text-sm" style={{ color: "var(--danger)" }}>
@@ -684,7 +688,7 @@ export function NoteEditor({ file }: { file: string }) {
           }}
           spellCheck={false}
           placeholder="笔记内容（Markdown）"
-          className="flex-1 w-full resize-none outline-none p-4 text-sm leading-relaxed"
+          className="flex-1 w-full max-w-[780px] mx-auto resize-none outline-none p-4 text-sm leading-relaxed"
           style={{
             background: "var(--bg-primary)",
             color: "var(--text-primary)",
@@ -703,7 +707,7 @@ export function NoteEditor({ file }: { file: string }) {
           <SlotListMount slot="gutter/note" />
           <div
             data-note-content
-            className="markdown-body flex-1 min-w-0 overflow-auto"
+            className="note-body markdown-body flex-1 min-w-0 overflow-auto"
             style={{
               background: "var(--bg-primary)",
               color: "var(--text-primary)",
@@ -736,13 +740,16 @@ export function NoteEditor({ file }: { file: string }) {
       )}
 
       {/* 反向链接区（编辑器内容区下方，独立于属性区）：引用本文档的笔记列表，点击打开引用方；
-          空 = 无引用时也显示该区（空态提示） */}
+          空 = 无引用时也显示该区（空态提示）；与正文同列居中 */}
       <div
-        className="flex-shrink-0 px-3 py-2 select-none"
+        className="mx-auto w-full max-w-[780px] flex-shrink-0 px-4 py-2 select-none"
         style={{ borderTop: "1px solid var(--border)" }}
       >
         <div className="text-xs mb-1" style={{ color: "var(--text-muted)" }}>
-          反向链接{backlinks.length > 0 ? `（${backlinks.length}）` : ""}
+          反向链接
+          {backlinks.length > 0 && (
+            <span style={{ fontFamily: "var(--font-mono)" }}>（{backlinks.length}）</span>
+          )}
         </div>
         {backlinks.length > 0 ? (
           <div className="flex flex-col gap-0.5 max-h-40 overflow-auto">
@@ -765,12 +772,17 @@ export function NoteEditor({ file }: { file: string }) {
         )}
       </div>
 
-      {/* 底部状态条：字数统计 + 剪贴板操作提示（2.5s 自动清除） */}
+      {/* 底部状态条：字数统计 + 剪贴板操作提示（2.5s 自动清除）；统计数字等宽便于扫读 */}
       <div
         className="px-3 py-1 text-[11px] flex-shrink-0 select-none"
-        style={{ borderTop: "1px solid var(--border)", color: "var(--text-muted)" }}
+        style={{
+          borderTop: "1px solid var(--border)",
+          color: "var(--text-muted)",
+          fontFamily: "var(--font-mono)",
+        }}
       >
         {content.length} 字
+        {backlinks.length > 0 && <span className="ml-2">反链 {backlinks.length}</span>}
         {clipHint && (
           <span className="ml-2" style={{ color: "var(--danger)" }}>
             {clipHint}

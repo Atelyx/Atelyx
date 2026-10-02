@@ -321,7 +321,7 @@ function TextCell({
     <div
       // 编辑态/隐藏编辑态共用同一输入框元素（绝对铺满 td）：编辑态显示即单元格本身，
       // 隐藏态 opacity-0 + pointer-events-none（点击穿透到 td 手势层），td 显示原值
-      className="w-full h-full min-h-8 px-1.5 py-1 text-xs whitespace-pre-wrap break-words"
+      className="w-full h-full min-h-8 px-1.5 py-1 text-[13px] whitespace-pre-wrap break-words"
       style={{
         color: "var(--text-primary)",
         ...(editing
@@ -466,7 +466,12 @@ function NumberCell({
       {!editing && (
         <div
           className="flex items-center w-full min-h-8 px-1.5 text-xs cursor-default"
-          style={{ color: "var(--text-primary)", ...styleToCss(cellStyleOf(row, field.id)) }}
+          style={{
+            color: "var(--text-primary)",
+            // 数值/时长一律等宽（便于按列扫读）；单元格样式可覆盖
+            fontFamily: "var(--font-mono)",
+            ...styleToCss(cellStyleOf(row, field.id)),
+          }}
         >
           <span className="truncate">
             {value !== undefined ? (field.type === "duration" ? `${value} 秒` : String(value)) : ""}

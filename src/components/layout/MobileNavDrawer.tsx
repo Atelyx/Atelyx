@@ -49,12 +49,12 @@ export function MobileNavDrawer({
         style={{
           width: RAIL_WIDTH,
           background: "var(--bg-secondary)",
-          borderRight: "1px solid var(--border)",
+          borderRight: "1px solid var(--border-subtle)",
           paddingTop: applySafeArea ? "env(safe-area-inset-top)" : undefined,
           paddingBottom: applySafeArea ? "env(safe-area-inset-bottom)" : undefined,
         }}
       >
-        <div className="flex-1 min-h-0 overflow-y-auto py-1">
+        <div className="flex-1 min-h-0 overflow-y-auto py-2">
           {items.map((item) => {
             const isActive = item.key === active;
             return (
@@ -66,9 +66,7 @@ export function MobileNavDrawer({
                 className="w-full h-12 flex items-center justify-center"
                 style={{
                   color: isActive ? "var(--accent)" : "var(--text-secondary)",
-                  background: isActive
-                    ? "color-mix(in srgb, var(--accent) 12%, transparent)"
-                    : "transparent",
+                  background: isActive ? "var(--accent-soft)" : "transparent",
                 }}
               >
                 {item.icon}
@@ -81,7 +79,7 @@ export function MobileNavDrawer({
           aria-label={expanded ? "收起导航栏" : "展开导航栏"}
           aria-expanded={expanded}
           className="h-11 flex items-center justify-center border-t flex-shrink-0"
-          style={{ borderColor: "var(--border)", color: "var(--text-muted)" }}
+          style={{ borderColor: "var(--border-subtle)", color: "var(--text-muted)" }}
         >
           {expanded ? <ChevronLeft size={16} /> : <ChevronRight size={16} />}
         </button>
@@ -95,14 +93,14 @@ export function MobileNavDrawer({
             onClick={() => setExpanded(false)}
           />
           <div
-            className="fixed top-0 bottom-0 z-40 flex flex-col border-r py-1 overflow-y-auto"
+            className="fixed top-0 bottom-0 z-40 flex flex-col border-r px-2.5 pt-3 pb-6 overflow-y-auto"
             style={{
               left: RAIL_WIDTH,
               width: 172,
-              background: "var(--bg-secondary)",
+              background: "var(--bg-primary)",
               borderColor: "var(--border)",
-              paddingTop: applySafeArea ? "env(safe-area-inset-top)" : undefined,
-              paddingBottom: applySafeArea ? "env(safe-area-inset-bottom)" : undefined,
+              paddingTop: applySafeArea ? "calc(env(safe-area-inset-top) + 12px)" : undefined,
+              paddingBottom: applySafeArea ? "calc(env(safe-area-inset-bottom) + 24px)" : undefined,
             }}
           >
             {items.map((item) => {
@@ -111,12 +109,10 @@ export function MobileNavDrawer({
                 <button
                   key={item.key}
                   onClick={() => pick(item.key)}
-                  className="flex items-center gap-2.5 px-3 h-11 text-sm text-left flex-shrink-0"
+                  className="flex items-center gap-2.5 px-2.5 h-12 text-sm text-left flex-shrink-0 rounded-sm"
                   style={{
                     color: isActive ? "var(--accent)" : "var(--text-secondary)",
-                    background: isActive
-                      ? "color-mix(in srgb, var(--accent) 12%, transparent)"
-                      : "transparent",
+                    background: isActive ? "var(--accent-soft)" : "transparent",
                   }}
                 >
                   {item.icon}

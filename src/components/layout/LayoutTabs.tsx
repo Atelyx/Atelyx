@@ -113,22 +113,26 @@ export function LayoutTabs() {
       <div className="flex items-stretch gap-1" data-tauri-drag-region>
         {layouts.map((l, index) => {
           const active = l.id === activeLayoutId;
+          const editing = editingId === l.id;
           const dragging = dragOffset !== null && dragRef.current?.index === index;
           const isHome = l.id === HOME_LAYOUT_ID;
           return (
             <div
               key={l.id}
               data-layout-tab
-              className="group flex items-center rounded-t-sm text-xs min-w-0 flex-shrink-0"
+              className="group flex items-center h-7 rounded-sm text-xs min-w-0 flex-shrink-0 hover:bg-[var(--bg-tertiary)]"
               style={{
-                // 激活 tab 背景与编辑区同色（bg-primary）+ 同色底边框「顶开」标题栏底边线 → 与面板网格粘连
-                background: active ? "var(--bg-primary)" : "transparent",
-                borderBottom: active ? "1px solid var(--bg-primary)" : undefined,
-                color: active ? "var(--text-primary)" : "var(--text-muted)",
+                // 弱层级：激活只抬一档底色 + 2px 金下边，不染金底（重命名中同款高亮）；
+                // 未激活不设内联底色，交给 hover 类，否则内联样式会压过 hover
+                background: active || editing ? "var(--bg-tertiary)" : undefined,
+                boxShadow: active || editing ? "inset 0 -2px 0 var(--accent)" : undefined,
+                color: active ? "var(--text-primary)" : "var(--text-secondary)",
                 // 拖动中：跟随水平位移 + 阴影提示，其他 tab 原位等待
                 transform: dragging && dragOffset !== null ? `translateX(${dragOffset}px)` : undefined,
                 opacity: dragging ? 0.85 : undefined,
-                transition: dragging ? "none" : "transform 120ms ease",
+                transition: dragging
+                  ? "none"
+                  : "transform 120ms ease, background-color 120ms ease, color 120ms ease",
                 zIndex: dragging ? 10 : undefined,
               }}
               // 禁窗口拖动：tab 需独占 pointer 事件做排序拖拽
@@ -150,7 +154,7 @@ export function LayoutTabs() {
                 setMenu({ id: l.id, x: e.clientX, y: e.clientY });
               }}
             >
-              {editingId === l.id ? (
+              {editing ? (
                 <input
                   value={draft}
                   onChange={(e) => setDraft(e.target.value)}
@@ -173,7 +177,7 @@ export function LayoutTabs() {
                     }
                   }}
                   autoFocus
-                  className="pl-3 pr-1 py-0.5 bg-transparent border-b border-[var(--accent)] outline-none text-xs min-w-0"
+                  className="pl-3 pr-1 py-0.5 bg-transparent outline-none text-xs min-w-0"
                   style={{ color: "var(--text-primary)" }}
                   data-tauri-drag-region="false"
                 />
@@ -211,10 +215,10 @@ export function LayoutTabs() {
 
         <button
           onClick={addLayout}
-          className="flex-shrink-0 px-1.5 hover:opacity-80"
+          className="flex-shrink-0 inline-flex items-center justify-center px-1.5 h-7 rounded-sm hover:bg-[var(--bg-tertiary)]"
           title="新建布局（复制当前布局）"
           aria-label="新建布局"
-          style={{ color: "var(--text-secondary)" }}
+          style={{ color: "var(--text-muted)" }}
           data-tauri-drag-region="false"
         >
           <Plus size={13} />

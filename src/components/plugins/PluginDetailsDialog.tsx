@@ -3,7 +3,7 @@
  * 纯 UI 组件：props 与回调通信；回退确认弹窗的状态机由父组件（PluginsSettingsTab）持有。
  */
 import { useEffect, useRef, useState } from "react";
-import { Check, ChevronRight, Circle, RefreshCw, Terminal, X } from "lucide-react";
+import { Check, ChevronRight, Circle, Lock, RefreshCw, Shield, Terminal, X } from "lucide-react";
 import type { InstalledPlugin, PluginAuditEntry, PluginCommandContribution, PluginSlotChain } from "@/types";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 import { PLUGIN_MOUNT_PHASE_LABELS, PLUGIN_MOUNT_PHASE_ORDER } from "@/constants/plugins";
@@ -71,6 +71,13 @@ export function PluginDetailsDialog({
   const [expandedSlot, setExpandedSlot] = useState<string | null>(null);
   const pluginCommands = commands.filter((command) => command.pluginId === plugin.id);
   const declares = plugin.manifest.declares ?? [];
+  // 审计对照：把声明能力与「实际访问」的服务面去重比对（服务与调用同属能力命名空间；
+  // 事件订阅不是能力，不计入），多出来的即声明之外的访问。
+  const actualServices = audit
+    ? Array.from(new Set([...audit.services, ...audit.calls.map((call) => call.service)]))
+    : [];
+  const declaredSet = new Set(declares);
+  const extraAccess = actualServices.filter((name) => !declaredSet.has(name));
   // 挂载失败阶段在六阶段顺序中的下标（progress 条：其前 = 已通过，其后 = 未到达）
   const failIndex = plugin.failure ? PLUGIN_MOUNT_PHASE_ORDER.indexOf(plugin.failure.phase) : -1;
 
@@ -162,14 +169,36 @@ export function PluginDetailsDialog({
 
         {declares.length > 0 && (
           <section className="mb-4">
-            <h4 className="text-[11px] font-medium mb-2" style={{ color: "var(--text-muted)" }}>声明能力</h4>
-            <div className="flex flex-wrap gap-1">{declares.map((name) => <span key={name} className="text-[10px] px-1.5 py-0.5 rounded border" style={{ color: capabilitySensitive(name) ? "var(--warning)" : "var(--text-secondary)", borderColor: "var(--border)" }}>{capabilityLabel(name)}{capabilitySensitive(name) ? "（敏感）" : ""}{declaredCapabilityAvailable(name) ? "" : "（本平台不可用）"}</span>)}</div>
+            {/* 权限披露：安装前声明的能力，金色描边盒与风险语义区分 */}
+            <div
+              className="rounded-[var(--radius-sm)] border p-3"
+              style={{
+                borderColor: "color-mix(in srgb, var(--accent) 30%, transparent)",
+                background: "color-mix(in srgb, var(--accent) 6%, transparent)",
+              }}
+            >
+              <div className="flex items-center gap-2 text-xs font-medium mb-2" style={{ color: "var(--accent)" }}>
+                <Lock size={12} className="shrink-0" />
+                权限披露（安装前声明）
+              </div>
+              <div className="flex flex-wrap gap-1">{declares.map((name) => <span key={name} className="inline-flex items-center h-5 px-2 rounded-full text-[10px] border" style={{ color: capabilitySensitive(name) ? "var(--warning)" : "var(--text-secondary)", borderColor: "var(--border)" }}>{capabilityLabel(name)}{capabilitySensitive(name) ? "（敏感）" : ""}{declaredCapabilityAvailable(name) ? "" : "（本平台不可用）"}</span>)}</div>
+            </div>
           </section>
         )}
 
         {audit && (audit.services.length > 0 || audit.events.length > 0 || audit.calls.length > 0) && (
           <section className="mb-4">
             <h4 className="text-[11px] font-medium mb-2" style={{ color: "var(--text-muted)" }}>实际访问与调用</h4>
+            {/* 审计对照：声明 vs 实际（无声明外访问才判定无越权） */}
+            <div className="flex items-center gap-2 text-[11px] mb-2 flex-wrap" style={{ color: "var(--text-muted)" }}>
+              <Shield size={12} className="shrink-0" />
+              <span className="font-mono">声明 {declares.length} 项 · 实际访问 {actualServices.length} 项</span>
+              {extraAccess.length === 0 ? (
+                <span style={{ color: "var(--success)" }}>· 无越权记录</span>
+              ) : (
+                <span style={{ color: "var(--warning)" }}>· 声明外访问 {extraAccess.length} 项</span>
+              )}
+            </div>
             <div className="space-y-1 text-[10px]" style={{ color: "var(--text-secondary)" }}>
               {audit.services.map((name) => <div key={`service:${name}`}>{capabilityLabel(name)} · 已访问</div>)}
               {audit.events.map((name) => <div key={`event:${name}`}>{name} · 已订阅</div>)}

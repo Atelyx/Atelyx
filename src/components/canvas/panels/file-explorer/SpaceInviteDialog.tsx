@@ -94,8 +94,8 @@ export function SpaceInviteDialog({ serverUrl, spaceId, spaceName, onClose }: Pr
       onClick={onClose}
     >
       <div
-        className="w-[380px] rounded-lg border shadow-xl"
-        style={{ background: "var(--bg-secondary)", borderColor: "var(--border)" }}
+        className="w-[380px] rounded-lg border shadow-[var(--shadow-pop)]"
+        style={{ background: "var(--bg-overlay)", borderColor: "var(--border)" }}
         onClick={(e) => e.stopPropagation()}
       >
         <header className="px-4 py-3 border-b flex items-center justify-between" style={{ borderColor: "var(--border)" }}>

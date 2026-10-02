@@ -211,8 +211,18 @@ export const PanelTabBar = memo(function PanelTabBar({
 
   return (
     <div
-      className="h-7 flex items-center gap-1 px-1.5 border-b flex-shrink-0 select-none min-w-0"
-      style={{ background: "var(--bg-secondary)", borderColor: "var(--border)" }}
+      className="h-7 flex items-center gap-1 px-1.5 flex-shrink-0 select-none min-w-0"
+      style={{
+        // 用 backgroundColor（而非 background 简写）：简写会把 backgroundImage 重置为 none，
+        // 依赖对象键序才生效，太脆
+        backgroundColor: "var(--bg-secondary)",
+        // 底边线画在背景层（而非绝对定位元素——定位元素会盖在标签之上）：标签是不透明底 + 金下边，
+        // 天然覆盖此处；其余位置露出这条线 → 激活标签把面板头与内容区连成一体
+        backgroundImage: "linear-gradient(var(--border), var(--border))",
+        backgroundSize: "100% 1px",
+        backgroundPosition: "bottom",
+        backgroundRepeat: "no-repeat",
+      }}
       onClick={onFocusHost}
       onContextMenu={(e) => {
         // 空白处右键 = 视图选择菜单（标签上的右键已被 button 拦截，不达此处）
@@ -222,10 +232,10 @@ export const PanelTabBar = memo(function PanelTabBar({
       }}
       data-panel-tabbar={isPanel ? "" : undefined}
     >
-      {/* 标签组（拖拽源；锁定标签显示锁标记） */}
-      <div className="flex items-stretch gap-0.5 flex-1 min-w-0 overflow-x-auto no-scrollbar">
+      {/* 标签组（拖拽源；锁定标签显示锁标记）。自撑满面板头高度：激活标签底色与内容区同色，直抵底边 */}
+      <div className="flex items-stretch gap-0.5 flex-1 min-w-0 overflow-x-auto no-scrollbar self-stretch">
         {tabs.map((tab, i) => (
-          <div key={tab.id} className="flex items-center flex-shrink-0">
+          <div key={tab.id} className="flex items-stretch flex-shrink-0">
             {i === insertIndex && <InsertionMarker />}
             <button
               data-tab-id={tab.id}
@@ -244,10 +254,11 @@ export const PanelTabBar = memo(function PanelTabBar({
               }}
               className="flex items-center gap-1 px-2 py-0.5 rounded-t text-xs border-b-2 transition-colors hover:bg-[var(--hover)]"
               style={{
+                // 中层级：激活 = 与内容区同色底（直抵底边，接管面板头底边线）+ 2px 金下边，文字用常规色
                 borderColor: tab.id === activeTabId ? "var(--accent)" : "transparent",
-                color: tab.id === activeTabId ? "var(--accent)" : "var(--text-secondary)",
+                color: tab.id === activeTabId ? "var(--text-primary)" : "var(--text-secondary)",
                 // 未激活不设内联底色，交给 hover:bg-[var(--hover)]（内联样式会压过 hover 类）
-                background: tab.id === activeTabId ? "var(--accent-soft)" : undefined,
+                background: tab.id === activeTabId ? "var(--bg-primary)" : undefined,
               }}
               title={`${viewMetaFor(tab.view).label}${tab.locked ? "（已锁定：不可移动/关闭/删除面板）" : ""}`}
             >

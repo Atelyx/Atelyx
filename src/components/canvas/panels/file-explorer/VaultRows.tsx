@@ -123,9 +123,9 @@ export function VaultRows({ vaults, vaultRoot, switchingTo, onEnter, collapsedVa
         return (
           <li key={v.root}>
             <div
-              className="flex items-center gap-1 px-2 py-1 min-h-8 select-none cursor-default rounded-sm hover:bg-[var(--hover)]"
+              className="flex items-center gap-2 px-2 py-1 min-h-8 select-none cursor-default rounded-sm hover:bg-[var(--hover)]"
               style={{
-                // 激活仓库行高亮 = 与当前打开文件行同色
+                // 激活仓库行高亮 = 整行强调色底（比文件行的 accent-soft 更强，坐实一级条目）
                 background: active ? "color-mix(in srgb, var(--accent) 20%, transparent)" : undefined,
               }}
               title={v.root}
@@ -137,22 +137,22 @@ export function VaultRows({ vaults, vaultRoot, switchingTo, onEnter, collapsedVa
               }}
               onContextMenu={(e) => onRowContextMenu(e, v.root)}
             >
-              <span className="flex items-center">{expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</span>
+              <span className="flex items-center" style={{ color: "var(--text-muted)" }}>{expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</span>
               {switching ? (
                 <Loader2 size={14} className="animate-spin" style={{ color: "var(--accent)" }} />
               ) : (
                 <HardDrive size={14} style={{ color: active ? "var(--accent)" : "var(--text-muted)" }} />
               )}
-              <span className="flex-1 truncate text-xs" style={{ color: "var(--text-primary)" }}>
+              <span className="flex-1 truncate text-xs font-medium" style={{ color: "var(--text-primary)" }}>
                 {v.name}
               </span>
             </div>
             {expanded && (
               <ul className="relative">
-                {/* 展开指示线：与文件夹展开线同位（仓库行 depth 0） */}
+                {/* 展开指示线：与文件夹展开线同位（仓库行 depth 0：px-2 + chevron 半宽 7） */}
                 <div
                   className="absolute top-0 bottom-0 w-px pointer-events-none z-10"
-                  style={{ left: 13, background: "var(--text-muted)", opacity: 0.6 }}
+                  style={{ left: 15, background: "var(--text-muted)", opacity: 0.6 }}
                 />
                 <FileTree nodes={tree} depth={1} parentDir="" {...fileTree} />
               </ul>

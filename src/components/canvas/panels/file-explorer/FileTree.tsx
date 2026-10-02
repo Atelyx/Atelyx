@@ -65,7 +65,7 @@ export function FileTree(props: FileTreeProps) {
   const sorted = sortChildren(nodes, sortKey);
   const creatingHere =
     editing?.kind === "creating" && editing.dir === parentDir ? (
-      <li key="__creating__" className="px-2 pl-6 py-1 flex items-center gap-1">
+      <li key="__creating__" className="py-1 pr-2 flex items-center gap-1" style={{ paddingLeft: 12 + depth * 16 }}>
         <InlineInput
           value={editing.value}
           onChange={(v) => onEditingChange({ ...editing, value: v })}
@@ -105,7 +105,7 @@ export function FileTree(props: FileTreeProps) {
     <>
       {creatingHere}
       {sorted.map((node) => {
-        const indent = { paddingLeft: 6 + depth * 12 };
+        const indent = { paddingLeft: 12 + depth * 16 };
         if (node.isDir) {
           const isExpanded = expanded.has(node.path);
           const editingThis: Editing | null =
@@ -124,7 +124,7 @@ export function FileTree(props: FileTreeProps) {
                 </div>
               ) : (
                 <div
-                  className="flex items-center gap-1 px-2 py-1 min-h-8 select-none cursor-default rounded-sm hover:bg-[var(--hover)]"
+                  className="flex items-center gap-2 px-2 py-1 min-h-8 select-none cursor-default rounded-sm hover:bg-[var(--hover)]"
                   style={{
                     ...indent,
                     // 拖拽悬停目标高亮（金色底），提示可放入移动
@@ -139,9 +139,9 @@ export function FileTree(props: FileTreeProps) {
                     onOpenMenu(e.clientX, e.clientY, { kind: "folder", dir: node.path });
                   }}
                 >
-                  <span className="flex items-center">{isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</span>
+                  <span className="flex items-center" style={{ color: "var(--text-muted)" }}>{isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</span>
                   <Folder size={14} style={{ color: folderColors?.[node.path] ?? "var(--text-muted)" }} />
-                  <span className="flex-1 truncate text-xs" style={{ color: "var(--text-primary)" }}>{node.name}</span>
+                  <span className="flex-1 truncate text-xs" style={{ color: "var(--text-secondary)" }}>{node.name}</span>
                   {/* 操作菜单入口：仅触屏显示——触屏长按已让位给起拖，菜单需显式入口（桌面保留原右键） */}
                   <button
                     onPointerDown={(e) => e.stopPropagation()}
@@ -164,8 +164,8 @@ export function FileTree(props: FileTreeProps) {
                   <div
                     className="absolute top-0 bottom-0 w-px pointer-events-none z-10"
                     style={{
-                      // 行 padding-left（inline 覆盖 px-2）= 6 + depth*12，加 chevron 半宽 7
-                      left: 13 + depth * 12,
+                      // 行 padding-left（inline 覆盖 px-2）= 12 + depth*16，加 chevron 半宽 7
+                      left: 19 + depth * 16,
                       background: "var(--text-muted)",
                       opacity: 0.6,
                     }}
@@ -187,6 +187,8 @@ export function FileTree(props: FileTreeProps) {
           (isWhiteboard && currentCanvasFile === node.path) ||
           (isNote && openedNoteFile === node.path) ||
           (isTable && openedTableFile === node.path);
+        /** 行内图标与文件名同色：激活取强调色，否则次要文本色。 */
+        const rowColor = active ? "var(--accent)" : "var(--text-secondary)";
         const editingThis: Editing | null =
           editing?.kind === "canvas" && editing.file === node.path
             ? editing
@@ -219,10 +221,13 @@ export function FileTree(props: FileTreeProps) {
               </div>
             ) : (
               <div
-                className="flex items-center gap-1 px-2 py-1 min-h-8 cursor-default rounded-sm hover:bg-[var(--hover)]"
+                className="flex items-center gap-2 px-2 py-1 min-h-8 cursor-default rounded-sm hover:bg-[var(--hover)]"
                 style={{
                   ...indent,
-                  background: active ? "color-mix(in srgb, var(--accent) 20%, transparent)" : undefined,
+                  background: active ? "var(--accent-soft)" : undefined,
+                  color: rowColor,
+                  // 激活态左侧 2px 金轨：不占布局宽度（inset 阴影）
+                  boxShadow: active ? "inset 2px 0 0 var(--accent)" : undefined,
                 }}
                 data-file={node.path}
                 onPointerDown={(e) => startPotentialDrag(e, node)}
@@ -239,20 +244,20 @@ export function FileTree(props: FileTreeProps) {
                 }}
               >
                 {isCanvas ? (
-                  <FileText size={14} style={{ color: "var(--text-muted)" }} />
+                  <FileText size={14} style={{ color: rowColor }} />
                 ) : isWhiteboard ? (
-                  <LayoutDashboard size={14} style={{ color: "var(--text-muted)" }} />
+                  <LayoutDashboard size={14} style={{ color: rowColor }} />
                 ) : isNote ? (
-                  <StickyNote size={14} style={{ color: "var(--text-muted)" }} />
+                  <StickyNote size={14} style={{ color: rowColor }} />
                 ) : isTable ? (
-                  <Table size={14} style={{ color: "var(--text-muted)" }} />
+                  <Table size={14} style={{ color: rowColor }} />
                 ) : (
-                  <Paperclip size={14} style={{ color: "var(--text-muted)" }} />
+                  <Paperclip size={14} style={{ color: rowColor }} />
                 )}
-                <span className="flex-1 truncate text-xs" style={{ color: "var(--text-primary)" }}>{node.name}</span>
+                <span className="flex-1 truncate text-xs">{node.name}</span>
                 <span
-                  className="ml-auto pl-2 text-[10px] font-bold flex-shrink-0"
-                  style={{ color: "var(--text-muted)", opacity: 0.6 }}
+                  className="ml-auto pl-2 text-[10px] flex-shrink-0"
+                  style={{ fontFamily: "var(--font-mono)", color: active ? "var(--accent)" : "var(--text-muted)" }}
                 >
                   {isCanvas ? "ATLX" : isWhiteboard ? "CANVAS" : isNote ? "MD" : isTable ? "ATB" : upperExt(node.name)}
                 </span>

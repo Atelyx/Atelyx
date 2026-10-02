@@ -279,14 +279,13 @@ export function FileExplorerPanel({ openedNoteFile, openedTableFile, onConvertWh
       className="h-full flex flex-col text-sm overflow-hidden"
       style={{ background: "var(--bg-primary)", color: "var(--text-primary)" }}
     >
-      {/* 工具条：打开文件夹（仓库级入口）+ 新增协作空间 + 排序方式下拉气泡 + 展开/收起全部 */}
-      <div className="px-2 py-1.5 border-b flex items-center gap-1" style={{ background: "var(--bg-secondary)", borderColor: "var(--border)" }}>
+      {/* 工具条：打开文件夹（仓库级入口）+ 新增协作空间 + 排序方式下拉气泡 + 展开/收起全部（右端） */}
+      <div className="px-2 py-1.5 border-b flex items-center gap-0.5" style={{ background: "var(--bg-secondary)", borderColor: "var(--border-subtle)" }}>
         {/* 插件贡献区：文件面板工具条左侧（list 槽，priority 降序） */}
         <SlotListMount slot="toolbar/files/left" />
         <button
           onClick={() => void openFolderAsVault()}
-          className="flex items-center justify-center w-7 h-7 rounded hover:bg-[var(--hover)]"
-          style={{ color: "var(--text-muted)" }}
+          className="flex items-center justify-center w-7 h-7 rounded text-[var(--text-muted)] hover:bg-[var(--hover)] hover:text-[var(--text-primary)]"
           title="打开文件夹为仓库"
           disabled={openFolderBusy}
         >
@@ -298,19 +297,18 @@ export function FileExplorerPanel({ openedNoteFile, openedTableFile, onConvertWh
             const rect = e.currentTarget.getBoundingClientRect();
             setSortMenu({ x: rect.right, y: rect.bottom });
           }}
-          className="flex items-center justify-center w-7 h-7 rounded hover:bg-[var(--hover)]"
-          style={{ color: "var(--text-muted)" }}
+          className="flex items-center justify-center w-7 h-7 rounded text-[var(--text-muted)] hover:bg-[var(--hover)] hover:text-[var(--text-primary)]"
           title="排序方式"
         >
           <ArrowUpDown size={14} />
         </button>
+        <span className="flex-1" />
         <button
           onClick={() => {
             if (dirPaths.length === 0) return;
             toggleExpandAll(dirPaths);
           }}
-          className="flex items-center justify-center w-7 h-7 rounded hover:bg-[var(--hover)]"
-          style={{ color: "var(--text-muted)" }}
+          className="flex items-center justify-center w-7 h-7 rounded text-[var(--text-muted)] hover:bg-[var(--hover)] hover:text-[var(--text-primary)]"
           title={allExpanded ? "收起全部文件夹" : "展开全部文件夹"}
         >
           {allExpanded ? <ChevronsDownUp size={14} /> : <ChevronsUpDown size={14} />}
@@ -344,7 +342,7 @@ export function FileExplorerPanel({ openedNoteFile, openedTableFile, onConvertWh
       {/* 树容器：仓库 = 顶级条目（激活仓库高亮展开其文件树），空白处右键 = 在仓库根目录新建 */}
       <div
         ref={treeScrollRef}
-        className="flex-1 overflow-auto py-1 px-2"
+        className="flex-1 overflow-auto px-1 pt-1.5 pb-3"
         data-dir=""
         style={{ background: dropDir === "" ? "color-mix(in srgb, var(--accent) 25%, transparent)" : undefined }}
         onContextMenu={(e) => {
@@ -405,7 +403,7 @@ export function FileExplorerPanel({ openedNoteFile, openedTableFile, onConvertWh
       {/* 拖拽幽灵（pointer 模拟拖拽时跟随鼠标；下方追加悬停目标的动作提示） */}
       {dragGhost && (
         <div
-          className="fixed z-[9999] pointer-events-none px-2 py-1 rounded shadow-lg"
+          className="fixed z-[9999] pointer-events-none px-2 py-1 rounded shadow-[var(--shadow-pop)]"
           style={{
             left: dragGhost.x + 10,
             top: dragGhost.y + 10,

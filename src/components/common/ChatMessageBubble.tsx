@@ -11,7 +11,7 @@
  * 回调 useCallback——流式期间历史消息靠引用不变跳过重渲染（assistant 消息无 refs/
  * 附件，引用天然稳定，重渲染最贵的 MarkdownView 得以跳过）。
  */
-import { memo, useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { memo, useMemo, useState, type ReactNode } from "react";
 import {
   AlertCircle,
   Check,
@@ -37,13 +37,10 @@ import type { AgentStep, Attachment, ToolRun } from "@/types";
 import { MarkdownView, type MarkdownEditorLinks } from "@/components/editor/MarkdownEditor";
 
 /** 两入口恒同值的气泡样式（画布/面板同款）：模块级单例，memo 浅比较引用恒稳定。
- *  user 气泡抬起一档（raised 底 + 细边），assistant 不画气泡、直接铺在面板底上。 */
-const USER_BUBBLE_CLASS = "bg-[var(--bg-tertiary)]";
-const ASSISTANT_BUBBLE_STYLE: CSSProperties = {
-  background: "var(--bg-primary)",
-  border: "1px solid var(--border)",
-};
-const BUBBLE_PADDING_CLASS = "px-3 py-2 text-sm leading-relaxed min-w-0";
+ *  user 气泡抬起一档（raised 底 + 细边）；assistant 不画气泡卡，最终答复直接作正文铺在面板底上。 */
+const USER_BUBBLE_CLASS = "bg-[var(--bg-tertiary)] rounded-bubble border px-3 py-2";
+/** 文本排版两入口恒同值：assistant 无气泡卡，仍需自带字号/行高（不能只靠宿主容器的 text-sm）。 */
+const ASSISTANT_BUBBLE_CLASS = "min-w-0 text-sm leading-relaxed";
 /** 流式且无内容时的占位（画布/面板同款）。 */
 const STREAMING_PLACEHOLDER = (
   <span
@@ -146,12 +143,12 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
   return (
     <div className={`group relative flex ${isUser ? "justify-end" : "justify-start"}`}>
       <div
-        className={`relative max-w-[85%] rounded-bubble ${BUBBLE_PADDING_CLASS} ${isUser ? USER_BUBBLE_CLASS : ""}`}
+        className={`relative max-w-[85%] text-sm leading-relaxed min-w-0 ${isUser ? USER_BUBBLE_CLASS : ASSISTANT_BUBBLE_CLASS}`}
         style={{
           userSelect: "text",
           WebkitUserSelect: "text",
-          // assistant 底色/边框来自样式常量，字色恒 text-primary
-          ...(isUser ? {} : { ...ASSISTANT_BUBBLE_STYLE, color: "var(--text-primary)" }),
+          // assistant 无气泡卡，字色恒 text-primary；user 只补边框色（其余来自样式常量）
+          ...(isUser ? { borderColor: "var(--border)" } : { color: "var(--text-primary)" }),
         }}
       >
         {atts.length > 0 && (
@@ -327,14 +324,14 @@ function ToolRunRow({ run }: { run: ToolRun }) {
     run.status === "error"
       ? "var(--danger)"
       : run.status === "done"
-        ? "var(--accent)"
+        ? "var(--success)"
         : "var(--text-muted)";
   return (
     <div
-      className="rounded overflow-hidden"
+      className="rounded-[var(--radius-sm)] overflow-hidden"
       style={{
-        background: "color-mix(in srgb, var(--accent) 8%, transparent)",
-        border: "1px solid color-mix(in srgb, var(--accent) 22%, transparent)",
+        background: "var(--bg-sunken)",
+        border: "1px solid var(--border-subtle)",
       }}
     >
       <button
@@ -354,7 +351,10 @@ function ToolRunRow({ run }: { run: ToolRun }) {
           )}
         </span>
         <span style={{ color: statusColor, display: "inline-flex" }}>{toolIcon(run.name, 12)}</span>
-        <span className="min-w-0 flex-1 truncate" style={{ color: "var(--text-secondary)" }}>
+        <span
+          className="min-w-0 flex-1 truncate"
+          style={{ color: "var(--text-secondary)", fontFamily: "var(--font-mono)" }}
+        >
           {run.argsSummary}
           {run.status !== "running" && run.resultSummary ? (
             <span className="ml-1" style={{ color: statusColor }}>
@@ -367,7 +367,7 @@ function ToolRunRow({ run }: { run: ToolRun }) {
         ) : run.status === "error" ? (
           <AlertCircle size={11} className="flex-shrink-0" style={{ color: "var(--danger)" }} />
         ) : (
-          <Check size={11} className="flex-shrink-0" style={{ color: "var(--accent)" }} />
+          <Check size={11} className="flex-shrink-0" style={{ color: statusColor }} />
         )}
       </button>
       {expanded && (

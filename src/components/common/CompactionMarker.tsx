@@ -13,10 +13,11 @@ export function CompactionMarker({ compaction }: { compaction: ConversationCompa
   const [expanded, setExpanded] = useState(false);
   return (
     <div
-      className="rounded overflow-hidden"
+      className="rounded-[var(--radius-md)] overflow-hidden"
       style={{
-        background: "color-mix(in srgb, var(--text-primary) 5%, transparent)",
-        border: "1px dashed color-mix(in srgb, var(--text-primary) 20%, transparent)",
+        // 卡片色：画布对话节点底色即 secondary，故此处抬一档到 tertiary（两个入口都可辨）
+        background: "var(--bg-tertiary)",
+        border: "1px dashed var(--border-subtle)",
       }}
     >
       <button

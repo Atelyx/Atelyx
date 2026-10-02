@@ -2,6 +2,7 @@ import { AlertTriangle, CircleHelp, FileText, Image } from "lucide-react";
 import type { SyntheticEvent } from "react";
 import type { NodeProps } from "@xyflow/react";
 import { useCanvasStore } from "@/stores/canvasStore";
+import { NODE_TYPE_BAR_CLASS, NODE_TYPE_COLORS } from "@/constants/canvas";
 import type { MediaData } from "@/types";
 import { ConnectionFrame } from "./ConnectionFrame";
 import { ResizeHandle } from "./ResizeHandle";
@@ -65,27 +66,34 @@ export function MediaNode({ id, data, width, height, selected }: NodeProps) {
 
   return (
     <div
-      className="rounded-md shadow-lg border flex flex-col text-sm"
+      className="rounded-md border flex flex-col text-sm"
       style={{
         width: nodeWidth,
         height: nodeHeight,
         minWidth: IMG_MIN_WIDTH,
         minHeight: 120,
-        background: "var(--bg-card)",
+        background: "var(--bg-secondary)",
         borderColor: selected ? "var(--accent)" : "var(--border)",
+        boxShadow: "var(--shadow-pop)",
         position: "relative",
       }}
     >
       <ConnectionFrame topType="source" selected={selected} />
 
       <header
-        className="px-3 py-1.5 border-b rounded-t-md text-xs font-medium flex-shrink-0"
+        className="flex items-center px-3 py-1.5 border-b rounded-t-md text-xs font-medium flex-shrink-0"
         style={{
           cursor: "grab",
-          borderColor: "var(--border)",
+          borderColor: "var(--border-subtle)",
+          background: "var(--bg-tertiary)",
           color: "var(--text-secondary)",
         }}
       >
+        {/* 类型标识：3px 色条（媒体） */}
+        <span
+          className={NODE_TYPE_BAR_CLASS}
+          style={{ background: NODE_TYPE_COLORS.media }}
+        />
         <span className="inline-flex items-center gap-1">
           <Image size={14} className="flex-shrink-0" />
           媒体

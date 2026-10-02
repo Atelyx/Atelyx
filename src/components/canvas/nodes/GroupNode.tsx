@@ -5,6 +5,7 @@
  * - label 双击 inline 编辑（nodrag）；header 右侧色块按钮弹出色板切换颜色
  * - 可拖拽移动 / NodeResizeControl 调整大小；仅无向关联可连线（有向模式被拦截）
  */
+import { Box } from "lucide-react";
 import { useRef, useState } from "react";
 import type { NodeProps } from "@xyflow/react";
 import { useCanvasStore } from "@/stores/canvasStore";
@@ -69,9 +70,9 @@ export function GroupNode({ id, data, width, height, selected }: NodeProps) {
         height: height ?? DEFAULT_GROUP_HEIGHT,
         minWidth: 160,
         minHeight: 80,
-        // 半透明色板色填充 + 实线边框（选中时金色高亮）
+        // 半透明色板色填充 + 虚线边框：虚线表达「这是范围容器而非卡片」，边框色仍带用户选的组色
         background: `${base}1f`,
-        border: `1.5px solid ${selected ? "var(--accent)" : base}`,
+        border: `1.5px dashed ${selected ? "var(--accent)" : base}`,
         position: "relative",
         // 仅标题栏可拖拽移动；主体指针穿透由 CSS（.react-flow__node-group）统一处理
       }}
@@ -89,6 +90,12 @@ export function GroupNode({ id, data, width, height, selected }: NodeProps) {
           cursor: "grab",
         }}
       >
+        {/* 类型标识：图标（分组 = 容器） */}
+        <Box
+          size={13}
+          className="flex-shrink-0"
+          style={{ color: "var(--text-secondary)" }}
+        />
         {labelEdit.editing ? (
           <input
             {...labelEdit.inputProps}
@@ -132,10 +139,11 @@ export function GroupNode({ id, data, width, height, selected }: NodeProps) {
       {colorMenu && (
         <div
           ref={colorMenuRef}
-          className="absolute top-7 left-3 z-10 flex items-center gap-1.5 p-1.5 rounded-md border shadow-lg"
+          className="absolute top-7 left-3 z-10 flex items-center gap-1.5 p-1.5 rounded-md border"
           style={{
             background: "var(--bg-tertiary)",
             borderColor: "var(--border)",
+            boxShadow: "var(--shadow-pop)",
           }}
           onClick={(e) => e.stopPropagation()}
         >

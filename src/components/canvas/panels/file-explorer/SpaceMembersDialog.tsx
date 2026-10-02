@@ -52,8 +52,8 @@ export function SpaceMembersDialog({ serverUrl, spaceId, spaceName, onClose }: P
       onClick={onClose}
     >
       <div
-        className="w-[420px] max-h-[70vh] flex flex-col rounded-lg border shadow-xl"
-        style={{ background: "var(--bg-secondary)", borderColor: "var(--border)" }}
+        className="w-[420px] max-h-[70vh] flex flex-col rounded-lg border shadow-[var(--shadow-pop)]"
+        style={{ background: "var(--bg-overlay)", borderColor: "var(--border)" }}
         onClick={(e) => e.stopPropagation()}
       >
         <header className="px-4 py-3 border-b flex items-center justify-between" style={{ borderColor: "var(--border)" }}>

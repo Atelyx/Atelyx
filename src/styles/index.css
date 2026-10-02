@@ -82,7 +82,7 @@
   --table-border: #e4e3de;
   --table-header-bg: #f1f1ee;
 
-  /* 形状与投影（投影只给浮层，面板内不用） */
+  /* 形状与投影（投影只给浮起的元素：浮层菜单/弹窗 + 画布节点；面板内部不用，靠色阶与细边分层） */
   /* 圆角刻度（数值递增）：xs 4 → sm 6 → bubble 8 → md 10 → lg 14。
      bubble 是聊天气泡专用档（设计稿里 .bub 单独给的 8px，不在常规刻度上）。 */
   --radius-xs: 4px;
@@ -447,6 +447,12 @@ body {
   position: relative;
   min-height: 100%;
   padding: 1rem;
+}
+/* 笔记面板正文最大行宽：与标题/属性区同列居中（面板宽度由用户拖拽决定，此行宽只锁可读性上限）；
+   画布文本节点不带 .note-body，不受影响 */
+.note-body .md-edit-content {
+  max-width: 780px;
+  margin: 0 auto;
 }
 /* 富装饰块（表格 / raw HTML / 缩进代码）整块回显源码：保留换行与缩进，长行折行 */
 .md-editor-source {

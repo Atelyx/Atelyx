@@ -111,7 +111,7 @@ const DOT_BASE = {
   height: DOT_SIZE,
   borderRadius: "50%",
   background: "var(--accent)",
-  border: "1px solid var(--xy-handle-border-color-default, #1e1e1e)",
+  border: "1px solid var(--xy-handle-border-color-default)",
 } as const;
 
 /** 四边遍历顺序 */

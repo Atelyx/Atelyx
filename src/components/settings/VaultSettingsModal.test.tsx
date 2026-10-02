@@ -124,8 +124,9 @@ describe("仓库设置弹窗", () => {
   it("编辑非激活仓库：横幅点名目标与身份；只读会话额外提示改动不会保存", () => {
     h.session = sessionOf({});
     renderModal();
-    expect(screen.getByText(/正在编辑非当前仓库/)).toBeTruthy();
-    expect(screen.getByText("另一个仓库")).toBeTruthy();
+    // 横幅点名目标仓库：仓库名在横幅内层元素里（跨元素），故按横幅整句取容器再查名字
+    // （仓库名同时出现在标题与左栏分组附注，不能直接按名字取唯一元素）
+    expect(screen.getByText(/正在编辑非当前仓库/).textContent).toContain("另一个仓库");
     // 目标身份（本地仓库路径）在标题与横幅里都出现，便于确认改的是哪个仓库
     expect(screen.getAllByText(/E:\/另一个仓库/).length).toBeGreaterThan(0);
     expect(screen.queryByText(/查看者/)).toBeNull();

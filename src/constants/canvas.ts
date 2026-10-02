@@ -34,5 +34,20 @@ export const GROUP_COLORS: Record<string, string> = {
   "5": "#9b6fd0",
 };
 
+/**
+ * 画布节点类型标识色（标题栏左侧 3px 色条）：对话 = 品牌金、文本 = 紫、搜索 = 蓝、媒体 = 绿、表格 = 中性。
+ * 固定调色板（不随主题翻转），与 GROUP_COLORS 同属画布域语义色，不是主题 token。
+ */
+export const NODE_TYPE_COLORS: Record<string, string> = {
+  conversation: "var(--accent)",
+  text: "#c98be0",
+  search: "var(--info)",
+  media: "var(--success)",
+  table: "var(--text-muted)",
+};
+
+/** 类型色条外形：各节点共用同一常量，尺寸/圆角改动只在此处。 */
+export const NODE_TYPE_BAR_CLASS = "w-[3px] h-3 rounded-full flex-shrink-0";
+
 /** `.atlx` 文件 schema 版本号（Rust 侧 `vault.rs` 有同名常量，两端须保持一致）。 */
 export const CANVAS_SCHEMA = "atelyx-canvas/v1" as const;

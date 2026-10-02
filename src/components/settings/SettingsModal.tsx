@@ -93,12 +93,24 @@ function PluginSettingMount({ component: Comp }: { component: ComponentType | un
   );
 }
 
-/** 设置弹窗外壳：标题栏（标题 + 可选副标题）+ 可选横幅 + 左侧可折叠标签栏 + 内容区。 */
+/** 左栏标签项。 */
+type SettingsTab = { key: string; label: string; icon: LucideIcon };
+
+/** 左栏分组：标题 + 作用域（决定分组标题配色）+ 组内标签；用于区分「应用级 / 仓库级」。 */
+type SettingsNavGroup = {
+  title: string;
+  /** 标题右侧的等宽附注（如「全局」或目标仓库名）。 */
+  hint?: string;
+  scope: "app" | "vault";
+  tabs: SettingsTab[];
+};
+
+/** 设置弹窗外壳：标题栏（标题 + 可选副标题）+ 可选横幅 + 左侧可折叠分组标签栏 + 内容区。 */
 function SettingsShell({
   title,
   subtitle,
   banner,
-  tabs,
+  groups,
   tab,
   onTabChange,
   onClose,
@@ -107,7 +119,7 @@ function SettingsShell({
   title: string;
   subtitle?: string;
   banner?: ReactNode;
-  tabs: { key: string; label: string; icon: LucideIcon }[];
+  groups: SettingsNavGroup[];
   tab: string;
   onTabChange: (key: string) => void;
   onClose: () => void;
@@ -121,12 +133,14 @@ function SettingsShell({
     return true;
   });
 
-  /** 窄屏导航抽屉条目（图标尺寸与宽屏 tab 栏一致，由抽屉自行排布）。 */
-  const navItems: MobileNavItem[] = tabs.map((item) => ({
-    key: item.key,
-    label: item.label,
-    icon: <item.icon size={16} />,
-  }));
+  /** 窄屏导航抽屉条目（图标尺寸与宽屏 tab 栏一致，由抽屉自行排布）；抽屉不分组。 */
+  const navItems: MobileNavItem[] = groups.flatMap((group) =>
+    group.tabs.map((item) => ({
+      key: item.key,
+      label: item.label,
+      icon: <item.icon size={16} />,
+    })),
+  );
 
   return (
     <div
@@ -186,23 +200,56 @@ function SettingsShell({
               className={`flex flex-col border-r shrink-0 transition-[width] ${tabsCollapsed ? "w-11" : "w-40"}`}
               style={{ borderColor: "var(--border)" }}
             >
-              <div className="flex-1 overflow-auto p-2 space-y-1">
-                {tabs.map((item) => (
-                  <button
-                    key={item.key}
-                    onClick={() => onTabChange(item.key)}
-                    title={item.label}
-                    className={`w-full flex items-center gap-2 px-2.5 py-1.5 rounded-[var(--radius-sm)] text-xs transition ${
-                      tabsCollapsed ? "justify-center px-0" : ""
-                    } ${
-                      tab === item.key
-                        ? "bg-[var(--accent-soft)] text-[var(--accent)] font-medium"
-                        : "text-[var(--text-secondary)] hover:bg-[var(--hover)]"
-                    }`}
+              <div className="flex-1 overflow-auto p-2">
+                {groups.map((group, gi) => (
+                  <div
+                    key={group.title}
+                    className={gi > 0 ? "mt-2 pt-3 border-t" : ""}
+                    style={gi > 0 ? { borderColor: "var(--border-subtle)" } : undefined}
                   >
-                    <item.icon size={14} className="shrink-0" />
-                    {!tabsCollapsed && <span className="truncate">{item.label}</span>}
-                  </button>
+                    {/* 分组标题：区分「应用级 / 仓库级」；仓库级用金色，应用级用中性色 */}
+                    {!tabsCollapsed && (
+                      <div
+                        className="flex items-center gap-2 px-2 pb-2 text-[11px] font-semibold tracking-wide"
+                        style={{ color: group.scope === "vault" ? "var(--accent)" : "var(--text-muted)" }}
+                      >
+                        <span
+                          className="w-[3px] h-[11px] rounded-full shrink-0"
+                          style={{
+                            background: group.scope === "vault" ? "var(--accent)" : "var(--border-strong)",
+                          }}
+                        />
+                        <span className="truncate">{group.title}</span>
+                        {group.hint && (
+                          <span
+                            className="ml-auto truncate font-mono text-[10px] font-normal tracking-normal"
+                            style={{ color: "var(--text-muted)" }}
+                          >
+                            {group.hint}
+                          </span>
+                        )}
+                      </div>
+                    )}
+                    <div className="space-y-1">
+                      {group.tabs.map((item) => (
+                        <button
+                          key={item.key}
+                          onClick={() => onTabChange(item.key)}
+                          title={item.label}
+                          className={`w-full flex items-center gap-2 px-2.5 py-1.5 rounded-[var(--radius-sm)] text-xs transition ${
+                            tabsCollapsed ? "justify-center px-0" : ""
+                          } ${
+                            tab === item.key
+                              ? "bg-[var(--accent-soft)] text-[var(--accent)] font-medium"
+                              : "text-[var(--text-secondary)] hover:bg-[var(--hover)]"
+                          }`}
+                        >
+                          <item.icon size={14} className="shrink-0" />
+                          {!tabsCollapsed && <span className="truncate">{item.label}</span>}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
                 ))}
               </div>
               <button
@@ -243,9 +290,16 @@ export function SettingsModal({ onClose, initialTab }: { onClose: () => void; in
   return (
     <SettingsShell
       title="设置"
-      tabs={[
-        ...APP_TABS,
-        ...pluginTabs.map((t) => ({ key: pluginTabId(t), label: t.label, icon: Puzzle as LucideIcon })),
+      groups={[
+        {
+          title: "应用级",
+          hint: "全局",
+          scope: "app",
+          tabs: [
+            ...APP_TABS,
+            ...pluginTabs.map((t) => ({ key: pluginTabId(t), label: t.label, icon: Puzzle as LucideIcon })),
+          ],
+        },
       ]}
       tab={tab}
       onTabChange={setTab}
@@ -344,7 +398,7 @@ export function VaultSettingsModal({
           : `${target.name}（${targetIdentityLabel(target)}）`
       }
       banner={banner}
-      tabs={VAULT_TABS}
+      groups={[{ title: "仓库级", hint: target.name, scope: "vault", tabs: VAULT_TABS }]}
       tab={tab}
       onTabChange={(k) => setTab(k as VaultTab)}
       onClose={onClose}
