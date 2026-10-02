@@ -14,6 +14,7 @@ import { SettingsPage } from "@/components/settings/SettingsPage";
 import { TitleBarControls } from "@/components/common/TitleBarControls";
 import { LayoutTabs } from "@/components/layout/LayoutTabs";
 import { WorkspaceGrid } from "@/components/layout/WorkspaceGrid";
+import { WorkspaceStatusBar } from "@/components/layout/WorkspaceStatusBar";
 import { SlotListMount } from "@/components/plugins/SlotHost";
 import { useWorkspaceFileEffects } from "@/hooks/useWorkspaceFileEffects";
 import { HOME_LAYOUT_ID } from "@/types";
@@ -134,6 +135,9 @@ export function ProjectWorkspacePage() {
               <WorkspaceGrid key={activeLayoutId ?? "default"} tree={activeTree} />
             )}
           </div>
+
+          {/* 工作区状态栏：全局/环境信息（只此一处，内容区切换不影响） */}
+          <WorkspaceStatusBar />
       </div>
     </div>
   );

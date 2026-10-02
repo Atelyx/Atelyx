@@ -277,6 +277,19 @@ function collectByExt(
   return out;
 }
 
+/** 全仓库文件数（状态栏计数用；目录不计。隐藏/排除目录与 `.tmp` 已在列举时跳过，故与文件面板所见一致）。 */
+export function selectVaultFileCount(s: Pick<VaultFileState, "tree">): number {
+  let count = 0;
+  const walk = (nodes: FileTreeNode[]) => {
+    for (const n of nodes) {
+      if (n.isDir) walk(n.children);
+      else count += 1;
+    }
+  };
+  walk(s.tree);
+  return count;
+}
+
 /** 按相对路径查树节点（dir = "" 返回根容器）。 */
 function findNode(nodes: FileTreeNode[], path: string): FileTreeNode | null {
   for (const n of nodes) {
