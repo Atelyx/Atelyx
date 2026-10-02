@@ -91,7 +91,7 @@ export function MobileNavDrawer({
         <>
           <div
             className="fixed inset-0 z-40"
-            style={{ left: RAIL_WIDTH, background: "rgba(0, 0, 0, 0.45)" }}
+            style={{ left: RAIL_WIDTH, background: "var(--scrim)" }}
             onClick={() => setExpanded(false)}
           />
           <div

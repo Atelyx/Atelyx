@@ -90,7 +90,7 @@ export function SpaceInviteDialog({ serverUrl, spaceId, spaceName, onClose }: Pr
   return (
     <div
       className="fixed inset-0 z-[200] flex items-center justify-center"
-      style={{ background: "rgba(0,0,0,0.5)" }}
+      style={{ background: "var(--scrim)" }}
       onClick={onClose}
     >
       <div
@@ -168,7 +168,7 @@ export function SpaceInviteDialog({ serverUrl, spaceId, spaceName, onClose }: Pr
                 onClick={() => void revoke()}
                 disabled={busy}
                 className="text-[11px] px-1.5 py-0.5 rounded hover:bg-[var(--hover)] disabled:opacity-40"
-                style={{ color: "#f87171" }}
+                style={{ color: "var(--danger)" }}
               >
                 撤销该邀请码
               </button>
@@ -176,7 +176,7 @@ export function SpaceInviteDialog({ serverUrl, spaceId, spaceName, onClose }: Pr
           )}
 
           {error && (
-            <div className="text-xs" style={{ color: "#f87171" }}>
+            <div className="text-xs" style={{ color: "var(--danger)" }}>
               {error}
             </div>
           )}

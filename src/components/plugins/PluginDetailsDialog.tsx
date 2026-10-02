@@ -92,7 +92,7 @@ export function PluginDetailsDialog({
   return (
     <div
       className="fixed inset-0 z-[180] flex items-center justify-center"
-      style={{ background: "rgba(0,0,0,0.5)" }}
+      style={{ background: "var(--scrim)" }}
       onClick={rollbackConfirm ? undefined : onClose}
       role="dialog"
       aria-modal="true"

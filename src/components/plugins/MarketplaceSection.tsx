@@ -167,8 +167,8 @@ export function MarketplaceSection() {
                       <span
                         className="text-[10px] px-1.5 py-0.5 rounded"
                         style={{
-                          color: it.badge === "official" ? "var(--accent)" : "#f59e0b",
-                          background: it.badge === "official" ? "rgba(212,175,55,0.12)" : "rgba(245,158,11,0.12)",
+                          color: it.badge === "official" ? "var(--accent)" : "var(--warning)",
+                          background: it.badge === "official" ? "var(--accent-soft)" : "color-mix(in srgb, var(--warning) 12%, transparent)",
                         }}
                       >
                         {PLUGIN_BADGE_LABELS[it.badge]}

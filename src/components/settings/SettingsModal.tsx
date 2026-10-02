@@ -130,7 +130,7 @@ function SettingsShell({
 
   return (
     <div
-      className={narrow ? "fixed inset-0 z-50 flex" : "fixed inset-0 bg-black/60 flex items-center justify-center z-50"}
+      className={narrow ? "fixed inset-0 z-50 flex" : "fixed inset-0 bg-[var(--scrim)] flex items-center justify-center z-50"}
       onClick={narrow ? undefined : onClose}
     >
       <div

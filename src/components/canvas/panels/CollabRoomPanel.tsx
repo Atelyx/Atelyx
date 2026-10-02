@@ -184,7 +184,7 @@ function SpaceMembersView({ serverUrl, spaceId }: { serverUrl: string; spaceId: 
         </div>
         {membersError ? (
           <div className="flex flex-col items-start gap-1.5 px-3 py-2 text-xs" style={{ color: "var(--text-muted)" }}>
-            <span style={{ color: "#f87171" }}>成员名册加载失败：{membersError}</span>
+            <span style={{ color: "var(--danger)" }}>成员名册加载失败：{membersError}</span>
             {isMainWindow && (
               <button
                 onClick={() => openSettings("collab")}

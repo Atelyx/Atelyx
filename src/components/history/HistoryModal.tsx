@@ -142,7 +142,7 @@ export function HistoryModal({ kind, file, open, onClose, onRollback }: Props) {
   return (
     <div
       className="fixed inset-0 z-[90] flex items-center justify-center"
-      style={{ background: "rgba(0,0,0,0.4)" }}
+      style={{ background: "var(--scrim)" }}
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
@@ -170,7 +170,7 @@ export function HistoryModal({ kind, file, open, onClose, onRollback }: Props) {
 
         <div className="flex-1 overflow-auto p-2">
           {error && (
-            <div className="px-2 py-1.5 mb-2 text-xs rounded" style={{ color: "#f87171", background: "rgba(248,113,113,0.1)" }}>
+            <div className="px-2 py-1.5 mb-2 text-xs rounded" style={{ color: "var(--danger)", background: "color-mix(in srgb, var(--danger) 12%, transparent)" }}>
               {error}
             </div>
           )}

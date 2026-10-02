@@ -79,7 +79,7 @@ export function MobileLocalVaultDialog({
   return (
     <div
       className="fixed inset-0 z-[185] flex items-center justify-center p-4"
-      style={{ background: "rgba(0,0,0,0.5)" }}
+      style={{ background: "var(--scrim)" }}
       role="dialog"
       aria-modal="true"
       aria-label="本地仓库"
@@ -114,7 +114,7 @@ export function MobileLocalVaultDialog({
             </>
           ) : granted ? (
             <>
-              <ShieldCheck size={12} style={{ color: "#4ade80" }} /> 已开启「所有文件访问权限」
+              <ShieldCheck size={12} style={{ color: "var(--success)" }} /> 已开启「所有文件访问权限」
             </>
           ) : (
             <>未开启「所有文件访问权限」</>
@@ -157,7 +157,7 @@ export function MobileLocalVaultDialog({
         </div>
 
         {error && (
-          <p className="mt-3 text-[11px] break-words" style={{ color: "#f87171" }}>
+          <p className="mt-3 text-[11px] break-words" style={{ color: "var(--danger)" }}>
             {error}
           </p>
         )}

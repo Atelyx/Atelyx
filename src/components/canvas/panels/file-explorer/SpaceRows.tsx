@@ -175,7 +175,7 @@ export function SpaceRows({ entries, hasServers, loading, listError, identity, s
       ) : (
         <li>
           {listError && (
-            <div className="px-2 py-0.5 text-[11px] break-all" style={{ color: "#f87171" }} title={listError}>
+            <div className="px-2 py-0.5 text-[11px] break-all" style={{ color: "var(--danger)" }} title={listError}>
               空间列表加载失败：{listError}
             </div>
           )}

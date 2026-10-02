@@ -48,7 +48,7 @@ export function SpaceMembersDialog({ serverUrl, spaceId, spaceName, onClose }: P
   return (
     <div
       className="fixed inset-0 z-[200] flex items-center justify-center"
-      style={{ background: "rgba(0,0,0,0.5)" }}
+      style={{ background: "var(--scrim)" }}
       onClick={onClose}
     >
       <div
@@ -67,7 +67,7 @@ export function SpaceMembersDialog({ serverUrl, spaceId, spaceName, onClose }: P
 
         <div className="flex-1 overflow-auto p-3 space-y-1.5">
           {membersError && (
-            <div className="text-xs mb-2" style={{ color: "#f87171" }}>
+            <div className="text-xs mb-2" style={{ color: "var(--danger)" }}>
               {membersError}
             </div>
           )}
@@ -110,7 +110,7 @@ export function SpaceMembersDialog({ serverUrl, spaceId, spaceName, onClose }: P
                       disabled={busy}
                       title="将该成员移出空间"
                       className="text-[11px] px-1.5 py-0.5 rounded hover:bg-[var(--hover)] disabled:opacity-40 flex-shrink-0"
-                      style={{ color: "#f87171" }}
+                      style={{ color: "var(--danger)" }}
                     >
                       移除
                     </button>
@@ -144,7 +144,7 @@ export function SpaceMembersDialog({ serverUrl, spaceId, spaceName, onClose }: P
         </div>
 
         {error && (
-          <div className="px-4 py-2 border-t text-xs" style={{ borderColor: "var(--border)", color: "#f87171" }}>
+          <div className="px-4 py-2 border-t text-xs" style={{ borderColor: "var(--border)", color: "var(--danger)" }}>
             {error}
           </div>
         )}

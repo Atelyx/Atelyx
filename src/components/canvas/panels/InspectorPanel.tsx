@@ -353,16 +353,16 @@ export function InspectorPanel() {
             />
           ) : !noteSurface ? (
             /* 笔记能力缺席（笔记插件停用）：属性读写无提供者，明示降级而不是静默少一块 */
-            <div className="text-xs" style={{ color: "#f59e0b" }}>
+            <div className="text-xs" style={{ color: "var(--warning)" }}>
               笔记能力未启用，属性不可编辑
             </div>
           ) : null}
           {(saveError || noteSaveFailed) && (
-            <div className="text-xs flex items-center gap-2" style={{ color: "#f87171" }}>
+            <div className="text-xs flex items-center gap-2" style={{ color: "var(--danger)" }}>
               <span>属性保存失败</span>
               <button
                 className="px-1.5 py-0.5 rounded border hover:opacity-80 flex-shrink-0"
-                style={{ borderColor: "#f87171" }}
+                style={{ borderColor: "var(--danger)" }}
                 onClick={() => {
                   const last = lastFailedDataRef.current;
                   if (last) handleNotePropsUpdate(last);

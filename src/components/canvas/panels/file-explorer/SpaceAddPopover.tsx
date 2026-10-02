@@ -247,7 +247,7 @@ export function SpaceAddPopover({ onNotice }: { onNotice: (message: string) => v
             />
 
             {error && (
-              <div className="mt-1.5 text-[11px] break-all" style={{ color: "#f87171" }}>
+              <div className="mt-1.5 text-[11px] break-all" style={{ color: "var(--danger)" }}>
                 {error}
               </div>
             )}

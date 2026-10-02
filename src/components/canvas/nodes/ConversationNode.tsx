@@ -862,8 +862,8 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
         <div
           className="nodrag px-3 py-1.5 text-xs flex items-center justify-between"
           style={{
-            background: "#7f1d1d",
-            color: "#fca5a5",
+            background: "color-mix(in srgb, var(--danger) 12%, transparent)",
+            color: "var(--danger)",
             userSelect: "text",
             WebkitUserSelect: "text",
           }}

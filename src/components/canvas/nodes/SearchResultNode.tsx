@@ -146,7 +146,7 @@ export function SearchResultNode({ id, data, height, selected }: NodeProps) {
           <div className="flex flex-col gap-2">
             <p
               className="text-xs flex items-center gap-1"
-              style={{ color: "#f87171" }}
+              style={{ color: "var(--danger)" }}
             >
               <AlertTriangle size={13} className="flex-shrink-0" />
               {d.error}

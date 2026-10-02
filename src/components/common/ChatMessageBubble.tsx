@@ -176,7 +176,7 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
                 <span
                   key={i}
                   className="inline-flex items-center gap-1 text-xs rounded px-1.5 py-0.5"
-                  style={{ background: "rgba(128,128,128,.2)" }}
+                  style={{ background: "color-mix(in srgb, var(--text-primary) 12%, transparent)" }}
                   title={att.filename}
                 >
                   <FileText size={12} className="flex-shrink-0" /> {att.filename || "文件"}

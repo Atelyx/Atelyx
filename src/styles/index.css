@@ -28,6 +28,8 @@
   --bg-card: #ffffff;
   --bg-overlay: #ffffff;
   --surface: #ffffff;
+  /* 浮层遮罩：模态与抽屉共用一档（浅底用 0.5 已足够压暗） */
+  --scrim: rgba(0, 0, 0, 0.5);
 
   /* 文本 */
   --text-primary: #1a1917;
@@ -110,6 +112,8 @@
   --bg-card: #16181b;
   --bg-overlay: #23262b;
   --surface: #16181b;
+  /* 浮层遮罩：深底需再压一档才与浮层拉开差 */
+  --scrim: rgba(0, 0, 0, 0.6);
 
   /* 文本 */
   --text-primary: #e8e6e1;

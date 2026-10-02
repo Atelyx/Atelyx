@@ -189,7 +189,7 @@ export function TextNode({ id, data, width, height, selected }: NodeProps) {
               <FileText size={14} />
               <span
                 className="ml-1 w-1.5 h-1.5 rounded-full"
-                style={{ background: "#f59e0b" }}
+                style={{ background: "var(--warning)" }}
               />
             </span>
           )}
@@ -273,7 +273,7 @@ export function TextNode({ id, data, width, height, selected }: NodeProps) {
         {fileMissing ? (
           <p
             className="text-xs flex items-center gap-1"
-            style={{ color: "#f87171" }}
+            style={{ color: "var(--danger)" }}
           >
             <AlertTriangle size={14} className="flex-shrink-0" />
             文件缺失（已在文件管理器中删除或重命名）
@@ -305,7 +305,7 @@ export function TextNode({ id, data, width, height, selected }: NodeProps) {
         ) : (
           <>
             {isSaved && !noteSurface && (
-              <p className="text-[11px] mb-1" style={{ color: "#f59e0b" }}>
+              <p className="text-[11px] mb-1" style={{ color: "var(--warning)" }}>
                 笔记能力未启用，只能查看
               </p>
             )}

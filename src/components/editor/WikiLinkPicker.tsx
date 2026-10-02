@@ -145,7 +145,7 @@ export function WikiLinkPicker({ query, anchor, onPick, onCreate, onClose }: Pro
                 onMouseEnter={() => setActive(i)}
                 className="w-full text-left px-3 py-1.5 text-sm block"
                 style={{
-                  color: isActive ? "#fff" : isCreate ? "var(--accent)" : "var(--text-primary)",
+                  color: isActive ? "var(--accent-fg)" : isCreate ? "var(--accent)" : "var(--text-primary)",
                   background: isActive ? "var(--accent)" : undefined,
                 }}
                 title={it.kind === "note" ? it.file : `新建笔记「${it.name}」并插入链接`}

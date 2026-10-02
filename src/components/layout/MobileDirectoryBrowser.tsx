@@ -72,7 +72,7 @@ export function MobileDirectoryBrowser({
           </div>
         )}
         {!loading && error && (
-          <div className="px-4 py-6 text-xs break-words" style={{ color: "#f87171" }}>
+          <div className="px-4 py-6 text-xs break-words" style={{ color: "var(--danger)" }}>
             {error}
           </div>
         )}

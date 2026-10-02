@@ -327,7 +327,7 @@ export function AiChatPanel() {
           {error || persistError ? (
             <span
               className="flex items-center gap-1 min-w-0 text-xs"
-              style={{ color: "#f87171" }}
+              style={{ color: "var(--danger)" }}
               title={persistError && !error ? `失败于 ${new Date(persistError.at).toLocaleTimeString()}` : undefined}
             >
               <AlertCircle size={13} className="flex-shrink-0" />

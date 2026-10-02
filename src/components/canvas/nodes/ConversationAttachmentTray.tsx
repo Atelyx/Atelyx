@@ -53,7 +53,7 @@ export function ConversationAttachmentTray({ attachments, onRemove, onPin }: Pro
           <span className="max-w-28 truncate">
             {att.filename || (att.kind === "image" ? "图片" : "文件")}
           </span>
-          {att.parseFailed && <AlertTriangle size={12} style={{ color: "#f87171" }} />}
+          {att.parseFailed && <AlertTriangle size={12} style={{ color: "var(--danger)" }} />}
           <button
             onClick={() => onRemove(att.id)}
             className="hover:opacity-70 flex-shrink-0"

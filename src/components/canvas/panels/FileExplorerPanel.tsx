@@ -335,7 +335,7 @@ export function FileExplorerPanel({ openedNoteFile, openedTableFile, onConvertWh
       {notice && (
         <div
           className="px-3 py-1 text-xs border-b"
-          style={{ color: "#f59e0b", borderColor: "var(--border)" }}
+          style={{ color: "var(--warning)", borderColor: "var(--border)" }}
         >
           {notice}
         </div>

@@ -663,7 +663,7 @@ export function NoteEditor({ file }: { file: string }) {
       )}
 
       {loadError ? (
-        <div className="flex-1 flex items-center justify-center text-sm" style={{ color: "#f87171" }}>
+        <div className="flex-1 flex items-center justify-center text-sm" style={{ color: "var(--danger)" }}>
           读取笔记失败，请确认文件存在
         </div>
       ) : sourceMode ? (
@@ -772,7 +772,7 @@ export function NoteEditor({ file }: { file: string }) {
       >
         {content.length} 字
         {clipHint && (
-          <span className="ml-2" style={{ color: "#f87171" }}>
+          <span className="ml-2" style={{ color: "var(--danger)" }}>
             {clipHint}
           </span>
         )}

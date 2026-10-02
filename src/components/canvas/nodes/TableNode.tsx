@@ -134,7 +134,7 @@ export function TableNode({ id, data, width, height, selected }: NodeProps) {
         {fileMissing ? (
           <p
             className="text-xs flex items-center gap-1"
-            style={{ color: "#f87171" }}
+            style={{ color: "var(--danger)" }}
           >
             <AlertTriangle size={14} className="flex-shrink-0" />
             文件缺失（已在文件管理器中删除或重命名）
