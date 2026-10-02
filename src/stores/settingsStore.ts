@@ -161,7 +161,7 @@ interface SettingsState {
   setAutoNamingEnabled: (enabled: boolean) => Promise<void>;
   /** 设话题自动命名模型（null = 跟随默认模型；话题命名一般用小模型）。 */
   setAutoNamingModel: (model: { providerId: string; model: string } | null) => Promise<void>;
-  /** 设应用级界面基础字号（undefined = 跟随默认 18px，写 global.json）。 */
+  /** 设应用级界面基础字号（undefined = 跟随默认 16px，写 global.json）。 */
   setFontSize: (size: number | undefined) => Promise<void>;
   /** 设应用级界面字体（undefined = 跟随系统默认，写 global.json）。 */
   setFontFamily: (family: string | undefined) => Promise<void>;

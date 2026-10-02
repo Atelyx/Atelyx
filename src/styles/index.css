@@ -1,16 +1,27 @@
 @import "katex/dist/katex.min.css";
 @import "@xyflow/react/dist/style.css";
+/* 自托管字体（随应用分发，无外链请求；CSP 的 default-src 'self' 即覆盖 font-src）。
+   只取 latin 子集：中文由系统 CJK 字体回退（见 --font-sans）；许可见 docs/THIRD_PARTY_NOTICES.md。 */
+@import "@fontsource/ibm-plex-sans/latin-400.css";
+@import "@fontsource/ibm-plex-sans/latin-500.css";
+@import "@fontsource/ibm-plex-sans/latin-600.css";
+@import "@fontsource/ibm-plex-mono/latin-400.css";
+@import "@fontsource/ibm-plex-mono/latin-500.css";
+@import "@fontsource/fraunces/latin-600.css";
 
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 /* ===== Theme Variables =====
-   浅色基底（品牌主色 = 黄铜金）。背景按用途分档（primary < secondary < tertiary < overlay），
-   相邻档差极小——分层靠「色阶 + 1px 边」而非强对比。
+   浅色基底（品牌主色 = 黄铜金）。背景 5 档色阶（sunken < primary < secondary < tertiary
+   < overlay），相邻档差极小——分层靠「色阶 + 1px 边」而非强对比。
+   用法约定：面板内容区一律 primary；面板头/工具条/标题栏 secondary；内嵌卡片 tertiary；
+   浮层 overlay；sunken 只给需要「下沉」的面（画布视口、输入框、代码块）。
    变量名是插件与主题契约（docs/plugins），只增不改。 */
 :root {
   /* 背景色阶 */
+  --bg-sunken: #f1f1ee;
   --bg-primary: #fafaf8;
   --bg-secondary: #ffffff;
   --bg-tertiary: #f1f1ee;
@@ -88,6 +99,7 @@
 /* 夜间主题（主基调）：炭黑 + 黄铜金 + 暖白文本；中性冷灰边，不用蓝色调 */
 :root.dark {
   /* 背景色阶 */
+  --bg-sunken: #0a0b0c;
   --bg-primary: #0e0f11;
   --bg-secondary: #16181b;
   --bg-tertiary: #1d2024;
@@ -149,7 +161,7 @@
 }
 
 :root.dark .react-flow__background {
-  background-color: var(--bg-primary) !important;
+  background-color: var(--bg-sunken) !important;
 }
 
 /* ===== ReactFlow theme ===== */
@@ -164,7 +176,7 @@
   --xy-minimap-mask-background-color-default: rgba(241, 241, 238, 0.6);
   --xy-minimap-node-background-color-default: #d8d7d1;
   --xy-minimap-node-stroke-color-default: transparent;
-  --xy-background-color-default: #fafaf8;
+  --xy-background-color-default: #f1f1ee;
   --xy-background-pattern-dots-color-default: #d8d7d1;
   --xy-node-color-default: #1a1917;
   --xy-node-border-default: 1px solid #e4e3de;
@@ -193,7 +205,7 @@
   --xy-minimap-background-color-default: #1d2024;
   --xy-minimap-mask-background-color-default: rgba(22, 24, 27, 0.6);
   --xy-minimap-node-background-color-default: #3d4249;
-  --xy-background-color-default: #0e0f11;
+  --xy-background-color-default: #0a0b0c;
   --xy-background-pattern-dots-color-default: #2e3238;
   --xy-node-color-default: #e8e6e1;
   --xy-node-border-default: 1px solid #2e3238;
@@ -229,9 +241,10 @@ body,
   margin: 0;
 }
 
+/* 基准 16px：紧凑档密度（行高 28–32、控件高 28、正文 14）；用户可在设置里覆盖 */
 :root {
   font-family: var(--font-sans);
-  font-size: 18px;
+  font-size: 16px;
   line-height: 1.5;
 }
 

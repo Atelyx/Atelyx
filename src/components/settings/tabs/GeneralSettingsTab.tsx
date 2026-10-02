@@ -58,7 +58,7 @@ export function GeneralSettingsTab() {
   return (
     <section className="flex-1 p-5 overflow-auto space-y-4">
       {/* 字体大小（应用级） */}
-      <SettingCard title="字体大小" description="界面字号；留空 = 18">
+      <SettingCard title="字体大小" description="界面字号；留空 = 16">
         <input
           type="number"
           min={12}
@@ -70,7 +70,7 @@ export function GeneralSettingsTab() {
           onKeyDown={(e) => {
             if (e.key === "Enter") e.currentTarget.blur();
           }}
-          placeholder="18"
+          placeholder="16"
           className="text-sm rounded px-2 py-1 outline-none max-w-[90px]"
           style={{
             color: "var(--text-primary)",

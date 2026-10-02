@@ -28,7 +28,7 @@ import type { MentionSeg } from "@/utils/text";
 
 /** overlay 与 textarea 严格一致的字体（CSS 未给 textarea 设 font，UA 默认不同会导致标签错位） */
 export const INPUT_FONT: CSSProperties = {
-  fontFamily: 'system-ui, -apple-system, "Segoe UI", sans-serif',
+  fontFamily: "var(--font-sans)",
   fontSize: 14,
   lineHeight: "1.4rem",
 };
