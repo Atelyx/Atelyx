@@ -36,7 +36,8 @@ import { groupAgentSteps } from "@/utils/agentSteps";
 import type { AgentStep, Attachment, ToolRun } from "@/types";
 import { MarkdownView, type MarkdownEditorLinks } from "@/components/editor/MarkdownEditor";
 
-/** 两入口恒同值的气泡样式（画布/面板同款）：模块级单例，memo 浅比较引用恒稳定。 */
+/** 两入口恒同值的气泡样式（画布/面板同款）：模块级单例，memo 浅比较引用恒稳定。
+ *  user 气泡抬起一档（raised 底 + 细边），assistant 不画气泡、直接铺在面板底上。 */
 const USER_BUBBLE_CLASS = "bg-[var(--bg-tertiary)]";
 const ASSISTANT_BUBBLE_STYLE: CSSProperties = {
   background: "var(--bg-primary)",
@@ -145,11 +146,11 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
   return (
     <div className={`group relative flex ${isUser ? "justify-end" : "justify-start"}`}>
       <div
-        className={`relative max-w-[85%] rounded-lg ${BUBBLE_PADDING_CLASS} ${isUser ? USER_BUBBLE_CLASS : ""}`}
+        className={`relative max-w-[85%] rounded-bubble ${BUBBLE_PADDING_CLASS} ${isUser ? USER_BUBBLE_CLASS : ""}`}
         style={{
           userSelect: "text",
           WebkitUserSelect: "text",
-          // assistant 底色/边框来自样式常量（原实现 bg-tertiary 被其覆盖，净效果一致），字色恒 text-primary
+          // assistant 底色/边框来自样式常量，字色恒 text-primary
           ...(isUser ? {} : { ...ASSISTANT_BUBBLE_STYLE, color: "var(--text-primary)" }),
         }}
       >
@@ -324,7 +325,7 @@ function ToolRunRow({ run }: { run: ToolRun }) {
   const [expanded, setExpanded] = useState(false);
   const statusColor =
     run.status === "error"
-      ? "#f87171"
+      ? "var(--danger)"
       : run.status === "done"
         ? "var(--accent)"
         : "var(--text-muted)";
@@ -364,7 +365,7 @@ function ToolRunRow({ run }: { run: ToolRun }) {
         {run.status === "running" ? (
           <Loader2 size={11} className="animate-spin flex-shrink-0" style={{ color: "var(--text-muted)" }} />
         ) : run.status === "error" ? (
-          <AlertCircle size={11} className="flex-shrink-0" style={{ color: "#f87171" }} />
+          <AlertCircle size={11} className="flex-shrink-0" style={{ color: "var(--danger)" }} />
         ) : (
           <Check size={11} className="flex-shrink-0" style={{ color: "var(--accent)" }} />
         )}

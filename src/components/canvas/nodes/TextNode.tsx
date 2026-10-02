@@ -154,7 +154,7 @@ export function TextNode({ id, data, width, height, selected }: NodeProps) {
   return (
     <div
       ref={editRootRef}
-      className="rounded-lg shadow-lg border flex flex-col text-sm"
+      className="rounded-md shadow-lg border flex flex-col text-sm"
       style={{
         width: width ?? DEFAULT_TEXT_NODE_WIDTH,
         height: height ?? DEFAULT_TEXT_NODE_HEIGHT,
@@ -170,7 +170,7 @@ export function TextNode({ id, data, width, height, selected }: NodeProps) {
       <ConnectionFrame topType="source" selected={selected} />
 
       <header
-        className="px-3 py-1.5 border-b rounded-t-lg text-xs font-medium flex-shrink-0 flex items-center justify-between gap-1"
+        className="px-3 py-1.5 border-b rounded-t-md text-xs font-medium flex-shrink-0 flex items-center justify-between gap-1"
         style={{
           cursor: "grab",
           borderColor: "var(--border)",

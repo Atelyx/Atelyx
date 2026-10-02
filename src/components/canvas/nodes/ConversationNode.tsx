@@ -732,7 +732,7 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
   return (
     <div
       ref={nodeRef}
-      className="rounded-lg shadow-lg border flex flex-col text-sm"
+      className="rounded-md shadow-lg border flex flex-col text-sm"
       style={{
         width: width ?? 420,
         height: height ?? undefined,
@@ -747,7 +747,7 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
       <ConnectionFrame topType="target" selected={selected} />
 
       <header
-        className="px-3 py-2 border-b rounded-t-lg flex items-center gap-2"
+        className="px-3 py-2 border-b rounded-t-md flex items-center gap-2"
         style={{
           cursor: "grab",
           borderColor: "var(--border)",

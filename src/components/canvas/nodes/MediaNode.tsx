@@ -65,7 +65,7 @@ export function MediaNode({ id, data, width, height, selected }: NodeProps) {
 
   return (
     <div
-      className="rounded-lg shadow-lg border flex flex-col text-sm"
+      className="rounded-md shadow-lg border flex flex-col text-sm"
       style={{
         width: nodeWidth,
         height: nodeHeight,
@@ -79,7 +79,7 @@ export function MediaNode({ id, data, width, height, selected }: NodeProps) {
       <ConnectionFrame topType="source" selected={selected} />
 
       <header
-        className="px-3 py-1.5 border-b rounded-t-lg text-xs font-medium flex-shrink-0"
+        className="px-3 py-1.5 border-b rounded-t-md text-xs font-medium flex-shrink-0"
         style={{
           cursor: "grab",
           borderColor: "var(--border)",

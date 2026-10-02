@@ -124,7 +124,7 @@ export function FileTree(props: FileTreeProps) {
                 </div>
               ) : (
                 <div
-                  className="flex items-center gap-1 px-2 py-1 min-h-8 select-none cursor-default rounded-md hover:bg-[var(--hover)]"
+                  className="flex items-center gap-1 px-2 py-1 min-h-8 select-none cursor-default rounded-sm hover:bg-[var(--hover)]"
                   style={{
                     ...indent,
                     // 拖拽悬停目标高亮（金色底），提示可放入移动
@@ -219,7 +219,7 @@ export function FileTree(props: FileTreeProps) {
               </div>
             ) : (
               <div
-                className="flex items-center gap-1 px-2 py-1 min-h-8 cursor-default rounded-md hover:bg-[var(--hover)]"
+                className="flex items-center gap-1 px-2 py-1 min-h-8 cursor-default rounded-sm hover:bg-[var(--hover)]"
                 style={{
                   ...indent,
                   background: active ? "color-mix(in srgb, var(--accent) 20%, transparent)" : undefined,

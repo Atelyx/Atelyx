@@ -104,7 +104,7 @@ export function SpaceRows({ entries, hasServers, loading, listError, identity, s
               </div>
             ) : (
               <div
-                className="flex items-center gap-1 px-2 py-1 min-h-8 select-none cursor-default rounded-md hover:bg-[var(--hover)]"
+                className="flex items-center gap-1 px-2 py-1 min-h-8 select-none cursor-default rounded-sm hover:bg-[var(--hover)]"
                 style={{
                   background: active ? "color-mix(in srgb, var(--accent) 20%, transparent)" : undefined,
                 }}

@@ -123,7 +123,7 @@ export function VaultRows({ vaults, vaultRoot, switchingTo, onEnter, collapsedVa
         return (
           <li key={v.root}>
             <div
-              className="flex items-center gap-1 px-2 py-1 min-h-8 select-none cursor-default rounded-md hover:bg-[var(--hover)]"
+              className="flex items-center gap-1 px-2 py-1 min-h-8 select-none cursor-default rounded-sm hover:bg-[var(--hover)]"
               style={{
                 // 激活仓库行高亮 = 与当前打开文件行同色
                 background: active ? "color-mix(in srgb, var(--accent) 20%, transparent)" : undefined,

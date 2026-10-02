@@ -50,7 +50,7 @@ export function MobileVaultSwitcher({ label }: { label: string }) {
       <button
         ref={triggerRef}
         onClick={toggle}
-        className="flex-1 min-w-0 flex items-center gap-1 h-10 px-2 rounded-md"
+        className="flex-1 min-w-0 flex items-center gap-1 h-10 px-2 rounded-sm"
         style={{ color: "var(--text-primary)" }}
         aria-haspopup="menu"
         aria-expanded={!!anchor}

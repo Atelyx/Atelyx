@@ -97,7 +97,7 @@ export function SearchResultNode({ id, data, height, selected }: NodeProps) {
 
   return (
     <div
-      className="rounded-lg shadow-lg border flex flex-col text-sm"
+      className="rounded-md shadow-lg border flex flex-col text-sm"
       style={{
         width: 280,
         height: height ?? undefined,
@@ -111,7 +111,7 @@ export function SearchResultNode({ id, data, height, selected }: NodeProps) {
     >
       <ConnectionFrame topType="source" selected={selected} />
       <header
-        className="px-3 py-2 border-b rounded-t-lg flex items-center gap-1.5"
+        className="px-3 py-2 border-b rounded-t-md flex items-center gap-1.5"
         style={{
           borderColor: "var(--border)",
           background: "var(--bg-card)",

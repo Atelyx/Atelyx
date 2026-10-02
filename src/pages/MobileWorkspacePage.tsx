@@ -197,7 +197,7 @@ export function MobileWorkspacePage() {
           <MobileVaultSwitcher label={vaultName} />
           <button
             onClick={() => openSettings()}
-            className="w-10 h-10 flex items-center justify-center rounded-md flex-shrink-0"
+            className="w-10 h-10 flex items-center justify-center rounded-sm flex-shrink-0"
             style={{ color: "var(--text-secondary)" }}
             aria-label="设置"
           >

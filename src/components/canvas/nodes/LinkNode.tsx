@@ -36,7 +36,7 @@ export function LinkNode({ data, width, height, selected }: NodeProps) {
 
   return (
     <div
-      className="rounded-lg shadow-lg border flex flex-col text-sm cursor-pointer"
+      className="rounded-md shadow-lg border flex flex-col text-sm cursor-pointer"
       style={{
         width: width ?? DEFAULT_LINK_WIDTH,
         height: height ?? DEFAULT_LINK_HEIGHT,

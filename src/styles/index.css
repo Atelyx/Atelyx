@@ -81,7 +81,11 @@
   --table-header-bg: #f1f1ee;
 
   /* 形状与投影（投影只给浮层，面板内不用） */
+  /* 圆角刻度（数值递增）：xs 4 → sm 6 → bubble 8 → md 10 → lg 14。
+     bubble 是聊天气泡专用档（设计稿里 .bub 单独给的 8px，不在常规刻度上）。 */
+  --radius-xs: 4px;
   --radius-sm: 6px;
+  --radius-bubble: 8px;
   --radius-md: 10px;
   --radius-lg: 14px;
   --shadow-pop: 0 1px 2px rgba(20, 20, 20, 0.06), 0 8px 24px rgba(20, 20, 20, 0.1);

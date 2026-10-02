@@ -96,7 +96,7 @@ export function ProjectWorkspacePage() {
               </span>
               <button
                 onClick={(e) => { e.stopPropagation(); openSettings(); }}
-                className="w-8 h-8 flex items-center justify-center rounded-md hover:opacity-80"
+                className="w-8 h-8 flex items-center justify-center rounded-sm hover:opacity-80"
                 style={{ color: "var(--text-secondary)" }}
                 title="设置"
                 data-tauri-drag-region="false"
@@ -105,7 +105,7 @@ export function ProjectWorkspacePage() {
               </button>
               <button
                 onClick={(e) => { e.stopPropagation(); handleToggleFullscreen(); }}
-                className="w-8 h-8 flex items-center justify-center rounded-md hover:opacity-80"
+                className="w-8 h-8 flex items-center justify-center rounded-sm hover:opacity-80"
                 style={{ color: "var(--text-secondary)" }}
                 title="全屏"
                 data-tauri-drag-region="false"

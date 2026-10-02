@@ -63,7 +63,7 @@ export function TableNode({ id, data, width, height, selected }: NodeProps) {
 
   return (
     <div
-      className="rounded-lg shadow-lg border flex flex-col text-sm"
+      className="rounded-md shadow-lg border flex flex-col text-sm"
       style={{
         width: width ?? DEFAULT_TABLE_NODE_WIDTH,
         height: height ?? DEFAULT_TABLE_NODE_HEIGHT,
@@ -77,7 +77,7 @@ export function TableNode({ id, data, width, height, selected }: NodeProps) {
       <ConnectionFrame topType="source" selected={selected} />
 
       <header
-        className="px-3 py-1.5 border-b rounded-t-lg text-xs font-medium flex-shrink-0 flex items-center justify-between gap-1"
+        className="px-3 py-1.5 border-b rounded-t-md text-xs font-medium flex-shrink-0 flex items-center justify-between gap-1"
         style={{
           cursor: "grab",
           borderColor: "var(--border)",
@@ -162,7 +162,7 @@ export function TableNode({ id, data, width, height, selected }: NodeProps) {
       {/* 底部：行数统计 + 打开提示（fileMissing 不显示） */}
       {!fileMissing && (
         <div
-          className="px-3 py-1 border-t rounded-b-lg text-[10px] flex items-center justify-between flex-shrink-0"
+          className="px-3 py-1 border-t rounded-b-md text-[10px] flex items-center justify-between flex-shrink-0"
           style={{
             borderColor: "var(--border)",
             color: "var(--text-muted)",
