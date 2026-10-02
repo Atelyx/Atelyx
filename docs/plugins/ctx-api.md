@@ -206,7 +206,8 @@ ctx.slots.registerUi({ slot: "settings/files", component: AttachmentRulesBlock }
   `panelhead/status`、`titlebar/right`，以及设置页区块——应用级「设置」弹窗里的
   `settings/general`、`settings/theme`、`settings/collab`、`settings/editorPrefs`，仓库级
   「仓库设置」弹窗里的 `settings/modelServices`、`settings/search`、`settings/files`、
-  `settings/editor`（区块自行负责标题与卡片外观，可用 CSS 变量 `--bg-*`/`--border-*`/`--text-*`）。
+  `settings/editor`（区块自行负责标题与卡片外观；样式一律内联 `style` + CSS 变量，见
+  [样式与容器契约](styling.md)）。
 - 宿主侧 `SlotListMount`/`SlotMount`（`components/plugins/SlotHost.tsx`）读取并渲染对应槽位。
 
 ### 右键菜单项 `registerMenu`

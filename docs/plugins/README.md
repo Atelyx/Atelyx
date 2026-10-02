@@ -32,6 +32,8 @@ Atelyx 是插件化平台：插件 = 一个 git 仓库（市场侧以 GitHub 为
 | `ctx.ai` | AI 会话与工具：`ctx.ai.chat(...)` 直连模型；`ctx.ai.registerTool(...)` 贡献模型可调用的工具 |
 | `ctx.effect` | 注册副作用（订阅/接线等），插件停用/卸载时自动撤销——**所有注册都应经它包裹** |
 
+视图与槽位贡献的样式契约（不自绘外壳 / 只用 CSS 变量 / 遵守槽位尺寸）见 [样式与容器契约](styling.md)。
+
 面板视图里可以直接 `<iframe>` 内嵌本机或局域网服务的 web 界面（宿主 CSP 已放行 http(s) 帧）：
 适合把别人的原生界面搬进面板，代价是读不到该页面的内容——
 需要它的数据时走它自己的接口（`ctx.http`）。注意内嵌加载受目标站点的同源/跨域设置约束，
@@ -67,4 +69,5 @@ Atelyx 是插件化平台：插件 = 一个 git 仓库（市场侧以 GitHub 为
 
 [发布检查清单 →](publishing.md)
 
-更多指南：[清单与依赖打包](manifest.md)、[ctx API 参考](ctx-api.md)、[自定义槽位](custom-slots.md)。
+更多指南：[清单与依赖打包](manifest.md)、[ctx API 参考](ctx-api.md)、[自定义槽位](custom-slots.md)、
+[样式与容器契约](styling.md)。
