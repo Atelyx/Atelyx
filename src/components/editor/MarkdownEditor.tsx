@@ -42,8 +42,10 @@ import {
 import {
   CaretOverlay,
   MarkdownEditSink,
+  indentEdit,
   listBackspaceEdit,
   listEnterEdit,
+  outdentEdit,
   type CompositionText,
   type RemoteCursor,
 } from "./markdownInput";
@@ -499,14 +501,14 @@ export function MarkdownEditor({
     else apply();
   }, []);
 
-  /** 用新正文替换全文（程序化编辑：句柄、勾选框、候选插入共用）。 */
+  /** 用新正文替换全文（程序化编辑：句柄、勾选框、候选插入、缩进共用）。 */
   const applyText = useCallback(
-    (next: string, caretAt: number): void => {
+    (next: string, caretAt: number, caretTo: number = caretAt): void => {
       commitLocalEdit(next);
       sinkRef.current?.setText(next);
       renderContent(next, caretAt);
-      sinkRef.current?.setSelection(caretAt, caretAt, false);
-      drawOverlay(caretAt, caretAt, true, true);
+      sinkRef.current?.setSelection(caretAt, caretTo, false);
+      drawOverlay(caretAt, caretTo, true, true);
       onBodyChangeRef.current?.(next);
     },
     [commitLocalEdit, drawOverlay, renderContent],
@@ -792,22 +794,29 @@ export function MarkdownEditor({
   );
 
   /**
-   * 列表行按键接管（其余按键全部交浏览器原生处理）：
+   * 编辑面按键接管（其余按键全部交浏览器原生处理）：
+   * - Tab：列表行整行缩进成子项，其余行在光标处插入缩进；Shift+Tab 整行反缩进；
    * - Enter：光标在列表标记行时延续项标记（空项同样延续）；
    * - 退格：光标恰好停在空项标记之后时一次删掉整段标记，使「回车新建空项 → 退格」不残留标记。
    */
   const onHostKeyDown = useCallback(
     (event: React.KeyboardEvent) => {
-      if (event.shiftKey) return;
-      const key = event.key;
-      if (key !== "Enter" && key !== "Backspace") return;
-      // 组合期这两个键是输入法的确认/删除键，不拦
+      // 组合期这些键是输入法的确认/删除/候选键，不拦
       if (event.nativeEvent.isComposing || composingRef.current) return;
       if (readOnlyRef.current) return;
       const target = event.target as Element | null;
       // 输入面（textarea）的按键正是编辑路径本身；其余原生控件上的按键不拦
       if (target && target !== sinkRef.current?.el && target.closest(NATIVE_CONTROL_SELECTOR)) return;
       const { from, to } = selRef.current;
+      if (event.key === "Tab") {
+        const edit = event.shiftKey ? outdentEdit(textRef.current, from, to) : indentEdit(textRef.current, from, to);
+        event.preventDefault(); // 无可改动也要吞键，否则焦点会跳出编辑面
+        if (edit) applyText(edit.text, edit.from, edit.to);
+        return;
+      }
+      if (event.shiftKey) return;
+      const key = event.key;
+      if (key !== "Enter" && key !== "Backspace") return;
       if (to !== from) return; // 有选区：删除选区后换行/退格走浏览器原生行为
       const block = indexRef.current ? blockAtOffset(indexRef.current, from) : null;
       if (block?.el.getAttribute("data-md-kind") !== "list") return;

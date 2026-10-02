@@ -27,6 +27,13 @@ vi.mock("./markdownSourceMap", async (importOriginal) => {
 
 import { MarkdownEditor } from "./MarkdownEditor";
 
+/** 聚焦输入面并把光标移到指定偏移（经 document selectionchange 驱动 applySelection）。 */
+function moveCaret(ta: HTMLTextAreaElement, offset: number): void {
+  ta.focus();
+  ta.setSelectionRange(offset, offset);
+  document.dispatchEvent(new Event("selectionchange"));
+}
+
 function Harness() {
   const [seq, setSeq] = useState(0);
   return (
@@ -320,13 +327,6 @@ describe("输入法组合", () => {
 });
 
 describe("列表行 Enter 延续", () => {
-  /** 聚焦输入面并把光标移到指定偏移（经 document selectionchange 驱动 applySelection）。 */
-  function moveCaret(ta: HTMLTextAreaElement, offset: number): void {
-    ta.focus();
-    ta.setSelectionRange(offset, offset);
-    document.dispatchEvent(new Event("selectionchange"));
-  }
-
   it("输入面上的 Enter 不被原生控件守卫排除：列表行拆分并延续标记", () => {
     const onChange = vi.fn();
     const { container } = render(
@@ -359,6 +359,44 @@ describe("列表行 Enter 延续", () => {
     const ta = container.querySelector("textarea") as HTMLTextAreaElement;
     moveCaret(ta, 4);
     fireEvent.keyDown(ta, { key: "Backspace" });
+    expect(onChange).not.toHaveBeenCalled();
+  });
+});
+
+describe("Tab 缩进", () => {
+  it("列表行按 Tab 整行缩进成上一项的子项", () => {
+    const onChange = vi.fn();
+    const { container } = render(
+      <MarkdownEditor body={"- 甲项\n- 乙项"} syncSeq={0} readOnly={false} onBodyChange={onChange} />,
+    );
+    const ta = container.querySelector("textarea") as HTMLTextAreaElement;
+    moveCaret(ta, 8); // 第二行行内
+    fireEvent.keyDown(ta, { key: "Tab" });
+    expect(onChange.mock.calls.at(-1)?.[0]).toBe("- 甲项\n  - 乙项");
+  });
+
+  it("普通段落按 Tab 只在光标处插入缩进（不整行右移）", () => {
+    const onChange = vi.fn();
+    const { container } = render(
+      <MarkdownEditor body={"普通段落"} syncSeq={0} readOnly={false} onBodyChange={onChange} />,
+    );
+    const ta = container.querySelector("textarea") as HTMLTextAreaElement;
+    moveCaret(ta, 2); // "普通|段落"
+    fireEvent.keyDown(ta, { key: "Tab" });
+    expect(onChange.mock.calls.at(-1)?.[0]).toBe("普通  段落");
+  });
+
+  it("缩进行按 Shift+Tab 左移一级，顶格行无可删时不写回", () => {
+    const onChange = vi.fn();
+    const { container } = render(
+      <MarkdownEditor body={"  - 甲项"} syncSeq={0} readOnly={false} onBodyChange={onChange} />,
+    );
+    const ta = container.querySelector("textarea") as HTMLTextAreaElement;
+    moveCaret(ta, 5);
+    fireEvent.keyDown(ta, { key: "Tab", shiftKey: true });
+    expect(onChange.mock.calls.at(-1)?.[0]).toBe("- 甲项");
+    onChange.mockClear();
+    fireEvent.keyDown(ta, { key: "Tab", shiftKey: true });
     expect(onChange).not.toHaveBeenCalled();
   });
 });

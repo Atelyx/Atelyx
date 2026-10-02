@@ -65,6 +65,96 @@ export function listBackspaceEdit(text: string, from: number): { text: string; c
   return { text: text.slice(0, lineStart) + text.slice(markerEnd), cursor: lineStart };
 }
 
+/** 文本变换结果：新正文 + 变换后的选区（源偏移）。 */
+export interface LineEdit {
+  text: string;
+  from: number;
+  to: number;
+}
+
+/** 行级缩进单位：两个空格（列表嵌套的通行写法；CommonMark 下 `- ` 项缩 2 即构成子项）。 */
+const INDENT_UNIT = "  ";
+
+/** offset 所在行的行首偏移。 */
+function lineStartAt(text: string, offset: number): number {
+  return text.lastIndexOf("\n", Math.max(0, offset - 1)) + 1;
+}
+
+/** offset 所在行文本（不含换行符）。 */
+function lineTextAt(text: string, offset: number): string {
+  const start = lineStartAt(text, offset);
+  const end = text.indexOf("\n", start);
+  return text.slice(start, end === -1 ? text.length : end);
+}
+
+/** 列表项行判定：行首缩进 + 列表标记 + 标记后空格或行尾（与 {@link listEnterEdit} 同口径）。 */
+function isListLine(line: string): boolean {
+  return /^\s*(?:[-+*]|\d+[.)])(?:[ \t]|$)/.test(line);
+}
+
+/** 选区覆盖的行首偏移：折叠光标即当前行；有选区时取最后一个被选中字符所在行（行首处的终点不计入）。 */
+function coveredLineStarts(text: string, from: number, to: number): number[] {
+  const lastStart = lineStartAt(text, to > from ? to - 1 : from);
+  const starts: number[] = [];
+  let start = lineStartAt(text, from);
+  for (;;) {
+    starts.push(start);
+    if (start >= lastStart) return starts;
+    start = text.indexOf("\n", start) + 1;
+  }
+}
+
+/**
+ * Tab 缩进变换。有选区、或光标停在列表项行时整行缩进——列表靠行首缩进判定嵌套，整行右移
+ * 才能把一行变成上一项的子项；其余情况（代码块、普通段落）只在光标处插入一级缩进，
+ * 与代码编辑器一致。
+ */
+export function indentEdit(text: string, from: number, to: number): LineEdit {
+  if (from === to && !isListLine(lineTextAt(text, from))) {
+    return { text: text.slice(0, from) + INDENT_UNIT + text.slice(from), from: from + INDENT_UNIT.length, to: to + INDENT_UNIT.length };
+  }
+  const starts = coveredLineStarts(text, from, to);
+  const shift = (offset: number) => offset + INDENT_UNIT.length * starts.filter((s) => s <= offset).length;
+  let out = "";
+  let prev = 0;
+  for (const start of starts) {
+    out += text.slice(prev, start) + INDENT_UNIT;
+    prev = start;
+  }
+  return { text: out + text.slice(prev), from: shift(from), to: shift(to) };
+}
+
+/**
+ * Shift+Tab 反缩进变换：选区覆盖的每一行（折叠光标即当前行）去掉一级前导缩进——行首制表符
+ * 整体删一个，否则删至多一个缩进单位的空格；没有任何可删的行返回 null（不改动、由调用方决定是否吞键）。
+ */
+export function outdentEdit(text: string, from: number, to: number): LineEdit | null {
+  const removals: { start: number; count: number }[] = [];
+  for (const start of coveredLineStarts(text, from, to)) {
+    let count = 0;
+    if (text[start] === "\t") count = 1;
+    else while (count < INDENT_UNIT.length && text[start + count] === " ") count++;
+    if (count > 0) removals.push({ start, count });
+  }
+  if (removals.length === 0) return null;
+  const map = (offset: number): number => {
+    let removed = 0;
+    for (const r of removals) {
+      if (r.start >= offset) break;
+      if (offset < r.start + r.count) return r.start - removed;
+      removed += r.count;
+    }
+    return offset - removed;
+  };
+  let out = "";
+  let prev = 0;
+  for (const r of removals) {
+    out += text.slice(prev, r.start);
+    prev = r.start + r.count;
+  }
+  return { text: out + text.slice(prev), from: map(from), to: map(to) };
+}
+
 /** 按元素当前字体以 pre 布局测量文本宽度（与 textarea 内部行内布局同构）。 */
 function measurePreWidth(el: HTMLTextAreaElement, text: string): number {
   const style = getComputedStyle(el);

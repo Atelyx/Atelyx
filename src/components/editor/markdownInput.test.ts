@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 /**
- * 输入面单测：列表行 Enter/退格的文本变换，以及输入法组合态（未上屏文本 + 选区折算）。
+ * 输入面单测：列表行 Enter/退格、Tab 缩进/反缩进的文本变换，以及输入法组合态（未上屏文本 + 选区折算）。
  */
 import { describe, expect, it } from "vitest";
-import { listBackspaceEdit, listEnterEdit, MarkdownEditSink, type CompositionText } from "./markdownInput";
+import { indentEdit, listBackspaceEdit, listEnterEdit, MarkdownEditSink, outdentEdit, type CompositionText } from "./markdownInput";
 
 /** 组装输入面；`onCompositionChange` 记录每次组合态上报。 */
 function mountSink(value: string, caret: number) {
@@ -138,5 +138,55 @@ describe("listBackspaceEdit", () => {
     expect(listBackspaceEdit("- ", 1)).toEqual({ text: "", cursor: 0 });
     // 标记后无空格的行（`-` 独占一行）同样在标记之内/之后触发
     expect(listBackspaceEdit("-", 1)).toEqual({ text: "", cursor: 0 });
+  });
+});
+
+describe("indentEdit", () => {
+  it("列表行整行缩进：光标在行中任意位置都右移，且光标随之偏移", () => {
+    expect(indentEdit("- 甲", 3, 3)).toEqual({ text: "  - 甲", from: 5, to: 5 });
+    // 光标停在行首也整行缩进（光标落到缩进之后）
+    expect(indentEdit("- 甲", 0, 0)).toEqual({ text: "  - 甲", from: 2, to: 2 });
+    // 有序项、任务项同为列表行
+    expect(indentEdit("1. 甲", 4, 4)).toEqual({ text: "  1. 甲", from: 6, to: 6 });
+    expect(indentEdit("- [ ] 甲", 7, 7)).toEqual({ text: "  - [ ] 甲", from: 9, to: 9 });
+  });
+
+  it("嵌套场景：光标停在第二项上按 Tab，只有该项成为上一项的子项", () => {
+    const text = "- 项目一\n- 项目二";
+    expect(indentEdit(text, text.length, text.length)).toEqual({ text: "- 项目一\n  - 项目二", from: 13, to: 13 });
+  });
+
+  it("非列表行只在光标处插入缩进（代码块/段落行内对齐用）", () => {
+    expect(indentEdit("普通段落", 2, 2)).toEqual({ text: "普通  段落", from: 4, to: 4 });
+    expect(indentEdit("const x = 1;", 12, 12)).toEqual({ text: "const x = 1;  ", from: 14, to: 14 });
+    expect(indentEdit("普通段落", 0, 0)).toEqual({ text: "  普通段落", from: 2, to: 2 });
+  });
+
+  it("有选区：覆盖到的每一行整行缩进，选区仍罩住原内容", () => {
+    const text = "- 甲\n- 乙\n- 丙";
+    // 选区终点落在第三行行首：只缩进前两行
+    expect(indentEdit(text, 2, 8)).toEqual({ text: "  - 甲\n  - 乙\n- 丙", from: 4, to: 12 });
+    // 单行内的部分选区同样按整行处理
+    expect(indentEdit("普通段落", 1, 3)).toEqual({ text: "  普通段落", from: 3, to: 5 });
+  });
+});
+
+describe("outdentEdit", () => {
+  it("按一级缩进左移：空格最多删一个单位、行首制表符整体删一个", () => {
+    expect(outdentEdit("  - 甲", 4, 4)).toEqual({ text: "- 甲", from: 2, to: 2 });
+    expect(outdentEdit(" - 甲", 3, 3)).toEqual({ text: "- 甲", from: 2, to: 2 });
+    expect(outdentEdit("\t- 甲", 4, 4)).toEqual({ text: "- 甲", from: 3, to: 3 });
+    // 缩进不足一个单位：整段删掉、光标回到行首
+    expect(outdentEdit("  - 甲", 1, 1)).toEqual({ text: "- 甲", from: 0, to: 0 });
+  });
+
+  it("多行选区：逐行左移，已顶格的行不动", () => {
+    const text = "  - 甲\n- 乙\n  - 丙";
+    expect(outdentEdit(text, 2, text.length)).toEqual({ text: "- 甲\n- 乙\n- 丙", from: 0, to: 11 });
+  });
+
+  it("无可删缩进返回 null", () => {
+    expect(outdentEdit("- 甲", 3, 3)).toBeNull();
+    expect(outdentEdit("普通段落", 2, 2)).toBeNull();
   });
 });
