@@ -102,7 +102,10 @@ export function LayoutTabs() {
       {/* 应用标识（纯展示，不可点） */}
       <div className="flex items-center gap-1.5 px-2 h-8 flex-shrink-0" data-tauri-drag-region>
         <img src={appIcon} alt="" draggable={false} className="w-4 h-4 rounded select-none" />
-        <span className="text-xs font-medium" style={{ color: "var(--text-secondary)" }}>
+        <span
+          className="text-xs font-semibold tracking-wide"
+          style={{ color: "var(--text-secondary)", fontFamily: "var(--font-display)" }}
+        >
           Atelyx
         </span>
       </div>

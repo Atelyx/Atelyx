@@ -91,7 +91,7 @@ export function DropdownSelect({
             <div key={`${o.value}-${i}`}>
               {o.group && (i === 0 || options[i - 1].group !== o.group) && (
                 <div
-                  className="px-3 pt-1.5 pb-0.5 text-[10px] select-none"
+                  className="px-3 pt-1.5 pb-0.5 text-[11px] select-none"
                   style={{ color: "var(--text-muted)" }}
                 >
                   {o.group}

@@ -10,10 +10,10 @@ export function SettingCard({
 }) {
   return (
     <div
-      className="flex flex-col items-stretch gap-2 p-3 rounded-lg border sm:flex-row sm:items-center sm:justify-between sm:gap-3"
+      className="flex flex-col items-stretch gap-2 p-3 rounded-[var(--radius-md)] border sm:flex-row sm:items-center sm:justify-between sm:gap-3"
       style={{
-        background: "var(--bg-primary)",
-        borderColor: "var(--border)",
+        background: "var(--bg-tertiary)",
+        borderColor: "var(--border-subtle)",
       }}
     >
       <div className="min-w-0">

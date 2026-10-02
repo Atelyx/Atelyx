@@ -1,8 +1,7 @@
 /**
  * 窗口控制按钮组（decorations: false 自定义标题栏用）。
- * 图标用 `--titlebar-icon`（夜间 #cccccc 浅灰）；最小化/最大化 hover 背景
- * 用 `--titlebar-hover`（夜间 #333333）；关闭 hover 背景 Windows 警告红
- * `--titlebar-close-hover`（夜间 #e81123）且 X 变白。高度由父容器决定。
+ * 图标用 `--titlebar-icon`；最小化/最大化 hover 背景用 `--titlebar-hover`；
+ * 关闭 hover 背景用 `--titlebar-close-hover`（Windows 警告红）且 X 变白。高度由父容器决定。
  * `data-tauri-drag-region` 让空白区可拖拽窗口，按钮本身自动排除。
  * 窗口控制经 props 回调由页面注入（页面从 appStore 取，经 services 层转发）。
  */

@@ -134,9 +134,9 @@ function SettingsShell({
       onClick={narrow ? undefined : onClose}
     >
       <div
-        className={narrow ? "flex-1 min-w-0 flex flex-col" : "rounded-lg w-[840px] h-[80vh] flex flex-col border shadow-2xl"}
+        className={narrow ? "flex-1 min-w-0 flex flex-col" : "rounded-[var(--radius-lg)] w-[840px] h-[80vh] flex flex-col border shadow-[var(--shadow-pop)]"}
         style={{
-          background: "var(--bg-secondary)",
+          background: "var(--bg-overlay)",
           borderColor: "var(--border)",
           paddingBottom: narrow ? "env(safe-area-inset-bottom)" : undefined,
         }}
@@ -192,11 +192,11 @@ function SettingsShell({
                     key={item.key}
                     onClick={() => onTabChange(item.key)}
                     title={item.label}
-                    className={`w-full flex items-center gap-2 px-2.5 py-2 rounded text-sm transition ${
+                    className={`w-full flex items-center gap-2 px-2.5 py-1.5 rounded-[var(--radius-sm)] text-xs transition ${
                       tabsCollapsed ? "justify-center px-0" : ""
                     } ${
                       tab === item.key
-                        ? "bg-[var(--accent)] text-[var(--accent-fg)]"
+                        ? "bg-[var(--accent-soft)] text-[var(--accent)] font-medium"
                         : "text-[var(--text-secondary)] hover:bg-[var(--hover)]"
                     }`}
                   >
@@ -208,7 +208,7 @@ function SettingsShell({
               <button
                 onClick={() => setTabsCollapsed((v) => !v)}
                 title={tabsCollapsed ? "展开标签栏" : "折叠标签栏"}
-                className={`m-2 flex items-center gap-1 rounded px-2 py-1.5 text-xs text-[var(--text-secondary)] hover:bg-[var(--hover)] ${
+                className={`m-2 flex items-center gap-1 rounded-[var(--radius-sm)] px-2 py-1.5 text-xs text-[var(--text-secondary)] hover:bg-[var(--hover)] ${
                   tabsCollapsed ? "justify-center" : ""
                 }`}
               >
@@ -316,7 +316,7 @@ export function VaultSettingsModal({
         </div>
       )}
       {session?.readOnly && (
-        <div className="flex items-center gap-1.5" style={{ color: "#f59e0b" }}>
+        <div className="flex items-center gap-1.5" style={{ color: "var(--warning)" }}>
           <AlertTriangle size={13} className="shrink-0" />
           <span className="min-w-0">
             你在该空间内是查看者：可以查看设置，改动不会被保存。
@@ -324,7 +324,7 @@ export function VaultSettingsModal({
         </div>
       )}
       {session?.corruptBackup && (
-        <div className="flex items-center gap-1.5" style={{ color: "#f87171" }}>
+        <div className="flex items-center gap-1.5" style={{ color: "var(--danger)" }}>
           <AlertTriangle size={13} className="shrink-0" />
           <span className="min-w-0">
             该仓库配置已损坏，原文备份为 .atelyx/{session.corruptBackup}：供应商、默认模型与 API key
@@ -358,7 +358,7 @@ export function VaultSettingsModal({
         </div>
       ) : failed ? (
         <div className="flex-1 flex flex-col items-center justify-center gap-3 px-8 text-center">
-          <AlertTriangle size={18} style={{ color: "#f87171" }} />
+          <AlertTriangle size={18} style={{ color: "var(--danger)" }} />
           <p className="text-sm" style={{ color: "var(--text-secondary)" }}>
             该仓库的配置未能读取：{session?.error}
           </p>

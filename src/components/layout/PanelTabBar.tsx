@@ -242,11 +242,12 @@ export const PanelTabBar = memo(function PanelTabBar({
                 setViewMenu(null);
                 setTabMenu({ tabId: tab.id, x: e.clientX, y: e.clientY, pane: "root" });
               }}
-              className="flex items-center gap-1 px-2 py-0.5 rounded-t text-xs border-b-2 transition-colors"
+              className="flex items-center gap-1 px-2 py-0.5 rounded-t text-xs border-b-2 transition-colors hover:bg-[var(--hover)]"
               style={{
                 borderColor: tab.id === activeTabId ? "var(--accent)" : "transparent",
                 color: tab.id === activeTabId ? "var(--accent)" : "var(--text-secondary)",
-                background: tab.id === activeTabId ? "rgba(255,255,255,0.04)" : "transparent",
+                // 未激活不设内联底色，交给 hover:bg-[var(--hover)]（内联样式会压过 hover 类）
+                background: tab.id === activeTabId ? "var(--accent-soft)" : undefined,
               }}
               title={`${viewMetaFor(tab.view).label}${tab.locked ? "（已锁定：不可移动/关闭/删除面板）" : ""}`}
             >

@@ -118,14 +118,14 @@ function CanvasStatusIndicator() {
     return (
       <span
         className="flex items-center gap-1 px-1.5 py-0.5 rounded flex-shrink-0"
-        style={{ color: "#f87171", background: "rgba(248,113,113,0.1)" }}
+        style={{ color: "var(--danger)", background: "color-mix(in srgb, var(--danger) 12%, transparent)" }}
       >
         <span className="truncate max-w-[160px]">{error}</span>
         {error === "加载画布失败，请重试" && canvasFile && (
           <button
             onClick={() => void load(canvasFile)}
             className="px-1 rounded hover:opacity-80"
-            style={{ background: "rgba(248,113,113,0.2)", color: "#f87171" }}
+            style={{ background: "color-mix(in srgb, var(--danger) 20%, transparent)", color: "var(--danger)" }}
           >
             重试
           </button>
@@ -133,7 +133,7 @@ function CanvasStatusIndicator() {
         <button
           onClick={() => clearError()}
           className="px-1 rounded hover:opacity-80"
-          style={{ background: "rgba(248,113,113,0.2)", color: "#f87171" }}
+          style={{ background: "color-mix(in srgb, var(--danger) 20%, transparent)", color: "var(--danger)" }}
           aria-label="关闭错误提示"
         >
           <X size={12} />
@@ -159,13 +159,13 @@ function TableStatusIndicator() {
     return (
       <span
         className="flex items-center gap-1 px-1.5 py-0.5 rounded flex-shrink-0"
-        style={{ color: "#f87171", background: "rgba(248,113,113,0.1)" }}
+        style={{ color: "var(--danger)", background: "color-mix(in srgb, var(--danger) 12%, transparent)" }}
       >
         <span className="truncate max-w-[160px]">{error}</span>
         <button
           onClick={() => clearError()}
           className="px-1 rounded hover:opacity-80"
-          style={{ background: "rgba(248,113,113,0.2)", color: "#f87171" }}
+          style={{ background: "color-mix(in srgb, var(--danger) 20%, transparent)", color: "var(--danger)" }}
           aria-label="关闭错误提示"
         >
           <X size={12} />
@@ -201,7 +201,7 @@ function NoteStatusIndicator() {
   return (
     <span
       className="flex-shrink-0 text-xs"
-      style={{ color: status.loadError || status.state === "error" ? "#f87171" : "var(--text-muted)" }}
+      style={{ color: status.loadError || status.state === "error" ? "var(--danger)" : "var(--text-muted)" }}
     >
       {text}
     </span>

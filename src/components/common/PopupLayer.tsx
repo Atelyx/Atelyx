@@ -81,12 +81,12 @@ export function PopupLayer({
       ref={ref}
       // data-popup-layer：宿主全局外点监听（如 NoteEditor 的「点外退出编辑」）按此标记排除弹层内操作
       data-popup-layer
-      className={`fixed border rounded shadow-lg ${zClass} ${widthClass ?? ""} ${contentClassName}`}
+      className={`fixed border rounded-[var(--radius-md)] shadow-[var(--shadow-pop)] ${zClass} ${widthClass ?? ""} ${contentClassName}`}
       style={{
         left: pos.x,
         top: pos.y,
         minWidth: anchor.minWidth,
-        background: "var(--bg-secondary)",
+        background: "var(--bg-overlay)",
         borderColor: "var(--border)",
       }}
       onClick={(e) => e.stopPropagation()}

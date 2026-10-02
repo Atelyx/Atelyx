@@ -10,12 +10,12 @@ import { AlertTriangle, CheckCircle2, Info, X, XCircle } from "lucide-react";
 import { useNotificationStore, type NotificationItem } from "@/stores/notificationStore";
 import type { NotificationLevel } from "@/services/cordis/types";
 
-/** 级别 → 图标与强调色（色值尽量走主题变量，状态色直给以保语义清晰）。 */
+/** 级别 → 图标与强调色（颜色走主题语义色变量，随深浅主题与强调色体系一致）。 */
 const LEVEL_STYLES: Record<NotificationLevel, { icon: typeof Info; color: string }> = {
   info: { icon: Info, color: "var(--text-secondary)" },
-  success: { icon: CheckCircle2, color: "#4ade80" },
-  warning: { icon: AlertTriangle, color: "#fbbf24" },
-  error: { icon: XCircle, color: "#f87171" },
+  success: { icon: CheckCircle2, color: "var(--success)" },
+  warning: { icon: AlertTriangle, color: "var(--warning)" },
+  error: { icon: XCircle, color: "var(--danger)" },
 };
 
 export function NotificationHost() {
