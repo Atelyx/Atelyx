@@ -13,8 +13,8 @@ import { SPACE_TEAM_AI_NOTICE, SPACE_VIEWER_NOTICE } from "@/constants/space";
 import type { ProviderConfig } from "@/types";
 import { SettingCard } from "@/components/settings/SettingCard";
 import { ToggleSwitch } from "@/components/common/ToggleSwitch";
-import { useEditingTargetFlags } from "@/hooks/useEditingTarget";
-import { useSettingsStore, selectEditingProviders, selectEditingVaultConfig } from "@/stores/settingsStore";
+import { useIsSpaceVault, useSpaceViewerOnly } from "@/hooks/useIsSpaceVault";
+import { useSettingsStore } from "@/stores/settingsStore";
 
 /** 测试连通性结果（idle = 未测试；testing = 请求中）。 */
 interface TestState {
@@ -26,19 +26,20 @@ interface TestState {
 /**
  * 设置页「模型供应商」面板：左侧供应商卡片列表（+ 快速添加），右侧表单
  * （名称/Base URL/API Key + 测试连通性 + 多模型管理（获取列表/复选/昵称/手动添加））。
- * 供应商列表与写操作均作用于当前编辑目标（仓库设置弹窗可编辑非激活仓库）。
+ * 供应商列表与写操作均作用于当前激活仓库。
  *
  * 空间下这份配置（含 API key）整体存在服务端团队元数据里、全员共用一份，因此没有
  * 「API key 随仓库保存」开关（那是本地仓库的多设备同步选项）。
  */
 export function ProviderSettingsSection() {
-  const providers = useSettingsStore(selectEditingProviders);
-  const syncKeys = useSettingsStore((s) => !!selectEditingVaultConfig(s)?.syncKeys);
+  const providers = useSettingsStore((s) => s.config.providers);
+  const syncKeys = useSettingsStore((s) => !!s.vaultConfig?.syncKeys);
   const setSyncKeys = useSettingsStore((s) => s.setSyncKeys);
   const addProvider = useSettingsStore((s) => s.addProvider);
   const updateProvider = useSettingsStore((s) => s.updateProvider);
   const removeProvider = useSettingsStore((s) => s.removeProvider);
-  const { isSpace, viewerOnly } = useEditingTargetFlags();
+  const isSpace = useIsSpaceVault();
+  const viewerOnly = useSpaceViewerOnly();
   const [editingId, setEditingId] = useState<string | null>(
     providers[0]?.id ?? null,
   );

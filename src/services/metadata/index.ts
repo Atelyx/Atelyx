@@ -1,10 +1,8 @@
 /**
  * 元数据双源分发层：`.atelyx` 元数据与配置的读写按仓库身份分发。
  *
- * 仓库级读写统一接受可选目标（`VaultSettingsTarget`）：缺省 = 当前激活仓库；
- * 显式目标 = 设置页正在编辑的那个仓库（可以是列表里未激活的仓库，由文件面板的仓库行/空间行打开），
- * 此时 local 走 `*_at` 命令（root 显式），space 按目标身份取连接与空间 meta。
- * 激活仓库与显式目标走同一份实现，不存在「激活专用」的第二条路径。
+ * 仓库级读写的落点由**当前激活仓库的身份**决定（个人仓库 = 本地文件，协作空间 = 服务端 meta）：
+ * 同一份实现按身份分流，没有第二条路径。
  *
  * 个人仓库（local）→ 既有本地 Tauri 命令（services/vault 的函数面原样直通）；
  * 协作空间（space）→ 服务端 meta 分组（services/space/client）：
@@ -25,16 +23,11 @@ import { createSpaceClient, type SpaceClient } from "@/services/space/client";
 import { getToken } from "@/services/space/auth";
 import {
   readVaultConfig as readLocalVaultConfig,
-  readVaultConfigAt as readLocalVaultConfigAt,
   patchVaultConfig as patchLocalVaultConfig,
-  patchVaultConfigAt as patchLocalVaultConfigAt,
   readPromptNotes as readLocalPromptNotes,
-  readPromptNotesAt as readLocalPromptNotesAt,
   writePromptNotes as writeLocalPromptNotes,
   readAgents as readLocalAgents,
-  readAgentsAt as readLocalAgentsAt,
   writeAgents as writeLocalAgents,
-  writeAgentsAt as writeLocalAgentsAt,
   readFolderColors as readLocalFolderColors,
   writeFolderColors as writeLocalFolderColors,
   listChatSessions as listLocalChatSessions,
@@ -67,7 +60,6 @@ import type {
   EditorChatMessage,
   VaultConfig,
   VaultConfigRead,
-  VaultSettingsTarget,
 } from "@/types";
 
 // ===== 空间 meta 键名（team 层）=====
@@ -220,17 +212,13 @@ const AI_CONFIG_KEYS: Record<string, string> = {
 };
 
 /**
- * 读仓库级配置：`target` 缺省 = 当前激活仓库。
- * - local（含显式目标）：`.atelyx/config.json`（显式目标走 `_at` 命令，可读未激活仓库）；
+ * 读仓库级配置：按激活仓库身份取落点。
+ * - local：`.atelyx/config.json`；
  * - space：服务端团队元数据——AI 配置本体（按字段分键，含 API key）+ 排序/排除夹/附件夹。
  * corruptBackup 仅本地路径有语义。
  */
-export async function readVaultConfig(target?: VaultSettingsTarget): Promise<VaultConfigRead> {
-  if (target?.kind === "local") return readLocalVaultConfigAt(target.root);
-  const identity =
-    target?.kind === "space"
-      ? { serverUrl: target.serverUrl, spaceId: target.spaceId }
-      : spaceIdentity();
+export async function readVaultConfig(): Promise<VaultConfigRead> {
+  const identity = spaceIdentity();
   if (!identity) return readLocalVaultConfig();
   const team = await getTeamValues(identity);
   const config: VaultConfig = {};
@@ -273,21 +261,16 @@ export async function readVaultConfig(target?: VaultSettingsTarget): Promise<Vau
 }
 
 /**
- * 字段级合并补丁写仓库级配置：`target` 缺省 = 当前激活仓库。
- * local = `vault_config_patch[_at]`（Rust 按字段合并）；
+ * 字段级合并补丁写仓库级配置（落点按激活仓库身份）：
+ * local = `vault_config_patch`（Rust 按字段合并）；
  * space 按字段拆到各自的团队键（`null` = 删键；AI 配置按字段分键，无需读—合并—写）；
  * `syncKeys` 在空间无意义（key 由团队元数据承载），忽略。
  * 返回损坏备份文件名（仅本地路径可能非空）。
  */
 export async function patchVaultConfig(
   patch: Record<string, unknown>,
-  target?: VaultSettingsTarget,
 ): Promise<string | null> {
-  if (target?.kind === "local") return patchLocalVaultConfigAt(target.root, patch);
-  const identity =
-    target?.kind === "space"
-      ? { serverUrl: target.serverUrl, spaceId: target.spaceId }
-      : spaceIdentity();
+  const identity = spaceIdentity();
   if (!identity) return patchLocalVaultConfig(patch);
   const metaValues: Record<string, string> = {};
   const metaDeletes: string[] = [];
@@ -321,53 +304,34 @@ export async function patchVaultConfig(
 
 // ===== 提示词标记 / Agent / 文件夹颜色 =====
 
-/** 读系统提示词标记：local = `.atelyx/prompt-notes.json`（显式目标走 `_at` 命令）；
- *  space = team meta `prompt-notes`。 */
-export async function readPromptNotes(target?: VaultSettingsTarget): Promise<string[]> {
-  if (target?.kind === "local") return readLocalPromptNotesAt(target.root);
-  const identity =
-    target?.kind === "space"
-      ? { serverUrl: target.serverUrl, spaceId: target.spaceId }
-      : spaceIdentity();
+/** 读系统提示词标记：local = `.atelyx/prompt-notes.json`；space = team meta `prompt-notes`。 */
+export async function readPromptNotes(): Promise<string[]> {
+  const identity = spaceIdentity();
   if (!identity) return readLocalPromptNotes();
   const team = await getTeamValues(identity);
   return parseJson<string[]>(team[TEAM_PROMPT_NOTES], []);
 }
 
-/** 写系统提示词标记：local 原样；space = 团队元数据 `prompt-notes`（owner/editor 可写，viewer 由服务端拒绝）。
- *  不接受目标参数：注册/注销与改名的路径同步只发生在当前激活仓库的文件树操作里，
- *  没有「在设置弹窗里改另一个仓库的提示词标记」这种入口。 */
+/** 写系统提示词标记：local 原样；space = 团队元数据 `prompt-notes`（owner/editor 可写，viewer 由服务端拒绝）。 */
 export async function writePromptNotes(files: string[]): Promise<void> {
   const identity = spaceIdentity();
   if (!identity) return writeLocalPromptNotes(files);
   await patchTeamValue(identity, TEAM_PROMPT_NOTES, JSON.stringify(files));
 }
 
-/** 读 Agent 配置：local = `.atelyx/agents.json`（显式目标走 `_at` 命令）；
- *  space = team meta `agents`。 */
-export async function readAgents(target?: VaultSettingsTarget): Promise<AgentConfig[]> {
-  if (target?.kind === "local") return readLocalAgentsAt(target.root);
-  const identity =
-    target?.kind === "space"
-      ? { serverUrl: target.serverUrl, spaceId: target.spaceId }
-      : spaceIdentity();
+/** 读 Agent 配置：local = `.atelyx/agents.json`；space = team meta `agents`。 */
+export async function readAgents(): Promise<AgentConfig[]> {
+  const identity = spaceIdentity();
   if (!identity) return readLocalAgents();
   const team = await getTeamValues(identity);
   return parseJson<AgentConfig[]>(team[TEAM_AGENTS], []);
 }
 
-/** 写 Agent 配置：local 原样（显式目标走 `_at` 命令）；
+/** 写 Agent 配置：local 原样；
  *  space = 团队元数据 `agents`（owner/editor 可写，viewer 由服务端拒绝）。
  *  整表替换（服务端元数据无字段级合并）：同一时刻两人各改一次时后写者覆盖，与文件夹颜色同口径。 */
-export async function writeAgents(
-  agents: AgentConfig[],
-  target?: VaultSettingsTarget,
-): Promise<void> {
-  if (target?.kind === "local") return writeLocalAgentsAt(target.root, agents);
-  const identity =
-    target?.kind === "space"
-      ? { serverUrl: target.serverUrl, spaceId: target.spaceId }
-      : spaceIdentity();
+export async function writeAgents(agents: AgentConfig[]): Promise<void> {
+  const identity = spaceIdentity();
   if (!identity) return writeLocalAgents(agents);
   await patchTeamValue(identity, TEAM_AGENTS, JSON.stringify(agents));
 }

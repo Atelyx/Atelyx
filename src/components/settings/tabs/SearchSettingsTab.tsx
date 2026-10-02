@@ -2,12 +2,12 @@ import { useEffect, useState } from "react";
 import { DropdownSelect } from "@/components/common/DropdownSelect";
 import { SettingCard } from "@/components/settings/SettingCard";
 import { SlotListMount } from "@/components/plugins/SlotHost";
-import { useSettingsStore, selectEditingSearchConfig, selectEditingTavilyKey } from "@/stores/settingsStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 
-/** 联网搜索面板（仓库级）：经编辑目标选择器取值（仓库设置弹窗可编辑非激活仓库）。 */
+/** 联网搜索面板（仓库级）：订阅当前激活仓库的配置。 */
 export function SearchSettingsTab() {
-  const searchConfig = useSettingsStore(selectEditingSearchConfig);
-  const tavilyKey = useSettingsStore(selectEditingTavilyKey);
+  const searchConfig = useSettingsStore((s) => s.searchConfig);
+  const tavilyKey = useSettingsStore((s) => s.tavilyKey);
   const setSearchConfig = useSettingsStore((s) => s.setSearchConfig);
   const setTavilyKey = useSettingsStore((s) => s.setTavilyKey);
   // Tavily key 用本地草稿 + blur 提交（受控输入避免每键一次 keychain 写入）

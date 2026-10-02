@@ -2,19 +2,11 @@ import { useState } from "react";
 import { SettingCard } from "@/components/settings/SettingCard";
 import { SlotListMount } from "@/components/plugins/SlotHost";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
-import { useSettingsStore, selectVaultSettingsSession } from "@/stores/settingsStore";
 import { useVaultStore } from "@/stores/vaultStore";
 
 /** 编辑器面板（仓库级）：重建内部链接流程自持。
- *  经编辑目标选择器取会话——仓库设置弹窗可编辑非激活仓库。
  *  宽松换行/页面内标题是应用级显示偏好（「设置 → 编辑器」，落 global.json），不在此。 */
 export function EditorSettingsTab() {
-  const session = useSettingsStore(selectVaultSettingsSession);
-
-  // 重建内部链接改写的是**仓库内容**（全仓 .md），依赖激活仓库的扫描与写盘链路：
-  // 正在编辑非激活仓库时不可执行（先切换到该仓库）。
-  const canRebuild = !session;
-
   // 重建内部链接：确认弹窗 / 执行中 / 内联结果
   const [rebuildConfirm, setRebuildConfirm] = useState(false);
   const [rebuilding, setRebuilding] = useState(false);
@@ -22,7 +14,6 @@ export function EditorSettingsTab() {
     null
   );
   const runRebuild = () => {
-    if (!canRebuild) return;
     setRebuildConfirm(false);
     setRebuilding(true);
     setRebuildState(null);
@@ -48,11 +39,6 @@ export function EditorSettingsTab() {
           description={
             <span>
               一键统一全仓库笔记的链接为标准 Markdown 写法；批量改写不可撤销。
-              {!canRebuild && (
-                <span className="block mt-1">
-                  批量改写作用于当前激活仓库：先切换到该仓库再执行。
-                </span>
-              )}
               {rebuilding && <span className="block mt-1">重建中…</span>}
               {rebuildState && (
                 <span
@@ -73,9 +59,9 @@ export function EditorSettingsTab() {
               borderColor: "var(--danger)",
               color: "var(--danger)",
             }}
-            disabled={rebuilding || !canRebuild}
+            disabled={rebuilding}
             onClick={() => setRebuildConfirm(true)}
-            title={canRebuild ? "批量改写仓库内全部 .md 的链接写法" : "先切换到该仓库再执行"}
+            title="批量改写当前仓库内全部 .md 的链接写法"
           >
             重建内部链接
           </button>

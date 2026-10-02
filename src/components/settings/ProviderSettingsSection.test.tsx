@@ -10,29 +10,27 @@ import { ProviderSettingsSection } from "@/components/settings/ProviderSettingsS
 
 const { flags, EMPTY_PROVIDERS, NO_SYNC_KEYS } = vi.hoisted(() => ({
   flags: { isSpace: false, viewerOnly: false },
-  // 选择器必须返回稳定引用：zustand 以快照比较，每次新建数组/对象会触发无限重渲染
+  // 状态字段必须返回稳定引用：zustand 以快照比较，每次新建数组/对象会触发无限重渲染
   EMPTY_PROVIDERS: [] as unknown[],
   NO_SYNC_KEYS: { syncKeys: false } as Record<string, unknown>,
 }));
 
-vi.mock("@/hooks/useEditingTarget", () => ({
-  useEditingTargetFlags: () => flags,
+vi.mock("@/hooks/useIsSpaceVault", () => ({
+  useIsSpaceVault: () => flags.isSpace,
+  useSpaceViewerOnly: () => flags.viewerOnly,
 }));
-
 
 vi.mock("@/stores/settingsStore", async () => {
   const { create } = await import("zustand");
   const useSettingsStore = create(() => ({
+    config: { providers: EMPTY_PROVIDERS },
+    vaultConfig: NO_SYNC_KEYS,
     addProvider: vi.fn(),
     updateProvider: vi.fn(),
     removeProvider: vi.fn(),
     setSyncKeys: vi.fn(),
   }));
-  return {
-    useSettingsStore,
-    selectEditingProviders: () => EMPTY_PROVIDERS,
-    selectEditingVaultConfig: () => NO_SYNC_KEYS,
-  };
+  return { useSettingsStore };
 });
 
 beforeEach(() => {

@@ -175,20 +175,6 @@ describe("team meta 分发（sort/exclusions/folder-colors/prompt-notes/agents�
     expect(items.some((n) => n.message.includes("协作空间元数据保存失败"))).toBe(true);
   });
 
-  it("显式空间目标写 agents：按目标身份落该空间的团队元数据", async () => {    // 未激活任何仓库：写入目标必须自带 serverUrl/spaceId（按目标而非激活身份取连接）
-    await metadata.writeAgents([{ id: "b", name: "外部", tools: [] }], {
-      kind: "space",
-      serverUrl: "http://s2",
-      spaceId: "sp2",
-      name: "外部空间",
-      role: "editor",
-    });
-    expect(space.state.teamValues["agents"]).toBe(
-      JSON.stringify([{ id: "b", name: "外部", tools: [] }]),
-    );
-    expect(h.state.localCalls.length).toBe(0);
-  });
-
   it("folderColors 空间往返：写 = team meta PATCH，读 = team meta 解析", async () => {
     factory.activateContentIdentity(SPACE_IDENTITY);
     await metadata.writeFolderColors({ "目录A/": "#ff0000" });
@@ -264,45 +250,6 @@ describe("team meta 分发（sort/exclusions/folder-colors/prompt-notes/agents�
     expect(config.providers).toEqual([
       { id: "p1", name: "A", baseUrl: "u", models: [], apiKey: "sk-1" },
     ]);
-  });
-
-  it("显式目标：本地仓库走 *_at 命令（root 透传），不读激活仓库的状态", async () => {
-    const target = { kind: "local", root: "E:/其他仓库", name: "其他" } as const;
-    await metadata.readVaultConfig(target);
-    await metadata.patchVaultConfig({ model: "m2" }, target);
-    await metadata.readAgents(target);
-    await metadata.readPromptNotes(target);
-
-    const at = (cmd: string) => h.state.localCalls.find((c) => c.cmd === cmd);
-    expect(at("read_vault_config_at")?.args).toEqual({ root: "E:/其他仓库" });
-    expect(at("vault_config_patch_at")?.args).toEqual({
-      root: "E:/其他仓库",
-      patch: { model: "m2" },
-    });
-    expect(at("read_agents_at")?.args).toEqual({ root: "E:/其他仓库" });
-    expect(at("read_prompt_notes_at")?.args).toEqual({ root: "E:/其他仓库" });
-    // 不带目标的调用仍走激活仓库命令
-    expect(h.state.localCalls.some((c) => c.cmd === "read_vault_config")).toBe(false);
-  });
-
-  it("显式目标：协作空间按目标身份读写（无需先把该空间设为激活）", async () => {
-    // 激活身份为空：目标必须自己带 serverUrl/spaceId
-    const target = {
-      kind: "space",
-      serverUrl: "http://s2",
-      spaceId: "sp2",
-      name: "外部空间",
-      role: "editor",
-    } as const;
-    space.state.teamValues["ai-model"] = JSON.stringify("m9");
-    space.state.teamValues.sort = JSON.stringify("name-asc");
-
-    const { config } = await metadata.readVaultConfig(target);
-    expect(config.model).toBe("m9");
-    expect(config.fileExplorerSort).toBe("name-asc");
-
-    await metadata.patchVaultConfig({ excludeFolders: ["草稿"] }, target);
-    expect(space.state.teamValues.exclusions).toBe(JSON.stringify(["草稿"]));
   });
 });
 

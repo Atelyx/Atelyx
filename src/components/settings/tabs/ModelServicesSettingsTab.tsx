@@ -9,15 +9,15 @@ import {
   modelPairValue,
   type ModelChoiceEntry,
 } from "@/components/settings/modelOptions";
-import { useSettingsStore, selectEditingVaultConfig, selectEditingProviders } from "@/stores/settingsStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 
 /** 话题自动命名下拉「跟随默认模型」哨兵值（与任何模型 id 区分；空串 = 不启用）。 */
 const AUTO_NAMING_DEFAULT = "__default__";
 
-/** 模型服务：默认模型与话题自动命名模型的仓库级设置（经编辑目标选择器取值）。 */
+/** 模型服务：默认模型与话题自动命名模型的仓库级设置（订阅当前激活仓库的配置）。 */
 export function ModelServicesSettingsTab() {
-  const vaultConfig = useSettingsStore(selectEditingVaultConfig);
-  const providers = useSettingsStore(selectEditingProviders);
+  const vaultConfig = useSettingsStore((s) => s.vaultConfig);
+  const providers = useSettingsStore((s) => s.config.providers);
   const setVaultModel = useSettingsStore((s) => s.setVaultModel);
   const setAutoNamingEnabled = useSettingsStore((s) => s.setAutoNamingEnabled);
   const setAutoNamingModel = useSettingsStore((s) => s.setAutoNamingModel);

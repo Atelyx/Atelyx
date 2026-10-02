@@ -14,17 +14,11 @@
  */
 import { ChevronDown, ChevronRight, Copy, Plus, Sparkles, Trash2 } from "lucide-react";
 import { useLayoutEffect, useEffect, useRef, useState } from "react";
-import {
-  useSettingsStore,
-  selectEditingAgents,
-  selectEditingPromptNotes,
-  selectEditingSearchConfig,
-  selectEditingTavilyKey,
-} from "@/stores/settingsStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { usePluginStore } from "@/stores/pluginStore";
 import { DropdownSelect } from "@/components/common/DropdownSelect";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
-import { useEditingTargetFlags } from "@/hooks/useEditingTarget";
+import { useIsSpaceVault, useSpaceViewerOnly } from "@/hooks/useIsSpaceVault";
 import { SPACE_TEAM_SHARED_NOTICE, SPACE_VIEWER_NOTICE } from "@/constants/space";
 import {
   AGENT_TOOLS_META,
@@ -136,15 +130,16 @@ function ToolCategoryGroup({
 }
 
 export function AgentSettingsSection() {
-  const agents = useSettingsStore(selectEditingAgents);
+  const agents = useSettingsStore((s) => s.agents);
   const addAgent = useSettingsStore((s) => s.addAgent);
   const updateAgent = useSettingsStore((s) => s.updateAgent);
   const removeAgent = useSettingsStore((s) => s.removeAgent);
   const duplicateAgent = useSettingsStore((s) => s.duplicateAgent);
-  const promptNotes = useSettingsStore(selectEditingPromptNotes);
+  const promptNotes = useSettingsStore((s) => s.promptNotes);
   // 协作空间内 Agent 与提示词库为团队共享（写服务端团队元数据，全体成员可见）：所有者/编辑者可改，
   // 查看者不可改（服务端按角色裁决，UI 只对查看者禁用）
-  const { isSpace: targetIsSpace, viewerOnly } = useEditingTargetFlags();
+  const targetIsSpace = useIsSpaceVault();
+  const viewerOnly = useSpaceViewerOnly();
   // 订阅插件运行时：插件启停/卸载变化触发本组件重渲染（插件工具表在服务层，非响应式，
   // 靠 pluginStore 收敛驱动重算；插件工具注册也经 pluginStore 的 UI 注册变更通知驱动重渲染）。
   usePluginStore((s) => s.plugins);
@@ -153,8 +148,8 @@ export function AgentSettingsSection() {
     ...usePluginStore.getState().pluginToolMetas(),
   ];
   // 搜索源就绪状态（订阅字段而非 isSearchConfigured 函数引用，配置变化即时刷新提示）
-  const searchConfig = useSettingsStore(selectEditingSearchConfig);
-  const tavilyKey = useSettingsStore(selectEditingTavilyKey);
+  const searchConfig = useSettingsStore((s) => s.searchConfig);
+  const tavilyKey = useSettingsStore((s) => s.tavilyKey);
   const searchReady =
     searchConfig.provider === "tavily"
       ? !!tavilyKey
@@ -175,7 +170,7 @@ export function AgentSettingsSection() {
   const selected = agents.find((a) => a.id === selectedId) ?? null;
 
   // 进入 Agent 页时清理失效提示词：注册列表与 Agent 引用中指向已删除笔记的路径
-  // （幂等自愈动作，action 内部处理会话目标跳过 / 校验与写盘失败降级，不阻塞面板渲染）
+  // （幂等自愈动作，action 内部处理校验与写盘失败降级，不阻塞面板渲染）
   useEffect(() => {
     void useSettingsStore.getState().pruneMissingPromptNotes();
   }, []);
@@ -207,10 +202,9 @@ export function AgentSettingsSection() {
   };
 
   // 勾选/全选从 store 最新态读 tools 计算整表替换（避免渲染闭包过期导致连续切换丢勾选）；
-  // 读数必须与写路径同源（编辑目标：仓库设置弹窗里可能是非激活仓库），否则会拿激活仓库的
-  // 工具集当基线算差集，把结果写进另一个仓库
+  // 读数必须与写路径同源（同一份 store 状态），否则会拿陈旧工具集当基线算差集
   const currentAgentTools = () =>
-    selectEditingAgents(useSettingsStore.getState()).find((a) => a.id === selectedId)?.tools ?? [];
+    (useSettingsStore.getState().agents.find((a) => a.id === selectedId)?.tools ?? []);
 
   const toggleTool = (id: string) => {
     const cur = currentAgentTools();

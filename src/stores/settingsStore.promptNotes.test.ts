@@ -4,7 +4,7 @@
  * 覆盖：注册列表与 Agent 引用中指向已删除笔记的路径被清除（存在的保留）；
  * 引用路径不在注册列表时同样纳入校验；存在性校验失败视为存在（不确定不删）；
  * 写盘失败内存不动；校验在途期间的注册变更不被清理覆盖（写盘前重取最新态）；
- * 非激活仓库的编辑会话跳过；空列表不产生任何查询；清理完成后轻通知。
+ * 空列表不产生任何查询；清理完成后轻通知。
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
@@ -200,38 +200,6 @@ describe("pruneMissingPromptNotes 失效提示词清理", () => {
     const s = settings.useSettingsStore.getState();
     expect(s.promptNotes).toEqual(["c.md"]);
     expect(h.state.promptNoteWrites).toEqual([["c.md"]]);
-  });
-
-  it("非激活仓库的编辑会话跳过：不产生任何存在性查询与写盘", async () => {
-    seedActivation(["丢失.md"], [AGENT("a1", "丢失.md")]);
-    settings.useSettingsStore.setState({
-      settingsSession: {
-        id: 1,
-        target: { kind: "local", root: "E:/other", name: "其他仓库" },
-        loaded: true,
-        error: null,
-        readOnly: false,
-        corruptBackup: null,
-        vaultConfig: {},
-        config: { providers: [] },
-        searchConfig: { provider: "tavily", searxngUrl: "" },
-        tavilyKey: "",
-        agents: [],
-        promptNotes: [],
-        digest: "",
-        keys: new Map(),
-        strayTavilyKey: false,
-        writeChain: Promise.resolve(),
-        lastPatchError: "",
-      },
-    });
-
-    await settings.useSettingsStore.getState().pruneMissingPromptNotes();
-
-    expect(h.state.existsCalls).toHaveLength(0);
-    expect(h.state.promptNoteWrites).toHaveLength(0);
-    expect(h.state.agentWrites).toHaveLength(0);
-    expect(settings.useSettingsStore.getState().promptNotes).toEqual(["丢失.md"]);
   });
 
   it("空注册列表且无 Agent 引用：不产生任何查询", async () => {
