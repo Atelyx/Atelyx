@@ -88,6 +88,12 @@ pub struct GlobalConfig {
     /// 缺省 None = false（前端默认）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inline_title: Option<bool>,
+    /// 笔记正文行宽上限（px，应用级显示偏好）：0 = 不限制。缺省 None = 780（前端默认）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note_line_width: Option<f64>,
+    /// 移动端底部导航栏的视图顺序（应用级；视图 key 数组）。缺省空 = 前端按内建常用序排。
+    #[serde(default)]
+    pub mobile_nav_order: Vec<String>,
     /// 登录过的协作服务器地址清单（应用级；由前端 space 登录态维护，去重）。
     /// 缺省空 = 未登录过任何协作服务器；旧文件无此字段照常读取（serde default）。
     #[serde(default)]

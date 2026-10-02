@@ -36,6 +36,11 @@ import { DEFAULT_AI_CONFIG } from "@/constants/ai";
 import { DEFAULT_AGENT_TOOLS } from "@/constants/tools";
 import { BUILTIN_AGENTS, BUILTIN_AGENT_CHAT_ID } from "@/constants/agents";
 import { PROVIDER_PRESETS } from "@/constants/providers";
+import {
+  NOTE_LINE_WIDTH_DEFAULT,
+  NOTE_LINE_WIDTH_MAX,
+  NOTE_LINE_WIDTH_MIN,
+} from "@/constants/notes";
 import { remapDirKey, remapDirPrefix } from "@/utils/filename";
 import { modelDisplayLabel } from "@/utils/text";
 import { createPersistController } from "@/utils/persist";
@@ -87,6 +92,10 @@ interface SettingsState {
   softLineBreak: boolean;
   /** 页面内标题（应用级显示偏好，存 global.json；缺省 false = 不显示）。 */
   inlineTitle: boolean;
+  /** 笔记正文行宽上限（px，应用级显示偏好，存 global.json；0 = 不限制，缺省 780）。 */
+  noteLineWidth: number;
+  /** 移动端底部导航栏的视图顺序（应用级，存 global.json；空 = 内建常用序，见 utils/mobileNav）。 */
+  mobileNavOrder: string[];
   /** 协作空间连接开关（应用级，存 global.json；缺省 false = 关闭，作用于协作空间频道）。 */
   collabEnabled: boolean;
   /** 协作显示昵称（空 = 设备名兜底）。 */
@@ -180,6 +189,10 @@ interface SettingsState {
   setSoftLineBreak: (enabled: boolean) => Promise<void>;
   /** 设置页面内标题（应用级显示偏好，缺省 false，写 global.json）。 */
   setInlineTitle: (enabled: boolean) => Promise<void>;
+  /** 设置笔记正文行宽上限（应用级显示偏好；0 = 不限制，值在设置项里钳制到可设区间，写 global.json）。 */
+  setNoteLineWidth: (width: number) => Promise<void>;
+  /** 设置移动端底部导航栏的视图顺序（应用级，写 global.json；空数组 = 回到内建常用序）。 */
+  setMobileNavOrder: (order: string[]) => Promise<void>;
   /** 设置进入仓库时是否自动恢复上次打开的文件（应用级；缺省 true = 开启，写 global.json）。 */
   setAutoRestoreFiles: (enabled: boolean) => Promise<void>;
   /** 设置进入仓库时是否自动切到「主页」布局（应用级；缺省 false = 保持恢复上次界面，写 global.json）。 */
@@ -1258,6 +1271,13 @@ function notifyGlobalConfigCorrupt(backup: string | null): void {
   });
 }
 
+/** 正文行宽归一化：0（或非数）= 不限制；其余钳制到可设区间（磁盘脏值/手输越界都经此收口）。 */
+function normalizeNoteLineWidth(width: number | undefined): number {
+  if (width === undefined || !Number.isFinite(width)) return NOTE_LINE_WIDTH_DEFAULT;
+  if (width <= 0) return 0;
+  return Math.min(NOTE_LINE_WIDTH_MAX, Math.max(NOTE_LINE_WIDTH_MIN, Math.round(width)));
+}
+
 /** 应用级配置写盘统一入口（各外观 setXxx 收敛于此）：先写内存再 patch 落 global.json，
  * 失败仅记专属文案日志不打断 UI（外观丢失可重设，非关键路径）。 */
 async function commitGlobal(patch: Partial<GlobalConfig>, errMsg: string): Promise<void> {
@@ -1297,6 +1317,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   defaultHomeLayout: false,
   softLineBreak: true,
   inlineTitle: false,
+  noteLineWidth: NOTE_LINE_WIDTH_DEFAULT,
+  mobileNavOrder: [],
   collabEnabled: false,
   collabNickname: "",
   collabColor: "",
@@ -1323,6 +1345,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     let defaultHomeLayout = false;
     let softLineBreak = true;
     let inlineTitle = false;
+    let noteLineWidth = NOTE_LINE_WIDTH_DEFAULT;
+    let mobileNavOrder: string[] = [];
     let collabEnabled = false;
     let collabNickname = "";
     let collabColor = "";
@@ -1342,6 +1366,11 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       defaultHomeLayout = cfg.defaultHomeLayout ?? false;
       softLineBreak = cfg.softLineBreak ?? true;
       inlineTitle = cfg.inlineTitle ?? false;
+      noteLineWidth = normalizeNoteLineWidth(cfg.noteLineWidth);
+      // 磁盘脏值（手改/旧格式）只保留字符串项，顺序与去重交给 orderMobileViews
+      mobileNavOrder = Array.isArray(cfg.mobileNavOrder)
+        ? cfg.mobileNavOrder.filter((k): k is string => typeof k === "string")
+        : [];
       collabEnabled = cfg.collabEnabled ?? false;
       collabNickname = cfg.collabNickname ?? "";
       collabColor = cfg.collabColor ?? "";
@@ -1369,6 +1398,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       defaultHomeLayout,
       softLineBreak,
       inlineTitle,
+      noteLineWidth,
+      mobileNavOrder,
       collabEnabled,
       collabNickname,
       collabColor,
@@ -1660,6 +1691,11 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
 
   setInlineTitle: (enabled) =>
     commitGlobal({ inlineTitle: enabled }, "保存页面内标题配置失败"),
+  setNoteLineWidth: (width) =>
+    commitGlobal({ noteLineWidth: normalizeNoteLineWidth(width) }, "保存正文行宽配置失败"),
+
+  setMobileNavOrder: (order) =>
+    commitGlobal({ mobileNavOrder: [...order] }, "保存移动端导航顺序失败"),
 
   setAutoRestoreFiles: (enabled) =>
     commitGlobal({ autoRestoreFiles: enabled }, "保存自动恢复配置失败"),

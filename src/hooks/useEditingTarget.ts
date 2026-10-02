@@ -1,8 +1,8 @@
 /**
- * 设置界面的「编辑目标」判定：会话目标（编辑非激活仓库）优先，否则激活仓库。
+ * 设置界面的「编辑目标」判定：仓库级设置的作用域恒为当前激活仓库/空间（设置页只编辑它）。
  *
- * 仓库设置弹窗（可编辑未激活的仓库）与设置页共用同一套判断，避免各组件各拼一遍空间/角色判定；
- * 角色未知（空间列表未加载/离线）时按「可写」处理——不臆断权限，真被服务端拒绝会给出可读原因。
+ * 统一在此判定，避免各设置组件各拼一遍空间/角色判定；角色未知（空间列表未加载/离线）时按
+ * 「可写」处理——不臆断权限，真被服务端拒绝会给出可读原因。
  */
 import { useSettingsStore, selectVaultSettingsSession } from "@/stores/settingsStore";
 import { useIsSpaceVault, useSpaceViewerOnly } from "@/hooks/useIsSpaceVault";

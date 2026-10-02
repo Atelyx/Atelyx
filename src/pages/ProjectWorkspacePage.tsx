@@ -10,7 +10,7 @@ import { useEffect, useRef } from "react";
 import { useAppStore } from "@/stores/appStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useUiStateStore } from "@/stores/uiStateStore";
-import { SettingsModal, VaultSettingsModal } from "@/components/settings/SettingsModal";
+import { SettingsPage } from "@/components/settings/SettingsPage";
 import { TitleBarControls } from "@/components/common/TitleBarControls";
 import { LayoutTabs } from "@/components/layout/LayoutTabs";
 import { WorkspaceGrid } from "@/components/layout/WorkspaceGrid";
@@ -24,13 +24,10 @@ export function ProjectWorkspacePage() {
   const toggleMaximizeWindow = useAppStore((s) => s.toggleMaximizeWindow);
   const closeWindow = useAppStore((s) => s.closeWindow);
 
-  // 设置弹窗（全局：面板内「前往设置」入口经 openSettings 打开，可指定初始 tab）
-  const settingsModal = useAppStore((s) => s.settingsModal);
+  // 设置页（应用级 + 当前仓库的仓库级同页；整页视图顶掉面板网格，面板内「前往设置」可指定初始 tab）
+  const settingsView = useAppStore((s) => s.settingsView);
   const openSettings = useAppStore((s) => s.openSettings);
   const closeSettings = useAppStore((s) => s.closeSettings);
-  // 仓库设置弹窗（文件面板仓库行/空间行右键打开；目标可为未激活的仓库）
-  const vaultSettingsModal = useAppStore((s) => s.vaultSettingsModal);
-  const closeVaultSettings = useAppStore((s) => s.closeVaultSettings);
 
   // 当前激活仓库身份（「进仓库时打开主页」门控）
   const hasVaultIdentity = useAppStore((s) => s.vaultIdentity !== null);
@@ -95,10 +92,19 @@ export function ProjectWorkspacePage() {
                 <SlotListMount slot="titlebar/right" />
               </span>
               <button
-                onClick={(e) => { e.stopPropagation(); openSettings(); }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (settingsView) closeSettings();
+                  else openSettings();
+                }}
                 className="w-8 h-8 flex items-center justify-center rounded-sm hover:opacity-80"
-                style={{ color: "var(--text-secondary)" }}
-                title="设置"
+                // 设置页打开时按钮保持激活态（与左栏布局 tab 同一口径），再点一次回工作区
+                style={{
+                  color: settingsView ? "var(--accent)" : "var(--text-secondary)",
+                  background: settingsView ? "var(--accent-soft)" : undefined,
+                }}
+                title={settingsView ? "设置（点击返回工作区）" : "设置"}
+                aria-pressed={!!settingsView}
                 data-tauri-drag-region="false"
               >
                 <Settings size={16} />
@@ -120,21 +126,15 @@ export function ProjectWorkspacePage() {
             />
           </div>
 
-          {/* 面板网格（激活布局；key 保证切布局整树重挂，defaultSize 恢复各面板比例） */}
+          {/* 内容区：设置页打开时整页顶掉面板网格（像切布局一样），否则渲染激活布局 */}
           <div className="flex-1 min-h-0">
-            <WorkspaceGrid key={activeLayoutId ?? "default"} tree={activeTree} />
+            {settingsView ? (
+              <SettingsPage initialTab={settingsView.tab} onClose={closeSettings} />
+            ) : (
+              <WorkspaceGrid key={activeLayoutId ?? "default"} tree={activeTree} />
+            )}
           </div>
-        </div>
-
-      {settingsModal && (
-        <SettingsModal initialTab={settingsModal.tab} onClose={closeSettings} />
-      )}
-      {vaultSettingsModal && (
-        <VaultSettingsModal
-          target={vaultSettingsModal.target}
-          onClose={closeVaultSettings}
-        />
-      )}
+      </div>
     </div>
   );
 }

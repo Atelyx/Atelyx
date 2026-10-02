@@ -1,15 +1,14 @@
 // @vitest-environment jsdom
 /**
- * 文件面板仓库行：右键菜单项（仓库设置 / 在文件管理器中打开 / 从列表移除）与派生态
- * （激活仓库不可移出列表）。appStore 以最小 zustand 替身注入（openVaultSettings 可断言）。
+ * 文件面板仓库行：右键菜单项（在文件管理器中打开 / 从列表移除）与派生态
+ * （激活仓库不可移出列表）。appStore 以最小 zustand 替身注入。
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, cleanup } from "@testing-library/react";
 import { VaultRows } from "@/components/canvas/panels/file-explorer/VaultRows";
 
-const { openInExplorerMock, openVaultSettingsMock, removeRecentVaultMock } = vi.hoisted(() => ({
+const { openInExplorerMock, removeRecentVaultMock } = vi.hoisted(() => ({
   openInExplorerMock: vi.fn(),
-  openVaultSettingsMock: vi.fn(),
   removeRecentVaultMock: vi.fn(),
 }));
 
@@ -17,7 +16,6 @@ vi.mock("@/stores/appStore", async () => {
   const { create } = await import("zustand");
   const useAppStore = create(() => ({
     openInExplorer: openInExplorerMock,
-    openVaultSettings: openVaultSettingsMock,
     removeRecentVault: removeRecentVaultMock,
   }));
   return { useAppStore };
@@ -55,12 +53,11 @@ function openMenu(index: number) {
 beforeEach(() => {
   cleanup();
   openInExplorerMock.mockReset();
-  openVaultSettingsMock.mockReset();
   removeRecentVaultMock.mockReset();
 });
 
 describe("仓库行右键菜单", () => {
-  it("菜单含仓库设置并提供给右键的那个仓库（激活与否都可编辑）", () => {
+  it("菜单只含在文件管理器中打开（仓库级设置入口已统一到标题栏设置）", () => {
     render(
       <VaultRows
         vaults={VAULTS}
@@ -74,12 +71,9 @@ describe("仓库行右键菜单", () => {
       />,
     );
     openMenu(1);
-    fireEvent.click(screen.getByText("仓库设置"));
-    expect(openVaultSettingsMock).toHaveBeenCalledWith({
-      kind: "local",
-      root: "E:/另一个",
-      name: "另一个仓库",
-    });
+    expect(screen.queryByText("仓库设置")).toBeNull();
+    fireEvent.click(screen.getByText("在文件管理器中打开"));
+    expect(openInExplorerMock).toHaveBeenCalledWith("E:/另一个");
   });
 
   it("激活仓库不可移出列表，非激活仓库移除需确认", () => {

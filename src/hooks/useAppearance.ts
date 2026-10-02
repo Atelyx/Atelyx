@@ -29,6 +29,7 @@ export function useAppearance(): void {
   const themeSettings = useSettingsStore((s) => s.themeSettings);
   const fontSize = useSettingsStore((s) => s.fontSize);
   const fontFamily = useSettingsStore((s) => s.fontFamily);
+  const noteLineWidth = useSettingsStore((s) => s.noteLineWidth);
 
   // 跟随系统：监听 prefers-color-scheme 变化（默认主题插件深浅模式 = 跟随系统时实时生效）
   const [systemDark, setSystemDark] = useState(() =>
@@ -102,4 +103,12 @@ export function useAppearance(): void {
     root.style.fontSize = fontSize ? `${fontSize}px` : "";
     root.style.fontFamily = fontFamily ?? "";
   }, [fontSize, fontFamily]);
+
+  // 笔记正文行宽（应用级）：写 --note-line-width 供正文/标题/属性/反链同列共用；0 = 不限制
+  useEffect(() => {
+    document.documentElement.style.setProperty(
+      "--note-line-width",
+      noteLineWidth > 0 ? `${noteLineWidth}px` : "none",
+    );
+  }, [noteLineWidth]);
 }

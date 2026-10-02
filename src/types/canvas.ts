@@ -310,6 +310,12 @@ export interface GlobalConfig {
   /** 页面内标题（应用级显示偏好）：开启后笔记正文顶部显示文件名（不含扩展名）作为标题。
    *  缺省 = false。 */
   inlineTitle?: boolean;
+  /** 笔记正文行宽上限（px，应用级显示偏好）：正文超宽即居中留白；0 = 不限制（随面板铺满）。
+   *  缺省 = 780。 */
+  noteLineWidth?: number;
+  /** 移动端底部导航栏的视图顺序（应用级；视图 key 数组，缺省 = 内建常用序）。
+   *  插件启停会改变可用集合，排序只作用于当前可用视图，见 utils/mobileNav。 */
+  mobileNavOrder?: string[];
   /** 协作空间频道开关。缺省 = false（关闭）。 */
   collabEnabled?: boolean;
   /** 协作显示昵称（空 = 设备名兜底）。 */

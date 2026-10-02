@@ -1,10 +1,15 @@
+import { Fragment } from "react";
+import { ChevronDown, ChevronUp } from "lucide-react";
 import { ToggleSwitch } from "@/components/common/ToggleSwitch";
 import { DropdownSelect } from "@/components/common/DropdownSelect";
 import { SettingCard } from "@/components/settings/SettingCard";
 import { SlotListMount } from "@/components/plugins/SlotHost";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useAppStore } from "@/stores/appStore";
+import { usePluginStore } from "@/stores/pluginStore";
+import { viewMetaFor } from "@/components/layout/ViewHost";
 import { useDraftSync } from "@/hooks/useDraftSync";
+import { MOBILE_NAV_BAR_SIZE, orderMobileViews, swapInOrder } from "@/utils/mobileNav";
 
 /** 界面字体选项（value = CSS font-family；空串 = 跟随系统默认）。 */
 const FONT_OPTIONS: { label: string; value: string }[] = [
@@ -34,6 +39,19 @@ export function GeneralSettingsTab() {
   const setAutoUpdate = useAppStore((s) => s.setAutoUpdate);
   /** 自动更新能力（桌面有 / 移动端无；经 store 读取，守「组件不 import services」分层）。 */
   const autoUpdateSupported = useAppStore((s) => s.platform.capabilities.autoUpdate);
+
+  // 移动端底部导航栏顺序（应用级；桌面无此栏，故仅移动端渲染本区块）
+  const isAndroid = useAppStore((s) => s.platform.isAndroid);
+  const mobileNavOrder = useSettingsStore((s) => s.mobileNavOrder);
+  const setMobileNavOrder = useSettingsStore((s) => s.setMobileNavOrder);
+  // 订阅插件 UI 注册变化：视图槽增删（插件启停/挂载）后可用视图集合随之变化
+  usePluginStore((s) => s.uiRevision);
+  const mobileViews = orderMobileViews(usePluginStore.getState().pluginViewKinds(), mobileNavOrder);
+
+  /** 相邻互换后整表提交（顺序是「用户自定义顺序」，首项缺失即回落到内建常用序）。 */
+  const moveMobileView = (from: number, to: number) => {
+    void setMobileNavOrder(swapInOrder(mobileViews, from, to));
+  };
 
   // 字号用本地草稿 + blur 提交：受控 + 范围校验会拒绝输入中间态（如敲 "1" 准备输 15）导致无法输入
   const [fontSizeDraft, setFontSizeDraft] = useDraftSync(
@@ -136,6 +154,58 @@ export function GeneralSettingsTab() {
           disabled={!autoUpdateSupported}
         />
       </SettingCard>
+
+      {/* 移动端底部导航栏顺序（应用级）：前 5 个上底栏，其余收进「更多」 */}
+      {isAndroid && (
+        <SettingCard
+          title="移动端导航栏"
+          description={`底部导航栏显示前 ${MOBILE_NAV_BAR_SIZE} 个视图，其余收进「更多」；上下移动即调整底栏顺序`}
+        >
+          <div className="flex flex-col gap-0.5 w-56 max-h-64 overflow-y-auto">
+            {mobileViews.map((kind, i) => (
+              <Fragment key={kind}>
+                {i === MOBILE_NAV_BAR_SIZE && (
+                  <div
+                    className="mt-1.5 pt-1.5 text-[11px]"
+                    style={{ borderTop: "1px solid var(--border-subtle)", color: "var(--text-muted)" }}
+                  >
+                    以下收进「更多」
+                  </div>
+                )}
+                <div className="flex items-center gap-1">
+                  <span
+                    className="flex-1 min-w-0 truncate text-xs"
+                    style={{ color: "var(--text-primary)" }}
+                  >
+                    {viewMetaFor(kind).label}
+                  </span>
+                  {/* 触控目标按移动端档 44px（本区块仅移动端渲染） */}
+                  <button
+                    onClick={() => moveMobileView(i, i - 1)}
+                    disabled={i === 0}
+                    title="上移"
+                    aria-label={`上移 ${viewMetaFor(kind).label}`}
+                    className="w-11 h-11 flex items-center justify-center rounded-[var(--radius-sm)] hover:bg-[var(--hover)] disabled:opacity-30 disabled:hover:bg-transparent"
+                    style={{ color: "var(--text-muted)" }}
+                  >
+                    <ChevronUp size={14} />
+                  </button>
+                  <button
+                    onClick={() => moveMobileView(i, i + 1)}
+                    disabled={i === mobileViews.length - 1}
+                    title="下移"
+                    aria-label={`下移 ${viewMetaFor(kind).label}`}
+                    className="w-11 h-11 flex items-center justify-center rounded-[var(--radius-sm)] hover:bg-[var(--hover)] disabled:opacity-30 disabled:hover:bg-transparent"
+                    style={{ color: "var(--text-muted)" }}
+                  >
+                    <ChevronDown size={14} />
+                  </button>
+                </div>
+              </Fragment>
+            ))}
+          </div>
+        </SettingCard>
+      )}
 
       {/* 插件贡献的设置区块（ctx.slots.registerUi 槽名 settings/general） */}
       <SlotListMount slot="settings/general" />

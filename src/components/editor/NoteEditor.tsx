@@ -2,11 +2,12 @@
  * `.md` 笔记编辑器（未打开画布时单击笔记打开）。
  *
  * 占据主编辑区（画布位置）：顶部文件操作条，正文 = 统一分块 Markdown 引擎
- * （默认只读实时视图，双击/铅笔进入实时预览编辑；「···」菜单切源码模式 textarea）。
+ * （工具条分段控件三态互斥：只读 / 预览编辑 / 源码；预览态双击正文也可进入编辑）。
  * 正文内容、保存、协作与撤销归 `stores/noteSessionStore` 的编辑会话（与画布文本节点共用同一会话），
  * 本组件只做面板 chrome 与交互编排。
  */
-import { Check, ClipboardPaste, Copy, MoreHorizontal, Pencil, Redo2, Scissors, Undo2, Wand2 } from "lucide-react";
+import { ClipboardPaste, Code, Copy, Eye, MoreHorizontal, Pencil, Redo2, Scissors, Undo2, Wand2 } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { MarkdownEditorHandle } from "@/components/editor/MarkdownEditor";
 import { useNoteStore } from "@/stores/noteStore";
@@ -35,6 +36,16 @@ import { PopupLayer } from "@/components/common/PopupLayer";
 
 /** 模块级空数组：notePeers 缺省引用（避免每次渲染新数组导致无限重渲染）。 */
 const EMPTY_PEERS: CollabPeer[] = [];
+
+/** 笔记三态模式（工具条分段控件）：只读 = 渲染面只读，预览编辑 = 渲染面可改，源码 = Markdown 源文可改。 */
+type NoteMode = "read" | "edit" | "source";
+
+/** 分段控件的段定义（顺序即展示顺序）。 */
+const NOTE_MODES: { key: NoteMode; label: string; hint: string; icon: LucideIcon }[] = [
+  { key: "read", label: "只读", hint: "只读：仅查看，双击正文进入编辑", icon: Eye },
+  { key: "edit", label: "预览编辑", hint: "预览编辑：正文可直接修改", icon: Pencil },
+  { key: "source", label: "源码", hint: "源码：直接编辑 Markdown 源文", icon: Code },
+];
 
 /** 预览右键进编辑后，等待光标/选区落位稳定（挂载、StrictMode 重挂载、selectionchange 收敛）再弹菜单的时延。 */
 const PENDING_MENU_DELAY_MS = 60;
@@ -171,6 +182,8 @@ export function NoteEditor({ file }: { file: string }) {
   const editorRootRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const onDocMouseDown = (e: MouseEvent) => {
+      // 源码模式是显式选择的一档模式，不因点外部回退（否则点一下属性区就掉出源码视图）
+      if (sourceMode) return;
       const root = editorRootRef.current;
       // 编辑器内部（内容区/属性区）不退出；portal 弹层（AI 改写菜单/「···」更多选项经
       // PopupLayer 挂 body，不在根节点内）也不退出——弹层内操作（点菜单项/评论输入框）
@@ -190,7 +203,7 @@ export function NoteEditor({ file }: { file: string }) {
     // 文档树，contains 会把编辑器内的点击误判为外点；捕获阶段先于任何 DOM 改动观测
     document.addEventListener("mousedown", onDocMouseDown, true);
     return () => document.removeEventListener("mousedown", onDocMouseDown, true);
-  }, []);
+  }, [sourceMode]);
 
   /** 待弹出右键菜单 → 延迟 PENDING_MENU_DELAY_MS 待编辑器挂载/重挂载/selectionchange 全部收敛后，
    *  一次性安置光标/选区并聚焦、紧接弹菜单——光标在菜单出现时真实闪烁，用户才看得到剪切/粘贴
@@ -204,9 +217,9 @@ export function NoteEditor({ file }: { file: string }) {
     /** 安置光标/选区并聚焦，返回菜单是否含剪切（编辑器未就绪返回 false，不阻塞弹菜单）。 */
     const restoreSelection = (): boolean => {
       if (sourceMode) {
+        // 60ms 窗口内切到了源码模式：落位移到源码 textarea（切换到新元素，原选区无从还原）
         const ta = editorRootRef.current?.querySelector("textarea");
         if (!ta) return false;
-        // 同元素只翻只读标志，光标/选区保留，聚焦即闪烁
         ta.focus();
         return true;
       }
@@ -278,6 +291,9 @@ export function NoteEditor({ file }: { file: string }) {
     return { from, to, text: view.getText().slice(from, to) };
   };
 
+  /** 当前三态模式（工具条分段控件的激活项）：源码优先，其余由 preview 区分。 */
+  const mode: NoteMode = sourceMode ? "source" : preview ? "read" : "edit";
+
   /** 切换源码模式：两种形态是各自独立的视图（textarea / 分块引擎），直接切换会停在文首，
    *  故切换前记下对侧视图顶部的源码偏移，挂载后由下方 effect 对齐回去。 */
   const toggleSourceMode = () => {
@@ -296,6 +312,12 @@ export function NoteEditor({ file }: { file: string }) {
       }
     }
     setSourceMode((v) => !v);
+  };
+
+  /** 分段控件切模式：三态互斥。源码恒可编辑（进入即退出只读），渲染面的只读由 preview 表达。 */
+  const setNoteMode = (next: NoteMode) => {
+    if ((next === "source") !== sourceMode) toggleSourceMode();
+    setPreview(next === "read");
   };
 
   /** 切模式后把新视图滚到切换前的位置：分块视图按源偏移定位，源码视图按行高折算。 */
@@ -544,12 +566,6 @@ export function NoteEditor({ file }: { file: string }) {
               )}
             </span>
           )}
-          {/* 预览模式提示：显示在切换按钮左侧 */}
-          {preview && (
-            <span className="text-[11px]" style={{ color: "var(--text-muted)" }}>
-              双击内容进入编辑模式
-            </span>
-          )}
           {/* 触屏无快捷键：撤销/重做屏幕入口（桌面隐藏，快捷键已够用） */}
           <span className="hidden [@media(hover:none)]:flex items-center gap-1 flex-shrink-0">
             <button
@@ -571,15 +587,33 @@ export function NoteEditor({ file }: { file: string }) {
               <Redo2 size={14} />
             </button>
           </span>
-          {/* 固定笔图标：未进入编辑（预览态）淡色，进入编辑后金色高亮（表达激活态） */}
-          <button
-            onClick={() => setPreview((v) => !v)}
-            title={preview ? "切换到编辑" : "切换到只读"}
-            className="p-0.5 rounded hover:opacity-80"
-            style={{ color: preview ? "var(--text-muted)" : "var(--accent)" }}
+          {/* 模式分段控件：只读 / 预览编辑 / 源码（三态互斥，激活项金色底） */}
+          <span
+            className="flex items-center gap-0.5 p-0.5 rounded-[var(--radius-sm)] flex-shrink-0"
+            style={{ background: "var(--bg-sunken)", border: "1px solid var(--border)" }}
           >
-            <Pencil size={14} />
-          </button>
+            {NOTE_MODES.map((m) => {
+              const Icon = m.icon;
+              const active = m.key === mode;
+              return (
+                <button
+                  key={m.key}
+                  onClick={() => setNoteMode(m.key)}
+                  title={m.hint}
+                  aria-pressed={active}
+                  className="flex items-center gap-1 h-[22px] px-2 rounded-[var(--radius-xs)] text-[11px]"
+                  style={
+                    active
+                      ? { background: "var(--accent-soft)", color: "var(--accent)" }
+                      : { color: "var(--text-secondary)" }
+                  }
+                >
+                  <Icon size={12} className="flex-shrink-0" />
+                  {m.label}
+                </button>
+              );
+            })}
+          </span>
           {/* 「···」更多选项：笔记属性面板入口（统一弹层 PopupLayer：锚定 + 钳制 + Esc/外点关闭） */}
           <span className="flex-shrink-0">
             <button
@@ -601,30 +635,14 @@ export function NoteEditor({ file }: { file: string }) {
                 className="w-full flex items-center gap-2 px-2 py-1.5 text-xs hover:opacity-80"
                 style={{ color: "var(--text-primary)" }}
                 onClick={() => {
-                  // 源码模式下属性区不渲染：先切回实时预览，表单才有着落
-                  setSourceMode(false);
+                  // 源码模式下属性区不渲染：先切回渲染面的编辑档（进源码必然是编辑态），表单才有着落
+                  if (sourceMode) setNoteMode("edit");
                   setAddPropsSeq((n) => n + 1);
                   menu.close();
                 }}
                 title="打开添加属性表单：填写属性名与值，保存时自动写入 frontmatter"
               >
-                {/* 图标列占位与「源码模式」对齐（Check 图标列同宽） */}
-                <span className="w-3.5 flex-shrink-0" />
                 添加笔记属性
-              </button>
-              <button
-                className="w-full flex items-center gap-2 px-2 py-1.5 text-xs hover:opacity-80"
-                style={{ color: "var(--text-primary)" }}
-                onClick={() => {
-                  toggleSourceMode();
-                  menu.close();
-                }}
-                title="源码模式：编辑区显示 Markdown 源码"
-              >
-                <span className="w-3.5 flex-shrink-0">
-                  {sourceMode && <Check size={12} style={{ color: "var(--accent)" }} />}
-                </span>
-                源码模式
               </button>
               <button
                 className="w-full flex items-center gap-2 px-2 py-1.5 text-xs hover:opacity-80 disabled:cursor-not-allowed disabled:opacity-40"
@@ -635,7 +653,6 @@ export function NoteEditor({ file }: { file: string }) {
                 }}
                 title="查看本笔记的历史版本并回滚"
               >
-                <span className="w-3.5 flex-shrink-0" />
                 历史记录
               </button>
             </PopupLayer>
@@ -643,9 +660,12 @@ export function NoteEditor({ file }: { file: string }) {
         </span>
       </div>
 
-      {/* 正文列：标题与属性区与正文同列居中（正文最大行宽见 styles/index.css .note-body）。
-          源码模式也保持同列，切模式不产生横向跳变 */}
-      <div className="mx-auto w-full max-w-[780px] flex-shrink-0">
+      {/* 正文列：标题与属性区与正文同列居中（行宽 = --note-line-width，与 styles/index.css
+          .note-body 同一档，设置 → 编辑器可调）。源码模式也保持同列，切模式不产生横向跳变 */}
+      <div
+        className="mx-auto w-full flex-shrink-0"
+        style={{ maxWidth: "var(--note-line-width)" }}
+      >
         {/* 页面内标题（设置 → 编辑器开启时）：正文最顶端显示文件名，点击可重命名笔记；
             读取失败时不显示（此时文件名不属于可信内容） */}
         {inlineTitle && !loadError && <NoteTitle file={file} />}
@@ -657,7 +677,7 @@ export function NoteEditor({ file }: { file: string }) {
             data={parsed.data}
             parseError={!parsed.ok}
             onUpdate={handlePropertiesUpdate}
-            onOpenSource={() => setSourceMode(true)}
+            onOpenSource={() => setNoteMode("source")}
             tagCandidates={tagCandidates}
             onRequestTagCandidates={requestTagCandidates}
             hideWhenEmpty
@@ -671,35 +691,25 @@ export function NoteEditor({ file }: { file: string }) {
           读取笔记失败，请确认文件存在
         </div>
       ) : sourceMode ? (
-        /* 源码模式：完整 Markdown 源码 textarea（含 frontmatter）；切换回实时预览编辑时内容经 content 双向同步。
-           未激活编辑（preview）时只读（阅读/编辑分离，仅可查看源码），双击激活后进入可编辑源码模式 */
+        /* 源码模式：完整 Markdown 源码 textarea（含 frontmatter），进入即可编辑（「源码」这档语义
+           就是改源文）；切回渲染面时内容经 content 双向同步 */
         <textarea
           data-note-content
           value={content}
           onChange={(e) => handleChange(e.target.value)}
-          readOnly={preview}
-          onDoubleClick={(e) => {
-            // 双击激活编辑：清除浏览器默认的双击选中单词，光标留在双击位置，不选中文本
-            const ta = e.currentTarget;
-            const pos = ta.selectionStart;
-            ta.setSelectionRange(pos, pos);
-            window.getSelection()?.removeAllRanges();
-            setPreview(false);
-          }}
           spellCheck={false}
           placeholder="笔记内容（Markdown）"
-          className="flex-1 w-full max-w-[780px] mx-auto resize-none outline-none p-4 text-sm leading-relaxed"
+          className="flex-1 w-full mx-auto resize-none outline-none p-4 text-sm leading-relaxed"
           style={{
             background: "var(--bg-primary)",
             color: "var(--text-primary)",
-            // 只读（未激活编辑）时光标用默认指针，非文本光标
-            cursor: preview ? "default" : "text",
+            maxWidth: "var(--note-line-width)",
           }}
         />
       ) : (
         /* 只读实时视图 / 实时预览编辑：同一分块引擎，readOnly 动态切换（不重建 → 预览⇄编辑
            零跳变、选区/滚动/协作绑定全保留）。只读态 widget 恒渲染（表格/数学/HTML/勾选框等全部显示），
-           双击/铅笔进入编辑；编辑器自身样式见 styles/index.css；border 与源码模式对齐（1px），
+           双击正文进入编辑；编辑器自身样式见 styles/index.css；border 与源码模式对齐（1px），
            accent 高亮 = 进入编辑模式（与源码模式聚焦时一致） */
         <div className="flex flex-1 min-h-0">
           {/* 编辑器 gutter：插件贡献的纵向小部件列（gutter/note 槽；缺贡献不占位，
@@ -742,8 +752,8 @@ export function NoteEditor({ file }: { file: string }) {
       {/* 反向链接区（编辑器内容区下方，独立于属性区）：引用本文档的笔记列表，点击打开引用方；
           空 = 无引用时也显示该区（空态提示）；与正文同列居中 */}
       <div
-        className="mx-auto w-full max-w-[780px] flex-shrink-0 px-4 py-2 select-none"
-        style={{ borderTop: "1px solid var(--border)" }}
+        className="mx-auto w-full flex-shrink-0 px-4 py-2 select-none"
+        style={{ borderTop: "1px solid var(--border)", maxWidth: "var(--note-line-width)" }}
       >
         <div className="text-xs mb-1" style={{ color: "var(--text-muted)" }}>
           反向链接

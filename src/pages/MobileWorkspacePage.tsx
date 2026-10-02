@@ -1,8 +1,9 @@
 /**
- * 移动端单栏工作区：顶栏（仓库/空间切换 + 设置入口）+ 导航抽屉（视图切换）+ 单视图。
+ * 移动端单栏工作区：顶栏（仓库/空间切换 + 设置入口）+ 底部导航栏（视图切换）+ 单视图。
  *
  * 视图与桌面同一分派来源（统一视图贡献注册表）：组合行启用才有标签，用户停用行 → 标签消失；
  * 零插件可启动（全部停用时显示空态提示，壳本身可用）。
+ * 底部导航栏的视图顺序是应用级偏好（设置 → 通用可调，缺省按内建常用序）。
  * 文件生命周期联动与桌面共用（useWorkspaceFileEffects）；打开文件切到对应视图（启动恢复
  * 发生在挂载前，不劫持「最近打开」启动页）。
  * 返回键逐层返回在此接线（安卓壳层经 window.__atelyxAndroidBack 调用）。
@@ -15,8 +16,11 @@ import { useAppStore } from "@/stores/appStore";
 import { useUiStateStore } from "@/stores/uiStateStore";
 import { usePluginStore } from "@/stores/pluginStore";
 import { useNotificationStore } from "@/stores/notificationStore";
-import { SettingsModal, VaultSettingsModal } from "@/components/settings/SettingsModal";
-import { MobileNavDrawer, type MobileNavItem } from "@/components/layout/MobileNavDrawer";
+import { SettingsPage } from "@/components/settings/SettingsPage";
+import { MobileBottomBar } from "@/components/layout/MobileBottomBar";
+import type { MobileNavItem } from "@/components/layout/MobileNavDrawer";
+import { useSettingsStore } from "@/stores/settingsStore";
+import { orderMobileViews } from "@/utils/mobileNav";
 import { MobileVaultSwitcher } from "@/components/layout/MobileVaultSwitcher";
 import { MobileLocalVaultDialog } from "@/components/layout/MobileLocalVaultDialog";
 import { ViewHost, viewMetaFor } from "@/components/layout/ViewHost";
@@ -35,22 +39,16 @@ declare global {
  * 单栏壳恒聚焦。 */
 const MOBILE_HOST_ID = "mobile";
 
-/** 侧边栏固定常用序（首发视图；其余视图含插件面板按 id 追加其后）。 */
-const PREFERRED_TAB_ORDER = ["recent", "note", "files", "aichat", "table"];
-
 /** 退出确认窗口：顶层第一次按返回提示，窗口内第二次才真正退出。 */
 const EXIT_CONFIRM_MS = 2000;
 
-/** 当前可用视图标签：固定常用序在前，其余（含插件面板）按 id 追加。 */
+/** 当前可用视图标签：顺序取应用级偏好（设置 → 通用可调；缺省 = 内建常用序），插件视图按 id 追加在后。 */
 function buildTabs(): MobileNavItem[] {
   const kinds = usePluginStore.getState().pluginViewKinds();
-  const ordered = [
-    ...PREFERRED_TAB_ORDER.filter((k) => kinds.includes(k)),
-    ...kinds.filter((k) => !PREFERRED_TAB_ORDER.includes(k)).sort(),
-  ];
+  const ordered = orderMobileViews(kinds, useSettingsStore.getState().mobileNavOrder);
   return ordered.map((kind) => {
     const meta = viewMetaFor(kind);
-    // 窄栏/抽屉图标按移动端档 16px（VIEW_META 默认 13 是桌面面板标签尺寸）
+    // 底栏/抽屉图标按移动端档 16px（VIEW_META 默认 13 是桌面面板标签尺寸）
     const icon = cloneElement(meta.icon as ReactElement<{ size?: number }>, { size: 16 });
     return { key: kind, label: meta.label, icon };
   });
@@ -60,12 +58,10 @@ export function MobileWorkspacePage() {
   // 文件生命周期联动（改名跟随/自动恢复/历史署名，桌面与移动端共用）
   useWorkspaceFileEffects();
 
-  // 设置弹窗（与桌面同状态面；顶栏设置入口打开）
-  const settingsModal = useAppStore((s) => s.settingsModal);
+  // 设置页（与桌面同状态面；顶栏设置入口打开，窄屏为整屏视图）
+  const settingsView = useAppStore((s) => s.settingsView);
   const openSettings = useAppStore((s) => s.openSettings);
   const closeSettings = useAppStore((s) => s.closeSettings);
-  const vaultSettingsModal = useAppStore((s) => s.vaultSettingsModal);
-  const closeVaultSettings = useAppStore((s) => s.closeVaultSettings);
 
   // 顶栏仓库名（个人仓库 = 目录名；协作空间 = 服务端承载，不落本地路径）
   const vaultIdentity = useAppStore((s) => s.vaultIdentity);
@@ -75,8 +71,10 @@ export function MobileWorkspacePage() {
       ? vaultIdentity.root.split(/[\\/]/).filter(Boolean).pop() ?? vaultIdentity.root
       : "协作空间";
 
-  // 可用视图标签：订阅 uiRevision（视图槽增删 = 插件启停/挂载后）触发重渲染，buildTabs 重取注册表
+  // 可用视图标签：订阅 uiRevision（视图槽增删 = 插件启停/挂载后）+ 导航顺序偏好触发重渲染，
+  // buildTabs 重取注册表与顺序
   usePluginStore((s) => s.uiRevision);
+  useSettingsStore((s) => s.mobileNavOrder);
   const tabs = buildTabs();
 
   const [activeView, setActiveView] = useState<string | null>("recent");
@@ -184,10 +182,8 @@ export function MobileWorkspacePage() {
   }, [isAndroid, androidStorageOnboarded]);
 
   return (
-    <div className="h-full w-full flex" style={{ background: "var(--bg-primary)" }}>
-      <MobileNavDrawer items={tabs} active={activeView} onSelect={setActiveView} />
-
-      <div className="flex-1 min-w-0 flex flex-col">
+    <div className="h-full w-full flex flex-col" style={{ background: "var(--bg-primary)" }}>
+      <div className="flex-1 min-h-0 flex flex-col">
         {/* 顶栏：仓库/空间切换 + 设置入口（设置是核心应用入口，恒宿主渲染） */}
         <div
           className="flex-shrink-0 flex items-center gap-2 px-2 min-h-12 select-none"
@@ -208,8 +204,9 @@ export function MobileWorkspacePage() {
           </button>
         </div>
 
-        {/* 单视图承载（统一视图槽分派；缺贡献 = 降级占位，与桌面同语义） */}
-        <div className="flex-1 min-h-0" style={{ paddingBottom: "env(safe-area-inset-bottom)" }}>
+        {/* 单视图承载（统一视图槽分派；缺贡献 = 降级占位，与桌面同语义）。
+            底部安全区由导航栏承担（不再在此重复叠加） */}
+        <div className="flex-1 min-h-0">
           {tabs.length === 0 ? (
             <div
               className="h-full w-full flex items-center justify-center px-8 text-center text-xs leading-relaxed"
@@ -225,8 +222,13 @@ export function MobileWorkspacePage() {
         </div>
       </div>
 
-      {settingsModal && (
-        <SettingsModal initialTab={settingsModal.tab} onClose={closeSettings} />
+      {/* 底部导航栏：视图切换（顺序由应用级偏好决定）；零可用视图时不显示 */}
+      {tabs.length > 0 && (
+        <MobileBottomBar items={tabs} active={activeView} onSelect={setActiveView} />
+      )}
+
+      {settingsView && (
+        <SettingsPage initialTab={settingsView.tab} onClose={closeSettings} />
       )}
       {showStorageGuide && (
         <MobileLocalVaultDialog
@@ -235,12 +237,6 @@ export function MobileWorkspacePage() {
             setShowStorageGuide(false);
             void useAppStore.getState().setAndroidStorageOnboarded(true);
           }}
-        />
-      )}
-      {vaultSettingsModal && (
-        <VaultSettingsModal
-          target={vaultSettingsModal.target}
-          onClose={closeVaultSettings}
         />
       )}
     </div>

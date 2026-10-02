@@ -1,11 +1,10 @@
 /**
  * 插件市场浏览：官方索引（CDN）搜索/筛选/安装。
  *
- * - 搜索：名称/id/描述/仓库全文匹配；类型筛选（全部/各类型）；徽标展示（官方/精选）
+ * - 搜索：名称/id/描述/仓库全文匹配；类型筛选（全部/各类型，胶囊行）；徽标展示（官方/精选）
  * - 安装 = 按 repo 取源码（git clone，无 git 回退 GitHub 源码包）；全新插件默认停用、
  *   替换行沿用原启用状态，由「已安装」tab 确认启停；安装前弹确认（社区插件未经官方审查、
  *   可访问本地数据）
- * - 顶部下拉（类型筛选）用统一 DropdownSelect 组件（自绘弹层，非原生 select）
  * 分层：只经 pluginStore 触达插件能力。
  */
 import { useEffect, useMemo, useState } from "react";
@@ -14,6 +13,7 @@ import {
   Boxes,
   Check,
   Download,
+  LayoutGrid,
   LayoutPanelTop,
   Palette,
   Puzzle,
@@ -27,7 +27,6 @@ import {
   Wrench,
   type LucideIcon,
 } from "lucide-react";
-import { DropdownSelect } from "@/components/common/DropdownSelect";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 import { usePluginStore } from "@/stores/pluginStore";
 import { PLUGIN_BADGE_LABELS, PLUGIN_SOURCE_LABELS, PLUGIN_TYPE_LABELS } from "@/constants/plugins";
@@ -121,35 +120,55 @@ export function MarketplaceSection() {
 
   return (
     <div className="flex flex-col gap-3 min-h-0">
-      {/* 搜索 / 类型筛选 / 刷新 */}
-      <div className="flex gap-2 flex-wrap">
+      {/* 搜索 / 刷新 */}
+      <div className="flex gap-2">
         <input
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder="搜索插件（名称 / id / 描述 / 仓库）"
-          className="flex-1 min-w-[180px] px-2.5 py-1.5 rounded text-xs border outline-none"
+          className="flex-1 min-w-0 px-2.5 py-1.5 rounded text-xs border outline-none"
           style={{ background: "var(--input-bg)", borderColor: "var(--input-border)", color: "var(--text-primary)" }}
-        />
-        <DropdownSelect
-          value={typeFilter}
-          onChange={(v) => setTypeFilter(v as PluginType | "all")}
-          options={TYPE_FILTERS.map((f) => ({ value: f.value, label: f.label }))}
-          title="类型筛选"
-          className="text-xs rounded px-2 py-1.5"
-          style={{
-            color: "var(--text-primary)",
-            background: "var(--input-bg)",
-            border: "1px solid var(--input-border)",
-          }}
         />
         <button
           onClick={() => void loadMarket(true)}
           title="刷新市场索引"
-          className="px-2 py-1.5 rounded border hover:bg-[var(--hover)]"
+          className="px-2 py-1.5 rounded border hover:bg-[var(--hover)] flex-shrink-0"
           style={{ borderColor: "var(--border)", color: "var(--text-secondary)" }}
         >
           <RefreshCw size={13} />
         </button>
+      </div>
+
+      {/* 类型筛选胶囊：类型多且面板可窄，单行横向滚动（折行会把工具条撑高） */}
+      <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5">
+        {TYPE_FILTERS.map((f) => {
+          const active = f.value === typeFilter;
+          const Icon = f.value === "all" ? LayoutGrid : TYPE_ICONS[f.value];
+          return (
+            <button
+              key={f.value}
+              onClick={() => setTypeFilter(f.value)}
+              aria-pressed={active}
+              className="inline-flex items-center gap-1.5 h-[26px] px-2.5 rounded-full border text-xs flex-shrink-0 transition-colors"
+              style={
+                active
+                  ? {
+                      color: "var(--accent)",
+                      background: "var(--accent-soft)",
+                      borderColor: "color-mix(in srgb, var(--accent) 34%, transparent)",
+                    }
+                  : {
+                      color: "var(--text-secondary)",
+                      background: "var(--bg-primary)",
+                      borderColor: "var(--border)",
+                    }
+              }
+            >
+              <Icon size={12} className="flex-shrink-0" />
+              {f.label}
+            </button>
+          );
+        })}
       </div>
 
       {marketError && (

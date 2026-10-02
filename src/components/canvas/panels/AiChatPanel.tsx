@@ -6,7 +6,9 @@ const refKeyOfPanelRef = (r: { label: string }) =>
  * AI 对话面板。
  *
  * IDE 式侧边聊天，无头样式：
- * - 顶部一行：左侧面板内联错误提示（仅出错时占位）+ 右侧「新建会话 / 历史会话」图标按钮
+ * - 左侧会话列表：搜索 + 会话行（点击切换、行内删除）；面板够宽时与对话区并列，
+ *   拖窄即改为浮层弹出（覆盖对话区，不挤压）；顶部「历史会话」按钮手动开关
+ * - 顶部一行：左侧面板内联错误提示（仅出错时占位）+ 右侧「新建会话 / 历史会话 / 压缩」图标按钮
  * - 中部消息流：Markdown 公共渲染、流式指示、自动滚底
  * - 底部输入区：textarea（Enter 发送 / Shift+Enter 换行，支持 @引用标签）
  *   + Agent 选择（图标 + Agent 名）+ 模型选择（图标 + 模型名）+ 发送/停止按钮
@@ -30,7 +32,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useEffect, useCallback, useMemo, useRef, useState } from "react";
+import { useEffect, useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useAppStore } from "@/stores/appStore";
 import { useChatPanelStore } from "@/stores/chatPanelStore";
 import { useSettingsStore, selectDefaultModelDisplay } from "@/stores/settingsStore";
@@ -47,10 +49,10 @@ import { MentionTextarea } from "@/components/common/MentionTextarea";
 import { JumpToBottomButton } from "@/components/common/JumpToBottomButton";
 import { DropdownSelect } from "@/components/common/DropdownSelect";
 import { ModelSelect } from "@/components/common/ModelSelect";
-import { PopupLayer } from "@/components/common/PopupLayer";
 import { CHAT_UNAVAILABLE_TEXT, ERROR_PREFIX } from "@/constants/chat";
 import { useChatRuntime } from "@/hooks/useChatRuntime";
-import { usePopupAnchor } from "@/hooks/usePopupAnchor";
+import { relTime } from "@/utils/time";
+import { useBackHandler } from "@/hooks/useBackHandler";
 import { VaultAtPicker, type VaultPickTarget } from "@/components/common/VaultAtPicker";
 import { openVaultPath } from "@/components/common/FileKindIcon";
 import { noteTitleFromFile } from "@/utils/filename";
@@ -62,6 +64,9 @@ import type { EditorChatMessage, EditorChatMessageRef } from "@/types";
 
 /** 空消息数组（模块级常量：避免 selector 新引用导致无限重渲染）。 */
 const EMPTY_MESSAGES: EditorChatMessage[] = [];
+
+/** 面板宽度低于此值即改为浮层弹出会话列表（侧栏 228px，再窄就没地方并列两列了）。 */
+const SIDEBAR_MIN_PANEL_WIDTH = 560;
 
 /**
  * 输入框追加 @标签：前文非空且不以空格结尾时才补一个分隔空格，标签后恒带一个尾随空格。
@@ -134,13 +139,62 @@ export function AiChatPanel() {
   const agentId = active?.agentId ?? draftAgentId;
 
   const [input, setInput] = useState("");
-  // 历史会话浮层：锚定 History 按钮（PopupLayer 统一壳，外点/Esc 关闭）
-  const historyBtnRef = useRef<HTMLButtonElement>(null);
-  const {
-    anchor: historyAnchor,
-    toggle: toggleHistory,
-    close: closeHistory,
-  } = usePopupAnchor(historyBtnRef);
+  // 会话列表侧栏：默认展开，顶部「历史会话」按钮开关
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sessionQuery, setSessionQuery] = useState("");
+  /**
+   * 面板是否窄到放不下「侧栏 + 对话区」两列：窄面板里侧栏改为浮层弹出覆盖对话区
+   * （并列会把对话区挤成一条），并在拖窄的那一刻自动收起，避免浮层突然盖住对话。
+   *
+   * 面板根节点经回调 ref 存 state（对话能力未启用时渲染占位、不挂根节点，恢复后才挂上，
+   * 节点变化要能重新起观察器）；初始宽度在布局阶段先量一次，避免首帧按宽面板渲染出侧栏。
+   */
+  const [panelRoot, setPanelRoot] = useState<HTMLDivElement | null>(null);
+  const [narrow, setNarrow] = useState(false);
+  /** 上一帧是否为窄面板：只在「宽 → 窄」的跨越那一刻收起侧栏，
+   *  否则窄态下任何一次尺寸微调都会把用户刚打开的浮层关掉。 */
+  const wasNarrowRef = useRef(false);
+  useLayoutEffect(() => {
+    if (!panelRoot) return;
+    const apply = (width: number) => {
+      if (width <= 0) return;
+      const next = width < SIDEBAR_MIN_PANEL_WIDTH;
+      setNarrow(next);
+      if (next && !wasNarrowRef.current) setSidebarOpen(false);
+      wasNarrowRef.current = next;
+    };
+    apply(panelRoot.clientWidth);
+    const ro = new ResizeObserver((entries) => apply(entries[0]?.contentRect.width ?? 0));
+    ro.observe(panelRoot);
+    return () => ro.disconnect();
+  }, [panelRoot]);
+  /** 浮层态（窄面板）下的关闭路径：返回键与 Esc 都要能关（浮层盖住对话区，只靠点遮罩太钝）。 */
+  const overlayOpen = narrow && sidebarOpen;
+  useBackHandler(overlayOpen, () => {
+    setSidebarOpen(false);
+    return true;
+  });
+  useEffect(() => {
+    if (!overlayOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setSidebarOpen(false);
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [overlayOpen]);
+  /** 侧栏列表：最近使用倒序 + 按列表里显示的标题过滤（无标题的会话按「未命名对话」参与匹配）。 */
+  const listedSessions = useMemo(() => {
+    const q = sessionQuery.trim().toLowerCase();
+    const sorted = [...sessions].sort((a, b) => b.updatedAt - a.updatedAt);
+    if (!q) return sorted;
+    return sorted.filter((s) => (s.title ?? "未命名对话").toLowerCase().includes(q));
+  }, [sessions, sessionQuery]);
+
+  /** 切换会话：窄面板（浮层态）下顺手收起浮层——浮层盖着对话区，不收起会让人以为没切成功。 */
+  const pickSession = (id: string) => {
+    openSession(id);
+    if (narrow) setSidebarOpen(false);
+  };
   // 手动重新命名请求是否进行中（按钮旋转反馈 + 防重复点击）
   const [renaming, setRenaming] = useState(false);
   const handleRename = async () => {
@@ -221,9 +275,8 @@ export function AiChatPanel() {
   const vaultIdentity = useAppStore((s) => s.vaultIdentity);
   useEffect(() => {
     if (!vaultIdentity) return;
-    closeHistory();
     void useChatPanelStore.getState().load();
-  }, [vaultIdentity, closeHistory]);
+  }, [vaultIdentity]);
 
   // 智能滚动跟随：贴底自动跟随新消息；上翻停止跟随 + 「新消息」回底按钮（与画布对话节点共用 hook）
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -307,343 +360,399 @@ export function AiChatPanel() {
     );
   }
 
-  return (
-    <div
-      className="h-full flex flex-col overflow-hidden relative"
-      style={{ background: "var(--bg-primary)", color: "var(--text-primary)" }}
-    >
-      {/* 顶部无头行：左侧会话标题（出错时显示错误提示）+ 右侧会话管理按钮 */}
+  /** 侧栏内容（宽面板内联 / 窄面板浮层共用同一份）：搜索 + 会话行（点击切换、行内删除）。 */
+  const sidebarBody = (
+    <>
       <div
-        className="px-2 py-1.5 border-b flex items-center gap-2 flex-shrink-0 min-h-9"
-        style={{ background: "var(--bg-secondary)", borderColor: "var(--border)" }}
-        data-tauri-drag-region
+        className="px-2.5 py-2 flex-shrink-0"
+        style={{ borderBottom: "1px solid var(--border-subtle)" }}
       >
-        <div className="flex-1 min-w-0 flex items-center gap-1.5">
-          <MessageSquare
-            size={13}
-            className="flex-shrink-0"
-            style={{ color: "var(--text-muted)" }}
-          />
-          {error || persistError ? (
-            <span
-              className="flex items-center gap-1 min-w-0 text-xs"
-              style={{ color: "var(--danger)" }}
-              title={persistError && !error ? `失败于 ${new Date(persistError.at).toLocaleTimeString()}` : undefined}
-            >
-              <AlertCircle size={13} className="flex-shrink-0" />
-              <span className="truncate">{error ?? persistError?.message}</span>
-              {error && (
-                <button
-                  onClick={clearError}
-                  title="清除"
-                  className="p-0.5 hover:opacity-70 flex-shrink-0"
-                >
-                  <X size={12} />
-                </button>
-              )}
-            </span>
-          ) : (
-            <>
-              <span
-                className="truncate text-xs font-medium"
-                style={{ color: "var(--text-primary)" }}
-                title={activeTitle}
-              >
-                {activeTitle}
-              </span>
-              {/* 手动重新命名：按全部会话记录请求 LLM 生成标题（新对话态/流式中禁用）；请求中旋转 + 防重复点击 */}
-              {active && !streaming && (
-                <button
-                  onClick={() => void handleRename()}
-                  disabled={renaming}
-                  title={renaming ? "正在生成标题…" : "重新命名（按全部会话记录生成标题）"}
-                  aria-label="重新命名"
-                  className="p-0.5 rounded hover:opacity-80 flex-shrink-0 disabled:opacity-60 disabled:cursor-default disabled:hover:opacity-60"
-                  style={{ color: "var(--text-muted)" }}
-                >
-                  {renaming ? (
-                    <Loader2 size={12} className="animate-spin" />
-                  ) : (
-                    <RefreshCw size={12} />
-                  )}
-                </button>
-              )}
-            </>
-          )}
-        </div>
-        <div className="flex items-center gap-0.5 flex-shrink-0" data-tauri-drag-region="false">
-          <button
-            onClick={newSession}
-            title="新建会话"
-            aria-label="新建会话"
-            className="p-1.5 rounded hover:opacity-80"
-            style={{ color: "var(--text-secondary)" }}
-          >
-            <FilePlus size={15} />
-          </button>
-          <button
-            ref={historyBtnRef}
-            onClick={toggleHistory}
-            title="历史会话"
-            aria-label="历史会话"
-            className="p-1.5 rounded hover:opacity-80"
-            style={{ color: historyAnchor ? "var(--accent)" : "var(--text-secondary)" }}
-          >
-            <History size={15} />
-          </button>
-          {/* 压缩会话历史：把对话总结为检查点，压缩后的请求历史由摘要代替（消息本体不动）；
-              仅激活会话有历史时可用；流式/压缩进行中禁用；转圈只显示在真正压缩的会话上 */}
-          <button
-            onClick={() => void compactSession()}
-            disabled={!active || streaming || compactingAny}
-            title={compactingThis ? "正在压缩会话历史…" : "压缩会话历史"}
-            aria-label={compactingThis ? "正在压缩会话历史" : "压缩会话历史"}
-            className="p-1.5 rounded hover:opacity-80 disabled:opacity-40 disabled:cursor-default disabled:hover:opacity-40"
-            style={{ color: "var(--text-secondary)" }}
-          >
-            {compactingThis ? (
-              <Loader2 size={15} className="animate-spin" />
-            ) : (
-              <Layers size={15} />
-            )}
-          </button>
-          {/* 插件贡献区：AI 对话面板顶部右侧动作区（list 槽，priority 降序） */}
-          <SlotListMount slot="toolbar/aichat/right" />
-        </div>
+        <input
+          value={sessionQuery}
+          onChange={(e) => setSessionQuery(e.target.value)}
+          placeholder="搜索会话"
+          spellCheck={false}
+          className="w-full px-2 py-1.5 rounded-[var(--radius-sm)] border text-xs outline-none"
+          style={{
+            background: "var(--input-bg)",
+            borderColor: "var(--input-border)",
+            color: "var(--text-primary)",
+          }}
+        />
       </div>
-
-      {/* 历史会话浮层（当前面板全部会话，按最近使用倒序；点击切换、可删除）——PopupLayer 锚定 History 按钮 */}
-      <PopupLayer
-        anchor={historyAnchor}
-        onClose={closeHistory}
-        triggerRef={historyBtnRef}
-        widthClass="w-64"
-      >
-        <div className="max-h-72 overflow-auto">
-          <div className="px-3 py-1 text-[11px]" style={{ color: "var(--text-muted)" }}>
-            历史会话
-          </div>
-          {[...sessions].sort((a, b) => b.updatedAt - a.updatedAt).map((s) => (
+      <div className="flex-1 min-h-0 overflow-y-auto p-2 flex flex-col gap-0.5">
+        {listedSessions.map((s) => {
+          const isActiveSession = s.id === activeSessionId;
+          return (
             <div
               key={s.id}
-              className="flex items-center gap-1 px-2 py-1.5 text-xs"
-              style={{
-                background: s.id === activeSessionId ? "var(--bg-tertiary)" : undefined,
-                color: "var(--text-primary)",
-              }}
+              className={`group flex items-center rounded-[var(--radius-sm)] ${
+                isActiveSession ? "" : "hover:bg-[var(--bg-tertiary)]"
+              }`}
+              style={
+                isActiveSession
+                  ? { background: "var(--accent-soft)", boxShadow: "inset 2px 0 0 var(--accent)" }
+                  : undefined
+              }
             >
               <button
-                onClick={() => {
-                  openSession(s.id);
-                  closeHistory();
-                }}
-                className="flex-1 text-left truncate min-w-0 hover:opacity-80"
+                onClick={() => pickSession(s.id)}
+                className="flex-1 min-w-0 text-left px-2.5 py-1.5"
                 title={s.title ?? "未命名对话"}
               >
-                {s.title ?? "未命名对话"}
+                <span
+                  className="block truncate text-xs font-medium"
+                  style={{ color: isActiveSession ? "var(--accent)" : "var(--text-primary)" }}
+                >
+                  {s.title ?? "未命名对话"}
+                </span>
+                <span
+                  className="block text-[11px] mt-0.5"
+                  style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}
+                >
+                  {relTime(s.updatedAt)}
+                </span>
               </button>
               <button
                 onClick={() => deleteSession(s.id)}
                 title="删除会话"
                 aria-label={`删除会话 ${s.title ?? ""}`}
-                className="p-0.5 hover:opacity-70 flex-shrink-0"
-                style={{ color: "var(--text-muted)" }}
+                // focus-visible:opacity-100：默认 hidden 态下仍可 Tab 到，键盘用户必须看得见焦点
+                className="p-1 mr-1 rounded-[var(--radius-xs)] flex-shrink-0 text-[var(--text-muted)] hover:text-[var(--danger)] opacity-0 group-hover:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100"
               >
                 <Trash2 size={12} />
               </button>
             </div>
-          ))}
-          {sessions.length === 0 && (
-            <div className="px-3 py-2 text-[11px]" style={{ color: "var(--text-muted)" }}>
-              暂无历史会话
-            </div>
-          )}
-        </div>
-      </PopupLayer>
-
-      {/* 消息流（relative 容器承载回底按钮，结构与画布对话节点一致） */}
-      <div className="relative flex-1 min-h-0 flex flex-col">
-        <div
-          ref={scrollRef}
-          onScroll={handleScroll}
-          className="flex-1 overflow-auto px-3 py-3 space-y-3 min-h-0"
-        >
-          {messages.length === 0 ? (
-            <div className="h-full flex flex-col items-center justify-center gap-2 text-xs select-none" style={{ color: "var(--text-muted)" }}>
-              <MessageSquare size={24} strokeWidth={1.5} className="opacity-60" />
-              开始新的 AI 对话
-            </div>
-          ) : (
-            messages.map((m, i) => {
-              // 流式指示：最后一条 assistant 占位且正在流式
-              const isStreamingMsg = streaming && m.role === "assistant" && i === messages.length - 1;
-              // 重新生成：仅最后一条完整 AI 回复可用（同画布 canRegenerate）
-              const canRegenerate =
-                !streaming &&
-                m.role === "assistant" &&
-                i === messages.length - 1 &&
-                assistantReplyText(m).trim() !== "" &&
-                !m.content.startsWith(ERROR_PREFIX);
-              return (
-                <div key={m.id} className="space-y-3">
-                  {/* 压缩标记：插在折叠块之后首条消息之前（被压缩的原文仍显示在标记上方） */}
-                  {i === compactionMarkerIdx && active?.compaction && (
-                    <CompactionMarker compaction={active.compaction} />
-                  )}
-                  <ChatMessageBubble
-                    role={m.role}
-                  displayContent={m.role === "user" ? m.displayContent ?? m.content : undefined}
-                  refs={m.refs}
-                  refKeyOf={refKeyOfPanelRef}
-                  onRefChipClick={handleRefChipClick}
-                  content={m.content}
-                  steps={m.steps}
-                  isStreaming={isStreamingMsg}
-                  markdownLinks={chatMarkdownLinks}
-                  copyText={m.role === "user" ? (m.displayContent ?? m.content) : assistantReplyText(m)}
-                  messageId={m.id}
-                  canRollback={!isStreamingMsg && m.role === "assistant" && assistantReplyText(m).trim() !== ""}
-                  onRollback={rollbackTo}
-                  onRegenerate={canRegenerate ? handleRegenerate : undefined}
-                />
-                </div>
-              );
-            })
-          )}
-
-          {/* 压缩覆盖到对话末尾（刚压缩完的常态）：标记行渲染在列表末尾 */}
-          {compactionMarkerIdx === messages.length && active?.compaction && (
-            <CompactionMarker compaction={active.compaction} />
-          )}
-        </div>
-        {showJumpToBottom && <JumpToBottomButton onClick={jumpToBottom} />}
+          );
+        })}
+        {listedSessions.length === 0 && (
+          <div className="px-2 py-2 text-[11px]" style={{ color: "var(--text-muted)" }}>
+            {sessionQuery.trim() ? "没有匹配的会话" : "暂无历史会话"}
+          </div>
+        )}
       </div>
+    </>
+  );
 
-      {/* 底部输入区：不铺底色、只用一条 1px 上边分隔——输入框是这里唯一的「盒子」，
-          底栏若再铺一层底色就与输入框叠成两个盒子 */}
-      <div
-        className="border-t flex-shrink-0 px-3 pt-2.5 pb-3"
-        style={{ borderColor: "var(--border-subtle)" }}
-      >
-        {/* 输入框（data-chat-input = 文件面板拖拽文件/文件夹的落点：拖入即 @引用）：
-        overlay 渲染 @标签（透明 textarea 承载输入，滚动同步 transform）；键入 @ 唤起仓库选择器。
-        输入框是输入区唯一的盒子，内部纵向三段常规流：输入面 → 分隔线 → 工具排
-        （工具排走常规流而非绝对定位——绝对定位会与超出的输入文字叠在一起） */}
-        <div
-          // 边框恒定不改：聚焦转金边在深底上呈"发光"观感，且叠加 2px 光环会形成同心双线，故聚焦不做边框变化
-          className="relative rounded-[var(--radius-md)] border border-[var(--border)]"
-          data-chat-input
-          ref={inputWrapRef}
-          style={{ background: "var(--bg-sunken)" }}
-        >
-          {picker && (
-            <VaultAtPicker
-              x={picker.x}
-              y={picker.y}
-              openUp={picker.openUp}
-              yBottom={picker.yBottom}
-              query={picker.query}
-              onPick={handleVaultPick}
-              onClose={() => setPicker(null)}
+  return (
+    <div
+      ref={setPanelRoot}
+      className="h-full flex overflow-hidden relative"
+      style={{ background: "var(--bg-primary)", color: "var(--text-primary)" }}
+    >
+      {/* 会话列表：宽面板与对话区并列；窄面板改为浮层弹出（覆盖对话区，不再挤压） */}
+      {sidebarOpen &&
+        (narrow ? (
+          <>
+            <div
+              className="absolute inset-0 z-10"
+              style={{ background: "var(--scrim)" }}
+              onClick={() => setSidebarOpen(false)}
             />
-          )}
-          <MentionTextarea
-            textareaRef={textareaRef}
-            value={input}
-            onChange={(v) => {
-              setInput(v);
-              // @ 后继续输入 → 实时过滤候选（query = @ 位置之后的内容）；
-              // @ 锚字符已被删（退格/整体替换）→ 关闭选择器，防陈旧 atIdx 错位插入
-              if (picker && atIdx >= 0) {
-                if (v[atIdx] !== "@") {
-                  setPicker(null);
-                  setAtIdx(-1);
-                } else {
-                  setPicker((p) => (p ? { ...p, query: v.slice(atIdx + 1) } : p));
-                }
-              }
-            }}
-            segments={segments}
-            onRemoveMention={removeMention}
-            onKeyDown={(e) => {
-              // 键入 @ 唤起仓库文件/文件夹选择器（坐标相对输入容器；下方视口不足 → 向上弹出）
-              if (e.key === "@") {
-                setAtIdx(textareaRef.current?.selectionStart ?? 0);
-                const taRect = textareaRef.current?.getBoundingClientRect();
-                const wrapRect = inputWrapRef.current?.getBoundingClientRect();
-                const x = (taRect?.left ?? 0) - (wrapRect?.left ?? 0);
-                const y = (taRect?.bottom ?? 0) - (wrapRect?.top ?? 0);
-                const yBottom = (wrapRect?.bottom ?? 0) - (taRect?.bottom ?? 0);
-                const openUp = window.innerHeight - (taRect?.bottom ?? 0) < 264;
-                setPicker({ x, y, openUp, yBottom, query: "" });
-              }
-              // Enter 发送 / Shift+Enter 换行；IME 组合期间 Enter 是「上屏候选词」而非发送
-              if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
-                e.preventDefault();
-                handleSend();
-              }
-            }}
-            spellCheck={false}
-            placeholder="输入消息，@ 引用文件，Enter 发送，Shift+Enter 换行"
-            rows={5}
-            overlayClassName="z-0 px-2 pt-3 pb-2 text-sm leading-relaxed"
-            // focus:shadow-none 压掉全局 textarea:focus 的 2px 焦点环：输入面撑满输入盒内部，
-            // 该环会紧贴盒子的 1px 金边形成同心双线；此处的聚焦提示由外层盒的边转金承担
-            textareaClassName="w-full px-2 pt-3 pb-2 text-sm leading-relaxed focus:shadow-none"
-          />
-
-          {/* 工具排（盒子内底部，与输入面同属一块、不画分隔线）：左 Agent/模型；右 发送/停止 */}
-          <div className="flex items-center gap-2 px-2 pt-1 pb-2">
-          {/* Agent 选择：选中的 Agent 提供系统提示词与工具（发送时实时解析）；缺省「对话」= 普通对话 */}
-          <DropdownSelect
-            value={agentId ?? ""}
-            onChange={(v) => setAgentId(v || undefined)}
-            options={agents.map((a) => ({ value: a.id, label: a.name }))}
-            // 未选择（旧数据/清空）= 缺省「对话」：占位显示对话、运行时按「对话」解析
-            placeholder="对话"
-            emptyText="暂无 Agent（设置 → Agent 新建）"
-            prefixIcon={<Bot size={13} className="flex-shrink-0" />}
-            title={agentId ? `Agent：${agents.find((a) => a.id === agentId)?.name ?? ""}` : "Agent：对话（缺省，普通对话；系统提示词与工具在 设置 → Agent 中配置）"}
-            // 无边框幽灵态 + 按内容定宽：宽度只包住文字（不撑满），空间不足时才收缩、由标签自身截断
-            className="h-6 px-2 rounded-[var(--radius-sm)] text-[11px] hover:bg-[var(--bg-tertiary)] min-w-0"
-            style={{ color: "var(--text-secondary)" }}
-          />
-
-          {/* 模型选择：两级菜单（模型 / 推理等级子面板，PopupLayer 统一弹层壳） */}
-          <ModelSelect
-            providers={providers}
-            providerId={modelOverride?.providerId}
-            model={modelOverride?.model}
-            effort={effortOverride ?? undefined}
-            onSelectModel={(sel) =>
-              sel
-                ? setModelOverride({ providerId: sel.providerId, model: sel.model })
-                : setModelOverride(null)
-            }
-            onSelectEffort={(effort) => setEffortOverride(effort ?? null)}
-            defaultModelDisplay={defaultModelDisplay}
-            prefixIcon={<Cpu size={13} className="flex-shrink-0" />}
-            title={modelOverride ? `模型：${modelOverride.model}` : "模型：跟随仓库默认（点击选择/设置推理等级）"}
-            // 模型名最长：同按内容定宽——面板够宽就完整显示且不再拉宽，不够才收缩截断
-            className="h-6 px-2 rounded-[var(--radius-sm)] text-[11px] hover:bg-[var(--bg-tertiary)] min-w-0"
-            style={{ color: "var(--text-secondary)" }}
-          />
-          {/* 右：发送 / 停止（图标 only，金色圆钮，流式中切换为停止）——mr-1 右缘留白不顶格；
-              任一会话压缩进行中即禁用（压缩与发送共用一个中止句柄，避免静默无效点击） */}
-          <button
-            onClick={streaming ? stop : handleSend}
-            disabled={compactingAny || (!streaming && !input.trim())}
-            title={compactingAny ? "正在压缩会话历史…" : streaming ? "停止" : "发送 (Enter)"}
-            aria-label={compactingAny ? "正在压缩会话历史" : streaming ? "停止" : "发送"}
-            className="w-7 h-7 ml-auto rounded-[var(--radius-sm)] inline-flex items-center justify-center flex-shrink-0 disabled:opacity-40"
-            style={{
-              background: streaming ? "var(--bg-tertiary)" : "var(--accent)",
-              color: streaming ? "var(--text-secondary)" : "var(--accent-fg)",
-            }}
+            <aside
+              className="absolute left-0 top-0 bottom-0 z-20 w-[228px] flex flex-col min-h-0 border-r shadow-[var(--shadow-pop)]"
+              style={{ borderColor: "var(--border-subtle)", background: "var(--bg-secondary)" }}
+            >
+              {sidebarBody}
+            </aside>
+          </>
+        ) : (
+          <aside
+            className="w-[228px] flex-shrink-0 flex flex-col min-h-0 border-r"
+            style={{ borderColor: "var(--border-subtle)", background: "var(--bg-secondary)" }}
           >
-            {streaming ? <Square size={12} /> : <ArrowUp size={13} />}
-          </button>
+            {sidebarBody}
+          </aside>
+        ))}
+
+      {/* 对话列：顶部行 + 消息流 + 输入区 */}
+      <div className="flex-1 min-w-0 flex flex-col overflow-hidden relative">
+        {/* 顶部无头行：左侧会话标题（出错时显示错误提示）+ 右侧会话管理按钮 */}
+        <div
+          className="px-2 py-1.5 border-b flex items-center gap-2 flex-shrink-0 min-h-9"
+          style={{ background: "var(--bg-secondary)", borderColor: "var(--border)" }}
+          data-tauri-drag-region
+        >
+          <div className="flex-1 min-w-0 flex items-center gap-1.5">
+            <MessageSquare
+              size={13}
+              className="flex-shrink-0"
+              style={{ color: "var(--text-muted)" }}
+            />
+            {error || persistError ? (
+              <span
+                className="flex items-center gap-1 min-w-0 text-xs"
+                style={{ color: "var(--danger)" }}
+                title={persistError && !error ? `失败于 ${new Date(persistError.at).toLocaleTimeString()}` : undefined}
+              >
+                <AlertCircle size={13} className="flex-shrink-0" />
+                <span className="truncate">{error ?? persistError?.message}</span>
+                {error && (
+                  <button
+                    onClick={clearError}
+                    title="清除"
+                    className="p-0.5 hover:opacity-70 flex-shrink-0"
+                  >
+                    <X size={12} />
+                  </button>
+                )}
+              </span>
+            ) : (
+              <>
+                <span
+                  className="truncate text-xs font-medium"
+                  style={{ color: "var(--text-primary)" }}
+                  title={activeTitle}
+                >
+                  {activeTitle}
+                </span>
+                {/* 手动重新命名：按全部会话记录请求 LLM 生成标题（新对话态/流式中禁用）；请求中旋转 + 防重复点击 */}
+                {active && !streaming && (
+                  <button
+                    onClick={() => void handleRename()}
+                    disabled={renaming}
+                    title={renaming ? "正在生成标题…" : "重新命名（按全部会话记录生成标题）"}
+                    aria-label="重新命名"
+                    className="p-0.5 rounded hover:opacity-80 flex-shrink-0 disabled:opacity-60 disabled:cursor-default disabled:hover:opacity-60"
+                    style={{ color: "var(--text-muted)" }}
+                  >
+                    {renaming ? (
+                      <Loader2 size={12} className="animate-spin" />
+                    ) : (
+                      <RefreshCw size={12} />
+                    )}
+                  </button>
+                )}
+              </>
+            )}
+          </div>
+          <div className="flex items-center gap-0.5 flex-shrink-0" data-tauri-drag-region="false">
+            <button
+              onClick={newSession}
+              title="新建会话"
+              aria-label="新建会话"
+              className="p-1.5 rounded hover:opacity-80"
+              style={{ color: "var(--text-secondary)" }}
+            >
+              <FilePlus size={15} />
+            </button>
+            <button
+              onClick={() => setSidebarOpen((v) => !v)}
+              title={sidebarOpen ? "收起会话列表" : "展开会话列表"}
+              aria-label={sidebarOpen ? "收起会话列表" : "展开会话列表"}
+              aria-expanded={sidebarOpen}
+              className="p-1.5 rounded hover:opacity-80"
+              style={{ color: sidebarOpen ? "var(--accent)" : "var(--text-secondary)" }}
+            >
+              <History size={15} />
+            </button>
+            {/* 压缩会话历史：把对话总结为检查点，压缩后的请求历史由摘要代替（消息本体不动）；
+                仅激活会话有历史时可用；流式/压缩进行中禁用；转圈只显示在真正压缩的会话上 */}
+            <button
+              onClick={() => void compactSession()}
+              disabled={!active || streaming || compactingAny}
+              title={compactingThis ? "正在压缩会话历史…" : "压缩会话历史"}
+              aria-label={compactingThis ? "正在压缩会话历史" : "压缩会话历史"}
+              className="p-1.5 rounded hover:opacity-80 disabled:opacity-40 disabled:cursor-default disabled:hover:opacity-40"
+              style={{ color: "var(--text-secondary)" }}
+            >
+              {compactingThis ? (
+                <Loader2 size={15} className="animate-spin" />
+              ) : (
+                <Layers size={15} />
+              )}
+            </button>
+            {/* 插件贡献区：AI 对话面板顶部右侧动作区（list 槽，priority 降序） */}
+            <SlotListMount slot="toolbar/aichat/right" />
+          </div>
         </div>
+
+        {/* 消息流（relative 容器承载回底按钮，结构与画布对话节点一致） */}
+        <div className="relative flex-1 min-h-0 flex flex-col">
+          <div
+            ref={scrollRef}
+            onScroll={handleScroll}
+            className="flex-1 overflow-auto px-3 py-3 space-y-3 min-h-0"
+          >
+            {messages.length === 0 ? (
+              <div className="h-full flex flex-col items-center justify-center gap-2 text-xs select-none" style={{ color: "var(--text-muted)" }}>
+                <MessageSquare size={24} strokeWidth={1.5} className="opacity-60" />
+                开始新的 AI 对话
+              </div>
+            ) : (
+              messages.map((m, i) => {
+                // 流式指示：最后一条 assistant 占位且正在流式
+                const isStreamingMsg = streaming && m.role === "assistant" && i === messages.length - 1;
+                // 重新生成：仅最后一条完整 AI 回复可用（同画布 canRegenerate）
+                const canRegenerate =
+                  !streaming &&
+                  m.role === "assistant" &&
+                  i === messages.length - 1 &&
+                  assistantReplyText(m).trim() !== "" &&
+                  !m.content.startsWith(ERROR_PREFIX);
+                return (
+                  <div key={m.id} className="space-y-3">
+                    {/* 压缩标记：插在折叠块之后首条消息之前（被压缩的原文仍显示在标记上方） */}
+                    {i === compactionMarkerIdx && active?.compaction && (
+                      <CompactionMarker compaction={active.compaction} />
+                    )}
+                    <ChatMessageBubble
+                      role={m.role}
+                    displayContent={m.role === "user" ? m.displayContent ?? m.content : undefined}
+                    refs={m.refs}
+                    refKeyOf={refKeyOfPanelRef}
+                    onRefChipClick={handleRefChipClick}
+                    content={m.content}
+                    steps={m.steps}
+                    isStreaming={isStreamingMsg}
+                    markdownLinks={chatMarkdownLinks}
+                    copyText={m.role === "user" ? (m.displayContent ?? m.content) : assistantReplyText(m)}
+                    messageId={m.id}
+                    canRollback={!isStreamingMsg && m.role === "assistant" && assistantReplyText(m).trim() !== ""}
+                    onRollback={rollbackTo}
+                    onRegenerate={canRegenerate ? handleRegenerate : undefined}
+                  />
+                  </div>
+                );
+              })
+            )}
+
+            {/* 压缩覆盖到对话末尾（刚压缩完的常态）：标记行渲染在列表末尾 */}
+            {compactionMarkerIdx === messages.length && active?.compaction && (
+              <CompactionMarker compaction={active.compaction} />
+            )}
+          </div>
+          {showJumpToBottom && <JumpToBottomButton onClick={jumpToBottom} />}
+        </div>
+
+        {/* 底部输入区：不铺底色、只用一条 1px 上边分隔——输入框是这里唯一的「盒子」，
+            底栏若再铺一层底色就与输入框叠成两个盒子 */}
+        <div
+          className="border-t flex-shrink-0 px-3 pt-2.5 pb-3"
+          style={{ borderColor: "var(--border-subtle)" }}
+        >
+          {/* 输入框（data-chat-input = 文件面板拖拽文件/文件夹的落点：拖入即 @引用）：
+          overlay 渲染 @标签（透明 textarea 承载输入，滚动同步 transform）；键入 @ 唤起仓库选择器。
+          输入框是输入区唯一的盒子，内部纵向三段常规流：输入面 → 分隔线 → 工具排
+          （工具排走常规流而非绝对定位——绝对定位会与超出的输入文字叠在一起） */}
+          <div
+            // 边框恒定不改：聚焦转金边在深底上呈"发光"观感，且叠加 2px 光环会形成同心双线，故聚焦不做边框变化
+            className="relative rounded-[var(--radius-md)] border border-[var(--border)]"
+            data-chat-input
+            ref={inputWrapRef}
+            style={{ background: "var(--bg-sunken)" }}
+          >
+            {picker && (
+              <VaultAtPicker
+                x={picker.x}
+                y={picker.y}
+                openUp={picker.openUp}
+                yBottom={picker.yBottom}
+                query={picker.query}
+                onPick={handleVaultPick}
+                onClose={() => setPicker(null)}
+              />
+            )}
+            <MentionTextarea
+              textareaRef={textareaRef}
+              value={input}
+              onChange={(v) => {
+                setInput(v);
+                // @ 后继续输入 → 实时过滤候选（query = @ 位置之后的内容）；
+                // @ 锚字符已被删（退格/整体替换）→ 关闭选择器，防陈旧 atIdx 错位插入
+                if (picker && atIdx >= 0) {
+                  if (v[atIdx] !== "@") {
+                    setPicker(null);
+                    setAtIdx(-1);
+                  } else {
+                    setPicker((p) => (p ? { ...p, query: v.slice(atIdx + 1) } : p));
+                  }
+                }
+              }}
+              segments={segments}
+              onRemoveMention={removeMention}
+              onKeyDown={(e) => {
+                // 键入 @ 唤起仓库文件/文件夹选择器（坐标相对输入容器；下方视口不足 → 向上弹出）
+                if (e.key === "@") {
+                  setAtIdx(textareaRef.current?.selectionStart ?? 0);
+                  const taRect = textareaRef.current?.getBoundingClientRect();
+                  const wrapRect = inputWrapRef.current?.getBoundingClientRect();
+                  const x = (taRect?.left ?? 0) - (wrapRect?.left ?? 0);
+                  const y = (taRect?.bottom ?? 0) - (wrapRect?.top ?? 0);
+                  const yBottom = (wrapRect?.bottom ?? 0) - (taRect?.bottom ?? 0);
+                  const openUp = window.innerHeight - (taRect?.bottom ?? 0) < 264;
+                  setPicker({ x, y, openUp, yBottom, query: "" });
+                }
+                // Enter 发送 / Shift+Enter 换行；IME 组合期间 Enter 是「上屏候选词」而非发送
+                if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+                  e.preventDefault();
+                  handleSend();
+                }
+              }}
+              spellCheck={false}
+              placeholder="输入消息，@ 引用文件，Enter 发送，Shift+Enter 换行"
+              rows={5}
+              overlayClassName="z-0 px-2 pt-3 pb-2 text-sm leading-relaxed"
+              // focus:shadow-none 压掉全局 textarea:focus 的 2px 焦点环：输入面撑满输入盒内部，
+              // 该环会紧贴盒子的 1px 金边形成同心双线；此处的聚焦提示由外层盒的边转金承担
+              textareaClassName="w-full px-2 pt-3 pb-2 text-sm leading-relaxed focus:shadow-none"
+            />
+
+            {/* 工具排（盒子内底部，与输入面同属一块、不画分隔线）：左 Agent/模型；右 发送/停止 */}
+            <div className="flex items-center gap-2 px-2 pt-1 pb-2">
+              {/* Agent 选择：选中的 Agent 提供系统提示词与工具（发送时实时解析）；缺省「对话」= 普通对话 */}
+              <DropdownSelect
+                value={agentId ?? ""}
+                onChange={(v) => setAgentId(v || undefined)}
+                options={agents.map((a) => ({ value: a.id, label: a.name }))}
+                // 未选择（旧数据/清空）= 缺省「对话」：占位显示对话、运行时按「对话」解析
+                placeholder="对话"
+                emptyText="暂无 Agent（设置 → Agent 新建）"
+                prefixIcon={<Bot size={13} className="flex-shrink-0" />}
+                title={agentId ? `Agent：${agents.find((a) => a.id === agentId)?.name ?? ""}` : "Agent：对话（缺省，普通对话；系统提示词与工具在 设置 → Agent 中配置）"}
+                // 无边框幽灵态 + 按内容定宽（宽度上限 = 文字自然宽度，不撑满剩余空间）；
+                // 不参与收缩——否则面板一窄，长模型名会把只有两个字的 Agent 名挤成「对…」
+                // （max-w-45% 只是超长 Agent 名的兜底，正常名不会触到）
+                className="h-6 px-2 rounded-[var(--radius-sm)] text-[11px] hover:bg-[var(--bg-tertiary)] w-fit max-w-[45%] flex-shrink-0 min-w-0"
+                style={{ color: "var(--text-secondary)" }}
+              />
+
+              {/* 模型选择：两级菜单（模型 / 推理等级子面板，PopupLayer 统一弹层壳） */}
+              <ModelSelect
+                providers={providers}
+                providerId={modelOverride?.providerId}
+                model={modelOverride?.model}
+                effort={effortOverride ?? undefined}
+                onSelectModel={(sel) =>
+                  sel
+                    ? setModelOverride({ providerId: sel.providerId, model: sel.model })
+                    : setModelOverride(null)
+                }
+                onSelectEffort={(effort) => setEffortOverride(effort ?? null)}
+                defaultModelDisplay={defaultModelDisplay}
+                prefixIcon={<Cpu size={13} className="flex-shrink-0" />}
+                title={modelOverride ? `模型：${modelOverride.model}` : "模型：跟随仓库默认（点击选择/设置推理等级）"}
+                // 同按内容定宽（上限 = 文字自然宽度）；空间不足时由它承担收缩（模型名最长，截断损失最小）
+                className="h-6 px-2 rounded-[var(--radius-sm)] text-[11px] hover:bg-[var(--bg-tertiary)] w-fit min-w-0"
+                style={{ color: "var(--text-secondary)" }}
+              />
+              {/* 右：发送 / 停止（图标 only，金色圆钮，流式中切换为停止）——mr-1 右缘留白不顶格；
+                  任一会话压缩进行中即禁用（压缩与发送共用一个中止句柄，避免静默无效点击） */}
+              <button
+                onClick={streaming ? stop : handleSend}
+                disabled={compactingAny || (!streaming && !input.trim())}
+                title={compactingAny ? "正在压缩会话历史…" : streaming ? "停止" : "发送 (Enter)"}
+                aria-label={compactingAny ? "正在压缩会话历史" : streaming ? "停止" : "发送"}
+                className="w-7 h-7 ml-auto rounded-[var(--radius-sm)] inline-flex items-center justify-center flex-shrink-0 disabled:opacity-40"
+                style={{
+                  background: streaming ? "var(--bg-tertiary)" : "var(--accent)",
+                  color: streaming ? "var(--text-secondary)" : "var(--accent-fg)",
+                }}
+              >
+                {streaming ? <Square size={12} /> : <ArrowUp size={13} />}
+              </button>
+            </div>
+          </div>
         </div>
       </div>
     </div>

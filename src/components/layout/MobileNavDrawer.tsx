@@ -1,7 +1,7 @@
 /**
  * 移动端导航抽屉：常驻窄图标栏（快捷切换）+ 可展开的带文字宽栏（覆盖在内容之上）。
  *
- * 两种用途共用：工作区的视图切换、设置页的 tab 切换（同一套交互）。
+ * 用于设置页的 tab 切换（工作区视图切换已改底部导航栏，见 MobileBottomBar）。
  * 展开态是浮层的一层：返回键先收起它（见 useBackHandler）；点选条目后自动收起。
  */
 import { useState } from "react";
@@ -23,13 +23,10 @@ export function MobileNavDrawer({
   items,
   active,
   onSelect,
-  applySafeArea = true,
 }: {
   items: MobileNavItem[];
   active: string | null;
   onSelect: (key: string) => void;
-  /** 由外层容器统一避让系统栏时传 false（防安全区重复叠加）。 */
-  applySafeArea?: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
   useBackHandler(expanded, () => {
@@ -50,8 +47,6 @@ export function MobileNavDrawer({
           width: RAIL_WIDTH,
           background: "var(--bg-secondary)",
           borderRight: "1px solid var(--border-subtle)",
-          paddingTop: applySafeArea ? "env(safe-area-inset-top)" : undefined,
-          paddingBottom: applySafeArea ? "env(safe-area-inset-bottom)" : undefined,
         }}
       >
         <div className="flex-1 min-h-0 overflow-y-auto py-2">
@@ -99,8 +94,6 @@ export function MobileNavDrawer({
               width: 172,
               background: "var(--bg-primary)",
               borderColor: "var(--border)",
-              paddingTop: applySafeArea ? "calc(env(safe-area-inset-top) + 12px)" : undefined,
-              paddingBottom: applySafeArea ? "calc(env(safe-area-inset-bottom) + 24px)" : undefined,
             }}
           >
             {items.map((item) => {

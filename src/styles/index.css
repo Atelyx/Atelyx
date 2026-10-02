@@ -90,6 +90,9 @@
   --radius-bubble: 8px;
   --radius-md: 10px;
   --radius-lg: 14px;
+  /* 笔记正文行宽上限（应用级偏好，设置 → 编辑器；运行时由 useAppearance 写 :root 内联值覆盖，
+     不限制时写 none）：标题/属性/正文/反链同列共用此一档 */
+  --note-line-width: 780px;
   --shadow-pop: 0 1px 2px rgba(20, 20, 20, 0.06), 0 8px 24px rgba(20, 20, 20, 0.1);
 
   /* 字体族：显示 / UI / 等宽。设计字体未随应用分发时回退系统栈（CJK 优先命中本地思源/苹方） */
@@ -448,10 +451,10 @@ body {
   min-height: 100%;
   padding: 1rem;
 }
-/* 笔记面板正文最大行宽：与标题/属性区同列居中（面板宽度由用户拖拽决定，此行宽只锁可读性上限）；
-   画布文本节点不带 .note-body，不受影响 */
+/* 笔记面板正文最大行宽：与标题/属性区同列居中（行宽取 --note-line-width，设置 → 编辑器可调，
+   none = 随面板铺满只留内边距）；画布文本节点不带 .note-body，不受影响 */
 .note-body .md-edit-content {
-  max-width: 780px;
+  max-width: var(--note-line-width, 780px);
   margin: 0 auto;
 }
 /* 富装饰块（表格 / raw HTML / 缩进代码）整块回显源码：保留换行与缩进，长行折行 */
