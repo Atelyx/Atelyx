@@ -176,7 +176,7 @@ function InspectorHeader({ badge }: { badge: string }) {
   return (
     <div
       className="px-3 py-2 border-b flex items-center gap-2 flex-shrink-0"
-      style={{ borderColor: "var(--border)" }}
+      style={{ background: "var(--bg-secondary)", borderColor: "var(--border)" }}
       data-tauri-drag-region
     >
       <span className="font-medium text-xs">属性</span>
@@ -326,7 +326,7 @@ export function InspectorPanel() {
     return (
       <div
         className="h-full flex flex-col overflow-hidden"
-        style={{ background: "var(--bg-secondary)", color: "var(--text-primary)" }}
+        style={{ background: "var(--bg-primary)", color: "var(--text-primary)" }}
       >
         <InspectorHeader badge="笔记" />
 
@@ -379,7 +379,7 @@ export function InspectorPanel() {
 
   // 无上下文（无选中节点、焦点非笔记编辑器）：空面板，无占位提示
   if (!node) {
-    return <div className="h-full" style={{ background: "var(--bg-secondary)" }} />;
+    return <div className="h-full" style={{ background: "var(--bg-primary)" }} />;
   }
 
   const isConv = node.type === "conversation";
@@ -421,7 +421,7 @@ export function InspectorPanel() {
   return (
     <div
       className="h-full flex flex-col overflow-hidden"
-      style={{ background: "var(--bg-secondary)", color: "var(--text-primary)" }}
+      style={{ background: "var(--bg-primary)", color: "var(--text-primary)" }}
     >
       <InspectorHeader badge={NODE_TYPE_LABEL[node.type ?? ""] ?? node.type ?? "节点"} />
 

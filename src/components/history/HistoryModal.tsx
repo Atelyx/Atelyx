@@ -148,12 +148,12 @@ export function HistoryModal({ kind, file, open, onClose, onRollback }: Props) {
       }}
     >
       <div
-        className="w-[560px] max-h-[80vh] flex flex-col rounded-lg shadow-2xl"
-        style={{ background: "var(--bg-primary)", border: "1px solid var(--border)" }}
+        className="w-[560px] max-h-[80vh] flex flex-col rounded-[var(--radius-lg)] shadow-[var(--shadow-pop)]"
+        style={{ background: "var(--bg-overlay)", border: "1px solid var(--border)" }}
       >
         <div
           className="flex items-center gap-2 px-3 py-2 flex-shrink-0 select-none"
-          style={{ borderBottom: "1px solid var(--border)" }}
+          style={{ background: "var(--bg-secondary)", borderBottom: "1px solid var(--border)" }}
         >
           <History size={15} style={{ color: "var(--accent)" }} />
           <span className="text-sm" style={{ color: "var(--text-primary)" }}>

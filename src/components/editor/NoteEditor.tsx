@@ -505,7 +505,11 @@ export function NoteEditor({ file }: { file: string }) {
       {/* 顶部条：右侧编辑/预览切换（保存状态已移至面板 header）。高度与表格/画布工具栏统一（py-1.5）。 */}
       <div
         className="px-3 py-1.5 flex items-center gap-1.5 text-xs flex-shrink-0 select-none"
-        style={{ borderBottom: "1px solid var(--border)", color: "var(--text-muted)" }}
+        style={{
+          background: "var(--bg-secondary)",
+          borderBottom: "1px solid var(--border)",
+          color: "var(--text-muted)",
+        }}
       >
         {/* 插件贡献区：笔记工具条左侧（list 槽，priority 降序） */}
         <SlotListMount slot="toolbar/note/left" />

@@ -658,7 +658,7 @@ export function TableEditor({ panelId }: { panelId: string }) {
       {/* 工具条（错误/保存状态均在面板 header） */}
       <div
         className="flex items-center gap-2 px-3 py-1.5 border-b flex-shrink-0 text-xs"
-        style={{ borderColor: "var(--border)", color: "var(--text-secondary)" }}
+        style={{ background: "var(--bg-secondary)", borderColor: "var(--border)", color: "var(--text-secondary)" }}
       >
         {/* 插件贡献区：表格工具条左侧（list 槽，priority 降序） */}
         <SlotListMount slot="toolbar/table/left" />

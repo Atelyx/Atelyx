@@ -165,7 +165,7 @@ export function CalendarPanel() {
   return (
     <div className="h-full w-full flex flex-col" style={{ background: "var(--bg-primary)" }}>
       {/* 顶部：年月导航 + 今天 + 过滤开关 */}
-      <div className="flex items-center gap-1 px-2 py-1.5 flex-shrink-0 select-none" style={{ borderBottom: "1px solid var(--border)" }}>
+      <div className="flex items-center gap-1 px-2 py-1.5 flex-shrink-0 select-none" style={{ background: "var(--bg-secondary)", borderBottom: "1px solid var(--border)" }}>
         <button onClick={() => goMonth(-1)} className="w-6 h-6 flex items-center justify-center rounded hover:opacity-80" style={{ color: "var(--text-secondary)" }} title="上一月">
           <ChevronLeft size={14} />
         </button>

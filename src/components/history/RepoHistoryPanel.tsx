@@ -85,7 +85,7 @@ function FileGroup({
 }) {
   const latest = group.entries[0];
   return (
-    <div className="rounded" style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)" }}>
+    <div className="rounded" style={{ background: "var(--bg-tertiary)", border: "1px solid var(--border)" }}>
       <div
         onClick={onToggle}
         className="flex items-center gap-1.5 text-xs px-2 py-1.5 cursor-pointer select-none"
@@ -179,7 +179,7 @@ export function RepoHistoryPanel() {
   return (
     <div className="h-full w-full flex flex-col" style={{ background: "var(--bg-primary)" }}>
       {/* 头：标题 + 加载指示 + 显示全部文件 */}
-      <div className="flex items-center gap-1.5 px-3 py-2 flex-shrink-0 select-none" style={{ borderBottom: "1px solid var(--border)" }}>
+      <div className="flex items-center gap-1.5 px-3 py-2 flex-shrink-0 select-none" style={{ background: "var(--bg-secondary)", borderBottom: "1px solid var(--border)" }}>
         <History size={13} style={{ color: "var(--accent)" }} />
         <span className="text-xs font-medium" style={{ color: "var(--text-primary)" }}>
           仓库历史

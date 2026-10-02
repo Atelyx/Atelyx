@@ -43,7 +43,7 @@ export function RecentPanel() {
 
   return (
     <div className="h-full w-full flex flex-col" style={{ background: "var(--bg-primary)" }}>
-      <div className="flex items-center gap-1.5 px-3 py-2 flex-shrink-0 select-none" style={{ borderBottom: "1px solid var(--border)" }}>
+      <div className="flex items-center gap-1.5 px-3 py-2 flex-shrink-0 select-none" style={{ background: "var(--bg-secondary)", borderBottom: "1px solid var(--border)" }}>
         <Clock size={13} style={{ color: "var(--accent)" }} />
         <span className="text-xs font-medium" style={{ color: "var(--text-primary)" }}>
           最近打开

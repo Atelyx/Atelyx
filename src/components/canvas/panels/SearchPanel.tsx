@@ -76,10 +76,10 @@ export function SearchPanel() {
   return (
     <div
       className="h-full flex flex-col text-sm overflow-hidden"
-      style={{ background: "var(--bg-secondary)", color: "var(--text-primary)" }}
+      style={{ background: "var(--bg-primary)", color: "var(--text-primary)" }}
     >
       {/* 顶部：模式选择 + 搜索输入框 */}
-      <div className="px-2 py-1.5 border-b flex flex-col gap-1.5" style={{ borderColor: "var(--border)" }}>
+      <div className="px-2 py-1.5 border-b flex flex-col gap-1.5" style={{ background: "var(--bg-secondary)", borderColor: "var(--border)" }}>
         <button
           onClick={(e) => {
             const rect = e.currentTarget.getBoundingClientRect();

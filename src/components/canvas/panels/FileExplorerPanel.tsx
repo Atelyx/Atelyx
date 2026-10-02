@@ -277,10 +277,10 @@ export function FileExplorerPanel({ openedNoteFile, openedTableFile, onConvertWh
   return (
     <div
       className="h-full flex flex-col text-sm overflow-hidden"
-      style={{ background: "var(--bg-secondary)", color: "var(--text-primary)" }}
+      style={{ background: "var(--bg-primary)", color: "var(--text-primary)" }}
     >
       {/* 工具条：打开文件夹（仓库级入口）+ 新增协作空间 + 排序方式下拉气泡 + 展开/收起全部 */}
-      <div className="px-2 py-1.5 border-b flex items-center gap-1" style={{ borderColor: "var(--border)" }}>
+      <div className="px-2 py-1.5 border-b flex items-center gap-1" style={{ background: "var(--bg-secondary)", borderColor: "var(--border)" }}>
         {/* 插件贡献区：文件面板工具条左侧（list 槽，priority 降序） */}
         <SlotListMount slot="toolbar/files/left" />
         <button

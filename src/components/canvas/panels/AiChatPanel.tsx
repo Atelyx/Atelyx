@@ -299,7 +299,7 @@ export function AiChatPanel() {
     return (
       <div
         className="h-full flex flex-col items-center justify-center gap-2 px-6 text-center"
-        style={{ background: "var(--bg-secondary)", color: "var(--text-secondary)" }}
+        style={{ background: "var(--bg-primary)", color: "var(--text-secondary)" }}
       >
         <AlertTriangle size={18} />
         <span className="text-xs">{CHAT_UNAVAILABLE_TEXT}</span>
@@ -310,12 +310,12 @@ export function AiChatPanel() {
   return (
     <div
       className="h-full flex flex-col overflow-hidden relative"
-      style={{ background: "var(--bg-secondary)", color: "var(--text-primary)" }}
+      style={{ background: "var(--bg-primary)", color: "var(--text-primary)" }}
     >
       {/* 顶部无头行：左侧会话标题（出错时显示错误提示）+ 右侧会话管理按钮 */}
       <div
         className="px-2 py-1.5 border-b flex items-center gap-2 flex-shrink-0 min-h-9"
-        style={{ borderColor: "var(--border)" }}
+        style={{ background: "var(--bg-secondary)", borderColor: "var(--border)" }}
         data-tauri-drag-region
       >
         <div className="flex-1 min-w-0 flex items-center gap-1.5">

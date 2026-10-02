@@ -46,7 +46,7 @@ function MemberRow({
 }) {
   const files = openFiles ?? [];
   return (
-    <div className="flex items-start gap-2 px-3 py-2 rounded-md hover:opacity-90" style={{ background: "var(--bg-secondary)" }}>
+    <div className="flex items-start gap-2 px-3 py-2 rounded-md hover:opacity-90" style={{ background: "var(--bg-tertiary)" }}>
       <span className="mt-1 w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: color }} aria-hidden />
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-1.5 text-sm">
@@ -169,9 +169,9 @@ function SpaceMembersView({ serverUrl, spaceId }: { serverUrl: string; spaceId: 
   return (
     <div className="h-full w-full flex flex-col overflow-hidden" style={{ background: "var(--bg-primary)" }}>
       {/* 连接状态条 */}
-      <div className="flex items-center gap-2 px-3 py-2 flex-shrink-0 select-none" style={{ borderBottom: "1px solid var(--border)" }}>
-        {connected ? <Wifi size={13} style={{ color: "#22c55e" }} /> : <WifiOff size={13} style={{ color: "var(--text-muted)" }} />}
-        <span className="text-xs" style={{ color: connected ? "#22c55e" : "var(--text-muted)" }}>
+      <div className="flex items-center gap-2 px-3 py-2 flex-shrink-0 select-none" style={{ background: "var(--bg-secondary)", borderBottom: "1px solid var(--border)" }}>
+        {connected ? <Wifi size={13} style={{ color: "var(--success)" }} /> : <WifiOff size={13} style={{ color: "var(--text-muted)" }} />}
+        <span className="text-xs" style={{ color: connected ? "var(--success)" : "var(--text-muted)" }}>
           {connected ? "已连接协作空间" : "未连接"}
         </span>
       </div>
@@ -203,7 +203,7 @@ function SpaceMembersView({ serverUrl, spaceId }: { serverUrl: string; spaceId: 
           </div>
         ) : (
           (rosterStale ? [] : members).map((m) => (
-            <div key={m.userId} className="flex items-center gap-2 px-3 py-1.5 rounded-md" style={{ background: "var(--bg-secondary)" }}>
+            <div key={m.userId} className="flex items-center gap-2 px-3 py-1.5 rounded-md" style={{ background: "var(--bg-tertiary)" }}>
               <span className="flex-1 min-w-0 truncate text-xs" style={{ color: "var(--text-primary)" }}>
                 {m.displayName || m.username}
                 <span className="ml-1.5" style={{ color: "var(--text-muted)" }}>
