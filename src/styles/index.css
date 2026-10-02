@@ -5,155 +5,213 @@
 @tailwind components;
 @tailwind utilities;
 
-/* ===== Theme Variables ===== */
+/* ===== Theme Variables =====
+   浅色基底（品牌主色 = 黄铜金）。背景按用途分档（primary < secondary < tertiary < overlay），
+   相邻档差极小——分层靠「色阶 + 1px 边」而非强对比。
+   变量名是插件与主题契约（docs/plugins），只增不改。 */
 :root {
-  --bg-primary: #f8fafc;
+  /* 背景色阶 */
+  --bg-primary: #fafaf8;
   --bg-secondary: #ffffff;
-  --bg-tertiary: #f1f5f9;
+  --bg-tertiary: #f1f1ee;
   --bg-card: #ffffff;
-  --text-primary: #0f172a;
-  --text-secondary: #475569;
-  --text-muted: #94a3b8;
-  --border: #e2e8f0;
-  --hover: #f1f5f9;
+  --bg-overlay: #ffffff;
   --surface: #ffffff;
-  --input-bg: #ffffff;
-  --input-border: #cbd5e1;
-  --input-placeholder: #94a3b8;
-  --scrollbar-thumb: #cbd5e1;
-  --scrollbar-thumb-hover: #94a3b8;
 
-  /* 品牌主色（全局一致，深/浅主题共用）：对齐应用图标金色 #D4AF37 */
-  --accent: #d4af37;
-  --accent-hover: #b8962e;
-  /* accent 底上的前景色（金色底用深色文字，对比度优于白字，呼应图标深底金饰） */
-  --accent-fg: #1c1c1e;
+  /* 文本 */
+  --text-primary: #1a1917;
+  --text-secondary: #565450;
+  --text-muted: #726f68;
+
+  /* 边与交互态 */
+  --border-subtle: #efeee9;
+  --border: #e4e3de;
+  --border-strong: #cfcec7;
+  --hover: #f1f1ee;
+
+  /* 表单与滚动条 */
+  --input-bg: #ffffff;
+  --input-border: #cfcec7;
+  --input-placeholder: #7c7a73;
+  --scrollbar-thumb: #d8d7d1;
+  --scrollbar-thumb-hover: #b6b4ac;
+
+  /* 强调（黄铜金）：浅底上用深一档金保证正文对比，金底恒配白字 */
+  --accent: #8c6a20;
+  --accent-hover: #6f5516;
+  --accent-fg: #ffffff;
+  --accent-soft: rgba(140, 106, 32, 0.1);
+  --focus-ring: 0 0 0 2px rgba(140, 106, 32, 0.28);
+
+  /* 状态语义色（状态点 / 提示 / 危险操作共用；不得只靠色表达状态） */
+  --success: #2e7d5b;
+  --warning: #9a6b00;
+  --danger: #c0392b;
+  /* 破坏性按钮的实心底（白字需 ≥4.5:1；--danger 是深底上的文字色，偏亮不能当底） */
+  --danger-fill: #c0392b;
+  --info: #2563eb;
 
   /* 标题栏窗口控制按钮（无边框窗口） */
-  --titlebar-icon: #475569;
-  --titlebar-hover: rgba(0, 0, 0, 0.08);
+  --titlebar-icon: #565450;
+  --titlebar-hover: rgba(0, 0, 0, 0.06);
   --titlebar-close-hover: rgba(232, 17, 35, 0.9);
 
-  --highlight-bg: #f1f5f9;
-  --highlight-text: #1e293b;
-  /* 代码块关键字色 / 内部链接色：跟随强调色（hover 档，浅/深主题统一） */
+  /* Markdown 与代码 */
+  --highlight-bg: #f1f1ee;
+  --highlight-text: #1a1917;
+  /* 代码关键字色 / 内部链接色：跟随强调色（暗化档，浅底保证正文对比） */
   --highlight-code: var(--accent-hover);
-  --table-border: #e2e8f0;
-  --table-header-bg: #f1f5f9;
-
-  /* Markdown 扩展语法：==高亮== / [[wiki 链接]] / callout */
-  --mark-bg: #fff3a3;
-  --mark-color: #1f2937;
   --link-internal: var(--accent-hover);
-  --callout-bg: rgba(15, 23, 42, 0.04);
-  /* 代码块底色（独立于行内 code 的 --highlight-bg；深色主题下需与卡片 #252526 区分） */
-  --code-bg: #f1f5f9;
+  --mark-bg: #fbf0c0;
+  --mark-color: #1f2937;
+  --callout-bg: rgba(26, 25, 23, 0.04);
+  --code-bg: #f4f4f1;
+  --table-border: #e4e3de;
+  --table-header-bg: #f1f1ee;
+
+  /* 形状与投影（投影只给浮层，面板内不用） */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --shadow-pop: 0 1px 2px rgba(20, 20, 20, 0.06), 0 8px 24px rgba(20, 20, 20, 0.1);
+
+  /* 字体族：显示 / UI / 等宽。设计字体未随应用分发时回退系统栈（CJK 优先命中本地思源/苹方） */
+  --font-sans:
+    "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", "Noto Sans SC",
+    "Source Han Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-display: "Fraunces", var(--font-sans);
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 
   color-scheme: light;
 }
 
-/* 夜间主题标准色（对齐深色 HEX 体系，中性灰而非蓝色调） */
+/* 夜间主题（主基调）：炭黑 + 黄铜金 + 暖白文本；中性冷灰边，不用蓝色调 */
 :root.dark {
-  --bg-primary: #1e1e1e;
-  --bg-secondary: #252526;
-  --bg-tertiary: #2a2d2e;
-  --bg-card: #252526;
-  --text-primary: #dcdcdc;
-  --text-secondary: #8b8b8b;
-  --text-muted: #8b8b8b;
-  --border: #333333;
-  --hover: #2a2d2e;
-  --surface: #252526;
-  --input-bg: #252526;
-  --input-border: #333333;
-  --input-placeholder: #8b8b8b;
-  --scrollbar-thumb: #333333;
-  --scrollbar-thumb-hover: #8b8b8b;
+  /* 背景色阶 */
+  --bg-primary: #0e0f11;
+  --bg-secondary: #16181b;
+  --bg-tertiary: #1d2024;
+  --bg-card: #16181b;
+  --bg-overlay: #23262b;
+  --surface: #16181b;
 
-  /* 标题栏：图标浅灰 #cccccc，hover 背景 #333333，关闭 hover Windows 红 #e81123 */
-  --titlebar-icon: #cccccc;
-  --titlebar-hover: #333333;
+  /* 文本 */
+  --text-primary: #e8e6e1;
+  --text-secondary: #a3a19b;
+  --text-muted: #85837a;
+
+  /* 边与交互态 */
+  --border-subtle: #23262b;
+  --border: #2e3238;
+  --border-strong: #3d4249;
+  --hover: #1d2024;
+
+  /* 表单与滚动条 */
+  --input-bg: #1d2024;
+  --input-border: #3d4249;
+  --input-placeholder: #85837a;
+  --scrollbar-thumb: #2e3238;
+  --scrollbar-thumb-hover: #3d4249;
+
+  /* 强调：深底上的金需提亮一档（暗化版对比不足），金底配深色前景 */
+  --accent: #e0a94e;
+  --accent-hover: #f0bc66;
+  --accent-fg: #141414;
+  --accent-soft: rgba(224, 169, 78, 0.14);
+  --focus-ring: 0 0 0 2px rgba(224, 169, 78, 0.34);
+
+  /* 状态语义色 */
+  --success: #5fbf8b;
+  --warning: #e0a94e;
+  --danger: #e06a5f;
+  --info: #6fa8dc;
+
+  /* 标题栏窗口控制按钮 */
+  --titlebar-icon: #a3a19b;
+  --titlebar-hover: rgba(255, 255, 255, 0.07);
   --titlebar-close-hover: #e81123;
 
-  --highlight-bg: #252526;
-  --highlight-text: #dcdcdc;
-  /* 代码块关键字色：深色底需亮化强调色（暗化版对比不足），浅色主题继承 :root */
-  --highlight-code: color-mix(in srgb, var(--accent) 55%, white);
-  --table-border: #333333;
-  --table-header-bg: #2a2d2e;
-
-  /* 深色主题 callout 背景（mark 高亮与 wiki 链接色两主题统一） */
+  /* Markdown 与代码 */
+  --highlight-bg: #1d2024;
+  --highlight-text: #e8e6e1;
+  /* 深色底需亮化强调色（暗化版对比不足）；浅色主题各自定义 */
+  --highlight-code: color-mix(in srgb, var(--accent) 88%, white);
+  --link-internal: color-mix(in srgb, var(--accent) 88%, white);
   --callout-bg: rgba(255, 255, 255, 0.05);
-  /* 深色代码块底色：比卡片 #252526 更深一档 */
-  --code-bg: #161616;
+  /* 代码块底色：比卡片更深一档 */
+  --code-bg: #0a0b0c;
+  --table-border: #2e3238;
+  --table-header-bg: #1d2024;
+
+  --shadow-pop: 0 1px 2px rgba(0, 0, 0, 0.5), 0 12px 32px rgba(0, 0, 0, 0.45);
 
   color-scheme: dark;
 }
 
 :root.dark .react-flow__background {
-  background-color: #1e1e1e !important;
+  background-color: var(--bg-primary) !important;
 }
 
 /* ===== ReactFlow theme ===== */
 :root {
-  --xy-edge-stroke-default: #94a3b8;
+  --xy-edge-stroke-default: #b6b4ac;
   --xy-edge-stroke-width-default: 1;
   --xy-edge-stroke-selected-default: var(--accent);
-  --xy-connectionline-stroke-default: #94a3b8;
+  --xy-connectionline-stroke-default: #b6b4ac;
   --xy-connectionline-stroke-width-default: 1;
-  --xy-attribution-background-color-default: rgba(200, 200, 200, 0.5);
-  --xy-minimap-background-color-default: #f1f5f9;
-  --xy-minimap-mask-background-color-default: rgba(241, 245, 249, 0.6);
-  --xy-minimap-node-background-color-default: #cbd5e1;
+  --xy-attribution-background-color-default: rgba(250, 250, 248, 0.5);
+  --xy-minimap-background-color-default: #f1f1ee;
+  --xy-minimap-mask-background-color-default: rgba(241, 241, 238, 0.6);
+  --xy-minimap-node-background-color-default: #d8d7d1;
   --xy-minimap-node-stroke-color-default: transparent;
-  --xy-background-color-default: #f8fafc;
-  --xy-background-pattern-dots-color-default: #cbd5e1;
-  --xy-node-color-default: #0f172a;
-  --xy-node-border-default: 1px solid #e2e8f0;
+  --xy-background-color-default: #fafaf8;
+  --xy-background-pattern-dots-color-default: #d8d7d1;
+  --xy-node-color-default: #1a1917;
+  --xy-node-border-default: 1px solid #e4e3de;
   --xy-node-background-color-default: #ffffff;
   --xy-node-boxshadow-hover-default: 0 1px 4px 1px rgba(0, 0, 0, 0.08);
   --xy-node-boxshadow-selected-default: none;
   --xy-handle-background-color-default: var(--accent);
   --xy-handle-border-color-default: #ffffff;
-  --xy-selection-background-color-default: rgba(124, 58, 237, 0.08);
-  --xy-selection-border-default: 1px dotted rgba(124, 58, 237, 0.6);
+  --xy-selection-background-color-default: color-mix(in srgb, var(--accent) 10%, transparent);
+  --xy-selection-border-default: 1px dashed color-mix(in srgb, var(--accent) 60%, transparent);
   --xy-controls-button-background-color-default: #ffffff;
-  --xy-controls-button-background-color-hover-default: #f1f5f9;
-  --xy-controls-button-color-default: #64748b;
-  --xy-controls-button-color-hover-default: #0f172a;
-  --xy-controls-button-border-color-default: #e2e8f0;
+  --xy-controls-button-background-color-hover-default: #f1f1ee;
+  --xy-controls-button-color-default: #6b6963;
+  --xy-controls-button-color-hover-default: #1a1917;
+  --xy-controls-button-border-color-default: #e4e3de;
   --xy-controls-box-shadow-default: 0 0 2px 1px rgba(0, 0, 0, 0.08);
   --xy-edge-label-background-color-default: #ffffff;
-  --xy-edge-label-color-default: #0f172a;
+  --xy-edge-label-color-default: #1a1917;
 }
 
 :root.dark {
-  --xy-edge-stroke-default: #555;
+  --xy-edge-stroke-default: #55595f;
   --xy-edge-stroke-selected-default: var(--accent);
-  --xy-connectionline-stroke-default: #666;
-  --xy-attribution-background-color-default: rgba(50, 50, 50, 0.5);
-  --xy-minimap-background-color-default: #2a2d2e;
-  --xy-minimap-mask-background-color-default: rgba(37, 37, 38, 0.6);
-  --xy-minimap-node-background-color-default: #333333;
-  --xy-background-color-default: #1e1e1e;
-  --xy-background-pattern-dots-color-default: #333333;
-  --xy-node-color-default: #dcdcdc;
-  --xy-node-border-default: 1px solid #333333;
-  --xy-node-background-color-default: #252526;
-  --xy-node-boxshadow-hover-default: 0 1px 4px 1px rgba(0, 0, 0, 0.3);
+  --xy-connectionline-stroke-default: #6b7078;
+  --xy-attribution-background-color-default: rgba(14, 15, 17, 0.5);
+  --xy-minimap-background-color-default: #1d2024;
+  --xy-minimap-mask-background-color-default: rgba(22, 24, 27, 0.6);
+  --xy-minimap-node-background-color-default: #3d4249;
+  --xy-background-color-default: #0e0f11;
+  --xy-background-pattern-dots-color-default: #2e3238;
+  --xy-node-color-default: #e8e6e1;
+  --xy-node-border-default: 1px solid #2e3238;
+  --xy-node-background-color-default: #16181b;
+  --xy-node-boxshadow-hover-default: 0 1px 4px 1px rgba(0, 0, 0, 0.4);
   --xy-node-boxshadow-selected-default: none;
   --xy-handle-background-color-default: var(--accent);
-  --xy-handle-border-color-default: #1e1e1e;
-  --xy-selection-background-color-default: rgba(124, 58, 237, 0.12);
-  --xy-selection-border-default: 1px dotted rgba(124, 58, 237, 0.6);
-  --xy-controls-button-background-color-default: #252526;
-  --xy-controls-button-background-color-hover-default: #2a2d2e;
-  --xy-controls-button-color-default: #8b8b8b;
-  --xy-controls-button-color-hover-default: #dcdcdc;
-  --xy-controls-button-border-color-default: #333333;
+  --xy-handle-border-color-default: #0e0f11;
+  --xy-selection-background-color-default: color-mix(in srgb, var(--accent) 12%, transparent);
+  --xy-selection-border-default: 1px dashed color-mix(in srgb, var(--accent) 60%, transparent);
+  --xy-controls-button-background-color-default: #16181b;
+  --xy-controls-button-background-color-hover-default: #1d2024;
+  --xy-controls-button-color-default: #a3a19b;
+  --xy-controls-button-color-hover-default: #e8e6e1;
+  --xy-controls-button-border-color-default: #2e3238;
   --xy-controls-box-shadow-default: 0 0 2px 1px rgba(0, 0, 0, 0.3);
-  --xy-edge-label-background-color-default: #252526;
-  --xy-edge-label-color-default: #dcdcdc;
+  --xy-edge-label-background-color-default: #16181b;
+  --xy-edge-label-color-default: #e8e6e1;
 }
 
 /* ===== 节点连接边框（ConnectionFrame）：四边透明长条 handle，连接圆点/选中阴影发光按需渐显 ===== */
@@ -172,11 +230,7 @@ body,
 }
 
 :root {
-  font-family:
-    system-ui,
-    -apple-system,
-    "Segoe UI",
-    sans-serif;
+  font-family: var(--font-sans);
   font-size: 18px;
   line-height: 1.5;
 }
@@ -679,7 +733,7 @@ blockquote.md-quote {
   height: 1rem;
 }
 .md-editor-code-lang {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 0.7rem;
   color: var(--text-muted);
   overflow: hidden;
@@ -735,7 +789,7 @@ blockquote.md-quote {
   border-bottom-width: 2px;
   border-radius: 4px;
   background: var(--bg-tertiary);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 0.85em;
 }
 .md-editor-html details {
@@ -956,8 +1010,9 @@ input[type="password"]:focus,
 input[type="url"]:focus,
 input[type="number"]:focus,
 textarea:focus {
-  @apply outline-none ring-1 ring-[var(--accent)];
+  @apply outline-none;
   border-color: var(--accent);
+  box-shadow: var(--focus-ring);
 }
 
 /* Number input: remove spinner */
@@ -1008,14 +1063,14 @@ input[type="number"]::-webkit-inner-spin-button {
   width: 240px;
   height: 3px;
   border-radius: 9999px;
-  background: rgba(255, 255, 255, 0.08);
+  background: color-mix(in srgb, var(--text-primary) 12%, transparent);
   overflow: hidden;
 }
 .sweep-bar {
   width: 33%;
   height: 100%;
   border-radius: 9999px;
-  background: linear-gradient(90deg, transparent, #d4af37, transparent);
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
   animation: sweep-slide 1.2s linear infinite;
 }
 
@@ -1061,6 +1116,11 @@ input[type="number"]::-webkit-inner-spin-button {
 }
 .no-scrollbar::-webkit-scrollbar {
   display: none;
+}
+
+/* 菜单项危险操作 hover：红字 + 红调底（不整块红底，避免与选中态混淆） */
+.menu-item-danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
 }
 
 /* ===== 触屏 ===== */

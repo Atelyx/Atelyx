@@ -2,7 +2,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" version="1.1" xmlns:xlink="http://www.w3.org/1999/xlink" preserveAspectRatio="none" x="0px" y="0px" width="1024px" height="1024px" viewBox="0 0 1024 1024">
 <defs>
 <radialGradient id="Gradient_1" gradientUnits="userSpaceOnUse" cx="0" cy="0" r="319.9875" fx="0" fy="0" gradientTransform="matrix( 1, 0, 0, 1, 511.95,511.95) " spreadMethod="pad">
-<stop  offset="0%" stop-color="#D4AF37" stop-opacity="0.24705882352941178"/>
+<stop  offset="0%" stop-color="#E0A94E" stop-opacity="0.24705882352941178"/>
 
 <stop  offset="100%" stop-color="#1C1C1E" stop-opacity="0"/>
 </radialGradient>
@@ -70,37 +70,37 @@ Q 782.6 330 738.2 285.8 694 241.4 636.6 217.2 577 192 512 192 446.8 192 387.4 21
 </g>
 
 <g id="Layer0_4_MEMBER_0_FILL">
-<path fill="#D4AF37" stroke="none" d="
+<path fill="#E0A94E" stroke="none" d="
 M 122 84.05
 L 134 84.05 128 69 122 84.05 Z"/>
 </g>
 
 <g id="Layer0_4_MEMBER_1_FILL">
-<path fill="#D4AF37" stroke="none" d="
+<path fill="#E0A94E" stroke="none" d="
 M 92.7 159.8
 L 84.2 151.3 77.85 166.15 92.7 159.8 Z"/>
 </g>
 
 <g id="Layer0_4_MEMBER_2_FILL">
-<path fill="#D4AF37" stroke="none" d="
+<path fill="#E0A94E" stroke="none" d="
 M 171.75 151.3
 L 163.25 159.8 178.1 166.15 171.75 151.3 Z"/>
 </g>
 
 <g id="Layer0_4_MEMBER_3_FILL">
-<path fill="#D4AF37" stroke="none" d="
+<path fill="#E0A94E" stroke="none" d="
 M 296 548.5
 L 320 608.7 344 548.5 296 548.5 Z"/>
 </g>
 
 <g id="Layer0_4_MEMBER_4_FILL">
-<path fill="#D4AF37" stroke="none" d="
+<path fill="#E0A94E" stroke="none" d="
 M 181.95 142
 L 169.95 142 175.95 157.05 181.95 142 Z"/>
 </g>
 
 <g id="Layer0_4_MEMBER_5_FILL">
-<path fill="#D4AF37" stroke="none" d="
+<path fill="#E0A94E" stroke="none" d="
 M 143.25 188.25
 L 151.75 196.75 158.1 181.9 143.25 188.25 Z"/>
 </g>
@@ -112,7 +112,7 @@ L 512 415.4 410.45 489.2 449.2 608.6 574.75 608.6 613.55 489.2 Z"/>
 </g>
 
 <g id="Layer0_7_MEMBER_0_MEMBER_1_MEMBER_1_FILL">
-<path fill="#D4AF37" stroke="none" d="
+<path fill="#E0A94E" stroke="none" d="
 M 128 103
 Q 124.25 103 121.65 105.65 119 108.3 119 112 119 115.75 121.65 118.4 124.25 121 128 121 131.7 121 134.35 118.4 137 115.75 137 112 137 108.3 134.35 105.65 131.7 103 128 103 Z"/>
 </g>
@@ -151,25 +151,25 @@ Q 195.1 697.95 183.25 710.1 Z"/>
 </g>
 
 <g id="Layer0_7_MEMBER_2_MEMBER_1_MEMBER_1_FILL">
-<path fill="#D4AF37" stroke="none" d="
+<path fill="#E0A94E" stroke="none" d="
 M 92 175
 Q 89.9 175 88.45 176.45 87 177.95 87 180 87 182.1 88.45 183.55 89.9 185 92 185 94.05 185 95.55 183.55 97 182.1 97 180 97 177.95 95.55 176.45 94.05 175 92 175 Z"/>
 </g>
 
 <g id="Layer0_7_MEMBER_2_MEMBER_1_MEMBER_2_FILL">
-<path fill="#D4AF37" stroke="none" d="
+<path fill="#E0A94E" stroke="none" d="
 M 92 175
 Q 89.9 175 88.45 176.45 87 177.95 87 180 87 182.1 88.45 183.55 89.9 185 92 185 94.05 185 95.55 183.55 97 182.1 97 180 97 177.95 95.55 176.45 94.05 175 92 175 Z"/>
 </g>
 
 <g id="Layer0_7_MEMBER_2_MEMBER_1_MEMBER_3_FILL">
-<path fill="#D4AF37" stroke="none" d="
+<path fill="#E0A94E" stroke="none" d="
 M 92 175
 Q 89.9 175 88.45 176.45 87 177.95 87 180 87 182.1 88.45 183.55 89.9 185 92 185 94.05 185 95.55 183.55 97 182.1 97 180 97 177.95 95.55 176.45 94.05 175 92 175 Z"/>
 </g>
 
 <g id="Layer0_7_MEMBER_2_MEMBER_1_MEMBER_4_FILL">
-<path fill="#D4AF37" stroke="none" d="
+<path fill="#E0A94E" stroke="none" d="
 M 92 175
 Q 89.9 175 88.45 176.45 87 177.95 87 180 87 182.1 88.45 183.55 89.9 185 92 185 94.05 185 95.55 183.55 97 182.1 97 180 97 177.95 95.55 176.45 94.05 175 92 175 Z"/>
 </g>
@@ -189,7 +189,7 @@ Q 691 697.95 679.1 710.1 Z"/>
 </g>
 
 <g id="Layer0_7_MEMBER_3_MEMBER_1_FILL">
-<path fill="#D4AF37" stroke="none" d="
+<path fill="#E0A94E" stroke="none" d="
 M 708.3 759.95
 L 708.3 790.95
 Q 708.3 799.7 714.25 805.65 720.15 811.6 728.95 811.6
@@ -202,36 +202,36 @@ Q 720.15 739.3 714.25 745.5 708.3 751.4 708.3 759.95 Z"/>
 </g>
 
 <g id="deepseek_svg_20260803_6473a5_svg_Layer_1__Path__4_0_Layer0_0_FILL">
-<path fill="#D4AF37" stroke="none" d="
+<path fill="#E0A94E" stroke="none" d="
 M 2.5 0
 Q 1.45 0 0.75 0.75 0 1.5 0 2.5 0 3.55 0.75 4.3 1.45 5 2.5 5 3.5 5 4.25 4.3 5 3.55 5 2.5 5 1.5 4.25 0.75 3.5 0 2.5 0 Z"/>
 </g>
 
 <g id="deepseek_svg_20260803_6473a5_svg_Layer_1__Path__3_0_Layer0_0_FILL">
-<path fill="#D4AF37" stroke="none" d="
+<path fill="#E0A94E" stroke="none" d="
 M 2 0
 Q 1.15 0 0.55 0.6 0 1.15 0 2 0 2.85 0.55 3.45 1.15 4 2 4 2.85 4 3.4 3.45 4 2.85 4 2 4 1.2 3.4 0.6 2.85 0 2 0 Z"/>
 </g>
 
 <g id="deepseek_svg_20260803_6473a5_svg_Layer_1__Path__2_0_0_Layer0_0_FILL">
-<path fill="#D4AF37" stroke="none" d="
+<path fill="#E0A94E" stroke="none" d="
 M 3 0
 Q 1.75 0 0.85 0.9 0 1.75 0 3 0 4.3 0.85 5.15 1.75 6 3 6 4.25 6 5.1 5.15 6 4.25 6 3 6 1.75 5.1 0.9 4.25 0 3 0 Z"/>
 </g>
 
 <g id="deepseek_svg_20260803_6473a5_svg_Layer_1__Path__1_0_Layer0_0_FILL">
-<path fill="#D4AF37" stroke="none" d="
+<path fill="#E0A94E" stroke="none" d="
 M 2 0
 Q 1.15 0 0.55 0.6 0 1.15 0 2 0 2.85 0.55 3.45 1.15 4 2 4 2.85 4 3.4 3.45 4 2.85 4 2 4 1.2 3.4 0.6 2.85 0 2 0 Z"/>
 </g>
 
 <g id="deepseek_svg_20260803_6473a5_svg_Layer_1__Path__0_Layer0_0_FILL">
-<path fill="#D4AF37" stroke="none" d="
+<path fill="#E0A94E" stroke="none" d="
 M 2.5 0
 Q 1.45 0 0.75 0.75 0 1.5 0 2.5 0 3.55 0.75 4.3 1.45 5 2.5 5 3.5 5 4.25 4.3 5 3.55 5 2.5 5 1.5 4.25 0.75 3.5 0 2.5 0 Z"/>
 </g>
 
-<path id="Layer0_3_1_STROKES" stroke="#D4AF37" stroke-opacity="0.14901960784313725" stroke-width="2" stroke-linejoin="miter" stroke-linecap="butt" stroke-miterlimit="4" fill="none" d="
+<path id="Layer0_3_1_STROKES" stroke="#E0A94E" stroke-opacity="0.14901960784313725" stroke-width="2" stroke-linejoin="miter" stroke-linecap="butt" stroke-miterlimit="4" fill="none" d="
 M 191.999267578125 0
 L 831.996826171875 0
 Q 911.5965225219727 0 967.7963081359862 56.19978561401368 1023.99609375 112.59957046508788 1023.99609375 191.999267578125
@@ -242,11 +242,11 @@ Q 112.39957122802736 1023.99609375 56.19978561401368 967.7963081359862 0 911.596
 L 0 191.999267578125
 Q 0 112.39957122802736 56.19978561401368 56.19978561401368 112.39957122802736 0 191.999267578125 0 Z"/>
 
-<path id="Layer0_5_1_STROKES" stroke="#D4AF37" stroke-width="28" stroke-linejoin="round" stroke-linecap="round" fill="none" d="
+<path id="Layer0_5_1_STROKES" stroke="#E0A94E" stroke-width="28" stroke-linejoin="round" stroke-linecap="round" fill="none" d="
 M 828.75 512
 Q 828.75 643.15 735.95 735.9 643.2 828.7 512.05 828.7 380.9 828.7 288.1 735.9 195.35 643.15 195.35 512 195.35 380.85 288.1 288.05 380.9 195.3 512.05 195.3 643.2 195.3 735.95 288.05 828.75 380.85 828.75 512 Z"/>
 
-<path id="Layer0_6_1_STROKES" stroke="#D4AF37" stroke-width="17" stroke-linejoin="round" stroke-linecap="round" fill="none" d="
+<path id="Layer0_6_1_STROKES" stroke="#E0A94E" stroke-width="17" stroke-linejoin="round" stroke-linecap="round" fill="none" d="
 M 733.25 749.85
 Q 717.1 734.85 709.75 713.2 702.35 691.5 706 669.75 707.25 662.55 710.65 650.9 715.05 635.8 716 632.1 721.45 609.9 715.75 595.5 710.95 583.45 698.75 575.5 687.35 568.1 673.25 566.6
 M 365.85 344.75
@@ -258,7 +258,7 @@ Q 296.85 743.25 302.5 719.25 305.65 705.9 309.45 696.8 314.3 684.9 321.35 676.85
 M 512 415.4
 L 613.55 489.2 574.75 608.6 449.2 608.6 410.45 489.2 512 415.4 Z"/>
 
-<path id="deepseek_svg_20260803_6473a5_svg_Layer_1__Path__2_0_Layer0_0_1_STROKES" stroke="#D4AF37" stroke-width="2" stroke-linejoin="miter" stroke-linecap="butt" stroke-miterlimit="4" fill="none" d="
+<path id="deepseek_svg_20260803_6473a5_svg_Layer_1__Path__2_0_Layer0_0_1_STROKES" stroke="#E0A94E" stroke-width="2" stroke-linejoin="miter" stroke-linecap="butt" stroke-miterlimit="4" fill="none" d="
 M 15 1
 Q 20.8 1 24.9 5.1 29 9.25 29 15 29 20.8 24.9 24.9 20.8 29 15 29 9.2 29 5.1 24.9 1 20.8 1 15 1 9.2 5.1 5.1 9.2 1 15 1 Z"/>
 
@@ -281,15 +281,15 @@ Q 443.05 326.05 431.15 313.9 419.05 302.05 419.05 284.75
 L 419.05 181.45
 Q 419.05 164.4 431.15 152.25 443.05 140.1 460.35 140.1 Z"/>
 
-<path id="Layer0_7_MEMBER_1_MEMBER_1_1_STROKES" stroke="#D4AF37" stroke-width="15" stroke-linejoin="miter" stroke-linecap="round" stroke-miterlimit="4" fill="none" d="
+<path id="Layer0_7_MEMBER_1_MEMBER_1_1_STROKES" stroke="#E0A94E" stroke-width="15" stroke-linejoin="miter" stroke-linecap="round" stroke-miterlimit="4" fill="none" d="
 M 456.3498168945313 191.4371826171875
 L 559.6548706054688 191.4371826171875"/>
 
-<path id="Layer0_7_MEMBER_1_MEMBER_2_1_STROKES" stroke="#D4AF37" stroke-width="15" stroke-linejoin="miter" stroke-linecap="round" stroke-miterlimit="4" fill="none" d="
+<path id="Layer0_7_MEMBER_1_MEMBER_2_1_STROKES" stroke="#E0A94E" stroke-width="15" stroke-linejoin="miter" stroke-linecap="round" stroke-miterlimit="4" fill="none" d="
 M 456.3498168945313 232.7592041015625
 L 528.6633544921875 232.7592041015625"/>
 
-<path id="Layer0_7_MEMBER_1_MEMBER_3_1_STROKES" stroke="#D4AF37" stroke-width="15" stroke-linejoin="miter" stroke-linecap="round" stroke-miterlimit="4" fill="none" d="
+<path id="Layer0_7_MEMBER_1_MEMBER_3_1_STROKES" stroke="#E0A94E" stroke-width="15" stroke-linejoin="miter" stroke-linecap="round" stroke-miterlimit="4" fill="none" d="
 M 456.3498168945313 274.0812255859375
 L 559.6548706054688 274.0812255859375"/>
 
@@ -304,11 +304,11 @@ Q 195.1 883.9 183.25 871.75 171.1 859.9 171.1 842.6
 L 171.1 739.3
 Q 171.1 722.25 183.25 710.1 195.1 697.95 212.4 697.95 Z"/>
 
-<path id="Layer0_7_MEMBER_2_MEMBER_1_MEMBER_0_1_STROKES" stroke="#D4AF37" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" fill="none" d="
+<path id="Layer0_7_MEMBER_2_MEMBER_1_MEMBER_0_1_STROKES" stroke="#E0A94E" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" fill="none" d="
 M 311.7 825.25
 L 311.75 824.6"/>
 
-<path id="Layer0_7_MEMBER_2_MEMBER_1_MEMBER_0_2_STROKES" stroke="#D4AF37" stroke-width="4" stroke-linejoin="round" stroke-linecap="round" fill="none" d="
+<path id="Layer0_7_MEMBER_2_MEMBER_1_MEMBER_0_2_STROKES" stroke="#E0A94E" stroke-width="4" stroke-linejoin="round" stroke-linecap="round" fill="none" d="
 M 311.75 824.6
 L 235.2 767.2 204.2 829.2
 M 317.85 829.2

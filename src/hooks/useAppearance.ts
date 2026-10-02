@@ -6,12 +6,13 @@
  * 应用顺序（分层：基础方案 < 主题插件变量 < 用户设置项）：
  * 1. `.dark` class + color-scheme（由 CSS 内 :root/:root.dark 承担）；
  * 2. 激活主题条目的 variables（inline style 于 :root，变更前回撤上一次写入的键）；
- * 3. 该主题插件的强调色设置项（用户偏好，压过主题 variables 的 --accent）。
+ * 3. 该主题插件的强调色设置项（用户偏好，压过主题 variables 的 --accent）——写 --accent 时
+ *    一并派生 --accent-hover / --accent-soft / --accent-fg / --focus-ring，保证变体同源。
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { usePluginStore } from "@/stores/pluginStore";
-import { darkenHex, foregroundFor } from "@/utils/color";
+import { darkenHex, foregroundFor, lightenHex, withAlpha } from "@/utils/color";
 import {
   ACCENT_COLOR_KEY,
   deriveThemeProviders,
@@ -78,9 +79,14 @@ export function useAppearance(): void {
       Object.assign(vars, normalizeThemeVarKeys(active.entry.variables));
     }
     if (accentColor && /^#[0-9a-fA-F]{6}$/.test(accentColor)) {
+      const dark = active?.entry?.colorScheme === "dark";
       vars["--accent"] = accentColor;
-      vars["--accent-hover"] = darkenHex(accentColor);
+      // hover 方向随主题：深色底需提亮、浅色底需压暗（暗化版在深底上对比不足）
+      vars["--accent-hover"] = dark ? lightenHex(accentColor) : darkenHex(accentColor);
       vars["--accent-fg"] = foregroundFor(accentColor);
+      // 半透明变体一并跟随（选中底/焦点环），否则换色后仍是内置金，色相错配
+      vars["--accent-soft"] = withAlpha(accentColor, dark ? 0.16 : 0.1);
+      vars["--focus-ring"] = `0 0 0 2px ${withAlpha(accentColor, dark ? 0.34 : 0.28)}`;
     }
     const keys: string[] = [];
     for (const [key, value] of Object.entries(vars)) {

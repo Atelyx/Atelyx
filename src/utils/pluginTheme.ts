@@ -157,5 +157,5 @@ export function normalizeThemeVarKeys(variables: Record<string, string>): Record
   return out;
 }
 
-/** 默认主题插件的缺省设置（深浅模式跟随系统；强调色缺省 = 默认金，键缺失即默认）。 */
-export const DEFAULT_BUILTIN_THEME_SETTINGS: Record<string, unknown> = { [COLOR_MODE_KEY]: "system" };
+/** 默认主题插件的缺省设置（缺省深色；强调色键缺失即用内置金）。 */
+export const DEFAULT_BUILTIN_THEME_SETTINGS: Record<string, unknown> = { [COLOR_MODE_KEY]: "dark" };

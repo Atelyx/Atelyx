@@ -1,8 +1,9 @@
 /**
  * 启动/进仓加载屏：窗口创建即显示（init 完成前）与仓库加载期间（selectVault 全程）。
- * 深色全屏 + Logo + 循环扫光进度条（indeterminate）+ 加载步骤清单：
+ * 全屏 + Logo + 循环扫光进度条（indeterminate）+ 加载步骤清单：
  * 步骤区固定可视窗（无滚动条），底部锚定——新条目从下轻入、旧条目被顶出可视区，
- * 顶部渐变阴影遮罩淡出；已完成项打勾（金色），最后一项 = 当前进行中（转圈 + 高亮）。
+ * 顶部渐变阴影遮罩淡出；已完成项打勾（强调色），最后一项 = 当前进行中（转圈 + 高亮）。
+ * 配色全部走主题变量（index.html 首屏预置 .dark，深色默认下无闪变）。
  * 步骤由 appStore 的加载会话上报（beginLoad/reportLoad/endLoad），清单为空时不渲染
  * （撕裂窗口/路由懒加载 fallback 复用本组件时保持纯 Logo + 扫光）。
  * 扫光动画（.sweep-track/.sweep-bar）与条目入场（load-step-in）定义在 styles/index.css。
@@ -18,13 +19,13 @@ export function LoadingScreen() {
   return (
     <div
       className="h-full flex flex-col items-center justify-center select-none"
-      style={{ background: "#1e1e1e" }}
+      style={{ background: "var(--bg-primary)" }}
     >
       <img
         src={appIcon}
         alt="Atelyx"
         draggable={false}
-        className="w-16 h-16 rounded-2xl shadow-lg ring-1 ring-white/10"
+        className="w-16 h-16 rounded-2xl shadow-lg ring-1 ring-[var(--border)]"
       />
       <div className="sweep-track mt-8">
         <div className="sweep-bar" />
@@ -38,7 +39,7 @@ export function LoadingScreen() {
             className="pointer-events-none absolute inset-x-0 top-0 h-10 z-10"
             style={{
               background:
-                "linear-gradient(to bottom, #1e1e1e 0%, rgba(30,30,30,0) 100%)",
+                "linear-gradient(to bottom, var(--bg-primary) 0%, transparent 100%)",
             }}
           />
           <ul className="h-full flex flex-col justify-end gap-1.5 px-1 py-1 text-[13px]">
@@ -54,21 +55,19 @@ export function LoadingScreen() {
                     <Loader2
                       size={12}
                       className="animate-spin flex-shrink-0"
-                      style={{ color: "#d4af37" }}
+                      style={{ color: "var(--accent)" }}
                     />
                   ) : (
                     <Check
                       size={12}
                       className="flex-shrink-0"
-                      style={{ color: "#d4af37" }}
+                      style={{ color: "var(--accent)" }}
                     />
                   )}
                   <span
                     className="truncate"
                     style={{
-                      color: current
-                        ? "rgba(255,255,255,0.9)"
-                        : "rgba(255,255,255,0.45)",
+                      color: current ? "var(--text-primary)" : "var(--text-muted)",
                     }}
                   >
                     {step}

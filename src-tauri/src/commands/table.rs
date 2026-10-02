@@ -458,7 +458,7 @@ pub fn export_table_xlsx(
 
     let header_fmt = Format::new()
         .set_bold()
-        .set_background_color("D4AF37")
+        .set_background_color("E0A94E")
         .set_border(FormatBorder::Thin);
     let wrap_fmt = Format::new().set_border(FormatBorder::Thin).set_text_wrap();
     let plain_fmt = Format::new().set_border(FormatBorder::Thin);

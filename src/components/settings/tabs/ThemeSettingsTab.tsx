@@ -95,6 +95,8 @@ function BuiltinThemeSettings({
   settings: Record<string, unknown>;
 }) {
   const setThemeSetting = useSettingsStore((s) => s.setThemeSetting);
+  // 兜底保持 "system"：与 utils/pluginTheme 的 resolveActiveThemeEntry 同口径
+  // （未知/缺失值按跟随系统解析），否则设置页高亮与实际外观会相反
   const colorMode: ThemeColorMode =
     settings[COLOR_MODE_KEY] === "light" || settings[COLOR_MODE_KEY] === "dark"
       ? (settings[COLOR_MODE_KEY] as ThemeColorMode)
