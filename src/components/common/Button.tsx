@@ -186,12 +186,16 @@ export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(functio
   return noTooltip ? btn : <Tooltip content={label}>{btn}</Tooltip>;
 });
 
-/** 正方形边长（与 SIZE_CLASS 的高度档一致）。 */
+/**
+ * 正方形边长（与 SIZE_CLASS 的高度档一致），并带上该档圆角。
+ * 圆角写在这里而非由调用点补：迁移前的裸 `<button>` 普遍带 `rounded`/`rounded-sm`，
+ * 缺了这层圆角会让 hover 底色变成硬直角方块，与所在面板的圆角风格不一致。
+ */
 const SQUARE_SIZE_CLASS: Record<ButtonSize, string> = {
-  "2xs": "w-4 h-4",
-  xs: "w-5 h-5",
-  sm: "w-6 h-6",
-  md: "w-7 h-7",
-  lg: "w-8 h-8",
-  touch: "w-11 h-11",
+  "2xs": "w-4 h-4 rounded-[var(--radius-xs)]",
+  xs: "w-5 h-5 rounded-[var(--radius-xs)]",
+  sm: "w-6 h-6 rounded-[var(--radius-sm)]",
+  md: "w-7 h-7 rounded-[var(--radius-sm)]",
+  lg: "w-8 h-8 rounded-[var(--radius-md)]",
+  touch: "w-11 h-11 rounded-[var(--radius-md)]",
 };
