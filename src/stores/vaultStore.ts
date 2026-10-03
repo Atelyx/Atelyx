@@ -277,7 +277,7 @@ function collectByExt(
   return out;
 }
 
-/** 全仓库文件数（状态栏计数用；目录不计。隐藏/排除目录与 `.tmp` 已在列举时跳过，故与文件面板所见一致）。 */
+/** 全仓库文件数（状态栏计数；目录不计。列举时已跳过隐藏/排除目录与 `.tmp`，与文件面板一致）。 */
 export function selectVaultFileCount(s: Pick<VaultFileState, "tree">): number {
   let count = 0;
   const walk = (nodes: FileTreeNode[]) => {

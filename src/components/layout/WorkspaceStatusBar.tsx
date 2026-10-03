@@ -1,9 +1,8 @@
 /**
  * 工作区状态栏（窗口底部常驻，只承载「全局/环境」事实）。
  *
- * 只放两件事：当前是哪个仓库/空间（含文件总数）、协作空间通道是否可用（在线设备数）。
- * 不放各视图自己的计数与保存态——画布/表格各有自己的底部条（节点·连线 + 缩放 / 列自动计算），
- * 保存态的唯一出处是面板头 `ViewStatusIndicator`：再放一处就会同时出现两条「保存中…」。
+ * 只放仓库/空间身份与协作通道状态：各视图自己的计数与保存态归视图底条与面板头
+ * `ViewStatusIndicator`，此处再放一份会出现重复的「保存中…」。
  */
 import { Cloud, HardDrive } from "lucide-react";
 import { useAppStore } from "@/stores/appStore";
@@ -17,10 +16,10 @@ export function WorkspaceStatusBar() {
   const hasVault = useAppStore((s) => s.vaultIdentity !== null);
   const isSpace = useIsSpaceVault();
   const fileCount = useVaultStore(selectVaultFileCount);
-  // 空间协作：开关关掉时通道本就不会建（`connected` 也为假），故二者分开取，别把「未开启」显示成「未连接」
+  // 协作开关关闭时通道本就不会建（connected 恒为假），故二者分开取，不把「未开启」显示成「未连接」
   const collabEnabled = useSettingsStore((s) => s.collabEnabled);
   const connected = useCollabStore((s) => s.connected);
-  // peers 已滤掉自己：加 1 = 含本机的在线设备数，「只有自己在线」时显示 1 而不是 0
+  // peers 已滤掉自己，加 1 = 含本机的在线设备数
   const deviceCount = useCollabStore((s) => s.peers.length) + 1;
 
   return (
