@@ -44,7 +44,7 @@ export function LinkNode({ data, width, height, selected }: NodeProps) {
         minHeight: 60,
         background: "var(--bg-secondary)",
         borderColor: selected ? "var(--accent)" : "var(--border)",
-        boxShadow: "var(--shadow-pop)",
+        boxShadow: selected ? "var(--shadow-pop), var(--accent-glow)" : "var(--shadow-pop)",
         position: "relative",
       }}
       onClick={handleOpen}

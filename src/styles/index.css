@@ -8,6 +8,14 @@
 @import "@fontsource/ibm-plex-mono/latin-400.css";
 @import "@fontsource/ibm-plex-mono/latin-500.css";
 @import "@fontsource/fraunces/latin-600.css";
+/* 「极光」皮肤使用的字体（字体文件按需加载：未启用该皮肤时不被引用，不会产生请求） */
+@import "@fontsource/sora/latin-400.css";
+@import "@fontsource/sora/latin-600.css";
+@import "@fontsource/manrope/latin-400.css";
+@import "@fontsource/manrope/latin-500.css";
+@import "@fontsource/manrope/latin-600.css";
+@import "@fontsource/jetbrains-mono/latin-400.css";
+@import "@fontsource/jetbrains-mono/latin-500.css";
 
 @tailwind base;
 @tailwind components;
@@ -55,6 +63,20 @@
   --accent-fg: #ffffff;
   --accent-soft: rgba(127, 95, 28, 0.1);
   --focus-ring: 0 0 0 2px rgba(127, 95, 28, 0.28);
+
+  /* 强调填充的渐变与辉光：默认值分别等价于「纯强调色」与「无阴影」，故不改变既有深浅主题外观；
+     皮肤（如内置「极光」）覆盖它们即可让主按钮/开关/勾选等实心强调面走渐变并带辉光。
+     辉光用「透明阴影」而非 none：需与 --shadow-pop 一起出现在同一个 box-shadow 列表里。 */
+  --accent-grad: linear-gradient(135deg, var(--accent), var(--accent));
+  --accent-glow: 0 0 22px transparent;
+
+  /* 页面氛围底：铺在 body 上的背景图，默认无；皮肤可给径向光晕，配合半透明的 --bg-* 透出 */
+  --app-backdrop: none;
+  /* html 层的不透明底色（与该主题 --bg-primary 同值）：皮肤把面改成半透明后，它是半透明之下的
+     最后一块实底。与 --bg-primary 分开定义——半透明皮肤把 --bg-primary 改掉时这里必须仍是实色 */
+  --app-base: #eae9e3;
+  /* 浮层玻璃的背景模糊，默认 none（不模糊，且不产生包含块/层叠上下文副作用） */
+  --glass-filter: none;
 
   /* 状态语义色（状态点 / 提示 / 危险操作共用；不得只靠色表达状态）。
      作正文用须 ≥4.5:1 */
@@ -137,6 +159,9 @@
 
 /* 夜间主题（主基调）：炭黑 + 黄铜金 + 暖白文本；中性冷灰边，不用蓝色调 */
 :root.dark {
+  /* html 层实底（与本主题 --bg-primary 同值） */
+  --app-base: #131418;
+
   /* 背景色阶 */
   --bg-sunken: #0c0d10;
   --bg-primary: #131418;
@@ -264,6 +289,14 @@ body,
   margin: 0;
 }
 
+/* html 层落地不透明底色：半透明面板之下必须有实底，面板透出的是「底色 + body 的氛围底」，
+   而不是窗口原生底色（也让浏览器里运行时的底座可预期）。
+   选择器写 html:root 提一级特异性：index.html 的首帧预置底色 html:not(.dark) 是 (0,1,1)，
+   不提高会在浅色下恒压过本规则，皮肤给的 --app-base 失效 */
+html:root {
+  background-color: var(--app-base);
+}
+
 /* 基准 16px：紧凑档密度（行高 28–32、控件高 28、正文 14）；用户可在设置里覆盖 */
 :root {
   font-family: var(--font-sans);
@@ -272,7 +305,9 @@ body,
 }
 
 body {
-  background: var(--bg-primary);
+  background-color: var(--bg-primary);
+  /* 页面氛围底（皮肤给值；默认 none）：与半透明的 --bg-* 配合，让面板下方的光晕透上来 */
+  background-image: var(--app-backdrop);
   color: var(--text-primary);
 }
 

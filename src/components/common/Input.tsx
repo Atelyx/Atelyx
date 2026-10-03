@@ -141,7 +141,9 @@ export const Checkbox = forwardRef<
         className="w-4 h-4 rounded-[var(--radius-xs)] border flex items-center justify-center
           transition-colors peer-focus-visible:shadow-[var(--focus-ring)]"
         style={{
-          background: checked || indeterminate ? "var(--accent)" : "var(--input-bg)",
+          // 底色与渐变图分开写：勾选切换时底色平滑过渡，渐变图即时开关（简写会把底色置透明）
+          backgroundColor: checked || indeterminate ? "var(--accent)" : "var(--input-bg)",
+          backgroundImage: checked || indeterminate ? "var(--accent-grad)" : "none",
           borderColor: checked || indeterminate ? "var(--accent)" : "var(--input-border)",
         }}
       >
@@ -205,7 +207,8 @@ export function Radio({
           className="w-4 h-4 rounded-full border flex items-center justify-center
             transition-colors peer-focus-visible:shadow-[var(--focus-ring)]"
           style={{
-            background: checked ? "var(--accent)" : "var(--input-bg)",
+            backgroundColor: checked ? "var(--accent)" : "var(--input-bg)",
+            backgroundImage: checked ? "var(--accent-grad)" : "none",
             borderColor: checked ? "var(--accent)" : "var(--input-border)",
           }}
         >

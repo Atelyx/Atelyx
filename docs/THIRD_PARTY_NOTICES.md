@@ -16,7 +16,7 @@
 | --- | --- |
 | dompurify | MPL-2.0 OR Apache-2.0 |
 | @codemirror/commands / lang-markdown / language / language-data / state / view | MIT |
-| @fontsource/ibm-plex-sans / ibm-plex-mono / fraunces | SIL OFL-1.1 |
+| @fontsource/ibm-plex-sans / ibm-plex-mono / fraunces / sora / manrope / jetbrains-mono | SIL OFL-1.1 |
 | @lezer/highlight | MIT |
 | @tauri-apps/api | Apache-2.0 OR MIT |
 | @tauri-apps/plugin-clipboard-manager / dialog / process / shell / updater | MIT OR Apache-2.0 |
@@ -37,10 +37,13 @@
 | --- | --- | --- |
 | IBM Plex Sans / IBM Plex Mono | SIL Open Font License 1.1 | © 2019 IBM Corp. |
 | Fraunces | SIL Open Font License 1.1 | © 2020 The Fraunces Project Authors |
+| Sora | SIL Open Font License 1.1 | © 2019 The Sora Project Authors |
+| Manrope | SIL Open Font License 1.1 | © 2019 The Manrope Project Authors |
+| JetBrains Mono | SIL Open Font License 1.1 | © 2020 The JetBrains Mono Project Authors |
 
-> 三者经 `@fontsource/*` 取 latin 子集 woff2，随构建产物一并分发（本地自托管，无外链请求）。
-> OFL-1.1 允许自由使用、修改与再分发（含商用），要求保留版权与许可声明、衍生字体同样以 OFL
-> 发布；许可全文见 `node_modules/@fontsource/*/LICENSE`。
+> 字体均经 `@fontsource/*` 取 latin 子集 woff2，随构建产物一并分发（本地自托管，无外链请求）；
+> 中文由系统 CJK 字体回退。OFL-1.1 允许自由使用、修改与再分发（含商用），要求保留版权与许可
+> 声明、衍生字体同样以 OFL 发布；许可全文见 `node_modules/@fontsource/*/LICENSE`。
 
 ## 开发期依赖（package.json `devDependencies`）
 

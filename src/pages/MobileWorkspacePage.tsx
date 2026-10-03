@@ -183,7 +183,8 @@ export function MobileWorkspacePage() {
   }, [isAndroid, androidStorageOnboarded]);
 
   return (
-    <div className="h-full w-full flex flex-col" style={{ background: "var(--bg-primary)" }}>
+    // 不画底色：与 html/body 的底色同值，重画只会让半透明皮肤（极光）多叠一层、氛围底透不上来
+    <div className="h-full w-full flex flex-col">
       <div className="flex-1 min-h-0 flex flex-col">
         {/* 顶栏：仓库/空间切换 + 设置入口（设置是核心应用入口，恒宿主渲染） */}
         <div

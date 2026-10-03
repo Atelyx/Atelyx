@@ -160,7 +160,7 @@ export function ProgressBar({
         className="h-full transition-[width]"
         style={{
           width: `${pct}%`,
-          background: "var(--accent)",
+          background: "var(--accent-grad)",
           transitionDuration: "var(--dur-base)",
         }}
       />

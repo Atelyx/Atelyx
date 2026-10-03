@@ -2,7 +2,7 @@
  * 主题内核纯函数测试（utils/pluginTheme）。
  *
  * 覆盖：派生（启停过滤/重名丢弃/默认主题插件同路径）、激活插件解析（命中/回退）、
- * 激活条目解析（默认主题插件三态含 system、其余插件 variant/缺省）、变量键归一化。 */
+ * 激活条目解析（默认主题插件三态含 system 与皮肤 variant、其余插件 variant/缺省）、变量键归一化。 */
 import { describe, it, expect } from "vitest";
 import {
   ACCENT_COLOR_KEY,
@@ -33,17 +33,24 @@ function row(id: string, themes: ThemeDefinition[], opts?: { enabled?: boolean; 
 
 const lightDef: ThemeDefinition = { id: "light", name: "浅色", colorScheme: "light", variables: {} };
 const darkDef: ThemeDefinition = { id: "dark", name: "深色", colorScheme: "dark", variables: {} };
+/** 默认主题插件的额外皮肤条目（外观设置项可直接取其 id）。 */
+const auroraDef: ThemeDefinition = {
+  id: "aurora",
+  name: "极光",
+  colorScheme: "dark",
+  variables: { "--accent": "#3FB4A4" },
+};
 /** 用户主题条目（避免与基础主题条目 id 重名，否则条目会被丢弃）。 */
 const thirdLight: ThemeDefinition = { id: "com.a.light", name: "A 浅色", colorScheme: "light", variables: {} };
 
-/** 默认主题插件行（清单形态：浅/深两基底 + accent 声明）。 */
+/** 默认主题插件行（清单形态：浅/深两基底 + 一个额外皮肤 + accent 声明）。 */
 function builtinRow(): ThemePluginRow {
   return {
     id: BUILTIN_THEME_PLUGIN_ID,
     enabled: true,
     manifest: {
       name: "默认主题",
-      themes: [lightDef, darkDef],
+      themes: [lightDef, darkDef, auroraDef],
       themeOptions: { accent: true },
     },
   };
@@ -69,7 +76,7 @@ describe("deriveThemeProviders", () => {
     const p = provider(builtinRow());
     expect(p.builtin).toBe(true);
     expect(p.accent).toBe(true);
-    expect(p.themes.map((t) => t.id)).toEqual(["light", "dark"]);
+    expect(p.themes.map((t) => t.id)).toEqual(["light", "dark", "aurora"]);
   });
 
   it("用户条目与基础主题条目 id 重名：丢弃该条目；全重名则插件不作为提供者", () => {
@@ -132,6 +139,16 @@ describe("resolveActiveThemeEntry", () => {
   it("默认主题插件缺省/非法深浅模式：按跟随系统处理", () => {
     expect(resolveActiveThemeEntry(builtin, {}, true)?.id).toBe("dark");
     expect(resolveActiveThemeEntry(builtin, { [COLOR_MODE_KEY]: "blue" }, false)?.id).toBe("light");
+  });
+
+  it("默认主题插件：variant 命中皮肤条目即选用该条目，与深浅模式无关", () => {
+    expect(resolveActiveThemeEntry(builtin, { [VARIANT_KEY]: "aurora" }, false)?.id).toBe("aurora");
+    expect(resolveActiveThemeEntry(builtin, { [VARIANT_KEY]: "aurora" }, true)?.id).toBe("aurora");
+    // variant 未命中 / 缺省（选「默认」）= 回到按深浅模式取基底
+    expect(
+      resolveActiveThemeEntry(builtin, { [VARIANT_KEY]: "nope", [COLOR_MODE_KEY]: "light" }, true)?.id,
+    ).toBe("light");
+    expect(resolveActiveThemeEntry(builtin, { [COLOR_MODE_KEY]: "dark" }, false)?.id).toBe("dark");
   });
 
   it("其余插件：variant 命中条目，否则第一个条目", () => {

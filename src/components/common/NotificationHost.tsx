@@ -45,7 +45,13 @@ function NotificationCard({ item }: { item: NotificationItem }) {
     <div
       role="status"
       className="pointer-events-auto flex max-w-sm items-start gap-2 rounded-md border px-3 py-2 shadow-lg"
-      style={{ background: "var(--bg-secondary)", borderColor: "var(--border)" }}
+      style={{
+        background: "var(--bg-secondary)",
+        borderColor: "var(--border)",
+        // 通知压在内容之上：背景模糊由皮肤决定（默认 none = 不模糊）
+        backdropFilter: "var(--glass-filter)",
+        WebkitBackdropFilter: "var(--glass-filter)",
+      }}
     >
       <Icon size={16} style={{ color, marginTop: 2, flexShrink: 0 }} />
       <div className="min-w-0 flex-1">

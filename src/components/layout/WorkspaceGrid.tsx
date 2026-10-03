@@ -254,7 +254,8 @@ export function WorkspaceGrid({ tree }: { tree: LayoutNode }) {
   }, [hasCanvas]);
 
   return (
-    <div className="h-full w-full" style={{ background: "var(--bg-primary)" }}>
+    // 不画底色：与 html/body 的底色同值（面板间隙透出的就是同一色），重画会挡住半透明皮肤的氛围底
+    <div className="h-full w-full">
       <GridNode
         node={tree}
         onFocus={setFocusedPanel}

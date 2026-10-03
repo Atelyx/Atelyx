@@ -754,7 +754,8 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
         minHeight: 150,
         background: "var(--bg-secondary)",
         borderColor: selected ? "var(--accent)" : "var(--border)",
-        boxShadow: "var(--shadow-pop)",
+        // 选中辉光走 --accent-glow（默认 = 透明阴影，不改变既有外观）
+        boxShadow: selected ? "var(--shadow-pop), var(--accent-glow)" : "var(--shadow-pop)",
         cursor: "default",
         position: "relative",
       }}

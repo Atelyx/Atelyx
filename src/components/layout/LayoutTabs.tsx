@@ -122,12 +122,11 @@ export function LayoutTabs() {
             <div
               key={l.id}
               data-layout-tab
-              className="group flex items-center h-7 rounded-sm text-xs min-w-0 flex-shrink-0 hover:bg-[var(--bg-tertiary)]"
+              className="group relative flex items-center h-7 rounded-sm text-xs min-w-0 flex-shrink-0 hover:bg-[var(--bg-tertiary)]"
               style={{
-                // 弱层级：激活只抬一档底色 + 2px 金下边，不染金底（重命名中同款高亮）；
+                // 弱层级：激活只抬一档底色 + 2px 强调下边（见下方条），不染强调底（重命名中同款高亮）；
                 // 未激活不设内联底色，交给 hover 类，否则内联样式会压过 hover
                 background: active || editing ? "var(--bg-tertiary)" : undefined,
-                boxShadow: active || editing ? "inset 0 -2px 0 var(--accent)" : undefined,
                 color: active ? "var(--text-primary)" : "var(--text-secondary)",
                 // 拖动中：跟随水平位移 + 阴影提示，其他 tab 原位等待
                 transform: dragging && dragOffset !== null ? `translateX(${dragOffset}px)` : undefined,
@@ -211,6 +210,14 @@ export function LayoutTabs() {
                 >
                   {l.name}
                 </button>
+              )}
+              {/* 激活下边：走 --accent-grad 的短条（box-shadow 不能铺渐变，故用元素画） */}
+              {(active || editing) && (
+                <span
+                  aria-hidden
+                  className="absolute left-2 right-2 -bottom-px h-0.5 rounded-full pointer-events-none"
+                  style={{ background: "var(--accent-grad)" }}
+                />
               )}
             </div>
           );

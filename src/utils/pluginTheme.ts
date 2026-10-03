@@ -12,11 +12,11 @@ export const BUILTIN_THEME_PLUGIN_ID = "builtin.theme";
 export const BUILTIN_THEME_LIGHT_ID = "light";
 export const BUILTIN_THEME_DARK_ID = "dark";
 
-/** 默认主题插件深浅模式设置项键（值域 ThemeColorMode）。 */
+/** 默认主题插件外观设置项键（值域：跟随系统 / 浅色 / 深色）。 */
 export const COLOR_MODE_KEY = "colorMode";
 /** 预置强调色设置项键（任何声明 themeOptions.accent 的主题插件共用；值自动应用 --accent 系列）。 */
 export const ACCENT_COLOR_KEY = "accentColor";
-/** 用户主题条目选择键（自定义设置项写该键选中 themes 条目；缺省用第一个条目）。 */
+/** 主题条目选择键：写某条目 id 即选用该条目（默认主题行用它选基底之外的皮肤，缺省 = 浅/深基底）。 */
 export const VARIANT_KEY = "variant";
 
 /** 默认主题插件深浅模式值域：跟随系统 / 浅色 / 深色。 */
@@ -42,7 +42,7 @@ export interface ThemeProvider {
   themes: ThemeDefinition[];
   /** 是否声明预置强调色设置项（themeOptions.accent）。 */
   accent: boolean;
-  /** 是否默认主题插件（其设置项含内核预置深浅模式）。 */
+  /** 是否默认主题插件（其设置项含内核预置深浅模式，且其条目在主题下拉里逐个列出）。 */
   builtin: boolean;
 }
 
@@ -125,8 +125,9 @@ export function resolveActiveThemePlugin(
 
 /**
  * 解析激活主题条目：提供者 + 其设置项值 → 主题条目。
- * 默认主题插件：深浅模式值（system 按 systemDark 解析）→ 对应基底的条目（缺省 = 跟随系统）；
- * 其余插件：variant 键命中 themes 条目，否则第一个条目（缺省条目）。
+ * 默认主题插件：先看皮肤（variant 命中基底之外的条目，如内置「极光」）→ 该条目；未选皮肤则按
+ * 深浅模式（light/dark，system 按 systemDark 解析）取浅/深基底（缺省 = 跟随系统）；
+ * 其余插件：variant 命中 themes 条目，否则第一个条目（缺省条目）。
  */
 export function resolveActiveThemeEntry(
   provider: ThemeProvider,
@@ -134,7 +135,10 @@ export function resolveActiveThemeEntry(
   systemDark: boolean,
 ): ThemeDefinition | undefined {
   if (provider.themes.length === 0) return undefined;
+  const variant = settings[VARIANT_KEY];
+  const skin = typeof variant === "string" ? provider.themes.find((t) => t.id === variant) : undefined;
   if (provider.builtin) {
+    if (skin) return skin;
     const mode = settings[COLOR_MODE_KEY];
     const target: "light" | "dark" =
       mode === "light" ? "light"
@@ -143,9 +147,7 @@ export function resolveActiveThemeEntry(
       : "light";
     return provider.themes.find((t) => t.colorScheme === target) ?? provider.themes[0];
   }
-  const variant = settings[VARIANT_KEY];
-  const hit = typeof variant === "string" ? provider.themes.find((t) => t.id === variant) : undefined;
-  return hit ?? provider.themes[0];
+  return skin ?? provider.themes[0];
 }
 
 /** 变量键归一化：补 `--` 前缀（插件可省略；应用时统一写 :root inline style）。 */

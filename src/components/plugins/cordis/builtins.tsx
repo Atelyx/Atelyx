@@ -64,6 +64,7 @@ import { createChatRuntime } from "@/stores/chatTurn";
 import { setPluginNoteAccess } from "@/services/cordis/access";
 import { registerChatRuntime } from "@/utils/chatRuntimeHost";
 import { VIEW_LABELS } from "@/constants/views";
+import { AURORA_THEME_ID, AURORA_THEME_NAME, AURORA_THEME_VARIABLES } from "@/constants/themes";
 import { CanvasEmptyState, NoteEmptyState, TableEmptyState } from "@/components/plugins/cordis/emptyStates";
 
 /** 单个视图载荷（无 props 契约的视图组件；重型视图用 render 承载宿主面板 id）。 */
@@ -90,6 +91,12 @@ function vaultHandler<K extends VaultEvent["kind"]>(
   return { kind, handler: handler as VaultEventHandler };
 }
 
+/** 主题类行的声明式载荷（清单里的 `themes` + `themeOptions`）。 */
+export interface BuiltinThemePayload {
+  themes: PluginManifest["themes"];
+  themeOptions: PluginManifest["themeOptions"];
+}
+
 /** 单个随应用分发的插件定义（数组顺序 = 装配顺序 = 领域生命周期 flush 注册序）。 */
 export interface CordisBuiltinDef {
   id: string;
@@ -98,6 +105,8 @@ export interface CordisBuiltinDef {
   tagline: string;
   /** 视图载荷（kind + 标签；apply 据此注册槽，管理页按 kind 反查提供行）。 */
   views: BuiltinViewPayload[];
+  /** 主题类行的声明（随清单交给主题系统消费；仅纯声明式主题行填）。 */
+  theme?: BuiltinThemePayload;
   /** 挂载实现（pluginStore 经 loader 调 ctx.plugin(apply)）。 */
   apply(ctx: Context): void;
 }
@@ -224,6 +233,8 @@ interface BuiltinDefOptions {
   type: string;
   tagline: string;
   views: BuiltinViewPayload[];
+  /** 主题类行的声明（随清单交主题系统消费）。 */
+  theme?: BuiltinThemePayload;
   /** UI 槽贡献（工具栏/空态/标题栏等；registerUi 语义）。 */
   ui?: BuiltinUiPayload[];
   lifecycle?: DomainLifecycleHooks;
@@ -251,8 +262,27 @@ function def(opts: BuiltinDefOptions): CordisBuiltinDef {
     if (opts.vaultEventHandlers) mountVaultEvents(ctx, opts.vaultEventHandlers);
     opts.provideService?.(ctx);
   };
-  return { id: opts.id, name: opts.name, type: opts.type, tagline: opts.tagline, views: opts.views, apply };
+  return {
+    id: opts.id,
+    name: opts.name,
+    type: opts.type,
+    tagline: opts.tagline,
+    views: opts.views,
+    ...(opts.theme ? { theme: opts.theme } : {}),
+    apply,
+  };
 }
+
+/** 默认主题插件声明的全部主题条目（由该插件行承载，主题下拉按条目逐个列出）：
+ *  深浅两基底（空变量 = 基础方案，未覆盖变量落回内置 CSS 双 palette）+ 「极光」皮肤（携带整套变量覆盖）。 */
+const BUILTIN_THEME_MANIFEST: BuiltinThemePayload = {
+  themes: [
+    { id: "light", name: "浅色", colorScheme: "light", variables: {} },
+    { id: "dark", name: "深色", colorScheme: "dark", variables: {} },
+    { id: AURORA_THEME_ID, name: AURORA_THEME_NAME, colorScheme: "dark", variables: AURORA_THEME_VARIABLES },
+  ],
+  themeOptions: { accent: true },
+};
 
 /** 随应用分发插件定义总表（id 全局唯一；views 内 kind 全局唯一）。 */
 export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
@@ -573,8 +603,9 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
     id: "builtin.theme",
     name: "默认主题",
     type: "theme",
-    tagline: "默认浅色/深色主题与强调色设置",
+    tagline: "内置浅色/深色主题与极光皮肤，含强调色设置",
     views: [], // 主题类行 = 纯声明式（无视图载荷），只置 active 供主题系统派生消费
+    theme: BUILTIN_THEME_MANIFEST,
   }),
 ];
 
@@ -591,15 +622,6 @@ export const DEFAULT_COMPOSITION: CompositionDefault[] = CORDIS_BUILTIN_DEFS.map
   tagline: d.tagline,
 }));
 
-/** 主题插件声明的基础条目：浅色/深色基底（空变量 = 基础方案，未覆盖变量落回内置 CSS 双 palette）。 */
-const BUILTIN_THEME_MANIFEST: Pick<PluginManifest, "themes" | "themeOptions"> = {
-  themes: [
-    { id: "light", name: "浅色", colorScheme: "light", variables: {} },
-    { id: "dark", name: "深色", colorScheme: "dark", variables: {} },
-  ],
-  themeOptions: { accent: true },
-};
-
 /** 随应用分发插件的清单（默认组合的唯一权威，随 `plugin_list` 交给 Rust 播种并保存）。
  *  形状 = 插件包原始清单（`package.json`：`name` = 插件 id + `atelyx` 块），与磁盘插件包同一
  *  字段契约——宿主按此形状读写行的显示名/类型/主题声明；行对象经 `validatePluginManifest`
@@ -613,9 +635,9 @@ export function builtinManifest(def: CordisBuiltinDef, version: string): PluginP
     author: "Atelyx",
     license: "MIT",
   };
-  if (def.id === "builtin.theme") {
-    atelyx.themes = BUILTIN_THEME_MANIFEST.themes;
-    atelyx.themeOptions = BUILTIN_THEME_MANIFEST.themeOptions;
+  if (def.theme) {
+    atelyx.themes = def.theme.themes;
+    atelyx.themeOptions = def.theme.themeOptions;
   }
   return { name: def.id, version: version || "0.0.0", main: "builtin", atelyx };
 }

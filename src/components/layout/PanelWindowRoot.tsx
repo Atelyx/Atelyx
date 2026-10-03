@@ -77,11 +77,8 @@ export function PanelWindowRoot() {
   }
 
   return (
-    <div
-      className="h-full w-full flex flex-col"
-      style={{ background: "var(--bg-primary)" }}
-      data-panel-drop-root
-    >
+    // 不画底色：与 html/body 的底色同值，重画只会让半透明皮肤（极光）多叠一层、氛围底透不上来
+    <div className="h-full w-full flex flex-col" data-panel-drop-root>
       {/* 自定义标题栏（与主窗口一致：拖动区 + 窗口控制）。错误态同样渲染——否则窗口既不能拖动
           也无法最小化/关闭，只能靠任务栏，而错误态是「布局服务未响应」这类可达界面 */}
       <div

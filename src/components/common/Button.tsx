@@ -32,41 +32,54 @@ const SIZE_CLASS: Record<ButtonSize, string> = {
 };
 
 /**
- * 变体：底色/ 文字色 / hover 反馈。`ghost` 无底色，hover 才出底（工具条与列表内联动作）。
+ * 变体：底色 / 渐变图 / 文字色 / hover 反馈。`ghost` 无底色，hover 才出底（工具条与列表内联动作）。
+ *
+ * 底色与渐变图分开写（不用 `background` 简写）：简写会把 background-color 置为 `transparent`，
+ * 而 hover 只换底色、渐变图即时移除——底色从 transparent 淡入，按钮会先掉底再渐显。
+ * 分开写则底色恒为实色，`transition-colors` 平滑过渡；渐变图叠在底色之上（默认等价纯色）。
  *
  * hover 一律用 `!important` 的任意值类：底色与文字色经内联 `style` 给出（便于主题插件
  * 与调用方动态覆盖），而内联样式在层叠中优先于任何无 `!important` 的作者规则——
  * 不用 `!important` 则悬停反馈会被内联底色吃掉，表现为「鼠标移上去没反应」。
  */
-const VARIANT_STYLE: Record<ButtonVariant, { background: string; color: string; hover: string }> = {
+const VARIANT_STYLE: Record<
+  ButtonVariant,
+  { backgroundColor: string; backgroundImage: string; color: string; hover: string }
+> = {
   primary: {
-    background: "var(--accent)",
+    backgroundColor: "var(--accent)",
+    backgroundImage: "var(--accent-grad)",
     color: "var(--accent-fg)",
-    hover: "hover:!bg-[var(--accent-hover)]",
+    hover: "hover:!bg-none hover:!bg-[var(--accent-hover)]",
   },
   secondary: {
-    background: "var(--bg-tertiary)",
+    backgroundColor: "var(--bg-tertiary)",
+    backgroundImage: "none",
     color: "var(--text-primary)",
     hover: "hover:!bg-[var(--hover)]",
   },
   ghost: {
-    background: "transparent",
+    backgroundColor: "transparent",
+    backgroundImage: "none",
     color: "var(--text-secondary)",
     hover: "hover:!bg-[var(--hover)] hover:!text-[var(--text-primary)]",
   },
   subtle: {
-    background: "transparent",
+    backgroundColor: "transparent",
+    backgroundImage: "none",
     color: "var(--text-muted)",
     hover: "hover:!text-[var(--text-primary)]",
   },
   danger: {
-    background: "transparent",
+    backgroundColor: "transparent",
+    backgroundImage: "none",
     color: "var(--danger)",
     hover: "hover:!bg-[color-mix(in_srgb,var(--danger)_12%,transparent)]",
   },
   // 实心底：不可逆动作的最终确认（与红字 `danger` 区分）
   dangerSolid: {
-    background: "var(--danger-fill)",
+    backgroundColor: "var(--danger-fill)",
+    backgroundImage: "none",
     color: "#ffffff",
     hover: "hover:!opacity-90",
   },
@@ -119,7 +132,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
         disabled:opacity-40 disabled:cursor-not-allowed ${SIZE_CLASS[size]} ${v.hover}
         ${block ? "w-full" : ""} ${className ?? ""}`}
       // 调用方 style 覆盖默认色（动态状态色场景），故置于展开之后
-      style={{ background: v.background, color: v.color, ...style }}
+      style={{ backgroundColor: v.backgroundColor, backgroundImage: v.backgroundImage, color: v.color, ...style }}
       {...rest}
     >
       {loading ? <Loader2 size={14} className="animate-spin flex-shrink-0" /> : icon}
@@ -177,7 +190,7 @@ export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(functio
         transition-colors outline-none focus-visible:shadow-[var(--focus-ring)]
         disabled:opacity-40 disabled:cursor-not-allowed
         ${SQUARE_SIZE_CLASS[size]} ${v.hover} ${className ?? ""}`}
-      style={{ background: v.background, color: v.color, ...style }}
+      style={{ backgroundColor: v.backgroundColor, backgroundImage: v.backgroundImage, color: v.color, ...style }}
       {...rest}
     >
       {loading ? <Loader2 size={14} className="animate-spin" /> : icon}

@@ -73,10 +73,8 @@ export function ProjectWorkspacePage() {
   };
 
   return (
-    <div
-      className="h-full w-full flex flex-col"
-      style={{ background: "var(--bg-primary)" }}
-    >
+    // 不画底色：与 html/body 的底色同值，重画只会让半透明皮肤（极光）多叠一层、氛围底透不上来
+    <div className="h-full w-full flex flex-col">
       <div className="flex-1 flex flex-col min-h-0">
         {/* 标题栏横条：仓库名 + 布局 tabs → 右操作区（设置/全屏/窗口控制，常驻） */}
         <div

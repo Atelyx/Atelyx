@@ -167,7 +167,7 @@ export function TextNode({ id, data, width, height, selected }: NodeProps) {
         minHeight: 100,
         background: "var(--bg-secondary)",
         borderColor: selected ? "var(--accent)" : "var(--border)",
-        boxShadow: "var(--shadow-pop)",
+        boxShadow: selected ? "var(--shadow-pop), var(--accent-glow)" : "var(--shadow-pop)",
         // 未保存的画布内文本节点用虚线边框与笔记节点（实线）区分
         borderStyle: isSaved ? "solid" : "dashed",
         position: "relative",

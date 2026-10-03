@@ -107,7 +107,7 @@ export function SearchResultNode({ id, data, height, selected }: NodeProps) {
         minHeight: 120,
         background: "var(--bg-secondary)",
         borderColor: selected ? "var(--accent)" : "var(--border)",
-        boxShadow: "var(--shadow-pop)",
+        boxShadow: selected ? "var(--shadow-pop), var(--accent-glow)" : "var(--shadow-pop)",
         cursor: "default",
         position: "relative",
       }}

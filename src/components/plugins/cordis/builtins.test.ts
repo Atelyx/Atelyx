@@ -7,6 +7,7 @@
 import { describe, it, expect } from "vitest";
 import { CORDIS_BUILTIN_DEFS, DEFAULT_COMPOSITION, builtinManifest } from "./builtins";
 import { validatePluginManifest } from "@/utils/pluginManifest";
+import { AURORA_THEME_ID } from "@/constants/themes";
 import { VIEW_KINDS } from "@/types";
 
 describe("随应用分发插件注册表", () => {
@@ -39,9 +40,12 @@ describe("随应用分发插件注册表", () => {
       expect(atelyx.name).toBe(def.name);
       expect(atelyx.type).toBe(def.type);
       if (def.type === "theme") {
+        // 默认主题行自带多套主题（浅/深基底 + 极光皮肤），条目标题即主题下拉里的候选
         const themes = atelyx.themes as Array<{ id: string }>;
-        expect(themes.map((t) => t.id)).toEqual(["light", "dark"]);
+        expect(themes.map((t) => t.id)).toEqual(["light", "dark", AURORA_THEME_ID]);
         expect((atelyx.themeOptions as { accent?: boolean }).accent).toBe(true);
+      } else {
+        expect(atelyx.themes).toBeUndefined();
       }
     }
   });

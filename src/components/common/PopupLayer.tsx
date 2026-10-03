@@ -88,6 +88,9 @@ export function PopupLayer({
         minWidth: anchor.minWidth,
         background: "var(--bg-overlay)",
         borderColor: "var(--border)",
+        // 浮层是唯一真正压在内容之上的面：背景模糊由皮肤决定（默认 none = 不模糊）
+        backdropFilter: "var(--glass-filter)",
+        WebkitBackdropFilter: "var(--glass-filter)",
       }}
       onClick={(e) => e.stopPropagation()}
       onPointerDown={stopPointerDown ? (e) => e.stopPropagation() : undefined}
