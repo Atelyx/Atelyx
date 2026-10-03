@@ -26,12 +26,22 @@ import {
 } from "react";
 import type { MentionSeg } from "@/utils/text";
 
-/** overlay 与 textarea 严格一致的字体（CSS 未给 textarea 设 font，UA 默认不同会导致标签错位） */
+/**
+ * overlay 与 textarea 严格一致的字体（CSS 未给 textarea 设 font，UA 默认不同会导致标签错位）。
+ *
+ * 字号/行高走字阶变量：应用级「字体大小」设置改的是根字号，故两者必须同为 rem 量纲——
+ * 若字号写死 px 而行高用 rem，缩放后行高不跟随，overlay 标签会与光标错行。
+ * 三个消费点（overlay、textarea、测量 probe）同源于此，改动须一并。
+ */
 export const INPUT_FONT: CSSProperties = {
   fontFamily: "var(--font-sans)",
-  fontSize: 14,
+  fontSize: "var(--fs-body)",
   lineHeight: "1.4rem",
 };
+
+/** 测量 probe 用 cssText：与 INPUT_FONT 同源，但需字面量拼接而非对象展开。 */
+const INPUT_FONT_CSS =
+  "font-family:var(--font-sans);font-size:var(--fs-body);line-height:1.4rem;";
 
 /**
  * 光标行高度测量 probe（模块级单例）：与内容层同排版（INPUT_FONT + pre-wrap + break-words），
@@ -43,7 +53,7 @@ const measureProbe = (() => {
   el.style.cssText =
     "position:absolute;visibility:hidden;pointer-events:none;left:-9999px;top:0;" +
     "white-space:pre-wrap;overflow-wrap:break-word;" +
-    `font-family:${INPUT_FONT.fontFamily};font-size:${INPUT_FONT.fontSize}px;line-height:${INPUT_FONT.lineHeight};`;
+    INPUT_FONT_CSS;
   document.body.appendChild(el);
   return el;
 })();
