@@ -231,6 +231,56 @@ pub fn run() {
 
 #[cfg(test)]
 mod capability_contract_tests {
+    /// 启动底色契约：窗口原生刷（`tauri.conf.json` / `commands/windows.rs`）恒为深色主题底色，
+    /// `index.html` 的首帧底色按 `.dark` 分支取深浅两套——任一处与 `--bg-primary` 异值都会闪异色。
+    #[test]
+    fn startup_background_matches_theme_primary() {
+        let css = include_str!("../../src/styles/index.css");
+        // 取指定主题块里的 --bg-primary（`:root {` 是浅色基础块，`:root.dark {` 是深色块）
+        let primary_of = |selector: &str| -> String {
+            let at = css
+                .find(selector)
+                .unwrap_or_else(|| panic!("index.css 缺少 {selector} 块"));
+            let block = &css[at..];
+            let block = &block[..block.find('}').expect("主题块未闭合")];
+            block
+                .split("--bg-primary:")
+                .nth(1)
+                .expect("主题块缺少 --bg-primary")
+                .split(';')
+                .next()
+                .unwrap()
+                .trim()
+                .to_lowercase()
+        };
+        let dark = primary_of(":root.dark {");
+        let light = primary_of(":root {");
+        assert!(dark.starts_with('#') && light.starts_with('#'), "两套 --bg-primary 应为 hex 字面量");
+
+        let html = include_str!("../../index.html").to_lowercase();
+        for (name, bg) in [("深色", &dark), ("浅色", &light)] {
+            assert!(
+                html.contains(&format!("background:{bg}")),
+                "index.html 的{name}首帧底色与 --bg-primary（{bg}）不一致"
+            );
+        }
+
+        let cfg: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).expect("tauri.conf.json 解析失败");
+        let window_bg = cfg["app"]["windows"][0]["backgroundColor"]
+            .as_str()
+            .expect("app.windows[0].backgroundColor 未配置")
+            .to_lowercase();
+        assert_eq!(window_bg, dark, "主窗口启动底色应为深色主题底色");
+
+        let rgb = |i: usize| u8::from_str_radix(&dark[1 + i * 2..3 + i * 2], 16).unwrap();
+        let expected = format!("Color({}, {}, {}, 255)", rgb(0), rgb(1), rgb(2));
+        assert!(
+            include_str!("commands/windows.rs").contains(&expected),
+            "撕裂窗口启动底色应为 {expected}（与深色 --bg-primary 一致）"
+        );
+    }
+
     /// 校验 `tauri.conf.json > plugins > shell > open` 的放行范围。
     ///
     /// tauri-plugin-shell 会把该正则**整体包上 `^...$`** 后逐项 `is_match`，

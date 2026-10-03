@@ -18,6 +18,11 @@ fn panel_url() -> WebviewUrl {
     WebviewUrl::App("index.html".into())
 }
 
+/// 撕裂窗口的启动底色（深色主题 `--bg-primary`）：窗口创建先于页面渲染，与主窗口
+/// `tauri.conf.json > backgroundColor` 同值才不闪异色（一致性由 lib.rs 契约测试把守）。
+#[cfg(desktop)]
+const STARTUP_BG: Color = Color(19, 20, 24, 255);
+
 /// 创建撕裂面板窗口（label = `panel-<id>`；内部函数，供布局迷你窗口管理器
 /// 撕裂建新窗/恢复调和调用）。已存在（恢复防重）时直接返回 true。
 /// 同步命令/事件处理器里调用会死锁（wry#583），故本函数只在 async 上下文
@@ -45,8 +50,8 @@ pub(crate) fn create_panel_window_internal(
             .decorations(false)
             .resizable(true)
             .min_inner_size(320.0, 240.0)
-            // 启动背景色 = 主窗口 tauri.conf.json 的 backgroundColor（#1e1e1e），防新建窗口白闪
-            .background_color(Color(30, 30, 30, 255));
+            // 启动背景色 = 主窗口 tauri.conf.json 的 backgroundColor，防新建窗口白闪
+            .background_color(STARTUP_BG);
         let win = builder.build();
         match win {
             Ok(win) => {

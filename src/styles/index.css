@@ -20,67 +20,68 @@
    浮层 overlay；sunken 只给需要「下沉」的面（画布视口、输入框、代码块）。
    变量名是插件与主题契约（docs/plugins），只增不改。 */
 :root {
-  /* 背景色阶 */
-  --bg-sunken: #f1f1ee;
-  --bg-primary: #fafaf8;
-  --bg-secondary: #ffffff;
-  --bg-tertiary: #f1f1ee;
-  --bg-card: #ffffff;
-  --bg-overlay: #ffffff;
-  --surface: #ffffff;
+  /* 背景色阶：相邻档差极小，分层靠「色阶 + 1px 边」而非强对比 */
+  --bg-sunken: #e4e3dc;
+  --bg-primary: #eae9e3;
+  --bg-secondary: #f5f4f0;
+  --bg-tertiary: #e4e3dc;
+  --bg-card: #f5f4f0;
+  --bg-overlay: #f5f4f0;
+  --surface: #f5f4f0;
   /* 浮层遮罩：模态与抽屉共用一档（浅底用 0.5 已足够压暗） */
   --scrim: rgba(0, 0, 0, 0.5);
 
   /* 文本 */
-  --text-primary: #1a1917;
-  --text-secondary: #565450;
-  --text-muted: #726f68;
+  --text-primary: #1f1e19;
+  --text-secondary: #55534c;
+  --text-muted: #6a6760;
 
   /* 边与交互态 */
-  --border-subtle: #efeee9;
-  --border: #e4e3de;
-  --border-strong: #cfcec7;
-  --hover: #f1f1ee;
+  --border-subtle: #dfddd6;
+  --border: #d3d1c9;
+  --border-strong: #bdbbb3;
+  --hover: #e1e0d9;
 
   /* 表单与滚动条 */
-  --input-bg: #ffffff;
-  --input-border: #cfcec7;
-  --input-placeholder: #7c7a73;
-  --scrollbar-thumb: #d8d7d1;
-  --scrollbar-thumb-hover: #b6b4ac;
+  --input-bg: #f5f4f0;
+  --input-border: #bdbbb3;
+  --input-placeholder: #6a6760;
+  --scrollbar-thumb: #c9c7bf;
+  --scrollbar-thumb-hover: #a8a69e;
 
-  /* 强调（黄铜金）：浅底上用深一档金保证正文对比，金底恒配白字 */
-  --accent: #8c6a20;
-  --accent-hover: #6f5516;
+  /* 强调（黄铜金）：浅底上用深一档金保证正文对比 ≥4.5:1，金底恒配白字 */
+  --accent: #7f5f1c;
+  --accent-hover: #6b5215;
   --accent-fg: #ffffff;
-  --accent-soft: rgba(140, 106, 32, 0.1);
-  --focus-ring: 0 0 0 2px rgba(140, 106, 32, 0.28);
+  --accent-soft: rgba(127, 95, 28, 0.1);
+  --focus-ring: 0 0 0 2px rgba(127, 95, 28, 0.28);
 
-  /* 状态语义色（状态点 / 提示 / 危险操作共用；不得只靠色表达状态） */
-  --success: #2e7d5b;
-  --warning: #9a6b00;
-  --danger: #c0392b;
+  /* 状态语义色（状态点 / 提示 / 危险操作共用；不得只靠色表达状态）。
+     作正文用须 ≥4.5:1 */
+  --success: #276a4c;
+  --warning: #855b00;
+  --danger: #b33425;
   /* 破坏性按钮的实心底（白字需 ≥4.5:1；--danger 是深底上的文字色，偏亮不能当底） */
-  --danger-fill: #c0392b;
-  --info: #2563eb;
+  --danger-fill: #b33425;
+  --info: #1d4ed8;
 
   /* 标题栏窗口控制按钮（无边框窗口） */
-  --titlebar-icon: #565450;
+  --titlebar-icon: #55534c;
   --titlebar-hover: rgba(0, 0, 0, 0.06);
   --titlebar-close-hover: rgba(232, 17, 35, 0.9);
 
   /* Markdown 与代码 */
-  --highlight-bg: #f1f1ee;
-  --highlight-text: #1a1917;
+  --highlight-bg: #e1e0d9;
+  --highlight-text: #1f1e19;
   /* 代码关键字色 / 内部链接色：跟随强调色（暗化档，浅底保证正文对比） */
   --highlight-code: var(--accent-hover);
   --link-internal: var(--accent-hover);
   --mark-bg: #fbf0c0;
   --mark-color: #1f2937;
   --callout-bg: rgba(26, 25, 23, 0.04);
-  --code-bg: #f4f4f1;
-  --table-border: #e4e3de;
-  --table-header-bg: #f1f1ee;
+  --code-bg: #e4e3dc;
+  --table-border: #d3d1c9;
+  --table-header-bg: #e1e0d9;
 
   /* 形状与投影（投影只给浮起的元素：浮层菜单/弹窗 + 画布节点；面板内部不用，靠色阶与细边分层） */
   /* 圆角刻度（数值递增）：xs 4 → sm 6 → bubble 8 → md 10 → lg 14。
@@ -108,33 +109,33 @@
 /* 夜间主题（主基调）：炭黑 + 黄铜金 + 暖白文本；中性冷灰边，不用蓝色调 */
 :root.dark {
   /* 背景色阶 */
-  --bg-sunken: #0a0b0c;
-  --bg-primary: #0e0f11;
-  --bg-secondary: #16181b;
-  --bg-tertiary: #1d2024;
-  --bg-card: #16181b;
-  --bg-overlay: #23262b;
-  --surface: #16181b;
+  --bg-sunken: #0c0d10;
+  --bg-primary: #131418;
+  --bg-secondary: #1b1e23;
+  --bg-tertiary: #23272e;
+  --bg-card: #1b1e23;
+  --bg-overlay: #2a2e36;
+  --surface: #1b1e23;
   /* 浮层遮罩：深底需再压一档才与浮层拉开差 */
   --scrim: rgba(0, 0, 0, 0.6);
 
   /* 文本 */
-  --text-primary: #e8e6e1;
-  --text-secondary: #a3a19b;
-  --text-muted: #85837a;
+  --text-primary: #e0ddd6;
+  --text-secondary: #aba9a2;
+  --text-muted: #918f88;
 
   /* 边与交互态 */
-  --border-subtle: #23262b;
-  --border: #2e3238;
-  --border-strong: #3d4249;
-  --hover: #1d2024;
+  --border-subtle: #252a31;
+  --border: #2e333a;
+  --border-strong: #383d44;
+  --hover: #23272e;
 
   /* 表单与滚动条 */
-  --input-bg: #1d2024;
-  --input-border: #3d4249;
-  --input-placeholder: #85837a;
-  --scrollbar-thumb: #2e3238;
-  --scrollbar-thumb-hover: #3d4249;
+  --input-bg: #23272e;
+  --input-border: #383d44;
+  --input-placeholder: #918f88;
+  --scrollbar-thumb: #2e333a;
+  --scrollbar-thumb-hover: #383d44;
 
   /* 强调：深底上的金需提亮一档（暗化版对比不足），金底配深色前景 */
   --accent: #e0a94e;
@@ -143,28 +144,28 @@
   --accent-soft: rgba(224, 169, 78, 0.14);
   --focus-ring: 0 0 0 2px rgba(224, 169, 78, 0.34);
 
-  /* 状态语义色 */
+  /* 状态语义色（作正文用须 ≥4.5:1） */
   --success: #5fbf8b;
   --warning: #e0a94e;
-  --danger: #e06a5f;
+  --danger: #e8776c;
   --info: #6fa8dc;
 
   /* 标题栏窗口控制按钮 */
-  --titlebar-icon: #a3a19b;
+  --titlebar-icon: #aba9a2;
   --titlebar-hover: rgba(255, 255, 255, 0.07);
   --titlebar-close-hover: #e81123;
 
   /* Markdown 与代码 */
-  --highlight-bg: #1d2024;
-  --highlight-text: #e8e6e1;
+  --highlight-bg: #23272e;
+  --highlight-text: #e0ddd6;
   /* 深色底需亮化强调色（暗化版对比不足）；浅色主题各自定义 */
   --highlight-code: color-mix(in srgb, var(--accent) 88%, white);
   --link-internal: color-mix(in srgb, var(--accent) 88%, white);
   --callout-bg: rgba(255, 255, 255, 0.05);
   /* 代码块底色：比卡片更深一档 */
-  --code-bg: #0a0b0c;
-  --table-border: #2e3238;
-  --table-header-bg: #1d2024;
+  --code-bg: #0c0d10;
+  --table-border: #2e333a;
+  --table-header-bg: #23272e;
 
   --shadow-pop: 0 1px 2px rgba(0, 0, 0, 0.5), 0 12px 32px rgba(0, 0, 0, 0.45);
 
@@ -175,66 +176,48 @@
   background-color: var(--bg-sunken) !important;
 }
 
-/* ===== ReactFlow theme ===== */
+/* ===== ReactFlow theme =====
+   画布调色板经主题变量取色，随深浅主题自动跟随；仅「关联边灰」「连接预览线」「归属水印底」
+   三个画布独有的色在两处分别定义。 */
 :root {
-  --xy-edge-stroke-default: #b6b4ac;
+  --xy-edge-stroke-default: #a8a69e;
   --xy-edge-stroke-width-default: 1;
   --xy-edge-stroke-selected-default: var(--accent);
-  --xy-connectionline-stroke-default: #b6b4ac;
+  --xy-connectionline-stroke-default: #a8a69e;
   --xy-connectionline-stroke-width-default: 1;
-  --xy-attribution-background-color-default: rgba(250, 250, 248, 0.5);
-  --xy-minimap-background-color-default: #f1f1ee;
-  --xy-minimap-mask-background-color-default: rgba(241, 241, 238, 0.6);
-  --xy-minimap-node-background-color-default: #d8d7d1;
+  --xy-attribution-background-color-default: rgba(234, 233, 227, 0.5);
+  --xy-minimap-background-color-default: var(--bg-tertiary);
+  --xy-minimap-mask-background-color-default: rgba(228, 227, 220, 0.6);
+  --xy-minimap-node-background-color-default: var(--scrollbar-thumb);
   --xy-minimap-node-stroke-color-default: transparent;
-  --xy-background-color-default: #f1f1ee;
-  --xy-background-pattern-dots-color-default: #d8d7d1;
-  --xy-node-color-default: #1a1917;
-  --xy-node-border-default: 1px solid #e4e3de;
-  --xy-node-background-color-default: #ffffff;
+  --xy-background-color-default: var(--bg-sunken);
+  --xy-background-pattern-dots-color-default: var(--scrollbar-thumb);
+  --xy-node-color-default: var(--text-primary);
+  --xy-node-border-default: 1px solid var(--border);
+  --xy-node-background-color-default: var(--bg-card);
   --xy-node-boxshadow-hover-default: 0 1px 4px 1px rgba(0, 0, 0, 0.08);
   --xy-node-boxshadow-selected-default: none;
   --xy-handle-background-color-default: var(--accent);
-  --xy-handle-border-color-default: #ffffff;
+  --xy-handle-border-color-default: var(--bg-card);
   --xy-selection-background-color-default: color-mix(in srgb, var(--accent) 10%, transparent);
   --xy-selection-border-default: 1px dashed color-mix(in srgb, var(--accent) 60%, transparent);
-  --xy-controls-button-background-color-default: #ffffff;
-  --xy-controls-button-background-color-hover-default: #f1f1ee;
-  --xy-controls-button-color-default: #6b6963;
-  --xy-controls-button-color-hover-default: #1a1917;
-  --xy-controls-button-border-color-default: #e4e3de;
+  --xy-controls-button-background-color-default: var(--bg-card);
+  --xy-controls-button-background-color-hover-default: var(--bg-tertiary);
+  --xy-controls-button-color-default: var(--text-muted);
+  --xy-controls-button-color-hover-default: var(--text-primary);
+  --xy-controls-button-border-color-default: var(--border);
   --xy-controls-box-shadow-default: 0 0 2px 1px rgba(0, 0, 0, 0.08);
-  --xy-edge-label-background-color-default: #ffffff;
-  --xy-edge-label-color-default: #1a1917;
+  --xy-edge-label-background-color-default: var(--bg-card);
+  --xy-edge-label-color-default: var(--text-primary);
 }
 
 :root.dark {
-  --xy-edge-stroke-default: #55595f;
-  --xy-edge-stroke-selected-default: var(--accent);
+  --xy-edge-stroke-default: #565b63;
   --xy-connectionline-stroke-default: #6b7078;
-  --xy-attribution-background-color-default: rgba(14, 15, 17, 0.5);
-  --xy-minimap-background-color-default: #1d2024;
-  --xy-minimap-mask-background-color-default: rgba(22, 24, 27, 0.6);
-  --xy-minimap-node-background-color-default: #3d4249;
-  --xy-background-color-default: #0a0b0c;
-  --xy-background-pattern-dots-color-default: #2e3238;
-  --xy-node-color-default: #e8e6e1;
-  --xy-node-border-default: 1px solid #2e3238;
-  --xy-node-background-color-default: #16181b;
+  --xy-attribution-background-color-default: rgba(19, 20, 24, 0.5);
+  --xy-handle-border-color-default: var(--bg-primary);
   --xy-node-boxshadow-hover-default: 0 1px 4px 1px rgba(0, 0, 0, 0.4);
-  --xy-node-boxshadow-selected-default: none;
-  --xy-handle-background-color-default: var(--accent);
-  --xy-handle-border-color-default: #0e0f11;
-  --xy-selection-background-color-default: color-mix(in srgb, var(--accent) 12%, transparent);
-  --xy-selection-border-default: 1px dashed color-mix(in srgb, var(--accent) 60%, transparent);
-  --xy-controls-button-background-color-default: #16181b;
-  --xy-controls-button-background-color-hover-default: #1d2024;
-  --xy-controls-button-color-default: #a3a19b;
-  --xy-controls-button-color-hover-default: #e8e6e1;
-  --xy-controls-button-border-color-default: #2e3238;
   --xy-controls-box-shadow-default: 0 0 2px 1px rgba(0, 0, 0, 0.3);
-  --xy-edge-label-background-color-default: #16181b;
-  --xy-edge-label-color-default: #e8e6e1;
 }
 
 /* ===== 节点连接边框（ConnectionFrame）：四边透明长条 handle，连接圆点/选中阴影发光按需渐显 ===== */
