@@ -469,6 +469,26 @@ body {
   min-height: 100%;
   padding: 1rem;
 }
+/* 隐藏输入面：透明 1px 的 textarea，托管 IME/键盘/选区，光标由 .md-caret-layer 自绘。
+   位置与内部高度由 MarkdownEditSink 经 CSSOM 逐项覆写（left/top/height），其余声明在此固定。
+   样式走类而非 style 属性：打包后自定义 scheme 下 style 属性的样式不参与层叠，
+   只有类与 CSSOM 写入才生效。 */
+.md-edit-sink {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 1px;
+  height: 1em;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  outline: none;
+  resize: none;
+  opacity: 0;
+  overflow: hidden;
+  white-space: pre;
+  z-index: -1;
+}
 /* 笔记面板正文最大行宽：与标题/属性区同列居中（行宽取 --note-line-width，设置 → 编辑器可调，
    none = 随面板铺满只留内边距）；画布文本节点不带 .note-body，不受影响 */
 .note-body .md-edit-content {

@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 /**
- * 输入面单测：列表行 Enter/退格、Tab 缩进/反缩进的文本变换，以及输入法组合态（未上屏文本 + 选区折算）。
+ * 输入面单测：列表行 Enter/退格、Tab 缩进/反缩进的文本变换，输入法组合态（未上屏文本 + 选区折算），
+ * 以及输入面基态样式的承载方式。
  */
 import { describe, expect, it } from "vitest";
 import { indentEdit, listBackspaceEdit, listEnterEdit, MarkdownEditSink, outdentEdit, type CompositionText } from "./markdownInput";
@@ -188,5 +189,26 @@ describe("outdentEdit", () => {
   it("无可删缩进返回 null", () => {
     expect(outdentEdit("- 甲", 3, 3)).toBeNull();
     expect(outdentEdit("普通段落", 2, 2)).toBeNull();
+  });
+});
+
+describe("隐藏输入面基态样式", () => {
+  it("基态走类名而非 style 属性：打包后自定义 scheme 下 style 属性的样式不参与层叠", () => {
+    const { sink } = mountSink("甲", 1);
+    expect(sink.el.className).toBe("md-edit-sink");
+    // 基态声明一条都不在 style 属性里（style 属性只有运行期覆写：内部高度与光标坐标）
+    for (const prop of ["opacity", "width", "position", "z-index", "resize"]) {
+      expect(sink.el.style.getPropertyValue(prop)).toBe("");
+    }
+  });
+
+  it("动态坐标与内部高度经 CSSOM 覆写类中的基态值", () => {
+    const { sink } = mountSink("甲乙丙", 1);
+    sink.moveTo({ left: 208, top: 20 });
+    sink.syncScroll();
+    expect(sink.el.style.left).toBe("208px");
+    expect(sink.el.style.top).toBe("20px");
+    // 内部高度按行高实测覆写类中的 1em 基态
+    expect(sink.el.style.height).toMatch(/^\d+(\.\d+)?px$/);
   });
 });

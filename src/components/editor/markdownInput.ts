@@ -172,22 +172,8 @@ function measurePreWidth(el: HTMLTextAreaElement, text: string): number {
   return width;
 }
 
-const SINK_STYLE = [
-  "position:absolute",
-  "top:0",
-  "left:0",
-  "width:1px",
-  "height:1em",
-  "padding:0",
-  "margin:0",
-  "border:0",
-  "outline:none",
-  "resize:none",
-  "opacity:0",
-  "overflow:hidden",
-  "white-space:pre",
-  "z-index:-1",
-].join(";");
+/** 隐藏输入面类名：基态样式在 styles/index.css 的 .md-edit-sink（走类不走 style 属性，见该处说明）。 */
+const SINK_CLASS = "md-edit-sink";
 
 export class MarkdownEditSink {
   readonly el: HTMLTextAreaElement;
@@ -208,7 +194,7 @@ export class MarkdownEditSink {
     this.#callbacks = callbacks;
     this.#interceptHistory = options.interceptHistory ?? true;
     const el = document.createElement("textarea");
-    el.setAttribute("style", SINK_STYLE);
+    el.className = SINK_CLASS;
     el.setAttribute("autocapitalize", "off");
     el.setAttribute("autocorrect", "off");
     el.spellcheck = false;
