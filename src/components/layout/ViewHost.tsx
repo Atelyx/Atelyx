@@ -33,6 +33,8 @@ import { useTableStore } from "@/stores/tableStore";
 import { useNoteStore } from "@/stores/noteStore";
 import { usePluginStore } from "@/stores/pluginStore";
 import { ErrorBoundary } from "@/components/common/ErrorBoundary";
+import { Button, IconButton } from "@/components/common/Button";
+import { StatusPill } from "@/components/common/Badge";
 import type { BuiltinViewKind, ViewKind } from "@/types";
 
 /** 视图元信息（标签/头部共用；显示名单一来源 = VIEW_LABELS，图标在此维护）。
@@ -122,30 +124,30 @@ function CanvasStatusIndicator() {
       >
         <span className="truncate max-w-[160px]">{error}</span>
         {error === "加载画布失败，请重试" && canvasFile && (
-          <button
+          <Button
+            variant="danger"
+            size="sm"
             onClick={() => void load(canvasFile)}
-            className="px-1 rounded hover:opacity-80"
-            style={{ background: "color-mix(in srgb, var(--danger) 20%, transparent)", color: "var(--danger)" }}
+            style={{ background: "color-mix(in srgb, var(--danger) 20%, transparent)" }}
           >
             重试
-          </button>
+          </Button>
         )}
-        <button
+        <IconButton
+          variant="danger"
+          size="sm"
+          icon={<X size={12} />}
+          label="关闭错误提示"
+          style={{ background: "color-mix(in srgb, var(--danger) 20%, transparent)" }}
           onClick={() => clearError()}
-          className="px-1 rounded hover:opacity-80"
-          style={{ background: "color-mix(in srgb, var(--danger) 20%, transparent)", color: "var(--danger)" }}
-          aria-label="关闭错误提示"
-        >
-          <X size={12} />
-        </button>
+        />
       </span>
     );
   }
-  return (
-    <span className="flex-shrink-0 text-xs" style={{ color: "var(--text-muted)" }}>
-      {loading ? "加载中…" : saving ? "保存中…" : readOnly ? "只读（外部白板格式）" : "已自动保存"}
-    </span>
-  );
+  if (loading) return <StatusPill status="pending" label="加载中…" />;
+  if (saving) return <StatusPill status="pending" label="保存中…" />;
+  if (readOnly) return <StatusPill status="off" label="只读（外部白板格式）" />;
+  return <StatusPill status="ok" label="已自动保存" />;
 }
 
 /** 表格视图状态指示（无当前表格不显示；错误 > 保存状态）。 */
@@ -162,22 +164,19 @@ function TableStatusIndicator() {
         style={{ color: "var(--danger)", background: "color-mix(in srgb, var(--danger) 12%, transparent)" }}
       >
         <span className="truncate max-w-[160px]">{error}</span>
-        <button
+        <IconButton
+          variant="danger"
+          size="sm"
+          icon={<X size={12} />}
+          label="关闭错误提示"
+          style={{ background: "color-mix(in srgb, var(--danger) 20%, transparent)" }}
           onClick={() => clearError()}
-          className="px-1 rounded hover:opacity-80"
-          style={{ background: "color-mix(in srgb, var(--danger) 20%, transparent)", color: "var(--danger)" }}
-          aria-label="关闭错误提示"
-        >
-          <X size={12} />
-        </button>
+        />
       </span>
     );
   }
-  return (
-    <span className="flex-shrink-0 text-xs" style={{ color: "var(--text-muted)" }}>
-      {saving ? "保存中…" : "已自动保存"}
-    </span>
-  );
+  if (saving) return <StatusPill status="pending" label="保存中…" />;
+  return <StatusPill status="ok" label="已自动保存" />;
 }
 
 /** 笔记视图状态指示（无当前笔记不显示；保存状态）。 */
@@ -186,26 +185,13 @@ function NoteStatusIndicator() {
   const status = useNoteStore((s) => (currentNoteFile ? s.noteSaveStates[currentNoteFile] : undefined));
   if (!currentNoteFile) return null;
   if (!status) return null;
-  const text = status.loadError
-    ? "读取失败"
-    : status.state === "saving"
-      ? "保存中…"
-      : status.state === "error"
-        ? "保存失败"
-        : status.state === "edited"
-          ? "未保存"
-          : status.state === "saved"
-            ? "已自动保存"
-            : null;
-  if (!text) return null;
-  return (
-    <span
-      className="flex-shrink-0 text-xs"
-      style={{ color: status.loadError || status.state === "error" ? "var(--danger)" : "var(--text-muted)" }}
-    >
-      {text}
-    </span>
-  );
+  if (status.loadError) return <StatusPill status="error" label="读取失败" />;
+  if (status.state === "saving") return <StatusPill status="pending" label="保存中…" />;
+  if (status.state === "error") return <StatusPill status="error" label="保存失败" />;
+  // 「未保存」是有待落盘的待办（警告档），不是失败
+  if (status.state === "edited") return <StatusPill status="pending" label="未保存" />;
+  if (status.state === "saved") return <StatusPill status="ok" label="已自动保存" />;
+  return null;
 }
 
 /** 按视图类型分派状态指示（view 变化 = 子组件类型切换，各子组件 hooks 固定）。
