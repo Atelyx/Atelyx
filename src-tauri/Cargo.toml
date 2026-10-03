@@ -70,6 +70,10 @@ tauri-plugin-shell = "2.0"
 tauri-plugin-process = "2"
 # 自动检查更新：check/downloadAndInstall/签名校验（GitHub Release 静态 latest.json，见 4.18）
 tauri-plugin-updater = "2"
+# 开机自启：Windows 写 HKCU Run 注册表 / Linux 写 XDG autostart .desktop / macOS 写 LaunchAgent
+tauri-plugin-autostart = "2"
+# 单实例（须最先注册）：第二个进程启动即退出，转交首个实例处理
+tauri-plugin-single-instance = "2"
 # API key 安全存储（OS keychain：Windows Credential Manager / Linux Secret Service / macOS Keychain）
 # 安全红线：API key 仅存 keychain，永不落仓库文件或 global.json
 keyring = "4"

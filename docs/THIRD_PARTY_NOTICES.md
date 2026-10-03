@@ -1,7 +1,7 @@
 # Third-Party Notices
 
 本项目包含或依赖以下第三方软件，许可与版权归属如下。完整传递依赖清单可用
-`pnpm licenses list` 审计（本文件记录于 2026-10-03）。
+`pnpm licenses list` 审计（本文件记录于 2026-10-04）。
 
 ## Vendored 源码
 
@@ -19,7 +19,7 @@
 | @fontsource/ibm-plex-sans / ibm-plex-mono / fraunces / sora / manrope / jetbrains-mono | SIL OFL-1.1 |
 | @lezer/highlight | MIT |
 | @tauri-apps/api | Apache-2.0 OR MIT |
-| @tauri-apps/plugin-clipboard-manager / dialog / process / shell / updater | MIT OR Apache-2.0 |
+| @tauri-apps/plugin-autostart / clipboard-manager / dialog / process / shell / updater | MIT OR Apache-2.0 |
 | @xyflow/react | MIT |
 | esbuild-wasm | MIT |
 | gray-matter | MIT |

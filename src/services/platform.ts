@@ -21,6 +21,8 @@ export interface PlatformCapabilities {
   credentialStorage: boolean;
   /** 应用内自动更新（移动端无 updater，改为提示下载）。 */
   autoUpdate: boolean;
+  /** 开机自启（桌面 = 写系统启动项；移动端无 autostart 插件）。 */
+  autoLaunch: boolean;
   /** 进程执行与插件依赖打包（移动端不存在，缺失显式可见）。 */
   processExecution: boolean;
   /** 磁盘文件监听（两端均无：外部改动在打开/重读时感知）。 */
@@ -41,6 +43,7 @@ export function platformCapabilities(): PlatformCapabilities {
       directoryPicker: false,
       credentialStorage: true,
       autoUpdate: false,
+      autoLaunch: false,
       processExecution: false,
       fileWatching: false,
     };
@@ -51,6 +54,7 @@ export function platformCapabilities(): PlatformCapabilities {
     directoryPicker: true,
     credentialStorage: true,
     autoUpdate: true,
+    autoLaunch: true,
     processExecution: true,
     fileWatching: false,
   };

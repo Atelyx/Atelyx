@@ -14,6 +14,7 @@ import { fileExists, readNote } from "@/services/vault";
 import { fetchProviderModels } from "@/services/ai/client";
 import { buildAgentTools } from "@/services/ai/tools";
 import { getHostname, readGlobalConfig, updateGlobalConfig } from "@/services/global";
+import { isAutoLaunchEnabled, setAutoLaunchEnabled } from "@/services/autostart";
 import { useAppStore } from "@/stores/appStore";
 import { useCollabStore } from "@/stores/collabStore";
 import { useSpaceDirectoryStore } from "@/stores/spaceDirectoryStore";
@@ -87,6 +88,8 @@ interface SettingsState {
   autoRestoreFiles: boolean;
   /** 进入仓库时自动切到「主页」布局（应用级，存 global.json；缺省 false = 保持恢复上次界面）。 */
   defaultHomeLayout: boolean;
+  /** 系统启动项是否已注册本应用（应用级但不落配置：真相源为系统启动项本身，实时读取）。 */
+  autoLaunch: boolean;
   /** 宽松换行（应用级显示偏好，存 global.json；缺省 true = 单个换行渲染为换行）。 */
   softLineBreak: boolean;
   /** 页面内标题（应用级显示偏好，存 global.json；缺省 false = 不显示）。 */
@@ -187,6 +190,10 @@ interface SettingsState {
   setAutoRestoreFiles: (enabled: boolean) => Promise<void>;
   /** 设置进入仓库时是否自动切到「主页」布局（应用级；缺省 false = 保持恢复上次界面，写 global.json）。 */
   setDefaultHomeLayout: (enabled: boolean) => Promise<void>;
+  /** 刷新开机自启真实状态（设置面板打开时调用：用户可能已在系统侧改过启动项）。 */
+  refreshAutoLaunch: () => Promise<void>;
+  /** 开关开机自启（写系统启动项；失败提示并回读系统真实状态，开关不虚报）。 */
+  setAutoLaunch: (enabled: boolean) => Promise<void>;
   /** 更新协作配置（应用级）：内存 + global.json 落盘 + 重建协作连接。 */
   setCollabConfig: (
     patch: Partial<Pick<SettingsState, "collabEnabled" | "collabNickname" | "collabColor">>,
@@ -844,6 +851,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   fontFamily: undefined,
   autoRestoreFiles: true,
   defaultHomeLayout: false,
+  autoLaunch: false,
   softLineBreak: true,
   inlineTitle: false,
   noteLineWidth: NOTE_LINE_WIDTH_DEFAULT,
@@ -871,6 +879,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     let fontFamily: string | undefined;
     let autoRestoreFiles = true;
     let defaultHomeLayout = false;
+    let autoLaunch = false;
     let softLineBreak = true;
     let inlineTitle = false;
     let noteLineWidth = NOTE_LINE_WIDTH_DEFAULT;
@@ -916,6 +925,12 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     } catch (e) {
       console.error("读取设备名失败", e);
     }
+    try {
+      // 开机自启状态独立读（不落配置，直接取系统启动项；移动端 service 内 no-op）
+      autoLaunch = await isAutoLaunchEnabled();
+    } catch (e) {
+      console.error("读取开机自启状态失败", e);
+    }
     set({
       config: DEFAULT_AI_CONFIG,
       theme,
@@ -924,6 +939,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       fontFamily,
       autoRestoreFiles,
       defaultHomeLayout,
+      autoLaunch,
       softLineBreak,
       inlineTitle,
       noteLineWidth,
@@ -1189,6 +1205,28 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
 
   setDefaultHomeLayout: (enabled) =>
     commitGlobal({ defaultHomeLayout: enabled }, "保存主页默认布局配置失败"),
+
+  refreshAutoLaunch: async () => {
+    try {
+      set({ autoLaunch: await isAutoLaunchEnabled() });
+    } catch (e) {
+      console.error("读取开机自启状态失败", e);
+    }
+  },
+
+  setAutoLaunch: async (enabled) => {
+    try {
+      await setAutoLaunchEnabled(enabled);
+    } catch (e) {
+      console.error("设置开机自启失败", e);
+      useNotificationStore.getState().notify({
+        level: "error",
+        message: `设置开机自启失败：${e instanceof Error ? e.message : String(e)}`,
+      });
+    }
+    // 无论成败都回读系统启动项真实状态：写失败时开关不虚报（系统可能是被外部改过的状态）
+    await get().refreshAutoLaunch();
+  },
 
   setCollabConfig: async (patch) => {
     set(patch);

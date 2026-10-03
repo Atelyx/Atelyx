@@ -37,13 +37,14 @@ describe("内核能力层", () => {
         directoryPicker: true,
         credentialStorage: true,
         autoUpdate: true,
+        autoLaunch: true,
         processExecution: true,
         fileWatching: false,
       });
     }
   });
 
-  it("安卓 = 按端取舍：单窗口、无窗口控制/目录选择器/自动更新/进程执行", () => {
+  it("安卓 = 按端取舍：单窗口、无窗口控制/目录选择器/自动更新/开机自启/进程执行", () => {
     restore = stubUserAgent(
       "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Mobile Safari/537.36",
     );
@@ -54,6 +55,7 @@ describe("内核能力层", () => {
       directoryPicker: false,
       credentialStorage: true,
       autoUpdate: false,
+      autoLaunch: false,
       processExecution: false,
       fileWatching: false,
     });

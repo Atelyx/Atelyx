@@ -1,4 +1,4 @@
-import { Fragment } from "react";
+import { Fragment, useEffect } from "react";
 import { ChevronDown, ChevronUp } from "lucide-react";
 import { ToggleSwitch } from "@/components/common/ToggleSwitch";
 import { DropdownSelect } from "@/components/common/DropdownSelect";
@@ -41,6 +41,18 @@ export function GeneralSettingsTab() {
   const setAutoUpdate = useAppStore((s) => s.setAutoUpdate);
   /** 自动更新能力（桌面有 / 移动端无；经 store 读取，守「组件不 import services」分层）。 */
   const autoUpdateSupported = useAppStore((s) => s.platform.capabilities.autoUpdate);
+  const autoLaunch = useSettingsStore((s) => s.autoLaunch);
+  const setAutoLaunch = useSettingsStore((s) => s.setAutoLaunch);
+  const refreshAutoLaunch = useSettingsStore((s) => s.refreshAutoLaunch);
+  /** 开机自启能力（桌面有 / 移动端无）。 */
+  const autoLaunchSupported = useAppStore((s) => s.platform.capabilities.autoLaunch);
+  /** 开发模式禁用：会把调试版可执行文件路径写进系统启动项，故不提供开关。 */
+  const autoLaunchUsable = autoLaunchSupported && !import.meta.env.DEV;
+
+  // 面板打开时刷新一次：用户可能已在系统侧（任务管理器/注册表）手动改过启动项
+  useEffect(() => {
+    void refreshAutoLaunch();
+  }, [refreshAutoLaunch]);
 
   // 移动端底部导航栏顺序（应用级；桌面无此栏，故仅移动端渲染本区块）
   const isAndroid = useAppStore((s) => s.platform.isAndroid);
@@ -149,6 +161,26 @@ export function GeneralSettingsTab() {
           onChange={(v) => void setAutoUpdate(v)}
           title={autoUpdateSupported ? "自动更新" : "当前平台不支持自动更新"}
           disabled={!autoUpdateSupported}
+        />
+      </SettingCard>
+
+      {/* 开机自启（应用级但不落配置：真相源为系统启动项本身，开关实时读系统）。
+          开发模式禁用：会把调试版可执行文件路径写进系统启动项。 */}
+      <SettingCard
+        title="开机自启"
+        description={
+          !autoLaunchSupported
+            ? "当前平台不支持开机自启"
+            : !autoLaunchUsable
+              ? "开发模式下不可用（避免注册调试版可执行文件路径）"
+              : "登录系统后自动运行 Atelyx"
+        }
+      >
+        <ToggleSwitch
+          checked={autoLaunch}
+          onChange={(v) => void setAutoLaunch(v)}
+          title={autoLaunchUsable ? "开机自启" : "当前不可用"}
+          disabled={!autoLaunchUsable}
         />
       </SettingCard>
 

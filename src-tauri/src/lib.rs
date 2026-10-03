@@ -29,14 +29,33 @@ use tauri::Manager;
 /// （mobile_entry_point 导出宿主入口）。
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let builder = tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // 单实例（桌面，须最先注册）：第二个进程启动即退出，并在首个实例内回调。
+    // 登录自启的进程带 --autorun → 静默退出不抢焦点；用户手动二次启动 → 聚焦主窗口
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+        if args.iter().any(|arg| arg == "--autorun") {
+            return;
+        }
+        if let Some(main) = app.get_webview_window("main") {
+            let _ = main.unminimize();
+            let _ = main.show();
+            let _ = main.set_focus();
+        }
+    }));
+    let builder = builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init());
-    // 桌面壳专属插件：shell（系统打开）/ process（更新后重启）；移动端无对应实现，不注册
+    // 桌面壳专属插件：shell（系统打开）/ process（更新后重启）/ autostart（开机自启，注册项附带
+    // --autorun 供上面的单实例回调识别登录自启）；移动端无对应实现，不注册
     #[cfg(desktop)]
     let builder = builder
         .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_process::init());
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec!["--autorun"]),
+        ));
     let app = builder
         .setup(|app| {
             // 自动检查更新（tauri-plugin-updater，endpoints/pubkey 见 tauri.conf.json；移动端无 updater，改提示下载）
