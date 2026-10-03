@@ -22,6 +22,7 @@ import {
   Type,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { Input, Textarea } from "@/components/common/Input";
 import { PopupLayer } from "@/components/common/PopupLayer";
 import { Menu, MenuDivider, MenuItem } from "@/components/common/Menu";
 import { Button } from "@/components/common/Button";
@@ -47,13 +48,16 @@ export function CellMenu({
 }) {
   return (
     <Menu x={x} y={y} onClose={onClose} widthClass="w-32" stopPointerDown>
-      <MenuItem onClick={() => { useTableStore.getState().copySelection(); onClose(); }}>
+      <MenuItem
+        onClick={() => { useTableStore.getState().copySelection(); onClose(); }}>
         <Copy size={14} /> 复制
       </MenuItem>
-      <MenuItem onClick={() => { void useTableStore.getState().cutSelection(); onClose(); }}>
+      <MenuItem
+        onClick={() => { void useTableStore.getState().cutSelection(); onClose(); }}>
         <Scissors size={14} /> 剪切
       </MenuItem>
-      <MenuItem onClick={() => { void useTableStore.getState().pasteFromClipboard(); onClose(); }}>
+      <MenuItem
+        onClick={() => { void useTableStore.getState().pasteFromClipboard(); onClose(); }}>
         <ClipboardPaste size={14} /> 粘贴
       </MenuItem>
       {onFormat && (
@@ -103,8 +107,9 @@ export function FieldMenu({
   if (mode === "rename") {
     return (
       <Menu x={x} y={y} onClose={onClose} widthClass="w-44" contentClassName="py-2 px-2.5" repositionDeps={[mode]} stopPointerDown>
-        <input
+        <Input
           ref={inputRef}
+          borderless
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => {
@@ -116,8 +121,7 @@ export function FieldMenu({
           }}
           onBlur={onClose}
           placeholder="字段名称"
-          className="w-full bg-transparent border-b border-[var(--accent)] outline-none text-xs"
-          style={{ color: "var(--text-primary)" }}
+          className="!text-xs border-b border-b-[var(--accent)]"
         />
       </Menu>
     );
@@ -129,13 +133,12 @@ export function FieldMenu({
         <p className="text-micro mb-1" style={{ color: "var(--text-muted)" }}>
           每行一个选项
         </p>
-        <textarea
+        <Textarea
           ref={optionsRef}
           value={optionsDraft}
           onChange={(e) => setOptionsDraft(e.target.value)}
           rows={5}
-          className="w-full bg-transparent border border-[var(--border)] rounded p-1.5 outline-none text-xs resize-none"
-          style={{ color: "var(--text-primary)" }}
+          className="!text-xs"
         />
         <div className="flex justify-end gap-1 mt-1.5">
           <Button variant="ghost" size="sm" onClick={onClose}>
@@ -187,7 +190,8 @@ export function FieldMenu({
         </div>
       ) : (
         <>
-          <MenuItem onClick={() => { setMode("rename"); setDraft(field.name); }}>
+          <MenuItem
+            onClick={() => { setMode("rename"); setDraft(field.name); }}>
             <Pencil size={14} /> 重命名
           </MenuItem>
           <div className="px-3 py-1">
@@ -260,8 +264,9 @@ export function ColumnMenu({
   if (mode !== "menu") {
     return (
       <Menu x={x} y={y} onClose={onClose} widthClass="w-44" contentClassName="py-2 px-2.5" repositionDeps={[mode]} stopPointerDown>
-        <input
+        <Input
           ref={inputRef}
+          borderless
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => {
@@ -274,8 +279,7 @@ export function ColumnMenu({
           }}
           onBlur={onClose}
           placeholder="新字段名称"
-          className="w-full bg-transparent border-b border-[var(--accent)] outline-none text-xs"
-          style={{ color: "var(--text-primary)" }}
+          className="!text-xs border-b border-b-[var(--accent)]"
         />
       </Menu>
     );
@@ -374,7 +378,9 @@ export function RowMenu({
 }
 
 /** 添加字段浮层：名称 + 类型选择 + 添加。 */
-export function AddFieldMenu({ x, y, onClose }: { x: number; y: number; onClose: () => void }) {
+export function AddFieldMenu({ x, y, onClose }: {
+  x: number;
+  y: number; onClose: () => void }) {
   const addField = useTableStore((s) => s.addField);
   const [name, setName] = useState("");
   const [type, setType] = useState<FieldType>("text");
@@ -386,8 +392,9 @@ export function AddFieldMenu({ x, y, onClose }: { x: number; y: number; onClose:
 
   return (
     <Menu x={x} y={y} onClose={onClose} widthClass="w-48" contentClassName="p-2.5" stopPointerDown>
-      <input
+      <Input
         ref={inputRef}
+        borderless
         value={name}
         onChange={(e) => setName(e.target.value)}
         onKeyDown={(e) => {
@@ -397,8 +404,7 @@ export function AddFieldMenu({ x, y, onClose }: { x: number; y: number; onClose:
           }
         }}
         placeholder="字段名称"
-        className="w-full bg-transparent border-b border-[var(--accent)] outline-none text-xs mb-2"
-        style={{ color: "var(--text-primary)" }}
+        className="mb-2 !text-xs border-b border-b-[var(--accent)]"
       />
       <div className="flex flex-col gap-0.5 mb-2">
         {(Object.keys(FIELD_TYPE_LABELS) as FieldType[]).map((t) => (

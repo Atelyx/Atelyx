@@ -7,6 +7,7 @@
  * 同名冲突在此前置拒绝：`vaultStore.renameNote` 对同名会静默加序号，而这里是用户手输的文档名，
  * 改完与他刚输入的内容不符，故不进入该逻辑，内联提示后由用户自行改名或另开标题。
  */
+import { Input } from "@/components/common/Input";
 import { useRef, useState } from "react";
 import { useVaultStore } from "@/stores/vaultStore";
 import { noteRenameTarget, noteTitleFromFile } from "@/utils/filename";
@@ -78,8 +79,9 @@ export function NoteTitle({ file }: { file: string }) {
           {shown}
         </button>
       ) : (
-        <input
+        <Input
           autoFocus
+          borderless
           spellCheck={false}
           value={draft}
           placeholder={shown}
@@ -92,8 +94,8 @@ export function NoteTitle({ file }: { file: string }) {
             if (e.key === "Enter") finishEdit(true);
             else if (e.key === "Escape") finishEdit(false);
           }}
-          className="w-full bg-transparent outline-none text-h1 leading-7 font-semibold tracking-[-0.01em]"
-          style={{ color: "var(--text-primary)", borderBottom: "1px dashed var(--border)" }}
+          className="!text-h1 !px-0 leading-7 font-semibold tracking-[-0.01em] border-b border-b-[var(--border)]"
+          style={{ borderBottomStyle: "dashed" }}
         />
       )}
       {notice && (

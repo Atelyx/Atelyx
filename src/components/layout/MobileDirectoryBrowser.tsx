@@ -4,7 +4,8 @@
  * 安卓 WebView 内没有系统文件夹选择器，故自研；数据与动作由入口对话框透传（其编排在
  * mobileVaultStore）。作为浮层的一层登记返回处理器：返回键先关它，不落到上一层。
  */
-import { ArrowUp, Folder, Loader2, X } from "lucide-react";
+import { ArrowUp, Folder, X } from "lucide-react";
+import { Spinner } from "@/components/common/primitives";
 import { IconButton } from "@/components/common/Button";
 import { useBackHandler } from "@/hooks/useBackHandler";
 import type { AbsoluteDirListing } from "@/types";
@@ -41,7 +42,8 @@ export function MobileDirectoryBrowser({
     >
       <div
         className="flex-shrink-0 flex items-center gap-2 px-2 h-12 border-b"
-        style={{ borderColor: "var(--border-subtle)", background: "var(--bg-secondary)" }}
+        style={{
+          borderColor: "var(--border-subtle)", background: "var(--bg-secondary)" }}
       >
         <IconButton icon={<X size={18} />} label="关闭" size="touch" onClick={onClose} />
         <span
@@ -62,7 +64,7 @@ export function MobileDirectoryBrowser({
       <div className="flex-1 min-h-0 overflow-y-auto">
         {loading && (
           <div className="flex items-center justify-center gap-2 py-6 text-xs" style={{ color: "var(--text-muted)" }}>
-            <Loader2 size={14} className="animate-spin" />
+            <Spinner size={14} />
             读取中…
           </div>
         )}

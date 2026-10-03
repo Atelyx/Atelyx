@@ -7,8 +7,9 @@
  * 编排在 mobileVaultStore（组件层不 import services）。
  */
 import { useEffect } from "react";
-import { FolderOpen, HardDrive, Loader2, ShieldCheck, X } from "lucide-react";
+import { FolderOpen, HardDrive, ShieldCheck, X } from "lucide-react";
 import { MobileDirectoryBrowser } from "@/components/layout/MobileDirectoryBrowser";
+import { Spinner } from "@/components/common/primitives";
 import { IconButton } from "@/components/common/Button";
 import { useMobileVaultStore } from "@/stores/mobileVaultStore";
 import { useBackHandler } from "@/hooks/useBackHandler";
@@ -104,7 +105,7 @@ export function MobileLocalVaultDialog({
         <div className="mt-3 flex items-center gap-1.5 text-xs" style={{ color: "var(--text-muted)" }}>
           {granted === null ? (
             <>
-              <Loader2 size={12} className="animate-spin" /> 正在检查权限…
+              <Spinner size={12} /> 正在检查权限…
             </>
           ) : granted ? (
             <>

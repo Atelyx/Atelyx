@@ -2,6 +2,7 @@ import { Fragment } from "react";
 import { ChevronDown, ChevronUp } from "lucide-react";
 import { ToggleSwitch } from "@/components/common/ToggleSwitch";
 import { DropdownSelect } from "@/components/common/DropdownSelect";
+import { Input } from "@/components/common/Input";
 import { SettingCard } from "@/components/settings/SettingCard";
 import { IconButton } from "@/components/common/Button";
 import { SlotListMount } from "@/components/plugins/SlotHost";
@@ -78,7 +79,7 @@ export function GeneralSettingsTab() {
     <section className="flex-1 p-5 overflow-auto space-y-4">
       {/* 字体大小（应用级） */}
       <SettingCard title="字体大小" description="界面字号；留空 = 16">
-        <input
+        <Input
           type="number"
           min={12}
           max={20}
@@ -90,12 +91,7 @@ export function GeneralSettingsTab() {
             if (e.key === "Enter") e.currentTarget.blur();
           }}
           placeholder="16"
-          className="text-sm rounded px-2 py-1 outline-none max-w-[90px]"
-          style={{
-            color: "var(--text-primary)",
-            background: "var(--input-bg)",
-            border: "1px solid var(--input-border)",
-          }}
+          className="max-w-[90px]"
         />
       </SettingCard>
 

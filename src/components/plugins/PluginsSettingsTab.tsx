@@ -19,6 +19,8 @@ import { ToggleSwitch } from "@/components/common/ToggleSwitch";
 import { PluginDetailsDialog } from "@/components/plugins/PluginDetailsDialog";
 import { PluginUninstallDialog } from "@/components/plugins/PluginUninstallDialog";
 import { MarketplaceSection } from "@/components/plugins/MarketplaceSection";
+import { Input } from "@/components/common/Input";
+import { IconButton } from "@/components/common/Button";
 import { SlotConflictPanel } from "@/components/plugins/SlotConflictPanel";
 import { DEFAULT_COMPOSITION } from "@/components/plugins/cordis/builtins";
 import { deriveThemeProviders, isThemePluginRow } from "@/utils/pluginTheme";
@@ -136,7 +138,8 @@ export function PluginsSettingsTab() {
     <section className="flex-1 min-h-0 p-5 overflow-y-auto">
       {/* 插件状态文件损坏/不可读的降级提示：行全部以停用态展示，修复文件后重载解除。 */}
       {stateError && (
-        <div className="text-xs mb-3 break-words" style={{ color: "var(--danger)" }}>
+        <div
+          className="text-xs mb-3 break-words" style={{ color: "var(--danger)" }}>
           {stateError}
         </div>
       )}
@@ -190,15 +193,14 @@ export function PluginsSettingsTab() {
         </button>
         <div className="flex items-center gap-1.5 flex-1 min-w-0">
           <GitBranch size={13} className="flex-shrink-0" style={{ color: "var(--text-muted)" }} />
-          <input
+          <Input
             value={gitUrl}
             onChange={(e) => setGitUrl(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter") startGitInstall();
             }}
             placeholder="从 Git 地址安装（如 https://github.com/owner/repo）"
-            className="flex-1 min-w-0 px-2 py-1.5 rounded border text-xs outline-none"
-            style={{ borderColor: "var(--input-border)", color: "var(--text-primary)", background: "var(--input-bg)" }}
+            className="flex-1 min-w-0"
           />
           <button
             onClick={() => startGitInstall()}
@@ -302,16 +304,17 @@ export function PluginsSettingsTab() {
                       title={lastTheme ? LAST_THEME_HINT : row.enabled ? "停用" : "启用"}
                       disabled={lastTheme}
                     />
-                    <button
+                    <IconButton
+                      icon={<Info size={14} />}
+                      label="查看详情"
                       onClick={() => setDetailsId(row.id)}
-                      title="查看详情"
-                      className="p-1.5 rounded hover:bg-[var(--hover)]"
-                      style={{ color: "var(--text-muted)" }}
-                    >
-                      <Info size={14} />
-                    </button>
+                      variant="subtle"
+                      size="sm"
+                    />
                     {row.sourceKind === "local" && (
-                      <button
+                      <IconButton
+                        icon={<RotateCw size={14} />}
+                        label={row.enabled ? "重载：重跑打包并重新挂载，使源码改动生效" : "启用后可重载"}
                         onClick={() =>
                           void reload(row.id).then(
                             () => setNotice({ kind: "ok", text: "插件已重载，源码改动已生效" }),
@@ -319,35 +322,31 @@ export function PluginsSettingsTab() {
                           )
                         }
                         disabled={!row.enabled}
-                        title={row.enabled ? "重载：重跑打包并重新挂载，使源码改动生效" : "启用后可重载"}
-                        className="p-1.5 rounded hover:bg-[var(--hover)] disabled:opacity-50"
-                        style={{ color: "var(--text-muted)" }}
-                      >
-                        <RotateCw size={14} />
-                      </button>
+                        variant="subtle"
+                        size="sm"
+                      />
                     )}
                     {p.installDir !== "" && row.sourceKind !== "local" && (
-                      <button
+                      <IconButton
+                        icon={<RefreshCw size={14} />}
+                        label="更新"
                         onClick={() => void update(row.id).catch((e) => setNotice({ kind: "error", text: errText(e) }))}
-                        title="更新"
-                        className="p-1.5 rounded hover:bg-[var(--hover)]"
-                        style={{ color: "var(--text-muted)" }}
-                      >
-                        <RefreshCw size={14} />
-                      </button>
+                        variant="subtle"
+                        size="sm"
+                      />
                     )}
-                    <button
+                    <IconButton
+                      icon={<Trash2 size={14} />}
+                      label={lastTheme ? LAST_THEME_HINT : "卸载"}
                       onClick={() => {
                         if (lastTheme) return;
                         setConfirmUninstall(row.id);
                       }}
-                      aria-disabled={lastTheme}
-                      title={lastTheme ? LAST_THEME_HINT : "卸载"}
-                      className={`p-1.5 rounded ${lastTheme ? "opacity-50" : "hover:bg-[var(--hover)]"}`}
-                      style={{ color: "var(--text-muted)" }}
-                    >
-                      <Trash2 size={14} />
-                    </button>
+                      disabled={lastTheme}
+                      variant="subtle"
+                      size="sm"
+                      className={lastTheme ? "" : "hover:!text-[var(--danger)]"}
+                    />
                   </>
                 ) : (
                   <button

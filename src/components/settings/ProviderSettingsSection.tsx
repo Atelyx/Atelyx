@@ -1,17 +1,19 @@
 import {
   CheckCircle2,
-  Loader2,
   Plus,
   RefreshCw,
   Unplug,
   X,
   XCircle,
-} from "lucide-react";
+  } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { PROVIDER_PRESETS } from "@/constants/providers";
 import { SPACE_TEAM_AI_NOTICE, SPACE_VIEWER_NOTICE } from "@/constants/space";
 import type { ProviderConfig } from "@/types";
 import { SettingCard } from "@/components/settings/SettingCard";
+import { Spinner } from "@/components/common/primitives";
+import { Checkbox, Input } from "@/components/common/Input";
+import { IconButton } from "@/components/common/Button";
 import { ToggleSwitch } from "@/components/common/ToggleSwitch";
 import { useIsSpaceVault, useSpaceViewerOnly } from "@/hooks/useIsSpaceVault";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -148,8 +150,7 @@ export function ProviderSettingsSection() {
 function ProviderCard({
   provider,
   active,
-  onClick,
-}: {
+  onClick }: {
   provider: ProviderConfig;
   active: boolean;
   onClick: () => void;
@@ -195,20 +196,10 @@ function ProviderCard({
   );
 }
 
-/** 表单输入统一样式（与设置页其他 tab 一致）。 */
-const INPUT_CLASS =
-  "text-sm rounded px-2 py-1.5 outline-none w-full focus:ring-1 focus:ring-[var(--accent)]";
-const INPUT_STYLE: React.CSSProperties = {
-  color: "var(--text-primary)",
-  background: "var(--input-bg)",
-  border: "1px solid var(--input-border)",
-};
-
 function ProviderForm({
   provider,
   onChange,
-  onRemove,
-}: {
+  onRemove }: {
   provider: ProviderConfig;
   onChange: (patch: Partial<ProviderConfig>) => void;
   onRemove: () => void;
@@ -320,35 +311,29 @@ function ProviderForm({
   return (
     <div className="space-y-4">
       <Field label="名称">
-        <input
+        <Input
           type="text"
           value={provider.name}
           onChange={(e) => onChange({ name: e.target.value })}
           placeholder="My Provider"
-          className={INPUT_CLASS}
-          style={INPUT_STYLE}
         />
       </Field>
       <Field label="Base URL">
-        <input
+        <Input
           type="url"
           value={provider.baseUrl}
           onChange={(e) => onChange({ baseUrl: e.target.value })}
           placeholder="https://api.openai.com/v1"
-          className={INPUT_CLASS}
-          style={INPUT_STYLE}
         />
       </Field>
       <Field label="API Key">
         <div className="flex items-center gap-2">
           <div className="flex-1">
-            <input
+            <Input
               type="password"
               value={provider.apiKey}
               onChange={(e) => onChange({ apiKey: e.target.value })}
               placeholder="sk-..."
-              className={INPUT_CLASS}
-              style={INPUT_STYLE}
             />
           </div>
           <button
@@ -363,7 +348,7 @@ function ProviderForm({
             title="验证 Base URL 与 API Key 是否可用（GET /models，免费）"
           >
             {test.status === "testing" ? (
-              <Loader2 size={12} className="animate-spin" />
+              <Spinner size={12} />
             ) : (
               <Unplug size={12} />
             )}
@@ -404,7 +389,7 @@ function ProviderForm({
             title="从供应商拉取可用模型列表（GET /models）"
           >
             {fetching ? (
-              <Loader2 size={12} className="animate-spin" />
+              <Spinner size={12} />
             ) : (
               <RefreshCw size={12} />
             )}
@@ -447,11 +432,10 @@ function ProviderForm({
                 }}
               >
                 {fromServer ? (
-                  <input
-                    type="checkbox"
+                  <Checkbox
+                    bare
                     checked={!!sel}
                     onChange={() => toggleModel(id)}
-                    className="w-3.5 h-3.5 flex-shrink-0 accent-[var(--accent)]"
                     title="勾选 = 使用该模型"
                   />
                 ) : (
@@ -473,48 +457,38 @@ function ProviderForm({
                   {id}
                 </span>
                 {sel && (
-                  <input
+                  <Input
                     value={sel.nickname ?? ""}
                     onChange={(e) => setNickname(id, e.target.value)}
                     placeholder="昵称（可选）"
-                    className="text-xs rounded px-1.5 py-0.5 outline-none w-32 flex-shrink-0 focus:ring-1 focus:ring-[var(--accent)]"
-                    style={{
-                      color: "var(--text-primary)",
-                      background: "var(--input-bg)",
-                      border: "1px solid var(--input-border)",
-                    }}
+                    className="!w-32 flex-shrink-0 !py-0.5"
                     title="显示昵称，替代长模型 ID"
                   />
                 )}
                 {sel && (
-                  <button
+                  <IconButton
+                    icon={<X size={12} />}
+                    label="移除模型"
                     onClick={() => removeModel(id)}
-                    className="flex-shrink-0 hover:opacity-80"
-                    style={{ color: "var(--text-muted)" }}
-                    title="移除模型"
-                  >
-                    <X size={12} />
-                  </button>
+                    variant="subtle"
+                    size="xs"
+                  />
                 )}
               </div>
             );
           })}
         </div>
         <div className="mt-2 flex items-center gap-1.5">
-          <input
+          <Input
             type="text"
             value={manualDraft}
             onChange={(e) => setManualDraft(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter") addManual();
-            }}
+            }
+    }
             placeholder="手动添加模型 ID（如模型名不在列表中）"
-            className="flex-1 text-xs rounded px-2 py-1 outline-none focus:ring-1 focus:ring-[var(--accent)]"
-            style={{
-              color: "var(--text-secondary)",
-              background: "var(--input-bg)",
-              border: "1px solid var(--input-border)",
-            }}
+            className="flex-1"
           />
           <button
             onClick={addManual}
@@ -547,8 +521,7 @@ function ProviderForm({
 
 function Field({
   label,
-  children,
-}: {
+  children }: {
   label: string;
   children: React.ReactNode;
 }) {

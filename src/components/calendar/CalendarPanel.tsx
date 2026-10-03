@@ -20,6 +20,7 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { Input } from "@/components/common/Input";
 import { Button, IconButton } from "@/components/common/Button";
 import { useAppStore } from "@/stores/appStore";
 import { useCalendarStore } from "@/stores/calendarStore";
@@ -198,7 +199,8 @@ export function CalendarPanel() {
                 color: filters[key] ? "var(--accent-fg)" : "var(--text-muted)",
                 background: filters[key] ? "var(--accent)" : "transparent",
                 borderColor: "var(--border)",
-              }}
+              }
+      }
               title={`${filters[key] ? "隐藏" : "显示"}${label}`}
             >
               {label}
@@ -322,8 +324,9 @@ export function CalendarPanel() {
                     title="切换颜色"
                   />
                   {editingId === it.id ? (
-                    <input
+                    <Input
                       autoFocus
+                      borderless
                       value={editingDraft}
                       onChange={(e) => setEditingDraft(e.target.value)}
                       onBlur={() => commitEdit(it.id)}
@@ -331,8 +334,7 @@ export function CalendarPanel() {
                         if (e.key === "Enter") commitEdit(it.id);
                         if (e.key === "Escape") setEditingId(null);
                       }}
-                      className="flex-1 min-w-0 bg-transparent border-b outline-none text-xs"
-                      style={{ color: "var(--text-primary)", borderColor: "var(--accent)" }}
+                      className="flex-1 min-w-0 !text-xs border-b border-b-[var(--accent)]"
                     />
                   ) : (
                     <button
@@ -382,13 +384,12 @@ export function CalendarPanel() {
           {/* 添加表单（标题 + 可选备注 + 颜色） */}
           <div className="space-y-1">
             <div className="flex items-center gap-1.5">
-              <input
+              <Input
                 value={draftTitle}
                 onChange={(e) => setDraftTitle(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && submitAdd()}
                 placeholder="添加日程标题…"
-                className="flex-1 min-w-0 text-xs rounded px-2 py-1 outline-none focus:ring-1 focus:ring-[var(--accent)]"
-                style={{ color: "var(--text-primary)", background: "var(--input-bg)", border: "1px solid var(--input-border)" }}
+                className="flex-1 min-w-0"
               />
               <div className="flex items-center gap-0.5">
                 {CALENDAR_ITEM_COLORS.map((c) => (
@@ -411,13 +412,11 @@ export function CalendarPanel() {
                 添加
               </Button>
             </div>
-            <input
+            <Input
               value={draftNote}
               onChange={(e) => setDraftNote(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && submitAdd()}
               placeholder="备注（可选）…"
-              className="w-full text-xs rounded px-2 py-1 outline-none focus:ring-1 focus:ring-[var(--accent)]"
-              style={{ color: "var(--text-primary)", background: "var(--input-bg)", border: "1px solid var(--input-border)" }}
             />
           </div>
         </div>

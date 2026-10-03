@@ -1,3 +1,4 @@
+import { Input } from "@/components/common/Input";
 import { AlertTriangle, Eye, FileText, Pencil, SlidersHorizontal, StickyNote } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { NodeProps } from "@xyflow/react";
@@ -77,7 +78,8 @@ export function TextNode({ id, data, width, height, selected }: NodeProps) {
     if (isSaved) {
       const content = session?.content();
       if (content !== undefined && content !== bodyMd) {
-        useCanvasStore.getState().updateNodeData(id, { bodyMd: content });
+        useCanvasStore
+          .getState().updateNodeData(id, { bodyMd: content });
       }
       return;
     }
@@ -203,15 +205,12 @@ export function TextNode({ id, data, width, height, selected }: NodeProps) {
             </span>
           )}
           {renameEdit.editing ? (
-            <input
+            <Input
               {...renameEdit.inputProps}
               autoFocus
+              borderless
               onClick={(e) => e.stopPropagation()}
-              className="nodrag w-full min-w-0 rounded px-1 text-xs outline-none focus:ring-1 focus:ring-[var(--accent)]"
-              style={{
-                background: "var(--input-bg)",
-                color: "var(--text-primary)",
-              }}
+              className="nodrag min-w-0 !text-xs"
             />
           ) : (
             <span

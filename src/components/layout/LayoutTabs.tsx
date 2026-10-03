@@ -9,6 +9,8 @@
 import { Plus } from "lucide-react";
 import { useRef, useState } from "react";
 import { useUiStateStore } from "@/stores/uiStateStore";
+import { Input } from "@/components/common/Input";
+import { IconButton } from "@/components/common/Button";
 import { Menu, MenuItem } from "@/components/common/Menu";
 import { MenuSlotList } from "@/components/plugins/MenuSlot";
 import { HOME_LAYOUT_ID } from "@/types";
@@ -155,7 +157,8 @@ export function LayoutTabs() {
               }}
             >
               {editing ? (
-                <input
+                <Input
+                  borderless
                   value={draft}
                   onChange={(e) => setDraft(e.target.value)}
                   onBlur={() => {
@@ -177,8 +180,8 @@ export function LayoutTabs() {
                     }
                   }}
                   autoFocus
-                  className="pl-3 pr-1 py-0.5 bg-transparent outline-none text-xs min-w-0"
-                  style={{ color: "var(--text-primary)" }}
+                  className="!text-xs py-0.5 min-w-0"
+                  style={{ paddingLeft: "0.75rem", color: "var(--text-primary)" }}
                   data-tauri-drag-region="false"
                 />
               ) : (
@@ -213,16 +216,15 @@ export function LayoutTabs() {
           );
         })}
 
-        <button
+        <IconButton
+          icon={<Plus size={13} />}
+          label="新建布局"
           onClick={addLayout}
-          className="flex-shrink-0 inline-flex items-center justify-center px-1.5 h-7 rounded-sm hover:bg-[var(--bg-tertiary)]"
-          title="新建布局（复制当前布局）"
-          aria-label="新建布局"
-          style={{ color: "var(--text-muted)" }}
+          variant="subtle"
+          size="md"
+          className="hover:!bg-[var(--bg-tertiary)]"
           data-tauri-drag-region="false"
-        >
-          <Plus size={13} />
-        </button>
+        />
       </div>
 
       {/* tab 右键菜单：重命名 / 删除 */}

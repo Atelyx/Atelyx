@@ -7,9 +7,11 @@
  *
  * 分层：只调 spaceAuthStore / spaceDirectoryStore / appStore 的动作，不直调 service。
  */
+import { Spinner } from "@/components/common/primitives";
 import { useEffect, useState } from "react";
-import { ChevronDown, ChevronRight, Loader2, LogOut, MonitorSmartphone, Server, X } from "lucide-react";
+import { ChevronDown, ChevronRight, LogOut, MonitorSmartphone, Server, X } from "lucide-react";
 import { SettingCard } from "@/components/settings/SettingCard";
+import { IconButton } from "@/components/common/Button";
 import { SpaceAuthDialog, type SpaceAuthMode } from "@/components/settings/SpaceAuthDialog";
 import { useSpaceAuthStore } from "@/stores/spaceAuthStore";
 import { useSpaceDirectoryStore } from "@/stores/spaceDirectoryStore";
@@ -141,7 +143,7 @@ function ServerList() {
               style={{ color: "var(--danger)" }}
             >
               {loggingOut === s.serverUrl ? (
-                <Loader2 size={11} className="animate-spin" />
+                <Spinner size={11} />
               ) : (
                 <LogOut size={11} />
               )}
@@ -177,9 +179,13 @@ export function SpaceAccountSection() {
             style={{ background: "var(--accent-soft)", color: "var(--text-primary)" }}
           >
             <span className="flex-1">登录后将继续打开协作空间 {loginPrompt.retry?.name ?? ""}</span>
-            <button onClick={clearLoginPrompt} title="取消引导" style={{ color: "var(--text-muted)" }}>
-              <X size={12} />
-            </button>
+            <IconButton
+              icon={<X size={12} />}
+              label="取消引导"
+              onClick={clearLoginPrompt}
+              variant="subtle"
+              size="xs"
+            />
           </div>
         )}
         <div className="flex items-center gap-2">
@@ -199,7 +205,7 @@ export function SpaceAccountSection() {
           >
             登录
           </button>
-          {busy && <Loader2 size={13} className="animate-spin" style={{ color: "var(--text-muted)" }} />}
+          {busy && <Spinner size={13} />}
         </div>
         <ServerList />
       </div>

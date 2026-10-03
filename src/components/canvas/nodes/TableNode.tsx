@@ -13,6 +13,8 @@ import type { NodeProps } from "@xyflow/react";
 import type { TableData } from "@/types";
 import { useCanvasStore } from "@/stores/canvasStore";
 import { useVaultStore } from "@/stores/vaultStore";
+import { IconButton } from "@/components/common/Button";
+import { Input } from "@/components/common/Input";
 import { useInlineEdit } from "@/hooks/useInlineEdit";
 import {
   DEFAULT_TABLE_NODE_HEIGHT,
@@ -96,15 +98,12 @@ export function TableNode({ id, data, width, height, selected }: NodeProps) {
         <span className="inline-flex items-center gap-1 min-w-0 flex-1 overflow-hidden">
           <TableIcon size={14} className="flex-shrink-0" />
           {renameEdit.editing ? (
-            <input
+            <Input
               {...renameEdit.inputProps}
               autoFocus
+              borderless
               onClick={(e) => e.stopPropagation()}
-              className="nodrag w-full min-w-0 rounded px-1 text-xs outline-none focus:ring-1 focus:ring-[var(--accent)]"
-              style={{
-                background: "var(--input-bg)",
-                color: "var(--text-primary)",
-              }}
+              className="nodrag min-w-0 !text-xs"
             />
           ) : (
             <span
@@ -123,15 +122,13 @@ export function TableNode({ id, data, width, height, selected }: NodeProps) {
             className="flex items-center nodrag"
             onClick={(e) => e.stopPropagation()}
           >
-            <button
-              type="button"
-              title="打开表格窗口"
+            <IconButton
+              icon={<ExternalLink size={13} />}
+              label="打开表格窗口"
               onClick={openTableWindow}
-              className="nodrag rounded p-0.5 hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)] transition-colors"
-              style={{ color: "var(--text-muted)" }}
-            >
-              <ExternalLink size={13} />
-            </button>
+              size="xs"
+              className="nodrag"
+            />
           </div>
         )}
       </header>

@@ -8,6 +8,7 @@
 import { Box } from "lucide-react";
 import { useRef, useState } from "react";
 import type { NodeProps } from "@xyflow/react";
+import { Input } from "@/components/common/Input";
 import { useCanvasStore } from "@/stores/canvasStore";
 import {
   DEFAULT_GROUP_HEIGHT,
@@ -97,15 +98,12 @@ export function GroupNode({ id, data, width, height, selected }: NodeProps) {
           style={{ color: "var(--text-secondary)" }}
         />
         {labelEdit.editing ? (
-          <input
+          <Input
             {...labelEdit.inputProps}
             autoFocus
+            borderless
             onClick={(e) => e.stopPropagation()}
-            className="nodrag w-full min-w-0 rounded px-1 text-xs outline-none focus:ring-1 focus:ring-[var(--accent)]"
-            style={{
-              background: "var(--input-bg)",
-              color: "var(--text-primary)",
-            }}
+            className="nodrag min-w-0 !text-xs"
           />
         ) : (
           <span

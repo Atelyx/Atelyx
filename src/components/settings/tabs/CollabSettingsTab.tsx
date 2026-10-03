@@ -1,5 +1,6 @@
 import { RotateCcw } from "lucide-react";
 import { ToggleSwitch } from "@/components/common/ToggleSwitch";
+import { Input } from "@/components/common/Input";
 import { SettingCard } from "@/components/settings/SettingCard";
 import { SpaceAccountSection } from "@/components/settings/SpaceAccountSection";
 import { SlotListMount } from "@/components/plugins/SlotHost";
@@ -7,7 +8,10 @@ import { randomPeerColor, useCollabStore } from "@/stores/collabStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useDraftSync, useDebouncedDraft } from "@/hooks/useDraftSync";
 
-/** 多人协作面板（应用级）：协作空间账号 + 空间频道开关与身份（昵称/颜色作用于空间在线列表）。草稿自持，直接订阅 store。 */
+/** 多人协作面板（应用级）：协作空间账号 + 空间频道开关与身份（昵称/颜色作用于空间在线列表）。草稿自持，直接订阅 store。
+ *
+ * 保留原生控件的一处：身份颜色用 `<input type="color">`——系统取色器无对应基元，
+ * 外观由浏览器决定（不随主题），归入基元反而要重造一套色板。 */
 export function CollabSettingsTab() {
   // 协作（应用级）：空间频道开关 + 昵称/颜色 + 常驻连接状态
   const collabEnabled = useSettingsStore((s) => s.collabEnabled);
@@ -64,7 +68,7 @@ export function CollabSettingsTab() {
         description="空昵称 = 设备名；空颜色 = 随机分配"
       >
         <div className="flex items-center gap-2">
-          <input
+          <Input
             value={collabNicknameDraft}
             onChange={(e) => setCollabNicknameDraft(e.target.value)}
             onBlur={commitCollabNickname}
@@ -72,12 +76,7 @@ export function CollabSettingsTab() {
               if (e.key === "Enter") e.currentTarget.blur();
             }}
             placeholder="设备名"
-            className="text-sm rounded px-2 py-1 outline-none max-w-[140px]"
-            style={{
-              color: "var(--text-primary)",
-              background: "var(--input-bg)",
-              border: "1px solid var(--input-border)",
-            }}
+            className="max-w-[140px]"
           />
           <input
             type="color"

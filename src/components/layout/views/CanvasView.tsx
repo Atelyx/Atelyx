@@ -65,6 +65,8 @@ import { TableNode } from "@/components/canvas/nodes/TableNode";
 import { NodeContextMenu } from "@/components/canvas/panels/NodeContextMenu";
 import { DataFlowEdge } from "@/components/canvas/edges/DataFlowEdge";
 import { PanelPlaceholder } from "@/components/layout/PanelPlaceholder";
+import { Input } from "@/components/common/Input";
+import { IconButton } from "@/components/common/Button";
 import { Menu, MenuDivider, MenuItem } from "@/components/common/Menu";
 import { PopupLayer } from "@/components/common/PopupLayer";
 import { HistoryModal } from "@/components/history/HistoryModal";
@@ -451,15 +453,15 @@ export const CanvasView = memo(function CanvasView({
         <SlotListMount slot="toolbar/canvas/right" />
         {/* 「···」更多选项：历史记录入口（统一 usePopupAnchor + PopupLayer 浮层） */}
         <span className="flex-shrink-0">
-          <button
+          <IconButton
             ref={moreTriggerRef}
+            icon={<MoreHorizontal size={15} />}
+            label="更多选项"
             onClick={() => moreMenu.toggle()}
-            title="更多选项"
-            className="p-0.5 rounded hover:opacity-80"
+            variant="subtle"
+            size="sm"
             style={{ color: moreMenu.anchor ? "var(--accent)" : "var(--text-muted)" }}
-          >
-            <MoreHorizontal size={15} />
-          </button>
+          />
           <PopupLayer
             anchor={moreMenu.anchor}
             onClose={moreMenu.close}
@@ -572,14 +574,16 @@ export const CanvasView = memo(function CanvasView({
               <ControlButton
                 title="放大 (+)"
                 onClick={() => zoomIn({ duration: 150 })}
-                style={{ width: 32, height: 32 }}
+                style={{
+                  width: 32, height: 32 }}
               >
                 <Plus size={16} />
               </ControlButton>
               <ControlButton
                 title="缩小 (-)"
                 onClick={() => zoomOut({ duration: 150 })}
-                style={{ width: 32, height: 32 }}
+                style={{
+                  width: 32, height: 32 }}
               >
                 <Minus size={16} />
               </ControlButton>
@@ -637,8 +641,9 @@ export const CanvasView = memo(function CanvasView({
           {menu.linkMode ? (
             /* 添加链接：菜单内 inline 输入 URL（Enter 创建，Esc 关闭） */
             <div className="px-3 py-1.5">
-              <input
+              <Input
                 autoFocus
+                borderless
                 placeholder="https://…"
                 onKeyDown={(e) => {
                   if (e.key === "Enter") {
@@ -650,8 +655,7 @@ export const CanvasView = memo(function CanvasView({
                   }
                 }}
                 onBlur={closeMenu}
-                className="w-full bg-transparent border-b border-[var(--accent)] outline-none text-xs"
-                style={{ color: "var(--text-primary)" }}
+                className="!text-xs border-b border-b-[var(--accent)]"
               />
             </div>
           ) : (

@@ -32,6 +32,7 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Input } from "@/components/common/Input";
 import { Button, IconButton } from "@/components/common/Button";
 import { PopupLayer, type PopupAnchor } from "@/components/common/PopupLayer";
 import { COMMON_PROPERTY_KEYS } from "@/constants/notes";
@@ -162,19 +163,22 @@ function ValueInput({
         ? { width: `calc(${Math.max(text.length, 2)}ch + 1.25rem)` }
         : undefined;
   return (
-    <input
+    <Input
       ref={inputRef}
       autoFocus
+      borderless
       spellCheck={false}
       value={text}
       onChange={(e) => {
         setText(e.target.value);
         onTextChange?.(e.target.value);
-      }}
+      }
+    }
       onFocus={(e) => {
         e.target.select();
         onFocus?.();
-      }}
+      }
+    }
       onBlur={() => done(() => onSubmit(text))}
       onKeyDown={(e) => {
         if (onKeyDownBefore?.(e)) return;
@@ -183,9 +187,10 @@ function ValueInput({
           e.preventDefault();
           done(() => onSubmit(text, e.shiftKey ? -1 : 1));
         } else if (e.key === "Escape") done(onCancel);
-      }}
-      className={`bg-transparent outline-none border-none text-sm leading-none ${
-        autoWidth ? "py-0.5 px-0" : "flex-1 min-w-0"
+      }
+    }
+      className={`border-none !text-sm leading-none ${
+        autoWidth ? "py-0.5 !px-0" : "flex-1 min-w-0"
       }`}
       style={widthStyle}
     />
@@ -217,7 +222,8 @@ function SuggestionItems({
             background:
               i === index ? "color-mix(in srgb, var(--accent) 15%, transparent)" : "transparent",
             color: "var(--text-primary)",
-          }}
+          }
+    }
           onMouseDown={(e) => e.preventDefault()}
           onClick={() => onSelect(it)}
           onMouseEnter={() => onHover(i)}
@@ -1024,7 +1030,9 @@ export function NotePropertiesView({
         }
         style={hasProps ? { gridTemplateRows: collapsed ? "0fr" : "1fr" } : undefined}
       >
-        <div className={hasProps ? "overflow-hidden" : undefined}>
+        <div
+        className={
+          hasProps ? "overflow-hidden" : undefined}>
           {parseError ? (
             <div className="text-xs py-1 flex items-center gap-2" style={{ color: "var(--danger)" }}>
               <span>YAML 格式错误，请检查（属性面板暂不可编辑）</span>
@@ -1098,7 +1106,8 @@ export function NotePropertiesView({
                         </div>
                       )}
                     </div>
-                  ))}
+                  )
+      )}
                 </div>
               )}
 
@@ -1110,9 +1119,10 @@ export function NotePropertiesView({
                   <div className="flex items-center gap-1.5">
                     {addStep === "key" ? (
                       <span className="flex items-center gap-1.5 flex-1 min-w-0">
-                        <input
+                        <Input
                           ref={keyInputRef}
                           autoFocus
+                          borderless
                           spellCheck={false}
                           placeholder="属性名"
                           value={newKey}
@@ -1124,8 +1134,8 @@ export function NotePropertiesView({
                           onFocus={openKeySuggest}
                           onBlur={closeAddField}
                           onKeyDown={handleKeyInputKeyDown}
-                          className="flex-1 min-w-0 bg-transparent text-sm outline-none"
-                          style={{ borderBottom: "1px dashed var(--border)" }}
+                          className="min-w-0 border-b border-b-[var(--border)]"
+                          style={{ borderBottomStyle: "dashed" }}
                         />
                         {keySuggestOpen && keySuggestions.length > 0 && keySuggestAnchor && (
                           <PopupLayer
@@ -1158,9 +1168,10 @@ export function NotePropertiesView({
                         >
                           {newKey}
                         </span>
-                        <input
+                        <Input
                           ref={valueInputRef}
                           autoFocus
+                          borderless
                           spellCheck={false}
                           placeholder="属性值（逗号分隔为数组）"
                           value={newValue}
@@ -1173,8 +1184,8 @@ export function NotePropertiesView({
                           }}
                           onBlur={handleValueBlur}
                           onKeyDown={handleValueInputKeyDown}
-                          className="flex-1 min-w-0 bg-transparent text-sm outline-none"
-                          style={{ borderBottom: "1px dashed var(--border)" }}
+                          className="min-w-0 border-b border-b-[var(--border)]"
+                          style={{ borderBottomStyle: "dashed" }}
                         />
                         {newKey === "tags" &&
                           tagSuggestOpen &&

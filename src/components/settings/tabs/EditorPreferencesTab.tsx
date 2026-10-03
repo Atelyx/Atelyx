@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { ToggleSwitch } from "@/components/common/ToggleSwitch";
+import { Input } from "@/components/common/Input";
 import { SettingCard } from "@/components/settings/SettingCard";
 import { SlotListMount } from "@/components/plugins/SlotHost";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -68,7 +69,7 @@ export function EditorPreferencesTab() {
         description={`笔记正文的可读性上限，${NOTE_LINE_WIDTH_MIN}–${NOTE_LINE_WIDTH_MAX}px；开启「不限制」后随面板宽度铺满，只保留左右内边距`}
       >
         <div className="flex items-center gap-2">
-          <input
+          <Input
             type="number"
             min={NOTE_LINE_WIDTH_MIN}
             max={NOTE_LINE_WIDTH_MAX}
@@ -82,12 +83,7 @@ export function EditorPreferencesTab() {
             }}
             placeholder="—"
             aria-label="正文行宽（px）"
-            className="w-20 px-2 py-1 rounded-[var(--radius-sm)] border text-xs text-right outline-none disabled:opacity-50"
-            style={{
-              background: "var(--input-bg)",
-              borderColor: "var(--input-border)",
-              color: "var(--text-primary)",
-            }}
+            className="!w-20 text-right"
           />
           <span className="text-xs" style={{ color: "var(--text-muted)" }}>
             px

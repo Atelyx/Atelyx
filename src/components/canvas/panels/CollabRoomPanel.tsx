@@ -8,13 +8,15 @@
  * 「我」行 = 本连接（身份来自 settingsStore，打开文件来自 appStore）。
  * 打开文件动作回调直连 appStore（与 FilesView 同模式）。
  */
-import { Cloud, Loader2, Settings, Users, Wifi, WifiOff } from "lucide-react";
+import { Cloud, Settings, Users, Wifi, WifiOff } from "lucide-react";
 import { useEffect, useMemo } from "react";
 import { useAppStore } from "@/stores/appStore";
 import { useCollabStore } from "@/stores/collabStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { usePanelStore } from "@/stores/panelStore";
 import { useSpaceDirectoryStore } from "@/stores/spaceDirectoryStore";
+import { Spinner } from "@/components/common/primitives";
+import { Badge } from "@/components/common/Badge";
 import { FileKindIcon, openFileByKind } from "@/components/common/FileKindIcon";
 import { noteTitleFromFile } from "@/utils/filename";
 import type { CollabPeer, CollabPresence } from "@/types";
@@ -36,8 +38,7 @@ function MemberRow({
   nickname,
   color,
   device,
-  openFiles,
-}: {
+  openFiles }: {
   isSelf: boolean;
   nickname: string;
   color: string;
@@ -53,14 +54,7 @@ function MemberRow({
           <span className="truncate font-medium" style={{ color: "var(--text-primary)" }}>
             {nickname}
           </span>
-          {isSelf && (
-            <span
-              className="text-micro px-1 rounded flex-shrink-0"
-              style={{ color: "var(--text-muted)", border: "1px solid var(--border)" }}
-            >
-              我
-            </span>
-          )}
+          {isSelf && <Badge>我</Badge>}
           {device && (
             <span className="text-micro truncate flex-shrink-0" style={{ color: "var(--text-muted)" }}>
               {device}
@@ -198,7 +192,7 @@ function SpaceMembersView({ serverUrl, spaceId }: { serverUrl: string; spaceId: 
           </div>
         ) : membersLoading && rosterStale ? (
           <div className="flex items-center justify-center gap-2 py-4 text-xs" style={{ color: "var(--text-muted)" }}>
-            <Loader2 size={13} className="animate-spin" />
+            <Spinner size={13} />
             加载成员中…
           </div>
         ) : (
@@ -210,12 +204,7 @@ function SpaceMembersView({ serverUrl, spaceId }: { serverUrl: string; spaceId: 
                   @{m.username}
                 </span>
               </span>
-              <span
-                className="text-micro px-1 rounded flex-shrink-0"
-                style={{ color: "var(--text-muted)", border: "1px solid var(--border)" }}
-              >
-                {roleLabel(m.role)}
-              </span>
+              <Badge>{roleLabel(m.role)}</Badge>
             </div>
           ))
         )}

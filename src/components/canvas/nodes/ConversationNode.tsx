@@ -1,14 +1,13 @@
 import {
   AlertTriangle,
   Layers,
-  Loader2,
   Lock,
   MessageSquare,
   Plus,
   RefreshCw,
   Scissors,
   X,
-} from "lucide-react";
+  } from "lucide-react";
 import { useEffect, useCallback, useMemo, useRef, useState } from "react";
 import { useReactFlow, type NodeProps } from "@xyflow/react";
 import { useShallow } from "zustand/react/shallow";
@@ -26,7 +25,7 @@ import { DEFAULT_CONVERSATION_WIDTH,
   DEFAULT_TEXT_NODE_HEIGHT,
   NODE_TYPE_BAR_CLASS,
   NODE_TYPE_COLORS,
-} from "@/constants/canvas";
+  } from "@/constants/canvas";
 import { CHAT_UNAVAILABLE_TEXT, ERROR_PREFIX } from "@/constants/chat";
 import { isAssetConsumed } from "@/utils/consumed";
 import { findFreeSpot } from "@/utils/layout";
@@ -44,8 +43,10 @@ import type {
   Message,
   PendingAttachment,
   Attachment,
-} from "@/types";
+  } from "@/types";
 import type { Node as FlowNode } from "@xyflow/react";
+import { Spinner } from "@/components/common/primitives";
+import { Input } from "@/components/common/Input";
 import { VaultAtPicker, type VaultPickTarget } from "@/components/common/VaultAtPicker";
 import { openVaultPath } from "@/components/common/FileKindIcon";
 import { noteTitleFromFile } from "@/utils/filename";
@@ -704,8 +705,7 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
     isVaultPathNote,
     handleOpenVaultPathNote,
     handleCreateNote,
-    openCreatedNote,
-  } = useVaultLinkHandlers();
+    openCreatedNote } = useVaultLinkHandlers();
 
   // ===== 渲染 =====
 
@@ -780,20 +780,21 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
         />
         {/* 标题：双击 inline 编辑（nodrag + stopPropagation 防触发节点拖拽） */}
         {titleEdit.editing ? (
-          <input
+          <Input
             {...titleEdit.inputProps}
             autoFocus
+            borderless
             onPointerDown={(e) => e.stopPropagation()}
             placeholder="对话"
-            className="nodrag font-medium text-sm min-w-0 w-32 bg-transparent border-b border-[var(--accent)] outline-none"
-            style={{ color: "var(--text-primary)" }}
+            className="nodrag font-medium min-w-0 !w-32 border-b border-b-[var(--accent)]"
           />
         ) : (
           <span
             onDoubleClick={(e) => {
               e.stopPropagation();
               titleEdit.start();
-            }}
+            }
+    }
             title="双击重命名"
             className="font-medium truncate max-w-[150px] min-w-0 flex-shrink cursor-text"
             style={{ color: "var(--text-primary)" }}
@@ -803,7 +804,7 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
         )}
         {streaming && (
           <span className="text-xs text-[var(--accent)] flex-shrink-0 inline-flex items-center gap-1">
-            <Loader2 size={12} className="animate-spin flex-shrink-0" />
+            <Spinner size={12} />
             生成中
           </span>
         )}
@@ -844,7 +845,8 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
                 providerId: sel.providerId,
                 model: sel.model,
               });
-            }}
+            }
+    }
             onSelectEffort={(effort) =>
               updateNodeData(id, { reasoningEffort: effort })
             }
@@ -867,7 +869,7 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
             className="nodrag"
             icon={
               compacting ? (
-                <Loader2 size={13} className="animate-spin" />
+                <Spinner size={13} />
               ) : (
                 <Layers size={13} />
               )
@@ -932,7 +934,8 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
                   {/* 压缩标记：插在折叠块之后首条消息之前（被压缩的原文仍显示在标记上方） */}
                   {i === compactionMarkerIdx && nodeData?.compaction && (
                     <CompactionMarker compaction={nodeData.compaction} />
-                  )}
+                  )
+            }
                   <ChatMessageBubble
                     role={m.role === "user" ? "user" : "assistant"}
                   displayContent={

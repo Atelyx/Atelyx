@@ -25,13 +25,12 @@ import {
   FilePlus,
   History,
   Layers,
-  Loader2,
   MessageSquare,
   RefreshCw,
   Square,
   Trash2,
   X,
-} from "lucide-react";
+  } from "lucide-react";
 import { useEffect, useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useAppStore } from "@/stores/appStore";
 import { useChatPanelStore } from "@/stores/chatPanelStore";
@@ -42,6 +41,8 @@ import {
   splitMentions,
   type MentionSeg,
 } from "@/utils/text";
+import { Spinner } from "@/components/common/primitives";
+import { Input } from "@/components/common/Input";
 import { ChatMessageBubble } from "@/components/common/ChatMessageBubble";
 import { Button, IconButton } from "@/components/common/Button";
 import { SlotListMount } from "@/components/plugins/SlotHost";
@@ -214,8 +215,7 @@ export function AiChatPanel() {
     isVaultPathNote,
     handleOpenVaultPathNote,
     handleCreateNote,
-    openCreatedNote,
-  } = useVaultLinkHandlers();
+    openCreatedNote } = useVaultLinkHandlers();
   const chatMarkdownLinks = useMemo<MarkdownEditorLinks>(
     () => ({
       onOpenNote: handleOpenWikiNote,
@@ -368,17 +368,11 @@ export function AiChatPanel() {
         className="px-2.5 py-2 flex-shrink-0"
         style={{ borderBottom: "1px solid var(--border-subtle)" }}
       >
-        <input
+        <Input
           value={sessionQuery}
           onChange={(e) => setSessionQuery(e.target.value)}
           placeholder="搜索会话"
           spellCheck={false}
-          className="w-full px-2 py-1.5 rounded-[var(--radius-sm)] border text-xs outline-none"
-          style={{
-            background: "var(--input-bg)",
-            borderColor: "var(--input-border)",
-            color: "var(--text-primary)",
-          }}
         />
       </div>
       <div className="flex-1 min-h-0 overflow-y-auto p-2 flex flex-col gap-0.5">
@@ -499,7 +493,8 @@ export function AiChatPanel() {
                     label="清除"
                     onClick={clearError}
                   />
-                )}
+                )
+              }
               </span>
             ) : (
               <>
@@ -518,7 +513,7 @@ export function AiChatPanel() {
                     size="xs"
                     icon={
                       renaming ? (
-                        <Loader2 size={12} className="animate-spin" />
+                        <Spinner size={12} />
                       ) : (
                         <RefreshCw size={12} />
                       )
@@ -557,7 +552,7 @@ export function AiChatPanel() {
               size="md"
               icon={
                 compactingThis ? (
-                  <Loader2 size={15} className="animate-spin" />
+                  <Spinner size={15} />
                 ) : (
                   <Layers size={15} />
                 )

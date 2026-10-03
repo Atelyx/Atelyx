@@ -11,12 +11,14 @@
  *
  * 保留原生 button 的三处（脱离基元的原因）：关闭（36px）与左右切换（40px）——灯箱是深色全屏
  * 遮罩上的大尺寸指针控件，边长落在 `lg`(32) 与 `touch`(44) 两档之间，归不进 `IconButton` 的
- * 正方形档位；且 hover 是 `white/10` 的浅色反馈、非主题色。
+ * 正方形档位；且 hover 是 `white/10` 的浅色反馈、非主题色。三处只以 `Tooltip` 取代原生 `title`
+ * 统一提示形态，可访问名由 `aria-label` 给出。
  */
 import { Copy, Download, ChevronLeft, ChevronRight, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { MouseEvent } from "react";
 import { Menu, MenuItem } from "@/components/common/Menu";
+import { Tooltip } from "@/components/common/Tooltip";
 
 interface Props {
   /** 图片 dataURL 数组（当前单元格的全部图片）。 */
@@ -115,39 +117,45 @@ export function ImageLightbox({
         onClick={(e) => e.stopPropagation()}
       />
       {/* 顶部关闭 */}
-      <button
-        onClick={onClose}
-        className="absolute top-4 right-4 w-9 h-9 flex items-center justify-center rounded hover:bg-white/10"
-        style={{ color: "var(--text-primary)" }}
-        title="关闭 (Esc)"
-      >
-        <X size={20} />
-      </button>
+      <Tooltip content="关闭 (Esc)">
+        <button
+          onClick={onClose}
+          className="absolute top-4 right-4 w-9 h-9 flex items-center justify-center rounded hover:bg-white/10"
+          style={{ color: "var(--text-primary)" }}
+          aria-label="关闭"
+        >
+          <X size={20} />
+        </button>
+      </Tooltip>
       {/* 左右切换（仅多图时显示；循环） */}
       {count > 1 && (
         <>
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              changeIndex((index - 1 + count) % count);
-            }}
-            className="absolute left-4 top-1/2 -translate-y-1/2 w-10 h-10 flex items-center justify-center rounded-full hover:bg-white/10"
-            style={{ color: "var(--text-primary)" }}
-            title="上一张 (←)"
-          >
-            <ChevronLeft size={24} />
-          </button>
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              changeIndex((index + 1) % count);
-            }}
-            className="absolute right-4 top-1/2 -translate-y-1/2 w-10 h-10 flex items-center justify-center rounded-full hover:bg-white/10"
-            style={{ color: "var(--text-primary)" }}
-            title="下一张 (→)"
-          >
-            <ChevronRight size={24} />
-          </button>
+          <Tooltip content="上一张 (←)">
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                changeIndex((index - 1 + count) % count);
+              }}
+              className="absolute left-4 top-1/2 -translate-y-1/2 w-10 h-10 flex items-center justify-center rounded-full hover:bg-white/10"
+              style={{ color: "var(--text-primary)" }}
+              aria-label="上一张"
+            >
+              <ChevronLeft size={24} />
+            </button>
+          </Tooltip>
+          <Tooltip content="下一张 (→)">
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                changeIndex((index + 1) % count);
+              }}
+              className="absolute right-4 top-1/2 -translate-y-1/2 w-10 h-10 flex items-center justify-center rounded-full hover:bg-white/10"
+              style={{ color: "var(--text-primary)" }}
+              aria-label="下一张"
+            >
+              <ChevronRight size={24} />
+            </button>
+          </Tooltip>
           <div
             className="absolute bottom-4 left-1/2 -translate-x-1/2 px-2 py-0.5 rounded-full text-xs"
             style={{ background: "rgba(0,0,0,0.6)", color: "var(--text-primary)" }}

@@ -3,8 +3,9 @@
  * 名册（名字 + 角色 owner/editor）+ 移除成员 + 转让 owner（服务端校验权限）。
  * 打开即拉取名册；操作成功后自动刷新。
  */
+import { Spinner } from "@/components/common/primitives";
 import { useEffect, useState } from "react";
-import { Loader2, ShieldCheck, X } from "lucide-react";
+import { ShieldCheck, X } from "lucide-react";
 import { useSpaceDirectoryStore } from "@/stores/spaceDirectoryStore";
 
 interface Props {
@@ -73,7 +74,7 @@ export function SpaceMembersDialog({ serverUrl, spaceId, spaceName, onClose }: P
           )}
           {membersLoading && members.length === 0 ? (
             <div className="flex items-center justify-center gap-2 py-6 text-xs" style={{ color: "var(--text-muted)" }}>
-              <Loader2 size={14} className="animate-spin" />
+              <Spinner size={14} />
               加载成员中…
             </div>
           ) : (

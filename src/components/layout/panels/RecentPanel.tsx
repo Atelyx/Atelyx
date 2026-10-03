@@ -8,6 +8,7 @@ import { useMemo } from "react";
 import { useAppStore, selectVaultIdentityKey } from "@/stores/appStore";
 import { useUiStateStore } from "@/stores/uiStateStore";
 import { useVaultStore } from "@/stores/vaultStore";
+import { EmptyState } from "@/components/common/EmptyState";
 import { FileKindIcon, openFileByKind } from "@/components/common/FileKindIcon";
 import { noteTitleFromFile } from "@/utils/filename";
 import { relTime } from "@/utils/time";
@@ -54,12 +55,11 @@ export function RecentPanel() {
       </div>
       <div className="flex-1 min-h-0 overflow-auto p-2 space-y-0.5">
         {rows.length === 0 ? (
-          <div className="flex flex-col items-center justify-center gap-1 py-8 text-center px-6">
-            <Clock size={20} style={{ color: "var(--text-muted)" }} />
-            <div className="text-xs" style={{ color: "var(--text-muted)" }}>
-              打开过文件后会显示在这里
-            </div>
-          </div>
+          <EmptyState
+            icon={<Clock size={18} />}
+            title="暂无最近打开"
+            description="打开过文件后会显示在这里。"
+          />
         ) : (
           rows.map((r) => {
             // 已删/已移 = 置灰；画布另需在 canvases 列表命中（打开画布按列表查行，未同步时同样置灰）

@@ -5,7 +5,8 @@
  */
 import { useState } from "react";
 import { Copy, X } from "lucide-react";
-import { Button } from "@/components/common/Button";
+import { Button, IconButton } from "@/components/common/Button";
+import { Input } from "@/components/common/Input";
 import { useSpaceDirectoryStore } from "@/stores/spaceDirectoryStore";
 import { useAppStore } from "@/stores/appStore";
 import type { InviteInfo } from "@/types";
@@ -82,12 +83,6 @@ export function SpaceInviteDialog({ serverUrl, spaceId, spaceName, onClose }: Pr
     }
   };
 
-  const inputStyle = {
-    color: "var(--text-primary)",
-    background: "var(--input-bg)",
-    border: "1px solid var(--input-border)",
-  } as const;
-
   return (
     <div
       className="fixed inset-0 z-[200] flex items-center justify-center"
@@ -103,9 +98,7 @@ export function SpaceInviteDialog({ serverUrl, spaceId, spaceName, onClose }: Pr
           <h3 className="text-sm font-medium" style={{ color: "var(--text-primary)" }}>
             邀请码 · {spaceName}
           </h3>
-          <button onClick={onClose} style={{ color: "var(--text-muted)" }} className="hover:opacity-80">
-            <X size={14} />
-          </button>
+          <IconButton icon={<X size={14} />} label="关闭" onClick={onClose} variant="subtle" size="sm" />
         </header>
 
         <div className="p-4 space-y-3">
@@ -116,8 +109,12 @@ export function SpaceInviteDialog({ serverUrl, spaceId, spaceName, onClose }: Pr
             <select
               value={role}
               onChange={(e) => setRole(e.target.value)}
-              className="text-xs rounded px-2 py-1 outline-none flex-1"
-              style={inputStyle}
+              className="flex-1 text-xs rounded px-2 py-1 outline-none"
+              style={{
+                background: "var(--input-bg)",
+                color: "var(--text-primary)",
+                border: "1px solid var(--input-border)",
+              }}
             >
               <option value="editor">编辑者（可编辑内容）</option>
               <option value="owner">所有者（可管理成员与邀请）</option>
@@ -127,22 +124,20 @@ export function SpaceInviteDialog({ serverUrl, spaceId, spaceName, onClose }: Pr
             <span className="flex-shrink-0" style={{ color: "var(--text-muted)" }}>
               过期（小时）
             </span>
-            <input
+            <Input
               value={expiresInHours}
               onChange={(e) => setExpiresInHours(e.target.value)}
               placeholder="留空 = 服务端默认"
-              className="text-xs rounded px-2 py-1 outline-none flex-1 min-w-0"
-              style={inputStyle}
+              className="flex-1 min-w-0"
             />
             <span className="flex-shrink-0" style={{ color: "var(--text-muted)" }}>
               次数
             </span>
-            <input
+            <Input
               value={maxUses}
               onChange={(e) => setMaxUses(e.target.value)}
               placeholder="留空 = 不限"
-              className="text-xs rounded px-2 py-1 outline-none flex-1 min-w-0"
-              style={inputStyle}
+              className="flex-1 min-w-0"
             />
           </div>
 

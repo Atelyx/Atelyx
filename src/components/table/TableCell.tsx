@@ -8,6 +8,8 @@
  *   = 移动选中、Esc 取消并清选中；编辑态：Enter = 提交并下移一行、Shift+Enter = 换行、
  *   失焦提交、Esc 取消并清选中
  * - number：数字输入（编辑态 Enter 提交并下移，空 = 清空）；选中态键盘语义同 text
+ *   数字列保留原生 input（不归基元）：依赖 type=number 的原生语义（步进、非法值拒绝、
+ *   输入法直接键入数字），基元无对应档；就地编辑的视觉档位与 text 列一致
  * - singleSelect：选项下拉（含空项）
  * - image：图片单元格（单图轮播 / 九宫格 + 缩略图队列滑动切换，见 ImageCell.tsx）
  *
@@ -22,6 +24,7 @@
 import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ChangeEvent, KeyboardEvent, MouseEvent } from "react";
 import { useTableStore } from "@/stores/tableStore";
+import { Textarea } from "@/components/common/Input";
 import { DropdownSelect } from "@/components/common/DropdownSelect";
 import { ImageCell } from "@/components/table/ImageCell";
 import { styleToCss } from "@/utils/table";
@@ -127,7 +130,8 @@ export const TableCell = memo(function TableCell({ field, row }: Props) {
           if (next === value) return;
           useTableStore.getState().pushUndo();
           updateCell(row.id, field.id, next);
-        }}
+        }
+}
         options={[{ value: "", label: "未选择" }, ...options.map((o) => ({ value: o, label: o }))]}
         className="w-full h-8 px-1.5 text-xs"
         style={{ color: value ? "var(--text-primary)" : "var(--text-muted)", ...styleToCss(cellStyleOf(row, field.id)) }}
@@ -334,7 +338,8 @@ function TextCell({
             }),
         // 单元格样式（字色/底色/字体/字号/粗斜下划线）覆盖基准；底色在隐藏态同样可见
         ...styleToCss(cellStyleOf(row, field.id)),
-      }}
+      }
+    }
       onDoubleClick={handleDoubleClick}
     >
       {editing ? (
@@ -345,8 +350,9 @@ function TextCell({
         <div>{value}</div>
       )}
       {(selected || editing) && (
-        <textarea
+        <Textarea
           ref={ref}
+          borderless
           data-cell-editor
           // data-editing 标记编辑态：表格层 Ctrl+C/V 据此放行原生复制/粘贴（选中态才接管结构化复制粘贴）
           data-editing={editing ? "" : undefined}
@@ -361,7 +367,8 @@ function TextCell({
               : "absolute inset-0 w-full h-full resize-none border-none bg-transparent outline-none text-xs px-1.5 py-1 opacity-0 pointer-events-none cursor-default"
           }
           // 编辑态同样套用单元格样式（粗体/字色/字号等），所见即所编辑
-          style={{ color: "var(--text-primary)", ...styleToCss(cellStyleOf(row, field.id)) }}
+          style={{
+        color: "var(--text-primary)", ...styleToCss(cellStyleOf(row, field.id)) }}
         />
       )}
     </div>
@@ -496,7 +503,8 @@ function NumberCell({
               ? "absolute inset-0 w-full h-full bg-transparent outline-none border-none text-xs px-1.5 cursor-text select-text"
               : "absolute inset-0 w-full h-full bg-transparent outline-none border-none text-xs px-1.5 opacity-0 pointer-events-none cursor-default"
           }
-          style={{ color: "var(--text-primary)", ...styleToCss(cellStyleOf(row, field.id)) }}
+          style={{
+            color: "var(--text-primary)", ...styleToCss(cellStyleOf(row, field.id)) }}
         />
       )}
       {editing && field.type === "duration" && (

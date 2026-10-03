@@ -1,5 +1,5 @@
 /**
- * 搜索面板（搜索面板，见 4.19）。
+ * 搜索面板
  *
  * 多搜索模式框架：顶部下拉选择模式（「按文件名」当前可用；「全局搜索」「按标签搜索」
  * 占位禁用「尚未支持」）。当前仅实现「按文件名」：输入即实时过滤全仓库文件名
@@ -10,6 +10,7 @@
  */
 import { Check, ChevronDown, FileText, LayoutDashboard, Paperclip, Search, StickyNote, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Input } from "@/components/common/Input";
 import { Menu, MenuItem } from "@/components/common/Menu";
 import { useAppStore } from "@/stores/appStore";
 import { useVaultStore } from "@/stores/vaultStore";
@@ -94,16 +95,16 @@ export function SearchPanel() {
           <ChevronDown size={12} />
         </button>
         <div className="flex items-center gap-1.5 px-2 py-1 rounded" style={{ background: "var(--bg-tertiary)" }}>
-          <input
+          <Input
             ref={inputRef}
+            borderless
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Escape") setQuery("");
             }}
             placeholder="搜索文件名…"
-            className="flex-1 bg-transparent outline-none text-xs min-w-0"
-            style={{ color: "var(--text-primary)" }}
+            className="flex-1 min-w-0 !text-xs"
           />
           {query && (
             <button

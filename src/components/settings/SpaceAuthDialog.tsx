@@ -6,11 +6,14 @@
  * 分层：只调 spaceAuthStore / spaceDirectoryStore / appStore 的动作，不直调 service。
  */
 import { useState } from "react";
-import { Loader2, X } from "lucide-react";
+import { X } from "lucide-react";
 import {
   useSpaceDirectoryStore,
   type SpaceEnterEntry,
 } from "@/stores/spaceDirectoryStore";
+import { Spinner } from "@/components/common/primitives";
+import { Input } from "@/components/common/Input";
+import { IconButton } from "@/components/common/Button";
 import { useSpaceAuthStore } from "@/stores/spaceAuthStore";
 import { useAppStore } from "@/stores/appStore";
 import { useBackHandler } from "@/hooks/useBackHandler";
@@ -21,12 +24,6 @@ interface Props {
   mode: SpaceAuthMode;
   onClose: () => void;
 }
-
-const inputStyle = {
-  color: "var(--text-primary)",
-  background: "var(--input-bg)",
-  border: "1px solid var(--input-border)",
-} as const;
 
 export function SpaceAuthDialog({ mode, onClose }: Props) {
   const busy = useSpaceAuthStore((s) => s.busy);
@@ -93,9 +90,7 @@ export function SpaceAuthDialog({ mode, onClose }: Props) {
           <h3 className="text-sm font-medium" style={{ color: "var(--text-primary)" }}>
             {mode === "login" ? "登录协作服务器" : "注册协作空间账号"}
           </h3>
-          <button onClick={onClose} style={{ color: "var(--text-muted)" }} className="hover:opacity-80">
-            <X size={14} />
-          </button>
+          <IconButton icon={<X size={14} />} label="关闭" onClick={onClose} variant="subtle" size="sm" />
         </header>
 
         <div className="p-4 flex flex-col gap-2.5">
@@ -105,56 +100,50 @@ export function SpaceAuthDialog({ mode, onClose }: Props) {
               style={{ background: "var(--accent-soft)", color: "var(--text-primary)" }}
             >
               <span className="flex-1">登录后将继续打开协作空间 {loginPrompt.retry.name}</span>
-              <button onClick={clearLoginPrompt} title="取消引导" style={{ color: "var(--text-muted)" }}>
-                <X size={12} />
-              </button>
+              <IconButton
+                icon={<X size={12} />}
+                label="取消引导"
+                onClick={clearLoginPrompt}
+                variant="subtle"
+                size="xs"
+              />
             </div>
           )}
-          <input
+          <Input
             value={serverUrl}
             onChange={(e) => setServerUrl(e.target.value)}
             placeholder="服务器地址（如 http://192.168.1.10:11224）"
             aria-label="服务器地址"
             autoFocus
-            className="text-sm rounded px-2 py-1 outline-none"
-            style={inputStyle}
           />
-          <input
+          <Input
             value={username}
             onChange={(e) => setUsername(e.target.value)}
             placeholder="用户名"
             aria-label="用户名"
-            className="text-sm rounded px-2 py-1 outline-none"
-            style={inputStyle}
           />
-          <input
+          <Input
             type="password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             placeholder="密码"
             aria-label="密码"
-            className="text-sm rounded px-2 py-1 outline-none"
-            style={inputStyle}
           />
           {mode === "register" && (
-            <input
+            <Input
               type="password"
               value={confirmPassword}
               onChange={(e) => setConfirmPassword(e.target.value)}
               placeholder="确认密码"
               aria-label="确认密码"
-              className="text-sm rounded px-2 py-1 outline-none"
-              style={inputStyle}
             />
           )}
           {mode === "register" && (
-            <input
+            <Input
               value={displayName}
               onChange={(e) => setDisplayName(e.target.value)}
               placeholder="昵称（可选）"
               aria-label="昵称"
-              className="text-sm rounded px-2 py-1 outline-none"
-              style={inputStyle}
             />
           )}
           {error && (
@@ -179,7 +168,7 @@ export function SpaceAuthDialog({ mode, onClose }: Props) {
             >
               取消
             </button>
-            {busy && <Loader2 size={13} className="animate-spin" style={{ color: "var(--text-muted)" }} />}
+            {busy && <Spinner size={13} />}
           </div>
         </div>
       </div>

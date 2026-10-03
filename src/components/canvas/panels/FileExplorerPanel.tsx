@@ -35,6 +35,8 @@ import { useSpaceAuthStore } from "@/stores/spaceAuthStore";
 import { useSpaceDirectoryStore } from "@/stores/spaceDirectoryStore";
 import { SlotListMount } from "@/components/plugins/SlotHost";
 import { FileContextMenu } from "@/components/canvas/panels/FileContextMenu";
+import { EmptyState } from "@/components/common/EmptyState";
+import { Button } from "@/components/common/Button";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 import { baseName, noteTitleFromFile, tableTitleFromFile } from "@/utils/filename";
 import type { CanvasFileRow } from "@/types";
@@ -295,7 +297,8 @@ export function FileExplorerPanel({ openedNoteFile, openedTableFile, onConvertWh
           onClick={(e) => {
             const rect = e.currentTarget.getBoundingClientRect();
             setSortMenu({ x: rect.right, y: rect.bottom });
-          }}
+          }
+    }
           className="flex items-center justify-center w-7 h-7 rounded text-[var(--text-muted)] hover:bg-[var(--hover)] hover:text-[var(--text-primary)]"
           title="排序方式"
         >
@@ -306,7 +309,8 @@ export function FileExplorerPanel({ openedNoteFile, openedTableFile, onConvertWh
           onClick={() => {
             if (dirPaths.length === 0) return;
             toggleExpandAll(dirPaths);
-          }}
+          }
+    }
           className="flex items-center justify-center w-7 h-7 rounded text-[var(--text-muted)] hover:bg-[var(--hover)] hover:text-[var(--text-primary)]"
           title={allExpanded ? "收起全部文件夹" : "展开全部文件夹"}
         >
@@ -353,22 +357,16 @@ export function FileExplorerPanel({ openedNoteFile, openedTableFile, onConvertWh
         }}
       >
         {recentVaults.length === 0 && spaceEntries.length === 0 && !hasServers ? (
-          <div className="flex flex-col items-center justify-center gap-3 py-14 text-center">
-            <p className="text-sm" style={{ color: "var(--text-secondary)" }}>
-              还没有仓库
-            </p>
-            <p className="text-xs" style={{ color: "var(--text-muted)" }}>
-              打开一个文件夹作为仓库（可用工具条的打开按钮，或此处）。
-            </p>
-            <button
-              onClick={() => void openFolderAsVault()}
-              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded text-xs border"
-              style={{ borderColor: "var(--border)", color: "var(--text-secondary)" }}
-            >
-              <FolderOpen size={13} />
-              打开文件夹
-            </button>
-          </div>
+          <EmptyState
+            icon={<FolderOpen size={18} />}
+            title="还没有仓库"
+            description="打开一个文件夹作为仓库（可用工具条的打开按钮，或此处）。"
+            action={
+              <Button variant="secondary" size="sm" icon={<FolderOpen size={13} />} onClick={() => void openFolderAsVault()}>
+                打开文件夹
+              </Button>
+            }
+          />
         ) : (
           <ul>
             <VaultRows

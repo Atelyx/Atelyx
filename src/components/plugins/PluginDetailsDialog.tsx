@@ -5,6 +5,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Check, ChevronRight, Circle, Lock, RefreshCw, Shield, Terminal, X } from "lucide-react";
 import type { InstalledPlugin, PluginAuditEntry, PluginCommandContribution, PluginSlotChain } from "@/types";
+import { IconButton } from "@/components/common/Button";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 import { PLUGIN_MOUNT_PHASE_LABELS, PLUGIN_MOUNT_PHASE_ORDER } from "@/constants/plugins";
 
@@ -117,9 +118,9 @@ export function PluginDetailsDialog({
               {plugin.id} · v{plugin.manifest.version} · {plugin.phase === "active" ? "运行中" : plugin.phase === "failed" ? "加载失败" : "已停用"}
             </div>
           </div>
-          <button ref={closeRef} onClick={onClose} className="p-1 rounded hover:bg-[var(--hover)]" style={{ color: "var(--text-muted)" }} title="关闭详情">
-            <X size={15} />
-          </button>
+          {/* noTooltip：挂载时 closeRef 自动聚焦，Tooltip 的 onFocus 会在 0.4s 后自己弹出提示，
+              用户并未悬停。关闭语义已由按钮位置与 aria-label 表达。 */}
+          <IconButton ref={closeRef} icon={<X size={15} />} label="关闭详情" onClick={onClose} size="sm" noTooltip />
         </div>
 
         {plugin.previousVersion && (

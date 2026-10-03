@@ -1,11 +1,11 @@
+import { Spinner } from "@/components/common/primitives";
 import {
   AlertCircle,
   CheckCircle2,
   Download,
   ExternalLink,
-  Loader2,
   RefreshCw,
-} from "lucide-react";
+  } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useAppStore } from "@/stores/appStore";
 // 应用图标（与 src-tauri/icons/icon.svg 同源，设置页「关于」Logo 展示）
@@ -86,7 +86,7 @@ export function AboutSection() {
             className="flex items-center gap-1.5 px-4 py-2 rounded text-sm font-medium bg-[var(--accent)] text-[var(--accent-fg)] hover:opacity-90 disabled:opacity-60"
           >
             {installing ? (
-              <Loader2 size={14} className="animate-spin" />
+              <Spinner size={14} className="[--spinner-track:color-mix(in_srgb,var(--accent-fg)_35%,transparent)] [--spinner-head:var(--accent-fg)]" />
             ) : (
               <Download size={14} />
             )}
@@ -99,7 +99,7 @@ export function AboutSection() {
             className="flex items-center gap-1.5 px-4 py-2 rounded text-sm font-medium bg-[var(--accent)] text-[var(--accent-fg)] hover:opacity-90 disabled:opacity-60"
           >
             {updateStatus === "checking" ? (
-              <Loader2 size={14} className="animate-spin" />
+              <Spinner size={14} className="[--spinner-track:color-mix(in_srgb,var(--accent-fg)_35%,transparent)] [--spinner-head:var(--accent-fg)]" />
             ) : (
               <RefreshCw size={14} />
             )}

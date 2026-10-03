@@ -10,8 +10,9 @@
  */
 import { useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
-import { ChevronDown, ChevronRight, HardDrive, Loader2 } from "lucide-react";
+import { ChevronDown, ChevronRight, HardDrive } from "lucide-react";
 import { useAppStore } from "@/stores/appStore";
+import { Spinner } from "@/components/common/primitives";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 import { Menu, MenuItem } from "@/components/common/Menu";
 import type { RecentVault, FileTreeNode } from "@/types";
@@ -45,8 +46,7 @@ function VaultMenu({
   x,
   y,
   onClose,
-  onRemove,
-}: {
+  onRemove }: {
   root: string;
   /** 该仓库是否为当前激活仓库（激活仓库不可移出列表，否则树中无其条目而它仍激活）。 */
   active: boolean;
@@ -124,7 +124,7 @@ export function VaultRows({ vaults, vaultRoot, switchingTo, onEnter, collapsedVa
             >
               <span className="flex items-center" style={{ color: "var(--text-muted)" }}>{expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</span>
               {switching ? (
-                <Loader2 size={14} className="animate-spin" style={{ color: "var(--accent)" }} />
+                <Spinner size={14} />
               ) : (
                 <HardDrive size={14} style={{ color: active ? "var(--accent)" : "var(--text-muted)" }} />
               )}

@@ -163,7 +163,7 @@ describe("SpaceAccountSection 登录/注册弹窗", () => {
     });
     render(<SpaceAccountSection />);
     // 无重试条目时弹窗内无引导提示，设置区引导条提供取消入口
-    fireEvent.click(screen.getByTitle("取消引导"));
+    fireEvent.click(screen.getByRole("button", { name: "取消引导" }));
     expect(clearLoginPrompt).toHaveBeenCalled();
   });
 });

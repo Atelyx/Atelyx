@@ -7,10 +7,11 @@
  * 数据来自 repoHistoryStore（按仓库身份经内容面聚合全部版本，ts 倒序、上限）。
  * 不含「最近文件活动」区——最近文件统一由「最近打开」面板承载，避免与主页重复。
  */
-import { ChevronDown, ChevronRight, ExternalLink, History, RefreshCw } from "lucide-react";
+import { ChevronDown, ChevronRight, ExternalLink, History } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useAppStore, selectVaultIdentityKey } from "@/stores/appStore";
 import { useRepoHistoryStore } from "@/stores/repoHistoryStore";
+import { Spinner } from "@/components/common/primitives";
 import { FileKindIcon, openFileByKind } from "@/components/common/FileKindIcon";
 import { IconButton, Button } from "@/components/common/Button";
 import { HistoryModal, ACTION_LABEL } from "@/components/history/HistoryModal";
@@ -184,7 +185,7 @@ export function RepoHistoryPanel() {
         <span className="text-xs font-medium" style={{ color: "var(--text-primary)" }}>
           仓库历史
         </span>
-        {loading && <RefreshCw size={11} className="animate-spin" style={{ color: "var(--text-muted)" }} />}
+        {loading && <Spinner size={11} />}
         {groups.length > TOP_FILES_LIMIT && (
           <Button
             onClick={() => setShowAllFiles((v) => !v)}

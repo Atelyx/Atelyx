@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { DropdownSelect } from "@/components/common/DropdownSelect";
+import { Input } from "@/components/common/Input";
 import { SettingCard } from "@/components/settings/SettingCard";
 import { SlotListMount } from "@/components/plugins/SlotHost";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -42,35 +43,25 @@ export function SearchSettingsTab() {
           title="Tavily API Key"
           description="默认存本机钥匙串，不进仓库文件"
         >
-          <input
+          <Input
             type="password"
             value={keyDraft}
             onChange={(e) => setKeyDraft(e.target.value)}
             onBlur={() => void setTavilyKey(keyDraft.trim())}
             placeholder="tvly-..."
-            className="text-sm rounded px-2 py-1 outline-none w-[260px] max-w-full"
-            style={{
-              color: "var(--text-primary)",
-              background: "var(--input-bg)",
-              border: "1px solid var(--input-border)",
-            }}
+            className="!w-[260px] max-w-full"
           />
         </SettingCard>
       ) : (
         <SettingCard title="SearXNG URL" description="自建实例的访问地址">
-          <input
+          <Input
             type="url"
             value={searchConfig.searxngUrl}
             onChange={(e) =>
               void setSearchConfig({ searxngUrl: e.target.value })
             }
             placeholder="https://searx.example.com"
-            className="text-sm rounded px-2 py-1 outline-none w-[260px] max-w-full"
-            style={{
-              color: "var(--text-primary)",
-              background: "var(--input-bg)",
-              border: "1px solid var(--input-border)",
-            }}
+            className="!w-[260px] max-w-full"
           />
         </SettingCard>
       )}

@@ -14,6 +14,7 @@
 import { useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { Cloud, FolderOpen, Plus, Ticket } from "lucide-react";
+import { Input } from "@/components/common/Input";
 import { Button } from "@/components/common/Button";
 import { PopupLayer } from "@/components/common/PopupLayer";
 import { usePopupAnchor } from "@/hooks/usePopupAnchor";
@@ -238,13 +239,11 @@ export function SpaceAddPopover({ onNotice }: { onNotice: (message: string) => v
               </select>
             )}
 
-            <input
+            <Input
               autoFocus
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               placeholder={tab.placeholder}
-              className="w-full text-xs rounded px-2 py-1.5 outline-none"
-              style={{ background: "var(--input-bg)", color: "var(--text-primary)", border: "1px solid var(--input-border)" }}
             />
 
             {error && (

@@ -7,6 +7,7 @@
  * - 搜索失败：显示错误 + 重试（重试 = 重新执行搜索并更新 data，4.6 失败降级）
  * - 分层：走 canvasStore（updateNodeData），不直调 service（重试的搜索执行在 store 层调 service）
  */
+import { Checkbox } from "@/components/common/Input";
 import { AlertTriangle, ExternalLink, Search } from "lucide-react";
 import { useState } from "react";
 import type { NodeProps } from "@xyflow/react";
@@ -35,12 +36,12 @@ function ResultRow({
   return (
     <li className="text-xs">
       <div className="flex items-start gap-1.5">
-        <input
-          type="checkbox"
+        <Checkbox
+          bare
           checked={checked}
           onChange={onToggleCheck}
           title="勾选 = 仅将勾选条目注入上下文"
-          className="nodrag mt-0.5 flex-shrink-0"
+          className="nodrag mt-0.5"
         />
         <a
           href={openable ? item.url : undefined}

@@ -8,8 +8,9 @@
  *
  * 分层：只调 appStore / spaceDirectoryStore 动作，不直调 service。
  */
+import { Spinner } from "@/components/common/primitives";
 import { useEffect, useState } from "react";
-import { ChevronDown, ChevronRight, Cloud, Loader2 } from "lucide-react";
+import { ChevronDown, ChevronRight, Cloud } from "lucide-react";
 import { useAppStore } from "@/stores/appStore";
 import { useSpaceDirectoryStore } from "@/stores/spaceDirectoryStore";
 import type { FileTreeNode } from "@/types";
@@ -131,7 +132,7 @@ export function SpaceRows({ entries, hasServers, loading, listError, identity, s
               >
                 <span className="flex items-center" style={{ color: "var(--text-muted)" }}>{expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</span>
                 {switching ? (
-                  <Loader2 size={14} className="animate-spin" style={{ color: "var(--accent)" }} />
+                  <Spinner size={14} />
                 ) : (
                   <Cloud size={14} style={{ color: active ? "var(--accent)" : "var(--text-muted)" }} />
                 )}
@@ -182,7 +183,7 @@ export function SpaceRows({ entries, hasServers, loading, listError, identity, s
           )}
           {loading && (
             <div className="flex items-center gap-1.5 px-2 py-0.5 text-micro" style={{ color: "var(--text-muted)" }}>
-              <Loader2 size={12} className="animate-spin" />
+              <Spinner size={12} />
               加载空间列表…
             </div>
           )}

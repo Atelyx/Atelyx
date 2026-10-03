@@ -267,15 +267,12 @@ function SettingsShell({
                   <span className="text-sm font-semibold truncate" style={{ color: "var(--text-primary)" }}>
                     {title}
                   </span>
-                  <button
+                  <IconButton
+                    icon={<X size={14} />}
+                    label="返回工作区"
                     onClick={onClose}
-                    aria-label="返回工作区"
-                    title="返回工作区"
-                    className="ml-auto w-6 h-6 flex items-center justify-center rounded-[var(--radius-sm)] hover:bg-[var(--hover)] shrink-0"
-                    style={{ color: "var(--text-muted)" }}
-                  >
-                    <X size={14} />
-                  </button>
+                    className="ml-auto shrink-0"
+                  />
                 </>
               )}
             </div>
@@ -296,7 +293,8 @@ function SettingsShell({
                         className="w-[3px] h-[11px] rounded-full shrink-0"
                         style={{
                           background: group.scope === "vault" ? "var(--accent)" : "var(--border-strong)",
-                        }}
+                        }
+          }
                       />
                       <span className="truncate">{group.title}</span>
                       {group.hint && (

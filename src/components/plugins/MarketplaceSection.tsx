@@ -27,6 +27,8 @@ import {
   Wrench,
   type LucideIcon,
 } from "lucide-react";
+import { Input } from "@/components/common/Input";
+import { IconButton } from "@/components/common/Button";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 import { usePluginStore } from "@/stores/pluginStore";
 import { PLUGIN_BADGE_LABELS, PLUGIN_SOURCE_LABELS, PLUGIN_TYPE_LABELS } from "@/constants/plugins";
@@ -122,21 +124,21 @@ export function MarketplaceSection() {
     <div className="flex flex-col gap-3 min-h-0">
       {/* 搜索 / 刷新 */}
       <div className="flex gap-2">
-        <input
+        <Input
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder="搜索插件（名称 / id / 描述 / 仓库）"
-          className="flex-1 min-w-0 px-2.5 py-1.5 rounded text-xs border outline-none"
-          style={{ background: "var(--input-bg)", borderColor: "var(--input-border)", color: "var(--text-primary)" }}
+          className="flex-1 min-w-0"
         />
-        <button
+        <IconButton
+          icon={<RefreshCw size={13} />}
+          label="刷新市场索引"
           onClick={() => void loadMarket(true)}
-          title="刷新市场索引"
-          className="px-2 py-1.5 rounded border hover:bg-[var(--hover)] flex-shrink-0"
+          variant="secondary"
+          size="sm"
+          className="border"
           style={{ borderColor: "var(--border)", color: "var(--text-secondary)" }}
-        >
-          <RefreshCw size={13} />
-        </button>
+        />
       </div>
 
       {/* 类型筛选胶囊：类型多且面板可窄，单行横向滚动（折行会把工具条撑高） */}
@@ -247,7 +249,8 @@ export function MarketplaceSection() {
                             ? "color-mix(in srgb, var(--accent) 32%, transparent)"
                             : "color-mix(in srgb, var(--info) 30%, transparent)"
                         }`,
-                      }}
+                      }
+              }
                     >
                       {it.badge === "official" ? <Shield size={11} /> : <Star size={11} />}
                       {PLUGIN_BADGE_LABELS[it.badge]}

@@ -17,6 +17,7 @@ import { useLayoutEffect, useEffect, useRef, useState } from "react";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { usePluginStore } from "@/stores/pluginStore";
 import { DropdownSelect } from "@/components/common/DropdownSelect";
+import { Checkbox, Input } from "@/components/common/Input";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 import { useIsSpaceVault, useSpaceViewerOnly } from "@/hooks/useIsSpaceVault";
 import { SPACE_TEAM_SHARED_NOTICE, SPACE_VIEWER_NOTICE } from "@/constants/space";
@@ -78,14 +79,14 @@ function ToolCategoryGroup({
         <span className="text-xs font-medium" style={{ color: "var(--text-primary)" }}>
           {cat.label}
         </span>
-        <input
-          type="checkbox"
+        <Checkbox
+          bare
           ref={checkboxRef}
           checked={allOn}
           onChange={onToggleAll}
           // 点击复选框只切换该类全选/全不选，不触发头部折叠（stopPropagation）
           onClick={(e) => e.stopPropagation()}
-          className="ml-auto w-3.5 h-3.5 flex-shrink-0 accent-[var(--accent)] cursor-pointer"
+          className="ml-auto"
           title="全选/全不选"
         />
       </div>
@@ -105,12 +106,11 @@ function ToolCategoryGroup({
                   color: on ? "var(--text-primary)" : "var(--text-secondary)",
                 }}
               >
-                <input
-                  type="checkbox"
+                <Checkbox
+                  bare
                   checked={on}
                   onChange={() => onToggle(t.id)}
                   disabled={disabled}
-                  className="w-3.5 h-3.5 flex-shrink-0 accent-[var(--accent)] disabled:cursor-not-allowed"
                 />
                 <span className="flex items-center gap-1.5">
                   {t.label}
@@ -367,19 +367,14 @@ export function AgentSettingsSection() {
               >
                 名称
               </div>
-              <input
+              <Input
                 value={nameDraft}
                 onChange={(e) => setNameDraft(e.target.value)}
                 onBlur={commitName}
                 disabled={viewerOnly}
                 title={viewerOnly ? SPACE_VIEWER_NOTICE : undefined}
                 placeholder="如：写作助手"
-                className="w-full max-w-[280px] text-sm rounded px-2 py-1 outline-none disabled:opacity-50"
-                style={{
-                  color: "var(--text-primary)",
-                  background: "var(--input-bg)",
-                  border: "1px solid var(--input-border)",
-                }}
+                className="max-w-[280px]"
               />
             </div>
 
