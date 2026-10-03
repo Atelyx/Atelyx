@@ -18,6 +18,7 @@ Atelyx is a human-first, extensible desktop workbench: conversations, notes, tab
 
 <span style="background:#D4AF37;color:#1C1C1E;border-radius:999px;padding:4px 18px;font-size:13px;font-weight:700;margin:0 4px">Windows</span>
 <span style="border:1px solid #5a5a5e;color:#9a9a9e;border-radius:999px;padding:3px 17px;font-size:13px;font-weight:600;margin:0 4px">Linux · Wayland</span>
+<span style="border:1px solid #5a5a5e;color:#9a9a9e;border-radius:999px;padding:3px 17px;font-size:13px;font-weight:600;margin:0 4px">Android</span>
 <span style="border:1px solid #5a5a5e;color:#9a9a9e;border-radius:999px;padding:3px 17px;font-size:13px;font-weight:600;margin:0 4px">Apache-2.0</span>
 
 </div>
@@ -37,11 +38,13 @@ Day-to-day work often means switching between several tools: writing in one app,
 The kernel stays thin — everything bundled with the app is a plugin:
 
 - **AI chat** — connect any OpenAI-compatible model with custom providers and keys; conversations branch into canvas nodes, with edges expressing data flow.
+
 - **Notes** — Markdown editing with tables, math formulas, wiki links, tags, footnotes, and more; real-time collaborative editing.
-- **Tables** — structured data tables with image support and real-time collaboration.
+- **Tables** — structured data tables with fully user-defined field types, images, rich cell formatting, and xlsx export; real-time collaboration.
 - **Canvas** — a spatial canvas where conversation branches, notes, and materials become nodes, and edges express references and outputs.
 - **Files** — the vault file tree: personal vaults and collaboration spaces side by side, switched in place from the file panel.
-- **Search** — web search and full-text vault search; results settle into reusable assets for any conversation.
+
+- **Multiple form factors** — on desktop, panels tear off into independent windows with multiple layout presets; on Android, a single-column shell with a bottom bar runs the same implementation.
 - **Endlessly extensible** — built-in features are just the starting point: install third-party plugins from the in-app marketplace. Plugins share the same mechanism as built-ins — no privileges — and can be disabled or replace the defaults at any time. The workbench's ceiling is set by its plugins.
 
 ## Installation
@@ -51,7 +54,8 @@ Download the installer for your platform from [GitHub Releases](https://github.c
 | Platform | Package |
 | --- | --- |
 | Windows 10/11 (x64) | `.exe` installer (in-app auto-update supported) |
-| Linux (native Wayland, X11 compatible) | build from source |
+| Android 15+ (arm64) | `.apk` (distributed via Releases) |
+| Linux (native Wayland, X11 compatible) | `.deb` package / build from source |
 
 Prerequisites: Node.js 20.19+, pnpm 10, Rust (stable), Tauri 2 system dependencies (see [Tauri docs](https://v2.tauri.app/start/prerequisites/)). To build from source, see "Development" below.
 

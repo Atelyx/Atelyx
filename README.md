@@ -16,7 +16,7 @@
 Atelyx 是一款以人为本的可拓展桌面工作台：对话、笔记、表格、文件在同一工作台；自建服务端即可开启多人实时协作。应用本体是极薄的内核，对话、笔记、表格、画布、搜索、日历等功能由随应用分发的插件实现，可停用、可被第三方插件替换——目标是探索 AI 时代协作与工作的新范式。
 </p>
 
-<span style="background:#D4AF37;color:#1C1C1E;border-radius:999px;padding:4px 18px;font-size:13px;font-weight:700;margin:0 4px">Windows</span> <span style="border:1px solid #5a5a5e;color:#9a9a9e;border-radius:999px;padding:3px 17px;font-size:13px;font-weight:600;margin:0 4px">Linux · Wayland</span> <span style="border:1px solid #5a5a5e;color:#9a9a9e;border-radius:999px;padding:3px 17px;font-size:13px;font-weight:600;margin:0 4px">Apache-2.0</span>
+<span style="background:#D4AF37;color:#1C1C1E;border-radius:999px;padding:4px 18px;font-size:13px;font-weight:700;margin:0 4px">Windows</span> <span style="border:1px solid #5a5a5e;color:#9a9a9e;border-radius:999px;padding:3px 17px;font-size:13px;font-weight:600;margin:0 4px">Linux · Wayland</span> <span style="border:1px solid #5a5a5e;color:#9a9a9e;border-radius:999px;padding:3px 17px;font-size:13px;font-weight:600;margin:0 4px">Android</span> <span style="border:1px solid #5a5a5e;color:#9a9a9e;border-radius:999px;padding:3px 17px;font-size:13px;font-weight:600;margin:0 4px">Apache-2.0</span>
 
 </div>
 
@@ -35,11 +35,13 @@ Atelyx 是一款以人为本的可拓展桌面工作台：对话、笔记、表�
 内核极薄，随应用分发的功能全部由插件提供：
 
 - **AI 对话** — 接入 OpenAI 兼容模型，自定义供应商与密钥；对话可分支成画布节点，连线表达数据流。
+
 - **笔记** — Markdown 编辑，支持表格、数学公式、双链、标签、脚注等，多人实时协作编辑。
-- **表格** — 结构化数据表，支持图片与多人实时协作。
+- **表格** — 结构化数据表，字段类型完全自定义，支持图片、单元格富格式与 xlsx 导出，多人实时协作。
 - **画布** — 空间画布：对话分支、笔记、素材成为节点，连线表达引用与产出关系。
 - **文件** — 仓库文件树：个人仓库与协作空间并排使用，文件面板就地切换。
-- **搜索** — 网络搜索与仓库内全文检索，结果可沉淀为素材接入对话。
+
+- **多端** — 桌面端面板可拆分独立窗口、多布局预设；Android 端为单栏壳 + 底部导航，与桌面同一实现。
 - **无限拓展** — 内置功能只是插件的起点：应用内市场一键安装第三方插件，插件与内置功能同构、无特权，可随时停用或替换默认实现——工作台的能力上限由插件决定。
 
 ## 安装
@@ -49,7 +51,8 @@ Atelyx 是一款以人为本的可拓展桌面工作台：对话、笔记、表�
 | 平台                       | 安装包                   |
 | ------------------------ | --------------------- |
 | Windows 10/11（x64）       | `.exe` 安装包（支持应用内自动更新） |
-| Linux（Wayland 原生，兼容 X11） | 源码构建                  |
+| Android 15+（arm64）      | `.apk`（随 Release 分发，自分发） |
+| Linux（Wayland 原生，兼容 X11） | `.deb` 包 / 源码构建                  |
 
 前置要求：Node.js 20.19+、pnpm 10、Rust（stable）、Tauri 2 系统依赖（见 [Tauri 官方文档](https://v2.tauri.app/start/prerequisites/)）。从源码构建见下文「开发命令」。
 
