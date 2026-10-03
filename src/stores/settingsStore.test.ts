@@ -19,6 +19,8 @@ const h = vi.hoisted(() => {
     keychain: new Map<string, string>(),
     /** 字段级补丁（vault_config_patch）载荷。 */
     patches: [] as Record<string, unknown>[],
+    /** 应用级全局配置补丁（patch_global_config）载荷，按 JSON 序列化后的线上形状录制。 */
+    globalPatches: [] as Record<string, unknown>[],
     setKeyCalls: [] as string[],
     failGetKey: false,
     failSetKey: false,
@@ -64,6 +66,13 @@ vi.mock("@tauri-apps/api/core", () => ({
         }
         h.state.patches.push(a.patch as Record<string, unknown>);
         return h.state.patchCorruptBackup;
+      }
+      case "patch_global_config": {
+        // 还原 Tauri invoke 的真实语义：参数经 JSON 序列化，undefined 值的键会缺席
+        h.state.globalPatches.push(
+          JSON.parse(JSON.stringify(a.patch ?? {})) as Record<string, unknown>,
+        );
+        return { config: {}, corruptBackup: null };
       }
       case "read_prompt_notes":
       case "read_agents":
@@ -138,6 +147,7 @@ beforeEach(async () => {
   h.state.patchCorruptBackup = null;
   h.state.keychain = new Map();
   h.state.patches = [];
+  h.state.globalPatches = [];
   h.state.setKeyCalls = [];
   h.state.failGetKey = false;
   h.state.failSetKey = false;
@@ -420,5 +430,25 @@ describe("配置损坏的可见性", () => {
     expect(items).toHaveLength(1);
     expect(items[0].level).toBe("error");
     expect(items[0].message).toContain("config.json.corrupt-write");
+  });
+});
+
+describe("应用级外观补丁（global.json 清空字段落盘）", () => {
+  it("字号留空发 null 删键（undefined 经 JSON 序列化缺席会保留磁盘旧值）", async () => {
+    await settings.useSettingsStore.getState().setFontSize(20);
+    await settings.useSettingsStore.getState().setFontSize(undefined);
+
+    expect(h.state.globalPatches).toEqual([{ fontSize: 20 }, { fontSize: null }]);
+    expect(settings.useSettingsStore.getState().fontSize).toBeUndefined();
+  });
+
+  it("字体留空同样发 null 删键", async () => {
+    await settings.useSettingsStore.getState().setFontFamily("Georgia, serif");
+    await settings.useSettingsStore.getState().setFontFamily(undefined);
+
+    expect(h.state.globalPatches).toEqual([
+      { fontFamily: "Georgia, serif" },
+      { fontFamily: null },
+    ]);
   });
 });

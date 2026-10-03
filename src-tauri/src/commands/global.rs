@@ -59,7 +59,7 @@ pub struct GlobalConfig {
     /// 各主题插件的设置项值字典（键 = 插件 id；预置键 colorMode/accentColor + 插件自定义键）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theme_settings: Option<std::collections::BTreeMap<String, std::collections::BTreeMap<String, serde_json::Value>>>,
-    /// 应用级界面基础字号（px，覆盖 :root font-size；缺省 = 18）。
+    /// 应用级界面基础字号（px，覆盖 :root font-size；缺省 = 16）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub font_size: Option<f64>,
     /// 应用级界面字体（CSS font-family，缺省 = system-ui 默认）。

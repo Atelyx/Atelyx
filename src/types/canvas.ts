@@ -296,7 +296,7 @@ export interface GlobalConfig {
   /** 各主题插件的设置项值字典（键 = 插件 id；预置键 colorMode/accentColor + 插件自定义键）。
    * 缺省 = 默认主题插件 { colorMode: "system" }。 */
   themeSettings?: Record<string, Record<string, unknown>>;
-  /** 应用级界面基础字号（px，覆盖 :root font-size；缺省 = 18）。 */
+  /** 应用级界面基础字号（px，覆盖 :root font-size；缺省 = 16）。 */
   fontSize?: number;
   /** 应用级界面字体（CSS font-family 值；缺省 = system-ui 默认）。 */
   fontFamily?: string;

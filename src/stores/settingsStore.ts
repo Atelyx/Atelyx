@@ -79,7 +79,7 @@ interface SettingsState {
   theme: string;
   /** 各主题插件的设置项值字典（应用级，写 global.json；预置键 colorMode/accentColor + 插件自定义键）。 */
   themeSettings: Record<string, Record<string, unknown>>;
-  /** 应用级界面基础字号（px；undefined = 默认 18，存 global.json）。 */
+  /** 应用级界面基础字号（px；undefined = 默认 16，存 global.json）。 */
   fontSize?: number;
   /** 应用级界面字体（CSS font-family；undefined = 系统默认，存 global.json）。 */
   fontFamily?: string;
@@ -803,11 +803,16 @@ function normalizeNoteLineWidth(width: number | undefined): number {
 }
 
 /** 应用级配置写盘统一入口（各外观 setXxx 收敛于此）：先写内存再 patch 落 global.json，
- * 失败仅记专属文案日志不打断 UI（外观丢失可重设，非关键路径）。 */
+ * 失败仅记专属文案日志不打断 UI（外观丢失可重设，非关键路径）。
+ * 值为 undefined 的字段 = 恢复默认：内存置 undefined（渲染回落默认），补丁通道改发 null 删键——
+ * undefined 键经 JSON 序列化会缺席，被后端「缺键 = 保留旧值」吞掉，清空字号/字体后重启回弹。 */
 async function commitGlobal(patch: Partial<GlobalConfig>, errMsg: string): Promise<void> {
   useSettingsStore.setState(patch);
+  const wire = Object.fromEntries(
+    Object.entries(patch).map(([key, value]) => [key, value ?? null]),
+  ) as { [K in keyof GlobalConfig]?: GlobalConfig[K] | null };
   try {
-    notifyGlobalConfigCorrupt(await updateGlobalConfig(patch));
+    notifyGlobalConfigCorrupt(await updateGlobalConfig(wire));
   } catch (e) {
     console.error(errMsg, e);
   }
