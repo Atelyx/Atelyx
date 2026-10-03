@@ -62,7 +62,10 @@ export function useAppearance(): void {
 
   // 主题 class 应用（分层：store 只存状态，DOM 副作用归 hook）
   useEffect(() => {
-    document.documentElement.classList.toggle("dark", active?.entry?.colorScheme === "dark");
+    // 主题未就绪（active 为空）时不动 class：index.html 已按系统深浅预置，此处摘掉 .dark
+    // 会让整屏瞬间落到浅色底
+    if (!active?.entry) return;
+    document.documentElement.classList.toggle("dark", active.entry.colorScheme === "dark");
   }, [active]);
 
   // 主题变量 + 强调色应用（单一真相源，避免变量 effect 与强调色 effect 争抢 --accent）：
