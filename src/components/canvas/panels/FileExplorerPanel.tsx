@@ -36,7 +36,7 @@ import { useSpaceDirectoryStore } from "@/stores/spaceDirectoryStore";
 import { SlotListMount } from "@/components/plugins/SlotHost";
 import { FileContextMenu } from "@/components/canvas/panels/FileContextMenu";
 import { EmptyState } from "@/components/common/EmptyState";
-import { Button } from "@/components/common/Button";
+import { Button, IconButton } from "@/components/common/Button";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 import { baseName, noteTitleFromFile, tableTitleFromFile } from "@/utils/filename";
 import type { CanvasFileRow } from "@/types";
@@ -284,38 +284,36 @@ export function FileExplorerPanel({ openedNoteFile, openedTableFile, onConvertWh
       <div className="px-2 py-1.5 border-b flex items-center gap-0.5" style={{ background: "var(--bg-secondary)", borderColor: "var(--border-subtle)" }}>
         {/* 插件贡献区：文件面板工具条左侧（list 槽，priority 降序） */}
         <SlotListMount slot="toolbar/files/left" />
-        <button
+        <IconButton
+          variant="ghost"
+          size="md"
+          icon={<FolderOpen size={15} />}
+          label="打开文件夹为仓库"
           onClick={() => void openFolderAsVault()}
-          className="flex items-center justify-center w-7 h-7 rounded text-[var(--text-muted)] hover:bg-[var(--hover)] hover:text-[var(--text-primary)]"
-          title="打开文件夹为仓库"
           disabled={openFolderBusy}
-        >
-          <FolderOpen size={15} />
-        </button>
+        />
         <SpaceAddPopover onNotice={setNotice} />
-        <button
+        <IconButton
+          variant="ghost"
+          size="md"
+          icon={<ArrowUpDown size={14} />}
+          label="排序方式"
           onClick={(e) => {
             const rect = e.currentTarget.getBoundingClientRect();
             setSortMenu({ x: rect.right, y: rect.bottom });
-          }
-    }
-          className="flex items-center justify-center w-7 h-7 rounded text-[var(--text-muted)] hover:bg-[var(--hover)] hover:text-[var(--text-primary)]"
-          title="排序方式"
-        >
-          <ArrowUpDown size={14} />
-        </button>
+          }}
+        />
         <span className="flex-1" />
-        <button
+        <IconButton
+          variant="ghost"
+          size="md"
+          icon={allExpanded ? <ChevronsDownUp size={14} /> : <ChevronsUpDown size={14} />}
+          label={allExpanded ? "收起全部文件夹" : "展开全部文件夹"}
           onClick={() => {
             if (dirPaths.length === 0) return;
             toggleExpandAll(dirPaths);
-          }
-    }
-          className="flex items-center justify-center w-7 h-7 rounded text-[var(--text-muted)] hover:bg-[var(--hover)] hover:text-[var(--text-primary)]"
-          title={allExpanded ? "收起全部文件夹" : "展开全部文件夹"}
-        >
-          {allExpanded ? <ChevronsDownUp size={14} /> : <ChevronsUpDown size={14} />}
-        </button>
+          }}
+        />
         {sortMenu && (
           <SortMenu
             x={sortMenu.x}

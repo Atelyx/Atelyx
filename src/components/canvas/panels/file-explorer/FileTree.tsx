@@ -11,6 +11,7 @@ import {
   Table,
 } from "lucide-react";
 import { InlineInput } from "./InlineInput";
+import { IconButton } from "@/components/common/Button";
 import { sortChildren, upperExt } from "./sort";
 import { useFileNavigation } from "@/hooks/useFileNavigation";
 import type { CanvasFileRow, FileExplorerSortKey, FileTreeNode } from "@/types";
@@ -143,19 +144,22 @@ export function FileTree(props: FileTreeProps) {
                   <Folder size={14} style={{ color: folderColors?.[node.path] ?? "var(--text-muted)" }} />
                   <span className="flex-1 truncate text-xs" style={{ color: "var(--text-secondary)" }}>{node.name}</span>
                   {/* 操作菜单入口：仅触屏显示——触屏长按已让位给起拖，菜单需显式入口（桌面保留原右键） */}
-                  <button
+                  <IconButton
+                    variant="subtle"
+                    size="sm"
+                    icon={<MoreHorizontal size={14} />}
+                    label="文件夹操作"
+                    className="hidden [@media(hover:none)]:flex"
+                    // 仅触屏显形：点按会先让按钮获焦再弹菜单，若挂 Tooltip 则提示
+                    // （z-1200）会压在菜单（z-50）上且触屏无 mouseleave 收不掉
+                    noTooltip
                     onPointerDown={(e) => e.stopPropagation()}
                     onClick={(e) => {
                       e.stopPropagation();
                       const r = e.currentTarget.getBoundingClientRect();
                       onOpenMenu(r.left, r.bottom + 2, { kind: "folder", dir: node.path });
                     }}
-                    aria-label="文件夹操作"
-                    className="w-6 h-6 hidden [@media(hover:none)]:flex items-center justify-center rounded flex-shrink-0"
-                    style={{ color: "var(--text-muted)" }}
-                  >
-                    <MoreHorizontal size={14} />
-                  </button>
+                  />
                 </div>
               )}
               {isExpanded && (
@@ -262,19 +266,21 @@ export function FileTree(props: FileTreeProps) {
                   {isCanvas ? "ATLX" : isWhiteboard ? "CANVAS" : isNote ? "MD" : isTable ? "ATB" : upperExt(node.name)}
                 </span>
                 {/* 操作菜单入口：仅触屏显示——触屏长按已让位给起拖，菜单需显式入口（桌面保留原右键） */}
-                <button
+                <IconButton
+                  variant="subtle"
+                  size="sm"
+                  icon={<MoreHorizontal size={14} />}
+                  label="文件操作"
+                  className="hidden [@media(hover:none)]:flex"
+                  // 同上：触屏点按后提示会压住刚打开的菜单
+                  noTooltip
                   onPointerDown={(e) => e.stopPropagation()}
                   onClick={(e) => {
                     e.stopPropagation();
                     const r = e.currentTarget.getBoundingClientRect();
                     onOpenMenu(r.left, r.bottom + 2, menuTarget);
                   }}
-                  aria-label="文件操作"
-                  className="w-6 h-6 hidden [@media(hover:none)]:flex items-center justify-center rounded flex-shrink-0"
-                  style={{ color: "var(--text-muted)" }}
-                >
-                  <MoreHorizontal size={14} />
-                </button>
+                />
               </div>
             )}
           </li>

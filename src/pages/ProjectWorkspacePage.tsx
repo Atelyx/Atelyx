@@ -12,6 +12,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { useUiStateStore } from "@/stores/uiStateStore";
 import { SettingsPage } from "@/components/settings/SettingsPage";
 import { TitleBarControls } from "@/components/common/TitleBarControls";
+import { IconButton } from "@/components/common/Button";
 import { LayoutTabs } from "@/components/layout/LayoutTabs";
 import { WorkspaceGrid } from "@/components/layout/WorkspaceGrid";
 import { WorkspaceStatusBar } from "@/components/layout/WorkspaceStatusBar";
@@ -92,33 +93,32 @@ export function ProjectWorkspacePage() {
               <span data-tauri-drag-region="false" className="flex items-center">
                 <SlotListMount slot="titlebar/right" />
               </span>
-              <button
+              <IconButton
                 onClick={(e) => {
                   e.stopPropagation();
                   if (settingsView) closeSettings();
                   else openSettings();
                 }}
-                className="w-8 h-8 flex items-center justify-center rounded-sm hover:opacity-80"
                 // 设置页打开时按钮保持激活态（与左栏布局 tab 同一口径），再点一次回工作区
                 style={{
                   color: settingsView ? "var(--accent)" : "var(--text-secondary)",
                   background: settingsView ? "var(--accent-soft)" : undefined,
                 }}
-                title={settingsView ? "设置（点击返回工作区）" : "设置"}
+                variant="ghost"
+                size="lg"
+                icon={<Settings size={16} />}
+                label="设置"
                 aria-pressed={!!settingsView}
                 data-tauri-drag-region="false"
-              >
-                <Settings size={16} />
-              </button>
-              <button
+              />
+              <IconButton
                 onClick={(e) => { e.stopPropagation(); handleToggleFullscreen(); }}
-                className="w-8 h-8 flex items-center justify-center rounded-sm hover:opacity-80"
-                style={{ color: "var(--text-secondary)" }}
-                title="全屏"
+                variant="ghost"
+                size="lg"
+                icon={<Maximize size={16} />}
+                label="全屏"
                 data-tauri-drag-region="false"
-              >
-                <Maximize size={16} />
-              </button>
+              />
             </div>
             <TitleBarControls
               onMinimize={() => void minimizeWindow()}

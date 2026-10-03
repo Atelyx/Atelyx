@@ -12,6 +12,7 @@ import { Check, ChevronDown, FileText, LayoutDashboard, Paperclip, Search, Stick
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Input } from "@/components/common/Input";
 import { Menu, MenuItem } from "@/components/common/Menu";
+import { IconButton } from "@/components/common/Button";
 import { useAppStore } from "@/stores/appStore";
 import { useVaultStore } from "@/stores/vaultStore";
 import { useFileNavigation } from "@/hooks/useFileNavigation";
@@ -107,18 +108,16 @@ export function SearchPanel() {
             className="flex-1 min-w-0 !text-xs"
           />
           {query && (
-            <button
+            <IconButton
+              variant="ghost"
+              size="2xs"
+              icon={<X size={12} />}
+              label="清空搜索"
               onClick={() => {
                 setQuery("");
                 inputRef.current?.focus();
               }}
-              className="flex-shrink-0 p-0.5 rounded hover:bg-[var(--hover)]"
-              style={{ color: "var(--text-muted)" }}
-              title="清空"
-              aria-label="清空搜索"
-            >
-              <X size={12} />
-            </button>
+            />
           )}
         </div>
       </div>

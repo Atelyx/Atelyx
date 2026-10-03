@@ -4,6 +4,7 @@
  * 打开即拉取名册；操作成功后自动刷新。
  */
 import { Spinner } from "@/components/common/primitives";
+import { IconButton } from "@/components/common/Button";
 import { useEffect, useState } from "react";
 import { ShieldCheck, X } from "lucide-react";
 import { useSpaceDirectoryStore } from "@/stores/spaceDirectoryStore";
@@ -61,9 +62,7 @@ export function SpaceMembersDialog({ serverUrl, spaceId, spaceName, onClose }: P
           <h3 className="text-sm font-medium" style={{ color: "var(--text-primary)" }}>
             成员管理 · {spaceName}
           </h3>
-          <button onClick={onClose} style={{ color: "var(--text-muted)" }} className="hover:opacity-80">
-            <X size={14} />
-          </button>
+          <IconButton variant="subtle" size="sm" icon={<X size={14} />} label="关闭成员管理" onClick={onClose} />
         </header>
 
         <div className="flex-1 overflow-auto p-3 space-y-1.5">

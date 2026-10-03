@@ -19,6 +19,7 @@ import { usePluginStore } from "@/stores/pluginStore";
 import { DropdownSelect } from "@/components/common/DropdownSelect";
 import { Checkbox, Input } from "@/components/common/Input";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
+import { IconButton } from "@/components/common/Button";
 import { useIsSpaceVault, useSpaceViewerOnly } from "@/hooks/useIsSpaceVault";
 import { SPACE_TEAM_SHARED_NOTICE, SPACE_VIEWER_NOTICE } from "@/constants/space";
 import {
@@ -317,34 +318,34 @@ export function AgentSettingsSection() {
                   {summary(a)}
                 </div>
               </div>
-              <button
-                type="button"
+              <IconButton
+                variant="subtle"
+                size="xs"
+                icon={<Copy size={12} />}
+                label="复制 Agent"
+                disabled={viewerOnly}
                 onClick={(e) => {
                   e.stopPropagation();
                   void duplicateAgent(a.id);
                 }}
-                disabled={viewerOnly}
-                title="复制 Agent"
-                className="p-1 rounded hover:opacity-70 flex-shrink-0 opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 disabled:cursor-not-allowed"
-                style={{ color: "var(--text-muted)" }}
-              >
-                <Copy size={12} />
-              </button>
+                // focus-visible:opacity-100：默认 opacity-0 态下仍可 Tab 到，
+                // 键盘用户必须看得见焦点（否则只剩 Tooltip 凭空提示）
+                className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100"
+              />
               {!a.builtin && (
-                <button
-                  type="button"
+                <IconButton
+                  variant="danger"
+                  size="xs"
+                  icon={<Trash2 size={12} />}
+                  label="删除 Agent"
+                  disabled={viewerOnly}
                   onClick={(e) => {
                     e.stopPropagation();
                     handleSelect(a.id);
                     setConfirmDelete(true);
                   }}
-                  disabled={viewerOnly}
-                  title="删除 Agent"
-                  className="p-1 rounded hover:opacity-70 flex-shrink-0 opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 disabled:cursor-not-allowed"
-                  style={{ color: "var(--danger)" }}
-                >
-                  <Trash2 size={12} />
-                </button>
+                  className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100"
+                />
               )}
             </div>
           ))}

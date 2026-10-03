@@ -121,13 +121,14 @@ function ServerList() {
       {servers.map((s) => (
         <div key={s.serverUrl} className="flex flex-col">
           <div className="flex items-center gap-2 text-xs">
-            <button
+            <IconButton
+              variant="subtle"
+              size="2xs"
+              icon={expanded.has(s.serverUrl) ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+              label="设备会话"
+              aria-expanded={expanded.has(s.serverUrl)}
               onClick={() => toggleExpand(s.serverUrl)}
-              title="设备会话"
-              style={{ color: "var(--text-muted)" }}
-            >
-              {expanded.has(s.serverUrl) ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-            </button>
+            />
             <Server size={12} style={{ color: "var(--text-muted)" }} />
             <span className="truncate flex-1" style={{ color: "var(--text-primary)" }} title={s.serverUrl}>
               {s.serverUrl}

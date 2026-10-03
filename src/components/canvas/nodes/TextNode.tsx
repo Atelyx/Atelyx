@@ -1,4 +1,5 @@
 import { Input } from "@/components/common/Input";
+import { IconButton } from "@/components/common/Button";
 import { AlertTriangle, Eye, FileText, Pencil, SlidersHorizontal, StickyNote } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { NodeProps } from "@xyflow/react";
@@ -236,30 +237,29 @@ export function TextNode({ id, data, width, height, selected }: NodeProps) {
           ))}
           {/* 有属性：跳笔记面板编辑（节点内只渲染正文） */}
           {hasFrontmatter && file && (
-            <button
-              type="button"
-              title="在笔记面板编辑属性"
+            <IconButton
+              variant="subtle"
+              size="xs"
+              icon={<SlidersHorizontal size={13} />}
+              label="在笔记面板编辑属性"
+              // subtle 变体只有文字色反馈，此处按钮密排于节点头，补底色避免悬停像没反应
+              className="hover:!bg-[var(--bg-tertiary)]"
               onClick={(e) => {
                 e.stopPropagation();
                 useAppStore.getState().openNote(file, title || "未命名");
               }}
-              className="rounded p-0.5 hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)] transition-colors"
-              style={{ color: "var(--text-muted)" }}
-            >
-              <SlidersHorizontal size={13} />
-            </button>
+            />
           )}
           {!fileMissing && !readOnly && (canEditBody || editing) && (
             <span onClick={(e) => e.stopPropagation()}>
-              <button
-                type="button"
-                title={editing ? "预览（Esc 退出）" : "编辑"}
+              <IconButton
+                variant="subtle"
+                size="xs"
+                icon={editing ? <Eye size={13} /> : <Pencil size={13} />}
+                label={editing ? "预览（Esc 退出）" : "编辑"}
+                className="hover:!bg-[var(--bg-tertiary)]"
                 onClick={() => (editing ? exitEdit() : enterEdit())}
-                className="rounded p-0.5 hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)] transition-colors"
-                style={{ color: "var(--text-muted)" }}
-              >
-                {editing ? <Eye size={13} /> : <Pencil size={13} />}
-              </button>
+              />
             </span>
           )}
         </span>

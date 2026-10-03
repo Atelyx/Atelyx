@@ -12,6 +12,7 @@ import { useNoteStore } from "@/stores/noteStore";
 import { useCanvasStore } from "@/stores/canvasStore";
 import { useTableStore } from "@/stores/tableStore";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
+import { IconButton } from "@/components/common/Button";
 import { diffTableVersions } from "@/utils/table";
 import { diffCanvasVersions } from "@/utils/canvasCollab";
 import type { CanvasFile, TableFile } from "@/types";
@@ -159,13 +160,14 @@ export function HistoryModal({ kind, file, open, onClose, onRollback }: Props) {
           <span className="text-sm" style={{ color: "var(--text-primary)" }}>
             历史记录 · {KIND_LABEL[kind]} · {name}
           </span>
-          <button
-            className="ml-auto p-1 rounded hover:opacity-80"
-            style={{ color: "var(--text-muted)" }}
+          <IconButton
+            className="ml-auto"
+            variant="ghost"
+            size="sm"
+            icon={<X size={15} />}
+            label="关闭历史记录"
             onClick={onClose}
-          >
-            <X size={15} />
-          </button>
+          />
         </div>
 
         <div className="flex-1 overflow-auto p-2">
@@ -195,13 +197,14 @@ export function HistoryModal({ kind, file, open, onClose, onRollback }: Props) {
               style={{ borderColor: "var(--border)", background: "var(--input-bg)" }}
             >
               <div className="flex items-center gap-2">
-                <button
-                  className="p-0.5 rounded hover:opacity-80"
-                  style={{ color: "var(--text-muted)" }}
+                <IconButton
+                  variant="ghost"
+                  size="xs"
+                  icon={previewSeq === v.seq ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+                  label="版本详情"
+                  aria-expanded={previewSeq === v.seq}
                   onClick={() => setPreviewSeq(previewSeq === v.seq ? null : v.seq)}
-                >
-                  {previewSeq === v.seq ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-                </button>
+                />
                 <span className="font-medium" style={{ color: "var(--text-primary)" }}>
                   {ACTION_LABEL[v.action] ?? v.action}
                 </span>
@@ -258,8 +261,8 @@ function VersionPreview({
 }) {
   return (
     <div
-      className="mt-1.5 px-2 py-1.5 rounded max-h-48 overflow-auto"
-      style={{ background: "var(--input-bg)", color: "var(--text-primary)", fontSize: 11 }}
+      className="mt-1.5 px-2 py-1.5 rounded max-h-48 overflow-auto text-micro"
+      style={{ background: "var(--input-bg)", color: "var(--text-primary)" }}
     >
       {note && <div className="mb-1" style={{ color: "var(--text-muted)" }}>{note}</div>}
       {kind === "note" ? (

@@ -7,6 +7,7 @@ import {
 import { ArrowRight, ArrowRightLeft, Minus } from "lucide-react";
 import { useShallow } from "zustand/react/shallow";
 import { useCanvasStore } from "@/stores/canvasStore";
+import { IconButton } from "@/components/common/Button";
 import { isAssetConsumed } from "@/utils/consumed";
 import type { LinkMode } from "@/types";
 
@@ -135,24 +136,21 @@ export function DataFlowEdge({
           {isLink ? (
             /* 关联边中点：模式切换圆钮常显（低透明度，hover 高亮；无向/单向/双向循环），只读白板隐藏 */
             !readOnly && (
-              <button
+              <IconButton
+                variant="secondary"
+                size="2xs"
+                // 关联边中点是直径 18px 的正圆，超出 2xs 档的 16px 方形，故尺寸与圆角
+                // 由本处覆写（`size` 的 w/h/圆角产出均被盖掉，仅取其变体与基元行为）；
+                // 基元提供焦点环、悬停提示与透传的事件。
+                className="!w-[18px] !h-[18px] !rounded-full !border !border-[var(--border)] opacity-50 hover:opacity-100"
+                style={{ pointerEvents: "auto", color: "var(--text-secondary)" }}
+                icon={linkModeIcon(linkMode)}
+                label={`边模式：${linkMode === "none" ? "无向" : linkMode === "single" ? "单向" : "双向"}（点击切换）`}
                 onClick={(e) => {
                   e.stopPropagation();
                   setEdgeLinkMode(id, cycleLinkMode(linkMode));
                 }}
-                className="flex items-center justify-center rounded-full border opacity-50 hover:opacity-100"
-                style={{
-                  width: 18,
-                  height: 18,
-                  pointerEvents: "auto",
-                  background: "var(--bg-tertiary)",
-                  borderColor: "var(--border)",
-                  color: "var(--text-secondary)",
-                }}
-                title={`边模式：${linkMode === "none" ? "无向" : linkMode === "single" ? "单向" : "双向"}（点击切换）`}
-              >
-                {linkModeIcon(linkMode)}
-              </button>
+              />
             )
           ) : (
             /* 数据流边中点圆点（随边色） */
