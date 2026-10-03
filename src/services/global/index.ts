@@ -2,13 +2,13 @@
  * 全局配置 service。
  *
  * 读写 `app_data_dir/global.json`，对应 Rust `commands/global.rs`。
- * 承载：最近打开仓库列表 + 自动更新开关 + 应用级界面外观（主题插件激活 + 主题设置 themeSettings +
+ * 承载：最近打开仓库列表 + 自动检查更新开关 + 应用级界面外观（主题插件激活 + 主题设置 themeSettings +
  * 字号/字体）+ 自动恢复上次打开文件（AI 供应商/搜索源等仓库级配置走各仓库 `.atelyx/config.json`；
  * 应用级 UI 使用状态走 `services/layout` 的 Rust 迷你窗口管理器，见 `layout.rs`）。
  * recentVaults 的截断上限在此层维护（去重/归一化在 Rust 读写路径完成）。
  *
  * **写入走补丁命令**：`updateGlobalConfig` → Rust `patch_global_config`（锁内读-合并-原子写）。
- * global.json 由 appStore（recentVaults/自动更新开关/最近空间）与 settingsStore（界面外观/自动恢复/
+ * global.json 由 appStore（recentVaults/自动检查更新开关/最近空间）与 settingsStore（界面外观/自动恢复/
  * 协作配置）共同写入，合并必须在后端单点完成——跨窗口（主/撕裂窗口各有独立 webview）前端
  * 自己做 read-modify-write 会互相覆盖丢字段。
  */

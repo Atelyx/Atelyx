@@ -1,6 +1,6 @@
 //! 全局配置命令（应用级数据）。
 //!
-//! 读写 `app_data_dir/global.json`：**应用级配置**——最近打开仓库列表 + 自动更新开关 +
+//! 读写 `app_data_dir/global.json`：**应用级配置**——最近打开仓库列表 + 自动检查更新开关 +
 //! 界面外观（主题/字号/字体）+ 自动恢复上次打开文件。
 //! 个人仓库的 AI 供应商 / 搜索源在 `vault.rs` 的 `VaultConfig.providers/search`；
 //! 协作空间的 AI 配置（含 API key）在服务端团队元数据，不经本文件
@@ -40,14 +40,14 @@ pub struct SpaceEntry {
     pub opened_at: Option<i64>,
 }
 
-/// 全局配置根结构（**应用级**：最近仓库列表 + 自动更新开关 + 界面外观（主题/字号/字体）+
+/// 全局配置根结构（**应用级**：最近仓库列表 + 自动检查更新开关 + 界面外观（主题/字号/字体）+
 /// 自动恢复上次打开文件；未知字段由 serde 忽略）。
 #[derive(Serialize, Deserialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct GlobalConfig {
     #[serde(default)]
     pub recent_vaults: Vec<RecentVault>,
-    /// 自动检查更新（应用级）：开启后每次启动应用静默检查新版本并自动安装。缺省 None = 关闭。
+    /// 自动检查更新（应用级）：开启后每次启动应用静默检查新版本并提示更新。缺省 None = 关闭。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_update: Option<bool>,
     /// 首次启动的存储授权引导是否已展示（移动端本地仓库用；缺省 None = 未展示）。

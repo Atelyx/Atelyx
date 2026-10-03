@@ -48,11 +48,11 @@ Atelyx 是一款以人为本的可拓展桌面工作台：对话、笔记、表�
 
 从 [GitHub Releases](https://github.com/Atelyx/Atelyx/releases) 下载对应平台安装包：
 
-| 平台                       | 安装包                   |
-| ------------------------ | --------------------- |
-| Windows 10/11（x64）       | `.exe` 安装包（支持应用内自动更新） |
-| Android 15+（arm64）      | `.apk`（随 Release 分发，自分发） |
-| Linux（Wayland 原生，兼容 X11） | `.deb` 包 / 源码构建                  |
+| 平台                       | 安装包   |
+| ------------------------ | ----- |
+| Windows 10/11（x64）       | `.exe` |
+| Android 15+（arm64）      | `.apk` |
+| Linux（Wayland 原生，兼容 X11） | `.deb` |
 
 前置要求：Node.js 20.19+、pnpm 10、Rust（stable）、Tauri 2 系统依赖（见 [Tauri 官方文档](https://v2.tauri.app/start/prerequisites/)）。从源码构建见下文「开发命令」。
 

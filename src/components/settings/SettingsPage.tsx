@@ -404,7 +404,7 @@ export function SettingsPage({ onClose, initialTab }: { onClose: () => void; ini
       onClose={onClose}
     >
       {activeTab === "general" ? (
-        /* ===== 通用：应用级外观（字号/字体/自动恢复/主页/自动更新） ===== */
+        /* ===== 通用：应用级外观（字号/字体/自动恢复/主页/自动检查更新） ===== */
         <GeneralSettingsTab />
       ) : tab === "theme" ? (
         /* ===== 主题：主题插件选择 + 激活主题的设置项 ===== */

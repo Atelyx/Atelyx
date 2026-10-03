@@ -53,9 +53,9 @@ Download the installer for your platform from [GitHub Releases](https://github.c
 
 | Platform | Package |
 | --- | --- |
-| Windows 10/11 (x64) | `.exe` installer (in-app auto-update supported) |
-| Android 15+ (arm64) | `.apk` (distributed via Releases) |
-| Linux (native Wayland, X11 compatible) | `.deb` package / build from source |
+| Windows 10/11 (x64) | `.exe` |
+| Android 15+ (arm64) | `.apk` |
+| Linux (native Wayland, X11 compatible) | `.deb` |
 
 Prerequisites: Node.js 20.19+, pnpm 10, Rust (stable), Tauri 2 system dependencies (see [Tauri docs](https://v2.tauri.app/start/prerequisites/)). To build from source, see "Development" below.
 

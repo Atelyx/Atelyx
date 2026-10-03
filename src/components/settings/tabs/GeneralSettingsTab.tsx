@@ -26,9 +26,9 @@ const FONT_OPTIONS: { label: string; value: string }[] = [
 
 /** 通用面板（应用级外观）：草稿与状态自持，直接订阅 store。
  * 主题模式与强调色在「主题」tab（主题插件 + 设置项），仓库级开关在「仓库设置」里。
- * 此处只放跨仓库共享的应用级项：字号/字体/自动恢复/主页布局/自动更新。 */
+ * 此处只放跨仓库共享的应用级项：字号/字体/自动恢复/主页布局/自动检查更新。 */
 export function GeneralSettingsTab() {
-  // 应用级外观（跨仓库共享，global.json）：字号 / 字体 / 自动恢复 / 主页布局 / 自动更新
+  // 应用级外观（跨仓库共享，global.json）：字号 / 字体 / 自动恢复 / 主页布局 / 自动检查更新
   const fontSize = useSettingsStore((s) => s.fontSize);
   const setFontSize = useSettingsStore((s) => s.setFontSize);
   const fontFamily = useSettingsStore((s) => s.fontFamily);
@@ -39,8 +39,6 @@ export function GeneralSettingsTab() {
   const setDefaultHomeLayout = useSettingsStore((s) => s.setDefaultHomeLayout);
   const autoUpdate = useAppStore((s) => s.autoUpdate);
   const setAutoUpdate = useAppStore((s) => s.setAutoUpdate);
-  /** 自动更新能力（桌面有 / 移动端无；经 store 读取，守「组件不 import services」分层）。 */
-  const autoUpdateSupported = useAppStore((s) => s.platform.capabilities.autoUpdate);
   const autoLaunch = useSettingsStore((s) => s.autoLaunch);
   const setAutoLaunch = useSettingsStore((s) => s.setAutoLaunch);
   const refreshAutoLaunch = useSettingsStore((s) => s.refreshAutoLaunch);
@@ -146,21 +144,16 @@ export function GeneralSettingsTab() {
         />
       </SettingCard>
 
-      {/* 自动更新（应用级，global.json）：开启后启动时静默检查新版本并自动安装。
-          移动端无 updater（不支持自动安装），开关置禁用，启动改为检查并提示下载。 */}
+      {/* 自动检查更新（应用级，global.json）：开启后启动静默检查新版本并提示，由用户决定是否更新；
+          关闭 = 完全不联网检查。桌面与安卓同一开关（点按钮后桌面安装重启、安卓打开下载页）。 */}
       <SettingCard
-        title="自动更新"
-        description={
-          autoUpdateSupported
-            ? "启动时自动检查新版本并安装；关闭 = 不联网检查"
-            : "当前平台不支持自动安装，启动时只检查并提示下载"
-        }
+        title="自动检查更新"
+        description="启动时自动检查新版本并提示；关闭 = 不联网检查"
       >
         <ToggleSwitch
           checked={autoUpdate}
           onChange={(v) => void setAutoUpdate(v)}
-          title={autoUpdateSupported ? "自动更新" : "当前平台不支持自动更新"}
-          disabled={!autoUpdateSupported}
+          title="自动检查更新"
         />
       </SettingCard>
 

@@ -6,7 +6,7 @@
  * 布局/展开/上次文件是个人使用偏好，与仓库无关。
  *
  * 与全局配置（global.json）分离：global.json 只保存低频配置（最近仓库列表 +
- * 自动更新开关），本文件保存高频「使用数据」——写入抖动不进配置，损坏只影响恢复。
+ * 自动检查更新开关），本文件保存高频「使用数据」——写入抖动不进配置，损坏只影响恢复。
  */
 import type { DetachedWindow, SplitDirection, ViewKind, WorkspaceLayout } from "@/types/workspaceLayout";
 

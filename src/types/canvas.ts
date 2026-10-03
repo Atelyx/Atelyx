@@ -277,7 +277,7 @@ export interface GlobalSearchConfig {
 }
 
 /**
- * 全局配置（app_data_dir/global.json）——**应用级配置**：最近仓库列表 + 自动更新开关 +
+ * 全局配置（app_data_dir/global.json）——**应用级配置**：最近仓库列表 + 自动检查更新开关 +
  * 界面外观（主题/强调色/字号/字体）+ 自动恢复上次打开文件。
  * AI 供应商 / 搜索源已仓库化（`.atelyx/config.json` 的 `VaultConfig.providers/search`）；
  * 应用级 UI 使用状态（布局/上次打开文件/展开）走 `app_data_dir/ui-state.json`；
@@ -286,7 +286,7 @@ export interface GlobalSearchConfig {
 export interface GlobalConfig {
   /** 最近打开的仓库列表（按最近打开倒序，前端维护顺序） */
   recentVaults: RecentVault[];
-  /** 自动检查更新（应用级）：开启后每次启动应用静默检查新版本并自动安装。缺省 = false（关闭）。 */
+  /** 自动检查更新（应用级）：开启后每次启动应用静默检查新版本并提示更新。缺省 = false（关闭）。 */
   autoUpdate?: boolean;
   /** 首次启动的存储授权引导是否已展示（移动端本地仓库用）。缺省 = false。 */
   androidStorageOnboarded?: boolean;

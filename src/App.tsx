@@ -10,7 +10,7 @@ import { LoadingScreen } from "@/components/common/LoadingScreen";
 import { NotificationHost } from "@/components/common/NotificationHost";
 import { useAppearance } from "@/hooks/useAppearance";
 import { getCurrentWindowLabel } from "@/services/window";
-import { platformCapabilities, isAndroidPlatform } from "@/services/platform";
+import { platformCapabilities } from "@/services/platform";
 import { layoutReconcile } from "@/services/layout";
 import { PANEL_LABEL_PREFIX, usePanelStore } from "@/stores/panelStore";
 
@@ -30,9 +30,6 @@ const MobileWorkspacePage = lazy(async () => {
 
 /** 平台能力（运行期内恒定，模块级取一次）。 */
 const MULTI_WINDOW = platformCapabilities().multiWindow;
-const AUTO_UPDATE = platformCapabilities().autoUpdate;
-/** 安卓端无 updater：启动时改为检查新版本并提示下载。 */
-const ANDROID = isAndroidPlatform();
 
 /** 窗口形态应用串行队列：多次触发（含 boot 末尾）时按序执行，队列 promise 因内层 catch 永不 reject。 */
 let windowShapeQueue: Promise<void> = Promise.resolve();
@@ -149,13 +146,9 @@ function MainWorkspaceApp() {
         app.reportLoad("还原布局窗口");
         await layoutReconcile();
       }
-      // 自动更新（应用级，global.json）：开启时启动静默检查一次，失败静默跳过。
-      // 走 store 包装（runAutoUpdate 内部先 flush 全部 pending 改动再检查安装，重启不丢数据；
-      // 协作连接收尾不随 flush 执行，见 appStore.flushAllPending 注释）。移动端无 updater。
-      if (AUTO_UPDATE && useAppStore.getState().autoUpdate) {
-        void useAppStore.getState().runAutoUpdate();
-      } else if (ANDROID) {
-        // 安卓无 updater：启动检查一次，发现新版本提示用户去下载（不自动安装）
+      // 自动检查更新（应用级，global.json）：开启时启动静默检查一次，发现新版本弹应用内提示，
+      // 由用户点按钮决定是否下载安装（不自动安装）；失败静默跳过。桌面与安卓共用（方法内按平台分派）。
+      if (useAppStore.getState().autoUpdate) {
         void useAppStore.getState().promptUpdateOnStartup();
       }
     })().finally(async () => {
@@ -184,7 +177,7 @@ function MainWorkspaceApp() {
 }
 
 /** 应用入口：按窗口 label 与平台能力分流——桌面主窗口走完整启动流程，桌面撕裂窗口只渲染
- * 单面板；移动端恒为主窗口（单栏壳）。撕裂窗口不执行 init/selectVault/自动更新等主窗口
+ * 单面板；移动端恒为主窗口（单栏壳）。撕裂窗口不执行 init/selectVault/自动检查更新等主窗口
  * 专属逻辑（面板角色由 panelStore 管理）。label 读取失败（IPC/init 脚本异常）时降级为主
  * 窗口角色并打日志，绝不白屏。 */
 export default function App() {

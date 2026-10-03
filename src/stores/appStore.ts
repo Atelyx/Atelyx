@@ -42,7 +42,7 @@ import { openInExplorer as openInExplorerSvc, openUrl as openUrlSvc } from "@/se
 import { readClipboardText as readClipboardTextSvc, writeClipboardText as writeClipboardTextSvc } from "@/services/clipboard";
 import { pickDirectory as pickDirectorySvc } from "@/services/dialog";
 import { applyWorkspaceWindow as applyWorkspaceWindowSvc, closeWindow as closeWindowSvc, minimizeWindow as minimizeWindowSvc, onCloseRequested as onCloseRequestedSvc, toggleFullscreen as toggleFullscreenSvc, toggleMaximizeWindow as toggleMaximizeWindowSvc } from "@/services/window";
-import { checkAndAutoUpdate as checkAndAutoUpdateSvc, checkForUpdate as checkForUpdateSvc, checkUpdateOnStartup as checkUpdateOnStartupSvc, installUpdate as installUpdateSvc } from "@/services/updater";
+import { checkForUpdate as checkForUpdateSvc, checkUpdateOnStartup as checkUpdateOnStartupSvc, installUpdate as installUpdateSvc } from "@/services/updater";
 import { isAndroidPlatform, platformCapabilities } from "@/services/platform";
 import type { PlatformCapabilities } from "@/services/platform";
 import { emitPluginEvent } from "@/services/cordis/events";
@@ -187,15 +187,13 @@ interface AppState {
   openPluginPage: (id: string) => void;
   /** 退出插件应用页面（回到工作区）。 */
   closePluginPage: () => void;
-  /** 立即落盘全部 store 的 pending 改动（画布/表格/面板会话/UI 状态/配置；关窗与更新重启前调用）。
-   *  不含协作连接收尾（本函数也会被启动自动更新检查调用，dispose 会误杀会话内协作连接）；
+  /** 立即落盘全部 store 的 pending 改动（画布/表格/面板会话/UI 状态/配置；关窗与更新安装前调用）。
+   *  不含协作连接收尾（本函数在文件重命名/删除等非退出路径也会调用，dispose 会误杀会话内协作连接）；
    *  协作 dispose 只在关窗守卫（真退出）调用，见 installCloseGuard。 */
   flushAllPending: () => Promise<void>;
   /** 注册窗口关闭守卫：关窗前先 flushAllPending 再销毁（幂等，App 挂载时调用一次）。 */
   installCloseGuard: () => void;
-  /** 静默自动更新链路（启动时 autoUpdate 开启才调用）：先落盘再检查安装，失败静默降级。 */
-  runAutoUpdate: () => Promise<void>;
-  /** 启动检查更新并提示下载（安卓：无 updater，只提示不自动装）。 */
+  /** 启动静默检查更新（autoUpdate 开启才调用）：发现新版本应用内提示，由用户点按钮决定是否安装。 */
   promptUpdateOnStartup: () => Promise<void>;
 
   /** 调系统目录选择器，选中路径（用户取消返回 null）。 */
@@ -401,7 +399,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     try {
       notifyGlobalConfigCorrupt(await updateGlobalConfig({ autoUpdate: enabled }));
     } catch (e) {
-      console.error("保存自动更新配置失败", e);
+      console.error("保存自动检查更新配置失败", e);
     }
   },
 
@@ -446,11 +444,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (isAndroidPlatform()) set({ installing: false, updateStatus: "idle" });
     } catch (e) {
       console.error("安装更新失败", e);
-      set({
-        installing: false,
-        updateStatus: "error",
-        updateError: e instanceof Error ? e.message : String(e),
-      });
+      const message = e instanceof Error ? e.message : String(e);
+      set({ installing: false, updateStatus: "error", updateError: message });
+      // 从启动提示点按钮触发时「关于」页未必打开，提示通知点击即消失，错误须另行可见
+      useNotificationStore.getState().notify({ level: "error", message: `更新失败：${message}` });
     }
   },
 
@@ -741,9 +738,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     await flushAllDomains({ vaultRoot: get().vaultRoot });
     await useUiStateStore.getState().flush();
     await useSettingsStore.getState().flush();
-    // 协作连接收尾不在此处（本函数启动自动更新检查时也会调用）：dispose 会断开会话内协作连接
+    // 协作连接收尾不在此处（本函数在文件重命名/删除等非退出路径也会调用）：dispose 会断开会话内协作连接
     // 且清空 runtimeCfg，之后 applyConfig 全部失效、状态永久未连接。dispose 只由关窗守卫
-    // （真退出）显式调用发 bye；更新 relaunch 场景进程退出即断，服务端按 TCP 断开立即移除 peer
+    // （真退出）显式调用发 bye；更新安装后 relaunch 场景进程退出即断，服务端按 TCP 断开立即移除 peer
   },
 
   installCloseGuard: () => {
@@ -756,24 +753,19 @@ export const useAppStore = create<AppState>((set, get) => ({
     });
   },
 
-  runAutoUpdate: async () => {
-    try {
-      // 更新重启前先落盘：relaunch 会销毁 webview，pending 的 debounce 保存随之中断；
-      // dev 跳过守卫在 service（checkAndAutoUpdateSvc）内；协作连接收尾不在此处见 flushAllPending
-      await useAppStore.getState().flushAllPending();
-      await checkAndAutoUpdateSvc();
-    } catch (e) {
-      console.error("自动更新失败（静默降级，下次启动再试）", e);
-    }
-  },
-
   promptUpdateOnStartup: async () => {
     const result = await checkUpdateOnStartupSvc();
     if (!result) return;
+    const android = isAndroidPlatform();
     useNotificationStore.getState().notify({
       level: "info",
-      message: `发现新版本 ${result.latestVersion}，可下载安装包手动更新。`,
-      action: { label: "去下载", onClick: () => void useAppStore.getState().installUpdate() },
+      message: android
+        ? `发现新版本 ${result.latestVersion}，可下载安装包手动更新。`
+        : `发现新版本 ${result.latestVersion}，是否立即下载并安装？`,
+      action: {
+        label: android ? "去下载" : "下载并安装",
+        onClick: () => void useAppStore.getState().installUpdate(),
+      },
     });
   },
 

@@ -2,7 +2,7 @@
  * 内核能力层：按运行平台声明内核级能力有无，调用点按能力分支（禁止散落平台字符串判断）。
  *
  * 能力收口标准：能不能靠「组合层不挂某个插件」实现取舍？能的走组合层（默认组合按平台裁剪），
- * 不能的（不属于任何插件：多窗口、窗口控制、目录选择器、凭据存储、自动更新、进程执行）才进本层。
+ * 不能的（不属于任何插件：多窗口、窗口控制、目录选择器、凭据存储、进程执行）才进本层。
  * 缺失能力必须显式可见（禁用态或提示），调用点不得静默失效。
  *
  * 平台判定经 WebView UA（安卓 WebView 的 UA 固含 Android 标识；桌面两端均无），
@@ -19,8 +19,6 @@ export interface PlatformCapabilities {
   directoryPicker: boolean;
   /** 凭据存储（桌面 = OS keychain；移动端 = 系统级安全存储，接口一致）。 */
   credentialStorage: boolean;
-  /** 应用内自动更新（移动端无 updater，改为提示下载）。 */
-  autoUpdate: boolean;
   /** 开机自启（桌面 = 写系统启动项；移动端无 autostart 插件）。 */
   autoLaunch: boolean;
   /** 进程执行与插件依赖打包（移动端不存在，缺失显式可见）。 */
@@ -42,7 +40,6 @@ export function platformCapabilities(): PlatformCapabilities {
       windowControls: false,
       directoryPicker: false,
       credentialStorage: true,
-      autoUpdate: false,
       autoLaunch: false,
       processExecution: false,
       fileWatching: false,
@@ -53,7 +50,6 @@ export function platformCapabilities(): PlatformCapabilities {
     windowControls: true,
     directoryPicker: true,
     credentialStorage: true,
-    autoUpdate: true,
     autoLaunch: true,
     processExecution: true,
     fileWatching: false,
