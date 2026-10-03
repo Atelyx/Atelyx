@@ -96,6 +96,35 @@
   --note-line-width: 780px;
   --shadow-pop: 0 1px 2px rgba(20, 20, 20, 0.06), 0 8px 24px rgba(20, 20, 20, 0.1);
 
+  /* 字阶（rem 基准，字号/行高成对）：主次靠档位与字重，不靠同号变色。
+     用 rem 而非 px：:root 的 font-size 是应用级「字体大小」设置的落点，写死 px 的文字
+     不随该设置缩放，会在同一块面板里与已缩放文字出现字号断层。
+     行高取Tailwind 默认刻度同值（xs 16 / sm 20 / base 24 / xl 28），使既有 text-xs / text-sm /
+     text-base / text-xl 在换用变量后行高不变——只换出处，不动渲染结果。 */
+  --fs-display: 1.75rem; /* 28  加载屏、空态主标题 */
+  --fs-h1: 1.25rem; /* 20    视图大标题（笔记标题） */
+  --fs-h2: 1rem; /* 16     区块标题 */
+  --fs-body: 0.875rem; /* 14     笔记正文、消息正文 */
+  --fs-ui: 0.8125rem; /* 13     面板标签、菜单、按钮、列表 */
+  --fs-caption: 0.75rem; /* 12     状态栏、次要说明 */
+  --fs-micro: 0.6875rem; /* 11     徽标、计数、快捷键提示 */
+  --lh-display: 2.25rem;
+  --lh-h1: 1.75rem;
+  --lh-h2: 1.5rem;
+  --lh-body: 1.25rem;
+  --lh-ui: 1.25rem;
+  --lh-caption: 1rem;
+  --lh-micro: 1rem;
+
+  /* 动效：仅用于状态变化（浮现、展开、高亮），不做装饰性动画。
+     时长分三档，曲线统一；流式输出用容器高度过渡而非逐字动画。
+     循环扫光/闪烁类无限动画（加载条、思考扫光、光标）不归入此三档——它们表达
+     「进行中」而非状态切换，节奏由辨识度决定，改档会变成另一种信号。 */
+  --dur-fast: 120ms;
+  --dur-base: 180ms;
+  --dur-slow: 260ms;
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+
   /* 字体族：显示 / UI / 等宽。设计字体未随应用分发时回退系统栈（CJK 优先命中本地思源/苹方） */
   --font-sans:
     "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", "Noto Sans SC",
@@ -246,6 +275,12 @@ body {
   background: var(--bg-primary);
   color: var(--text-primary);
 }
+
+/* 中英数混排的视觉间隙交给底座：`text-autospace` 的初始值即 normal，支持的引擎
+   （WebView2/Chromium 140+）会自动在汉字与西文/数字之间插入间距，故不声明该属性。
+   注意：该间距是 Chromium 140 起随引擎升级「新增」的排版行为（升级前无），
+   非各底座一致默认；Firefox/Safari 的初始值与规范不同。若将来需跨引擎统一，
+   应显式声明 text-autospace 而非依赖初始值。 */
 
 /* ===== ReactFlow overrides ===== */
 .react-flow__attribution {
@@ -1110,7 +1145,7 @@ input[type="number"]::-webkit-inner-spin-button {
   flex-shrink: 0;
   touch-action: none;
   background: var(--border);
-  transition: background 0.15s;
+  transition: background var(--dur-fast) var(--ease);
 }
 .split-handle[data-direction="horizontal"] {
   width: 4px;
