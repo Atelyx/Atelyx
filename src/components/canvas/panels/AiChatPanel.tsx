@@ -30,7 +30,7 @@ import {
   Square,
   Trash2,
   X,
-  } from "lucide-react";
+} from "lucide-react";
 import { useEffect, useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useAppStore } from "@/stores/appStore";
 import { useChatPanelStore } from "@/stores/chatPanelStore";
@@ -215,7 +215,8 @@ export function AiChatPanel() {
     isVaultPathNote,
     handleOpenVaultPathNote,
     handleCreateNote,
-    openCreatedNote } = useVaultLinkHandlers();
+    openCreatedNote,
+  } = useVaultLinkHandlers();
   const chatMarkdownLinks = useMemo<MarkdownEditorLinks>(
     () => ({
       onOpenNote: handleOpenWikiNote,

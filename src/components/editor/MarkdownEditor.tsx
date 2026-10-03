@@ -514,15 +514,31 @@ export function MarkdownEditor({
     [commitLocalEdit, drawOverlay, renderContent],
   );
 
-  // ===== 输入面挂载（一次）=====
+  // ===== 交互挂载 + 内容首绘 + 输入面（随 readOnly 重建）=====
+  //
+  // 输入面与光标绘制层只服务本端编辑，且输入面的 value 就是全文——挂到只读渲染面上
+  // 等于在每个气泡/画布节点里放一个可输入的全文副本。故两者随 readOnly 生死与共：
+  // 本 effect 把 readOnly 列入依赖，翻转时先销毁再按新形态重建，容器本身不重建。
   useEffect(() => {
     const host = hostRef.current;
     const content = contentRef.current;
     if (!host || !content) return;
     const detachInteractions = attachMarkdownInteractions(content, getOptions);
+    // 首次内容渲染与编辑能力无关：只读面同样要出内容，且其正文刷新通道只在文本变化时
+    // 触发（挂载时 body 与 textRef 相等），故首绘必须在此、与是否挂输入面无关
+    renderContent(textRef.current, undefined);
     // 绘制层挂到宿主（与内容容器同级）：内容每次整篇重绘都不会把它一起清掉
     const overlay = new CaretOverlay(host);
     overlayRef.current = overlay;
+    /** 拆卸：交互与绘制层两条形态共用，input 面相关的清理交给调用方追加。 */
+    const teardownBase = (): void => {
+      detachInteractions();
+      overlay.destroy();
+      overlayRef.current = null;
+    };
+    // 只读面到此为止：绘制层无光标可画（drawOverlay 的 caret 恒为 null），输入面无编辑可接。
+    // indexRef 不清——只读面的落点换算与滚动定位仍按当前内容取源偏移。
+    if (readOnlyRef.current) return teardownBase;
     const sink = new MarkdownEditSink(
       host,
       {
@@ -554,7 +570,6 @@ export function MarkdownEditor({
     // 挂载即把当前正文注入输入面：输入面 value 就是文档模型，等外部 syncSeq 首递增兜底
     // 会让 syncSeq 恒定的编辑面（画布内文本节点）在首次击键时按「空 → 全文」差量清掉正文
     sink.setText(textRef.current);
-    renderContent(textRef.current, undefined);
 
     /** 焦点/滚动变化后重绘（隐藏输入面不带动滚动，滚动时需按当前选区重算位置）。 */
     const refreshOverlay = (): void => {
@@ -582,16 +597,14 @@ export function MarkdownEditor({
       scrollEl?.removeEventListener("scroll", refreshOverlay);
       sink.el.removeEventListener("focus", refreshOverlay);
       sink.el.removeEventListener("blur", refreshOverlay);
-      detachInteractions();
-      overlay.destroy();
+      teardownBase();
       sink.destroy();
-      overlayRef.current = null;
       sinkRef.current = null;
       indexRef.current = null;
       activeBlockRef.current = null;
     };
-    // localHistory 为挂载期配置，只在挂载时生效
-  }, [applySelection, commitLocalEdit, drawOverlay, getOptions, localHistory, renderContent, revealAt]);
+    // localHistory 为挂载期配置，只在挂载时生效；readOnly 决定输入面生死（翻转即重建）
+  }, [applySelection, commitLocalEdit, drawOverlay, getOptions, localHistory, readOnly, renderContent, revealAt]);
 
   // 只读翻转：内容形态变化，重建一次（容器不重建，滚动保留）
   useEffect(() => {

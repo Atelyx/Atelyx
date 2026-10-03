@@ -5,7 +5,7 @@ import {
   Unplug,
   X,
   XCircle,
-  } from "lucide-react";
+} from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { PROVIDER_PRESETS } from "@/constants/providers";
 import { SPACE_TEAM_AI_NOTICE, SPACE_VIEWER_NOTICE } from "@/constants/space";

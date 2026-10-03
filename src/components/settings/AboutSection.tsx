@@ -5,7 +5,7 @@ import {
   Download,
   ExternalLink,
   RefreshCw,
-  } from "lucide-react";
+} from "lucide-react";
 import { useEffect, useState } from "react";
 import { useAppStore } from "@/stores/appStore";
 // 应用图标（与 src-tauri/icons/icon.svg 同源，设置页「关于」Logo 展示）

@@ -7,7 +7,7 @@ import {
   RefreshCw,
   Scissors,
   X,
-  } from "lucide-react";
+} from "lucide-react";
 import { useEffect, useCallback, useMemo, useRef, useState } from "react";
 import { useReactFlow, type NodeProps } from "@xyflow/react";
 import { useShallow } from "zustand/react/shallow";
@@ -25,7 +25,7 @@ import { DEFAULT_CONVERSATION_WIDTH,
   DEFAULT_TEXT_NODE_HEIGHT,
   NODE_TYPE_BAR_CLASS,
   NODE_TYPE_COLORS,
-  } from "@/constants/canvas";
+} from "@/constants/canvas";
 import { CHAT_UNAVAILABLE_TEXT, ERROR_PREFIX } from "@/constants/chat";
 import { isAssetConsumed } from "@/utils/consumed";
 import { findFreeSpot } from "@/utils/layout";
@@ -43,7 +43,7 @@ import type {
   Message,
   PendingAttachment,
   Attachment,
-  } from "@/types";
+} from "@/types";
 import type { Node as FlowNode } from "@xyflow/react";
 import { Spinner } from "@/components/common/primitives";
 import { Input } from "@/components/common/Input";
@@ -705,7 +705,8 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
     isVaultPathNote,
     handleOpenVaultPathNote,
     handleCreateNote,
-    openCreatedNote } = useVaultLinkHandlers();
+    openCreatedNote,
+  } = useVaultLinkHandlers();
 
   // ===== 渲染 =====
 

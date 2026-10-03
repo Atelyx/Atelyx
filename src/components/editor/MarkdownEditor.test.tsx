@@ -74,6 +74,58 @@ describe("MarkdownEditor 编辑面结构", () => {
   });
 });
 
+describe("MarkdownEditor 只读面结构", () => {
+  it("不挂隐藏输入面（只读渲染面内的全文可输入副本）", () => {
+    const { container } = render(<MarkdownEditor body={"你好"} syncSeq={0} readOnly className="md-embed" />);
+    expect(container.querySelector("textarea")).toBeNull();
+  });
+
+  it("首绘出内容（正文刷新通道在文本未变时不触发）", () => {
+    const { container } = render(<MarkdownEditor body={"# 标题\n\n正文一段。"} syncSeq={0} readOnly />);
+    const content = container.querySelector(".md-edit-content") as HTMLElement;
+    expect(content.textContent).toContain("标题");
+    expect(content.textContent).toContain("正文一段。");
+  });
+
+  it("wiki 链接点击仍可用（交互挂载不随输入面一起跳过）", () => {
+    const onOpenNote = vi.fn();
+    const { container } = render(
+      <MarkdownEditor body={"见 [[目标笔记]]"} syncSeq={0} readOnly links={{ onOpenNote }} />,
+    );
+    const link = container.querySelector(".md-editor-internal-link") as HTMLElement;
+    expect(link).not.toBeNull();
+    fireEvent.click(link);
+    expect(onOpenNote).toHaveBeenCalledWith("目标笔记");
+  });
+
+  it("切到可编辑后重建输入面，切回只读后销毁（笔记预览 ⇄ 编辑）", () => {
+    function Switcher() {
+      const [preview, setPreview] = useState(true);
+      return (
+        <>
+          <button onClick={() => setPreview((p) => !p)}>toggle</button>
+          <MarkdownEditor body={"正文一段。"} syncSeq={0} readOnly={preview} />
+        </>
+      );
+    }
+    const { container } = render(<Switcher />);
+    const content = () => (container.querySelector(".md-edit-content") as HTMLElement).textContent;
+    expect(container.querySelector("textarea")).toBeNull();
+    expect(content()).toContain("正文一段。");
+
+    fireEvent.click(container.querySelector("button") as HTMLElement);
+    const ta = container.querySelector("textarea") as HTMLTextAreaElement;
+    expect(ta).not.toBeNull();
+    // 重建后输入面即文档模型：内容与正文仍一致，未因翻转重复渲染而丢失
+    expect(ta.value).toBe("正文一段。");
+    expect(content()).toContain("正文一段。");
+
+    fireEvent.click(container.querySelector("button") as HTMLElement);
+    expect(container.querySelector("textarea")).toBeNull();
+    expect(content()).toContain("正文一段。");
+  });
+});
+
 describe("MarkdownEditor 滚动与选区行为", () => {
   /** 聚焦输入面并把光标移到指定偏移（经 document selectionchange 驱动 applySelection）。 */
   function moveCaret(ta: HTMLTextAreaElement, offset: number): void {
