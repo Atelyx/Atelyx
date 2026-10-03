@@ -95,6 +95,36 @@ describe("IconButton", () => {
       vi.useRealTimers();
     }
   });
+
+  /**
+   * `noTooltip` 必须连提示一起关掉：提示的层级（z-1200）高于它所遮挡的浮层
+   * （如文件树触屏菜单 z-50），且触屏无 `mouseleave` 收不掉。只断言类名会漏掉
+   * 「提示仍然弹出」的实现回归，故这里走真实悬停。
+   */
+  it("noTooltip 时悬停不浮出提示（避免压住同时打开的浮层）", () => {
+    vi.useFakeTimers();
+    try {
+      const { getByRole } = render(
+        <IconButton icon={<Trash2 size={12} />} label="文件操作" noTooltip />,
+      );
+      act(() => {
+        fireEvent.mouseEnter(getByRole("button"));
+        vi.advanceTimersByTime(600);
+      });
+      expect(document.body.textContent).not.toContain("文件操作");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("透传 aria-* 状态属性（如展开键的 aria-expanded）", () => {
+    const { getByRole, rerender } = render(
+      <IconButton icon={<Trash2 size={12} />} label="版本详情" aria-expanded={false} />,
+    );
+    expect(getByRole("button").getAttribute("aria-expanded")).toBe("false");
+    rerender(<IconButton icon={<Trash2 size={12} />} label="版本详情" aria-expanded />);
+    expect(getByRole("button").getAttribute("aria-expanded")).toBe("true");
+  });
 });
 
 /**
