@@ -4,7 +4,8 @@
  * 生成后展示可复制的 code 与过期/次数，并可撤销该邀请码。
  */
 import { useState } from "react";
-import { Copy, Loader2, X } from "lucide-react";
+import { Copy, X } from "lucide-react";
+import { Button } from "@/components/common/Button";
 import { useSpaceDirectoryStore } from "@/stores/spaceDirectoryStore";
 import { useAppStore } from "@/stores/appStore";
 import type { InviteInfo } from "@/types";
@@ -154,20 +155,20 @@ export function SpaceInviteDialog({ serverUrl, spaceId, spaceName, onClose }: Pr
                 <button
                   onClick={() => void copyCode()}
                   title="复制邀请码"
-                  className="flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded hover:bg-[var(--hover)] flex-shrink-0"
+                  className="flex items-center gap-1 text-micro px-1.5 py-0.5 rounded hover:bg-[var(--hover)] flex-shrink-0"
                   style={{ color: "var(--text-secondary)" }}
                 >
                   <Copy size={12} />
                   {copied ? "已复制" : "复制"}
                 </button>
               </div>
-              <div className="text-[10px]" style={{ color: "var(--text-muted)" }}>
+              <div className="text-micro" style={{ color: "var(--text-muted)" }}>
                 {invite.role === "owner" ? "所有者" : "编辑者"} · {fmtExpiry(invite)} · {fmtUses(invite)}
               </div>
               <button
                 onClick={() => void revoke()}
                 disabled={busy}
-                className="text-[11px] px-1.5 py-0.5 rounded hover:bg-[var(--hover)] disabled:opacity-40"
+                className="text-micro px-1.5 py-0.5 rounded hover:bg-[var(--hover)] disabled:opacity-40"
                 style={{ color: "var(--danger)" }}
               >
                 撤销该邀请码
@@ -183,15 +184,14 @@ export function SpaceInviteDialog({ serverUrl, spaceId, spaceName, onClose }: Pr
         </div>
 
         <footer className="px-4 py-3 border-t flex justify-end gap-2" style={{ borderColor: "var(--border)" }}>
-          <button
+          <Button
+            variant="primary"
+            size="md"
+            loading={busy}
             onClick={() => void generate()}
-            disabled={busy}
-            className="px-3 py-1.5 text-xs rounded hover:opacity-80 disabled:opacity-50 flex items-center gap-1.5"
-            style={{ background: "var(--accent)", color: "var(--accent-fg)" }}
           >
-            {busy && <Loader2 size={12} className="animate-spin" />}
             {invite ? "重新生成" : "生成邀请码"}
-          </button>
+          </Button>
         </footer>
       </div>
     </div>

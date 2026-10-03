@@ -256,7 +256,7 @@ export function FileTree(props: FileTreeProps) {
                 )}
                 <span className="flex-1 truncate text-xs">{node.name}</span>
                 <span
-                  className="ml-auto pl-2 text-[10px] flex-shrink-0"
+                  className="ml-auto pl-2 text-micro flex-shrink-0"
                   style={{ fontFamily: "var(--font-mono)", color: active ? "var(--accent)" : "var(--text-muted)" }}
                 >
                   {isCanvas ? "ATLX" : isWhiteboard ? "CANVAS" : isNote ? "MD" : isTable ? "ATB" : upperExt(node.name)}

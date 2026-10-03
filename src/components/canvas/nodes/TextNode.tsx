@@ -314,7 +314,7 @@ export function TextNode({ id, data, width, height, selected }: NodeProps) {
         ) : (
           <>
             {isSaved && !noteSurface && (
-              <p className="text-[11px] mb-1" style={{ color: "var(--warning)" }}>
+              <p className="text-micro mb-1" style={{ color: "var(--warning)" }}>
                 笔记能力未启用，只能查看
               </p>
             )}

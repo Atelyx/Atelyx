@@ -55,14 +55,14 @@ function MemberRow({
           </span>
           {isSelf && (
             <span
-              className="text-[10px] px-1 rounded flex-shrink-0"
+              className="text-micro px-1 rounded flex-shrink-0"
               style={{ color: "var(--text-muted)", border: "1px solid var(--border)" }}
             >
               我
             </span>
           )}
           {device && (
-            <span className="text-[10px] truncate flex-shrink-0" style={{ color: "var(--text-muted)" }}>
+            <span className="text-micro truncate flex-shrink-0" style={{ color: "var(--text-muted)" }}>
               {device}
             </span>
           )}
@@ -178,7 +178,7 @@ function SpaceMembersView({ serverUrl, spaceId }: { serverUrl: string; spaceId: 
 
       <div className="flex-1 min-h-0 overflow-auto p-2 space-y-1.5">
         {/* 成员名册 */}
-        <div className="px-1 text-[11px] flex items-center gap-1.5" style={{ color: "var(--text-muted)" }}>
+        <div className="px-1 text-micro flex items-center gap-1.5" style={{ color: "var(--text-muted)" }}>
           <Users size={12} />
           空间成员
         </div>
@@ -211,7 +211,7 @@ function SpaceMembersView({ serverUrl, spaceId }: { serverUrl: string; spaceId: 
                 </span>
               </span>
               <span
-                className="text-[10px] px-1 rounded flex-shrink-0"
+                className="text-micro px-1 rounded flex-shrink-0"
                 style={{ color: "var(--text-muted)", border: "1px solid var(--border)" }}
               >
                 {roleLabel(m.role)}
@@ -221,7 +221,7 @@ function SpaceMembersView({ serverUrl, spaceId }: { serverUrl: string; spaceId: 
         )}
 
         {/* 在线设备（连接语义：与名册分别展示，不强行合并同人） */}
-        <div className="px-1 pt-1 text-[11px] flex items-center gap-1.5" style={{ color: "var(--text-muted)" }}>
+        <div className="px-1 pt-1 text-micro flex items-center gap-1.5" style={{ color: "var(--text-muted)" }}>
           <Cloud size={12} />
           在线设备
         </div>

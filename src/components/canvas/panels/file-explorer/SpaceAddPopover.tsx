@@ -13,7 +13,8 @@
  */
 import { useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { Cloud, FolderOpen, Loader2, Plus, Ticket } from "lucide-react";
+import { Cloud, FolderOpen, Plus, Ticket } from "lucide-react";
+import { Button } from "@/components/common/Button";
 import { PopupLayer } from "@/components/common/PopupLayer";
 import { usePopupAnchor } from "@/hooks/usePopupAnchor";
 import { useAppStore } from "@/stores/appStore";
@@ -206,7 +207,7 @@ export function SpaceAddPopover({ onNotice }: { onNotice: (message: string) => v
                     type="button"
                     aria-pressed={active}
                     onClick={() => switchMode(m)}
-                    className="flex-1 flex items-center justify-center gap-1 px-1 py-1 rounded text-[11px]"
+                    className="flex-1 flex items-center justify-center gap-1 px-1 py-1 rounded text-micro"
                     style={active ? { background: "var(--accent)", color: "var(--accent-fg)" } : { color: "var(--text-muted)" }}
                   >
                     {t.icon}
@@ -216,7 +217,7 @@ export function SpaceAddPopover({ onNotice }: { onNotice: (message: string) => v
               })}
             </div>
 
-            <p className="text-[11px] mb-2" style={{ color: "var(--text-muted)" }}>
+            <p className="text-micro mb-2" style={{ color: "var(--text-muted)" }}>
               {tab.hint}
             </p>
 
@@ -247,29 +248,18 @@ export function SpaceAddPopover({ onNotice }: { onNotice: (message: string) => v
             />
 
             {error && (
-              <div className="mt-1.5 text-[11px] break-all" style={{ color: "var(--danger)" }}>
+              <div className="mt-1.5 text-micro break-all" style={{ color: "var(--danger)" }}>
                 {error}
               </div>
             )}
 
             <div className="mt-2.5 flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={close}
-                className="px-2.5 py-1 text-xs rounded hover:bg-[var(--hover)]"
-                style={{ color: "var(--text-secondary)" }}
-              >
+              <Button type="button" variant="ghost" size="sm" onClick={close}>
                 取消
-              </button>
-              <button
-                type="submit"
-                disabled={busy || !draft.trim()}
-                className="px-2.5 py-1 text-xs rounded flex items-center gap-1.5 disabled:opacity-50"
-                style={{ background: "var(--accent)", color: "var(--accent-fg)" }}
-              >
-                {busy && <Loader2 size={12} className="animate-spin" />}
+              </Button>
+              <Button type="submit" variant="primary" size="sm" loading={busy} disabled={!draft.trim()}>
                 {tab.confirm}
-              </button>
+              </Button>
             </div>
           </form>
         )}

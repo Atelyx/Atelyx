@@ -61,7 +61,7 @@ export function FolderColorMenu({
           title="自定义颜色"
           className="w-5 h-5 rounded cursor-pointer bg-transparent p-0 border-0 flex-shrink-0"
         />
-        <span className="text-[10px] truncate" style={{ color: "var(--text-muted)" }}>
+        <span className="text-micro truncate" style={{ color: "var(--text-muted)" }}>
           自定义
         </span>
       </div>

@@ -3,6 +3,7 @@ import { ChevronDown, ChevronUp } from "lucide-react";
 import { ToggleSwitch } from "@/components/common/ToggleSwitch";
 import { DropdownSelect } from "@/components/common/DropdownSelect";
 import { SettingCard } from "@/components/settings/SettingCard";
+import { IconButton } from "@/components/common/Button";
 import { SlotListMount } from "@/components/plugins/SlotHost";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useAppStore } from "@/stores/appStore";
@@ -166,7 +167,7 @@ export function GeneralSettingsTab() {
               <Fragment key={kind}>
                 {i === MOBILE_NAV_BAR_SIZE && (
                   <div
-                    className="mt-1.5 pt-1.5 text-[11px]"
+                    className="mt-1.5 pt-1.5 text-micro"
                     style={{ borderTop: "1px solid var(--border-subtle)", color: "var(--text-muted)" }}
                   >
                     以下收进「更多」
@@ -180,26 +181,20 @@ export function GeneralSettingsTab() {
                     {viewMetaFor(kind).label}
                   </span>
                   {/* 触控目标按移动端档 44px（本区块仅移动端渲染） */}
-                  <button
-                    onClick={() => moveMobileView(i, i - 1)}
+                  <IconButton
+                    icon={<ChevronUp size={14} />}
+                    label={`上移 ${viewMetaFor(kind).label}`}
+                    size="touch"
                     disabled={i === 0}
-                    title="上移"
-                    aria-label={`上移 ${viewMetaFor(kind).label}`}
-                    className="w-11 h-11 flex items-center justify-center rounded-[var(--radius-sm)] hover:bg-[var(--hover)] disabled:opacity-30 disabled:hover:bg-transparent"
-                    style={{ color: "var(--text-muted)" }}
-                  >
-                    <ChevronUp size={14} />
-                  </button>
-                  <button
-                    onClick={() => moveMobileView(i, i + 1)}
+                    onClick={() => moveMobileView(i, i - 1)}
+                  />
+                  <IconButton
+                    icon={<ChevronDown size={14} />}
+                    label={`下移 ${viewMetaFor(kind).label}`}
+                    size="touch"
                     disabled={i === mobileViews.length - 1}
-                    title="下移"
-                    aria-label={`下移 ${viewMetaFor(kind).label}`}
-                    className="w-11 h-11 flex items-center justify-center rounded-[var(--radius-sm)] hover:bg-[var(--hover)] disabled:opacity-30 disabled:hover:bg-transparent"
-                    style={{ color: "var(--text-muted)" }}
-                  >
-                    <ChevronDown size={14} />
-                  </button>
+                    onClick={() => moveMobileView(i, i + 1)}
+                  />
                 </div>
               </Fragment>
             ))}

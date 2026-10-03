@@ -17,6 +17,7 @@ import { useAppStore } from "@/stores/appStore";
 import { useChatPanelStore } from "@/stores/chatPanelStore";
 import { useCollabStore } from "@/stores/collabStore";
 import { Menu, MenuDivider, MenuItem } from "@/components/common/Menu";
+import { Button, IconButton } from "@/components/common/Button";
 import type { BacklinkRow, CollabPeer } from "@/types";
 import { parseFrontmatter, stringifyFrontmatter } from "@/utils/frontmatter";
 import { noteTitleFromFile } from "@/utils/filename";
@@ -544,7 +545,7 @@ export function NoteEditor({ file }: { file: string }) {
               {notePeers.slice(0, 4).map((p) => (
                 <span
                   key={p.peerId}
-                  className="flex items-center gap-1 rounded px-1 py-0.5 text-[11px]"
+                  className="flex items-center gap-1 rounded px-1 py-0.5 text-micro"
                   style={{
                     color: p.color,
                     background: `${p.color}1f`,
@@ -560,7 +561,7 @@ export function NoteEditor({ file }: { file: string }) {
                 </span>
               ))}
               {notePeers.length > 4 && (
-                <span className="text-[11px]" style={{ color: "var(--text-muted)" }}>
+                <span className="text-micro" style={{ color: "var(--text-muted)" }}>
                   +{notePeers.length - 4}
                 </span>
               )}
@@ -568,24 +569,20 @@ export function NoteEditor({ file }: { file: string }) {
           )}
           {/* 触屏无快捷键：撤销/重做屏幕入口（桌面隐藏，快捷键已够用） */}
           <span className="hidden [@media(hover:none)]:flex items-center gap-1 flex-shrink-0">
-            <button
+            <IconButton
+              variant="subtle"
+              size="sm"
+              icon={<Undo2 size={14} />}
+              label="撤销"
               onClick={() => getOpenNoteSession(file)?.undo()}
-              title="撤销"
-              aria-label="撤销"
-              className="p-0.5 rounded hover:opacity-80"
-              style={{ color: "var(--text-muted)" }}
-            >
-              <Undo2 size={14} />
-            </button>
-            <button
+            />
+            <IconButton
+              variant="subtle"
+              size="sm"
+              icon={<Redo2 size={14} />}
+              label="重做"
               onClick={() => getOpenNoteSession(file)?.redo()}
-              title="重做"
-              aria-label="重做"
-              className="p-0.5 rounded hover:opacity-80"
-              style={{ color: "var(--text-muted)" }}
-            >
-              <Redo2 size={14} />
-            </button>
+            />
           </span>
           {/* 模式分段控件：只读 / 预览编辑 / 源码（三态互斥，激活项金色底） */}
           <span
@@ -596,35 +593,36 @@ export function NoteEditor({ file }: { file: string }) {
               const Icon = m.icon;
               const active = m.key === mode;
               return (
-                <button
+                <Button
                   key={m.key}
+                  variant="subtle"
+                  size="sm"
+                  icon={<Icon size={12} className="flex-shrink-0" />}
                   onClick={() => setNoteMode(m.key)}
                   title={m.hint}
                   aria-pressed={active}
-                  className="flex items-center gap-1 h-[22px] px-2 rounded-[var(--radius-xs)] text-[11px]"
                   style={
                     active
                       ? { background: "var(--accent-soft)", color: "var(--accent)" }
                       : { color: "var(--text-secondary)" }
                   }
                 >
-                  <Icon size={12} className="flex-shrink-0" />
                   {m.label}
-                </button>
+                </Button>
               );
             })}
           </span>
           {/* 「···」更多选项：笔记属性面板入口（统一弹层 PopupLayer：锚定 + 钳制 + Esc/外点关闭） */}
           <span className="flex-shrink-0">
-            <button
+            <IconButton
               ref={menuTriggerRef}
+              variant="subtle"
+              size="sm"
+              icon={<MoreHorizontal size={15} />}
+              label="更多选项"
               onClick={() => menu.toggle()}
-              title="更多选项"
-              className="p-0.5 rounded hover:opacity-80"
               style={{ color: menu.anchor ? "var(--accent)" : "var(--text-muted)" }}
-            >
-              <MoreHorizontal size={15} />
-            </button>
+            />
             <PopupLayer
               anchor={menu.anchor}
               onClose={menu.close}
@@ -764,15 +762,17 @@ export function NoteEditor({ file }: { file: string }) {
         {backlinks.length > 0 ? (
           <div className="flex flex-col gap-0.5 max-h-40 overflow-auto">
             {backlinks.map((b) => (
-              <button
+              <Button
                 key={b.file}
-                className="flex items-center gap-1 text-xs text-left truncate hover:opacity-80"
+                variant="ghost"
+                size="xs"
+                className="justify-start truncate text-left"
                 style={{ color: "var(--accent)" }}
                 onClick={() => useAppStore.getState().openNote(b.file, b.title)}
                 title={`打开「${b.title}」`}
               >
                 <span className="truncate">{b.title}</span>
-              </button>
+              </Button>
             ))}
           </div>
         ) : (
@@ -784,7 +784,7 @@ export function NoteEditor({ file }: { file: string }) {
 
       {/* 底部状态条：字数统计 + 剪贴板操作提示（2.5s 自动清除）；统计数字等宽便于扫读 */}
       <div
-        className="px-3 py-1 text-[11px] flex-shrink-0 select-none"
+        className="px-3 py-1 text-micro flex-shrink-0 select-none"
         style={{
           borderTop: "1px solid var(--border)",
           color: "var(--text-muted)",
@@ -864,20 +864,12 @@ export function NoteEditor({ file }: { file: string }) {
                 }}
               />
               <div className="flex justify-end gap-1 mt-1.5">
-                <button
-                  onClick={closeRewriteMenu}
-                  className="px-2 py-1 rounded text-xs hover:opacity-80"
-                  style={{ color: "var(--text-secondary)" }}
-                >
+                <Button variant="ghost" size="sm" onClick={closeRewriteMenu}>
                   取消
-                </button>
-                <button
-                  onClick={submitRewrite}
-                  className="px-2 py-1 rounded text-xs"
-                  style={{ background: "var(--accent)", color: "var(--accent-fg)" }}
-                >
+                </Button>
+                <Button variant="primary" size="sm" onClick={submitRewrite}>
                   发送到面板
-                </button>
+                </Button>
               </div>
             </div>
           )}

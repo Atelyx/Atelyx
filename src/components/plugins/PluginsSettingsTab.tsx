@@ -216,14 +216,14 @@ export function PluginsSettingsTab() {
 
       {/* 列表头：随应用分发的默认组合成员默认启用；恢复默认装配补回已卸载成员（不复活停用） */}
       <div className="mb-3 flex items-center justify-between">
-        <span className="text-[11px] font-medium" style={{ color: "var(--text-muted)" }}>
+        <span className="text-micro font-medium" style={{ color: "var(--text-muted)" }}>
           插件
         </span>
         <button
           onClick={() =>
             void restoreDefaultComposition().catch((e) => setNotice({ kind: "error", text: errText(e) }))
           }
-          className="flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded hover:bg-[var(--hover)] flex-shrink-0"
+          className="flex items-center gap-1 text-micro px-1.5 py-0.5 rounded hover:bg-[var(--hover)] flex-shrink-0"
           style={{ color: "var(--text-secondary)" }}
           title="补回已卸载的默认插件（不覆盖停用状态）"
         >
@@ -256,14 +256,14 @@ export function PluginsSettingsTab() {
                     </span>
                     {p && (
                       <span
-                        className="text-[10px] px-1.5 py-0.5 rounded border flex-shrink-0"
+                        className="text-micro px-1.5 py-0.5 rounded border flex-shrink-0"
                         style={{ color: "var(--text-secondary)", borderColor: "var(--border)" }}
                       >
                         {PLUGIN_TYPE_LABELS[p.manifest.type]}
                       </span>
                     )}
                     <span
-                      className="text-[10px] px-1.5 py-0.5 rounded flex-shrink-0"
+                      className="text-micro px-1.5 py-0.5 rounded flex-shrink-0"
                       title={
                         row.sourceKind === "local"
                           ? "实时引用本地目录，源码改动即时生效"
@@ -278,17 +278,17 @@ export function PluginsSettingsTab() {
                       {row.installed ? PLUGIN_SOURCE_LABELS[row.sourceKind] : "未安装"}
                     </span>
                     {!row.installed && (
-                      <span className="text-[10px] px-1.5 py-0.5 rounded" style={{ color: "var(--text-muted)", background: "var(--bg-secondary)" }}>
+                      <span className="text-micro px-1.5 py-0.5 rounded" style={{ color: "var(--text-muted)", background: "var(--bg-secondary)" }}>
                         已卸载
                       </span>
                     )}
                     {failed && (
-                      <span className="text-[10px] px-1.5 py-0.5 rounded" style={{ color: "var(--danger)", background: "color-mix(in srgb, var(--danger) 10%, transparent)" }}>
+                      <span className="text-micro px-1.5 py-0.5 rounded" style={{ color: "var(--danger)", background: "color-mix(in srgb, var(--danger) 10%, transparent)" }}>
                         加载失败
                       </span>
                     )}
                   </div>
-                  <div className="text-[11px] truncate" style={{ color: "var(--text-muted)" }}>
+                  <div className="text-micro truncate" style={{ color: "var(--text-muted)" }}>
                     {row.id}
                     {row.installed ? ` · v${row.version}` : " · 默认插件（已卸载）"}
                     {row.tagline ? ` · ${row.tagline}` : ""}
@@ -355,7 +355,7 @@ export function PluginsSettingsTab() {
                       void restoreDefaultComposition().catch((e) => setNotice({ kind: "error", text: errText(e) }))
                     }
                     title="恢复默认装配（补回已卸载的默认插件）"
-                    className="flex items-center gap-1 px-2 py-1 rounded border text-[11px] flex-shrink-0"
+                    className="flex items-center gap-1 px-2 py-1 rounded border text-micro flex-shrink-0"
                     style={{ borderColor: "var(--border)", color: "var(--text-secondary)" }}
                   >
                     <RefreshCw size={12} />

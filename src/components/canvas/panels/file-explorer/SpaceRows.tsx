@@ -138,7 +138,7 @@ export function SpaceRows({ entries, hasServers, loading, listError, identity, s
                 <span className="flex-1 truncate text-xs font-medium" style={{ color: "var(--text-primary)" }}>
                   {entry.name}
                 </span>
-                <span className="flex-shrink-0 text-[10px] truncate max-w-[45%]" style={{ fontFamily: "var(--font-mono)", color: "var(--text-muted)" }} title={entry.serverUrl}>
+                <span className="flex-shrink-0 text-micro truncate max-w-[45%]" style={{ fontFamily: "var(--font-mono)", color: "var(--text-muted)" }} title={entry.serverUrl}>
                   {entry.serverUrl}
                 </span>
               </div>
@@ -176,19 +176,19 @@ export function SpaceRows({ entries, hasServers, loading, listError, identity, s
       ) : (
         <li>
           {listError && (
-            <div className="px-2 py-0.5 text-[11px] break-all" style={{ color: "var(--danger)" }} title={listError}>
+            <div className="px-2 py-0.5 text-micro break-all" style={{ color: "var(--danger)" }} title={listError}>
               空间列表加载失败：{listError}
             </div>
           )}
           {loading && (
-            <div className="flex items-center gap-1.5 px-2 py-0.5 text-[11px]" style={{ color: "var(--text-muted)" }}>
+            <div className="flex items-center gap-1.5 px-2 py-0.5 text-micro" style={{ color: "var(--text-muted)" }}>
               <Loader2 size={12} className="animate-spin" />
               加载空间列表…
             </div>
           )}
           {/* 无条目时的去向提示：新增入口在面板工具条，本区只放条目 */}
           {!loading && !listError && entries.length === 0 && (
-            <div className="px-2 py-0.5 text-[11px]" style={{ color: "var(--text-muted)" }}>
+            <div className="px-2 py-0.5 text-micro" style={{ color: "var(--text-muted)" }}>
               还没有协作空间，用工具条的新增协作空间按钮创建或加入。
             </div>
           )}

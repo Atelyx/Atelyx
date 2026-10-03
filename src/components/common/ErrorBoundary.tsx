@@ -5,6 +5,7 @@
  * 无任何可操作 UI（自定义标题栏也未渲染，窗口无法关闭）——边界保证崩溃后可读、可关。
  */
 import { Component, type ErrorInfo, type ReactNode } from "react";
+import { Button } from "@/components/common/Button";
 import { useAppStore } from "@/stores/appStore";
 
 interface ErrorBoundaryProps {
@@ -60,20 +61,12 @@ function ErrorFallback({ error }: { error: Error }) {
           {String(error?.message ?? error)}
         </pre>
         <div className="mt-4 flex items-center justify-center gap-2">
-          <button
-            onClick={() => window.location.reload()}
-            className="px-3 py-1.5 text-xs rounded hover:opacity-80"
-            style={{ background: "var(--accent)", color: "var(--accent-fg)" }}
-          >
+          <Button variant="primary" size="md" onClick={() => window.location.reload()}>
             重新加载
-          </button>
-          <button
-            onClick={() => void closeWindow()}
-            className="px-3 py-1.5 text-xs rounded hover:opacity-80"
-            style={{ background: "var(--bg-tertiary)", color: "var(--text-primary)" }}
-          >
+          </Button>
+          <Button variant="secondary" size="md" onClick={() => void closeWindow()}>
             关闭窗口
-          </button>
+          </Button>
         </div>
       </div>
     </div>

@@ -95,8 +95,8 @@ export function ViewPickerMenu({
           >
             {meta.icon}
             {meta.label}
-            {inGroup && <span className="ml-auto text-[10px]">本组</span>}
-            {occupiedElsewhere && <span className="ml-auto text-[10px]">已占用</span>}
+            {inGroup && <span className="ml-auto text-micro">本组</span>}
+            {occupiedElsewhere && <span className="ml-auto text-micro">已占用</span>}
           </MenuItem>
         );
       })}
@@ -444,8 +444,8 @@ export const PanelTabBar = memo(function PanelTabBar({
                   >
                     {meta.icon}
                     {meta.label}
-                    {isCurrent && <span className="ml-auto text-[10px]">当前</span>}
-                    {occupiedElsewhere && <span className="ml-auto text-[10px]">已占用</span>}
+                    {isCurrent && <span className="ml-auto text-micro">当前</span>}
+                    {occupiedElsewhere && <span className="ml-auto text-micro">已占用</span>}
                   </MenuItem>
                 );
               })}

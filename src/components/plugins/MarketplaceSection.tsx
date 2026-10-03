@@ -59,7 +59,7 @@ const TYPE_ICONS: Record<PluginType, LucideIcon> = {
 };
 
 /** 卡片胶囊徽标统一尺寸。 */
-const TAG_CLASS = "inline-flex items-center gap-1 h-5 px-2 rounded-full text-[11px] font-medium whitespace-nowrap";
+const TAG_CLASS = "inline-flex items-center gap-1 h-5 px-2 rounded-full text-micro font-medium whitespace-nowrap";
 
 export function MarketplaceSection() {
   const marketItems = usePluginStore((s) => s.marketItems);
@@ -226,7 +226,7 @@ export function MarketplaceSection() {
                       {it.name}
                     </div>
                     <div
-                      className="text-[11px] font-mono truncate mt-0.5"
+                      className="text-micro font-mono truncate mt-0.5"
                       style={{ color: "var(--text-muted)" }}
                       title={`${it.repo} · ${it.id}`}
                     >
@@ -261,7 +261,7 @@ export function MarketplaceSection() {
                 </div>
 
                 {sameIdRow && !installed && (
-                  <div className="text-[11px] break-words" style={{ color: "var(--text-muted)" }}>
+                  <div className="text-micro break-words" style={{ color: "var(--text-muted)" }}>
                     同名 id 行已存在（{PLUGIN_SOURCE_LABELS[sameIdRow.sourceKind]}，按索引自报 id 判定）。
                     若包内清单 id 与之一致，安装将以本包实现替代该行并沿用其原启用状态；全新插件默认停用
                     （需到「已安装」tab 启用），实际落位 id 以安装结果提示为准。

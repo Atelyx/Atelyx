@@ -17,11 +17,15 @@
  *   落到空 ref 上，静默无反应）。
  * - 值读写经 store（addImagesToCell/removeImageAt/toggleImageDisplay/reorderImages）；
  *   单元格值经 normalizeImageValue 读取（磁盘/远端旧形态与脏值统一归一，勿内联 typeof 判定）。
+ *
+ * 保留原生 button 的一处（脱离基元的原因）：空值占位里铺满单元格（`absolute inset-0`）的
+ * 「添加图片」按钮——铺满遮罩按钮按迁移口径不归 `Button`/`IconButton` 管。
  */
 import { GalleryHorizontal, ImagePlus, LayoutGrid, Plus, X } from "lucide-react";
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useTableStore } from "@/stores/tableStore";
+import { IconButton } from "@/components/common/Button";
 import { ImageLightbox } from "@/components/table/ImageLightbox";
 import { ImageCarouselMode } from "@/components/table/ImageCarouselMode";
 import { ImageGridMode } from "@/components/table/ImageGridMode";
@@ -183,43 +187,47 @@ export const ImageCell = memo(function ImageCell({ field, row }: Props) {
         {/* 左上角 hover：模式切换（多图）/ 追加；右上角 hover：移除当前图（仅轮播，九宫格无移除入口） */}
         <div className="absolute top-1 left-1 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 transition-opacity">
           {multi && (
-            <button
+            <IconButton
+              icon={gridMode ? <GalleryHorizontal size={11} /> : <LayoutGrid size={11} />}
+              label={gridMode ? "切换为单图轮播" : "切换为九宫格同显"}
+              size="xs"
+              variant="subtle"
+              // 压在图上的深色蒙层按钮：底色/字色不属主题色，留在 style
+              className="rounded-full"
+              style={{ background: "rgba(0,0,0,0.6)", color: "#fff" }}
               onClick={(e) => {
                 e.stopPropagation();
                 toggleImageDisplay(row.id, field.id);
               }}
-              className="w-5 h-5 flex items-center justify-center rounded-full"
-              style={{ background: "rgba(0,0,0,0.6)", color: "#fff" }}
-              title={gridMode ? "切换为单图轮播" : "切换为九宫格同显"}
-            >
-              {gridMode ? <GalleryHorizontal size={11} /> : <LayoutGrid size={11} />}
-            </button>
+            />
           )}
-          <button
+          <IconButton
+            icon={<Plus size={11} />}
+            label="追加图片"
+            size="xs"
+            variant="subtle"
+            className="rounded-full"
+            style={{ background: "rgba(0,0,0,0.6)", color: "#fff" }}
             onClick={(e) => {
               e.stopPropagation();
               imageInputRef.current?.click();
             }}
-            className="w-5 h-5 flex items-center justify-center rounded-full"
-            style={{ background: "rgba(0,0,0,0.6)", color: "#fff" }}
-            title="追加图片"
-          >
-            <Plus size={11} />
-          </button>
+          />
         </div>
         {!gridMode && (
           <div className="absolute top-1 right-1 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 transition-opacity">
-            <button
+            <IconButton
+              icon={<X size={11} />}
+              label="移除当前图片"
+              size="xs"
+              variant="subtle"
+              className="rounded-full"
+              style={{ background: "rgba(0,0,0,0.6)", color: "#f87171" }}
               onClick={(e) => {
                 e.stopPropagation();
                 removeImageAt(row.id, field.id, cur);
               }}
-              className="w-5 h-5 flex items-center justify-center rounded-full"
-              style={{ background: "rgba(0,0,0,0.6)", color: "#f87171" }}
-              title="移除当前图片"
-            >
-              <X size={11} />
-            </button>
+            />
           </div>
         )}
       </div>

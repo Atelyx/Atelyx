@@ -154,7 +154,7 @@ function AssetRow({ node, onLocate }: { node: FlowNode; onLocate: (id: string) =
       {icon}
       <span className="truncate text-xs">{node.type === "conversation" ? "对话" : mentionTextOf(node)}</span>
       {node.type === "conversation" && (
-        <span className="ml-auto text-[10px] flex-shrink-0" style={{ color: "var(--text-muted)" }}>
+        <span className="ml-auto text-micro flex-shrink-0" style={{ color: "var(--text-muted)" }}>
           分支
         </span>
       )}
@@ -165,7 +165,7 @@ function AssetRow({ node, onLocate }: { node: FlowNode; onLocate: (id: string) =
 /** 分组小标题。 */
 function SectionTitle({ children }: { children: React.ReactNode }) {
   return (
-    <h3 className="text-[11px] mb-1 flex items-center gap-1" style={{ color: "var(--text-muted)" }}>
+    <h3 className="text-micro mb-1 flex items-center gap-1" style={{ color: "var(--text-muted)" }}>
       {children}
     </h3>
   );
@@ -334,7 +334,7 @@ export function InspectorPanel() {
           <div>
             <div className="text-sm font-medium truncate">{title}</div>
             <div
-              className="text-[11px] truncate"
+              className="text-micro truncate"
               style={{ color: "var(--text-muted)" }}
               title={targetNoteFile}
             >
@@ -429,7 +429,7 @@ export function InspectorPanel() {
         <div>
           <div className="text-sm font-medium truncate">{title}</div>
           {sub && (
-            <div className="text-[11px] truncate" style={{ color: "var(--text-muted)" }} title={sub}>
+            <div className="text-micro truncate" style={{ color: "var(--text-muted)" }} title={sub}>
               {sub}
             </div>
           )}
@@ -467,7 +467,7 @@ export function InspectorPanel() {
             />
             {selectedAgent && (
               <p
-                className="text-[11px] mt-1.5 leading-relaxed"
+                className="text-micro mt-1.5 leading-relaxed"
                 style={{ color: "var(--text-muted)" }}
                 title={
                   selectedAgent.systemPromptFile
@@ -487,7 +487,7 @@ export function InspectorPanel() {
         <section>
           <SectionTitle>{isConv ? "被消费的资产" : "来源"}</SectionTitle>
           {sources.length === 0 ? (
-            <p className="text-[11px]" style={{ color: "var(--text-muted)" }}>
+            <p className="text-micro" style={{ color: "var(--text-muted)" }}>
               {sourceFallback(node)}
             </p>
           ) : (
@@ -502,7 +502,7 @@ export function InspectorPanel() {
         <section>
           <SectionTitle>{isConv ? "产出的资产" : "消费方"}</SectionTitle>
           {targets.length === 0 ? (
-            <p className="text-[11px]" style={{ color: "var(--text-muted)" }}>
+            <p className="text-micro" style={{ color: "var(--text-muted)" }}>
               暂无
             </p>
           ) : (

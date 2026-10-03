@@ -158,7 +158,7 @@ export function SearchPanel() {
                 )}
                 <span className="flex-1 truncate text-xs" style={{ color: "var(--text-primary)" }}>{node.name}</span>
                 {node.path !== node.name && (
-                  <span className="text-[10px] truncate max-w-[45%] flex-shrink-0" style={{ color: "var(--text-muted)", opacity: 0.6 }}>
+                  <span className="text-micro truncate max-w-[45%] flex-shrink-0" style={{ color: "var(--text-muted)", opacity: 0.6 }}>
                     {parentDir(node.path)}
                   </span>
                 )}
@@ -215,7 +215,7 @@ function ModeMenu({
           {m.supported ? (
             value === m.key && <Check size={12} style={{ color: "var(--accent)" }} />
           ) : (
-            <span className="text-[10px]">尚未支持</span>
+            <span className="text-micro">尚未支持</span>
           )}
         </MenuItem>
       ))}

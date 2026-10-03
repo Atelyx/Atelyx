@@ -52,6 +52,7 @@ import { noteTitleFromFile } from "@/utils/filename";
 import { ConversationAttachmentTray } from "./ConversationAttachmentTray";
 import { ConnectionFrame } from "./ConnectionFrame";
 import { DropdownSelect } from "@/components/common/DropdownSelect";
+import { Button, IconButton } from "@/components/common/Button";
 import { ModelSelect } from "@/components/common/ModelSelect";
 import { Menu, MenuItem } from "@/components/common/Menu";
 import { ChatMessageBubble } from "@/components/common/ChatMessageBubble";
@@ -858,26 +859,27 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
           />
           {/* 压缩会话历史：把对话总结为检查点，压缩后的请求历史由摘要代替（消息本体不动）；
               流式/压缩进行中或对端持锁时禁用（持锁时注解写不进，避免点了没反应） */}
-          <button
+          <IconButton
             onClick={() => void compactConversation(id)}
             disabled={streaming || compacting || !!lockedByPeer}
-            title={
+            variant="subtle"
+            size="xs"
+            className="nodrag"
+            icon={
+              compacting ? (
+                <Loader2 size={13} className="animate-spin" />
+              ) : (
+                <Layers size={13} />
+              )
+            }
+            label={
               compacting
-                ? "正在压缩会话历史…"
+                ? "正在压缩会话历史"
                 : lockedByPeer
                   ? "对端正在编辑该对话，暂不可压缩"
                   : "压缩会话历史"
             }
-            aria-label={compacting ? "正在压缩会话历史" : "压缩会话历史"}
-            className="nodrag p-0.5 rounded hover:opacity-80 disabled:opacity-50 disabled:cursor-default disabled:hover:opacity-50 flex-shrink-0"
-            style={{ color: "var(--text-muted)" }}
-          >
-            {compacting ? (
-              <Loader2 size={13} className="animate-spin" />
-            ) : (
-              <Layers size={13} />
-            )}
-          </button>
+          />
         </div>
       </header>
 
@@ -892,9 +894,14 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
           }}
         >
           <span>{error}</span>
-          <button onClick={clearError} className="ml-2 hover:opacity-80">
-            <X size={12} />
-          </button>
+          <IconButton
+            onClick={clearError}
+            className="ml-2"
+            variant="danger"
+            size="xs"
+            icon={<X size={12} />}
+            label="清除"
+          />
         </div>
       )}
 
@@ -965,18 +972,17 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
 
           {canRegenerate && (
             <div className="flex justify-end">
-              <button
+              <Button
                 onClick={() => void regenerate(id)}
-                className="text-xs px-2 py-0.5 rounded border hover:opacity-80 inline-flex items-center gap-1"
-                style={{
-                  color: "var(--text-secondary)",
-                  borderColor: "var(--border)",
-                  background: "var(--bg-tertiary)",
-                }}
+                variant="secondary"
+                size="sm"
+                className="border"
+                style={{ borderColor: "var(--border)" }}
+                icon={<RefreshCw size={12} className="flex-shrink-0" />}
                 title="重新生成最后一条回复"
               >
-                <RefreshCw size={12} className="flex-shrink-0" /> 重新生成
-              </button>
+                重新生成
+              </Button>
             </div>
           )}
         </div>
@@ -1061,17 +1067,14 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
             e.target.value = "";
           }}
         />
-        <button
+        <IconButton
           onClick={() => fileInputRef.current?.click()}
-          className="px-2 rounded text-sm nodrag hover:opacity-80 disabled:opacity-40 disabled:cursor-not-allowed"
-          style={{
-            color: "var(--text-secondary)",
-            background: "var(--bg-tertiary)",
-          }}
-          title="添加附件（Ctrl+V 粘贴图片 / 拖拽文件）"
-        >
-          <Plus size={16} />
-        </button>
+          className="nodrag"
+          variant="secondary"
+          size="lg"
+          icon={<Plus size={16} />}
+          label="添加附件（Ctrl+V 粘贴图片 / 拖拽文件）"
+        />
         {iOwnLock && (
           <span
             className="self-center w-1.5 h-1.5 rounded-full flex-shrink-0"
@@ -1137,25 +1140,20 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
           />
         </div>
         {streaming ? (
-          <button
-            onClick={() => abort(id)}
-            className="px-3 rounded text-xs nodrag"
-            style={{
-              background: "var(--bg-tertiary)",
-              color: "var(--text-secondary)",
-            }}
-          >
+          <Button onClick={() => abort(id)} variant="secondary" size="sm" className="nodrag">
             停止
-          </button>
+          </Button>
         ) : (
-          <button
+          <Button
             onClick={handleSend}
             disabled={compacting}
+            variant="primary"
+            size="sm"
+            className="nodrag"
             title={compacting ? "正在压缩会话历史…" : "发送"}
-            className="px-3 rounded bg-[var(--accent)] text-[var(--accent-fg)] text-xs hover:bg-[var(--accent-hover)] nodrag disabled:opacity-40 disabled:hover:bg-[var(--accent)]"
           >
             发送
-          </button>
+          </Button>
         )}
       </div>
       )}

@@ -99,7 +99,7 @@ export function MobileBottomBar({
               paddingBottom: "calc(env(safe-area-inset-bottom) + 16px)",
             }}
           >
-            <div className="px-2.5 pb-1.5 text-[11px] font-medium" style={{ color: "var(--text-muted)" }}>
+            <div className="px-2.5 pb-1.5 text-micro font-medium" style={{ color: "var(--text-muted)" }}>
               全部视图
             </div>
             {items.map((item) => {

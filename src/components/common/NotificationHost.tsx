@@ -8,6 +8,7 @@
 import { useEffect } from "react";
 import { AlertTriangle, CheckCircle2, Info, X, XCircle } from "lucide-react";
 import { useNotificationStore, type NotificationItem } from "@/stores/notificationStore";
+import { Button, IconButton } from "@/components/common/Button";
 import type { NotificationLevel } from "@/services/cordis/types";
 
 /** 级别 → 图标与强调色（颜色走主题语义色变量，随深浅主题与强调色体系一致）。 */
@@ -49,36 +50,36 @@ function NotificationCard({ item }: { item: NotificationItem }) {
       <Icon size={16} style={{ color, marginTop: 2, flexShrink: 0 }} />
       <div className="min-w-0 flex-1">
         {item.title && (
-          <div className="text-[12px] font-medium" style={{ color: "var(--text-primary)" }}>
+          <div className="text-caption font-medium" style={{ color: "var(--text-primary)" }}>
             {item.title}
           </div>
         )}
-        <div className="text-[12px] break-words" style={{ color: "var(--text-secondary)" }}>
+        <div className="text-caption break-words" style={{ color: "var(--text-secondary)" }}>
           {item.message}
         </div>
         {item.action && (
-          <button
+          <Button
             type="button"
             onClick={() => {
               item.action?.onClick();
               dismiss(item.id);
             }}
-            className="mt-1.5 px-2 py-0.5 rounded text-[11px] font-medium"
-            style={{ background: "var(--accent)", color: "var(--accent-fg)" }}
+            variant="primary"
+            size="xs"
+            className="mt-1.5"
           >
             {item.action.label}
-          </button>
+          </Button>
         )}
       </div>
-      <button
+      <IconButton
         type="button"
         onClick={() => dismiss(item.id)}
-        title="关闭"
-        className="flex-shrink-0 rounded p-0.5 hover:opacity-80"
-        style={{ color: "var(--text-muted)" }}
-      >
-        <X size={13} />
-      </button>
+        icon={<X size={13} />}
+        label="关闭"
+        size="xs"
+        variant="subtle"
+      />
     </div>
   );
 }

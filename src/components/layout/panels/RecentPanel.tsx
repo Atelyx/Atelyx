@@ -48,7 +48,7 @@ export function RecentPanel() {
         <span className="text-xs font-medium" style={{ color: "var(--text-primary)" }}>
           最近打开
         </span>
-        <span className="text-[10px] ml-auto" style={{ color: "var(--text-muted)" }}>
+        <span className="text-micro ml-auto" style={{ color: "var(--text-muted)" }}>
           当前仓库
         </span>
       </div>
@@ -77,7 +77,7 @@ export function RecentPanel() {
               >
                 <FileKindIcon kind={r.kind} />
                 <span className="truncate flex-1">{noteTitleFromFile(r.file)}</span>
-                <span className="text-[10px] flex-shrink-0" style={{ color: "var(--text-muted)" }}>
+                <span className="text-micro flex-shrink-0" style={{ color: "var(--text-muted)" }}>
                   {relTime(r.openedAt)}
                 </span>
               </button>

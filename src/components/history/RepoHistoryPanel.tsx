@@ -12,6 +12,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useAppStore, selectVaultIdentityKey } from "@/stores/appStore";
 import { useRepoHistoryStore } from "@/stores/repoHistoryStore";
 import { FileKindIcon, openFileByKind } from "@/components/common/FileKindIcon";
+import { IconButton, Button } from "@/components/common/Button";
 import { HistoryModal, ACTION_LABEL } from "@/components/history/HistoryModal";
 import { noteTitleFromFile } from "@/utils/filename";
 import { relTime } from "@/utils/time";
@@ -44,7 +45,7 @@ function VersionRow({
   return (
     <button
       onClick={() => onOpenHistory({ kind, file: entry.file })}
-      className="w-full flex items-center gap-1.5 text-[10px] px-1.5 py-1 rounded text-left hover:opacity-90"
+      className="w-full flex items-center gap-1.5 text-micro px-1.5 py-1 rounded text-left hover:opacity-90"
       style={{ color: "var(--text-secondary)" }}
       title={`${entry.summary ?? ""}${entry.note ? `（${entry.note}）` : ""}`}
     >
@@ -97,20 +98,19 @@ function FileGroup({
         </span>
         <FileKindIcon kind={group.kind} />
         <span className="truncate flex-1">{noteTitleFromFile(group.file)}</span>
-        <span className="text-[10px] flex-shrink-0" style={{ color: "var(--text-muted)" }}>
+        <span className="text-micro flex-shrink-0" style={{ color: "var(--text-muted)" }}>
           {group.entries.length} 版 · {relTime(group.latestTs)}
         </span>
-        <button
+        <IconButton
+          icon={<ExternalLink size={11} />}
+          label="打开文件"
+          size="xs"
+          className="ml-2"
           onClick={(e) => {
             e.stopPropagation();
             openFileByKind(group.file, group.kind);
           }}
-          className="w-5 h-5 flex items-center justify-center rounded hover:opacity-80 flex-shrink-0"
-          style={{ color: "var(--text-muted)" }}
-          title="打开文件"
-        >
-          <ExternalLink size={11} />
-        </button>
+        />
       </div>
       {expanded ? (
         <div className="px-2 pb-2 space-y-0.5">
@@ -122,7 +122,7 @@ function FileGroup({
         /* latest = 组内最新版本（entries 建组时恒非空） */
         <button
           onClick={() => onOpenHistory({ kind: group.kind, file: group.file })}
-          className="w-full flex items-center gap-1 text-[10px] pl-7 pr-2 pb-1.5 truncate text-left hover:opacity-80"
+          className="w-full flex items-center gap-1 text-micro pl-7 pr-2 pb-1.5 truncate text-left hover:opacity-80"
           style={{ color: "var(--text-muted)" }}
         >
           <span className="truncate">
@@ -186,13 +186,14 @@ export function RepoHistoryPanel() {
         </span>
         {loading && <RefreshCw size={11} className="animate-spin" style={{ color: "var(--text-muted)" }} />}
         {groups.length > TOP_FILES_LIMIT && (
-          <button
+          <Button
             onClick={() => setShowAllFiles((v) => !v)}
-            className="ml-auto text-[10px] px-1.5 py-0.5 rounded hover:opacity-80"
-            style={{ color: "var(--text-secondary)", border: "1px solid var(--border)" }}
+            size="xs"
+            className="ml-auto border"
+            style={{ color: "var(--text-secondary)", borderColor: "var(--border)" }}
           >
             {showAllFiles ? "收起" : `显示全部 ${groups.length} 个文件`}
-          </button>
+          </Button>
         )}
       </div>
 

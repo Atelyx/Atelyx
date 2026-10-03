@@ -5,6 +5,10 @@
  * - 带日期笔记（frontmatter `date`/`due` 自动标出，点击打开笔记）。
  * 底部编辑区：选中某天后增/改/删手动日程（改色循环 + 标题行内编辑 + 删除）。
  * 顶部过滤开关可分别隐藏 活动/日程/笔记。
+ *
+ * 保留原生 button 的三处（脱离基元的原因）：色块按钮（12px 圆点，尺寸与形态都无法归入
+ * Button/IconButton 档位，纯色块无文字无图标）、日程标题行（可点击的文本行，进入行内编辑，
+ * 语义是行而非按钮）。
  */
 import {
   CalendarDays,
@@ -16,6 +20,7 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { Button, IconButton } from "@/components/common/Button";
 import { useAppStore } from "@/stores/appStore";
 import { useCalendarStore } from "@/stores/calendarStore";
 import { useRepoHistoryStore } from "@/stores/repoHistoryStore";
@@ -166,23 +171,14 @@ export function CalendarPanel() {
     <div className="h-full w-full flex flex-col" style={{ background: "var(--bg-primary)" }}>
       {/* 顶部：年月导航 + 今天 + 过滤开关 */}
       <div className="flex items-center gap-1 px-2 py-1.5 flex-shrink-0 select-none" style={{ background: "var(--bg-secondary)", borderBottom: "1px solid var(--border)" }}>
-        <button onClick={() => goMonth(-1)} className="w-6 h-6 flex items-center justify-center rounded hover:opacity-80" style={{ color: "var(--text-secondary)" }} title="上一月">
-          <ChevronLeft size={14} />
-        </button>
-        <button onClick={() => goMonth(1)} className="w-6 h-6 flex items-center justify-center rounded hover:opacity-80" style={{ color: "var(--text-secondary)" }} title="下一月">
-          <ChevronRight size={14} />
-        </button>
+        <IconButton icon={<ChevronLeft size={14} />} label="上一月" size="sm" onClick={() => goMonth(-1)} />
+        <IconButton icon={<ChevronRight size={14} />} label="下一月" size="sm" onClick={() => goMonth(1)} />
         <span className="text-sm font-medium min-w-[90px] text-center" style={{ color: "var(--text-primary)" }}>
           {viewYear} 年 {viewMonth + 1} 月
         </span>
-        <button
-          onClick={goToday}
-          className="text-[10px] px-1.5 py-0.5 rounded hover:opacity-80"
-          style={{ color: "var(--text-secondary)", border: "1px solid var(--border)" }}
-          title="回到今天"
-        >
+        <Button variant="ghost" size="sm" className="border" style={{ borderColor: "var(--border)" }} onClick={goToday} title="回到今天">
           今天
-        </button>
+        </Button>
         <div className="ml-auto flex items-center gap-1.5">
           {(
             [
@@ -191,19 +187,22 @@ export function CalendarPanel() {
               ["notes", "笔记"],
             ] as const
           ).map(([key, label]) => (
-            <button
+            <Button
               key={key}
+              variant="ghost"
+              size="sm"
+              className="border"
               onClick={() => setFilters((f) => ({ ...f, [key]: !f[key] }))}
-              className="text-[10px] px-1.5 py-0.5 rounded"
               style={{
+                // 过滤开关的选中态是动态条件色，按 style 传（不归 variant）
                 color: filters[key] ? "var(--accent-fg)" : "var(--text-muted)",
                 background: filters[key] ? "var(--accent)" : "transparent",
-                border: "1px solid var(--border)",
+                borderColor: "var(--border)",
               }}
               title={`${filters[key] ? "隐藏" : "显示"}${label}`}
             >
               {label}
-            </button>
+            </Button>
           ))}
         </div>
       </div>
@@ -211,7 +210,7 @@ export function CalendarPanel() {
       {/* 周头 */}
       <div className="grid grid-cols-7 gap-0.5 px-2 pt-1 flex-shrink-0">
         {WEEKDAYS.map((w) => (
-          <div key={w} className="text-center text-[10px]" style={{ color: "var(--text-muted)" }}>
+          <div key={w} className="text-center text-micro" style={{ color: "var(--text-muted)" }}>
             {w}
           </div>
         ))}
@@ -238,7 +237,7 @@ export function CalendarPanel() {
                   outline: isSelected ? "1px solid var(--accent)" : "1px solid var(--border)",
                 }}
               >
-                <span className="text-[10px]" style={{ color: isToday ? "var(--accent)" : "var(--text-secondary)" }}>
+                <span className="text-micro" style={{ color: isToday ? "var(--accent)" : "var(--text-secondary)" }}>
                   {day}
                 </span>
                 <div className="mt-0.5 space-y-0.5">
@@ -246,7 +245,7 @@ export function CalendarPanel() {
                     dayItems.slice(0, 2).map((it) => (
                       <div
                         key={it.id}
-                        className="flex items-center gap-1 text-[10px] rounded px-0.5 truncate"
+                        className="flex items-center gap-1 text-micro rounded px-0.5 truncate"
                         style={{ color: it.color ?? "var(--text-secondary)", background: "color-mix(in srgb, " + (it.color ?? "#888") + " 15%, transparent)" }}
                         title={it.title}
                       >
@@ -255,24 +254,27 @@ export function CalendarPanel() {
                       </div>
                     ))}
                   {filters.schedule && dayItems.length > 2 && (
-                    <div className="text-[10px] pl-2" style={{ color: "var(--text-muted)" }}>
+                    <div className="text-micro pl-2" style={{ color: "var(--text-muted)" }}>
                       +{dayItems.length - 2}
                     </div>
                   )}
                   {filters.notes && dayNotes.length > 0 && (
-                    <button
+                    <Button
+                      variant="ghost"
+                      size="xs"
+                      // w-full justify-start：格内标题行靠左且文本需截断，基元默认居中且按内容收宽
+                      className="w-full justify-start"
                       onClick={(e) => {
                         e.stopPropagation();
                         const n = dayNotes[0];
                         openNote(n.file, n.title);
                       }}
-                      className="flex items-center gap-1 text-[10px] px-0.5 rounded hover:opacity-80"
                       style={{ color: "var(--accent-hover)" }}
                       title={`来自笔记：${dayNotes.map((n) => n.title).join("、")}`}
                     >
                       <FileText size={12} />
                       <span className="truncate">{dayNotes.length > 1 ? `${dayNotes.length} 篇笔记` : dayNotes[0].title}</span>
-                    </button>
+                    </Button>
                   )}
                 </div>
                 {filters.activity && count > 0 && (
@@ -298,9 +300,14 @@ export function CalendarPanel() {
             <span className="text-xs font-medium" style={{ color: "var(--text-primary)" }}>
               {selectedDate}
             </span>
-            <button onClick={() => setSelectedDate(null)} className="ml-auto w-5 h-5 flex items-center justify-center rounded hover:opacity-80" style={{ color: "var(--text-muted)" }} title="关闭">
-              <X size={12} />
-            </button>
+            <IconButton
+              icon={<X size={12} />}
+              label="关闭日期选择"
+              size="xs"
+              variant="subtle"
+              className="ml-auto"
+              onClick={() => setSelectedDate(null)}
+            />
           </div>
 
           {/* 当天已有手动日程：改色循环 + 标题行内编辑 + 删除 */}
@@ -338,12 +345,15 @@ export function CalendarPanel() {
                       title={it.note ?? it.title}
                     >
                       {it.title}
-                      {it.note ? <span className="ml-1 text-[10px]" style={{ color: "var(--text-muted)" }}>{it.note}</span> : null}
+                      {it.note ? <span className="ml-1 text-micro" style={{ color: "var(--text-muted)" }}>{it.note}</span> : null}
                     </button>
                   )}
-                  <button onClick={() => removeItem(it.id)} className="w-5 h-5 flex items-center justify-center rounded hover:opacity-80" style={{ color: "var(--text-muted)" }} title="删除">
-                    <Trash2 size={11} />
-                  </button>
+                  <IconButton
+                    icon={<Trash2 size={11} />}
+                    label="删除"
+                    size="xs"
+                    onClick={() => removeItem(it.id)}
+                  />
                 </div>
               ))}
             </div>
@@ -352,17 +362,19 @@ export function CalendarPanel() {
           {/* 当天带日期笔记（点击打开） */}
           {selectedNotes.length > 0 && (
             <div className="flex items-center gap-1.5 flex-wrap text-xs">
-              <span className="text-[10px]" style={{ color: "var(--text-muted)" }}>来自笔记：</span>
+              <span className="text-micro" style={{ color: "var(--text-muted)" }}>来自笔记：</span>
               {selectedNotes.map((n) => (
-                <button
+                <Button
                   key={n.file}
+                  variant="ghost"
+                  size="xs"
+                  className="border"
                   onClick={() => openNote(n.file, n.title)}
-                  className="flex items-center gap-1 rounded px-1.5 py-0.5 hover:opacity-80"
-                  style={{ color: "var(--accent-hover)", border: "1px solid var(--border)" }}
+                  style={{ color: "var(--accent-hover)", borderColor: "var(--border)" }}
                 >
                   <FileText size={9} />
                   {n.title}
-                </button>
+                </Button>
               ))}
             </div>
           )}
@@ -389,15 +401,15 @@ export function CalendarPanel() {
                   />
                 ))}
               </div>
-              <button
+              <Button
+                variant="primary"
+                size="sm"
+                icon={<Plus size={11} />}
                 onClick={submitAdd}
                 disabled={!draftTitle.trim()}
-                className="flex items-center gap-1 text-xs px-2 py-1 rounded disabled:opacity-50"
-                style={{ color: "var(--accent-fg)", background: "var(--accent)" }}
               >
-                <Plus size={11} />
                 添加
-              </button>
+              </Button>
             </div>
             <input
               value={draftNote}

@@ -10,12 +10,18 @@
  * 格式与值**正交**（存 `TableRow.styles[fieldId]`，见 `types/table.ts` `CellStyle`）：
  * 值/复制粘贴/快照不受影响；动作走 `tableStore.applyCellStyle`（一步撤销 + 防抖落盘 +
  * 协作广播，选区不一致时各属性呈三态：布尔半选、颜色/字体/字号「混合」）。
+ *
+ * 颜色弹层内保留原生 button 的两处（脱离基元的原因）：「默认」行是弹层里的选项行
+ * （与 `MenuItem` 同一体系）；预设色板按钮的按钮本体即色块（无图标，且 hover 用
+ * scale 放大反馈），两者都归不进 `IconButton` 的「图标 + 方形控件」形态。
  */
 import { Bold, Eraser, Italic, Strikethrough, Underline } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode, RefObject } from "react";
 import { createPortal } from "react-dom";
 import { DropdownSelect } from "@/components/common/DropdownSelect";
+import { IconButton } from "@/components/common/Button";
+import { Divider } from "@/components/common/primitives";
 import { PopupLayer } from "@/components/common/PopupLayer";
 import { usePopupAnchor } from "@/hooks/usePopupAnchor";
 import { useClampedMenuPosition } from "@/hooks/useClampedMenuPosition";
@@ -116,7 +122,7 @@ function ColorPopover({
           </div>
           <div className="flex items-center gap-1.5 mt-2">
             <ColorInput value={current === undefined || current === "mixed" ? "#e05252" : current} onCommit={pick} />
-            <span className="text-[10px]" style={{ color: "var(--text-muted)" }}>自定义</span>
+            <span className="text-micro" style={{ color: "var(--text-muted)" }}>自定义</span>
           </div>
         </div>
       </PopupLayer>
@@ -209,18 +215,24 @@ export function TableFormatToolbar({ anchor, onClose }: Props) {
 
       {/* 粗体/斜体/下划线/删除线 */}
       {flags.map((f) => (
-        <button
+        <IconButton
           key={f.key}
           onClick={() => toggleFlag(f.key, f.state)}
-          title={f.title}
-          className="relative w-7 h-7 flex items-center justify-center rounded transition-colors hover:bg-[var(--hover)]"
+          label={f.title}
+          size="md"
+          variant="ghost"
+          // 三态色（实心/淡强调/默认）是动态条件色，按 style 传；relative 供 mixed 态圆点定位
+          className="relative"
           style={flagButtonStyle(f.state)}
-        >
-          {f.icon}
-          {f.state === "mixed" && (
-            <span className="absolute bottom-0.5 left-1/2 -translate-x-1/2 w-1 h-1 rounded-full" style={{ background: "var(--accent)" }} />
-          )}
-        </button>
+          icon={
+            <>
+              {f.icon}
+              {f.state === "mixed" && (
+                <span className="absolute bottom-0.5 left-1/2 -translate-x-1/2 w-1 h-1 rounded-full" style={{ background: "var(--accent)" }} />
+              )}
+            </>
+          }
+        />
       ))}
 
       <span className="w-px h-4 mx-0.5 flex-shrink-0" style={{ background: "var(--border)" }} />
@@ -230,61 +242,67 @@ export function TableFormatToolbar({ anchor, onClose }: Props) {
         target="color"
         current={summary.color}
         trigger={(ref, open, onToggle) => (
-          <button
+          <IconButton
             ref={ref}
             onClick={onToggle}
-            title="文字颜色"
-            className="w-7 h-7 flex flex-col items-center justify-center rounded transition-colors hover:bg-[var(--hover)]"
+            label="文字颜色"
+            size="md"
+            variant="ghost"
+            // 弹层展开态是动态条件色，按 style 传；flex-col 容纳「A + 下划线」两行图标
+            className="flex-col"
             style={{ color: open ? "var(--accent)" : "var(--text-secondary)" }}
-          >
-            <span className="text-[13px] font-bold leading-none">A</span>
-            <span
-              className="block w-3.5 h-[3px] rounded-full mt-0.5"
-              style={{
-                background:
-                  summary.color === "mixed"
-                    ? "linear-gradient(90deg, #e05252, #4f8fd0, #4fae6a)"
-                    : (summary.color ?? "color-mix(in srgb, var(--text-muted) 35%, transparent)"),
-              }}
-            />
-          </button>
+            icon={
+              <>
+                <span className="text-ui font-bold leading-none">A</span>
+                <span
+                  className="block w-3.5 h-[3px] rounded-full mt-0.5"
+                  style={{
+                    background:
+                      summary.color === "mixed"
+                        ? "linear-gradient(90deg, #e05252, #4f8fd0, #4fae6a)"
+                        : (summary.color ?? "color-mix(in srgb, var(--text-muted) 35%, transparent)"),
+                  }}
+                />
+              </>
+            }
+          />
         )}
       />
       <ColorPopover
         target="bg"
         current={summary.bg}
         trigger={(ref, open, onToggle) => (
-          <button
+          <IconButton
             ref={ref}
             onClick={onToggle}
-            title="背景色"
-            className="w-7 h-7 flex items-center justify-center rounded transition-colors hover:bg-[var(--hover)]"
+            label="背景色"
+            size="md"
             style={{ color: open ? "var(--accent)" : "var(--text-secondary)" }}
-          >
-            <span
-              className="block w-3.5 h-3.5 rounded-[var(--radius-sm)] border border-[var(--border)]"
-              style={{
-                background:
-                  summary.bg === "mixed"
-                    ? "linear-gradient(45deg, #fde2e2 50%, #e0ecfb 50%)"
-                    : (summary.bg ?? "transparent"),
-              }}
-            />
-          </button>
+            icon={
+              <span
+                className="block w-3.5 h-3.5 rounded-[var(--radius-sm)] border border-[var(--border)]"
+                style={{
+                  background:
+                    summary.bg === "mixed"
+                      ? "linear-gradient(45deg, #fde2e2 50%, #e0ecfb 50%)"
+                      : (summary.bg ?? "transparent"),
+                }}
+              />
+            }
+          />
         )}
       />
 
-      <span className="w-px h-4 mx-0.5 flex-shrink-0" style={{ background: "var(--border)" }} />
+      <Divider vertical className="h-4 mx-0.5" />
 
       {/* 清除格式 */}
-      <button
+      <IconButton
         onClick={() => apply(null)}
-        title="清除格式"
-        className="w-7 h-7 flex items-center justify-center rounded transition-colors hover:bg-[var(--hover)]"
+        label="清除格式"
+        size="md"
         style={{ color: "var(--text-secondary)" }}
-      >
-        <Eraser size={13} />
-      </button>
+        icon={<Eraser size={13} />}
+      />
     </div>,
     document.body,
   );

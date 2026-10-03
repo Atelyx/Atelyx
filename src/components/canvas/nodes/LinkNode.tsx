@@ -65,7 +65,7 @@ export function LinkNode({ data, width, height, selected }: NodeProps) {
           <span className="truncate">{hostOf(url)}</span>
         </span>
         <span
-          className="text-[10px] truncate"
+          className="text-micro truncate"
           style={{ color: "var(--text-muted)" }}
         >
           {url}

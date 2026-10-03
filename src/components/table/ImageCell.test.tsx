@@ -59,13 +59,14 @@ describe("图片单元格文件选择输入", () => {
   });
 
   it("已有图片：「追加图片」按钮点击触发同一个文件选择（输入必须在两支都在场）", () => {
-    const { container, getByTitle } = render(
+    const { container, getByRole } = render(
       <ImageCell field={field} row={rowWith(["attachments/a.png"])} />,
     );
     const input = fileInput(container);
     expect(input.multiple).toBe(true);
     const click = vi.spyOn(input, "click").mockImplementation(() => {});
-    fireEvent.click(getByTitle("追加图片"));
+    // 按可访问名定位（图标按钮的可访问名来自 aria-label，不用 title）
+    fireEvent.click(getByRole("button", { name: "追加图片" }));
     expect(click).toHaveBeenCalledTimes(1);
   });
 

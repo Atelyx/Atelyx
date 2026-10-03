@@ -42,14 +42,14 @@ export function LoadingScreen() {
                 "linear-gradient(to bottom, var(--bg-primary) 0%, transparent 100%)",
             }}
           />
-          <ul className="h-full flex flex-col justify-end gap-1.5 px-1 py-1 text-[13px]">
+          <ul className="h-full flex flex-col justify-end gap-1.5 px-1 py-1 text-ui">
             {loadSteps.map((step, i) => {
               const current = i === loadSteps.length - 1;
               return (
                 <li
                   key={i}
                   className="flex items-center gap-2 min-w-0"
-                  style={{ animation: "load-step-in 0.25s ease-out" }}
+                  style={{ animation: "load-step-in var(--dur-slow) var(--ease)" }}
                 >
                   {current ? (
                     <Loader2

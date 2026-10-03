@@ -175,7 +175,7 @@ function ProviderCard({
           {provider.name}
         </span>
         <span
-          className="text-[10px] px-1 py-0.5 rounded flex-shrink-0"
+          className="text-micro px-1 py-0.5 rounded flex-shrink-0"
           style={{
             background: "var(--bg-tertiary)",
             color: "var(--text-muted)",
@@ -185,7 +185,7 @@ function ProviderCard({
         </span>
       </div>
       <div
-        className="text-[11px] mt-0.5 truncate"
+        className="text-micro mt-0.5 truncate"
         style={{ color: "var(--text-muted)" }}
         title={provider.baseUrl}
       >
@@ -411,7 +411,7 @@ function ProviderForm({
             获取模型列表
           </button>
           <span
-            className="text-[11px]"
+            className="text-micro"
             style={{ color: "var(--text-muted)" }}
           >
             勾选要使用的模型，可设置昵称
@@ -456,7 +456,7 @@ function ProviderForm({
                   />
                 ) : (
                   <span
-                    className="text-[10px] px-1 py-0.5 rounded flex-shrink-0"
+                    className="text-micro px-1 py-0.5 rounded flex-shrink-0"
                     style={{
                       background: "var(--bg-tertiary)",
                       color: "var(--text-muted)",

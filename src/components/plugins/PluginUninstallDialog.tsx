@@ -6,6 +6,7 @@
 import { useEffect, useRef } from "react";
 import { AlertTriangle } from "lucide-react";
 import { useBackHandler } from "@/hooks/useBackHandler";
+import { Button } from "@/components/common/Button";
 
 export function PluginUninstallDialog({
   title,
@@ -59,26 +60,15 @@ export function PluginUninstallDialog({
           {description}
         </p>
         <div className="flex flex-col gap-2 mt-4">
-          <button
-            onClick={onKeepData}
-            className="px-3 py-1.5 text-xs rounded hover:opacity-90"
-            style={{ background: "var(--accent)", color: "var(--accent-fg)" }}
-          >
+          <Button variant="primary" size="sm" block onClick={onKeepData}>
             保留配置卸载（重装时自动恢复）
-          </button>
-          <button
-            onClick={onDeleteAll}
-            className="px-3 py-1.5 text-xs rounded bg-[var(--danger-fill)] hover:opacity-90 text-white"
-          >
+          </Button>
+          <Button variant="dangerSolid" size="sm" block onClick={onDeleteAll}>
             彻底卸载（删除全部数据）
-          </button>
-          <button
-            onClick={onCancel}
-            className="px-3 py-1.5 text-xs rounded hover:bg-[var(--hover)]"
-            style={{ color: "var(--text-primary)" }}
-          >
+          </Button>
+          <Button variant="ghost" size="sm" block onClick={onCancel}>
             取消
-          </button>
+          </Button>
         </div>
       </div>
     </div>

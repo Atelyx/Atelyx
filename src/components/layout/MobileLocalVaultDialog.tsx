@@ -9,6 +9,7 @@
 import { useEffect } from "react";
 import { FolderOpen, HardDrive, Loader2, ShieldCheck, X } from "lucide-react";
 import { MobileDirectoryBrowser } from "@/components/layout/MobileDirectoryBrowser";
+import { IconButton } from "@/components/common/Button";
 import { useMobileVaultStore } from "@/stores/mobileVaultStore";
 import { useBackHandler } from "@/hooks/useBackHandler";
 
@@ -92,14 +93,7 @@ export function MobileLocalVaultDialog({
           <h3 className="flex-1 text-sm font-medium" style={{ color: "var(--text-primary)" }}>
             {firstRun ? "本地仓库" : "添加本地仓库"}
           </h3>
-          <button
-            onClick={onClose}
-            className="w-11 h-11 flex items-center justify-center rounded-sm"
-            style={{ color: "var(--text-muted)" }}
-            aria-label="关闭"
-          >
-            <X size={15} />
-          </button>
+          <IconButton icon={<X size={15} />} label="关闭" size="touch" onClick={onClose} />
         </div>
 
         <p className="mt-2 text-sm leading-relaxed" style={{ color: "var(--text-secondary)" }}>

@@ -321,7 +321,7 @@ function TextCell({
     <div
       // 编辑态/隐藏编辑态共用同一输入框元素（绝对铺满 td）：编辑态显示即单元格本身，
       // 隐藏态 opacity-0 + pointer-events-none（点击穿透到 td 手势层），td 显示原值
-      className="w-full h-full min-h-8 px-1.5 py-1 text-[13px] whitespace-pre-wrap break-words"
+      className="w-full h-full min-h-8 px-1.5 py-1 text-ui whitespace-pre-wrap break-words"
       style={{
         color: "var(--text-primary)",
         ...(editing
@@ -501,7 +501,7 @@ function NumberCell({
       )}
       {editing && field.type === "duration" && (
         <span
-          className="absolute right-1.5 top-1/2 -translate-y-1/2 text-[10px] pointer-events-none"
+          className="absolute right-1.5 top-1/2 -translate-y-1/2 text-micro pointer-events-none"
           style={{ color: "var(--text-muted)" }}
         >
           秒

@@ -10,6 +10,9 @@
  * memo 生效前提：markdownLinks 必须 useMemo 稳定化、onRollback/onBranch 等
  * 回调 useCallback——流式期间历史消息靠引用不变跳过重渲染（assistant 消息无 refs/
  * 附件，引用天然稳定，重渲染最贵的 MarkdownView 得以跳过）。
+ *
+ * 保留原生 button 的一处（脱离基元的原因）：`ToolRunRow` 的展开/收起行——可点击的标题行
+ * （整行 `w-full` 展开详情、行内混排状态色与等宽摘要），语义是行而非按钮。
  */
 import { memo, useMemo, useState, type ReactNode } from "react";
 import {
@@ -32,6 +35,7 @@ import {
   Wrench,
 } from "lucide-react";
 import { ThinkingBlock } from "@/components/common/ThinkingBlock";
+import { Button } from "@/components/common/Button";
 import { groupAgentSteps } from "@/utils/agentSteps";
 import type { AgentStep, Attachment, ToolRun } from "@/types";
 import { MarkdownView, type MarkdownEditorLinks } from "@/components/editor/MarkdownEditor";
@@ -243,48 +247,49 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
         className={`nodrag h-5 flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-60 [@media(hover:none)]:opacity-100 hover:!opacity-100 ${isUser ? "justify-end" : "justify-start"}`}
         {...stopProps}
       >
-        <button
+        <Button
           onClick={copyMessage}
           title="复制消息"
           aria-label="复制消息"
-          className="flex items-center gap-0.5 rounded px-1 py-0.5 text-[11px]"
-          style={{ color: "var(--text-muted)" }}
+          variant="subtle"
+          size="xs"
+          icon={copied ? <Check size={12} className="flex-shrink-0" /> : <Copy size={12} className="flex-shrink-0" />}
         >
-          {copied ? <Check size={12} className="flex-shrink-0" /> : <Copy size={12} className="flex-shrink-0" />}
           {copied ? "已复制" : "复制"}
-        </button>
+        </Button>
         {canRollback && (
-          <button
+          <Button
             onClick={() => onRollback?.(messageId)}
             title="截断此消息之后的全部消息，在此处继续对话（可撤销）"
-            className="flex items-center gap-0.5 rounded px-1 py-0.5 text-[11px]"
-            style={{ color: "var(--text-muted)" }}
+            variant="subtle"
+            size="xs"
+            icon={<History size={12} className="flex-shrink-0" />}
           >
-            <History size={12} className="flex-shrink-0" />
             回到此处
-          </button>
+          </Button>
         )}
         {onBranch && (
-          <button
+          <Button
             onClick={() => onBranch(messageId)}
             title="在此处创建分支对话节点"
-            className="flex items-center gap-0.5 rounded px-1 py-0.5 text-[11px]"
-            style={{ color: "var(--text-muted)" }}
+            variant="subtle"
+            size="xs"
+            icon={<GitBranch size={12} className="flex-shrink-0" />}
           >
-            <GitBranch size={12} className="flex-shrink-0" />
             分支
-          </button>
+          </Button>
         )}
         {onRegenerate && (
-          <button
+          <Button
             onClick={onRegenerate}
             title="重新生成最后一条回复"
             aria-label="重新生成"
-            className="flex items-center gap-0.5 rounded px-1 py-0.5 text-[11px]"
-            style={{ color: "var(--text-muted)" }}
+            variant="subtle"
+            size="xs"
+            icon={<RefreshCw size={12} className="flex-shrink-0" />}
           >
-            <RefreshCw size={12} className="flex-shrink-0" /> 重新生成
-          </button>
+            重新生成
+          </Button>
         )}
       </div>
     </div>
@@ -342,7 +347,7 @@ function ToolRunRow({ run }: { run: ToolRun }) {
       <button
         type="button"
         onClick={() => setExpanded((v) => !v)}
-        className="flex w-full items-center gap-1.5 text-[11px] leading-snug rounded px-1.5 py-1 text-left"
+        className="flex w-full items-center gap-1.5 text-micro leading-snug rounded px-1.5 py-1 text-left"
         style={{ cursor: "pointer" }}
         title={expanded ? "收起详情" : "展开详情"}
       >
@@ -376,7 +381,7 @@ function ToolRunRow({ run }: { run: ToolRun }) {
         )}
       </button>
       {expanded && (
-        <div className="flex flex-col gap-1 px-1.5 pb-1.5 text-[11px] leading-snug">
+        <div className="flex flex-col gap-1 px-1.5 pb-1.5 text-micro leading-snug">
           {run.args != null && (
             <DetailSection label="参数">
               <pre>{prettyJson(run.args)}</pre>

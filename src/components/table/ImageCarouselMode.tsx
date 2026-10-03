@@ -26,6 +26,7 @@ import {
   IMAGE_SWIPE_THRESHOLD,
 } from "@/constants/table";
 import { useTableStore } from "@/stores/tableStore";
+import { IconButton } from "@/components/common/Button";
 
 /** 队列槽位步进 / 水平内衬（布局 px，与队列条样式保持一致）。 */
 const QUEUE_STEP = IMAGE_QUEUE_THUMB_SIZE + IMAGE_QUEUE_GAP;
@@ -260,7 +261,9 @@ export const ImageCarouselMode = memo(function ImageCarouselMode({
     };
   }, [onCurChange, rowId, fieldId]);
 
-  const slideTransition = dragging ? "none" : "transform 160ms ease-out";
+  const slideTransition = dragging
+    ? "none"
+    : "transform var(--dur-base) var(--ease)";
   const slides: ReactNode[] = [];
   {
     const center = Math.round(view);
@@ -318,7 +321,7 @@ export const ImageCarouselMode = memo(function ImageCarouselMode({
             const slot = qDrag ? qDrag.order.indexOf(j) : j;
             const shift = qDrag && !isDragged ? (slot - j) * QUEUE_STEP : 0;
             return (
-              <button
+              <IconButton
                 key={entry}
                 onPointerDown={(e) => onThumbPointerDown(e, j)}
                 onClick={(e) => {
@@ -329,7 +332,25 @@ export const ImageCarouselMode = memo(function ImageCarouselMode({
                   }
                   onCurChange(j);
                 }}
-                className="flex-shrink-0 rounded-[var(--radius-sm)] overflow-hidden border-2 cursor-pointer"
+                // 缩略图本体即图片（`IconButton` 不接受 children，图片走 icon 通道）
+                icon={
+                  srcMap.get(entry) ? (
+                    <img
+                      src={srcMap.get(entry)}
+                      alt=""
+                      className="w-full h-full object-cover pointer-events-none"
+                      draggable={false}
+                    />
+                  ) : (
+                    <div className="w-full h-full bg-[var(--hover)]" />
+                  )
+                }
+                label={`第 ${slot + 1} 张`}
+                size="md"
+                // 选 subtle 而非 ghost：原按钮无 hover 底色，subtle 的 hover 只改文字色（此处无文字）
+                variant="subtle"
+                // 圆角保留：`IconButton` 不带圆角档，这里的圆角是裁图片四角（形状，非控件尺寸）
+                className="rounded-[var(--radius-sm)] overflow-hidden border-2 cursor-pointer"
                 style={{
                   width: IMAGE_QUEUE_THUMB_SIZE,
                   height: IMAGE_QUEUE_THUMB_SIZE,
@@ -340,24 +361,14 @@ export const ImageCarouselMode = memo(function ImageCarouselMode({
                     : shift
                       ? `translateX(${shift}px)`
                       : undefined,
-                  transition: isDragged ? "none" : "transform 150ms ease-out",
+                  transition: isDragged
+                    ? "none"
+                    : "transform var(--dur-base) var(--ease)",
                   position: "relative",
                   zIndex: isDragged ? 10 : undefined,
                   boxShadow: isDragged ? "var(--shadow-pop)" : undefined,
                 }}
-                title={`第 ${slot + 1} 张`}
-              >
-                {srcMap.get(entry) ? (
-                  <img
-                    src={srcMap.get(entry)}
-                    alt=""
-                    className="w-full h-full object-cover pointer-events-none"
-                    draggable={false}
-                  />
-                ) : (
-                  <div className="w-full h-full bg-[var(--hover)]" />
-                )}
-              </button>
+              />
             );
           })}
         </div>

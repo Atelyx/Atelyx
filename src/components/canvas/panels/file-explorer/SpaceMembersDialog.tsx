@@ -83,12 +83,12 @@ export function SpaceMembersDialog({ serverUrl, spaceId, spaceName, onClose }: P
                   <div className="text-xs truncate" style={{ color: "var(--text-primary)" }}>
                     {m.displayName || m.username}
                   </div>
-                  <div className="text-[10px]" style={{ color: "var(--text-muted)" }}>
+                  <div className="text-micro" style={{ color: "var(--text-muted)" }}>
                     @{m.username}
                   </div>
                 </div>
                 <span
-                  className="text-[10px] px-1.5 py-0.5 rounded flex-shrink-0"
+                  className="text-micro px-1.5 py-0.5 rounded flex-shrink-0"
                   style={{ color: "var(--text-muted)", border: "1px solid var(--border)" }}
                 >
                   {roleLabel(m.role)}
@@ -99,7 +99,7 @@ export function SpaceMembersDialog({ serverUrl, spaceId, spaceName, onClose }: P
                       onClick={() => setConfirmTransfer(m.userId)}
                       disabled={busy}
                       title="转让后对方成为空间所有者"
-                      className="text-[11px] px-1.5 py-0.5 rounded hover:bg-[var(--hover)] disabled:opacity-40 flex-shrink-0"
+                      className="text-micro px-1.5 py-0.5 rounded hover:bg-[var(--hover)] disabled:opacity-40 flex-shrink-0"
                       style={{ color: "var(--text-secondary)" }}
                     >
                       <ShieldCheck size={12} className="inline mr-0.5" />
@@ -109,7 +109,7 @@ export function SpaceMembersDialog({ serverUrl, spaceId, spaceName, onClose }: P
                       onClick={() => act(() => removeMember(serverUrl, spaceId, m.userId))}
                       disabled={busy}
                       title="将该成员移出空间"
-                      className="text-[11px] px-1.5 py-0.5 rounded hover:bg-[var(--hover)] disabled:opacity-40 flex-shrink-0"
+                      className="text-micro px-1.5 py-0.5 rounded hover:bg-[var(--hover)] disabled:opacity-40 flex-shrink-0"
                       style={{ color: "var(--danger)" }}
                     >
                       移除
@@ -124,14 +124,14 @@ export function SpaceMembersDialog({ serverUrl, spaceId, spaceName, onClose }: P
                         setConfirmTransfer(null);
                         act(() => transferOwnership(serverUrl, spaceId, to));
                       }}
-                      className="text-[11px] px-1.5 py-0.5 rounded"
+                      className="text-micro px-1.5 py-0.5 rounded"
                       style={{ background: "var(--accent)", color: "var(--accent-fg)" }}
                     >
                       确认转让
                     </button>
                     <button
                       onClick={() => setConfirmTransfer(null)}
-                      className="text-[11px] px-1.5 py-0.5 rounded hover:bg-[var(--hover)]"
+                      className="text-micro px-1.5 py-0.5 rounded hover:bg-[var(--hover)]"
                       style={{ color: "var(--text-muted)" }}
                     >
                       取消

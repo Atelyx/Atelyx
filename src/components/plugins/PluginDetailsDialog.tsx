@@ -113,7 +113,7 @@ export function PluginDetailsDialog({
         <div className="flex items-start gap-3 mb-4">
           <div className="flex-1 min-w-0">
             <h3 className="text-sm font-medium truncate" style={{ color: "var(--text-primary)" }}>{plugin.manifest.name}</h3>
-            <div className="text-[11px] break-all mt-1" style={{ color: "var(--text-muted)" }}>
+            <div className="text-micro break-all mt-1" style={{ color: "var(--text-muted)" }}>
               {plugin.id} · v{plugin.manifest.version} · {plugin.phase === "active" ? "运行中" : plugin.phase === "failed" ? "加载失败" : "已停用"}
             </div>
           </div>
@@ -125,7 +125,7 @@ export function PluginDetailsDialog({
         {plugin.previousVersion && (
           <div className="mb-4 rounded border p-3" style={{ borderColor: "var(--border)" }}>
             <div className="text-xs" style={{ color: "var(--text-secondary)" }}>可回退版本：v{plugin.previousVersion}</div>
-            <div className="text-[11px] mt-1" style={{ color: "var(--text-muted)" }}>只替换代码，插件数据保持当前内容；回退成功后将清空保留版本。</div>
+            <div className="text-micro mt-1" style={{ color: "var(--text-muted)" }}>只替换代码，插件数据保持当前内容；回退成功后将清空保留版本。</div>
             <button onClick={onRollback} className="mt-2 flex items-center gap-1.5 px-2.5 py-1.5 rounded text-xs" style={{ background: "var(--accent)", color: "var(--accent-fg)" }}>
               <RefreshCw size={13} /> 回退到 v{plugin.previousVersion}
             </button>
@@ -143,27 +143,27 @@ export function PluginDetailsDialog({
                 const label = PLUGIN_MOUNT_PHASE_LABELS[phase];
                 if (i === failIndex) {
                   return (
-                    <span key={phase} className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px]" style={{ background: "color-mix(in srgb, var(--danger) 12%, transparent)", color: "var(--danger)" }}>
+                    <span key={phase} className="flex items-center gap-1 px-1.5 py-0.5 rounded text-micro" style={{ background: "color-mix(in srgb, var(--danger) 12%, transparent)", color: "var(--danger)" }}>
                       <X size={12} /> {label}
                     </span>
                   );
                 }
                 if (i < failIndex) {
                   return (
-                    <span key={phase} className="flex items-center gap-1 text-[11px]" style={{ color: "var(--text-secondary)" }}>
+                    <span key={phase} className="flex items-center gap-1 text-micro" style={{ color: "var(--text-secondary)" }}>
                       <Check size={12} /> {label}
                     </span>
                   );
                 }
                 return (
-                  <span key={phase} className="flex items-center gap-1 text-[11px]" style={{ color: "var(--text-muted)" }}>
+                  <span key={phase} className="flex items-center gap-1 text-micro" style={{ color: "var(--text-muted)" }}>
                     <Circle size={10} /> {label}
                   </span>
                 );
               })}
             </div>
             <div className="text-xs mt-1 break-words" style={{ color: "var(--danger)" }}>{plugin.failure.message}</div>
-            {plugin.failure.missing && <div className="text-[11px] mt-1" style={{ color: "var(--text-muted)" }}>缺失依赖：{plugin.failure.missing.join("、")}</div>}
+            {plugin.failure.missing && <div className="text-micro mt-1" style={{ color: "var(--text-muted)" }}>缺失依赖：{plugin.failure.missing.join("、")}</div>}
           </div>
         )}
 
@@ -181,16 +181,16 @@ export function PluginDetailsDialog({
                 <Lock size={12} className="shrink-0" />
                 权限披露（安装前声明）
               </div>
-              <div className="flex flex-wrap gap-1">{declares.map((name) => <span key={name} className="inline-flex items-center h-5 px-2 rounded-full text-[10px] border" style={{ color: capabilitySensitive(name) ? "var(--warning)" : "var(--text-secondary)", borderColor: "var(--border)" }}>{capabilityLabel(name)}{capabilitySensitive(name) ? "（敏感）" : ""}{declaredCapabilityAvailable(name) ? "" : "（本平台不可用）"}</span>)}</div>
+              <div className="flex flex-wrap gap-1">{declares.map((name) => <span key={name} className="inline-flex items-center h-5 px-2 rounded-full text-micro border" style={{ color: capabilitySensitive(name) ? "var(--warning)" : "var(--text-secondary)", borderColor: "var(--border)" }}>{capabilityLabel(name)}{capabilitySensitive(name) ? "（敏感）" : ""}{declaredCapabilityAvailable(name) ? "" : "（本平台不可用）"}</span>)}</div>
             </div>
           </section>
         )}
 
         {audit && (audit.services.length > 0 || audit.events.length > 0 || audit.calls.length > 0) && (
           <section className="mb-4">
-            <h4 className="text-[11px] font-medium mb-2" style={{ color: "var(--text-muted)" }}>实际访问与调用</h4>
+            <h4 className="text-micro font-medium mb-2" style={{ color: "var(--text-muted)" }}>实际访问与调用</h4>
             {/* 审计对照：声明 vs 实际（无声明外访问才判定无越权） */}
-            <div className="flex items-center gap-2 text-[11px] mb-2 flex-wrap" style={{ color: "var(--text-muted)" }}>
+            <div className="flex items-center gap-2 text-micro mb-2 flex-wrap" style={{ color: "var(--text-muted)" }}>
               <Shield size={12} className="shrink-0" />
               <span className="font-mono">声明 {declares.length} 项 · 实际访问 {actualServices.length} 项</span>
               {extraAccess.length === 0 ? (
@@ -199,7 +199,7 @@ export function PluginDetailsDialog({
                 <span style={{ color: "var(--warning)" }}>· 声明外访问 {extraAccess.length} 项</span>
               )}
             </div>
-            <div className="space-y-1 text-[10px]" style={{ color: "var(--text-secondary)" }}>
+            <div className="space-y-1 text-micro" style={{ color: "var(--text-secondary)" }}>
               {audit.services.map((name) => <div key={`service:${name}`}>{capabilityLabel(name)} · 已访问</div>)}
               {audit.events.map((name) => <div key={`event:${name}`}>{name} · 已订阅</div>)}
               {audit.calls.map((call) => <div key={`${call.service}.${call.method}:${call.summary}`}>{capabilityLabel(call.service)} · {call.summary}</div>)}
@@ -209,8 +209,8 @@ export function PluginDetailsDialog({
 
         {audit && (audit.slotContributions.length > 0 || audit.slotDecorators.length > 0) && (
           <section className="mb-4">
-            <h4 className="text-[11px] font-medium mb-2" style={{ color: "var(--text-muted)" }}>槽位贡献与装饰</h4>
-            <div className="space-y-1 text-[10px]" style={{ color: "var(--text-secondary)" }}>
+            <h4 className="text-micro font-medium mb-2" style={{ color: "var(--text-muted)" }}>槽位贡献与装饰</h4>
+            <div className="space-y-1 text-micro" style={{ color: "var(--text-secondary)" }}>
               {audit.slotContributions.map((c) => (
                 <div key={c.id}>
                   <button
@@ -218,7 +218,7 @@ export function PluginDetailsDialog({
                     className="flex items-center gap-1 hover:opacity-80 text-left"
                     style={{ color: "var(--text-secondary)" }}
                   >
-                    <ChevronRight size={12} className={expandedSlot === c.slot ? "rotate-90" : ""} style={{ transition: "transform 0.12s" }} />
+                    <ChevronRight size={12} className={expandedSlot === c.slot ? "rotate-90" : ""} style={{ transition: "transform var(--dur-fast) var(--ease)" }} />
                     {c.slot} · 贡献（{c.cardinality} · priority {c.priority}{c.label ? ` · ${c.label}` : ""}）
                   </button>
                   {expandedSlot === c.slot && <SlotChainDetail chain={getSlotChain(c.slot)} />}
@@ -231,7 +231,7 @@ export function PluginDetailsDialog({
                     className="flex items-center gap-1 hover:opacity-80 text-left"
                     style={{ color: "var(--text-secondary)" }}
                   >
-                    <ChevronRight size={12} className={expandedSlot === d.slot ? "rotate-90" : ""} style={{ transition: "transform 0.12s" }} />
+                    <ChevronRight size={12} className={expandedSlot === d.slot ? "rotate-90" : ""} style={{ transition: "transform var(--dur-fast) var(--ease)" }} />
                     {d.slot} · 装饰（priority {d.priority}）
                   </button>
                   {expandedSlot === d.slot && <SlotChainDetail chain={getSlotChain(d.slot)} />}
@@ -243,8 +243,8 @@ export function PluginDetailsDialog({
 
         {pluginCommands.length > 0 && (
           <section>
-            <h4 className="text-[11px] font-medium mb-2 flex items-center gap-1" style={{ color: "var(--text-muted)" }}><Terminal size={12} /> 命令</h4>
-            <div className="flex flex-wrap gap-1">{pluginCommands.map((command) => <button key={command.globalId} onClick={() => onRunCommand(command.globalId)} className="px-1.5 py-0.5 rounded border text-[10px]" style={{ borderColor: "var(--border)", color: "var(--text-secondary)" }}>{command.label}</button>)}</div>
+            <h4 className="text-micro font-medium mb-2 flex items-center gap-1" style={{ color: "var(--text-muted)" }}><Terminal size={12} /> 命令</h4>
+            <div className="flex flex-wrap gap-1">{pluginCommands.map((command) => <button key={command.globalId} onClick={() => onRunCommand(command.globalId)} className="px-1.5 py-0.5 rounded border text-micro" style={{ borderColor: "var(--border)", color: "var(--text-secondary)" }}>{command.label}</button>)}</div>
           </section>
         )}
       </div>

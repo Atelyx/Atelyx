@@ -43,6 +43,7 @@ import {
   type MentionSeg,
 } from "@/utils/text";
 import { ChatMessageBubble } from "@/components/common/ChatMessageBubble";
+import { Button, IconButton } from "@/components/common/Button";
 import { SlotListMount } from "@/components/plugins/SlotHost";
 import type { MarkdownEditorLinks } from "@/components/editor/MarkdownEditor";
 import { MentionTextarea } from "@/components/common/MentionTextarea";
@@ -395,9 +396,11 @@ export function AiChatPanel() {
                   : undefined
               }
             >
-              <button
+              <Button
+                variant="ghost"
+                size="sm"
+                className="flex-1 min-w-0 justify-start items-start"
                 onClick={() => pickSession(s.id)}
-                className="flex-1 min-w-0 text-left px-2.5 py-1.5"
                 title={s.title ?? "未命名对话"}
               >
                 <span
@@ -407,26 +410,26 @@ export function AiChatPanel() {
                   {s.title ?? "未命名对话"}
                 </span>
                 <span
-                  className="block text-[11px] mt-0.5"
+                  className="block text-micro mt-0.5"
                   style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}
                 >
                   {relTime(s.updatedAt)}
                 </span>
-              </button>
-              <button
+              </Button>
+              {/* focus-visible:opacity-100：默认 hidden 态下仍可 Tab 到，键盘用户必须看得见焦点 */}
+              <IconButton
+                className="mr-1 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100"
+                variant="danger"
+                size="xs"
+                icon={<Trash2 size={12} />}
+                label={`删除会话 ${s.title ?? ""}`}
                 onClick={() => deleteSession(s.id)}
-                title="删除会话"
-                aria-label={`删除会话 ${s.title ?? ""}`}
-                // focus-visible:opacity-100：默认 hidden 态下仍可 Tab 到，键盘用户必须看得见焦点
-                className="p-1 mr-1 rounded-[var(--radius-xs)] flex-shrink-0 text-[var(--text-muted)] hover:text-[var(--danger)] opacity-0 group-hover:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100"
-              >
-                <Trash2 size={12} />
-              </button>
+              />
             </div>
           );
         })}
         {listedSessions.length === 0 && (
-          <div className="px-2 py-2 text-[11px]" style={{ color: "var(--text-muted)" }}>
+          <div className="px-2 py-2 text-micro" style={{ color: "var(--text-muted)" }}>
             {sessionQuery.trim() ? "没有匹配的会话" : "暂无历史会话"}
           </div>
         )}
@@ -488,13 +491,14 @@ export function AiChatPanel() {
                 <AlertCircle size={13} className="flex-shrink-0" />
                 <span className="truncate">{error ?? persistError?.message}</span>
                 {error && (
-                  <button
+                  <IconButton
+                    className="flex-shrink-0"
+                    variant="danger"
+                    size="xs"
+                    icon={<X size={12} />}
+                    label="清除"
                     onClick={clearError}
-                    title="清除"
-                    className="p-0.5 hover:opacity-70 flex-shrink-0"
-                  >
-                    <X size={12} />
-                  </button>
+                  />
                 )}
               </span>
             ) : (
@@ -508,60 +512,58 @@ export function AiChatPanel() {
                 </span>
                 {/* 手动重新命名：按全部会话记录请求 LLM 生成标题（新对话态/流式中禁用）；请求中旋转 + 防重复点击 */}
                 {active && !streaming && (
-                  <button
+                  <IconButton
+                    className="flex-shrink-0"
+                    variant="subtle"
+                    size="xs"
+                    icon={
+                      renaming ? (
+                        <Loader2 size={12} className="animate-spin" />
+                      ) : (
+                        <RefreshCw size={12} />
+                      )
+                    }
+                    label={renaming ? "正在生成标题…" : "重新命名（按全部会话记录生成标题）"}
                     onClick={() => void handleRename()}
                     disabled={renaming}
-                    title={renaming ? "正在生成标题…" : "重新命名（按全部会话记录生成标题）"}
-                    aria-label="重新命名"
-                    className="p-0.5 rounded hover:opacity-80 flex-shrink-0 disabled:opacity-60 disabled:cursor-default disabled:hover:opacity-60"
-                    style={{ color: "var(--text-muted)" }}
-                  >
-                    {renaming ? (
-                      <Loader2 size={12} className="animate-spin" />
-                    ) : (
-                      <RefreshCw size={12} />
-                    )}
-                  </button>
+                  />
                 )}
               </>
             )}
           </div>
           <div className="flex items-center gap-0.5 flex-shrink-0" data-tauri-drag-region="false">
-            <button
+            <IconButton
               onClick={newSession}
-              title="新建会话"
-              aria-label="新建会话"
-              className="p-1.5 rounded hover:opacity-80"
-              style={{ color: "var(--text-secondary)" }}
-            >
-              <FilePlus size={15} />
-            </button>
-            <button
+              variant="ghost"
+              size="md"
+              icon={<FilePlus size={15} />}
+              label="新建会话"
+            />
+            <IconButton
               onClick={() => setSidebarOpen((v) => !v)}
-              title={sidebarOpen ? "收起会话列表" : "展开会话列表"}
-              aria-label={sidebarOpen ? "收起会话列表" : "展开会话列表"}
+              variant="ghost"
+              size="md"
+              icon={<History size={15} />}
+              label={sidebarOpen ? "收起会话列表" : "展开会话列表"}
               aria-expanded={sidebarOpen}
-              className="p-1.5 rounded hover:opacity-80"
               style={{ color: sidebarOpen ? "var(--accent)" : "var(--text-secondary)" }}
-            >
-              <History size={15} />
-            </button>
+            />
             {/* 压缩会话历史：把对话总结为检查点，压缩后的请求历史由摘要代替（消息本体不动）；
                 仅激活会话有历史时可用；流式/压缩进行中禁用；转圈只显示在真正压缩的会话上 */}
-            <button
+            <IconButton
               onClick={() => void compactSession()}
               disabled={!active || streaming || compactingAny}
-              title={compactingThis ? "正在压缩会话历史…" : "压缩会话历史"}
-              aria-label={compactingThis ? "正在压缩会话历史" : "压缩会话历史"}
-              className="p-1.5 rounded hover:opacity-80 disabled:opacity-40 disabled:cursor-default disabled:hover:opacity-40"
-              style={{ color: "var(--text-secondary)" }}
-            >
-              {compactingThis ? (
-                <Loader2 size={15} className="animate-spin" />
-              ) : (
-                <Layers size={15} />
-              )}
-            </button>
+              variant="ghost"
+              size="md"
+              icon={
+                compactingThis ? (
+                  <Loader2 size={15} className="animate-spin" />
+                ) : (
+                  <Layers size={15} />
+                )
+              }
+              label={compactingThis ? "正在压缩会话历史" : "压缩会话历史"}
+            />
             {/* 插件贡献区：AI 对话面板顶部右侧动作区（list 槽，priority 降序） */}
             <SlotListMount slot="toolbar/aichat/right" />
           </div>
@@ -713,7 +715,7 @@ export function AiChatPanel() {
                 // 无边框幽灵态 + 按内容定宽（宽度上限 = 文字自然宽度，不撑满剩余空间）；
                 // 不参与收缩——否则面板一窄，长模型名会把只有两个字的 Agent 名挤成「对…」
                 // （max-w-45% 只是超长 Agent 名的兜底，正常名不会触到）
-                className="h-6 px-2 rounded-[var(--radius-sm)] text-[11px] hover:bg-[var(--bg-tertiary)] w-fit max-w-[45%] flex-shrink-0 min-w-0"
+                className="h-6 px-2 rounded-[var(--radius-sm)] text-micro hover:bg-[var(--bg-tertiary)] w-fit max-w-[45%] flex-shrink-0 min-w-0"
                 style={{ color: "var(--text-secondary)" }}
               />
 
@@ -733,24 +735,22 @@ export function AiChatPanel() {
                 prefixIcon={<Cpu size={13} className="flex-shrink-0" />}
                 title={modelOverride ? `模型：${modelOverride.model}` : "模型：跟随仓库默认（点击选择/设置推理等级）"}
                 // 同按内容定宽（上限 = 文字自然宽度）；空间不足时由它承担收缩（模型名最长，截断损失最小）
-                className="h-6 px-2 rounded-[var(--radius-sm)] text-[11px] hover:bg-[var(--bg-tertiary)] w-fit min-w-0"
+                className="h-6 px-2 rounded-[var(--radius-sm)] text-micro hover:bg-[var(--bg-tertiary)] w-fit min-w-0"
                 style={{ color: "var(--text-secondary)" }}
               />
               {/* 右：发送 / 停止（图标 only，金色圆钮，流式中切换为停止）——mr-1 右缘留白不顶格；
                   任一会话压缩进行中即禁用（压缩与发送共用一个中止句柄，避免静默无效点击） */}
-              <button
+              <IconButton
+                className="ml-auto"
                 onClick={streaming ? stop : handleSend}
                 disabled={compactingAny || (!streaming && !input.trim())}
-                title={compactingAny ? "正在压缩会话历史…" : streaming ? "停止" : "发送 (Enter)"}
-                aria-label={compactingAny ? "正在压缩会话历史" : streaming ? "停止" : "发送"}
-                className="w-7 h-7 ml-auto rounded-[var(--radius-sm)] inline-flex items-center justify-center flex-shrink-0 disabled:opacity-40"
-                style={{
-                  background: streaming ? "var(--bg-tertiary)" : "var(--accent)",
-                  color: streaming ? "var(--text-secondary)" : "var(--accent-fg)",
-                }}
-              >
-                {streaming ? <Square size={12} /> : <ArrowUp size={13} />}
-              </button>
+                variant={streaming ? "secondary" : "primary"}
+                size="md"
+                icon={streaming ? <Square size={12} /> : <ArrowUp size={13} />}
+                label={
+                  compactingAny ? "正在压缩会话历史" : streaming ? "停止" : "发送 (Enter)"
+                }
+              />
             </div>
           </div>
         </div>

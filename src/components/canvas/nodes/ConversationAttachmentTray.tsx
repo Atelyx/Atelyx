@@ -2,6 +2,7 @@ import { AlertTriangle, FileText, Pin, X } from "lucide-react";
 import { useState } from "react";
 import type { PendingAttachment } from "@/types";
 import { Menu, MenuItem } from "@/components/common/Menu";
+import { IconButton } from "@/components/common/Button";
 
 /**
  * 待发送附件托盘（临时附件通道）。
@@ -54,13 +55,14 @@ export function ConversationAttachmentTray({ attachments, onRemove, onPin }: Pro
             {att.filename || (att.kind === "image" ? "图片" : "文件")}
           </span>
           {att.parseFailed && <AlertTriangle size={12} style={{ color: "var(--danger)" }} />}
-          <button
+          <IconButton
             onClick={() => onRemove(att.id)}
-            className="hover:opacity-70 flex-shrink-0"
-            title={att.sourceNodeId ? "取消引用（断开边）" : "移除附件"}
-          >
-            <X size={12} />
-          </button>
+            className="flex-shrink-0"
+            variant="ghost"
+            size="xs"
+            icon={<X size={12} />}
+            label={att.sourceNodeId ? "取消引用（断开边）" : "移除附件"}
+          />
         </div>
       ))}
 

@@ -21,6 +21,10 @@
  *   底边贴点击位置不遮住点击处）；已设置列居中显示「类型 + 结果」。
  * - 错误/保存状态在面板 header 展示（`PanelFrame` 读 tableStore）。
  * - 弹层菜单（字段/列/行/整表/状态栏）见 `TableMenus.tsx`。
+ *
+ * 保留原生 button 的三处（脱离基元的原因）：工具条「···」浮层内的历史记录/导出 xlsx 两项
+ * （`PopupLayer` 内的菜单项，归 `MenuItem` 体系）、行首拖拽手柄（16×20 非正方尺寸，
+ * 且语义是 pointer 拖拽而非点击，归不进 `IconButton` 的正方形档位）。
  */
 import { GripVertical, MoreHorizontal, MoveDiagonal, Plus, Redo2, Sigma, Undo2 } from "lucide-react";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -43,6 +47,7 @@ import { computeColumnCalc, fieldDefaultWidth, selectionRegion, type TableRegion
 import { HistoryModal } from "@/components/history/HistoryModal";
 import { PopupLayer } from "@/components/common/PopupLayer";
 import { SlotListMount } from "@/components/plugins/SlotHost";
+import { IconButton, Button } from "@/components/common/Button";
 import { DropdownSelect } from "@/components/common/DropdownSelect";
 import { ErrorBoundary } from "@/components/common/ErrorBoundary";
 import { usePopupAnchor } from "@/hooks/usePopupAnchor";
@@ -700,17 +705,18 @@ export function TableEditor({ panelId }: { panelId: string }) {
         {tablePeers.length > 0 && (
           <div className="flex items-center gap-1 flex-shrink-0">
             {tablePeers.map((p) => (
-              <button
+              <Button
                 key={p.peerId}
+                variant="ghost"
+                size="sm"
                 onClick={() => focusPeer(p)}
-                className="flex items-center gap-1.5 px-1.5 py-0.5 rounded transition-colors hover:bg-[var(--hover)]"
                 title={`${p.nickname}${p.deviceName ? `（${p.deviceName}）` : ""} · 点击定位到其选中`}
               >
                 <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: p.color }} />
                 <span className="max-w-24 truncate" style={{ color: "var(--text-secondary)" }}>
                   {p.nickname}
                 </span>
-              </button>
+              </Button>
             ))}
           </div>
         )}
@@ -718,36 +724,33 @@ export function TableEditor({ panelId }: { panelId: string }) {
         <SlotListMount slot="toolbar/table/right" />
         {/* 触屏无快捷键：撤销/重做屏幕入口（桌面隐藏，快捷键已够用） */}
         <span className="hidden [@media(hover:none)]:flex items-center gap-1 flex-shrink-0">
-          <button
+          <IconButton
+            icon={<Undo2 size={14} />}
+            label="撤销"
+            size="sm"
+            variant="subtle"
             onClick={() => useTableStore.getState().undo()}
-            title="撤销"
-            aria-label="撤销"
-            className="p-0.5 rounded hover:opacity-80"
-            style={{ color: "var(--text-muted)" }}
-          >
-            <Undo2 size={14} />
-          </button>
-          <button
+          />
+          <IconButton
+            icon={<Redo2 size={14} />}
+            label="重做"
+            size="sm"
+            variant="subtle"
             onClick={() => useTableStore.getState().redo()}
-            title="重做"
-            aria-label="重做"
-            className="p-0.5 rounded hover:opacity-80"
-            style={{ color: "var(--text-muted)" }}
-          >
-            <Redo2 size={14} />
-          </button>
+          />
         </span>
         {/* 「···」更多选项：历史记录 + 导出 xlsx（统一 usePopupAnchor + PopupLayer 浮层） */}
         <span className="flex-shrink-0">
-          <button
+          <IconButton
             ref={moreTriggerRef}
+            icon={<MoreHorizontal size={15} />}
+            label="更多选项"
+            size="sm"
+            variant="subtle"
             onClick={() => moreMenu.toggle()}
-            title="更多选项"
-            className="p-0.5 rounded hover:opacity-80"
+            // 菜单展开态是动态条件色，按 style 传（不归 variant）
             style={{ color: moreMenu.anchor ? "var(--accent)" : "var(--text-muted)" }}
-          >
-            <MoreHorizontal size={15} />
-          </button>
+          />
           <PopupLayer
             anchor={moreMenu.anchor}
             onClose={moreMenu.close}
@@ -859,18 +862,18 @@ export function TableEditor({ panelId }: { panelId: string }) {
                     <span className="truncate flex-1 cursor-default" title={f.name}>
                       {f.name}
                     </span>
-                    <button
+                    <IconButton
+                      icon={<MoreHorizontal size={13} />}
+                      label="字段菜单"
+                      size="xs"
+                      variant="subtle"
+                      className="flex-shrink-0"
                       onClick={(e) => {
                         e.stopPropagation();
                         const rect = e.currentTarget.getBoundingClientRect();
                         setFieldMenu({ fieldId: f.id, x: rect.left, y: rect.bottom + 2 });
                       }}
-                      className="w-5 h-5 flex items-center justify-center rounded hover:bg-[var(--hover)] flex-shrink-0"
-                      style={{ color: "var(--text-muted)" }}
-                      title="字段菜单"
-                    >
-                      <MoreHorizontal size={13} />
-                    </button>
+                    />
                   </div>
                   {/* 列宽拖拽手柄：悬停显示金色分隔线，按下拖拽调整（钳制 MIN/MAX） */}
                   <div
@@ -885,18 +888,17 @@ export function TableEditor({ panelId }: { panelId: string }) {
                 className="border-b border-r align-middle px-1.5 py-1 sticky top-0 z-10 text-center"
                 style={{ background: "var(--bg-secondary)", borderColor: "var(--border)" }}
               >
-                <button
+                <IconButton
+                  icon={<Plus size={14} />}
+                  label="添加字段"
+                  size="sm"
+                  variant="subtle"
                   onClick={(e) => {
                     e.stopPropagation();
                     const rect = e.currentTarget.getBoundingClientRect();
                     setAddFieldMenu({ x: rect.left, y: rect.bottom + 2 });
                   }}
-                  className="w-6 h-6 flex items-center justify-center rounded hover:bg-[var(--hover)]"
-                  style={{ color: "var(--text-muted)" }}
-                  title="添加字段"
-                >
-                  <Plus size={14} />
-                </button>
+                />
               </th>
             </tr>
           </thead>
@@ -933,7 +935,7 @@ export function TableEditor({ panelId }: { panelId: string }) {
                     {/* absolute 铺满 td：序号 + 拖拽手柄随行高垂直居中（行高拖拽手柄在其下层仍可交互） */}
                     <div className="absolute inset-0 flex items-center justify-center gap-0.5">
                       <span
-                        className="text-[11px]"
+                        className="text-micro"
                         style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}
                       >
                         {i + 1}

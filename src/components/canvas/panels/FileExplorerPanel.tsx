@@ -413,7 +413,7 @@ export function FileExplorerPanel({ openedNoteFile, openedTableFile, onConvertWh
         >
           <div className="text-xs">{dragGhost.label}</div>
           {dragHint && (
-            <div className="mt-0.5 text-[10px] whitespace-nowrap" style={{ color: "var(--accent)" }}>
+            <div className="mt-0.5 text-micro whitespace-nowrap" style={{ color: "var(--accent)" }}>
               {dragHint}
             </div>
           )}

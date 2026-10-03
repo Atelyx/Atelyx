@@ -18,7 +18,7 @@ export function SlotConflictPanel() {
 
   return (
     <div className="mb-4 rounded border p-3" style={{ borderColor: "var(--border-subtle)", background: "var(--bg-tertiary)" }}>
-      <div className="text-[11px] font-medium mb-2" style={{ color: "var(--text-muted)" }}>
+      <div className="text-micro font-medium mb-2" style={{ color: "var(--text-muted)" }}>
         槽位冲突（多个插件贡献同一位置，选择显示哪个）
       </div>
       <div className="space-y-2">
@@ -31,7 +31,7 @@ export function SlotConflictPanel() {
                 <span className="text-xs font-medium truncate" style={{ color: "var(--text-primary)" }}>
                   {row.slot}
                 </span>
-                <span className="text-[10px] px-1.5 py-0.5 rounded flex-shrink-0" style={{ color: "var(--text-muted)", background: "var(--bg-secondary)" }}>
+                <span className="text-micro px-1.5 py-0.5 rounded flex-shrink-0" style={{ color: "var(--text-muted)", background: "var(--bg-secondary)" }}>
                   声明方：{row.declarer}
                 </span>
               </div>
@@ -56,12 +56,12 @@ export function SlotConflictPanel() {
                 </select>
               </div>
               {pinnedStale && (
-                <div className="text-[10px] mt-1" style={{ color: "var(--warning)" }}>
+                <div className="text-micro mt-1" style={{ color: "var(--warning)" }}>
                   钉住的贡献已卸载，当前按 priority 胜出：{winner?.label ? `${winner.label} · ` : ""}{winner?.pluginId ?? "无"}
                 </div>
               )}
               {row.pinnedId === null && winner && (
-                <div className="text-[10px] mt-1" style={{ color: "var(--text-muted)" }}>
+                <div className="text-micro mt-1" style={{ color: "var(--text-muted)" }}>
                   当前胜出：{winner.label ? `${winner.label} · ` : ""}{winner.pluginId}
                 </div>
               )}

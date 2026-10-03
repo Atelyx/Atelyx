@@ -83,7 +83,7 @@ export function DropdownSelect({
       >
         <div role="listbox" className="max-h-64 overflow-y-auto">
           {options.length === 0 && emptyText != null && (
-            <div className="px-3 py-2 text-[11px]" style={{ color: "var(--text-muted)" }}>
+            <div className="px-3 py-2 text-micro" style={{ color: "var(--text-muted)" }}>
               {emptyText}
             </div>
           )}
@@ -91,7 +91,7 @@ export function DropdownSelect({
             <div key={`${o.value}-${i}`}>
               {o.group && (i === 0 || options[i - 1].group !== o.group) && (
                 <div
-                  className="px-3 pt-1.5 pb-0.5 text-[11px] select-none"
+                  className="px-3 pt-1.5 pb-0.5 text-micro select-none"
                   style={{ color: "var(--text-muted)" }}
                 >
                   {o.group}
@@ -105,7 +105,7 @@ export function DropdownSelect({
                   onChange(o.value);
                   close();
                 }}
-                className="w-full text-left px-3 py-1.5 text-[13px] hover:bg-[var(--hover)] inline-flex items-center justify-between gap-2"
+                className="w-full text-left px-3 py-1.5 text-ui hover:bg-[var(--hover)] inline-flex items-center justify-between gap-2"
                 style={{
                   color:
                     o.value === value

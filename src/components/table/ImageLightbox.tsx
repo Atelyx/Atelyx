@@ -8,6 +8,10 @@
  * 动作经 `onCopyImage`/`onDownloadImage` 回调（返回 Promise<boolean> 是否成功），
  * 结果在遮罩内底部提示（成功绿/失败红；全屏遮罩盖住面板 header，提示须就地可见）。
  * 菜单打开时 Esc 只关菜单不连关预览；左右切换图片自动关闭菜单（防菜单停留在旧图位置）。
+ *
+ * 保留原生 button 的三处（脱离基元的原因）：关闭（36px）与左右切换（40px）——灯箱是深色全屏
+ * 遮罩上的大尺寸指针控件，边长落在 `lg`(32) 与 `touch`(44) 两档之间，归不进 `IconButton` 的
+ * 正方形档位；且 hover 是 `white/10` 的浅色反馈、非主题色。
  */
 import { Copy, Download, ChevronLeft, ChevronRight, X } from "lucide-react";
 import { useEffect, useState } from "react";

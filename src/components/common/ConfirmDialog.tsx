@@ -7,6 +7,7 @@ import { useEffect, useRef } from "react";
 import type { ReactNode } from "react";
 import { AlertTriangle } from "lucide-react";
 import { useBackHandler } from "@/hooks/useBackHandler";
+import { Button } from "@/components/common/Button";
 
 export function ConfirmDialog({
   title,
@@ -69,20 +70,12 @@ export function ConfirmDialog({
         )}
         {children && <div className="mb-3">{children}</div>}
         <div className="flex justify-end gap-2 mt-4">
-          <button
-            onClick={onCancel}
-            className="px-3 py-1.5 text-xs rounded hover:bg-[var(--hover)]"
-            style={{ color: "var(--text-primary)" }}
-          >
+          <Button variant="ghost" size="sm" onClick={onCancel}>
             {cancelText}
-          </button>
-          <button
-            onClick={onConfirm}
-            className={`px-3 py-1.5 text-xs rounded ${danger ? "bg-[var(--danger-fill)] hover:opacity-90 text-white" : ""}`}
-            style={danger ? undefined : { background: "var(--accent)", color: "var(--accent-fg)" }}
-          >
+          </Button>
+          <Button variant={danger ? "dangerSolid" : "primary"} size="sm" onClick={onConfirm}>
             {confirmText}
-          </button>
+          </Button>
         </div>
       </div>
     </div>

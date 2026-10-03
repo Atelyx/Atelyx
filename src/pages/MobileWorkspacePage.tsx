@@ -12,6 +12,7 @@
 import { Settings } from "lucide-react";
 import { cloneElement, useEffect, useRef, useState } from "react";
 import type { ReactElement } from "react";
+import { IconButton } from "@/components/common/Button";
 import { useAppStore } from "@/stores/appStore";
 import { useUiStateStore } from "@/stores/uiStateStore";
 import { usePluginStore } from "@/stores/pluginStore";
@@ -194,14 +195,12 @@ export function MobileWorkspacePage() {
           }}
         >
           <MobileVaultSwitcher label={vaultName} />
-          <button
+          <IconButton
+            icon={<Settings size={16} />}
+            label="设置"
+            size="touch"
             onClick={() => openSettings()}
-            className="w-11 h-11 flex items-center justify-center rounded-sm flex-shrink-0"
-            style={{ color: "var(--text-secondary)" }}
-            aria-label="设置"
-          >
-            <Settings size={16} />
-          </button>
+          />
         </div>
 
         {/* 单视图承载（统一视图槽分派；缺贡献 = 降级占位，与桌面同语义）。

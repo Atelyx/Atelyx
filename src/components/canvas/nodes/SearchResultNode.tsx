@@ -58,7 +58,7 @@ function ResultRow({
         </a>
         <button
           onClick={() => setOpen((v) => !v)}
-          className="flex-shrink-0 hover:opacity-80 text-[10px]"
+          className="flex-shrink-0 hover:opacity-80 text-micro"
           style={{ color: "var(--text-muted)" }}
           title={open ? "收起摘要" : "展开摘要"}
         >
@@ -67,7 +67,7 @@ function ResultRow({
       </div>
       {open && item.snippet && (
         <p
-          className="mt-1 pl-6 text-[11px] leading-relaxed"
+          className="mt-1 pl-6 text-micro leading-relaxed"
           style={{ color: "var(--text-secondary)" }}
         >
           {item.snippet}
@@ -138,7 +138,7 @@ export function SearchResultNode({ id, data, height, selected }: NodeProps) {
           {d.query}
         </span>
         <span
-          className="ml-auto text-[10px] flex-shrink-0"
+          className="ml-auto text-micro flex-shrink-0"
           style={{ color: "var(--text-muted)" }}
         >
           {d.results.length} 条结果

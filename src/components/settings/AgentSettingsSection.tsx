@@ -115,7 +115,7 @@ function ToolCategoryGroup({
                 <span className="flex items-center gap-1.5">
                   {t.label}
                   {t.needsSearch && !searchReady && (
-                    <span className="text-[10px]" style={{ color: "var(--text-muted)" }}>
+                    <span className="text-micro" style={{ color: "var(--text-muted)" }}>
                       （未配置搜索源，发送时自动降级）
                     </span>
                   )}
@@ -298,7 +298,7 @@ export function AgentSettingsSection() {
                   {a.name}
                   {a.builtin && (
                     <span
-                      className="text-[9px] px-1 rounded flex-shrink-0"
+                      className="text-micro px-1 rounded flex-shrink-0"
                       style={{
                         color: "var(--text-muted)",
                         background: "var(--bg-tertiary)",
@@ -310,7 +310,7 @@ export function AgentSettingsSection() {
                   )}
                 </div>
                 <div
-                  className="text-[11px] truncate mt-0.5"
+                  className="text-micro truncate mt-0.5"
                   style={{ color: "var(--text-muted)" }}
                   title={summary(a)}
                 >
@@ -415,7 +415,7 @@ export function AgentSettingsSection() {
                 }}
               />
               <p
-                className="text-[11px] mt-1"
+                className="text-micro mt-1"
                 style={{ color: "var(--text-muted)" }}
               >
                 文件面板右键 .md 可注册为系统提示词

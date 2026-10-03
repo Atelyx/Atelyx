@@ -26,6 +26,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { useState, type ComponentType, type ReactNode } from "react";
+import { IconButton } from "@/components/common/Button";
 import { ProviderSettingsSection } from "@/components/settings/ProviderSettingsSection";
 import { AgentSettingsSection } from "@/components/settings/AgentSettingsSection";
 import { AboutSection } from "@/components/settings/AboutSection";
@@ -175,7 +176,7 @@ function SettingsShell({
         style={{ borderColor: "var(--border-subtle)" }}
       >
         <div className="min-w-0">
-          <h1 className="text-[15px] font-semibold truncate" style={{ color: "var(--text-primary)" }}>
+          <h1 className="text-h2 font-semibold truncate" style={{ color: "var(--text-primary)" }}>
             {page.title}
           </h1>
           <p className="text-xs mt-0.5" style={{ color: "var(--text-muted)" }}>
@@ -184,7 +185,7 @@ function SettingsShell({
         </div>
         {/* 作用域徽标：与左栏分组标题同一口径，扫一眼即知这一页改的是谁 */}
         <span
-          className="ml-auto shrink-0 inline-flex items-center h-5 px-2 rounded-full text-[11px]"
+          className="ml-auto shrink-0 inline-flex items-center h-5 px-2 rounded-full text-micro"
           style={
             page.scope === "vault"
               ? {
@@ -224,15 +225,13 @@ function SettingsShell({
             paddingTop: "env(safe-area-inset-top)",
           }}
         >
-          <button
+          <IconButton
+            icon={<ArrowLeft size={16} />}
+            label="返回工作区"
+            size="touch"
+            className="shrink-0"
             onClick={onClose}
-            aria-label="返回工作区"
-            title="返回工作区"
-            className="w-11 h-11 flex items-center justify-center rounded-sm shrink-0"
-            style={{ color: "var(--text-secondary)" }}
-          >
-            <ArrowLeft size={16} />
-          </button>
+          />
           <span className="text-sm font-semibold truncate" style={{ color: "var(--text-primary)" }}>
             {title}
           </span>
@@ -257,15 +256,12 @@ function SettingsShell({
             {/* 页面标题与关闭：设置是整页视图（不是浮层），返回入口放在左栏顶部 */}
             <div className={`flex items-center gap-2 shrink-0 ${tabsCollapsed ? "justify-center py-3" : "px-3 py-3"}`}>
               {tabsCollapsed ? (
-                <button
+                <IconButton
+                  icon={<ArrowLeft size={15} />}
+                  label="返回工作区"
+                  size="md"
                   onClick={onClose}
-                  aria-label="返回工作区"
-                  title="返回工作区"
-                  className="w-7 h-7 flex items-center justify-center rounded-[var(--radius-sm)] hover:bg-[var(--hover)]"
-                  style={{ color: "var(--text-secondary)" }}
-                >
-                  <ArrowLeft size={15} />
-                </button>
+                />
               ) : (
                 <>
                   <span className="text-sm font-semibold truncate" style={{ color: "var(--text-primary)" }}>
@@ -293,7 +289,7 @@ function SettingsShell({
                   {/* 分组标题：区分「应用级 / 仓库级」；仓库级用金色，应用级用中性色 */}
                   {!tabsCollapsed && (
                     <div
-                      className="flex items-center gap-2 px-2 pb-2 text-[11px] font-semibold tracking-wide"
+                      className="flex items-center gap-2 px-2 pb-2 text-micro font-semibold tracking-wide"
                       style={{ color: group.scope === "vault" ? "var(--accent)" : "var(--text-muted)" }}
                     >
                       <span
@@ -305,7 +301,7 @@ function SettingsShell({
                       <span className="truncate">{group.title}</span>
                       {group.hint && (
                         <span
-                          className="ml-auto truncate font-mono text-[10px] font-normal tracking-normal"
+                          className="ml-auto truncate font-mono text-micro font-normal tracking-normal"
                           style={{ color: "var(--text-muted)" }}
                         >
                           {group.hint}

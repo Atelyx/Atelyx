@@ -171,7 +171,7 @@ export function TableNode({ id, data, width, height, selected }: NodeProps) {
       {/* 底部：行数统计 + 打开提示（fileMissing 不显示） */}
       {!fileMissing && (
         <div
-          className="px-3 py-1 border-t rounded-b-md text-[10px] flex items-center justify-between flex-shrink-0"
+          className="px-3 py-1 border-t rounded-b-md text-micro flex items-center justify-between flex-shrink-0"
           style={{
             borderColor: "var(--border-subtle)",
             color: "var(--text-muted)",

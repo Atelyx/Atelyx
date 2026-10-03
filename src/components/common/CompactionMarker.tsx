@@ -3,6 +3,9 @@
  *
  * 只作提示与摘要展开——被压缩的原始消息仍完整显示在标记上方（非破坏注解），
  * 模型请求历史则由摘要代替该区间（见 `utils/compaction` 的 `splitByCompaction`）。
+ *
+ * 保留原生 button 的一处（脱离基元的原因）：展开/收起行是可点击的标题行（整行 `w-full`
+ * 展开摘要、行内混排图标与等宽计数），语义是行而非按钮。
  */
 import { useState } from "react";
 import { ChevronDown, ChevronRight, Layers } from "lucide-react";
@@ -23,7 +26,7 @@ export function CompactionMarker({ compaction }: { compaction: ConversationCompa
       <button
         type="button"
         onClick={() => setExpanded((v) => !v)}
-        className="flex w-full items-center gap-1.5 text-[11px] leading-snug rounded px-1.5 py-1 text-left"
+        className="flex w-full items-center gap-1.5 text-micro leading-snug rounded px-1.5 py-1 text-left"
         style={{ cursor: "pointer" }}
         title={expanded ? "收起检查点摘要" : "展开检查点摘要"}
       >
@@ -44,7 +47,7 @@ export function CompactionMarker({ compaction }: { compaction: ConversationCompa
       </button>
       {expanded && (
         <pre
-          className="max-h-64 overflow-auto whitespace-pre-wrap break-words px-1.5 pb-1.5 m-0 text-[11px] leading-snug"
+          className="max-h-64 overflow-auto whitespace-pre-wrap break-words px-1.5 pb-1.5 m-0 text-micro leading-snug"
           style={{ color: "var(--text-secondary)", fontFamily: "inherit" }}
         >
           {compaction.summary}

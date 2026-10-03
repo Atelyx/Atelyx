@@ -24,7 +24,7 @@ export function WorkspaceStatusBar() {
 
   return (
     <div
-      className="h-[26px] flex items-center gap-3 px-3 border-t flex-shrink-0 select-none text-[11px]"
+      className="h-[26px] flex items-center gap-3 px-3 border-t flex-shrink-0 select-none text-micro"
       style={{
         background: "var(--bg-secondary)",
         borderColor: "var(--border-subtle)",

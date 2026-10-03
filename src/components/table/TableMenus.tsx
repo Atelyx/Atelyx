@@ -4,6 +4,9 @@
  *
  * 弹层壳统一走 `common/PopupLayer`（视口钳制 + Esc/点击外部关闭 + 容器样式，
  * 经 `common/Menu` 包装）；状态栏计算菜单（StatMenu）固定向上弹出走 PopupLayer 的 align="bottom"。
+ *
+ * 保留原生 button 的两处（脱离基元的原因）：`FieldMenu` / `AddFieldMenu` 内的字段类型
+ * 选项行——自绘下拉的选项行（整行可点、右侧 Check 标识当前项），与 `MenuItem` 同一体系。
  */
 import {
   AlignVerticalSpaceAround,
@@ -21,6 +24,7 @@ import {
 import { useEffect, useRef, useState } from "react";
 import { PopupLayer } from "@/components/common/PopupLayer";
 import { Menu, MenuDivider, MenuItem } from "@/components/common/Menu";
+import { Button } from "@/components/common/Button";
 import { MenuSlotList } from "@/components/plugins/MenuSlot";
 import { CALC_TYPE_LABELS, CALC_TYPES_BY_FIELD, FIELD_TYPE_LABELS } from "@/constants/table";
 import { useTableStore } from "@/stores/tableStore";
@@ -122,7 +126,7 @@ export function FieldMenu({
   if (mode === "options") {
     return (
       <Menu x={x} y={y} onClose={onClose} widthClass="w-52" contentClassName="p-2.5" repositionDeps={[mode]} stopPointerDown>
-        <p className="text-[10px] mb-1" style={{ color: "var(--text-muted)" }}>
+        <p className="text-micro mb-1" style={{ color: "var(--text-muted)" }}>
           每行一个选项
         </p>
         <textarea
@@ -134,14 +138,12 @@ export function FieldMenu({
           style={{ color: "var(--text-primary)" }}
         />
         <div className="flex justify-end gap-1 mt-1.5">
-          <button
-            onClick={onClose}
-            className="px-2 py-0.5 rounded text-xs hover:bg-[var(--hover)]"
-            style={{ color: "var(--text-secondary)" }}
-          >
+          <Button variant="ghost" size="sm" onClick={onClose}>
             取消
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="primary"
+            size="sm"
             onClick={() => {
               setFieldOptions(
                 field.id,
@@ -149,11 +151,9 @@ export function FieldMenu({
               );
               onClose();
             }}
-            className="px-2 py-0.5 rounded text-xs"
-            style={{ background: "color-mix(in srgb, var(--accent) 15%, transparent)", color: "var(--accent)" }}
           >
             确定
-          </button>
+          </Button>
         </div>
       </Menu>
     );
@@ -191,7 +191,7 @@ export function FieldMenu({
             <Pencil size={14} /> 重命名
           </MenuItem>
           <div className="px-3 py-1">
-            <p className="text-[10px] mb-1" style={{ color: "var(--text-muted)" }}>
+            <p className="text-micro mb-1" style={{ color: "var(--text-muted)" }}>
               字段类型
             </p>
             <div className="flex flex-col gap-0.5">
@@ -414,16 +414,16 @@ export function AddFieldMenu({ x, y, onClose }: { x: number; y: number; onClose:
         ))}
       </div>
       <div className="flex justify-end">
-        <button
+        <Button
+          variant="primary"
+          size="sm"
           onClick={() => {
             addField(name.trim() || "字段", type);
             onClose();
           }}
-          className="px-2 py-0.5 rounded text-xs"
-          style={{ background: "color-mix(in srgb, var(--accent) 15%, transparent)", color: "var(--accent)" }}
         >
           添加
-        </button>
+        </Button>
       </div>
     </Menu>
   );

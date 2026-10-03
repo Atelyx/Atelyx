@@ -57,7 +57,7 @@ function Row({
     <button
       type="button"
       onClick={onClick}
-      className="w-full text-left px-3 py-1.5 text-[13px] hover:bg-[var(--hover)] inline-flex items-center justify-between gap-2"
+      className="w-full text-left px-3 py-1.5 text-ui hover:bg-[var(--hover)] inline-flex items-center justify-between gap-2"
       style={{ color: "var(--text-primary)" }}
     >
       <span className="inline-flex items-center gap-1.5 min-w-0">
@@ -65,7 +65,7 @@ function Row({
         <span className="truncate">{children}</span>
       </span>
       {value != null && (
-        <span className="truncate text-[12px]" style={{ color: "var(--text-muted)" }}>
+        <span className="truncate text-caption" style={{ color: "var(--text-muted)" }}>
           {value}
         </span>
       )}
@@ -90,13 +90,13 @@ function Option({
     <button
       type="button"
       onClick={onClick}
-      className="w-full text-left px-3 py-1.5 text-[13px] hover:bg-[var(--hover)] inline-flex items-center justify-between gap-2"
+      className="w-full text-left px-3 py-1.5 text-ui hover:bg-[var(--hover)] inline-flex items-center justify-between gap-2"
       style={{ color: selected ? "var(--accent)" : "var(--text-primary)" }}
     >
       <span className="min-w-0 truncate">
         {children}
         {sub && (
-          <span className="ml-1 text-[11px] truncate" style={{ color: "var(--text-muted)" }}>
+          <span className="ml-1 text-micro truncate" style={{ color: "var(--text-muted)" }}>
             {sub}
           </span>
         )}
@@ -201,7 +201,7 @@ export function ModelSelect({
                 p.models.length === 0 ? null : (
                   <div key={p.id}>
                     <div
-                      className="px-3 pt-1.5 pb-0.5 text-[10px] select-none"
+                      className="px-3 pt-1.5 pb-0.5 text-micro select-none"
                       style={{ color: "var(--text-muted)" }}
                     >
                       {p.name}
@@ -225,7 +225,7 @@ export function ModelSelect({
                 ),
               )}
               {providers.length === 0 && (
-                <div className="px-3 py-2 text-[11px]" style={{ color: "var(--text-muted)" }}>
+                <div className="px-3 py-2 text-micro" style={{ color: "var(--text-muted)" }}>
                   暂无已配置模型（请在设置中添加供应商）
                 </div>
               )}

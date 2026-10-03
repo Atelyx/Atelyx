@@ -5,6 +5,7 @@
  * mobileVaultStore）。作为浮层的一层登记返回处理器：返回键先关它，不落到上一层。
  */
 import { ArrowUp, Folder, Loader2, X } from "lucide-react";
+import { IconButton } from "@/components/common/Button";
 import { useBackHandler } from "@/hooks/useBackHandler";
 import type { AbsoluteDirListing } from "@/types";
 
@@ -42,29 +43,20 @@ export function MobileDirectoryBrowser({
         className="flex-shrink-0 flex items-center gap-2 px-2 h-12 border-b"
         style={{ borderColor: "var(--border-subtle)", background: "var(--bg-secondary)" }}
       >
-        <button
-          onClick={onClose}
-          className="w-11 h-11 flex items-center justify-center rounded-sm flex-shrink-0"
-          style={{ color: "var(--text-secondary)" }}
-          aria-label="关闭"
-        >
-          <X size={18} />
-        </button>
+        <IconButton icon={<X size={18} />} label="关闭" size="touch" onClick={onClose} />
         <span
           className="flex-1 min-w-0 truncate text-xs"
           style={{ color: "var(--text-secondary)", fontFamily: "var(--font-mono)" }}
         >
           {listing?.path ?? "…"}
         </span>
-        <button
-          onClick={() => listing?.parent && onEnter(listing.parent)}
+        <IconButton
+          icon={<ArrowUp size={18} />}
+          label="返回上级"
+          size="touch"
           disabled={!listing?.parent}
-          className="w-11 h-11 flex items-center justify-center rounded-sm flex-shrink-0 disabled:opacity-40"
-          style={{ color: "var(--text-secondary)" }}
-          aria-label="返回上级"
-        >
-          <ArrowUp size={18} />
-        </button>
+          onClick={() => listing?.parent && onEnter(listing.parent)}
+        />
       </div>
 
       <div className="flex-1 min-h-0 overflow-y-auto">

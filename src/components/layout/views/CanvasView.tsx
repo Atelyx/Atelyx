@@ -430,7 +430,7 @@ export const CanvasView = memo(function CanvasView({
             {canvasPeers.map((p) => (
               <span
                 key={p.peerId}
-                className="flex items-center gap-1.5 px-1.5 py-0.5 rounded border text-[11px]"
+                className="flex items-center gap-1.5 px-1.5 py-0.5 rounded border text-micro"
                 style={{
                   background: "var(--bg-tertiary)",
                   borderColor: "var(--border)",
@@ -608,7 +608,7 @@ export const CanvasView = memo(function CanvasView({
       {/* 画布状态栏：节点/连线计数 + 缩放。
           保存态不放这里——面板头 ViewStatusIndicator 已是唯一出处，此处重复会出现两条「保存中…」 */}
       <div
-        className="flex items-center gap-2 px-3 py-1.5 border-t flex-shrink-0 text-[11px] select-none"
+        className="flex items-center gap-2 px-3 py-1.5 border-t flex-shrink-0 text-micro select-none"
         style={{
           background: "var(--bg-secondary)",
           borderColor: "var(--border-subtle)",

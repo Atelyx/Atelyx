@@ -32,6 +32,7 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Button, IconButton } from "@/components/common/Button";
 import { PopupLayer, type PopupAnchor } from "@/components/common/PopupLayer";
 import { COMMON_PROPERTY_KEYS } from "@/constants/notes";
 import {
@@ -773,14 +774,14 @@ export function NotePropertiesView({
     const type = isBadgeKey(key) ? "tag" : inferPropertyType(key, data[key]);
     return (
       <div className="w-24 flex-shrink-0 flex items-center gap-0.5 min-w-0">
-        <button
-          className="flex-shrink-0 p-0.5 rounded hover:bg-[var(--hover)] hover:opacity-90 transition-colors cursor-pointer"
-          style={{ color: "var(--text-muted)" }}
+        <IconButton
+          className="flex-shrink-0 cursor-pointer"
+          variant="subtle"
+          size="xs"
+          icon={TYPE_ICONS[type]}
+          label={`类型：${TYPE_LABELS[type]}（点击切换）`}
           onClick={(e) => openTypeMenu(key, e)}
-          title={`类型：${TYPE_LABELS[type]}（点击切换）`}
-        >
-          {TYPE_ICONS[type]}
-        </button>
+        />
         {isEditing(slot) ? (
           <CandidateInput
             key={slotKey(slot)}
@@ -793,19 +794,19 @@ export function NotePropertiesView({
             onCancel={() => setEditing(null)}
           />
         ) : (
-          <button
-            className="flex-1 min-w-0 truncate text-left text-sm leading-none py-0.5 px-1 rounded-[var(--radius-sm)] hover:bg-[var(--hover)] hover:opacity-90 cursor-pointer transition-colors"
-            style={{ color: "var(--text-muted)" }}
+          <Button
+            variant="subtle"
+            size="xs"
+            className="flex-1 min-w-0 justify-start truncate text-left cursor-pointer"
             onClick={(e) => {
               keyChipWidthRef.current = e.currentTarget.offsetWidth;
               setAddingItem(null);
               setAddOpen(false);
               setEditing(slot);
             }}
-            title={key}
           >
             {key}
-          </button>
+          </Button>
         )}
       </div>
     );
@@ -823,16 +824,17 @@ export function NotePropertiesView({
             style={TAG_BADGE_STYLE}
           >
             #{String(item)}
-            <button
-              className="ml-1 align-middle opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 hover:text-[var(--danger)]"
+            <IconButton
+              className="ml-1 align-middle opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100"
+              variant="danger"
+              size="2xs"
+              icon={<X size={10} />}
+              label="删除标签"
               onClick={(e) => {
                 e.stopPropagation();
                 removeArrayItem(key, i);
               }}
-              title="删除"
-            >
-              <X size={10} />
-            </button>
+            />
           </span>
         ) : isEditing({ part: "value", key, index: i }) ? (
           key === "tags" ? (
@@ -870,16 +872,17 @@ export function NotePropertiesView({
           >
             <span className="opacity-60 mr-0.5">#</span>
             {item}
-            <button
-              className="ml-1 align-middle opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 hover:text-[var(--danger)]"
+            <IconButton
+              className="ml-1 align-middle opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100"
+              variant="danger"
+              size="2xs"
+              icon={<X size={10} />}
+              label="删除标签"
               onClick={(e) => {
                 e.stopPropagation();
                 removeArrayItem(key, i);
               }}
-              title="删除"
-            >
-              <X size={10} />
-            </button>
+            />
           </span>
         )
       )}
@@ -906,18 +909,18 @@ export function NotePropertiesView({
           />
         )
       ) : (
-        <button
-          className="w-4 h-4 rounded-full flex items-center justify-center hover:opacity-80 flex-shrink-0"
-          style={{ color: "var(--text-muted)" }}
+        <IconButton
+          className="flex-shrink-0"
+          variant="subtle"
+          size="2xs"
+          icon={<Plus size={11} />}
+          label="添加标签项"
           onClick={() => {
             setEditing(null);
             setAddOpen(false);
             setAddingItem(key);
           }}
-          title="添加"
-        >
-          <Plus size={11} />
-        </button>
+        />
       )}
     </div>
   );
@@ -948,16 +951,17 @@ export function NotePropertiesView({
             <Clock size={12} style={{ color: "var(--text-muted)" }} className="flex-shrink-0" />
             <span className="truncate">{String(item)}</span>
             {/* 删除钮恒显示（非字符串项也可删，删数组元素不破坏 YAML 类型） */}
-            <button
-              className="ml-auto opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 hover:text-[var(--danger)] flex-shrink-0"
+            <IconButton
+              className="ml-auto opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 flex-shrink-0"
+              variant="danger"
+              size="xs"
+              icon={<X size={12} />}
+              label="删除列表项"
               onClick={(e) => {
                 e.stopPropagation();
                 removeArrayItem(key, i);
               }}
-              title="删除"
-            >
-              <X size={12} />
-            </button>
+            />
           </div>
         )
       )}
@@ -969,17 +973,18 @@ export function NotePropertiesView({
           onCancel={() => setAddingItem(null)}
         />
       ) : (
-        <button
-          className="flex items-center gap-0.5 text-xs hover:opacity-80"
-          style={{ color: "var(--text-muted)" }}
+        <Button
+          variant="subtle"
+          size="xs"
+          icon={<Plus size={11} />}
           onClick={() => {
             setEditing(null);
             setAddOpen(false);
             setAddingItem(key);
           }}
         >
-          <Plus size={11} /> 添加
-        </button>
+          添加
+        </Button>
       )}
     </div>
   );
@@ -997,34 +1002,42 @@ export function NotePropertiesView({
     >
       {/* 标题栏：点击整行折叠/展开（Chevron 指示），默认展开；无属性时不显示标题 */}
       {hasProps && (
-        <button
-          className="w-full flex items-center gap-1 text-xs mb-1.5 rounded hover:opacity-80 cursor-pointer"
-          style={{ color: "var(--text-muted)" }}
+        <Button
+          variant="subtle"
+          size="xs"
+          block
+          className="justify-start mb-1.5 cursor-pointer"
+          icon={collapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
           onClick={() => setCollapsed((v) => !v)}
           title={collapsed ? "展开笔记属性" : "折叠笔记属性"}
         >
-          {collapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
           <span>笔记属性（{entries.length}）</span>
-        </button>
+        </Button>
       )}
 
       {/* 内容区：grid-rows 过渡动画（0fr↔1fr，WebView2 支持；折叠时状态保留） */}
       <div
-        className={hasProps ? "grid transition-[grid-template-rows] duration-200" : undefined}
+        className={
+          hasProps
+            ? "grid transition-[grid-template-rows] [transition-duration:var(--dur-base)]"
+            : undefined
+        }
         style={hasProps ? { gridTemplateRows: collapsed ? "0fr" : "1fr" } : undefined}
       >
         <div className={hasProps ? "overflow-hidden" : undefined}>
           {parseError ? (
             <div className="text-xs py-1 flex items-center gap-2" style={{ color: "var(--danger)" }}>
               <span>YAML 格式错误，请检查（属性面板暂不可编辑）</span>
-              <button
-                className="px-1.5 py-0.5 rounded border hover:opacity-80 flex-shrink-0"
+              <Button
+                variant="danger"
+                size="xs"
+                className="border flex-shrink-0"
                 style={{ borderColor: "var(--danger)" }}
                 onClick={onOpenSource}
                 title="切换到源码模式查看并修复 YAML"
               >
                 打开源码模式
-              </button>
+              </Button>
             </div>
           ) : (
             <>
@@ -1049,8 +1062,10 @@ export function NotePropertiesView({
                               onCancel={() => setEditing(null)}
                             />
                           ) : typeof value === "string" ? (
-                            <button
-                              className="flex-1 min-w-0 text-left text-sm truncate hover:opacity-80 cursor-pointer"
+                            <Button
+                              variant="subtle"
+                              size="xs"
+                              className="flex-1 min-w-0 justify-start truncate text-left cursor-pointer"
                               onClick={() => {
                                 setAddingItem(null);
                                 setAddOpen(false);
@@ -1059,7 +1074,7 @@ export function NotePropertiesView({
                               title="点击编辑"
                             >
                               {value}
-                            </button>
+                            </Button>
                           ) : (
                             <span
                               className="flex-1 min-w-0 text-sm truncate"
@@ -1072,13 +1087,14 @@ export function NotePropertiesView({
                                   : String(value)}
                             </span>
                           )}
-                          <button
-                            className="opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 hover:text-[var(--danger)] flex-shrink-0"
+                          <IconButton
+                            className="opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 flex-shrink-0"
+                            variant="danger"
+                            size="xs"
+                            icon={<X size={12} />}
+                            label="删除属性"
                             onClick={() => removeField(key)}
-                            title="删除属性"
-                          >
-                            <X size={12} />
-                          </button>
+                          />
                         </div>
                       )}
                     </div>
@@ -1192,14 +1208,16 @@ export function NotePropertiesView({
                   )}
                 </div>
               ) : (
-                <button
-                  className="mt-1.5 flex items-center gap-1 text-xs rounded px-1.5 py-0.5 hover:opacity-80"
-                  style={{ color: "var(--text-muted)" }}
+                <Button
+                  variant="subtle"
+                  size="xs"
+                  className="mt-1.5 justify-start"
+                  icon={<Plus size={12} />}
                   onClick={openAddField}
                   title="添加属性"
                 >
-                  <Plus size={12} /> 添加属性
-                </button>
+                  添加属性
+                </Button>
               )}
             </>
           )}

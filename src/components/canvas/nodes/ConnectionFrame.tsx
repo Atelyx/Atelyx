@@ -33,8 +33,6 @@ const STRIP_IN = 4;
 const STRIP = STRIP_OUT + STRIP_IN;
 /** 连接圆点直径（px）：默认 handle 圆点（6px）偏小，放大到两倍保证可见性 */
 const DOT_SIZE = 12;
-/** 渐显/淡出与选中阴影的过渡时长（ms）：视觉按需出现的统一节奏 */
-const FADE_MS = 150;
 /** 条带离开延迟淡出（ms）：跨边移动/短暂抖动时不闪烁，重入即取消 */
 const LEAVE_DELAY_MS = 120;
 
@@ -153,7 +151,7 @@ export function ConnectionFrame({ topType, selected }: Props) {
           boxShadow: selected
             ? "0 0 10px color-mix(in srgb, var(--accent) 55%, transparent)"
             : "0 0 0 transparent",
-          transition: `box-shadow ${FADE_MS}ms ease`,
+          transition: `box-shadow var(--dur-base) var(--ease)`,
         }}
       />
       {/* 连接圆点（外缘 = 连线锚点，圆心贴节点边缘）：鼠标移到对应边条带时渐显 */}
@@ -166,7 +164,7 @@ export function ConnectionFrame({ topType, selected }: Props) {
             ...DOT_BASE,
             ...dotStyle(p),
             opacity: hoverSide === p ? 1 : 0,
-            transition: `opacity ${FADE_MS}ms ease`,
+            transition: `opacity var(--dur-base) var(--ease)`,
           }}
         />
       ))}
