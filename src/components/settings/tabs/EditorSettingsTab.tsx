@@ -73,7 +73,7 @@ export function EditorSettingsTab() {
       {rebuildConfirm && (
         <ConfirmDialog
           title="重建内部链接"
-          description="将批量改写仓库内全部 .md 笔记的链接写法，统一为标准 Markdown「[名](基于仓库的路径)」。此操作不可撤销，建议先确认重要笔记已备份！"
+          description="将批量改写仓库内全部 .md 笔记的链接写法，统一为标准 Markdown「[名](基于仓库的路径)」。此操作不可撤销，建议先备份重要笔记。"
           confirmText="开始重建"
           onConfirm={runRebuild}
           onCancel={() => setRebuildConfirm(false)}

@@ -1898,7 +1898,7 @@ fn restore_retained_data(retention_base: &Path, id: &str, target_dir: &Path) -> 
     }
     let data = target_dir.join("data");
     if data.exists() {
-        return Some("检测到该插件保留过数据，但插件目录已有 data 目录；保留的数据原样留存于 plugin-data 目录".into());
+        return Some("插件目录已有 data 目录，保留的数据原样留存于 plugin-data 目录".into());
     }
     // 同卷优先 rename（原子）；跨卷（本地链接源目录在另一块盘）回退为「复制到落位目录内临时名
     // → 同卷改名」，复制失败时清掉半成品，保留区原样留存可重试。

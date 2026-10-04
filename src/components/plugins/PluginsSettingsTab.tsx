@@ -408,7 +408,7 @@ export function PluginsSettingsTab() {
       {confirmRollback && !detailsId && plugins[confirmRollback] && (
         <ConfirmDialog
           title={`回退插件「${plugins[confirmRollback].manifest.name}」`}
-          description={`将插件代码恢复到 v${plugins[confirmRollback].previousVersion ?? "上一版本"}，并保留当前插件数据。回退成功后将清空保留版本，是否继续？`}
+          description={`将插件代码恢复到 v${plugins[confirmRollback].previousVersion ?? "上一版本"}，并保留当前插件数据。回退成功后将清空保留版本`}
           confirmText="回退"
           danger={false}
           onConfirm={() => confirmRollbackFor(confirmRollback)}
@@ -421,7 +421,7 @@ export function PluginsSettingsTab() {
         // 随应用分发行无磁盘数据，两者卸载不涉及保留问题，维持确认/取消）
         <PluginUninstallDialog
           title={`卸载插件「${plugins[confirmUninstall]?.manifest.name ?? confirmUninstall}」`}
-          description="卸载后插件贡献的功能随即移除。保留配置卸载会把插件数据搬到保留区，重装同 id 插件时自动恢复；彻底卸载则连同数据一并删除、不可恢复。"
+          description="保留配置卸载：插件数据搬到保留区，重装同 id 插件时自动恢复；彻底卸载：数据一并删除，不可恢复。"
           onKeepData={() => {
             const id = confirmUninstall;
             setConfirmUninstall(null);

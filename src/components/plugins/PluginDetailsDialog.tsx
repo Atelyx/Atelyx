@@ -252,7 +252,7 @@ export function PluginDetailsDialog({
       {rollbackConfirm && (
         <ConfirmDialog
           title={`回退插件「${plugin.manifest.name}」`}
-          description={`将插件代码恢复到 v${plugin.previousVersion ?? "上一版本"}，并保留当前插件数据。回退成功后将清空保留版本，是否继续？`}
+          description={`将插件代码恢复到 v${plugin.previousVersion ?? "上一版本"}，并保留当前插件数据。回退成功后将清空保留版本`}
           confirmText="回退"
           danger={false}
           onConfirm={onConfirmRollback}

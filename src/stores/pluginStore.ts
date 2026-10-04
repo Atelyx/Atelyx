@@ -682,7 +682,7 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
     if (legacyVaultPluginRoots?.length) {
       useNotificationStore.getState().notify({
         level: "warning",
-        message: `以下仓库仍保留随仓库安装的插件目录（<仓库>/.atelyx/plugins），其中的插件不会加载：${legacyVaultPluginRoots.join("；")}。如需使用请以应用级重新安装，确认无用后可删除目录`,
+        message: `以下仓库仍保留随仓库安装的插件目录（.atelyx/plugins），其中的插件不会加载：${legacyVaultPluginRoots.join("；")}。如需使用请以应用级重新安装，确认无用后可删除目录`,
       });
     }
     const plugins: Record<string, InstalledPlugin> = {};
