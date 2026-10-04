@@ -167,7 +167,7 @@ export function attachMarkdownInteractions(container: HTMLElement, getOptions: O
     if (mentionKey !== null) {
       event.preventDefault();
       event.stopPropagation();
-      opts.onMentionClick?.(mentionKey, (el.textContent ?? "").replace(/^@/, ""));
+      opts.onMentionClick?.(mentionKey, (el.textContent ?? "").replace(/^[@#]/, ""));
       return;
     }
 

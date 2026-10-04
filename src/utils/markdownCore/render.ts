@@ -721,7 +721,7 @@ function renderSpan(span: InlineSpan, options: EditRenderOptions, source: string
         `</sup>`
       );
     case "mention":
-      return `<span class="mention-capsule"${at} data-md-mention-key="${escapeHtml(span.key)}">@${escapeHtml(span.label)}</span>`;
+      return `<span class="mention-capsule"${at} data-md-mention-key="${escapeHtml(span.key)}">${escapeHtml(span.char)}${escapeHtml(span.label)}</span>`;
     case "html":
       return (
         `<span class="md-editor-html"${at}${ownAttrs(options)}>` +

@@ -30,7 +30,7 @@ export type InlineSpan =
   | { kind: "image"; from: number; to: number; src: string; alt: string; width: string | null; height: string | null; title: string | null }
   | { kind: "tag"; from: number; to: number; tag: string }
   | { kind: "footnoteRef"; from: number; to: number; label: string }
-  | { kind: "mention"; from: number; to: number; key: string; label: string }
+  | { kind: "mention"; from: number; to: number; key: string; label: string; char: "@" | "#" }
   | { kind: "html"; from: number; to: number; html: string }
   | { kind: "hardBreak"; from: number; to: number };
 
@@ -77,7 +77,7 @@ export type MarkdownLinkResolver = (href: string) => LinkForm;
 export interface ParseOptions {
   /** 链接形态判定（缺省全部判为 "plain"）。 */
   resolveLink?: MarkdownLinkResolver;
-  /** `@label` 胶囊候选（宿主提供的用户/节点列表）。 */
+  /** mention 胶囊候选（宿主提供的用户/节点列表；源文本以 `@` 或 `#` 触发）。 */
   mentions?: { key: string; label: string }[];
 }
 

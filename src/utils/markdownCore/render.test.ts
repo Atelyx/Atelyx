@@ -86,6 +86,11 @@ describe("renderMarkdownToHtml 类名契约", () => {
     expect(html).toContain('<div class="md-editor-html">');
   });
 
+  it("mention # 触发符按源文本渲染", () => {
+    const out2 = renderMarkdownToHtml("#Alice", { mentions: [{ key: "u1", label: "Alice" }] });
+    expect(out2).toContain('<span class="mention-capsule" data-md-mention-key="u1">#Alice</span>');
+  });
+
   it("块级数学", () => {
     const out = renderMarkdownToHtml("$$\ny^2\n$$");
     expect(out).toContain("md-editor-math md-editor-math-block");

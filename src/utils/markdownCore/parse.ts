@@ -2,7 +2,7 @@
  * Markdown 内核解析：纯文本 → 框架无关文档规格（MarkdownDocument）。
  *
  * 独立用 @lezer/markdown 解析；lezer 不识别的语法（`[[wiki]]`、`#标签`、`==高亮==`、
- * `%%注释%%`、行内/块级数学、脚注、`@mention`）按行正则补充，正则命中若落在代码/链接/
+ * `%%注释%%`、行内/块级数学、脚注、`@`/`#` mention）按行正则补充，正则命中若落在代码/链接/
  * 图片/HTML 等不透明区间内则跳过。所有 from/to 均为源文本绝对偏移。
  */
 import { parser, GFM } from "@lezer/markdown";
@@ -843,38 +843,50 @@ function scanLine(ctx: Ctx, lineText: string, lineFrom: number): RawMatch[] {
   for (const r of inlineMathRanges(lineText, lineFrom)) {
     push(r.from, r.to, () => ({ kind: "mathInline", from: r.from, to: r.to, tex: ctx.source.slice(r.from + 1, r.to - 1) }));
   }
-  for (const r of inlineTagRanges(lineText, lineFrom)) {
-    push(r.from, r.to, () => ({ kind: "tag", from: r.from, to: r.to, tag: ctx.source.slice(r.from + 1, r.to) }));
-  }
+  // mention（`@`/`#` 触发符 + 宿主候选 label）：先于 tag 收集——`#label` 与 `#标签` 同形，
+  // 宿主显式提供的候选（对话气泡的引用胶囊）优先于标签语法；已知 mention 命中的区间
+  // 不再产出 tag（同一区间两个候选按「先到先得」接受，mention 先 push 即胜出）。
   const mentions = ctx.options.mentions;
   if (mentions && mentions.length > 0) {
-    let i = 0;
-    while (i < lineText.length) {
-      const at = lineText.indexOf("@", i);
-      if (at === -1) break;
-      const prev = at > 0 ? lineText[at - 1] ?? "" : "";
-      if (prev !== "" && /[\p{L}\p{N}]/u.test(prev)) {
-        i = at + 1;
-        continue;
-      }
-      let best: { key: string; label: string } | null = null;
-      for (const mn of mentions) {
-        if (!mn.label) continue;
-        if (!lineText.startsWith(mn.label, at + 1)) continue;
-        const after = lineText[at + 1 + mn.label.length];
-        if (after === undefined || !/[\p{L}\p{N}]/u.test(after)) {
-          if (!best || mn.label.length > best.label.length) best = mn;
+    const mentionRanges: Array<{ from: number; to: number }> = [];
+    for (const trigger of ["@", "#"] as const) {
+      let i = 0;
+      while (i < lineText.length) {
+        const at = lineText.indexOf(trigger, i);
+        if (at === -1) break;
+        const prev = at > 0 ? lineText[at - 1] ?? "" : "";
+        if (prev !== "" && /[\p{L}\p{N}]/u.test(prev)) {
+          i = at + 1;
+          continue;
         }
+        let best: { key: string; label: string } | null = null;
+        for (const mn of mentions) {
+          if (!mn.label) continue;
+          if (!lineText.startsWith(mn.label, at + 1)) continue;
+          const after = lineText[at + 1 + mn.label.length];
+          if (after === undefined || !/[\p{L}\p{N}]/u.test(after)) {
+            if (!best || mn.label.length > best.label.length) best = mn;
+          }
+        }
+        if (!best) {
+          i = at + 1;
+          continue;
+        }
+        const from = lineFrom + at;
+        const to = from + 1 + best.label.length;
+        const hit = best;
+        push(from, to, () => ({ kind: "mention", from, to, key: hit.key, label: hit.label, char: trigger }));
+        mentionRanges.push({ from, to });
+        i = to - lineFrom;
       }
-      if (!best) {
-        i = at + 1;
-        continue;
-      }
-      const from = lineFrom + at;
-      const to = from + 1 + best.label.length;
-      const hit = best;
-      push(from, to, () => ({ kind: "mention", from, to, key: hit.key, label: hit.label }));
-      i = to - lineFrom;
+    }
+    for (const r of inlineTagRanges(lineText, lineFrom)) {
+      if (mentionRanges.some((m) => r.from < m.to && r.to > m.from)) continue;
+      push(r.from, r.to, () => ({ kind: "tag", from: r.from, to: r.to, tag: ctx.source.slice(r.from + 1, r.to) }));
+    }
+  } else {
+    for (const r of inlineTagRanges(lineText, lineFrom)) {
+      push(r.from, r.to, () => ({ kind: "tag", from: r.from, to: r.to, tag: ctx.source.slice(r.from + 1, r.to) }));
     }
   }
   return out;

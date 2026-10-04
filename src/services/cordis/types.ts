@@ -352,7 +352,7 @@ export interface NoteService {
 export interface PluginMarkdownOptions {
   /** 是否启用 KaTeX（缺省启用；关闭时数学回显源码）。 */
   katex?: boolean;
-  /** `@label` 胶囊候选。 */
+  /** mention 胶囊候选（源文本以 `@` 或 `#` 触发）。 */
   mentions?: { key: string; label: string }[];
 }
 

@@ -196,8 +196,18 @@ describe("parseMarkdown 行内 span", () => {
   it("行内数学 / 脚注引用 / mention / 图片尺寸", () => {
     expect(find("mathInline")).toMatchObject({ tex: "e=mc^2" });
     expect(find("footnoteRef")).toMatchObject({ label: "fn" });
-    expect(find("mention")).toMatchObject({ key: "u1", label: "Alice" });
+    expect(find("mention")).toMatchObject({ key: "u1", label: "Alice", char: "@" });
     expect(find("image")).toMatchObject({ src: "p.png", alt: "img", width: "100", height: "50" });
+  });
+
+  it("# 触发的已知 mention 优先于标签语法，未知候选仍为标签", () => {
+    const spans2 = inlineSpans(parseMarkdown("#Alice #unknown", options).blocks);
+    expect(spans2.find((s) => s.kind === "mention")).toMatchObject({
+      key: "u1",
+      label: "Alice",
+      char: "#",
+    });
+    expect(spans2.find((s) => s.kind === "tag")).toMatchObject({ tag: "unknown" });
   });
 
   it("自动链接 <https://x> 剥角括号", () => {
