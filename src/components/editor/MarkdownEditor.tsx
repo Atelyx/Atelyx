@@ -315,6 +315,35 @@ export function MarkdownEditor({
     }
   }, []);
 
+  /**
+   * 绘制协作者光标与选区（awareness 的 selection 字段，legacy cursor 只画光标；本端 clientID 跳过）。
+   * 光标竖线画在 head（对方光标现行处），选区矩形铺 anchor..head 区间。
+   * 内容重绘与滚动都会调用：矩形按当前版面实时测量，重绘后位置即随版面滚动/位移。
+   */
+  const drawRemoteCursors = useCallback((): void => {
+    const awareness = collabRef.current?.awareness;
+    const index = indexRef.current;
+    const overlay = overlayRef.current;
+    if (!awareness || !index || !overlay) return;
+    const origin = overlay.el.getBoundingClientRect();
+    const cursors: RemoteCursor[] = [];
+    for (const [clientId, state] of awareness.getStates()) {
+      if (clientId === awareness.clientID) continue;
+      const selection = (state as { selection?: { anchor: number; head?: number } }).selection;
+      const raw = selection ?? (state as { cursor?: { anchor: number } }).cursor;
+      if (!raw || typeof raw.anchor !== "number") continue;
+      const head = selection && typeof selection.head === "number" ? selection.head : raw.anchor;
+      const user = (state as { user?: { name?: string; color?: string } }).user;
+      cursors.push({
+        rects: rangeRects(index, Math.min(raw.anchor, head), Math.max(raw.anchor, head)),
+        rect: caretRect(index, head),
+        label: user?.name ?? "",
+        color: user?.color ?? "var(--accent)",
+      });
+    }
+    overlay.setRemoteCursors(cursors, origin);
+  }, []);
+
   /** 内容重绘（结构变化：文本变更 / 富装饰块进出 / 只读翻转）。 */
   const renderContent = useCallback(
     (text: string, activeOffset: number | undefined): void => {
@@ -356,8 +385,10 @@ export function MarkdownEditor({
       if (scrollRef.current) scrollRef.current.scrollTop = scrollTop;
       hydrateMarkdownImages(content, getOptions);
       decorateMarkdownControls(content);
+      // 版面随内容变化（本端打字位移 / 远端合入重排），协作者光标与选区按新版面重测
+      drawRemoteCursors();
     },
-    [getOptions, revealAt],
+    [drawRemoteCursors, getOptions, revealAt],
   );
 
   /**
@@ -395,25 +426,6 @@ export function MarkdownEditor({
         else if (caret.bottom > box.bottom) scroll.scrollTop += caret.bottom - box.bottom + 8;
       }
     }
-  }, []);
-
-  /** 绘制协作者光标（awareness 的 selection/cursor 字段；本端 clientID 跳过）。 */
-  const drawRemoteCursors = useCallback((): void => {
-    const awareness = collabRef.current?.awareness;
-    const index = indexRef.current;
-    const overlay = overlayRef.current;
-    if (!awareness || !index || !overlay) return;
-    const origin = overlay.el.getBoundingClientRect();
-    const cursors: RemoteCursor[] = [];
-    for (const [clientId, state] of awareness.getStates()) {
-      if (clientId === awareness.clientID) continue;
-      const raw = (state as { selection?: { anchor: number; head?: number }; cursor?: { anchor: number } }).selection
-        ?? (state as { cursor?: { anchor: number } }).cursor;
-      if (!raw || typeof raw.anchor !== "number") continue;
-      const user = (state as { user?: { name?: string; color?: string } }).user;
-      cursors.push({ rect: caretRect(index, raw.anchor), label: user?.name ?? "", color: user?.color ?? "var(--accent)" });
-    }
-    overlayRef.current?.setRemoteCursors(cursors, origin);
   }, []);
 
   /** 光标是否落在不回显候选的语法区间（代码 / raw HTML）：此时不弹双链候选。 */
@@ -670,8 +682,13 @@ export function MarkdownEditor({
     };
     ytext.observe(applyRemote);
     awareness.on("change", drawRemoteCursors);
+    // 绘制层不随内容滚动：滚动后按新版面重测协作者光标与选区（编辑/预览两态同一出口——
+    // 预览态无输入面，滚动重绘只能挂在这里，不能挂输入面的焦点刷新路径）
+    const scrollEl = scrollRef.current;
+    scrollEl?.addEventListener("scroll", drawRemoteCursors, { passive: true });
     drawRemoteCursors();
     return () => {
+      scrollEl?.removeEventListener("scroll", drawRemoteCursors);
       ytext.unobserve(applyRemote);
       awareness.off("change", drawRemoteCursors);
     };
