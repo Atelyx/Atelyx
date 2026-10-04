@@ -52,6 +52,13 @@ pub(crate) fn create_panel_window_internal(
             .min_inner_size(320.0, 240.0)
             // 启动背景色 = 主窗口 tauri.conf.json 的 backgroundColor，防新建窗口白闪
             .background_color(STARTUP_BG);
+        // UI 驻留托盘（静默自启/主窗口已驻留）期间建窗不可见，显示由 show_all_windows
+        // 统一补；标志未托管（不可能在驻留语义外建窗的极端时序）按可见处理
+        let hidden = app
+            .try_state::<crate::tray::UiHidden>()
+            .map(|flag| flag.get())
+            .unwrap_or(false);
+        let builder = builder.visible(!hidden);
         let win = builder.build();
         match win {
             Ok(win) => {
@@ -59,7 +66,10 @@ pub(crate) fn create_panel_window_internal(
                 win.on_window_event(window_event_handler(app, label_owned.clone()));
                 // 种子化初始 bounds：新窗未触发 Moved/Resized 前拖拽解析读不到（主窗口同，见 setup）
                 crate::layout::seed_window_bounds(app, &label_owned);
-                let _ = win.set_focus();
+                // 驻留托盘期间建出的隐藏窗口不抢焦点
+                if !hidden {
+                    let _ = win.set_focus();
+                }
             }
             Err(e) => {
                 // if cfg! 而非 #[cfg]：e 语法上被引用，release 不触发 unused_variables 告警（恒假分支被消除）

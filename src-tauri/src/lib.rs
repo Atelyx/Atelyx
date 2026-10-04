@@ -19,6 +19,7 @@ mod layout_window;
 mod net_guard;
 mod plugin_build;
 mod plugin_process;
+mod tray;
 mod vault;
 
 use std::sync::Arc;
@@ -31,17 +32,13 @@ use tauri::Manager;
 pub fn run() {
     let builder = tauri::Builder::default();
     // 单实例（桌面，须最先注册）：第二个进程启动即退出，并在首个实例内回调。
-    // 登录自启的进程带 --autorun → 静默退出不抢焦点；用户手动二次启动 → 聚焦主窗口
+    // 登录自启的进程带 --autorun → 静默退出不抢焦点；用户手动二次启动 → 显示全部窗口
     #[cfg(desktop)]
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
         if args.iter().any(|arg| arg == "--autorun") {
             return;
         }
-        if let Some(main) = app.get_webview_window("main") {
-            let _ = main.unminimize();
-            let _ = main.show();
-            let _ = main.set_focus();
-        }
+        tray::show_all_windows(app);
     }));
     let builder = builder
         .plugin(tauri_plugin_dialog::init())
@@ -73,6 +70,21 @@ pub fn run() {
                 main_win.on_window_event(layout::window_event_handler(app.handle(), "main".into()));
                 // 种子化初始 bounds：启动后未移动过时 on_window_event 不触发，拖拽解析读不到
                 layout::seed_window_bounds(app.handle(), "main");
+            }
+            // 托盘与驻留标志（桌面）：登录自启（--autorun）静默启动，UI 藏在托盘不显示
+            // 主窗口；手动启动照常显示。主窗口 visible 先由配置置 false，此处按启动方式
+            // 决定是否 show。驻留标志供撕裂窗口建窗决定可见性（见 tray.rs）。
+            #[cfg(desktop)]
+            {
+                let autorun = std::env::args().any(|arg| arg == "--autorun");
+                app.manage(tray::UiHidden::new(autorun));
+                app.manage(tray::ExitWait::default());
+                if !autorun {
+                    if let Some(main_win) = app.get_webview_window("main") {
+                        let _ = main_win.show();
+                    }
+                }
+                tray::create_tray(app.handle())?;
             }
             // 插件目录：先对账恢复更新中途崩溃被搬走的插件目录（.bak-* 即时恢复），再清扫超龄残留
             let sweep_app = app.handle().clone();
@@ -229,6 +241,9 @@ pub fn run() {
             commands::update::download_update_package,
             commands::update::cancel_update_download,
             commands::update::install_downloaded_update,
+            // 系统托盘（图标/菜单、驻留显隐与完全退出协调，见 tray.rs；移动端无托盘语义）
+            tray::hide_to_tray,
+            tray::exit_flush_done,
             // 移动端专属（安卓本地仓库：存储权限、私有回落目录、自研目录浏览；桌面端一律拒绝）
             commands::mobile::android_has_all_files_access,
             commands::mobile::android_request_all_files_access,

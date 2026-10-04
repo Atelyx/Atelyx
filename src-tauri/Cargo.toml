@@ -17,7 +17,8 @@ crate-type = ["rlib", "cdylib", "staticlib"]
 tauri-build = { version = "2.0", features = [] }
 
 [dependencies]
-tauri = { version = "2.1", features = [] }
+# tray-icon：系统托盘（图标 + 右键菜单，见 tray.rs）；桌面能力，移动端构建忽略
+tauri = { version = "2.1", features = ["tray-icon"] }
 tauri-plugin-dialog = "2.0"
 # 剪贴板写入（表格图片复制：前端 canvas 解码 RGBA → 核心 image 资源 → 本插件 arboard 写系统剪贴板）
 tauri-plugin-clipboard-manager = "2"
