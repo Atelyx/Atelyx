@@ -49,10 +49,12 @@ import * as bus from "@/services/windowBus";
 import type { DropTargetInfo, OpenFileChangedPayload } from "@/services/windowBus";
 import type { DragBroadcast, DragHit } from "@/types";
 import {
+  ackExitFlushDone,
   getCurrentOuterPosition,
   getCurrentWindowLabel,
   isMouseLeftDown,
   onCloseRequested,
+  onTrayExitRequested,
   onWindowMoved,
   setWindowTitle,
 } from "@/services/window";
@@ -881,6 +883,18 @@ export const usePanelStore = create<PanelStore>((set, get) => {
           await ps.releaseView(v);
         }
         await ps.notifyPanelClosed();
+      });
+      // 托盘完全退出：只落盘自己托管视图后回报；不动布局模型条目（进程退出时条目保留，
+      // 下次启动恢复调和照常重建本窗口），回报放 finally——收尾失败不拖到看门狗超时
+      onTrayExitRequested(async () => {
+        const ps = usePanelStore.getState();
+        try {
+          for (const v of ps.panelTabs.map((t) => t.view)) {
+            await ps.releaseView(v);
+          }
+        } finally {
+          await ackExitFlushDone();
+        }
       });
     },
   };

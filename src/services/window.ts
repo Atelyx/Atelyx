@@ -7,6 +7,7 @@
 import { getCurrentWindow, type Window } from "@tauri-apps/api/window";
 import { LogicalSize } from "@tauri-apps/api/dpi";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { platformCapabilities } from "@/services/platform";
 
 /** 窗口控制是否可用（模块级恒定：能力表运行期内不变）。 */
@@ -41,10 +42,17 @@ export function closeWindow(): Promise<void> {
   return getCurrentWindow().close();
 }
 
-/** 注册窗口关闭请求监听：先阻止默认关闭，await 回调（落盘等）后真正销毁窗口。
- * 返回取消订阅函数；仅在回调完成后销毁，防 debounce 窗口内丢改动。
+/** 关窗收尾动作：destroy = 销毁本窗口（撕裂窗口）；hideAll = 隐藏全部窗口驻留托盘（主窗口，
+ * Rust 侧同步置驻留标志，见 src-tauri/src/tray.rs）。 */
+export type CloseAfter = "destroy" | "hideAll";
+
+/** 注册窗口关闭请求监听：先阻止默认关闭，await 回调（落盘等）后按 after 收尾。
+ * 返回取消订阅函数；收尾在回调完成后执行，防 debounce 窗口内丢改动。
  * 移动端无「关窗」语义，不注册。 */
-export async function onCloseRequested(handler: () => Promise<void>): Promise<() => void> {
+export async function onCloseRequested(
+  handler: () => Promise<void>,
+  after: CloseAfter = "destroy",
+): Promise<() => void> {
   if (!WINDOW_CONTROLS) return () => {};
   const win = getCurrentWindow();
   return win.onCloseRequested(async (event) => {
@@ -52,9 +60,39 @@ export async function onCloseRequested(handler: () => Promise<void>): Promise<()
     try {
       await handler();
     } finally {
-      await win.destroy();
+      if (after === "destroy") {
+        await win.destroy();
+      } else {
+        await invoke("hide_to_tray").catch((e) => console.error("驻留系统托盘失败", e));
+      }
     }
   });
+}
+
+/** 托盘退出请求事件（Rust tray 模块广播给全部 WebView）。 */
+const TRAY_EXIT_EVENT = "atelyx:tray-exit-requested";
+
+/** 注册托盘完全退出请求监听（主窗口/撕裂窗口各自注册收尾回调）。
+ * 回调完成后调用点须回报 ackExitFlushDone，Rust 收齐全部窗口回报才真正退出。
+ * 移动端无托盘语义，不注册。 */
+export function onTrayExitRequested(handler: () => Promise<void>): () => void {
+  if (!WINDOW_CONTROLS) return () => {};
+  let disposed = false;
+  let unlisten: (() => void) | null = null;
+  void listen(TRAY_EXIT_EVENT, () => void handler()).then((off) => {
+    if (disposed) off();
+    else unlisten = off;
+  });
+  return () => {
+    disposed = true;
+    unlisten?.();
+  };
+}
+
+/** 回报本窗口退出收尾完成（Rust 收齐全部窗口回报后真正退出进程）。移动端 no-op。 */
+export function ackExitFlushDone(): Promise<void> {
+  if (!WINDOW_CONTROLS) return Promise.resolve();
+  return invoke("exit_flush_done");
 }
 
 /** 切换全屏（视图控制图标用；移动端 no-op）。 */

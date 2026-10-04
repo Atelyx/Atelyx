@@ -41,7 +41,7 @@ import { getAppVersion as getVersionSvc } from "@/services/app";
 import { openInExplorer as openInExplorerSvc, openUrl as openUrlSvc } from "@/services/shell";
 import { readClipboardText as readClipboardTextSvc, writeClipboardText as writeClipboardTextSvc } from "@/services/clipboard";
 import { pickDirectory as pickDirectorySvc } from "@/services/dialog";
-import { applyWorkspaceWindow as applyWorkspaceWindowSvc, closeWindow as closeWindowSvc, minimizeWindow as minimizeWindowSvc, onCloseRequested as onCloseRequestedSvc, toggleFullscreen as toggleFullscreenSvc, toggleMaximizeWindow as toggleMaximizeWindowSvc } from "@/services/window";
+import { applyWorkspaceWindow as applyWorkspaceWindowSvc, ackExitFlushDone as ackExitFlushDoneSvc, closeWindow as closeWindowSvc, minimizeWindow as minimizeWindowSvc, onCloseRequested as onCloseRequestedSvc, onTrayExitRequested as onTrayExitRequestedSvc, toggleFullscreen as toggleFullscreenSvc, toggleMaximizeWindow as toggleMaximizeWindowSvc } from "@/services/window";
 import { cancelUpdateDownload as cancelUpdateDownloadSvc, checkForUpdate as checkForUpdateSvc, checkUpdateOnStartup as checkUpdateOnStartupSvc, installUpdate as installUpdateSvc } from "@/services/updater";
 import { isAndroidPlatform, platformCapabilities } from "@/services/platform";
 import type { PlatformCapabilities } from "@/services/platform";
@@ -788,10 +788,25 @@ export const useAppStore = create<AppState>((set, get) => ({
   installCloseGuard: () => {
     if (closeGuardInstalled) return;
     closeGuardInstalled = true;
-    void onCloseRequestedSvc(async () => {
-      await useAppStore.getState().flushAllPending();
-      // 关窗 = 真退出：发 bye 离开协作房间并停止重连，防服务端 30s 心跳残留幽灵在线
-      useCollabStore.getState().dispose();
+    // 主窗口点 X = 驻留托盘：先落盘全部挂起内容再隐藏全部窗口，进程保持运行；
+    // 协作连接驻留期间保持在线，dispose（发 bye 下线）只在托盘退出的收尾回调执行
+    void onCloseRequestedSvc(
+      async () => {
+        await useAppStore.getState().flushAllPending();
+      },
+      "hideAll",
+    );
+    // 托盘退出 = 真退出：落盘 + 发 bye 离开协作房间并停止重连，防服务端 30s 心跳残留
+    // 幽灵在线；回报放 finally——收尾失败不拖到 Rust 看门狗超时才退出
+    onTrayExitRequestedSvc(async () => {
+      try {
+        await useAppStore.getState().flushAllPending();
+        useCollabStore.getState().dispose();
+      } catch (e) {
+        console.error("托盘退出收尾失败", e);
+      } finally {
+        await ackExitFlushDoneSvc();
+      }
     });
   },
 

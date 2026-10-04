@@ -152,7 +152,7 @@ export function GeneralSettingsTab() {
             ? "当前平台不支持"
             : !autoLaunchUsable
               ? "开发模式不可用"
-              : "登录系统后自动运行"
+              : "登录系统后自动在后台运行（驻留系统托盘）"
         }
       >
         <ToggleSwitch
