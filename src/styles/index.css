@@ -587,11 +587,15 @@ body {
   background: var(--accent);
   animation: md-caret-blink 1s steps(2, start) infinite;
 }
-/* 协作者光标：实色条 + 昵称标签（颜色来自对方用户色） */
+/* 协作者光标：实色条 + 昵称标签 + 选区矩形（底色在绘制时按对方用户色内联，色浓度与本地选区一致） */
 .md-remote-layer {
   position: absolute;
   inset: 0;
   pointer-events: none;
+}
+.md-remote-selection-rect {
+  position: absolute;
+  border-radius: 2px;
 }
 .md-remote-caret {
   position: absolute;

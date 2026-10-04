@@ -361,9 +361,11 @@ export class MarkdownEditSink {
 }
 
 /** 自绘光标与选区的绘制层：按源区间在渲染 DOM 上测量矩形并绘制。 */
-/** 远端光标（协作者）：位置 + 昵称与用户色。 */
+/** 远端光标（协作者）：光标位置 + 选区矩形 + 昵称与用户色。 */
 export interface RemoteCursor {
   readonly rect: DOMRect | null;
+  /** 选区覆盖的矩形（视口坐标，跨块多段）；折叠光标为空数组。 */
+  readonly rects: readonly DOMRect[];
   readonly label: string;
   readonly color: string;
 }
@@ -392,10 +394,21 @@ export class CaretOverlay {
     this.#caret = caret;
   }
 
-  /** 绘制协作者光标（含昵称标签）。 */
+  /** 绘制协作者光标与选区：选区矩形按协作者色半透明铺底（色浓度与本地选区一致），
+   *  光标竖线带昵称标签；rect 为 null 时只画选区。 */
   setRemoteCursors(cursors: readonly RemoteCursor[], origin: DOMRect): void {
     const fragment = document.createDocumentFragment();
     for (const cursor of cursors) {
+      for (const rect of cursor.rects) {
+        const box = document.createElement("div");
+        box.className = "md-remote-selection-rect";
+        box.style.left = `${rect.left - origin.left}px`;
+        box.style.top = `${rect.top - origin.top}px`;
+        box.style.width = `${rect.width}px`;
+        box.style.height = `${rect.height}px`;
+        box.style.background = `color-mix(in srgb, ${cursor.color} 25%, transparent)`;
+        fragment.appendChild(box);
+      }
       if (!cursor.rect) continue;
       const box = document.createElement("div");
       box.className = "md-remote-caret";
