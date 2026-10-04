@@ -16,7 +16,7 @@
  *   可再添加视图或经 ≡ 菜单「删除面板」移除
  *
  * 布局列表 + 激活布局 + 聚焦面板 + 撕裂窗口应用级持久化到 `app_data_dir/ui-state.json`
- * （见 `types/uiState.ts` 的 `AppUiState`，Rust 侧 `commands/global.rs` 同步字段）。
+ * （见 `types/uiState.ts` 的 `AppUiState`，Rust 侧唯一写者 = `layout_model.rs`/`layout.rs` 族）。
  */
 
 /** 宿主视图类型（宿主随附；面板承载的内容）。 */
@@ -99,6 +99,20 @@ export interface WorkspaceLayout {
   tree: LayoutNode;
 }
 
+/** 场景（布局之上的容器：场景专属主页 + 一组命名布局 + 场景内激活记忆）。
+ *  场景切换 = 整组替换面板网格，并恢复该场景记忆的激活布局；文件状态与撕裂窗口不动。 */
+export interface Scene {
+  id: string;
+  name: string;
+  /** 场景专属主页（id 恒为 HOME_LAYOUT_ID，不在 layouts 内：不可删除/排序/重命名，
+   *  面板可自由调整且各场景独立；文件缺省 = 主页模板）。 */
+  homeLayout: WorkspaceLayout;
+  /** 场景内激活布局 id（主页 id 或 layouts 内 id；Rust normalize 保证恒有效，缺省 = 主页）。 */
+  activeLayoutId: string;
+  /** 场景内布局列表（恒非空；不含主页）。 */
+  layouts: WorkspaceLayout[];
+}
+
 /** 撕裂出去的独立窗口（应用级，存 `AppUiState.detachedWindows`，跨布局共享）。 */
 export interface DetachedWindow {
   id: string;
@@ -138,6 +152,9 @@ export function createPanel(view: ViewKind): PanelNode {
 /** 主页布局的稳定 id（固定置顶、不可删除/排序/重命名；uiState 加载时缺失即补入，幂等只补一次）。 */
 export const HOME_LAYOUT_ID = "home";
 
+/** 默认场景的稳定 id（固定置顶、不可删除/排序/重命名；含主页布局，与 Rust `DEFAULT_SCENE_ID` 对齐）。 */
+export const DEFAULT_SCENE_ID = "default";
+
 /** 主页布局（固定置顶；左窄右宽：左列 协作房间+最近打开，右区 日历+仓库历史；面板内部仍可自由调整）。 */
 export function createHomeLayout(): WorkspaceLayout {
   return {
@@ -168,10 +185,8 @@ export function createHomeLayout(): WorkspaceLayout {
   };
 }
 
-/**
- * 默认布局（主页固定置顶 + 三套：画布/笔记/表格，面板结构 文件 | [主区/副区]，均为单标签面板）。
- * 首次进入仓库/布局损坏时回退；激活布局缺省 = 列表第一个（主页）。
- */
+/** 默认场景布局（三套：画布/笔记/表格，面板结构 文件 | [主区/副区]，均为单标签面板；
+ *  主页走场景专属槽位不在此列）。首次进入仓库/布局损坏时回退。 */
 export function createDefaultLayouts(): WorkspaceLayout[] {
   const build = (name: string, left: ViewKind, main: ViewKind, right: ViewKind, sizes1: [number, number], sizes2: [number, number]): WorkspaceLayout => ({
     id: crypto.randomUUID(),
@@ -194,9 +209,21 @@ export function createDefaultLayouts(): WorkspaceLayout[] {
     },
   });
   return [
-    createHomeLayout(),
     build("画布", "files", "canvas", "inspector", [17, 83], [74, 26]),
     build("笔记", "files", "note", "aichat", [19, 81], [72, 28]),
     build("表格", "files", "table", "note", [18, 82], [77, 23]),
+  ];
+}
+
+/** 默认场景列表（bootstrap 失败时的渲染兜底种子；专属主页 = createHomeLayout，与 Rust 同构）。 */
+export function createDefaultScenes(): Scene[] {
+  return [
+    {
+      id: DEFAULT_SCENE_ID,
+      name: "默认",
+      homeLayout: createHomeLayout(),
+      activeLayoutId: HOME_LAYOUT_ID,
+      layouts: createDefaultLayouts(),
+    },
   ];
 }

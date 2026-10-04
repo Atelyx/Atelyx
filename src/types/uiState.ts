@@ -1,17 +1,18 @@
 /**
- * 应用级 UI 使用状态（`app_data_dir/ui-state.json`，schema `atelyx-ui-state/v1`）。
+ * 应用级 UI 使用状态（`app_data_dir/ui-state.json`，schema `atelyx-ui-state/v2`）。
  *
- * 工作区布局（布局列表 + 激活布局 + 聚焦面板）+ 上次打开的文件 + 文件面板展开，
+ * 场景（布局之上的容器）+ 布局 + 上次打开的文件 + 文件面板展开，
  * 全部**应用级**：app_data_dir 本机独有、不随仓库同步，跨仓库共享——
  * 布局/展开/上次文件是个人使用偏好，与仓库无关。
  *
  * 与全局配置（global.json）分离：global.json 只保存低频配置（最近仓库列表 +
  * 自动检查更新开关），本文件保存高频「使用数据」——写入抖动不进配置，损坏只影响恢复。
  */
-import type { DetachedWindow, SplitDirection, ViewKind, WorkspaceLayout } from "@/types/workspaceLayout";
+import type { DetachedWindow, Scene, SplitDirection, ViewKind } from "@/types/workspaceLayout";
 
-/** `ui-state.json` 文件 schema 版本（Rust 侧 `layout.rs` 有同名常量，两端须保持一致）。 */
-export const UI_STATE_SCHEMA = "atelyx-ui-state/v1" as const;
+/** `ui-state.json` 文件 schema 版本（Rust 侧 `layout.rs` 有同名常量，两端须保持一致；
+ *  格式变更直接升版，旧文件按默认态处理）。 */
+export const UI_STATE_SCHEMA = "atelyx-ui-state/v2" as const;
 
 /** 最近打开的文件条目（应用级、跨仓库记录；主页面板按当前仓库过滤展示）。 */
 export interface RecentFileEntry {
@@ -58,7 +59,11 @@ export type LayoutOp =
   | { op: "renameLayout"; id: string; name: string }
   | { op: "deleteLayout"; id: string }
   | { op: "activateLayout"; id: string }
-  | { op: "moveLayout"; fromIndex: number; toIndex: number };
+  | { op: "moveLayout"; fromIndex: number; toIndex: number }
+  | { op: "addScene" }
+  | { op: "renameScene"; id: string; name: string }
+  | { op: "deleteScene"; id: string }
+  | { op: "activateScene"; id: string };
 
 /** 布局操作返回值：splitPanel 的新面板 id 与 tearOff 的新撕裂窗口条目。
  *  前端只消费 `splitPanelId`（撕裂/停靠由 Rust 拖拽落点解析驱动，不再发这两个 op）；
@@ -129,10 +134,12 @@ export interface AppUiState {
   lastNoteFile?: string;
   /** 上次打开的表格文件（相对仓库根路径）。 */
   lastTableFile?: string;
-  /** 工作区布局列表（缺省 = 无条目时回退默认布局）。 */
-  workspaceLayouts?: WorkspaceLayout[];
-  /** 激活布局 id（缺省 = 布局列表第一个）。 */
-  activeLayoutId?: string;
+  /** 场景列表（布局之上的容器；normalize 恒种子化非空）。 */
+  scenes: Scene[];
+  /** 激活场景 id（normalize 保证恒有效且指向列表内场景）。 */
+  activeSceneId: string;
+  /** 激活布局 id（主页 id 或激活场景内布局 id；normalize 保证恒有效）。 */
+  activeLayoutId: string;
   /** 聚焦面板 id（画布快捷键门控；缺省 = 布局第一个面板）。 */
   focusedPanelId?: string;
   /** 撕裂出去的独立窗口（应用级、跨布局共享；缺省 = 无）。 */

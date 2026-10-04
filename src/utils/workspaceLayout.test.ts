@@ -1,7 +1,8 @@
 /**
  * 工作区布局树查询函数契约测试（utils/workspaceLayout）。
  *
- * 覆盖：面板/标签收集、面板查找、视图汇总、视图宿主判定、激活标签。
+ * 覆盖：面板/标签收集、面板查找、视图汇总、视图宿主判定、激活标签、
+ * resolveEntryScene（仓库级「启动时切换场景」配置解析）。
  * （布局变异逻辑已下沉 Rust `layout.rs`，不再在此测试。）
  */
 import { describe, expect, it } from "vitest";
@@ -12,8 +13,17 @@ import {
   collectTabs,
   findPanel,
   findViewHost,
+  resolveEntryScene,
 } from "./workspaceLayout";
-import { createPanel, createTab, type DetachedWindow, type LayoutNode } from "@/types/workspaceLayout";
+import {
+  createPanel,
+  createTab,
+  DEFAULT_SCENE_ID,
+  type DetachedWindow,
+  type LayoutNode,
+  type Scene,
+  type WorkspaceLayout,
+} from "@/types/workspaceLayout";
 
 function makePanel(views: string[], active = 0): LayoutNode {
   const panel = createPanel(views[0] as never);
@@ -93,5 +103,47 @@ describe("视图汇总与宿主判定", () => {
     expect(findViewHost(tree, [w], "canvas")).toBe("main");
     expect(findViewHost(tree, [w], "table")).toBe("w1");
     expect(findViewHost(tree, [w], "note")).toBeNull();
+  });
+});
+
+describe("resolveEntryScene（启动仓库时自动切换场景的解析）", () => {
+  function layout(id: string): WorkspaceLayout {
+    return {
+      id,
+      name: id,
+      tree: { kind: "panel", id: `p-${id}`, tabs: [], activeTabId: null },
+    };
+  }
+  function scene(id: string, layoutIds: string[]): Scene {
+    return {
+      id,
+      name: id,
+      homeLayout: layout("home"),
+      activeLayoutId: layoutIds[0] ?? null,
+      layouts: layoutIds.map(layout),
+    };
+  }
+  const scenes = [
+    scene(DEFAULT_SCENE_ID, ["home", "canvas", "note"]),
+    scene("scene-ai", ["comfyui", "draw"]),
+  ];
+
+  it("未配置（null/undefined/空串）= 不切换", () => {
+    expect(resolveEntryScene(null, scenes)).toBeNull();
+    expect(resolveEntryScene(undefined, scenes)).toBeNull();
+    expect(resolveEntryScene("", scenes)).toBeNull();
+  });
+
+  it("命中场景返回场景 id（默认场景与非默认场景同口径）", () => {
+    expect(resolveEntryScene(DEFAULT_SCENE_ID, scenes)).toBe(DEFAULT_SCENE_ID);
+    expect(resolveEntryScene("scene-ai", scenes)).toBe("scene-ai");
+  });
+
+  it("指定场景已删除（悬挂引用）= 不切换", () => {
+    expect(resolveEntryScene("deleted", scenes)).toBeNull();
+  });
+
+  it("场景列表为空 = 不切换", () => {
+    expect(resolveEntryScene("scene-ai", [])).toBeNull();
   });
 });

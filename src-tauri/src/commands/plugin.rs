@@ -36,7 +36,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use crate::vault::atomic_write;
 use crate::layout::LayoutState;
 use crate::layout_model::{
-    collect_tabs, instantiate_layout_spec, layout_spec_valid, layout_spec_views,
+    active_scene_mut, collect_tabs, instantiate_layout_spec, layout_spec_valid, layout_spec_views,
     unique_layout_name, LayoutSpecNode, WorkspaceLayout, SPEC_MAX_NAME_BYTES,
 };
 use crate::layout_persist::{broadcast_layout, schedule_persist};
@@ -1996,24 +1996,34 @@ pub fn plugin_apply_default_layout(
         return Ok(());
     }
     let spec_views = layout_spec_views(&tree);
-    let view_in_use = inner.ui.workspace_layouts.iter().any(|l| {
-        let mut tabs = Vec::new();
-        collect_tabs(&l.tree, &mut tabs);
-        tabs.iter().any(|t| spec_views.iter().any(|v| v == &t.view))
-    }) || inner
+    // 撕裂窗口占用先于场景可变借用判定（借用期不重叠）
+    let detached_in_use = inner
         .ui
         .detached_windows
         .iter()
         .flat_map(|w| &w.tabs)
         .any(|t| spec_views.iter().any(|v| v == &t.view));
+    // 视图占用 = 任一场景的布局或专属主页 + 撕裂窗口（「任一布局已含该视图则不追加」语义）
+    let view_in_use = inner.ui.scenes.iter().any(|s| {
+        s.layouts
+            .iter()
+            .chain(std::iter::once(&s.home_layout))
+            .any(|l| {
+                let mut tabs = Vec::new();
+                collect_tabs(&l.tree, &mut tabs);
+                tabs.iter().any(|t| spec_views.iter().any(|v| v == &t.view))
+            })
+    }) || detached_in_use;
+    // 追加落点 = 激活场景的布局列表（不激活、不改任何既有布局）
+    let scene = active_scene_mut(&mut inner.ui);
     if !view_in_use {
-        let names: Vec<String> = inner.ui.workspace_layouts.iter().map(|l| l.name.clone()).collect();
+        let names: Vec<String> = scene.layouts.iter().map(|l| l.name.clone()).collect();
         let layout = WorkspaceLayout {
             id: nanoid::nanoid!(),
             name: unique_layout_name(&names, trimmed),
             tree: instantiate_layout_spec(&tree),
         };
-        inner.ui.workspace_layouts.push(layout);
+        scene.layouts.push(layout);
         inner.dirty = true;
         let ui = inner.ui.clone();
         drop(inner);

@@ -113,6 +113,7 @@ export {
 export {
   VIEW_KINDS,
   HOME_LAYOUT_ID,
+  DEFAULT_SCENE_ID,
   type BuiltinViewKind,
   type ViewKind,
   type SplitDirection,
@@ -121,6 +122,7 @@ export {
   type SplitNode,
   type LayoutNode,
   type WorkspaceLayout,
+  type Scene,
   type DetachedWindow,
   type PluginLayoutSpecNode,
   type PluginDefaultLayoutSpec,

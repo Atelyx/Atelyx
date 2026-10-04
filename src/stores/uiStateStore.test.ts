@@ -7,8 +7,19 @@
  */
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 
+import { createDefaultScenes, DEFAULT_SCENE_ID, HOME_LAYOUT_ID } from "@/types/workspaceLayout";
+
+/** normalize 后形状的 bootstrap 快照替身（Rust 侧 normalize 保证：scenes 恒非空、激活态恒有效）。 */
+const BOOT_SNAPSHOT = {
+  schema: "atelyx-ui-state/v2" as const,
+  fileExplorerExpanded: [],
+  scenes: createDefaultScenes(),
+  activeSceneId: DEFAULT_SCENE_ID,
+  activeLayoutId: HOME_LAYOUT_ID,
+};
+
 vi.mock("@/services/layout", () => ({
-  layoutBootstrap: vi.fn(async () => ({})),
+  layoutBootstrap: vi.fn(async () => ({ ...BOOT_SNAPSHOT })),
   layoutFlush: vi.fn(async () => {}),
   layoutOp: vi.fn(async () => ({})),
   onLayoutBroadcast: vi.fn(async () => () => {}),
@@ -34,6 +45,8 @@ beforeEach(async () => {
     lastCanvasFile: null,
     lastNoteFile: null,
     lastTableFile: null,
+    scenes: [],
+    activeSceneId: null,
     workspaceLayouts: [],
     activeLayoutId: null,
     focusedPanelId: null,
@@ -138,6 +151,7 @@ describe("slotWinnerOverrides（single 槽手动胜者）", () => {
     expect(vi.mocked(uiStatePatch)).toHaveBeenCalledTimes(1);
 
     vi.mocked(layoutBootstrap).mockResolvedValueOnce({
+      ...BOOT_SNAPSHOT,
       slotWinnerOverrides: { "empty/canvas": "com.b:empty/canvas" },
     } as never);
     await useUiStateStore.getState().load();

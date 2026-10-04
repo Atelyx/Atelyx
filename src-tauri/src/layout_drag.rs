@@ -756,7 +756,14 @@ mod tests {
     fn ui_with(tree: LayoutNode) -> AppUiState {
         AppUiState {
             schema: UI_STATE_SCHEMA.into(),
-            workspace_layouts: vec![WorkspaceLayout { id: "l1".into(), name: "L".into(), tree }],
+            scenes: vec![crate::layout_model::Scene {
+                id: crate::layout_model::DEFAULT_SCENE_ID.into(),
+                name: "默认".into(),
+                home_layout: crate::layout_model::create_home_layout(),
+                active_layout_id: Some("l1".into()),
+                layouts: vec![WorkspaceLayout { id: "l1".into(), name: "L".into(), tree }],
+            }],
+            active_scene_id: Some(crate::layout_model::DEFAULT_SCENE_ID.into()),
             active_layout_id: Some("l1".into()),
             ..Default::default()
         }

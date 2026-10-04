@@ -1,13 +1,13 @@
 //! 布局迷你窗口管理器：多窗口面板体系的唯一权威（撕裂窗口方案）。
 //!
-//! 布局模型（布局列表 + 激活布局 + 撕裂窗口）的唯一真相在本模块族。任何窗口的前端
+//! 布局模型（场景 + 布局列表 + 激活场景/布局 + 撕裂窗口）的唯一真相在本模块族。任何窗口的前端
 //! 都不持有权威——只发命令（`layout_op`/`ui_state_patch`/拖拽）与接收广播
 //! （`layout-broadcast`/`drag-session`）渲染自身切片。`app_data_dir/ui-state.json`
 //! 由本模块族单一写者持久化（防双写竞争），磁盘 schema 与前端 `types/uiState.ts` 对齐
-//! （`atelyx-ui-state/v1`），字段名/形状不变，无需迁移。
+//! （`atelyx-ui-state/v2`，与前端 `types/uiState.ts` 同步升版；旧格式文件按默认态处理，不做存量兼容）。
 //!
 //! 设计动机：webview 之间无法共享内存，跨窗口一致性只能靠「一个权威 + 广播」。
-//! 布局操作全部在 `apply_layout_op` 校验（视图全局唯一、主页固定置顶、锁定语义、
+//! 布局操作全部在 `apply_layout_op` 校验（视图全局唯一、默认场景/主页固定置顶、锁定语义、
 //! 树形状）后应用，前端只负责渲染与像素级命中。跨窗口拖拽会话见 `layout_drag`。
 //!
 //! 本文件 = 命令面 + 布局状态 + 操作应用中枢；纯模型/树操作见 `layout_model`，
@@ -19,14 +19,15 @@ use tauri::{AppHandle, Manager, State};
 
 use crate::layout_drag::{DragHit, DragSession, DragStartPayload};
 use crate::layout_model::{
-    active_layout, apply_tab_group_detached, apply_tab_group_panel, close_panel_op, collect_tabs,
-    create_tab, find_panel, find_tab_in_detached, find_tab_in_tree, group_activate_tab,
-    group_add_tab, group_move_tab, group_of, group_of_detached, group_remove_tab,
-    group_set_tab_locked, group_set_tab_view, map_detached, map_panel, next_layout_name,
+    active_layout, active_scene, active_scene_mut, apply_tab_group_detached,
+    apply_tab_group_panel, close_panel_op, collect_tabs, create_blank_tree, create_tab,
+    find_panel, find_tab_in_detached, find_tab_in_tree, group_activate_tab, group_add_tab,
+    group_move_tab, group_of, group_of_detached, group_remove_tab, group_set_tab_locked,
+    group_set_tab_view, map_detached, map_panel, next_layout_name, next_scene_name,
     prune_empty_windows, regenerate_ids, set_active_tree, set_layout_sizes_op, sizes_valid_for,
-    split_children_count, split_panel_op,
-    tear_off_from_panel_op, AppUiState, DetachedWindow, LayoutOp, LayoutOpResult, UiStatePatch,
-    MAX_RECENT_FILES, HOME_LAYOUT_ID, WorkspaceLayout,
+    split_children_count, split_panel_op, tear_off_from_panel_op, AppUiState, DetachedWindow,
+    LayoutOp, LayoutOpResult, Scene, UiStatePatch, MAX_RECENT_FILES, DEFAULT_SCENE_ID,
+    HOME_LAYOUT_ID, WorkspaceLayout,
 };
 use crate::layout_persist::{broadcast_layout, persist_now, schedule_persist};
 use crate::layout_window::reconcile_panel_windows;
@@ -298,11 +299,16 @@ pub(crate) fn apply_layout_op(ui: &mut AppUiState, op: &LayoutOp) -> LayoutOpRes
             }
         }
         LayoutOp::AddLayout => {
-            let active = active_layout(ui);
-            let names: Vec<String> = ui.workspace_layouts.iter().map(|l| l.name.clone()).collect();
-            let copy = WorkspaceLayout { id: nanoid::nanoid!(), name: next_layout_name(&names), tree: regenerate_ids(&active.tree) };
-            ui.workspace_layouts.push(copy);
-            ui.active_layout_id = ui.workspace_layouts.last().map(|l| l.id.clone());
+            let new_id = {
+                let scene = active_scene_mut(ui);
+                let names: Vec<String> = scene.layouts.iter().map(|l| l.name.clone()).collect();
+                let blank = WorkspaceLayout { id: nanoid::nanoid!(), name: next_layout_name(&names), tree: create_blank_tree() };
+                let new_id = blank.id.clone();
+                scene.layouts.push(blank);
+                scene.active_layout_id = Some(new_id.clone());
+                new_id
+            };
+            ui.active_layout_id = Some(new_id);
             ui.focused_panel_id = None;
         }
         LayoutOp::RenameLayout { id, name } => {
@@ -313,7 +319,8 @@ pub(crate) fn apply_layout_op(ui: &mut AppUiState, op: &LayoutOp) -> LayoutOpRes
             if trimmed.is_empty() {
                 return result;
             }
-            for l in &mut ui.workspace_layouts {
+            let scene = active_scene_mut(ui);
+            for l in &mut scene.layouts {
                 if l.id == *id {
                     l.name = trimmed.to_string();
                     break;
@@ -321,34 +328,131 @@ pub(crate) fn apply_layout_op(ui: &mut AppUiState, op: &LayoutOp) -> LayoutOpRes
             }
         }
         LayoutOp::DeleteLayout { id } => {
-            if id == HOME_LAYOUT_ID || ui.workspace_layouts.len() <= 1 {
+            if id == HOME_LAYOUT_ID {
                 return result;
             }
-            let removing_active = ui.active_layout_id.as_deref() == Some(id);
-            ui.workspace_layouts.retain(|l| l.id != *id);
-            if removing_active {
-                ui.active_layout_id = ui.workspace_layouts.first().map(|l| l.id.clone());
+            let fallback: Option<String> = {
+                let scene = active_scene_mut(ui);
+                if scene.layouts.len() <= 1 {
+                    return result;
+                }
+                scene.layouts.retain(|l| l.id != *id);
+                // 场景记忆指向被删布局 → 回落场景内第一个（记忆与顶层激活是两个独立态：
+                // normalize 允许记忆 ≠ 顶层激活，二者须各自修复，不能只看顶层）
+                if scene.active_layout_id.as_deref() == Some(id) {
+                    let first = scene.layouts.first().map(|l| l.id.clone());
+                    scene.active_layout_id = first.clone();
+                    first
+                } else {
+                    scene.active_layout_id.clone()
+                }
+            };
+            // 顶层激活指向被删布局 → 跟随场景记忆（上一步已保证记忆指向存活布局）
+            if ui.active_layout_id.as_deref() == Some(id) {
+                ui.active_layout_id = fallback;
                 ui.focused_panel_id = None;
             }
         }
         LayoutOp::ActivateLayout { id } => {
-            if ui.workspace_layouts.iter().any(|l| l.id == *id) {
+            if id == HOME_LAYOUT_ID {
+                // 主页是激活场景的专属槽位：激活它并记入场景记忆（切回本场景时恢复）
+                active_scene_mut(ui).active_layout_id = Some(id.clone());
                 ui.active_layout_id = Some(id.clone());
+                ui.focused_panel_id = None;
+                return result;
+            }
+            if !active_scene(ui).layouts.iter().any(|l| l.id == *id) {
+                return result;
+            }
+            active_scene_mut(ui).active_layout_id = Some(id.clone());
+            ui.active_layout_id = Some(id.clone());
+            ui.focused_panel_id = None;
+        }
+        LayoutOp::MoveLayout { from_index, to_index } => {
+            // 合成序 = tab 条可见序：0 = 固定主页，场景内布局从 1 起。
+            // 主页不可拖动（from 0），其他布局不可拖到主页之前（to 0）。
+            if *from_index == 0 || *to_index == 0 || from_index == to_index {
+                return result;
+            }
+            let scene = active_scene_mut(ui);
+            let len = scene.layouts.len();
+            let from = *from_index - 1;
+            let to = *to_index - 1;
+            if from >= len || to >= len {
+                return result;
+            }
+            let moved = scene.layouts.remove(from);
+            scene.layouts.insert(to, moved);
+        }
+        LayoutOp::AddScene => {
+            let names: Vec<String> = ui.scenes.iter().map(|s| s.name.clone()).collect();
+            let source = active_scene(ui);
+            // 复制源场景（布局与专属主页均复制：布局 id 与树内节点/标签 id 重新生成防跨场景串扰，
+            // 主页 id 恒为 HOME_LAYOUT_ID），激活记忆指向记忆布局的复制件
+            let active_index = source
+                .layouts
+                .iter()
+                .position(|l| Some(&l.id) == source.active_layout_id.as_ref());
+            let layouts: Vec<WorkspaceLayout> = source
+                .layouts
+                .iter()
+                .map(|l| WorkspaceLayout { id: nanoid::nanoid!(), name: l.name.clone(), tree: regenerate_ids(&l.tree) })
+                .collect();
+            let copy = Scene {
+                id: nanoid::nanoid!(),
+                name: next_scene_name(&names),
+                home_layout: WorkspaceLayout {
+                    id: HOME_LAYOUT_ID.to_string(),
+                    name: source.home_layout.name.clone(),
+                    tree: regenerate_ids(&source.home_layout.tree),
+                },
+                active_layout_id: match source.active_layout_id.as_deref() {
+                    Some(HOME_LAYOUT_ID) => Some(HOME_LAYOUT_ID.to_string()),
+                    _ => active_index.and_then(|i| layouts.get(i)).map(|l| l.id.clone()),
+                },
+                layouts,
+            };
+            ui.active_layout_id = copy.active_layout_id.clone();
+            ui.scenes.push(copy);
+            ui.active_scene_id = ui.scenes.last().map(|s| s.id.clone());
+            ui.focused_panel_id = None;
+        }
+        LayoutOp::RenameScene { id, name } => {
+            if id == DEFAULT_SCENE_ID {
+                return result;
+            }
+            let trimmed = name.trim();
+            if trimmed.is_empty() {
+                return result;
+            }
+            for s in &mut ui.scenes {
+                if s.id == *id {
+                    s.name = trimmed.to_string();
+                    break;
+                }
+            }
+        }
+        LayoutOp::DeleteScene { id } => {
+            if id == DEFAULT_SCENE_ID {
+                return result;
+            }
+            let removing_active = ui.active_scene_id.as_deref() == Some(id);
+            ui.scenes.retain(|s| s.id != *id);
+            if removing_active {
+                // 删除激活场景 → 回到默认场景（默认场景不可删，恒在首位）及其记忆布局
+                ui.active_scene_id = Some(ui.scenes[0].id.clone());
+                ui.active_layout_id = ui.scenes[0].active_layout_id.clone();
                 ui.focused_panel_id = None;
             }
         }
-        LayoutOp::MoveLayout { from_index, to_index } => {
-            let len = ui.workspace_layouts.len();
-            if from_index == to_index || *from_index >= len || *to_index >= len {
+        LayoutOp::ActivateScene { id } => {
+            let Some(scene) = ui.scenes.iter_mut().find(|s| s.id == *id) else {
                 return result;
-            }
-            // 主页固定置顶：禁止移动主页本身（index 0），也禁止把其他布局拖到主页之前（toIndex 0）
-            let from_is_home = ui.workspace_layouts.get(*from_index).map(|l| l.id == HOME_LAYOUT_ID).unwrap_or(false);
-            if from_is_home || *to_index == 0 {
-                return result;
-            }
-            let moved = ui.workspace_layouts.remove(*from_index);
-            ui.workspace_layouts.insert(*to_index, moved);
+            };
+            // 恢复目标场景记忆的激活布局（normalize 保证记忆恒有效）
+            ui.active_layout_id = scene.active_layout_id.clone();
+            ui.active_scene_id = Some(id.clone());
+            ui.focused_panel_id = None;
         }
     }
     result
@@ -477,7 +581,9 @@ pub async fn panel_window_closed(app: AppHandle, window_id: String) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout_model::{LayoutNode, TabItem, UI_STATE_SCHEMA, WorkspaceLayout};
+    use crate::layout_model::{
+        create_home_layout, LayoutNode, TabItem, UI_STATE_SCHEMA, WorkspaceLayout,
+    };
 
     /// 布局状态锁的失败语义必须显式化：命令层 `map_err(...)?` 传播 Err，无返回值的内部路径
     /// 用 `let ... else { 记录并 return }`。`unwrap()` 会让一次持锁 panic 变成此后每次调用的 panic
@@ -546,7 +652,14 @@ mod tests {
     fn ui_with(tree: LayoutNode) -> AppUiState {
         AppUiState {
             schema: UI_STATE_SCHEMA.into(),
-            workspace_layouts: vec![WorkspaceLayout { id: "l1".into(), name: "L".into(), tree }],
+            scenes: vec![Scene {
+                id: DEFAULT_SCENE_ID.into(),
+                name: "默认".into(),
+                home_layout: create_home_layout(),
+                active_layout_id: Some("l1".into()),
+                layouts: vec![WorkspaceLayout { id: "l1".into(), name: "L".into(), tree }],
+            }],
+            active_scene_id: Some(DEFAULT_SCENE_ID.into()),
             active_layout_id: Some("l1".into()),
             ..Default::default()
         }
@@ -848,29 +961,36 @@ mod tests {
     #[test]
     fn layout_add_rename_activate_delete() {
         let mut ui = ui_with(two_panels_horizontal());
-        // AddLayout：复制树 + 命名去重「布局 N」+ 激活新布局
+        fn layouts(ui: &AppUiState) -> &Vec<WorkspaceLayout> {
+            &active_scene(ui).layouts
+        }
+        // AddLayout：全新空面板（不复制当前布局）+ 命名去重「布局 N」+ 激活新布局
         let _ = apply_layout_op(&mut ui, &LayoutOp::AddLayout);
         let _ = apply_layout_op(&mut ui, &LayoutOp::AddLayout);
-        assert_eq!(ui.workspace_layouts.len(), 3);
-        assert_eq!(ui.workspace_layouts[1].name, "布局 1");
-        assert_eq!(ui.workspace_layouts[2].name, "布局 2");
-        assert_eq!(ui.active_layout_id.as_deref(), Some(ui.workspace_layouts[2].id.as_str()));
-        // 复制树：视图种类一致但节点 id 全部重新生成（独立副本）
-        let l0 = ui.workspace_layouts[0].clone();
-        let l2 = ui.workspace_layouts[2].clone();
-        let mut t0 = Vec::new();
-        collect_tabs(&l0.tree, &mut t0);
-        let mut t2 = Vec::new();
-        collect_tabs(&l2.tree, &mut t2);
-        let v0: Vec<&str> = t0.iter().map(|t| t.view.as_str()).collect();
-        let v2: Vec<&str> = t2.iter().map(|t| t.view.as_str()).collect();
-        assert_eq!(v0, v2);
-        assert_ne!(l0.tree.node_id(), l2.tree.node_id());
+        assert_eq!(layouts(&ui).len(), 3);
+        assert_eq!(layouts(&ui)[1].name, "布局 1");
+        assert_eq!(layouts(&ui)[2].name, "布局 2");
+        assert_eq!(active_scene(&ui).active_layout_id.as_deref(), Some(layouts(&ui)[2].id.as_str()));
+        for new_layout in [&layouts(&ui)[1], &layouts(&ui)[2]] {
+            match &new_layout.tree {
+                LayoutNode::Panel { tabs, active_tab_id, .. } => {
+                    assert!(tabs.is_empty(), "新建布局 = 空面板占位");
+                    assert_eq!(active_tab_id, &None);
+                }
+                _ => panic!("expected blank panel root"),
+            }
+        }
+        // 源布局不受影响
+        assert_eq!(layouts(&ui)[0].name, "L");
+        match &layouts(&ui)[0].tree {
+            LayoutNode::Split { children, .. } => assert_eq!(children.len(), 2),
+            _ => panic!("expected split root"),
+        }
         // RenameLayout：修剪空白；主页固定不可重命名；空名忽略
         let _ = apply_layout_op(&mut ui, &LayoutOp::RenameLayout { id: "l1".into(), name: "  主工作  ".into() });
-        assert_eq!(ui.workspace_layouts[0].name, "主工作");
+        assert_eq!(layouts(&ui)[0].name, "主工作");
         let _ = apply_layout_op(&mut ui, &LayoutOp::RenameLayout { id: "l1".into(), name: "  ".into() });
-        assert_eq!(ui.workspace_layouts[0].name, "主工作");
+        assert_eq!(layouts(&ui)[0].name, "主工作");
         // ActivateLayout：命中切换；缺失忽略
         let _ = apply_layout_op(&mut ui, &LayoutOp::ActivateLayout { id: "l1".into() });
         assert_eq!(ui.active_layout_id.as_deref(), Some("l1"));
@@ -878,13 +998,47 @@ mod tests {
         assert_eq!(ui.active_layout_id.as_deref(), Some("l1"));
         // DeleteLayout：删除激活布局回退第一个；删到只剩一个后拒删
         let _ = apply_layout_op(&mut ui, &LayoutOp::DeleteLayout { id: "l1".into() });
-        assert_eq!(ui.workspace_layouts.len(), 2);
-        assert_eq!(ui.active_layout_id.as_deref(), Some(ui.workspace_layouts[0].id.as_str()));
-        let id0 = ui.workspace_layouts[0].id.clone();
+        assert_eq!(layouts(&ui).len(), 2);
+        assert_eq!(ui.active_layout_id.as_deref(), Some(layouts(&ui)[0].id.as_str()));
+        let id0 = layouts(&ui)[0].id.clone();
         let _ = apply_layout_op(&mut ui, &LayoutOp::DeleteLayout { id: id0 });
-        assert_eq!(ui.workspace_layouts.len(), 1);
-        let id0 = ui.workspace_layouts[0].id.clone();
+        assert_eq!(layouts(&ui).len(), 1);
+        let id0 = layouts(&ui)[0].id.clone();
         let _ = apply_layout_op(&mut ui, &LayoutOp::DeleteLayout { id: id0 });
-        assert_eq!(ui.workspace_layouts.len(), 1); // 最后一个不可删
+        assert_eq!(layouts(&ui).len(), 1); // 最后一个不可删
+    }
+
+    #[test]
+    fn delete_layout_repairs_scene_memory_independent_of_top_active() {
+        fn layouts(ui: &AppUiState) -> &Vec<WorkspaceLayout> {
+            &active_scene(ui).layouts
+        }
+        // 记忆与顶层激活是独立态（normalize 允许记忆 ≠ 顶层激活，如顶层失效回退主页而记忆有效）：
+        // 删除「记忆指向但非顶层激活」的布局必须修复场景记忆，否则悬垂记忆经
+        // ActivateScene 转成顶层激活失效 → active_layout 的不变量 expect 被击穿（锁毒化）
+        let mut ui = ui_with(two_panels_horizontal());
+        let _ = apply_layout_op(&mut ui, &LayoutOp::AddLayout); // [l1, 布局1]
+        // 构造分歧态：顶层激活 = 主页，场景记忆 = 布局1
+        let copy_id = layouts(&ui)[1].id.clone();
+        let _ = apply_layout_op(&mut ui, &LayoutOp::ActivateLayout { id: copy_id.clone() });
+        ui.active_layout_id = Some(HOME_LAYOUT_ID.into());
+        // 删除记忆指向的布局（非顶层激活）
+        let _ = apply_layout_op(&mut ui, &LayoutOp::DeleteLayout { id: copy_id });
+        // 记忆修复为场景内第一个，顶层激活（主页）不受影响，不变量成立
+        assert_eq!(active_scene(&ui).active_layout_id.as_deref(), Some("l1"));
+        assert_eq!(ui.active_layout_id.as_deref(), Some(HOME_LAYOUT_ID));
+        let _ = apply_layout_op(&mut ui, &LayoutOp::ActivateScene { id: DEFAULT_SCENE_ID.into() });
+        assert_eq!(active_layout(&ui).id, "l1");
+        // 顶层激活指向被删布局而记忆另有所指：顶层跟随记忆，不吞掉有效记忆
+        let _ = apply_layout_op(&mut ui, &LayoutOp::AddLayout); // [l1, 布局1]
+        ui.active_layout_id = Some("l1".into());
+        ui.scenes[0].active_layout_id = Some(layouts(&ui)[1].id.clone());
+        let _ = apply_layout_op(&mut ui, &LayoutOp::DeleteLayout { id: "l1".into() });
+        assert_eq!(
+            ui.active_layout_id.as_deref(),
+            Some(layouts(&ui)[0].id.as_str()),
+            "顶层激活应跟随场景记忆回落"
+        );
+        assert_eq!(active_scene(&ui).active_layout_id.as_deref(), Some(layouts(&ui)[0].id.as_str()));
     }
 }

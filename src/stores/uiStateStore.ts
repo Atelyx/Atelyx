@@ -2,7 +2,7 @@
  * 应用级 UI 使用状态。
  *
  * 承载跨会话恢复的使用数据，磁盘 `app_data_dir/ui-state.json` 由 Rust `layout.rs`
- * 迷你窗口管理器**单一写者**持久化（schema `atelyx-ui-state/v1`，本 store 不直接写盘）：
+ * 迷你窗口管理器**单一写者**持久化（schema `atelyx-ui-state/v2`，本 store 不直接写盘）：
  * - **布局（Rust 权威）**：布局列表 + 激活布局 + 撕裂窗口。本 store 只持有镜像——
  *   一切布局操作经 `services/layout.ts` 的 `layout_op` 命令发给 Rust，模型变更后
  *   Rust 全量广播 `layout-broadcast`，各窗口据此更新自身镜像并渲染。
@@ -21,9 +21,10 @@ import { remapDirKey } from "@/utils/filename";
 import { createPersistController } from "@/utils/persist";
 import { layoutBootstrap, layoutFlush, layoutOp, onLayoutBroadcast, uiStatePatch } from "@/services/layout";
 import {
-  createDefaultLayouts,
+  createDefaultScenes,
   type DetachedWindow,
   type LayoutNode,
+  type Scene,
   type SplitDirection,
   type ViewKind,
   type WorkspaceLayout,
@@ -39,9 +40,13 @@ interface UiStateStore {
   lastNoteFile: string | null;
   /** 上次打开的表格文件（相对仓库根；关闭/删除后清空）。 */
   lastTableFile: string | null;
-  /** 工作区布局列表镜像（Rust 权威；至少一项，load 前为默认布局）。 */
+  /** 场景列表镜像（Rust 权威；布局之上的容器，至少一项，load 前为默认场景）。 */
+  scenes: Scene[];
+  /** 激活场景 id 镜像（缺省 = 列表第一个）。 */
+  activeSceneId: string | null;
+  /** 激活场景的布局列表镜像（Rust 权威；至少一项，load 前为默认布局）。 */
   workspaceLayouts: WorkspaceLayout[];
-  /** 激活布局 id 镜像（缺省 = 列表第一个）。 */
+  /** 激活布局 id 镜像（激活场景内；缺省 = 列表第一个）。 */
   activeLayoutId: string | null;
   /** 聚焦面板 id（画布快捷键门控；面板可能已被关闭/布局切换，渲染兜底聚焦第一个）。 */
   focusedPanelId: string | null;
@@ -122,7 +127,7 @@ interface UiStateStore {
   detachedMoveTab: (windowId: string, tabId: string, toIndex: number) => void;
   /** 拖拽调宽回写 Split 子树尺寸比例（百分数，和 = 100，长度 = children 长度；前端防抖提交）。 */
   setLayoutSizes: (splitId: string, sizes: number[]) => void;
-  /** 新建布局（复制当前激活布局），命名「布局 N」自动去重，并激活。 */
+  /** 新建布局（单个空面板占位），命名「布局 N」自动去重，并激活。 */
   addLayout: () => void;
   /** 重命名布局。 */
   renameLayout: (id: string, name: string) => void;
@@ -132,6 +137,14 @@ interface UiStateStore {
   activateLayout: (id: string) => void;
   /** 调整布局顺序（布局 tab 拖拽排序）。 */
   moveLayout: (fromIndex: number, toIndex: number) => void;
+  /** 新建场景（复制当前激活场景），命名「场景 N」自动去重，并激活。 */
+  addScene: () => void;
+  /** 重命名场景。 */
+  renameScene: (id: string, name: string) => void;
+  /** 删除场景（默认场景不可删；场景内布局一并删除）。 */
+  deleteScene: (id: string) => void;
+  /** 激活场景（切换场景：恢复该场景记忆的激活布局，文件状态与撕裂窗口不动）。 */
+  activateScene: (id: string) => void;
   /** 立即落盘（应用退出/切页面前 flush 用，防 debounce 窗口内丢状态）。 */
   flush: () => Promise<void>;
 }
@@ -198,13 +211,27 @@ function sendLayoutOp(op: LayoutOp): void {
 /** 布局广播订阅守卫（每窗口实例只订阅一次）。 */
 let broadcastSubscribed = false;
 
+/** 场景快照 → 布局镜像字段：workspaceLayouts = 主页（激活场景专属）+ 激活场景布局列表，
+ *  activeLayoutId = 顶层激活布局 id。消费方（布局 tab 条/面板网格/进仓自动切场景）只看这两个
+ *  派生字段，不感知场景结构。入参来自 Rust normalize 后的快照/广播，激活态由 normalize 保证。 */
+function deriveLayoutMirror(active: Scene, activeLayoutId: string) {
+  return {
+    workspaceLayouts: [active.homeLayout, ...active.layouts],
+    activeLayoutId,
+  };
+}
+
 /** 广播 → 镜像（只应用布局字段；非布局字段 JS 是权威，不随广播覆盖）。
  * 收到广播即证明 Rust 存活且有真实布局 → 清除 bootstrap 失败标记，恢复后续 patch 落盘。 */
 function applyLayoutMirror(state: AppUiState): void {
-  if (!state || !Array.isArray(state.workspaceLayouts) || state.workspaceLayouts.length === 0) return;
+  if (!state || !Array.isArray(state.scenes) || state.scenes.length === 0) return;
+  const scenes = state.scenes;
+  const activeSceneId = state.activeSceneId;
+  const active = scenes.find((s) => s.id === activeSceneId)!;
   useUiStateStore.setState({
-    workspaceLayouts: state.workspaceLayouts,
-    activeLayoutId: state.activeLayoutId ?? state.workspaceLayouts[0].id ?? null,
+    scenes,
+    activeSceneId,
+    ...deriveLayoutMirror(active, state.activeLayoutId),
     detachedWindows: Array.isArray(state.detachedWindows)
       ? state.detachedWindows.filter(isValidDetached)
       : [],
@@ -213,13 +240,17 @@ function applyLayoutMirror(state: AppUiState): void {
 }
 
 export const useUiStateStore = create<UiStateStore>((set, get) => {
+  // load 前的渲染兜底种子（与 load 失败路径同源；单个实例保证字段间 id 一致）
+  const bootScenes = createDefaultScenes();
   return {
     fileExplorerExpanded: new Set(),
     lastCanvasFile: null,
     lastNoteFile: null,
     lastTableFile: null,
-    workspaceLayouts: createDefaultLayouts(),
-    activeLayoutId: null,
+    scenes: bootScenes,
+    activeSceneId: bootScenes[0].id,
+    workspaceLayouts: [bootScenes[0].homeLayout, ...bootScenes[0].layouts],
+    activeLayoutId: bootScenes[0].activeLayoutId,
     focusedPanelId: null,
     detachedWindows: [],
     recentFiles: [],
@@ -239,16 +270,20 @@ export const useUiStateStore = create<UiStateStore>((set, get) => {
       }
       try {
         const disk = await layoutBootstrap();
+        // 快照来自 Rust normalize 后的模型：scenes 恒非空、激活态恒有效
+        const scenes = disk.scenes;
+        const activeSceneId = disk.activeSceneId;
         set({
           fileExplorerExpanded: new Set(disk.fileExplorerExpanded ?? []),
           lastCanvasFile: disk.lastCanvasFile ?? null,
           lastNoteFile: disk.lastNoteFile ?? null,
           lastTableFile: disk.lastTableFile ?? null,
-          workspaceLayouts:
-            Array.isArray(disk.workspaceLayouts) && disk.workspaceLayouts.length > 0
-              ? disk.workspaceLayouts
-              : [],
-          activeLayoutId: disk.activeLayoutId ?? disk.workspaceLayouts?.[0]?.id ?? null,
+          scenes,
+          activeSceneId,
+          ...deriveLayoutMirror(
+            scenes.find((s) => s.id === activeSceneId)!,
+            disk.activeLayoutId,
+          ),
           focusedPanelId: disk.focusedPanelId ?? null,
           detachedWindows: Array.isArray(disk.detachedWindows)
             ? disk.detachedWindows.filter(isValidDetached)
@@ -267,13 +302,15 @@ export const useUiStateStore = create<UiStateStore>((set, get) => {
         console.error("读取应用级 UI 状态失败", e);
         // 失败时以默认值渲染（恢复 effect 依赖 loaded=true 才跑），但标记错误态禁止
         // 后续 patch 落盘：默认值一旦经补丁进 Rust 会覆盖磁盘 recentFiles/expanded
+        const scenes = createDefaultScenes();
         set({
           fileExplorerExpanded: new Set(),
           lastCanvasFile: null,
           lastNoteFile: null,
           lastTableFile: null,
-          workspaceLayouts: createDefaultLayouts(),
-          activeLayoutId: null,
+          scenes,
+          activeSceneId: scenes[0].id,
+          ...deriveLayoutMirror(scenes[0], scenes[0].activeLayoutId),
           focusedPanelId: null,
           detachedWindows: [],
           recentFiles: [],
@@ -452,6 +489,26 @@ export const useUiStateStore = create<UiStateStore>((set, get) => {
       markPatch({ focusedPanelId: null });
     },
     moveLayout: (fromIndex, toIndex) => sendLayoutOp({ op: "moveLayout", fromIndex, toIndex }),
+
+    addScene: () => {
+      sendLayoutOp({ op: "addScene" });
+      set({ focusedPanelId: null });
+      markPatch({ focusedPanelId: null });
+    },
+    renameScene: (id, name) => sendLayoutOp({ op: "renameScene", id, name }),
+    deleteScene: (id) => {
+      sendLayoutOp({ op: "deleteScene", id });
+      // 删除激活场景时 Rust 回退默认场景 → 聚焦面板失效，本地同步清空（非布局字段）
+      if (get().activeSceneId === id) {
+        set({ focusedPanelId: null });
+        markPatch({ focusedPanelId: null });
+      }
+    },
+    activateScene: (id) => {
+      sendLayoutOp({ op: "activateScene", id });
+      set({ focusedPanelId: null });
+      markPatch({ focusedPanelId: null });
+    },
 
     flush: async () => {
       // 布局字段由 Rust 侧已调度落盘；非布局字段补丁立即发送 + 强制 Rust 落盘

@@ -11,6 +11,7 @@ import type {
   DetachedWindow,
   LayoutNode,
   PanelNode,
+  Scene,
   TabItem,
   ViewKind,
 } from "@/types";
@@ -60,4 +61,17 @@ export function findViewHost(
 /** 面板的激活标签（tabs 空返回 null）。 */
 export function activeTabOf(panel: PanelNode): TabItem | null {
   return panel.tabs.find((t) => t.id === panel.activeTabId) ?? panel.tabs[0] ?? null;
+}
+
+/**
+ * 解析仓库级「启动时切换场景」配置：配置 id 在场景列表中存在 → 返回场景 id
+ * （切换场景恢复该场景记忆的激活布局）；
+ * 未配置 / 指定场景已删除（场景结构与仓库配置独立，悬挂引用常态存在）→ null = 不切换。
+ */
+export function resolveEntryScene(
+  configuredId: string | null | undefined,
+  scenes: Scene[],
+): string | null {
+  if (!configuredId) return null;
+  return scenes.some((s) => s.id === configuredId) ? configuredId : null;
 }
