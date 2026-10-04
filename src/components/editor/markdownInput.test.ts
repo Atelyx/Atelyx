@@ -4,7 +4,7 @@
  * 以及输入面基态样式的承载方式。
  */
 import { describe, expect, it } from "vitest";
-import { indentEdit, listBackspaceEdit, listEnterEdit, MarkdownEditSink, outdentEdit, type CompositionText } from "./markdownInput";
+import { CaretOverlay, indentEdit, listBackspaceEdit, listEnterEdit, MarkdownEditSink, outdentEdit, type CompositionText, type RemoteCursor } from "./markdownInput";
 
 /** 组装输入面；`onCompositionChange` 记录每次组合态上报。 */
 function mountSink(value: string, caret: number) {
@@ -210,5 +210,57 @@ describe("隐藏输入面基态样式", () => {
     expect(sink.el.style.top).toBe("20px");
     // 内部高度按行高实测覆写类中的 1em 基态
     expect(sink.el.style.height).toMatch(/^\d+(\.\d+)?px$/);
+  });
+});
+
+/** jsdom 无布局：用平面矩形对象充当量测结果。 */
+function fakeRect(left: number, top: number, width = 0, height = 0): DOMRect {
+  return { left, top, width, height, right: left + width, bottom: top + height, x: left, y: top } as DOMRect;
+}
+
+describe("协作者光标与选区绘制", () => {
+  it("选区矩形铺协作者色半透明底，光标竖线带昵称标签（坐标相对绘制层原点）", () => {
+    const host = document.createElement("div");
+    const overlay = new CaretOverlay(host);
+    const cursors: RemoteCursor[] = [
+      {
+        rects: [fakeRect(110, 220, 40, 20)],
+        rect: fakeRect(150, 220, 0, 20),
+        label: "甲",
+        color: "#ff0000",
+      },
+    ];
+    overlay.setRemoteCursors(cursors, fakeRect(100, 200));
+    const layer = host.querySelector(".md-remote-layer")!;
+    const boxes = layer.querySelectorAll<HTMLElement>(".md-remote-selection-rect");
+    expect(boxes).toHaveLength(1);
+    expect(boxes[0]!.style.left).toBe("10px");
+    expect(boxes[0]!.style.top).toBe("20px");
+    expect(boxes[0]!.style.width).toBe("40px");
+    expect(boxes[0]!.style.height).toBe("20px");
+    // 底色按协作者用户色调低浓度（与本地选区同浓度），色值经 CSSOM 内联
+    expect(boxes[0]!.style.background).toContain("color-mix");
+    expect(boxes[0]!.style.background).toContain("rgb(255, 0, 0)");
+    const caret = layer.querySelector<HTMLElement>(".md-remote-caret")!;
+    expect(caret.style.left).toBe("50px");
+    expect(caret.style.background).toBe("rgb(255, 0, 0)");
+    expect(caret.querySelector(".md-remote-caret-label")!.textContent).toBe("甲");
+  });
+
+  it("折叠光标不画选区；量不出光标矩形时只画选区", () => {
+    const host = document.createElement("div");
+    const overlay = new CaretOverlay(host);
+    overlay.setRemoteCursors(
+      [
+        { rects: [], rect: fakeRect(10, 10, 0, 18), label: "", color: "#00ff00" },
+        { rects: [fakeRect(0, 0, 30, 18)], rect: null, label: "乙", color: "#0000ff" },
+      ],
+      fakeRect(0, 0),
+    );
+    const layer = host.querySelector(".md-remote-layer")!;
+    expect(layer.querySelectorAll(".md-remote-selection-rect")).toHaveLength(1);
+    expect(layer.querySelectorAll(".md-remote-caret")).toHaveLength(1);
+    // 无昵称不出标签
+    expect(layer.querySelector(".md-remote-caret .md-remote-caret-label")).toBeNull();
   });
 });
