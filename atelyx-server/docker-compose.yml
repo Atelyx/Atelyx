@@ -1,11 +1,11 @@
 services:
-  relay:
+  atelyx-server:
     build: .
-    container_name: atelyx-collab-relay
+    container_name: atelyx-server
     restart: unless-stopped
     environment:
       - PORT=11224
-      # 日志级别（默认 info；调试看转发明细用 collab_relay=debug）
+      # 日志级别（默认 info；调试看转发明细用 atelyx_server=debug）
       - RUST_LOG=${RUST_LOG:-info}
       # 可选：json 切结构化行输出，便于 docker logs 采集
       - LOG_FORMAT=${LOG_FORMAT:-}

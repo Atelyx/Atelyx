@@ -1,5 +1,5 @@
 /**
- * 协作空间传输工厂（collab-relay 的 `/ws/space`）：帧收发共用帧泵（framePump.ts），
+ * 协作空间传输工厂（atelyx-server 的 `/ws/space`）：帧收发共用帧泵（framePump.ts），
  * 入口 hello 携带 spaceId（房间 = space:<spaceId>）与空间登录令牌（服务端据此
  * 鉴权成员资格，失败发 error 帧后断开，经 onServerError 可见）。
  * 令牌仅随 hello 帧发送，本模块不打任何日志（不落令牌）。

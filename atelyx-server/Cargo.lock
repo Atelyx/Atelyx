@@ -33,6 +33,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "atelyx-server"
+version = "0.1.0"
+dependencies = [
+ "argon2",
+ "axum",
+ "axum-server",
+ "base64",
+ "dunce",
+ "futures-util",
+ "globset",
+ "rand 0.8.8",
+ "rcgen",
+ "regex",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite 0.24.0",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -216,33 +243,6 @@ dependencies = [
  "cfg-if",
  "cpufeatures 0.3.1",
  "rand_core 0.10.1",
-]
-
-[[package]]
-name = "collab-relay"
-version = "0.1.0"
-dependencies = [
- "argon2",
- "axum",
- "axum-server",
- "base64",
- "dunce",
- "futures-util",
- "globset",
- "rand 0.8.8",
- "rcgen",
- "regex",
- "reqwest",
- "rustls",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "tokio",
- "tokio-tungstenite 0.24.0",
- "tower-http",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

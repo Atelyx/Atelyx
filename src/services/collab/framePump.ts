@@ -2,7 +2,7 @@
  * 协作帧泵（WebSocket 连接内核）：WebSocket 生命周期 + 帧编解码 +
  * 心跳保活 + 半开检测 + 指数退避重连。泵不感知 hello 内容，由传输工厂组装后传入。
  *
- * 协议（JSON，camelCase，见 `collab-relay/src/ws.rs`）：
+ * 协议（JSON，camelCase，见 `atelyx-server/src/ws.rs`）：
  * - C→S `hello`（首条必发）/ `presence` / `table-patch` / `canvas-patch` /
  *   `note-sync` / `note-aware` / `plugin-msg` / `plugin-replay` / `ping` / `bye`
  * - S→C `peers`（成员全量）/ `hello-ack`（分配 peerId + 房间插件序号头）/ `presence` / 各频道转发帧 /
@@ -98,7 +98,7 @@ interface CollabFramePumpHandle {
 }
 
 // ===== 插件消息二进制帧编解码（WebSocket 二进制帧直传，不经 base64） =====
-// 布局（小端，与 collab-relay parse_plugin_binary 逐字节同构）：
+// 布局（小端，与 atelyx-server parse_plugin_binary 逐字节同构）：
 // [0]=kind(1) [1]=flags(bit0=有 targetPeerId) [2..3]=channel 字节长
 // [channel utf8] [8B seq] [8B targetPeerId（flags.bit0 时）] [8B senderPeerId] [payload 原样字节]。
 // seq/senderPeerId 由服务端分配回填（C→S 恒 0），载荷原样透传不解析。

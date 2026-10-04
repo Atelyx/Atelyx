@@ -7,7 +7,7 @@
     <!-- 空 favicon：避免控制台 favicon.ico 404 -->
     <link rel="icon" href="data:," />
     <!-- CSP：本地单用户应用，connect-src 放宽允许任意 http/https 与 ws/wss，
-         以兼容自建 Ollama、局域网 API、SearXNG、协作中转（collab-relay）等。
+         以兼容自建 Ollama、局域网 API、SearXNG、协作服务端（atelyx-server）等。
          http://ipc.localhost 是 Tauri 2 的 IPC 协议地址，必须允许。
          script-src 的 blob: 供插件包入口的 ESM 求值（blob URL 动态 import）；
          wasm-unsafe-eval 供 esbuild-wasm 转译 TS 插件入口（插件代码在主上下文内执行，安装即授权）。

@@ -2,9 +2,9 @@
 # Atelyx 协作服务端一键安装/更新（Linux + systemd 宿主机直跑，不用 Docker）。
 #
 # 用法（在仓库克隆目录内）：
-#   sudo bash collab-relay/install.sh            # 默认端口 11224，数据目录 /var/lib/atelyx
-#   sudo bash collab-relay/install.sh 13000      # 自定义端口
-#   sudo bash collab-relay/install.sh 11224 /mnt/nas/atelyx-data   # 自定义数据目录（如 NAS 挂载点）
+#   sudo bash atelyx-server/install.sh            # 默认端口 11224，数据目录 /var/lib/atelyx
+#   sudo bash atelyx-server/install.sh 13000      # 自定义端口
+#   sudo bash atelyx-server/install.sh 11224 /mnt/nas/atelyx-data   # 自定义数据目录（如 NAS 挂载点）
 #
 # 每次执行完成完整更新：拉取最新代码 → 增量编译 → 安装并重启服务，数据不受影响。
 # 不带参数重复执行时沿用上次安装的端口/数据目录（记录于 /opt/atelyx-server/install.conf），
@@ -22,7 +22,7 @@ SERVICE_USER="atelyx"
 CONF_FILE="$INSTALL_DIR/install.conf"
 SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(dirname "$SRC_DIR")"
-BIN_SRC="$SRC_DIR/target/release/collab-relay"
+BIN_SRC="$SRC_DIR/target/release/atelyx-server"
 
 [ "$(id -u)" = 0 ] || { echo "请用 sudo 运行"; exit 1; }
 
@@ -74,15 +74,15 @@ if find_cargo; then
 elif [ -x "$BIN_SRC" ]; then
     echo "警告：本机没有可用 cargo，跳过编译，安装已有产物 $BIN_SRC（可能不含最新代码）。"
 else
-    echo "未找到 target/release/collab-relay，且本机没有 cargo。"
-    echo "先安装 Rust（https://rustup.rs）后重试，或在有 Rust 的机器上构建后把 target/release/collab-relay 拷到 $SRC_DIR/target/release/"
+    echo "未找到 target/release/atelyx-server，且本机没有 cargo。"
+    echo "先安装 Rust（https://rustup.rs）后重试，或在有 Rust 的机器上构建后把 target/release/atelyx-server 拷到 $SRC_DIR/target/release/"
     exit 1
 fi
 
 # 专用系统用户（无登录 shell）：服务不跑在 root 下
 id -u "$SERVICE_USER" >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin "$SERVICE_USER"
 
-install -Dm755 "$BIN_SRC" "$INSTALL_DIR/collab-relay"
+install -Dm755 "$BIN_SRC" "$INSTALL_DIR/atelyx-server"
 install -d -m750 -o "$SERVICE_USER" -g "$SERVICE_USER" "$DATA_DIR"
 
 # 服务文件被整体重写，先取出手工加入的 TLS 环境行写回新文件，避免更新时丢失
@@ -99,7 +99,7 @@ After=network.target
 
 [Service]
 User=$SERVICE_USER
-ExecStart=$INSTALL_DIR/collab-relay
+ExecStart=$INSTALL_DIR/atelyx-server
 Environment=PORT=$PORT
 Environment=DATA_DIR=$DATA_DIR
 ${TLS_ENV_BLOCK}Restart=always

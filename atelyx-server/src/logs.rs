@@ -220,7 +220,7 @@ mod tests {
         assert_eq!(entry.message, "内容写入");
         assert_eq!(entry.level, "info");
         assert_eq!(entry.fields, "marker=capture-1 space_id=sp1 bytes=12");
-        assert!(entry.target.starts_with("collab_relay::logs"), "目标应为事件所在模块：{}", entry.target);
+        assert!(entry.target.starts_with("atelyx_server::logs"), "目标应为事件所在模块：{}", entry.target);
         assert!(entry.ts > 0);
     }
 

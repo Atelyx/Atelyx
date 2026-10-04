@@ -73,18 +73,18 @@ pnpm run check       # full gate: typecheck + ESLint + frontend tests + cargo te
 
 ## Self-Hosting the Collaboration Server
 
-Collaboration spaces keep their source of truth on the server (`collab-relay/`, a single Rust process) — one Linux box or NAS is enough:
+Collaboration spaces keep their source of truth on the server (`atelyx-server/`, a single Rust process) — one Linux box or NAS is enough:
 
 ```bash
 # Option 1: Docker Compose (data lands in ./data; backup = copy that directory)
-cd collab-relay && docker compose up -d
+cd atelyx-server && docker compose up -d
 
 # Option 2: Linux + systemd (builds and registers the service automatically; data dir /var/lib/atelyx)
-sudo bash collab-relay/install.sh
-# Custom port / data dir: sudo bash collab-relay/install.sh 13000 /mnt/nas/atelyx-data
+sudo bash atelyx-server/install.sh
+# Custom port / data dir: sudo bash atelyx-server/install.sh 13000 /mnt/nas/atelyx-data
 ```
 
-- The server listens on port `11224` by default; set `TLS_CERT` + `TLS_KEY` to enable HTTPS/WSS. More options: comments in `collab-relay/docker-compose.yml` and the header of `install.sh`.
+- The server listens on port `11224` by default; set `TLS_CERT` + `TLS_KEY` to enable HTTPS/WSS. More options: comments in `atelyx-server/docker-compose.yml` and the header of `install.sh`.
 - Once deployed, open `http://<server>:11224` in a browser for the admin console: register an account (the first registered account becomes the admin), create spaces, and invite members. Clients connect by entering the server address in the app.
 
 ## Plugin Development

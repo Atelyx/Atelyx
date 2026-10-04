@@ -1,5 +1,5 @@
 [package]
-name = "collab-relay"
+name = "atelyx-server"
 version = "0.1.0"
 edition = "2021"
 description = "Atelyx 协作服务端：账号 / 空间 / 成员 / 内容真源（文件树）/ 派生索引 / WS 实时频道"

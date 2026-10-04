@@ -12,7 +12,7 @@
 
 use std::path::PathBuf;
 
-use collab_relay::{build_app, serve_on, ServerState, TlsPaths};
+use atelyx_server::{build_app, serve_on, ServerState, TlsPaths};
 use tracing::info;
 
 fn main() {
@@ -53,7 +53,7 @@ fn init_logging() {
     use tracing_subscriber::util::SubscriberInitExt;
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    let logs_layer = collab_relay::logs::layer();
+    let logs_layer = atelyx_server::logs::layer();
     if std::env::var("LOG_FORMAT").as_deref() == Ok("json") {
         tracing_subscriber::registry()
             .with(filter)

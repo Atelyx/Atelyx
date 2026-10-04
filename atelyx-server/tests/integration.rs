@@ -24,13 +24,13 @@ static TEST_SERIAL: Mutex<()> = Mutex::new(());
 struct SizeLimitOverride;
 impl SizeLimitOverride {
     fn set(file: Option<usize>, meta: Option<usize>) -> Self {
-        collab_relay::set_size_limit_override(file, meta);
+        atelyx_server::set_size_limit_override(file, meta);
         Self
     }
 }
 impl Drop for SizeLimitOverride {
     fn drop(&mut self) {
-        collab_relay::set_size_limit_override(None, None);
+        atelyx_server::set_size_limit_override(None, None);
     }
 }
 
@@ -38,12 +38,12 @@ impl Drop for SizeLimitOverride {
 
 /// 起一个服务器实例（独立数据目录 + 临时端口），返回 base URL。
 async fn spawn_server(data_dir: &Path) -> String {
-    let state = collab_relay::ServerState::open(data_dir);
-    let app = collab_relay::build_app(state);
+    let state = atelyx_server::ServerState::open(data_dir);
+    let app = atelyx_server::build_app(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("绑定临时端口");
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        collab_relay::serve_on(listener, app, None)
+        atelyx_server::serve_on(listener, app, None)
             .await
             .expect("服务器错误");
     });
@@ -943,15 +943,15 @@ async fn tls_enabled_with_cert_paths() {
     std::fs::write(&cert_path, cert.cert.pem()).unwrap();
     std::fs::write(&key_path, cert.key_pair.serialize_pem()).unwrap();
 
-    let state = collab_relay::ServerState::open(&data_dir);
-    let app = collab_relay::build_app(state);
+    let state = atelyx_server::ServerState::open(&data_dir);
+    let app = atelyx_server::build_app(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        collab_relay::serve_on(
+        atelyx_server::serve_on(
             listener,
             app,
-            Some(collab_relay::TlsPaths { cert: cert_path, key: key_path }),
+            Some(atelyx_server::TlsPaths { cert: cert_path, key: key_path }),
         )
         .await
         .expect("服务器错误");
@@ -2236,7 +2236,7 @@ async fn reserved_media_dir_hidden_but_reachable() {
     let space_id = setup_two_members(&ctx, "alice", "bob").await;
     let a = login_as(&ctx, "alice").await;
     let url = format!("/api/spaces/{space_id}/file");
-    let media = collab_relay::fsops::RESERVED_MEDIA_DIR;
+    let media = atelyx_server::fsops::RESERVED_MEDIA_DIR;
 
     // 文本写与 base64 写进保留目录照常可达
     let (status, _) = ctx
@@ -2305,7 +2305,7 @@ async fn media_list_enumerates_reserved_dir_safely() {
     let (_, _, viewer) = add_viewer(&ctx, &space_id).await;
     let file_url = format!("/api/spaces/{space_id}/file");
     let url = format!("/api/spaces/{space_id}/media/list");
-    let media = collab_relay::fsops::RESERVED_MEDIA_DIR;
+    let media = atelyx_server::fsops::RESERVED_MEDIA_DIR;
 
     // 造数据：保留目录根一个文件 + 子目录两层各一个文件（size = 内容字节数）+ 一个空目录
     for (path, content) in [
@@ -2703,7 +2703,7 @@ fn ensure_log_capture() {
     ONCE.call_once(|| {
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::util::SubscriberInitExt;
-        let _ = tracing_subscriber::registry().with(collab_relay::logs::layer()).try_init();
+        let _ = tracing_subscriber::registry().with(atelyx_server::logs::layer()).try_init();
     });
 }
 

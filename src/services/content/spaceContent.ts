@@ -1154,7 +1154,7 @@ export function createSpaceContentBackend(serverUrl: string, spaceId: string): C
 
     // ===== 历史侧文件迁移（服务端在内容改名/移动时自行迁移，客户端无需动作）=====
     // 本地这两步由客户端在 rename/move 后调用（Rust remap_sideloads）；空间里服务端
-    // 知道每次改名（见 collab-relay history::remap_after_rename），客户端调用为无操作。
+    // 知道每次改名（见 atelyx-server history::remap_after_rename），客户端调用为无操作。
     remapSideloads: () => Promise.resolve(),
     remapSideloadsByDir: () => Promise.resolve(),
 

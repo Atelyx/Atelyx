@@ -70,18 +70,18 @@ pnpm run check       # 完整门禁：类型检查 + ESLint + 前端测试 + car
 
 ## 自建协作服务端
 
-协作空间的内容真源在服务端（`collab-relay/`，Rust 单进程），一台 Linux 机器或 NAS 即可部署：
+协作空间的内容真源在服务端（`atelyx-server/`，Rust 单进程），一台 Linux 机器或 NAS 即可部署：
 
 ```bash
 # 方式一：Docker Compose（数据落在 ./data，备份 = 拷贝该目录）
-cd collab-relay && docker compose up -d
+cd atelyx-server && docker compose up -d
 
 # 方式二：Linux + systemd（自动构建并注册服务，数据目录 /var/lib/atelyx）
-sudo bash collab-relay/install.sh
-# 自定义端口 / 数据目录：sudo bash collab-relay/install.sh 13000 /mnt/nas/atelyx-data
+sudo bash atelyx-server/install.sh
+# 自定义端口 / 数据目录：sudo bash atelyx-server/install.sh 13000 /mnt/nas/atelyx-data
 ```
 
-- 服务端口默认 `11224`；设 `TLS_CERT` + `TLS_KEY` 即启用 HTTPS/WSS，更多配置见 `collab-relay/docker-compose.yml` 与 `install.sh` 头注释。
+- 服务端口默认 `11224`；设 `TLS_CERT` + `TLS_KEY` 即启用 HTTPS/WSS，更多配置见 `atelyx-server/docker-compose.yml` 与 `install.sh` 头注释。
 - 部署后浏览器打开 `http://<服务器>:11224` 进入管理台：注册账号（首个注册账号为管理员）、创建空间并邀请成员；客户端在应用内填服务器地址登录即可协作。
 
 ## 插件开发
