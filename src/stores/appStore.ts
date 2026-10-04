@@ -42,7 +42,7 @@ import { openInExplorer as openInExplorerSvc, openUrl as openUrlSvc } from "@/se
 import { readClipboardText as readClipboardTextSvc, writeClipboardText as writeClipboardTextSvc } from "@/services/clipboard";
 import { pickDirectory as pickDirectorySvc } from "@/services/dialog";
 import { applyWorkspaceWindow as applyWorkspaceWindowSvc, closeWindow as closeWindowSvc, minimizeWindow as minimizeWindowSvc, onCloseRequested as onCloseRequestedSvc, toggleFullscreen as toggleFullscreenSvc, toggleMaximizeWindow as toggleMaximizeWindowSvc } from "@/services/window";
-import { checkForUpdate as checkForUpdateSvc, checkUpdateOnStartup as checkUpdateOnStartupSvc, installUpdate as installUpdateSvc } from "@/services/updater";
+import { cancelUpdateDownload as cancelUpdateDownloadSvc, checkForUpdate as checkForUpdateSvc, checkUpdateOnStartup as checkUpdateOnStartupSvc, installUpdate as installUpdateSvc } from "@/services/updater";
 import { isAndroidPlatform, platformCapabilities } from "@/services/platform";
 import type { PlatformCapabilities } from "@/services/platform";
 import { emitPluginEvent } from "@/services/cordis/events";
@@ -57,6 +57,9 @@ type UpdateStatus =
   | "upToDate"
   | "available"
   | "error";
+
+/** 安装流水线阶段：idle = 未开始（含已取消/已交给安装器）。 */
+type UpdatePhase = "idle" | "downloading" | "verifying" | "launching";
 
 /** 窗口关闭守卫已注册标志（installCloseGuard 幂等，防 React StrictMode 双挂载重复订阅）。 */
 let closeGuardInstalled = false;
@@ -150,8 +153,11 @@ interface AppState {
   updateLatestVersion: string;
   /** 检查/安装失败信息（status = error 时有效）。 */
   updateError: string;
-  /** 新版本下载安装中（available 后点「下载并安装」）。 */
-  installing: boolean;
+  /** 安装流水线阶段（非 idle 即进行中，界面据此禁用按钮并显示进度）。 */
+  updatePhase: UpdatePhase;
+  /** 已下载字节 / 总字节（总字节未知时为 0）。 */
+  updateReceived: number;
+  updateTotal: number;
 
   /** 应用挂载时调用一次：读取最近仓库列表。返回本次应自动进入的目标（null = 无仓库，停留空态）。 */
   init: () => Promise<AutoEnterTarget | null>;
@@ -161,8 +167,10 @@ interface AppState {
   setAndroidStorageOnboarded: (shown: boolean) => Promise<void>;
   /** 手动检查新版本（设置页「关于」）；结果写入 updateStatus/updateLatestVersion/updateError。 */
   checkForUpdates: () => Promise<void>;
-  /** 下载并安装已发现的新版本；成功后 relaunch 重启。 */
+  /** 下载并安装已发现的新版本（三端分派见 services/updater）。 */
   installUpdate: () => Promise<void>;
+  /** 取消在途下载（安装包保留，重下即续传）。 */
+  cancelUpdate: () => Promise<void>;
   /** 打开仓库：openVault + 登记最近 + 进画布工作区（占位态）。成功返回 true。 */
   selectVault: (root: string) => Promise<boolean>;
   /**
@@ -323,7 +331,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   updateStatus: "idle",
   updateLatestVersion: "",
   updateError: "",
-  installing: false,
+  updatePhase: "idle",
+  updateReceived: 0,
+  updateTotal: 0,
 
   // 加载会话三方法：进仓/启动期间由 App boot 与 selectVault 调用，
   // LoadingScreen 订阅 loadSteps 渲染步骤清单（已完成打勾、最后一项 = 当前进行中）。
@@ -413,7 +423,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   checkForUpdates: async () => {
-    set({ updateStatus: "checking", updateError: "" });
+    set({ updateStatus: "checking", updateError: "", updatePhase: "idle", updateReceived: 0, updateTotal: 0 });
     try {
       const result = await checkForUpdateSvc();
       set(
@@ -434,20 +444,52 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   installUpdate: async () => {
-    set({ installing: true, updateError: "" });
+    set({ updatePhase: "downloading", updateError: "", updateReceived: 0, updateTotal: 0 });
+    // 从启动提示触发时「关于」页未必打开：下载真正开始后补一条提示，指路进度所在
+    let announced = false;
     try {
-      // 更新安装后 relaunch 重启：先落盘全部 pending 改动，防 debounce 保存随 webview 销毁丢失
-      // （协作连接无需在此 dispose：安装成功后进程退出，服务端按 TCP 断开即移除 peer）
-      await useAppStore.getState().flushAllPending();
-      await installUpdateSvc();
-      // 安卓端只打开下载地址（无 updater，不会重启），复位按钮状态；桌面端安装后即重启，无需复位
-      if (isAndroidPlatform()) set({ installing: false, updateStatus: "idle" });
+      await installUpdateSvc({
+        onProgress: (received, total) => {
+          if (!announced) {
+            announced = true;
+            useNotificationStore.getState().notify({
+              level: "info",
+              message: "正在下载更新包，可在「设置 → 关于」查看进度。",
+            });
+          }
+          set({ updateReceived: received, updateTotal: total ?? 0 });
+        },
+        onVerifying: () => set({ updatePhase: "verifying" }),
+        // 安装器会让本进程退出：pending 改动必须赶在它之前落盘（下载期间的编辑不能被丢掉）
+        onBeforeInstall: async () => {
+          set({ updatePhase: "launching" });
+          await useAppStore.getState().flushAllPending();
+        },
+      });
+      // 已取消或已交给安装器/浏览器：复位流水线（Windows 交给安装器后进程随即退出，此处不会再被看到）。
+      // 取消时保留 updateStatus = available，按钮仍可点，再点即从已落盘的 .part 续传。
+      set({ updatePhase: "idle", updateReceived: 0, updateTotal: 0 });
     } catch (e) {
       console.error("安装更新失败", e);
       const message = e instanceof Error ? e.message : String(e);
-      set({ installing: false, updateStatus: "error", updateError: message });
+      set({
+        updatePhase: "idle",
+        updateReceived: 0,
+        updateTotal: 0,
+        updateStatus: "error",
+        updateError: message,
+      });
       // 从启动提示点按钮触发时「关于」页未必打开，提示通知点击即消失，错误须另行可见
       useNotificationStore.getState().notify({ level: "error", message: `更新失败：${message}` });
+    }
+  },
+
+  cancelUpdate: async () => {
+    try {
+      await cancelUpdateDownloadSvc();
+    } catch (e) {
+      // 无在途下载时取消会被拒绝（属正常收尾时序），只记日志不打扰用户
+      console.error("取消更新下载失败", e);
     }
   },
 
@@ -740,7 +782,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     await useSettingsStore.getState().flush();
     // 协作连接收尾不在此处（本函数在文件重命名/删除等非退出路径也会调用）：dispose 会断开会话内协作连接
     // 且清空 runtimeCfg，之后 applyConfig 全部失效、状态永久未连接。dispose 只由关窗守卫
-    // （真退出）显式调用发 bye；更新安装后 relaunch 场景进程退出即断，服务端按 TCP 断开立即移除 peer
+    // （真退出）显式调用发 bye；更新安装时进程被结束即断，服务端按 TCP 断开立即移除 peer
   },
 
   installCloseGuard: () => {
@@ -756,14 +798,15 @@ export const useAppStore = create<AppState>((set, get) => ({
   promptUpdateOnStartup: async () => {
     const result = await checkUpdateOnStartupSvc();
     if (!result) return;
-    const android = isAndroidPlatform();
+    // 应用内更新（Windows/安卓）= 下载并拉起安装器；Linux 无应用内安装，只前往下载页
+    const inAppUpdate = get().platform.capabilities.inAppUpdate;
     useNotificationStore.getState().notify({
       level: "info",
-      message: android
-        ? `发现新版本 ${result.latestVersion}，可下载安装包手动更新。`
-        : `发现新版本 ${result.latestVersion}，是否立即下载并安装？`,
+      message: inAppUpdate
+        ? `发现新版本 ${result.latestVersion}，是否立即下载并安装？`
+        : `发现新版本 ${result.latestVersion}，是否前往下载页？`,
       action: {
-        label: android ? "去下载" : "下载并安装",
+        label: inAppUpdate ? "下载并安装" : "前往下载",
         onClick: () => void useAppStore.getState().installUpdate(),
       },
     });

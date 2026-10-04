@@ -145,7 +145,7 @@ export function GeneralSettingsTab() {
       </SettingCard>
 
       {/* 自动检查更新（应用级，global.json）：开启后启动静默检查新版本并提示，由用户决定是否更新；
-          关闭 = 完全不联网检查。桌面与安卓同一开关（点按钮后桌面安装重启、安卓打开下载页）。 */}
+          关闭 = 完全不联网检查。三端同一开关（Linux 打开下载页，其余应用内下载并启动安装程序）。 */}
       <SettingCard
         title="自动检查更新"
         description="启动时自动检查新版本并提示；关闭 = 不联网检查"

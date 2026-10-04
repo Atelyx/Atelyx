@@ -12,6 +12,7 @@ pub mod process;
 pub mod search;
 pub mod table;
 pub mod temp_attachment;
+pub mod update;
 pub mod vault;
 pub mod web;
 pub mod windows;

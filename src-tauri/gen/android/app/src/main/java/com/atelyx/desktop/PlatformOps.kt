@@ -7,6 +7,8 @@ import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.Settings
+import androidx.core.content.FileProvider
+import java.io.File
 
 /**
  * 系统能力桥：设备名、存储授权状态/申请与外部 URL 打开。
@@ -55,6 +57,62 @@ object PlatformOps {
   fun openUrl(context: Context, url: String) {
     val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
       .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    context.startActivity(intent)
+  }
+
+  /** 是否已允许安装未知来源应用（Android 8+ 装更新包的前置开关）。 */
+  @JvmStatic
+  fun canInstallPackages(context: Context): Boolean =
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+      context.packageManager.canRequestPackageInstalls()
+    } else {
+      true
+    }
+
+  /**
+   * 拉起「安装未知应用」的系统设置页：该开关不能弹窗申请，只能由用户手动开启。
+   * 拉起即返回（不等待用户操作）；个别 ROM 没有按包名的页面，回落应用设置列表页。
+   */
+  @JvmStatic
+  fun requestInstallPermission(context: Context) {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+      return
+    }
+    val perApp = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES)
+      .setData(Uri.fromParts("package", context.packageName, null))
+    val fallback = Intent(Settings.ACTION_MANAGE_APPLICATIONS_SETTINGS)
+    try {
+      context.startActivity(perApp)
+    } catch (e: ActivityNotFoundException) {
+      context.startActivity(fallback)
+    }
+  }
+
+  /**
+   * 把已下载的更新包交给系统安装器。
+   *
+   * 先 rename 进 cacheDir（file_paths.xml 只暴露固定根目录，cache 在其中；同盘 rename 无拷贝）。
+   * Android 7+ 必须经 FileProvider 传 content://，否则触发 FileUriExposedException。
+   */
+  @JvmStatic
+  fun installApk(context: Context, path: String) {
+    val source = File(path)
+    if (!source.isFile) {
+      throw IllegalArgumentException("安装包不存在：$path")
+    }
+    val updatesDir = File(context.cacheDir, "updates").apply { mkdirs() }
+    val target = File(updatesDir, source.name)
+    if (target.exists() && !target.delete()) {
+      throw IllegalStateException("无法替换旧的安装包：${target.absolutePath}")
+    }
+    if (!source.renameTo(target)) {
+      source.copyTo(target, overwrite = true)
+      source.delete()
+    }
+    val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", target)
+    val intent = Intent(Intent.ACTION_VIEW)
+      .setDataAndType(uri, "application/vnd.android.package-archive")
+      .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)
     context.startActivity(intent)
   }
 }

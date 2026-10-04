@@ -1,4 +1,5 @@
-import { Spinner } from "@/components/common/primitives";
+import { ProgressBar } from "@/components/common/primitives";
+import { Button } from "@/components/common/Button";
 import {
   AlertCircle,
   CheckCircle2,
@@ -11,24 +12,32 @@ import { useAppStore } from "@/stores/appStore";
 // 应用图标（与 src-tauri/icons/icon.svg 同源，设置页「关于」Logo 展示）
 import appIcon from "@/assets/icon.svg";
 
-/** 项目主页（更新源为 GitHub Release，见 tauri.conf.json updater.endpoints）。 */
+/** 项目主页（更新源为 GitHub Release）。 */
 const REPO_URL = "https://github.com/Atelyx/Atelyx";
 
+/** 字节转 MB（更新包量级为十几到几十 MB，固定用 MB 足够读）。 */
+function toMb(bytes: number): string {
+  return (bytes / 1024 / 1024).toFixed(1);
+}
+
 /**
- * 设置页「关于」tab：Logo + 版本号 + 手动检查更新（下载安装后 relaunch 重启）。
+ * 设置页「关于」tab：Logo + 版本号 + 手动检查更新（应用内下载并启动安装程序）。
  * 更新状态机在 appStore（updateStatus）：idle → checking → upToDate / available / error。
  */
 export function AboutSection() {
   const updateStatus = useAppStore((s) => s.updateStatus);
   const updateLatestVersion = useAppStore((s) => s.updateLatestVersion);
   const updateError = useAppStore((s) => s.updateError);
-  const installing = useAppStore((s) => s.installing);
+  const updatePhase = useAppStore((s) => s.updatePhase);
+  const updateReceived = useAppStore((s) => s.updateReceived);
+  const updateTotal = useAppStore((s) => s.updateTotal);
   const checkForUpdates = useAppStore((s) => s.checkForUpdates);
   const installUpdate = useAppStore((s) => s.installUpdate);
+  const cancelUpdate = useAppStore((s) => s.cancelUpdate);
   const getAppVersion = useAppStore((s) => s.getAppVersion);
   const openUrl = useAppStore((s) => s.openUrl);
-  /** 安卓无 updater：新版本只能打开下载地址，由用户手动安装（平台事实经 store 读取）。 */
-  const isAndroid = useAppStore((s) => s.platform.isAndroid);
+  /** 应用内更新（Windows/安卓）；Linux 只打开下载页（平台事实经 store 读取）。 */
+  const inAppUpdate = useAppStore((s) => s.platform.capabilities.inAppUpdate);
 
   const [version, setVersion] = useState("");
   useEffect(() => {
@@ -46,6 +55,17 @@ export function AboutSection() {
       // 剪贴板不可用时静默忽略，不影响其他操作
     }
   };
+
+  /** 下载安装流水线进行中：按钮禁用并显示进度区。 */
+  const busy = updatePhase !== "idle";
+  const percent =
+    updateTotal > 0 ? Math.min(100, Math.round((updateReceived / updateTotal) * 100)) : 0;
+  const phaseLabel =
+    updatePhase === "downloading" ? "下载中…" : updatePhase === "verifying" ? "校验中…" : "正在安装…";
+  const progressText =
+    updateTotal > 0
+      ? `${percent}% · ${toMb(updateReceived)} / ${toMb(updateTotal)} MB`
+      : `${toMb(updateReceived)} MB`;
 
   return (
     <section className="flex-1 overflow-auto flex flex-col items-center justify-center px-8">
@@ -80,29 +100,25 @@ export function AboutSection() {
       {/* 检查更新 / 下载并安装（状态流：idle → checking → upToDate / available / error） */}
       <div className="mt-8 flex flex-col items-center gap-2">
         {updateStatus === "available" ? (
-          <button
+          <Button
+            variant="primary"
+            size="lg"
             onClick={() => void installUpdate()}
-            disabled={installing}
-            className="flex items-center gap-1.5 px-4 py-2 rounded text-sm font-medium bg-[var(--accent)] text-[var(--accent-fg)] hover:opacity-90 disabled:opacity-60"
+            disabled={busy}
+            loading={busy}
+            icon={busy ? undefined : <Download size={14} />}
           >
-            {installing ? (
-              <Spinner size={14} className="[--spinner-track:color-mix(in_srgb,var(--accent-fg)_35%,transparent)] [--spinner-head:var(--accent-fg)]" />
-            ) : (
-              <Download size={14} />
-            )}
-            {installing ? (isAndroid ? "打开中…" : "安装中…") : isAndroid ? "下载新版本" : "下载并安装"}
-          </button>
+            {busy ? phaseLabel : inAppUpdate ? "下载并安装" : "前往下载页"}
+          </Button>
         ) : (
-          <button
+          <Button
+            variant="primary"
+            size="lg"
             onClick={() => void checkForUpdates()}
             disabled={updateStatus === "checking"}
-            className="flex items-center gap-1.5 px-4 py-2 rounded text-sm font-medium bg-[var(--accent)] text-[var(--accent-fg)] hover:opacity-90 disabled:opacity-60"
+            loading={updateStatus === "checking"}
+            icon={updateStatus === "checking" ? undefined : <RefreshCw size={14} />}
           >
-            {updateStatus === "checking" ? (
-              <Spinner size={14} className="[--spinner-track:color-mix(in_srgb,var(--accent-fg)_35%,transparent)] [--spinner-head:var(--accent-fg)]" />
-            ) : (
-              <RefreshCw size={14} />
-            )}
             {updateStatus === "checking"
               ? "检查中…"
               : updateStatus === "upToDate"
@@ -110,8 +126,23 @@ export function AboutSection() {
                 : updateStatus === "error"
                   ? "重试"
                   : "检查更新"}
-          </button>
+          </Button>
         )}
+
+        {busy && (
+          <div className="flex flex-col items-center gap-1.5 w-full max-w-[320px]">
+            <ProgressBar value={percent} className="w-full" label={phaseLabel} />
+            <p className="text-xs" style={{ color: "var(--text-muted)" }}>
+              {progressText}
+            </p>
+            {updatePhase === "downloading" && (
+              <Button variant="subtle" size="sm" onClick={() => void cancelUpdate()}>
+                取消下载
+              </Button>
+            )}
+          </div>
+        )}
+
         {updateStatus === "upToDate" && (
           <p
             className="text-xs flex items-center gap-1"
@@ -121,13 +152,13 @@ export function AboutSection() {
             已是最新版本
           </p>
         )}
-        {updateStatus === "available" && (
+        {updateStatus === "available" && !busy && (
           <p
             className="text-xs max-w-[420px] text-center"
             style={{ color: "var(--text-muted)" }}
           >
             发现新版本 {updateLatestVersion}
-            {isAndroid ? "；将打开下载页，安装包需自行安装" : "；安装完成后将自动重启应用"}
+            {inAppUpdate ? "；下载完成后将启动安装程序" : "；将打开下载页，安装包需自行安装"}
           </p>
         )}
         {updateStatus === "error" && (

@@ -46,23 +46,21 @@ pub fn run() {
     let builder = builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init());
-    // 桌面壳专属插件：shell（系统打开）/ process（更新后重启）/ autostart（开机自启，注册项附带
-    // --autorun 供上面的单实例回调识别登录自启）；移动端无对应实现，不注册
+    // 桌面壳专属插件：shell（系统打开）/ autostart（开机自启，注册项附带 --autorun 供上面的
+    // 单实例回调识别登录自启）；移动端无对应实现，不注册
     #[cfg(desktop)]
     let builder = builder
         .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--autorun"]),
         ));
     let app = builder
         .setup(|app| {
-            // 自动检查更新（tauri-plugin-updater，endpoints/pubkey 见 tauri.conf.json；移动端无 updater，改提示下载）
-            #[cfg(desktop)]
-            app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
             // 仓库化：注册当前仓库根路径状态（初始为 None，open_vault 时设置）
             app.manage(vault::VaultState::default());
+            // 应用内更新下载：托管在途任务的取消句柄（见 commands/update.rs）
+            app.manage(commands::update::UpdateDownloadState::default());
             // 布局迷你窗口管理器：布局模型唯一权威，启动即从 ui-state.json 加载
             app.manage(layout::LayoutState::new());
             layout::load_from_disk(app.handle(), &app.state::<layout::LayoutState>());
@@ -227,10 +225,17 @@ pub fn run() {
             // 插件托管进程的启动与结束（ctx.shell.spawn 的后端 + 按 pid 结束进程树）
             commands::process::spawn_plugin_process,
             commands::process::kill_process_tree,
+            // 应用内更新下载与安装（进度 / 取消 / 断点续传 / 摘要校验；见 commands/update.rs）
+            commands::update::download_update_package,
+            commands::update::cancel_update_download,
+            commands::update::install_downloaded_update,
             // 移动端专属（安卓本地仓库：存储权限、私有回落目录、自研目录浏览；桌面端一律拒绝）
             commands::mobile::android_has_all_files_access,
             commands::mobile::android_request_all_files_access,
             commands::mobile::android_open_url,
+            commands::mobile::android_can_install_packages,
+            commands::mobile::android_request_install_permission,
+            commands::mobile::android_install_apk,
             commands::mobile::android_private_vault_path,
             commands::mobile::android_storage_root,
             commands::mobile::list_absolute_dir,

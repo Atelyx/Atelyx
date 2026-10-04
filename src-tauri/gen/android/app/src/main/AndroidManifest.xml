@@ -4,8 +4,10 @@
     <!-- 本地仓库走真实路径（/sdcard）：该权限不能弹窗申请，由用户在系统设置页手动开启；
          未开启时回落应用内部私有目录，功能完整但不可导出 -->
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+    <!-- 应用内下载更新包后交给系统安装器（安卓 8+ 需声明；用户还须在系统设置里开启「安装未知应用」） -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
-    <!-- 外部 VIEW 意图（打开链接 / 下载更新包）的包可见性声明；
+    <!-- 外部 VIEW 意图（打开链接）的包可见性声明；
          本应用不做 resolveActivity 预判，此处仅为系统解析隐式意图保留标准声明 -->
     <queries>
         <intent>

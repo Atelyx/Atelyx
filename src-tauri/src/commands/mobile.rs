@@ -1,7 +1,8 @@
-//! 移动端专属命令：安卓系统能力（设备名 / 存储授权 / 目录浏览）与外部 URL 打开。
+//! 移动端专属命令：安卓系统能力（设备名 / 存储授权 / 目录浏览 / 更新包安装）与外部 URL 打开。
 //!
 //! 桌面端不提供这些能力（一律返回可读错误，不静默失败）：桌面选目录走系统原生弹窗、
 //! 仓库根由用户直接指定，无需系统级存储授权，也没有「打开系统设置页」这类交互。
+//! 更新包的安装在桌面上另有实现（`commands/update.rs`）。
 //!
 //! Kotlin 能力桥 `com.atelyx.desktop.PlatformOps` 随安卓工程分发（见 gen/android）。
 
@@ -120,6 +121,94 @@ pub async fn android_open_url(app: AppHandle, url: String) -> Result<(), String>
             env.call_static_method(
                 class,
                 "openUrl",
+                "(Landroid/content/Context;Ljava/lang/String;)V",
+                &[JValue::Object(activity), JValue::Object(&target)],
+            )
+            .map_err(|e| crate::android_bridge::jni_error_message(env, CALL_FAILED_LABEL, e))?;
+            Ok(())
+        })
+        .await
+    }
+}
+
+/// 是否已允许安装未知来源应用（安卓 8+ 装更新包的前置开关）。
+#[tauri::command]
+pub async fn android_can_install_packages(app: AppHandle) -> Result<bool, String> {
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Err(MOBILE_ONLY.to_string())
+    }
+    #[cfg(target_os = "android")]
+    {
+        bridge_call(app, |env, activity, _webview| {
+            use jni::objects::JValue;
+            let class = load_bridge(env, activity)?;
+            env.call_static_method(
+                class,
+                "canInstallPackages",
+                "(Landroid/content/Context;)Z",
+                &[JValue::Object(activity)],
+            )
+            .and_then(|v| v.z())
+            .map_err(|e| crate::android_bridge::jni_error_message(env, CALL_FAILED_LABEL, e))
+        })
+        .await
+    }
+}
+
+/// 拉起「安装未知应用」的系统设置页。**拉起即返回**，不等待用户操作完成。
+///
+/// 该开关不能弹窗申请，只能由用户手动开启；未开启时安装意图会被系统直接拒绝。
+#[tauri::command]
+pub async fn android_request_install_permission(app: AppHandle) -> Result<(), String> {
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Err(MOBILE_ONLY.to_string())
+    }
+    #[cfg(target_os = "android")]
+    {
+        bridge_call(app, |env, activity, _webview| {
+            use jni::objects::JValue;
+            let class = load_bridge(env, activity)?;
+            env.call_static_method(
+                class,
+                "requestInstallPermission",
+                "(Landroid/content/Context;)V",
+                &[JValue::Object(activity)],
+            )
+            .map_err(|e| crate::android_bridge::jni_error_message(env, CALL_FAILED_LABEL, e))?;
+            Ok(())
+        })
+        .await
+    }
+}
+
+/// 把已下载的更新包交给系统安装器（FileProvider `content://` + ACTION_VIEW）。
+///
+/// 只接受下载目录内的路径（与桌面 `install_downloaded_update` 同一守卫），避免这条命令被当成
+/// 「安装任意 APK」的入口。安装由系统界面完成，本进程会在覆盖安装时被系统结束。
+#[tauri::command]
+pub async fn android_install_apk(app: AppHandle, path: String) -> Result<(), String> {
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (app, path);
+        Err(MOBILE_ONLY.to_string())
+    }
+    #[cfg(target_os = "android")]
+    {
+        let target =
+            crate::commands::update::resolve_downloaded_package(&app, &path)?.to_string_lossy().into_owned();
+        bridge_call(app, move |env, activity, _webview| {
+            use jni::objects::JValue;
+            let class = load_bridge(env, activity)?;
+            let target = env
+                .new_string(&target)
+                .map_err(|e| crate::android_bridge::jni_error_message(env, CALL_FAILED_LABEL, e))?;
+            env.call_static_method(
+                class,
+                "installApk",
                 "(Landroid/content/Context;Ljava/lang/String;)V",
                 &[JValue::Object(activity), JValue::Object(&target)],
             )

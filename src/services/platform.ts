@@ -25,11 +25,20 @@ export interface PlatformCapabilities {
   processExecution: boolean;
   /** 磁盘文件监听（两端均无：外部改动在打开/重读时感知）。 */
   fileWatching: boolean;
+  /** 应用内更新（下载更新包并拉起系统安装器）；Linux 安装语义各异，改为打开下载页。 */
+  inAppUpdate: boolean;
 }
 
 /** 当前是否运行在安卓 WebView。 */
 export function isAndroidPlatform(): boolean {
   return typeof navigator !== "undefined" && /android/i.test(navigator.userAgent);
+}
+
+/** 当前是否运行在 Linux 桌面（安卓 UA 也含 Linux 标识，须先排除）。 */
+export function isLinuxPlatform(): boolean {
+  return (
+    !isAndroidPlatform() && typeof navigator !== "undefined" && /linux/i.test(navigator.userAgent)
+  );
 }
 
 /** 当前平台的能力表。 */
@@ -43,6 +52,7 @@ export function platformCapabilities(): PlatformCapabilities {
       autoLaunch: false,
       processExecution: false,
       fileWatching: false,
+      inAppUpdate: true,
     };
   }
   return {
@@ -53,5 +63,6 @@ export function platformCapabilities(): PlatformCapabilities {
     autoLaunch: true,
     processExecution: true,
     fileWatching: false,
+    inAppUpdate: !isLinuxPlatform(),
   };
 }
