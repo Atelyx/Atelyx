@@ -77,9 +77,6 @@ pub struct GlobalConfig {
     /// 协作身份色（hex；空 = 随机分配）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collab_color: Option<String>,
-    /// 进入仓库时自动切到「主页」布局。缺省 None = false（保持恢复上次界面）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default_home_layout: Option<bool>,
     /// 宽松换行（应用级显示偏好）：开启时预览模式单个换行符渲染为换行；关闭时按 Markdown
     /// 标准视为空格。缺省 None = true（前端默认）。
     #[serde(default, skip_serializing_if = "Option::is_none")]

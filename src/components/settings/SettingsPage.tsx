@@ -15,6 +15,7 @@ import {
   FolderTree,
   Info,
   Palette,
+  PanelsTopLeft,
   PenLine,
   Puzzle,
   Search,
@@ -35,6 +36,7 @@ import { ThemeSettingsTab } from "@/components/settings/tabs/ThemeSettingsTab";
 import { CollabSettingsTab } from "@/components/settings/tabs/CollabSettingsTab";
 import { ModelServicesSettingsTab } from "@/components/settings/tabs/ModelServicesSettingsTab";
 import { FilesSettingsTab } from "@/components/settings/tabs/FilesSettingsTab";
+import { WorkspaceSettingsTab } from "@/components/settings/tabs/WorkspaceSettingsTab";
 import { EditorSettingsTab } from "@/components/settings/tabs/EditorSettingsTab";
 import { EditorPreferencesTab } from "@/components/settings/tabs/EditorPreferencesTab";
 import { SearchSettingsTab } from "@/components/settings/tabs/SearchSettingsTab";
@@ -48,7 +50,7 @@ import { usePluginStore } from "@/stores/pluginStore";
 
 /** 应用级 tab key（`editorPrefs` 不用 `editor`：仓库级同名 tab 与之并存于同一左栏，key 必须唯一）。 */
 type AppTab = "general" | "theme" | "collab" | "editorPrefs" | "plugins" | "about";
-type VaultTab = "providers" | "modelServices" | "agents" | "search" | "files" | "editor";
+type VaultTab = "providers" | "modelServices" | "agents" | "search" | "files" | "workspace" | "editor";
 
 /** 应用级 tab（跨仓库共享，落 global.json）。 */
 const APP_TABS: { key: AppTab; label: string; icon: LucideIcon }[] = [
@@ -71,6 +73,7 @@ const VAULT_TABS: { key: VaultTab; label: string; icon: LucideIcon }[] = [
   { key: "agents", label: "Agent", icon: Sparkles },
   { key: "search", label: "联网搜索", icon: Search },
   { key: "files", label: "文件与路径", icon: FolderTree },
+  { key: "workspace", label: "工作区", icon: PanelsTopLeft },
   { key: "editor", label: "编辑器", icon: PenLine },
 ];
 
@@ -436,6 +439,9 @@ export function SettingsPage({ onClose, initialTab }: { onClose: () => void; ini
       ) : tab === "files" ? (
         /* ===== 文件与路径面板 ===== */
         <FilesSettingsTab />
+      ) : tab === "workspace" ? (
+        /* ===== 工作区面板：启动仓库时自动切换场景 ===== */
+        <WorkspaceSettingsTab />
       ) : tab === "editor" ? (
         /* ===== 编辑器（仓库级）：一键重建内部链接 ===== */
         <EditorSettingsTab />

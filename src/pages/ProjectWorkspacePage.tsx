@@ -7,18 +7,19 @@
  */
 import { Maximize, Settings } from "lucide-react";
 import { useEffect, useRef } from "react";
-import { useAppStore } from "@/stores/appStore";
+import { useAppStore, selectVaultIdentityKey } from "@/stores/appStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useUiStateStore } from "@/stores/uiStateStore";
 import { SettingsPage } from "@/components/settings/SettingsPage";
 import { TitleBarControls } from "@/components/common/TitleBarControls";
 import { IconButton } from "@/components/common/Button";
 import { LayoutTabs } from "@/components/layout/LayoutTabs";
+import { SceneSwitcher } from "@/components/layout/SceneSwitcher";
 import { WorkspaceGrid } from "@/components/layout/WorkspaceGrid";
 import { WorkspaceStatusBar } from "@/components/layout/WorkspaceStatusBar";
 import { SlotListMount } from "@/components/plugins/SlotHost";
 import { useWorkspaceFileEffects } from "@/hooks/useWorkspaceFileEffects";
-import { HOME_LAYOUT_ID } from "@/types";
+import { resolveEntryScene } from "@/utils/workspaceLayout";
 
 export function ProjectWorkspacePage() {
   const toggleFullscreen = useAppStore((s) => s.toggleFullscreen);
@@ -30,9 +31,6 @@ export function ProjectWorkspacePage() {
   const settingsView = useAppStore((s) => s.settingsView);
   const openSettings = useAppStore((s) => s.openSettings);
   const closeSettings = useAppStore((s) => s.closeSettings);
-
-  // 当前激活仓库身份（「进仓库时打开主页」门控）
-  const hasVaultIdentity = useAppStore((s) => s.vaultIdentity !== null);
 
   // 文件生命周期联动（改名跟随/自动恢复/历史署名，桌面与移动端共用）
   useWorkspaceFileEffects();
@@ -48,22 +46,31 @@ export function ProjectWorkspacePage() {
   // AI 对话面板会话与表格改动落盘：进仓库读盘 + 切仓库时 flush 防 debounce 丢改动，
   // 均已归入领域生命周期注册表分发（builtin.chatpanel 的 onVaultEntered、各域 flush）
 
-  /** 「进仓库时打开主页」开关：仅在本次运行的首次进仓生效（boot 自动进仓，或从空态创建/进入
-   *  第一个仓库）；面板内切换仓库不生效——切换保持当前布局，打断位置违背切换的连续性预期。
-   *  依赖 uiLoaded：ui-state 从磁盘加载完成前不得激活——否则随后 load 会用磁盘 activeLayoutId 覆盖。
-   *  门控按「有激活仓库身份」——协作空间无本地 root，按 vaultRoot 会让开关在空间内不生效。 */
+  /** 「启动仓库时自动切换场景」（仓库级，vaultConfig.entrySceneId）：每次进入仓库生效（含面板内切换）。
+   *  切场景 = 整组替换面板网格并恢复该场景记忆的激活布局；
+   *  指定场景已删除（场景结构与仓库配置独立，悬挂引用常态存在）→ 不切换，保持当前界面。
+   *  门控 switchingVaultRoot：切换在途时 vaultConfig 可能还是旧仓库的，收尾后配置才可信；
+   *  按仓库身份键（selectVaultIdentityKey）去重，身份离开激活态（键 = "none"）即重置，
+   *  A→空态→A 重新生效。依赖 uiLoaded：ui-state 从磁盘加载完成前不得激活——
+   *  否则随后 load 会用磁盘状态覆盖。 */
   const uiLoaded = useUiStateStore((s) => s.loaded);
-  const defaultHomeLayout = useSettingsStore((s) => s.defaultHomeLayout);
-  const homeAppliedRef = useRef(false);
+  const switchingVaultRoot = useAppStore((s) => s.switchingVaultRoot);
+  const vaultIdentityKey = useAppStore(selectVaultIdentityKey);
+  const entrySceneId = useSettingsStore((s) => s.vaultConfig?.entrySceneId ?? null);
+  const entryAppliedRef = useRef<string | null>(null);
   useEffect(() => {
-    if (homeAppliedRef.current) return;
-    if (!defaultHomeLayout || !uiLoaded || !hasVaultIdentity) return;
-    homeAppliedRef.current = true;
-    const ui = useUiStateStore.getState();
-    if (ui.workspaceLayouts.some((l) => l.id === HOME_LAYOUT_ID)) {
-      ui.activateLayout(HOME_LAYOUT_ID);
+    if (vaultIdentityKey === "none") {
+      entryAppliedRef.current = null;
+      return;
     }
-  }, [defaultHomeLayout, hasVaultIdentity, uiLoaded]);
+    if (switchingVaultRoot !== null || !uiLoaded) return;
+    if (entryAppliedRef.current === vaultIdentityKey) return;
+    entryAppliedRef.current = vaultIdentityKey;
+    const ui = useUiStateStore.getState();
+    const targetSceneId = resolveEntryScene(entrySceneId, ui.scenes);
+    if (!targetSceneId || targetSceneId === ui.activeSceneId) return;
+    ui.activateScene(targetSceneId);
+  }, [vaultIdentityKey, switchingVaultRoot, uiLoaded, entrySceneId]);
 
   /** 全屏切换（视图控制图标，经 store 转发到 services）。 */
   const handleToggleFullscreen = () => {
@@ -84,13 +91,14 @@ export function ProjectWorkspacePage() {
         >
           <LayoutTabs />
 
-            {/* 右操作区（常驻）：设置 + 全屏（ml-auto 贴右缘，窗口控制在其后）。
+            {/* 右操作区（常驻）：场景切换 + 设置 + 全屏（ml-auto 贴右缘，窗口控制在其后）。
                 设置是核心应用入口，恒宿主渲染、不随插件启停消失；外部插件经 titlebar/right 槽并列贡献 */}
             <div className="ml-auto flex-shrink-0 flex items-center" data-tauri-drag-region>
               {/* 插件贡献区：标题栏右操作区（list 槽，priority 降序；容器避让窗口拖拽） */}
               <span data-tauri-drag-region="false" className="flex items-center">
                 <SlotListMount slot="titlebar/right" />
               </span>
+              <SceneSwitcher />
               <IconButton
                 onClick={(e) => {
                   e.stopPropagation();

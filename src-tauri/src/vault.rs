@@ -950,6 +950,10 @@ pub struct VaultConfig {
     /// 话题自动命名模型（缺省 = 跟随默认模型；指定后命名用该模型，话题命名一般用小模型）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_naming_model: Option<EditorChatModelOverride>,
+    /// 启动仓库时自动切换到的场景 id（缺省 = 不切换，保持上次界面；切换场景恢复该场景记忆的激活布局）。
+    /// 场景列表是应用级的（ui-state.json），id 悬挂（场景已删）由前端解析守卫忽略。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_scene_id: Option<String>,
 }
 
 /// 路径（相对 `.atelyx/`）与读写的唯一出口：命令层不自行拼路径，避免两处口径漂移。

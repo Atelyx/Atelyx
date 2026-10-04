@@ -195,6 +195,9 @@ export interface VaultConfig {
   autoNamingEnabled?: boolean;
   /** 话题自动命名模型（缺省 = 跟随默认模型；指定后命名用该模型，如 `{ providerId, model }`——话题命名一般用小模型）。 */
   autoNamingModel?: { providerId: string; model: string };
+  /** 启动仓库时自动切换到的场景 id（缺省 = 不切换，保持上次界面；切换场景恢复该场景记忆的激活布局）。
+   *  场景列表是应用级的，id 悬挂（场景已删）由进仓解析守卫忽略。 */
+  entrySceneId?: string;
 }
 
 /** `read_vault_config` 的返回：仓库配置 + 损坏备份文件名（null = 正常读取）。 */
@@ -302,8 +305,6 @@ export interface GlobalConfig {
   fontFamily?: string;
   /** 进入仓库时自动恢复上次打开的文件（画布/笔记/表格）。缺省 = true（开启）。 */
   autoRestoreFiles?: boolean;
-  /** 进入仓库时自动切到「主页」布局。缺省 = false（保持恢复上次界面）。 */
-  defaultHomeLayout?: boolean;
   /** 宽松换行（应用级显示偏好）：开启时预览模式单个换行符渲染为换行；关闭时按 Markdown
    *  标准视为空格。缺省 = true。 */
   softLineBreak?: boolean;

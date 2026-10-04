@@ -4,7 +4,7 @@
  * - 布局 tab：点击切换；**右键菜单**（重命名 inline / 删除红字，最后一个布局不可删）；
  *   双击重命名保留；**pointer 模拟拖拽排序**（WebView2 HTML5 DnD 不可靠）——
  *   位移超阈值进入拖动（setPointerCapture），松手按落点计算目标位置持久化
- * - 「+」：新建布局（复制当前布局树，命名「布局 N」自动去重）
+ * - 「+」：新建布局（单个空面板占位，命名「布局 N」自动去重）
  */
 import { Plus } from "lucide-react";
 import { useRef, useState } from "react";
@@ -12,6 +12,7 @@ import { useUiStateStore } from "@/stores/uiStateStore";
 import { Input } from "@/components/common/Input";
 import { IconButton } from "@/components/common/Button";
 import { Menu, MenuItem } from "@/components/common/Menu";
+import { Tooltip } from "@/components/common/Tooltip";
 import { MenuSlotList } from "@/components/plugins/MenuSlot";
 import { HOME_LAYOUT_ID } from "@/types";
 import appIcon from "@/assets/icon.svg";
@@ -184,32 +185,36 @@ export function LayoutTabs() {
                   data-tauri-drag-region="false"
                 />
               ) : (
-                <button
-                  onClick={() => {
-                    // 拖拽结束的 pointerup 会紧随触发 click，抑制这次激活
-                    if (suppressClickRef.current) {
-                      suppressClickRef.current = false;
-                      return;
-                    }
-                    activateLayout(l.id);
-                  }}
-                  onDoubleClick={() => {
-                    // 主页布局固定：不可重命名
-                    if (isHome) return;
-                    cancelRef.current = false;
-                    setDraft(l.name);
-                    setEditingId(l.id);
-                  }}
-                  className="pl-3 pr-2 py-0.5 truncate max-w-[120px] min-w-[48px] text-left"
-                  title={
+                <Tooltip
+                  content={
                     isHome
-                      ? "主页（固定布局：不可删除/排序/重命名，面板可调整）"
-                      : `${l.name}（点击切换 / 双击重命名 / 右键菜单 / 拖拽排序）`
+                      ? "固定布局：不可删除或重命名"
+                      : "点击切换 · 双击重命名 · 右键更多"
                   }
-                  data-tauri-drag-region="false"
+                  placement="bottom"
                 >
-                  {l.name}
-                </button>
+                  <button
+                    onClick={() => {
+                      // 拖拽结束的 pointerup 会紧随触发 click，抑制这次激活
+                      if (suppressClickRef.current) {
+                        suppressClickRef.current = false;
+                        return;
+                      }
+                      activateLayout(l.id);
+                    }}
+                    onDoubleClick={() => {
+                      // 主页布局固定：不可重命名
+                      if (isHome) return;
+                      cancelRef.current = false;
+                      setDraft(l.name);
+                      setEditingId(l.id);
+                    }}
+                    className="pl-3 pr-2 py-0.5 truncate max-w-[120px] min-w-[48px] text-left"
+                    data-tauri-drag-region="false"
+                  >
+                    {l.name}
+                  </button>
+                </Tooltip>
               )}
               {/* 激活下边：走 --accent-grad 的短条（box-shadow 不能铺渐变，故用元素画） */}
               {(active || editing) && (
@@ -248,7 +253,8 @@ export function LayoutTabs() {
           >
             重命名
           </MenuItem>
-          {layouts.length > 1 && (
+          {/* 场景内至少保留 1 个布局：合成序含主页（首位），可删前提 = 布局列表 ≥ 2 */}
+          {layouts.length > 2 && (
             <MenuItem
               onClick={() => {
                 deleteLayout(menu.id);

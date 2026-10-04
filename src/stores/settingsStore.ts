@@ -86,8 +86,6 @@ interface SettingsState {
   fontFamily?: string;
   /** 进入仓库时自动恢复上次打开的文件（应用级，存 global.json；缺省 true = 开启）。 */
   autoRestoreFiles: boolean;
-  /** 进入仓库时自动切到「主页」布局（应用级，存 global.json；缺省 false = 保持恢复上次界面）。 */
-  defaultHomeLayout: boolean;
   /** 系统启动项是否已注册本应用（应用级但不落配置：真相源为系统启动项本身，实时读取）。 */
   autoLaunch: boolean;
   /** 宽松换行（应用级显示偏好，存 global.json；缺省 true = 单个换行渲染为换行）。 */
@@ -178,6 +176,8 @@ interface SettingsState {
   setExcludeFolders: (folders: string[]) => Promise<void>;
   /** 设置附件导入默认文件夹（仓库级；undefined = 仓库根目录）。 */
   setAttachmentFolder: (folder: string | undefined) => Promise<void>;
+  /** 设置启动仓库时自动切换的场景 id（仓库级；undefined = 不切换，保持上次界面）。 */
+  setEntryScene: (sceneId: string | undefined) => Promise<void>;
   /** 设置宽松换行（应用级显示偏好，缺省 true，写 global.json）。 */
   setSoftLineBreak: (enabled: boolean) => Promise<void>;
   /** 设置页面内标题（应用级显示偏好，缺省 false，写 global.json）。 */
@@ -188,8 +188,6 @@ interface SettingsState {
   setMobileNavOrder: (order: string[]) => Promise<void>;
   /** 设置进入仓库时是否自动恢复上次打开的文件（应用级；缺省 true = 开启，写 global.json）。 */
   setAutoRestoreFiles: (enabled: boolean) => Promise<void>;
-  /** 设置进入仓库时是否自动切到「主页」布局（应用级；缺省 false = 保持恢复上次界面，写 global.json）。 */
-  setDefaultHomeLayout: (enabled: boolean) => Promise<void>;
   /** 刷新开机自启真实状态（设置面板打开时调用：用户可能已在系统侧改过启动项）。 */
   refreshAutoLaunch: () => Promise<void>;
   /** 开关开机自启（写系统启动项；失败提示并回读系统真实状态，开关不虚报）。 */
@@ -850,7 +848,6 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   fontSize: undefined,
   fontFamily: undefined,
   autoRestoreFiles: true,
-  defaultHomeLayout: false,
   autoLaunch: false,
   softLineBreak: true,
   inlineTitle: false,
@@ -878,7 +875,6 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     let fontSize: number | undefined;
     let fontFamily: string | undefined;
     let autoRestoreFiles = true;
-    let defaultHomeLayout = false;
     let autoLaunch = false;
     let softLineBreak = true;
     let inlineTitle = false;
@@ -900,7 +896,6 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       fontSize = cfg.fontSize;
       fontFamily = cfg.fontFamily;
       autoRestoreFiles = cfg.autoRestoreFiles ?? true;
-      defaultHomeLayout = cfg.defaultHomeLayout ?? false;
       softLineBreak = cfg.softLineBreak ?? true;
       inlineTitle = cfg.inlineTitle ?? false;
       noteLineWidth = normalizeNoteLineWidth(cfg.noteLineWidth);
@@ -938,7 +933,6 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       fontSize,
       fontFamily,
       autoRestoreFiles,
-      defaultHomeLayout,
       autoLaunch,
       softLineBreak,
       inlineTitle,
@@ -1189,6 +1183,11 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     await commitVault({ excludeFolders: folders.length ? folders : null });
   },
 
+  setEntryScene: async (sceneId) => {
+    // undefined = 删除该键（缺省 = 不切换，保持上次界面）
+    await commitVault({ entrySceneId: sceneId ?? null });
+  },
+
   setSoftLineBreak: (enabled) =>
     commitGlobal({ softLineBreak: enabled }, "保存宽松换行配置失败"),
 
@@ -1202,9 +1201,6 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
 
   setAutoRestoreFiles: (enabled) =>
     commitGlobal({ autoRestoreFiles: enabled }, "保存自动恢复配置失败"),
-
-  setDefaultHomeLayout: (enabled) =>
-    commitGlobal({ defaultHomeLayout: enabled }, "保存主页默认布局配置失败"),
 
   refreshAutoLaunch: async () => {
     try {

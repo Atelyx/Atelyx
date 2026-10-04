@@ -58,6 +58,7 @@ const FIXED_SLOTS: Record<string, string> = {
   "settings/editor": "仓库设置 · 编辑器页追加区块",
   "settings/modelServices": "仓库设置 · 模型服务页追加区块",
   "settings/files": "仓库设置 · 文件与路径页追加区块",
+  "settings/workspace": "仓库设置 · 工作区页追加区块",
   "settings/search": "仓库设置 · 联网搜索页追加区块",
 };
 
