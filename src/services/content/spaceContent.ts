@@ -28,6 +28,7 @@ import { READ_WINDOW_DEFAULT_LINES } from "@/constants/tools";
 import { CANVAS_SCHEMA } from "@/constants/canvas";
 import { SPACE_TEAM_META, spaceMetaScalar } from "@/constants/spaceMeta";
 import { TABLE_SCHEMA } from "@/constants/table";
+import { CHAT_MESSAGES_META_PREFIX } from "@/constants/editorChats";
 import { baseName, parentDir, sanitizeFilename, stripExt } from "@/utils/filename";
 import { normalizeTableRow } from "@/utils/table";
 import type {
@@ -1204,6 +1205,48 @@ export function createSpaceContentBackend(serverUrl: string, spaceId: string): C
         }
       } catch (e) {
         console.error("画布临时附件回收跳过（引用扫描失败）", e);
+        return 0;
+      }
+      let removed = 0;
+      for (const entry of entries) {
+        if (referenced.has(entry.name)) continue;
+        try {
+          await client.content.deleteFile(spaceId, `${dir}/${entry.name}`);
+          removed += 1;
+        } catch (e) {
+          console.error(`删除未引用临时附件失败：${dir}/${entry.name}`, e);
+        }
+      }
+      return removed;
+    },
+    // 按引用回收会话临时附件（AI 对话面板，会话删除后调用）：面板附件引用不跨会话，
+    // 只需本会话消息正文的引用集合。空间内会话消息以 user meta `chat/messages/<id>` 为真源
+    // （不落服务端内容文件），读原语与面板读写同一套键约定：
+    // - 读得到 → 逐行解析引用（JSONL），只删未被引用的文件；
+    // - 键缺失（会话已删）→ 引用集合为空，整目录可清；
+    // - 读取失败（网络等，引用集合未知）→ 保守跳过（宁可留垃圾不误删）。
+    async cleanupSessionTempAttachments(sessionId: string, sessionFile: string): Promise<number> {
+      void sessionFile; // 目录归属由 sessionId 决定；引用集合取自 user meta，不经内容文件路径
+      const dir = `${SPACE_TEMP_DIR}/${sessionId}`;
+      const dirPrefix = `${dir}/`;
+      const entries = await listMediaEntries(dir);
+      if (entries.length === 0) return 0;
+      let referenced: Set<string>;
+      try {
+        const values = (await client.meta.getMyMeta(spaceId)).values ?? {};
+        const text = values[CHAT_MESSAGES_META_PREFIX + sessionId];
+        if (text === undefined) {
+          referenced = new Set(); // 会话已删：引用集合为空
+        } else {
+          referenced = new Set();
+          for (const line of text.split("\n")) {
+            const trimmed = line.trim();
+            if (!trimmed) continue;
+            for (const name of referencedTempNames(trimmed, dirPrefix)) referenced.add(name);
+          }
+        }
+      } catch (e) {
+        console.error("会话临时附件回收跳过（会话消息读取失败，引用集合未知）", sessionId, e);
         return 0;
       }
       let removed = 0;

@@ -11,7 +11,7 @@
  * 引用形态判定（`isTempAttachmentRef`）在 `utils/tempAttachmentPath`（纯函数，无 I/O）。
  */
 import { TEMP_ATTACHMENT_DIR } from "@/utils/tempAttachmentPath";
-import { bytesToBase64 } from "@/utils/base64";
+import { bytesToBase64, dataUrlToText } from "@/utils/base64";
 import { readAttachmentDataUrl } from "@/services/vault";
 import { getActiveContentBackend } from "@/services/content/factory";
 
@@ -46,19 +46,7 @@ export async function readAttachmentRef(
   return dataUrlToText(dataUrl);
 }
 
-/** dataURL → 文本（非 dataURL 原样返回）。严格按 UTF-8 解码：解不出来即抛错，由调用方标「无法解析」。
- *
- * 为什么不用宽松解码：二进制附件（PDF/zip）宽松解码会得到一段乱码且不报错，调用方据此认为「解析成功」，
- * 于是乱码被当正文注入模型、节点也不再显示「无法解析」提示——宁可如实标失败。
- */
-export function dataUrlToText(dataUrl: string): string {
-  const comma = dataUrl.indexOf(",");
-  if (!dataUrl.startsWith("data:") || comma < 0) return dataUrl;
-  const binary = atob(dataUrl.slice(comma + 1));
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-}
+export { dataUrlToText };
 
 /**
  * 读文本类附件内容，区分两种失败：
@@ -93,6 +81,47 @@ export async function cleanupCanvasTempAttachments(
   canvasFile: string,
 ): Promise<number> {
   return getActiveContentBackend().cleanupCanvasTempAttachments(canvasId, canvasFile);
+}
+
+/**
+ * 按引用回收某会话的未入库附件（AI 对话面板会话删除时调用）。
+ * 返回删除文件数；失败上抛由调用方降级（回收是清理动作，不阻塞会话删除本身）。
+ */
+export async function cleanupSessionTempAttachments(
+  sessionId: string,
+  sessionFile: string,
+): Promise<number> {
+  return getActiveContentBackend().cleanupSessionTempAttachments(sessionId, sessionFile);
+}
+
+/**
+ * 消息附件补齐读取器工厂（发送前按引用读回附件内容，画布对话节点与 AI 对话面板共用）：
+ * - 二进制附件（不是 UTF-8 文本）记入 `nonTextRefs` 并返回空串——预期不注入模型，不算失败；
+ * - 读不到（已删/权限）回调 `onReadFailure` 后返回空串——该附件不进本轮请求，
+ *   其余附件与对话照常（按附件粒度降级，抛错会中断整轮）。
+ * `nonTextRefs` 由调用方持有并负责生命周期（切仓库/载入时清空），水合等流程可与读取器共用同一集合。
+ */
+export function createMessageAttachmentReader(
+  onReadFailure: (ref: string, error: unknown) => void,
+  nonTextRefs: Set<string> = new Set(),
+): (ref: string, kind: "image" | "file") => Promise<string> {
+  return async (ref, kind) => {
+    if (nonTextRefs.has(ref)) return "";
+    try {
+      if (kind === "file") {
+        const text = await readAttachmentText(ref);
+        if (text === null) {
+          nonTextRefs.add(ref);
+          return "";
+        }
+        return text;
+      }
+      return await readAttachmentRef(ref, kind);
+    } catch (e) {
+      onReadFailure(ref, e);
+      return "";
+    }
+  };
 }
 
 export { TEMP_ATTACHMENT_DIR };

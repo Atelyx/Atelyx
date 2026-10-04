@@ -142,6 +142,8 @@ export interface ContentBackend {
   importTableImage(image: TableImageSource, tableId: string): Promise<string>;
   /** 按引用回收某画布的未入库附件，返回删除文件数。 */
   cleanupCanvasTempAttachments(canvasId: string, canvasFile: string): Promise<number>;
+  /** 按引用回收某会话的未入库附件（AI 对话面板），返回删除文件数。 */
+  cleanupSessionTempAttachments(sessionId: string, sessionFile: string): Promise<number>;
   /** 回收表格孤儿图片附件，返回删除文件数。 */
   cleanupTableAttachments(file: string): Promise<number>;
 

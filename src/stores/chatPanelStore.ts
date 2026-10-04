@@ -12,17 +12,24 @@ import {
 } from "@/services/metadata";
 import { identityKeyOf } from "@/services/content/factory";
 import { abortAutoTitle } from "@/services/ai/autoTitle";
+import { resolveMessageAttachments } from "@/services/ai/client";
+import {
+  cleanupSessionTempAttachments,
+  createMessageAttachmentReader,
+  writeTempAttachment,
+} from "@/services/tempAttachment";
 import { deleteAgentTodos } from "@/services/vault/agentTodos";
 import { CHAT_UNAVAILABLE_TEXT, ERROR_PREFIX } from "@/constants/chat";
 import { BUILTIN_AGENT_CHAT_ID } from "@/constants/agents";
 import { prefix, scanMentionHits } from "@/utils/text";
 import { coalesceAgentSteps, fillAssistantReplyText } from "@/utils/agentSteps";
-import { nextCompactionBoundary } from "@/utils/compaction";
+import { nextCompactionBoundary, splitByCompaction } from "@/utils/compaction";
 import { createPersistController } from "@/utils/persist";
 import { getChatRuntime } from "@/utils/chatRuntimeHost";
 import { useSettingsStore } from "./settingsStore";
 import { useAppStore } from "./appStore";
 import { useVaultStore } from "./vaultStore";
+import { useNotificationStore } from "./notificationStore";
 import {
   EDITOR_CHATS_META_SCHEMA,
   CHAT_HISTORY_DIR,
@@ -30,6 +37,7 @@ import {
   CHAT_META_EXT,
 } from "@/constants/editorChats";
 import type {
+  Attachment,
   ChatNamingTarget,
   ChatRuntime,
   ChatTurnSink,
@@ -40,6 +48,7 @@ import type {
   EditorChatSession,
   ChatMetaFile,
   NoteRewriteRequest,
+  PendingAttachment,
   ProviderConfig,
   ReasoningEffort,
 } from "@/types";
@@ -52,7 +61,7 @@ import type {
  * 会话清单 = 扫目录（无整文件索引），切换笔记不切换会话；面板级覆盖存 `.atelyx/editor-chats-meta.json`。
  * 协作空间内同一套读写签名经 services/metadata 分发到 user meta（`chat/messages/<id>`、
  * `chat/sessions/<id>`、`chat/editor-meta`），`file` 仍按本地路径约定回填，消费方无感。
- * 笔记上下文两条路径：@引用（手动拖入，发送时就地替换注入）+ 当前打开笔记尾部上下文块（runExchange 注入，ephemeral 不落盘）。
+ * 笔记上下文两条路径：#引用（手动拖入，发送时按路径块注入）+ 当前打开笔记尾部上下文块（runExchange 注入，ephemeral 不落盘）。
  * 会话清单与内容以磁盘为真相，重进仓库/切回面板时读盘刷新（外部与跨设备变更不实时互见）。
  *
  * 与画布对话（canvasStore）的差异：
@@ -68,6 +77,9 @@ interface ChatPanelState {
   activeSessionId: string | null;
   /** 面板是否正在流式回复（全局单一，与当前激活会话对应）。 */
   streaming: boolean;
+  /** 发送预检进行中（附件落盘 + 会话创建 + 消息入容器）：预检完成前防重入双发；
+   *  预检完成即复位，此后由 streaming 守卫接力。 */
+  sending: boolean;
   /** 面板级模型覆盖（优先于仓库默认模型；null = 跟随仓库默认）。 */
   modelOverride: EditorChatModelOverride | null;
   /** 面板级推理等级覆盖（null = 不指定/跟随默认；与模型覆盖正交，跟随仓库默认时也可单独设置；持久化 editor-chats.json）。 */
@@ -99,8 +111,11 @@ interface ChatPanelState {
   openSession: (id: string) => void;
   /** 删除会话（删的是当前激活会话时回落新对话态；同时删其消息 .jsonl 与元数据侧车）。 */
   deleteSession: (id: string) => void;
-  /** 发送消息到当前激活会话（refs = 输入框内的 @引用笔记，发送时就地替换注入笔记全文）。 */
-  send: (content: string, refs?: EditorChatMessageRef[]) => Promise<void>;
+  /** 发送消息到当前激活会话（refs = 输入框内的 #引用笔记，发送时就地替换注入路径块；
+   *  pendings = 待发送托盘附件：字节落仓库临时区后以路径引用随消息持久化，图片走 vision、
+   *  文本类注入内容。附件落盘失败返回 false 且不产生消息（输入与托盘原样保留），
+   *  其余失败路径（无模型等）与既有语义一致。 */
+  send: (content: string, refs?: EditorChatMessageRef[], pendings?: PendingAttachment[]) => Promise<boolean>;
   /** 重新生成最后一条回复：移除最后 assistant、按 refs 重建最后一条 user 消息注入后重发（同画布 regenerate 语义）。 */
   regenerate: () => Promise<void>;
   /**
@@ -155,6 +170,79 @@ let overridesDirty = false;
  */
 const messageBaseline = new Map<string, EditorChatMessage[]>();
 
+/** 已判定「不是文本」的附件引用（二进制附件）：补读/发送前跳过；引用是仓库相对路径，切仓库时清空。 */
+const nonTextAttachmentRefs = new Set<string>();
+
+/** 已提示过的「消息附件读回失败」引用：同一附件不重复弹（否则每次发送都弹一次）。随进仓加载清空。 */
+const reportedAttachmentReadFailures = new Set<string>();
+
+/** 消息附件补齐读取器（发送前按引用读回）：非文本（二进制）返回空串不算失败（预期不注入模型）；
+ *  读不到通知一次并返回空串，该附件不进请求、其余附件与对话照常（按附件粒度降级）。 */
+const readMessageAttachment = createMessageAttachmentReader((ref, error) => {
+  console.error("面板消息附件内容读回失败，本次不发送该附件", ref, error);
+  if (reportedAttachmentReadFailures.has(ref)) return;
+  reportedAttachmentReadFailures.add(ref);
+  useNotificationStore.getState().notify({
+    level: "warning",
+    message: `附件「${ref.split("/").pop() ?? ref}」读取失败，本次未发送；请重新添加或移除该附件`,
+  });
+}, nonTextAttachmentRefs);
+
+/**
+ * 会话消息附件水合：附件内容（图片缩略/文本正文）是运行时缓存不落盘，重开软件后按引用读回并回填，
+ * 历史气泡的图片才能恢复显示（否则退化为文件名 chip）。
+ * 只补缺 payload 的附件；「不是文本」负缓存跳过；读失败留日志不重试（下次打开会话再试）。
+ * 仅水合当前打开的会话（全量历史读一遍是无谓 I/O）；回填按消息 id + 附件下标核对引用，
+ * 期间消息列表变化不会套错内容。
+ */
+async function hydrateSessionAttachments(sessionId: string): Promise<void> {
+  const session = useChatPanelStore.getState().sessions.find((s) => s.id === sessionId);
+  if (!session) return;
+  const targets: Array<{ messageId: string; index: number; ref: string; kind: "image" | "file" }> = [];
+  for (const m of session.messages) {
+    (m.attachments ?? []).forEach((a, i) => {
+      if (a.file && !a.payload && !nonTextAttachmentRefs.has(a.file)) {
+        targets.push({ messageId: m.id, index: i, ref: a.file, kind: a.kind });
+      }
+    });
+  }
+  if (targets.length === 0) return;
+  const payloads = new Map<string, string>();
+  await Promise.all(
+    targets.map(async (t) => {
+      const payload = await readMessageAttachment(t.ref, t.kind);
+      if (payload) payloads.set(`${t.messageId}:${t.index}`, payload);
+    }),
+  );
+  if (payloads.size === 0) return;
+  useChatPanelStore.setState((state) => {
+    let changed = false;
+    const sessions = state.sessions.map((s) => {
+      if (s.id !== sessionId) return s;
+      const messages = s.messages.map((m) => {
+        const atts = m.attachments;
+        if (!atts?.length) return m;
+        let filled = false;
+        const attachments = atts.map((a, i) => {
+          if (a.payload) return a;
+          // 按同下标取读回结果并核对引用，防期间列表变化套错内容
+          const candidate = payloads.get(`${m.id}:${i}`);
+          if (!candidate) return a;
+          filled = true;
+          return { ...a, payload: candidate };
+        });
+        if (!filled) return m;
+        changed = true;
+        return { ...m, attachments };
+      });
+      if (!changed) return s;
+      return { ...s, messages };
+    });
+    if (!changed) return state;
+    return { sessions };
+  });
+}
+
 /** 当前激活仓库的身份键（identityKeyOf，未激活 = "none"）：load/flush 的归属判别统一用键而非 root
  * （空间模式 vaultRoot 恒 null，root 比对无法区分空间 A/B）。 */
 function activeIdentityKey(): string {
@@ -180,8 +268,9 @@ function chatMetaFilePath(sessionId: string): string {
 
 /**
  * 序列化会话消息 → JSONL 文本（一行一条消息记录，紧凑 JSON）。
- * 只写持久化字段：id/createdAt 稳定持久化，refs（@引用）/steps（含工具步）结构化持久化，
- * 重开会话完整恢复。
+ * 只写持久化字段：id/createdAt 稳定持久化，refs（#引用）/steps（含工具步）/attachments
+ * （附件按 `file` 引用持久化，`payload` 是运行时缓存、落盘剥离——base64 图片会把历史文件撑到几十 MB）
+ * 结构化持久化，重开会话完整恢复。
  */
 function serializeChatMessages(messages: EditorChatMessage[]): string {
   return messages
@@ -193,6 +282,9 @@ function serializeChatMessages(messages: EditorChatMessage[]): string {
         ...(m.displayContent ? { displayContent: m.displayContent } : {}),
         ...(m.refs?.length ? { refs: m.refs } : {}),
         ...(m.steps?.length ? { steps: m.steps } : {}),
+        ...(m.attachments?.length
+          ? { attachments: m.attachments.map(({ payload: _payload, ...rest }) => rest) }
+          : {}),
         createdAt: m.createdAt,
       })
     )
@@ -218,6 +310,7 @@ function parseChatMessages(jsonl: string): EditorChatMessage[] {
         ...(typeof raw.displayContent === "string" ? { displayContent: raw.displayContent } : {}),
         ...(Array.isArray(raw.refs) ? { refs: raw.refs } : {}),
         ...(Array.isArray(raw.steps) ? { steps: coalesceAgentSteps(raw.steps) } : {}),
+        ...(Array.isArray(raw.attachments) ? { attachments: raw.attachments } : {}),
         ...(typeof raw.createdAt === "number"
           ? { createdAt: raw.createdAt }
           : { createdAt: messages.length }),
@@ -233,9 +326,9 @@ function parseChatMessages(jsonl: string): EditorChatMessage[] {
 const autoNamedSessions = new Set<string>();
 
 /**
- * @引用 注入（send/regenerate 共用）：.md 引用只发文件路径——@标签 文本保留原位，
+ * #引用 注入（send/regenerate 共用）：.md 引用只发文件路径——#标签 文本保留原位，
  * 消息开头拼「引用文件」路径块（模型用 read_file 按需读取正文，不把笔记全文打进每条消息）。
- * @标签 被手动删掉时跳过（扫描不到标签 = 该引用下沉丢弃，不记 refs）。
+ * #标签 被手动删掉时跳过（扫描不到标签 = 该引用下沉丢弃，不记 refs）。
  */
 async function injectNoteRefs(
   text: string,
@@ -243,12 +336,16 @@ async function injectNoteRefs(
 ): Promise<{ text: string; injectedFiles: string[] }> {
   const injectedFiles: string[] = [];
   if (!refs.length) return { text, injectedFiles };
+  // 触发符双兼容：新输入为 #标签，旧消息（重新生成基底）固化的是 @标签
   const hits = scanMentionHits(
     text,
-    refs.map((r) => ({ nodeId: r.file, text: `@${r.label}` })),
+    refs.flatMap((r) => [
+      { nodeId: r.file, text: `#${r.label}` },
+      { nodeId: r.file, text: `@${r.label}` },
+    ]),
   );
   const hitFiles = new Set(hits.map((h) => h.mention.nodeId));
-  // 按 @标签 出现顺序去重（同文件重复引用只出一条路径）
+  // 按 #/@标签 出现顺序去重（同文件重复引用只出一条路径）
   const seen = new Set<string>();
   const active: { file: string; label: string }[] = [];
   for (const r of refs) {
@@ -562,6 +659,51 @@ async function runExchange(
   });
   schedulePersist(active.id);
 
+  // 附件不随消息内嵌（只持久化 `file` 引用）：发轮前按引用读回（压缩注解之外的消息才读），
+  // 读到的内容回填消息缓存，同会话后续发送不重复读盘。按附件粒度降级：单个附件读不到只丢该附件
+  // 不进请求（读取器内部提示），其余附件与对话照常；读回整段失败只记日志（历史原样发，附件缺内容）。
+  // 切分只限定附件读回范围——runTurn 收到的历史必须是全量（其内部按注解定位锚点，
+  // 预切分的列表找不到锚点会让压缩摘要静默失效）。
+  try {
+    const { kept } = splitByCompaction(updated.messages, active.compaction);
+    const resolvedHistory = await resolveMessageAttachments(kept, (att) =>
+      readMessageAttachment(att.file as string, att.kind),
+    );
+    if (resolvedHistory !== kept) {
+      // 只回填附件缓存（整体替换会话数组会把 await 期间到达的外部合并回退成旧快照）
+      useChatPanelStore.setState((state) => {
+        const resolvedById = new Map(resolvedHistory.map((m) => [m.id, m]));
+        let changed = false;
+        const sessions = state.sessions.map((s) => {
+          if (s.id !== active!.id) return s;
+          const merged = s.messages.map((m) => {
+            const resolvedMsg = resolvedById.get(m.id);
+            const atts = m.attachments;
+            if (!resolvedMsg || !atts?.length) return m;
+            let filled = false;
+            const attachments = atts.map((a, i) => {
+              if (a.payload || !a.file) return a;
+              // 按同下标取补齐结果（resolve 保序）并核对引用，防期间列表变化套错内容
+              const candidate = resolvedMsg.attachments?.[i];
+              if (!candidate?.payload || candidate.file !== a.file) return a;
+              filled = true;
+              return { ...a, payload: candidate.payload };
+            });
+            if (!filled) return m;
+            changed = true;
+            return { ...m, attachments };
+          });
+          if (!changed) return s;
+          return { ...s, messages: merged };
+        });
+        if (!changed) return state;
+        return { sessions };
+      });
+    }
+  } catch (e) {
+    console.error("面板消息附件读回失败，附件不进本轮请求", e);
+  }
+
   const controller = new AbortController();
   abortController = controller;
 
@@ -601,12 +743,12 @@ async function runExchange(
   await runtime.runTurn({
     targetId: active.id,
     target,
-    // 历史含刚追加的 user 消息（消息本体即中性字段，核心直接读）
+    // 全量历史（含刚追加的 user 消息）：消息本体即中性字段，核心内部按压缩注解切分
     history: updated.messages,
     ...(reasoningEffort ? { reasoningEffort } : {}),
     ...(updated.agentId !== undefined ? { agentId: updated.agentId } : {}),
     ...(active.compaction ? { compaction: active.compaction } : {}),
-    // 面板把当前打开的笔记当隐式上下文（画布对话节点用显式 @引用/连边，不开此开关）
+    // 面板把当前打开的笔记当隐式上下文（画布对话节点用显式 #引用/连边，不开此开关）
     includeCurrentNote: true,
     signal: controller.signal,
     sink,
@@ -618,6 +760,7 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
   sessions: [],
   activeSessionId: null,
   streaming: false,
+  sending: false,
   modelOverride: null,
   effortOverride: null,
   pendingMentions: [],
@@ -647,6 +790,9 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
     dirtyMetaSessions.clear();
     messageBaseline.clear();
     autoNamedSessions.clear();
+    // 附件负缓存/提示去重按仓库相对路径记账：换仓库后同路径指向不同内容，一并失效
+    nonTextAttachmentRefs.clear();
+    reportedAttachmentReadFailures.clear();
     overridesDirty = false;
     // 真实重载（换仓库/强制）时中止进行中的流式回复：会话即将清空重建，孤儿流只会把增量
     // 写进已消失的会话（静默丢内容），与画布「切仓库中止流」同语义
@@ -741,6 +887,8 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
       activeSessionId: id,
       error: null,
     });
+    // 附件内容是运行时缓存（落盘只存引用）：重开软件后首次打开会话按引用读回，恢复图片显示
+    void hydrateSessionAttachments(id);
   },
 
   deleteSession: (id) => {
@@ -751,14 +899,20 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
     messageBaseline.delete(id);
     if (target?.file) {
       // 立即删消息 .jsonl + 元数据侧车（异步，失败仅记日志——删除 = 删文件）
-      void deleteChatMessages(target.file).catch((e) =>
-        console.error("删除会话消息文件失败", e),
-      );
       void deleteChatSessionMeta(chatMetaFilePath(id)).catch((e) =>
         console.error("删除会话元数据文件失败", e),
       );
       // 顺手清理该会话的任务清单侧车（孤儿清理；best-effort，失败静默）
       void deleteAgentTodos(id).catch(() => {});
+      // 回收该会话的未入库附件：等消息 .jsonl 删除尘埃落定后再扫（会话已删 = 引用集合为空，
+      // 整目录可清；best-effort——读盘失败保守不删，残留由进仓兜底回收）
+      void deleteChatMessages(target.file)
+        .catch((e) => console.error("删除会话消息文件失败", e))
+        .then(() =>
+          cleanupSessionTempAttachments(id, target.file).catch((e) =>
+            console.error("回收会话临时附件失败", id, e),
+          ),
+        );
     }
     let activeSessionId = get().activeSessionId;
     if (activeSessionId === id) {
@@ -770,70 +924,125 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
     schedulePersist();
   },
 
-  send: async (content, refs = []) => {
+  send: async (content, refs = [], pendings = []) => {
     const trimmed = content.trim();
-    if (!trimmed || get().streaming || get().compacting) return;
-
-    // 对话能力未启用（对话核心插件停用）：如实提示，不进入本轮（不创建空会话）
-    const runtime = getChatRuntime();
-    if (!runtime) {
-      set({ error: CHAT_UNAVAILABLE_TEXT });
-      return;
+    if (
+      (!trimmed && pendings.length === 0) ||
+      get().streaming ||
+      get().compacting ||
+      get().sending
+    ) {
+      return false;
     }
+    set({ sending: true });
+    try {
+      // 对话能力未启用（对话核心插件停用）：如实提示，不进入本轮（不创建空会话）
+      const runtime = getChatRuntime();
+      if (!runtime) {
+        set({ error: CHAT_UNAVAILABLE_TEXT });
+        return false;
+      }
 
-    const resolved = resolveProviderModel(runtime);
-    if (!resolved) return;
+      const resolved = resolveProviderModel(runtime);
+      if (!resolved) return false;
 
-    // 确保有激活会话：新对话态（null）时创建会话并激活——标题/消息 .jsonl 路径在首条消息确定；
-    // 新对话态选好的 draft Agent 随会话创建固化，随后清空
-    let active: EditorChatSession | null =
-      get().sessions.find((s) => s.id === get().activeSessionId) ?? null;
-    if (!active) {
-      const now = Date.now();
-      const id = crypto.randomUUID();
-      active = {
-        id,
-        title: prefix(trimmed, 16),
-        file: chatMessageFilePath(id),
-        agentId: get().draftAgentId,
-        messages: [],
-        createdAt: now,
-        updatedAt: now,
+      // 确保有激活会话：新对话态（null）时创建会话并激活——标题/消息 .jsonl 路径在首条消息确定；
+      // 新对话态选好的 draft Agent 随会话创建固化，随后清空。
+      // 会话 id 先于附件落盘确定（附件临时目录按会话 id 归属）；新会话在附件全部落盘成功后才登记，
+      // 落盘失败不残留无消息的空会话（孤儿临时目录由进仓兜底回收）。
+      const existing = get().sessions.find((s) => s.id === get().activeSessionId) ?? null;
+      const sessionId = existing?.id ?? crypto.randomUUID();
+
+      // 附件字节落仓库临时区（`.atelyx/temp/<会话 key>/`）：消息只持久化路径引用，
+      // base64 进历史文件会把它撑到几十 MB。失败必须可见且不丢草稿：报错返回，输入与托盘原样保留。
+      const attachments: Attachment[] = [];
+      for (const p of pendings) {
+        try {
+          if (!p.file) {
+            if (!p.blob) {
+              // 托盘数据不完整（无引用也无字节）：不可达路径，留痕不静默丢弃
+              console.warn("跳过无内容也无引用的托盘附件", p.id, p.filename);
+              continue;
+            }
+            const ref = await writeTempAttachment(sessionId, p.filename ?? "attachment", p.blob);
+            p.file = ref;
+          }
+          attachments.push({
+            kind: p.kind,
+            payload: p.payload,
+            mime: p.mime,
+            filename: p.filename,
+            file: p.file,
+          });
+        } catch (e) {
+          console.error("附件写入临时区失败", p.filename, e);
+          const reason = e instanceof Error && e.message ? `：${e.message}` : "";
+          useNotificationStore.getState().notify({
+            level: "error",
+            message: `附件「${p.filename ?? ""}」写入失败，消息未发送${reason}`,
+          });
+          return false;
+        }
+      }
+
+      let active = existing;
+      if (!active) {
+        const now = Date.now();
+        active = {
+          id: sessionId,
+          title: prefix(trimmed, 16),
+          file: chatMessageFilePath(sessionId),
+          agentId: get().draftAgentId,
+          messages: [],
+          createdAt: now,
+          updatedAt: now,
+        };
+        set({
+          sessions: [...get().sessions, active],
+          activeSessionId: active.id,
+          draftAgentId: undefined,
+          error: null,
+        });
+        // 新会话：元数据侧车随首条消息落盘（新建 = 新文件，多设备并发创建互不覆盖）
+        markMetaDirty(active.id);
+      }
+
+      // #引用（手动拖入）：只发文件路径——#标签 保留原位，消息开头拼「引用文件」路径块
+      // （模型用 read_file 读取正文，不整文打进消息）。标签被用户手动删掉/文件缺失时跳过（扫描不到标签 = 该引用下沉丢弃，不记 refs）。
+      const { text: finalContent, injectedFiles } = await injectNoteRefs(trimmed, refs);
+      const injectedRefs: EditorChatMessageRef[] = injectedFiles
+        .map((f) => refs.find((r) => r.file === f))
+        .filter((r): r is EditorChatMessageRef => !!r);
+
+      const userMsg: EditorChatMessage = {
+        id: crypto.randomUUID(),
+        role: "user",
+        // 气泡显示原始输入；content 含「引用文件」路径块（与画布 displayContent 分离语义一致）
+        content: finalContent,
+        displayContent: trimmed,
+        refs: injectedRefs.length ? injectedRefs : undefined,
+        ...(attachments.length ? { attachments } : {}),
+        createdAt: Date.now(),
       };
-      set({
-        sessions: [...get().sessions, active],
-        activeSessionId: active.id,
-        draftAgentId: undefined,
-        error: null,
+
+      // 预检到此全部完成：runExchange 内先置 streaming=true（守卫接力防双发），轮转本身
+      // 不等待——send 及时返回让调用方清草稿，流式期间的输入不受轮末清空波及。
+      void runExchange(
+        active,
+        userMsg,
+        runtime,
+        { provider: resolved.provider, model: resolved.model },
+        resolved.reasoningEffort,
+      ).catch((e) => {
+        // 编排侧异常已被 runChatTurn 兜底交回 sink；此处只兜 runExchange 自身早退
+        //（附件读回等已在内部消化），复位流式态防「转圈到天荒地老」
+        console.error("面板对话轮编排失败", e);
+        useChatPanelStore.setState({ streaming: false });
       });
-      // 新会话：元数据侧车随首条消息落盘（新建 = 新文件，多设备并发创建互不覆盖）
-      markMetaDirty(active.id);
+      return true;
+    } finally {
+      set({ sending: false });
     }
-
-    // @引用（手动拖入）：只发文件路径——@标签 保留原位，消息开头拼「引用文件」路径块
-    // （模型用 read_file 读取正文，不整文打进消息）。标签被用户手动删掉/文件缺失时跳过（扫描不到标签 = 该引用下沉丢弃，不记 refs）。
-    const { text: finalContent, injectedFiles } = await injectNoteRefs(trimmed, refs);
-    const injectedRefs: EditorChatMessageRef[] = injectedFiles
-      .map((f) => refs.find((r) => r.file === f))
-      .filter((r): r is EditorChatMessageRef => !!r);
-
-    const userMsg: EditorChatMessage = {
-      id: crypto.randomUUID(),
-      role: "user",
-      // 气泡显示原始输入；content 含「引用文件」路径块（与画布 displayContent 分离语义一致）
-      content: finalContent,
-      displayContent: trimmed,
-      refs: injectedRefs.length ? injectedRefs : undefined,
-      createdAt: Date.now(),
-    };
-
-    await runExchange(
-      active,
-      userMsg,
-      runtime,
-      { provider: resolved.provider, model: resolved.model },
-      resolved.reasoningEffort,
-    );
   },
 
   regenerate: async () => {
@@ -861,8 +1070,8 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
 
     const userMsg = list[lastUserIdx];
     // 重建引用：以原始输入（displayContent）为基底重拼「引用文件」路径块（同 send 语义）。
-    // 不能以 userMsg.content（已含上次路径块）为基底——上次的路径块会把 @标签 位置
-    // 整体推移，displayContent 的命中索引套在 content 上会错位（多个 @引用时尤甚）；
+    // 不能以 userMsg.content（已含上次路径块）为基底——上次的路径块会把 #/@标签 位置
+    // 整体推移，displayContent 的命中索引套在 content 上会错位（多个引用时尤甚）；
     // displayContent 缺失/无 refs 跳过。
     let rebuiltContent = userMsg.content;
     if (userMsg.displayContent && userMsg.refs?.length) {

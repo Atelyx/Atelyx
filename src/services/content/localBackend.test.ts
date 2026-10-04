@@ -276,6 +276,13 @@ const MAPPING: Array<{
     returns: 3,
   },
   {
+    name: "cleanupSessionTempAttachments",
+    call: (b) => b.cleanupSessionTempAttachments("session1", ".atelyx/对话历史/session1.jsonl"),
+    cmd: "cleanup_session_temp_attachments",
+    args: { sessionId: "session1", sessionFile: ".atelyx/对话历史/session1.jsonl" },
+    returns: 3,
+  },
+  {
     name: "cleanupTableAttachments",
     call: (b) => b.cleanupTableAttachments("t.atb"),
     cmd: "cleanup_table_attachments_vault",

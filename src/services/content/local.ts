@@ -128,6 +128,8 @@ export const localBackend: ContentBackend = {
     }),
   cleanupCanvasTempAttachments: (canvasId, canvasFile) =>
     invoke<number>("cleanup_canvas_temp_attachments", { canvasId, canvasFile }),
+  cleanupSessionTempAttachments: (sessionId, sessionFile) =>
+    invoke<number>("cleanup_session_temp_attachments", { sessionId, sessionFile }),
   cleanupTableAttachments: (file) => invoke<number>("cleanup_table_attachments_vault", { file }),
 
   // ===== 索引 =====

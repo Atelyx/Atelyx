@@ -168,12 +168,17 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
                   className="max-h-32 rounded border"
                   style={{ borderColor: "var(--border)", background: "var(--bg-card)" }}
                   draggable={false}
-                  onContextMenu={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    onMediaExtract?.(att);
-                  }}
-                  title="右键：拉出为媒体节点"
+                  // 右键「拉出为媒体节点」是画布语义（面板无画布归属，不提示不拦截右键）
+                  {...(onMediaExtract
+                    ? {
+                        onContextMenu: (e: React.MouseEvent) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          onMediaExtract(att);
+                        },
+                        title: "右键：拉出为媒体节点",
+                      }
+                    : {})}
                 />
               ) : (
                 <span

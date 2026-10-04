@@ -4,11 +4,12 @@
  * `.meta.json` 元数据侧车（title/agentId/compaction）；会话清单 = 扫目录（无整文件索引，多设备共享文件夹
  * 实时互见）；面板级覆盖存 `.atelyx/editor-chats-meta.json`。单一全局历史，不按笔记归属。
  *
- * 与画布对话（types/message.ts）的差异：面板是纯文本对话，
- * 无 attachments/refs/system 消息——错误占位用 content 的 `[错误]` 前缀标记（同 runStream 约定）。
+ * 与画布对话（types/message.ts）的差异：面板无 system 消息、无画布节点归属——
+ * 引用只发文件路径（refs 仅作 chip 展示），附件以临时区路径引用随消息持久化；
+ * 错误占位用 content 的 `[错误]` 前缀标记（同 runStream 约定）。
  */
 import { EDITOR_CHATS_META_SCHEMA } from "@/constants/editorChats";
-import type { AgentStep } from "./message";
+import type { AgentStep, Attachment } from "./message";
 import type { ConversationCompaction } from "./compaction";
 import type { ReasoningEffort } from "./provider";
 
@@ -61,6 +62,11 @@ export interface EditorChatMessage {
   displayContent?: string;
   /** 该 user 消息发送时拖入的笔记引用（气泡显示只读 @chip，点击打开笔记）；随 .jsonl 记录持久化。 */
   refs?: EditorChatMessageRef[];
+  /**
+   * user 消息多模态附件（图片走 vision、文本类注入内容；`payload` 运行时缓存不落盘，
+   * 重开会话按 `file` 引用读回）；随 .jsonl 记录持久化（剥离 payload）。
+   */
+  attachments?: Attachment[];
   /** 真实创建时间（发送时生成，随 .jsonl 记录持久化，恢复不重排）。 */
   createdAt: number;
 }

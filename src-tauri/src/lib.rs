@@ -123,6 +123,7 @@ pub fn run() {
             commands::temp_attachment::write_temp_attachment,
             commands::temp_attachment::import_vault_attachment,
             commands::temp_attachment::cleanup_canvas_temp_attachments,
+            commands::temp_attachment::cleanup_session_temp_attachments,
             commands::vault::read_prompt_notes,
             commands::vault::write_prompt_notes,
             commands::vault::read_agents,

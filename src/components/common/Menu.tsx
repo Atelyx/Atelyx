@@ -15,6 +15,8 @@ interface MenuProps {
   onClose: () => void;
   /** 宽度 class（如 "w-44" / "w-56"），缺省 w-48。 */
   widthClass?: string;
+  /** 弹出方向：top = 向下展开（缺省）；bottom = 向上展开（底边贴锚点 y，输入区底部的按钮菜单用）。 */
+  align?: "top" | "bottom";
   /** 容器内容 class（默认 "py-1"；内容非菜单项列表时覆盖，如 "p-2.5"）。 */
   contentClassName?: string;
   /** 内容高度可能变化的场景（如删除确认态切换）重新钳制，防贴视口底部溢出。 */
@@ -27,12 +29,13 @@ interface MenuProps {
 }
 
 /** 弹层菜单容器：fixed 定位 + 视口钳制 + Esc/点击外部关闭。 */
-export function Menu({ x, y, onClose, widthClass = "w-48", contentClassName, repositionDeps, stopPointerDown, zClass, children }: MenuProps) {
+export function Menu({ x, y, onClose, widthClass = "w-48", align, contentClassName, repositionDeps, stopPointerDown, zClass, children }: MenuProps) {
   return (
     <PopupLayer
       anchor={{ x, y }}
       onClose={onClose}
       widthClass={widthClass}
+      align={align}
       contentClassName={contentClassName}
       zClass={zClass}
       repositionDeps={repositionDeps}

@@ -24,6 +24,7 @@ import {
 import { readTableVault } from "@/services/table";
 import {
   cleanupCanvasTempAttachments,
+  createMessageAttachmentReader,
   importVaultAttachment,
   readAttachmentRef,
   readAttachmentText,
@@ -159,7 +160,7 @@ interface ReferencedInput {
   nodeId: string;
   label: string;
   content: string;
-  /** .md 笔记节点相对仓库根路径（@引用/连边统一走路径块，模型 read_file 读取）。 */
+  /** .md 笔记节点相对仓库根路径（#引用/连边统一走路径块，模型 read_file 读取）。 */
   file?: string;
 }
 
@@ -193,7 +194,7 @@ interface CanvasState {
   streamingByConv: Record<string, boolean>;
   /** 压缩中的对话节点 id 集合（手动压缩为独立请求，与流式互斥：压缩期间禁用发送/再压缩）。 */
   compactingByConv: Record<string, boolean>;
-  /** 拖线引用队列：conversationId → 待进输入框 @标签 的节点 id（不立即建边，发送时自动连线） */
+  /** 拖线引用队列：conversationId → 待进输入框 #标签 的节点 id（不立即建边，发送时自动连线） */
   pendingMentionsByConv: Record<string, string[]>;
   /** 全局错误提示（如未配置 AI provider） */
   error: string | null;
@@ -254,7 +255,7 @@ interface CanvasState {
   findTextNoteByFile: (file: string) => string | null;
   /** 添加边到画布。 */
   addEdge: (edge: Edge) => void;
-  /** 拖线引用：不立即建边，进输入框 @标签 队列（发送时自动连线）。 */
+  /** 拖线引用：不立即建边，进输入框 #标签 队列（发送时自动连线）。 */
   queueMention: (conversationId: string, nodeId: string) => void;
   /** 清空某对话的拖线引用队列（输入框消费后）。 */
   clearPendingMentions: (conversationId: string) => void;
@@ -295,7 +296,7 @@ interface CanvasState {
   setCollabBroadcast: (fn: ((file: string, patch: CanvasPatch) => void) | null) => void;
   /** 应用远端画布补丁（`canvas-patch` 帧）：按 id LWW 合并，不置脏/不入撤销栈/不触发保存。 */
   applyRemoteCanvasPatch: (file: string, patch: CanvasPatch) => void;
-  /** 发送消息到指定对话节点，可携带待发送附件与 @提及；fileMentions = 纯路径引用（仓库文件/文件夹，画布无对应节点）。 */
+  /** 发送消息到指定对话节点，可携带待发送附件与 #提及；fileMentions = 纯路径引用（仓库文件/文件夹，画布无对应节点）。 */
   send: (
     conversationId: string,
     content: string,
@@ -412,8 +413,9 @@ const nonTextAttachmentRefs = new Set<string>();
 /** 已提示过的「消息附件读回失败」引用：同一附件不重复弹（否则每次发送都弹一次）。随画布加载清空。 */
 const reportedAttachmentReadFailures = new Set<string>();
 
-/** 附件读回失败的用户可见提示（按引用去重）：只写日志等于「用户以为发了、模型其实没收到」。 */
-function reportAttachmentReadFailure(ref: string, error: unknown): void {
+/** 消息附件补齐读取器（发送前按引用读回）：非文本（二进制）返回空串不算失败（预期不注入模型）；
+ *  读不到通知一次并返回空串，该附件不进请求、其余附件与对话照常（按附件粒度降级）。 */
+const readMessageAttachment = createMessageAttachmentReader((ref, error) => {
   console.error("消息附件内容读回失败，本次不发送该附件", ref, error);
   if (reportedAttachmentReadFailures.has(ref)) return;
   reportedAttachmentReadFailures.add(ref);
@@ -421,27 +423,7 @@ function reportAttachmentReadFailure(ref: string, error: unknown): void {
     level: "warning",
     message: `附件「${ref.split("/").pop() ?? ref}」读取失败，本次未发送；请重新添加或移除该附件`,
   });
-}
-
-/** 按引用读附件内容（消息附件场景）：二进制（不是文本）返回空串并不算失败，读不到才算失败并提示。
- *  两种失败语义不同（不是文本 = 预期不注入；读不到 = 该让用户知道），不能混成一个错误。 */
-async function readMessageAttachment(ref: string, kind: "image" | "file"): Promise<string> {
-  if (nonTextAttachmentRefs.has(ref)) return "";
-  try {
-    if (kind === "file") {
-      const text = await readAttachmentText(ref);
-      if (text === null) {
-        nonTextAttachmentRefs.add(ref);
-        return "";
-      }
-      return text;
-    }
-    return await readAttachmentRef(ref, kind);
-  } catch (e) {
-    reportAttachmentReadFailure(ref, e);
-    return "";
-  }
-}
+}, nonTextAttachmentRefs);
 
 /** 把当前运行时状态引用记为「已落盘基线」（load/保存成功后调用）。 */
 function syncLastSaved(): void {
@@ -1179,7 +1161,7 @@ function isRefCoveredPath(messages: Message[], path: string): boolean {
 const materializingPaths = new Set<string>();
 
 /**
- * 纯路径引用的消费物质化：Agent 工具实际读取 @引用 的文件后，画布尚无对应节点 →
+ * 纯路径引用的消费物质化：Agent 工具实际读取 #引用 的文件后，画布尚无对应节点 →
  * 按类型在对话左侧落引用节点（产出方位置，findFreeSpot 避让）并连 节点→对话 数据流边；
  * 同时把该对话历史中 `file:<path>` 引用改写为真实节点 id——引用即边：气泡 @chip 变为定位节点、
  * 数据流边随 isAssetConsumed 转实线。已有同文件节点只补边不重复建。
@@ -1246,7 +1228,7 @@ async function materializeReferencedFile(conversationId: string, path: string): 
       } else {
         const data = await buildMediaData(path, name);
         if (!data) {
-          // 与「拖入画布」同口径提示：Agent 读了 @引用附件后本该补出媒体节点，读失败不能静默
+          // 与「拖入画布」同口径提示：Agent 读了 #引用附件后本该补出媒体节点，读失败不能静默
           useNotificationStore.getState().notify({
             level: "error",
             message: `无法在画布中添加「${name}」：文件读取失败（可能已被删除或无权限）`,
@@ -1451,7 +1433,7 @@ async function runStream(conversationId: string): Promise<void> {
   const controller = new AbortController();
   abortControllers.set(conversationId, controller);
 
-  // 引用已在 send 时固化进 user 消息 content（@引用 路径块 / 非文件节点全文注入），此处不再动态拼接。
+  // 引用已在 send 时固化进 user 消息 content（#引用 路径块 / 非文件节点全文注入），此处不再动态拼接。
   // 附件内容不随消息内嵌（画布只存 `file` 引用）：发送前按引用读回，读到的内容回填消息附件缓存，
   // 同一会话后续发送不再重复读盘。**按附件粒度降级**：单个附件读不到只丢该附件不进请求并提示用户
   //（抛错会中断整轮，而覆盖整段历史的补齐会让此后每次发送都在同一处失败、对话无法继续）；
@@ -1578,7 +1560,7 @@ async function runStream(conversationId: string): Promise<void> {
     sink,
     naming: conversationNamingTarget(conversationId),
     hooks: {
-      // @引用 的文件被 Agent 实际读取 → 消费物质化：画布落引用节点 + 连已消费边（幂等）
+      // #引用 的文件被 Agent 实际读取 → 消费物质化：画布落引用节点 + 连已消费边（幂等）
       capabilities: (standard) => ({
         readFile: (path, opts) =>
           standard.readFile!(path, opts).then((res) => {
@@ -1616,7 +1598,7 @@ function nowId() {
 
 /**
  * 节点 → AI 可注入内容（唯一权威映射，三处消费方共用——regenerate 重建 / 连边引用 /
- * send @提及 就地替换，防各写一份拷贝后行为分叉）：
+ * send #提及 就地替换，防各写一份拷贝后行为分叉）：
  * - text：正文 bodyMd（画布内文本节点或 .md 笔记节点）
  * - search：结果摘要（勾选子集或全部，resultsToText）
  * - table：快照文本（snapshot 缺省回退标题）
@@ -1677,8 +1659,8 @@ function assembleContentWithRefs(
 
 /**
  * 用最新资产状态重建最后一条 user 消息（regenerate 前调用，扩展）：
- * - .md 笔记 @引用（refs.label 出现在 displayContent）：保留 @标题 原位，最新文件路径重拼「引用文件」块
- * - 非文件 @提及：就地替换为最新内容——与 send 侧「首处子串替换」语义一致
+ * - .md 笔记 #引用（refs.label 出现在 displayContent）：保留 #标题 原位，最新文件路径重拼「引用文件」块
+ * - 非文件 #提及：就地替换为最新内容——与 send 侧「首处子串替换」语义一致
  * - 正向连边引用（label 不在 displayContent）：重拼 `[引用：…]` 前缀
  * - 附件：画布媒体节点引用（sourceNodeId）替换为最新 thumb/body，临时附件保留
  * 源节点缺失/读不到内容时跳过（保持旧快照，不崩坏）。
@@ -1700,9 +1682,10 @@ function rebuildUserContent(
     }
     const node = nodes.find((n) => n.id === ref.nodeId);
     if (!node) continue;
-    const tag = `@${ref.label}`;
+    // 触发符双兼容：新消息为 #标签，旧消息固化的是 @标签（历史原文不改）
+    const tag = content.includes(`#${ref.label}`) ? `#${ref.label}` : `@${ref.label}`;
     const inText = content.includes(tag);
-    // .md 笔记节点：@引用 与连边引用统一走「引用文件」路径块——@标题 在正文则保留原位（不替换），
+    // .md 笔记节点：#引用 与连边引用统一走「引用文件」路径块——#标题 在正文则保留原位（不替换），
     // 取最新文件路径（笔记改名/移动后更新）；非文件节点（画布内文本/搜索/表格）落到下方整文注入分支
     if (node.type === "text" && (node.data as unknown as TextData).file) {
       const file = (node.data as unknown as TextData).file as string;
@@ -2074,7 +2057,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
     const src = nodes.find((n) => n.id === connection.source);
     const tgt = nodes.find((n) => n.id === connection.target);
     // 拖线引用（text/media/search → conversation）：引用即边——未连接时立即建虚线边（未消费自动虚线）
-    // + 输入框 @标签 队列（消费后由虚实判定自动转实线，取消引用=删 @标签断边）
+    // + 输入框 #标签 队列（消费后由虚实判定自动转实线，取消引用=删 #标签断边）
     if (
       tgt?.type === "conversation" &&
       (src?.type === "text" || src?.type === "media" || src?.type === "search")
@@ -2084,7 +2067,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
       );
       if (alreadyConnected) {
         // 已连接：未消费（虚线待发送）→ 无效果（防同轮重复引用）；已消费（实线边）→ 再次注入——
-        // 直接进输入框 @标签 队列（边已存在不可断开，发送时注入并保持实线）
+        // 直接进输入框 #标签 队列（边已存在不可断开，发送时注入并保持实线）
         const injected = isAssetConsumed(
           messagesByConv[connection.target] ?? [],
           connection.source,
@@ -2094,7 +2077,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
         }
         return;
       }
-      // 未连接：立即建边（不入 undo 栈——取消引用 = 删 @标签自动断边，无需撤销）+ 输入框 @标签；
+      // 未连接：立即建边（不入 undo 栈——取消引用 = 删 #标签自动断边，无需撤销）+ 输入框 #标签；
       // 属非入栈数据变更，必须作废 redo 栈（防 undo 后 Ctrl+Y 用旧快照抹掉本边）
       touchRedo();
       const nodesNow = get().nodes;
@@ -2451,7 +2434,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
     for (const edge of upstream) {
       const sourceNode = nodes.find((n) => n.id === edge.source);
       if (!sourceNode) continue;
-      // .md 笔记节点：连边引用与 @提及 统一走「引用文件」路径块（模型 read_file 读取，不整文注入）
+      // .md 笔记节点：连边引用与 #提及 统一走「引用文件」路径块（模型 read_file 读取，不整文注入）
       if (sourceNode.type === "text") {
         const d = sourceNode.data as unknown as TextData;
         if (d.file) {
@@ -2462,10 +2445,10 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
       }
       const input = describeNodeAsInput(sourceNode);
       if (!input) continue;
-      // 媒体图片（attach 形态）不走连边注入：连边引用是文本语义，图片经 @提及 以附件发送（vision）；
+      // 媒体图片（attach 形态）不走连边注入：连边引用是文本语义，图片经 #提及 以附件发送（vision）；
       // 文本类媒体（解析出 body）与文本/搜索/表格一致注入正文
       if (input.attach) continue;
-      // label 语义各类型不同：文本取正文前缀、search 取搜索词、table 取标题（与 @提及 显示名一致）
+      // label 语义各类型不同：文本取正文前缀、search 取搜索词、table 取标题（与 #提及 显示名一致）
       const label =
         sourceNode.type === "search"
           ? prefix((sourceNode.data as unknown as SearchResultData).query) || "搜索"
@@ -2509,7 +2492,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
     // AI 消息发送不进 Undo 栈（业务操作），但作废 redo：undo 后发送的新消息不得被 Ctrl+Y 抹除
     touchRedo();
 
-    // 发送时自动连线（防御）：输入框 @提及 但尚未建边的引用此刻建立边（正常路径拖线/@picker 已立即建边，
+    // 发送时自动连线（防御）：输入框 #提及 但尚未建边的引用此刻建立边（正常路径拖线/#picker 已立即建边，
     // 此处仅兜底异常路径）；源节点已被删除的提及不再建边（否则产生悬空边），该引用随之下沉丢弃
     const edgesNow = get().edges;
     const missing = mentions.filter(
@@ -2539,9 +2522,9 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
       schedulePersist();
     }
 
-    // @提及 → 引用：文本节点正文 / 媒体附件就地替换注入；.md 笔记节点改为只发文件路径
-    // （消息顶部「引用文件」块，模型用 read_file 读取正文），@标题 文本位保留不动。
-    // 用 scanMentionHits 按命中实例精确处理（重复 @提及 时不错位），文本替换从后往前避免位置漂移。
+    // #提及 → 引用：文本节点正文 / 媒体附件就地替换注入；.md 笔记节点改为只发文件路径
+    // （消息顶部「引用文件」块，模型用 read_file 读取正文），#标题 文本位保留不动。
+    // 用 scanMentionHits 按命中实例精确处理（重复 #提及 时不错位），文本替换从后往前避免位置漂移。
     let finalContent = content;
     const mentionRefs: ReferencedInput[] = [];
     const mentionAtts: PendingAttachment[] = [];
@@ -2552,7 +2535,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
       const node = nodes.find((n) => n.id === m.nodeId);
       if (!node) continue;
       const label = m.text.slice(1);
-      // .md 笔记节点：@引用 只发文件路径（保留 @标题 原位），模型按需 read_file 读取；
+      // .md 笔记节点：#引用 只发文件路径（保留 #标题 原位），模型按需 read_file 读取；
       // 仍记入 mentionRefs（气泡 @chip + 防连边引用重复注入）
       if (node.type === "text") {
         const d = node.data as unknown as TextData;
@@ -2566,7 +2549,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
       if (!input) continue;
       if (input.attach) {
         // 图片：文本位替换为文件名，图片本体随附件（vision）发送。
-        // 引用此节点的附件已在托盘（拖线/@picker 均同时进托盘 + 输入框 @标记），
+        // 引用此节点的附件已在托盘（拖线/#picker 均同时进托盘 + 输入框 @标记），
         // 这里只做文本位替换，不重复 push——否则同一图片会发两张。
         finalContent =
           finalContent.slice(0, start) + input.text + finalContent.slice(end);
@@ -2584,11 +2567,11 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
       }
     }
     mentionRefs.reverse(); // 从后往前处理后恢复按出现顺序
-    mentionAtts.reverse(); // 同 mentionRefs：多图片附件保持 @提及 出现顺序
+    mentionAtts.reverse(); // 同 mentionRefs：多图片附件保持 #提及 出现顺序
 
-    // 连边通道：与 @提及 通道遍历的是同一引用集合（「引用即边」——每个 @提及 都建边），
-    // 是注入的两半——@提及 通道按 @标签 位置原位注入；这里只补「有边但当前消息无 @标签 且从未消费」的引用。
-    // 交互建的边首轮发送即被 @提及 消费，不会走到此分支；仅导入/旧画布/协作遗留的孤儿边命中。
+    // 连边通道：与 #提及 通道遍历的是同一引用集合（「引用即边」——每个 #提及 都建边），
+    // 是注入的两半——#提及 通道按 #标签 位置原位注入；这里只补「有边但当前消息无 #标签 且从未消费」的引用。
+    // 交互建的边首轮发送即被 #提及 消费，不会走到此分支；仅导入/旧画布/协作遗留的孤儿边命中。
     const edgeRefs = get().getReferencedInputs(conversationId);
     const already = new Set(mentionRefs.map((r) => r.nodeId));
     // 已消费（历史消息已注入过）的引用不重复注入——边消费后保留为实线，若不过滤，
@@ -2609,7 +2592,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
       .filter(Boolean)
       .join("\n\n");
 
-    // 「引用文件」路径块：@提及 .md（已恢复 @出现顺序）+ 连边 .md + 纯路径引用合并，同路径去重——
+    // 「引用文件」路径块：#提及 .md（已恢复 @出现顺序）+ 连边 .md + 纯路径引用合并，同路径去重——
     // 与 FILE_REFERENCE_PROMPT 引导对应，模型据此用 read_file 读取正文（目录标注由拼装处统一加）
     const seenNodeIds = new Set<string>();
     const uniqueFileRefs = [...fileRefs.reverse(), ...edgeFileRefs].filter((r) => {
@@ -2643,7 +2626,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
       id: userId,
       role: "user",
       content: finalContent,
-      // 气泡显示原始输入（含 @提及 标记），避免展示就地替换后的一大篇正文
+      // 气泡显示原始输入（含 #提及 标记），避免展示就地替换后的一大篇正文
       displayContent: content,
       createdAt: userTs,
       attachments: allAttachments.length

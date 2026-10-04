@@ -1,8 +1,10 @@
 import {
   AlertTriangle,
+  Hash,
   Layers,
   Lock,
   MessageSquare,
+  Paperclip,
   Plus,
   RefreshCw,
   Scissors,
@@ -50,7 +52,7 @@ import { Input } from "@/components/common/Input";
 import { VaultAtPicker, type VaultPickTarget } from "@/components/common/VaultAtPicker";
 import { openVaultPath } from "@/components/common/FileKindIcon";
 import { noteTitleFromFile } from "@/utils/filename";
-import { ConversationAttachmentTray } from "./ConversationAttachmentTray";
+import { ChatAttachmentTray } from "@/components/common/ChatAttachmentTray";
 import { ConnectionFrame } from "./ConnectionFrame";
 import { DropdownSelect } from "@/components/common/DropdownSelect";
 import { Button, IconButton } from "@/components/common/Button";
@@ -131,7 +133,7 @@ const refKeyOfNodeRef = (r: { label: string }) =>
  * 对话节点。
  * 消息列表 + 输入框 + 流式渲染 + Markdown。
  * - 输入框支持粘贴/拖拽附件 → 待发送托盘
- * - @ 提及引用画布资产：@chips 常驻显示入边引用
+ * - # 提及引用画布资产：#chips 常驻显示入边引用
  * - 连接边框：鼠标移到节点边缘渐显连接圆点，从边缘拉线接入引用 / 拖线引用（发送时自动连线）
  */
 export function ConversationNode({ id, width, height, selected }: NodeProps) {
@@ -192,14 +194,16 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
     yBottom: number;
     query: string;
   } | null>(null);
-  // 记录 @ 触发时光标位置（@ 尚未插入，插入后 @ 即在该索引），用于精确删除而非只删末尾
+  // 记录 # 触发时光标位置（# 尚未插入，插入后 # 即在该索引），用于精确删除而非只删末尾
   const [atIdx, setAtIdx] = useState(-1);
-  // @ 提及映射：输入框内可见的 @显示名 → 源节点 id，发送时按文本就地替换为引用内容
+  // # 提及映射：输入框内可见的 #显示名 → 源节点 id，发送时按文本就地替换为引用内容
   const [mentions, setMentions] = useState<{ nodeId: string; text: string }[]>(
     [],
   );
-  // 纯路径引用：@ 选择的仓库文件/文件夹（画布无对应节点），发送时只并路径进「引用文件」块（nodeId = file:<path>）
+  // 纯路径引用：# 选择的仓库文件/文件夹（画布无对应节点），发送时只并路径进「引用文件」块（nodeId = file:<path>）
   const [fileMentions, setFileMentions] = useState<{ file: string; label: string }[]>([]);
+  // 「+」浮层菜单（视口坐标，Menu portal 到 body 渲染——避开 React Flow transform 容器）
+  const [plusMenu, setPlusMenu] = useState<{ x: number; y: number } | null>(null);
   // 仅订阅「本节点入边的 media 源节点」派生数据（useShallow 保证引用稳定）：
   // 拖拽其他节点（nodes 数组变化但未变节点对象引用保留）时不触发本组件重渲染/重跑 effect
   const mediaSources = useCanvasStore(
@@ -211,7 +215,7 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
     ),
   );
 
-  // 当前画布上有节点引用的文件路径（@ 选择器排序：画布内文件排最前，选中走节点引用流）；
+  // 当前画布上有节点引用的文件路径（# 选择器排序：画布内文件排最前，选中走节点引用流）；
   // useShallow 数组逐项比较，路径集合不变不重渲染
   const canvasFilePaths = useCanvasStore(
     useShallow((s) => {
@@ -303,7 +307,7 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
     });
   }, [id, mediaSources]);
 
-  // 拖线引用消费：text/media 节点拖线到本对话 → 输入框出现 @标签（媒体同步进托盘），边在发送时自动建立
+  // 拖线引用消费：text/media 节点拖线到本对话 → 输入框出现 #标签（媒体同步进托盘），边在发送时自动建立
   const pendingMentions = useCanvasStore(
     (s) => s.pendingMentionsByConv[id] ?? EMPTY_PENDING,
   );
@@ -313,14 +317,14 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
     for (const nodeId of pendingMentions) {
       const node = store.nodes.find((n) => n.id === nodeId);
       if (!node) continue;
-      // 媒体（图片/文件）连线：只进待发送托盘，**不在输入框出现 @标签**（图片靠托盘附件注入，
-      // 无文本占位；text/search 引用才用 @标签 就地替换）
+      // 媒体（图片/文件）连线：只进待发送托盘，**不在输入框出现 #标签**（图片靠托盘附件注入，
+      // 无文本占位；text/search 引用才用 #标签 就地替换）
       if (node.type === "media") {
         // 同源节点已在托盘则不重复进（拖线/picker 可能重复触发同一节点）
         setAttachments((prev) => appendMediaAttachment(prev, node));
         continue;
       }
-      const mentionText = `@${mentionTextOf(node)}`;
+      const mentionText = `#${mentionTextOf(node)}`;
       setInput((prev) => (prev ? prev + " " : "") + mentionText + " ");
       setMentions((prev) => [...prev, { nodeId, text: mentionText }]);
     }
@@ -475,7 +479,7 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
 
   // ===== @ 提及（反向：手动 @ → 自动建边） =====
 
-  /** @标签 原位插入（各插入路径共用同一语义，变换本身见 `insertMentionTag`）；record 回调登记
+  /** #标签 原位插入（各插入路径共用同一语义，变换本身见 `insertMentionTag`）；record 回调登记
    *  引用映射（节点 mentions / 纯路径 fileMentions）。插入位置在 `setInput(prev => …)` 内按 `prev`
    *  计算——渲染期闭包的 `input` 已含上一次入队结果，两次插入同 tick 到达时会互相覆盖。
    *  `atIdx`/光标是「待替换区间」的渲染期事实，同 tick 多次插入不会改变它们（每次插入后都会复位选择器）。 */
@@ -507,7 +511,7 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
       // 同源节点已在托盘则不重复进（picker 选中后 useEffect 按边再进会重复）
       setAttachments((prev) => appendMediaAttachment(prev, node));
     }
-    // 仓库选择器全量列出候选，已连边（同源同向）不重复建边；@标签 仍插入 = 再次引用语义
+    // 仓库选择器全量列出候选，已连边（同源同向）不重复建边；#标签 仍插入 = 再次引用语义
     const connected = useCanvasStore
       .getState()
       .edges.some((e) => e.source === node.id && e.target === id);
@@ -520,15 +524,15 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
         targetHandle: null,
       });
     }
-    // 输入框插入可见 @显示名，并记录提及映射供发送时就地替换
-    const mentionText = `@${mentionTextOf(node)}`;
+    // 输入框插入可见 #显示名，并记录提及映射供发送时就地替换
+    const mentionText = `#${mentionTextOf(node)}`;
     insertMentionLabel(mentionText, () =>
       setMentions((prev) => [...prev, { nodeId: node.id, text: mentionText }]),
     );
   };
 
   /** 仓库选择器选中：画布上已有节点的文件路由到既有节点引用流（建边/托盘/快照，引用即边）；
-   * 无节点的文件与文件夹 → 纯路径引用（@标签 原位插入 + fileMentions，发送只并路径块）。 */
+   * 无节点的文件与文件夹 → 纯路径引用（#标签 原位插入 + fileMentions，发送只并路径块）。 */
   const handleVaultPick = (t: VaultPickTarget) => {
     if (!t.isDir) {
       const node = useCanvasStore
@@ -540,9 +544,31 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
       }
     }
     const label = t.name.toLowerCase().endsWith(".md") ? noteTitleFromFile(t.path) : t.name;
-    insertMentionLabel(`@${label}`, () =>
+    insertMentionLabel(`#${label}`, () =>
       setFileMentions((prev) => [...prev, { file: t.path, label }]),
     );
+  };
+
+  /** 「+」浮层菜单 → 添加上下文：在光标处插入 # 触发符并唤起仓库选择器（与键入 # 同一状态：
+   *  atIdx 锚定 # 位置、query 从 # 之后开始，继续键入即过滤）。 */
+  const openContextPicker = () => {
+    const ta = textareaRef.current;
+    const at = Math.min(ta?.selectionStart ?? input.length, input.length);
+    setInput((prev) => prev.slice(0, at) + "#" + prev.slice(at));
+    setAtIdx(at);
+    const caretAfter = at + 1;
+    requestAnimationFrame(() => {
+      ta?.focus();
+      ta?.setSelectionRange(caretAfter, caretAfter);
+    });
+    // 节点内相对坐标（菜单 absolute 定位，避免 React Flow transform 容器下 fixed 漂移）
+    const taRect = ta?.getBoundingClientRect();
+    const nodeRect = nodeRef.current?.getBoundingClientRect();
+    const x = (taRect?.left ?? 0) - (nodeRect?.left ?? 0);
+    const y = (taRect?.bottom ?? 0) - (nodeRect?.top ?? 0);
+    const yBottom = (nodeRect?.bottom ?? 0) - (taRect?.bottom ?? 0);
+    const openUp = window.innerHeight - (taRect?.bottom ?? 0) < 264;
+    setPicker({ x, y, openUp, yBottom, query: "" });
   };
 
   // 胶囊被移除（MentionTextarea 已删文本 + 复位光标）→ 引用层清理：
@@ -564,7 +590,7 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
     if (!nodeId) return;
     const store = useCanvasStore.getState();
     const consumed = isAssetConsumed(store.messagesByConv[id] ?? [], nodeId);
-    if (consumed) return; // 已消费边不可断开（仅移除 @标签 文本）
+    if (consumed) return; // 已消费边不可断开（仅移除 #标签 文本）
     const edge = store.edges.find(
       (e) => e.target === id && e.source === nodeId,
     );
@@ -685,7 +711,7 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
     [id, branchFrom, fitView],
   );
 
-  // 点击 user 消息气泡里的 @chip → 定位视图到引用的源节点；纯路径引用（file:<path>）画布无节点，按类型打开文件
+  // 点击 user 消息气泡里的 #/@chip → 定位视图到引用的源节点；纯路径引用（file:<path>）画布无节点，按类型打开文件
   const handleLocateRef = useCallback(
     (nodeId: string) => {
       if (nodeId.startsWith("file:")) {
@@ -737,10 +763,10 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
     // 对话能力未启用时无「重新生成」可言（避免点了只弹错误）
     chatAvailable &&
     !last.content.startsWith(ERROR_PREFIX);
-  // 输入框 overlay 分段：@提及 → 圆角标签段（可删除），其余普通文本段（含纯路径引用 file:<path>）
+  // 输入框 overlay 分段：#提及 → 圆角标签段（可删除），其余普通文本段（含纯路径引用 file:<path>）
   const segments = splitMentions(input, [
     ...mentions,
-    ...fileMentions.map((fm) => ({ nodeId: `file:${fm.file}`, text: `@${fm.label}` })),
+    ...fileMentions.map((fm) => ({ nodeId: `file:${fm.file}`, text: `#${fm.label}` })),
   ]);
 
   return (
@@ -780,6 +806,14 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
           className="flex-shrink-0"
           style={{ color: "var(--text-secondary)" }}
         />
+        {/* 协作独占编辑指示：本端正占锁编辑，他人只读（随标题常显，放头部不放输入行） */}
+        {iOwnLock && (
+          <span
+            className="w-1.5 h-1.5 rounded-full flex-shrink-0"
+            style={{ background: "var(--accent)" }}
+            title="正在独占编辑（他人只读）"
+          />
+        )}
         {/* 标题：双击 inline 编辑（nodrag + stopPropagation 防触发节点拖拽） */}
         {titleEdit.editing ? (
           <Input
@@ -1026,7 +1060,7 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
         />
       )}
 
-      <ConversationAttachmentTray
+      <ChatAttachmentTray
         attachments={attachments}
         onRemove={handleAttachmentRemove}
         onPin={handlePin}
@@ -1056,7 +1090,7 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
         </div>
       ) : (
       <div
-        className="nodrag border-t p-2 flex gap-2"
+        className="nodrag border-t p-2 flex items-center gap-1.5"
         style={{ borderColor: "var(--border)" }}
         onBlur={handleInputRowBlur}
         onDragOver={(e) => e.preventDefault()}
@@ -1073,19 +1107,50 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
           }}
         />
         <IconButton
-          onClick={() => fileInputRef.current?.click()}
+          onClick={(e) => {
+            // 视口坐标——Menu portal 到 body 后按视口渲染（React Flow transform 容器内 fixed 会漂移）；
+            // 输入行在节点底部，恒向上弹出（底边贴按钮顶）
+            const rect = e.currentTarget.getBoundingClientRect();
+            setPlusMenu({ x: rect.left, y: rect.top });
+          }}
           className="nodrag"
-          variant="secondary"
-          size="lg"
+          variant="ghost"
+          size="md"
           icon={<Plus size={16} />}
-          label="添加附件（Ctrl+V 粘贴图片 / 拖拽文件）"
+          label="添加上下文 / 上传附件"
         />
-        {iOwnLock && (
-          <span
-            className="self-center w-1.5 h-1.5 rounded-full flex-shrink-0"
-            style={{ background: "var(--accent)" }}
-            title="正在独占编辑（他人只读）"
-          />
+        {plusMenu && (
+          <Menu
+            x={plusMenu.x}
+            y={plusMenu.y}
+            onClose={() => setPlusMenu(null)}
+            widthClass="w-40"
+            align="bottom"
+            stopPointerDown
+          >
+            <MenuItem
+              onClick={() => {
+                setPlusMenu(null);
+                openContextPicker();
+              }}
+            >
+              <span className="inline-flex items-center gap-1.5">
+                <Hash size={14} />
+                添加上下文
+              </span>
+            </MenuItem>
+            <MenuItem
+              onClick={() => {
+                setPlusMenu(null);
+                fileInputRef.current?.click();
+              }}
+            >
+              <span className="inline-flex items-center gap-1.5">
+                <Paperclip size={14} />
+                上传附件
+              </span>
+            </MenuItem>
+          </Menu>
         )}
         <div className="relative flex-1 min-w-0 overflow-hidden">
           <MentionTextarea
@@ -1095,10 +1160,10 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
               // 首次真实输入占锁（协作独占锁：草稿空 → 非空）
               if (input === "" && v !== "") acquireLock();
               setInput(v);
-              // @ 后继续输入 → 实时过滤候选（query = @ 位置之后的内容）；
-              // @ 锚字符已被删（退格/整体替换）→ 关闭选择器，防陈旧 atIdx 错位插入
+              // # 后继续输入 → 实时过滤候选（query = # 位置之后的内容）；
+              // # 锚字符已被删（退格/整体替换）→ 关闭选择器，防陈旧 atIdx 错位插入
               if (picker && atIdx >= 0) {
-                if (v[atIdx] !== "@") {
+                if (v[atIdx] !== "#") {
                   setPicker(null);
                   setAtIdx(-1);
                 } else {
@@ -1109,7 +1174,8 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
             segments={segments}
             onRemoveMention={removeMention}
             onKeyDown={(e) => {
-              if (e.key === "@") {
+                // 键入 # 唤起仓库文件/文件夹选择器（坐标相对节点容器；下方视口不足 → 向上弹出）
+                if (e.key === "#") {
                 setAtIdx(textareaRef.current?.selectionStart ?? 0);
                 const taRect = textareaRef.current?.getBoundingClientRect();
                 const nodeRect = nodeRef.current?.getBoundingClientRect();
@@ -1132,7 +1198,7 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
               }
             }}
             onPaste={handlePaste}
-            placeholder="输入消息…（@ 引用仓库文件/文件夹，Shift+Enter 换行）"
+            placeholder="输入消息…（# 引用仓库文件/文件夹，Shift+Enter 换行）"
             rows={2}
             backgroundLayer={
               <div
@@ -1145,7 +1211,7 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
           />
         </div>
         {streaming ? (
-          <Button onClick={() => abort(id)} variant="secondary" size="sm" className="nodrag">
+          <Button onClick={() => abort(id)} variant="secondary" size="md" className="nodrag flex-shrink-0">
             停止
           </Button>
         ) : (
@@ -1153,8 +1219,8 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
             onClick={handleSend}
             disabled={compacting}
             variant="primary"
-            size="sm"
-            className="nodrag"
+            size="md"
+            className="nodrag flex-shrink-0"
             title={compacting ? "正在压缩会话历史…" : "发送"}
           >
             发送

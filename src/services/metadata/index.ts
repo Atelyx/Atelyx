@@ -46,6 +46,7 @@ import { deleteAttachment } from "@/services/vault";
 import {
   CHAT_HISTORY_DIR,
   CHAT_MESSAGE_EXT,
+  CHAT_MESSAGES_META_PREFIX,
   CHAT_META_EXT,
   EDITOR_CHATS_META_SCHEMA,
 } from "@/constants/editorChats";
@@ -75,7 +76,7 @@ const TEAM_CALENDAR = SPACE_TEAM_META.calendar;
 
 // ===== 空间 meta 键名（user 层）=====
 const MY_EDITOR_META = "chat/editor-meta";
-const MY_CHAT_MESSAGES_PREFIX = "chat/messages/";
+const MY_CHAT_MESSAGES_PREFIX = CHAT_MESSAGES_META_PREFIX;
 const MY_CHAT_SESSIONS_PREFIX = "chat/sessions/";
 const MY_TODOS_PREFIX = "todos/";
 

@@ -94,6 +94,12 @@ export interface PendingAttachment {
   sourceNodeId?: string;
   /** 文本类文件解析失败，仅作画布参考 */
   parseFailed?: boolean;
+  /**
+   * 源文件（运行时，AI 对话面板通道专用）：面板没有画布 id、会话在发送首条消息时才创建，
+   * 字节落仓库临时区推迟到发送时（send 内按会话 id 落盘）；画布通道不走此字段
+   * （进托盘时画布 id 已知、字节立即落临时区）。
+   */
+  blob?: File;
 }
 
 export interface Message {

@@ -5,17 +5,18 @@ import { Menu, MenuItem } from "@/components/common/Menu";
 import { IconButton } from "@/components/common/Button";
 
 /**
- * 待发送附件托盘（临时附件通道）。
- * 纯展示组件：缩略图 chip 列表 + 移除；chip 右键「固定到画布」（仅无源附件）。
+ * 待发送附件托盘（临时附件通道，画布对话节点与 AI 对话面板共用）。
+ * 纯展示组件：缩略图 chip 列表 + 移除；chip 右键「固定到画布」（仅无源附件，面板不传 onPin）。
  * 右键菜单走公共 Menu（portal 到 body + 视口坐标，天然避开 React Flow transform 容器）。
  */
 interface Props {
   attachments: PendingAttachment[];
   onRemove: (id: string) => void;
-  onPin: (att: PendingAttachment) => void;
+  /** 固定到画布（仅画布对话节点传；面板附件无画布归属，不传即无右键菜单）。 */
+  onPin?: (att: PendingAttachment) => void;
 }
 
-export function ConversationAttachmentTray({ attachments, onRemove, onPin }: Props) {
+export function ChatAttachmentTray({ attachments, onRemove, onPin }: Props) {
   const [menu, setMenu] = useState<{ att: PendingAttachment; x: number; y: number } | null>(null);
 
   if (attachments.length === 0) return null;
@@ -36,7 +37,7 @@ export function ConversationAttachmentTray({ attachments, onRemove, onPin }: Pro
           onContextMenu={(e) => {
             e.preventDefault();
             e.stopPropagation();
-            if (att.sourceNodeId) return;
+            if (att.sourceNodeId || !onPin) return;
             // 视口坐标（e.clientX/Y）——Menu portal 到 body 后按视口渲染，无需 offsetParent 换算
             setMenu({ att, x: e.clientX, y: e.clientY });
           }}
@@ -70,7 +71,7 @@ export function ConversationAttachmentTray({ attachments, onRemove, onPin }: Pro
         <Menu x={menu.x} y={menu.y} onClose={() => setMenu(null)} widthClass="w-40" stopPointerDown>
           <MenuItem
             onClick={() => {
-              onPin(menu.att);
+              onPin?.(menu.att);
               setMenu(null);
             }}
           >

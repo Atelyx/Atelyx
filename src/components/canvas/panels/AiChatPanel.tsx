@@ -10,7 +10,7 @@ const refKeyOfPanelRef = (r: { label: string }) =>
  *   拖窄即改为浮层弹出（覆盖对话区，不挤压）；顶部「历史会话」按钮手动开关
  * - 顶部一行：左侧面板内联错误提示（仅出错时占位）+ 右侧「新建会话 / 历史会话 / 压缩」图标按钮
  * - 中部消息流：Markdown 公共渲染、流式指示、自动滚底
- * - 底部输入区：textarea（Enter 发送 / Shift+Enter 换行，支持 @引用标签）
+ * - 底部输入区：textarea（Enter 发送 / Shift+Enter 换行，支持 #引用标签）
  *   + Agent 选择（图标 + Agent 名）+ 模型选择（图标 + 模型名）+ 发送/停止按钮
  *
  * 分层：组件只走 chatPanelStore / settingsStore / vaultStore，不直调 service。
@@ -23,9 +23,12 @@ import {
   Bot,
   Cpu,
   FilePlus,
+  Hash,
   History,
   Layers,
   MessageSquare,
+  Paperclip,
+  Plus,
   RefreshCw,
   Square,
   Trash2,
@@ -57,12 +60,16 @@ import { relTime } from "@/utils/time";
 import { useBackHandler } from "@/hooks/useBackHandler";
 import { VaultAtPicker, type VaultPickTarget } from "@/components/common/VaultAtPicker";
 import { openVaultPath } from "@/components/common/FileKindIcon";
+import { ChatAttachmentTray } from "@/components/common/ChatAttachmentTray";
+import { Menu, MenuItem } from "@/components/common/Menu";
+import { useNotificationStore } from "@/stores/notificationStore";
+import { dataUrlToText } from "@/utils/base64";
 import { noteTitleFromFile } from "@/utils/filename";
 import { assistantReplyText } from "@/utils/agentSteps";
 import { compactionMarkerIndex } from "@/utils/compaction";
 import { CompactionMarker } from "@/components/common/CompactionMarker";
 import { useVaultLinkHandlers } from "@/hooks/useVaultLinkHandlers";
-import type { EditorChatMessage, EditorChatMessageRef } from "@/types";
+import type { EditorChatMessage, EditorChatMessageRef, PendingAttachment } from "@/types";
 
 /** 空消息数组（模块级常量：避免 selector 新引用导致无限重渲染）。 */
 const EMPTY_MESSAGES: EditorChatMessage[] = [];
@@ -71,11 +78,62 @@ const EMPTY_MESSAGES: EditorChatMessage[] = [];
 const SIDEBAR_MIN_PANEL_WIDTH = 560;
 
 /**
- * 输入框追加 @标签：前文非空且不以空格结尾时才补一个分隔空格，标签后恒带一个尾随空格。
+ * 输入框追加 #标签：前文非空且不以空格结尾时才补一个分隔空格，标签后恒带一个尾随空格。
  */
 function appendMentionTags(prev: string, tags: string[]): string {
   const sep = prev && !prev.endsWith(" ") ? " " : "";
   return prev + sep + tags.join(" ") + " ";
+}
+
+/** 本机文件 → dataURL（FileReader；图片预览与文本解码共用一次读取）。 */
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = () => reject(reader.error ?? new Error("读取文件失败"));
+    reader.readAsDataURL(file);
+  });
+}
+
+/**
+ * 面板待发送附件进托盘（上传附件通道）：读取本机文件字节生成预览载荷，
+ * 字节本体随附件持有（`blob`），落仓库临时区推迟到发送时——面板会话在发送首条消息时才创建，
+ * 托盘阶段没有会话 id 可作临时目录归属。文本类按严格 UTF-8 解码：解不出来 = 二进制附件，
+ * 标 `parseFailed`（可发送作画布参考、不注入模型），与画布节点拖拽通道同一判定口径。
+ */
+async function buildPanelPendingAttachment(file: File): Promise<PendingAttachment> {
+  const isImage = file.type.startsWith("image/") || /\.(png|jpe?g|gif|webp|bmp|svg|avif)$/i.test(file.name);
+  const dataUrl = await readFileAsDataUrl(file);
+  if (isImage) {
+    return {
+      id: crypto.randomUUID(),
+      kind: "image",
+      payload: dataUrl,
+      mime: file.type,
+      filename: file.name,
+      blob: file,
+    };
+  }
+  try {
+    return {
+      id: crypto.randomUUID(),
+      kind: "file",
+      payload: dataUrlToText(dataUrl),
+      mime: file.type,
+      filename: file.name,
+      blob: file,
+    };
+  } catch {
+    // 内容不是 UTF-8 文本（PDF/zip 等）：不算失败——空载荷 + parseFailed，可引用、不注入模型
+    return {
+      id: crypto.randomUUID(),
+      kind: "file",
+      mime: file.type,
+      filename: file.name,
+      blob: file,
+      parseFailed: true,
+    };
+  }
 }
 
 /**
@@ -230,15 +288,15 @@ export function AiChatPanel() {
   );
   // 气泡操作回调稳定化（memo 生效前提）；rollbackTo 为 store action 引用恒稳定，onRollback 直传
   const handleRegenerate = useCallback(() => void regenerate(), [regenerate]);
-  // @chip 点击按类型打开引用目标（画布/笔记/表格应用内打开，其他文件/文件夹在文件管理器中打开；
+  // #/@chip 点击按类型打开引用目标（画布/笔记/表格应用内打开，其他文件/文件夹在文件管理器中打开；
   // 稳定引用，气泡 memo 生效前提）
   const handleRefChipClick = useCallback((file: string) => {
     openVaultPath(file);
   }, []);
-  // 输入框内的 @引用（拖入/键入 @ 选择）：@标签 随 input 文本渲染，发送时按命中实例注入路径
+  // 输入框内的 #引用（拖入/键入 # 选择）：#标签 随 input 文本渲染，发送时按命中实例注入路径
   const [mentions, setMentions] = useState<EditorChatMessageRef[]>([]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  // 键入 @ 唤起仓库选择器：atIdx = @ 位置（query = @ 之后的内容），坐标相对输入容器
+  // 键入 # 唤起仓库选择器：atIdx = # 位置（query = # 之后的内容），坐标相对输入容器
   const [picker, setPicker] = useState<{
     x: number;
     y: number;
@@ -248,15 +306,20 @@ export function AiChatPanel() {
   } | null>(null);
   const [atIdx, setAtIdx] = useState(-1);
   const inputWrapRef = useRef<HTMLDivElement>(null);
+  // 待发送附件托盘（上传附件通道）：字节随附件持有，发送时才落仓库临时区（会话 id 此时已知）
+  const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  // 「+」浮层菜单（视口坐标，Menu portal 到 body 渲染）
+  const [plusMenu, setPlusMenu] = useState<{ x: number; y: number } | null>(null);
 
-  // 拖入的笔记引用队列（FileExplorerPanel 拖拽笔记到本输入框）→ 输入框追加 @标签（去重）
+  // 拖入的笔记引用队列（FileExplorerPanel 拖拽笔记到本输入框）→ 输入框追加 #标签（去重）
   const pendingMentions = useChatPanelStore((s) => s.pendingMentions);
   useEffect(() => {
     if (pendingMentions.length === 0) return;
     const added = pendingMentions.filter((r) => !mentions.some((x) => x.file === r.file));
     if (added.length) {
       setMentions((prev) => [...prev, ...added]);
-      setInput((prev) => appendMentionTags(prev, added.map((r) => `@${r.label}`)));
+      setInput((prev) => appendMentionTags(prev, added.map((r) => `#${r.label}`)));
     }
     useChatPanelStore.getState().clearPendingMentions();
   }, [pendingMentions, mentions]);
@@ -293,24 +356,66 @@ export function AiChatPanel() {
   // Agent 候选（配置在 设置 → Agent，仓库级 .atelyx/agents.json；发送时实时解析系统提示词/工具）
   const agents = useSettingsStore((s) => s.agents);
 
-  // 输入框 overlay 分段：@引用 → 圆角标签段（可删除），其余普通文本段
+  // 输入框 overlay 分段：#引用 → 圆角标签段（可删除），其余普通文本段
   const segments = splitMentions(
     input,
-    mentions.map((r) => ({ nodeId: r.file, text: `@${r.label}` }))
+    mentions.map((r) => ({ nodeId: r.file, text: `#${r.label}` }))
   );
 
-  const handleSend = () => {
+  const handleSend = async () => {
     const text = input.trim();
     // 压缩进行中拦截在清空草稿之前（与画布 handleSend 同口径；store 侧另有竞态兜底）
-    if (!text || streaming || compactingAny) return;
+    if ((!text && attachments.length === 0) || streaming || compactingAny) return;
+    const pending = attachments;
+    const mts = mentions;
+    // send 返回 false（附件落盘失败/无可用模型等）：草稿与托盘原样保留，不清输入
+    const sent = await send(text, mts, pending);
+    if (!sent) return;
     setInput("");
     setMentions([]);
     setPicker(null);
     setAtIdx(-1);
-    void send(text, mentions);
+    setAttachments([]);
   };
 
-  // 仓库选择器选中 → @标签 插入（@ 到光标间过滤词替换、分隔空格、尾随空格、光标复位，与画布同语义）。
+  /** 「+」浮层菜单 → 添加上下文：在光标处插入 # 触发符并唤起仓库选择器（与键入 # 同一状态：
+   *  atIdx 锚定 # 位置、query 从 # 之后开始，继续键入即过滤）。 */
+  const openContextPicker = () => {
+    const ta = textareaRef.current;
+    const at = Math.min(ta?.selectionStart ?? input.length, input.length);
+    setInput((prev) => prev.slice(0, at) + "#" + prev.slice(at));
+    setAtIdx(at);
+    const caretAfter = at + 1;
+    requestAnimationFrame(() => {
+      ta?.focus();
+      ta?.setSelectionRange(caretAfter, caretAfter);
+    });
+    const taRect = ta?.getBoundingClientRect();
+    const wrapRect = inputWrapRef.current?.getBoundingClientRect();
+    const x = (taRect?.left ?? 0) - (wrapRect?.left ?? 0);
+    const y = (taRect?.bottom ?? 0) - (wrapRect?.top ?? 0);
+    const yBottom = (wrapRect?.bottom ?? 0) - (taRect?.bottom ?? 0);
+    const openUp = window.innerHeight - (taRect?.bottom ?? 0) < 264;
+    setPicker({ x, y, openUp, yBottom, query: "" });
+  };
+
+  /** 「+」浮层菜单 → 上传附件：系统文件选择器（多选），选中文件进待发送托盘。 */
+  const addFiles = (files: File[]) => {
+    for (const file of files) {
+      void buildPanelPendingAttachment(file)
+        .then((att) => setAttachments((prev) => [...prev, att]))
+        .catch((e) => {
+          console.error("添加附件失败", file.name, e);
+          const reason = e instanceof Error && e.message ? `：${e.message}` : "";
+          useNotificationStore.getState().notify({
+            level: "error",
+            message: `附件「${file.name}」添加失败${reason}`,
+          });
+        });
+    }
+  };
+
+  // 仓库选择器选中 → #标签 插入（# 到光标间过滤词替换、分隔空格、尾随空格、光标复位，与画布同语义）。
   // `atIdx`/光标是「待替换区间」的渲染期事实；插入位置在 `setInput(prev => ...)` 内按 `prev` 计算——
   // 渲染期闭包的 `input` 已含上一次入队结果，两次插入同 tick 到达时会互相覆盖。
   const handleVaultPick = (t: VaultPickTarget) => {
@@ -318,7 +423,7 @@ export function AiChatPanel() {
     const insertAt = Math.min(Math.max(atIdx, 0), input.length);
     const end = Math.max(caret, insertAt);
     const label = t.name.toLowerCase().endsWith(".md") ? noteTitleFromFile(t.path) : t.name;
-    const mentionText = `@${label}`;
+    const mentionText = `#${label}`;
     let caretAfter = 0;
     setInput((prev) => {
       const { text, caret: next } = insertMentionTag(prev, insertAt, end, mentionText);
@@ -602,6 +707,7 @@ export function AiChatPanel() {
                     onRefChipClick={handleRefChipClick}
                     content={m.content}
                     steps={m.steps}
+                    attachments={m.attachments}
                     isStreaming={isStreamingMsg}
                     markdownLinks={chatMarkdownLinks}
                     copyText={m.role === "user" ? (m.displayContent ?? m.content) : assistantReplyText(m)}
@@ -629,8 +735,8 @@ export function AiChatPanel() {
           className="border-t flex-shrink-0 px-3 pt-2.5 pb-3"
           style={{ borderColor: "var(--border-subtle)" }}
         >
-          {/* 输入框（data-chat-input = 文件面板拖拽文件/文件夹的落点：拖入即 @引用）：
-          overlay 渲染 @标签（透明 textarea 承载输入，滚动同步 transform）；键入 @ 唤起仓库选择器。
+          {/* 输入框（data-chat-input = 文件面板拖拽文件/文件夹的落点：拖入即 #引用）：
+          overlay 渲染 #标签（透明 textarea 承载输入，滚动同步 transform）；键入 # 唤起仓库选择器。
           输入框是输入区唯一的盒子，内部纵向三段常规流：输入面 → 分隔线 → 工具排
           （工具排走常规流而非绝对定位——绝对定位会与超出的输入文字叠在一起） */}
           <div
@@ -651,15 +757,22 @@ export function AiChatPanel() {
                 onClose={() => setPicker(null)}
               />
             )}
+            {/* 待发送附件托盘（上传附件通道）：chip 列表在输入面上方，发送时随消息落临时区 */}
+            <ChatAttachmentTray
+              attachments={attachments}
+              onRemove={(attId) =>
+                setAttachments((prev) => prev.filter((a) => a.id !== attId))
+              }
+            />
             <MentionTextarea
               textareaRef={textareaRef}
               value={input}
               onChange={(v) => {
                 setInput(v);
-                // @ 后继续输入 → 实时过滤候选（query = @ 位置之后的内容）；
-                // @ 锚字符已被删（退格/整体替换）→ 关闭选择器，防陈旧 atIdx 错位插入
+                // # 后继续输入 → 实时过滤候选（query = # 位置之后的内容）；
+                // # 锚字符已被删（退格/整体替换）→ 关闭选择器，防陈旧 atIdx 错位插入
                 if (picker && atIdx >= 0) {
-                  if (v[atIdx] !== "@") {
+                  if (v[atIdx] !== "#") {
                     setPicker(null);
                     setAtIdx(-1);
                   } else {
@@ -670,8 +783,8 @@ export function AiChatPanel() {
               segments={segments}
               onRemoveMention={removeMention}
               onKeyDown={(e) => {
-                // 键入 @ 唤起仓库文件/文件夹选择器（坐标相对输入容器；下方视口不足 → 向上弹出）
-                if (e.key === "@") {
+                // 键入 # 唤起仓库文件/文件夹选择器（坐标相对输入容器；下方视口不足 → 向上弹出）
+                if (e.key === "#") {
                   setAtIdx(textareaRef.current?.selectionStart ?? 0);
                   const taRect = textareaRef.current?.getBoundingClientRect();
                   const wrapRect = inputWrapRef.current?.getBoundingClientRect();
@@ -688,7 +801,7 @@ export function AiChatPanel() {
                 }
               }}
               spellCheck={false}
-              placeholder="输入消息，@ 引用文件，Enter 发送，Shift+Enter 换行"
+              placeholder="输入消息，# 引用文件，Enter 发送，Shift+Enter 换行"
               rows={5}
               overlayClassName="z-0 px-2 pt-3 pb-2 text-sm leading-relaxed"
               // focus:shadow-none 压掉全局 textarea:focus 的 2px 焦点环：输入面撑满输入盒内部，
@@ -696,8 +809,21 @@ export function AiChatPanel() {
               textareaClassName="w-full px-2 pt-3 pb-2 text-sm leading-relaxed focus:shadow-none"
             />
 
-            {/* 工具排（盒子内底部，与输入面同属一块、不画分隔线）：左 Agent/模型；右 发送/停止 */}
+            {/* 工具排（盒子内底部，与输入面同属一块、不画分隔线）：左 加号/Agent/模型；右 发送/停止 */}
             <div className="flex items-center gap-2 px-2 pt-1 pb-2">
+              {/* 加号菜单：添加上下文（光标处插入 # 唤起仓库选择器）/ 上传附件（系统文件选择器）。
+                  输入区在面板底部，恒向上弹出（底边贴按钮顶） */}
+              <IconButton
+                onClick={(e) => {
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  setPlusMenu({ x: rect.left, y: rect.top });
+                }}
+                variant="ghost"
+                size="md"
+                icon={<Plus size={14} />}
+                label="添加上下文 / 上传附件"
+                className="flex-shrink-0"
+              />
               {/* Agent 选择：选中的 Agent 提供系统提示词与工具（发送时实时解析）；缺省「对话」= 普通对话 */}
               <DropdownSelect
                 value={agentId ?? ""}
@@ -738,8 +864,8 @@ export function AiChatPanel() {
                   任一会话压缩进行中即禁用（压缩与发送共用一个中止句柄，避免静默无效点击） */}
               <IconButton
                 className="ml-auto"
-                onClick={streaming ? stop : handleSend}
-                disabled={compactingAny || (!streaming && !input.trim())}
+                onClick={streaming ? stop : () => void handleSend()}
+                disabled={compactingAny || (!streaming && !input.trim() && attachments.length === 0)}
                 variant={streaming ? "secondary" : "primary"}
                 size="md"
                 icon={streaming ? <Square size={12} /> : <ArrowUp size={13} />}
@@ -748,6 +874,51 @@ export function AiChatPanel() {
                 }
               />
             </div>
+
+            {/* 上传附件：系统文件选择器（多选；选中文件进托盘，发送时落临时区） */}
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              className="hidden"
+              onChange={(e) => {
+                addFiles(Array.from(e.target.files ?? []));
+                e.target.value = "";
+              }}
+            />
+            {/* 「+」浮层菜单：只含已实现的两个入口；输入区在面板底部，恒向上弹出 */}
+            {plusMenu && (
+              <Menu
+                x={plusMenu.x}
+                y={plusMenu.y}
+                onClose={() => setPlusMenu(null)}
+                widthClass="w-40"
+                align="bottom"
+              >
+                <MenuItem
+                  onClick={() => {
+                    setPlusMenu(null);
+                    openContextPicker();
+                  }}
+                >
+                  <span className="inline-flex items-center gap-1.5">
+                    <Hash size={14} />
+                    添加上下文
+                  </span>
+                </MenuItem>
+                <MenuItem
+                  onClick={() => {
+                    setPlusMenu(null);
+                    fileInputRef.current?.click();
+                  }}
+                >
+                  <span className="inline-flex items-center gap-1.5">
+                    <Paperclip size={14} />
+                    上传附件
+                  </span>
+                </MenuItem>
+              </Menu>
+            )}
           </div>
         </div>
       </div>

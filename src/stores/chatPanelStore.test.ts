@@ -11,6 +11,12 @@ const h = vi.hoisted(() => {
     metaWrites: [] as unknown[],
     messageWriteFails: 0,
     messageWrites: [] as unknown[],
+    tempWrites: [] as Array<{ canvasId: string; fileName: string; base64Data: string }>,
+    tempWriteFails: 0,
+    attachmentDataUrl: "",
+    /** 内存会话文件系统：file → .jsonl 内容（list/read/write/delete 共用，模拟重启重读）。 */
+    chatFiles: new Map<string, string>(),
+    chatMetas: new Map<string, string>(),
     gate: null as null | {
       armed: Promise<void>;
       resolveArmed: () => void;
@@ -42,12 +48,35 @@ const h = vi.hoisted(() => {
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: async (cmd: string, args: unknown) => {
     if (cmd === "list_chat_sessions") {
+      const rows = [...h.state.chatFiles.keys()].map((file) => {
+        const id = file.split("/").pop()!.replace(/\.jsonl$/, "");
+        const metaRaw = h.state.chatMetas.get(file.replace(/\.jsonl$/, ".meta.json"));
+        return {
+          id,
+          file,
+          meta: metaRaw ? (JSON.parse(metaRaw) as Record<string, unknown>) : null,
+        };
+      });
       if (h.state.gate) {
         const gate = h.state.gate;
         gate.resolveArmed();
-        return gate.release.then(() => []);
+        return gate.release.then(() => rows);
       }
-      return [];
+      return rows;
+    }
+    if (cmd === "read_chat_messages") {
+      const content = h.state.chatFiles.get((args as { file: string }).file);
+      if (content === undefined) throw new Error("会话消息不存在");
+      return content;
+    }
+    if (cmd === "delete_chat_messages") {
+      h.state.chatFiles.delete((args as { file: string }).file);
+      return "";
+    }
+    if (cmd === "write_chat_session_meta") {
+      const a = args as { file: string; meta: unknown };
+      h.state.chatMetas.set(a.file, JSON.stringify(a.meta));
+      return "";
     }
     if (cmd === "read_editor_chats_meta") return {};
     if (cmd === "write_editor_chats_meta") {
@@ -60,7 +89,17 @@ vi.mock("@tauri-apps/api/core", () => ({
         throw new Error("磁盘已满");
       }
       h.state.messageWrites.push(args);
+      h.state.chatFiles.set((args as { file: string }).file, (args as { content: string }).content);
       return "";
+    }
+    if (cmd === "read_attachment_data_url") return h.state.attachmentDataUrl;
+    if (cmd === "write_temp_attachment") {
+      if (h.state.tempWriteFails > 0) {
+        h.state.tempWriteFails--;
+        throw new Error("附件写入失败");
+      }
+      h.state.tempWrites.push(args as { canvasId: string; fileName: string; base64Data: string });
+      return ".atelyx/temp/0123456789abcdef/att-1-笔记.txt";
     }
     return "";
   },
@@ -85,6 +124,11 @@ beforeEach(async () => {
   h.state.metaWrites = [];
   h.state.messageWrites = [];
   h.state.messageWriteFails = 0;
+  h.state.tempWrites = [];
+  h.state.tempWriteFails = 0;
+  h.state.attachmentDataUrl = "";
+  h.state.chatFiles.clear();
+  h.state.chatMetas.clear();
   h.state.gate = null;
   // 先起 noteSessionStore 再取目标模块：chatPanelStore 经 pluginStore→builtins 与
   // noteSessionStore/settingsStore 成环，从其它模块进入会在环上取到尚未初始化的 export
@@ -181,6 +225,13 @@ describe("写盘失败的退避重试与可见性", () => {
 });
 
 describe("对话能力缺失/存在时的一致性（运行时判空降级 + 写入器回写）", () => {
+  /** 等待在途轮收尾（send 只等预检、轮转 fire-and-forget：轮末状态靠微任务推进）。 */
+  async function settleTurn(): Promise<void> {
+    for (let i = 0; i < 50 && chat.useChatPanelStore.getState().streaming; i++) {
+      await vi.advanceTimersByTimeAsync(1);
+    }
+  }
+
   it("对话核心未启用：发送被拦下并给出可操作提示，不创建空会话", async () => {
     await loadedInVault("v1");
     await chat.useChatPanelStore.getState().send("你好");
@@ -207,6 +258,7 @@ describe("对话能力缺失/存在时的一致性（运行时判空降级 + 写
     });
     try {
       await chat.useChatPanelStore.getState().send("你好");
+      await settleTurn();
       const s = chat.useChatPanelStore.getState();
       expect(s.sessions).toHaveLength(1);
       expect(s.sessions[0].messages.map((m) => [m.role, m.content])).toEqual([
@@ -214,6 +266,125 @@ describe("对话能力缺失/存在时的一致性（运行时判空降级 + 写
         ["assistant", "答"],
       ]);
       expect(s.streaming).toBe(false);
+    } finally {
+      off();
+    }
+  });
+});
+
+describe("面板附件通道（临时区落盘 + 引用持久化）", () => {
+  /** 注册对话核心（本轮立即完成），返回取消注册。 */
+  async function withRuntime(): Promise<() => void> {
+    const { registerChatRuntime } = await import("@/utils/chatRuntimeHost");
+    return registerChatRuntime({
+      resolveTarget: () => ({
+        ok: true,
+        provider: { id: "p1", name: "P", baseUrl: "http://x", apiKey: "k", models: [] },
+        model: "m1",
+      }),
+      runTurn: async (req) => {
+        req.sink.finish({ content: "答", steps: [], removed: false, timedOut: false, aborted: false });
+      },
+      compact: async () => ({ ok: false, aborted: false, message: "不应被调用" }),
+      autoName: async () => "skipped",
+    });
+  }
+
+  it("发送带附件：字节按会话 id 落临时区，消息持久化剥离 payload 只留路径引用", async () => {
+    await loadedInVault("v1");
+    const off = await withRuntime();
+    try {
+      const blob = new File([new TextEncoder().encode("正文内容")], "笔记.txt", { type: "text/plain" });
+      const pending = {
+        id: "att-1",
+        kind: "file" as const,
+        mime: "text/plain",
+        filename: "笔记.txt",
+        payload: "正文内容",
+        blob,
+      };
+      const ok = await chat.useChatPanelStore.getState().send("看这个", [], [pending]);
+      expect(ok).toBe(true);
+
+      // 字节落临时区：目录归属 = 会话 id（发送时已确定，新会话亦然）
+      expect(h.state.tempWrites).toHaveLength(1);
+      expect(h.state.tempWrites[0].fileName).toBe("笔记.txt");
+      const s = chat.useChatPanelStore.getState();
+      expect(s.sessions[0].messages[0].attachments?.[0]?.file).toBe(
+        ".atelyx/temp/0123456789abcdef/att-1-笔记.txt",
+      );
+
+      // 持久化记录：附件按 file 引用落盘，运行时缓存 payload 不得进 .jsonl
+      await chat.useChatPanelStore.getState().flush();
+      expect(h.state.messageWrites).toHaveLength(1);
+      const record = JSON.parse(
+        (h.state.messageWrites[0] as { content: string }).content.split("\n")[0],
+      ) as { attachments?: Array<{ file?: string; payload?: string }> };
+      expect(record.attachments?.[0]?.file).toBe(".atelyx/temp/0123456789abcdef/att-1-笔记.txt");
+      expect(record.attachments?.[0]).not.toHaveProperty("payload");
+    } finally {
+      off();
+    }
+  });
+
+  it("附件落盘失败：send 返回 false，不创建消息、新会话不残留（草稿可保留待重试）", async () => {
+    await loadedInVault("v1");
+    h.state.tempWriteFails = 1;
+    const off = await withRuntime();
+    try {
+      const blob = new File(["x"], "a.png", { type: "image/png" });
+      const ok = await chat.useChatPanelStore.getState().send("看图", [], [
+        { id: "att-1", kind: "image", mime: "image/png", filename: "a.png", blob },
+      ]);
+      expect(ok).toBe(false);
+      const s = chat.useChatPanelStore.getState();
+      expect(s.sessions).toEqual([]);
+      expect(s.activeSessionId).toBeNull();
+      expect(h.state.messageWrites).toHaveLength(0);
+    } finally {
+      off();
+    }
+  });
+
+  it("重启后打开会话：附件按引用读回 payload（水合恢复图片显示）", async () => {
+    await loadedInVault("v1");
+    const off = await withRuntime();
+    try {
+      h.state.attachmentDataUrl = "data:image/png;base64,aGVsbG8=";
+      const blob = new File(["x"], "a.png", { type: "image/png" });
+      await chat.useChatPanelStore.getState().send("看图", [], [
+        {
+          id: "att-1",
+          kind: "image",
+          mime: "image/png",
+          filename: "a.png",
+          payload: "data:image/png;base64,old",
+          blob,
+        },
+      ]);
+      const sessionId = chat.useChatPanelStore.getState().activeSessionId!;
+      // 模拟重启：落盘后强制重读（记录里 payload 已剥离），附件无运行时缓存
+      await chat.useChatPanelStore.getState().flush();
+      await chat.useChatPanelStore.getState().load(true);
+      const restored = chat.useChatPanelStore
+        .getState()
+        .sessions.find((s) => s.id === sessionId);
+      expect(restored?.messages[0].attachments?.[0]?.payload).toBeUndefined();
+      // 打开会话 → 水合按引用读回
+      chat.useChatPanelStore.getState().openSession(sessionId);
+      for (let i = 0; i < 20; i++) {
+        await vi.advanceTimersByTimeAsync(1);
+        const msg = chat.useChatPanelStore
+          .getState()
+          .sessions.find((s) => s.id === sessionId)
+          ?.messages[0];
+        if (msg?.attachments?.[0]?.payload) break;
+      }
+      const msg = chat.useChatPanelStore
+        .getState()
+        .sessions.find((s) => s.id === sessionId)
+        ?.messages[0];
+      expect(msg?.attachments?.[0]?.payload).toBe("data:image/png;base64,aGVsbG8=");
     } finally {
       off();
     }

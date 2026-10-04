@@ -18,7 +18,7 @@ use base64::Engine;
 use serde::Serialize;
 use tauri::State;
 
-use crate::vault::{atomic_write, atomic_write_bytes, safe_join, VaultState};
+use crate::vault::{atomic_write, atomic_write_bytes, safe_join, VaultState, CHAT_HISTORY_DIR};
 
 /// 未入库临时附件的目录（相对仓库根）。
 pub const TEMP_ATTACHMENT_DIR: &str = ".atelyx/temp";
@@ -222,7 +222,7 @@ pub async fn cleanup_canvas_temp_attachments(
     let mut live = std::collections::HashMap::new();
     let mut ids = std::collections::HashSet::new();
     // 扫描失败 = 引用集合残缺：残缺集合当成完整白名单会误删别处仍在用的附件，故放弃本次删除
-    collect_temp_usage(&root, &mut ids, &mut live)?;
+    collect_all_temp_usage(&root, &mut ids, &mut live)?;
     let elsewhere = live.remove(&key).unwrap_or_default();
     let mut removed = 0usize;
     for (name, path) in candidates {
@@ -236,11 +236,78 @@ pub async fn cleanup_canvas_temp_attachments(
     Ok(removed)
 }
 
+/// 回收某面板会话的临时附件（AI 对话面板，会话删除后调用）：只删本会话目录内
+/// 未被会话消息 .jsonl 引用的文件。面板附件引用不跨会话（不存在画布间的复制粘贴带引用），
+/// 无需全仓库引用扫描。
+///
+/// 保守规则与画布清理同源：
+/// 1. 会话 .jsonl 读得到 → 按引用白名单删（坏行跳过，与前端恢复语义一致）；
+/// 2. .jsonl 不存在（会话确实已删）→ 标记与 session_id 一致才整目录清（防同名/碰撞复用）；
+/// 3. 只删顶层普通文件，不递归。
+#[tauri::command]
+pub async fn cleanup_session_temp_attachments(
+    session_id: String,
+    session_file: String,
+    state: State<'_, VaultState>,
+) -> Result<usize, String> {
+    let root = state.root()?;
+    let Ok(dir) = safe_join(&root, &canvas_temp_dir(&session_id), false) else {
+        return Ok(0);
+    };
+    if !dir.is_dir() {
+        return Ok(0);
+    }
+    let key = canvas_temp_key(&session_id);
+    let session_path = safe_join(&root, &session_file, false)?;
+    let referenced: std::collections::HashSet<String> = if session_path.is_file() {
+        let text = std::fs::read_to_string(&session_path)
+            .map_err(|e| format!("读取会话失败，未回收临时附件：{e}"))?;
+        referenced_session_temp_refs(&text)
+            .into_iter()
+            .filter(|(k, _)| *k == key)
+            .map(|(_, name)| name)
+            .collect()
+    } else {
+        // 会话已删除：目录里没有引用了；仍要认标记，防目录被同名/碰撞复用
+        if !marker_matches(&dir, &session_id) {
+            return Ok(0);
+        }
+        std::collections::HashSet::new()
+    };
+    let mut removed = 0usize;
+    for entry in std::fs::read_dir(&dir).map_err(|e| e.to_string())?.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name == TEMP_MARKER_FILE || referenced.contains(&name) {
+            continue;
+        }
+        if entry.file_type().map(|t| t.is_file()).unwrap_or(false)
+            && std::fs::remove_file(entry.path()).is_ok()
+        {
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
 /// 目录标记是否与给定画布 id 一致（标记缺失 = 无法确认归属，按「不一致」处理）。
 fn marker_matches(dir: &Path, canvas_id: &str) -> bool {
     std::fs::read_to_string(dir.join(TEMP_MARKER_FILE))
         .map(|s| s.trim() == canvas_id)
         .unwrap_or(false)
+}
+
+/// 会话消息 .jsonl 文本里引用的临时附件，逐条为 `(key, 文件名)`；按行解析 JSON，
+/// 损坏行跳过（与前端会话恢复语义一致：坏行不阻塞其余引用的收集）。
+fn referenced_session_temp_refs(jsonl_text: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let prefix = format!("{TEMP_ATTACHMENT_DIR}/");
+    for line in jsonl_text.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        collect_temp_refs_in(&value, &prefix, &mut out);
+    }
+    out
 }
 
 /// 画布文本里引用的临时附件，逐条为 `(canvasKey, 文件名)`；文本不是合法 JSON 时返回 `None`。
@@ -303,7 +370,7 @@ pub fn sweep_orphan_temp_dirs(root: &Path) -> usize {
     let mut canvas_ids = std::collections::HashSet::new();
     let mut refs = std::collections::HashMap::new();
     // 扫描失败 = 引用集合残缺：整目录删除的风险更高（可能删掉别处仍在用的附件），本次跳过
-    if let Err(e) = collect_temp_usage(root, &mut canvas_ids, &mut refs) {
+    if let Err(e) = collect_all_temp_usage(root, &mut canvas_ids, &mut refs) {
         eprintln!("[vault] 临时附件兜底回收跳过（引用扫描失败）：{e}");
         return 0;
     }
@@ -346,6 +413,57 @@ pub fn sweep_orphan_temp_dirs(root: &Path) -> usize {
         }
     }
     removed
+}
+
+/// 兜底回收判定事实的完整收集 = 画布（全仓库 `.atlx` 递归）+ 面板会话（`.atelyx/对话历史/`）。
+/// 两类容器的临时目录共用 `.atelyx/temp/<key>/` 命名（key = 容器 id 的稳定派生），白名单必须同时
+/// 认得两类引用，否则面板会话的附件会被当成孤儿误删。
+fn collect_all_temp_usage(
+    root: &Path,
+    ids: &mut std::collections::HashSet<String>,
+    refs: &mut std::collections::HashMap<String, std::collections::HashSet<String>>,
+) -> Result<(), String> {
+    collect_temp_usage(root, ids, refs)?;
+    collect_chat_session_usage(root, ids, refs)
+}
+
+/// 扫 `.atelyx/对话历史/`，收集面板会话的回收判定事实：
+/// - `ids`：会话 id 的临时目录 key（消息 .jsonl 文件名 = 会话 id）；
+/// - `refs`：会话消息里引用的临时附件（逐行 JSON 解析，损坏行跳过——与前端恢复语义一致）。
+///
+/// 读目录/读文件失败返回 `Err`（调用方放弃本次删除，理由同画布白名单完整性）。
+fn collect_chat_session_usage(
+    root: &Path,
+    ids: &mut std::collections::HashSet<String>,
+    refs: &mut std::collections::HashMap<String, std::collections::HashSet<String>>,
+) -> Result<(), String> {
+    let Ok(dir) = safe_join(root, CHAT_HISTORY_DIR, false) else {
+        return Ok(());
+    };
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    let rd = std::fs::read_dir(&dir).map_err(|e| format!("读取对话历史失败：{e}"))?;
+    for entry in rd {
+        let entry = entry.map_err(|e| format!("读取对话历史目录项失败：{e}"))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|e| format!("读取对话历史目录项类型失败：{e}"))?;
+        if !file_type.is_file() && !file_type.is_symlink() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(session_id) = name.strip_suffix(".jsonl") else {
+            continue;
+        };
+        ids.insert(canvas_temp_key(session_id));
+        let text = std::fs::read_to_string(entry.path())
+            .map_err(|e| format!("读取会话失败（{name}）：{e}"))?;
+        for (key, file) in referenced_session_temp_refs(&text) {
+            refs.entry(key).or_default().insert(file);
+        }
+    }
+    Ok(())
 }
 
 /// 递归扫仓库内全部 `.atlx`，收集两件回收判定用的事实：
@@ -543,5 +661,38 @@ mod tests {
         assert_eq!(sanitize_temp_file_name("a:b*c.png"), "a_b_c.png");
         // 空格与中文原样保留（回收扫描按 JSON 值取引用，不依赖空白）
         assert_eq!(sanitize_temp_file_name("my photo.png"), "my photo.png");
+    }
+
+    #[test]
+    fn session_refs_parse_jsonl_lines_and_skip_broken_lines() {
+        let text = concat!(
+            r#"{"id":"m1","attachments":[{"file":".atelyx/temp/s1/att-a.png"}]}"#, "\n",
+            "{ 损坏行\n",
+            r#"{"id":"m2","refs":[],"attachments":[{"file":".atelyx/temp/s2/att-b.pdf"}]}"#, "\n",
+        );
+        let mut refs = referenced_session_temp_refs(text);
+        refs.sort();
+        assert_eq!(
+            refs,
+            vec![
+                ("s1".to_string(), "att-a.png".to_string()),
+                ("s2".to_string(), "att-b.pdf".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn chat_session_usage_collects_session_ids_and_refs() {
+        let root = TempDir::new("session-usage");
+        let dir = root.join(".atelyx/对话历史");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("session-a.jsonl"), r#"{"attachments":[{"file":".atelyx/temp/x/att-1.png"}]}"#).unwrap();
+
+        let mut ids = std::collections::HashSet::new();
+        let mut refs = std::collections::HashMap::new();
+        collect_chat_session_usage(&root, &mut ids, &mut refs).unwrap();
+
+        assert!(ids.contains(&canvas_temp_key("session-a")));
+        assert!(refs[&"x".to_string()].contains("att-1.png"));
     }
 }

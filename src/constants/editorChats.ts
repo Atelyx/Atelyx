@@ -13,3 +13,6 @@ export const CHAT_MESSAGE_EXT = ".jsonl";
 
 /** 会话元数据侧车扩展名（`<会话 id>.meta.json`）。 */
 export const CHAT_META_EXT = ".meta.json";
+
+/** 协作空间内会话消息正文的 user meta 键前缀（`chat/messages/<会话 id>`；空间无本地副本，正文以 user meta 为真源）。 */
+export const CHAT_MESSAGES_META_PREFIX = "chat/messages/";

@@ -25,15 +25,15 @@ export function modelDisplayLabel(
   return shared ? `${provider.name} · ${name}` : name;
 }
 
-/** 截取内容前缀作为 @chip 显示名（约 12 字 + 省略号）。 */
+/** 截取内容前缀作为引用 chip 显示名（约 12 字 + 省略号）。 */
 export function prefix(text: string, len = 12): string {
   const t = (text ?? "").replace(/\s+/g, " ").trim();
   return t.length > len ? t.slice(0, len) + "…" : t;
 }
 
 /**
- * @ 提及显示名：文本节点取**笔记名称（title）**（缺失回退正文前缀），
- * 媒体节点取文件名，表格节点取标题。输入框内插入的可见文本 = `@${mentionTextOf(node)}`，发送时按此文本就地替换为引用内容。
+ * # 提及显示名：文本节点取**笔记名称（title）**（缺失回退正文前缀），
+ * 媒体节点取文件名，表格节点取标题。输入框内插入的可见文本 = `#${mentionTextOf(node)}`，发送时按此文本就地替换为引用内容。
  */
 export function mentionTextOf(node: FlowNode): string {
   if (node.type === "text") {
@@ -61,12 +61,12 @@ export function mentionTextOf(node: FlowNode): string {
 }
 
 /**
- * @标签 原位插入的纯文本变换（对话节点与 AI 对话面板输入框共用同一语义）：
- * 把 `[insertAt, end)` 区间（= `@` 到光标间的过滤词）替换为「前导分隔空格 + 标签 + 尾随空格」，
+ * #标签 原位插入的纯文本变换（对话节点与 AI 对话面板输入框共用同一语义）：
+ * 把 `[insertAt, end)` 区间（= `#` 到光标间的过滤词）替换为「前导分隔空格 + 标签 + 尾随空格」，
  * 返回新文本与「尾随空格之后」的光标位置。
  *
  * 插入位置只由传入的 `prev` 决定，调用方须在 `setInput(prev => ...)` 内按 `prev` 计算——
- * 用渲染期闭包的 `input` 会让同一 tick 内先后到达的两次插入互相覆盖（后写盖先写、@标签丢失）。
+ * 用渲染期闭包的 `input` 会让同一 tick 内先后到达的两次插入互相覆盖（后写盖先写、#标签丢失）。
  * 前导空格仅在前文非空且不以空白结尾时补，保证胶囊前后为空白区（胶囊背景外扩不遮相邻字符）。
  */
 export function insertMentionTag(
@@ -85,7 +85,7 @@ export function insertMentionTag(
   };
 }
 
-/** 输入框内 @提及 的命中片段（含精确位置）。 */
+/** 输入框内 #提及 的命中片段（含精确位置）。 */
 export interface MentionHit {
   start: number;
   end: number;
@@ -93,11 +93,11 @@ export interface MentionHit {
 }
 
 /**
- * 扫描输入文本中的 @提及 命中（每条 mention 条目最多返回一处：首个不重叠的实例；
+ * 扫描输入文本中的 #提及 命中（每条 mention 条目最多返回一处：首个不重叠的实例；
  * 同一节点被选择多次会产生多条条目，重复实例由多条条目分别命中）。
  * 同一位置只命中一次（重叠检查），命中按 start 升序。
- * 供组件渲染 @标签（splitMentions）与 store 发送时精确替换共用——
- * 保证「删除 / 替换按实例位置」而非 indexOf 首个出现（重复 @提及 时不错位）。
+ * 供组件渲染 #标签（splitMentions）与 store 发送时精确替换共用——
+ * 保证「删除 / 替换按实例位置」而非 indexOf 首个出现（重复 #提及 时不错位）。
  */
 export function scanMentionHits(
   input: string,
@@ -122,14 +122,14 @@ export function scanMentionHits(
   return hits;
 }
 
-/** 输入文本按 @提及 切分后的段：普通文本段或标签段（文本匹配，不重叠，顺序排序）。 */
+/** 输入文本按 #提及 切分后的段：普通文本段或标签段（文本匹配，不重叠，顺序排序）。 */
 export interface MentionSeg {
   text: string;
   start: number;
   mention: { nodeId: string; text: string } | null;
 }
 
-/** 按 @提及 命中把输入文本切成「普通文本 / 标签」交替段（对话节点与 AI 对话面板输入框共用）。
+/** 按 #提及 命中把输入文本切成「普通文本 / 标签」交替段（对话节点与 AI 对话面板输入框共用）。
  * 标签段吞相邻空格（插入路径恒补「前导分隔 + 尾随」空格）：胶囊金底覆盖空格 = 视觉整体，
  * 与 textarea 真实文本一致不破坏对齐；前导空格不吞前段已占的位置（防相邻胶囊争抢同一空格）。 */
 export function splitMentions(

@@ -214,6 +214,7 @@ export function createSpaceStubBackend() {
     importAttachment: () => Promise.reject(noImpl("importAttachment")),
     importTableImage: () => Promise.reject(noImpl("importTableImage")),
     cleanupCanvasTempAttachments: () => Promise.reject(noImpl("cleanupCanvasTempAttachments")),
+    cleanupSessionTempAttachments: () => Promise.reject(noImpl("cleanupSessionTempAttachments")),
     cleanupTableAttachments: () => Promise.reject(noImpl("cleanupTableAttachments")),
 
     scanBacklinks: () => Promise.reject(noImpl("scanBacklinks")),

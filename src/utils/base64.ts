@@ -25,3 +25,17 @@ export function base64ToBytes(b64: string): Uint8Array {
   }
   return bytes;
 }
+
+/** dataURL → 文本（非 dataURL 原样返回）。严格按 UTF-8 解码：解不出来即抛错，由调用方标「无法解析」。
+ *
+ * 为什么不用宽松解码：二进制附件（PDF/zip）宽松解码会得到一段乱码且不报错，调用方据此认为「解析成功」，
+ * 于是乱码被当正文注入模型、节点也不再显示「无法解析」提示——宁可如实标失败。
+ */
+export function dataUrlToText(dataUrl: string): string {
+  const comma = dataUrl.indexOf(",");
+  if (!dataUrl.startsWith("data:") || comma < 0) return dataUrl;
+  const binary = atob(dataUrl.slice(comma + 1));
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+}
