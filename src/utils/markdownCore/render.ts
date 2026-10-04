@@ -7,7 +7,7 @@
  */
 import katex from "katex";
 import { sanitizeHtmlFragment } from "@/utils/htmlSanitize";
-import type { InlineSpan, MarkdownBlock, MarkdownListItem, RenderOptions } from "@/types/markdown";
+import type { InlineSpan, MarkdownBlock, MarkdownListItem, MarkdownTableCell, RenderOptions } from "@/types/markdown";
 import { parseMarkdown, parseInlineRange } from "./parse";
 
 /** KaTeX 渲染结果按输入缓存（上限 300，与既有做法一致）；空串 = 解析失败。 */
@@ -392,7 +392,7 @@ function renderBlock(
         `</div>`
       );
     case "table":
-      return renderTable(block, at);
+      return renderTable(block, options, source, at);
     case "mathBlock":
       return renderMathBlock(block, options, source, at);
     case "htmlBlock":
@@ -559,21 +559,24 @@ function renderCodeBlock(
   );
 }
 
-function renderTable(block: Extract<MarkdownBlock, { kind: "table" }>, attrs: string): string {
+function renderTable(block: Extract<MarkdownBlock, { kind: "table" }>, options: EditRenderOptions, source: string, attrs: string): string {
   const colCount = Math.max(
     block.header.length,
     block.aligns.length,
     ...block.rows.map((r) => r.length),
     1,
   );
-  const cell = (tag: "th" | "td", value: string, i: number) => {
+  // 单元格是完整行内语境（加粗/链接/代码等同正文）：按源区间重解析后走统一行内渲染
+  const emptyCell: MarkdownTableCell = { from: 0, to: 0 };
+  const cell = (tag: "th" | "td", value: MarkdownTableCell, i: number) => {
     const align = block.aligns[i];
     const style = align ? ` style="text-align:${align}"` : "";
-    return `<${tag}${style}>${escapeHtml(value)}</${tag}>`;
+    const spans = parseInlineRange(source, value.from, value.to, options);
+    return `<${tag}${style}>${renderSpans(spans, options, source)}</${tag}>`;
   };
-  const head = `<thead><tr>${Array.from({ length: colCount }, (_, i) => cell("th", block.header[i] ?? "", i)).join("")}</tr></thead>`;
+  const head = `<thead><tr>${Array.from({ length: colCount }, (_, i) => cell("th", block.header[i] ?? emptyCell, i)).join("")}</tr></thead>`;
   const body = `<tbody>${block.rows
-    .map((row) => `<tr>${Array.from({ length: colCount }, (_, i) => cell("td", row[i] ?? "", i)).join("")}</tr>`)
+    .map((row) => `<tr>${Array.from({ length: colCount }, (_, i) => cell("td", row[i] ?? emptyCell, i)).join("")}</tr>`)
     .join("")}</tbody>`;
   return `<div class="md-editor-table-wrap"${attrs}><table class="md-editor-table">${head}${body}</table></div>`;
 }

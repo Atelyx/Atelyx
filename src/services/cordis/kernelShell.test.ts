@@ -15,7 +15,12 @@ import type { Context } from "@atelyx/cordis";
 /** 替身进程：pid 由测试指定，close/error 回调由测试触发。 */
 interface FakeProcess {
   pid: number;
-  handlers: { close: (code: number | null) => void; error: (message: string) => void };
+  handlers: {
+    stdout: (line: string) => void;
+    stderr: (line: string) => void;
+    close: (code: number | null) => void;
+    error: (message: string) => void;
+  };
 }
 
 const spawned: FakeProcess[] = [];
@@ -31,7 +36,12 @@ vi.mock("@/services/shell", () => ({
     _program: string,
     _args: string[],
     _options: unknown,
-    handlers: { close: (code: number | null) => void; error: (message: string) => void },
+    handlers: {
+      stdout: (line: string) => void;
+      stderr: (line: string) => void;
+      close: (code: number | null) => void;
+      error: (message: string) => void;
+    },
   ) => {
     const proc: FakeProcess = { pid: 9000 + spawned.length, handlers };
     spawned.push(proc);
@@ -236,6 +246,32 @@ describe("ctx.shell 进程记账与句柄", () => {
     });
 
     expect(await killTracked(kernel.ctx, "com.test.aggregate")).toEqual([]);
+    kernel.dispose();
+  });
+
+  it("exec 聚合输出 = 行事件原样拼接（行事件自带换行终止符，不再补 \\n）", async () => {
+    spawned.length = 0;
+    const kernel = createKernel();
+    let result: { code: number | null; stdout: string; stderr: string } | undefined;
+
+    await mountPlugin(kernel, {
+      id: "com.test.exec-raw",
+      apply: async (ctx: Context) => {
+        const pending = ctx.shell.exec({ command: "sh", args: ["-c", "data"] });
+        // Rust 侧 read_line 的行事件自带换行终止符（services/shell.ts 契约），末行可能没有
+        const handlers = spawned[0].handlers;
+        handlers.stdout("hello\n");
+        handlers.stdout("world\n");
+        handlers.stdout("tail-without-terminator");
+        handlers.stderr("boom\n");
+        handlers.close(0);
+        result = await pending;
+      },
+    });
+
+    expect(result?.code).toBe(0);
+    expect(result?.stdout).toBe("hello\nworld\ntail-without-terminator");
+    expect(result?.stderr).toBe("boom\n");
     kernel.dispose();
   });
 

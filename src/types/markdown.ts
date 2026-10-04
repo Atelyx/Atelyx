@@ -44,6 +44,12 @@ export interface MarkdownListItem {
   children: MarkdownBlock[];
 }
 
+/** 表格单元格：内容以源区间承载（单元格行内渲染按区间重解析，与正文同一套行内语义）。 */
+export interface MarkdownTableCell {
+  from: number;
+  to: number;
+}
+
 /** 块级规格（顶层块；引用块与列表项递归持有内层块）。 */
 export type MarkdownBlock =
   | { kind: "heading"; level: number; from: number; to: number; inline: InlineSpan[] }
@@ -53,7 +59,7 @@ export type MarkdownBlock =
   | { kind: "fencedCode"; from: number; to: number; lang: string; code: string; contentFrom: number; contentTo: number }
   | { kind: "indentedCode"; from: number; to: number; code: string }
   | { kind: "hr"; from: number; to: number }
-  | { kind: "table"; from: number; to: number; header: string[]; aligns: ("" | "left" | "center" | "right")[]; rows: string[][] }
+  | { kind: "table"; from: number; to: number; header: MarkdownTableCell[]; aligns: ("" | "left" | "center" | "right")[]; rows: MarkdownTableCell[][] }
   | { kind: "mathBlock"; from: number; to: number; tex: string }
   | { kind: "htmlBlock"; from: number; to: number; html: string }
   | { kind: "footnoteDef"; from: number; to: number; label: string; inline: InlineSpan[] };

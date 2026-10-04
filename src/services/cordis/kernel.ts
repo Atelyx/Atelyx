@@ -341,15 +341,17 @@ export function createKernel(): Kernel {
       const pluginId = requireCallerPluginId(this.ctx);
       if (!handlers) {
         // 非流式：聚合输出后一次性返回。
+        // 行事件自带换行终止符（services/shell.ts runProcess 契约，Rust read_line 不剥 \r?\n），
+        // 逐段拼接即原始输出；再补 \n 会把每行撑成两行，隔断表格等需要连续行的块结构。
         return new Promise<ShellExecResult | undefined>((resolve, reject) => {
           let stdout = "";
           let stderr = "";
           launchTrackedProcess(pluginId, opts, {
             stdout: (line) => {
-              stdout += `${line}\n`;
+              stdout += line;
             },
             stderr: (line) => {
-              stderr += `${line}\n`;
+              stderr += line;
             },
             close: (code) => resolve({ code, stdout, stderr }),
             error: (msg) => reject(new Error(msg)),

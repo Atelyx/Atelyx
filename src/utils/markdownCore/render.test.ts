@@ -104,10 +104,19 @@ describe("renderMarkdownToHtml 转义与清洗", () => {
     expect(out).toContain("a &lt; b &amp; c");
   });
 
-  it("表格单元格转义", () => {
+  it("表格单元格行内渲染与正文同语义，raw HTML 经白名单清洗", () => {
     const out = renderMarkdownToHtml("| a |\n| - |\n| <x> |");
-    expect(out).toContain("&lt;x&gt;");
+    // 单元格是完整行内语境：未知标签走白名单清洗（与段落一致），不再整格转义
+    expect(out).toContain('<td><span class="md-editor-html"></span></td>');
     expect(out).not.toContain("<x>");
+  });
+
+  it("表格单元格渲染链接/加粗/代码与转义竖线", () => {
+    const out = renderMarkdownToHtml("| a \\|\n| --- |\n| [b](https://x) **c** `d` |");
+    expect(out).toContain("<th>a |</th>");
+    expect(out).toContain(
+      '<td><span class="md-editor-link" data-md-href="https://x" title="https://x">b</span> <strong>c</strong> <code>d</code></td>',
+    );
   });
 
   it("行内 raw HTML 经白名单清洗（on* 事件剥除、白名单标签保留）", () => {

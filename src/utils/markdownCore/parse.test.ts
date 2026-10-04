@@ -134,9 +134,10 @@ describe("parseMarkdown 块级切分", () => {
   it("表格表头 / 对齐 / 数据行", () => {
     const table = doc.blocks[10];
     if (table.kind !== "table") throw new Error("expect table");
-    expect(table.header).toEqual(["h1", "h2"]);
+    const text = (cells: Array<{ from: number; to: number }>) => cells.map((c) => doc.source.slice(c.from, c.to));
+    expect(text(table.header)).toEqual(["h1", "h2"]);
     expect(table.aligns).toEqual(["", "center"]);
-    expect(table.rows).toEqual([["a", "b"]]);
+    expect(table.rows.map(text)).toEqual([["a", "b"]]);
   });
 
   it("Setext 标题", () => {
@@ -284,8 +285,8 @@ describe("parseMarkdown 嵌套与边界回归", () => {
     const doc = parseMarkdown("| x \\| y | z |\n| --- | --- |\n| a | b |\n");
     const table = doc.blocks[0];
     if (table.kind !== "table") throw new Error("expect table");
-    expect(table.header).toEqual(["x | y", "z"]);
-    expect(table.rows).toEqual([["a", "b"]]);
+    expect(table.header.map((c) => doc.source.slice(c.from, c.to))).toEqual(["x \\| y", "z"]);
+    expect(table.rows.map((r) => r.map((c) => doc.source.slice(c.from, c.to)))).toEqual([["a", "b"]]);
   });
 
   it("非相邻 HTMLTag 不越界合并，标签间文本与 #标签 语法保留", () => {
@@ -318,7 +319,7 @@ describe("parseMarkdown 嵌套与边界回归", () => {
     const doc = parseMarkdown("| a \\|\n| --- |\n");
     const table = doc.blocks[0];
     if (table.kind !== "table") throw new Error("expect table");
-    expect(table.header).toEqual(["a |"]);
+    expect(table.header.map((c) => doc.source.slice(c.from, c.to))).toEqual(["a \\|"]);
   });
 
   it("配对的开闭 HTMLTag 合并为单个不透明区", () => {

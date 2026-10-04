@@ -14,6 +14,7 @@ import type {
   MarkdownBlock,
   MarkdownDocument,
   MarkdownListItem,
+  MarkdownTableCell,
   ParseOptions,
   RangeInfo,
 } from "@/types/markdown";
@@ -520,23 +521,65 @@ function indentedCodeBlock(node: SyntaxNode, source: string): MarkdownBlock {
 
 function tableBlock(node: SyntaxNode, source: string): MarkdownBlock {
   const raw = source.slice(node.from, node.to);
-  const lines = raw.split("\n").filter((l) => l.trim() !== "");
-  // `\|` 是字面竖线：先占位再切列（否则行尾转义管道会被当定界剥掉），切完后还原
-  const splitRow = (l: string) =>
-    l
-      .trim()
-      .replace(/\\\|/g, "\u0000")
-      .replace(/^\|/, "")
-      .replace(/\|$/, "")
-      .split("|")
-      .map((c) => c.trim().split("\u0000").join("|"));
+  // 逐行收集（保留行起点偏移），空行剔除
+  const lines: Array<{ text: string; offset: number }> = [];
+  let cursor = node.from;
+  for (const text of raw.split("\n")) {
+    const offset = cursor;
+    cursor += text.length + 1;
+    if (text.trim() !== "") lines.push({ text, offset });
+  }
   const header = lines[0] ? splitRow(lines[0]) : [];
   const aligns = (lines[1] ? splitRow(lines[1]) : []).map(
-    (c): "" | "left" | "center" | "right" =>
-      c.startsWith(":") && c.endsWith(":") ? "center" : c.endsWith(":") ? "right" : c.startsWith(":") ? "left" : "",
+    (c): "" | "left" | "center" | "right" => {
+      const text = source.slice(c.from, c.to);
+      return text.startsWith(":") && text.endsWith(":") ? "center" : text.endsWith(":") ? "right" : text.startsWith(":") ? "left" : "";
+    },
   );
   const rows = lines.slice(2).map(splitRow);
   return { kind: "table", from: node.from, to: node.to, header, aligns, rows };
+}
+
+/**
+ * 切一行成单元格，同步记录每格的源区间（单元格行内渲染按区间重解析）。
+ * `\|` 是字面竖线：占位成一个虚拟字符再切列（否则转义管道会被当定界剥掉），
+ * 还原交给行内渲染的 Escape 处理；行与每格的首尾空白、行首尾各一个 `|` 不属内容。
+ */
+function splitRow(line: { text: string; offset: number }): MarkdownTableCell[] {
+  const text = line.text;
+  let start = 0;
+  let end = text.length;
+  while (start < end && /\s/.test(text[start]!)) start++;
+  while (end > start && /\s/.test(text[end - 1]!)) end--;
+  const chars: Array<{ ch: string; src: number }> = [];
+  for (let i = start; i < end; i++) {
+    if (text[i] === "\\" && text[i + 1] === "|") {
+      chars.push({ ch: "\u0000", src: line.offset + i });
+      i++;
+      continue;
+    }
+    chars.push({ ch: text[i]!, src: line.offset + i });
+  }
+  if (chars[0]?.ch === "|") chars.shift();
+  if (chars[chars.length - 1]?.ch === "|") chars.pop();
+
+  const cells: MarkdownTableCell[] = [];
+  let segStart = 0;
+  for (let i = 0; i <= chars.length; i++) {
+    if (i < chars.length && chars[i]!.ch !== "|") continue;
+    const seg = chars.slice(segStart, i);
+    let lo = 0;
+    let hi = seg.length;
+    while (lo < hi && /\s/.test(seg[lo]!.ch)) lo++;
+    while (hi > lo && /\s/.test(seg[hi - 1]!.ch)) hi--;
+    // 末字符是 `\|` 占位时它代表两个源字符，区间终点要越过后一个字符
+    const last = seg[hi - 1];
+    const from = lo < hi ? seg[lo]!.src : segStart < chars.length ? chars[segStart]!.src : line.offset + start;
+    const to = lo < hi ? last!.src + (last!.ch === "\u0000" ? 2 : 1) : from;
+    cells.push({ from, to });
+    segStart = i + 1;
+  }
+  return cells;
 }
 
 // ===== 行内解析 =====
