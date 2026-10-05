@@ -2,9 +2,9 @@
  * 公共流式对话引擎：画布对话节点（canvasStore.runStream）与 AI 对话面板（chatPanelStore.runExchange）共用。
  *
  * 一轮完整流式对话 = 无预算工具循环（模型不调工具即收束，靠 max-tokens 兜底 + 停止按钮打断）+
- * 双通道 rAF 节流 + 空闲超时 + SSE 流式。
+ * 双通道定时器节流 + 空闲超时 + SSE 流式。
  * 状态容器差异（messagesByConv vs sessions）由调用方回调消化：
- * - applyBatch：每帧合并后的增量写回调
+ * - applyBatch：每个节流窗口合并后的增量写回调
  * - onError：请求失败写 [错误] 占位（保留已产出内容）
  * - onDone：流结束（含超时/中止/截断），调用方用 decideCleanup 做最终清理；`truncated` = 达到输出上限，
  *   `promoteNarration` = 最终回答轮（无工具调用）其叙述行应在轮末提升进 content
@@ -99,19 +99,23 @@ export async function runStreamExchange(
   let totalReasoning = "";
   let pendingDelta = "";
   let pendingReasoning = "";
-  // 工具轮叙述正文增量（rAF 合并，避免每 token 一次 setState；与 content/reasoning 同一条 merge 通道）
+  // 工具轮叙述正文增量（与 content/reasoning 同一条节流合并通道，避免每 token 一次 setState）
   let pendingNarration = "";
-  let rafId: number | null = null;
+  // 增量交付 = 单一漏桶节流：首个增量起 50ms 内的后续增量全部合并为一次 flush。
+  // 不用 rAF——它是帧管线机制，独立 WebView（速问窗口）在部分可见性状态下不触发，
+  // 增量会攒到流结束才一次性吐出；定时器在一切窗口状态下行为一致。
+  let flushTimer: ReturnType<typeof setTimeout> | null = null;
+  const STREAM_FLUSH_INTERVAL_MS = 50;
   // 工具调用过程跨轮累积：每轮 onToolRuns 发全量，供调用方 mergeToolRuns 交错进 steps——
   // 否则多轮工具循环只显示最后一轮（调用方整体替换）。
   // **随结算重写为 `let`**：done/中止时回写 allRuns，finally 兜底只能命中「真未回填」的工具，不误标已完成
   let allRuns: ToolRun[] = [];
-  // 工具参数流式槽位（当轮，完整调用到达即清）：参数分片边到边累积，随 rAF 帧把
+  // 工具参数流式槽位（当轮，完整调用到达即清）：参数分片边到边累积，随节流 flush 把
   // 「生成中」工具行叠加在 allRuns 后发出（调用方 mergeToolRuns 按 id 原位刷新）——
   // 长参数（如 write_file 正文）生成阶段不再无任何可见过程
   const pendingArgs = new Map<number, { id: string; name: string; args: string }>();
   let pendingArgsDirty = false;
-  // 任一帧发过「生成中」overlay：收尾兜底据此补发一次纯 allRuns，让调用方剪除残留合成行
+  // 任一节流窗口发过「生成中」overlay：收尾兜底据此补发一次纯 allRuns，让调用方剪除残留合成行
   let pendingRunsEmitted = false;
 
   // 收尾兜底：把残留的「生成中」槽位固化为 error 行并入 allRuns（中止路径未经执行轮固化、
@@ -145,7 +149,7 @@ export async function runStreamExchange(
     pendingNarration = "";
     if (n) options.onNarration?.(n);
     if (d || r) applyBatch(d, r);
-    // 「生成中」工具行随帧发出：叠加在跨轮已完成列表之后（同 id 行由真实工具行原位替换，
+    // 「生成中」工具行随节流 flush 发出：叠加在跨轮已完成列表之后（同 id 行由真实工具行原位替换，
     // 合成 id 行由调用方 mergeToolRuns 的剪除规则随全量列表收敛）
     if (pendingArgsDirty) {
       pendingArgsDirty = false;
@@ -162,18 +166,18 @@ export async function runStreamExchange(
       options.onToolRuns?.([...allRuns, ...pendingRuns]);
     }
   };
-  const scheduleApply = () => {
-    if (rafId === null)
-      rafId = requestAnimationFrame(() => {
-        rafId = null;
-        flushPending();
-      });
-  };
-  const cancelRaf = () => {
-    if (rafId !== null) {
-      cancelAnimationFrame(rafId);
-      rafId = null;
+  const cancelScheduled = () => {
+    if (flushTimer !== null) {
+      clearTimeout(flushTimer);
+      flushTimer = null;
     }
+  };
+  const scheduleApply = () => {
+    if (flushTimer !== null) return;
+    flushTimer = setTimeout(() => {
+      flushTimer = null;
+      flushPending();
+    }, STREAM_FLUSH_INTERVAL_MS);
   };
 
   // 空闲超时：每个增量重置，超时无新 token 视为挂起（后端异常/连接半死），自动中止降级
@@ -227,7 +231,7 @@ export async function runStreamExchange(
         {
           onDelta: (delta) => {
             roundProducedOutput = true;
-            // 工具轮里正文是「叙述」（缓冲后 rAF 合并进 text 步，保留流式打字；最终回答轮由调用方
+            // 工具轮里正文是「叙述」（缓冲后节流合并进 text 步，保留流式打字；最终回答轮由调用方
             // 在 onDone promoteNarration 时提升进 content）；无工具（单轮模式）的正文实时进 content。
             if (hasTools) pendingNarration += delta;
             else pendingDelta += delta;
@@ -269,7 +273,7 @@ export async function runStreamExchange(
             pendingArgs.clear();
             pendingArgsDirty = false;
           },
-          // 参数增量：喂空闲超时看门狗（长参数生成不误判挂起）+ 累积进当轮槽位（随帧刷「生成中」行）
+          // 参数增量：喂空闲超时看门狗（长参数生成不误判挂起）+ 累积进当轮槽位（随节流 flush 刷「生成中」行）
           onToolCallDelta: (delta) => {
             roundProducedOutput = true;
             resetIdle();
@@ -314,7 +318,7 @@ export async function runStreamExchange(
             continue;
           }
         }
-        cancelRaf();
+        cancelScheduled();
         clearIdle();
         options.onError(roundError);
         return;
@@ -350,9 +354,9 @@ export async function runStreamExchange(
         args: tc.arguments,
         status: "running",
       }));
-      // 先 flush 当轮思考与叙述再发工具步：思考/叙述增量经 rAF 异步落 steps，若不同步 flush，
+      // 先 flush 当轮思考与叙述再发工具步：思考/叙述增量经节流定时器异步落 steps，若不同步 flush，
       // 工具步会先于其思考/叙述进入 steps（整条消息「工具一串、思考堆在后」分不清对应哪步）
-      cancelRaf();
+      cancelScheduled();
       flushPending();
       // 跨轮累积后发全量：调用方合并进 steps（多轮思考→工具交错展示）。
       // onToolCalls 已把「生成中」行固化为同 id running 行——此处去重并入防重复
@@ -396,9 +400,9 @@ export async function runStreamExchange(
       ];
     }
 
-    // 收尾：固化残留「生成中」槽位（中止/截断路径未经过执行轮），终帧 flush 不再发过期 overlay
+    // 收尾：固化残留「生成中」槽位（中止/截断路径未经过执行轮），终次 flush 不再发过期 overlay
     settlePendingArgs();
-    cancelRaf();
+    cancelScheduled();
     clearIdle();
     flushPending();
     options.onDone({
@@ -409,7 +413,7 @@ export async function runStreamExchange(
       promoteNarration,
     });
   } catch (e) {
-    cancelRaf();
+    cancelScheduled();
     clearIdle();
     options.onError(e as Error);
   } finally {
