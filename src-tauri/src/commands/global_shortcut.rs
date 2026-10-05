@@ -21,7 +21,6 @@ use std::collections::HashMap;
 #[cfg(desktop)]
 use std::sync::Mutex;
 
-#[cfg(desktop)]
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
 #[cfg(desktop)]
@@ -32,7 +31,9 @@ use tauri::{Emitter, Manager};
 const TRIGGERED_EVENT: &str = "plugin-shortcut-triggered";
 
 /// 窗口直控目标（快捷键触发时 Rust 直接切换的撕裂窗口）。
-#[cfg(desktop)]
+///
+/// 不做平台门控：命令签名双端一致（移动端载荷原样收下、忽略），门控会让该参数在
+/// 移动端从签名消失、安卓目标因缺类型编译失败。
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct WindowToggleSpec {
@@ -54,7 +55,7 @@ struct ShortcutTriggerPayload {
 }
 
 /// 登记表：归属表（快捷键 → 插件 id）与触发回查表（OS 快捷键 id → 归属）。
-/// 两表同锁同更新；移动端无 OS 层，两表恒空、命令恒拒。
+/// 两表同锁同更新；移动端无 OS 层，两表恒空（注册恒拒，注销/释放幂等成功）。
 #[derive(Default)]
 pub struct GlobalShortcutState {
     #[cfg(desktop)]
@@ -109,7 +110,9 @@ pub fn plugin_shortcut_unregister(
     #[cfg(not(desktop))]
     {
         let _ = (&app, &state, &accelerator, &plugin_id);
-        Err("当前平台不支持全局快捷键".into())
+        // 移动端无 OS 层，不存在任何登记可注销：幂等成功。返回错误会让宿主每次加载/停用
+        // 插件的清理收尾（本地登记为空也照常调用释放，跨窗口口径）逐插件误报失败。
+        Ok(())
     }
 }
 
@@ -127,7 +130,8 @@ pub fn plugin_shortcut_release_plugin(
     #[cfg(not(desktop))]
     {
         let _ = (&app, &state, &plugin_id);
-        Err("当前平台不支持全局快捷键".into())
+        // 移动端无 OS 层，无登记可释放：幂等成功（口径同注销）。
+        Ok(())
     }
 }
 

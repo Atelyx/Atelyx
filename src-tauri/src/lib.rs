@@ -65,7 +65,7 @@ pub fn run() {
             layout::load_from_disk(app.handle(), &app.state::<layout::LayoutState>());
             // 插件托管进程：进程创建即纳入作业对象/进程组，随应用退出统一收尾（见 plugin_process.rs）
             app.manage(Arc::new(plugin_process::PluginProcessHost::new()));
-            // 全局快捷键登记表（ctx.shortcuts 后端；移动端空表、命令恒拒）
+            // 全局快捷键登记表（ctx.shortcuts 后端；移动端空表，注册恒拒、注销/释放幂等成功）
             app.manage(commands::global_shortcut::GlobalShortcutState::default());
             // 主窗口窗口事件钩子：Moved/Resized → 权威 bounds（拖拽命中/落点解析）。
             // 桌面专属：移动端单窗口无移动/缩放语义
