@@ -13,6 +13,7 @@ use serde::Serialize;
 use tauri::{Manager, State, WebviewWindow};
 
 use super::content_broadcast::{broadcast_content_changes, ContentChange};
+use super::temp_attachment::{instance_temp_dir, validate_table_id, TempComponent};
 use crate::commands::vault::{
     collect_ref_updates, ensure_no_id_conflict, flush_canvas_updates, mime_from_ext,
     remove_replaced_file, PatchWriteResult,
@@ -307,8 +308,8 @@ pub fn move_table_vault(
 }
 
 /// 删除表格 .atb 文件（不更新 .atlx 引用，画布 table 节点断链降级「文件缺失」）。
-/// 附件目录按 tableId 划分、随表私有：删除前读表拿 id，删文件后随删整个附件目录
-/// （读不到 id——文件损坏/已被外部删除——则跳过，残留目录不拦截删除）。
+/// 图片附件目录按 tableId 划分、随表私有：删除前读表拿 id，删文件后随删附件目录
+/// （读不到 id——文件损坏/已被外部删除——则跳过，残留目录不拦截删除本身）。
 #[tauri::command]
 pub fn delete_table_vault(file: String, state: State<'_, VaultState>) -> Result<(), String> {
     let root = state.root()?;
@@ -317,84 +318,21 @@ pub fn delete_table_vault(file: String, state: State<'_, VaultState>) -> Result<
         .map(|t| t.id);
     delete_vault_file(&root, &file)?;
     if let Some(id) = table_id {
-        if let Ok(dir) = safe_join(&root, &table_attachments_rel(&id), false) {
+        if let Ok(dir) = safe_join(&root, &instance_temp_dir(TempComponent::Table, &id), false) {
             let _ = std::fs::remove_dir_all(&dir);
         }
     }
     Ok(())
 }
 
-/// 回收表格孤儿图片附件：删除 `.atelyx/attachments/<tableId>/` 下未被 .atb 任一 image
-/// 单元格引用的文件。文件名每次导入唯一（`img-<nanoid>.<ext>`）——未被引用即确定孤儿，
-/// 无共享文件、无其他消费者（目录按 tableId 私有）。
-/// 会话内不调用（删除后 Ctrl+Z 需能恢复引用）；切表/关闭表格时调用（该表撤销栈已清、
-/// 显示缓存已清，无跨会话恢复路径）。读盘失败（文件损坏/已被外部删除）返回 0 保守不清理——
-/// 引用集合未知，防误删引用中的文件。返回删除文件数。
-#[tauri::command]
-pub fn cleanup_table_attachments_vault(
-    file: String,
-    state: State<'_, VaultState>,
-) -> Result<usize, String> {
-    let root = state.root()?;
-    let table = match read_table_file(&safe_join(&root, &file, false)?) {
-        Ok(t) => t,
-        Err(_) => return Ok(0),
-    };
-    // 收集全部 image 单元格的路径引用（遗留 `data:` 条目非路径，不计入）
-    let mut referenced: HashSet<String> = HashSet::new();
-    for field in &table.fields {
-        if field.field_type != "image" {
-            continue;
-        }
-        for row in &table.rows {
-            let Some(value) = row.values.get(&field.id) else { continue };
-            for item in image_cell_entries(value) {
-                if !item.starts_with("data:") {
-                    referenced.insert(item.to_string());
-                }
-            }
-        }
-    }
-    // 目录不存在 = 无附件可清
-    let Ok(dir) = safe_join(&root, &table_attachments_rel(&table.id), false) else {
-        return Ok(0);
-    };
-    if !dir.is_dir() {
-        return Ok(0);
-    }
-    // 只删顶层普通文件（附件均为单层存放，不递归——防误删子目录）
-    let mut removed = 0;
-    for entry in std::fs::read_dir(&dir).map_err(|e| e.to_string())? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let rel = format!("{}/{}", table_attachments_rel(&table.id), name);
-        if referenced.contains(&rel) {
-            continue;
-        }
-        if entry.file_type().map(|t| t.is_file()).unwrap_or(false)
-            && std::fs::remove_file(entry.path()).is_ok()
-        {
-            removed += 1;
-        }
-    }
-    Ok(removed)
-}
-
 /// 图片单元格条目（双形态兼容）：新形态 `{ images: [...] }` / 旧形态 `string[]` → 字符串列表
 /// （路径引用或遗留内嵌 dataURL）。其他形态（空/缺省）→ 空列表。
-fn image_cell_entries(value: &serde_json::Value) -> Vec<&str> {
+pub(crate) fn image_cell_entries(value: &serde_json::Value) -> Vec<&str> {
     value
         .as_array()
         .or_else(|| value.get("images").and_then(|v| v.as_array()))
         .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
         .unwrap_or_default()
-}
-
-/// 表格附件目录（相对仓库根）：`.atelyx/attachments/<tableId>/`。隐藏目录（`.` 开头）——
-/// 文件树 / 全仓库扫描天然跳过，图片写盘零树噪声。
-/// 图片字节不随 .atb 内嵌，单元格只存路径引用（大表多图免每次保存全量序列化图片）。
-fn table_attachments_rel(table_id: &str) -> String {
-    format!(".atelyx/attachments/{table_id}")
 }
 
 /// 图片条目字节：内嵌 dataURL → base64 解码；外置路径引用 → 读仓库附件（safe_join 校验）。
@@ -414,8 +352,10 @@ fn resolve_table_image_bytes(root: Option<&std::path::Path>, entry: &str) -> Res
 /// 把本机图片（前端读好的 base64 字节 + 文件名）落为表格附件，返回相对仓库根路径。
 /// 文件名 = `img-<nanoid>.<ext>`（每次导入唯一：删除后重导不覆盖旧文件、不撞缓存/撤销引用；
 /// 与迁移的确定性命名 `img-<rowId>-<fieldId>-<idx>` 前缀不同，互不冲突）。
-/// 字节由前端经 IPC 传输而非后端读本机路径：协作空间后端同样消费前端 base64（路径对服务端不可达），
-/// 两侧调用形状保持一致。
+/// 表格图片落为附件（前端读为 base64 的字节 + 文件名），返回唯一相对路径供单元格引用
+/// （每次导入新文件，删除后重导不覆盖旧文件、不撞显示缓存）。
+/// 落 `temp/tables/<tableId>/`（temp 组件目录，按引用回收）；字节由前端经 IPC 传输而非后端
+/// 读本机路径：协作空间后端同样消费前端 base64（路径对服务端不可达），两侧调用形状保持一致。
 #[tauri::command]
 pub fn import_table_image_vault(
     file_name: String,
@@ -423,6 +363,7 @@ pub fn import_table_image_vault(
     table_id: String,
     state: State<'_, VaultState>,
 ) -> Result<String, String> {
+    validate_table_id(&table_id)?;
     let root = state.root()?;
     let ext = mime_from_ext(&file_name)
         .and_then(ext_from_mime)
@@ -430,7 +371,7 @@ pub fn import_table_image_vault(
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(data.as_bytes())
         .map_err(|e| format!("图片数据解码失败：{e}"))?;
-    let rel = format!("{}/img-{}.{}", table_attachments_rel(&table_id), nanoid!(), ext);
+    let rel = format!("{}/img-{}.{}", instance_temp_dir(TempComponent::Table, &table_id), nanoid!(), ext);
     let dest = safe_join(&root, &rel, true)?;
     std::fs::write(&dest, bytes).map_err(|e| format!("写入图片失败：{e}"))?;
     Ok(rel)

@@ -113,8 +113,8 @@ pub fn open_vault(
         let Some(st) = warm_app.try_state::<VaultState>() else {
             return;
         };
-        // 未入库附件临时区的兜底回收：清理「画布已不存在」的超龄目录
-        // （崩溃/强杀遗留，画布未走正常关闭路径；正常关闭由 cleanup_canvas_temp_attachments 按引用清单个清）
+        // 未入库附件临时区的兜底回收：清理「归属实例已不存在」的超龄目录
+        // （崩溃/强杀遗留，实体未走正常关闭路径；正常关闭由 cleanup_temp_attachments 按引用清单个清）
         crate::commands::temp_attachment::sweep_orphan_temp_dirs(&warm_root);
         warm_indexes(&st, &warm_root, &warm_exclude, warm_generation);
     });

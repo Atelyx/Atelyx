@@ -119,11 +119,10 @@ pub fn run() {
             commands::vault::rename_note,
             commands::vault::read_vault_config,
             commands::vault::vault_config_patch,
-            // 未入库附件（粘贴/拖入先落仓库内隐藏临时区，画布只存路径引用）
+            // 未入库附件与表格图片（粘贴/拖入/导入先落仓库内隐藏临时区，实体只存路径引用）
             commands::temp_attachment::write_temp_attachment,
             commands::temp_attachment::import_vault_attachment,
-            commands::temp_attachment::cleanup_canvas_temp_attachments,
-            commands::temp_attachment::cleanup_session_temp_attachments,
+            commands::temp_attachment::cleanup_temp_attachments,
             commands::vault::read_prompt_notes,
             commands::vault::write_prompt_notes,
             commands::vault::read_agents,
@@ -164,7 +163,6 @@ pub fn run() {
             commands::table::move_table_vault,
             commands::table::delete_table_vault,
             commands::table::import_table_image_vault,
-            commands::table::cleanup_table_attachments_vault,
             commands::table::export_table_xlsx,
             commands::table::save_image_to_downloads,
             // 全局配置（global.json，最近仓库列表等）
