@@ -863,8 +863,11 @@ function scanLine(ctx: Ctx, lineText: string, lineFrom: number): RawMatch[] {
         for (const mn of mentions) {
           if (!mn.label) continue;
           if (!lineText.startsWith(mn.label, at + 1)) continue;
+          // 边界判定只防「label 是更长词的前缀」：label 末字符本身是标点（引号收尾的标题等）
+          // 时，后随字母不可能延长 label，不得因紧跟字母而拒绝命中（否则回落 tag 语法把胶囊切缺）
           const after = lineText[at + 1 + mn.label.length];
-          if (after === undefined || !/[\p{L}\p{N}]/u.test(after)) {
+          const labelEndsWord = /[\p{L}\p{N}]/u.test(mn.label[mn.label.length - 1] ?? "");
+          if (after === undefined || !labelEndsWord || !/[\p{L}\p{N}]/u.test(after)) {
             if (!best || mn.label.length > best.label.length) best = mn;
           }
         }
