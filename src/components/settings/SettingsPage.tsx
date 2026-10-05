@@ -14,6 +14,7 @@ import {
   ChevronRight,
   FolderTree,
   Info,
+  Keyboard,
   Palette,
   PanelsTopLeft,
   PenLine,
@@ -39,6 +40,7 @@ import { FilesSettingsTab } from "@/components/settings/tabs/FilesSettingsTab";
 import { WorkspaceSettingsTab } from "@/components/settings/tabs/WorkspaceSettingsTab";
 import { EditorSettingsTab } from "@/components/settings/tabs/EditorSettingsTab";
 import { EditorPreferencesTab } from "@/components/settings/tabs/EditorPreferencesTab";
+import { ShortcutSettingsTab } from "@/components/settings/tabs/ShortcutSettingsTab";
 import { SearchSettingsTab } from "@/components/settings/tabs/SearchSettingsTab";
 import { PluginsSettingsTab } from "@/components/plugins/PluginsSettingsTab";
 import { ErrorBoundary } from "@/components/common/ErrorBoundary";
@@ -49,7 +51,7 @@ import { useAppStore } from "@/stores/appStore";
 import { usePluginStore } from "@/stores/pluginStore";
 
 /** 应用级 tab key（`editorPrefs` 不用 `editor`：仓库级同名 tab 与之并存于同一左栏，key 必须唯一）。 */
-type AppTab = "general" | "theme" | "collab" | "editorPrefs" | "plugins" | "about";
+type AppTab = "general" | "theme" | "collab" | "editorPrefs" | "shortcuts" | "plugins" | "about";
 type VaultTab = "providers" | "modelServices" | "agents" | "search" | "files" | "workspace" | "editor";
 
 /** 应用级 tab（跨仓库共享，落 global.json）。 */
@@ -58,6 +60,7 @@ const APP_TABS: { key: AppTab; label: string; icon: LucideIcon }[] = [
   { key: "theme", label: "主题", icon: Palette },
   { key: "collab", label: "多人协作", icon: Users },
   { key: "editorPrefs", label: "编辑器", icon: PenLine },
+  { key: "shortcuts", label: "快捷键", icon: Keyboard },
   { key: "plugins", label: "插件", icon: Puzzle },
 ];
 
@@ -349,6 +352,9 @@ export function SettingsPage({ onClose, initialTab }: { onClose: () => void; ini
   // 仓库级分组只在已进入仓库时出现；作用域固定为当前激活仓库/空间
   const vaultIdentity = useAppStore((s) => s.vaultIdentity);
   const vaultName = useAppStore((s) => s.vaultName);
+  // 安卓无物理键盘、全局热键无 OS 支持：快捷键 tab 不进移动端导航（key 保留在 BUILTIN_TABS 供校验）
+  const isAndroid = useAppStore((s) => s.platform.isAndroid);
+  const appTabs = isAndroid ? APP_TABS.filter((t) => t.key !== "shortcuts") : APP_TABS;
   const [tab, setTab] = useState<string>(() => {
     const builtinKeys: string[] = BUILTIN_TABS.map((t) => t.key);
     if (initialTab && (builtinKeys.includes(initialTab) || pluginTabs.some((t) => pluginTabId(t) === initialTab))) {
@@ -385,7 +391,7 @@ export function SettingsPage({ onClose, initialTab }: { onClose: () => void; ini
           hint: "全局共享",
           scope: "app",
           tabs: [
-            ...APP_TABS,
+            ...appTabs,
             ...pluginTabs.map((t) => ({ key: pluginTabId(t), label: t.label, icon: Puzzle as LucideIcon })),
           ],
         },
@@ -418,6 +424,9 @@ export function SettingsPage({ onClose, initialTab }: { onClose: () => void; ini
       ) : tab === "editorPrefs" ? (
         /* ===== 编辑器：应用级显示偏好（宽松换行/页面内标题/正文行宽） ===== */
         <EditorPreferencesTab />
+      ) : tab === "shortcuts" ? (
+        /* ===== 快捷键：应用内命令 + 全局热键（OS 级） ===== */
+        <ShortcutSettingsTab />
       ) : tab === "about" ? (
         /* ===== 关于面板：Logo + 版本号 + 检查更新 ===== */
         <AboutSection />

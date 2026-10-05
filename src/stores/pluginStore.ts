@@ -57,6 +57,7 @@ import {
   setPluginHistoryAccess,
   setPluginLayoutAccess,
   setPluginNotificationAccess,
+  setPluginShortcutAccess,
   setPluginSlotHostComponent,
   setPluginUiStateAccess,
   setPluginVaultWriteAccess,
@@ -424,6 +425,20 @@ function ensureNotificationAccess(): void {
   });
 }
 
+/** 全局热键解析数据源接线：manifest 声明表（已装插件行）+ 用户覆盖表（settingsStore）暴露给
+ *  内核 `shortcuts` 按声明注册与设置页改键（幂等一次）。声明按调用时插件行现查——接线早于
+ *  行集合写入，注册发生在挂载后，届时行已在 store。 */
+let shortcutAccessWired = false;
+function ensureShortcutAccess(): void {
+  if (shortcutAccessWired) return;
+  shortcutAccessWired = true;
+  setPluginShortcutAccess({
+    declarations: (pluginId) =>
+      usePluginStore.getState().plugins[pluginId]?.manifest.shortcuts ?? [],
+    overrides: () => useSettingsStore.getState().globalShortcuts,
+  });
+}
+
 /** 浮层承载接线：把插件浮层运行时暴露给内核 `ui` 服务（幂等一次）。 */
 let floatingLayerWired = false;
 function ensureFloatingLayerAccess(): void {
@@ -697,6 +712,7 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
     ensureVaultWriteAccess();
     ensureCollabRuntimeAccess();
     ensureNotificationAccess();
+    ensureShortcutAccess();
     ensureFloatingLayerAccess();
     ensureSettingsAccess();
     ensureHistoryAccess();
@@ -705,7 +721,7 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
     ensureSlotHostAccess();
     ensureSlotOverrideAccess();
     ensureRuntimeChangeEvents();
-    installCommandHotkeys();
+    installCommandHotkeys(() => useSettingsStore.getState().commandShortcuts);
     const hostVersion = await getAppVersion().catch(() => null);
     const { rows, stateError, legacyVaultPluginRoots } = await pluginList(defaultManifests(hostVersion));
     // 随仓库安装的插件目录不再受支持（插件统一应用级加载）：Rust 侧探测到仍在的目录时汇总提示，
@@ -979,6 +995,8 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
           pluginId: c.pluginId,
           id: c.id,
           label: c.label,
+          ...(c.shortcut ? { shortcut: c.shortcut } : {}),
+          scope: c.scope,
         };
         byGlobalId.set(item.globalId, item);
       }

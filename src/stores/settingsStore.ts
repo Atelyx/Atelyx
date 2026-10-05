@@ -44,6 +44,9 @@ import {
 import { remapDirKey, remapDirPrefix } from "@/utils/filename";
 import { modelDisplayLabel } from "@/utils/text";
 import { createPersistController } from "@/utils/persist";
+import { applyShortcutOverride } from "@/services/cordis/shortcutOverrides";
+import { getKernel } from "@/services/cordis/kernel";
+import { listGlobalShortcuts, type GlobalShortcutRegistration } from "@/services/globalShortcut";
 
 /**
  * 设置 store（供应商/搜索源等仓库化，界面外观应用级）。
@@ -116,6 +119,14 @@ interface SettingsState {
   agents: AgentConfig[];
   /** 文件面板文件夹图标颜色（相对仓库根路径 → hex 色；独立落盘 .atelyx/folder-colors.json）。 */
   folderColors: Record<string, string>;
+  /** 命令快捷键的用户覆盖（命令 globalId → 键串；应用级，存 global.json；缺省空 = 全用声明默认键）。 */
+  commandShortcuts: Record<string, string>;
+  /** 全局快捷键的用户覆盖（`插件id:声明id` → OS accelerator 串；应用级，存 global.json；缺省空 = 全用声明默认键）。 */
+  globalShortcuts: Record<string, string>;
+  /** 当前 OS 层登记的全部全局快捷键（现查快照，快捷键设置页展示用；读取失败为空数组）。 */
+  globalShortcutRegistrations: GlobalShortcutRegistration[];
+  /** 登记清单最近一次读取是否失败（空数组可能是「真没有」，此标记区分失败态）。 */
+  globalShortcutRegistrationsError: boolean;
   loaded: boolean;
 
   /** 应用挂载时调用：读 global.json 填充应用级外观（主题/强调色/字号/字体/自动恢复），重置仓库级运行时状态。 */
@@ -228,6 +239,13 @@ interface SettingsState {
   pruneMissingPromptNotes: () => Promise<void>;
   /** 设置文件夹图标颜色（dir = 相对仓库根路径，color = hex 色；undefined = 清除还原默认，写 .atelyx/folder-colors.json）。 */
   setFolderColor: (dir: string, color: string | undefined) => Promise<void>;
+  /** 设命令快捷键覆盖（globalId → 键串；undefined = 清除恢复声明默认键，写 global.json）。 */
+  setCommandShortcut: (globalId: string, shortcut: string | undefined) => Promise<void>;
+  /** 设全局快捷键覆盖（`插件id:声明id` → accelerator 串；undefined = 清除恢复声明默认键，写 global.json）。
+   *  返回是否生效：覆盖变更触发的重注册失败（新键被占用）时返回 false 并保留原覆盖。 */
+  setGlobalShortcutOverride: (declarationKey: string, accelerator: string | undefined) => Promise<boolean>;
+  /** 现查 OS 层全局快捷键登记清单（快捷键设置页进入/改键后刷新用）。 */
+  refreshGlobalShortcutRegistrations: () => Promise<void>;
   /** 文件夹重命名/移动后同步颜色键（目录键精确或 `oldDir/` 前缀命中才更新，写 .atelyx/folder-colors.json）。 */
   remapFolderColorsByDir: (oldDir: string, newDir: string) => Promise<void>;
   /**
@@ -807,6 +825,16 @@ function normalizeNoteLineWidth(width: number | undefined): number {
   return Math.min(NOTE_LINE_WIDTH_MAX, Math.max(NOTE_LINE_WIDTH_MIN, Math.round(width)));
 }
 
+/** 字符串记录的磁盘脏值收敛：只保留字符串项（手改/坏值不进运行时，防非串键串流入匹配逻辑）。 */
+function sanitizeStringRecord(record: Record<string, string> | undefined): Record<string, string> {
+  if (!record || typeof record !== "object") return {};
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(record)) {
+    if (typeof value === "string" && value.trim()) out[key] = value;
+  }
+  return out;
+}
+
 /** 应用级配置写盘统一入口（各外观 setXxx 收敛于此）：先写内存再 patch 落 global.json，
  * 失败仅记专属文案日志不打断 UI（外观丢失可重设，非关键路径）。
  * 值为 undefined 的字段 = 恢复默认：内存置 undefined（渲染回落默认），补丁通道改发 null 删键——
@@ -863,6 +891,10 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   promptNotes: [],
   agents: [],
   folderColors: {},
+  commandShortcuts: {},
+  globalShortcuts: {},
+  globalShortcutRegistrations: [],
+  globalShortcutRegistrationsError: false,
   loaded: false,
 
   load: async () => {
@@ -884,6 +916,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     let collabNickname = "";
     let collabColor = "";
     let deviceName = "";
+    let commandShortcuts: Record<string, string> = {};
+    let globalShortcuts: Record<string, string> = {};
     try {
       const { config: cfg, corruptBackup } = await readGlobalConfig();
       notifyGlobalConfigCorrupt(corruptBackup);
@@ -906,6 +940,9 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       collabEnabled = cfg.collabEnabled ?? false;
       collabNickname = cfg.collabNickname ?? "";
       collabColor = cfg.collabColor ?? "";
+      // 覆盖表磁盘脏值只保留字符串项（手改/坏值不进运行时）
+      commandShortcuts = sanitizeStringRecord(cfg.commandShortcuts);
+      globalShortcuts = sanitizeStringRecord(cfg.globalShortcuts);
     } catch (e) {
       console.error("读取外观配置失败", e);
       // 读失败（含「全局配置损坏且原文备份失败」被后端拒绝）会让外观与协作配置本次不可用，必须可见
@@ -942,6 +979,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       collabNickname,
       collabColor,
       deviceName,
+      commandShortcuts,
+      globalShortcuts,
       searchConfig: { provider: "tavily", searxngUrl: "" },
       tavilyKey: "",
       promptNotes: [],
@@ -1477,6 +1516,65 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       return;
     }
     set({ folderColors: next });
+  },
+
+  /** 设命令快捷键覆盖（globalId → 键串；undefined = 清除恢复声明默认键，写 global.json）。
+   *  生效不需重注册：应用内命令分发按注册表 + 覆盖表现查。 */
+  setCommandShortcut: async (globalId, shortcut) => {
+    const cur = get().commandShortcuts;
+    const next: Record<string, string> = { ...cur };
+    if (shortcut) next[globalId] = shortcut;
+    else delete next[globalId];
+    set({ commandShortcuts: next });
+    // 空表整字段删除，global.json 不留空壳（与 excludeFolders 空数组删键同口径）
+    try {
+      notifyGlobalConfigCorrupt(
+        await updateGlobalConfig({ commandShortcuts: Object.keys(next).length ? next : null }),
+      );
+    } catch (e) {
+      console.error("保存命令快捷键失败", e);
+    }
+  },
+
+  /** 设全局快捷键覆盖（`插件id:声明id` → accelerator；undefined = 清除恢复声明默认键）。
+   *  先执行 OS 层重注册（失败不落覆盖、保留原键并提示），成功才更新内存与 global.json。 */
+  setGlobalShortcutOverride: async (declarationKey, accelerator) => {
+    const sep = declarationKey.indexOf(":");
+    const pluginId = sep > 0 ? declarationKey.slice(0, sep) : "";
+    const declarationId = sep > 0 ? declarationKey.slice(sep + 1) : "";
+    if (!pluginId || !declarationId) return false;
+    const outcome = await applyShortcutOverride(getKernel().ctx, pluginId, declarationId, accelerator);
+    if (!outcome.ok) {
+      useNotificationStore.getState().notify({
+        level: "error",
+        message: `快捷键修改失败：${outcome.error ?? "未知原因"}（已保留原快捷键）`,
+      });
+      return false;
+    }
+    const cur = get().globalShortcuts;
+    const next: Record<string, string> = { ...cur };
+    if (accelerator) next[declarationKey] = accelerator;
+    else delete next[declarationKey];
+    set({ globalShortcuts: next });
+    try {
+      notifyGlobalConfigCorrupt(
+        await updateGlobalConfig({ globalShortcuts: Object.keys(next).length ? next : null }),
+      );
+    } catch (e) {
+      console.error("保存全局快捷键失败", e);
+    }
+    await get().refreshGlobalShortcutRegistrations();
+    return true;
+  },
+
+  /** 现查 OS 层全局快捷键登记清单（读失败置空数组 + 失败标记——展示层不虚报状态）。 */
+  refreshGlobalShortcutRegistrations: async () => {
+    try {
+      set({ globalShortcutRegistrations: await listGlobalShortcuts(), globalShortcutRegistrationsError: false });
+    } catch (e) {
+      console.error("读取全局快捷键登记失败", e);
+      set({ globalShortcutRegistrations: [], globalShortcutRegistrationsError: true });
+    }
   },
 
   /** 文件夹重命名/移动后同步颜色键（目录键精确或 `oldDir/` 前缀命中才更新；写成功才更新内存，同 setFolderColor）。 */
