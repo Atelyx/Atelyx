@@ -4,6 +4,7 @@
 pub mod external_fs;
 pub mod filesearch;
 pub mod global;
+pub mod global_shortcut;
 pub mod home;
 pub mod keychain;
 pub mod mobile;

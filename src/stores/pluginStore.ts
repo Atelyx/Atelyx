@@ -81,6 +81,11 @@ import {
 import { PluginSlotHost } from "@/components/plugins/SlotHost";
 import { getKernel } from "@/services/cordis/kernel";
 import { killUnmountedPluginProcesses, killPluginProcesses } from "@/services/cordis/pluginProcesses";
+import {
+  releasePluginShortcuts,
+  releaseUnmountedPluginShortcuts,
+} from "@/services/cordis/pluginShortcuts";
+import { releasePluginGlobalShortcuts } from "@/services/globalShortcut";
 import { killProcessTree } from "@/services/shell";
 import { mountedPluginIds } from "@/services/cordis/loader";
 import { installCommandHotkeys } from "@/services/cordis/commandHotkeys";
@@ -284,6 +289,7 @@ async function stopPlugin(id: string): Promise<void> {
   const kernel = getKernel();
   await unmountPlugin(kernel, id);
   await endPluginProcesses(kernel.ctx, id);
+  await endPluginShortcuts(kernel.ctx, id);
 }
 
 /** 结束某插件的全部在册进程；失败逐个提示（不阻断停用本身——插件已停，残留交用户处理）。
@@ -295,6 +301,17 @@ async function endPluginProcesses(ctx: object, id: string): Promise<void> {
   useNotificationStore.getState().notify({
     level: "warning",
     message: `插件「${id}」的进程未能全部结束：${detail}`,
+  });
+}
+
+/** 注销某插件登记的全部全局快捷键；失败提示（不阻断停用本身）。OS 层归属仲裁在 Rust，
+ *  任意窗口的释放都生效——全局快捷键是应用级资源，不随注册窗口的内核销毁而失联。 */
+async function endPluginShortcuts(ctx: object, id: string): Promise<void> {
+  const outcome = await releasePluginShortcuts(ctx, id, () => releasePluginGlobalShortcuts(id));
+  if (outcome.message === null) return;
+  useNotificationStore.getState().notify({
+    level: "warning",
+    message: `插件「${id}」的全局快捷键未能注销：${outcome.message}`,
   });
 }
 
@@ -721,6 +738,18 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
       useNotificationStore.getState().notify({
         level: "warning",
         message: `插件「${id}」的残留进程未能结束：${detail}`,
+      });
+    }
+    // 同口径兜底未挂载插件的全局快捷键（OS 层应用内唯一，泄漏会永久占键）
+    const shortcutLeftovers = await releaseUnmountedPluginShortcuts(
+      getKernel().ctx,
+      mountedPluginIds(getKernel()),
+      (id) => releasePluginGlobalShortcuts(id),
+    );
+    for (const [id, message] of shortcutLeftovers) {
+      useNotificationStore.getState().notify({
+        level: "warning",
+        message: `插件「${id}」的残留全局快捷键未能注销：${message}`,
       });
     }
   };

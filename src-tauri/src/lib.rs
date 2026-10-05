@@ -44,14 +44,16 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init());
     // 桌面壳专属插件：shell（系统打开）/ autostart（开机自启，注册项附带 --autorun 供上面的
-    // 单实例回调识别登录自启）；移动端无对应实现，不注册
+    // 单实例回调识别登录自启）/ global-shortcut（OS 级全局快捷键，ctx.shortcuts 后端，
+    // 触发事件统一转投主窗口，见 commands/global_shortcut.rs）；移动端无对应实现，不注册
     #[cfg(desktop)]
     let builder = builder
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--autorun"]),
-        ));
+        ))
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build());
     let app = builder
         .setup(|app| {
             // 仓库化：注册当前仓库根路径状态（初始为 None，open_vault 时设置）
@@ -63,6 +65,8 @@ pub fn run() {
             layout::load_from_disk(app.handle(), &app.state::<layout::LayoutState>());
             // 插件托管进程：进程创建即纳入作业对象/进程组，随应用退出统一收尾（见 plugin_process.rs）
             app.manage(Arc::new(plugin_process::PluginProcessHost::new()));
+            // 全局快捷键登记表（ctx.shortcuts 后端；移动端空表、命令恒拒）
+            app.manage(commands::global_shortcut::GlobalShortcutState::default());
             // 主窗口窗口事件钩子：Moved/Resized → 权威 bounds（拖拽命中/落点解析）。
             // 桌面专属：移动端单窗口无移动/缩放语义
             #[cfg(desktop)]
@@ -236,6 +240,10 @@ pub fn run() {
             // 插件托管进程的启动与结束（ctx.shell.spawn 的后端 + 按 pid 结束进程树）
             commands::process::spawn_plugin_process,
             commands::process::kill_process_tree,
+            // 全局快捷键（ctx.shortcuts 的 OS 层后端，见 commands/global_shortcut.rs）
+            commands::global_shortcut::plugin_shortcut_register,
+            commands::global_shortcut::plugin_shortcut_unregister,
+            commands::global_shortcut::plugin_shortcut_release_plugin,
             // 应用内更新下载与安装（进度 / 取消 / 断点续传 / 摘要校验；见 commands/update.rs）
             commands::update::download_update_package,
             commands::update::cancel_update_download,

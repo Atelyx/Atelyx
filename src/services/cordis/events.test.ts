@@ -8,6 +8,14 @@ import { createKernel, type Kernel } from "./kernel";
 import { mountPlugin, unmountAll } from "./loader";
 import { emitPluginEvent, runSerialHook, setKernelRef } from "./events";
 
+// 内核创建会订阅全局快捷键触发事件（Tauri event API）：node 环境无 window，桩掉防噪音
+vi.mock("@/services/globalShortcut", () => ({
+  registerGlobalShortcut: vi.fn(async () => {}),
+  unregisterGlobalShortcut: vi.fn(async () => {}),
+  releasePluginGlobalShortcuts: vi.fn(async () => {}),
+  onGlobalShortcutTriggered: vi.fn(async () => () => {}),
+}));
+
 let kernel: Kernel | null = null;
 
 async function boot(): Promise<Kernel> {

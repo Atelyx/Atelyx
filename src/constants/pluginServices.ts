@@ -14,6 +14,7 @@ export const PLUGIN_SERVICE_LABELS: Record<string, string> = {
   dialog: "系统对话框",
   clipboard: "剪贴板读写",
   window: "窗口控制",
+  shortcuts: "系统级全局快捷键",
   ai: "AI 会话与工具",
   collab: "协作在线状态",
   canvas: "画布数据",
@@ -39,6 +40,7 @@ export const PLUGIN_SERVICE_SENSITIVE: ReadonlySet<string> = new Set([
   "http",
   "native",
   "fs",
+  "shortcuts",
 ]);
 
 /** 方法级高危面（服务整体敏感之外的单方法；当前 = vault 写）。审计据此记调用摘要，披露 UI 同源。 */

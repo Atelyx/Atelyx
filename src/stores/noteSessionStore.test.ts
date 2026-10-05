@@ -28,6 +28,14 @@ const h = vi.hoisted(() => ({
   historyJson: "",
 }));
 
+// 内核创建会订阅全局快捷键触发事件（Tauri event API）：node 环境无 window，桩掉防噪音
+vi.mock("@/services/globalShortcut", () => ({
+  registerGlobalShortcut: vi.fn(async () => {}),
+  unregisterGlobalShortcut: vi.fn(async () => {}),
+  releasePluginGlobalShortcuts: vi.fn(async () => {}),
+  onGlobalShortcutTriggered: vi.fn(async () => () => {}),
+}));
+
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: async (cmd: string, args?: Record<string, unknown>) => {
     const file = String(args?.file ?? "");

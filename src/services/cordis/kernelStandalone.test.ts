@@ -5,10 +5,18 @@
  * 缺席——内核不靠领域代码也能跑；再挂一个最小插件（只注册 UI 槽 + ctx.effect）验证贡献随卸载零残留。
  * 与 kernelBoundary.test.ts 互补：那条守静态导入边界，这条守运行时行为边界。
  */
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createKernel } from "./kernel";
 import { mountedPluginIds, mountPlugin, unmountPlugin } from "./loader";
 import { listSlot, registerSlotContrib, registeredSlots, unregisterSlot } from "./slots";
+
+// 无 Tauri 运行时：全局快捷键服务按 no-op 桩掉（触发订阅失败噪音 otherwise 逐用例刷屏）
+vi.mock("@/services/globalShortcut", () => ({
+  registerGlobalShortcut: vi.fn(async () => {}),
+  unregisterGlobalShortcut: vi.fn(async () => {}),
+  releasePluginGlobalShortcuts: vi.fn(async () => {}),
+  onGlobalShortcutTriggered: vi.fn(async () => () => {}),
+}));
 
 afterEach(() => {
   // 槽注册表为模块级：测试内注册的贡献随 fiber 卸载撤销，此处仅兜底按 id 清空。
@@ -33,6 +41,7 @@ describe("内核独立启动（零插件）", () => {
       "dialog",
       "clipboard",
       "window",
+      "shortcuts",
       "ai",
       "collab",
       "history",

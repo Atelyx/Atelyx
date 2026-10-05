@@ -1,0 +1,35 @@
+/**
+ * 全局快捷键的 service 层：`ctx.shortcuts` 的 OS 层后端调用（Rust 命令见
+ * `src-tauri/src/commands/global_shortcut.rs`）。
+ *
+ * 注册/注销/按插件释放三面命令 + 触发事件订阅。触发事件只投递主窗口（Rust 侧固定转发
+ * 目标），载荷携带**原始注册串**——前端一切键控都按注册时的原串，不做归一化。
+ */
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import type { UnlistenFn } from "@tauri-apps/api/event";
+
+/** 注册全局快捷键（同键已被其他插件占用即失败；同插件重复注册幂等）。 */
+export function registerGlobalShortcut(accelerator: string, pluginId: string): Promise<void> {
+  return invoke("plugin_shortcut_register", { accelerator, pluginId });
+}
+
+/** 注销单个全局快捷键（仅归属插件可注销；未注册 = no-op）。 */
+export function unregisterGlobalShortcut(accelerator: string, pluginId: string): Promise<void> {
+  return invoke("plugin_shortcut_unregister", { accelerator, pluginId });
+}
+
+/** 按插件整体注销（插件停用/卸载的宿主收口；未持有任何快捷键 = no-op）。 */
+export function releasePluginGlobalShortcuts(pluginId: string): Promise<void> {
+  return invoke("plugin_shortcut_release_plugin", { pluginId });
+}
+
+/** 订阅全局快捷键触发（只会在主窗口收到回调；accelerator = 原始注册串）。 */
+export function onGlobalShortcutTriggered(
+  handler: (accelerator: string, pluginId: string) => void,
+): Promise<UnlistenFn> {
+  return listen<{ accelerator: string; pluginId: string }>(
+    "plugin-shortcut-triggered",
+    (e) => handler(e.payload.accelerator, e.payload.pluginId),
+  );
+}

@@ -270,6 +270,16 @@ export interface WindowService {
   close(): Promise<void>;
 }
 
+/** 系统级全局快捷键服务（OS 层注册，应用不在前台也触发；无 OS 支持的平台以错误拒绝）。
+ *  注册属应用级资源：归属与触发转发由宿主 Rust 侧统一登记，不随注册窗口销毁失效。 */
+export interface ShortcutsService {
+  /** 注册全局快捷键（同一快捷键在应用内唯一，已被其他插件占用即失败；随调用方插件
+   *  停用/卸载自动注销）。accelerator 为 OS 层格式（如 "Shift+Alt+E"），非法格式报错。 */
+  registerGlobal(accelerator: string, handler: () => void | Promise<void>): Promise<void>;
+  /** 注销单个全局快捷键（仅归属插件可注销；未注册 = no-op）。 */
+  unregisterGlobal(accelerator: string): Promise<void>;
+}
+
 /** AI 会话服务：模型/Agent 列表 + 流式对话 + 插件工具贡献；`req.signal` 可中止流式（中止后按 `end` 收敛）。 */
 export interface AiService {
   /** 流式对话；传 handlers 则经 chunk/end 推送（resolve 时流已收尾），否则返回聚合结果。 */
@@ -457,6 +467,7 @@ declare module "@atelyx/cordis" {
     dialog: DialogService;
     clipboard: ClipboardService;
     window: WindowService;
+    shortcuts: ShortcutsService;
     ai: AiService;
     collab: CollabService;
     canvas: CanvasService;

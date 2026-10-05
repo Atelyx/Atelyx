@@ -10,6 +10,14 @@ import { describe, expect, it, vi, afterEach } from "vitest";
 import type { Context } from "@atelyx/cordis";
 import { createKernel, getKernel, resetKernel, type Kernel } from "./kernel";
 import { mountPlugin, unmountAll, unmountPlugin } from "./loader";
+
+// 内核创建会订阅全局快捷键触发事件（Tauri event API）：node 环境无 window，桩掉防噪音
+vi.mock("@/services/globalShortcut", () => ({
+  registerGlobalShortcut: vi.fn(async () => {}),
+  unregisterGlobalShortcut: vi.fn(async () => {}),
+  releasePluginGlobalShortcuts: vi.fn(async () => {}),
+  onGlobalShortcutTriggered: vi.fn(async () => () => {}),
+}));
 import { registerServiceProvider } from "./services";
 import { auditSnapshot, resetAudit } from "./audit";
 import { splitInject } from "./loader";

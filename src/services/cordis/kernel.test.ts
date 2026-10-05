@@ -15,6 +15,7 @@ import { createCanvasService } from "./canvas";
 import { createTableService } from "./table";
 import { buildAgentTools, pluginToolMetas } from "@/services/ai/tools";
 import { mountPlugin, unmountAll, unmountPlugin } from "./loader";
+import { registerGlobalShortcut } from "@/services/globalShortcut";
 import {
   pluginReadState,
   pluginWriteState,
@@ -50,6 +51,18 @@ vi.mock("@/services/externalFs", () => ({
   externalPrivateDir: vi.fn(async () => "C:/plugins/data/files"),
   externalWriteFileBase64: vi.fn(async () => {}),
   externalReadFileDataUrl: vi.fn(async () => "data:image/png;base64,AA=="),
+}));
+
+const shortcutTest = vi.hoisted(() => ({ trigger: null as ((accelerator: string, pluginId: string) => void) | null }));
+
+vi.mock("@/services/globalShortcut", () => ({
+  registerGlobalShortcut: vi.fn(async () => {}),
+  unregisterGlobalShortcut: vi.fn(async () => {}),
+  releasePluginGlobalShortcuts: vi.fn(async () => {}),
+  onGlobalShortcutTriggered: vi.fn(async (handler: (accelerator: string, pluginId: string) => void) => {
+    shortcutTest.trigger = handler;
+    return () => {};
+  }),
 }));
 
 afterEach(() => {
@@ -401,5 +414,63 @@ describe("fs 服务按调用方插件绑定", () => {
     expect(() => kernel!.ctx.fs.writeFileBase64("E:/x", "QQ==")).toThrow("只能在插件上下文中使用");
     expect(() => kernel!.ctx.fs.readFileDataUrl("E:/x")).toThrow("只能在插件上下文中使用");
     expect(externalPrivateDir).not.toHaveBeenCalled();
+  });
+});
+
+describe("shortcuts 全局快捷键按调用方插件记账", () => {
+  let kernel: Kernel | null = null;
+
+  afterEach(async () => {
+    if (kernel) {
+      await unmountAll(kernel);
+      kernel.dispose();
+      kernel = null;
+    }
+    shortcutTest.trigger = null;
+    vi.mocked(registerGlobalShortcut).mockClear();
+  });
+
+  it("registerGlobal 归属调用方插件；触发事件按原始注册串分发到登记回调", async () => {
+    kernel = createKernel();
+    const handler = vi.fn();
+    await mountPlugin(kernel, {
+      id: "com.test.a",
+      apply: (ctx) => {
+        void ctx.shortcuts.registerGlobal("Shift+Alt+E", handler);
+      },
+    });
+    await vi.waitFor(() => expect(registerGlobalShortcut).toHaveBeenCalledWith("Shift+Alt+E", "com.test.a"));
+
+    // 模拟 Rust 触发事件转发（载荷 = 原始注册串）
+    shortcutTest.trigger?.("Shift+Alt+E", "com.test.a");
+    await vi.waitFor(() => expect(handler).toHaveBeenCalledTimes(1));
+    // 未登记的键不分发
+    shortcutTest.trigger?.("Shift+Alt+X", "com.test.a");
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it("注册失败即摘册：触发不再命中该键", async () => {
+    vi.mocked(registerGlobalShortcut).mockRejectedValueOnce(new Error("已被其他插件注册"));
+    kernel = createKernel();
+    const handler = vi.fn();
+    await mountPlugin(kernel, {
+      id: "com.test.a",
+      apply: async (ctx) => {
+        await expect(ctx.shortcuts.registerGlobal("Shift+Alt+E", handler)).rejects.toThrow("已被其他插件注册");
+      },
+    });
+    shortcutTest.trigger?.("Shift+Alt+E", "com.test.a");
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("非插件上下文访问直接拒绝（无归属插件可记账）", async () => {
+    kernel = createKernel();
+    await expect(kernel!.ctx.shortcuts.registerGlobal("Shift+Alt+E", () => {})).rejects.toThrow(
+      "只能在插件上下文中使用",
+    );
+    await expect(kernel!.ctx.shortcuts.unregisterGlobal("Shift+Alt+E")).rejects.toThrow(
+      "只能在插件上下文中使用",
+    );
+    expect(registerGlobalShortcut).not.toHaveBeenCalled();
   });
 });

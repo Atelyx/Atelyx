@@ -17,6 +17,11 @@ import { runProcess, killProcessTree } from "@/services/shell";
 import { pickDirectory, pickFile, saveFile } from "@/services/dialog";
 import { copyImageToClipboard, readClipboardText, writeClipboardText } from "@/services/clipboard";
 import { closeWindow, minimizeWindow, toggleMaximizeWindow } from "@/services/window";
+import {
+  onGlobalShortcutTriggered,
+  registerGlobalShortcut,
+  unregisterGlobalShortcut,
+} from "@/services/globalShortcut";
 import { listVaultTree } from "@/services/vault";
 import { pluginKvDelete, pluginKvRead, pluginKvSet, pluginKvWrite, pluginReadState, pluginWriteState } from "@/services/plugins";
 import { httpRequest } from "@/services/http";
@@ -56,6 +61,13 @@ import {
 import { installAudit, resetAudit } from "./audit";
 import { pluginIdOf } from "./loader";
 import { trackPendingLaunch, trackPluginProcess, untrackPluginProcess } from "./pluginProcesses";
+import {
+  dispatchShortcutTrigger,
+  trackPendingShortcutRegister,
+  trackShortcut,
+  untrackShortcut,
+  untrackShortcutIf,
+} from "./pluginShortcuts";
 import { createSlotsApi } from "./slotsApi";
 import { createServicesService } from "./services";
 import { nativeInvoke } from "@/services/native";
@@ -83,6 +95,7 @@ import type {
   StorageService,
   VaultService,
   WindowService,
+  ShortcutsService,
 } from "./types";
 import "./types";
 
@@ -125,6 +138,11 @@ interface ShellServiceInstance extends ShellService {
 
 /** collab 服务实例（tracker 注入调用方插件上下文：频道命名空间与订阅归属由调用方决定）。 */
 interface CollabServiceInstance extends CollabService {
+  ctx: Context;
+}
+
+/** shortcuts 服务实例（tracker 注入调用方插件上下文：注册归属按调用方插件记账）。 */
+interface ShortcutsServiceInstance extends ShortcutsService {
   ctx: Context;
 }
 
@@ -537,6 +555,50 @@ export function createKernel(): Kernel {
     close: () => closeWindow(),
   };
   provide("window", windowSvc);
+
+  // 全局快捷键按调用方插件记账：登记先于注册 promise 落地（停用可覆盖在途注册），
+  // 注册失败即摘册；OS 层归属仲裁（同键唯一、仅归属者可注销）在 Rust 登记表。
+  // 触发事件由 Rust 固定转发主窗口，本内核收到后按原始注册串分发给登记的回调。
+  const shortcuts: ShortcutsService = {
+    async registerGlobal(this: ShortcutsServiceInstance, accelerator, handler) {
+      const pluginId = requireCallerPluginId(this.ctx);
+      if (typeof accelerator !== "string" || accelerator.trim() === "") {
+        throw new Error("快捷键须为非空字符串");
+      }
+      if (typeof handler !== "function") throw new Error("快捷键回调须为函数");
+      const register = registerGlobalShortcut(accelerator, pluginId);
+      trackShortcut(ctx, pluginId, accelerator, handler);
+      trackPendingShortcutRegister(ctx, pluginId, register);
+    try {
+      await register;
+    } catch (e) {
+      // 条件摘册：并发同键注册时，先发注册的失败回滚不得摘掉后发注册刚登记的条目
+      untrackShortcutIf(ctx, pluginId, accelerator, handler);
+      throw e;
+    }
+    },
+    async unregisterGlobal(this: ShortcutsServiceInstance, accelerator) {
+      const pluginId = requireCallerPluginId(this.ctx);
+      if (typeof accelerator !== "string" || accelerator.trim() === "") {
+        throw new Error("快捷键须为非空字符串");
+      }
+      untrackShortcut(ctx, pluginId, accelerator);
+      await unregisterGlobalShortcut(accelerator, pluginId);
+    },
+  };
+  Object.defineProperty(shortcuts, symbols.tracker, { value: { property: "ctx" } });
+  provide("shortcuts", shortcuts);
+
+  void onGlobalShortcutTriggered((accelerator) => {
+    if (!dispatchShortcutTrigger(ctx, accelerator)) {
+      console.warn(`全局快捷键 ${accelerator} 触发，但本窗口没有已挂载插件登记的回调`);
+    }
+  }).then(
+    (unlisten) => {
+      disposables.push(unlisten);
+    },
+    (e) => console.error("全局快捷键触发事件订阅失败", e),
+  );
 
   const ai: AiService = {
     chat: async (req, handlers) => {

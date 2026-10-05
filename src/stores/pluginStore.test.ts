@@ -31,6 +31,13 @@ vi.mock("@/services/cordis/events", () => ({ emitPluginEvent: vi.fn() }));
 // 登记与结束落在不同表上，测不出真实行为。`vi.hoisted` 让 mock 工厂能引用到它。
 const fakeKernel = vi.hoisted(() => ({ ctx: {} }));
 vi.mock("@/services/cordis/kernel", () => ({ getKernel: () => fakeKernel }));
+// stopPlugin 的快捷键注销收口走 Tauri invoke（node 环境无 window），按 no-op 桩掉防噪音
+vi.mock("@/services/globalShortcut", () => ({
+  registerGlobalShortcut: vi.fn(async () => {}),
+  unregisterGlobalShortcut: vi.fn(async () => {}),
+  releasePluginGlobalShortcuts: vi.fn(async () => {}),
+  onGlobalShortcutTriggered: vi.fn(async () => () => {}),
+}));
 vi.mock("@/services/cordis/loader", () => ({
   mountPlugin: vi.fn(async () => ({ ok: true })),
   unmountPlugin: vi.fn(async () => {}),

@@ -4,8 +4,16 @@
  * 不依赖内核挂载——直接调 services/cordis/slots 的注册函数与聚合函数（注册表是模块级单例，
  * 测试按既有 pattern 用返回的撤销函数清理；覆盖源 afterEach 置空复位纯 priority 决胜）。
  */
-import { describe, expect, it, beforeEach, afterEach } from "vitest";
+import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import { createKernel, type Kernel } from "./kernel";
+
+// 内核创建会订阅全局快捷键触发事件（Tauri event API）：node 环境无 window，桩掉防噪音
+vi.mock("@/services/globalShortcut", () => ({
+  registerGlobalShortcut: vi.fn(async () => {}),
+  unregisterGlobalShortcut: vi.fn(async () => {}),
+  releasePluginGlobalShortcuts: vi.fn(async () => {}),
+  onGlobalShortcutTriggered: vi.fn(async () => () => {}),
+}));
 import {
   declareSlot,
   listAllContributions,
