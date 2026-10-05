@@ -451,7 +451,7 @@ fn list_media_files(dir: &std::path::Path, rel: &str, out: &mut Vec<(String, u64
     Ok(())
 }
 
-/// 枚举保留媒体目录（`.space-media/`）下的文件（递归、只列文件），供客户端临时附件回收。
+/// 枚举保留媒体目录（`.atelyx/temp/`，与个人仓库同构的临时区根）下的文件（递归、只列文件），供客户端临时附件回收。
 /// 成员即可读（与内容读一致）。`path` 省略 = 枚举整个保留目录；提供时解析后必须仍落在
 /// 保留目录内（首段前缀先判 + `SpaceRoot::join` 安全校验 + canonicalize 前缀复核，
 /// 防穿越与符号链接逃逸）；空目录 / 不存在返回空 entries。
@@ -466,9 +466,11 @@ pub async fn media_list(
     let list_dir = match query.path.as_deref() {
         None | Some("") => media_root.clone(),
         Some(rel) => {
-            // 逐段前缀判定在 join 之前：不存在的路径无法 canonicalize，
-            // 首段不等于保留目录名即越出保留区（含 `\` 分隔与保留目录名的相似前缀）
-            if rel.split('/').next() != Some(RESERVED_MEDIA_DIR) {
+            // 逐段前缀判定在 join 之前：不存在的路径无法 canonicalize，路径不落在保留目录
+            // 内（含 `\` 分隔与保留目录名的相似前缀，如 `.atelyx/temp-x`）即越出保留区
+            let under_media = rel == RESERVED_MEDIA_DIR
+                || rel.starts_with(&format!("{RESERVED_MEDIA_DIR}/"));
+            if !under_media {
                 return Err(bad_request(&format!("路径越出保留媒体目录：{rel}")));
             }
             match root.join(rel, false) {
