@@ -8,6 +8,7 @@ import { PanelWindowRoot } from "@/components/layout/PanelWindowRoot";
 import { ErrorBoundary } from "@/components/common/ErrorBoundary";
 import { LoadingScreen } from "@/components/common/LoadingScreen";
 import { NotificationHost } from "@/components/common/NotificationHost";
+import { FloatingLayerHost } from "@/components/common/FloatingLayerHost";
 import { useAppearance } from "@/hooks/useAppearance";
 import { getCurrentWindowLabel } from "@/services/window";
 import { platformCapabilities } from "@/services/platform";
@@ -208,6 +209,8 @@ export default function App() {
         {isPanel ? <PanelWindowRoot /> : <MainWorkspaceApp />}
         {/* 应用内通知宿主（每个窗口各挂一个；插件经 ctx.notification 触达） */}
         <NotificationHost />
+        {/* 插件浮层宿主（每个窗口各挂一个；插件经 ctx.ui.showFloatingLayer 触达） */}
+        <FloatingLayerHost />
       </ErrorBoundary>
     </ReactFlowProvider>
   );

@@ -53,6 +53,7 @@ import {
 import {
   setAppPageOpener,
   setPluginCollabAccess,
+  setPluginFloatingLayerAccess,
   setPluginHistoryAccess,
   setPluginLayoutAccess,
   setPluginNotificationAccess,
@@ -117,6 +118,7 @@ import { useTableStore } from "@/stores/tableStore";
 import { useRepoHistoryStore } from "@/stores/repoHistoryStore";
 import { useUiStateStore } from "@/stores/uiStateStore";
 import { useNotificationStore } from "@/stores/notificationStore";
+import { useFloatingLayerStore } from "@/stores/floatingLayerStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { loadHistory } from "@/services/history";
 import { layoutOp } from "@/services/layout";
@@ -422,6 +424,17 @@ function ensureNotificationAccess(): void {
   });
 }
 
+/** 浮层承载接线：把插件浮层运行时暴露给内核 `ui` 服务（幂等一次）。 */
+let floatingLayerWired = false;
+function ensureFloatingLayerAccess(): void {
+  if (floatingLayerWired) return;
+  floatingLayerWired = true;
+  setPluginFloatingLayerAccess({
+    open: (entry) => useFloatingLayerStore.getState().open(entry),
+    close: (id) => useFloatingLayerStore.getState().close(id),
+  });
+}
+
 /** AI 配置接线守卫：把供应商/模型/Agent 与默认目标解析暴露给内核 `ai` 服务（幂等一次）。
  *  providers 为运行时配置（apiKey 已由 settingsStore 填充——key 读取不进本层）。 */
 let settingsAccessWired = false;
@@ -684,6 +697,7 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
     ensureVaultWriteAccess();
     ensureCollabRuntimeAccess();
     ensureNotificationAccess();
+    ensureFloatingLayerAccess();
     ensureSettingsAccess();
     ensureHistoryAccess();
     ensureLayoutAccess();

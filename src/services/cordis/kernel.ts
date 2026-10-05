@@ -75,6 +75,7 @@ import { platformCapabilities } from "@/services/platform";
 import { createHistoryService } from "./history";
 import { createLayoutService } from "./layout";
 import { createUiStateService } from "./uiState";
+import { createUiService } from "./uiFloating";
 import { createMarkdownService } from "./markdown";
 import { installEventIsolation, setKernelRef } from "./events";
 import type {
@@ -755,6 +756,9 @@ export function createKernel(): Kernel {
   provide("history", createHistoryService());
   provide("layout", createLayoutService());
   provide("uiState", createUiStateService());
+
+  // 插件浮层承载（ctx.ui，内核平台能力）：定位/层级/收起语义由宿主代管，登记随调用方 fiber 撤销。
+  provide("ui", createUiService());
 
   // Markdown 渲染服务（内核提供，root 作用域）：能力来自框架无关内核，不依赖任何插件行，
   // 停用笔记/表格等插件后仍可用（插件可据此渲染自己的 Markdown 内容）。
