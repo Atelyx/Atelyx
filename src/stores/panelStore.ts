@@ -463,10 +463,9 @@ export const usePanelStore = create<PanelStore>((set, get) => {
       // 本地 = localBackend，null = 退出激活（I/O 回落 localBackend，与现状一致）
       activateContentIdentity(payload.vaultIdentity);
       if (payload.vaultRoot || payload.vaultIdentity) {
-        if (payload.vaultRoot) {
-          // 仓库级配置仅本地仓库加载（空间路径暂无配置双源，读本地会失败）
-          void useSettingsStore.getState().loadVaultConfig();
-        }
+        // 仓库级配置按激活身份加载（readVaultSettings 已按身份分流：本地 = `.atelyx`，
+        // 空间 = 服务端团队元数据）；判据若只看 vaultRoot，空间仓库的撕裂窗口将永远没有配置
+        void useSettingsStore.getState().loadVaultConfig();
         void useVaultStore.getState().loadFiles();
       }
       // AI 会话换仓库读盘（含未激活仓库场景）经生命周期注册表分发
