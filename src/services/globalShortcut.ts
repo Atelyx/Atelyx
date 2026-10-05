@@ -36,6 +36,19 @@ export function releasePluginGlobalShortcuts(pluginId: string): Promise<void> {
   return invoke("plugin_shortcut_release_plugin", { pluginId });
 }
 
+/** 单条全局快捷键登记（OS 层登记表现查结果）。 */
+export interface GlobalShortcutRegistration {
+  accelerator: string;
+  pluginId: string;
+  /** true = 窗口切换热键（触发由 Rust 直控窗口显隐，无 JS 回调）。 */
+  windowToggle: boolean;
+}
+
+/** 列出当前登记的全部全局快捷键（OS 层真源，跨窗口一致；移动端恒空）。 */
+export function listGlobalShortcuts(): Promise<GlobalShortcutRegistration[]> {
+  return invoke("plugin_shortcut_list");
+}
+
 /** 订阅全局快捷键触发（只会在主窗口收到回调；accelerator = 原始注册串）。 */
 export function onGlobalShortcutTriggered(
   handler: (accelerator: string, pluginId: string) => void,

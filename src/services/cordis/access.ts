@@ -27,6 +27,7 @@ import type {
   ChatTargetResult,
   ChatTurnMessage,
   ConversationCompaction,
+  PluginGlobalShortcutDeclaration,
   ProviderConfig,
 } from "@/types";
 
@@ -379,5 +380,25 @@ export function setPluginSlotHostComponent(comp: ComponentType<PluginSlotHostPro
 /** 读取槽位宿主组件（ctx.slots.host 服务消费；未接线 = null）。 */
 export function getPluginSlotHostComponent(): ComponentType<PluginSlotHostProps> | null {
   return slotHostComponent;
+}
+
+/** 全局热键解析数据源（ctx.shortcuts 按声明注册 + 设置页改键的解析依据；pluginStore 接线注入）。 */
+export interface PluginShortcutAccess {
+  /** 插件 manifest 声明的全局热键（未安装/未声明 = 空数组）。 */
+  declarations(pluginId: string): PluginGlobalShortcutDeclaration[];
+  /** 全局热键覆盖表（`插件id:声明id` → accelerator；缺省空 = 全用声明默认键）。 */
+  overrides(): Record<string, string>;
+}
+
+let shortcutAccess: PluginShortcutAccess | null = null;
+
+/** 注入/复位全局热键解析数据源（pluginStore.load 时接线；null 复位供测试）。 */
+export function setPluginShortcutAccess(access: PluginShortcutAccess | null): void {
+  shortcutAccess = access;
+}
+
+/** 读取全局热键解析数据源（ctx.shortcuts 与改键服务消费；未接线 = null）。 */
+export function getPluginShortcutAccess(): PluginShortcutAccess | null {
+  return shortcutAccess;
 }
 

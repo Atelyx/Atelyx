@@ -44,10 +44,16 @@ describe("宿主 UI 贡献注册表", () => {
 
   it("应用页/命令注册与读取", () => {
     disposers.push(registerPluginAppPage("com.test.a", "com.test.a.app", "应用页", () => null));
-    disposers.push(registerPluginCommand("com.test.a", "say", "打招呼", () => "hi"));
+    disposers.push(registerPluginCommand("com.test.a", { id: "say", label: "打招呼", run: () => "hi" }));
     expect(getPluginAppPages()).toHaveLength(1);
     expect(getPluginCommands()).toHaveLength(1);
-    expect(getPluginCommands()[0]).toMatchObject({ pluginId: "com.test.a", id: "say", label: "打招呼" });
+    expect(getPluginCommands()[0]).toMatchObject({
+      pluginId: "com.test.a",
+      id: "say",
+      label: "打招呼",
+      scope: "global",
+    });
+    expect(getPluginCommands()[0]?.shortcut).toBeUndefined();
 
     for (const off of disposers) off();
     expect(getPluginAppPages()).toHaveLength(0);

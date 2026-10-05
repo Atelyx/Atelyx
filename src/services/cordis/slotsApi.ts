@@ -13,6 +13,7 @@ import { symbols } from "@atelyx/cordis";
 import { createElement } from "react";
 import type { ComponentType, ReactNode } from "react";
 import type { Context } from "@atelyx/cordis";
+import type { CommandShortcutScope } from "@/types";
 import type { SlotCardinality } from "@/utils/cordis/slots";
 import type { SlotDeclaration } from "@/constants/slots";
 import {
@@ -96,8 +97,10 @@ export interface RegisterCommandOptions {
   id: string;
   label: string;
   run: () => unknown;
-  /** 快捷键（如 "mod+k"；可选）。 */
+  /** 默认快捷键（如 "mod+k"；可选；无 = 未绑定，仍可在设置 → 快捷键自定义）。 */
   shortcut?: string;
+  /** 快捷键作用域（缺省 global：window 级统一监听；作用域类命令由对应视图的监听点按生效键匹配）。 */
+  scope?: CommandShortcutScope;
 }
 
 /** 主题插件设置项注册载荷（主题页设置区）。 */
@@ -294,7 +297,9 @@ export function createSlotsApi(): SlotsApi {
       if (typeof opts.id !== "string" || opts.id.length === 0) throw new Error("命令需要非空 id");
       const ctx = this.ctx;
       const pluginId = pluginIdOfCtx(ctx);
-      return ctx.effect(() => registerPluginCommand(pluginId, opts.id, opts.label, opts.run, opts.shortcut));
+      return ctx.effect(() =>
+        registerPluginCommand(pluginId, { id: opts.id, label: opts.label, run: opts.run, shortcut: opts.shortcut, scope: opts.scope }),
+      );
     },
     registerThemeSetting(this: SlotsApiInstance, opts: RegisterThemeSettingOptions): () => void {
       if (typeof opts.key !== "string" || opts.key.length === 0) throw new Error("主题设置项需要非空 key");

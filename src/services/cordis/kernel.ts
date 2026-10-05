@@ -55,6 +55,7 @@ import {
   getAppPageOpener,
   getPluginCollabAccess,
   getPluginNotificationAccess,
+  getPluginShortcutAccess,
   getSettingsAccess,
   requireVaultWrite,
   type PluginNotificationAccess,
@@ -64,9 +65,12 @@ import { pluginIdOf } from "./loader";
 import { trackPendingLaunch, trackPluginProcess, untrackPluginProcess } from "./pluginProcesses";
 import {
   dispatchShortcutTrigger,
+  declaredShortcutOf,
   trackPendingShortcutRegister,
   trackShortcut,
+  trackShortcutDeclaration,
   untrackShortcut,
+  untrackShortcutDeclarationIf,
   untrackShortcutIf,
 } from "./pluginShortcuts";
 import { createSlotsApi } from "./slotsApi";
@@ -154,6 +158,15 @@ function requireCallerPluginId(ctx: Context): string {
   const id = pluginIdOf(ctx);
   if (!id) throw new Error("插件服务只能在插件上下文中使用");
   return id;
+}
+
+/** 声明热键解析：manifest 缺该声明即报错（可见）；实际键 = 用户覆盖 → 声明默认键。 */
+function resolveDeclaredAccelerator(pluginId: string, id: string): string {
+  const access = getPluginShortcutAccess();
+  if (!access) throw new Error("全局热键声明数据源未就绪");
+  const decl = access.declarations(pluginId).find((d) => d.id === id);
+  if (!decl) throw new Error(`热键声明 ${id} 不存在（须在 manifest 的 atelyx.shortcuts 中声明）`);
+  return access.overrides()[`${pluginId}:${id}`] || decl.key;
 }
 
 /** 插件频道线路名 = 插件 id + ":" + 逻辑频道名：命名空间分隔符，跨插件撞名不串台。
@@ -579,6 +592,46 @@ export function createKernel(): Kernel {
       throw e;
     }
     },
+    async registerDeclared(this: ShortcutsServiceInstance, id, handler) {
+      const pluginId = requireCallerPluginId(this.ctx);
+      if (typeof id !== "string" || id.trim() === "") throw new Error("热键声明 id 须为非空字符串");
+      if (typeof handler !== "function") throw new Error("快捷键回调须为函数");
+      const accelerator = resolveDeclaredAccelerator(pluginId, id);
+      const register = registerGlobalShortcut(accelerator, pluginId);
+      trackShortcut(ctx, pluginId, accelerator, handler);
+      trackShortcutDeclaration(ctx, pluginId, accelerator, { id });
+      trackPendingShortcutRegister(ctx, pluginId, register);
+      try {
+        await register;
+      } catch (e) {
+        // 条件摘册（回调 + 声明元数据）：先发注册的失败回滚不得摘掉后发注册刚登记的条目
+        untrackShortcutIf(ctx, pluginId, accelerator, handler);
+        untrackShortcutDeclarationIf(ctx, pluginId, accelerator, id);
+        throw e;
+      }
+    },
+    async registerDeclaredWindowToggle(this: ShortcutsServiceInstance, id, view, options) {
+      const pluginId = requireCallerPluginId(this.ctx);
+      if (typeof id !== "string" || id.trim() === "") throw new Error("热键声明 id 须为非空字符串");
+      if (typeof view !== "string" || view.trim() === "") {
+        throw new Error("窗口切换热键需要非空视图 kind");
+      }
+      if (typeof options !== "object" || options === null) {
+        throw new Error("窗口切换热键需要窗口选项（WindowOptions）");
+      }
+      const accelerator = resolveDeclaredAccelerator(pluginId, id);
+      const register = registerWindowToggleShortcut(accelerator, pluginId, { view, options });
+      // 无 JS 回调可摘；声明元数据登记供设置页改键时按声明定位重注册
+      trackShortcutDeclaration(ctx, pluginId, accelerator, { id, windowToggle: { view, options } });
+      trackPendingShortcutRegister(ctx, pluginId, register);
+      try {
+        await register;
+      } catch (e) {
+        // 条件摘册：注册失败不得留下幽灵声明元数据（否则改键路径会为一条从未注册成功的声明工作）
+        untrackShortcutDeclarationIf(ctx, pluginId, accelerator, id);
+        throw e;
+      }
+    },
     async registerWindowToggle(this: ShortcutsServiceInstance, accelerator, view, options) {
       const pluginId = requireCallerPluginId(this.ctx);
       if (typeof accelerator !== "string" || accelerator.trim() === "") {
@@ -604,6 +657,15 @@ export function createKernel(): Kernel {
       }
       untrackShortcut(ctx, pluginId, accelerator);
       await unregisterGlobalShortcut(accelerator, pluginId);
+    },
+    async unregisterDeclared(this: ShortcutsServiceInstance, id) {
+      const pluginId = requireCallerPluginId(this.ctx);
+      if (typeof id !== "string" || id.trim() === "") throw new Error("热键声明 id 须为非空字符串");
+      const reg = declaredShortcutOf(ctx, pluginId, id);
+      if (!reg) return;
+      untrackShortcutDeclarationIf(ctx, pluginId, reg.accelerator, id);
+      if (reg.handler) untrackShortcut(ctx, pluginId, reg.accelerator);
+      await unregisterGlobalShortcut(reg.accelerator, pluginId);
     },
   };
   Object.defineProperty(shortcuts, symbols.tracker, { value: { property: "ctx" } });

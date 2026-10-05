@@ -320,6 +320,12 @@ export interface ShortcutsService {
   /** 注册全局快捷键（同一快捷键在应用内唯一，已被其他插件占用即失败；随调用方插件
    *  停用/卸载自动注销）。accelerator 为 OS 层格式（如 "Shift+Alt+E"），非法格式报错。 */
   registerGlobal(accelerator: string, handler: () => void | Promise<void>): Promise<void>;
+  /** 按本插件 manifest 的热键声明（`atelyx.shortcuts` 条目 id）注册全局快捷键：实际热键 =
+   *  用户覆盖（设置 → 快捷键）→ 声明默认键，设置页改键即改这里解析出的键。声明缺失报错；
+   *  占用/幂等/注销语义同 registerGlobal。 */
+  registerDeclared(id: string, handler: () => void | Promise<void>): Promise<void>;
+  /** 按声明 id 注册窗口切换热键（语义与选项同 registerWindowToggle；实际热键解析同 registerDeclared）。 */
+  registerDeclaredWindowToggle(id: string, view: string, options: WindowOptions): Promise<void>;
   /** 注册窗口切换热键：触发由 Rust 按声明的窗口选项（置顶、不进任务栏、失焦自动收起、
    *  关闭即藏——任意子集组合）直接切换承载 `view` 的撕裂窗口，不经本插件回调——主窗口
    *  驻留托盘时照常生效。占用/幂等/注销语义同 registerGlobal（unregisterGlobal 通用）。 */
@@ -328,6 +334,8 @@ export interface ShortcutsService {
     view: string,
     options: WindowOptions,
   ): Promise<void>;
+  /** 按声明 id 注销（当前生效的 accelerator 随之注销；未注册 = no-op）。 */
+  unregisterDeclared(id: string): Promise<void>;
   /** 注销单个全局快捷键（仅归属插件可注销；未注册 = no-op）。 */
   unregisterGlobal(accelerator: string): Promise<void>;
 }

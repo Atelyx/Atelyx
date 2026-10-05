@@ -1,11 +1,29 @@
 /**
- * 命令快捷键测试（services/cordis/commandHotkeys）：matchesShortcut 修饰键精确匹配
- * 与 dispatchHotkey 的执行/异常隔离。
+ * 命令快捷键测试（services/cordis/commandHotkeys）：dispatchHotkey 的覆盖解析、
+ * 作用域过滤、首条命中执行与异常隔离；matchesShortcut 的匹配语义（修饰键精确相等等）同文件覆盖。
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { dispatchHotkey, matchesShortcut } from "./commandHotkeys";
+import { dispatchHotkey } from "./commandHotkeys";
+import { acceleratorConflictKey, commandShortcutConflictKey, matchesShortcut } from "@/utils/shortcutKeys";
 
 const ev = (partial: Record<string, unknown>) => partial as unknown as KeyboardEvent;
+
+describe("冲突判定键归一", () => {
+  it("同键不同书写归一到同一键（ctrl/meta 与 mod 同义）", () => {
+    expect(commandShortcutConflictKey("mod+k")).toBe(commandShortcutConflictKey("ctrl+k"));
+    expect(commandShortcutConflictKey("mod+k")).toBe(commandShortcutConflictKey("MOD+K"));
+    expect(commandShortcutConflictKey("mod+k")).toBe(commandShortcutConflictKey("mod+k"));
+    expect(commandShortcutConflictKey("mod+shift+k")).not.toBe(commandShortcutConflictKey("mod+k"));
+    expect(commandShortcutConflictKey("mod+k")).not.toBe(commandShortcutConflictKey("mod+j"));
+  });
+
+  it("accelerator 书写顺序无关、修饰键别名归一", () => {
+    expect(acceleratorConflictKey("CmdOrCtrl+Shift+KeyK")).toBe(
+      acceleratorConflictKey("Shift+CmdOrCtrl+KeyK"),
+    );
+    expect(acceleratorConflictKey("Ctrl+KeyK")).toBe(acceleratorConflictKey("Control+KeyK"));
+  });
+});
 
 describe("matchesShortcut", () => {
   it("mod+k：Ctrl/Cmd + K 命中；无修饰不命中", () => {
@@ -50,12 +68,18 @@ describe("dispatchHotkey", () => {
     vi.restoreAllMocks();
   });
 
-  const command = (over: { shortcut: string; run: () => unknown; id: string }) => ({
+  const command = (over: {
+    shortcut?: string;
+    run: () => unknown;
+    id: string;
+    scope?: "global" | "canvas" | "note-editing" | "table";
+  }) => ({
     pluginId: "com.test",
     id: over.id,
     label: "运行",
-    shortcut: over.shortcut,
+    ...(over.shortcut ? { shortcut: over.shortcut } : {}),
     run: over.run,
+    scope: over.scope ?? "global",
   });
 
   it("首条命中执行并 preventDefault，其余命令不再执行", () => {
@@ -79,6 +103,42 @@ describe("dispatchHotkey", () => {
       command({ id: "a", shortcut: "ctrl+j", run: () => undefined }),
     ]);
     expect(hit).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+  });
+
+  it("用户覆盖替换声明默认键；无默认键的命令可经覆盖命中", () => {
+    const runA = vi.fn();
+    const runB = vi.fn();
+    const preventDefault = vi.fn();
+    const hit = dispatchHotkey(
+      ev({ key: "k", altKey: true, preventDefault }),
+      [
+        command({ id: "a", shortcut: "mod+j", run: runA }), // 默认键未命中
+        command({ id: "b", run: runB }), // 无默认键
+      ],
+      { "com.test:b": "alt+k" },
+    );
+    expect(hit).toBe(true);
+    expect(runA).not.toHaveBeenCalled();
+    expect(runB).toHaveBeenCalledTimes(1);
+    expect(preventDefault).toHaveBeenCalledTimes(1);
+  });
+
+  it("覆盖后的键未按下不命中；scope 非 global 的命令不参与统一分发", () => {
+    const runA = vi.fn();
+    const runScoped = vi.fn();
+    const preventDefault = vi.fn();
+    const hit = dispatchHotkey(
+      ev({ key: "k", ctrlKey: true, preventDefault }),
+      [
+        command({ id: "scoped", shortcut: "ctrl+k", run: runScoped, scope: "canvas" }),
+        command({ id: "a", run: runA }),
+      ],
+      { "com.test:a": "alt+j", "com.test:scoped": "ctrl+k" },
+    );
+    expect(hit).toBe(false);
+    expect(runScoped).not.toHaveBeenCalled();
+    expect(runA).not.toHaveBeenCalled();
     expect(preventDefault).not.toHaveBeenCalled();
   });
 

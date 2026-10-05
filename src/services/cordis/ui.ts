@@ -7,6 +7,7 @@
  * 节点/边/表格视图的读取 getter 亦收拢于此（读 slots 注册表，single 胜出），供 pluginStore 统一读取。
  */
 import type { ComponentType } from "react";
+import type { CommandShortcutScope } from "@/types";
 import { resolveNodeSlot, resolveEdgeSlot, resolveTableViewSlot, nodeKinds, edgeKinds, tableViewKinds } from "./slots";
 
 /** 插件设置项注册（设置页左侧 tab）。 */
@@ -41,8 +42,10 @@ export interface PluginCommandRegistration {
   id: string;
   label: string;
   run: () => unknown;
-  /** 快捷键（如 "mod+k"；可选；主线程统一监听匹配后执行）。 */
+  /** 默认快捷键（如 "mod+k"；可选；主线程统一监听匹配后执行，作用域类命令由视图监听点按生效键匹配）。 */
   shortcut?: string;
+  /** 快捷键作用域（缺省 global，见 CommandShortcutScope）。 */
+  scope: CommandShortcutScope;
 }
 
 /** 插件命令贡献（管理 UI「运行命令」入口：全局 id = `<pluginId>:<命令 id>`）；共享展示契约在 `types/plugin.ts`。 */
@@ -162,13 +165,17 @@ export function registerPluginAppPage(
 /** 注册插件主线程命令（管理 UI「运行命令」入口）；pluginId 溯源，返回精确撤销。 */
 export function registerPluginCommand(
   pluginId: string,
-  id: string,
-  label: string,
-  run: () => unknown,
-  shortcut?: string,
+  opts: { id: string; label: string; run: () => unknown; shortcut?: string; scope?: CommandShortcutScope },
 ): () => void {
-  const k = `${pluginId}:${id}`;
-  commands.set(k, { pluginId, id, label, run, ...(shortcut ? { shortcut } : {}) });
+  const k = `${pluginId}:${opts.id}`;
+  commands.set(k, {
+    pluginId,
+    id: opts.id,
+    label: opts.label,
+    run: opts.run,
+    ...(opts.shortcut ? { shortcut: opts.shortcut } : {}),
+    scope: opts.scope ?? "global",
+  });
   notify();
   return () => {
     if (commands.delete(k)) notify();
