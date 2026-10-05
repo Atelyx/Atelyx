@@ -39,6 +39,17 @@ pub fn window_event_handler(app: &AppHandle, label: String) -> impl Fn(&tauri::W
                 let sf = *scale_factor;
                 write_bounds(&app, &label, None, None, Some(new_inner_size.width as f64 / sf), Some(new_inner_size.height as f64 / sf), sf);
             }
+            // 失焦自动收起（options.hide_on_blur 声明；图钉豁免；判定与模型同步在 layout 层）
+            tauri::WindowEvent::Focused(false) => {
+                crate::layout::hide_window_on_blur(&app, &label);
+            }
+            // 关闭请求按 options.close_hides = 隐藏不销毁（热键收起同语义），否则照常销毁
+            tauri::WindowEvent::CloseRequested { api, .. } => {
+                if crate::layout::window_close_hides(&app, &label) {
+                    api.prevent_close();
+                    crate::layout::hide_detached_window(&app, &label);
+                }
+            }
             _ => {}
         }
     }
@@ -209,6 +220,8 @@ mod tests {
                 bounds: WindowBounds { x: 0.0, y: 0.0, width: 100.0, height: 100.0, scale: 0.0 },
                 hidden: false,
                 restore_on_launch: true,
+                options: crate::layout_model::WindowOptions::default(),
+                pinned: false,
             }],
             ..Default::default()
         }

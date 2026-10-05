@@ -877,6 +877,13 @@ export const usePanelStore = create<PanelStore>((set, get) => {
       // 销毁由 onCloseRequested 内部完成。panelStore 每窗口一个实例（各自 JS 运行时），
       // 模块级标志恰好按窗口防重
       await onCloseRequested(async () => {
+        // 声明 closeHides 的撕裂窗口，关闭 = 隐藏不销毁（Rust 侧已拦截并置 hidden，
+        // 热键/图钉语义不变）：不上报关闭、不动模型条目，返回 keep 让 wrapper 跳过
+        // destroy——OS 窗口随隐藏继续运行（进行中的轮次不中断）。
+        const ui = useUiStateStore.getState();
+        if ((ui.detachedWindows ?? []).some((w) => w.id === get().windowId && w.options.closeHides)) {
+          return "keep";
+        }
         const ps = usePanelStore.getState();
         for (const v of ps.panelTabs.map((t) => t.view)) {
           await ps.releaseView(v);

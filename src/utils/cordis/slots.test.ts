@@ -26,7 +26,7 @@ import {
   tableViewKinds,
   unregisterSlot,
   unregisterSlotDecorator,
-  viewKinds,
+  dockableViewKinds,
 } from "@/services/cordis/slots";
 
 const contrib = (partial: Partial<SlotContribution> & { id: string }): SlotContribution => ({
@@ -112,10 +112,10 @@ describe("slots 注册表", () => {
     const off = regView("canvas", "builtin.canvas", "画布");
     expect(resolveViewKind("canvas")?.payload.label).toBe("画布");
     expect(resolveViewKind("canvas")?.pluginId).toBe("builtin.canvas");
-    expect(viewKinds()).toContain("canvas");
+    expect(dockableViewKinds()).toContain("canvas");
     off();
     expect(resolveViewKind("canvas")).toBeUndefined();
-    expect(viewKinds()).not.toContain("canvas");
+    expect(dockableViewKinds()).not.toContain("canvas");
   });
 
   it("resolveViewKind 返回稳定引用（selector 订阅依赖；贡献注册期内多次调用同一对象）", () => {

@@ -98,7 +98,7 @@ import {
   setSlotWinnerOverrideSource,
   slotChain as buildSlotChain,
   slotConflictRows as buildSlotConflictRows,
-  viewKinds as slotViewKinds,
+  dockableViewKinds as slotDockableViewKinds,
 } from "@/services/cordis/slots";
 import type { ViewSlotContribution } from "@/services/cordis/slots";
 import { composePlugins, compositionPackages, mountOrder } from "@/utils/cordis/composition";
@@ -946,7 +946,8 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
     pluginAppPage: (id) => getPluginAppPages().find((p) => p.id === id),
     pluginViewKinds: () => {
       // 已挂载的视图槽（启用中的行；停用/卸载随 fiber 撤销自动消失）。
-      return slotViewKinds();
+      // 独立窗口专用视图（standaloneOnly）不进「添加面板」菜单，窗口形态由插件自定。
+      return slotDockableViewKinds();
     },
     viewContribution: (kind) => {
       // 分派 = slots（统一视图槽注册表）。
@@ -961,6 +962,7 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
           label: slot.payload.label,
           component: slot.payload.component,
           render: slot.payload.render,
+          standaloneOnly: slot.payload.standaloneOnly,
           pluginId: slot.pluginId,
         };
         slotViewCache.set(slot, cached);

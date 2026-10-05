@@ -8,10 +8,22 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { UnlistenFn } from "@tauri-apps/api/event";
+import type { WindowOptions } from "@/types";
 
 /** 注册全局快捷键（同键已被其他插件占用即失败；同插件重复注册幂等）。 */
 export function registerGlobalShortcut(accelerator: string, pluginId: string): Promise<void> {
   return invoke("plugin_shortcut_register", { accelerator, pluginId });
+}
+
+/** 注册窗口切换热键（Rust 直控：触发时按 `windowToggle.options` 声明切换承载 `view` 的
+ *  撕裂窗口，不经主窗口 JS，主窗口驻留托盘时照常生效；同键已被其他插件占用即失败；
+ *  同插件重复注册幂等，声明变更原地更新）。 */
+export function registerWindowToggleShortcut(
+  accelerator: string,
+  pluginId: string,
+  windowToggle: { view: string; options: WindowOptions },
+): Promise<void> {
+  return invoke("plugin_shortcut_register", { accelerator, pluginId, windowToggle });
 }
 
 /** 注销单个全局快捷键（仅归属插件可注销；未注册 = no-op）。 */

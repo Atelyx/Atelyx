@@ -20,6 +20,7 @@ import { closeWindow, minimizeWindow, toggleMaximizeWindow } from "@/services/wi
 import {
   onGlobalShortcutTriggered,
   registerGlobalShortcut,
+  registerWindowToggleShortcut,
   unregisterGlobalShortcut,
 } from "@/services/globalShortcut";
 import { listVaultTree } from "@/services/vault";
@@ -577,6 +578,24 @@ export function createKernel(): Kernel {
       untrackShortcutIf(ctx, pluginId, accelerator, handler);
       throw e;
     }
+    },
+    async registerWindowToggle(this: ShortcutsServiceInstance, accelerator, view, options) {
+      const pluginId = requireCallerPluginId(this.ctx);
+      if (typeof accelerator !== "string" || accelerator.trim() === "") {
+        throw new Error("快捷键须为非空字符串");
+      }
+      if (typeof view !== "string" || view.trim() === "") {
+        throw new Error("窗口切换热键需要非空视图 kind");
+      }
+      if (typeof options !== "object" || options === null) {
+        throw new Error("窗口切换热键需要窗口选项（WindowOptions）");
+      }
+      // 无 JS 回调可摘：幂等与声明变更由 Rust 登记表原地处理；随插件停用由 release 整体注销。
+      // 在途注册照常进 pending 表——「注册后立即停用」时 release 先等注册落地再整体注销，
+      // 漏登记会留下归属插件已停用、OS 层仍注册占用的幽灵热键
+      const register = registerWindowToggleShortcut(accelerator, pluginId, { view, options });
+      trackPendingShortcutRegister(ctx, pluginId, register);
+      await register;
     },
     async unregisterGlobal(this: ShortcutsServiceInstance, accelerator) {
       const pluginId = requireCallerPluginId(this.ctx);

@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 #[cfg(desktop)]
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
 #[cfg(desktop)]
 use tauri::{Emitter, Manager};
@@ -31,6 +31,15 @@ use tauri::{Emitter, Manager};
 #[cfg(desktop)]
 const TRIGGERED_EVENT: &str = "plugin-shortcut-triggered";
 
+/// 窗口直控目标（快捷键触发时 Rust 直接切换的撕裂窗口）。
+#[cfg(desktop)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowToggleSpec {
+    pub view: String,
+    pub options: crate::layout_model::WindowOptions,
+}
+
 /// 触发事件载荷（字段 camelCase 与前端对齐）。
 #[cfg(desktop)]
 #[derive(Serialize, Clone)]
@@ -38,6 +47,10 @@ const TRIGGERED_EVENT: &str = "plugin-shortcut-triggered";
 struct ShortcutTriggerPayload {
     accelerator: String,
     plugin_id: String,
+    /// 窗口直控目标（Some = 触发由 Rust 直接切换承载 `view` 的撕裂窗口，不经主窗口 JS——
+    /// 主窗口驻留托盘时热键照常生效；None = 转发主窗口由插件回调处理）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    window_toggle: Option<WindowToggleSpec>,
 }
 
 /// 登记表：归属表（快捷键 → 插件 id）与触发回查表（OS 快捷键 id → 归属）。
@@ -68,14 +81,15 @@ pub fn plugin_shortcut_register(
     state: State<'_, GlobalShortcutState>,
     accelerator: String,
     plugin_id: String,
+    window_toggle: Option<WindowToggleSpec>,
 ) -> Result<(), String> {
     #[cfg(desktop)]
     {
-        desktop_register(app, &state, &accelerator, &plugin_id)
+        desktop_register(app, &state, &accelerator, &plugin_id, window_toggle)
     }
     #[cfg(not(desktop))]
     {
-        let _ = (&app, &state, &accelerator, &plugin_id);
+        let _ = (&app, &state, &accelerator, &plugin_id, &window_toggle);
         Err("当前平台不支持全局快捷键".into())
     }
 }
@@ -123,6 +137,7 @@ fn desktop_register(
     state: &State<'_, GlobalShortcutState>,
     accelerator: &str,
     plugin_id: &str,
+    window_toggle: Option<WindowToggleSpec>,
 ) -> Result<(), String> {
     use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
@@ -139,6 +154,18 @@ fn desktop_register(
         .map_err(|_| "快捷键登记表锁定失败".to_string())?;
     if let Some(existing) = owners.by_id.get(&id) {
         if existing.plugin_id == plugin_id {
+            // 同插件幂等：直控目标变更（设置切换后重注册）原地更新载荷，OS 注册不动；
+            // accelerator 保留首次注册串——OS 快捷键 id 与修饰键书写顺序无关，重注册串
+            // 可能只是同 id 的另一种书写，改写会让 by_accelerator（仅首注册写入）与
+            // by_id 载荷分叉，release 清理时漏掉旧串残留
+            if existing.window_toggle != window_toggle {
+                let updated = ShortcutTriggerPayload {
+                    accelerator: existing.accelerator.clone(),
+                    plugin_id: plugin_id.to_string(),
+                    window_toggle: window_toggle.clone(),
+                };
+                owners.by_id.insert(id, updated);
+            }
             return Ok(());
         }
         return Err(format!(
@@ -151,6 +178,7 @@ fn desktop_register(
     let owner = ShortcutTriggerPayload {
         accelerator: accelerator.to_string(),
         plugin_id: plugin_id.to_string(),
+        window_toggle: window_toggle.clone(),
     };
     owners.by_accelerator.insert(accelerator.to_string(), plugin_id.to_string());
     owners.by_id.insert(id, owner.clone());
@@ -166,10 +194,22 @@ fn desktop_register(
             .lock()
             .ok()
             .and_then(|owners| owners.by_id.get(&shortcut.id()).cloned());
-        if let Some(owner) = owner {
+        let Some(owner) = owner else { return };
+        match owner.window_toggle.clone() {
+            // 窗口直控：Rust 侧直接按视图切换撕裂窗口（建窗须经 async runtime，见
+            // create_panel_window_internal 的 wry#583 注记），不经主窗口 JS——
+            // 主窗口驻留托盘时热键照常生效
+            Some(spec) => {
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    let _ = crate::layout::toggle_window_by_view(&app, &spec.view, spec.options);
+                });
+            }
             // 转发目标固定主窗口：其内核持有全部已激活插件的回调，与注册窗口的生灭无关；
             // 主窗口不存在（应用退出中）则事件自然丢弃
-            let _ = app.emit_to("main", TRIGGERED_EVENT, owner);
+            None => {
+                let _ = app.emit_to("main", TRIGGERED_EVENT, owner);
+            }
         }
     });
     if let Err(e) = result {
@@ -202,7 +242,9 @@ fn desktop_unregister(
     }
     // 先出册再注销 OS 层：注销期间到达的触发查不到回查表，自然丢弃（快捷键已在注销中）；
     // OS 注销失败则把登记原样放回（归属与 OS 注册保持一致，不留「登记已丢、OS 仍注册」的死键）
-    if let Ok(parsed) = accelerator.parse::<Shortcut>() {
+    let restored = parsed_id_of(accelerator).and_then(|id| owners.by_id.get(&id).cloned());
+    let parsed = accelerator.parse::<Shortcut>();
+    if let Ok(parsed) = parsed {
         owners.by_id.remove(&parsed.id());
     }
     owners.by_accelerator.remove(accelerator);
@@ -213,10 +255,11 @@ fn desktop_unregister(
             if let Ok(parsed) = accelerator.parse::<Shortcut>() {
                 owners.by_id.insert(
                     parsed.id(),
-                    ShortcutTriggerPayload {
+                    restored.unwrap_or_else(|| ShortcutTriggerPayload {
                         accelerator: accelerator.to_string(),
                         plugin_id: plugin_id.to_string(),
-                    },
+                        window_toggle: None,
+                    }),
                 );
             }
         }
@@ -225,54 +268,51 @@ fn desktop_unregister(
     Ok(())
 }
 
+/// 快捷键原始串 → OS id（解析失败 = None；调用方按无 id 处理）。
+#[cfg(desktop)]
+fn parsed_id_of(accelerator: &str) -> Option<u32> {
+    accelerator.parse::<tauri_plugin_global_shortcut::Shortcut>().ok().map(|s| s.id())
+}
+
 #[cfg(desktop)]
 fn desktop_release_plugin(
     app: AppHandle<tauri::Wry>,
     state: &State<'_, GlobalShortcutState>,
     plugin_id: &str,
 ) -> Result<(), String> {
-    use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
-    let accelerators: Vec<String> = {
+    // 以 by_id（含完整载荷）为唯一事实来源收集本插件条目，两表同轮清理
+    let owned: Vec<(u32, ShortcutTriggerPayload)> = {
         let mut owners = state
             .inner
             .lock()
             .map_err(|_| "快捷键登记表锁定失败".to_string())?;
-        let owned: Vec<String> = owners
-            .by_accelerator
+        let owned: Vec<(u32, ShortcutTriggerPayload)> = owners
+            .by_id
             .iter()
-            .filter(|(_, owner)| owner.as_str() == plugin_id)
-            .map(|(accelerator, _)| accelerator.clone())
+            .filter(|(_, payload)| payload.plugin_id == plugin_id)
+            .map(|(id, payload)| (*id, payload.clone()))
             .collect();
-        for accelerator in &owned {
-            if let Ok(parsed) = accelerator.parse::<Shortcut>() {
-                owners.by_id.remove(&parsed.id());
-            }
-            owners.by_accelerator.remove(accelerator);
+        for (id, payload) in &owned {
+            owners.by_id.remove(id);
+            owners.by_accelerator.remove(&payload.accelerator);
         }
         owned
     };
-    if accelerators.is_empty() {
+    if owned.is_empty() {
         return Ok(());
     }
     let global = app.global_shortcut();
     let mut failures: Vec<String> = Vec::new();
-    for accelerator in &accelerators {
-        if let Err(e) = global.unregister(accelerator.as_str()) {
+    for (id, payload) in &owned {
+        if let Err(e) = global.unregister(payload.accelerator.as_str()) {
             // OS 注销失败：登记放回（同 desktop_unregister，不留归属与 OS 注册不一致的死键）
             if let Ok(mut owners) = state.inner.lock() {
-                owners.by_accelerator.insert(accelerator.clone(), plugin_id.to_string());
-                if let Ok(parsed) = accelerator.parse::<Shortcut>() {
-                    owners.by_id.insert(
-                        parsed.id(),
-                        ShortcutTriggerPayload {
-                            accelerator: accelerator.clone(),
-                            plugin_id: plugin_id.to_string(),
-                        },
-                    );
-                }
+                owners.by_accelerator.insert(payload.accelerator.clone(), plugin_id.to_string());
+                owners.by_id.insert(*id, payload.clone());
             }
-            failures.push(format!("{accelerator}：{e}"));
+            failures.push(format!("{}：{}", payload.accelerator, e));
         }
     }
     if failures.is_empty() {

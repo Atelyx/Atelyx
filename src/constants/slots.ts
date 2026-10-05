@@ -99,9 +99,9 @@ const DECLARATIONS: readonly SlotDeclaration[] = [
     prefix: true,
     cardinality: "single",
     required: ["label"],
-    optional: ["component", "render"],
+    optional: ["component", "render", "standaloneOnly"],
     scope: "面板视图",
-    summary: "注册任意视图 kind，出现在「添加视图」菜单；重型视图用 render(hostId) 承载宿主面板 id。",
+    summary: "注册任意视图 kind，出现在「添加视图」菜单；重型视图用 render(hostId) 承载宿主面板 id；standaloneOnly 声明独立窗口专用视图（不进「添加视图」菜单，窗口形态由插件经窗口选项自定）。",
     decoratable: false,
   },
   {

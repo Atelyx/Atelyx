@@ -47,6 +47,8 @@ export interface RegisterViewOptions {
   render?: (hostId: string) => ReactNode;
   /** 槽优先级（higher wins；缺省 0。替换同 kind 的默认实现时设高值）。 */
   priority?: number;
+  /** 独立窗口专用视图：不进「添加面板」菜单，只由插件自定窗口形态承载（经布局命令/热键唤起；缺省 false = 可停靠）。 */
+  standaloneOnly?: boolean;
 }
 
 /** 表格视图注册载荷（表格编辑器内视图）。 */
@@ -214,6 +216,7 @@ export function createSlotsApi(): SlotsApi {
           label: opts.label,
           ...(opts.component ? { component: opts.component } : {}),
           ...(opts.render ? { render: opts.render } : {}),
+          ...(opts.standaloneOnly ? { standaloneOnly: true } : {}),
         }, { priority: opts.priority ?? 0 }),
       );
     },

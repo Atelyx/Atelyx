@@ -26,8 +26,8 @@ use crate::layout_model::{
     group_set_tab_view, map_detached, map_panel, next_layout_name, next_scene_name,
     prune_empty_windows, regenerate_ids, set_active_tree, set_layout_sizes_op, sizes_valid_for,
     split_children_count, split_panel_op, tear_off_from_panel_op, AppUiState, DetachedWindow,
-    LayoutOp, LayoutOpResult, Scene, UiStatePatch, MAX_RECENT_FILES, DEFAULT_SCENE_ID,
-    HOME_LAYOUT_ID, WorkspaceLayout,
+    LayoutOp, LayoutOpResult, Scene, UiStatePatch, MAX_RECENT_FILES,
+    DEFAULT_SCENE_ID, HOME_LAYOUT_ID, WorkspaceLayout,
 };
 use crate::layout_persist::{broadcast_layout, persist_now, schedule_persist};
 use crate::layout_window::{reconcile_panel_windows, title_of_tabs};
@@ -41,7 +41,7 @@ pub use crate::layout_drag::{
     __tauri_command_name_drag_hit, __tauri_command_name_drag_update, drag_end, drag_hit,
     drag_update,
 };
-pub use crate::layout_model::WindowBounds;
+pub use crate::layout_model::{WindowBounds, WindowOptions};
 pub use crate::layout_persist::load_from_disk;
 // 窗口事件钩子是桌面语义（移动端单窗口无 Moved/Resized 事件源），随实现一同分档
 #[cfg(desktop)]
@@ -200,7 +200,7 @@ pub(crate) fn apply_layout_op(ui: &mut AppUiState, op: &LayoutOp) -> LayoutOpRes
         LayoutOp::TearOff { panel_id, tab_id, bounds } => {
             let tree = active_layout(ui).tree;
             if let Some((new_tree, tab)) = tear_off_from_panel_op(&tree, panel_id, tab_id) {
-                let win = DetachedWindow { id: nanoid::nanoid!(), tabs: vec![tab.clone()], active_tab_id: Some(tab.id.clone()), bounds: bounds.clone(), hidden: false, restore_on_launch: true };
+                let win = DetachedWindow { id: nanoid::nanoid!(), tabs: vec![tab.clone()], active_tab_id: Some(tab.id.clone()), bounds: bounds.clone(), hidden: false, restore_on_launch: true, options: WindowOptions::default(), pinned: false };
                 set_active_tree(ui, new_tree);
                 ui.detached_windows.push(win.clone());
                 result.detached_window = Some(win);
@@ -209,7 +209,7 @@ pub(crate) fn apply_layout_op(ui: &mut AppUiState, op: &LayoutOp) -> LayoutOpRes
         LayoutOp::TearOffFromDetached { window_id, tab_id, bounds } => {
             if let Some((src, tab)) = find_tab_in_detached(&ui.detached_windows, tab_id) {
                 if src == *window_id {
-                    let win = DetachedWindow { id: nanoid::nanoid!(), tabs: vec![tab.clone()], active_tab_id: Some(tab.id.clone()), bounds: bounds.clone(), hidden: false, restore_on_launch: true };
+                    let win = DetachedWindow { id: nanoid::nanoid!(), tabs: vec![tab.clone()], active_tab_id: Some(tab.id.clone()), bounds: bounds.clone(), hidden: false, restore_on_launch: true, options: WindowOptions::default(), pinned: false };
                     let next = map_detached(&ui.detached_windows, window_id, &|w| apply_tab_group_detached(w, group_remove_tab(&group_of_detached(w), tab_id)));
                     let mut next = prune_empty_windows(next);
                     next.push(win.clone());
@@ -303,6 +303,8 @@ pub(crate) fn apply_layout_op(ui: &mut AppUiState, op: &LayoutOp) -> LayoutOpRes
                     bounds: bounds.clone(),
                     hidden: false,
                     restore_on_launch: restore_on_launch.unwrap_or(true),
+                    options: WindowOptions::default(),
+                    pinned: false,
                 };
                 ui.detached_windows.push(win.clone());
                 result.detached_window = Some(win);
@@ -318,6 +320,42 @@ pub(crate) fn apply_layout_op(ui: &mut AppUiState, op: &LayoutOp) -> LayoutOpRes
         LayoutOp::ShowDetachedWindow { window_id } => {
             if let Some(w) = ui.detached_windows.iter_mut().find(|w| w.id == *window_id) {
                 w.hidden = false;
+            }
+        }
+        LayoutOp::ToggleDetachedWindow { view, bounds, options } => {
+            // 按视图定位条目（一个视图至多一个 toggle 窗口）：有 = 显隐翻转 + 选项随本次声明收敛；
+            // 无 = 以给定边界与选项新建（视图全局唯一，被占用 = 忽略）。bounds 仅新建时使用。
+            if let Some(w) = ui
+                .detached_windows
+                .iter_mut()
+                .find(|w| w.tabs.iter().any(|t| t.view == *view))
+            {
+                w.options = *options;
+                w.hidden = !w.hidden;
+                result.detached_window = Some(w.clone());
+            } else if !view_occupied(ui, view, None) {
+                let tab = create_tab(view);
+                let win = DetachedWindow {
+                    id: nanoid::nanoid!(),
+                    tabs: vec![tab.clone()],
+                    active_tab_id: Some(tab.id.clone()),
+                    bounds: bounds.clone(),
+                    hidden: false,
+                    restore_on_launch: false,
+                    options: *options,
+                    pinned: false,
+                };
+                ui.detached_windows.push(win.clone());
+                result.detached_window = Some(win);
+            }
+        }
+        LayoutOp::SetDetachedWindowPinned { window_id, pinned } => {
+            if let Some(w) = ui
+                .detached_windows
+                .iter_mut()
+                .find(|w| w.id == *window_id && w.options.hide_on_blur)
+            {
+                w.pinned = *pinned;
             }
         }
         LayoutOp::SetLayoutSizes { split_id, sizes } => {
@@ -536,6 +574,167 @@ pub async fn layout_op(app: AppHandle, op: LayoutOp) -> Result<LayoutOpResult, S
     Ok(result)
 }
 
+/// 按视图 toggle 的默认边界（首次热键唤起建窗用；此后以窗口事件回写的模型 bounds 为准）：
+/// 主显示器右侧贴边、垂直偏上，逻辑 px。
+#[cfg(desktop)]
+fn default_summon_bounds(app: &AppHandle) -> WindowBounds {
+    const W: f64 = 440.0;
+    const H: f64 = 680.0;
+    if let Ok(Some(monitor)) = app.primary_monitor() {
+        let sf = monitor.scale_factor() as f64;
+        let lw = monitor.size().width as f64 / sf;
+        let lh = monitor.size().height as f64 / sf;
+        return WindowBounds {
+            x: (lw - W - 24.0).max(12.0),
+            y: ((lh - H) * 0.18).max(12.0),
+            width: W,
+            height: H,
+            scale: sf,
+        };
+    }
+    WindowBounds { x: 60.0, y: 60.0, width: W, height: H, scale: 1.0 }
+}
+
+/// 热键直控（Rust 快捷键触发线程投递 async runtime 执行，不经主窗口 JS——主窗口驻留
+/// 托盘时照常生效）：与 `layout_op` 命令同一套「模型变更 → 调和 → 窗口动作 → 落盘 → 广播」
+/// 序列。选项随 toggle 收敛到条目（创建方的配置变更由此生效）；新建时的边界由宿主按
+/// 主显示器推导（创建后以窗口事件回写为准）。
+#[cfg(desktop)]
+pub fn toggle_window_by_view(
+    app: &AppHandle,
+    view: &str,
+    options: WindowOptions,
+) -> Result<(), String> {
+    let state = app.state::<LayoutState>();
+    // 默认边界在锁外推导：primary_monitor() 阻塞等待主事件循环应答，持锁调用会与主线程
+    // 的窗口事件（write_bounds 等需同一把锁）互等死锁——「让主事件循环回头的动作一律
+    // 放锁后」纪律的另一种形态。边界仅新建分支使用（apply 内判定条目是否已存在），
+    // 既有条目的 toggle 忽略它。
+    let bounds = default_summon_bounds(app);
+    let op = LayoutOp::ToggleDetachedWindow { view: view.to_string(), bounds, options };
+    let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
+    if !inner.loaded {
+        return Ok(());
+    }
+    if !op_passes_shape_check(&inner.ui, &op) {
+        return Ok(());
+    }
+    let result = apply_layout_op(&mut inner.ui, &op);
+    inner.dirty = true;
+    let ui = inner.ui.clone();
+    drop(inner);
+    reconcile_panel_windows(&app);
+    apply_window_action(app, &op, &ui, &result);
+    schedule_persist(app, &state);
+    broadcast_layout(app, &ui);
+    Ok(())
+}
+
+/// 将撕裂窗口置为隐藏（模型 hidden 置真 + 广播 + 调度落盘 + OS 隐藏）；
+/// 非 `panel-` 窗口或模型已隐藏 = no-op。失焦收起与关闭键隐藏共用。
+#[cfg(desktop)]
+pub(crate) fn hide_detached_window(app: &AppHandle, label: &str) {
+    let Some(id) = label.strip_prefix(crate::layout_window::PANEL_LABEL_PREFIX) else {
+        return;
+    };
+    let state = app.state::<LayoutState>();
+    let Ok(mut inner) = state.inner.lock() else {
+        return;
+    };
+    let Some(w) = inner.ui.detached_windows.iter_mut().find(|w| w.id == id) else {
+        return;
+    };
+    if w.hidden {
+        return;
+    }
+    w.hidden = true;
+    let ui = inner.ui.clone();
+    inner.dirty = true;
+    drop(inner);
+    if let Some(win) = app.get_webview_window(label) {
+        let _ = win.hide();
+    }
+    broadcast_layout(app, &ui);
+    schedule_persist(app, &state);
+}
+
+/// 失焦自动收起（`options.hide_on_blur` 声明的窗口；图钉豁免）。
+/// 失焦带宽限期复核：头部拖动区启动原生拖拽在 Windows 上会瞬时失焦，立即收会打断拖动——
+/// 延迟后复核焦点，已回到本窗口（拖拽结束回焦/用户点回）则不收。
+/// 桌面专属（焦点语义仅桌面有）。
+#[cfg(desktop)]
+pub fn hide_window_on_blur(app: &AppHandle, label: &str) {
+    let Some(id) = label.strip_prefix(crate::layout_window::PANEL_LABEL_PREFIX) else {
+        return;
+    };
+    let state = app.state::<LayoutState>();
+    let Ok(inner) = state.inner.lock() else {
+        return;
+    };
+    let should_hide = inner
+        .ui
+        .detached_windows
+        .iter()
+        .find(|w| w.id == id)
+        .is_some_and(|w| w.options.hide_on_blur && !w.pinned && !w.hidden);
+    drop(inner);
+    if !should_hide {
+        return;
+    }
+    let app = app.clone();
+    let label = label.to_string();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(220));
+        let Some(win) = app.get_webview_window(&label) else {
+            return;
+        };
+        // 拖动循环期间 is_focused 报告实现不一：以「仍持有焦点」为豁免判据，
+        // 焦点确实离开（点了其他应用/窗口）才收。图钉豁免在 set 前按最新模型复算。
+        if win.is_focused().unwrap_or(false) {
+            return;
+        }
+        let state = app.state::<LayoutState>();
+        let exempt = state
+            .inner
+            .lock()
+            .ok()
+            .and_then(|inner| {
+                inner
+                    .ui
+                    .detached_windows
+                    .iter()
+                    .find(|w| w.id == label.trim_start_matches(crate::layout_window::PANEL_LABEL_PREFIX))
+                    .map(|w| w.pinned || !w.options.hide_on_blur)
+            })
+            .unwrap_or(true);
+        if exempt {
+            return;
+        }
+        hide_detached_window(&app, &label);
+    });
+}
+
+/// 关闭请求是否按「隐藏不销毁」处理（`options.close_hides` 声明；label → 模型条目查表）。
+#[cfg(desktop)]
+pub fn window_close_hides(app: &AppHandle, label: &str) -> bool {
+    let Some(id) = label.strip_prefix(crate::layout_window::PANEL_LABEL_PREFIX) else {
+        return false;
+    };
+    app.state::<LayoutState>()
+        .inner
+        .lock()
+        .ok()
+        .and_then(|inner| {
+            inner
+                .ui
+                .detached_windows
+                .iter()
+                .find(|w| w.id == id)
+                .map(|w| w.options.close_hides)
+        })
+        .unwrap_or(false)
+}
+
 /// 布局操作触达的 OS 窗口动作（免标签直撕建窗 / 聚焦 / 显隐）：模型变更与调和后执行。
 /// 建窗走 `create_panel_window_internal`（其内部与 UI 驻留标志取交集）。驻留期间的显式
 /// 唤起（show/直撕）照常把目标窗口带到眼前——那是用户的直接意图，且该窗口已随
@@ -627,6 +826,46 @@ fn apply_window_action(app: &AppHandle, op: &LayoutOp, ui: &AppUiState, result: 
                 }
             }
         }
+        LayoutOp::ToggleDetachedWindow { .. } => {
+            // 显隐翻转在 apply 阶段完成，此处按应用后的模型条目执行 OS 动作：
+            // 未建窗先补建（驻留期间建窗会因驻留标志为隐藏，随后统一 show）；显示 = 前置 + 聚焦，
+            // 且 residence_forget 从驻留备份除名（托盘恢复不把它翻回隐藏）；隐藏 = 仅隐藏。
+            if let Some(w) = &result.detached_window {
+                let label = format!("{PANEL_LABEL_PREFIX}{}", w.id);
+                let entry = ui.detached_windows.iter().find(|e| e.id == w.id);
+                let show = entry.is_some_and(|e| !e.hidden);
+                if app.get_webview_window(&label).is_none() {
+                    if let Some(e) = entry {
+                        crate::commands::windows::create_panel_window_internal(
+                            app,
+                            &label,
+                            &title_of_tabs(&e.tabs, &e.active_tab_id),
+                            &e.bounds,
+                            true,
+                        );
+                    }
+                }
+                if let Some(win) = app.get_webview_window(&label) {
+                    // 既有 OS 窗口的选项收敛：本次声明可能变更了置顶/任务栏属性，
+                    // 建窗时应用的旧值在此对齐模型（补建路径由建窗函数自行应用）
+                    crate::commands::windows::apply_window_os_options(app, &label);
+                    if show {
+                        residence_forget(app, &w.id);
+                        // unminimize 桌面专属 API（移动端单窗口无最小化语义）
+                        #[cfg(desktop)]
+                        {
+                            let _ = win.unminimize();
+                        }
+                        let _ = win.show();
+                        let _ = win.set_focus();
+                    } else {
+                        let _ = win.hide();
+                    }
+                }
+            }
+        }
+        // 图钉只改模型（失焦收起判定读模型），无 OS 动作
+        LayoutOp::SetDetachedWindowPinned { .. } => {}
         _ => {}
     }
 }
@@ -827,6 +1066,8 @@ mod tests {
             bounds: WindowBounds { x: 0.0, y: 0.0, width: 100.0, height: 100.0, scale: 1.0 },
             hidden,
             restore_on_launch: true,
+            options: WindowOptions::default(),
+            pinned: false,
         };
         let mut ui = AppUiState {
             schema: UI_STATE_SCHEMA.into(),
@@ -1158,6 +1399,37 @@ mod tests {
         let _ = apply_layout_op(&mut ui, &LayoutOp::DockIntoDetached { window_id: w1.clone(), tab_id: "t-files".into(), index: Some(0) });
         let tabs: Vec<&str> = ui.detached_windows.iter().find(|w| w.id == w1).unwrap().tabs.iter().map(|t| t.view.as_str()).collect();
         assert_eq!(tabs, vec!["files", "canvas"]);
+    }
+
+    #[test]
+    fn toggle_window_by_view_and_pin() {
+        let mut ui = ui_with(two_panels_horizontal());
+        let b = WindowBounds { x: 0.0, y: 0.0, width: 440.0, height: 680.0, scale: 1.0 };
+        let opts = WindowOptions {
+            always_on_top: true,
+            skip_taskbar: true,
+            hide_on_blur: true,
+            close_hides: true,
+        };
+        // 首次 toggle：以声明选项新建（不参与启动恢复、初始可见）
+        let r = apply_layout_op(&mut ui, &LayoutOp::ToggleDetachedWindow { view: "com.test.summon".into(), bounds: b.clone(), options: opts });
+        let w1 = r.detached_window.expect("首次 toggle 应建窗");
+        assert!(w1.options.always_on_top && !w1.pinned && !w1.restore_on_launch && !w1.hidden);
+        // 再次 toggle = 翻转为隐藏
+        let _ = apply_layout_op(&mut ui, &LayoutOp::ToggleDetachedWindow { view: "com.test.summon".into(), bounds: b.clone(), options: opts });
+        assert!(ui.detached_windows.iter().find(|w| w.id == w1.id).unwrap().hidden);
+        // 第三次 toggle = 复原可见（不新建条目）
+        let r = apply_layout_op(&mut ui, &LayoutOp::ToggleDetachedWindow { view: "com.test.summon".into(), bounds: b.clone(), options: opts });
+        let w = ui.detached_windows.iter().find(|x| x.id == w1.id).unwrap();
+        assert_eq!(r.detached_window.as_ref().unwrap().id, w1.id);
+        assert!(!w.hidden);
+        assert_eq!(ui.detached_windows.len(), 1);
+        // 图钉只作用于声明了失焦收起的条目
+        let _ = apply_layout_op(&mut ui, &LayoutOp::SetDetachedWindowPinned { window_id: w1.id.clone(), pinned: true });
+        assert!(ui.detached_windows[0].pinned);
+        // 视图已被 toggle 窗口占用：其他窗口占据同一视图 = 忽略（不建第二条目）
+        let _ = apply_layout_op(&mut ui, &LayoutOp::CreateDetachedWindow { view: "com.test.summon".into(), bounds: b, restore_on_launch: Some(true) });
+        assert_eq!(ui.detached_windows.len(), 1);
     }
 
     #[test]

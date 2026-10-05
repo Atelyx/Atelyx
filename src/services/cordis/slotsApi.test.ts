@@ -10,7 +10,7 @@ import type { Context } from "@atelyx/cordis";
 import type { SlotDeclaration } from "@/constants/slots";
 import { createKernel, type Kernel } from "./kernel";
 import { mountPlugin, unmountAll, unmountPlugin } from "./loader";
-import { resolveViewKind, viewKinds, listSlot, listDecorators, registeredSlots, onSlotChange, findSlotDeclarationRuntime } from "./slots";
+import { resolveViewKind, dockableViewKinds, listSlot, listDecorators, registeredSlots, onSlotChange, findSlotDeclarationRuntime } from "./slots";
 import { getPluginTableView } from "./ui";
 import { setPluginSlotHostComponent } from "./access";
 
@@ -32,12 +32,12 @@ describe("ctx.slots", () => {
       ctx.slots.registerView({ kind: "com.test.panel", label: "面板", component: () => null });
     };
     await mountPlugin(kernel, { id: "com.test.ui", apply });
-    expect(viewKinds()).toContain("com.test.panel");
+    expect(dockableViewKinds()).toContain("com.test.panel");
     expect(resolveViewKind("com.test.panel")?.pluginId).toBe("com.test.ui");
     expect(resolveViewKind("com.test.panel")?.payload.label).toBe("面板");
 
     await unmountAll(kernel);
-    expect(viewKinds()).toEqual([]);
+    expect(dockableViewKinds()).toEqual([]);
   });
 
   it("registerTableView：表格视图注册；卸载撤销", async () => {
@@ -61,7 +61,7 @@ describe("ctx.slots", () => {
     };
     const result = await mountPlugin(kernel, { id: "com.test.ui", apply });
     expect(result.ok).toBe(false);
-    expect(viewKinds()).toEqual([]);
+    expect(dockableViewKinds()).toEqual([]);
   });
 
   it("registerUi：可向已声明的具名槽位贡献组件；卸载撤销", async () => {
@@ -169,7 +169,7 @@ describe("载荷与参数契约", () => {
       const result = await mountPlugin(kernel, { id: "com.test.ui", apply: c.register });
       expect(result.ok, c.name).toBe(false);
       if (!result.ok) expect(result.message, c.name).toContain("类型不符");
-      expect(viewKinds(), c.name).toEqual([]);
+      expect(dockableViewKinds(), c.name).toEqual([]);
       await unmountAll(kernel);
       kernel = null;
     }

@@ -65,6 +65,9 @@ pub(crate) fn create_panel_window_internal(
         let win = builder.build();
         match win {
             Ok(win) => {
+                // 按条目声明的窗口选项应用 OS 属性（置顶 / 不进任务栏；失焦收起与
+                // 关闭即藏由窗口事件层按模型 options 判定）
+                apply_window_os_options(app, &label);
                 // 窗口事件钩子：Moved/Resized → 布局迷你窗口管理器权威 bounds（拖拽命中/落点解析）
                 win.on_window_event(window_event_handler(app, label_owned.clone()));
                 // 种子化初始 bounds：新窗未触发 Moved/Resized 前拖拽解析读不到（主窗口同，见 setup）
@@ -91,6 +94,34 @@ pub(crate) fn close_panel_window_internal(app: &AppHandle, window_id: &str) {
     let label_full = format!("{PANEL_LABEL_PREFIX}{window_id}");
     if let Some(win) = app.get_webview_window(&label_full) {
         let _ = win.close();
+    }
+}
+
+/// 按模型条目的窗口选项重应用 OS 属性（置顶 / 不进任务栏）到已建 OS 窗口。
+/// 建窗路径（create_panel_window_internal）与选项收敛路径（toggle 后的既有窗口）共用；
+/// 窗口不存在 = no-op。失焦收起与关闭即藏由窗口事件层实时读模型，不经此处。
+pub(crate) fn apply_window_os_options(app: &AppHandle, label: &str) {
+    let options = app
+        .state::<crate::layout::LayoutState>()
+        .inner
+        .lock()
+        .ok()
+        .and_then(|inner| {
+            let id = label.strip_prefix(PANEL_LABEL_PREFIX)?;
+            inner
+                .ui
+                .detached_windows
+                .iter()
+                .find(|w| w.id == id)
+                .map(|w| w.options)
+        });
+    if let Some(options) = options {
+        let _ = &options;
+        #[cfg(desktop)]
+        if let Some(win) = app.get_webview_window(label) {
+            let _ = win.set_always_on_top(options.always_on_top);
+            let _ = win.set_skip_taskbar(options.skip_taskbar);
+        }
     }
 }
 

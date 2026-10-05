@@ -18,7 +18,7 @@ import {
 import { CORDIS_BUILTIN_DEFS, DEFAULT_COMPOSITION } from "@/components/plugins/cordis/builtins";
 import { createKernel, type Kernel } from "./kernel";
 import { mountPlugin, mountedPluginIds, unmountAll } from "./loader";
-import { resolveViewKind, viewKinds } from "./slots";
+import { resolveViewKind, dockableViewKinds } from "./slots";
 import { getChatRuntime } from "@/utils/chatRuntimeHost";
 import { composePlugins, mountOrder, type CompositionPackage } from "@/utils/cordis/composition";
 
@@ -75,7 +75,7 @@ describe("随应用分发插件挂载集成", () => {
     await mountAll(kernel);
 
     // 视图槽：默认组合的视图 kind 全部注册（主题行无视图）。
-    const kinds = viewKinds();
+    const kinds = dockableViewKinds();
     expect(kinds).toContain("canvas");
     expect(kinds).toContain("table");
     expect(kinds).toContain("note");
@@ -103,7 +103,7 @@ describe("随应用分发插件挂载集成", () => {
 
     // 卸载全部：槽与服务随 fiber 撤销。
     await unmountAll(kernel);
-    expect(viewKinds()).toEqual([]);
+    expect(dockableViewKinds()).toEqual([]);
     expect(kernel.ctx.get("canvas")).toBeUndefined();
     expect(kernel.ctx.get("table")).toBeUndefined();
     expect(kernel.ctx.get("note")).toBeUndefined();

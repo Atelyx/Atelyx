@@ -46,24 +46,33 @@ export function closeWindow(): Promise<void> {
  * Rust 侧同步置驻留标志，见 src-tauri/src/tray.rs）。 */
 export type CloseAfter = "destroy" | "hideAll";
 
+/** 关窗回调返回 "keep" = 本次关闭请求已由回调消化（如声明 closeHides 的撕裂窗口：
+ * 隐藏不销毁），跳过 after 收尾——不返回或返回其他值照常收尾。 */
+export type CloseDisposition = "keep" | void;
+
 /** 注册窗口关闭请求监听：先阻止默认关闭，await 回调（落盘等）后按 after 收尾。
  * 返回取消订阅函数；收尾在回调完成后执行，防 debounce 窗口内丢改动。
  * 移动端无「关窗」语义，不注册。 */
 export async function onCloseRequested(
-  handler: () => Promise<void>,
+  handler: () => Promise<CloseDisposition>,
   after: CloseAfter = "destroy",
 ): Promise<() => void> {
   if (!WINDOW_CONTROLS) return () => {};
   const win = getCurrentWindow();
   return win.onCloseRequested(async (event) => {
     event.preventDefault();
+    let keep = false;
     try {
-      await handler();
+      keep = (await handler()) === "keep";
     } finally {
-      if (after === "destroy") {
-        await win.destroy();
-      } else {
-        await invoke("hide_to_tray").catch((e) => console.error("驻留系统托盘失败", e));
+      // 回调失败照常收尾（维持既有语义：flush 失败不卡死窗口）；
+      // 仅回调明确返回 keep 才跳过收尾
+      if (!keep) {
+        if (after === "destroy") {
+          await win.destroy();
+        } else {
+          await invoke("hide_to_tray").catch((e) => console.error("驻留系统托盘失败", e));
+        }
       }
     }
   });

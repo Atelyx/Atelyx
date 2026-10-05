@@ -21,6 +21,8 @@ export interface ViewSlotPayload {
   label: string;
   component?: ComponentType;
   render?: (hostId: string) => ReactNode;
+  /** 独立窗口专用视图：不进「添加面板」菜单，只由插件自定窗口形态承载（经布局命令/热键唤起；缺省 false = 可停靠）。 */
+  standaloneOnly?: boolean;
 }
 
 /** 视图贡献（ViewHost 分派用：slot 胜出贡献的转换形态；render 优先，重型视图承载宿主面板 id）。 */
@@ -30,6 +32,8 @@ export interface ViewContribution {
   component?: ComponentType;
   /** 按宿主面板/撕裂窗口 id 渲染（重型视图用；普通插件面板不提供）。 */
   render?: (hostId: string) => ReactNode;
+  /** 独立窗口专用视图：不进「添加面板」菜单，只由插件自定窗口形态承载。 */
+  standaloneOnly?: boolean;
   pluginId: string;
 }
 
@@ -217,12 +221,14 @@ export function slotConflictRows(pins: Record<string, string>): SlotConflictRow[
   return rows.sort((a, b) => (a.slot < b.slot ? -1 : 1));
 }
 
-/** 全部已注册的视图 kind（槽名剥 `view/` 前缀；视图菜单/选择器用）。 */
-export function viewKinds(): string[] {
+/** 可停靠视图清单（「添加面板」菜单数据源）：独立窗口专用视图（standaloneOnly）不在列。 */
+export function dockableViewKinds(): string[] {
   const prefix = "view/";
   return registeredSlots()
     .filter((s) => s.startsWith(prefix))
-    .map((s) => s.slice(prefix.length));
+    .map((s) => resolveSlot(s) as ViewSlotContribution)
+    .filter((c) => c?.payload.standaloneOnly !== true)
+    .map((c) => c.slot.slice(prefix.length));
 }
 
 // ===== 插件自声明槽位（ctx.slots.declare：运行时声明，先到先得 + 宿主保护） =====
@@ -399,11 +405,12 @@ function assertSlotDeclared(slot: string, cardinality: SlotCardinality, payload:
 
 /** 载荷字段的值类型契约（按字段名约定）：槽位字段面小且稳定，无需在声明表逐槽展开。
  *  `undefined` 不在此判（缺字段由 required 校验负责），只拦「字段给了但类型不符」。 */
-const PAYLOAD_FIELD_TYPES: Record<string, "string" | "function"> = {
+const PAYLOAD_FIELD_TYPES: Record<string, "string" | "function" | "boolean"> = {
   label: "string",
   component: "function",
   render: "function",
   onClick: "function",
+  standaloneOnly: "boolean",
 };
 
 /** 载荷字段契约校验：缺必需字段 / 带未知字段 / 值类型不符即抛错
@@ -427,7 +434,7 @@ function assertSlotPayload(slot: string, decl: SlotDeclaration, payload: unknown
   const wrongType = Object.keys(record).filter((key) => {
     const expected = PAYLOAD_FIELD_TYPES[key];
     if (!expected || record[key] === undefined) return false;
-    return expected === "string" ? typeof record[key] !== "string" : typeof record[key] !== "function";
+    return typeof record[key] !== expected;
   });
   if (wrongType.length > 0) {
     throw new Error(`槽位「${slot}」的载荷字段类型不符：${wrongType.join("、")}（应为 ${slotPayloadShape(decl)}）`);

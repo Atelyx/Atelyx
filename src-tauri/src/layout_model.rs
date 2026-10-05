@@ -89,6 +89,24 @@ pub struct Scene {
     pub layouts: Vec<WorkspaceLayout>,
 }
 
+/// 撕裂窗口的可定制 OS 属性（声明式开放给创建方，任意子集组合；缺省 = 全关，等同普通撕裂窗口）。
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowOptions {
+    /// 置顶（覆盖式浮窗）。
+    #[serde(default)]
+    pub always_on_top: bool,
+    /// 不进任务栏。
+    #[serde(default)]
+    pub skip_taskbar: bool,
+    /// 失焦自动收起（隐藏不销毁；`pinned` 豁免）。
+    #[serde(default)]
+    pub hide_on_blur: bool,
+    /// OS 关闭请求（关闭键 / Alt+F4）= 隐藏不销毁，而非销毁条目。
+    #[serde(default)]
+    pub close_hides: bool,
+}
+
 /// 撕裂出去的独立窗口（应用级、跨布局共享）。
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -107,6 +125,12 @@ pub struct DetachedWindow {
     /// 显示由创建方显式触发）。缺省 = 参与。
     #[serde(default = "default_true")]
     pub restore_on_launch: bool,
+    /// 可定制 OS 属性（创建/toggle 时由创建方声明并随条目持久化）。
+    #[serde(default)]
+    pub options: WindowOptions,
+    /// 图钉：失焦不收起（仅 `options.hide_on_blur` 开启时有意义；运行期用户豁免开关）。
+    #[serde(default)]
+    pub pinned: bool,
 }
 
 fn default_true() -> bool {
@@ -245,6 +269,13 @@ pub enum LayoutOp {
     HideDetachedWindow { window_id: String },
     /// 恢复显示撕裂窗口并前置（未建窗的不参与启动恢复窗口由此补建；条目不存在 = 忽略）。
     ShowDetachedWindow { window_id: String },
+    /// 按视图显隐翻转一个撕裂窗口（热键直控的通用能力）：按视图定位条目，有 = 显隐翻转
+    /// 并将条目 options 收敛为本次声明；无 = 以给定边界与选项新建（不参与启动恢复）；
+    /// 视图被主树面板占用（且无含该视图的撕裂条目）= 忽略。
+    /// bounds 仅新建时使用，此后以窗口事件回写的模型 bounds 为准。
+    ToggleDetachedWindow { view: ViewKind, bounds: WindowBounds, options: WindowOptions },
+    /// 图钉：失焦不收起（仅 `options.hide_on_blur` 开启的撕裂窗口有意义；其余 = 忽略）。
+    SetDetachedWindowPinned { window_id: String, pinned: bool },
     /// 拖拽调宽回写 Split 子树尺寸比例（百分数，和 = 100，长度 = children 长度）。
     SetLayoutSizes { split_id: String, sizes: Vec<f64> },
     /// 新建布局（单个空面板占位），命名「布局 N」自动去重，并激活。
@@ -682,7 +713,7 @@ pub(crate) fn apply_tab_group_panel(panel: &LayoutNode, patch: Option<TabGroup>)
 /// 把标签组补丁写回撕裂窗口。
 pub(crate) fn apply_tab_group_detached(win: &DetachedWindow, patch: Option<TabGroup>) -> DetachedWindow {
     match patch {
-        Some(p) => DetachedWindow { id: win.id.clone(), tabs: p.tabs, active_tab_id: p.active_tab_id, bounds: win.bounds.clone(), hidden: win.hidden, restore_on_launch: win.restore_on_launch },
+        Some(p) => DetachedWindow { id: win.id.clone(), tabs: p.tabs, active_tab_id: p.active_tab_id, bounds: win.bounds.clone(), hidden: win.hidden, restore_on_launch: win.restore_on_launch, options: win.options, pinned: win.pinned },
         None => win.clone(),
     }
 }
@@ -1324,6 +1355,8 @@ mod tests {
             bounds: WindowBounds { x: 0.0, y: 0.0, width: 100.0, height: 100.0, scale: 0.0 },
             hidden: false,
             restore_on_launch: true,
+            options: Default::default(),
+            pinned: false,
         });
         normalize(&mut ui);
         assert_eq!(ui.schema, UI_STATE_SCHEMA);

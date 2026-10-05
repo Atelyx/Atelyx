@@ -78,7 +78,9 @@ describe("槽位声明表", () => {
   });
 
   it("载荷形状由字段契约派生", () => {
-    expect(slotPayloadShape(findSlotDeclaration("view/canvas")!)).toBe("{ label, component?, render? }");
+    expect(slotPayloadShape(findSlotDeclaration("view/canvas")!)).toBe(
+      "{ label, component?, render?, standaloneOnly? }",
+    );
     expect(slotPayloadShape(findSlotDeclaration("toolbar/note/right")!)).toBe("{ component }");
   });
 

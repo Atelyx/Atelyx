@@ -72,8 +72,70 @@ export function PanelWindowRoot() {
 
   const isDropTarget = dropTarget?.window === windowId && dropTarget.zone === "center";
 
+  // 插件声明了窗口选项（自定形态）的撕裂窗口：无标题栏/标签条的裸渲染——插件视图
+  // 自带头部（拖动区 + 窗口动作），错误态保留最小拖动条 + 重试（否则窗口既拖不动
+  // 也无处重试）。关闭语义由窗口选项声明，Rust/守卫按选项拦截。
+  // 判定 = 窗口声明了任一非默认选项（即创建方要求的特殊形态）→ 裸渲染插件视图。
+  const isStandaloneWindow = useUiStateStore((s) =>
+    (s.detachedWindows ?? []).some(
+      (w) => w.id === windowId && Object.values(w.options ?? {}).some(Boolean),
+    ),
+  );
+
   if (!panelReady) {
     return <LoadingScreen />;
+  }
+
+  if (isStandaloneWindow) {
+    return (
+      <div className="h-full w-full flex flex-col" data-panel-drop-root>
+        {panelError ? (
+          <>
+            <div
+              className="h-9 flex items-center gap-1 px-2 flex-shrink-0 select-none"
+              style={{ background: "var(--bg-secondary)", borderBottom: "1px solid var(--border)" }}
+              data-tauri-drag-region
+            >
+              <span
+                className="text-xs truncate"
+                style={{ color: "var(--text-secondary)" }}
+                data-tauri-drag-region
+              >
+                {title}
+              </span>
+              <div className="ml-auto h-full flex items-center" data-tauri-drag-region>
+                <TitleBarControls
+                  onMinimize={() => void minimizeWindow()}
+                  onMaximize={() => void toggleMaximizeWindow()}
+                  onClose={() => void closeWindow()}
+                />
+              </div>
+            </div>
+            <div className="flex-1 min-h-0">
+              <PanelPlaceholder
+                icon={<TriangleAlert size={64} strokeWidth={1.5} />}
+                title="面板未能加载"
+                description={panelError}
+                action={
+                  <button
+                    onClick={() => void usePanelStore.getState().retryPanelInit()}
+                    className="px-3 py-1.5 rounded text-xs border hover:bg-[var(--hover)]"
+                    style={{ borderColor: "var(--border)", color: "var(--text-primary)" }}
+                  >
+                    重试
+                  </button>
+                }
+              />
+            </div>
+          </>
+        ) : activeTab ? (
+          <div className="flex-1 min-h-0">
+            <ViewHost view={activeTab.view} hostId={windowId} />
+          </div>
+        ) : null}
+        <DragGhost />
+      </div>
+    );
   }
 
   return (
