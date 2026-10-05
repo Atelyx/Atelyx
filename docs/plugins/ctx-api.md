@@ -41,10 +41,11 @@ ctx.effect(() => {
 | `ctx.table` | `snapshot(): PluginTableSnapshot` / `updateCell(rowId: string, fieldId: string, value: CellValue | undefined): void` / `addRow(): void` / `removeRow(rowId: string): void` / `selectRow(rowId: string | null): void` / `resolveImage(entry: string): Promise<string>` | 表格数据服务（由随应用分发的表格插件提供，停用即不可用；写操作要求已接线）。 |
 | `ctx.note` | `currentFile(): string | null` / `open(file: string, title: string): void` / `read(file?: string): Promise<string>` / `write(content: string): Promise<void>` / `save(): Promise<void>` | 笔记内容服务（由随应用分发的笔记插件提供，停用即不可用；读写走当前仓库上下文的编辑器链）。 写入 `.md` 为整文件写（后写者胜）：该笔记若正被编辑且有待落盘输入，其后续自动保存会把本地 输入写盘，覆盖本次写入的内容。 |
 | `ctx.markdown` | `renderHtml(markdown: string, options?: PluginMarkdownOptions): string` / `parse(markdown: string, options?: PluginMarkdownOptions): MarkdownDocument` / `renderToFragment(markdown: string, options?: PluginMarkdownOptions): DocumentFragment | null` | Markdown 渲染服务（内核平台能力，恒可用）：与编辑器同一内核， 纯文本进、规格/DOM/已清洗 HTML 出，渲染结果与应用内展示一致。 |
-| `ctx.chat` | `resolveTarget(selection?: ChatTargetSelection | null): ChatTargetResult` / `runTurn(req: ChatTurnRequest): Promise<void>` / `compact(req: ChatCompactRequest): Promise<ChatCompactResult>` / `autoName(naming: ChatNamingTarget, targetId: string, opts?: ChatAutoNameOptions): Promise<ChatAutoNameResult>` | AI 对话能力（由随应用分发的对话核心插件提供，停用即不可用）：用宿主配置的模型/Agent/工具跑一轮对话。 核心只跑一轮——消息容器与落盘留在调用方（插件自带容器），流式与收尾经 `ChatTurnSink` 交回。 类型面与宿主内部消费方同一份契约（见 types/chatRuntime.ts 的 `ChatRuntime`）。 |
+| `ctx.chat` | `resolveTarget(selection?: ChatTargetSelection | null): ChatTargetResult` / `runTurn(req: ChatTurnRequest): Promise<void>` / `compact(req: ChatCompactRequest): Promise<ChatCompactResult>` / `autoName(naming: ChatNamingTarget, targetId: string, opts?: ChatAutoNameOptions): Promise<ChatAutoNameResult>` / `importSession(messages: ChatTurnMessage[], opts?: { title?: string; agentId?: string }): Promise<{ id: string }>` / `appendMessages(sessionId: string, messages: ChatTurnMessage[]): Promise<void>` | AI 对话能力（由随应用分发的对话核心插件提供，停用即不可用）：用宿主配置的模型/Agent/工具跑一轮对话。 核心只跑一轮——消息容器与落盘留在调用方（插件自带容器），流式与收尾经 `ChatTurnSink` 交回。 容器方法（importSession/appendMessages）写入宿主对话面板，要求对话面板插件已启用（未启用即抛错）。 类型面与宿主内部消费方同一份契约（见 types/chatRuntime.ts 的 `ChatRuntime`）。 |
 | `ctx.history` | `list(kind: HistoryKind, file: string): Promise<HistoryVersion[]>` / `rollback(kind: HistoryKind, file: string, seq: number): Promise<void>` / `repoHistory(): RepoHistoryResult | null` | 领域历史服务（笔记/画布/表格的版本历史读 + 回滚）。 |
 | `ctx.layout` | `activeLayoutId(): string | null` / `layouts(): WorkspaceLayout[]` / `addView(panelId: string, view: string): Promise<LayoutOpResult>` / `op(op: LayoutOp): Promise<LayoutOpResult>` / `declareDefaultLayout(spec: PluginDefaultLayoutSpec): () => void` | 布局服务（读取布局镜像 + 发布布局操作；`op` 与 Rust `LayoutOp` 逐字段对齐，改布局一律经 `layout_op`，布局权威在 Rust）。 |
 | `ctx.uiState` | `read(): AppUiState` | 应用级 UI 使用状态读服务（只读非布局字段 + 布局镜像）。 |
+| `ctx.ui` | `showFloatingLayer(options: FloatingLayerOptions): FloatingLayerHandle` | 插件浮层承载服务（内核平台能力）：宿主代管浮层的定位、层级与 Esc/外点收起语义， 与宿主弹层同一套层级策略。浮层按调用方插件记账，插件停用/卸载时自动收起。 |
 | `ctx.slots` | `registerView(opts: RegisterViewOptions): () => void` / `registerTableView(opts: RegisterTableViewOptions): () => void` / `registerNode(opts: RegisterNodeOptions): () => void` / `registerEdge(opts: RegisterEdgeOptions): () => void` / `registerSetting(opts: RegisterSettingOptions): () => void` / `registerAppPage(opts: RegisterAppPageOptions): () => void` / `registerCommand(opts: RegisterCommandOptions): () => void` / `registerThemeSetting(opts: RegisterThemeSettingOptions): () => void` / `registerUi(opts: RegisterUiOptions): () => void` / `registerMenu(opts: RegisterMenuOptions): () => void` / `decorate(opts: RegisterDecorateOptions): () => void` / `declare(opts: RegisterDeclareOptions): () => void` / `host(slot: string): () => ReactNode` / `list(): readonly SlotDeclaration[]` | 插件 UI 注册服务（视图/节点/边/表格视图/设置项/应用页/命令/主题设置项/具名槽位/右键菜单/装饰器）。 |
 | `ctx.services` | `list(): ServiceInfo[]` / `get(name: K): Context[K] | undefined` | 服务注册表查询服务（ctx.services）：插件据此发现当前真实可用的服务面与提供者。 宿主内核提供平台服务（无 provider）；插件经 ctx.root.provide 提供的服务带提供者插件 id。 |
 | `ctx.native` | `invoke(command: string, args?: Record<string, unknown>): Promise<unknown>` | 原始 Rust 命令逃生舱（ctx.native.invoke）：未封装的服务能力经此触达，调用进审计。 |
@@ -256,6 +257,27 @@ ctx.slots.registerUi({ slot: "toolbar/com.example.panel/export", component: Expo
   界面里承载他插件贡献；调用时槽须已声明（宿主插件先 `declare` 后 `host`）。贡献按声明的载荷契约校验。
 - 声明同样出现在 `ctx.slots.list()`（合并视图含宿主声明表与插件运行时声明），其他插件可发现并贡献。
 
+### 插件浮层 `ctx.ui.showFloatingLayer`
+
+浮层是插件触达应用级悬浮 UI 的入口（快捷面板、迷你对话窗等）：宿主代管定位、层级与收起语义，
+与宿主弹层同一套层级策略，插件不自行挂 DOM。
+
+```ts
+const handle = ctx.ui.showFloatingLayer({
+  component: QuickChatPanel,          // 插件自己的 React 组件
+  placement: "center",                // 缺省视口居中；或 { x, y } 指定浮层左上角坐标
+  width: 360,
+  // closeOnOutsideClick: true,       // 缺省 false（浮层常驻输入防误触丢输入）；Esc 收起恒由宿主代管
+  onClose: () => saveDraft(),         // 任何收起路径触发（至多一次）
+});
+handle.close();                       // 插件主动收起
+```
+
+- 浮层随插件停用/卸载自动收起（登记按调用方插件记账）；重复调用叠加多层。
+- 收起路径：Esc（只关最上层）、外点（仅 `closeOnOutsideClick` 开启时，同样只关最上层）、句柄 `close()`、插件停用。
+- 浮层内组件的样式与容器规则同插件面板（见[样式与容器契约](styling.md)）；需要弹层、右键菜单等
+  二级浮层时仍走宿主浮层入口，不要在浮层内自挂 fixed 元素（transform 祖先会捕获定位）。
+
 ## AI 工具：`ctx.ai.registerTool`
 
 ```ts
@@ -274,6 +296,77 @@ ctx.ai.registerTool({
 - `run(args, { signal })` 返回气泡摘要文本；`signal` 在用户中止时置位（长任务请自行检查并尽快返回）；
   抛错即记为失败结果（不中断整轮对话）；工具名与已有工具重复会被拒绝（防覆盖宿主工具）。
 - 参数校验/摘要/结果回填由宿主补齐；工具内部访问仓库、网络等能力仍统一经 `ctx`（受同一审计与披露）。
+
+## 会话互通：`ctx.chat.importSession` / `appendMessages`
+
+插件自持容器的对话可登记为宿主对话面板会话：用户在面板历史里可见、可在面板中继续对话。
+
+```ts
+// 把插件容器里的既有消息整体导入为新会话（返回会话 id）
+const { id } = await ctx.chat.importSession(
+  [
+    { id: "m1", role: "user", content: "帮我总结这篇笔记" },
+    { id: "m2", role: "assistant", content: "总结如下……" },
+  ],
+  { title: "笔记总结" },          // 缺省按首条 user 消息派生标题；agentId 可指定会话 Agent
+);
+
+// 后续轮次继续追加到该会话（runTurn 产出经 sink 收集后再写入）
+await ctx.chat.appendMessages(id, [
+  { id: "m3", role: "user", content: "再精简一点" },
+  { id: "m4", role: "assistant", content: "精简后……" },
+]);
+```
+
+- 消息经宿主校验（失败抛错不静默）：`role` 限 user/assistant、`content` 须为字符串；
+  `id` 只需单次调用内唯一（撞车宿主自动重生成）；`steps`（思考/工具过程）随消息保留，面板气泡可展示。
+- 附件只支持 `file` 引用形态（重开会话按引用读回）；纯内联附件无法持久化，宿主直接拒绝。
+- 登记不改变面板当前激活会话；落盘走宿主会话链（防抖 + 失败可见）。
+- 容器方法要求对话面板插件已启用（未启用调用即抛错；`ctx.chat` 本体的编排方法不受影响）。
+
+## 会话压缩：`ctx.chat.compact`
+
+插件自持长会话可自行判断时机压缩：把检查点之前的模型可见历史折进一条摘要，之后重建请求时
+由摘要代替。注解非破坏性——消息本体不删改，仅在重建请求历史时按注解裁剪；锚点消息缺失
+（被回滚/丢弃）即注解失效，退回完整历史（宁可多发也不静默丢内容）。
+
+```ts
+// 1) 求边界：把当前全部消息折进检查点（至少一轮问答才有摘要意义；边界只前进，
+//    已覆盖到最后一条 = 无新增可压内容）
+function nextBoundary(messages: Array<{ id: string }>, current?: Compaction | null) {
+  if (messages.length < 2) return null;
+  const last = messages[messages.length - 1];
+  if (current && current.upToMessageId === last.id) return null;
+  return { upToMessageId: last.id, messageCount: messages.length };
+}
+
+// 2) 请求压缩（现有注解随请求传入：旧摘要与新内容一并重新总结，压缩两次不丢先前摘要）
+const result = await ctx.chat.compact({
+  target,                            // resolveTarget 解析的对话目标
+  messages,                          // 容器完整消息（含最新一轮）
+  compaction: current,               // 现有压缩注解（无则省略）
+  upToMessageId: boundary.upToMessageId,
+  agentId,                           // 与最近一次真实请求的 Agent 一致（工具名册对齐）
+  signal,
+});
+
+// 3) 成功后把注解写回自己的容器（重建请求历史时按它裁剪；失败 message 可展示，
+//    aborted = 用户中止静默）
+if (result.ok) {
+  saveCompaction({
+    summary: result.summary,
+    upToMessageId: boundary.upToMessageId,
+    messageCount: boundary.messageCount,
+    createdAt: Date.now(),
+    providerId: result.providerId,
+    model: result.model,
+  });
+}
+```
+
+注解结构：`{ summary, upToMessageId, messageCount, createdAt, providerId?, model? }`——
+`upToMessageId` 是压缩覆盖到的最后一条消息 id（该条及其之前不进模型历史），`messageCount`
+供标记行展示，供应商/模型为溯源展示字段（缺省可省）。
 
 ## 组合与替换
 

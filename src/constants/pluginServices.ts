@@ -25,6 +25,7 @@ export const PLUGIN_SERVICE_LABELS: Record<string, string> = {
   history: "领域历史读与回滚",
   layout: "工作区布局读与操作",
   uiState: "应用级 UI 状态读",
+  ui: "插件浮层承载",
   slots: "插件 UI 注册",
   services: "服务注册表查询",
   native: "原始命令调用",

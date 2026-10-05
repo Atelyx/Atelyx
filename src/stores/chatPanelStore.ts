@@ -40,6 +40,7 @@ import type {
   Attachment,
   ChatNamingTarget,
   ChatRuntime,
+  ChatTurnMessage,
   ChatTurnSink,
   ChatTurnTarget,
   EditorChatMessage,
@@ -111,6 +112,14 @@ interface ChatPanelState {
   openSession: (id: string) => void;
   /** 删除会话（删的是当前激活会话时回落新对话态；同时删其消息 .jsonl 与元数据侧车）。 */
   deleteSession: (id: string) => void;
+  /** 把插件侧消息登记为新面板会话（ctx.chat.importSession 数据源）：消息经校验转换，落盘走既有防抖链。
+   *  不改变面板当前激活会话；title 缺省按首条 user 消息派生。校验失败抛错（角色/内容/附件引用）。 */
+  importSession: (
+    messages: ChatTurnMessage[],
+    opts?: { title?: string; agentId?: string },
+  ) => Promise<{ id: string }>;
+  /** 向既有面板会话追加插件侧消息（ctx.chat.appendMessages 数据源）：会话不存在即抛错。 */
+  appendMessages: (sessionId: string, messages: ChatTurnMessage[]) => Promise<void>;
   /** 发送消息到当前激活会话（refs = 输入框内的 #引用笔记，发送时就地替换注入路径块；
    *  pendings = 待发送托盘附件：字节落仓库临时区后以路径引用随消息持久化，图片走 vision、
    *  文本类注入内容。附件落盘失败返回 false 且不产生消息（输入与托盘原样保留），
@@ -289,6 +298,48 @@ function serializeChatMessages(messages: EditorChatMessage[]): string {
       })
     )
     .join("\n");
+}
+
+/**
+ * 插件侧消息 → 面板消息（ctx.chat.importSession/appendMessages 的共享转换）：逐条校验，
+ * 失败抛错不静默——角色限 user/assistant、content 须为字符串、附件仅接受带 `file` 引用的
+ * （payload 是运行时缓存不落盘，重开会话按引用读回，纯内联附件落盘即丢内容）；id 撞车或
+ * 缺失时重生成（面板会话内唯一即可，压缩注解锚点按它定位）；createdAt 按序派生保证时序。
+ */
+function toPanelMessages(messages: ChatTurnMessage[], baseTime: number): EditorChatMessage[] {
+  if (!Array.isArray(messages) || messages.length === 0) {
+    throw new Error("会话消息须为非空数组");
+  }
+  const usedIds = new Set<string>();
+  return messages.map((m, i) => {
+    const label = `第 ${i + 1} 条消息`;
+    if (!m || typeof m !== "object") throw new Error(`${label}形状非法`);
+    if (m.role !== "user" && m.role !== "assistant") {
+      throw new Error(`${label} role 只支持 user/assistant`);
+    }
+    if (typeof m.content !== "string") throw new Error(`${label} content 须为字符串`);
+    let id = typeof m.id === "string" && m.id !== "" && !usedIds.has(m.id) ? m.id : crypto.randomUUID();
+    while (usedIds.has(id)) id = crypto.randomUUID();
+    usedIds.add(id);
+    if (m.attachments?.length) {
+      for (const a of m.attachments) {
+        if (!a || typeof a.file !== "string" || a.file === "") {
+          throw new Error(`${label}附件缺少 file 引用（内联附件无法持久化，不支持导入）`);
+        }
+      }
+    }
+    return {
+      id,
+      role: m.role,
+      content: m.content,
+      ...(typeof m.displayContent === "string" && m.displayContent !== "" ? { displayContent: m.displayContent } : {}),
+      ...(Array.isArray(m.steps) && m.steps.length ? { steps: coalesceAgentSteps(m.steps) } : {}),
+      ...(m.attachments?.length
+        ? { attachments: m.attachments.map(({ payload: _payload, ...rest }) => rest) }
+        : {}),
+      createdAt: baseTime + i,
+    };
+  });
 }
 
 /**
@@ -922,6 +973,55 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
     set({ sessions, activeSessionId, error: null });
     // 无整文件索引要写；保留调度以 flush 其余待写项（若有）
     schedulePersist();
+  },
+
+  importSession: async (messages, opts) => {
+    // 先确保本仓库会话已读盘：写盘守卫 loaded=false 不落盘，未加载先读（幂等，同仓库跳过）；
+    // 读盘竞态被丢弃（切仓库在途）时 loaded 仍为 false——如实抛错，不留一个永不落盘的内存会话
+    if (!get().loaded) await get().load();
+    if (!get().loaded) throw new Error("会话读盘未完成（仓库切换中），请重试");
+    const now = Date.now();
+    const panelMessages = toPanelMessages(messages, now);
+    const firstUser = panelMessages.find((m) => m.role === "user");
+    const derived = firstUser ? prefix(firstUser.displayContent ?? firstUser.content, 16) : "";
+    const title = opts?.title ?? (derived !== "" ? derived : undefined);
+    const id = crypto.randomUUID();
+    const session: EditorChatSession = {
+      id,
+      ...(title !== undefined ? { title } : {}),
+      ...(opts?.agentId !== undefined ? { agentId: opts.agentId } : {}),
+      file: chatMessageFilePath(id),
+      messages: panelMessages,
+      createdAt: now,
+      updatedAt: panelMessages[panelMessages.length - 1].createdAt,
+    };
+    // 不改面板激活会话：登记 = 留档，不打断用户正在进行的对话
+    set({ sessions: [...get().sessions, session] });
+    schedulePersist(id);
+    markMetaDirty(id);
+    return { id };
+  },
+
+  appendMessages: async (sessionId, messages) => {
+    if (!get().loaded) await get().load();
+    if (!get().loaded) throw new Error("会话读盘未完成（仓库切换中），请重试");
+    const session = get().sessions.find((s) => s.id === sessionId);
+    if (!session) throw new Error(`会话不存在：${sessionId}`);
+    const last = session.messages[session.messages.length - 1];
+    const baseTime = Math.max(last ? last.createdAt + 1 : 0, Date.now());
+    const panelMessages = toPanelMessages(messages, baseTime);
+    useChatPanelStore.setState((state) => ({
+      sessions: state.sessions.map((s) =>
+        s.id !== sessionId
+          ? s
+          : {
+              ...s,
+              messages: [...s.messages, ...panelMessages],
+              updatedAt: panelMessages[panelMessages.length - 1].createdAt,
+            },
+      ),
+    }));
+    schedulePersist(sessionId);
   },
 
   send: async (content, refs = [], pendings = []) => {

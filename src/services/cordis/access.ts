@@ -21,8 +21,8 @@ import type {
   WorkspaceLayout,
 } from "@/types";
 import type { HistoryKind, HistoryVersion } from "@/services/history";
-import type { NotificationInput } from "./types";
-import type { AgentConfig, ChatTargetResult, ProviderConfig } from "@/types";
+import type { FloatingLayerEntry, NotificationInput } from "./types";
+import type { AgentConfig, ChatTargetResult, ChatTurnMessage, ProviderConfig } from "@/types";
 
 /** 表格能力访问（ctx.table 的 store 数据源；pluginStore/tableStore 接线注入）。 */
 export interface PluginTableRuntimeAccess {
@@ -292,6 +292,52 @@ export function setPluginUiStateAccess(access: PluginUiStateAccess | null): void
 /** 读取 UI 状态访问（ctx.uiState 服务消费；未接线 = null）。 */
 export function getPluginUiStateAccess(): PluginUiStateAccess | null {
   return uiStateAccess;
+}
+
+/** 宿主对话会话写入访问（ctx.chat 容器方法的数据源；builtin.chatpanel 接线注入）。
+ *  实现委托对话面板 store 的登记/追加动作（校验、转换与落盘调度都在 store 内）；
+ *  面板插件停用 = 访问复位，ctx.chat 容器方法据此抛「对话面板能力未就绪」。 */
+export interface PluginChatPanelAccess {
+  /** 把插件侧消息登记为新面板会话，返回会话 id。 */
+  importSession(
+    messages: ChatTurnMessage[],
+    opts?: { title?: string; agentId?: string },
+  ): Promise<{ id: string }>;
+  /** 向既有面板会话追加插件侧消息（会话不存在 = 抛错）。 */
+  appendMessages(sessionId: string, messages: ChatTurnMessage[]): Promise<void>;
+}
+
+let chatPanelAccess: PluginChatPanelAccess | null = null;
+
+/** 注入/复位对话会话写入访问（builtin.chatpanel 启停时接线；null 复位供测试）。 */
+export function setPluginChatPanelAccess(access: PluginChatPanelAccess | null): void {
+  chatPanelAccess = access;
+}
+
+/** 读取对话会话写入访问（ctx.chat 容器方法消费；未接线 = null）。 */
+export function getPluginChatPanelAccess(): PluginChatPanelAccess | null {
+  return chatPanelAccess;
+}
+
+/** 浮层承载访问（ctx.ui 的 store 数据源；pluginStore 接线注入）。
+ *  open/close 委托浮层 store（渲染由 FloatingLayerHost 承担，服务层不 import store）。 */
+export interface PluginFloatingLayerAccess {
+  /** 登记一个浮层，返回浮层 id。 */
+  open(entry: Omit<FloatingLayerEntry, "id">): string;
+  /** 收起浮层（不存在 = no-op）。 */
+  close(id: string): void;
+}
+
+let floatingLayerAccess: PluginFloatingLayerAccess | null = null;
+
+/** 注入/复位浮层承载访问（pluginStore 接线；null 复位供测试）。 */
+export function setPluginFloatingLayerAccess(access: PluginFloatingLayerAccess | null): void {
+  floatingLayerAccess = access;
+}
+
+/** 读取浮层承载访问（ctx.ui 服务消费；未接线 = null）。 */
+export function getPluginFloatingLayerAccess(): PluginFloatingLayerAccess | null {
+  return floatingLayerAccess;
 }
 
 /** 槽位宿主组件 props（ctx.slots.host(slot) 返回组件的注入载体：按槽渲染贡献）。 */

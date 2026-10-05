@@ -390,3 +390,69 @@ describe("面板附件通道（临时区落盘 + 引用持久化）", () => {
     }
   });
 });
+
+describe("插件侧会话写入（importSession / appendMessages）", () => {
+  it("importSession：校验转换 + 落盘（不改激活会话，id 撞车重生成，payload 剥离）", async () => {
+    await loadedInVault("v1");
+    const { id } = await chat.useChatPanelStore.getState().importSession(
+      [
+        { id: "m1", role: "user", content: "hi", displayContent: "提问" },
+        // 撞车 id：宿主重生成，面板会话内唯一
+        { id: "m1", role: "assistant", content: "答" },
+      ],
+      { title: "插件会话" },
+    );
+    const s = chat.useChatPanelStore.getState();
+    expect(s.sessions).toHaveLength(1);
+    expect(s.activeSessionId).toBeNull();
+    const session = s.sessions.find((x) => x.id === id);
+    expect(session?.title).toBe("插件会话");
+    expect(session?.messages).toHaveLength(2);
+    expect(session?.messages[0].id).toBe("m1");
+    expect(session?.messages[1].id).not.toBe("m1");
+    // createdAt 按序派生（时序保证）
+    expect(session?.messages[1].createdAt).toBeGreaterThan(session?.messages[0].createdAt ?? 0);
+
+    await chat.useChatPanelStore.getState().flush();
+    expect(h.state.messageWrites).toHaveLength(1);
+    // 元数据侧车随登记落盘（write_chat_session_meta 进 chatMetas 内存表）
+    const metaRaw = [...h.state.chatMetas.values()][0];
+    expect(metaRaw).toBeDefined();
+    expect((JSON.parse(metaRaw!) as { title?: string }).title).toBe("插件会话");
+  });
+
+  it("importSession：角色/内容/附件校验失败抛错，不产生会话", async () => {
+    await loadedInVault("v1");
+    const store = chat.useChatPanelStore.getState();
+    await expect(
+      store.importSession([{ id: "a", role: "system" as never, content: "x" }]),
+    ).rejects.toThrow("role");
+    await expect(
+      store.importSession([{ id: "a", role: "user", content: 1 as never }]),
+    ).rejects.toThrow("content");
+    await expect(
+      store.importSession([
+        { id: "a", role: "user", content: "x", attachments: [{ kind: "image", payload: "data:" } as never] },
+      ]),
+    ).rejects.toThrow("file");
+    expect(chat.useChatPanelStore.getState().sessions).toEqual([]);
+  });
+
+  it("appendMessages：向既有会话追加并落盘；会话不存在抛错", async () => {
+    await loadedInVault("v1");
+    const { id } = await chat.useChatPanelStore.getState().importSession([
+      { id: "m1", role: "user", content: "hi" },
+    ]);
+    await chat.useChatPanelStore.getState().appendMessages(id, [
+      { id: "m2", role: "assistant", content: "答" },
+    ]);
+    const session = chat.useChatPanelStore.getState().sessions.find((s) => s.id === id);
+    expect(session?.messages.map((m) => [m.role, m.content])).toEqual([
+      ["user", "hi"],
+      ["assistant", "答"],
+    ]);
+    await expect(
+      chat.useChatPanelStore.getState().appendMessages("no-such", [{ id: "x", role: "user", content: "y" }]),
+    ).rejects.toThrow("会话不存在");
+  });
+});

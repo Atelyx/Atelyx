@@ -61,7 +61,7 @@ import { createTableService } from "@/services/cordis/table";
 import { createNoteService } from "@/services/cordis/note";
 import { createChatService } from "@/services/cordis/chat";
 import { createChatRuntime } from "@/stores/chatTurn";
-import { setPluginNoteAccess } from "@/services/cordis/access";
+import { setPluginNoteAccess, setPluginChatPanelAccess } from "@/services/cordis/access";
 import { registerChatRuntime } from "@/utils/chatRuntimeHost";
 import { VIEW_LABELS } from "@/constants/views";
 import { AURORA_THEME_ID, AURORA_THEME_NAME, AURORA_THEME_VARIABLES } from "@/constants/themes";
@@ -227,6 +227,17 @@ function wireChatRuntime(): () => void {
   return registerChatRuntime(createChatRuntime());
 }
 
+/** 对话面板容器接线（builtin.chatpanel 的 capability）：把面板会话登记/追加注入 ctx.chat 容器方法
+ *  数据源（校验、转换与落盘调度在面板 store 内）。返回 unregister（停用/卸载复位访问，容器方法抛「未就绪」）。 */
+function wireChatPanelAccess(): () => void {
+  setPluginChatPanelAccess({
+    importSession: (messages, opts) => useChatPanelStore.getState().importSession(messages, opts),
+    appendMessages: (sessionId, messages) =>
+      useChatPanelStore.getState().appendMessages(sessionId, messages),
+  });
+  return () => setPluginChatPanelAccess(null);
+}
+
 interface BuiltinDefOptions {
   id: string;
   name: string;
@@ -332,6 +343,7 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
     type: "panel",
     tagline: "AI 对话会话面板",
     views: [{ kind: "aichat", label: VIEW_LABELS.aichat, component: AiChatView }],
+    capability: wireChatPanelAccess,
     lifecycle: {
       id: "builtin.chatpanel",
       flush: async () => {

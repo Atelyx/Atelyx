@@ -19,6 +19,7 @@ import type {
   ChatNamingTarget,
   ChatTargetResult,
   ChatTargetSelection,
+  ChatTurnMessage,
   ChatTurnRequest,
   CollabMyPeer,
   CollabPeer,
@@ -40,6 +41,7 @@ import type {
   WorkspaceLayout,
   PluginDefaultLayoutSpec,
 } from "@/types";
+import type { ComponentType } from "react";
 import type { Context } from "@atelyx/cordis";
 import type { HistoryKind, HistoryVersion } from "@/services/history";
 import type { HttpRequestInput, HttpResponseResult } from "@/services/http";
@@ -256,6 +258,45 @@ export interface DialogService {
   saveFile(opts?: { defaultPath?: string; filters?: DialogFilters[] }): Promise<string | null>;
 }
 
+/** 插件浮层选项（ctx.ui.showFloatingLayer）。 */
+export interface FloatingLayerOptions {
+  /** 浮层内容组件（无 props 契约；JSX 经宿主转译可用）。 */
+  component: ComponentType;
+  /** 位置：视口居中（缺省）或浮层左上角视口坐标（宿主钳制到视口内）。 */
+  placement?: "center" | { x: number; y: number };
+  /** 浮层宽度像素（缺省按内容自适应；最终钳制到视口内）。 */
+  width?: number;
+  /** 点击浮层外区域时收起（缺省 false：浮层常驻输入场景防误触丢输入；Esc 收起恒由宿主代管）。 */
+  closeOnOutsideClick?: boolean;
+  /** 浮层收起时回调（Esc/外点/handle.close/插件停用宿主收起均触发；至多一次）。 */
+  onClose?: () => void;
+}
+
+/** 插件浮层句柄。 */
+export interface FloatingLayerHandle {
+  /** 收起浮层（已收起 = no-op）。 */
+  close(): void;
+}
+
+/** 插件浮层承载服务（内核平台能力）：宿主代管浮层的定位、层级与 Esc/外点收起语义，
+ *  与宿主弹层同一套层级策略。浮层按调用方插件记账，插件停用/卸载时自动收起。 */
+export interface UiService {
+  /** 展示一个浮层，返回收起句柄。重复调用叠加多层。 */
+  showFloatingLayer(options: FloatingLayerOptions): FloatingLayerHandle;
+}
+
+/** 插件浮层条目（宿主渲染层消费；FloatingLayerHost 按 open 顺序叠放）。 */
+export interface FloatingLayerEntry {
+  id: string;
+  /** 登记方插件 id（审计/诊断展示）。 */
+  pluginId: string;
+  component: ComponentType;
+  placement: "center" | { x: number; y: number };
+  width?: number;
+  closeOnOutsideClick: boolean;
+  onClose?: () => void;
+}
+
 /** 剪贴板服务（文本 + 图片 dataURL；敏感：可读写用户剪贴板）。 */
 export interface ClipboardService {
   readText(): Promise<string>;
@@ -379,6 +420,7 @@ export interface MarkdownService {
 
 /** AI 对话能力（由随应用分发的对话核心插件提供，停用即不可用）：用宿主配置的模型/Agent/工具跑一轮对话。
  *  核心只跑一轮——消息容器与落盘留在调用方（插件自带容器），流式与收尾经 `ChatTurnSink` 交回。
+ *  容器方法（importSession/appendMessages）写入宿主对话面板，要求对话面板插件已启用（未启用即抛错）。
  *  类型面与宿主内部消费方同一份契约（见 types/chatRuntime.ts 的 `ChatRuntime`）。 */
 export interface ChatService {
   /** 解析对话目标（未指定 = 跟随仓库默认；失败给可展示文案）。 */
@@ -393,6 +435,16 @@ export interface ChatService {
     targetId: string,
     opts?: ChatAutoNameOptions,
   ): Promise<ChatAutoNameResult>;
+  /** 把插件侧消息登记为宿主对话面板会话（新建并返回会话 id；面板历史可见、可在面板中继续对话）。
+   *  消息经宿主校验转换（role 限 user/assistant、content 须为字符串、附件仅接受 file 引用），
+   *  落盘由宿主会话链承担；opts.title 缺省按首条 user 消息派生，opts.agentId 指定会话 Agent。
+   *  不改变面板当前激活会话。 */
+  importSession(
+    messages: ChatTurnMessage[],
+    opts?: { title?: string; agentId?: string },
+  ): Promise<{ id: string }>;
+  /** 向既有面板会话追加插件侧消息（会话不存在即抛错；校验规则同 importSession）。 */
+  appendMessages(sessionId: string, messages: ChatTurnMessage[]): Promise<void>;
 }
 
 /** 领域历史服务（笔记/画布/表格的版本历史读 + 回滚）。 */
@@ -478,6 +530,7 @@ declare module "@atelyx/cordis" {
     history: HistoryService;
     layout: LayoutService;
     uiState: UiStateService;
+    ui: UiService;
     slots: SlotsApi;
     services: ServicesService;
     native: NativeService;
