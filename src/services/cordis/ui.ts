@@ -46,6 +46,8 @@ export interface PluginCommandRegistration {
   shortcut?: string;
   /** 快捷键作用域（缺省 global，见 CommandShortcutScope）。 */
   scope: CommandShortcutScope;
+  /** 关联的本插件全局热键声明 id（可选；设置 → 快捷键据它把同一动作收敛到全局区单行呈现）。 */
+  globalShortcutId?: string;
 }
 
 /** 插件命令贡献（管理 UI「运行命令」入口：全局 id = `<pluginId>:<命令 id>`）；共享展示契约在 `types/plugin.ts`。 */
@@ -165,7 +167,14 @@ export function registerPluginAppPage(
 /** 注册插件主线程命令（管理 UI「运行命令」入口）；pluginId 溯源，返回精确撤销。 */
 export function registerPluginCommand(
   pluginId: string,
-  opts: { id: string; label: string; run: () => unknown; shortcut?: string; scope?: CommandShortcutScope },
+  opts: {
+    id: string;
+    label: string;
+    run: () => unknown;
+    shortcut?: string;
+    scope?: CommandShortcutScope;
+    globalShortcutId?: string;
+  },
 ): () => void {
   const k = `${pluginId}:${opts.id}`;
   commands.set(k, {
@@ -175,6 +184,7 @@ export function registerPluginCommand(
     run: opts.run,
     ...(opts.shortcut ? { shortcut: opts.shortcut } : {}),
     scope: opts.scope ?? "global",
+    ...(opts.globalShortcutId ? { globalShortcutId: opts.globalShortcutId } : {}),
   });
   notify();
   return () => {

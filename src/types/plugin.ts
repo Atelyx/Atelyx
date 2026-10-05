@@ -284,10 +284,13 @@ export interface PluginCommandContribution {
   pluginId: string;
   id: string;
   label: string;
-  /** 声明的默认快捷键（如 "mod+k"；可选，无 = 未绑定）。 */
+  /** 声明的默认快捷键（如 "mod+k"；可选，无 = 未绑定，设置页仍可赋予）。 */
   shortcut?: string;
   /** 快捷键作用域（缺省 global）。 */
   scope: CommandShortcutScope;
+  /** 关联的本插件全局热键声明 id（可选）：命令与该声明是同一动作，设置 → 快捷键只在
+   *  全局快捷键区呈现该动作，不重复列命令行。 */
+  globalShortcutId?: string;
 }
 
 /** 槽位参与者在治理清单中的展示形态（id/pluginId/priority 来自注册表；label 取载荷字符串字段）。 */

@@ -997,6 +997,7 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
           label: c.label,
           ...(c.shortcut ? { shortcut: c.shortcut } : {}),
           scope: c.scope,
+          ...(c.globalShortcutId ? { globalShortcutId: c.globalShortcutId } : {}),
         };
         byGlobalId.set(item.globalId, item);
       }

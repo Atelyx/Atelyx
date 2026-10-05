@@ -100,7 +100,7 @@ describe("PluginDetailsDialog 能力面（宿主自发现）", () => {
       plugin(),
       audit({ services: ["vault"], calls: [{ service: "shell", method: "exec", summary: "cmd /c build（3 个参数）" }] }),
     );
-    expect(el.textContent).toContain("能力面（宿主自动发现）");
+    expect(el.textContent).toContain("能力面");
     expect(el.textContent).toContain("vault");
     expect(el.textContent).toContain("shell");
   });
@@ -119,12 +119,12 @@ describe("PluginDetailsDialog 能力面（宿主自发现）", () => {
 
   it("无审计记录：提示能力面由宿主运行时自动发现", () => {
     const el = mountDialog(plugin());
-    expect(el.textContent).toContain("能力面（宿主自动发现）");
+    expect(el.textContent).toContain("能力面");
     expect(el.textContent).toContain("无需开发者声明");
   });
 
   it("纯 theme 插件（声明式皮肤，无运行时访问）：不渲染能力面区", () => {
     const el = mountDialog(plugin({ type: "theme" }));
-    expect(el.textContent).not.toContain("能力面（宿主自动发现）");
+    expect(el.textContent).not.toContain("能力面");
   });
 });

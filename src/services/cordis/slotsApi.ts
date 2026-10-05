@@ -101,6 +101,9 @@ export interface RegisterCommandOptions {
   shortcut?: string;
   /** 快捷键作用域（缺省 global：window 级统一监听；作用域类命令由对应视图的监听点按生效键匹配）。 */
   scope?: CommandShortcutScope;
+  /** 关联的本插件 manifest 全局热键声明 id（可选）：声明该命令与热键是同一动作，
+   *  设置 → 快捷键只在全局快捷键区呈现该动作、不重复列命令行。 */
+  globalShortcutId?: string;
 }
 
 /** 主题插件设置项注册载荷（主题页设置区）。 */
@@ -298,7 +301,14 @@ export function createSlotsApi(): SlotsApi {
       const ctx = this.ctx;
       const pluginId = pluginIdOfCtx(ctx);
       return ctx.effect(() =>
-        registerPluginCommand(pluginId, { id: opts.id, label: opts.label, run: opts.run, shortcut: opts.shortcut, scope: opts.scope }),
+        registerPluginCommand(pluginId, {
+          id: opts.id,
+          label: opts.label,
+          run: opts.run,
+          shortcut: opts.shortcut,
+          scope: opts.scope,
+          globalShortcutId: opts.globalShortcutId,
+        }),
       );
     },
     registerThemeSetting(this: SlotsApiInstance, opts: RegisterThemeSettingOptions): () => void {

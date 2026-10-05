@@ -180,7 +180,7 @@ export function PluginDetailsDialog({
             >
               <div className="flex items-center gap-2 text-xs font-medium mb-2" style={{ color: "var(--accent)" }}>
                 <Lock size={12} className="shrink-0" />
-                能力面（宿主自动发现）
+                能力面
               </div>
               {hasCapabilityData ? (
                 <div className="flex flex-wrap gap-1">{actualServices.map((name) => <span key={name} className="inline-flex items-center h-5 px-2 rounded-full text-micro border" style={{ color: capabilitySensitive(name) ? "var(--warning)" : "var(--text-secondary)", borderColor: "var(--border)" }}>{capabilityLabel(name)}{capabilitySensitive(name) ? "（敏感）" : ""}{capabilityAvailable(name) ? "" : "（本平台不可用）"}</span>)}</div>

@@ -142,9 +142,18 @@ export function ShortcutSettingsTab() {
     return () => window.removeEventListener("keydown", onKey, { capture: true });
   }, [recording, setCommandShortcut, setGlobalShortcutOverride]);
 
+  /** 命令去重：注册时声明 globalShortcutId 且同插件 manifest 确有该声明的，动作由全局
+   *  快捷键区单行承载，不再重复列命令行；声明缺失（清单更新未生效等）时命令行照常展示。
+   *  其余命令（含未绑定）一律展示、可设置。 */
+  const bindableCommands = commands.filter((c) => {
+    if (!c.globalShortcutId) return true;
+    const declared = plugins[c.pluginId]?.manifest.shortcuts?.some((d) => d.id === c.globalShortcutId);
+    return !declared;
+  });
+
   /** 应用内命令按插件分组（注册表顺序；同名插件行取显示名）。 */
   const commandGroups = new Map<string, PluginCommandContribution[]>();
-  for (const c of commands) {
+  for (const c of bindableCommands) {
     const group = commandGroups.get(c.pluginId) ?? [];
     group.push(c);
     commandGroups.set(c.pluginId, group);
@@ -208,12 +217,11 @@ export function ShortcutSettingsTab() {
           应用内生效；点击键位后按下新组合键即覆盖，Esc 取消。多条命令共用同一键时按注册顺序先到先得。
         </div>
       </div>
-      {commands.length === 0 && (
+      {bindableCommands.length === 0 && (
         <div className="text-xs" style={{ color: "var(--text-muted)" }}>
-          当前没有已注册的命令（随插件启停变化）
+          当前没有可自定义的命令快捷键（随插件启停变化）
         </div>
-      )}
-      {[...commandGroups.entries()].map(([pluginId, group]) => (
+      )}      {[...commandGroups.entries()].map(([pluginId, group]) => (
         <div
           key={pluginId}
           className="p-3 rounded-[var(--radius-md)] border"
