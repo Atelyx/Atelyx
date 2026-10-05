@@ -561,7 +561,11 @@ fn apply_window_action(app: &AppHandle, op: &LayoutOp, ui: &AppUiState, result: 
                 if residence {
                     residence_forget(app, &w.id);
                     if let Some(win) = app.get_webview_window(&label) {
-                        let _ = win.unminimize();
+                        // unminimize 桌面专属 API（移动端单窗口无最小化语义）
+                        #[cfg(desktop)]
+                        {
+                            let _ = win.unminimize();
+                        }
                         let _ = win.show();
                         let _ = win.set_focus();
                     }
@@ -571,8 +575,12 @@ fn apply_window_action(app: &AppHandle, op: &LayoutOp, ui: &AppUiState, result: 
         LayoutOp::FocusDetachedWindow { window_id } => {
             if !residence {
                 if let Some(win) = app.get_webview_window(&format!("{PANEL_LABEL_PREFIX}{window_id}")) {
-                    // 最小化窗口 set_focus 不会还原，先 unminimize（与托盘补显同口径）
-                    let _ = win.unminimize();
+                    // 最小化窗口 set_focus 不会还原，先 unminimize（与托盘补显同口径）；
+                    // unminimize 桌面专属 API（移动端单窗口无最小化语义）
+                    #[cfg(desktop)]
+                    {
+                        let _ = win.unminimize();
+                    }
                     let _ = win.set_focus();
                 }
             }
@@ -587,7 +595,11 @@ fn apply_window_action(app: &AppHandle, op: &LayoutOp, ui: &AppUiState, result: 
             let label = format!("{PANEL_LABEL_PREFIX}{window_id}");
             match app.get_webview_window(&label) {
                 Some(win) => {
-                    let _ = win.unminimize();
+                    // unminimize 桌面专属 API（移动端单窗口无最小化语义）
+                    #[cfg(desktop)]
+                    {
+                        let _ = win.unminimize();
+                    }
                     let _ = win.show();
                     let _ = win.set_focus();
                 }
@@ -603,7 +615,11 @@ fn apply_window_action(app: &AppHandle, op: &LayoutOp, ui: &AppUiState, result: 
                             true,
                         );
                         if let Some(win) = app.get_webview_window(&label) {
-                            let _ = win.unminimize();
+                            // unminimize 桌面专属 API（移动端单窗口无最小化语义）
+                            #[cfg(desktop)]
+                            {
+                                let _ = win.unminimize();
+                            }
                             let _ = win.show();
                             let _ = win.set_focus();
                         }

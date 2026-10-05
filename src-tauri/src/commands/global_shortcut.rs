@@ -15,16 +15,24 @@
 //! 信任模型与 `ctx.shell` 一致：不构成防插件边界（占用/释放只在插件之间做归属仲裁），
 //! 快捷键格式合法性与按键语义由 OS 层校验，非法格式以可读错误拒绝。
 
+// 登记表条目与其消费方均为桌面专属，导入同步门控（移动端两表恒空）
+#[cfg(desktop)]
 use std::collections::HashMap;
+#[cfg(desktop)]
 use std::sync::Mutex;
 
+#[cfg(desktop)]
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, State};
+#[cfg(desktop)]
+use tauri::{Emitter, Manager};
 
 /// 触发事件名（Rust → 主窗口；载荷 [ShortcutTriggerPayload]）。
+#[cfg(desktop)]
 const TRIGGERED_EVENT: &str = "plugin-shortcut-triggered";
 
 /// 触发事件载荷（字段 camelCase 与前端对齐）。
+#[cfg(desktop)]
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct ShortcutTriggerPayload {

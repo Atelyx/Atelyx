@@ -10,20 +10,25 @@
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+
+#[cfg(desktop)]
 use std::time::Duration;
 
 use tauri::{AppHandle, Manager};
 
 /// 托盘退出请求事件（广播给全部 WebView；各窗口收尾后经 exit_flush_done 回报）。
+#[cfg(desktop)]
 pub const TRAY_EXIT_EVENT: &str = "atelyx:tray-exit-requested";
 
 /// 看门狗等待窗口：自广播退出请求起，超过该时长仍有窗口未回报即强制退出。
+#[cfg(desktop)]
 const EXIT_WATCHDOG: Duration = Duration::from_secs(8);
 
 /// UI 驻留标志：true = 全部窗口隐藏在托盘（撕裂窗口建窗应不可见）。
 pub struct UiHidden(AtomicBool);
 
 impl UiHidden {
+    #[cfg(desktop)]
     pub fn new(hidden: bool) -> Self {
         Self(AtomicBool::new(hidden))
     }
@@ -43,6 +48,7 @@ pub struct ExitWait(Mutex<Option<HashSet<String>>>);
 
 impl ExitWait {
     /// 登记待回报窗口集合；已有退出进行中时返回 false（调用方不再重复广播/起看门狗）。
+    #[cfg(desktop)]
     fn begin(&self, labels: HashSet<String>) -> bool {
         let mut guard = self.0.lock().unwrap_or_else(|e| e.into_inner());
         if guard.is_some() {
@@ -70,6 +76,7 @@ impl ExitWait {
         }
     }
 
+    #[cfg(desktop)]
     fn in_progress(&self) -> bool {
         self.0.lock().unwrap_or_else(|e| e.into_inner()).is_some()
     }
@@ -78,6 +85,8 @@ impl ExitWait {
 /// 显示全部窗口并聚焦主窗口（托盘打开 / 手动二次启动共用）；
 /// 同时解除驻留标志，此后撕裂窗口照常可见建窗。
 /// 先按驻留备份还原模型 hidden（唤起类隐藏窗口不随驻留补显），再照常跳过模型隐藏窗口。
+/// 桌面专属：调用方（托盘/单实例二次启动）均为桌面侧。
+#[cfg(desktop)]
 pub fn show_all_windows(app: &AppHandle) {
     if let Some(flag) = app.try_state::<UiHidden>() {
         flag.set(false);
