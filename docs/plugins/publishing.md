@@ -29,7 +29,6 @@ Atelyx 的安装一律「取源码」：市场安装会把你的仓库 git clone
 ## 发布检查清单
 
 - [ ] `package.json` 齐全：name（反向域名、不可变）/ version / main / atelyx.type
-- [ ] `declares` 如实披露将访问的服务（`table`/`vault`/`shell` 等；敏感服务务必列出）
 - [ ] 入口为 `.js`/`.ts`/`.tsx`，默认导出 `apply(ctx)`
 - [ ] 未声明依赖的入口自包含（无运行时 import）；用了 npm 依赖则一并提交 `package-lock.json`
 - [ ] 产物目录 `.atelyx-dist/` 与 `node_modules/` 已加进忽略（宿主在安装时生成，不随仓库提交）

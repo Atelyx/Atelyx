@@ -2,7 +2,7 @@
  * 插件包清单校验与兼容性纯函数测试（utils/pluginManifest）。
  *
  * 覆盖：name 合法性、版本比较、宿主兼容（版本范围/平台）、插件包（package.json + atelyx 块）
- * 校验的必填/可选/归一化、前向兼容（未知附加分类跳过）、declares 服务披露、
+ * 校验的必填/可选/归一化、前向兼容（未知字段与未知附加分类跳过）、
  * 运行时依赖（dependencies）与显式打包开关（bundle）。
  */
 import { describe, it, expect } from "vitest";
@@ -149,7 +149,6 @@ describe("validatePluginManifest", () => {
     expect(result.manifest.id).toBe("com.example.todo");
     expect(result.manifest.name).toBe("示例插件");
     expect(result.manifest.types).toEqual(["tool"]);
-    expect(result.manifest.declares).toBeUndefined();
   });
   it("atelyx.name 缺省 = package name；author/license/description/tags 回退顶层字段", () => {
     const result = validatePluginManifest({
@@ -177,24 +176,21 @@ describe("validatePluginManifest", () => {
     // 缺 name/atelyx 块的清单拒绝。
     expect(validatePluginManifest({ schemaVersion: 2, id: "com.x", name: "x", version: "1", type: "tool", main: "a.js" }).ok).toBe(false);
   });
-  it("前向兼容：未知附加分类跳过而不报错；declares 保留全部服务名", () => {
+  it("前向兼容：未知附加分类与未知元数据字段（含旧版 declares/permissions）跳过而不报错", () => {
     const result = validatePluginManifest({
       ...validManifest(),
       atelyx: {
         ...(validManifest().atelyx as Record<string, unknown>),
         types: ["tool", "future-kind"],
         declares: ["table", "com.example.db", "future:ns"],
+        permissions: { table: "读取表格" },
       },
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.manifest.types).toEqual(["tool"]);
-    expect(result.manifest.declares).toEqual(["table", "com.example.db", "future:ns"]);
-  });
-  it("declares 畸形（非字符串/空串）拒绝", () => {
-    expect(validatePluginManifest({ ...validManifest(), atelyx: { ...(validManifest().atelyx as Record<string, unknown>), declares: "table" } }).ok).toBe(false);
-    expect(validatePluginManifest({ ...validManifest(), atelyx: { ...(validManifest().atelyx as Record<string, unknown>), declares: [""] } }).ok).toBe(false);
-    expect(validatePluginManifest({ ...validManifest(), atelyx: { ...(validManifest().atelyx as Record<string, unknown>), declares: [123] } }).ok).toBe(false);
+    expect("declares" in result.manifest).toBe(false);
+    expect("permissions" in result.manifest).toBe(false);
   });
   it("dependencies 归一化：保留包名 → 版本；缺省与空表都不带该字段", () => {
     const declared = validatePluginManifest({
@@ -263,21 +259,17 @@ describe("validatePluginManifest", () => {
       }).ok,
     ).toBe(false);
   });
-  it("保留 declares/permissions/platforms/hostApiVersion", () => {
+  it("保留 platforms/hostApiVersion", () => {
     const result = validatePluginManifest({
       ...validManifest(),
       atelyx: {
         ...(validManifest().atelyx as Record<string, unknown>),
-        declares: ["table", "shell"],
-        permissions: { shell: "执行打包命令" },
         platforms: ["windows-x64"],
         hostApiVersion: 1,
       },
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.manifest.declares).toEqual(["table", "shell"]);
-    expect(result.manifest.permissions).toEqual({ shell: "执行打包命令" });
     expect(result.manifest.platforms).toEqual(["windows-x64"]);
     expect(result.manifest.hostApiVersion).toBe(1);
   });

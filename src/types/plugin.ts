@@ -97,14 +97,10 @@ export interface PluginManifest {
   dependencies?: Record<string, string>;
   /** 显式要求宿主打包（入口拆成多文件但无依赖时用它；声明了 dependencies 即自动打包）。 */
   bundle?: boolean;
-  /** 披露：将访问的 Atelyx 服务名（管理页「声明 vs 实际」审计对照的声明侧；无运行时门槛）。 */
-  declares?: string[];
   /** 切仓库保活声明（默认关闭）：声明后切仓库触发的插件全量重载跳过本插件——运行时、
    *  UI 贡献与托管进程原地保留，apply 不重跑（仓库感知走 vault:switch 事件）。
    *  停用 / 卸载 / 更新 / 跨窗口变化仍正常重建并结束进程。 */
   keepMountedOnVaultSwitch?: boolean;
-  /** 权限说明：服务名 → 一句理由（安装/详情展示）。 */
-  permissions?: Record<string, string>;
   /** 声明式主题条目（type 含 theme 时通常携带；必须 ≥1；id 插件内唯一）。 */
   themes?: ThemeDefinition[];
   /** 全局热键声明（OS 级热键的静态披露：设置页展示与改键的数据源）。 */
@@ -243,7 +239,7 @@ export interface PluginAuditCall {
   summary: string;
 }
 
-/** 单条槽位贡献摘要（审计「实际侧」的槽位面：插件贡献了哪些槽、以什么基数与优先级）。 */
+/** 单条槽位贡献摘要（审计记录的槽位面：插件贡献了哪些槽、以什么基数与优先级）。 */
 export interface PluginSlotContributionSummary {
   slot: string;
   id: string;
@@ -252,14 +248,14 @@ export interface PluginSlotContributionSummary {
   label?: string;
 }
 
-/** 单条槽位装饰摘要（审计「实际侧」：插件包裹了哪些槽的渲染）。 */
+/** 单条槽位装饰摘要（审计记录：插件包裹了哪些槽的渲染）。 */
 export interface PluginSlotDecoratorSummary {
   slot: string;
   id: string;
   priority: number;
 }
 
-/** 单个插件的审计结果（声明 vs 实际对照的「实际」侧；管理 UI 详情弹窗展示）。 */
+/** 单个插件的审计结果（宿主自发现的能力面；管理 UI 详情弹窗展示）。 */
 export interface PluginAuditEntry {
   pluginId: string;
   /** 实际读过的 Atelyx ctx 服务名（访问序去重）。 */

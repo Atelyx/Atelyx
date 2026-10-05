@@ -1,5 +1,5 @@
 /**
- * 插件审计：「声明 vs 实际」的实际侧 = ctx 服务读 + 事件订阅 + 槽位贡献/装饰 + 高危调用摘要（按插件归属）。
+ * 插件审计：能力面自发现 = ctx 服务读 + 事件订阅 + 槽位贡献/装饰 + 高危调用摘要（按插件归属）。
  *
  * 机制（不动框架源码）：
  * - 服务读：包装 `ReflectService.handler.get`——插件经 ctx 代理访问服务时记录服务名；
@@ -165,7 +165,7 @@ export function installAudit(): () => void {
   };
 }
 
-/** 审计快照：服务读 + 事件订阅 + 槽位贡献/装饰按插件聚合（声明对照的实际侧）。 */
+/** 审计快照：服务读 + 事件订阅 + 槽位贡献/装饰按插件聚合（能力面展示的数据源）。 */
 export function auditSnapshot(ctx: Context): PluginAuditEntry[] {
   const ids = new Set<string>(serviceReads.keys());
   const eventsByPlugin = new Map<string, Set<string>>();

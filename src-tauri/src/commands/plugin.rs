@@ -754,7 +754,7 @@ fn manifest_valid_or_error(v: &Value) -> Result<(), String> {
             }
         }
     }
-    // atelyx 块：插件元数据（显示名/类型/披露/主题等）。
+    // atelyx 块：插件元数据（显示名/类型/主题等）。
     let ax = v
         .get("atelyx")
         .and_then(|a| a.as_object())
@@ -772,12 +772,6 @@ fn manifest_valid_or_error(v: &Value) -> Result<(), String> {
     if let Some(t) = ax.get("types") {
         if !t.is_array() {
             return Err("atelyx.types 必须是数组".to_string());
-        }
-    }
-    // declares（披露的服务）非数组即拒绝。
-    if let Some(d) = ax.get("declares") {
-        if !d.is_array() {
-            return Err("atelyx.declares 必须是数组".to_string());
         }
     }
     // bundle（显式要求宿主打包）：非布尔即拒绝——静默当缺省会让「声明了要打包」的插件不打包。

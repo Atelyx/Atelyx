@@ -156,7 +156,7 @@ export function validatePluginManifest(raw: unknown): ManifestValidateResult {
     }
   }
 
-  // atelyx 块：插件元数据（显示名/类型/作用域/披露/主题等）。
+  // atelyx 块：插件元数据（显示名/类型/作用域/主题等）。
   const atelyx = data.atelyx;
   if (typeof atelyx !== "object" || atelyx === null || Array.isArray(atelyx)) {
     errors.push("缺少 atelyx 块");
@@ -189,8 +189,6 @@ export function validatePluginManifest(raw: unknown): ManifestValidateResult {
   const themeOnly = types.every((t) => t === "theme");
   if (!themeOnly && main === undefined) errors.push("main 不能为空");
 
-  const declares = normalizeStringList(ax.declares, "declares", errors);
-  const permissions = normalizePermissions(ax.permissions, errors);
   const platforms = normalizeStringList(ax.platforms, "platforms", errors);
   const themes = normalizeThemes(ax.themes, errors);
   const shortcuts = normalizeGlobalShortcutDeclarations(ax.shortcuts, errors);
@@ -208,8 +206,6 @@ export function validatePluginManifest(raw: unknown): ManifestValidateResult {
     ...(ax.bundle === true ? { bundle: true } : {}),
     ...(ax.keepMountedOnVaultSwitch === true ? { keepMountedOnVaultSwitch: true } : {}),
     ...(types.length > 0 ? { types } : {}),
-    ...(declares.length > 0 ? { declares } : {}),
-    ...(Object.keys(permissions).length > 0 ? { permissions } : {}),
     ...(platforms.length > 0 ? { platforms } : {}),
     ...(themes ? { themes } : {}),
     ...(shortcuts ? { shortcuts } : {}),
@@ -259,20 +255,6 @@ function normalizeTypes(type: string, rawTypes: unknown, errors: string[]): Plug
     if (typeof item === "string" && isKnownPluginType(item)) known.push(item as PluginType);
   }
   return [...new Set([type as PluginType, ...known])];
-}
-
-/** permissions 归一化：必须是服务名 → 非空字符串的表。 */
-function normalizePermissions(raw: unknown, errors: string[]): Record<string, string> {
-  if (raw === undefined) return {};
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-    errors.push("permissions 必须是对象");
-    return {};
-  }
-  const result: Record<string, string> = {};
-  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
-    if (typeof value === "string" && value.trim().length > 0) result[key] = value;
-  }
-  return result;
 }
 
 /** dependencies 归一化：包名 → 非空版本串；畸形项在校验阶段已报错，此处只保留可用项。 */

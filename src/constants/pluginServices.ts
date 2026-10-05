@@ -1,6 +1,6 @@
 /**
  * 插件面服务展示元数据：服务名 → 标签 + 敏感标记。
- * 管理页「披露 vs 实际」审计对照展示用（declares 声明侧与审计实际侧共用同一词汇表）。
+ * 管理页「能力面（宿主自动发现）」展示与审计共用同一词汇表（审计记录侧与展示标签同源）。
  */
 export const PLUGIN_SERVICE_LABELS: Record<string, string> = {
   state: "插件自持状态",

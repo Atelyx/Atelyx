@@ -1,9 +1,9 @@
 /**
- * 插件详情弹窗：失败诊断 / 声明能力与实际调用对照 / 命令入口 / 回退入口。
+ * 插件详情弹窗：失败诊断 / 能力面（宿主自发现）/ 槽位贡献 / 命令入口 / 回退入口。
  * 纯 UI 组件：props 与回调通信；回退确认弹窗的状态机由父组件（PluginsSettingsTab）持有。
  */
 import { useEffect, useRef, useState } from "react";
-import { Check, ChevronRight, Circle, Lock, RefreshCw, Shield, Terminal, X } from "lucide-react";
+import { Check, ChevronRight, Circle, Lock, RefreshCw, Terminal, X } from "lucide-react";
 import type { InstalledPlugin, PluginAuditEntry, PluginCommandContribution, PluginSlotChain } from "@/types";
 import { IconButton } from "@/components/common/Button";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
@@ -15,7 +15,7 @@ interface PluginDetailsDialogProps {
   commands: PluginCommandContribution[];
   capabilityLabel: (name: string) => string;
   capabilitySensitive: (name: string) => boolean;
-  /** 进程执行（声明里的 `shell`）在本平台是否可用。 */
+  /** 进程执行（实际访问里的 `shell`）在本平台是否可用。 */
   shellAvailable: boolean;
   /** 槽位修改链查询（归属可见：展开某槽看声明方 + 全部贡献/装饰者）。 */
   getSlotChain: (slot: string) => PluginSlotChain;
@@ -62,8 +62,8 @@ export function PluginDetailsDialog({
   onCancelRollback,
 }: PluginDetailsDialogProps) {
   const closeRef = useRef<HTMLButtonElement>(null);
-  /** 声明能力在本平台是否可用：只列有平台差异的能力（如 shell = 进程执行），其余不受平台影响。 */
-  const declaredCapabilityAvailable = (name: string): boolean =>
+  /** 已发现能力在本平台是否可用：只列有平台差异的能力（如 shell = 进程执行），其余不受平台影响。 */
+  const capabilityAvailable = (name: string): boolean =>
     name === "shell" ? shellAvailable : true;
   const onCloseRef = useRef(onClose);
   const rollbackConfirmRef = useRef(rollbackConfirm);
@@ -71,14 +71,14 @@ export function PluginDetailsDialog({
   rollbackConfirmRef.current = rollbackConfirm;
   const [expandedSlot, setExpandedSlot] = useState<string | null>(null);
   const pluginCommands = commands.filter((command) => command.pluginId === plugin.id);
-  const declares = plugin.manifest.declares ?? [];
-  // 审计对照：把声明能力与「实际访问」的服务面去重比对（服务与调用同属能力命名空间；
-  // 事件订阅不是能力，不计入），多出来的即声明之外的访问。
+  // 能力面 = 宿主自发现：审计记录的实际访问服务面（服务读与调用摘要同属能力命名空间去重；
+  // 事件订阅不是能力，单列在下方明细）。
   const actualServices = audit
     ? Array.from(new Set([...audit.services, ...audit.calls.map((call) => call.service)]))
     : [];
-  const declaredSet = new Set(declares);
-  const extraAccess = actualServices.filter((name) => !declaredSet.has(name));
+  const hasCapabilityData = actualServices.length > 0;
+  // 纯 theme 插件是声明式皮肤、无运行时代码，不会产生任何访问记录：不渲染能力面区。
+  const themeOnly = (plugin.manifest.types ?? [plugin.manifest.type]).every((t) => t === "theme");
   // 挂载失败阶段在六阶段顺序中的下标（progress 条：其前 = 已通过，其后 = 未到达）
   const failIndex = plugin.failure ? PLUGIN_MOUNT_PHASE_ORDER.indexOf(plugin.failure.phase) : -1;
 
@@ -168,9 +168,9 @@ export function PluginDetailsDialog({
           </div>
         )}
 
-        {declares.length > 0 && (
+        {(!themeOnly || hasCapabilityData) && (
           <section className="mb-4">
-            {/* 权限披露：安装前声明的能力，金色描边盒与风险语义区分 */}
+            {/* 能力面：宿主运行时自发现（审计记录的实际访问），无需开发者声明 */}
             <div
               className="rounded-[var(--radius-sm)] border p-3"
               style={{
@@ -180,31 +180,22 @@ export function PluginDetailsDialog({
             >
               <div className="flex items-center gap-2 text-xs font-medium mb-2" style={{ color: "var(--accent)" }}>
                 <Lock size={12} className="shrink-0" />
-                权限披露（安装前声明）
+                能力面（宿主自动发现）
               </div>
-              <div className="flex flex-wrap gap-1">{declares.map((name) => <span key={name} className="inline-flex items-center h-5 px-2 rounded-full text-micro border" style={{ color: capabilitySensitive(name) ? "var(--warning)" : "var(--text-secondary)", borderColor: "var(--border)" }}>{capabilityLabel(name)}{capabilitySensitive(name) ? "（敏感）" : ""}{declaredCapabilityAvailable(name) ? "" : "（本平台不可用）"}</span>)}</div>
-            </div>
-          </section>
-        )}
-
-        {audit && (audit.services.length > 0 || audit.events.length > 0 || audit.calls.length > 0) && (
-          <section className="mb-4">
-            <h4 className="text-micro font-medium mb-2" style={{ color: "var(--text-muted)" }}>实际访问与调用</h4>
-            {/* 审计对照：声明 vs 实际（无声明外访问才判定无越权） */}
-            <div className="flex items-center gap-2 text-micro mb-2 flex-wrap" style={{ color: "var(--text-muted)" }}>
-              <Shield size={12} className="shrink-0" />
-              <span className="font-mono">声明 {declares.length} 项 · 实际访问 {actualServices.length} 项</span>
-              {extraAccess.length === 0 ? (
-                <span style={{ color: "var(--success)" }}>· 无越权记录</span>
+              {hasCapabilityData ? (
+                <div className="flex flex-wrap gap-1">{actualServices.map((name) => <span key={name} className="inline-flex items-center h-5 px-2 rounded-full text-micro border" style={{ color: capabilitySensitive(name) ? "var(--warning)" : "var(--text-secondary)", borderColor: "var(--border)" }}>{capabilityLabel(name)}{capabilitySensitive(name) ? "（敏感）" : ""}{capabilityAvailable(name) ? "" : "（本平台不可用）"}</span>)}</div>
               ) : (
-                <span style={{ color: "var(--warning)" }}>· 声明外访问 {extraAccess.length} 项</span>
+                <div className="text-micro" style={{ color: "var(--text-muted)" }}>
+                  无需开发者声明：插件运行后宿主自动记录其实际访问的服务与调用，这里随之更新。
+                </div>
               )}
             </div>
-            <div className="space-y-1 text-micro" style={{ color: "var(--text-secondary)" }}>
-              {audit.services.map((name) => <div key={`service:${name}`}>{capabilityLabel(name)} · 已访问</div>)}
-              {audit.events.map((name) => <div key={`event:${name}`}>{name} · 已订阅</div>)}
-              {audit.calls.map((call) => <div key={`${call.service}.${call.method}:${call.summary}`}>{capabilityLabel(call.service)} · {call.summary}</div>)}
-            </div>
+            {audit && (audit.events.length > 0 || audit.calls.length > 0) && (
+              <div className="space-y-1 text-micro mt-2" style={{ color: "var(--text-secondary)" }}>
+                {audit.events.map((name) => <div key={`event:${name}`}>{name} · 已订阅</div>)}
+                {audit.calls.map((call) => <div key={`${call.service}.${call.method}:${call.summary}`}>{capabilityLabel(call.service)} · {call.summary}</div>)}
+              </div>
+            )}
           </section>
         )}
 
