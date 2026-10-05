@@ -400,6 +400,27 @@ describe("面板附件通道（临时区落盘 + 引用持久化）", () => {
       off();
     }
   });
+
+  it("容器面读出（readSession）：附件 payload 水合完成后随契约返回", async () => {
+    await loadedInVault("v1");
+    const off = await withRuntime();
+    try {
+      h.state.attachmentDataUrl = "data:image/png;base64,aGVsbG8=";
+      const blob = new File(["x"], "a.png", { type: "image/png" });
+      await chat.useChatPanelStore.getState().send("看图", [], [
+        { id: "att-1", kind: "image", mime: "image/png", filename: "a.png", blob },
+      ]);
+      const sessionId = chat.useChatPanelStore.getState().activeSessionId!;
+      // 模拟重启：落盘后强制重读（记录里 payload 已剥离），附件无运行时缓存
+      await chat.useChatPanelStore.getState().flush();
+      await chat.useChatPanelStore.getState().load(true);
+      // 容器消费方（速问窗口等）经 readSession 读出：水合在返回前完成，payload 随附件出契约
+      const opened = await chat.useChatPanelStore.getState().readSession(sessionId);
+      expect(opened.messages[0].attachments?.[0]?.payload).toBe("data:image/png;base64,aGVsbG8=");
+    } finally {
+      off();
+    }
+  });
 });
 
 describe("插件侧会话写入（importSession / appendMessages）", () => {
@@ -540,5 +561,44 @@ describe("跨窗口对账（reconcileExternalChatWrites）", () => {
     });
     expect(chat.useChatPanelStore.getState().sessions.some((s) => s.id === id)).toBe(false);
     expect(chat.useChatPanelStore.getState().activeSessionId).toBeNull();
+  });
+
+  it("外部写盘广播转发插件事件：对账落定后发，载荷只含受影响会话 id 分组", async () => {
+    await loadedInVault("v1");
+    const cordisEvents = await import("@/services/cordis/events");
+    const received: Array<{ name: string; payload: unknown }> = [];
+    cordisEvents.setKernelRef({
+      ctx: { events: { emit: (name: string, payload: unknown) => received.push({ name, payload }) } },
+    } as never);
+    try {
+      const { id } = await chat.useChatPanelStore.getState().importSession([
+        { id: "m1", role: "user", content: "hi" },
+      ]);
+      await chat.useChatPanelStore.getState().flush();
+      const file = chat.useChatPanelStore.getState().sessions.find((s) => s.id === id)!.file;
+      const line = JSON.stringify({
+        id: "other-1",
+        role: "assistant",
+        content: "来自另一窗口",
+        createdAt: Date.now() + 5000,
+      });
+      h.state.chatFiles.set(file, h.state.chatFiles.get(file) + "\n" + line);
+
+      await chat.syncExternalChatWritesToPlugins({
+        origin: "other-window",
+        messages: [id],
+        metas: [],
+        deleted: [],
+      });
+      // 对账先于转发：订阅方收到事件后读容器面，拿到的已含其他窗口的消息
+      expect(received).toEqual([
+        { name: "chat:sessions-changed", payload: { messages: [id], metas: [], deleted: [] } },
+      ]);
+      expect(
+        chat.useChatPanelStore.getState().sessions.find((s) => s.id === id)?.messages.map((m) => m.id),
+      ).toEqual(["m1", "other-1"]);
+    } finally {
+      cordisEvents.setKernelRef(null);
+    }
   });
 });

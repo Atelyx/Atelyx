@@ -27,6 +27,7 @@ import {
 import { deleteAgentTodos } from "@/services/vault/agentTodos";
 import { CHAT_UNAVAILABLE_TEXT, ERROR_PREFIX } from "@/constants/chat";
 import { BUILTIN_AGENT_CHAT_ID } from "@/constants/agents";
+import { emitPluginEvent } from "@/services/cordis/events";
 import { prefix, scanMentionHits } from "@/utils/text";
 import { coalesceAgentSteps, fillAssistantReplyText } from "@/utils/agentSteps";
 import { nextCompactionBoundary, splitByCompaction } from "@/utils/compaction";
@@ -522,7 +523,21 @@ function initExternalChatSync(): void {
   externalSyncInitialized = true;
   if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) return;
   void onChatSessionsChanged((payload) => {
-    void reconcileExternalChatWrites(payload);
+    void syncExternalChatWritesToPlugins(payload);
+  });
+}
+
+/**
+ * 外部写盘广播 → 插件事件（`chat:sessions-changed`）：先对账再转发，订阅方经容器面重读时
+ * 读到的已是磁盘对齐副本。本窗口自身广播不转发（写入方自知变更，无实时跟随诉求）。
+ */
+export async function syncExternalChatWritesToPlugins(payload: ChatSessionsChangedPayload): Promise<void> {
+  await reconcileExternalChatWrites(payload);
+  if (payload.origin === CHAT_SYNC_ORIGIN) return;
+  emitPluginEvent("chat:sessions-changed", {
+    messages: payload.messages,
+    metas: payload.metas,
+    deleted: payload.deleted,
   });
 }
 
@@ -1193,6 +1208,9 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
   readSession: async (sessionId) => {
     if (!get().loaded) await get().load();
     if (!get().loaded) throw new Error("会话读盘未完成（仓库切换中），请重试");
+    // 附件内容是运行时缓存：容器消费方（速问窗口等）无读回通道，读出前先按引用水合；
+    // 水合会替换 store 内该会话的消息数组，返回值须在水合完成后重新取会话。
+    await hydrateSessionAttachments(sessionId);
     const session = get().sessions.find((s) => s.id === sessionId);
     if (!session) throw new Error(`会话不存在：${sessionId}`);
     return {
@@ -1200,14 +1218,15 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
       ...(session.title !== undefined ? { title: session.title } : {}),
       ...(session.agentId !== undefined ? { agentId: session.agentId } : {}),
       ...(session.compaction ? { compaction: session.compaction } : {}),
-      // 面板消息 → 中性消息：面板特有字段（refs/notices/error）与运行时附件缓存不出契约
+      // 面板消息 → 中性消息：面板特有字段（refs/notices/error）不出契约；
+      // 附件随契约携带水合后的内容缓存（payload），供容器消费方展示图片缩略
       messages: session.messages.map((m) => ({
         id: m.id,
         role: m.role,
         content: m.content,
         ...(m.displayContent !== undefined ? { displayContent: m.displayContent } : {}),
         ...(m.steps?.length ? { steps: m.steps } : {}),
-        ...(m.attachments?.length ? { attachments: m.attachments.map(({ kind, mime, filename, file }) => ({ kind, mime, ...(filename !== undefined ? { filename } : {}), ...(file !== undefined ? { file } : {}) })) } : {}),
+        ...(m.attachments?.length ? { attachments: m.attachments.map(({ kind, mime, filename, file, payload }) => ({ kind, mime, ...(filename !== undefined ? { filename } : {}), ...(file !== undefined ? { file } : {}), ...(payload !== undefined ? { payload } : {}) })) } : {}),
       })),
     };
   },

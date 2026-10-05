@@ -90,6 +90,7 @@ ctx.effect(() => {
 | `chat:started` | `{ targetId: string }` | emit | AI 对话轮次开始（发起请求）。 |
 | `chat:message` | `{ targetId: string; role: "user" | "assistant"; content: string }` | emit | AI 对话消息（角色 + 内容；assistant 消息在流式完成后发出，非逐 token）。 |
 | `chat:finished` | `{ targetId: string }` | emit | AI 对话轮次结束（正常 / 中止 / 出错统一收敛）。 |
+| `chat:sessions-changed` | `{ messages: string[]; metas: string[]; deleted: string[] }` | emit | 会话容器外部变更（其他窗口写盘/删除广播在本窗口对账完成后发出；载荷 = 受影响会话 id 分组）。 本窗口自身写入不发出（写入方自知变更）；提示性信号，按需经 chat 容器面重读会话。 |
 <!-- generated:ctx-api:events:end -->
 
 ```ts

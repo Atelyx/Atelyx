@@ -468,8 +468,9 @@ export interface ChatService {
   appendMessages(sessionId: string, messages: ChatTurnMessage[]): Promise<void>;
   /** 面板会话清单（同源只读：id + 标题 + 最近活动时间，按最近活动降序）。 */
   listSessions(): Promise<Array<{ id: string; title?: string; updatedAt: number }>>;
-  /** 打开面板会话（全部消息 + 元数据；会话不存在即抛错）。附件按 file 引用出契约
-   *  （payload 是面板窗口的运行时缓存），消息中的面板特有标注（refs/错误占位标记）不出契约。 */
+  /** 打开面板会话（全部消息 + 元数据；会话不存在即抛错）。附件出契约时携带按引用水合的
+   *  内容缓存（payload：图片 = dataURL、文本文件 = 解出文本），供容器消费方直接展示；
+   *  消息中的面板特有标注（refs/错误占位标记）不出契约。 */
   openSession(sessionId: string): Promise<{
     id: string;
     title?: string;
@@ -608,6 +609,9 @@ declare module "@atelyx/cordis" {
     "chat:message": (payload: { targetId: string; role: "user" | "assistant"; content: string }) => void;
     /** AI 对话轮次结束（正常 / 中止 / 出错统一收敛）。@emit */
     "chat:finished": (payload: { targetId: string }) => void;
+    /** 会话容器外部变更（其他窗口写盘/删除广播在本窗口对账完成后发出；载荷 = 受影响会话 id 分组）。
+     *  本窗口自身写入不发出（写入方自知变更）；提示性信号，按需经 chat 容器面重读会话。@emit */
+    "chat:sessions-changed": (payload: { messages: string[]; metas: string[]; deleted: string[] }) => void;
   }
 }
 
