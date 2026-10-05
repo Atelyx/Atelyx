@@ -135,6 +135,42 @@ pub fn plugin_shortcut_release_plugin(
     }
 }
 
+/// 单条全局快捷键登记信息（设置页展示用：归属插件 + 是否窗口直控）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShortcutRegistrationInfo {
+    pub accelerator: String,
+    pub plugin_id: String,
+    /// true = 窗口切换热键（触发由 Rust 直控窗口显隐，无 JS 回调）。
+    pub window_toggle: bool,
+}
+
+/// 列出当前登记的全部全局快捷键（OS 层登记表是应用级真源，跨窗口一致；移动端恒空）。
+#[tauri::command(async)]
+pub fn plugin_shortcut_list(state: State<'_, GlobalShortcutState>) -> Result<Vec<ShortcutRegistrationInfo>, String> {
+    #[cfg(desktop)]
+    {
+        let owners = state
+            .inner
+            .lock()
+            .map_err(|_| "快捷键登记表锁定失败".to_string())?;
+        Ok(owners
+            .by_id
+            .values()
+            .map(|payload| ShortcutRegistrationInfo {
+                accelerator: payload.accelerator.clone(),
+                plugin_id: payload.plugin_id.clone(),
+                window_toggle: payload.window_toggle.is_some(),
+            })
+            .collect())
+    }
+    #[cfg(not(desktop))]
+    {
+        let _ = &state;
+        Ok(Vec::new())
+    }
+}
+
 #[cfg(desktop)]
 fn desktop_register(
     app: AppHandle<tauri::Wry>,

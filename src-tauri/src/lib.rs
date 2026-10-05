@@ -244,6 +244,7 @@ pub fn run() {
             commands::global_shortcut::plugin_shortcut_register,
             commands::global_shortcut::plugin_shortcut_unregister,
             commands::global_shortcut::plugin_shortcut_release_plugin,
+            commands::global_shortcut::plugin_shortcut_list,
             // 应用内更新下载与安装（进度 / 取消 / 断点续传 / 摘要校验；见 commands/update.rs）
             commands::update::download_update_package,
             commands::update::cancel_update_download,
