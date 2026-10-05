@@ -121,6 +121,10 @@ export interface DetachedWindow {
   activeTabId: string | null;
   /** 窗口屏幕位置与尺寸（logical px，创建/恢复/移动/缩放时更新）。 */
   bounds: { x: number; y: number; width: number; height: number };
+  /** 窗口隐藏（不销毁：OS 窗口隐藏后 WebView 继续运行，进行中的会话不中断）；启动恢复按此恢复可见性。 */
+  hidden: boolean;
+  /** 启动调和是否补建 OS 窗口（false = 创建方声明不参与启动恢复；条目保留，出现由创建方显式触发）。 */
+  restoreOnLaunch: boolean;
 }
 
 /** 视图类型清单（视图选择器选项顺序）。 */

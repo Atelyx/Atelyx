@@ -99,6 +99,18 @@ pub struct DetachedWindow {
     pub active_tab_id: Option<String>,
     /// 窗口屏幕位置与尺寸（logical px）。
     pub bounds: WindowBounds,
+    /// 窗口隐藏（不销毁：OS 窗口隐藏后 WebView 继续运行，进行中的会话不中断）；
+    /// 启动调和按此恢复可见性。缺省 = 可见。
+    #[serde(default)]
+    pub hidden: bool,
+    /// 启动调和是否补建 OS 窗口（false = 创建方声明不参与启动恢复；条目保留，
+    /// 显示由创建方显式触发）。缺省 = 参与。
+    #[serde(default = "default_true")]
+    pub restore_on_launch: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// 应用级 UI 使用状态（`app_data_dir/ui-state.json` 磁盘格式；本模块为唯一写者）。
@@ -219,6 +231,20 @@ pub enum LayoutOp {
     DetachedMoveTab { window_id: String, tab_id: String, to_index: usize },
     /// 移除撕裂窗口条目（OS 窗口已关闭/拖空自动关窗时调用）。
     RemoveDetachedWindow { window_id: String },
+    /// 免面板直撕：新建撕裂窗口承载单个视图（不经主窗口面板标签，主窗口无标签闪现）。
+    /// 视图全局被占用 = 忽略；`restoreOnLaunch: false` 声明该窗口不参与启动恢复
+    /// （唤起类窗口：OS 窗口只由创建方显式触发出现）。
+    CreateDetachedWindow {
+        view: ViewKind,
+        bounds: WindowBounds,
+        restore_on_launch: Option<bool>,
+    },
+    /// 聚焦已存在的撕裂窗口（OS 前置；条目/窗口不存在 = 忽略）。
+    FocusDetachedWindow { window_id: String },
+    /// 隐藏撕裂窗口（不销毁：窗口内 JS 与进行中的会话继续；启动调和按 hidden 恢复为隐藏）。
+    HideDetachedWindow { window_id: String },
+    /// 恢复显示撕裂窗口并前置（未建窗的不参与启动恢复窗口由此补建；条目不存在 = 忽略）。
+    ShowDetachedWindow { window_id: String },
     /// 拖拽调宽回写 Split 子树尺寸比例（百分数，和 = 100，长度 = children 长度）。
     SetLayoutSizes { split_id: String, sizes: Vec<f64> },
     /// 新建布局（单个空面板占位），命名「布局 N」自动去重，并激活。
@@ -656,7 +682,7 @@ pub(crate) fn apply_tab_group_panel(panel: &LayoutNode, patch: Option<TabGroup>)
 /// 把标签组补丁写回撕裂窗口。
 pub(crate) fn apply_tab_group_detached(win: &DetachedWindow, patch: Option<TabGroup>) -> DetachedWindow {
     match patch {
-        Some(p) => DetachedWindow { id: win.id.clone(), tabs: p.tabs, active_tab_id: p.active_tab_id, bounds: win.bounds.clone() },
+        Some(p) => DetachedWindow { id: win.id.clone(), tabs: p.tabs, active_tab_id: p.active_tab_id, bounds: win.bounds.clone(), hidden: win.hidden, restore_on_launch: win.restore_on_launch },
         None => win.clone(),
     }
 }
@@ -1047,6 +1073,20 @@ mod tests {
     use super::*;
     use crate::layout::apply_layout_op;
 
+    /// 旧版 ui-state.json 的撕裂窗口条目没有 hidden/restoreOnLaunch 字段：反序列化必须
+    /// 落到缺省（可见、参与启动恢复），存量文件不做迁移即可读。
+    #[test]
+    fn detached_window_deserializes_legacy_entry() {
+        let json = r#"{"id":"w1","tabs":[],"activeTabId":null,"bounds":{"x":0,"y":0,"width":100,"height":100}}"#;
+        let w: DetachedWindow = serde_json::from_str(json).unwrap();
+        assert!(!w.hidden);
+        assert!(w.restore_on_launch);
+        // 新字段序列化恒在场（前端契约类型为必填）
+        let text = serde_json::to_string(&w).unwrap();
+        assert!(text.contains(r#""hidden":false"#));
+        assert!(text.contains(r#""restoreOnLaunch":true"#));
+    }
+
     fn ui_with(tree: LayoutNode) -> AppUiState {
         AppUiState {
             schema: UI_STATE_SCHEMA.into(),
@@ -1282,6 +1322,8 @@ mod tests {
             tabs: vec![],
             active_tab_id: None,
             bounds: WindowBounds { x: 0.0, y: 0.0, width: 100.0, height: 100.0, scale: 0.0 },
+            hidden: false,
+            restore_on_launch: true,
         });
         normalize(&mut ui);
         assert_eq!(ui.schema, UI_STATE_SCHEMA);

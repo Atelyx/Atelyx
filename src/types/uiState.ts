@@ -54,6 +54,17 @@ export type LayoutOp =
   | { op: "detachedSetTabView"; windowId: string; tabId: string; view: ViewKind }
   | { op: "detachedMoveTab"; windowId: string; tabId: string; toIndex: number }
   | { op: "removeDetachedWindow"; windowId: string }
+  | {
+      /** 免面板直撕：新建撕裂窗口承载单个视图（不经主窗口面板标签，主窗口无标签闪现）；
+       *  视图全局被占用 = 忽略。restoreOnLaunch: false 声明该窗口不参与启动恢复。 */
+      op: "createDetachedWindow";
+      view: ViewKind;
+      bounds: LayoutBounds;
+      restoreOnLaunch?: boolean;
+    }
+  | { op: "focusDetachedWindow"; windowId: string }
+  | { op: "hideDetachedWindow"; windowId: string }
+  | { op: "showDetachedWindow"; windowId: string }
   | { op: "setLayoutSizes"; splitId: string; sizes: number[] }
   | { op: "addLayout" }
   | { op: "renameLayout"; id: string; name: string }

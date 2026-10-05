@@ -88,6 +88,8 @@ describe("视图汇总与宿主判定", () => {
       tabs: [createTab("table")],
       activeTabId: null,
       bounds: { x: 0, y: 0, width: 0, height: 0 },
+      hidden: false,
+      restoreOnLaunch: true,
     };
     expect(collectAllViews(tree, [w])).toEqual(["canvas", "note", "table"]);
   });
@@ -99,6 +101,8 @@ describe("视图汇总与宿主判定", () => {
       tabs: [createTab("table")],
       activeTabId: null,
       bounds: { x: 0, y: 0, width: 0, height: 0 },
+      hidden: false,
+      restoreOnLaunch: true,
     };
     expect(findViewHost(tree, [w], "canvas")).toBe("main");
     expect(findViewHost(tree, [w], "table")).toBe("w1");

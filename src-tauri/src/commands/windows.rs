@@ -24,7 +24,9 @@ fn panel_url() -> WebviewUrl {
 const STARTUP_BG: Color = Color(19, 20, 24, 255);
 
 /// 创建撕裂面板窗口（label = `panel-<id>`；内部函数，供布局迷你窗口管理器
-/// 撕裂建新窗/恢复调和调用）。已存在（恢复防重）时直接返回 true。
+/// 撕裂建新窗/恢复调和/直撕与显窗动作调用）。已存在（恢复防重）时直接返回 true。
+/// `visible` 为模型侧期望可见性，与 UI 驻留标志（托盘）取交集——驻留期间建窗恒隐藏，
+/// 显示由 show_all_windows 统一补。
 /// 同步命令/事件处理器里调用会死锁（wry#583），故本函数只在 async 上下文
 /// （拖拽落点/恢复调和命令）调用——build() 在 async runtime 线程执行，经投递
 /// 主事件循环在正常派发点创建窗口。
@@ -35,6 +37,7 @@ pub(crate) fn create_panel_window_internal(
     label: &str,
     title: &str,
     bounds: &WindowBounds,
+    visible: bool,
 ) -> bool {
     if app.get_webview_window(label).is_some() {
         return true;
@@ -58,7 +61,7 @@ pub(crate) fn create_panel_window_internal(
             .try_state::<crate::tray::UiHidden>()
             .map(|flag| flag.get())
             .unwrap_or(false);
-        let builder = builder.visible(!hidden);
+        let builder = builder.visible(!hidden && visible);
         let win = builder.build();
         match win {
             Ok(win) => {
@@ -67,7 +70,7 @@ pub(crate) fn create_panel_window_internal(
                 // 种子化初始 bounds：新窗未触发 Moved/Resized 前拖拽解析读不到（主窗口同，见 setup）
                 crate::layout::seed_window_bounds(app, &label_owned);
                 // 驻留托盘期间建出的隐藏窗口不抢焦点
-                if !hidden {
+                if !hidden && visible {
                     let _ = win.set_focus();
                 }
             }

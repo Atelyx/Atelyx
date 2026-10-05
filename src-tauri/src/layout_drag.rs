@@ -991,6 +991,7 @@ mod tests {
             drag_move_gen: 0,
             drag_resolving: false,
             pending_start: None,
+            residence_backup: None,
         };
         resolve_drag(&mut inner, false);
         let p1 = find_panel(&active_layout(&inner.ui).tree, "p1").unwrap();
@@ -1040,6 +1041,7 @@ mod tests {
             drag_move_gen: 0,
             drag_resolving: false,
             pending_start: None,
+            residence_backup: None,
         };
         resolve_drag(&mut inner, false);
         assert_eq!(inner.ui.detached_windows.len(), 1);
@@ -1123,6 +1125,7 @@ mod tests {
             drag_move_gen: gen,
             drag_resolving: false,
             pending_start: None,
+            residence_backup: None,
         }
     }
 

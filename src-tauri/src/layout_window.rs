@@ -115,7 +115,7 @@ fn sync_detached_bounds(ui: &mut AppUiState, label: &str, b: &WindowBounds) -> b
 }
 
 /// 撕裂窗口标题（Rust 侧占位；窗口 boot 后由前端按激活标签更新）。
-fn title_of_tabs(tabs: &[crate::layout_model::TabItem], active_tab_id: &Option<String>) -> String {
+pub(crate) fn title_of_tabs(tabs: &[crate::layout_model::TabItem], active_tab_id: &Option<String>) -> String {
     let active = tabs.iter().find(|t| Some(&t.id) == active_tab_id.as_ref()).or_else(|| tabs.first());
     active.map(|t| t.view.clone()).unwrap_or_else(|| "面板".to_string())
 }
@@ -163,12 +163,25 @@ fn reconcile_windows_once(app: &AppHandle) {
     for w in &ui.detached_windows {
         let label = format!("{PANEL_LABEL_PREFIX}{}", w.id);
         if !existing.contains(&label) {
+            // 创建方声明不参与启动恢复的窗口不补建：条目保留（bounds/标签不丢），
+            // OS 窗口的出现由创建方显式触发（唤起类窗口：按快捷键才出现）
+            if !w.restore_on_launch {
+                continue;
+            }
             crate::commands::windows::create_panel_window_internal(
                 app,
                 &label,
                 &title_of_tabs(&w.tabs, &w.active_tab_id),
                 &w.bounds,
+                !w.hidden,
             );
+        } else if w.hidden {
+            // 隐藏不销毁：OS 窗口被外部显示（如驻留补显时序差）时按模型收回隐藏
+            if let Some(win) = app.get_webview_window(&label) {
+                if win.is_visible().unwrap_or(true) {
+                    let _ = win.hide();
+                }
+            }
         }
     }
     // 回收幽灵（防落点解析把它当停靠目标——条目已移除时标签无处可去会丢失）
@@ -194,6 +207,8 @@ mod tests {
                 tabs: vec![TabItem { id: "t".into(), view: "canvas".into(), locked: false }],
                 active_tab_id: None,
                 bounds: WindowBounds { x: 0.0, y: 0.0, width: 100.0, height: 100.0, scale: 0.0 },
+                hidden: false,
+                restore_on_launch: true,
             }],
             ..Default::default()
         }

@@ -77,11 +77,34 @@ impl ExitWait {
 
 /// 显示全部窗口并聚焦主窗口（托盘打开 / 手动二次启动共用）；
 /// 同时解除驻留标志，此后撕裂窗口照常可见建窗。
+/// 先按驻留备份还原模型 hidden（唤起类隐藏窗口不随驻留补显），再照常跳过模型隐藏窗口。
 pub fn show_all_windows(app: &AppHandle) {
     if let Some(flag) = app.try_state::<UiHidden>() {
         flag.set(false);
     }
+    crate::layout::residence_set(app, false);
+    let model_hidden: HashSet<String> = app
+        .try_state::<crate::layout::LayoutState>()
+        .map(|state| {
+            state
+                .inner
+                .lock()
+                .map(|inner| {
+                    inner
+                        .ui
+                        .detached_windows
+                        .iter()
+                        .filter(|w| w.hidden)
+                        .map(|w| format!("{}{}", crate::layout::PANEL_LABEL_PREFIX, w.id))
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+        .unwrap_or_default();
     for (_, win) in app.webview_windows() {
+        if model_hidden.contains(win.label()) {
+            continue;
+        }
         let _ = win.unminimize();
         let _ = win.show();
     }
@@ -91,7 +114,10 @@ pub fn show_all_windows(app: &AppHandle) {
 }
 
 /// 隐藏全部窗口驻留托盘（主窗口关闭守卫收尾调用）。
+/// 模型 hidden 随 OS 实况整体置真并广播（镜像不失真，插件的显隐判定在驻留期间有效）；
+/// 驻留前的 hidden 备份在内存里，托盘恢复时还原。
 fn hide_all_windows(app: &AppHandle) {
+    crate::layout::residence_set(app, true);
     if let Some(flag) = app.try_state::<UiHidden>() {
         flag.set(true);
     }
