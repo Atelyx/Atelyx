@@ -10,8 +10,12 @@ import type { GrepMatchRow } from "@/types";
 import { createSpaceContentBackend } from "./spaceContent";
 import { createSpaceBackendRegistration } from "./factory";
 import { bytesToBase64 } from "@/utils/base64";
+import { tempInstanceKey } from "@/utils/tempAttachmentPath";
 import { SpaceApiError } from "@/services/space/client";
 import { bumpRecentSpace, removeRecentSpace, spaceKey } from "@/services/global";
+
+/** 临时附件源路径夹具（画布组件实例目录，与新落盘结构同形）。 */
+const TEMP_SRC = `.atelyx/temp/canvas/${tempInstanceKey("c1")}`;
 
 vi.mock("@/services/space/auth", () => ({
   getToken: async () => "tok-test",
@@ -736,10 +740,10 @@ describe("附件：base64 读写与入库", () => {
     expect(await b.readAttachmentDataUrl("file.bin")).toBe(`data:application/octet-stream;base64,${btoa("x")}`);
   });
 
-  it("writeTempAttachment：唯一叶子名 + base64 写入临时目录，返回仓库相对路径", async () => {
+  it("writeTempAttachment：唯一叶子名写入组件实例目录，返回仓库相对路径", async () => {
     const server = setupSpaceServer({});
-    const rel = await backend().writeTempAttachment("c1", "my photo.png", btoa("data"));
-    expect(rel.startsWith(".space-media/temp/c1/att-")).toBe(true);
+    const rel = await backend().writeTempAttachment("canvas", "c1", "my photo.png", btoa("data"));
+    expect(rel.startsWith(`.atelyx/temp/canvas/${tempInstanceKey("c1")}/att-`)).toBe(true);
     expect(rel.endsWith("-my photo.png")).toBe(true);
     expect(server.b64.get(rel)).toBe(btoa("data"));
     const write = calls.find((c) => c.method === "PUT");
@@ -749,26 +753,26 @@ describe("附件：base64 读写与入库", () => {
   it("importAttachment：复制进 attachments 固定目录（重名追加 ` (n)`），临时源保留", async () => {
     const server = setupSpaceServer({
       b64: {
-        ".space-media/temp/c1/att-x-图.png": btoa("img"),
-        // 已有同名附件经 glob 枚举（重名集合来自内容面，非 media/list——后者只允许 .space-media/ 内路径）
+        [`${TEMP_SRC}/att-x-图.png`]: btoa("img"),
+        // 已有同名附件经 glob 枚举（重名集合来自内容面，非 media/list——后者只允许 .atelyx/temp/ 内路径）
         "attachments/图.png": btoa("old"),
       },
     });
-    const r = await backend().importAttachment(".space-media/temp/c1/att-x-图.png", "图.png");
+    const r = await backend().importAttachment(`${TEMP_SRC}/att-x-图.png`, "图.png");
     // 已有 图.png → 追加序号，不覆盖
     expect(r.file).toBe("attachments/图 (1).png");
     expect(server.b64.get("attachments/图 (1).png")).toBe(btoa("img"));
     // 复制而非移动：临时源可能被多个节点引用，残留由按引用清理回收
-    expect(server.b64.has(".space-media/temp/c1/att-x-图.png")).toBe(true);
+    expect(server.b64.has(`${TEMP_SRC}/att-x-图.png`)).toBe(true);
     // 重名枚举不得走 media/list（服务端对仓库可见目录拒绝）
     expect(calls.some((c) => /\/media\/list\?path=attachments/.test(c.url))).toBe(false);
   });
 
   it("importAttachment：无重名直落原基础名", async () => {
     const server = setupSpaceServer({
-      b64: { ".space-media/temp/c1/att-x-图.png": btoa("img") },
+      b64: { [`${TEMP_SRC}/att-x-图.png`]: btoa("img") },
     });
-    const r = await backend().importAttachment(".space-media/temp/c1/att-x-图.png", "图.png");
+    const r = await backend().importAttachment(`${TEMP_SRC}/att-x-图.png`, "图.png");
     expect(r.file).toBe("attachments/图.png");
     expect(server.b64.get("attachments/图.png")).toBe(btoa("img"));
   });
@@ -777,24 +781,24 @@ describe("附件：base64 读写与入库", () => {
     const server = setupSpaceServer({
       metaValues: { "attachment-folder": JSON.stringify("素材/图片") },
       b64: {
-        ".space-media/temp/c1/att-x-图.png": btoa("img"),
+        [`${TEMP_SRC}/att-x-图.png`]: btoa("img"),
         "素材/图片/图.png": btoa("old"),
       },
     });
-    const r = await backend().importAttachment(".space-media/temp/c1/att-x-图.png", "图.png");
+    const r = await backend().importAttachment(`${TEMP_SRC}/att-x-图.png`, "图.png");
     expect(r.file).toBe("素材/图片/图 (1).png");
     expect(server.b64.get("素材/图片/图 (1).png")).toBe(btoa("img"));
     expect(server.b64.get("素材/图片/图.png")).toBe(btoa("old"));
   });
 
   it("importAttachment：附件文件夹设定非法（隐藏目录/通配符/绝对路径/越界）即拒绝，不落盘", async () => {
-    for (const bad of [".space-media/x", "./.space-media", ".hidden", "素材*", "C:/素材", "../外"]) {
+    for (const bad of [".atelyx/x", "./.atelyx", ".hidden", "素材*", "C:/素材", "../外"]) {
       const server = setupSpaceServer({
         metaValues: { "attachment-folder": JSON.stringify(bad) },
-        b64: { ".space-media/temp/c1/att-x-图.png": btoa("img") },
+        b64: { [`${TEMP_SRC}/att-x-图.png`]: btoa("img") },
       });
       await expect(
-        backend().importAttachment(".space-media/temp/c1/att-x-图.png", "图.png"),
+        backend().importAttachment(`${TEMP_SRC}/att-x-图.png`, "图.png"),
       ).rejects.toThrow("附件文件夹设定无效");
       expect(server.writes.some((w) => w.path.endsWith("图.png"))).toBe(false);
     }
@@ -806,7 +810,7 @@ describe("附件：base64 读写与入库", () => {
       { fileName: "photo.jpeg", base64Data: btoa("img") },
       "t1",
     );
-    expect(rel).toMatch(/^\.space-media\/tables\/t1\/img-[0-9a-f-]+\.jpeg$/);
+    expect(rel).toMatch(/^\.atelyx\/temp\/tables\/t1\/img-[0-9a-f-]+\.jpeg$/);
     expect(server.b64.get(rel)).toBe(btoa("img"));
     await expect(
       backend().importTableImage({ fileName: "doc.pdf", base64Data: btoa("x") }, "t1"),
@@ -816,33 +820,34 @@ describe("附件：base64 读写与入库", () => {
 
 describe("附件清理", () => {
   it("cleanupCanvasTempAttachments：只删未引用文件，被引用（含跨画布引用）保留，返回删除数", async () => {
+    const newDir = `.atelyx/temp/canvas/${tempInstanceKey("c1")}`;
     setupSpaceServer({
       files: {
-        // 本画布引用 keep.png；另一画布（节点复制粘贴）引用 keep.png；gone.png 无人引用
+        // 本画布引用 keep.png；另一画布（节点复制粘贴）引用同一文件；orphan.png 无人引用
         "a.atlx": canvasJson([
-          { id: "n1", type: "media", x: 0, y: 0, data: { file: ".space-media/temp/c1/keep.png", mime: "image/png", kind: "image" } },
+          { id: "n1", type: "media", x: 0, y: 0, data: { file: `${newDir}/keep.png`, mime: "image/png", kind: "image" } },
         ]),
         "b.atlx": canvasJson([
-          { id: "n2", type: "media", x: 0, y: 0, data: { file: ".space-media/temp/c1/keep.png", mime: "image/png", kind: "image" } },
+          { id: "n2", type: "media", x: 0, y: 0, data: { file: `${newDir}/keep.png`, mime: "image/png", kind: "image" } },
         ]),
       },
-      media: { ".space-media/temp/c1": [{ name: "keep.png", size: 3 }, { name: "gone.png", size: 3 }] },
+      media: { [newDir]: [{ name: "keep.png", size: 3 }, { name: "orphan.png", size: 3 }] },
     });
     const n = await backend().cleanupCanvasTempAttachments("c1", "a.atlx");
     expect(n).toBe(1);
-    expect(deletesTarget()).toEqual([".space-media/temp/c1/gone.png"]);
+    expect(deletesTarget()).toEqual([`${newDir}/orphan.png`]);
   });
 
   it("cleanupCanvasTempAttachments：画布损坏（引用集合未知）保守放弃，零删除", async () => {
     const server = setupSpaceServer({
       files: { "坏.atlx": "{ 坏" },
-      media: { ".space-media/temp/c1": [{ name: "gone.png", size: 3 }] },
+      media: { [`.atelyx/temp/canvas/${tempInstanceKey("c1")}`]: [{ name: "gone.png", size: 3 }] },
     });
     expect(await backend().cleanupCanvasTempAttachments("c1", "坏.atlx")).toBe(0);
     expect(server.deletes).toEqual([]);
   });
 
-  it("cleanupTableAttachments：只删未被 image 单元格引用的孤儿，返回删除数；损坏表格返回 0", async () => {
+  it("cleanupTableAttachments：只删未被 image 单元格引用的孤儿，损坏表格返回 0", async () => {
     const server = setupSpaceServer({
       files: {
         "t.atb": JSON.stringify({
@@ -850,19 +855,28 @@ describe("附件清理", () => {
           id: "t1",
           fields: [{ id: "f1", name: "图", type: "image" }],
           rows: [
-            { id: "r1", values: { f1: { images: [".space-media/tables/t1/keep.png", "data:image/png;base64,xxx"] } } },
+            {
+              id: "r1",
+              values: {
+                f1: {
+                  images: [".atelyx/temp/tables/t1/keep.png", "data:image/png;base64,xxx"],
+                },
+              },
+            },
           ],
         }),
         "坏.atb": "{ 坏",
       },
-      media: { ".space-media/tables/t1": [{ name: "keep.png", size: 3 }, { name: "orphan.png", size: 3 }] },
+      media: {
+        ".atelyx/temp/tables/t1": [{ name: "keep.png", size: 3 }, { name: "orphan.png", size: 3 }],
+      },
     });
     const b = backend();
-    expect(await b.cleanupTableAttachments("t.atb")).toBe(1);
-    expect(server.deletes).toEqual([".space-media/tables/t1/orphan.png"]);
+    expect(await b.cleanupTableAttachments("t1", "t.atb")).toBe(1);
+    expect(server.deletes).toEqual([".atelyx/temp/tables/t1/orphan.png"]);
     // 损坏表格：引用集合未知 → 0 不清理
-    expect(await b.cleanupTableAttachments("坏.atb")).toBe(0);
-    expect(server.deletes).toEqual([".space-media/tables/t1/orphan.png"]);
+    expect(await b.cleanupTableAttachments("t1", "坏.atb")).toBe(0);
+    expect(server.deletes).toEqual([".atelyx/temp/tables/t1/orphan.png"]);
   });
 });
 
@@ -1127,8 +1141,8 @@ describe("附件上传链：本机文件 base64 → 空间后端形状", () => {
     const { writeTempAttachment } = await import("@/services/tempAttachment");
     // 本机文件（组件经文件选择/粘贴/拖拽拿到 File 对象，无路径语义）
     const file = new File([new Uint8Array([1, 2, 3, 250])], "截图.png");
-    const ref = await writeTempAttachment("c1", file.name, file);
-    expect(ref.startsWith(".space-media/temp/c1/att-")).toBe(true);
+    const ref = await writeTempAttachment("session", "c1", file.name, file);
+    expect(ref.startsWith(`.atelyx/temp/sessions/${tempInstanceKey("c1")}/att-`)).toBe(true);
     expect(ref.endsWith("-截图.png")).toBe(true);
     // 调用形状：base64 载荷经空间 API 传输（解码后与源字节一致）
     expect(server.b64.get(ref)).toBe(btoa(String.fromCharCode(1, 2, 3, 250)));
@@ -1143,7 +1157,7 @@ describe("附件上传链：本机文件 base64 → 空间后端形状", () => {
     const file = new File([new Uint8Array([9, 8, 7])], "photo.jpg");
     const bytes = new Uint8Array(await file.arrayBuffer());
     const rel = await importTableImage({ fileName: file.name, base64Data: bytesToBase64(bytes) }, "t1");
-    expect(rel).toMatch(/^\.space-media\/tables\/t1\/img-[0-9a-f-]+\.jpg$/);
+    expect(rel).toMatch(/^\.atelyx\/temp\/tables\/t1\/img-[0-9a-f-]+\.jpg$/);
     expect(server.b64.get(rel)).toBe(btoa(String.fromCharCode(9, 8, 7)));
   });
 });

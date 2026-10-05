@@ -4,9 +4,14 @@
  * 当前覆盖：笔记域 + 画布/表格读写/补丁 + 附件/临时区/入库 + 结构变更（含引用同步）+ 索引
  * + 文件历史（追加经服务端 `history/record` 在路径锁内合并，聚合经 `history/aggregate`）。
  *
- * 空间内媒体目录约定（服务端保留目录，树/索引不出现在结果中、读写可达）：
- * - 画布未入库临时附件：`.space-media/temp/<canvasId>/<fileName>`
- * - 表格图片：`.space-media/tables/<tableId>/<fileName>`
+ * 空间内媒体目录约定（服务端保留目录 `.atelyx/temp/`，**与个人仓库临时区同构**——空间退化
+ * 为本地仓库时媒体按同名相对路径落位、引用不改写；树/索引不出现在结果中、读写可达）：
+ * - 画布未入库临时附件：`.atelyx/temp/canvas/<canvasKey>/<fileName>`（canvasKey = 画布 id 的
+ *   FNV 派生，与本地同算法）
+ * - 面板会话附件：`.atelyx/temp/sessions/<sessionKey>/<fileName>`（同派生）
+ * - 表格图片：`.atelyx/temp/tables/<tableId>/<fileName>`
+ * - 实例目录首写时落 `.instance-id` 标记（内容 = 实例 id，与本地同机制）：退化后本地兜底清扫器
+ *   无需特判即可接管
  * - 入库附件：`<附件文件夹>/<fileName>`（团队元数据 `attachment-folder` 设定，未配置 = `attachments/`；
  *   既有附件不因改动设定而迁移——引用是相对路径，改设定只影响之后入库的文件）
  *
@@ -56,6 +61,13 @@ import {
   type TreeNode,
 } from "@/services/space/client";
 import { getToken } from "@/services/space/auth";
+import {
+  TEMP_ATTACHMENT_DIR,
+  TEMP_COMPONENT_DIRS,
+  tempInstanceLeaf,
+  type TempComponent,
+} from "@/utils/tempAttachmentPath";
+import { bytesToBase64 } from "@/utils/base64";
 import type { ContentBackend, TableImageSource } from "./contract";
 
 /**
@@ -80,16 +92,13 @@ function pathLevelError(e: SpaceApiError): string {
 
 // ===== 空间媒体目录约定（见文件头注释） =====
 
-const SPACE_MEDIA_DIR = ".space-media";
-const SPACE_TEMP_DIR = `${SPACE_MEDIA_DIR}/temp`;
-const SPACE_TABLE_MEDIA_DIR = `${SPACE_MEDIA_DIR}/tables`;
 /** 入库附件的兜底目录（未配置「附件文件夹」时的落位）。 */
 const SPACE_DEFAULT_ATTACHMENT_DIR = "attachments";
 
 /**
  * 入库附件的目标目录：读团队元数据 `attachment-folder`（「附件文件夹」设定，与本地同语义）。
  *
- * 只接受仓库内普通相对目录——绝对路径、`..` 段、隐藏段（含服务端保留目录 `.space-media`）、
+ * 只接受仓库内普通相对目录——绝对路径、`..` 段、隐藏段（含服务端保留目录 `.atelyx/temp`）、
  * 以及 glob 元字符一律拒绝并抛错：隐藏目录不参与文件树与索引（附件落进去等于找不到），
  * 重名枚举按 glob 模式查已有附件、元字符会命中别的目录（同名附件会被当不存在而覆盖，附件丢失
  * 不可接受）。拒绝时报错而非回落默认目录：回落会让用户的设定静默失效，落错位置且无人知晓。
@@ -575,33 +584,20 @@ function updateCanvasFileRefs(rootValue: unknown, oldFile: string, newFile: stri
   return changed;
 }
 
-/** 画布文本内引用临时区某目录的文件名集合；文本不是合法 JSON 时抛错（引用集合未知，不得当空集清理）。 */
-function referencedTempNames(canvasText: string, dirPrefix: string): Set<string> {
-  let value: unknown;
-  try {
-    value = JSON.parse(canvasText);
-  } catch {
-    throw new Error("画布文件损坏，无法解析，未回收临时附件");
+/** 深度遍历 JSON，把以 `<前缀>/` 开头的字符串值收进集合（完整仓库相对路径，前缀匹配比逐段
+ * 解析保守：多认账只会少删、不会误删）。 */
+function collectTempRefsIn(value: unknown, prefix: string, out: Set<string>): void {
+  if (typeof value === "string") {
+    if (value.startsWith(prefix)) out.add(value);
+    return;
   }
-  const names = new Set<string>();
-  const visit = (v: unknown) => {
-    if (typeof v === "string") {
-      if (v.startsWith(dirPrefix)) {
-        const name = v.slice(dirPrefix.length);
-        if (name && !name.includes("/")) names.add(name);
-      }
-      return;
-    }
-    if (Array.isArray(v)) {
-      v.forEach(visit);
-      return;
-    }
-    if (v && typeof v === "object") {
-      Object.values(v).forEach(visit);
-    }
-  };
-  visit(value);
-  return names;
+  if (Array.isArray(value)) {
+    value.forEach((v) => collectTempRefsIn(v, prefix, out));
+    return;
+  }
+  if (value && typeof value === "object") {
+    Object.values(value).forEach((v) => collectTempRefsIn(v, prefix, out));
+  }
 }
 
 
@@ -694,7 +690,7 @@ export function createSpaceContentBackend(serverUrl: string, spaceId: string): C
     }
   }
 
-  /** 单层枚举保留媒体目录条目；目录不存在（404）视为空。仅用于 `.space-media/` 内路径——服务端 media/list 拒绝仓库可见目录（400）。 */
+  /** 单层枚举保留媒体目录条目；目录不存在（404）视为空。仅用于 `.atelyx/temp/` 内路径——服务端 media/list 拒绝保留目录外的路径（400）。 */
   async function listMediaEntries(path: string): Promise<MediaListEntry[]> {
     try {
       const res = await client.content.mediaList(spaceId, path);
@@ -703,6 +699,29 @@ export function createSpaceContentBackend(serverUrl: string, spaceId: string): C
       if (e instanceof SpaceApiError && e.status === 404) return [];
       throw e;
     }
+  }
+
+  /**
+   * 按引用回收某实例的临时附件（统一入口）：删实例目录（新组件目录 + 旧落盘目录）内
+   * 未被 `refs` 白名单认账的文件。白名单 = 被引用的完整仓库相对路径集合（调用方在引用
+   * 集合未知时已提前返回 0，传入的集合总是完整可判定的）。
+   * media/list 只列文件（temp 实例目录内均为单层附件，无子目录语义）。
+   */
+  async function cleanupInstanceTempDirs(dirs: string[], refs: Set<string>): Promise<number> {
+    let removed = 0;
+    for (const dir of dirs) {
+      for (const entry of await listMediaEntries(dir)) {
+        const rel = `${dir}/${entry.name}`;
+        if (refs.has(rel)) continue;
+        try {
+          await client.content.deleteFile(spaceId, rel);
+          removed += 1;
+        } catch (e) {
+          console.error(`删除未引用临时附件失败：${rel}`, e);
+        }
+      }
+    }
+    return removed;
   }
 
   /** 用 grep 定位引用旧名/旧路径的候选文件（去重返回路径）。 */
@@ -794,7 +813,7 @@ export function createSpaceContentBackend(serverUrl: string, spaceId: string): C
     const stem = hasExt ? fileName.slice(0, dot) : fileName;
     const ext = hasExt ? fileName.slice(dot + 1) : null;
     const withExt = (name: string) => (ext ? `${name}.${ext}` : name);
-    // 重名枚举走内容面 glob：附件目录是仓库可见目录，media/list 对其拒绝（仅允许 .space-media/ 内）
+    // 重名枚举走内容面 glob：附件目录是仓库可见目录，media/list 对其拒绝（仅允许 .atelyx/temp/ 内）
     const res = await client.content.glob(spaceId, { pattern: `${dir}/*` });
     const existing = new Set(res.paths.map((p) => baseName(p)));
     let leaf = withExt(stem);
@@ -1076,9 +1095,27 @@ export function createSpaceContentBackend(serverUrl: string, spaceId: string): C
     },
     deleteNote: (file) => client.content.deleteFile(spaceId, file),
     deleteAttachment: (file) => client.content.deleteFile(spaceId, file),
-    // 删除画布/表格：不更新画布引用（契约如此，断链降级由前端处理）
+    // 删除画布/表格：不更新画布引用（契约如此，断链降级由前端处理）。
+    // 删表随删图片附件目录（temp 组件目录 + 旧落盘目录，与本地同语义）：读不到 id
+    // （文件损坏/已被删）只跳过目录清理，不拦截删除本身。
     deleteCanvas: (file) => client.content.deleteFile(spaceId, file),
-    deleteTable: (file) => client.content.deleteFile(spaceId, file),
+    async deleteTable(file: string): Promise<void> {
+      const tableId = await readEntityJson(file, "表格")
+        .then(({ data }) => (typeof data.id === "string" ? data.id : null))
+        .catch(() => null);
+      await client.content.deleteFile(spaceId, file);
+      if (tableId !== null) {
+        await client.content
+          .deleteFolder(spaceId, {
+            path: `${TEMP_ATTACHMENT_DIR}/${TEMP_COMPONENT_DIRS.table}/${tableId}`,
+            force: true,
+          })
+          .catch((e) => {
+            if (e instanceof SpaceApiError && e.status === 404) return;
+            console.error(`删除表格图片目录失败：${TEMP_ATTACHMENT_DIR}/${TEMP_COMPONENT_DIRS.table}/${tableId}`, e);
+          });
+      }
+    },
     async deleteFolder(dir: string, force: boolean): Promise<DeleteFolderResult> {
       const res = await client.content.deleteFolder(spaceId, { path: dir, force });
       // itemCount 由服务端递归统计（含隐藏项，与本地 count_dir_items 同口径）
@@ -1160,10 +1197,24 @@ export function createSpaceContentBackend(serverUrl: string, spaceId: string): C
     remapSideloadsByDir: () => Promise.resolve(),
 
     // ===== 附件 =====
-    // 未入库临时附件：唯一叶子名 `att-<随机>-<净化名>`（与本地同形），base64 写入后返回
-    // 仓库相对路径引用（画布 media 节点 `file` 直接消费）。
-    async writeTempAttachment(canvasId: string, fileName: string, base64Data: string): Promise<string> {
-      const rel = `${SPACE_TEMP_DIR}/${canvasId}/att-${crypto.randomUUID()}-${sanitizeTempFileName(fileName)}`;
+    // 未入库临时附件：唯一叶子名 `att-<随机>-<净化名>`（与本地同形），写入组件实例目录后返回
+    // 仓库相对路径引用（画布 media 节点 `file` 直接消费）。实例目录首写落 `.instance-id` 标记
+    // （内容 = 实例 id，与本地同机制）：空间退化为本地仓库后，本地兜底清扫器无需特判即可接管。
+    async writeTempAttachment(
+      component: TempComponent,
+      instanceId: string,
+      fileName: string,
+      base64Data: string,
+    ): Promise<string> {
+      const dir = `${TEMP_ATTACHMENT_DIR}/${TEMP_COMPONENT_DIRS[component]}/${tempInstanceLeaf(component, instanceId)}`;
+      if (component !== "table") {
+        // 标记内容与本地一致（原始实例 id，供清扫器与存活实例对账）；幂等覆盖同内容
+        const markerBytes = new TextEncoder().encode(instanceId);
+        await writeBase64File(`${dir}/.instance-id`, bytesToBase64(markerBytes)).catch((e) =>
+          console.error("写入实例标记失败（目录退化为清扫器保守保留）", dir, e),
+        );
+      }
+      const rel = `${dir}/att-${crypto.randomUUID()}-${sanitizeTempFileName(fileName)}`;
       await writeBase64File(rel, base64Data);
       return rel;
     },
@@ -1180,106 +1231,86 @@ export function createSpaceContentBackend(serverUrl: string, spaceId: string): C
       await writeBase64File(target, data);
       return { file: target };
     },
-    // 表格图片：唯一命名 `img-<随机>.<ext>`（与本地同形：删除后重导不覆盖旧文件、不撞缓存/撤销引用）。
-    // 源为前端读好的本机文件 base64——本机路径在协作空间不可达，图片字节统一经前端读出后传输。
+    // 表格图片：唯一命名 `img-<随机>.<ext>`（与本地同形：删除后重导不覆盖旧文件、不撞缓存/撤销引用），
+    // 落 `temp/tables/<tableId>/` 组件目录。源为前端读好的本机文件 base64——本机路径在协作空间
+    // 不可达，图片字节统一经前端读出后传输。
     async importTableImage(image: TableImageSource, tableId: string): Promise<string> {
       const ext = imageExtFromName(image.fileName);
       if (ext === null) throw new Error(`非图片文件：${image.fileName}`);
-      const rel = `${SPACE_TABLE_MEDIA_DIR}/${tableId}/img-${crypto.randomUUID()}.${ext}`;
+      const rel = `${TEMP_ATTACHMENT_DIR}/${TEMP_COMPONENT_DIRS.table}/${tableId}/img-${crypto.randomUUID()}.${ext}`;
       await writeBase64File(rel, image.base64Data);
       return rel;
     },
-    // 按引用回收画布临时附件：只删全仓库任何画布都不再引用的文件；
-    // 引用扫描失败（画布读不到/损坏）一律放弃本次清理（残缺引用集当完整白名单会误删）。
+    // 按引用回收画布临时附件：删画布实例目录内未被任何画布认账的文件；引用扫描失败
+    // （画布读不到/损坏）一律放弃本次清理（残缺引用集当完整白名单会误删）。
     async cleanupCanvasTempAttachments(canvasId: string, canvasFile: string): Promise<number> {
       void canvasFile; // 目录归属由 canvasId 决定；画布自身引用已含在全仓库扫描中
-      const dir = `${SPACE_TEMP_DIR}/${canvasId}`;
-      const dirPrefix = `${dir}/`;
-      const entries = await listMediaEntries(dir);
-      if (entries.length === 0) return 0;
-      let referenced: Set<string>;
+      const refs = new Set<string>();
       try {
-        referenced = new Set();
         for (const { text } of await readAllCanvasTexts()) {
-          for (const name of referencedTempNames(text, dirPrefix)) referenced.add(name);
+          collectTempRefsIn(JSON.parse(text), `${TEMP_ATTACHMENT_DIR}/`, refs);
         }
       } catch (e) {
         console.error("画布临时附件回收跳过（引用扫描失败）", e);
         return 0;
       }
-      let removed = 0;
-      for (const entry of entries) {
-        if (referenced.has(entry.name)) continue;
-        try {
-          await client.content.deleteFile(spaceId, `${dir}/${entry.name}`);
-          removed += 1;
-        } catch (e) {
-          console.error(`删除未引用临时附件失败：${dir}/${entry.name}`, e);
-        }
-      }
-      return removed;
+      return cleanupInstanceTempDirs(
+        [`${TEMP_ATTACHMENT_DIR}/${TEMP_COMPONENT_DIRS.canvas}/${tempInstanceLeaf("canvas", canvasId)}`],
+        refs,
+      );
     },
     // 按引用回收会话临时附件（AI 对话面板，会话删除后调用）：面板附件引用不跨会话，
     // 只需本会话消息正文的引用集合。空间内会话消息以 user meta `chat/messages/<id>` 为真源
     // （不落服务端内容文件），读原语与面板读写同一套键约定：
-    // - 读得到 → 逐行解析引用（JSONL），只删未被引用的文件；
-    // - 键缺失（会话已删）→ 引用集合为空，整目录可清；
+    // - 读得到 → 逐行解析引用（JSONL，损坏行跳过——与本地回收及前端恢复语义一致）；
+    // - 键缺失（会话已删）→ 引用集合为空，实例目录可清；
     // - 读取失败（网络等，引用集合未知）→ 保守跳过（宁可留垃圾不误删）。
     async cleanupSessionTempAttachments(sessionId: string, sessionFile: string): Promise<number> {
       void sessionFile; // 目录归属由 sessionId 决定；引用集合取自 user meta，不经内容文件路径
-      const dir = `${SPACE_TEMP_DIR}/${sessionId}`;
-      const dirPrefix = `${dir}/`;
-      const entries = await listMediaEntries(dir);
-      if (entries.length === 0) return 0;
-      let referenced: Set<string>;
+      const refs = new Set<string>();
       try {
         const values = (await client.meta.getMyMeta(spaceId)).values ?? {};
         const text = values[CHAT_MESSAGES_META_PREFIX + sessionId];
-        if (text === undefined) {
-          referenced = new Set(); // 会话已删：引用集合为空
-        } else {
-          referenced = new Set();
+        if (text !== undefined) {
           for (const line of text.split("\n")) {
             const trimmed = line.trim();
             if (!trimmed) continue;
-            for (const name of referencedTempNames(trimmed, dirPrefix)) referenced.add(name);
+            try {
+              collectTempRefsIn(JSON.parse(trimmed), `${TEMP_ATTACHMENT_DIR}/`, refs);
+            } catch {
+              continue; // 损坏行跳过（与本地回收及前端恢复语义一致：坏行不阻塞其余引用收集）
+            }
           }
         }
       } catch (e) {
         console.error("会话临时附件回收跳过（会话消息读取失败，引用集合未知）", sessionId, e);
         return 0;
       }
-      let removed = 0;
-      for (const entry of entries) {
-        if (referenced.has(entry.name)) continue;
-        try {
-          await client.content.deleteFile(spaceId, `${dir}/${entry.name}`);
-          removed += 1;
-        } catch (e) {
-          console.error(`删除未引用临时附件失败：${dir}/${entry.name}`, e);
-        }
-      }
-      return removed;
+      return cleanupInstanceTempDirs(
+        [`${TEMP_ATTACHMENT_DIR}/${TEMP_COMPONENT_DIRS.session}/${tempInstanceLeaf("session", sessionId)}`],
+        refs,
+      );
     },
-    // 回收表格孤儿图片：删除附件目录中未被任一 image 单元格引用的文件；
-    // 读盘失败（损坏/已被外部删除）返回 0 保守不清理——引用集合未知，防误删（与本地同口径）。
-    async cleanupTableAttachments(file: string): Promise<number> {
+    // 回收表格孤儿图片：删表格实例目录（temp 组件目录 + 旧落盘目录）中未被任一 image
+    // 单元格引用的文件；读盘失败（损坏/已被外部删除）返回 0 保守不清理——引用集合未知，
+    // 防误删（与本地同口径）。
+    async cleanupTableAttachments(tableId: string, file: string): Promise<number> {
       let table: Record<string, unknown>;
       try {
         ({ data: table } = await readEntityJson(file, "表格"));
       } catch {
         return 0;
       }
-      const tableId = typeof table.id === "string" ? table.id : null;
-      if (tableId === null || !Array.isArray(table.rows)) return 0;
+      const refs = new Set<string>();
       const imageFieldIds = new Set(
         (Array.isArray(table.fields) ? table.fields : [])
           .map((f) => f as { id?: unknown; type?: unknown })
           .filter((f) => f.type === "image" && typeof f.id === "string")
           .map((f) => f.id as string),
       );
-      const referenced = new Set<string>();
-      for (const row of table.rows as Array<{ values?: Record<string, unknown> }>) {
+      for (const row of (Array.isArray(table.rows) ? table.rows : []) as Array<{
+        values?: Record<string, unknown>;
+      }>) {
         for (const [fieldId, value] of Object.entries(row.values ?? {})) {
           if (!imageFieldIds.has(fieldId)) continue;
           const items = Array.isArray(value)
@@ -1288,25 +1319,14 @@ export function createSpaceContentBackend(serverUrl: string, spaceId: string): C
               ? (value as { images: unknown[] }).images
               : [];
           for (const item of items) {
-            if (typeof item === "string" && !item.startsWith("data:")) referenced.add(item);
+            if (typeof item === "string" && !item.startsWith("data:")) refs.add(item);
           }
         }
       }
-      const dir = `${SPACE_TABLE_MEDIA_DIR}/${tableId}`;
-      const entries = await listMediaEntries(dir);
-      if (entries.length === 0) return 0;
-      let removed = 0;
-      for (const entry of entries) {
-        const rel = `${dir}/${entry.name}`;
-        if (referenced.has(rel)) continue;
-        try {
-          await client.content.deleteFile(spaceId, rel);
-          removed += 1;
-        } catch (e) {
-          console.error(`删除表格孤儿图片失败：${rel}`, e);
-        }
-      }
-      return removed;
+      return cleanupInstanceTempDirs(
+        [`${TEMP_ATTACHMENT_DIR}/${TEMP_COMPONENT_DIRS.table}/${tableId}`],
+        refs,
+      );
     },
 
     // ===== 索引 =====

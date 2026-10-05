@@ -233,7 +233,7 @@ export interface SpaceClient {
     getTree(spaceId: string): Promise<TreeNode[]>;
     readFile(spaceId: string, path: string, opts?: ReadFileOptions): Promise<FileContent>;
     writeFile(spaceId: string, body: WriteFileBody): Promise<{ updatedAt: number }>;
-    /** 单层枚举保留媒体目录（如 `.space-media/...`；隐藏目录不出现在树/索引端点）。 */
+    /** 单层枚举保留媒体目录（`.atelyx/temp/...`，与个人仓库临时区同构；隐藏目录不出现在树/索引端点）。 */
     mediaList(spaceId: string, path: string): Promise<{ entries: MediaListEntry[] }>;
     rename(spaceId: string, body: RenameBody): Promise<void>;
     copy(spaceId: string, body: CopyBody): Promise<void>;

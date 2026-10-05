@@ -139,7 +139,7 @@ async function seedAllDomains(): Promise<void> {
   // 表格图片显示缓存（真实读取一次入缓存；空间后端无附件读取，种子失败可容忍——
   // 缓存保持为空不影响「已清」断言）
   await tableImageCache
-    .resolveTableImageUrl(".atelyx/attachments/t1/pic.png")
+    .resolveTableImageUrl(".atelyx/temp/tables/t1/pic.png")
     .catch(() => undefined);
   // 画布视口交接缓存
   viewHandoff.cacheCanvasViewport("a.atlx", { x: 1, y: 2, zoom: 1 });
@@ -182,7 +182,7 @@ describe("切换激活仓库清理（notifyVaultLeaving 总断言）", () => {
   it("切换后同路径图片再次解析必须重新读盘（显示缓存已清）", async () => {
     expect(h.calls.filter((c) => c === "read_attachment_data_url")).toHaveLength(1);
     kernel.notifyVaultLeaving();
-    await tableImageCache.resolveTableImageUrl(".atelyx/attachments/t1/pic.png");
+    await tableImageCache.resolveTableImageUrl(".atelyx/temp/tables/t1/pic.png");
     expect(h.calls.filter((c) => c === "read_attachment_data_url")).toHaveLength(2);
   });
 
@@ -196,7 +196,7 @@ describe("切换激活仓库清理（notifyVaultLeaving 总断言）", () => {
  *  仅适用于激活后端支持附件读取的场景（local）。 */
 async function assertImageCacheCleared(): Promise<void> {
   const callsBefore = h.calls.filter((c) => c === "read_attachment_data_url").length;
-  await tableImageCache.resolveTableImageUrl(".atelyx/attachments/t1/pic.png");
+  await tableImageCache.resolveTableImageUrl(".atelyx/temp/tables/t1/pic.png");
   expect(h.calls.filter((c) => c === "read_attachment_data_url").length).toBe(callsBefore + 1);
 }
 
@@ -204,7 +204,7 @@ async function assertImageCacheCleared(): Promise<void> {
  *  缓存若未清会直接命中返回、不会触达后端。 */
 async function assertImageCacheClearedForSpace(): Promise<void> {
   await expect(
-    tableImageCache.resolveTableImageUrl(".atelyx/attachments/t1/pic.png"),
+    tableImageCache.resolveTableImageUrl(".atelyx/temp/tables/t1/pic.png"),
   ).rejects.toThrow();
 }
 

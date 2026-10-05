@@ -202,6 +202,9 @@ interface TableSnapshot {
   rows: TableRow[];
 }
 
+/** 加载世代号：load 全程多段 await（读盘/迁移复制/迁移补丁），快速切表时旧 load 不得回写状态。 */
+let tableLoadGeneration = 0;
+
 /** 撤销/重做栈（深 50，通用快照栈工具；与画布共用语义）。 */
 const undoMgr = createUndoManager<TableSnapshot>({
   snapshot: () => {
@@ -720,6 +723,7 @@ export const useTableStore = create<TableStoreState>((set, get) => ({
   undoResetCell: null,
 
   load: async (file) => {
+    const generation = ++tableLoadGeneration;
     // 切换表格前取消未落盘的保存定时器 + 清空撤销栈：快照含旧表内容，混用会串表污染撤销
     persistCtl.cancel();
     undoMgr.clear();
@@ -730,6 +734,7 @@ export const useTableStore = create<TableStoreState>((set, get) => ({
     // hasCollabPeerOnTable）。切表即清空旧表撤销栈与显示缓存，会话内删除的图片此刻才
     // 没有恢复路径，回收安全（读盘失败保守跳过，不阻塞打开）
     const prevFile = get().tableFile;
+    const prevId = get().id;
     if (prevFile && prevFile !== file) {
       void (async () => {
         try {
@@ -739,7 +744,7 @@ export const useTableStore = create<TableStoreState>((set, get) => ({
         }
         const s = useTableStore.getState();
         if (s.tableFile !== prevFile && !s.dirty && !hasCollabPeerOnTable(prevFile)) {
-          void cleanupTableAttachments(prevFile).catch((e) =>
+          void cleanupTableAttachments(prevId, prevFile).catch((e) =>
             console.error("回收表格孤儿图片失败", e),
           );
         }
@@ -749,6 +754,8 @@ export const useTableStore = create<TableStoreState>((set, get) => ({
     clearTableImageCache();
     try {
       const table = await readTableVault(file);
+      // 世代守卫：读盘期间用户已切表 → 本轮作废，不得回写状态
+      if (generation !== tableLoadGeneration) return;
       set({
         tableFile: file,
         id: table.id,
@@ -766,6 +773,8 @@ export const useTableStore = create<TableStoreState>((set, get) => ({
       syncLastSaved();
     } catch (e) {
       console.error("加载表格失败", e);
+      // 世代守卫：读失败但用户已切表 → 复位会让新表状态被错误清掉
+      if (generation !== tableLoadGeneration) return;
       // 复位文件态：读失败时上一张表的内容/路径不得残留——继续编辑会写进错误的表文件
       resetTableState(e instanceof Error ? e.message : String(e));
     }
@@ -787,8 +796,9 @@ export const useTableStore = create<TableStoreState>((set, get) => ({
     // 调用方契约已先 flush——closeTable 先落盘，closeTableSilent 文件已删读盘失败保守跳过）。
     // 协作对端同表在线跳过（见 hasCollabPeerOnTable）
     const prevFile = get().tableFile;
+    const prevId = get().id;
     if (prevFile && !hasCollabPeerOnTable(prevFile)) {
-      void cleanupTableAttachments(prevFile).catch((e) =>
+      void cleanupTableAttachments(prevId, prevFile).catch((e) =>
         console.error("回收表格孤儿图片失败", e),
       );
     }

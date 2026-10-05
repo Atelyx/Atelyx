@@ -964,7 +964,7 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
               console.warn("跳过无内容也无引用的托盘附件", p.id, p.filename);
               continue;
             }
-            const ref = await writeTempAttachment(sessionId, p.filename ?? "attachment", p.blob);
+            const ref = await writeTempAttachment("session", sessionId, p.filename ?? "attachment", p.blob);
             p.file = ref;
           }
           attachments.push({

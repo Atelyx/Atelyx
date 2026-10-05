@@ -1,5 +1,5 @@
 /**
- * 表格图片显示缓存：图片外置后单元格值存仓库相对路径（`.atelyx/attachments/<tableId>/…`），
+ * 表格图片显示缓存：图片外置后单元格值存仓库相对路径（`.atelyx/temp/tables/<tableId>/…`），
  * 渲染时经此缓存解析为 dataURL（底层走 `read_attachment_data_url`，与画布媒体节点同源）。
  *
  * 模块级 LRU（条目上限，淘汰最久未用）+ 进行中 promise 复用（多单元格引用同一图片只发一次 IPC）。

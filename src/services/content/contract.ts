@@ -30,6 +30,7 @@ import type {
   TablePatch,
   TagRow,
 } from "@/types";
+import type { TempComponent } from "@/utils/tempAttachmentPath";
 
 /** 仓库运行时身份：个人仓库 = root 绝对路径；协作空间 = serverUrl + spaceId。 */
 export type VaultIdentity =
@@ -134,8 +135,13 @@ export interface ContentBackend {
   remapSideloadsByDir(oldDir: string, newDir: string): Promise<void>;
 
   // ===== 附件 =====
-  /** 附件字节写入未入库临时区，返回仓库相对路径引用。 */
-  writeTempAttachment(canvasId: string, fileName: string, base64Data: string): Promise<string>;
+  /** 附件字节写入临时区指定组件的实例目录，返回仓库相对路径引用。 */
+  writeTempAttachment(
+    component: TempComponent,
+    instanceId: string,
+    fileName: string,
+    base64Data: string,
+  ): Promise<string>;
   /** 把未入库附件复制进仓库附件文件夹，返回仓库相对路径。 */
   importAttachment(rel: string, fileName: string): Promise<{ file: string }>;
   /** 把本机图片（base64 字节 + 文件名）落为表格附件，返回唯一相对路径供单元格引用。 */
@@ -144,8 +150,8 @@ export interface ContentBackend {
   cleanupCanvasTempAttachments(canvasId: string, canvasFile: string): Promise<number>;
   /** 按引用回收某会话的未入库附件（AI 对话面板），返回删除文件数。 */
   cleanupSessionTempAttachments(sessionId: string, sessionFile: string): Promise<number>;
-  /** 回收表格孤儿图片附件，返回删除文件数。 */
-  cleanupTableAttachments(file: string): Promise<number>;
+  /** 回收表格孤儿图片附件（temp 组件目录 + 旧落盘目录），返回删除文件数。 */
+  cleanupTableAttachments(tableId: string, file: string): Promise<number>;
 
   // ===== 索引 =====
   /** 查询反链（`[[笔记名]]` 或 `[label](路径)` 两种写法）。 */

@@ -116,8 +116,8 @@ export const localBackend: ContentBackend = {
   },
 
   // ===== 附件 =====
-  writeTempAttachment: (canvasId, fileName, base64Data) =>
-    invoke<string>("write_temp_attachment", { canvasId, fileName, base64Data }),
+  writeTempAttachment: (component, instanceId, fileName, base64Data) =>
+    invoke<string>("write_temp_attachment", { component, instanceId, fileName, base64Data }),
   importAttachment: (rel, fileName) =>
     invoke<{ file: string }>("import_vault_attachment", { rel, fileName }),
   importTableImage: (image: TableImageSource, tableId) =>
@@ -127,10 +127,23 @@ export const localBackend: ContentBackend = {
       tableId,
     }),
   cleanupCanvasTempAttachments: (canvasId, canvasFile) =>
-    invoke<number>("cleanup_canvas_temp_attachments", { canvasId, canvasFile }),
+    invoke<number>("cleanup_temp_attachments", {
+      component: "canvas",
+      instanceId: canvasId,
+      sourceFile: canvasFile,
+    }),
   cleanupSessionTempAttachments: (sessionId, sessionFile) =>
-    invoke<number>("cleanup_session_temp_attachments", { sessionId, sessionFile }),
-  cleanupTableAttachments: (file) => invoke<number>("cleanup_table_attachments_vault", { file }),
+    invoke<number>("cleanup_temp_attachments", {
+      component: "session",
+      instanceId: sessionId,
+      sourceFile: sessionFile,
+    }),
+  cleanupTableAttachments: (tableId, file) =>
+    invoke<number>("cleanup_temp_attachments", {
+      component: "table",
+      instanceId: tableId,
+      sourceFile: file,
+    }),
 
   // ===== 索引 =====
   scanBacklinks: (noteName, noteFile) =>

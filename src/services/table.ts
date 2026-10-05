@@ -81,12 +81,13 @@ export async function importTableImage(
 }
 
 /**
- * 回收表格孤儿图片附件（切表/关闭表格时 fire-and-forget 调用）：删除附件目录中
- * 未被 .atb 任一 image 单元格引用的文件。会话内不调用——删除后 Ctrl+Z 可恢复引用；
- * 切表/关闭时该表撤销栈与显示缓存已清，无跨会话恢复路径。返回删除文件数。
+ * 回收表格孤儿图片附件（切表/关闭表格时 fire-and-forget 调用）：删除 temp 组件目录与
+ * 旧落盘目录中未被 .atb 任一 image 单元格引用的文件。会话内不调用——删除后 Ctrl+Z 可恢复
+ * 引用；切表/关闭时该表撤销栈与显示缓存已清，无跨会话恢复路径。返回删除文件数。
+ * `tableId` 由调用方在状态复位前捕获（回收目标目录按 id 派生，不复读磁盘）。
  */
-export async function cleanupTableAttachments(file: string): Promise<number> {
-  return getActiveContentBackend().cleanupTableAttachments(file);
+export async function cleanupTableAttachments(tableId: string, file: string): Promise<number> {
+  return getActiveContentBackend().cleanupTableAttachments(tableId, file);
 }
 
 /** 保存 dataURL 图片到系统 Downloads 文件夹（放大预览右键「下载」用；重名自动加序号）。 */

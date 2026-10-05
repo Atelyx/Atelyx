@@ -91,7 +91,7 @@ describe("addImagesToCell 大小预检", () => {
   });
 
   it("上限内：正常发起导入并写入单元格", async () => {
-    h.importTableImage.mockResolvedValue(".space-media/tables/t1/img-x.png");
+    h.importTableImage.mockResolvedValue(".atelyx/temp/tables/t1/img-x.png");
     const file = new File([new Uint8Array([1, 2, 3])], "ok.png");
     Object.defineProperty(file, "size", { value: TABLE_IMAGE_MAX_BYTES });
 
@@ -100,7 +100,7 @@ describe("addImagesToCell 大小预检", () => {
     expect(h.importTableImage).toHaveBeenCalledTimes(1);
     expect(table.useTableStore.getState().error).toBeNull();
     expect(table.useTableStore.getState().rows[0].values.f1).toEqual({
-      images: [".space-media/tables/t1/img-x.png"],
+      images: [".atelyx/temp/tables/t1/img-x.png"],
     });
     // 取消导入落盘触发的防抖保存 timer，不跨测试残留
     table.useTableStore.getState().clear();
@@ -110,8 +110,8 @@ describe("addImagesToCell 大小预检", () => {
 describe("addImagesToCell 批量导入", () => {
   it("一次多选：按选择顺序全部追加，整批 = 一步撤销", async () => {
     h.importTableImage
-      .mockResolvedValueOnce(".space-media/tables/t1/img-a.png")
-      .mockResolvedValueOnce(".space-media/tables/t1/img-b.png");
+      .mockResolvedValueOnce(".atelyx/temp/tables/t1/img-a.png")
+      .mockResolvedValueOnce(".atelyx/temp/tables/t1/img-b.png");
     const files = [
       new File([new Uint8Array([1])], "a.png"),
       new File([new Uint8Array([2])], "b.png"),
@@ -120,7 +120,7 @@ describe("addImagesToCell 批量导入", () => {
     await table.useTableStore.getState().addImagesToCell("r1", "f1", files);
 
     expect(table.useTableStore.getState().rows[0].values.f1).toEqual({
-      images: [".space-media/tables/t1/img-a.png", ".space-media/tables/t1/img-b.png"],
+      images: [".atelyx/temp/tables/t1/img-a.png", ".atelyx/temp/tables/t1/img-b.png"],
     });
     // 撤销一次回到空单元格（两张同属一个撤销单元）
     table.useTableStore.getState().undo();
@@ -129,7 +129,7 @@ describe("addImagesToCell 批量导入", () => {
   });
 
   it("部分超限：跳过该张，其余照常追加并提示", async () => {
-    h.importTableImage.mockResolvedValue(".space-media/tables/t1/img-ok.png");
+    h.importTableImage.mockResolvedValue(".atelyx/temp/tables/t1/img-ok.png");
     const big = new File([new Uint8Array([1])], "big.png");
     Object.defineProperty(big, "size", { value: TABLE_IMAGE_MAX_BYTES + 1 });
     const ok = new File([new Uint8Array([2])], "ok.png");
@@ -138,7 +138,7 @@ describe("addImagesToCell 批量导入", () => {
 
     expect(h.importTableImage).toHaveBeenCalledTimes(1);
     expect(table.useTableStore.getState().rows[0].values.f1).toEqual({
-      images: [".space-media/tables/t1/img-ok.png"],
+      images: [".atelyx/temp/tables/t1/img-ok.png"],
     });
     // 部分失败走通知（error 会被随后的自动保存成功清掉），文案同时点明超限与「其余已添加」
     expect(lastNotification()).toContain("50MB");
@@ -149,7 +149,7 @@ describe("addImagesToCell 批量导入", () => {
   it("单张导入失败：该张丢弃，其余照常追加", async () => {
     h.importTableImage
       .mockRejectedValueOnce(new Error("boom"))
-      .mockResolvedValueOnce(".space-media/tables/t1/img-ok.png");
+      .mockResolvedValueOnce(".atelyx/temp/tables/t1/img-ok.png");
     const files = [
       new File([new Uint8Array([1])], "bad.png"),
       new File([new Uint8Array([2])], "ok.png"),
@@ -158,7 +158,7 @@ describe("addImagesToCell 批量导入", () => {
     await table.useTableStore.getState().addImagesToCell("r1", "f1", files);
 
     expect(table.useTableStore.getState().rows[0].values.f1).toEqual({
-      images: [".space-media/tables/t1/img-ok.png"],
+      images: [".atelyx/temp/tables/t1/img-ok.png"],
     });
     expect(lastNotification()).toContain("1 张导入失败");
     table.useTableStore.getState().clear();
@@ -181,7 +181,7 @@ describe("addImagesToCell 批量导入", () => {
     h.importTableImage.mockImplementation(async () => {
       // 模拟导入耗时期间用户切换了表格文件
       table.useTableStore.setState({ tableFile: "other.atb", id: "t2" });
-      return ".space-media/tables/t1/img-x.png";
+      return ".atelyx/temp/tables/t1/img-x.png";
     });
     const files = [new File([new Uint8Array([1])], "a.png")];
 

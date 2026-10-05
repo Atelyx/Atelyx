@@ -16,7 +16,7 @@ export type FieldType = "text" | "number" | "duration" | "singleSelect" | "image
 export type CalcType = "sum" | "avg" | "max" | "min" | "count";
 
 /**
- * 图片单元格值：`images` = 图片条目数组（表格附件相对仓库根路径 `.atelyx/attachments/<tableId>/…`，
+ * 图片单元格值：`images` = 图片条目数组（表格附件相对仓库根路径 `.atelyx/temp/tables/<tableId>/…`，
  * 图片外置）；`display` = 展示模式（缺省 = 单图轮播，"grid" = 九宫格同显，按单元格记忆）。
  * 旧文件兼容：磁盘上的 `string[]` 形态在进入内存时经 `normalizeImageValue` 归一化为本结构。
  */

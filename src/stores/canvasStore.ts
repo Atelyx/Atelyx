@@ -2411,7 +2411,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
   attachFileFromDisk: async (file) => {
     const canvasId = get().canvasId;
     if (!canvasId) throw new Error("画布未加载，无法添加附件");
-    const ref = await writeTempAttachment(canvasId, file.name, file);
+    const ref = await writeTempAttachment("canvas", canvasId, file.name, file);
     // 图片判定按扩展名：`File.type` 在未知扩展名/部分粘贴源下为空，按 MIME 判会让同一张图
     // 在托盘（非文本 → 不注入）与文件树拖入（图片节点）两条路径上行为分叉
     if (isImageFileName(file.name)) {
