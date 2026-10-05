@@ -124,6 +124,7 @@ export {
   type WorkspaceLayout,
   type Scene,
   type DetachedWindow,
+  type WindowOptions,
   type PluginLayoutSpecNode,
   type PluginDefaultLayoutSpec,
 } from "./workspaceLayout";

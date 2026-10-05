@@ -25,5 +25,10 @@ export function createChatService(): ChatService {
     ...runtime,
     importSession: (messages, opts) => requireChatPanelAccess().importSession(messages, opts),
     appendMessages: (sessionId, messages) => requireChatPanelAccess().appendMessages(sessionId, messages),
+    listSessions: () => requireChatPanelAccess().listSessions(),
+    openSession: (sessionId) => requireChatPanelAccess().readSession(sessionId),
+    createSession: (opts) => requireChatPanelAccess().createSession(opts),
+    setSessionTitle: (sessionId, title) => requireChatPanelAccess().setSessionTitle(sessionId, title),
+    deleteSession: (sessionId) => requireChatPanelAccess().deleteSession(sessionId),
   };
 }

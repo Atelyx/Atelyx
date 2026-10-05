@@ -22,7 +22,13 @@ import type {
 } from "@/types";
 import type { HistoryKind, HistoryVersion } from "@/services/history";
 import type { FloatingLayerEntry, NotificationInput } from "./types";
-import type { AgentConfig, ChatTargetResult, ChatTurnMessage, ProviderConfig } from "@/types";
+import type {
+  AgentConfig,
+  ChatTargetResult,
+  ChatTurnMessage,
+  ConversationCompaction,
+  ProviderConfig,
+} from "@/types";
 
 /** 表格能力访问（ctx.table 的 store 数据源；pluginStore/tableStore 接线注入）。 */
 export interface PluginTableRuntimeAccess {
@@ -294,9 +300,11 @@ export function getPluginUiStateAccess(): PluginUiStateAccess | null {
   return uiStateAccess;
 }
 
-/** 宿主对话会话写入访问（ctx.chat 容器方法的数据源；builtin.chatpanel 接线注入）。
- *  实现委托对话面板 store 的登记/追加动作（校验、转换与落盘调度都在 store 内）；
- *  面板插件停用 = 访问复位，ctx.chat 容器方法据此抛「对话面板能力未就绪」。 */
+/** 宿主对话会话访问（ctx.chat 同源容器面的数据源；builtin.chatpanel 接线注入）。
+ *  实现委托对话面板 store 的登记/读写动作（校验、转换与落盘调度都在 store 内）：
+ *  读写的就是面板会话（同一批会话文件，磁盘为真源）；面板 store 每窗口一份内存实例，
+ *  写盘后经跨窗口对账广播对齐（见 chatPanelStore）。面板插件停用 = 访问复位，
+ *  ctx.chat 容器方法据此抛「对话面板能力未就绪」。 */
 export interface PluginChatPanelAccess {
   /** 把插件侧消息登记为新面板会话，返回会话 id。 */
   importSession(
@@ -305,6 +313,22 @@ export interface PluginChatPanelAccess {
   ): Promise<{ id: string }>;
   /** 向既有面板会话追加插件侧消息（会话不存在 = 抛错）。 */
   appendMessages(sessionId: string, messages: ChatTurnMessage[]): Promise<void>;
+  /** 面板会话清单（同源只读，按最近活动降序）。 */
+  listSessions(): Promise<Array<{ id: string; title?: string; updatedAt: number }>>;
+  /** 打开面板会话（全部消息 + 元数据；会话不存在 = 抛错）。 */
+  readSession(sessionId: string): Promise<{
+    id: string;
+    title?: string;
+    agentId?: string;
+    compaction?: ConversationCompaction;
+    messages: ChatTurnMessage[];
+  }>;
+  /** 新建空面板会话（返回 id；不改面板激活会话）。 */
+  createSession(opts?: { title?: string; agentId?: string }): Promise<{ id: string }>;
+  /** 写面板会话标题（会话不存在 = 抛错）。 */
+  setSessionTitle(sessionId: string, title: string): Promise<void>;
+  /** 删除面板会话（连带消息 .jsonl / 元数据侧车 / 任务清单侧车）。 */
+  deleteSession(sessionId: string): Promise<void>;
 }
 
 let chatPanelAccess: PluginChatPanelAccess | null = null;

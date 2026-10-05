@@ -23,6 +23,7 @@ import type {
   ChatTurnRequest,
   CollabMyPeer,
   CollabPeer,
+  ConversationCompaction,
   FileTreeNode,
   GlobVaultResult,
   GrepVaultResult,
@@ -38,6 +39,7 @@ import type {
   ReasoningEffort,
   RepoHistoryResult,
   ToolSchema,
+  WindowOptions,
   WorkspaceLayout,
   PluginDefaultLayoutSpec,
 } from "@/types";
@@ -317,6 +319,14 @@ export interface ShortcutsService {
   /** 注册全局快捷键（同一快捷键在应用内唯一，已被其他插件占用即失败；随调用方插件
    *  停用/卸载自动注销）。accelerator 为 OS 层格式（如 "Shift+Alt+E"），非法格式报错。 */
   registerGlobal(accelerator: string, handler: () => void | Promise<void>): Promise<void>;
+  /** 注册窗口切换热键：触发由 Rust 按声明的窗口选项（置顶、不进任务栏、失焦自动收起、
+   *  关闭即藏——任意子集组合）直接切换承载 `view` 的撕裂窗口，不经本插件回调——主窗口
+   *  驻留托盘时照常生效。占用/幂等/注销语义同 registerGlobal（unregisterGlobal 通用）。 */
+  registerWindowToggle(
+    accelerator: string,
+    view: string,
+    options: WindowOptions,
+  ): Promise<void>;
   /** 注销单个全局快捷键（仅归属插件可注销；未注册 = no-op）。 */
   unregisterGlobal(accelerator: string): Promise<void>;
 }
@@ -420,7 +430,9 @@ export interface MarkdownService {
 
 /** AI 对话能力（由随应用分发的对话核心插件提供，停用即不可用）：用宿主配置的模型/Agent/工具跑一轮对话。
  *  核心只跑一轮——消息容器与落盘留在调用方（插件自带容器），流式与收尾经 `ChatTurnSink` 交回。
- *  容器方法（importSession/appendMessages）写入宿主对话面板，要求对话面板插件已启用（未启用即抛错）。
+ *  同源容器方法（importSession/appendMessages/listSessions/openSession/createSession/setSessionTitle）
+ *  读写宿主对话面板的会话（同一批会话文件，磁盘为真源；面板 store 每窗口一份内存实例，
+ *  跨窗口并发以写盘广播对账，见 chatPanelStore），要求对话面板插件已启用。
  *  类型面与宿主内部消费方同一份契约（见 types/chatRuntime.ts 的 `ChatRuntime`）。 */
 export interface ChatService {
   /** 解析对话目标（未指定 = 跟随仓库默认；失败给可展示文案）。 */
@@ -445,6 +457,23 @@ export interface ChatService {
   ): Promise<{ id: string }>;
   /** 向既有面板会话追加插件侧消息（会话不存在即抛错；校验规则同 importSession）。 */
   appendMessages(sessionId: string, messages: ChatTurnMessage[]): Promise<void>;
+  /** 面板会话清单（同源只读：id + 标题 + 最近活动时间，按最近活动降序）。 */
+  listSessions(): Promise<Array<{ id: string; title?: string; updatedAt: number }>>;
+  /** 打开面板会话（全部消息 + 元数据；会话不存在即抛错）。附件按 file 引用出契约
+   *  （payload 是面板窗口的运行时缓存），消息中的面板特有标注（refs/错误占位标记）不出契约。 */
+  openSession(sessionId: string): Promise<{
+    id: string;
+    title?: string;
+    agentId?: string;
+    compaction?: ConversationCompaction;
+    messages: ChatTurnMessage[];
+  }>;
+  /** 新建空面板会话（返回 id；不改面板激活会话；首条消息落盘时会话文件才实际出现）。 */
+  createSession(opts?: { title?: string; agentId?: string }): Promise<{ id: string }>;
+  /** 写面板会话标题（会话不存在即抛错）。 */
+  setSessionTitle(sessionId: string, title: string): Promise<void>;
+  /** 删除面板会话（连带消息 .jsonl / 元数据侧车 / 任务清单侧车）。 */
+  deleteSession(sessionId: string): Promise<void>;
 }
 
 /** 领域历史服务（笔记/画布/表格的版本历史读 + 回滚）。 */

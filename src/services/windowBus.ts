@@ -46,6 +46,19 @@ export interface OpenFileChangedPayload {
   currentTableTitle: string;
 }
 
+/** 会话容器跨窗口对账载荷：某窗口写盘成功后广播受影响会话，其他窗口据此把内存副本
+ *  对齐磁盘真源（会话容器每窗口一份实例，写盘链各自独立）。 */
+export interface ChatSessionsChangedPayload {
+  /** 发起窗口标识（接收方忽略自己发出的广播）。 */
+  origin: string;
+  /** 消息 .jsonl 已写入的会话 id。 */
+  messages: string[];
+  /** 元数据侧车已写入的会话 id。 */
+  metas: string[];
+  /** 已删除（条目与文件均已清）的会话 id。 */
+  deleted: string[];
+}
+
 // ---------- emit ----------
 
 export function emitPanelLayoutOp(windowId: string, op: PanelLayoutOp): Promise<void> {
@@ -59,6 +72,11 @@ export function emitOpenFileChanged(payload: OpenFileChangedPayload): Promise<vo
 /** 撕裂窗口启动时请求当前仓库/打开文件上下文（主窗口以 open-file-changed 应答）。 */
 export function emitRequestOpenFileState(): Promise<void> {
   return emit("request-open-file-state");
+}
+
+/** 广播会话容器写盘结果（写盘方调用；fire-and-forget，失败不影响写盘状态）。 */
+export function emitChatSessionsChanged(payload: ChatSessionsChangedPayload): Promise<void> {
+  return emit("chat-sessions-changed", payload);
 }
 
 // ---------- listen ----------
@@ -77,4 +95,11 @@ export function onOpenFileChanged(handler: (payload: OpenFileChangedPayload) => 
 
 export function onRequestOpenFileState(handler: () => void): Promise<UnlistenFn> {
   return listen("request-open-file-state", () => handler());
+}
+
+/** 订阅会话容器跨窗口对账广播（每个持有会话容器的窗口各订一份）。 */
+export function onChatSessionsChanged(
+  handler: (payload: ChatSessionsChangedPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<ChatSessionsChangedPayload>("chat-sessions-changed", (e) => handler(e.payload));
 }

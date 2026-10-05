@@ -227,13 +227,19 @@ function wireChatRuntime(): () => void {
   return registerChatRuntime(createChatRuntime());
 }
 
-/** 对话面板容器接线（builtin.chatpanel 的 capability）：把面板会话登记/追加注入 ctx.chat 容器方法
- *  数据源（校验、转换与落盘调度在面板 store 内）。返回 unregister（停用/卸载复位访问，容器方法抛「未就绪」）。 */
+/** 对话面板容器接线（builtin.chatpanel 的 capability）：把面板会话同源读写注入 ctx.chat
+ *  容器方法数据源（校验、转换与落盘调度在面板 store 内）。返回 unregister
+ *  （停用/卸载复位访问，容器方法抛「未就绪」）。 */
 function wireChatPanelAccess(): () => void {
   setPluginChatPanelAccess({
     importSession: (messages, opts) => useChatPanelStore.getState().importSession(messages, opts),
     appendMessages: (sessionId, messages) =>
       useChatPanelStore.getState().appendMessages(sessionId, messages),
+    listSessions: () => useChatPanelStore.getState().listSessions(),
+    readSession: (sessionId) => useChatPanelStore.getState().readSession(sessionId),
+    createSession: (opts) => useChatPanelStore.getState().createSession(opts),
+    setSessionTitle: (sessionId, title) => useChatPanelStore.getState().setSessionTitle(sessionId, title),
+    deleteSession: (sessionId) => useChatPanelStore.getState().deleteSessionExternal(sessionId),
   });
   return () => setPluginChatPanelAccess(null);
 }

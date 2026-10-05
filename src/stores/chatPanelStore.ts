@@ -3,6 +3,7 @@ import {
   listChatSessions,
   writeChatSessionMeta,
   deleteChatSessionMeta,
+  readChatSessionMeta,
   readEditorChatsMeta,
   writeEditorChatsMeta,
   readChatMessages,
@@ -10,6 +11,11 @@ import {
   appendChatMessages,
   deleteChatMessages,
 } from "@/services/metadata";
+import {
+  emitChatSessionsChanged,
+  onChatSessionsChanged,
+  type ChatSessionsChangedPayload,
+} from "@/services/windowBus";
 import { identityKeyOf } from "@/services/content/factory";
 import { abortAutoTitle } from "@/services/ai/autoTitle";
 import { resolveMessageAttachments } from "@/services/ai/client";
@@ -43,6 +49,7 @@ import type {
   ChatTurnMessage,
   ChatTurnSink,
   ChatTurnTarget,
+  ConversationCompaction,
   EditorChatMessage,
   EditorChatMessageRef,
   EditorChatModelOverride,
@@ -120,6 +127,24 @@ interface ChatPanelState {
   ) => Promise<{ id: string }>;
   /** 向既有面板会话追加插件侧消息（ctx.chat.appendMessages 数据源）：会话不存在即抛错。 */
   appendMessages: (sessionId: string, messages: ChatTurnMessage[]) => Promise<void>;
+  /** 面板会话清单（同源只读；id + 标题 + 最近活动时间，按 updatedAt 降序）。
+   *  store 未加载时先读盘（同 importSession）。 */
+  listSessions: () => Promise<Array<{ id: string; title?: string; updatedAt: number }>>;
+  /** 打开面板会话读取全部消息与元数据（同源；会话不存在即抛错）。
+   *  与上面的 openSession（激活面板会话）不同：本动作只读，不动激活态。 */
+  readSession: (sessionId: string) => Promise<{
+    id: string;
+    title?: string;
+    agentId?: string;
+    compaction?: ConversationCompaction;
+    messages: ChatTurnMessage[];
+  }>;
+  /** 新建空面板会话（同源；返回 id；不改面板激活会话）。首条消息落盘时 .jsonl 才实际出现。 */
+  createSession: (opts?: { title?: string; agentId?: string }) => Promise<{ id: string }>;
+  /** 写面板会话标题（同源；会话不存在即抛错）。 */
+  setSessionTitle: (sessionId: string, title: string) => Promise<void>;
+  /** 删除面板会话（同源；连带消息 .jsonl / 元数据侧车 / 任务清单侧车）。 */
+  deleteSessionExternal: (sessionId: string) => Promise<void>;
   /** 发送消息到当前激活会话（refs = 输入框内的 #引用笔记，发送时就地替换注入路径块；
    *  pendings = 待发送托盘附件：字节落仓库临时区后以路径引用随消息持久化，图片走 vision、
    *  文本类注入内容。附件落盘失败返回 false 且不产生消息（输入与托盘原样保留），
@@ -304,13 +329,19 @@ function serializeChatMessages(messages: EditorChatMessage[]): string {
  * 插件侧消息 → 面板消息（ctx.chat.importSession/appendMessages 的共享转换）：逐条校验，
  * 失败抛错不静默——角色限 user/assistant、content 须为字符串、附件仅接受带 `file` 引用的
  * （payload 是运行时缓存不落盘，重开会话按引用读回，纯内联附件落盘即丢内容）；id 撞车或
- * 缺失时重生成（面板会话内唯一即可，压缩注解锚点按它定位）；createdAt 按序派生保证时序。
+ * 缺失时重生成（`reservedIds` = 既有占用：追加场景传目标会话现有消息 id，保证**会话内**
+ * 唯一——压缩注解锚点与前端 key 都按它定位，跨调用批次的撞车同样要避开）；createdAt
+ * 按序派生保证时序。
  */
-function toPanelMessages(messages: ChatTurnMessage[], baseTime: number): EditorChatMessage[] {
+function toPanelMessages(
+  messages: ChatTurnMessage[],
+  baseTime: number,
+  reservedIds?: Iterable<string>,
+): EditorChatMessage[] {
   if (!Array.isArray(messages) || messages.length === 0) {
     throw new Error("会话消息须为非空数组");
   }
-  const usedIds = new Set<string>();
+  const usedIds = new Set<string>(reservedIds);
   return messages.map((m, i) => {
     const label = `第 ${i + 1} 条消息`;
     if (!m || typeof m !== "object") throw new Error(`${label}形状非法`);
@@ -474,6 +505,103 @@ function markOverridesDirty() {
   persistCtl.schedule();
 }
 
+// ===== 跨窗口对账 =====
+// 会话容器每窗口一份实例、写盘链各自独立：跨窗口并发使用同一会话时，另一窗口的
+// 全量重写可能覆盖本窗口已落盘的追加（两窗口内存副本互不感知）。对账 = 写盘成功后
+// 广播受影响会话，其他窗口把内存副本对齐磁盘真源。
+
+/** 本窗口的广播标识：接收方据此忽略自己发出的广播（每窗口一个实例）。 */
+const CHAT_SYNC_ORIGIN = crypto.randomUUID();
+
+/** 跨窗口对账监听是否已安装（每窗口一次；load 时安装）。 */
+let externalSyncInitialized = false;
+
+/** 安装跨窗口对账监听（每窗口一次；非 Tauri 环境——vitest/jsdom——跳过）。 */
+function initExternalChatSync(): void {
+  if (externalSyncInitialized) return;
+  externalSyncInitialized = true;
+  if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) return;
+  void onChatSessionsChanged((payload) => {
+    void reconcileExternalChatWrites(payload);
+  });
+}
+
+/**
+ * 对账（收到其他窗口的写盘广播）：把本窗口内存副本对齐磁盘真源。
+ * 只对账本窗口已持有且无在途写的会话——本地有在途写（脏集合非空）时本窗口副本更新，
+ * 其 flush 后的广播会让对端反向对齐；本窗口未持有的会话不在对账面（其 load 流程读
+ * 磁盘最新）。每会话独立 best-effort：单个读盘失败保留现状，等下次广播。
+ */
+export async function reconcileExternalChatWrites(payload: ChatSessionsChangedPayload): Promise<void> {
+  if (payload.origin === CHAT_SYNC_ORIGIN) return;
+  const state = useChatPanelStore.getState();
+  if (!state.loaded || activeIdentityKey() !== state.sessionVaultKey) return;
+  const reloads = new Map<string, { messages?: EditorChatMessage[]; meta?: Awaited<ReturnType<typeof readChatSessionMeta>> }>();
+  for (const id of payload.messages) {
+    if (dirtyMessageFiles.has(id)) continue;
+    const s = state.sessions.find((x) => x.id === id);
+    if (!s) continue;
+    try {
+      reloads.set(id, { ...reloads.get(id), messages: parseChatMessages(await readChatMessages(s.file)) });
+    } catch {
+      // 磁盘暂不可读：保留现状，等下次广播
+    }
+  }
+  for (const id of payload.metas) {
+    if (dirtyMetaSessions.has(id)) continue;
+    const s = state.sessions.find((x) => x.id === id);
+    if (!s) continue;
+    try {
+      reloads.set(id, { ...reloads.get(id), meta: await readChatSessionMeta(chatMetaFilePath(id)) });
+    } catch {
+      // 同上
+    }
+  }
+  if (reloads.size === 0 && payload.deleted.length === 0) return;
+  // 基线先对齐：对账后的数组就是磁盘内容（后续纯增长判定以此为准）
+  for (const [id, r] of reloads) {
+    if (r.messages) messageBaseline.set(id, r.messages);
+  }
+  useChatPanelStore.setState((current) => {
+    let sessions = current.sessions;
+    for (const id of payload.deleted) {
+      // 对账期间本地起了在途写则不动（本地 flush 后广播反向对齐）
+      if (dirtyMessageFiles.has(id) || dirtyMetaSessions.has(id)) continue;
+      sessions = sessions.filter((s) => s.id !== id);
+    }
+    for (const [id, r] of reloads) {
+      if (dirtyMessageFiles.has(id) || dirtyMetaSessions.has(id)) continue;
+      sessions = sessions.map((s) => {
+        if (s.id !== id) return s;
+        const messages = r.messages ?? s.messages;
+        // 元数据侧车读回 null（对端清了 title）时按无标题对齐
+        const metaFields =
+          r.meta === null
+            ? { title: undefined, agentId: undefined, compaction: undefined }
+            : r.meta
+              ? {
+                  ...(r.meta.title !== undefined ? { title: r.meta.title } : {}),
+                  ...(r.meta.agentId !== undefined ? { agentId: r.meta.agentId } : {}),
+                  ...(r.meta.compaction ? { compaction: r.meta.compaction } : {}),
+                }
+              : {};
+        return {
+          ...s,
+          ...metaFields,
+          messages,
+          createdAt: messages[0]?.createdAt ?? s.createdAt,
+          updatedAt: messages[messages.length - 1]?.createdAt ?? s.updatedAt,
+        };
+      });
+    }
+    const activeSessionId =
+      current.activeSessionId !== null && sessions.some((s) => s.id === current.activeSessionId)
+        ? current.activeSessionId
+        : null;
+    return { sessions, activeSessionId };
+  });
+}
+
 // ===== 失败重试（指数退避）=====
 
 /** 写盘失败重试的指数退避序列（500ms→2s→8s→30s 封顶）：持久性故障（服务端不可达/磁盘只读）
@@ -524,6 +652,8 @@ async function persistNow(): Promise<void> {
   //    写盘期间并发 schedulePersist 新标记的会话不在本次快照，保留由下一轮再写（防误清）。
   //    追加式：纯增长只追加新增记录（基线引用逐一相同）；流式中途落盘/截断/基线缺失 → 全量重写（幂等）。
   const pendingIds = [...dirtyMessageFiles];
+  const writtenMessageIds: string[] = [];
+  const writtenMetaIds: string[] = [];
   await Promise.all(
     pendingIds.map(async (id) => {
       const s = sessions.find((x) => x.id === id);
@@ -550,6 +680,7 @@ async function persistNow(): Promise<void> {
         // 流式中途的全量重写同样以当前数组为基线（最终内容由 onDone 保存覆盖）
         messageBaseline.set(id, s.messages);
         dirtyMessageFiles.delete(id);
+        writtenMessageIds.push(id);
       } catch {
         // 追加失败（含外部删文件导致文件缺失）：回落全量重写（幂等，重建历史/防追加重复）；
         // 仍失败保留脏待下次重试 + 基线清除
@@ -557,6 +688,7 @@ async function persistNow(): Promise<void> {
           await writeChatMessages(s.file, serializeChatMessages(s.messages));
           messageBaseline.set(id, s.messages);
           dirtyMessageFiles.delete(id);
+          writtenMessageIds.push(id);
         } catch (e2) {
           messageBaseline.delete(id);
           console.error("保存会话消息失败", e2);
@@ -583,6 +715,7 @@ async function persistNow(): Promise<void> {
           ...(s.compaction ? { compaction: s.compaction } : {}),
         });
         dirtyMetaSessions.delete(id);
+        writtenMetaIds.push(id);
       } catch (e) {
         console.error("保存会话元数据失败", e);
       }
@@ -618,6 +751,15 @@ async function persistNow(): Promise<void> {
     if (useChatPanelStore.getState().persistError) {
       useChatPanelStore.setState({ persistError: null });
     }
+  }
+  // 跨窗口对账广播（fire-and-forget）：本窗口落盘成功的会话通知其他窗口对齐内存副本
+  if (writtenMessageIds.length > 0 || writtenMetaIds.length > 0) {
+    void emitChatSessionsChanged({
+      origin: CHAT_SYNC_ORIGIN,
+      messages: writtenMessageIds,
+      metas: writtenMetaIds,
+      deleted: [],
+    }).catch(() => {});
   }
 }
 
@@ -831,6 +973,7 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
     const st = useChatPanelStore.getState();
     const targetKey = activeIdentityKey();
     const prevKey = st.sessionVaultKey;
+    initExternalChatSync();
     if (!force && st.loaded && prevKey === targetKey) {
       return;
     }
@@ -963,6 +1106,15 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
           cleanupSessionTempAttachments(id, target.file).catch((e) =>
             console.error("回收会话临时附件失败", id, e),
           ),
+        )
+        .then(() =>
+          // 文件删除尘埃落定后才广播：过早广播会让对端读到未删净的文件
+          emitChatSessionsChanged({
+            origin: CHAT_SYNC_ORIGIN,
+            messages: [],
+            metas: [],
+            deleted: [id],
+          }).catch(() => {}),
         );
     }
     let activeSessionId = get().activeSessionId;
@@ -1009,7 +1161,13 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
     if (!session) throw new Error(`会话不存在：${sessionId}`);
     const last = session.messages[session.messages.length - 1];
     const baseTime = Math.max(last ? last.createdAt + 1 : 0, Date.now());
-    const panelMessages = toPanelMessages(messages, baseTime);
+    // 追加去重含既有消息：插件重载后其模块计数器归零，会话 id 却跨重载复用，
+    // 不含既有 id 会在同一会话内产生重复消息 id（压缩锚点/前端 key 均按它定位）
+    const panelMessages = toPanelMessages(
+      messages,
+      baseTime,
+      session.messages.map((m) => m.id),
+    );
     useChatPanelStore.setState((state) => ({
       sessions: state.sessions.map((s) =>
         s.id !== sessionId
@@ -1022,6 +1180,74 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
       ),
     }));
     schedulePersist(sessionId);
+  },
+
+  listSessions: async () => {
+    if (!get().loaded) await get().load();
+    if (!get().loaded) throw new Error("会话读盘未完成（仓库切换中），请重试");
+    return get()
+      .sessions.map((s) => ({ id: s.id, ...(s.title !== undefined ? { title: s.title } : {}), updatedAt: s.updatedAt }))
+      .sort((a, b) => b.updatedAt - a.updatedAt);
+  },
+
+  readSession: async (sessionId) => {
+    if (!get().loaded) await get().load();
+    if (!get().loaded) throw new Error("会话读盘未完成（仓库切换中），请重试");
+    const session = get().sessions.find((s) => s.id === sessionId);
+    if (!session) throw new Error(`会话不存在：${sessionId}`);
+    return {
+      id: session.id,
+      ...(session.title !== undefined ? { title: session.title } : {}),
+      ...(session.agentId !== undefined ? { agentId: session.agentId } : {}),
+      ...(session.compaction ? { compaction: session.compaction } : {}),
+      // 面板消息 → 中性消息：面板特有字段（refs/notices/error）与运行时附件缓存不出契约
+      messages: session.messages.map((m) => ({
+        id: m.id,
+        role: m.role,
+        content: m.content,
+        ...(m.displayContent !== undefined ? { displayContent: m.displayContent } : {}),
+        ...(m.steps?.length ? { steps: m.steps } : {}),
+        ...(m.attachments?.length ? { attachments: m.attachments.map(({ kind, mime, filename, file }) => ({ kind, mime, ...(filename !== undefined ? { filename } : {}), ...(file !== undefined ? { file } : {}) })) } : {}),
+      })),
+    };
+  },
+
+  createSession: async (opts) => {
+    if (!get().loaded) await get().load();
+    if (!get().loaded) throw new Error("会话读盘未完成（仓库切换中），请重试");
+    const now = Date.now();
+    const id = crypto.randomUUID();
+    const session: EditorChatSession = {
+      id,
+      ...(opts?.title !== undefined ? { title: opts.title } : {}),
+      ...(opts?.agentId !== undefined ? { agentId: opts.agentId } : {}),
+      file: chatMessageFilePath(id),
+      messages: [],
+      createdAt: now,
+      updatedAt: now,
+    };
+    // 不改面板激活会话：新建 = 留出空容器，首条消息落盘时 .jsonl 才实际出现
+    set({ sessions: [...get().sessions, session] });
+    markMetaDirty(id);
+    return { id };
+  },
+
+  setSessionTitle: async (sessionId, title) => {
+    if (!get().loaded) await get().load();
+    if (!get().loaded) throw new Error("会话读盘未完成（仓库切换中），请重试");
+    const session = get().sessions.find((s) => s.id === sessionId);
+    if (!session) throw new Error(`会话不存在：${sessionId}`);
+    useChatPanelStore.setState((state) => ({
+      sessions: state.sessions.map((s) => (s.id !== sessionId ? s : { ...s, title })),
+    }));
+    markMetaDirty(sessionId);
+  },
+
+  /** 删除面板会话（同源；连带消息 .jsonl / 元数据侧车 / 任务清单侧车，见 deleteSession）。 */
+  deleteSessionExternal: async (sessionId: string) => {
+    if (!get().loaded) await get().load();
+    if (!get().loaded) throw new Error("会话读盘未完成（仓库切换中），请重试");
+    get().deleteSession(sessionId);
   },
 
   send: async (content, refs = [], pendings = []) => {

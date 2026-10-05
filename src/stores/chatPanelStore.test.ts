@@ -17,6 +17,8 @@ const h = vi.hoisted(() => {
     /** 内存会话文件系统：file → .jsonl 内容（list/read/write/delete 共用，模拟重启重读）。 */
     chatFiles: new Map<string, string>(),
     chatMetas: new Map<string, string>(),
+    /** 追加命令留痕（file + 追加的消息 id 序列；纯增长路径断言用）。 */
+    appends: [] as Array<{ file: string; ids: string[] }>,
     gate: null as null | {
       armed: Promise<void>;
       resolveArmed: () => void;
@@ -68,6 +70,14 @@ vi.mock("@tauri-apps/api/core", () => ({
       const content = h.state.chatFiles.get((args as { file: string }).file);
       if (content === undefined) throw new Error("会话消息不存在");
       return content;
+    }
+    if (cmd === "append_chat_messages") {
+      const a = args as { file: string; records: Array<{ id: string }> };
+      const existing = h.state.chatFiles.get(a.file) ?? "";
+      const lines = a.records.map((r) => JSON.stringify(r));
+      h.state.chatFiles.set(a.file, existing ? `${existing}\n${lines.join("\n")}` : lines.join("\n"));
+      h.state.appends.push({ file: a.file, ids: a.records.map((r) => r.id) });
+      return "";
     }
     if (cmd === "delete_chat_messages") {
       h.state.chatFiles.delete((args as { file: string }).file);
@@ -126,6 +136,7 @@ beforeEach(async () => {
   h.state.messageWriteFails = 0;
   h.state.tempWrites = [];
   h.state.tempWriteFails = 0;
+  h.state.appends = [];
   h.state.attachmentDataUrl = "";
   h.state.chatFiles.clear();
   h.state.chatMetas.clear();
@@ -454,5 +465,80 @@ describe("插件侧会话写入（importSession / appendMessages）", () => {
     await expect(
       chat.useChatPanelStore.getState().appendMessages("no-such", [{ id: "x", role: "user", content: "y" }]),
     ).rejects.toThrow("会话不存在");
+  });
+});
+
+describe("跨窗口对账（reconcileExternalChatWrites）", () => {
+  it("收到其他窗口的消息写盘广播：内存副本对齐磁盘，基线随磁盘重置", async () => {
+    await loadedInVault("v1");
+    const { id } = await chat.useChatPanelStore.getState().importSession([
+      { id: "m1", role: "user", content: "hi" },
+    ]);
+    await chat.useChatPanelStore.getState().flush();
+    // 模拟另一窗口写盘：磁盘上多出一条本窗口不知道的消息
+    const file = chat.useChatPanelStore.getState().sessions.find((s) => s.id === id)!.file;
+    const line = JSON.stringify({
+      id: "other-1",
+      role: "assistant",
+      content: "来自另一窗口",
+      createdAt: Date.now() + 5000,
+    });
+    h.state.chatFiles.set(file, h.state.chatFiles.get(file) + "\n" + line);
+
+    await chat.reconcileExternalChatWrites({
+      origin: "other-window",
+      messages: [id],
+      metas: [],
+      deleted: [],
+    });
+    const session = chat.useChatPanelStore.getState().sessions.find((s) => s.id === id);
+    expect(session?.messages.map((m) => m.id)).toEqual(["m1", "other-1"]);
+
+    // 对账后本窗口继续追加：以磁盘为基线走纯增长（只追加新行，不整文件重写其他窗口的消息）
+    await chat.useChatPanelStore.getState().appendMessages(id, [
+      { id: "m2", role: "user", content: "本地追加" },
+    ]);
+    await chat.useChatPanelStore.getState().flush();
+    expect(h.state.appends.at(-1)).toMatchObject({ file, ids: ["m2"] });
+    const lines = (h.state.chatFiles.get(file) ?? "").split("\n");
+    expect(lines).toHaveLength(3);
+    expect(h.state.chatFiles.get(file)).toContain("other-1");
+  });
+
+  it("本地有在途写的会话跳过对账；广播删除会移除内存副本并回落激活态", async () => {
+    await loadedInVault("v1");
+    const { id } = await chat.useChatPanelStore.getState().importSession([
+      { id: "m1", role: "user", content: "hi" },
+    ]);
+    await chat.useChatPanelStore.getState().flush();
+    const file = chat.useChatPanelStore.getState().sessions.find((s) => s.id === id)!.file;
+
+    // 本地在途写：append 后未 flush（脏集合非空）
+    await chat.useChatPanelStore.getState().appendMessages(id, [
+      { id: "m2", role: "assistant", content: "本地未落盘" },
+    ]);
+    h.state.chatFiles.set(file, JSON.stringify({ id: "m1", role: "user", content: "hi", createdAt: 1 }));
+    await chat.reconcileExternalChatWrites({
+      origin: "other-window",
+      messages: [id],
+      metas: [],
+      deleted: [],
+    });
+    // 本地未落盘的 m2 仍在（在途写优先）
+    expect(
+      chat.useChatPanelStore.getState().sessions.find((s) => s.id === id)?.messages.map((m) => m.id),
+    ).toEqual(["m1", "m2"]);
+
+    // flush 后收到删除广播：内存副本移除、激活会话回落
+    await chat.useChatPanelStore.getState().flush();
+    chat.useChatPanelStore.setState({ activeSessionId: id });
+    await chat.reconcileExternalChatWrites({
+      origin: "other-window",
+      messages: [],
+      metas: [],
+      deleted: [id],
+    });
+    expect(chat.useChatPanelStore.getState().sessions.some((s) => s.id === id)).toBe(false);
+    expect(chat.useChatPanelStore.getState().activeSessionId).toBeNull();
   });
 });

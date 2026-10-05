@@ -113,6 +113,18 @@ export interface Scene {
   layouts: WorkspaceLayout[];
 }
 
+/** 撕裂窗口的可定制 OS 属性（创建/toggle 时声明，任意子集组合；缺省 = 全关，等同普通撕裂窗口）。 */
+export interface WindowOptions {
+  /** 置顶（覆盖式浮窗）。 */
+  alwaysOnTop?: boolean;
+  /** 不进任务栏。 */
+  skipTaskbar?: boolean;
+  /** 失焦自动收起（隐藏不销毁；`pinned` 豁免）。 */
+  hideOnBlur?: boolean;
+  /** OS 关闭请求（关闭键 / Alt+F4）= 隐藏不销毁，而非销毁条目。 */
+  closeHides?: boolean;
+}
+
 /** 撕裂出去的独立窗口（应用级，存 `AppUiState.detachedWindows`，跨布局共享）。 */
 export interface DetachedWindow {
   id: string;
@@ -125,6 +137,10 @@ export interface DetachedWindow {
   hidden: boolean;
   /** 启动调和是否补建 OS 窗口（false = 创建方声明不参与启动恢复；条目保留，出现由创建方显式触发）。 */
   restoreOnLaunch: boolean;
+  /** 可定制 OS 属性（创建/toggle 时声明并随条目持久化）。 */
+  options: WindowOptions;
+  /** 图钉：失焦不收起（仅 `options.hideOnBlur` 开启时有意义；运行期用户豁免开关）。 */
+  pinned: boolean;
 }
 
 /** 视图类型清单（视图选择器选项顺序）。 */

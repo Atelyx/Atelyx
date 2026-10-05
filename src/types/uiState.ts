@@ -8,7 +8,13 @@
  * 与全局配置（global.json）分离：global.json 只保存低频配置（最近仓库列表 +
  * 自动检查更新开关），本文件保存高频「使用数据」——写入抖动不进配置，损坏只影响恢复。
  */
-import type { DetachedWindow, Scene, SplitDirection, ViewKind } from "@/types/workspaceLayout";
+import type {
+  DetachedWindow,
+  Scene,
+  SplitDirection,
+  ViewKind,
+  WindowOptions,
+} from "@/types/workspaceLayout";
 
 /** `ui-state.json` 文件 schema 版本（Rust 侧 `layout.rs` 有同名常量，两端须保持一致；
  *  格式变更直接升版，旧文件按默认态处理）。 */
@@ -65,6 +71,16 @@ export type LayoutOp =
   | { op: "focusDetachedWindow"; windowId: string }
   | { op: "hideDetachedWindow"; windowId: string }
   | { op: "showDetachedWindow"; windowId: string }
+  | {
+      /** 按视图显隐翻转一个撕裂窗口（热键直控的通用能力）：按视图定位条目，有 = 显隐翻转，
+       *  无 = 以给定边界与选项新建（不参与启动恢复）。视图全局被占用 = 忽略。
+       *  bounds 仅新建时使用，此后以窗口事件回写为准；options 随条目落盘（配置变更由此收敛）。 */
+      op: "toggleDetachedWindow";
+      view: ViewKind;
+      bounds: LayoutBounds;
+      options: WindowOptions;
+    }
+  | { op: "setDetachedWindowPinned"; windowId: string; pinned: boolean }
   | { op: "setLayoutSizes"; splitId: string; sizes: number[] }
   | { op: "addLayout" }
   | { op: "renameLayout"; id: string; name: string }
