@@ -194,6 +194,8 @@ export {
   type PluginType,
   type PluginPackageJson,
   type PluginManifest,
+  type PluginGlobalShortcutDeclaration,
+  type CommandShortcutScope,
   type PluginThemeOptions,
   type ThemeDefinition,
   type PluginBadge,

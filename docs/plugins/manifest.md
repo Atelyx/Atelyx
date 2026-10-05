@@ -30,10 +30,22 @@
     "themes": [                     // 可选（type 含 theme 时）：声明式主题条目，无需代码
       { "id": "nord-light", "name": "Nord 浅色", "colorScheme": "light", "variables": { "accent": "#7c3aed" } }
     ],
-    "themeOptions": { "accent": true } // 可选：预置设置项声明（accent = 内核实现的强调色设置项）
+    "themeOptions": { "accent": true }, // 可选：预置设置项声明（accent = 内核实现的强调色设置项）
+    "shortcuts": [                  // 可选：全局快捷键声明（设置 → 快捷键展示与改键的数据源）
+      { "id": "toggle-window", "label": "显示我的窗口", "key": "CmdOrCtrl+Shift+E" }
+    ]
   }
 }
 ```
+
+## 全局快捷键声明（`shortcuts`）
+
+- `shortcuts`：可选数组；每项 `id`（插件内唯一，运行时注册按它引用）/ `label`（设置页展示的动作名）/
+  `key`（默认热键，OS accelerator 格式，如 `CmdOrCtrl+Shift+E`）均为非空字符串。
+- 声明后插件运行时经 `ctx.shortcuts.registerDeclared(id, handler)`（或 `registerDeclaredWindowToggle`）
+  注册：实际生效键 = 用户覆盖（设置 → 快捷键）→ 声明默认键；设置页改键即时生效（宿主重注册）。
+- 未声明也可直接用 `registerGlobal(accelerator, …)` 原始串注册（旧路径兼容），但不会进入设置页的
+  可自定义列表，只在「运行时注册（未声明）」区只读展示。
 
 ## 类型取值
 

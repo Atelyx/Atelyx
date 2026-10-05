@@ -5,6 +5,7 @@
  * 未知字段、未知附加分类一律跳过（前向兼容），只对结构性问题（缺字段、类型错误、未知主分类）报错。
  */
 import {
+  type PluginGlobalShortcutDeclaration,
   type PluginManifest,
   type PluginType,
   type ThemeDefinition,
@@ -192,6 +193,7 @@ export function validatePluginManifest(raw: unknown): ManifestValidateResult {
   const permissions = normalizePermissions(ax.permissions, errors);
   const platforms = normalizeStringList(ax.platforms, "platforms", errors);
   const themes = normalizeThemes(ax.themes, errors);
+  const shortcuts = normalizeGlobalShortcutDeclarations(ax.shortcuts, errors);
   const themeOptions = normalizeThemeOptions(ax.themeOptions, errors);
   const dependenciesDeclared = normalizeDependencies(dependencies);
   if (errors.length > 0) return { ok: false, errors };
@@ -210,6 +212,7 @@ export function validatePluginManifest(raw: unknown): ManifestValidateResult {
     ...(Object.keys(permissions).length > 0 ? { permissions } : {}),
     ...(platforms.length > 0 ? { platforms } : {}),
     ...(themes ? { themes } : {}),
+    ...(shortcuts ? { shortcuts } : {}),
     ...(themeOptions ? { themeOptions } : {}),
     ...(typeof ax.atelyxVersionMin === "string" ? { atelyxVersionMin: ax.atelyxVersionMin } : {}),
     ...(typeof ax.atelyxVersionMax === "string" ? { atelyxVersionMax: ax.atelyxVersionMax } : {}),
@@ -340,6 +343,41 @@ function normalizeThemes(raw: unknown, errors: string[]): ThemeDefinition[] | un
     return undefined;
   }
   return items;
+}
+
+/** shortcuts（全局热键声明）归一化：非空对象数组（每项 id/label/key 非空字符串），id 插件内唯一。 */
+function normalizeGlobalShortcutDeclarations(
+  raw: unknown,
+  errors: string[],
+): PluginGlobalShortcutDeclaration[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw)) {
+    errors.push("shortcuts 必须是数组");
+    return undefined;
+  }
+  const items: PluginGlobalShortcutDeclaration[] = [];
+  const seen = new Set<string>();
+  for (const rawItem of raw) {
+    if (typeof rawItem !== "object" || rawItem === null) {
+      errors.push("shortcuts 项必须是对象");
+      continue;
+    }
+    const item = rawItem as Record<string, unknown>;
+    const id = typeof item.id === "string" && item.id.trim().length > 0 ? item.id : null;
+    const label = typeof item.label === "string" && item.label.trim().length > 0 ? item.label : null;
+    const key = typeof item.key === "string" && item.key.trim().length > 0 ? item.key : null;
+    if (!id || !label || !key) {
+      errors.push("shortcuts 项的 id/label/key 必须都是非空字符串");
+      continue;
+    }
+    if (seen.has(id)) {
+      errors.push(`shortcuts 内 id 重复：${id}`);
+      continue;
+    }
+    seen.add(id);
+    items.push({ id, label, key });
+  }
+  return items.length > 0 ? items : undefined;
 }
 
 /** themeOptions 归一化：仅接受 { accent?: boolean }；未知键跳过。 */

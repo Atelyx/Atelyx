@@ -57,6 +57,20 @@ export interface PluginThemeOptions {
 export type PluginPackageJson = Record<string, unknown>;
 
 /**
+ * 插件 manifest 全局热键声明（`atelyx.shortcuts` 条目）：安装时静态已知，设置 → 快捷键据此
+ * 展示与改键；插件运行时经 `ctx.shortcuts.registerDeclared(id, …)` 按声明 id 注册，
+ * 实际热键 = 用户覆盖 → 声明默认。
+ */
+export interface PluginGlobalShortcutDeclaration {
+  /** 声明 id（插件内唯一；运行时注册与覆盖表都按它引用）。 */
+  id: string;
+  /** 动作名（设置页展示）。 */
+  label: string;
+  /** 默认热键（OS accelerator 串，如 "CmdOrCtrl+Shift+KeyK"）。 */
+  key: string;
+}
+
+/**
  * 插件包清单（插件根目录的 package.json 归一化；原始输入为 npm 标准字段 + `atelyx` 块，
  * 归一化后展平为本类型，见 utils/pluginManifest）。id = package.json 的 name（反向域名）。
  */
@@ -93,6 +107,8 @@ export interface PluginManifest {
   permissions?: Record<string, string>;
   /** 声明式主题条目（type 含 theme 时通常携带；必须 ≥1；id 插件内唯一）。 */
   themes?: ThemeDefinition[];
+  /** 全局热键声明（OS 级热键的静态披露：设置页展示与改键的数据源）。 */
+  shortcuts?: PluginGlobalShortcutDeclaration[];
   /** 主题设置项声明（预置类型：accent = 内核实现的强调色设置项）。 */
   themeOptions?: PluginThemeOptions;
   /** 插件契约版本（宿主 App 版本解耦；不兼容时加载时响亮拒绝）。 */
@@ -258,12 +274,24 @@ export interface PluginAuditEntry {
   slotDecorators: PluginSlotDecoratorSummary[];
 }
 
+/**
+ * 命令快捷键作用域：决定「在哪生效」与「由谁分发」。
+ * - global：window 级统一监听分发（输入框聚焦时跳过）；
+ * - canvas / note-editing / table：匹配逻辑留在该视图的既有监听点（面板聚焦、编辑面归属
+ *   等上下文判断与视图生命周期绑定），注册表只承载键位数据（默认键 + 用户覆盖）。
+ */
+export type CommandShortcutScope = "global" | "canvas" | "note-editing" | "table";
+
 /** 插件命令贡献（管理 UI「运行命令」入口：全局 id = `<pluginId>:<命令 id>`）。 */
 export interface PluginCommandContribution {
   globalId: string;
   pluginId: string;
   id: string;
   label: string;
+  /** 声明的默认快捷键（如 "mod+k"；可选，无 = 未绑定）。 */
+  shortcut?: string;
+  /** 快捷键作用域（缺省 global）。 */
+  scope: CommandShortcutScope;
 }
 
 /** 槽位参与者在治理清单中的展示形态（id/pluginId/priority 来自注册表；label 取载荷字符串字段）。 */

@@ -327,6 +327,10 @@ export interface GlobalConfig {
   spaceServers?: string[];
   /** 最近打开的协作空间仓库列表（应用级；与 spaceServers 登录清单区分）。 */
   spaces?: RecentSpace[];
+  /** 命令快捷键的用户覆盖（命令 globalId → 键串；缺省 = 用命令声明的默认键）。 */
+  commandShortcuts?: Record<string, string>;
+  /** 全局快捷键的用户覆盖（`插件id:声明id` → OS accelerator 串；缺省 = 用声明默认键）。 */
+  globalShortcuts?: Record<string, string>;
 }
 
 /** `read_global_config` 的返回：全局配置 + 损坏备份文件名（null = 正常读取）。 */

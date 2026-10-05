@@ -99,6 +99,12 @@ pub struct GlobalConfig {
     /// 缺省空 = 未打开过任何协作空间仓库；旧文件无此字段照常读取（serde default）。
     #[serde(default)]
     pub spaces: Vec<SpaceEntry>,
+    /// 命令快捷键的用户覆盖（命令 globalId → 键串；缺省 None = 全部用命令声明的默认键）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_shortcuts: Option<std::collections::BTreeMap<String, String>>,
+    /// 全局快捷键的用户覆盖（`插件id:声明id` → OS accelerator 串；缺省 None = 全部用声明默认键）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub global_shortcuts: Option<std::collections::BTreeMap<String, String>>,
 }
 
 /// `read_global_config` 的返回：全局配置 + 损坏备份文件名（`None` = 正常读取）。
