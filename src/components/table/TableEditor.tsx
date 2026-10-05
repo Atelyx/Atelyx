@@ -31,6 +31,12 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "rea
 import { useTableStore } from "@/stores/tableStore";
 import { useUiStateStore } from "@/stores/uiStateStore";
 import { usePluginStore } from "@/stores/pluginStore";
+import { useSettingsStore } from "@/stores/settingsStore";
+import { matchesShortcut } from "@/utils/shortcutKeys";
+import {
+  BUILTIN_COMMAND_SHORTCUT_DEFAULTS,
+  BUILTIN_TABLE_PLUGIN_ID,
+} from "@/constants/commandShortcuts";
 import { TableCell, clearCell, navigateCell, navDirection } from "@/components/table/TableCell";
 import { useCollabStore } from "@/stores/collabStore";
 import type { CollabPeer } from "@/types";
@@ -211,19 +217,40 @@ export function TableEditor({ panelId }: { panelId: string }) {
     dragRef.current = { rowId, startX: e.clientX, startY: e.clientY, active: false };
   }, []);
 
-  // ===== Ctrl+Z/Y 撤销/重做 + Ctrl+C/V 复制/粘贴 + 选中态焦点兜底导航（全局键盘监听；
-  // 选中单元格的覆盖输入由常驻输入框承接，不经此监听）=====
+  // ===== 撤销/重做/复制/剪切/粘贴/清空选中 + 选中态焦点兜底导航（全局键盘监听；
+  // 选中单元格的覆盖输入由常驻输入框承接，不经此监听）。命令生效键 = 用户覆盖 → 内置默认
+  // （constants/commandShortcuts）；mod+shift+z 保留为重做别名（惯例，不单独开放）=====
+  const commandShortcuts = useSettingsStore((s) => s.commandShortcuts);
+  const tableKeys = {
+    undo:
+      commandShortcuts[`${BUILTIN_TABLE_PLUGIN_ID}:undo`] ??
+      BUILTIN_COMMAND_SHORTCUT_DEFAULTS[`${BUILTIN_TABLE_PLUGIN_ID}:undo`],
+    redo:
+      commandShortcuts[`${BUILTIN_TABLE_PLUGIN_ID}:redo`] ??
+      BUILTIN_COMMAND_SHORTCUT_DEFAULTS[`${BUILTIN_TABLE_PLUGIN_ID}:redo`],
+    copy:
+      commandShortcuts[`${BUILTIN_TABLE_PLUGIN_ID}:copy`] ??
+      BUILTIN_COMMAND_SHORTCUT_DEFAULTS[`${BUILTIN_TABLE_PLUGIN_ID}:copy`],
+    cut:
+      commandShortcuts[`${BUILTIN_TABLE_PLUGIN_ID}:cut`] ??
+      BUILTIN_COMMAND_SHORTCUT_DEFAULTS[`${BUILTIN_TABLE_PLUGIN_ID}:cut`],
+    paste:
+      commandShortcuts[`${BUILTIN_TABLE_PLUGIN_ID}:paste`] ??
+      BUILTIN_COMMAND_SHORTCUT_DEFAULTS[`${BUILTIN_TABLE_PLUGIN_ID}:paste`],
+    clear:
+      commandShortcuts[`${BUILTIN_TABLE_PLUGIN_ID}:clear`] ??
+      BUILTIN_COMMAND_SHORTCUT_DEFAULTS[`${BUILTIN_TABLE_PLUGIN_ID}:clear`],
+  };
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       // 仅表格面板聚焦时生效（同画布快捷键门控惯例）；编辑框聚焦同样接管
       // （受控 input/textarea 原生撤销不可靠，整编辑会话一步撤销与 Esc 放弃编辑互补）
       const ctrl = e.ctrlKey || e.metaKey;
       if (ctrl && !e.altKey && focusedPanelId === panelId) {
-        const key = e.key.toLowerCase();
         const active = document.activeElement as HTMLElement | null;
         const isCellEditor = !!active?.hasAttribute("data-cell-editor");
         // 焦点在弹层菜单/面板内其它输入框（字段重命名/单选选项/插入字段等非单元格编辑器）→
-        // 放行原生 Ctrl+Z/Y/C/V；表格级接管只作用于单元格编辑器与空白选中态
+        // 放行原生撤销/重做/剪贴板键；表格级接管只作用于单元格编辑器与空白选中态
         if (
           !isCellEditor &&
           (active instanceof HTMLInputElement ||
@@ -233,26 +260,32 @@ export function TableEditor({ panelId }: { panelId: string }) {
         ) {
           return;
         }
-        if (key === "z" && !e.shiftKey) {
+        if (tableKeys.undo && matchesShortcut(tableKeys.undo, e)) {
           e.preventDefault();
           useTableStore.getState().undo();
           return;
         }
-        if (key === "y" || (key === "z" && e.shiftKey)) {
+        const redoHit = tableKeys.redo !== undefined && matchesShortcut(tableKeys.redo, e);
+        // 重做别名：mod+shift+z（撤销绑定命中已在上方优先消费）
+        const redoAlias = e.shiftKey && !e.altKey && e.key.toLowerCase() === "z";
+        if (redoHit || redoAlias) {
           e.preventDefault();
           useTableStore.getState().redo();
           return;
         }
         // 复制/粘贴/剪切：放大预览打开时归预览（Esc/方向键）；编辑态单元格输入框（data-editing）
         // 放行原生（复制草稿/贴入输入框/剪切草稿）；选中态才接管为「选中区域 ↔ 剪贴板 TSV」结构化复制粘贴
-        if (key === "c" || key === "v" || key === "x") {
+        const copyHit = tableKeys.copy !== undefined && matchesShortcut(tableKeys.copy, e);
+        const cutHit = tableKeys.cut !== undefined && matchesShortcut(tableKeys.cut, e);
+        const pasteHit = tableKeys.paste !== undefined && matchesShortcut(tableKeys.paste, e);
+        if (copyHit || cutHit || pasteHit) {
           if (document.querySelector("[data-lightbox]")) return;
           if (active?.hasAttribute("data-editing")) return;
           const st = useTableStore.getState();
           if (!st.selection || st.view !== "table") return;
           e.preventDefault();
-          if (key === "c") st.copySelection();
-          else if (key === "x") void st.cutSelection();
+          if (copyHit) st.copySelection();
+          else if (cutHit) void st.cutSelection();
           else void st.pasteFromClipboard();
           return;
         }
@@ -275,7 +308,9 @@ export function TableEditor({ panelId }: { panelId: string }) {
         st.selectRow(null); // 取消并清选中
         return;
       }
-      if (e.key === "Backspace" || e.key === "Delete") {
+      // 清空选中：默认 Delete；Backspace 保留为别名（编辑惯例，不单独开放）
+      const clearHit = tableKeys.clear !== undefined && matchesShortcut(tableKeys.clear, e);
+      if (clearHit || e.key === "Backspace") {
         e.preventDefault(); // 防浏览器默认（滚动/后退）
         // 框选 = 整块清空；单格 = 文本类字段清空（输入框失焦时语义照常），其余无操作
         if (sel.kind === "range") {
@@ -308,7 +343,8 @@ export function TableEditor({ panelId }: { panelId: string }) {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [focusedPanelId, panelId]);
+    // 生效键随覆盖变更重绑
+  }, [focusedPanelId, panelId, tableKeys.undo, tableKeys.redo, tableKeys.copy, tableKeys.cut, tableKeys.paste, tableKeys.clear]);
 
   // ===== 单元格按下手势：<5px 松手 = 选中（进入隐藏编辑态）；>5px 拖动 = 拖拽框选多格（selectRange）=====
   const cellPressRef = useRef<{

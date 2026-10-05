@@ -64,6 +64,8 @@ import { createChatRuntime } from "@/stores/chatTurn";
 import { setPluginNoteAccess, setPluginChatPanelAccess } from "@/services/cordis/access";
 import { registerChatRuntime } from "@/utils/chatRuntimeHost";
 import { VIEW_LABELS } from "@/constants/views";
+import { BUILTIN_COMMAND_SHORTCUTS } from "@/constants/commandShortcuts";
+import { getOpenNoteSession } from "@/hooks/useNoteBodySession";
 import { AURORA_THEME_ID, AURORA_THEME_NAME, AURORA_THEME_VARIABLES } from "@/constants/themes";
 import { CanvasEmptyState, NoteEmptyState, TableEmptyState } from "@/components/plugins/cordis/emptyStates";
 
@@ -148,6 +150,25 @@ function mountUi(ctx: Context, items: BuiltinUiPayload[]): void {
 
 function mountLifecycle(ctx: Context, hooks: DomainLifecycleHooks): void {
   ctx.effect(() => registerDomainLifecycle(hooks));
+}
+
+/** 挂载内置命令（ctx.slots.registerCommand 语义）：label/默认键/作用域取 constants/commandShortcuts
+ *  清单（唯一事实源），run 由各插件行按 id 提供——双向不对齐（清单缺 run / runs 多余 id）
+ *  均属装配错误，抛错可见。 */
+function mountCommands(ctx: Context, runs: Record<string, () => unknown>): void {
+  const pluginId = pluginIdOf(ctx) ?? "plugin";
+  for (const c of BUILTIN_COMMAND_SHORTCUTS.filter((x) => x.pluginId === pluginId)) {
+    const run = runs[c.id];
+    if (!run) throw new Error(`内置命令 ${pluginId}:${c.id} 缺少 run 实现`);
+    ctx.effect(() =>
+      ctx.slots.registerCommand({ id: c.id, label: c.label, run, shortcut: c.shortcut, scope: c.scope }),
+    );
+  }
+  for (const id of Object.keys(runs)) {
+    if (!BUILTIN_COMMAND_SHORTCUTS.some((x) => x.pluginId === pluginId && x.id === id)) {
+      throw new Error(`内置命令 ${pluginId}:${id} 不在快捷键清单中（清单与 runs 不对齐）`);
+    }
+  }
 }
 
 function mountWiring(ctx: Context, wire: () => () => void): void {
@@ -254,6 +275,8 @@ interface BuiltinDefOptions {
   theme?: BuiltinThemePayload;
   /** UI 槽贡献（工具栏/空态/标题栏等；registerUi 语义）。 */
   ui?: BuiltinUiPayload[];
+  /** 命令快捷键 run 实现（id → run；label/默认键/作用域取 constants/commandShortcuts 清单）。 */
+  commands?: Record<string, () => unknown>;
   lifecycle?: DomainLifecycleHooks;
   /** 能力提供者接线（如 canvas/table 命名空间数据源 + 变更事件；返回 unregister）。 */
   capability?: () => () => void;
@@ -272,6 +295,7 @@ function def(opts: BuiltinDefOptions): CordisBuiltinDef {
   const apply = (ctx: Context): void => {
     mountViews(ctx, opts.views);
     if (opts.ui) mountUi(ctx, opts.ui);
+    if (opts.commands) mountCommands(ctx, opts.commands);
     if (opts.lifecycle) mountLifecycle(ctx, opts.lifecycle);
     if (opts.capability) mountWiring(ctx, opts.capability);
     if (opts.collabWiring) mountWiring(ctx, opts.collabWiring);
@@ -386,6 +410,19 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
       },
     ],
     ui: [{ slot: "empty/canvas", component: CanvasEmptyState, cardinality: "single" }],
+    commands: {
+      delete: () => useCanvasStore.getState().deleteSelected(),
+      copy: () => useCanvasStore.getState().copySelectedNodes(),
+      // 粘贴落点依赖画布视口（快捷键路径由 CanvasView 以 canvasCenter 提供）；命令入口无视口上下文
+      paste: () => false,
+      undo: () => useCanvasStore.getState().undo(),
+      redo: () => useCanvasStore.getState().redo(),
+      selectAll: () => {
+        const st = useCanvasStore.getState();
+        if (st.nodes.length === 0) return;
+        st.onNodesChange(st.nodes.map((n) => ({ type: "select", id: n.id, selected: true })));
+      },
+    },
     lifecycle: {
       id: "builtin.canvas",
       flush: async () => {
@@ -467,6 +504,18 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
     needsCollab: true,
     views: [{ kind: "note", label: VIEW_LABELS.note, component: NoteView }],
     ui: [{ slot: "empty/note", component: NoteEmptyState, cardinality: "single" }],
+    commands: {
+      // 撤销/重做作用于当前打开笔记的编辑会话（快捷键路径按焦点编辑面路由，见 useNoteUndoRouting；
+      // 命令入口无焦点上下文，取当前打开笔记的会话，未打开时无操作）
+      undo: () => {
+        const file = useAppStore.getState().currentNoteFile;
+        (file ? getOpenNoteSession(file) : null)?.undo();
+      },
+      redo: () => {
+        const file = useAppStore.getState().currentNoteFile;
+        (file ? getOpenNoteSession(file) : null)?.redo();
+      },
+    },
     lifecycle: {
       id: "builtin.note",
       flush: async () => {
@@ -557,6 +606,18 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
       },
     ],
     ui: [{ slot: "empty/table", component: TableEmptyState, cardinality: "single" }],
+    commands: {
+      undo: () => useTableStore.getState().undo(),
+      redo: () => useTableStore.getState().redo(),
+      copy: () => useTableStore.getState().copySelection(),
+      cut: () => void useTableStore.getState().cutSelection(),
+      paste: () => void useTableStore.getState().pasteFromClipboard(),
+      // 清空只处理框选区域（快捷键路径的单元格清空依赖选中格字段类型，见 TableEditor）
+      clear: () => {
+        const st = useTableStore.getState();
+        if (st.selection?.kind === "range") st.clearSelectionCells();
+      },
+    },
     lifecycle: {
       id: "builtin.table",
       flush: async () => {
