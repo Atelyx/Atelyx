@@ -1,9 +1,6 @@
 /**
  * 分组节点：画布背景矩形容器（对等外部白板格式的 group 节点）。
- *
- * - 半透明彩色填充 + 实线边框按色板颜色（1-5 + 默认灰）渲染
- * - label 双击 inline 编辑（nodrag）；header 右侧色块按钮弹出色板切换颜色
- * - 可拖拽移动 / NodeResizeControl 调整大小；仅无向关联可连线（有向模式被拦截）
+ * 自身不承载内容，只框选范围；颜色与 label 存在节点 data 上。
  */
 import { Box } from "lucide-react";
 import { useRef, useState } from "react";
@@ -50,14 +47,12 @@ export function GroupNode({ id, data, width, height, selected }: NodeProps) {
 
   const base = GROUP_COLORS[color ?? ""] ?? "#8a8a8a";
 
-  // 色板弹层：点击外部 / Esc 关闭（统一 useDismissOnOutside：pointerdown 语义 + trigger 排除，
-  // 点触发器本体不关——开/关由按钮 onClick toggle，防 pointerdown 先关后 click 重开的竞态）
-
   const startEdit = () => {
     if (readOnly) return;
     labelEdit.start();
   };
 
+  /** 色板弹层开关在 trigger 上走 onClick toggle：不关闭 trigger 本体，防外点先关、click 又开的竞态。 */
   useDismissOnOutside(() => {
     if (!colorMenu) return;
     setColorMenu(false);
@@ -85,13 +80,12 @@ export function GroupNode({ id, data, width, height, selected }: NodeProps) {
       <header
         className="px-3 py-1.5 text-sm font-medium flex-shrink-0 select-none flex items-center gap-1.5 rounded-t-xl"
         style={{
-          // 标题行背景：色板色高不透明度（与主体 12% 填充拉开层次），文字用主色保证清晰
+          // 标题行背景用更高不透明度，与主体的淡填充拉开层次
           background: `${base}40`,
           color: "var(--text-primary)",
           cursor: "grab",
         }}
       >
-        {/* 类型标识：图标（分组 = 容器） */}
         <Box
           size={13}
           className="flex-shrink-0"

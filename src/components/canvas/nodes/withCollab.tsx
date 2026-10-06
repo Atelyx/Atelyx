@@ -1,10 +1,6 @@
 /**
- * 画布节点协作装饰 HOC：包一层 React Flow 节点组件，叠加协作视觉层——
- * - 远端选中高亮：用户色描边（多用户同心叠加，inset 递增，视觉与表格单元格高亮一致）
- * - 远端生成中：节点右上角用户色脉冲点（AI 流式进行中）
- *
- * 非侵入：不修改基础节点组件内部，overlay 用 absolute inset-0 pointer-events-none。
- * 协作状态经 useNodeCollab 订阅 store 实时更新（不受 memo 阻止——store 订阅强制重渲染）。
+ * 画布节点协作装饰 HOC：包一层节点组件，叠加远端选中描边（多用户同心叠加）与「生成中」脉冲点。
+ * 非侵入：overlay 走 absolute + pointer-events-none，不改动内层组件；协作 state 由 store 订阅穿透 memo。
  */
 import { memo, type ComponentType } from "react";
 import { useNodeCollab } from "@/hooks/useNodeCollab";

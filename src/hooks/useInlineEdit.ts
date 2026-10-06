@@ -1,12 +1,7 @@
 /**
  * 双击 inline 编辑（标题/label 等）：editing + draft + 提交/取消 + Escape 拦截 blur 误提交。
- *
- * 收敛节点标题（对话/文本/分组）等处的重复模式（提交/取消经 inputProps 内部接线，不外露）：
- * - start：draft 重置为当前值 + 进入编辑态
- * - commit（内部）：Enter / 失焦提交（Escape 已取消时被 cancelRef 拦截，防 input 卸载触发的 blur 误提交）
- * - cancel（内部）：Escape 取消（重置 cancelRef 后退出，draft 不提交）
- *
- * inputProps 直接展开到 <input>（autoFocus 由调用方自定，start 后需聚焦时传 autoFocus）。
+ * 收敛节点标题（对话/文本/分组）等处的重复模式；提交/取消经 inputProps 内部接线，不外露。
+ * inputProps 直接展开到 <input>（start 后需聚焦时调用方自传 autoFocus）。
  */
 import { useCallback, useState, useRef, type ChangeEvent, type KeyboardEvent } from "react";
 

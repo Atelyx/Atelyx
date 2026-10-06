@@ -1,13 +1,7 @@
 /**
  * 槽位声明表：宿主实际渲染的扩展位置（唯一清单）。
- *
- * 固定具名槽（titlebar/toolbar/panelhead/statusbar/settings）与右键菜单目标（contextmenu/<target>）
- * 必须在表内登记——注册进未声明的槽即失败并给近似槽名提示（治「槽名拼错静默丢失」与「乱占位置」）；
- * 载荷须匹配声明的字段契约。
- * 开放 kind 槽（view/node/edge/tableview）按前缀放行：插件可注册任意 kind/type 出现在「添加视图」
- * 菜单与画布节点集合里，这是既有的开放语义，不做逐项白名单。
- * 新增宿主渲染位置时在此登记（缺登记 = 该位置无法被插件贡献）。
- * 表与元素均深冻结：`ctx.slots.list()` 暴露「本表 + 插件运行时声明」的合并冻结视图，防插件运行时改写全局校验依据。
+ * 固定具名槽与 contextmenu/<target> 必须登记，注册进未声明的槽即失败并给近似槽名提示；
+ * 开放 kind 槽（view/node/edge/tableview）按前缀放行。新增宿主渲染位置时在此登记。
  */
 import type { SlotCardinality } from "@/utils/cordis/slots";
 

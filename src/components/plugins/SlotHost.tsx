@@ -1,13 +1,7 @@
 /**
- * 通用槽位宿主：渲染某具名 UI 槽（titlebar/toolbar/panelhead/settings/statusbar 等）的贡献；
+ * 通用槽位宿主：渲染具名 UI 槽（titlebar/toolbar/panelhead/settings/statusbar 等）的插件贡献；
  * 右键菜单项由 MenuSlot 渲染（contextmenu/<target>）。
- *
- * SlotListMount 渲染 list 槽全部贡献（priority 降序），OpenSlotList 渲染开放前缀 list 槽
- * （inspector/<nodeType> 按运行时 kind 动态查询），SlotReplaceMount 渲染 single 替换槽
- * （有胜出贡献则替换 children，否则回退宿主默认实现；视图空态是它的特例）。
- * 内容统一经 SlotDecoratedContent 被装饰器链包裹（ctx.slots.decorate）。
- * 订阅 pluginStore 按槽的修订号（slotRevisions）——槽注册/装饰变化只重渲染该槽宿主，防全局放大。
- * 每贡献包 ErrorBoundary（单个崩溃不拖垮宿主）；替换槽另有回退边界（崩了回默认 chrome 而非换掉整屏）。
+ * 各宿主订阅 pluginStore 按槽修订号（slotRevisions）：槽注册/装饰变化只重渲染该槽宿主，防全局放大。
  */
 import { Component, useLayoutEffect, useRef, useState, type ComponentType, type ErrorInfo, type ReactNode } from "react";
 import { listDecorators, listSlot, resolveSlot, decoratorEpochOf, findSlotDeclarationRuntime } from "@/services/cordis/slots";

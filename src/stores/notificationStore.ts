@@ -1,8 +1,6 @@
 /**
- * 应用内通知运行时（内核 UI 服务 `ctx.notification` 的数据源）。
- *
- * 插件与宿主都只 push/dismiss；渲染在 NotificationHost（每个窗口各挂一个、各自独立实例
- * ——撕裂窗口是独立 webview，通知不跨窗口共享）。自动消失由宿主组件按 timeoutMs 计时。
+ * 应用内通知运行时（内核 UI 服务 `ctx.notification` 的数据源）：插件与宿主都只 push/dismiss，渲染在 NotificationHost。
+ * 自动消失由宿主组件按 timeoutMs 计时。
  */
 import { create } from "zustand";
 import type { NotificationAction, NotificationInput, NotificationLevel } from "@/services/cordis/types";
@@ -33,6 +31,7 @@ const AUTO_DISMISS_MS: Record<NotificationLevel, number> = {
 };
 
 interface NotificationState {
+  /** 本窗口的通知（撕裂窗口是独立 webview，各挂各的 host 实例，通知不跨窗口共享）。 */
   items: NotificationItem[];
   /** 弹出一条通知，返回 id。 */
   notify(input: NotificationInput): string;

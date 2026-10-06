@@ -1,11 +1,7 @@
 /**
- * 内置命令快捷键清单（默认键与作用域的唯一事实源）：
- * - `builtins.tsx` 据此经 ctx.slots.registerCommand 注册命令（注册表承载设置页展示与运行）；
- * - 作用域类监听点（画布/笔记/表格）据此取默认键，叠加用户覆盖（settingsStore.commandShortcuts）
- *   得到生效键；globalId = `<pluginId>:<id>`。
- *
- * 键串为应用内命令格式（"mod+k"，见 utils/shortcutKeys）；编辑语义键（Tab/Enter/方向键）
- * 与 Esc（与浮层关闭语义耦合）不在此列，不开放自定义。
+ * 内置命令快捷键清单（默认键与作用域的唯一事实源）：builtins.tsx 据此注册命令，各作用域
+ * 监听点据此取默认键并叠加用户覆盖（settingsStore.commandShortcuts）得生效键；
+ * globalId = `<pluginId>:<id>`。键串格式见 utils/shortcutKeys；编辑语义键与 Esc 不开放自定义。
  */
 import type { CommandShortcutScope } from "@/types";
 
@@ -18,9 +14,9 @@ export interface BuiltinCommandShortcutDef {
   shortcut?: string;
   scope: CommandShortcutScope;
   /**
-   * 录制约束（按监听点的修饰键门控定）：require-mod = 组合键须含 Ctrl/Cmd（监听点在
-   * mod 分支内匹配，裸键永不生效）；no-mod = 不得含 Ctrl/Cmd/Alt（监听点在 mod/alt 早退
-   * 之后匹配）；缺省 = 无约束。设置页录制时据此校验，防止录出永不生效的死绑定。
+   * 录制约束：require-mod = 须含 Ctrl/Cmd（监听点在 mod 分支内匹配，裸键永不生效）；
+   * no-mod = 不得含 Ctrl/Cmd/Alt（监听点在 mod/alt 早退之后匹配）；缺省 = 无约束。
+   * 设置页录制时据此校验，防录出永不生效的死绑定。
    */
   bindingRule?: "require-mod" | "no-mod";
 }

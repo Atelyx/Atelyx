@@ -1,12 +1,7 @@
 /**
- * 协作面板：激活仓库为协作空间时显示成员名册 + 在线设备（presence 实时）；
- * 个人仓库无协作能力，显示空态。
- *
- * 空间形态数据源：spaceDirectoryStore.listMembers（名册，owner/editor 角色）+
- * collabStore.peers（服务端 peers 帧是连接语义——在线设备列表，不与名册强行合并同人，
- * 各设备当前打开文件经 presence 展示）。
- * 「我」行 = 本连接（身份来自 settingsStore，打开文件来自 appStore）。
- * 打开文件动作回调直连 appStore（与 FilesView 同模式）。
+ * 协作面板：成员名册（含角色）+ 在线设备列表；个人仓库无协作能力时显示空态。
+ * 名册与在线设备是两份数据、不合并成一「人」 —— 名册来自 spaceDirectoryStore.listMembers，
+ * 设备来自 collabStore.peers（连接语义，一人可多设备，各设备打开的文件由 presence 给出）。
  */
 import { Cloud, Settings, Users, Wifi, WifiOff } from "lucide-react";
 import { useEffect, useMemo } from "react";
@@ -210,6 +205,7 @@ function SpaceMembersView({ serverUrl, spaceId }: { serverUrl: string; spaceId: 
         )}
 
         {/* 在线设备（连接语义：与名册分别展示，不强行合并同人） */}
+        {/* 「我」这一行 = 本连接：昵称/颜色取 settingsStore，打开文件取 appStore */}
         <div className="px-1 pt-1 text-micro flex items-center gap-1.5" style={{ color: "var(--text-muted)" }}>
           <Cloud size={12} />
           在线设备

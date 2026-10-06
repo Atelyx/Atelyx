@@ -1,21 +1,7 @@
 /**
- * 统一 Markdown 渲染/编辑引擎（分块 DOM 视图层）。
- *
- * 文档模型 = 纯文本正文（与文件正文逐字节一致）。渲染走框架无关内核
- * （`utils/markdownCore`：文本 → 块/行内规格 → DOM），编辑面不引入 HTML 往返。
- *
- * 编辑形态：所有块都按渲染态出，源码里的标记字符（`**`、`- `、`##` 等）常驻 DOM 但默认隐藏；
- * 光标进入某个块或某个行内元素时，只给它的宿主切 `md-reveal`，标记显形——揭示不重建 DOM，
- * 编辑态与只读态视觉一致，移光标只改 class。整篇源码由一个隐藏 textarea 承载，输入法组合、
- * 方向键、Home/End、跨块选区、剪贴板复制（得到源码）沿用浏览器原生行为；光标与选区自绘。
- *
- * 内容按顶层分片增量替换（见 {@link patchChunks}），因此击键只重建变化的块、未变的块
- * 连同已加载图片原样保留；输入法未上屏文本由内核就地插入渲染，组合期不落正文。
- *
- * 只读形态（`readOnly`）：同一渲染器全量出渲染结果、不产出标记字符、不挂输入焦点——因此
- * 「预览 ⇄ 编辑」共用同一容器与同一内核，视觉一致，切换时只换标记是否有，滚动位置保留。
- *
- * 安全：渲染产物只出 class + textContent / 已清洗 HTML（raw HTML 经 `utils/htmlSanitize`）。
+ * 统一 Markdown 渲染/编辑引擎（分块 DOM 视图层）：文档模型 = 纯文本正文（与文件正文逐字节一致），
+ * 渲染与编辑走框架无关内核 `utils/markdownCore`（文本 → 块/行内规格 → DOM），编辑面不引入 HTML 往返。
+ * 揭示、分片增量替换、协作差量、只读形态等机制见各自函数的注释；渲染产物只出 class + textContent / 已清洗 HTML（raw HTML 经 `utils/htmlSanitize`）。
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAppStore } from "@/stores/appStore";
@@ -344,7 +330,8 @@ export function MarkdownEditor({
     overlay.setRemoteCursors(cursors, origin);
   }, []);
 
-  /** 内容重绘（结构变化：文本变更 / 富装饰块进出 / 只读翻转）。 */
+  /** 内容重绘（结构变化：文本变更 / 富装饰块进出 / 只读翻转）。
+   *  只读面与编辑面共用本渲染器，重绘前后保存/恢复 scrollTop——预览 ⇄ 编辑切换滚动位置不丢。 */
   const renderContent = useCallback(
     (text: string, activeOffset: number | undefined): void => {
       const content = contentRef.current;

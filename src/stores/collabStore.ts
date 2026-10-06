@@ -1,13 +1,7 @@
 /**
  * 协作运行时（DocHost 的 store 门面）：连接策略 + 当前空间在线设备列表。
- *
- * 协作只存在于协作空间（服务端真源）：配置（开关/昵称/颜色）来自 settingsStore 应用级配置，
- * 连接目标按激活仓库身份解析（utils/collabHost 的 resolveCollabTarget）——协作空间身份按
- * spaceId 入房、令牌随连接触取；个人仓库/未进仓不连接。切换仓库身份断开旧连接（bye + 重连）。
- * 传输/入站路由/出站咽喉归内核 DocHost（services/collab/docHost.ts）：本 store 只做
- * 「何时连/断/换房」策略与 presence 节流调度、peers/myPeerId 状态镜像；画布/笔记/表格域的协作
- * 接线（消息通道/重连/拆卸/presence 合并/广播注入）随插件启停经各域 `register*CollabWiring`
- * 注册到 collabHost 注册表。本 store 不 import 任何域 store。
+ * 传输/入站路由/出站咽喉归内核 DocHost（services/collab/docHost.ts），本 store 只做
+ * 「何时连/断/换房」策略与 presence 节流调度、peers/myPeerId 状态镜像；本 store 不 import 任何域 store。
  */
 import { create } from "zustand";
 import {

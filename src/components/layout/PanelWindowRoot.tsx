@@ -1,16 +1,7 @@
 /**
- * 撕裂窗口根（label `panel-<id>` 的独立窗口）。
- *
- * 与主窗口同代码入口，但只渲染单面板：自定义标题栏（窗口控制 + 拖动区）+ 标签头
- * （PanelTabBar，可多标签）+ 视图承载（ViewHost）。≡ 菜单锁定 = 整块窗口锁定。
- *
- * - 启动：panelStore.initPanel——bootstrap 拉布局快照（ui-state）+ 订阅 layout-broadcast
- *   广播镜像 + drag-session，未就绪前渲染 LoadingScreen
- * - 状态：标签组镜像自 uiStateStore（Rust 广播权威布局）；视图离开本窗口即 releaseView（flush + 清内存）
- * - 上下文：请求当前仓库/打开文件（emitRequestOpenFileState，应答经 open-file-changed 广播，
- *   按需加载仓库级配置/文件树/AI 会话）
- * - 关闭：installPanelCloseGuard（flush 托管视图 → notifyPanelClosed 上报 Rust → 销毁，守卫收在 panelStore）
- * - 外观/配置：与主窗口一致（useAppearance + settingsStore.load() 读盘）
+ * 撕裂窗口根（label `panel-<id>` 的独立窗口）：与主窗口同代码入口，但只渲染单面板——
+ * 自定义标题栏（窗口控制 + 拖动区）+ 标签头（PanelTabBar，可多标签）+ 视图承载（ViewHost）；
+ * ≡ 菜单锁定 = 整块窗口锁定。启动/状态镜像/关闭守卫等生命周期见各 effect 与 panelStore 注释。
  */
 import { useEffect, useMemo } from "react";
 import { LayoutTemplate, TriangleAlert } from "lucide-react";

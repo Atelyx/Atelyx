@@ -1,14 +1,7 @@
 /**
- * 仓库文件树状态 + CRUD（自由文件夹结构，兼容通用笔记工具）。
- *
- * 职责：持有全仓库文件树（`list_vault_tree`，跳过隐藏/排除目录），封装文件管理面板用的
- * 新建/重命名/删除，调 `services/vault`。canvases 列表仍由 `appStore` 维护（与画布 CRUD 同源）。
- * 文件动作（改名/移动/删除）完成后由本 store 刷新树；外部改动经打开/重读路径感知。
- *
- * 无固定 画布/笔记/附件 目录：`.md` 笔记可在任意文件夹，`file` 字段即相对仓库根路径
- * （如 `项目A/提示词.md`），不用目录名拼接。
- *
- * 分层：组件不直调 service → FileExplorerPanel 用本 store。
+ * 仓库文件树状态 + CRUD（自由文件夹结构，兼容通用笔记工具）：持有全仓库文件树（`list_vault_tree`，
+ * 跳过隐藏/排除目录），封装文件管理面板的新建/重命名/删除，调 `services/vault`；canvases 列表
+ * 由 appStore 维护（与画布 CRUD 同源）。文件动作完成后由本 store 刷新树，外部改动经打开/重读路径感知；组件不直调 service。
  */
 import { create } from "zustand";
 import {

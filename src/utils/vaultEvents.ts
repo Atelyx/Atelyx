@@ -1,20 +1,10 @@
 /**
- * 仓库文件事件发射器（内核事件总线）。
- *
- * 两类来源统一走此总线，内核（vaultStore）不直接调用领域 store：
- * - 文件动作联动：note/table/attachment 重命名/移动/删除、文件夹重命名/移动（载荷含 old/new 路径，
- *   供领域订阅者做画布节点引用同步/撤销栈路径迁移/UI 状态 remap 等）；
- * - 软件内 `.md` 写落点：AI 文件工具/插件写盘、重建内部链接改写（见 `services/vault/aiFiles.ts`），
- *   投递 `note:changed` 让笔记域作废内容缓存并收敛编辑面（事件源是应用自己的写路径，非磁盘监听）。
- *
+ * 仓库文件事件发射器（内核事件总线）。两类来源统一走此总线，内核（vaultStore）不直接调用领域 store：
+ * - 文件动作联动：重命名/移动/删除（载荷含 old/new 路径，供领域订阅者做引用同步/路径迁移/UI remap）；
+ * - 软件内 `.md` 写落点（`note:changed`）：让笔记域作废内容缓存并收敛编辑面（事件源是应用自己的
+ *   写路径，非磁盘监听，见 `services/vault/aiFiles.ts`）。
  * 订阅随插件启停注册（cordis/builtins 的 vaultEventHandlers）；未注册 kind 静默丢弃。
- * 投递两种口径：
- * - `emitVaultEvent`：同步按注册序投递（写落点与画布 CRUD 等即时信号用；领域反应的 await 不阻塞投递方）；
- * - `emitVaultEventAsync`：逐个 await handler（文件动作路径用；领域反应须在调用方继续前完成，
- *   如画布节点引用同步不得晚于后续自动保存）。
- * 两种口径的订阅方异常都逐个隔离：`emitVaultEvent` 记日志后继续（订阅方的缺陷不得改变文件动作
- * 本身的成败，也不得饿死同级订阅方）；`emitVaultEventAsync` 隔离投递后汇总抛错，由调用方决定上报。
- * 纯数据容器 + 纯函数，无 store/service 依赖，可直测（模式同 utils/collabHost.ts）。
+ * 两种投递口径的语义与异常隔离见 `emitVaultEvent` / `emitVaultEventAsync`。纯数据容器，可直测。
  */
 
 /** 文件动作事件（重命名/移动/删除/文件夹重命名）：载荷含新旧路径。

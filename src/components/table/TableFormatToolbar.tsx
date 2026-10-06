@@ -1,19 +1,9 @@
 /**
- * 表格气泡格式工具栏：对当前选中区域（单格/框选/行/列/整表）应用单元格格式——
- * 字体 / 字号 / 粗体 / 斜体 / 下划线 / 删除线 / 文字颜色 / 背景色 / 清除格式。
+ * 表格气泡格式工具栏：对当前选中区域应用单元格格式（字体/字号/粗斜下划线删除线/文字色/背景色/清除格式）。
  *
- * 与常驻工具条无关，是跟随选区的瞬时浮层：触发方（TableEditor）在拖框选完成 / 再次点击
- * 已选中单元格 / 右键菜单「格式」时浮出，锚点为选区左上角或菜单坐标；外点 / Esc /
- * 表格滚动 / 开始在单元格键入时自动关闭。条保持打开支持连续格式化（多级内层弹层经
- * `data-popup-layer` 排除在「外点关闭」之外）。
- *
- * 格式与值**正交**（存 `TableRow.styles[fieldId]`，见 `types/table.ts` `CellStyle`）：
- * 值/复制粘贴/快照不受影响；动作走 `tableStore.applyCellStyle`（一步撤销 + 防抖落盘 +
- * 协作广播，选区不一致时各属性呈三态：布尔半选、颜色/字体/字号「混合」）。
- *
- * 颜色弹层内保留原生 button 的两处（脱离基元的原因）：「默认」行是弹层里的选项行
- * （与 `MenuItem` 同一体系）；预设色板按钮的按钮本体即色块（无图标，且 hover 用
- * scale 放大反馈），两者都归不进 `IconButton` 的「图标 + 方形控件」形态。
+ * 与常驻工具条无关，是跟随选区的瞬时浮层——触发时机与自动关闭条件见 TableFormatToolbar 的关闭监听；
+ * 格式与值正交（存 `TableRow.styles[fieldId]`，值/复制粘贴/快照不受影响），
+ * 动作走 `applyCellStyle`（一步撤销 + 防抖落盘 + 协作广播）。
  */
 import { Bold, Eraser, Italic, Strikethrough, Underline } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -102,6 +92,8 @@ function ColorPopover({
       {trigger(triggerRef, !!anchor, toggle)}
       <PopupLayer anchor={anchor} onClose={close} triggerRef={triggerRef} zClass="z-[1100]">
         <div className="p-2 w-44">
+          {/* 以下两处保留原生 button（不归 IconButton）：「默认」是弹层里的选项行（与 MenuItem 同一体系）；
+              预设色板按钮的本体即色块（无图标，hover 用 scale 放大反馈），都归不进「图标 + 方形控件」形态 */}
           <button
             onClick={clear}
             className="w-full text-left px-2 py-1 rounded text-xs hover:bg-[var(--hover)]"
@@ -130,12 +122,15 @@ function ColorPopover({
   );
 }
 
+/** TableEditor 在拖框选完成 / 再次点击已选中单元格 / 右键菜单「格式」时浮出本条，锚点为选区左上角
+ *  或菜单坐标；条保持打开以支持连续格式化（内层弹层经 `data-popup-layer` 排除在外点关闭之外）。 */
 export function TableFormatToolbar({ anchor, onClose }: Props) {
   const fields = useTableStore((s) => s.fields);
   const rows = useTableStore((s) => s.rows);
   const selection = useTableStore((s) => s.selection);
   const apply = useTableStore((s) => s.applyCellStyle);
   // 选区样式汇总（三态来源）；selection 变化即重算，条保持打开随选区状态刷新
+  // 选区摘要：选区内各属性不一致时呈三态（布尔半选、颜色/字体/字号「混合」）
   const summary = useMemo(() => selectionStyleSummary(selection, fields, rows), [selection, fields, rows]);
 
   const { ref: posRef, pos } = useClampedMenuPosition(anchor.x, anchor.y, [selection], { alignBottom: true });

@@ -1,11 +1,7 @@
 /**
  * AI 工具（Agent 模式）UI 元数据 + 默认勾选 + read_file 分页执行常量。
- *
- * 这里放**组件可见**的展示元数据（id/label/依赖项）与 read_file 分页默认行数（工具/服务共用）；
- * 工具的可执行定义（schema/参数校验/摘要/执行/回填）在 `services/ai/tools/*`。两者以 `id`
- * （= 工具名）为联结键。Agent 配置里勾选的工具以 id 列表存 `.atelyx/agents.json`。
- *
- * 工具为基础文件/网络能力（对仓库内任意文本文件与网页生效），命名通用规范。
+ * 组件可见的展示元数据与分页默认行数在此；可执行定义（schema/校验/执行/回填）在
+ * `services/ai/tools/*`，两者以 id（= 工具名）联结。Agent 勾选结果以 id 列表存 `.atelyx/agents.json`。
  */
 /** 工具分类键（Agent 设置页折叠分组；顺序见 AGENT_TOOL_CATEGORIES）。 */
 export type AgentToolCategory = "web" | "file" | "task" | "plugin";

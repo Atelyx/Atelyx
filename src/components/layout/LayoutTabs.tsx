@@ -1,10 +1,6 @@
 /**
  * 标题栏左侧：应用标识（图标 + 软件名，纯展示）+ 布局 tab 条（切换/右键/双击重命名/pointer 排序/新建）。
- *
- * - 布局 tab：点击切换；**右键菜单**（重命名 inline / 删除红字，最后一个布局不可删）；
- *   双击重命名保留；**pointer 模拟拖拽排序**（WebView2 HTML5 DnD 不可靠）——
- *   位移超阈值进入拖动（setPointerCapture），松手按落点计算目标位置持久化
- * - 「+」：新建布局（单个空面板占位，命名「布局 N」自动去重）
+ * tab 交互细节见各处理函数；「+」新建布局 = 单个空面板占位，命名「布局 N」自动去重。
  */
 import { Plus } from "lucide-react";
 import { useRef, useState } from "react";
@@ -38,7 +34,8 @@ export function LayoutTabs() {
   const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   const closeMenu = () => setMenu(null);
 
-  // ===== pointer 拖拽排序 =====
+  // ===== pointer 拖拽排序（不用 HTML5 DnD：WebView2 下不可靠）=====
+  /** 位移超阈值进入拖动（setPointerCapture），松手按落点计算目标位置持久化。 */
   /** 拖动会话（pointerdown 时建立；moved = 是否越过阈值进入拖动）。 */
   const dragRef = useRef<{ index: number; startX: number; moved: boolean } | null>(null);
   /** 拖动视觉：被拖 tab 的水平位移（null = 未拖动）。 */

@@ -1,13 +1,7 @@
 /**
- * 源文本偏移 ↔ 渲染 DOM 的映射（编辑面专用）。
- *
- * 内核在 `offsets` 模式下给块容器与行内元素打了 `data-md-from/to`：
- * - 「线性片段」：元素只含一个文本节点且文本长度等于源区间长度（纯文本 span、源标记 span、
- *   代码正文），区间内每个字符都能一一对应；
- * - 「原子片段」：源区间与可见文本长度不等的替换形态（数学 / 图片 / 标签 / 胶囊 / 空标签回退成
- *   地址的链接）与零宽锚（空行行元素、空项内容锚、代码末尾空行），按整体取边界。
- *
- * 光标与选区的绘制、点击落点换算都基于本模块；映射只依赖 DOM 结构，不依赖布局测量。
+ * 源文本偏移 ↔ 渲染 DOM 的映射（编辑面专用）：光标/选区绘制与点击落点换算基于本模块，
+ * 只依赖 DOM 结构、不依赖布局测量。内核 `offsets` 模式在块容器与行内元素上打
+ * `data-md-from/to`，片段分线性（逐字符对应）与原子（整体取边界）两类，定义见 buildSourceIndex。
  */
 
 export interface SourceRun {
@@ -58,7 +52,10 @@ export function isBlankTextNode(node: Text): boolean {
   return !/\S/.test(node.data);
 }
 
-/** 扫描渲染容器，建立偏移索引（内容每次替换后重建）。 */
+/** 扫描渲染容器，建立偏移索引（内容每次替换后重建）。
+ *  线性片段（runs）= 只含一个文本节点且文本长度等于源区间（纯文本 span、源标记 span、代码正文），每字符一一对应；
+ *  原子片段（atomics）= 源区间与可见文本长度不等的替换形态（数学/图片/标签/胶囊/空标签回退成地址的链接）
+ *  与零宽锚（空行行元素、空项内容锚、代码末尾空行），按整体取边界。 */
 export function buildSourceIndex(root: HTMLElement): SourceIndex {
   const runs: SourceRun[] = [];
   const atomics: AtomicSpan[] = [];

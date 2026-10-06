@@ -1,12 +1,6 @@
 /**
- * 仓库树顶级行（与文件树同构的仓库列表）：仓库 = 树的顶级条目，行样式与文件夹行一致。
- *
- * 激活仓库行高亮（与当前打开文件同色）并就地展开其文件树，其余仓库收起；
- * 点击其他仓库 = 激活切换（完整切换流程），点击激活仓库行 = 展开/收起其文件树；
- * 右键菜单：在文件管理器中打开 / 从列表移除（不删文件、不影响激活态）——仓库级设置统一在
- * 标题栏「设置」里改当前仓库，行右键不再另设入口。菜单壳用 `common/Menu`（悬停高亮/钳制/Esc 关闭同全项目）。
- *
- * 分层：只读 appStore + 调 selectVault / removeRecentVault / openInExplorer。
+ * 仓库树顶级行：每个最近仓库一行（样式同文件夹行），激活仓库就地展开其文件树，其余收起。
+ * 点激活行 = 展开/收起；点其他行 = 激活切换。右键菜单见 `VaultMenu`。
  */
 import { useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
@@ -38,7 +32,7 @@ interface VaultRowsProps {
   fileTree: VaultTreeProps;
 }
 
-/** 仓库行右键菜单（公共菜单壳：悬停高亮/视口钳制/Esc 与外点关闭统一在这里）。 */
+/** 仓库行右键菜单：在文件管理器中打开 / 从列表移除（只移除条目，不删文件、不动激活态）。 */
 function VaultMenu({
   root,
   active,

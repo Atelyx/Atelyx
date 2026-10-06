@@ -1,12 +1,6 @@
 /**
- * 文件面板列表层的协作空间区：空间条目与本地仓库平级（仓库树的顶级条目同构）。
- *
- * 数据（合并后的空间条目）由 FileExplorerPanel 计算传入；本组件承载条目交互：
- * 点击进入（ok / need-login 引导登录 / error 已通知）、行内重命名、右键菜单（SpaceMenu，
- * 由面板渲染）、激活空间就地展开文件树，以及列表加载/错误/空态与无已登录服务器的引导。
- * 新增空间的三条途径在面板工具条（见 `SpaceAddPopover`）。
- *
- * 分层：只调 appStore / spaceDirectoryStore 动作，不直调 service。
+ * 文件面板列表层的协作空间区：空间条目与本地仓库平级，激活后同样就地展开文件树。
+ * 条目数据由 FileExplorerPanel 合并后传入；本组件承载进入、行内重命名与右键菜单入口。
  */
 import { Spinner } from "@/components/common/primitives";
 import { useEffect, useState } from "react";

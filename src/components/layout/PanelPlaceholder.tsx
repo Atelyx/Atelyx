@@ -1,8 +1,6 @@
 /**
- * 面板占位引导（无文件/空视图时显示）。
- * 图标 + 标题 + 描述，承载各视图的空状态引导文案。
- * 传 `viewKind` 时该空态走 `empty/<viewKind>` 槽：有胜出贡献则替换为空态贡献，
- * 否则回退本组件的兜底引导（内置视图插件各自贡献空态，插件可高 priority 替换）。
+ * 面板占位引导（无文件/空视图时显示）：图标 + 标题 + 描述，承载各视图的空状态引导文案。
+ * 传 `viewKind` 时走 `empty/<viewKind>` 槽（见 viewKind 注释），否则纯本组件兜底引导。
  */
 import type { ReactNode } from "react";
 import { EmptyStateMount } from "@/components/plugins/SlotHost";

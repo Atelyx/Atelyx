@@ -1,20 +1,8 @@
 /**
- * 应用级 UI 使用状态。
- *
- * 承载跨会话恢复的使用数据，磁盘 `app_data_dir/ui-state.json` 由 Rust `layout.rs`
- * 迷你窗口管理器**单一写者**持久化（schema `atelyx-ui-state/v2`，本 store 不直接写盘）：
- * - **布局（Rust 权威）**：布局列表 + 激活布局 + 撕裂窗口。本 store 只持有镜像——
- *   一切布局操作经 `services/layout.ts` 的 `layout_op` 命令发给 Rust，模型变更后
- *   Rust 全量广播 `layout-broadcast`，各窗口据此更新自身镜像并渲染。
- * - **非布局（JS 权威）**：上次打开文件 + 文件面板展开 + 最近打开 + 聚焦面板。
- *   本 store 持有并变更，防抖后经 `ui_state_patch` 补丁进 Rust 模型合并落盘。
- *
- * **应用级、跨仓库共享**：app_data_dir 本机独有、不随仓库同步；切仓库不清空、不重载。
- * `load` 在应用启动时调用一次（appStore.init）；撕裂窗口在其 `initPanel` 也调用一次
- * （每窗口各自持有本 store 实例，bootstrap + 订阅广播）。
- *
- * 分层：FileExplorerPanel / ProjectWorkspacePage / WorkspaceGrid / panelStore 走本 store，
- * 不直调 `services`。防抖 400ms（同 settingsStore.persistDebounced 模式）。
+ * 应用级 UI 使用状态（app_data_dir/ui-state.json，Rust `layout.rs` 单一写者持久化，schema `atelyx-ui-state/v2`）。
+ * 布局字段 Rust 权威：本 store 只持镜像，一切布局操作经 `services/layout.ts` 的 `layout_op` 命令、
+ * 由 Rust 全量广播 `layout-broadcast` 收敛；非布局字段 JS 权威：防抖经 `ui_state_patch` 补丁合并落盘。
+ * 应用级、跨仓库共享（app_data_dir 本机独有），切仓库不清空不重载；组件不直调 `services`。
  */
 import { create } from "zustand";
 import { remapDirKey } from "@/utils/filename";
@@ -61,7 +49,7 @@ interface UiStateStore {
   /** bootstrap 失败标志（失败时以默认值渲染，但禁止后续 patch 落盘防覆盖磁盘）。 */
   loadFailed: boolean;
 
-  /** 应用启动/撕裂窗口启动时调用：拉取快照 + 订阅布局广播。 */
+  /** 应用启动（appStore.init）/撕裂窗口启动（initPanel）时调用：拉取快照 + 订阅布局广播（每窗口各自实例）。 */
   load: () => Promise<void>;
   /** 文件面板展开/收起文件夹（toggle）。 */
   toggleExpanded: (path: string) => void;

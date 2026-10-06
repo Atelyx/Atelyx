@@ -1,18 +1,8 @@
 /**
- * 跨窗口写盘感知桥（本地仓库）：任一窗口对本仓库内容的写盘由 Rust 在写命令成功后广播
- * （`vault-content-changed`，排除发起窗口），本模块把变更分发到各内容域的既有收敛机制——
- * 打开中的文件据此与磁盘对账：
- * - 笔记（.md）：作废内容缓存 + bump 外部变更序号，编辑会话收敛（无未落盘输入采纳磁盘、
- *   有则保留本地，下一次自动保存按整文件写落盘）；路径迁移按协作换路同一簿记跟上。
- * - 画布（.atlx）/表格（.atb）：路径先跟上（title 改名漂移/移动），无脏且无在途写盘时重读
- *   磁盘，否则保留本地（下一次自动保存按各自语义落盘——补丁按稳定 id 合并、整写后写者胜）。
- * - 引用文件（.md 正文 / 附件）：画布引用节点按引用补读（无引用时补读动作自身 no-op）。
- *
- * 只覆盖本地仓库：协作空间内容真源在服务端，其他窗口的变化经协作通道到达，不经本桥。
- * 不广播删除：外部删除本就「在打开/重读时表现」，陈旧窗口的下次写盘重建文件与既有口径一致。
- *
- * 分发只做「状态如何跟上」的决策，收敛一律复用域内机制；补丁合并发生在 Rust 侧
- * （每次落盘前重读磁盘最新内容），陈旧窗口的增量补丁不会覆盖他窗已落盘内容。
+ * 跨窗口写盘感知桥（本地仓库）：把 Rust 在写命令成功后广播的内容变更（`vault-content-changed`，
+ * 排除发起窗口）分发到各内容域的既有收敛机制，打开中的文件据此与磁盘对账。
+ * 各域「状态如何跟上」的决策见 noteWritten/canvasWritten/tableWritten/renamed；协作空间内容
+ * 真源在服务端，其他窗口的变化经协作通道到达，不经本桥。
  */
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -74,7 +64,7 @@ function tableClean(): boolean {
   return !s.dirty && !s.saving;
 }
 
-/** .md 落盘：笔记域收敛信号 + 打开中的画布对引用该文件的 text 节点补读。 */
+/** .md 落盘：作废内容缓存 + bump 外部变更序号（编辑会话收敛语义见 markNoteExternallyEdited），打开中的画布对引用该文件的 text 节点补读。 */
 function noteWritten(file: string): void {
   useNoteStore.getState().markNoteExternallyEdited(file);
   useNoteStore.getState().invalidateNoteCache(file);
@@ -82,7 +72,7 @@ function noteWritten(file: string): void {
   if (canvas.canvasFile !== null) void canvas.refreshTextContent(file);
 }
 
-/** .atlx 落盘：打开中的画布先跟路径（title 漂移），干净态重读磁盘。 */
+/** .atlx 落盘：打开中的画布先跟路径（title 漂移/移动），干净态重读磁盘；脏或在途写盘则保留本地，由下一次自动保存按各自语义落盘（补丁按稳定 id 合并、整写后写者胜）。 */
 function canvasWritten(file: string, from: string | undefined): void {
   const canvas = useCanvasStore.getState();
   if (canvas.canvasFile === null) return;
@@ -94,7 +84,7 @@ function canvasWritten(file: string, from: string | undefined): void {
   if (canvasClean()) void useCanvasStore.getState().reloadFromDisk();
 }
 
-/** .atb 落盘：语义同画布。 */
+/** .atb 落盘：语义同画布（先跟路径，干净态重读；脏态保留本地待自动保存落盘）。 */
 function tableWritten(file: string, from: string | undefined): void {
   const table = useTableStore.getState();
   if (table.tableFile === null) return;
@@ -172,7 +162,11 @@ function rootKey(root: string): string {
   return root.replace(/\\/g, "/").toLowerCase();
 }
 
-/** 分发一条广播（订阅回调与测试共用）。 */
+/**
+ * 分发一条广播（订阅回调与测试共用）。收敛一律复用域内机制，本函数只做「状态如何跟上」的决策；
+ * 补丁合并在 Rust 侧每次落盘前重读磁盘完成，陈旧窗口的增量补丁不会覆盖他窗已落盘内容。
+ * 不广播删除：外部删除本就「在打开/重读时表现」，陈旧窗口的下次写盘重建文件与既有口径一致。
+ */
 export function handleVaultContentChanged(payload: VaultContentChangedPayload): void {
   const identity = getActiveVaultIdentity();
   // 非本地仓库（空间真源在服务端）或仓库根不符（切仓库在途的迟到广播）：不分发

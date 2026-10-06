@@ -1,28 +1,8 @@
 /**
- * 表格类型化单元格（按字段类型分派编辑器）。
+ * 表格类型化单元格：按字段类型分派编辑器（text / number / duration / singleSelect / image）。
  *
- * - text：单击 = 进入隐藏编辑态（视觉不显露：无光标、无边框无背景，编辑即单元格本身），
- *   打字直达输入框——首个字符/IME 组合开始覆盖原值（清空旧内容直接写入）；
- *   双击 = 显示光标 + 取消覆盖（保留原值光标插入）；
- *   选中态键盘：Backspace/Delete = 直接清空（一步撤销，空值无操作）、方向键/Home/End/Enter
- *   = 移动选中、Esc 取消并清选中；编辑态：Enter = 提交并下移一行、Shift+Enter = 换行、
- *   失焦提交、Esc 取消并清选中
- * - number：数字输入（编辑态 Enter 提交并下移，空 = 清空）；选中态键盘语义同 text
- *   数字列保留原生 input（不归基元）：依赖 type=number 的原生语义（步进、非法值拒绝、
- *   输入法直接键入数字），基元无对应档；就地编辑沿用 text 列那套隐藏输入面做法
- * - singleSelect：选项下拉（含空项）
- * - image：图片单元格（单图轮播 / 九宫格 + 缩略图队列滑动切换，见 ImageCell.tsx）
- *
- * 覆盖编辑实现（见 useCellEditor）：选中即聚焦**常驻隐形输入框**——打字/粘贴/IME 组合的
- * 首个字符直接落入真实输入元素，组合开始即绑定该元素、焦点全程不换元素，首字符（含中文
- * 拼音首字母）不丢失。IME 组合必须起始于真实输入元素：组合在无输入元素的文档上开始，
- * 首键会被当纯字母提交、后续才正常。
- *
- * 显示面与编辑面是两个元素（显示 div + 绝对铺满的编辑框），字号档与字体族只能各写一份声明：
- * 两处叉开时，进入编辑的那一刻文字就跳档（字号与行高成对变、首行基线位移），故同一档取同一常量。
- *
- * 纯 UI：值读写经 store（updateCell/addImagesToCell/removeImageAt）；
- * 单元格选中（selectCell）由 TableEditor 的 td 层 pointer 手势统一处理。
+ * 纯 UI（值读写经 tableStore，选中由 TableEditor 的 td 手势层统一处理）；
+ * 各类型键位见 TextCell / NumberCell，覆盖编辑的焦点与 IME 约束见 useCellEditor。
  */
 import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ChangeEvent, KeyboardEvent, MouseEvent } from "react";
@@ -67,12 +47,12 @@ function useDraftSyncOnUndo(
 
 /**
  * 单元格编辑状态机（覆盖编辑核心）：
- * - 选中（隐藏编辑态）：常驻隐形输入框聚焦，value 空，td 仍显示原值；打字/IME 组合/粘贴
- *   的首个字符 → startEdit(首字符) 覆盖原值；双击 → startEdit(原值) 取消覆盖。
+ * - 选中（隐藏编辑态）：常驻隐形输入框聚焦，value 空，td 仍显示原值；打字/IME 组合/粘贴的
+ *   首个字符 → startEdit(首字符) 覆盖原值；双击 → startEdit(原值) 取消覆盖。
  * - 编辑（可见输入框，即单元格本身）：失焦提交、Esc 取消并清选中（组件各自处理）。
  *
- * 关键约束：选中态与编辑态是**同一个输入框元素**切换显隐（焦点与 IME 组合不换元素）；
- * 聚焦只在「未选中 → 选中」时发生（失焦提交后不抢回焦点）。
+ * IME 组合必须起始于真实输入元素（在无输入元素的文档上开始会丢首键），故两态复用同一输入框元素
+ * 只切显隐、焦点全程不换元素；聚焦只在「未选中 → 选中」时发生（失焦提交后不抢回焦点）。
  */
 function useCellEditor<T extends HTMLTextAreaElement | HTMLInputElement>(
   rowId: string,
@@ -88,7 +68,7 @@ function useCellEditor<T extends HTMLTextAreaElement | HTMLInputElement>(
     (s) =>
       s.selection?.kind === "cell" && s.selection.rowId === rowId && s.selection.fieldId === fieldId,
   );
-  // 仅「未选中 → 选中」时聚焦隐形输入框（打字直达；失焦提交后 editing 回落不抢回焦点）
+  // 仅「未选中 → 选中」时聚焦隐形输入框：打字直达，且失焦提交后 editing 回落不抢回焦点
   const wasSelectedRef = useRef(false);
   useLayoutEffect(() => {
     const becameSelected = selected && !wasSelectedRef.current;
@@ -121,13 +101,14 @@ interface Props {
 }
 
 /**
- * 类型化单元格（memo：store 不可变更新下未变 row/field 引用稳定，浅比较跳过整行未变单元格的重渲染，
- * 单格编辑不再连带整行其余单元格重渲染；内部选中态/撤销回退订阅走 zustand 自身通知，不受 memo 影响）。
+ * 类型化单元格（memo：store 不可变更新下未变 row/field 引用稳定，浅比较跳过整行未变单元格的重渲染；
+ * 内部选中态/撤销回退订阅走 zustand 自身通知，不受 memo 影响）。
  */
 export const TableCell = memo(function TableCell({ field, row }: Props) {
   const value = row.values[field.id];
   const updateCell = useTableStore((s) => s.updateCell);
 
+  // 单图轮播 / 九宫格 + 缩略图队列，见 ImageCell.tsx
   if (field.type === "image") return <ImageCell field={field} row={row} />;
   if (field.type === "singleSelect") {
     const options = field.options ?? [];
@@ -254,7 +235,9 @@ function handleSelectionKey(
   return false;
 }
 
-/** 文本单元格：单击进入隐藏编辑态（常驻隐形输入框），首字符覆盖；双击取消覆盖（保留原值）。 */
+/** 文本单元格：单击进入隐藏编辑态（常驻隐形输入框），首个输入覆盖原值；双击取消覆盖并保留原值。
+ *  选中态键盘：Backspace/Delete 清空、方向键/Home/End/Enter 移动选中、Esc 取消并清选中。
+ *  编辑态键盘：Enter 提交并下移一行、Shift+Enter 换行、失焦提交、Esc 取消并清选中。 */
 function TextCell({
   field,
   row,
@@ -287,8 +270,7 @@ function TextCell({
   };
   const commit = () => {
     setEditing(false);
-    // diff 后才写：失焦未改动不置脏（避免无谓写盘，同 TextNode 惯例）；
-    // 保留原文首尾空白（文本即真相，不 trim）；有改动提交会话（撤销单元保留），无改动丢弃
+    // 有改动才写：保留首尾空白（文本即真相，不 trim）；无改动中止会话（免空撤销单元与无谓写盘）
     if (draft !== value) {
       useTableStore.getState().commitCellEdit();
       updateCell(row.id, field.id, draft || undefined);
@@ -333,8 +315,7 @@ function TextCell({
 
   return (
     <div
-      // 编辑态/隐藏编辑态共用同一输入框元素（绝对铺满 td）：编辑态显示即单元格本身，
-      // 隐藏态 opacity-0 + pointer-events-none（点击穿透到 td 手势层），td 显示原值
+      // 隐藏态 opacity-0 + pointer-events-none：点击穿透到 td 手势层，td 仍显示原值
       className={`w-full h-full min-h-8 px-1.5 py-1 ${TEXT_CELL_FONT} whitespace-pre-wrap break-words`}
       style={{
         color: "var(--text-primary)",
@@ -353,8 +334,7 @@ function TextCell({
       onDoubleClick={handleDoubleClick}
     >
       {editing ? (
-        // 占位（不可见）：与显示态同结构撑起 td 高度（编辑框 absolute 不参与布局）。
-        // 未固定行高 = 内容高（随 draft 增长）；固定行高 = td 高由行高决定。
+        // 不可见占位（编辑框 absolute 不参与布局）：撑起 td 高度，未固定行高时随 draft 增长
         <div className="invisible">{draft}</div>
       ) : (
         <div>{value}</div>
@@ -385,7 +365,8 @@ function TextCell({
   );
 }
 
-/** 数字/时长单元格：数字输入（失焦/Enter 提交，空 = 清空）；覆盖/取消覆盖语义同 text。 */
+/** 数字/时长单元格：空 = 清空，Enter 提交并下移一行；覆盖与取消覆盖语义同 TextCell。
+ *  保留原生 input（不归基元）：依赖 type=number 的步进与非法值拒绝语义，基元无对应档。 */
 function NumberCell({
   field,
   row,

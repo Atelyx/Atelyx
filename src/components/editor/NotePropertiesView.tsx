@@ -1,22 +1,6 @@
 /**
- * 笔记属性区：胶囊行式融入笔记正文顶部，可视化展示 + 内联编辑。
- * `.md` 开头 YAML Frontmatter（渲染/实时预览编辑模式显示；源码模式由 textarea 显示 YAML 原文）。
- *
- * 纯受控展示组件，无持久化逻辑：data 由 NoteEditor 解析传入，onUpdate 提交新 data（NoteEditor 拼回完整
- * content 走既有 debounce 保存链路）。类型化渲染：
- * - tags/aliases/cssclasses → `#` 徽章；其余数组 → Clock 垂直列表；
- * - string → 键值对行；未知类型（数字/布尔/嵌套）→ 只读键值对行 String(value)（编辑会破坏 YAML 类型，不做）。
- *
- * 输入体验（槽位模型 + 连续编辑）：
- * - 每个属性 = 键槽 + 值槽（数组每项一槽）；Enter/Tab 提交并进入下一条可编辑槽位，Shift+Tab 回退，
- *   末槽后自动打开「添加属性」；Esc 取消；键名→值连贯编辑（键槽提交后直入本行值槽）。
- * - 数组项/徽章输入含中英文逗号自动拆分为多项提交（单值字段不拆）。
- * - 两段式添加：键名 Enter → 键名变胶囊、值输入自动聚焦 → 值 Enter 落盘；键名输入弹常用键名建议
- *   （COMMON_PROPERTY_KEYS 子串过滤、排除已有，↑↓ 选择）。
- * 空态（无任何属性）由调用方选择：编辑器正文顶部传 hideWhenEmpty 整块不渲染（添加入口在「···」菜单，
- * 经 openAddSignal 请求打开表单）；属性面板缺省显示「添加属性」入口。
- * - tags 输入候选：全仓库标签词汇表（tagCandidates，NoteEditor 按需加载），子串过滤、排除已有、
- *   ↑↓ 选择、Enter 选中提交、Esc 先关建议再取消。
+ * 笔记属性区：`.md` 开头 YAML Frontmatter 的可视化展示 + 内联编辑，胶囊行式融入笔记正文顶部。
+ * 纯受控组件，无持久化逻辑：data 由 NoteEditor 解析传入，onUpdate 提交新 data（NoteEditor 拼回完整 content 走既有 debounce 保存链路）。
  */
 import {
   Calendar,

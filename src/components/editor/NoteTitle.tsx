@@ -1,11 +1,6 @@
 /**
  * 页面内标题：笔记面板正文顶部的文件名标题（去扩展名），点击进入行内编辑，提交即重命名笔记文件。
- *
- * 标题恒由 `file` 派生（磁盘事实）：重命名成功后打开的路径随之变化，面板按路径重挂载，
- * 本组件不缓存标题。提交后到面板切到新路径之间显示「在途提交的目标标题」，防旧名回闪。
- *
- * 同名冲突在此前置拒绝：`vaultStore.renameNote` 对同名会静默加序号，而这里是用户手输的文档名，
- * 改完与他刚输入的内容不符，故不进入该逻辑，内联提示后由用户自行改名或另开标题。
+ * 标题恒由 `file` 派生（磁盘事实）：重命名成功后面板按新路径重挂载，本组件不缓存标题。
  */
 import { Input } from "@/components/common/Input";
 import { useRef, useState } from "react";
@@ -43,7 +38,8 @@ export function NoteTitle({ file }: { file: string }) {
     const next = text.trim();
     if (!next || next === shown) return;
     const target = noteRenameTarget(file, next);
-    // 无目标 = 净化后与原路径相同；目标已被同仓库笔记占用 = 拒绝（不覆盖、不自动加序号）
+    // 无目标 = 净化后与原路径相同；目标已被同仓库笔记占用 = 拒绝（不覆盖、不自动加序号——
+    // 标题是用户手输的文档名，静默加序号的结果与他输入的不符，内联提示后由用户自行改名）
     if (!target) return;
     if (useVaultStore.getState().noteList.some((n) => n.file === target)) {
       setNotice(`「${noteTitleFromFile(target)}」已存在，未重命名`);

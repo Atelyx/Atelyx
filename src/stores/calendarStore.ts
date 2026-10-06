@@ -1,19 +1,7 @@
 /**
  * 日历（主页）store：手动日程（仓库级）+ 带日期笔记（只读）。
- *
- * 手动日程 CRUD 防抖落盘，落盘位置按激活仓库身份分流（services/metadata）：
- * 个人仓库 = `.atelyx/calendar.json`；协作空间 = 团队 meta 键 `calendar`（全员共享，
- * 写权限服务端按角色裁决）。写盘按「已加载仓库身份」归属校验（loadedFor），切仓库前须先 flush
- * （appStore.selectVault/selectSpace 已接）防防抖窗口内把旧仓库日程写进新仓库。
- * 身份判别一律用身份键（identityKeyOf）：空间模式 vaultRoot 恒为 null，
- * 按 root 比对会让空间 A→B 切换时在途读不被丢弃、A 的数据写进 B。
- * 协作空间内多人并发编辑按整文件后写者胜收敛：服务端写/删落地后广播 `meta-changed` 帧，
- * 本域订阅（registerCalendarCollabWiring）回读磁盘真源——本地干净（无未落盘改动）才采纳，
- * 本地脏时忽略（保留用户输入，随后落盘覆盖远端）；等待期间切仓库或产生本地编辑同样不采纳。
- * 带日期笔记来自 `services/home.listDatedNotes`（frontmatter date/due），随 load 一并刷新。
- * 性能：同仓库会话内缓存（loadedFor），主页面板随布局切换反复挂载时，已缓存仓库
- * 仅后台静默重扫带日期笔记；手动日程 items 为 store 实时态（防抖落盘），刷新不重读磁盘
- * 防覆盖在途编辑。加载失败静默降级为空（尽力而为，不阻塞面板）。
+ * 手动日程 CRUD 防抖落盘，落盘位置按激活仓库身份分流（services/metadata）；写盘按已加载仓库身份
+ * 归属校验，切仓库前须先 flush（appStore.selectVault/selectSpace 已接），防防抖窗口内把旧仓库日程写进新仓库。
  */
 import { create } from "zustand";
 import { CALENDAR_SCHEMA } from "@/constants/calendar";
@@ -39,6 +27,7 @@ function calendarGuardKey(): string {
 
 interface CalendarState {
   items: CalendarItem[];
+  /** 带日期笔记（`services/home.listDatedNotes`，frontmatter date/due），随 load 一并刷新。 */
   datedNotes: DatedNote[];
   /** 已加载的仓库守卫键（null = 未加载；persist 归属校验用）。 */
   loadedFor: string | null;

@@ -1,9 +1,7 @@
 /**
  * Agent 配置类型（仓库级，落盘 `.atelyx/agents.json`）。
- *
- * Agent = 可复用的对话预设：名称 + 系统提示词（引用已注册提示词笔记）+ 工具能力。
- * 对话节点 / AI 对话面板通过 `agentId` 引用（实时解析，编辑 Agent 后引用处立即生效）。
- * 模型/推理等级不进 Agent（仍由节点/面板头部 ModelSelect 独立选择）。
+ * Agent = 可复用的对话预设：名称 + 系统提示词（引用提示词笔记）+ 工具能力，对话节点/面板经
+ * `agentId` 实时解析引用。模型/推理等级不进 Agent，由节点/面板头部独立选择。
  */
 export interface AgentConfig {
   /** 稳定 id（uuid；节点/会话按它引用；预置 Agent 用固定 id）。 */

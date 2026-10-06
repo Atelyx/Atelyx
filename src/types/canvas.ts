@@ -1,9 +1,7 @@
 /**
  * `.atlx` 文件 schema 类型（磁盘格式，atelyx-canvas/v1）。
- *
- * 与运行时 `types/node.ts` 分开：磁盘用扁平 x/y（不绑 React Flow），
- * 运行时↔磁盘的转换在 services/vault 层做。
- * 所有 node/edge/message 有稳定 id，为未来协作增量合并预留。
+ * 与运行时 `types/node.ts` 分开：磁盘用扁平 x/y（不绑 React Flow），转换在 services/vault 层做；
+ * 所有 node/edge/message 有稳定 id，为协作按 id 增量合并预留。
  */
 import type { Message } from "./message";
 import type { ConversationCompaction } from "./compaction";
@@ -280,11 +278,9 @@ export interface GlobalSearchConfig {
 }
 
 /**
- * 全局配置（app_data_dir/global.json）——**应用级配置**：最近仓库列表 + 自动检查更新开关 +
- * 界面外观（主题/强调色/字号/字体）+ 自动恢复上次打开文件。
- * AI 供应商 / 搜索源已仓库化（`.atelyx/config.json` 的 `VaultConfig.providers/search`）；
- * 应用级 UI 使用状态（布局/上次打开文件/展开）走 `app_data_dir/ui-state.json`；
- * 不含 API key（key 仅存 keychain，条目按仓库隔离，见安全红线）。
+ * 全局配置（app_data_dir/global.json）——应用级：最近仓库列表 + 更新检查 + 外观 + 自动恢复。
+ * AI 供应商/搜索源已仓库化（`.atelyx/config.json` 的 `VaultConfig.providers/search`）；
+ * 应用级 UI 使用状态走 `app_data_dir/ui-state.json`；不含 API key（仅存 keychain，条目按仓库隔离）。
  */
 export interface GlobalConfig {
   /** 最近打开的仓库列表（按最近打开倒序，前端维护顺序） */

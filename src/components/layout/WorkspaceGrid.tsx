@@ -1,17 +1,7 @@
 /**
- * 工作区面板网格：递归多叉树渲染。
- *
- * Split → 自研 flex 分割容器（子项按占比分配，相邻子项间插拖拽手柄，拖拽回写占比）；
- * Panel → PanelFrame（标签组头部 + 视图承载）。布局操作经 uiStateStore（走既有 debounce 持久化链路）。
- *
- * 分割/合并入口：分割在面板 ≡ 菜单，面板清理走「关闭标签 → 空面板 → 删除面板」；
- * 边 = 纯 resize 手柄（指针拖拽 + 方向键）。
- *
- * 跨窗口拖拽：面板 DOM 标注 data-drop-panel，panelStore 拖拽会话按 getBoundingClientRect 命中；
- * 本组件渲染 drop 指示器 overlay（中部 = 加标签 / 四边缘 = 分割）。
- *
- * 性能：拖拽只改本 Split 的本地占比，不在拖拽帧内重建布局树；占比经防抖 IPC 回写（Rust 为最终权威）。
- * PanelFrame/PanelTabBar 以 memo 收敛无关重渲染。
+ * 工作区面板网格：递归多叉树渲染。Split → 自研 flex 分割容器（子项按占比分配、相邻子项间插拖拽手柄），
+ * Panel → PanelFrame（标签组头部 + 视图承载）；布局操作经 uiStateStore（走既有 debounce 持久化链路）。
+ * 分割/合并入口、跨窗口拖拽命中、拖拽性能处理见各组件/函数的注释。
  */
 import {
   Fragment,

@@ -1,9 +1,5 @@
 /**
  * 标题栏右上角场景选择器：场景（布局之上的容器）的切换入口，布局切换在左侧布局 tab 条。
- *
- * 菜单：点击切换场景（整组替换面板网格并恢复该场景记忆的布局）、行内重命名、
- * 删除走确认面板（场景内布局一并删除，不可撤销）、底部新建场景。
- * 默认场景固定置顶、不可删除/重命名。
  * 全部变更经 uiStateStore 发命令，Rust 是唯一权威，本组件只渲染镜像。
  */
 import { Check, ChevronDown, Pencil, Plus, Trash2 } from "lucide-react";
@@ -161,6 +157,7 @@ export function SceneSwitcher() {
       >
         {confirmTarget ? (
           <div className="p-3" data-tauri-drag-region="false">
+            {/* 删除不可撤销：场景内布局一并删（无恢复入口），故走二次确认而非直接删 */}
             <p className="text-xs font-medium" style={{ color: "var(--text-primary)" }}>
               删除场景「{confirmTarget.name}」？
             </p>

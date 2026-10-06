@@ -12,15 +12,8 @@ const IMG_MAX_DIM = 360;
 /** 图片展示宽度下限（px），与节点 minWidth 对齐避免过窄 */
 const IMG_MIN_WIDTH = 180;
 
-/**
- * 媒体节点。
- * 图片显示缩略图，文件显示图标 + 文件名；解析失败标注「无法解析」。
- * 连线锚点：右侧 source 供接入对话节点。
- *
- * 尺寸策略：用 data.userResized 区分用户是否手动 resize 过。
- * - 未 resize：宽度跟随 data.displayWidth（按图片比例推导），高度 auto 让图片自然撑高；
- * - 已 resize：宽高跟随 NodeProps（用户拖拽值），内容区溢出滚动。
- */
+/** 媒体节点：图片显示缩略图，其他类型显示图标 + 文件名；解析失败或文件缺失各自标注。
+ * 图片未手动 resize 时宽度跟随加载后推导的 displayWidth、高度 auto 自然撑高；resize 过后宽高才由用户拖拽值决定。 */
 export function MediaNode({ id, data, width, height, selected }: NodeProps) {
   const {
     name,
@@ -89,7 +82,6 @@ export function MediaNode({ id, data, width, height, selected }: NodeProps) {
           color: "var(--text-secondary)",
         }}
       >
-        {/* 类型标识：3px 色条（媒体） */}
         <span
           className={NODE_TYPE_BAR_CLASS}
           style={{ background: NODE_TYPE_COLORS.media }}

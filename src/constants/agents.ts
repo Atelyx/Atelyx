@@ -1,8 +1,6 @@
 /**
  * Agent 预置常量：默认随每个仓库出现的两个不可删除 Agent（builtin 标记）。
- *
- * 预置 Agent 可编辑（改名/改工具/配提示词）但不可删除；settingsStore 加载时
- * 缺失即补入并落盘（首次种子 / 手删补齐），保证默认必现。
+ * 可编辑（改名/改工具/配提示词）但不可删除；settingsStore 加载缺失时补入并落盘。
  */
 import type { AgentConfig } from "@/types";
 import { DEFAULT_AGENT_TOOLS, READONLY_TOOL_IDS } from "@/constants/tools";

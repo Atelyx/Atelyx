@@ -1,18 +1,7 @@
 /**
  * 随应用分发的插件：实现注册表 + 默认组合定义（分发属性，非类别）。
- *
- * 这些插件与用户安装的插件同注册表/同生命周期/同 slots·services·events/同审计，无特权；
- * 唯一差别是**实现解析方式**——实现随宿主编译（本模块 id → Cordis 插件定义的映射），
- * 而非从磁盘读入口。pluginStore 按组合行启停状态经 loader 挂载/卸载（fiber 生命周期）：
- * - 视图贡献 → view/<kind> 槽（single；重型视图 render(hostId) 承载宿主面板 id）；
- * - 领域生命周期钩子（flush/切仓库/释放视图）经 kernelLifecycle 注册，随 fiber 撤销；
- * - 能力提供者 / 协作域接线 / 仓库事件订阅经 ctx.effect 注册（apply 中途抛错/卸载均自动撤销）；
- * - builtin.canvas/table/note/chatcore 额外提供 ctx.canvas/ctx.table/ctx.note/ctx.chat 类型化服务（停用即消失）；
- *   其中 chatcore 是能力行（无视图）：提供 AI 对话运行时，面板行与画布对话节点经注册表消费它。
- *
- * 数组顺序 = 领域生命周期钩子的 flush 注册序（对齐既有注册序）；也是默认组合的装配顺序。
- * 本模块被 pluginStore 静态 import，环内所有跨模块访问均为函数体内延迟求值（无顶层
- * getState/useXxx），新增顶层触碰会 TDZ 崩溃。
+ * 与用户安装的插件同注册表/同生命周期/同审计，无特权；唯一差别是实现随宿主编译（本模块 id → Cordis 插件定义的映射），不从磁盘读入口。
+ * 被 pluginStore 静态 import（循环依赖）：所有跨模块访问必须在函数体内延迟求值，新增顶层 getState/useXxx 会 TDZ 崩溃。
  */
 import type { ComponentType, ReactNode } from "react";
 import type { Context } from "@atelyx/cordis";

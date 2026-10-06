@@ -1,11 +1,6 @@
 /**
- * 文件面板行右键菜单：创建副本 / 重命名 / 删除。
- *
- * 「删除」文字恒为红色；点击后**菜单内就地**切确认态（红色「确认删除」+「取消」），
- * 确认才执行删除——不用系统 confirm。
- *
- * 关闭：Esc / 点击菜单外（pointerdown，mousedown 会被树行 pointerdown 的 preventDefault 抑制派发）；
- * 容器 stopPointerDown 阻止事件到达树行处理器，防按钮 click 被宿主抑制。
+ * 文件面板行右键菜单：创建副本 / 重命名 / 删除——删除在菜单内就地切确认态（红色「确认删除」+「取消」），不用系统 confirm。
+ * 关闭走 Esc 与 pointerdown 外点（树行的 preventDefault 会抑制 mousedown 派发），并用 stopPointerDown 隔断宿主行处理器。
  */
 import { BookmarkMinus, BookmarkPlus, Copy, FileOutput, Pencil, Trash2 } from "lucide-react";
 import { useState } from "react";

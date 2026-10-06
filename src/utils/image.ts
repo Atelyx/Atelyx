@@ -1,11 +1,7 @@
 /**
- * 图片扩展名与 MIME 的单一真源。
- *
- * 「哪些扩展名算图片」这份知识原先散在多个调用点（画布媒体判定、白板节点分类、表格图片落盘、
- * 协作空间附件读写、文件选择器 accept），任一处遗漏就会互相分叉。本模块统一承载，其余位置只取用：
- * 集合用 IMAGE_EXTS，文件名后缀判定用 isImageFileName，MIME 用 imageMimeFromExt。
- *
- * 注意：本地附件 dataURL 的 mime 由 Rust 侧 `commands/vault.rs` 的同一张表产出，属另一语言实现；
+ * 图片扩展名与 MIME 的单一真源：「哪些扩展名算图片」的知识统一在此，其余位置只取用
+ * （集合 IMAGE_EXTS / 文件名判定 isImageFileName / MIME imageMimeFromExt）。
+ * 注意：本地附件 dataURL 的 mime 由 Rust 侧 `commands/vault.rs` 同一张表产出（另一语言实现），
  * 改动本表时须同步该处。
  */
 

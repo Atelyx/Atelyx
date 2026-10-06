@@ -1,9 +1,8 @@
 /**
- * 应用内通知宿主（右下角堆叠）。
+ * 应用内通知宿主（右下角堆叠）：每窗口各挂一个（主窗口与撕裂窗口是独立 webview，
+ * 通知列表各自独立、不跨窗口共享）。
  *
- * 每个窗口各挂一个（主窗口与撕裂窗口是独立 webview，通知列表各自独立、不跨窗口共享）；
- * 列表来自 notificationStore，自动消失与手关闭都只调 store.dismiss。
- * 颜色走主题 CSS 变量，图标用 lucide 线性图标。
+ * 列表来自 notificationStore，自动消失与手动关闭都只调 store.dismiss。
  */
 import { useEffect } from "react";
 import { AlertTriangle, CheckCircle2, Info, X, XCircle } from "lucide-react";

@@ -1,10 +1,6 @@
 /**
- * `.md` 笔记编辑器（未打开画布时单击笔记打开）。
- *
- * 占据主编辑区（画布位置）：顶部文件操作条，正文 = 统一分块 Markdown 引擎
- * （工具条分段控件三态互斥：只读 / 预览编辑 / 源码；预览态双击正文也可进入编辑）。
- * 正文内容、保存、协作与撤销归 `stores/noteSessionStore` 的编辑会话（与画布文本节点共用同一会话），
- * 本组件只做面板 chrome 与交互编排。
+ * `.md` 笔记编辑器（未打开画布时单击笔记打开）：占据主编辑区，顶部文件操作条 + 正文（统一分块 Markdown 引擎）。
+ * 正文内容、保存、协作与撤销归 `stores/noteSessionStore` 的编辑会话（与画布文本节点共用同一会话），本组件只做面板 chrome 与交互编排。
  */
 import { ClipboardPaste, Code, Copy, Eye, MoreHorizontal, Pencil, Redo2, Scissors, Undo2, Wand2 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";

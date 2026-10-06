@@ -1,10 +1,9 @@
 /**
- * 插件浮层宿主（ctx.ui.showFloatingLayer 的渲染层）。
+ * 插件浮层宿主（ctx.ui.showFloatingLayer 的渲染层）：每窗口各挂一个（App.tsx，与 NotificationHost 同位），
+ * 撕裂窗口是独立 webview，浮层各自独立、不跨窗口共享。
  *
- * 每个窗口各挂一个（App.tsx，与 NotificationHost 同位；撕裂窗口是独立 webview，浮层各自独立）。
- * 浮层按登记顺序叠放；fixed 定位脱离 transform 祖先（同 PopupLayer 的 portal 语义），
- * z 层级高于全部既有弹层、低于通知堆叠。收起语义宿主代管：Esc 恒收起（后开先关），
- * 外点收起按登记选项；center 居中或坐标定位（实测尺寸后钳制视口）。
+ * 浮层按登记顺序叠放；fixed 定位脱离 transform 祖先，z 高于全部既有弹层、低于通知堆叠。
+ * 收起由宿主代管：Esc 恒收起（后开先关），外点收起按登记选项；center 居中或坐标定位（实测尺寸后钳制视口）。
  */
 import { useEffect, useRef, type CSSProperties, type RefObject } from "react";
 import { useFloatingLayerStore, type FloatingLayerEntry } from "@/stores/floatingLayerStore";

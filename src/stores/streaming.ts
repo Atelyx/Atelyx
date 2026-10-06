@@ -1,16 +1,8 @@
 /**
  * 公共流式对话引擎：画布对话节点（canvasStore.runStream）与 AI 对话面板（chatPanelStore.runExchange）共用。
- *
  * 一轮完整流式对话 = 无预算工具循环（模型不调工具即收束，靠 max-tokens 兜底 + 停止按钮打断）+
- * 双通道定时器节流 + 空闲超时 + SSE 流式。
- * 状态容器差异（messagesByConv vs sessions）由调用方回调消化：
- * - applyBatch：每个节流窗口合并后的增量写回调
- * - onError：请求失败写 [错误] 占位（保留已产出内容）
- * - onDone：流结束（含超时/中止/截断），调用方用 decideCleanup 做最终清理；`truncated` = 达到输出上限，
- *   `promoteNarration` = 最终回答轮（无工具调用）其叙述行应在轮末提升进 content
- * - executeTools：工具执行（走公共执行器 runAgentTools，产物节点差异由调用方 hooks 消化），返回 tool 消息由引擎回填下一轮
- *
- * 类型全部用中性词汇（LlmMessage/ToolSchema），工具执行走 services/ai/tools 注册表（runAgentTools）。
+ * 双通道定时器节流 + 空闲超时 + SSE 流式；状态容器差异由调用方回调消化（见 RunStreamExchangeOptions），
+ * 类型全部用中性词汇（LlmMessage/ToolSchema）。
  */
 import { streamChat, STREAM_IDLE_TIMEOUT_MS } from "@/services/ai/client";
 import { isContextOverflowError } from "@/services/ai/errors";

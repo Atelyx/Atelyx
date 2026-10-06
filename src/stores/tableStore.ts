@@ -1,11 +1,8 @@
 /**
- * 多维表格（.atb）运行时状态：当前打开的表格内容 + 防抖保存。
- *
- * 保存管线对齐 canvasStore：debounce 500ms 原子写 +
- * 按稳定 id 的增量补丁（服务端/本地命令各自合并落盘）。
- * 窗口槽/恢复/重命名联动由页面层（ProjectWorkspacePage）编排，本 store 只管内容与持久化。
- * title 变更走 `vaultStore.renameTable`（Rust 改文件名 + 同步画布引用），本 store 不直接改 title。
- * 数据边界：切仓库清空运行时态（见文件末尾自注册的 `onVaultLeaving`）。
+ * 多维表格（.atb）运行时状态：当前打开的表格内容 + 防抖保存（管线对齐 canvasStore：debounce 500ms
+ * 原子写 + 按稳定 id 的增量补丁，服务端/本地命令各自合并落盘）。title 变更走 `vaultStore.renameTable`
+ * （Rust 改文件名 + 同步画布引用），本 store 不直接改 title；窗口槽/恢复/重命名联动由页面层编排；
+ * 切仓库清空运行时态（见文件末尾自注册的 `onVaultLeaving`）。
  */
 import { create } from "zustand";
 import { CALC_TYPES_BY_FIELD, TABLE_SCHEMA, TABLE_IMAGE_MAX_BYTES } from "@/constants/table";

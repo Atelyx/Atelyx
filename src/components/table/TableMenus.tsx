@@ -2,11 +2,8 @@
  * 表格编辑器弹层菜单（字段菜单 / 表头右键列菜单 / 行菜单 / 数据单元格复制粘贴菜单 /
  * 添加字段浮层 / 整表右键菜单 / 状态栏计算类型菜单）。
  *
- * 弹层壳统一走 `common/PopupLayer`（视口钳制 + Esc/点击外部关闭 + 容器样式，
- * 经 `common/Menu` 包装）；状态栏计算菜单（StatMenu）固定向上弹出走 PopupLayer 的 align="bottom"。
- *
- * 保留原生 button 的两处（脱离基元的原因）：`FieldMenu` / `AddFieldMenu` 内的字段类型
- * 选项行——自绘下拉的选项行（整行可点、右侧 Check 标识当前项），与 `MenuItem` 同一体系。
+ * 弹层壳统一走 `common/PopupLayer`（视口钳制 + Esc/点击外部关闭 + 容器样式，经 `common/Menu` 包装）；
+ * 字段类型选项行保留原生 button，原因见 FieldMenu / AddFieldMenu。
  */
 import {
   AlignVerticalSpaceAround,
@@ -199,6 +196,8 @@ export function FieldMenu({
               字段类型
             </p>
             <div className="flex flex-col gap-0.5">
+              {/* 字段类型选项行保留原生 button（不归 MenuItem）：整行可点、右侧 Check 标识当前项，
+                  是自绘下拉的选项行形态，与 MenuItem 同一体系 */}
               {(Object.keys(FIELD_TYPE_LABELS) as FieldType[]).map((t) => (
                 <button
                   key={t}
@@ -406,6 +405,7 @@ export function AddFieldMenu({ x, y, onClose }: {
         placeholder="字段名称"
         className="mb-2 !text-xs border-b border-b-[var(--accent)]"
       />
+      {/* 字段类型选项行保留原生 button：整行可点、右侧 Check 标识当前项，是自绘下拉的选项行形态 */}
       <div className="flex flex-col gap-0.5 mb-2">
         {(Object.keys(FIELD_TYPE_LABELS) as FieldType[]).map((t) => (
           <button

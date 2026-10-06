@@ -1,24 +1,6 @@
 /**
- * 仓库文件管理面板（仓库树）：仓库 = 树的顶级条目，与文件树无缝同构。
- *
- * 激活仓库行高亮（与当前打开文件同色）并就地展开其文件树（见 `VaultRows`），其余仓库收起；
- * 点击其他仓库 = 激活切换（完整切换流程，切换后该仓库行经最近排序置顶、容器滚回顶部）。
- * 工具条承载仓库级入口：打开文件夹为仓库、新增协作空间（浮层内切创建 / 纳管服务器文件夹 /
- * 输邀请码加入三条途径）。无仓库时树区空态引导打开。
- * 无仓库时树区空态引导创建；树内操作（跳过隐藏 `.` 开头目录与排除文件夹，
- * 见 `.atelyx/config.json` 的 `excludeFolders`）支持展开折叠、排序下拉、
- * 文件夹行右键新建（画布 / 笔记 / 文件夹，inline 输入框 Enter 创建，落该文件夹；
- * 文件树空白处右键 = 落仓库根目录）+ 创建副本 / 重命名 / 删除（空目录直接删，非空弹窗确认递归删）、
- * 文件行右键创建副本 / 重命名 / 删除（菜单内确认）。
- *
- * 交互：
- * - 单击 `.atlx` → 打开画布；单击 `.md` → 打开笔记编辑器；`.md`/附件拖到画布 → 建节点
- * - `.atlx` / `.md` 均可位于任意文件夹（无固定 画布/笔记/附件 目录）
- *
- * 分层：用 `vaultStore`（文件树/笔记 CRUD）+ `appStore`（画布 CRUD/切换/建仓）+ `canvasStore`（建节点），
- * 不直调 service。打开画布/笔记/表格统一经 `useFileNavigation`；白板转换经 props 回调。
- *
- * 递归树渲染 / 指针拖拽 / 文件操作 hooks / 菜单组件 / 纯函数见 `./file-explorer/`。
+ * 仓库文件管理面板：本地仓库与协作空间同作顶级条目，各自内联展开一棵仓库树。
+ * 树体渲染、拖拽、行菜单与排序的实现见 `./file-explorer/`。
  */
 import {
   ArrowUpDown,
@@ -64,6 +46,7 @@ interface PanelProps {
 
 export function FileExplorerPanel({ openedNoteFile, openedTableFile, onConvertWhiteboard }: PanelProps) {
   const vaultRoot = useAppStore((s) => s.vaultRoot);
+  // 树数据读取前已跳过隐藏目录与 config.json 的 excludeFolders
   const tree = useVaultStore((s) => s.tree);
   const loadFiles = useVaultStore((s) => s.loadFiles);
   const deleteFolder = useVaultStore((s) => s.deleteFolder);
@@ -81,8 +64,7 @@ export function FileExplorerPanel({ openedNoteFile, openedTableFile, onConvertWh
   const currentCanvasFile = useAppStore((s) => s.currentCanvasFile);
   const deleteCanvas = useAppStore((s) => s.deleteCanvas);
 
-  // 展开集合（初始空 = 默认全部折叠：进入仓库只显示顶层文件夹；点文件夹展开）。
-  // 展开状态仓库级持久化（uiStateStore → .atelyx/ui-state.json），进入仓库自动恢复上次展开情况
+  // 展开集合（初始空 = 默认全部折叠，进入仓库只显示顶层）；仓库级持久化到 .atelyx/ui-state.json
   const expanded = useUiStateStore((s) => s.fileExplorerExpanded);
   const toggleExpanded = useUiStateStore((s) => s.toggleExpanded);
   const toggleExpandAll = useUiStateStore((s) => s.toggleExpandAll);
@@ -203,7 +185,7 @@ export function FileExplorerPanel({ openedNoteFile, openedTableFile, onConvertWh
     }
   }, [openFolderBusy, pickVaultDirectory, selectVault]);
 
-  // 树容器：切换仓库后滚回顶部——激活仓库行经最近排序已是第一行，展开的文件树随即从容器顶开始
+  // 切换仓库后滚回顶部：激活仓库行按最近排序已是第一行，展开的树随之从容器顶开始
   const treeScrollRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     treeScrollRef.current?.scrollTo({ top: 0 });
@@ -257,7 +239,7 @@ export function FileExplorerPanel({ openedNoteFile, openedTableFile, onConvertWh
     [renameSpace],
   );
 
-  /** 内嵌文件树的公共属性（本地仓库行与空间条目同构复用）。 */
+  /** 内嵌文件树的公共属性（本地仓库行与空间条目同构复用）。树按实际目录结构展示，无固定画布/笔记/附件目录。 */
   const fileTreeProps = {
     sortKey,
     expanded,

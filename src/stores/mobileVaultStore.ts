@@ -1,8 +1,7 @@
 /**
- * 移动端本地仓库编排：存储授权查询/申请、私有回落目录、自研目录浏览的数据与状态。
- *
- * 命令在 `services/mobilePlatform`（桌面端一律返回可读错误）；本 store 是组件访问它的唯一入口——
- * 组件层不 import services（分层约束）。进入仓库经 `appStore.selectVault`（其失败已弹通知）。
+ * 移动端本地仓库编排：存储授权查询/申请、私有回落目录、自研目录浏览（命令在 `services/mobilePlatform`，
+ * 桌面端一律返回可读错误）。组件层不 import services，本 store 是其唯一访问入口；进入仓库经
+ * `appStore.selectVault`（其失败已弹通知）。
  */
 import { create } from "zustand";
 import { useAppStore } from "@/stores/appStore";

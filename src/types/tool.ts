@@ -1,11 +1,8 @@
 /**
- * AI 工具契约。
- *
- * - `ToolSchema`：发给模型的工具名册描述（中性，适配器转供应商 tools 字段）。
- * - `ToolDefinition`：自包含工具模块的完整定义。schema/参数校验/摘要/执行/结果回填
- *   全部收敛在一个文件里，新增工具 = 一个 defineTool 模块 + 注册，不再改 switch。
- * - `ToolExecContext`：执行上下文，能力经 `capabilities` 注入（运行时由调用方注入），
- *   工具本身不直接 import store —— 保证可移植、可复用。
+ * AI 工具契约：`ToolSchema` = 发给模型的工具名册描述（适配器转供应商 tools 字段）；
+ * `ToolDefinition` = 自包含工具模块（schema/校验/摘要/执行/回填收敛一文件，新增工具 =
+ * 一个 defineTool 模块 + 注册）。`ToolExecContext` 能力经 `capabilities` 注入，工具不直接
+ * import store。
  */
 import type { SearchResultData } from "./node";
 

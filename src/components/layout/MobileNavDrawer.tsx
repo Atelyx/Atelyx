@@ -1,8 +1,6 @@
 /**
- * 移动端导航抽屉：常驻窄图标栏（快捷切换）+ 可展开的带文字宽栏（覆盖在内容之上）。
- *
- * 用于设置页的 tab 切换（工作区视图切换已改底部导航栏，见 MobileBottomBar）。
- * 展开态是浮层的一层：返回键先收起它（见 useBackHandler）；点选条目后自动收起。
+ * 移动端导航抽屉：常驻窄图标栏（快捷切换）+ 可展开的带文字宽栏（覆盖在内容之上），用于设置页的 tab 切换（工作区视图切换见 MobileBottomBar）。
+ * 展开态是浮层的一层：返回键先收起它（useBackHandler）；点选条目后自动收起。
  */
 import { useState } from "react";
 import type { ReactNode } from "react";

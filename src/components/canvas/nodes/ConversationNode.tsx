@@ -99,8 +99,7 @@ function toMediaData(att: {
 
 /**
  * 画布媒体节点 → 待发送托盘附件（只带 `file` 引用 + 已读到的内容缓存）。
- * sourceNodeId 供 DataFlowEdge「已消费」反推与发送后归档影子节点；三处进托盘通道
- * （媒体源连边 / 拖线 / @picker 选中）共用，防各自手写拷贝后行为分叉。
+ * sourceNodeId 供 DataFlowEdge「已消费」反推与发送后归档影子节点；三个入托盘通道共用本函数，防手写拷贝后行为分叉。
  */
 function mediaAttachmentFrom(n: FlowNode): PendingAttachment {
   const md = n.data as unknown as MediaData;
@@ -130,11 +129,8 @@ const refKeyOfNodeRef = (r: { label: string }) =>
   (r as unknown as { nodeId: string }).nodeId;
 
 /**
- * 对话节点。
- * 消息列表 + 输入框 + 流式渲染 + Markdown。
- * - 输入框支持粘贴/拖拽附件 → 待发送托盘
- * - # 提及引用画布资产：#chips 常驻显示入边引用
- * - 连接边框：鼠标移到节点边缘渐显连接圆点，从边缘拉线接入引用 / 拖线引用（发送时自动连线）
+ * 对话节点：消息列表 + 输入框 + 流式渲染 + Markdown。
+ * 输入框支持粘贴/拖拽附件进托盘；`#` 唤起仓库选择器引用资产，引用也可拉线或发送时自动连边接入。
  */
 export function ConversationNode({ id, width, height, selected }: NodeProps) {
   const hasFixedHeight = height != null;
@@ -204,8 +200,7 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
   const [fileMentions, setFileMentions] = useState<{ file: string; label: string }[]>([]);
   // 「+」浮层菜单（视口坐标，Menu portal 到 body 渲染——避开 React Flow transform 容器）
   const [plusMenu, setPlusMenu] = useState<{ x: number; y: number } | null>(null);
-  // 仅订阅「本节点入边的 media 源节点」派生数据（useShallow 保证引用稳定）：
-  // 拖拽其他节点（nodes 数组变化但未变节点对象引用保留）时不触发本组件重渲染/重跑 effect
+  // 只订阅「入边 media 源节点」的派生结果（useShallow 稳定引用）：拖动其他节点时不重渲染、不重跑 effect
   const mediaSources = useCanvasStore(
     useShallow((s) =>
       s.edges
@@ -215,8 +210,7 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
     ),
   );
 
-  // 当前画布上有节点引用的文件路径（# 选择器排序：画布内文件排最前，选中走节点引用流）；
-  // useShallow 数组逐项比较，路径集合不变不重渲染
+  // 画布上有节点引用的文件路径（# 选择器据此把画布内文件排最前）；useShallow 逐项比较，集合不变不重渲染
   const canvasFilePaths = useCanvasStore(
     useShallow((s) => {
       const paths: string[] = [];
@@ -229,8 +223,7 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
   );
   const canvasFiles = useMemo(() => new Set(canvasFilePaths), [canvasFilePaths]);
 
-  // ===== Agent 选择：配置在 设置 → Agent（settingsStore.agents，仓库级 .atelyx/agents.json）；
-  // 发送时实时解析系统提示词与工具（canvasStore.runStream 按 agentId 解析）=====
+  // Agent 来自 设置 → Agent（settingsStore.agents）；系统提示词与工具在发送时由 canvasStore.runStream 按 agentId 解析
   const agents = useSettingsStore((s) => s.agents);
 
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -248,9 +241,8 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
   // 锁释放判定上下文：blur/流式结束用最新 draft/附件/流式态（ref 避免每按键重挂监听）
   const lockCtxRef = useRef({ draft: "", attachments: 0, streaming: false });
   lockCtxRef.current = { draft: input, attachments: attachments.length, streaming };
-  // 输入区失焦且无输入/附件且未流式 → 释放锁（「失焦无输入」释放语义）。
-  // 用容器合成 onBlur（focusout 冒泡，见下方输入行 div）而非 textareaRef 原生监听——
-  // 只读条（lockedByPeer）切回输入行时 textarea 重新挂载，原生监听不随挂载重建会失效 → 锁泄漏
+  // 失焦且无输入/附件且未流式 → 释放锁。走容器合成 onBlur（focusout 冒泡）而非 textarea 原生监听：
+  // 只读条切回输入行时 textarea 会重新挂载，原生监听不随之重建 → 锁泄漏
   const handleInputRowBlur = useCallback(() => {
     const ctx = lockCtxRef.current;
     if (ctx.draft === "" && ctx.attachments === 0 && !ctx.streaming) releaseLock();
@@ -282,11 +274,8 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
     return () => el.removeEventListener("wheel", handler);
   }, []);
 
-  // 画布媒体节点新连入 → 自动进待发送托盘（画布媒体节点通道）。
-  // 已通过该对话发送过的附件（含发送时自动归档的影子节点）不再重复进托盘：按**引用**判定——
-  // 附件内容不随消息持久化（`payload` 落盘被剥离），引用是重载后仍然稳定的身份。
-  // 消息附件里来自媒体节点的还带 `sourceNodeId`：节点「保存到仓库」会把引用从临时区换成仓库路径，
-  // 只比引用会让同一张图再进一次托盘（源节点身份也要收进判定集合）。
+  // 新连入的画布媒体节点自动进托盘；已发送过的不再进——按引用判定（payload 落盘被剥离，引用是重载后稳定的身份），
+  // 且 sourceNodeId 也要进判定集合：节点「保存到仓库」会把引用从临时区换成仓库路径，只比引用会让同一张图再进一次
   useEffect(() => {
     setAttachments((prev) => {
       const sentRefs = new Set(
@@ -317,8 +306,7 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
     for (const nodeId of pendingMentions) {
       const node = store.nodes.find((n) => n.id === nodeId);
       if (!node) continue;
-      // 媒体（图片/文件）连线：只进待发送托盘，**不在输入框出现 #标签**（图片靠托盘附件注入，
-      // 无文本占位；text/search 引用才用 #标签 就地替换）
+      // 媒体连线只进托盘，不插入 #标签：图片靠托盘附件注入，输入框里没有占位文本
       if (node.type === "media") {
         // 同源节点已在托盘则不重复进（拖线/picker 可能重复触发同一节点）
         setAttachments((prev) => appendMediaAttachment(prev, node));
@@ -333,9 +321,8 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
 
   const clearAttachments = () => setAttachments([]);
 
-  /** 协作锁主校验（读最新 store 状态）：本端是否仍是本节点的确定性锁主。发送前必查——若对端
-   * 在锁传播窗口内抢占成功，此时发送会并发写 → 数据丢失（store.send 亦有兜底守卫，但组件
-   * 需在清空草稿前拦截，防已输入内容被吞）。无对端声明（含未接入协作）或本端即锁主 → 通过。 */
+  /** 本端是否仍是本节点的确定性锁主（读最新 store 状态）。无对端声明（含未接入协作）或本端即锁主 → true。
+   *  发送前必查：若对端在锁传播窗口内抢占成功，此时发送会并发写丢数据；需在清空草稿前拦住。 */
   const isOwnLockActive = useCallback((): boolean => {
     const { lockedConversations } = useCanvasStore.getState();
     const { peers, myPeerId } = useCollabStore.getState();
@@ -369,10 +356,9 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
 
   // ===== 附件输入：粘贴 / 拖拽 / 选择文件（未入库附件通道） =====
 
-  /** 单文件进托盘：字节落仓库内隐藏临时区（`.atelyx/temp/<canvasKey>/`），托盘只留引用 + 内容缓存。
-   *  不内嵌 base64——图片直接进 `.atlx` 会让画布文件涨到几十 MB。
-   *  读/写失败必须可见：附件是用户显式动作，静默丢弃等于点击无反应。
-   *  内容不是文本（PDF/zip 等）不算失败：空载荷 + `parseFailed` 进托盘（可引用、不注入模型）。 */
+  /** 单文件进托盘：字节落仓库内隐藏临时区（`.atelyx/temp/<canvasKey>/`），托盘只留引用 + 内容缓存，
+   *  不内嵌 base64——否则图片会把 `.atlx` 撑到几十 MB。读写失败必须报错：附件是用户显式动作，静默丢弃等于点击无反应。
+   *  读不出文本（PDF/zip 等）不算失败：按空载荷 + `parseFailed` 进托盘（可引用，不注入模型）。 */
   const addFile = (file: File) => {
     // 加附件 = 编辑意图 → 占锁（协作）
     acquireLock();
@@ -479,10 +465,8 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
 
   // ===== @ 提及（反向：手动 @ → 自动建边） =====
 
-  /** #标签 原位插入（各插入路径共用同一语义，变换本身见 `insertMentionTag`）；record 回调登记
-   *  引用映射（节点 mentions / 纯路径 fileMentions）。插入位置在 `setInput(prev => …)` 内按 `prev`
-   *  计算——渲染期闭包的 `input` 已含上一次入队结果，两次插入同 tick 到达时会互相覆盖。
-   *  `atIdx`/光标是「待替换区间」的渲染期事实，同 tick 多次插入不会改变它们（每次插入后都会复位选择器）。 */
+  /** #标签 原位插入（record 回调登记引用映射）。插入位置在 `setInput(prev => …)` 内由 `prev` 算：
+   *  渲染期闭包的 `input` 已含上一次入队结果，两次插入落到同一 tick 会互相覆盖。 */
   const insertMentionLabel = (mentionText: string, record: () => void) => {
     const caret = textareaRef.current?.selectionStart ?? input.length;
     const insertAt = Math.min(Math.max(atIdx, 0), input.length);
@@ -531,8 +515,8 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
     );
   };
 
-  /** 仓库选择器选中：画布上已有节点的文件路由到既有节点引用流（建边/托盘/快照，引用即边）；
-   * 无节点的文件与文件夹 → 纯路径引用（#标签 原位插入 + fileMentions，发送只并路径块）。 */
+  /** 仓库选择器选中：画布上已有节点的文件走既有节点引用流（建边/托盘，引用即边）；
+   *  无节点的 `.md` 与文件夹走纯路径引用（插入 #标签 + fileMentions，发送时只并路径块）。 */
   const handleVaultPick = (t: VaultPickTarget) => {
     if (!t.isDir) {
       const node = useCanvasStore
@@ -549,8 +533,7 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
     );
   };
 
-  /** 「+」浮层菜单 → 添加上下文：在光标处插入 # 触发符并唤起仓库选择器（与键入 # 同一状态：
-   *  atIdx 锚定 # 位置、query 从 # 之后开始，继续键入即过滤）。 */
+  /** 「+」菜单添加上下文：在光标处插入 `#` 并唤起仓库选择器（与键入 `#` 同状态，继续键入即过滤）。 */
   const openContextPicker = () => {
     const ta = textareaRef.current;
     const at = Math.min(ta?.selectionStart ?? input.length, input.length);
@@ -571,9 +554,7 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
     setPicker({ x, y, openUp, yBottom, query: "" });
   };
 
-  // 胶囊被移除（MentionTextarea 已删文本 + 复位光标）→ 引用层清理：
-  // 仅未消费（虚线待发送）的引用边自动断开；已消费（历史实线边，如「再次注入」）
-  // 不断边（连接后不可手动断开）；media 附件同步从托盘移除
+  // 胶囊被移除 → 引用层清理：只断开未消费（虚线待发送）的引用边，已消费的历史边保持连接；media 附件同步出托盘
   const removeMention = (seg: MentionSeg) => {
     const nodeId = seg.mention?.nodeId;
     // 纯路径引用：只清 fileMentions（无节点边/托盘语义）；同路径多枚胶囊按实例删第一处
@@ -625,8 +606,7 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
     if (!convNode) return;
     const textNodeId = crypto.randomUUID();
     const title = prefix(selMenu.text, 16) || "文本";
-    // 画布内文本节点：不落 `.md`，正文随 .atlx 内嵌（右键「保存为笔记」才生成仓库笔记文件）
-    // 对话节点右侧，自适应避开已有节点
+    // 对话节点右侧，自适应避开已有节点；正文随 .atlx 内嵌，右键「保存为笔记」才落 `.md`
     const spot = findFreeSpot(
       nodes,
       { x: convNode.position.x + 480, y: convNode.position.y },
@@ -688,8 +668,7 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
     [id, addNode],
   );
 
-  // ===== 分支：以点击消息（含）之前的全部完整状态创建子对话节点 =====
-  // 分支按钮挂在每条消息气泡下方；父子间仅一条血缘边，无数据交互。
+  // 分支：以点击消息（含）之前的全部完整状态创建子节点；父子间只有一条血缘边，无数据交互
   const handleBranch = useCallback(
     (messageId: string) => {
       const { nodes } = useCanvasStore.getState();
@@ -1108,8 +1087,7 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
         />
         <IconButton
           onClick={(e) => {
-            // 视口坐标——Menu portal 到 body 后按视口渲染（React Flow transform 容器内 fixed 会漂移）；
-            // 输入行在节点底部，恒向上弹出（底边贴按钮顶）
+            // 视口坐标：Menu portal 到 body 渲染，节点内的 React Flow transform 容器会让 fixed 定位漂移
             const rect = e.currentTarget.getBoundingClientRect();
             setPlusMenu({ x: rect.left, y: rect.top });
           }}
@@ -1160,8 +1138,7 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
               // 首次真实输入占锁（协作独占锁：草稿空 → 非空）
               if (input === "" && v !== "") acquireLock();
               setInput(v);
-              // # 后继续输入 → 实时过滤候选（query = # 位置之后的内容）；
-              // # 锚字符已被删（退格/整体替换）→ 关闭选择器，防陈旧 atIdx 错位插入
+              // `#` 锚字符被删（退格/整体替换）则关闭选择器：留着会让陈旧 atIdx 错位插入
               if (picker && atIdx >= 0) {
                 if (v[atIdx] !== "#") {
                   setPicker(null);

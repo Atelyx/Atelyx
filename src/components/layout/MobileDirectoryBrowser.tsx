@@ -1,8 +1,7 @@
 /**
- * 移动端目录浏览（纯展示）：从外部存储根逐级进入并选定一个文件夹（用作仓库根）。
- *
- * 安卓 WebView 内没有系统文件夹选择器，故自研；数据与动作由入口对话框透传（其编排在
- * mobileVaultStore）。作为浮层的一层登记返回处理器：返回键先关它，不落到上一层。
+ * 移动端目录浏览（纯展示）：从外部存储根逐级进入并选定一个文件夹（用作仓库根）；
+ * 安卓 WebView 内没有系统文件夹选择器，故自研。数据与动作由入口对话框透传（编排在 mobileVaultStore）。
+ * 登记返回处理器：返回键先关它，不落到上一层。
  */
 import { ArrowUp, Folder, X } from "lucide-react";
 import { Spinner } from "@/components/common/primitives";

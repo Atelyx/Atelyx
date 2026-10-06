@@ -1,19 +1,9 @@
 /**
- * @提及 输入框（画布对话节点 / AI 对话面板共用）。
+ * @提及 输入框（画布对话节点 / AI 对话面板共用）：透明 textarea 承载输入（文本即真相），
+ * overlay 渲染 @引用标签作视觉装饰层，滚动以 transform 同步。
  *
- * 透明 textarea 承载输入（文本即真相），overlay 渲染 @引用标签 为视觉装饰层，
- * 滚动同步（transform 位移）、胶囊整体化交互内置：
- * - 点击胶囊 → 原生选中胶囊全文（金色高亮，.mention-input::selection）
- * - 选中态 Backspace/Delete、光标紧贴胶囊末尾 Backspace/开头 Delete → 整删胶囊（含两侧空格）
- * - 选中态输入字符 → 胶囊被替换，引用层同步清理（onChange 检测文本消失补调 onRemoveMention）
- * - ←/→ 光标在胶囊内/边界 → 整体跳到对侧边界（不逐字经过）
- * 文本删除统一由本组件负责，onRemoveMention 只做引用层清理（断边/清映射）。
- * 差异由 props 表达：背景层/class/占位/其他键处理（@picker 打开、Enter 发送）。
- *
- * 注意（标签对齐前提）：overlay 与 textarea 共用 INPUT_FONT——CSS 未给 textarea
- * 设 font 时 UA 默认不同会导致标签错位；@标签 span 本体必须保持文本宽（padding/宽度
- * 变化会使其后文本与 textarea 光标错位），视觉胶囊由 .mention-capsule 的背景 +
- * box-shadow 外扩绘制（不占布局、逐行段渲染跨行正确，见 styles/index.css）。
+ * 胶囊整体化交互（点击选中、整删、方向键跳边界）见 handleKeyDown 内各分支；
+ * 对齐前提见 INPUT_FONT 与 .mention-capsule 锚点。差异由 props 表达：背景层/class/占位/其他键处理。
  */
 import {
   useCallback,
@@ -216,6 +206,8 @@ export function MentionTextarea({
               （折行一致才能滚动精确对齐，不猜滚动条/边框宽度） */}
           <div ref={contentRef} className="whitespace-pre-wrap break-words">
             {segments.map((s, i) =>
+              // span 本体须保持纯文本宽（padding/宽度变化会让其后文本与 textarea 光标错位）；
+              // 视觉胶囊由 .mention-capsule 的背景 + box-shadow 外扩绘制（不占布局，跨行段渲染正确）
               s.mention ? (
                 <span key={i} className="mention-capsule">
                   {s.text}

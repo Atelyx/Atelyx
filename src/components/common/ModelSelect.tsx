@@ -1,10 +1,8 @@
 /**
- * 两级模型选择菜单：触发器显示「模型名 · 推理等级」，点击弹出根菜单
- * ——两行「模型 ›」「推理等级 ›」各自进入独立子面板，可分别设置模型或推理等级。
+ * 两级模型选择菜单：触发器显示「模型名 · 推理等级」，点击弹出根菜单——两行「模型 ›」「推理等级 ›」
+ * 各自进入独立子面板，可分别设置模型或推理等级。
  *
- * 模型子面板 = 供应商分组模型列表 + 「跟随仓库默认」；推理等级子面板 = 默认/关闭/低/中/高。
- * 模型与推理等级为**正交覆盖**：可单独设推理等级（含跟随仓库默认时），互不牵连。
- * 复用 `PopupLayer` + `usePopupAnchor` 统一弹层机制（锚定触发器 + 外点/Esc 关闭 + 视口钳制）。
+ * 复用 `PopupLayer` + `usePopupAnchor` 统一弹层机制；模型与推理等级为正交覆盖，见 onSelectEffort。
  */
 import { Check, ChevronDown, ChevronLeft, ChevronRight } from "lucide-react";
 import { useRef, useState, type CSSProperties, type ReactNode } from "react";
@@ -27,7 +25,7 @@ interface ModelSelectProps {
   effort?: ReasoningEffort;
   /** 选择模型（null = 跟随仓库默认）。 */
   onSelectModel: (sel: { providerId: string; model: string } | null) => void;
-  /** 选择推理等级（undefined = 默认/不指定）。 */
+  /** 选择推理等级（undefined = 默认/不指定）。与模型正交：跟随仓库默认模型时也可单独设置。 */
   onSelectEffort: (effort: ReasoningEffort | undefined) => void;
   /** 跟随仓库默认时触发器/菜单显示的生效模型名（缺省 null → 显示「模型」）。 */
   defaultModelDisplay?: string | null;

@@ -1,13 +1,7 @@
 /**
- * 视图承载（主窗口面板与撕裂窗口共用）：按视图类型分派渲染 + 头部状态指示。
- *
- * hostId = 面板 id 或撕裂窗口 id（画布/表格聚焦门控用）。各视图内容由全局 store
- * 驱动（画布/表格/笔记打开文件状态），本组件只做分派；`ViewStatusIndicator` 供
- * 面板头/撕裂窗口头渲染保存/错误状态。
- *
- * 分派模型：所有视图经统一视图贡献注册表分派（默认组合与用户插件同表）——
- * 内核不硬编码视图，只做渲染宿主。重型视图（画布/表格）经贡献的 `render(hostId)`
- * 接收宿主 id（聚焦门控），普通插件面板组件契约无 props 不受影响。
+ * 视图承载（主窗口面板与撕裂窗口共用）：所有视图经统一视图贡献注册表分派（默认组合与用户插件同表），
+ * 内核不硬编码视图，只做渲染宿主。hostId = 面板 id 或撕裂窗口 id（画布/表格聚焦门控用）；
+ * `ViewStatusIndicator` 供面板头/撕裂窗口头渲染保存/错误状态。
  */
 import {
   CalendarDays,
@@ -91,6 +85,7 @@ function ViewContributionMount({ kind, hostId }: { kind: string; hostId: string 
   const Comp = contrib.component;
   return (
     <ErrorBoundary>
+      {/* 重型视图（画布/表格）经贡献的 render(hostId) 接收宿主 id（聚焦门控）；普通插件面板组件契约无 props */}
       {contrib.render ? contrib.render(hostId) : Comp ? <Comp /> : null}
     </ErrorBoundary>
   );

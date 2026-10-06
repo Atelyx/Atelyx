@@ -1,10 +1,8 @@
 /**
  * 组合层契约：组合行「id → 实现来源」的 patch 声明与裁决结果。
- *
- * 组合行 = 装配单元。`id` 承担装配位置与顺序、插件自持数据归属（`data/state.json`、`data/kv.json`）、
- * 审计与槽位贡献归属与启停真源（`plugin-state.json`），必须稳定；`impl` 决定装配时跑谁的代码，
- * 缺省 = 行自身实现。patch 只改 `impl`，不改行 id —— 「换掉某一行」与「某行没装过」是两件事。
- * 声明分两层，后者赢：插件清单声明（`atelyx.compositionPatch`）→ 用户层（`global.json`）。
+ * 组合行 id 承担装配位置与顺序、插件自持数据归属、审计与启停真源，必须稳定；`impl` 决定
+ * 装配时跑谁的代码（缺省 = 行自身），patch 只改 impl。声明分两层，后者赢：
+ * 插件清单声明（`atelyx.compositionPatch`）→ 用户层（`global.json`）。
  */
 /** 生效实现来源：default = 行自身；plugin = 插件清单声明；user = 用户层钉住。 */
 export type CompositionImplSource = "default" | "plugin" | "user";

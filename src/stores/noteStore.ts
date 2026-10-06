@@ -1,13 +1,8 @@
 /**
  * 笔记编辑器运行时态：内容缓存 + 挂起输入 + 保存状态 + 外部修改序号 + 版本历史。
- *
- * 职责：仓库文件层（vaultStore）只留文件树与文件 CRUD，笔记编辑面的运行时态与写盘链归本 store——
- * 写盘链 = **缓存先行**（先于异步写盘更新内容缓存，防重挂载读到陈旧缓存闪回/回退）+ **按文件串行写盘队列**
- * （同一笔记的并发保存严格按调用序落盘，后调用者最后写）。
- *
- * 分层：组件不直连 service；笔记编辑会话（noteSessionStore）、属性面板、面板 header 经本 store 读写。
- * 模块环：builtins（组件层）静态引本模块、本模块引 vaultStore，环上的跨模块访问只能在函数体内延迟求值
- * （顶层 getState/useXxx 会在环上 TDZ 崩溃）。
+ * 职责：仓库文件层（vaultStore）只留文件树与文件 CRUD，笔记编辑面的运行时态与写盘链归本 store；
+ * 组件不直连 service。模块环：builtins（组件层）静态引本模块、本模块引 vaultStore，
+ * 环上的跨模块访问只能在函数体内延迟求值（顶层 getState/useXxx 会在环上 TDZ 崩溃）。
  */
 import { create } from "zustand";
 import {

@@ -1,30 +1,7 @@
 /**
- * 多维表格编辑器（表格视图）。
+ * 多维表格编辑器：工具条 → 表格主体（行号列 + 列头 + 类型化单元格）→ 底部状态栏。
  *
- * 布局：工具条（视图切换 / 导出；错误/保存状态在面板 header）→ 表格主体（行号列 + 列头 + 类型化单元格）→
- * 行尾「+ 新行」→ 底部横向滑动条 → 状态栏（列自动计算，整格点击选类型 + 实时结果）。
- *
- * 交互要点：
- * - 选中体系（互斥）：左上角整格单击全选（角标示意）/ 右键全选并弹菜单；表头单击选整列；
- *   行首单击选整行；单元格按下不动（<5px）松手 = 选中（td 金色内描边，进入隐藏编辑态，
- *   编辑时保持单元格大小），拖动（>5px）= 拖拽框选多格（范围全体金色内描边）。
- *   选中后打字直达常驻输入框，首个字符/IME 组合覆盖原值；双击 = 取消覆盖（保留原值）。
- * - 复制/粘贴/剪切（选中区域 ↔ 系统剪贴板 TSV）：Ctrl+C 复制 / Ctrl+V 粘贴 / Ctrl+X 剪切
- *   （先写剪贴板成功再清空选中区域，一步撤销；编辑态输入框聚焦时放行原生行为）；
- *   数据单元格右键菜单「复制/剪切/粘贴」（点在当前选区内保留选区、否则落单格；
- *   整表选中时右键仍弹列宽/行高自适应菜单）。粘贴以选区左上角为锚点展开、越界自动补行/补列。
- * - 行拖拽为 pointer 模拟（HTML5 DnD 在 WebView2 不可靠，与文件面板同策略）：
- *   行首手柄按下 → 位移超 5px 激活 → 按行元素中点计算插入位（金色插入线指示）→ 松手 moveRow。
- * - 列宽：列头右缘拖拽（钳制 MIN/MAX）；行高：行首底缘拖拽。表头/行首/整表选中后右键菜单
- *   （`ColumnMenu`/`RowMenu`/`SelectAllMenu`）提供列宽/行高自适应与左右插入字段。
- * - 状态栏：每列整格 hover 高亮可点击（未设置留空），弹出计算类型菜单（固定向上弹出，
- *   底边贴点击位置不遮住点击处）；已设置列居中显示「类型 + 结果」。
- * - 错误/保存状态在面板 header 展示（`PanelFrame` 读 tableStore）。
- * - 弹层菜单（字段/列/行/整表/状态栏）见 `TableMenus.tsx`。
- *
- * 保留原生 button 的三处（脱离基元的原因）：工具条「···」浮层内的历史记录/导出 xlsx 两项
- * （`PopupLayer` 内的菜单项，归 `MenuItem` 体系）、行首拖拽手柄（16×20 非正方尺寸，
- * 且语义是 pointer 拖拽而非点击，归不进 `IconButton` 的正方形档位）。
+ * 选中、复制粘贴、行拖拽、列宽行高等交互见各自处理函数的注释；弹层菜单见 `TableMenus.tsx`。
  */
 import { GripVertical, MoreHorizontal, MoveDiagonal, Plus, Redo2, Sigma, Undo2 } from "lucide-react";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -211,6 +188,7 @@ export function TableEditor({ panelId }: { panelId: string }) {
     };
   }, [moveRow]);
 
+  /** 行拖拽用 pointer 模拟：HTML5 DnD 在 WebView2 下不可靠（与文件面板同策略）。 */
   const startRowDrag = useCallback((e: React.PointerEvent, rowId: string) => {
     if (e.button !== 0) return;
     e.preventDefault(); // 阻止文本选择干扰
@@ -793,6 +771,8 @@ export function TableEditor({ panelId }: { panelId: string }) {
             triggerRef={moreTriggerRef}
             widthClass="w-36"
           >
+            {/* 浮层内的菜单项归 MenuItem 体系，行首拖拽手柄是 16×20 非正方尺寸且语义为拖拽，
+                两处都归不进基元档位，保留原生 button */}
             <button
               className="w-full flex items-center gap-2 px-2 py-1.5 text-xs hover:opacity-80 disabled:cursor-not-allowed disabled:opacity-40"
               style={{ color: "var(--text-primary)" }}

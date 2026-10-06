@@ -2,12 +2,6 @@
  * 应用外观应用（主题/字号/字体 + 系统主题跟随 + 主题插件应用）。
  * 主窗口（App）与撕裂窗口（PanelWindowRoot）共用：撕裂窗口是独立 webview，
  * 需要自行应用同一套外观（settingsStore 应用级配置，两窗口各自读盘）。
- *
- * 应用顺序（分层：基础方案 < 主题插件变量 < 用户设置项）：
- * 1. `.dark` class + color-scheme（由 CSS 内 :root/:root.dark 承担）；
- * 2. 激活主题条目的 variables（inline style 于 :root，变更前回撤上一次写入的键）；
- * 3. 该主题插件的强调色设置项（用户偏好，压过主题 variables 的 --accent）——写 --accent 时
- *    一并派生 --accent-hover / --accent-soft / --accent-fg / --focus-ring，保证变体同源。
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -25,6 +19,11 @@ import {
 const EMPTY_SETTINGS: Record<string, unknown> = {};
 
 export function useAppearance(): void {
+  // 应用顺序（分层：基础方案 < 主题插件变量 < 用户设置项）：
+  // 1. `.dark` class + color-scheme（由 CSS 内 :root/:root.dark 承担）；
+  // 2. 激活主题条目的 variables（inline style 于 :root，变更前回撤上一次写入的键）；
+  // 3. 该主题插件的强调色设置项（用户偏好，压过主题 variables 的 --accent）——写 --accent 时
+  //    一并派生 --accent-hover / --accent-soft / --accent-fg / --focus-ring，保证变体同源。
   const theme = useSettingsStore((s) => s.theme);
   const themeSettings = useSettingsStore((s) => s.themeSettings);
   const fontSize = useSettingsStore((s) => s.fontSize);

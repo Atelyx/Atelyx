@@ -1,9 +1,8 @@
 /**
- * 悬停提示（替换浏览器原生 `title`）：原生提示延迟长（约1s 才出现）、样式不可控、
+ * 悬停提示（替换浏览器原生 `title`）：原生提示延迟长（约 1s 才出现）、样式不可控、
  * 且各浏览器位置与外观不一致。这里统一为浮层，锚定触发器、实测尺寸钳制、防贴边翻转。
  *
- * 由 `PopupLayer` 承载（全项目浮层唯一入口），故与菜单/下拉共享外点与 Esc 关闭语义。
- * 触屏无悬停，调用方不应依赖本组件传达关键信息（关键信息须写在可见文案里）。
+ * 由 `PopupLayer` 承载，与菜单/下拉共享外点与 Esc 关闭语义；触屏无悬停，关键信息须写在可见文案里。
  */
 import { cloneElement, useEffect, useRef, useState } from "react";
 import type { ReactElement, ReactNode } from "react";

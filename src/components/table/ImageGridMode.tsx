@@ -1,15 +1,7 @@
 /**
- * 图片单元格·九宫格模式（ImageCell 分派壳的拆分件）。
+ * 图片单元格·九宫格模式（ImageCell 分派壳的拆分件）：多图平铺方块 + 长按拖动排序。
  *
- * - 多图平铺方块（object-cover 裁切，gridAutoRows 1fr 填满展示层）：点击开预览对应图；单图限宽方块。
- * - **长按格子拖动排序**：影子 portal 到 body 跟手（CSS zoom 会缩放 fixed 后代，与放大预览
- *   同避法），原位虚线占位，落点格实时让位，松手 reorderImages 写回。
- *
- * 拖拽事件管线与表格行拖拽同款（document 级监听 + ref 路由）：pointerdown 只登记按压 + 长按
- * 定时器，move/up/cancel 由 document 监听处理——被拖元素激活后会被 React 原地改写成占位符
- * （事件属性剥离），元素级监听会事件断流。影子位置 ref + 直写 DOM（pointermove 零 React
- * 渲染，仅槽位切换重渲染）；拖拽期间按 pointerId 过滤他指事件。槽位矩形激活时快照（视觉
- * 像素，槽位位置固定，命中测试全程复用，与 clientX 同口径无需 zoom 换算）。
+ * 拖拽管线的实现约束见 onTilePointerDown 与下方 document 监听；槽位矩形快照见 gridSlotsRef。
  */
 import { memo, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -80,7 +72,8 @@ export const ImageGridMode = memo(function ImageGridMode({
   };
 
   // document 级 move/up/cancel：拖拽全程、按压取消与「松手早于长按」的清理都在此路由
-  // （onCurChange 经 useCallback 稳定，监听器不重挂）
+  // （onCurChange 经 useCallback 稳定，监听器不重挂）。
+  // 走 document 而非元素级监听：被拖元素激活后会被 React 原地改写成占位符、事件属性剥离，元素级监听会断流。
   useEffect(() => {
     const onMove = (e: PointerEvent) => {
       const g = gDragRef.current;
@@ -167,6 +160,7 @@ export const ImageGridMode = memo(function ImageGridMode({
   return (
     <>
       <div className="flex-1 min-h-0 overflow-hidden p-1">
+        {/* 平铺方块：object-cover 裁切，gridAutoRows 1fr 填满展示层；单图限宽。点击开预览对应图，长按拖动排序 */}
         <div
           ref={gridRef}
           className="grid h-full"

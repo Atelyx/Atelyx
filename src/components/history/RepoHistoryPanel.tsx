@@ -1,11 +1,6 @@
 /**
- * 仓库历史面板（主页）：全仓库版本历史流，按文件分组折叠——
- * 每文件一个可折叠卡片：头部显示图标 + 标题 + 版本数 + 最近时间（点击展开/收起），
- * 收起态显示「最近版本」一行概览，展开态列出该文件全部版本（时间/作者/行为/摘要，点击开 HistoryModal）。
- * 默认只列最近编辑的若干文件（可「显示全部」）。
- *
- * 数据来自 repoHistoryStore（按仓库身份经内容面聚合全部版本，ts 倒序、上限）。
- * 不含「最近文件活动」区——最近文件统一由「最近打开」面板承载，避免与主页重复。
+ * 仓库历史面板（主页）：全仓库版本流，按文件分组折叠展示，默认只列最近编辑的文件（可「显示全部」）。
+ * 数据来自 repoHistoryStore；不含「最近文件活动」区，最近文件由「最近打开」面板承载。
  */
 import { ChevronDown, ChevronRight, ExternalLink, History } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";

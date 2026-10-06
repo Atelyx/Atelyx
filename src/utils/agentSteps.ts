@@ -1,14 +1,9 @@
 /**
  * Agent 步进（`Message.steps`）的纯数据操作：画布与面板共用。
- *
- * 归一化 - `steps` 为展示的权威来源（思考步与工具步按序交错）；
- * 旧 `.atlx` 消息只有 `reasoningContent`+`toolRuns` 遗留字段，经 `normalizeAgentSteps`
- * 推导为「单思考步 + 工具步」。新写入一律只写 `steps`。
- *
- * 思考流式累积（`appendReasoning`）与工具轮合并（`mergeToolRuns`）都是不可变更新——
- * 思考/叙述并入「当前轮」最后一个同类型步（尾部向前找，遇工具步即停），
- * 这样思考与叙述交错到达（同一 rAF 帧 flush）时不会把一段思考拆成两个思考块；
- * 工具轮之间的思考仍自然分隔（第二轮思考不会并进第一轮）。
+ * `steps` 为展示的权威来源（思考步与工具步按序交错）；旧 `.atlx` 消息只有 `reasoningContent`
+ * +`toolRuns` 遗留字段，经 `normalizeAgentSteps` 推导为「单思考步 + 工具步」，新写入一律只写 `steps`。
+ * 思考累积与工具轮合并均为不可变更新：只并入当前轮最后一个同类型步（尾部向前找、遇工具步即停），
+ * 避免思考/叙述同帧到达时一段思考被拆成两个思考块。
  */
 import type { AgentStep, Role, ToolRun } from "@/types";
 import { ERROR_PREFIX, TRUNCATED_TEXT, PENDING_RUN_ID_PREFIX } from "@/constants/chat";

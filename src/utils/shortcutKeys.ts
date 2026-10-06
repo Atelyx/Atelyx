@@ -1,6 +1,5 @@
 /**
  * 快捷键键串的序列化与展示（两套格式，互不混用）：
- *
  * - 应用内命令格式（services/cordis/commandHotkeys 的匹配约定）：`mod+k`——mod = Ctrl/Cmd
  *   任一，主键 = `e.key` 小写，修饰键集合精确匹配；
  * - OS accelerator 格式（Rust 侧 `tauri_plugin_global_shortcut::Shortcut` 解析）：

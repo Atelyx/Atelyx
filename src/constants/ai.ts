@@ -1,12 +1,7 @@
 /**
- * AI 配置默认值。
- * 供应商列表存于仓库级配置（.atelyx/config.json 的 `ai` 段，见 VaultConfig），
- * API key 不随配置落盘——默认仅存 OS keychain（services/keychain，按仓库隔离），
- * 仅 `syncKeys` 显式开启时随仓库配置落盘。
- *
- * 推理等级（ReasoningEffort，下发 `reasoning_effort`）为**会话/节点级**独立覆盖，
- * 不在供应商模型配置里声明——模型选择菜单（ModelSelect）的「推理等级」子面板选择，
- * 缺省 = 不指定（跟随模型/供应商默认）。
+ * AI 配置默认值。供应商列表存于仓库级配置（.atelyx/config.json 的 `ai` 段，见 VaultConfig）；
+ * API key 不随配置落盘，默认仅存 OS keychain（services/keychain，按仓库隔离），仅 `syncKeys`
+ * 显式开启时随仓库配置落盘。推理等级为会话/节点级覆盖（ModelSelect 子面板选择），缺省 = 不指定。
  */
 import type { AiConfig, ReasoningEffort } from "@/types";
 

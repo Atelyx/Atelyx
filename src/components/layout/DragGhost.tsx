@@ -1,9 +1,7 @@
 /**
  * 拖拽 ghost 影子：拖拽标签时显示跟随鼠标的半透明标签预览。
- *
- * 各窗口各自渲染一份：订阅 Rust 广播的活跃拖拽会话（panelStore.dragSession，屏幕坐标），
- * 换算为本地 client 坐标，仅在坐标位于本窗口视口内时显示——跨窗口拖动时影子跟随光标所在窗口；
- * 拖到桌面（无窗口）时影子不显示（无跨窗口层叠能力）。
+ * 各窗口各自渲染一份：订阅 Rust 广播的拖拽会话（panelStore.dragSession，屏幕坐标）换算本地坐标，
+ * 仅在本窗口视口内显示——跨窗口拖动时影子跟随光标所在窗口，拖到桌面（无窗口）不显示（无跨窗口层叠能力）。
  */
 import { usePanelStore } from "@/stores/panelStore";
 import { viewMetaFor } from "@/components/layout/ViewHost";

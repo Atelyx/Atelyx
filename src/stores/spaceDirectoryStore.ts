@@ -1,12 +1,7 @@
 /**
- * 协作空间目录 store（空间列表 / 成员 / 邀请的 UI 数据编排）。
- *
- * 所有网络 I/O 经 `services/space/client`（组件不得直调 service）；最近空间条目的
- * 持久化真源在 global.json（appStore.recentSpaces 镜像），本 store 只在增删改名时
- * 经 `useAppStore.setState` 同步该镜像并落盘，不改动 appStore 的动作面。
- *
- * `loginPrompt`：need-login 引导状态——文件面板点空间条目无会话时置入（可携带登录后
- * 自动重试进入的空间条目），设置弹窗「多人协作」区读取预填，登录成功后自动重试。
+ * 协作空间目录 store（空间列表 / 成员 / 邀请的 UI 数据编排）：所有网络 I/O 经 `services/space/client`
+ * （组件不得直调 service）。最近空间条目的持久化真源在 global.json（appStore.recentSpaces 镜像），
+ * 本 store 只在增删改名时经 `syncRecentSpaces` 同步镜像并落盘，不改动 appStore 的动作面。
  */
 
 import { create } from "zustand";
@@ -42,7 +37,7 @@ interface SpaceDirectoryState {
   loadingByServer: Record<string, boolean>;
   /** 各服务器空间列表加载错误（用户可见，重试即再拉）。 */
   errorByServer: Record<string, string | undefined>;
-  /** need-login 引导（null = 无）。 */
+  /** need-login 引导（null = 无）：文件面板点空间条目无会话时置入，设置弹窗「多人协作」区读取预填，登录成功后自动重试。 */
   loginPrompt: SpaceLoginPrompt | null;
   /** 当前加载过的成员名册（成员面板/成员管理弹窗共用；按 serverUrl#spaceId 缓存键校验）。 */
   members: MemberInfo[];

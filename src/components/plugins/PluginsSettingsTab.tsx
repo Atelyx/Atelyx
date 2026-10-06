@@ -1,13 +1,7 @@
 /**
- * 设置 → 插件面板：插件列表（默认组合成员 + 已装插件）+ 市场浏览。
- *
- * - 列表（单表，装配顺序 = 默认组合成员在前）：每行可启停/重载（本地插件）/更新/卸载，展示来源徽标/版本/运行状态/
- *   分段失败诊断/声明与实际调用审计/命令入口；未安装的默认组合成员成灰行，经「恢复默认装配」装回。
- * - 槽位替换（改控件）由插件在 apply 里经 ctx.slots 的 priority 声明（作者侧决定）；行级接管
- *   （改「这一行由谁装配」）由插件清单声明 + 用户层拍板，治理入口见 CompositionPanel。
- * - 安装入口：市场安装（git clone）之外，支持「从本地文件夹安装」（junction 实时引用）与
- *   「从 Git 地址安装」（git clone）。
- * 分层：本组件只经 pluginStore 触达插件能力（不直连 services）；列表行推导取自 utils/cordis/composition。
+ * 设置 → 插件面板：插件列表（默认组合成员 + 已装插件）的启停/重载/更新/卸载 + 市场、本地文件夹、Git 地址安装入口。
+ * 槽位替换（改控件）由插件在 apply 里经 ctx.slots 的 priority 声明；行级接管（改「这一行由谁装配」）由清单声明 + 用户层拍板，入口见 CompositionPanel。
+ * 只经 pluginStore 触达插件能力，不直连 services。
  */
 import { useMemo, useState } from "react";
 import { FolderOpen, GitBranch, Info, RefreshCw, RotateCw, Trash2 } from "lucide-react";

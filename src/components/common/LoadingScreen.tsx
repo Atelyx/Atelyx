@@ -1,12 +1,8 @@
 /**
  * 启动/进仓加载屏：窗口创建即显示（init 完成前）与仓库加载期间（selectVault 全程）。
- * 全屏 + Logo + 循环扫光进度条（indeterminate）+ 加载步骤清单：
- * 步骤区固定可视窗（无滚动条），底部锚定——新条目从下轻入、旧条目被顶出可视区，
- * 顶部渐变阴影遮罩淡出；已完成项打勾（强调色），最后一项 = 当前进行中（转圈 + 高亮）。
- * 配色全部走主题变量（index.html 首屏预置 .dark，深色默认下无闪变）。
- * 步骤由 appStore 的加载会话上报（beginLoad/reportLoad/endLoad），清单为空时不渲染
- * （撕裂窗口/路由懒加载 fallback 复用本组件时保持纯 Logo + 扫光）。
- * 扫光动画（.sweep-track/.sweep-bar）与条目入场（load-step-in）定义在 styles/index.css。
+ *
+ * 全屏 + Logo + 循环扫光进度条（indeterminate）+ 加载步骤清单；步骤区布局见下方锚点注释，
+ * 步骤由 appStore 的加载会话上报（beginLoad/reportLoad/endLoad），清单为空时只留 Logo + 扫光。
  */
 // 应用图标（与 src-tauri/icons/icon.svg 同源，加载屏 Logo 展示）
 import { Check, Loader2 } from "lucide-react";
@@ -17,6 +13,7 @@ export function LoadingScreen() {
   const loadSteps = useAppStore((s) => s.loadSteps);
 
   return (
+    // 配色全部走主题变量：index.html 首屏预置 .dark，深色默认下无闪变
     <div
       className="h-full flex flex-col items-center justify-center select-none"
       style={{ background: "var(--bg-primary)" }}
@@ -27,6 +24,7 @@ export function LoadingScreen() {
         draggable={false}
         className="w-16 h-16 rounded-2xl shadow-lg ring-1 ring-[var(--border)]"
       />
+      {/* 扫光动画（.sweep-track/.sweep-bar）定义在 styles/index.css */}
       <div className="sweep-track mt-8">
         <div className="sweep-bar" />
       </div>
@@ -44,6 +42,7 @@ export function LoadingScreen() {
           />
           <ul className="h-full flex flex-col justify-end gap-1.5 px-1 py-1 text-ui">
             {loadSteps.map((step, i) => {
+              // 最后一项 = 当前进行中（转圈 + 高亮），其余已完成项打勾
               const current = i === loadSteps.length - 1;
               return (
                 <li

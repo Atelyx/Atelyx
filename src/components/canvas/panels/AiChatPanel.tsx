@@ -3,18 +3,8 @@ const refKeyOfPanelRef = (r: { label: string }) =>
   (r as unknown as { file: string }).file;
 
 /**
- * AI 对话面板。
- *
- * IDE 式侧边聊天，无头样式：
- * - 左侧会话列表：搜索 + 会话行（点击切换、行内删除）；面板够宽时与对话区并列，
- *   拖窄即改为浮层弹出（覆盖对话区，不挤压）；顶部「历史会话」按钮手动开关
- * - 顶部一行：左侧面板内联错误提示（仅出错时占位）+ 右侧「新建会话 / 历史会话 / 压缩」图标按钮
- * - 中部消息流：Markdown 公共渲染、流式指示、自动滚底
- * - 底部输入区：textarea（Enter 发送 / Shift+Enter 换行，支持 #引用标签）
- *   + Agent 选择（图标 + Agent 名）+ 模型选择（图标 + 模型名）+ 发送/停止按钮
- *
- * 分层：组件只走 chatPanelStore / settingsStore / vaultStore，不直调 service。
- * 当前打开笔记不经本组件传递：发送时由 chatPanelStore 以尾部上下文块随请求注入（见 runExchange）。
+ * AI 对话面板：会话列表 + 消息流 + 输入区；窄面板放不下两列时会话列表改浮层（判定见下方 ResizeObserver 段落）。
+ * 当前打开的笔记不经本组件传递，由 chatPanelStore 在发送时作为上下文块注入（见 runExchange）。
  */
 import {
   AlertCircle,
@@ -96,10 +86,9 @@ function readFileAsDataUrl(file: File): Promise<string> {
 }
 
 /**
- * 面板待发送附件进托盘（上传附件通道）：读取本机文件字节生成预览载荷，
- * 字节本体随附件持有（`blob`），落仓库临时区推迟到发送时——面板会话在发送首条消息时才创建，
- * 托盘阶段没有会话 id 可作临时目录归属。文本类按严格 UTF-8 解码：解不出来 = 二进制附件，
- * 标 `parseFailed`（可发送作画布参考、不注入模型），与画布节点拖拽通道同一判定口径。
+ * 面板待发送附件进托盘：字节本体先随附件持有（`blob`），落仓库临时区推迟到发送时——
+ * 会话在发送首条消息时才创建，托盘阶段没有会话 id 可作临时目录归属。
+ * 文本类按严格 UTF-8 解码，解不出来即二进制附件，标 `parseFailed`（可作画布参考，不注入模型）。
  */
 async function buildPanelPendingAttachment(file: File): Promise<PendingAttachment> {
   const isImage = file.type.startsWith("image/") || /\.(png|jpe?g|gif|webp|bmp|svg|avif)$/i.test(file.name);
@@ -138,9 +127,7 @@ async function buildPanelPendingAttachment(file: File): Promise<PendingAttachmen
 
 /**
  * 划词 → 面板输入框指令文本（中性化描述）：笔记路径 + 划词原文 + 用户要求。
- * 不预设「改写」意图——用户划词提出要求，AI 自行判断用工具修改、解释还是其他；
- * 工具可用性由 Agent 模式开关决定。注入仓库路径帮助 AI 精确匹配目标笔记
- * （edit_file 的 path 参数支持路径匹配，同名笔记不混淆）。
+ * 不预设「改写」意图，AI 自行判断处理方式；带上仓库路径可让 edit_file 精确匹配笔记（同名不混淆）。
  */
 function buildRewritePrompt(r: {
   noteFile: string;
@@ -203,16 +190,12 @@ export function AiChatPanel() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [sessionQuery, setSessionQuery] = useState("");
   /**
-   * 面板是否窄到放不下「侧栏 + 对话区」两列：窄面板里侧栏改为浮层弹出覆盖对话区
-   * （并列会把对话区挤成一条），并在拖窄的那一刻自动收起，避免浮层突然盖住对话。
-   *
-   * 面板根节点经回调 ref 存 state（对话能力未启用时渲染占位、不挂根节点，恢复后才挂上，
-   * 节点变化要能重新起观察器）；初始宽度在布局阶段先量一次，避免首帧按宽面板渲染出侧栏。
+   * 面板是否窄到放不下「侧栏 + 对话区」两列：窄面板侧栏改浮层（并列会把对话区挤成一条），拖窄的那一刻自动收起。
+   * 根节点经回调 ref 存 state：对话能力未启用时根节点不挂载，恢复后要能重新起观察器；初始先用布局期宽度量一次防首帧闪宽。
    */
   const [panelRoot, setPanelRoot] = useState<HTMLDivElement | null>(null);
   const [narrow, setNarrow] = useState(false);
-  /** 上一帧是否为窄面板：只在「宽 → 窄」的跨越那一刻收起侧栏，
-   *  否则窄态下任何一次尺寸微调都会把用户刚打开的浮层关掉。 */
+/** 上一帧是否窄：只在「宽 → 窄」跨越那一刻收起侧栏，否则窄态下任何一次尺寸微调都会把用户刚打开的浮层关掉。 */
   const wasNarrowRef = useRef(false);
   useLayoutEffect(() => {
     if (!panelRoot) return;
@@ -288,8 +271,7 @@ export function AiChatPanel() {
   );
   // 气泡操作回调稳定化（memo 生效前提）；rollbackTo 为 store action 引用恒稳定，onRollback 直传
   const handleRegenerate = useCallback(() => void regenerate(), [regenerate]);
-  // #/@chip 点击按类型打开引用目标（画布/笔记/表格应用内打开，其他文件/文件夹在文件管理器中打开；
-  // 稳定引用，气泡 memo 生效前提）
+  // #/@chip 点击按类型打开引用目标（画布/笔记/表格应用内打开，其余在文件管理器中打开）
   const handleRefChipClick = useCallback((file: string) => {
     openVaultPath(file);
   }, []);
@@ -333,10 +315,8 @@ export function AiChatPanel() {
     useChatPanelStore.getState().clearPendingRewrites();
   }, [pendingRewrites]);
 
-  // 挂载/重挂对齐会话（不 force，load 幂等守卫兜底）：面板重挂（布局切换/关闭再打开）不得
-  // 清空进行中会话——流式引擎在 store 层持续运行，重挂后原样续上；仓库真实切换时
-  // sessionVaultKey 不匹配，load 自会完整重读盘（覆盖 selectVault/selectSpace 中途异常跳过的场景）。
-  // 门控按仓库身份（空间模式下 vaultRoot 恒 null，按 root 门控会让空间内面板不加载会话）
+  // 挂载/重挂按仓库身份对齐会话（不 force）：重挂不得清空进行中会话（流式在 store 层继续），
+  // 真实切仓库时 sessionVaultKey 不匹配、load 自会重读盘。用 vaultIdentity 而非 root 门控：空间模式下 root 恒 null
   const vaultIdentity = useAppStore((s) => s.vaultIdentity);
   useEffect(() => {
     if (!vaultIdentity) return;
@@ -378,8 +358,7 @@ export function AiChatPanel() {
     setAttachments([]);
   };
 
-  /** 「+」浮层菜单 → 添加上下文：在光标处插入 # 触发符并唤起仓库选择器（与键入 # 同一状态：
-   *  atIdx 锚定 # 位置、query 从 # 之后开始，继续键入即过滤）。 */
+  /** 「+」菜单添加上下文：在光标处插入 `#` 并唤起仓库选择器（与键入 `#` 同状态，继续键入即过滤）。 */
   const openContextPicker = () => {
     const ta = textareaRef.current;
     const at = Math.min(ta?.selectionStart ?? input.length, input.length);

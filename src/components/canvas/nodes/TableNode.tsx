@@ -1,12 +1,6 @@
 /**
  * 表格节点（仓库 `.atb` 文件引用）。
- *
- * 引用模型同笔记节点：`.atlx` 只存 `{title, file}`，内容快照（snapshot）运行时从
- * `.atb` 读取（打开/重读时读盘），持久化时剥离。
- * 快照可被 @提及 / 连边接入对话注入。
- *
- * 交互：header 标题双击重命名（renameTable 同步画布引用）；「打开表格」按钮与底部行
- * 经 `useFileNavigation` 打开表格窗口（组件本层调 appStore）。
+ * `.atlx` 只存 `{title, file}`：内容快照运行时从 `.atb` 读盘，持久化时剥离。
  */
 import { AlertTriangle, Table as TableIcon, ExternalLink } from "lucide-react";
 import type { NodeProps } from "@xyflow/react";

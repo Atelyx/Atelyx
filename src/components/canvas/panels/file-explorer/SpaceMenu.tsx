@@ -1,10 +1,6 @@
 /**
- * 协作空间条目右键菜单（文件面板列表层空间区）：
- * 重新连接 / 重命名（服务端 + 最近条目同步）/ 成员管理 / 邀请码 / 断开连接（仅移除本机条目）——
- * 空间级设置统一在标题栏「设置」里改当前空间，行右键不再另设入口。
- *
- * 菜单壳用 `common/Menu`（悬停高亮/视口钳制/Esc 与外点关闭同全项目）。
- * 断开连接经确认弹窗（面板渲染 ConfirmDialog）；重命名走面板 inline 输入。
+ * 协作空间条目右键菜单：重新连接 / 重命名 / 成员管理 / 邀请码 / 断开连接（断开只移除本机最近条目）。
+ * 重命名由面板走 inline 输入、断开由面板弹确认框，本组件只派发意图。
  */
 import { Pencil, RefreshCw, Ticket, Unlink, Users } from "lucide-react";
 import { Menu, MenuItem } from "@/components/common/Menu";

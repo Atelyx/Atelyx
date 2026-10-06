@@ -1,9 +1,6 @@
 /**
- * 移动端底部导航栏：横向图标栏（取前若干个视图）+「更多」展开完整列表。
- *
- * 视图顺序由应用级偏好决定（`utils/mobileNav`，设置 → 通用可调）；视图多于此上限时
- * 尾部追加「更多」，完整列表以底部抽屉浮层呈现——返回键先收起它（useBackHandler）。
- * 触控目标 ≥ 44px，底部避让系统手势区。
+ * 移动端底部导航栏：横向图标栏（取前若干个视图）+「更多」展开完整列表（底部抽屉浮层）。
+ * 视图顺序由应用级偏好决定（`utils/mobileNav`，设置 → 通用可调）；返回键先收起抽屉（useBackHandler）。
  */
 import { useState } from "react";
 import { MoreHorizontal } from "lucide-react";

@@ -1,9 +1,6 @@
 /**
- * 通用历史面板（模态浮层）：画布/笔记/表格共用——版本列表（时间/作者/行为/人话摘要）+
- * 按 kind 预览（笔记 = 全文；画布/表格 = 相对上一版本的变更 diff）+ 回滚。
- * 数据经各 store（noteHistoryLoad / canvasHistoryLoad / tableHistoryLoad 等）读写，
- * 组件不直连 service。回滚成功经 onRollback(content) 回传调用方（笔记编辑器刷新正文；
- * 画布/表格由 store 自行重载内存态）。
+ * 历史面板（模态浮层）：画布/笔记/表格共用——版本列表 + 按 kind 预览（笔记全文；画布/表格 diff）+ 回滚。
+ * 数据经各 store 读写，组件不直连 service；回滚成功经 onRollback 回传调用方。
  */
 import { useEffect, useMemo, useState } from "react";
 import { History, RotateCcw, ChevronDown, ChevronRight, X } from "lucide-react";

@@ -1,11 +1,6 @@
 /**
  * 搜索结果节点（AI 对话中自主联网搜索的产物节点）。
- *
- * - 标题 = 搜索词，内容 = 结果列表（每条：标题 + 摘要 + 链接）
- * - 节点数据嵌在 .atlx 的 node.data（结构化 JSON，不单独文件化）
- * - 每条结果可展开/折叠查看摘要；可勾选「仅将勾选条目注入上下文」（checked 下标，@引用/连边注入时按子集）
- * - 搜索失败：显示错误 + 重试（重试 = 重新执行搜索并更新 data，4.6 失败降级）
- * - 分层：走 canvasStore（updateNodeData），不直调 service（重试的搜索执行在 store 层调 service）
+ * 结果列表、勾选子集与错误信息都存在 .atlx 的 node.data 里，不单独文件化。
  */
 import { Checkbox } from "@/components/common/Input";
 import { AlertTriangle, ExternalLink, Search } from "lucide-react";
@@ -121,7 +116,6 @@ export function SearchResultNode({ id, data, height, selected }: NodeProps) {
           cursor: "grab",
         }}
       >
-        {/* 类型标识：3px 色条（搜索） */}
         <span
           className={NODE_TYPE_BAR_CLASS}
           style={{ background: NODE_TYPE_COLORS.search }}

@@ -1,15 +1,9 @@
 /**
- * 领域生命周期注册表（内核原语）。
- *
- * 内核启动路径（appStore/panelStore/App boot/页面）不直接调用领域 store：领域生命周期钩子
- * （flush / 切仓库清态与进仓加载 / 释放视图 / 视图进出窗口）经此注册表注册，
- * 内核只做分发。注册/撤销随插件启停驱动（pluginStore.spawn/unload → cordis/builtins 的 lifecycle）；
- * 领域 store 自身的数据边界（如笔记运行时态随仓库清空）在模块加载时自注册，不随插件启停撤销。
- *
- * 错误语义 = 失败快速传播（fail-fast）：分发按注册序执行，任一钩子抛错即向外传播——调用方
- * 自行 try/catch（如 selectVault 中 flush 失败即中止切换，防跨仓库数据污染）。
- *
- * 纯数据容器 + 纯函数，无 store/service 依赖，可直测（模式同 utils/collabHost.ts）。
+ * 领域生命周期注册表（内核原语）：领域生命周期钩子（flush / 切仓库清态与进仓加载 / 视图进出
+ * 窗口）经此注册，内核启动路径只做分发、不直接调用领域 store。注册/撤销随插件启停驱动；
+ * 领域 store 自身的数据边界（如笔记运行时态随仓库清空）在模块加载时自注册，不随启停撤销。
+ * 错误语义 = 失败快速传播（fail-fast）：按注册序执行，任一钩子抛错即向外传播，调用方自行
+ * try/catch（如 selectVault 中 flush 失败即中止切换，防跨仓库数据污染）。纯数据容器，可直测。
  */
 import type { ViewKind } from "@/types";
 

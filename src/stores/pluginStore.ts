@@ -1,18 +1,10 @@
 /**
  * 插件平台 store：插件行状态（应用级）+ 组合层（默认组合 + 已装行）+ 生命周期编排。
- *
- * 分层：本 store 是插件相关状态的唯一出口——组件不直连 `services/plugins`；
- * 插件运行时（Cordis 内核/挂载器/注册表）在 `services/cordis`，组合层推导在 `utils/cordis/composition`，
- * 本 store 只做编排与快照。
- * 装配：行来自插件列表（磁盘包行 + 随应用分发的行），装配顺序 = 默认组合成员在前、其余按 id 追加；
- * 每行的实现来源由组合裁决决定（缺省 = 行自身实现；插件可声明接管某行，用户层可钉住或改回默认），
- * 实现为磁盘包则读该包入口，否则经随应用分发实现注册表取编译实现。
- * 「控件替换」（槽位）与「行替换」（接管）是两条缝：前者由插件在 apply 里经 ctx.slots 的 priority 声明。
- * 加载时机：应用挂载/进仓后 `load()` 一次——先按默认组合清单播种并取行，再按装配顺序拉起启用行。
- * 例外说明：本 store 静态 import `components/plugins/cordis/builtins.tsx`（随应用分发插件注册表）与
- * `components/plugins/SlotHost`（插件侧槽位渲染宿主，经注入点接进内核 slots 服务）——组件层承载组件引用
- * （services 不 import components 的约束所致）；该边经头注释文档化，
- * 环上跨模块访问均为函数体内延迟求值，无顶层 getState/useXxx（新增顶层触碰会 TDZ 崩溃）。
+ * 分层：本 store 是插件相关状态的唯一出口（组件不直连 `services/plugins`）；插件运行时（Cordis 内核）
+ * 在 `services/cordis`、组合层推导在 `utils/cordis/composition`，本 store 只做编排与快照。
+ * 例外边：静态 import `components/plugins/cordis/builtins.tsx`（随应用分发插件注册表）与
+ * `components/plugins/SlotHost`（槽位渲染宿主，经注入点接进内核 slots 服务）——组件引用必须由组件层
+ * 承载（services 不 import components 的约束）；环上跨模块访问均为函数体内延迟求值，无顶层 getState/useXxx。
  */
 import { create } from "zustand";
 import type { ComponentType } from "react";
@@ -186,7 +178,12 @@ interface PluginStoreState {
   marketError: string;
   /** 市场是否已加载过（UI 据此显示加载/空态）。 */
   marketLoaded: boolean;
-  /** 加载插件行并按装配顺序拉起运行时。 */
+  /**
+   * 加载插件行并按装配顺序拉起运行时（应用挂载/进仓后调用一次）：先按默认组合清单播种并取行，
+   * 再按装配顺序拉起启用行。装配：行来自插件列表（磁盘包行 + 随应用分发的行），
+   * 顺序 = 默认组合成员在前、其余按 id 追加；每行实现来源由组合裁决定（缺省 = 行自身实现；
+   * 插件可声明接管某行，用户层可钉住或改回默认），磁盘包读包入口、否则取随应用分发编译实现。
+   */
   load(reason?: PluginLoadReason): Promise<void>;
   /** 从 GitHub 仓库安装（repo 为 `owner/repo` 市场引用或完整 git 地址；新装一律停用）。 */
   install(repo: string): Promise<PluginInstallResult>;

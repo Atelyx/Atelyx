@@ -63,22 +63,14 @@ import type {
 } from "@/types";
 
 /**
- * AI 对话面板会话状态。
- *
- * 单一全局历史：以对话历史文件夹为真相——每会话一个消息 `.jsonl`
- * （JSON Lines：一行一条消息记录，追加式写）+ 可选 `.meta.json` 元数据侧车（title/agentId）；
- * 会话清单 = 扫目录（无整文件索引），切换笔记不切换会话；面板级覆盖存 `.atelyx/editor-chats-meta.json`。
- * 协作空间内同一套读写签名经 services/metadata 分发到 user meta（`chat/messages/<id>`、
- * `chat/sessions/<id>`、`chat/editor-meta`），`file` 仍按本地路径约定回填，消费方无感。
- * 笔记上下文两条路径：#引用（手动拖入，发送时按路径块注入）+ 当前打开笔记尾部上下文块（runExchange 注入，ephemeral 不落盘）。
- * 会话清单与内容以磁盘为真相，重进仓库/切回面板时读盘刷新（外部与跨设备变更不实时互见）。
- *
- * 与画布对话（canvasStore）的差异：
- * - 面板一次只流式一个会话（单输入框）；对话编排（提示词/工具/流式/收尾/命名）由对话核心能力
- *   承担（`stores/chatTurn.ts`，经 `utils/chatRuntimeHost` 取用），本 store 只管容器、落盘与面板态
- * - 错误占位沿用 `[错误]` 前缀过滤约定（ERROR_PREFIX，见 constants/chat.ts）
- * - provider/model 解析：对话核心能力的 resolveTarget（面板覆盖 → 跟随仓库默认，与画布同源）
- * - 持久化 debounce 500ms：消息纯增长只追加新增记录（每记录一行 JSON），元数据/覆盖变化写对应小文件
+ * AI 对话面板会话状态。单一全局历史：每会话一个消息 `.jsonl`（JSON Lines，追加式写）+ 可选
+ * `.meta.json` 元数据侧车；会话清单 = 扫目录（无整文件索引），磁盘为真相（重进仓库/切回面板读盘刷新，
+ * 外部与跨设备变更不实时互见）；面板级覆盖存 `.atelyx/editor-chats-meta.json`。协作空间内同一套读写
+ * 签名经 services/metadata 分发到 user meta（`chat/messages/<id>` 等），`file` 仍按本地路径约定回填。
+ * 笔记上下文两条路径：#引用（手动拖入，发送时按路径块注入）+ 当前打开笔记尾部上下文块（runExchange
+ * 注入，ephemeral 不落盘）。与画布对话的差异：编排由对话核心能力承担（`stores/chatTurn.ts`，经
+ * `utils/chatRuntimeHost` 取用），本 store 只管容器、落盘与面板态；错误占位沿用 `[错误]` 前缀过滤
+ * （ERROR_PREFIX）；持久化 debounce 500ms，消息纯增长只追加新增记录。
  */
 
 interface ChatPanelState {

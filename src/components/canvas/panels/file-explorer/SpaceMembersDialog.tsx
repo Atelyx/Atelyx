@@ -1,7 +1,5 @@
 /**
- * 协作空间成员管理弹窗（文件面板空间条目右键「成员管理」）：
- * 名册（名字 + 角色 owner/editor）+ 移除成员 + 转让 owner（服务端校验权限）。
- * 打开即拉取名册；操作成功后自动刷新。
+ * 协作空间成员管理弹窗：名册 + 移除成员 + 转让 owner（权限由服务端校验）；打开即拉取，操作后自动刷新。
  */
 import { Spinner } from "@/components/common/primitives";
 import { IconButton } from "@/components/common/Button";

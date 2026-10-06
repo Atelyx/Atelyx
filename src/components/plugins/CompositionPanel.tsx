@@ -1,12 +1,6 @@
 /**
- * 组合接管面板（设置 → 插件）：显示每一行的实现来源，并提供用户层裁决。
- *
- * 数据全部经 pluginStore 中转（组件不直连 services）：`pluginStore.composition`（装载时裁决的
- * 快照）+ 行展示字段取自 utils/cordis/composition 的列表行推导。切换写
- * `pluginStore.setCompositionImpl`（null = 删键回落到插件声明层，`"default"` = 钉住该行默认实现）。
- * 无可治理行（无声明、无用户层条目、无回退告警）时不渲染——治理面板只在需要裁决时出现。
- *
- * 接管方插件的自身行不独立装配（同一份 apply 只跑一次），其代码在目标行的位置运行，面板据此标注。
+ * 组合接管面板（设置 → 插件）：显示每一行的实现来源，并提供用户层裁决（钉住/改回默认）。
+ * 数据全部经 pluginStore 中转（组件不直连 services）；无可治理行时不渲染——治理面板只在需要裁决时出现。
  */
 import { useState } from "react";
 import { usePluginStore } from "@/stores/pluginStore";
@@ -55,6 +49,7 @@ export function CompositionPanel() {
   });
   if (governed.length === 0 && composition.unmatched.length === 0) return null;
 
+  // null = 删键回落插件声明层；"default" = 钉住本行默认实现
   const apply = (rowId: string, value: string) => {
     void setCompositionImpl(rowId, value || null).then(
       () => setNotice(null),

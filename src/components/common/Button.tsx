@@ -1,17 +1,6 @@
 /**
  * 按钮基元：全项目按钮的统一形态与交互态（尺寸 / 变体 / 焦点环 / 禁用 / 加载）。
- * 业务代码一律用本组件的 `Button` / `IconButton`，不再各写各的 className 与内联色。
- *
- * 尺寸档（方角=图标按钮边长，含字=文字按钮控件高）：
- * - `2xs` 16px：属性行内联小徽标（键值 chip 上的删除）
- * - `xs`  20px：表格工具条、属性 chip、列表行内联操作
- * - `sm`  24px：工具条、面板头、次要动作、对话框次按钮
- * - `md`  28px：默认（面板头主按钮、空态行动）
- * - `lg`  32px：视图标题栏、画布节点内操作
- * - `touch` 44px：移动端（≥44px 触控目标）
- *
- * 变体只给「底色 + 文字色 + hover 反馈」；强调色留给需要引起注意的动作，
- * 常规动作用 `ghost` / `secondary`，破坏性动作用 `danger`。
+ * 业务代码一律用 `Button` / `IconButton`，不再各写各的 className 与内联色。
  */
 import { forwardRef } from "react";
 import type { ButtonHTMLAttributes, ReactNode } from "react";
@@ -21,7 +10,9 @@ import { Tooltip } from "@/components/common/Tooltip";
 export type ButtonVariant = "primary" | "secondary" | "ghost" | "subtle" | "danger" | "dangerSolid";
 export type ButtonSize = "2xs" | "xs" | "sm" | "md" | "lg" | "touch";
 
-/** 各档的class。字号走字阶变量；控件高固定，字号变化不撑开布局。 */
+/** 各档的 class：方角=图标按钮边长，含字=文字按钮控件高；字号走字阶变量，控件高固定、字号变化不撑开布局。
+ *  2xs 16 属性行内联小徽标；xs 20 表格工具条/属性 chip/列表行内联操作；sm 24 工具条/面板头/次要动作；
+ *  md 28 默认（面板头主按钮、空态行动）；lg 32 视图标题栏/画布节点内操作；touch 44 移动端触控目标。 */
 const SIZE_CLASS: Record<ButtonSize, string> = {
   "2xs": "h-4 px-1 text-micro gap-0.5 rounded-[var(--radius-xs)]",
   xs: "h-5 px-1.5 text-micro gap-0.5 rounded-[var(--radius-xs)]",
@@ -33,6 +24,7 @@ const SIZE_CLASS: Record<ButtonSize, string> = {
 
 /**
  * 变体：底色 / 渐变图 / 文字色 / hover 反馈。`ghost` 无底色，hover 才出底（工具条与列表内联动作）。
+ * 强调色留给需要引起注意的动作，常规动作用 `ghost` / `secondary`，破坏性动作用 `danger`。
  *
  * 底色与渐变图分开写（不用 `background` 简写）：简写会把 background-color 置为 `transparent`，
  * 而 hover 只换底色、渐变图即时移除——底色从 transparent 淡入，按钮会先掉底再渐显。

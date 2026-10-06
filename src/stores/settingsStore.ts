@@ -50,30 +50,11 @@ import { listGlobalShortcuts, type GlobalShortcutRegistration } from "@/services
 
 /**
  * 设置 store（供应商/搜索源等仓库化，界面外观应用级）。
- *
- * 仓库级配置按激活仓库身份双源分发（读写都经 services/metadata）：
- * - 个人仓库：`.atelyx/config.json`（AI 供应商 + 默认模型 + 搜索源 + 排序/排除夹/附件夹）+
- *   独立文件（prompt-notes/agents/folder-colors）；API key 默认走 keychain，
- *   条目按仓库身份（root 绝对路径）哈希隔离；开启 `syncKeys`（「API key 随仓库保存」，多设备同步）
- *   后 key 明文随 config.json 落盘。
- * - 协作空间：供应商/搜索源/默认模型连同 API key 整份落服务端团队元数据（按字段分键，
- *   全员共用一份，写权限由服务端按角色裁决）；排序/排除夹/附件夹/文件夹颜色/提示词/Agent 同层。
- *   空间不使用本机 keychain（空间的 AI 配置与 key 整体由服务端团队元数据承载）。
- * 应用级配置（`app_data_dir/global.json`，随 `updateGlobalConfig` 落盘）：主题 +
- * 强调色 + 字号/字体 + 自动恢复上次打开文件，跨仓库共享。
- *
- * 解析链（画布对话节点 / AI 对话面板共用 `resolveChatTarget`）：
- * 选定 {providerId, model}（无 = 跟随仓库默认）→ 供应商缺失报错不静默回落；
- * 未选定 = 仓库默认模型（vaultConfig.model + 固定供应商 modelProviderId：固定供应商含该模型则用之、
- * 失效判定未配置；仅旧配置无固定供应商时按 model 名反查），未配置默认模型报错；
- * 选定供应商但未选模型 = 供应商首个模型（models[0]）。
- *
- * 加载时机：应用挂载 load（读 global.json 填充应用级外观）；
- * selectVault → loadVaultConfig（读 config.json；syncKeys 关时从 keychain 填充 key，开时直读 config 内 key）；无仓库时状态为空。
- *
- * 写盘（仓库级）：只把本次改动的字段作为补丁发出（`vault_config_patch`，Rust 侧按字段合并进磁盘
- * 现有配置），不再整文件重写——撕裂窗口持有独立 store 副本，整文件写会用陈旧副本覆盖主窗口刚写入的
- * 字段（供应商丢失即此因）。同时按内容摘要做脏门控：与上次成功持久化一致时不写盘、不写 keychain。
+ * 仓库级配置按激活仓库身份双源分发（读写都经 services/metadata）：个人仓库 = `.atelyx/config.json` +
+ * 独立文件（prompt-notes/agents/folder-colors），API key 默认走 keychain（按仓库身份哈希隔离），
+ * `syncKeys` 开启后 key 明文随 config.json 落盘；协作空间 = AI 配置与 key 整份落服务端团队元数据
+ * （按字段分键、全员共用一份，写权限服务端按角色裁决），不使用本机 keychain。
+ * 应用级配置（`app_data_dir/global.json`）：主题/强调色/字号/字体/自动恢复，跨仓库共享。
  */
 
 interface SettingsState {

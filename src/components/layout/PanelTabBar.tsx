@@ -1,11 +1,6 @@
 /**
- * 面板标签条（主窗口面板头与撕裂窗口头共用）：标签组 + 标签右键菜单 + 空白右键视图切换菜单 + ≡ 菜单 + 拖拽源。
- *
- * - 标签：点击激活；锁定标签显示锁标记且不可拖；pointer 拖拽 = 撕裂/停靠/排序（经 panelStore 会话）
- * - 标签右键菜单：**关闭该标签** + **切换标签视图 ›**（钻入子菜单列出全部视图类型，受全局唯一约束）
- * - 空白右键：弹出视图选择菜单（添加视图）——组内已有 = 激活，未占用 = 添加为本组标签，撕裂窗口占用 = 禁用
- * - ≡ 菜单（右）：锁定/解锁（整块面板，锁定 = 不可移动/关闭标签/删除面板）、**删除面板**（整块删除含标签）、左右/上下分割
- * - 布局操作全部经 props 回调注入宿主（PanelFrame → uiStateStore；PanelWindowRoot → panelStore）
+ * 面板标签条（主窗口面板头与撕裂窗口头共用）：标签组 + 标签右键菜单 + 空白右键视图切换菜单 + ≡ 菜单 + 拖拽源（撕裂/停靠/排序）。
+ * 布局操作全部经 props 回调注入宿主（PanelFrame → uiStateStore；PanelWindowRoot → panelStore），菜单内容见各菜单 JSX 与 ViewPickerMenu。
  */
 import { ChevronLeft, ChevronRight, Lock, LockOpen, Menu, X } from "lucide-react";
 import { memo, useRef, useState, type ReactNode } from "react";

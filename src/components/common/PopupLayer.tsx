@@ -1,17 +1,8 @@
 /**
- * 统一弹层壳：全项目所有浮层（右键菜单/下拉/工具浮层/状态栏计算菜单/仓库切换列表/历史会话）
- * 的唯一入口，机制全部收敛于此——锚点定位 + 方向 + 实测尺寸钳制/翻转 + Esc/外点关闭 + portal + 容器样式。
+ * 统一弹层壳：全项目所有浮层（右键菜单/下拉/工具浮层/状态栏计算菜单/仓库切换列表/历史会话）的唯一入口。
  *
- * 方向语义（显式区分）：
- * - `align="top"`（缺省）向下弹出：顶边贴锚点 y；anchor.flipY 提供且下方空间不足时向上翻转。
- * - `align="bottom"` 向上弹出：底边贴锚点 y，过高时贴视口顶兜底。
- * 水平一律左边缘贴锚点 x（minWidth 防窄于触发器），视口钳制。
- *
- * 机制：createPortal 挂 body——画布节点带 transform，fixed 会被 transform 祖先捕获错位，
- * 脱离节点 DOM 树后按视口坐标渲染；`useClampedMenuPosition` 实测尺寸定位；
- * `useDismissOnOutside` Esc/点击外部关闭，triggerRef 排除自身 trigger 区域
- * （点自身 trigger 不关，开/关 toggle 语义归调用方 click——不加 stopPropagation，
- * 保证其它弹层打开时点本 trigger 能被外点关闭，实现弹层互斥）。
+ * 锚点定位 + 方向 + 实测尺寸钳制/翻转 + Esc/外点关闭 + portal + 容器样式全部收敛于此；
+ * 方向语义见 align prop，portal 与 triggerRef 排除的原因见下方实现注释。
  */
 import { createPortal } from "react-dom";
 import type { ReactNode, RefObject } from "react";
@@ -35,7 +26,9 @@ interface PopupLayerProps {
   onClose: () => void;
   /** 外点排除区（自身 trigger 区域）：点它不关，开/关语义由调用方 click 控制。 */
   triggerRef?: RefObject<HTMLElement | null>;
-  /** 弹出方向：top = 向下展开（缺省，配 flipY 可向上翻转）；bottom = 向上展开。 */
+  /** 弹出方向：top = 向下展开（缺省，顶边贴锚点 y，配 flipY 可在下方空间不足时向上翻转）；
+   *  bottom = 向上展开（底边贴锚点 y，过高时贴视口顶兜底）。水平一律左边缘贴锚点 x 并视口钳制，
+   *  minWidth 防窄于触发器。 */
   align?: "top" | "bottom";
   /** 宽度 class（如 "w-44" / "w-64"）。 */
   widthClass?: string;
@@ -76,6 +69,9 @@ export function PopupLayer({
   });
 
   if (!anchor) return null;
+  // portal 挂 body：画布节点带 transform，fixed 会被 transform 祖先捕获错位，脱离节点 DOM 树后按视口坐标渲染。
+  // useDismissOnOutside 的 triggerRef 排除自身 trigger（开/关 toggle 归调用方 click，不加 stopPropagation——
+  // 其它弹层打开时点本 trigger 仍能被外点关闭，实现弹层互斥）
   return createPortal(
     <div
       ref={ref}

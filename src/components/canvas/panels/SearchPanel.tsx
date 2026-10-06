@@ -1,12 +1,6 @@
 /**
- * 搜索面板
- *
- * 多搜索模式框架：顶部下拉选择模式（「按文件名」当前可用；「全局搜索」「按标签搜索」
- * 占位禁用「尚未支持」）。当前仅实现「按文件名」：输入即实时过滤全仓库文件名
- * （不区分大小写子串匹配，内存过滤无 debounce），结果扁平行点击打开画布/笔记
- * （与文件面板单击行为一致，附件不可点）。
- *
- * 分层：走 `vaultStore`（文件树）+ `appStore`（画布行），打开统一经 `useFileNavigation`。
+ * 搜索面板：顶部下拉切换搜索模式，当前只实现「按文件名」（其余模式占位禁用）。
+ * 结果按文件名子串实时内存过滤，点击行打开文件（同文件面板，附件不可点）。
  */
 import { Check, ChevronDown, FileText, LayoutDashboard, Paperclip, Search, StickyNote, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";

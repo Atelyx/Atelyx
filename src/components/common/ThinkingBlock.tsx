@@ -1,11 +1,7 @@
 /**
- * 消息气泡内的「思考过程」折叠块（reasoning_content 展示）。
- * 默认折叠；折叠态显示一行思考摘要（完成后=首行，流式中=最新一行、跟随末尾），
- * 折叠且仍在流式时标题带强调色扫光等待动画，完成后静止。
- * 思考仅作即时过程展示：不进 API 历史上下文、不参与复制。
+ * 消息气泡内的「思考过程」折叠块（reasoning_content 展示）：默认折叠，折叠态显示一行思考摘要。
  *
- * 保留原生 button 的一处（脱离基元的原因）：折叠头部条是可点击的标题行（整行 `w-full`
- * 承载思考摘要、`relative` 定位扫光动画、`select-none` 禁选），语义是行而非按钮。
+ * 摘要取首行（完成）/ 最新一行（流式）；思考仅作即时展示，不进 API 历史上下文、不参与复制。
  */
 import { useEffect, useRef, useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
@@ -43,7 +39,8 @@ export function ThinkingBlock({
       className="mb-2 overflow-hidden rounded-[var(--radius-md)] border text-xs"
       style={{ borderColor: "var(--border-subtle)", background: "var(--bg-secondary)" }}
     >
-      {/* 头部条（下沉面）：折叠态即思考摘要行 */}
+      {/* 头部条（下沉面）：折叠态即思考摘要行。保留原生 button（不归基元）：整行 w-full 承载摘要、
+          relative 定位扫光动画、select-none 禁选，语义是行而非按钮 */}
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}

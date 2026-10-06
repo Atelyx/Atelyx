@@ -1,25 +1,7 @@
 /**
- * 图片单元格（分派壳）：按单元格值 display 记忆两种展示模式——轮播（缺省）/
- * 九宫格，交互实现见 ImageCarouselMode/ImageGridMode 拆分件。
+ * 图片单元格（分派壳）：按单元格值 display 记忆轮播（缺省）与九宫格两种展示模式。
  *
- * - 布局：自适应行由「撑高层」（流内，只给高度）撑起固有高度（轮播 96px + 队列条；九宫格按
- *   列宽估算方块行高，单图按限宽修正），展示层 absolute inset-0 以 td 为定位上下文（td
- *   relative）铺满单元格并随行高伸展——行高手动调整/同行其他单元格撑高都不留白。不能依赖
- *   td 内百分比高度：td 无显式高度时 h-full 解析不可靠，flex-1 min-h-0 会塌陷成 0。
- * - 预载：多图/九宫格挂载即后台逐条解析全部条目（inflight 去重 + LRU 复用，单条失败不拖累
- *   其余），结果以**条目路径为键**共享给两个模式（重排后零重解析零错帧）；当前图另走
- *   useTableImageSrc 立即渲染。
- * - 放大预览：portal 到 body（逃离表格 CSS zoom 缩放包装层）；连续打开以序号守卫，
- *   仅最新请求落地（防并发解析互相覆盖）。
- * - hover 按钮组：左上角 = 展示模式切换（多图时）+ 追加图片（可多选）；右上角 = 移除当前图
- *   （仅轮播，九宫格无移除入口）。
- * - 文件选择输入由两个分支共用同一个 ref，故必须在两处都在场（只挂一支会让另一支的 click
- *   落到空 ref 上，静默无反应）。
- * - 值读写经 store（addImagesToCell/removeImageAt/toggleImageDisplay/reorderImages）；
- *   单元格值经 normalizeImageValue 读取（磁盘/远端旧形态与脏值统一归一，勿内联 typeof 判定）。
- *
- * 保留原生 button 的一处（脱离基元的原因）：空值占位里铺满单元格（`absolute inset-0`）的
- * 「添加图片」按钮——铺满遮罩按钮按迁移口径不归 `Button`/`IconButton` 管。
+ * 两种模式的交互实现见 ImageCarouselMode / ImageGridMode；布局、预载与放大预览见各自 JSX 锚点注释。
  */
 import { GalleryHorizontal, ImagePlus, LayoutGrid, Plus, X } from "lucide-react";
 import { memo, useCallback, useEffect, useRef, useState } from "react";
@@ -46,6 +28,8 @@ interface Props {
   row: TableRow;
 }
 
+/** 值读写经 tableStore；单元格值一律经 normalizeImageValue 读取（磁盘/远端旧形态与脏值统一归一，
+ *  勿内联 typeof 判定）。 */
 export const ImageCell = memo(function ImageCell({ field, row }: Props) {
   const cell = normalizeImageValue(row.values[field.id]);
   const images = cell.images;
@@ -69,7 +53,8 @@ export const ImageCell = memo(function ImageCell({ field, row }: Props) {
   const fixedHeight = row.height !== undefined;
 
   useEffect(() => {
-    // 九宫格所有格子与轮播跟手层/队列都只读 srcMap，必须预载；单图轮播走 useTableImageSrc 即可
+    // 九宫格所有格子与轮播跟手层/队列都只读 srcMap，必须预载；单图轮播走 useTableImageSrc 即可。
+    // 结果以条目路径为键：重排后元素按路径取图，零重解析零错帧；单条解析失败不拖累其余条目。
     if (images.length === 0 || (!multi && !gridMode)) return;
     images.forEach((entry) => {
       resolveTableImageEntry(entry)
@@ -123,6 +108,7 @@ export const ImageCell = memo(function ImageCell({ field, row }: Props) {
       // 行高更高时按钮随单元格整体居中
       <div className="group min-h-8 p-1">
         {imageInput}
+        {/* 铺满遮罩按钮（`absolute inset-0`）按迁移口径不归 Button/IconButton 管，保留原生 button */}
         <button
           onClick={() => imageInputRef.current?.click()}
           className="absolute inset-0 w-full h-full flex items-center justify-center rounded opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 transition-opacity hover:bg-[var(--hover)]"
@@ -160,7 +146,8 @@ export const ImageCell = memo(function ImageCell({ field, row }: Props) {
       {imageInput}
       {/* 撑高层：只给自适应行一个固有高度（固定行高由 tr height 保证），不参与定位与交互 */}
       {!fixedHeight && <div style={{ height: sizerHeight }} />}
-      {/* 展示层：absolute 以 td 为定位上下文（td relative），铺满单元格并随行高伸展 */}
+      {/* 展示层：absolute 以 td 为定位上下文（td relative），铺满单元格并随行高伸展。
+          不能依赖 td 内百分比高度：td 无显式高度时 h-full 解析不可靠，flex-1 min-h-0 会塌陷成 0 */}
       <div className="absolute inset-0 flex flex-col group">
         {gridMode ? (
           <ImageGridMode

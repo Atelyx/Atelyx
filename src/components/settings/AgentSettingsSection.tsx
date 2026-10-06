@@ -1,16 +1,7 @@
 /**
- * 设置 → Agent 面板：Agent 配置列表 + 编辑器。
- *
- * Agent = 可复用的对话预设（名称 + 系统提示词 + 工具），对话节点 / AI 对话面板
- * 按 id 引用、发送时实时解析（改 Agent 即改行为，无需改引用处）。
- * 系统提示词 = 引用已注册提示词笔记（右键笔记「注册为提示词」，发送时实时读正文、
- * 外部编辑即时生效）；工具 = 全部工具按分类折叠分组勾选，勾选即赋予能力、取消即移除（默认全开）。
- *
- * 预置 Agent（builtin 标记）默认随仓库出现、
- * 可编辑但不可删除（列表不显示删除按钮，store 侧另有兜底）；副本为普通 Agent 可删除。
- *
- * 编辑即时生效（同设置页其他面板）：下拉/工具勾选即改即存；名称用本地草稿 + blur 提交
- * （避免每键一次 agents.json 原子写，空名回退）。删除走 ConfirmDialog（同设置页惯例）。
+ * 设置 → Agent 面板：可复用对话预设（名称 + 系统提示词 + 工具）的列表与编辑器，对话节点 / AI 对话面板按 id 引用、发送时实时解析。
+ * 系统提示词 = 引用已注册提示词笔记（发送时实时读正文，外部编辑即时生效）；编辑即时生效（名称走 blur 提交，避免每键一次 agents.json 原子写）。
+ * 预置 Agent（builtin 标记）可编辑不可删除（store 侧另有兜底），副本为普通 Agent 可删除；删除走 ConfirmDialog。
  */
 import { ChevronDown, ChevronRight, Copy, Plus, Sparkles, Trash2 } from "lucide-react";
 import { useLayoutEffect, useEffect, useRef, useState } from "react";

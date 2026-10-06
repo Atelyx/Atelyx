@@ -1,11 +1,7 @@
 /**
- * 设置「多人协作」区的协作空间账号段：登录/注册入口按钮 + 已登录服务器与设备会话管理。
- * 表单在 SpaceAuthDialog 弹窗中呈现（登录与注册各自弹出）。
- *
- * need-login 引导：`spaceDirectoryStore.loginPrompt` 置入时显示引导条并自动弹出登录窗
- * （弹窗内预填服务器地址）；若携带重试条目，登录/注册成功后自动重试进入该协作空间。
- *
- * 分层：只调 spaceAuthStore / spaceDirectoryStore / appStore 的动作，不直调 service。
+ * 设置「多人协作」区的协作空间账号段：登录/注册入口 + 已登录服务器与设备会话管理，表单在 SpaceAuthDialog 弹窗。
+ * need-login 引导（spaceDirectoryStore.loginPrompt）置入时显示引导条并自动弹出登录窗；携带重试条目时登录成功后自动进入该空间。
+ * 只调 spaceAuthStore / spaceDirectoryStore / appStore 的动作，不直调 service。
  */
 import { Spinner } from "@/components/common/primitives";
 import { useEffect, useState } from "react";

@@ -1,11 +1,7 @@
 /**
  * `.atb` 表格文件 schema 类型（磁盘格式，atelyx-table/v1）。
- *
- * 泛用多维表格：字段完全用户自定义，无内置模板。
- * 分镜板等用法 = 用户自建字段（镜号/景别/时长/分镜图…）+ 时间线/预演视图。
- *
- * 除磁盘 schema 外，还承载运行时 UI/presence 类型（`TableSelection` 选中范围，
- * 供表格视图高亮与协作 presence 复用）。
+ * 泛用多维表格：字段完全用户自定义，无内置模板；分镜板等用法 = 用户自建字段 + 时间线/预演视图。
+ * 除磁盘 schema 外，还承载运行时 UI/presence 类型（`TableSelection` 供高亮与协作 presence 复用）。
  */
 import type { TABLE_SCHEMA } from "@/constants/table";
 

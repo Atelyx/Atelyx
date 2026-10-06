@@ -1,15 +1,6 @@
 /**
- * 协作空间新增入口（文件面板工具条）：一个按钮收敛三条新增途径——在服务器上创建空间 /
- * 把服务器上已有文件夹就地纳管为空间 / 输邀请码加入。
- *
- * 点按钮弹出浮层：分段切换模式 + 该模式表单，确认后直接执行；创建与纳管成功后进入该空间，
- * 加入成功只提示（是否进入由用户在列表里决定）。无已登录服务器时浮层内引导前往设置。
- *
- * 可靠性约定：失败在浮层内显示且**不关浮层**（输入保留、可就地重试）；提交中确认按钮禁点
- * （防重复请求）；切换仓库进行中按钮禁用（与相邻的打开文件夹入口同一把闸）；目标服务器按
- * 当前登录态推导，选中的服务器中途登出不会拿旧地址发请求。
- *
- * 分层：只调 appStore / spaceAuthStore / spaceDirectoryStore，不直调 service。
+ * 协作空间新增入口（文件面板工具条）：一个按钮收敛三条途径——创建空间 / 纳管服务器文件夹 / 输邀请码加入。
+ * 失败在浮层内显示且不关浮层（输入保留、可就地重试），提交中确认按钮禁点防重复请求。
  */
 import { useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
@@ -108,6 +99,7 @@ export function SpaceAddPopover({ onNotice }: { onNotice: (message: string) => v
     setError(null);
   };
 
+  /** 创建与纳管成功后直接进入该空间；加入成功只提示，是否进入由用户在列表里点。 */
   const submit = async () => {
     if (busy) return;
     const value = draft.trim();

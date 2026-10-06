@@ -1,10 +1,7 @@
 /**
  * 槽位冲突裁决面板（设置 → 插件）：single 槽多个插件贡献时，由用户决定显示哪个贡献。
- *
- * 数据全部经 pluginStore 中转（组件不直连 services）：冲突行 = `pluginStore.slotConflictRows()`
- * （钉住信息来自应用级 ui-state），切换胜者写 `uiStateStore.setSlotWinner`（null = 跟随 priority）。
- * 订阅 pluginStore.uiRevision（注册变化）与 uiStateStore.slotWinnerOverrides（裁决变化）。
- * 无冲突行时不渲染——治理面板只在需要裁决时出现，避免噪音。
+ * 冲突行来自 pluginStore.slotConflictRows()（钉住信息来自应用级 ui-state）；切换胜者写 uiStateStore.setSlotWinner（null = 跟随 priority）。
+ * 无冲突行时不渲染——治理面板只在需要裁决时出现。
  */
 import { usePluginStore } from "@/stores/pluginStore";
 import { useUiStateStore } from "@/stores/uiStateStore";

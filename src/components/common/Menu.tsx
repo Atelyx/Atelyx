@@ -2,9 +2,7 @@
  * 弹层菜单公共壳（右键菜单/浮层菜单共用）——`PopupLayer` 统一弹层壳的薄包装
  * （坐标锚定 + 向下弹出 + z-50 + 菜单项/分隔线统一样式）。
  *
- * 容器内元素无需再 stopPropagation 防提前关闭（外部关闭检测用 contains 判定）；
- * 但 React Flow / 文件树行等宿主有 pointerdown 拦截的场景需传 stopPointerDown
- * （阻止事件到达宿主处理器，防按钮 click 被宿主 preventDefault 抑制）。
+ * 容器内元素无需 stopPropagation 防提前关闭：外部关闭检测用 contains 判定。
  */
 import type { ReactNode } from "react";
 import { PopupLayer } from "@/components/common/PopupLayer";

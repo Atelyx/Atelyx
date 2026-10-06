@@ -1,14 +1,6 @@
 /**
- * 日历面板（主页）：月视图，一格里聚合三类信息——
- * - 活动密度（当日历史版本数 + 文件 mtime 改动数，底部活动条）；
- * - 手动日程（`.atelyx/calendar.json`，色块 chip，点击进入编辑）；
- * - 带日期笔记（frontmatter `date`/`due` 自动标出，点击打开笔记）。
- * 底部编辑区：选中某天后增/改/删手动日程（改色循环 + 标题行内编辑 + 删除）。
- * 顶部过滤开关可分别隐藏 活动/日程/笔记。
- *
- * 保留原生 button 的三处（脱离基元的原因）：色块按钮（12px 圆点，尺寸与形态都无法归入
- * Button/IconButton 档位，纯色块无文字无图标）、日程标题行（可点击的文本行，进入行内编辑，
- * 语义是行而非按钮）。
+ * 日历面板（主页）：月视图。一格聚合活动密度（历史版本数 + 文件 mtime 改动数）、手动日程
+ * （`.atelyx/calendar.json`）与带日期笔记（frontmatter `date`/`due`）；底部编辑区增/改/删选中日的日程。
  */
 import {
   CalendarDays,
@@ -317,6 +309,7 @@ export function CalendarPanel() {
             <div className="space-y-1">
               {selectedItems.map((it) => (
                 <div key={it.id} className="flex items-center gap-1.5 text-xs">
+                  {/* 色块按钮：12px 纯色圆点，尺寸与形态都归不进 Button/IconButton 档位，保留原生 button */}
                   <button
                     onClick={() => updateItem(it.id, { color: cycleColor(it.color ?? CALENDAR_ITEM_COLORS[0]) })}
                     className="w-3 h-3 rounded-full flex-shrink-0 hover:opacity-80"
@@ -338,6 +331,7 @@ export function CalendarPanel() {
                     />
                   ) : (
                     <button
+                      // 日程标题：可点击文本行进入行内编辑，语义是行而非按钮，保留原生 button
                       onClick={() => {
                         setEditingId(it.id);
                         setEditingDraft(it.title);
@@ -392,6 +386,7 @@ export function CalendarPanel() {
                 className="flex-1 min-w-0"
               />
               <div className="flex items-center gap-0.5">
+                {/* 选色圆点：12px 纯色块无文字无图标，归不进基元档位，保留原生 button */}
                 {CALENDAR_ITEM_COLORS.map((c) => (
                   <button
                     key={c}

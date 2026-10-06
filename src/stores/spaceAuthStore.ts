@@ -1,15 +1,6 @@
 /**
- * 协作空间登录态 store（运行时内存态 + 编排 service）。
- *
- * 编排 `services/space/auth` 与 `services/global`：所有 I/O（keychain 令牌、global.json 清单、
- * 网络请求）都在 service 层；本 store 只持有内存态并提供动作。不 import 组件、不渲染。
- *
- * `servers` = 已验证有效的会话（来自 spaceServers 清单 + 启动 restore）；`spaceServers`
- * 清单本身持久化在 global.json（由 auth service 维护），本 store 不直接写 global.json。
- *
- * restore 与并发登录的竞态：restore 逐服务器网络校验耗时长，期间用户可能完成 login/register。
- * 进行中的 restore 重入复用同一次恢复；完成时结果与当前 state 按服务器地址合并——
- * state 已有的条目（并发登录的新会话）优先保留，restore 结果只补足缺失的地址，不做整体替换。
+ * 协作空间登录态 store（运行时内存态 + 编排 service）：所有 I/O（keychain 令牌、global.json 清单、
+ * 网络请求）都在 service 层，本 store 只持有内存态并提供动作；不 import 组件、不渲染。
  */
 
 import { create } from "zustand";
@@ -32,14 +23,19 @@ export interface SpaceServerEntry {
 }
 
 interface SpaceAuthState {
-  /** 已验证有效的会话（内存态）。 */
+  /** 已验证有效的会话（内存态；清单 spaceServers 持久化在 global.json，由 auth service 维护）。 */
   servers: SpaceServerEntry[];
   /** 启动 restore 是否已完成（无论成功失败），避免重复 restore。 */
   restored: boolean;
   /** 是否有登录/注册/恢复在进行中。 */
   busy: boolean;
 
-  /** 启动时调用：遍历 spaceServers 逐个恢复会话，失效的从清单剔除并落盘。 */
+  /**
+   * 启动时调用：遍历 spaceServers 逐个恢复会话，失效的从清单剔除并落盘。
+   * 与并发登录的竞态：restore 网络校验耗时长，期间用户可能完成 login/register——进行中的
+   * restore 重入复用同一次恢复；完成时按服务器地址合并，state 已有条目（并发登录的新会话）
+   * 优先保留，restore 结果只补足缺失的地址，不做整体替换。
+   */
   restore: () => Promise<void>;
   login: (serverUrl: string, username: string, password: string, deviceName?: string, displayName?: string) => Promise<SpaceServerEntry>;
   register: (serverUrl: string, username: string, password: string, deviceName?: string, displayName?: string) => Promise<SpaceServerEntry>;

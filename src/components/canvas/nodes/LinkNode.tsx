@@ -1,9 +1,6 @@
 /**
  * 链接节点：URL 卡片（对等外部白板格式的 link 节点）。
- *
- * - 图标 + 域名 + 完整 URL，单击卡片在外部浏览器打开（仅可外部打开的协议，见 `isOpenableUrl`）
- * - 可拖拽移动 / NodeResizeControl 调整大小
- * - 仅关联边可连（自动分类：link 参与的连线一律为关联自由线，见 2.4）
+ * 单击卡片在系统浏览器打开 URL；不可打开的协议（见 `isOpenableUrl`）静默不响应。
  */
 import { Link2 } from "lucide-react";
 import { type NodeProps } from "@xyflow/react";
@@ -50,6 +47,7 @@ export function LinkNode({ data, width, height, selected }: NodeProps) {
       onClick={handleOpen}
       title={url ? (isOpenableUrl(url) ? `打开 ${url}` : url) : undefined}
     >
+      {/* link 只出 source：它参与的连线一律分类为关联自由线，其它关系类型连不上 */}
       <ConnectionFrame topType="source" selected={selected} />
 
       <div className="flex-1 min-h-0 flex flex-col justify-center px-3 py-2 gap-1">

@@ -1,22 +1,14 @@
 /**
- * 笔记撤销栈运行时（会话内内存驻留，不落盘）。
- *
- * 生命周期：栈只在内存——退出软件与切仓库（仓库身份变化，防跨仓库同路径
- * 串文件）时 clearAll()；切笔记、模式切换（预览↔编辑/源码）、布局/面板重挂载等一切
- * 会话内操作不清栈。
- *
- * 每文件独立栈实例（stacks 按 file 键隔离），撤销/重做按当前编辑器 file 取栈并应用，
- * 各文件互不混淆；多面板打开同一笔记共享同一栈。
- *
- * 协作语义：协作态下 ytext 远端合入/基线收敛也会经 onBodyChange 走 recordEdit 积累本地栈
- * 快照（文件内容历史视角，自洽）；撤销/重做统一走本栈（编辑态窗口级路由，见 6.4），
- * 协作/非协作一致——撤销可把此前（含远端合入）的内容一步回滚到快照。
+ * 笔记撤销栈运行时（会话内内存驻留，不落盘）：切笔记、模式切换（预览↔编辑/源码）、布局/面板重挂载等
+ * 一切会话内操作不清栈，仅退出软件与切仓库时 clearAll()。撤销/重做统一走本栈（编辑态窗口级路由，见 6.4），
+ * 协作/非协作一致——协作态下 ytext 远端合入也经 onBodyChange 走 recordEdit 积累快照，可一步回滚到快照。
  */
 import { create } from "zustand";
 import { createNoteUndoStack, type NoteUndoStack } from "@/services/noteUndo";
 import { registerDomainLifecycle } from "@/utils/kernelLifecycle";
 
 interface NoteUndoState {
+  /** 按文件键隔离的独立栈实例；多面板打开同一笔记共享同一栈。 */
   stacks: Record<string, NoteUndoStack>;
   /** 取某文件的撤销栈（无则懒创建；首次编辑时建一次，之后复用同一实例）。 */
   stackOf: (file: string) => NoteUndoStack;

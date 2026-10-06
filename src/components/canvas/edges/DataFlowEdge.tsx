@@ -12,14 +12,8 @@ import { isAssetConsumed } from "@/utils/consumed";
 import type { LinkMode } from "@/types";
 
 /**
- * 画布边（按类型自动分类，见 2.4）：
- * - **数据流边**（有向）：金色实线/虚线 + 终点金色箭头 + 中点圆点；
- *   虚实反映消费状态（资产引用边 text/media/search → conversation）
- * - **关联边**（directed: false）：灰色自由线，无中点圆点；中点常显模式切换圆钮
- *   （无向 / 单向 / 双向，`linkMode` 循环切换）；可选中 Delete 单独删除
- *
- * 箭头用组件内 `<defs>` + url 引用（BaseEdge 的 markerEnd 只接受字符串引用），
- * id 取边 id 保证唯一。
+ * 画布边：数据流边（有向，金色 + 终点箭头 + 中点圆点，虚实表消费状态）与关联边（灰色自由线 + 中点模式切换钮）。
+ * 箭头以组件内 `<defs>` + url 引用实现（BaseEdge 的 markerEnd 只接受字符串引用），id 取边 id 保证唯一。
  */
 
 /** 数据流箭头色（金色，跟随主题 --accent）与关联箭头色（灰，与关联边描边同源变量）。 */
@@ -139,9 +133,8 @@ export function DataFlowEdge({
               <IconButton
                 variant="secondary"
                 size="2xs"
-                // 关联边中点是直径 18px 的正圆，超出 2xs 档的 16px 方形，故尺寸与圆角
-                // 由本处覆写（`size` 的 w/h/圆角产出均被盖掉，仅取其变体与基元行为）；
-                // 基元提供焦点环、悬停提示与透传的事件。
+                // 关联边中点是 18px 正圆，超出 2xs 档的 16px 方形：此处覆写 `size` 产出的宽高与圆角，
+                // 只保留它的变体（焦点环、悬停提示、事件透传）
                 className="!w-[18px] !h-[18px] !rounded-full !border !border-[var(--border)] opacity-50 hover:opacity-100"
                 style={{ pointerEvents: "auto", color: "var(--text-secondary)" }}
                 icon={linkModeIcon(linkMode)}

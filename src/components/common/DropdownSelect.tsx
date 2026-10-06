@@ -1,13 +1,8 @@
 /**
  * 通用下拉选择器（自绘弹层，替代原生 select 统一 UI 风格）。
  *
- * 受控组件：value 与选项匹配时显示该选项 label，否则显示 placeholder；
- * 「清除/空值」由调用方传 `{ value: "" }` 选项实现（与原 `<option value="">` 一一对应）。
- * 触发按钮只负责结构（flex：prefixIcon + label + 箭头——图标为 flex 兄弟项，
- * 与 label/ChevronDown 同排垂直居中），尺寸/颜色/边框由调用方 className/style 决定。
- *
- * 弹层 = `PopupLayer` 统一壳（锚定按钮 + portal + 钳制/向上翻转 + 外点关闭排除自身 trigger，
- * 与全项目所有浮层同一套机制）；`group` 选项渲染分组头（对应原生 optgroup）。
+ * 受控组件：value 与选项匹配时显示该选项 label，否则显示 placeholder；「清除/空值」由调用方
+ * 传 `{ value: "" }` 选项实现（与原 `<option value="">` 一一对应）。弹层走 `PopupLayer` 统一壳。
  */
 import { Check, ChevronDown } from "lucide-react";
 import { useRef, type CSSProperties, type ReactNode } from "react";
@@ -58,6 +53,8 @@ export function DropdownSelect({
 
   return (
     <>
+      {/* 触发按钮只给结构：flex 的 prefixIcon + label + 箭头同排垂直居中；
+          尺寸/颜色/边框全部由调用方 className/style 决定 */}
       <button
         ref={triggerRef}
         type="button"

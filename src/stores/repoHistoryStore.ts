@@ -1,16 +1,5 @@
 /**
  * 仓库历史只读聚合 store（主页「仓库历史」面板 + 日历活动计数共用数据源）。
- *
- * 数据来自 `services/home.listRepoHistory`（经内容面按身份分派：本地聚合历史侧文件，
- * 协作空间走服务端聚合端点）：
- * - `entries`：版本流（ts 倒序、上限）→ 仓库历史面板；
- * - `dailyCounts`：全量版本按日计数 → 日历活动密度。
- *
- * 性能：同仓库会话内缓存（`loadedFor` 存仓库身份键），主页面板随布局切换反复挂载时，
- * 已缓存仓库只做后台静默刷新（不清空、不转圈，async 命令不阻塞 UI），避免每次
- * 进主页都整树重扫；`inflight` 单飞去重（主页日历/仓库历史两面板同帧并发触发）。
- * 切仓库时由面板经仓库身份 effect 触发重载（未缓存仓库走首载：清空 + loading）。
- * 加载失败静默降级为空（尽力而为，不阻塞面板）。
  */
 import { create } from "zustand";
 import { listRepoHistory, type DailyCount, type RepoHistoryEntry } from "@/services/home";
@@ -24,7 +13,11 @@ interface RepoHistoryState {
   dailyCounts: DailyCount[];
   /** 已加载的仓库身份键（null = 未加载；同仓库再进主页仅后台静默刷新，不重扫）。 */
   loadedFor: string | null;
-  /** 重载（切仓库/面板挂载时调用；同仓库已缓存走后台刷新）。 */
+  /**
+   * 重载（切仓库/面板挂载时调用）。数据来自 `services/home.listRepoHistory`（经内容面按身份分派：
+   * 本地聚合历史侧文件，协作空间走服务端聚合端点）。同仓库已缓存走后台静默刷新（不清空不转圈，
+   * 避免每次进主页整树重扫）；加载失败静默降级为空，不阻塞面板。
+   */
   load: () => Promise<void>;
 }
 

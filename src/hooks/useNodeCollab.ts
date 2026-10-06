@@ -1,18 +1,14 @@
 /**
  * 单节点的协作实时状态（画布）：远端选中高亮 / 独占编辑锁主 / 生成中，供节点 HOC 与
  * ConversationNode 只读态共用。
- *
  * - 选中高亮：同一画布（presence.file + view=canvas）且 selection.kind==="node" 命中。
- * - 锁主：所有声明（本端 `lockedConversations` + 对端 presence.lockedNodes，仅按 nodeId 匹配，
- *   不按 file/view 过滤——锁跨视图保活）经 `resolveLockState` 确定性判定（since 最小、同 since
- *   按 peerId 取小）。本端非锁主 → 只读；发送前须校验 `iOwnLock`。
- * - 生成中：对端 presence.streamingNodeIds 命中（仅按 nodeId，同锁）。
+ * - 锁主：全部声明（本端 `lockedConversations` + 对端 `lockedNodes`，仅按 nodeId 匹配不按
+ *   file/view——锁跨视图保活）经 `resolveLockState` 确定性判定。本端非锁主 → 只读。
+ * - 生成中：对端 `streamingNodeIds` 命中（仅按 nodeId，同锁）。
  *
- * 订阅粒度：presence 每次更新（他端动鼠标）都会让下列 selector 各求值一次，`useShallow` 只负责
- * 「派生结果按值相等则不重渲染」，不省求值——因此 selector 内只做单次遍历的 `filter`/`find`。
- * 返回的每个字段必须是「引用稳定或标量」：selector 返回含新建数组的包装对象时 `useShallow` 恒判
- * 不等（无限重渲染），故数组字段各自订阅并用 `useShallow` 比较。锁主结果是标量对，同样以
- * `useShallow` 比较；锁主对象再由独立订阅解引用（`lockedByPeer` 引用取自 `peers`）。
+ * 订阅粒度：presence 每次更新都会让下列 selector 求值一次，`useShallow` 只省渲染不省求值。
+ * 返回字段必须引用稳定或标量——selector 返回含新建数组的包装对象时 `useShallow` 恒判不等
+ * （无限重渲染），故数组字段各自订阅；锁主对象由独立订阅解引用（引用取自 `peers`）。
  */
 import { useShallow } from "zustand/react/shallow";
 import { useCollabStore } from "@/stores/collabStore";

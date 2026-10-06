@@ -1,22 +1,10 @@
 /**
  * 多窗口面板运行时（每窗口一个实例；角色由窗口 label 决定）。
- *
- * **布局唯一权威在 Rust `layout.rs`**（迷你窗口管理器）：主窗口与撕裂窗口的布局
- * 都经 `layout-broadcast` 广播镜像到 `uiStateStore`。跨窗口拖拽的**会话、命中调和、
- * 落点解析、释放检测（看门狗）也全部在 Rust**——本 store 只承担：
- * - 角色/窗口身份（label 分流）；撕裂窗口启动 bootstrap + 订阅广播渲染自身切片
- * - 拖拽输入桥：源窗口 4px 候选阈值 → `drag_update`（带 start）转正；pointermove →
- *   `drag_update`（start=null）上报坐标（Rust 广播 `drag-session` 驱动各窗口 ghost +
- *   命中计算）；pointerup → `drag_end`
- * - 本窗口 DOM 命中计算与上报（`drag_hit`）+ 本地 drop 指示器（dropTarget 渲染用）
- * - 撕裂窗口 OS 生命周期（Rust 建/关窗，本 store 只负责关闭上报 `panel_window_closed`）
- * - 视图交接（releaseView：flush 落盘 + 清内存；视图离开本窗口时调用）
- * - 协作连接宿主重算（按当前布局镜像判断本窗口是否承载协作视图）
- *
- * 释放检测三层冗余（全部汇入 Rust `drag_end`，先到先得幂等）：
- * 1) 源窗口 pointerup（捕获期间窗口外事件通常可达）
- * 2) Windows 左键物理状态轮询（`is_mouse_left_down`，窗口外 pointerup 丢失的主修复）
- * 3) Rust 看门狗（一段时间没有新的移动上报即按最后坐标收尾，跨平台兜底）
+ * 布局唯一权威在 Rust `layout.rs`：布局模型、拖拽会话/命中调和/落点解析/释放检测（看门狗）都在 Rust，
+ * 经 `layout-broadcast`/`drag-session` 广播镜像到各窗口；本 store 只承担拖拽输入桥（moveDragCandidate/
+ * updateDrag/endDrag）、本窗口 DOM 命中上报（`drag_hit`）、撕裂窗口关闭上报、视图交接与协作宿主重算。
+ * 释放检测三层冗余（全部汇入 Rust `drag_end`，先到先得幂等）：源窗口 pointerup、Windows 左键物理
+ * 状态轮询（窗口外 pointerup 丢失的主修复）、Rust 看门狗按最后坐标收尾。
  */
 import { create } from "zustand";
 import type { Viewport } from "@xyflow/react";

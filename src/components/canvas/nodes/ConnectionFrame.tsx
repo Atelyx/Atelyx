@@ -2,26 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { Handle, Position } from "@xyflow/react";
 
 /**
- * 节点连接边框：四边透明长条拉线区 + 按需渐显的连接圆点与选中发光。
- * 四边各重叠两个透明长条 handle（source + target，上层可交互）——
- * 鼠标可从节点边缘任意位置拉线连接到另一个节点的边缘。
- *
- * 视觉按需渐显（CSS opacity 过渡），常态不显示任何指示、保持画布干净：
- * - 连接圆点 = 每边一个（React Flow 默认 handle 样式的圆点），外缘 = 条带外缘
- *   （= 连线锚点），圆心落在节点边框内缘（随边框宽 1~1.5px 内缩，视觉即贴在
- *   边缘上）；鼠标移到对应边的条带时该边圆点渐显、移开淡出；
- * - 选中反馈 = 节点边缘阴影发光（透明层贴合节点边缘，仅外阴影向外发光，
- *   圆角继承节点根元素），不改节点边框。
- *
- * 锚点几何（对齐 React Flow 规则，关键）：最终连线端点取 handle 外缘，
- * 拖拽预览线与落点吸附取 handle 中心——条带以节点边缘为轴、外 6/内 4
- * （padding 盒口径，外缘 = 圆点外缘），连线端点止于圆点外缘、
- * 预览线起点 ≈ 节点边缘；条带越厚锚点越远浮，故保持薄。
- *
- * 层序：topType 指定的类型渲染在上层（点击/释放优先命中）：
- * - 产出方（文本/媒体）：source 在上 → 从边缘拉出
- * - 消费方（对话）：target 在上 → 拉线接入（也从边缘拉出到产出方，方向仍为产出→消费）
- * connectionMode 为 Loose：任意 handle 组合可连接，连线语义由两端节点类型自动分类（isValidConnection 兜底）。
+ * 节点连接边框：四边透明长条拉线区（source + target 重叠各一条）+ 悬停渐显的连接圆点 + 选中发光。
+ * 鼠标可从节点边缘任意位置拉线；连接模式为 Loose，具体组合是否成立由 isValidConnection 按两端节点类型判定。
  */
 
 /** 条带越出节点边缘的深度（px）：条带外缘 = 拉线锚点 = 圆点外缘 */
@@ -46,8 +28,8 @@ interface Props {
 /** 仅覆盖 React Flow 默认 handle 自带的居中 translate（外观重置由 .conn-strip 类承担） */
 const STRIP_STYLE = { transform: "none" } as const;
 
-/** 四边的条状定位（覆盖 React Flow 默认圆点样式，拉伸成整条边）。
- * 条带以节点边缘为轴跨内外两侧（外 STRIP_OUT / 内 STRIP_IN），外缘 = 拉线锚点。 */
+/** 四边的条状定位（覆盖 React Flow 默认圆点样式，拉伸成整条边）：以节点边缘为轴跨外 STRIP_OUT / 内 STRIP_IN。
+ * 条带保持薄：连线端点取 handle 外缘、拖拽预览取 handle 中心，条带越厚锚点越远离视觉边缘。 */
 function stripStyle(position: Position): React.CSSProperties {
   switch (position) {
     case Position.Top:
@@ -85,10 +67,8 @@ function stripStyle(position: Position): React.CSSProperties {
   }
 }
 
-/** 圆点定位：外缘 = 条带外缘（= 连线锚点），圆心落在节点边框内缘。
- * top/left 以元素顶/左边缘为基准，负向偏移半个直径即圆心落在边缘基准上，
- * 只需单轴 translate 居中；bottom/right 以底/右边缘为基准，同理只偏移水平/垂直单轴
- * （不可用 translate(-50%, -50%)——它恒向左上偏，会把下方/右侧圆点推进节点内部）。 */
+/** 圆点定位：圆心落在节点边缘上，故按所在边只对单轴做居中 translate——
+ * 不可用 translate(-50%, -50%)，它恒向左上偏，会把下方/右侧的圆点推进节点内部。 */
 function dotStyle(position: Position): React.CSSProperties {
   const half = DOT_SIZE / 2;
   switch (position) {
@@ -168,8 +148,7 @@ export function ConnectionFrame({ topType, selected }: Props) {
           }}
         />
       ))}
-      {/* 下层 handle：与上层几何重合、DOM 在前恒被覆盖（事件恒由上层接），
-          仅作为另一种 handle 类型存在——两类 handle 的 bounds 都是连线锚点查找所需 */}
+      {/* 下层 handle：几何与上层重合且 DOM 在前，事件恒被上层截获；它只负责另一种类型的锚点存在 */}
       {POSITIONS.map((p) => (
         <Handle
           key={`${p}-${bottomType}`}

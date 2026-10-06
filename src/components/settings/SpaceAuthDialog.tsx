@@ -1,9 +1,7 @@
 /**
- * 协作空间登录/注册弹窗（设置「多人协作」区按钮触发）：
- * 登录与注册共用一套表单骨架，注册多一项可选昵称与密码确认。
- * need-login 引导（spaceDirectoryStore.loginPrompt）存在时预填服务器地址；
- * 携带重试条目时提示登录后自动进入目标空间，提交成功即清除引导并关闭弹窗。
- * 分层：只调 spaceAuthStore / spaceDirectoryStore / appStore 的动作，不直调 service。
+ * 协作空间登录/注册弹窗（设置「多人协作」区触发）：共用表单骨架，注册多可选昵称与密码确认。
+ * need-login 引导存在时预填服务器地址；携带重试条目时提交成功即自动进入目标空间并清除引导。
+ * 只调 spaceAuthStore / spaceDirectoryStore / appStore 的动作，不直调 service。
  */
 import { useState } from "react";
 import { X } from "lucide-react";

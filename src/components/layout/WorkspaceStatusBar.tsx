@@ -1,8 +1,6 @@
 /**
- * 工作区状态栏（窗口底部常驻，只承载「全局/环境」事实）。
- *
- * 只放仓库/空间身份与协作通道状态：各视图自己的计数与保存态归视图底条与面板头
- * `ViewStatusIndicator`，此处再放一份会出现重复的「保存中…」。
+ * 工作区状态栏（窗口底部常驻，只承载「全局/环境」事实：仓库/空间身份与协作通道状态）。
+ * 各视图自己的计数与保存态归视图底条与面板头 ViewStatusIndicator，此处再放一份会出现重复的「保存中…」。
  */
 import { Cloud, HardDrive } from "lucide-react";
 import { useAppStore } from "@/stores/appStore";

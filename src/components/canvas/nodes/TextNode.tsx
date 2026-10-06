@@ -71,8 +71,7 @@ export function TextNode({ id, data, width, height, selected }: NodeProps) {
   useEffect(() => {
     if (editing) cmViewRef.current?.focus();
   }, [editing]);
-  /** 退出编辑：笔记节点把会话最新全文镜像回节点（bodyMd 只是渲染缓存，随画布不落 .md）；
-   *  画布内文本节点把草稿写回节点（随画布 debounce 写 .atlx），并入画布撤销栈。 */
+  /** 退出编辑：笔记节点把会话全文镜像回节点（bodyMd 只是渲染缓存，不落 .md）；画布内文本节点把草稿写回节点并入画布撤销栈。 */
   const exitEdit = useCallback(() => {
     setEditing(false);
     if (isSaved) {
@@ -90,8 +89,7 @@ export function TextNode({ id, data, width, height, selected }: NodeProps) {
   /** 退出编辑的稳定入口：mousedown 监听不随每次输入重建（见下） */
   const exitEditRef = useRef(exitEdit);
   exitEditRef.current = exitEdit;
-  /** 编辑态点节点外退出：按节点容器命中判定（容器内交互——属性小标/协作徽标/编辑按钮——不退出；
-   *  这些交互会使输入面失焦，用 blur 判定会误退出）。 */
+  /** 编辑态点节点外退出：按节点容器命中判定而非 blur——容器内的按钮同样会让输入面失焦，用 blur 会误退出。 */
   useEffect(() => {
     if (!editing) return;
     const onDocMouseDown = (e: MouseEvent) => {
@@ -100,8 +98,7 @@ export function TextNode({ id, data, width, height, selected }: NodeProps) {
       if (target?.closest?.("[data-popup-layer]")) return;
       exitEditRef.current();
     };
-    // 捕获阶段判定：活动块切换会同步重建正文 DOM，冒泡到 document 时命中节点已脱离
-    // 文档树，contains 会把节点内的点击误判为外点；捕获阶段先于任何 DOM 改动观测
+    // 捕获阶段判定：活动块切换会同步重建正文 DOM，冒泡到 document 时命中的节点已脱离文档树，contains 会把节点内的点击误判为外点
     document.addEventListener("mousedown", onDocMouseDown, true);
     return () => document.removeEventListener("mousedown", onDocMouseDown, true);
   }, [editing]);
@@ -273,8 +270,7 @@ export function TextNode({ id, data, width, height, selected }: NodeProps) {
             onCollabDivergence={(ytextText) => session.handleCollabDivergence(ytextText)}
           />
         ) : editing ? (
-          /* 画布内文本节点：正文随 .atlx 内嵌，草稿提交由退出编辑触发（不涉及仓库文件）；
-             撤销走 CM 本地历史（该编辑面没有按文件持久栈） */
+          /* 画布内文本节点：草稿随 .atlx 内嵌，提交由退出编辑触发（不碰仓库文件）；撤销走 CM 本地历史 */
           <MarkdownEditor
             body={draft}
             syncSeq={0}

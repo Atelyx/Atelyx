@@ -1,13 +1,6 @@
 /**
- * 右侧边栏属性面板：不只画布专属，也显示笔记属性。
- *
- * 上下文（焦点优先，其次选中）：
- * - 焦点在笔记编辑器面板 → 显示当前笔记的 frontmatter 属性（NotePropertiesView 复用，增删改/切类型，编辑即写盘）
- * - 选中笔记节点（text + file）→ 显示该笔记的属性
- * - 焦点在画布/选中其他节点 → 节点属性（对话：Agent + 来源/资产列表；文本/媒体：基本信息 + 来源/消费方）
- * - 其余（无选中、非笔记焦点）→ 空面板（无占位提示）
- * 资产列表项点击 → setCenter 定位到对应节点（与 @chip 点击定位一致）。
- * 分层：走 canvasStore / appStore / uiStateStore / panelStore / noteStore / settingsStore，不直调 service。
+ * 右侧边栏属性面板：笔记 frontmatter 属性与画布节点属性合一，不只服务画布。
+ * 上下文按「焦点优先、其次选中」解析，规则见 `resolveContext`。
  */
 import {
   Bot,
@@ -128,7 +121,7 @@ function sourceFallback(node: FlowNode): string {
   return "暂无";
 }
 
-/** 资产列表行：节点类型图标 + 显示名（对话行标注「分支」血缘）。 */
+/** 资产列表行：点击经 onLocate 把视口 setCenter 到该节点；对话行标注「分支」血缘。 */
 function AssetRow({ node, onLocate }: { node: FlowNode; onLocate: (id: string) => void }) {
   const icon =
     node.type === "conversation" ? (

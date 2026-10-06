@@ -1,18 +1,6 @@
 /**
- * 聊天消息气泡（画布对话节点 / AI 对话面板共用）。
- *
- * 收敛两处的重复实现：气泡容器 + @引用胶囊（按原文位置内嵌）+ 附件缩略 + 思考折叠 +
- * Markdown 渲染 + 操作按钮组（复制/回到此处/分支/重新生成）。
- * user/assistant 消息统一 Markdown 渲染；差异由 props 表达：@胶囊 点击行为
- * （画布 = 定位节点，面板 = 打开笔记）、附件（仅画布有）、分支/重新生成（入口各自）。
- * 气泡配色/内边距/流式占位两入口恒同值，内联为模块级常量（调用点不再传，memo 引用恒稳定）。
- *
- * memo 生效前提：markdownLinks 必须 useMemo 稳定化、onRollback/onBranch 等
- * 回调 useCallback——流式期间历史消息靠引用不变跳过重渲染（assistant 消息无 refs/
- * 附件，引用天然稳定，重渲染最贵的 MarkdownView 得以跳过）。
- *
- * 保留原生 button 的一处（脱离基元的原因）：`ToolRunRow` 的展开/收起行——可点击的标题行
- * （整行 `w-full` 展开详情、行内混排状态色与等宽摘要），语义是行而非按钮。
+ * 聊天消息气泡（画布对话节点 / AI 对话面板共用）：气泡容器 + @引用胶囊 + 附件缩略 + 思考折叠
+ * + Markdown 渲染 + 操作按钮组。两入口的差异（@胶囊行为、附件、分支/重新生成）由 props 表达。
  */
 import { memo, useMemo, useState, type ReactNode } from "react";
 import {
@@ -98,6 +86,8 @@ interface ChatMessageBubbleProps {
   stopPropagation?: boolean;
 }
 
+/** 气泡（memo）：memo 生效前提是 markdownLinks 须 useMemo 稳定化、onRollback/onBranch 等回调须
+ *  useCallback——流式期间历史消息靠引用不变跳过重渲染，最贵的 MarkdownView 得以跳过。 */
 export const ChatMessageBubble = memo(function ChatMessageBubble({
   role,
   displayContent,
@@ -332,7 +322,9 @@ function toolIcon(name: string, size: number) {
   }
 }
 
-/** 工具调用行：可点开详情。折叠 = 图标 + 参数摘要 + 状态 + 结果摘要；展开 = 完整参数与结果。 */
+/** 工具调用行：可点开详情。折叠 = 图标 + 参数摘要 + 状态 + 结果摘要；展开 = 完整参数与结果。
+ *  保留原生 button（不归基元）：可点击的标题行（整行 w-full 展开详情、行内混排状态色与等宽摘要），
+ *  语义是行而非按钮。 */
 function ToolRunRow({ run }: { run: ToolRun }) {
   const [expanded, setExpanded] = useState(false);
   const statusColor =

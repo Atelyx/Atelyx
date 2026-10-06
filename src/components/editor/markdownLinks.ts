@@ -1,9 +1,7 @@
 /**
  * 链接域纯函数与链接回调契约（分块渲染的解析侧与点击侧共用，保证同一 href 的分类一致）。
- *
  * 分类只依据 href 与宿主注入的回调：能命中仓库笔记 = path，能创建 = create，
  * 可走系统浏览器 = external，其余 = plain（保持原文，不产出可点形态）。
- * `MarkdownEditorLinks` 由 `MarkdownEditor` 原样 re-export，消费方导入路径不变。
  */
 import { decodeLinkHref, isOpenableUrl } from "@/utils/markdown";
 import { isSafeVaultRelPath } from "@/utils/markdownCore";

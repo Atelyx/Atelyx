@@ -1,11 +1,7 @@
 /**
- * Frontmatter 解析/序列化工具（笔记属性面板数据层）。
- *
- * 解析用 `gray-matter`（内部 js-yaml v3）：
- * - 兼容 `tags: [a, b]` 与 `tags:\n  - a` 两种数组写法（解析结果均为 string[]）；
- * - `stringify` 的 options 会透传给 js-yaml dump——必须显式传 `lineWidth` 防默认 80 列折行长值，
- *   `noRefs` 防序列化时出现 `&ref` 引用标记；
- * - 空对象序列化时不输出 `---` 块（删光属性后文件自然回到无 frontmatter 态）。
+ * Frontmatter 解析/序列化工具（笔记属性面板数据层）。解析用 `gray-matter`（内部 js-yaml v3）：
+ * 兼容 `tags: [a, b]` 与块级两种数组写法；stringify 必须显式 `lineWidth`（防默认 80 列折行长值）
+ * 与 `noRefs`（防 `&ref` 引用标记）；空对象序列化不输出 `---` 块（删光属性即回到无 frontmatter 态）。
  */
 import matter from "gray-matter";
 import { BADGE_PROPERTY_KEYS } from "@/constants/notes";

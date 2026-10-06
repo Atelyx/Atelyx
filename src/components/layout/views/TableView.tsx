@@ -1,10 +1,7 @@
 /**
  * 表格编辑器视图面板（全局当前打开表格；无文件时占位引导）。
  * panelId 用于聚焦判定（覆盖编辑键盘监听门控，同画布快捷键惯例）。
- *
- * 内容自载（同 CanvasView 惯例）：表格内容（tableStore）是每窗口独立的运行时态，
- * 撕裂窗口/跨窗口经握手或 open-file-changed 只镜像了 currentTableFile 文件路径，
- * 需在此按文件加载磁盘内容；tableFile 已同（本窗口已加载）则跳过，防重复读盘。
+ * 内容自载（同 CanvasView 惯例）：跨窗口只镜像 currentTableFile 路径（tableStore 是每窗口独立运行时态），需按文件加载磁盘内容；tableFile 已同则跳过防重复读盘。
  */
 import { useEffect } from "react";
 import { Table as TableIcon } from "lucide-react";

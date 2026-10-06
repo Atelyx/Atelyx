@@ -2,16 +2,14 @@
  * 会话压缩标记行：画布对话节点与 AI 对话面板共用，插在「压缩边界之后」首条消息之前。
  *
  * 只作提示与摘要展开——被压缩的原始消息仍完整显示在标记上方（非破坏注解），
- * 模型请求历史则由摘要代替该区间（见 `utils/compaction` 的 `splitByCompaction`）。
- *
- * 保留原生 button 的一处（脱离基元的原因）：展开/收起行是可点击的标题行（整行 `w-full`
- * 展开摘要、行内混排图标与等宽计数），语义是行而非按钮。
+ * 模型请求历史由摘要代替该区间（见 `utils/compaction` 的 `splitByCompaction`）。
  */
 import { useState } from "react";
 import { ChevronDown, ChevronRight, Layers } from "lucide-react";
 import type { ConversationCompaction } from "@/types";
 
-/** 压缩标记：图标 + 「上下文已压缩」+ 覆盖条数；可展开查看检查点摘要。 */
+/** 压缩标记：图标 + 「上下文已压缩」+ 覆盖条数；可展开查看检查点摘要。
+ *  保留原生 button（不归基元）：展开/收起是可点击的标题行（整行 w-full、行内混排图标与计数），语义是行。 */
 export function CompactionMarker({ compaction }: { compaction: ConversationCompaction }) {
   const [expanded, setExpanded] = useState(false);
   return (

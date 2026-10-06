@@ -1,12 +1,9 @@
 /**
  * AI 对话面板（右侧边栏）的消息与会话类型。
- * 持久化：以 `.atelyx/对话历史/` 文件夹为真相——每会话一个消息 `.jsonl`（追加式写）+ 可选
- * `.meta.json` 元数据侧车（title/agentId/compaction）；会话清单 = 扫目录（无整文件索引，多设备共享文件夹
- * 实时互见）；面板级覆盖存 `.atelyx/editor-chats-meta.json`。单一全局历史，不按笔记归属。
- *
- * 与画布对话（types/message.ts）的差异：面板无 system 消息、无画布节点归属——
- * 引用只发文件路径（refs 仅作 chip 展示），附件以临时区路径引用随消息持久化；
- * 错误占位用 content 的 `[错误]` 前缀标记（同 runStream 约定）。
+ * 持久化以 `.atelyx/对话历史/` 为真相：每会话一个消息 `.jsonl`（追加式写）+ 可选 `.meta.json`
+ * 侧车；会话清单 = 扫目录（无整文件索引，多设备实时互见）。单一全局历史，不按笔记归属。
+ * 与画布对话（types/message.ts）的差异：无 system 消息、无节点归属——@引用 只发文件路径
+ * （refs 仅 chip 展示），附件以临时区路径引用随消息持久化，错误占位用 `[错误]` 前缀（同 runStream）。
  */
 import { EDITOR_CHATS_META_SCHEMA } from "@/constants/editorChats";
 import type { AgentStep, Attachment } from "./message";

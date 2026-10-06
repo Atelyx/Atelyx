@@ -1,18 +1,7 @@
 /**
- * 图片单元格·轮播模式（ImageCell 分派壳的拆分件）。
+ * 图片单元格·轮播模式（ImageCell 分派壳的拆分件）：主图滑动翻页 + 底部缩略图队列长按排序。
  *
- * - 主图：object-contain 居中、四周 4px 内衬不顶格；按住左右滑动实时跟手（横向 >5px 激活、
- *   纵向占优放弃、两端阻尼不循环、松手过阈值翻页否则回弹、单次手势钳制一页），slide 以图片
- *   条目为 key（重排/切换内容复用无跳变）。
- * - 队列：多图时底部迷你缩略图条（当前图强调色描边、点击跳转、溢出横向滚动、当前项跟随可见）；
- *   **长按小图拖动排序**——被拖项 transform 跟手、其余项让位，松手 reorderImages 写回。
- *
- * 拖拽事件管线与表格行拖拽同款（document 级监听 + ref 路由）：pointerdown 只登记按压 + 长按
- * 定时器，move/up/cancel 由 document 监听处理——被拖元素激活后会被 React 原地改写（事件属性
- * 剥离），元素级监听会事件断流。拖拽期间队列渲染恒等顺序、由 transform 让位：DOM 重排与
- * transform 叠加会双重位移 + 被拖项脱手。跟手位移 ref + 直写 DOM（pointermove 零 React 渲染，
- * 仅槽位切换重渲染）；拖拽期间按 pointerId 过滤他指事件。位移按 CSS zoom 换算（指针视觉像素
- * ↔ transform 布局像素），激活时读一次缓存。
+ * 两条手势管线的实现约束见各自锚点注释；视觉像素与布局像素的换算见 zoomOf。
  */
 import { memo, useEffect, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
@@ -186,7 +175,8 @@ export const ImageCarouselMode = memo(function ImageCarouselMode({
   };
 
   // document 级 move/up/cancel：拖拽全程、按压取消与「松手早于长按」的清理都在此路由
-  // （onCurChange 经 useCallback 稳定，监听器不重挂）
+  // （onCurChange 经 useCallback 稳定，监听器不重挂）。
+  // 走 document 而非元素级监听：被拖元素激活后会被 React 原地改写、事件属性剥离，元素级监听会断流。
   useEffect(() => {
     const onMove = (e: PointerEvent) => {
       // —— 队列拖拽（按 pointerId 过滤他指事件）——
@@ -264,6 +254,7 @@ export const ImageCarouselMode = memo(function ImageCarouselMode({
   const slideTransition = dragging
     ? "none"
     : "transform var(--dur-base) var(--ease)";
+  // 只渲染 cur±1（配合上面的一页钳制）；key 取图片条目，重排/切换内容时复用同一 slide 无跳变
   const slides: ReactNode[] = [];
   {
     const center = Math.round(view);
@@ -310,6 +301,9 @@ export const ImageCarouselMode = memo(function ImageCarouselMode({
       >
         {slides}
       </div>
+      {/* 底部迷你缩略图条：当前图强调色描边、点击跳转、溢出横向滚动、当前项跟随可见；
+          长按小图拖动排序见 onThumbPointerDown。拖拽期间队列渲染顺序恒等、只由 transform 让位——
+          DOM 重排叠加 transform 会双重位移并让被拖项脱手 */}
       {multi && (
         <div
           ref={queueRef}

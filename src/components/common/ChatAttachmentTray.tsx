@@ -5,9 +5,9 @@ import { Menu, MenuItem } from "@/components/common/Menu";
 import { IconButton } from "@/components/common/Button";
 
 /**
- * 待发送附件托盘（临时附件通道，画布对话节点与 AI 对话面板共用）。
- * 纯展示组件：缩略图 chip 列表 + 移除；chip 右键「固定到画布」（仅无源附件，面板不传 onPin）。
- * 右键菜单走公共 Menu（portal 到 body + 视口坐标，天然避开 React Flow transform 容器）。
+ * 待发送附件托盘（临时附件通道，画布对话节点与 AI 对话面板共用）：缩略图 chip 列表 + 移除。
+ * chip 右键「固定到画布」（仅无源附件，面板不传 onPin）；右键菜单走公共 Menu
+ * （portal 到 body + 视口坐标，天然避开 React Flow transform 容器）。
  */
 interface Props {
   attachments: PendingAttachment[];
