@@ -28,7 +28,7 @@ Atelyx 是插件化平台：插件 = 一个 git 仓库（市场侧以 GitHub 为
 | `ctx.services` | 服务发现：`ctx.services.list()` 返回当前已注册服务面（含提供者插件 id）；`ctx.services.get("foo")` 判空读取（可选依赖用，见 [ctx API](ctx-api.md)） |
 | `ctx.native` | 原始命令逃生舱：`ctx.native.invoke("command", args)` 调用未封装成 ctx 的 Rust 命令（敏感，进审计；见 [ctx API](ctx-api.md)） |
 | `ctx.events` | 领域事件总线：`ctx.events.on("canvas:changed", ...)` 订阅（`table:changed`/`vault:changed` 等，见 [ctx API](ctx-api.md)） |
-| `ctx.slots` | 注册面：`registerView`/`registerTableView`/`registerNode`/`registerEdge`/`registerUi`/`registerMenu`/`registerSetting`/`registerAppPage`/`registerCommand`/`registerThemeSetting`；`declare`/`host` 声明并承载插件自有的槽位（见 [自定义槽位指南](custom-slots.md)）；`list()` 返回可贡献的槽位声明表（见 [ctx API](ctx-api.md)） |
+| `ctx.slots` | 注册面：`registerView`/`registerTableView`/`registerNode`/`registerEdge`/`registerUi`/`registerMenu`/`registerSetting`/`registerAppPage`/`registerCommand`/`registerThemeSetting`/`registerShell`；`declare`/`host` 声明并承载插件自有的槽位（见 [自定义槽位指南](custom-slots.md)）；`list()` 返回可贡献的槽位声明表（见 [ctx API](ctx-api.md)） |
 | `ctx.ai` | AI 会话与工具：`ctx.ai.chat(...)` 直连模型；`ctx.ai.registerTool(...)` 贡献模型可调用的工具 |
 | `ctx.effect` | 注册副作用（订阅/接线等），插件停用/卸载时自动撤销——**所有注册都应经它包裹** |
 
@@ -38,6 +38,16 @@ Atelyx 是插件化平台：插件 = 一个 git 仓库（市场侧以 GitHub 为
 适合把别人的原生界面搬进面板，代价是读不到该页面的内容——
 需要它的数据时走它自己的接口（`ctx.http`）。注意内嵌加载受目标站点的同源/跨域设置约束，
 和宿主 `ctx.http` 的地址策略无关。
+
+## 外壳接管
+
+`ctx.slots.registerShell({ component, priority? })` 注册的插件在启用时**整体替换主窗口界面**（桌面工作区与移动端单栏页都替换）。接管者拥有整个应用外壳：
+
+- **标题栏拖拽区与窗口控制自理**：根元素或顶栏写 `data-tauri-drag-region`；最小化 / 最大化 / 关闭经 `ctx.window`。
+- **内嵌既有视图**：`ctx.slots.host("view/<kind>", { hostId })` 渲染任意已注册视图——画布等重型视图用 `render(hostId)` 承载，`hostId` 自定（用于聚焦门控）。
+- **数据面照常可用**：`ctx.canvas` / `ctx.note` / `ctx.chat` / `ctx.vault` 等服务不因接管而变化，导航与面板体系由接管者自建。
+
+多个插件竞争时高 priority 胜出（同 priority 后注册者胜）；插件停用 / 卸载即恢复默认界面；接管组件渲染崩溃时自动回退默认界面并弹通知——**宿主没有逃生入口，接管即拥有界面**。样式仍走 CSS 变量与 token（[样式与容器契约](styling.md)）。
 
 依赖声明用 apply 对象形式：`{ name, inject: ["table"], apply(ctx) { ... } }`——`inject` 声明的
 服务缺失时插件不激活（管理页显示失败原因）；`inject` 值形如 `{ foo: { optional: true } }` 的可选

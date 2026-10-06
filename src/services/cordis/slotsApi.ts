@@ -1,5 +1,5 @@
 /**
- * ctx.slots：插件 UI 注册 API（视图/节点/边/表格视图/设置项/应用页/命令/主题设置项）。
+ * ctx.slots：插件 UI 注册 API（视图/节点/边/表格视图/设置项/应用页/命令/主题设置项/外壳接管）。
  *
  * 服务对象带 Cordis tracker（`symbols.tracker`）——经插件 ctx 读取时 `this.ctx` 解析为
  * 调用方插件上下文，注册随其 fiber 生命周期自动撤销（ctx.effect）。pluginId 经挂载器的
@@ -139,6 +139,13 @@ export interface RegisterMenuOptions {
   priority?: number;
 }
 
+/** 应用外壳接管注册载荷（shell 槽；single 胜出，整体替换主窗口工作区）。 */
+export interface RegisterShellOptions {
+  component: ComponentType;
+  /** 槽优先级（higher wins；缺省 0。多个插件竞争外壳时高 priority 胜出）。 */
+  priority?: number;
+}
+
 /** 装饰器注册载荷（ctx.slots.decorate：包裹某槽渲染内容，用于修改宿主面板 UI）。 */
 export interface RegisterDecorateOptions {
   /** 槽名（须在 constants/slots 的声明表内且可被装饰）。 */
@@ -171,7 +178,7 @@ export interface RegisterDeclareOptions {
   decoratable?: boolean;
 }
 
-/** 插件 UI 注册服务（视图/节点/边/表格视图/设置项/应用页/命令/主题设置项/具名槽位/右键菜单/装饰器）。 */
+/** 插件 UI 注册服务（视图/节点/边/表格视图/设置项/应用页/命令/主题设置项/具名槽位/右键菜单/装饰器/外壳接管）。 */
 export interface SlotsApi {
   registerView(opts: RegisterViewOptions): () => void;
   registerTableView(opts: RegisterTableViewOptions): () => void;
@@ -183,6 +190,8 @@ export interface SlotsApi {
   registerThemeSetting(opts: RegisterThemeSettingOptions): () => void;
   /** 向已声明的具名 UI 槽位贡献一个组件（list 槽多贡献有序）。 */
   registerUi(opts: RegisterUiOptions): () => void;
+  /** 接管应用外壳（shell 槽，single 胜出）：整体替换主窗口工作区，随停用撤销回退默认界面。 */
+  registerShell(opts: RegisterShellOptions): () => void;
   /** 向右键菜单贡献一个菜单项（label + 回调；list 槽多贡献有序）。 */
   registerMenu(opts: RegisterMenuOptions): () => void;
   /** 以装饰器包裹某槽的渲染内容（修改宿主面板 UI 的正解；包装是建设性的，替换是破坏性的）。
@@ -193,10 +202,17 @@ export interface SlotsApi {
   declare(opts: RegisterDeclareOptions): () => void;
   /** 渲染某槽位（已声明的宿主槽或插件槽）的贡献，返回 React 组件：
    *  list = 全部贡献按 priority 降序，single = 胜出者；供插件在自己面板内承载他插件贡献。
+   *  hostId 可选：承载视图槽（view/<kind>）时传宿主面板 id，重型视图的 render(hostId) 依赖它做聚焦门控。
    *  调用时槽须已声明（宿主插件先 declare 后 host；装配顺序确定，跨插件托管须声明方先挂载）。 */
-  host(slot: string): () => ReactNode;
+  host(slot: string, opts?: HostOptions): () => ReactNode;
   /** 可贡献的槽位清单（宿主声明表 + 插件运行时声明的合并冻结视图）——插件据此发现能贡献的位置。 */
   list(): readonly SlotDeclaration[];
+}
+
+/** 槽位宿主选项（host 的可选承载参数）。 */
+export interface HostOptions {
+  /** 宿主面板/撕裂窗口 id：承载视图槽（view/<kind>）时传给载荷的 render(hostId)。 */
+  hostId?: string;
 }
 
 interface SlotsApiInstance extends SlotsApi {
@@ -250,6 +266,14 @@ export function createSlotsApi(): SlotsApi {
       const pluginId = pluginIdOfCtx(ctx);
       return ctx.effect(() => registerUiSlot(opts.slot, pluginId, { component: opts.component }, { priority: opts.priority ?? 0, cardinality: opts.cardinality }));
     },
+    registerShell(this: SlotsApiInstance, opts: RegisterShellOptions): () => void {
+      if (typeof opts.component !== "function") throw new Error("外壳接管需要组件");
+      const ctx = this.ctx;
+      const pluginId = pluginIdOfCtx(ctx);
+      return ctx.effect(() =>
+        registerUiSlot("shell", pluginId, { component: opts.component }, { cardinality: "single", priority: opts.priority ?? 0 }),
+      );
+    },
     registerMenu(this: SlotsApiInstance, opts: RegisterMenuOptions): () => void {
       if (typeof opts.target !== "string" || opts.target.length === 0) throw new Error("菜单目标需要非空");
       const ctx = this.ctx;
@@ -272,7 +296,7 @@ export function createSlotsApi(): SlotsApi {
       // 声明抛错随 apply 传播 → 该行 failed（冲突 / 覆盖宿主槽位均可读原因定位）。
       return ctx.effect(() => declareSlot(opts, pluginId));
     },
-    host(this: SlotsApiInstance, slot: string): () => ReactNode {
+    host(this: SlotsApiInstance, slot: string, opts?: HostOptions): () => ReactNode {
       if (typeof slot !== "string" || slot.length === 0) throw new Error("槽位宿主需要非空槽名");
       // 未声明即拒绝：托管一个不存在的槽是编程错误，静默渲染空白会掩盖拼写错误。
       if (!findSlotDeclarationRuntime(slot)) {
@@ -282,7 +306,7 @@ export function createSlotsApi(): SlotsApi {
       }
       const Host = getPluginSlotHostComponent();
       if (!Host) throw new Error("槽位宿主组件未就绪");
-      return () => createElement(Host, { slot });
+      return () => createElement(Host, { slot, hostId: opts?.hostId });
     },
     registerSetting(this: SlotsApiInstance, opts: RegisterSettingOptions): () => void {
       if (typeof opts.key !== "string" || opts.key.length === 0) throw new Error("设置项需要非空 key");

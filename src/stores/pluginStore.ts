@@ -74,6 +74,7 @@ import type {
   ThemeSettingRegistration,
 } from "@/services/cordis/ui";
 import type { ViewContribution } from "@/services/cordis/slots";
+import type { SlotContribution } from "@/utils/cordis/slots";
 import {
   CORDIS_BUILTIN_BY_ID,
   CORDIS_BUILTIN_DEFS,
@@ -95,13 +96,14 @@ import { mountPlugin, unmountAll, unmountPlugin } from "@/services/cordis/loader
 import { mountPluginFromPackage } from "@/services/cordis/packageMount";
 import {
   resolveViewKind,
+  resolveSlot,
   onSlotChange,
   setSlotWinnerOverrideSource,
   slotChain as buildSlotChain,
   slotConflictRows as buildSlotConflictRows,
   dockableViewKinds as slotDockableViewKinds,
 } from "@/services/cordis/slots";
-import type { ViewSlotContribution } from "@/services/cordis/slots";
+import type { ViewSlotContribution, UiSlotPayload } from "@/services/cordis/slots";
 import { composePlugins, compositionPackages, mountOrder } from "@/utils/cordis/composition";
 import {
   useCollabStore,
@@ -145,6 +147,12 @@ interface ViewProviderState {
   name: string;
   enabled: boolean;
   installed: boolean;
+}
+
+/** 应用外壳接管注册（shell 槽胜出者；App 外壳承载渲染用）。 */
+export interface ShellContribution {
+  component: ComponentType;
+  pluginId: string;
 }
 
 /** 全量重载的触发原因。`"vault-switch"` = 切仓库触发：声明「切仓库保活」（清单
@@ -204,6 +212,8 @@ interface PluginStoreState {
   pluginEdgeTypes(): Record<string, ComponentType>;
   /** 插件应用页面注册（app 页面/模式全页接管）。 */
   pluginAppPage(id: string): PluginAppPageRegistration | undefined;
+  /** 应用外壳接管注册（shell 槽胜出者；缺省 = 默认界面）。 */
+  shellContribution(): ShellContribution | undefined;
   /** 面板视图候选（内建 + 插件面板）。 */
   pluginViewKinds(): string[];
   /** 某视图的贡献（统一视图槽注册表；ViewHost 分派用，缺注册 = 空面板占位）。 */
@@ -341,6 +351,9 @@ function ensurePluginChangeListener(): void {
 
 /** slots 视图贡献 → ViewContribution 转换缓存（selector 稳定引用；随贡献对象 GC 自动失效）。 */
 const slotViewCache = new WeakMap<ViewSlotContribution, ViewContribution>();
+
+/** shell 槽胜出贡献缓存（同 viewContribution：selector 订阅需稳定引用）。 */
+const slotShellCache = new WeakMap<object, ShellContribution>();
 
 /** 安装后统一收尾（模块私有）：宿主兼容强制 + 重载；返回落位行（调用方按实际 id 提示）。 */
 async function finishInstall(get: () => PluginStoreState, row: PluginRow): Promise<PluginRow> {
@@ -982,6 +995,18 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
           pluginId: slot.pluginId,
         };
         slotViewCache.set(slot, cached);
+      }
+      return cached;
+    },
+    shellContribution: () => {
+      // shell 槽胜出者（single；停用/卸载随 fiber 撤销自动消失，回退默认界面）。
+      // 缓存口径同 viewContribution：selector 订阅需稳定引用。
+      const slot = resolveSlot("shell") as SlotContribution<UiSlotPayload> | undefined;
+      if (!slot) return undefined;
+      let cached = slotShellCache.get(slot);
+      if (!cached) {
+        cached = { component: slot.payload.component, pluginId: slot.pluginId };
+        slotShellCache.set(slot, cached);
       }
       return cached;
     },

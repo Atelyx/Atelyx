@@ -365,9 +365,11 @@ export function getPluginFloatingLayerAccess(): PluginFloatingLayerAccess | null
   return floatingLayerAccess;
 }
 
-/** 槽位宿主组件 props（ctx.slots.host(slot) 返回组件的注入载体：按槽渲染贡献）。 */
+/** 槽位宿主组件 props（ctx.slots.host(slot) 返回组件的注入载体：按槽渲染贡献）。
+ *  hostId 可选：承载视图槽时传给重型视图载荷的 render(hostId)（聚焦门控）。 */
 export interface PluginSlotHostProps {
   slot: string;
+  hostId?: string;
 }
 
 let slotHostComponent: ComponentType<PluginSlotHostProps> | null = null;

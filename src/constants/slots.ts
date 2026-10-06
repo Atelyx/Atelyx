@@ -93,6 +93,16 @@ const DECLARATIONS: readonly SlotDeclaration[] = [
     decoratable: false,
   })),
 
+  // ── single 替换槽 ────────────────────────────────────────────────────────────
+  {
+    key: "shell",
+    cardinality: "single",
+    required: COMPONENT_ONLY,
+    scope: "应用外壳",
+    summary: "整体接管主窗口外壳（替换桌面工作区/移动端单栏页；胜出者负责标题栏拖拽区与窗口控制；渲染崩溃自动回退默认界面）。",
+    decoratable: false,
+  },
+
   // ── 开放 kind 槽（前缀放行；插件自定 kind/type）─────────────────────────────
   {
     key: "view",

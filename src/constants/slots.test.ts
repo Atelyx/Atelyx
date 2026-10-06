@@ -12,6 +12,7 @@ import {
   registeredSlots,
   registerSlotContrib,
   registerViewSlot,
+  resolveSlot,
   resolveViewKind,
   unregisterSlot,
 } from "@/services/cordis/slots";
@@ -119,13 +120,28 @@ describe("声明表 ↔ 宿主渲染点守卫", () => {
       );
     }
     // 双向：宿主渲染点都有声明（缺声明 = 注册静默丢失），声明都有渲染点（多声明 = 注册成功却不显示）。
-    const declared = SLOT_DECLARATIONS.filter((d) => !d.prefix && !d.key.startsWith("contextmenu/")).map((d) => d.key);
+    // single 固定槽不在此列：宿主承载组件非 SlotListMount，由下方专用守卫逐槽登记。
+    const declared = SLOT_DECLARATIONS.filter(
+      (d) => !d.prefix && !d.key.startsWith("contextmenu/") && d.cardinality === "list",
+    ).map((d) => d.key);
     expect([...rendered].sort()).toEqual([...declared].sort());
     // 菜单目标与声明的 contextmenu 槽同样双向一致（无宿主的 target 不得留在声明里，反之亦然）。
     const declaredMenus = SLOT_DECLARATIONS.filter((d) => d.key.startsWith("contextmenu/")).map((d) =>
       d.key.slice("contextmenu/".length),
     );
     expect([...menuTargets].sort()).toEqual([...declaredMenus].sort());
+  });
+
+  it("single 固定槽（shell）宿主承载存在", () => {
+    // shell 槽宿主 = App.tsx 的 ShellSlotMount（读 shellContribution 分派胜出者）。
+    // 声明在而承载缺失 = 注册成功却不渲染；承载在而声明缺失 = 注册即失败——此处把双向钉死在声明表。
+    const root = fileURLToPath(new URL("../..", import.meta.url));
+    const text = readFileSync(join(root, "src", "App.tsx"), "utf8");
+    expect(text).toMatch(/shellContribution\(\)/);
+    const singles = SLOT_DECLARATIONS.filter(
+      (d) => !d.prefix && !d.key.startsWith("contextmenu/") && d.cardinality === "single",
+    ).map((d) => d.key);
+    expect(singles).toEqual(["shell"]);
   });
 });
 
@@ -204,6 +220,18 @@ describe("注册校验", () => {
     expect(listSlot("toolbar/note/right")).toHaveLength(1);
     off();
     expect(listSlot("toolbar/note/right")).toEqual([]);
+  });
+
+  it("外壳槽：single 胜出（priority + last-wins），缺省 list 基数拒绝", () => {
+    registerSlotContrib("shell", "com.test.low", { component: () => null }, { cardinality: "single", priority: 0 });
+    const off = registerSlotContrib("shell", "com.test.high", { component: () => null }, { cardinality: "single", priority: 5 });
+    expect(resolveSlot("shell")?.pluginId).toBe("com.test.high");
+    off();
+    expect(resolveSlot("shell")?.pluginId).toBe("com.test.low");
+    // 声明表基数为 single：list 基数注册即失败（registerUi 缺省 list，误用即失败可见）。
+    expect(() =>
+      registerSlotContrib("shell", "com.test.p", { component: () => null }, { cardinality: "list" }),
+    ).toThrow(/基数/);
   });
 
   it("开放 kind 槽：可自定 kind，component 与 render 可并存", () => {

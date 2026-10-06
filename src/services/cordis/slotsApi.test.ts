@@ -10,7 +10,7 @@ import type { Context } from "@atelyx/cordis";
 import type { SlotDeclaration } from "@/constants/slots";
 import { createKernel, type Kernel } from "./kernel";
 import { mountPlugin, unmountAll, unmountPlugin } from "./loader";
-import { resolveViewKind, dockableViewKinds, listSlot, listDecorators, registeredSlots, onSlotChange, findSlotDeclarationRuntime } from "./slots";
+import { resolveViewKind, resolveSlot, dockableViewKinds, listSlot, listDecorators, registeredSlots, onSlotChange, findSlotDeclarationRuntime } from "./slots";
 import { getPluginTableView } from "./ui";
 import { setPluginSlotHostComponent } from "./access";
 
@@ -424,5 +424,49 @@ describe("ctx.slots.declare / host（插件自声明槽位）", () => {
     });
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.message).toContain("未声明的槽位");
+  });
+});
+
+describe("ctx.slots.registerShell / host hostId（外壳接管）", () => {
+  it("registerShell：外壳槽注册 + 卸载撤销（回退默认界面）", async () => {
+    kernel = createKernel();
+    await mountPlugin(kernel, {
+      id: "com.test.shell",
+      apply: (ctx) => {
+        ctx.slots.registerShell({ component: () => null });
+      },
+    });
+    expect(resolveSlot("shell")?.pluginId).toBe("com.test.shell");
+
+    await unmountAll(kernel);
+    expect(resolveSlot("shell")).toBeUndefined();
+  });
+
+  it("registerShell 缺组件 → 该行 failed", async () => {
+    kernel = createKernel();
+    const result = await mountPlugin(kernel, {
+      id: "com.test.shell",
+      apply: (ctx) => {
+        ctx.slots.registerShell({ component: undefined as never });
+      },
+    });
+    expect(result.ok).toBe(false);
+    expect(resolveSlot("shell")).toBeUndefined();
+  });
+
+  it("host 带 hostId：承载视图槽时 hostId 进入槽位宿主元素 props（重型视图 render(hostId) 依赖）", async () => {
+    kernel = createKernel();
+    setPluginSlotHostComponent(() => null);
+    await mountPlugin(kernel, {
+      id: "com.test.shell",
+      apply: (ctx) => {
+        ctx.slots.registerView({ kind: "com.test.heavy", label: "重", render: () => null });
+        // host 工厂返回 React 元素（渲染由 React 承担）；元素 props 即宿主组件收到的 props。
+        const el = ctx.slots.host("view/com.test.heavy", { hostId: "panel-1" })() as {
+          props: { slot: string; hostId?: string };
+        };
+        expect(el.props).toEqual({ slot: "view/com.test.heavy", hostId: "panel-1" });
+      },
+    });
   });
 });

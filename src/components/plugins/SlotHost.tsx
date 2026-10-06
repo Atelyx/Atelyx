@@ -139,8 +139,9 @@ export function EmptyStateMount({ viewKind, fallback }: { viewKind: string; fall
 }
 
 /** 插件侧槽位渲染宿主（ctx.slots.host(slot) 返回的组件）：按声明基数渲染 single 胜出者或全部 list 贡献，
- *  内容经 SlotDecoratedContent 被装饰器链包裹（与宿主 SlotListMount 同语义，插件面板内复用）。 */
-export function PluginSlotHost({ slot }: { slot: string }): ReactNode {
+ *  内容经 SlotDecoratedContent 被装饰器链包裹（与宿主 SlotListMount 同语义，插件面板内复用）。
+ *  hostId 可选：承载视图槽（view/<kind>）时传给重型视图载荷的 render(hostId)。 */
+export function PluginSlotHost({ slot, hostId }: { slot: string; hostId?: string }): ReactNode {
   usePluginStore((s) => s.slotRevisions[slot] ?? 0);
   const decl = findSlotDeclarationRuntime(slot);
   // host() 调用时已保证声明存在；此处声明缺失只发生在声明方停用后——无契约可依，渲染空。
@@ -148,12 +149,12 @@ export function PluginSlotHost({ slot }: { slot: string }): ReactNode {
   if (decl.cardinality === "single") {
     const winner = resolveSlot(slot);
     if (!winner) return null;
-    const Comp = (winner.payload as { component?: ComponentType }).component;
-    if (!Comp) return null;
+    const payload = winner.payload as { component?: ComponentType; render?: (hostId: string) => ReactNode };
+    if (!payload.component && !payload.render) return null;
     return (
       <SlotDecoratedContent slot={slot}>
         <ErrorBoundary key={winner.id}>
-          <Comp />
+          {payload.render ? payload.render(hostId ?? "") : payload.component ? <payload.component /> : null}
         </ErrorBoundary>
       </SlotDecoratedContent>
     );

@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { Component, lazy, Suspense, useEffect, useRef, useState, type ErrorInfo, type ReactNode } from "react";
 import { ReactFlowProvider } from "@xyflow/react";
 import { useAppStore } from "@/stores/appStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -8,6 +8,7 @@ import { PanelWindowRoot } from "@/components/layout/PanelWindowRoot";
 import { ErrorBoundary } from "@/components/common/ErrorBoundary";
 import { LoadingScreen } from "@/components/common/LoadingScreen";
 import { NotificationHost } from "@/components/common/NotificationHost";
+import { useNotificationStore } from "@/stores/notificationStore";
 import { FloatingLayerHost } from "@/components/common/FloatingLayerHost";
 import { useAppearance } from "@/hooks/useAppearance";
 import { getCurrentWindowLabel } from "@/services/window";
@@ -76,6 +77,35 @@ function PluginPageMount({ pageId }: { pageId: string }) {
         <Comp />
       </div>
     </ErrorBoundary>
+  );
+}
+
+/** 外壳接管错误边界：接管组件渲染崩溃时回退 fallback（默认界面），崩溃经通知可见不静默。 */
+class ShellErrorBoundary extends Component<{ children: ReactNode; fallback: ReactNode }, { failed: boolean }> {
+  state: { failed: boolean } = { failed: false };
+  static getDerivedStateFromError(): { failed: boolean } {
+    return { failed: true };
+  }
+  componentDidCatch(error: unknown, info: ErrorInfo): void {
+    console.error("外壳接管插件渲染崩溃", error, info.componentStack);
+    useNotificationStore.getState().notify({ message: "外壳接管插件渲染崩溃，已恢复默认界面", level: "error" });
+  }
+  render(): ReactNode {
+    return this.state.failed ? this.props.fallback : this.props.children;
+  }
+}
+
+/** 插件外壳承载（shell 槽胜出者整体替换默认工作区；无胜出者 = 默认界面）。
+ *  边界按「插件 id + 槽修订号」重挂：换接管者或重注册即重置错误状态、重新渲染接管组件。 */
+function ShellSlotMount({ children }: { children: ReactNode }) {
+  const revision = usePluginStore((s) => s.slotRevisions["shell"] ?? 0);
+  const shell = usePluginStore.getState().shellContribution();
+  if (!shell) return children;
+  const Comp = shell.component;
+  return (
+    <ShellErrorBoundary key={`${shell.pluginId}:${revision}`} fallback={children}>
+      <Comp />
+    </ShellErrorBoundary>
   );
 }
 
@@ -166,12 +196,16 @@ function MainWorkspaceApp() {
     <Suspense fallback={<LoadingScreen />}>
       {booting ? (
         <LoadingScreen />
-      ) : pluginPage ? (
-        <PluginPageMount pageId={pluginPage} />
-      ) : MULTI_WINDOW ? (
-        <ProjectWorkspacePage />
       ) : (
-        <MobileWorkspacePage />
+        <ShellSlotMount>
+          {pluginPage ? (
+            <PluginPageMount pageId={pluginPage} />
+          ) : MULTI_WINDOW ? (
+            <ProjectWorkspacePage />
+          ) : (
+            <MobileWorkspacePage />
+          )}
+        </ShellSlotMount>
       )}
     </Suspense>
   );

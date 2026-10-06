@@ -69,6 +69,7 @@ import { mountedPluginIds } from "@/services/cordis/loader";
 import { trackPluginProcess } from "@/services/cordis/pluginProcesses";
 import { emitPluginEvent } from "@/services/cordis/events";
 import { dispatchCollabChannel, registerPluginChannel } from "@/utils/collabHost";
+import { registerSlotContrib } from "@/services/cordis/slots";
 import { usePluginStore } from "@/stores/pluginStore";
 import { useNotificationStore } from "@/stores/notificationStore";
 
@@ -542,5 +543,17 @@ describe("协作插件消息入站桥", () => {
     expect(received).toEqual([[7, { cmd: "start" }]]);
     expect(emitPluginEvent).not.toHaveBeenCalled();
     off();
+  });
+});
+
+describe("应用外壳接管分派", () => {
+  it("shell 槽胜出者经 shellContribution 透出，撤销后回退 undefined", () => {
+    const Shell = () => null;
+    const off = registerSlotContrib("shell", "com.test.shell", { component: Shell }, { cardinality: "single" });
+    const shell = usePluginStore.getState().shellContribution();
+    expect(shell?.pluginId).toBe("com.test.shell");
+    expect(shell?.component).toBe(Shell);
+    off();
+    expect(usePluginStore.getState().shellContribution()).toBeUndefined();
   });
 });
