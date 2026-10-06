@@ -1,13 +1,11 @@
 /**
- * 通用确认弹窗（fixed 遮罩 + 居中卡片，用于破坏性操作确认，也可作风险提示确认）。
- * Esc / 点击遮罩取消；danger=true（默认）确认按钮红色（破坏性语义），
- * danger=false 用强调色（如安装第三方代码的知情确认）。
+ * 通用确认弹窗（破坏性操作确认，也可作风险提示确认）：正文与按钮见下，弹窗外框与关闭行为
+ * （Esc / 遮罩点击 / 返回键）由 ConfirmDialogFrame 统一提供。
+ * danger=true（默认）确认按钮红色（破坏性语义），danger=false 用强调色（如安装第三方代码的知情确认）。
  */
-import { useEffect, useRef } from "react";
 import type { ReactNode } from "react";
-import { AlertTriangle } from "lucide-react";
-import { useBackHandler } from "@/hooks/useBackHandler";
 import { Button } from "@/components/common/Button";
+import { ConfirmDialogFrame } from "@/components/common/ConfirmDialogFrame";
 
 export function ConfirmDialog({
   title,
@@ -28,56 +26,22 @@ export function ConfirmDialog({
   onConfirm: () => void;
   onCancel: () => void;
 }) {
-  const onCancelRef = useRef(onCancel);
-  onCancelRef.current = onCancel;
-
-  // Esc 取消
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onCancelRef.current();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
-
-  // 返回键取消
-  useBackHandler(true, () => {
-    onCancelRef.current();
-    return true;
-  });
-
   return (
-    <div
-      className="fixed inset-0 z-[200] flex items-center justify-center"
-      style={{ background: "var(--scrim)" }}
-      onClick={onCancel}
-    >
-      <div
-        className="w-80 max-w-[calc(100vw-2rem)] rounded-[var(--radius-lg)] border shadow-[var(--shadow-pop)] p-4"
-        style={{ background: "var(--bg-overlay)", borderColor: "var(--border)" }}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-start gap-2 mb-2">
-          <AlertTriangle size={16} className="mt-0.5 flex-shrink-0" style={{ color: "var(--warning)" }} />
-          <h3 className="text-sm font-medium leading-5" style={{ color: "var(--text-primary)" }}>
-            {title}
-          </h3>
-        </div>
-        {description && (
-          <p className="text-xs mb-3 whitespace-pre-wrap break-words" style={{ color: "var(--text-muted)" }}>
-            {description}
-          </p>
-        )}
-        {children && <div className="mb-3">{children}</div>}
-        <div className="flex justify-end gap-2 mt-4">
-          <Button variant="ghost" size="sm" onClick={onCancel}>
-            {cancelText}
-          </Button>
-          <Button variant={danger ? "dangerSolid" : "primary"} size="sm" onClick={onConfirm}>
-            {confirmText}
-          </Button>
-        </div>
+    <ConfirmDialogFrame title={title} onCancel={onCancel}>
+      {description && (
+        <p className="text-xs mb-3 whitespace-pre-wrap break-words" style={{ color: "var(--text-muted)" }}>
+          {description}
+        </p>
+      )}
+      {children && <div className="mb-3">{children}</div>}
+      <div className="flex justify-end gap-2 mt-4">
+        <Button variant="ghost" size="sm" onClick={onCancel}>
+          {cancelText}
+        </Button>
+        <Button variant={danger ? "dangerSolid" : "primary"} size="sm" onClick={onConfirm}>
+          {confirmText}
+        </Button>
       </div>
-    </div>
+    </ConfirmDialogFrame>
   );
 }
