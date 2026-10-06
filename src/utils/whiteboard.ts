@@ -23,6 +23,7 @@ import type {
 } from "@/types";
 import { prefix } from "@/utils/text";
 import { baseName, noteTitleFromFile } from "@/utils/filename";
+import { imageMimeFromExt, isImageFileName } from "@/utils/image";
 
 /** 映射时读取文件内容的注入接口（services/vault 提供实现）。 */
 export interface WhiteboardIo {
@@ -32,24 +33,8 @@ export interface WhiteboardIo {
 
 /** 按图片扩展名推 mime（仅图片；其他返回 text/plain 兜底）。 */
 export function inferImageMime(name: string): string {
-  const ext = name.match(/\.([a-z0-9]+)$/i)?.[1].toLowerCase() ?? "";
-  switch (ext) {
-    case "png":
-      return "image/png";
-    case "jpg":
-    case "jpeg":
-      return "image/jpeg";
-    case "webp":
-      return "image/webp";
-    case "gif":
-      return "image/gif";
-    default:
-      return "text/plain";
-  }
-}
-
-function isImageExt(name: string): boolean {
-  return /\.(png|jpe?g|webp|gif)$/i.test(name);
+  const ext = name.match(/\.([a-z0-9]+)$/i)?.[1] ?? "";
+  return imageMimeFromExt(ext) ?? "text/plain";
 }
 
 /** 解析 .canvas JSON（格式损坏抛错，由调用方降级提示）。 */
@@ -98,7 +83,7 @@ export async function mapWhiteboardNodes(
         const data: MediaData = {
           file: n.file,
           mime: inferImageMime(n.file),
-          kind: isImageExt(n.file) ? "image" : "file",
+          kind: isImageFileName(n.file) ? "image" : "file",
           name: baseName(n.file),
         };
         if (data.kind === "image") {

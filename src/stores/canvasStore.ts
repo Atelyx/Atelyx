@@ -63,6 +63,7 @@ import { registerDomainLifecycle } from "@/utils/kernelLifecycle";
 import { clearCanvasViewportCache } from "@/services/viewHandoff";
 import { createUndoManager } from "@/utils/undoStack";
 import { inferImageMime } from "@/utils/whiteboard";
+import { isImageFileName } from "@/utils/image";
 import {
   CANVAS_SCHEMA,
   DEFAULT_CONVERSATION_WIDTH,
@@ -1106,12 +1107,6 @@ async function buildTextNoteData(file: string, title: string) {
     fileMissing = true;
   }
   return { title, file, bodyMd, fileMissing };
-}
-
-/** 图片附件判定：按扩展名（`File.type` 在未知扩展名/部分粘贴源下为空，按 MIME 判会与文件树拖入路径分叉）。 */
-const IMAGE_EXT_RE = /\.(png|jpe?g|webp|gif)$/i;
-function isImageFileName(name: string): boolean {
-  return IMAGE_EXT_RE.test(name);
 }
 
 async function buildMediaData(file: string, name: string): Promise<MediaData | null> {

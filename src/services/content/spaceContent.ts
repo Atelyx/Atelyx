@@ -35,6 +35,7 @@ import { SPACE_TEAM_META, spaceMetaScalar } from "@/constants/spaceMeta";
 import { TABLE_SCHEMA } from "@/constants/table";
 import { CHAT_MESSAGES_META_PREFIX } from "@/constants/editorChats";
 import { baseName, parentDir, sanitizeFilename, stripExt } from "@/utils/filename";
+import { IMAGE_EXTS, imageMimeFromExt } from "@/utils/image";
 import { normalizeTableRow } from "@/utils/table";
 import type {
   CanvasCreateResult,
@@ -118,28 +119,16 @@ function attachmentDirFromMeta(raw: string | undefined): string {
   return configured;
 }
 
-/** 按扩展名推 mime（仅图片，与本地 readAttachmentDataUrl 同口径；其余回落 application/octet-stream）。 */
+/** 按扩展名推 mime（仅图片；其余回落 application/octet-stream）。 */
 function mimeFromExt(file: string): string {
   const ext = file.slice(file.lastIndexOf(".") + 1).toLowerCase();
-  switch (ext) {
-    case "png":
-      return "image/png";
-    case "jpg":
-    case "jpeg":
-      return "image/jpeg";
-    case "webp":
-      return "image/webp";
-    case "gif":
-      return "image/gif";
-    default:
-      return "application/octet-stream";
-  }
+  return imageMimeFromExt(ext) ?? "application/octet-stream";
 }
 
 /** 图片扩展名（importTableImage 落盘扩展名来源；非图片返回 null）。 */
 function imageExtFromName(file: string): string | null {
   const ext = file.slice(file.lastIndexOf(".") + 1).toLowerCase();
-  return ["png", "jpg", "jpeg", "webp", "gif"].includes(ext) ? ext : null;
+  return IMAGE_EXTS.includes(ext) ? ext : null;
 }
 
 /** 临时附件叶子名净化（与本地 write_temp_attachment 同口径：去路径段、替非法字符、空名兜底）。 */

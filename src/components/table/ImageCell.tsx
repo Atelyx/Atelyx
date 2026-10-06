@@ -30,6 +30,7 @@ import { ImageLightbox } from "@/components/table/ImageLightbox";
 import { ImageCarouselMode } from "@/components/table/ImageCarouselMode";
 import { ImageGridMode } from "@/components/table/ImageGridMode";
 import { resolveTableImageEntries, resolveTableImageEntry, useTableImageSrc } from "@/hooks/useTableImageSrc";
+import { IMAGE_ACCEPT } from "@/utils/image";
 import { fieldDefaultWidth, normalizeImageValue } from "@/utils/table";
 import {
   IMAGE_CAROUSEL_AREA_HEIGHT,
@@ -88,7 +89,7 @@ export const ImageCell = memo(function ImageCell({ field, row }: Props) {
     <input
       ref={imageInputRef}
       type="file"
-      accept="image/png,image/jpeg,image/webp,image/gif"
+      accept={IMAGE_ACCEPT}
       multiple
       className="hidden"
       onChange={(e) => {
