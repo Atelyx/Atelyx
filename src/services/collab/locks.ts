@@ -1,8 +1,6 @@
 /**
- * 协作锁原语（内核，域无关）：确定性锁主判定纯函数。
- * 锁语义 = 声明制：各对端把对同一资源的锁声明（peerId + 请求时间戳 since）经协作
- * presence 通道互见；确定性锁主 = since 最小者持有、同 since 按 peerId 递增取小
- * （服务端全局递增分配 peerId，各对端对同一批声明计算出一致锁主 → UI 确定性只读不闪烁）。
+ * 协作锁原语（内核，域无关）：锁语义 = 声明制，各对端把锁声明（peerId + since）经协作 presence 通道互见。
+ * 确定性锁主 = since 最小者持有、同 since 按 peerId 递增取小：服务端全局递增分配 peerId，各端对同一批声明算出同一锁主，UI 只读态不闪烁。
  */
 import type { CollabPeer } from "@/types";
 

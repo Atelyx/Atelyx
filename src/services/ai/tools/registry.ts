@@ -1,6 +1,6 @@
 /**
  * 工具注册表：把自包含 `ToolDefinition` 列表组织成「名册 → 模型」「参数 → 执行」的按名分发器。
- * 取代旧的 `stores/toolRunner.ts` 的 switch：加工具 = 加一个 defineTool 模块 + 注册进列表，不再改分发逻辑。
+ * 取代旧的 `stores/toolRunner.ts` switch：加工具 = 加一个 defineTool 模块 + 注册进列表，不再改分发逻辑。
  */
 import type {
   ToolDefinition,

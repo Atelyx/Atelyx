@@ -1,7 +1,5 @@
 /**
- * 协作空间 HTTP 客户端契约测试（services/space/client）。
- *
- * 核心回归：URL/方法/头正确；非 2xx/网络/超时统一归一成 `SpaceApiError`（中文可定位 + `status`）；
+ * 协作空间 HTTP 客户端契约测试（services/space/client）：URL/方法/头正确，非 2xx/网络/超时统一归一成 `SpaceApiError`（中文可定位 + `status`）。
  * meta 三方法的请求形状（路径 + 查询 + 体）与服务端契约一致。
  */
 import { afterEach, describe, expect, it, vi } from "vitest";

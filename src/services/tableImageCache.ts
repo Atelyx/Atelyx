@@ -1,10 +1,5 @@
 /**
- * 表格图片显示缓存：图片外置后单元格值存仓库相对路径（`.atelyx/temp/tables/<tableId>/…`），
- * 渲染时经此缓存解析为 dataURL（底层走 `read_attachment_data_url`，与画布媒体节点同源）。
- *
- * 模块级 LRU（条目上限，淘汰最久未用）+ 进行中 promise 复用（多单元格引用同一图片只发一次 IPC）。
- * 键 = 相对路径（含 tableId 目录段，跨表天然不撞）；读取失败不留缓存（下次重试）。
- * 遗留内嵌 `data:` 条目原样透传（不读盘不入缓存）。缓存命中返回原字符串引用（零拷贝）。
+ * 表格图片显示缓存：单元格存的仓库相对路径 → dataURL（底层走 `read_attachment_data_url`，与画布媒体节点同源）。
  */
 import { readAttachmentDataUrl } from "@/services/vault";
 
@@ -16,11 +11,12 @@ interface CacheEntry {
   at: number;
 }
 
+/** 键 = 相对路径（含 tableId 目录段，跨表天然不撞）。 */
 const cache = new Map<string, CacheEntry>();
 /** 进行中的读取：同一路径并发请求共用同一 promise（首读突发时去重）。 */
 const inflight = new Map<string, Promise<string>>();
 
-/** 解析表格图片条目为 dataURL；进行中复用、成功入缓存、失败丢弃（下次重试）。
+/** 解析表格图片条目为 dataURL；进行中复用、成功入缓存、失败丢弃（下次重试），命中返回缓存内原字符串引用（零拷贝）。
  * 遗留内嵌 dataURL 条目原样透传（不读盘不入缓存——大字符串缓存无收益）。 */
 export function resolveTableImageUrl(file: string): Promise<string> {
   if (file.startsWith("data:")) return Promise.resolve(file);

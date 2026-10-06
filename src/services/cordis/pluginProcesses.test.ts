@@ -1,7 +1,5 @@
 /**
- * 插件进程登记表测试（services/cordis/pluginProcesses）。
- *
- * 纯表行为：登记/摘除/按插件结束/未挂载收尾，以及失败逐个隔离（一个 pid 失败不放弃其余）。
+ * 插件进程登记表测试（services/cordis/pluginProcesses）：纯表行为——登记/摘除/按插件结束/未挂载收尾，失败逐个隔离（一个 pid 失败不放弃其余）。
  * 登记表按内核上下文隔离——用一个普通对象当内核根上下文即可直测。
  */
 import { describe, expect, it, vi } from "vitest";

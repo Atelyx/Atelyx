@@ -1,7 +1,6 @@
 /**
  * 笔记正文差量与三方合并纯函数测试（services/noteCollab/textChange.ts）。
- * 覆盖：hunk 定位正确性（按 hunk 重放必得目标文本）、多 hunk 精度、超限降级不丢内容、
- * 三方合并在非重叠区间保留双方、重叠区间按指定一侧取值且结果确定。
+ * 锁定 hunk 定位正确性（按 hunk 重放必得目标文本）、超限降级不丢内容、三方合并结果确定。
  */
 import { describe, it, expect } from "vitest";
 import { diffHunks, merge3, MAX_DIFF_TOKENS, type TextHunk } from "./textChange";

@@ -1,20 +1,12 @@
 /**
- * 全局配置 service。
- *
- * 读写 `app_data_dir/global.json`，对应 Rust `commands/global.rs`。
- * 承载：最近打开仓库列表 + 自动检查更新开关 + 应用级界面外观（主题插件激活 + 主题设置 themeSettings +
- * 字号/字体）+ 自动恢复上次打开文件（AI 供应商/搜索源等仓库级配置走各仓库 `.atelyx/config.json`；
- * 应用级 UI 使用状态走 `services/layout` 的 Rust 迷你窗口管理器，见 `layout.rs`）。
- * recentVaults 的截断上限在此层维护（去重/归一化在 Rust 读写路径完成）。
- *
- * **写入走补丁命令**：`updateGlobalConfig` → Rust `patch_global_config`（锁内读-合并-原子写）。
- * global.json 由 appStore（recentVaults/自动检查更新开关/最近空间）与 settingsStore（界面外观/自动恢复/
- * 协作配置）共同写入，合并必须在后端单点完成——跨窗口（主/撕裂窗口各有独立 webview）前端
- * 自己做 read-modify-write 会互相覆盖丢字段。
+ * 全局配置 service：读写 `app_data_dir/global.json`（对应 Rust `commands/global.rs`）。
+ * 承载最近打开仓库/空间列表 + 自动检查更新开关 + 应用级界面外观（主题插件激活 + themeSettings + 字号/字体）+ 自动恢复上次打开文件。
+ * 仓库级配置（AI 供应商/搜索源）走各仓库 `.atelyx/config.json`，应用级 UI 使用状态走 `services/layout`（见 `layout.rs`）。
  */
 import { invoke } from "@tauri-apps/api/core";
 import type { GlobalConfig, GlobalConfigRead, RecentSpace, RecentVault, VaultInfo } from "@/types";
 
+/** 最近仓库列表截断上限（去重/归一化在 Rust 读写路径完成，本层只管截断）。 */
 const MAX_RECENT_VAULTS = 10;
 
 /** 读全局配置（文件不存在返回空配置）。`corruptBackup` 非空 = 原文损坏已备份为磁盘上该文件名。 */
@@ -83,6 +75,8 @@ export function removeRecentSpace(recentSpaces: RecentSpace[], key: string): Rec
  * 自然缺席、不影响存量字段），与各调用方「整对象提交子字段」的用法一致。
  * 返回本次读到的损坏备份文件名（`null` = 无损坏）：损坏时按空配置 + 补丁写回，等于把
  * 其余字段重置，调用方据此提示用户（必须可见）。
+ * 合并必须在后端单点完成：global.json 由 appStore 与 settingsStore 共同写入，跨窗口各有独立 webview，
+ * 前端自己做 read-modify-write 会互相覆盖丢字段。
  */
 export async function updateGlobalConfig(
   patch: { [K in keyof GlobalConfig]?: GlobalConfig[K] | null },

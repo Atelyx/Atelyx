@@ -1,8 +1,7 @@
 /**
- * 工具：搜索内容（grep）。用正则表达式搜索仓库内文件内容，返回匹配行（绝对行号、按文件分组），
- * 最多内联返回 GREP_MAX_MATCHES 条，超限附精确总数提示收窄；单行预览按字节截断（UTF-8 边界安全）。
- * 可选 path 限定文件/目录、include 限定单一正向 glob 过滤文件。
- * 依赖 `capabilities.grep`（Rust `grep_vault`）。只读，不建产物节点。
+ * 工具：搜索内容（grep）。用正则表达式搜索仓库内文件内容，返回匹配行（绝对行号、按文件分组），最多内联返回 GREP_MAX_MATCHES 条，超限附精确总数提示收窄。
+ * 单行预览按字节截断（UTF-8 边界安全）；可选 path 限定文件/目录、include 限定单一正向 glob 过滤文件。
+ * 依赖 `capabilities.grep`（Rust `grep_vault`）；只读，不建产物节点。
  */
 import { ToolArgsError, errText, type GrepMatchRow } from "@/types";
 import {

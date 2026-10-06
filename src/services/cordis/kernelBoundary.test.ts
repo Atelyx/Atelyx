@@ -1,17 +1,7 @@
 /**
- * 内核路径导入守卫（静态扫描源码）。
- *
- * 断言内核启动/组合路径不依赖领域 store——「内核可脱离领域代码独立启动」的可回归证据。
- * 运行时无法观测模块图，静态读源码断言 import 说明符是唯一可靠手段。
- * 扫描口径：`from "..."` / `import "..."` / `import("...")` / `require("...")` 四种形式；
- * 模板串与变量说明符无法静态解析，不在此列（新增此类写法须人工确认）。
- * 例外：宿主接线模块 stores/pluginStore.ts 不在内核路径清单内（它把领域 store 的数据源注入内核
- * ctx 服务），其领域依赖以显式清单登记——新增依赖会让本测试失败，须在此登记理由。
- * 第二跳同样登记：pluginStore 静态 import `components/plugins/cordis/builtins.tsx`（随应用分发的
- * 插件实现注册表），后者按插件 apply 闭包直接消费领域 store —— 那份依赖单独成清单，同样以测试锁死。
- * 另守组件/服务两侧边界：components 不得 import services（例外 = 槽位宿主/通知宿主与
- * builtins 接线跳，显式登记），services 不得 import components（无例外）。
- * 另守对话核心与容器解耦：对话核心能力（stores/chatTurn.ts）不得 import 领域 store。
+ * 内核路径导入守卫（静态扫描源码）：断言内核启动/组合路径不依赖领域 store——「内核可脱离领域代码独立启动」的可回归证据。
+ * 扫描口径 = `from "..."` / `import "..."` / `import("...")` / `require("...")` 四种形式；模板串与变量说明符无法静态解析，不在此列（新增此类写法须人工确认）。
+ * 例外显式登记：宿主接线模块 stores/pluginStore.ts（把领域 store 数据源注入内核 ctx 服务）与其第二跳 components/plugins/cordis/builtins.tsx（随应用分发的插件实现注册表，apply 闭包直接消费领域 store）各自成清单；components 不得 import services（例外 = 槽位宿主/通知宿主与 builtins 接线跳）、services 不得 import components（无例外）；对话核心 stores/chatTurn.ts 不得 import 领域 store。
  */
 import { readdir, readFile, stat } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";

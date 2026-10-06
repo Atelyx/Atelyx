@@ -1,6 +1,5 @@
 /**
- * 帧泵测试（services/collab/framePump.ts）：插件消息二进制帧编解码往返、seq 对账
- * （缺口上报 onResync、房间序号空间重置作废旧基线）、hello-ack 后的补投请求帧序。
+ * 帧泵测试（services/collab/framePump.ts）：插件二进制帧编解码往返、seq 对账（缺口上报 onResync、房间序号空间重置作废旧基线）、hello-ack 后的补投请求帧序。
  * 连接机制（心跳/重连）由 spaceTransport.test.ts 覆盖，本文件只测帧面与对账。
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";

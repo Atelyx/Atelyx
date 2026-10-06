@@ -1,9 +1,6 @@
 /**
- * 全局快捷键的 service 层：`ctx.shortcuts` 的 OS 层后端调用（Rust 命令见
- * `src-tauri/src/commands/global_shortcut.rs`）。
- *
- * 注册/注销/按插件释放三面命令 + 触发事件订阅。触发事件只投递主窗口（Rust 侧固定转发
- * 目标），载荷携带**原始注册串**——前端一切键控都按注册时的原串，不做归一化。
+ * 全局快捷键 service（`ctx.shortcuts` 的 OS 层后端，Rust 命令见 `src-tauri/src/commands/global_shortcut.rs`）：
+ * 注册/注销/按插件释放三面命令 + 触发事件订阅。
  */
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";

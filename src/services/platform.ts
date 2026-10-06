@@ -1,15 +1,10 @@
 /**
  * 内核能力层：按运行平台声明内核级能力有无，调用点按能力分支（禁止散落平台字符串判断）。
- *
- * 能力收口标准：能不能靠「组合层不挂某个插件」实现取舍？能的走组合层（默认组合按平台裁剪），
- * 不能的（不属于任何插件：多窗口、窗口控制、目录选择器、凭据存储、进程执行）才进本层。
- * 缺失能力必须显式可见（禁用态或提示），调用点不得静默失效。
- *
- * 平台判定经 WebView UA（安卓 WebView 的 UA 固含 Android 标识；桌面两端均无），
- * 同步可得，供启动路径在首次渲染前分支。能力表在应用运行期内恒定。
  */
 
-/** 内核级能力表（布尔 = 该端是否提供）。 */
+/** 内核级能力表（布尔 = 该端是否提供）。
+ * 收口标准：能靠「组合层不挂某个插件」取舍的不进本层，只有不属于任何插件的能力（多窗口、窗口控制、
+ * 目录选择器、凭据存储、进程执行）才在此声明；缺失能力必须显式可见（禁用态或提示），调用点不得静默失效。 */
 export interface PlatformCapabilities {
   /** 多窗口与撕裂窗口（桌面专有叠加能力）。 */
   multiWindow: boolean;
@@ -29,7 +24,8 @@ export interface PlatformCapabilities {
   inAppUpdate: boolean;
 }
 
-/** 当前是否运行在安卓 WebView。 */
+/** 当前是否运行在安卓 WebView：经 UA 判定（安卓 WebView UA 固含 Android 标识，桌面两端均无），
+ * 同步可得，供启动路径在首次渲染前分支。 */
 export function isAndroidPlatform(): boolean {
   return typeof navigator !== "undefined" && /android/i.test(navigator.userAgent);
 }
@@ -41,7 +37,7 @@ export function isLinuxPlatform(): boolean {
   );
 }
 
-/** 当前平台的能力表。 */
+/** 当前平台的能力表（运行期内恒定）。 */
 export function platformCapabilities(): PlatformCapabilities {
   if (isAndroidPlatform()) {
     return {

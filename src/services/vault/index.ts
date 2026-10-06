@@ -1,11 +1,8 @@
 /**
  * 仓库文件 service：仓库内容 I/O 的 store/视图侧入口 + 运行时 ↔ 磁盘格式转换。
- *
  * 内容 I/O（树/读/写/补丁/结构变更/历史/附件/索引）经内容面按激活仓库取后端（services/content），
- * 本文件保留消费方函数签名并承担画布等格式的运行时转换；`.atelyx` 元数据与仓库开关仍直连命令。
- * 命令对应 `src-tauri/src/commands/vault.rs`，类型对齐 `types/canvas.ts`。
- *
- * text 节点 bodyMd 的剥离/填充在此层组合。
+ * 本文件保留消费方函数签名并承担画布格式转换（text 节点 bodyMd 的剥离/填充在此层组合）；
+ * `.atelyx` 元数据与仓库开关仍直连 Rust 命令（commands/vault.rs），类型对齐 `types/canvas.ts`。
  */
 import { invoke } from "@tauri-apps/api/core";
 import type { Edge, Node } from "@xyflow/react";
@@ -372,9 +369,9 @@ export async function remapSideloadsByDir(oldDir: string, newDir: string): Promi
 
 // ===== 运行时 ↔ 磁盘格式转换 =====
 
-/** 加载后的运行时画布（对齐原 loadCanvas 返回结构，供 canvasStore 消费）。 */
+/** 加载后的运行时画布（供 canvasStore 消费）。 */
 export interface RuntimeCanvas {
-  /** 磁盘文件内的画布 id（运行时身份；文件名不再含 id） */
+  /** 画布 id（运行时身份，与文件名无关） */
   id: string;
   title: string;
   nodes: Node[];

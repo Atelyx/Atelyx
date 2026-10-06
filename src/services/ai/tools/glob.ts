@@ -1,8 +1,7 @@
 /**
- * 工具：查找文件（glob）。按 glob 模式枚举仓库内文件路径（只返回文件、不含目录），
- * 按修改时间升序返回，最多内联返回 GLOB_MAX_RESULTS 条，超限附精确总数提示收窄。
+ * 工具：查找文件（glob）。按 glob 模式枚举仓库内文件路径（只返回文件、不含目录），按修改时间升序，最多内联返回 GLOB_MAX_RESULTS 条，超限附精确总数提示收窄。
  * 模式不含「/」时匹配任意深度的文件名（「*」即整棵树），含「/」才锚定层级。
- * 依赖 `capabilities.glob`（Rust `glob_vault`）。只读，不建产物节点。
+ * 依赖 `capabilities.glob`（Rust `glob_vault`）；只读，不建产物节点。
  */
 import { ToolArgsError, errText } from "@/types";
 import { GLOB_MAX_RESULTS, HIDDEN_PATH_ERROR, hasHiddenSegment } from "@/constants/tools";

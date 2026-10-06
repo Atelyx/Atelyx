@@ -1,14 +1,6 @@
 /**
- * 笔记正文文本差量与三方合并（纯函数，不依赖 Yjs）。
- *
- * 用途：
- * - `diffHunks`：把「当前正文 → 目标正文」表达为以字符区间为单位的 hunk 列表，
- *   供调用方在协作文档上做**增量**改写（整篇重写会把同一文本以不同客户端并存，合并即重复）。
- * - `merge3`：为「以最近落盘文本为共同祖先」的收敛提供三方合并，使本地未落盘输入与
- *   对端权威文本都能保留；仅当同一区间两侧都改写时按调用方指定的一侧取值（结果确定）。
- *
- * 精度：按「含行尾换行的行」切 token 后求 LCS，超限（`MAX_DIFF_TOKENS`）降级为
- * 「公共前后缀 + 中段整段替换」单 hunk——降级只影响粒度，不丢内容。
+ * 笔记正文文本差量与三方合并（纯函数，不依赖 Yjs）：`diffHunks` 供增量改写，`merge3` 供以最近落盘文本为共同祖先的收敛。
+ * 差分按「含行尾换行的行」切 token 求 LCS，超限（`MAX_DIFF_TOKENS`）降级为「公共前后缀 + 中段整段替换」单 hunk——只影响粒度，不丢内容。
  */
 
 /** 单个差异块：`base` 的 `[at, at + remove)` 区间替换为 `insert`（`remove = 0` 为纯插入）。 */
@@ -112,7 +104,7 @@ function hunksFromTokens(a: string[], b: string[]): TextHunk[] {
   return hunks;
 }
 
-/** 求 `base → next` 的差异块（`base === next` 返回空表）。 */
+/** 求 `base → next` 的差异块（`base === next` 返回空表）；整篇重写会让同一文本以不同客户端并存、合并即重复，故调用方一律走本函数的差量。 */
 export function diffHunks(base: string, next: string): TextHunk[] {
   if (base === next) return [];
   return hunksFromTokens(tokenize(base), tokenize(next));

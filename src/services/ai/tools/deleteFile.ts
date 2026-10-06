@@ -1,7 +1,7 @@
 /**
- * 工具：删除文件（delete_file）。受限删除：仅单个文件（目录不可删），须显式传 confirm: true
- * 才执行，防误删。删除 .atb 会连带删除其私有图片附件目录；被画布/表格引用的文件删除后
- * 引用处降级为「文件缺失」。依赖 `capabilities.deleteFile`（vaultStore.deleteFile 按扩展名分发）。
+ * 工具：删除文件（delete_file）。受限删除：仅单个文件（目录不可删），须显式传 confirm: true 才执行，防误删。
+ * 删除 .atb 会连带删除其私有图片附件目录；被画布/表格引用的文件删除后引用处降级为「文件缺失」。
+ * 依赖 `capabilities.deleteFile`（vaultStore.deleteFile 按扩展名分发）。
  */
 import { ToolArgsError } from "@/types";
 import { HIDDEN_PATH_ERROR, hasHiddenSegment } from "@/constants/tools";

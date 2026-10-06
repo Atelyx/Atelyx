@@ -1,13 +1,7 @@
 /**
- * shell 服务面测试（services/cordis/kernel 的 `ctx.shell`）：
- * - 进程按调用方插件记账（spawn/exec 启动都登记），进程结束时摘除；
- * - `spawn` 返回带 pid 的句柄，`cancel` 结束进程树并使登记失效；
- * - 已结束的句柄 `cancel` 为 no-op（防 pid 复用误杀）；
- * - 启动在途（pid 未落地）时停用也会等到落地再结束（不漏杀）；
- * - 运行期 `error` 不摘除登记（进程可能仍在跑）；
- * - 非插件上下文调用直接拒绝（tracker 绑定，API 不暴露插件 id）。
- *
- * `@/services/shell` 以替身替代（真跑进程交由 Rust 侧测试），只验证内核侧接线。
+ * shell 服务面测试（services/cordis/kernel 的 `ctx.shell`）：进程按调用方插件记账（spawn/exec 启动都登记）、进程结束摘除而运行期 `error` 不摘（进程可能仍在跑）；
+ * `spawn` 返回带 pid 的句柄，`cancel` 结束进程树并使登记失效，已结束句柄再 `cancel` 为 no-op（防 pid 复用误杀）；
+ * 启动在途（pid 未落地）时停用也会等到落地再结束（不漏杀）；非插件上下文调用直接拒绝（tracker 绑定，API 不暴露插件 id）。`@/services/shell` 以替身替代（真跑进程交由 Rust 侧测试），只验证内核侧接线。
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Context } from "@atelyx/cordis";

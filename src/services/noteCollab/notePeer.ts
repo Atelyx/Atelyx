@@ -1,28 +1,7 @@
 /**
  * 笔记协作文档 peer（可实例化状态机）：每篇打开的笔记持一个 `Y.Doc`（根 `Y.Text` = 正文 Markdown），
  * 负责收发协作帧、维护基线标签与磁盘基线、把内容变更落到共享基线上。
- *
- * 数据正确性依赖三条不变量：
- * 1. **基线一致**：文档的 clientID=1 struct 流恒等于其当前基线文本的确定性 seed
- *    （`baselineSeedUpdate`，固定 clientID 1）——同文本各端字节一致，合并幂等。
- * 2. **跨基线不合并**：`note-sync` 帧携带发送方基线标签，标签不同则不应用该帧，改走基线再协商。
- *    共享时钟空间被不同文本复用会让 Yjs 按本地状态向量截断对端 struct 内容（尾部混入异文本
- *    或静默分歧），因此异基线状态永不进入同一文档。
- * 3. **标签即真相**：`(seq, author, id)` 与基线正文一一对应；本端合并结果若与采纳的通告文本不同，
- *    立即以更高 `seq` 发布新基线，使房间收敛到同一 seed。
- *
- * 内容变更分两类：
- * - **编辑**（用户输入、撤销重做、外部改盘、回滚、冲突处置）：以 `最近落盘文本` 为共同祖先做
- *   `merge3`，再按 `diffHunks` 差量落到共享基线上——整篇重写会让同一文本以不同客户端并存而重复。
- * - **采纳**（对端通告更高序基线）：`merge3` 后整体重建为 `seed(合并文本)`，使各端基线字节一致。
- *
- * 合并精度（明确的取舍）：`merge3` 只在**区间不重叠**时两侧都保留；一个 hunk 的替换文本是原子整体
- * （无法按子区间拆分），因此两侧 hunk 区间真正重叠时按序号高者整块取胜、败方该 hunk 改动被丢弃，
- * 不做内容拼接（拼接会把同一段内容并排留下，正是本模块要消除的症状）。落在对方区间端点上的插入不属重叠。
- *
- * 磁盘基线语义：`lastFlushed` = 最近确认已落盘的正文，只由 `markDiskWrite` 推进；它同时是三方合并的
- * 共同祖先，因此**已存在文档**不会把未落盘内容当成已落盘（新建文档时以调用方传入的正文为起点，
- * 调用方保证它是磁盘最新正文或本端即将落盘、已按差量写回文档的正文）。
+ * 三条不变量分落各处：基线 seed 字节一致见 `baselineSeedUpdate`，跨基线不合并见 `receive` 的同步分支，标签即真相见 `adoptBaseline`。
  */
 import * as Y from "yjs";
 import { Awareness, applyAwarenessUpdate, encodeAwarenessUpdate } from "y-protocols/awareness";
@@ -113,7 +92,8 @@ export interface NotePeer {
   open(file: string, text: string, identity: NoteIdentity): NoteDocInstance;
   /** 释放引用（归零保留文档：远端状态与 CRDT 真值留内存，供下次打开与房间收敛）。 */
   release(file: string): void;
-  /** 内容收敛：把目标正文按最小差量落到共享基线上（等价于把目标文本编辑出来）。 */
+  /** 内容收敛：把目标正文按最小差量落到共享基线上（等价于把目标文本编辑出来）。
+   *  整篇重写会让同一文本以不同客户端并存、合并即重复，故一律走差量。 */
   syncBody(file: string, bodyLF: string): void;
   /** 登记「该正文已落盘」：推进三方合并的共同祖先。 */
   markDiskWrite(file: string, bodyLF: string): void;

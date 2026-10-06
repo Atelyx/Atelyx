@@ -1,13 +1,6 @@
 /**
- * AI 对话能力（ctx.chat）：由宿主内核在启动时提供（与 history/layout/uiState 同层）。
- *
- * 编排方法 = 核心注册表里的对话运行时（`utils/chatRuntimeHost.ts`；内置实现与提供者插件都经
- * `ctx.chat.registerRuntime` 注册，随各自 fiber 撤销）；容器方法 = 注入的面板会话写入访问
- * （`access.ts`，builtin.chatpanel 接线）。
- *
- * 运行时**每次调用现取**而不是构造时快照：提供者是可替换的（组合接管把对话核心行换个实现），
- * 快照住旧运行时会让人以为换成了、实际还指着旧引擎。未注册运行时 = 编排方法抛「未就绪」；
- * 对话面板插件未启用 = 容器方法抛「未就绪」；两者互不牵连。
+ * AI 对话能力（ctx.chat）：由宿主内核启动时提供（与 history/layout/uiState 同层）。
+ * 编排方法 = 注册的对话运行时（`utils/chatRuntimeHost.ts`），容器方法 = 注入的面板会话写入访问（`access.ts`，builtin.chatpanel 接线）。
  */
 import { getChatRuntime, registerChatRuntime } from "@/utils/chatRuntimeHost";
 import { getPluginChatPanelAccess, type PluginChatPanelAccess } from "./access";
@@ -28,7 +21,7 @@ function requireChatRuntime(): ChatRuntime {
   return runtime;
 }
 
-/** 构造 AI 对话能力（构造不要求运行时已注册：运行时按调用现取）。 */
+/** 构造 AI 对话能力（不要求运行时已注册）。运行时按调用现取：提供者可替换，构造时快照会指向旧实现。 */
 export function createChatService(): ChatService {
   return {
     resolveTarget: (selection) => requireChatRuntime().resolveTarget(selection),

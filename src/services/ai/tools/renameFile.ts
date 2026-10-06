@@ -1,7 +1,7 @@
 /**
- * 工具：重命名文件（rename_file）。同目录改名：newName 为新文件名（含扩展名，扩展名不可变更），
- * .md/.atb/.atlx 标题随文件名同步；目标重名自动加序号，结果以返回的实际路径为准。
- * 跨目录移动请用 move_file。依赖 `capabilities.renameFile`（vaultStore.renameFile 按扩展名分发）。
+ * 工具：重命名文件（rename_file）。同目录改名：newName 为新文件名（含扩展名，扩展名不可变更），.md/.atb/.atlx 标题随文件名同步。
+ * 目标重名自动加序号，结果以返回的实际路径为准；跨目录移动请用 move_file。
+ * 依赖 `capabilities.renameFile`（vaultStore.renameFile 按扩展名分发）。
  */
 import { ToolArgsError } from "@/types";
 import { HIDDEN_PATH_ERROR, hasHiddenSegment } from "@/constants/tools";

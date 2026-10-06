@@ -1,9 +1,6 @@
 /**
- * 元数据双源分发层契约测试（services/metadata/index.ts）。
- *
- * 覆盖：协作空间下元数据读写按激活仓库身份分发到 team meta（space meta）/
- * user meta（meta/me）或本机命令；个人仓库保持本地命令直通；
- * 只读团队层写入被拒且通知可见；append 读改写与身份中途切换守卫。
+ * 元数据双源分发层契约测试（services/metadata/index.ts）：协作空间下元数据读写按激活仓库身份分发到 team meta / user meta，个人仓库保持本地命令直通。
+ * 另测只读团队层写入被拒且通知可见、append 读改写与身份中途切换守卫。
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
 

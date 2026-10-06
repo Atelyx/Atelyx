@@ -1,7 +1,5 @@
 /**
- * 协作空间传输测试（services/collab/spaceTransport.ts）：用假 WebSocket 驱动，锁定 /ws/space
- * 契约——hello 首帧形状（spaceId/token/身份字段，camelCase 与服务端 serde 对齐）、hello-ack
- * 分配 peerId、频道消息入站分发、出站帧形状（sendMessage/sendBye）、error 帧上报、断线状态可见。
+ * 协作空间传输测试（services/collab/spaceTransport.ts）：用假 WebSocket 驱动，锁定 /ws/space 契约——hello 首帧形状（spaceId/token/身份字段，camelCase 与服务端 serde 对齐）、hello-ack 分配 peerId、频道消息入站分发、出站帧形状（sendMessage/sendBye）、error 帧上报、断线状态可见。
  * 连接机制（心跳/重连）由共用帧泵（framePump.ts）承载，此处不重复覆盖。
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";

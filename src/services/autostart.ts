@@ -1,10 +1,7 @@
 /**
- * 开机自启 service。
- *
- * 真相源 = 系统启动项本身（Windows HKCU Run 注册表 / Linux XDG autostart / macOS LaunchAgent）：
- * 状态每次实时读系统、不落 global.json，避免用户从系统侧手动改动后应用显示与之漂移。
- * 调用时机：应用挂载读一次，通用设置面板打开时刷新一次；失败抛错由调用方提示。
- * 移动端无 autostart 插件，统一 no-op（设置页按平台能力禁用开关）。
+ * 开机自启 service：真相源 = 系统启动项（Windows Run 注册表 / XDG autostart / LaunchAgent），
+ * 状态每次实时读系统、不落 global.json（防用户从系统侧改动后应用显示与之漂移）。
+ * 调用时机：应用挂载读一次，通用设置面板打开时刷新一次。移动端无 autostart 插件，统一 no-op。
  */
 import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
 import { isAndroidPlatform } from "@/services/platform";

@@ -1,9 +1,6 @@
 /**
- * ctx.slots 注册 API 测试（services/cordis/slotsApi）。
- *
- * 覆盖：插件 apply 内经 ctx.slots.registerView/registerTableView 注册生效、pluginId 归属正确、
- * 卸载随 fiber 撤销（tracker 绑定调用方插件上下文）；插件自声明槽（declare）先到先得 +
- * 宿主保护 + 冲突指名占用者；host(slot) 托管语义。
+ * ctx.slots 注册 API 测试（services/cordis/slotsApi）：插件 apply 内经 ctx.slots.registerView/registerTableView 注册生效、pluginId 归属正确、
+ * 卸载随 fiber 撤销（tracker 绑定调用方插件上下文）；插件自声明槽（declare）先到先得 + 宿主保护 + 冲突指名占用者；host(slot) 托管语义。
  */
 import { describe, expect, it, afterEach } from "vitest";
 import type { Context } from "@atelyx/cordis";

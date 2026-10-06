@@ -1,7 +1,7 @@
 /**
- * 工具：追加内容（append_file）。把内容追加到仓库中**已存在**文本文件的末尾（原子写），
- * 免去「读到末尾 → 带全文替换」；文件不存在/不可读（含超 read_file 整读上限）拒绝——
- * 新建文件请用 write_file。依赖 `capabilities.appendFile`（aiFiles.appendVaultFile）。
+ * 工具：追加内容（append_file）。把内容追加到仓库中**已存在**文本文件的末尾（原子写），免去「读到末尾 → 带全文替换」。
+ * 文件不存在/不可读（含超 read_file 整读上限）拒绝——新建文件请用 write_file。
+ * 依赖 `capabilities.appendFile`（aiFiles.appendVaultFile）。
  */
 import { ToolArgsError, errText } from "@/types";
 import { HIDDEN_PATH_ERROR, hasHiddenSegment } from "@/constants/tools";

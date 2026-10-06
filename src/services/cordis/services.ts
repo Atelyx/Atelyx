@@ -1,18 +1,6 @@
 /**
  * 服务注册表查询服务（ctx.services）：插件据此发现当前真实可用的服务面与提供者。
- *
- * 数据真相 = Cordis `ctx.reflect.store`（root 作用域，含内核平台服务与插件经 provide
- * 注册的全部服务）；`list()` 遍历它返回服务名 + 提供者插件 id。提供者归属两路：
- * 插件经 `ctx.provide`（自身 ctx）注册的服务，`impl.fiber` 即插件 fiber，`pluginIdOf`
- * 可直接推断；builtins 领域服务经 `ctx.root.provide` 注册（root fiber 无归属），由
- * 登记表补充（builtins 挂载时经 `registerServiceProvider` 登记，随 fiber 撤销）。
- * 宿主内核平台服务无提供者（list 返回项不带 provider 字段）。
- *
- * `get(name)` 读某服务（不存在/未激活 = undefined，不抛错）——可选依赖判空入口：
- * inject 声明 `{ foo: { optional: true } }` 的可选依赖经 loader 剥出后，插件在 apply
- * 内经 `ctx.services.get("foo")` 判空降级（直接 `ctx.foo` 访问会因不在 inject 而抛错）。
- * 返回值重新绑定调用方 ctx（`ctx.get` 返回 root 绑定的 traceable，直接透传会丢审计归属），
- * 敏感面套审计包装（与 `ctx.<service>` 直连同口径记录高危调用摘要）。
+ * 数据真相 = Cordis `ctx.reflect.store`（root 作用域，含内核平台服务与插件经 provide 注册的全部服务）。
  */
 import { getTraceable, symbols } from "@atelyx/cordis";
 import type { Context } from "@atelyx/cordis";
@@ -45,6 +33,7 @@ interface ServicesServiceInstance extends ServicesService {
 /** 构造 ctx.services 服务（内核 provide；插件经 ctx.services 触达）。 */
 export function createServicesService(): ServicesService {
   const api = {
+    /** 列出服务名 + 提供者插件 id。提供者两路归属：插件 ctx.provide 由 fiber 直接推断，builtins 领域服务（root fiber 无归属）由 registerServiceProvider 登记表补充；宿主内核平台服务无提供者（不带 provider 字段）。 */
     list(this: ServicesServiceInstance): ServiceInfo[] {
       const out: ServiceInfo[] = [];
       const seen = new Set<string>();
@@ -60,6 +49,7 @@ export function createServicesService(): ServicesService {
       }
       return out.sort((a, b) => (a.name < b.name ? -1 : 1));
     },
+    /** 读某服务（不存在/未激活 = undefined，不抛错）——可选依赖判空入口：inject 声明 `{ foo: { optional: true } }` 剥出后，插件在 apply 内经此判空降级（直接 `ctx.foo` 访问会因不在 inject 而抛错）。 */
     get<K extends keyof Context>(this: ServicesServiceInstance, name: K): Context[K] | undefined {
       const raw = this.ctx.get(name as never);
       if (raw === undefined) return undefined;

@@ -1,20 +1,6 @@
 /**
- * 通用历史记录（画布/笔记/表格共用，每文件隐藏侧文件，审计/回滚轴）。
- *
- * 磁盘仍以源文件（.atlx/.md/.atb）为真源；历史是独立的审计轴，存
- * `.atelyx/history/<kind>/<最小编码名>.json`（note 保持顶层路径；随仓库走、跨设备一致；
- * `.atelyx` 隐藏目录被文件树排除）。
- * 每个版本存**全文快照**（回滚即时可靠）+ 相对上一版本的 diff 摘要（展示「改了啥」；
- * 笔记默认行级，画布/表格经 `summarize` 回调生成实体级人话摘要），
- * 版本粒度 = 落盘存档点 + 外部写入 + 手动回滚 + Agent 工具写入（连贯编辑合并为一个存档点，不逐键）。
- *
- * 多人协作：默认作者 = 当前用户协作昵称（`setHistoryAuthor` 注入）；主作者可被
- * `authorOverride` 覆盖——协作远端合入署发送端协作者、Agent 工具写文件署「AI Agent（操作人）」；
- * 并发存档点可带 `coAuthors`（窗口内全部参与者，多人署名）。合并仅限**同一作者 id**连续编辑，
- * 防版本串身份/串版（不同作者/不同操作人拆版）。
- *
- * 防膨胀：留存默认全留，可配 `maxVersions` 剪枝（保留最近 N 版）；diff 摘要而非整存两份正文。
- * 并发安全：读改写整文件（同事写同一侧文件为罕见边界，后写者胜，容忍偶发丢版本）。
+ * 通用历史记录（画布/笔记/表格共用，每文件隐藏侧文件）：磁盘源文件仍是真源，历史是独立的审计/回滚轴。
+ * 每版本存**全文快照**（回滚即时可靠）+ 相对上一版的 diff 摘要（展示「改了啥」）。
  */
 import { deleteVaultFile, readVaultFile, writeVaultFile } from "@/services/vault/aiFiles";
 import { getActiveVaultIdentity } from "@/services/content/factory";
@@ -60,12 +46,9 @@ interface HistoryFile {
 }
 
 /**
- * 历史侧文件字节预算（写盘前剪枝：超限丢最旧保最新）。与 Rust `read_vault_file`
- * 的 5MB 整读上限对齐：历史文件一旦膨胀超过该上限，`loadHistory` 读失败返回空数组、
- * 随后 `recordHistoryVersion` 会以「仅新版本」整文件覆盖写回 → 全部旧版本一次性静默
- * 清空（数据丢失）。故写入前必须把序列化体积压到预算内，保证永不触及读上限。
- * 用 UTF-8 字节数（TextEncoder）而非 JS 字符串长度——Rust 侧按字节判定，中文内容
- * 两者不等长。
+ * 历史侧文件字节预算（写盘前剪枝：超限丢最旧保最新），与 Rust `read_vault_file` 的 5MB 整读上限对齐：
+ * 超限后 `loadHistory` 读失败返回空数组，下次记录会以「仅新版本」整文件覆盖写回 → 全部旧版本一次性静默清空。
+ * 按 UTF-8 字节数（TextEncoder）而非 JS 字符串长度计——Rust 侧按字节判定，中文内容两者不等长。
  */
 const HISTORY_BYTE_BUDGET = 5_000_000;
 

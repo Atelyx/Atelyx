@@ -1,11 +1,6 @@
 /**
- * AI 任务清单的仓库持久化（todo_write 工具后端）。
- *
- * 清单按会话/画布对话 id 隔离，落盘位置按激活仓库身份分流（services/metadata）：
- * 个人仓库 = `.atelyx/todos/<encodeURIComponent(id)>.json`（`{ updatedAt, todos }`）；
- * 协作空间 = user meta 键 `todos/<encodeURIComponent(id)>`。缺失/损坏 → 空清单
- * （尽力而为，不阻塞对话）。供两 store 注入 writeTodos capability，
- * 并跨轮次以尾部上下文块带出当前清单（currentTodosBlock）。
+ * AI 任务清单的仓库持久化（todo_write 工具后端）：按会话/画布对话 id 隔离，供两 store 注入 writeTodos capability。
+ * 落盘位置按激活仓库身份分流（个人仓库侧车文件 / 空间 user meta），见 `services/metadata`。
  */
 import { readSessionTodosRaw, writeSessionTodosRaw, deleteSessionTodosRaw } from "@/services/metadata";
 import type { TodoItem } from "@/types";

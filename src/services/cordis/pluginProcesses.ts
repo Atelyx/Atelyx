@@ -1,16 +1,7 @@
 /**
- * 插件托管进程的登记表（按内核隔离）。
- *
- * `ctx.shell.exec`/`ctx.shell.spawn` 启动的进程按**调用方插件**记账，插件停用/卸载时由
- * 宿主统一结束（`stores/pluginStore.ts` 的 `stopPlugin` 与 `load` 收尾）——插件的长驻服务
- * （本机模型服务、sidecar 等）不该活过插件本身。
- *
- * 两条与「按 pid 结束」绑定的纪律：
- * - 进程结束（`close`）即摘除登记，否则同 pid 被系统复用给别的进程时会被误杀；
- *   运行期 `error` **不摘除**（进程可能仍在跑，摘了会让停用漏杀）；
- * - 登记表按内核隔离（多窗口各自持有内核），只有启动进程的那个窗口能结束它。
- *
- * 本模块不 import 任何 service：结束动作由调用方以 `kill` 回调注入，保持纯表 + 可直测。
+ * 插件托管进程的登记表（按内核隔离）：`ctx.shell.exec`/`ctx.shell.spawn` 启动的进程按调用方插件记账，
+ * 插件停用/卸载时由宿主统一结束（`stores/pluginStore.ts` 的 `stopPlugin` 与 `load` 收尾）——插件的长驻服务不该活过插件本身。
+ * 结束动作由调用方以 `kill` 回调注入（不 import 任何 service，保持纯表 + 可直测）。
  */
 
 /** 单个 pid 的结束结果（失败逐个隔离，不因一个 pid 失败放弃其余）。 */
@@ -59,7 +50,8 @@ export function trackPluginProcess(ctx: object, pluginId: string, pid: number): 
   processesOf(registryOf(ctx), pluginId).add(pid);
 }
 
-/** 摘除登记（进程退出后调用；不存在 = no-op）。 */
+/** 摘除登记（进程 `close` 后调用；不存在 = no-op）。close 必摘——防同 pid 被系统复用给别的进程后误杀；
+ *  运行期 `error` 不摘——进程可能仍在跑，摘了会让停用漏杀。 */
 export function untrackPluginProcess(ctx: object, pluginId: string, pid: number): void {
   const registry = registryOf(ctx);
   const set = registry.get(pluginId);

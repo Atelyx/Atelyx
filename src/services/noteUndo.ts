@@ -1,23 +1,14 @@
 /**
- * 笔记撤销栈（会话内内存驻留，**不落盘**）：按文件全文快照 + 时间合并。
- *
- * 设计取舍：撤销栈只在内存——退出软件与切仓库（防跨仓库同路径串文件）时由
- * store 层清空；预览↔编辑切换、源码切换、切笔记、布局/面板重挂载等一切会话内操作都不清栈。
- * 每文件独立实例，按 file 键严格隔离，互不混淆。
- *
- * 打字成组：连续输入（recordEdit 间隔 < coalesceMs）并为一次输入组，
- * 只入栈**组起点前的全文**一条——撤销一步回到整段输入之前，而非逐键；组内后续输入不新增条目。
- * 与 utils/undoStack.ts（画布/表格快照式栈）语义一致：push 清空 redo、undo/redo 弹栈互放。
- *
- * 内存有界：depth 上限 + 快照字节上限双剪枝（超预算丢最旧保最新）。
+ * 笔记撤销栈：按文件全文快照 + 时间合并，会话内内存驻留、**不落盘**。
  */
 export interface NoteUndoEntry {
   content: string;
   ts: number;
 }
 
+/** 与 utils/undoStack.ts（画布/表格快照式栈）语义一致：push 清空 redo、undo/redo 弹栈互放。 */
 export interface NoteUndoStack {
-  /** 登记一次用户输入：before = 本次输入前的全文。连续输入合并为一个撤销步。 */
+  /** 登记一次用户输入：before = 本次输入前的全文。连续输入合并为一个撤销步（撤销回到整段输入之前，而非逐键）。 */
   recordEdit(before: string, now?: number): void;
   /** 撤销：current = 当前全文；撤销成功时 current 进 redo；无可撤销返回 null。 */
   undo(current: string): string | null;
@@ -28,6 +19,11 @@ export interface NoteUndoStack {
   clear(): void;
 }
 
+/**
+ * 创建某一文件的撤销栈：每文件独立实例，按 file 键严格隔离。
+ * 只在内存——退出软件与切仓库（防跨仓库同路径串文件）由 store 层清空；预览↔编辑切换、源码切换、
+ * 切笔记、布局/面板重挂载等会话内操作都不清栈。内存有界：depth + 快照字节双剪枝（超预算丢最旧保最新）。
+ */
 export function createNoteUndoStack(opts?: {
   /** 撤销深度（默认 50，与画布/表格 undo 栈对齐）。 */
   depth?: number;

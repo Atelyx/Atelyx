@@ -1,10 +1,7 @@
 /**
- * AI 工具（Agent 模式）执行层入口。
- *
- * - `AGENT_TOOLS`：注册表（自包含工具 + 按名分发），取代旧工具的 switch 分发。
- * - `buildAgentTools`：按勾选 id + 搜索是否已配置，组装发给模型的 `ToolSchema[]`。
- * - `runAgentTools`：执行一轮工具（差异由调用方 hooks 消化，如画布建产物节点）。
- * 工具只经注入的 `ToolCapabilities` 访问仓库/搜索能力，不 import store —— 可移植、可复用。
+ * AI 工具（Agent 模式）执行层入口：`AGENT_TOOLS` 注册表按名分发，`runAgentTools` 执行一轮（差异由调用方 hooks 消化）。
+ * `buildAgentTools` 按勾选 id + 搜索是否已配置组装发给模型的 `ToolSchema[]`。
+ * 工具只经注入的 `ToolCapabilities` 访问仓库/搜索能力，不 import store——可移植、可复用。
  */
 import type {
   LlmMessage,
@@ -157,12 +154,8 @@ export function buildAgentTools(
 }
 
 /**
- * 组装发送给模型的 system 消息文本：Agent 系统提示词 + 引用文件读取引导。
- * 工具含 read_file 时追加引导（read_file 是否在名册由 Agent 勾选决定，勾选时才注入）——让模型知道 @引用 的笔记
- * 应经 read_file 按路径读取正文，而不是假装看过内容。两 store（画布/面板）共用防行为分叉。
- * 注意：易变上下文（当前任务清单/当前笔记）一律走**尾部 user 消息块**注入（见
- * agentTodos.currentTodosBlock / chatPanelStore.currentNoteContextBlock），不进系统提示词——
- * 系统前缀必须保持稳定以命中前缀缓存。
+ * 组装发送给模型的 system 消息文本：Agent 系统提示词 + 引用文件读取引导（工具含 read_file 时追加，两 store 共用防分叉）。
+ * 易变上下文（当前任务清单/当前笔记）一律走尾部 user 消息块注入（见 agentTodos.currentTodosBlock / chatPanelStore.currentNoteContextBlock），系统前缀须稳定以命中前缀缓存。
  */
 export function assembleAgentSystemPrompt(
   systemPrompt: string | undefined,

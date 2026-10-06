@@ -1,16 +1,10 @@
 /**
- * 协作空间 HTTP 客户端（传输层，不含状态/重试）。
- *
- * 对应协作服务端 `atelyx-server`（`/api/*`）：账号 / 空间 / 成员 / 邀请 / 内容。
- * 请求/响应字段名、大小写、错误体（`{"error": "..."}`）均按服务端如实镜像，不发明字段。
- * meta 端点由另一代理并行实现，形状以本文件契约为准；联调若有出入以后端为准调整。
- *
- * 规约：base = 规整后的 serverUrl（去尾斜杠）+ `/api`；带 `Authorization: Bearer`；
- * JSON 收发；30 秒超时；网络错误/超时/非 2xx 统一归一成 `SpaceApiError`（中文可定位，
- * 附 `status` 供上层分类，如 401 = 会话失效）。
+ * 协作空间 HTTP 客户端（传输层，不含状态/重试）：对应协作服务端 `atelyx-server`（`/api/*`）的账号 / 空间 / 成员 / 邀请 / 内容。
+ * 请求/响应字段名、大小写、错误体（`{"error": "..."}`）均按服务端如实镜像，不发明字段；meta 端点形状以本文件契约为准，联调有出入以后端为准。
+ * 规约：base = 规整后的 serverUrl（去尾斜杠）+ `/api`，带 `Authorization: Bearer`，JSON 收发。
  */
 
-/** 请求/响应超时（毫秒）。 */
+/** 请求/响应超时（毫秒）：超时、网络错误与非 2xx 一并归一成 `SpaceApiError`（附 `status` 供上层分类，如 401 = 会话失效）。 */
 const REQUEST_TIMEOUT_MS = 30_000;
 
 /**
@@ -327,8 +321,7 @@ let sessionExpiredHandler: SessionExpiredHandler | null = null;
 
 /**
  * 注册会话失效 handler（应用侧一次性注册；传 null 撤销）。
- * 触发口径见 request()：带令牌的非 `/auth/*` 请求收到 401 时——登录/注册/登出/设备管理等
- * 鉴权端点与未携带令牌的请求不在其列（登录预检/未登录的 401 是正常失败路径，不是「中途失效」）。
+ * 触发口径见 request()：带令牌的非 `/auth/*` 请求收到 401——鉴权端点与未携带令牌的请求不在其列（登录预检/未登录的 401 是正常失败路径）。
  */
 export function setSpaceSessionExpiredHandler(handler: SessionExpiredHandler | null): void {
   sessionExpiredHandler = handler;

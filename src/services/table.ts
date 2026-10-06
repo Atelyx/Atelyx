@@ -1,8 +1,6 @@
 /**
- * 多维表格（.atb）文件读写 service。
- *
- * 内容 I/O 经内容面按激活仓库取后端（services/content）；类型对齐 `types/table.ts`。
- * 重命名/移动由后端扫描所有 .atlx 同步 table 节点 file 引用（链接维护）。
+ * 多维表格（.atb）文件读写 service：内容 I/O 经内容面按激活仓库取后端（services/content）。
+ * 重命名/移动由后端扫描所有 .atlx 同步 table 节点 file 引用（链接维护）；类型对齐 `types/table.ts`。
  */
 import { invoke } from "@tauri-apps/api/core";
 import { computeTablePatch } from "@/utils/table";

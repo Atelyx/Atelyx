@@ -1,10 +1,7 @@
 /**
  * 宿主侧 UI 贡献注册表：插件主线程平面（设置项/应用页/命令/主题设置项）。
- *
- * 注册经 ctx.slots 触达（slotsApi.ts，随插件 fiber 生命周期撤销）；消费者经 pluginStore 读取。
- * 本表为「键值型」主线程平面：设置 key / 应用页 id / 命令 globalId / 主题设置 key 天然唯一，
- * 同 key 后注册覆盖（last-wins）；需要优先级竞争的位置一律走 slots。
- * 节点/边/表格视图的读取 getter 亦收拢于此（读 slots 注册表，single 胜出），供 pluginStore 统一读取。
+ * 注册经 ctx.slots 触达（slotsApi.ts，随插件 fiber 生命周期撤销），消费者经 pluginStore 读取。
+ * 本表为「键值型」主线程平面：设置 key / 应用页 id / 命令 globalId / 主题设置 key 天然唯一，同 key 后注册覆盖（last-wins）——需要优先级竞争的位置一律走 slots。
  */
 import type { ComponentType } from "react";
 import type { CommandShortcutScope } from "@/types";
@@ -117,6 +114,7 @@ export function getPluginEdges(): PluginEdgeRegistration[] {
 export function getPluginCommands(): PluginCommandRegistration[] {
   return [...commands.values()];
 }
+/** 表格视图槽胜出者（single 槽；pluginStore 统一读取）。 */
 export function getPluginTableView(kind: string): PluginTableViewRegistration | undefined {
   const winner = resolveTableViewSlot(kind);
   if (!winner) return undefined;

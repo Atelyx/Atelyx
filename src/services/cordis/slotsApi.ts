@@ -1,13 +1,7 @@
 /**
- * ctx.slots：插件 UI 注册 API（视图/节点/边/表格视图/设置项/应用页/命令/主题设置项/外壳接管）。
- *
- * 服务对象带 Cordis tracker（`symbols.tracker`）——经插件 ctx 读取时 `this.ctx` 解析为
- * 调用方插件上下文，注册随其 fiber 生命周期自动撤销（ctx.effect）。pluginId 经挂载器的
- * contextToPluginId 归属（追原型链，见 loader.pluginIdOf）。
- * 视图/节点/边/表格视图为 slots 槽贡献（single 胜出，priority 定胜负）；设置项/应用页/
- * 命令/主题设置项为 ui.ts 键值平面（同 key last-wins）。
- * 槽位注册须匹配 constants/slots.ts 的声明表（未声明、基数或载荷字段不符即抛错，插件行标 failed）；
- * `list()` 暴露该声明表供插件发现可贡献的位置。
+ * ctx.slots：插件 UI 注册 API（视图/节点/边/表格视图 + 设置项/应用页/命令/主题设置项/外壳接管）。
+ * 服务对象带 Cordis tracker（`symbols.tracker`）：经插件 ctx 读取时 `this.ctx` 解析为调用方插件上下文，注册随其 fiber 自动撤销（ctx.effect）；pluginId 经 loader.pluginIdOf 归属（追原型链）。
+ * 视图/节点/边/表格视图为 slots 槽贡献（single 胜出，priority 定胜负），设置项/应用页/命令/主题设置项为 ui.ts 键值平面（同 key last-wins）；槽位注册须匹配 constants/slots.ts 声明表（不符即抛错，插件行标 failed），`list()` 暴露该表供插件发现。
  */
 import { symbols } from "@atelyx/cordis";
 import { createElement } from "react";

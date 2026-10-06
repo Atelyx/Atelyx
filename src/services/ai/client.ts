@@ -1,14 +1,7 @@
 /**
- * OpenAI 兼容协议的适配器（当前唯一供应商适配器，契约提供者中立）。
- * 前端直连，SSE 流式输出。
- *
- * - `streamRequest`：中性 `LlmMessage[]` → 发起一次请求，异步产出中性 `LlmStreamEvent`（单次尝试，不含重试）。
- * - `streamChat`：消费 `streamRequest`，叠加传输级重试策略（retry.ts），对外保留回调 API，供流式引擎调用。
- * - `chatOnce`：非流式单次（标题生成等一次性任务）。
- * - `messagesToWire` / `toLlmMessages`：中性词 ⇄ 内部消息/线协议的纯转换。
- *
- * 加新供应商 = 按同一中性接缝再实现一个适配器，调用方无感知。
- * key 由用户在设置中填入，本适配器只在发请求时经入参拿到明文（存取归 keychain，见 services/keychain）。
+ * OpenAI 兼容协议的适配器（当前唯一供应商适配器，契约提供者中立）：前端直连，SSE 流式输出。
+ * 加新供应商 = 按同一中性接缝再实现一个适配器，调用方无感知；key 由用户在设置中填入，本适配器只在发请求时经入参拿明文（存取归 services/keychain）。
+ * `streamChat` = `streamRequest` 叠加传输级重试（retry.ts），`chatOnce` 为非流式单次，`messagesToWire` / `toLlmMessages` 是中性词 ⇄ 线协议的纯转换。
  */
 import type {
   Attachment,

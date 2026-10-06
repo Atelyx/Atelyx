@@ -1,13 +1,7 @@
 /**
- * Cordis 内核契约：类型化 ctx 服务 + typed events（Atelyx 宿主侧服务面）。
- *
- * 服务实现 = 宿主侧直连 service 层与注入访问（见 kernel.ts）；本文件只定义类型契约，
- * 插件侧一律经 ctx.<domain>.<method>() 的类型化方法触达。
- * 事件闭集（vault:switch/canvas:changed/table:changed/collab:changed/collab:reconnected/
- * collab:resync/vault:changed）在此声明为 typed event map（@mode 标注分派模式）。
- *
- * 平台服务（state/app/shell/vault/dialog/clipboard/window/ai/collab）与内核领域服务
- * （history/layout/uiState/chat）由内核提供；canvas/table/note 由对应插件提供（停用即不可用）。
+ * Cordis 内核契约：类型化 ctx 服务 + typed events（Atelyx 宿主侧服务面）；服务实现见 kernel.ts，插件侧一律经 ctx.<domain>.<method>() 触达。
+ * 事件闭集（vault:switch / canvas:changed / table:changed / collab:changed / collab:reconnected / collab:resync / vault:changed）在本文件声明为 typed event map（@mode 标注分派模式）。
+ * 平台服务（state/app/shell/vault/dialog/clipboard/window/ai/collab）与内核领域服务（history/layout/uiState/chat）由内核提供；canvas/table/note 由对应插件提供（停用即不可用）。
  */
 import type {
   AgentStep,
@@ -278,10 +272,8 @@ export interface VaultService {
   createFolder(dir: string): Promise<{ ok: boolean; summary: string; path: string }>;
 }
 
-/** 仓库外文件读写服务（外部文件服务面）：方法面与 `vault` 镜像，但入参是绝对路径、
- *  作用域为仓库外任意路径（无目录授权门槛；调用经审计按调用方插件记录方法与路径）。
- *  私有目录（`privateDir()`）为插件自有落点，随插件卸载清除、更新保留。插件代码不传
- *  插件 id——宿主按当前 fiber 绑定（与 state/storage 同机制）。
+/** 仓库外文件读写服务（外部文件服务面）：方法面与 `vault` 镜像，但入参是绝对路径、作用域为仓库外任意路径（无目录授权门槛；调用经审计按调用方插件记录方法与路径）。
+ *  私有目录（`privateDir()`）为插件自有落点，随插件卸载清除、更新保留；插件代码不传插件 id——宿主按当前 fiber 绑定（与 state/storage 同机制）。
  *  模型工具（AI 文件工具）走 `vault`，结构性够不到本面。 */
 export interface FsService {
   readFile(path: string): Promise<string>;
@@ -367,18 +359,16 @@ export interface WindowService {
  *  错误拒绝，注销/释放幂等成功——无 OS 层即不存在任何登记可清理。
  *  注册属应用级资源：归属与触发转发由宿主 Rust 侧统一登记，不随注册窗口销毁失效。 */
 export interface ShortcutsService {
-  /** 注册全局快捷键（同一快捷键在应用内唯一，已被其他插件占用即失败；随调用方插件
-   *  停用/卸载自动注销）。accelerator 为 OS 层格式（如 "Shift+Alt+E"），非法格式报错。 */
+  /** 注册全局快捷键：同一快捷键在应用内唯一，已被其他插件占用即失败；随调用方插件停用/卸载自动注销。
+   *  accelerator 为 OS 层格式（如 "Shift+Alt+E"），非法格式报错。 */
   registerGlobal(accelerator: string, handler: () => void | Promise<void>): Promise<void>;
-  /** 按本插件 manifest 的热键声明（`atelyx.shortcuts` 条目 id）注册全局快捷键：实际热键 =
-   *  用户覆盖（设置 → 快捷键）→ 声明默认键，设置页改键即改这里解析出的键。声明缺失报错；
-   *  占用/幂等/注销语义同 registerGlobal。 */
+  /** 按本插件 manifest 的热键声明（`atelyx.shortcuts` 条目 id）注册全局快捷键：实际热键 = 用户覆盖（设置 → 快捷键）→ 声明默认键，设置页改键即改这里解析出的键。
+   *  声明缺失报错；占用/幂等/注销语义同 registerGlobal。 */
   registerDeclared(id: string, handler: () => void | Promise<void>): Promise<void>;
   /** 按声明 id 注册窗口切换热键（语义与选项同 registerWindowToggle；实际热键解析同 registerDeclared）。 */
   registerDeclaredWindowToggle(id: string, view: string, options: WindowOptions): Promise<void>;
-  /** 注册窗口切换热键：触发由 Rust 按声明的窗口选项（置顶、不进任务栏、失焦自动收起、
-   *  关闭即藏——任意子集组合）直接切换承载 `view` 的撕裂窗口，不经本插件回调——主窗口
-   *  驻留托盘时照常生效。占用/幂等/注销语义同 registerGlobal（unregisterGlobal 通用）。 */
+  /** 注册窗口切换热键：触发由 Rust 按声明的窗口选项（置顶、不进任务栏、失焦自动收起、关闭即藏——任意子集组合）直接切换承载 `view` 的撕裂窗口，不经本插件回调——主窗口驻留托盘时照常生效。
+   *  占用/幂等/注销语义同 registerGlobal（unregisterGlobal 通用）。 */
   registerWindowToggle(
     accelerator: string,
     view: string,
@@ -406,9 +396,8 @@ export interface CollabService {
   setPresence(view: string | null, file: string | null): void;
   /** 发送插件消息到同房间其他成员：payload 为任意 JSON 或二进制（Uint8Array，传输层按二进制帧直传）。
    *  channel 是本插件的逻辑频道名，宿主自动加插件命名空间（线路名 = `插件id:频道`，跨插件撞名不串台）。
-   *  opts.to 指定 = 定向单播只发该 peer，缺省 = 广播。返回是否已投递到传输层（未连接/断开 = false，
-   *  调用方据此感知消息未发出）。通道为尽力而为语义；断线/裁剪丢帧经 collab:reconnected /
-   *  collab:resync 事件感知后自行补发。 */
+   *  opts.to 指定 = 定向单播只发该 peer，缺省 = 广播。返回是否已投递到传输层（未连接/断开 = false，调用方据此感知消息未发出）。
+   *  通道为尽力而为语义；断线/裁剪丢帧经 collab:reconnected / collab:resync 事件感知后自行补发。 */
   sendMessage(channel: string, payload: unknown, opts?: { to?: number }): boolean;
   /** 订阅本插件的协作频道（线路名 = `本插件id:channel`），返回退订函数（随插件 fiber 撤销）。
    *  handler 只收到已订阅频道的入站消息（其他插件频道与未订阅频道不投递，跨插件撞名不串台）；
@@ -417,8 +406,7 @@ export interface CollabService {
   /** 本端身份（peerId 未连接 = null；与 peers() 对称）。 */
   myPeer(): CollabMyPeer;
   /** 声明本插件需要协作通道，返回释放函数（撤销声明；随插件 fiber 撤销调用）。
-   *  存在活跃声明时宿主为本窗口维持协作连接，其余连接条件不变——插件的协作需求宿主
-   *  看不到，不经此声明，承载插件面板的窗口不会建立连接，ctx.collab 收发恒不可用。 */
+   *  存在活跃声明时宿主为本窗口维持协作连接，其余连接条件不变——不声明则承载插件面板的窗口不建连接，ctx.collab 收发恒不可用。 */
   acquire(): () => void;
 }
 
@@ -488,11 +476,8 @@ export interface MarkdownService {
 }
 
 /** AI 对话能力（内核提供，恒可用；编排依赖「对话核心」行注册的运行时，未注册即调用抛「未就绪」）：
- *  用宿主配置的模型/Agent/工具跑一轮对话。核心只跑一轮——消息容器与落盘留在调用方（插件自带容器），
- *  流式与收尾经 `ChatTurnSink` 交回。运行时经 `registerRuntime` 供给，可被替换（组合接管换对话核心行）。
- *  同源容器方法（importSession/appendMessages/listSessions/openSession/createSession/setSessionTitle）
- *  读写宿主对话面板的会话（同一批会话文件，磁盘为真源；面板 store 每窗口一份内存实例，
- *  跨窗口并发以写盘广播对账，见 chatPanelStore），要求对话面板插件已启用。
+ *  用宿主配置的模型/Agent/工具跑一轮对话。核心只跑一轮——消息容器与落盘留在调用方（插件自带容器），流式与收尾经 `ChatTurnSink` 交回；运行时经 `registerRuntime` 供给，可被替换（组合接管换对话核心行）。
+ *  同源容器方法（importSession/appendMessages/listSessions/openSession/createSession/setSessionTitle）读写宿主对话面板的会话（同一批会话文件，磁盘为真源；面板 store 每窗口一份内存实例，跨窗口并发以写盘广播对账，见 chatPanelStore），要求对话面板插件已启用。
  *  类型面与宿主内部消费方同一份契约（见 types/chatRuntime.ts 的 `ChatRuntime`）。 */
 export interface ChatService {
   /** 解析对话目标（未指定 = 跟随仓库默认；失败给可展示文案）。 */
@@ -560,9 +545,8 @@ export interface LayoutService {
   addView(panelId: string, view: string): Promise<LayoutOpResult>;
   /** 发布布局操作（`LayoutOp` 与 Rust `LayoutOp` 逐字段对齐，命令层全量受理；布局权威在 Rust）。 */
   op(op: LayoutOp): Promise<LayoutOpResult>;
-  /** 声明插件默认布局（每插件一次性生效）：宿主把规格实例化为布局列表新条目追加（不激活、
-   *  不改既有布局）；用户任一布局已含规格中的视图时不追加。声明随插件停用撤销（已追加的
-   *  布局保留为普通用户布局）。布局名非法 / 规格树缺失随声明同步抛错（插件行标 failed）；
+  /** 声明插件默认布局（每插件一次性生效）：宿主把规格实例化为布局列表新条目追加（不激活、不改既有布局）；用户任一布局已含规格中的视图时不追加。
+   *  声明随插件停用撤销（已追加的布局保留为普通用户布局）。布局名非法 / 规格树缺失随声明同步抛错（插件行标 failed）；
    *  规格形状非法由 Rust 侧校验拒绝，经应用通知可见、不阻断插件其余注册。 */
   declareDefaultLayout(spec: PluginDefaultLayoutSpec): () => void;
 }

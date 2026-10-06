@@ -1,9 +1,6 @@
 /**
- * 协作空间登录态 service 测试（services/space/auth）。
- *
- * 令牌/用户身份经 mock 的 keychain service 入库；服务器清单经 mock 的 global service 维护。
- * 覆盖：login/register 成功后令牌入库 + 清单更新；restore 会话失效从清单剔除；
- * logout 调服务端并清令牌与清单。
+ * 协作空间登录态 service 测试（services/space/auth）：令牌/用户身份经 mock 的 keychain service 入库，服务器清单经 mock 的 global service 维护。
+ * 断言 login/register 成功后令牌入库 + 清单更新、restore 会话失效从清单剔除、logout 调服务端并清令牌与清单。
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 

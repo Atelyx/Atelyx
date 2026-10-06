@@ -1,11 +1,7 @@
 /**
- * vendored Cordis 核心行为锚点（`vendor/cordis` 同步/升级前先跑这条）。
- *
- * 验证核心在 vitest（node 环境、经 Vite 转换管线）可启动：typed events 声明合并、
+ * vendored Cordis 核心行为锚点（`vendor/cordis` 同步/升级前先跑这条）：验证核心在 vitest（node 环境、经 Vite 转换管线）可启动——typed events 声明合并、
  * 服务提供/读取/撤销、on/once、waterfall 环绕、插件注册随 fiber 卸载可逆撤销。
- * 与 kernel/loader/slotsApi 等测试的分工：那些走宿主封装，本文件只钉 vendor 自身语义。
- * 另对账 vendor/README.md 的声明：导入映射补丁的全集与上游 commit 记录存在
- * （局限：测试无法离线校验上游 commit 真伪，只校验「声明存在且补丁无越界」）。
+ * 与 kernel/loader/slotsApi 等测试的分工：那些走宿主封装，本文件只钉 vendor 自身语义；另对账 vendor/README.md 的声明（导入映射补丁全集与上游 commit 记录存在；测试无法离线校验上游 commit 真伪，只校验「声明存在且补丁无越界」）。
  */
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";

@@ -1,9 +1,6 @@
 /**
- * OpenAI 兼容适配器契约测试（services/ai/client）。
- *
- * 核心回归：工具调用参数分片以 `tool-call-delta` 逐片发出（参数进度实时可见、空闲超时可喂狗），
- * 完整调用仍在流末一次性发出（工具执行只认完整调用）；`streamChat` 把增量原样转发给
- * `onToolCallDelta`，`onToolCalls` 仍只在流末触发一次（引擎据此把「生成中」行固化为正式行）。
+ * OpenAI 兼容适配器契约测试（services/ai/client）：工具调用参数分片以 `tool-call-delta` 逐片发出（参数进度实时可见、空闲超时可喂狗），完整调用仍在流末一次性发出。
+ * `streamChat` 把增量原样转发给 `onToolCallDelta`，`onToolCalls` 仍只在流末触发一次（引擎据此把「生成中」行固化为正式行）。
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Context } from "@atelyx/cordis";

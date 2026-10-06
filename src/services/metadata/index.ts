@@ -1,22 +1,7 @@
 /**
- * 元数据双源分发层：`.atelyx` 元数据与配置的读写按仓库身份分发。
- *
- * 仓库级读写的落点由**当前激活仓库的身份**决定（个人仓库 = 本地文件，协作空间 = 服务端 meta）：
- * 同一份实现按身份分流，没有第二条路径。
- *
- * 个人仓库（local）→ 既有本地 Tauri 命令（services/vault 的函数面原样直通）；
- * 协作空间（space）→ 服务端 meta 分组（services/space/client）：
- * - team 层（space meta，团队共享）：AI 配置本体（供应商/模型/搜索源，按字段分键，含 API key）/
- *   排序 `sort` / 排除夹 `exclusions` / 附件夹 `attachment-folder` / 文件夹颜色 `folder-colors` /
- *   提示词标记 `prompt-notes` / Agent 配置 `agents` / 日历日程 `calendar`；写权限由服务端按角色裁决
- *   （owner/editor 可写，viewer 拒绝），客户端不另行拦截。团队层写/删落地后服务端向空间房间广播
- *   `meta-changed` 帧（只带键名），日历域据此回读磁盘真源刷新；
- * - user 层（meta/me，个人）：对话历史 `chat/messages/<id>`、`chat/sessions/<id>`、
- *   `chat/editor-meta`、待办 `todos/<encodeURIComponent(id)>`。
- *
- * 空间写失败与写被服务端拒绝（如 viewer 改团队层）都经 cordis access 注入点弹通知，不静默；
- * 配置补丁路径例外——该路径的错误由 settingsStore 的写盘入口统一通知，避免双重弹窗。
- * 读改写场景（对话追加）在写前校验激活身份未变，切换后的在途写直接丢弃。
+ * 元数据双源分发层：`.atelyx` 元数据与配置的读写按当前激活仓库身份分流（个人仓库 = 本地 Tauri 命令，协作空间 = 服务端 meta），没有第二条路径。
+ * 团队层（space meta，团队共享）见 `TEAM_*` 键，个人层（meta/me）见 `MY_*` 键；写权限由服务端按角色裁决，客户端不另行拦截。
+ * 空间写失败与写被服务端拒绝都经 cordis access 注入点弹通知（配置补丁路径例外，见 `patchVaultConfig`）；读改写场景在写前校验激活身份未变。
  */
 import { getActiveVaultIdentity, identityKeyOf } from "@/services/content/factory";
 import { createSpaceClient, type SpaceClient } from "@/services/space/client";
@@ -63,8 +48,9 @@ import type {
   VaultConfigRead,
 } from "@/types";
 
-// ===== 空间 meta 键名（team 层）=====
+// ===== 空间 meta 键名（team 层）：AI 配置本体 / sort / exclusions / attachment-folder / folder-colors / prompt-notes / agents / calendar =====
 // 键名常量在 constants/spaceMeta 一处定义（内容后端消费附件夹设定时复用同一份）。
+// 团队层写/删落地后服务端向空间房间广播 `meta-changed` 帧（只带键名），日历域据此回读磁盘真源刷新。
 
 const TEAM_SORT = SPACE_TEAM_META.sort;
 const TEAM_EXCLUSIONS = SPACE_TEAM_META.exclusions;
@@ -74,7 +60,7 @@ const TEAM_PROMPT_NOTES = SPACE_TEAM_META.promptNotes;
 const TEAM_AGENTS = SPACE_TEAM_META.agents;
 const TEAM_CALENDAR = SPACE_TEAM_META.calendar;
 
-// ===== 空间 meta 键名（user 层）=====
+// ===== 空间 meta 键名（user 层）：对话历史 chat/messages、chat/sessions、chat/editor-meta 与待办 todos/<id> =====
 const MY_EDITOR_META = "chat/editor-meta";
 const MY_CHAT_MESSAGES_PREFIX = CHAT_MESSAGES_META_PREFIX;
 const MY_CHAT_SESSIONS_PREFIX = "chat/sessions/";

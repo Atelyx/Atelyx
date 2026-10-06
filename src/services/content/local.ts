@@ -1,9 +1,6 @@
 /**
- * 个人仓库内容后端：契约方法 → 本地 Tauri 命令的逐项委托。
- *
- * root 无关——当前仓库根由 Rust 侧 VaultState 持有，命令不带 root 参数；
- * 仓库切换 = open_vault 换 root，本后端对象跨仓库复用。
- * 命令对应 `src-tauri/src/commands/{vault,table,filesearch,temp_attachment,home}.rs`。
+ * 个人仓库内容后端：契约方法 → 本地 Tauri 命令的逐项委托（命令见 `src-tauri/src/commands/{vault,table,filesearch,temp_attachment,home}.rs`）。
+ * root 无关：仓库根由 Rust 侧 VaultState 持有，命令不带 root，本后端跨仓库复用（切换仓库 = open_vault 换 root）。
  */
 import { invoke } from "@tauri-apps/api/core";
 import { READ_WINDOW_DEFAULT_LINES } from "@/constants/tools";

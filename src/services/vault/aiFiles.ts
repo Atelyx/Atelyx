@@ -1,11 +1,5 @@
 /**
- * AI 文件工具的仓库能力（read_file / append_file / edit_file / write_file 的落地）。
- *
- * - `readVaultFile`/`writeVaultFile`：读/写仓库内**任意文本文件**（个人仓库安全边界 = 仓库根，
- *   Rust `safe_join` 校验 + 原子写 + 自动建父目录）；I/O 经内容面按激活仓库取后端。
- * - `appendVaultFile`：追加内容到已存在文本文件（读全文 → 拼接 → 原子写；不存在/超限拒绝）。
- * - `editVaultFile`：行级修改（oldText 唯一精确匹配、块间不重叠，全部校验通过后统一替换），
- *   按路径定位（通用，不只 .md），复用笔记行级替换的校验语义。
+ * AI 文件工具的仓库能力（read_file / append_file / edit_file / write_file 的落地），I/O 经内容面按激活仓库取后端。
  */
 import { READ_WINDOW_DEFAULT_LINES } from "@/constants/tools";
 import { errText } from "@/types";
@@ -31,7 +25,7 @@ export async function readVaultFileWindow(
 }
 
 /**
- * 写仓库内任意文本文件（原子写 + 自动建父目录）。
+ * 写仓库内任意文本文件（个人仓库安全边界 = 仓库根，Rust `safe_join` 校验 + 原子写 + 自动建父目录）。
  * 打开的笔记会话按磁盘内容事实收敛：写的内容与本地未落盘正文一致则对齐基线并清脏；
  * 不一致且会话有待落盘输入时保留本地输入，由后续自动保存写盘（整文件写 = 后写者胜）。
  *

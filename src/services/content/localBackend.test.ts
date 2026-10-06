@@ -1,6 +1,5 @@
 /**
- * localBackend 契约符合性测试：每个契约方法必须映射到既定 Rust 命令、
- * 参数原样透传、返回值原样透传、命令失败如实抛出（内容 I/O 失败不得静默）。
+ * localBackend 契约符合性测试：每个契约方法映射到既定 Rust 命令，参数与返回值原样透传，命令失败如实抛出（不得静默）。
  * readTable 的行归一化（磁盘旧形态 → 内存形态）属于契约返回形状，一并锁定。
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";

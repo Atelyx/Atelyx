@@ -1,14 +1,7 @@
 /**
- * AI 请求错误：LlmError 错误载体 + 错误文本判定纯函数。
- *
- * - `LlmError`：AI 请求错误载体，附 `status` 与 `retryAfterMs`（重试策略优先尊重服务端 retry-after）。
- * - 错误判定只有两个出口：传输级可重试（`isTransportRetryable` → `isRetryableError`，供重试策略）
- *   与上下文溢出（`isContextOverflowError` → `withOverflowHint` 追加友好提示；调用方据此先折叠超长
- *   历史工具结果重试一次）；
- *   其余错误（配额耗尽/鉴权失败/参数错误/其余未知）不区分类别，统一不重试、原始文案直出。
- * - 配额/鉴权等终态特征在 `isTransportRetryable` 内优先否决，防止 HTTP 429/5xx 状态兜底误重试。
- *
- * 判定规则只在这一个文件维护，client 与各调用方共用。
+ * AI 请求错误：LlmError 错误载体 + 错误文本判定纯函数；判定规则只在本文件维护，client 与各调用方共用。
+ * 判定只有两个出口：传输级可重试（`isRetryableError`，供重试策略）与上下文溢出（`withOverflowHint` 追加友好提示，调用方据此先折叠超长工具结果重试一次）。
+ * 其余错误（配额耗尽/鉴权失败/参数错误/未知）不区分类别，统一不重试、原始文案直出；终态特征在 `isTransportRetryable` 内优先否决，防 429/5xx 状态兜底误重试。
  */
 
 /** 上下文溢出错误的友好提示（追加到原始错误消息后展示）。 */

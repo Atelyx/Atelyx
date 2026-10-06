@@ -1,7 +1,6 @@
 /**
- * 协作锁原语纯函数测试（services/collab/locks.ts）。
- * 覆盖确定性锁主判定（since 最小/同 since peerId 取小/空数组）与单资源锁判定
- * （本端+对端声明收集、myPeerId 未分配时本端不参与）。
+ * 协作锁原语纯函数测试（services/collab/locks.ts）：确定性锁主判定（since 最小 / 同 since peerId 取小 / 空数组）、
+ * 单资源锁判定（本端 + 对端声明收集、myPeerId 未分配时本端不参与）。
  */
 import { describe, it, expect } from "vitest";
 import type { CollabPeer } from "@/types";

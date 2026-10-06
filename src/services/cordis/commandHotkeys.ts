@@ -1,10 +1,6 @@
 /**
- * 命令快捷键：主线程统一键盘监听，按插件命令注册的生效键匹配执行。
- *
- * 生效键 = 用户覆盖（global.json，调用方注入 getter）→ 命令声明的默认 shortcut；仅分发
- * `scope: "global"` 的命令——作用域类命令（画布/笔记/表格）的匹配逻辑留在对应视图的既有
- * 监听点（面板聚焦、编辑面归属等上下文判断与视图生命周期绑定），注册表只承载键位数据。
- * 监听经 installCommandHotkeys 幂等安装一次（pluginStore.load 时）。输入框聚焦时跳过。
+ * 命令快捷键：主线程统一键盘监听（installCommandHotkeys 幂等安装一次，pluginStore.load 时），按插件命令注册的生效键匹配执行；输入框聚焦时跳过。
+ * 生效键 = 用户覆盖（global.json，调用方注入 getter）→ 命令声明的默认 shortcut；仅分发 `scope: "global"` 的命令——作用域类命令（画布/笔记/表格）的匹配逻辑留在对应视图的既有监听点（上下文判断与视图生命周期绑定）。
  */
 import { matchesShortcut } from "@/utils/shortcutKeys";
 import { getPluginCommands } from "./ui";

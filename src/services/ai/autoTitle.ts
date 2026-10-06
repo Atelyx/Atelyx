@@ -1,7 +1,5 @@
 /**
- * LLM 话题自动命名：把首轮对话摘要为简短标题。
- *
- * 命名模型复用当前对话使用的 provider/model（调用方传入），不新增配置。
+ * LLM 话题自动命名：把首轮对话摘要为简短标题，复用当前对话的 provider/model（调用方传入），不新增配置。
  * 失败/空结果返回 null——调用方保留现有占位标题，不阻塞、不重试轰炸。
  */
 import { chatOnce, type ChatParams } from "@/services/ai/client";

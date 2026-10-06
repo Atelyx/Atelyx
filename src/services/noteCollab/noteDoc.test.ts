@@ -1,7 +1,6 @@
 /**
- * 笔记协作接线测试（services/noteCollab/noteDoc.ts）：以假广播钩子驱动模块级单例，
- * 锁定 store 依赖的接线契约——绑定即通告基线并握手、正文差量同步、落盘登记推进共同祖先、
- * 入站帧路由与重建回调、目录前缀销毁、重连反熵只覆盖激活文档。
+ * 笔记协作接线测试（services/noteCollab/noteDoc.ts）：以假广播钩子驱动模块级单例，锁定 store 依赖的接线契约。
+ * 断言绑定即通告基线并握手、正文走差量同步、落盘登记推进共同祖先、入站帧路由与重建回调、重连反熵只覆盖激活文档。
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import {

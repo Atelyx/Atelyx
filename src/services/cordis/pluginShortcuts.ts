@@ -1,14 +1,7 @@
 /**
- * 插件全局快捷键的登记表（按内核隔离）。
- *
- * `ctx.shortcuts.registerGlobal` 注册的快捷键按**调用方插件**记账，插件停用/卸载时由宿主
- * 统一注销（`stores/pluginStore.ts` 的 `stopPlugin` 与 `load` 收尾）——OS 级热键是应用内
- * 唯一资源，不该活过插件本身。与 `pluginProcesses.ts` 同一套纪律：
- * - 登记先于注册 promise 落地（停用可覆盖在途注册）；注销/释放前先等在途注册落地；
- * - 登记表按内核隔离（多窗口各自持有内核）；OS 层归属仲裁与释放是应用级的，
- *   由 Rust 侧登记表裁定（任一窗口的释放都生效）。
- *
- * 本模块不 import 任何 service：注销动作由调用方以 `release` 回调注入，保持纯表 + 可直测。
+ * 插件全局快捷键的登记表（按内核隔离）：`ctx.shortcuts.registerGlobal` 注册的快捷键按调用方插件记账，
+ * 插件停用/卸载时由宿主统一注销（`stores/pluginStore.ts` 的 `stopPlugin` 与 `load` 收尾）——OS 级热键是应用内唯一资源，不该活过插件本身。
+ * 与 pluginProcesses.ts 同纪律（登记先于注册 promise 落地，注销前先等在途注册落地）；OS 层归属仲裁与释放由 Rust 侧登记表裁定；注销动作由调用方以 `release` 回调注入。
  */
 
 import type { WindowOptions } from "@/types";

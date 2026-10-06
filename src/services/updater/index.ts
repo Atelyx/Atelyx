@@ -1,9 +1,6 @@
 /**
- * 检查更新与安装 service。
- *
- * 三端统一查 GitHub Release API 比对版本：Windows/安卓应用内下载（进度/取消/续传/sha256）后拉起
- * 系统安装器；Linux 发行版安装语义各异，改为打开 Release 下载页。
- * 启动检查只提示不安装；失败静默降级（下次启动再试）；dev 跳过。
+ * 检查更新与安装 service：三端统一查 GitHub Release API 比对版本。
+ * Windows/安卓应用内下载（进度/取消/续传/sha256）后拉起系统安装器；Linux 安装语义各异，改为打开 Release 下载页。
  */
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { getAppVersion } from "@/services/app";

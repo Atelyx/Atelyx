@@ -1,8 +1,7 @@
 /**
- * 工具：读取历史（read_history）。读取仓库文件的版本历史（.md/.atlx/.atb，侧文件
- * `.atelyx/history/`）：不传 version 列出版本摘要（序号/时间/作者/行为/改动摘要/备注，
- * **不含全文**防撑爆上下文）；传 version 返回该版全文快照（模型可用 write_file 写回恢复）。
- * 只读，不建产物节点。隐藏屏蔽的刻意豁免：其入参是普通仓库文件路径，内部直读 `.atelyx/history/`。
+ * 工具：读取历史（read_history）。读取仓库文件的版本历史（.md/.atlx/.atb，侧文件 `.atelyx/history/`）。
+ * 不传 version 列出版本摘要（序号/时间/作者/行为/改动摘要/备注，**不含全文**防撑爆上下文）；传 version 返回该版全文快照（模型可用 write_file 写回恢复）。
+ * 只读，不建产物节点；入参是普通仓库文件路径、内部直读 `.atelyx/history/`，属隐藏屏蔽的刻意豁免。
  */
 import { ToolArgsError, errText } from "@/types";
 import type { AgentHistoryReadResult } from "@/types";

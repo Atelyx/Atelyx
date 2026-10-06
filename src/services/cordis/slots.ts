@@ -1,12 +1,7 @@
 /**
  * slots 运行时注册表：具名槽的贡献收集与解析（纯代数见 utils/cordis/slots）。
- *
- * 可注册的槽位以 constants/slots.ts 的声明表为宿主侧唯一清单：固定具名槽（titlebar/toolbar/
- * panelhead/statusbar/settings）与右键菜单目标（contextmenu/<target>）未声明即注册失败并附近似槽名
- * 提示；开放 kind 槽（view/node/edge/tableview/empty/inspector）按前缀放行。
- * 插件可经 ctx.slots.declare 声明自有槽位（先到先得 + 宿主保护，运行时声明注册表在本模块）；
- * 对宿主槽与插件声明槽的贡献注册路径相同，仅声明校验来源不同。
- * 随应用分发的视图/节点/边 = 对应默认组合成员挂载时注册的 single 槽贡献；注册经 ctx.effect 随 fiber 撤销。
+ * 可注册的槽位以 constants/slots.ts 的声明表为宿主侧唯一清单：固定具名槽（titlebar/toolbar/panelhead/statusbar/settings）与右键菜单目标（contextmenu/<target>）未声明即注册失败并附近似槽名提示，开放 kind 槽（view/node/edge/tableview/empty/inspector）按前缀放行。
+ * 插件可经 ctx.slots.declare 声明自有槽位（先到先得 + 宿主保护，声明注册表在本模块）；宿主槽与插件声明槽的贡献注册路径相同，仅声明校验来源不同。随应用分发的视图/节点/边 = 对应默认组合成员挂载时注册的 single 槽贡献，注册经 ctx.effect 随 fiber 撤销。
  */
 import type { ComponentType, ReactNode } from "react";
 import { VIEW_LABELS } from "@/constants/views";

@@ -1,8 +1,6 @@
 /**
- * 当前窗口控制 service（decorations: false 自定义标题栏/全屏用）。
- *
- * 窗口控制属桌面专有能力：调用点先查能力表（services/platform），移动端一律 no-op，
- * 不把不支持的原生窗口 API 打进安卓 WebView。
+ * 当前窗口控制 service（decorations: false 自定义标题栏/全屏用）：桌面专有能力，移动端一律 no-op。
+ * 调用点先查能力表（services/platform），不把不支持的原生窗口 API 打进安卓 WebView。
  */
 import { getCurrentWindow, type Window } from "@tauri-apps/api/window";
 import { LogicalSize } from "@tauri-apps/api/dpi";
@@ -16,9 +14,8 @@ const WINDOW_CONTROLS = platformCapabilities().windowControls;
 /** 工作区窗口尺寸（默认与最小一致：不可缩小到默认以下）。 */
 const WORKSPACE_WINDOW = { width: 1440, height: 900 };
 
-/** 调整尺寸并按当前显示器居中（center 基于显示器几何计算，不读窗口旧位置——
- * 多次调用幂等、无累积漂移；替代「读当前位置再写回」的按中心调整，后者在 Windows 上
- * setPosition 异步应用、outerPosition 读回旧值，连续调用会向右下漂移）。 */
+/** 调整尺寸并按当前显示器居中：center 基于显示器几何计算，不读窗口旧位置——多次调用幂等、无累积漂移
+ * （Windows 上 setPosition 异步应用、outerPosition 读回旧值，按中心调整会持续向右下漂移）。 */
 async function setSizeCentered(win: Window, width: number, height: number): Promise<void> {
   await win.setSize(new LogicalSize(width, height));
   await win.center();

@@ -1,15 +1,6 @@
 /**
- * 笔记协作帧编解码（`note-sync` 通道载荷）。
- *
- * 帧首 varUint = 帧类型，后续字段按类型排布；`SYNC` 帧内嵌 y-protocols 同步消息
- * （syncStep1/syncStep2/update 原样透传）。
- *
- * 帧必须携带发送方**基线标签**：不同基线文本的文档合并会按本地状态向量截断对端 struct 内容，
- * 产生「尾部混入异文本」或静默分歧，因此接收方按标签决定是否应用（见 notePeer）。
- * 标签含 `id` = 基线文本的内容标识：两端各自建立**同一正文**基线时（同文本不同 `seq`/`author`）
- * 直接判定兼容、按普通 CRDT 增量合并，无需重建文档。
- *
- * 解码对任意字节串都返回结果或 null，不抛异常（网络载荷不可信）。
+ * 笔记协作帧编解码（`note-sync` 通道载荷）：帧首 varUint 为帧类型，后续字段按类型排布，各帧语义见对应 encode 函数。
+ * `SYNC` 帧内嵌 y-protocols 同步消息（syncStep1/syncStep2/update 原样透传）。
  */
 import * as decoding from "lib0/decoding";
 import * as encoding from "lib0/encoding";
@@ -26,6 +17,7 @@ export const NOTE_FRAME_RELOCATE = 0x44;
 /**
  * 基线标签：`seq` 为提案序号（Lamport），`author` 为本会话稳定身份 id，`id` 为基线正文内容标识。
  * 全序为 `seq → author → id`（三段，绝无平局）；兼容性只看 `id`（同正文的基线字节一致，合并幂等）。
+ * 每帧都携带它：异基线文本的文档合并会按本地状态向量截断对端 struct 内容（尾部混入异文本/静默分歧），接收方据此决定是否应用（见 notePeer）。
  */
 export interface BaselineTag {
   seq: number;
@@ -124,7 +116,7 @@ export type NoteFrame =
   | { kind: "resync"; reason: number }
   | { kind: "relocate"; oldPath: string; newPath: string };
 
-/** 解析帧：类型/字段不完整或类型未知一律返回 null。 */
+/** 解析帧：类型/字段不完整或类型未知一律返回 null（网络载荷不可信，解码不抛异常）。 */
 export function decodeNoteFrame(payload: Uint8Array): NoteFrame | null {
   try {
     const decoder = decoding.createDecoder(payload);

@@ -1,11 +1,7 @@
 /**
- * 随应用分发插件集成测试：默认组合行经 loader 全部挂载到真实内核。
- *
- * 验证 pluginStore.load 的挂载路径等价语义（行 → 实现解析 → apply 装配视图槽 + 领域服务 + 接线）：
- * - 挂载后 ctx.canvas/ctx.table/ctx.note/ctx.chat 可用、视图槽可解析、装配顺序 = 默认组合顺序
- * - 卸载（fiber dispose）全部撤销：槽消失、插件服务消失、能力接线复位（ctx.chat 由内核提供，恒在）
- * - 用户插件经 priority 替换默认实现（作者侧声明，用户只需安装 + 启用）
- * - 对话能力行与面板行分离：能力行注册对话运行时，面板行只贡献视图
+ * 随应用分发插件集成测试：默认组合行经 loader 全部挂载到真实内核，验证 pluginStore.load 的挂载路径等价语义（行 → 实现解析 → apply 装配视图槽 + 领域服务 + 接线）。
+ * 挂载后 ctx.canvas/table/note/chat 可用、视图槽可解析、装配顺序 = 默认组合顺序；卸载全部撤销（槽/插件服务消失、能力接线复位，ctx.chat 由内核提供恒在）。
+ * 用户插件经 priority 替换默认实现（作者侧声明，用户只需安装 + 启用）；对话能力行注册对话运行时、面板行只贡献视图。
  */
 import { describe, expect, it, afterEach, beforeEach } from "vitest";
 import type { Context } from "@atelyx/cordis";

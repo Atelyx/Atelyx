@@ -1,15 +1,7 @@
 /**
  * 系统 shell service：在文件管理器中打开路径 / 默认程序打开 URL / 执行外部进程（流式）。
- *
- * - `open`（openInExplorer / openUrl）：放行范围由 `tauri.conf.json > plugins > shell > open`
- *   的正则决定（该正则由 tauri-plugin-shell 整体包上 `^...$` 后逐项匹配），
- *   不匹配即 `Err(Validation)`；本地路径依赖该配置放行。
- * - 进程执行走宿主命令 `spawn_plugin_process`（不是 tauri-plugin-shell 的 `Command`）：进程必须
- *   在**创建那一刻**就被纳入清理范围（Windows 作业对象 / Unix 进程组），否则包装进程
- *   （`sh -c`/`cmd.exe /C`）可能已经派生真正的服务、让孙进程漏在清理之外。程序白名单在 Rust 侧
- *   （只放行 `sh`/`cmd.exe`，参数全开），输出与退出经 `Channel` 流式回传。
- * - 结束进程走 `kill_process_tree` 命令（整棵树），不用 `Child.kill`：插件起的服务通常被
- *   `sh -c`/`cmd.exe /C` 包一层，只结束包装进程会把真正的服务留成孤儿。
+ * `open` 的放行范围由 `tauri.conf.json > plugins > shell > open` 正则决定（该正则被整体包上 `^...$`
+ * 后逐项匹配），不匹配即 `Err(Validation)`——本地路径也依赖该配置放行。
  */
 import { open as shellOpen } from "@tauri-apps/plugin-shell";
 import { invoke, Channel } from "@tauri-apps/api/core";
@@ -57,8 +49,10 @@ type ProcessEvent =
 
 /** 执行外部进程（流式 stdout/stderr + 退出回调）；返回进程 pid（spawn 成功后 resolve）。
  *
- *  pid 是结束进程的唯一可靠凭据（按命令行特征匹配会因启动方式变化失效，且有误杀同目录进程的
- *  风险），故交给调用方记账。启动失败（程序不在白名单等）reject，同时经 `error` 上报同因错误。 */
+ *  走宿主命令 `spawn_plugin_process`（程序白名单在 Rust 侧，只放行 `sh`/`cmd.exe`，参数全开）：进程在创建
+ *  那一刻就被纳入清理范围（Windows 作业对象 / Unix 进程组），否则 `sh -c` 派生的真服务会漏在清理之外。
+ *  pid 是结束进程的唯一可靠凭据（按命令行特征匹配会因启动方式变化失效，且有误杀同目录进程的风险），
+ *  故交给调用方记账。启动失败（程序不在白名单等）reject，同时经 `error` 上报同因错误。 */
 export function runProcess(
   program: string,
   args: string[],
@@ -94,7 +88,9 @@ export function runProcess(
   return started;
 }
 
-/** 结束 pid 及其全部子孙进程（已不存在 = 成功；其余失败 reject 带原因）。 */
+/** 结束 pid 及其全部子孙进程（已不存在 = 成功；其余失败 reject 带原因）。
+ * 走 `kill_process_tree` 命令整棵树结束，不用 `Child.kill`：插件起的服务被 `sh -c`/`cmd.exe /C` 包一层，
+ * 只杀包装进程会把真服务留成孤儿。 */
 export function killProcessTree(pid: number): Promise<void> {
   return invoke<void>("kill_process_tree", { pid });
 }

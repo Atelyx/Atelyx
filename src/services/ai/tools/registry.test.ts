@@ -1,10 +1,6 @@
 /**
- * 工具注册表并行分发契约测试（services/ai/tools/registry）。
- *
- * 核心回归：连续 `parallelSafe` 的调用在有界滚动池内**并发**执行、结果按模型调用顺序回填；
- * 非 `parallelSafe`（读写）调用单独成段形成**屏障**（前段收敛前不启动）；
- * 单调用失败只降级该调用（错误隔离）；中止后不再启动新调用、跳过结果回填；
- * 在飞数量不超过 `maxParallel`。
+ * 工具注册表并行分发契约测试（services/ai/tools/registry）：连续 `parallelSafe` 调用在有界滚动池内并发执行、结果按模型调用顺序回填，在飞数不超 `maxParallel`。
+ * 非 `parallelSafe`（读写）调用单独成段形成屏障（前段收敛前不启动）；单调用失败只降级该调用；中止后不再启动新调用并跳过结果回填。
  */
 import { describe, expect, it } from "vitest";
 import type { LlmToolCall, ToolDefinition, ToolExecContext } from "@/types";

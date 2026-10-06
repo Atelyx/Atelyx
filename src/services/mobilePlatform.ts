@@ -1,8 +1,6 @@
 /**
- * 移动端平台能力 service（安卓本地仓库的系统交互）。
- *
- * 命令对应 `src-tauri/src/commands/mobile.rs`，桌面端一律返回可读错误：
- * 桌面选目录走系统原生弹窗、仓库根由用户直接指定，没有这些交互。
+ * 移动端平台能力 service（安卓本地仓库的系统交互），命令对应 `src-tauri/src/commands/mobile.rs`。
+ * 桌面端一律返回可读错误：桌面选目录走系统原生弹窗、仓库根由用户直接指定，没有这些交互。
  * 调用点只在 `stores/mobileVaultStore`（组件层不直连 services，见分层约束）与 `services/shell`。
  */
 import { invoke } from "@tauri-apps/api/core";

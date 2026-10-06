@@ -1,7 +1,6 @@
 /**
- * 插件平台 service：Rust `commands/plugin.rs` 的 invoke 封装。
- * 插件列表/安装/卸载/启停/更新/读入口/插件数据/默认组合播种都经这里，前端组件只经 store 触达。
- * 运行时（Cordis 内核/挂载器）在 `services/cordis`，不在此层。
+ * 插件平台 service：Rust `commands/plugin.rs` 的 invoke 封装（列表/安装/卸载/启停/更新/读入口/插件数据/默认组合播种）。
+ * 前端组件只经 store 触达；插件运行时（Cordis 内核/挂载器）在 `services/cordis`，不在此层。
  */
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";

@@ -1,8 +1,7 @@
 /**
- * 工具：删除目录（delete_dir）。删除仓库中的文件夹（相对仓库根路径），须显式传
- * confirm: true 防误删；空目录直接删除，非空目录首次调用提示项数、再传 force: true
- * 才递归删除。隐藏目录（. 开头段）与仓库根不可删除。删除后自动清理目录内画布引用/
- * 上次打开等（vaultStore.deleteFolder 既有联动）。依赖 `capabilities.deleteDir`。
+ * 工具：删除目录（delete_dir）。删除仓库中的文件夹（相对仓库根路径），须显式传 confirm: true 防误删。
+ * 空目录直接删除，非空目录首次调用提示项数、再传 force: true 才递归删除；隐藏目录（. 开头段）与仓库根不可删除。
+ * 删除后自动清理目录内画布引用/上次打开等既有联动；依赖 `capabilities.deleteDir`。
  */
 import { ToolArgsError } from "@/types";
 import { HIDDEN_PATH_ERROR, hasHiddenSegment } from "@/constants/tools";

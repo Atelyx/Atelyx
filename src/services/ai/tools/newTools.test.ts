@@ -1,6 +1,5 @@
 /**
- * 新工具契约测试：隐藏段屏蔽（hasHiddenSegment + 各文件工具 validate）、
- * read_file offset 越界降级、delete_dir/todo_write/read_history/append_file 的校验与执行。
+ * 新工具契约测试：隐藏段屏蔽（hasHiddenSegment + 各文件工具 validate）、read_file offset 越界降级、delete_dir/todo_write/read_history/append_file 的校验与执行。
  * 沿用 registry.test.ts 的注入 capability 模式（execute 只依赖注入能力，不触 store）。
  */
 import { describe, expect, it } from "vitest";

@@ -1,8 +1,6 @@
 /**
- * 会话压缩服务契约测试（services/ai/compaction）。
- *
- * 核心回归：压缩指令作为**最后一条 user 消息**追加在既有对话之后（复用前缀缓存），
- * 且失败路径一律不产出半成品——空输出、输出上限截断、请求失败都判失败，让调用方提示重试。
+ * 会话压缩服务契约测试（services/ai/compaction）：压缩指令作为**最后一条 user 消息**追加在既有对话之后（复用前缀缓存）。
+ * 失败路径一律不产出半成品——空输出、输出上限截断、请求失败都判失败，让调用方提示重试。
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { runCompaction } from "./compaction";

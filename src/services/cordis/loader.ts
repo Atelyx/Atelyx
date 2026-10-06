@@ -1,9 +1,6 @@
 /**
- * Cordis 挂载器：插件生命周期（ctx.plugin 挂载 / 卸载 / 装配）。
- *
- * 挂载 = 进程内（主线程）apply；失败 = 该插件 failed + 可读原因，不阻塞其余。
- * 插件定义 = Cordis 插件（函数或 { apply, inject, provide, Config } 对象）；`inject` 声明的
- * 依赖服务缺失时插件不激活（apply 不执行），挂载器据此返回失败 + 缺失清单（可见化）。
+ * Cordis 挂载器：插件生命周期（ctx.plugin 挂载 / 卸载 / 装配），进程内 apply。
+ * 挂载失败 = 该插件 failed + 可读原因，不阻塞其余；inject 声明的依赖服务缺失时插件不激活（apply 不执行），返回失败 + 缺失清单。
  * 审计归属：contextToPluginId 记录插件上下文 → 插件 id（audit.ts 据此归属服务读/事件订阅）。
  */
 import { Context, FiberState, type Fiber, type Inject, type Plugin } from "@atelyx/cordis";

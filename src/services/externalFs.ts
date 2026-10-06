@@ -1,7 +1,7 @@
 /**
  * 仓库外文件命令的 invoke 封装（`ctx.fs` 的 Rust 调用面）：作用域为任意绝对路径。
- * 插件调用边界只做上下文校验（services/cordis/kernel.ts 的 `fs` 服务按当前 fiber 取
- * 调用方插件 id，非插件上下文同步拒绝），id 不进命令参数；调用归属由 audit 层记录。
+ * 插件调用边界只做上下文校验（`services/cordis/kernel.ts` 的 `fs` 服务按当前 fiber 取调用方插件 id，非插件上下文同步拒绝）；
+ * id 不进命令参数，调用归属由 audit 层记录。
  */
 import { invoke } from "@tauri-apps/api/core";
 import type { ListDirResult } from "@/types";

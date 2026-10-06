@@ -1,8 +1,6 @@
 /**
- * Cordis 内核宿主测试（services/cordis/kernel）。
- *
- * 验证：平台服务提供/撤销、事件发射（emitPluginEvent → ctx.emit）、canvas/table/collab 服务工厂
- * （经注入的访问对象）、state/storage 按调用方插件隔离（tracker 绑定）、懒单例。
+ * Cordis 内核宿主测试（services/cordis/kernel）：平台服务提供/撤销、事件发射（emitPluginEvent → ctx.emit）、
+ * canvas/table/collab 服务工厂（经注入的访问对象）、state/storage 按调用方插件隔离（tracker 绑定）、懒单例。
  * invoke 路径以替身替代，只验证归属 id 的推导与调用面。
  */
 import { Context } from "@atelyx/cordis";

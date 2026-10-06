@@ -1,14 +1,6 @@
 /**
- * 未入库附件（临时区）service —— 对应 Rust `commands/temp_attachment.rs`。
- *
- * 画布对话节点的附件**不随 `.atlx` 内嵌 base64**（否则图片会让画布文件涨到几十 MB）：
- * 粘贴/拖入时把字节写进仓库内隐藏目录 `.atelyx/temp/<组件>/<实例目录>/`，实体只存**仓库相对路径**引用。
- * 路径放仓库内（而非应用数据目录）换来三件事不必另造一套边界：
- * - 读回复用仓库附件读命令（`read_attachment_data_url`，`safe_join` 自带越界校验）；
- * - 回收天然按仓库归属（不会跨仓库误删其它仓库实体的附件）；
- * - 与表格图片同处 temp 体系，文件树天然跳过。
- *
- * 引用形态判定（`isTempAttachmentRef`）在 `utils/tempAttachmentPath`（纯函数，无 I/O）。
+ * 未入库附件（临时区）service（对应 Rust `commands/temp_attachment.rs`）：字节落仓库内隐藏目录，
+ * 实体只存**仓库相对路径**引用；引用形态判定（`isTempAttachmentRef`）在 `utils/tempAttachmentPath`。
  */
 import { TEMP_ATTACHMENT_DIR, type TempComponent } from "@/utils/tempAttachmentPath";
 import { bytesToBase64, dataUrlToText } from "@/utils/base64";
@@ -16,7 +8,8 @@ import { readAttachmentDataUrl } from "@/services/vault";
 import { getActiveContentBackend } from "@/services/content/factory";
 
 /**
- * 附件字节写入临时区，返回仓库相对路径引用。
+ * 附件字节写入临时区（`.atelyx/temp/<组件>/<实例目录>/`），返回仓库相对路径引用。
+ * 不随 `.atlx` 内嵌 base64——图片会让画布文件涨到几十 MB。
  * `component` = 附件归属组件（画布 / AI 会话；表格图片走 `importTableImage`）；
  * `instanceId` = 实体稳定 id（画布 `.atlx` 内 id / 会话 id），后端派生成无路径语义的实例目录名。
  */
@@ -126,4 +119,6 @@ export function createMessageAttachmentReader(
   };
 }
 
+/** 临时区根目录（`.atelyx/temp`，放仓库内而非应用数据目录）：读回复用仓库附件读命令（`safe_join` 自带越界校验）、
+ * 回收天然按仓库归属（不跨仓库误删）、与表格图片同处 temp 体系而文件树天然跳过。 */
 export { TEMP_ATTACHMENT_DIR };

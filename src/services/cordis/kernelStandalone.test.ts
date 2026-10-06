@@ -1,8 +1,6 @@
 /**
- * 内核独立启动验证：无任何插件挂载时内核可启动。
- *
- * 断言：平台服务（含内核领域服务 ctx.chat/history/layout/uiState 与 ctx.slots）就绪，而插件提供的
- * 领域服务（canvas/table/note）缺席——内核不靠领域代码也能跑；再挂一个最小插件（只注册 UI 槽 + ctx.effect）验证贡献随卸载零残留。
+ * 内核独立启动验证：无任何插件挂载时内核可启动——平台服务（含内核领域服务 ctx.chat/history/layout/uiState 与 ctx.slots）就绪，而插件提供的领域服务（canvas/table/note）缺席；
+ * 再挂一个最小插件（只注册 UI 槽 + ctx.effect）验证贡献随卸载零残留。
  * 与 kernelBoundary.test.ts 互补：那条守静态导入边界，这条守运行时行为边界。
  */
 import { afterEach, describe, expect, it, vi } from "vitest";

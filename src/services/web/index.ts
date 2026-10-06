@@ -1,8 +1,6 @@
 /**
- * 网页抓取 service（AI `fetch_url` 工具的产物数据源）。
- * 抓取统一走 Tauri Rust 代理（`fetch_web` 命令）——浏览器/WebView 前端直 fetch 受 CORS 拦截，
- * 且便于统一超时与大小上限。返回 title + 正文纯文本。
- * 边界捕获：失败返回 error 字段，不抛异常（失败降级不阻塞对话）。
+ * 网页抓取 service（AI `fetch_url` 工具的产物数据源）：经 Rust `fetch_web` 代理抓 title + 正文纯文本。
+ * 走代理而非前端直 fetch：WebView 直连受 CORS 拦截，且超时与大小上限统一在 Rust 侧。
  */
 import { invoke } from "@tauri-apps/api/core";
 

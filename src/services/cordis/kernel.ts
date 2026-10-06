@@ -1,13 +1,7 @@
 /**
- * Cordis 内核宿主：根 Context + 平台类型化服务（typed ctx 服务）。
- *
- * 服务实现 = 宿主侧直连：平台服务（state/app/shell/vault/dialog/clipboard/window/ai/collab）
- * 直接调用 service 层与注入访问（access.ts，store 数据经 pluginStore 接线）——类型化方法面，
- * 无字符串路由中转；canvas/table/note/chat 由对应插件提供（见 canvas.ts/table.ts/note.ts/chat.ts）。
- *
- * 每窗口一个内核（懒单例，pluginStore.load 首行取用）；撕裂窗口 bootstrap 时各自创建。
- * 事件发射经 events.ts（ctx.emit 直发）；审计由 audit.ts 单独安装。
- * 用户插件的 ESM 求值需 React 全局（JSX 经 esbuild 转出 React.createElement 引用）。
+ * Cordis 内核宿主：根 Context + 平台类型化服务；平台服务直连 service 层与注入访问（access.ts，无字符串路由中转），canvas/table/note/chat 由对应插件提供。
+ * 每窗口一个内核（懒单例，pluginStore.load 首行取用），撕裂窗口 bootstrap 时各自创建；事件发射经 events.ts，审计由 audit.ts 单独安装。
+ * 用户插件的 ESM 求值需 React 全局（JSX 经 esbuild 转出 React.createElement 引用，见下方 window.React 声明）。
  */
 import React from "react";
 import { Context, symbols } from "@atelyx/cordis";
@@ -269,14 +263,9 @@ export function createKernel(): Kernel {
 
   /** 启动进程并按调用方插件登记 pid（退出即摘除）；pid 到位后 resolve（启动失败则 reject）。
    *
-   *  登记是为了让插件停用/卸载能结束它启动的进程（长驻服务不该活过插件本身）；退出即摘除是
-   *  pid 复用的唯一防线——留着已退出进程的 pid，之后系统把它分给别的进程时就会被误杀。
-   *  pid 解析与退出回调存在竞态（进程可能极快退出并先触发 close）：退出先到时标记 ended，
-   *  pid 到位后不再登记。`ended` 同时供 spawn 的 cancel 判断 no-op。
-   *
-   *  只在 `close`（进程真的结束）摘除登记，**不在 `error` 摘除**：`error` 是「运行期出错」，
-   *  进程可能仍在跑（如管道读取失败），提前摘除会让停用路径漏杀、`cancel()` 变永久 no-op。
-   *  启动失败时 pid 从未落地、本就无登记，无需在此清理。 */
+   *  登记是为了让插件停用/卸载能结束它启动的进程（长驻服务不该活过插件本身）；退出即摘除是 pid 复用的唯一防线——留着已退出进程的 pid，之后系统把它分给别的进程时就会被误杀。
+   *  pid 解析与退出回调存在竞态（进程可能极快退出并先触发 close）：退出先到时标记 ended，pid 到位后不再登记。`ended` 同时供 spawn 的 cancel 判断 no-op。
+   *  只在 `close`（进程真的结束）摘除登记，**不在 `error` 摘除**：`error` 是「运行期出错」，进程可能仍在跑（如管道读取失败），提前摘除会让停用路径漏杀、`cancel()` 变永久 no-op。启动失败时 pid 从未落地、本就无登记。 */
   function launchTrackedProcess(
     pluginId: string,
     opts: ShellExecOptions,
@@ -473,10 +462,8 @@ export function createKernel(): Kernel {
   };
   provide("vault", vault);
 
-  // 仓库外文件读写（外部文件服务面）：作用域为任意绝对路径、无目录授权门槛（插件与宿主
-  // 同 realm，事前授权不构成可信边界；调用经 audit 层按调用方插件记录方法与路径，详情页可见）。
-  // 每方法先取调用方插件 id：非插件上下文同步拒绝——fs 面只对插件开放；id 不入命令参数，
-  // 私有目录（privateDir）按它定位。模型工具走 vault，结构性够不到本面。
+  // 仓库外文件读写（外部文件服务面）：作用域为任意绝对路径、无目录授权门槛（插件与宿主同 realm，事前授权不构成可信边界；调用经 audit 层按调用方插件记录方法与路径）。
+  // 每方法先取调用方插件 id：非插件上下文同步拒绝——fs 面只对插件开放；id 不入命令参数，私有目录（privateDir）按它定位。模型工具走 vault，结构性够不到本面。
   const fs: FsService = {
     readFile(this: FsServiceInstance, path) {
       requireCallerPluginId(this.ctx);

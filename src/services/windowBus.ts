@@ -1,13 +1,6 @@
 /**
- * 跨窗口事件总线（多窗口面板体系的 Tauri event 封装，纯 I/O，无状态）。
- *
- * 布局权威在 Rust（`layout.rs` 迷你窗口管理器），布局/撕裂窗口变更由 Rust 全量广播
- * `layout-broadcast`；跨窗口拖拽由 Rust 会话 + `drag-session` 广播驱动。本文件只保留
- * 前端私有协调事件：
- * - `panel-layout-op`：撕裂窗口本地操作请求（panel → main；经 uiStateStore 命令进 Rust）
- * - `open-file-changed`：当前打开文件/仓库广播（main → all；撕裂窗口镜像上下文）
- * - `request-open-file-state`：撕裂窗口启动时一次性请求当前上下文（panel → main，
- *   主窗口以 `open-file-changed` 应答——窗口 boot 可能晚于主窗口的上下文广播）
+ * 跨窗口事件总线（多窗口面板体系的 Tauri event 封装，纯 I/O，无状态）：只承载前端私有协调事件。
+ * 布局与拖拽的权威在 Rust（布局变更经 `layout-broadcast` 全量广播、拖拽经 `drag-session` 广播），不在此层。
  */
 import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { VaultIdentity } from "@/services/content/contract";
@@ -65,11 +58,13 @@ export function emitPanelLayoutOp(windowId: string, op: PanelLayoutOp): Promise<
   return emit("panel-layout-op", { windowId, op });
 }
 
+/** 广播当前打开文件/仓库（main → all；撕裂窗口据此镜像上下文）。 */
 export function emitOpenFileChanged(payload: OpenFileChangedPayload): Promise<void> {
   return emit("open-file-changed", payload);
 }
 
-/** 撕裂窗口启动时请求当前仓库/打开文件上下文（主窗口以 open-file-changed 应答）。 */
+/** 撕裂窗口启动时请求当前仓库/打开文件上下文（panel → main；主窗口以 `open-file-changed` 应答——
+ * 窗口 boot 可能晚于主窗口的上下文广播）。 */
 export function emitRequestOpenFileState(): Promise<void> {
   return emit("request-open-file-state");
 }

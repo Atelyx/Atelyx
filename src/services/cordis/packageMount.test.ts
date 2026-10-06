@@ -1,8 +1,6 @@
 /**
- * 插件包挂载测试（services/cordis/packageMount + loader 扩展）。
- *
- * 覆盖：TS 入口 → ESM 求值 → apply 挂载/卸载；apply 对象（inject）缺失依赖 → failed + 缺失清单；
- * inject 满足 → 激活；ctx→pluginId 审计归属。
+ * 插件包挂载测试（services/cordis/packageMount + loader 扩展）：TS 入口 → ESM 求值 → apply 挂载/卸载；
+ * apply 对象（inject）缺失依赖 → failed + 缺失清单，满足 → 激活；ctx→pluginId 审计归属。
  */
 import { describe, expect, it, afterEach, vi } from "vitest";
 import type { Context } from "@atelyx/cordis";

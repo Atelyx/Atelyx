@@ -1,8 +1,6 @@
 /**
  * 插件浮层承载服务（ctx.ui）：内核平台能力，宿主代管浮层的定位/层级/Esc 收起语义。
- *
- * 登记按调用方插件记账（tracker + ctx.effect），插件停用/卸载浮层自动收起；store 数据经
- * access 注入（pluginStore 接线），本模块不 import store。
+ * 登记按调用方插件记账（tracker + ctx.effect），插件停用/卸载浮层自动收起；store 数据经 access 注入（pluginStore 接线），本模块不 import store。
  */
 import { symbols } from "@atelyx/cordis";
 import type { Context } from "@atelyx/cordis";

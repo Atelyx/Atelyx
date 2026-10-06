@@ -1,12 +1,7 @@
 /**
- * 空间形态 stub 后端：内存文件树实现内容面契约（仅测试消费，不进生产 bundle）。
- *
- * 表达空间后端的最低语义：真源 = 内存树（无磁盘）、读按需取树、写后即真、
- * 写自动建父目录、失败如实抛出、删除不存在即报错。未实现的方法抛错——
- * 压测只承诺笔记域读写链，不模拟链接改写等重扫描行为。
- *
- * 画布/表格额外表达**按稳定 id 的增量补丁**（upsert 覆盖/removed 幂等 + 改名漂移），
- * 与空补丁/缺失文件语义一致；写盘延迟可注入（`writeDelayMs`），用于构造「写盘在途」的时序。
+ * 空间形态 stub 后端：以内存文件树实现内容面契约，仅供测试消费，不进生产 bundle。
+ * 只承诺笔记域读写链与画布/表格的按 id 增量补丁；链接改写等重扫描行为不模拟，未实现方法抛错（见 noImpl）。
+ * 内存树即真源：无磁盘、写后立即可读、目录由路径隐式表达（空目录不存在）。
  */
 import { READ_WINDOW_DEFAULT_LINES } from "@/constants/tools";
 import { CANVAS_SCHEMA } from "@/constants/canvas";
@@ -85,6 +80,7 @@ export function createSpaceStubBackend() {
       : Promise.resolve();
   }
 
+  /** 写盘：注入到 failContents 的内容如实抛错（store 的保存失败分支依赖此路径）。 */
   async function write(file: string, content: string): Promise<void> {
     await delayWrite();
     if (failContents.has(content)) throw new Error("后端写失败（stub 注入）");

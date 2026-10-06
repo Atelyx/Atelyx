@@ -1,9 +1,6 @@
 /**
  * 事件发射：store/插件经此把领域事件投递到内核事件总线（ctx.emit）。
- *
- * typed events 见 types.ts Events（vault:switch/canvas:changed/table:changed/collab:changed/
- * collab:reconnected/collab:resync/vault:changed）；内核未建（kernelRef 空）时 no-op——事件只在运行期发射，
- * 正常路径内核已由 pluginStore.load 创建。
+ * 内核未建（kernelRef 空）时 no-op——事件只在运行期发射，正常路径内核已由 pluginStore.load 创建。
  */
 import { EventsService } from "@atelyx/cordis";
 import type { Kernel } from "./kernel";
@@ -27,14 +24,10 @@ export function emitPluginEvent(event: string, payload: unknown): void {
 }
 
 /**
- * serial 拦截面分派（veto / 改写）：顺序 await 每个监听器，监听器返回对象与当前载荷合并
- * 传给下一监听器，`veto: true` 立即短路（bail）；监听器抛错只记录并继续——
- * 保存/请求管线绝不能因插件监听器抛错而中断，改写失败按原值前进。
- *
- * 供领域管线（`note:before-save` / `ai:before-request`，见 types.ts @serial 事件）在关键点调用；
- * 内核未建时 no-op（原样返回，单测/无插件场景零开销）。
- * 复用 vendor `dispatch` 取监听器（与下方 emit 隔离同款），短路/改写语义由宿主定义——
- * vendor `serial` 的 truthy 短路无法表达「返回改写值后继续」。
+ * serial 拦截面分派（veto / 改写）：顺序 await 每个监听器，返回对象与当前载荷合并传给下一监听器，
+ * `veto: true` 立即短路；监听器抛错只记录并继续（保存/请求管线不因插件抛错中断，改写失败按原值前进）。
+ * 供领域管线（`note:before-save` / `ai:before-request`，见 types.ts @serial 事件）在关键点调用；内核未建时 no-op（原样返回）。
+ * 复用 vendor `dispatch` 取监听器——vendor `serial` 的 truthy 短路无法表达「返回改写值后继续」。
  */
 export async function runSerialHook<T extends object>(
   event: string,
@@ -68,13 +61,7 @@ let emitIsolated = false;
 
 /**
  * 逐监听器异常隔离：包装 `EventsService.emit`，单个监听器抛错（或返回 rejected Promise）
- * 只记录并继续投递给其余监听器。
- *
- * 为什么必须在宿主侧做：vendor 的 `emit` 逐个调用监听器、不做异常隔离——一个监听器抛错即中断，
- * 同事件其余插件的监听器被静默跳过（且调用方看不到），故不能只依赖 vendor 行为，也不改 vendor
- * （vendor 保持上游 commit）。包装保持 vendor 的派发语义（同一 `dispatch("emit", args)` 取回调），
- * 只把「逐个调用」换成「逐个隔离调用」；`internal/*` 同样只是不打断其余，判定语义不变。
- *
+ * 只记录并继续投递其余监听器（vendor `emit` 不隔离——一个监听器抛错即中断其余，且 vendor 保持上游不改动）。
  * 进程级幂等且不随内核复位撤销：`EventsService` 是所有 Context 共享的类，按内核装卸补丁会互相影响。
  */
 export function installEventIsolation(): void {

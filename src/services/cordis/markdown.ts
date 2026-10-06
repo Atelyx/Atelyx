@@ -1,9 +1,7 @@
 /**
  * Markdown 渲染服务提供器（ctx.markdown）：内核平台能力，root 作用域、无条件挂载，
  * 停用插件后仍可用（契约见 kernel 的 provide 处与 cordis/types）。
- *
- * 实现 = 适配 utils/markdownCore 的纯函数（解析 / HTML 序列化 / DOM 片段）——与编辑器视图
- * 同一内核，插件渲染结果与应用内展示一致。
+ * 实现 = 适配 utils/markdownCore 的纯函数（解析 / HTML 序列化 / DOM 片段）——与编辑器视图同一内核，插件渲染结果与应用内展示一致。
  */
 import { parseMarkdown, renderMarkdownToHtml } from "@/utils/markdownCore";
 import type { PluginMarkdownOptions, MarkdownService } from "./types";

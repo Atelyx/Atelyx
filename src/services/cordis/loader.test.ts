@@ -1,7 +1,5 @@
 /**
- * Cordis 挂载器测试（services/cordis/loader）。
- *
- * 验证：插件 ctx.plugin 挂载 → 服务/槽/事件生效 → 卸载随 fiber 撤销；
+ * Cordis 挂载器测试（services/cordis/loader）：插件 ctx.plugin 挂载 → 服务/槽/事件生效 → 卸载随 fiber 撤销；
  * apply 抛错 → failed + 可读原因且不留残留；同 id 重复/并发挂载 = 串行替换（句柄不丢、能力不残留）。
  */
 import { Context } from "@atelyx/cordis";

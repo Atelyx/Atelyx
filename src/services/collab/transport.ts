@@ -1,7 +1,6 @@
 /**
  * 协作传输接口（内核，域无关）：传输 = 连接/房间/presence/频道收发的可注册后端。
- * 空间传输工厂（spaceTransport.ts 的 `spaceCollabTransport`，模块加载即注册）；
- * 换协作后端 = 注册新 factory（connect 返回同接口 handle），画布/笔记/表格零改动。
+ * 空间工厂见 `spaceTransport.ts`（模块加载即注册）；换后端 = 注册新 factory，画布/笔记/表格零改动。
  */
 import type { CollabHello, CollabPeer, CollabPresence } from "@/types";
 

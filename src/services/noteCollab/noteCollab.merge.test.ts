@@ -1,10 +1,6 @@
 /**
- * 基线 seed 幂等契约测试（services/noteCollab/notePeer.ts 的 `baselineSeedUpdate`）。
- *
- * 协议层（基线标签/采纳/三方合并）的收敛行为由 `notePeer.convergence.test.ts` 覆盖；
- * 本文件只锁定 CRDT 地基：**同一正文的确定性 seed 在任意端字节一致、合并幂等**
- * （各端以种子重建基线时不会产生同一文本的多份 item）。
- * 该性质是「异正文基线永不互相合并」之外的互补面：同正文基线可安全增量合并。
+ * 基线 seed 幂等契约测试（services/noteCollab/notePeer.ts 的 `baselineSeedUpdate`）：同一正文的确定性 seed 在任意端字节一致、合并幂等（不产生同一文本的多份 item）。
+ * 协议层收敛行为由 `notePeer.convergence.test.ts` 覆盖；本文件只锁 CRDT 地基——它是「异正文基线永不互合并」的互补面：同正文基线可安全增量合并。
  */
 import { describe, it, expect } from "vitest";
 import * as Y from "yjs";

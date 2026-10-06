@@ -1,15 +1,6 @@
 /**
- * 插件市场数据源：官方索引（CDN 静态 JSON）消费。
- *
- * - `index.json`：插件清单（id/name/repo/stars/type…）
- * - `endorsed.json`：精选表 `{ owner/repo: 理由 }`（授予精选徽标）
- *
- * 消费策略：内存 + localStorage 缓存（6h 过期），未过期直接回缓存（启动秒开）；
- * 网络失败直接报错。
- * 徽标 = 作者账号锚点（GitHub `owner/repo`，账号归属 GitHub 背书不可伪造）：
- * official = repo owner 命中官方名单；精选 = 严格按 `owner/repo` 命中精选表——
- * 不同作者巧合同 id 视为不同插件，自报 id 不能继承任一徽标（id + 作者账号双重校验）。
- * 安装/更新取源码（git clone，无 git 回退 GitHub 源码包；见 commands/plugin.rs）。
+ * 插件市场数据源：消费官方索引（CDN 静态 JSON）——只管索引读取、缓存与徽标判定。
+ * 安装/更新取源码不在此层（git clone，无 git 回退 GitHub 源码包，见 `commands/plugin.rs`）。
  */
 import type { PluginBadge, PluginIndex, PluginIndexEntry } from "@/types";
 import {
@@ -88,7 +79,7 @@ export function readMarketCache(): MarketSnapshot | null {
   return readCache<MarketSnapshot>(INDEX_CACHE_KEY);
 }
 
-/** 拉取市场索引（index + endorsed 合并；网络失败直接抛错，由调用方提示，不回退缓存）。 */
+/** 拉取市场索引（`index.json` 插件清单 + `endorsed.json` 精选表合并；网络失败直接抛错，由调用方提示，不回退缓存）。 */
 export async function fetchMarketIndex(): Promise<MarketSnapshot> {
   const [index, endorsed] = await Promise.all([
     fetchJson<PluginIndex>(PLUGIN_INDEX_URL),

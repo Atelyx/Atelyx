@@ -1,13 +1,7 @@
 /**
- * 内容面契约：仓库内容 I/O 的统一方法面。
- *
- * 三个消费缝——前端服务层 facade（stores/视图）、AI 工具能力注入（ToolCapabilities）、
- * 插件 ctx.vault——都经工厂取后端后走本契约；后端按激活仓库身份分派：
- * 个人仓库 = 本地 Tauri 命令，协作空间 = 空间服务端 API。
- *
- * 契约一律使用仓库内相对路径（`/` 分隔），引用格式（wiki 链接/附件引用/表格图片引用）不变；
- * 返回值即前端运行时形状（如 readTable 的行已归一化，磁盘旧形态不出后端）。
- * 追加写与行级编辑是「读 → 改 → 写」的前端组合逻辑，不设独立后端方法。
+ * 内容面契约：仓库内容 I/O 的统一方法面，前端服务层 / AI 工具 / 插件 ctx.vault 共用同一套。
+ * 路径一律为仓库内相对路径（`/` 分隔），引用格式不变；返回值即前端运行时形状（如 readTable 行已归一化）。
+ * 追加写与行级编辑是前端「读 → 改 → 写」的组合，不设后端方法；后端按激活仓库身份分派，见 `factory.ts`。
  */
 import type {
   BacklinkRow,
@@ -57,7 +51,7 @@ export interface ContentBackend {
   readFileWindow(file: string, opts?: { offset?: number; limit?: number }): Promise<ReadWindowResult>;
   /** 读 .md 笔记正文。 */
   readNote(file: string): Promise<string>;
-  /** 文件是否存在（元数据查询不读内容，不限文件类型；文件或所在目录已删除 = false，路径非法抛错）。 */
+  /** 文件是否存在（不读内容、不限文件类型；已删除 = false，路径非法抛错）。 */
   fileExists(file: string): Promise<boolean>;
   /** 读 .atlx 画布（磁盘格式）。 */
   readCanvas(file: string): Promise<CanvasFile>;

@@ -1,10 +1,6 @@
 /**
- * 笔记协作接线（模块级单例）：把 `notePeer` 的可实例化状态机接到应用的广播与重建回调上，
- * 对上层（`stores/noteCollabStore`）暴露稳定的函数面。
- *
- * 网络收发经 `noteCollabStore` 接线注入的广播钩子完成，本模块不直连传输层；
- * 文档被整体重建（采纳对端基线）时经 `onBindingRefresh` 通知 store 刷新绑定，
- * 使编辑面随 ytext/awareness 引用变化重绑。
+ * 笔记协作接线（模块级单例）：把 `notePeer` 状态机接到应用广播与重建回调上，对 `stores/noteCollabStore` 暴露稳定函数面。
+ * 网络收发经 store 注入的广播钩子完成，本模块不直连传输层；文档整体重建（采纳对端基线）时经 `onBindingRefresh` 让编辑面重绑。
  */
 import {
   baselineSeedUpdate,

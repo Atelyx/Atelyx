@@ -1,18 +1,7 @@
 /**
- * 协作帧泵（WebSocket 连接内核）：WebSocket 生命周期 + 帧编解码 +
- * 心跳保活 + 半开检测 + 指数退避重连。泵不感知 hello 内容，由传输工厂组装后传入。
- *
- * 协议（JSON，camelCase，见 `atelyx-server/src/ws.rs`）：
- * - C→S `hello`（首条必发）/ `presence` / `table-patch` / `canvas-patch` /
- *   `note-sync` / `note-aware` / `plugin-msg` / `plugin-replay` / `ping` / `bye`
- * - S→C `peers`（成员全量）/ `hello-ack`（分配 peerId + 房间插件序号头）/ `presence` / 各频道转发帧 /
- *   `meta-changed`（团队 meta 落地广播，只带键名）/ `resync`（接收队列被裁剪）/ `pong` / `error`
- *
- * 插件消息：JSON 载荷走 `plugin-msg` 文本帧（带房间级序号 seq）；二进制载荷（Uint8Array）走
- * WebSocket 二进制帧直传（不经 base64，编解码见 encodePluginBinaryFrame/decodePluginBinaryFrame）。
- * 可靠有序（服务端缓存补投）：连接参数 pluginLastSeq = 上次收到的房间级插件帧序号（跨连接延续、
- * 换房重置，由 DocHost 维护）；hello-ack 后非 null 即发 `plugin-replay` 请求补投缺帧；入站按 seq
- * 检测缺口（补投缓存已逐出）上报 onResync——序号对账全部在泵内闭环，域回调面不感知 seq。
+ * 协作帧泵（WebSocket 连接内核）：WebSocket 生命周期 + 帧编解码 + 心跳保活 + 半开检测 + 指数退避重连。
+ * 泵不感知 hello 内容，由传输工厂组装后传入；帧全集见 `CollabServerMessage`（JSON/camelCase，见 `atelyx-server/src/ws.rs`）。
+ * 插件帧的序号对账与补投在泵内闭环，域回调面不感知 seq（见 `pluginLastSeq` 与补投缓冲模式）。
  */
 import type { CanvasPatch, CollabHello, CollabPeer, CollabPresence, TablePatch } from "@/types";
 import type { CollabTransportHandle, CollabTransportOptions } from "./transport";
@@ -24,6 +13,12 @@ const STALL_TIMEOUT_MS = HEARTBEAT_MS * 3;
 /** 断线重连退避：1s 起，翻倍，封顶 15s。 */
 const MAX_RETRY_MS = 15_000;
 
+/**
+ * 服务端 → 客户端帧全集（JSON，camelCase，见 `atelyx-server/src/ws.rs`）。
+ * 反向帧为 `hello`（首条必发）/ `presence` / `table-patch` / `canvas-patch` / `note-sync` /
+ * `note-aware` / `plugin-msg`（JSON 载荷，带房间级 seq）/ `plugin-replay` / `ping` / `bye`。
+ * 插件的 Uint8Array 载荷另走 WebSocket 二进制帧直传，见 encodePluginBinaryFrame。
+ */
 type CollabServerMessage =
   | { type: "peers"; peers: CollabPeer[] }
   | { type: "hello-ack"; peerId: number; pluginSeq?: number }

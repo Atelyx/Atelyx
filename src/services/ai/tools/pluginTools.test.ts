@@ -1,8 +1,6 @@
 /**
- * 插件工具注册 → Agent 名册接线测试（services/ai/tools）。
- *
- * 覆盖：插件工具注册后进入执行名册与 UI 元数据（「插件」分类）、可被 buildAgentTools 组装、
- * 注销后从两处移除。注册/注销保持平衡，不污染其他测试。
+ * 插件工具注册 → Agent 名册接线测试（services/ai/tools）：插件工具注册后进入执行名册与 UI 元数据（「插件」分类）、可被 buildAgentTools 组装、注销后从两处移除。
+ * 注册/注销保持平衡，不污染其他测试。
  */
 import { describe, it, expect } from "vitest";
 import {

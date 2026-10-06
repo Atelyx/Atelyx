@@ -1,9 +1,7 @@
 /**
- * 工具：任务清单（todo_write）。整单替换当前会话/画布对话的持久任务清单
- * （pending/in_progress/completed），返回各状态计数；跨轮次以**尾部上下文块**带出当前清单
- * （currentTodosBlock，不进系统提示词——保前缀缓存命中）供模型跟踪长任务进度。
- * 清单随会话存 `.atelyx/todos/`（隐藏屏蔽的刻意豁免，内部能力写入）。
- * 非 parallelSafe（有副作用）。依赖 `capabilities.writeTodos`。
+ * 工具：任务清单（todo_write）。整单替换当前会话/画布对话的持久任务清单（pending/in_progress/completed），返回各状态计数。
+ * 跨轮次以**尾部上下文块**带出当前清单（currentTodosBlock，不进系统提示词——保前缀缓存命中）供模型跟踪长任务进度。
+ * 清单随会话存 `.atelyx/todos/`（隐藏屏蔽的刻意豁免，内部能力写入）；非 parallelSafe（有副作用），依赖 `capabilities.writeTodos`。
  */
 import { ToolArgsError, errText } from "@/types";
 import type { TodoItem } from "@/types";

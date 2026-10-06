@@ -1,10 +1,6 @@
 /**
- * 插件审计测试（services/cordis/audit）。
- *
- * 验证能力面自发现：ctx 服务读（包装代理 get，按插件归属）+ 事件订阅
- * （events._hooks 按插件上下文归属）+ 高危调用摘要（脱敏，不含参数原文）。归属经 loader
- * 挂载时登记的 contextToPluginId。另锁卸载后记录清理。服务面清单与 ctx 契约的一致性由
- * `scripts/gen-ctx-api.mjs` 门禁把守（`pnpm run ctx-api:check`）。
+ * 插件审计测试（services/cordis/audit）：能力面自发现——ctx 服务读（包装代理 get，按插件归属）、事件订阅归属、高危调用摘要脱敏（不含参数原文）、卸载后记录清理。
+ * 归属经 loader 挂载时登记的 contextToPluginId；服务面清单与 ctx 契约的一致性由 `scripts/gen-ctx-api.mjs` 门禁把守（`pnpm run ctx-api:check`）。
  */
 import { describe, expect, it, afterEach, vi } from "vitest";
 import type { Context } from "@atelyx/cordis";

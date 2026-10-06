@@ -1,16 +1,5 @@
 /**
- * 布局迷你窗口管理器前端封装（纯 I/O，无状态）。
- *
- * 布局模型（布局列表 + 激活布局 + 撕裂窗口）的唯一权威在 Rust `layout.rs`：
- * - `layoutBootstrap`：拉取全量快照（主窗口/撕裂窗口初始化渲染用）
- * - `layoutOp`：发布局操作命令（前端不直接改布局，靠广播收敛）
- * - `uiStatePatch`：非布局字段补丁（JS 拥有这些字段，合并进模型后由 Rust 统一落盘）
- * - `layoutFlush`：立即落盘（应用退出/切页面前 flush 用）
- * - `onLayoutBroadcast`：订阅布局广播（各窗口据此渲染自身切片）
- *
- * 跨窗口拖拽（会话/命中调和/落点解析在 Rust）：源窗口只上报输入（`dragUpdate`：
- * 转正带 start、移动 start 为 null），各窗口经 `onDragSession` 广播渲染 ghost 并
- * 计算自身 DOM 命中上报 `dragHit`。
+ * 布局迷你窗口管理器前端封装（纯 I/O，无状态）：布局模型的唯一权威在 Rust `layout.rs`，前端只发命令与订阅广播。
  */
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -34,7 +23,7 @@ export async function layoutOp(op: LayoutOp): Promise<LayoutOpResult> {
   return invoke<LayoutOpResult>("layout_op", { op });
 }
 
-/** 非布局字段补丁（只发变更字段；字段缺失 = 不改，null = 显式清除）。 */
+/** 非布局字段补丁（只发变更字段；字段缺失 = 不改，null = 显式清除）。这些字段由 JS 拥有，合并进模型后由 Rust 统一落盘。 */
 export async function uiStatePatch(patch: UiStatePatch): Promise<void> {
   await invoke("ui_state_patch", { patch });
 }
@@ -51,7 +40,7 @@ export async function onLayoutBroadcast(
   return listen<AppUiState>("layout-broadcast", (e) => handler(e.payload));
 }
 
-// ---- 跨窗口拖拽 ----
+// ---- 跨窗口拖拽（会话/命中调和/落点解析在 Rust，本窗口只上报输入与命中） ----
 
 /** 拖拽输入上报（源窗口统一入口）：转正时带 start，移动时 start = null。 */
 export async function dragUpdate(

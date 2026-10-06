@@ -1,10 +1,6 @@
 /**
- * 内容面工厂：按激活仓库身份分派内容后端。
- *
- * 打开/切换仓库时激活身份（个人仓库 = root 绝对路径），此后所有内容 I/O 经
- * getActiveContentBackend 取后端——后端只看身份、不按路径判定。
- * 无激活身份时回落 localBackend：localBackend root 无关（当前仓库根由 Rust 侧持有）；
- * 空间仓库必须显式激活（缺失即抛错），未激活的上下文回落 localBackend 行为不变。
+ * 内容面工厂：按激活仓库身份分派内容后端，所有内容 I/O 都从这里取后端。
+ * 撕裂窗口是独立 webview、激活态不跨窗口共享，需收到主窗口广播后自建设施（见 activateContentIdentity）。
  */
 import type { ContentBackend, VaultIdentity } from "./contract";
 import { localBackend } from "./local";
@@ -70,7 +66,7 @@ export function activateContentIdentity(identity: VaultIdentity | null): void {
   }
 }
 
-/** 当前激活仓库的内容后端。 */
+/** 当前激活仓库的内容后端：只看激活身份、不按路径判定；未激活回落 localBackend（root 无关，仓库根由 Rust 侧持有）。 */
 export function getActiveContentBackend(): ContentBackend {
   const active = activeKey ? backends.get(activeKey) : undefined;
   return active ?? localBackend;

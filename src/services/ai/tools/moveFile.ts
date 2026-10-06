@@ -1,6 +1,6 @@
 /**
- * 工具：移动文件（move_file）。把仓库内单个文件移动到目标文件夹，保持文件名；
- * 目标重名自动加序号，结果以返回的实际路径为准。同目录改名请用 rename_file。
+ * 工具：移动文件（move_file）。把仓库内单个文件移动到目标文件夹，保持文件名；同目录改名请用 rename_file。
+ * 目标重名自动加序号，结果以返回的实际路径为准。
  * 依赖 `capabilities.moveFile`（vaultStore.moveFile 按扩展名分发到对应动作）。
  */
 import { ToolArgsError } from "@/types";

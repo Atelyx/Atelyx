@@ -1,33 +1,7 @@
 /**
- * 协作空间内容后端：内容面契约 → 协作服务端 API（services/space/client 的 content 分组）。
+ * 协作空间内容后端：内容面契约 → 协作服务端 API（`services/space/client` 的 content 分组）。
  *
- * 当前覆盖：笔记域 + 画布/表格读写/补丁 + 附件/临时区/入库 + 结构变更（含引用同步）+ 索引
- * + 文件历史（追加经服务端 `history/record` 在路径锁内合并，聚合经 `history/aggregate`）。
- *
- * 空间内媒体目录约定（服务端保留目录 `.atelyx/temp/`，**与个人仓库临时区同构**——空间退化
- * 为本地仓库时媒体按同名相对路径落位、引用不改写；树/索引不出现在结果中、读写可达）：
- * - 画布未入库临时附件：`.atelyx/temp/canvas/<canvasKey>/<fileName>`（canvasKey = 画布 id 的
- *   FNV 派生，与本地同算法）
- * - 面板会话附件：`.atelyx/temp/sessions/<sessionKey>/<fileName>`（同派生）
- * - 表格图片：`.atelyx/temp/tables/<tableId>/<fileName>`
- * - 实例目录首写时落 `.instance-id` 标记（内容 = 实例 id，与本地同机制）：退化后本地兜底清扫器
- *   无需特判即可接管
- * - 入库附件：`<附件文件夹>/<fileName>`（团队元数据 `attachment-folder` 设定，未配置 = `attachments/`；
- *   既有附件不因改动设定而迁移——引用是相对路径，改设定只影响之后入库的文件）
- *
- * 补丁端点 404（文件已被删除）镜像本地命令逐字文案——store 据此回退全量写；
- * 整文件写 404（路径级错误）镜像服务端消息（本地 safe_join 文案同形）。
- *
- * 引用改写（renameNote/renameFolder/表格与附件引用同步）前端复刻本地引擎的最小确定规则集：
- * 整词 `[[旧名]]` 替换、链接目标段 `(相对路径)` 替换、画布节点 `file` 字段精确替换；
- * 不确定的形态（含 `#` 锚点、大小写分歧、图片 `!` 语法）一律不改写。改写前用 grep 定位候选
- * 文件，逐个 read→替换→write，仅内容实际变化才写回（无关文件不被读写）。
- * 服务端补丁/重命名端点只改文件本身，画布引用同步由客户端在读改写中补齐（对应本地
- * rename/patch 命令里的事务化引用扫描，语义一致、时序上非事务）。
- *
- * 重建内部链接（rebuildLinks）同样复刻本地引擎规则：`[[名]]`/`[[名|别名]]` → `[名](规范路径)`、
- * 命中仓库 .md 的路径链接归一化、空路径按 label 补全；frontmatter/代码块/HTML 块/行内代码/
- * 图片链接/外部链接/非 .md 路径一律不动（见 rewriteInternalLinks 处注释）。
+ * 引用改写与链接重建复刻本地引擎的最小确定规则集——不确定形态一律不改写，细节见各改写函数注释。
  */
 import { READ_WINDOW_DEFAULT_LINES } from "@/constants/tools";
 import { CANVAS_SCHEMA } from "@/constants/canvas";
@@ -91,7 +65,7 @@ function pathLevelError(e: SpaceApiError): string {
   return e.serverMessage || e.message;
 }
 
-// ===== 空间媒体目录约定（见文件头注释） =====
+// ===== 空间媒体目录约定（与个人仓库同构，见 utils/tempAttachmentPath.ts） =====
 
 /** 入库附件的兜底目录（未配置「附件文件夹」时的落位）。 */
 const SPACE_DEFAULT_ATTACHMENT_DIR = "attachments";

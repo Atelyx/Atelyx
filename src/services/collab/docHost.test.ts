@@ -1,6 +1,5 @@
 /**
- * 协作传输宿主测试（services/collab/docHost.ts）：传输工厂查表与连接替换、入站频道消息
- * 路由到领域注册表、出站咽喉断开时静默丢弃、重同步提示透传。
+ * 协作传输宿主测试（services/collab/docHost.ts）：传输工厂查表与连接替换、入站频道消息路由到领域注册表、出站咽喉断开时静默丢弃、重同步提示透传。
  * 文档实例生命周期归各领域服务自持（如 noteDoc），本模块只做句柄与路由。
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";

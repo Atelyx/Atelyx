@@ -1,10 +1,7 @@
 /**
- * 服务注册表查询（ctx.services）与可选依赖剥出测试。
- *
- * 验证：list() 返回当前已注册服务面（内核平台服务无提供者、插件提供服务带提供者插件 id、
- * builtins 领域服务经登记表补充归属）；get() 判空读取（未注册 = undefined，敏感面经审计
- * 包装记录摘要）；可选依赖 `{ optional: true }` 缺失不阻断激活（apply 照常执行，经
- * ctx.services.get 判空），必需依赖缺失仍按 inject 语义不激活。
+ * 服务注册表查询（ctx.services）与可选依赖剥出测试：list() 返回当前已注册服务面（内核平台服务无提供者、插件提供服务带提供者插件 id、builtins 领域服务经登记表补充归属）；
+ * get() 判空读取（未注册 = undefined，敏感面经审计包装记录摘要）；
+ * 可选依赖 `{ optional: true }` 缺失不阻断激活（apply 照常执行，经 ctx.services.get 判空），必需依赖缺失仍按 inject 语义不激活。
  */
 import { describe, expect, it, vi, afterEach } from "vitest";
 import type { Context } from "@atelyx/cordis";

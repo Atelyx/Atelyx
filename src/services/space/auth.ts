@@ -1,12 +1,7 @@
 /**
- * 协作空间登录态 service。
- *
- * 令牌与用户身份经 OS keychain 的通用应用秘密存储（见 `services/keychain`），不落明文文件：
- * - 令牌条目名 `space-token-<sha256(serverUrl)>`（哈希避免 serverUrl 含特殊字符作 keychain 条目名）。
- * - 用户身份条目名 `space-user-<sha256(serverUrl)>`，值为 `{userId,username,displayName}` JSON。
+ * 协作空间登录态 service：只编排 keychain 与 HTTP 客户端，不做状态（运行时状态在 `stores/spaceAuthStore`）。
+ * 令牌与用户身份经 OS keychain 的通用应用秘密存储（见 `services/keychain`）按服务器分别存条目，不落明文文件。
  * 登录过的服务器清单经 `services/global` 的 `updateGlobalConfig`（字段 `spaceServers`）维护（增删去重）。
- *
- * 只编排 keychain 与 HTTP 客户端，不做状态（运行时状态在 `stores/spaceAuthStore`）。
  */
 
 import { createSpaceClient, type SpaceApiError, type SpaceClient, type DeviceInfo } from "./client";
@@ -33,10 +28,12 @@ async function sha256Hex(input: string): Promise<string> {
     .join("");
 }
 
+/** 令牌条目名按 serverUrl 的 sha256 命名：避免 serverUrl 含特殊字符作 keychain 条目名。 */
 function tokenEntryName(serverUrl: string): Promise<string> {
   return sha256Hex(serverUrl).then((h) => `space-token-${h}`);
 }
 
+/** 用户身份条目名（值 = `{userId,username,displayName}` JSON）。 */
 function userEntryName(serverUrl: string): Promise<string> {
   return sha256Hex(serverUrl).then((h) => `space-user-${h}`);
 }
@@ -216,10 +213,8 @@ export async function revokeDevice(serverUrl: string, sessionId: string): Promis
 }
 
 /**
- * 取当前令牌（供空间内容后端与 HTTP 客户端随请求附加 Authorization）。
- * 内存缓存未命中时回源 keychain（keychain 是真源）——任意窗口（主窗口/撕裂窗口各自一份
- * 内存缓存）首次取令牌自动可用，无需依赖启动 restore 填充；读到的令牌入缓存，每窗口
- * 每服务器仅多一次 keychain IPC。未登录（keychain 无令牌）返回空串，客户端据此不携带令牌。
+ * 取当前令牌（供空间内容后端与 HTTP 客户端随请求附加 Authorization）；未登录返回空串，客户端据此不携带令牌。
+ * 内存缓存未命中时回源 keychain（keychain 是真源）：任意窗口首次取令牌自动可用，无需依赖启动 restore 填充；读到的令牌入缓存，每窗口每服务器仅多一次 IPC。
  */
 export async function getToken(serverUrl: string): Promise<string> {
   const cached = tokenCache.get(serverUrl);

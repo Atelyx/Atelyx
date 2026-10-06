@@ -1,16 +1,7 @@
 /**
- * 插件审计：能力面自发现 = ctx 服务读 + 事件订阅 + 槽位贡献/装饰 + 高危调用摘要（按插件归属）。
- *
- * 机制（不动框架源码）：
- * - 服务读：包装 `ReflectService.handler.get`——插件经 ctx 代理访问服务时记录服务名；
- *   归属 = 挂载器登记的「插件上下文 → 插件 id」（contextToPluginId），宿主侧读（root ctx）
- *   不在登记表内、不记录。
- * - 槽位贡献/装饰：快照时从槽注册表现扫（与事件同法），随 fiber 撤销自然消失，无需运行时记录。
- * - 高危调用摘要：命中敏感面（服务整体或单方法）的服务换成一层包装视图，调用时只记形状与
- *   规模（程序名 + 参数个数 / 方法 + 主机路径 / 字节数 / 相对路径），参数原文（凭据、正文、
- *   header、body）一律不进审计。
- * - 事件订阅：扫 `ctx.events._hooks`，按 hook.ctx 归属插件。
- * 由 getKernel() 安装（应用路径）；测试用 installAudit 直装。
+ * 插件审计：能力面自发现 = ctx 服务读 + 事件订阅 + 槽位贡献/装饰 + 高危调用摘要（按插件归属）；由 getKernel() 安装（应用路径），测试用 installAudit 直装。
+ * 服务读包装 `ReflectService.handler.get`：归属 = 挂载器登记的「插件上下文 → 插件 id」（contextToPluginId），宿主侧读（root ctx）不在登记表内、不记录。
+ * 槽位贡献/装饰快照时从槽注册表现扫（随 fiber 撤销自然消失）；事件订阅扫 `ctx.events._hooks` 按 hook.ctx 归属插件；高危调用摘要只记形状与规模（程序名 + 参数个数 / 方法 + 主机路径 / 字节数 / 相对路径），参数原文（凭据、正文、header、body）一律不进审计。
  */
 import { ReflectService } from "@atelyx/cordis";
 import type { Context } from "@atelyx/cordis";

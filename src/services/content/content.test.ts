@@ -1,8 +1,6 @@
 /**
- * 协作空间内容后端测试（services/content/spaceContent）。
- *
- * 风格照 client.test.ts：桩 `global.fetch` 逐 URL/方法/体回包，断言透传与错误传播；
- * 引用改写用受控 grep 回包 + 文件内容，断言真实变更文件被读改写、无关文件零读写。
+ * 协作空间内容后端测试（services/content/spaceContent）：桩 `global.fetch` 逐 URL/方法/体回包，断言透传与错误传播。
+ * 引用改写用受控 grep 回包 + 文件内容，断言真实变更文件被读改写、无关文件零读写（风格照 client.test.ts）。
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { TreeNode } from "@/services/space/client";
