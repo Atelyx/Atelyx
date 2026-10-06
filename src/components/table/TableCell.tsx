@@ -9,7 +9,7 @@
  *   失焦提交、Esc 取消并清选中
  * - number：数字输入（编辑态 Enter 提交并下移，空 = 清空）；选中态键盘语义同 text
  *   数字列保留原生 input（不归基元）：依赖 type=number 的原生语义（步进、非法值拒绝、
- *   输入法直接键入数字），基元无对应档；就地编辑的视觉档位与 text 列一致
+ *   输入法直接键入数字），基元无对应档；就地编辑沿用 text 列那套隐藏输入面做法
  * - singleSelect：选项下拉（含空项）
  * - image：图片单元格（单图轮播 / 九宫格 + 缩略图队列滑动切换，见 ImageCell.tsx）
  *
@@ -17,6 +17,9 @@
  * 首个字符直接落入真实输入元素，组合开始即绑定该元素、焦点全程不换元素，首字符（含中文
  * 拼音首字母）不丢失。IME 组合必须起始于真实输入元素：组合在无输入元素的文档上开始，
  * 首键会被当纯字母提交、后续才正常。
+ *
+ * 显示面与编辑面是两个元素（显示 div + 绝对铺满的编辑框），字号档与字体族只能各写一份声明：
+ * 两处叉开时，进入编辑的那一刻文字就跳档（字号与行高成对变、首行基线位移），故同一档取同一常量。
  *
  * 纯 UI：值读写经 store（updateCell/addImagesToCell/removeImageAt）；
  * 单元格选中（selectCell）由 TableEditor 的 td 层 pointer 手势统一处理。
@@ -29,6 +32,13 @@ import { DropdownSelect } from "@/components/common/DropdownSelect";
 import { ImageCell } from "@/components/table/ImageCell";
 import { styleToCss } from "@/utils/table";
 import type { CellStyle, TableField, TableRow } from "@/types";
+
+/**
+ * 单元格文字档位（显示面与编辑面共用）：两态是两个元素，各写一份字号声明就会漂移，
+ * 进入编辑即跳档。文本列取 ui 档；数字/时长列取 caption 档（数值另走等宽字体）。
+ */
+const TEXT_CELL_FONT = "text-ui";
+const NUM_CELL_FONT = "text-xs";
 
 /** 单元格显示样式（`row.styles[fieldId]`；缺省 = 默认样式）。 */
 function cellStyleOf(row: TableRow, fieldId: string): CellStyle | undefined {
@@ -325,7 +335,7 @@ function TextCell({
     <div
       // 编辑态/隐藏编辑态共用同一输入框元素（绝对铺满 td）：编辑态显示即单元格本身，
       // 隐藏态 opacity-0 + pointer-events-none（点击穿透到 td 手势层），td 显示原值
-      className="w-full h-full min-h-8 px-1.5 py-1 text-ui whitespace-pre-wrap break-words"
+      className={`w-full h-full min-h-8 px-1.5 py-1 ${TEXT_CELL_FONT} whitespace-pre-wrap break-words`}
       style={{
         color: "var(--text-primary)",
         ...(editing
@@ -363,8 +373,8 @@ function TextCell({
           tabIndex={-1}
           className={
             editing
-              ? "absolute inset-0 w-full h-full resize-none overflow-auto border-none bg-transparent outline-none text-xs px-1.5 py-1 cursor-text select-text"
-              : "absolute inset-0 w-full h-full resize-none border-none bg-transparent outline-none text-xs px-1.5 py-1 opacity-0 pointer-events-none cursor-default"
+              ? `absolute inset-0 w-full h-full resize-none overflow-auto border-none bg-transparent outline-none ${TEXT_CELL_FONT} px-1.5 py-1 cursor-text select-text`
+              : `absolute inset-0 w-full h-full resize-none border-none bg-transparent outline-none ${TEXT_CELL_FONT} px-1.5 py-1 opacity-0 pointer-events-none cursor-default`
           }
           // 编辑态同样套用单元格样式（粗体/字色/字号等），所见即所编辑
           style={{
@@ -472,7 +482,7 @@ function NumberCell({
     <div className="w-full h-full min-h-8" onDoubleClick={handleDoubleClick}>
       {!editing && (
         <div
-          className="flex items-center w-full min-h-8 px-1.5 text-xs cursor-default"
+          className={`flex items-center w-full min-h-8 px-1.5 ${NUM_CELL_FONT} cursor-default`}
           style={{
             color: "var(--text-primary)",
             // 数值/时长一律等宽（便于按列扫读）；单元格样式可覆盖
@@ -500,11 +510,14 @@ function NumberCell({
           tabIndex={-1}
           className={
             editing
-              ? "absolute inset-0 w-full h-full bg-transparent outline-none border-none text-xs px-1.5 cursor-text select-text"
-              : "absolute inset-0 w-full h-full bg-transparent outline-none border-none text-xs px-1.5 opacity-0 pointer-events-none cursor-default"
+              ? `absolute inset-0 w-full h-full bg-transparent outline-none border-none ${NUM_CELL_FONT} px-1.5 cursor-text select-text`
+              : `absolute inset-0 w-full h-full bg-transparent outline-none border-none ${NUM_CELL_FONT} px-1.5 opacity-0 pointer-events-none cursor-default`
           }
           style={{
-            color: "var(--text-primary)", ...styleToCss(cellStyleOf(row, field.id)) }}
+            color: "var(--text-primary)",
+            fontFamily: "var(--font-mono)",
+            ...styleToCss(cellStyleOf(row, field.id)),
+          }}
         />
       )}
       {editing && field.type === "duration" && (

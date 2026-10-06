@@ -78,7 +78,7 @@ export function fontFamilyOf(key: string | undefined): string | undefined {
   return FONT_PRESETS.find((f) => f.key === key)?.fontFamily;
 }
 
-/** 字号选项（px；12 = 表格基准字号 text-xs；缺省 = 不设）。 */
+/** 字号选项（px；缺省 = 不设，随所在列的字阶档）。 */
 export const FONT_SIZE_OPTIONS = [12, 13, 14, 16, 18, 20, 24] as const;
 
 /** 文字颜色预设色板（hex）；「默认」= 清除（不设 key）。 */
