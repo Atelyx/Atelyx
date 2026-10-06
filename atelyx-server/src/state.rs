@@ -1,19 +1,6 @@
-//! 服务端持久化状态：数据目录布局 + 内存态 + 原子写。
-//!
-//! 数据目录布局（`DATA_DIR`，默认 `./data`）：
-//!
-//! ```text
-//! data/
-//!   accounts.json    用户（argon2 密码哈希）
-//!   sessions.json    设备会话（令牌只存 SHA-256 摘要，文件泄露不等于令牌泄露）
-//!   spaces.json      空间 + 成员名册（含角色）
-//!   invites.json     邀请码（角色 + 过期 + 次数上限）
-//!   spaces/<id>/     空间内容文件树（真源）
-//! ```
-//!
-//! 全部结构化元数据是小规模数据（目标 ≤30 人），读入内存、每次变更整文件原子写；备份 = 拷目录。
-//! 启动加载遇文件损坏直接拒绝启动——账号与权限数据静默重置等于放开权限，不可接受。
-//! `last_seen_at` 只在内存刷新、随下次结构变更落盘：会话集合不变的高频请求不产生写盘。
+//! 服务端持久化状态：数据目录布局（见 `Persisted`）+ 内存态 + 原子写。
+//! 全部结构化元数据是小规模数据（目标 ≤30 人），读入内存、每次变更整文件原子写，备份 = 拷目录。
+//! 启动加载遇文件损坏直接拒绝启动——账号与权限数据静默重置等于放开权限。
 
 use std::path::{Path, PathBuf};
 use std::collections::HashMap;
@@ -90,6 +77,10 @@ pub struct Invite {
     pub used_count: u32,
 }
 
+/// 数据目录（`DATA_DIR`，默认 `./data`）中的结构化元数据，对应四个 JSON 名册文件：
+/// `accounts.json` 用户（argon2 密码哈希）、`sessions.json` 设备会话（令牌只存 SHA-256 摘要，
+/// 文件泄露不等于令牌泄露）、`spaces.json` 空间 + 成员名册（含角色）、`invites.json`
+/// 邀请码（角色 + 过期 + 次数上限）；空间内容文件树在 `spaces/<id>/`（真源）。
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub(crate) struct Persisted {
     pub(crate) users: Vec<User>,
@@ -172,11 +163,12 @@ impl Drop for PathLockGuard {
     }
 }
 
-/// unix 秒时刻。
+/// 500 内部错误响应。
 pub fn internal(e: impl std::fmt::Display) -> ApiError {
     ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
 }
 
+/// unix 秒时刻。
 pub fn now_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

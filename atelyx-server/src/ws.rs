@@ -1,25 +1,6 @@
-//! WS 共享房间机制（presence / 补丁 / 笔记同步 / 插件消息转发），
-//! 空间频道 `/ws/space` 的底层：鉴权由 space_ws 完成后，入房与转发全走本模块。
-//!
-//! 协议（JSON over WS，字段 camelCase）：
-//! - C→S `hello`：`{ type, spaceId, token, nickname, color, deviceName, version? }`（首条必发）
-//! - C→S `presence`：`{ type, file?, selection?, view?, openFiles?, lockedNodes?, streamingNodeIds?, editingNotes? }`
-//! - C→S `table-patch` / `canvas-patch`：`{ type, file, patch }`（不透明透传）
-//! - C→S `note-sync` / `note-aware`：`{ type, file, payload }`（base64 载荷不透明透传）
-//! - C→S `plugin-msg`：`{ type, channel, payload, targetPeerId? }`（广播/定向单播）
-//! - C→S `plugin-replay`：`{ type, after }`（可靠补投：回放 seq > after 的缓存广播帧）
-//! - C→S `ping`（保活，回 `pong` 广播）/ `bye`（离开）
-//! - C→S 二进制帧：插件消息二进制载荷直传（布局见 `parse_plugin_binary`），与 `plugin-msg` 同语义
-//! - S→C `hello-ack`：`{ type, peerId, pluginSeq }`（先于 peers 帧——客户端据此把自己过滤出列表；
-//!   pluginSeq = 房间插件帧序号头，客户端据此判定序号空间是否重置）
-//! - S→C `peers` / `presence` / 各转发帧（不含自己；`plugin-msg` 广播帧带房间级序号 `seq`）/
-//!   `meta-changed`（团队 meta 落地广播，含写入者，只带 `key` 不带值）/ `resync`（慢消费者重新握手）/ `error`
-//!
-//! 插件消息可靠有序：广播帧按房间级单调 seq 分配并进环形缓存（条数/字节双上限，超限逐出最旧），
-//! 重连后按 `plugin-replay` 的 after 回放缺帧（回放帧与直播帧同通道保序）；定向单播为尽力而为，
-//! 不占序号不入缓存。房间清空时缓存随之移除。
-//!
-//! 日志红线：转发内容（patch / Yjs payload / selection）只记字节数不记内容。
+//! WS 共享房间机制（presence / 补丁 / 笔记同步 / 插件消息转发），空间频道 `/ws/space` 的底层：
+//! 鉴权由 space_ws 完成后，入房与转发全走本模块。协议（JSON over WS，camelCase）见 `ClientMsg`（C→S）与 `ServerMsg`（S→C）。
+//! 插件消息可靠有序（房间级 seq + 环形缓存补投，见 `Room`）；日志红线：转发内容只记字节数不记内容。
 
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
@@ -189,6 +170,11 @@ pub struct PeerMeta {
     pub session_id: String,
 }
 
+/// C→S 帧类型（`type` 字段分派）：`hello`（首条必发，见 space_ws）/ `presence` /
+/// `table-patch`、`canvas-patch`（不透明透传）/ `note-sync`、`note-aware`（base64 载荷不透明透传）/
+/// `plugin-msg`（广播/定向单播）/ `plugin-replay`（可靠补投：回放 seq > after 的缓存广播帧）/
+/// `ping`（保活，回 `pong` 广播）/ `bye`（离开）；二进制帧 = 插件消息二进制载荷直传
+/// （布局见 `parse_plugin_binary`，与 `plugin-msg` 同语义）。
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ClientMsg {
@@ -259,6 +245,9 @@ struct PeerInfo {
     presence: Option<Presence>,
 }
 
+/// S→C 帧：`hello-ack`（先于 peers 帧，带房间插件序号头）/ `peers` / `presence` / 各转发帧
+/// （不含自己；`plugin-msg` 广播帧带房间级 seq）/ `meta-changed`（落地广播，只带 `key` 不带值）/
+/// `resync`（慢消费者重新握手）/ `error`。
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ServerMsg {

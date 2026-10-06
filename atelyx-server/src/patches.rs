@@ -1,13 +1,6 @@
-//! 空间内容增量补丁端点（画布 `.atlx` / 表格 `.atb`）：客户端补丁按稳定 id 合并进服务端
-//! 真源（合并语义与客户端本地保存一致，同一 JSON 形状），落地后向空间房间广播补丁帧。
-//!
-//! 合并语义：removed 幂等（缺 id 不报错）；upsert 覆盖同 id 或追加；fieldOrder/rowOrder
-//! 为 id 全序重排（未出现的 id 保持相对顺序置尾——排序是数组属性，id 合并无法表达）；
-//! 补丁 id 与文件内 id 不符 = 补丁属于另一文件，拒绝（防串文件混写）；title 变更 =
-//! 同目录改文件名（返回新路径），同名异 id 拒绝覆盖防静默丢失；文件损坏明确 400，不静默重建。
-//!
-//! 并发模型：补丁与整文件写共用每路径一把的异步锁（见 `state::PathLocks`），锁内完成
-//! 「读 → 校验 → 合并 → 原子写」，同路径并发写严格按到达序落地。
+//! 空间内容增量补丁端点（画布 `.atlx` / 表格 `.atb`）：客户端补丁按稳定 id 合并进服务端真源
+//! （合并语义与客户端本地保存一致），落地后向空间房间广播补丁帧。
+//! 合并语义见 `apply_canvas_patch` / `apply_table_patch`；并发模型与整文件写共用每路径异步锁（见 `state::PathLocks`）。
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -293,6 +286,7 @@ fn parse_patch<T: serde::de::DeserializeOwned>(raw: &serde_json::Value, what: &s
         .map_err(|e| bad_request(&format!("{what}格式不合法：{e}")))
 }
 
+/// 读画布真源文件：schema 不符或解析失败（损坏）→ 400 拒绝覆盖，不静默重建。
 fn read_canvas_file(path: &Path) -> Result<CanvasFile, ApiError> {
     let text =
         std::fs::read_to_string(path).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("读取失败：{e}")))?;
@@ -304,6 +298,7 @@ fn read_canvas_file(path: &Path) -> Result<CanvasFile, ApiError> {
     Ok(canvas)
 }
 
+/// 读表格真源文件：schema 不符或解析失败（损坏）→ 400 拒绝覆盖，不静默重建。
 fn read_table_file(path: &Path) -> Result<TableFile, ApiError> {
     let text = std::fs::read_to_string(path).map_err(|e| internal(format!("读取失败：{e}")))?;
     let table: TableFile = serde_json::from_str(&text)

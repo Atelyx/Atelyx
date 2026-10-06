@@ -1,9 +1,6 @@
 //! 主页面板数据命令（日历/仓库历史）：带日期笔记扫描 + 全仓库历史版本聚合。
-//!
 //! 两类都是只读聚合，尽力而为：缺失/损坏文件静默跳过，不阻塞面板显示。
-//! - `list_dated_notes`：扫描仓库 `.md` frontmatter 的 `date`/`due` 字段（自动进日历）。
-//! - `list_repo_history`：聚合 `.atelyx/history/` 全部版本（版本流 + 按日计数），
-//!   剔除全文 content 以控制载荷；日期按本机时区归日（活动日历与用户日历一致）。
+//! 历史聚合剔除全文 content 控制载荷；日期按本机时区归日（活动日历与用户日历一致）。
 
 use chrono::{DateTime, Local, Utc};
 use regex::Regex;

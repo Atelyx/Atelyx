@@ -1,11 +1,6 @@
-//! 系统托盘（桌面）：托盘图标/菜单、全窗口驻留显隐、完全退出协调。
-//!
-//! 驻留模型：UI 驻留标志（`UiHidden`）= 主窗口与撕裂窗口当前是否整体隐藏在托盘。
-//! 撕裂窗口建窗时读该标志决定可见性——静默自启或已驻留期间的启动恢复调和建窗不弹出，
-//! 显示动作由 `show_all_windows` 统一补。主窗口点 X = `hide_to_tray`（进程不退出）；
-//! 完全退出唯一入口 = 托盘菜单「退出」：广播退出请求 → 各 WebView 落盘收尾后经
-//! `exit_flush_done` 回报 → 收齐全部回报真正退出；看门狗超时强制退出兜底
-//! （WebView 卡死或未完成启动时回报永远不会到齐）。
+//! 系统托盘（桌面）：托盘图标/菜单、全窗口驻留显隐（驻留模型见 `UiHidden`）、完全退出协调
+//! （协议见 `begin_exit` / `exit_flush_done`）。主窗口点 X = 驻留托盘不退出；
+//! 完全退出唯一入口 = 托盘菜单「退出」。
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -20,7 +15,8 @@ use tauri::{AppHandle, Manager};
 #[cfg(desktop)]
 pub const TRAY_EXIT_EVENT: &str = "atelyx:tray-exit-requested";
 
-/// 看门狗等待窗口：自广播退出请求起，超过该时长仍有窗口未回报即强制退出。
+/// 看门狗等待窗口：自广播退出请求起，超过该时长仍有窗口未回报即强制退出
+/// （WebView 卡死或未完成启动时回报永远不会到齐，强制退出兜底）。
 #[cfg(desktop)]
 const EXIT_WATCHDOG: Duration = Duration::from_secs(8);
 

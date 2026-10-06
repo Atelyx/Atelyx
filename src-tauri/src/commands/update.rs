@@ -1,10 +1,5 @@
-//! 应用内更新下载与安装。
-//!
-//! 前端查 GitHub Release API 取地址与 sha256 → 本模块流式下载（进度/取消/断点续传/摘要校验）→
-//! 拉起安装。安卓的安装桥在 `commands/mobile.rs`；Linux 改为打开下载页，故这里只实现 Windows。
-//!
+//! 应用内更新：流式下载（进度/取消/断点续传/摘要校验）与拉起安装；只实现 Windows，安卓桥在 `commands/mobile.rs`。
 //! 出网走公网策略（同 `commands/web.rs` 的 `fetch_web`）；安装命令只接受下载目录内的路径。
-//! 取消是协作式的且只计已写盘字节，故取消点必然落在字节边界，`.part` 无需截断即可续传。
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -309,7 +304,7 @@ impl ChunkSource for reqwest::Response {
 }
 
 /// 把响应体逐块写入落盘目标；返回累计字节数，取消时返回 `None`。
-/// 只计已写盘字节、只在写盘前检查取消，故任何时刻落盘内容都是完整前缀。
+/// 只计已写盘字节、只在写盘前检查取消，落盘内容恒为完整前缀，`.part` 无需截断即可续传。
 async fn pump<S, W>(
     source: &mut S,
     writer: &mut W,

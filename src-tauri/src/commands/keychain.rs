@@ -1,25 +1,12 @@
-//! API key 安全存储命令（按仓库隔离）。
-//!
-//! 命令接口两端一致（签名与「条目不存在返回空串」语义不变），实现按平台分档：
-//! - 桌面：`keyring` crate 写 OS keychain（Windows Credential Manager / Linux Secret Service /
-//!   macOS Keychain）；
-//! - 安卓：Kotlin 桥 `com.atelyx.desktop.SecretStore`（gen/android 工程内）——Keystore 主密钥 +
-//!   加密 SharedPreferences，Rust 经 webview JNI 线程同步调用。
-//!
-//! 安全边界：API key 默认仅存凭据存储，不落仓库文件或 `global.json`；
-//! 仅当仓库开启 `syncKeys`（「API key 随仓库保存」，多设备同步）时前端才把 key 明文写入
-//! `config.json`（`vault.rs` 的 `VaultProvider.api_key` 为可选字段，默认不落盘 = 类型层守边界）。
-//!
-//! 条目名（桌面 = keychain username；安卓 = prefs 键）：
-//! - provider 条目 = `provider-<sha256(root)>-<providerId>`（仓库身份 = root 绝对路径，条目名取其
-//!   SHA-256 哈希：路径长且含分隔符，不能直接作条目名；哈希隔离保证复制的仓库与原件互不共条目）；
-//! - 通用应用秘密条目 = `app-secret-<sha256(name)>`（`name` 是任意调用方字串，整体哈希后与
-//!   provider 条目共用同一命名空间隔离，且长度/字符集稳定）。
-//! 与仓库级配置 `VaultConfig.providers` 配套；Tavily key 的 providerId 传 `search-tavily`。
+//! API key 安全存储命令（按仓库隔离；与仓库级配置 `VaultConfig.providers` 配套，Tavily key 的 providerId 传 `search-tavily`）。
+//! 命令接口两端一致（签名与「条目不存在返回空串」语义不变）：桌面 = `keyring` 写 OS keychain，
+//! 安卓 = Kotlin 桥 SecretStore（Keystore 主密钥 + 加密 SharedPreferences）。安全边界：key 默认仅存凭据存储不落盘，
+//! 仅当仓库开启 `syncKeys` 时前端才把 key 明文写入 `config.json`（`VaultProvider.api_key` 为可选字段 = 类型层守边界）。
 
 use sha2::{Digest, Sha256};
 
 /// 仓库身份（root 绝对路径）→ 条目名段：SHA-256 十六进制（64 字符，长度与字符集稳定）。
+/// 路径长且含分隔符，不能直接作条目名；哈希隔离保证复制的仓库与原件互不共条目。
 fn root_hash(vault_root: &str) -> String {
     let digest = Sha256::digest(vault_root.as_bytes());
     format!("{digest:x}")

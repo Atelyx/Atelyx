@@ -1,18 +1,6 @@
-//! 插件托管进程的命令面：启动（`ctx.shell.exec`/`spawn` 的后端）与按 pid 结束进程树。
-//!
-//! 插件经 `ctx.shell.spawn`/`exec` 启动的长驻服务，包装层是 `sh -c`（Unix）/
-//! `cmd.exe /C`（Windows）——只结束包装进程会把真正的服务留成孤儿（Windows 上尤其确定），
-//! 所以这里按 pid 结束整棵树：Windows 用系统自带 `taskkill /T /F`，Linux 读 `/proc` 收齐
-//! 子孙后从叶到根下发 SIGKILL（先结束父进程会让子孙改挂 init、再也枚举不到）。
-//!
-//! 启动侧（`spawn_plugin_process`）把进程创建收进宿主，好在创建那一刻就定下清理归属：
-//! 作业对象/进程组与随应用退出的收尾见 `plugin_process.rs`。这一层不是沙箱——程序白名单只放行
-//! shell 解释器而参数全开，与 `ctx.shell` 敏感面的信任模型一致。
-//!
-//! `kill_process_tree` 的信任模型与 `commands/external_fs.rs` 同款：命令接受任意 pid，不构成防插件
-//! 边界——插件本可经 `ctx.shell.exec` 跑 `kill`/`taskkill`，原始命令逃生舱 `ctx.native.invoke` 亦全量
-//! 放行。唯一的硬护栏是「不能杀掉整个应用/系统」：pid 0（Unix = 调用方进程组）与超出 i32 范围的
-//! pid（`as i32` 会变成 -1 = 全部进程）在发起任何系统调用之前恒拒。
+//! 插件托管进程的命令面：启动（`ctx.shell.exec`/`spawn` 的后端，见 `spawn_plugin_process`）与按 pid 结束进程树（`kill_process_tree`）。
+//! 两者的信任模型都不是沙箱/防插件边界：程序白名单只放行 shell 解释器而参数全开、命令接受任意 pid——
+//! 插件本可经 `ctx.shell.exec` 跑 `kill`/`taskkill`，唯一硬护栏是「不能杀掉整个应用/系统」（pid 0 与超 i32 范围恒拒）。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -49,11 +37,12 @@ pub fn spawn_plugin_process(
     host.spawn(&program, &args, cwd.as_deref(), env.as_ref(), sink)
 }
 
-/// 结束 pid 及其全部子孙进程。
+/// 结束 pid 及其全部子孙进程（包装层 `sh -c`/`cmd.exe /C` 下真正服务的存活依赖整树结束）。
 ///
 /// 进程已不存在不算失败（调用方可能只是重复停止）；其余失败返回可读原因，不静默。
-/// 声明为 async：Windows 侧要起 `taskkill` 子进程（数十毫秒），同步命令会占住主线程
-/// 事件循环，插件有多个在册进程时表现为停用瞬间界面卡顿。
+/// 实现：Windows 用 `taskkill /T /F`；Linux 读 `/proc` 收齐子孙后从叶到根 SIGKILL
+/// （父先死会让子孙改挂 init、再也枚举不到）。声明为 async：Windows 侧要起 `taskkill`
+/// 子进程（数十毫秒），同步命令会占住主线程事件循环。
 #[tauri::command(async)]
 pub fn kill_process_tree(pid: u32) -> Result<(), String> {
     // pid 0：Unix 的 kill(0) 命中调用方所在进程组、Windows 指向 Idle 进程——挡在系统调用之前

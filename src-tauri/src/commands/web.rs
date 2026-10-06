@@ -1,13 +1,7 @@
-//! 网页抓取代理命令（`fetch_web`）+ 通用 HTTP 请求命令（`http_request`，插件 `ctx.http` 面）。
-//!
-//! 抓取由 Rust 侧执行，理由与搜索代理一致：浏览器/WebView 前端直 fetch 受 CORS 限制，
-//! 且便于统一超时与大小上限。`fetch_web` 返回 `title` + 正文纯文本，供 AI `fetch_url` 工具
-//! 回填上下文做回答依据；`http_request` 返回状态码 + 响应头 + 原样文本体，供插件访问 HTTP API。
-//!
-//! 边界捕获：非 http/https 拒绝、地址按命令身份分策略（`fetch_web` 公网、`http_request`
-//! 本机/局域网——调用方身份天然按命令分离，插件是可信主体可连本机/局域网服务，
-//! 但云元数据/链路本地仍拒；策略见 `net_guard`）、方法白名单外拒绝、网络/HTTP 错误返回 Err，
-//! 前端降级为错误文本。
+//! 网页抓取代理命令（`fetch_web`，返回 title + 正文纯文本供 AI `fetch_url` 工具回填）+
+//! 通用 HTTP 请求命令（`http_request`，返回状态码 + 响应头 + 原样文本体，插件 `ctx.http` 面）。
+//! 由 Rust 侧执行：前端直 fetch 受 CORS 限制，且便于统一超时与大小上限；地址按命令身份分策略（见 `RequestKind`），边界校验见 `net_guard`。
+//! 失败一律 Err（非 http/https、方法白名单外、地址被拒、网络/HTTP 错误），前端降级为错误文本。
 
 use std::collections::HashMap;
 

@@ -1,9 +1,6 @@
-//! 空间 / 成员 / 邀请：建空间、我的空间（可见性隔离）、改名、转让 owner、
-//! 成员名册、邀请码（角色 + 过期 + 次数上限）与接受邀请。
-//!
-//! 可见性隔离：空间列表只返回自己参与的空间；成员名册只对空间内成员可见（viewer 只读可看）。
-//! 角色三档：owner（改名/邀请/移除成员/转让）、editor（内容读写）、viewer（内容/索引/团队
-//! 元数据只读，自身 user 元数据可写）。空间未提供删除端点。
+//! 空间 / 成员 / 邀请：建空间、我的空间、改名、转让 owner、成员名册、邀请码（角色 + 过期 + 次数上限）与接受邀请。
+//! 角色三档（owner/editor/viewer）的定义与权限见 `state::ROLE_*` 常量；成员名册只对空间内成员可见。
+//! 空间未提供删除端点。
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -144,6 +141,7 @@ pub async fn create_space(
     Ok(Json(json!({ "spaceId": id, "name": name, "role": ROLE_OWNER, "rootPath": adopted })))
 }
 
+/// 我的空间列表：只返回自己参与的空间（可见性隔离）。
 pub async fn list_spaces(State(state): State<ServerState>, user: AuthUser) -> ApiResult<Json<serde_json::Value>> {
     let spaces = state.read(|p| {
         p.spaces

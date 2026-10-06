@@ -1,19 +1,6 @@
-//! 全局配置命令（应用级数据）。
-//!
-//! 读写 `app_data_dir/global.json`：**应用级配置**——最近打开仓库列表 + 自动检查更新开关 +
-//! 界面外观（主题/字号/字体）+ 自动恢复上次打开文件。
-//! 个人仓库的 AI 供应商 / 搜索源在 `vault.rs` 的 `VaultConfig.providers/search`；
-//! 协作空间的 AI 配置（含 API key）在服务端团队元数据，不经本文件
-//! （`commands/keychain.rs` 的空间条目身份 `space:<serverUrl>#<spaceId>` 已不再使用）。
-//! 字段只按当前形状读写；文件里出现未知字段时由 serde 忽略（不报错、不写回）。
-//!
-//! 另有 `app_data_dir/ui-state.json`（应用级 UI 使用状态：工作区布局 + 上次打开文件 +
-//! 文件面板展开；本机独有、不随仓库同步，由 `crate::layout` 迷你窗口管理器单一写者
-//! 承载，见 `layout.rs`）。
-//!
-//! 整文件读写 + 原子写（写 `.tmp` → rename）。前端写入统一走补丁命令：
-//! `updateGlobalConfig` → `patch_global_config`（锁内读-合并-写）。
-//! ——跨窗口（主/撕裂窗口各有独立 webview）并发整文件写会互相覆盖丢字段，合并必须在后端单点完成。
+//! 全局配置命令：`app_data_dir/global.json` 的读写与补丁（应用级，不随仓库同步）。
+//! 仓库级 AI 供应商 / 搜索源在 `vault.rs` 的 `VaultConfig.providers/search`；协作空间的 AI 配置（含 API key）在服务端团队元数据，不经本文件。
+//! 应用级 UI 使用状态在 `app_data_dir/ui-state.json`，由 `crate::layout` 迷你窗口管理器单一写者承载（见 `layout.rs`）。
 
 use std::path::{Path, PathBuf};
 

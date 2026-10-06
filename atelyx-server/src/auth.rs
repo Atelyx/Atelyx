@@ -1,8 +1,6 @@
 //! 账号与会话：开放注册 / 登录 / 登出 / 设备会话列表与吊销。
-//!
-//! 密码 argon2 哈希；令牌随机 256 位 hex，服务端只存 SHA-256 摘要。令牌经
-//! `Authorization: Bearer` 传递；一次登录 = 一个设备会话，同账号多会话并存、可逐个吊销。
-//! 日志只记用户名等元数据，密码与令牌一律不入日志。
+//! 密码 argon2 哈希；令牌随机 256 位 hex、经 `Authorization: Bearer` 传递，服务端只存 SHA-256 摘要。
+//! 一次登录 = 一个设备会话，同账号多会话并存、可逐个吊销；日志只记用户名等元数据，密码与令牌一律不入日志。
 
 use argon2::password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;

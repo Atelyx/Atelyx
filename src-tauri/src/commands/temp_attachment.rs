@@ -1,22 +1,6 @@
-//! 附件临时区命令：未入库附件与表格图片统一落仓库内隐藏目录，实体文件只存路径引用。
-//!
-//! 目录分层 `.atelyx/temp/<组件>/<实例目录>/`：
-//! - 组件 = 画布（`canvas`，画布对话节点附件）/ AI 会话（`sessions`，面板会话附件）/
-//!   表格（`tables`，图片字段）；
-//! - 画布与会话的实例目录 = 实例 id 的 FNV-1a 16 位哈希（id 来自实体文件内容、可被外部构造，
-//!   哈希排除分隔符/`..`/保留名等路径语义），目录内标记文件记录实例 id 供回收反查；
-//!   表格实例目录直接用 tableId（应用生成，写入前校验无路径语义）；
-//! - 隐藏目录：文件树与全仓库扫描天然跳过；
-//! - **放在仓库内**（而非应用数据目录）：路径校验直接复用 `safe_join`（越界一律拒绝），
-//!   回收天然按仓库归属，读取复用仓库附件读命令——三件事都不需要另造一套边界；
-//! - 未入库的内容会随 `.atelyx` 一起被 Git/云盘同步（不额外忽略）。
-//!
-//! 回收 = 引用收集器注册：各组件声明自己的引用来源（画布扫全仓 `.atlx`、会话扫 `.atelyx/对话历史/`
-//! 的 `.jsonl`、表格扫全仓 `.atb` 的 image 单元格），统一收集「被引用的完整仓库相对路径」白名单，
-//! 只删实例目录内不在白名单里的顶层文件（节点复制粘贴可把画布引用带到别的画布，白名单必须全仓收集）。
-//! 「保存到仓库」= 把临时件复制进附件文件夹并换成普通仓库相对路径引用；临时目录的回收由
-//! 实体关闭/删除时的清理命令（`cleanup_temp_attachments`，按组件 + 实例 id + 实体文件路径）
-//! 与进仓兜底清扫负责。
+//! 附件临时区命令：未入库附件与表格图片统一落仓库内隐藏目录 `.atelyx/temp/`，实体文件只存路径引用。
+//! 放在仓库内（而非应用数据目录）：路径校验复用 `safe_join`、回收按仓库归属、读取复用仓库附件读命令；
+//! 未入库内容会随 `.atelyx` 一起被 Git/云盘同步（不额外忽略）。
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -29,7 +13,7 @@ use tauri::State;
 use super::table::image_cell_entries;
 use crate::vault::{atomic_write, atomic_write_bytes, safe_join, VaultState, CHAT_HISTORY_DIR};
 
-/// 未入库临时附件的根目录（相对仓库根）。
+/// 未入库临时附件的根目录（相对仓库根）。隐藏目录：文件树与全仓库扫描天然跳过。
 pub const TEMP_ATTACHMENT_DIR: &str = ".atelyx/temp";
 
 /// 画布/会话实例目录的标记文件：内容 = 实例 id，防「实体文档恰好暂时读不到」与目录被
@@ -442,6 +426,7 @@ fn collect_chat_session_usage(root: &Path, usage: &mut TempUsage) -> Result<(), 
 }
 
 /// 回收判定事实的完整收集 = 实体文件（画布 + 表格）+ 面板会话。
+/// 白名单必须全仓收集：节点复制粘贴可把画布引用带到别的画布。
 fn collect_all_temp_usage(root: &Path) -> Result<TempUsage, String> {
     let mut usage = TempUsage::new();
     collect_entity_usage(root, &mut usage)?;

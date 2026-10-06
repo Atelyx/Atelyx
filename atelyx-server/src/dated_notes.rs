@@ -1,7 +1,5 @@
-//! 带日期笔记扫描（主页日历）：扫空间 `.md` 的 frontmatter `date`/`due` 字段。
-//!
-//! 与客户端本地 Rust `commands/home.rs::list_dated_notes` 同一套解析口径（frontmatter 块识别、
-//! `YYYY-MM-DD` 提取、只读文件头、尊重排除文件夹），只是真相源改为服务端内容树。
+//! 带日期笔记扫描（主页日历）：扫空间 `.md` 的 frontmatter `date`/`due` 字段，解析口径
+//! 与客户端本地 `commands/home.rs::list_dated_notes` 一致（真相源改为服务端内容树）。
 //! 只读、尽力而为：读失败/无日期/超上限一律跳过，不阻塞面板。
 
 use std::path::Path;

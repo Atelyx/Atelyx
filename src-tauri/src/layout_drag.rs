@@ -1,7 +1,6 @@
 //! 布局迷你窗口管理器的跨窗口拖拽层：拖拽会话（Rust 持有，源窗口只上报输入）、
-//! 命中调和、落点解析、释放检测（看门狗）与全局光标换算。前端只上报输入与接收
-//! `drag-session` 广播渲染 ghost + 各自 DOM 命中。权威窗口 bounds 由
-//! `layout_window` 的窗口事件驱动，前端不再维护 bounds 注册表。
+//! DOM 命中收集、落点解析与释放看门狗。前端只上报输入并接收 `drag-session` 广播渲染 ghost。
+//! 权威窗口 bounds 由 `layout_window` 的窗口事件驱动，前端不再维护 bounds 注册表。
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;

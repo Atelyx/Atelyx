@@ -1,10 +1,6 @@
 //! 出网 http/https 地址校验（`commands/web.rs` 与 `commands/search.rs` 共用）。
-//!
-//! 两套策略，同一次校验只能择一（见 [`HostPolicy`]）：网页抓取 `fetch_web`（模型工具）走公网
-//! 策略，插件通用 HTTP `http_request` 与用户自建的 SearXNG 等本机/局域网服务走
-//! [`HostPolicy::LocalService`]。三层边界并存：入口按协议白名单 + IP 字面量判定；重定向每跳
-//! 复检同一策略；DNS 解析结果逐 IP 过策略（挂在 reqwest 客户端上，见 [`PolicyDnsResolver`]）——
-//! 域名解析到内网地址与 DNS rebinding 均被拦截，连接只建立到已校验放行的 IP。
+//! 两套策略同次校验择一（见 `HostPolicy`）；三层边界并存：入口协议白名单 + IP 字面量判定、
+//! 重定向每跳复检（见 `redirect_policy`）、DNS 解析结果逐 IP 过滤（见 `PolicyDnsResolver`）——rebinding 均被拦截。
 
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;

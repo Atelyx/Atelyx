@@ -1,27 +1,6 @@
 //! 插件平台命令：安装/卸载/启用/更新/读取入口与插件数据。
-//!
-//! 存储布局：
-//! - 插件：`app_data_dir/plugins/<目录>/`（本机）
-//! - 状态：`app_data_dir/plugin-state.json`（每 id：enabled 开关 + 行来源 kind/落位目录名 +
-//!   可选一代回退目录与版本 + 随应用分发行的清单 + 已播种 id 记录）
-//!
-//! 身份模型：插件身份 = 清单 `package.json` 的 `name`（反向域名，仍校验）；**目录名 = 原名**（本地
-//! 源目录名 / 仓库名），不校验合法性、不要求等于 name。按 name 定位一律扫描目录读清单匹配；
-//! 点开头目录（`.install-*`/`.bak-*` 等临时/隐藏目录）不参与扫描。
-//!
-//! 行的两种实现解析：磁盘包（扫目录读清单）与随应用分发的包（实现随宿主编译、无磁盘目录，清单由
-//! 前端随 `plugin_list` 的 `defaults` 交给本层播种并保存）。二者同一张行表、同一启停/卸载路径；
-//! 同名 id 的磁盘包覆盖随应用分发的实现（磁盘行优先列出）。
-//!
-//! 安装流（三类安装来源，统一「取源码」；随应用分发行不是安装来源，只由播种产生）：
-//! - 市场：GitHub `owner/repo`，git clone 到临时目录；本机无 git 时回退下载 GitHub 自动生成的
-//!   源码包（codeload，作者零操作，非 Release 资产）。
-//! - 手动 git 地址：git clone（保留 `.git` 供更新）。
-//! - 本地目录：junction（Windows）/ 符号链接（Unix）实时引用，无拷贝无更新。
-//! 三者统一：校验 `package.json` → 以原名原子落位到 `plugins/<原名>/`（本地目录为链接）；失败不留脏。
-//!
-//! 安全：插件 name 视为不可信输入（仍校验）；插件目录内路径访问经 `safe_plugin_path` 限制在对应插件根
-//! 目录内并拒绝符号链接段（防穿越越权）；插件代码在 WebView 主上下文内执行（安装即授权，能力经 ctx 面）。
+//! 身份模型：插件身份 = 清单 `package.json` 的 `name`（仍校验），目录名 = 原名不校验，按 name 扫目录读清单定位。
+//! 安全：插件代码在 WebView 主上下文内执行（安装即授权，能力经 ctx 面），目录内路径访问经 `safe_plugin_path` 拒越权。
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -266,6 +245,7 @@ fn seed_default_rows(pstate: &mut PluginState, defaults: &[Value], disk_ids: &Ha
     changed
 }
 
+/// 插件落盘根目录：`app_data_dir/plugins/`（磁盘包目录，目录名 = 原名）。
 fn plugin_base_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     Ok(dir.join("plugins"))

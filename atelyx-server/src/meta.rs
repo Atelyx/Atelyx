@@ -1,11 +1,6 @@
-//! 空间配置落点（键值元数据）：space 与 user 两种 scope。
-//!
-//! 存储：按键分文件散列在数据目录下 `<data>/meta/<space_id>/{space,user/<user_id>}/<key 编码>.json`，
-//! 文件内容即 value 原文（UTF-8 文本，非 JSON 包装）；扩展名 `.json` 仅为与数据目录其他文件一致。
-//! 原子写复用 fsops::atomic_write（temp + rename），避免半截文件；目录不存在即空 map。
-//! 权限：space scope 任意成员可读，仅 owner/editor 可写；user scope 任意成员可读写自己那份。
-//! 非成员一律拒绝（与内容端点同口径）。space scope 写/删落地成功后向 `space:<id>` 房间广播
-//! `meta-changed` 帧（只带键名），客户端回读磁盘真源；user scope 为个人数据，不广播。
+//! 空间配置落点（键值元数据）：space 与 user 两种 scope，权限闸门见各端点。
+//! 存储布局与 key 编码见 `key_to_path`；space scope 写/删成功后向 `space:<id>` 房间广播
+//! `meta-changed` 帧（只带键名，客户端回读磁盘真源）；user scope 为个人数据，不广播。
 
 use std::collections::HashMap;
 use std::path::Path as FsPath;
@@ -99,7 +94,8 @@ fn validate_key(key: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
-/// key → 磁盘路径：key 的分段直接映射为相对路径（与内容路径同等编码），末段加 `.json` 扩展名。
+/// key → 磁盘路径：scope 根 + key 分段直接映射为相对路径（与内容路径同等编码），
+/// 文件内容即 value 原文（UTF-8 文本，非 JSON 包装；`.json` 后缀仅为与数据目录其他文件一致）。
 /// 末段以 `{seg}.json` 拼接（非 set_extension），避免 key 自带扩展名被替换导致回读错位。
 fn key_to_path(root: &FsPath, key: &str) -> Result<PathBuf, ApiError> {
     validate_key(key)?;

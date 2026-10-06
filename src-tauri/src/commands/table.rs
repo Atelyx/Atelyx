@@ -1,8 +1,6 @@
-//! 多维表格（.atb）文件命令。
-//!
-//! 命名约定同 .atlx：`<sanitized-title>.atb`（标题即文件名，任意文件夹，同名自动加序号）。
-//! 重命名/移动会扫描所有 .atlx 更新 table 节点 file 引用（链接维护，
-//! 复用 `commands/vault.rs` 的 collect/flush 扫描函数，事务模式与 rename_note 对称）。
+//! 多维表格（.atb）文件命令：命名约定同 .atlx——`<sanitized-title>.atb`（标题即文件名，任意文件夹，同名自动加序号）。
+//! 重命名/移动会扫描所有 .atlx 更新 table 节点 file 引用（链接维护，复用 `commands/vault.rs`
+//! 的 collect/flush 扫描函数，事务模式与 rename_note 对称）。
 
 use std::collections::HashSet;
 

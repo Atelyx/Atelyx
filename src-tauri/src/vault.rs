@@ -1,9 +1,5 @@
-//! 仓库文件读写核心模块。
-//!
-//! 仓库 = 用户自选文件夹，无数据库，全部文件存储。
-//! 文件结构与 .atlx schema 。
-//! 本模块只做文件 I/O + 路径校验，不耦合业务语义（text 节点 bodyMd
-//! 的剥离/填充在 services/vault 层组合）。
+//! 仓库文件读写核心模块：仓库 = 用户自选文件夹，无数据库，全部文件存储。
+//! 本模块只做文件 I/O + 路径校验，不耦合业务语义（text 节点 bodyMd 的剥离/填充在 services/vault 层组合）。
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};

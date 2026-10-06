@@ -1,22 +1,6 @@
-//! 插件依赖获取与产物打包：把清单声明的 npm 依赖打成自包含单文件产物。
-//!
-//! 目标：开发者只声明标准依赖，其余由宿主在**安装/更新时**完成——解析、取件、校验、打包；
+//! 插件依赖获取与产物打包：安装/更新时解析清单声明的 npm 依赖、取件校验并打成自包含单文件产物；
 //! 运行时只求值产物，用户机器不需要 Node/pnpm，启动时不需要联网。
-//!
-//! 为什么只读 `package-lock.json` 而不做版本区间解析：锁文件已经把整棵树钉到具体版本与字节
-//! （`resolved` + `integrity`），宿主照单取件即可——零 semver 解析、结果可复现（同一份锁在
-//! 任何机器上得到同一份依赖），并且天然满足「当前版/上一版各自携带自己的锁定信息」：锁与产物
-//! 都在插件目录内，随版本目录一起切换与回退，不需要额外状态字段。
-//!
-//! 产物 = `<插件根>/.atelyx-dist/entry.js`（ESM、浏览器 realm）。取件与打包都在安装事务的候选
-//! 目录内完成，失败即整体失败、当前版本不受影响。
-//!
-//! 边界：产物跑在 WebView 里，所以只有**浏览器可用**的 npm 包能进来——依赖 Node 内置模块
-//! （fs/child_process 等）、原生扩展（.node）、或无法静态解析的 `require(变量)` 的包会在打包
-//! 阶段失败，并尽力指认到来源文件；这类需求走 `ctx.native.invoke` / `shell.exec` 逃生舱。
-//!
-//! 取件地址来自插件仓库提交的锁文件：安装即授权（与插件代码本身的信任级别一致），故只做
-//! https 白名单，不额外叠加网络边界。
+//! 产物 = `.atelyx-dist/entry.js`（ESM、浏览器 realm）：只有浏览器可用的 npm 包能进来，Node 侧能力走 `ctx.native.invoke` / `shell.exec` 逃生舱。
 
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::io::{Read as _, Write as _};
@@ -30,7 +14,7 @@ use tauri::{AppHandle, Manager};
 
 use crate::commands::plugin::sanitize_archive_entry;
 
-/// 产物目录名（插件根内）与产物入口（相对插件根）。
+/// 产物目录名（插件根内）与产物入口（相对插件根）。产物为 ESM、面向浏览器 realm。
 pub const BUILD_DIR: &str = ".atelyx-dist";
 pub const BUILD_ENTRY: &str = ".atelyx-dist/entry.js";
 
@@ -125,7 +109,7 @@ pub fn built_entry(plugin_root: &Path) -> Option<&'static str> {
     plugin_root.join(BUILD_ENTRY).is_file().then_some(BUILD_ENTRY)
 }
 
-/// 依据清单准备自包含产物。
+/// 依据清单准备自包含产物。取件与打包都在安装事务的候选目录内完成，失败即整体失败、当前版本不受影响。
 ///
 /// - 未要求打包（既没声明依赖、也没显式开启）→ 清掉可能残留的产物并返回（保证「入口是清单的
 ///   函数」：去掉依赖或关掉开关的版本不会继续跑上一版产物）。
@@ -216,6 +200,8 @@ fn remove_build_dir(build_dir: &Path) -> Result<(), String> {
 // ===== 锁定信息解析 =====
 
 /// 读 `package-lock.json` 并取出 `packages` 映射（npm 7+ 的 lockfileVersion 2/3 形态）。
+/// 只认锁文件不做版本区间解析：锁已把整棵树钉到具体版本与字节（`resolved` + `integrity`），
+/// 照单取件零 semver 解析、结果可复现；锁随插件版本目录一起切换与回退，无需额外状态字段。
 fn read_lock_packages(plugin_root: &Path) -> Result<Map<String, Value>, String> {
     let path = crate::commands::plugin::safe_plugin_path(plugin_root, "package-lock.json")
         .map_err(|e| format!("{e}（声明了 dependencies 必须提交 package-lock.json）"))?;
@@ -399,6 +385,8 @@ fn sweep_stale_temp(dir: &Path) {
 }
 
 /// 取件整轮：读锁 → 逐个依赖「缓存命中校验 / 下载校验」→ 解压到 node_modules 对应路径。
+/// 取件地址即插件仓库提交的锁文件：安装即授权（与插件代码同信任级别），故只做 https
+/// 白名单，不额外叠加网络边界。
 async fn materialize_dependencies(
     cache: &Path,
     client: &reqwest::Client,

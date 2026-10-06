@@ -1,12 +1,6 @@
 //! 派生索引与扫描（真源 = 空间内容文件树）：反链 / 标签 / glob / grep。
-//!
-//! 与客户端检索同一套语义与同一批引擎（globset + regex）：
-//! - 反链 / 标签索引：纯内存只读派生，按文件指纹（mtime 毫秒 + 大小）增量刷新，
-//!   消失文件剔除——内容在服务器上被本服务写入，无外部编辑者，指纹刷新主要覆盖
-//!   重命名 / 删除后的索引收敛。查询频率低，刷新是 stat 遍历（快），不做后台预热。
-//! - glob / grep：目录遍历与客户端文件面板同过滤（隐藏项 / `.tmp`），命中上限与字节预算一致。
-//!
-//! 日志只记模式与命中数，不记匹配行内容（可能含用户文本）。
+//! 与客户端检索同一套语义与同一批引擎（globset + regex）；反链 / 标签索引为纯内存只读派生，
+//! 按文件指纹（mtime 毫秒 + 大小）增量刷新、消失文件剔除（见 `refresh_wiki_index` / `with_space_index`）。
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path as FsPath;
@@ -809,6 +803,8 @@ pub struct GrepBody {
     include: Option<String>,
 }
 
+/// grep 端点：目录遍历与文件面板同过滤（隐藏项 / `.tmp` / 团队排除名单）；
+/// 日志只记模式与命中数，不记匹配行内容（可能含用户文本）。
 pub async fn grep(
     State(state): State<ServerState>,
     user: AuthUser,

@@ -1,14 +1,7 @@
-//! 仓库文件读写命令。
+//! 仓库文件读写命令：画布/笔记/附件/配置的唯一文件 I/O 出口，仓库根路径由 `State<VaultState>` 注入。
 //!
-//! 通过 `State<VaultState>` 注入当前仓库根路径。本模块为画布/笔记/附件/配置的唯一文件 I/O 出口。
-//!
-//! 本模块只做文件 I/O，不耦合业务语义：
-//! - text 节点 bodyMd 的剥离/填充在 `services/vault` 层组合；
-//! - 因此 `read_canvas_vault`/`write_canvas_vault` 直接读写 .atlx 文件，不操作 笔记/*.md。
-//!
-//! .atlx 文件命名约定：`<sanitized-title>.atlx`（标题即文件名，无 id 后缀，任意文件夹）
-//! - 同名自动加序号（-2、-3）保证唯一性（`sanitize_filename` + 递增循环，见 `vault.rs`）；
-//! - rename_canvas 时同时重命名文件；重命名/删除后所有引用它的画布内引用同步更新。
+//! 只做文件 I/O，不耦合业务语义——text 节点 bodyMd 的剥离/填充在 `services/vault` 层组合。
+//! .atlx 以标题为文件名（`<sanitized-title>.atlx`），重命名即改文件名；引用同步见各 rename/delete 命令。
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};

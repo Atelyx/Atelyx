@@ -1,20 +1,13 @@
-//! Atelyx 协作服务端入口：读环境变量并起服务。
-//!
-//! 环境变量：
-//! - `PORT`：监听端口（默认 11224）
-//! - `DATA_DIR`：数据目录（默认 `./data`；账号 / 空间名册 / 空间内容都在这里，备份 = 拷目录）
-//! - `TLS_CERT` + `TLS_KEY`：PEM 证书与私钥路径，二者齐备即启 HTTPS/WSS（缺省明文 HTTP，
-//!   供本地开发与测试；局域网跨进程传密码应启用 TLS）
-//!
-//! 日志：tracing 结构化输出（stderr / `docker logs`），同时经采集层写入进程内环形缓冲
-//! （管理台「服务日志」面板读取，重启清空）。级别由 `RUST_LOG` 控制（默认 info），
-//! `LOG_FORMAT=json` 切 JSON 行输出便于采集。
+//! Atelyx 协作服务端入口：读环境变量并起服务（环境变量配置见 `fn main`，日志见 `init_logging`）。
 
 use std::path::PathBuf;
 
 use atelyx_server::{build_app, serve_on, ServerState, TlsPaths};
 use tracing::info;
 
+/// 环境变量配置：`PORT` 监听端口（默认 11224）；`DATA_DIR` 数据目录（默认 `./data`，
+/// 账号/空间名册/空间内容都在这里，备份 = 拷目录）；`TLS_CERT` + `TLS_KEY` PEM 证书与
+/// 私钥路径，二者齐备即启 HTTPS/WSS（缺省明文 HTTP，仅供本地开发测试；局域网跨进程传密码应启用 TLS）。
 fn main() {
     init_logging();
     let port = std::env::var("PORT").unwrap_or_else(|_| "11224".to_string());

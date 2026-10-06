@@ -1,16 +1,6 @@
-//! 联网搜索代理命令。
-//!
-//! 搜索统一走 Rust 侧请求，理由：
-//! - **SearXNG**：自建实例无内置 CORS 支持，浏览器/WebView 前端直 fetch 必被
-//!   `Access-Control-Allow-Origin` 拦截（官方架构即「放反代后面」）；Rust 代理天然绕过。
-//! - **Tavily**：请求走 Rust 侧构造（不落 WebView 代码），key 由前端传入——key 的落点与
-//!   取值（keychain 条目 / `syncKeys` 落盘 / 协作空间团队元数据）统一由前端配置层处理，
-//!   本命令不读仓库配置、不依赖本地仓库根（协作空间无本地 root，按 root 读会取到上一个仓库的残留）。
-//!
-//! 边界捕获：网络/HTTP 错误返回 Err，前端 `runSearch` 降级为 `SearchResultData.error`
-//! （失败降级不阻塞对话，）。
-//! 地址校验：Tavily 走公网策略、SearXNG 走本机/局域网策略（自建实例常在本机或局域网），
-//! 两套策略与重定向逐跳复检见 `net_guard`。
+//! 联网搜索代理命令：Tavily / SearXNG 统一走 Rust 侧请求。
+//! SearXNG 自建实例无内置 CORS，WebView 直 fetch 必被拦（官方架构即「放反代后面」），Rust 代理天然绕过。
+//! Tavily key 的落点与取值统一由前端配置层处理——本模块不读仓库配置、不依赖本地仓库根（协作空间无 root）。
 
 use reqwest::Url;
 use serde::Serialize;
@@ -31,6 +21,8 @@ pub struct SearchResultItem {
 
 /// 执行搜索（Tavily / SearXNG，按 provider 分发）。key 与实例地址由前端配置层传值、
 /// Rust 侧只做请求与地址校验（不读仓库配置，本地与协作空间同一路径）。
+/// Err = 网络/HTTP/地址校验失败，前端 `runSearch` 降级为 `SearchResultData.error`（不阻塞对话）；
+/// 地址策略（Tavily 公网 / SearXNG 本机局域网，重定向逐跳复检）见 `net_guard`。
 #[tauri::command]
 pub async fn search_web(
     provider: String,

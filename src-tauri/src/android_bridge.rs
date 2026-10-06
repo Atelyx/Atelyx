@@ -1,12 +1,6 @@
-//! 安卓 Kotlin 桥的共享 JNI 管道。
-//!
-//! JNIEnv 与 Activity 只在 webview 线程可得：`with_webview` 取到平台载荷，再经
-//! `JniHandle::exec` 投递到该线程执行，结果经通道回传。本模块集中三处易错点：
-//! 1. **类解析必须经 Activity 的 ClassLoader**：原生线程的 `FindClass` 命不中应用类加载器；
-//! 2. **Java 异常必须提取文本后清除**：残留挂起异常会让 webview 线程后续 JNI 调用崩溃；
-//! 3. **同步等待必须在阻塞线程池上做**：安卓上同步命令跑在主线程，主线程等待 webview 回调互等死锁。
-//!
-//! 各调用方只负责拼自己的静态方法调用，超时、投递与异常处理口径统一在此。
+//! 安卓 Kotlin 桥的共享 JNI 管道：`with_webview` 取平台载荷，经 `JniHandle::exec` 投递到
+//! webview 线程执行，结果经通道回传。超时、投递与异常处理口径统一在此，调用方只拼自己的静态方法调用；
+//! 三处 JNI 易错点（ClassLoader 解析 / 清除挂起异常 / 主线程死锁）就近记录在各函数上。
 
 use std::sync::mpsc;
 use std::time::Duration;
@@ -22,6 +16,8 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(10);
 ///
 /// `label` 是错误前缀，调用方各自传入以保留各自措辞（「凭据存储桥」「系统能力桥」）。
 /// 闭包拿到的 Activity 同时是 `android.content.Context`，可直接作为桥方法的 Context 实参。
+/// 本函数会阻塞等待回调：安卓上不得在主线程调用（主线程等 webview 回调互等死锁），
+/// 须放到阻塞线程池执行。
 pub fn with_activity<T, F>(app: &tauri::AppHandle, label: &str, f: F) -> Result<T, String>
 where
     T: Send + 'static,

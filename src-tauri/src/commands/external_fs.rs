@@ -1,15 +1,6 @@
-//! 仓库外文件命令（插件 `ctx.fs` 面）。
-//!
-//! 与 `read_vault_file`/`write_vault_file` 等仓库命令同构，但作用域为任意绝对路径——
-//! 本面无目录授权门槛：插件与宿主同 realm、事前授权不构成可信边界，取向为
-//! 「无门槛 + 调用全量审计」（审计在前端 audit 层按调用方插件记录方法与路径，详情页可见）。
-//! 独立命令族：模型工具（AI 文件工具）走仓库命令、限仓库根内，结构性够不到本面
-//! ——`safe_join` 与仓库命令一字未动。
-//!
-//! 路径入参一律绝对路径且不含 `..` 段（须规范化，创建语义不做词法消解）。
-//! `external_private_dir` 按 plugin_id 定位插件私有文件目录（插件根内 `data/files`）。
-//! plugin_id 由宿主侧 tracker 绑定（services/cordis/kernel.ts 的 `fs` 服务）——类型化
-//! ctx.fs 面只在调用边界校验插件上下文，不把 id 交给插件。
+//! 仓库外文件命令（插件 `ctx.fs` 面）：与仓库文件命令同构，但作用域为任意绝对路径。
+//! 本面无目录授权门槛（插件与宿主同 realm，事前授权不构成可信边界），取向为「无门槛 + 调用全量审计」（前端 audit 层按调用方插件记录）。
+//! 独立命令族：模型工具（AI 文件工具）走仓库命令、限仓库根内，结构性够不到本面——`safe_join` 与仓库命令一字未动。
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -157,6 +148,8 @@ pub fn external_delete_dir(path: String, force: bool) -> Result<ExternalDeleteDi
 
 /// 返回插件私有文件目录（不存在则创建）的绝对路径。目录位置因机器而异、清单无法声明，
 /// 插件运行时经此取值，再用取到的路径走本命令族读写。
+/// plugin_id 由宿主侧 tracker 绑定（services/cordis/kernel.ts 的 `fs` 服务）——
+/// 类型化 ctx.fs 面只在调用边界校验插件上下文，不把 id 交给插件。
 #[tauri::command]
 pub fn external_private_dir(plugin_id: String, app: AppHandle) -> Result<String, String> {
     let root = private_files_dir_of(&resolve_plugin_dir(&app, &plugin_id)?);

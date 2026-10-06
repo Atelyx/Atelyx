@@ -1,6 +1,4 @@
-//! Atelyx Tauri 后端入口。
-//! 负责命令注册与仓库状态托管。
-//!
+//! Atelyx Tauri 后端入口：命令注册（generate_handler）与各托管状态；
 //! 文件化仓库（`vault.rs`）为唯一存储出口。
 
 // Windows 上 MSVC 链接 dll 时会顺带产出导入库并向 stdout 打印「正在创建库 …dll.lib 和对象
