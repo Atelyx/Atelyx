@@ -7,9 +7,10 @@
  * collab:resync/vault:changed）在此声明为 typed event map（@mode 标注分派模式）。
  *
  * 平台服务（state/app/shell/vault/dialog/clipboard/window/ai/collab）与内核领域服务
- * （history/layout/uiState）由内核提供；canvas/table/note/chat 由对应插件提供（停用即不可用）。
+ * （history/layout/uiState/chat）由内核提供；canvas/table/note 由对应插件提供（停用即不可用）。
  */
 import type {
+  AgentStep,
   AppUiState,
   CellValue,
   ChatAutoNameOptions,
@@ -17,6 +18,7 @@ import type {
   ChatCompactRequest,
   ChatCompactResult,
   ChatNamingTarget,
+  ChatRuntime,
   ChatTargetResult,
   ChatTargetSelection,
   ChatTurnMessage,
@@ -90,6 +92,54 @@ export interface NoteBeforeSaveOutput extends SerialHookOutput {
 /** ai:before-request 监听器返回值：messages 改写请求消息（缺省 = 上一值原样）。 */
 export interface AiBeforeRequestOutput extends SerialHookOutput {
   messages?: LlmMessage[];
+}
+
+/** chat:before-step 载荷：一轮对话组好请求、尚未发出时的可拦截面。 */
+export interface ChatBeforeStepPayload {
+  /** 目标标识（面板会话 id / 画布对话节点 id / 插件自定 id）。 */
+  targetId: string;
+  model: string;
+  messages: LlmMessage[];
+  tools?: ToolSchema[];
+}
+
+/** chat:before-step 监听器返回值：任一项缺省 = 上一值原样；veto 放弃本轮（不产生任何回复）。
+ *  不含 `tools`：工具名册与系统提示词、尾部上下文块同源派生，改名册会让三者失配——
+ *  要收窄工具请用 `chat:before-tool` 逐次拦截，或调整 Agent 的工具勾选。 */
+export interface ChatBeforeStepOutput extends SerialHookOutput {
+  messages?: LlmMessage[];
+  model?: string;
+}
+
+/** chat:before-tool 载荷：一次工具调用执行前的可拦截面。 */
+export interface ChatBeforeToolPayload {
+  targetId: string;
+  /** 该次调用在模型 tool_calls 里的 id（回填结果按它对应）。 */
+  id: string;
+  name: string;
+  /** 参数原文（JSON 文本，由注册表校验后执行）。 */
+  arguments: string;
+}
+
+/** chat:before-tool 监听器返回值：缺省 = 上一值原样；veto 跳过该次调用（宿主回一条被拒的 tool 消息，
+ *  缺了它下一轮请求的 tool_calls 没有应答）。 */
+export interface ChatBeforeToolOutput extends SerialHookOutput {
+  name?: string;
+  arguments?: string;
+}
+
+/** chat:before-finish 载荷：一轮收尾判定完成后的可改写面。 */
+export interface ChatBeforeFinishPayload {
+  targetId: string;
+  /** 已最终化的正文（含叙述提升与截断提示）。 */
+  content: string;
+  steps: AgentStep[];
+}
+
+/** chat:before-finish 监听器返回值：缺省 = 上一值原样；veto 放弃本轮结果（消费方移除占位，同空回复）。 */
+export interface ChatBeforeFinishOutput extends SerialHookOutput {
+  content?: string;
+  steps?: AgentStep[];
 }
 
 /** shell.exec 选项（command 必填；cwd/env 可选）。
@@ -437,8 +487,9 @@ export interface MarkdownService {
   renderToFragment(markdown: string, options?: PluginMarkdownOptions): DocumentFragment | null;
 }
 
-/** AI 对话能力（由随应用分发的对话核心插件提供，停用即不可用）：用宿主配置的模型/Agent/工具跑一轮对话。
- *  核心只跑一轮——消息容器与落盘留在调用方（插件自带容器），流式与收尾经 `ChatTurnSink` 交回。
+/** AI 对话能力（内核提供，恒可用；编排依赖「对话核心」行注册的运行时，未注册即调用抛「未就绪」）：
+ *  用宿主配置的模型/Agent/工具跑一轮对话。核心只跑一轮——消息容器与落盘留在调用方（插件自带容器），
+ *  流式与收尾经 `ChatTurnSink` 交回。运行时经 `registerRuntime` 供给，可被替换（组合接管换对话核心行）。
  *  同源容器方法（importSession/appendMessages/listSessions/openSession/createSession/setSessionTitle）
  *  读写宿主对话面板的会话（同一批会话文件，磁盘为真源；面板 store 每窗口一份内存实例，
  *  跨窗口并发以写盘广播对账，见 chatPanelStore），要求对话面板插件已启用。
@@ -456,6 +507,9 @@ export interface ChatService {
     targetId: string,
     opts?: ChatAutoNameOptions,
   ): Promise<ChatAutoNameResult>;
+  /** 供给对话运行时实现（提供者插件用：内置实现与第三方提供者经同一注册表，同能力后注册者生效）。
+   *  返回撤销函数，随调用方 fiber 撤销；被替换的运行时不再被消费方取到。 */
+  registerRuntime(runtime: ChatRuntime): () => void;
   /** 把插件侧消息登记为宿主对话面板会话（新建并返回会话 id；面板历史可见、可在面板中继续对话）。
    *  消息经宿主校验转换（role 限 user/assistant、content 须为字符串、附件仅接受 file 引用），
    *  落盘由宿主会话链承担；opts.title 缺省按首条 user 消息派生，opts.agentId 指定会话 Agent。
@@ -599,6 +653,13 @@ declare module "@atelyx/cordis" {
       messages: LlmMessage[];
       tools?: ToolSchema[];
     }) => AiBeforeRequestOutput | void;
+    /** 一轮对话发出前钩子（serial：顺序执行；返回 { veto } 放弃本轮，返回 { messages }/{ model } 改写请求）。
+     *  与 `ai:before-request` 的分工：后者在**每次 HTTP 请求**层（工具循环每轮都发），前者只在一轮对话开始时发一次。@serial */
+    "chat:before-step": (payload: ChatBeforeStepPayload) => ChatBeforeStepOutput | void;
+    /** 每次工具调用执行前钩子（serial：顺序执行；返回 { veto } 跳过该次调用，返回 { name }/{ arguments } 改写调用）。@serial */
+    "chat:before-tool": (payload: ChatBeforeToolPayload) => ChatBeforeToolOutput | void;
+    /** 一轮对话收尾钩子（serial：顺序执行；返回 { content }/{ steps } 改写最终结果，返回 { veto } 放弃本轮结果）。@serial */
+    "chat:before-finish": (payload: ChatBeforeFinishPayload) => ChatBeforeFinishOutput | void;
     /** 笔记打开/切换（file = null = 关闭当前笔记）。@emit */
     "note:opened": (payload: { file: string | null }) => void;
     /** 当前笔记内容变更（保存落盘后发出；按需再调 note 服务读内容）。@emit */

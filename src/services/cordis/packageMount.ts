@@ -37,12 +37,23 @@ export async function evaluatePluginModule(code: string): Promise<unknown> {
   }
 }
 
-/** 挂载插件包实现（入口 = 宿主产出的打包产物或清单 main；读取 → 转译 → 求值 → 挂载，
- *  各段失败归入对应阶段）。打包产物已是自包含 ESM，按 `.js` 原样求值。 */
-export async function mountPluginFromPackage(kernel: Kernel, id: string, entry: string): Promise<MountResult> {
+/**
+ * 挂载插件包实现（入口 = 宿主产出的打包产物或清单 main；读取 → 转译 → 求值 → 挂载，
+ * 各段失败归入对应阶段）。打包产物已是自包含 ESM，按 `.js` 原样求值。
+ *
+ * `sourceId` = 入口代码所属的插件（读盘与打包产物的定位依据）；缺省与 `mountId` 同值。
+ * 两者分离是为了组合接管：被接管的行（`mountId` = 行 id）跑的是另一个插件的代码
+ * （`sourceId` = 实现提供者 id），此时数据/审计归属仍随行，代码来源随提供者。
+ */
+export async function mountPluginFromPackage(
+  kernel: Kernel,
+  mountId: string,
+  entry: string,
+  sourceId: string = mountId,
+): Promise<MountResult> {
   let code: string;
   try {
-    code = await pluginReadEntry(id, entry);
+    code = await pluginReadEntry(sourceId, entry);
   } catch (e) {
     return { ok: false, phase: "read", message: errText(e) };
   }
@@ -61,5 +72,5 @@ export async function mountPluginFromPackage(kernel: Kernel, id: string, entry: 
   if (!isApply(apply)) {
     return { ok: false, phase: "eval", message: "插件入口未导出 apply 函数" };
   }
-  return mountPlugin(kernel, { id, apply });
+  return mountPlugin(kernel, { id: mountId, apply });
 }

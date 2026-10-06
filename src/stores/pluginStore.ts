@@ -5,8 +5,9 @@
  * 插件运行时（Cordis 内核/挂载器/注册表）在 `services/cordis`，组合层推导在 `utils/cordis/composition`，
  * 本 store 只做编排与快照。
  * 装配：行来自插件列表（磁盘包行 + 随应用分发的行），装配顺序 = 默认组合成员在前、其余按 id 追加；
- * 挂载实现按「入口解析方式」判定——行有落位目录则读该包磁盘入口，否则经随应用分发实现注册表取编译实现。
- * 「谁替换谁」由插件在 apply 里经 ctx.slots 的 priority / inject 声明，组合层不提供行级覆盖。
+ * 每行的实现来源由组合裁决决定（缺省 = 行自身实现；插件可声明接管某行，用户层可钉住或改回默认），
+ * 实现为磁盘包则读该包入口，否则经随应用分发实现注册表取编译实现。
+ * 「控件替换」（槽位）与「行替换」（接管）是两条缝：前者由插件在 apply 里经 ctx.slots 的 priority 声明。
  * 加载时机：应用挂载/进仓后 `load()` 一次——先按默认组合清单播种并取行，再按装配顺序拉起启用行。
  * 例外说明：本 store 静态 import `components/plugins/cordis/builtins.tsx`（随应用分发插件注册表）与
  * `components/plugins/SlotHost`（插件侧槽位渲染宿主，经注入点接进内核 slots 服务）——组件层承载组件引用
@@ -18,6 +19,8 @@ import type { ComponentType } from "react";
 import type { InstalledPlugin, PluginIndexEntry, PluginManifest, PluginPackageJson } from "@/types";
 import {
   errText,
+  type CompositionResolution,
+  type CompositionUserPatches,
   type PluginAuditEntry,
   type PluginCommandContribution,
   type PluginFiberPhase,
@@ -74,7 +77,6 @@ import type {
   ThemeSettingRegistration,
 } from "@/services/cordis/ui";
 import type { ViewContribution } from "@/services/cordis/slots";
-import type { SlotContribution } from "@/utils/cordis/slots";
 import {
   CORDIS_BUILTIN_BY_ID,
   CORDIS_BUILTIN_DEFS,
@@ -96,15 +98,24 @@ import { mountPlugin, unmountAll, unmountPlugin } from "@/services/cordis/loader
 import { mountPluginFromPackage } from "@/services/cordis/packageMount";
 import {
   resolveViewKind,
-  resolveSlot,
   onSlotChange,
   setSlotWinnerOverrideSource,
   slotChain as buildSlotChain,
   slotConflictRows as buildSlotConflictRows,
   dockableViewKinds as slotDockableViewKinds,
 } from "@/services/cordis/slots";
-import type { ViewSlotContribution, UiSlotPayload } from "@/services/cordis/slots";
-import { composePlugins, compositionPackages, mountOrder } from "@/utils/cordis/composition";
+import type { ViewSlotContribution } from "@/services/cordis/slots";
+import {
+  composePlugins,
+  compositionPackages,
+  orderViewKindsByRow,
+  resolveComposition,
+  sanitizeCompositionPatches,
+  type ActiveCompositionDeclaration,
+  type CompositionRow,
+} from "@/utils/cordis/composition";
+import { readGlobalConfig, updateGlobalConfig } from "@/services/global";
+import { emitCompositionChanged, onCompositionChanged } from "@/services/windowBus";
 import {
   useCollabStore,
   publishPluginPresence,
@@ -149,12 +160,6 @@ interface ViewProviderState {
   installed: boolean;
 }
 
-/** 应用外壳接管注册（shell 槽胜出者；App 外壳承载渲染用）。 */
-export interface ShellContribution {
-  component: ComponentType;
-  pluginId: string;
-}
-
 /** 全量重载的触发原因。`"vault-switch"` = 切仓库触发：声明「切仓库保活」（清单
  *  `keepMountedOnVaultSwitch`）的插件跳过清场与重挂，运行时与托管进程原地保留；
  *  其余触发原因（启动/插件变化/版本操作/安装）一律全量重建。 */
@@ -171,6 +176,10 @@ interface PluginStoreState {
   uiRevision: number;
   /** 按槽的注册修订号（槽注册/装饰变化只 bump 对应槽；细粒度槽宿主按槽订阅，防全局重渲染放大）。 */
   slotRevisions: Record<string, number>;
+  /** 组合接管的用户层（global.json 镜像：组合行 id → 实现 id；`"default"` = 该行默认实现）。 */
+  compositionPatches: CompositionUserPatches;
+  /** 组合裁决快照（每次加载重算；管理页展示归属与冲突，运行时装配按它执行）。 */
+  composition: CompositionResolution | null;
   /** 市场索引条目（含徽标合并）。 */
   marketItems: PluginIndexEntry[];
   marketLoading: boolean;
@@ -200,6 +209,9 @@ interface PluginStoreState {
   reload(id: string): Promise<void>;
   /** 恢复默认装配：补播种已卸载的默认行 + 重载。 */
   restoreDefaultComposition(): Promise<void>;
+  /** 设组合接管用户层（行 id → 实现 id；`null` = 删键回落到插件声明层，`"default"` = 钉住该行
+   *  默认实现）。现读最新表再写（内存镜像可能滞后于别的窗口），写失败原样上抛、不改动任何状态。 */
+  setCompositionImpl(rowId: string, impl: string | null): Promise<void>;
   /** 插件工具的 UI 元数据（Agent 设置页名册合并；组件经此读取，不直连 services）。 */
   pluginToolMetas(): AgentToolMeta[];
   /** 插件设置项注册（设置页 tab 合并）。 */
@@ -212,8 +224,6 @@ interface PluginStoreState {
   pluginEdgeTypes(): Record<string, ComponentType>;
   /** 插件应用页面注册（app 页面/模式全页接管）。 */
   pluginAppPage(id: string): PluginAppPageRegistration | undefined;
-  /** 应用外壳接管注册（shell 槽胜出者；缺省 = 默认界面）。 */
-  shellContribution(): ShellContribution | undefined;
   /** 面板视图候选（内建 + 插件面板）。 */
   pluginViewKinds(): string[];
   /** 某视图的贡献（统一视图槽注册表；ViewHost 分派用，缺注册 = 空面板占位）。 */
@@ -349,11 +359,28 @@ function ensurePluginChangeListener(): void {
   });
 }
 
+/** 组合接管用户层跨窗口广播：接管表决定装配计划，其他窗口写盘后本窗口必须重载，
+ *  否则各窗口各自跑着不同的实现来源。 */
+let compositionListenerStarted = false;
+
+function ensureCompositionListener(): void {
+  if (compositionListenerStarted) return;
+  compositionListenerStarted = true;
+  void onCompositionChanged(() => {
+    void usePluginStore.getState().load().catch((error) => {
+      console.error("组合接管变更后重载失败", error);
+    });
+  }).catch((error) => {
+    compositionListenerStarted = false;
+    console.error("组合接管变更监听启动失败", error);
+  });
+}
+
+/** 入口图排序：不属于任何组合行的视图排在全部有归属的视图之后（保持彼此的注册顺序）。 */
+const UNRANKED_ROW = Number.MAX_SAFE_INTEGER;
+
 /** slots 视图贡献 → ViewContribution 转换缓存（selector 稳定引用；随贡献对象 GC 自动失效）。 */
 const slotViewCache = new WeakMap<ViewSlotContribution, ViewContribution>();
-
-/** shell 槽胜出贡献缓存（同 viewContribution：selector 订阅需稳定引用）。 */
-const slotShellCache = new WeakMap<object, ShellContribution>();
 
 /** 安装后统一收尾（模块私有）：宿主兼容强制 + 重载；返回落位行（调用方按实际 id 提示）。 */
 async function finishInstall(get: () => PluginStoreState, row: PluginRow): Promise<PluginRow> {
@@ -625,43 +652,63 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
     CORDIS_BUILTIN_DEFS.map((d) => builtinManifest(d, hostVersion ?? "0.0.0"));
 
   /** 拉起单个插件行的运行时：先做兼容校验；行有落位目录则读包入口，否则取编译实现。 */
-  const spawn = async (id: string, env?: { hostVersion: string | null; platform: string }): Promise<void> => {
+/** 组合接管相关读写遇到全局配置损坏时的可见提示（读/写两处同源；原文已由 Rust 侧备份）。 */
+function compositionCorruptMessage(backup: string): string {
+  return `全局配置已损坏，原文备份为 ${backup}（应用数据目录）：组合接管设置已重置`;
+}
+
+  /** 随应用编译实现查表：hasOwn 防原型链命中（行 id / 用户层取值可被手改，`constructor` 等会假命中）。 */
+  const builtinDefOf = (id: string) =>
+    Object.hasOwn(CORDIS_BUILTIN_BY_ID, id) ? CORDIS_BUILTIN_BY_ID[id] : undefined;
+
+  /**
+   * 拉起一条装配计划：在 `rowId` 的位置上跑 `implId` 的实现（组合裁决给定；两者不同 = 该行被接管）。
+   * 兼容门槛按实际装载的那份代码判：编译实现由宿主自身保证兼容（宿主版本未知不拦截），
+   * 磁盘包实现核该提供者的清单/版本/平台——接管行的实现来自提供者，其清单承诺才是要核对的那份。
+   */
+  const spawn = async (
+    rowId: string,
+    implId: string,
+    env?: { hostVersion: string | null; platform: string },
+  ): Promise<void> => {
     // 先撤销旧运行时（重载防重复注册）及其进程：新一次 apply 会重新启动自己的服务，
     // 留着上一轮的进程只会多出一个无人认领的重复实例（见 stopPlugin 注释）。
-    await stopPlugin(id);
+    await stopPlugin(rowId);
     try {
-      const plugin = get().plugins[id];
-      if (!plugin) return syncPhase(id, "failed", { phase: "manifest", message: "插件不存在" });
+      const row = get().plugins[rowId];
+      if (!row) return syncPhase(rowId, "failed", { phase: "manifest", message: "插件行不存在" });
       const hostVersion = env?.hostVersion ?? (await getAppVersion().catch(() => null));
       const platform = env?.platform ?? detectPlatform();
-      if (plugin.installDir === "") {
-        // 随应用编译行：实现随宿主二进制分发，兼容性由宿主自身保证——宿主版本未知不拦截，契约/平台仍判。
-        const compat = pluginCompatibleWithHost(plugin.manifest, hostVersion, platform);
-        if (!compat.ok) return syncPhase(id, "failed", { phase: "compat", message: compat.reason });
-        const def = CORDIS_BUILTIN_BY_ID[id];
-        if (!def) {
-          return syncPhase(id, "failed", { phase: "manifest", message: "实现随应用编译但缺少对应实现定义" });
-        }
-        const result = await mountPlugin(getKernel(), { id, apply: def.apply });
-        return syncPhase(id, result.ok ? "active" : "failed", result.ok ? undefined : result);
+      const def = builtinDefOf(implId);
+      if (def) {
+        // 主机自带代码，无版本/平台承诺可核，直接装载
+        const result = await mountPlugin(getKernel(), { id: rowId, apply: def.apply });
+        return syncPhase(rowId, result.ok ? "active" : "failed", result.ok ? undefined : result);
       }
-      // 磁盘包行：实现来自外部，宿主版本未知 = 无法核对清单的版本承诺，一律不挂载；
+      // 磁盘包实现：宿主版本未知 = 无法核对清单的版本承诺，一律不挂载；
       // 清单无效（toInstalled 已诊断）保持原失败态，不进入执行。
-      if (plugin.failure?.phase === "manifest") return;
-      if (hostVersion === null) {
-        return syncPhase(id, "failed", { phase: "compat", message: "无法读取宿主版本，无法核对版本兼容性" });
+      const impl = get().plugins[implId];
+      if (!impl) {
+        return syncPhase(rowId, "failed", { phase: "manifest", message: `实现「${implId}」不存在` });
       }
-      const compat = pluginCompatibleWithHost(plugin.manifest, hostVersion, platform);
-      if (!compat.ok) return syncPhase(id, "failed", { phase: "compat", message: compat.reason });
+      if (impl.installDir === "") {
+        return syncPhase(rowId, "failed", { phase: "manifest", message: "实现随应用编译但缺少对应实现定义" });
+      }
+      if (impl.failure?.phase === "manifest") return;
+      if (hostVersion === null) {
+        return syncPhase(rowId, "failed", { phase: "compat", message: "无法读取宿主版本，无法核对版本兼容性" });
+      }
+      const compat = pluginCompatibleWithHost(impl.manifest, hostVersion, platform);
+      if (!compat.ok) return syncPhase(rowId, "failed", { phase: "compat", message: compat.reason });
       // 入口优先级：宿主产出的打包产物 → 清单 main。两者都没有 = 声明式插件（如纯 theme）：
-      // 置 active 即可（主题提供者经清单消费）。
-      const entry = plugin.entry ?? plugin.manifest.main;
-      if (!entry) return syncPhase(id, "active");
-      const result = await mountPluginFromPackage(getKernel(), id, entry);
-      return syncPhase(id, result.ok ? "active" : "failed", result.ok ? undefined : result);
+      // 置 active 即可（主题提供者经清单消费）。入口按实现提供者定位，挂载归属仍记在行 id。
+      const entry = impl.entry ?? impl.manifest.main;
+      if (!entry) return syncPhase(rowId, "active");
+      const result = await mountPluginFromPackage(getKernel(), rowId, entry, impl.id);
+      return syncPhase(rowId, result.ok ? "active" : "failed", result.ok ? undefined : result);
     } catch (e) {
       // 宿主侧意外错误（内核未就绪等）：归入激活阶段，避免行卡在 pending。
-      syncPhase(id, "failed", { phase: "apply", message: errText(e) });
+      syncPhase(rowId, "failed", { phase: "apply", message: errText(e) });
     }
   };
 
@@ -714,12 +761,84 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
   const runVersionOpTracked = async (op: () => Promise<unknown>, label: string): Promise<void> =>
     runTracked(() => runVersionOp(op, label));
 
-  /** 装配顺序：默认组合成员在前，其余按 id 追加（行有落位目录 → 磁盘入口，否则编译实现）。 */
-  const mountIds = (): string[] =>
-    mountOrder(composePlugins(DEFAULT_COMPOSITION, compositionPackages(get().plugins)));
+  /** 组合行列表：默认组合成员在前，其余已装行按 id 追加。 */
+  const compositionRows = (): CompositionRow[] =>
+    composePlugins(DEFAULT_COMPOSITION, compositionPackages(get().plugins));
+
+  /** 实现是否可挂载：命中随应用编译的实现，或插件已装 + 已启用 + 清单有效 + 有入口。
+   *  停用或清单无效的提供者不可用 ⇒ 接管失效回退本行默认实现（「停用提供者」就是接管的开关）。 */
+  const compositionImplUsable = (implId: string): boolean => {
+    if (builtinDefOf(implId)) return true;
+    const p = get().plugins[implId];
+    if (!p || !p.enabled || p.failure?.phase === "manifest") return false;
+    return Boolean(p.installDir !== "" && (p.entry ?? p.manifest.main));
+  };
+
+  /** 已生效的接管声明：只收已启用的插件（停用/卸载即声明失效）。 */
+  const activeCompositionDeclarations = (): ActiveCompositionDeclaration[] => {
+    const out: ActiveCompositionDeclaration[] = [];
+    for (const p of Object.values(get().plugins)) {
+      if (!p.enabled) continue;
+      for (const decl of p.manifest.compositionPatch ?? []) out.push({ ...decl, pluginId: p.id });
+    }
+    return out;
+  };
+
+  /** 读组合接管用户层（global.json）。读失败按空表并可见提示——读不到时不能静默按「已钉住」装配。 */
+  const readCompositionPatches = async (): Promise<CompositionUserPatches> => {
+    try {
+      const { config, corruptBackup } = await readGlobalConfig();
+      if (corruptBackup) {
+        useNotificationStore.getState().notify({
+          level: "error",
+          message: compositionCorruptMessage(corruptBackup),
+        });
+      }
+      return sanitizeCompositionPatches(config.compositionPatches);
+    } catch (e) {
+      console.error("读取组合接管配置失败", e);
+      useNotificationStore.getState().notify({
+        level: "error",
+        message: `组合接管配置读取失败，本次按默认组合装配：${errText(e)}`,
+      });
+      return {};
+    }
+  };
+
+  /** 组合裁决：逐行定实现来源并给出装配计划。 */
+  const resolveCompositionNow = (userPatches: CompositionUserPatches): CompositionResolution =>
+    resolveComposition({
+      rows: compositionRows(),
+      declarations: activeCompositionDeclarations(),
+      userPatches,
+      implUsable: compositionImplUsable,
+    });
+
+  /**
+   * 按最新裁决把运行时对齐到装配计划：撤掉计划外或实现已变的行，拉起缺失或实现已变的行，
+   * 其余插件运行时不重建（启停一个插件不该连带重启全部插件与其托管进程）。
+   * 尚无装配计划（本次启动还没装载过）= 交全量 load 处理。
+   */
+  const syncCompositionMounts = async (): Promise<void> => {
+    if (!get().composition) return get().load();
+    const previous = new Map(get().composition!.mounts.map((m) => [m.rowId, m.implId]));
+    const resolution = resolveCompositionNow(get().compositionPatches);
+    set({ composition: resolution });
+    const next = new Map(resolution.mounts.map((m) => [m.rowId, m.implId]));
+    const hostVersion = await getAppVersion().catch(() => null);
+    const platform = detectPlatform();
+    for (const [rowId, implId] of previous) {
+      if (next.get(rowId) !== implId) await stopPlugin(rowId);
+    }
+    for (const [rowId, implId] of next) {
+      if (previous.get(rowId) === implId) continue;
+      await spawn(rowId, implId, { hostVersion, platform });
+    }
+  };
 
   const performLoad = async (reason?: PluginLoadReason): Promise<void> => {
     ensurePluginChangeListener();
+    ensureCompositionListener();
     setAppPageOpener((pageId) => useAppStore.getState().openPluginPage(pageId));
     getKernel();
     ensureVaultWriteAccess();
@@ -747,6 +866,7 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
     }
     const plugins: Record<string, InstalledPlugin> = {};
     for (const row of rows) plugins[row.id] = toInstalled(row);
+    const userPatches = await readCompositionPatches();
     // 切仓库保活：仅此原因豁免——声明保活的健康启用行且当前真实挂载的插件，清场/重挂/收尾全部跳过，
     // 运行时、UI 贡献与托管进程原地保留（行 phase 直接置 active，运行时未动）。停用/卸载/更新/
     // 安装等其余重载原因不豁免：插件行状态可能已变，全量重建才是对那些场景的正确响应。
@@ -754,23 +874,26 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
       reason === "vault-switch" ? collectKeepMounted(plugins, mountedPluginIds(getKernel())) : new Set<string>();
     for (const id of keepMounted) plugins[id] = { ...plugins[id], phase: "active" };
     await unmountAll(getKernel(), keepMounted);
-    set({ plugins, initialized: true, stateError: stateError ?? null });
+    set({ plugins, initialized: true, stateError: stateError ?? null, compositionPatches: userPatches });
     if (stateError) {
       useNotificationStore.getState().notify({ level: "error", message: stateError });
     }
     set((s) => ({ uiRevision: s.uiRevision + 1 }));
-    const mounts = mountIds();
+    // 裁决在行集合落定之后算（实现可用性要读行状态）；装配计划按行序，被引用为实现的插件行不独立装配。
+    const resolution = resolveCompositionNow(userPatches);
+    set({ composition: resolution });
+    const mounts = resolution.mounts;
     const total = mounts.length;
     const platform = detectPlatform();
     for (let i = 0; i < mounts.length; i++) {
-      const id = mounts[i];
-      if (keepMounted.has(id)) continue;
+      const { rowId, implId } = mounts[i];
+      if (keepMounted.has(rowId)) continue;
       if (useAppStore.getState().entryLoading) {
         useAppStore.getState().reportLoad(
-          `加载插件：${get().plugins[id]?.manifest.name ?? id}（${i + 1}/${total}）`,
+          `加载插件：${get().plugins[rowId]?.manifest.name ?? rowId}（${i + 1}/${total}）`,
         );
       }
-      await spawn(id, { hostVersion, platform });
+      await spawn(rowId, implId, { hostVersion, platform });
     }
     // 收尾：结束「已不在挂载集里」的插件的进程。登记表按内核隔离，所以这里兜住的是两类
     // 本窗口 unmountAll 覆盖不到的残留：插件被别的窗口停用/卸载（进程仍记在本窗口），以及
@@ -804,6 +927,8 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
     stateError: null,
     uiRevision: 0,
     slotRevisions: {},
+    compositionPatches: {},
+    composition: null,
     marketItems: [],
     marketLoading: false,
     marketError: "",
@@ -860,36 +985,20 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
       const p = get().plugins[id];
       if (!p) return;
       // Rust 先行（含守恒校验等拒绝路径）：失败抛错时本地运行时保持完好、状态一致；
-      // 成功后再终止运行时与贡献、删除 store 行（默认组合成员卸载后仍在列表中成灰行）。
+      // 成功后全量重建（默认组合成员卸载后仍在列表中成灰行）——卸载会同时撤掉它的接管声明
+      // 与它作为实现提供者的可用性，别的行可能正跑着它的代码，必须重新裁决。
       await pluginUninstall(id, keepData);
-      await stopPlugin(id);
-      set((s) => {
-        const plugins = { ...s.plugins };
-        delete plugins[id];
-        return { plugins };
-      });
+      await get().load();
     },
 
     setEnabled: async (id, enabled) => {
       const p = get().plugins[id];
       if (!p || p.enabled === enabled) return;
       await pluginSetEnabled(id, enabled);
-      if (enabled) {
-        set((s) => ({
-          plugins: { ...s.plugins, [id]: { ...s.plugins[id], enabled } },
-        }));
-        await spawn(id);
-      } else {
-        await stopPlugin(id);
-        // 复位运行阶段（运行时已移除，store 残留的 active 是过期状态）。
-        set((s) => {
-          const cur = s.plugins[id];
-          if (!cur) return s;
-          return {
-            plugins: { ...s.plugins, [id]: { ...cur, enabled: false, phase: "pending", failure: undefined } },
-          };
-        });
-      }
+      set((s) => ({ plugins: { ...s.plugins, [id]: { ...s.plugins[id], enabled } } }));
+      // 启停会改变组合裁决的两侧（该插件的接管声明、以及它作为实现提供者的可用性），
+      // 故按新裁决对齐装配计划；只重挂受影响的那些行，别的插件运行时与托管进程不动。
+      await syncCompositionMounts();
     },
 
     update: async (id) => {
@@ -949,10 +1058,16 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
         // 行状态为准——Rust 返回的是打包期间点到的快照），再重新挂载；
         // 挂载失败由 spawn 落失败态，不再上抛。
         set((s) => ({ plugins: { ...s.plugins, [id]: { ...toInstalled(rebuilt), enabled: true } } }));
-        await spawn(id);
+        // 重打包后清单可能变了（新增/撤销接管声明）⇒ 重算裁决并按计划重挂受影响的行；
+        // 本插件自己的行若仍独立装配也在计划里，其余插件运行时不动。
+        const previous = new Map((get().composition?.mounts ?? []).map((m) => [m.rowId, m.implId]));
+        await syncCompositionMounts();
+        const affected = new Set<string>();
+        for (const [rowId, implId] of previous) if (implId === id) affected.add(rowId);
+        for (const m of get().composition?.mounts ?? []) if (m.implId === id) affected.add(m.rowId);
         // 挂载失败如实上抛（行上已有分段诊断）：新代码没跑起来就不算重载成功。
-        const mounted = get().plugins[id];
-        if (mounted?.phase === "failed") {
+        const mounted = [...affected].map((rowId) => get().plugins[rowId]).find((p) => p?.phase === "failed");
+        if (mounted) {
           throw new Error(mounted.failure?.message ?? "重载后挂载失败");
         }
       });
@@ -976,7 +1091,14 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
     pluginViewKinds: () => {
       // 已挂载的视图槽（启用中的行；停用/卸载随 fiber 撤销自动消失）。
       // 独立窗口专用视图（standaloneOnly）不进「添加面板」菜单，窗口形态由插件自定。
-      return slotDockableViewKinds();
+      // 顺序按**组合行位置**排（行内保持槽注册顺序）：入口图只由贡献与组合决定，
+      // 不随异步注册的到达时间漂移；某行被接管后，它的视图随之落到接管行的位置。
+      const orderOf = new Map(compositionRows().map((row, index) => [row.id, index]));
+      const rank = (kind: string): number => {
+        const provider = resolveViewKind(kind)?.pluginId;
+        return provider === undefined ? UNRANKED_ROW : (orderOf.get(provider) ?? UNRANKED_ROW);
+      };
+      return orderViewKindsByRow(slotDockableViewKinds(), rank);
     },
     viewContribution: (kind) => {
       // 分派 = slots（统一视图槽注册表）。
@@ -995,18 +1117,6 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
           pluginId: slot.pluginId,
         };
         slotViewCache.set(slot, cached);
-      }
-      return cached;
-    },
-    shellContribution: () => {
-      // shell 槽胜出者（single；停用/卸载随 fiber 撤销自动消失，回退默认界面）。
-      // 缓存口径同 viewContribution：selector 订阅需稳定引用。
-      const slot = resolveSlot("shell") as SlotContribution<UiSlotPayload> | undefined;
-      if (!slot) return undefined;
-      let cached = slotShellCache.get(slot);
-      if (!cached) {
-        cached = { component: slot.payload.component, pluginId: slot.pluginId };
-        slotShellCache.set(slot, cached);
       }
       return cached;
     },
@@ -1085,6 +1195,25 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
     restoreDefaultComposition: async () => {
       const hostVersion = await getAppVersion().catch(() => null);
       await pluginSeedDefault(defaultManifests(hostVersion));
+      await get().load();
+    },
+
+    setCompositionImpl: async (rowId, impl) => {
+      // 现读最新表再改：内存镜像可能滞后于另一个窗口的写入，用旧镜像整表提交会把别人的改动抹掉。
+      // 读失败原样上抛（不按空表写回——那会连带清掉别的行）。
+      const { config, corruptBackup } = await readGlobalConfig();
+      const next = sanitizeCompositionPatches(config.compositionPatches);
+      if (impl) next[rowId] = impl;
+      else delete next[rowId];
+      await updateGlobalConfig({ compositionPatches: Object.keys(next).length ? next : null });
+      if (corruptBackup) {
+        useNotificationStore.getState().notify({
+          level: "error",
+          message: compositionCorruptMessage(corruptBackup),
+        });
+      }
+      // 先广播（其他窗口按新表重载），再本窗口重载（改动方负责把自己对齐到真源）
+      await emitCompositionChanged().catch(() => undefined);
       await get().load();
     },
   };

@@ -115,9 +115,6 @@ describe("声明表 ↔ 宿主渲染点守卫", () => {
         /<SlotListMount[^>]*\bslot=\{/,
       );
       expect(text, `${file}：菜单宿主须写字面量 target`).not.toMatch(/<MenuSlotList[^>]*\btarget=\{/);
-      expect(text, `${file}：新增 single 槽宿主须先在声明表登记为 single 并更新本守卫`).not.toMatch(
-        /<SlotMount[^>]*\bslot=/,
-      );
     }
     // 双向：宿主渲染点都有声明（缺声明 = 注册静默丢失），声明都有渲染点（多声明 = 注册成功却不显示）。
     // single 固定槽不在此列：宿主承载组件非 SlotListMount，由下方专用守卫逐槽登记。
@@ -132,16 +129,30 @@ describe("声明表 ↔ 宿主渲染点守卫", () => {
     expect([...menuTargets].sort()).toEqual([...declaredMenus].sort());
   });
 
-  it("single 固定槽（shell）宿主承载存在", () => {
-    // shell 槽宿主 = App.tsx 的 ShellSlotMount（读 shellContribution 分派胜出者）。
+  it("single 固定槽宿主承载存在（每个 single 固定槽都有字面量渲染点）", () => {
     // 声明在而承载缺失 = 注册成功却不渲染；承载在而声明缺失 = 注册即失败——此处把双向钉死在声明表。
     const root = fileURLToPath(new URL("../..", import.meta.url));
-    const text = readFileSync(join(root, "src", "App.tsx"), "utf8");
-    expect(text).toMatch(/shellContribution\(\)/);
+    const rendered = new Set<string>();
+    for (const file of sourceFiles(join(root, "src"))) {
+      const text = readFileSync(file, "utf8");
+      for (const m of text.matchAll(/<SlotReplaceMount[^>]*\bslot="([^"]+)"/g)) if (m[1]) rendered.add(m[1]);
+      // 承载组件自身（SlotHost）按参数分派槽名——只允许 EmptyStateMount 这一处派生，
+      // 新增动态用法须先改成字面量（动态槽名会绕过声明表守卫）
+      if (file.endsWith(join("plugins", "SlotHost.tsx"))) {
+        expect(
+          [...text.matchAll(/<SlotReplaceMount[^>]*\bslot=\{/g)].length,
+          "SlotHost 内只允许 EmptyStateMount 一处动态槽名",
+        ).toBe(1);
+        continue;
+      }
+      expect(text, `${file}：single 槽宿主须写字面量槽名，动态槽名会绕过声明表守卫`).not.toMatch(
+        /<SlotReplaceMount[^>]*\bslot=\{/,
+      );
+    }
     const singles = SLOT_DECLARATIONS.filter(
       (d) => !d.prefix && !d.key.startsWith("contextmenu/") && d.cardinality === "single",
     ).map((d) => d.key);
-    expect(singles).toEqual(["shell"]);
+    expect([...rendered].sort()).toEqual([...singles].sort());
   });
 });
 

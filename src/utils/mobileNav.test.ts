@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { MOBILE_NAV_DEFAULT_ORDER, orderMobileViews, swapInOrder } from "./mobileNav";
 
 describe("orderMobileViews", () => {
-  it("无保存序时按内建常用序在前、其余按 id 追加", () => {
+  it("无保存序时按内建常用序在前，其余保持入参顺序（= 组合行顺序）", () => {
     const kinds = ["table", "canvas", "note", "recent", "files"];
     expect(orderMobileViews(kinds, [])).toEqual(["recent", "note", "files", "table", "canvas"]);
   });
@@ -25,8 +25,8 @@ describe("orderMobileViews", () => {
     expect([...orderMobileViews(kinds, ["c", "c", "x"])].sort()).toEqual([...kinds].sort());
   });
 
-  it("缺省顺序里的视图全部不可用时，退化为可用集合本身", () => {
-    expect(orderMobileViews(["plugin.b", "plugin.a"], [])).toEqual(["plugin.a", "plugin.b"]);
+  it("缺省顺序里的视图全部不可用时，退化为可用集合本身（保持入参顺序）", () => {
+    expect(orderMobileViews(["plugin.b", "plugin.a"], [])).toEqual(["plugin.b", "plugin.a"]);
     // 缺省序常量与实现同源，避免两处各写一份
     expect(MOBILE_NAV_DEFAULT_ORDER.length).toBeGreaterThan(0);
   });

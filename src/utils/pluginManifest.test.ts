@@ -259,6 +259,46 @@ describe("validatePluginManifest", () => {
       }).ok,
     ).toBe(false);
   });
+  it("compositionPatch 归一化：合法声明保留（含 priority），缺省不出现", () => {
+    const declared = validatePluginManifest({
+      ...validManifest(),
+      atelyx: {
+        ...(validManifest().atelyx as Record<string, unknown>),
+        compositionPatch: [{ target: "builtin.chatcore", priority: 10 }],
+      },
+    });
+    expect(declared.ok).toBe(true);
+    if (!declared.ok) return;
+    expect(declared.manifest.compositionPatch).toEqual([{ target: "builtin.chatcore", priority: 10 }]);
+
+    const absent = validatePluginManifest(validManifest());
+    expect(absent.ok).toBe(true);
+    if (!absent.ok) return;
+    expect(absent.manifest.compositionPatch).toBeUndefined();
+  });
+
+  it("compositionPatch 畸形拒绝：非数组 / 项非对象 / target 非法 / 重复目标 / 接管自身行 / priority 非有限数", () => {
+    const withPatch = (compositionPatch: unknown) => ({
+      ...validManifest(),
+      atelyx: { ...(validManifest().atelyx as Record<string, unknown>), compositionPatch },
+    });
+    expect(validatePluginManifest(withPatch({ target: "builtin.note" })).ok).toBe(false);
+    expect(validatePluginManifest(withPatch(["builtin.note"])).ok).toBe(false);
+    expect(validatePluginManifest(withPatch([{ target: "builtin" }])).ok).toBe(false);
+    expect(
+      validatePluginManifest(withPatch([{ target: "builtin.note" }, { target: "builtin.note" }])).ok,
+    ).toBe(false);
+    // 接管自身行是空操作（作者多半写错了目标），响亮拒绝而不是静默生效
+    expect(validatePluginManifest(withPatch([{ target: "com.example.todo" }])).ok).toBe(false);
+    // 一个插件接管多行会让同一份代码按行各装一份（槽位与能力重复注册），拒绝
+    expect(
+      validatePluginManifest(
+        withPatch([{ target: "builtin.chatcore" }, { target: "builtin.note" }]),
+      ).ok,
+    ).toBe(false);
+    expect(validatePluginManifest(withPatch([{ target: "builtin.note", priority: "高" }])).ok).toBe(false);
+  });
+
   it("保留 platforms/hostApiVersion", () => {
     const result = validatePluginManifest({
       ...validManifest(),

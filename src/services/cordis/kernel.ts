@@ -80,6 +80,7 @@ import { platformCapabilities } from "@/services/platform";
 import { createHistoryService } from "./history";
 import { createLayoutService } from "./layout";
 import { createUiStateService } from "./uiState";
+import { createChatService } from "./chat";
 import { createUiService } from "./uiFloating";
 import { createMarkdownService } from "./markdown";
 import { installEventIsolation, setKernelRef } from "./events";
@@ -837,6 +838,11 @@ export function createKernel(): Kernel {
   provide("history", createHistoryService());
   provide("layout", createLayoutService());
   provide("uiState", createUiStateService());
+
+  // AI 对话能力（内核提供）：编排半挂「对话核心」行注册的运行时、容器半挂对话面板接线。
+  // 由内核提供而非某一插件行提供——运行时提供者是可被替换的（组合接管），
+  // 服务本身随提供者消失会让消费方拿到「服务不存在」而不是可降级的「能力未就绪」。
+  provide("chat", createChatService());
 
   // 插件浮层承载（ctx.ui，内核平台能力）：定位/层级/收起语义由宿主代管，登记随调用方 fiber 撤销。
   provide("ui", createUiService());

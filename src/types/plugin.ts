@@ -6,6 +6,7 @@
  * 未知的字段、类型、附加分类一律跳过而不报错（主分类错误则拒绝，见 utils/pluginManifest）。
  */
 import type { TableField, TableRow } from "./table";
+import type { CompositionPatchDeclaration } from "./composition";
 
 /** 插件展示分类：type 只做市场展示/过滤，实际能力在运行时经 apply 注册（一个插件可属多类）。
  *  新增分类不破坏旧 App：旧 App 遇到未知 type 会在市场/安装时安全跳过。 */
@@ -101,6 +102,9 @@ export interface PluginManifest {
    *  UI 贡献与托管进程原地保留，apply 不重跑（仓库感知走 vault:switch 事件）。
    *  停用 / 卸载 / 更新 / 跨窗口变化仍正常重建并结束进程。 */
   keepMountedOnVaultSwitch?: boolean;
+  /** 组合接管声明（`atelyx.compositionPatch`）：本插件接管列出的组合行——装配时那些行的位置
+   *  改跑本插件实现，行 id 与状态归属不变。用户层（global.json）可钉住或改回默认。 */
+  compositionPatch?: CompositionPatchDeclaration[];
   /** 声明式主题条目（type 含 theme 时通常携带；必须 ≥1；id 插件内唯一）。 */
   themes?: ThemeDefinition[];
   /** 全局热键声明（OS 级热键的静态披露：设置页展示与改键的数据源）。 */

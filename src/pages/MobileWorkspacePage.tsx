@@ -43,7 +43,7 @@ const MOBILE_HOST_ID = "mobile";
 /** 退出确认窗口：顶层第一次按返回提示，窗口内第二次才真正退出。 */
 const EXIT_CONFIRM_MS = 2000;
 
-/** 当前可用视图标签：顺序取应用级偏好（设置 → 通用可调；缺省 = 内建常用序），插件视图按 id 追加在后。 */
+/** 当前可用视图标签：顺序取应用级偏好（设置 → 通用可调；缺省 = 内建常用序），其余视图保持入参顺序（= 组合行顺序，见 pluginViewKinds）。 */
 function buildTabs(): MobileNavItem[] {
   const kinds = usePluginStore.getState().pluginViewKinds();
   const ordered = orderMobileViews(kinds, useSettingsStore.getState().mobileNavOrder);

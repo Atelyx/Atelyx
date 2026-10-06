@@ -1,8 +1,8 @@
 /**
  * 内核独立启动验证：无任何插件挂载时内核可启动。
  *
- * 断言：平台服务（含内核领域服务与 ctx.slots）就绪，而插件提供的领域服务（canvas/table/note/chat）
- * 缺席——内核不靠领域代码也能跑；再挂一个最小插件（只注册 UI 槽 + ctx.effect）验证贡献随卸载零残留。
+ * 断言：平台服务（含内核领域服务 ctx.chat/history/layout/uiState 与 ctx.slots）就绪，而插件提供的
+ * 领域服务（canvas/table/note）缺席——内核不靠领域代码也能跑；再挂一个最小插件（只注册 UI 槽 + ctx.effect）验证贡献随卸载零残留。
  * 与 kernelBoundary.test.ts 互补：那条守静态导入边界，这条守运行时行为边界。
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -51,7 +51,9 @@ describe("内核独立启动（零插件）", () => {
     ]) {
       expect(ctx.get(name as never), name).toBeDefined();
     }
-    for (const name of ["canvas", "table", "note", "chat"]) {
+    // ctx.chat 由内核提供（对话运行时可缺席，服务本身恒在）
+    expect(ctx.get("chat" as never)).toBeDefined();
+    for (const name of ["canvas", "table", "note"]) {
       expect(ctx.get(name as never), name).toBeUndefined();
     }
     dispose();

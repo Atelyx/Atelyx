@@ -331,6 +331,9 @@ export interface GlobalConfig {
   commandShortcuts?: Record<string, string>;
   /** 全局快捷键的用户覆盖（`插件id:声明id` → OS accelerator 串；缺省 = 用声明默认键）。 */
   globalShortcuts?: Record<string, string>;
+  /** 组合接管的用户层（组合行 id → 实现 id；`"default"` = 该行自身默认实现）。
+   *  用户层恒胜插件清单声明（即「钉住」），删除键 = 解除钉住。取值见 types/composition。 */
+  compositionPatches?: Record<string, string>;
 }
 
 /** `read_global_config` 的返回：全局配置 + 损坏备份文件名（null = 正常读取）。 */

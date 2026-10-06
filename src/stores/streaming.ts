@@ -118,6 +118,30 @@ export async function runStreamExchange(
   // 任一节流窗口发过「生成中」overlay：收尾兜底据此补发一次纯 allRuns，让调用方剪除残留合成行
   let pendingRunsEmitted = false;
 
+  /**
+   * 工具行终态归一（收尾唯一入口，幂等）：补发一次纯 allRuns 让调用方剪除合成行，
+   * 再把仍在 running 的行落到终态（任何原因下 UI 都不会永久转圈）。
+   * 正常路径在 onDone 之前调用（让收尾方拿到已归一的 steps），异常路径由 finally 兜底。
+   */
+  let toolRunsSettled = false;
+  const settleToolRuns = (): void => {
+    if (toolRunsSettled) return;
+    toolRunsSettled = true;
+    if (pendingRunsEmitted) {
+      options.onToolRuns?.([...allRuns]);
+    }
+    // 仅在确有 running 残留时才发（正常路径已全部 done，不 re-emit，避免误标已完成工具）
+    if (allRuns.some((r) => r.status === "running")) {
+      options.onToolRuns?.(
+        allRuns.map((run) =>
+          run.status === "running"
+            ? { ...run, status: "error" as const, resultSummary: "（结果未回填）" }
+            : run,
+        ),
+      );
+    }
+  };
+
   // 收尾兜底：把残留的「生成中」槽位固化为 error 行并入 allRuns（中止路径未经执行轮固化、
   // 无真实行替换；截断路径槽位已由 onToolCalls 清空，此处幂等 no-op）——防 UI 残留转圈行
   const settlePendingArgs = () => {
@@ -405,6 +429,9 @@ export async function runStreamExchange(
     cancelScheduled();
     clearIdle();
     flushPending();
+    // 工具行终态归一必须在 onDone **之前**：onDone 的接收方（对话核心）据此固化 steps，
+    // 归一放在它之后就等于把剪除/归一前的快照写进最终结果（残留合成行、running 行重现有）
+    settleToolRuns();
     options.onDone({
       content: totalContent,
       reasoning: totalReasoning,
@@ -418,22 +445,8 @@ export async function runStreamExchange(
     options.onError(e as Error);
   } finally {
     settlePendingArgs();
-    // 「生成中」overlay 兜底：发过就补一次纯 allRuns——调用方 mergeToolRuns 剪除不在列表中的
-    // 合成行（中止/出错/参数残缺路径统一收敛，不残留永久转圈行）
-    if (pendingRunsEmitted) {
-      options.onToolRuns?.([...allRuns]);
-    }
-    // 收尾兜底：任何原因（异常/结果缺失）下仍在 running 的工具行归一到终态，保证 UI 不会永久转圈。
-    // 仅在确有 running 残留时才发（正常路径已全部 done，不 re-emit，避免误标已完成工具）
-    if (allRuns.some((r) => r.status === "running")) {
-      options.onToolRuns?.(
-        allRuns.map((run) =>
-          run.status === "running"
-            ? { ...run, status: "error" as const, resultSummary: "（结果未回填）" }
-            : run,
-        ),
-      );
-    }
+    // 异常路径的兜底（正常路径已在 onDone 前归一）：同一函数幂等，调用两次不重复发
+    settleToolRuns();
   }
 }
 

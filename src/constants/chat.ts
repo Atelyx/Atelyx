@@ -20,3 +20,7 @@ export const PENDING_RUN_ID_PREFIX = "pending:";
 
 /** 对话能力不可用时的提示（对话核心插件停用时，面板占位与发送守卫共用同一文案）。 */
 export const CHAT_UNAVAILABLE_TEXT = "AI 对话能力未启用：请到 设置 → 插件 启用「AI 对话核心」";
+
+/** 工具调用被拦截面拒绝时的工具结果文案。必须回一条 tool 消息：模型发出的 tool_calls 缺应答会让
+ *  下一轮请求结构不合法（多数端点直接 400）。 */
+export const TOOL_VETO_TEXT = "工具调用被插件拒绝";

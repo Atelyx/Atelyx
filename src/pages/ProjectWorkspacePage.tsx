@@ -17,7 +17,7 @@ import { LayoutTabs } from "@/components/layout/LayoutTabs";
 import { SceneSwitcher } from "@/components/layout/SceneSwitcher";
 import { WorkspaceGrid } from "@/components/layout/WorkspaceGrid";
 import { WorkspaceStatusBar } from "@/components/layout/WorkspaceStatusBar";
-import { SlotListMount } from "@/components/plugins/SlotHost";
+import { SlotListMount, SlotReplaceMount } from "@/components/plugins/SlotHost";
 import { useWorkspaceFileEffects } from "@/hooks/useWorkspaceFileEffects";
 import { resolveEntryScene } from "@/utils/workspaceLayout";
 
@@ -83,55 +83,58 @@ export function ProjectWorkspacePage() {
     // 不画底色：与 html/body 的底色同值，重画只会让半透明皮肤（极光）多叠一层、氛围底透不上来
     <div className="h-full w-full flex flex-col">
       <div className="flex-1 flex flex-col min-h-0">
-        {/* 标题栏横条：仓库名 + 布局 tabs → 右操作区（设置/全屏/窗口控制，常驻） */}
-        <div
-          className="h-9 flex items-center gap-1 pl-1 pr-1 flex-shrink-0 select-none"
-          style={{ background: "var(--bg-secondary)", borderBottom: "1px solid var(--border)" }}
-          data-tauri-drag-region
-        >
-          <LayoutTabs />
+        {/* 标题栏横条（默认实现）：仓库名 + 布局 tabs → 右操作区（设置/全屏/窗口控制，常驻）。
+            插件可经 shell/titlebar 单槽整条替换（胜出者自担拖拽区与窗口控制）。 */}
+        <SlotReplaceMount slot="shell/titlebar">
+          <div
+            className="h-9 flex items-center gap-1 pl-1 pr-1 flex-shrink-0 select-none"
+            style={{ background: "var(--bg-secondary)", borderBottom: "1px solid var(--border)" }}
+            data-tauri-drag-region
+          >
+            <LayoutTabs />
 
-            {/* 右操作区（常驻）：场景切换 + 设置 + 全屏（ml-auto 贴右缘，窗口控制在其后）。
-                设置是核心应用入口，恒宿主渲染、不随插件启停消失；外部插件经 titlebar/right 槽并列贡献 */}
-            <div className="ml-auto flex-shrink-0 flex items-center" data-tauri-drag-region>
-              {/* 插件贡献区：标题栏右操作区（list 槽，priority 降序；容器避让窗口拖拽） */}
-              <span data-tauri-drag-region="false" className="flex items-center">
-                <SlotListMount slot="titlebar/right" />
-              </span>
-              <SceneSwitcher />
-              <IconButton
-                onClick={(e) => {
-                  e.stopPropagation();
-                  if (settingsView) closeSettings();
-                  else openSettings();
-                }}
-                // 设置页打开时按钮保持激活态（与左栏布局 tab 同一口径），再点一次回工作区
-                style={{
-                  color: settingsView ? "var(--accent)" : "var(--text-secondary)",
-                  background: settingsView ? "var(--accent-soft)" : undefined,
-                }}
-                variant="ghost"
-                size="lg"
-                icon={<Settings size={16} />}
-                label="设置"
-                aria-pressed={!!settingsView}
-                data-tauri-drag-region="false"
-              />
-              <IconButton
-                onClick={(e) => { e.stopPropagation(); handleToggleFullscreen(); }}
-                variant="ghost"
-                size="lg"
-                icon={<Maximize size={16} />}
-                label="全屏"
-                data-tauri-drag-region="false"
+              {/* 右操作区（常驻）：场景切换 + 设置 + 全屏（ml-auto 贴右缘，窗口控制在其后）。
+                  设置是核心应用入口，恒宿主渲染、不随插件启停消失；外部插件经 titlebar/right 槽并列贡献 */}
+              <div className="ml-auto flex-shrink-0 flex items-center" data-tauri-drag-region>
+                {/* 插件贡献区：标题栏右操作区（list 槽，priority 降序；容器避让窗口拖拽） */}
+                <span data-tauri-drag-region="false" className="flex items-center">
+                  <SlotListMount slot="titlebar/right" />
+                </span>
+                <SceneSwitcher />
+                <IconButton
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (settingsView) closeSettings();
+                    else openSettings();
+                  }}
+                  // 设置页打开时按钮保持激活态（与左栏布局 tab 同一口径），再点一次回工作区
+                  style={{
+                    color: settingsView ? "var(--accent)" : "var(--text-secondary)",
+                    background: settingsView ? "var(--accent-soft)" : undefined,
+                  }}
+                  variant="ghost"
+                  size="lg"
+                  icon={<Settings size={16} />}
+                  label="设置"
+                  aria-pressed={!!settingsView}
+                  data-tauri-drag-region="false"
+                />
+                <IconButton
+                  onClick={(e) => { e.stopPropagation(); handleToggleFullscreen(); }}
+                  variant="ghost"
+                  size="lg"
+                  icon={<Maximize size={16} />}
+                  label="全屏"
+                  data-tauri-drag-region="false"
+                />
+              </div>
+              <TitleBarControls
+                onMinimize={() => void minimizeWindow()}
+                onMaximize={() => void toggleMaximizeWindow()}
+                onClose={() => void closeWindow()}
               />
             </div>
-            <TitleBarControls
-              onMinimize={() => void minimizeWindow()}
-              onMaximize={() => void toggleMaximizeWindow()}
-              onClose={() => void closeWindow()}
-            />
-          </div>
+        </SlotReplaceMount>
 
           {/* 内容区：设置页打开时整页顶掉面板网格（像切布局一样），否则渲染激活布局 */}
           <div className="flex-1 min-h-0">
@@ -142,8 +145,10 @@ export function ProjectWorkspacePage() {
             )}
           </div>
 
-          {/* 工作区状态栏：全局/环境信息（只此一处，内容区切换不影响） */}
-          <WorkspaceStatusBar />
+          {/* 工作区状态栏（默认实现）：全局/环境信息（只此一处，内容区切换不影响）；插件可经 shell/statusbar 替换 */}
+          <SlotReplaceMount slot="shell/statusbar">
+            <WorkspaceStatusBar />
+          </SlotReplaceMount>
       </div>
     </div>
   );

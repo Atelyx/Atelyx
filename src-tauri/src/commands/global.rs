@@ -105,6 +105,10 @@ pub struct GlobalConfig {
     /// 全局快捷键的用户覆盖（`插件id:声明id` → OS accelerator 串；缺省 None = 全部用声明默认键）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub global_shortcuts: Option<std::collections::BTreeMap<String, String>>,
+    /// 组合接管的用户层（组合行 id → 实现 id；`"default"` = 该行自身默认实现）。
+    /// 用户层恒胜插件清单声明（即「钉住」），删除键 = 解除钉住。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub composition_patches: Option<std::collections::BTreeMap<String, String>>,
 }
 
 /// `read_global_config` 的返回：全局配置 + 损坏备份文件名（`None` = 正常读取）。

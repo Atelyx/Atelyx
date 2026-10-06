@@ -3,8 +3,8 @@
  *
  * - 列表（单表，装配顺序 = 默认组合成员在前）：每行可启停/重载（本地插件）/更新/卸载，展示来源徽标/版本/运行状态/
  *   分段失败诊断/声明与实际调用审计/命令入口；未安装的默认组合成员成灰行，经「恢复默认装配」装回。
- * - 替换/增强关系由插件自己在 apply 里经 ctx.slots 的 priority / inject 声明（作者侧决定）：
- *   用户侧只需安装 + 启用，不在管理页暴露行序/实现来源等开发者语义。
+ * - 槽位替换（改控件）由插件在 apply 里经 ctx.slots 的 priority 声明（作者侧决定）；行级接管
+ *   （改「这一行由谁装配」）由插件清单声明 + 用户层拍板，治理入口见 CompositionPanel。
  * - 安装入口：市场安装（git clone）之外，支持「从本地文件夹安装」（junction 实时引用）与
  *   「从 Git 地址安装」（git clone）。
  * 分层：本组件只经 pluginStore 触达插件能力（不直连 services）；列表行推导取自 utils/cordis/composition。
@@ -22,6 +22,7 @@ import { MarketplaceSection } from "@/components/plugins/MarketplaceSection";
 import { Input } from "@/components/common/Input";
 import { IconButton } from "@/components/common/Button";
 import { SlotConflictPanel } from "@/components/plugins/SlotConflictPanel";
+import { CompositionPanel } from "@/components/plugins/CompositionPanel";
 import { DEFAULT_COMPOSITION } from "@/components/plugins/cordis/builtins";
 import { deriveThemeProviders, isThemePluginRow } from "@/utils/pluginTheme";
 import { composePlugins, compositionPackages } from "@/utils/cordis/composition";
@@ -212,6 +213,9 @@ export function PluginsSettingsTab() {
           </button>
         </div>
       </div>
+
+      {/* 组合接管裁决：行的实现来源（插件声明 / 用户钉住）；无需裁决时不显示 */}
+      <CompositionPanel />
 
       {/* 槽位冲突裁决：single 槽多贡献由用户定胜者；无冲突行时不显示 */}
       <SlotConflictPanel />

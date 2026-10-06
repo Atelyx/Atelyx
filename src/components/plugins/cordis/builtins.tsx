@@ -59,7 +59,6 @@ import { registerServiceProvider } from "@/services/cordis/services";
 import { createCanvasService } from "@/services/cordis/canvas";
 import { createTableService } from "@/services/cordis/table";
 import { createNoteService } from "@/services/cordis/note";
-import { createChatService } from "@/services/cordis/chat";
 import { createChatRuntime } from "@/stores/chatTurn";
 import { setPluginNoteAccess, setPluginChatPanelAccess } from "@/services/cordis/access";
 import { registerChatRuntime } from "@/utils/chatRuntimeHost";
@@ -363,9 +362,8 @@ export const CORDIS_BUILTIN_DEFS: CordisBuiltinDef[] = [
     name: "AI 对话核心",
     type: "background",
     tagline: "为面板、对话节点与插件提供 AI 对话能力",
-    views: [], // 能力行 = 纯声明式（无视图载荷）：注册对话运行时并提供 ctx.chat，停用即不可用
+    views: [], // 能力行 = 纯声明式（无视图载荷）：注册对话运行时；停用即无运行时（ctx.chat 随之「未就绪」）
     capability: wireChatRuntime,
-    provideService: (ctx) => provideRootService(ctx, "chat", () => createChatService()),
   }),
   def({
     id: "builtin.chatpanel",

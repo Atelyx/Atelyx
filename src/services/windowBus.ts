@@ -79,6 +79,12 @@ export function emitChatSessionsChanged(payload: ChatSessionsChangedPayload): Pr
   return emit("chat-sessions-changed", payload);
 }
 
+/** 广播组合接管用户层已变更（写盘方调用）：接管表决定装配计划，其他窗口据此重载插件运行时，
+ *  否则各窗口会各自跑着不同的实现来源。 */
+export function emitCompositionChanged(): Promise<void> {
+  return emit("composition-changed");
+}
+
 // ---------- listen ----------
 
 export function onPanelLayoutOp(
@@ -102,4 +108,9 @@ export function onChatSessionsChanged(
   handler: (payload: ChatSessionsChangedPayload) => void,
 ): Promise<UnlistenFn> {
   return listen<ChatSessionsChangedPayload>("chat-sessions-changed", (e) => handler(e.payload));
+}
+
+/** 订阅组合接管用户层变更（每个窗口各订一份，收到后重载插件运行时）。 */
+export function onCompositionChanged(handler: () => void): Promise<UnlistenFn> {
+  return listen("composition-changed", () => handler());
 }

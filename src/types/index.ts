@@ -220,6 +220,18 @@ export {
   type SlotConflictRow,
 } from "./plugin";
 
+export {
+  COMPOSITION_IMPL_DEFAULT,
+  type CompositionImplSource,
+  type CompositionUserPatches,
+  type CompositionPatchDeclaration,
+  type CompositionDeclarer,
+  type CompositionBinding,
+  type CompositionUnmatchedDeclaration,
+  type CompositionResolution,
+  type CompositionMount,
+} from "./composition";
+
 export type {
   NoteEditorBinding,
   NoteBodySessionView,

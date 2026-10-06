@@ -56,8 +56,12 @@ const accessStub = (calls: string[]): PluginChatPanelAccess => ({
 });
 
 describe("createChatService", () => {
-  it("对话核心未注册运行时：构造即抛「未就绪」", () => {
-    expect(() => createChatService()).toThrow("AI 对话能力未就绪");
+  it("未注册运行时：构造不抛错（运行时按调用现取），编排方法抛「未就绪」", () => {
+    const service = createChatService();
+    expect(() => service.resolveTarget()).toThrow("AI 对话能力未就绪");
+    expect(() => service.runTurn({} as never)).toThrow("AI 对话能力未就绪");
+    expect(() => service.compact({} as never)).toThrow("AI 对话能力未就绪");
+    expect(() => service.autoName({} as never, "t")).toThrow("AI 对话能力未就绪");
   });
 
   it("编排方法透传运行时；容器方法未接线抛「对话面板能力未就绪」", () => {
@@ -70,6 +74,26 @@ describe("createChatService", () => {
     expect(() => service.openSession("s1")).toThrow("对话面板能力未就绪");
     expect(() => service.createSession({})).toThrow("对话面板能力未就绪");
     expect(() => service.setSessionTitle("s1", "t")).toThrow("对话面板能力未就绪");
+  });
+
+  it("registerRuntime 供给实现：服务面由构造后注册的运行时接管（现取，不快照）", () => {
+    const service = createChatService();
+    registeredOffs.push(service.registerRuntime(runtimeStub()));
+    expect(service.resolveTarget().ok).toBe(true);
+
+    // 提供者被替换（组合接管换行）：后注册者生效，已构造的服务面跟着走
+    let called = "";
+    registeredOffs.push(
+      service.registerRuntime({
+        ...runtimeStub(),
+        resolveTarget: () => {
+          called = "second";
+          return runtimeStub().resolveTarget();
+        },
+      }),
+    );
+    expect(service.resolveTarget().ok).toBe(true);
+    expect(called).toBe("second");
   });
 
   it("容器方法委托注入访问", async () => {

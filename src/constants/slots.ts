@@ -102,6 +102,22 @@ const DECLARATIONS: readonly SlotDeclaration[] = [
     summary: "整体接管主窗口外壳（替换桌面工作区/移动端单栏页；胜出者负责标题栏拖拽区与窗口控制；渲染崩溃自动回退默认界面）。",
     decoratable: false,
   },
+  {
+    key: "shell/titlebar",
+    cardinality: "single",
+    required: COMPONENT_ONLY,
+    scope: "桌面标题栏",
+    summary: "替换桌面标题栏（主窗口与撕裂窗口共用此槽；胜出者自担拖拽区、窗口控制与撕裂窗口的标题文本）；渲染崩溃自动回退默认标题栏。",
+    decoratable: false,
+  },
+  {
+    key: "shell/statusbar",
+    cardinality: "single",
+    required: COMPONENT_ONLY,
+    scope: "桌面状态栏",
+    summary: "替换桌面状态栏；渲染崩溃自动回退默认状态栏。",
+    decoratable: false,
+  },
 
   // ── 开放 kind 槽（前缀放行；插件自定 kind/type）─────────────────────────────
   {

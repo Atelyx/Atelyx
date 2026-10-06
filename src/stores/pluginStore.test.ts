@@ -23,6 +23,15 @@ vi.mock("@/services/plugins", () => ({
 
 vi.mock("@/services/app", () => ({ getAppVersion: vi.fn(async () => "0.0.0") }));
 vi.mock("@/services/dialog", () => ({ pickDirectory: vi.fn() }));
+// 组合接管的用户层读写与跨窗口广播：本文件只验证装配编排，配置层与广播机制各自单测。
+vi.mock("@/services/global", () => ({
+  readGlobalConfig: vi.fn(async () => ({ config: { recentVaults: [] }, corruptBackup: null })),
+  updateGlobalConfig: vi.fn(async () => null),
+}));
+vi.mock("@/services/windowBus", () => ({
+  emitCompositionChanged: vi.fn(async () => {}),
+  onCompositionChanged: vi.fn(async () => () => {}),
+}));
 // 事件发射以替身替代：本文件只验证接线「plugin-msg 入站 → 插件频道订阅注册表投递」，投递本身在 collabHost/kernel 测试覆盖
 vi.mock("@/services/cordis/events", () => ({ emitPluginEvent: vi.fn() }));
 
@@ -64,12 +73,15 @@ import type { PluginRow } from "@/services/plugins";
 import { getAppVersion } from "@/services/app";
 import { pickDirectory } from "@/services/dialog";
 import { mountPluginFromPackage } from "@/services/cordis/packageMount";
+import { registerViewSlot } from "@/services/cordis/slots";
+import { mountPlugin } from "@/services/cordis/loader";
+import { readGlobalConfig, updateGlobalConfig } from "@/services/global";
+import { emitCompositionChanged } from "@/services/windowBus";
 import { killProcessTree } from "@/services/shell";
 import { mountedPluginIds } from "@/services/cordis/loader";
 import { trackPluginProcess } from "@/services/cordis/pluginProcesses";
 import { emitPluginEvent } from "@/services/cordis/events";
 import { dispatchCollabChannel, registerPluginChannel } from "@/utils/collabHost";
-import { registerSlotContrib } from "@/services/cordis/slots";
 import { usePluginStore } from "@/stores/pluginStore";
 import { useNotificationStore } from "@/stores/notificationStore";
 
@@ -86,17 +98,33 @@ function row(over: Partial<InstalledPlugin> & { id: string }): InstalledPlugin {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  usePluginStore.setState({ plugins: {}, initialized: false, stateError: null });
+  usePluginStore.setState({ plugins: {}, initialized: false, stateError: null, compositionPatches: {}, composition: null });
   vi.mocked(pluginList).mockResolvedValue({ rows: [] });
   vi.mocked(mountedPluginIds).mockReturnValue([]);
+  vi.mocked(readGlobalConfig).mockResolvedValue({ config: { recentVaults: [] }, corruptBackup: null });
+  vi.mocked(updateGlobalConfig).mockResolvedValue(null);
+  vi.mocked(emitCompositionChanged).mockResolvedValue(undefined);
   vi.mocked(pluginUpdate).mockReset();
   vi.mocked(pluginRollback).mockReset();
 });
 
 describe("插件行失败诊断", () => {
   it("实现随应用编译但缺实现定义 → 阶段 manifest", async () => {
-    usePluginStore.setState({ plugins: { "com.test.nope": row({ id: "com.test.nope" }) } });
-    await usePluginStore.getState().setEnabled("com.test.nope", true);
+    vi.mocked(pluginList).mockResolvedValue({
+      rows: [
+        {
+          id: "com.test.nope",
+          name: "Nope",
+          version: "1.0.0",
+          type: "panel",
+          installDir: "",
+          sourceKind: "builtin",
+          enabled: true,
+          manifest: { name: "com.test.nope", version: "1.0.0", type: "panel" },
+        },
+      ],
+    });
+    await usePluginStore.getState().load();
     const p = usePluginStore.getState().plugins["com.test.nope"];
     expect(p.phase).toBe("failed");
     expect(p.failure).toEqual({ phase: "manifest", message: "实现随应用编译但缺少对应实现定义" });
@@ -131,22 +159,35 @@ describe("插件行失败诊断", () => {
   });
 
   it("手动启用不兼容插件同样停在 compat 阶段", async () => {
+    // 启停走全量重建（组合裁决会随之变化）：Rust 返回的行带新启用态，与真实路径一致
     usePluginStore.setState({
       plugins: {
         "com.test.old": row({
           id: "com.test.old",
           installDir: "/tmp/old",
           sourceKind: "market",
-          manifest: {
-            id: "com.test.old",
-            name: "Old",
-            version: "1.0.0",
-            type: "panel",
-            main: "main.js",
-            hostApiVersion: 999,
-          },
+          manifest: { id: "com.test.old", name: "Old", version: "1.0.0", type: "panel", main: "main.js" },
         }),
       },
+    });
+    vi.mocked(pluginList).mockResolvedValue({
+      rows: [
+        {
+          id: "com.test.old",
+          name: "Old",
+          version: "1.0.0",
+          type: "panel",
+          installDir: "/tmp/old",
+          sourceKind: "market",
+          enabled: true,
+          manifest: {
+            name: "com.test.old",
+            version: "1.0.0",
+            main: "main.js",
+            atelyx: { name: "Old", type: "panel", hostApiVersion: 999 },
+          },
+        },
+      ],
     });
 
     await usePluginStore.getState().setEnabled("com.test.old", true);
@@ -371,54 +412,194 @@ describe("安装收尾的宿主兼容强制", () => {
 });
 
 describe("磁盘包入口选择（宿主产物优先）", () => {
-  const diskRow = (id: string, over: Partial<InstalledPlugin>) =>
-    row({
-      id,
-      installDir: "/tmp/plugin",
-      sourceKind: "market",
-      manifest: {
-        id,
-        name: id,
-        version: "1.0.0",
-        type: "panel",
-        main: "src/index.ts",
-        dependencies: { nanoid: "^5.0.0" },
-      },
-      ...over,
-    });
+  const diskRow = (id: string, over: Partial<PluginRow> = {}): PluginRow => ({
+    id,
+    name: id,
+    version: "1.0.0",
+    type: "panel",
+    installDir: "/tmp/plugin",
+    sourceKind: "market",
+    enabled: true,
+    manifest: {
+      name: id,
+      version: "1.0.0",
+      main: "src/index.ts",
+      atelyx: { name: id, type: "panel" },
+    },
+    ...over,
+  });
 
   it("有打包产物时用产物入口（不再回落清单 main）", async () => {
-    usePluginStore.setState({
-      plugins: { "com.test.dep": diskRow("com.test.dep", { entry: ".atelyx-dist/entry.js" }) },
+    vi.mocked(pluginList).mockResolvedValue({
+      rows: [diskRow("com.test.dep", { entry: ".atelyx-dist/entry.js" })],
     });
-    await usePluginStore.getState().setEnabled("com.test.dep", true);
-    expect(mountPluginFromPackage).toHaveBeenCalledWith(expect.anything(), "com.test.dep", ".atelyx-dist/entry.js");
+    await usePluginStore.getState().load();
+    expect(mountPluginFromPackage).toHaveBeenCalledWith(
+      expect.anything(),
+      "com.test.dep",
+      ".atelyx-dist/entry.js",
+      "com.test.dep",
+    );
     expect(usePluginStore.getState().plugins["com.test.dep"].phase).toBe("active");
   });
 
   it("无产物时回落清单 main（未声明依赖的插件行为不变）", async () => {
-    usePluginStore.setState({
-      plugins: {
-        "com.test.plain": diskRow("com.test.plain", {
-          manifest: { id: "com.test.plain", name: "com.test.plain", version: "1.0.0", type: "panel", main: "src/index.ts" },
-        }),
-      },
-    });
-    await usePluginStore.getState().setEnabled("com.test.plain", true);
-    expect(mountPluginFromPackage).toHaveBeenCalledWith(expect.anything(), "com.test.plain", "src/index.ts");
+    vi.mocked(pluginList).mockResolvedValue({ rows: [diskRow("com.test.plain")] });
+    await usePluginStore.getState().load();
+    expect(mountPluginFromPackage).toHaveBeenCalledWith(
+      expect.anything(),
+      "com.test.plain",
+      "src/index.ts",
+      "com.test.plain",
+    );
   });
 
   it("产物与 main 都缺 → 声明式插件，直接置 active 且不挂载", async () => {
-    usePluginStore.setState({
-      plugins: {
-        "com.test.theme": diskRow("com.test.theme", {
-          manifest: { id: "com.test.theme", name: "com.test.theme", version: "1.0.0", type: "theme" },
+    vi.mocked(pluginList).mockResolvedValue({
+      rows: [
+        diskRow("com.test.theme", {
+          type: "theme",
+          manifest: { name: "com.test.theme", version: "1.0.0", atelyx: { name: "t", type: "theme" } },
         }),
-      },
+      ],
     });
-    await usePluginStore.getState().setEnabled("com.test.theme", true);
+    await usePluginStore.getState().load();
     expect(mountPluginFromPackage).not.toHaveBeenCalled();
     expect(usePluginStore.getState().plugins["com.test.theme"].phase).toBe("active");
+  });
+});
+
+describe("组合接管装配", () => {
+  /** 随应用分发的行（无磁盘目录，清单 main 恒为占位串）。 */
+  const builtinRow = (id: string): PluginRow => ({
+    id,
+    name: id,
+    version: "1.0.0",
+    type: "panel",
+    installDir: "",
+    sourceKind: "builtin",
+    enabled: true,
+    manifest: { name: id, version: "1.0.0", main: "builtin", atelyx: { name: id, type: "panel" } },
+  });
+
+  /** 磁盘包行，声明接管给定的目标行。 */
+  const providerRow = (id: string, patch: unknown[]): PluginRow => ({
+    id,
+    name: id,
+    version: "1.0.0",
+    type: "background",
+    installDir: "/tmp/provider",
+    sourceKind: "market",
+    enabled: true,
+    manifest: {
+      name: id,
+      version: "1.0.0",
+      main: "src/index.ts",
+      atelyx: { name: id, type: "background", compositionPatch: patch },
+    },
+  });
+
+  it("插件声明接管内置行：内置行的位置跑提供者入口，提供者自身行不独立装配", async () => {
+    vi.mocked(pluginList).mockResolvedValue({
+      rows: [builtinRow("builtin.search"), providerRow("com.test.provider", [{ target: "builtin.search" }])],
+    });
+    await usePluginStore.getState().load();
+
+    // 内置行的位置装配提供者的入口（读盘按提供者定位，挂载归属仍是内置行）
+    expect(mountPluginFromPackage).toHaveBeenCalledWith(
+      expect.anything(),
+      "builtin.search",
+      "src/index.ts",
+      "com.test.provider",
+    );
+    // 提供者的自身行不独立装配（同一份 apply 只跑一次）
+    expect(mountPluginFromPackage).not.toHaveBeenCalledWith(
+      expect.anything(),
+      "com.test.provider",
+      expect.anything(),
+      expect.anything(),
+    );
+    // 内置实现不再装配
+    expect(mountPlugin).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ id: "builtin.search" }),
+    );
+    expect(usePluginStore.getState().composition?.bindings["builtin.search"]).toMatchObject({
+      implId: "com.test.provider",
+      source: "plugin",
+    });
+  });
+
+  it("用户层钉住 default：内置行恢复自身实现，提供者自身行恢复独立装配", async () => {
+    vi.mocked(readGlobalConfig).mockResolvedValue({
+      config: { recentVaults: [], compositionPatches: { "builtin.search": "default" } },
+      corruptBackup: null,
+    });
+    vi.mocked(pluginList).mockResolvedValue({
+      rows: [builtinRow("builtin.search"), providerRow("com.test.provider", [{ target: "builtin.search" }])],
+    });
+    await usePluginStore.getState().load();
+
+    expect(mountPlugin).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ id: "builtin.search" }));
+    expect(mountPluginFromPackage).toHaveBeenCalledWith(
+      expect.anything(),
+      "com.test.provider",
+      "src/index.ts",
+      "com.test.provider",
+    );
+    expect(usePluginStore.getState().composition?.bindings["builtin.search"]).toMatchObject({
+      implId: "builtin.search",
+      source: "user",
+    });
+  });
+
+  it("用户层指定的实现不可用（未安装）：回退本行默认实现并给出可读原因", async () => {
+    vi.mocked(readGlobalConfig).mockResolvedValue({
+      config: { recentVaults: [], compositionPatches: { "builtin.search": "com.absent.provider" } },
+      corruptBackup: null,
+    });
+    vi.mocked(pluginList).mockResolvedValue({ rows: [builtinRow("builtin.search")] });
+    await usePluginStore.getState().load();
+
+    const binding = usePluginStore.getState().composition?.bindings["builtin.search"];
+    expect(binding?.implId).toBe("builtin.search");
+    expect(binding?.problem).toContain("com.absent.provider");
+    expect(mountPlugin).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ id: "builtin.search" }));
+  });
+
+  it("setCompositionImpl：整表落 global.json + 广播 + 重载；清空整字段删除", async () => {
+    // 真实替身：写盘后读回同一份，镜像由加载阶段从磁盘重建
+    let stored: Record<string, string> = {};
+    vi.mocked(readGlobalConfig).mockImplementation(async () => ({
+      config: { recentVaults: [], compositionPatches: stored },
+      corruptBackup: null,
+    }));
+    vi.mocked(updateGlobalConfig).mockImplementation(async (patch) => {
+      stored = patch.compositionPatches ? { ...patch.compositionPatches } : {};
+      return null;
+    });
+
+    await usePluginStore.getState().setCompositionImpl("builtin.search", "com.test.provider");
+
+    expect(updateGlobalConfig).toHaveBeenCalledWith({
+      compositionPatches: { "builtin.search": "com.test.provider" },
+    });
+    expect(emitCompositionChanged).toHaveBeenCalled();
+    expect(pluginList).toHaveBeenCalledTimes(1);
+    expect(usePluginStore.getState().compositionPatches).toEqual({ "builtin.search": "com.test.provider" });
+
+    await usePluginStore.getState().setCompositionImpl("builtin.search", null);
+    expect(updateGlobalConfig).toHaveBeenLastCalledWith({ compositionPatches: null });
+    expect(usePluginStore.getState().compositionPatches).toEqual({});
+  });
+
+  it("setCompositionImpl 写盘失败：不落地、原样上抛", async () => {
+    vi.mocked(updateGlobalConfig).mockRejectedValue(new Error("写盘失败"));
+    await expect(
+      usePluginStore.getState().setCompositionImpl("builtin.search", "com.test.provider"),
+    ).rejects.toThrow("写盘失败");
+    expect(usePluginStore.getState().compositionPatches).toEqual({});
+    expect(emitCompositionChanged).not.toHaveBeenCalled();
   });
 });
 
@@ -546,14 +727,82 @@ describe("协作插件消息入站桥", () => {
   });
 });
 
-describe("应用外壳接管分派", () => {
-  it("shell 槽胜出者经 shellContribution 透出，撤销后回退 undefined", () => {
-    const Shell = () => null;
-    const off = registerSlotContrib("shell", "com.test.shell", { component: Shell }, { cardinality: "single" });
-    const shell = usePluginStore.getState().shellContribution();
-    expect(shell?.pluginId).toBe("com.test.shell");
-    expect(shell?.component).toBe(Shell);
-    off();
-    expect(usePluginStore.getState().shellContribution()).toBeUndefined();
+describe("入口图顺序（视图候选按组合行位置排）", () => {
+  it("注册到达顺序与组合行顺序不一致时，以组合行顺序为准", async () => {
+    // builtin.canvas 在默认组合里排在 builtin.note 之前；这里先注册 note 的视图再注册 canvas 的，
+    // 入口图仍须按行位置排出 canvas 在前（不受槽注册到达时间影响）。
+    const offNote = registerViewSlot("probe-note", "builtin.note", { label: "N", component: () => null });
+    const offCanvas = registerViewSlot("probe-canvas", "builtin.canvas", { label: "C", component: () => null });
+    vi.mocked(pluginList).mockResolvedValue({
+      rows: [
+        {
+          id: "builtin.canvas",
+          name: "画布",
+          version: "1.0.0",
+          type: "panel",
+          installDir: "",
+          sourceKind: "builtin",
+          enabled: true,
+          manifest: { name: "builtin.canvas", version: "1.0.0", main: "builtin", atelyx: { name: "画布", type: "panel" } },
+        },
+        {
+          id: "builtin.note",
+          name: "笔记",
+          version: "1.0.0",
+          type: "panel",
+          installDir: "",
+          sourceKind: "builtin",
+          enabled: true,
+          manifest: { name: "builtin.note", version: "1.0.0", main: "builtin", atelyx: { name: "笔记", type: "panel" } },
+        },
+      ],
+    });
+    await usePluginStore.getState().load();
+
+    const kinds = usePluginStore.getState().pluginViewKinds().filter((k) => k.startsWith("probe-"));
+    expect(kinds).toEqual(["probe-canvas", "probe-note"]);
+
+    offCanvas();
+    offNote();
+  });
+});
+
+describe("组合接管实现可用性", () => {
+  it("提供者清单无效：不可用作实现，目标行回退默认实现并给出可读原因", async () => {
+    vi.mocked(pluginList).mockResolvedValue({
+      rows: [
+        {
+          id: "builtin.search",
+          name: "builtin.search",
+          version: "1.0.0",
+          type: "panel",
+          installDir: "",
+          sourceKind: "builtin",
+          enabled: true,
+          manifest: { name: "builtin.search", version: "1.0.0", main: "builtin", atelyx: { name: "s", type: "panel" } },
+        },
+        {
+          id: "com.test.bad",
+          name: "bad",
+          version: "1.0.0",
+          type: "background",
+          installDir: "/tmp/bad",
+          sourceKind: "market",
+          enabled: true,
+          // 缺 main（非 theme）→ 清单无效
+          manifest: { name: "com.test.bad", version: "1.0.0", atelyx: { name: "b", type: "background" } },
+        },
+      ],
+    });
+    vi.mocked(readGlobalConfig).mockResolvedValue({
+      config: { recentVaults: [], compositionPatches: { "builtin.search": "com.test.bad" } },
+      corruptBackup: null,
+    });
+    await usePluginStore.getState().load();
+
+    const binding = usePluginStore.getState().composition?.bindings["builtin.search"];
+    expect(binding?.implId).toBe("builtin.search");
+    expect(binding?.problem).toContain("com.test.bad");
+    expect(mountPluginFromPackage).not.toHaveBeenCalled();
   });
 });

@@ -14,6 +14,7 @@
  */
 import { useEffect, useMemo } from "react";
 import { LayoutTemplate, TriangleAlert } from "lucide-react";
+import { SlotReplaceMount } from "@/components/plugins/SlotHost";
 import { useAppStore } from "@/stores/appStore";
 import { titleOfTabs, usePanelStore } from "@/stores/panelStore";
 import { usePluginStore } from "@/stores/pluginStore";
@@ -141,28 +142,30 @@ export function PanelWindowRoot() {
   return (
     // 不画底色：与 html/body 的底色同值，重画只会让半透明皮肤（极光）多叠一层、氛围底透不上来
     <div className="h-full w-full flex flex-col" data-panel-drop-root>
-      {/* 自定义标题栏（与主窗口一致：拖动区 + 窗口控制）。错误态同样渲染——否则窗口既不能拖动
-          也无法最小化/关闭，只能靠任务栏，而错误态是「布局服务未响应」这类可达界面 */}
-      <div
-        className="h-9 flex items-center gap-1 px-2 flex-shrink-0 select-none"
-        style={{ background: "var(--bg-secondary)", borderBottom: "1px solid var(--border)" }}
-        data-tauri-drag-region
-      >
-        <span
-          className="text-xs truncate"
-          style={{ color: "var(--text-secondary)" }}
+      {/* 标题栏（默认实现）：拖动区 + 窗口控制。错误态同样渲染——否则窗口既不能拖动也无法关闭，
+          而错误态是「布局服务未响应」这类可达界面。插件可经 shell/titlebar 单槽替换本窗口标题栏。 */}
+      <SlotReplaceMount slot="shell/titlebar">
+        <div
+          className="h-9 flex items-center gap-1 px-2 flex-shrink-0 select-none"
+          style={{ background: "var(--bg-secondary)", borderBottom: "1px solid var(--border)" }}
           data-tauri-drag-region
         >
-          {title}
-        </span>
-        <div className="ml-auto h-full flex items-center" data-tauri-drag-region>
-          <TitleBarControls
-            onMinimize={() => void minimizeWindow()}
-            onMaximize={() => void toggleMaximizeWindow()}
-            onClose={() => void closeWindow()}
-          />
+          <span
+            className="text-xs truncate"
+            style={{ color: "var(--text-secondary)" }}
+            data-tauri-drag-region
+          >
+            {title}
+          </span>
+          <div className="ml-auto h-full flex items-center" data-tauri-drag-region>
+            <TitleBarControls
+              onMinimize={() => void minimizeWindow()}
+              onMaximize={() => void toggleMaximizeWindow()}
+              onClose={() => void closeWindow()}
+            />
+          </div>
         </div>
-      </div>
+      </SlotReplaceMount>
 
       {panelError ? (
         // bootstrap 失败/超时：可见错误态 + 重试入口（不静默停在加载屏）

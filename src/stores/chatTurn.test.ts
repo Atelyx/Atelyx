@@ -43,6 +43,16 @@ const h = vi.hoisted(() => ({
   currentNote: null as string | null,
   toolExec: null as unknown,
   toolHooks: null as unknown,
+  /** 交给工具执行器的调用批次（拦截面改写后）与替身返回值。 */
+  toolCalls: null as unknown,
+  toolResult: null as unknown,
+  /** 拦截面调用留痕（事件名 + 载荷），按注册顺序。 */
+  serialCalls: [] as Array<[string, Record<string, unknown>]>,
+  /** 拦截面替身：事件名 → 返回 { vetoed, payload }；未登记的事件原样放行。 */
+  serialHandlers: {} as Record<
+    string,
+    (payload: Record<string, unknown>) => { vetoed: boolean; payload: Record<string, unknown> }
+  >,
 }));
 
 vi.mock("./streaming", async (importOriginal) => {
@@ -71,6 +81,12 @@ vi.mock("@/services/cordis/events", () => ({
   emitPluginEvent: (name: string, payload: Record<string, unknown>) => {
     h.events.push([name, payload]);
   },
+  // 拦截面：留痕 + 由用例登记的替身裁决；未登记的事件原样放行（真实实现在无插件订阅时同样放行）
+  runSerialHook: async (event: string, payload: Record<string, unknown>) => {
+    h.serialCalls.push([event, payload]);
+    const handler = h.serialHandlers[event];
+    return handler ? handler(payload) : { vetoed: false, payload };
+  },
 }));
 
 vi.mock("@/services/vault/agentTodos", () => ({
@@ -86,7 +102,8 @@ vi.mock("@/services/ai/tools", async (importOriginal) => {
     runAgentTools: async (_calls: unknown[], exec: unknown, hooks?: unknown) => {
       h.toolExec = exec;
       h.toolHooks = hooks;
-      return { messages: [], results: [] };
+      h.toolCalls = _calls;
+      return h.toolResult ?? { messages: [], results: [] };
     },
   };
 });
@@ -172,6 +189,10 @@ beforeEach(async () => {
   h.currentNote = null;
   h.toolExec = null;
   h.toolHooks = null;
+  h.toolCalls = null;
+  h.toolResult = null;
+  h.serialCalls = [];
+  h.serialHandlers = {};
   const mod = await import("./chatTurn");
   runChatTurn = mod.runChatTurn;
   compactChatTurn = mod.compactChatTurn;
@@ -471,5 +492,125 @@ describe("compactChatTurn 压缩摘要", () => {
     });
     expect(result.ok).toBe(false);
     expect(result.ok === false && result.message).toContain("压缩失败");
+  });
+});
+
+describe("对话循环拦截面", () => {
+  it("chat:before-step：改写请求消息与模型后进请求（工具名册只读，见返回值类型说明）", async () => {
+    h.agentRequest = {
+      systemPrompt: "S",
+      tools: [{ name: "read_file", description: "读", parameters: {} }],
+      skippedWebSearch: false,
+    };
+    h.serialHandlers["chat:before-step"] = (payload) => ({
+      vetoed: false,
+      payload: {
+        ...payload,
+        model: "m2",
+        messages: [{ role: "user", text: "改写后" }],
+      },
+    });
+    h.scenario = (o) => {
+      (o as unknown as EngineOptions).onDone({
+        content: "答",
+        reasoning: "",
+        timedOut: false,
+        truncated: false,
+        promoteNarration: false,
+      });
+    };
+    const r = recorder();
+    await runChatTurn(request({ sink: r.sink }));
+
+    const opts = h.engineOptions as EngineOptions & { model: string };
+    expect(opts.model).toBe("m2");
+    expect(opts.apiMessages).toEqual([{ role: "user", text: "改写后" }]);
+    // 工具名册不可被该钩子改写（否则与按名册派生的系统提示词/尾部上下文块失配）
+    expect(opts.tools?.map((t) => t.name)).toEqual(["read_file"]);
+    expect(r.finishes).toHaveLength(1);
+  });
+
+  it("chat:before-step veto：本轮不跑（无轮次事件、不产生回复）", async () => {
+    let engineCalled = false;
+    h.scenario = () => {
+      engineCalled = true;
+    };
+    h.serialHandlers["chat:before-step"] = (payload) => ({ vetoed: true, payload });
+    const r = recorder();
+    await runChatTurn(request({ sink: r.sink }));
+
+    expect(engineCalled).toBe(false);
+    expect(h.events).toEqual([]);
+    expect(r.finishes).toEqual([
+      { content: "", steps: [], removed: true, timedOut: false, aborted: false },
+    ]);
+  });
+
+  it("chat:before-tool：改写名与参数传执行器；被拒的调用不进执行器且补一条 tool 消息", async () => {
+    h.agentRequest = {
+      systemPrompt: "S",
+      tools: [{ name: "read_file", description: "读", parameters: {} }],
+      skippedWebSearch: false,
+    };
+    h.toolResult = {
+      messages: [{ role: "tool", text: "结果", toolCallId: "c1" }],
+      results: [{ id: "c1", ok: true, summary: "ok" }],
+    };
+    const seen: unknown[] = [];
+    h.serialHandlers["chat:before-tool"] = (payload) => {
+      seen.push(payload.name);
+      if (payload.id === "c2") return { vetoed: true, payload };
+      return { vetoed: false, payload: { ...payload, name: "glob", arguments: '{"pattern":"*"}' } };
+    };
+    let out: { messages: Array<{ role: string; text: string; toolCallId: string }> } | null = null;
+    h.scenario = async (o) => {
+      const opts = o as unknown as EngineOptions;
+      out = (await opts.executeTools([
+        { id: "c1", name: "read_file", arguments: "{}" },
+        { id: "c2", name: "read_file", arguments: "{}" },
+      ])) as never;
+      opts.onDone({
+        content: "答",
+        reasoning: "",
+        timedOut: false,
+        truncated: false,
+        promoteNarration: false,
+      });
+    };
+    await runChatTurn(request({}));
+
+    expect(seen).toEqual(["read_file", "read_file"]);
+    // 只有未被拒的调用进执行器，且是改写后的名与参数
+    expect(h.toolCalls).toEqual([{ id: "c1", name: "glob", arguments: '{"pattern":"*"}' }]);
+    // 结果按模型 tool_calls 的原始序回填：被拒的调用补一条 tool 消息（缺它下一轮请求结构不合法）
+    expect(out!.messages.map((m) => m.toolCallId)).toEqual(["c1", "c2"]);
+    expect(out!.messages[1].text).toContain("拒绝");
+  });
+
+  it("chat:before-finish：改写最终正文，事件按改写后内容发出", async () => {
+    h.serialHandlers["chat:before-finish"] = (payload) => ({
+      vetoed: false,
+      payload: { ...payload, content: "改写后的回复" },
+    });
+    h.scenario = (o) => {
+      const opts = o as unknown as EngineOptions;
+      opts.applyBatch({ content: "原始回复", reasoning: "" });
+      opts.onDone({
+        content: "原始回复",
+        reasoning: "",
+        timedOut: false,
+        truncated: false,
+        promoteNarration: false,
+      });
+    };
+    const r = recorder();
+    await runChatTurn(request({ sink: r.sink }));
+
+    expect(r.finishes[0]?.content).toBe("改写后的回复");
+    expect(r.finishes[0]?.removed).toBe(false);
+    expect(h.events).toContainEqual([
+      "chat:message",
+      { targetId: "s1", role: "assistant", content: "改写后的回复" },
+    ]);
   });
 });

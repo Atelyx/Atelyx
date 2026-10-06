@@ -3,17 +3,18 @@
  * 右键菜单项由 MenuSlot 渲染（contextmenu/<target>）。
  *
  * SlotListMount 渲染 list 槽全部贡献（priority 降序），OpenSlotList 渲染开放前缀 list 槽
- * （inspector/<nodeType> 按运行时 kind 动态查询），EmptyStateMount 渲染视图空态
- * （有胜出贡献则替换、否则回退宿主引导）。
+ * （inspector/<nodeType> 按运行时 kind 动态查询），SlotReplaceMount 渲染 single 替换槽
+ * （有胜出贡献则替换 children，否则回退宿主默认实现；视图空态是它的特例）。
  * 内容统一经 SlotDecoratedContent 被装饰器链包裹（ctx.slots.decorate）。
  * 订阅 pluginStore 按槽的修订号（slotRevisions）——槽注册/装饰变化只重渲染该槽宿主，防全局放大。
- * 每贡献包 ErrorBoundary（单个崩溃不拖垮宿主）。
+ * 每贡献包 ErrorBoundary（单个崩溃不拖垮宿主）；替换槽另有回退边界（崩了回默认 chrome 而非换掉整屏）。
  */
-import { Component, useLayoutEffect, useRef, useState, type ComponentType, type ReactNode } from "react";
+import { Component, useLayoutEffect, useRef, useState, type ComponentType, type ErrorInfo, type ReactNode } from "react";
 import { listDecorators, listSlot, resolveSlot, decoratorEpochOf, findSlotDeclarationRuntime } from "@/services/cordis/slots";
 import type { SlotContribution } from "@/utils/cordis/slots";
 import type { UiSlotPayload } from "@/services/cordis/slots";
 import { usePluginStore } from "@/stores/pluginStore";
+import { useNotificationStore } from "@/stores/notificationStore";
 import { ErrorBoundary } from "@/components/common/ErrorBoundary";
 
 const EMPTY_REJECTED: ReadonlySet<string> = new Set();
@@ -121,21 +122,51 @@ export function OpenSlotList({ slot }: { slot: string }): ReactNode {
   );
 }
 
-/** 视图空态槽：有胜出贡献则渲染贡献替换空态，否则回退宿主兜底引导（empty/<viewKind> single 槽）。 */
-export function EmptyStateMount({ viewKind, fallback }: { viewKind: string; fallback: ReactNode }): ReactNode {
-  const slot = `empty/${viewKind}`;
-  usePluginStore((s) => s.slotRevisions[slot] ?? 0);
+/** 替换槽崩溃边界：胜出者渲染崩溃即回退宿主默认实现并通知（局部替换崩了不该换掉整屏、更不该白屏）。
+ *  按「插件 id + 槽修订号」重挂（见 SlotReplaceMount 的 key）：换胜出者或重注册即重置错误态重试。 */
+class SlotReplaceBoundary extends Component<
+  { slot: string; fallback: ReactNode; children: ReactNode },
+  { failed: boolean }
+> {
+  state: { failed: boolean } = { failed: false };
+  static getDerivedStateFromError(): { failed: boolean } {
+    return { failed: true };
+  }
+  componentDidCatch(error: unknown, info: ErrorInfo): void {
+    console.error(`槽 ${this.props.slot} 的插件渲染崩溃`, error, info.componentStack);
+    useNotificationStore.getState().notify({
+      level: "error",
+      message: `插件渲染崩溃，已恢复默认界面（${this.props.slot}）`,
+    });
+  }
+  render(): ReactNode {
+    return this.state.failed ? this.props.fallback : this.props.children;
+  }
+}
+
+/**
+ * single 替换槽宿主：有胜出贡献就用它替换 children，否则原样渲染 children（渲染崩溃同样回退 children）。
+ * `children` 是宿主默认实现（标题栏/状态栏这类局部 chrome、视图空态引导）；插件据此只换局部，
+ * 不必接管整壳（整壳是 shell 槽，走同一实现）。
+ */
+export function SlotReplaceMount({ slot, children }: { slot: string; children: ReactNode }): ReactNode {
+  const revision = usePluginStore((s) => s.slotRevisions[slot] ?? 0);
   const winner = resolveSlot(slot);
-  if (!winner) return <>{fallback}</>;
-  const Comp = (winner.payload as { component?: ComponentType }).component;
-  if (!Comp) return <>{fallback}</>;
+  const Comp = (winner?.payload as { component?: ComponentType } | undefined)?.component;
+  if (!winner || !Comp) return <>{children}</>;
   return (
     <SlotDecoratedContent slot={slot}>
-      <ErrorBoundary key={winner.id}>
+      {/* 边界在装饰器链**内**：胜出组件崩溃只回退本槽内容，不会被装饰器的崩溃守卫当成装饰器抛错剔除 */}
+      <SlotReplaceBoundary key={`${winner.id}:${revision}`} slot={slot} fallback={children}>
         <Comp />
-      </ErrorBoundary>
+      </SlotReplaceBoundary>
     </SlotDecoratedContent>
   );
+}
+
+/** 视图空态槽：有胜出贡献则渲染贡献替换空态，否则回退宿主兜底引导（empty/<viewKind> single 槽）。 */
+export function EmptyStateMount({ viewKind, fallback }: { viewKind: string; fallback: ReactNode }): ReactNode {
+  return <SlotReplaceMount slot={`empty/${viewKind}`} children={fallback} />;
 }
 
 /** 插件侧槽位渲染宿主（ctx.slots.host(slot) 返回的组件）：按声明基数渲染 single 胜出者或全部 list 贡献，

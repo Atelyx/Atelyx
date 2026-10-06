@@ -5,6 +5,7 @@
  * 未知字段、未知附加分类一律跳过（前向兼容），只对结构性问题（缺字段、类型错误、未知主分类）报错。
  */
 import {
+  type CompositionPatchDeclaration,
   type PluginGlobalShortcutDeclaration,
   type PluginManifest,
   type PluginType,
@@ -192,6 +193,7 @@ export function validatePluginManifest(raw: unknown): ManifestValidateResult {
   const platforms = normalizeStringList(ax.platforms, "platforms", errors);
   const themes = normalizeThemes(ax.themes, errors);
   const shortcuts = normalizeGlobalShortcutDeclarations(ax.shortcuts, errors);
+  const compositionPatch = normalizeCompositionPatch(ax.compositionPatch, id as string, errors);
   const themeOptions = normalizeThemeOptions(ax.themeOptions, errors);
   const dependenciesDeclared = normalizeDependencies(dependencies);
   if (errors.length > 0) return { ok: false, errors };
@@ -209,6 +211,7 @@ export function validatePluginManifest(raw: unknown): ManifestValidateResult {
     ...(platforms.length > 0 ? { platforms } : {}),
     ...(themes ? { themes } : {}),
     ...(shortcuts ? { shortcuts } : {}),
+    ...(compositionPatch ? { compositionPatch } : {}),
     ...(themeOptions ? { themeOptions } : {}),
     ...(typeof ax.atelyxVersionMin === "string" ? { atelyxVersionMin: ax.atelyxVersionMin } : {}),
     ...(typeof ax.atelyxVersionMax === "string" ? { atelyxVersionMax: ax.atelyxVersionMax } : {}),
@@ -358,6 +361,52 @@ function normalizeGlobalShortcutDeclarations(
     }
     seen.add(id);
     items.push({ id, label, key });
+  }
+  return items.length > 0 ? items : undefined;
+}
+
+/** compositionPatch（组合接管声明）归一化：非空对象数组；`target` 为合法行 id 且非自身行、不重复。
+ *  畸形静默跳过会让「声明了却没接管」，一律拒绝。**至多一项**：一个插件接管多行会让同一份代码
+ *  按行各装一份（同一槽位/能力重复注册、后者覆盖前者），语义不清；要替换多行请拆成多个插件
+ *  （整壳替换本身就是单行 `shell`）。 */
+function normalizeCompositionPatch(
+  raw: unknown,
+  selfId: string,
+  errors: string[],
+): CompositionPatchDeclaration[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw)) {
+    errors.push("compositionPatch 必须是数组");
+    return undefined;
+  }
+  if (raw.length > 1) {
+    errors.push("compositionPatch 至多声明一项（一个插件只接管一行）");
+    return undefined;
+  }
+  const items: CompositionPatchDeclaration[] = [];
+  for (const rawItem of raw) {
+    if (typeof rawItem !== "object" || rawItem === null) {
+      errors.push("compositionPatch 项必须是对象");
+      continue;
+    }
+    const item = rawItem as Record<string, unknown>;
+    const target = item.target;
+    if (typeof target !== "string" || !pluginIdValid(target)) {
+      errors.push("compositionPatch 项的 target 必须是合法的行 id");
+      continue;
+    }
+    if (target === selfId) {
+      errors.push(`compositionPatch 不能声明接管自身行：${target}`);
+      continue;
+    }
+    if (item.priority !== undefined && (typeof item.priority !== "number" || !Number.isFinite(item.priority))) {
+      errors.push(`compositionPatch[${target}].priority 必须是有限数字`);
+      continue;
+    }
+    items.push({
+      target,
+      ...(typeof item.priority === "number" ? { priority: item.priority } : {}),
+    });
   }
   return items.length > 0 ? items : undefined;
 }

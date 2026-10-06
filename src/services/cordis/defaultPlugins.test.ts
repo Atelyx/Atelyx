@@ -3,9 +3,9 @@
  *
  * 验证 pluginStore.load 的挂载路径等价语义（行 → 实现解析 → apply 装配视图槽 + 领域服务 + 接线）：
  * - 挂载后 ctx.canvas/ctx.table/ctx.note/ctx.chat 可用、视图槽可解析、装配顺序 = 默认组合顺序
- * - 卸载（fiber dispose）全部撤销：槽消失、服务消失、能力接线复位
+ * - 卸载（fiber dispose）全部撤销：槽消失、插件服务消失、能力接线复位（ctx.chat 由内核提供，恒在）
  * - 用户插件经 priority 替换默认实现（作者侧声明，用户只需安装 + 启用）
- * - 对话能力行与面板行分离：能力行注册运行时并提供 ctx.chat，面板行只贡献视图
+ * - 对话能力行与面板行分离：能力行注册对话运行时，面板行只贡献视图
  */
 import { describe, expect, it, afterEach, beforeEach } from "vitest";
 import type { Context } from "@atelyx/cordis";
@@ -87,10 +87,11 @@ describe("随应用分发插件挂载集成", () => {
     expect(kernel.ctx.canvas.snapshot()).toBeDefined();
     expect(kernel.ctx.table.snapshot()).toBeDefined();
     expect(kernel.ctx.get("vault")).toBeDefined();
-    // 能力全开：ctx.note/ctx.chat 由对应行提供（停用即不可用）。
+    // 能力全开：ctx.note 由对应行提供（停用即不可用）；ctx.chat 由内核提供（恒可用）。
     expect(kernel.ctx.get("note")).toBeDefined();
     expect(kernel.ctx.get("chat")).toBeDefined();
-    // 对话核心能力行：运行时已注册（面板与画布对话节点据此取用），与面板行分离
+    // 对话核心能力行：运行时已注册（面板与画布对话节点据此取用），与面板行分离。
+    // ctx.chat 由内核提供（恒可用），其编排半读运行时注册表。
     expect(getChatRuntime()).not.toBeNull();
     expect(getChatRuntime()?.resolveTarget).toBeTypeOf("function");
     expect(mountedPluginIds(kernel)).toContain("builtin.chatcore");
@@ -107,20 +108,24 @@ describe("随应用分发插件挂载集成", () => {
     expect(kernel.ctx.get("canvas")).toBeUndefined();
     expect(kernel.ctx.get("table")).toBeUndefined();
     expect(kernel.ctx.get("note")).toBeUndefined();
-    expect(kernel.ctx.get("chat")).toBeUndefined();
+    // ctx.chat 由内核提供，不随行撤销；消失的是运行时（编排方法随之抛「未就绪」）
+    expect(kernel.ctx.get("chat")).toBeDefined();
     // 对话能力运行时的注册随 fiber 撤销（消费方据此降级为「能力未启用」）
     expect(getChatRuntime()).toBeNull();
+    const chat = kernel.ctx.get("chat") as unknown as { resolveTarget(): unknown };
+    expect(() => chat.resolveTarget()).toThrow("AI 对话能力未就绪");
   });
 
-  it("停用对话核心行（保留面板行）：ctx.chat 与运行时一并消失，视图槽仍在", async () => {
+  it("停用对话核心行（保留面板行）：运行时消失（编排方法抛未就绪），视图槽仍在", async () => {
     kernel = createKernel();
     await mountAll(
       kernel,
       packages.map((p) => (p.id === "builtin.chatcore" ? { ...p, enabled: false } : p)),
     );
     expect(mountedPluginIds(kernel)).not.toContain("builtin.chatcore");
-    expect(kernel.ctx.get("chat")).toBeUndefined();
     expect(getChatRuntime()).toBeNull();
+    const chat = kernel.ctx.get("chat") as unknown as { resolveTarget(): unknown };
+    expect(() => chat.resolveTarget()).toThrow("AI 对话能力未就绪");
     // 面板行照常挂载（能力缺失在运行时判空降级，不整行失效）
     expect(resolveViewKind("aichat")?.pluginId).toBe("builtin.chatpanel");
   });

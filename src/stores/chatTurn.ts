@@ -8,12 +8,16 @@
  * 不持有消息容器、不落盘：产出经调用方传入的 `ChatTurnSink` 交回，容器与落盘留在消费方
  * （面板会话数组 / 画布节点消息表 / 插件自有容器），故本模块不感知容器形状——
  * 存在性守卫、协作与落盘调度都在消费方的写入器里。会话压缩同样只出摘要，注解写回由消费方负责。
+ *
+ * 对话循环拦截面（serial 事件，插件可 veto/改写）：`chat:before-step`（一轮发出前）→
+ * `chat:before-tool`（每次工具调用前）→ `chat:before-finish`（收尾前）。三者都在本模块分派，
+ * 逐监听器异常隔离；被跳过的工具调用仍回一条 tool 消息，保证下一轮请求结构完整。
  */
 import { toLlmMessages } from "@/services/ai/client";
 import { abortAutoTitle } from "@/services/ai/autoTitle";
 import { runCompaction } from "@/services/ai/compaction";
 import { fetchWeb } from "@/services/web";
-import { emitPluginEvent } from "@/services/cordis/events";
+import { emitPluginEvent, runSerialHook } from "@/services/cordis/events";
 import { runAgentTools, assembleAgentSystemPrompt } from "@/services/ai/tools";
 import { runSearch } from "@/services/search";
 import { readHistoryForAgent, recordAgentFileWrite } from "@/services/history";
@@ -36,7 +40,7 @@ import {
 } from "@/utils/agentSteps";
 import { splitByCompaction } from "@/utils/compaction";
 import { frameCompactionSummary } from "@/constants/compaction";
-import { ERROR_PREFIX, TIMEOUT_ERROR_TEXT } from "@/constants/chat";
+import { ERROR_PREFIX, TIMEOUT_ERROR_TEXT, TOOL_VETO_TEXT } from "@/constants/chat";
 import { runStreamExchange, decideCleanup, runAutoNaming } from "./streaming";
 import { useAppStore } from "./appStore";
 import { useSettingsStore } from "./settingsStore";
@@ -51,10 +55,18 @@ import type {
   ChatRuntime,
   ChatTargetResult,
   ChatTargetSelection,
+  ChatTurnOutcome,
   ChatTurnRequest,
   LlmMessage,
+  LlmToolCall,
   ToolCapabilities,
+  ToolExecResult,
 } from "@/types";
+import type {
+  ChatBeforeFinishPayload,
+  ChatBeforeStepPayload,
+  ChatBeforeToolPayload,
+} from "@/services/cordis/types";
 
 /**
  * 当前打开笔记的尾部上下文块：随请求折叠进末条 user 消息线文（ephemeral，不入会话存储）。
@@ -128,6 +140,15 @@ function standardToolCapabilities(targetId: string): ToolCapabilities {
 }
 
 /**
+ * 一轮对话的执行流程标记：`reported` = 结论（finish/fail）是否已交给写入器。
+ * 兜底出口据此判定要不要补一次 fail——引擎已收尾但结论未落地的窗口（收尾拦截面在途）里，
+ * 挂起的失败仍必须交回消费方，消费方的流式态才不会悬空。
+ */
+interface ChatTurnFlow {
+  reported: boolean;
+}
+
+/**
  * 跑一轮对话：追加历史由消费方完成，本函数只组请求、跑引擎、收尾、命名。
  * 流式增量与收尾结果经 `req.sink` 交回消费方容器；命名在轮末 fire-and-forget（不阻塞返回）。
  * 出口唯一：**要么 finish 要么 fail**——引擎内部失败经 onError 上报，编排侧失败（Agent 提示词与
@@ -136,12 +157,13 @@ function standardToolCapabilities(targetId: string): ToolCapabilities {
 export async function runChatTurn(req: ChatTurnRequest): Promise<void> {
   // 让路：中止同目标的在途命名请求（防其占用后端槽位与新消息排队；不误伤其他目标）
   abortAutoTitle(req.targetId);
-  // 本轮是否已经写入器交回结果：兜底只在「什么都没交回」时补一次，不覆盖已上报的结论
-  const flow = { settled: false };
+  // 本轮是否已把结论交给写入器：兜底只在「什么都没交回」时补一次，不覆盖已上报的结论。
+  // 注意与「引擎已收尾」不同——收尾拦截面在收尾之后、交回之前，那段窗口里引擎已收尾但结论未落地。
+  const flow: ChatTurnFlow = { reported: false };
   try {
     await performTurn(req, flow);
   } catch (e) {
-    if (flow.settled) return;
+    if (flow.reported) return;
     // 失败不得静默：编排侧异常同样如实交回（消费方据此写错误占位并复位流式态）
     req.sink.fail(e instanceof Error ? e : new Error(String(e)));
     emitPluginEvent("chat:finished", { targetId: req.targetId });
@@ -149,7 +171,7 @@ export async function runChatTurn(req: ChatTurnRequest): Promise<void> {
 }
 
 /** 一轮对话的实际编排（异常统一交 runChatTurn 的兜底出口）。 */
-async function performTurn(req: ChatTurnRequest, flow: { settled: boolean }): Promise<void> {
+async function performTurn(req: ChatTurnRequest, flow: ChatTurnFlow): Promise<void> {
   const { targetId, history, sink, naming } = req;
 
   // 系统提示词 + 工具名册：按 Agent 实时解析（配置在 设置 → Agent，引用提示词笔记实时读正文注入）。
@@ -206,6 +228,22 @@ async function performTurn(req: ChatTurnRequest, flow: { settled: boolean }): Pr
   const overrides = req.hooks?.capabilities?.(standard);
   const capabilities: ToolCapabilities = overrides ? { ...standard, ...overrides } : standard;
 
+  // 拦截面（一轮发出前）：可放弃本轮或改写请求。放弃时不发轮次事件、不写任何回复占位——
+  // 消费方按空回复处置（占位移除），缘由由阻止方自己经通知等渠道说明。
+  const stepHook = await runSerialHook<ChatBeforeStepPayload>("chat:before-step", {
+    targetId,
+    model: req.target.model,
+    messages: apiMessages,
+    ...(tools.length ? { tools } : {}),
+  });
+  if (stepHook.vetoed) {
+    sink.finish({ content: "", steps: [], removed: true, timedOut: false, aborted: false });
+    flow.reported = true;
+    return;
+  }
+  const requestMessages = stepHook.payload.messages ?? apiMessages;
+  const requestModel = stepHook.payload.model ?? req.target.model;
+
   // 领域事件（状态已由消费方提交，订阅方读到的是含本轮 user 消息的最新状态）：轮次开始 + 本轮 user 消息
   emitPluginEvent("chat:started", { targetId });
   const lastUser = [...history].reverse().find((m) => m.role === "user");
@@ -222,11 +260,17 @@ async function performTurn(req: ChatTurnRequest, flow: { settled: boolean }): Pr
   let steps: AgentStep[] = [];
   let content = "";
 
+  // 收尾在 onDone 里算完但先不落地：收尾拦截面（异步）要能改写结果，写回与事件统一在其后发生
+  const tail: { outcome: ChatTurnOutcome | null; timeoutError: boolean } = {
+    outcome: null,
+    timeoutError: false,
+  };
+
   await runStreamExchange({
     provider: req.target.provider,
-    model: req.target.model,
+    model: requestModel,
     ...(req.reasoningEffort ? { reasoningEffort: req.reasoningEffort } : {}),
-    apiMessages,
+    apiMessages: requestMessages,
     ...(tools.length ? { tools } : {}),
     signal: req.signal,
     applyBatch: ({ content: delta, reasoning }) => {
@@ -247,13 +291,12 @@ async function performTurn(req: ChatTurnRequest, flow: { settled: boolean }): Pr
     },
     onError: (err) => {
       // 不静默降级：消费方写 [错误] 占位（下次请求历史过滤，不污染上下文）
-      flow.settled = true;
       sink.fail(err);
+      flow.reported = true;
       emitPluginEvent("chat:finished", { targetId });
     },
     onDone: ({ reasoning, timedOut, truncated, promoteNarration }) => {
       // onDone 最终化：最终回答轮叙述提升进 content + 输出上限截断提示
-      flow.settled = true;
       const finalized = finalizeReplyText({ content, steps, promoteNarration, truncated });
       const decision = decideCleanup(
         finalized.content,
@@ -262,7 +305,7 @@ async function performTurn(req: ChatTurnRequest, flow: { settled: boolean }): Pr
         finalized.steps.length > 0,
       );
       const removed = decision.kind === "remove";
-      sink.finish({
+      tail.outcome = {
         content:
           decision.kind === "timeout-error"
             ? `${ERROR_PREFIX} ${TIMEOUT_ERROR_TEXT}`
@@ -271,28 +314,104 @@ async function performTurn(req: ChatTurnRequest, flow: { settled: boolean }): Pr
         removed,
         timedOut,
         aborted: req.signal.aborted,
-      });
-      // 领域事件：assistant 完成消息（保留分支才有最终内容）+ 轮次结束
-      if (!removed && decision.kind !== "timeout-error" && finalized.content) {
-        emitPluginEvent("chat:message", {
-          targetId,
-          role: "assistant",
-          content: finalized.content,
-        });
-      }
-      emitPluginEvent("chat:finished", { targetId });
+      };
+      tail.timeoutError = decision.kind === "timeout-error";
     },
     executeTools: (calls) =>
-      // 公共工具执行器；产物节点差异经 hooks.onToolResult 交消费方
-      runAgentTools(
-        calls,
-        { signal: req.signal, capabilities },
-        req.hooks?.onToolResult ? { onToolResult: req.hooks.onToolResult } : undefined,
-      ),
+      executeToolsWithHook(calls, targetId, req, capabilities),
   });
+
+  // 拦截面（收尾）：可改写最终正文与步骤；veto = 放弃本轮结果（消费方按空回复移除占位）。
+  // 出错路径无收尾结果（已由 onError 交回失败），跳过落地但仍走轮末命名。
+  if (tail.outcome) {
+    const finishHook = await runSerialHook<ChatBeforeFinishPayload>("chat:before-finish", {
+      targetId,
+      content: tail.outcome.content,
+      steps: tail.outcome.steps,
+    });
+    const outcome: ChatTurnOutcome = finishHook.vetoed
+      ? { ...tail.outcome, content: "", steps: [], removed: true }
+      : {
+          ...tail.outcome,
+          ...(finishHook.payload.content !== undefined ? { content: finishHook.payload.content } : {}),
+          ...(finishHook.payload.steps !== undefined ? { steps: finishHook.payload.steps } : {}),
+        };
+    sink.finish(outcome);
+    flow.reported = true;
+    // 领域事件：assistant 完成消息（保留分支且有正文才有；超时降级占位不是「模型的回答」）。
+    // 判定用**改写后**的结果：钩子可能把空回复改成有正文，反之亦然。
+    if (!outcome.removed && !tail.timeoutError && outcome.content) {
+      emitPluginEvent("chat:message", {
+        targetId,
+        role: "assistant",
+        content: outcome.content,
+      });
+    }
+    emitPluginEvent("chat:finished", { targetId });
+  }
 
   // 轮末话题命名（成功与否都不阻塞返回；已命名的目标自动跳过）
   void runAutoNaming(naming, { key: targetId });
+}
+
+/**
+ * 工具执行（含拦截面）：逐次调用先过 `chat:before-tool`（可跳过该次 / 改写名与参数），
+ * 再交公共执行器；结果**按模型 tool_calls 的原始顺序**回填——被跳过的调用补一条「被拒」tool 消息，
+ * 缺了它下一轮请求的 tool_calls 没有应答（多数端点直接 400）。
+ */
+async function executeToolsWithHook(
+  calls: LlmToolCall[],
+  targetId: string,
+  req: ChatTurnRequest,
+  capabilities: ToolCapabilities,
+): Promise<{ messages: LlmMessage[]; results: ToolExecResult[] }> {
+  const decisions: Array<{ keep: boolean; call: LlmToolCall }> = [];
+  for (const call of calls) {
+    const hook = await runSerialHook<ChatBeforeToolPayload>("chat:before-tool", {
+      targetId,
+      id: call.id,
+      name: call.name,
+      arguments: call.arguments,
+    });
+    decisions.push({
+      keep: !hook.vetoed,
+      call: hook.vetoed
+        ? call
+        : {
+            ...call,
+            name: hook.payload.name ?? call.name,
+            arguments: hook.payload.arguments ?? call.arguments,
+          },
+    });
+  }
+  const keptCalls = decisions.filter((d) => d.keep).map((d) => d.call);
+  const out = await runAgentTools(
+    keptCalls,
+    { signal: req.signal, capabilities },
+    req.hooks?.onToolResult ? { onToolResult: req.hooks.onToolResult } : undefined,
+  );
+  // 执行器按入参顺序回填，故按序归位（不能按 toolCallId：兼容网关常不回 id，`client.ts` 统一补空串，
+  // 同轮多次调用会撞同一个键）。被中途中止时执行器会跳过未启动的调用（长度变短），此时不做补写——
+  // 本轮已中止，这些消息不会再进请求。
+  if (out.messages.length !== keptCalls.length || out.results.length !== keptCalls.length) {
+    return { messages: out.messages, results: out.results };
+  }
+  const messages: LlmMessage[] = [];
+  const results: ToolExecResult[] = [];
+  let executed = 0;
+  for (const decision of decisions) {
+    if (decision.keep) {
+      messages.push(out.messages[executed]);
+      results.push(out.results[executed]);
+      executed += 1;
+      continue;
+    }
+    // 被拒的调用：补一条 tool 消息（缺它下一轮请求的 tool_calls 没有应答）+ 一条失败结果
+    // （缺它工具块会停在「结果未回填」的错误态而不是「被拒绝」）
+    messages.push({ role: "tool", toolCallId: decision.call.id, text: TOOL_VETO_TEXT });
+    results.push({ id: decision.call.id, ok: false, summary: TOOL_VETO_TEXT });
+  }
+  return { messages, results };
 }
 
 /**
