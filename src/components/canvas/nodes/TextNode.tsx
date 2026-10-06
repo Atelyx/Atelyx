@@ -1,4 +1,3 @@
-import { Input } from "@/components/common/Input";
 import { IconButton } from "@/components/common/Button";
 import { AlertTriangle, Eye, FileText, Pencil, SlidersHorizontal, StickyNote } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -13,10 +12,10 @@ import { ResizeHandle } from "./ResizeHandle";
 import {
   DEFAULT_TEXT_NODE_HEIGHT,
   DEFAULT_TEXT_NODE_WIDTH,
-  NODE_TYPE_BAR_CLASS,
   NODE_TYPE_COLORS,
 } from "@/constants/canvas";
 import { ConnectionFrame } from "./ConnectionFrame";
+import { NodeHeader } from "./NodeHeader";
 import { useInlineEdit } from "@/hooks/useInlineEdit";
 import { useVaultLinkHandlers } from "@/hooks/useVaultLinkHandlers";
 import { useWikiNodeLocate } from "@/hooks/useWikiNodeLocate";
@@ -175,22 +174,10 @@ export function TextNode({ id, data, width, height, selected }: NodeProps) {
     >
       <ConnectionFrame topType="source" selected={selected} />
 
-      <header
-        className="px-3 py-1.5 border-b rounded-t-md text-xs font-medium flex-shrink-0 flex items-center justify-between gap-1"
-        style={{
-          cursor: "grab",
-          borderColor: "var(--border-subtle)",
-          background: "var(--bg-tertiary)",
-          color: "var(--text-secondary)",
-        }}
-      >
-        {/* 类型标识：3px 色条（文本） */}
-        <span
-          className={NODE_TYPE_BAR_CLASS}
-          style={{ background: NODE_TYPE_COLORS.text }}
-        />
-        <span className="inline-flex items-center gap-1 min-w-0 flex-1 overflow-hidden">
-          {isSaved ? (
+      <NodeHeader
+        typeColor={NODE_TYPE_COLORS.text}
+        icon={
+          isSaved ? (
             <StickyNote size={14} className="flex-shrink-0" />
           ) : (
             /* 画布内文本节点：文件图标 + 琥珀圆点标记「未保存为笔记」 */
@@ -204,66 +191,53 @@ export function TextNode({ id, data, width, height, selected }: NodeProps) {
                 style={{ background: "var(--warning)" }}
               />
             </span>
-          )}
-          {renameEdit.editing ? (
-            <Input
-              {...renameEdit.inputProps}
-              autoFocus
-              borderless
-              onClick={(e) => e.stopPropagation()}
-              className="nodrag min-w-0 !text-xs"
-            />
-          ) : (
-            <span
-              className="truncate"
-              title={fileMissing || readOnly ? undefined : "双击重命名"}
-              onDoubleClick={
-                fileMissing || readOnly ? undefined : renameEdit.start
-              }
-            >
-              {title || "文本"}
-            </span>
-          )}
-        </span>
-        <span className="flex items-center gap-1 nodrag flex-shrink-0">
-          {/* 这篇笔记上还有谁（对端 presence 上报的编辑面集合，含在笔记面板里打开的） */}
-          {noteEditors.slice(0, 3).map((p) => (
-            <span
-              key={p.peerId}
-              title={`${p.nickname} 打开了这篇笔记`}
-              className="w-2 h-2 rounded-full flex-shrink-0"
-              style={{ background: p.color }}
-            />
-          ))}
-          {/* 有属性：跳笔记面板编辑（节点内只渲染正文） */}
-          {hasFrontmatter && file && (
-            <IconButton
-              variant="subtle"
-              size="xs"
-              icon={<SlidersHorizontal size={13} />}
-              label="在笔记面板编辑属性"
-              // subtle 变体只有文字色反馈，此处按钮密排于节点头，补底色避免悬停像没反应
-              className="hover:!bg-[var(--bg-tertiary)]"
-              onClick={(e) => {
-                e.stopPropagation();
-                useAppStore.getState().openNote(file, title || "未命名");
-              }}
-            />
-          )}
-          {!fileMissing && !readOnly && (canEditBody || editing) && (
-            <span onClick={(e) => e.stopPropagation()}>
+          )
+        }
+        title={title}
+        fallbackTitle="文本"
+        renameEdit={renameEdit}
+        renameDisabled={fileMissing || readOnly}
+        actions={
+          <span className="flex items-center gap-1 nodrag flex-shrink-0">
+            {/* 这篇笔记上还有谁（对端 presence 上报的编辑面集合，含在笔记面板里打开的） */}
+            {noteEditors.slice(0, 3).map((p) => (
+              <span
+                key={p.peerId}
+                title={`${p.nickname} 打开了这篇笔记`}
+                className="w-2 h-2 rounded-full flex-shrink-0"
+                style={{ background: p.color }}
+              />
+            ))}
+            {/* 有属性：跳笔记面板编辑（节点内只渲染正文） */}
+            {hasFrontmatter && file && (
               <IconButton
                 variant="subtle"
                 size="xs"
-                icon={editing ? <Eye size={13} /> : <Pencil size={13} />}
-                label={editing ? "预览（Esc 退出）" : "编辑"}
+                icon={<SlidersHorizontal size={13} />}
+                label="在笔记面板编辑属性"
+                // subtle 变体只有文字色反馈，此处按钮密排于节点头，补底色避免悬停像没反应
                 className="hover:!bg-[var(--bg-tertiary)]"
-                onClick={() => (editing ? exitEdit() : enterEdit())}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  useAppStore.getState().openNote(file, title || "未命名");
+                }}
               />
-            </span>
-          )}
-        </span>
-      </header>
+            )}
+            {!fileMissing && !readOnly && (canEditBody || editing) && (
+              <span onClick={(e) => e.stopPropagation()}>
+                <IconButton
+                  variant="subtle"
+                  size="xs"
+                  icon={editing ? <Eye size={13} /> : <Pencil size={13} />}
+                  label={editing ? "预览（Esc 退出）" : "编辑"}
+                  className="hover:!bg-[var(--bg-tertiary)]"
+                  onClick={() => (editing ? exitEdit() : enterEdit())}
+                />
+              </span>
+            )}
+          </span>
+        }
+      />
 
       <div
         className="nodrag nowheel overflow-auto markdown-body max-w-none break-words px-3 py-2 flex-1 min-h-0"

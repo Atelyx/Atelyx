@@ -14,18 +14,17 @@ import type { TableData } from "@/types";
 import { useCanvasStore } from "@/stores/canvasStore";
 import { useVaultStore } from "@/stores/vaultStore";
 import { IconButton } from "@/components/common/Button";
-import { Input } from "@/components/common/Input";
 import { useInlineEdit } from "@/hooks/useInlineEdit";
 import {
   DEFAULT_TABLE_NODE_HEIGHT,
   DEFAULT_TABLE_NODE_WIDTH,
-  NODE_TYPE_BAR_CLASS,
   NODE_TYPE_COLORS,
 } from "@/constants/canvas";
 import { tableTitleFromFile } from "@/utils/filename";
 import { useFileNavigation } from "@/hooks/useFileNavigation";
 import { ResizeHandle } from "./ResizeHandle";
 import { ConnectionFrame } from "./ConnectionFrame";
+import { NodeHeader } from "./NodeHeader";
 
 export function TableNode({ id, data, width, height, selected }: NodeProps) {
   const { title, file, snapshot, fileMissing } = data as unknown as TableData;
@@ -81,57 +80,31 @@ export function TableNode({ id, data, width, height, selected }: NodeProps) {
     >
       <ConnectionFrame topType="source" selected={selected} />
 
-      <header
-        className="px-3 py-1.5 border-b rounded-t-md text-xs font-medium flex-shrink-0 flex items-center justify-between gap-1"
-        style={{
-          cursor: "grab",
-          borderColor: "var(--border-subtle)",
-          background: "var(--bg-tertiary)",
-          color: "var(--text-secondary)",
-        }}
-      >
-        {/* 类型标识：3px 色条（表格） */}
-        <span
-          className={NODE_TYPE_BAR_CLASS}
-          style={{ background: NODE_TYPE_COLORS.table }}
-        />
-        <span className="inline-flex items-center gap-1 min-w-0 flex-1 overflow-hidden">
-          <TableIcon size={14} className="flex-shrink-0" />
-          {renameEdit.editing ? (
-            <Input
-              {...renameEdit.inputProps}
-              autoFocus
-              borderless
+      <NodeHeader
+        typeColor={NODE_TYPE_COLORS.table}
+        icon={<TableIcon size={14} className="flex-shrink-0" />}
+        title={title}
+        fallbackTitle="表格"
+        renameEdit={renameEdit}
+        renameDisabled={fileMissing || readOnly}
+        actions={
+          !fileMissing &&
+          !readOnly && (
+            <div
+              className="flex items-center nodrag"
               onClick={(e) => e.stopPropagation()}
-              className="nodrag min-w-0 !text-xs"
-            />
-          ) : (
-            <span
-              className="truncate"
-              title={fileMissing || readOnly ? undefined : "双击重命名"}
-              onDoubleClick={
-                fileMissing || readOnly ? undefined : renameEdit.start
-              }
             >
-              {title || "表格"}
-            </span>
-          )}
-        </span>
-        {!fileMissing && !readOnly && (
-          <div
-            className="flex items-center nodrag"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <IconButton
-              icon={<ExternalLink size={13} />}
-              label="打开表格窗口"
-              onClick={openTableWindow}
-              size="xs"
-              className="nodrag"
-            />
-          </div>
-        )}
-      </header>
+              <IconButton
+                icon={<ExternalLink size={13} />}
+                label="打开表格窗口"
+                onClick={openTableWindow}
+                size="xs"
+                className="nodrag"
+              />
+            </div>
+          )
+        }
+      />
 
       <div
         className="nodrag nowheel overflow-auto flex-1 min-h-0 px-3 py-2"
