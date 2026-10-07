@@ -32,10 +32,15 @@ function capturePluginSeq(): void {
   if (seq !== null && (pluginLastSeq === null || seq > pluginLastSeq)) pluginLastSeq = seq;
 }
 
-/** 建连请求（传输名 + 连接参数；入站路由由 DocHost 内部接 collabHost 注册表，调用方不必提供）。 */
+/** 建连请求（传输名 + 连接参数；入站路由由 DocHost 内部接 collabHost 注册表，调用方不必提供）。
+ *  onChannelMessage/onMetaChanged/onRenamed 为可选入站嗅探：先于注册表分发调用（默认分发照旧），
+ *  宿主中继借此把真实连接的入站帧转发撕裂窗口；撕裂窗口连 proxy 不传。 */
 export interface ConnectTransportRequest
   extends Omit<CollabTransportOptions, "onChannelMessage" | "onMetaChanged" | "onRenamed"> {
   name: string;
+  onChannelMessage?: CollabTransportOptions["onChannelMessage"];
+  onMetaChanged?: CollabTransportOptions["onMetaChanged"];
+  onRenamed?: CollabTransportOptions["onRenamed"];
 }
 
 /** 建立连接（先 bye + 断开旧连接，再按名连新传输；未注册传输抛错）。
@@ -58,10 +63,18 @@ export function connectTransport(req: ConnectTransportRequest): void {
     onHelloAck: req.onHelloAck,
     onPeers: req.onPeers,
     onPeerPresence: req.onPeerPresence,
-    onChannelMessage: (peerId, channel, file, payload) =>
-      dispatchCollabChannel(channel, peerId, file, payload),
-    onMetaChanged: dispatchCollabMetaChanged,
-    onRenamed: dispatchCollabRenamed,
+    onChannelMessage: (peerId, channel, file, payload) => {
+      req.onChannelMessage?.(peerId, channel, file, payload);
+      dispatchCollabChannel(channel, peerId, file, payload);
+    },
+    onMetaChanged: (key) => {
+      req.onMetaChanged?.(key);
+      dispatchCollabMetaChanged(key);
+    },
+    onRenamed: (oldPath, newPath) => {
+      req.onRenamed?.(oldPath, newPath);
+      dispatchCollabRenamed(oldPath, newPath);
+    },
     onResync: req.onResync,
     onServerError: req.onServerError,
     onStatusChange: req.onStatusChange,

@@ -183,10 +183,10 @@ export function mergeCollabPresence(base: CollabPresence): CollabPresence {
 
 // ===== 身份 → 传输选择（纯函数，依赖注入保持本模块无 store/service 运行时依赖） =====
 
-/** 协作连接目标（resolveCollabTarget 的解析结果，collabStore 据此 connectTransport）。 */
+/** 协作连接目标（resolveCollabTarget 的解析结果，collabStore 据此 connectTransport）。
+ *  transport = space（宿主主窗口直连服务端）| proxy（撕裂窗口转发传输，目标恒为常量）。 */
 export interface CollabTarget {
-  /** 传输工厂名：space（协作空间频道）。 */
-  transport: "space";
+  transport: "space" | "proxy";
   url: string;
   hello: CollabHello;
 }
