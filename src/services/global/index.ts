@@ -73,14 +73,14 @@ export function removeRecentSpace(recentSpaces: RecentSpace[], key: string): Rec
  * 补丁写全局配置：补丁直接交 Rust `patch_global_config`，读盘 → 顶层合并 → 原子写在后端
  * 互斥完成。补丁按顶层字段整体替换（`null` 删除该键；值为 `undefined` 的键经 JSON 序列化
  * 自然缺席、不影响存量字段），与各调用方「整对象提交子字段」的用法一致。
- * 返回本次读到的损坏备份文件名（`null` = 无损坏）：损坏时按空配置 + 补丁写回，等于把
- * 其余字段重置，调用方据此提示用户（必须可见）。
+ * 返回写后完整读取结果：`corruptBackup` 非空 = 本次读到的损坏备份文件名（损坏时按空配置 +
+ * 补丁写回，等于把其余字段重置，调用方据此提示用户，必须可见）；`assemblyVersion` = 写后
+ * 应用装配版本（补丁含组合用户层时自增，调用方据此广播）。
  * 合并必须在后端单点完成：global.json 由 appStore 与 settingsStore 共同写入，跨窗口各有独立 webview，
  * 前端自己做 read-modify-write 会互相覆盖丢字段。
  */
 export async function updateGlobalConfig(
   patch: { [K in keyof GlobalConfig]?: GlobalConfig[K] | null },
-): Promise<string | null> {
-  const { corruptBackup } = await invoke<GlobalConfigRead>("patch_global_config", { patch });
-  return corruptBackup;
+): Promise<GlobalConfigRead> {
+  return invoke<GlobalConfigRead>("patch_global_config", { patch });
 }

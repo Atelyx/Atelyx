@@ -826,7 +826,7 @@ async function commitGlobal(patch: Partial<GlobalConfig>, errMsg: string): Promi
     Object.entries(patch).map(([key, value]) => [key, value ?? null]),
   ) as { [K in keyof GlobalConfig]?: GlobalConfig[K] | null };
   try {
-    notifyGlobalConfigCorrupt(await updateGlobalConfig(wire));
+    notifyGlobalConfigCorrupt((await updateGlobalConfig(wire)).corruptBackup);
   } catch (e) {
     console.error(errMsg, e);
   }
@@ -1250,11 +1250,13 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       // 空值显式发 null：补丁通道里 null = 删键；发 undefined 会在序列化时缺席，
       // 被服务端「缺键 = 保留旧值」语义吞掉，关掉的协作配置重启后回弹
       notifyGlobalConfigCorrupt(
-        await updateGlobalConfig({
-          collabEnabled: get().collabEnabled || null,
-          collabNickname: get().collabNickname || null,
-          collabColor: get().collabColor || null,
-        }),
+        (
+          await updateGlobalConfig({
+            collabEnabled: get().collabEnabled || null,
+            collabNickname: get().collabNickname || null,
+            collabColor: get().collabColor || null,
+          })
+        ).corruptBackup,
       );
       // 配置变更即时生效：重建协作连接（开关/身份变化）
       useCollabStore.getState().applyConfig({
@@ -1510,7 +1512,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     // 空表整字段删除，global.json 不留空壳（与 excludeFolders 空数组删键同口径）
     try {
       notifyGlobalConfigCorrupt(
-        await updateGlobalConfig({ commandShortcuts: Object.keys(next).length ? next : null }),
+        (await updateGlobalConfig({ commandShortcuts: Object.keys(next).length ? next : null }))
+          .corruptBackup,
       );
     } catch (e) {
       console.error("保存命令快捷键失败", e);
@@ -1539,7 +1542,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     set({ globalShortcuts: next });
     try {
       notifyGlobalConfigCorrupt(
-        await updateGlobalConfig({ globalShortcuts: Object.keys(next).length ? next : null }),
+        (await updateGlobalConfig({ globalShortcuts: Object.keys(next).length ? next : null }))
+          .corruptBackup,
       );
     } catch (e) {
       console.error("保存全局快捷键失败", e);

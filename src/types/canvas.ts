@@ -337,6 +337,10 @@ export interface GlobalConfigRead {
   config: GlobalConfig;
   /** 非空 = `global.json` 原文损坏，已按该文件名备份并退回空配置（用户可见提示据此弹出）。 */
   corruptBackup: string | null;
+  /** 应用装配版本（Rust 进程内单调计数器）：插件行状态或组合用户层每次落盘变更自增，
+   *  各窗口据此比对装配快照新旧；应用重启后全部窗口重建重取基线，无需跨进程持久化。
+   *  Rust 侧恒返回；缺省（旧数据/测试替身未填）视为 0 = 从未变更。 */
+  assemblyVersion?: number;
 }
 
 // ===== 外部白板格式（.canvas JSON，只读查看/转换为画布用）=====

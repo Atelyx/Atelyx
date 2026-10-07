@@ -11,26 +11,39 @@ import type { InstalledPlugin, PluginPackageJson } from "@/types";
 vi.mock("@/services/plugins", () => ({
   pluginInstall: vi.fn(),
   pluginInstallLocal: vi.fn(),
-  pluginList: vi.fn(async () => ({ rows: [] })),
+  pluginList: vi.fn(async () => ({ rows: [], assemblyVersion: 0 })),
   pluginSeedDefault: vi.fn(),
   pluginSetEnabled: vi.fn(async () => {}),
   pluginUninstall: vi.fn(async () => {}),
   pluginUpdate: vi.fn(),
   pluginRollback: vi.fn(),
   pluginApplyDefaultLayout: vi.fn(async () => {}),
-  onPluginChanged: vi.fn(async () => () => {}),
+  getAssemblyVersion: vi.fn(async () => 0),
+  onPluginChanged: vi.fn(async (handler: (payload: { id: string; version: number }) => void) => {
+    assemblyBroadcast.pluginChanged.push(handler);
+    return () => {};
+  }),
 }));
 
 vi.mock("@/services/app", () => ({ getAppVersion: vi.fn(async () => "0.0.0") }));
 vi.mock("@/services/dialog", () => ({ pickDirectory: vi.fn() }));
+// 广播 handler 抓取：store 的监听器在首次 load 时注册（ensure* 有模块级守卫，全文件仅注册一次），
+// 测试经此直接派发跨窗口装配广播（plugin-changed / composition-changed）。
+const assemblyBroadcast = vi.hoisted(() => ({
+  pluginChanged: [] as Array<(payload: { id: string; version: number }) => void>,
+  compositionChanged: [] as Array<(version: number) => void>,
+}));
 // 组合接管的用户层读写与跨窗口广播：本文件只验证装配编排，配置层与广播机制各自单测。
 vi.mock("@/services/global", () => ({
   readGlobalConfig: vi.fn(async () => ({ config: { recentVaults: [] }, corruptBackup: null })),
-  updateGlobalConfig: vi.fn(async () => null),
+  updateGlobalConfig: vi.fn(async () => ({ config: { recentVaults: [] }, corruptBackup: null })),
 }));
 vi.mock("@/services/windowBus", () => ({
   emitCompositionChanged: vi.fn(async () => {}),
-  onCompositionChanged: vi.fn(async () => () => {}),
+  onCompositionChanged: vi.fn(async (handler: (version: number) => void) => {
+    assemblyBroadcast.compositionChanged.push(handler);
+    return () => {};
+  }),
 }));
 // 事件发射以替身替代：本文件只验证接线「plugin-msg 入站 → 插件频道订阅注册表投递」，投递本身在 collabHost/kernel 测试覆盖
 vi.mock("@/services/cordis/events", () => ({ emitPluginEvent: vi.fn() }));
@@ -68,13 +81,21 @@ vi.mock("@/stores/appStore", () => ({
   },
 }));
 
-import { pluginInstall, pluginInstallLocal, pluginList, pluginRollback, pluginUninstall, pluginUpdate } from "@/services/plugins";
+import {
+  getAssemblyVersion,
+  pluginInstall,
+  pluginInstallLocal,
+  pluginList,
+  pluginRollback,
+  pluginUninstall,
+  pluginUpdate,
+} from "@/services/plugins";
 import type { PluginRow } from "@/services/plugins";
 import { getAppVersion } from "@/services/app";
 import { pickDirectory } from "@/services/dialog";
 import { mountPluginFromPackage } from "@/services/cordis/packageMount";
 import { registerViewSlot } from "@/services/cordis/slots";
-import { mountPlugin } from "@/services/cordis/loader";
+import { mountPlugin, unmountPlugin } from "@/services/cordis/loader";
 import { readGlobalConfig, updateGlobalConfig } from "@/services/global";
 import { emitCompositionChanged } from "@/services/windowBus";
 import { killProcessTree } from "@/services/shell";
@@ -96,13 +117,55 @@ function row(over: Partial<InstalledPlugin> & { id: string }): InstalledPlugin {
   };
 }
 
+/** 随应用分发的行（无磁盘目录，清单 main 恒为占位串）。 */
+const builtinRow = (id: string): PluginRow => ({
+  id,
+  name: id,
+  version: "1.0.0",
+  type: "panel",
+  installDir: "",
+  sourceKind: "builtin",
+  enabled: true,
+  manifest: { name: id, version: "1.0.0", main: "builtin", atelyx: { name: id, type: "panel" } },
+});
+
+/** 磁盘包行，声明接管给定的目标行。 */
+const providerRow = (id: string, patch: unknown[]): PluginRow => ({
+  id,
+  name: id,
+  version: "1.0.0",
+  type: "background",
+  installDir: "/tmp/provider",
+  sourceKind: "market",
+  enabled: true,
+  manifest: {
+    name: id,
+    version: "1.0.0",
+    main: "src/index.ts",
+    atelyx: { name: id, type: "background", compositionPatch: patch },
+  },
+});
+
 beforeEach(() => {
   vi.clearAllMocks();
-  usePluginStore.setState({ plugins: {}, initialized: false, stateError: null, compositionPatches: {}, composition: null });
-  vi.mocked(pluginList).mockResolvedValue({ rows: [] });
+  // assemblyBroadcast 的 handler 数组不清：监听器注册是模块级一次性（ensure* 守卫），
+  // 清空后广播派发将空转（用例假绿或 waitFor 卡死）。
+  usePluginStore.setState({
+    plugins: {},
+    initialized: false,
+    stateError: null,
+    compositionPatches: {},
+    composition: null,
+    assemblyCursor: 0,
+  });
+  vi.mocked(pluginList).mockResolvedValue({ rows: [], assemblyVersion: 0 });
+  // 装配版本 mock 同源：默认 0 与 pluginList 缺省一致（漏发追平用例依赖两处同源）；
+  // mockReset 清掉上个用例残留的 mockResolvedValue(Once) 队列，防版本计数器跨用例泄漏。
+  vi.mocked(getAssemblyVersion).mockReset();
+  vi.mocked(getAssemblyVersion).mockResolvedValue(0);
   vi.mocked(mountedPluginIds).mockReturnValue([]);
   vi.mocked(readGlobalConfig).mockResolvedValue({ config: { recentVaults: [] }, corruptBackup: null });
-  vi.mocked(updateGlobalConfig).mockResolvedValue(null);
+  vi.mocked(updateGlobalConfig).mockResolvedValue({ config: { recentVaults: [] }, corruptBackup: null });
   vi.mocked(emitCompositionChanged).mockResolvedValue(undefined);
   vi.mocked(pluginUpdate).mockReset();
   vi.mocked(pluginRollback).mockReset();
@@ -470,35 +533,6 @@ describe("磁盘包入口选择（宿主产物优先）", () => {
 });
 
 describe("组合接管装配", () => {
-  /** 随应用分发的行（无磁盘目录，清单 main 恒为占位串）。 */
-  const builtinRow = (id: string): PluginRow => ({
-    id,
-    name: id,
-    version: "1.0.0",
-    type: "panel",
-    installDir: "",
-    sourceKind: "builtin",
-    enabled: true,
-    manifest: { name: id, version: "1.0.0", main: "builtin", atelyx: { name: id, type: "panel" } },
-  });
-
-  /** 磁盘包行，声明接管给定的目标行。 */
-  const providerRow = (id: string, patch: unknown[]): PluginRow => ({
-    id,
-    name: id,
-    version: "1.0.0",
-    type: "background",
-    installDir: "/tmp/provider",
-    sourceKind: "market",
-    enabled: true,
-    manifest: {
-      name: id,
-      version: "1.0.0",
-      main: "src/index.ts",
-      atelyx: { name: id, type: "background", compositionPatch: patch },
-    },
-  });
-
   it("插件声明接管内置行：内置行的位置跑提供者入口，提供者自身行不独立装配", async () => {
     vi.mocked(pluginList).mockResolvedValue({
       rows: [builtinRow("builtin.search"), providerRow("com.test.provider", [{ target: "builtin.search" }])],
@@ -567,8 +601,8 @@ describe("组合接管装配", () => {
     expect(mountPlugin).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ id: "builtin.search" }));
   });
 
-  it("setCompositionImpl：整表落 global.json + 广播 + 重载；清空整字段删除", async () => {
-    // 真实替身：写盘后读回同一份，镜像由加载阶段从磁盘重建
+  it("setCompositionImpl：整表落 global.json + 带版本广播 + 定向重挂；清空整字段删除", async () => {
+    // 真实替身：写盘后读回同一份（返回写后完整读取结果，含装配版本），镜像由加载阶段从磁盘重建
     let stored: Record<string, string> = {};
     vi.mocked(readGlobalConfig).mockImplementation(async () => ({
       config: { recentVaults: [], compositionPatches: stored },
@@ -576,15 +610,21 @@ describe("组合接管装配", () => {
     }));
     vi.mocked(updateGlobalConfig).mockImplementation(async (patch) => {
       stored = patch.compositionPatches ? { ...patch.compositionPatches } : {};
-      return null;
+      return {
+        config: { recentVaults: [], compositionPatches: stored },
+        corruptBackup: null,
+        assemblyVersion: 11,
+      };
     });
+    vi.mocked(getAssemblyVersion).mockResolvedValue(11);
 
     await usePluginStore.getState().setCompositionImpl("builtin.search", "com.test.provider");
 
     expect(updateGlobalConfig).toHaveBeenCalledWith({
       compositionPatches: { "builtin.search": "com.test.provider" },
     });
-    expect(emitCompositionChanged).toHaveBeenCalled();
+    // 广播载荷 = 写后装配版本；本窗口随后按新裁决定向重挂（不跑无条件全量重载）
+    expect(emitCompositionChanged).toHaveBeenCalledWith(11);
     expect(pluginList).toHaveBeenCalledTimes(1);
     expect(usePluginStore.getState().compositionPatches).toEqual({ "builtin.search": "com.test.provider" });
 
@@ -600,6 +640,116 @@ describe("组合接管装配", () => {
     ).rejects.toThrow("写盘失败");
     expect(usePluginStore.getState().compositionPatches).toEqual({});
     expect(emitCompositionChanged).not.toHaveBeenCalled();
+  });
+});
+
+describe("装配版本追平", () => {
+  /** 基线：版本 10 的行集合（provider 接管 builtin.search）。监听器在首次 load 注册，
+   *  之后测试经 assemblyBroadcast 直接派发跨窗口广播。 */
+  beforeEach(async () => {
+    // handler 必须已注册（注册发生在文件内首次 load；数组被清空会让派发空转、用例假绿）
+    expect(assemblyBroadcast.pluginChanged.length).toBeGreaterThan(0);
+    expect(assemblyBroadcast.compositionChanged.length).toBeGreaterThan(0);
+    vi.mocked(pluginList).mockResolvedValue({
+      rows: [builtinRow("builtin.search"), providerRow("com.test.provider", [{ target: "builtin.search" }])],
+      assemblyVersion: 10,
+    });
+    vi.mocked(getAssemblyVersion).mockResolvedValue(10);
+    await usePluginStore.getState().load();
+    vi.mocked(pluginList).mockClear();
+    vi.mocked(mountPlugin).mockClear();
+    vi.mocked(mountPluginFromPackage).mockClear();
+    vi.mocked(unmountPlugin).mockClear();
+    vi.mocked(getAssemblyVersion).mockClear();
+  });
+
+  /** provider 行状态翻转为停用（装配输入变更的模拟）。 */
+  const rowsWithProviderDisabled = (version: number) => ({
+    rows: [
+      builtinRow("builtin.search"),
+      { ...providerRow("com.test.provider", [{ target: "builtin.search" }]), enabled: false },
+    ],
+    assemblyVersion: version,
+  });
+
+  it("同版本重复广播：不触发任何重载", async () => {
+    for (const h of assemblyBroadcast.compositionChanged) h(10);
+    for (const h of assemblyBroadcast.pluginChanged) h({ id: "com.test.provider", version: 10 });
+    // 版本比对在排队前完成（无追平任务入队）：微任务冲刷后仍无任何取数与重挂
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(pluginList).not.toHaveBeenCalled();
+    expect(mountPlugin).not.toHaveBeenCalled();
+    expect(unmountPlugin).not.toHaveBeenCalled();
+  });
+
+  it("漏发一次广播：更高版本仍追平；迟到旧广播忽略", async () => {
+    vi.mocked(pluginList).mockResolvedValue(rowsWithProviderDisabled(12));
+    vi.mocked(getAssemblyVersion).mockResolvedValue(12);
+    // 版本 11 的广播丢失，直接收到 12：按单调比对追平，不要求逐版对账
+    for (const h of assemblyBroadcast.pluginChanged) h({ id: "com.test.provider", version: 12 });
+    await vi.waitFor(() => {
+      expect(mountPlugin).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ id: "builtin.search" }));
+    });
+    // 迟到的版本 11：游标已到 12，忽略（不产生第二轮取数）
+    vi.mocked(pluginList).mockClear();
+    for (const h of assemblyBroadcast.compositionChanged) h(11);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(pluginList).not.toHaveBeenCalled();
+  });
+
+  it("高版本广播：只重挂裁决变化的行，未受影响行不重启", async () => {
+    vi.mocked(pluginList).mockResolvedValue(rowsWithProviderDisabled(11));
+    vi.mocked(getAssemblyVersion).mockResolvedValue(11);
+    for (const h of assemblyBroadcast.pluginChanged) h({ id: "com.test.provider", version: 11 });
+    await vi.waitFor(() => {
+      expect(mountPlugin).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ id: "builtin.search" }));
+    });
+    // builtin.search 由 provider 实现回退内置实现：先撤旧挂载再重挂内置实现
+    expect(unmountPlugin).toHaveBeenCalledWith(expect.anything(), "builtin.search");
+    // provider 停用后接管失效且自身行不装配：无任何磁盘包挂载
+    expect(mountPluginFromPackage).not.toHaveBeenCalled();
+    // 恰好一轮取数（before/after 版本一致，无重跑循环）
+    expect(pluginList).toHaveBeenCalledTimes(1);
+  });
+
+  it("拉取期间装配版本又前移：重跑追平至取数与版本一致后记游标", async () => {
+    vi.mocked(getAssemblyVersion)
+      .mockResolvedValueOnce(12) // 第一轮 before
+      .mockResolvedValueOnce(13) // 第一轮 after（拉取期间他窗又改）→ 重跑
+      .mockResolvedValue(13); // 第二轮起稳定
+    vi.mocked(pluginList).mockResolvedValue(rowsWithProviderDisabled(13));
+    for (const h of assemblyBroadcast.pluginChanged) h({ id: "com.test.provider", version: 13 });
+    await vi.waitFor(() => expect(pluginList).toHaveBeenCalledTimes(2));
+    // 重跑不重复重挂：第一轮已把装配对齐，第二轮 diff 为空。
+    // unmount 计 2 次均在第一轮：diff 拆除 1 次 + spawn 重挂前的自拆除 1 次（防重复注册）。
+    expect(mountPlugin).toHaveBeenCalledTimes(1);
+    expect(unmountPlugin).toHaveBeenCalledTimes(2);
+  });
+
+  it("尚无装配计划（composition 为 null）：追平走全量重载，不在串行队列上死锁", async () => {
+    // boot 首次装载失败过的窗口：composition 为 null、游标停在旧值
+    usePluginStore.setState({ composition: null, assemblyCursor: 0 });
+    vi.mocked(pluginList).mockResolvedValue({
+      rows: [builtinRow("builtin.search"), providerRow("com.test.provider", [{ target: "builtin.search" }])],
+      assemblyVersion: 11,
+    });
+    vi.mocked(getAssemblyVersion).mockResolvedValue(11);
+    for (const h of assemblyBroadcast.compositionChanged) h(11);
+    // 死锁回归断言：若走 syncCompositionMounts 的 load() 兜底会在本队列上自等，waitFor 超时
+    await vi.waitFor(() => expect(pluginList).toHaveBeenCalledTimes(1));
+    expect(usePluginStore.getState().composition).not.toBeNull();
+  });
+
+  it("连续多轮拉取期间都有新变更：退回全量重载兜底", async () => {
+    let version = 10;
+    vi.mocked(getAssemblyVersion).mockImplementation(async () => ++version);
+    vi.mocked(pluginList).mockResolvedValue({
+      rows: [builtinRow("builtin.search"), providerRow("com.test.provider", [{ target: "builtin.search" }])],
+      assemblyVersion: 99,
+    });
+    for (const h of assemblyBroadcast.pluginChanged) h({ id: "com.test.provider", version: 11 });
+    // 追平循环上限 3 轮（每轮取数 1 次）后走全量重载（第 4 次取数）
+    await vi.waitFor(() => expect(pluginList).toHaveBeenCalledTimes(4));
   });
 });
 

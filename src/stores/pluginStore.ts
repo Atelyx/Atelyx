@@ -22,6 +22,7 @@ import {
 } from "@/types";
 import type { AppUiState } from "@/types";
 import {
+  getAssemblyVersion,
   pluginInstall,
   pluginInstallLocal,
   pluginList,
@@ -61,7 +62,7 @@ import {
 import { emitPluginEvent } from "@/services/cordis/events";
 import { auditSnapshot } from "@/services/cordis/audit";
 import { PLUGIN_SERVICE_LABELS, PLUGIN_SERVICE_SENSITIVE } from "@/constants/pluginServices";
-import type { PluginRow } from "@/services/plugins";
+import type { PluginRow, PluginListResult } from "@/services/plugins";
 import type {
   PluginAppPageRegistration,
   PluginSettingRegistration,
@@ -168,6 +169,8 @@ interface PluginStoreState {
   uiRevision: number;
   /** 按槽的注册修订号（槽注册/装饰变化只 bump 对应槽；细粒度槽宿主按槽订阅，防全局重渲染放大）。 */
   slotRevisions: Record<string, number>;
+  /** 本窗口已应用的装配版本游标（Rust 进程内单调计数器）：跨窗口广播按它单调比对，落后才追平。 */
+  assemblyCursor: number;
   /** 组合接管的用户层（global.json 镜像：组合行 id → 实现 id；`"default"` = 该行默认实现）。 */
   compositionPatches: CompositionUserPatches;
   /** 组合裁决快照（每次加载重算；管理页展示归属与冲突，运行时装配按它执行）。 */
@@ -185,6 +188,9 @@ interface PluginStoreState {
    * 插件可声明接管某行，用户层可钉住或改回默认），磁盘包读包入口、否则取随应用分发编译实现。
    */
   load(reason?: PluginLoadReason): Promise<void>;
+  /** 追平装配（跨窗口装配广播触发，入口见模块层 handleAssemblyBroadcast）：拉最新行集合与
+   *  组合用户层重算裁决后按 diff 定向重挂，未受影响行不重启。 */
+  reconcileAssembly(): Promise<void>;
   /** 从 GitHub 仓库安装（repo 为 `owner/repo` 市场引用或完整 git 地址；新装一律停用）。 */
   install(repo: string): Promise<PluginInstallResult>;
   /** 从本地目录安装（junction/符号链接实时引用，源目录改动即时生效）。 */
@@ -335,39 +341,53 @@ async function endPluginShortcuts(ctx: object, id: string): Promise<void> {
   });
 }
 
+/** 组合接管相关读写遇到全局配置损坏时的可见提示（读/写两处同源；原文已由 Rust 侧备份）。 */
+function compositionCorruptMessage(backup: string): string {
+  return `全局配置已损坏，原文备份为 ${backup}（应用数据目录）：组合接管设置已重置`;
+}
+
 let pluginChangeListenerStarted = false;
 
-/** 本窗口是否有版本操作（更新/回退）在途：在途期间 Rust 广播的 plugin-changed 已由操作内的
- * 显式重载覆盖，监听器跳过，避免同窗口连跑两次全量重载（多窗口仍各自收到广播并重载）。
- * 放模块层：监听器是模块级函数（见 ensurePluginChangeListener）。 */
+/** 全量重载与追平共用的串行队列：跨窗口版本事件与当前窗口操作可能同时触发，排队可避免两个
+ *  刷新在 unmount/mount 之间交错而留下孤儿 fiber。队列在模块层：广播入口（本函数所在层）与
+ *  store 的 load 共用同一条链。 */
+let loadQueue: Promise<void> = Promise.resolve();
+
+/** 本窗口是否有装配操作（版本更新/回退/本地重载/启停）在途：在途期间 Rust 广播的装配变更
+ *  已由操作内的显式刷新覆盖（操作自身对齐同步游标），监听器跳过，避免同窗口连跑两轮刷新。
+ *  放模块层：监听器是模块级函数（见 ensurePluginChangeListener）。 */
 let versionOpRunning = false;
+
+/** 跨窗口装配变更广播（plugin-changed / composition-changed）统一入口：版本单调比对，落后才
+ *  排队追平。重复通知（同版本）与过期通知（版本低于游标）直接忽略——漏发的中间版本由更高
+ *  版本追平，无需逐版对账。 */
+function handleAssemblyBroadcast(version: number): void {
+  if (versionOpRunning) return;
+  if (version <= usePluginStore.getState().assemblyCursor) return;
+  const next = loadQueue.then(
+    () => usePluginStore.getState().reconcileAssembly(),
+    () => usePluginStore.getState().reconcileAssembly(),
+  );
+  loadQueue = next.catch(() => {});
+}
 
 function ensurePluginChangeListener(): void {
   if (pluginChangeListenerStarted) return;
   pluginChangeListenerStarted = true;
-  void onPluginChanged(() => {
-    if (versionOpRunning) return;
-    void usePluginStore.getState().load().catch((error) => {
-      console.error("插件变化后重载失败", error);
-    });
-  }).catch((error) => {
+  void onPluginChanged(({ version }) => handleAssemblyBroadcast(version)).catch((error) => {
     pluginChangeListenerStarted = false;
     console.error("插件变化监听启动失败", error);
   });
 }
 
-/** 组合接管用户层跨窗口广播：接管表决定装配计划，其他窗口写盘后本窗口必须重载，
- *  否则各窗口各自跑着不同的实现来源。 */
+/** 组合接管用户层跨窗口广播：接管表决定装配计划，落后窗口按版本比对追平（定向重挂），
+ *  否则各窗口会各自跑着不同的实现来源。 */
 let compositionListenerStarted = false;
 
 function ensureCompositionListener(): void {
   if (compositionListenerStarted) return;
   compositionListenerStarted = true;
-  void onCompositionChanged(() => {
-    void usePluginStore.getState().load().catch((error) => {
-      console.error("组合接管变更后重载失败", error);
-    });
-  }).catch((error) => {
+  void onCompositionChanged((version) => handleAssemblyBroadcast(version)).catch((error) => {
     compositionListenerStarted = false;
     console.error("组合接管变更监听启动失败", error);
   });
@@ -648,12 +668,6 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
   const defaultManifests = (hostVersion: string | null): PluginPackageJson[] =>
     CORDIS_BUILTIN_DEFS.map((d) => builtinManifest(d, hostVersion ?? "0.0.0"));
 
-  /** 拉起单个插件行的运行时：先做兼容校验；行有落位目录则读包入口，否则取编译实现。 */
-/** 组合接管相关读写遇到全局配置损坏时的可见提示（读/写两处同源；原文已由 Rust 侧备份）。 */
-function compositionCorruptMessage(backup: string): string {
-  return `全局配置已损坏，原文备份为 ${backup}（应用数据目录）：组合接管设置已重置`;
-}
-
   /** 随应用编译实现查表：hasOwn 防原型链命中（行 id / 用户层取值可被手改，`constructor` 等会假命中）。 */
   const builtinDefOf = (id: string) =>
     Object.hasOwn(CORDIS_BUILTIN_BY_ID, id) ? CORDIS_BUILTIN_BY_ID[id] : undefined;
@@ -833,6 +847,73 @@ function compositionCorruptMessage(backup: string): string {
     }
   };
 
+  /** 行集合与组合用户层的提示归口（加载与追平两路共用）：随仓库插件目录残留 + 状态文件不可读。 */
+  const notifyRowIssues = (list: PluginListResult): void => {
+    if (list.legacyVaultPluginRoots?.length) {
+      useNotificationStore.getState().notify({
+        level: "warning",
+        message: `以下仓库仍保留随仓库安装的插件目录（.atelyx/plugins），其中的插件不会加载：${list.legacyVaultPluginRoots.join("；")}。如需使用请以应用级重新安装，确认无用后可删除目录`,
+      });
+    }
+    if (list.stateError) {
+      useNotificationStore.getState().notify({ level: "error", message: list.stateError });
+    }
+  };
+
+  /** 拉取装配输入（行集合 + 组合用户层）：加载与追平共用的取数路径；通知与落 store 归调用方
+   *  （两路对 keepMounted / unmountAll 的编排不同）。 */
+  const fetchAssemblyInputs = async (): Promise<{
+    hostVersion: string | null;
+    list: PluginListResult;
+    plugins: Record<string, InstalledPlugin>;
+    userPatches: CompositionUserPatches;
+  }> => {
+    const hostVersion = await getAppVersion().catch(() => null);
+    const list = await pluginList(defaultManifests(hostVersion));
+    // 随仓库安装的插件目录不再受支持（插件统一应用级加载）：提示口径见 notifyRowIssues。
+    const plugins: Record<string, InstalledPlugin> = {};
+    for (const row of list.rows) plugins[row.id] = toInstalled(row);
+    const userPatches = await readCompositionPatches();
+    return { hostVersion, list, plugins, userPatches };
+  };
+
+  /** 本窗口显式装配操作（启停/本地重载）完成后对齐同步游标：操作已把本窗口对齐到磁盘最新
+   *  输入，对齐后随后到达的自身广播按游标跳过，不再多跑一轮追平。 */
+  const syncAssemblyCursor = async (): Promise<void> => {
+    const version = await getAssemblyVersion().catch(() => null);
+    if (version !== null && version > get().assemblyCursor) set({ assemblyCursor: version });
+  };
+
+  /**
+   * 追平装配（触发入口 = 模块层 handleAssemblyBroadcast）：拉最新行集合与组合用户层重算裁决，
+   * 按 diff 定向重挂，未受影响行不重启。拉取前后核对装配版本一致才记游标——拉取期间又有新
+   * 变更则重跑（有限次后退回全量重载，全量自身记游标，后续广播继续追平）。
+   */
+  const reconcileAssembly = async (): Promise<void> => {
+    // 尚无装配计划（boot 首次装载失败过 = composition 为 null）无从 diff：全量直调兜底。
+    // 不能放行给 syncCompositionMounts 的 get().load() 兜底——load 经同一 loadQueue 排队，
+    // 在本函数（队列元素）内等待会自等死锁（与循环兜底同理由）。
+    if (!get().composition) {
+      await performLoad();
+      return;
+    }
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const before = await getAssemblyVersion().catch(() => get().assemblyCursor);
+      const { list, plugins, userPatches } = await fetchAssemblyInputs();
+      notifyRowIssues(list);
+      set({ plugins, initialized: true, stateError: list.stateError ?? null, compositionPatches: userPatches });
+      set((s) => ({ uiRevision: s.uiRevision + 1 }));
+      await syncCompositionMounts();
+      const after = await getAssemblyVersion().catch(() => before);
+      if (after === before) {
+        set({ assemblyCursor: after });
+        return;
+      }
+    }
+    // 本函数跑在串行队列上：兜底全量直调 performLoad（经 load() 再排队会同链自等死锁）
+    await performLoad();
+  };
+
   const performLoad = async (reason?: PluginLoadReason): Promise<void> => {
     ensurePluginChangeListener();
     ensureCompositionListener();
@@ -851,19 +932,8 @@ function compositionCorruptMessage(backup: string): string {
     ensureSlotOverrideAccess();
     ensureRuntimeChangeEvents();
     installCommandHotkeys(() => useSettingsStore.getState().commandShortcuts);
-    const hostVersion = await getAppVersion().catch(() => null);
-    const { rows, stateError, legacyVaultPluginRoots } = await pluginList(defaultManifests(hostVersion));
-    // 随仓库安装的插件目录不再受支持（插件统一应用级加载）：Rust 侧探测到仍在的目录时汇总提示，
-    // 保留「装了但看不到」的可解释性，不静默。
-    if (legacyVaultPluginRoots?.length) {
-      useNotificationStore.getState().notify({
-        level: "warning",
-        message: `以下仓库仍保留随仓库安装的插件目录（.atelyx/plugins），其中的插件不会加载：${legacyVaultPluginRoots.join("；")}。如需使用请以应用级重新安装，确认无用后可删除目录`,
-      });
-    }
-    const plugins: Record<string, InstalledPlugin> = {};
-    for (const row of rows) plugins[row.id] = toInstalled(row);
-    const userPatches = await readCompositionPatches();
+    const { hostVersion, list, plugins, userPatches } = await fetchAssemblyInputs();
+    notifyRowIssues(list);
     // 切仓库保活：仅此原因豁免——声明保活的健康启用行且当前真实挂载的插件，清场/重挂/收尾全部跳过，
     // 运行时、UI 贡献与托管进程原地保留（行 phase 直接置 active，运行时未动）。停用/卸载/更新/
     // 安装等其余重载原因不豁免：插件行状态可能已变，全量重建才是对那些场景的正确响应。
@@ -871,11 +941,11 @@ function compositionCorruptMessage(backup: string): string {
       reason === "vault-switch" ? collectKeepMounted(plugins, mountedPluginIds(getKernel())) : new Set<string>();
     for (const id of keepMounted) plugins[id] = { ...plugins[id], phase: "active" };
     await unmountAll(getKernel(), keepMounted);
-    set({ plugins, initialized: true, stateError: stateError ?? null, compositionPatches: userPatches });
-    if (stateError) {
-      useNotificationStore.getState().notify({ level: "error", message: stateError });
-    }
+    set({ plugins, initialized: true, stateError: list.stateError ?? null, compositionPatches: userPatches });
     set((s) => ({ uiRevision: s.uiRevision + 1 }));
+    // 拉取到的输入对应此刻的装配版本：spawn 耗时期间到达的广播按游标比对排队追平
+    //（缺省按 0 = 从未变更处理；游标单调不回拨，防缺省值抹掉已确认的进度）
+    set((s) => ({ assemblyCursor: Math.max(s.assemblyCursor, list.assemblyVersion ?? 0) }));
     // 裁决在行集合落定之后算（实现可用性要读行状态）；装配计划按行序，被引用为实现的插件行不独立装配。
     const resolution = resolveCompositionNow(userPatches);
     set({ composition: resolution });
@@ -915,8 +985,11 @@ function compositionCorruptMessage(backup: string): string {
         message: `插件「${id}」的残留全局快捷键未能注销：${message}`,
       });
     }
+    // boot 窗口期他窗变更补偿：拉行后装配版本已前移 = 有变更未进本窗口，排队追平一轮
+    //（追平与广播幂等，重复触发无害）
+    const bootVersion = await getAssemblyVersion().catch(() => list.assemblyVersion ?? 0);
+    if (bootVersion > get().assemblyCursor) handleAssemblyBroadcast(bootVersion);
   };
-  let loadQueue: Promise<void> = Promise.resolve();
 
   return {
     plugins: {},
@@ -924,6 +997,7 @@ function compositionCorruptMessage(backup: string): string {
     stateError: null,
     uiRevision: 0,
     slotRevisions: {},
+    assemblyCursor: 0,
     compositionPatches: {},
     composition: null,
     marketItems: [],
@@ -936,13 +1010,16 @@ function compositionCorruptMessage(backup: string): string {
      * 按装配顺序重建。语义 =「重置到当前插件行状态」，可在 boot / 切仓库 / 安装更新后安全重复调用。
      */
     load: (reason?: PluginLoadReason) => {
-      // 全量重载串行执行：跨窗口版本事件与当前窗口操作可能同时触发，排队可避免两个 load
-      // 在 unmount/mount 之间交错而留下孤儿 fiber。reason 显式透传（不走函数引用直传，
-      // 防止队列 rejection 值被误当参数）；保活判定在队列内执行时进行，集合取当时的挂载状态。
+      // 全量重载串行执行（队列在模块层，与追平共用）：跨窗口版本事件与当前窗口操作可能同时
+      // 触发，排队可避免两个 load 在 unmount/mount 之间交错而留下孤儿 fiber。reason 显式透传
+      //（不走函数引用直传，防止队列 rejection 值被误当参数）；保活判定在队列内执行时进行，
+      // 集合取当时的挂载状态。
       const next = loadQueue.then(() => performLoad(reason), () => performLoad(reason));
       loadQueue = next.catch(() => {});
       return next;
     },
+
+    reconcileAssembly,
 
     install: async (repo) => {
       const before = new Set(Object.keys(get().plugins));
@@ -991,11 +1068,18 @@ function compositionCorruptMessage(backup: string): string {
     setEnabled: async (id, enabled) => {
       const p = get().plugins[id];
       if (!p || p.enabled === enabled) return;
-      await pluginSetEnabled(id, enabled);
-      set((s) => ({ plugins: { ...s.plugins, [id]: { ...s.plugins[id], enabled } } }));
-      // 启停会改变组合裁决的两侧（该插件的接管声明、以及它作为实现提供者的可用性），
-      // 故按新裁决对齐装配计划；只重挂受影响的那些行，别的插件运行时与托管进程不动。
-      await syncCompositionMounts();
+      // 启停按版本操作口径抑制广播追平：Rust 广播在操作完成前到达时游标未对齐，抑制后由
+      // 尾部对齐跳过（见 handleAssemblyBroadcast / syncAssemblyCursor）。
+      await runTracked(async () => {
+        await pluginSetEnabled(id, enabled);
+        set((s) => ({ plugins: { ...s.plugins, [id]: { ...s.plugins[id], enabled } } }));
+        // 先对齐游标再重挂（与 setCompositionImpl 的「先记版本」同序）：重挂抛错时游标已对齐，
+        // 被抑制的本窗口自身广播不留下漏追平的窗口
+        await syncAssemblyCursor();
+        // 启停会改变组合裁决的两侧（该插件的接管声明、以及它作为实现提供者的可用性），
+        // 故按新裁决对齐装配计划；只重挂受影响的那些行，别的插件运行时与托管进程不动。
+        await syncCompositionMounts();
+      });
     },
 
     update: async (id) => {
@@ -1065,8 +1149,10 @@ function compositionCorruptMessage(backup: string): string {
         // 挂载失败如实上抛（行上已有分段诊断）：新代码没跑起来就不算重载成功。
         const mounted = [...affected].map((rowId) => get().plugins[rowId]).find((p) => p?.phase === "failed");
         if (mounted) {
+          await syncAssemblyCursor();
           throw new Error(mounted.failure?.message ?? "重载后挂载失败");
         }
+        await syncAssemblyCursor();
       });
     },
 
@@ -1198,20 +1284,25 @@ function compositionCorruptMessage(backup: string): string {
     setCompositionImpl: async (rowId, impl) => {
       // 现读最新表再改：内存镜像可能滞后于另一个窗口的写入，用旧镜像整表提交会把别人的改动抹掉。
       // 读失败原样上抛（不按空表写回——那会连带清掉别的行）。
-      const { config, corruptBackup } = await readGlobalConfig();
-      const next = sanitizeCompositionPatches(config.compositionPatches);
+      const current = await readGlobalConfig();
+      const next = sanitizeCompositionPatches(current.config.compositionPatches);
       if (impl) next[rowId] = impl;
       else delete next[rowId];
-      await updateGlobalConfig({ compositionPatches: Object.keys(next).length ? next : null });
+      const { config, corruptBackup, assemblyVersion } = await updateGlobalConfig({
+        compositionPatches: Object.keys(next).length ? next : null,
+      });
       if (corruptBackup) {
         useNotificationStore.getState().notify({
           level: "error",
           message: compositionCorruptMessage(corruptBackup),
         });
       }
-      // 先广播（其他窗口按新表重载），再本窗口重载（改动方负责把自己对齐到真源）
-      await emitCompositionChanged().catch(() => undefined);
-      await get().load();
+      // 内存表取写后全表（Rust 锁内读盘合并的落盘事实，含并发窗口的改动）
+      set({ compositionPatches: sanitizeCompositionPatches(config.compositionPatches) });
+      // 先记版本再广播：本窗口自己的广播按游标跳过；随后按新裁决定向重挂，不跑全量重载
+      set((s) => ({ assemblyCursor: Math.max(s.assemblyCursor, assemblyVersion ?? 0) }));
+      await emitCompositionChanged(assemblyVersion ?? 0).catch(() => undefined);
+      await syncCompositionMounts();
     },
   };
 });

@@ -33,10 +33,10 @@ export function emitPanelLayoutOp(windowId: string, op: PanelLayoutOp): Promise<
   return emit("panel-layout-op", { windowId, op });
 }
 
-/** 广播组合接管用户层已变更（写盘方调用）：接管表决定装配计划，其他窗口据此重载插件运行时，
- *  否则各窗口会各自跑着不同的实现来源。 */
-export function emitCompositionChanged(): Promise<void> {
-  return emit("composition-changed");
+/** 广播组合接管用户层已变更（写盘方调用）：载荷 = 写后应用装配版本（广播不带表内容——
+ *  global.json 在本机各窗口读得到），其他窗口版本比对落后者拉输入重算裁决后定向重挂。 */
+export function emitCompositionChanged(version: number): Promise<void> {
+  return emit("composition-changed", { version });
 }
 
 // ---------- listen ----------
@@ -49,7 +49,7 @@ export function onPanelLayoutOp(
   );
 }
 
-/** 订阅组合接管用户层变更（每个窗口各订一份，收到后重载插件运行时）。 */
-export function onCompositionChanged(handler: () => void): Promise<UnlistenFn> {
-  return listen("composition-changed", () => handler());
+/** 订阅组合接管用户层变更（每个窗口各订一份）：载荷 = 写后应用装配版本。 */
+export function onCompositionChanged(handler: (version: number) => void): Promise<UnlistenFn> {
+  return listen<{ version: number }>("composition-changed", (e) => handler(e.payload.version));
 }

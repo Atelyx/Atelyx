@@ -36,6 +36,10 @@ export interface PluginListResult {
   /** 仍保留随仓库安装插件目录（`<root>/.atelyx/plugins` 非空）的仓库根：随仓库安装已不再支持，
    *  其中的插件不会加载，由调用方汇总提示；空/缺省 = 无。 */
   legacyVaultPluginRoots?: string[];
+  /** 应用装配版本（Rust 进程内单调计数器快照）：行集合与装配输入的版本锚，
+   *  与 global.json 读写的 `assemblyVersion` 同源；跨窗口据此比对装配快照新旧。
+   *  Rust 侧恒返回；缺省（测试替身未填）视为 0 = 从未变更。 */
+  assemblyVersion?: number;
 }
 
 /** 列出全部插件行（先按默认组合清单增量播种随应用分发的行，再列出磁盘包行）。 */
@@ -91,9 +95,15 @@ export function pluginRebuildLocal(id: string): Promise<PluginRow> {
   return invoke<PluginRow>("plugin_rebuild_local", { id });
 }
 
-/** 订阅其他窗口完成的插件版本变化；各窗口据此重载自己的运行时。 */
-export function onPluginChanged(handler: (payload: { id: string }) => void): Promise<UnlistenFn> {
-  return listen<{ id: string }>("plugin-changed", (event) => handler(event.payload));
+/** 读取当前应用装配版本（Rust 进程内单调计数器）：追平流程用它核对拉取前后输入是否仍新鲜。 */
+export function getAssemblyVersion(): Promise<number> {
+  return invoke<number>("plugin_assembly_version");
+}
+
+/** 订阅其他窗口完成的插件行变更（启停/安装/卸载/版本操作）：载荷带装配版本，
+ *  各窗口据此比对自身装配快照新旧，落后者拉输入重算裁决后定向重挂。 */
+export function onPluginChanged(handler: (payload: { id: string; version: number }) => void): Promise<UnlistenFn> {
+  return listen<{ id: string; version: number }>("plugin-changed", (event) => handler(event.payload));
 }
 
 /** 读取插件入口源码（path 缺省 = 清单 main）。 */

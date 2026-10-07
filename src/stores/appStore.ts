@@ -407,7 +407,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   setAutoUpdate: async (enabled) => {
     set({ autoUpdate: enabled });
     try {
-      notifyGlobalConfigCorrupt(await updateGlobalConfig({ autoUpdate: enabled }));
+      notifyGlobalConfigCorrupt((await updateGlobalConfig({ autoUpdate: enabled })).corruptBackup);
     } catch (e) {
       console.error("保存自动检查更新配置失败", e);
     }
@@ -416,7 +416,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   setAndroidStorageOnboarded: async (shown) => {
     set({ androidStorageOnboarded: shown });
     try {
-      notifyGlobalConfigCorrupt(await updateGlobalConfig({ androidStorageOnboarded: shown }));
+      notifyGlobalConfigCorrupt(
+        (await updateGlobalConfig({ androidStorageOnboarded: shown })).corruptBackup,
+      );
     } catch (e) {
       console.error("保存存储引导状态失败", e);
     }
@@ -548,7 +550,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       // 登记最近仓库失败不阻塞切换：global.json 写入异常（权限/磁盘）只影响最近列表，
       // 若放行抛错会被下方 catch 吞掉，导致后续重载（配置/画布列表/文件树/AI 会话）全部跳过
       try {
-        notifyGlobalConfigCorrupt(await updateGlobalConfig({ recentVaults: recents }));
+        notifyGlobalConfigCorrupt((await updateGlobalConfig({ recentVaults: recents })).corruptBackup);
       } catch (e) {
         console.error("登记最近仓库失败", e);
       }
@@ -663,7 +665,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       notifyVaultLeaving();
       // recentSpaces 落盘 global.json（失败不阻塞切换，同 recentVaults）
       try {
-        notifyGlobalConfigCorrupt(await updateGlobalConfig({ spaces }));
+        notifyGlobalConfigCorrupt((await updateGlobalConfig({ spaces })).corruptBackup);
       } catch (e) {
         console.error("登记最近空间失败", e);
       }
@@ -762,7 +764,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   removeRecentVault: async (root) => {
     const recents = dropVaultFromRecents(get().recentVaults, root);
     try {
-      notifyGlobalConfigCorrupt(await updateGlobalConfig({ recentVaults: recents }));
+      notifyGlobalConfigCorrupt((await updateGlobalConfig({ recentVaults: recents })).corruptBackup);
     } catch (e) {
       console.error("更新最近仓库列表失败", e);
     }
