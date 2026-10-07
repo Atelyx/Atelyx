@@ -213,6 +213,7 @@ pub fn run() {
             commands::home::list_repo_history,
             // 插件平台（安装/卸载/启用/更新/读入口/插件数据/默认组合播种；见 commands/plugin.rs）
             commands::plugin::plugin_list,
+            commands::plugin::plugin_assembly_version,
             commands::plugin::plugin_install,
             commands::plugin::plugin_install_local,
             commands::plugin::plugin_uninstall,

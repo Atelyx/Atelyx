@@ -107,6 +107,8 @@ pub struct PluginListResult {
     /// 已不再支持，这些目录中的插件不会加载，前端据此汇总提示。
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub legacy_vault_plugin_roots: Vec<String>,
+    /// 应用装配版本快照（见 ASSEMBLY_VERSION）：行集合与装配输入的版本锚，前端据此记同步游标。
+    pub assembly_version: u64,
 }
 
 /// 成功更新后保留的一代旧代码定位记录（随 `PluginSource` 持久化；回退成功后清空）。
@@ -686,6 +688,8 @@ fn mutate_plugin_state_at<T>(
     let (out, changed) = f(&mut state)?;
     if changed {
         write_plugin_state_at(path, &state)?;
+        // 实质变更已落盘：装配输入变了，版本前移（读取命令与广播据此携带新版本）
+        bump_assembly_version();
     }
     Ok(out)
 }
@@ -1135,8 +1139,30 @@ fn locate_plugin_root(extract_dir: &Path) -> Result<PathBuf, String> {
 
 // ===== 安装 / 卸载 / 更新 =====
 
+/// 应用装配版本（进程内单调计数器）：插件行状态或组合用户层每次落盘变更自增。
+/// 广播与各读取命令携带该版本，各窗口据此比对装配快照新旧——通知丢失由后续更高版本
+/// 追平，无需逐版对账。应用重启后全部窗口重建重取基线，无需跨进程持久化。
+static ASSEMBLY_VERSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 自增并返回新版本号（写盘成功路径调用）。
+pub fn bump_assembly_version() -> u64 {
+    ASSEMBLY_VERSION.fetch_add(1, std::sync::atomic::Ordering::Release) + 1
+}
+
+/// 读当前版本号（广播与读取命令快照用）。
+pub fn assembly_version() -> u64 {
+    ASSEMBLY_VERSION.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// 测试专用闸锁：版本计数器是进程级全局静态，并行测试共享。凡断言版本或经实质变更前移
+/// 版本的测试都先取它，把「读版本 → 触发变更 → 读版本」变成独占窗口——相等断言不被其他
+/// 测试的并发 bump 打穿（bump 源：本模块状态事务回归、global 的补丁测试）。
+#[cfg(test)]
+pub(crate) static ASSEMBLY_TEST_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn emit_plugin_changed(app: &AppHandle, id: &str) {
-    if let Err(e) = app.emit("plugin-changed", serde_json::json!({ "id": id })) {
+    let version = assembly_version();
+    if let Err(e) = app.emit("plugin-changed", serde_json::json!({ "id": id, "version": version })) {
         eprintln!("[plugin] 广播插件变化失败：{e}");
     }
 }
@@ -1265,6 +1291,8 @@ async fn install_plugin_dir(
     let warning = restore_retained_data(&retention_base, &id, &target);
     let mut info = plugin_info_from(&target, &manifest, source_kind, enabled);
     info.warning = warning;
+    // 落位即行集合变更：广播让其他窗口刷新行列表（载荷带装配版本，见 emit_plugin_changed）
+    emit_plugin_changed(app, &id);
     Ok(info)
 }
 
@@ -1386,7 +1414,14 @@ pub fn plugin_list(app: AppHandle, defaults: Vec<Value>) -> Result<PluginListRes
         rows: out,
         state_error: if state_readable { None } else { state_error },
         legacy_vault_plugin_roots: roots_with_legacy_plugin_dirs(&known_roots),
+        assembly_version: assembly_version(),
     })
+}
+
+/// 读取当前应用装配版本（追平流程核对拉取前后输入是否仍新鲜用）。
+#[tauri::command]
+pub fn plugin_assembly_version() -> u64 {
+    assembly_version()
 }
 
 /// 恢复默认装配（用户显式触发）：把 `entries`（默认组合清单）里缺失的行补建回默认启用。
@@ -1738,6 +1773,8 @@ pub fn plugin_uninstall(app: AppHandle, id: String, keep_data: Option<bool>) -> 
             }
         }
     }
+    // 行集合变更广播（见 install_plugin_dir 尾部）
+    emit_plugin_changed(&app, &id);
     Ok(())
 }
 
@@ -1918,20 +1955,28 @@ pub fn plugin_set_enabled(app: AppHandle, id: String, enabled: bool) -> Result<(
     // 锁外快照会让两个窗口并发各停一个主题时都看到 2 个主题、最终停到 0。
     let _io_guard = PLUGIN_IO_LOCK.lock().map_err(|_| "插件文件忙，请重试".to_string())?;
     if enabled {
-        return update_plugin_state(&app, |fresh| {
+        let result = update_plugin_state(&app, |fresh| {
             fresh.enabled.insert(id.clone(), true);
             Ok(((), true))
         });
+        if result.is_ok() {
+            emit_plugin_changed(&app, &id);
+        }
+        return result;
     }
     let pstate = read_plugin_state(&app)?;
     let theme_ids = enabled_theme_ids(&app, &pstate, Some(&id));
-    update_plugin_state(&app, |fresh| {
+    let result = update_plugin_state(&app, |fresh| {
         if let Some(msg) = theme_conservation_violation(fresh, &theme_ids, &id) {
             return Err(msg);
         }
         fresh.enabled.remove(&id);
         Ok(((), true))
-    })
+    });
+    if result.is_ok() {
+        emit_plugin_changed(&app, &id);
+    }
+    result
 }
 
 /// 应用插件声明的默认布局（每插件一次性）：
@@ -3127,6 +3172,8 @@ mod tests {
     /// （丢 `sources` 会让更新/按名卸载持续失效，丢 `enabled` 会让开关静默回退）。
     #[test]
     fn concurrent_state_updates_keep_all_fields() {
+        // 16 次实质变更都会前移装配版本：取闸锁防止与版本断言用例的独占窗口交错
+        let _gate = ASSEMBLY_TEST_GATE.lock().unwrap();
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -3163,6 +3210,36 @@ mod tests {
             assert!(final_state.enabled.contains_key(&format!("com.test.e{i}")), "丢了 enabled[{i}]");
             assert!(final_state.sources.contains_key(&format!("com.test.s{i}")), "丢了 sources[{i}]");
         }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 实质变更落盘后装配版本前移：跨窗口追平的输入信号（计数器是全局静态，
+    /// 精确 +1 断言依赖闸锁独占窗口）。
+    #[test]
+    fn state_change_bumps_assembly_version() {
+        let _gate = ASSEMBLY_TEST_GATE.lock().unwrap();
+        let dir = temp_state_dir("assembly-bump");
+        let path = dir.join("plugin-state.json");
+        let before = assembly_version();
+        mutate_plugin_state_at(&path, |s| {
+            s.enabled.insert("com.test.bump".into(), true);
+            Ok(((), true))
+        })
+        .unwrap();
+        assert_eq!(assembly_version(), before + 1, "实质变更落盘应前移装配版本");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 状态未变（changed=false 跳写）不前移版本：列表路径的空读改写不得伪造装配变更，
+    /// 否则全部窗口会被无谓广播反复唤醒。
+    #[test]
+    fn unchanged_state_keeps_assembly_version() {
+        let _gate = ASSEMBLY_TEST_GATE.lock().unwrap();
+        let dir = temp_state_dir("assembly-nobump");
+        let path = dir.join("plugin-state.json");
+        let before = assembly_version();
+        mutate_plugin_state_at(&path, |_s| Ok(((), false))).unwrap();
+        assert_eq!(assembly_version(), before, "无变更不得前移装配版本");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -3214,6 +3291,8 @@ mod tests {
     /// 恰好一个成功——守卫必须在状态锁临界区内对 fresh 重算才挡得住另一窗口。
     #[test]
     fn concurrent_theme_disable_keeps_one_enabled() {
+        // 停用成功会前移装配版本：取闸锁防止与版本断言用例的独占窗口交错
+        let _gate = ASSEMBLY_TEST_GATE.lock().unwrap();
         let dir = temp_state_dir("theme-conservation");
         let path = dir.join("plugin-state.json");
         write_plugin_state_at(

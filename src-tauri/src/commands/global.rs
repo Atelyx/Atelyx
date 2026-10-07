@@ -105,6 +105,9 @@ pub struct GlobalConfigRead {
     pub config: GlobalConfig,
     /// 非空 = `global.json` 原文损坏、已按该文件名备份并退回空配置（前端据此提示用户）
     pub corrupt_backup: Option<String>,
+    /// 应用装配版本快照（进程内单调计数器，计数器本体在 `commands::plugin`）：补丁含组合
+    /// 用户层时自增，前端据此广播并做跨窗口装配快照比对。
+    pub assembly_version: u64,
 }
 
 /// 获取本机设备名（协作身份默认值：昵称留空时前端用它兜底展示）。
@@ -224,6 +227,7 @@ pub fn read_global_config(app: AppHandle) -> Result<GlobalConfigRead, String> {
     Ok(GlobalConfigRead {
         config,
         corrupt_backup,
+        assembly_version: crate::commands::plugin::assembly_version(),
     })
 }
 
@@ -242,25 +246,22 @@ pub fn write_global_config(app: AppHandle, mut config: GlobalConfig) -> Result<(
 /// 后写者会基于旧读数覆盖先写者的补丁（丢字段）。
 static PATCH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-
-
-/// 全局配置补丁写（应用级写入单点）：读盘 → 顶层合并 → 原子写 → 返回写后完整配置
-/// （含本次读到的损坏备份文件名）。整条命令在互斥锁内完成，跨窗口并发补丁不再互相覆盖。
+/// 补丁事务主体（PATCH_LOCK 内）：读盘 → 顶层合并 → 原子写 → 返回写后完整配置
+/// （含本次读到的损坏备份文件名）。补丁含 compositionPatches = 装配输入变更，提交时
+/// 前移装配版本（`null` 删键同样是变更，contains_key 已覆盖）。
 ///
 /// 为什么是顶层浅替换（补丁键覆盖同名字段、`null` 删除该键）而非 RFC 7386 深合并：
 /// themeSettings 的删键语义依赖整字段替换（前端先在内存里删好键再整对象提交），
 /// 深合并会让「删除的键」从旧值里复活；顶层字段全部由前端整对象提交，浅替换与
-/// 原 read-modify-write 行为逐字段一致。
-#[tauri::command]
-pub fn patch_global_config(app: AppHandle, patch: serde_json::Value) -> Result<GlobalConfigRead, String> {
+/// 原 read-modify-write 行为逐字段一致。拆 `_at` 是为绕开 AppHandle 对临时路径做事务级单测。
+fn patch_global_config_at(path: &Path, patch: &serde_json::Value) -> Result<GlobalConfigRead, String> {
     let _guard = PATCH_LOCK
         .lock()
         .map_err(|_| "全局配置写锁不可用".to_string())?;
     let patch_obj = patch
         .as_object()
         .ok_or_else(|| "全局配置补丁必须是 JSON 对象".to_string())?;
-    let path = global_config_path(&app)?;
-    let (config, corrupt_backup) = read_global_config_with_backup(&path)?;
+    let (config, corrupt_backup) = read_global_config_with_backup(path)?;
     // 经 serde_json::Value 应用补丁：未知补丁键在反序列化回 GlobalConfig 时被忽略（与读路径同口径），
     // 补丁值类型不匹配则报错不写盘（失败不得静默）
     let mut root = serde_json::to_value(&config).map_err(|e| e.to_string())?;
@@ -278,9 +279,70 @@ pub fn patch_global_config(app: AppHandle, patch: serde_json::Value) -> Result<G
         serde_json::from_value(root).map_err(|e| format!("全局配置补丁字段类型不匹配：{e}"))?;
     config.recent_vaults = normalize_and_dedupe_vaults(config.recent_vaults);
     let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
-    crate::vault::atomic_write(&path, &json)?;
+    crate::vault::atomic_write(path, &json)?;
+    // 补丁含组合用户层 = 装配输入变更：版本前移（`null` 删键同样是变更，contains_key 已覆盖）。
+    // 放在提交成功之后：写盘失败不得留下「版本已前移、磁盘未变」的空转追平信号。
+    if patch_obj.contains_key("compositionPatches") {
+        crate::commands::plugin::bump_assembly_version();
+    }
     Ok(GlobalConfigRead {
         config,
         corrupt_backup,
+        assembly_version: crate::commands::plugin::assembly_version(),
     })
+}
+
+/// 全局配置补丁写（应用级写入单点）：整条命令在互斥锁内完成，跨窗口并发补丁不再互相覆盖。
+#[tauri::command]
+pub fn patch_global_config(app: AppHandle, patch: serde_json::Value) -> Result<GlobalConfigRead, String> {
+    patch_global_config_at(&global_config_path(&app)?, &patch)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::commands::plugin::{assembly_version, ASSEMBLY_TEST_GATE};
+
+    /// 组合用户层补丁（含 `null` 删键）= 装配输入变更，版本前移；其余补丁不动版本。
+    /// 计数器是进程级全局静态：精确增量断言先取闸锁独占窗口（并行测试里其他 bump 源同持此锁）。
+    #[test]
+    fn patch_composition_patches_bumps_assembly_version() {
+        let _gate = ASSEMBLY_TEST_GATE.lock().unwrap();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("atelyx-global-patch-{nanos}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("global.json");
+
+        let before = assembly_version();
+        // 含 compositionPatches：版本 +1，补丁落进写后配置，读取带回新版本
+        let read = patch_global_config_at(
+            &path,
+            &serde_json::json!({ "compositionPatches": { "builtin.search": "default" } }),
+        )
+        .unwrap();
+        assert_eq!(read.assembly_version, before + 1, "含 compositionPatches 的补丁应前移版本");
+        assert_eq!(
+            read.config
+                .composition_patches
+                .as_ref()
+                .and_then(|m| m.get("builtin.search").map(String::as_str)),
+            Some("default"),
+            "补丁应落进写后配置"
+        );
+
+        // `null` 删键同样是装配输入变更：版本 +1，键被移除
+        let read = patch_global_config_at(&path, &serde_json::json!({ "compositionPatches": null })).unwrap();
+        assert_eq!(read.assembly_version, before + 2, "null 删键也是装配变更");
+        assert!(read.config.composition_patches.is_none(), "null 应删掉组合用户层");
+
+        // 其余补丁不动版本
+        let read = patch_global_config_at(&path, &serde_json::json!({ "theme": "com.other" })).unwrap();
+        assert_eq!(read.assembly_version, before + 2, "不含 compositionPatches 的补丁不得前移版本");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
