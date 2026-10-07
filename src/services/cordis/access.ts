@@ -300,9 +300,9 @@ export function getPluginUiStateAccess(): PluginUiStateAccess | null {
 
 /** 宿主对话会话访问（ctx.chat 同源容器面的数据源；builtin.chatpanel 接线注入）。
  *  实现委托对话面板 store 的登记/读写动作（校验、转换与落盘调度都在 store 内）：
- *  读写的就是面板会话（同一批会话文件，磁盘为真源）；面板 store 每窗口一份内存实例，
- *  写盘后经跨窗口对账广播对齐（见 chatPanelStore）。面板插件停用 = 访问复位，
- *  ctx.chat 容器方法据此抛「对话面板能力未就绪」。 */
+ *  读写的就是面板会话（同一批会话文件，磁盘为真源）；容器跨窗口按宿主-镜像模型组织，
+ *  镜像窗口的写意图经 op 转发宿主应用（见 chatPanelStore/chatContainerWire）。面板插件停用
+ *  = 访问复位，ctx.chat 容器方法据此抛「对话面板能力未就绪」。 */
 export interface PluginChatPanelAccess {
   /** 把插件侧消息登记为新面板会话，返回会话 id。 */
   importSession(

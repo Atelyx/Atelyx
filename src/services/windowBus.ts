@@ -1,9 +1,10 @@
 /**
  * 跨窗口事件总线（多窗口面板体系的 Tauri event 封装，纯 I/O，无状态）：只承载前端私有协调事件。
- * 布局与拖拽的权威在 Rust（布局变更经 `layout-broadcast` 全量广播、拖拽经 `drag-session` 广播），不在此层。
+ * 布局与拖拽的权威在 Rust（布局变更经 `layout-broadcast` 全量广播、拖拽经 `drag-session` 广播），
+ * 打开文件上下文真源在 Rust（见 services/hostContext）；会话容器快照/增量/op 线协议在
+ * services/chatContainerWire（宿主-镜像模型），均不在此层。
  */
 import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { VaultIdentity } from "@/services/content/contract";
 import type { DropZone, ViewKind } from "@/types";
 
 /** 一次命中的 drop 目标（本窗口本地计算；指示器渲染用——落点解析在 Rust）。 */
@@ -26,52 +27,10 @@ export type PanelLayoutOp =
   | { op: "moveTab"; tabId: string; toIndex: number }
   | { op: "addView"; view: ViewKind };
 
-export interface OpenFileChangedPayload {
-  vaultRoot: string | null;
-  /** 当前激活仓库身份（local/space；null = 未激活）。撕裂窗口是独立 webview，
-   *  内容面激活态不跨窗口共享，据此自建对应后端（见 factory.activateContentIdentity）。 */
-  vaultIdentity: VaultIdentity | null;
-  vaultName: string;
-  currentCanvasFile: string | null;
-  currentNoteFile: string | null;
-  currentTableFile: string | null;
-  currentNoteTitle: string;
-  currentTableTitle: string;
-}
-
-/** 会话容器跨窗口对账载荷：某窗口写盘成功后广播受影响会话，其他窗口据此把内存副本
- *  对齐磁盘真源（会话容器每窗口一份实例，写盘链各自独立）。 */
-export interface ChatSessionsChangedPayload {
-  /** 发起窗口标识（接收方忽略自己发出的广播）。 */
-  origin: string;
-  /** 消息 .jsonl 已写入的会话 id。 */
-  messages: string[];
-  /** 元数据侧车已写入的会话 id。 */
-  metas: string[];
-  /** 已删除（条目与文件均已清）的会话 id。 */
-  deleted: string[];
-}
-
 // ---------- emit ----------
 
 export function emitPanelLayoutOp(windowId: string, op: PanelLayoutOp): Promise<void> {
   return emit("panel-layout-op", { windowId, op });
-}
-
-/** 广播当前打开文件/仓库（main → all；撕裂窗口据此镜像上下文）。 */
-export function emitOpenFileChanged(payload: OpenFileChangedPayload): Promise<void> {
-  return emit("open-file-changed", payload);
-}
-
-/** 撕裂窗口启动时请求当前仓库/打开文件上下文（panel → main；主窗口以 `open-file-changed` 应答——
- * 窗口 boot 可能晚于主窗口的上下文广播）。 */
-export function emitRequestOpenFileState(): Promise<void> {
-  return emit("request-open-file-state");
-}
-
-/** 广播会话容器写盘结果（写盘方调用；fire-and-forget，失败不影响写盘状态）。 */
-export function emitChatSessionsChanged(payload: ChatSessionsChangedPayload): Promise<void> {
-  return emit("chat-sessions-changed", payload);
 }
 
 /** 广播组合接管用户层已变更（写盘方调用）：接管表决定装配计划，其他窗口据此重载插件运行时，
@@ -88,21 +47,6 @@ export function onPanelLayoutOp(
   return listen<{ windowId: string; op: PanelLayoutOp }>("panel-layout-op", (e) =>
     handler(e.payload.windowId, e.payload.op),
   );
-}
-
-export function onOpenFileChanged(handler: (payload: OpenFileChangedPayload) => void): Promise<UnlistenFn> {
-  return listen<OpenFileChangedPayload>("open-file-changed", (e) => handler(e.payload));
-}
-
-export function onRequestOpenFileState(handler: () => void): Promise<UnlistenFn> {
-  return listen("request-open-file-state", () => handler());
-}
-
-/** 订阅会话容器跨窗口对账广播（每个持有会话容器的窗口各订一份）。 */
-export function onChatSessionsChanged(
-  handler: (payload: ChatSessionsChangedPayload) => void,
-): Promise<UnlistenFn> {
-  return listen<ChatSessionsChangedPayload>("chat-sessions-changed", (e) => handler(e.payload));
 }
 
 /** 订阅组合接管用户层变更（每个窗口各订一份，收到后重载插件运行时）。 */
