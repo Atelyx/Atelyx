@@ -14,6 +14,14 @@ import { useAppStore } from "@/stores/appStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { usePluginStore } from "@/stores/pluginStore";
 import { useCollabStore } from "@/stores/collabStore";
+import {
+  HOST_WINDOW_LABEL,
+  installCollabRelayHost,
+  isCollabHost,
+  pruneCollabRelayWindows,
+  remoteCollabDemandTotal,
+} from "@/services/collab/collabRelay";
+import { sendTransportMessage, sendTransportPresence } from "@/services/collab/docHost";
 import { useVaultStore } from "@/stores/vaultStore";
 import { useNotificationStore } from "@/stores/notificationStore";
 import * as kernelLifecycle from "@/utils/kernelLifecycle";
@@ -174,7 +182,8 @@ interface PanelStore {
 
   /** 释放本窗口托管的视图（flush 落盘 + 清内存；视图离开本窗口时调用）。 */
   releaseView: (view: ViewKind) => Promise<void>;
-  /** 协作连接宿主重算：本窗口托管画布/表格/笔记任一视图且协作开启 → 连接，否则断开。 */
+  /** 协作连接重算（单连接模型）：宿主按全应用插件协作声明总数评估真实连接的建立/拆除；
+   *  撕裂窗口按本窗口声明挂 proxy 转发传输（连接由宿主单点持有）。 */
   syncCollabHost: () => void;
   /** 撕裂窗口关闭上报（用户关闭窗口/≡删除面板；Rust 移除模型条目）。 */
   notifyPanelClosed: () => Promise<void>;
@@ -535,12 +544,29 @@ export const usePanelStore = create<PanelStore>((set, get) => {
       }
       followWindowMoves();
 
+      // 协作中继宿主：主窗口单点持连，转发面注入出站咽喉与状态快照；demand 聚合变化即重评估连接
+      installCollabRelayHost({
+        send: sendTransportMessage,
+        myPeerId: () => useCollabStore.getState().myPeerId,
+        hostState: () => {
+          const s = useCollabStore.getState();
+          return { connected: s.connected, peers: s.peers, myPeerId: s.myPeerId };
+        },
+        onDemandChanged: () => get().syncCollabHost(),
+        onPresenceOut: (presence) => sendTransportPresence(presence),
+      });
+
       // 布局镜像跟随 uiStateStore（Rust 广播收敛）：视图离开本窗口 → releaseView
       // （撕裂出去后 flush 落盘 + 清内存 + 画布视口交接）；aichat 回归主窗口重读盘；协作宿主重算
       const syncFromUi = (): void => {
         const mirror = mirrorFromUiState();
         const prev = get().layoutMirror;
         set({ layoutMirror: mirror });
+        // 消失的撕裂窗口清中继记账（demand/presence；断电式退出无 detach 上行，此处兜底收账）
+        pruneCollabRelayWindows([
+          HOST_WINDOW_LABEL,
+          ...mirror.detachedWindows.map((w) => windowLabelOf(w.id)),
+        ]);
         if (prev) {
           const before = new Set(collectTabs(prev.activeTree).map((t) => t.view));
           const after = new Set(collectTabs(mirror.activeTree).map((t) => t.view));
@@ -847,20 +873,29 @@ export const usePanelStore = create<PanelStore>((set, get) => {
         if (collab.connected) collab.dispose();
         return;
       }
-      // 协作宿主 = 本窗口有插件声明需要协作通道（每个窗口独立持有连接）。
       // 协作需求宿主无从得知，一律由插件（内置领域插件与用户插件一视同仁）经
       // ctx.collab.acquire 声明：计数在 collabStore，随插件启停变化，变化即重评估。
-      if (collab.pluginDemand > 0) {
-        if (!collab.connected) {
-          collab.init({
-            enabled: true,
-            nickname: st.collabNickname,
-            color: st.collabColor,
-            deviceName: st.deviceName,
-          });
+      const init = () =>
+        collab.init({
+          enabled: true,
+          nickname: st.collabNickname,
+          color: st.collabColor,
+          deviceName: st.deviceName,
+        });
+      if (isCollabHost()) {
+        // 宿主：真实连接以全应用声明总数评估（本窗口 + 撕裂窗口上行记账）
+        if (collab.pluginDemand > 0 || remoteCollabDemandTotal() > 0) {
+          if (!collab.connected) init();
+        } else if (collab.connected) {
+          collab.dispose();
         }
-      } else if (collab.connected) {
-        collab.dispose();
+      } else {
+        // 撕裂窗口：只看本窗口声明，连接恒为 proxy 转发传输（目标常量，重复 init 幂等跳过）
+        if (collab.pluginDemand > 0) {
+          if (!collab.connected) init();
+        } else if (collab.connected) {
+          collab.dispose();
+        }
       }
     },
 

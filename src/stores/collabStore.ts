@@ -17,6 +17,16 @@ import { getAppVersion } from "@/services/app";
 import { getToken } from "@/services/space/auth";
 // 空间传输工厂随本模块加载注册进传输注册表（连接按身份选中 space 工厂）
 import { spaceWsUrl } from "@/services/collab/spaceTransport";
+// 转发传输工厂随本模块加载注册进传输注册表（撕裂窗口按角色选中 proxy 工厂）
+import { PROXY_TARGET_HELLO, PROXY_TARGET_URL } from "@/services/collab/proxyTransport";
+import {
+  clearCollabHostPresence,
+  forwardCollabInbound,
+  isCollabHost,
+  loopbackPluginMsg,
+  reportCollabDemand,
+  reportCollabPresence,
+} from "@/services/collab/collabRelay";
 import {
   mergeCollabPresence,
   resolveCollabTarget,
@@ -104,11 +114,18 @@ function randomColorOnce(): string {
   return cachedRandomColor;
 }
 
-/** 按当前身份与配置解析连接目标（建连与重连刷新共用）：space = space 工厂按 spaceId 入房，
- *  每次解析触取登录令牌——身份/令牌/配置变化自动生效；local/无身份/协作关闭 = 不连接（null）。 */
+/** 按当前身份与配置解析连接目标（建连与重连刷新共用）：
+ *  宿主（主窗口）= space 工厂按 spaceId 入房，每次解析触取登录令牌——身份/令牌/配置变化自动生效；
+ *  撕裂窗口 = 复用「该不该连」判定（协作只在协作空间），目标恒为 proxy 常量（重复请求幂等跳过拆建）；
+ *  local/无身份/协作关闭 = 不连接（null）。 */
 async function resolveCurrentTarget(): Promise<CollabTarget | null> {
   const cfg = runtimeCfg;
   if (!cfg) return null;
+  if (!isCollabHost()) {
+    const identity = useAppStore.getState().vaultIdentity ?? null;
+    if (!identity || identity.kind !== "space" || !cfg.enabled) return null;
+    return { transport: "proxy", url: PROXY_TARGET_URL, hello: PROXY_TARGET_HELLO };
+  }
   // 应用版本随 hello 上报（协作房间展示各成员版本）；版本运行期不变，仅首次真实读取，失败降级省略
   const version = await appVersionOnce();
   return resolveCollabTarget({
@@ -148,9 +165,12 @@ export function collabSendSink(
 }
 
 /** 插件通用消息发送（`plugin-msg` 通道；传输层 file 槽承载插件频道名）。返回是否已投递到传输层
- *  （未连接/断开 = false，调用方据此感知消息未发出——协作是尽力而为，不静默）。to 指定 = 定向单播只发该 peer。 */
+ *  （未连接/断开 = false，调用方据此感知消息未发出——协作是尽力而为，不静默）。to 指定 = 定向单播只发该 peer。
+ *  宿主发出后回环广播撕裂窗口（服务端不回放发送者）；撕裂窗口发出经宿主中继回环（proxy 传输）。 */
 export function sendPluginMessage(channel: string, payload: unknown, to?: number): boolean {
-  return sendTransportMessage("plugin-msg", channel, payload, to);
+  const ok = sendTransportMessage("plugin-msg", channel, payload, to);
+  if (ok && isCollabHost()) loopbackPluginMsg(channel, payload, to);
+  return ok;
 }
 
 /** 本端身份（peerId 未连接 = null；昵称/颜色/设备名取当前运行时配置，未 init 为空身份）。
@@ -204,6 +224,9 @@ async function establishConnection(): Promise<void> {
   // 最近一次上报基底同理失效：换房后 republishPresence 不得拿旧仓库的聚焦文件成帧
   lastPresenceBase = null;
   useCollabStore.setState({ connected: false, peers: [] });
+  // 宿主连接（space 工厂）入站帧全量转发撕裂窗口（error 帧不转发——宿主唯一弹点，防重复提示）；
+  // proxy 连接（撕裂窗口）不转发，回调面直接喂本窗口状态
+  const host = target.transport === "space";
   try {
     connectTransport({
       name: target.transport,
@@ -214,7 +237,17 @@ async function establishConnection(): Promise<void> {
         const fresh = await resolveCurrentTarget();
         return fresh?.hello ?? null;
       },
+      ...(host
+        ? {
+            onChannelMessage: (peerId: number, channel: CollabChannel, file: string, payload: unknown) =>
+              forwardCollabInbound({ kind: "channel", peerId, channel, file, payload }),
+            onMetaChanged: (key: string) => forwardCollabInbound({ kind: "meta-changed", key }),
+            onRenamed: (oldPath: string, newPath: string) =>
+              forwardCollabInbound({ kind: "renamed", oldPath, newPath }),
+          }
+        : {}),
       onHelloAck: (peerId) => {
+        if (host) forwardCollabInbound({ kind: "hello-ack", peerId });
         myPeerId = peerId;
         // hello-ack 先于 peers 帧到达（服务端保证）：立即过滤已收快照里的自己 + 暴露本端 peerId
         useCollabStore.setState((s) => ({
@@ -222,9 +255,12 @@ async function establishConnection(): Promise<void> {
           peers: s.peers.filter((p) => p.peerId !== peerId),
         }));
       },
-      onPeers: (peers) =>
-        useCollabStore.setState({ peers: peers.filter((p) => p.peerId !== myPeerId) }),
+      onPeers: (peers) => {
+        if (host) forwardCollabInbound({ kind: "peers", peers });
+        useCollabStore.setState({ peers: peers.filter((p) => p.peerId !== myPeerId) });
+      },
       onPeerPresence: (peerId, presence) => {
+        if (host) forwardCollabInbound({ kind: "peer-presence", peerId, presence });
         if (peerId === myPeerId) return;
         useCollabStore.setState((s) => ({
           peers: s.peers.map((p) => (p.peerId === peerId ? { ...p, presence } : p)),
@@ -252,6 +288,7 @@ async function establishConnection(): Promise<void> {
       // 服务端按最小间隔下发，本端再合并一波，防「重握手大帧 → 更慢 → 再下发」自激。
       // 插件通道无重握手兜底，丢帧经 collab:resync 事件开放给插件自行补发状态（不静默）
       onResync: () => {
+        if (host) forwardCollabInbound({ kind: "resync" });
         const now = Date.now();
         if (now - lastResyncAt < RESYNC_COALESCE_MS) return;
         lastResyncAt = now;
@@ -259,6 +296,7 @@ async function establishConnection(): Promise<void> {
         runCollabReconnects();
       },
       onStatusChange: (connected) => {
+        if (host) forwardCollabInbound({ kind: "status", connected });
         useCollabStore.setState({ connected });
         // 连接建立后补发一次当前 presence：重连/进房间时本端选中立即可见，
         // 否则要等用户下一次选中变化才广播（hello 已先发，同 TCP FIFO 保证先入房）
@@ -305,7 +343,12 @@ function schedulePresenceBroadcast(presence: CollabPresence): void {
   if (broadcastTimer !== null) return;
   broadcastTimer = window.setTimeout(() => {
     broadcastTimer = null;
-    if (pendingPresence) sendTransportPresence(pendingPresence);
+    if (pendingPresence) {
+      // 宿主 presence 进中继聚合器（服务端单 peer 只有一份 presence，聚合值 = 全窗口并集，
+      // 直发会与聚合输出互相覆盖）；撕裂窗口经 proxy 上行，聚合同样在宿主完成
+      if (isCollabHost()) reportCollabPresence(pendingPresence);
+      else sendTransportPresence(pendingPresence);
+    }
     pendingPresence = null;
   }, BROADCAST_THROTTLE_MS);
 }
@@ -348,6 +391,9 @@ export const useCollabStore = create<CollabStoreState>((set) => ({
   retainPluginDemand: () => {
     pluginDemandCount += 1;
     set({ pluginDemand: pluginDemandCount });
+    // 宿主连接的建立以全应用声明总数评估（panelStore.syncCollabHost）：撕裂窗口声明上行宿主
+    // 记账；宿主自身不记账（collabStore.pluginDemand 已承载，进中继表会双计）
+    reportCollabDemand(1);
     let released = false;
     return () => {
       if (released) return;
@@ -355,6 +401,7 @@ export const useCollabStore = create<CollabStoreState>((set) => ({
       // Math.max 兜底：释放函数逃逸出插件生命周期被多余调用时不把计数打成负数
       pluginDemandCount = Math.max(0, pluginDemandCount - 1);
       set({ pluginDemand: pluginDemandCount });
+      reportCollabDemand(-1);
     };
   },
 
@@ -394,6 +441,8 @@ export const useCollabStore = create<CollabStoreState>((set) => ({
     }
     pendingPresence = null;
     lastPresenceBase = null;
+    // 宿主清中继聚合条目（防陈旧焦点并进撕裂窗口的后续聚合输出）；撕裂窗口条目由 proxy detach 上行清理
+    if (isCollabHost()) clearCollabHostPresence();
     set({ connected: false, peers: [], myPeerId: null });
   },
 }));
