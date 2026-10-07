@@ -8,6 +8,7 @@ pub mod global_shortcut;
 pub mod home;
 pub mod keychain;
 pub mod mobile;
+pub mod open_context;
 pub mod plugin;
 pub mod process;
 pub mod search;

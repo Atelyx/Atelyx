@@ -34,7 +34,13 @@ import {
   panelWindowClosed,
 } from "@/services/layout";
 import * as bus from "@/services/windowBus";
-import type { DropTargetInfo, OpenFileChangedPayload } from "@/services/windowBus";
+import type { DropTargetInfo } from "@/services/windowBus";
+import {
+  getOpenFileContext,
+  onOpenFileContextChanged,
+  setOpenFileContext,
+  type OpenFileContext,
+} from "@/services/hostContext";
 import type { DragBroadcast, DragHit } from "@/types";
 import {
   ackExitFlushDone,
@@ -75,8 +81,8 @@ let panelInitialized = false;
 /** 面板窗口一次性接线标志：位置跟随 + 布局镜像/拖拽广播订阅 + 上下文应答监听都只注册一次
  *  （这些注册函数自身无幂等，重试路径重复注册会让同一广播按份数重复触发整条仓库上下文重载链）。 */
 let panelWired = false;
-/** 上下文应答监听注册的在途 promise（重试时复用同一次注册，不重复监听）。 */
-let contextListener: ReturnType<typeof bus.onOpenFileChanged> | null = null;
+/** 上下文广播监听注册的在途 promise（重试时复用同一次注册，不重复监听）。 */
+let contextListener: ReturnType<typeof onOpenFileContextChanged> | null = null;
 /** 本次窗口是否已收到过仓库上下文应答（3s 未应答提示的判据）。 */
 let contextAnswered = false;
 
@@ -286,8 +292,8 @@ export function titleOfTabs(tabs: TabItem[], activeTabId: string | null): string
   return active ? pluginViewLabel(active.view) : "面板";
 }
 
-/** 当前仓库/打开文件上下文广播载荷（主窗口发出，撕裂窗口镜像）。 */
-function currentOpenFilePayload(): bus.OpenFileChangedPayload {
+/** 当前仓库/打开文件上下文（读本窗口 appStore；主窗口写入 Rust 宿主真源，撕裂窗口镜像用）。 */
+function currentOpenFilePayload(): OpenFileContext {
   const s = useAppStore.getState();
   return {
     vaultRoot: s.vaultRoot,
@@ -424,10 +430,10 @@ export const usePanelStore = create<PanelStore>((set, get) => {
     void onDragSession(onDragSessionState).catch((e) => console.error("订阅拖拽会话广播失败", e));
   };
 
-  /** 仓库上下文应答处理器（`open-file-changed`）：镜像当前仓库/身份/打开文件，并按需加载仓库级配置、
-   *  文件树、领域仓库上下文与插件运行时。注册归 initPanel 的一次性接线（重复注册会让每次广播
-   *  按份数重复触发整条重载链）。 */
-  const applyOpenFileContext = (payload: OpenFileChangedPayload): void => {
+  /** 仓库上下文处理器（Rust 宿主广播 / boot 拉取基线共用）：镜像当前仓库/身份/打开文件，并按需加载
+   *  仓库级配置、文件树、领域仓库上下文与插件运行时。注册归 initPanel 的一次性接线（重复注册会让每次
+   *  广播按份数重复触发整条重载链）。 */
+  const applyOpenFileContext = (payload: OpenFileContext): void => {
     contextAnswered = true;
     const app = useAppStore.getState();
     useAppStore.setState({
@@ -469,13 +475,12 @@ export const usePanelStore = create<PanelStore>((set, get) => {
     }
   };
 
-  /** 请求当前仓库/打开文件上下文（面板渲染只依赖布局快照，本段失败只提示、不盖面板）。
-   *  应答监听已在一次性接线里注册完成（listen 是异步 IPC，先发请求会丢应答）。 */
+  /** 拉取当前仓库/打开文件上下文基线（面板渲染只依赖布局快照，本段失败只提示、不盖面板）。
+   *  广播监听已在一次性接线里注册完成：基线快照晚于任何先前广播，基线与增量任意到达序都收敛。 */
   const requestPanelContext = async (): Promise<void> => {
     // 同一失败只提示一次：定时器已弹过「未获取到」时，catch 不再补一条
-    // （listen 注册晚于 3s 才 reject 时 clearTimeout 拦不住已触发的回调）
     let noAnswerNotified = false;
-    // 无应答兜底自请求发出计时：覆盖 emit 自身挂起（主窗口忙/卡住）的情形
+    // 无基线兜底自拉取发出计时：覆盖 invoke 挂起（宿主忙/卡住）的情形
     const noAnswerTimer = window.setTimeout(() => {
       if (contextAnswered) return;
       noAnswerNotified = true;
@@ -486,11 +491,14 @@ export const usePanelStore = create<PanelStore>((set, get) => {
     }, PANEL_CONTEXT_TIMEOUT_MS);
     try {
       if (contextListener) await contextListener;
-      await bus.emitRequestOpenFileState();
-    } catch (e) {
-      // emit/注册已失败：本次结论就是失败，不再让未应答定时器对同一件事再弹一条
+      const context = await getOpenFileContext();
       window.clearTimeout(noAnswerTimer);
-      console.error("撕裂窗口请求仓库上下文失败", e);
+      // null = 宿主尚未播种（主窗口未 initMain）：等后续广播到达时照常应用
+      if (context) applyOpenFileContext(context);
+    } catch (e) {
+      // 拉取/注册已失败：本次结论就是失败，不再让未应答定时器对同一件事再弹一条
+      window.clearTimeout(noAnswerTimer);
+      console.error("撕裂窗口拉取仓库上下文失败", e);
       if (!noAnswerNotified) {
         useNotificationStore.getState().notify({
           level: "warning",
@@ -552,8 +560,8 @@ export const usePanelStore = create<PanelStore>((set, get) => {
       syncFromUi();
       subscribeDragSession();
 
-      // 当前打开文件 + 仓库信息广播（撕裂窗口镜像文件状态/切仓库换上下文用）。
-      // 身份变化必须触发广播：空间仓库 vaultRoot 恒为 null，space→space 切换只体现在 vaultIdentity
+      // 打开文件上下文写入 Rust 宿主真源（主窗口唯一写者；Rust 负责向撕裂窗口广播）。
+      // 身份变化必须写入：空间仓库 vaultRoot 恒为 null，space→space 切换只体现在 vaultIdentity
       useAppStore.subscribe((s, prev) => {
         if (
           identityKeyOf(s.vaultIdentity) !== identityKeyOf(prev.vaultIdentity) ||
@@ -564,13 +572,15 @@ export const usePanelStore = create<PanelStore>((set, get) => {
           s.currentNoteTitle !== prev.currentNoteTitle ||
           s.currentTableTitle !== prev.currentTableTitle
         ) {
-          void bus.emitOpenFileChanged(currentOpenFilePayload());
+          void setOpenFileContext(currentOpenFilePayload()).catch((e) =>
+            console.error("写入打开文件上下文失败", e),
+          );
         }
       });
-      // 撕裂窗口启动时请求上下文（窗口 boot 可能晚于上述广播）→ 以当前状态应答
-      void bus.onRequestOpenFileState(() => {
-        void bus.emitOpenFileChanged(currentOpenFilePayload());
-      });
+      // 播种宿主基线（initMain 先于任何撕裂窗口创建；此后上下文变化经上方订阅写入）
+      void setOpenFileContext(currentOpenFilePayload()).catch((e) =>
+        console.error("写入打开文件上下文失败", e),
+      );
 
       // 撕裂窗口本地操作请求（布局权威在 Rust：经 uiStateStore 命令）
       void bus.onPanelLayoutOp((windowId, op) => {
@@ -662,8 +672,8 @@ export const usePanelStore = create<PanelStore>((set, get) => {
         subscribeLayoutMirror(syncFromUi);
         subscribePluginDemand();
         subscribeDragSession();
-        // 应答监听必须先于请求注册（listen 是异步 IPC 注册，先发请求会丢应答）
-        contextListener = bus.onOpenFileChanged(applyOpenFileContext);
+        // 上下文广播监听必须先于基线拉取注册（先有监听才不漏基线之后的增量）
+        contextListener = onOpenFileContextChanged(applyOpenFileContext);
         // 注册失败时兜住 rejection（布局阶段若提前返回就没人体 await 它，会变成未处理拒绝）
         contextListener.catch((e: unknown) => console.error("撕裂窗口订阅仓库上下文失败", e));
       }

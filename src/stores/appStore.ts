@@ -107,7 +107,7 @@ interface AppState {
   /** 当前仓库根路径（workspace 期间有效；协作空间仓库无本地 root，恒为 null） */
   vaultRoot: string | null;
   /** 当前激活仓库身份（与 vaultRoot 并列：local 时 root 一致；space 时 root 为 null）。
-   *  撕裂窗口经 open-file-changed 广播镜像此身份自建内容后端。 */
+   *  撕裂窗口经 Rust 宿主广播（services/hostContext）镜像此身份自建内容后端。 */
   vaultIdentity: VaultIdentity | null;
   /** 当前仓库名（显示用） */
   vaultName: string;

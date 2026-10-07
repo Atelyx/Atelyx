@@ -28,15 +28,17 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 
 vi.mock("@/services/windowBus", () => ({
-  onOpenFileChanged: async (handler: (payload: never) => void) => {
+  onPanelLayoutOp: async () => () => {},
+  emitPanelLayoutOp: async () => {},
+}));
+
+vi.mock("@/services/hostContext", () => ({
+  onOpenFileContextChanged: async (handler: (payload: never) => void) => {
     busState.openFileHandler = handler as (payload: unknown) => void;
     return () => {};
   },
-  emitRequestOpenFileState: async () => {},
-  emitOpenFileChanged: async () => {},
-  onRequestOpenFileState: async () => () => {},
-  onPanelLayoutOp: async () => () => {},
-  emitPanelLayoutOp: async () => {},
+  getOpenFileContext: async () => null,
+  setOpenFileContext: async () => {},
 }));
 
 vi.mock("@/services/layout", () => ({

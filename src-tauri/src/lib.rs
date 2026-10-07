@@ -63,6 +63,8 @@ pub fn run() {
             layout::load_from_disk(app.handle(), &app.state::<layout::LayoutState>());
             // 插件托管进程：进程创建即纳入作业对象/进程组，随应用退出统一收尾（见 plugin_process.rs）
             app.manage(Arc::new(plugin_process::PluginProcessHost::new()));
+            // 打开文件上下文宿主（跨窗口协调态真源：主窗口唯一写者，撕裂窗口拉基线 + 订阅广播）
+            app.manage(commands::open_context::OpenContextState::default());
             // 全局快捷键登记表（ctx.shortcuts 后端；移动端空表，注册恒拒、注销/释放幂等成功）
             app.manage(commands::global_shortcut::GlobalShortcutState::default());
             // 主窗口窗口事件钩子：Moved/Resized → 权威 bounds（拖拽命中/落点解析）。
@@ -191,6 +193,9 @@ pub fn run() {
             commands::web::http_request,
             // 跨窗口拖拽释放检测（物理左键状态轮询，见 commands/windows.rs；Windows 专用净）
             commands::windows::is_mouse_left_down,
+            // 打开文件上下文宿主（跨窗口协调态真源：get = 撕裂窗口 boot 基线，set = 主窗口写 + 广播）
+            commands::open_context::get_open_file_context,
+            commands::open_context::set_open_file_context,
             // 布局迷你窗口管理器（布局模型唯一权威：bootstrap/操作/非布局补丁/flush）
             layout::layout_bootstrap,
             layout::layout_op,
