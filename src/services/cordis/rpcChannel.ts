@@ -13,6 +13,10 @@ const DEFAULT_INITIALIZE_TIMEOUT_MS = 30_000;
 export const RPC_ERROR_METHOD_NOT_FOUND = -32601;
 export const RPC_ERROR_INTERNAL = -32603;
 
+/** supervisor 保留的通知方法（`host:` 前缀为运行时侧专用）：模块崩溃通知。通道机制收到即把
+ *  未决请求按崩溃原因结算（通道保持打开，重启完成后可继续调用）；插件可另行为它注册订阅做状态恢复。 */
+export const RPC_RESERVED_CRASH_METHOD = "host:crashed";
+
 /** 宿主半返回的错误（JSON-RPC error 对象的异常形态）。 */
 export class RpcRemoteError extends Error {
   readonly code: number;
@@ -125,6 +129,16 @@ export function createRpcChannel(
     closeChannel({ code: null, reason: message });
   }
 
+  /** 软复位：结算未决请求但不关通道——常驻运行时的模块崩溃由运行时侧重启，通道随重启恢复。 */
+  function softReset(reason: string): void {
+    if (closed) return;
+    for (const [key, entry] of pending) {
+      if (entry.timer) clearTimeout(entry.timer);
+      entry.reject(new Error(reason));
+      pending.delete(key);
+    }
+  }
+
   /** 发一条线上消息；写失败按通道故障收场（结算未决请求），异常同时抛给直接调用方。 */
   function send(message: Record<string, unknown>): Promise<void> {
     if (closed) return Promise.reject(new Error(end.reason));
@@ -208,6 +222,10 @@ export function createRpcChannel(
   }
 
   function handleNotification(method: string, params: unknown): void {
+    if (method === RPC_RESERVED_CRASH_METHOD) {
+      const reason = (params as { reason?: unknown } | null)?.reason;
+      softReset(typeof reason === "string" && reason !== "" ? reason : "宿主半模块已崩溃");
+    }
     const handlers = notificationHandlers.get(method);
     if (!handlers) return;
     for (const handler of handlers) {

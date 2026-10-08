@@ -80,6 +80,10 @@ import { PluginSlotHost } from "@/components/plugins/SlotHost";
 import { getKernel } from "@/services/cordis/kernel";
 import { killUnmountedPluginProcesses, killPluginProcesses } from "@/services/cordis/pluginProcesses";
 import {
+  detachPluginSessions,
+  detachUnmountedPluginSessions,
+} from "@/services/cordis/pluginRpcSessions";
+import {
   releasePluginShortcuts,
   releaseUnmountedPluginShortcuts,
 } from "@/services/cordis/pluginShortcuts";
@@ -318,7 +322,20 @@ async function stopPlugin(id: string): Promise<void> {
   const kernel = getKernel();
   await unmountPlugin(kernel, id);
   await endPluginProcesses(kernel.ctx, id);
+  await endPluginSessions(kernel.ctx, id);
   await endPluginShortcuts(kernel.ctx, id);
+}
+
+/** 卸载某插件在常驻运行时里的全部会话；失败逐个提示（不阻断停用本身——插件已停，
+ *  残留会话由下次清扫兜底）。运行时进程本身是内核级设施，不随单个插件退出。 */
+async function endPluginSessions(ctx: object, id: string): Promise<void> {
+  const outcome = await detachPluginSessions(ctx, id);
+  if (outcome.failed.length === 0) return;
+  const detail = outcome.failed.map((f) => `会话 ${f.sessionId}：${f.message}`).join("；");
+  useNotificationStore.getState().notify({
+    level: "warning",
+    message: `插件「${id}」的常驻运行时会话未能全部卸载：${detail}`,
+  });
 }
 
 /** 结束某插件的全部在册进程；失败逐个提示（不阻断停用本身——插件已停，残留交用户处理）。
@@ -989,6 +1006,15 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
       useNotificationStore.getState().notify({
         level: "warning",
         message: `插件「${id}」的残留进程未能结束：${detail}`,
+      });
+    }
+    // 同口径兜底未挂载插件的常驻运行时会话（会话随插件装卸，运行时进程本身常驻）
+    const sessionLeftovers = await detachUnmountedPluginSessions(getKernel().ctx, mountedPluginIds(getKernel()));
+    for (const [id, outcome] of sessionLeftovers) {
+      const detail = outcome.failed.map((f) => `会话 ${f.sessionId}：${f.message}`).join("；");
+      useNotificationStore.getState().notify({
+        level: "warning",
+        message: `插件「${id}」的常驻运行时会话未能全部卸载：${detail}`,
       });
     }
     // 同口径兜底未挂载插件的全局快捷键（OS 层应用内唯一，泄漏会永久占键）

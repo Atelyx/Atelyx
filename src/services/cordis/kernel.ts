@@ -9,7 +9,14 @@ import { getAppVersion } from "@/services/app";
 import { detectPlatform } from "@/utils/pluginHost";
 import { runProcess, killProcessTree, writeProcessStdin, endProcessStdin } from "@/services/shell";
 import { resolveBundledRuntime } from "@/services/bundledRuntime";
+import {
+  hostRuntimeAttach,
+  hostRuntimeDetach,
+  hostRuntimeSend,
+  subscribeHostRuntime,
+} from "@/services/hostRuntime";
 import { createRpcChannel, type RpcChannelFeed } from "./rpcChannel";
+import { trackPluginSession, trackPendingSessionAttach, untrackPluginSession } from "./pluginRpcSessions";
 import { pickDirectory, pickFile, saveFile } from "@/services/dialog";
 import { copyImageToClipboard, readClipboardImage, readClipboardText, writeClipboardText } from "@/services/clipboard";
 import { closeWindow, listMonitors, minimizeWindow, toggleMaximizeWindow } from "@/services/window";
@@ -95,6 +102,8 @@ import type {
   ProcessExecOptions,
   ProcessExecResult,
   ProcessService,
+  RpcAttachOptions,
+  RpcChannel,
   RpcService,
   StateService,
   StorageService,
@@ -567,6 +576,84 @@ export function createKernel(): Kernel {
         throw error;
       }
       return feed.channel;
+    },
+
+    attach(this: RpcServiceInstance, opts: RpcAttachOptions): Promise<RpcChannel> {
+      // 非 async 形态：返回值就是已登记的 attachPromise 本身——插件 `void ctx.rpc.attach(...)`
+      // 后被停用时，在途登记的 settle 已在其上挂了拒绝处理器，不会冒成未处理拒绝
+      try {
+        const pluginId = requireCallerPluginId(this.ctx);
+        if (!PROCESS_EXECUTION) return Promise.reject(new Error(PROCESS_UNAVAILABLE));
+        if (typeof opts?.module !== "string" || opts.module === "") {
+          return Promise.reject(new Error("ctx.rpc.attach 需要宿主半模块路径（module）"));
+        }
+        if (opts.args !== undefined && !Array.isArray(opts.args)) {
+          return Promise.reject(new Error("ctx.rpc.attach 的 args 须为数组"));
+        }
+        // 先订下行事件再发起 attach：attach-ok 之前模块线程就可能产出帧（activate 期反向调用），
+        // 事件载荷自带 sessionId，先收进 buffer，拿到 sessionId 后按会话过滤重放
+        const attachPromise = (async (): Promise<RpcChannel> => {
+          const known: { current: number | null } = { current: null };
+          const backlog: Array<{ sessionId: number; kind: "frame" | "end"; payload: string }> = [];
+          const feedRef: { current?: RpcChannelFeed } = {};
+          const unlisten = await subscribeHostRuntime({
+            onFrame: (sessionId, frame) => {
+              if (known.current === null) backlog.push({ sessionId, kind: "frame", payload: frame });
+              else if (sessionId === known.current) feedRef.current?.receiveLine(frame);
+            },
+            onSessionEnded: (sessionId, reason) => {
+              if (known.current === null) backlog.push({ sessionId, kind: "end", payload: reason });
+              else if (sessionId === known.current) feedRef.current?.transportClosed(null);
+            },
+          });
+          try {
+            const started = await hostRuntimeAttach(pluginId, opts.module, opts.args ?? null);
+            known.current = started.sessionId;
+            const feed = createRpcChannel(
+              started.pid,
+              {
+                write: (data) => hostRuntimeSend(started.sessionId, data),
+                kill: async () => {
+                  await hostRuntimeDetach(started.sessionId);
+                },
+              },
+              { initializeTimeoutMs: opts.initializeTimeoutMs },
+            );
+            feedRef.current = feed;
+            for (const item of backlog) {
+              if (item.sessionId !== started.sessionId) continue;
+              if (item.kind === "frame") feed.receiveLine(item.payload);
+              else feed.transportClosed(null);
+            }
+            try {
+              await feed.initialize();
+            } catch (error) {
+              // 收尾失败不顶掉原始握手错误（会话登记仍在，随插件停用/退出兜底卸载）
+              await feed.channel.close().catch(() => {});
+              throw error;
+            }
+            trackPluginSession(ctx, pluginId, {
+              sessionId: started.sessionId,
+              close: () => feed.channel.close(),
+            });
+            // 通道关闭即出册并退订（主动 close / 熔断会话结束 / 运行时进程死亡）
+            void feed.channel.done.then(() => {
+              untrackPluginSession(ctx, pluginId, started.sessionId);
+              unlisten();
+            });
+            return feed.channel;
+          } catch (error) {
+            unlisten();
+            throw error;
+          }
+        })();
+        // 完整 attach 流程先登记后落地的部分（订阅就绪之后的段落）：插件不等返回即被停用时，
+        // 结束流程等它落地再卸载（与进程的在途启动登记同一纪律）
+        trackPendingSessionAttach(ctx, pluginId, attachPromise);
+        return attachPromise;
+      } catch (error) {
+        return Promise.reject(error instanceof Error ? error : new Error(String(error)));
+      }
     },
   };
   Object.defineProperty(rpc, symbols.tracker, { value: { property: "ctx" } });

@@ -284,6 +284,16 @@ export interface RpcConnectOptions extends ProcessExecOptions {
   initializeTimeoutMs?: number;
 }
 
+/** 常驻运行时会话的 attach 参数：宿主半以模块形态加载进宿主托管的运行时进程，进程与协议由宿主管。 */
+export interface RpcAttachOptions {
+  /** 宿主半模块的绝对路径（.mjs 等 ESM 模块；落点口径与 connect 的宿主半脚本相同）。 */
+  module: string;
+  /** 透传给宿主半 activate 的参数（须可结构化克隆）。 */
+  args?: unknown[];
+  /** initialize 握手超时毫秒数（缺省 30000）。 */
+  initializeTimeoutMs?: number;
+}
+
 /** 通道结束信息：code = 宿主半进程退出码（主动关闭或非进程原因为 null）。 */
 export interface RpcChannelEnd {
   code: number | null;
@@ -313,11 +323,17 @@ export interface RpcChannel {
   readonly done: Promise<RpcChannelEnd>;
 }
 
-/** 插件双半通道服务：起宿主半进程并按契约握手，返回就绪通道。 */
+/** 插件双半通道服务：宿主半两条路——`connect` 自起进程（进程归插件管）或 `attach` 加载进宿主
+ *  托管的常驻运行时（进程与协议归宿主管）——统一按契约握手，返回形状一致的就绪通道。 */
 export interface RpcService {
   /** 启动宿主半进程（程序来源与 `ctx.process` 同口径）→ initialize 握手（校验协议版本）→
    *  就绪通道。握手失败或进程先行退出即 reject，进程不残留。 */
   connect(opts: RpcConnectOptions): Promise<RpcChannel>;
+  /** 把宿主半模块加载进宿主托管的常驻运行时进程（进程与协议由宿主管）→ initialize 握手 →
+   *  就绪通道。通道形状与 connect 完全一致；模块崩溃由宿主自动重启（未决调用以崩溃原因结算，
+   *  `host:crashed` / `host:restarted` 通知开放订阅），连续快速崩溃熔断后通道关闭。
+   *  会话随插件停用/卸载由宿主卸载；无进程执行能力的平台（安卓）拒绝。 */
+  attach(opts: RpcAttachOptions): Promise<RpcChannel>;
 }
 
 /** 仓库文件读写服务（读写全开；写方法语义与 AI 文件工具一致；失败返回 { ok:false, summary } 不抛断）。 */

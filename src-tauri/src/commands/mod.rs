@@ -6,6 +6,7 @@ pub mod filesearch;
 pub mod chat_container;
 pub mod global;
 pub mod global_shortcut;
+pub mod host_runtime;
 pub mod home;
 pub mod keychain;
 pub mod mobile;

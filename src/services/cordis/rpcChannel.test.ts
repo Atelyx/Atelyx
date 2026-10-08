@@ -232,3 +232,47 @@ describe("rpcChannel 关闭与容错", () => {
     expect(transport.kill).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("rpcChannel 软复位（常驻运行时崩溃语义）", () => {
+  it("host:crashed 通知结算未决请求但通道保持打开，后续调用照常", async () => {
+    const { feed, channel, writes } = setup();
+    await handshake(feed, writes);
+    const first = channel.call("slow");
+    await flush();
+    // 模块崩溃：supervisor 发保留通知
+    hostSends(feed, { jsonrpc: "2.0", method: "host:crashed", params: { reason: "模块抛出未捕获异常" } });
+    await expect(first).rejects.toThrow("模块抛出未捕获异常");
+    // 通道未关闭：done 未 resolve、收发照常（重启完成后恢复）
+    let ended: unknown = "pending";
+    void channel.done.then((v) => (ended = v));
+    await flush();
+    expect(ended).toBe("pending");
+    const second = channel.call("ping");
+    await flush();
+    hostSends(feed, { jsonrpc: "2.0", id: 3, result: "pong" });
+    await expect(second).resolves.toBe("pong");
+  });
+
+  it("host:crashed 同时分派给插件订阅者（状态恢复钩子）", async () => {
+    const { feed, channel, writes } = setup();
+    await handshake(feed, writes);
+    const seen: unknown[] = [];
+    channel.on("host:crashed", (p) => seen.push(p));
+    hostSends(feed, { jsonrpc: "2.0", method: "host:crashed", params: { reason: "x" } });
+    expect(seen).toEqual([{ reason: "x" }]);
+  });
+
+  it("无 reason 的崩溃通知回退缺省原因", async () => {
+    const { feed, channel, writes } = setup();
+    await handshake(feed, writes);
+    const pending = channel.call("x");
+    await flush();
+    hostSends(feed, { jsonrpc: "2.0", method: "host:crashed" });
+    await expect(pending).rejects.toThrow("宿主半模块已崩溃");
+    // 通道未关闭：done 未 resolve（哨兵模式）
+    let ended: unknown = "pending";
+    void channel.done.then((v) => (ended = v));
+    await flush();
+    expect(ended).toBe("pending");
+  });
+});

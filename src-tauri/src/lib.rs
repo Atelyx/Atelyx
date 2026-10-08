@@ -10,6 +10,7 @@
 mod android_bridge;
 mod chat_container;
 mod commands;
+mod host_runtime;
 mod layout;
 mod layout_drag;
 mod layout_model;
@@ -40,6 +41,19 @@ pub fn run() {
         tray::show_all_windows(app);
     }));
     let builder = builder
+        .on_window_event(|window, event| {
+            // 窗口销毁：其发起的常驻运行时会话随窗口清账（前端无从收尾，宿主兜底卸载模块）
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                use tauri::Manager;
+                let app = window.app_handle();
+                if let (Some(state), Some(host)) = (
+                    app.try_state::<Arc<host_runtime::HostRuntimeState>>(),
+                    app.try_state::<Arc<plugin_process::PluginProcessHost>>(),
+                ) {
+                    state.prune_window(&host, window.label());
+                }
+            }
+        })
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init());
     // 桌面壳专属插件：shell（系统打开）/ autostart（开机自启，注册项附带 --autorun 供上面的
@@ -64,6 +78,11 @@ pub fn run() {
             layout::load_from_disk(app.handle(), &app.state::<layout::LayoutState>());
             // 插件托管进程：进程创建即纳入作业对象/进程组，随应用退出统一收尾（见 plugin_process.rs）
             app.manage(Arc::new(plugin_process::PluginProcessHost::new()));
+            // 常驻运行时宿主（ctx.rpc.attach 的后端）：进程随会话惰性启动、随应用退出统一收尾
+            let host_runtime = Arc::new(host_runtime::HostRuntimeState::new());
+            #[cfg(not(test))]
+            host_runtime.install_app_emitter(app.handle().clone());
+            app.manage(host_runtime);
             // 打开文件上下文宿主（跨窗口协调态真源：主窗口唯一写者，撕裂窗口拉基线 + 订阅广播）
             app.manage(commands::open_context::OpenContextState::default());
             // 全局快捷键登记表（ctx.shortcuts 后端；移动端空表，注册恒拒、注销/释放幂等成功）
@@ -269,6 +288,10 @@ pub fn run() {
             commands::process::write_plugin_process_stdin,
             commands::process::close_plugin_process_stdin,
             commands::process::kill_process_tree,
+            // 常驻运行时（ctx.rpc.attach 的后端：会话建立/收发/卸载；见 commands/host_runtime.rs）
+            commands::host_runtime::host_runtime_attach,
+            commands::host_runtime::host_runtime_send,
+            commands::host_runtime::host_runtime_detach,
             // 全局快捷键（ctx.shortcuts 的 OS 层后端，见 commands/global_shortcut.rs）
             commands::global_shortcut::plugin_shortcut_register,
             commands::global_shortcut::plugin_shortcut_unregister,
