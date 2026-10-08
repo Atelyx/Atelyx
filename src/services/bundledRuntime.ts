@@ -1,10 +1,10 @@
 /**
- * 随应用分发的脚本运行时解析（`ctx.process.bundledRuntime()` 的实现面）：落点 = 应用资源目录下
- * 的 `runtime/`，二进制与 version.json 由构建前脚本（scripts/sync-node-runtime.mjs）落位。
+ * 随应用分发的脚本运行时解析（`ctx.process.bundledRuntime()` 的实现面）：二进制与 version.json
+ * 由构建前脚本（scripts/sync-node-runtime.mjs）落位，落点见 defaultDeps 的候选目录注释。
  *
  * 解析只读已有资源（列目录确认二进制存在 + 读 version.json 取版本），不新增 Tauri 命令；
- * 资源目录候选 = 运行时资源目录（打包版）→ 构建期注入的源码资源目录（dev 下 tauri 不把资源
- * 放到二进制旁）。全部候选不可用或平台不分发即返回 null，由插件按自己的降级口径处理。
+ * 资源目录候选 = 打包资源根（resourceDir 下的 resources/）→ 构建期注入的源码资源目录（dev 下
+ * tauri 不把资源放到二进制旁）。全部候选不可用或平台不分发即返回 null，由插件按自己的降级口径处理。
  */
 import { resourceDir } from "@tauri-apps/api/path";
 import { externalListDir, externalReadFile } from "@/services/externalFs";
@@ -49,7 +49,9 @@ const defaultDeps: BundledRuntimeDeps = {
   async candidateDirs() {
     const dirs: string[] = [];
     try {
-      dirs.push(await resourceDir());
+      // 打包版：bundle.resources 的条目按完整相对路径落在资源目录下，
+      // 即 <resourceDir>/resources/runtime（与 Rust 侧资源解析同口径）
+      dirs.push(joinResource(await resourceDir(), "resources"));
     } catch {
       // 无资源目录的平台（该分支只在异常环境出现），留给下一个候选。
     }
