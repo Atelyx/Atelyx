@@ -19,7 +19,7 @@ vi.mock("@/services/plugins", () => ({
   pluginRollback: vi.fn(),
   pluginApplyDefaultLayout: vi.fn(async () => {}),
   getAssemblyVersion: vi.fn(async () => 0),
-  onPluginChanged: vi.fn(async (handler: (payload: { id: string; version: number }) => void) => {
+  onPluginChanged: vi.fn(async (handler: (payload: { version: number }) => void) => {
     assemblyBroadcast.pluginChanged.push(handler);
     return () => {};
   }),
@@ -30,7 +30,7 @@ vi.mock("@/services/dialog", () => ({ pickDirectory: vi.fn() }));
 // 广播 handler 抓取：store 的监听器在首次 load 时注册（ensure* 有模块级守卫，全文件仅注册一次），
 // 测试经此直接派发跨窗口装配广播（plugin-changed / composition-changed）。
 const assemblyBroadcast = vi.hoisted(() => ({
-  pluginChanged: [] as Array<(payload: { id: string; version: number }) => void>,
+  pluginChanged: [] as Array<(payload: { version: number }) => void>,
   compositionChanged: [] as Array<(version: number) => void>,
 }));
 // 组合接管的用户层读写与跨窗口广播：本文件只验证装配编排，配置层与广播机制各自单测。
@@ -674,7 +674,7 @@ describe("装配版本追平", () => {
 
   it("同版本重复广播：不触发任何重载", async () => {
     for (const h of assemblyBroadcast.compositionChanged) h(10);
-    for (const h of assemblyBroadcast.pluginChanged) h({ id: "com.test.provider", version: 10 });
+    for (const h of assemblyBroadcast.pluginChanged) h({ version: 10 });
     // 版本比对在排队前完成（无追平任务入队）：微任务冲刷后仍无任何取数与重挂
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(pluginList).not.toHaveBeenCalled();
@@ -686,7 +686,7 @@ describe("装配版本追平", () => {
     vi.mocked(pluginList).mockResolvedValue(rowsWithProviderDisabled(12));
     vi.mocked(getAssemblyVersion).mockResolvedValue(12);
     // 版本 11 的广播丢失，直接收到 12：按单调比对追平，不要求逐版对账
-    for (const h of assemblyBroadcast.pluginChanged) h({ id: "com.test.provider", version: 12 });
+    for (const h of assemblyBroadcast.pluginChanged) h({ version: 12 });
     await vi.waitFor(() => {
       expect(mountPlugin).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ id: "builtin.search" }));
     });
@@ -697,10 +697,38 @@ describe("装配版本追平", () => {
     expect(pluginList).not.toHaveBeenCalled();
   });
 
+  it("版本操作期间到达的他窗变更：操作收尾补追，不停在旧装配", async () => {
+    usePluginStore.setState({
+      plugins: {
+        "com.test.provider": row({ id: "com.test.provider", installDir: "/tmp/p", sourceKind: "git" }),
+      },
+    });
+    // 操作自身的刷新仍读操作前输入（版本 10、provider 行启用）；他窗在操作期间把它停用（版本 12）
+    vi.mocked(pluginList).mockResolvedValueOnce({
+      rows: [builtinRow("builtin.search"), providerRow("com.test.provider", [{ target: "builtin.search" }])],
+      assemblyVersion: 10,
+    });
+    vi.mocked(pluginUpdate).mockImplementationOnce(async () => {
+      for (const h of assemblyBroadcast.pluginChanged) h({ version: 12 });
+      return { id: "com.test.provider" } as never;
+    });
+    vi.mocked(pluginList).mockResolvedValue(rowsWithProviderDisabled(12));
+    vi.mocked(getAssemblyVersion).mockResolvedValue(12);
+
+    await usePluginStore.getState().update("com.test.provider");
+
+    // 补追生效：接管关系回落到内置行（操作自身那次刷新读不到这个变更）
+    await vi.waitFor(() => {
+      expect(usePluginStore.getState().composition?.bindings["builtin.search"]?.implId).toBe("builtin.search");
+    });
+    // 取数两次 = 操作自身一次 + 收尾补追一次（无抑制时只有前者）
+    expect(vi.mocked(pluginList).mock.calls.length).toBe(2);
+  });
+
   it("高版本广播：只重挂裁决变化的行，未受影响行不重启", async () => {
     vi.mocked(pluginList).mockResolvedValue(rowsWithProviderDisabled(11));
     vi.mocked(getAssemblyVersion).mockResolvedValue(11);
-    for (const h of assemblyBroadcast.pluginChanged) h({ id: "com.test.provider", version: 11 });
+    for (const h of assemblyBroadcast.pluginChanged) h({ version: 11 });
     await vi.waitFor(() => {
       expect(mountPlugin).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ id: "builtin.search" }));
     });
@@ -718,7 +746,7 @@ describe("装配版本追平", () => {
       .mockResolvedValueOnce(13) // 第一轮 after（拉取期间他窗又改）→ 重跑
       .mockResolvedValue(13); // 第二轮起稳定
     vi.mocked(pluginList).mockResolvedValue(rowsWithProviderDisabled(13));
-    for (const h of assemblyBroadcast.pluginChanged) h({ id: "com.test.provider", version: 13 });
+    for (const h of assemblyBroadcast.pluginChanged) h({ version: 13 });
     await vi.waitFor(() => expect(pluginList).toHaveBeenCalledTimes(2));
     // 重跑不重复重挂：第一轮已把装配对齐，第二轮 diff 为空。
     // unmount 计 2 次均在第一轮：diff 拆除 1 次 + spawn 重挂前的自拆除 1 次（防重复注册）。
@@ -747,7 +775,7 @@ describe("装配版本追平", () => {
       rows: [builtinRow("builtin.search"), providerRow("com.test.provider", [{ target: "builtin.search" }])],
       assemblyVersion: 99,
     });
-    for (const h of assemblyBroadcast.pluginChanged) h({ id: "com.test.provider", version: 11 });
+    for (const h of assemblyBroadcast.pluginChanged) h({ version: 11 });
     // 追平循环上限 3 轮（每轮取数 1 次）后走全量重载（第 4 次取数）
     await vi.waitFor(() => expect(pluginList).toHaveBeenCalledTimes(4));
   });

@@ -21,11 +21,27 @@
       content="default-src 'self'; frame-src 'self' http: https:; img-src 'self' data: blob: https: http:; media-src 'self' data: blob: https: http:; connect-src 'self' http: https: ws: wss: http://ipc.localhost; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' blob: 'wasm-unsafe-eval'"
     />
     <title>Atelyx</title>
-    <!-- 主题配置就绪前按系统深浅预置（.dark 已写在 html 上，仅系统浅色时摘除）；底色按 class
-         取 :root / :root.dark 的 --bg-primary 同值，就绪后由 useAppearance 按配置修正。 -->
+    <!-- 主题配置就绪前预置深浅：优先上一次解析出的深浅（缓存，真相仍在配置与主题插件——
+         首帧同步读不到配置，只能靠上次结果近似），无缓存按系统深浅；底色按 class 取
+         :root / :root.dark 的 --bg-primary 同值，就绪后由 useAppearance 按配置修正。 -->
     <script>
-      if (!window.matchMedia("(prefers-color-scheme: dark)").matches) {
-        document.documentElement.classList.remove("dark");
+      var scheme;
+      try {
+        scheme = localStorage.getItem("atelyx:bootScheme");
+      } catch (e) {
+        /* 存储不可用：回落系统深浅 */
+      }
+      if (scheme !== "dark" && scheme !== "light") {
+        scheme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+      }
+      document.documentElement.classList.toggle("dark", scheme === "dark");
+      /* 首帧骨架（构建期注入，见 vite.config.ts 的 bootSplashPlugin）只给撕裂窗口铺：
+         窗口角色此刻唯一的来源是 Tauri 注入的 label，主窗口启动期走加载屏、形状不同。 */
+      try {
+        var label = window.__TAURI_INTERNALS__.metadata.currentWindow.label;
+        if (label.indexOf("panel-") === 0) document.documentElement.classList.add("boot-panel");
+      } catch (e) {
+        /* 非 Tauri 环境（浏览器直开）：不铺骨架 */
       }
     </script>
     <style>

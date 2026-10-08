@@ -14,9 +14,9 @@ import { useUiStateStore } from "@/stores/uiStateStore";
 import { PanelTabBar } from "@/components/layout/PanelTabBar";
 import { ViewHost, ViewStatusIndicator } from "@/components/layout/ViewHost";
 import { DragGhost } from "@/components/layout/DragGhost";
+import { PanelBootSkeleton } from "@/components/layout/PanelSkeleton";
 import { TitleBarControls } from "@/components/common/TitleBarControls";
 import { PanelPlaceholder } from "@/components/layout/PanelPlaceholder";
-import { LoadingScreen } from "@/components/common/LoadingScreen";
 import { Spinner } from "@/components/common/primitives";
 import { useAppearance } from "@/hooks/useAppearance";
 import { collectAllViews } from "@/utils/workspaceLayout";
@@ -25,6 +25,7 @@ export function PanelWindowRoot() {
   useAppearance();
   const panelReady = usePanelStore((s) => s.panelReady);
   const panelError = usePanelStore((s) => s.panelError);
+  const panelEntryPresent = usePanelStore((s) => s.panelEntryPresent);
   const tabs = usePanelStore((s) => s.panelTabs);
   const activeTabId = usePanelStore((s) => s.panelActiveTabId);
   const windowId = usePanelStore((s) => s.windowId);
@@ -84,17 +85,14 @@ export function PanelWindowRoot() {
   // 自带头部（拖动区 + 窗口动作），错误态保留最小拖动条 + 重试（否则窗口既拖不动
   // 也无处重试）。关闭语义由窗口选项声明，Rust/守卫按选项拦截。
   // 判定 = 窗口声明了任一非默认选项（即创建方要求的特殊形态）→ 裸渲染插件视图。
+  // 仍以 panelReady 门控：选项来自布局快照，快照落地早于 panelReady，不门控会先裸渲染一帧空容器。
   const isStandaloneWindow = useUiStateStore((s) =>
     (s.detachedWindows ?? []).some(
       (w) => w.id === windowId && Object.values(w.options ?? {}).some(Boolean),
     ),
   );
 
-  if (!panelReady) {
-    return <LoadingScreen />;
-  }
-
-  if (isStandaloneWindow) {
+  if (panelReady && isStandaloneWindow) {
     return (
       <div className="h-full w-full flex flex-col" data-panel-drop-root>
         {panelError ? (
@@ -193,6 +191,11 @@ export function PanelWindowRoot() {
             }
           />
         </div>
+      ) : !panelReady || !panelEntryPresent ? (
+        // 启动骨架：布局快照未到（bootstrap 中）或本窗口在布局模型里还没有条目（拖拽起手预建的
+        // 窗口待落点认领）。此处不渲染应用加载屏——本窗口是「同进程新开的一个视图」，
+        // Logo 加载屏会让撕裂读起来像另起一个应用；骨架与最终面板同形，就绪后只有占位换真内容。
+        <PanelBootSkeleton />
       ) : (
         <>
           {/* 标签头 + 视图承载 */}

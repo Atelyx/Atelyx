@@ -29,6 +29,8 @@ import { usePluginStore } from "@/stores/pluginStore";
 import { ErrorBoundary } from "@/components/common/ErrorBoundary";
 import { Button, IconButton } from "@/components/common/Button";
 import { StatusPill } from "@/components/common/Badge";
+import { ViewBootSkeleton } from "@/components/layout/PanelSkeleton";
+import { viewFallbackOf } from "@/utils/viewFallback";
 import type { BuiltinViewKind, ViewKind } from "@/types";
 
 /** 视图元信息（标签/头部共用；显示名单一来源 = VIEW_LABELS，图标在此维护）。
@@ -65,17 +67,21 @@ export function viewMetaFor(view: string): { label: string; icon: ReactNode } {
  *  其他插件注册事件（uiRevision 变化但本 kind 贡献不变）不打扰重型视图（画布/笔记编辑器等）。 */
 function ViewContributionMount({ kind, hostId }: { kind: string; hostId: string }) {
   const contrib = usePluginStore((s) => s.viewContribution(kind));
+  const assemblyLoading = usePluginStore((s) => s.assemblyLoading);
+  const initialized = usePluginStore((s) => s.initialized);
   if (!contrib) {
-    // 缺贡献：kind 由随应用分发的默认实现提供但其行不可用（停用/卸载）→ 降级占位（提示处置入口）；
-    // 否则保持空白占位（未知 kind / 插件视图已卸载，不猜测原因）。
-    const state = usePluginStore.getState().viewProviderState(kind);
-    if (state && !state.enabled) {
+    // 缺贡献：装配在途 = 骨架；kind 由随应用分发的默认实现提供但其行不可用（停用/卸载）→
+    // 降级占位（提示处置入口）；否则保持空白占位（未知 kind / 插件视图已卸载，不猜测原因）。
+    const provider = usePluginStore.getState().viewProviderState(kind);
+    const fallback = viewFallbackOf({ assemblyLoading, initialized, provider });
+    if (fallback === "skeleton") return <ViewBootSkeleton />;
+    if (fallback === "provider" && provider) {
       return (
         <div className="h-full w-full flex items-center justify-center" style={{ background: "var(--bg-primary)" }}>
           <div className="text-xs text-center px-6 leading-relaxed" style={{ color: "var(--text-muted)" }}>
-            「{state.name}」插件{state.installed ? "已停用" : "已卸载"}
+            「{provider.name}」插件{provider.installed ? "已停用" : "已卸载"}
             <br />
-            {state.installed ? "可在设置 → 插件中重新启用" : "可在设置 → 插件中恢复"}
+            {provider.installed ? "可在设置 → 插件中重新启用" : "可在设置 → 插件中恢复"}
           </div>
         </div>
       );

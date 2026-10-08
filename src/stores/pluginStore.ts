@@ -161,8 +161,11 @@ export type PluginLoadReason = "vault-switch";
 interface PluginStoreState {
   /** 插件行（按 id；运行时阶段/审计与列表行合并）。 */
   plugins: Record<string, InstalledPlugin>;
-  /** 已初始化（应用挂载/进仓后加载一次）。 */
+  /** 本窗口完成过一次完整装配（全部行挂载完毕）。视图承载据此区分「首次装配中」与「装配后再重载」：
+   *  前者渲染骨架，后者沿用既有空白占位（不为每次启停/切仓库引入骨架闪现）。 */
   initialized: boolean;
+  /** 全量重载在途（真 = 视图贡献可能整体缺失，「缺贡献」尚不能判为停用/卸载）。 */
+  assemblyLoading: boolean;
   /** 插件状态文件不可读/损坏的诊断（非空 = 全部行以停用态展示的降级态；修复文件后重载解除）。 */
   stateError: string | null;
   /** UI 注册修订号（主线程插件脚本异步注册到达时自增；依赖插件 UI 的组件据此重渲染）。 */
@@ -358,11 +361,18 @@ let loadQueue: Promise<void> = Promise.resolve();
  *  放模块层：监听器是模块级函数（见 ensurePluginChangeListener）。 */
 let versionOpRunning = false;
 
+/** 版本操作期间被抑制的最高装配版本（见 handleAssemblyBroadcast）：操作自身的刷新读的是操作前
+ *  输入，覆盖不到操作期间到达的他窗变更，故在操作收尾补追一次。 */
+let suppressedAssemblyVersion = 0;
+
 /** 跨窗口装配变更广播（plugin-changed / composition-changed）统一入口：版本单调比对，落后才
  *  排队追平。重复通知（同版本）与过期通知（版本低于游标）直接忽略——漏发的中间版本由更高
  *  版本追平，无需逐版对账。 */
 function handleAssemblyBroadcast(version: number): void {
-  if (versionOpRunning) return;
+  if (versionOpRunning) {
+    suppressedAssemblyVersion = Math.max(suppressedAssemblyVersion, version);
+    return;
+  }
   if (version <= usePluginStore.getState().assemblyCursor) return;
   const next = loadQueue.then(
     () => usePluginStore.getState().reconcileAssembly(),
@@ -759,13 +769,18 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
   };
 
   /** 标记本窗口正在进行版本操作：Rust 广播的 plugin-changed 已由操作内的显式刷新覆盖，
-   * 监听器跳过，避免同窗口连跑两次全量重载（多窗口仍各自收到广播并重载）。 */
+   * 监听器跳过，避免同窗口连跑两次全量重载（多窗口仍各自收到广播并重载）。
+   * 收尾补追在操作期间到达的更高版本：操作内那次刷新读的是操作前输入，覆盖不到他窗此间的变更，
+   * 不补追本窗口会一直停在旧装配（下一次广播/装载才收敛）。 */
   const runTracked = async (op: () => Promise<void>): Promise<void> => {
     versionOpRunning = true;
     try {
       await op();
     } finally {
       versionOpRunning = false;
+      const suppressed = suppressedAssemblyVersion;
+      suppressedAssemblyVersion = 0;
+      if (suppressed > get().assemblyCursor) handleAssemblyBroadcast(suppressed);
     }
   };
 
@@ -894,7 +909,7 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
     // 不能放行给 syncCompositionMounts 的 get().load() 兜底——load 经同一 loadQueue 排队，
     // 在本函数（队列元素）内等待会自等死锁（与循环兜底同理由）。
     if (!get().composition) {
-      await performLoad();
+      await performLoadTracked();
       return;
     }
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -910,8 +925,8 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
         return;
       }
     }
-    // 本函数跑在串行队列上：兜底全量直调 performLoad（经 load() 再排队会同链自等死锁）
-    await performLoad();
+    // 本函数跑在串行队列上：兜底全量直调 performLoadTracked（经 load() 再排队会同链自等死锁）
+    await performLoadTracked();
   };
 
   const performLoad = async (reason?: PluginLoadReason): Promise<void> => {
@@ -941,7 +956,7 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
       reason === "vault-switch" ? collectKeepMounted(plugins, mountedPluginIds(getKernel())) : new Set<string>();
     for (const id of keepMounted) plugins[id] = { ...plugins[id], phase: "active" };
     await unmountAll(getKernel(), keepMounted);
-    set({ plugins, initialized: true, stateError: list.stateError ?? null, compositionPatches: userPatches });
+    set({ plugins, stateError: list.stateError ?? null, compositionPatches: userPatches });
     set((s) => ({ uiRevision: s.uiRevision + 1 }));
     // 拉取到的输入对应此刻的装配版本：spawn 耗时期间到达的广播按游标比对排队追平
     //（缺省按 0 = 从未变更处理；游标单调不回拨，防缺省值抹掉已确认的进度）
@@ -962,6 +977,9 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
       }
       await spawn(rowId, implId, { hostVersion, platform });
     }
+    // 全部行挂载完毕才算「完成过一次装配」：装配期间视图贡献可能整体缺失，
+    // 视图承载据 initialized + assemblyLoading 判「首次装载中」（渲染骨架而非空白/假提示）
+    set({ initialized: true });
     // 收尾：结束「已不在挂载集里」的插件的进程。登记表按内核隔离，所以这里兜住的是两类
     // 本窗口 unmountAll 覆盖不到的残留：插件被别的窗口停用/卸载（进程仍记在本窗口），以及
     // apply 抛错导致未挂载的进程。不扫就会留下活过插件的孤儿进程；已挂载插件的进程不动。
@@ -991,9 +1009,24 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
     if (bootVersion > get().assemblyCursor) handleAssemblyBroadcast(bootVersion);
   };
 
+  /**
+   * 全量重载的在途包装：装配输入在途期间视图贡献可能整体缺失，视图承载据此渲染骨架，
+   * 而不是把「尚未装载」显示成「插件已卸载」（撕裂窗口 boot 期可见）。失败（拉行失败）
+   * 同样落回 false——此时按提供者状态提示，与既有的装配失败表现一致。
+   */
+  const performLoadTracked = async (reason?: PluginLoadReason): Promise<void> => {
+    set({ assemblyLoading: true });
+    try {
+      await performLoad(reason);
+    } finally {
+      set({ assemblyLoading: false });
+    }
+  };
+
   return {
     plugins: {},
     initialized: false,
+    assemblyLoading: false,
     stateError: null,
     uiRevision: 0,
     slotRevisions: {},
@@ -1014,7 +1047,7 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => {
       // 触发，排队可避免两个 load 在 unmount/mount 之间交错而留下孤儿 fiber。reason 显式透传
       //（不走函数引用直传，防止队列 rejection 值被误当参数）；保活判定在队列内执行时进行，
       // 集合取当时的挂载状态。
-      const next = loadQueue.then(() => performLoad(reason), () => performLoad(reason));
+      const next = loadQueue.then(() => performLoadTracked(reason), () => performLoadTracked(reason));
       loadQueue = next.catch(() => {});
       return next;
     },

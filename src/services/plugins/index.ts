@@ -102,7 +102,7 @@ export function getAssemblyVersion(): Promise<number> {
 
 /** 订阅其他窗口完成的插件行变更（启停/安装/卸载/版本操作）：载荷带装配版本，
  *  各窗口据此比对自身装配快照新旧，落后者拉输入重算裁决后定向重挂。 */
-export function onPluginChanged(handler: (payload: { id: string; version: number }) => void): Promise<UnlistenFn> {
+export function onPluginChanged(handler: (payload: { version: number }) => void): Promise<UnlistenFn> {
   return listen<{ id: string; version: number }>("plugin-changed", (event) => handler(event.payload));
 }
 

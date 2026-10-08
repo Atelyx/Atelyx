@@ -142,8 +142,10 @@ interface PanelStore {
   /** 撕裂窗口镜像标签组（panel 用；来自 uiStateStore 自身切片）。 */
   panelTabs: TabItem[];
   panelActiveTabId: string | null;
-  /** panel 是否已完成 bootstrap（渲染 gate）。 */
+  /** panel 是否已完成 bootstrap（真 = 布局快照已到；渲染 gate 与 panelEntryPresent 合看）。 */
   panelReady: boolean;
+  /** 本窗口在布局模型里的条目已存在（false = 布局快照未到，或预热窗口尚未被落点认领）。 */
+  panelEntryPresent: boolean;
   /** panel bootstrap 失败/超时原因（非空 = 渲染错误态 + 重试入口；晚到成功自愈清空）。 */
   panelError: string | null;
   /** 按下候选（未转正）。 */
@@ -416,7 +418,7 @@ export const usePanelStore = create<PanelStore>((set, get) => {
     // 不依赖周期性上报；确认结束时若命中与上次相同，Rust 已有该值无需重复）
     if (sameDropTarget(get().dropTarget, hit)) return;
     set({ dropTarget: hit });
-    // 上报键 = 窗口 label（与 Rust window_under_cursor/drag_hits 键一致）
+    // 上报键 = 窗口 label（与 Rust 命中解析 cursor_window_label/drag_hits 的键一致）
     const reportKey = windowLabelOf(windowId);
     if (hit) {
       const payload: DragHit = {
@@ -560,6 +562,7 @@ export const usePanelStore = create<PanelStore>((set, get) => {
     panelTabs: [],
     panelActiveTabId: null,
     panelReady: false,
+    panelEntryPresent: false,
     panelError: null,
     dragCandidate: null,
     dragActive: false,
@@ -712,7 +715,9 @@ export const usePanelStore = create<PanelStore>((set, get) => {
         const entry = ui.detachedWindows.find((w) => w.id === windowId) ?? null;
         set({ layoutMirror: mirrorFromUiState() });
         const prevTabs = get().panelTabs;
+        const prevActive = get().panelActiveTabId;
         const nextTabs = entry ? entry.tabs : [];
+        const nextActive = entry ? entry.activeTabId : null;
         // 视图离开本窗口 → releaseView（落盘 + 清内存）；进入 → 由视图组件挂载加载
         const before = new Set(prevTabs.map((t) => t.view));
         const after = new Set(nextTabs.map((t) => t.view));
@@ -721,11 +726,15 @@ export const usePanelStore = create<PanelStore>((set, get) => {
         }
         set({
           panelTabs: nextTabs,
-          panelActiveTabId: entry ? entry.activeTabId : null,
+          panelActiveTabId: nextActive,
+          panelEntryPresent: entry !== null,
           panelReady: true,
           // 拉取成功后清错误态（重试成功、或错误态期间布局广播到达）
           panelError: null,
         });
+        // 激活标签变化 → 刷新窗口标题：落点认领（boot 时还没有条目，标题停在占位名）、
+        // 从他窗拖入等布局侧变化都走这里，不必各写一遍
+        if (nextActive !== prevActive) void setWindowTitle(titleOfTabs(nextTabs, nextActive));
         get().syncCollabHost();
       };
 
@@ -768,9 +777,6 @@ export const usePanelStore = create<PanelStore>((set, get) => {
         set({ panelReady: true, panelError: "布局服务未响应，面板未能加载" });
         return;
       }
-      // 窗口标题 = 激活标签（Rust 建窗用占位标题，boot 后按视图名刷新）
-      const entry0 = useUiStateStore.getState().detachedWindows.find((w) => w.id === windowId);
-      if (entry0) void setWindowTitle(titleOfTabs(entry0.tabs, entry0.activeTabId));
       // 阶段二：仓库上下文（失败只提示，见 requestPanelContext）
       void requestPanelContext();
     },

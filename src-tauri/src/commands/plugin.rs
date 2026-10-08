@@ -1160,9 +1160,11 @@ pub fn assembly_version() -> u64 {
 #[cfg(test)]
 pub(crate) static ASSEMBLY_TEST_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-fn emit_plugin_changed(app: &AppHandle, id: &str) {
+/// 广播行集合变更（版本号单调，见装配版本游标）：载荷只带版本号——各窗口据游标单调比对，
+/// 自己读本机输入重算裁决，不需要按行定向通知。
+fn emit_plugin_changed(app: &AppHandle) {
     let version = assembly_version();
-    if let Err(e) = app.emit("plugin-changed", serde_json::json!({ "id": id, "version": version })) {
+    if let Err(e) = app.emit("plugin-changed", serde_json::json!({ "version": version })) {
         eprintln!("[plugin] 广播插件变化失败：{e}");
     }
 }
@@ -1292,7 +1294,7 @@ async fn install_plugin_dir(
     let mut info = plugin_info_from(&target, &manifest, source_kind, enabled);
     info.warning = warning;
     // 落位即行集合变更：广播让其他窗口刷新行列表（载荷带装配版本，见 emit_plugin_changed）
-    emit_plugin_changed(app, &id);
+    emit_plugin_changed(app);
     Ok(info)
 }
 
@@ -1774,7 +1776,7 @@ pub fn plugin_uninstall(app: AppHandle, id: String, keep_data: Option<bool>) -> 
         }
     }
     // 行集合变更广播（见 install_plugin_dir 尾部）
-    emit_plugin_changed(&app, &id);
+    emit_plugin_changed(&app);
     Ok(())
 }
 
@@ -1960,7 +1962,7 @@ pub fn plugin_set_enabled(app: AppHandle, id: String, enabled: bool) -> Result<(
             Ok(((), true))
         });
         if result.is_ok() {
-            emit_plugin_changed(&app, &id);
+            emit_plugin_changed(&app);
         }
         return result;
     }
@@ -1974,7 +1976,7 @@ pub fn plugin_set_enabled(app: AppHandle, id: String, enabled: bool) -> Result<(
         Ok(((), true))
     });
     if result.is_ok() {
-        emit_plugin_changed(&app, &id);
+        emit_plugin_changed(&app);
     }
     result
 }
@@ -2181,7 +2183,7 @@ pub async fn plugin_update(app: AppHandle, id: String) -> Result<PluginInfo, Str
     // 源码包装的市场插件（无 git 环境安装，无 .git）：重新下载源码包替换。
     if source.kind == PluginSourceKind::Market && !dir.join(".git").exists() {
         let info = codeload_update(&app, &source, &dir, &base).await?;
-        emit_plugin_changed(&app, &id);
+        emit_plugin_changed(&app);
         return Ok(info);
     }
 
@@ -2251,7 +2253,7 @@ pub async fn plugin_update(app: AppHandle, id: String) -> Result<PluginInfo, Str
     // 命令开头的快照只是守卫输入，不得覆盖锁内结论）。
     let info = commit_plugin_update(&app, &source, &dir, &staging, &base, &manifest)?;
     let _ = fs::remove_dir_all(&staging);
-    emit_plugin_changed(&app, &id);
+    emit_plugin_changed(&app);
     Ok(info)
 }
 
@@ -2429,7 +2431,7 @@ pub async fn plugin_rollback(app: AppHandle, id: String, expected_previous_versi
             Ok(((), true))
         })
     })?;
-    emit_plugin_changed(&app, &id);
+    emit_plugin_changed(&app);
     Ok(plugin_info_from(&current, &previous_manifest, source.kind, enabled))
 }
 
@@ -2458,7 +2460,7 @@ pub async fn plugin_rebuild_local(app: AppHandle, id: String) -> Result<PluginIn
     crate::plugin_build::prepare_artifact(&app, &dir, &manifest, false).await?;
     // 启用状态在打包后重读：打包耗时期间用户可能已启停，返回值不得携带过期快照。
     let enabled = read_plugin_state(&app)?.enabled.get(&id).copied().unwrap_or(false);
-    emit_plugin_changed(&app, &id);
+    emit_plugin_changed(&app);
     Ok(plugin_info_from(&dir, &manifest, PluginSourceKind::Local, enabled))
 }
 

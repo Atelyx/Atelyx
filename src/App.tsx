@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { ReactFlowProvider } from "@xyflow/react";
 import { useAppStore } from "@/stores/appStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -14,6 +14,7 @@ import { useAppearance } from "@/hooks/useAppearance";
 import { getCurrentWindowLabel } from "@/services/window";
 import { platformCapabilities } from "@/services/platform";
 import { layoutReconcile } from "@/services/layout";
+import { BOOT_SPLASH_ID } from "@/constants/panelSkeleton";
 import { PANEL_LABEL_PREFIX, usePanelStore } from "@/stores/panelStore";
 
 // 页面 lazy 分割：主包不含 KaTeX/高亮语言包等重库，LoadingScreen 更快出现。
@@ -202,6 +203,13 @@ export default function App() {
       return false;
     }
   });
+
+  // 首帧骨架（构建期注入 index.html，见 constants/panelSkeleton）在首个提交时移除。
+  // 用布局效应：它在本次绘制前执行，首帧直接呈现 React 内容、两者之间不出现空白；
+  // React 未能挂载时骨架留在原地兜底（比纯底色有信息）。重复执行对已移除的元素是 no-op。
+  useLayoutEffect(() => {
+    document.getElementById(BOOT_SPLASH_ID)?.remove();
+  }, []);
 
   // 全局屏蔽浏览器默认右键菜单（两窗口角色都需要）
   useEffect(() => {
