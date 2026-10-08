@@ -3,6 +3,7 @@
 
 pub mod external_fs;
 pub mod filesearch;
+pub mod chat_container;
 pub mod global;
 pub mod global_shortcut;
 pub mod home;

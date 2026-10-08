@@ -8,6 +8,7 @@
 
 #[cfg(target_os = "android")]
 mod android_bridge;
+mod chat_container;
 mod commands;
 mod layout;
 mod layout_drag;
@@ -67,6 +68,17 @@ pub fn run() {
             app.manage(commands::open_context::OpenContextState::default());
             // 全局快捷键登记表（ctx.shortcuts 后端；移动端空表，注册恒拒、注销/释放幂等成功）
             app.manage(commands::global_shortcut::GlobalShortcutState::default());
+            // 会话容器真源：唯一 op 权威与写盘链；写链线程随进程常驻。
+            // 测试构建不接线——emit 实例化只允许进生产链接闭包（install_app_emitter 仅生产编译）。
+            #[cfg(not(test))]
+            {
+                let chat_state = Arc::new(chat_container::ChatContainerState::new(
+                    chat_container::WriteChainConfig::default(),
+                ));
+                chat_state.install_app_emitter(app.handle().clone());
+                chat_state.spawn_writer();
+                app.manage(chat_state);
+            }
             // 主窗口窗口事件钩子：Moved/Resized → 权威 bounds（拖拽命中/落点解析）。
             // 桌面专属：移动端单窗口无移动/缩放语义
             #[cfg(desktop)]
@@ -143,6 +155,14 @@ pub fn run() {
             commands::vault::write_chat_messages,
             commands::vault::append_chat_messages,
             commands::vault::delete_chat_messages,
+            // 会话容器真源（撕裂窗口拉基线/提交写意图；执行体提交编排变更）
+            commands::chat_container::chat_container_snapshot,
+            commands::chat_container::chat_container_load,
+            commands::chat_container::chat_container_apply,
+            commands::chat_container::chat_container_commit,
+            commands::chat_container::chat_container_intent_result,
+            commands::chat_container::chat_container_executor_boot,
+            commands::chat_container::chat_container_flush,
             commands::vault::create_canvas_vault,
             // 仓库文件管理（全仓库文件树 + 建文件夹 + 删改 + 附件 dataURL + 链接维护）
             commands::vault::list_vault_tree,

@@ -1390,7 +1390,7 @@ pub fn write_chat_messages_file(root: &Path, file: &str, content: &str) -> Resul
 }
 
 /// 追加记录：消息 .jsonl 的增量（一行一条消息记录，与前端 serializeChatMessages 字段对齐；
-/// refs/steps 透传 JSON——Rust 侧不镜像嵌套类型，序列化时按字段名原样写出）。
+/// refs/steps/attachments 透传 JSON——Rust 侧不镜像嵌套类型，序列化时按字段名原样写出）。
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatMessageRecord {
@@ -1407,6 +1407,9 @@ pub struct ChatMessageRecord {
     /// Agent 步进（思考/工具交错；工具步含调用过程，随记录持久化恢复展示）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub steps: Option<serde_json::Value>,
+    /// 附件 `file` 引用（payload 运行时缓存已在入库前剥离，不落盘）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachments: Option<serde_json::Value>,
     pub created_at: i64,
 }
 
@@ -1463,6 +1466,21 @@ pub fn append_chat_messages_file(
         .map_err(|e| e.to_string())?;
     // 本批一次写入：共享盘/多设备并发追加时，本批记录不会与其它写入端在行中间交错
     handle.write_all(&buf).map_err(|e| e.to_string())?;
+    handle.sync_all().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 消息 .jsonl 追加原始行（会话容器写链专用）：tail 为确定性序列化、以 `\n` 结尾的多行
+/// 文本，原样落盘。文件缺失报错——调用方（chat_container 写链）先核对磁盘内容与内存
+/// 基线一致才追加，不一致或缺失时回落全量重写。
+pub(crate) fn append_chat_messages_raw(root: &Path, file: &str, tail: &str) -> Result<(), String> {
+    use std::io::Write;
+    let path = chat_messages_path(root, file)?;
+    let mut handle = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .map_err(|e| e.to_string())?;
+    handle.write_all(tail.as_bytes()).map_err(|e| e.to_string())?;
     handle.sync_all().map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -2995,6 +3013,7 @@ mod chat_append_tests {
             display_content: None,
             refs: None,
             steps: None,
+            attachments: None,
             created_at: 1,
         }
     }
@@ -3013,6 +3032,24 @@ mod chat_append_tests {
         assert_eq!(parsed.id, "a");
         let parsed: ChatMessageRecord = serde_json::from_str(lines[1]).unwrap();
         assert_eq!(parsed.id, "b");
+    }
+
+    #[test]
+    fn append_line_keeps_attachments_field() {
+        // 追加路径按记录序列化：附件引用必须随行保留（serde 不得静默丢字段；
+        // 全量重写走前端原文透传不受此影响，唯独强类型追加曾是丢字段的重灾区）
+        let mut with_atts = record("a", "看这个");
+        with_atts.attachments = Some(serde_json::json!([
+            { "kind": "image", "mime": "image/png", "file": ".atelyx/附件/a.png" }
+        ]));
+        let buf = build_chat_append_buffer(&[with_atts], false).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        let parsed: ChatMessageRecord = serde_json::from_str(text.trim()).unwrap();
+        let atts = parsed
+            .attachments
+            .expect("attachments 必须随追加行持久化");
+        assert_eq!(atts[0]["kind"], "image");
+        assert_eq!(atts[0]["file"], ".atelyx/附件/a.png");
     }
 
     #[test]

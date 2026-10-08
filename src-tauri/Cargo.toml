@@ -37,6 +37,8 @@ base64 = "0.22"
 # 工具
 nanoid = "0.4"
 chrono = "0.4"
+# 会话容器真源（chat_container）：纯持久 op 建会话 id / 意图 id 派生
+uuid = { version = "1", features = ["v4"] }
 
 # 联网搜索代理：SearXNG 自建实例无内置 CORS，前端直 fetch 必被拦截，
 # Tavily key 按官方 best practice 不应暴露给 WebView——搜索统一走 Rust 侧请求。
