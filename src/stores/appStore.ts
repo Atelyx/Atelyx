@@ -46,6 +46,7 @@ import { cancelUpdateDownload as cancelUpdateDownloadSvc, checkForUpdate as chec
 import { isAndroidPlatform, platformCapabilities } from "@/services/platform";
 import type { PlatformCapabilities } from "@/services/platform";
 import { emitPluginEvent } from "@/services/cordis/events";
+import { abortVaultSwitchGate, runVaultSwitchGate } from "@/services/vaultSwitchGate";
 import { usePluginStore } from "@/stores/pluginStore";
 import { useNotificationStore } from "@/stores/notificationStore";
 import type { CanvasFileRow, RecentSpace, RecentVault } from "@/types";
@@ -504,7 +505,21 @@ export const useAppStore = create<AppState>((set, get) => ({
     // 全屏加载会话：boot 期间渲染加载屏；面板内切换不再整屏替换，仅插件步骤上报仍经此门控
     get().beginLoad();
     get().reportLoad("打开仓库");
+    // 切换门安全网判据：收尾时身份未变（门失败/打开失败等中止路径）必须广播 abort 撤撕裂窗口遮罩
+    const identityKeyBefore = identityKeyOf(get().vaultIdentity);
+    let gateSwitchId: string | null = null;
     try {
+      // 两阶段切换门：先让全部撕裂窗口 flush 在途写入并遮罩禁写（无限等待 ack），放行后才动
+      // 本窗口与 Rust——撕裂窗口的 debounce 写盘晚于 open_vault 会打进新仓库同路径（跨仓库污染）
+      const gate = await runVaultSwitchGate();
+      gateSwitchId = gate.switchId;
+      if (!gate.ok) {
+        useNotificationStore.getState().notify({
+          level: "error",
+          message: `切换仓库中止：${gate.failures[0]?.error ?? "部分窗口未能完成落盘"}`,
+        });
+        return false;
+      }
       // 切换前先落盘旧仓库的全部领域编辑并**等待写盘完成**：openVault 会把 VaultState.root 切到新仓库，
       // 若 fire-and-forget 直接放行，写盘可能晚于 open_vault 执行、把旧仓库内容写进新仓库（跨仓库污染）。
       // 领域 store 无改动则不写（脏门控，见各自 flush）；chatPanel 额外传当前仓库 root 做归属校验。
@@ -597,6 +612,13 @@ export const useAppStore = create<AppState>((set, get) => ({
         get().endLoad();
         set({ switchingVaultRoot: null });
       }
+      // 收尾安全网：身份未变（门失败/打开失败/预检失败等中止路径）= 撕裂窗口没有收到新上下文
+      // 广播、遮罩仍悬挂，必须广播 abort 撤销。成功路径不发 abort：经 Rust 中转的上下文广播与
+      // 直发的 abort 之间无到达顺序保证，abort 先到会提前撤掉「身份未切、root 已切」窗口期的
+      // 禁写遮罩；成功路径的遮罩由撕裂窗口加载链完成自行撤销。
+      if (gateSwitchId && identityKeyOf(get().vaultIdentity) === identityKeyBefore) {
+        void abortVaultSwitchGate(gateSwitchId);
+      }
     }
   },
 
@@ -616,7 +638,20 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ switchingVaultRoot: `space:${entry.serverUrl}#${entry.spaceId}` });
     get().beginLoad();
     get().reportLoad("打开协作空间");
+    // 切换门安全网判据（同 selectVault）：身份未变的收尾路径广播 abort 撕裂窗口撤遮罩
+    const identityKeyBefore = identityKeyOf(get().vaultIdentity);
+    let gateSwitchId: string | null = null;
     try {
+      // 两阶段切换门（同 selectVault）：先让全部撕裂窗口 flush 在途写入并遮罩禁写再放行
+      const gate = await runVaultSwitchGate();
+      gateSwitchId = gate.switchId;
+      if (!gate.ok) {
+        useNotificationStore.getState().notify({
+          level: "error",
+          message: `切换协作空间中止：${gate.failures[0]?.error ?? "部分窗口未能完成落盘"}`,
+        });
+        return "error";
+      }
       // 切换前先落盘旧仓库全部领域编辑并等待写盘完成（同 selectVault：flush 失败快速传播，中止切换）
       await flushAllDomains({ vaultRoot: get().vaultRoot });
       // 会话校验：restore 幂等（已恢复过直接返回），无有效令牌即 need-login（不进入激活态，UI 引导登录）
@@ -704,6 +739,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (seq === vaultSwitchSeq) {
         get().endLoad();
         set({ switchingVaultRoot: null });
+      }
+      // 收尾安全网（同 selectVault）：身份未变的中止路径广播 abort 撤撕裂窗口遮罩
+      if (gateSwitchId && identityKeyOf(get().vaultIdentity) === identityKeyBefore) {
+        void abortVaultSwitchGate(gateSwitchId);
       }
     }
   },
