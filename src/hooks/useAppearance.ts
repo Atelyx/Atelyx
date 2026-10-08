@@ -6,6 +6,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { usePluginStore } from "@/stores/pluginStore";
+import { cacheBootScheme } from "@/constants/panelSkeleton";
 import { darkenHex, foregroundFor, lightenHex, withAlpha } from "@/utils/color";
 import {
   ACCENT_COLOR_KEY,
@@ -61,10 +62,13 @@ export function useAppearance(): void {
 
   // 主题 class 应用（分层：store 只存状态，DOM 副作用归 hook）
   useEffect(() => {
-    // 主题未就绪（active 为空）时不动 class：index.html 已按系统深浅预置，此处摘掉 .dark
+    // 主题未就绪（active 为空）时不动 class：index.html 已按缓存/系统深浅预置，此处摘掉 .dark
     // 会让整屏瞬间落到浅色底
     if (!active?.entry) return;
-    document.documentElement.classList.toggle("dark", active.entry.colorScheme === "dark");
+    const dark = active.entry.colorScheme === "dark";
+    document.documentElement.classList.toggle("dark", dark);
+    // 首帧主题缓存（下次启动时 index.html 在配置就绪前取用）；本窗口每次解析都写同一个值
+    cacheBootScheme(dark ? "dark" : "light");
   }, [active]);
 
   // 主题变量 + 强调色应用（单一真相源，避免变量 effect 与强调色 effect 争抢 --accent）：

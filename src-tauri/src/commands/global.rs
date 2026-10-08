@@ -298,11 +298,141 @@ pub fn patch_global_config(app: AppHandle, patch: serde_json::Value) -> Result<G
     patch_global_config_at(&global_config_path(&app)?, &patch)
 }
 
+/// 原生启动底色的深浅方案（底色只能取主题 `--bg-primary` 的浅/深基底这两档）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ThemeScheme {
+    Dark,
+    Light,
+}
+
+/// 内置主题插件 id（与前端 `utils/pluginTheme.ts` 的 `BUILTIN_THEME_PLUGIN_ID` 同值，契约测试把守）。
+const BUILTIN_THEME_PLUGIN_ID: &str = "builtin.theme";
+/// 主题设置项键（前端 `utils/pluginTheme.ts` 的 `COLOR_MODE_KEY` / `VARIANT_KEY`）。
+const THEME_COLOR_MODE_KEY: &str = "colorMode";
+const THEME_VARIANT_KEY: &str = "variant";
+
+/// 当前主题的深浅方案（原生启动底色用；`system_dark` = 系统是否深色）。
+/// 只解析内置主题插件的浅/深基底：皮肤（内置「极光」的 variables 自定义了 `--bg-primary`）、
+/// 自定义主题插件（含它被停用后前端回退内置插件的情形）与读盘/解析失败一律回落深色——
+/// 宁可闪一次深色，也不猜一个错色。
+pub(crate) fn startup_theme_scheme(app: &AppHandle, system_dark: bool) -> ThemeScheme {
+    let Ok(path) = global_config_path(app) else {
+        return ThemeScheme::Dark;
+    };
+    let Ok(data) = std::fs::read_to_string(path) else {
+        return ThemeScheme::Dark;
+    };
+    match serde_json::from_str::<GlobalConfig>(&data) {
+        Ok(config) => theme_scheme_of(&config, system_dark),
+        Err(_) => ThemeScheme::Dark,
+    }
+}
+
+/// 主题值 → 深浅方案（colorMode 与主题插件口径逐分支对齐前端 `utils/pluginTheme.ts` 的
+/// `resolveActiveThemeEntry`；皮肤变体比前端保守：任意字符串变体都按变量自定义兜底深色）。
+fn theme_scheme_of(config: &GlobalConfig, system_dark: bool) -> ThemeScheme {
+    // 未设置主题 = 默认主题插件（前端同口径）
+    if config.theme.as_deref().unwrap_or(BUILTIN_THEME_PLUGIN_ID) != BUILTIN_THEME_PLUGIN_ID {
+        return ThemeScheme::Dark;
+    }
+    let settings = config
+        .theme_settings
+        .as_ref()
+        .and_then(|all| all.get(BUILTIN_THEME_PLUGIN_ID));
+    // 皮肤：命中条目的 variables 自定义了底色（如内置「极光」的 `--bg-primary`），Rust 不带皮肤清单，
+    // 故任意字符串变体都按「变量自定义」处理 → 深色兜底（前端只认命中条目 id 的变体，
+    // 这里比前端更保守：陈旧变体值下会多闪一次深色，代价可接受）。
+    if settings
+        .and_then(|s| s.get(THEME_VARIANT_KEY))
+        .and_then(|v| v.as_str())
+        .is_some()
+    {
+        return ThemeScheme::Dark;
+    }
+    match settings {
+        // 整条主题设置缺失：前端会播种缺省 colorMode = dark
+        None => ThemeScheme::Dark,
+        Some(s) => match s.get(THEME_COLOR_MODE_KEY).and_then(|v| v.as_str()) {
+            Some("dark") => ThemeScheme::Dark,
+            Some("light") => ThemeScheme::Light,
+            // "system" 与未知值/键缺失：前端解析为跟随系统
+            _ => {
+                if system_dark {
+                    ThemeScheme::Dark
+                } else {
+                    ThemeScheme::Light
+                }
+            }
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     use crate::commands::plugin::{assembly_version, ASSEMBLY_TEST_GATE};
+
+    /// 原生启动底色的主题解析：内置主题插件按 colorMode 取深浅（跟随系统时看系统），
+    /// 皮肤与自定义主题插件一律深色兜底（变量在 JS 侧，Rust 读不到）。
+    #[test]
+    fn startup_theme_scheme_resolution() {
+        let of = |json: &str, system_dark: bool| {
+            let config: GlobalConfig = serde_json::from_str(json).unwrap();
+            theme_scheme_of(&config, system_dark)
+        };
+        let with_mode = |mode: &str| {
+            format!(r#"{{"theme":"builtin.theme","themeSettings":{{"builtin.theme":{{"colorMode":"{mode}"}}}}}}"#)
+        };
+        // 整条主题设置缺失 = 前端播种缺省 colorMode = dark；主题未设置同理（默认主题插件）
+        assert_eq!(of(r#"{"theme":"builtin.theme"}"#, false), ThemeScheme::Dark);
+        assert_eq!(of("{}", false), ThemeScheme::Dark);
+        assert_eq!(of(&with_mode("dark"), false), ThemeScheme::Dark);
+        assert_eq!(of(&with_mode("dark"), true), ThemeScheme::Dark);
+        // 显式浅色：与系统无关
+        assert_eq!(of(&with_mode("light"), true), ThemeScheme::Light);
+        // 跟随系统
+        assert_eq!(of(&with_mode("system"), true), ThemeScheme::Dark);
+        assert_eq!(of(&with_mode("system"), false), ThemeScheme::Light);
+        // 未知取值与「条目存在但缺 colorMode」：前端按跟随系统解析
+        assert_eq!(of(&with_mode("blue"), true), ThemeScheme::Dark);
+        assert_eq!(of(&with_mode("blue"), false), ThemeScheme::Light);
+        assert_eq!(
+            of(r#"{"theme":"builtin.theme","themeSettings":{"builtin.theme":{}}}"#, false),
+            ThemeScheme::Light
+        );
+        // 皮肤：变量自定义底色，深色兜底（含前端会忽略的陈旧变体值——比前端保守）；
+        // 非字符串变体前端同样忽略 → 回落 colorMode
+        assert_eq!(
+            of(
+                r#"{"theme":"builtin.theme","themeSettings":{"builtin.theme":{"colorMode":"light","variant":"aurora"}}}"#,
+                false
+            ),
+            ThemeScheme::Dark
+        );
+        assert_eq!(
+            of(
+                r#"{"theme":"builtin.theme","themeSettings":{"builtin.theme":{"colorMode":"light","variant":"gone-skin"}}}"#,
+                false
+            ),
+            ThemeScheme::Dark
+        );
+        assert_eq!(
+            of(
+                r#"{"theme":"builtin.theme","themeSettings":{"builtin.theme":{"colorMode":"light","variant":7}}}"#,
+                false
+            ),
+            ThemeScheme::Light
+        );
+        // 自定义主题插件（含被停用后前端回退内置插件的情形）
+        assert_eq!(
+            of(
+                r#"{"theme":"com.example.theme","themeSettings":{"com.example.theme":{"colorMode":"light"}}}"#,
+                false
+            ),
+            ThemeScheme::Dark
+        );
+    }
 
     /// 组合用户层补丁（含 `null` 删键）= 装配输入变更，版本前移；其余补丁不动版本。
     /// 计数器是进程级全局静态：精确增量断言先取闸锁独占窗口（并行测试里其他 bump 源同持此锁）。

@@ -97,6 +97,9 @@ pub fn run() {
                 app.manage(tray::ExitWait::default());
                 if !autorun {
                     if let Some(main_win) = app.get_webview_window("main") {
+                        // 主题底色：配置里只有深色缺省，浅色主题先改底色再显窗，不闪深色
+                        let _ = main_win
+                            .set_background_color(Some(commands::windows::startup_background(app.handle())));
                         let _ = main_win.show();
                     }
                 }
@@ -302,8 +305,9 @@ pub fn run() {
 
 #[cfg(test)]
 mod capability_contract_tests {
-    /// 启动底色契约：窗口原生刷（`tauri.conf.json` / `commands/windows.rs`）恒为深色主题底色，
-    /// `index.html` 的首帧底色按 `.dark` 分支取深浅两套——任一处与 `--bg-primary` 异值都会闪异色。
+    /// 启动底色契约：原生窗口刷与主题 `--bg-primary` 必须逐档同值——`tauri.conf.json`（建窗时的
+    /// 深色缺省，见 lib.rs setup 的按主题改底色）、`commands/windows.rs`（深浅两档常量）、
+    /// `index.html`（首帧按 `.dark` 分支取）任一处异值都会在启动时闪一次异色。
     #[test]
     fn startup_background_matches_theme_primary() {
         let css = include_str!("../../src/styles/index.css");
@@ -342,14 +346,40 @@ mod capability_contract_tests {
             .as_str()
             .expect("app.windows[0].backgroundColor 未配置")
             .to_lowercase();
-        assert_eq!(window_bg, dark, "主窗口启动底色应为深色主题底色");
+        assert_eq!(window_bg, dark, "主窗口配置底色应为深色主题底色（浅色由 setup 按主题改）");
 
-        let rgb = |i: usize| u8::from_str_radix(&dark[1 + i * 2..3 + i * 2], 16).unwrap();
-        let expected = format!("Color({}, {}, {}, 255)", rgb(0), rgb(1), rgb(2));
+        // 两极底色常量：两档都要在 windows.rs 里，缺浅色档 = 浅色主题仍闪深色
+        let as_literal = |hex: &str| {
+            let rgb = |i: usize| u8::from_str_radix(&hex[1 + i * 2..3 + i * 2], 16).unwrap();
+            format!("Color({}, {}, {}, 255)", rgb(0), rgb(1), rgb(2))
+        };
+        let windows_rs = include_str!("commands/windows.rs");
+        for (name, hex) in [("深色", &dark), ("浅色", &light)] {
+            let expected = as_literal(hex);
+            assert!(
+                windows_rs.contains(&expected),
+                "启动底色常量缺{name}档 {expected}（应与 --bg-primary 同值）"
+            );
+        }
+    }
+
+    /// 主题解析口径契约：原生底色按 `global.json` 的主题解析（见 `commands/global.rs`），
+    /// 这里的键名与内置主题插件 id 必须与前端一致——不一致只会让浅色主题的用户仍旧闪深色，
+    /// 静默失效且运行时无断言点。
+    #[test]
+    fn startup_theme_scheme_keys_match_frontend() {
+        let frontend = include_str!("../../src/utils/pluginTheme.ts");
         assert!(
-            include_str!("commands/windows.rs").contains(&expected),
-            "撕裂窗口启动底色应为 {expected}（与深色 --bg-primary 一致）"
+            frontend.contains(r#"BUILTIN_THEME_PLUGIN_ID = "builtin.theme""#),
+            "前端内置主题插件 id 已变"
         );
+        assert!(frontend.contains(r#"COLOR_MODE_KEY = "colorMode""#), "前端 colorMode 键已变");
+        assert!(frontend.contains(r#"VARIANT_KEY = "variant""#), "前端 variant 键已变");
+
+        let rust = include_str!("commands/global.rs");
+        assert!(rust.contains(r#"BUILTIN_THEME_PLUGIN_ID: &str = "builtin.theme""#));
+        assert!(rust.contains(r#"THEME_COLOR_MODE_KEY: &str = "colorMode""#));
+        assert!(rust.contains(r#"THEME_VARIANT_KEY: &str = "variant""#));
     }
 
     /// 校验 `tauri.conf.json > plugins > shell > open` 的放行范围。

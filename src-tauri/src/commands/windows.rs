@@ -18,10 +18,32 @@ fn panel_url() -> WebviewUrl {
     WebviewUrl::App("index.html".into())
 }
 
-/// 撕裂窗口的启动底色（深色主题 `--bg-primary`）：窗口创建先于页面渲染，与主窗口
-/// `tauri.conf.json > backgroundColor` 同值才不闪异色（一致性由 lib.rs 契约测试把守）。
+/// 撕裂窗口的启动底色（主题 `--bg-primary` 的浅/深基底）：窗口创建先于页面渲染，
+/// 与 `tauri.conf.json > backgroundColor`、`index.html` 首帧底色取同一组值才不闪异色
+/// （一致性由 lib.rs 契约测试把守）。
 #[cfg(desktop)]
-const STARTUP_BG: Color = Color(19, 20, 24, 255);
+const DARK_BG: Color = Color(19, 20, 24, 255);
+#[cfg(desktop)]
+const LIGHT_BG: Color = Color(234, 233, 227, 255);
+
+/// 当前生效主题的原生启动底色（主窗口 setup 与撕裂窗口建窗共用）。
+#[cfg(desktop)]
+pub(crate) fn startup_background(app: &AppHandle) -> Color {
+    match crate::commands::global::startup_theme_scheme(app, system_dark(app)) {
+        crate::commands::global::ThemeScheme::Light => LIGHT_BG,
+        crate::commands::global::ThemeScheme::Dark => DARK_BG,
+    }
+}
+
+/// 系统是否深色：窗口未显式设主题时 `theme()` 即系统设置，与页面 `prefers-color-scheme` 同源。
+/// 取不到窗口（极端时序）按深色——两套基底里深色是缺省。
+#[cfg(desktop)]
+fn system_dark(app: &AppHandle) -> bool {
+    app.get_webview_window("main")
+        .and_then(|win| win.theme().ok())
+        .map(|theme| theme == tauri::Theme::Dark)
+        .unwrap_or(true)
+}
 
 /// 创建撕裂面板窗口（label = `panel-<id>`；内部函数，供布局迷你窗口管理器
 /// 撕裂建新窗/恢复调和/直撕与显窗动作调用）。已存在（恢复防重）时直接返回 true。
@@ -53,8 +75,8 @@ pub(crate) fn create_panel_window_internal(
             .decorations(false)
             .resizable(true)
             .min_inner_size(320.0, 240.0)
-            // 启动背景色 = 主窗口 tauri.conf.json 的 backgroundColor，防新建窗口白闪
-            .background_color(STARTUP_BG);
+            // 启动背景色 = 当前主题底色（与主窗口同源），防新建窗口白闪/异色闪
+            .background_color(startup_background(app));
         // UI 驻留托盘（静默自启/主窗口已驻留）期间建窗不可见，显示由 show_all_windows
         // 统一补；标志未托管（不可能在驻留语义外建窗的极端时序）按可见处理
         let hidden = app
