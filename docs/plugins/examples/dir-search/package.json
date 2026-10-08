@@ -1,0 +1,12 @@
+{
+  "name": "com.atelyx.example.dir-search",
+  "version": "1.0.0",
+  "main": "index.ts",
+  "description": "示例插件：目录全文检索（双半形态）——客户端半只渲染，宿主半 Node 进程递归扫描匹配",
+  "license": "MIT",
+  "atelyx": {
+    "name": "目录检索（双半示例）",
+    "tagline": "宿主半进程做递归检索，界面零等待",
+    "type": "panel"
+  }
+}

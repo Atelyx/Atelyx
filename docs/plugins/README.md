@@ -79,5 +79,6 @@ Atelyx 是插件化平台：插件 = 一个 git 仓库（市场侧以 GitHub 为
 
 [发布检查清单 →](publishing.md)
 
-更多指南：[清单与依赖打包](manifest.md)、[ctx API 参考](ctx-api.md)、[插件双半与 stdio RPC](rpc.md)、[自定义槽位](custom-slots.md)、
+更多指南：[清单与依赖打包](manifest.md)、[ctx API 参考](ctx-api.md)、[插件自带原生能力](native-capabilities.md)、
+[插件双半与 stdio RPC](rpc.md)、[示例：目录检索双半插件](examples/dir-search/README.md)、[自定义槽位](custom-slots.md)、
 [样式与容器契约](styling.md)。
