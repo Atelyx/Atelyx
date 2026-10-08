@@ -472,6 +472,9 @@ function chatRecordLine(m: EditorChatMessage): string {
     ...(m.displayContent ? { displayContent: m.displayContent } : {}),
     ...(m.refs?.length ? { refs: m.refs } : {}),
     ...(m.steps?.length ? { steps: m.steps } : {}),
+    ...(m.attachments?.length
+      ? { attachments: m.attachments.map(({ payload: _payload, ...rest }) => rest) }
+      : {}),
     createdAt: m.createdAt,
   });
 }

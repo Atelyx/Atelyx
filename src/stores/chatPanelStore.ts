@@ -12,9 +12,11 @@ import {
 } from "@/services/metadata";
 import {
   foldChatDelta,
+  flushChatContainerTruth,
+  foldChatContainerExternal,
+  initChatContainerTransport,
   isChatContainerHost,
-  installChatContainerHost,
-  installChatContainerMirror,
+  isRustTruthMode,
   requestChatContainerSnapshot,
   sendChatContainerOp,
   stripPendingsForWire,
@@ -488,37 +490,49 @@ async function autoNameSession(sessionId: string): Promise<void> {
   await runtime.autoName(sessionNamingTarget(sessionId), sessionId);
 }
 
-/** debounce 500ms 写盘（读最新 state；`messageSessionId` = 本次改动涉及的会话，其消息 .jsonl 需重写）。 */
+/** debounce 500ms 写盘（读最新 state；`messageSessionId` = 本次改动涉及的会话，其消息 .jsonl 需重写）。
+ *  Rust 真源模式空操作：落盘脏标记由真源在应用变更时自行登记，写链（防抖+退避）在 Rust 侧。 */
 function schedulePersist(messageSessionId?: string) {
+  if (isRustTruthMode()) return;
   if (messageSessionId) dirtyMessageFiles.add(messageSessionId);
   dirty = true;
   persistCtl.schedule();
 }
 
-/** 会话元数据侧车（title/agentId）脏标记 + 调度写盘。 */
+/** 会话元数据侧车（title/agentId）脏标记 + 调度写盘（Rust 真源模式空操作，同上）。 */
 function markMetaDirty(sessionId: string) {
+  if (isRustTruthMode()) return;
   dirtyMetaSessions.add(sessionId);
   dirty = true;
   persistCtl.schedule();
 }
 
-/** 面板级覆盖（editor-chats-meta.json）脏标记 + 调度写盘。 */
+/** 面板级覆盖（editor-chats-meta.json）脏标记 + 调度写盘（Rust 真源模式空操作，同上）。 */
 function markOverridesDirty() {
+  if (isRustTruthMode()) return;
   overridesDirty = true;
   dirty = true;
   persistCtl.schedule();
 }
 
-// ===== 跨窗口角色与容器面（宿主-镜像模型）=====
-// 主窗口为容器宿主：本文件的容器态与写盘链（脏集合/基线/退避）独占，镜像窗口的全部写意图
-// 经 op 转发到宿主应用。镜像窗口不持有写盘链：容器态来自宿主快照/增量折叠，改动经 op 转发。
+// ===== 跨窗口角色与容器面（Rust 真源 / 宿主-镜像双模式）=====
+// Rust 真源模式：Rust 持有持久态与写盘链，全窗口薄客户端（快照/op 走 invoke，增量折叠
+// Rust 广播），主窗口兼执行体（意图执行 + 编排变更提交，见 services/chatContainerWire）。
+// 事件线模式（Rust 不可达降级）：主窗口 = 宿主单写者（容器态与写盘链独占），撕裂窗口 =
+// 镜像薄客户端（基线快照 + op 转发 + 增量折叠）。镜像窗口不持有写盘链：容器态来自
+// 快照/增量折叠，改动经 op 转发。
 
-/** 本窗口角色：主窗口 = 宿主（含非 Tauri 环境降级，行为与单窗口一致）。 */
+/** 本窗口角色：主窗口 = 宿主/执行体候选（含非 Tauri 环境降级，行为与单窗口一致）。 */
 const isContainerHost = isChatContainerHost();
 
-/** Tauri 运行时判定（vitest/jsdom 无跨窗口线，wire 不安装）。 */
-function hasTauriRuntime(): boolean {
-  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+/** 执行体意图执行进行中：意图 op 在本窗口落地时容器动作按本地路径运行。执行体是容器动作的
+ * 本地执行者，若经模式分派再转发，执行 op 会再产意图成回环（stop/append/import 等）。 */
+let executingIntentOp = false;
+
+/** 本地模式宿主判定：事件线模式主窗口本地动作；Rust 真源模式全部窗口走转发/薄客户端路径，
+ * 惟执行体意图执行期间按本地路径运行（见 executingIntentOp）。 */
+function isLocalModeHost(): boolean {
+  return isContainerHost && (!isRustTruthMode() || executingIntentOp);
 }
 
 /** 宿主容器的差分视图（wire 据此产出增量）。 */
@@ -632,9 +646,10 @@ function cancelPersistRetry(): void {
 /**
  * 写盘。归属校验按身份键：当前激活身份键与内存会话所属身份键（sessionVaultKey）不一致 →
  * 不写（防跨仓库搞混——切仓库前 flush 时身份尚未切换，校验通过落旧仓库；
- * 切换完成后的迟到写盘身份不匹配被丢弃）。
+ * 切换完成后的迟到写盘身份不匹配被丢弃）。Rust 真源模式下整个写盘链在真源侧，此处不达。
  */
 async function persistNow(): Promise<void> {
+  if (isRustTruthMode()) return;
   const versionAtStart = persistCtl.version;
   let persistFailed = false;
   // 守卫：load 完成前（loaded=false，store 仍是初始空态）不落盘——
@@ -1299,21 +1314,52 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
   persistError: null,
 
   load: async (force = false) => {
-    // 镜像：load = 向宿主拉基线快照（幂等守卫照常，force 重拉）。宿主不可达重试一次后
-    // 如实报错（loaded 保持 false，重进面板/切仓库可再触发）。
-    if (!isContainerHost) {
+    // 传输初始化（每次装载重评估）：按资格与探测评定 Rust 真源/事件线模式并安装对应角色
+    //（薄客户端 + 主窗口执行体，或事件线宿主/镜像）。资格 = 本地仓库身份：容器持久态收口
+    // Rust 仅覆盖本地仓库，空间仓库会话存储在服务端，走事件线（宿主写盘链经内容 I/O 分派）。
+    await initChatContainerTransport({
+      mirror: {
+        applySnapshot: applyContainerSnapshot,
+        applyFragments: applyContainerFragments,
+      },
+      ...(isContainerHost
+        ? {
+            executor: {
+              getView: () => containerView(useChatPanelStore.getState()),
+              subscribe: (listener) => useChatPanelStore.subscribe(listener),
+              executeOp: applyContainerOp,
+            },
+            host: {
+              getView: () => containerView(useChatPanelStore.getState()),
+              subscribe: (listener) => useChatPanelStore.subscribe(listener),
+              applyOp: applyContainerOp,
+            },
+          }
+        : {}),
+      rustTruthEligible: useAppStore.getState().vaultIdentity?.kind === "local",
+    });
+    // 薄客户端/镜像：load = 向真源拉基线快照（幂等守卫照常，force 重拉）。真源不可达重试
+    // 一次后如实报错（loaded 保持 false，重进面板/切仓库可再触发）。
+    // 判定与 isLocalModeHost 解耦：执行体意图执行期间装载路径不变（仍是薄客户端拉快照）。
+    if (!(isContainerHost && !isRustTruthMode())) {
       if (!force && get().loaded) return;
+      // 目标身份 = 调用时激活身份；await 快照期间身份可能切换（新 load 会重评模式并自拉
+      // 基线），迟到快照属旧身份，应用即跨仓库污染
+      const targetKey = activeIdentityKey();
       let lastError: unknown = null;
       for (let attempt = 0; attempt < 2; attempt++) {
         try {
-          applyContainerSnapshot(await requestChatContainerSnapshot());
+          const snapshot = await requestChatContainerSnapshot();
+          if (activeIdentityKey() !== targetKey) return;
+          // 快照装载是外部变更：执行体差分基准随之推进，不得当本地改动回提交真源
+          foldChatContainerExternal(() => applyContainerSnapshot(snapshot));
           return;
         } catch (e) {
           lastError = e;
         }
       }
       console.error("会话容器基线拉取失败", lastError);
-      set({ error: "会话容器暂不可达（主窗口未响应）" });
+      set({ error: isRustTruthMode() ? "会话容器暂不可达（真源未响应）" : "会话容器暂不可达（主窗口未响应）" });
       return;
     }
     // 目标身份 = 调用时的激活仓库身份（进仓流程在激活完成后才分发 onVaultEntered）。
@@ -1437,7 +1483,7 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
   deleteSession: (id) => {
     // 镜像：删除意图转发宿主（会话列表随增量折叠收回，文件清理在宿主）；激活回落是本窗口
     // 本地状态（宿主增量不管各窗口激活态），先行本地处理
-    if (!isContainerHost) {
+    if (!isLocalModeHost()) {
       const active = get().activeSessionId;
       set(active === id ? { activeSessionId: null, error: null } : { error: null });
       void sendChatContainerOp({ kind: "delete", sessionId: id }).catch((e) =>
@@ -1479,7 +1525,7 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
 
   importSession: async (messages, opts) => {
     // 镜像：留档写意图转发宿主（登记随增量折叠收回），返回新建 id
-    if (!isContainerHost) {
+    if (!isLocalModeHost()) {
       if (!get().loaded) await get().load();
       if (!get().loaded) throw new Error("会话容器未就绪（基线拉取未完成），请重试");
       const response = await sendChatContainerOp({ kind: "import", messages, opts });
@@ -1514,7 +1560,7 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
 
   appendMessages: async (sessionId, messages) => {
     // 镜像：追加写意图转发宿主（去重/时间基线由宿主按真源会话计算）
-    if (!isContainerHost) {
+    if (!isLocalModeHost()) {
       if (!get().loaded) await get().load();
       if (!get().loaded) throw new Error("会话容器未就绪（基线拉取未完成），请重试");
       const response = await sendChatContainerOp({ kind: "append", sessionId, messages });
@@ -1584,7 +1630,7 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
 
   createSession: async (opts) => {
     // 镜像：新建意图转发宿主（不改激活会话的语义由宿主保持），返回新建 id
-    if (!isContainerHost) {
+    if (!isLocalModeHost()) {
       if (!get().loaded) await get().load();
       if (!get().loaded) throw new Error("会话容器未就绪（基线拉取未完成），请重试");
       const response = await sendChatContainerOp({ kind: "create", opts });
@@ -1612,7 +1658,7 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
 
   setSessionTitle: async (sessionId, title) => {
     // 镜像：改名意图转发宿主（同名冲突/存在性校验在宿主真源）
-    if (!isContainerHost) {
+    if (!isLocalModeHost()) {
       if (!get().loaded) await get().load();
       if (!get().loaded) throw new Error("会话容器未就绪（基线拉取未完成），请重试");
       const response = await sendChatContainerOp({ kind: "setTitle", sessionId, title });
@@ -1632,7 +1678,7 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
   /** 删除面板会话（同源；连带消息 .jsonl / 元数据侧车 / 任务清单侧车，见 deleteSession）。 */
   deleteSessionExternal: async (sessionId: string) => {
     // 镜像：删除意图转发宿主（连带清理在宿主执行）
-    if (!isContainerHost) {
+    if (!isLocalModeHost()) {
       if (!get().loaded) await get().load();
       if (!get().loaded) throw new Error("会话容器未就绪（基线拉取未完成），请重试");
       const response = await sendChatContainerOp({ kind: "deleteExternal", sessionId });
@@ -1647,12 +1693,16 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
   send: async (content, refs = [], pendings = []) => {
     // 镜像：预检在本窗口完成后转发 op（附件字节先落本仓库临时区，blob 不过事件线）；
     // 读己之写 = 响应片段先折叠再返回，新建会话的激活回落同步完成。
-    if (!isContainerHost) {
+    if (!isLocalModeHost()) {
       const trimmed = content.trim();
       if ((!trimmed && pendings.length === 0) || get().streaming || get().compacting || get().sending) {
         return false;
       }
-      set({ sending: true });
+      // Rust 真源模式不占 sending：意图回到本窗口（执行体）执行 runSend，由其 sending 守卫
+      // 串行化并发意图；转发期间占位会自挡本窗口意图。事件线镜像无本地执行，占位防双击。
+      // 门控进 tried 时捕获：模式在 await 期间翻转时 finally 仍按进入时决定复位，防 sending 卡死
+      const gateSending = !isRustTruthMode();
+      if (gateSending) set({ sending: true });
       try {
         const sessionKey = get().activeSessionId ?? crypto.randomUUID();
         const materialized = await materializePendings(pendings, sessionKey);
@@ -1682,7 +1732,7 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
         console.error("镜像发送转发失败", e);
         return false;
       } finally {
-        set({ sending: false });
+        if (gateSending) set({ sending: false });
       }
     }
     const result = await runSend({
@@ -1699,7 +1749,7 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
 
   regenerate: async () => {
     // 镜像：重建意图转发宿主（截断写经宿主真源，防陈旧副本覆盖）；软失败提示随响应回传
-    if (!isContainerHost) {
+    if (!isLocalModeHost()) {
       const id = get().activeSessionId;
       if (!id || get().streaming || get().compacting) return;
       try {
@@ -1716,7 +1766,7 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
 
   compactSession: async () => {
     // 镜像：压缩意图转发宿主（模型请求在宿主执行；互斥守卫以宿主状态为准，本地守卫只省无效转发）
-    if (!isContainerHost) {
+    if (!isLocalModeHost()) {
       const id = get().activeSessionId;
       if (!id || get().streaming || get().compacting) return;
       try {
@@ -1733,7 +1783,7 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
 
   renameSession: async () => {
     // 镜像：命名意图转发宿主（模型请求在宿主执行，标题写回经真源广播）
-    if (!isContainerHost) {
+    if (!isLocalModeHost()) {
       const id = get().activeSessionId;
       if (!id || get().streaming) return;
       try {
@@ -1753,7 +1803,7 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
     const id = s.activeSessionId;
     if (!id || s.streaming || s.compacting) return;
     // 镜像：截断写转发宿主（陈旧副本的整文件重写是跨窗口丢数据的根源，截断只发生在真源）
-    if (!isContainerHost) {
+    if (!isLocalModeHost()) {
       void sendChatContainerOp({ kind: "rollback", sessionId: id, messageId }).catch((e) =>
         console.error("镜像回滚转发失败", e),
       );
@@ -1764,7 +1814,7 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
 
   stop: () => {
     // 镜像：中止意图转发宿主（abortController 持有在宿主；本地流式态随 status 增量收回）
-    if (!isContainerHost) {
+    if (!isLocalModeHost()) {
       void sendChatContainerOp({ kind: "stop" }).catch((e) =>
         console.error("镜像停止转发失败", e),
       );
@@ -1775,7 +1825,7 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
 
   setAgentId: (id) => {
     const current = get();
-    if (!isContainerHost) {
+    if (!isLocalModeHost()) {
       if (current.activeSessionId) {
         void sendChatContainerOp({
           kind: "setAgentId",
@@ -1800,7 +1850,7 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
     set({ modelOverride: ov });
     // 镜像：覆盖随 op 同步宿主（send 的模型解析在宿主做）；持久化（设备偏好）归宿主，
     // 宿主回声经 status 增量折叠（同值幂等）
-    if (!isContainerHost) {
+    if (!isLocalModeHost()) {
       void sendChatContainerOp({ kind: "setModelOverride", ov }).catch((e) =>
         console.error("镜像模型覆盖转发失败", e),
       );
@@ -1811,7 +1861,7 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
 
   setEffortOverride: (effort) => {
     set({ effortOverride: effort });
-    if (!isContainerHost) {
+    if (!isLocalModeHost()) {
       void sendChatContainerOp({ kind: "setEffortOverride", effort }).catch((e) =>
         console.error("镜像推理力度覆盖转发失败", e),
       );
@@ -1841,8 +1891,10 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
   clearPendingRewrites: () => set({ pendingRewrites: [] }),
 
   flush: () => {
+    // Rust 真源模式：写盘链在真源侧，flush 请求真源立即写（resolve 不代表全部写成功，失败可见+退避重试）
+    if (isRustTruthMode()) return flushChatContainerTruth();
     // 镜像不持有写盘链：容器变更已随 op 落在宿主，退出时无盘可刷
-    if (!isContainerHost) return Promise.resolve();
+    if (!isLocalModeHost()) return Promise.resolve();
     // 无本地改动不写盘：外部删除会话文件后切仓库/退出，不把内存副本写回（覆盖删除）
     if (!dirty) return Promise.resolve();
     // 归属校验在 persistNow 内按身份键做（当前激活身份 ≠ 内存会话所属身份 → 不写）
@@ -1853,11 +1905,21 @@ export const useChatPanelStore = create<ChatPanelState>((set, get) => ({
 // ===== 容器 op 分派与角色安装 =====
 
 /**
- * 容器 op → 宿主容器动作的唯一分派点：镜像写意图在此落回宿主真源（复用上述执行体与动作，
- * 宿主自身状态变化照常进差分广播）。产出随 op 响应回传镜像：value = 对应容器面动作的返回值，
- * createdSessionId 供镜像回落自身激活态。
+ * 容器 op → 容器动作的唯一分派点：镜像写意图在此落回真源执行体（复用上述动作，执行期间
+ * 按本地路径运行——见 executingIntentOp），产出随 op 响应回传发起窗口：value = 对应容器面
+ * 动作的返回值，createdSessionId 供其回落自身激活态。
  */
 async function applyContainerOp(op: ChatContainerOp): Promise<ChatOpOutcome> {
+  const outer = executingIntentOp;
+  executingIntentOp = true;
+  try {
+    return await applyContainerOpInner(op);
+  } finally {
+    executingIntentOp = outer;
+  }
+}
+
+async function applyContainerOpInner(op: ChatContainerOp): Promise<ChatOpOutcome> {
   const s = useChatPanelStore.getState();
   switch (op.kind) {
     case "send": {
@@ -1912,20 +1974,5 @@ async function applyContainerOp(op: ChatContainerOp): Promise<ChatOpOutcome> {
     case "deleteExternal":
       await s.deleteSessionExternal(op.sessionId);
       return {};
-  }
-}
-
-if (hasTauriRuntime()) {
-  if (isContainerHost) {
-    installChatContainerHost({
-      getView: () => containerView(useChatPanelStore.getState()),
-      subscribe: (listener) => useChatPanelStore.subscribe(listener),
-      applyOp: applyContainerOp,
-    });
-  } else {
-    installChatContainerMirror({
-      applySnapshot: applyContainerSnapshot,
-      applyFragments: applyContainerFragments,
-    });
   }
 }

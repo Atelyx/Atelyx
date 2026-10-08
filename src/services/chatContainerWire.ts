@@ -1,7 +1,9 @@
 /**
- * 会话容器跨窗口线（宿主-镜像模型）：宿主 = 主窗口单写者（独占写盘链），镜像窗口经
- * seq 戳快照拉基线、增量折叠跟随、op 转发写意图。差分与折叠为纯函数，传输为 Tauri event。
+ * 会话容器跨窗口线：传输双模式——宿主-镜像事件线（主窗口单写者独占写盘链）与 Rust 真源
+ * （Rust 持有持久态与写盘链，全窗口薄客户端，主窗口兼执行体）。差分与折叠为纯函数，
+ * 事件线传输为 Tauri event，Rust 真源传输为 invoke + Rust 广播，对外 API 同形。
  */
+import { invoke } from "@tauri-apps/api/core";
 import { emit, emitTo, listen } from "@tauri-apps/api/event";
 import { emitPluginEvent } from "@/services/cordis/events";
 import { getCurrentWindowLabel } from "@/services/window";
@@ -22,6 +24,8 @@ const HOST_WINDOW_LABEL = "main";
 const REQUEST_EVENT = "chat-container-request";
 const RESPONSE_EVENT = "chat-container-response";
 const DELTA_EVENT = "chat-container-delta";
+/** Rust 真源 → 执行体（主窗口）的意图事件（执行 op 定向投递；经 intent_result 回填）。 */
+const INTENT_EVENT = "chat-container-intent";
 
 /** 增量广播的合并节奏（流式期间的镜像跟随延迟上限；与 UI 帧率感知平衡）。 */
 const DELTA_FLUSH_MS = 100;
@@ -588,7 +592,7 @@ function handleMirrorResponse(r: ChatContainerResponse): void {
   const pending = mirrorPending.get(r.requestId);
   if (r.kind === "op" && r.ok && r.fragments) {
     // 自身 op 的响应片段先折叠再决绝：await 返回时读己之写已可见；不转发插件事件（自身变更不自通知）
-    mirrorHandlers?.applyFragments(r.fragments, { notifyPlugins: false });
+    foldExternal(() => mirrorHandlers?.applyFragments(r.fragments, { notifyPlugins: false }));
   }
   if (!pending) return;
   mirrorPending.delete(r.requestId);
@@ -600,10 +604,34 @@ function handleMirrorResponse(r: ChatContainerResponse): void {
 }
 
 function handleMirrorDelta(d: ChatContainerDelta): void {
+  // 事件线宿主自回声：宿主是 delta 唯一产出方（emit 全窗广播含自身），状态已是权威；
+  // 宿主自身变更 opOwners 为空判不出回声，折叠会以通知面重复触发插件事件——整体跳过
+  if (!rustTruthEnabled && isChatContainerHost()) return;
   if (d.seq <= mirrorSeq) return;
   mirrorSeq = d.seq;
+  if (d.status?.sessionVaultKey !== undefined) rustCurrentRoot = d.status.sessionVaultKey;
+  // 执行体自身提交的回声：执行期变更已乐观应用进本地（本地内容 ≥ 广播内容），折叠会回退
+  // 正在流式的内容——整体跳过（Rust 真源侧一致性由提交时的差分保证，无需本地对账）
+  if (rustTruthEnabled && executorHandlers !== null && d.opOwners.some((id) => executorCommitIds.has(id))) {
+    return;
+  }
   const ownEcho = d.opOwners.some((id) => mirrorOpIds.has(id));
-  mirrorHandlers?.applyFragments(d, { notifyPlugins: !ownEcho });
+  foldExternal(() => mirrorHandlers?.applyFragments(d, { notifyPlugins: !ownEcho }));
+}
+
+/** 外部来源的容器变更折叠（Rust 广播/快照/事件线响应）：期间执行体的差分提交基准直接推进，不回提交。 */
+function foldExternal(fold: () => void): void {
+  externalFolding = true;
+  try {
+    fold();
+  } finally {
+    externalFolding = false;
+  }
+}
+
+/** wire 之外的容器变更入点（快照整体替换等）复用同一折叠语义：基准推进不回提交。 */
+export function foldChatContainerExternal(fold: () => void): void {
+  foldExternal(fold);
 }
 
 function rememberMirrorOpId(opId: string): void {
@@ -614,8 +642,29 @@ function rememberMirrorOpId(opId: string): void {
   mirrorOpIds.set(opId, now);
 }
 
-/** 拉取容器基线快照（超时拒绝；seq 基线在此登记）。 */
+/** 拉取容器基线快照（Rust 真源 = invoke 装载命令；事件线 = 向宿主定向请求，超时拒绝）。 */
 export function requestChatContainerSnapshot(): Promise<ChatContainerSnapshot> {
+  if (rustTruthEnabled) {
+    return invoke<ChatContainerSnapshot>("chat_container_load").then((snapshot) => {
+      rustCurrentRoot = snapshot.sessionVaultKey;
+      mirrorSeq = snapshot.seq;
+      // 装载 = 真源按新仓库根重建：执行体在途队列/退避重试/补丁 rev 全部作废
+      //（批次基于旧根基线，提交会污染新根；Rust 侧 rev 计数随重建归零）
+      executorQueue = [];
+      executorCommitRetries = 0;
+      if (executorRetryTimer) {
+        clearTimeout(executorRetryTimer);
+        executorRetryTimer = null;
+      }
+      executorPatchRevs.clear();
+      if (executorFlushTimer) {
+        clearTimeout(executorFlushTimer);
+        executorFlushTimer = null;
+      }
+      executorLastView = executorHandlers?.getView() ?? null;
+      return snapshot;
+    });
+  }
   const requestId = crypto.randomUUID();
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -645,8 +694,10 @@ export function requestChatContainerSnapshot(): Promise<ChatContainerSnapshot> {
   });
 }
 
-/** 转发写意图到宿主（响应片段由镜像层先行折叠；不设超时——压缩/命名等模型请求耗时不可上限）。 */
+/** 转发写意图（Rust 真源 = invoke 真源命令，纯持久 op 直应用、执行 op 经意图转发执行体；
+ *  事件线 = 定向发宿主）。响应片段由镜像层先行折叠；不设超时——压缩/命名等模型请求耗时不可上限。 */
 export function sendChatContainerOp(op: ChatContainerOp): Promise<ChatContainerOpResponse> {
+  if (rustTruthEnabled) return sendChatContainerOpRust(op);
   const requestId = crypto.randomUUID();
   rememberMirrorOpId(requestId);
   return new Promise((resolve, reject) => {
@@ -667,4 +718,347 @@ export function sendChatContainerOp(op: ChatContainerOp): Promise<ChatContainerO
       op,
     } satisfies ChatContainerRequest);
   });
+}
+
+async function sendChatContainerOpRust(op: ChatContainerOp): Promise<ChatContainerOpResponse> {
+  const requestId = crypto.randomUUID();
+  rememberMirrorOpId(requestId);
+  const result = await invoke<{
+    value?: unknown;
+    createdSessionId?: string;
+    fragments: ChatDeltaFragments;
+  }>("chat_container_apply", { requestId, expectedRoot: rustCurrentRoot, op });
+  const response: ChatContainerOpResponse = {
+    requestId,
+    kind: "op",
+    ok: true,
+    ...(result.value !== undefined ? { value: result.value } : {}),
+    ...(result.createdSessionId !== undefined ? { createdSessionId: result.createdSessionId } : {}),
+    fragments: result.fragments,
+  };
+  // 读己之写：响应片段先折叠再返回（同事件线镜像语义；执行体意图窗口片段同路径收敛）
+  foldExternal(() => mirrorHandlers?.applyFragments(result.fragments, { notifyPlugins: false }));
+  return response;
+}
+
+// ---------- Rust 真源传输（Rust 持有持久态与写盘链，全窗口薄客户端，主窗口兼执行体）----------
+
+/** Rust 容器真源是否已启用（initChatContainerTransport 按资格与探测评定；未评定 = 事件线模式）。 */
+let rustTruthEnabled = false;
+/** 已知真源仓库身份键（快照/增量 status 携带更新；op 与变更提交的 expectedRoot）。 */
+let rustCurrentRoot = "";
+
+/** Rust 容器真源模式判定（动作分派按此分流：true = 全窗口走 invoke，false = 宿主-镜像事件线）。 */
+export function isRustTruthMode(): boolean {
+  return rustTruthEnabled;
+}
+
+/** Tauri 运行时判定（vitest/jsdom 无 invoke 通道，恒事件线降级）。 */
+function hasTauriRuntime(): boolean {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
+/** 请求 Rust 真源立即写盘并等待本轮完成（resolve 不代表全部写成功；失败可见 + 退避重试）。 */
+export function flushChatContainerTruth(): Promise<void> {
+  // flush 前同步冲刷执行体在途队列：100ms 节流窗口内的变更先提交进真源再等写盘轮，
+  // 防退出时最后一批变更留在前端内存（invoke 按序处理，commit 先于 flush 到达 Rust）
+  if (rustTruthEnabled && executorHandlers) flushExecutorCommits();
+  return invoke("chat_container_flush");
+}
+
+export interface ChatContainerExecutorHandlers {
+  /** 当前容器视图（变更提交的差分基准）。 */
+  getView(): ChatContainerView;
+  /** 订阅容器状态变化（同步回调；编排侧乐观应用经此捕获并提交真源）。 */
+  subscribe(listener: () => void): () => void;
+  /** 执行意图 op（Rust 转发的执行 op；产出经变更提交回真源，随 intent_result 回填调用方）。 */
+  executeOp(op: ChatContainerOp): Promise<ChatOpOutcome>;
+}
+
+interface IntentPayload {
+  intentId: string;
+  requestId: string;
+  op: ChatContainerOp;
+}
+
+/**
+ * 传输初始化（面板 load 时调用）：按资格与探测结果评定传输模式并安装对应角色，本地/空间
+ * 仓库切换时模式随装载重评估。Rust 真源模式 = 资格成立（当前激活身份支持容器持久态上收）
+ * 且探测可达（旧后端无容器命令则回落）——全窗口薄客户端（快照/op 走 invoke、增量折叠 Rust
+ * 广播），主窗口额外安装执行体（意图执行 + 编排变更提交）；否则宿主-镜像事件线（主窗口 =
+ * 宿主单写者）。角色监听幂等安装、双模式并存：模式翻转只切换分派标志，不重挂监听。
+ */
+export async function initChatContainerTransport(handlers: {
+  mirror: ChatContainerMirrorHandlers;
+  /** 主窗口传入（执行体职责仅主窗口承担）；事件线模式的宿主 handlers。 */
+  executor?: ChatContainerExecutorHandlers;
+  host?: ChatContainerHostHandlers;
+  /** Rust 真源模式资格：容器持久态收口 Rust 仅覆盖本地仓库——空间仓库会话存储在服务端
+   * （Rust 无鉴权通道），且 Rust 侧仓库根只跟踪本地激活，空间身份下取根会错指向旧本地仓库。 */
+  rustTruthEligible?: boolean;
+}): Promise<void> {
+  if (!hasTauriRuntime()) return;
+  let rustOk = false;
+  if (handlers.rustTruthEligible) {
+    try {
+      await invoke("chat_container_snapshot");
+      rustOk = true;
+    } catch (e) {
+      // 探测失败回落事件线（旧后端无容器命令属预期）；记日志便于区分「后端过旧」与「真源异常」
+      console.error("Rust 会话容器真源探测失败，回落宿主-镜像事件线", e);
+      rustOk = false;
+    }
+  }
+  rustTruthEnabled = rustOk;
+  installChatContainerMirror(handlers.mirror);
+  if (isChatContainerHost()) {
+    if (rustTruthEnabled && handlers.executor) {
+      installChatContainerExecutor(handlers.executor);
+    }
+    if (!rustTruthEnabled && handlers.host) {
+      installChatContainerHost(handlers.host);
+    }
+  }
+}
+
+// ===== 执行体（主窗口）：意图执行 + 编排变更提交 =====
+
+let executorHandlers: ChatContainerExecutorHandlers | null = null;
+let executorLastView: ChatContainerView | null = null;
+let executorCommitSeq = 0;
+let executorFlushTimer: ReturnType<typeof setTimeout> | null = null;
+let executorQueue: CommitBatch[] = [];
+/** 自身提交的 requestId（回声跳过保留窗，覆盖广播回声到达）。 */
+const executorCommitIds = new Map<string, number>();
+/** 消息补丁 rev（Rust 门控单调：迟到的旧补丁不得覆盖新内容）。 */
+const executorPatchRevs = new Map<string, number>();
+/** 外部来源变更折叠进行中标志（foldExternal 维护）：执行体差分提交据此推进基准而不回提交。 */
+let externalFolding = false;
+/** 自身提交回声的保留窗（同事件线 opId 语义）。 */
+const COMMIT_ID_RETENTION_MS = OPID_RETENTION_MS;
+/** 提交通道失败的退避序列（有界重试，达上限放弃并报错）。 */
+const EXECUTOR_COMMIT_RETRY_DELAYS = [500, 1000, 2000, 4000, 8000];
+let executorCommitRetries = 0;
+let executorRetryTimer: ReturnType<typeof setTimeout> | null = null;
+
+function installChatContainerExecutor(handlers: ChatContainerExecutorHandlers): void {
+  if (executorHandlers) return;
+  executorHandlers = handlers;
+  executorLastView = handlers.getView();
+  void invoke("chat_container_executor_boot").catch((e) => console.error("会话执行体登记失败", e));
+  void listen<IntentPayload>(INTENT_EVENT, (e) => {
+    void handleExecutorIntent(e.payload);
+  });
+  handlers.subscribe(queueExecutorReport);
+}
+
+async function handleExecutorIntent(intent: IntentPayload): Promise<void> {
+  const handlers = executorHandlers;
+  if (!handlers) return;
+  let result:
+    | { status: "ok"; value?: unknown; createdSessionId?: string }
+    | { status: "error"; error: string };
+  try {
+    const outcome = await handlers.executeOp(intent.op);
+    result = {
+      status: "ok",
+      ...(outcome.value !== undefined ? { value: outcome.value } : {}),
+      ...(outcome.createdSessionId !== undefined ? { createdSessionId: outcome.createdSessionId } : {}),
+    };
+  } catch (e) {
+    result = { status: "error", error: e instanceof Error ? e.message : String(e) };
+  }
+  await invoke("chat_container_intent_result", { intentId: intent.intentId, result }).catch((e) =>
+    console.error("意图结果回填失败", intent.intentId, e),
+  );
+}
+
+/** 执行体状态变化 → 差分 → 提交批次（100ms 节流；外部折叠或模式退离期间仅推进基准）。 */
+function queueExecutorReport(): void {
+  const handlers = executorHandlers;
+  if (!handlers) return;
+  const next = handlers.getView();
+  const prev = executorLastView;
+  executorLastView = next;
+  // 模式退离（切到空间仓库走事件线）：本地视图属另一真源，基准推进防陈旧差分在模式回归时回放
+  if (!prev || externalFolding || !rustTruthEnabled) return;
+  const batch = containerDeltaToBatch(prev, next);
+  if (isBatchEmpty(batch)) return;
+  executorQueue.push(batch);
+  if (!executorFlushTimer) {
+    executorFlushTimer = setTimeout(flushExecutorCommits, DELTA_FLUSH_MS);
+  }
+}
+
+function flushExecutorCommits(): void {
+  executorFlushTimer = null;
+  // 模式退离后在途队列整体丢弃：批次基于旧模式基线，提交会污染退离前的真源仓库
+  if (!rustTruthEnabled) {
+    executorQueue = [];
+    return;
+  }
+  if (executorQueue.length === 0 || !executorHandlers) return;
+  const batch = mergeCommitBatches(executorQueue);
+  executorQueue = [];
+  const requestId = `exec-${++executorCommitSeq}`;
+  const now = Date.now();
+  for (const [id, at] of executorCommitIds) {
+    if (now - at > COMMIT_ID_RETENTION_MS) executorCommitIds.delete(id);
+  }
+  executorCommitIds.set(requestId, now);
+  // 落盘重试链在 Rust 真源侧（防抖 + 退避）；提交通道失败由前端按退避重试——「仓库已切换」
+  // 除外（切仓进行中，旧变更随旧仓丢弃，与事件线归属校验同语义）
+  void invoke("chat_container_commit", { requestId, expectedRoot: rustCurrentRoot, batch }).catch((e) => {
+    const message = e instanceof Error ? e.message : String(e);
+    if (message.includes("仓库已切换")) return;
+    console.error("会话容器变更提交失败，将重试", e);
+    scheduleExecutorCommitRetry(batch);
+  });
+  executorCommitRetries = 0;
+}
+
+/** 提交通道失败的退避重试（有界）：批次重新入队错峰再交；连续失败达上限放弃（真源侧落盘重试链不受影响）。 */
+function scheduleExecutorCommitRetry(batch: CommitBatch): void {
+  if (executorCommitRetries >= EXECUTOR_COMMIT_RETRY_DELAYS.length) {
+    console.error("会话容器变更提交重试达上限，本批变更已丢弃", batch);
+    return;
+  }
+  const delay = EXECUTOR_COMMIT_RETRY_DELAYS[executorCommitRetries];
+  executorCommitRetries += 1;
+  if (executorRetryTimer) clearTimeout(executorRetryTimer);
+  executorRetryTimer = setTimeout(() => {
+    executorRetryTimer = null;
+    if (!rustTruthEnabled) return;
+    executorQueue.push(batch);
+    flushExecutorCommits();
+  }, delay);
+}
+
+/** 执行体提交批次（chat_container_commit 的 CommitBatch；字段与 Rust 契约逐一对齐）。 */
+interface CommitBatch {
+  created: Array<{
+    id: string;
+    file: string;
+    title?: string;
+    agentId?: string;
+    compaction?: unknown;
+    createdAt: number;
+    updatedAt: number;
+    messages: EditorChatMessage[];
+  }>;
+  metas: Array<{
+    id: string;
+    title?: string;
+    agentId?: string;
+    compaction?: unknown;
+    updatedAt?: number;
+  }>;
+  appends: Array<{ sessionId: string; messages: EditorChatMessage[] }>;
+  patches: Array<{
+    sessionId: string;
+    messageId: string;
+    rev: number;
+    content?: string;
+    steps?: unknown;
+  }>;
+  truncations: Array<{ sessionId: string; keepCount: number }>;
+  status: { streaming?: boolean; compacting?: string | null };
+}
+
+function isBatchEmpty(batch: CommitBatch): boolean {
+  return (
+    batch.created.length === 0 &&
+    batch.metas.length === 0 &&
+    batch.appends.length === 0 &&
+    batch.patches.length === 0 &&
+    batch.truncations.length === 0 &&
+    batch.status.streaming === undefined &&
+    batch.status.compacting === undefined
+  );
+}
+
+function mergeCommitBatches(list: CommitBatch[]): CommitBatch {
+  const merged: CommitBatch = { created: [], metas: [], appends: [], patches: [], truncations: [], status: {} };
+  for (const b of list) {
+    merged.created.push(...b.created);
+    merged.metas.push(...b.metas);
+    merged.appends.push(...b.appends);
+    merged.patches.push(...b.patches);
+    merged.truncations.push(...b.truncations);
+    if (b.status.streaming !== undefined) merged.status.streaming = b.status.streaming;
+    if (b.status.compacting !== undefined) merged.status.compacting = b.status.compacting;
+  }
+  return merged;
+}
+
+/**
+ * 相邻容器视图 → 真源提交批次：差分（updatedAt 单独变化不产出）后按「prev 有无」分派——
+ * 消息 prev 已有 = 内容补丁（rev 单调），prev 无 = 末尾追加；会话 prev 无 = 新建登记，
+ * prev 有 = 元数据补丁；会话移除不产批次（删除走纯持久 op 直应用）。执行期消息契约 =
+ * 仅 content/steps 变化（其他字段只随新建进入真源），补丁按此只携带两字段。
+ * 与 Rust commit 的应用顺序（created→metas→appends→patches→truncations→status）和折叠
+ * 语义（upserts 先于 keepCount 截断）对齐。
+ */
+function containerDeltaToBatch(prev: ChatContainerView, next: ChatContainerView): CommitBatch {
+  const batch: CommitBatch = { created: [], metas: [], appends: [], patches: [], truncations: [], status: {} };
+  const fragments = computeChatDeltaFragments(prev, next);
+  const prevById = new Map(prev.sessions.map((s) => [s.id, s]));
+  const createdIds = new Set<string>();
+  for (const meta of fragments.metas) {
+    const p = prevById.get(meta.id);
+    const n = next.sessions.find((s) => s.id === meta.id);
+    if (meta.removed || !n) continue;
+    if (!p) {
+      createdIds.add(n.id);
+      batch.created.push({
+        id: n.id,
+        file: n.file,
+        ...(n.title !== undefined ? { title: n.title } : {}),
+        ...(n.agentId !== undefined ? { agentId: n.agentId } : {}),
+        ...(n.compaction !== undefined ? { compaction: n.compaction } : {}),
+        createdAt: n.createdAt,
+        updatedAt: n.updatedAt,
+        messages: n.messages.map(stripMessageForWire),
+      });
+      continue;
+    }
+    const patch: CommitBatch["metas"][number] = { id: meta.id };
+    if (p.title !== n.title) patch.title = n.title;
+    if (p.agentId !== n.agentId) patch.agentId = n.agentId;
+    if (p.compaction !== n.compaction) patch.compaction = n.compaction;
+    if (p.updatedAt !== n.updatedAt) patch.updatedAt = n.updatedAt;
+    if (patch.title !== undefined || patch.agentId !== undefined || patch.compaction !== undefined || patch.updatedAt !== undefined) {
+      batch.metas.push(patch);
+    }
+  }
+  for (const md of fragments.messages) {
+    // 新建会话的全量消息已随 created 登记，再产 append 会在真源翻倍（import 单步全量
+    // setState 即此形状），直接跳过
+    if (createdIds.has(md.sessionId)) continue;
+    const p = prevById.get(md.sessionId);
+    for (const up of md.upserts) {
+      const known = p?.messages.some((m) => m.id === up.id) ?? false;
+      if (known) {
+        const rev = (executorPatchRevs.get(up.id) ?? 0) + 1;
+        executorPatchRevs.set(up.id, rev);
+        batch.patches.push({
+          sessionId: md.sessionId,
+          messageId: up.id,
+          rev,
+          ...(up.content !== undefined ? { content: up.content } : {}),
+          ...(up.steps !== undefined ? { steps: up.steps } : {}),
+        });
+      } else {
+        batch.appends.push({ sessionId: md.sessionId, messages: [stripMessageForWire(up)] });
+      }
+    }
+    if (md.keepCount !== undefined) {
+      batch.truncations.push({ sessionId: md.sessionId, keepCount: md.keepCount });
+    }
+  }
+  if (fragments.status) {
+    if (fragments.status.streaming !== undefined) batch.status.streaming = fragments.status.streaming;
+    if (fragments.status.compacting !== undefined) batch.status.compacting = fragments.status.compacting;
+  }
+  return batch;
 }
