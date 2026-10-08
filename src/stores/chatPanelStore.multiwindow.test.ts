@@ -68,6 +68,10 @@ const h = vi.hoisted(() => {
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: async (cmd: string, args: unknown) => {
+    if (cmd === "chat_container_snapshot") {
+      // 传输探测命令：内存 mock 无 Rust 容器命令，抛错使探测回落宿主-镜像事件线（本文件测事件线契约）
+      throw new Error("命令不存在");
+    }
     if (cmd === "list_chat_sessions") {
       const rows = [...h.state.chatFiles.keys()].map((file) => {
         const id = file.split("/").pop()!.replace(/\.jsonl$/, "");

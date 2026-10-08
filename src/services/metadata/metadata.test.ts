@@ -275,6 +275,28 @@ describe("user meta 分发（chat/todos）", () => {
     );
   });
 
+  it("appendChatMessages 保留追加记录的附件引用并剥离 payload", async () => {
+    space.state.myValues["chat/messages/s1"] = "{\"id\":\"m0\"}\n";
+    const file = ".atelyx/对话历史/s1.jsonl";
+    await metadata.appendChatMessages(file, [
+      {
+        id: "m1",
+        role: "user",
+        content: "看图",
+        attachments: [
+          { kind: "image", mime: "image/png", file: ".atelyx/附件/a.png", payload: "data:image/png;base64,xxx" },
+        ],
+        createdAt: 1,
+      },
+    ]);
+
+    const lines = space.state.myValues["chat/messages/s1"].split("\n");
+    const parsed = JSON.parse(lines[1]);
+    expect(parsed.attachments).toEqual([
+      { kind: "image", mime: "image/png", file: ".atelyx/附件/a.png" },
+    ]);
+  });
+
   it("读在途期间空间切换：在途追加被丢弃，不写新空间的 user meta", async () => {
     space.state.myValues["chat/messages/s1"] = "{\"id\":\"m0\"}\n";
     space.state.holdMyMeta = new Promise<void>((r) => (space.state.resolveGate = r));
