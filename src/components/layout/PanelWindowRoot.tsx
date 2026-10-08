@@ -17,6 +17,7 @@ import { DragGhost } from "@/components/layout/DragGhost";
 import { TitleBarControls } from "@/components/common/TitleBarControls";
 import { PanelPlaceholder } from "@/components/layout/PanelPlaceholder";
 import { LoadingScreen } from "@/components/common/LoadingScreen";
+import { Spinner } from "@/components/common/primitives";
 import { useAppearance } from "@/hooks/useAppearance";
 import { collectAllViews } from "@/utils/workspaceLayout";
 
@@ -29,6 +30,7 @@ export function PanelWindowRoot() {
   const windowId = usePanelStore((s) => s.windowId);
   const dropTarget = usePanelStore((s) => s.dropTarget);
   const layoutMirror = usePanelStore((s) => s.layoutMirror);
+  const switchGate = usePanelStore((s) => s.switchGate);
 
   const minimizeWindow = useAppStore((s) => s.minimizeWindow);
   const toggleMaximizeWindow = useAppStore((s) => s.toggleMaximizeWindow);
@@ -63,6 +65,20 @@ export function PanelWindowRoot() {
   }, [layoutMirror]);
 
   const isDropTarget = dropTarget?.window === windowId && dropTarget.zone === "center";
+
+  // 仓库切换门遮罩：切换准备/上下文加载期间整窗禁写（flush 后到新仓库数据就绪前，
+  // 任何写入都会打进已切换的新仓库）；abort 或加载链完成时随门状态清空自动消失
+  const switchGateMask = switchGate ? (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center flex-col gap-3"
+      style={{ background: "var(--bg-primary)" }}
+    >
+      <Spinner />
+      <span className="text-sm" style={{ color: "var(--text-secondary)" }}>
+        正在切换仓库…
+      </span>
+    </div>
+  ) : null;
 
   // 插件声明了窗口选项（自定形态）的撕裂窗口：无标题栏/标签条的裸渲染——插件视图
   // 自带头部（拖动区 + 窗口动作），错误态保留最小拖动条 + 重试（否则窗口既拖不动
@@ -125,6 +141,7 @@ export function PanelWindowRoot() {
             <ViewHost view={activeTab.view} hostId={windowId} />
           </div>
         ) : null}
+        {switchGateMask}
         <DragGhost />
       </div>
     );
@@ -220,6 +237,9 @@ export function PanelWindowRoot() {
           </div>
         </>
       )}
+
+      {/* 仓库切换门遮罩（含独立形态窗口的提前返回分支） */}
+      {switchGateMask}
 
       {/* drop 指示器（中部 = 加标签） */}
       {isDropTarget && (

@@ -49,6 +49,13 @@ import {
   setOpenFileContext,
   type OpenFileContext,
 } from "@/services/hostContext";
+import {
+  completeVaultSwitchGate,
+  currentVaultSwitchGate,
+  installVaultSwitchGatePanel,
+  markVaultSwitchApplying,
+  type VaultSwitchGateState,
+} from "@/services/vaultSwitchGate";
 import type { DragBroadcast, DragHit } from "@/types";
 import {
   ackExitFlushDone,
@@ -151,6 +158,9 @@ interface PanelStore {
   windowPos: { x: number; y: number };
   /** 布局镜像（来自 uiStateStore = Rust 广播）。 */
   layoutMirror: LayoutMirror | null;
+  /** 仓库切换门状态（撕裂窗口；null = 空闲）：preparing = 已 flush 待切换，switching = 新上下文
+   *  加载中。非空时面板遮罩禁写——flush 后到新仓库上下文应用前，任何写入都会打进已切换的新仓库。 */
+  switchGate: VaultSwitchGateState | null;
 
   /** 主窗口初始化：缓存窗口位置 + 订阅 uiState/拖拽广播 + 注册事件监听。 */
   initMain: () => Promise<void>;
@@ -439,6 +449,38 @@ export const usePanelStore = create<PanelStore>((set, get) => {
     void onDragSession(onDragSessionState).catch((e) => console.error("订阅拖拽会话广播失败", e));
   };
 
+  /** 按新仓库上下文重载本窗口的仓库级数据链：仓库级配置 / 文件树 / 领域仓库上下文（AI 会话/
+   *  容器快照重拉）/ 插件运行时并行拉取（与主窗口 selectVault 同口径：任一失败不连带跳过其余，
+   *  各自记日志）。gateSwitchId 非空 = 切换门驱动的热切换，全部加载完成（含失败落地）后撤销
+   *  切换门遮罩（finally 保证失败也不悬挂）。 */
+  const reloadVaultContext = async (payload: OpenFileContext, gateSwitchId?: string): Promise<void> => {
+    const withLog = (p: Promise<unknown>, label: string): Promise<unknown> =>
+      p.catch((e: unknown) => console.error(label, e));
+    const loads: Promise<unknown>[] = [];
+    if (payload.vaultRoot || payload.vaultIdentity) {
+      // 仓库级配置按激活身份加载（readVaultSettings 已按身份分流：本地 = `.atelyx`，
+      // 空间 = 服务端团队元数据）；判据若只看 vaultRoot，空间仓库的撕裂窗口将永远没有配置
+      loads.push(useSettingsStore.getState().loadVaultConfig());
+      loads.push(useVaultStore.getState().loadFiles());
+    }
+    // AI 会话换仓库读盘（含未激活仓库场景）经生命周期注册表分发
+    loads.push(
+      withLog(kernelLifecycle.notifyVaultEntered({ vaultRoot: payload.vaultRoot }), "撕裂窗口加载领域仓库上下文失败"),
+    );
+    // 插件运行时随仓库上下文重载（与主窗口 selectVault 时机一致）：
+    // vaultRoot 置空（未激活仓库）也 load——此时只扫 app 插件，自然卸载 vault 插件；
+    // 插件事件（vault:switch）按窗口隔离不跨窗口转发，撕裂窗口插件经重载兜底
+    loads.push(withLog(usePluginStore.getState().load(), "撕裂窗口加载插件失败"));
+    try {
+      await Promise.all(loads);
+    } catch (e) {
+      // 加载链自身的失败已由各任务兜底记录，此处兜住意外抛出（含非 Error 值），不产生未处理拒绝
+      console.error("撕裂窗口重载仓库上下文失败", e);
+    } finally {
+      if (gateSwitchId) completeVaultSwitchGate(gateSwitchId);
+    }
+  };
+
   /** 仓库上下文处理器（Rust 宿主广播 / boot 拉取基线共用）：镜像当前仓库/身份/打开文件，并按需加载
    *  仓库级配置、文件树、领域仓库上下文与插件运行时。注册归 initPanel 的一次性接线（重复注册会让每次
    *  广播按份数重复触发整条重载链）。 */
@@ -465,20 +507,15 @@ export const usePanelStore = create<PanelStore>((set, get) => {
       // 激活本窗口内容面身份（独立 webview 不共享激活态）：空间 = 同参空间后端，
       // 本地 = localBackend，null = 退出激活（I/O 回落 localBackend，与现状一致）
       activateContentIdentity(payload.vaultIdentity);
-      if (payload.vaultRoot || payload.vaultIdentity) {
-        // 仓库级配置按激活身份加载（readVaultSettings 已按身份分流：本地 = `.atelyx`，
-        // 空间 = 服务端团队元数据）；判据若只看 vaultRoot，空间仓库的撕裂窗口将永远没有配置
-        void useSettingsStore.getState().loadVaultConfig();
-        void useVaultStore.getState().loadFiles();
+      const gate = currentVaultSwitchGate();
+      if (gate?.phase === "preparing") {
+        // 切换门驱动的热切换：新上下文已到达，加载链完成后撤遮罩（await 化；门期间已禁写）
+        markVaultSwitchApplying();
+        void reloadVaultContext(payload, gate.switchId);
+      } else {
+        // boot 基线 / 无门的广播：fire-and-forget（各域加载自带身份守卫，迟到结果不会跨仓库污染）
+        void reloadVaultContext(payload);
       }
-      // AI 会话换仓库读盘（含未激活仓库场景）经生命周期注册表分发
-      void kernelLifecycle
-        .notifyVaultEntered({ vaultRoot: payload.vaultRoot })
-        .catch((e) => console.error("撕裂窗口加载领域仓库上下文失败", e));
-      // 撕裂窗口插件运行时随仓库上下文重载（与主窗口 selectVault 时机一致）：
-      // vaultRoot 置空（未激活仓库）也 load——此时只扫 app 插件，自然卸载 vault 插件；
-      // 插件事件（vault:switch）按窗口隔离不跨窗口转发，撕裂窗口插件经重载兜底
-      void usePluginStore.getState().load().catch((e) => console.error("撕裂窗口加载插件失败", e));
       // 协作宿主重算（仓库房间变化）
       get().syncCollabHost();
     }
@@ -530,6 +567,7 @@ export const usePanelStore = create<PanelStore>((set, get) => {
     dragSession: null,
     windowPos: { x: 0, y: 0 },
     layoutMirror: null,
+    switchGate: null,
 
     initMain: async () => {
       if (mainInitialized) return;
@@ -700,6 +738,12 @@ export const usePanelStore = create<PanelStore>((set, get) => {
         subscribeDragSession();
         // 上下文广播监听必须先于基线拉取注册（先有监听才不漏基线之后的增量）
         contextListener = onOpenFileContextChanged(applyOpenFileContext);
+        // 仓库切换门（撕裂窗口面）：prepare = 遮罩禁写 + flush 全部领域挂起写入 + ack 上行
+        installVaultSwitchGatePanel({
+          flush: () =>
+            kernelLifecycle.flushAllDomains({ vaultRoot: useAppStore.getState().vaultRoot }),
+          onGateState: (gate) => set({ switchGate: gate }),
+        }).catch((e: unknown) => console.error("注册仓库切换门失败", e));
         // 注册失败时兜住 rejection（布局阶段若提前返回就没人体 await 它，会变成未处理拒绝）
         contextListener.catch((e: unknown) => console.error("撕裂窗口订阅仓库上下文失败", e));
       }
@@ -742,6 +786,10 @@ export const usePanelStore = create<PanelStore>((set, get) => {
 
     beginDragCandidate: (tab, sourceHost, x, y) => {
       if (tab.locked) return;
+      // 仓库切换期间禁止新拖拽会话：撕裂出去的新窗口收不到本轮 prepare、也不在等待集内，
+      // 其写盘会在 root 切换窗口期打进新仓库（跨仓库污染）。主窗口看 switchingVaultRoot，
+      // 撕裂窗口看切换门（prepare 已达即门开）。
+      if (get().switchGate || useAppStore.getState().switchingVaultRoot) return;
       if (get().dragCandidate) return;
       set({ dragCandidate: { tab, sourceHost, x, y } });
     },

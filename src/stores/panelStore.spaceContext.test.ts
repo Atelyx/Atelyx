@@ -146,9 +146,16 @@ function dispatchOpenFileChanged(payload: unknown): void {
   (busState.openFileHandler as (payload: unknown) => void)(payload);
 }
 
+/** 排空 microtask 队列：上下文应答的加载链为顺序 await（配置 → 文件树 → 领域 → 插件），
+ *  断言前须让整条链跑完（纯 microtask，无定时器参与，轮次覆盖链内 await 深度即可）。 */
+const settle = async (): Promise<void> => {
+  for (let i = 0; i < 50; i++) await Promise.resolve();
+};
+
 describe("撕裂窗口仓库上下文应答：仓库级配置加载判据", () => {
-  it("空间仓库（vaultRoot 恒 null）：按身份加载仓库级配置", () => {
+  it("空间仓库（vaultRoot 恒 null）：按身份加载仓库级配置", async () => {
     dispatchOpenFileChanged({ ...basePayload, vaultRoot: null, vaultIdentity: SPACE });
+    await settle();
 
     expect(app.useAppStore.getState().vaultIdentity).toEqual(SPACE);
     expect(loadVaultConfigSpy).toHaveBeenCalledTimes(1);
@@ -156,19 +163,21 @@ describe("撕裂窗口仓库上下文应答：仓库级配置加载判据", () =
     expect(calls.pluginLoad).toBe(1);
   });
 
-  it("本地仓库（vaultRoot 非空）：照旧加载", () => {
+  it("本地仓库（vaultRoot 非空）：照旧加载", async () => {
     dispatchOpenFileChanged({
       ...basePayload,
       vaultRoot: "E:/repo",
       vaultIdentity: { kind: "local", root: "E:/repo" },
     });
+    await settle();
 
     expect(loadVaultConfigSpy).toHaveBeenCalledTimes(1);
     expect(calls.loadFiles).toBe(1);
   });
 
-  it("未激活仓库（身份 null）：不加载配置与文件树", () => {
+  it("未激活仓库（身份 null）：不加载配置与文件树", async () => {
     dispatchOpenFileChanged({ ...basePayload, vaultRoot: null, vaultIdentity: null });
+    await settle();
 
     expect(loadVaultConfigSpy).not.toHaveBeenCalled();
     expect(calls.loadFiles).toBe(0);
