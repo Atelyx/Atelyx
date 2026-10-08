@@ -49,10 +49,12 @@ type ProcessEvent =
 
 /** 执行外部进程（流式 stdout/stderr + 退出回调）；返回进程 pid（spawn 成功后 resolve）。
  *
- *  走宿主命令 `spawn_plugin_process`（程序白名单在 Rust 侧，只放行 `sh`/`cmd.exe`，参数全开）：进程在创建
+ *  走宿主命令 `spawn_plugin_process`（程序来源全部放行，裸名走 PATH、路径形态按给定值）：进程在创建
  *  那一刻就被纳入清理范围（Windows 作业对象 / Unix 进程组），否则 `sh -c` 派生的真服务会漏在清理之外。
+ *  stdin 管道由后端建立并入册：写入（`writeProcessStdin`）与关闭（`endProcessStdin`）的时机由调用方
+ *  （内核侧 stdin 关闭策略）决定。
  *  pid 是结束进程的唯一可靠凭据（按命令行特征匹配会因启动方式变化失效，且有误杀同目录进程的风险），
- *  故交给调用方记账。启动失败（程序不在白名单等）reject，同时经 `error` 上报同因错误。 */
+ *  故交给调用方记账。启动失败 reject，同时经 `error` 上报同因错误。 */
 export function runProcess(
   program: string,
   args: string[],
@@ -86,6 +88,16 @@ export function runProcess(
   // 启动失败同时反映到返回的 promise（调用方 await 得到失败原因）与 error 回调（流式面同口径）
   void started.catch((e) => handlers.error(e instanceof Error ? e.message : String(e)));
   return started;
+}
+
+/** 向在册进程写入 stdin（可反复调用）。进程已退出或 stdin 已关闭时 reject 带原因。 */
+export function writeProcessStdin(pid: number, data: string): Promise<void> {
+  return invoke<void>("write_plugin_process_stdin", { pid, data });
+}
+
+/** 关闭在册进程的 stdin（对端读到 EOF）。已退出或已关闭为 no-op。 */
+export function endProcessStdin(pid: number): Promise<void> {
+  return invoke("close_plugin_process_stdin", { pid });
 }
 
 /** 结束 pid 及其全部子孙进程（已不存在 = 成功；其余失败 reject 带原因）。

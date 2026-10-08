@@ -48,6 +48,8 @@ vi.mock("@/services/shell", () => ({
     return Promise.resolve(1234);
   },
   killProcessTree: () => Promise.resolve(),
+  writeProcessStdin: () => Promise.resolve(),
+  endProcessStdin: () => Promise.resolve(),
 }));
 
 declare module "@atelyx/cordis" {
@@ -215,13 +217,13 @@ describe("ctx.services.get 敏感面审计", () => {
   it("经 ctx.services.get 返回的敏感服务调用仍记脱敏摘要（与 ctx.<svc> 直连同口径）", async () => {
     kernel = getKernel(); // 应用路径：自动安装审计
     const apply = (ctx: Context) => {
-      const svc = ctx.services.get("shell");
+      const svc = ctx.services.get("process");
       void svc?.exec({ command: "cmd.exe", args: ["/C", "echo", "SECRET"] });
     };
     await mountPlugin(kernel, { id: "builtin.svc-a", apply });
     const entry = auditSnapshot(kernel.ctx).find((e) => e.pluginId === "builtin.svc-a");
     expect(entry?.calls).toEqual(
-      expect.arrayContaining([{ service: "shell", method: "exec", summary: "cmd.exe（3 个参数）" }]),
+      expect.arrayContaining([{ service: "process", method: "exec", summary: "cmd.exe（3 个参数）" }]),
     );
     const dumped = JSON.stringify(entry);
     expect(dumped).not.toContain("SECRET");

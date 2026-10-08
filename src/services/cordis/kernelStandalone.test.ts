@@ -33,7 +33,7 @@ describe("内核独立启动（零插件）", () => {
       "http",
       "notification",
       "app",
-      "shell",
+      "process",
       "vault",
       "fs",
       "dialog",

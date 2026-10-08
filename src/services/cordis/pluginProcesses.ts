@@ -1,5 +1,5 @@
 /**
- * 插件托管进程的登记表（按内核隔离）：`ctx.shell.exec`/`ctx.shell.spawn` 启动的进程按调用方插件记账，
+ * 插件托管进程的登记表（按内核隔离）：`ctx.process.exec`/`ctx.process.spawn` 启动的进程按调用方插件记账，
  * 插件停用/卸载时由宿主统一结束（`stores/pluginStore.ts` 的 `stopPlugin` 与 `load` 收尾）——插件的长驻服务不该活过插件本身。
  * 结束动作由调用方以 `kill` 回调注入（不 import 任何 service，保持纯表 + 可直测）。
  */
@@ -17,7 +17,7 @@ const registries = new WeakMap<object, Map<string, Set<number>>>();
 
 /** 内核登记表 → 插件 id → 在途启动（pid 尚未解析）的 promise。
  *
- *  插件 `void ctx.shell.spawn(...)`（不等返回）后紧接着被停用时，pid 还没登记就已被清表——
+ *  插件 `void ctx.process.spawn(...)`（不等返回）后紧接着被停用时，pid 还没登记就已被清表——
  *  结束前先等这些 promise 落地，才谈得上「停用即结束它启动的进程」。键用登记表本身（同一内核
  *  共享一张），随内核回收。 */
 const pendingLaunches = new WeakMap<Map<string, Set<number>>, Map<string, Set<Promise<unknown>>>>();

@@ -23,6 +23,8 @@ vi.mock("@/services/shell", () => ({
     return Promise.resolve(1234);
   },
   killProcessTree: () => Promise.resolve(),
+  writeProcessStdin: () => Promise.resolve(),
+  endProcessStdin: () => Promise.resolve(),
 }));
 
 vi.mock("@/services/http", () => ({
@@ -131,7 +133,7 @@ describe("插件审计", () => {
   it("高危服务调用按插件归属记脱敏摘要（只记形状与规模）", async () => {
     kernel = getKernel();
     const apply = (ctx: Context) => {
-      void ctx.shell.exec({ command: "cmd.exe", args: ["/C", "echo", "TOP SECRET"] });
+      void ctx.process.exec({ command: "cmd.exe", args: ["/C", "echo", "TOP SECRET"] });
       void ctx.clipboard.writeText("TOP SECRET");
       void ctx.http.request({
         url: "https://api.example.com/v1/x?token=SECRET",
@@ -148,7 +150,7 @@ describe("插件审计", () => {
     const entry = auditSnapshot(kernel.ctx).find((e) => e.pluginId === "builtin.audit");
     expect(entry?.calls).toEqual(
       expect.arrayContaining([
-        { service: "shell", method: "exec", summary: "cmd.exe（3 个参数）" },
+        { service: "process", method: "exec", summary: "cmd.exe（3 个参数）" },
         { service: "clipboard", method: "writeText", summary: "writeText（10 字节）" },
         { service: "http", method: "request", summary: "POST https://api.example.com/v1/x" },
         { service: "vault", method: "writeFile", summary: "writeFile notes/a.md" },

@@ -7,7 +7,7 @@ import React from "react";
 import { Context, symbols } from "@atelyx/cordis";
 import { getAppVersion } from "@/services/app";
 import { detectPlatform } from "@/utils/pluginHost";
-import { runProcess, killProcessTree } from "@/services/shell";
+import { runProcess, killProcessTree, writeProcessStdin, endProcessStdin } from "@/services/shell";
 import { pickDirectory, pickFile, saveFile } from "@/services/dialog";
 import { copyImageToClipboard, readClipboardText, writeClipboardText } from "@/services/clipboard";
 import { closeWindow, minimizeWindow, toggleMaximizeWindow } from "@/services/window";
@@ -89,9 +89,9 @@ import type {
   HttpService,
   NativeService,
   NotificationService,
-  ShellExecOptions,
-  ShellExecResult,
-  ShellService,
+  ProcessExecOptions,
+  ProcessExecResult,
+  ProcessService,
   StateService,
   StorageService,
   VaultService,
@@ -109,8 +109,8 @@ declare global {
 
 /** 进程执行能力（桌面有 / 移动端无）。缺失必须显式可见：调用即以可读错误拒绝，不静默失效。 */
 const PROCESS_EXECUTION = platformCapabilities().processExecution;
-/** `ctx.shell` 在无进程执行能力平台上的拒绝原因（插件按错误处理，宿主不做隐式降级）。 */
-const SHELL_UNAVAILABLE = "当前平台不支持进程执行";
+/** `ctx.process` 在无进程执行能力平台上的拒绝原因（插件按错误处理，宿主不做隐式降级）。 */
+const PROCESS_UNAVAILABLE = "当前平台不支持进程执行";
 
 /** ai 服务实例（tracker 注入调用方插件上下文：registerTool 随其 fiber 撤销）。 */
 interface AiServiceInstance extends AiService {
@@ -132,8 +132,8 @@ interface FsServiceInstance extends FsService {
   ctx: Context;
 }
 
-/** shell 服务实例（tracker 注入调用方插件上下文：启动的进程按调用方插件记账）。 */
-interface ShellServiceInstance extends ShellService {
+/** process 服务实例（tracker 注入调用方插件上下文：启动的进程按调用方插件记账）。 */
+interface ProcessServiceInstance extends ProcessService {
   ctx: Context;
 }
 
@@ -172,7 +172,7 @@ function pluginWireChannel(pluginId: string, channel: string): string {
   return `${pluginId}:${channel}`;
 }
 
-/** 流句柄（shell/ai 流式：chunk/end/error 帧；已收尾后忽略后续调用）。 */
+/** 流句柄（process/ai 流式：chunk/end/error 帧；已收尾后忽略后续调用）。 */
 interface StreamSink {
   chunk(data: unknown): void;
   end(data?: unknown): void;
@@ -265,10 +265,17 @@ export function createKernel(): Kernel {
    *
    *  登记是为了让插件停用/卸载能结束它启动的进程（长驻服务不该活过插件本身）；退出即摘除是 pid 复用的唯一防线——留着已退出进程的 pid，之后系统把它分给别的进程时就会被误杀。
    *  pid 解析与退出回调存在竞态（进程可能极快退出并先触发 close）：退出先到时标记 ended，pid 到位后不再登记。`ended` 同时供 spawn 的 cancel 判断 no-op。
-   *  只在 `close`（进程真的结束）摘除登记，**不在 `error` 摘除**：`error` 是「运行期出错」，进程可能仍在跑（如管道读取失败），提前摘除会让停用路径漏杀、`cancel()` 变永久 no-op。启动失败时 pid 从未落地、本就无登记。 */
+   *  只在 `close`（进程真的结束）摘除登记，**不在 `error` 摘除**：`error` 是「运行期出错」，进程可能仍在跑（如管道读取失败），提前摘除会让停用路径漏杀、`cancel()` 变永久 no-op。启动失败时 pid 从未落地、本就无登记。
+   *
+   *  stdin 关闭策略（`stdinPolicy`）：`"close"` = pid 落地即关（exec 与历史 null-stdin 语义一致——
+   *  读 stdin 的一次性程序用 `opts.input` 喂数据）；`"keep"` = 保持开放（spawn 句柄的 write/endInput）。
+   *  `opts.input` 传入时两种策略都写一次再关。写失败**不进插件错误面**：进程自身的退出码与输出即
+   *  结果，写入失败只说明 input 没送达（进程未读即退出），且与退出事件无到达序保证——进错误面会
+   *  造成时序依赖的偶发 reject 并丢掉已聚合的输出，故只记宿主诊断日志。 */
   function launchTrackedProcess(
     pluginId: string,
-    opts: ShellExecOptions,
+    opts: ProcessExecOptions,
+    stdinPolicy: "close" | "keep",
     handlers: {
       stdout(line: string): void;
       stderr(line: string): void;
@@ -296,6 +303,13 @@ export function createKernel(): Kernel {
     const tracked = pidPromise.then((value) => {
       pid = value;
       if (!ended) trackPluginProcess(ctx, pluginId, value);
+      if (opts.input !== undefined) {
+        void writeProcessStdin(value, opts.input)
+          .then(() => endProcessStdin(value))
+          .catch((e) => console.warn("进程 stdin 写入失败（进程可能未读 stdin 即退出）", e));
+      } else if (stdinPolicy === "close") {
+        void endProcessStdin(value).catch((e) => console.warn("关闭进程 stdin 失败", e));
+      }
       return value;
     });
     // 在途登记：pid 还没解析完就停用时，结束流程会等它落地再收 pid（否则漏杀）
@@ -358,18 +372,18 @@ export function createKernel(): Kernel {
   };
   provide("app", app);
 
-  const shell: ShellService = {
-    exec(this: ShellServiceInstance, opts, handlers) {
-      if (!PROCESS_EXECUTION) return Promise.reject(new Error(SHELL_UNAVAILABLE));
+  const process: ProcessService = {
+    exec(this: ProcessServiceInstance, opts, handlers) {
+      if (!PROCESS_EXECUTION) return Promise.reject(new Error(PROCESS_UNAVAILABLE));
       const pluginId = requireCallerPluginId(this.ctx);
       if (!handlers) {
         // 非流式：聚合输出后一次性返回。
         // 行事件自带换行终止符（services/shell.ts runProcess 契约，Rust read_line 不剥 \r?\n），
         // 逐段拼接即原始输出；再补 \n 会把每行撑成两行，隔断表格等需要连续行的块结构。
-        return new Promise<ShellExecResult | undefined>((resolve, reject) => {
+        return new Promise<ProcessExecResult | undefined>((resolve, reject) => {
           let stdout = "";
           let stderr = "";
-          launchTrackedProcess(pluginId, opts, {
+          launchTrackedProcess(pluginId, opts, "close", {
             stdout: (line) => {
               stdout += line;
             },
@@ -389,7 +403,7 @@ export function createKernel(): Kernel {
       // 流式：stdout/stderr → chunk{stream,data}；退出 → end{code}；错误 → error。
       // 等待进程结束再 resolve：流已收尾，不会提前补 end。
       return new Promise<undefined>((resolve) => {
-        launchTrackedProcess(pluginId, opts, {
+        launchTrackedProcess(pluginId, opts, "close", {
           stdout: (line) => sink.chunk({ stream: "stdout", data: line }),
           stderr: (line) => sink.chunk({ stream: "stderr", data: line }),
           close: (code) => {
@@ -403,8 +417,8 @@ export function createKernel(): Kernel {
         });
       });
     },
-    spawn(this: ShellServiceInstance, opts, handlers) {
-      if (!PROCESS_EXECUTION) return Promise.reject(new Error(SHELL_UNAVAILABLE));
+    spawn(this: ProcessServiceInstance, opts, handlers) {
+      if (!PROCESS_EXECUTION) return Promise.reject(new Error(PROCESS_UNAVAILABLE));
       const pluginId = requireCallerPluginId(this.ctx);
       const sink = makeStreamSink(
         handlers
@@ -421,7 +435,7 @@ export function createKernel(): Kernel {
               error: (message) => console.error("插件进程错误", message),
             },
       );
-      const launched = launchTrackedProcess(pluginId, opts, {
+      const launched = launchTrackedProcess(pluginId, opts, "keep", {
         stdout: (line) => sink.chunk({ stream: "stdout", data: line }),
         stderr: (line) => sink.chunk({ stream: "stderr", data: line }),
         close: (code) => sink.end({ code }),
@@ -429,6 +443,8 @@ export function createKernel(): Kernel {
       });
       return launched.pid.then((pid) => ({
         pid,
+        write: (data: string) => writeProcessStdin(pid, data),
+        endInput: () => endProcessStdin(pid),
         cancel: async () => {
           // 已结束即 no-op：退出时登记已摘除，此时该 pid 可能已被系统复用给别的进程
           if (launched.ended()) return;
@@ -438,8 +454,8 @@ export function createKernel(): Kernel {
       }));
     },
   };
-  Object.defineProperty(shell, symbols.tracker, { value: { property: "ctx" } });
-  provide("shell", shell);
+  Object.defineProperty(process, symbols.tracker, { value: { property: "ctx" } });
+  provide("process", process);
 
   const vault: VaultService = {
     listFiles: () => listVaultTree(),

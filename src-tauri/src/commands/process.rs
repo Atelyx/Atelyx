@@ -1,6 +1,6 @@
-//! 插件托管进程的命令面：启动（`ctx.shell.exec`/`spawn` 的后端，见 `spawn_plugin_process`）与按 pid 结束进程树（`kill_process_tree`）。
-//! 两者的信任模型都不是沙箱/防插件边界：程序白名单只放行 shell 解释器而参数全开、命令接受任意 pid——
-//! 插件本可经 `ctx.shell.exec` 跑 `kill`/`taskkill`，唯一硬护栏是「不能杀掉整个应用/系统」（pid 0 与超 i32 范围恒拒）。
+//! 插件托管进程的命令面：启动、stdin 写入/关闭与按 pid 结束进程树（`ctx.process` 的后端）。
+//! 信任模型不是沙箱/防插件边界：程序来源全部放行、命令接受任意 pid，唯一硬护栏是「不能杀掉
+//! 整个应用/系统」（pid 0 与超 i32 范围恒拒）。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -17,10 +17,10 @@ use std::process::Command;
 #[cfg(any(unix, test))]
 use std::collections::HashSet;
 
-/// 启动插件托管进程（`ctx.shell.exec`/`spawn` 的后端），pid 到位即返回。
+/// 启动插件托管进程（`ctx.process.exec`/`spawn` 的后端），pid 到位即返回。
 ///
-/// 程序白名单由 `plugin_process` 校验，进程在创建时就纳入作业对象/进程组，输出与退出经
-/// `on_event` 流式回传。
+/// 程序来源由 `plugin_process::resolve_program` 校验（只挡空名），进程在创建时就纳入作业对象/
+/// 进程组，stdin 管道同时入册，输出与退出经 `on_event` 流式回传。
 #[tauri::command(async)]
 pub fn spawn_plugin_process(
     host: State<'_, Arc<PluginProcessHost>>,
@@ -35,6 +35,26 @@ pub fn spawn_plugin_process(
         let _ = on_event.send(event);
     });
     host.spawn(&program, &args, cwd.as_deref(), env.as_ref(), sink)
+}
+
+/// 向插件托管进程写入 stdin（`ctx.process` spawn 句柄 `write` 与 exec `input` 的后端）。
+///
+/// 进程已退出或 stdin 已关闭时报可读错误，不静默；写失败同样上抛（条目由宿主摘除）。
+/// 声明为 async：对端不读而管道写满时 `write_all` 会阻塞，同步命令会占住主线程事件循环。
+#[tauri::command(async)]
+pub fn write_plugin_process_stdin(
+    host: State<'_, Arc<PluginProcessHost>>,
+    pid: u32,
+    data: String,
+) -> Result<(), String> {
+    host.write_stdin(pid, &data)
+}
+
+/// 关闭插件托管进程的 stdin（对端读到 EOF）。已退出或已关闭为 no-op——插件端 `endInput`
+/// 只该调一次，但重复调用不算插件错误。
+#[tauri::command(async)]
+pub fn close_plugin_process_stdin(host: State<'_, Arc<PluginProcessHost>>, pid: u32) {
+    host.close_stdin(pid);
 }
 
 /// 结束 pid 及其全部子孙进程（包装层 `sh -c`/`cmd.exe /C` 下真正服务的存活依赖整树结束）。
@@ -215,6 +235,7 @@ fn windows_process_alive(pid: u32) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plugin_process::testing::{event_recorder, wait_terminated};
 
     fn children_of(pairs: &[(u32, u32)]) -> HashMap<u32, Vec<u32>> {
         let parent_of: HashMap<u32, u32> = pairs.iter().map(|&(parent, child)| (child, parent)).collect();
@@ -364,32 +385,6 @@ mod tests {
         let service = wait_service_pid(&pid_file);
         cleanup_wrapped_files(&pid_file);
         (child, service)
-    }
-
-    /// 收集宿主上报的进程事件的测试替身。
-    fn event_recorder() -> (Arc<std::sync::Mutex<Vec<ProcessEvent>>>, EventSink) {
-        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let sink: EventSink = {
-            let seen = seen.clone();
-            Arc::new(move |event| seen.lock().unwrap().push(event))
-        };
-        (seen, sink)
-    }
-
-    /// 等事件里出现退出事件，返回退出码（超时即失败）。
-    fn wait_terminated(seen: &Arc<std::sync::Mutex<Vec<ProcessEvent>>>) -> Option<i32> {
-        for _ in 0..50 {
-            if let Some(ProcessEvent::Terminated { code }) = seen
-                .lock()
-                .unwrap()
-                .iter()
-                .find(|e| matches!(e, ProcessEvent::Terminated { .. }))
-            {
-                return *code;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-        None
     }
 
     /// 进程是否仍存在（未被回收的僵尸也算存在，故断言前必须先 wait 收尸）。

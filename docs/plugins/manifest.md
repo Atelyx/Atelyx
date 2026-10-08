@@ -99,19 +99,20 @@
 
 产物跑在 WebView 里，所以只有**浏览器可用**的 npm 包能用：依赖 Node 内置模块（`fs`、
 `child_process` 等）、原生扩展（`.node`）、或无法静态解析的 `require(变量)` 的包会在安装阶段失败
-并指认到来源文件。这类需求改用 `ctx.native.invoke`（原始命令逃生舱）或 `ctx.shell.exec`（执行外部程序）。
+并指认到来源文件。这类需求改用 `ctx.native.invoke`（原始命令逃生舱）或 `ctx.process.exec`（执行外部程序）。
 
 `react` 与 `react/jsx-runtime` 不需要（也不应）声明为依赖：宿主已提供全局 React，打包时会自动
 接到宿主那一份上，避免同一个界面里出现两份 React。`react-dom` 不在接管范围内，需要就自行声明。
 
-## 执行外部程序（`ctx.shell`）
+## 执行外部程序（`ctx.process`）
 
-`ctx.shell.exec(opts, handlers?)` 执行并等进程结束（不传 `handlers` 聚合输出返回，传则流式回调）；
-`ctx.shell.spawn(opts, handlers?)` 启动后立即返回句柄 `{ pid, cancel() }`——托管长驻服务（本机模型服务、sidecar 等）用后者。
+`ctx.process.exec(opts, handlers?)` 执行并等进程结束（不传 `handlers` 聚合输出返回，传则流式回调）；
+`ctx.process.spawn(opts, handlers?)` 启动后立即返回句柄 `{ pid, write(), endInput(), cancel() }`——托管长驻服务（本机模型服务、sidecar 等）用后者。
 
-- 程序只能是 `sh`（Unix，配 `-c`）或 `cmd.exe`（Windows，配 `/C`），参数全开，等价任意命令执行。
-- `cwd` 指定工作目录；`env` 追加/覆盖宿主环境（不传则完整继承，本机服务通常需要）；不提供 stdin 写入。
-- `cancel()` 结束该进程及其全部子孙（含 `sh -c`/`cmd.exe /C` 包出的实际服务进程，不只杀包装进程）。
+- 程序来源全部放行：裸名（`node`、`python`…）按 PATH 解析，路径形态按给定值使用；等价任意命令执行。
+- `cwd` 指定工作目录；`env` 追加/覆盖宿主环境（不传则完整继承，本机服务通常需要）。
+- `input` 传入时进程启动后写一次 stdin 并立即关闭（一次性喂数据）。input 无法送达（进程未读 stdin 就退出）时只记宿主诊断日志，不影响聚合结果——以进程自身的退出码与输出为准。
+- spawn 句柄的 `write(data)` 可反复写入 stdin，`endInput()` 关闭 stdin（长驻 helper 的双向通信用）；`cancel()` 结束该进程及其全部子孙（含 `sh -c`/`cmd.exe /C` 包出的实际服务进程，不只杀包装进程）。
 - 进程按插件记账：插件停用 / 卸载 / 更新 / 回退 / 重载与应用退出时一律结束——启动还没返回就被停用也一样。
 - 不要用它甩出「应在应用关闭后继续跑」的进程；要复用已在跑的服务，自查端口/接口后再决定是否启动（重载后上一轮句柄已失效）。
 - 仍应给用户做停止入口（如设置页按钮）；`cancel()` 后再停用无副作用（已结束的句柄为 no-op）。

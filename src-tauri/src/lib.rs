@@ -263,8 +263,10 @@ pub fn run() {
             commands::external_fs::external_private_dir,
             commands::external_fs::external_write_file_base64,
             commands::external_fs::external_read_file_data_url,
-            // 插件托管进程的启动与结束（ctx.shell.spawn 的后端 + 按 pid 结束进程树）
+            // 插件托管进程（ctx.process 的后端：启动 + stdin 写入/关闭 + 按 pid 结束进程树）
             commands::process::spawn_plugin_process,
+            commands::process::write_plugin_process_stdin,
+            commands::process::close_plugin_process_stdin,
             commands::process::kill_process_tree,
             // 全局快捷键（ctx.shortcuts 的 OS 层后端，见 commands/global_shortcut.rs）
             commands::global_shortcut::plugin_shortcut_register,
@@ -431,7 +433,7 @@ mod capability_contract_tests {
         }
     }
 
-    /// 插件进程执行走宿主 `spawn_plugin_process`（程序白名单在 Rust 侧 `plugin_process::resolve_program`），
+    /// 插件进程执行走宿主 `spawn_plugin_process`（程序来源校验在 Rust 侧 `plugin_process::resolve_program`），
     /// 为的是在进程创建那一刻就定下清理归属。故 `shell:allow-spawn`/`allow-execute`/`allow-kill` 不得
     /// 出现在任何能力文件里：那等于敞开一条不进程记账、不随应用退出的执行路径。
     ///

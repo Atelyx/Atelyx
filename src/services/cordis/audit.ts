@@ -19,7 +19,7 @@ import type {
 } from "@/types";
 import { listAllContributions, listAllDecorators, payloadLabel } from "./slots";
 import { pluginIdOf } from "./loader";
-import type { ShellExecOptions } from "./types";
+import type { ProcessExecOptions } from "./types";
 
 /** 纳入审计的 Atelyx 服务面（与展示标签同一清单，避免两处枚举漂移；新增服务面改 constants 一处）。 */
 const ATELYX_SERVICES = new Set(PLUGIN_SERVICE_NAMES);
@@ -74,8 +74,8 @@ function sanitizeUrl(raw: unknown): string {
 
 /** 调用摘要：只记形状与规模；返回 undefined = 该调用不进审计。 */
 function summarizeCall(service: string, method: string, args: unknown[]): string | undefined {
-  if (service === "shell") {
-    const opts = args[0] as ShellExecOptions | undefined;
+  if (service === "process") {
+    const opts = args[0] as ProcessExecOptions | undefined;
     const program = typeof opts?.command === "string" ? opts.command : "未知程序";
     const count = Array.isArray(opts?.args) ? opts.args.length : 0;
     return `${program}（${count} 个参数）`;
@@ -103,13 +103,13 @@ function summarizeCall(service: string, method: string, args: unknown[]): string
 /** 该插件视角下的服务视图：敏感面换成一层包装，调用时先记摘要再转发（真实调用抛错也留摘要）。
  *
  *  必须是**不带 tracker 的普通对象**（不能直接包 Proxy 而不遮挡 tracker）：被包装的服务本身多带
- *  `symbols.tracker`（state/storage/fs/shell 按调用方绑定），而 vendor 的 `getTraceable` 一见
+ *  `symbols.tracker`（state/storage/fs/process 按调用方绑定），而 vendor 的 `getTraceable` 一见
  *  tracker 就再包一层 traceable——那层解析成员用 `getPropertyDescriptor`，而 `Reflect` 取描述符
  *  会被 Proxy 转发到 target，直接命中原服务的原始方法，于是**绕过本包装层**（外层 traceable 又
  *  恰好屏蔽了它的 `get` 陷阱）：结果是经 `ctx.services.get(name)` 取回的敏感服务调用不进审计
  *  （直接读 `ctx.<name>` 不受影响）。不含 tracker 的普通对象让 vendor 到该层不再重绑，包装
  *  必定生效；方法转发用读取时得到的成员，调用方绑定已由内部那层完成（`this.ctx` 仍解析为调用方）。
- *  代价：只搬运函数成员（当前敏感面——shell/clipboard/http/native/fs 整体敏感 + vault 方法级
+ *  代价：只搬运函数成员（当前敏感面——process/clipboard/http/native/fs 整体敏感 + vault 方法级
  *  敏感——都只有方法，无异形成员被丢）。 */
 export function wrapSensitiveService(pluginId: string, service: string, target: object): object {
   const wrapped: Record<string, unknown> = Object.create(null);

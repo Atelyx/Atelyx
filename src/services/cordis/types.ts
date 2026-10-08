@@ -1,7 +1,7 @@
 /**
  * Cordis 内核契约：类型化 ctx 服务 + typed events（Atelyx 宿主侧服务面）；服务实现见 kernel.ts，插件侧一律经 ctx.<domain>.<method>() 触达。
  * 事件闭集（vault:switch / canvas:changed / table:changed / collab:changed / collab:reconnected / collab:resync / vault:changed）在本文件声明为 typed event map（@mode 标注分派模式）。
- * 平台服务（state/app/shell/vault/dialog/clipboard/window/ai/collab）与内核领域服务（history/layout/uiState/chat）由内核提供；canvas/table/note 由对应插件提供（停用即不可用）。
+ * 平台服务（state/app/process/vault/dialog/clipboard/window/ai/collab）与内核领域服务（history/layout/uiState/chat）由内核提供；canvas/table/note 由对应插件提供（停用即不可用）。
  */
 import type {
   AgentStep,
@@ -136,33 +136,42 @@ export interface ChatBeforeFinishOutput extends SerialHookOutput {
   steps?: AgentStep[];
 }
 
-/** shell.exec 选项（command 必填；cwd/env 可选）。
+/** process.exec 选项（command 必填；cwd/env/input 可选）。
  *  `env` 是**追加/覆盖**宿主环境（不传即完全继承宿主的 PATH/TEMP 等——本机服务需要它们）；
- *  没有「清空环境」的写法，stdin 也不开放（不给子进程写输入）。 */
-export interface ShellExecOptions {
+ *  没有「清空环境」的写法。`input` 传入时宿主在进程启动后把这段文本写进 stdin 并立即关闭
+ *  （程序读到 EOF 才会开始处理）——适合「喂一份数据、拿一份结果」的一次性用法；input 无法
+ *  送达（进程未读 stdin 即退出）时记宿主诊断日志、不改变聚合结果。双向多轮通信用 spawn
+ *  句柄的 write/endInput。 */
+export interface ProcessExecOptions {
   command: string;
   args?: string[];
   cwd?: string;
   env?: Record<string, string>;
+  input?: string;
 }
 
-/** shell.exec 聚合结果（非流式）。 */
-export interface ShellExecResult {
+/** process.exec 聚合结果（非流式）。 */
+export interface ProcessExecResult {
   code: number | null;
   stdout: string;
   stderr: string;
 }
 
-/** shell.exec 流式回调（stdout/stderr → chunk；退出 → end{code}）。 */
-export interface ShellStreamHandlers {
+/** process.exec 流式回调（stdout/stderr → chunk；退出 → end{code}）。 */
+export interface ProcessStreamHandlers {
   chunk(data: { stream: "stdout" | "stderr"; data: string }): void;
   end(data: { code: number | null }): void;
   error(message: string): void;
 }
 
-/** shell.spawn 的进程句柄。 */
-export interface ShellProcessHandle {
+/** process.spawn 的进程句柄。 */
+export interface ProcessHandle {
   pid: number;
+  /** 向进程写入 stdin（可反复调用；长驻 helper 的 JSON-RPC 一来一回都走这里）。
+   *  进程已退出或 stdin 已关闭时 reject 带原因。 */
+  write(data: string): Promise<void>;
+  /** 关闭 stdin（对端读到 EOF）。已退出或已关闭时为 no-op。 */
+  endInput(): Promise<void>;
   /** 结束该进程及其全部子孙（含 `sh -c`/`cmd.exe /C` 包装出的实际服务进程）。
    *  进程已退出（或已被结束）时本调用为 no-op；进程已不存在不算失败，其余失败 reject 带原因。 */
   cancel(): Promise<void>;
@@ -239,16 +248,16 @@ export interface AppService {
   openPage(pageId: string): Promise<boolean>;
 }
 
-/** 外部程序执行服务（敏感：程序只放行 `sh`（Unix，配 `-c`）/ `cmd.exe`（Windows，配 `/C`），`args` 全开，等价任意命令执行）。
+/** 外部程序执行服务（敏感：程序来源全部放行——裸名走 PATH 解析、路径形态按给定值使用，等价任意命令执行）。
  *  插件启动的进程按调用方记账：插件停用/卸载时由宿主统一结束，应用退出时也一并结束——长驻服务
  *  不该活过插件本身，更不该活过应用（被强杀时靠 Windows 作业对象兜底，Unix 该路径不保证）。 */
-export interface ShellService {
+export interface ProcessService {
   /** 非流式：聚合输出后一次性返回；传 handlers 则流式（stdout/stderr → chunk）。 */
-  exec(opts: ShellExecOptions, handlers?: ShellStreamHandlers): Promise<ShellExecResult | undefined>;
-  /** 启动进程并立即返回句柄（不等进程结束）——托管长驻服务的可靠停止方式。
+  exec(opts: ProcessExecOptions, handlers?: ProcessStreamHandlers): Promise<ProcessExecResult | undefined>;
+  /** 启动进程并立即返回句柄（不等进程结束）——托管长驻服务与双向通信（write/endInput）的承载方式。
    *  启动失败 reject（同时经 handlers.error 上报同因错误）；此后错误只走 handlers.error。
    *  进程创建那一刻即纳入退出清理范围：应用退出（含被强杀，Windows）时随宿主一起结束。 */
-  spawn(opts: ShellExecOptions, handlers?: ShellStreamHandlers): Promise<ShellProcessHandle>;
+  spawn(opts: ProcessExecOptions, handlers?: ProcessStreamHandlers): Promise<ProcessHandle>;
 }
 
 /** 仓库文件读写服务（读写全开；写方法语义与 AI 文件工具一致；失败返回 { ok:false, summary } 不抛断）。 */
@@ -590,7 +599,7 @@ declare module "@atelyx/cordis" {
     http: HttpService;
     notification: NotificationService;
     app: AppService;
-    shell: ShellService;
+    process: ProcessService;
     vault: VaultService;
     fs: FsService;
     dialog: DialogService;

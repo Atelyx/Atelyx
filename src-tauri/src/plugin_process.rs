@@ -1,11 +1,11 @@
-//! 插件托管进程的宿主：启动（`ctx.shell.exec`/`spawn` 的后端）与「随应用退出收干净」。
+//! 插件托管进程的宿主：启动（`ctx.process.exec`/`spawn` 的后端）、stdin 写入与「随应用退出收干净」。
 //! 清理归属必须在创建那一刻定下：先跑起来再补登记，`sh -c`/`cmd.exe /C` 包装进程可能已派生出
 //! 真正的服务进程，孙进程会漏在清理范围外（「应用关掉了，本机服务还在占端口与显存」的成因）。
 //! 失败不静默：纳入清理范围失败即终止本次启动并返回原因；插件停用/卸载按调用方记账走 `kill_process_tree`。
 
 use std::collections::HashMap;
-use std::io::{BufRead, Read};
-use std::process::{Child, Command, Stdio};
+use std::io::{BufRead, Read, Write};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -35,29 +35,20 @@ pub enum ProcessEvent {
 /// 事件出口：命令侧包一层 Tauri `Channel`，测试侧收进内存。
 pub type EventSink = Arc<dyn Fn(ProcessEvent) + Send + Sync + 'static>;
 
-/// 各平台放行的程序名（提示文案用；判定见 `resolve_program`）。
-#[cfg(windows)]
-const ALLOWED_PROGRAM: &str = "cmd.exe";
-#[cfg(unix)]
-const ALLOWED_PROGRAM: &str = "sh";
-#[cfg(not(any(windows, unix)))]
-const ALLOWED_PROGRAM: &str = "（本平台无可用解释器）";
-
 /// 校验并解析要启动的程序。
 ///
-/// 只放行 shell 解释器，**参数全开**——`ctx.shell` 是敏感面，其信任模型就是等价任意命令执行，
-/// 这一层不是沙箱，只保证进程创建时能定下清理归属。
-pub fn resolve_program(program: &str) -> Result<&'static str, String> {
-    #[cfg(windows)]
-    if program == "cmd.exe" {
-        return Ok("cmd.exe");
+/// 程序来源**全部放行**（裸名交给 PATH 解析，路径形态按给定值使用）——这不是沙箱边界，
+/// 信任模型本就等价任意命令执行，本层只负责两件事：空程序名在这里给出可读错误（而不是落到
+/// OS 层报一堆码）、Unix 裸名 `sh` 固定解析到 `/bin/sh`（系统 shell 语义不随 PATH 漂移）。
+pub fn resolve_program(program: &str) -> Result<String, String> {
+    if program.trim().is_empty() {
+        return Err("程序名不能为空".to_string());
     }
     #[cfg(unix)]
     if program == "sh" {
-        // 固定用 /bin/sh：与 shell 解释器约定一致，不随 PATH 漂移
-        return Ok("/bin/sh");
+        return Ok("/bin/sh".to_string());
     }
-    Err(format!("不允许启动程序「{program}」：插件进程只放行 {ALLOWED_PROGRAM}"))
+    Ok(program.to_string())
 }
 
 /// 插件托管进程的宿主（应用内单例，经 `app.manage(Arc<PluginProcessHost>)` 托管）。
@@ -67,6 +58,9 @@ pub struct PluginProcessHost {
     /// 在册的直接子进程 pid（pid 即它自建的进程组 id）。仅 Unix 用：退出前按组结束。
     #[cfg(unix)]
     groups: Mutex<HashSet<u32>>,
+    /// 在册进程的 stdin 写端（pid → 管道写端）。进程退出时由守望线程按**句柄身份**摘除（防 pid
+    /// 复用误摘新进程的条目）；写路径只在取句柄时短暂持有此锁，阻塞 I/O 持的是条目自己的锁。
+    stdins: Mutex<HashMap<u32, Arc<Mutex<ChildStdin>>>>,
     /// 已开始退出收尾：此后的启动一律拒绝，否则新进程会落在收尾之后、逃过清理。
     ///
     /// 正常退出路径上窗口已全部销毁、不会再有插件代码运行，此标志是防「收尾与新启动交叉」的
@@ -81,13 +75,15 @@ impl PluginProcessHost {
             job: Mutex::new(None),
             #[cfg(unix)]
             groups: Mutex::new(HashSet::new()),
+            stdins: Mutex::new(HashMap::new()),
             shutting_down: AtomicBool::new(false),
         }
     }
 
     /// 启动进程：pid 到位即返回（不等进程结束），输出与退出经 `sink` 流式上报。
     ///
-    /// 启动失败（程序不在白名单、工作目录不存在、无法纳入清理范围）返回可读原因。
+    /// 启动失败（工作目录不存在、无法纳入清理范围）返回可读原因。stdin 管道在启动时建立并
+    /// 入册，供 `write_stdin` / `close_stdin` 使用。
     pub fn spawn(
         self: &Arc<Self>,
         program: &str,
@@ -97,9 +93,24 @@ impl PluginProcessHost {
         sink: EventSink,
     ) -> Result<u32, String> {
         let mut command = build_command(program, args, cwd, env)?;
-        let child = self.create(&mut command)?;
+        let mut child = self.create(&mut command)?;
         let pid = child.id();
-        supervise(child, pid, sink, self.clone());
+        // 守望线程只持 Weak：强引用归注册表与写入路径——否则 close_stdin（仅从注册表摘除）后
+        // 守望线程的强引用仍拖着写端，对端永远等不到 EOF
+        let stdin_entry = child
+            .stdin
+            .take()
+            .map(|stdin| Arc::new(Mutex::new(stdin)));
+        if let Some(entry) = &stdin_entry {
+            self.stdins.lock().unwrap().insert(pid, entry.clone());
+        }
+        supervise(
+            child,
+            pid,
+            stdin_entry.as_ref().map(Arc::downgrade),
+            sink,
+            self.clone(),
+        );
         Ok(pid)
     }
 
@@ -207,6 +218,51 @@ impl PluginProcessHost {
     #[cfg(not(unix))]
     fn release(&self, _pid: u32) {}
 
+    /// 向在册进程写入 stdin。
+    ///
+    /// 取句柄后立即释放注册表锁，阻塞 I/O 只持**条目自己的锁**——对端不读而管道写满时
+    /// `write_all` 会无限期阻塞，绝不能让这层阻塞扩散到注册表（否则其它进程的启动/收尾全卡）。
+    /// 同一进程的并发写按条目锁串行（保序）；对已退出进程写入按注册表缺席/写错误两条路径报可读错误。
+    pub fn write_stdin(&self, pid: u32, data: &str) -> Result<(), String> {
+        let entry = {
+            let stdins = self.stdins.lock().unwrap();
+            stdins.get(&pid).cloned()
+        };
+        let Some(entry) = entry else {
+            return Err(format!("进程 {pid} 不存在或 stdin 已关闭，无法写入"));
+        };
+        let result = entry
+            .lock()
+            .unwrap()
+            .write_all(data.as_bytes())
+            .map_err(|e| format!("写入进程 {pid} 的 stdin 失败：{e}"));
+        if result.is_err() {
+            // 写失败（对端已关、管道断开）按句柄身份摘除，让后续写入落到「不存在」同一条错误路径
+            self.remove_stdin_if(pid, &entry);
+        }
+        result
+    }
+
+    /// 关闭在册进程的 stdin（对端读到 EOF，长驻 helper 据此知道输入结束）。
+    /// 进程已退出或已关闭时为 no-op。
+    pub fn close_stdin(&self, pid: u32) {
+        self.stdins.lock().unwrap().remove(&pid);
+    }
+
+    /// 仅当注册表里的条目仍是 `entry` 本尊时才摘除（守望线程退出清理与写入失败清理共用）。
+    ///
+    /// 按句柄身份而不是按 pid 盲摘：Unix 上 `wait` 收尸后 pid 立即可被复用，若新进程恰好拿到
+    /// 同一 pid 并已入册，旧守望线程按 pid 摘除会砍掉**新进程**的写端。
+    fn remove_stdin_if(&self, pid: u32, entry: &Arc<Mutex<ChildStdin>>) {
+        let mut stdins = self.stdins.lock().unwrap();
+        if stdins
+            .get(&pid)
+            .is_some_and(|cur| Arc::ptr_eq(cur, entry))
+        {
+            stdins.remove(&pid);
+        }
+    }
+
     /// 摘除在册进程（启动被拒绝时主动放弃；正常退出走 `release`）。
     #[cfg(unix)]
     fn untrack(&self, pid: u32) {
@@ -294,7 +350,8 @@ pub fn shutdown(app: &tauri::AppHandle) {
 }
 
 /// 组装命令：cwd 可选、`env` 为**追加/覆盖**宿主环境（不 `env_clear`——插件启动的本机服务需要
-/// 宿主的 PATH/TEMP 等才有正常行为）。stdin 不接管：`ctx.shell` 没有写 stdin 的面。
+/// 宿主的 PATH/TEMP 等才有正常行为）。stdin 建管道：插件经 spawn 句柄写入（不传数据时写端
+/// 随进程退出一并释放，对不读 stdin 的程序没有行为影响）。
 fn build_command(
     program: &str,
     args: &[String],
@@ -305,7 +362,7 @@ fn build_command(
     let mut command = Command::new(resolved);
     command
         .args(args)
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     if let Some(cwd) = cwd {
@@ -328,7 +385,13 @@ fn discard(child: &mut Child) {
 /// 退出上报排在输出之后：聚合型调用（`ctx.shell.exec`）以退出事件为结果落地时刻，
 /// 先报退出会把尾巴上的输出丢掉。若服务把 stdout 交给了长命子孙，读端不结束、退出上报会跟着
 /// 延后（输出读完才算收尾）。
-fn supervise(mut child: Child, pid: u32, sink: EventSink, host: Arc<PluginProcessHost>) {
+fn supervise(
+    mut child: Child,
+    pid: u32,
+    stdin_entry: Option<std::sync::Weak<Mutex<ChildStdin>>>,
+    sink: EventSink,
+    host: Arc<PluginProcessHost>,
+) {
     let out_reader = child
         .stdout
         .take()
@@ -339,8 +402,13 @@ fn supervise(mut child: Child, pid: u32, sink: EventSink, host: Arc<PluginProces
         .map(|pipe| spawn_line_reader(pipe, sink.clone(), false));
     std::thread::spawn(move || {
         let status = child.wait();
-        // 处置在册条目：包装进程结束不等于它这一组结束（见 release）
+        // 处置在册条目：包装进程结束不等于它这一组结束（见 release）；stdin 条目按**句柄身份**
+        // 摘除（防 pid 复用后误摘新进程的写端），写端随之 drop、对端读到 EOF。条目已被
+        // close_stdin 摘走时 Weak 升级失败，自然跳过
         host.release(pid);
+        if let Some(entry) = stdin_entry.as_ref().and_then(std::sync::Weak::upgrade) {
+            host.remove_stdin_if(pid, &entry);
+        }
         if let Some(reader) = out_reader {
             let _ = reader.join();
         }
@@ -498,36 +566,128 @@ fn resume_main_thread(pid: u32) -> Result<(), String> {
     Ok(())
 }
 
+/// 测试共用替身（与 `commands::process` 的测试共享，避免逐字副本）。
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::*;
+
+    /// 收集宿主上报的进程事件的测试替身。
+    pub fn event_recorder() -> (Arc<std::sync::Mutex<Vec<ProcessEvent>>>, EventSink) {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink: EventSink = {
+            let seen = seen.clone();
+            Arc::new(move |event| seen.lock().unwrap().push(event))
+        };
+        (seen, sink)
+    }
+
+    /// 等事件里出现退出事件，返回退出码（超时即失败）。
+    pub fn wait_terminated(seen: &Arc<std::sync::Mutex<Vec<ProcessEvent>>>) -> Option<i32> {
+        for _ in 0..50 {
+            if let Some(ProcessEvent::Terminated { code }) = seen
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|e| matches!(e, ProcessEvent::Terminated { .. }))
+            {
+                return *code;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use testing::{event_recorder, wait_terminated};
 
-    #[test]
-    fn only_shell_interpreters_are_allowed() {
+    /// 本机可直接用的解释器（绝对路径形态：PATH 之外的程序按给定路径启动同样要能跑）。
+    fn shell_program() -> (String, Vec<String>) {
         #[cfg(windows)]
         {
-            assert!(resolve_program("cmd.exe").is_ok());
-            for denied in ["sh", "python.exe", "powershell.exe", "cmd", ""] {
-                assert!(resolve_program(denied).is_err(), "应拒绝：{denied}");
-            }
+            let comspec = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string());
+            (comspec, vec!["/C".to_string(), "echo hello".to_string()])
         }
         #[cfg(unix)]
-        {
-            assert_eq!(resolve_program("sh").unwrap(), "/bin/sh");
-            for denied in ["cmd.exe", "bash", "/bin/sh", "python3", ""] {
-                assert!(resolve_program(denied).is_err(), "应拒绝：{denied}");
-            }
+        ("/bin/sh".to_string(), vec!["-c".to_string(), "echo hello".to_string()])
+    }
+
+    #[test]
+    fn any_program_is_allowed() {
+        // 信任模型 = 等价任意命令执行：裸名与路径形态一律放行，本层只挡空程序名
+        for program in ["cmd.exe", "sh", "python", "powershell.exe", "bash", "/bin/sh", "C:\\tools\\ffmpeg.exe"] {
+            assert!(resolve_program(program).is_ok(), "应放行：{program}");
+        }
+        #[cfg(unix)]
+        assert_eq!(resolve_program("sh").unwrap(), "/bin/sh", "裸名 sh 固定解析到系统 shell");
+        for denied in ["", "   "] {
+            assert!(resolve_program(denied).is_err(), "应拒绝：{denied}");
         }
     }
 
     #[test]
-    fn rejects_spawn_of_program_outside_whitelist() {
+    fn rejects_empty_program() {
         let host = Arc::new(PluginProcessHost::new());
         let sink: EventSink = Arc::new(|_| {});
-        let denied = if cfg!(windows) { "python.exe" } else { "bash" };
         let err = host
-            .spawn(denied, &[], None, None, sink)
-            .expect_err("白名单外的程序必须拒绝启动");
-        assert!(err.contains(denied), "错误原因应指明被拒的程序：{err}");
+            .spawn("", &[], None, None, sink)
+            .expect_err("空程序名必须拒绝启动");
+        assert!(err.contains("程序名"), "错误原因应指明程序名：{err}");
+    }
+
+    /// 绝对路径形态的程序要能直接启动（插件的侧车可执行不走 PATH）。
+    #[test]
+    fn spawns_program_by_absolute_path() {
+        let host = Arc::new(PluginProcessHost::new());
+        let (seen, sink) = event_recorder();
+        let (program, args) = shell_program();
+        let pid = host.spawn(&program, &args, None, None, sink).expect("按绝对路径启动失败");
+        assert_ne!(pid, 0);
+        assert_eq!(wait_terminated(&seen), Some(0), "应上报正常退出");
+    }
+
+    /// stdin 写入面：写进去的数据要到达子进程，close 后子进程收到 EOF 正常退出。
+    #[test]
+    fn stdin_round_trip() {
+        let host = Arc::new(PluginProcessHost::new());
+        let (seen, sink) = event_recorder();
+        #[cfg(windows)]
+        let (program, args) = ("cmd.exe", vec!["/C".to_string(), "more".to_string()]);
+        #[cfg(unix)]
+        let (program, args) = ("sh", vec!["-c".to_string(), "read line; echo \"got:$line\"".to_string()]);
+
+        let pid = host.spawn(&program, &args, None, None, sink).expect("启动进程失败");
+        host.write_stdin(pid, "hello\n").expect("写入 stdin 失败");
+        host.close_stdin(pid);
+        assert_eq!(wait_terminated(&seen), Some(0), "关闭 stdin 后子进程应正常退出");
+
+        let stdout: String = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                ProcessEvent::Stdout { data } => Some(data.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(stdout.contains("hello"), "stdin 数据应到达子进程输出：{stdout:?}");
+    }
+
+    /// 进程退出后 stdin 条目已摘除：写入必须报错（错误路径），而不是把数据写进悬空管道后静默。
+    #[test]
+    fn stdin_write_after_exit_fails() {
+        let host = Arc::new(PluginProcessHost::new());
+        let (seen, sink) = event_recorder();
+        #[cfg(windows)]
+        let (program, args) = ("cmd.exe", vec!["/C".to_string(), "echo x".to_string()]);
+        #[cfg(unix)]
+        let (program, args) = ("sh", vec!["-c".to_string(), "echo x".to_string()]);
+
+        let pid = host.spawn(&program, &args, None, None, sink).expect("启动进程失败");
+        assert_eq!(wait_terminated(&seen), Some(0), "进程应已退出");
+        let err = host.write_stdin(pid, "late\n").expect_err("退出后写入 stdin 必须报错");
+        assert!(err.contains(&pid.to_string()), "错误原因应指明 pid：{err}");
     }
 }

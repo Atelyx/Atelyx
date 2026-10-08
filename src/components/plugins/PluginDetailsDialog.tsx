@@ -15,8 +15,8 @@ interface PluginDetailsDialogProps {
   commands: PluginCommandContribution[];
   capabilityLabel: (name: string) => string;
   capabilitySensitive: (name: string) => boolean;
-  /** 进程执行（实际访问里的 `shell`）在本平台是否可用。 */
-  shellAvailable: boolean;
+  /** 进程执行（实际访问里的 `process`）在本平台是否可用。 */
+  processAvailable: boolean;
   /** 槽位修改链查询（归属可见：展开某槽看声明方 + 全部贡献/装饰者）。 */
   getSlotChain: (slot: string) => PluginSlotChain;
   onRunCommand: (globalId: string) => void;
@@ -52,7 +52,7 @@ export function PluginDetailsDialog({
   commands,
   capabilityLabel,
   capabilitySensitive,
-  shellAvailable,
+  processAvailable,
   getSlotChain,
   onRunCommand,
   onRollback,
@@ -62,9 +62,9 @@ export function PluginDetailsDialog({
   onCancelRollback,
 }: PluginDetailsDialogProps) {
   const closeRef = useRef<HTMLButtonElement>(null);
-  /** 已发现能力在本平台是否可用：只列有平台差异的能力（如 shell = 进程执行），其余不受平台影响。 */
+  /** 已发现能力在本平台是否可用：只列有平台差异的能力（如 process = 进程执行），其余不受平台影响。 */
   const capabilityAvailable = (name: string): boolean =>
-    name === "shell" ? shellAvailable : true;
+    name === "process" ? processAvailable : true;
   const onCloseRef = useRef(onClose);
   const rollbackConfirmRef = useRef(rollbackConfirm);
   onCloseRef.current = onClose;

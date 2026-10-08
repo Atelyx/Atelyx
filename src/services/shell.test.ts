@@ -39,7 +39,7 @@ vi.mock("@tauri-apps/plugin-shell", () => ({
   open: () => Promise.resolve(),
 }));
 
-import { runProcess, killProcessTree, type ProcessStreamHandlers } from "./shell";
+import { runProcess, killProcessTree, writeProcessStdin, endProcessStdin, type ProcessStreamHandlers } from "./shell";
 
 /** 收集回调调用的测试替身。 */
 function recorder(): ProcessStreamHandlers & {
@@ -109,11 +109,18 @@ describe("进程执行 service", () => {
 
   it("启动失败同时走 reject 与 handlers.error（流式面与返回值同口径）", async () => {
     const handlers = recorder();
-    nextFailure = "不允许启动程序「python.exe」";
+    nextFailure = "启动进程失败：程序不存在";
 
-    await expect(runProcess("python.exe", [], {}, handlers)).rejects.toThrow("不允许启动程序");
+    await expect(runProcess("python.exe", [], {}, handlers)).rejects.toThrow("启动进程失败");
     // error 回调与 reject 同因：调用方只看流式面时不会漏掉启动失败
-    expect(handlers.errors).toEqual(["不允许启动程序「python.exe」"]);
+    expect(handlers.errors).toEqual(["启动进程失败：程序不存在"]);
+  });
+
+  it("writeProcessStdin / endProcessStdin 走对应命令", async () => {
+    await writeProcessStdin(77, "data\n");
+    await endProcessStdin(77);
+    expect(invokes[0]).toMatchObject({ command: "write_plugin_process_stdin", args: { pid: 77, data: "data\n" } });
+    expect(invokes[1]).toMatchObject({ command: "close_plugin_process_stdin", args: { pid: 77 } });
   });
 
   it("killProcessTree 按 pid 调命令", async () => {

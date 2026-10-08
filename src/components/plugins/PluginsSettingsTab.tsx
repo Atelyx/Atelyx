@@ -389,7 +389,7 @@ export function PluginsSettingsTab() {
           commands={commands}
           capabilityLabel={capabilityLabel}
           capabilitySensitive={capabilitySensitive}
-          shellAvailable={capabilities.processExecution}
+          processAvailable={capabilities.processExecution}
           getSlotChain={slotChain}
           onRunCommand={(globalId) => void runPluginCommand(globalId).then(
             () => setNotice({ kind: "ok", text: "命令已执行" }),

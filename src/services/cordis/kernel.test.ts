@@ -71,7 +71,7 @@ afterEach(() => {
 });
 
 describe("Cordis 内核宿主", () => {
-  it("createKernel 提供平台服务（state/storage/http/notification/app/shell/vault/dialog/clipboard/window/ai/collab/markdown）", () => {
+  it("createKernel 提供平台服务（state/storage/http/notification/app/process/vault/dialog/clipboard/window/ai/collab/markdown）", () => {
     const { ctx, dispose } = createKernel();
     expect(ctx).toBeInstanceOf(Context);
     for (const name of [
@@ -80,7 +80,7 @@ describe("Cordis 内核宿主", () => {
       "http",
       "notification",
       "app",
-      "shell",
+      "process",
       "vault",
       "dialog",
       "clipboard",
