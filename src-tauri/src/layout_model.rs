@@ -976,6 +976,61 @@ pub(crate) fn tear_off_from_panel_op(tree: &LayoutNode, panel_id: &str, tab_id: 
     Some((new_tree, tab))
 }
 
+/// 新撕裂窗口条目；`window_id` = 调用方预分配的 id（拖拽预建窗口复用，None = 现场生成）。
+fn new_detached_window(tab: TabItem, bounds: &WindowBounds, window_id: Option<String>) -> DetachedWindow {
+    DetachedWindow {
+        id: window_id.unwrap_or_else(|| nanoid!()),
+        tabs: vec![tab.clone()],
+        active_tab_id: Some(tab.id.clone()),
+        bounds: bounds.clone(),
+        hidden: false,
+        restore_on_launch: true,
+        options: WindowOptions::default(),
+        pinned: false,
+    }
+}
+
+/// 撕裂落点（来源 = 树面板）：标签移出面板并把新撕裂窗口条目挂上（面板留空）。
+/// 返回新条目；标签不在该面板 = None（布局不动）。与 `apply_layout_op` 的 TearOff 共用同一实现，
+/// 差别只在窗口 id 是否由调用方预分配（拖拽落点复用预热窗口时预分配）。
+pub(crate) fn tear_off_from_panel(
+    ui: &mut AppUiState,
+    panel_id: &str,
+    tab_id: &str,
+    bounds: &WindowBounds,
+    window_id: Option<String>,
+) -> Option<DetachedWindow> {
+    let tree = active_layout(ui).tree;
+    let (new_tree, tab) = tear_off_from_panel_op(&tree, panel_id, tab_id)?;
+    let window = new_detached_window(tab, bounds, window_id);
+    set_active_tree(ui, new_tree);
+    ui.detached_windows.push(window.clone());
+    Some(window)
+}
+
+/// 撕裂落点（来源 = 撕裂窗口）：把标签移到新撕裂窗口条目（源窗口拖空自动移除）。
+/// 返回新条目；标签不在该窗口 = None（布局不动）。
+pub(crate) fn tear_off_from_detached(
+    ui: &mut AppUiState,
+    source_window_id: &str,
+    tab_id: &str,
+    bounds: &WindowBounds,
+    window_id: Option<String>,
+) -> Option<DetachedWindow> {
+    let (source, tab) = find_tab_in_detached(&ui.detached_windows, tab_id)?;
+    if source != source_window_id {
+        return None;
+    }
+    let window = new_detached_window(tab, bounds, window_id);
+    let next = map_detached(&ui.detached_windows, source_window_id, &|w| {
+        apply_tab_group_detached(w, group_remove_tab(&group_of_detached(w), tab_id))
+    });
+    let mut next = prune_empty_windows(next);
+    next.push(window.clone());
+    ui.detached_windows = next;
+    Some(window)
+}
+
 /// 复制布局树时全部节点与标签重新生成 id（布局复制 = 独立副本，id 全局唯一约定）。
 pub(crate) fn regenerate_ids(node: &LayoutNode) -> LayoutNode {
     match node {

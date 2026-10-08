@@ -106,8 +106,10 @@ pub fn show_all_windows(app: &AppHandle) {
                 .unwrap_or_default()
         })
         .unwrap_or_default();
+    // 预热备用窗口是模型外的隐藏窗口，显示名单里没有它：驻留补显不得把它带出来
+    let prewarm = crate::layout::prewarm_window_label(app);
     for (_, win) in app.webview_windows() {
-        if model_hidden.contains(win.label()) {
+        if model_hidden.contains(win.label()) || prewarm.as_deref() == Some(win.label()) {
             continue;
         }
         let _ = win.unminimize();
@@ -137,7 +139,11 @@ fn hide_all_windows(app: &AppHandle) {
 pub fn begin_exit(app: &AppHandle) {
     use tauri::Emitter;
 
-    let labels: HashSet<String> = app.webview_windows().keys().cloned().collect();
+    let mut labels: HashSet<String> = app.webview_windows().keys().cloned().collect();
+    // 预热备用窗口（模型外）不参与退出收尾：它没有内容可落盘，等它回报只会拖住退出
+    if let Some(prewarm) = crate::layout::prewarm_window_label(app) {
+        labels.remove(&prewarm);
+    }
     // 无窗口可收尾（全部已销毁）直接退出，不等看门狗
     if labels.is_empty() {
         app.exit(0);

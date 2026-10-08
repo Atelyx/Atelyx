@@ -9,9 +9,10 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::time::Instant;
 
-use crate::layout::{apply_layout_op, LayoutInner, LayoutState};
+use crate::layout::{apply_layout_op, LayoutInner, LayoutState, PrewarmWindow};
 use crate::layout_model::{
-    active_layout, set_active_tree, split_panel_op, LayoutOp, ViewKind, WindowBounds,
+    active_layout, set_active_tree, split_panel_op, tear_off_from_detached, tear_off_from_panel,
+    LayoutOp, ViewKind, WindowBounds,
 };
 use crate::layout_persist::{broadcast_layout, schedule_persist, DRAG_SESSION_EVENT};
 use crate::layout_window::{reconcile_panel_windows, seed_window_bounds, PANEL_LABEL_PREFIX};
@@ -19,6 +20,8 @@ use crate::layout_window::{reconcile_panel_windows, seed_window_bounds, PANEL_LA
 /// 撕裂窗口默认尺寸（logical px，与前端一致）。
 const PANEL_WINDOW_WIDTH: f64 = 420.0;
 const PANEL_WINDOW_HEIGHT: f64 = 560.0;
+/// 预热窗口标题占位（认领时按条目里的激活标签刷新，见 `layout_window::show_prewarmed_window`）。
+const PREWARM_TITLE: &str = "面板";
 /// 拖拽看门狗：**静默超时即收尾**（释放事件丢失的跨平台兜底）。
 ///
 /// 为什么按「一段时间没有新的移动上报」而不是「光标移出所有应用窗口」：窗口内同样会丢事件
@@ -152,6 +155,68 @@ fn begin_replaces_session(existing: Option<&DragSession>, p: &DragStartPayload) 
     }
 }
 
+/// 无落点可参考时的预热窗口初始 bounds（默认面板尺寸 + 原点；认领时会按落点搬到实际位置）。
+fn default_prewarm_bounds() -> WindowBounds {
+    WindowBounds { x: 0.0, y: 0.0, width: PANEL_WINDOW_WIDTH, height: PANEL_WINDOW_HEIGHT, scale: 0.0 }
+}
+
+/// 备一个预热窗口（已备一个即不动）。先登记占位再建窗：建窗在途时它已「在册」，调和的幽灵回收
+/// 不会把它当残留窗口关掉；建窗失败清占位，下一次拖拽起手重试。
+/// 调用点须无手势在途（拖拽起手时的一次停顿可接受，落点是手势结束后的空档）。
+/// 建窗在放锁后执行：建窗路径（`seed_window_bounds` → `write_bounds`）会自行取布局锁。
+/// 建窗期间的预留不会被别人动：认领要求 `ready`（只在建窗落地后置真），故这份预留仍是自己的。
+fn ensure_prewarm(app: &AppHandle, bounds: WindowBounds) {
+    let state = app.state::<LayoutState>();
+    let id = nanoid::nanoid!();
+    {
+        let Ok(mut inner) = state.inner.lock() else {
+            eprintln!("[layout] 布局状态锁已损坏，放弃预热窗口");
+            return;
+        };
+        // 复核：并发调用（拖拽起手与落点收尾）已在建的那一个就是备用窗口
+        if inner.prewarm.is_some() {
+            return;
+        }
+        inner.prewarm = Some(PrewarmWindow { id: id.clone(), ready: false });
+    }
+    let label = format!("{PANEL_LABEL_PREFIX}{id}");
+    crate::commands::windows::create_panel_window_internal(app, &label, PREWARM_TITLE, &bounds, false);
+    let created = app.get_webview_window(&label).is_some();
+    let Ok(mut inner) = state.inner.lock() else { return };
+    if created {
+        if let Some(p) = inner.prewarm.as_mut() {
+            p.ready = true;
+        }
+    } else {
+        // 建窗失败：清占位，下一次拖拽起手重试
+        inner.prewarm = None;
+    }
+}
+
+/// 可用的预热窗口 id（建窗已落地才可用；在途或未备 = None，落点回退现场建窗）。
+fn ready_prewarm_id(inner: &LayoutInner) -> Option<String> {
+    inner.prewarm.as_ref().filter(|p| p.ready).map(|p| p.id.clone())
+}
+
+/// 撕裂条目建成后的收尾：条目建起来了（`created`）才消费该备用窗口，并返回需显窗的（id, 落点）。
+/// 标签已不在源面板/源窗口等未建成路径保留备用窗口给下一次；现场建窗（无预热窗口）返回 None，
+/// 显隐由建窗路径负责。
+fn adopt_prewarm(
+    inner: &mut LayoutInner,
+    prewarm: Option<String>,
+    created: bool,
+    bounds: WindowBounds,
+) -> Option<(String, WindowBounds)> {
+    let id = prewarm?;
+    if !created {
+        return None;
+    }
+    if inner.prewarm.as_ref().is_some_and(|p| p.id == id) {
+        inner.prewarm = None;
+    }
+    Some((id, bounds))
+}
+
 /// 拖拽更新（start=Some 创建会话，None 仅更新坐标）：更新会话 + 广播 + 重置看门狗。
 /// start=Some：刷新全部窗口 bounds（窗口可能在启动后移动过而事件/种子未覆盖，落点解析
 /// 的「光标在哪个窗口」判定需要最新 bounds）+ 建会话（含 loaded 检查 + 清空旧命中）。
@@ -169,6 +234,11 @@ pub async fn drag_update(
             seed_window_bounds(&app, &label);
         }
     }
+    // 拖拽起手即备一个预热撕裂窗口：建窗停顿与前端装载都落在手势期间，真撕裂时直接显窗。
+    // 已备一个不重复建（预热只在真正需要时付一次）；建窗在放锁后执行。
+    let start_bounds = start
+        .as_ref()
+        .map(|p| bounds_near(screen_x, screen_y, p.source_width, p.source_height));
     let (gen, broadcast) = {
         let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
         match start {
@@ -230,6 +300,9 @@ pub async fn drag_update(
     };
     if let Some(b) = broadcast {
         broadcast_drag(&app, &b);
+    }
+    if let Some(bounds) = start_bounds {
+        ensure_prewarm(&app, bounds);
     }
     arm_watchdog(&app, gen, Instant::now(), DRAG_IDLE_OUTSIDE_MS);
     Ok(())
@@ -385,7 +458,7 @@ async fn finish_drag(app: &AppHandle, screen_x: Option<f64>, screen_y: Option<f6
         return;
     };
     inner.drag_resolving = false;
-    resolve_drag(&mut inner, cancelled);
+    let adopted = resolve_drag(&mut inner, cancelled);
     // 取消路径不改布局，不置 dirty（避免无谓落盘）
     if !cancelled {
         inner.dirty = true;
@@ -398,6 +471,10 @@ async fn finish_drag(app: &AppHandle, screen_x: Option<f64>, screen_y: Option<f6
     reconcile_panel_windows(app);
     schedule_persist(app, &state);
     broadcast_layout(app, &ui);
+    // 认领的预热窗口：条目与广播都已就位，再搬位显窗——窗口出现时已带数据（先写条目再显窗）
+    if let Some((id, bounds)) = &adopted {
+        crate::layout_window::show_prewarmed_window(app, id, bounds);
+    }
     match resumed {
         Some((gen, Some(b))) => {
             broadcast_drag(app, &b);
@@ -414,6 +491,8 @@ async fn finish_drag(app: &AppHandle, screen_x: Option<f64>, screen_y: Option<f6
             });
         }
     }
+    // 备用窗口已消费（或本就缺）时补建下一个：此刻无手势在途，建窗停顿落在这里
+    ensure_prewarm(app, adopted.map(|(_, bounds)| bounds).unwrap_or_else(default_prewarm_bounds));
 }
 
 /// 事件驱动 settle：轮询光标所在窗口的命中条目相对广播前快照的变化（新上报/移除），
@@ -586,27 +665,32 @@ fn decide_drop_ops(
 /// 主窗口面板命中（center/tab/边缘分割）/ 撕裂窗口命中（加标签或排序）/
 /// 窗外 = 撕裂建新窗。主窗口 chrome（无面板命中）= 取消。
 /// 决策由纯函数 `decide_drop_ops` 给出（可单测），本函数只负责执行。
-fn resolve_drag(inner: &mut LayoutInner, cancelled: bool) {
+/// 返回本次认领的预热窗口（id + 落点 bounds）：撕裂落点复用了预建窗口时非空，
+/// 调用方据此在条目落地后把它搬到落点并显窗（现场建窗的显隐由建窗路径负责）。
+fn resolve_drag(inner: &mut LayoutInner, cancelled: bool) -> Option<(String, WindowBounds)> {
     // 仅 finish_drag 调用且入口已守卫 drag 恒非 None（drag_resolving 保证并发唯一），
     // 内部信任：take 后直接解包
     let drag = inner.drag.take().unwrap();
     // 命中保留给本次落点解析（decide_drop_ops 读取）；此处清空会让解析恒拿空表而取消全部停靠。
     // 下次拖拽开始时由 drag_update(start=Some) 清空。
     if cancelled {
-        return;
+        return None;
     }
     let (x, y) = (drag.screen_x, drag.screen_y);
     let detached_ids: HashSet<String> = inner.ui.detached_windows.iter().map(|w| w.id.clone()).collect();
     match decide_drop_ops(&drag, &inner.drag_hits, &inner.window_bounds, &detached_ids) {
-        DropDecision::None => {}
+        DropDecision::None => None,
         DropDecision::MoveTabWithin { panel_id, to_index } => {
             apply_layout_op(&mut inner.ui, &LayoutOp::MoveTabWithin { panel_id, tab_id: drag.tab_id.clone(), to_index });
+            None
         }
         DropDecision::MoveTabBetween { from_panel_id, to_panel_id, index } => {
             apply_layout_op(&mut inner.ui, &LayoutOp::MoveTabBetween { from_panel_id, to_panel_id, tab_id: drag.tab_id.clone(), index });
+            None
         }
         DropDecision::DockIntoPanel { panel_id, index } => {
             apply_layout_op(&mut inner.ui, &LayoutOp::DockIntoPanel { panel_id, tab_id: drag.tab_id.clone(), index });
+            None
         }
         DropDecision::SplitPanelThenDock { panel_id, direction, position, dock } => {
             // 新面板 id 运行时生成：先分割出空面板，再按来源把标签移入
@@ -630,23 +714,24 @@ fn resolve_drag(inner: &mut LayoutInner, cancelled: bool) {
                     });
                 }
             }
+            None
         }
         DropDecision::DockIntoDetached { window_id, index } => {
             apply_layout_op(&mut inner.ui, &LayoutOp::DockIntoDetached { window_id, tab_id: drag.tab_id.clone(), index });
+            None
         }
         DropDecision::TearOff { panel_id } => {
-            apply_layout_op(&mut inner.ui, &LayoutOp::TearOff {
-                panel_id,
-                tab_id: drag.tab_id.clone(),
-                bounds: bounds_near(x, y, drag.source_width, drag.source_height),
-            });
+            let bounds = bounds_near(x, y, drag.source_width, drag.source_height);
+            // 有可用预热窗口就把它的 id 交给 op（条目建成后该窗口即被认领进模型）
+            let prewarm = ready_prewarm_id(inner);
+            let created = tear_off_from_panel(&mut inner.ui, &panel_id, &drag.tab_id, &bounds, prewarm.clone());
+            adopt_prewarm(inner, prewarm, created.is_some(), bounds)
         }
-        DropDecision::TearOffFromDetached { window_id } => {
-            apply_layout_op(&mut inner.ui, &LayoutOp::TearOffFromDetached {
-                window_id,
-                tab_id: drag.tab_id.clone(),
-                bounds: bounds_near(x, y, drag.source_width, drag.source_height),
-            });
+        DropDecision::TearOffFromDetached { window_id: source } => {
+            let bounds = bounds_near(x, y, drag.source_width, drag.source_height);
+            let prewarm = ready_prewarm_id(inner);
+            let created = tear_off_from_detached(&mut inner.ui, &source, &drag.tab_id, &bounds, prewarm.clone());
+            adopt_prewarm(inner, prewarm, created.is_some(), bounds)
         }
     }
 }
@@ -749,7 +834,9 @@ fn arm_watchdog(app: &AppHandle, gen: u64, started: Instant, wait_ms: u64) {
 mod tests {
     use super::*;
     use crate::layout::LayoutInner;
-    use crate::layout_model::{find_panel, AppUiState, TabItem, UI_STATE_SCHEMA, WorkspaceLayout};
+    use crate::layout_model::{
+        find_panel, AppUiState, DetachedWindow, TabItem, UI_STATE_SCHEMA, WorkspaceLayout,
+    };
     use crate::layout_model::LayoutNode;
 
     fn ui_with(tree: LayoutNode) -> AppUiState {
@@ -991,6 +1078,7 @@ mod tests {
             drag_resolving: false,
             pending_start: None,
             residence_backup: None,
+            prewarm: None,
         };
         resolve_drag(&mut inner, false);
         let p1 = find_panel(&active_layout(&inner.ui).tree, "p1").unwrap();
@@ -1000,10 +1088,85 @@ mod tests {
         assert!(inner.drag.is_none(), "解析后拖拽会话应被取走");
     }
 
+    // ---- 预热备用窗口（拖拽起手预建 → 落点认领）----
+
+    /// 认领只在建窗落地后发生：在途（ready = false）不可用且预留保留（留给后续落点复用）。
+    #[test]
+    fn ready_prewarm_requires_ready() {
+        let mut inner = inner_with_drag(1, 500.0, 300.0);
+        inner.prewarm = Some(PrewarmWindow { id: "w-pre".into(), ready: false });
+        assert!(ready_prewarm_id(&inner).is_none());
+        assert_eq!(inner.prewarm.as_ref().map(|p| p.id.as_str()), Some("w-pre"), "在途预留不得被消费");
+        if let Some(p) = inner.prewarm.as_mut() {
+            p.ready = true;
+        }
+        assert_eq!(ready_prewarm_id(&inner).as_deref(), Some("w-pre"));
+        // 未建成条目（created = false）不消费：备用窗口留给下一次
+        assert!(adopt_prewarm(&mut inner, Some("w-pre".into()), false, default_prewarm_bounds()).is_none());
+        assert!(inner.prewarm.is_some(), "条目未建不得消费备用窗口");
+        // 建成后才消费，并返回需显窗的（id, 落点）
+        let bounds = default_prewarm_bounds();
+        let adopted = adopt_prewarm(&mut inner, Some("w-pre".into()), true, bounds.clone());
+        assert_eq!(adopted, Some(("w-pre".to_string(), bounds)));
+        assert!(inner.prewarm.is_none(), "认领后预留被消费");
+        // 无预热窗口的现场建窗路径：不返回显窗目标
+        assert!(adopt_prewarm(&mut inner, None, true, default_prewarm_bounds()).is_none());
+    }
+
+    /// 窗外撕裂认领预热窗口：新条目 id = 预分配 id（窗口随即被认领进模型），
+    /// 并返回落点供调用方显窗（现场建窗的显隐由建窗路径负责）。
+    #[test]
+    fn resolve_drag_adopts_ready_prewarm() {
+        let mut inner = inner_with_drag(1, 3000.0, 2000.0);
+        inner.prewarm = Some(PrewarmWindow { id: "w-pre".into(), ready: true });
+        let adopted = resolve_drag(&mut inner, false);
+        assert_eq!(inner.ui.detached_windows.len(), 1);
+        assert_eq!(inner.ui.detached_windows[0].id, "w-pre");
+        let (id, bounds) = adopted.expect("认领预建窗口应返回落点用于显窗");
+        assert_eq!(id, "w-pre");
+        assert_eq!(inner.ui.detached_windows[0].bounds, bounds, "返回值应与条目 bounds 一致");
+        assert!(inner.prewarm.is_none(), "认领后备位置空（由收尾补建下一个）");
+    }
+
+    /// 预热在途（建窗未落地）时落点回退现场建窗：条目 id 现场生成，预留保留给下一次。
+    #[test]
+    fn resolve_drag_keeps_unready_prewarm_and_generates_id() {
+        let mut inner = inner_with_drag(1, 3000.0, 2000.0);
+        inner.prewarm = Some(PrewarmWindow { id: "w-pre".into(), ready: false });
+        let adopted = resolve_drag(&mut inner, false);
+        assert_eq!(inner.ui.detached_windows.len(), 1);
+        assert_ne!(inner.ui.detached_windows[0].id, "w-pre");
+        assert!(adopted.is_none(), "未认领时无需显窗");
+        assert_eq!(inner.prewarm.as_ref().map(|p| p.id.as_str()), Some("w-pre"), "在途预留不得被消费");
+    }
+
+    /// 撕裂窗口再撕裂同样认领预热窗口（来源 = 撕裂窗口的那条落点路径）。
+    #[test]
+    fn resolve_drag_adopts_prewarm_from_detached_source() {
+        let mut inner = inner_with_drag(1, 3000.0, 2000.0);
+        inner.drag = Some(drag("t-note", "note", "panel-w1", "w1", 3000.0, 2000.0));
+        inner.ui.detached_windows = vec![DetachedWindow {
+            id: "w1".into(),
+            tabs: vec![TabItem { id: "t-note".into(), view: "note".into(), locked: false }],
+            active_tab_id: Some("t-note".into()),
+            bounds: WindowBounds { x: 1000.0, y: 0.0, width: 300.0, height: 400.0, scale: 1.0 },
+            hidden: false,
+            restore_on_launch: true,
+            options: crate::layout_model::WindowOptions::default(),
+            pinned: false,
+        }];
+        inner.prewarm = Some(PrewarmWindow { id: "w-pre".into(), ready: true });
+        let adopted = resolve_drag(&mut inner, false);
+        // 源窗口拖空被移除，只剩认领出的新窗口
+        assert_eq!(inner.ui.detached_windows.len(), 1);
+        assert_eq!(inner.ui.detached_windows[0].id, "w-pre");
+        assert_eq!(inner.ui.detached_windows[0].tabs[0].id, "t-note");
+        assert_eq!(adopted.expect("认领预建窗口应返回落点").0, "w-pre");
+    }
+
     /// 撕裂新窗 bounds 尺寸 = 源面板尺寸（>0 用之）；未知（0）回退固定默认。
     #[test]
-    fn bounds_near_uses_source_size() {
-        // 显式源尺寸生效，位置按源尺寸居中于光标
+    fn bounds_near_uses_source_size() {        // 显式源尺寸生效，位置按源尺寸居中于光标
         let b = bounds_near(1000.0, 500.0, 360.0, 480.0);
         assert_eq!((b.width, b.height), (360.0, 480.0));
         assert_eq!(b.x, (1000.0_f64 - 180.0).round());
@@ -1041,6 +1204,7 @@ mod tests {
             drag_resolving: false,
             pending_start: None,
             residence_backup: None,
+            prewarm: None,
         };
         resolve_drag(&mut inner, false);
         assert_eq!(inner.ui.detached_windows.len(), 1);
@@ -1125,6 +1289,7 @@ mod tests {
             drag_resolving: false,
             pending_start: None,
             residence_backup: None,
+            prewarm: None,
         }
     }
 

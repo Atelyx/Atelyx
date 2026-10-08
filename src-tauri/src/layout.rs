@@ -14,8 +14,8 @@ use crate::layout_model::{
     group_move_tab, group_of, group_of_detached, group_remove_tab, group_set_tab_locked,
     group_set_tab_view, map_detached, map_panel, next_layout_name, next_scene_name,
     prune_empty_windows, regenerate_ids, set_active_tree, set_layout_sizes_op, sizes_valid_for,
-    split_children_count, split_panel_op, tear_off_from_panel_op, AppUiState, DetachedWindow,
-    LayoutOp, LayoutOpResult, Scene, UiStatePatch, MAX_RECENT_FILES,
+    split_children_count, split_panel_op, tear_off_from_detached, tear_off_from_panel,
+    AppUiState, DetachedWindow, LayoutOp, LayoutOpResult, Scene, UiStatePatch, MAX_RECENT_FILES,
     DEFAULT_SCENE_ID, HOME_LAYOUT_ID, WorkspaceLayout,
 };
 use crate::layout_persist::{broadcast_layout, persist_now, schedule_persist};
@@ -71,6 +71,18 @@ pub(crate) struct LayoutInner {
     /// hide_to_tray 整体置 hidden=true（镜像与 OS 实况一致，插件的显隐判定不失真），
     /// 恢复时按备份还原——唤起类隐藏窗口不随驻留补显。
     pub residence_backup: Option<std::collections::HashMap<String, bool>>,
+    /// 预热备用撕裂窗口（模型外；见 `PrewarmWindow`）。
+    pub prewarm: Option<PrewarmWindow>,
+}
+
+/// 拖拽期间预建的备用撕裂窗口（隐藏、且不在布局模型里）：撕裂落点直接复用它的 id 作为条目 id，
+/// 窗口随即被认领进模型；未用上就留作下次（再次拖拽起手不再付一次建窗停顿）。
+#[derive(Clone, Debug)]
+pub(crate) struct PrewarmWindow {
+    /// 预分配的窗口 id（label = `panel-<id>`）。
+    pub id: String,
+    /// 建窗是否已落地。建窗在途（false）时落点不认领，回退现场建窗——不赌一个可能还没建出来的窗口。
+    pub ready: bool,
 }
 
 impl LayoutState {
@@ -88,9 +100,21 @@ impl LayoutState {
                 drag_resolving: false,
                 pending_start: None,
                 residence_backup: None,
+                prewarm: None,
             }),
         }
     }
+}
+
+/// 预热备用窗口的 label（模型外的隐藏窗口）；无 = None。
+/// 托盘显隐与退出收尾按窗口枚举时必须放过它：它没有布局条目、也没有内容可落盘。
+pub(crate) fn prewarm_window_label(app: &AppHandle) -> Option<String> {
+    let state = app.try_state::<LayoutState>()?;
+    let inner = state.inner.lock().ok()?;
+    inner
+        .prewarm
+        .as_ref()
+        .map(|p| format!("{}{}", crate::layout_window::PANEL_LABEL_PREFIX, p.id))
 }
 
 // ===== 布局操作应用（唯一变更入口）=====
@@ -187,25 +211,10 @@ pub(crate) fn apply_layout_op(ui: &mut AppUiState, op: &LayoutOp) -> LayoutOpRes
             }
         }
         LayoutOp::TearOff { panel_id, tab_id, bounds } => {
-            let tree = active_layout(ui).tree;
-            if let Some((new_tree, tab)) = tear_off_from_panel_op(&tree, panel_id, tab_id) {
-                let win = DetachedWindow { id: nanoid::nanoid!(), tabs: vec![tab.clone()], active_tab_id: Some(tab.id.clone()), bounds: bounds.clone(), hidden: false, restore_on_launch: true, options: WindowOptions::default(), pinned: false };
-                set_active_tree(ui, new_tree);
-                ui.detached_windows.push(win.clone());
-                result.detached_window = Some(win);
-            }
+            result.detached_window = tear_off_from_panel(ui, panel_id, tab_id, bounds, None);
         }
         LayoutOp::TearOffFromDetached { window_id, tab_id, bounds } => {
-            if let Some((src, tab)) = find_tab_in_detached(&ui.detached_windows, tab_id) {
-                if src == *window_id {
-                    let win = DetachedWindow { id: nanoid::nanoid!(), tabs: vec![tab.clone()], active_tab_id: Some(tab.id.clone()), bounds: bounds.clone(), hidden: false, restore_on_launch: true, options: WindowOptions::default(), pinned: false };
-                    let next = map_detached(&ui.detached_windows, window_id, &|w| apply_tab_group_detached(w, group_remove_tab(&group_of_detached(w), tab_id)));
-                    let mut next = prune_empty_windows(next);
-                    next.push(win.clone());
-                    ui.detached_windows = next;
-                    result.detached_window = Some(win);
-                }
-            }
+            result.detached_window = tear_off_from_detached(ui, window_id, tab_id, bounds, None);
         }
         LayoutOp::DockIntoPanel { panel_id, tab_id, index } => {
             if let Some((src, tab)) = find_tab_in_detached(&ui.detached_windows, tab_id) {

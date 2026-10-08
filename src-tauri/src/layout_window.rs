@@ -73,6 +73,14 @@ fn write_bounds(
         eprintln!("[layout] 布局状态锁已损坏，放弃写入窗口 bounds");
         return;
     };
+    // 预热备用窗口不进注册表：它是隐藏的模型外窗口，注册进去会参与拖拽命中判定——
+    // 它建在源窗口位置且尺寸取源面板尺寸，光标所在窗口按面积取小者时会把它的落点抢走
+    // （在撕裂窗口内排序标签被误判成再撕裂）。认领进模型后（prewarm 已消费）照常注册。
+    if let Some(prewarm) = inner.prewarm.as_ref() {
+        if label.strip_prefix(PANEL_LABEL_PREFIX) == Some(prewarm.id.as_str()) {
+            return;
+        }
+    };
     let entry = inner
         .window_bounds
         .entry(label.to_string())
@@ -131,12 +139,22 @@ pub(crate) fn title_of_tabs(tabs: &[crate::layout_model::TabItem], active_tab_id
     active.map(|t| t.view.clone()).unwrap_or_else(|| "面板".to_string())
 }
 
+/// 布局模型的读取快照（同一次加锁内取：条目集合与预热窗口状态必须同代）。
+struct ModelSnapshot {
+    ui: AppUiState,
+    /// 预热备用窗口 label（模型外的隐藏窗口；幽灵回收必须放过它）。
+    prewarm: Option<String>,
+}
+
 /// 读当前布局模型快照。锁只在本函数内持有：建窗路径（`seed_window_bounds` → `write_bounds`）
 /// 会在同线程二次取同一把非可重入锁，调用方持锁期间触发建窗即自死锁。关窗与窗口事件是否同线程
 /// 同步派发无保证，故「建窗/关窗/让主事件循环回头」的动作一律在放锁后执行。
-fn ui_snapshot(state: &LayoutState) -> Option<AppUiState> {
+fn ui_snapshot(state: &LayoutState) -> Option<ModelSnapshot> {
     let inner = state.inner.lock().ok()?;
-    Some(inner.ui.clone())
+    Some(ModelSnapshot {
+        ui: inner.ui.clone(),
+        prewarm: inner.prewarm.as_ref().map(|p| format!("{PANEL_LABEL_PREFIX}{}", p.id)),
+    })
 }
 
 /// 调和串行化锁：布局模型锁在窗口动作期间已放锁，故「模型快照 + OS 窗口集合」的成对读取不再互斥——
@@ -160,10 +178,11 @@ pub(crate) fn reconcile_panel_windows(app: &AppHandle) {
 /// 单轮调和（只在 `reconcile_panel_windows` 的串行化保护内执行）。
 fn reconcile_windows_once(app: &AppHandle) {
     let state = app.state::<LayoutState>();
-    let Some(ui) = ui_snapshot(&state) else {
+    let Some(snapshot) = ui_snapshot(&state) else {
         eprintln!("[layout] 布局状态锁已损坏，放弃窗口调和");
         return;
     };
+    let ui = &snapshot.ui;
     let existing: HashSet<String> = app.webview_windows().keys().cloned().collect();
     let wanted: HashSet<String> = ui
         .detached_windows
@@ -195,12 +214,39 @@ fn reconcile_windows_once(app: &AppHandle) {
             }
         }
     }
-    // 回收幽灵（防落点解析把它当停靠目标——条目已移除时标签无处可去会丢失）
+    // 回收幽灵（防落点解析把它当停靠目标——条目已移除时标签无处可去会丢失）；
+    // 预热备用窗口是模型外的隐藏窗口，不在回收范围内（由建窗路径自己收尾）
     for label in &existing {
-        if label.starts_with(PANEL_LABEL_PREFIX) && !wanted.contains(label) {
+        if is_ghost_window(label, &wanted, snapshot.prewarm.as_deref()) {
             crate::commands::windows::close_panel_window_internal(app, label.trim_start_matches(PANEL_LABEL_PREFIX));
         }
     }
+}
+
+/// 幽灵窗口判定：撕裂窗口但模型里没有对应条目，且不是预热备用窗口（后者本就在模型外）。
+fn is_ghost_window(label: &str, wanted: &HashSet<String>, prewarm: Option<&str>) -> bool {
+    label.starts_with(PANEL_LABEL_PREFIX) && !wanted.contains(label) && prewarm != Some(label)
+}
+
+/// 认领预热窗口：搬到落点 bounds 并显窗（模型条目与广播都已就位，标题由前端按条目刷新）。
+/// 窗口不存在（预建失败/已被回收）= 无操作——调和已按条目补建过窗口。
+pub(crate) fn show_prewarmed_window(app: &AppHandle, window_id: &str, bounds: &WindowBounds) {
+    let label = format!("{PANEL_LABEL_PREFIX}{window_id}");
+    let Some(win) = app.get_webview_window(&label) else { return };
+    let _ = win.set_size(tauri::LogicalSize::new(bounds.width, bounds.height));
+    let _ = win.set_position(tauri::LogicalPosition::new(bounds.x, bounds.y));
+    // 驻留托盘期间不显窗（与建窗路径同口径），显示由 show_all_windows 补
+    let hidden = app
+        .try_state::<crate::tray::UiHidden>()
+        .map(|flag| flag.get())
+        .unwrap_or(false);
+    if !hidden {
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
+    // 建窗时种子化的是预热位置，且预热窗口刻意不进注册表：搬位后重新种子化，
+    // 拖拽命中与落点解析才拿到真实几何
+    seed_window_bounds(app, &label);
 }
 
 // ===== 单元测试 =====
@@ -240,5 +286,20 @@ mod tests {
         assert_eq!(ui.detached_windows[0].bounds, b);
         // 撕裂窗口 label 但条目不存在（幽灵）→ false
         assert!(!sync_detached_bounds(&mut ui, "panel-ghost", &b));
+    }
+
+    /// 幽灵判定：模型无条目才回收；预热备用窗口（模型外）必须放过——关掉它等于把下一次撕裂的
+    /// 预热窗口提前作废（建窗停顿又回到拖拽手势里）。
+    #[test]
+    fn ghost_window_excludes_prewarm_label() {
+        let wanted: HashSet<String> = HashSet::from(["panel-w1".to_string()]);
+        assert!(!is_ghost_window("panel-w1", &wanted, None), "有条目不是幽灵");
+        assert!(is_ghost_window("panel-ghost", &wanted, None), "无条目即幽灵");
+        assert!(!is_ghost_window("main", &wanted, None), "主窗口不是撕裂窗口");
+        assert!(
+            !is_ghost_window("panel-warm", &wanted, Some("panel-warm")),
+            "预热备用窗口不得被回收"
+        );
+        assert!(is_ghost_window("panel-warm", &wanted, Some("panel-other")));
     }
 }
