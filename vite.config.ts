@@ -31,6 +31,11 @@ function bootSplashPlugin(): Plugin {
 // https://vitejs.dev/config/
 export default defineConfig({
   plugins: [react(), bootSplashPlugin()],
+  define: {
+    // dev 回退用源码资源目录（tauri dev 不把 bundle.resources 放到二进制旁）；打包版同样注入，
+    // 但该路径在用户机器不存在，探测失败自然跳过（services/bundledRuntime.ts 消费）。
+    __SOURCE_RESOURCE_DIR__: JSON.stringify(path.resolve(__dirname, "src-tauri", "resources")),
+  },
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "src"),

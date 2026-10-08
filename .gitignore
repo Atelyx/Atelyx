@@ -19,6 +19,10 @@ src-tauri/gen/schemas/
 src-tauri/resources/esbuild/*
 !src-tauri/resources/esbuild/.gitkeep
 
+# 随应用分发的脚本运行时（不入库；构建前由 scripts/sync-node-runtime.mjs 从 nodejs.org 官方 dist 下载锁定版本）
+src-tauri/resources/runtime/*
+!src-tauri/resources/runtime/.gitkeep
+
 # Editor
 .vscode/*
 !.vscode/extensions.json

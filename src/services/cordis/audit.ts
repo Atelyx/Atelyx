@@ -75,6 +75,8 @@ function sanitizeUrl(raw: unknown): string {
 /** 调用摘要：只记形状与规模；返回 undefined = 该调用不进审计。 */
 function summarizeCall(service: string, method: string, args: unknown[]): string | undefined {
   if (service === "process") {
+    // 指路查询（bundledRuntime）：只读宿主资源元数据，不启动任何进程，不构成调用形态。
+    if (method === "bundledRuntime") return undefined;
     const opts = args[0] as ProcessExecOptions | undefined;
     const program = typeof opts?.command === "string" ? opts.command : "未知程序";
     const count = Array.isArray(opts?.args) ? opts.args.length : 0;

@@ -45,7 +45,7 @@
         "languages": ["SimpChinese"]
       }
     },
-    "resources": ["resources/esbuild"]
+    "resources": ["resources/esbuild", "resources/runtime"]
   },
   "plugins": {
     "shell": {

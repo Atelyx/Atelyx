@@ -248,6 +248,14 @@ export interface AppService {
   openPage(pageId: string): Promise<boolean>;
 }
 
+/** 随应用分发的脚本运行时信息（bundledRuntime 查询结果）。 */
+export interface BundledRuntimeInfo {
+  /** 可执行绝对路径（可直接作为 exec/spawn 的 command）。 */
+  path: string;
+  /** 运行时版本（Node 版本号）。 */
+  version: string;
+}
+
 /** 外部程序执行服务（敏感：程序来源全部放行——裸名走 PATH 解析、路径形态按给定值使用，等价任意命令执行）。
  *  插件启动的进程按调用方记账：插件停用/卸载时由宿主统一结束，应用退出时也一并结束——长驻服务
  *  不该活过插件本身，更不该活过应用（被强杀时靠 Windows 作业对象兜底，Unix 该路径不保证）。 */
@@ -258,6 +266,10 @@ export interface ProcessService {
    *  启动失败 reject（同时经 handlers.error 上报同因错误）；此后错误只走 handlers.error。
    *  进程创建那一刻即纳入退出清理范围：应用退出（含被强杀，Windows）时随宿主一起结束。 */
   spawn(opts: ProcessExecOptions, handlers?: ProcessStreamHandlers): Promise<ProcessHandle>;
+  /** 查询宿主随应用分发的脚本运行时（当前 = Node）：插件的「自带实现」用它取得可执行路径后
+   *  经 exec/spawn 启动。未分发运行时的平台（安卓等）或资源缺失返回 null——插件据此走自己的
+   *  降级口径，宿主不做隐式兜底。 */
+  bundledRuntime(): Promise<BundledRuntimeInfo | null>;
 }
 
 /** 仓库文件读写服务（读写全开；写方法语义与 AI 文件工具一致；失败返回 { ok:false, summary } 不抛断）。 */

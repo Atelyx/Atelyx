@@ -8,6 +8,7 @@ import { Context, symbols } from "@atelyx/cordis";
 import { getAppVersion } from "@/services/app";
 import { detectPlatform } from "@/utils/pluginHost";
 import { runProcess, killProcessTree, writeProcessStdin, endProcessStdin } from "@/services/shell";
+import { resolveBundledRuntime } from "@/services/bundledRuntime";
 import { pickDirectory, pickFile, saveFile } from "@/services/dialog";
 import { copyImageToClipboard, readClipboardText, writeClipboardText } from "@/services/clipboard";
 import { closeWindow, minimizeWindow, toggleMaximizeWindow } from "@/services/window";
@@ -452,6 +453,13 @@ export function createKernel(): Kernel {
           untrackPluginProcess(ctx, pluginId, pid);
         },
       }));
+    },
+    bundledRuntime(this: ProcessServiceInstance) {
+      // 指路面：未分发运行时的平台返回 null（可探测降级），与 exec/spawn 的「调用即拒绝」不同——
+      // 探测本身要能成功，插件才谈得上按自己的口径降级。归属校验与进程记账同源（非插件上下文拒绝）。
+      if (!PROCESS_EXECUTION) return Promise.resolve(null);
+      requireCallerPluginId(this.ctx);
+      return resolveBundledRuntime();
     },
   };
   Object.defineProperty(process, symbols.tracker, { value: { property: "ctx" } });
