@@ -70,6 +70,8 @@ const h = vi.hoisted(() => {
     probes: 0,
     loads: 0,
     deltas: [] as Array<Record<string, unknown>>,
+    /** 提交命令注入失败（验证前端退避重试；`false` = 正常应用）。 */
+    failCommit: false,
   };
   let intentSeq = 0;
   let createValue: unknown = null;
@@ -91,6 +93,7 @@ const h = vi.hoisted(() => {
     rust.probes = 0;
     rust.loads = 0;
     rust.deltas = [];
+    rust.failCommit = false;
     intentSeq = 0;
     createValue = null;
   }
@@ -319,6 +322,7 @@ const h = vi.hoisted(() => {
   /** 执行体提交：批次按契约顺序应用 + 差分广播。 */
   function commitCmd(args: { requestId: string; expectedRoot: string; batch: Record<string, unknown> }): Record<string, unknown> {
     rust.commits.push(args);
+    if (rust.failCommit) throw new Error("提交通道暂时不可用");
     const acc = newAcc();
     const b = args.batch as {
       created: Array<WireSession>;
@@ -614,6 +618,31 @@ describe("Rust 真源模式：薄客户端与执行体契约", () => {
         ["assistant", "答"],
       ]);
       expect(sessionMessages(main, sid!).map((m) => m.content)).toEqual(["问", "答"]);
+    });
+  });
+
+  it("提交失败按有界退避重试：逐档拉长，达上限后放弃（不无限重试）", async () => {
+    h.rust.failCommit = true;
+    await bootMain();
+    await withRuntime(async () => {
+      await main.useChatPanelStore.getState().send("问");
+      // 节流窗口后首次提交
+      await vi.advanceTimersByTimeAsync(100);
+      expect(h.rust.commits.length).toBe(1);
+      // 第 1 档 500ms → 第 2 次尝试
+      await vi.advanceTimersByTimeAsync(500);
+      expect(h.rust.commits.length).toBe(2);
+      // 再 500ms 不产生第 3 次（间隔已按退避拉长到 1s；固定间隔重试会在此失败）
+      await vi.advanceTimersByTimeAsync(500);
+      expect(h.rust.commits.length).toBe(2);
+      await vi.advanceTimersByTimeAsync(500);
+      expect(h.rust.commits.length).toBe(3);
+      // 走完余下档位：共 1 次首发 + 5 档退避 = 6 次尝试后放弃
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(h.rust.commits.length).toBe(6);
+      // 链条已断：继续推进时间不再有新的尝试
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(h.rust.commits.length).toBe(6);
     });
   });
 

@@ -895,6 +895,7 @@ function flushExecutorCommits(): void {
   // 模式退离后在途队列整体丢弃：批次基于旧模式基线，提交会污染退离前的真源仓库
   if (!rustTruthEnabled) {
     executorQueue = [];
+    executorCommitRetries = 0;
     return;
   }
   if (executorQueue.length === 0 || !executorHandlers) return;
@@ -907,14 +908,21 @@ function flushExecutorCommits(): void {
   }
   executorCommitIds.set(requestId, now);
   // 落盘重试链在 Rust 真源侧（防抖 + 退避）；提交通道失败由前端按退避重试——「仓库已切换」
-  // 除外（切仓进行中，旧变更随旧仓丢弃，与事件线归属校验同语义）
-  void invoke("chat_container_commit", { requestId, expectedRoot: rustCurrentRoot, batch }).catch((e) => {
-    const message = e instanceof Error ? e.message : String(e);
-    if (message.includes("仓库已切换")) return;
-    console.error("会话容器变更提交失败，将重试", e);
-    scheduleExecutorCommitRetry(batch);
-  });
-  executorCommitRetries = 0;
+  // 除外（切仓进行中，旧变更随旧仓丢弃，与事件线归属校验同语义）。计数只在链条真正结束时归零：
+  // 若在发出前无条件归零，重试自己的 flush 又会清零，退避序列永远停在第 0 档（等同固定间隔无限重试）。
+  void invoke("chat_container_commit", { requestId, expectedRoot: rustCurrentRoot, batch })
+    .then(() => {
+      executorCommitRetries = 0;
+    })
+    .catch((e) => {
+      const message = e instanceof Error ? e.message : String(e);
+      if (message.includes("仓库已切换")) {
+        executorCommitRetries = 0;
+        return;
+      }
+      console.error("会话容器变更提交失败，将重试", e);
+      scheduleExecutorCommitRetry(batch);
+    });
 }
 
 /** 提交通道失败的退避重试（有界）：批次重新入队错峰再交；连续失败达上限放弃（真源侧落盘重试链不受影响）。 */
