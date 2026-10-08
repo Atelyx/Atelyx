@@ -1,6 +1,6 @@
 /**
  * 会话容器跨窗口契约测试（宿主-镜像模型）：宿主 = 主窗口单写者（独占写盘链），镜像窗口 = 薄客户端
- * （boot 拉 seq 戳快照 + op 转发 + 增量折叠）。覆盖 AGENTS §2.4 时序矩阵：写盘在途 + 用户继续输入 +
+ * （boot 拉 seq 戳快照 + op 转发 + 增量折叠）。覆盖跨窗口写盘时序矩阵：写盘在途 + 用户继续输入 +
  * 广播到达的收敛性；核心复现 = 镜像流式全量重写不得抹掉宿主已落盘的并发追加。
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
@@ -219,7 +219,7 @@ function diskMessageIds(file: string): string[] {
     .map((line) => (JSON.parse(line) as { id: string }).id);
 }
 
-describe("跨窗口并发写同一会话（§2.4 时序矩阵）", () => {
+describe("跨窗口并发写同一会话（写盘时序矩阵）", () => {
   it("核心复现：镜像基于陈旧副本的截断写盘不得绕过宿主真源（宿主已落盘消息不得被静默抹掉）", async () => {
     await bootHostInVault("v1");
     const { id } = await host.useChatPanelStore.getState().importSession([

@@ -198,8 +198,9 @@ export function forwardCollabInbound(frame: CollabRelayDown): void {
 }
 
 /** 宿主自身发出的 plugin-msg 回环（服务端不回放发送者；撕裂窗口插件订阅经此可达）。
- *  域帧不回环（内容视图全局唯一渲染，其他窗口无消费方）。 */
-export function loopbackPluginMsg(channel: string, payload: unknown, targetPeerId?: number): void {
+ *  域帧不回环（内容视图全局唯一渲染，其他窗口无消费方）；同应用窗口不在彼此 peers 里，
+ *  故回环恒为广播——定向单播对同应用窗口不生效（见 sendPluginMessage 的语义损失说明）。 */
+export function loopbackPluginMsg(channel: string, payload: unknown): void {
   if (!hostDeps) return;
   const senderPeerId = hostDeps.myPeerId();
   if (senderPeerId === null) return; // 未连接无发送方身份
@@ -209,7 +210,6 @@ export function loopbackPluginMsg(channel: string, payload: unknown, targetPeerI
     channel: "plugin-msg" satisfies CollabChannel,
     file: channel,
     payload: encodePayload(payload),
-    ...(targetPeerId !== undefined ? { targetPeerId } : {}),
   } satisfies CollabRelayDown);
 }
 

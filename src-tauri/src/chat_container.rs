@@ -249,9 +249,6 @@ pub struct PatchEntry {
     pub content: Option<String>,
     #[serde(default)]
     pub steps: Option<Value>,
-    /// 非空才写入（失败占位语义：`m.content || "[错误] …"`——流式已有内容不被错误文案回退）。
-    #[serde(default)]
-    pub content_if_empty: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -288,12 +285,6 @@ pub struct CommitBatch {
     pub truncations: Vec<TruncateEntry>,
     #[serde(default)]
     pub status: StatusPatch,
-    /// 需要重写消息 .jsonl 的会话（写链脏标记）。
-    #[serde(default)]
-    pub dirty_messages: Vec<String>,
-    /// 需要重写元数据侧车的会话。
-    #[serde(default)]
-    pub dirty_meta: Vec<String>,
 }
 
 // ===== 真源内部状态 =====
@@ -871,7 +862,6 @@ impl ChatContainerState {
                     session.messages.truncate(keep);
                     session.updated_at = now_ms();
                     acc.truncated(session_id, keep);
-                    acc.meta_updated_at(session_id, session.updated_at);
                     inner.mark_session_messages(session_id);
                 }
                 Value::Null
@@ -1030,17 +1020,6 @@ impl ChatContainerState {
                 message["steps"] = steps.clone();
                 changed = true;
             }
-            if let Some(fallback) = &patch.content_if_empty {
-                let empty = message
-                    .get("content")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .is_empty();
-                if empty {
-                    message["content"] = json!(fallback);
-                    changed = true;
-                }
-            }
             if changed {
                 inner.patch_revs.insert(key, patch.rev);
                 let message = &inner.sessions[idx].messages[mi];
@@ -1058,7 +1037,6 @@ impl ChatContainerState {
             session.messages.truncate(trunc.keep_count);
             session.updated_at = now_ms();
             acc.truncated(&trunc.session_id, trunc.keep_count);
-            acc.meta_updated_at(&trunc.session_id, session.updated_at);
             inner.mark_session_messages(&trunc.session_id);
         }
         let mut status = json!({});
@@ -1072,16 +1050,6 @@ impl ChatContainerState {
                 .map(|id| json!(id))
                 .unwrap_or(Value::Null);
             inner.compacting = compacting.clone();
-        }
-        for id in &batch.dirty_messages {
-            if inner.session(id).is_some() {
-                inner.mark_session_messages(id);
-            }
-        }
-        for id in &batch.dirty_meta {
-            if inner.session(id).is_some() {
-                inner.mark_session_meta(id);
-            }
         }
         acc.status(status);
         let fragments = acc.finish(&inner);
@@ -1349,14 +1317,7 @@ struct DiffAccumulator {
     appended: Vec<(String, Vec<Value>)>,
     patched: Vec<(String, Value)>,
     truncated: Vec<(String, usize)>,
-    meta_only: Vec<(String, MetaPatchKind)>,
     status: Option<Value>,
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum MetaPatchKind {
-    Fields,
-    UpdatedAtOnly,
 }
 
 impl DiffAccumulator {
@@ -1371,15 +1332,10 @@ impl DiffAccumulator {
     }
 
     fn meta_patch(&mut self, id: &str, _patch: &MetaPatch) {
-        if !self.meta_only.iter().any(|(x, _)| x == id) {
+        // 同一会话在一个提交里既新建又补元数据（批次合并所致）时只记一次
+        if !self.touched.iter().any(|x| x == id) {
             self.touched.push(id.to_string());
-            self.meta_only.push((id.to_string(), MetaPatchKind::Fields));
         }
-    }
-
-    fn meta_updated_at(&mut self, _id: &str, _at: i64) {
-        // updatedAt 单独变化不产出片段（「最近使用」置顶不进容器广播）；
-        // 与消息/元数据变更同批时由后者携带的完整片段覆盖
     }
 
     fn appended(&mut self, id: &str, messages: &[Value]) {
@@ -1417,17 +1373,6 @@ impl DiffAccumulator {
         let mut meta_session_ids = Vec::new();
         for id in &self.touched {
             let Some(session) = inner.session(id) else { continue };
-            let meta_only = self
-                .meta_only
-                .iter()
-                .any(|(x, kind)| x == id && *kind == MetaPatchKind::UpdatedAtOnly);
-            if meta_only
-                && self.appended.iter().all(|(x, _)| x != id)
-                && self.patched.iter().all(|(x, _)| x != id)
-                && self.truncated.iter().all(|(x, _)| x != id)
-            {
-                continue; // updatedAt 单独变化不进广播
-            }
             metas.push(meta_fragment_full(session));
             meta_session_ids.push(id.clone());
         }
@@ -2403,19 +2348,13 @@ mod tests {
             updated_at: 999,
             ..session("s1", None, vec![msg("m1", "user", "a")])
         }];
-        let state = state_with(after.clone());
-        let inner = state.lock();
-        let mut acc = DiffAccumulator::default();
-        acc.meta_updated_at("s1", 999);
-        let got = acc.finish(&inner);
-        let want = diff_views(
+        let got = diff_views(
             &before,
             &owned_status("local:x"),
             &after,
             &NeutralStatus::default().view("local:x"),
         );
-        assert!(fragments_empty(&got), "acc 不该产出片段");
-        assert!(fragments_empty(&want), "差分不该产出片段");
+        assert!(fragments_empty(&got), "updatedAt 单独变化不该产出片段");
     }
 
     // ===== 写链 =====
@@ -2586,10 +2525,10 @@ mod tests {
         assert!(tmp.join(&chat_message_file("s1")).exists());
     }
 
-    // ===== commit：rev 门控 / content_if_empty =====
+    // ===== commit：rev 门控 =====
 
     #[test]
-    fn commit_rev_gating_and_content_if_empty() {
+    fn commit_rev_gating() {
         let tmp = TempDir::new("chatc-commit");
         let state = ChatContainerState::new(test_config());
         state.load(&tmp).unwrap();
@@ -2629,7 +2568,6 @@ mod tests {
                     rev: 5,
                     content: Some("hello".into()),
                     steps: None,
-                    content_if_empty: None,
                 }),
             )
             .unwrap();
@@ -2645,23 +2583,6 @@ mod tests {
                     rev: 3,
                     content: Some("stale".into()),
                     steps: None,
-                    content_if_empty: None,
-                }),
-            )
-            .unwrap();
-        // content_if_empty：内容非空不回填
-        state
-            .commit(
-                "r3",
-                "main",
-                &key,
-                batch(PatchEntry {
-                    session_id: "s1".into(),
-                    message_id: "m1".into(),
-                    rev: 6,
-                    content: None,
-                    steps: None,
-                    content_if_empty: Some("fallback".into()),
                 }),
             )
             .unwrap();
@@ -2671,28 +2592,6 @@ mod tests {
             .map(|s| s["messages"][0]["content"].clone())
             .unwrap();
         assert_eq!(content, json!("hello"));
-        // 空内容消息被回填
-        state
-            .commit(
-                "r4",
-                "main",
-                &key,
-                batch(PatchEntry {
-                    session_id: "s1".into(),
-                    message_id: "m1".into(),
-                    rev: 7,
-                    content: Some(String::new()),
-                    steps: None,
-                    content_if_empty: Some("fallback".into()),
-                }),
-            )
-            .unwrap();
-        let content = state.snapshot().sessions
-            .into_iter()
-            .find(|s| s["id"] == json!("s1"))
-            .map(|s| s["messages"][0]["content"].clone())
-            .unwrap();
-        assert_eq!(content, json!("fallback"));
     }
 
     // ===== 意图往返 =====

@@ -169,7 +169,7 @@ export function collabSendSink(
  *  宿主发出后回环广播撕裂窗口（服务端不回放发送者）；撕裂窗口发出经宿主中继回环（proxy 传输）。 */
 export function sendPluginMessage(channel: string, payload: unknown, to?: number): boolean {
   const ok = sendTransportMessage("plugin-msg", channel, payload, to);
-  if (ok && isCollabHost()) loopbackPluginMsg(channel, payload, to);
+  if (ok && isCollabHost()) loopbackPluginMsg(channel, payload);
   return ok;
 }
 

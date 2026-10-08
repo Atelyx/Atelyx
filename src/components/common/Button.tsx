@@ -193,8 +193,7 @@ export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(functio
 
 /**
  * 正方形边长（与 SIZE_CLASS 的高度档一致），并带上该档圆角。
- * 圆角写在这里而非由调用点补：迁移前的裸 `<button>` 普遍带 `rounded`/`rounded-sm`，
- * 缺了这层圆角会让 hover 底色变成硬直角方块，与所在面板的圆角风格不一致。
+ * 圆角写在这里而不由调用点补：缺了这层圆角，hover 底色会成为硬直角方块，与所在面板的圆角风格不一致。
  */
 const SQUARE_SIZE_CLASS: Record<ButtonSize, string> = {
   "2xs": "w-4 h-4 rounded-[var(--radius-xs)]",
