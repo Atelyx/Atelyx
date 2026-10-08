@@ -46,8 +46,6 @@ vi.mock("@tauri-apps/api/core", () => ({
         return { config: h.state.globalConfig, corruptBackup: null };
       case "patch_global_config":
         return { config: h.state.globalConfig, corruptBackup: null };
-      case "write_global_config":
-        return null;
       case "get_api_key":
         return h.state.keychain.get(`${String(a.vaultRoot)}:${String(a.providerId)}`) ?? "";
       case "set_api_key":

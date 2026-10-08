@@ -2,7 +2,7 @@
  * 未入库附件（临时区）service（对应 Rust `commands/temp_attachment.rs`）：字节落仓库内隐藏目录，
  * 实体只存**仓库相对路径**引用；引用形态判定（`isTempAttachmentRef`）在 `utils/tempAttachmentPath`。
  */
-import { TEMP_ATTACHMENT_DIR, type TempComponent } from "@/utils/tempAttachmentPath";
+import type { TempComponent } from "@/utils/tempAttachmentPath";
 import { bytesToBase64, dataUrlToText } from "@/utils/base64";
 import { readAttachmentDataUrl } from "@/services/vault";
 import { getActiveContentBackend } from "@/services/content/factory";
@@ -40,8 +40,6 @@ export async function readAttachmentRef(
   if (kind === "image") return dataUrl;
   return dataUrlToText(dataUrl);
 }
-
-export { dataUrlToText };
 
 /**
  * 读文本类附件内容，区分两种失败：
@@ -118,7 +116,3 @@ export function createMessageAttachmentReader(
     }
   };
 }
-
-/** 临时区根目录（`.atelyx/temp`，放仓库内而非应用数据目录）：读回复用仓库附件读命令（`safe_join` 自带越界校验）、
- * 回收天然按仓库归属（不跨仓库误删）、与表格图片同处 temp 体系而文件树天然跳过。 */
-export { TEMP_ATTACHMENT_DIR };

@@ -194,7 +194,6 @@ pub fn run() {
             commands::table::save_image_to_downloads,
             // 全局配置（global.json，最近仓库列表等）
             commands::global::read_global_config,
-            commands::global::write_global_config,
             // 全局配置补丁（锁内读-合并-原子写，跨窗口并发不互相覆盖）
             commands::global::patch_global_config,
             // 本机设备名（协作身份默认值）

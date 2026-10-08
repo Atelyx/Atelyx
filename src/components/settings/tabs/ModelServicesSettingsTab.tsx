@@ -23,12 +23,8 @@ export function ModelServicesSettingsTab() {
   const setAutoNamingModel = useSettingsStore((s) => s.setAutoNamingModel);
 
   const modelEntries: ModelChoiceEntry[] = buildModelEntries(providers);
-  /** 默认模型当前值编码：优先固定供应商（modelProviderId），旧配置按 model 名反查首个命中；无默认 = 空串。 */
-  const defaultModelKey = defaultModelKeyFor(
-    modelEntries,
-    vaultConfig?.model,
-    vaultConfig?.modelProviderId,
-  );
+  /** 默认模型当前值编码：供应商（modelProviderId）+ model 名；无默认 = 空串。 */
+  const defaultModelKey = defaultModelKeyFor(vaultConfig?.model, vaultConfig?.modelProviderId);
   /** 默认模型下拉选项：先「不指定」，再接存活模型项（含存量值兼容的「已失效」前置项）。 */
   const defaultModelChoices: DropdownOption[] = [
     { value: "", label: "不指定" },

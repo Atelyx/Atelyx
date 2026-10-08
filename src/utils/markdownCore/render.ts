@@ -257,8 +257,9 @@ function renderBlockSource(block: { from: number; to: number; kind: string }, so
 }
 
 /**
- * 编辑形态渲染：与只读形态共用同一套块渲染器，另加一层默认隐藏的源码标记
+ * 编辑形态渲染（整篇）：与只读形态共用同一套块渲染器，另加一层默认隐藏的源码标记
  * （只有富装饰块整块回显源码），因此「预览 ⇄ 编辑」视觉一致、不产生两套样式。
+ * 编辑面走 {@link renderMarkdownEditChunks} 做增量替换，整篇入口供契约测试与一次性渲染用。
  */
 export function renderMarkdownEditHtml(source: string, options: EditRenderOptions = {}): string {
   return joinChunks(renderMarkdownEditChunks(source, options).chunks);

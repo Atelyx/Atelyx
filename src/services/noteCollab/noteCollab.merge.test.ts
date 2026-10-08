@@ -4,7 +4,7 @@
  */
 import { describe, it, expect } from "vitest";
 import * as Y from "yjs";
-import { baselineSeedUpdate } from "./noteDoc";
+import { baselineSeedUpdate } from "./notePeer";
 
 const textOf = (doc: Y.Doc) => doc.getText("text").toString();
 const countOf = (text: string, needle: string) => text.split(needle).length - 1;

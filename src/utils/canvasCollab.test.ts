@@ -9,9 +9,9 @@
 import { describe, it, expect } from "vitest";
 import type { Node } from "@xyflow/react";
 import type { CanvasEdge, Message } from "@/types";
+import { computeCollabLockOwner as computeLockOwner } from "@/services/collab/locks";
 import {
   computeCanvasCollabPatch,
-  computeLockOwner,
   deserializeNodeForCollab,
   diffCanvasEntities,
   diffCanvasVersions,

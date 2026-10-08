@@ -305,13 +305,11 @@ export function computeCanvasCollabPatch(opts: {
 
 /**
  * 协作锁原语（确定性锁主判定）实现在内核 `services/collab/locks.ts`；此处 re-export
- * 保持画布域既有导入路径（canvasStore/组件/测试零改动）。语义：声明制 + since 最小者持有、
+ * 保持画布域既有导入路径（canvasStore/组件零改动）。语义：声明制 + since 最小者持有、
  * 同 since 按 peerId 递增取小（详见 locks.ts 头注释）。
  */
 export {
-  computeCollabLockOwner as computeLockOwner,
   resolveCollabLock as resolveLockState,
-  type LockResolution,
 } from "@/services/collab/locks";
 
 // ===== 历史版本摘要 / diff（画布历史面板可读化）=====

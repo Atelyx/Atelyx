@@ -170,9 +170,10 @@ fn normalize_vault_root(root: &str) -> String {
     }
 }
 
-/// 最近仓库列表归一化 + 去重（按归一化后路径精确去重，保留首次出现顺序）。
-/// 兼容历史脏数据：同一物理目录可能同时存有 `\\?\E:\x` 与 `E:\x` 两条；
-/// name 为空（网络共享根等历史 `file_name()` 取不到的条目）按路径重新推导。
+/// 最近仓库列表归一化 + 去重：同一物理目录只留一条（按解析后的路径精确去重，保留首次出现顺序），
+/// 并保证列表里存的是规范路径（去 Windows `\\?\` 长路径前缀、解析 `..`/符号链接），
+/// `name` 为空（网络共享根等 `file_name()` 取不到的路径）按路径重新推导。
+/// 读写两侧都过一道：外部改过的文件与前端提交的整表都收敛到同一形态。
 fn normalize_and_dedupe_vaults(mut recents: Vec<RecentVault>) -> Vec<RecentVault> {
     let mut seen = std::collections::HashSet::new();
     recents.retain(|v| {
@@ -229,16 +230,6 @@ pub fn read_global_config(app: AppHandle) -> Result<GlobalConfigRead, String> {
         corrupt_backup,
         assembly_version: crate::commands::plugin::assembly_version(),
     })
-}
-
-/// 写全局配置（原子写：临时文件 + fsync + rename，与 vault 侧 `atomic_write` 同一 durability 语义）。
-/// 写入前对 recentVaults 归一化去重，保证落盘路径格式统一（验收标准：无 `\\?\` 前缀）。
-#[tauri::command]
-pub fn write_global_config(app: AppHandle, mut config: GlobalConfig) -> Result<(), String> {
-    config.recent_vaults = normalize_and_dedupe_vaults(config.recent_vaults);
-    let path = global_config_path(&app)?;
-    let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
-    crate::vault::atomic_write(&path, &json)
 }
 
 /// global.json 的进程内写互斥：补丁命令是「读文件 → 合并 → 写回」三步，

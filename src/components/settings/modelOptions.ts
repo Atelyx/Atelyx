@@ -16,7 +16,7 @@ export interface ModelChoiceEntry {
   group: string;
 }
 
-/** 构建模型下拉选项：存活项 + 存量值兼容（当前值不在存活项中时前置「已失效」项，使当前值可显示、可改选）。 */
+/** 构建模型下拉选项：存活项 + 当前值占位（当前值不在存活项中时前置「已失效」项，使当前值可显示、可改选）。 */
 export function buildModelChoices(
   entries: ModelChoiceEntry[],
   currentKey: string,
@@ -55,15 +55,9 @@ export function buildModelEntries(providers: ProviderConfig[]): ModelChoiceEntry
   );
 }
 
-/** 默认模型当前值编码：优先固定供应商（modelProviderId），旧配置按 model 名反查首个命中；无默认 = 空串。 */
-export function defaultModelKeyFor(
-  entries: ModelChoiceEntry[],
-  model: string | undefined,
-  pinnedId?: string,
-): string {
+/** 默认模型当前值编码：固定供应商（modelProviderId）+ model 名；无默认 = 空串。
+ *  未设 `modelProviderId` 的配置按编码取不到存活项，下拉据 `buildModelChoices` 的「已失效」项展示当前值供改选。 */
+export function defaultModelKeyFor(model: string | undefined, pinnedId?: string): string {
   if (!model) return "";
-  const entry = entries.find(
-    (e) => e.model === model && (pinnedId ? e.providerId === pinnedId : true),
-  );
-  return modelPairValue(entry?.providerId ?? pinnedId ?? "", model);
+  return modelPairValue(pinnedId ?? "", model);
 }

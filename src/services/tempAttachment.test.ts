@@ -49,7 +49,7 @@ describe("附件内容读取语义", () => {
   });
 
   it("dataUrlToText 对非 UTF-8 抛错（严格解码，不让乱码冒充正文）", async () => {
-    const { dataUrlToText } = await import("./tempAttachment");
+    const { dataUrlToText } = await import("@/utils/base64");
     expect(() => dataUrlToText(dataUrlOf([0xff, 0xfe]))).toThrow();
   });
 });

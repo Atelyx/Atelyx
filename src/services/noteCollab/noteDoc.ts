@@ -3,7 +3,6 @@
  * 网络收发经 store 注入的广播钩子完成，本模块不直连传输层；文档整体重建（采纳对端基线）时经 `onBindingRefresh` 让编辑面重绑。
  */
 import {
-  baselineSeedUpdate,
   createNotePeer,
   type NoteDocInstance,
   type NoteIdentity,
@@ -12,7 +11,6 @@ import {
 } from "./notePeer";
 import { encodeNoteRelocate } from "./frame";
 
-export { baselineSeedUpdate };
 export type { NoteIdentity, NoteRemoteAuthor };
 /** 协作文档实例（ytext/awareness 供编辑面绑定）。 */
 export type NoteDoc = NoteDocInstance;

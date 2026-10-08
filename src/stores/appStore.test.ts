@@ -204,7 +204,7 @@ describe("启动与建仓流程", () => {
     expect(autoEnterRoot).toBeNull();
     expect(app.useAppStore.getState().recentVaults).toEqual([]);
     expect(h.calls.some((c) => c.cmd === "ensure_default_vault")).toBe(false);
-    expect(h.calls.some((c) => c.cmd === "write_global_config")).toBe(false);
+    expect(h.calls.some((c) => c.cmd === "patch_global_config")).toBe(false);
   });
 
   it("有最近仓库：返回最近仓库 root 供自动进入，不写 global.json", async () => {

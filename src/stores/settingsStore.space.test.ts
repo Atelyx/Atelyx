@@ -90,8 +90,6 @@ vi.mock("@tauri-apps/api/core", () => ({
       case "patch_global_config":
         h.state.globalPatches.push(a.patch as Record<string, unknown>);
         return { config: h.state.globalConfig, corruptBackup: null };
-      case "write_global_config":
-        return null;
       case "space_config_patch":
         h.state.spaceConfigPatches.push({
           serverKey: String(a.serverKey),

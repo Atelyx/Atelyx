@@ -94,8 +94,6 @@ vi.mock("@tauri-apps/api/core", () => ({
         return { config: {}, corruptBackup: null };
       case "get_api_key":
         return h.state.keychain[`${String(a.vaultRoot)}:${String(a.providerId)}`] ?? "";
-      case "write_global_config":
-        return null;
       // 本地命令：录制即直通（本地分支只断言「转发了对应命令」）
       default:
         h.state.localCalls.push({ cmd, args: a });
