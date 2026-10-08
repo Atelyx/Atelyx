@@ -19,7 +19,7 @@ import type {
 } from "@/types";
 import { listAllContributions, listAllDecorators, payloadLabel } from "./slots";
 import { pluginIdOf } from "./loader";
-import type { ProcessExecOptions } from "./types";
+import type { ProcessExecOptions, RpcConnectOptions } from "./types";
 
 /** 纳入审计的 Atelyx 服务面（与展示标签同一清单，避免两处枚举漂移；新增服务面改 constants 一处）。 */
 const ATELYX_SERVICES = new Set(PLUGIN_SERVICE_NAMES);
@@ -78,6 +78,14 @@ function summarizeCall(service: string, method: string, args: unknown[]): string
     // 指路查询（bundledRuntime）：只读宿主资源元数据，不启动任何进程，不构成调用形态。
     if (method === "bundledRuntime") return undefined;
     const opts = args[0] as ProcessExecOptions | undefined;
+    const program = typeof opts?.command === "string" ? opts.command : "未知程序";
+    const count = Array.isArray(opts?.args) ? opts.args.length : 0;
+    return `${program}（${count} 个参数）`;
+  }
+  if (service === "rpc") {
+    // 通道内的方法级调用不进摘要（connect 已披露程序）；指路查询之外的连接即进程启动，照 process 口径记
+    if (method !== "connect") return undefined;
+    const opts = args[0] as RpcConnectOptions | undefined;
     const program = typeof opts?.command === "string" ? opts.command : "未知程序";
     const count = Array.isArray(opts?.args) ? opts.args.length : 0;
     return `${program}（${count} 个参数）`;

@@ -9,6 +9,7 @@ import { getAppVersion } from "@/services/app";
 import { detectPlatform } from "@/utils/pluginHost";
 import { runProcess, killProcessTree, writeProcessStdin, endProcessStdin } from "@/services/shell";
 import { resolveBundledRuntime } from "@/services/bundledRuntime";
+import { createRpcChannel, type RpcChannelFeed } from "./rpcChannel";
 import { pickDirectory, pickFile, saveFile } from "@/services/dialog";
 import { copyImageToClipboard, readClipboardText, writeClipboardText } from "@/services/clipboard";
 import { closeWindow, minimizeWindow, toggleMaximizeWindow } from "@/services/window";
@@ -93,6 +94,7 @@ import type {
   ProcessExecOptions,
   ProcessExecResult,
   ProcessService,
+  RpcService,
   StateService,
   StorageService,
   VaultService,
@@ -135,6 +137,11 @@ interface FsServiceInstance extends FsService {
 
 /** process 服务实例（tracker 注入调用方插件上下文：启动的进程按调用方插件记账）。 */
 interface ProcessServiceInstance extends ProcessService {
+  ctx: Context;
+}
+
+/** rpc 服务实例（tracker 注入调用方插件上下文：通道进程按调用方插件记账）。 */
+interface RpcServiceInstance extends RpcService {
   ctx: Context;
 }
 
@@ -464,6 +471,59 @@ export function createKernel(): Kernel {
   };
   Object.defineProperty(process, symbols.tracker, { value: { property: "ctx" } });
   provide("process", process);
+
+  // 插件双半通道：宿主半进程经进程托管面启动（记账/退出清理与 ctx.process 同源），stdio 上的
+  // JSON-RPC 会话由 rpcChannel 机制承载。stderr 不参与协议（诊断材料）；握手失败不留活进程。
+  const rpc: RpcService = {
+    async connect(this: RpcServiceInstance, opts) {
+      if (!PROCESS_EXECUTION) return Promise.reject(new Error(PROCESS_UNAVAILABLE));
+      const pluginId = requireCallerPluginId(this.ctx);
+      if (opts.input !== undefined) throw new Error("rpc.connect 不支持 input（stdin 由通道协议占用）");
+      const { initializeTimeoutMs, ...spawnOpts } = opts;
+      // feed 就位前的行/事件先暂存：进程可能在 pid 解析前就开始输出或退出；持有点用 ref
+      //（feed 在 pid 落地后才构造，回调必须能引用到它）
+      const feedRef: { current?: RpcChannelFeed } = {};
+      const backlog: string[] = [];
+      let earlyClose: number | null | undefined;
+      let earlyError: string | undefined;
+      const launched = launchTrackedProcess(pluginId, spawnOpts, "keep", {
+        stdout: (line) =>
+          feedRef.current ? feedRef.current.receiveLine(line) : backlog.push(line),
+        stderr: () => {},
+        close: (code) =>
+          feedRef.current ? feedRef.current.transportClosed(code) : (earlyClose = code),
+        error: (message) =>
+          feedRef.current ? feedRef.current.transportFailed(message) : (earlyError = message),
+      });
+      const pid = await launched.pid;
+      const feed = createRpcChannel(
+        pid,
+        {
+          write: (data) => writeProcessStdin(pid, data),
+          kill: async () => {
+            if (launched.ended()) return;
+            await killProcessTree(pid);
+            untrackPluginProcess(ctx, pluginId, pid);
+          },
+        },
+        { initializeTimeoutMs },
+      );
+      feedRef.current = feed;
+      for (const line of backlog.splice(0)) feed.receiveLine(line);
+      if (earlyClose !== undefined) feed.transportClosed(earlyClose);
+      else if (earlyError !== undefined) feed.transportFailed(earlyError);
+      try {
+        await feed.initialize();
+      } catch (error) {
+        // 收尾失败不顶掉原始握手错误（进程登记仍在，随插件停用/退出兜底结束）
+        await feed.channel.close().catch(() => {});
+        throw error;
+      }
+      return feed.channel;
+    },
+  };
+  Object.defineProperty(rpc, symbols.tracker, { value: { property: "ctx" } });
+  provide("rpc", rpc);
 
   const vault: VaultService = {
     listFiles: () => listVaultTree(),

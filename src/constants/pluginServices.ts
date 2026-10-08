@@ -9,6 +9,7 @@ export const PLUGIN_SERVICE_LABELS: Record<string, string> = {
   notification: "应用内通知",
   app: "宿主信息",
   process: "执行外部程序",
+  rpc: "插件宿主半通道（stdio RPC）",
   vault: "仓库文件读写",
   fs: "仓库外文件与私有目录读写",
   dialog: "系统对话框",
@@ -37,6 +38,7 @@ export const PLUGIN_SERVICE_NAMES: readonly string[] = Object.keys(PLUGIN_SERVIC
 /** 敏感服务（审计/披露 UI「敏感」高亮）。 */
 export const PLUGIN_SERVICE_SENSITIVE: ReadonlySet<string> = new Set([
   "process",
+  "rpc",
   "clipboard",
   "http",
   "native",

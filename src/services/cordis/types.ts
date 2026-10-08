@@ -272,6 +272,54 @@ export interface ProcessService {
   bundledRuntime(): Promise<BundledRuntimeInfo | null>;
 }
 
+/** 宿主半自报的实现信息（rpc 握手响应的 serverInfo，形状由宿主半自定）。 */
+export interface RpcRemoteInfo {
+  name?: string;
+  version?: string;
+}
+
+/** rpc 通道连接参数：进程启动参数（stdin 由协议占用）+ 握手选项。 */
+export interface RpcConnectOptions extends ProcessExecOptions {
+  /** initialize 握手超时毫秒数（缺省 30000）。 */
+  initializeTimeoutMs?: number;
+}
+
+/** 通道结束信息：code = 宿主半进程退出码（主动关闭或非进程原因为 null）。 */
+export interface RpcChannelEnd {
+  code: number | null;
+  reason: string;
+}
+
+/** 插件双半的就绪通道：客户端半与宿主半进程之间的 JSON-RPC（stdio NDJSON 帧）。
+ *  线上契约规范见 docs/plugins/rpc.md；宿主半进程按调用方插件记账（随停用/卸载/退出结束）。 */
+export interface RpcChannel {
+  readonly pid: number;
+  /** 握手协商一致的协议版本。 */
+  readonly protocolVersion: number;
+  /** 宿主半自报的实现信息（未提供则 undefined）。 */
+  readonly remoteInfo: RpcRemoteInfo | undefined;
+  /** 调用宿主半方法（等响应）；timeoutMs 缺省不设超时（通道关闭仍会结算）。远端错误以
+   *  RpcRemoteError（code/data）抛出。 */
+  call<T = unknown>(method: string, params?: unknown, opts?: { timeoutMs?: number }): Promise<T>;
+  /** 发单向通知（不等响应）。 */
+  notify(method: string, params?: unknown): Promise<void>;
+  /** 订阅宿主半通知；返回退订函数。 */
+  on(method: string, handler: (params: unknown) => void): () => void;
+  /** 注册宿主半反向请求的处理（返回值即响应 result，抛错回内部错误）；返回注销函数。 */
+  onRequest(method: string, handler: (params: unknown) => unknown): () => void;
+  /** 结束宿主半进程（整树）并关闭通道；幂等。 */
+  close(): Promise<void>;
+  /** 通道关闭时 resolve（含主动关闭）；其后一切收发被拒。 */
+  readonly done: Promise<RpcChannelEnd>;
+}
+
+/** 插件双半通道服务：起宿主半进程并按契约握手，返回就绪通道。 */
+export interface RpcService {
+  /** 启动宿主半进程（程序来源与 `ctx.process` 同口径）→ initialize 握手（校验协议版本）→
+   *  就绪通道。握手失败或进程先行退出即 reject，进程不残留。 */
+  connect(opts: RpcConnectOptions): Promise<RpcChannel>;
+}
+
 /** 仓库文件读写服务（读写全开；写方法语义与 AI 文件工具一致；失败返回 { ok:false, summary } 不抛断）。 */
 export interface VaultService {
   listFiles(): Promise<FileTreeNode[]>;
@@ -612,6 +660,7 @@ declare module "@atelyx/cordis" {
     notification: NotificationService;
     app: AppService;
     process: ProcessService;
+    rpc: RpcService;
     vault: VaultService;
     fs: FsService;
     dialog: DialogService;

@@ -24,7 +24,7 @@ Atelyx 是插件化平台：插件 = 一个 git 仓库（市场侧以 GitHub 为
 
 | 面 | 说明 |
 | --- | --- |
-| `ctx.<service>` | 类型化服务：平台服务 `state`/`app`/`process`/`vault`/`dialog`/`clipboard`/`window`/`ai`/`collab` + 内核领域服务 `history`/`layout`/`uiState` + 插件提供的 `canvas`/`table`/`note`/`chat`（见 [ctx API](ctx-api.md)） |
+| `ctx.<service>` | 类型化服务：平台服务 `state`/`app`/`process`/`rpc`/`vault`/`dialog`/`clipboard`/`window`/`ai`/`collab` + 内核领域服务 `history`/`layout`/`uiState` + 插件提供的 `canvas`/`table`/`note`/`chat`（见 [ctx API](ctx-api.md)） |
 | `ctx.services` | 服务发现：`ctx.services.list()` 返回当前已注册服务面（含提供者插件 id）；`ctx.services.get("foo")` 判空读取（可选依赖用，见 [ctx API](ctx-api.md)） |
 | `ctx.native` | 原始命令逃生舱：`ctx.native.invoke("command", args)` 调用未封装成 ctx 的 Rust 命令（敏感，进审计；见 [ctx API](ctx-api.md)） |
 | `ctx.events` | 领域事件总线：`ctx.events.on("canvas:changed", ...)` 订阅（`table:changed`/`vault:changed` 等，见 [ctx API](ctx-api.md)） |
@@ -79,5 +79,5 @@ Atelyx 是插件化平台：插件 = 一个 git 仓库（市场侧以 GitHub 为
 
 [发布检查清单 →](publishing.md)
 
-更多指南：[清单与依赖打包](manifest.md)、[ctx API 参考](ctx-api.md)、[自定义槽位](custom-slots.md)、
+更多指南：[清单与依赖打包](manifest.md)、[ctx API 参考](ctx-api.md)、[插件双半与 stdio RPC](rpc.md)、[自定义槽位](custom-slots.md)、
 [样式与容器契约](styling.md)。

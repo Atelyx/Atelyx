@@ -81,6 +81,7 @@ describe("Cordis 内核宿主", () => {
       "notification",
       "app",
       "process",
+      "rpc",
       "vault",
       "dialog",
       "clipboard",
