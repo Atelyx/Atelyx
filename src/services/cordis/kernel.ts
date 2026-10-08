@@ -11,8 +11,9 @@ import { runProcess, killProcessTree, writeProcessStdin, endProcessStdin } from 
 import { resolveBundledRuntime } from "@/services/bundledRuntime";
 import { createRpcChannel, type RpcChannelFeed } from "./rpcChannel";
 import { pickDirectory, pickFile, saveFile } from "@/services/dialog";
-import { copyImageToClipboard, readClipboardText, writeClipboardText } from "@/services/clipboard";
-import { closeWindow, minimizeWindow, toggleMaximizeWindow } from "@/services/window";
+import { copyImageToClipboard, readClipboardImage, readClipboardText, writeClipboardText } from "@/services/clipboard";
+import { closeWindow, listMonitors, minimizeWindow, toggleMaximizeWindow } from "@/services/window";
+import { clearPluginTrayMenu, setPluginTrayMenu } from "@/services/trayMenu";
 import {
   onGlobalShortcutTriggered,
   registerGlobalShortcut,
@@ -97,6 +98,8 @@ import type {
   RpcService,
   StateService,
   StorageService,
+  TrayService,
+  TrayMenuEntry,
   VaultService,
   WindowService,
   ShortcutsService,
@@ -143,6 +146,50 @@ interface ProcessServiceInstance extends ProcessService {
 /** rpc 服务实例（tracker 注入调用方插件上下文：通道进程按调用方插件记账）。 */
 interface RpcServiceInstance extends RpcService {
   ctx: Context;
+}
+
+/** tray 服务实例（tracker 注入调用方插件上下文：菜单贡献随调用方插件停用清除）。 */
+interface TrayServiceInstance extends TrayService {
+  ctx: Context;
+}
+
+/** 插件托盘菜单树节点数上限与深度上限（与 Rust 侧对抗性复核同数值）。 */
+const TRAY_MENU_MAX_NODES = 64;
+const TRAY_MENU_MAX_DEPTH = 3;
+
+/** 托盘菜单树形状预校验：id 命名空间、文案、规模与深度（Rust 侧对入参再做对抗性复核）。
+ *  叶子 key = 插件 id + 路径 id（分层命名空间），树内唯一性按 key 判定。 */
+function validateTrayMenu(pluginId: string, items: TrayMenuEntry[]): void {
+  if (!Array.isArray(items)) throw new Error("ctx.tray.setMenu 需要菜单节点数组");
+  const keys = new Set<string>();
+  const walk = (nodes: TrayMenuEntry[], depth: number, path: string[]): void => {
+    if (depth > TRAY_MENU_MAX_DEPTH) {
+      throw new Error(`托盘菜单嵌套超过 ${TRAY_MENU_MAX_DEPTH} 层`);
+    }
+    if (keys.size + nodes.length > TRAY_MENU_MAX_NODES) {
+      throw new Error(`托盘菜单节点数超过 ${TRAY_MENU_MAX_NODES}`);
+    }
+    for (const node of nodes) {
+      if (node.type === "separator") continue;
+      if (typeof node.id !== "string" || node.id === "" || node.id.includes(":")) {
+        throw new Error(`托盘菜单 id 须为非空且不含 ":" 的字符串`);
+      }
+      if (typeof node.label !== "string" || node.label.trim() === "") {
+        throw new Error("托盘菜单文案不能为空");
+      }
+      if (node.type === "item") {
+        if (typeof node.onActivate !== "function") {
+          throw new Error(`托盘菜单项 ${node.id} 需要 onActivate 回调`);
+        }
+        const key = [pluginId, ...path, node.id].join(":");
+        if (keys.has(key)) throw new Error(`托盘菜单项 key 重复：${key}`);
+        keys.add(key);
+      } else {
+        walk(node.items, depth + 1, [...path, node.id]);
+      }
+    }
+  };
+  walk(items, 1, []);
 }
 
 /** collab 服务实例（tracker 注入调用方插件上下文：频道命名空间与订阅归属由调用方决定）。 */
@@ -633,6 +680,7 @@ export function createKernel(): Kernel {
     readText: () => readClipboardText(),
     writeText: (text) => writeClipboardText(text),
     copyImage: (dataUrl) => copyImageToClipboard(dataUrl),
+    readImage: () => readClipboardImage(),
   };
   provide("clipboard", clipboard);
 
@@ -640,8 +688,35 @@ export function createKernel(): Kernel {
     minimize: () => minimizeWindow(),
     toggleMaximize: () => toggleMaximizeWindow(),
     close: () => closeWindow(),
+    listMonitors: () => listMonitors(),
   };
   provide("window", windowSvc);
+
+  // 插件托盘菜单贡献：整树写入 Rust 注册表（与内置项平铺同层，插件间分隔），
+  // 点击由 Rust 定向回传注册窗口的桥分发。归属校验与形状预校验在此，
+  // 生命周期经 ctx.effect 随插件停用清除（Rust 侧同步移除，残留点击被白名单拦下）。
+  const tray: TrayService = {
+    setMenu(this: TrayServiceInstance, items) {
+      const pluginId = requireCallerPluginId(this.ctx);
+      validateTrayMenu(pluginId, items);
+      const ctx = this.ctx;
+      return new Promise<void>((resolve, reject) => {
+        ctx.effect(() => {
+          const applied = setPluginTrayMenu(pluginId, items);
+          void applied.then(resolve, reject);
+          return () => {
+            // 等写入落地再清（invoke 到达序无保证，clear 先到会被后到的 set 覆盖出残留）
+            void applied
+              .catch(() => {})
+              .then(() => clearPluginTrayMenu(pluginId))
+              .catch((e) => console.error("清除插件托盘菜单失败", e));
+          };
+        });
+      });
+    },
+  };
+  Object.defineProperty(tray, symbols.tracker, { value: { property: "ctx" } });
+  provide("tray", tray);
 
   // 全局快捷键按调用方插件记账：登记先于注册 promise 落地（停用可覆盖在途注册），
   // 注册失败即摘册；OS 层归属仲裁（同键唯一、仅归属者可注销）在 Rust 登记表。

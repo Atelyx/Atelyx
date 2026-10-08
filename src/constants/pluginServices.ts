@@ -10,6 +10,7 @@ export const PLUGIN_SERVICE_LABELS: Record<string, string> = {
   app: "宿主信息",
   process: "执行外部程序",
   rpc: "插件宿主半通道（stdio RPC）",
+  tray: "系统托盘菜单贡献",
   vault: "仓库文件读写",
   fs: "仓库外文件与私有目录读写",
   dialog: "系统对话框",
@@ -39,6 +40,7 @@ export const PLUGIN_SERVICE_NAMES: readonly string[] = Object.keys(PLUGIN_SERVIC
 export const PLUGIN_SERVICE_SENSITIVE: ReadonlySet<string> = new Set([
   "process",
   "rpc",
+  "tray",
   "clipboard",
   "http",
   "native",

@@ -90,6 +90,18 @@ function summarizeCall(service: string, method: string, args: unknown[]): string
     const count = Array.isArray(opts?.args) ? opts.args.length : 0;
     return `${program}（${count} 个参数）`;
   }
+  if (service === "tray") {
+    // 菜单树只记规模（节点数，含子菜单与分隔线）
+    const count = (nodes: unknown): number =>
+      Array.isArray(nodes)
+        ? nodes.reduce(
+            (n: number, node) =>
+              n + (node && typeof node === "object" && (node as { type?: string }).type === "submenu" ? 1 + count((node as { items?: unknown[] }).items) : 1),
+            0,
+          )
+        : 0;
+    return `${count(args[0])} 个菜单项`;
+  }
   if (service === "http") {
     const req = args[0] as HttpRequestInput | undefined;
     return `${typeof req?.method === "string" ? req.method : "GET"} ${sanitizeUrl(req?.url)}`;

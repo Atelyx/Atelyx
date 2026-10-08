@@ -120,6 +120,26 @@
 - 要把插件逻辑整体放进进程侧（双半形态：客户端半只渲染、宿主半干活）时，用 `ctx.rpc.connect`
   起进程并走统一的 JSON-RPC 通道，见[插件双半与 stdio RPC](rpc.md)。
 
+## 系统托盘菜单贡献（`ctx.tray`）
+
+插件可以把动作挂进系统托盘右键菜单：菜单项与内置项（打开 Atelyx / 退出）平铺同层，不同插件
+之间自动分隔，插件内可用子菜单与分隔线组织自己的条目。整树随插件停用 / 卸载自动清除，点击
+回调只回传给注册来源窗口。
+
+```ts
+await ctx.tray.setMenu([
+  { type: "item", id: "sync", label: "立即同步", onActivate: () => sync() },
+  { type: "submenu", id: "more", label: "更多", items: [
+    { type: "item", id: "settings", label: "打开设置", onActivate: () => openSettings() },
+    { type: "separator" },
+  ]},
+]);
+```
+
+- 约束：单树最多 64 节点、嵌套最多 3 层；`id` 插件内唯一且不能含 `:`；`label` 非空。
+- 重复调用整树覆盖；点击回调在注册插件运行的窗口内执行（插件停用即失效）。
+- 托盘是应用级单例资源：贡献进审计（敏感面，按节点数记录规模）。
+
 ## 切仓库保活（`keepMountedOnVaultSwitch`）
 
 默认关闭。声明后，切换仓库触发的插件全量重载会跳过本插件：运行时、UI 贡献与托管进程原地保留，

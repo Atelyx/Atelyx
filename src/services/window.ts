@@ -168,3 +168,32 @@ export async function isMouseLeftDown(): Promise<boolean | null> {
     return null;
   }
 }
+
+/** 显示器几何（物理像素 + 缩放；多屏虚拟桌面坐标系，原点 = 主显示器左上角）。 */
+export interface MonitorInfo {
+  /** 会话内稳定的序号 id（显示器热插拔后重排，不跨会话持久）。 */
+  id: string;
+  /** 系统显示器名（拿不到时为空串）。 */
+  name: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /** 工作区（扣除任务栏等系统保留区域），同一坐标系。 */
+  workX: number;
+  workY: number;
+  workWidth: number;
+  workHeight: number;
+  scaleFactor: number;
+}
+
+/** 列出全部显示器的几何（多窗口跨屏定位用）；移动端单屏语义返回空列表。 */
+export async function listMonitors(): Promise<MonitorInfo[]> {
+  if (!WINDOW_CONTROLS) return [];
+  try {
+    return await invoke<MonitorInfo[]>("list_monitors");
+  } catch (e) {
+    console.error("查询显示器几何失败", e);
+    return [];
+  }
+}

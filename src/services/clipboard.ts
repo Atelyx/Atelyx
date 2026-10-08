@@ -2,7 +2,7 @@
  * 系统剪贴板读写 service（表格放大预览右键「复制图片」/ 笔记划词右键复制剪切粘贴用），纯 I/O 封装。
  */
 import { Image } from "@tauri-apps/api/image";
-import { readText, writeImage, writeText } from "@tauri-apps/plugin-clipboard-manager";
+import { readImage, readText, writeImage, writeText } from "@tauri-apps/plugin-clipboard-manager";
 
 /** 复制 dataURL 图片到系统剪贴板：dataURL → 离屏 Image 解码 → canvas 取 RGBA → `plugin:image|new` 建资源 →
  * clipboard 插件 `write_image`（arboard 写系统剪贴板，含透明通道）。PNG 透明通道保留、GIF 取首帧；
@@ -34,4 +34,26 @@ export async function readClipboardText(): Promise<string> {
 /** 写纯文本到系统剪贴板。 */
 export async function writeClipboardText(text: string): Promise<void> {
   await writeText(text);
+}
+
+/** 读系统剪贴板图片为 PNG dataURL；当前没有图片或读取失败（剪贴板被占用等）返回 null，
+ * 调用方按「没有图」处理。RGBA 像素经离屏画布重编码，透明通道保留。 */
+export async function readClipboardImage(): Promise<string | null> {
+  try {
+    const img = await readImage();
+    const { width, height } = await img.size();
+    if (!width || !height) return null;
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const ctx2d = canvas.getContext("2d");
+    if (!ctx2d) return null;
+    const frame = ctx2d.createImageData(width, height);
+    frame.data.set(await img.rgba());
+    ctx2d.putImageData(frame, 0, 0);
+    return canvas.toDataURL("image/png");
+  } catch (e) {
+    console.error("读取剪贴板图片失败（按无图处理）", e);
+    return null;
+  }
 }

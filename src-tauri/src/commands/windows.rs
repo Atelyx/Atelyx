@@ -167,3 +167,58 @@ pub fn is_mouse_left_down() -> Option<bool> {
         None
     }
 }
+
+// ===== 屏幕与显示器几何 =====
+
+/// 显示器几何信息（物理像素 + 缩放；多屏虚拟桌面坐标系，原点 = 主显示器左上角）。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MonitorInfo {
+    /// 会话内稳定的序号 id（显示器热插拔后重排，不跨会话持久）。
+    id: String,
+    /// 系统显示器名（拿不到时为空串）。
+    name: String,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    /// 工作区（扣除任务栏等系统保留区域），同一坐标系。
+    work_x: i32,
+    work_y: i32,
+    work_width: u32,
+    work_height: u32,
+    scale_factor: f64,
+}
+
+/// 列出全部显示器的几何（插件多窗口跨屏定位的查询面）；移动端单屏语义返回空列表。
+#[tauri::command]
+pub fn list_monitors(app: AppHandle) -> Vec<MonitorInfo> {
+    monitors_impl(app)
+}
+
+#[cfg(desktop)]
+fn monitors_impl(app: AppHandle) -> Vec<MonitorInfo> {
+    let monitors = app.available_monitors().unwrap_or_default();
+    monitors
+        .iter()
+        .enumerate()
+        .map(|(i, m)| MonitorInfo {
+            id: format!("monitor-{i}"),
+            name: m.name().map(String::as_str).unwrap_or_default().to_string(),
+            x: m.position().x,
+            y: m.position().y,
+            width: m.size().width,
+            height: m.size().height,
+            work_x: m.work_area().position.x,
+            work_y: m.work_area().position.y,
+            work_width: m.work_area().size.width,
+            work_height: m.work_area().size.height,
+            scale_factor: m.scale_factor(),
+        })
+        .collect()
+}
+
+#[cfg(not(desktop))]
+fn monitors_impl(_app: AppHandle) -> Vec<MonitorInfo> {
+    Vec::new()
+}

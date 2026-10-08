@@ -95,6 +95,7 @@ pub fn run() {
                 let autorun = std::env::args().any(|arg| arg == "--autorun");
                 app.manage(tray::UiHidden::new(autorun));
                 app.manage(tray::ExitWait::default());
+                app.manage(tray::PluginMenus::default());
                 if !autorun {
                     if let Some(main_win) = app.get_webview_window("main") {
                         // 主题底色：配置里只有深色缺省，浅色主题先改底色再显窗，不闪深色
@@ -280,6 +281,9 @@ pub fn run() {
             // 系统托盘（图标/菜单、驻留显隐与完全退出协调，见 tray.rs；移动端无托盘语义）
             tray::hide_to_tray,
             tray::exit_flush_done,
+            tray::tray_set_plugin_menu,
+            // 屏幕与显示器几何（插件多窗口定位用；移动端单屏返回空列表）
+            commands::windows::list_monitors,
             // 移动端专属（安卓本地仓库：存储权限、私有回落目录、自研目录浏览；桌面端一律拒绝）
             commands::mobile::android_has_all_files_access,
             commands::mobile::android_request_all_files_access,

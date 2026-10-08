@@ -415,6 +415,9 @@ export interface ClipboardService {
   readText(): Promise<string>;
   writeText(text: string): Promise<void>;
   copyImage(dataUrl: string): Promise<void>;
+  /** 读系统剪贴板图片（PNG dataURL，透明通道保留）；当前没有图片或读取失败返回 null，
+   *  调用方按「没有图」处理。 */
+  readImage(): Promise<string | null>;
 }
 
 /** 窗口控制服务（自定义标题栏窗口）。 */
@@ -422,6 +425,42 @@ export interface WindowService {
   minimize(): Promise<void>;
   toggleMaximize(): Promise<void>;
   close(): Promise<void>;
+  /** 列出全部显示器的几何（物理像素 + 缩放；多屏虚拟桌面坐标系）。
+   *  多窗口跨屏定位的查询面；移动端单屏语义返回空列表。 */
+  listMonitors(): Promise<MonitorInfo[]>;
+}
+
+/** 显示器几何信息（原点 = 主显示器左上角）。 */
+export interface MonitorInfo {
+  /** 会话内稳定的序号 id（显示器热插拔后重排，不跨会话持久）。 */
+  id: string;
+  /** 系统显示器名（拿不到时为空串）。 */
+  name: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /** 工作区（扣除任务栏等系统保留区域），同一坐标系。 */
+  workX: number;
+  workY: number;
+  workWidth: number;
+  workHeight: number;
+  scaleFactor: number;
+}
+
+/** 插件托盘菜单树节点。`item` 叶子点击时执行 `onActivate`；`submenu` 可嵌套（宿主限 3 层、
+ *  单树 64 节点）；`id` 在插件内唯一且不能含 `:`（叶子 key = 插件 id + 路径 id，分层命名空间用）。 */
+export type TrayMenuEntry =
+  | { type: "item"; id: string; label: string; onActivate: () => void }
+  | { type: "submenu"; id: string; label: string; items: TrayMenuEntry[] }
+  | { type: "separator" };
+
+/** 系统托盘菜单贡献服务：插件菜单项与内置项平铺同层（插件之间分隔），点击回传插件回调。
+ *  应用级单例资源归宿主持有，插件只贡献内容；整树随插件停用/卸载自动清除。 */
+export interface TrayService {
+  /** 设置本插件贡献的托盘菜单（整树覆盖式，重复调用覆盖旧树）；resolve = 已生效，
+   *  失败 reject 带原因（形状/数量/深度越界等）。停用/卸载时宿主自动清除，无需手动。 */
+  setMenu(items: TrayMenuEntry[]): Promise<void>;
 }
 
 /** 系统级全局快捷键服务（OS 层注册，应用不在前台也触发）。无 OS 支持的平台：注册以
@@ -661,6 +700,7 @@ declare module "@atelyx/cordis" {
     app: AppService;
     process: ProcessService;
     rpc: RpcService;
+    tray: TrayService;
     vault: VaultService;
     fs: FsService;
     dialog: DialogService;
