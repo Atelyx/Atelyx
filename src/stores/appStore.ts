@@ -704,13 +704,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       } catch (e) {
         console.error("登记最近空间失败", e);
       }
-      // 仓库级配置按身份分流（metadata 层）：local = config.json；space = 服务端团队元数据
+      // 仓库级配置按身份分流（metadata 层）：local = config.json；space = 服务端团队元数据。
+      // 加载失败由其内部收口（清空为默认态 + 可见通知），不中止切换
       get().reportLoad("加载仓库配置");
-      try {
-        await useSettingsStore.getState().loadVaultConfig();
-      } catch (e) {
-        console.error("加载仓库配置失败", e);
-      }
+      await useSettingsStore.getState().loadVaultConfig();
       // 文件树与画布列表随切换等待完成（空间后端支持全量方法，与本地同链路）：
       // 门控「全部加载完再进入」，加载屏覆盖到数据就绪。加载失败不连带跳过其余步骤
       get().reportLoad("加载文件树与画布列表");

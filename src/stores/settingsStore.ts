@@ -1017,7 +1017,19 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       strayTavilyKeyOnDisk = data.strayTavilyKey;
     } catch (e) {
       console.error("读取仓库级配置失败", e);
-      // 加载失败后本仓库的 provider 写盘会被守卫整体跳过（内存是默认值/上一仓库的值，落盘会抹掉磁盘配置）。
+      // 清空为默认态：内存不得残留上一仓库的配置（切换收尾后依赖方按空态降级，
+      // 而不是把上一个仓库的供应商/Agent 读成当前仓库的）。
+      set({
+        vaultConfig: null,
+        config: DEFAULT_AI_CONFIG,
+        searchConfig: { provider: "tavily", searxngUrl: "" },
+        tavilyKey: "",
+        promptNotes: [],
+        agents: [],
+        folderColors: {},
+      });
+      // 加载失败后 persist 路径的 provider 写盘会被守卫（loadedForVault 未登记）整体跳过
+      //（内存是默认值，落盘会抹掉磁盘配置）；commitVault/applySyncKeys/applyTavilyKey 不经该守卫。
       // 「该写却不写」必须让用户知道，否则改设置看起来生效、重启后全丢。
       useNotificationStore.getState().notify({
         level: "error",

@@ -19,6 +19,8 @@ const space = vi.hoisted(() => {
     /** 挂起 patchSpaceMeta 应答（在途写守卫测试）。 */
     holdPatch: null as Promise<void> | null,
     releasePatch: null as (() => void) | null,
+    /** getSpaceMeta 抛错开关（加载失败清理测试）。 */
+    failGetSpaceMeta: false as boolean,
   };
   function makeClient(_serverUrl: string) {
     return {
@@ -26,7 +28,10 @@ const space = vi.hoisted(() => {
       spaces: {},
       content: {},
       meta: {
-        getSpaceMeta: async () => ({ values: { ...state.teamValues } }),
+        getSpaceMeta: async () => {
+          if (state.failGetSpaceMeta) throw new Error("服务端不可达");
+          return { values: { ...state.teamValues } };
+        },
         patchSpaceMeta: async (_spaceId: string, body: { values: Record<string, string> }) => {
           state.patchSpaceCalls.push(body);
           if (state.holdPatch) await state.holdPatch;
@@ -151,6 +156,7 @@ beforeEach(async () => {
   space.state.patchSpaceCalls = [];
   space.state.holdPatch = null;
   space.state.releasePatch = null;
+  space.state.failGetSpaceMeta = false;
   h.state.vaultConfig = {};
   h.state.globalConfig = {};
   h.state.spaceConfigPatches = [];
@@ -350,5 +356,37 @@ describe("应用级显示偏好在空间内不被吞", () => {
     // 内存态即时生效（跨仓库共享）
     expect(settings.useSettingsStore.getState().softLineBreak).toBe(false);
     expect(settings.useSettingsStore.getState().inlineTitle).toBe(true);
+  });
+});
+
+describe("loadVaultConfig 失败清理", () => {
+  it("加载失败 = 清空为默认态（不残留上一仓库配置）；恢复后重进可自愈", async () => {
+    // 空间 A 配置加载成功，内存持有其数据
+    enterSpace();
+    space.state.teamValues["ai-providers"] = JSON.stringify([
+      { id: "p1", name: "A 供应商", baseUrl: "u", models: [], apiKey: "sk-a" },
+    ]);
+    space.state.teamValues["prompt-notes"] = JSON.stringify(["笔记/A.md"]);
+    await settings.useSettingsStore.getState().loadVaultConfig();
+    expect(settings.useSettingsStore.getState().config.providers[0].name).toBe("A 供应商");
+
+    // 切到空间 B 且服务端读取失败：内存不得残留 A 的配置
+    const other = { kind: "space" as const, serverUrl: "http://s1", spaceId: "sp2" };
+    factory.activateContentIdentity(other);
+    app.useAppStore.setState({ vaultIdentity: other, vaultRoot: null });
+    space.state.failGetSpaceMeta = true;
+    await settings.useSettingsStore.getState().loadVaultConfig();
+
+    const s = settings.useSettingsStore.getState();
+    expect(s.vaultConfig).toBeNull();
+    expect(s.config.providers).toEqual([]);
+    expect(s.promptNotes).toEqual([]);
+
+    // 服务端恢复后重进：读到的是该空间的（空）数据，而非内存残留
+    space.state.failGetSpaceMeta = false;
+    space.state.teamValues = {};
+    await settings.useSettingsStore.getState().loadVaultConfig();
+    expect(settings.useSettingsStore.getState().config.providers).toEqual([]);
+    expect(settings.useSettingsStore.getState().vaultConfig).not.toBeNull();
   });
 });
