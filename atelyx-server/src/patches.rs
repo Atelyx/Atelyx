@@ -351,6 +351,123 @@ fn apply_table_patch(table: &mut TableFile, patch: &TablePatch) {
     }
 }
 
+/// 补丁端点的类型槽位（画布/表格同构事务的参数点）。
+struct PatchEntityIo<E, P> {
+    kind: &'static str,
+    ext: &'static str,
+    /// parse_patch 的载荷文案（"画布补丁" / "表格补丁"）。
+    what: &'static str,
+    /// 落地后向空间房间广播的帧类型（"canvas-patch" / "table-patch"）。
+    broadcast_kind: &'static str,
+    read_file: fn(&Path) -> Result<E, ApiError>,
+    write_file: fn(&Path, &E) -> Result<(), ApiError>,
+    parse: fn(&serde_json::Value, &str) -> Result<P, ApiError>,
+    patch_id: fn(&P) -> &str,
+    patch_title: fn(&P) -> Option<&String>,
+    apply: fn(&mut E, &P),
+    entity_id: fn(&E) -> &str,
+    entity_title: fn(&E) -> &str,
+    set_title: fn(&mut E, String),
+    set_updated_at: fn(&mut E, i64),
+}
+
+fn canvas_patch_io() -> PatchEntityIo<CanvasFile, CanvasPatch> {
+    PatchEntityIo {
+        kind: "画布",
+        ext: "atlx",
+        what: "画布补丁",
+        broadcast_kind: "canvas-patch",
+        read_file: read_canvas_file,
+        write_file: write_canvas_file,
+        parse: parse_patch::<CanvasPatch>,
+        patch_id: |p| &p.id,
+        patch_title: |p| p.title.as_ref(),
+        apply: apply_canvas_patch,
+        entity_id: |c| &c.id,
+        entity_title: |c| &c.title,
+        set_title: |c, t| c.title = t,
+        set_updated_at: |c, v| c.updated_at = v,
+    }
+}
+
+fn table_patch_io() -> PatchEntityIo<TableFile, TablePatch> {
+    PatchEntityIo {
+        kind: "表格",
+        ext: "atb",
+        what: "表格补丁",
+        broadcast_kind: "table-patch",
+        read_file: read_table_file,
+        write_file: write_table_file,
+        parse: parse_patch::<TablePatch>,
+        patch_id: |p| &p.id,
+        patch_title: |p| p.title.as_ref(),
+        apply: apply_table_patch,
+        entity_id: |t| &t.id,
+        entity_title: |t| &t.title,
+        set_title: |t, title| t.title = title,
+        set_updated_at: |t, v| t.updated_at = v,
+    }
+}
+
+/// 补丁端点公共骨架：存在检查 → 解析补丁 → 读盘 → id 守卫 → title 应用 → 漂移冲突守卫 →
+/// 合并 → 原子写 → 旧文件清理 → 广播帧。锁（结构锁 → 路径锁）由 handler 持有后调用。
+fn patch_entity<E: serde::de::DeserializeOwned, P>(
+    state: &ServerState,
+    space_id: &str,
+    path: &Path,
+    body_path: &str,
+    raw_patch: &serde_json::Value,
+    io: &PatchEntityIo<E, P>,
+) -> Result<Response, ApiError> {
+    // 磁盘文件缺失：补丁只有变化实体，重建会丢未变化部分——拒绝
+    if !path.is_file() {
+        return Err(crate::state::not_found(&format!(
+            "{}文件不存在（已从磁盘删除）",
+            io.kind
+        )));
+    }
+    let patch = (io.parse)(raw_patch, io.what)?;
+    let mut entity = (io.read_file)(path)?;
+    // 防串文件守卫：补丁属于另一实体（陈旧保存回调）→ 拒绝，防跨文件混写
+    if (io.patch_id)(&patch) != (io.entity_id)(&entity) {
+        return Err(bad_request(&format!(
+            "补丁与文件不匹配：补丁属于另一{}，已中止保存",
+            io.kind
+        )));
+    }
+    if let Some(title) = (io.patch_title)(&patch) {
+        (io.set_title)(&mut entity, title.clone());
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| bad_request(&format!("非法路径：{}", body_path)))?;
+    let new_path = parent.join(format!("{}.{}", sanitize_filename((io.entity_title)(&entity)), io.ext));
+    let new_rel = rel_with_new_title(body_path, (io.entity_title)(&entity), io.ext);
+    if new_path != path {
+        ensure_no_id_conflict(
+            &new_path,
+            (io.entity_id)(&entity),
+            &|p: &Path| {
+                std::fs::read_to_string(p)
+                    .ok()
+                    .and_then(|t| serde_json::from_str::<E>(&t).ok())
+                    .map(|e| (io.entity_id)(&e).to_string())
+            },
+            io.kind,
+            (io.entity_title)(&entity),
+        )?;
+    }
+    (io.apply)(&mut entity, &patch);
+    (io.set_updated_at)(&mut entity, now_secs());
+    (io.write_file)(&new_path, &entity)?;
+    remove_replaced_file(path, &new_path, io.kind)?;
+    // 落地后向空间房间广播补丁帧（与客户端 WS 透传帧同形状）；失败只记日志不回滚——真源已落盘
+    ws_broadcast(state, space_id, io.broadcast_kind, &new_rel, raw_patch.clone());
+    tracing::info!(space_id = %space_id, path = %new_rel, "{}补丁落地", io.kind);
+    let updated_at = file_mtime_secs(&new_path);
+    Ok(Json(json!({ "updatedAt": updated_at, "file": new_rel })).into_response())
+}
+
 /// 画布补丁端点：锁内 读 → 校验 → 合并 → 原子写 → 广播。
 pub async fn patch_canvas(
     State(state): State<ServerState>,
@@ -364,40 +481,7 @@ pub async fn patch_canvas(
     // 与改名端点互斥（改名同样持结构锁 + 双路径锁），防在途改名/补丁互相重建对方路径的文件
     let _structure = state.structure_lock(&space_id).await;
     let _lock = state.path_lock(&space_id, &body.path).await;
-    // 磁盘文件缺失：补丁只有变化实体，重建会丢未变化部分——拒绝
-    if !path.is_file() {
-        return Err(crate::state::not_found("画布文件不存在（已从磁盘删除）"));
-    }
-    let patch: CanvasPatch = parse_patch(&body.patch, "画布补丁")?;
-    let mut canvas = read_canvas_file(&path)?;
-    // 防串文件守卫：补丁属于另一画布（陈旧保存回调）→ 拒绝，防跨文件混写
-    if patch.id != canvas.id {
-        return Err(bad_request("补丁与文件不匹配：补丁属于另一画布，已中止保存"));
-    }
-    if let Some(title) = &patch.title {
-        canvas.title = title.clone();
-    }
-    let parent = path.parent().ok_or_else(|| bad_request(&format!("非法路径：{}", body.path)))?;
-    let new_path = parent.join(format!("{}.atlx", sanitize_filename(&canvas.title)));
-    let new_rel = rel_with_new_title(&body.path, &canvas.title, "atlx");
-    if new_path != path {
-        ensure_no_id_conflict(
-            &new_path,
-            &canvas.id,
-            &|p| std::fs::read_to_string(p).ok().and_then(|t| serde_json::from_str::<CanvasFile>(&t).ok()).map(|c| c.id),
-            "画布",
-            &canvas.title,
-        )?;
-    }
-    apply_canvas_patch(&mut canvas, &patch);
-    canvas.updated_at = now_secs();
-    write_canvas_file(&new_path, &canvas)?;
-    remove_replaced_file(&path, &new_path, "画布")?;
-    // 落地后向空间房间广播补丁帧（与客户端 WS 透传帧同形状）；失败只记日志不回滚——真源已落盘
-    ws_broadcast(&state, &space_id, "canvas-patch", &new_rel, body.patch);
-    tracing::info!(space_id = %space_id, path = %new_rel, "画布补丁落地");
-    let updated_at = file_mtime_secs(&new_path);
-    Ok(Json(json!({ "updatedAt": updated_at, "file": new_rel })).into_response())
+    patch_entity(&state, &space_id, &path, &body.path, &body.patch, &canvas_patch_io())
 }
 
 /// 表格补丁端点：锁内 读 → 校验 → 合并 → 原子写 → 广播（与画布同构）。
@@ -412,37 +496,7 @@ pub async fn patch_table(
     // 结构锁 → 同路径锁（与画布补丁同构，见上）
     let _structure = state.structure_lock(&space_id).await;
     let _lock = state.path_lock(&space_id, &body.path).await;
-    if !path.is_file() {
-        return Err(crate::state::not_found("表格文件不存在（已从磁盘删除）"));
-    }
-    let patch: TablePatch = parse_patch(&body.patch, "表格补丁")?;
-    let mut table = read_table_file(&path)?;
-    if patch.id != table.id {
-        return Err(bad_request("补丁与文件不匹配：补丁属于另一表格，已中止保存"));
-    }
-    if let Some(title) = &patch.title {
-        table.title = title.clone();
-    }
-    let parent = path.parent().ok_or_else(|| bad_request(&format!("非法路径：{}", body.path)))?;
-    let new_path = parent.join(format!("{}.atb", sanitize_filename(&table.title)));
-    let new_rel = rel_with_new_title(&body.path, &table.title, "atb");
-    if new_path != path {
-        ensure_no_id_conflict(
-            &new_path,
-            &table.id,
-            &|p| std::fs::read_to_string(p).ok().and_then(|t| serde_json::from_str::<TableFile>(&t).ok()).map(|t| t.id),
-            "表格",
-            &table.title,
-        )?;
-    }
-    apply_table_patch(&mut table, &patch);
-    table.updated_at = now_secs();
-    write_table_file(&new_path, &table)?;
-    remove_replaced_file(&path, &new_path, "表格")?;
-    ws_broadcast(&state, &space_id, "table-patch", &new_rel, body.patch);
-    tracing::info!(space_id = %space_id, path = %new_rel, "表格补丁落地");
-    let updated_at = file_mtime_secs(&new_path);
-    Ok(Json(json!({ "updatedAt": updated_at, "file": new_rel })).into_response())
+    patch_entity(&state, &space_id, &path, &body.path, &body.patch, &table_patch_io())
 }
 
 fn ws_broadcast(state: &ServerState, space_id: &str, kind: &'static str, file: &str, patch: serde_json::Value) {
