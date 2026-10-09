@@ -168,6 +168,21 @@ pub fn internal(e: impl std::fmt::Display) -> ApiError {
     ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
 }
 
+/// 400 请求错误响应。
+pub fn bad_request(message: &str) -> ApiError {
+    ApiError(StatusCode::BAD_REQUEST, message.to_string())
+}
+
+/// 404 资源不存在响应。
+pub fn not_found(message: &str) -> ApiError {
+    ApiError(StatusCode::NOT_FOUND, message.to_string())
+}
+
+/// 403 无权限响应。
+pub fn forbidden(message: &str) -> ApiError {
+    ApiError(StatusCode::FORBIDDEN, message.to_string())
+}
+
 /// unix 秒时刻。
 pub fn now_secs() -> i64 {
     std::time::SystemTime::now()
@@ -356,6 +371,14 @@ impl ServerState {
     /// 默认布局的空间内容根（未收编目录时的落点）。
     pub fn default_space_root(&self, space_id: &str) -> PathBuf {
         self.inner.data_dir.join("spaces").join(space_id)
+    }
+
+    /// 空间内容根的磁盘路径（已收编目录用登记路径，未收编回落默认布局根）。
+    pub fn space_content_root(&self, space: &Space) -> PathBuf {
+        match &space.root_path {
+            Some(p) => PathBuf::from(p),
+            None => self.default_space_root(&space.id),
+        }
     }
 
     /// 数据目录（收编校验用：空间内容根不得与数据目录互相嵌套，防元数据混进内容树）。

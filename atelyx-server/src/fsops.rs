@@ -139,6 +139,66 @@ pub fn walk_files(
     Ok(())
 }
 
+/// 递归遍历空间 `.md`（与文件树同过滤：隐藏目录 + 团队排除文件夹）。
+pub fn walk_md_in(
+    root: &Path,
+    rel: &str,
+    exclude_folders: &[String],
+    f: &mut dyn FnMut(&str, &Path) -> Result<(), String>,
+) -> Result<(), String> {
+    let dir = if rel.is_empty() { root.to_path_buf() } else { root.join(rel) };
+    if !dir.exists() {
+        return Ok(());
+    }
+    for (child_rel, is_dir) in read_dir_filtered(&dir, rel, exclude_folders)? {
+        if is_dir {
+            walk_md_in(root, &child_rel, exclude_folders, f)?;
+        } else if child_rel.ends_with(".md") {
+            f(&child_rel, &root.join(&child_rel))?;
+        }
+    }
+    Ok(())
+}
+
+/// 百分号解码（`%XX`），非法序列原样保留（匹配不上自然不命中，不报错）。
+pub fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
+                out.push(hi * 16 + lo);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Windows 保留设备名（大小写不敏感；不带扩展名时同样保留，如 `CON` / `CON.txt` 均非法）。
+pub fn is_windows_reserved_name(name: &str) -> bool {
+    let up = name.to_ascii_uppercase();
+    matches!(
+        up.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL"
+            | "COM1" | "COM2" | "COM3" | "COM4" | "COM5" | "COM6" | "COM7" | "COM8" | "COM9"
+            | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5" | "LPT6" | "LPT7" | "LPT8" | "LPT9"
+    )
+}
+
 /// mtime unix 秒（失败回退 0；单文件失败不拖垮整轮）。
 pub fn file_mtime_secs(path: &Path) -> i64 {
     std::fs::metadata(path)

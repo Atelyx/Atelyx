@@ -14,8 +14,8 @@ use serde_json::json;
 
 use crate::auth::AuthUser;
 use crate::content::{join_err, write_root};
-use crate::fsops::{atomic_write, file_mtime_secs};
-use crate::state::{internal, now_secs};
+use crate::fsops::{atomic_write, file_mtime_secs, is_windows_reserved_name};
+use crate::state::{bad_request, internal, now_secs};
 use crate::{ApiError, ServerState};
 
 /// `.atlx` schema 版本号（私有格式保护：不符即拒绝解析，防外部工具/手改误写）。
@@ -202,17 +202,6 @@ pub fn sanitize_filename(title: &str) -> String {
     }
 }
 
-/// Windows 保留设备名（不带扩展名时同样保留，如 `CON` / `CON.txt` 均非法）。
-fn is_windows_reserved_name(stem: &str) -> bool {
-    let up = stem.to_ascii_uppercase();
-    matches!(
-        up.as_str(),
-        "CON" | "PRN" | "AUX" | "NUL"
-            | "COM1" | "COM2" | "COM3" | "COM4" | "COM5" | "COM6" | "COM7" | "COM8" | "COM9"
-            | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5" | "LPT6" | "LPT7" | "LPT8" | "LPT9"
-    )
-}
-
 /// title 变更后的同目录新相对路径（旧路径取目录前缀 + 净化标题 + 扩展名）。
 fn rel_with_new_title(old_file: &str, new_title: &str, ext: &str) -> String {
     let filename = format!("{}.{}", sanitize_filename(new_title), ext);
@@ -261,10 +250,6 @@ fn remove_replaced_file(old_path: &Path, new_path: &Path, kind: &str) -> Result<
             .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("删除旧{kind}文件失败：{e}")))?;
     }
     Ok(())
-}
-
-fn bad_request(message: &str) -> ApiError {
-    ApiError(StatusCode::BAD_REQUEST, message.to_string())
 }
 
 #[derive(Deserialize)]
@@ -381,7 +366,7 @@ pub async fn patch_canvas(
     let _lock = state.path_lock(&space_id, &body.path).await;
     // 磁盘文件缺失：补丁只有变化实体，重建会丢未变化部分——拒绝
     if !path.is_file() {
-        return Err(crate::content::not_found("画布文件不存在（已从磁盘删除）"));
+        return Err(crate::state::not_found("画布文件不存在（已从磁盘删除）"));
     }
     let patch: CanvasPatch = parse_patch(&body.patch, "画布补丁")?;
     let mut canvas = read_canvas_file(&path)?;
@@ -428,7 +413,7 @@ pub async fn patch_table(
     let _structure = state.structure_lock(&space_id).await;
     let _lock = state.path_lock(&space_id, &body.path).await;
     if !path.is_file() {
-        return Err(crate::content::not_found("表格文件不存在（已从磁盘删除）"));
+        return Err(crate::state::not_found("表格文件不存在（已从磁盘删除）"));
     }
     let patch: TablePatch = parse_patch(&body.patch, "表格补丁")?;
     let mut table = read_table_file(&path)?;

@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 
 use crate::auth::AuthUser;
 use crate::content::{join_err, write_root};
-use crate::fsops::{atomic_write, SpaceRoot};
+use crate::fsops::{atomic_write, percent_decode, SpaceRoot};
 use crate::state::ServerState;
 use crate::{ApiError, ApiResult};
 
@@ -44,33 +44,6 @@ fn percent_encode(s: &str) -> String {
         }
     }
     out
-}
-
-/// 百分号解码（`%XX`），非法序列原样保留（匹配不上自然不命中）。
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    let hex = |b: u8| -> Option<u8> {
-        match b {
-            b'0'..=b'9' => Some(b - b'0'),
-            b'a'..=b'f' => Some(b - b'a' + 10),
-            b'A'..=b'F' => Some(b - b'A' + 10),
-            _ => None,
-        }
-    };
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(hi), Some(lo)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
-                out.push(hi * 16 + lo);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// kind 字符串校验（未知即拒，不落无意义侧文件）。

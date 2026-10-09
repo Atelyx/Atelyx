@@ -17,7 +17,8 @@ use crate::auth::AuthUser;
 use crate::fsops::{
     atomic_write, file_mtime_secs, read_dir_filtered, JoinError, SpaceRoot, RESERVED_MEDIA_DIR,
 };
-use crate::state::{internal, max_file_bytes, ServerState, ROLE_EDITOR, ROLE_OWNER};
+use crate::spaces::{require_role, space_of, ALL_ROLES};
+use crate::state::{bad_request, internal, max_file_bytes, not_found, ServerState, ROLE_EDITOR, ROLE_OWNER};
 use crate::{ApiError, ApiResult};
 
 /// 单文件字节上限（局域网传输与内存呈现的合理上限；过大单文件拖累服务端内存与同步）。
@@ -26,54 +27,19 @@ pub const MAX_FILE_BYTES: usize = 50 * 1024 * 1024;
 /// 成员校验 + 内容根。读端点用这里（任意成员均可读）。
 pub(crate) fn member_root(state: &ServerState, space_id: &str, user: &AuthUser) -> Result<SpaceRoot, ApiError> {
     state.read(|p| {
-        let space = p
-            .spaces
-            .iter()
-            .find(|s| s.id == space_id)
-            .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "空间不存在".to_string()))?;
-        space
-            .members
-            .iter()
-            .find(|m| m.user_id == user.user_id)
-            .ok_or_else(|| ApiError(StatusCode::FORBIDDEN, "不是该空间成员".to_string()))?;
-        let root = match &space.root_path {
-            Some(p) => std::path::PathBuf::from(p),
-            None => state.default_space_root(space_id),
-        };
-        Ok(SpaceRoot(root))
+        let space = space_of(p, space_id)?;
+        require_role(space, &user.user_id, ALL_ROLES)?;
+        Ok(SpaceRoot(state.space_content_root(space)))
     })
 }
 
 /// 成员校验 + 内容根 + 写角色（owner/editor）。写端点统一走这里，只读角色（viewer）被拒。
 pub(crate) fn write_root(state: &ServerState, space_id: &str, user: &AuthUser) -> Result<SpaceRoot, ApiError> {
     state.read(|p| {
-        let space = p
-            .spaces
-            .iter()
-            .find(|s| s.id == space_id)
-            .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "空间不存在".to_string()))?;
-        let member = space
-            .members
-            .iter()
-            .find(|m| m.user_id == user.user_id)
-            .ok_or_else(|| ApiError(StatusCode::FORBIDDEN, "不是该空间成员".to_string()))?;
-        if member.role != ROLE_OWNER && member.role != ROLE_EDITOR {
-            return Err(ApiError(StatusCode::FORBIDDEN, "角色权限不足：仅 owner/editor 可写".to_string()));
-        }
-        let root = match &space.root_path {
-            Some(p) => std::path::PathBuf::from(p),
-            None => state.default_space_root(space_id),
-        };
-        Ok(SpaceRoot(root))
+        let space = space_of(p, space_id)?;
+        require_role(space, &user.user_id, &[ROLE_OWNER, ROLE_EDITOR])?;
+        Ok(SpaceRoot(state.space_content_root(space)))
     })
-}
-
-fn bad_request(message: &str) -> ApiError {
-    ApiError(StatusCode::BAD_REQUEST, message.to_string())
-}
-
-pub(crate) fn not_found(message: &str) -> ApiError {
-    ApiError(StatusCode::NOT_FOUND, message.to_string())
 }
 
 pub(crate) fn join_err(e: JoinError) -> ApiError {

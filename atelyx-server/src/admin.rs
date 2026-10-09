@@ -253,10 +253,7 @@ pub async fn list_spaces(
         p.spaces
             .iter()
             .map(|s| {
-                let root = match &s.root_path {
-                    Some(path) => std::path::PathBuf::from(path),
-                    None => state.default_space_root(&s.id),
-                };
+                let root = state.space_content_root(s);
                 let owner_username = p
                     .users
                     .iter()

@@ -16,7 +16,7 @@ use serde_json::json;
 
 use crate::auth::AuthUser;
 use crate::content::member_root;
-use crate::fsops::{file_mtime_secs, read_dir_filtered, SpaceRoot};
+use crate::fsops::{file_mtime_secs, percent_decode, walk_md_in, SpaceRoot};
 use crate::state::ServerState;
 use crate::{ApiError, ApiResult};
 
@@ -124,27 +124,6 @@ fn query_wiki_backlinks(index: &WikiIndex, note_name: &str, note_file: &str) -> 
         }
     }
     rows
-}
-
-/// 递归遍历空间 .md（与文件树同过滤：跳过隐藏目录与团队排除文件夹）。
-fn walk_md_in(
-    root: &FsPath,
-    rel: &str,
-    exclude_folders: &[String],
-    f: &mut dyn FnMut(&str, &FsPath) -> Result<(), String>,
-) -> Result<(), String> {
-    let dir = if rel.is_empty() { root.to_path_buf() } else { root.join(rel) };
-    if !dir.exists() {
-        return Ok(());
-    }
-    for (child_rel, is_dir) in read_dir_filtered(&dir, rel, exclude_folders)? {
-        if is_dir {
-            walk_md_in(root, &child_rel, exclude_folders, f)?;
-        } else if child_rel.ends_with(".md") {
-            f(&child_rel, &root.join(&child_rel))?;
-        }
-    }
-    Ok(())
 }
 
 fn file_stamp(path: &FsPath) -> Option<FileStamp> {
@@ -413,34 +392,6 @@ fn normalize_link_path(raw: &str) -> Option<String> {
         }
     }
     Some(s)
-}
-
-/// 简易 percent 解码（%XX）；非法序列原样保留（匹配不上自然不命中，不报错）。
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(hi), Some(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
-                out.push(hi * 16 + lo);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-fn hex_val(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    }
 }
 
 /// 若 `i` 处位于行首（i == 0 或前一字符为换行）。

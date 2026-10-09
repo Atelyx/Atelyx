@@ -7,28 +7,15 @@ use std::path::Path as FsPath;
 use std::path::PathBuf;
 
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
 use axum::Json;
 use serde::Deserialize;
 use serde_json::json;
 
 use crate::auth::AuthUser;
-use crate::fsops::{atomic_write, walk_files};
-use crate::state::{max_meta_value_bytes, ServerState};
+use crate::fsops::{atomic_write, is_windows_reserved_name, walk_files};
+use crate::state::{bad_request, internal, max_meta_value_bytes, not_found, ServerState};
 use crate::spaces::{require_role, space_of, ALL_ROLES};
 use crate::{ApiError, ApiResult};
-
-fn bad_request(message: &str) -> ApiError {
-    ApiError(StatusCode::BAD_REQUEST, message.to_string())
-}
-
-fn not_found(message: &str) -> ApiError {
-    ApiError(StatusCode::NOT_FOUND, message.to_string())
-}
-
-fn internal(e: impl std::fmt::Display) -> ApiError {
-    ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-}
 
 /// 要求调用方是该空间成员（任意角色；404 = 空间不存在，不区分无权限防探测）。
 fn require_member(state: &ServerState, space_id: &str, user: &AuthUser) -> Result<(), ApiError> {
@@ -47,13 +34,6 @@ fn require_writer(state: &ServerState, space_id: &str, user: &AuthUser) -> Resul
         Ok(())
     })
 }
-
-/// Windows 保留设备名段（大小写不敏感）：这类名字作文件名时系统会做保留名处理，
-/// key → 磁盘路径的映射会与回读错位。
-const WINDOWS_RESERVED_SEGS: [&str; 22] = [
-    "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
-    "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
-];
 
 /// 校验 key：允许字母数字、`-`、`_`、`.`、`/`（层级）；逐段查空段 / `.` / `..` / 以 `.` 开头 /
 /// 以 `.` 结尾 / Windows 保留设备名 / 非法字符。
@@ -79,7 +59,7 @@ fn validate_key(key: &str) -> Result<(), ApiError> {
         if seg.ends_with('.') {
             return Err(bad_request("键段不能以 . 结尾（Windows 会剥离尾点致回读错位）"));
         }
-        if WINDOWS_RESERVED_SEGS.contains(&seg.to_ascii_lowercase().as_str()) {
+        if is_windows_reserved_name(seg) {
             return Err(bad_request(
                 "键段不能使用 Windows 保留设备名（con/prn/aux/nul/com1-9/lpt1-9）",
             ));

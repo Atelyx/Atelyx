@@ -10,24 +10,13 @@ use serde_json::json;
 
 use crate::auth::AuthUser;
 use crate::state::{
-    now_secs, random_hex, Member, ServerState, Space, ROLE_EDITOR, ROLE_OWNER, ROLE_VIEWER,
+    bad_request, forbidden, not_found, now_secs, random_hex, Member, ServerState, Space,
+    ROLE_EDITOR, ROLE_OWNER, ROLE_VIEWER,
 };
 use crate::ws::KickReason;
 use crate::{ApiError, ApiResult};
 
 const NAME_MAX: usize = 64;
-
-fn bad_request(message: &str) -> ApiError {
-    ApiError(StatusCode::BAD_REQUEST, message.to_string())
-}
-
-fn not_found(message: &str) -> ApiError {
-    ApiError(StatusCode::NOT_FOUND, message.to_string())
-}
-
-fn forbidden(message: &str) -> ApiError {
-    ApiError(StatusCode::FORBIDDEN, message.to_string())
-}
 
 fn valid_name(name: &str) -> bool {
     !name.trim().is_empty() && name.chars().count() <= NAME_MAX

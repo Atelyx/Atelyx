@@ -13,7 +13,7 @@ use serde_json::json;
 
 use crate::auth::AuthUser;
 use crate::content::member_root;
-use crate::fsops::read_dir_filtered;
+use crate::fsops::walk_md_in;
 use crate::state::ServerState;
 use crate::ApiResult;
 
@@ -95,26 +95,6 @@ fn extract_ymd(value: &str) -> Option<String> {
     None
 }
 
-/// 递归遍历空间 `.md`（与文件树同过滤：隐藏目录 + 团队排除文件夹）。
-fn walk_md_in(
-    root: &Path,
-    rel: &str,
-    exclude_folders: &[String],
-    f: &mut dyn FnMut(&str, &Path) -> Result<(), String>,
-) -> Result<(), String> {
-    let dir = if rel.is_empty() { root.to_path_buf() } else { root.join(rel) };
-    if !dir.exists() {
-        return Ok(());
-    }
-    for (child_rel, is_dir) in read_dir_filtered(&dir, rel, exclude_folders)? {
-        if is_dir {
-            walk_md_in(root, &child_rel, exclude_folders, f)?;
-        } else if child_rel.ends_with(".md") {
-            f(&child_rel, &root.join(&child_rel))?;
-        }
-    }
-    Ok(())
-}
 
 /// `GET /api/spaces/{space_id}/dated-notes` — 扫描带日期笔记（只读、尽力而为）。
 /// 扫描是纯阻塞 IO，与客户端同口径放在 `spawn_blocking`（不占 async 执行器）。
