@@ -97,3 +97,35 @@ export function notifyViewRemoved(view: ViewKind): void {
     h.onViewRemoved(view);
   }
 }
+
+// ===== 仓库切换编排动作（appStore 分发；领域 store 模块加载时注册）=====
+
+/** 仓库切换编排动作：appStore 的切仓/退仓/画布联动流程按固定顺序调用的领域动作。
+ *  appStore 经此调度而不 import 领域 store（领域 → appStore 单向）；字段未登记 = 该领域
+ *  模块未加载，调用方按 no-op 跳过。 */
+export interface VaultSwitchActions {
+  /** 清空领域文件面板视图（切仓瞬间同步执行；防跨仓库污染守卫要求在下一个 await 前完成）。 */
+  clearViews(): void;
+  /** 仓库级配置按当前身份加载（切仓收尾步骤）。 */
+  loadConfig(): Promise<void>;
+  /** 按当前身份刷新文件树（切仓加载步骤 + 画布 CRUD 后联动共用）。 */
+  loadFiles(): Promise<void>;
+  /** 插件行按新仓库重载（切仓步骤；reason 为触发语境标记）。 */
+  reloadPlugins(reason: string): Promise<void>;
+  /** 仓库级配置落盘（应用退出收尾）。 */
+  flushConfig(): Promise<void>;
+  /** 停协作连接（应用退出收尾；切仓不经过——切仓走重载而非断开）。 */
+  disposeCollab(): void;
+}
+
+let vaultSwitch: Partial<VaultSwitchActions> = {};
+
+/** 登记/更新仓库切换编排动作（同字段后注册者生效；store 模块加载时调用）。 */
+export function registerVaultSwitchActions(patch: Partial<VaultSwitchActions>): void {
+  vaultSwitch = { ...vaultSwitch, ...patch };
+}
+
+/** 读已登记动作（测试用；未登记字段由调用方按 no-op 跳过）。 */
+export function vaultSwitchActions(): Partial<VaultSwitchActions> {
+  return vaultSwitch;
+}

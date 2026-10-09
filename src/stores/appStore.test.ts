@@ -116,6 +116,11 @@ beforeEach(async () => {
   h.spaceWrites = [];
   h.spacePatchBodies = [];
   await import("./noteSessionStore");
+  // 显式加载四个切仓动作登记方：appStore 经 kernelLifecycle 登记表分发动作（不 import 领域
+  // store），漏导则 clearViews/loadFiles/loadConfig/reloadPlugins 全部 no-op（静默缩水断言面）
+  await import("./vaultStore");
+  await import("./settingsStore");
+  await import("./collabStore");
   await import("./pluginStore");
   app = await import("./appStore");
   notifications = await import("./notificationStore");

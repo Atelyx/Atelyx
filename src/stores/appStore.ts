@@ -21,11 +21,8 @@ import {
   bumpRecentSpace,
   removeRecentVault as dropVaultFromRecents,
 } from "@/services/global";
-import { useSettingsStore } from "@/stores/settingsStore";
 import { useSpaceAuthStore } from "@/stores/spaceAuthStore";
-import { useVaultStore } from "@/stores/vaultStore";
 import { useUiStateStore } from "@/stores/uiStateStore";
-import { useCollabStore } from "@/stores/collabStore";
 import { discardLocalSession, getToken } from "@/services/space/auth";
 import { setSpaceSessionExpiredHandler } from "@/services/space/client";
 import { migrateHistoryFile } from "@/services/history";
@@ -34,6 +31,7 @@ import {
   notifyVaultEntered,
   notifyVaultLeaving,
   releaseView,
+  vaultSwitchActions,
 } from "@/utils/kernelLifecycle";
 import { emitVaultEvent } from "@/utils/vaultEvents";
 import { baseName, dedupeFilename, parentDir, remapDirPrefix, sanitizeFilename, siblingPath, stripExt } from "@/utils/filename";
@@ -47,7 +45,6 @@ import { isAndroidPlatform, platformCapabilities } from "@/services/platform";
 import type { PlatformCapabilities } from "@/services/platform";
 import { emitPluginEvent } from "@/services/cordis/events";
 import { abortVaultSwitchGate, runVaultSwitchGate } from "@/services/vaultSwitchGate";
-import { usePluginStore } from "@/stores/pluginStore";
 import { useNotificationStore } from "@/stores/notificationStore";
 import type { CanvasFileRow, RecentSpace, RecentVault } from "@/types";
 
@@ -286,7 +283,7 @@ interface AppState {
  * 漏刷会导致文件面板不显示新画布，直到重进仓库——所有画布写操作后必须走这里。 */
 async function refreshCanvasAndTree(): Promise<void> {
   await useAppStore.getState().loadList();
-  await useVaultStore.getState().loadFiles();
+  await vaultSwitchActions().loadFiles?.();
 }
 
 /** 系统「在文件管理器中打开」只接受绝对路径：仓库相对路径（@chip、`file:` 引用、图片/路径链接）
@@ -558,7 +555,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       // flush——若此处落后于下一个 await（React 提交卸载），noteList 还是旧仓库列表，cleanup 会把
       // 旧仓库内容经已切换的 root 写进新仓库同路径文件（跨仓库污染）。笔记挂起输入已在 openVault 前
       // flush 落盘旧仓库，残留（含 flush 后、切仓库前新输入）由下方 notifyVaultLeaving 同步清掉，不丢数据。
-      useVaultStore.setState({ tree: [], noteList: [], tableList: [] });
+      vaultSwitchActions().clearViews?.();
       // 切仓库同步清态（笔记运行时态/撤销栈/画布运行时，经领域生命周期注册表分发）——同步执行，
       // 保住防跨仓库写入守卫：清空须在下一个 await 之前完成（与上方 set 同批，React 提交卸载前 noteList 已清空）
       notifyVaultLeaving();
@@ -571,7 +568,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
       // 加载仓库级配置覆盖（.atelyx/config.json），需在发消息前完成
       get().reportLoad("加载仓库配置");
-      await useSettingsStore.getState().loadVaultConfig();
+      await vaultSwitchActions().loadConfig?.();
       // 文件树/画布列表/AI 会话随切换等待完成：门控「全部加载完再进入」，加载屏覆盖到数据就绪。
       // 各自独立 try——任一加载失败不连带跳过其余（尤其 AI 会话加载不能被文件树失败跳过，
       // 否则历史/当前会话停留在旧仓库）
@@ -593,7 +590,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       // 加载完成后再广播 vault:switch，保证订阅方是已就绪的后台插件。声明切仓库保活的插件跳过重建。
       get().reportLoad("加载插件");
       try {
-        await usePluginStore.getState().load("vault-switch");
+        await vaultSwitchActions().reloadPlugins?.("vault-switch");
       } catch (e) {
         console.error("加载插件失败", e);
       }
@@ -696,7 +693,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         currentTableTitle: "",
       });
       // 立即清空旧仓库文件树 + 撤销栈/笔记运行时态（同步执行，同 selectVault 防跨仓库守卫）
-      useVaultStore.setState({ tree: [], noteList: [], tableList: [] });
+      vaultSwitchActions().clearViews?.();
       notifyVaultLeaving();
       // recentSpaces 落盘 global.json（失败不阻塞切换，同 recentVaults）
       try {
@@ -707,7 +704,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       // 仓库级配置按身份分流（metadata 层）：local = config.json；space = 服务端团队元数据。
       // 加载失败由其内部收口（清空为默认态 + 可见通知），不中止切换
       get().reportLoad("加载仓库配置");
-      await useSettingsStore.getState().loadVaultConfig();
+      await vaultSwitchActions().loadConfig?.();
       // 文件树与画布列表随切换等待完成（空间后端支持全量方法，与本地同链路）：
       // 门控「全部加载完再进入」，加载屏覆盖到数据就绪。加载失败不连带跳过其余步骤
       get().reportLoad("加载文件树与画布列表");
@@ -726,7 +723,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       // 插件平台：全量重载（同 selectVault；加载完成后再广播 vault:switch）
       get().reportLoad("加载插件");
       try {
-        await usePluginStore.getState().load("vault-switch");
+        await vaultSwitchActions().reloadPlugins?.("vault-switch");
       } catch (e) {
         console.error("加载插件失败", e);
       }
@@ -782,11 +779,11 @@ export const useAppStore = create<AppState>((set, get) => ({
           currentTableFile: null,
           currentTableTitle: "",
         });
-        useVaultStore.setState({ tree: [], noteList: [], tableList: [] });
+        vaultSwitchActions().clearViews?.();
         notifyVaultLeaving();
         // 插件层感知仓库上下文消失（同切换语义；失败静默降级，下次切换再重载）
         try {
-          await usePluginStore.getState().load("vault-switch");
+          await vaultSwitchActions().reloadPlugins?.("vault-switch");
         } catch (e) {
           console.error("加载插件失败", e);
         }
@@ -817,7 +814,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     // 补历史存档点，防关窗/切仓库/AI 重命名移动删除前丢最后 500ms 输入
     await flushAllDomains({ vaultRoot: get().vaultRoot });
     await useUiStateStore.getState().flush();
-    await useSettingsStore.getState().flush();
+    await vaultSwitchActions().flushConfig?.();
     // 协作连接收尾不在此处（本函数在文件重命名/删除等非退出路径也会调用）：dispose 会断开会话内协作连接
     // 且清空 runtimeCfg，之后 applyConfig 全部失效、状态永久未连接。dispose 只由关窗守卫
     // （真退出）显式调用发 bye；更新安装时进程被结束即断，服务端按 TCP 断开立即移除 peer
@@ -839,7 +836,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     onTrayExitRequestedSvc(async () => {
       try {
         await useAppStore.getState().flushAllPending();
-        useCollabStore.getState().dispose();
+        vaultSwitchActions().disposeCollab?.();
       } catch (e) {
         console.error("托盘退出收尾失败", e);
       } finally {

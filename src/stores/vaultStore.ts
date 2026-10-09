@@ -3,6 +3,7 @@
  * 跳过隐藏/排除目录），封装文件管理面板的新建/重命名/删除，调 `services/vault`；canvases 列表
  * 由 appStore 维护（与画布 CRUD 同源）。文件动作完成后由本 store 刷新树，外部改动经打开/重读路径感知；组件不直调 service。
  */
+import { registerVaultSwitchActions } from "@/utils/kernelLifecycle";
 import { create } from "zustand";
 import {
   createFolder as createFolderSvc,
@@ -812,3 +813,10 @@ export const useVaultStore = create<VaultFileState>((set, get) => ({
   historySetAuthor: (name, device) =>
     setHistoryAuthor({ id: device || name, name: name || device || "用户", device: device || "" }),
 }));
+
+// 切仓编排动作登记：appStore 经 kernelLifecycle 分发（appStore 不 import 本模块）。
+registerVaultSwitchActions({
+  clearViews: () => useVaultStore.setState({ tree: [], noteList: [], tableList: [] }),
+  loadFiles: () => useVaultStore.getState().loadFiles(),
+});
+

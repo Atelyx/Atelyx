@@ -1,3 +1,4 @@
+import { registerVaultSwitchActions } from "@/utils/kernelLifecycle";
 import { create } from "zustand";
 import { getApiKey, setApiKey, deleteApiKey } from "@/services/keychain";
 import {
@@ -1668,3 +1669,10 @@ export function selectDefaultModelDisplay(s: SettingsState): string | null {
 //
 // 设置组件读仓库级配置直接取状态字段（`s.vaultConfig` / `s.config` / `s.searchConfig` / `s.agents` …）：
 // 作用域恒为当前激活仓库，没有第二份可供分发的数据。
+
+// 切仓编排动作登记：appStore 经 kernelLifecycle 分发（appStore 不 import 本模块）。
+registerVaultSwitchActions({
+  loadConfig: () => useSettingsStore.getState().loadVaultConfig(),
+  flushConfig: () => useSettingsStore.getState().flush(),
+});
+

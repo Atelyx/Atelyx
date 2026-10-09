@@ -5,7 +5,7 @@
  */
 import { readdir, readFile, stat } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 const srcRoot = resolve(process.cwd(), "src");
 
@@ -47,11 +47,15 @@ const KERNEL_PATH = [
 const APP_STORE_EXCEPTION = "stores/appStore.ts";
 const APP_STORE_DOMAIN_DEPS = ["spaceAuthStore"];
 
-/** 宿主接线模块（显式例外）：领域 store 仅用于把数据源注入内核 ctx 服务。 */
+/** 宿主接线模块（显式例外）：本模块只保留状态管理与装配调度，接线实现拆至 pluginWiring
+ *  （见下），自身不再依赖任何领域 store（空清单锁死）。 */
 const HOST_WIRING_EXCEPTION = "stores/pluginStore.ts";
-/** 该例外当前登记的领域依赖（新增即须在此登记并说明理由）。
+const HOST_WIRING_DOMAIN_DEPS: string[] = [];
+
+/** 插件内核接线实现（宿主接线的执行体，pluginStore.load 调 wirePluginRuntime）：
  *  canvasStore/tableStore/repoHistoryStore/noteStore = ctx.canvas/ctx.table/ctx.history（含笔记历史回滚）数据源。 */
-const HOST_WIRING_DOMAIN_DEPS = ["canvasStore", "tableStore", "repoHistoryStore", "noteStore"];
+const PLUGIN_WIRING_EXCEPTION = "stores/pluginWiring.ts";
+const PLUGIN_WIRING_DOMAIN_DEPS = ["canvasStore", "tableStore", "repoHistoryStore", "noteStore"];
 
 /** 第二跳：随应用分发的插件实现注册表（pluginStore 的静态 import），其领域依赖同样须登记。
  *  八项分别对应各内置插件 apply 闭包消费的领域 store（画布/表格/AI 面板/笔记/笔记协作/笔记撤销/日历/笔记正文会话）。 */
@@ -137,6 +141,31 @@ describe("内核路径导入守卫", () => {
   it("宿主接线模块的领域依赖限于已登记清单", async () => {
     const deps = await importedDomainStores(resolve(srcRoot, HOST_WIRING_EXCEPTION));
     expect([...deps].sort()).toEqual([...HOST_WIRING_DOMAIN_DEPS].sort());
+  });
+
+  it("插件内核接线实现的领域依赖限于已登记清单（宿主接线的执行体）", async () => {
+    const deps = await importedDomainStores(resolve(srcRoot, PLUGIN_WIRING_EXCEPTION));
+    expect([...deps].sort()).toEqual([...PLUGIN_WIRING_DOMAIN_DEPS].sort());
+  });
+
+  it("仓库切换编排动作在四个领域 store 加载后必须全部登记", async () => {
+    // appStore 经 kernelLifecycle 登记表分发切仓动作（不 import 领域 store）；
+    // 此处锁「四 store 模块求值 → 六动作齐备」契约：任一 store 删登记代码即红。
+    // 生产启动链 = App.tsx → pluginStore → pluginWiring → vaultStore/collabStore，
+    // settingsStore 由 App.tsx 直接导入，故运行时六动作恒已登记。
+    vi.resetModules();
+    await import("@/stores/vaultStore");
+    await import("@/stores/settingsStore");
+    await import("@/stores/collabStore");
+    await import("@/stores/pluginStore");
+    const { vaultSwitchActions } = await import("@/utils/kernelLifecycle");
+    const actions = vaultSwitchActions();
+    expect(actions.clearViews).toBeDefined();
+    expect(actions.loadConfig).toBeDefined();
+    expect(actions.loadFiles).toBeDefined();
+    expect(actions.reloadPlugins).toBeDefined();
+    expect(actions.flushConfig).toBeDefined();
+    expect(actions.disposeCollab).toBeDefined();
   });
 
   it("插件实现注册表的领域依赖限于已登记清单（宿主接线的第二跳）", async () => {

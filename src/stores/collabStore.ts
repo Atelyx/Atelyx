@@ -3,6 +3,7 @@
  * 传输/入站路由/出站咽喉归内核 DocHost（services/collab/docHost.ts），本 store 只做
  * 「何时连/断/换房」策略与 presence 节流调度、peers/myPeerId 状态镜像；本 store 不 import 任何域 store。
  */
+import { registerVaultSwitchActions } from "@/utils/kernelLifecycle";
 import { create } from "zustand";
 import {
   connectTransport,
@@ -446,3 +447,9 @@ export const useCollabStore = create<CollabStoreState>((set) => ({
     set({ connected: false, peers: [], myPeerId: null });
   },
 }));
+
+// 退出收尾动作登记：appStore 经 kernelLifecycle 分发（appStore 不 import 本模块）。
+registerVaultSwitchActions({
+  disposeCollab: () => useCollabStore.getState().dispose(),
+});
+
