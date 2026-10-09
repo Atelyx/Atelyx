@@ -376,7 +376,7 @@ describe("工厂激活与后端替换", () => {
   });
 
   it("激活 stub 后端后，读经 stub 内存树而非 Rust 命令", async () => {
-    const { createSpaceStubBackend } = await import("./stubSpaceBackend");
+    const { createSpaceStubBackend } = await import("@/test-support/stubSpaceBackend");
     const stub = createSpaceStubBackend();
     await stub.write("a.md", "空间正文");
     factoryMod.activateContentVault(stub.identity, stub.backend);
@@ -392,7 +392,7 @@ describe("工厂激活与后端替换", () => {
   });
 
   it("同 root 复用已登记后端（身份按 root 路径区分）", async () => {
-    const { createSpaceStubBackend } = await import("./stubSpaceBackend");
+    const { createSpaceStubBackend } = await import("@/test-support/stubSpaceBackend");
     factoryMod.activateContentVault({ kind: "local", root: "E:/v1" }, createSpaceStubBackend().backend);
     // 同 root 再激活不带后端：不覆盖已登记
     factoryMod.activateContentVault({ kind: "local", root: "E:/v1" });

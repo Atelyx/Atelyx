@@ -27,7 +27,7 @@ vi.mock("@/services/history", async (importOriginal) => {
   return { ...actual, recordHistoryVersion };
 });
 
-import { createSpaceStubBackend } from "@/services/content/stubSpaceBackend";
+import { createSpaceStubBackend } from "@/test-support/stubSpaceBackend";
 import { TABLE_SCHEMA } from "@/constants/table";
 
 const FILE = "表/t1.atb";
@@ -53,7 +53,7 @@ beforeEach(async () => {
   await import("./collabStore");
   const tableMod = await import("./tableStore");
   void tableMod;
-  const stubMod = await import("@/services/content/stubSpaceBackend");
+  const stubMod = await import("@/test-support/stubSpaceBackend");
   const factory = await import("@/services/content/factory");
   stub = stubMod.createSpaceStubBackend();
   stub.seed(FILE, tableJson([{ id: "r1" }]));

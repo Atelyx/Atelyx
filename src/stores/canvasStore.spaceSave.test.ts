@@ -35,7 +35,7 @@ vi.mock("@/components/plugins/cordis/builtins", () => ({
 }));
 
 type CanvasStore = typeof import("./canvasStore");
-type StubFactory = typeof import("@/services/content/stubSpaceBackend");
+type StubFactory = typeof import("@/test-support/stubSpaceBackend");
 
 const FILE = "画布/c1.atlx";
 
@@ -81,7 +81,7 @@ beforeEach(async () => {
   // 先起 collabStore 再取画布 store：画布 store 的协作接线在模块加载期读 collabStore 服务面
   await import("./collabStore");
   canvas = await import("./canvasStore");
-  const stubMod = await import("@/services/content/stubSpaceBackend");
+  const stubMod = await import("@/test-support/stubSpaceBackend");
   const factory = await import("@/services/content/factory");
   stub = stubMod.createSpaceStubBackend();
   stub.seed(FILE, canvasJson([textNode("n1", "节点一")]));

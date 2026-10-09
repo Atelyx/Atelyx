@@ -9,7 +9,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 type AiFiles = typeof import("@/services/vault/aiFiles");
 type VaultIndex = typeof import("@/services/vault");
 type VaultEvents = typeof import("@/utils/vaultEvents");
-type StubFactory = typeof import("@/services/content/stubSpaceBackend");
+type StubFactory = typeof import("@/test-support/stubSpaceBackend");
 type Factory = typeof import("@/services/content/factory");
 
 let aiFiles: AiFiles;
@@ -22,7 +22,7 @@ beforeEach(async () => {
   aiFiles = await import("@/services/vault/aiFiles");
   vaultIndex = await import("@/services/vault");
   vaultEvents = await import("@/utils/vaultEvents");
-  const stubMod = await import("@/services/content/stubSpaceBackend");
+  const stubMod = await import("@/test-support/stubSpaceBackend");
   const { activateContentVault } = await import("@/services/content/factory") as Factory;
   stub = stubMod.createSpaceStubBackend();
   activateContentVault(stub.identity, stub.backend);

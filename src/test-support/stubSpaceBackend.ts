@@ -8,7 +8,7 @@ import { CANVAS_SCHEMA } from "@/constants/canvas";
 import { TABLE_SCHEMA } from "@/constants/table";
 import { parentDir, sanitizeFilename } from "@/utils/filename";
 import type { CanvasFile, TableFile } from "@/types";
-import type { ContentBackend, VaultIdentity } from "./contract";
+import type { ContentBackend, VaultIdentity } from "@/services/content/contract";
 
 export function createSpaceStubBackend() {
   /** 内容文件树（相对路径 → 正文；目录由路径隐式表达，空目录不存在）。 */

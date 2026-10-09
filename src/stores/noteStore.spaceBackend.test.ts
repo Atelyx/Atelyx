@@ -18,7 +18,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 type NoteStore = typeof import("./noteStore");
-type StubFactory = typeof import("@/services/content/stubSpaceBackend");
+type StubFactory = typeof import("@/test-support/stubSpaceBackend");
 
 let noteStore: NoteStore;
 let stubMod: StubFactory;
@@ -30,7 +30,7 @@ beforeEach(async () => {
   h.calls.length = 0;
   await import("./noteSessionStore");
   noteStore = await import("./noteStore");
-  stubMod = await import("@/services/content/stubSpaceBackend");
+  stubMod = await import("@/test-support/stubSpaceBackend");
   const { activateContentVault } = await import("@/services/content/factory");
   stub = stubMod.createSpaceStubBackend();
   await stub.write("已有.md", "预置正文");

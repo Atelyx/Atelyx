@@ -30,7 +30,7 @@ vi.mock("@/components/plugins/cordis/builtins", () => ({
 }));
 
 type TableStore = typeof import("./tableStore");
-type StubFactory = typeof import("@/services/content/stubSpaceBackend");
+type StubFactory = typeof import("@/test-support/stubSpaceBackend");
 
 const FILE = "表/t1.atb";
 
@@ -66,7 +66,7 @@ beforeEach(async () => {
   // 先起 collabStore 再取表格 store：表格 store 的协作接线在模块加载期读 collabStore 服务面
   await import("./collabStore");
   table = await import("./tableStore");
-  const stubMod = await import("@/services/content/stubSpaceBackend");
+  const stubMod = await import("@/test-support/stubSpaceBackend");
   const factory = await import("@/services/content/factory");
   stub = stubMod.createSpaceStubBackend();
   stub.seed(FILE, tableJson([{ id: "r1" }]));

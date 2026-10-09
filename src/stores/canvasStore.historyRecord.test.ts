@@ -26,7 +26,7 @@ vi.mock("@/services/history", async (importOriginal) => {
   return { ...actual, recordHistoryVersion };
 });
 
-import { createSpaceStubBackend } from "@/services/content/stubSpaceBackend";
+import { createSpaceStubBackend } from "@/test-support/stubSpaceBackend";
 
 const FILE = "画布/c1.atlx";
 let stub: ReturnType<typeof createSpaceStubBackend>;
@@ -66,7 +66,7 @@ beforeEach(async () => {
   recordHistoryVersion.mockClear();
   await import("./collabStore");
   const canvas = await import("./canvasStore");
-  const stubMod = await import("@/services/content/stubSpaceBackend");
+  const stubMod = await import("@/test-support/stubSpaceBackend");
   const factory = await import("@/services/content/factory");
   stub = stubMod.createSpaceStubBackend();
   stub.seed(FILE, canvasJson([]));
