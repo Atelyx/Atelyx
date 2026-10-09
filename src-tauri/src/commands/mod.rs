@@ -2,6 +2,7 @@
 //! 每个命令对应前端 invoke 调用，统一在 lib.rs 的 generate_handler! 中注册。
 
 pub mod assembly;
+pub mod entity_txn;
 pub mod external_fs;
 pub mod filesearch;
 pub mod chat_container;

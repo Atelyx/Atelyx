@@ -13,18 +13,17 @@ use serde::Serialize;
 use tauri::{AppHandle, Manager, State, WebviewWindow};
 
 use super::content_broadcast::{broadcast_content_changes, ContentChange};
+use super::entity_txn;
 
 use crate::vault::{
-    append_chat_messages_file, cache_put_canvas, collect_md_link_updates,
+    append_chat_messages_file, collect_md_link_updates,
     copy_folder as copy_folder_impl, create_folder as create_folder_impl,
     delete_folder as delete_folder_impl, delete_vault_file, flush_md_updates,
     init_vault_dirs, list_canvas_files,
-    list_vault_tree as list_vault_tree_impl, markdown_link_path, read_canvas_file,
-    read_canvas_file_cached, read_file_bytes, read_note as read_note_file,
+    list_vault_tree as list_vault_tree_impl, markdown_link_path, read_canvas_file, read_file_bytes, read_note as read_note_file,
     file_exists as file_exists_impl, read_vault_config_with_backup,
-    refresh_wiki_index, rename_folder as rename_folder_impl, rename_note_file, rel_with_new_title,
-    resolve_link_target, rewrite_internal_links, safe_join, same_physical_file,
-    sanitize_filename, walk_md_in, write_canvas_file, write_note as write_note_file,
+    refresh_wiki_index, rename_folder as rename_folder_impl, rename_note_file,
+    resolve_link_target, rewrite_internal_links, safe_join, same_physical_file, walk_md_in, write_canvas_file, write_note as write_note_file,
     patch_vault_config,
     aggregate_tag_counts, refresh_tag_index,
     list_chat_sessions_file,
@@ -219,49 +218,11 @@ pub fn read_canvas_vault(file: String, state: State<'_, VaultState>) -> Result<C
 #[tauri::command]
 pub fn write_canvas_vault(
     window: WebviewWindow,
-    mut canvas: CanvasFile,
+    canvas: CanvasFile,
     file: String,
     state: State<'_, VaultState>,
 ) -> Result<i64, String> {
-    let root = state.root()?;
-    let old_path = safe_join(&root, &file, false)?;
-    // 目标路径 = 同目录 + <sanitized-title>.atlx（title 变更 = 同目录改文件名，路径不漂移）
-    let parent = old_path
-        .parent()
-        .ok_or_else(|| format!("非法路径：{}", file))?;
-    let new_path = parent.join(format!("{}.atlx", sanitize_filename(&canvas.title)));
-    // 新路径已存在且 id 不同（前端 dedupe 被绕过/同步盘合并）：拒绝覆盖，防静默丢失另一画布
-    ensure_no_id_conflict(
-        &new_path,
-        &canvas.id,
-        &|p| read_canvas_file(p).ok().map(|c| c.id),
-        "画布",
-        &canvas.title,
-    )?;
-    let now = Utc::now().timestamp();
-    // createdAt 保留：读一次磁盘（缓存命中免重读；文件缺失 = 新画布用 now）
-    if old_path.exists() {
-        let (_, disk) = read_canvas_file_cached(&state, &root, &file)
-            .map_err(|e| format!("磁盘画布文件损坏，无法保存：{} ({e})", old_path.display()))?;
-        canvas.created_at = disk.created_at;
-    } else {
-        canvas.created_at = now;
-    }
-    canvas.updated_at = now;
-    write_canvas_file(&new_path, &canvas)?;
-    remove_replaced_file(&old_path, &new_path, "画布")?;
-    let new_rel = rel_with_new_title(&file, &canvas.title, "atlx");
-    cache_evict_canvas(&state, &file);
-    cache_put_canvas(&state, &new_path, &new_rel, &canvas);
-    // title 漂移 = 写盘同时改名：接收方先跟路径再对账
-    let change = if new_rel == file {
-        ContentChange::write(&file)
-    } else {
-        ContentChange::write_drifted(&new_rel, &file)
-    };
-    broadcast_content_changes(&window, &root.to_string_lossy(), vec![change]);
-    // 返回落盘后的 updated_at（前端据此更新本地时间戳）
-    Ok(now)
+    entity_txn::write_entity(&window, &state, &entity_txn::canvas_io(), &file, canvas)
 }
 
 /// 增量保存 .atlx（自动保存主路径）：只写变化/新增/删除的实体（前端按引用 diff 计算补丁），
@@ -275,66 +236,25 @@ pub fn patch_canvas_vault(
     file: String,
     state: State<'_, VaultState>,
 ) -> Result<PatchWriteResult, String> {
-    let root = state.root()?;
-    let old_path = safe_join(&root, &file, false)?;
-    // 磁盘文件缺失（外部删除）：补丁只有变化实体，重建会丢未变化部分——拒绝并回退全量写
-    if !old_path.exists() {
-        return Err("画布文件不存在（已从磁盘删除）".to_string());
-    }
-    let (_, mut canvas) = read_canvas_file_cached(&state, &root, &file)?;
-    // 防串文件守卫：补丁属于另一画布（陈旧保存回调）→ 拒绝，防跨文件混写
-    if patch.id != canvas.id {
-        return Err("画布身份不匹配，已中止保存".to_string());
-    }
-    if let Some(title) = &patch.title {
-        canvas.title = title.clone();
-    }
-    let parent = old_path
-        .parent()
-        .ok_or_else(|| format!("非法路径：{}", file))?;
-    let new_path = parent.join(format!("{}.atlx", sanitize_filename(&canvas.title)));
-    let new_rel = rel_with_new_title(&file, &canvas.title, "atlx");
-    // 名冲突守卫仅路径漂移（title 变更）时检查——同名时文件就是本次基底，id 必然一致，免每次保存全量重读
-    if old_path != new_path {
-        ensure_no_id_conflict(
-            &new_path,
-            &canvas.id,
-            &|p| read_canvas_file(p).ok().map(|c| c.id),
-            "画布",
-            &canvas.title,
-        )?;
-    }
-    let now = Utc::now().timestamp();
-    // 按稳定 id 合并（removed 幂等；upsert 覆盖同 id 或追加）
-    let removed_nodes: HashSet<&String> = patch.removed_node_ids.iter().collect();
-    canvas.nodes.retain(|n| !removed_nodes.contains(&n.id));
-    for n in &patch.upsert_nodes {
-        match canvas.nodes.iter_mut().find(|x| x.id == n.id) {
-            Some(existing) => *existing = n.clone(),
-            None => canvas.nodes.push(n.clone()),
+    entity_txn::patch_entity(&window, &state, &entity_txn::canvas_io(), &file, &patch, |canvas, patch| {
+        // 按稳定 id 合并（removed 幂等；upsert 覆盖同 id 或追加）
+        let removed_nodes: HashSet<&String> = patch.removed_node_ids.iter().collect();
+        canvas.nodes.retain(|n| !removed_nodes.contains(&n.id));
+        for n in &patch.upsert_nodes {
+            match canvas.nodes.iter_mut().find(|x| x.id == n.id) {
+                Some(existing) => *existing = n.clone(),
+                None => canvas.nodes.push(n.clone()),
+            }
         }
-    }
-    let removed_edges: HashSet<&String> = patch.removed_edge_ids.iter().collect();
-    canvas.edges.retain(|e| !removed_edges.contains(&e.id));
-    for e in &patch.upsert_edges {
-        match canvas.edges.iter_mut().find(|x| x.id == e.id) {
-            Some(existing) => *existing = e.clone(),
-            None => canvas.edges.push(e.clone()),
+        let removed_edges: HashSet<&String> = patch.removed_edge_ids.iter().collect();
+        canvas.edges.retain(|e| !removed_edges.contains(&e.id));
+        for e in &patch.upsert_edges {
+            match canvas.edges.iter_mut().find(|x| x.id == e.id) {
+                Some(existing) => *existing = e.clone(),
+                None => canvas.edges.push(e.clone()),
+            }
         }
-    }
-    canvas.updated_at = now;
-    write_canvas_file(&new_path, &canvas)?;
-    remove_replaced_file(&old_path, &new_path, "画布")?;
-    cache_evict_canvas(&state, &file);
-    cache_put_canvas(&state, &new_path, &new_rel, &canvas);
-    // title 漂移 = 写盘同时改名：接收方先跟路径再对账
-    let change = if new_rel == file {
-        ContentChange::write(&file)
-    } else {
-        ContentChange::write_drifted(&new_rel, &file)
-    };
-    broadcast_content_changes(&window, &root.to_string_lossy(), vec![change]);
-    Ok(PatchWriteResult { updated_at: now, file: new_rel })
+    })
 }
 
 /// 增量补丁写入结果：写入后的 `updated_at` 与**落盘后**的相对路径（title 变更改了文件名，
@@ -354,43 +274,7 @@ pub fn rename_canvas_vault(
     new_title: String,
     state: State<'_, VaultState>,
 ) -> Result<(), String> {
-    let root = state.root()?;
-    let old_path = safe_join(&root, &file, false)?;
-    let mut canvas = read_canvas_file(&old_path)?;
-    canvas.title = new_title;
-    canvas.updated_at = Utc::now().timestamp();
-    let parent = old_path
-        .parent()
-        .ok_or_else(|| format!("非法路径：{}", file))?;
-    let new_path = parent.join(format!("{}.atlx", sanitize_filename(&canvas.title)));
-    // 目标已被另一画布占用（内部 id 不同，文件名与 title 脱钩时前端 dedupe 防不住）时拒绝覆盖，
-    // 防静默丢失（同 write_canvas_vault 的保存守卫；同物理文件 = case-only 改名豁免）
-    if !same_physical_file(&old_path, &new_path) {
-        ensure_no_id_conflict(
-            &new_path,
-            &canvas.id,
-            &|p| read_canvas_file(p).ok().map(|c| c.id),
-            "画布",
-            &canvas.title,
-        )?;
-    }
-    // 先写新文件再删旧文件，保证不丢数据
-    write_canvas_file(&new_path, &canvas)?;
-    remove_replaced_file(&old_path, &new_path, "画布")?;
-    let new_rel = rel_with_new_title(&file, &canvas.title, "atlx");
-    // 重命名路径变化：清旧缓存键 + 新路径按新指纹入缓存
-    if new_path != old_path {
-        cache_evict_canvas(&state, &file);
-        cache_put_canvas(&state, &new_path, &new_rel, &canvas);
-    }
-    // 路径漂移 = 迁移（接收方跟路径后重读）；同名落点也是内容改写（title/updated_at），按写盘广播
-    let change = if new_path != old_path {
-        ContentChange::rename(&file, &new_rel)
-    } else {
-        ContentChange::write(&file)
-    };
-    broadcast_content_changes(&window, &root.to_string_lossy(), vec![change]);
-    Ok(())
+    entity_txn::rename_entity(&window, &state, &entity_txn::canvas_io(), &file, new_title)
 }
 
 /// 移动画布文件到新路径（跨目录，拖动文件到文件夹用）。画布不被其他文件引用，
@@ -1270,7 +1154,6 @@ pub fn create_canvas_vault(
     dir: String,
     state: State<'_, VaultState>,
 ) -> Result<CanvasCreateResult, String> {
-    let root = state.root()?;
     let id = nanoid!();
     let now = Utc::now().timestamp();
     let canvas = CanvasFile {
@@ -1282,20 +1165,8 @@ pub fn create_canvas_vault(
         created_at: now,
         updated_at: now,
     };
-    // 目标路径：dir（相对仓库根，空 = 根目录）+ <sanitized-title>.atlx
-    let filename = format!("{}.atlx", sanitize_filename(&title));
-    let rel = if dir.is_empty() {
-        filename
-    } else {
-        format!("{dir}/{filename}")
-    };
-    let path = safe_join(&root, &rel, true)?;
-    // 后端兜底：同名画布已存在则拒绝（前端 dedupe 是正常路径，此处防绕过/同步盘合并覆盖）
-    if path.exists() {
-        return Err(format!("画布名冲突：{}", title));
-    }
-    write_canvas_file(&path, &canvas)?;
-    Ok(CanvasCreateResult { id, file: rel })
+    let (id, file) = entity_txn::create_entity(&state, &entity_txn::canvas_io(), &dir, canvas)?;
+    Ok(CanvasCreateResult { id, file })
 }
 
 /// `create_canvas_vault` 返回值：id（运行时身份）+ file（磁盘定位）。

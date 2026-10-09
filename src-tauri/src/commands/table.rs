@@ -11,15 +11,15 @@ use serde::Serialize;
 use tauri::{Manager, State, WebviewWindow};
 
 use super::content_broadcast::{broadcast_content_changes, ContentChange};
+use super::entity_txn;
 use super::temp_attachment::{instance_temp_dir, validate_table_id, TempComponent};
 use crate::commands::vault::{
-    collect_ref_updates, ensure_no_id_conflict, flush_canvas_updates, mime_from_ext,
-    remove_replaced_file, PatchWriteResult,
+    collect_ref_updates, flush_canvas_updates, mime_from_ext, PatchWriteResult,
 };
 use crate::vault::{
-    cache_evict_table, cache_put_table, delete_vault_file, read_table_file, read_table_file_cached,
-    reorder_by, rename_note_file, rel_with_new_title, safe_join, same_physical_file,
-    sanitize_filename, write_table_file, TableField, TableFile, TablePatch, VaultState,
+    delete_vault_file, read_table_file,
+    reorder_by, rename_note_file, safe_join,
+    sanitize_filename, TableField, TableFile, TablePatch, VaultState,
     TABLE_SCHEMA,
 };
 
@@ -38,7 +38,6 @@ pub fn create_table_vault(
     dir: String,
     state: State<'_, VaultState>,
 ) -> Result<TableCreateResult, String> {
-    let root = state.root()?;
     let id = nanoid!();
     let now = Utc::now().timestamp();
     let table = TableFile {
@@ -57,19 +56,8 @@ pub fn create_table_vault(
         created_at: now,
         updated_at: now,
     };
-    let filename = format!("{}.atb", sanitize_filename(&title));
-    let rel = if dir.is_empty() {
-        filename
-    } else {
-        format!("{dir}/{filename}")
-    };
-    let path = safe_join(&root, &rel, true)?;
-    // 后端兜底：同名表格已存在则拒绝（前端 dedupe 是正常路径，此处防绕过/同步盘合并覆盖）
-    if path.exists() {
-        return Err(format!("表格名冲突：{}", title));
-    }
-    write_table_file(&path, &table)?;
-    Ok(TableCreateResult { id, file: rel })
+    let (id, file) = entity_txn::create_entity(&state, &entity_txn::table_io(), &dir, table)?;
+    Ok(TableCreateResult { id, file })
 }
 
 /// 读 .atb 文件（按相对仓库根路径，如 `项目A/分镜.atb`）。
@@ -86,56 +74,11 @@ pub fn read_table_vault(file: String, state: State<'_, VaultState>) -> Result<Ta
 #[tauri::command]
 pub fn write_table_vault(
     window: WebviewWindow,
-    mut table: TableFile,
+    table: TableFile,
     file: String,
     state: State<'_, VaultState>,
 ) -> Result<i64, String> {
-    let root = state.root()?;
-    let old_path = safe_join(&root, &file, false)?;
-    let parent = old_path
-        .parent()
-        .ok_or_else(|| format!("非法路径：{}", file))?;
-    let new_path = parent.join(format!("{}.atb", sanitize_filename(&table.title)));
-    // 新路径已存在且 id 不同（前端 dedupe 被绕过/同步盘合并）：拒绝覆盖
-    ensure_no_id_conflict(
-        &new_path,
-        &table.id,
-        &|p| read_table_file(p).ok().map(|t| t.id),
-        "表格",
-        &table.title,
-    )?;
-    let now = Utc::now().timestamp();
-    // createdAt 保留：读一次磁盘（缓存命中免重读；文件缺失 = 新表用 now）
-    if old_path.exists() {
-        let (_, disk) = read_table_file_cached(&state, &root, &file)
-            .map_err(|e| format!("磁盘表格文件损坏，无法保存：{} ({e})", old_path.display()))?;
-        table.created_at = disk.created_at;
-    } else {
-        table.created_at = now;
-    }
-    table.updated_at = now;
-    let new_rel = rel_with_new_title(&file, &table.title, "atb");
-    write_table_file(&new_path, &table)?;
-    // title 变更导致路径漂移：table 节点按 file 路径引用，须同步全部 .atlx（防断链）
-    if old_path != new_path {
-        let pending = collect_ref_updates(&root, &file, &new_rel)?;
-        if let Err(e) = flush_canvas_updates(&pending) {
-            // 回滚：删新文件（旧文件未动、引用未刷，保持原名），防改名后引用断裂
-            let _ = std::fs::remove_file(&new_path);
-            return Err(format!("更新画布引用失败：{e}"));
-        }
-        remove_replaced_file(&old_path, &new_path, "表格")?;
-    }
-    cache_evict_table(&state, &file);
-    cache_put_table(&state, &new_path, &new_rel, &table);
-    // title 漂移 = 写盘同时改名：接收方先跟路径再对账
-    let change = if new_rel == file {
-        ContentChange::write(&file)
-    } else {
-        ContentChange::write_drifted(&new_rel, &file)
-    };
-    broadcast_content_changes(&window, &root.to_string_lossy(), vec![change]);
-    Ok(now)
+    entity_txn::write_entity(&window, &state, &entity_txn::table_io(), &file, table)
 }
 
 /// 增量保存 .atb（自动保存主路径）：只写变化/新增/删除的字段与行（前端按引用 diff 计算补丁），
@@ -149,82 +92,33 @@ pub fn patch_table_vault(
     file: String,
     state: State<'_, VaultState>,
 ) -> Result<PatchWriteResult, String> {
-    let root = state.root()?;
-    let old_path = safe_join(&root, &file, false)?;
-    // 磁盘文件缺失（外部删除）：补丁只有变化实体，重建会丢未变化部分——拒绝并回退全量写
-    if !old_path.exists() {
-        return Err("表格文件不存在（已从磁盘删除）".to_string());
-    }
-    let (_, mut table) = read_table_file_cached(&state, &root, &file)?;
-    // 防串文件守卫：补丁属于另一表格（陈旧保存回调）→ 拒绝，防跨文件混写
-    if patch.id != table.id {
-        return Err("表格身份不匹配，已中止保存".to_string());
-    }
-    if let Some(title) = &patch.title {
-        table.title = title.clone();
-    }
-    let parent = old_path
-        .parent()
-        .ok_or_else(|| format!("非法路径：{}", file))?;
-    let new_path = parent.join(format!("{}.atb", sanitize_filename(&table.title)));
-    let new_rel = rel_with_new_title(&file, &table.title, "atb");
-    // 名冲突守卫仅路径漂移（title 变更）时检查——同名时文件就是本次基底，id 必然一致，免每次保存全量重读
-    if old_path != new_path {
-        ensure_no_id_conflict(
-            &new_path,
-            &table.id,
-            &|p| read_table_file(p).ok().map(|t| t.id),
-            "表格",
-            &table.title,
-        )?;
-    }
-    let now = Utc::now().timestamp();
-    // 按稳定 id 合并（removed 幂等；upsert 覆盖同 id 或追加）
-    let removed_fields: HashSet<&String> = patch.removed_field_ids.iter().collect();
-    table.fields.retain(|f| !removed_fields.contains(&f.id));
-    for f in &patch.upsert_fields {
-        match table.fields.iter_mut().find(|x| x.id == f.id) {
-            Some(existing) => *existing = f.clone(),
-            None => table.fields.push(f.clone()),
+    entity_txn::patch_entity(&window, &state, &entity_txn::table_io(), &file, &patch, |table, patch| {
+        // 按稳定 id 合并（removed 幂等；upsert 覆盖同 id 或追加）
+        let removed_fields: HashSet<&String> = patch.removed_field_ids.iter().collect();
+        table.fields.retain(|f| !removed_fields.contains(&f.id));
+        for f in &patch.upsert_fields {
+            match table.fields.iter_mut().find(|x| x.id == f.id) {
+                Some(existing) => *existing = f.clone(),
+                None => table.fields.push(f.clone()),
+            }
         }
-    }
-    let removed_rows: HashSet<&String> = patch.removed_row_ids.iter().collect();
-    table.rows.retain(|r| !removed_rows.contains(&r.id));
-    for r in &patch.upsert_rows {
-        match table.rows.iter_mut().find(|x| x.id == r.id) {
-            Some(existing) => *existing = r.clone(),
-            None => table.rows.push(r.clone()),
+        let removed_rows: HashSet<&String> = patch.removed_row_ids.iter().collect();
+        table.rows.retain(|r| !removed_rows.contains(&r.id));
+        for r in &patch.upsert_rows {
+            match table.rows.iter_mut().find(|x| x.id == r.id) {
+                Some(existing) => *existing = r.clone(),
+                None => table.rows.push(r.clone()),
+            }
         }
-    }
-    // 顺序变化（拖拽排序/复制行/左右插列）：按补丁携带的 id 全序重排——
-    // 已删 id 的下标自然空置，order 未出现的实体（并发新增）保持相对顺序置尾
-    if let Some(order) = &patch.field_order {
-        reorder_by(&mut table.fields, order, |f| f.id.as_str());
-    }
-    if let Some(order) = &patch.row_order {
-        reorder_by(&mut table.rows, order, |r| r.id.as_str());
-    }
-    table.updated_at = now;
-    write_table_file(&new_path, &table)?;
-    // title 变更导致路径漂移：table 节点按 file 路径引用，须同步全部 .atlx（防断链）
-    if old_path != new_path {
-        let pending = collect_ref_updates(&root, &file, &new_rel)?;
-        if let Err(e) = flush_canvas_updates(&pending) {
-            // 回滚：删新文件（旧文件未动、引用未刷，保持原名），防改名后引用断裂
-            let _ = std::fs::remove_file(&new_path);
-            return Err(format!("更新画布引用失败：{e}"));
+        // 顺序变化（拖拽排序/复制行/左右插列）：按补丁携带的 id 全序重排——
+        // 已删 id 的下标自然空置，order 未出现的实体（并发新增）保持相对顺序置尾
+        if let Some(order) = &patch.field_order {
+            reorder_by(&mut table.fields, order, |f| f.id.as_str());
         }
-        remove_replaced_file(&old_path, &new_path, "表格")?;
-    }
-    cache_put_table(&state, &new_path, &new_rel, &table);
-    // title 漂移 = 写盘同时改名：接收方先跟路径再对账
-    let change = if new_rel == file {
-        ContentChange::write(&file)
-    } else {
-        ContentChange::write_drifted(&new_rel, &file)
-    };
-    broadcast_content_changes(&window, &root.to_string_lossy(), vec![change]);
-    Ok(PatchWriteResult { updated_at: now, file: new_rel })
+        if let Some(order) = &patch.row_order {
+            reorder_by(&mut table.rows, order, |r| r.id.as_str());
+        }
+    })
 }
 
 /// 重命名表格：更新 .atb 内 title + 同目录重命名文件 + 扫描所有 .atlx 更新 table 节点引用。
@@ -236,49 +130,7 @@ pub fn rename_table_vault(
     new_title: String,
     state: State<'_, VaultState>,
 ) -> Result<(), String> {
-    let root = state.root()?;
-    let old_path = safe_join(&root, &file, false)?;
-    let parent = old_path
-        .parent()
-        .ok_or_else(|| format!("非法路径：{}", file))?;
-    let new_path = parent.join(format!("{}.atb", sanitize_filename(&new_title)));
-    let new_rel = rel_with_new_title(&file, &new_title, "atb");
-    let old_table = read_table_file(&old_path)?;
-    let same_file = same_physical_file(&old_path, &new_path);
-    // 目标已存在且非同文件：读现存 id 比对，异表拒绝覆盖（同 write_table_vault，防同步盘合并/
-    // 隐藏/排除目录绕过前端 dedupe 时静默覆盖另一表格）
-    if !same_file {
-        ensure_no_id_conflict(
-            &new_path,
-            &old_table.id,
-            &|p| read_table_file(p).ok().map(|t| t.id),
-            "表格",
-            &new_title,
-        )?;
-    }
-    let pending = collect_ref_updates(&root, &file, &new_rel)?;
-    let mut table = old_table.clone();
-    table.title = new_title;
-    table.updated_at = Utc::now().timestamp();
-    // 先写新文件再删旧文件，保证不丢数据
-    write_table_file(&new_path, &table)?;
-    remove_replaced_file(&old_path, &new_path, "表格")?;
-    if let Err(e) = flush_canvas_updates(&pending) {
-        // 尽力回滚：恢复旧文件（旧标题），清理新文件
-        let _ = write_table_file(&old_path, &old_table);
-        if old_path != new_path {
-            let _ = std::fs::remove_file(&new_path);
-        }
-        return Err(format!("更新画布引用失败，重命名已回滚（请重试）：{e}"));
-    }
-    // 路径漂移 = 迁移（接收方跟路径后重读）；同名落点也是内容改写（title/updated_at），按写盘广播
-    let change = if new_rel != file {
-        ContentChange::rename(&file, &new_rel)
-    } else {
-        ContentChange::write(&file)
-    };
-    broadcast_content_changes(&window, &root.to_string_lossy(), vec![change]);
-    Ok(())
+    entity_txn::rename_entity(&window, &state, &entity_txn::table_io(), &file, new_title)
 }
 
 /// 移动表格文件到新路径（跨目录，拖动文件到文件夹用）+ 扫描所有 .atlx 更新 table 节点引用
