@@ -3,7 +3,7 @@
  * 删除 .atb 会连带删除其私有图片附件目录；被画布/表格引用的文件删除后引用处降级为「文件缺失」。
  * 依赖 `capabilities.deleteFile`（vaultStore.deleteFile 按扩展名分发）。
  */
-import { ToolArgsError } from "@/types";
+import { ToolArgsError } from "@/utils/errors";
 import { HIDDEN_PATH_ERROR, hasHiddenSegment } from "@/constants/tools";
 import { defineTool } from "./defineTool";
 

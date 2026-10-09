@@ -20,7 +20,7 @@ import { CompositionPanel } from "@/components/plugins/CompositionPanel";
 import { DEFAULT_COMPOSITION } from "@/components/plugins/cordis/builtins";
 import { deriveThemeProviders, isThemePluginRow } from "@/utils/pluginTheme";
 import { composePlugins, compositionPackages } from "@/utils/cordis/composition";
-import { errText } from "@/types";
+import { errText } from "@/utils/errors";
 import {
   PLUGIN_SOURCE_LABELS,
   PLUGIN_TYPE_LABELS,

@@ -12,7 +12,7 @@ export type CollabSelection = TableSelection | { kind: "node"; nodeId: string };
 
 /** 画布对话节点独占编辑锁声明（presence 携带）。
  * 确定性锁主判定 = since 最小；同 since 按 peerId 递增取小（服务端全局递增分配，确定性）。 */
-export interface CollabLockClaim {
+interface CollabLockClaim {
   /** 对话节点 id。 */
   id: string;
   /** 获取时间戳（ms）。 */

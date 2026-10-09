@@ -1,5 +1,5 @@
 /** 供应商下的单个模型：id = API 请求用的模型名；nickname = 可选显示昵称（缺省 = id）。 */
-export interface ProviderModel {
+interface ProviderModel {
   id: string;
   nickname?: string;
 }

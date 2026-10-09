@@ -10,7 +10,7 @@ import type { AgentStep, Attachment } from "./message";
 import type { ConversationCompaction } from "./compaction";
 import type { ReasoningEffort } from "./provider";
 
-export type EditorChatRole = "user" | "assistant";
+type EditorChatRole = "user" | "assistant";
 
 /**
  * 用户消息发送时固化的笔记引用（拖入输入框的 @引用，运行时有效）。

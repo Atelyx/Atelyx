@@ -62,7 +62,7 @@ export interface TextFileData {
 }
 
 /** 媒体节点：内容在独立文件（仓库附件或未入库的临时件），此处存路径引用 + 元数据。 */
-export interface MediaFileData {
+interface MediaFileData {
   /** 仓库相对路径：`.atelyx/temp/<canvasKey>/…` = 未入库临时件，其余 = 仓库附件；缺省 = 内容只在节点自身（thumb/body 内嵌） */
   file?: string;
   mime: string;
@@ -263,7 +263,7 @@ export interface LinkRewriteResult {
   rewritten: string[];
 }
 
-export type SearchProvider = "tavily" | "searxng";
+type SearchProvider = "tavily" | "searxng";
 
 /** 仓库级搜索源配置（.atelyx/config.json 的 VaultConfig.search）。
  * Tavily key 默认走 keychain 条目（按仓库身份哈希隔离），不落文件；

@@ -9,7 +9,6 @@ import { remapDirKey } from "@/utils/filename";
 import { createPersistController } from "@/utils/persist";
 import { layoutBootstrap, layoutFlush, layoutOp, onLayoutBroadcast, uiStatePatch } from "@/services/layout";
 import {
-  createDefaultScenes,
   type DetachedWindow,
   type LayoutNode,
   type Scene,
@@ -17,6 +16,7 @@ import {
   type ViewKind,
   type WorkspaceLayout,
 } from "@/types/workspaceLayout";
+import { createDefaultScenes } from "@/utils/workspaceLayout";
 import { type AppUiState, type LayoutOp, type LayoutOpResult, type RecentFileEntry } from "@/types";
 
 interface UiStateStore {

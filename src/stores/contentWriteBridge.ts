@@ -16,7 +16,7 @@ import { openNoteSessionFiles } from "@/stores/noteSessionStore";
 import { adoptRemoteNoteRelocate } from "@/stores/noteCollabStore";
 
 /** 一条内容变更（相对仓库根路径）。 */
-export type ContentWriteChange =
+type ContentWriteChange =
   | { kind: "write"; file: string; from?: string }
   | { kind: "rename"; from: string; file: string };
 

@@ -4,7 +4,7 @@
  */
 
 /** 目录浏览条目（只列子目录）。 */
-export interface AbsoluteDirEntry {
+interface AbsoluteDirEntry {
   name: string;
   /** 子目录绝对路径（规范化后） */
   path: string;

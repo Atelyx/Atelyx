@@ -7,7 +7,7 @@ import { decodeLinkHref, isOpenableUrl } from "@/utils/markdown";
 import { noteTitleFromFile } from "@/utils/filename";
 import { isNoteCreatableHref, isNotePathHit, type MarkdownEditorLinks } from "./markdownLinks";
 
-export interface MarkdownInteractionOptions {
+interface MarkdownInteractionOptions {
   links?: MarkdownEditorLinks;
   onOpenUrl: (url: string) => void;
   readImage: (src: string) => Promise<string | null>;

@@ -3,7 +3,7 @@
  * 跨轮次以**尾部上下文块**带出当前清单（currentTodosBlock，不进系统提示词——保前缀缓存命中）供模型跟踪长任务进度。
  * 清单随会话存 `.atelyx/todos/`（隐藏屏蔽的刻意豁免，内部能力写入）；非 parallelSafe（有副作用），依赖 `capabilities.writeTodos`。
  */
-import { ToolArgsError, errText } from "@/types";
+import { errText, ToolArgsError } from "@/utils/errors";
 import type { TodoItem } from "@/types";
 import { defineTool } from "./defineTool";
 

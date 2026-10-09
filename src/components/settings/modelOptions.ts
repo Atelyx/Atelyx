@@ -34,7 +34,7 @@ export function buildModelChoices(
 }
 
 /** 供应商名可重名（用户自定义）：重名时在分组头补短 id 后缀，避免同名供应商的模型在视觉上合并。 */
-export const groupLabel = (p: { id: string; name: string }, nameCounts: Map<string, number>) =>
+const groupLabel = (p: { id: string; name: string }, nameCounts: Map<string, number>) =>
   (nameCounts.get(p.name) ?? 0) > 1 ? `${p.name}（${p.id.slice(0, 6)}）` : p.name;
 
 /** 模型选项：每个供应商的每个模型各一条（同名模型跨供应商**不合并**；仅单供应商内部去重），

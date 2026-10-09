@@ -2,7 +2,7 @@
  * AI 文件工具的仓库能力（read_file / append_file / edit_file / write_file 的落地），I/O 经内容面按激活仓库取后端。
  */
 import { READ_WINDOW_DEFAULT_LINES } from "@/constants/tools";
-import { errText } from "@/types";
+import { errText } from "@/utils/errors";
 import type { GlobVaultResult, GrepVaultResult, ListDirResult, ReadWindowResult } from "@/types";
 import { getActiveContentBackend } from "@/services/content/factory";
 import { emitVaultEvent } from "@/utils/vaultEvents";

@@ -4,13 +4,13 @@
  * `data-md-from/to`，片段分线性（逐字符对应）与原子（整体取边界）两类，定义见 buildSourceIndex。
  */
 
-export interface SourceRun {
+interface SourceRun {
   readonly from: number;
   readonly to: number;
   readonly node: Text;
 }
 
-export interface AtomicSpan {
+interface AtomicSpan {
   readonly from: number;
   readonly to: number;
   readonly el: Element;
@@ -23,7 +23,7 @@ export interface SourceBlock {
 }
 
 /** 标记宿主：直接含源标记字符的元素（块或行内），揭示时给它切 `md-reveal`。 */
-export interface SourceOwner {
+interface SourceOwner {
   readonly from: number;
   readonly to: number;
   readonly el: Element;

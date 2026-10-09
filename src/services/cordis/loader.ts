@@ -4,7 +4,8 @@
  * 审计归属：contextToPluginId 记录插件上下文 → 插件 id（audit.ts 据此归属服务读/事件订阅）。
  */
 import { Context, FiberState, type Fiber, type Inject, type Plugin } from "@atelyx/cordis";
-import { errText, type PluginMountFailure } from "@/types";
+import { type PluginMountFailure } from "@/types";
+import { errText } from "@/utils/errors";
 import { forgetPluginAudit } from "./audit";
 import type { Kernel } from "./kernel";
 

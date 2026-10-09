@@ -43,10 +43,10 @@ export interface ChatTurnMessage {
 }
 
 /** 工具能力覆盖工厂：入参 = 核心的标准能力集（已绑定目标），返回要覆盖的方法（同名覆盖，其余用标准）。 */
-export type ChatCapabilityOverrides = (standard: ToolCapabilities) => Partial<ToolCapabilities>;
+type ChatCapabilityOverrides = (standard: ToolCapabilities) => Partial<ToolCapabilities>;
 
 /** 消费方钩子：核心标准行为之外的分支（缺省 = 标准行为）。 */
-export interface ChatTurnHooks {
+interface ChatTurnHooks {
   /** 每条工具结果回调（画布据此建搜索/写笔记产物节点）。 */
   onToolResult?: (name: string, result: ToolResult) => void;
   /** 覆盖标准工具能力（如把 read_file 包一层做引用物质化）。 */

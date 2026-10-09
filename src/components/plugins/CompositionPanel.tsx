@@ -6,7 +6,8 @@ import { useState } from "react";
 import { usePluginStore } from "@/stores/pluginStore";
 import { DEFAULT_COMPOSITION } from "@/components/plugins/cordis/builtins";
 import { composePlugins, compositionPackages } from "@/utils/cordis/composition";
-import { COMPOSITION_IMPL_DEFAULT, errText, type CompositionBinding } from "@/types";
+import { COMPOSITION_IMPL_DEFAULT, type CompositionBinding } from "@/types";
+import { errText } from "@/utils/errors";
 
 /** 当前生效实现的展示文案。 */
 function describeImplementation(b: CompositionBinding): string {

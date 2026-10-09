@@ -34,7 +34,7 @@ export function isSafeVaultRelPath(src: string): boolean {
 const INLINE_TAG_RE = /(^|[^\p{L}\p{N}_#/])#([\p{L}\p{N}_\-/]+)/gu;
 
 /** 行内 `#标签` 匹配区间（行文本 + 行起点偏移 → 绝对区间；`from` = `#` 位置，`to` 含标签尾）。 */
-export function inlineTagRanges(lineText: string, lineFrom: number): RangeInfo[] {
+function inlineTagRanges(lineText: string, lineFrom: number): RangeInfo[] {
   const out: RangeInfo[] = [];
   INLINE_TAG_RE.lastIndex = 0;
   let m: RegExpExecArray | null;
@@ -49,7 +49,7 @@ export function inlineTagRanges(lineText: string, lineFrom: number): RangeInfo[]
 
 /** `[text](url)` / `![alt](url)`（含可选 title）解析；不匹配返回 null（保持原文）。
  *  URL 可空：`[名]()` 是「快捷新建同名笔记」语法，故两个正则的 URL 组都允许零字符。 */
-export function parseBracketLink(text: string): { label: string; url: string; title: string | null } | null {
+function parseBracketLink(text: string): { label: string; url: string; title: string | null } | null {
   const m =
     /^\[([^\]]*)\]\(([^)\s]*)(?:\s+(["'`][^"'`]*["'`]))?\)$/.exec(text) ||
     /^\[([^\]]*)\]\(([^)]*)\)$/.exec(text);
@@ -60,7 +60,7 @@ export function parseBracketLink(text: string): { label: string; url: string; ti
 
 /** 行内数学 `$...$` 匹配区间（单 `$` 定界、内容不跨行、非 `$$`、内容不以空格起止）；
  *  手动扫描避免 lookbehind（WebKitGTK 兼容）。 */
-export function inlineMathRanges(lineText: string, lineFrom: number): RangeInfo[] {
+function inlineMathRanges(lineText: string, lineFrom: number): RangeInfo[] {
   const out: RangeInfo[] = [];
   let i = 0;
   while (i < lineText.length) {
@@ -86,7 +86,7 @@ export function inlineMathRanges(lineText: string, lineFrom: number): RangeInfo[
 }
 
 /** 块级数学 `$$...$$` 区间（可跨行；同行闭合或 `$$` 开段到下一 `$$` 闭段）。 */
-export function blockMathRanges(docText: string): RangeInfo[] {
+function blockMathRanges(docText: string): RangeInfo[] {
   const out: RangeInfo[] = [];
   const lines = docText.split("\n");
   let i = 0;

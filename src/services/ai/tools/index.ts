@@ -29,7 +29,7 @@ import { DELETE_FILE_TOOL } from "./deleteFile";
 import { DELETE_DIR_TOOL } from "./deleteDir";
 import { TODO_WRITE_TOOL } from "./todoWrite";
 import { createToolRegistry } from "./registry";
-import { errText } from "@/types";
+import { errText } from "@/utils/errors";
 import { FILE_REFERENCE_PROMPT, AGENT_TOOLS_META, type AgentToolMeta } from "@/constants/tools";
 
 /** Agent 模式全部工具（注册顺序 = 名册/浮层展示顺序，与 AGENT_TOOLS_META 一致）。各工具参数类型各异，注册为通用定义。 */

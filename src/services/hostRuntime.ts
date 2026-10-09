@@ -31,13 +31,13 @@ export function hostRuntimeDetach(sessionId: number): Promise<void> {
 }
 
 /** 下行帧事件载荷（会话的 JSON-RPC 消息原文）。 */
-export interface HostFrameEvent {
+interface HostFrameEvent {
   sessionId: number;
   frame: string;
 }
 
 /** 会话结束事件载荷（运行时侧主动结束：模块连续崩溃熔断等）。 */
-export interface HostSessionEndedEvent {
+interface HostSessionEndedEvent {
   sessionId: number;
   reason: string;
 }

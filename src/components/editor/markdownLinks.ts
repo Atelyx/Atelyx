@@ -38,7 +38,7 @@ export function isNoteCreatableHref(url: string): boolean {
 }
 
 /** 单一分类入口：解析期（决定链接形态/样式）与点击期（决定行为）都用它，避免两处实现分叉。 */
-export function resolveLinkForm(href: string, links: MarkdownEditorLinks): LinkForm {
+function resolveLinkForm(href: string, links: MarkdownEditorLinks): LinkForm {
   if (href === "") return "create";
   const url = decodeLinkHref(href);
   if (isOpenableUrl(url)) return "external";

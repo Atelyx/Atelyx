@@ -8,7 +8,7 @@ import { COMPACTION_INSTRUCTION, COMPACTION_MAX_TOKENS } from "@/constants/compa
 import type { LlmFinishReason, LlmMessage, ToolSchema } from "@/types";
 
 /** 压缩失败原因：中止（不算失败，静默）/ 空输出 / 触顶截断 / 请求失败。 */
-export type CompactionFailureReason = "aborted" | "empty" | "truncated" | "failed";
+type CompactionFailureReason = "aborted" | "empty" | "truncated" | "failed";
 
 export type CompactionResult =
   | { ok: true; summary: string }

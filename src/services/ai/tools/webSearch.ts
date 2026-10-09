@@ -2,7 +2,7 @@
  * 工具：联网搜索（web_search）。结果回填上下文，data 供画布建搜索结果节点。
  * 依赖 `capabilities.search`；依赖搜索源配置（needsSearch，未配置时由调用方剔除）。
  */
-import { ToolArgsError } from "@/types";
+import { ToolArgsError } from "@/utils/errors";
 import { defineTool } from "./defineTool";
 
 export interface WebSearchArgs {

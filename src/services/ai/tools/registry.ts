@@ -10,11 +10,12 @@ import type {
   LlmMessage,
   LlmToolCall,
 } from "@/types";
-import { UNKNOWN_TOOL_MSG_PREFIX, errText } from "@/types";
+import { UNKNOWN_TOOL_MSG_PREFIX } from "@/types";
+import { errText } from "@/utils/errors";
 import { MAX_PARALLEL_TOOL_CALLS } from "@/constants/tools";
 
 /** 一次执行结束后的回填工具消息 + 可视化结果 + 原始结果（供调用方 hooks 消费 data 建产物）。 */
-export interface ToolDispatchResult {
+interface ToolDispatchResult {
   messages: LlmMessage[];
   results: ToolExecResult[];
   /** 已成功执行（未被中止跳过）的原始结果，含 data（画布据此建产物节点）。 */

@@ -71,7 +71,7 @@ export interface MarkdownDocument {
 }
 
 /** 宿主注入：判定链接形态（外链 / 仓库路径 / 可新建）；缺省全部判为 "plain"。 */
-export type MarkdownLinkResolver = (href: string) => LinkForm;
+type MarkdownLinkResolver = (href: string) => LinkForm;
 
 /** 解析选项。 */
 export interface ParseOptions {

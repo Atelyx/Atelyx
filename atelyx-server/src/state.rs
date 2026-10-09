@@ -102,8 +102,8 @@ struct ServerStateInner {
     persistent: Mutex<Persisted>,
     /// 派生索引缓存（空间 id → 反链/标签索引；纯内存只读派生，可随时重建，不落盘）。
     index_cache: Mutex<HashMap<String, SpaceIndex>>,
-    /// WS 房间表：`/ws` 与 `/ws/space` 两个入口共用一套房间机制。
-    pub hub: Hub,
+    /// WS 房间表（`/ws/space` 入口的房间机制）。
+    hub: Hub,
     /// 内容写按路径串行化的锁表（整文件写与补丁端点共用）。
     path_locks: PathLocks,
     /// 空间级结构锁表（补丁与改名/移动串行化；与 path_locks 独立成表，键不含路径）。

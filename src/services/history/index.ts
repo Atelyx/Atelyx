@@ -22,7 +22,7 @@ export interface HistoryAuthor {
 }
 
 /** 版本行为枚举（UI 展示 + 回滚决策；历史侧文件中的旧值由展示层 `?? action` 兜底显示原值）。 */
-export type HistoryAction = "edit" | "restore";
+type HistoryAction = "edit" | "restore";
 
 /** 一个历史版本。 */
 export interface HistoryVersion {

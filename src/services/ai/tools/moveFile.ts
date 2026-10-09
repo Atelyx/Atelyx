@@ -3,7 +3,7 @@
  * 目标重名自动加序号，结果以返回的实际路径为准。
  * 依赖 `capabilities.moveFile`（vaultStore.moveFile 按扩展名分发到对应动作）。
  */
-import { ToolArgsError } from "@/types";
+import { ToolArgsError } from "@/utils/errors";
 import { HIDDEN_PATH_ERROR, hasHiddenSegment } from "@/constants/tools";
 import { defineTool } from "./defineTool";
 

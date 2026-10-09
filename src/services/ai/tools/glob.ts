@@ -3,7 +3,7 @@
  * 模式不含「/」时匹配任意深度的文件名（「*」即整棵树），含「/」才锚定层级。
  * 依赖 `capabilities.glob`（Rust `glob_vault`）；只读，不建产物节点。
  */
-import { ToolArgsError, errText } from "@/types";
+import { errText, ToolArgsError } from "@/utils/errors";
 import { GLOB_MAX_RESULTS, HIDDEN_PATH_ERROR, hasHiddenSegment } from "@/constants/tools";
 import { defineTool } from "./defineTool";
 

@@ -5,7 +5,7 @@
  * 插件清单声明（`atelyx.compositionPatch`）→ 用户层（`global.json`）。
  */
 /** 生效实现来源：default = 行自身；plugin = 插件清单声明；user = 用户层钉住。 */
-export type CompositionImplSource = "default" | "plugin" | "user";
+type CompositionImplSource = "default" | "plugin" | "user";
 
 /** 用户层「恢复该行默认实现」的取值（其余取值一律按插件 id 解释）。 */
 export const COMPOSITION_IMPL_DEFAULT = "default";

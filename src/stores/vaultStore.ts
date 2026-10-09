@@ -38,7 +38,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { useUiStateStore } from "@/stores/uiStateStore";
 import { useNotificationStore } from "@/stores/notificationStore";
 import { baseName, dedupeFilename, parentDir, sanitizeFilename, siblingPath, stripExt } from "@/utils/filename";
-import { errText } from "@/types";
+import { errText } from "@/utils/errors";
 import type { BacklinkRow, CanvasFileRow, DeleteFolderResult, FileTreeNode, RebuildLinksResult, TagRow } from "@/types";
 
 /**

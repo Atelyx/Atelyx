@@ -2,7 +2,7 @@
  * 工具：编辑文件（edit_file）。对仓库内任意文本文件做行级修改：每项 oldText 唯一精确匹配、
  * 块间不重叠，全部校验通过后统一替换（原子写）。依赖 `capabilities.editFile`。不建产物节点。
  */
-import { ToolArgsError, errText } from "@/types";
+import { errText, ToolArgsError } from "@/utils/errors";
 import { HIDDEN_PATH_ERROR, hasHiddenSegment } from "@/constants/tools";
 import { defineTool } from "./defineTool";
 

@@ -48,7 +48,7 @@ export interface ChatContainerView {
 }
 
 /** 会话元数据增量片段（按 id 折叠；null = 清除——会话字段以 undefined 表示「无」，线上需显式区分）。 */
-export interface ChatSessionMetaFragment {
+interface ChatSessionMetaFragment {
   id: string;
   file?: string;
   title?: string | null;
@@ -60,14 +60,14 @@ export interface ChatSessionMetaFragment {
 }
 
 /** 消息增量：upserts 按 id 原位替换或末尾追加；keepCount = 截断为前 N 条（回滚/重新生成）。 */
-export interface ChatMessageDelta {
+interface ChatMessageDelta {
   sessionId: string;
   upserts: EditorChatMessage[];
   keepCount?: number;
 }
 
 /** 容器全局面状态增量（字段级，仅携带变化项）。 */
-export interface ChatContainerStatusFragment {
+interface ChatContainerStatusFragment {
   streaming?: boolean;
   compacting?: string | null;
   persistError?: { message: string; at: number } | null;
@@ -88,7 +88,7 @@ export interface ChatDeltaFragments {
 }
 
 /** 宿主 → 全部窗口的增量广播（seq 单调；镜像仅应用 seq 更大者）。 */
-export interface ChatContainerDelta extends ChatDeltaFragments {
+interface ChatContainerDelta extends ChatDeltaFragments {
   seq: number;
   /** 引起本批变更的镜像 opId（宿主自身改动 = 空）；镜像据此抑制自身回声的插件事件转发。 */
   opOwners: string[];
@@ -142,7 +142,7 @@ export interface ChatOpOutcome {
   createdSessionId?: string;
 }
 
-export type ChatContainerResponse =
+type ChatContainerResponse =
   | { requestId: string; kind: "snapshot"; snapshot: ChatContainerSnapshot }
   | {
       requestId: string;
@@ -183,7 +183,7 @@ function currentWindowLabel(): string {
 // ---------- 纯函数：进线载荷整备 / 差分 / 折叠 ----------
 
 /** 剥离附件运行时缓存（payload 只活在各窗口本地，镜像自行按引用水合）。 */
-export function stripMessageForWire(m: EditorChatMessage): EditorChatMessage {
+function stripMessageForWire(m: EditorChatMessage): EditorChatMessage {
   if (!m.attachments?.length) return m;
   return { ...m, attachments: m.attachments.map(({ payload: _payload, ...rest }) => rest) };
 }
@@ -243,7 +243,7 @@ function diffMessages(
 }
 
 /** 相邻容器状态 → 增量片段（纯函数；updatedAt 单独变化不产出——每窗口「最近使用」置顶不进容器广播）。 */
-export function computeChatDeltaFragments(
+function computeChatDeltaFragments(
   prev: ChatContainerView,
   next: ChatContainerView,
 ): ChatDeltaFragments {
@@ -434,7 +434,7 @@ let hostFlushTimer: ReturnType<typeof setTimeout> | null = null;
 let hostOpOwner: string | null = null;
 
 /** 安装宿主（每窗口一次；请求监听 + 状态订阅差分）。 */
-export function installChatContainerHost(handlers: ChatContainerHostHandlers): void {
+function installChatContainerHost(handlers: ChatContainerHostHandlers): void {
   if (hostHandlers) return;
   hostHandlers = handlers;
   hostLastView = handlers.getView();
@@ -577,7 +577,7 @@ const mirrorPending = new Map<
 const mirrorOpIds = new Map<string, number>();
 
 /** 安装镜像（每窗口一次；响应与增量监听）。 */
-export function installChatContainerMirror(handlers: ChatContainerMirrorHandlers): void {
+function installChatContainerMirror(handlers: ChatContainerMirrorHandlers): void {
   if (mirrorHandlers) return;
   mirrorHandlers = handlers;
   void listen<ChatContainerResponse>(RESPONSE_EVENT, (e) => {

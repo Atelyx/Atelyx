@@ -170,7 +170,7 @@ export function computeColumnCalc(field: TableField, rows: TableRow[]): string |
 // ===== 增量补丁计算（保存写盘 / 协作实时广播共用）=====
 
 /** id 序列是否逐位一致（长度不同即不等）。数组顺序是数组属性，引用 diff 看不见，必须显式比对。 */
-export function sameIdSequence(a: { id: string }[], b: { id: string }[]): boolean {
+function sameIdSequence(a: { id: string }[], b: { id: string }[]): boolean {
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) {
     if (a[i].id !== b[i].id) return false;

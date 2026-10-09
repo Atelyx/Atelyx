@@ -15,7 +15,7 @@ import {
 import { readGlobalConfig } from "@/services/global";
 import type { DeviceInfo } from "@/services/space/client";
 
-export interface SpaceServerEntry {
+interface SpaceServerEntry {
   serverUrl: string;
   userId: string;
   username: string;

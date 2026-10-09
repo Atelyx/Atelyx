@@ -55,7 +55,7 @@ import type { DeviceInfo, InviteInfo } from "@/types/space";
 // 设备会话与邀请码的服务端 JSON 形状落位 types/space（组件层引用需经 types 契约层）
 export type { DeviceInfo, InviteInfo };
 
-export interface AuthResponse {
+interface AuthResponse {
   userId: string;
   username: string;
   displayName: string;
@@ -63,7 +63,7 @@ export interface AuthResponse {
   sessionId: string;
 }
 
-export interface Credentials {
+interface Credentials {
   username: string;
   password: string;
   displayName?: string;
@@ -78,12 +78,12 @@ export interface SpaceSummary {
   createdAt: number;
 }
 
-export interface CreateSpaceBody {
+interface CreateSpaceBody {
   name: string;
   path?: string;
 }
 
-export interface CreateSpaceResult {
+interface CreateSpaceResult {
   spaceId: string;
   name: string;
   role: string;
@@ -110,11 +110,11 @@ export interface AcceptInviteResult {
   role: string;
 }
 
-export interface SpaceMeta {
+interface SpaceMeta {
   values: Record<string, string>;
 }
 
-export interface MetaPatchBody {
+interface MetaPatchBody {
   values: Record<string, string>;
 }
 
@@ -127,7 +127,7 @@ export interface TreeNode {
   children: TreeNode[];
 }
 
-export interface FileContent {
+interface FileContent {
   content: string;
   /** 文件 mtime（unix 秒，展示/排序用元数据）。 */
   updatedAt: number;
@@ -136,53 +136,53 @@ export interface FileContent {
 }
 
 /** 读文件选项：`encoding: "base64"` = 原始字节按标准 base64 返回（附件/媒体等二进制内容必须走 base64，文本读会损坏字节）。 */
-export interface ReadFileOptions {
+interface ReadFileOptions {
   encoding?: "base64";
 }
 
-export interface WriteFileBody {
+interface WriteFileBody {
   path: string;
   content: string;
   /** 缺省 = content 按文本落盘；`base64` = content 为标准 base64，服务端解码后按字节落盘（限额按解码后字节计）。 */
   encoding?: "base64";
 }
 
-export interface PatchCanvasBody {
+interface PatchCanvasBody {
   path: string;
   patch: CanvasPatch;
 }
 
-export interface PatchTableBody {
+interface PatchTableBody {
   path: string;
   patch: TablePatch;
 }
 
 /** 补丁端点结果：写入后 mtime（展示用）与实际落盘路径（title 改名漂移时为新路径）。 */
-export interface SpacePatchResult {
+interface SpacePatchResult {
   updatedAt: number;
   file: string;
 }
 
-export interface RenameBody {
+interface RenameBody {
   oldPath: string;
   newPath: string;
 }
 
-export interface CopyBody {
+interface CopyBody {
   fromPath: string;
   toPath: string;
 }
 
-export interface CreateFolderBody {
+interface CreateFolderBody {
   path: string;
 }
 
-export interface DeleteFolderBody {
+interface DeleteFolderBody {
   path: string;
   force?: boolean;
 }
 
-export interface DeleteFolderResult {
+interface DeleteFolderResult {
   needsConfirm?: boolean;
   deleted?: boolean;
   /** 递归条目数（含隐藏项；删除确认弹窗文案用）。 */
@@ -250,14 +250,14 @@ export interface SpaceClient {
 }
 
 /** 历史版本作者（与 `services/history` 的 HistoryAuthor 同形状）。 */
-export interface HistoryRecordAuthor {
+interface HistoryRecordAuthor {
   id: string;
   name: string;
   device: string;
 }
 
 /** `POST /history/record` 请求体（judgement 判据由客户端表达，服务端不感知内容格式）。 */
-export interface HistoryRecordBody {
+interface HistoryRecordBody {
   kind: "note" | "canvas" | "table";
   file: string;
   content: string;
@@ -275,7 +275,7 @@ export interface HistoryRecordBody {
 }
 
 /** 历史版本行（聚合返回，不含全文）。 */
-export interface SpaceHistoryEntry {
+interface SpaceHistoryEntry {
   file: string;
   kind: string;
   ts: number;
@@ -288,7 +288,7 @@ export interface SpaceHistoryEntry {
 }
 
 /** `GET /history/aggregate` 返回：版本流（ts 倒序、上限）+ 全量版本时间戳。 */
-export interface SpaceHistoryAggregate {
+interface SpaceHistoryAggregate {
   entries: SpaceHistoryEntry[];
   timestamps: number[];
 }
@@ -325,11 +325,6 @@ let sessionExpiredHandler: SessionExpiredHandler | null = null;
  */
 export function setSpaceSessionExpiredHandler(handler: SessionExpiredHandler | null): void {
   sessionExpiredHandler = handler;
-}
-
-export interface CreateSpaceClientOptions {
-  /** 取当前 Bearer 令牌（每次鉴权请求前调用；登录/注册端点传空串即不携带）。 */
-  getToken: () => Promise<string>;
 }
 
 /**

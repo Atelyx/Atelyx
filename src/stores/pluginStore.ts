@@ -10,7 +10,6 @@ import { create } from "zustand";
 import type { ComponentType } from "react";
 import type { InstalledPlugin, PluginIndexEntry, PluginManifest, PluginPackageJson } from "@/types";
 import {
-  errText,
   type CompositionResolution,
   type CompositionUserPatches,
   type PluginAuditEntry,
@@ -20,6 +19,7 @@ import {
   type PluginSlotChain,
   type SlotConflictRow,
 } from "@/types";
+import { errText } from "@/utils/errors";
 import type { AppUiState } from "@/types";
 import {
   getAssemblyVersion,

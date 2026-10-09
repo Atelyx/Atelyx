@@ -1,7 +1,7 @@
 /**
  * 笔记撤销栈：按文件全文快照 + 时间合并，会话内内存驻留、**不落盘**。
  */
-export interface NoteUndoEntry {
+interface NoteUndoEntry {
   content: string;
   ts: number;
 }

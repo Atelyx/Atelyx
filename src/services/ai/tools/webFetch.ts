@@ -2,7 +2,7 @@
  * 工具：抓取网页（web_fetch）。抓取指定 URL 的正文回填上下文，不建画布产物节点；依赖 `capabilities.fetchUrl`（后端代理）。
  * 结果自描述：正文为空时显式报「可能为动态渲染/需登录」（AI 可判别抓取失败 vs 页面无内容），非空时附字符数与截断标记。
  */
-import { ToolArgsError, errText } from "@/types";
+import { errText, ToolArgsError } from "@/utils/errors";
 import { WEB_FETCH_TITLE_PREVIEW } from "@/constants/tools";
 import { defineTool } from "./defineTool";
 

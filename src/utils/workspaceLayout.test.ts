@@ -11,13 +11,13 @@ import {
   collectAllViews,
   collectPanels,
   collectTabs,
+  createPanel,
+  createTab,
   findPanel,
   findViewHost,
   resolveEntryScene,
 } from "./workspaceLayout";
 import {
-  createPanel,
-  createTab,
   DEFAULT_SCENE_ID,
   type DetachedWindow,
   type LayoutNode,

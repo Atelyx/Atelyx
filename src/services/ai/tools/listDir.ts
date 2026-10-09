@@ -3,7 +3,7 @@
  * 不含 `.` 开头隐藏项（.atelyx 等对 AI 完全屏蔽）；想看子目录内容需再对其调用本工具，按模式检索文件请用 glob。
  * 依赖 `capabilities.listDir`（Rust `list_vault_dir`）；只读，不建产物节点。
  */
-import { ToolArgsError, errText } from "@/types";
+import { errText, ToolArgsError } from "@/utils/errors";
 import { HIDDEN_PATH_ERROR, LIST_DIR_MAX_ENTRIES, hasHiddenSegment } from "@/constants/tools";
 import { defineTool } from "./defineTool";
 

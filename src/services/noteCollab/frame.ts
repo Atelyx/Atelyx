@@ -6,13 +6,13 @@ import * as decoding from "lib0/decoding";
 import * as encoding from "lib0/encoding";
 
 /** 同步帧类型（内嵌 y-protocols 消息）。 */
-export const NOTE_FRAME_SYNC = 0x03;
+const NOTE_FRAME_SYNC = 0x03;
 /** 基线通告帧类型（携带基线全文）。 */
 export const NOTE_FRAME_BASELINE = 0x42;
 /** 重同步请求帧类型（传输缺帧/周期反熵）。 */
-export const NOTE_FRAME_RESYNC = 0x43;
+const NOTE_FRAME_RESYNC = 0x43;
 /** 换路帧类型（笔记改名/移动）。 */
-export const NOTE_FRAME_RELOCATE = 0x44;
+const NOTE_FRAME_RELOCATE = 0x44;
 
 /**
  * 基线标签：`seq` 为提案序号（Lamport），`author` 为本会话稳定身份 id，`id` 为基线正文内容标识。

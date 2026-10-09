@@ -453,7 +453,6 @@ impl Default for WriteChainConfig {
 }
 
 /// 广播事件：delta 为容器增量（全窗口广播），intent 为执行 op 意图（定向投递执行体窗口）。
-#[cfg_attr(not(test), allow(dead_code))]
 pub enum EmitterEvent {
     Delta(ContainerDelta),
     /// 意图事件载荷：{ intentId, requestId, op }
@@ -462,7 +461,6 @@ pub enum EmitterEvent {
 
 /// 广播出口：事件 → 出口回调。生产侧闭包包装 Tauri emit（全窗口 delta / 定向 intent），
 /// 测试侧为收集器。
-#[cfg_attr(not(test), allow(dead_code))]
 type EmitterFn = Box<dyn Fn(&EmitterEvent) + Send + Sync>;
 
 pub struct ChatContainerState {

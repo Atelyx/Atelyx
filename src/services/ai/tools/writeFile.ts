@@ -2,7 +2,7 @@
  * 工具：写入文件（write_file）。把内容按指定相对路径写入仓库（原子写、自动建父目录），
  * 像编程工具写文件那样直接落盘；data.path 供画布判断是否建产物节点。依赖 `capabilities.writeFile`。
  */
-import { ToolArgsError, errText } from "@/types";
+import { errText, ToolArgsError } from "@/utils/errors";
 import { HIDDEN_PATH_ERROR, hasHiddenSegment } from "@/constants/tools";
 import { defineTool } from "./defineTool";
 

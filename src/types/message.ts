@@ -27,7 +27,7 @@ export interface Attachment {
  * user 消息发送时固化的文本/搜索引用记录（一次性注入语义）。
  * 与 attachments 的固化语义对称：注入随该 user 消息进历史，未来消息不重复注入。
  */
-export interface MessageRef {
+interface MessageRef {
   /** 源文本/搜索节点 id（消息气泡 @chip 点击定位目标）；纯路径引用（仓库文件/文件夹，画布无对应节点）= `file:<path>` */
   nodeId: string;
   /** @chip 显示名（内容前缀约 12 字） */

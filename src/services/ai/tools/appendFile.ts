@@ -3,7 +3,7 @@
  * 文件不存在/不可读（含超 read_file 整读上限）拒绝——新建文件请用 write_file。
  * 依赖 `capabilities.appendFile`（aiFiles.appendVaultFile）。
  */
-import { ToolArgsError, errText } from "@/types";
+import { errText, ToolArgsError } from "@/utils/errors";
 import { HIDDEN_PATH_ERROR, hasHiddenSegment } from "@/constants/tools";
 import { defineTool } from "./defineTool";
 

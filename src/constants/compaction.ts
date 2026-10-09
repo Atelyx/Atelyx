@@ -11,7 +11,7 @@ const SUMMARY_OPEN_TAG = "<compacted-summary>";
 const SUMMARY_CLOSE_TAG = "</compacted-summary>";
 
 /** 检查点包裹前言：让摘要被当作已确立的背景，而非又一条待回应的用户发言。 */
-export const COMPACTION_PREAMBLE =
+const COMPACTION_PREAMBLE =
   "这是一段检查点摘要，先前的对话已压缩在此，用于腾出上下文空间。" +
   "请把其中记录的信息视为已确立的背景，直接在其上继续推进，不要复述，也不要提及本检查点。";
 

@@ -3,7 +3,7 @@
  * 大文件按 offset/limit 分段读取（单行/单次字节受 Rust 侧截断约束），页脚引导模型继续翻页——不硬拒大文件，也不整文件回填撑爆上下文。
  * 依赖 `capabilities.readFile`；只读，不建产物节点。
  */
-import { ToolArgsError, errText } from "@/types";
+import { errText, ToolArgsError } from "@/utils/errors";
 import { HIDDEN_PATH_ERROR, READ_WINDOW_DEFAULT_LINES, hasHiddenSegment } from "@/constants/tools";
 import { defineTool } from "./defineTool";
 

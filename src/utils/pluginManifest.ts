@@ -39,7 +39,7 @@ export function pluginIdValid(id: string): boolean {
 }
 
 /** 是否为已知插件类型（未知主分类拒绝；未知附加分类在旧 App 上安全跳过）。 */
-export function isKnownPluginType(type: string): boolean {
+function isKnownPluginType(type: string): boolean {
   return KNOWN_PLUGIN_TYPES.includes(type);
 }
 

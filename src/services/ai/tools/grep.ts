@@ -3,7 +3,8 @@
  * 单行预览按字节截断（UTF-8 边界安全）；可选 path 限定文件/目录、include 限定单一正向 glob 过滤文件。
  * 依赖 `capabilities.grep`（Rust `grep_vault`）；只读，不建产物节点。
  */
-import { ToolArgsError, errText, type GrepMatchRow } from "@/types";
+import { type GrepMatchRow } from "@/types";
+import { errText, ToolArgsError } from "@/utils/errors";
 import {
   GREP_MAX_LINE_BYTES,
   GREP_MAX_MATCHES,

@@ -1,19 +1,22 @@
 /**
- * 工作区布局树查询纯函数（只读；布局变更逻辑已下沉 Rust `layout.rs` 迷你窗口管理器，
- * 本文件不再提供任何变异函数）。
+ * 工作区布局树查询纯函数与默认结构种子。
+ * 布局变更逻辑已下沉 Rust `layout.rs` 迷你窗口管理器，本文件不提供任何变异函数；
+ * 查询函数只回答「某视图/标签/面板在哪里」——渲染、菜单禁用、协作宿主判定用。
  *
  * 语义：
  * - 布局 = 递归多叉树（Split = 分割方向 + 子树 + 占比；Panel 叶子 = 标签组）
  * - 撕裂窗口 = 应用级 `DetachedWindow`（跨布局共享）
- * - 本文件只回答「某视图/标签/面板在哪里」——渲染、菜单禁用、协作宿主判定用
  */
-import type {
-  DetachedWindow,
-  LayoutNode,
-  PanelNode,
-  Scene,
-  TabItem,
-  ViewKind,
+import {
+  DEFAULT_SCENE_ID,
+  HOME_LAYOUT_ID,
+  type DetachedWindow,
+  type LayoutNode,
+  type PanelNode,
+  type Scene,
+  type TabItem,
+  type ViewKind,
+  type WorkspaceLayout,
 } from "@/types";
 
 /** 收集树中全部面板节点（深度优先，顺序稳定）。 */
@@ -33,7 +36,7 @@ export function collectTabs(tree: LayoutNode): TabItem[] {
 }
 
 /** 收集树中全部非空视图（不含重复——标签组内同视图不重复，跨面板也全局唯一）。 */
-export function collectViewsInTree(tree: LayoutNode): ViewKind[] {
+function collectViewsInTree(tree: LayoutNode): ViewKind[] {
   return collectTabs(tree).map((t) => t.view);
 }
 
@@ -74,4 +77,88 @@ export function resolveEntryScene(
 ): string | null {
   if (!configuredId) return null;
   return scenes.some((s) => s.id === configuredId) ? configuredId : null;
+}
+
+/** 新建标签（锁定恒 false；视图恒非 empty）。 */
+export function createTab(view: ViewKind): TabItem {
+  return { id: crypto.randomUUID(), view, locked: false };
+}
+
+/** 新建单标签面板。 */
+export function createPanel(view: ViewKind): PanelNode {
+  const tab = createTab(view);
+  return { kind: "panel", id: crypto.randomUUID(), tabs: [tab], activeTabId: tab.id };
+}
+
+/** 主页布局（固定置顶；左窄右宽：左列 协作房间+最近打开，右区 日历+仓库历史；面板内部仍可自由调整）。 */
+function createHomeLayout(): WorkspaceLayout {
+  return {
+    id: HOME_LAYOUT_ID,
+    name: "主页",
+    tree: {
+      kind: "split",
+      id: crypto.randomUUID(),
+      direction: "horizontal",
+      children: [
+        {
+          kind: "split",
+          id: crypto.randomUUID(),
+          direction: "vertical",
+          children: [createPanel("collabroom"), createPanel("recent")],
+          sizes: [50, 50],
+        },
+        {
+          kind: "split",
+          id: crypto.randomUUID(),
+          direction: "vertical",
+          children: [createPanel("calendar"), createPanel("repohistory")],
+          sizes: [55, 45],
+        },
+      ],
+      sizes: [22, 78],
+    },
+  };
+}
+
+/** 默认场景布局（三套：画布/笔记/表格，面板结构 文件 | [主区/副区]，均为单标签面板；
+ *  主页走场景专属槽位不在此列）。首次进入仓库/布局损坏时回退。 */
+function createDefaultLayouts(): WorkspaceLayout[] {
+  const build = (name: string, left: ViewKind, main: ViewKind, right: ViewKind, sizes1: [number, number], sizes2: [number, number]): WorkspaceLayout => ({
+    id: crypto.randomUUID(),
+    name,
+    tree: {
+      kind: "split",
+      id: crypto.randomUUID(),
+      direction: "horizontal",
+      children: [
+        createPanel(left),
+        {
+          kind: "split",
+          id: crypto.randomUUID(),
+          direction: "horizontal",
+          children: [createPanel(main), createPanel(right)],
+          sizes: sizes2,
+        },
+      ],
+      sizes: sizes1,
+    },
+  });
+  return [
+    build("画布", "files", "canvas", "inspector", [17, 83], [74, 26]),
+    build("笔记", "files", "note", "aichat", [19, 81], [72, 28]),
+    build("表格", "files", "table", "note", [18, 82], [77, 23]),
+  ];
+}
+
+/** 默认场景列表（bootstrap 失败时的渲染兜底种子；专属主页 = createHomeLayout，与 Rust 同构）。 */
+export function createDefaultScenes(): Scene[] {
+  return [
+    {
+      id: DEFAULT_SCENE_ID,
+      name: "默认",
+      homeLayout: createHomeLayout(),
+      activeLayoutId: HOME_LAYOUT_ID,
+      layouts: createDefaultLayouts(),
+    },
+  ];
 }

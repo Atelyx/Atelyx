@@ -3,7 +3,7 @@
  * 入口取宿主产出的打包产物（自包含 + 已转译）或清单 `main`——未打包的入口须自包含（无运行时 import/export 依赖；`import type` 为类型注解，转译时擦除），扩展名在安装/读取时由清单校验限制为 .js/.ts/.tsx。
  */
 import type { Plugin } from "@atelyx/cordis";
-import { errText } from "@/types";
+import { errText } from "@/utils/errors";
 import { pluginReadEntry } from "@/services/plugins";
 import { transpileEsm } from "@/services/plugins/transpile";
 import type { Kernel } from "./kernel";

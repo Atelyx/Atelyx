@@ -44,7 +44,7 @@ export interface ThemeDefinition {
  * 主题插件设置项声明：预置设置项类型（由内核实现并应用，无需插件代码）。
  * 自定义设置项经主线程 UI 平面 registerThemeSetting 运行时注册。
  */
-export interface PluginThemeOptions {
+interface PluginThemeOptions {
   /** 使用内核预置「强调色」设置项（值自动应用到 --accent 系列；存 themeSettings[插件id].accentColor）。 */
   accent?: boolean;
 }
@@ -298,7 +298,7 @@ export interface PluginCommandContribution {
 }
 
 /** 槽位参与者在治理清单中的展示形态（id/pluginId/priority 来自注册表；label 取载荷字符串字段）。 */
-export interface SlotContributorInfo {
+interface SlotContributorInfo {
   id: string;
   pluginId: string;
   priority: number;

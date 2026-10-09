@@ -12,7 +12,7 @@ import {
   requestAllFilesAccess,
   storageRoot,
 } from "@/services/mobilePlatform";
-import { errText } from "@/types/tool";
+import { errText } from "@/utils/errors";
 import type { AbsoluteDirListing } from "@/types";
 
 interface MobileVaultStore {

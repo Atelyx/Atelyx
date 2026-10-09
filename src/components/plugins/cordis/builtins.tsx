@@ -58,7 +58,7 @@ import { AURORA_THEME_ID, AURORA_THEME_NAME, AURORA_THEME_VARIABLES } from "@/co
 import { CanvasEmptyState, NoteEmptyState, TableEmptyState } from "@/components/plugins/cordis/emptyStates";
 
 /** 单个视图载荷（无 props 契约的视图组件；重型视图用 render 承载宿主面板 id）。 */
-export interface BuiltinViewPayload {
+interface BuiltinViewPayload {
   kind: string;
   label: string;
   /** 无 props 契约的视图组件（用户插件面板同款；重型视图用 render，不填 component）。 */
@@ -68,7 +68,7 @@ export interface BuiltinViewPayload {
 }
 
 /** 仓库事件订阅条目（kind 显式声明；handler 按 kind 收窄载荷）。 */
-export interface VaultEventHandlerSpec {
+interface VaultEventHandlerSpec {
   kind: VaultEvent["kind"];
   handler: VaultEventHandler;
 }
@@ -82,7 +82,7 @@ function vaultHandler<K extends VaultEvent["kind"]>(
 }
 
 /** 主题类行的声明式载荷（清单里的 `themes` + `themeOptions`）。 */
-export interface BuiltinThemePayload {
+interface BuiltinThemePayload {
   themes: PluginManifest["themes"];
   themeOptions: PluginManifest["themeOptions"];
 }
@@ -114,7 +114,7 @@ function mountViews(ctx: Context, views: BuiltinViewPayload[]): void {
 }
 
 /** 单条 UI 槽贡献规格（registerUi 的载荷；single 用于替换类槽位如 empty/<kind>）。 */
-export interface BuiltinUiPayload {
+interface BuiltinUiPayload {
   slot: string;
   component: ComponentType;
   /** 槽优先级（list 排序 / single 决胜；缺省 0）。 */

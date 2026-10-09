@@ -3,7 +3,7 @@
  * 空目录直接删除，非空目录首次调用提示项数、再传 force: true 才递归删除；隐藏目录（. 开头段）与仓库根不可删除。
  * 删除后自动清理目录内画布引用/上次打开等既有联动；依赖 `capabilities.deleteDir`。
  */
-import { ToolArgsError } from "@/types";
+import { ToolArgsError } from "@/utils/errors";
 import { HIDDEN_PATH_ERROR, hasHiddenSegment } from "@/constants/tools";
 import { defineTool } from "./defineTool";
 

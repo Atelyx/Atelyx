@@ -11,10 +11,6 @@ import type {
   WindowOptions,
 } from "@/types/workspaceLayout";
 
-/** `ui-state.json` 文件 schema 版本（Rust 侧 `layout.rs` 有同名常量，两端须保持一致；
- *  格式变更直接升版，旧文件按默认态处理）。 */
-export const UI_STATE_SCHEMA = "atelyx-ui-state/v2" as const;
-
 /** 最近打开的文件条目（应用级、跨仓库记录；主页面板按当前仓库过滤展示）。 */
 export interface RecentFileEntry {
   /** 相对仓库根路径。 */
@@ -147,7 +143,9 @@ export interface DragBroadcast {
 
 /** 应用级 UI 使用状态（`app_data_dir/ui-state.json` 磁盘格式，扁平无分桶）。 */
 export interface AppUiState {
-  schema: typeof UI_STATE_SCHEMA;
+  /** 文件 schema 版本（字面量 `"atelyx-ui-state/v2"`；Rust 侧 `layout_model.rs` 有同名常量，
+   *  两端须保持一致。格式变更直接升版，旧文件按默认态处理）。 */
+  schema: "atelyx-ui-state/v2";
   /** 文件面板展开的文件夹相对路径列表（缺省 = 全部折叠；跨仓库按路径共享）。 */
   fileExplorerExpanded: string[];
   /** 上次打开的画布文件（相对仓库根路径；恢复时按当前仓库列表查找命中才打开）。 */

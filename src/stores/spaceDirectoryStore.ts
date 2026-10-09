@@ -7,7 +7,7 @@
 import { create } from "zustand";
 import { createSpaceClient } from "@/services/space/client";
 import { getToken } from "@/services/space/auth";
-import { updateGlobalConfig } from "@/services/global";
+import { removeRecentSpace, spaceKey, updateGlobalConfig } from "@/services/global";
 import { useAppStore } from "@/stores/appStore";
 import type {
   AcceptInviteResult,
@@ -25,7 +25,7 @@ export interface SpaceEnterEntry {
 }
 
 /** need-login 引导：待登录服务器地址 + 可选的自动重试条目。 */
-export interface SpaceLoginPrompt {
+interface SpaceLoginPrompt {
   serverUrl: string;
   retry?: SpaceEnterEntry;
 }
@@ -182,9 +182,10 @@ export const useSpaceDirectoryStore = create<SpaceDirectoryState>((set, get) => 
   revokeInvite: (serverUrl, spaceId, code) => client(serverUrl).spaces.revokeInvite(spaceId, code),
 
   forgetSpace: async (serverUrl, spaceId) => {
-    const spaces = useAppStore
-      .getState()
-      .recentSpaces.filter((e) => !(e.serverUrl === serverUrl && e.spaceId === spaceId));
+    const spaces = removeRecentSpace(
+      useAppStore.getState().recentSpaces,
+      spaceKey(serverUrl, spaceId),
+    );
     await syncRecentSpaces(spaces);
   },
 }));

@@ -138,12 +138,13 @@ pub(crate) fn apply_window_os_options(app: &AppHandle, label: &str) {
                 .map(|w| w.options)
         });
     if let Some(options) = options {
-        let _ = &options;
         #[cfg(desktop)]
         if let Some(win) = app.get_webview_window(label) {
             let _ = win.set_always_on_top(options.always_on_top);
             let _ = win.set_skip_taskbar(options.skip_taskbar);
         }
+        #[cfg(not(desktop))]
+        let _ = options;
     }
 }
 

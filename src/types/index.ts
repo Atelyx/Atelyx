@@ -13,7 +13,6 @@ export type {
   Role,
   Attachment,
   PendingAttachment,
-  MessageRef,
   ToolRun,
   AgentStep,
   Message,
@@ -25,8 +24,6 @@ export type {
   ChatTargetSelection,
   ChatTurnTarget,
   ChatTurnMessage,
-  ChatCapabilityOverrides,
-  ChatTurnHooks,
   ChatTurnSink,
   ChatTurnOutcome,
   ChatNamingTarget,
@@ -39,7 +36,6 @@ export type {
 } from "./chatRuntime";
 
 export type {
-  EditorChatRole,
   EditorChatMessage,
   EditorChatMessageRef,
   ChatSessionMeta,
@@ -52,7 +48,6 @@ export type {
 
 export type {
   ProviderConfig,
-  ProviderModel,
   ReasoningEffort,
   AiConfig,
   GlobalProvider,
@@ -69,7 +64,6 @@ export {
   type CanvasPatch,
   type ConversationFileData,
   type TextFileData,
-  type MediaFileData,
   type GroupFileData,
   type LinkFileData,
   type TableFileData,
@@ -80,7 +74,6 @@ export {
   type FileTreeNode,
   type FileExplorerSortKey,
   type GlobalSearchConfig,
-  type SearchProvider,
   type VaultConfig,
   type VaultConfigRead,
   type VaultInfo,
@@ -97,10 +90,8 @@ export {
 } from "./canvas";
 
 export {
-  UI_STATE_SCHEMA,
   type AppUiState,
   type RecentFileEntry,
-  type LayoutBounds,
   type LayoutOp,
   type LayoutOpResult,
   type UiStatePatch,
@@ -135,7 +126,7 @@ export type { DatedNote, RepoHistoryEntry, DailyCount, RepoHistoryResult } from 
 
 export type { TagRow } from "./tags";
 
-export type { AbsoluteDirEntry, AbsoluteDirListing } from "./mobile";
+export type { AbsoluteDirListing } from "./mobile";
 
 export type {
   FieldType,
@@ -157,13 +148,10 @@ export type {
   CollabPeer,
   CollabMyPeer,
   CollabHello,
-  CollabLockClaim,
 } from "./collab";
 
 export {
   UNKNOWN_TOOL_MSG_PREFIX,
-  ToolArgsError,
-  errText,
   type ToolSchema,
   type ToolResult,
   type ToolCapabilities,
@@ -171,7 +159,6 @@ export {
   type ToolDefinition,
   type ToolExecResult,
   type PluginToolOptions,
-  type ReadWindowLine,
   type ReadWindowResult,
   type GlobVaultResult,
   type GrepMatchRow,
@@ -196,7 +183,6 @@ export {
   type PluginManifest,
   type PluginGlobalShortcutDeclaration,
   type CommandShortcutScope,
-  type PluginThemeOptions,
   type ThemeDefinition,
   type PluginBadge,
   type PluginIndexEntry,
@@ -216,13 +202,11 @@ export {
   type PluginSlotContributionSummary,
   type PluginSlotDecoratorSummary,
   type PluginSlotChain,
-  type SlotContributorInfo,
   type SlotConflictRow,
 } from "./plugin";
 
 export {
   COMPOSITION_IMPL_DEFAULT,
-  type CompositionImplSource,
   type CompositionUserPatches,
   type CompositionPatchDeclaration,
   type CompositionDeclarer,
@@ -234,18 +218,8 @@ export {
 
 export type {
   NoteEditorBinding,
-  NoteBodySessionView,
-  NoteBodySession,
-  NoteSurfaceProvider,
 } from "./noteSurface";
 
 export type {
-  RangeInfo,
-  LinkForm,
-  InlineSpan,
-  MarkdownBlock,
   MarkdownDocument,
-  MarkdownLinkResolver,
-  ParseOptions,
-  RenderOptions,
 } from "./markdown";

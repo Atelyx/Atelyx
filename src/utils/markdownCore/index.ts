@@ -5,7 +5,6 @@
 export { parseMarkdown, isSafeVaultRelPath } from "./parse";
 export {
   renderMarkdownToHtml,
-  renderMarkdownEditHtml,
   renderMarkdownChunks,
   renderMarkdownEditChunks,
   RAW_SOURCE_KINDS,
@@ -18,7 +17,6 @@ export type {
   MarkdownBlock,
   MarkdownDocument,
   MarkdownListItem,
-  MarkdownLinkResolver,
   ParseOptions,
   RangeInfo,
   RenderOptions,
