@@ -343,11 +343,9 @@ fn hex(bytes: &[u8]) -> String {
 // ===== 取件与解压 =====
 
 /// HTTP 客户端：逐块空闲超时（大 tarball 在慢链路上不会被中途 abort），体积上限在读取路径上。
+/// 下载源 = lockfile 的 `resolved` URL（插件作者可控，入口仅校验 https 前缀），挂公网策略。
 fn http_client() -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
-        .read_timeout(Duration::from_secs(60))
-        .build()
-        .map_err(|e| format!("创建网络客户端失败：{e}"))
+    crate::net_guard::client_for(crate::net_guard::HostPolicy::PublicOnly, crate::net_guard::ClientTimeout::IdleRead(60))
 }
 
 /// 依赖缓存目录（内容寻址，按包名无关的摘要寻址：同一份锁定在任何插件间复用）。

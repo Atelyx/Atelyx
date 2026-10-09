@@ -12,7 +12,7 @@ use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager, State};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 
-use crate::net_guard::{ensure_public_http_url, public_dns_resolver, redirect_policy};
+use crate::net_guard::{client_for, ensure_public_http_url, ClientTimeout, HostPolicy};
 
 /// 建立连接的超时：站点只连不答时尽早失败。
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -373,13 +373,13 @@ async fn run_download(
     sink: &EventSink,
     cancel: &AtomicBool,
 ) -> Result<Option<PathBuf>, String> {
-    let client = reqwest::Client::builder()
-        .connect_timeout(CONNECT_TIMEOUT)
-        .read_timeout(READ_TIMEOUT)
-        .redirect(redirect_policy(ensure_public_http_url))
-        .dns_resolver(public_dns_resolver())
-        .build()
-        .map_err(|e| format!("客户端初始化失败：{e}"))?;
+    let client = client_for(
+        HostPolicy::PublicOnly,
+        ClientTimeout::ConnectRead {
+            connect: CONNECT_TIMEOUT.as_secs(),
+            read: READ_TIMEOUT.as_secs(),
+        },
+    )?;
 
     let stream = open_stream(&client, &url, part).await?;
     let mut file = tokio::fs::OpenOptions::new()

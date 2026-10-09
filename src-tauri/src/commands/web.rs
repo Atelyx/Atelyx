@@ -9,10 +9,7 @@ use reqwest::header::{ACCEPT, USER_AGENT};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 
-use crate::net_guard::{
-    ensure_local_service_http_url, ensure_public_http_url, local_service_dns_resolver, public_dns_resolver,
-    redirect_policy, HostPolicy,
-};
+use crate::net_guard::{client_for, ensure_local_service_http_url, ensure_public_http_url, ClientTimeout, HostPolicy};
 
 /// 抓取响应上限（字节）。防超大页面/二进制拖死请求，超出即截断。
 const MAX_RESPONSE_BYTES: usize = 1_000_000;
@@ -72,7 +69,7 @@ fn policy_for(kind: RequestKind) -> HostPolicy {
     }
 }
 
-/// 类别 → 入口地址校验函数。
+/// 类别 → 入口地址校验函数（客户端构建统一走 net_guard::client_for，此处仅供入口 URL 预检与测试）。
 fn url_check_for(kind: RequestKind) -> fn(&str) -> Result<Url, String> {
     match policy_for(kind) {
         HostPolicy::PublicOnly => ensure_public_http_url,
@@ -80,26 +77,11 @@ fn url_check_for(kind: RequestKind) -> fn(&str) -> Result<Url, String> {
     }
 }
 
-/// 类别 → DNS 解析器（与入口校验同一策略：解析结果逐 IP 过策略，连接只建立到已校验地址）。
-fn dns_resolver_for(kind: RequestKind) -> std::sync::Arc<crate::net_guard::PolicyDnsResolver> {
-    match policy_for(kind) {
-        HostPolicy::PublicOnly => public_dns_resolver(),
-        HostPolicy::LocalService => local_service_dns_resolver(),
-    }
-}
-
 /// 抓取网页正文（`https://`/`http://`）。
 #[tauri::command]
 pub async fn fetch_web(url: String) -> Result<FetchedWebPage, String> {
-    let check = url_check_for(RequestKind::WebFetch);
-    let parsed = check(&url)?;
-    // 重定向每跳复检（默认策略会默默跟随 302 到内网地址，绕过入口校验）
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(20))
-        .redirect(redirect_policy(check))
-        .dns_resolver(dns_resolver_for(RequestKind::WebFetch))
-        .build()
-        .map_err(|e| format!("客户端初始化失败：{}", e))?;
+    let parsed = url_check_for(RequestKind::WebFetch)(&url)?;
+    let client = client_for(policy_for(RequestKind::WebFetch), ClientTimeout::Total(20))?;
     let resp = client
         .get(parsed)
         .header(USER_AGENT, "Mozilla/5.0 (compatible; AtelyxWebFetch/1.0)")
@@ -128,16 +110,9 @@ pub async fn fetch_web(url: String) -> Result<FetchedWebPage, String> {
 /// 工具的 `fetch_web` 公网限制区分；重定向每跳与 DNS 解析结果同样过该策略。
 #[tauri::command]
 pub async fn http_request(req: HttpRequest) -> Result<HttpResponse, String> {
-    let check = url_check_for(RequestKind::HttpRequest);
-    let url = check(&req.url)?;
+    let url = url_check_for(RequestKind::HttpRequest)(&req.url)?;
     let method = normalize_method(req.method.as_deref())?;
-    // 重定向每跳复检（默认策略会默默跟随 302 到被拒地址，绕过入口校验）
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(20))
-        .redirect(redirect_policy(check))
-        .dns_resolver(dns_resolver_for(RequestKind::HttpRequest))
-        .build()
-        .map_err(|e| format!("客户端初始化失败：{}", e))?;
+    let client = client_for(policy_for(RequestKind::HttpRequest), ClientTimeout::Total(20))?;
     let mut builder = client.request(method, url);
     for (name, value) in req.headers.unwrap_or_default() {
         builder = builder.header(name, value);

@@ -414,26 +414,7 @@ pub fn read_canvas_file_cached(
     root: &Path,
     file: &str,
 ) -> Result<(PathBuf, CanvasFile), String> {
-    let path = safe_join(root, file, false)?;
-    if let Some(fp) = file_fingerprint(&path) {
-        let mut cache = state.canvas_cache.lock().map_err(|e| e.to_string())?;
-        if let Some(entry) = cache.get(file) {
-            if entry.mtime_nanos == fp.0 && entry.len == fp.1 {
-                return Ok((path, entry.data.clone()));
-            }
-        }
-        let data = read_canvas_file(&path)?;
-        cache.insert(
-            file.to_string(),
-            CachedFile {
-                mtime_nanos: fp.0,
-                len: fp.1,
-                data: data.clone(),
-            },
-        );
-        return Ok((path, data));
-    }
-    Ok((path.clone(), read_canvas_file(&path)?))
+    read_file_cached(root, file, &state.canvas_cache, read_canvas_file)
 }
 
 /// 带缓存读 .atb（语义同 read_canvas_file_cached）。
@@ -442,15 +423,25 @@ pub fn read_table_file_cached(
     root: &Path,
     file: &str,
 ) -> Result<(PathBuf, TableFile), String> {
+    read_file_cached(root, file, &state.table_cache, read_table_file)
+}
+
+/// 带缓存读的公共实现（canvas/table 两套缓存同构操作按槽位参数化）。
+fn read_file_cached<T: Clone>(
+    root: &Path,
+    file: &str,
+    cache_lock: &std::sync::Mutex<HashMap<String, CachedFile<T>>>,
+    parse: fn(&Path) -> Result<T, String>,
+) -> Result<(PathBuf, T), String> {
     let path = safe_join(root, file, false)?;
     if let Some(fp) = file_fingerprint(&path) {
-        let mut cache = state.table_cache.lock().map_err(|e| e.to_string())?;
+        let mut cache = cache_lock.lock().map_err(|e| e.to_string())?;
         if let Some(entry) = cache.get(file) {
             if entry.mtime_nanos == fp.0 && entry.len == fp.1 {
                 return Ok((path, entry.data.clone()));
             }
         }
-        let data = read_table_file(&path)?;
+        let data = parse(&path)?;
         cache.insert(
             file.to_string(),
             CachedFile {
@@ -461,30 +452,28 @@ pub fn read_table_file_cached(
         );
         return Ok((path, data));
     }
-    Ok((path.clone(), read_table_file(&path)?))
+    Ok((path.clone(), parse(&path)?))
 }
 
 /// 写盘成功后更新缓存（file = 写盘后的相对路径；重命名路径变化时先清旧 key）。
-/// 锁 poison 静默跳过：缓存是纯优化，丢一次命中下次读盘即可（读路径对 poison 传播错误，见 read_*_cached）。
+/// 锁 poison 静默跳过：缓存是纯优化，丢一次命中下次读盘即可（读路径对 poison 传播错误，见 read_file_cached）。
 pub fn cache_put_canvas(state: &VaultState, path: &Path, file: &str, data: &CanvasFile) {
-    if let Ok(mut cache) = state.canvas_cache.lock() {
-        cache.retain(|k, _| k != file);
-        if let Some(fp) = file_fingerprint(path) {
-            cache.insert(
-                file.to_string(),
-                CachedFile {
-                    mtime_nanos: fp.0,
-                    len: fp.1,
-                    data: data.clone(),
-                },
-            );
-        }
-    }
+    cache_put(&state.canvas_cache, path, file, data);
 }
 
-/// 写盘成功后更新 .atb 缓存（语义同 cache_put_canvas，锁 poison 静默跳过）。
+/// 写盘成功后更新 .atb 缓存（语义同 cache_put_canvas）。
 pub fn cache_put_table(state: &VaultState, path: &Path, file: &str, data: &TableFile) {
-    if let Ok(mut cache) = state.table_cache.lock() {
+    cache_put(&state.table_cache, path, file, data);
+}
+
+/// 写后更新缓存的公共实现。
+fn cache_put<T: Clone>(
+    cache_lock: &std::sync::Mutex<HashMap<String, CachedFile<T>>>,
+    path: &Path,
+    file: &str,
+    data: &T,
+) {
+    if let Ok(mut cache) = cache_lock.lock() {
         cache.retain(|k, _| k != file);
         if let Some(fp) = file_fingerprint(path) {
             cache.insert(
@@ -502,14 +491,17 @@ pub fn cache_put_table(state: &VaultState, path: &Path, file: &str, data: &Table
 /// 从画布解析缓存移除指定相对路径（重命名/移动/删除后旧路径键残留清理；不存在 = 无操作）。
 /// 残留键因指纹（mtime+len）失效本不会被命中，清理仅为防长会话内存累积。
 pub fn cache_evict_canvas(state: &VaultState, file: &str) {
-    if let Ok(mut cache) = state.canvas_cache.lock() {
-        cache.remove(file);
-    }
+    cache_evict(&state.canvas_cache, file);
 }
 
 /// 从 .atb 解析缓存移除指定相对路径（语义同 cache_evict_canvas）。
 pub fn cache_evict_table(state: &VaultState, file: &str) {
-    if let Ok(mut cache) = state.table_cache.lock() {
+    cache_evict(&state.table_cache, file);
+}
+
+/// 缓存移除的公共实现。
+fn cache_evict<T>(cache_lock: &std::sync::Mutex<HashMap<String, CachedFile<T>>>, file: &str) {
+    if let Ok(mut cache) = cache_lock.lock() {
         cache.remove(file);
     }
 }

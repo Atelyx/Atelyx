@@ -1,4 +1,4 @@
-//! 出网 http/https 地址校验（`commands/web.rs` 与 `commands/search.rs` 共用）。
+//! 出网 http/https 地址校验与策略守卫客户端（全部出网 HTTP 经 `client_for` 构建）。
 //! 两套策略同次校验择一（见 `HostPolicy`）；三层边界并存：入口协议白名单 + IP 字面量判定、
 //! 重定向每跳复检（见 `redirect_policy`）、DNS 解析结果逐 IP 过滤（见 `PolicyDnsResolver`）——rebinding 均被拦截。
 
@@ -10,7 +10,8 @@ use reqwest::Url;
 /// 地址用途策略。
 #[derive(Clone, Copy)]
 pub(crate) enum HostPolicy {
-    /// 公网目标：回环/私网/链路本地/未指定/广播/ULA 一律拒绝（网页抓取 `fetch_web` 的边界）。
+    /// 公网目标：回环/私网/链路本地/未指定/广播/ULA 一律拒绝（网页抓取、更新下载、
+    /// 插件 GitHub 源解析与依赖下载的边界）。
     PublicOnly,
     /// 本机或局域网服务：放行回环与私网/ULA，仅拒链路本地（含云元数据 169.254.169.254）、
     /// 未指定、广播——自建实例常跑在本机 Docker 或局域网主机上。
@@ -108,6 +109,37 @@ pub(crate) fn redirect_policy(check: fn(&str) -> Result<Url, String>) -> reqwest
     })
 }
 
+/// 客户端超时形态（各网络面节奏不同）。
+pub(crate) enum ClientTimeout {
+    /// 总超时（页面抓取/搜索等短请求）。
+    Total(u64),
+    /// 连接 + 读超时（更新下载等长流）。
+    ConnectRead { connect: u64, read: u64 },
+    /// 逐块空闲超时（插件源码包/依赖 tarball 等慢链路大文件，不设总超时）。
+    IdleRead(u64),
+}
+
+/// 策略守卫客户端的统一构建入口（全部出网 HTTP 客户端必须经此构建）：
+/// 入口校验用同一策略的 `check`，DNS 解析结果逐 IP 过策略（重定向跳到的新域名同口径），
+/// 重定向每跳复检——SSRF 防线单点收口，杜绝某处构建漏挂守卫。
+pub(crate) fn client_for(policy: HostPolicy, timeout: ClientTimeout) -> Result<reqwest::Client, String> {
+    let check: fn(&str) -> Result<Url, String> = match policy {
+        HostPolicy::PublicOnly => ensure_public_http_url,
+        HostPolicy::LocalService => ensure_local_service_http_url,
+    };
+    let mut builder = reqwest::Client::builder()
+        .redirect(redirect_policy(check))
+        .dns_resolver(Arc::new(PolicyDnsResolver { policy }));
+    builder = match timeout {
+        ClientTimeout::Total(secs) => builder.timeout(std::time::Duration::from_secs(secs)),
+        ClientTimeout::ConnectRead { connect, read } => builder
+            .connect_timeout(std::time::Duration::from_secs(connect))
+            .read_timeout(std::time::Duration::from_secs(read)),
+        ClientTimeout::IdleRead(secs) => builder.read_timeout(std::time::Duration::from_secs(secs)),
+    };
+    builder.build().map_err(|e| format!("客户端初始化失败：{e}"))
+}
+
 /// 该跳是否放行：跳数在上限内且目标过同一策略校验。
 fn redirect_allowed(hops: usize, url: &str, check: fn(&str) -> Result<Url, String>) -> bool {
     hops < MAX_REDIRECTS && check(url).is_ok()
@@ -155,16 +187,6 @@ impl reqwest::dns::Resolve for PolicyDnsResolver {
             Ok(Box::new(addrs.into_iter()) as _)
         })
     }
-}
-
-/// 公网策略的 DNS 解析器（`fetch_web` 客户端挂载）。
-pub(crate) fn public_dns_resolver() -> Arc<PolicyDnsResolver> {
-    Arc::new(PolicyDnsResolver { policy: HostPolicy::PublicOnly })
-}
-
-/// 本机/局域网策略的 DNS 解析器（SearXNG 等自建服务客户端挂载）。
-pub(crate) fn local_service_dns_resolver() -> Arc<PolicyDnsResolver> {
-    Arc::new(PolicyDnsResolver { policy: HostPolicy::LocalService })
 }
 
 #[cfg(test)]

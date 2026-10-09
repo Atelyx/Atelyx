@@ -543,6 +543,19 @@ pub fn rebuild_internal_links(
     })
 }
 
+/// 写仓库文本文件的公共实现（`write_note` 与 `write_vault_file` 同体：原子写 + 自动建父目录 + 内容变更广播）。
+fn write_vault_text(
+    window: &WebviewWindow,
+    file: &str,
+    content: &str,
+    state: &State<'_, VaultState>,
+) -> Result<(), String> {
+    let root = state.root()?;
+    write_note_file(&root, file, content)?;
+    broadcast_content_changes(window, &root.to_string_lossy(), vec![ContentChange::write(file)]);
+    Ok(())
+}
+
 /// 写 .md 笔记（原子写，自动建父目录）。
 #[tauri::command]
 pub fn write_note(
@@ -551,10 +564,7 @@ pub fn write_note(
     content: String,
     state: State<'_, VaultState>,
 ) -> Result<(), String> {
-    let root = state.root()?;
-    write_note_file(&root, &file, &content)?;
-    broadcast_content_changes(&window, &root.to_string_lossy(), vec![ContentChange::write(&file)]);
-    Ok(())
+    write_vault_text(&window, &file, &content, &state)
 }
 
 /// 读仓库内任意文本文件全文（安全边界 = 仓库根，safe_join 校验；非 UTF-8 返回替换字符容错）。
@@ -585,10 +595,7 @@ pub fn write_vault_file(
     content: String,
     state: State<'_, VaultState>,
 ) -> Result<(), String> {
-    let root = state.root()?;
-    write_note_file(&root, &file, &content)?;
-    broadcast_content_changes(&window, &root.to_string_lossy(), vec![ContentChange::write(&file)]);
-    Ok(())
+    write_vault_text(&window, &file, &content, &state)
 }
 
 // ===== AI read_file 分页窗口 =====
@@ -901,11 +908,10 @@ pub fn delete_note(file: String, state: State<'_, VaultState>) -> Result<(), Str
     delete_vault_file(&root, &file)
 }
 
-/// 删除附件（同 delete_note，不更新 .atlx 引用）。
+/// 删除附件（与 delete_note 同体：不更新 .atlx 引用）。
 #[tauri::command]
 pub fn delete_attachment(file: String, state: State<'_, VaultState>) -> Result<(), String> {
-    let root = state.root()?;
-    delete_vault_file(&root, &file)
+    delete_note(file, state)
 }
 
 /// 复制仓库内文件为同目录副本（纯字节复制；新路径由前端 dedupe 防重名）。

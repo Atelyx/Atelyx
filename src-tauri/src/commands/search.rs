@@ -5,10 +5,7 @@
 use reqwest::Url;
 use serde::Serialize;
 
-use crate::net_guard::{
-    ensure_local_service_http_url, ensure_public_http_url, local_service_dns_resolver,
-    public_dns_resolver, redirect_policy, HostPolicy,
-};
+use crate::net_guard::{client_for, ensure_local_service_http_url, ClientTimeout, HostPolicy};
 
 /// 单条搜索结果（camelCase 对齐前端 `SearchResultItem`）。
 #[derive(Serialize)]
@@ -37,24 +34,9 @@ pub async fn search_web(
     }
 }
 
-/// 带超时的 HTTP 客户端（搜索请求不被挂死；15s 对搜索 API 足够）。
-/// `policy` = 地址策略（Tavily 公网 / SearXNG 本机局域网）：重定向每跳复检 +
-/// DNS 解析结果逐 IP 过同一策略，两层同口径。
+/// 带总超时的策略守卫客户端（搜索请求不被挂死；15s 对搜索 API 足够）。
 fn http_client(policy: HostPolicy) -> Result<reqwest::Client, String> {
-    let check: fn(&str) -> Result<Url, String> = match policy {
-        HostPolicy::PublicOnly => ensure_public_http_url,
-        HostPolicy::LocalService => ensure_local_service_http_url,
-    };
-    let resolver = match policy {
-        HostPolicy::PublicOnly => public_dns_resolver(),
-        HostPolicy::LocalService => local_service_dns_resolver(),
-    };
-    reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .redirect(redirect_policy(check))
-        .dns_resolver(resolver)
-        .build()
-        .map_err(|e| e.to_string())
+    client_for(policy, ClientTimeout::Total(15))
 }
 
 async fn tavily_search(key: &str, query: &str) -> Result<Vec<SearchResultItem>, String> {

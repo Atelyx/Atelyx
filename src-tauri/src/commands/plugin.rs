@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager};
 
+use crate::net_guard::{client_for, ClientTimeout, HostPolicy};
 use crate::vault::atomic_write;
 use crate::layout::LayoutState;
 use crate::layout_model::{
@@ -973,10 +974,7 @@ async fn git_clone_to(base: &Path, url: &str) -> Result<PathBuf, String> {
 /// 逐块空闲超时（60s 无数据即失败）——不用总超时，慢链路上的大源码包不会被中途 abort；
 /// 体积上限在 download_zip 的累计校验里（64MB），不会无限挂。
 fn http_client() -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
-        .read_timeout(std::time::Duration::from_secs(60))
-        .build()
-        .map_err(|e| format!("创建网络客户端失败：{e}"))
+    client_for(HostPolicy::PublicOnly, ClientTimeout::IdleRead(60))
 }
 
 /// 解析仓库默认分支（无 git 回退源码包时需要分支名定位归档）。
@@ -1253,7 +1251,7 @@ async fn install_plugin_dir(
     // 依赖取件与打包在候选目录内完成：此刻尚未落位，失败只影响候选目录，当前版本不受影响。
     // 这步是耗时 I/O（下载 + 打包），放在文件锁之外。
     crate::plugin_build::prepare_artifact(app, plugin_root, &manifest, true).await?;
-    let _io_guard = PLUGIN_IO_LOCK.lock().map_err(|_| "插件文件忙，请重试".to_string())?;
+    let _io_guard = plugin_io_lock()?;
     let source_kind = source.kind;
 
     let target = base.join(&folder);
@@ -1328,7 +1326,7 @@ fn roots_with_legacy_plugin_dirs(roots: &[String]) -> Vec<String> {
 /// 且不落盘任何由「读失败得出的状态」、不做孤儿回收（两者的依据都不可信）。
 #[tauri::command]
 pub fn plugin_list(app: AppHandle, defaults: Vec<Value>) -> Result<PluginListResult, String> {
-    let _io_guard = PLUGIN_IO_LOCK.lock().map_err(|_| "插件文件忙，请重试".to_string())?;
+    let _io_guard = plugin_io_lock()?;
     // 只读展示路径：读不到状态也不阻断列表（播种只在读成功时落盘，见下）。
     let (mut pstate, state_error) = read_plugin_state_lenient(&app);
     let disk_ids = disk_plugin_ids(&app);
@@ -1527,7 +1525,7 @@ pub async fn plugin_install_local(app: AppHandle, path: String) -> Result<Plugin
     // 但不清理其 node_modules——那是开发者自己的目录。
     crate::plugin_build::prepare_artifact(&app, &src_dir, &manifest, false).await?;
 
-    let _io_guard = PLUGIN_IO_LOCK.lock().map_err(|_| "插件文件忙，请重试".to_string())?;
+    let _io_guard = plugin_io_lock()?;
     let target = base.join(&folder);
     if target.exists() {
         return Err("同名文件夹已存在，请先卸载".into());
@@ -1687,7 +1685,7 @@ pub fn plugin_uninstall(app: AppHandle, id: String, keep_data: Option<bool>) -> 
     let base = plugin_base_dir(&app)?;
     // 状态读必须在 IO 锁内：守恒判定（见 theme_conservation_violation）依赖「读取 → 提交」
     // 之间状态不被并发命令改动，锁外快照会让守卫基于陈旧启停结论放行。
-    let _io_guard = PLUGIN_IO_LOCK.lock().map_err(|_| "插件文件忙，请重试".to_string())?;
+    let _io_guard = plugin_io_lock()?;
     let pstate = read_plugin_state(&app)?;
     let theme_ids = enabled_theme_ids(&app, &pstate, Some(&id));
     let source = pstate.sources.get(&id).cloned().unwrap_or_default();
@@ -1955,7 +1953,7 @@ pub fn plugin_set_enabled(app: AppHandle, id: String, enabled: bool) -> Result<(
     // 启停全程持 IO 锁：清单读取（主题判定）在临界区内不可变，且与安装/更新/卸载互斥。
     // 停用的守恒判定在状态锁闭包内对 fresh 复算（见 theme_conservation_violation），
     // 锁外快照会让两个窗口并发各停一个主题时都看到 2 个主题、最终停到 0。
-    let _io_guard = PLUGIN_IO_LOCK.lock().map_err(|_| "插件文件忙，请重试".to_string())?;
+    let _io_guard = plugin_io_lock()?;
     if enabled {
         let result = update_plugin_state(&app, |fresh| {
             fresh.enabled.insert(id.clone(), true);
@@ -2005,7 +2003,7 @@ pub fn plugin_apply_default_layout(
     if !layout_spec_valid(&tree) {
         return Err("默认布局规格非法".to_string());
     }
-    let _io_guard = PLUGIN_IO_LOCK.lock().map_err(|_| "插件文件忙，请重试".to_string())?;
+    let _io_guard = plugin_io_lock()?;
     if read_plugin_state(&app)?.default_layout_done.iter().any(|x| x == &id) {
         return Ok(());
     }
@@ -2399,7 +2397,7 @@ pub async fn plugin_rollback(app: AppHandle, id: String, expected_previous_versi
         return Err("可回退版本已变化，请刷新详情后重试".into());
     }
     let base = plugin_base_dir(&app)?;
-    let _io_guard = PLUGIN_IO_LOCK.lock().map_err(|_| "插件文件忙，请重试".to_string())?;
+    let _io_guard = plugin_io_lock()?;
     let current = find_plugin_dir(&base, &id)?;
     // 目录名只认本实现生成的形态，且必须对应当前落位目录名：状态记录按可能被篡改处理，
     // 防 `.previous-../x` 之类被拼到 base 之外，或指向别的插件的回退目录。
@@ -2474,7 +2472,7 @@ fn commit_plugin_update(
     base: &Path,
     manifest: &Value,
 ) -> Result<PluginInfo, String> {
-    let _io_guard = PLUGIN_IO_LOCK.lock().map_err(|_| "插件文件忙，请重试".to_string())?;
+    let _io_guard = plugin_io_lock()?;
     let folder = current.file_name().ok_or("插件目录名缺失")?.to_string_lossy().into_owned();
     let previous_name = previous_plugin_dir_name(&folder);
     let previous = base.join(&previous_name);
@@ -2579,51 +2577,68 @@ pub(crate) fn resolve_plugin_dir(app: &AppHandle, id: &str) -> Result<PathBuf, S
 /// 读取插件入口 JS（供宿主求值加载；限制在插件根目录内）。path 缺省 = 清单 main。
 #[tauri::command]
 pub fn plugin_read_entry(app: AppHandle, id: String, path: Option<String>) -> Result<String, String> {
-    let _guard = PLUGIN_IO_LOCK.lock().map_err(|_| "插件文件忙，请重试".to_string())?;
-    let dir = resolve_plugin_dir(&app, &id)?;
-    let manifest = read_manifest(&dir)?;
-    let main = manifest["main"].as_str().ok_or("清单缺少 main")?;
-    let entry = path.as_deref().unwrap_or(main);
-    // 打包产物把整棵依赖内联进单文件，体量自然大于手写入口，故按其自身上限判定。
-    let limit = if is_built_entry(entry) {
-        crate::plugin_build::MAX_BUILT_ENTRY_BYTES
-    } else {
-        MAX_ENTRY_BYTES
-    };
-    let entry_path = safe_plugin_path(&dir, entry)?;
-    let size = fs::metadata(&entry_path).map_err(|e| format!("读取插件入口失败：{e}"))?.len();
-    if size > limit {
-        return Err(format!("插件入口过大（上限 {limit} 字节）"));
-    }
-    let data = fs::read(&entry_path).map_err(|e| format!("读取插件入口失败：{e}"))?;
-    String::from_utf8(data).map_err(|_| "插件入口不是合法 UTF-8 文本".to_string())
+    with_plugin_dir(&app, &id, |dir| {
+        let manifest = read_manifest(dir)?;
+        let main = manifest["main"].as_str().ok_or("清单缺少 main")?;
+        let entry = path.as_deref().unwrap_or(main);
+        // 打包产物把整棵依赖内联进单文件，体量自然大于手写入口，故按其自身上限判定。
+        let limit = if is_built_entry(entry) {
+            crate::plugin_build::MAX_BUILT_ENTRY_BYTES
+        } else {
+            MAX_ENTRY_BYTES
+        };
+        let entry_path = safe_plugin_path(dir, entry)?;
+        let size = fs::metadata(&entry_path).map_err(|e| format!("读取插件入口失败：{e}"))?.len();
+        if size > limit {
+            return Err(format!("插件入口过大（上限 {limit} 字节）"));
+        }
+        let data = fs::read(&entry_path).map_err(|e| format!("读取插件入口失败：{e}"))?;
+        String::from_utf8(data).map_err(|_| "插件入口不是合法 UTF-8 文本".to_string())
+    })
 }
 
 /// 读取插件自持数据（单 JSON 对象，原子写落盘）。
 #[tauri::command]
 pub fn plugin_read_state(app: AppHandle, id: String) -> Result<Value, String> {
-    let _guard = PLUGIN_IO_LOCK.lock().map_err(|_| "插件文件忙，请重试".to_string())?;
-    let dir = resolve_plugin_dir(&app, &id)?;
-    let path = safe_plugin_path(&dir, "data/state.json")?;
-    let raw = fs::read_to_string(&path).unwrap_or_else(|_| "{}".to_string());
-    serde_json::from_str(&raw).map_err(|e| format!("插件数据损坏：{e}"))
+    with_plugin_dir(&app, &id, |dir| {
+        let path = safe_plugin_path(dir, "data/state.json")?;
+        let raw = fs::read_to_string(&path).unwrap_or_else(|_| "{}".to_string());
+        serde_json::from_str(&raw).map_err(|e| format!("插件数据损坏：{e}"))
+    })
 }
 
 /// 写入插件自持数据（原子写落盘）。
 #[tauri::command]
 pub fn plugin_write_state(app: AppHandle, id: String, data: Value) -> Result<(), String> {
-    let _guard = PLUGIN_IO_LOCK.lock().map_err(|_| "插件文件忙，请重试".to_string())?;
-    let dir = resolve_plugin_dir(&app, &id)?;
-    let data_dir = safe_plugin_path(&dir, "data")?;
-    fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
-    let path = data_dir.join("state.json");
-    let raw = serde_json::to_string(&data).map_err(|e| e.to_string())?;
-    atomic_write(&path, &raw)
+    with_plugin_dir(&app, &id, |dir| {
+        let data_dir = safe_plugin_path(dir, "data")?;
+        fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
+        let path = data_dir.join("state.json");
+        let raw = serde_json::to_string(&data).map_err(|e| e.to_string())?;
+        atomic_write(&path, &raw)
+    })
 }
 
 /// 插件键值存储的读改写串行化：整表读改写必须互斥，否则并发写会丢键
 ///（同一 realm 内 `Promise.all`、多窗口各自独立 realm 同时写同一插件）。
 static PLUGIN_IO_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 取插件 IO 互斥锁：目录内文件与键值表的读改写全程持锁；锁 poison 统一报忙。
+/// 所有触及插件目录的命令必须经此取锁（含只读——防读到 rename 链的中间态）。
+fn plugin_io_lock() -> Result<std::sync::MutexGuard<'static, ()>, String> {
+    PLUGIN_IO_LOCK.lock().map_err(|_| "插件文件忙，请重试".to_string())
+}
+
+/// 持 IO 锁解析插件目录后执行 `f`（「取锁 + resolve_plugin_dir」组合样板收口）。
+fn with_plugin_dir<T>(
+    app: &AppHandle,
+    id: &str,
+    f: impl FnOnce(&Path) -> Result<T, String>,
+) -> Result<T, String> {
+    let _guard = plugin_io_lock()?;
+    let dir = resolve_plugin_dir(app, id)?;
+    f(&dir)
+}
 /// 插件安装/更新/回退/卸载互斥。用原子占用而非跨 await 持线程锁，忙时让用户重试。
 static PLUGIN_MANAGEMENT_BUSY: AtomicBool = AtomicBool::new(false);
 
@@ -2676,7 +2691,7 @@ fn write_kv_file(dir: &Path, map: &serde_json::Map<String, Value>) -> Result<(),
 /// 读取插件键值存储（单 JSON 对象，独立于 state.json；键值面见 ctx.storage）。
 #[tauri::command]
 pub fn plugin_kv_read(app: AppHandle, id: String) -> Result<Value, String> {
-    let _guard = PLUGIN_IO_LOCK.lock().map_err(|_| "插件文件忙，请重试".to_string())?;
+    let _guard = plugin_io_lock()?;
     let dir = resolve_plugin_dir(&app, &id)?;
     Ok(Value::Object(read_kv_file(&dir)?))
 }
@@ -2684,7 +2699,7 @@ pub fn plugin_kv_read(app: AppHandle, id: String) -> Result<Value, String> {
 /// 写一个键（Rust 侧完成读改写：调用方无需整表往返，并发写不会互相丢键）。
 #[tauri::command]
 pub fn plugin_kv_set(app: AppHandle, id: String, key: String, value: Value) -> Result<(), String> {
-    let _guard = PLUGIN_IO_LOCK.lock().map_err(|_| "插件文件忙，请重试".to_string())?;
+    let _guard = plugin_io_lock()?;
     let dir = resolve_plugin_dir(&app, &id)?;
     let mut map = read_kv_file(&dir)?;
     map.insert(key, value);
@@ -2694,7 +2709,7 @@ pub fn plugin_kv_set(app: AppHandle, id: String, key: String, value: Value) -> R
 /// 删一个键（不存在 = no-op）。
 #[tauri::command]
 pub fn plugin_kv_delete(app: AppHandle, id: String, key: String) -> Result<(), String> {
-    let _guard = PLUGIN_IO_LOCK.lock().map_err(|_| "插件文件忙，请重试".to_string())?;
+    let _guard = plugin_io_lock()?;
     let dir = resolve_plugin_dir(&app, &id)?;
     let mut map = read_kv_file(&dir)?;
     map.remove(&key);
@@ -2705,7 +2720,7 @@ pub fn plugin_kv_delete(app: AppHandle, id: String, key: String) -> Result<(), S
 #[tauri::command]
 pub fn plugin_kv_write(app: AppHandle, id: String, data: Value) -> Result<(), String> {
     let map = data.as_object().ok_or_else(|| "键值表必须是 JSON 对象".to_string())?.clone();
-    let _guard = PLUGIN_IO_LOCK.lock().map_err(|_| "插件文件忙，请重试".to_string())?;
+    let _guard = plugin_io_lock()?;
     let dir = resolve_plugin_dir(&app, &id)?;
     write_kv_file(&dir, &map)
 }
