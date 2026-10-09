@@ -6,6 +6,8 @@
 import { useEffect } from "react";
 import { FolderOpen, HardDrive, ShieldCheck, X } from "lucide-react";
 import { MobileDirectoryBrowser } from "@/components/layout/MobileDirectoryBrowser";
+import { DialogFrame } from "@/components/common/DialogFrame";
+import { Z_LAYERS } from "@/constants/zLayers";
 import { Spinner } from "@/components/common/primitives";
 import { IconButton } from "@/components/common/Button";
 import { useMobileVaultStore } from "@/stores/mobileVaultStore";
@@ -76,17 +78,15 @@ export function MobileLocalVaultDialog({
   }
 
   return (
-    <div
-      className="fixed inset-0 z-[185] flex items-center justify-center p-4"
-      style={{ background: "var(--scrim)" }}
-      role="dialog"
-      aria-modal="true"
-      aria-label="本地仓库"
+    <DialogFrame
+      onClose={onClose}
+      z={Z_LAYERS.mobileDialog}
+      panelClassName="w-[min(28rem,100%)] p-4"
+      overlayClassName="p-4"
+      ariaLabel="本地仓库"
+      closeOnScrim={false}
+      closeOnEsc={false}
     >
-      <div
-        className="w-[min(28rem,100%)] rounded-lg border shadow-[var(--shadow-pop)] p-4"
-        style={{ background: "var(--bg-overlay)", borderColor: "var(--border)" }}
-      >
         <div className="flex items-start gap-2">
           <h3 className="flex-1 text-sm font-medium" style={{ color: "var(--text-primary)" }}>
             {firstRun ? "本地仓库" : "添加本地仓库"}
@@ -163,7 +163,6 @@ export function MobileLocalVaultDialog({
             稍后再说
           </button>
         )}
-      </div>
-    </div>
+    </DialogFrame>
   );
 }

@@ -9,6 +9,8 @@ import {
   useSpaceDirectoryStore,
   type SpaceEnterEntry,
 } from "@/stores/spaceDirectoryStore";
+import { DialogFrame } from "@/components/common/DialogFrame";
+import { Z_LAYERS } from "@/constants/zLayers";
 import { Spinner } from "@/components/common/primitives";
 import { Input } from "@/components/common/Input";
 import { IconButton } from "@/components/common/Button";
@@ -72,18 +74,12 @@ export function SpaceAuthDialog({ mode, onClose }: Props) {
   };
 
   return (
-    <div
-      className="fixed inset-0 z-[200] flex items-center justify-center"
-      style={{ background: "var(--scrim)" }}
-      onClick={onClose}
+    <DialogFrame
+      onClose={onClose}
+      z={Z_LAYERS.dialog}
+      panelClassName="w-[380px] max-w-[calc(100vw-2rem)]"
+      ariaLabel={mode === "login" ? "登录协作服务器" : "注册协作空间账号"}
     >
-      <div
-        role="dialog"
-        aria-label={mode === "login" ? "登录协作服务器" : "注册协作空间账号"}
-        className="w-[380px] max-w-[calc(100vw-2rem)] rounded-[var(--radius-lg)] border shadow-[var(--shadow-pop)]"
-        style={{ background: "var(--bg-overlay)", borderColor: "var(--border)" }}
-        onClick={(e) => e.stopPropagation()}
-      >
         <header className="px-4 py-3 border-b flex items-center justify-between" style={{ borderColor: "var(--border)" }}>
           <h3 className="text-sm font-medium" style={{ color: "var(--text-primary)" }}>
             {mode === "login" ? "登录协作服务器" : "注册协作空间账号"}
@@ -169,7 +165,6 @@ export function SpaceAuthDialog({ mode, onClose }: Props) {
             {busy && <Spinner size={13} />}
           </div>
         </div>
-      </div>
-    </div>
+    </DialogFrame>
   );
 }

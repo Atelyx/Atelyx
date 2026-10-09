@@ -9,6 +9,8 @@ import { useNoteStore } from "@/stores/noteStore";
 import { useCanvasStore } from "@/stores/canvasStore";
 import { useTableStore } from "@/stores/tableStore";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
+import { DialogFrame } from "@/components/common/DialogFrame";
+import { Z_LAYERS } from "@/constants/zLayers";
 import { IconButton } from "@/components/common/Button";
 import { diffTableVersions } from "@/utils/table";
 import { diffCanvasVersions } from "@/utils/canvasCollab";
@@ -138,16 +140,13 @@ export function HistoryModal({ kind, file, open, onClose, onRollback }: Props) {
   const name = file.split("/").pop() ?? file;
 
   return (
-    <div
-      className="fixed inset-0 z-[90] flex items-center justify-center"
-      style={{ background: "var(--scrim)" }}
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
-    >
-      <div
-        className="w-[560px] max-h-[80vh] flex flex-col rounded-[var(--radius-lg)] shadow-[var(--shadow-pop)]"
-        style={{ background: "var(--bg-overlay)", border: "1px solid var(--border)" }}
+    <>
+      <DialogFrame
+        onClose={onClose}
+        z={Z_LAYERS.historyModal}
+        panelClassName="w-[560px] max-h-[80vh] flex flex-col"
+        ariaLabel="历史记录"
+        canClose={() => confirmSeq === null}
       >
         <div
           className="flex items-center gap-2 px-3 py-2 flex-shrink-0 select-none"
@@ -228,7 +227,7 @@ export function HistoryModal({ kind, file, open, onClose, onRollback }: Props) {
             </div>
           ))}
         </div>
-      </div>
+      </DialogFrame>
 
       {confirmSeq !== null && (
         <ConfirmDialog
@@ -238,7 +237,7 @@ export function HistoryModal({ kind, file, open, onClose, onRollback }: Props) {
           onCancel={() => setConfirmSeq(null)}
         />
       )}
-    </div>
+    </>
   );
 }
 

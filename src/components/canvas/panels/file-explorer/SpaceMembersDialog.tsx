@@ -1,6 +1,8 @@
 /**
  * 协作空间成员管理弹窗：名册 + 移除成员 + 转让 owner（权限由服务端校验）；打开即拉取，操作后自动刷新。
  */
+import { DialogFrame } from "@/components/common/DialogFrame";
+import { Z_LAYERS } from "@/constants/zLayers";
 import { Spinner } from "@/components/common/primitives";
 import { IconButton } from "@/components/common/Button";
 import { useEffect, useState } from "react";
@@ -46,16 +48,12 @@ export function SpaceMembersDialog({ serverUrl, spaceId, spaceName, onClose }: P
   };
 
   return (
-    <div
-      className="fixed inset-0 z-[200] flex items-center justify-center"
-      style={{ background: "var(--scrim)" }}
-      onClick={onClose}
+    <DialogFrame
+      onClose={onClose}
+      z={Z_LAYERS.dialog}
+      panelClassName="w-[420px] max-h-[70vh] flex flex-col"
+      ariaLabel="成员管理"
     >
-      <div
-        className="w-[420px] max-h-[70vh] flex flex-col rounded-lg border shadow-[var(--shadow-pop)]"
-        style={{ background: "var(--bg-overlay)", borderColor: "var(--border)" }}
-        onClick={(e) => e.stopPropagation()}
-      >
         <header className="px-4 py-3 border-b flex items-center justify-between" style={{ borderColor: "var(--border)" }}>
           <h3 className="text-sm font-medium" style={{ color: "var(--text-primary)" }}>
             成员管理 · {spaceName}
@@ -146,7 +144,6 @@ export function SpaceMembersDialog({ serverUrl, spaceId, spaceName, onClose }: P
             {error}
           </div>
         )}
-      </div>
-    </div>
+    </DialogFrame>
   );
 }

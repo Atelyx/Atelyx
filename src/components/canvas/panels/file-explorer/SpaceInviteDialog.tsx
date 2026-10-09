@@ -3,6 +3,8 @@
  */
 import { useState } from "react";
 import { Copy, X } from "lucide-react";
+import { DialogFrame } from "@/components/common/DialogFrame";
+import { Z_LAYERS } from "@/constants/zLayers";
 import { Button, IconButton } from "@/components/common/Button";
 import { Input } from "@/components/common/Input";
 import { useSpaceDirectoryStore } from "@/stores/spaceDirectoryStore";
@@ -82,16 +84,12 @@ export function SpaceInviteDialog({ serverUrl, spaceId, spaceName, onClose }: Pr
   };
 
   return (
-    <div
-      className="fixed inset-0 z-[200] flex items-center justify-center"
-      style={{ background: "var(--scrim)" }}
-      onClick={onClose}
+    <DialogFrame
+      onClose={onClose}
+      z={Z_LAYERS.dialog}
+      panelClassName="w-[380px]"
+      ariaLabel="邀请码"
     >
-      <div
-        className="w-[380px] rounded-lg border shadow-[var(--shadow-pop)]"
-        style={{ background: "var(--bg-overlay)", borderColor: "var(--border)" }}
-        onClick={(e) => e.stopPropagation()}
-      >
         <header className="px-4 py-3 border-b flex items-center justify-between" style={{ borderColor: "var(--border)" }}>
           <h3 className="text-sm font-medium" style={{ color: "var(--text-primary)" }}>
             邀请码 · {spaceName}
@@ -186,7 +184,6 @@ export function SpaceInviteDialog({ serverUrl, spaceId, spaceName, onClose }: Pr
             {invite ? "重新生成" : "生成邀请码"}
           </Button>
         </footer>
-      </div>
-    </div>
+    </DialogFrame>
   );
 }

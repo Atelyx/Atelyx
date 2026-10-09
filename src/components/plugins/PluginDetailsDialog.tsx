@@ -7,6 +7,8 @@ import { Check, ChevronRight, Circle, Lock, RefreshCw, Terminal, X } from "lucid
 import type { InstalledPlugin, PluginAuditEntry, PluginCommandContribution, PluginSlotChain } from "@/types";
 import { IconButton } from "@/components/common/Button";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
+import { DialogFrame } from "@/components/common/DialogFrame";
+import { Z_LAYERS } from "@/constants/zLayers";
 import { PLUGIN_MOUNT_PHASE_LABELS, PLUGIN_MOUNT_PHASE_ORDER } from "@/constants/plugins";
 
 interface PluginDetailsDialogProps {
@@ -65,9 +67,7 @@ export function PluginDetailsDialog({
   /** 已发现能力在本平台是否可用：只列有平台差异的能力（如 process = 进程执行），其余不受平台影响。 */
   const capabilityAvailable = (name: string): boolean =>
     name === "process" ? processAvailable : true;
-  const onCloseRef = useRef(onClose);
   const rollbackConfirmRef = useRef(rollbackConfirm);
-  onCloseRef.current = onClose;
   rollbackConfirmRef.current = rollbackConfirm;
   const [expandedSlot, setExpandedSlot] = useState<string | null>(null);
   const pluginCommands = commands.filter((command) => command.pluginId === plugin.id);
@@ -85,32 +85,21 @@ export function PluginDetailsDialog({
   useEffect(() => {
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     closeRef.current?.focus();
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !rollbackConfirmRef.current) onCloseRef.current();
-    };
-    window.addEventListener("keydown", onKeyDown);
     return () => {
-      window.removeEventListener("keydown", onKeyDown);
       previousFocus?.focus();
     };
   }, []);
 
-  // 层级 180：高于既有弹层段（历史弹窗 90 / 灯箱 100 / 右键菜单 110）——弹窗可能从右键菜单
-  // 路径打开；内部叠加的回退确认弹窗自身为 z-[200]，自然落在详情弹窗之上
+  // 弹窗可能从右键菜单路径打开，层级取 pluginDetails 段；内部叠加的回退确认弹窗
+  // 取 dialog 段（更高），自然落在详情弹窗之上——其打开期间经 canClose 挂起本弹窗的关闭行为
   return (
-    <div
-      className="fixed inset-0 z-[180] flex items-center justify-center"
-      style={{ background: "var(--scrim)" }}
-      onClick={rollbackConfirm ? undefined : onClose}
-      role="dialog"
-      aria-modal="true"
-      aria-label={`${plugin.manifest.name}插件详情`}
+    <DialogFrame
+      onClose={onClose}
+      z={Z_LAYERS.pluginDetails}
+      panelClassName="w-[min(38rem,calc(100vw-2rem))] max-h-[calc(100vh-2rem)] overflow-y-auto p-4"
+      ariaLabel={`${plugin.manifest.name}插件详情`}
+      canClose={() => !rollbackConfirmRef.current}
     >
-      <div
-        className="w-[min(38rem,calc(100vw-2rem))] max-h-[calc(100vh-2rem)] overflow-y-auto rounded-[var(--radius-lg)] border shadow-[var(--shadow-pop)] p-4"
-        style={{ background: "var(--bg-overlay)", borderColor: "var(--border)" }}
-        onClick={(event) => event.stopPropagation()}
-      >
         <div className="flex items-start gap-3 mb-4">
           <div className="flex-1 min-w-0">
             <h3 className="text-sm font-medium truncate" style={{ color: "var(--text-primary)" }}>{plugin.manifest.name}</h3>
@@ -239,7 +228,6 @@ export function PluginDetailsDialog({
             <div className="flex flex-wrap gap-1">{pluginCommands.map((command) => <button key={command.globalId} onClick={() => onRunCommand(command.globalId)} className="px-1.5 py-0.5 rounded border text-micro" style={{ borderColor: "var(--border)", color: "var(--text-secondary)" }}>{command.label}</button>)}</div>
           </section>
         )}
-      </div>
       {rollbackConfirm && (
         <ConfirmDialog
           title={`回退插件「${plugin.manifest.name}」`}
@@ -250,6 +238,6 @@ export function PluginDetailsDialog({
           onCancel={onCancelRollback}
         />
       )}
-    </div>
+    </DialogFrame>
   );
 }
