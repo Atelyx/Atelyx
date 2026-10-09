@@ -36,7 +36,7 @@ pub struct VaultState {
 }
 
 /// 一次仓库会话：根路径 + 该仓库生效的文件面板配置（open_vault 时从配置解析）。
-pub struct VaultSession {
+pub(crate) struct VaultSession {
     pub root: PathBuf,
     /// 排除文件夹名列表（任何层级的同名文件夹不显示/不监听，`excludeFolders` 配置）。
     pub exclude_folders: Vec<String>,
@@ -1004,7 +1004,7 @@ pub fn read_vault_config_with_backup(root: &Path) -> Result<(VaultConfig, Option
     }
 }
 
-pub fn write_vault_config(root: &Path, config: &VaultConfig) -> Result<(), String> {
+pub(crate) fn write_vault_config(root: &Path, config: &VaultConfig) -> Result<(), String> {
     let path = root.join(".atelyx").join(VAULT_CONFIG_FILE);
     let json = serde_json::to_string_pretty(config).map_err(|e| e.to_string())?;
     atomic_write(&path, &json)
@@ -1119,7 +1119,7 @@ pub fn patch_vault_config(root: &Path, patch: &serde_json::Value) -> Result<Opti
 ///
 /// 合并结果经 `VaultConfig` 反序列化再序列化：这一趟保证输出只含已知字段、保持 `skip_serializing_if`
 /// 的干净形状（未知字段被丢弃，与 `write_vault_config` 同一形状约束）。
-pub fn merge_vault_config(base_json: &str, patch: &serde_json::Value) -> Result<VaultConfig, String> {
+pub(crate) fn merge_vault_config(base_json: &str, patch: &serde_json::Value) -> Result<VaultConfig, String> {
     let patch_obj = patch
         .as_object()
         .ok_or_else(|| "配置补丁必须是 JSON 对象".to_string())?;

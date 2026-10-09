@@ -105,7 +105,7 @@ pub struct GlobalConfigRead {
     pub config: GlobalConfig,
     /// 非空 = `global.json` 原文损坏、已按该文件名备份并退回空配置（前端据此提示用户）
     pub corrupt_backup: Option<String>,
-    /// 应用装配版本快照（进程内单调计数器，计数器本体在 `commands::plugin`）：补丁含组合
+    /// 应用装配版本快照（进程内单调计数器，计数器本体在 `commands::assembly`）：补丁含组合
     /// 用户层时自增，前端据此广播并做跨窗口装配快照比对。
     pub assembly_version: u64,
 }
@@ -228,7 +228,7 @@ pub fn read_global_config(app: AppHandle) -> Result<GlobalConfigRead, String> {
     Ok(GlobalConfigRead {
         config,
         corrupt_backup,
-        assembly_version: crate::commands::plugin::assembly_version(),
+        assembly_version: crate::commands::assembly::assembly_version(),
     })
 }
 
@@ -274,12 +274,12 @@ fn patch_global_config_at(path: &Path, patch: &serde_json::Value) -> Result<Glob
     // 补丁含组合用户层 = 装配输入变更：版本前移（`null` 删键同样是变更，contains_key 已覆盖）。
     // 放在提交成功之后：写盘失败不得留下「版本已前移、磁盘未变」的空转追平信号。
     if patch_obj.contains_key("compositionPatches") {
-        crate::commands::plugin::bump_assembly_version();
+        crate::commands::assembly::bump_assembly_version();
     }
     Ok(GlobalConfigRead {
         config,
         corrupt_backup,
-        assembly_version: crate::commands::plugin::assembly_version(),
+        assembly_version: crate::commands::assembly::assembly_version(),
     })
 }
 
@@ -362,7 +362,7 @@ fn theme_scheme_of(config: &GlobalConfig, system_dark: bool) -> ThemeScheme {
 mod tests {
     use super::*;
 
-    use crate::commands::plugin::{assembly_version, ASSEMBLY_TEST_GATE};
+    use crate::commands::assembly::{assembly_version, ASSEMBLY_TEST_GATE};
 
     /// 原生启动底色的主题解析：内置主题插件按 colorMode 取深浅（跟随系统时看系统），
     /// 皮肤与自定义主题插件一律深色兜底（变量在 JS 侧，Rust 读不到）。

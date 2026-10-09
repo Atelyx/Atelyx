@@ -108,7 +108,7 @@ pub struct PluginListResult {
     /// 已不再支持，这些目录中的插件不会加载，前端据此汇总提示。
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub legacy_vault_plugin_roots: Vec<String>,
-    /// 应用装配版本快照（见 ASSEMBLY_VERSION）：行集合与装配输入的版本锚，前端据此记同步游标。
+    /// 应用装配版本快照（见 `commands::assembly`）：行集合与装配输入的版本锚，前端据此记同步游标。
     pub assembly_version: u64,
 }
 
@@ -1137,26 +1137,7 @@ fn locate_plugin_root(extract_dir: &Path) -> Result<PathBuf, String> {
 
 // ===== 安装 / 卸载 / 更新 =====
 
-/// 应用装配版本（进程内单调计数器）：插件行状态或组合用户层每次落盘变更自增。
-/// 广播与各读取命令携带该版本，各窗口据此比对装配快照新旧——通知丢失由后续更高版本
-/// 追平，无需逐版对账。应用重启后全部窗口重建重取基线，无需跨进程持久化。
-static ASSEMBLY_VERSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// 自增并返回新版本号（写盘成功路径调用）。
-pub fn bump_assembly_version() -> u64 {
-    ASSEMBLY_VERSION.fetch_add(1, std::sync::atomic::Ordering::Release) + 1
-}
-
-/// 读当前版本号（广播与读取命令快照用）。
-pub fn assembly_version() -> u64 {
-    ASSEMBLY_VERSION.load(std::sync::atomic::Ordering::Acquire)
-}
-
-/// 测试专用闸锁：版本计数器是进程级全局静态，并行测试共享。凡断言版本或经实质变更前移
-/// 版本的测试都先取它，把「读版本 → 触发变更 → 读版本」变成独占窗口——相等断言不被其他
-/// 测试的并发 bump 打穿（bump 源：本模块状态事务回归、global 的补丁测试）。
-#[cfg(test)]
-pub(crate) static ASSEMBLY_TEST_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub use super::assembly::{assembly_version, bump_assembly_version};
 
 /// 广播行集合变更（版本号单调，见装配版本游标）：载荷只带版本号——各窗口据游标单调比对，
 /// 自己读本机输入重算裁决，不需要按行定向通知。
@@ -2728,6 +2709,7 @@ pub fn plugin_kv_write(app: AppHandle, id: String, data: Value) -> Result<(), St
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::assembly::ASSEMBLY_TEST_GATE;
     use serde_json::json;
 
     #[test]
