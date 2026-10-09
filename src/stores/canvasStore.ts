@@ -58,7 +58,7 @@ import {
   rectOf,
   collectGroupMembers,
 } from "@/utils/layout";
-import { createPersistController, advanceBaselineRefs } from "@/utils/persist";
+import { createPersistController, advanceBaselineRefs, finishPersistRound, routePersistError } from "@/utils/persist";
 import { registerDomainLifecycle } from "@/utils/kernelLifecycle";
 import { clearCanvasViewportCache } from "@/services/viewHandoff";
 import { createUndoManager } from "@/utils/undoStack";
@@ -822,42 +822,34 @@ async function persistNow(): Promise<void> {
   const { canvasId, canvasFile, canvasTitle, nodes, edges, messagesByConv } =
     useCanvasStore.getState();
   if (!canvasId || !canvasFile) return;
-  // 写盘成功后的统一收尾：同步 title 改名后的落地路径（不同步会让下一轮写已被改名删除的
-  // 旧路径 → 404 回退全量写，凭空多出一个画布文件），再记历史（只绑定「本轮真实落盘」这一
-  // 事实，与收尾走哪条出口无关），最后按本轮是否已被新变更接续决定收尾方式。
-  // written = false 表示空补丁（磁盘未动，不记历史）。
-  const finish = (written: boolean, newFile?: string) => {
-    // 竞态守卫：await 期间可能已切换画布/清空状态（load 异步读盘），旧画布的写盘结果
-    // 不得覆盖新画布的脏标记/路径（否则新画布下次保存写错文件、脏编辑被吞）
-    const cur = useCanvasStore.getState();
-    if (cur.canvasId !== canvasId || cur.canvasFile !== canvasFile) return;
-    // 落地路径先于并发判断：本轮写盘已经发生，改名落点是既成事实，必须照常同步
-    if (newFile && newFile !== canvasFile) {
-      // title 变更导致路径漂移：同步 canvasFile + appStore.currentCanvasFile（同源）
-      useCanvasStore.setState({ canvasFile: newFile });
-      if (useAppStore.getState().currentCanvasFile === canvasFile) {
-        useAppStore.setState({ currentCanvasFile: newFile });
-      }
-    }
-    if (written) {
-      recordCanvasHistorySnapshot(newFile ?? canvasFile, {
-        canvasId,
-        canvasTitle,
-        nodes,
-        edges,
-        messagesByConv,
-      });
-    }
-    if (persistCtl.version !== versionAtStart) {
-      // 写盘期间有新变更（已挂新 timer）：保留 dirty，由下一轮 timer 再写盘，防本次成功
-      // 吞掉新编辑；不推进快照——下一轮 diff 仍以旧快照为基线（已写盘部分重发同内容
-      // upsert，幂等）。历史已按本轮落盘快照记过，不随出口丢失
-      useCanvasStore.setState({ saving: false });
-      return;
-    }
-    useCanvasStore.setState({ error: null, dirty: false, saving: false });
-    syncLastSaved();
-  };
+  const finish = (written: boolean, newFile?: string) =>
+    finishPersistRound({
+      versionAtStart,
+      versionNow: () => persistCtl.version,
+      // 竞态守卫：await 期间可能已切换画布/清空状态（load 异步读盘），旧画布的写盘结果
+      // 不得覆盖新画布的脏标记/路径（否则新画布下次保存写错文件、脏编辑被吞）
+      ownerUnchanged: () => {
+        const cur = useCanvasStore.getState();
+        return cur.canvasId === canvasId && cur.canvasFile === canvasFile;
+      },
+      file: canvasFile,
+      newFile,
+      written,
+      // title 变更导致路径漂移：同步 canvasFile + appStore.currentCanvasFile（同源）——
+      // 不同步会让下一轮写已被改名删除的旧路径 → 404 回退全量写，凭空多出一个画布文件
+      onRelocated: (nextFile, oldFile) => {
+        useCanvasStore.setState({ canvasFile: nextFile });
+        if (useAppStore.getState().currentCanvasFile === oldFile) {
+          useAppStore.setState({ currentCanvasFile: nextFile });
+        }
+      },
+      onWritten: (file) => recordCanvasHistorySnapshot(file, { canvasId, canvasTitle, nodes, edges, messagesByConv }),
+      onSuperseded: () => useCanvasStore.setState({ saving: false }),
+      onClean: () => {
+        useCanvasStore.setState({ error: null, dirty: false, saving: false });
+        syncLastSaved();
+      },
+    });
   const reportError = (e: unknown) => {
     useCanvasStore.setState({ saving: false });
     console.error("自动保存失败", e);
@@ -880,17 +872,23 @@ async function persistNow(): Promise<void> {
     });
     finish(result !== null, result?.file);
   } catch (e) {
-    if (typeof e === "string" && e.includes("画布文件不存在（已从磁盘删除）")) {
-      // 文件已被删除：补丁只含变化实体，重建会丢未变化部分——回退全量写
-      try {
-        await persistCanvasVault(canvasId, canvasFile, canvasTitle, nodes, edges, messagesByConv);
-        finish(true);
-      } catch (e2) {
-        reportError(e2);
-      }
-    } else {
-      reportError(e);
-    }
+    // 文件已被删除：补丁只含变化实体，重建会丢未变化部分——回退全量写。
+    // 读最新 state：await 主补丁期间用户可能又有新编辑，写起始快照会把 stale 内容
+    // 短暂覆盖磁盘；同时防切画布后把新画布内容写进旧文件（与 finish 守卫同语义）。
+    await routePersistError(e, {
+      deletedMarker: "画布文件不存在（已从磁盘删除）",
+      rewriteFull: async () => {
+        try {
+          const latest = useCanvasStore.getState();
+          if (latest.canvasId !== canvasId || latest.canvasFile !== canvasFile) return;
+          await persistCanvasVault(canvasId, canvasFile, latest.canvasTitle, latest.nodes, latest.edges, latest.messagesByConv);
+          finish(true);
+        } catch (e2) {
+          reportError(e2);
+        }
+      },
+      reportError,
+    });
   }
 }
 

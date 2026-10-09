@@ -8,6 +8,7 @@ import { emit, emitTo, listen } from "@tauri-apps/api/event";
 import { emitPluginEvent } from "@/services/cordis/events";
 import { getCurrentWindowLabel } from "@/services/window";
 import { CHAT_HISTORY_DIR, CHAT_MESSAGE_EXT } from "@/constants/editorChats";
+import { createBackoffRetry } from "@/utils/backoff";
 import type {
   ChatTurnMessage,
   ConversationCompaction,
@@ -651,11 +652,7 @@ export function requestChatContainerSnapshot(): Promise<ChatContainerSnapshot> {
       // 装载 = 真源按新仓库根重建：执行体在途队列/退避重试/补丁 rev 全部作废
       //（批次基于旧根基线，提交会污染新根；Rust 侧 rev 计数随重建归零）
       executorQueue = [];
-      executorCommitRetries = 0;
-      if (executorRetryTimer) {
-        clearTimeout(executorRetryTimer);
-        executorRetryTimer = null;
-      }
+      executorRetry.reset();
       executorPatchRevs.clear();
       if (executorFlushTimer) {
         clearTimeout(executorFlushTimer);
@@ -838,8 +835,17 @@ let externalFolding = false;
 const COMMIT_ID_RETENTION_MS = OPID_RETENTION_MS;
 /** 提交通道失败的退避序列（有界重试，达上限放弃并报错）。 */
 const EXECUTOR_COMMIT_RETRY_DELAYS = [500, 1000, 2000, 4000, 8000];
-let executorCommitRetries = 0;
-let executorRetryTimer: ReturnType<typeof setTimeout> | null = null;
+/** 在途重试批次（schedule 时登记，触发时重新入队）。 */
+let executorRetryBatch: CommitBatch | null = null;
+const executorRetry = createBackoffRetry({
+  delaysMs: EXECUTOR_COMMIT_RETRY_DELAYS,
+  onRetry: () => {
+    if (!rustTruthEnabled || !executorRetryBatch) return;
+    executorQueue.push(executorRetryBatch);
+    flushExecutorCommits();
+  },
+  onGiveUp: () => console.error("会话容器变更提交重试达上限，本批变更已丢弃", executorRetryBatch),
+});
 
 function installChatContainerExecutor(handlers: ChatContainerExecutorHandlers): void {
   if (executorHandlers) return;
@@ -895,7 +901,7 @@ function flushExecutorCommits(): void {
   // 模式退离后在途队列整体丢弃：批次基于旧模式基线，提交会污染退离前的真源仓库
   if (!rustTruthEnabled) {
     executorQueue = [];
-    executorCommitRetries = 0;
+    executorRetry.reset();
     return;
   }
   if (executorQueue.length === 0 || !executorHandlers) return;
@@ -912,12 +918,13 @@ function flushExecutorCommits(): void {
   // 若在发出前无条件归零，重试自己的 flush 又会清零，退避序列永远停在第 0 档（等同固定间隔无限重试）。
   void invoke("chat_container_commit", { requestId, expectedRoot: rustCurrentRoot, batch })
     .then(() => {
-      executorCommitRetries = 0;
+      // 只归零退避进度：在途重试 timer 是更早失败批次的补交，不得随本次成功吞掉
+      executorRetry.resetProgress();
     })
     .catch((e) => {
       const message = e instanceof Error ? e.message : String(e);
       if (message.includes("仓库已切换")) {
-        executorCommitRetries = 0;
+        executorRetry.reset();
         return;
       }
       console.error("会话容器变更提交失败，将重试", e);
@@ -927,19 +934,8 @@ function flushExecutorCommits(): void {
 
 /** 提交通道失败的退避重试（有界）：批次重新入队错峰再交；连续失败达上限放弃（真源侧落盘重试链不受影响）。 */
 function scheduleExecutorCommitRetry(batch: CommitBatch): void {
-  if (executorCommitRetries >= EXECUTOR_COMMIT_RETRY_DELAYS.length) {
-    console.error("会话容器变更提交重试达上限，本批变更已丢弃", batch);
-    return;
-  }
-  const delay = EXECUTOR_COMMIT_RETRY_DELAYS[executorCommitRetries];
-  executorCommitRetries += 1;
-  if (executorRetryTimer) clearTimeout(executorRetryTimer);
-  executorRetryTimer = setTimeout(() => {
-    executorRetryTimer = null;
-    if (!rustTruthEnabled) return;
-    executorQueue.push(batch);
-    flushExecutorCommits();
-  }, delay);
+  executorRetryBatch = batch;
+  executorRetry.schedule();
 }
 
 /** 执行体提交批次（chat_container_commit 的 CommitBatch；字段与 Rust 契约逐一对齐）。 */

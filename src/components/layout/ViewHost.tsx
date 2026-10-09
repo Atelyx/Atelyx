@@ -106,6 +106,25 @@ export const ViewHost = memo(function ViewHost({ view, hostId }: { view: ViewKin
   return <ViewContributionMount kind={view} hostId={hostId} />;
 });
 
+/** 视图状态条的错误提示（danger 配色 + 可选重试按钮 + 关闭按钮；画布/表格共用）。 */
+function ErrorPill({ error, onRetry, onDismiss }: { error: string; onRetry?: () => void; onDismiss: () => void }) {
+  const actionStyle = { background: "color-mix(in srgb, var(--danger) 20%, transparent)" };
+  return (
+    <span
+      className="flex items-center gap-1 px-1.5 py-0.5 rounded flex-shrink-0"
+      style={{ color: "var(--danger)", background: "color-mix(in srgb, var(--danger) 12%, transparent)" }}
+    >
+      <span className="truncate max-w-[160px]">{error}</span>
+      {onRetry && (
+        <Button variant="danger" size="sm" onClick={onRetry} style={actionStyle}>
+          重试
+        </Button>
+      )}
+      <IconButton variant="danger" size="sm" icon={<X size={12} />} label="关闭错误提示" style={actionStyle} onClick={onDismiss} />
+    </span>
+  );
+}
+
 /** 画布视图状态指示（无当前画布不显示；错误 > 保存状态）。 */
 function CanvasStatusIndicator() {
   const canvasId = useCanvasStore((s) => s.canvasId);
@@ -119,30 +138,11 @@ function CanvasStatusIndicator() {
   if (!canvasId) return null;
   if (error) {
     return (
-      <span
-        className="flex items-center gap-1 px-1.5 py-0.5 rounded flex-shrink-0"
-        style={{ color: "var(--danger)", background: "color-mix(in srgb, var(--danger) 12%, transparent)" }}
-      >
-        <span className="truncate max-w-[160px]">{error}</span>
-        {error === "加载画布失败，请重试" && canvasFile && (
-          <Button
-            variant="danger"
-            size="sm"
-            onClick={() => void load(canvasFile)}
-            style={{ background: "color-mix(in srgb, var(--danger) 20%, transparent)" }}
-          >
-            重试
-          </Button>
-        )}
-        <IconButton
-          variant="danger"
-          size="sm"
-          icon={<X size={12} />}
-          label="关闭错误提示"
-          style={{ background: "color-mix(in srgb, var(--danger) 20%, transparent)" }}
-          onClick={() => clearError()}
-        />
-      </span>
+      <ErrorPill
+        error={error}
+        onRetry={error === "加载画布失败，请重试" && canvasFile ? () => void load(canvasFile) : undefined}
+        onDismiss={() => clearError()}
+      />
     );
   }
   if (loading) return <StatusPill status="pending" label="加载中…" />;
@@ -159,22 +159,7 @@ function TableStatusIndicator() {
   const clearError = useTableStore((s) => s.clearError);
   if (!currentTableFile) return null;
   if (error) {
-    return (
-      <span
-        className="flex items-center gap-1 px-1.5 py-0.5 rounded flex-shrink-0"
-        style={{ color: "var(--danger)", background: "color-mix(in srgb, var(--danger) 12%, transparent)" }}
-      >
-        <span className="truncate max-w-[160px]">{error}</span>
-        <IconButton
-          variant="danger"
-          size="sm"
-          icon={<X size={12} />}
-          label="关闭错误提示"
-          style={{ background: "color-mix(in srgb, var(--danger) 20%, transparent)" }}
-          onClick={() => clearError()}
-        />
-      </span>
-    );
+    return <ErrorPill error={error} onDismiss={() => clearError()} />;
   }
   if (saving) return <StatusPill status="pending" label="保存中…" />;
   return <StatusPill status="ok" label="已自动保存" />;

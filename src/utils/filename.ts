@@ -50,6 +50,13 @@ export function baseName(file: string): string {
   return i >= 0 ? file.slice(i + 1) : file;
 }
 
+/** 路径小写扩展名（不含点；"a/b.md" → "md"；无扩展名/隐藏文件（点在首字符）= 空串）。 */
+export function extOf(path: string): string {
+  const base = baseName(path);
+  const dot = base.lastIndexOf(".");
+  return dot > 0 ? base.slice(dot + 1).toLowerCase() : "";
+}
+
 /** 去最后一个扩展名（"b.md" → "b"；无扩展名/隐藏文件原样返回）。 */
 export function stripExt(name: string): string {
   const dot = name.lastIndexOf(".");

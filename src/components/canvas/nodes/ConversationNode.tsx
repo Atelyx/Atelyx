@@ -33,7 +33,6 @@ import { isAssetConsumed } from "@/utils/consumed";
 import { findFreeSpot } from "@/utils/layout";
 import { useNotificationStore } from "@/stores/notificationStore";
 import {
-  insertMentionTag,
   mentionTextOf,
   prefix,
   splitMentions,
@@ -64,6 +63,7 @@ import { MentionTextarea } from "@/components/common/MentionTextarea";
 import { JumpToBottomButton } from "@/components/common/JumpToBottomButton";
 import { useInlineEdit } from "@/hooks/useInlineEdit";
 import { useVaultLinkHandlers } from "@/hooks/useVaultLinkHandlers";
+import { useMentionInsert } from "@/hooks/useMentionInsert";
 import { useWikiNodeLocate } from "@/hooks/useWikiNodeLocate";
 import { assistantReplyText } from "@/utils/agentSteps";
 import { compactionMarkerIndex } from "@/utils/compaction";
@@ -465,30 +465,17 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
 
   // ===== @ 提及（反向：手动 @ → 自动建边） =====
 
-  /** #标签 原位插入（record 回调登记引用映射）。插入位置在 `setInput(prev => …)` 内由 `prev` 算：
-   *  渲染期闭包的 `input` 已含上一次入队结果，两次插入落到同一 tick 会互相覆盖。 */
-  const insertMentionLabel = (mentionText: string, record: () => void) => {
-    const caret = textareaRef.current?.selectionStart ?? input.length;
-    const insertAt = Math.min(Math.max(atIdx, 0), input.length);
-    const end = Math.max(caret, insertAt);
-    let caretAfter = 0;
-    setInput((prev) => {
-      const { text, caret: next } = insertMentionTag(prev, insertAt, end, mentionText);
-      caretAfter = next;
-      return text;
-    });
-    record();
-    // 光标移到尾随空格之后（继续输入不紧贴胶囊）
-    requestAnimationFrame(() => {
-      const ta = textareaRef.current;
-      if (ta) {
-        ta.focus();
-        ta.setSelectionRange(caretAfter, caretAfter);
-      }
-    });
-    setPicker(null);
-    setAtIdx(-1);
-  };
+  // #标签 原位插入（record 回调登记引用映射），骨架见 hooks/useMentionInsert。
+  const insertMention = useMentionInsert({
+    textareaRef,
+    input,
+    atIdx,
+    setInput,
+    closePicker: () => {
+      setPicker(null);
+      setAtIdx(-1);
+    },
+  });
 
   const handlePickerPick = (node: FlowNode) => {
     if (node.type === "media") {
@@ -510,7 +497,7 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
     }
     // 输入框插入可见 #显示名，并记录提及映射供发送时就地替换
     const mentionText = `#${mentionTextOf(node)}`;
-    insertMentionLabel(mentionText, () =>
+    insertMention(mentionText, () =>
       setMentions((prev) => [...prev, { nodeId: node.id, text: mentionText }]),
     );
   };
@@ -528,7 +515,7 @@ export function ConversationNode({ id, width, height, selected }: NodeProps) {
       }
     }
     const label = t.name.toLowerCase().endsWith(".md") ? noteTitleFromFile(t.path) : t.name;
-    insertMentionLabel(`#${label}`, () =>
+    insertMention(`#${label}`, () =>
       setFileMentions((prev) => [...prev, { file: t.path, label }]),
     );
   };

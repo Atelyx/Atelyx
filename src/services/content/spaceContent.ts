@@ -8,7 +8,7 @@ import { CANVAS_SCHEMA } from "@/constants/canvas";
 import { SPACE_TEAM_META, spaceMetaScalar } from "@/constants/spaceMeta";
 import { TABLE_SCHEMA } from "@/constants/table";
 import { CHAT_MESSAGES_META_PREFIX } from "@/constants/editorChats";
-import { baseName, parentDir, sanitizeFilename, stripExt } from "@/utils/filename";
+import { baseName, extOf, parentDir, sanitizeFilename, stripExt } from "@/utils/filename";
 import { IMAGE_EXTS, imageMimeFromExt } from "@/utils/image";
 import { normalizeTableRow } from "@/utils/table";
 import type {
@@ -95,13 +95,12 @@ function attachmentDirFromMeta(raw: string | undefined): string {
 
 /** 按扩展名推 mime（仅图片；其余回落 application/octet-stream）。 */
 function mimeFromExt(file: string): string {
-  const ext = file.slice(file.lastIndexOf(".") + 1).toLowerCase();
-  return imageMimeFromExt(ext) ?? "application/octet-stream";
+  return imageMimeFromExt(extOf(file)) ?? "application/octet-stream";
 }
 
 /** 图片扩展名（importTableImage 落盘扩展名来源；非图片返回 null）。 */
 function imageExtFromName(file: string): string | null {
-  const ext = file.slice(file.lastIndexOf(".") + 1).toLowerCase();
+  const ext = extOf(file);
   return IMAGE_EXTS.includes(ext) ? ext : null;
 }
 

@@ -89,3 +89,65 @@ export function advanceBaselineRefs<T extends { id: string }>(
     }
   }
 }
+
+/**
+ * 单文件持久化一轮的统一收尾（canvas/table 共用骨架）：
+ * 归属守卫（旧目标的写盘结果不得覆盖新目标的脏标记/路径）→ 漂移路径同步（先于并发判断，
+ * 改名落点是既成事实）→ 记历史（只绑定「本轮真实落盘」这一事实）→ 按本轮是否被新变更
+ * 接续分流：有新变更保留 dirty 由下一轮 timer 再写，无新变更清脏并推进落盘基线。
+ */
+export function finishPersistRound(args: {
+  /** 本轮 persist 开始时捕获的 persistCtl.version。 */
+  versionAtStart: number;
+  /** persistCtl.version 读取器（收尾时对比，变了 = 写盘期间有新编辑）。 */
+  versionNow: () => number;
+  /** 归属守卫：写盘目标仍是当前激活目标（false = 已切换画布/表格，本轮结果丢弃）。 */
+  ownerUnchanged: () => boolean;
+  /** 本轮写盘的起始文件路径。 */
+  file: string;
+  /** 服务端回传的漂移落点（title 改名）；缺省或与起始相同 = 无漂移。 */
+  newFile?: string;
+  /** 本轮是否真实落盘（false = 空补丁，磁盘未动，不记历史）。 */
+  written: boolean;
+  /** 漂移路径同步副作用（本 store 状态与同源引用）。 */
+  onRelocated: (newFile: string, oldFile: string) => void;
+  /** 记历史（入参 = 落盘后的最终路径）。 */
+  onWritten: (file: string) => void;
+  /** 有新变更接续：只收 saving（dirty 保留，基线不推进）。 */
+  onSuperseded: () => void;
+  /** 无新变更：清 dirty/error 并推进落盘基线。 */
+  onClean: () => void;
+}): void {
+  if (!args.ownerUnchanged()) return;
+  if (args.newFile && args.newFile !== args.file) {
+    args.onRelocated(args.newFile, args.file);
+  }
+  if (args.written) args.onWritten(args.newFile ?? args.file);
+  if (args.versionNow() !== args.versionAtStart) {
+    args.onSuperseded();
+    return;
+  }
+  args.onClean();
+}
+
+/**
+ * 补丁持久化失败的统一分流：文件已被外部删除（补丁只含变化实体，重建会丢未变化部分）→
+ * 走全量回退；其余错误交给上报。
+ */
+export async function routePersistError(
+  e: unknown,
+  opts: {
+    /** 服务端「文件已从磁盘删除」错误的判定文本。 */
+    deletedMarker: string;
+    /** 全量回退（调用方自行 finish）。 */
+    rewriteFull: () => Promise<void>;
+    /** 其余错误上报。 */
+    reportError: (e: unknown) => void;
+  },
+): Promise<void> {
+  if (typeof e === "string" && e.includes(opts.deletedMarker)) {
+    await opts.rewriteFull();
+    return;
+  }
+  opts.reportError(e);
+}

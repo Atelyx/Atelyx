@@ -40,6 +40,7 @@ import { CHAT_UNAVAILABLE_TEXT, ERROR_PREFIX } from "@/constants/chat";
 import { BUILTIN_AGENT_CHAT_ID } from "@/constants/agents";
 import { emitPluginEvent } from "@/services/cordis/events";
 import { prefix, scanMentionHits } from "@/utils/text";
+import { createBackoffRetry } from "@/utils/backoff";
 import { coalesceAgentSteps, fillAssistantReplyText } from "@/utils/agentSteps";
 import { nextCompactionBoundary, splitByCompaction } from "@/utils/compaction";
 import { createPersistController } from "@/utils/persist";
@@ -619,28 +620,20 @@ function opValueResult(response: ChatContainerOpResponse): { ok?: boolean; error
 /** 写盘失败重试的指数退避序列（500ms→2s→8s→30s 封顶）：持久性故障（服务端不可达/磁盘只读）
  *  期间固定短间隔重试会让写盘请求与错误通知刷屏；成功后归零恢复即时性。 */
 const PERSIST_RETRY_DELAYS_MS = [500, 2000, 8000, 30000];
-let persistRetryAttempt = 0;
-let persistRetryTimer: ReturnType<typeof setTimeout> | null = null;
+const persistRetry = createBackoffRetry({
+  delaysMs: PERSIST_RETRY_DELAYS_MS,
+  // 重试走完整 persistNow：loaded/归属守卫与脏集合照常生效
+  onRetry: () => void persistNow(),
+});
 
-/** 失败后安排下一轮退避重试（重试走完整 persistNow：loaded/归属守卫与脏集合照常生效）。 */
+/** 失败后安排下一轮退避重试。 */
 function schedulePersistRetry(): void {
-  const delay =
-    PERSIST_RETRY_DELAYS_MS[Math.min(persistRetryAttempt, PERSIST_RETRY_DELAYS_MS.length - 1)];
-  persistRetryAttempt++;
-  if (persistRetryTimer) clearTimeout(persistRetryTimer);
-  persistRetryTimer = setTimeout(() => {
-    persistRetryTimer = null;
-    void persistNow();
-  }, delay);
+  persistRetry.schedule();
 }
 
 /** 清退避重试（load 切仓库时调用：persistNow 的归属校验是兜底，清 timer 免旧仓库重试空转）。 */
 function cancelPersistRetry(): void {
-  persistRetryAttempt = 0;
-  if (persistRetryTimer) {
-    clearTimeout(persistRetryTimer);
-    persistRetryTimer = null;
-  }
+  persistRetry.reset();
 }
 
 /**
@@ -770,7 +763,8 @@ async function persistNow(): Promise<void> {
       persistError: { message: "会话保存失败，将自动重试", at: Date.now() },
     });
   } else {
-    persistRetryAttempt = 0;
+    // 只归零退避进度（在途重试重跑 persistNow 幂等，照常触发）
+    persistRetry.resetProgress();
     if (useChatPanelStore.getState().persistError) {
       useChatPanelStore.setState({ persistError: null });
     }

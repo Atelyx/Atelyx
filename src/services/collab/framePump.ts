@@ -4,6 +4,7 @@
  * 插件帧的序号对账与补投在泵内闭环，域回调面不感知 seq（见 `pluginLastSeq` 与补投缓冲模式）。
  */
 import type { CanvasPatch, CollabHello, CollabPeer, CollabPresence, TablePatch } from "@/types";
+import { createBackoffRetry } from "@/utils/backoff";
 import type { CollabTransportHandle, CollabTransportOptions } from "./transport";
 
 /** 心跳间隔：服务端 30s 无消息超时踢出，25s 发 ping 保活。 */
@@ -178,9 +179,17 @@ function connectFramePump(opts: CollabFramePumpOptions): CollabFramePumpHandle {
   let ws: WebSocket | null = null;
   let closed = false; // disconnect() 后不再重连
   let alive = false; // 曾连上（避免未连接阶段的重复 false 通知）
-  let retryDelay = 1000;
-  let retryTimer: number | null = null;
   let heartbeatTimer: number | null = null;
+  // 断线重连退避（1s 指数倍增至 15s 封顶；连接成功归零）
+  const retry = createBackoffRetry({
+    delaysMs: [1000, 2000, 4000, 8000, MAX_RETRY_MS],
+    onRetry: () => void reopen(),
+    // 浏览器上下文帧泵沿用 window 计时器（与心跳一致；node 测试环境经 window 桩捕获）
+    timers: {
+      set: window.setTimeout.bind(window),
+      clear: window.clearTimeout.bind(window),
+    },
+  });
   let lastMessageAt = Date.now(); // 最近一次收到服务端帧的时间（含 pong/peers/presence 等）
   let currentHello = opts.hello; // 重连前可经 refreshHello 换新（令牌/身份/配置变化）
   // 房间级插件帧序号 = 最后按序投递的 seq（重连补投的 after 基准）：初值来自连接参数，
@@ -273,7 +282,7 @@ function connectFramePump(opts: CollabFramePumpOptions): CollabFramePumpHandle {
     ws.binaryType = "arraybuffer"; // 二进制插件帧以 ArrayBuffer 入站（JSON 帧仍是 string）
     ws.onopen = () => {
       alive = true;
-      retryDelay = 1000;
+      retry.resetProgress();
       // hello 必须先于任何其它帧发出：连接态回调同步触发各域重连钩子（可能立刻广播 note-sync），
       // 而服务端规定首条消息必须是 hello，否则整条连接被拒
       ws?.send(JSON.stringify({ type: "hello", ...currentHello }));
@@ -369,11 +378,7 @@ function connectFramePump(opts: CollabFramePumpOptions): CollabFramePumpHandle {
 
   function scheduleReconnect(): void {
     if (closed) return;
-    retryTimer = window.setTimeout(() => {
-      retryTimer = null;
-      void reopen();
-    }, retryDelay);
-    retryDelay = Math.min(retryDelay * 2, MAX_RETRY_MS);
+    retry.schedule();
   }
 
   /** 重连前刷新 hello：身份/令牌/配置可能已变；刷新返回 null = 放弃重连并正常收尾
@@ -451,10 +456,7 @@ function connectFramePump(opts: CollabFramePumpOptions): CollabFramePumpHandle {
       closed = true;
       // 断开即丢弃补投缓冲（残留帧属于旧连接，不得投递给新连接的订阅者）
       exitReplayWindow();
-      if (retryTimer !== null) {
-        clearTimeout(retryTimer);
-        retryTimer = null;
-      }
+      retry.cancel();
       if (heartbeatTimer !== null) {
         clearInterval(heartbeatTimer);
         heartbeatTimer = null;

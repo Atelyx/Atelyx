@@ -39,7 +39,7 @@ import {
 import { useAppStore } from "@/stores/appStore";
 import { useUiStateStore } from "@/stores/uiStateStore";
 import { tableTitleFromFile, remapDirPrefix } from "@/utils/filename";
-import { createPersistController, advanceBaselineRefs } from "@/utils/persist";
+import { createPersistController, advanceBaselineRefs, finishPersistRound, routePersistError } from "@/utils/persist";
 import { createUndoManager } from "@/utils/undoStack";
 import { registerDomainLifecycle } from "@/utils/kernelLifecycle";
 import { useNotificationStore } from "@/stores/notificationStore";
@@ -385,35 +385,31 @@ const persistCtl = createPersistController({
     // 本轮写盘内容快照（persist 开始时同步捕获）：收尾记历史用——
     // await 期间内存可能已被协作回放/新编辑改写，不能取收尾时的内存
     const snapshotAtStart = buildTableSnapshot();
-    // 写盘成功后的统一收尾：先同步 title 改名后的落地路径（不同步会让下一轮写已被改名删除的旧路径），
-    // 再记历史（只绑定「本轮真实落盘」这一事实，与收尾走哪条出口无关），最后按本轮是否被
-    // 新变更接续收尾。written = false 表示空补丁（磁盘未动，不记历史）。
-    const finish = (written: boolean, newFile?: string) => {
-      // 竞态守卫：await 期间可能已切换表格（load 替换了状态），旧表的写盘结果不得覆盖新表
-      // 的脏标记/路径（否则新表下次保存写错文件、脏编辑被吞）
-      if (useTableStore.getState().tableFile !== tableFile) return;
-      // 落地路径先于并发判断：本轮写盘已经发生，改名落点是既成事实，必须照常同步
-      if (newFile && newFile !== tableFile) {
-        useTableStore.setState({ tableFile: newFile });
-      }
-      if (written) recordTableHistorySnapshot(newFile ?? tableFile, snapshotAtStart);
-      if (persistCtl.version !== versionAtStart) {
-        // 写盘期间有新变更（已挂新 timer）：保留 dirty，由下一轮 timer 再写盘，防本次成功
-        // 吞掉新编辑；不推进快照——下一轮 diff 仍以旧快照为基线（已写盘部分重发同内容
-        // upsert，幂等）。历史已按本轮落盘快照记过，不随出口丢失
-        useTableStore.setState({ saving: false });
-        return;
-      }
-      useTableStore.setState({ dirty: false, saving: false, error: null });
-      syncLastSaved();
-    };
+    const finish = (written: boolean, newFile?: string) =>
+      finishPersistRound({
+        versionAtStart,
+        versionNow: () => persistCtl.version,
+        // 竞态守卫：await 期间可能已切换表格（load 替换了状态），旧表的写盘结果不得覆盖
+        // 新表的脏标记/路径（否则新表下次保存写错文件、脏编辑被吞）
+        ownerUnchanged: () => useTableStore.getState().tableFile === tableFile,
+        file: tableFile,
+        newFile,
+        written,
+        // title 变更导致路径漂移：同步 tableFile——不同步会让下一轮写已被改名删除的旧路径
+        onRelocated: (nextFile) => useTableStore.setState({ tableFile: nextFile }),
+        onWritten: (file) => recordTableHistorySnapshot(file, snapshotAtStart),
+        onSuperseded: () => useTableStore.setState({ saving: false }),
+        onClean: () => {
+          useTableStore.setState({ dirty: false, saving: false, error: null });
+          syncLastSaved();
+        },
+      });
     const reportError = (e: unknown) => {
       console.error("表格自动保存失败", e);
       useTableStore.setState({ error: "自动保存失败，请检查磁盘空间或权限", saving: false });
     };
-    /** 文件已被删除：补丁只含变化实体，重建会丢未变化部分——回退全量写。
-     * 必须读最新 state：await 主补丁期间用户可能又有新编辑，写起始快照会把 stale 内容
-     * 短暂覆盖磁盘；同时防切表后把新表内容写进旧文件（tableFile 变了即放弃，与 finish 守卫同语义）。 */
+    /** 全量回退：必须读最新 state——await 主补丁期间用户可能又有新编辑，写起始快照会把
+     * stale 内容短暂覆盖磁盘；同时防切表后把新表内容写进旧文件（与 finish 守卫同语义）。 */
     const rewriteFull = async (): Promise<void> => {
       try {
         const latest = useTableStore.getState();
@@ -434,11 +430,11 @@ const persistCtl = createPersistController({
       });
       finish(result !== null, result?.file);
     } catch (e) {
-      if (typeof e === "string" && e.includes("表格文件不存在（已从磁盘删除）")) {
-        await rewriteFull();
-      } else {
-        reportError(e);
-      }
+      await routePersistError(e, {
+        deletedMarker: "表格文件不存在（已从磁盘删除）",
+        rewriteFull,
+        reportError,
+      });
     }
   },
   beforeSchedule: () => useTableStore.setState({ saving: true, dirty: true }),

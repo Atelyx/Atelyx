@@ -30,7 +30,6 @@ import { useChatPanelStore } from "@/stores/chatPanelStore";
 import { useSettingsStore, selectDefaultModelDisplay } from "@/stores/settingsStore";
 import { useAutoScrollFollow } from "@/hooks/useAutoScrollFollow";
 import {
-  insertMentionTag,
   splitMentions,
   type MentionSeg,
 } from "@/utils/text";
@@ -59,6 +58,7 @@ import { assistantReplyText } from "@/utils/agentSteps";
 import { compactionMarkerIndex } from "@/utils/compaction";
 import { CompactionMarker } from "@/components/common/CompactionMarker";
 import { useVaultLinkHandlers } from "@/hooks/useVaultLinkHandlers";
+import { useMentionInsert } from "@/hooks/useMentionInsert";
 import type { EditorChatMessage, EditorChatMessageRef, PendingAttachment } from "@/types";
 
 /** 空消息数组（模块级常量：避免 selector 新引用导致无限重渲染）。 */
@@ -287,6 +287,17 @@ export function AiChatPanel() {
     query: string;
   } | null>(null);
   const [atIdx, setAtIdx] = useState(-1);
+  // #提及插入骨架（与画布对话节点共用；picker 收起 = 关浮层 + 复位 # 触发位）
+  const insertMention = useMentionInsert({
+    textareaRef,
+    input,
+    atIdx,
+    setInput,
+    closePicker: () => {
+      setPicker(null);
+      setAtIdx(-1);
+    },
+  });
   const inputWrapRef = useRef<HTMLDivElement>(null);
   // 待发送附件托盘（上传附件通道）：字节随附件持有，发送时才落仓库临时区（会话 id 此时已知）
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
@@ -395,30 +406,9 @@ export function AiChatPanel() {
   };
 
   // 仓库选择器选中 → #标签 插入（# 到光标间过滤词替换、分隔空格、尾随空格、光标复位，与画布同语义）。
-  // `atIdx`/光标是「待替换区间」的渲染期事实；插入位置在 `setInput(prev => ...)` 内按 `prev` 计算——
-  // 渲染期闭包的 `input` 已含上一次入队结果，两次插入同 tick 到达时会互相覆盖。
   const handleVaultPick = (t: VaultPickTarget) => {
-    const caret = textareaRef.current?.selectionStart ?? input.length;
-    const insertAt = Math.min(Math.max(atIdx, 0), input.length);
-    const end = Math.max(caret, insertAt);
     const label = t.name.toLowerCase().endsWith(".md") ? noteTitleFromFile(t.path) : t.name;
-    const mentionText = `#${label}`;
-    let caretAfter = 0;
-    setInput((prev) => {
-      const { text, caret: next } = insertMentionTag(prev, insertAt, end, mentionText);
-      caretAfter = next;
-      return text;
-    });
-    setMentions((prev) => [...prev, { file: t.path, label }]);
-    requestAnimationFrame(() => {
-      const ta = textareaRef.current;
-      if (ta) {
-        ta.focus();
-        ta.setSelectionRange(caretAfter, caretAfter);
-      }
-    });
-    setPicker(null);
-    setAtIdx(-1);
+    insertMention(`#${label}`, () => setMentions((prev) => [...prev, { file: t.path, label }]));
   };
 
   // 胶囊被移除（MentionTextarea 已删文本 + 复位光标）→ 引用层清理：按实例移出 mentions（同路径多枚胶囊只删一处）

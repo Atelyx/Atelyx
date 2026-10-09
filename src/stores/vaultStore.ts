@@ -37,7 +37,7 @@ import { emitVaultEvent, emitVaultEventAsync, type VaultEvent } from "@/utils/va
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useUiStateStore } from "@/stores/uiStateStore";
 import { useNotificationStore } from "@/stores/notificationStore";
-import { baseName, dedupeFilename, parentDir, sanitizeFilename, siblingPath, stripExt } from "@/utils/filename";
+import { baseName, dedupeFilename, extOf, parentDir, sanitizeFilename, siblingPath, stripExt } from "@/utils/filename";
 import { errText } from "@/utils/errors";
 import type { BacklinkRow, CanvasFileRow, DeleteFolderResult, FileTreeNode, RebuildLinksResult, TagRow } from "@/types";
 
@@ -98,12 +98,6 @@ export function lastFolderRenameTarget(file: string): string | null {
   const { oldDir, newDir } = lastFolderRename;
   const prefix = `${oldDir}/`;
   return file.startsWith(prefix) ? `${newDir}/${file.slice(prefix.length)}` : null;
-}
-
-/** 相对路径的小写扩展名（不含点；无扩展名 = 空串）。AI 文件工具按扩展名分发用。 */
-function relExt(path: string): string {
-  const i = path.lastIndexOf(".");
-  return i > path.lastIndexOf("/") ? path.slice(i + 1).toLowerCase() : "";
 }
 
 /** 画布列表行（rename/move/deleteCanvas 按 file 定位、title 供去重排除；列表未命中时用占位行兜底）。 */
@@ -635,8 +629,8 @@ export const useVaultStore = create<VaultFileState>((set, get) => ({
     if (!old || !name) {
       return { ok: false, summary: "路径为空", actualPath: old || name };
     }
-    const ext = relExt(old);
-    if (relExt(name) !== ext) {
+    const ext = extOf(old);
+    if (extOf(name) !== ext) {
       return { ok: false, summary: "不允许更改文件扩展名", actualPath: old };
     }
     if (parentDir(name)) {
@@ -682,7 +676,7 @@ export const useVaultStore = create<VaultFileState>((set, get) => ({
     }
     // 防抖窗口内的未落盘编辑先落盘：移动后旧 timer 的路径守卫会跳过保存，不 flush 会丢编辑
     await useAppStore.getState().flushAllPending();
-    const ext = relExt(old);
+    const ext = extOf(old);
     try {
       let actual: string;
       if (ext === "md") actual = await get().moveNote(old, dir);
@@ -700,7 +694,7 @@ export const useVaultStore = create<VaultFileState>((set, get) => ({
     if (!p) return { ok: false, summary: "路径为空" };
     // 防抖窗口内的未落盘编辑先落盘，防删除后残留 timer 把旧状态写回重建文件
     await useAppStore.getState().flushAllPending();
-    const ext = relExt(p);
+    const ext = extOf(p);
     try {
       if (ext === "md") {
         await get().deleteNote(p);

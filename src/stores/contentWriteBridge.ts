@@ -7,7 +7,7 @@
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getActiveVaultIdentity } from "@/services/content/factory";
-import { remapDirPrefix } from "@/utils/filename";
+import { remapDirPrefix, extOf } from "@/utils/filename";
 import { useAppStore } from "@/stores/appStore";
 import { useCanvasStore } from "@/stores/canvasStore";
 import { useTableStore } from "@/stores/tableStore";
@@ -27,13 +27,6 @@ export interface VaultContentChangedPayload {
   /** 仓库根（本地绝对路径）：与本窗口激活身份不符的广播丢弃（切换在途的迟到事件防串仓）。 */
   root: string;
   changes: ContentWriteChange[];
-}
-
-/** 路径扩展名（小写；目录名无扩展名返回空串）。 */
-function extOf(path: string): string {
-  const base = path.split("/").pop() ?? path;
-  const dot = base.lastIndexOf(".");
-  return dot > 0 ? base.slice(dot + 1).toLowerCase() : "";
 }
 
 /** 画布路径跟随：同步 canvasFile 与 appStore 的当前画布（同源，与本地保存收尾一致）。 */
