@@ -7,7 +7,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useAppStore } from "@/stores/appStore";
 import { useVaultStore } from "@/stores/vaultStore";
 import { useSettingsStore } from "@/stores/settingsStore";
-import { collapseSoftLineBreaks } from "@/utils/softLineBreak";
 import { RAW_SOURCE_KINDS, renderMarkdownChunks, renderMarkdownEditChunks, type RenderChunk } from "@/utils/markdownCore";
 import { encodeMarkdownLinkHref, wikiLinkContextAt } from "@/utils/markdown";
 import { WikiLinkPicker } from "@/components/editor/WikiLinkPicker";
@@ -337,7 +336,12 @@ export function MarkdownEditor({
       const content = contentRef.current;
       if (!content) return;
       const scrollTop = scrollRef.current?.scrollTop ?? 0;
-      const base = { resolveLink: createLinkResolver(linksRef.current), mentions: mentionsRef.current };
+      const base = {
+        resolveLink: createLinkResolver(linksRef.current),
+        mentions: mentionsRef.current,
+        // 宽松换行关闭时只读面折叠软换行（编辑面忽略：offsets 恒真值优先）
+        softBreakOff: softBreakOffRef.current,
+      };
       // 活动块由内核按新文本的块结构一次定下（光标不落在任何块内时沿用上一活动块），
       // 因此这里只重绘一次：块拆分/合并后旧偏移的归属已不可靠，须以新结构为准
       if (readOnlyRef.current) {
@@ -604,6 +608,15 @@ export function MarkdownEditor({
     };
     // localHistory 为挂载期配置，只在挂载时生效；readOnly 决定输入面生死（翻转即重建）
   }, [applySelection, commitLocalEdit, drawOverlay, getOptions, localHistory, readOnly, renderContent, revealAt]);
+
+  // 宽松换行翻转：更新只读渲染选项并重绘（编辑面文本即真相，不经折叠，无需重绘）
+  const softLineBreak = useSettingsStore((s) => s.softLineBreak);
+  const softBreakOffRef = useRef(!softLineBreak);
+  useEffect(() => {
+    const changed = softBreakOffRef.current !== !softLineBreak;
+    softBreakOffRef.current = !softLineBreak;
+    if (changed && readOnlyRef.current) renderContent(textRef.current, undefined);
+  }, [softLineBreak, renderContent]);
 
   // 只读翻转：内容形态变化，重建一次（容器不重建，滚动保留）
   useEffect(() => {
@@ -887,13 +900,11 @@ interface MarkdownViewProps {
 }
 
 /** 只读 Markdown 渲染（与编辑面同一引擎与内核，渲染完全一致）。
- * 宽松换行关闭（softLineBreak=false）时折叠段内单换行为空格（见 utils/softLineBreak）。 */
+ *  宽松换行开关由引擎只读渲染分支按设置生效（软换行折叠为空格、硬换行保留）。 */
 export function MarkdownView({ text, links, mentions, onMentionClick, className }: MarkdownViewProps) {
-  const softLineBreak = useSettingsStore((s) => s.softLineBreak);
-  const displayText = softLineBreak ? text : collapseSoftLineBreaks(text);
   return (
     <MarkdownEditor
-      body={displayText}
+      body={text}
       syncSeq={0}
       readOnly
       links={links}

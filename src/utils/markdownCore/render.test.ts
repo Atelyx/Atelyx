@@ -669,3 +669,30 @@ describe("renderMarkdownToHtml 列表与边界回归", () => {
     expect(out).toContain("<th>z</th>");
   });
 });
+describe("softBreakOff（宽松换行关闭的只读折叠）", () => {
+  it("只读面：段内软换行渲染为空格", () => {
+    const out = renderMarkdownToHtml("第一行\n第二行", { softBreakOff: true });
+    expect(out).toContain("第一行 第二行");
+    expect(out).not.toContain("第一行\n");
+  });
+
+  it("只读面：硬换行（行尾 ≥2 空格）保留为 <br>", () => {
+    const out = renderMarkdownToHtml("硬换行  \n下一行", { softBreakOff: true });
+    expect(out).toContain("<br>");
+    expect(out).toContain("下一行");
+  });
+
+  it("缺省（开关开启）：段内换行保留", () => {
+    const out = renderMarkdownToHtml("第一行\n第二行");
+    expect(out).toContain("第一行\n第二行");
+  });
+
+  it("编辑面（offsets）不受 softBreakOff 影响：文本节点内换行保留", () => {
+    const result = renderMarkdownEditChunks("第一行\n第二行", {
+      offsets: true,
+      softBreakOff: true,
+    });
+    const text = result.chunks.map((c) => c.html).join("");
+    expect(text).toContain("第一行\n第二行");
+  });
+});

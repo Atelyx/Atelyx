@@ -82,5 +82,11 @@ export interface ParseOptions {
 }
 
 /** 渲染选项：解析选项 + 是否启用 KaTeX（缺省启用；关闭时回显源码）。
- *  `offsets` 供编辑面使用：给块与行内元素打上源偏移，使 DOM 能与源码互相定位。 */
-export type RenderOptions = ParseOptions & { katex?: boolean; offsets?: boolean };
+ *  `offsets` 供编辑面使用：给块与行内元素打上源偏移，使 DOM 能与源码互相定位。
+ *  `softBreakOff` = 宽松换行关闭：只读面（无 offsets）把段内软换行渲染为空格，
+ *  硬换行（独立 span）不受影响；编辑面恒保留换行（文本即真相）。 */
+export type RenderOptions = ParseOptions & {
+  katex?: boolean;
+  offsets?: boolean;
+  softBreakOff?: boolean;
+};

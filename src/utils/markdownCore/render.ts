@@ -142,6 +142,9 @@ function insertComposition(options: EditRenderOptions): string {
 /** 带源区间的纯文本片段（编辑面逐字符定位的最小单位）；空片段不产出元素。 */
 function textSpanHtml(from: number, to: number, text: string, options: EditRenderOptions): string {
   if (to <= from) return "";
+  // 宽松换行关闭的只读面：文本 span 内的 \n 是软换行（硬换行为独立 span），渲染为空格；
+  // 编辑面（offsets）不经此折叠——文本即真相，换行必须在 DOM 中与源码逐字对应
+  if (options.softBreakOff && !options.offsets) text = text.replace(/\n/g, " ");
   return options.offsets ? `<span data-md-from="${from}" data-md-to="${to}">${escapeHtml(text)}</span>` : escapeHtml(text);
 }
 
