@@ -7,12 +7,17 @@ import type { ComponentType } from "react";
 import type { CommandShortcutScope } from "@/types";
 import { resolveNodeSlot, resolveEdgeSlot, resolveTableViewSlot, nodeKinds, edgeKinds, tableViewKinds } from "./slots";
 
+/** 设置 tab 图标组件契约：与 lucide 图标同构（接 size/className，stroke currentColor 跟随主题）。 */
+export type SettingIconComponent = ComponentType<{ size?: number | string; className?: string }>;
+
 /** 插件设置项注册（设置页左侧 tab）。 */
 export interface PluginSettingRegistration {
   pluginId: string;
   key: string;
   label: string;
   component: ComponentType;
+  /** 自定义 tab 图标；缺省用统一的插件图标。 */
+  icon?: SettingIconComponent;
 }
 /** 插件应用级页面注册（应用页面/模式；路由接管接入处）。 */
 export interface PluginAppPageRegistration {
@@ -139,9 +144,10 @@ export function registerPluginSetting(
   key: string,
   label: string,
   component: ComponentType,
+  icon?: SettingIconComponent,
 ): () => void {
   const k = `${pluginId}:${key}`;
-  settings.set(k, { pluginId, key, label, component });
+  settings.set(k, { pluginId, key, label, component, ...(icon ? { icon } : {}) });
   notify();
   return () => {
     if (settings.delete(k)) notify();

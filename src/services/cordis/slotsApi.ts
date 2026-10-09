@@ -31,7 +31,7 @@ import {
   registerPluginSetting,
   registerPluginThemeSetting,
 } from "./ui";
-import type { ThemeSettingComponentProps } from "./ui";
+import type { SettingIconComponent, ThemeSettingComponentProps } from "./ui";
 
 /** 视图槽注册载荷（工作区面板视图；render 优先，重型视图承载宿主面板 id）。 */
 export interface RegisterViewOptions {
@@ -77,6 +77,8 @@ export interface RegisterSettingOptions {
   key: string;
   label: string;
   component: ComponentType;
+  /** 自定义 tab 图标（可选；24 viewBox、stroke currentColor 的 SVG 组件，接 size/className；缺省用统一的插件图标）。 */
+  icon?: SettingIconComponent;
 }
 
 /** 应用级页面注册载荷（全页接管）。 */
@@ -304,9 +306,10 @@ export function createSlotsApi(): SlotsApi {
     },
     registerSetting(this: SlotsApiInstance, opts: RegisterSettingOptions): () => void {
       if (typeof opts.key !== "string" || opts.key.length === 0) throw new Error("设置项需要非空 key");
+      if (opts.icon !== undefined && typeof opts.icon !== "function") throw new Error("设置项图标须为组件");
       const ctx = this.ctx;
       const pluginId = pluginIdOfCtx(ctx);
-      return ctx.effect(() => registerPluginSetting(pluginId, opts.key, opts.label, opts.component));
+      return ctx.effect(() => registerPluginSetting(pluginId, opts.key, opts.label, opts.component, opts.icon));
     },
     registerAppPage(this: SlotsApiInstance, opts: RegisterAppPageOptions): () => void {
       if (typeof opts.id !== "string" || opts.id.length === 0) throw new Error("应用页需要非空 id");

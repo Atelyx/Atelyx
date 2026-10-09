@@ -31,15 +31,23 @@ afterEach(() => {
 
 describe("宿主 UI 贡献注册表", () => {
   it("设置项注册/读取/精确撤销", () => {
-    disposers.push(registerPluginSetting("com.test.a", "com.test.a.key", "我的设置", () => null));
+    const Icon = () => null;
+    disposers.push(registerPluginSetting("com.test.a", "com.test.a.key", "我的设置", () => null, Icon));
     // 设置页 tab 以注册时的裸 key 并入左侧栏，据该 key 取回组件（不得按实现内部复合键断言）
     const tab = getPluginSettings().find((t) => t.key === "com.test.a.key");
     expect(tab?.label).toBe("我的设置");
     expect(tab?.component).not.toBeNull();
+    expect(tab?.icon).toBe(Icon);
 
     disposers[0]!();
     expect(getPluginSettings().find((t) => t.key === "com.test.a.key")).toBeUndefined();
     expect(getPluginSettings()).toHaveLength(0);
+  });
+
+  it("设置项不带图标时 icon 缺省（设置页落统一插件图标）", () => {
+    disposers.push(registerPluginSetting("com.test.a", "com.test.a.key", "我的设置", () => null));
+    const tab = getPluginSettings().find((t) => t.key === "com.test.a.key");
+    expect(tab?.icon).toBeUndefined();
   });
 
   it("应用页/命令注册与读取", () => {

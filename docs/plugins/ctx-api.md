@@ -179,11 +179,14 @@ ctx.slots.registerTableView({ kind: "com.example.timeline", label: "时间线", 
 ### 设置项 / 应用页 / 命令 / 主题设置项
 
 ```ts
-ctx.slots.registerSetting({ key: "com.example", label: "我的设置", component: SettingsComp });
+ctx.slots.registerSetting({ key: "com.example", label: "我的设置", component: SettingsComp, icon: SettingsIcon });
 ctx.slots.registerAppPage({ id: "com.example.page", label: "我的应用页", component: PageComp });
 ctx.slots.registerCommand({ id: "say", label: "打招呼", run: () => console.log("hi"), shortcut: "mod+k" });
 ctx.slots.registerThemeSetting({ key: "accent", label: "强调色", component: AccentComp });
 ```
+
+- `registerSetting` 的 `icon`：可选，自定义设置页左侧 tab 的图标组件——与 lucide 图标同构（24 viewBox、
+  `stroke="currentColor"`、接 `size`/`className`，跟随主题着色）；缺省用宿主统一的插件图标。
 
 - `registerSetting` 注册的是**独立设置页**：并入设置页左侧栏（tab 以你传入的 `key` 命名，
   整页由你的组件渲染）；想在既有设置页里追加一节，用下面的设置区块槽。

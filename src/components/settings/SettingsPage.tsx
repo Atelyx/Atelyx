@@ -388,7 +388,8 @@ export function SettingsPage({ onClose, initialTab }: { onClose: () => void; ini
           scope: "app",
           tabs: [
             ...appTabs,
-            ...pluginTabs.map((t) => ({ key: pluginTabId(t), label: t.label, icon: Puzzle as LucideIcon })),
+            // 插件可自带 tab 图标（与 lucide 同构：size/className + currentColor）；未提供时用统一的插件图标
+            ...pluginTabs.map((t) => ({ key: pluginTabId(t), label: t.label, icon: (t.icon ?? Puzzle) as LucideIcon })),
           ],
         },
         ...(vaultIdentity
