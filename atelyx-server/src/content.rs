@@ -17,7 +17,7 @@ use crate::auth::AuthUser;
 use crate::fsops::{
     atomic_write, file_mtime_secs, read_dir_filtered, JoinError, SpaceRoot, RESERVED_MEDIA_DIR,
 };
-use crate::state::{max_file_bytes, ServerState, ROLE_EDITOR, ROLE_OWNER};
+use crate::state::{internal, max_file_bytes, ServerState, ROLE_EDITOR, ROLE_OWNER};
 use crate::{ApiError, ApiResult};
 
 /// 单文件字节上限（局域网传输与内存呈现的合理上限；过大单文件拖累服务端内存与同步）。
@@ -296,6 +296,10 @@ pub async fn copy(
 ) -> ApiResult<Json<serde_json::Value>> {
     let root = write_root(&state, &space_id, &user)?;
     let from = root.join(&body.from_path, false).map_err(join_err)?;
+    // 结构锁 → 目标路径锁：与补丁（会写新删旧）、改名（双路径）互斥，防复制目标被并发改写；
+    // 目标存在检查在锁内完成，两个并发 copy 不会都通过检查后互相覆盖
+    let _structure = state.structure_lock(&space_id).await;
+    let _lock = state.path_lock(&space_id, &body.to_path).await;
     if !from.exists() {
         return Err(not_found("源路径不存在"));
     }
@@ -303,7 +307,11 @@ pub async fn copy(
     if to.exists() {
         return Err(ApiError(StatusCode::CONFLICT, format!("目标已存在：{}", body.to_path)));
     }
-    copy_recursive(&from, &to)
+    // 递归复制是同步 IO（整目录可达秒级），持锁期间放 spawn_blocking，不占 async 执行器
+    let copy_to = to.clone();
+    tokio::task::spawn_blocking(move || copy_recursive(&from, &copy_to))
+        .await
+        .map_err(|e| internal(format!("复制失败：{e}")))?
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("复制失败：{e}")))?;
     tracing::info!(space_id = %space_id, from = %body.from_path, to = %body.to_path, "内容复制");
     Ok(Json(json!({})))
@@ -331,6 +339,11 @@ pub async fn delete_file(
 ) -> ApiResult<Json<serde_json::Value>> {
     let root = write_root(&state, &space_id, &user)?;
     let path = root.join(&query.path, false).map_err(join_err)?;
+    // 结构锁 → 被删路径锁：补丁的「锁内读 → 合并 → 写」若与删除互不互斥，
+    // 在途补丁会把已删文件原样写回（删除被静默复活）；结构锁同时消解补丁按 title
+    // 漂移到第二条路径的写/删与删除的取锁顺序问题。存在检查在锁内完成。
+    let _structure = state.structure_lock(&space_id).await;
+    let _lock = state.path_lock(&space_id, &query.path).await;
     if !path.exists() {
         return Err(not_found("文件不存在"));
     }
@@ -385,15 +398,29 @@ pub async fn delete_folder(
         return Err(bad_request("不能删除空间根目录"));
     }
     let path = root.join(&body.path, false).map_err(join_err)?;
+    // 结构锁：目录树内逐路径取锁不可行，改为与补丁（会写新删旧）、改名（双路径）
+    // 全量互斥——这两类是「在途写把已删条目复活」的来源；write_file 只持单路径锁
+    // 且建父目录在取锁前，与删除并发可能得到 ENOENT 500（安全失败），无复活/损坏
+    let _structure = state.structure_lock(&space_id).await;
     if !path.is_dir() {
         return Err(not_found("文件夹不存在"));
     }
-    let item_count = count_dir_items(&path);
+    // 条目清点与删除都是同步递归 IO（大目录可达秒级），持结构锁期间放进
+    // spawn_blocking：不占 async 执行器，也不让该空间补丁/改名的等待方饿死
+    let count_path = path.clone();
+    let item_count = tokio::task::spawn_blocking(move || count_dir_items(&count_path))
+        .await
+        .map_err(|e| internal(format!("目录清点失败：{e}")))?;
     let empty = item_count == 0;
     if !empty && !body.force {
         return Ok(Json(json!({ "needsConfirm": true, "itemCount": item_count })));
     }
-    let result = if empty { std::fs::remove_dir(&path) } else { std::fs::remove_dir_all(&path) };
+    let remove_path = path.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        if empty { std::fs::remove_dir(&remove_path) } else { std::fs::remove_dir_all(&remove_path) }
+    })
+    .await
+    .map_err(|e| internal(format!("删除失败：{e}")))?;
     result.map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("删除失败：{e}")))?;
     tracing::info!(space_id = %space_id, path = %body.path, "文件夹删除");
     Ok(Json(json!({ "deleted": true, "itemCount": item_count })))

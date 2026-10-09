@@ -158,6 +158,12 @@ fn list_scope(root: &FsPath) -> Result<HashMap<String, String>, ApiError> {
     Ok(out)
 }
 
+/// 空间 meta 键的锁键（`__meta__/` 前缀常规情况下与内容路径锁键不相交；内容路径
+/// 理论上可拼出同名键，撞上只是不相关操作的过度串行，两侧落盘目录不相交、无正确性问题）。
+fn space_meta_lock_key(key: &str) -> String {
+    format!("__meta__/{key}")
+}
+
 /// 写单键：先建父目录，原子写 value 原文（temp + rename，不留半截文件）。
 fn write_key(root: &FsPath, key: &str, value: &str) -> Result<(), ApiError> {
     let path = key_to_path(root, key)?;
@@ -245,8 +251,10 @@ pub async fn patch_space_meta(
     require_writer(&state, &space_id, &user)?;
     validate_values(&body.values)?;
     let root = space_scope_root(state.data_dir(), &space_id);
-    // 逐键写成功即广播：中途失败时已落盘键已通知、失败键未写无状态变化，两端口径一致
+    // 逐键写成功即广播：中途失败时已落盘键已通知、失败键未写无状态变化，两端口径一致。
+    // 每键在写锁内落盘：同键的写与删除按到达序串行（防删后被在途写复活），广播顺序 = 落盘顺序
     for (key, value) in &body.values {
+        let _lock = state.path_lock(&space_id, &space_meta_lock_key(key)).await;
         write_key(&root, key, value)?;
         crate::ws::broadcast_meta_changed(&state.hub(), &format!("space:{space_id}"), key);
     }
@@ -270,6 +278,8 @@ pub async fn delete_space_meta(
     validate_key(&query.key)?;
     let root = space_scope_root(state.data_dir(), &space_id);
     let path = key_to_path(&root, &query.key)?;
+    // 写锁内完成存在检查与删除（与 patch_space_meta 同一把键锁，防删/写交错复活）
+    let _lock = state.path_lock(&space_id, &space_meta_lock_key(&query.key)).await;
     if !path.exists() {
         return Err(not_found("键不存在"));
     }
@@ -307,7 +317,11 @@ pub async fn patch_user_meta(
     require_member(&state, &space_id, &user)?;
     validate_values(&body.values)?;
     let root = user_scope_root(state.data_dir(), &space_id, &user.user_id);
+    // 每键在写锁内落盘：同键写按到达序串行（锁键含 user_id，不同用户互不影响）
     for (key, value) in &body.values {
+        let _lock = state
+            .path_lock(&space_id, &format!("__meta_user__/{}/{}", user.user_id, key))
+            .await;
         write_key(&root, key, value)?;
     }
     tracing::info!(space_id = %space_id, user_id = %user.user_id, keys = body.values.len(), "用户元信息写入");
@@ -325,6 +339,10 @@ pub async fn delete_user_meta(
     validate_key(&query.key)?;
     let root = user_scope_root(state.data_dir(), &space_id, &user.user_id);
     let path = key_to_path(&root, &query.key)?;
+    // 写锁内完成存在检查与删除（与 patch_user_meta 同一把键锁）
+    let _lock = state
+        .path_lock(&space_id, &format!("__meta_user__/{}/{}", user.user_id, query.key))
+        .await;
     if !path.exists() {
         return Err(not_found("键不存在"));
     }

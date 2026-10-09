@@ -16,7 +16,7 @@ use tokio::sync::broadcast;
 
 use crate::auth::{self, AuthUser};
 use crate::logs::{self, LogEntry};
-use crate::state::{Persisted, ServerState};
+use crate::state::{internal, Persisted, ServerState};
 use crate::ws::KickReason;
 use crate::{ApiError, ApiResult};
 
@@ -275,9 +275,18 @@ pub async fn list_spaces(
             })
             .collect::<Vec<_>>()
     });
+    // 目录占用实算是跨全部空间的递归遍历（纯阻塞 IO），放 spawn_blocking：
+    // 不占 async 执行器（大目录可达秒级，与 dated_notes 扫描同口径）
+    let roots = rows.iter().map(|(_, _, _, _, _, _, root)| root.clone()).collect::<Vec<_>>();
+    let sizes = tokio::task::spawn_blocking(move || {
+        roots.iter().map(|root| dir_size_bytes(root)).collect::<Vec<_>>()
+    })
+    .await
+    .map_err(|e| internal(format!("目录占用统计失败：{e}")))?;
     let spaces = rows
         .into_iter()
-        .map(|(id, name, owner_user_id, owner_username, member_count, created_at, root)| {
+        .zip(sizes)
+        .map(|((id, name, owner_user_id, owner_username, member_count, created_at, root), size)| {
             json!({
                 "spaceId": id,
                 "name": name,
@@ -286,7 +295,7 @@ pub async fn list_spaces(
                 "memberCount": member_count,
                 "createdAt": created_at,
                 "rootPath": root.to_string_lossy(),
-                "sizeBytes": dir_size_bytes(&root),
+                "sizeBytes": size,
             })
         })
         .collect::<Vec<_>>();
