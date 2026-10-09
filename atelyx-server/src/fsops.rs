@@ -81,7 +81,7 @@ pub fn has_hidden_segment(rel: &str) -> bool {
 }
 
 /// 相对路径（单段）是否被全树过滤：隐藏项与原子写 `.tmp` 中间产物。
-pub fn is_excluded_name(name: &str) -> bool {
+fn is_excluded_name(name: &str) -> bool {
     (name.starts_with('.') && name.len() > 1) || name.ends_with(".tmp")
 }
 

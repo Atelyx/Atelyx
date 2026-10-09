@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::auth::AuthUser;
-use crate::content::{join_err, write_root};
+use crate::access::{join_err, write_root};
 use crate::fsops::{atomic_write, percent_decode, SpaceRoot};
 use crate::state::ServerState;
 use crate::{ApiError, ApiResult};
@@ -350,7 +350,7 @@ pub async fn aggregate_history(
     user: AuthUser,
     AxumPath(space_id): AxumPath<String>,
 ) -> ApiResult<Json<Value>> {
-    let root = crate::content::member_root(&state, &space_id, &user)?;
+    let root = crate::access::member_root(&state, &space_id, &user)?;
     let mut entries: Vec<RepoHistoryEntry> = vec![];
     let mut timestamps: Vec<i64> = vec![];
     collect_history_dir(&root.0.join(HISTORY_DIR), "note", &mut entries, &mut timestamps);

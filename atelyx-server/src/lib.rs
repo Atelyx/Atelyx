@@ -2,6 +2,7 @@
 //! HTTP JSON（账号 / 空间 / 成员 / 邀请 / 内容 / 索引）。内容真源在服务器数据目录的文件树上，
 //! 权限在服务端强制校验（数据目录结构与日志口径分别见 `state.rs` / `logs.rs`）。
 
+pub mod access;
 pub mod admin;
 pub mod auth;
 pub mod content;

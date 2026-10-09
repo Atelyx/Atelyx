@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use axum::http::StatusCode;
 
-use crate::index::SpaceIndex;
+use crate::index::SpaceIndexCache;
 use crate::ws::Hub;
 use crate::ApiError;
 use std::sync::Mutex;
@@ -101,7 +101,7 @@ struct ServerStateInner {
     started_at: i64,
     persistent: Mutex<Persisted>,
     /// 派生索引缓存（空间 id → 反链/标签索引；纯内存只读派生，可随时重建，不落盘）。
-    index_cache: Mutex<HashMap<String, SpaceIndex>>,
+    index_cache: crate::index::SpaceIndexCache,
     /// WS 房间表（`/ws/space` 入口的房间机制）。
     hub: Hub,
     /// 内容写按路径串行化的锁表（整文件写与补丁端点共用）。
@@ -266,7 +266,7 @@ impl ServerState {
                 data_dir: data_dir.to_path_buf(),
                 started_at: now_secs(),
                 persistent: Mutex::new(inner),
-                index_cache: Mutex::new(HashMap::new()),
+                index_cache: SpaceIndexCache::new(),
                 hub: Hub::default(),
                 path_locks: PathLocks::new(),
                 structure_locks: PathLocks::new(),
@@ -344,8 +344,8 @@ impl ServerState {
         self.inner.started_at
     }
 
-    /// 派生索引缓存句柄（index 模块经此刷新与查询）。
-    pub(crate) fn inner_index_cache(&self) -> &Mutex<HashMap<String, SpaceIndex>> {
+    /// 派生索引缓存句柄（index 端点经此取用与刷新）。
+    pub(crate) fn index_cache(&self) -> &crate::index::SpaceIndexCache {
         &self.inner.index_cache
     }
 

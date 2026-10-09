@@ -1,10 +1,10 @@
 //! 派生索引与扫描（真源 = 空间内容文件树）：反链 / 标签 / glob / grep。
 //! 与客户端检索同一套语义与同一批引擎（globset + regex）；反链 / 标签索引为纯内存只读派生，
-//! 按文件指纹（mtime 毫秒 + 大小）增量刷新、消失文件剔除（见 `refresh_wiki_index` / `with_space_index`）。
+//! 按文件指纹（mtime 毫秒 + 大小）增量刷新、消失文件剔除（见 `refresh_wiki_index` / `SpaceIndexCache::with_space`）。
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path as FsPath;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -15,7 +15,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::auth::AuthUser;
-use crate::content::member_root;
+use crate::access::member_root;
 use crate::fsops::{file_mtime_secs, percent_decode, walk_md_in, SpaceRoot};
 use crate::state::ServerState;
 use crate::{ApiError, ApiResult};
@@ -662,29 +662,41 @@ fn scan_for_matches(
 
 // ===== HTTP 端点 =====
 
-/// 取（或懒建）空间的派生索引并增量刷新。刷新是 stat 遍历 + 变化文件重读；
-/// 缓存为全局单锁（所有空间串行刷新），且持锁做阻塞文件 I/O——目标规模（≤30 人内容量）
-/// 下延迟可忽略，不值得为此引入分空间锁或后台任务。
-/// 团队排除名单变化时整份缓存作废重建（成员改了排除夹后索引立即收敛，不留陈旧条目）。
-fn with_space_index<R>(
-    state: &ServerState,
-    space_id: &str,
-    root: &FsPath,
-    f: impl FnOnce(&mut SpaceIndex) -> R,
-) -> R {
-    let exclude = crate::meta::space_exclusions(state.data_dir(), space_id);
-    let mut caches = state.inner_index_cache().lock().unwrap();
-    let index = caches.entry(space_id.to_string()).or_default();
-    if index.exclude_folders != exclude {
-        *index = SpaceIndex { exclude_folders: exclude.clone(), ..Default::default() };
+/// 空间派生索引缓存（space_id → 反链/标签索引；纯内存只读派生，可随时重建，不落盘）。
+/// 持有方 = `ServerState`；本类型自足封装取用与刷新，不反向依赖状态模块。
+#[derive(Default)]
+pub(crate) struct SpaceIndexCache(Mutex<HashMap<String, SpaceIndex>>);
+
+impl SpaceIndexCache {
+    pub(crate) fn new() -> Self {
+        Self(Mutex::new(HashMap::new()))
     }
-    if let Err(e) = refresh_wiki_index(root, &exclude, &mut index.wiki) {
-        tracing::warn!(space_id = %space_id, "反链索引刷新失败：{e}");
+
+    /// 取（或懒建）空间的派生索引并增量刷新后在 `f` 内访问。刷新是 stat 遍历 + 变化文件重读；
+    /// 缓存为全局单锁（所有空间串行刷新），且持锁做阻塞文件 I/O——目标规模（≤30 人内容量）
+    /// 下延迟可忽略，不值得为此引入分空间锁或后台任务。
+    /// 团队排除名单变化时整份缓存作废重建（成员改了排除夹后索引立即收敛，不留陈旧条目）。
+    pub(crate) fn with_space<R>(
+        &self,
+        data_dir: &FsPath,
+        space_id: &str,
+        root: &FsPath,
+        f: impl FnOnce(&mut SpaceIndex) -> R,
+    ) -> R {
+        let exclude = crate::meta::space_exclusions(data_dir, space_id);
+        let mut caches = self.0.lock().unwrap();
+        let index = caches.entry(space_id.to_string()).or_default();
+        if index.exclude_folders != exclude {
+            *index = SpaceIndex { exclude_folders: exclude.clone(), ..Default::default() };
+        }
+        if let Err(e) = refresh_wiki_index(root, &exclude, &mut index.wiki) {
+            tracing::warn!(space_id = %space_id, "反链索引刷新失败：{e}");
+        }
+        if let Err(e) = refresh_tag_index(root, &exclude, &mut index.tags) {
+            tracing::warn!(space_id = %space_id, "标签索引刷新失败：{e}");
+        }
+        f(index)
     }
-    if let Err(e) = refresh_tag_index(root, &exclude, &mut index.tags) {
-        tracing::warn!(space_id = %space_id, "标签索引刷新失败：{e}");
-    }
-    f(index)
 }
 
 #[derive(Deserialize)]
@@ -701,7 +713,7 @@ pub async fn backlinks(
     Query(query): Query<BacklinksQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let root = member_root(&state, &space_id, &user)?;
-    let rows = with_space_index(&state, &space_id, &root.0, |index| {
+    let rows = state.index_cache().with_space(state.data_dir(), &space_id, &root.0, |index| {
         query_wiki_backlinks(&index.wiki, &query.note_name, &query.note_file)
     });
     Ok(Json(serde_json::to_value(rows).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?))
@@ -713,7 +725,7 @@ pub async fn tags(
     Path(space_id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let root = member_root(&state, &space_id, &user)?;
-    let rows = with_space_index(&state, &space_id, &root.0, |index| aggregate_tag_counts(&index.tags));
+    let rows = state.index_cache().with_space(state.data_dir(), &space_id, &root.0, |index| aggregate_tag_counts(&index.tags));
     Ok(Json(serde_json::to_value(rows).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?))
 }
 

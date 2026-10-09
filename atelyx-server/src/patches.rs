@@ -13,15 +13,15 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::auth::AuthUser;
-use crate::content::{join_err, write_root};
+use crate::access::{join_err, write_root};
 use crate::fsops::{atomic_write, file_mtime_secs, is_windows_reserved_name};
 use crate::state::{bad_request, internal, now_secs};
 use crate::{ApiError, ServerState};
 
 /// `.atlx` schema 版本号（私有格式保护：不符即拒绝解析，防外部工具/手改误写）。
-pub const CANVAS_SCHEMA: &str = "atelyx-canvas/v1";
+const CANVAS_SCHEMA: &str = "atelyx-canvas/v1";
 /// `.atb` schema 版本号。
-pub const TABLE_SCHEMA: &str = "atelyx-table/v1";
+const TABLE_SCHEMA: &str = "atelyx-table/v1";
 
 // ===== .atlx 文件结构（与客户端 types/canvas.ts 同形状；data 不耦合业务字段）=====
 
@@ -183,7 +183,7 @@ fn reorder_by<T>(items: &mut Vec<T>, order: &[String], key: impl Fn(&T) -> &str)
 
 /// 文件名净化：非法字符换 `_`、去首尾空白、Windows 保留名与尾点/尾空格补偿
 /// （服务端数据目录可能落在 Windows 盘，与客户端同口径）。
-pub fn sanitize_filename(title: &str) -> String {
+fn sanitize_filename(title: &str) -> String {
     let cleaned: String = title
         .chars()
         .map(|c| match c {

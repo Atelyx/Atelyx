@@ -12,7 +12,7 @@ use serde::Serialize;
 use serde_json::json;
 
 use crate::auth::AuthUser;
-use crate::content::member_root;
+use crate::access::member_root;
 use crate::fsops::walk_md_in;
 use crate::state::ServerState;
 use crate::ApiResult;

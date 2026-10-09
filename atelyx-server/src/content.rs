@@ -13,41 +13,14 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::access::{join_err, member_root, write_root};
 use crate::auth::AuthUser;
-use crate::fsops::{
-    atomic_write, file_mtime_secs, read_dir_filtered, JoinError, SpaceRoot, RESERVED_MEDIA_DIR,
-};
-use crate::spaces::{require_role, space_of, ALL_ROLES};
-use crate::state::{bad_request, internal, max_file_bytes, not_found, ServerState, ROLE_EDITOR, ROLE_OWNER};
+use crate::fsops::{atomic_write, file_mtime_secs, read_dir_filtered, JoinError, RESERVED_MEDIA_DIR};
+use crate::state::{bad_request, internal, max_file_bytes, not_found, ServerState};
 use crate::{ApiError, ApiResult};
 
 /// 单文件字节上限（局域网传输与内存呈现的合理上限；过大单文件拖累服务端内存与同步）。
 pub const MAX_FILE_BYTES: usize = 50 * 1024 * 1024;
-
-/// 成员校验 + 内容根。读端点用这里（任意成员均可读）。
-pub(crate) fn member_root(state: &ServerState, space_id: &str, user: &AuthUser) -> Result<SpaceRoot, ApiError> {
-    state.read(|p| {
-        let space = space_of(p, space_id)?;
-        require_role(space, &user.user_id, ALL_ROLES)?;
-        Ok(SpaceRoot(state.space_content_root(space)))
-    })
-}
-
-/// 成员校验 + 内容根 + 写角色（owner/editor）。写端点统一走这里，只读角色（viewer）被拒。
-pub(crate) fn write_root(state: &ServerState, space_id: &str, user: &AuthUser) -> Result<SpaceRoot, ApiError> {
-    state.read(|p| {
-        let space = space_of(p, space_id)?;
-        require_role(space, &user.user_id, &[ROLE_OWNER, ROLE_EDITOR])?;
-        Ok(SpaceRoot(state.space_content_root(space)))
-    })
-}
-
-pub(crate) fn join_err(e: JoinError) -> ApiError {
-    match e {
-        JoinError::Invalid(m) => bad_request(&m),
-        JoinError::NotFound(m) => not_found(&m),
-    }
-}
 
 /// 全仓库文件树（嵌套；隐藏目录与 `.tmp` 原子写产物不出现，与客户端文件面板同过滤）。
 pub async fn tree(
