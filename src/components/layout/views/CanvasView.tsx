@@ -377,7 +377,7 @@ export const CanvasView = memo(function CanvasView({
         viewKind="canvas"
         icon={<Palette size={64} strokeWidth={1.5} />}
         title="打开画布"
-        description="从左侧文件面板或搜索面板单击一个 .atlx 画布开始编辑。"
+        description="在文件面板或搜索面板单击一个 .atlx 画布开始编辑。"
       />
     );
   }

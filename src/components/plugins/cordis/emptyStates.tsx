@@ -11,7 +11,7 @@ export function CanvasEmptyState() {
     <PanelPlaceholder
       icon={<Palette size={64} strokeWidth={1.5} />}
       title="打开画布"
-      description="从左侧文件面板或搜索面板单击一个 .atlx 画布开始编辑。"
+      description="在文件面板或搜索面板单击一个 .atlx 画布开始编辑。"
     />
   );
 }
@@ -22,7 +22,7 @@ export function NoteEmptyState() {
     <PanelPlaceholder
       icon={<FileText size={64} strokeWidth={1.5} />}
       title="打开笔记"
-      description="从左侧文件面板或搜索面板单击一个 .md 笔记开始编辑。"
+      description="在文件面板或搜索面板单击一个 .md 笔记开始编辑。"
     />
   );
 }
@@ -33,7 +33,7 @@ export function TableEmptyState() {
     <PanelPlaceholder
       icon={<TableIcon size={64} strokeWidth={1.5} />}
       title="打开表格"
-      description="从左侧文件面板或搜索面板单击一个 .atb 表格开始编辑。"
+      description="在文件面板或搜索面板单击一个 .atb 表格开始编辑。"
     />
   );
 }
