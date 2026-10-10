@@ -14,8 +14,11 @@ serde_json = "1"
 dunce = "1"
 # 会话容器（chat_container）：持久 op 建 id / 写链线程与广播回执（spawn + oneshot + sleep）
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
+uuid = { version = "1", features = ["v4"] }
 # 出网校验（net_guard）：URL 解析与地址枚举
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# 仓库内文件检索（filesearch）：glob 模式匹配（`**/` 任意深度语义，即 ripgrep 所用引擎）
+globset = "0.4"
 
 # 插件进程托管（plugin_process）：Unix 进程组信号（setpgid/killpg/ESRCH 判定）
 [target.'cfg(unix)'.dependencies]
@@ -25,7 +28,6 @@ libc = "0.2"
 # 插件卸载前递归清只读位
 [target.'cfg(target_os = "windows")'.dependencies]
 winapi = { version = "0.3", features = ["winnt", "processthreadsapi", "handleapi", "errhandlingapi", "minwinbase", "jobapi2", "tlhelp32"] }
-uuid = { version = "1", features = ["v4"] }
 
 [features]
 # 测试基建（TempDir 等）供依赖方的测试构建复用；常规构建不编译

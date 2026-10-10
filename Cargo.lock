@@ -282,6 +282,7 @@ name = "atelyx-core"
 version = "0.1.0"
 dependencies = [
  "dunce",
+ "globset",
  "libc",
  "nanoid",
  "regex",
