@@ -1254,16 +1254,11 @@ fn scan_atlx_in(
     update: &mut dyn FnMut(&mut CanvasFile) -> bool,
     updates: &mut Vec<(PathBuf, CanvasFile)>,
 ) -> Result<(), String> {
-    let dir = if rel.is_empty() {
-        root.to_path_buf()
-    } else {
-        root.join(rel)
-    };
-    if !dir.exists() {
+    if !root.join(rel).exists() {
         return Ok(());
     }
     // 链接维护不过滤（排除/隐藏目录内的画布也可能引用文件），exclude 传空
-    for (child_rel, is_dir) in read_dir_filtered(&dir, rel, &[])? {
+    for (child_rel, is_dir) in read_dir_filtered(root, rel, &[])? {
         if is_dir {
             scan_atlx_in(root, &child_rel, update, updates)?;
         } else if child_rel.ends_with(".atlx") {

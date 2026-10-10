@@ -223,14 +223,19 @@ pub fn has_hidden_segment(rel: &str) -> bool {
     })
 }
 
-/// 读取目录条目（相对路径 + 是否目录），应用全仓库统一过滤：
+/// 读取 `root/rel` 目录条目（相对路径 + 是否目录），应用全仓库统一过滤：
 /// 隐藏项（`.` 前缀）/ 排除文件夹 / `.tmp` 原子写副产物。递归由各 walker 自行组织
 /// （list_tree_in / scan_canvases_in / walk_md_in / scan_atlx_in 共用，过滤规则只维护一处）。
 pub fn read_dir_filtered(
-    dir: &Path,
+    root: &Path,
     rel: &str,
     exclude: &[String],
 ) -> Result<Vec<(String, bool)>, String> {
+    let dir = if rel.is_empty() {
+        root.to_path_buf()
+    } else {
+        root.join(rel)
+    };
     let mut out: Vec<(String, bool)> = vec![];
     for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
@@ -267,13 +272,8 @@ fn list_tree_in(
     rel: &str,
     exclude: &[String],
 ) -> Result<Vec<FileTreeNode>, String> {
-    let dir = if rel.is_empty() {
-        root.to_path_buf()
-    } else {
-        root.join(rel)
-    };
     let mut nodes: Vec<FileTreeNode> = vec![];
-    for (child_rel, is_dir) in read_dir_filtered(&dir, rel, exclude)? {
+    for (child_rel, is_dir) in read_dir_filtered(root, rel, exclude)? {
         let path = root.join(&child_rel);
         let mtime = std::fs::metadata(&path)
             .ok()
@@ -601,12 +601,7 @@ fn scan_canvases_in(
     exclude: &[String],
     rows: &mut Vec<CanvasFileRow>,
 ) -> Result<(), String> {
-    let dir = if rel.is_empty() {
-        root.to_path_buf()
-    } else {
-        root.join(rel)
-    };
-    for (child_rel, is_dir) in read_dir_filtered(&dir, rel, exclude)? {
+    for (child_rel, is_dir) in read_dir_filtered(root, rel, exclude)? {
         if is_dir {
             scan_canvases_in(root, &child_rel, exclude, rows)?;
         } else if child_rel.ends_with(".atlx") {
@@ -1986,15 +1981,10 @@ pub fn walk_md_in(
     exclude: &[String],
     f: &mut dyn FnMut(&str, &Path) -> Result<(), String>,
 ) -> Result<(), String> {
-    let dir = if rel.is_empty() {
-        root.to_path_buf()
-    } else {
-        root.join(rel)
-    };
-    if !dir.exists() {
+    if !root.join(rel).exists() {
         return Ok(());
     }
-    for (child_rel, is_dir) in read_dir_filtered(&dir, rel, exclude)? {
+    for (child_rel, is_dir) in read_dir_filtered(root, rel, exclude)? {
         if is_dir {
             walk_md_in(root, &child_rel, exclude, f)?;
         } else if child_rel.ends_with(".md") {

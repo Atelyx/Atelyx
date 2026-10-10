@@ -130,12 +130,7 @@ fn file_mtime(path: &Path) -> i64 {
 
 /// 递归收集目录树内全部文件（相对路径 + mtime），过滤规则走 `read_dir_filtered`。
 fn walk_files(root: &Path, rel: &str, exclude: &[String], out: &mut Vec<(String, i64)>) -> Result<(), String> {
-    let dir = if rel.is_empty() {
-        root.to_path_buf()
-    } else {
-        root.join(rel)
-    };
-    let mut entries = read_dir_filtered(&dir, rel, exclude)?;
+    let mut entries = read_dir_filtered(root, rel, exclude)?;
     // 按名排序保证遍历顺序确定（read_dir 顺序由文件系统决定）
     entries.sort_by(|a, b| a.0.cmp(&b.0));
     for (child_rel, is_dir) in entries {
