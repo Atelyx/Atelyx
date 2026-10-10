@@ -226,9 +226,6 @@ export interface ToolDefinition<A = Record<string, unknown>> {
   renderResult?: (result: ToolResult) => string;
 }
 
-/** 工具注册表中「未知工具」的错误消息文本。 */
-export const UNKNOWN_TOOL_MSG_PREFIX = "未知工具：";
-
 /** 单个工具执行结果的可视化摘要（消息气泡工具块）。 */
 export interface ToolExecResult {
   id: string;

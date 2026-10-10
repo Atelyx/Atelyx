@@ -6,6 +6,9 @@
 /** 工具分类键（Agent 设置页折叠分组；顺序见 AGENT_TOOL_CATEGORIES）。 */
 export type AgentToolCategory = "web" | "file" | "task" | "plugin";
 
+/** 工具注册表中「未知工具」的错误消息文本。 */
+export const UNKNOWN_TOOL_MSG_PREFIX = "未知工具：";
+
 export interface AgentToolMeta {
   id: string;
   label: string;

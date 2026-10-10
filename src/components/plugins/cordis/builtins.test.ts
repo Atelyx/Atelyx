@@ -8,7 +8,7 @@ import { describe, it, expect } from "vitest";
 import { CORDIS_BUILTIN_DEFS, DEFAULT_COMPOSITION, builtinManifest } from "./builtins";
 import { validatePluginManifest } from "@/utils/pluginManifest";
 import { AURORA_THEME_ID } from "@/constants/themes";
-import { VIEW_KINDS } from "@/types";
+import { VIEW_KINDS } from "@/constants/views";
 
 describe("随应用分发插件注册表", () => {
   it("pluginId 唯一且使用 builtin. 前缀", () => {

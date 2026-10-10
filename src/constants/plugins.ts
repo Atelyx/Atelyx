@@ -8,6 +8,9 @@ import type { PluginBadge, PluginMountPhase, PluginSourceKind, PluginType } from
 /** 官方账号名单：这些账号发布的插件自动带 official 徽标（市场聚合侧同用）。 */
 export const OFFICIAL_PLUGIN_ORGS = ["Atelyx"] as const;
 
+/** 用户层「恢复该行默认实现」的取值（其余取值一律按插件 id 解释；见 types/composition 的取值层）。 */
+export const COMPOSITION_IMPL_DEFAULT = "default";
+
 /** 市场索引地址（官方索引仓库的 CDN 直链）。 */
 export const PLUGIN_INDEX_URL =
   "https://cdn.jsdelivr.net/gh/Atelyx/Atelyx-plugin-index@main/index.json";

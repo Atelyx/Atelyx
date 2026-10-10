@@ -6,8 +6,8 @@
  * 不变——它承担装配位置、插件自持数据归属、审计与启停真源。裁决两层后者赢：插件清单声明 → 用户层。
  */
 import type { InstalledPlugin, PluginSourceKind } from "@/types";
+import { COMPOSITION_IMPL_DEFAULT } from "@/constants/plugins";
 import {
-  COMPOSITION_IMPL_DEFAULT,
   type CompositionBinding,
   type CompositionDeclarer,
   type CompositionMount,

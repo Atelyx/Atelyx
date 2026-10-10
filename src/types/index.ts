@@ -102,9 +102,6 @@ export {
 } from "./uiState";
 
 export {
-  VIEW_KINDS,
-  HOME_LAYOUT_ID,
-  DEFAULT_SCENE_ID,
   type BuiltinViewKind,
   type ViewKind,
   type SplitDirection,
@@ -151,7 +148,6 @@ export type {
 } from "./collab";
 
 export {
-  UNKNOWN_TOOL_MSG_PREFIX,
   type ToolSchema,
   type ToolResult,
   type ToolCapabilities,
@@ -206,7 +202,6 @@ export {
 } from "./plugin";
 
 export {
-  COMPOSITION_IMPL_DEFAULT,
   type CompositionUserPatches,
   type CompositionPatchDeclaration,
   type CompositionDeclarer,

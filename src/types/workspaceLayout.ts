@@ -133,24 +133,3 @@ export interface DetachedWindow {
   /** 图钉：失焦不收起（仅 `options.hideOnBlur` 开启时有意义；运行期用户豁免开关）。 */
   pinned: boolean;
 }
-
-/** 视图类型清单（视图选择器选项顺序）。 */
-export const VIEW_KINDS: ViewKind[] = [
-  "canvas",
-  "note",
-  "table",
-  "files",
-  "search",
-  "inspector",
-  "aichat",
-  "collabroom",
-  "calendar",
-  "repohistory",
-  "recent",
-];
-
-/** 主页布局的稳定 id（固定置顶、不可删除/排序/重命名；uiState 加载时缺失即补入，幂等只补一次）。 */
-export const HOME_LAYOUT_ID = "home";
-
-/** 默认场景的稳定 id（固定置顶、不可删除/排序/重命名；含主页布局，与 Rust `DEFAULT_SCENE_ID` 对齐）。 */
-export const DEFAULT_SCENE_ID = "default";

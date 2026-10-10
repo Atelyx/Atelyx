@@ -10,9 +10,8 @@ import type {
   LlmMessage,
   LlmToolCall,
 } from "@/types";
-import { UNKNOWN_TOOL_MSG_PREFIX } from "@/types";
+import { UNKNOWN_TOOL_MSG_PREFIX, MAX_PARALLEL_TOOL_CALLS } from "@/constants/tools";
 import { errText } from "@/utils/errors";
-import { MAX_PARALLEL_TOOL_CALLS } from "@/constants/tools";
 
 /** 一次执行结束后的回填工具消息 + 可视化结果 + 原始结果（供调用方 hooks 消费 data 建产物）。 */
 interface ToolDispatchResult {

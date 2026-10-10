@@ -7,9 +7,8 @@
  * - 布局 = 递归多叉树（Split = 分割方向 + 子树 + 占比；Panel 叶子 = 标签组）
  * - 撕裂窗口 = 应用级 `DetachedWindow`（跨布局共享）
  */
+import { DEFAULT_SCENE_ID, HOME_LAYOUT_ID } from "@/constants/views";
 import {
-  DEFAULT_SCENE_ID,
-  HOME_LAYOUT_ID,
   type DetachedWindow,
   type LayoutNode,
   type PanelNode,

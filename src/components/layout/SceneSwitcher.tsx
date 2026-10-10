@@ -9,7 +9,7 @@ import { Input } from "@/components/common/Input";
 import { PopupLayer } from "@/components/common/PopupLayer";
 import { usePopupAnchor } from "@/hooks/usePopupAnchor";
 import { MenuItem } from "@/components/common/Menu";
-import { DEFAULT_SCENE_ID } from "@/types";
+import { DEFAULT_SCENE_ID } from "@/constants/views";
 
 /** 菜单面板：root = 场景列表；confirmDelete = 场景删除确认。 */
 type Pane = "root" | { kind: "confirmDelete"; sceneId: string };

@@ -18,12 +18,12 @@ import {
   resolveEntryScene,
 } from "./workspaceLayout";
 import {
-  DEFAULT_SCENE_ID,
   type DetachedWindow,
   type LayoutNode,
   type Scene,
   type WorkspaceLayout,
 } from "@/types/workspaceLayout";
+import { DEFAULT_SCENE_ID } from "@/constants/views";
 
 function makePanel(views: string[], active = 0): LayoutNode {
   const panel = createPanel(views[0] as never);

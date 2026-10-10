@@ -7,7 +7,7 @@
  */
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 
-import { DEFAULT_SCENE_ID, HOME_LAYOUT_ID } from "@/types/workspaceLayout";
+import { DEFAULT_SCENE_ID, HOME_LAYOUT_ID } from "@/constants/views";
 import { createDefaultScenes } from "@/utils/workspaceLayout";
 
 /** normalize 后形状的 bootstrap 快照替身（Rust 侧 normalize 保证：scenes 恒非空、激活态恒有效）。 */

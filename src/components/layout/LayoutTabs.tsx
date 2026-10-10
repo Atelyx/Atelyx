@@ -10,7 +10,7 @@ import { IconButton } from "@/components/common/Button";
 import { Menu, MenuItem } from "@/components/common/Menu";
 import { Tooltip } from "@/components/common/Tooltip";
 import { MenuSlotList } from "@/components/plugins/MenuSlot";
-import { HOME_LAYOUT_ID } from "@/types";
+import { HOME_LAYOUT_ID } from "@/constants/views";
 import appIcon from "@/assets/icon.svg";
 
 /** 拖拽判定阈值（px）：低于视为点击，不进入拖动模式。 */
