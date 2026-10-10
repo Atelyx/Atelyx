@@ -6,6 +6,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod layout_view;
+mod markdown_edit;
 mod markdown_view;
 
 use std::collections::HashMap;
@@ -16,11 +17,13 @@ use atelyx_core::layout::{
     self, apply_layout_op, normalize, op_passes_shape_check, AppUiState, DetachedWindow,
     LayoutOp, WindowBounds, UI_STATE_SCHEMA,
 };
-use atelyx_core::markdown::MarkdownDocument;
+use atelyx_core::markdown::{LinkForm, MarkdownDocument};
 use atelyx_core::vault;
 use iced::widget::{space, text_editor};
 use iced::window::{self, Level, Mode, Position, Settings};
 use iced::{keyboard, mouse, Element, Event, Point, Size, Subscription, Task, Theme};
+
+use markdown_edit::HitTarget;
 
 use layout_view::{enumerate_dividers, RenameState, RenameTarget, UiMetrics};
 
@@ -82,6 +85,89 @@ fn strip_frontmatter(text: &str) -> &str {
         offset = end;
     }
     text
+}
+
+/// 前一个字符边界（`at` 为字符边界）。
+fn prev_boundary(text: &str, at: usize) -> usize {
+    let mut i = at.min(text.len());
+    if i == 0 {
+        return 0;
+    }
+    i -= 1;
+    while i > 0 && !text.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+/// 后一个字符边界。
+fn next_boundary(text: &str, at: usize) -> usize {
+    let mut i = (at + 1).min(text.len());
+    while i < text.len() && !text.is_char_boundary(i) {
+        i += 1;
+    }
+    i
+}
+
+/// `at` 所在行行首。
+fn line_start_of(text: &str, at: usize) -> usize {
+    let at = at.min(text.len());
+    text[..at].rfind('\n').map_or(0, |i| i + 1)
+}
+
+/// `at` 所在行行尾。
+fn line_end_of(text: &str, at: usize) -> usize {
+    let at = at.min(text.len());
+    text[at..].find('\n').map_or(text.len(), |i| at + i)
+}
+
+/// 百分号解码（链接 href）。
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(h), Some(l)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
+                out.push(h * 16 + l);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// 外链交系统浏览器打开：只放行常见协议，命令行走原样拼接并整串加引号，
+/// 拒绝引号/百分号/换行——避免 URL 内容被命令行解释成命令分隔或变量展开。
+fn open_external(url: &str) {
+    let scheme_ok = url.starts_with("http://") || url.starts_with("https://") || url.starts_with("mailto:");
+    let clean = !url.contains('"') && !url.contains('%') && !url.contains('\n') && !url.contains('\r');
+    if !scheme_ok || !clean {
+        return;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let _ = std::process::Command::new("cmd")
+            .raw_arg(format!("/C start \"\" \"{url}\""))
+            .spawn();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+    }
 }
 
 fn main() -> iced::Result {
@@ -155,6 +241,12 @@ enum Message {
     Saved(u64, String, Result<(), String>),
     /// 切换 note 视图模式（只读 / 预览编辑 / 源码）。
     NoteMode(NoteMode),
+    /// 编辑面事件（部件只上报，正文/光标/选区真相在应用层）。
+    Editor(markdown_edit::EditorEvent),
+    /// 打开链接（外链 / 仓库路径 / wiki）。
+    OpenLink(String, LinkForm),
+    /// 切换任务勾选框（携带列表项源起点）。
+    ToggleTask(usize),
     /// 复制代码块正文到系统剪贴板。
     CopyCode(String),
     PanelTab(String, String),
@@ -230,8 +322,17 @@ pub struct App {
     os_shown: HashMap<window::Id, bool>,
     /// files 视图懒加载子项缓存（key = 目录相对路径，根为 ""；运行态不落盘）。
     pub children: HashMap<String, Vec<(String, bool)>>,
-    /// note 视图编辑器内容与脏标记（视图实例全局唯一）。
-    pub editor: text_editor::Content,
+    /// note 正文真相（与磁盘逐字节一致；源码档与编辑档共用）。
+    pub note_text: String,
+    /// 源码档编辑器（进出档按正文重建）。
+    pub source_editor: text_editor::Content,
+    /// 编辑档状态（光标 / 选区 / 活动块 / 撤销栈 / 组合态）。
+    pub edit: markdown_edit::EditorState,
+    /// 编辑档解析产物与块元数据（正文或档位变更时重建）。
+    pub edit_doc: Option<MarkdownDocument>,
+    pub edit_meta: Vec<markdown_view::BlockMeta>,
+    /// 编辑档解析选项（链接形态判定；进程内只建一次）。
+    pub edit_opts: atelyx_core::markdown::ParseOptions,
     pub dirty: bool,
     /// note 视图模式（缺省只读）。
     pub note_mode: NoteMode,
@@ -273,7 +374,12 @@ impl App {
                 detached_os: HashMap::new(),
                 os_shown: HashMap::new(),
                 children: HashMap::new(),
-                editor: text_editor::Content::new(),
+                note_text: String::new(),
+                source_editor: text_editor::Content::new(),
+                edit: markdown_edit::EditorState::default(),
+                edit_doc: None,
+                edit_meta: Vec::new(),
+                edit_opts: markdown_view::link_options(),
                 dirty: false,
                 note_mode: NoteMode::Read,
                 preview_doc: None,
@@ -359,7 +465,11 @@ impl App {
                 self.vault_root = self.vault.root().ok();
                 self.status = "仓库已打开".into();
                 self.children.clear();
-                self.editor = text_editor::Content::new();
+                self.note_text.clear();
+                self.source_editor = text_editor::Content::new();
+                self.edit.reset(0);
+                self.edit_doc = None;
+                self.edit_meta.clear();
                 self.preview_doc = None;
                 self.dirty = false;
                 // last_note_file 跨仓库沿用（相对路径语义）；仓库就绪即恢复其内容
@@ -403,8 +513,10 @@ impl App {
                     return Task::none();
                 }
                 self.ui.last_note_file = Some(rel.clone());
-                // 清掉上一文件的解析产物：载入在途期间只读档不留旧内容
+                // 清掉上一文件的解析产物：载入在途期间两档都不留旧内容
                 self.preview_doc = None;
+                self.edit_doc = None;
+                self.edit_meta.clear();
                 self.schedule_persist();
                 self.load_note(&rel)
             }
@@ -412,16 +524,23 @@ impl App {
                 if gen != self.epoch() || self.ui.last_note_file.as_deref() != Some(rel.as_str()) {
                     return Task::none();
                 }
-                self.editor = text_editor::Content::with_text(&text);
+                self.note_text = text;
+                self.source_editor = text_editor::Content::with_text(&self.note_text);
+                self.edit.reset(0);
                 self.dirty = false;
                 self.refresh_preview();
+                self.refresh_edit();
                 self.status = "已打开".into();
                 Task::none()
             }
             Message::FileLoaded(_, Err(e)) => {
                 // 载入失败必须清空编辑器：last_note_file 已指向新文件，残留旧内容
                 // 会让 Ctrl+S 把旧内容写进新路径
-                self.editor = text_editor::Content::new();
+                self.note_text.clear();
+                self.source_editor = text_editor::Content::new();
+                self.edit.reset(0);
+                self.edit_doc = None;
+                self.edit_meta.clear();
                 self.dirty = false;
                 self.preview_doc = None;
                 self.status = e;
@@ -430,11 +549,14 @@ impl App {
             Message::Edited(action) => {
                 // 动作须全部执行（widget 只发布不应用）；置脏只看内容是否实际变化
                 let may_edit = action.is_edit();
-                let before = may_edit.then(|| self.editor.text());
-                self.editor.perform(action);
+                let before = may_edit.then(|| self.source_editor.text());
+                self.source_editor.perform(action);
                 if let Some(before) = before {
-                    if self.editor.text() != before {
+                    let after = self.source_editor.text();
+                    if after != before {
+                        self.note_text = after;
                         self.dirty = true;
+                        self.refresh_edit();
                     }
                 }
                 Task::none()
@@ -450,7 +572,7 @@ impl App {
                     return Task::none();
                 };
                 let gen = self.epoch();
-                let content = self.editor.text();
+                let content = self.note_text.clone();
                 let saved = content.clone();
                 Task::perform(
                     async move {
@@ -465,7 +587,7 @@ impl App {
                     return Task::none();
                 }
                 // 保存发起时冻结的内容与当前一致才算保存完成；在途期间的新编辑保持脏标记
-                if self.editor.text() == saved {
+                if self.note_text == saved {
                     self.dirty = false;
                     self.status = "已保存".into();
                 } else {
@@ -479,16 +601,41 @@ impl App {
             }
             Message::NoteMode(mode) => {
                 match mode {
-                    // 预览编辑档不可用：不改模式，仅提示
-                    NoteMode::Edit => self.status = "预览编辑档不可用".into(),
                     NoteMode::Read => {
                         self.note_mode = NoteMode::Read;
+                        self.edit_doc = None;
+                        self.edit_meta.clear();
                         self.refresh_preview();
+                    }
+                    NoteMode::Edit => {
+                        self.note_mode = NoteMode::Edit;
+                        self.preview_doc = None;
+                        // 进入编辑档不揭示任何块、不持光标：首帧即全篇按块渲染，无源码回显
+                        self.edit.active = None;
+                        self.edit.preedit = None;
+                        self.edit.focused = false;
+                        self.refresh_edit();
                     }
                     NoteMode::Source => {
                         self.note_mode = NoteMode::Source;
                         self.preview_doc = None;
+                        self.edit_doc = None;
+                        self.edit_meta.clear();
+                        self.source_editor = text_editor::Content::with_text(&self.note_text);
                     }
+                }
+                Task::none()
+            }
+            Message::Editor(event) => self.on_editor(event),
+            Message::OpenLink(href, form) => self.open_link(&href, form),
+            Message::ToggleTask(item_from) => {
+                if let Some((next, at)) = markdown_edit::toggle_task(&self.note_text, item_from) {
+                    self.edit.snapshot(&self.note_text);
+                    self.note_text = next;
+                    self.dirty = true;
+                    self.edit.caret = at;
+                    self.edit.anchor = at;
+                    self.after_edit();
                 }
                 Task::none()
             }
@@ -1088,9 +1235,447 @@ impl App {
             self.preview_doc = None;
             return;
         }
-        let text = self.editor.text();
-        let body = strip_frontmatter(&text);
-        self.preview_doc = Some(markdown_view::parse_document(body));
+        let body = strip_frontmatter(&self.note_text).to_string();
+        self.preview_doc = Some(markdown_view::parse_document(&body));
+    }
+
+    /// 编辑档解析产物与块元数据重建。
+    fn refresh_edit(&mut self) {
+        if self.note_mode != NoteMode::Edit {
+            self.edit_doc = None;
+            self.edit_meta.clear();
+            return;
+        }
+        let doc = markdown_view::parse_document(&self.note_text);
+        self.edit_meta = markdown_view::block_meta(&doc.source, &doc.blocks);
+        // 空文档（无块）也要有光标宿主：补一个空块
+        if self.edit_meta.is_empty() {
+            self.edit_meta.push(markdown_view::empty_block_meta());
+        }
+        self.edit_doc = Some(doc);
+    }
+
+    /// 光标所在块序号（严格落在块区间内；空行 / 文外返回 None）。
+    fn block_at(&self, offset: usize) -> Option<usize> {
+        self.edit_meta.iter().position(|m| offset >= m.from && offset <= m.to)
+    }
+
+    /// 光标最近块（块间空行与文外兜底用）。
+    fn nearest_block(&self, offset: usize) -> Option<usize> {
+        if self.edit_meta.is_empty() {
+            return None;
+        }
+        if let Some(i) = self.block_at(offset) {
+            return Some(i);
+        }
+        if let Some(first) = self.edit_meta.first() {
+            if offset < first.from {
+                return Some(0);
+            }
+        }
+        self.edit_meta.iter().rposition(|m| m.from <= offset).or(Some(0))
+    }
+
+    /// 命中目标 → 源偏移。
+    fn resolve_hit(&self, target: HitTarget) -> usize {
+        match target {
+            HitTarget::BlockText { index, point, width } => match self.edit_meta.get(index) {
+                Some(meta) => markdown_edit::offset_in_block(
+                    &self.note_text,
+                    meta.from,
+                    meta.to,
+                    &meta.source,
+                    width,
+                    point,
+                    &self.edit_opts,
+                ),
+                None => 0,
+            },
+            HitTarget::BlockEdge { index, upper } => match self.edit_meta.get(index) {
+                Some(meta) => if upper { meta.from } else { meta.to },
+                None => 0,
+            },
+            HitTarget::GapLine { from, to, upper } => {
+                if upper {
+                    // 空行起点 = 上一块末之后第一个字节
+                    (from + 1).min(to)
+                } else {
+                    to
+                }
+            }
+            HitTarget::Start => self.edit_meta.first().map_or(0, |m| m.from),
+            HitTarget::End => self.edit_meta.last().map_or(self.note_text.len(), |m| m.to),
+        }
+    }
+
+    /// 活动块 = 光标所在块。光标落在块间空行时不揭示任何块（空行光标由编辑面自绘）；
+    /// 落在文首 / 文末之外时回到最近块，保证光标有宿主。
+    fn sync_active(&mut self) {
+        let caret = self.edit.caret.min(self.note_text.len());
+        if let Some(i) = self.block_at(caret) {
+            self.edit.active = Some(i);
+            return;
+        }
+        let outside = self
+            .edit_meta
+            .first()
+            .zip(self.edit_meta.last())
+            .is_some_and(|(f, l)| caret < f.from || caret > l.to);
+        self.edit.active = if outside { self.nearest_block(caret) } else { None };
+    }
+
+    /// 选区锚点所在块。
+    fn anchor_block(&self) -> Option<usize> {
+        self.block_at(self.edit.anchor.min(self.note_text.len()))
+    }
+
+    /// 一次编辑落地后的收尾。
+    fn after_edit(&mut self) {
+        self.refresh_edit();
+        self.sync_active();
+    }
+
+    /// 需要回显源码的块：光标所在块 + 选区锚点所在块（无选区时不揭示锚点块）。
+    pub fn editable_blocks(&self) -> Vec<usize> {
+        let mut out = Vec::new();
+        if let Some(i) = self.edit.active {
+            out.push(i);
+        }
+        let (a, b) = self.edit.selection();
+        if b > a {
+            if let Some(i) = self.anchor_block() {
+                if !out.contains(&i) {
+                    out.push(i);
+                }
+            }
+        }
+        out
+    }
+
+    /// 光标是否在列表块内。
+    fn is_in_list(&self) -> bool {
+        self.edit
+            .active
+            .is_some_and(|i| self.edit_meta.get(i).is_some_and(|m| m.list))
+    }
+
+    /// 删除选区（有则删）。
+    fn delete_selection(&mut self) -> bool {
+        let (a, b) = self.edit.selection();
+        if b <= a {
+            return false;
+        }
+        self.edit.snapshot(&self.note_text);
+        let mut next = String::with_capacity(self.note_text.len());
+        next.push_str(&self.note_text[..a]);
+        next.push_str(&self.note_text[b..]);
+        self.note_text = next;
+        self.dirty = true;
+        self.edit.caret = a;
+        self.edit.anchor = a;
+        self.after_edit();
+        true
+    }
+
+    /// 插入文本（替换选区）。
+    fn edit_insert(&mut self, text: String) {
+        if text.is_empty() {
+            return;
+        }
+        self.edit.snapshot(&self.note_text);
+        let (a, b) = self.edit.selection();
+        let mut next = String::with_capacity(self.note_text.len() + text.len());
+        next.push_str(&self.note_text[..a]);
+        next.push_str(&text);
+        next.push_str(&self.note_text[b..]);
+        self.note_text = next;
+        self.dirty = true;
+        self.edit.caret = a + text.len();
+        self.edit.anchor = self.edit.caret;
+        self.after_edit();
+    }
+
+    /// 退格：先删选区；否则空列表项整段标记；再否则删前一个字符。
+    fn edit_backspace(&mut self) {
+        if self.delete_selection() {
+            return;
+        }
+        if self.is_in_list() {
+            if let Some((next, caret)) =
+                markdown_edit::list_backspace_edit(&self.note_text, self.edit.caret)
+            {
+                self.edit.snapshot(&self.note_text);
+                self.note_text = next;
+                self.dirty = true;
+                self.edit.caret = caret;
+                self.edit.anchor = caret;
+                self.after_edit();
+                return;
+            }
+        }
+        let caret = self.edit.caret.min(self.note_text.len());
+        if caret == 0 {
+            return;
+        }
+        let prev = prev_boundary(&self.note_text, caret);
+        self.edit.snapshot(&self.note_text);
+        let mut next = String::with_capacity(self.note_text.len());
+        next.push_str(&self.note_text[..prev]);
+        next.push_str(&self.note_text[caret..]);
+        self.note_text = next;
+        self.dirty = true;
+        self.edit.caret = prev;
+        self.edit.anchor = prev;
+        self.after_edit();
+    }
+
+    /// 删除：先删选区；否则删后一个字符。
+    fn edit_delete(&mut self) {
+        if self.delete_selection() {
+            return;
+        }
+        let caret = self.edit.caret.min(self.note_text.len());
+        if caret >= self.note_text.len() {
+            return;
+        }
+        let after = next_boundary(&self.note_text, caret);
+        self.edit.snapshot(&self.note_text);
+        let mut next = String::with_capacity(self.note_text.len());
+        next.push_str(&self.note_text[..caret]);
+        next.push_str(&self.note_text[after..]);
+        self.note_text = next;
+        self.dirty = true;
+        self.after_edit();
+    }
+
+    /// 回车：列表块内延续项标记，否则插入换行。
+    fn edit_newline(&mut self) {
+        if self.delete_selection() {
+            return;
+        }
+        if self.is_in_list() {
+            if let Some((next, caret)) =
+                markdown_edit::list_enter_edit(&self.note_text, self.edit.caret)
+            {
+                self.edit.snapshot(&self.note_text);
+                self.note_text = next;
+                self.dirty = true;
+                self.edit.caret = caret;
+                self.edit.anchor = caret;
+                self.after_edit();
+                return;
+            }
+        }
+        self.edit_insert("\n".to_string());
+    }
+
+    /// Tab 缩进 / Shift+Tab 反缩进。
+    fn edit_indent(&mut self, outdent: bool) {
+        let (from, to) = self.edit.selection();
+        let edit = if outdent {
+            match markdown_edit::outdent_edit(&self.note_text, from, to) {
+                Some(edit) => edit,
+                None => return,
+            }
+        } else {
+            markdown_edit::indent_edit(&self.note_text, from, to)
+        };
+        self.edit.snapshot(&self.note_text);
+        self.note_text = edit.text;
+        self.dirty = true;
+        self.edit.anchor = edit.from;
+        self.edit.caret = edit.to;
+        self.after_edit();
+    }
+
+    /// 光标移动（上下越界时跨块）。
+    fn edit_move(&mut self, motion: markdown_edit::Motion, extend: bool) {
+        use markdown_edit::Motion;
+        let len = self.note_text.len();
+        let caret = self.edit.caret.min(len);
+        let target = match motion {
+            Motion::Left => prev_boundary(&self.note_text, caret),
+            Motion::Right => next_boundary(&self.note_text, caret),
+            Motion::Home => line_start_of(&self.note_text, caret),
+            Motion::End => line_end_of(&self.note_text, caret),
+            Motion::Up => {
+                self.cross_block_move(false, extend);
+                return;
+            }
+            Motion::Down => {
+                self.cross_block_move(true, extend);
+                return;
+            }
+        };
+        if !extend {
+            self.edit.anchor = target;
+        }
+        self.edit.caret = target;
+        self.sync_active();
+    }
+
+    /// 上下越界时的跨块移动：落到相邻块首/末。
+    fn cross_block_move(&mut self, forward: bool, extend: bool) {
+        let Some(idx) = self.edit.active.or_else(|| self.nearest_block(self.edit.caret)) else {
+            return;
+        };
+        let target_index = if forward { idx + 1 } else { idx.saturating_sub(1) };
+        let Some(meta) = self.edit_meta.get(target_index).cloned() else {
+            return;
+        };
+        let target = if forward { meta.from } else { meta.to.min(self.note_text.len()) };
+        if !extend {
+            self.edit.anchor = target;
+        }
+        self.edit.caret = target;
+        self.edit.active = Some(target_index);
+    }
+
+    fn edit_undo(&mut self) {
+        if let Some((text, caret, anchor)) = self.edit.undo(&self.note_text) {
+            self.note_text = text;
+            self.dirty = true;
+            self.edit.caret = caret.min(self.note_text.len());
+            self.edit.anchor = anchor.min(self.note_text.len());
+            self.after_edit();
+        }
+    }
+
+    fn edit_redo(&mut self) {
+        if let Some((text, caret, anchor)) = self.edit.redo(&self.note_text) {
+            self.note_text = text;
+            self.dirty = true;
+            self.edit.caret = caret.min(self.note_text.len());
+            self.edit.anchor = anchor.min(self.note_text.len());
+            self.after_edit();
+        }
+    }
+
+    /// 编辑面事件处理。
+    fn on_editor(&mut self, event: markdown_edit::EditorEvent) -> Task<Message> {
+        use markdown_edit::EditorEvent as E;
+        match event {
+            E::Hit { target, extend } => {
+                let offset = self.resolve_hit(target);
+                if !extend {
+                    self.edit.anchor = offset;
+                }
+                self.edit.caret = offset.min(self.note_text.len());
+                self.edit.focused = true;
+                self.sync_active();
+                Task::none()
+            }
+            E::Blur => {
+                // 失焦即收起光标与揭示（与只读档同观感），选区保留但不再有光标
+                self.edit.focused = false;
+                self.edit.preedit = None;
+                self.edit.active = None;
+                Task::none()
+            }
+            E::SetCaret { offset, extend } => {
+                let offset = offset.min(self.note_text.len());
+                if !extend {
+                    self.edit.anchor = offset;
+                }
+                self.edit.caret = offset;
+                self.sync_active();
+                Task::none()
+            }
+            E::Insert(text) => {
+                self.edit_insert(text);
+                Task::none()
+            }
+            E::Backspace => {
+                self.edit_backspace();
+                Task::none()
+            }
+            E::Delete | E::DeleteSelection => {
+                self.edit_delete();
+                Task::none()
+            }
+            E::Newline => {
+                self.edit_newline();
+                Task::none()
+            }
+            E::Indent => {
+                self.edit_indent(false);
+                Task::none()
+            }
+            E::Outdent => {
+                self.edit_indent(true);
+                Task::none()
+            }
+            E::Move { motion, extend } => {
+                self.edit_move(motion, extend);
+                Task::none()
+            }
+            E::Undo => {
+                self.edit_undo();
+                Task::none()
+            }
+            E::Redo => {
+                self.edit_redo();
+                Task::none()
+            }
+            E::SelectAll => {
+                self.edit.anchor = 0;
+                self.edit.caret = self.note_text.len();
+                self.edit.active = self.nearest_block(self.edit.caret);
+                Task::none()
+            }
+            E::Preedit(preedit) => {
+                self.edit.preedit = preedit;
+                Task::none()
+            }
+        }
+    }
+
+    /// 打开链接：外链走系统浏览器，仓库路径/wiki 命中即打开笔记。
+    fn open_link(&mut self, href: &str, form: LinkForm) -> Task<Message> {
+        let decoded = percent_decode(href);
+        let path = decoded.split('#').next().unwrap_or("").trim().to_string();
+        match form {
+            LinkForm::External => {
+                open_external(&decoded);
+                Task::none()
+            }
+            LinkForm::Path | LinkForm::Wiki | LinkForm::Create => {
+                if self.dirty {
+                    self.status = "有未保存改动，先 Ctrl+S 保存".into();
+                    return Task::none();
+                }
+                match self.resolve_note_path(&path) {
+                    Some(rel) => {
+                        self.ui.last_note_file = Some(rel.clone());
+                        self.schedule_persist();
+                        self.status = "打开链接".into();
+                        self.load_note(&rel)
+                    }
+                    None => {
+                        self.status = format!("未找到笔记：{path}");
+                        Task::none()
+                    }
+                }
+            }
+            LinkForm::Plain => Task::none(),
+        }
+    }
+
+    /// 链接路径 → 仓库内相对路径（不做 wiki 标题级检索）。
+    fn resolve_note_path(&self, href: &str) -> Option<String> {
+        let root = self.vault.root().ok()?;
+        let rel = href.trim_start_matches('/');
+        if rel.is_empty() {
+            return None;
+        }
+        for candidate in [rel.to_string(), format!("{rel}.md")] {
+            if let Ok(path) = vault::safe_join(&root, &candidate, false) {
+                if path.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+        None
     }
 
     /// 读 note 视图文件内容（仓库切换恢复与文件点击共用；根在发起时冻结，

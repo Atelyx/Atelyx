@@ -9,7 +9,7 @@ use atelyx_core::layout::{self, AppUiState, LayoutNode, TabItem};
 use iced::widget::{button, column, container, row, scrollable, space, text, text_editor, text_input};
 use iced::{Element, Length, Rectangle};
 
-use crate::{markdown_view, App, Message, NoteMode};
+use crate::{markdown_edit, markdown_view, App, Message, NoteMode};
 
 pub struct UiMetrics;
 
@@ -478,7 +478,7 @@ fn note_view(app: &App) -> Element<'_, Message> {
     .padding([2.0, 4.0]);
 
     let content: Element<'_, Message> = match app.note_mode {
-        NoteMode::Source => text_editor(&app.editor)
+        NoteMode::Source => text_editor(&app.source_editor)
             .height(Length::Fill)
             .on_action(Message::Edited)
             .into(),
@@ -486,13 +486,122 @@ fn note_view(app: &App) -> Element<'_, Message> {
             Some(doc) => markdown_view::document_view(doc, &app.theme),
             None => placeholder("正在渲染…"),
         },
-        NoteMode::Edit => placeholder("预览编辑档不可用"),
+        NoteMode::Edit => edit_view(app),
     };
 
     column![bar, content].width(Length::Fill).height(Length::Fill).into()
 }
 
-/// 模式分段按钮：当前档高亮，其余档为次级样式（预览编辑档点击仅提示）。
+/// 预览编辑档：块行与空行行交给编辑面容器统一排布与承接鼠标；非活动块由只读块
+/// 控件承载（视觉逐点一致），仅活动块与选区锚点块回显源码。
+fn edit_view(app: &App) -> Element<'_, Message> {
+    let Some(doc) = app.edit_doc.as_ref() else {
+        return placeholder("正在解析…");
+    };
+    let editable = app.editable_blocks();
+    let pal = markdown_edit::EditPalette::from_theme(&app.theme);
+    let (sel_from, sel_to) = app.edit.selection();
+    let mut rows = Vec::new();
+    let mut prev: Option<usize> = None;
+    // 块行是否回显源码：光标所在块 / 选区锚点块
+    let caret = app.edit.caret.min(doc.source.len());
+    // 空文档：补一个空源码块，给光标一个宿主
+    if doc.blocks.is_empty() {
+        rows.push(markdown_edit::SurfaceRow::Block {
+            index: 0,
+            editable: true,
+            exact: true,
+            covered: false,
+            element: markdown_edit::SourceBlock {
+                from: 0,
+                to: 0,
+                text: &doc.source,
+                caret,
+                anchor: app.edit.anchor,
+                preedit: app.edit.preedit.clone(),
+                source: markdown_view::empty_block_meta().source,
+                pal,
+                opts: &app.edit_opts,
+                focused: app.edit.focused,
+            }
+            .into(),
+        });
+        return scrollable(markdown_edit::EditSurface::new(
+            rows,
+            pal,
+            caret,
+            app.edit.focused,
+        ))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into();
+    }
+    for (index, chunk) in markdown_view::block_chunks(&doc.source, &doc.blocks, &app.theme, true)
+        .into_iter()
+        .enumerate()
+    {
+        let editable = editable.contains(&index);
+        let meta = app.edit_meta.get(index);
+        if chunk.gap_before > 0 {
+            // 空行区间 = 上一块末 → 本块首；两侧块都被选中时整行铺选区底色
+            if let Some(p) = prev {
+                if let Some(prev_meta) = app.edit_meta.get(p) {
+                    let from = prev_meta.to;
+                    let covered = sel_to > sel_from && sel_from <= from && sel_to >= chunk.from;
+                    rows.push(markdown_edit::SurfaceRow::Gap {
+                        from,
+                        to: chunk.from,
+                        covered,
+                        element: markdown_view::gap(chunk.gap_before),
+                    });
+                }
+            }
+        }
+        if editable {
+            rows.push(markdown_edit::SurfaceRow::Block {
+                index,
+                editable: true,
+                exact: true,
+                covered: false,
+                element: markdown_edit::SourceBlock {
+                    from: chunk.from,
+                    to: chunk.to,
+                    text: &doc.source,
+                    caret,
+                    anchor: app.edit.anchor,
+                    preedit: app.edit.preedit.clone(),
+                    source: chunk.source,
+                    pal,
+                    opts: &app.edit_opts,
+                    // 仅当光标确实落在本块区间内才显示光标（块间空行的光标由容器自绘）
+                    focused: app.edit.focused && caret >= chunk.from && caret <= chunk.to,
+                }
+                .into(),
+            });
+        } else {
+            let covered = sel_to > sel_from && sel_from < chunk.to && sel_to > chunk.from;
+            rows.push(markdown_edit::SurfaceRow::Block {
+                index,
+                editable: false,
+                exact: meta.is_some_and(|m| m.exact),
+                covered,
+                element: chunk.element,
+            });
+        }
+        prev = Some(index);
+    }
+    scrollable(markdown_edit::EditSurface::new(
+        rows,
+        pal,
+        caret,
+        app.edit.focused,
+    ))
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
+}
+
+/// 模式分段按钮：当前档高亮，其余档为次级样式。
 fn mode_button(label: &str, mode: NoteMode, current: NoteMode) -> Element<'static, Message> {
     button(text(label.to_string()).size(12))
         .padding([3.0, 10.0])

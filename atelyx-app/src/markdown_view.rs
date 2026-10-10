@@ -1,4 +1,4 @@
-﻿//! Markdown 只读渲染：块规格 → iced 控件（阅读面，不含编辑态与源码标记）。
+//! Markdown 只读渲染：块规格 → iced 控件（阅读面，不含编辑态与源码标记）。
 //! 块间距 = 源码空行数 × 行高（块级不设外边距）；公式与 raw HTML 降级源码文本，
 //! 图片以替代文字占位，链接只作样式。
 
@@ -23,16 +23,121 @@ const CODE_MAX_LINES: usize = 18;
 /// 列表标记悬挂列宽（内容与标记分列，嵌套列表随之逐层缩进）。
 const LIST_MARKER_W: f32 = 20.0;
 
+/// 编辑档可点的链接目标（外链 / 仓库路径 / wiki），命中后由视图层打开。
+#[derive(Clone)]
+pub struct LinkTarget {
+    pub href: String,
+    pub form: LinkForm,
+}
+
+/// 一个顶层块的渲染产物：源区间 + 前置空行数 + 控件。
+/// 编辑档与只读档由同一入口产出，非活动块据此逐点一致（档位切换不重排）。
+pub struct BlockChunk<'a> {
+    pub from: usize,
+    pub to: usize,
+    /// 与上一块之间的源码空行数（首块为 0；块间距 = 空行数 × 行高）。
+    pub gap_before: usize,
+    /// 源码态排版口径（编辑档回显源码时与该块类型一致）。
+    pub source: SourceKind,
+    pub element: Element<'a, Message>,
+}
+
+/// 源码态排版口径。
+#[derive(Clone, Copy)]
+pub enum SourceKind {
+    /// 散文类块：字号与行高随块类型（标题逐级放大）。
+    Prose { size: f32, line_height: f32 },
+    /// 代码类块：等宽小字。
+    Mono { size: f32 },
+}
+
+/// 块渲染共享入口：`interactive` 为真时链接可点、任务框可勾（编辑档）。
+pub fn block_chunks<'a>(
+    source: &'a str,
+    blocks: &'a [MarkdownBlock],
+    theme: &iced::Theme,
+    interactive: bool,
+) -> Vec<BlockChunk<'a>> {
+    let render = Render { pal: Palette::from_theme(theme), opts: link_options(), interactive };
+    render.chunks(source, blocks)
+}
+
 /// 阅读面入口：正文列放进滚动容器。
 pub fn document_view<'a>(doc: &'a MarkdownDocument, theme: &iced::Theme) -> Element<'a, Message> {
-    let render = Render { pal: Palette::from_theme(theme), opts: link_options() };
-    let body = column(render.blocks(&doc.source, &doc.blocks))
-        .width(Length::Fill)
-        .spacing(0);
+    let mut body = column![].width(Length::Fill).spacing(0);
+    for chunk in block_chunks(&doc.source, &doc.blocks, theme, false) {
+        if chunk.gap_before > 0 {
+            body = body.push(gap(chunk.gap_before));
+        }
+        body = body.push(chunk.element);
+    }
     scrollable(container(body).width(Length::Fill).padding(16.0))
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
+}
+
+/// 编辑面块元数据。
+#[derive(Clone)]
+pub struct BlockMeta {
+    pub from: usize,
+    pub to: usize,
+    /// 列表块（Enter 延续项、空项退格用）。
+    pub list: bool,
+    /// 富渲染与源码渲染几何是否一致（一致才可按源文本精确换算落点）。
+    pub exact: bool,
+    pub source: SourceKind,
+}
+
+/// 富渲染与源码渲染几何是否一致：只有「纯文本段落」（无任何隐藏标记）两者逐点相同——
+/// 落点可按源文本精确换算，且揭示不引起重排；其余块富形态带标记或缩进列，只能按块边界吸附。
+fn rich_equals_source(source: &str, from: usize, to: usize, block: &MarkdownBlock) -> bool {
+    let MarkdownBlock::Paragraph { inline, .. } = block else {
+        return false;
+    };
+    if to <= from || to > source.len() {
+        return false;
+    }
+    let slice = &source[from..to];
+    if slice.starts_with(char::is_whitespace) {
+        return false;
+    }
+    let mut len = 0;
+    for span in inline {
+        match span {
+            InlineSpan::Text { text, .. } => len += text.len(),
+            _ => return false,
+        }
+    }
+    len == slice.len()
+}
+
+/// 编辑面块元数据（按顶层块序）。
+pub fn block_meta(source: &str, blocks: &[MarkdownBlock]) -> Vec<BlockMeta> {
+    blocks
+        .iter()
+        .map(|b| {
+            let (from, to) = (block_from(b), block_to(b));
+            BlockMeta {
+                from,
+                to,
+                list: matches!(b, MarkdownBlock::List { .. }),
+                exact: rich_equals_source(source, from, to, b),
+                source: block_source_style(b),
+            }
+        })
+        .collect()
+}
+
+/// 空文档的空块元数据（编辑档给无块正文一个光标宿主）。
+pub fn empty_block_meta() -> BlockMeta {
+    BlockMeta {
+        from: 0,
+        to: 0,
+        list: false,
+        exact: true,
+        source: SourceKind::Prose { size: BASE_SIZE, line_height: LINE_HEIGHT },
+    }
 }
 
 /// 阅读面解析入口：与渲染面共用同一套链接形态判定。
@@ -41,7 +146,7 @@ pub fn parse_document(source: &str) -> MarkdownDocument {
 }
 
 /// 解析选项：非外链地址一律判为仓库内路径（不做存在性判定）。
-fn link_options() -> ParseOptions {
+pub(crate) fn link_options() -> ParseOptions {
     ParseOptions {
         resolve_link: Some(Box::new(|href: &str| {
             if href.trim().is_empty() {
@@ -104,44 +209,94 @@ impl TextStyle {
     }
 }
 
+/// 标题字号：按层级逐级放大。
+fn heading_size(level: u8) -> f32 {
+    BASE_SIZE
+        * match level {
+            1 => 1.5,
+            2 => 1.35,
+            3 => 1.2,
+            4 => 1.1,
+            5 => 1.0,
+            _ => 0.9,
+        }
+}
+
+/// 块的源码态口径：结构块与散文块统一按整块源码回显，字号随块类型。
+fn block_source_style(block: &MarkdownBlock) -> SourceKind {
+    match block {
+        MarkdownBlock::Heading { level, .. } => {
+            SourceKind::Prose { size: heading_size(*level), line_height: 1.3 }
+        }
+        MarkdownBlock::Paragraph { .. }
+        | MarkdownBlock::List { .. }
+        | MarkdownBlock::Blockquote { .. } => {
+            SourceKind::Prose { size: BASE_SIZE, line_height: LINE_HEIGHT }
+        }
+        MarkdownBlock::FootnoteDef { .. } => {
+            SourceKind::Prose { size: BASE_SIZE * 0.9, line_height: LINE_HEIGHT }
+        }
+        MarkdownBlock::FencedCode { .. }
+        | MarkdownBlock::IndentedCode { .. }
+        | MarkdownBlock::Table { .. }
+        | MarkdownBlock::HtmlBlock { .. }
+        | MarkdownBlock::MathBlock { .. }
+        | MarkdownBlock::Hr { .. } => SourceKind::Mono { size: MONO_SIZE },
+    }
+}
+
 struct Render {
     pal: Palette,
     opts: ParseOptions,
+    /// 链接可点、任务框可勾（编辑档）；只读档为假。
+    interactive: bool,
 }
 
 impl Render {
-    /// 块序列：块之间按源码空行数补行高的间距（块级不设外边距）。
-    fn blocks<'a>(&self, source: &'a str, blocks: &'a [MarkdownBlock]) -> Vec<Element<'a, Message>> {
-        let mut out = Vec::new();
+    /// 块序列：每块附源区间与前置空行数（间距由调用方按空行数补行高）。
+    fn chunks<'a>(&self, source: &'a str, blocks: &'a [MarkdownBlock]) -> Vec<BlockChunk<'a>> {
+        let mut out = Vec::with_capacity(blocks.len());
         let mut prev: Option<&MarkdownBlock> = None;
         for block in blocks {
-            if let Some(p) = prev {
-                let n = blank_line_count(source, block_to(p), block_from(block));
-                if n > 0 {
-                    out.push(gap(n));
-                }
-            }
-            out.push(self.block(source, block));
+            let gap_before = prev.map_or(0, |p| {
+                blank_line_count(source, block_to(p), block_from(block))
+            });
+            out.push(BlockChunk {
+                from: block_from(block),
+                to: block_to(block),
+                gap_before,
+                source: block_source_style(block),
+                element: self.block(source, block),
+            });
             prev = Some(block);
         }
         out
     }
 
+    /// 子块列表 → 列（块间按源码空行数补行高间距）。
+    fn blocks_column<'a>(&self, source: &'a str, blocks: &'a [MarkdownBlock]) -> Element<'a, Message> {
+        let mut col = column![].width(Length::Fill).spacing(0);
+        for chunk in self.chunks(source, blocks) {
+            if chunk.gap_before > 0 {
+                col = col.push(gap(chunk.gap_before));
+            }
+            col = col.push(chunk.element);
+        }
+        col.into()
+    }
+
     fn block<'a>(&self, source: &'a str, block: &'a MarkdownBlock) -> Element<'a, Message> {
         match block {
             MarkdownBlock::Heading { level, inline, .. } => {
-                let size = BASE_SIZE
-                    * match level {
-                        1 => 1.5,
-                        2 => 1.35,
-                        3 => 1.2,
-                        4 => 1.1,
-                        5 => 1.0,
-                        _ => 0.9,
-                    };
                 let mut st = TextStyle::base();
                 st.font.weight = iced::font::Weight::Semibold;
-                rich(self.spans(source, inline, st), size, 1.3, None, iced::alignment::Horizontal::Left)
+                rich(
+                    self.spans(source, inline, st),
+                    heading_size(*level),
+                    1.3,
+                    None,
+                    iced::alignment::Horizontal::Left,
+                )
             }
             MarkdownBlock::Paragraph { inline, .. } => rich(
                 self.spans(source, inline, TextStyle::base()),
@@ -178,7 +333,7 @@ impl Render {
         children: &'a [MarkdownBlock],
     ) -> Element<'a, Message> {
         let line = callout.map(|name| self.callout_color(name)).unwrap_or(self.pal.border);
-        let content = column(self.blocks(source, children)).width(Length::Fill).spacing(0);
+        let content = self.blocks_column(source, children);
         let content = match callout {
             Some(name) => {
                 let badge = container(
@@ -193,7 +348,7 @@ impl Render {
                     border: Border { radius: 8.0.into(), ..Border::default() },
                     ..Default::default()
                 });
-                column![badge, content].width(Length::Fill).spacing(4.0)
+                column![badge, content].width(Length::Fill).spacing(4.0).into()
             }
             None => content,
         };
@@ -262,11 +417,17 @@ impl Render {
                 iced::alignment::Horizontal::Left,
             ));
         }
-        body = body.push(column(self.blocks(source, &item.children)).width(Length::Fill).spacing(0));
+        body = body.push(self.blocks_column(source, &item.children));
 
         // 任务框取代圆点/序号；有序项沿用源序号文本
         let marker: Element<'_, Message> = if item.task {
-            container(checkbox(item.checked))
+            let box_widget = checkbox(item.checked);
+            let box_widget = if self.interactive {
+                box_widget.on_toggle(move |_| Message::ToggleTask(item.from))
+            } else {
+                box_widget
+            };
+            container(box_widget)
                 .width(Length::Fixed(LIST_MARKER_W))
                 .padding(Padding { top: 2.0, ..Padding::default() })
                 .into()
@@ -346,7 +507,7 @@ impl Render {
         let columns = (0..cols).map(|i| {
             let head = self.cell(source, header.get(i), aligns.get(i), true);
             // 单元格生成器随行闭包独立持有调色板与解析选项，不借用 self
-            let cells = Render { pal, opts: link_options() };
+            let cells = Render { pal, opts: link_options(), interactive: self.interactive };
             table::column(head, move |row: usize| {
                 let cell = rows.get(row).and_then(|r| r.get(i));
                 cells.cell(source, cell, aligns.get(i), false)
@@ -469,7 +630,7 @@ impl Render {
 
     // ===== 行内 =====
 
-    fn spans<'a>(&self, source: &str, list: &[InlineSpan], st: TextStyle) -> Vec<Span<'a, (), Font>> {
+    fn spans<'a>(&self, source: &str, list: &[InlineSpan], st: TextStyle) -> Vec<Span<'a, LinkTarget, Font>> {
         let mut out = Vec::new();
         for span in list {
             self.push_span(source, span, st, &mut out);
@@ -482,7 +643,7 @@ impl Render {
         source: &str,
         span: &InlineSpan,
         st: TextStyle,
-        out: &mut Vec<Span<'a, (), Font>>,
+        out: &mut Vec<Span<'a, LinkTarget, Font>>,
     ) {
         match span {
             InlineSpan::Text { text, .. } => out.push(self.leaf(text.clone(), st)),
@@ -520,24 +681,27 @@ impl Render {
                 out.push(self.leaf(source[*from..*to].to_string(), TextStyle { font: Font { style: iced::font::Style::Italic, ..inner.font }, ..inner }));
             }
             InlineSpan::Comment { .. } => {}
-            InlineSpan::Link { from, to, label, form, .. } => match form {
+            InlineSpan::Link { from, to, label, form, href, .. } => match form {
                 LinkForm::Plain => out.push(self.leaf(source[*from..*to].to_string(), st)),
                 LinkForm::External | LinkForm::Path | LinkForm::Wiki => {
                     let inner = TextStyle { color: Some(self.pal.accent), underline: true, ..st };
-                    out.push(self.leaf(label.clone(), inner));
+                    let leaf = self.leaf(label.clone(), inner);
+                    out.push(self.linked(leaf, href.clone(), *form));
                 }
                 LinkForm::Create => {
                     let inner = TextStyle { color: Some(self.pal.muted), underline: true, ..st };
                     out.push(self.leaf(label.clone(), inner));
                 }
             },
-            InlineSpan::Autolink { label, .. } => {
+            InlineSpan::Autolink { href, label, .. } => {
                 let inner = TextStyle { color: Some(self.pal.accent), underline: true, ..st };
-                out.push(self.leaf(label.clone(), inner));
+                let leaf = self.leaf(label.clone(), inner);
+                out.push(self.linked(leaf, href.clone(), LinkForm::External));
             }
-            InlineSpan::Wiki { label, .. } => {
+            InlineSpan::Wiki { target, label, .. } => {
                 let inner = TextStyle { color: Some(self.pal.accent), underline: true, ..st };
-                out.push(self.leaf(label.clone(), inner));
+                let leaf = self.leaf(label.clone(), inner);
+                out.push(self.linked(leaf, target.clone(), LinkForm::Wiki));
             }
             // 图片以替代文字占位（不加载图片字节）
             InlineSpan::Image { src, alt, .. } => {
@@ -576,7 +740,21 @@ impl Render {
         }
     }
 
-    fn leaf<'a>(&self, content: String, st: TextStyle) -> Span<'a, (), Font> {
+    /// 交互档给链接片段挂触点（只读档不挂，链接仅作样式）。
+    fn linked<'a>(
+        &self,
+        leaf: Span<'a, LinkTarget, Font>,
+        href: String,
+        form: LinkForm,
+    ) -> Span<'a, LinkTarget, Font> {
+        if self.interactive {
+            leaf.link(LinkTarget { href, form })
+        } else {
+            leaf
+        }
+    }
+
+    fn leaf<'a>(&self, content: String, st: TextStyle) -> Span<'a, LinkTarget, Font> {
         let mut span = Span::new(content).font(st.font).strikethrough(st.strike);
         if let Some(color) = st.color {
             span = span.color(color);
@@ -595,18 +773,20 @@ impl Render {
 }
 
 /// 行内富文本（默认字色与行内对齐可选，供引用/脚注的弱化文本与表格单元格对齐用）。
+/// 链接触点常驻：只读档的行内片段不带链接，处理器不会触发。
 fn rich<'a>(
-    spans: Vec<Span<'a, (), Font>>,
+    spans: Vec<Span<'a, LinkTarget, Font>>,
     size: f32,
     line_height: f32,
     color: Option<Color>,
     align: iced::alignment::Horizontal,
 ) -> Element<'a, Message> {
-    let mut text = Rich::<'a, (), Message>::with_spans(spans)
+    let mut text = Rich::<'a, LinkTarget, Message>::with_spans(spans)
         .size(size)
         .line_height(LineHeight::Relative(line_height))
         .align_x(align)
-        .width(Length::Fill);
+        .width(Length::Fill)
+        .on_link_click(|target: LinkTarget| Message::OpenLink(target.href, target.form));
     if let Some(c) = color {
         text = text.color(c);
     }
@@ -614,7 +794,7 @@ fn rich<'a>(
 }
 
 /// 空行间距元素：一个源码空行 = 一行高。
-fn gap<'a>(lines: usize) -> Element<'a, Message> {
+pub fn gap<'a>(lines: usize) -> Element<'a, Message> {
     Space::new().height(Length::Fixed(lines as f32 * gap_height())).into()
 }
 
@@ -796,5 +976,25 @@ mod tests {
         assert_eq!(strip_quote_marks("a\n> > b"), "a\nb");
         // 无引用标记的行（含缩进）不动
         assert_eq!(strip_quote_marks("a\n  lazy"), "a\n  lazy");
+    }
+
+    #[test]
+    fn block_meta_exact_only_for_plain_paragraphs() {
+        // 富渲染与源码渲染几何一致才可精确换算落点：仅纯文本段落成立
+        for (src, exact) in [
+            ("普通段落", true),
+            ("first line\nsecond line", true),
+            ("## 标题", false),
+            ("- 甲", false),
+            ("> 引用", false),
+            ("*斜*体", false),
+            ("**粗**体", false),
+            ("[链接](a.md)", false),
+            ("`code`", false),
+        ] {
+            let doc = parse_markdown(src, &link_options());
+            let meta = block_meta(&doc.source, &doc.blocks);
+            assert_eq!(meta.first().map(|m| m.exact), Some(exact), "src = {src}");
+        }
     }
 }
