@@ -365,6 +365,20 @@ function resetPersistBaseline(): void {
   strayTavilyKeyOnDisk = false;
 }
 
+/** 仓库级写入口的加载守卫：当前仓库配置未成功加载时拒写并可见提示。
+ * 加载失败后内存是默认值——此时写盘会把磁盘/团队元数据的真实配置抹掉
+ * （syncKeys 关闭路径以内存 providers 整组替换磁盘清单，等价删除供应商；keychain 回写会清掉真实条目）。
+ * 返回 true = 已拒绝（调用方直接返回）。 */
+function rejectUnloadedVaultWrite(): boolean {
+  const guardKey = activeGuardKey();
+  if (guardKey && loadedForVault === guardKey) return false;
+  useNotificationStore.getState().notify({
+    level: "error",
+    message: "仓库配置未加载完成，本次修改已拒绝保存；请重新进入仓库后重试",
+  });
+  return true;
+}
+
 /** 仓库级配置写盘（本模块唯一出口）：补丁交给 Rust 侧字段级合并，并处理三件必须可见的事：
  *  - 磁盘原文损坏：后端已把原文备份并退回空基线，必须提示用户（他看到的是「设置被重置」）；
  *  - 后端拒绝写盘（损坏原文备份失败）：内存已改、磁盘没改，静默等于用户以为已保存；
@@ -533,6 +547,7 @@ function stripSearchKeys(
  * 失败仅记日志不打断 UI（配置丢失可重设，非关键路径）。
  * 空间查看者先拒掉：否则内存已改、服务端会拒绝，形成「已保存」的假象。 */
 async function commitVault(patch: VaultConfigPatch): Promise<void> {
+  if (rejectUnloadedVaultWrite()) return;
   if (rejectActiveSpaceViewer("修改")) return;
   const base = useSettingsStore.getState().vaultConfig ?? {};
   useSettingsStore.setState({ vaultConfig: applyVaultPatch(base, patch) });
@@ -698,6 +713,7 @@ async function applyTavilyKey(key: string): Promise<void> {
  * 两者必须按序执行（先落盘剥离、再回写 keychain），故整体作为一个任务。
  */
 async function applySyncKeys(enabled: boolean): Promise<void> {
+  if (rejectUnloadedVaultWrite()) return;
   const active = useSettingsStore.getState();
   const base = active.vaultConfig ?? {};
   const ai = active.config;
@@ -1030,7 +1046,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         folderColors: {},
       });
       // 加载失败后 persist 路径的 provider 写盘会被守卫（loadedForVault 未登记）整体跳过
-      //（内存是默认值，落盘会抹掉磁盘配置）；commitVault/applySyncKeys/applyTavilyKey 不经该守卫。
+      //（内存是默认值，落盘会抹掉磁盘配置）；commitVault/applySyncKeys/applyTavilyKey
+      // 经入口守卫拒写并提示。persist 跳过静默（防抖自动触发，提示会在重试期刷屏）。
       // 「该写却不写」必须让用户知道，否则改设置看起来生效、重启后全丢。
       useNotificationStore.getState().notify({
         level: "error",
@@ -1630,6 +1647,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
 
   setSearchConfig: async (patch) => {
     if (!vaultWritable("修改")) return;
+    // 守卫先于内存写入：拒写时不得让内存显示新搜索配置（虚假已保存态）
+    if (rejectUnloadedVaultWrite()) return;
     const next = { ...get().searchConfig, ...patch };
     set({ searchConfig: next });
     await commitVault({ search: next });
@@ -1637,6 +1656,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
 
   setTavilyKey: async (key) => {
     if (!vaultWritable("修改")) return;
+    // 守卫先于内存写入：拒写时不得让内存显示新 key（虚假已保存态）
+    if (rejectUnloadedVaultWrite()) return;
     set({ tavilyKey: key });
     await applyTavilyKey(key);
   },

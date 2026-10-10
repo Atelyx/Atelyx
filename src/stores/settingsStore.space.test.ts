@@ -73,6 +73,8 @@ const h = vi.hoisted(() => {
     spaceConfigPatches: [] as Array<{ serverKey: string; patch: Record<string, unknown> }>,
     /** vault_config_patch 收到的补丁（空间下不得出现）。 */
     vaultPatches: [] as Record<string, unknown>[],
+    /** read_vault_config 抛错开关（加载失败态守卫测试）。 */
+    failReadVaultConfig: false as boolean,
     /** patch_global_config 收到的补丁（应用级显示偏好落点）。 */
     globalPatches: [] as Record<string, unknown>[],
     keychain: new Map<string, string>(),
@@ -86,6 +88,7 @@ vi.mock("@tauri-apps/api/core", () => ({
     const a = args ?? {};
     switch (cmd) {
       case "read_vault_config":
+        if (h.state.failReadVaultConfig) throw new Error("配置读取失败");
         return { config: h.state.vaultConfig, corruptBackup: null };
       case "vault_config_patch":
         h.state.vaultPatches.push(a.patch as Record<string, unknown>);
@@ -161,6 +164,7 @@ beforeEach(async () => {
   h.state.globalConfig = {};
   h.state.spaceConfigPatches = [];
   h.state.vaultPatches = [];
+  h.state.failReadVaultConfig = false;
   h.state.globalPatches = [];
   h.state.keychain = new Map();
   h.state.keyWrites = [];
@@ -388,5 +392,48 @@ describe("loadVaultConfig 失败清理", () => {
     await settings.useSettingsStore.getState().loadVaultConfig();
     expect(settings.useSettingsStore.getState().config.providers).toEqual([]);
     expect(settings.useSettingsStore.getState().vaultConfig).not.toBeNull();
+  });
+});
+
+describe("加载失败态的写入守卫", () => {
+  /** 通知清单里的错误消息文本（动态导入：resetModules 后 settingsStore 持有的是新实例）。 */
+  async function errorNotices(): Promise<string[]> {
+    const { useNotificationStore } = await import("@/stores/notificationStore");
+    return useNotificationStore
+      .getState()
+      .items.filter((n) => n.level === "error")
+      .map((n) => n.message);
+  }
+
+  it("配置加载失败后：commitVault/applyTavilyKey/applySyncKeys 一律拒写并提示，恢复加载后可写", async () => {
+    // 磁盘已有真实配置；本次读取失败 → loadedForVault 未登记、内存是默认值
+    h.state.vaultConfig = {
+      providers: [{ id: "p1", name: "磁盘供应商", baseUrl: "u", models: [] }],
+      fileExplorerSort: "name-asc",
+    };
+    enterLocal("v1");
+    h.state.failReadVaultConfig = true;
+    await settings.useSettingsStore.getState().loadVaultConfig();
+    expect(settings.useSettingsStore.getState().config.providers).toEqual([]);
+
+    // 四入口全部拒写：磁盘补丁为零、keychain 不动、每入口一条错误提示
+    await settings.useSettingsStore.getState().setFileExplorerSort("mtime-desc");
+    await settings.useSettingsStore.getState().setTavilyKey("sk-new");
+    await settings.useSettingsStore.getState().setSyncKeys(false);
+    await settings.useSettingsStore.getState().setSearchConfig({ searxngUrl: "http://x" });
+    expect(h.state.vaultPatches).toEqual([]);
+    expect(h.state.keyWrites).toEqual([]);
+    expect((await errorNotices()).filter((m) => m.includes("已拒绝保存"))).toHaveLength(4);
+    // 内存不得被写入口污染：tavilyKey / searchConfig / vaultConfig 仍为加载失败后的默认态
+    expect(settings.useSettingsStore.getState().tavilyKey).toBe("");
+    expect(settings.useSettingsStore.getState().searchConfig.searxngUrl).toBe("");
+    expect(settings.useSettingsStore.getState().vaultConfig?.fileExplorerSort).toBeUndefined();
+
+    // 恢复加载后三入口照常可写
+    h.state.failReadVaultConfig = false;
+    await settings.useSettingsStore.getState().loadVaultConfig();
+    expect(settings.useSettingsStore.getState().config.providers[0].name).toBe("磁盘供应商");
+    await settings.useSettingsStore.getState().setFileExplorerSort("mtime-desc");
+    expect(h.state.vaultPatches).toEqual([expect.objectContaining({ fileExplorerSort: "mtime-desc" })]);
   });
 });
