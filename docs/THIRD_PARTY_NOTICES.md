@@ -59,7 +59,7 @@
 | typescript-eslint | MIT |
 | vite / vitest | MIT |
 
-> `esbuild` 的原生二进制随应用再分发（`src-tauri/resources/esbuild/`，安装插件时用于把声明的 npm
+> `esbuild` 的原生二进制随应用再分发（`legacy/src-tauri/resources/esbuild/`，安装插件时用于把声明的 npm
 > 依赖打成自包含产物）。上表许可与版权声明随该目录的 `LICENSE.md` 一并分发。
 
 

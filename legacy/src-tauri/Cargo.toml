@@ -18,7 +18,7 @@ tauri-build = { version = "2.0", features = [] }
 
 [dependencies]
 # UI 无关核心层（存储/会话容器/补丁合并等，随迁移逐步扩容）
-atelyx-core = { path = "../crates/atelyx-core" }
+atelyx-core = { path = "../../atelyx-core" }
 
 # tray-icon：系统托盘（图标 + 右键菜单，见 tray.rs）；桌面能力，移动端构建忽略
 tauri = { version = "2.1", features = ["tray-icon"] }
@@ -108,7 +108,7 @@ libc = "0.2"
 
 [dev-dependencies]
 # 测试复用 core 的临时目录等基建（仅测试构建生效）
-atelyx-core = { path = "../crates/atelyx-core", features = ["test-support"] }
+atelyx-core = { path = "../../atelyx-core", features = ["test-support"] }
 
 [features]
 # 自定义 protocol 用

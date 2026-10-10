@@ -386,7 +386,7 @@ mod capability_contract_tests {
     /// `index.html`（首帧按 `.dark` 分支取）任一处异值都会在启动时闪一次异色。
     #[test]
     fn startup_background_matches_theme_primary() {
-        let css = include_str!("../../src/styles/index.css");
+        let css = include_str!("../../../src/styles/index.css");
         // 取指定主题块里的 --bg-primary（`:root {` 是浅色基础块，`:root.dark {` 是深色块）
         let primary_of = |selector: &str| -> String {
             let at = css
@@ -408,7 +408,7 @@ mod capability_contract_tests {
         let light = primary_of(":root {");
         assert!(dark.starts_with('#') && light.starts_with('#'), "两套 --bg-primary 应为 hex 字面量");
 
-        let html = include_str!("../../index.html").to_lowercase();
+        let html = include_str!("../../../index.html").to_lowercase();
         for (name, bg) in [("深色", &dark), ("浅色", &light)] {
             assert!(
                 html.contains(&format!("background:{bg}")),
@@ -444,7 +444,7 @@ mod capability_contract_tests {
     /// 静默失效且运行时无断言点。
     #[test]
     fn startup_theme_scheme_keys_match_frontend() {
-        let frontend = include_str!("../../src/utils/pluginTheme.ts");
+        let frontend = include_str!("../../../src/utils/pluginTheme.ts");
         assert!(
             frontend.contains(r#"BUILTIN_THEME_PLUGIN_ID = "builtin.theme""#),
             "前端内置主题插件 id 已变"
@@ -583,7 +583,7 @@ mod capability_contract_tests {
         let cfg: serde_json::Value =
             serde_json::from_str(include_str!("../tauri.conf.json")).expect("tauri.conf.json 解析失败");
         let config_csp = cfg["app"]["security"]["csp"].as_str().expect("app.security.csp 未配置");
-        let html = include_str!("../../index.html");
+        let html = include_str!("../../../index.html");
         let anchor = html
             .find("http-equiv=\"Content-Security-Policy\"")
             .expect("index.html 缺少 CSP meta");

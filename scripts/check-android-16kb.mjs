@@ -3,7 +3,7 @@
  *
  * 为什么需要它：Android 15+ 设备的系统内存页可能为 16KB，未按 16KB 对齐的 `.so` 会直接加载失败；
  * 而对齐由链接器参数决定（NDK r28+ 对 64 位 ABI 默认对齐，32 位 ABI 不会），
- * 环境变量 RUSTFLAGS 会整体覆盖 `.cargo/config.toml` 的那份配置，因此由 `src-tauri/build.rs`
+ * 环境变量 RUSTFLAGS 会整体覆盖 `.cargo/config.toml` 的那份配置，因此由 `legacy/src-tauri/build.rs`
  * 改用 `cargo:rustc-link-arg` 追加 `max-page-size`，最终以本脚本对构建产物的校验为准。
  *
  * 判定依据（每个 PT_LOAD 段同时满足）：
@@ -24,7 +24,7 @@ const PT_LOAD = 1;
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const targetDir = process.argv[2]
   ? path.resolve(process.argv[2])
-  : path.join(root, "src-tauri", "gen", "android", "app", "src", "main", "jniLibs");
+  : path.join(root, "legacy", "src-tauri", "gen", "android", "app", "src", "main", "jniLibs");
 
 function fail(message) {
   console.error(`[android:16kb] ${message}`);

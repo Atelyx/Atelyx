@@ -6,7 +6,7 @@
 
 <div align="center" style="background:#17171a;border:1px solid #2a2a2e;border-radius:16px;padding:48px 24px 40px;margin:0 0 32px">
 
-<img src="../src-tauri/icons/icon.png" alt="Atelyx" width="92">
+<img src="../legacy/src-tauri/icons/icon.png" alt="Atelyx" width="92">
 
 <h1 style="color:#E5E0D5;font-weight:700;letter-spacing:3px;margin:16px 0 10px">ATELYX</h1>
 

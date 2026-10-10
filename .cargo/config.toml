@@ -1,7 +1,7 @@
 # 安卓 16KB 内存页对齐：Android 15+ 设备的系统内存页为 16KB，未按 16KB 对齐的 native 库
 # 会直接加载失败。NDK r28+ 默认已按 16KB 对齐，这里显式传参兜底（不依赖 NDK 版本）。
 # 注意：环境变量 RUSTFLAGS / CARGO_ENCODED_RUSTFLAGS 会整体覆盖本文件的 rustflags（安卓构建时就会
-# 被覆盖），所以这里对部署产物并不总是生效——实际兜底见 src-tauri/build.rs 的 rustc-link-arg；
+# 被覆盖），所以这里对部署产物并不总是生效——实际兜底见 legacy/src-tauri/build.rs 的 rustc-link-arg；
 # 最终仍以 scripts/check-android-16kb.mjs 对构建产物的校验为准。
 [target.aarch64-linux-android]
 rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]

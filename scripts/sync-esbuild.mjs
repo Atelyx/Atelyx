@@ -1,5 +1,5 @@
 /**
- * 把原生 esbuild 可执行文件同步到 `src-tauri/resources/esbuild/`。
+ * 把原生 esbuild 可执行文件同步到 `legacy/src-tauri/resources/esbuild/`。
  *
  * 为什么需要它：插件安装/更新时由宿主把声明的 npm 依赖打成自包含产物，打包器必须随应用分发
  * （用户机器不预装 Node）。二进制体积约 10MB，不入库（见 .gitignore），构建前从 esbuild 的
@@ -16,7 +16,7 @@ import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const destDir = path.join(root, "src-tauri", "resources", "esbuild");
+const destDir = path.join(root, "legacy", "src-tauri", "resources", "esbuild");
 // 平台包内的可执行文件位置随平台不同：Windows 在包根（esbuild.exe），其余在 bin/ 下。
 const candidates = ["bin/esbuild", "esbuild.exe", "esbuild"];
 const destName = process.platform === "win32" ? "esbuild.exe" : "esbuild";

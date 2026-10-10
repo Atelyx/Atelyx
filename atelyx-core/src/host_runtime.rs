@@ -733,7 +733,7 @@ createInterface({ input: stdin }).on("line", (line) => {
             eprintln!("skipping: PATH 上没有 node");
             return;
         };
-        let supervisor = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../src-tauri/resources/host-runtime.mjs");
+        let supervisor = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy/src-tauri/resources/host-runtime.mjs");
         assert!(supervisor.is_file(), "supervisor 脚本应随源码入库");
 
         // 插件宿主半模块：activate 返回描述符（ping 方法 + serverInfo）
@@ -781,7 +781,7 @@ createInterface({ input: stdin }).on("line", (line) => {
             eprintln!("skipping: PATH 上没有 node");
             return;
         };
-        let supervisor = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../src-tauri/resources/host-runtime.mjs");
+        let supervisor = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy/src-tauri/resources/host-runtime.mjs");
         let state = Arc::new(HostRuntimeState::new());
         let collector = Collector::new();
         install(&state, &collector);

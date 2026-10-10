@@ -38,8 +38,8 @@ pnpm run tauri:build # 打包
 | 状态 | `src/stores/` | 运行时状态 + 调 service 持久化 |
 | 服务 | `src/services/` | 所有外部 I/O 的唯一出口（invoke / AI / 搜索 / keychain） |
 | 类型 | `src/types/` | 类型契约 |
-| Rust 命令 | `src-tauri/src/commands/` | Tauri 命令边界 |
-| Rust 模块 | `src-tauri/src/{vault,watcher}.rs` | 仓库文件读写、文件监听 |
+| Rust 命令 | `legacy/src-tauri/src/commands/` | Tauri 命令边界 |
+| Rust 模块 | `legacy/src-tauri/src/{vault,watcher}.rs` | 仓库文件读写、文件监听 |
 
 主要目录：
 

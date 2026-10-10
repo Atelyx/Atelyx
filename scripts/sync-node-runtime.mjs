@@ -1,5 +1,5 @@
 /**
- * 把随应用分发的 Node 运行时同步到 `src-tauri/resources/runtime/`。
+ * 把随应用分发的 Node 运行时同步到 `legacy/src-tauri/resources/runtime/`。
  *
  * 为什么需要它：插件经 `ctx.process` 起宿主捆绑的脚本运行时获得完整 JS 能力（用户机器不预装
  * Node）。二进制体积几十 MB，不入库（见 .gitignore），构建前从 nodejs.org 官方 dist 下载锁定
@@ -26,7 +26,7 @@ const NODE_VERSION = "24.21.0";
 const DIST_BASE = `https://nodejs.org/dist/v${NODE_VERSION}`;
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const destDir = path.join(root, "src-tauri", "resources", "runtime");
+const destDir = path.join(root, "legacy", "src-tauri", "resources", "runtime");
 
 /** 当前构建平台的分发包形态：归档地址 + 包内二进制与许可文件的成员路径。 */
 function targetFor(platform) {
