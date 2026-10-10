@@ -728,6 +728,7 @@ async function persistNow(): Promise<void> {
         }
       } catch (e) {
         console.error("保存会话元数据失败", e);
+        persistFailed = true;
       }
     }),
   );

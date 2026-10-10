@@ -10,6 +10,7 @@ const h = vi.hoisted(() => {
   const state = {
     metaWrites: [] as unknown[],
     messageWriteFails: 0,
+    metaWriteFails: 0,
     messageWrites: [] as unknown[],
     tempWrites: [] as Array<{ canvasId: string; fileName: string; base64Data: string }>,
     tempWriteFails: 0,
@@ -84,6 +85,10 @@ vi.mock("@tauri-apps/api/core", () => ({
       return "";
     }
     if (cmd === "write_chat_session_meta") {
+      if (h.state.metaWriteFails > 0) {
+        h.state.metaWriteFails--;
+        throw new Error("侧车写入失败");
+      }
       const a = args as { file: string; meta: unknown };
       h.state.chatMetas.set(a.file, JSON.stringify(a.meta));
       return "";
@@ -134,6 +139,7 @@ beforeEach(async () => {
   h.state.metaWrites = [];
   h.state.messageWrites = [];
   h.state.messageWriteFails = 0;
+  h.state.metaWriteFails = 0;
   h.state.tempWrites = [];
   h.state.tempWriteFails = 0;
   h.state.appends = [];
@@ -232,6 +238,27 @@ describe("写盘失败的退避重试与可见性", () => {
     await vi.advanceTimersByTimeAsync(500);
     expect(chat.useChatPanelStore.getState().persistError).toBeNull();
     expect(h.state.messageWrites).toHaveLength(1);
+  });
+
+  it("元数据侧车写盘失败：persistError 置位并按退避重试，成功后侧车落盘", async () => {
+    await loadedInVault("v1");
+    await sendOne();
+    // 先把建会话的首轮写盘冲掉（消息 + 侧车 + 覆盖照常落盘）
+    await vi.advanceTimersByTimeAsync(500);
+    expect(chat.useChatPanelStore.getState().persistError).toBeNull();
+    // 改名置侧车脏，首轮写盘失败：persistError 置位、侧车不落盘
+    const sessionId = chat.useChatPanelStore.getState().sessions[0].id;
+    h.state.metaWriteFails = 1;
+    await chat.useChatPanelStore.getState().setSessionTitle(sessionId, "新标题");
+    await vi.advanceTimersByTimeAsync(500);
+    expect(chat.useChatPanelStore.getState().persistError).not.toBeNull();
+    expect([...h.state.chatMetas.values()].map((raw) => JSON.parse(raw as string) as { title?: string }))
+      .not.toContainEqual(expect.objectContaining({ title: "新标题" }));
+    // 首轮退避 500ms 后重试成功：侧车落盘、persistError 清空
+    await vi.advanceTimersByTimeAsync(500);
+    expect(chat.useChatPanelStore.getState().persistError).toBeNull();
+    const metas = [...h.state.chatMetas.values()].map((raw) => JSON.parse(raw as string) as { title?: string });
+    expect(metas).toEqual([expect.objectContaining({ title: "新标题" })]);
   });
 });
 
