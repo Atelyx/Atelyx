@@ -22,6 +22,22 @@ use iced::{keyboard, mouse, Element, Event, Point, Size, Subscription, Task, The
 
 use layout_view::{enumerate_dividers, RenameState, RenameTarget, UiMetrics};
 
+/// 主窗口树面板的活动标签（拖标签手势的承载对象）。
+fn find_active_tab(tree: &layout::LayoutNode, panel_id: &str) -> Option<(String, String)> {
+    match tree {
+        layout::LayoutNode::Panel { id, tabs, active_tab_id } if id == panel_id => {
+            let t = tabs
+                .iter()
+                .find(|t| Some(t.id.as_str()) == active_tab_id.as_deref())?;
+            Some((t.id.clone(), t.view.clone()))
+        }
+        layout::LayoutNode::Split { children, .. } => {
+            children.iter().find_map(|c| find_active_tab(c, panel_id))
+        }
+        _ => None,
+    }
+}
+
 /// 撕裂窗口建窗参数：bounds 恢复位置 + 条目 OS 选项（不进任务栏）。
 fn panel_settings(w: &DetachedWindow) -> Settings {
     let mut settings = Settings {
@@ -138,10 +154,29 @@ enum Message {
     PersistTick,
     PersistDone(Result<(), String>),
     WindowResized(window::Id, Size),
-    DividerPressed(window::Id),
-    DividerMove(window::Id, Point),
-    DividerEnd,
+    /// 窗口位置播种（建窗后主动查询；OS 移动事件为增量权威）。
+    PositionKnown(window::Id, Option<Point>),
+    Press(window::Id),
+    CursorMoved(window::Id, Point),
+    Release,
     ToggleTheme,
+}
+
+/// 跨窗口标签拖拽会话：源窗口只产生输入事件，落点由全局面板几何命中。
+struct DragSession {
+    tab_id: String,
+    #[allow(dead_code)]
+    view: String,
+    from_panel: Option<String>,
+    from_detached: Option<String>,
+    /// 全局光标（源窗口位置 + 本地坐标）。
+    current: Point,
+}
+
+/// 拖拽悬停落点。
+struct DragHover {
+    zone: layout_view::PanelZone,
+    tab_zone: bool,
 }
 
 pub struct App {
@@ -153,7 +188,7 @@ pub struct App {
     /// 当前仓库根（打开仓库后与 vault.root() 一致；仅用于展示与 files 视图判空）。
     pub vault_root: Option<PathBuf>,
     /// 主窗口（渲染激活布局树）；None = 首帧在途。
-    main_id: Option<window::Id>,
+    pub main_id: Option<window::Id>,
     /// 撕裂窗口 OS 注册：iced 窗口 id → 模型窗口 id（建窗前预注册，见 reconcile）。
     detached_os: HashMap<window::Id, String>,
     /// OS 窗口当前可见态（调和比对基准；建窗即视为可见）。
@@ -166,16 +201,24 @@ pub struct App {
     /// 防抖落盘：有未写盘的模型变更。
     persist_dirty: bool,
     /// 主窗口内容区尺寸（logical；Resized 驱动，把手命中几何用）。
-    main_size: Size,
+    pub main_size: Size,
+    /// 各窗口逻辑位置（建窗播种 + Moved 增量；拖拽全局坐标换算用）。
+    pub os_positions: HashMap<window::Id, Point>,
+    /// 撕裂窗口逻辑尺寸（建窗播种 + Resized 增量；落点矩形用）。
+    pub os_sizes: HashMap<window::Id, Size>,
     /// 主窗口最近光标位置（按下事件不带坐标，命中判定用最近位置）。
-    cursor: Point,
+    pub cursor: Point,
     divider: Option<DividerDrag>,
+    /// 按压起点（本地坐标；移动超阈值 = 拖标签手势）。
+    press: Option<(window::Id, Point)>,
+    drag: Option<DragSession>,
+    drag_hover: Option<DragHover>,
     pub rename: Option<RenameState>,
 }
 
 impl App {
     fn boot() -> (Self, Task<Message>) {
-        let (_, open) = window::open(Settings {
+        let (main_os, open) = window::open(Settings {
             size: WINDOW_SIZE,
             exit_on_close_request: false,
             ..Settings::default()
@@ -195,11 +238,17 @@ impl App {
                 dirty: false,
                 persist_dirty: false,
                 main_size: WINDOW_SIZE,
+                os_positions: HashMap::new(),
+                os_sizes: HashMap::new(),
                 cursor: Point::ORIGIN,
                 divider: None,
+                press: None,
+                drag: None,
+                drag_hover: None,
                 rename: None,
             },
-            open.map(Message::WindowOpened),
+            open.map(Message::WindowOpened)
+                .chain(window::position(main_os).map(move |p| Message::PositionKnown(main_os, p))),
         )
     }
 
@@ -480,7 +529,12 @@ impl App {
                     Task::none()
                 }
             }
+            Message::PositionKnown(id, pos) => {
+                self.os_positions.insert(id, pos.unwrap_or(Point::ORIGIN));
+                Task::none()
+            }
             Message::WindowMoved(id, pos) => {
+                self.os_positions.insert(id, pos);
                 let Some(model_id) = self.detached_os.get(&id) else { return Task::none() };
                 if let Some(w) = self.ui.detached_windows.iter_mut().find(|w| w.id == *model_id) {
                     w.bounds.x = pos.x as f64;
@@ -582,6 +636,7 @@ impl App {
                     return Task::none();
                 }
                 // 撕裂窗口尺寸回写模型 bounds（OS 窗口事件 = bounds 唯一写者）
+                self.os_sizes.insert(id, size);
                 let Some(model_id) = self.detached_os.get(&id) else { return Task::none() };
                 if let Some(w) = self.ui.detached_windows.iter_mut().find(|w| w.id == *model_id) {
                     w.bounds.width = size.width as f64;
@@ -590,13 +645,25 @@ impl App {
                 }
                 Task::none()
             }
-            Message::DividerPressed(id) => {
-                if self.main_id != Some(id) || self.divider.is_some() {
+            Message::Press(id) => {
+                // 拖拽会话中收到新按压 = 释放事件丢失的兜底：按当前悬停落点收尾
+                if self.drag.is_some() {
+                    if let Some(d) = self.drag.take() {
+                        let hover = self.drag_hover.take();
+                        return self.resolve_drop(d, hover);
+                    }
                     return Task::none();
                 }
-                let tree = layout::active_layout(&self.ui).tree;
-                for d in enumerate_dividers(&tree, self.content_area()) {
-                    if d.rect.contains(self.cursor) {
+                if self.divider.is_some() {
+                    return Task::none();
+                }
+                // 把手命中优先（主窗口）；否则记录按压起点（移动超阈值 = 拖标签手势）
+                if self.main_id == Some(id) {
+                    let tree = layout::active_layout(&self.ui).tree;
+                    let hit = enumerate_dividers(&tree, self.content_area())
+                        .into_iter()
+                        .find(|d| d.rect.contains(self.cursor));
+                    if let Some(d) = hit {
                         self.divider = Some(DividerDrag {
                             split_id: d.split_id,
                             gap: d.gap,
@@ -605,39 +672,71 @@ impl App {
                             split_len: d.split_len,
                             sizes: d.sizes,
                         });
-                        break;
+                        return Task::none();
+                    }
+                }
+                self.press = Some((id, self.cursor));
+                Task::none()
+            }
+            Message::CursorMoved(id, pos) => {
+                self.cursor = pos;
+                if self.divider.is_some() {
+                    if self.main_id != Some(id) {
+                        return Task::none();
+                    }
+                    let Some(d) = &mut self.divider else { return Task::none() };
+                    let axis = if d.horizontal { pos.x } else { pos.y };
+                    let sum: f64 = d.sizes.iter().sum();
+                    let dfrac = ((axis - d.drag_start) as f64 / d.split_len as f64) * sum;
+                    let s0 = d.sizes[d.gap] + dfrac;
+                    let s1 = d.sizes[d.gap + 1] - dfrac;
+                    if s0 < 0.02 || s1 < 0.02 {
+                        return Task::none();
+                    }
+                    let split_id = d.split_id.clone();
+                    let mut sizes = d.sizes.clone();
+                    sizes[d.gap] = s0;
+                    sizes[d.gap + 1] = s1;
+                    return self.apply(LayoutOp::SetLayoutSizes { split_id, sizes });
+                }
+                if self.drag.is_some() {
+                    if let Some(wpos) = self.os_positions.get(&id) {
+                        let global = Point::new(wpos.x + pos.x, wpos.y + pos.y);
+                        if let Some(d) = self.drag.as_mut() {
+                            d.current = global;
+                        }
+                        let zones = layout_view::panel_zones(self);
+                        self.drag_hover = zones
+                            .into_iter()
+                            .find(|z| z.rect.contains(global))
+                            .map(|zone| DragHover {
+                                tab_zone: layout_view::in_tab_strip(&zone, global),
+                                zone,
+                            });
+                    }
+                    return Task::none();
+                }
+                if let Some((press_win, press_pos)) = self.press {
+                    if press_win == id
+                        && ((pos.x - press_pos.x).abs() > 5.0 || (pos.y - press_pos.y).abs() > 5.0)
+                    {
+                        self.press = None;
+                        return self.try_start_tab_drag(id, press_pos);
                     }
                 }
                 Task::none()
             }
-            Message::DividerMove(id, pos) => {
-                let (Some(id_main), Some(d)) = (self.main_id, &mut self.divider) else {
-                    if self.main_id == Some(id) {
-                        self.cursor = pos;
-                    }
+            Message::Release => {
+                self.press = None;
+                if self.divider.take().is_some() {
+                    return Task::none();
+                }
+                let Some(d) = self.drag.take() else {
+                    self.drag_hover = None;
                     return Task::none();
                 };
-                if id != id_main {
-                    return Task::none();
-                }
-                self.cursor = pos;
-                let axis = if d.horizontal { pos.x } else { pos.y };
-                let sum: f64 = d.sizes.iter().sum();
-                let dfrac = ((axis - d.drag_start) as f64 / d.split_len as f64) * sum;
-                let s0 = d.sizes[d.gap] + dfrac;
-                let s1 = d.sizes[d.gap + 1] - dfrac;
-                if s0 < 0.02 || s1 < 0.02 {
-                    return Task::none();
-                }
-                let split_id = d.split_id.clone();
-                let mut sizes = d.sizes.clone();
-                sizes[d.gap] = s0;
-                sizes[d.gap + 1] = s1;
-                self.apply(LayoutOp::SetLayoutSizes { split_id, sizes })
-            }
-            Message::DividerEnd => {
-                self.divider = None;
-                Task::none()
+                let hover = self.drag_hover.take();
+                self.resolve_drop(d, hover)
             }
             Message::ToggleTheme => {
                 self.theme = match self.theme {
@@ -660,6 +759,149 @@ impl App {
         self.reconcile()
     }
 
+    /// 拖标签手势成立：按压落在某个窗口的标签条内 → 拖该面板/撕裂窗口的活动标签
+    /// （锁定禁拖，与老壳守卫同语义）。
+    fn try_start_tab_drag(&mut self, window: window::Id, press_local: Point) -> Task<Message> {
+        let Some(wpos) = self.os_positions.get(&window) else {
+            return Task::none();
+        };
+        let press_global = Point::new(wpos.x + press_local.x, wpos.y + press_local.y);
+        let zones = layout_view::panel_zones(self);
+        let Some(zone) = zones.iter().find(|z| z.rect.contains(press_global)) else {
+            return Task::none();
+        };
+        if !layout_view::in_tab_strip(zone, press_global) {
+            return Task::none();
+        }
+        let active = if let Some(pid) = &zone.panel_id {
+            self.active_tree()
+                .and_then(|tree| find_active_tab(&tree, pid))
+        } else if let Some(mid) = &zone.detached_id {
+            self.ui.detached_windows.iter().find(|w| &w.id == mid).and_then(|w| {
+                let t = w.tabs.iter().find(|t| Some(t.id.as_str()) == w.active_tab_id.as_deref())?;
+                Some((t.id.clone(), t.view.clone()))
+            })
+        } else {
+            None
+        };
+        let Some((tab_id, view)) = active else {
+            return Task::none();
+        };
+        if self
+            .tab_locked(&tab_id, zone.panel_id.as_deref(), zone.detached_id.as_deref())
+        {
+            return Task::none();
+        }
+        self.drag = Some(DragSession {
+            tab_id,
+            view,
+            from_panel: zone.panel_id.clone(),
+            from_detached: zone.detached_id.clone(),
+            current: press_global,
+        });
+        self.drag_hover = None;
+        Task::none()
+    }
+
+    /// 标签是否锁定（主窗口树面板 / 撕裂窗口两处查找）。
+    fn tab_locked(&self, tab_id: &str, panel_id: Option<&str>, detached_id: Option<&str>) -> bool {
+        if let Some(pid) = panel_id {
+            return self
+                .active_tree()
+                .and_then(|tree| layout::find_tab_in_tree(&tree, tab_id))
+                .is_some_and(|(src, t)| src == pid && t.locked);
+        }
+        if let Some(mid) = detached_id {
+            return self
+                .ui
+                .detached_windows
+                .iter()
+                .find(|w| w.id == mid)
+                .and_then(|w| w.tabs.iter().find(|t| t.id == tab_id))
+                .is_some_and(|t| t.locked);
+        }
+        false
+    }
+
+    /// 释放落点解析：同宿主标签条 = 重排序、跨宿主 = 移动/停靠、桌面 = 撕出新窗口。
+    fn resolve_drop(&mut self, d: DragSession, hover: Option<DragHover>) -> Task<Message> {
+        let Some(h) = hover else {
+            let bounds = WindowBounds {
+                x: d.current.x as f64,
+                y: d.current.y as f64,
+                width: 420.0,
+                height: 560.0,
+                scale: 0.0,
+            };
+            return match (&d.from_panel, &d.from_detached) {
+                (Some(panel_id), _) => self.apply(LayoutOp::TearOff {
+                    panel_id: panel_id.clone(),
+                    tab_id: d.tab_id,
+                    bounds,
+                }),
+                (None, Some(window_id)) => self.apply(LayoutOp::TearOffFromDetached {
+                    window_id: window_id.clone(),
+                    tab_id: d.tab_id,
+                    bounds,
+                }),
+                _ => Task::none(),
+            };
+        };
+        let index = h
+            .tab_zone
+            .then(|| layout_view::tab_index_at(&h.zone, d.current.x));
+        // 同主窗口面板：标签条 = 重排序，面板体 = 取消
+        if h.zone.panel_id.is_some() && h.zone.panel_id == d.from_panel {
+            if let (Some(panel_id), Some(to_index)) = (d.from_panel, index) {
+                return self.apply(LayoutOp::MoveTabWithin {
+                    panel_id,
+                    tab_id: d.tab_id,
+                    to_index,
+                });
+            }
+            return Task::none();
+        }
+        // 同撕裂窗口：标签条 = 组内排序，面板体 = 取消
+        if h.zone.detached_id.is_some() && h.zone.detached_id == d.from_detached {
+            if let (Some(window_id), Some(to_index)) = (d.from_detached, index) {
+                return self.apply(LayoutOp::DetachedMoveTab {
+                    window_id,
+                    tab_id: d.tab_id,
+                    to_index,
+                });
+            }
+            return Task::none();
+        }
+        // 跨宿主
+        if let Some(to_panel) = h.zone.panel_id {
+            if let Some(from_panel_id) = d.from_panel {
+                return self.apply(LayoutOp::MoveTabBetween {
+                    from_panel_id,
+                    to_panel_id: to_panel,
+                    tab_id: d.tab_id,
+                    index,
+                });
+            }
+            if d.from_detached.is_some() {
+                // 来源撕裂窗口条目由 op 内部拖空自动移除（reconcile 随即回收 OS 窗口）
+                return self.apply(LayoutOp::DockIntoPanel {
+                    panel_id: to_panel,
+                    tab_id: d.tab_id,
+                    index,
+                });
+            }
+            return Task::none();
+        }
+        if let Some(window_id) = h.zone.detached_id {
+            return self.apply(LayoutOp::DockIntoDetached {
+                window_id,
+                tab_id: d.tab_id,
+                index,
+            });
+        }
+        Task::none()
+    }
+
     /// 撕裂窗口调和：模型条目 → OS 窗口。缺失即建（bounds/选项随条目）、
     /// hidden 态与 OS 可见性同步、模型已无条目的 OS 窗口（幽灵）回收。
     /// bounds 权威 = OS 窗口事件回写模型；恢复位置只读模型（show 时按模型搬位）。
@@ -680,6 +922,7 @@ impl App {
                 self.os_shown.insert(os_id, true);
                 task = task
                     .chain(open.map(Message::WindowOpened))
+                    .chain(window::position(os_id).map(move |p| Message::PositionKnown(os_id, p)))
                     .chain(window::set_level(
                         os_id,
                         if entry.options.always_on_top {
@@ -848,13 +1091,13 @@ impl App {
                     Some(Message::ScaleKnown(window, sf))
                 }
                 Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
-                    Some(Message::DividerPressed(window))
+                    Some(Message::Press(window))
                 }
                 Event::Mouse(mouse::Event::CursorMoved { position }) => {
-                    Some(Message::DividerMove(window, position))
+                    Some(Message::CursorMoved(window, position))
                 }
                 Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
-                    Some(Message::DividerEnd)
+                    Some(Message::Release)
                 }
                 _ => None,
             }),

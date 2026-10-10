@@ -20,6 +20,10 @@ impl UiMetrics {
     pub const HEADER_H: f32 = Self::STATUS_H + Self::SCENE_BAR_H + Self::LAYOUT_BAR_H;
     pub const TAB_BAR_H: f32 = 32.0;
     pub const DIVIDER_W: f32 = 7.0;
+    /// 标签定宽（拖拽命中与重排序的几何基准；标签显示名均为短词，定宽不截义）。
+    pub const TAB_W: f32 = 96.0;
+    /// 面板头容器内边距（标签条起点 = 面板左缘 + HEADER_INSET）。
+    pub const HEADER_INSET: f32 = 4.0;
 }
 
 /// 内置视图显示名（面板头标签；插件 kind 原样显示）。
@@ -108,7 +112,8 @@ pub fn detached_view<'a>(app: &'a App, window_id: &str) -> Element<'a, Message> 
         };
         tab_bar = tab_bar.push(
             button(text(label).size(12))
-                .padding([3, 8])
+                .padding([3, 4])
+                .width(Length::Fixed(UiMetrics::TAB_W))
                 .style(if is_active { button::primary } else { button::text })
                 .on_press_maybe(
                     (!is_active).then(|| Message::DetachedTab(w.id.clone(), t.id.clone())),
@@ -147,21 +152,42 @@ pub fn detached_view<'a>(app: &'a App, window_id: &str) -> Element<'a, Message> 
         .map(|t| view_content(app, &t.view))
         .unwrap_or_else(|| placeholder("空面板"));
 
-    column![
-        container(
-            row![
-                tab_bar,
-                iced::widget::Space::new().width(Length::Fill),
-                actions,
-            ]
-            .spacing(8)
-        )
-        .padding([2, 4])
-        .height(Length::Fixed(UiMetrics::TAB_BAR_H)),
-        content,
-    ]
+    let hovered = app.drag_hover.as_ref().is_some_and(|h| {
+        app.drag.is_some() && h.zone.detached_id.as_deref() == Some(window_id)
+    });
+    container(
+        column![
+            container(
+                row![
+                    tab_bar,
+                    iced::widget::Space::new().width(Length::Fill),
+                    actions,
+                ]
+                .spacing(8)
+            )
+            .padding([2.0, UiMetrics::HEADER_INSET])
+            .height(Length::Fixed(UiMetrics::TAB_BAR_H)),
+            content,
+        ]
+        .width(Length::Fill)
+        .height(Length::Fill),
+    )
     .width(Length::Fill)
     .height(Length::Fill)
+    .style(move |theme: &iced::Theme| {
+        if hovered {
+            container::Style {
+                border: iced::Border {
+                    color: theme.palette().primary,
+                    width: 2.0,
+                    radius: 0.0.into(),
+                },
+                ..Default::default()
+            }
+        } else {
+            container::Style::default()
+        }
+    })
     .into()
 }
 
@@ -350,7 +376,8 @@ fn panel_view<'a>(
         };
         tab_bar = tab_bar.push(
             button(text(label).size(12))
-                .padding([3, 8])
+                .padding([3, 4])
+                .width(Length::Fixed(UiMetrics::TAB_W))
                 .style(if is_active { button::primary } else { button::text })
                 .on_press_maybe(
                     (!is_active).then(|| Message::PanelTab(panel_id.to_string(), t.id.clone())),
@@ -389,21 +416,42 @@ fn panel_view<'a>(
         Some(t) => view_content(app, &t.view),
     };
 
-    column![
-        container(
-            row![
-                tab_bar,
-                iced::widget::Space::new().width(Length::Fill),
-                actions,
-            ]
-            .spacing(8)
-        )
-        .padding([2, 4])
-        .height(Length::Fixed(UiMetrics::TAB_BAR_H)),
-        content,
-    ]
+    let hovered = app.drag_hover.as_ref().is_some_and(|h| {
+        app.drag.is_some() && h.zone.panel_id.as_deref() == Some(panel_id)
+    });
+    container(
+        column![
+            container(
+                row![
+                    tab_bar,
+                    iced::widget::Space::new().width(Length::Fill),
+                    actions,
+                ]
+                .spacing(8)
+            )
+            .padding([2.0, UiMetrics::HEADER_INSET])
+            .height(Length::Fixed(UiMetrics::TAB_BAR_H)),
+            content,
+        ]
+        .width(Length::Fill)
+        .height(Length::Fill),
+    )
     .width(Length::Fill)
     .height(Length::Fill)
+    .style(move |theme: &iced::Theme| {
+        if hovered {
+            container::Style {
+                border: iced::Border {
+                    color: theme.palette().primary,
+                    width: 2.0,
+                    radius: 0.0.into(),
+                },
+                ..Default::default()
+            }
+        } else {
+            container::Style::default()
+        }
+    })
     .into()
 }
 
@@ -592,4 +640,110 @@ fn walk_dividers(node: &LayoutNode, area: Rectangle, out: &mut Vec<DividerInfo>)
             pos += UiMetrics::DIVIDER_W;
         }
     }
+}
+
+// ===== 面板落点几何（拖拽命中）=====
+
+/// 一个可停靠面板的落点信息（全局 logical 坐标；与渲染分配规则一致）。
+pub struct PanelZone {
+    /// 主窗口树面板 id（撕裂窗口为 None）。
+    pub panel_id: Option<String>,
+    /// 撕裂窗口条目 id（主窗口面板为 None）。
+    pub detached_id: Option<String>,
+    /// 面板客户区矩形（含标签条）。
+    pub rect: Rectangle,
+    /// 标签数（重排序插入索引上限）。
+    pub tab_count: usize,
+}
+
+/// 枚举全部窗口的可停靠面板矩形（拖拽会话期间位置尺寸视为稳定）。
+pub fn panel_zones(app: &App) -> Vec<PanelZone> {
+    let mut out = Vec::new();
+    if let Some(main_id) = app.main_id {
+        if let Some(pos) = app.os_positions.get(&main_id) {
+            let area = Rectangle {
+                x: pos.x,
+                y: pos.y + UiMetrics::HEADER_H,
+                width: app.main_size.width,
+                height: (app.main_size.height - UiMetrics::HEADER_H).max(0.0),
+            };
+            walk_panels(&layout::active_layout(&app.ui).tree, area, &mut out);
+        }
+    }
+    for (os, mid) in &app.detached_os {
+        if let (Some(pos), Some(sz)) = (app.os_positions.get(os), app.os_sizes.get(os)) {
+            let tab_count = app
+                .ui
+                .detached_windows
+                .iter()
+                .find(|w| &w.id == mid)
+                .map(|w| w.tabs.len())
+                .unwrap_or(0);
+            out.push(PanelZone {
+                panel_id: None,
+                detached_id: Some(mid.clone()),
+                rect: Rectangle { x: pos.x, y: pos.y, width: sz.width, height: sz.height },
+                tab_count,
+            });
+        }
+    }
+    out
+}
+
+fn walk_panels(node: &LayoutNode, area: Rectangle, out: &mut Vec<PanelZone>) {
+    match node {
+        LayoutNode::Panel { id, tabs, .. } => out.push(PanelZone {
+            panel_id: Some(id.clone()),
+            detached_id: None,
+            rect: area,
+            tab_count: tabs.len(),
+        }),
+        LayoutNode::Split { direction, children, sizes, .. } => {
+            let n = children.len();
+            if n == 0 || sizes.len() != n {
+                return;
+            }
+            let horizontal = direction == "horizontal";
+            let total = if horizontal { area.width } else { area.height };
+            let avail = total - (n as f32 - 1.0) * UiMetrics::DIVIDER_W;
+            if avail <= 0.0 {
+                return;
+            }
+            let sum = sizes.iter().sum::<f64>().max(1e-9);
+            let mut pos = if horizontal { area.x } else { area.y };
+            for (i, child) in children.iter().enumerate() {
+                let len = (avail as f64 * (sizes[i] / sum)) as f32;
+                let child_area = if horizontal {
+                    Rectangle { x: pos, y: area.y, width: len, height: area.height }
+                } else {
+                    Rectangle { x: area.x, y: pos, width: area.width, height: len }
+                };
+                walk_panels(child, child_area, out);
+                pos += len + UiMetrics::DIVIDER_W;
+            }
+        }
+    }
+}
+
+/// 光标在标签条内的插入索引（半宽细分：左半 = 该标签前，右半 = 该标签后）。
+pub fn tab_index_at(zone: &PanelZone, global_x: f32) -> usize {
+    let idx = ((global_x - zone.rect.x - UiMetrics::HEADER_INSET) / UiMetrics::TAB_W).floor();
+    let half_bumped = if (global_x - zone.rect.x - UiMetrics::HEADER_INSET) % UiMetrics::TAB_W
+        > UiMetrics::TAB_W / 2.0
+    {
+        idx + 1.0
+    } else {
+        idx
+    };
+    (half_bumped.max(0.0) as usize).min(zone.tab_count)
+}
+
+/// 光标是否落在标签条内（含标签区横向范围；动作按钮区不算）。
+pub fn in_tab_strip(zone: &PanelZone, global: iced::Point) -> bool {
+    let rel_y = global.y - zone.rect.y;
+    let rel_x = global.x - zone.rect.x;
+    (0.0..=UiMetrics::TAB_BAR_H).contains(&rel_y)
+        && (UiMetrics::HEADER_INSET
+            ..=UiMetrics::HEADER_INSET + zone.tab_count as f32 * UiMetrics::TAB_W)
+            .contains(&rel_x)
 }
