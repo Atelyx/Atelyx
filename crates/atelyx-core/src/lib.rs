@@ -4,4 +4,7 @@
 //! （序列化、异步运行时、时间与标识、正则 / glob、网络客户端）。
 
 pub mod chat_container;
+pub mod host_runtime;
+pub mod net_guard;
+pub mod plugin_process;
 pub mod vault;

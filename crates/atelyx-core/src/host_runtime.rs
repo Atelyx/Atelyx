@@ -155,25 +155,9 @@ impl HostRuntimeState {
         self.inner.lock().unwrap_or_else(poison)
     }
 
-    /// 安装生产广播出口（Tauri 事件）：帧与会话结束定向投递到发起会话的窗口。
-    /// 仅生产构建编译：emit 的单态化实现只在此闭包内被引用——若进测试 exe 的链接闭包，
-    /// 会拉入 tao/comctl32 v6 依赖，而测试二进制无 manifest，loader 绑到 v5 缺入口点启动即失败。
-    #[cfg(not(test))]
-    pub fn install_app_emitter(&self, app: tauri::AppHandle) {
-        use tauri::Emitter;
-        let app = app.clone();
-        *self.emitter.lock().unwrap_or_else(poison) = Some(Box::new(move |ev: &EmitterEvent| match ev {
-            EmitterEvent::Frame { label, payload } => {
-                let _ = app.emit_to(label, FRAME_EVENT, payload);
-            }
-            EmitterEvent::Ended { label, payload } => {
-                let _ = app.emit_to(label, SESSION_EVENT, payload);
-            }
-        }));
-    }
-
-    #[cfg(test)]
-    fn install_collector(&self, f: impl Fn(&EmitterEvent) + Send + Sync + 'static) {
+    /// 安装广播出口：帧与会话结束定向投递到发起会话的窗口。
+    /// 出口由调用方注入——本 crate 不感知具体传输（壳侧接 Tauri 事件，测试接收集器）。
+    pub fn install_emitter(&self, f: impl Fn(&EmitterEvent) + Send + Sync + 'static) {
         *self.emitter.lock().unwrap_or_else(poison) = Some(Box::new(f));
     }
 
@@ -438,7 +422,7 @@ mod tests {
 
     fn install(state: &HostRuntimeState, collector: &Arc<Collector>) {
         let c = collector.clone();
-        state.install_collector(move |ev| match ev {
+        state.install_emitter(move |ev| match ev {
             EmitterEvent::Frame { label, payload } => {
                 c.frames.lock().unwrap().push((label.clone(), payload.clone()));
             }
@@ -749,7 +733,7 @@ createInterface({ input: stdin }).on("line", (line) => {
             eprintln!("skipping: PATH 上没有 node");
             return;
         };
-        let supervisor = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/host-runtime.mjs");
+        let supervisor = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../src-tauri/resources/host-runtime.mjs");
         assert!(supervisor.is_file(), "supervisor 脚本应随源码入库");
 
         // 插件宿主半模块：activate 返回描述符（ping 方法 + serverInfo）
@@ -797,7 +781,7 @@ createInterface({ input: stdin }).on("line", (line) => {
             eprintln!("skipping: PATH 上没有 node");
             return;
         };
-        let supervisor = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/host-runtime.mjs");
+        let supervisor = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../src-tauri/resources/host-runtime.mjs");
         let state = Arc::new(HostRuntimeState::new());
         let collector = Collector::new();
         install(&state, &collector);

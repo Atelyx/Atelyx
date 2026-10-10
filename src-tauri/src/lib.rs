@@ -9,19 +9,19 @@
 #[cfg(target_os = "android")]
 mod android_bridge;
 mod commands;
-mod host_runtime;
 mod layout;
 mod layout_drag;
 mod layout_model;
 mod layout_persist;
 mod layout_window;
-mod net_guard;
 mod plugin_build;
-mod plugin_process;
 mod tray;
 
-// 存储层与会话容器真源实现在 atelyx-core，壳侧经此重导出保持 crate:: 路径不变。
+// 存储层与会话容器/进程托管真源实现在 atelyx-core，壳侧经此重导出保持 crate:: 路径不变。
 pub use atelyx_core::chat_container;
+pub use atelyx_core::host_runtime;
+pub use atelyx_core::net_guard;
+pub use atelyx_core::plugin_process;
 pub use atelyx_core::vault;
 
 // 会话容器的 Tauri 广播出口：delta 全窗口、intent 定向执行体窗口。仅生产构建编译。
@@ -40,6 +40,34 @@ fn install_chat_emitter(
             let _ = app.emit_to(EXECUTOR_LABEL, INTENT_EVENT, payload);
         }
     }));
+}
+
+// 运行时宿主的 Tauri 广播出口：帧与会话结束定向投递发起会话的窗口。仅生产构建编译。
+#[cfg(not(test))]
+fn install_host_runtime_emitter(
+    runtime: &host_runtime::HostRuntimeState,
+    app: tauri::AppHandle,
+) {
+    use tauri::Emitter;
+    use host_runtime::{EmitterEvent, FRAME_EVENT, SESSION_EVENT};
+    runtime.install_emitter(Box::new(move |ev: &EmitterEvent| match ev {
+        EmitterEvent::Frame { label, payload } => {
+            let _ = app.emit_to(label, FRAME_EVENT, payload);
+        }
+        EmitterEvent::Ended { label, payload } => {
+            let _ = app.emit_to(label, SESSION_EVENT, payload);
+        }
+    }));
+}
+
+// 应用退出：结束全部插件托管进程。挂在 `RunEvent::Exit` 上——它是唯一的终态事件，
+// 此时窗口已全部销毁、不再有新的进程启动。
+fn shutdown_plugin_processes(app: &tauri::AppHandle) {
+    use tauri::Manager;
+    let Some(host) = app.try_state::<Arc<plugin_process::PluginProcessHost>>() else {
+        return;
+    };
+    host.shutdown_children();
 }
 
 use std::sync::Arc;
@@ -101,7 +129,7 @@ pub fn run() {
             // 常驻运行时宿主（ctx.rpc.attach 的后端）：进程随会话惰性启动、随应用退出统一收尾
             let host_runtime = Arc::new(host_runtime::HostRuntimeState::new());
             #[cfg(not(test))]
-            host_runtime.install_app_emitter(app.handle().clone());
+            install_host_runtime_emitter(&host_runtime, app.handle().clone());
             app.manage(host_runtime);
             // 打开文件上下文宿主（跨窗口协调态真源：主窗口唯一写者，撕裂窗口拉基线 + 订阅广播）
             app.manage(commands::open_context::OpenContextState::default());
@@ -346,7 +374,7 @@ pub fn run() {
         // 退出请求在关窗守卫里可能被拦下，Exit 才是终态（窗口已全销毁、不再有新进程启动）。
         // 崩溃与强杀不经过这里，由 Windows 作业对象随句柄关闭兜底（见 plugin_process.rs）。
         if let tauri::RunEvent::Exit = event {
-            plugin_process::shutdown(handle);
+            shutdown_plugin_processes(handle);
         }
     });
 }

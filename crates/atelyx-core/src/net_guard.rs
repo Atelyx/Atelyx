@@ -9,7 +9,7 @@ use reqwest::Url;
 
 /// 地址用途策略。
 #[derive(Clone, Copy)]
-pub(crate) enum HostPolicy {
+pub enum HostPolicy {
     /// 公网目标：回环/私网/链路本地/未指定/广播/ULA 一律拒绝（网页抓取、更新下载、
     /// 插件 GitHub 源解析与依赖下载的边界）。
     PublicOnly,
@@ -22,7 +22,7 @@ pub(crate) enum HostPolicy {
 const MAX_REDIRECTS: usize = 10;
 
 /// 按策略校验并解析 URL：`raw` 非 http/https、无法解析或 host 被策略拒绝即 Err。
-pub(crate) fn ensure_http_url(raw: &str, policy: HostPolicy) -> Result<Url, String> {
+pub fn ensure_http_url(raw: &str, policy: HostPolicy) -> Result<Url, String> {
     if !raw.starts_with("https://") && !raw.starts_with("http://") {
         return Err("仅支持 http/https 网址".to_string());
     }
@@ -48,12 +48,12 @@ pub(crate) fn ensure_http_url(raw: &str, policy: HostPolicy) -> Result<Url, Stri
 }
 
 /// 公网策略的地址校验（网页抓取 `fetch_web`）。
-pub(crate) fn ensure_public_http_url(raw: &str) -> Result<Url, String> {
+pub fn ensure_public_http_url(raw: &str) -> Result<Url, String> {
     ensure_http_url(raw, HostPolicy::PublicOnly)
 }
 
 /// 本机/局域网策略的地址校验（用户自建的本机服务）。
-pub(crate) fn ensure_local_service_http_url(raw: &str) -> Result<Url, String> {
+pub fn ensure_local_service_http_url(raw: &str) -> Result<Url, String> {
     ensure_http_url(raw, HostPolicy::LocalService)
 }
 
@@ -99,7 +99,7 @@ fn reject_message(policy: HostPolicy) -> String {
 }
 
 /// 重定向策略：每跳重新做策略校验（被拒目标即停止，把 3xx 响应原样交回调用方，不再向该地址发请求）。
-pub(crate) fn redirect_policy(check: fn(&str) -> Result<Url, String>) -> reqwest::redirect::Policy {
+pub fn redirect_policy(check: fn(&str) -> Result<Url, String>) -> reqwest::redirect::Policy {
     reqwest::redirect::Policy::custom(move |attempt| {
         if redirect_allowed(attempt.previous().len(), attempt.url().as_str(), check) {
             attempt.follow()
@@ -110,7 +110,7 @@ pub(crate) fn redirect_policy(check: fn(&str) -> Result<Url, String>) -> reqwest
 }
 
 /// 客户端超时形态（各网络面节奏不同）。
-pub(crate) enum ClientTimeout {
+pub enum ClientTimeout {
     /// 总超时（页面抓取/搜索等短请求）。
     Total(u64),
     /// 连接 + 读超时（更新下载等长流）。
@@ -122,7 +122,7 @@ pub(crate) enum ClientTimeout {
 /// 策略守卫客户端的统一构建入口（全部出网 HTTP 客户端必须经此构建）：
 /// 入口校验用同一策略的 `check`，DNS 解析结果逐 IP 过策略（重定向跳到的新域名同口径），
 /// 重定向每跳复检——SSRF 防线单点收口，杜绝某处构建漏挂守卫。
-pub(crate) fn client_for(policy: HostPolicy, timeout: ClientTimeout) -> Result<reqwest::Client, String> {
+pub fn client_for(policy: HostPolicy, timeout: ClientTimeout) -> Result<reqwest::Client, String> {
     let check: fn(&str) -> Result<Url, String> = match policy {
         HostPolicy::PublicOnly => ensure_public_http_url,
         HostPolicy::LocalService => ensure_local_service_http_url,
@@ -171,7 +171,7 @@ fn resolve_and_filter(host: &str, policy: HostPolicy) -> Result<Vec<SocketAddr>,
 /// 挂在客户端上后，每个连接目标（含重定向跳到的新域名）都先解析、后校验、再连接，
 /// 校验与连接使用同一次解析结果——不存在「校验后二次解析」的 rebinding 窗口。
 #[derive(Clone, Copy)]
-pub(crate) struct PolicyDnsResolver {
+pub struct PolicyDnsResolver {
     policy: HostPolicy,
 }
 

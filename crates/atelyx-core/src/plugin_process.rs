@@ -337,18 +337,6 @@ fn job_handle(slot: &mut Option<JobHandle>) -> Result<HANDLE, String> {
     Ok(raw)
 }
 
-/// 应用退出：结束全部插件托管进程。
-///
-/// 挂在 `RunEvent::Exit` 上——它是唯一的终态事件，此时窗口已全部销毁、不再有新的进程启动。
-/// 崩溃与强杀不经过这里，由 Windows 作业对象随句柄关闭兜底（Unix 无等价机制，该路径留孤儿）。
-pub fn shutdown(app: &tauri::AppHandle) {
-    use tauri::Manager;
-    let Some(host) = app.try_state::<Arc<PluginProcessHost>>() else {
-        return;
-    };
-    host.shutdown_children();
-}
-
 /// 组装命令：cwd 可选、`env` 为**追加/覆盖**宿主环境（不 `env_clear`——插件启动的本机服务需要
 /// 宿主的 PATH/TEMP 等才有正常行为）。stdin 建管道：插件经 spawn 句柄写入（不传数据时写端
 /// 随进程退出一并释放，对不读 stdin 的程序没有行为影响）。
@@ -462,10 +450,42 @@ fn spawn_line_reader(
 
 /// 读一行：到 `\n` 或 `\r` 即算一行（终止符含在返回内容里，前端因此仍需按 `\r?\n` 自行切分）。
 ///
-/// 用 tauri 自带的实现（tauri-plugin-shell 走的也是它），保证按行上报的切分语义与业界一致，
-/// 不在这里另写一份等价副本。返回 0 = 输出结束。
+/// 切分语义与 tauri-plugin-shell 的按行上报一致：同一缓冲块内**先找 `\n` 再找 `\r`**（次序影响
+/// 切分结果），中断读重试，返回 0 = 输出结束。
 fn read_line(reader: &mut impl BufRead, out: &mut Vec<u8>) -> std::io::Result<usize> {
-    tauri::utils::io::read_line(reader, out)
+    let mut read = 0;
+    loop {
+        let (done, used) = {
+            let available = match reader.fill_buf() {
+                Ok(n) => n,
+                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            };
+            match available.iter().position(|&b| b == b'\n') {
+                Some(i) => {
+                    let end = i + 1;
+                    out.extend_from_slice(&available[..end]);
+                    (true, end)
+                }
+                None => match available.iter().position(|&b| b == b'\r') {
+                    Some(i) => {
+                        let end = i + 1;
+                        out.extend_from_slice(&available[..end]);
+                        (true, end)
+                    }
+                    None => {
+                        out.extend_from_slice(available);
+                        (false, available.len())
+                    }
+                },
+            }
+        };
+        reader.consume(used);
+        read += used;
+        if done || used == 0 {
+            return Ok(read);
+        }
+    }
 }
 
 // ---------- Windows：作业对象 ----------
@@ -567,8 +587,8 @@ fn resume_main_thread(pid: u32) -> Result<(), String> {
 }
 
 /// 测试共用替身（与 `commands::process` 的测试共享，避免逐字副本）。
-#[cfg(test)]
-pub(crate) mod testing {
+#[cfg(any(test, feature = "test-support"))]
+pub mod testing {
     use super::*;
 
     /// 收集宿主上报的进程事件的测试替身。
