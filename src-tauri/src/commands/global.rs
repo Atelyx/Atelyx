@@ -290,6 +290,8 @@ pub fn patch_global_config(app: AppHandle, patch: serde_json::Value) -> Result<G
 }
 
 /// 原生启动底色的深浅方案（底色只能取主题 `--bg-primary` 的浅/深基底这两档）。
+/// 桌面专属：原生窗口底色只在桌面创建窗口时生效。
+#[cfg(desktop)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum ThemeScheme {
     Dark,
@@ -297,15 +299,19 @@ pub(crate) enum ThemeScheme {
 }
 
 /// 内置主题插件 id（与前端 `utils/pluginTheme.ts` 的 `BUILTIN_THEME_PLUGIN_ID` 同值，契约测试把守）。
+#[cfg(desktop)]
 const BUILTIN_THEME_PLUGIN_ID: &str = "builtin.theme";
 /// 主题设置项键（前端 `utils/pluginTheme.ts` 的 `COLOR_MODE_KEY` / `VARIANT_KEY`）。
+#[cfg(desktop)]
 const THEME_COLOR_MODE_KEY: &str = "colorMode";
+#[cfg(desktop)]
 const THEME_VARIANT_KEY: &str = "variant";
 
 /// 当前主题的深浅方案（原生启动底色用；`system_dark` = 系统是否深色）。
 /// 只解析内置主题插件的浅/深基底：皮肤（内置「极光」的 variables 自定义了 `--bg-primary`）、
 /// 自定义主题插件（含它被停用后前端回退内置插件的情形）与读盘/解析失败一律回落深色——
 /// 宁可闪一次深色，也不猜一个错色。
+#[cfg(desktop)]
 pub(crate) fn startup_theme_scheme(app: &AppHandle, system_dark: bool) -> ThemeScheme {
     let Ok(path) = global_config_path(app) else {
         return ThemeScheme::Dark;
@@ -321,6 +327,7 @@ pub(crate) fn startup_theme_scheme(app: &AppHandle, system_dark: bool) -> ThemeS
 
 /// 主题值 → 深浅方案（colorMode 与主题插件口径逐分支对齐前端 `utils/pluginTheme.ts` 的
 /// `resolveActiveThemeEntry`；皮肤变体比前端保守：任意字符串变体都按变量自定义兜底深色）。
+#[cfg(desktop)]
 fn theme_scheme_of(config: &GlobalConfig, system_dark: bool) -> ThemeScheme {
     // 未设置主题 = 默认主题插件（前端同口径）
     if config.theme.as_deref().unwrap_or(BUILTIN_THEME_PLUGIN_ID) != BUILTIN_THEME_PLUGIN_ID {

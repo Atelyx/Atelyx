@@ -11,8 +11,10 @@ use serde::Serialize;
 use crate::plugin_process::{EventSink, PluginProcessHost, ProcessEvent};
 
 /// 下行帧事件：载荷带会话 id 与 JSON-RPC 消息原文，前端按会话喂进对应通道。
+#[cfg(not(test))]
 pub const FRAME_EVENT: &str = "host-runtime-frame";
 /// 会话结束事件：运行时侧主动结束（模块连续崩溃熔断等），前端据此关闭对应通道。
+#[cfg(not(test))]
 pub const SESSION_EVENT: &str = "host-runtime-session-ended";
 
 /// attach 等待上限：模块加载（起线程 + import + activate）在时限内不到位即失败，不让命令悬挂。

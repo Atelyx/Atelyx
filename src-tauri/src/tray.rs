@@ -2,7 +2,9 @@
 //! `UiHidden`）、完全退出协调（协议见 `begin_exit` / `exit_flush_done`）。主窗口点 X =
 //! 驻留托盘不退出；完全退出唯一入口 = 托盘菜单「退出」。
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
+#[cfg(desktop)]
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
@@ -95,7 +97,9 @@ const MAX_MENU_DEPTH: usize = 3;
 /// 插件贡献的托盘菜单树节点（serde 形状 = 前端 `ctx.tray.setMenu` 的条目）。
 /// `item` 叶子的 key 由前端拼好（`{插件id}:{路径id}`），点击按 key 原样回传；
 /// 校验只认以插件 id 为前缀的 key，跨插件伪造与残留点击都在这里拦下。
+/// 移动端无托盘，本类型仅作为命令入参的契约形状存在。
 #[derive(serde::Deserialize, Clone)]
+#[cfg_attr(not(desktop), allow(dead_code))]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum TrayMenuNode {
     Item { key: String, label: String },
@@ -550,7 +554,7 @@ mod tests {
 
     #[test]
     fn window_of_leaf_finds_nested_items_only() {
-        let mut registry = PluginMenus::default();
+        let registry = PluginMenus::default();
         registry.set(
             "com.a".into(),
             PluginMenuEntry {

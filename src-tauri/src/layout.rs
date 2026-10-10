@@ -108,6 +108,8 @@ impl LayoutState {
 
 /// 预热备用窗口的 label（模型外的隐藏窗口）；无 = None。
 /// 托盘显隐与退出收尾按窗口枚举时必须放过它：它没有布局条目、也没有内容可落盘。
+/// 桌面专属：预热机制与托盘均只在桌面存在。
+#[cfg(desktop)]
 pub(crate) fn prewarm_window_label(app: &AppHandle) -> Option<String> {
     let state = app.try_state::<LayoutState>()?;
     let inner = state.inner.lock().ok()?;
