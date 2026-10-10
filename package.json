@@ -19,7 +19,7 @@
     "lint": "eslint .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml && cargo test --manifest-path atelyx-server/Cargo.toml",
+    "test:rust": "cargo test --workspace && cargo test --manifest-path atelyx-server/Cargo.toml",
     "android:16kb": "node scripts/check-android-16kb.mjs",
     "check": "pnpm run build:vendor && pnpm run typecheck && pnpm run ctx-api:check && pnpm run lint && pnpm run test && pnpm run test:rust"
   },

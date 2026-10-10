@@ -1,0 +1,9 @@
+[workspace]
+resolver = "2"
+members = ["src-tauri", "crates/atelyx-core"]
+exclude = ["atelyx-server"]
+
+# profile 仅在 workspace 根生效；发版用 thin LTO + strip。
+[profile.release]
+lto = "thin"
+strip = true

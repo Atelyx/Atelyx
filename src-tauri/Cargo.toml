@@ -106,9 +106,3 @@ libc = "0.2"
 [features]
 # 自定义 protocol 用
 custom-protocol = ["tauri/custom-protocol"]
-
-# 发版优化：thin LTO 跨 crate 做链接期整体优化且并行执行；strip 剥离符号表。
-# panic 策略保持默认 unwind——命令层依赖 unwind 收敛单命令 panic 不致进程退出。
-[profile.release]
-lto = "thin"
-strip = true

@@ -1,0 +1,6 @@
+[package]
+name = "atelyx-core"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77.2"
+description = "Atelyx UI 无关核心：仓库存储、会话容器、补丁合并与写盘串行化、AI 客户端、协作帧泵、插件进程托管"
