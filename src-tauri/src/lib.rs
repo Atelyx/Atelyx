@@ -8,7 +8,6 @@
 
 #[cfg(target_os = "android")]
 mod android_bridge;
-mod chat_container;
 mod commands;
 mod host_runtime;
 mod layout;
@@ -21,8 +20,27 @@ mod plugin_build;
 mod plugin_process;
 mod tray;
 
-// 存储层实现在 atelyx-core，壳侧经此重导出保持 crate::vault 路径不变。
+// 存储层与会话容器真源实现在 atelyx-core，壳侧经此重导出保持 crate:: 路径不变。
+pub use atelyx_core::chat_container;
 pub use atelyx_core::vault;
+
+// 会话容器的 Tauri 广播出口：delta 全窗口、intent 定向执行体窗口。仅生产构建编译。
+#[cfg(not(test))]
+fn install_chat_emitter(
+    container: &chat_container::ChatContainerState,
+    app: tauri::AppHandle,
+) {
+    use tauri::Emitter;
+    use chat_container::{EmitterEvent, DELTA_EVENT, EXECUTOR_LABEL, INTENT_EVENT};
+    container.install_emitter(Box::new(move |ev: &EmitterEvent| match ev {
+        EmitterEvent::Delta(delta) => {
+            let _ = app.emit(DELTA_EVENT, delta);
+        }
+        EmitterEvent::Intent(payload) => {
+            let _ = app.emit_to(EXECUTOR_LABEL, INTENT_EVENT, payload);
+        }
+    }));
+}
 
 use std::sync::Arc;
 
@@ -90,13 +108,13 @@ pub fn run() {
             // 全局快捷键登记表（ctx.shortcuts 后端；移动端空表，注册恒拒、注销/释放幂等成功）
             app.manage(commands::global_shortcut::GlobalShortcutState::default());
             // 会话容器真源：唯一 op 权威与写盘链；写链线程随进程常驻。
-            // 测试构建不接线——emit 实例化只允许进生产链接闭包（install_app_emitter 仅生产编译）。
+            // 测试构建不接线——Tauri emit 实例化只允许进生产链接闭包（install_chat_emitter 仅生产编译）。
             #[cfg(not(test))]
             {
                 let chat_state = Arc::new(chat_container::ChatContainerState::new(
                     chat_container::WriteChainConfig::default(),
                 ));
-                chat_state.install_app_emitter(app.handle().clone());
+                install_chat_emitter(&chat_state, app.handle().clone());
                 chat_state.spawn_writer();
                 app.manage(chat_state);
             }

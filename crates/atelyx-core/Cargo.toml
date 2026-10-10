@@ -12,6 +12,9 @@ regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dunce = "1"
+# 会话容器（chat_container）：持久 op 建 id / 写链线程与广播回执（spawn + oneshot + sleep）
+tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
+uuid = { version = "1", features = ["v4"] }
 
 [features]
 # 测试基建（TempDir 等）供依赖方的测试构建复用；常规构建不编译

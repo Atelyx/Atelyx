@@ -9,11 +9,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-// 仅生产构建引入：emit 的实例化收敛在 install_app_emitter，测试 exe 的链接闭包
-// 因此不携带 Tauri 运行时的 GUI 依赖（tao → comctl32 v6 + manifest 要求）
-#[cfg(not(test))]
-use tauri::{AppHandle, Emitter};
-
 use crate::vault::{
     append_chat_messages_raw, delete_chat_messages_file, delete_chat_session_meta_file,
     list_chat_sessions_file, read_chat_messages_file, read_editor_chats_meta_file,
@@ -505,25 +500,9 @@ impl ChatContainerState {
         }
     }
 
-    /// 安装生产广播出口（Tauri 事件）：delta 全窗口广播、intent 定向投递执行体窗口。
-    /// 仅生产构建编译：emit 的单态化实现只在此闭包内被引用——若进测试 exe 的链接闭包，
-    /// 会拉入 tao/comctl32 v6 依赖，而测试二进制无 manifest，loader 绑到 v5 缺入口点启动即失败。
-    #[cfg(not(test))]
-    pub fn install_app_emitter(&self, app: AppHandle) {
-        let app = app.clone();
-        *self.emitter.lock().unwrap_or_else(poison) =
-            Some(Box::new(move |ev: &EmitterEvent| match ev {
-                EmitterEvent::Delta(delta) => {
-                    let _ = app.emit(DELTA_EVENT, delta);
-                }
-                EmitterEvent::Intent(payload) => {
-                    let _ = app.emit_to(EXECUTOR_LABEL, INTENT_EVENT, payload);
-                }
-            }));
-    }
-
-    #[cfg(test)]
-    fn install_collector(&self, f: impl Fn(&EmitterEvent) + Send + Sync + 'static) {
+    /// 安装广播出口：delta 全窗口广播、intent 定向投递执行体窗口。
+    /// 出口由调用方注入——本 crate 不感知具体传输（壳侧接 Tauri 事件，测试接收集器）。
+    pub fn install_emitter(&self, f: impl Fn(&EmitterEvent) + Send + Sync + 'static) {
         *self.emitter.lock().unwrap_or_else(poison) = Some(Box::new(f));
     }
 
@@ -2447,7 +2426,7 @@ mod tests {
         let state = ChatContainerState::new(test_config());
         let seen: Arc<Mutex<Vec<ContainerDelta>>> = Arc::default();
         let seen2 = seen.clone();
-        state.install_collector(move |ev| {
+        state.install_emitter(move |ev| {
             if let EmitterEvent::Delta(d) = ev {
                 seen2.lock().unwrap().push(d.clone());
             }
@@ -2601,7 +2580,7 @@ mod tests {
         state.executor_boot("main").unwrap();
         let intents: Arc<Mutex<Vec<Value>>> = Arc::default();
         let ints2 = intents.clone();
-        state.install_collector(move |ev| {
+        state.install_emitter(move |ev| {
             if let EmitterEvent::Intent(v) = ev {
                 ints2.lock().unwrap().push(v.clone());
             }
