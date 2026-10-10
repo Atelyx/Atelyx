@@ -1,0 +1,2852 @@
+{
+  "cases": [
+    {
+      "name": "blocks-overview",
+      "source": "# Title\n\npara **b** here\n\n> [!note] quoted\n> more\n\n- [x] done\n- plain\n\n1. one\n2. two\n\n```js\nconst x = 1;\n```\n\n---\n\n<div>hi</div>\n\n$$\nx^2\n$$\n\n[^a]: footnote text\n\n| h1 | h2 |\n| --- | :--: |\n| a | b |",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "# Title\n\npara **b** here\n\n> [!note] quoted\n> more\n\n- [x] done\n- plain\n\n1. one\n2. two\n\n```js\nconst x = 1;\n```\n\n---\n\n<div>hi</div>\n\n$$\nx^2\n$$\n\n[^a]: footnote text\n\n| h1 | h2 |\n| --- | :--: |\n| a | b |",
+        "blocks": [
+          {
+            "kind": "heading",
+            "level": 1,
+            "from": 0,
+            "to": 7,
+            "inline": [
+              {
+                "kind": "text",
+                "from": 2,
+                "to": 7,
+                "text": "Title"
+              }
+            ]
+          },
+          {
+            "kind": "paragraph",
+            "from": 9,
+            "to": 24,
+            "inline": [
+              {
+                "kind": "text",
+                "from": 9,
+                "to": 14,
+                "text": "para "
+              },
+              {
+                "kind": "strong",
+                "from": 14,
+                "to": 19,
+                "children": [
+                  {
+                    "kind": "text",
+                    "from": 16,
+                    "to": 17,
+                    "text": "b"
+                  }
+                ]
+              },
+              {
+                "kind": "text",
+                "from": 19,
+                "to": 24,
+                "text": " here"
+              }
+            ]
+          },
+          {
+            "kind": "blockquote",
+            "from": 26,
+            "to": 49,
+            "callout": "note",
+            "children": [
+              {
+                "kind": "paragraph",
+                "from": 28,
+                "to": 49,
+                "inline": [
+                  {
+                    "kind": "text",
+                    "from": 35,
+                    "to": 43,
+                    "text": " quoted\n"
+                  },
+                  {
+                    "kind": "text",
+                    "from": 45,
+                    "to": 49,
+                    "text": "more"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "kind": "list",
+            "ordered": false,
+            "from": 51,
+            "to": 69,
+            "items": [
+              {
+                "from": 51,
+                "to": 61,
+                "task": true,
+                "checked": true,
+                "children": []
+              },
+              {
+                "from": 62,
+                "to": 69,
+                "task": false,
+                "checked": false,
+                "children": []
+              }
+            ]
+          },
+          {
+            "kind": "list",
+            "ordered": true,
+            "from": 71,
+            "to": 84,
+            "items": [
+              {
+                "from": 71,
+                "to": 77,
+                "task": false,
+                "checked": false,
+                "children": []
+              },
+              {
+                "from": 78,
+                "to": 84,
+                "task": false,
+                "checked": false,
+                "children": []
+              }
+            ]
+          },
+          {
+            "kind": "fencedCode",
+            "from": 86,
+            "to": 108,
+            "lang": "js",
+            "code": "const x = 1;",
+            "contentFrom": 92,
+            "contentTo": 104
+          },
+          {
+            "kind": "hr",
+            "from": 110,
+            "to": 113
+          },
+          {
+            "kind": "htmlBlock",
+            "from": 115,
+            "to": 128,
+            "html": "<div>hi</div>"
+          },
+          {
+            "kind": "mathBlock",
+            "from": 130,
+            "to": 139,
+            "tex": "x^2"
+          },
+          {
+            "kind": "footnoteDef",
+            "from": 141,
+            "to": 160,
+            "label": "a",
+            "inline": [
+              {
+                "kind": "text",
+                "from": 147,
+                "to": 160,
+                "text": "footnote text"
+              }
+            ]
+          },
+          {
+            "kind": "table",
+            "from": 162,
+            "to": 198,
+            "header": [
+              {
+                "from": 164,
+                "to": 166
+              },
+              {
+                "from": 169,
+                "to": 171
+              }
+            ],
+            "aligns": [
+              "",
+              "center"
+            ],
+            "rows": [
+              [
+                {
+                  "from": 191,
+                  "to": 192
+                },
+                {
+                  "from": 195,
+                  "to": 196
+                }
+              ]
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "setext-headings",
+      "source": "Title\n=====\n\nsub\n---\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "Title\n=====\n\nsub\n---\n",
+        "blocks": [
+          {
+            "kind": "heading",
+            "level": 1,
+            "from": 0,
+            "to": 11,
+            "inline": [
+              {
+                "kind": "text",
+                "from": 0,
+                "to": 5,
+                "text": "Title"
+              }
+            ]
+          },
+          {
+            "kind": "heading",
+            "level": 2,
+            "from": 13,
+            "to": 20,
+            "inline": [
+              {
+                "kind": "text",
+                "from": 13,
+                "to": 16,
+                "text": "sub"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "html-comment-block",
+      "source": "<!-- c -->\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "<!-- c -->\n",
+        "blocks": [
+          {
+            "kind": "htmlBlock",
+            "from": 0,
+            "to": 10,
+            "html": "<!-- c -->"
+          }
+        ]
+      }
+    },
+    {
+      "name": "footnote-single-line",
+      "source": "[^b]: singleword\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "[^b]: singleword\n",
+        "blocks": [
+          {
+            "kind": "footnoteDef",
+            "from": 0,
+            "to": 16,
+            "label": "b",
+            "inline": [
+              {
+                "kind": "text",
+                "from": 6,
+                "to": 16,
+                "text": "singleword"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "empty-source",
+      "source": "",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "",
+        "blocks": []
+      }
+    },
+    {
+      "name": "blank-lines-only",
+      "source": "\n\n\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "\n\n\n",
+        "blocks": []
+      }
+    },
+    {
+      "name": "indented-code",
+      "source": "    code line\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "    code line\n",
+        "blocks": [
+          {
+            "kind": "indentedCode",
+            "from": 4,
+            "to": 13,
+            "code": "code line"
+          }
+        ]
+      }
+    },
+    {
+      "name": "loose-list",
+      "source": "- a\n- b\n\n- c\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "- a\n- b\n\n- c\n",
+        "blocks": [
+          {
+            "kind": "list",
+            "ordered": false,
+            "from": 0,
+            "to": 12,
+            "items": [
+              {
+                "from": 0,
+                "to": 3,
+                "task": false,
+                "checked": false,
+                "children": []
+              },
+              {
+                "from": 4,
+                "to": 7,
+                "task": false,
+                "checked": false,
+                "children": []
+              },
+              {
+                "from": 9,
+                "to": 12,
+                "task": false,
+                "checked": false,
+                "children": []
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "nested-blockquote",
+      "source": "> quote\n> > nested\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "> quote\n> > nested\n",
+        "blocks": [
+          {
+            "kind": "blockquote",
+            "from": 0,
+            "to": 18,
+            "callout": null,
+            "children": [
+              {
+                "kind": "paragraph",
+                "from": 2,
+                "to": 7,
+                "inline": [
+                  {
+                    "kind": "text",
+                    "from": 2,
+                    "to": 7,
+                    "text": "quote"
+                  }
+                ]
+              },
+              {
+                "kind": "blockquote",
+                "from": 10,
+                "to": 18,
+                "callout": null,
+                "children": [
+                  {
+                    "kind": "paragraph",
+                    "from": 12,
+                    "to": 18,
+                    "inline": [
+                      {
+                        "kind": "text",
+                        "from": 12,
+                        "to": 18,
+                        "text": "nested"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "cjk-inline",
+      "source": "# 中文标题 ==中文高亮== #中文标签",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "# 中文标题 ==中文高亮== #中文标签",
+        "blocks": [
+          {
+            "kind": "heading",
+            "level": 1,
+            "from": 0,
+            "to": 21,
+            "inline": [
+              {
+                "kind": "text",
+                "from": 2,
+                "to": 7,
+                "text": "中文标题 "
+              },
+              {
+                "kind": "highlight",
+                "from": 7,
+                "to": 15,
+                "children": [
+                  {
+                    "kind": "text",
+                    "from": 9,
+                    "to": 13,
+                    "text": "中文高亮"
+                  }
+                ]
+              },
+              {
+                "kind": "text",
+                "from": 15,
+                "to": 16,
+                "text": " "
+              },
+              {
+                "kind": "tag",
+                "from": 16,
+                "to": 21,
+                "tag": "中文标签"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "inline-kitchen-sink",
+      "source": "**bold** _em_ ~~del~~ `code` [ext](https://x.com) [path](notes/a.md) [new]() [plain](ftp://x) [[wiki|W]] #tag ==hl== %%note%% $e=mc^2$ [^fn] @Alice ![img|100x50](p.png)",
+      "mentions": [
+        {
+          "key": "u1",
+          "label": "Alice"
+        }
+      ],
+      "links": {
+        "notes/a.md": "path"
+      },
+      "expected": {
+        "source": "**bold** _em_ ~~del~~ `code` [ext](https://x.com) [path](notes/a.md) [new]() [plain](ftp://x) [[wiki|W]] #tag ==hl== %%note%% $e=mc^2$ [^fn] @Alice ![img|100x50](p.png)",
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "from": 0,
+            "to": 168,
+            "inline": [
+              {
+                "kind": "strong",
+                "from": 0,
+                "to": 8,
+                "children": [
+                  {
+                    "kind": "text",
+                    "from": 2,
+                    "to": 6,
+                    "text": "bold"
+                  }
+                ]
+              },
+              {
+                "kind": "text",
+                "from": 8,
+                "to": 9,
+                "text": " "
+              },
+              {
+                "kind": "em",
+                "from": 9,
+                "to": 13,
+                "children": [
+                  {
+                    "kind": "text",
+                    "from": 10,
+                    "to": 12,
+                    "text": "em"
+                  }
+                ]
+              },
+              {
+                "kind": "text",
+                "from": 13,
+                "to": 14,
+                "text": " "
+              },
+              {
+                "kind": "strike",
+                "from": 14,
+                "to": 21,
+                "children": [
+                  {
+                    "kind": "text",
+                    "from": 16,
+                    "to": 19,
+                    "text": "del"
+                  }
+                ]
+              },
+              {
+                "kind": "text",
+                "from": 21,
+                "to": 22,
+                "text": " "
+              },
+              {
+                "kind": "code",
+                "from": 22,
+                "to": 28,
+                "text": "code"
+              },
+              {
+                "kind": "text",
+                "from": 28,
+                "to": 29,
+                "text": " "
+              },
+              {
+                "kind": "link",
+                "from": 29,
+                "to": 49,
+                "href": "https://x.com",
+                "label": "ext",
+                "form": "external",
+                "title": null
+              },
+              {
+                "kind": "text",
+                "from": 49,
+                "to": 50,
+                "text": " "
+              },
+              {
+                "kind": "link",
+                "from": 50,
+                "to": 68,
+                "href": "notes/a.md",
+                "label": "path",
+                "form": "path",
+                "title": null
+              },
+              {
+                "kind": "text",
+                "from": 68,
+                "to": 69,
+                "text": " "
+              },
+              {
+                "kind": "link",
+                "from": 69,
+                "to": 76,
+                "href": "",
+                "label": "new",
+                "form": "create",
+                "title": null
+              },
+              {
+                "kind": "text",
+                "from": 76,
+                "to": 77,
+                "text": " "
+              },
+              {
+                "kind": "link",
+                "from": 77,
+                "to": 93,
+                "href": "ftp://x",
+                "label": "plain",
+                "form": "plain",
+                "title": null
+              },
+              {
+                "kind": "text",
+                "from": 93,
+                "to": 94,
+                "text": " "
+              },
+              {
+                "kind": "wiki",
+                "from": 94,
+                "to": 104,
+                "target": "wiki",
+                "label": "W"
+              },
+              {
+                "kind": "text",
+                "from": 104,
+                "to": 105,
+                "text": " "
+              },
+              {
+                "kind": "tag",
+                "from": 105,
+                "to": 109,
+                "tag": "tag"
+              },
+              {
+                "kind": "text",
+                "from": 109,
+                "to": 110,
+                "text": " "
+              },
+              {
+                "kind": "highlight",
+                "from": 110,
+                "to": 116,
+                "children": [
+                  {
+                    "kind": "text",
+                    "from": 112,
+                    "to": 114,
+                    "text": "hl"
+                  }
+                ]
+              },
+              {
+                "kind": "text",
+                "from": 116,
+                "to": 117,
+                "text": " "
+              },
+              {
+                "kind": "comment",
+                "from": 117,
+                "to": 125
+              },
+              {
+                "kind": "text",
+                "from": 125,
+                "to": 126,
+                "text": " "
+              },
+              {
+                "kind": "mathInline",
+                "from": 126,
+                "to": 134,
+                "tex": "e=mc^2"
+              },
+              {
+                "kind": "text",
+                "from": 134,
+                "to": 135,
+                "text": " "
+              },
+              {
+                "kind": "footnoteRef",
+                "from": 135,
+                "to": 140,
+                "label": "fn"
+              },
+              {
+                "kind": "text",
+                "from": 140,
+                "to": 141,
+                "text": " "
+              },
+              {
+                "kind": "mention",
+                "from": 141,
+                "to": 147,
+                "key": "u1",
+                "label": "Alice",
+                "char": "@"
+              },
+              {
+                "kind": "text",
+                "from": 147,
+                "to": 148,
+                "text": " "
+              },
+              {
+                "kind": "image",
+                "from": 148,
+                "to": 168,
+                "src": "p.png",
+                "alt": "img",
+                "width": "100",
+                "height": "50",
+                "title": null
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "mention-vs-tag",
+      "source": "#Alice #unknown",
+      "mentions": [
+        {
+          "key": "u1",
+          "label": "Alice"
+        }
+      ],
+      "links": null,
+      "expected": {
+        "source": "#Alice #unknown",
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "from": 0,
+            "to": 15,
+            "inline": [
+              {
+                "kind": "mention",
+                "from": 0,
+                "to": 6,
+                "key": "u1",
+                "label": "Alice",
+                "char": "#"
+              },
+              {
+                "kind": "text",
+                "from": 6,
+                "to": 7,
+                "text": " "
+              },
+              {
+                "kind": "tag",
+                "from": 7,
+                "to": 15,
+                "tag": "unknown"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "mention-punct-label",
+      "source": "#示例\"标题\"",
+      "mentions": [
+        {
+          "key": "f1",
+          "label": "示例\"标题\""
+        }
+      ],
+      "links": null,
+      "expected": {
+        "source": "#示例\"标题\"",
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "from": 0,
+            "to": 7,
+            "inline": [
+              {
+                "kind": "mention",
+                "from": 0,
+                "to": 7,
+                "key": "f1",
+                "label": "示例\"标题\"",
+                "char": "#"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "mention-word-boundary",
+      "source": "#示例标题",
+      "mentions": [
+        {
+          "key": "f2",
+          "label": "示例"
+        }
+      ],
+      "links": null,
+      "expected": {
+        "source": "#示例标题",
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "from": 0,
+            "to": 5,
+            "inline": [
+              {
+                "kind": "tag",
+                "from": 0,
+                "to": 5,
+                "tag": "示例标题"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "autolink-angle",
+      "source": "see <https://x.example> now",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "see <https://x.example> now",
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "from": 0,
+            "to": 27,
+            "inline": [
+              {
+                "kind": "text",
+                "from": 0,
+                "to": 4,
+                "text": "see "
+              },
+              {
+                "kind": "autolink",
+                "from": 4,
+                "to": 23,
+                "href": "https://x.example",
+                "label": "https://x.example"
+              },
+              {
+                "kind": "text",
+                "from": 23,
+                "to": 27,
+                "text": " now"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "autolink-bare",
+      "source": "see https://bare.example now",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "see https://bare.example now",
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "from": 0,
+            "to": 28,
+            "inline": [
+              {
+                "kind": "text",
+                "from": 0,
+                "to": 4,
+                "text": "see "
+              },
+              {
+                "kind": "autolink",
+                "from": 4,
+                "to": 24,
+                "href": "https://bare.example",
+                "label": "https://bare.example"
+              },
+              {
+                "kind": "text",
+                "from": 24,
+                "to": 28,
+                "text": " now"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "skip-fence-inline-code",
+      "source": "```\n#tag $$\n```\n\ninline `#tag` here\n\nreal #tag here",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "```\n#tag $$\n```\n\ninline `#tag` here\n\nreal #tag here",
+        "blocks": [
+          {
+            "kind": "fencedCode",
+            "from": 0,
+            "to": 15,
+            "lang": "",
+            "code": "#tag $$",
+            "contentFrom": 4,
+            "contentTo": 11
+          },
+          {
+            "kind": "paragraph",
+            "from": 17,
+            "to": 35,
+            "inline": [
+              {
+                "kind": "text",
+                "from": 17,
+                "to": 24,
+                "text": "inline "
+              },
+              {
+                "kind": "code",
+                "from": 24,
+                "to": 30,
+                "text": "#tag"
+              },
+              {
+                "kind": "text",
+                "from": 30,
+                "to": 35,
+                "text": " here"
+              }
+            ]
+          },
+          {
+            "kind": "paragraph",
+            "from": 37,
+            "to": 51,
+            "inline": [
+              {
+                "kind": "text",
+                "from": 37,
+                "to": 42,
+                "text": "real "
+              },
+              {
+                "kind": "tag",
+                "from": 42,
+                "to": 46,
+                "tag": "tag"
+              },
+              {
+                "kind": "text",
+                "from": 46,
+                "to": 51,
+                "text": " here"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "skip-tag-in-link",
+      "source": "[see #tag](https://x.com)",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "[see #tag](https://x.com)",
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "from": 0,
+            "to": 25,
+            "inline": [
+              {
+                "kind": "link",
+                "from": 0,
+                "to": 25,
+                "href": "https://x.com",
+                "label": "see #tag",
+                "form": "external",
+                "title": null
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "skip-math-in-fence",
+      "source": "```\n$$\nx\n$$\n```",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "```\n$$\nx\n$$\n```",
+        "blocks": [
+          {
+            "kind": "fencedCode",
+            "from": 0,
+            "to": 15,
+            "lang": "",
+            "code": "$$\nx\n$$",
+            "contentFrom": 4,
+            "contentTo": 11
+          }
+        ]
+      }
+    },
+    {
+      "name": "nested-list-deep",
+      "source": "- outer\n  - inner\n    - deep\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "- outer\n  - inner\n    - deep\n",
+        "blocks": [
+          {
+            "kind": "list",
+            "ordered": false,
+            "from": 0,
+            "to": 28,
+            "items": [
+              {
+                "from": 0,
+                "to": 28,
+                "task": false,
+                "checked": false,
+                "children": [
+                  {
+                    "kind": "list",
+                    "ordered": false,
+                    "from": 10,
+                    "to": 28,
+                    "items": [
+                      {
+                        "from": 10,
+                        "to": 28,
+                        "task": false,
+                        "checked": false,
+                        "children": [
+                          {
+                            "kind": "list",
+                            "ordered": false,
+                            "from": 22,
+                            "to": 28,
+                            "items": [
+                              {
+                                "from": 22,
+                                "to": 28,
+                                "task": false,
+                                "checked": false,
+                                "children": []
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "math-paragraph-overlap",
+      "source": "$$x\n$$ tail text\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "$$x\n$$ tail text\n",
+        "blocks": [
+          {
+            "kind": "mathBlock",
+            "from": 0,
+            "to": 6,
+            "tex": "x"
+          },
+          {
+            "kind": "paragraph",
+            "from": 6,
+            "to": 16,
+            "inline": [
+              {
+                "kind": "text",
+                "from": 6,
+                "to": 16,
+                "text": " tail text"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "math-fence-overlap",
+      "source": "```text\n$$\n```\nhello $$ world\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "```text\n$$\n```\nhello $$ world\n",
+        "blocks": [
+          {
+            "kind": "fencedCode",
+            "from": 0,
+            "to": 14,
+            "lang": "text",
+            "code": "$$",
+            "contentFrom": 8,
+            "contentTo": 10
+          },
+          {
+            "kind": "paragraph",
+            "from": 15,
+            "to": 29,
+            "inline": [
+              {
+                "kind": "text",
+                "from": 15,
+                "to": 29,
+                "text": "hello $$ world"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "math-empty-body",
+      "source": "$$\n$$\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "$$\n$$\n",
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "from": 0,
+            "to": 5,
+            "inline": [
+              {
+                "kind": "text",
+                "from": 0,
+                "to": 5,
+                "text": "$$\n$$"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "crlf-footnote",
+      "source": "[^a]: note text\r\nbody\r\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "[^a]: note text\r\nbody\r\n",
+        "blocks": [
+          {
+            "kind": "footnoteDef",
+            "from": 0,
+            "to": 15,
+            "label": "a",
+            "inline": [
+              {
+                "kind": "text",
+                "from": 6,
+                "to": 15,
+                "text": "note text"
+              }
+            ]
+          },
+          {
+            "kind": "paragraph",
+            "from": 17,
+            "to": 22,
+            "inline": [
+              {
+                "kind": "text",
+                "from": 17,
+                "to": 22,
+                "text": "body\r"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "table-escaped-pipe",
+      "source": "| x \\| y | z |\n| --- | --- |\n| a | b |\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "| x \\| y | z |\n| --- | --- |\n| a | b |\n",
+        "blocks": [
+          {
+            "kind": "table",
+            "from": 0,
+            "to": 38,
+            "header": [
+              {
+                "from": 2,
+                "to": 8
+              },
+              {
+                "from": 11,
+                "to": 12
+              }
+            ],
+            "aligns": [
+              "",
+              ""
+            ],
+            "rows": [
+              [
+                {
+                  "from": 31,
+                  "to": 32
+                },
+                {
+                  "from": 35,
+                  "to": 36
+                }
+              ]
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "html-tags-nonascent",
+      "source": "<b>x</b> plain #tag <i>y</i>\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "<b>x</b> plain #tag <i>y</i>\n",
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "from": 0,
+            "to": 28,
+            "inline": [
+              {
+                "kind": "html",
+                "from": 0,
+                "to": 8,
+                "html": "<b>x</b>"
+              },
+              {
+                "kind": "text",
+                "from": 8,
+                "to": 15,
+                "text": " plain "
+              },
+              {
+                "kind": "tag",
+                "from": 15,
+                "to": 19,
+                "tag": "tag"
+              },
+              {
+                "kind": "text",
+                "from": 19,
+                "to": 20,
+                "text": " "
+              },
+              {
+                "kind": "html",
+                "from": 20,
+                "to": 28,
+                "html": "<i>y</i>"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "math-multiple-paragraphs",
+      "source": "$$a$$\ntext\n$$b$$\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "$$a$$\ntext\n$$b$$\n",
+        "blocks": [
+          {
+            "kind": "mathBlock",
+            "from": 0,
+            "to": 5,
+            "tex": "a"
+          },
+          {
+            "kind": "paragraph",
+            "from": 5,
+            "to": 11,
+            "inline": [
+              {
+                "kind": "text",
+                "from": 5,
+                "to": 11,
+                "text": "\ntext\n"
+              }
+            ]
+          },
+          {
+            "kind": "mathBlock",
+            "from": 11,
+            "to": 16,
+            "tex": "b"
+          }
+        ]
+      }
+    },
+    {
+      "name": "math-cross-paragraph",
+      "source": "$$x\n\n$$y\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "$$x\n\n$$y\n",
+        "blocks": [
+          {
+            "kind": "mathBlock",
+            "from": 0,
+            "to": 7,
+            "tex": "x"
+          },
+          {
+            "kind": "paragraph",
+            "from": 7,
+            "to": 8,
+            "inline": [
+              {
+                "kind": "text",
+                "from": 7,
+                "to": 8,
+                "text": "y"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "math-cross-paragraph-middle",
+      "source": "$$x\n\nmiddle\n\n$$y\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "$$x\n\nmiddle\n\n$$y\n",
+        "blocks": [
+          {
+            "kind": "mathBlock",
+            "from": 0,
+            "to": 15,
+            "tex": "x\n\nmiddle"
+          },
+          {
+            "kind": "paragraph",
+            "from": 15,
+            "to": 16,
+            "inline": [
+              {
+                "kind": "text",
+                "from": 15,
+                "to": 16,
+                "text": "y"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "table-trailing-escape",
+      "source": "| a \\|\n| --- |\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "| a \\|\n| --- |\n",
+        "blocks": [
+          {
+            "kind": "table",
+            "from": 0,
+            "to": 14,
+            "header": [
+              {
+                "from": 2,
+                "to": 6
+              }
+            ],
+            "aligns": [
+              ""
+            ],
+            "rows": []
+          }
+        ]
+      }
+    },
+    {
+      "name": "html-pair-merge",
+      "source": "text <b>x</b> end\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "text <b>x</b> end\n",
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "from": 0,
+            "to": 17,
+            "inline": [
+              {
+                "kind": "text",
+                "from": 0,
+                "to": 5,
+                "text": "text "
+              },
+              {
+                "kind": "html",
+                "from": 5,
+                "to": 13,
+                "html": "<b>x</b>"
+              },
+              {
+                "kind": "text",
+                "from": 13,
+                "to": 17,
+                "text": " end"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "emphasis-nested",
+      "source": "**bold *inner* end**\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "**bold *inner* end**\n",
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "from": 0,
+            "to": 20,
+            "inline": [
+              {
+                "kind": "strong",
+                "from": 0,
+                "to": 20,
+                "children": [
+                  {
+                    "kind": "text",
+                    "from": 2,
+                    "to": 7,
+                    "text": "bold "
+                  },
+                  {
+                    "kind": "em",
+                    "from": 7,
+                    "to": 14,
+                    "children": [
+                      {
+                        "kind": "text",
+                        "from": 8,
+                        "to": 13,
+                        "text": "inner"
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "text",
+                    "from": 14,
+                    "to": 18,
+                    "text": " end"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "emphasis-intra-word",
+      "source": "foo_bar_baz and a*b*c\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "foo_bar_baz and a*b*c\n",
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "from": 0,
+            "to": 21,
+            "inline": [
+              {
+                "kind": "text",
+                "from": 0,
+                "to": 17,
+                "text": "foo_bar_baz and a"
+              },
+              {
+                "kind": "em",
+                "from": 17,
+                "to": 20,
+                "children": [
+                  {
+                    "kind": "text",
+                    "from": 18,
+                    "to": 19,
+                    "text": "b"
+                  }
+                ]
+              },
+              {
+                "kind": "text",
+                "from": 20,
+                "to": 21,
+                "text": "c"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "emphasis-mixed",
+      "source": "***both*** and **a *b* c**\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "***both*** and **a *b* c**\n",
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "from": 0,
+            "to": 26,
+            "inline": [
+              {
+                "kind": "em",
+                "from": 0,
+                "to": 10,
+                "children": [
+                  {
+                    "kind": "strong",
+                    "from": 1,
+                    "to": 9,
+                    "children": [
+                      {
+                        "kind": "text",
+                        "from": 3,
+                        "to": 7,
+                        "text": "both"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "kind": "text",
+                "from": 10,
+                "to": 15,
+                "text": " and "
+              },
+              {
+                "kind": "strong",
+                "from": 15,
+                "to": 26,
+                "children": [
+                  {
+                    "kind": "text",
+                    "from": 17,
+                    "to": 19,
+                    "text": "a "
+                  },
+                  {
+                    "kind": "em",
+                    "from": 19,
+                    "to": 22,
+                    "children": [
+                      {
+                        "kind": "text",
+                        "from": 20,
+                        "to": 21,
+                        "text": "b"
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "text",
+                    "from": 22,
+                    "to": 24,
+                    "text": " c"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "strike-basic",
+      "source": "~~del~~ keep ~one~\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "~~del~~ keep ~one~\n",
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "from": 0,
+            "to": 18,
+            "inline": [
+              {
+                "kind": "strike",
+                "from": 0,
+                "to": 7,
+                "children": [
+                  {
+                    "kind": "text",
+                    "from": 2,
+                    "to": 5,
+                    "text": "del"
+                  }
+                ]
+              },
+              {
+                "kind": "text",
+                "from": 7,
+                "to": 18,
+                "text": " keep ~one~"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "hardbreak",
+      "source": "a  \nb\nc\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "a  \nb\nc\n",
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "from": 0,
+            "to": 7,
+            "inline": [
+              {
+                "kind": "text",
+                "from": 0,
+                "to": 1,
+                "text": "a"
+              },
+              {
+                "kind": "hardBreak",
+                "from": 1,
+                "to": 4
+              },
+              {
+                "kind": "text",
+                "from": 4,
+                "to": 7,
+                "text": "b\nc"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "entities",
+      "source": "&amp; &#65; &#x41; plain & tail\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "&amp; &#65; &#x41; plain & tail\n",
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "from": 0,
+            "to": 31,
+            "inline": [
+              {
+                "kind": "html",
+                "from": 0,
+                "to": 5,
+                "html": "&amp;"
+              },
+              {
+                "kind": "text",
+                "from": 5,
+                "to": 6,
+                "text": " "
+              },
+              {
+                "kind": "html",
+                "from": 6,
+                "to": 11,
+                "html": "&#65;"
+              },
+              {
+                "kind": "text",
+                "from": 11,
+                "to": 12,
+                "text": " "
+              },
+              {
+                "kind": "html",
+                "from": 12,
+                "to": 18,
+                "html": "&#x41;"
+              },
+              {
+                "kind": "text",
+                "from": 18,
+                "to": 31,
+                "text": " plain & tail"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "escapes",
+      "source": "\\*not em\\* and \\`tick\\`",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "\\*not em\\* and \\`tick\\`",
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "from": 0,
+            "to": 23,
+            "inline": [
+              {
+                "kind": "text",
+                "from": 0,
+                "to": 2,
+                "text": "*"
+              },
+              {
+                "kind": "text",
+                "from": 2,
+                "to": 8,
+                "text": "not em"
+              },
+              {
+                "kind": "text",
+                "from": 8,
+                "to": 10,
+                "text": "*"
+              },
+              {
+                "kind": "text",
+                "from": 10,
+                "to": 15,
+                "text": " and "
+              },
+              {
+                "kind": "text",
+                "from": 15,
+                "to": 17,
+                "text": "`"
+              },
+              {
+                "kind": "text",
+                "from": 17,
+                "to": 21,
+                "text": "tick"
+              },
+              {
+                "kind": "text",
+                "from": 21,
+                "to": 23,
+                "text": "`"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "fence-multi-line",
+      "source": "```\nline1\nline2\n```\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "```\nline1\nline2\n```\n",
+        "blocks": [
+          {
+            "kind": "fencedCode",
+            "from": 0,
+            "to": 19,
+            "lang": "",
+            "code": "line1\nline2",
+            "contentFrom": 4,
+            "contentTo": 15
+          }
+        ]
+      }
+    },
+    {
+      "name": "fence-unclosed",
+      "source": "```\ncode tail",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "```\ncode tail",
+        "blocks": [
+          {
+            "kind": "fencedCode",
+            "from": 0,
+            "to": 13,
+            "lang": "",
+            "code": "code tail",
+            "contentFrom": 4,
+            "contentTo": 13
+          }
+        ]
+      }
+    },
+    {
+      "name": "fence-empty",
+      "source": "```\n```\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "```\n```\n",
+        "blocks": [
+          {
+            "kind": "fencedCode",
+            "from": 0,
+            "to": 7,
+            "lang": "",
+            "code": "",
+            "contentFrom": 4,
+            "contentTo": 4
+          }
+        ]
+      }
+    },
+    {
+      "name": "fence-info-extra",
+      "source": "```js extra\ncode\n```\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "```js extra\ncode\n```\n",
+        "blocks": [
+          {
+            "kind": "fencedCode",
+            "from": 0,
+            "to": 20,
+            "lang": "js extra",
+            "code": "code",
+            "contentFrom": 12,
+            "contentTo": 16
+          }
+        ]
+      }
+    },
+    {
+      "name": "fence-tilde",
+      "source": "~~~\ncode\n~~~\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "~~~\ncode\n~~~\n",
+        "blocks": [
+          {
+            "kind": "fencedCode",
+            "from": 0,
+            "to": 12,
+            "lang": "",
+            "code": "code",
+            "contentFrom": 4,
+            "contentTo": 8
+          }
+        ]
+      }
+    },
+    {
+      "name": "indented-code-multi",
+      "source": "    a\n\n    b\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "    a\n\n    b\n",
+        "blocks": [
+          {
+            "kind": "indentedCode",
+            "from": 4,
+            "to": 12,
+            "code": "a\n\nb"
+          }
+        ]
+      }
+    },
+    {
+      "name": "list-multi-para",
+      "source": "- a\n\n  b\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "- a\n\n  b\n",
+        "blocks": [
+          {
+            "kind": "list",
+            "ordered": false,
+            "from": 0,
+            "to": 8,
+            "items": [
+              {
+                "from": 0,
+                "to": 8,
+                "task": false,
+                "checked": false,
+                "children": [
+                  {
+                    "kind": "paragraph",
+                    "from": 7,
+                    "to": 8,
+                    "inline": [
+                      {
+                        "kind": "text",
+                        "from": 7,
+                        "to": 8,
+                        "text": "b"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "list-nested-quote",
+      "source": "- > quoted\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "- > quoted\n",
+        "blocks": [
+          {
+            "kind": "list",
+            "ordered": false,
+            "from": 0,
+            "to": 10,
+            "items": [
+              {
+                "from": 0,
+                "to": 10,
+                "task": false,
+                "checked": false,
+                "children": [
+                  {
+                    "kind": "blockquote",
+                    "from": 2,
+                    "to": 10,
+                    "callout": null,
+                    "children": [
+                      {
+                        "kind": "paragraph",
+                        "from": 4,
+                        "to": 10,
+                        "inline": [
+                          {
+                            "kind": "text",
+                            "from": 4,
+                            "to": 10,
+                            "text": "quoted"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "quote-multi-para",
+      "source": "> a\n>\n> b\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "> a\n>\n> b\n",
+        "blocks": [
+          {
+            "kind": "blockquote",
+            "from": 0,
+            "to": 9,
+            "callout": null,
+            "children": [
+              {
+                "kind": "paragraph",
+                "from": 2,
+                "to": 3,
+                "inline": [
+                  {
+                    "kind": "text",
+                    "from": 2,
+                    "to": 3,
+                    "text": "a"
+                  }
+                ]
+              },
+              {
+                "kind": "paragraph",
+                "from": 8,
+                "to": 9,
+                "inline": [
+                  {
+                    "kind": "text",
+                    "from": 8,
+                    "to": 9,
+                    "text": "b"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "quote-list",
+      "source": "> - item\n> - two\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "> - item\n> - two\n",
+        "blocks": [
+          {
+            "kind": "blockquote",
+            "from": 0,
+            "to": 16,
+            "callout": null,
+            "children": [
+              {
+                "kind": "list",
+                "ordered": false,
+                "from": 2,
+                "to": 16,
+                "items": [
+                  {
+                    "from": 2,
+                    "to": 8,
+                    "task": false,
+                    "checked": false,
+                    "children": []
+                  },
+                  {
+                    "from": 11,
+                    "to": 16,
+                    "task": false,
+                    "checked": false,
+                    "children": []
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "table-aligns",
+      "source": "| l | c | r |\n| :- | :-: | -: |\n| 1 | 2 | 3 |\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "| l | c | r |\n| :- | :-: | -: |\n| 1 | 2 | 3 |\n",
+        "blocks": [
+          {
+            "kind": "table",
+            "from": 0,
+            "to": 45,
+            "header": [
+              {
+                "from": 2,
+                "to": 3
+              },
+              {
+                "from": 6,
+                "to": 7
+              },
+              {
+                "from": 10,
+                "to": 11
+              }
+            ],
+            "aligns": [
+              "left",
+              "center",
+              "right"
+            ],
+            "rows": [
+              [
+                {
+                  "from": 34,
+                  "to": 35
+                },
+                {
+                  "from": 38,
+                  "to": 39
+                },
+                {
+                  "from": 42,
+                  "to": 43
+                }
+              ]
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "atx-trailing-hash",
+      "source": "## head ##\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "## head ##\n",
+        "blocks": [
+          {
+            "kind": "heading",
+            "level": 2,
+            "from": 0,
+            "to": 10,
+            "inline": [
+              {
+                "kind": "text",
+                "from": 3,
+                "to": 7,
+                "text": "head"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "atx-no-space",
+      "source": "#nospace plain\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "#nospace plain\n",
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "from": 0,
+            "to": 14,
+            "inline": [
+              {
+                "kind": "tag",
+                "from": 0,
+                "to": 8,
+                "tag": "nospace"
+              },
+              {
+                "kind": "text",
+                "from": 8,
+                "to": 14,
+                "text": " plain"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "hr-variants",
+      "source": "***\n\n___\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "***\n\n___\n",
+        "blocks": [
+          {
+            "kind": "hr",
+            "from": 0,
+            "to": 3
+          },
+          {
+            "kind": "hr",
+            "from": 5,
+            "to": 8
+          }
+        ]
+      }
+    },
+    {
+      "name": "para-interrupt-list",
+      "source": "para\n- item\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "para\n- item\n",
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "from": 0,
+            "to": 4,
+            "inline": [
+              {
+                "kind": "text",
+                "from": 0,
+                "to": 4,
+                "text": "para"
+              }
+            ]
+          },
+          {
+            "kind": "list",
+            "ordered": false,
+            "from": 5,
+            "to": 11,
+            "items": [
+              {
+                "from": 5,
+                "to": 11,
+                "task": false,
+                "checked": false,
+                "children": []
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "para-interrupt-atx",
+      "source": "para\n# head\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "para\n# head\n",
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "from": 0,
+            "to": 4,
+            "inline": [
+              {
+                "kind": "text",
+                "from": 0,
+                "to": 4,
+                "text": "para"
+              }
+            ]
+          },
+          {
+            "kind": "heading",
+            "level": 1,
+            "from": 5,
+            "to": 11,
+            "inline": [
+              {
+                "kind": "text",
+                "from": 7,
+                "to": 11,
+                "text": "head"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "link-title",
+      "source": "[t](https://x.com \"title\") tail\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "[t](https://x.com \"title\") tail\n",
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "from": 0,
+            "to": 31,
+            "inline": [
+              {
+                "kind": "link",
+                "from": 0,
+                "to": 26,
+                "href": "https://x.com",
+                "label": "t",
+                "form": "external",
+                "title": "title"
+              },
+              {
+                "kind": "text",
+                "from": 26,
+                "to": 31,
+                "text": " tail"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "link-paren-url",
+      "source": "[t](url(sub)) tail\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "[t](url(sub)) tail\n",
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "from": 0,
+            "to": 18,
+            "inline": [
+              {
+                "kind": "text",
+                "from": 0,
+                "to": 18,
+                "text": "[t](url(sub)) tail"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "reference-link",
+      "source": "[foo][bar] tail\n\n[bar]: https://x.com\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "[foo][bar] tail\n\n[bar]: https://x.com\n",
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "from": 0,
+            "to": 15,
+            "inline": [
+              {
+                "kind": "text",
+                "from": 0,
+                "to": 15,
+                "text": "[foo][bar] tail"
+              }
+            ]
+          },
+          {
+            "kind": "paragraph",
+            "from": 17,
+            "to": 37,
+            "inline": [
+              {
+                "kind": "text",
+                "from": 17,
+                "to": 37,
+                "text": "[bar]: https://x.com"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "wikilink-variants",
+      "source": "[[target]] [[a|b]] [[]] tail\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "[[target]] [[a|b]] [[]] tail\n",
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "from": 0,
+            "to": 28,
+            "inline": [
+              {
+                "kind": "wiki",
+                "from": 0,
+                "to": 10,
+                "target": "target",
+                "label": "target"
+              },
+              {
+                "kind": "text",
+                "from": 10,
+                "to": 11,
+                "text": " "
+              },
+              {
+                "kind": "wiki",
+                "from": 11,
+                "to": 18,
+                "target": "a",
+                "label": "b"
+              },
+              {
+                "kind": "text",
+                "from": 18,
+                "to": 28,
+                "text": " [[]] tail"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "footnote-def-multi",
+      "source": "[^a]: first\n[^b]: second\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "[^a]: first\n[^b]: second\n",
+        "blocks": [
+          {
+            "kind": "footnoteDef",
+            "from": 0,
+            "to": 11,
+            "label": "a",
+            "inline": [
+              {
+                "kind": "text",
+                "from": 6,
+                "to": 11,
+                "text": "first"
+              }
+            ]
+          },
+          {
+            "kind": "footnoteDef",
+            "from": 12,
+            "to": 24,
+            "label": "b",
+            "inline": [
+              {
+                "kind": "text",
+                "from": 18,
+                "to": 24,
+                "text": "second"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "html-inline-attrs",
+      "source": "<a href=\"x\">y</a> tail\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "<a href=\"x\">y</a> tail\n",
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "from": 0,
+            "to": 22,
+            "inline": [
+              {
+                "kind": "html",
+                "from": 0,
+                "to": 17,
+                "html": "<a href=\"x\">y</a>"
+              },
+              {
+                "kind": "text",
+                "from": 17,
+                "to": 22,
+                "text": " tail"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "comment-inline",
+      "source": "a <!-- c --> b\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "a <!-- c --> b\n",
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "from": 0,
+            "to": 14,
+            "inline": [
+              {
+                "kind": "text",
+                "from": 0,
+                "to": 2,
+                "text": "a "
+              },
+              {
+                "kind": "comment",
+                "from": 2,
+                "to": 12
+              },
+              {
+                "kind": "text",
+                "from": 12,
+                "to": 14,
+                "text": " b"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "math-mix",
+      "source": "$$a$$ inline $b$ tail\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "$$a$$ inline $b$ tail\n",
+        "blocks": [
+          {
+            "kind": "mathBlock",
+            "from": 0,
+            "to": 5,
+            "tex": "a"
+          },
+          {
+            "kind": "paragraph",
+            "from": 5,
+            "to": 21,
+            "inline": [
+              {
+                "kind": "text",
+                "from": 5,
+                "to": 21,
+                "text": " inline $b$ tail"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "cjk-punct",
+      "source": "**中文**「引号」#标签\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "**中文**「引号」#标签\n",
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "from": 0,
+            "to": 13,
+            "inline": [
+              {
+                "kind": "strong",
+                "from": 0,
+                "to": 6,
+                "children": [
+                  {
+                    "kind": "text",
+                    "from": 2,
+                    "to": 4,
+                    "text": "中文"
+                  }
+                ]
+              },
+              {
+                "kind": "text",
+                "from": 6,
+                "to": 10,
+                "text": "「引号」"
+              },
+              {
+                "kind": "tag",
+                "from": 10,
+                "to": 13,
+                "tag": "标签"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "tag-variants",
+      "source": "#a #a-b #a/b #1 #_x tail\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "#a #a-b #a/b #1 #_x tail\n",
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "from": 0,
+            "to": 24,
+            "inline": [
+              {
+                "kind": "tag",
+                "from": 0,
+                "to": 2,
+                "tag": "a"
+              },
+              {
+                "kind": "text",
+                "from": 2,
+                "to": 3,
+                "text": " "
+              },
+              {
+                "kind": "tag",
+                "from": 3,
+                "to": 7,
+                "tag": "a-b"
+              },
+              {
+                "kind": "text",
+                "from": 7,
+                "to": 8,
+                "text": " "
+              },
+              {
+                "kind": "tag",
+                "from": 8,
+                "to": 12,
+                "tag": "a/b"
+              },
+              {
+                "kind": "text",
+                "from": 12,
+                "to": 16,
+                "text": " #1 "
+              },
+              {
+                "kind": "tag",
+                "from": 16,
+                "to": 19,
+                "tag": "_x"
+              },
+              {
+                "kind": "text",
+                "from": 19,
+                "to": 24,
+                "text": " tail"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "autolink-trailing-punct",
+      "source": "see https://x.com/path. now\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "see https://x.com/path. now\n",
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "from": 0,
+            "to": 27,
+            "inline": [
+              {
+                "kind": "text",
+                "from": 0,
+                "to": 4,
+                "text": "see "
+              },
+              {
+                "kind": "autolink",
+                "from": 4,
+                "to": 22,
+                "href": "https://x.com/path",
+                "label": "https://x.com/path"
+              },
+              {
+                "kind": "text",
+                "from": 22,
+                "to": 27,
+                "text": ". now"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "link-trailing-backslash",
+      "source": "[a\\\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "[a\\\n",
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "from": 0,
+            "to": 3,
+            "inline": [
+              {
+                "kind": "text",
+                "from": 0,
+                "to": 3,
+                "text": "[a\\"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "declaration-multi-line",
+      "source": "<!DOCTYPE html>\ntext\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "<!DOCTYPE html>\ntext\n",
+        "blocks": [
+          {
+            "kind": "htmlBlock",
+            "from": 0,
+            "to": 15,
+            "html": "<!DOCTYPE html>"
+          },
+          {
+            "kind": "paragraph",
+            "from": 16,
+            "to": 20,
+            "inline": [
+              {
+                "kind": "text",
+                "from": 16,
+                "to": 20,
+                "text": "text"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "callout-bang-only",
+      "source": "> [!\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "> [!\n",
+        "blocks": [
+          {
+            "kind": "blockquote",
+            "from": 0,
+            "to": 4,
+            "callout": null,
+            "children": [
+              {
+                "kind": "paragraph",
+                "from": 2,
+                "to": 4,
+                "inline": [
+                  {
+                    "kind": "text",
+                    "from": 2,
+                    "to": 4,
+                    "text": "[!"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "callout-cjk-name",
+      "source": "> [!中文] x\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "> [!中文] x\n",
+        "blocks": [
+          {
+            "kind": "blockquote",
+            "from": 0,
+            "to": 9,
+            "callout": null,
+            "children": [
+              {
+                "kind": "paragraph",
+                "from": 2,
+                "to": 9,
+                "inline": [
+                  {
+                    "kind": "text",
+                    "from": 2,
+                    "to": 9,
+                    "text": "[!中文] x"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "fence-close-longer-run",
+      "source": "```\ncode\n`````\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "```\ncode\n`````\n",
+        "blocks": [
+          {
+            "kind": "fencedCode",
+            "from": 0,
+            "to": 14,
+            "lang": "",
+            "code": "code",
+            "contentFrom": 4,
+            "contentTo": 8
+          }
+        ]
+      }
+    }
+  ]
+}

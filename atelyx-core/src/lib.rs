@@ -7,6 +7,7 @@ pub mod chat_container;
 pub mod filesearch;
 pub mod host_runtime;
 pub mod layout;
+pub mod markdown;
 pub mod net_guard;
 pub mod plugin_process;
 pub mod search;

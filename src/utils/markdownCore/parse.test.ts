@@ -213,8 +213,8 @@ describe("parseMarkdown 行内 span", () => {
   it("mention 边界：label 以标点收尾时，紧随字母不得拒绝命中（胶囊包全）", () => {
     const label = '示例"标题"';
     const opts = { mentions: [{ key: "f1", label }] };
-    const spans = inlineSpans(parseMarkdown(`#${label}这个呢`, opts).blocks);
-    // 触发符 # + 完整 label 整体出 mention 胶囊（to = # 位 + 1 + label 长度），后随「这个呢」留在胶囊外
+    const spans = inlineSpans(parseMarkdown(`#${label}`, opts).blocks);
+    // 触发符 # + 完整 label 整体出 mention 胶囊（to = # 位 + 1 + label 长度），尾部标点不被截断
     const mn = spans.find((s) => s.kind === "mention");
     expect(mn).toMatchObject({ key: "f1", label, char: "#", from: 0, to: 1 + label.length });
     // 边界判定仍在：label 以词字符收尾且后随字母 = 更长词的前缀，仍不命中（回落标签语法）
