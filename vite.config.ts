@@ -51,8 +51,9 @@ export default defineConfig({
     strictPort: true,
     host: "127.0.0.1",
     watch: {
-      // 监听 Tauri 配置变化，触发热重载
-      ignored: ["**/src-tauri/target/**"],
+      // 监听 Tauri 配置变化，触发热重载；target = workspace 根的 Rust 构建产物
+      // （构建期间产物文件被锁，Windows 上 fs.watch 直接 EBUSY 崩溃，必须排除）
+      ignored: ["**/target/**"],
     },
   },
   envPrefix: ["VITE_", "TAURI_"],
