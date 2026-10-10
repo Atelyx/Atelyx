@@ -12,14 +12,30 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use atelyx_core::layout::{
-    self, apply_layout_op, normalize, op_passes_shape_check, AppUiState, LayoutOp, UI_STATE_SCHEMA,
+    self, apply_layout_op, normalize, op_passes_shape_check, AppUiState, DetachedWindow,
+    LayoutOp, WindowBounds, UI_STATE_SCHEMA,
 };
 use atelyx_core::vault;
 use iced::widget::{space, text_editor};
-use iced::window::{self, Settings};
+use iced::window::{self, Level, Mode, Position, Settings};
 use iced::{keyboard, mouse, Element, Event, Point, Size, Subscription, Task, Theme};
 
 use layout_view::{enumerate_dividers, RenameState, RenameTarget, UiMetrics};
+
+/// 撕裂窗口建窗参数：bounds 恢复位置 + 条目 OS 选项（不进任务栏）。
+fn panel_settings(w: &DetachedWindow) -> Settings {
+    let mut settings = Settings {
+        size: Size::new(w.bounds.width.max(200.0) as f32, w.bounds.height.max(160.0) as f32),
+        position: Position::Specific(Point::new(w.bounds.x as f32, w.bounds.y as f32)),
+        exit_on_close_request: false,
+        ..Settings::default()
+    };
+    #[cfg(windows)]
+    {
+        settings.platform_specific.skip_taskbar = w.options.skip_taskbar;
+    }
+    settings
+}
 
 fn main() -> iced::Result {
     iced::daemon(App::boot, App::update, App::view)
@@ -95,6 +111,18 @@ enum Message {
     PanelTabLock(String, String),
     PanelSplit(String, String),
     PanelClose(String),
+    PanelTearOff(String, String),
+    /// 撕出边界已按主窗口位置解析（主窗口位置 + 级联偏移）。
+    TearOffAt(String, String, Option<Point>),
+    DetachedTab(String, String),
+    DetachedTabClose(String, String),
+    DetachedTabLock(String, String),
+    DetachedDockBack(String),
+    DetachedClose(String),
+    DetachedPin(String),
+    DetachedFocusLost(window::Id),
+    WindowMoved(window::Id, Point),
+    ScaleKnown(window::Id, f32),
     LayoutActivate(String),
     LayoutNew,
     LayoutRenameStart(String),
@@ -126,8 +154,10 @@ pub struct App {
     pub vault_root: Option<PathBuf>,
     /// 主窗口（渲染激活布局树）；None = 首帧在途。
     main_id: Option<window::Id>,
-    /// 撕裂窗口 OS 注册：iced 窗口 id → 模型窗口 id（撕裂窗口调和在后续步骤接线）。
+    /// 撕裂窗口 OS 注册：iced 窗口 id → 模型窗口 id（建窗前预注册，见 reconcile）。
     detached_os: HashMap<window::Id, String>,
+    /// OS 窗口当前可见态（调和比对基准；建窗即视为可见）。
+    os_shown: HashMap<window::Id, bool>,
     /// files 视图懒加载子项缓存（key = 目录相对路径，根为 ""；运行态不落盘）。
     pub children: HashMap<String, Vec<(String, bool)>>,
     /// note 视图编辑器内容与脏标记（视图实例全局唯一）。
@@ -159,6 +189,7 @@ impl App {
                 vault_root: None,
                 main_id: None,
                 detached_os: HashMap::new(),
+                os_shown: HashMap::new(),
                 children: HashMap::new(),
                 editor: text_editor::Content::new(),
                 dirty: false,
@@ -177,15 +208,33 @@ impl App {
             Message::WindowOpened(id) => {
                 if self.main_id.is_none() {
                     self.main_id = Some(id);
+                    // 主窗口就绪即调和：启动恢复 restore_on_launch 的撕裂窗口
+                    return self.reconcile();
                 }
                 Task::none()
             }
             Message::WindowCloseRequested(id) => {
-                if self.dirty {
-                    self.status = "有未保存改动，先 Ctrl+S 保存".into();
-                    Task::none()
+                if self.main_id == Some(id) {
+                    if self.dirty {
+                        self.status = "有未保存改动，先 Ctrl+S 保存".into();
+                        return Task::none();
+                    }
+                    return window::close(id);
+                }
+                // 撕裂窗口按条目选项分流：close_hides = 隐藏不销毁，否则销毁条目
+                let Some(model_id) = self.detached_os.get(&id).cloned() else {
+                    return window::close(id);
+                };
+                let close_hides = self
+                    .ui
+                    .detached_windows
+                    .iter()
+                    .find(|w| w.id == model_id)
+                    .is_some_and(|w| w.options.close_hides);
+                if close_hides {
+                    self.apply(LayoutOp::HideDetachedWindow { window_id: model_id })
                 } else {
-                    window::close(id)
+                    self.apply(LayoutOp::RemoveDetachedWindow { window_id: model_id })
                 }
             }
             Message::WindowClosed(id) => {
@@ -193,6 +242,7 @@ impl App {
                     iced::exit()
                 } else {
                     self.detached_os.remove(&id);
+                    self.os_shown.remove(&id);
                     Task::none()
                 }
             }
@@ -351,6 +401,104 @@ impl App {
                 position: Some("after".into()),
             }),
             Message::PanelClose(panel_id) => self.apply(LayoutOp::ClosePanel { panel_id }),
+            Message::PanelTearOff(panel_id, tab_id) => {
+                // 新窗边界以主窗口位置级联（老壳按主显示器推导，此处取主窗位置 + 偏移）
+                let Some(main) = self.main_id else { return Task::none() };
+                window::position(main)
+                    .map(move |pos| Message::TearOffAt(panel_id.clone(), tab_id.clone(), pos))
+            }
+            Message::TearOffAt(panel_id, tab_id, pos) => {
+                let bounds = WindowBounds {
+                    x: pos.map_or(60.0, |p| (p.x as f64) + 40.0),
+                    y: pos.map_or(60.0, |p| (p.y as f64) + 40.0),
+                    width: 420.0,
+                    height: 560.0,
+                    scale: 0.0,
+                };
+                self.apply(LayoutOp::TearOff { panel_id, tab_id, bounds })
+            }
+            Message::DetachedTab(window_id, tab_id) => {
+                self.apply(LayoutOp::DetachedSetActive { window_id, tab_id })
+            }
+            Message::DetachedTabClose(window_id, tab_id) => {
+                self.apply(LayoutOp::DetachedCloseTab { window_id, tab_id })
+            }
+            Message::DetachedTabLock(window_id, tab_id) => {
+                let locked = self
+                    .ui
+                    .detached_windows
+                    .iter()
+                    .find(|w| w.id == window_id)
+                    .and_then(|w| w.tabs.iter().find(|t| t.id == tab_id))
+                    .is_some_and(|t| t.locked);
+                self.apply(LayoutOp::DetachedSetLocked { window_id, tab_id, locked: !locked })
+            }
+            Message::DetachedDockBack(window_id) => {
+                let Some(tab_id) = self
+                    .ui
+                    .detached_windows
+                    .iter()
+                    .find(|w| w.id == window_id)
+                    .and_then(|w| w.active_tab_id.clone())
+                else {
+                    return Task::none();
+                };
+                let Some(tree) = self.active_tree() else { return Task::none() };
+                let mut panels = Vec::new();
+                layout::collect_panels(&tree, &mut panels);
+                let Some(panel_id) = panels.first().map(|p| p.node_id().to_string()) else {
+                    self.status = "当前布局无面板，先分割出面板".into();
+                    return Task::none();
+                };
+                self.apply(LayoutOp::DockIntoPanel { panel_id, tab_id, index: None })
+            }
+            Message::DetachedClose(window_id) => {
+                self.apply(LayoutOp::RemoveDetachedWindow { window_id })
+            }
+            Message::DetachedPin(window_id) => {
+                let pinned = self
+                    .ui
+                    .detached_windows
+                    .iter()
+                    .find(|w| w.id == window_id)
+                    .is_some_and(|w| w.pinned);
+                self.apply(LayoutOp::SetDetachedWindowPinned { window_id, pinned: !pinned })
+            }
+            Message::DetachedFocusLost(os_id) => {
+                let Some(model_id) = self.detached_os.get(&os_id).cloned() else {
+                    return Task::none();
+                };
+                let hide = self
+                    .ui
+                    .detached_windows
+                    .iter()
+                    .find(|w| w.id == model_id)
+                    .is_some_and(|w| w.options.hide_on_blur && !w.pinned && !w.hidden);
+                if hide {
+                    self.apply(LayoutOp::HideDetachedWindow { window_id: model_id })
+                } else {
+                    Task::none()
+                }
+            }
+            Message::WindowMoved(id, pos) => {
+                let Some(model_id) = self.detached_os.get(&id) else { return Task::none() };
+                if let Some(w) = self.ui.detached_windows.iter_mut().find(|w| w.id == *model_id) {
+                    w.bounds.x = pos.x as f64;
+                    w.bounds.y = pos.y as f64;
+                    self.schedule_persist();
+                }
+                Task::none()
+            }
+            Message::ScaleKnown(id, sf) => {
+                let Some(model_id) = self.detached_os.get(&id) else { return Task::none() };
+                if let Some(w) = self.ui.detached_windows.iter_mut().find(|w| w.id == *model_id) {
+                    if (w.bounds.scale - sf as f64).abs() > f64::EPSILON {
+                        w.bounds.scale = sf as f64;
+                        self.schedule_persist();
+                    }
+                }
+                Task::none()
+            }
             Message::LayoutActivate(id) => self.apply(LayoutOp::ActivateLayout { id }),
             Message::LayoutNew => self.apply(LayoutOp::AddLayout),
             Message::LayoutRenameStart(id) => {
@@ -431,6 +579,14 @@ impl App {
             Message::WindowResized(id, size) => {
                 if self.main_id == Some(id) {
                     self.main_size = size;
+                    return Task::none();
+                }
+                // 撕裂窗口尺寸回写模型 bounds（OS 窗口事件 = bounds 唯一写者）
+                let Some(model_id) = self.detached_os.get(&id) else { return Task::none() };
+                if let Some(w) = self.ui.detached_windows.iter_mut().find(|w| w.id == *model_id) {
+                    w.bounds.width = size.width as f64;
+                    w.bounds.height = size.height as f64;
+                    self.schedule_persist();
                 }
                 Task::none()
             }
@@ -493,14 +649,82 @@ impl App {
         }
     }
 
-    /// 应用一个布局操作：形状校验 + 变更 + 调度落盘（iced 单状态树天然全窗口可见，无广播层）。
+    /// 应用一个布局操作：形状校验 + 变更 + 调度落盘 + 撕裂窗口调和
+    /// （iced 单状态树天然全窗口可见，无广播层）。
     fn apply(&mut self, op: LayoutOp) -> Task<Message> {
         if !op_passes_shape_check(&self.ui, &op) {
             return Task::none();
         }
         let _result = apply_layout_op(&mut self.ui, &op);
         self.schedule_persist();
-        Task::none()
+        self.reconcile()
+    }
+
+    /// 撕裂窗口调和：模型条目 → OS 窗口。缺失即建（bounds/选项随条目）、
+    /// hidden 态与 OS 可见性同步、模型已无条目的 OS 窗口（幽灵）回收。
+    /// bounds 权威 = OS 窗口事件回写模型；恢复位置只读模型（show 时按模型搬位）。
+    fn reconcile(&mut self) -> Task<Message> {
+        let mut task = Task::none();
+        for entry in self.ui.detached_windows.clone() {
+            let known = self
+                .detached_os
+                .iter()
+                .find(|(_, mid)| mid.as_str() == entry.id)
+                .map(|(os, _)| *os);
+            let Some(os_id) = known else {
+                if entry.hidden {
+                    continue;
+                }
+                let (os_id, open) = window::open(panel_settings(&entry));
+                self.detached_os.insert(os_id, entry.id.clone());
+                self.os_shown.insert(os_id, true);
+                task = task
+                    .chain(open.map(Message::WindowOpened))
+                    .chain(window::set_level(
+                        os_id,
+                        if entry.options.always_on_top {
+                            Level::AlwaysOnTop
+                        } else {
+                            Level::Normal
+                        },
+                    ))
+                    .chain(window::scale_factor(os_id).map(move |sf| Message::ScaleKnown(os_id, sf)));
+                continue;
+            };
+            let shown = self.os_shown.get(&os_id).copied().unwrap_or(true);
+            if entry.hidden && shown {
+                self.os_shown.insert(os_id, false);
+                task = task.chain(window::set_mode(os_id, Mode::Hidden));
+            } else if !entry.hidden && !shown {
+                // 唤起：按模型 bounds 搬位（隐藏期间的位置变更以模型为准）
+                self.os_shown.insert(os_id, true);
+                task = task
+                    .chain(window::set_mode(os_id, Mode::Windowed))
+                    .chain(window::move_to(os_id, Point::new(entry.bounds.x as f32, entry.bounds.y as f32)))
+                    .chain(window::resize(os_id, Size::new(entry.bounds.width as f32, entry.bounds.height as f32)))
+                    .chain(window::set_level(
+                        os_id,
+                        if entry.options.always_on_top {
+                            Level::AlwaysOnTop
+                        } else {
+                            Level::Normal
+                        },
+                    ))
+                    .chain(window::gain_focus(os_id));
+            }
+        }
+        let ghosts: Vec<window::Id> = self
+            .detached_os
+            .iter()
+            .filter(|(_, mid)| !self.ui.detached_windows.iter().any(|w| w.id == mid.as_str()))
+            .map(|(os, _)| *os)
+            .collect();
+        for os in ghosts {
+            self.detached_os.remove(&os);
+            self.os_shown.remove(&os);
+            task = task.chain(window::close(os));
+        }
+        task
     }
 
     fn schedule_persist(&mut self) {
@@ -571,15 +795,30 @@ impl App {
     }
 
     fn title(&self, id: window::Id) -> String {
-        let _ = id;
-        "Atelyx".into()
+        if self.main_id == Some(id) {
+            return "Atelyx".into();
+        }
+        // 撕裂窗口标题 = 激活视图名
+        let Some(model_id) = self.detached_os.get(&id) else { return "Atelyx".into() };
+        self.ui
+            .detached_windows
+            .iter()
+            .find(|w| w.id == *model_id)
+            .and_then(|w| {
+                w.active_tab_id.as_deref().and_then(|tid| {
+                    w.tabs.iter().find(|t| t.id == tid).map(|t| {
+                        format!("Atelyx — {}", layout_view::view_label(&t.view))
+                    })
+                })
+            })
+            .unwrap_or_else(|| "Atelyx".into())
     }
 
     fn view(&self, id: window::Id) -> Element<'_, Message> {
         if self.main_id == Some(id) {
             layout_view::main_view(self)
-        } else if self.detached_os.contains_key(&id) {
-            layout_view::detached_view(self, &self.detached_os[&id])
+        } else if let Some(model_id) = self.detached_os.get(&id) {
+            layout_view::detached_view(self, model_id)
         } else {
             space().into()
         }
@@ -600,6 +839,13 @@ impl App {
                 Event::Window(window::Event::Closed) => Some(Message::WindowClosed(window)),
                 Event::Window(window::Event::Resized(size)) => {
                     Some(Message::WindowResized(window, size))
+                }
+                Event::Window(window::Event::Moved(pos)) => {
+                    Some(Message::WindowMoved(window, pos))
+                }
+                Event::Window(window::Event::Unfocused) => Some(Message::DetachedFocusLost(window)),
+                Event::Window(window::Event::Rescaled(sf)) => {
+                    Some(Message::ScaleKnown(window, sf))
                 }
                 Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                     Some(Message::DividerPressed(window))

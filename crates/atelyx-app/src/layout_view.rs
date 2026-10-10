@@ -92,19 +92,77 @@ fn active_tree(ui: &AppUiState) -> &LayoutNode {
     }
 }
 
-/// 撕裂窗口：单面板标签组（OS 窗口调和接线前的占位渲染）。
+/// 撕裂窗口：单面板标签组 + 条目级操作（拖回/图钉/关闭）。
 pub fn detached_view<'a>(app: &'a App, window_id: &str) -> Element<'a, Message> {
     let Some(w) = app.ui.detached_windows.iter().find(|w| w.id == window_id) else {
         return space().into();
     };
-    match w
+
+    let mut tab_bar = row![].spacing(2);
+    for t in &w.tabs {
+        let is_active = w.active_tab_id.as_deref() == Some(t.id.as_str());
+        let label = if t.locked {
+            format!("🔒{}", view_label(&t.view))
+        } else {
+            view_label(&t.view).to_string()
+        };
+        tab_bar = tab_bar.push(
+            button(text(label).size(12))
+                .padding([3, 8])
+                .style(if is_active { button::primary } else { button::text })
+                .on_press_maybe(
+                    (!is_active).then(|| Message::DetachedTab(w.id.clone(), t.id.clone())),
+                ),
+        );
+    }
+
+    let mut actions = row![].spacing(2);
+    let active = w
         .tabs
         .iter()
-        .find(|t| Some(t.id.as_str()) == w.active_tab_id.as_deref())
-    {
-        Some(active) => view_content(app, &active.view),
-        None => placeholder("空面板"),
+        .find(|t| Some(t.id.as_str()) == w.active_tab_id.as_deref());
+    if let Some(t) = active {
+        actions = actions.push(small_button(
+            if t.locked { "解锁" } else { "锁定" },
+            Message::DetachedTabLock(w.id.clone(), t.id.clone()),
+        ));
+        actions = actions.push(
+            button(text("关标签").size(11))
+                .padding([3, 6])
+                .on_press_maybe(
+                    (!t.locked).then(|| Message::DetachedTabClose(w.id.clone(), t.id.clone())),
+                ),
+        );
+        actions = actions.push(small_button("拖回主窗", Message::DetachedDockBack(w.id.clone())));
     }
+    if w.options.hide_on_blur {
+        actions = actions.push(small_button(
+            if w.pinned { "已钉" } else { "图钉" },
+            Message::DetachedPin(w.id.clone()),
+        ));
+    }
+    actions = actions.push(small_button("关闭窗口", Message::DetachedClose(w.id.clone())));
+
+    let content = active
+        .map(|t| view_content(app, &t.view))
+        .unwrap_or_else(|| placeholder("空面板"));
+
+    column![
+        container(
+            row![
+                tab_bar,
+                iced::widget::Space::new().width(Length::Fill),
+                actions,
+            ]
+            .spacing(8)
+        )
+        .padding([2, 4])
+        .height(Length::Fixed(UiMetrics::TAB_BAR_H)),
+        content,
+    ]
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
 }
 
 fn scene_bar(app: &App) -> Element<'_, Message> {
@@ -319,6 +377,12 @@ fn panel_view<'a>(
         .push(small_button("右分", Message::PanelSplit(panel_id.to_string(), "horizontal".into())))
         .push(small_button("下分", Message::PanelSplit(panel_id.to_string(), "vertical".into())))
         .push(small_button("关面板", Message::PanelClose(panel_id.to_string())));
+    if let Some(t) = active.filter(|t| !t.locked) {
+        actions = actions.push(small_button(
+            "撕出",
+            Message::PanelTearOff(panel_id.to_string(), t.id.clone()),
+        ));
+    }
 
     let content: Element<'_, Message> = match active {
         None => placeholder("空面板"),
