@@ -157,6 +157,28 @@ fn parse_conformance() {
 }
 
 #[test]
+fn indented_atx_heading_does_not_panic() {
+    // 列表项内缩进的 ATX 标题：行内片段偏移必须回加行首缩进（`line.start + ind + h.to`），
+    // 否则偏移落在行首缩进字节内、切进多字节字符而 panic。语料覆盖 3/4 字节字符与嵌套层级。
+    for source in [
+        "- # 顶层\n\t- ## 二级\n\t  # 三级\n",
+        "- 甲\n  # 标题\n",
+        "- 甲\n\t# 😀四字节字符\n",
+        "\t#### 四级标题\n",
+    ] {
+        let doc = atelyx_core::markdown::parse_markdown(
+            source,
+            &atelyx_core::markdown::ParseOptions::default(),
+        );
+        let json = serde_json::to_string(&doc).unwrap();
+        assert!(
+            json.contains("顶层") || json.contains("标题") || json.contains("甲"),
+            "{source:?} 未产出正文"
+        );
+    }
+}
+
+#[test]
 fn snapshot_contract_roundtrip() {
     // serde 契约自检：快照 → core 类型 → 回 JSON（UTF-16 转换后）与原快照逐值相等。
     for (name, value) in snapshot_cases() {

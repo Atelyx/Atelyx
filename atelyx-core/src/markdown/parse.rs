@@ -49,6 +49,13 @@ pub fn parse_markdown(source: &str, options: &ParseOptions) -> MarkdownDocument 
     MarkdownDocument { source: source.to_string(), blocks }
 }
 
+/// 按源区间做行内解析：表格单元格与列表项内容在块规格里只带 from/to，
+/// 行内片段由渲染层按区间重解析（与正文同一套行内语义）。
+pub fn parse_inline(source: &str, from: usize, to: usize, options: &ParseOptions) -> Vec<InlineSpan> {
+    let ctx = Ctx { source, options, no_bare_autolink: false };
+    inline::parse_inline_range(&ctx, from, to)
+}
+
 // ===== 行原语 =====
 
 /// 行视图：行尾偏移在 `\n` 之前（CRLF 源文本的 `\r` 属行内容，与前端内核一致）。
@@ -83,8 +90,63 @@ fn trim_indent(text: &str) -> &str {
     text.trim_start_matches([' ', '\t'])
 }
 
+/// 行首空白从 `col` 列起算的（字节数，列数）。Tab 前进到 4 的下一档列。
+fn indent_from(text: &str, col: usize) -> (usize, usize) {
+    let bytes = text.as_bytes();
+    let mut c = col;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b' ' => c += 1,
+            b'\t' => c = (c / 4 + 1) * 4,
+            _ => break,
+        }
+        i += 1;
+    }
+    (i, c - col)
+}
+
+fn indent_prefix(text: &str) -> (usize, usize) {
+    indent_from(text, 0)
+}
+
 fn indent_prefix_len(text: &str) -> usize {
-    text.len() - trim_indent(text).len()
+    indent_prefix(text).0
+}
+
+fn indent_columns(text: &str) -> usize {
+    indent_prefix(text).1
+}
+
+/// 容器剥前缀：消耗 `want` 列后，行首剩余空白折成等宽空格，返回（跳过字节数，空格列数）。
+/// Tab 整格消费（对齐到列档），剩余列须从消费后的列位置起算，故一律折成空格。
+fn fold_indent(text: &str, want: usize) -> (usize, usize) {
+    let (stop, overshoot) = consume_columns(text, want);
+    let (rest_bytes, rest_cols) = indent_from(&text[stop..], want + overshoot);
+    (stop + rest_bytes, rest_cols)
+}
+
+/// 从行首消耗至多 `want` 列缩进：返回（跳过字节数，Tab 越档额外消耗的列数）。
+/// Tab 对齐到下一列档，所得字节位置即消耗后的起点。
+fn consume_columns(text: &str, want: usize) -> (usize, usize) {
+    let bytes = text.as_bytes();
+    let mut col = 0usize;
+    let mut i = 0usize;
+    while col < want && i < bytes.len() {
+        match bytes[i] {
+            b' ' => col += 1,
+            b'\t' => {
+                let next = (col / 4 + 1) * 4;
+                if next > want {
+                    return (i + 1, next - want);
+                }
+                col = next;
+            }
+            _ => break,
+        }
+        i += 1;
+    }
+    (i, 0)
 }
 
 fn is_blank(text: &str) -> bool {
@@ -108,10 +170,10 @@ fn parse_blocks(
             pos = next_pos(&line, to, src);
             continue;
         }
-        let body = trim_indent(line.text);
-        let ind = line.text.len() - body.len();
+        let (ind, ind_cols) = indent_prefix(line.text);
+        let body = &line.text[ind..];
 
-        if ind <= 3 {
+        if ind_cols <= 3 {
             if let Some(fence) = fence_open(body) {
                 let (block, next) = collect_fenced_code(ctx, &line, ind, fence, to);
                 blocks.push(block);
@@ -120,10 +182,12 @@ fn parse_blocks(
             }
             if let Some(h) = atx_heading(body) {
                 // 块区间 = 整行（含尾 # 序列）；行内片段 = 剥标记后的内容区间
-                let inline = inline::parse_inline_range(ctx, line.start + h.from, line.start + h.to);
+                // h.from/h.to 相对去掉行首缩进的 body，回加 ind 才是行内绝对偏移
+                let base = line.start + ind;
+                let inline = inline::parse_inline_range(ctx, base + h.from, base + h.to);
                 blocks.push(MarkdownBlock::Heading {
                     level: h.level,
-                    from: line.start,
+                    from: base,
                     to: line.end,
                     inline,
                 });
@@ -143,13 +207,13 @@ fn parse_blocks(
                 continue;
             }
             if let Some(kind) = list_kind(body) {
-                let (block, next) = collect_list(ctx, &line, ind, kind, to);
+                let (block, next) = collect_list(ctx, &line, ind, ind_cols, kind, to);
                 blocks.push(block);
                 pos = next;
                 continue;
             }
             if is_hr(body) {
-                blocks.push(MarkdownBlock::Hr { from: line.start, to: line.end });
+                blocks.push(MarkdownBlock::Hr { from: line.start + ind, to: line.end });
                 pos = next_pos(&line, to, src);
                 continue;
             }
@@ -164,7 +228,7 @@ fn parse_blocks(
                 }
             }
         }
-        if ind >= 4 {
+        if ind_cols >= 4 {
             let (block, next) = collect_indented_code(ctx, &line, to);
             blocks.push(block);
             pos = next;
@@ -216,10 +280,9 @@ fn collect_fenced_code(ctx: &Ctx, first: &Line, ind: usize, fence: FenceOpen, to
     while pos < to {
         let line = read_line(src, pos, to);
         let body = trim_indent(line.text);
-        let line_ind = line.text.len() - body.len();
         let closes = {
             let run = run_len(body.as_bytes(), 0, body.len(), fence.ch);
-            line_ind <= 3 && run >= fence.run && body[run..].trim().is_empty()
+            indent_columns(line.text) <= 3 && run >= fence.run && body[run..].trim().is_empty()
         };
         if closes {
             close_start = line.start;
@@ -239,7 +302,7 @@ fn collect_fenced_code(ctx: &Ctx, first: &Line, ind: usize, fence: FenceOpen, to
     // 闭围栏行行尾即块尾（含空行正文时的 fallback 语义）
     let close_line_end = if close_start < to { read_line(src, close_start, to).end } else { to };
     let block = MarkdownBlock::FencedCode {
-        from: first.start,
+        from: first.start + ind,
         to: close_line_end,
         lang,
         code: src[content_from..content_to].to_string(),
@@ -401,6 +464,7 @@ const BLOCK_TAGS: &[&str] = &[
 
 fn collect_html_block(ctx: &Ctx, first: &Line, to: usize, kind: HtmlKind) -> (MarkdownBlock, usize) {
     let src = ctx.source;
+    let from = first.start + indent_prefix_len(first.text);
     let mut pos = next_pos(first, to, src);
     let mut last = first.end;
     let done = |line: &Line| -> bool {
@@ -439,9 +503,9 @@ fn collect_html_block(ctx: &Ctx, first: &Line, to: usize, kind: HtmlKind) -> (Ma
         }
     }
     let block = MarkdownBlock::HtmlBlock {
-        from: first.start,
+        from,
         to: last,
-        html: src[first.start..last].to_string(),
+        html: src[from..last].to_string(),
     };
     (block, next_after(src, last, to))
 }
@@ -457,15 +521,14 @@ fn contains_ignore_case(haystack: &str, needle: &[u8]) -> bool {
 
 // ===== 引用块 =====
 
-/// 一层引用前缀宽度（`[ \t]*>[ \t]?`）。
-fn quote_prefix_len(text: &str) -> Option<usize> {
-    let ind = indent_prefix_len(text);
-    if ind > 3 || !text[ind..].starts_with('>') {
+/// 一层引用前缀 `[ ]{0,3}>` + 至多 1 列空白：返回（跳过字节数，剩余缩进折成的空格列数）。
+fn quote_prefix(text: &str) -> Option<(usize, usize)> {
+    let (ind, ind_cols) = indent_prefix(text);
+    if ind_cols > 3 || !text[ind..].starts_with('>') {
         return None;
     }
-    let after = &text[ind + 1..];
-    let spaces = after.len() - after.trim_start_matches([' ', '\t']).len();
-    Some(ind + 1 + spaces.min(1))
+    let (ws_bytes, ws_cols) = indent_from(&text[ind + 1..], ind_cols + 1);
+    Some((ind + 1 + ws_bytes, ws_cols.saturating_sub(1)))
 }
 
 /// 段落续行判定（lazy continuation 依据）：非空、缩进 <4、不是任何块起始。
@@ -473,8 +536,8 @@ fn is_paragraph_continuation(text: &str) -> bool {
     if is_blank(text) {
         return false;
     }
-    let ind = indent_prefix_len(text);
-    if ind >= 4 {
+    let (ind, ind_cols) = indent_prefix(text);
+    if ind_cols >= 4 {
         return false;
     }
     let body = &text[ind..];
@@ -508,15 +571,16 @@ fn is_link_ref_def_line(body: &str) -> bool {
 fn collect_blockquote(ctx: &Ctx, first: &Line, to: usize) -> (MarkdownBlock, usize) {
     let src = ctx.source;
     let mut lines: Vec<Line> = vec![*first];
-    let mut strips: Vec<(usize, usize)> = vec![(first.start, quote_prefix_len(first.text).unwrap_or(0))];
+    let (first_skip, first_pad) = quote_prefix(first.text).unwrap_or((0, 0));
+    let mut strips: Vec<(usize, usize, usize)> = vec![(first.start, first_skip, first_pad)];
     let mut pos = next_pos(first, to, src);
     while pos < to {
         let line = read_line(src, pos, to);
         if is_blank(line.text) {
             break;
         }
-        if let Some(w) = quote_prefix_len(line.text) {
-            strips.push((line.start, w));
+        if let Some((skip, pad)) = quote_prefix(line.text) {
+            strips.push((line.start, skip, pad));
         } else if !is_paragraph_continuation(line.text) {
             break;
         }
@@ -527,7 +591,8 @@ fn collect_blockquote(ctx: &Ctx, first: &Line, to: usize) -> (MarkdownBlock, usi
     let bq_from = first.start + indent_prefix_len(first.text);
     let bq_to = lines.last().unwrap().end;
     let prefix_end = strips.first().map(|s| s.0 + s.1).unwrap_or(0);
-    let mut children = recurse_container(ctx, strips, bq_from, bq_to);
+    // 递归从行首起（strips 以行首为键；行首缩进由引用前缀一并剥掉）
+    let mut children = recurse_container(ctx, strips, first.start, bq_to);
     // 续行 `>` 前缀剔除（贪婪逐行；只影响落在子块区间内的前缀）
     strip_quote_prefixes(&mut children, quote_line_prefixes(ctx.source, bq_from, bq_to), ctx.source);
 
@@ -685,6 +750,7 @@ fn collect_list(
     ctx: &Ctx,
     first: &Line,
     first_ind: usize,
+    first_ind_cols: usize,
     kind: ListKind,
     to: usize,
 ) -> (MarkdownBlock, usize) {
@@ -705,9 +771,7 @@ fn collect_list(
                     continue;
                 }
                 let body = trim_indent(l.text);
-                if (l.text.len() - body.len()) <= 3
-                    && list_kind(body).is_some_and(|k| k == kind)
-                {
+                if indent_columns(l.text) <= 3 && list_kind(body).is_some_and(|k| k == kind) {
                     pos = peek;
                     continue 'outer;
                 }
@@ -715,10 +779,10 @@ fn collect_list(
             }
             break;
         }
-        let body = trim_indent(line.text);
-        let ind = line.text.len() - body.len();
+        let (ind, ind_cols) = indent_prefix(line.text);
+        let body = &line.text[ind..];
         let marker_len = marker_len_of(body, kind);
-        let Some(marker_len) = (ind <= 3).then_some(marker_len).flatten() else {
+        let Some(marker_len) = (ind_cols <= 3).then_some(marker_len).flatten() else {
             break;
         };
         let spaces = marker_spaces_of(body, marker_len);
@@ -727,7 +791,7 @@ fn collect_list(
             // 空项不打断当前项流，但也构成独立项（ListItem 可为空）
             let item_to = line.end;
             items.push(MarkdownListItem {
-                from: line.start,
+                from: line.start + ind,
                 to: item_to,
                 task: false,
                 checked: false,
@@ -738,12 +802,12 @@ fn collect_list(
             continue;
         }
         // 收集项：首行 + 续行（缩进 ≥W 或 lazy）
-        let width = first_ind + item_content_width(marker_len, spaces);
+        let width = first_ind_cols + item_content_width(marker_len, spaces);
         let item_from = line.start;
+        let mark_from = line.start + ind;
         let content_off = marker_len + spaces;
         let (task, checked) = task_marker_of(&body[content_off..]);
-        let mut strips: Vec<(usize, usize)> =
-            vec![(line.start, ind + content_off)];
+        let mut strips: Vec<(usize, usize, usize)> = vec![(line.start, ind + content_off, 0)];
         let mut last = line.end;
         let mut j = next_pos(&line, to, src);
         while j < to {
@@ -758,9 +822,8 @@ fn collect_list(
                         peek = next_pos(&pl, to, src);
                         continue;
                     }
-                    let pind = indent_prefix_len(pl.text);
-                    continues = pind >= width
-                        || ((pl.text.len() - trim_indent(pl.text).len()) <= 3
+                    continues = indent_columns(pl.text) >= width
+                        || (indent_columns(pl.text) <= 3
                             && list_kind(trim_indent(pl.text)).is_some_and(|k| k == kind));
                     break;
                 }
@@ -771,9 +834,9 @@ fn collect_list(
                 }
                 break;
             }
-            let lind = indent_prefix_len(l.text);
-            if lind >= width {
-                strips.push((l.start, width.min(lind)));
+            if indent_columns(l.text) >= width {
+                let (skip, pad) = fold_indent(l.text, width);
+                strips.push((l.start, skip, pad));
                 last = l.end;
                 j = next_pos(&l, to, src);
                 continue;
@@ -793,11 +856,16 @@ fn collect_list(
             Some(MarkdownBlock::Paragraph { .. }) => children_raw.into_iter().skip(1).collect(),
             _ => children_raw,
         };
-        items.push(MarkdownListItem { from: item_from, to: item_to, task, checked, children });
+        items.push(MarkdownListItem { from: mark_from, to: item_to, task, checked, children });
         list_to = item_to;
         pos = j;
     }
-    let block = MarkdownBlock::List { ordered: matches!(kind, ListKind::Ordered(_)), from: first.start, to: list_to, items };
+    let block = MarkdownBlock::List {
+        ordered: matches!(kind, ListKind::Ordered(_)),
+        from: first.start + first_ind,
+        to: list_to,
+        items,
+    };
     (block, next_after(src, list_to, to))
 }
 
@@ -964,7 +1032,13 @@ fn collect_table(ctx: &Ctx, first: &Line, to: usize) -> (MarkdownBlock, usize) {
         .map(|(t, off)| table_cells(t, *off))
         .collect();
     let last = lines.last().unwrap();
-    let block = MarkdownBlock::Table { from: first.start, to: last.end, header, aligns, rows };
+    let block = MarkdownBlock::Table {
+        from: first.start + indent_prefix_len(first.text),
+        to: last.end,
+        header,
+        aligns,
+        rows,
+    };
     (block, next_after(src, last.end, to))
 }
 
@@ -1013,7 +1087,7 @@ fn cell_range(seg: &[&Vc], abs_start: usize) -> MarkdownTableCell {
 
 fn collect_indented_code(ctx: &Ctx, first: &Line, to: usize) -> (MarkdownBlock, usize) {
     let src = ctx.source;
-    let from = first.start + 4.min(indent_prefix_len(first.text));
+    let from = first.start + consume_columns(first.text, 4).0;
     let mut to_b = first.end;
     let mut code = strip_indent_4(first.text).to_string();
     let mut pos = next_pos(first, to, src);
@@ -1029,7 +1103,7 @@ fn collect_indented_code(ctx: &Ctx, first: &Line, to: usize) -> (MarkdownBlock, 
                     peek = next_pos(&pl, to, src);
                     continue;
                 }
-                cont = indent_prefix_len(pl.text) >= 4;
+                cont = indent_columns(pl.text) >= 4;
                 break;
             }
             if !cont {
@@ -1040,7 +1114,7 @@ fn collect_indented_code(ctx: &Ctx, first: &Line, to: usize) -> (MarkdownBlock, 
             pos = next_pos(&line, to, src);
             continue;
         }
-        if indent_prefix_len(line.text) < 4 {
+        if indent_columns(line.text) < 4 {
             break;
         }
         code.push('\n');
@@ -1052,10 +1126,9 @@ fn collect_indented_code(ctx: &Ctx, first: &Line, to: usize) -> (MarkdownBlock, 
     (block, pos)
 }
 
-/// 剥行首 4 列缩进（不足 4 的整行剥全部缩进）。
+/// 剥行首 4 列缩进（不足 4 列时整行剥全部缩进）。
 fn strip_indent_4(text: &str) -> &str {
-    let ind = indent_prefix_len(text);
-    &text[4.min(ind)..]
+    &text[consume_columns(text, 4).0..]
 }
 
 // ===== 段落 / 脚注 / Setext / 数学 =====
@@ -1077,8 +1150,7 @@ fn collect_paragraph(
             break;
         }
         let body = trim_indent(line.text);
-        let ind = line.text.len() - body.len();
-        if ind <= 3 {
+        if indent_columns(line.text) <= 3 {
             let t = body.trim_end();
             if !t.is_empty() && (t.bytes().all(|c| c == b'=') || t.bytes().all(|c| c == b'-')) {
                 heading = Some(if t.as_bytes()[0] == b'=' { 1 } else { 2 });
@@ -1199,7 +1271,10 @@ fn paragraph_segments(
 
 /// 段落首行 `[^label]: text`（只覆盖定义行；行尾 `\r` 不属定义内容）。
 fn footnote_def(ctx: &Ctx, first: &Line) -> Option<MarkdownBlock> {
-    let line = first.text.strip_suffix('\r').unwrap_or(first.text);
+    let raw = first.text.strip_suffix('\r').unwrap_or(first.text);
+    let ind = indent_prefix_len(raw);
+    let base = first.start + ind;
+    let line = &raw[ind..];
     let rest = line.strip_prefix("[^")?;
     let rb = rest.find(']')?;
     let label = &rest[..rb];
@@ -1208,12 +1283,12 @@ fn footnote_def(ctx: &Ctx, first: &Line) -> Option<MarkdownBlock> {
     }
     let after = rest[rb + 1..].strip_prefix(':')?;
     let content = after.trim_start_matches([' ', '\t']);
-    let text_from = first.start + (line.len() - content.len());
+    let text_from = base + (line.len() - content.len());
     let ctx2 = Ctx { source: ctx.source, options: ctx.options, no_bare_autolink: true };
-    let inline = inline::parse_inline_range(&ctx2, text_from, first.start + line.len());
+    let inline = inline::parse_inline_range(&ctx2, text_from, base + line.len());
     Some(MarkdownBlock::FootnoteDef {
-        from: first.start,
-        to: first.start + line.len(),
+        from: base,
+        to: base + line.len(),
         label: label.to_string(),
         inline,
     })
@@ -1239,27 +1314,36 @@ impl OffsetMap {
     }
 }
 
-/// 容器递归：每行剥前缀后拼接重解析，块区间经偏移映射回原空间。
+/// 容器递归：每行剥前缀（行首剩余空白折成空格）后拼接重解析，块区间经映射回原空间。
 /// 容器内不走文档级数学区间消费：内层按重解析文本独立成块。
-fn recurse_container(ctx: &Ctx, strips: Vec<(usize, usize)>, from: usize, to: usize) -> Vec<MarkdownBlock> {
+fn recurse_container(
+    ctx: &Ctx,
+    strips: Vec<(usize, usize, usize)>,
+    from: usize,
+    to: usize,
+) -> Vec<MarkdownBlock> {
     let src = ctx.source;
     let mut buf = String::new();
     let mut map: Vec<(usize, usize, isize)> = Vec::new();
     let mut pos = from;
     while pos < to {
         let line = read_line(src, pos, to);
-        let strip = strips
+        let (skip, pad) = strips
             .iter()
-            .find(|(s, _)| *s == line.start)
-            .map(|(_, w)| *w)
-            .unwrap_or(0);
-        let content_start = line.start + strip.min(line.end - line.start);
+            .find(|(s, _, _)| *s == line.start)
+            .map(|(_, skip, pad)| (*skip, *pad))
+            .unwrap_or((0, 0));
+        let content_start = line.start + skip.min(line.end - line.start);
         let buf_from = buf.len();
+        for _ in 0..pad {
+            buf.push(' ');
+        }
         buf.push_str(&src[content_start..line.end]);
         if line.end < to {
             buf.push('\n');
         }
-        map.push((buf_from, buf.len(), content_start as isize - buf_from as isize));
+        // 补入的空格不对应源文本：内容起点为锚，避免把它算进平移量
+        map.push((buf_from, buf.len(), content_start as isize - (buf_from + pad) as isize));
         pos = next_pos(&line, to, src);
     }
     let inner = Ctx { source: &buf, options: ctx.options, no_bare_autolink: false };

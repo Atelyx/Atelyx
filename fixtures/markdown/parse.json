@@ -2711,6 +2711,531 @@
       }
     },
     {
+      "name": "atx-indented-in-nested-list",
+      "source": "- # 顶层\n\t- ## 二级\n\t  # 三级\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "- # 顶层\n\t- ## 二级\n\t  # 三级\n",
+        "blocks": [
+          {
+            "kind": "list",
+            "ordered": false,
+            "from": 0,
+            "to": 23,
+            "items": [
+              {
+                "from": 0,
+                "to": 23,
+                "task": false,
+                "checked": false,
+                "children": [
+                  {
+                    "kind": "heading",
+                    "level": 1,
+                    "from": 2,
+                    "to": 6,
+                    "inline": [
+                      {
+                        "kind": "text",
+                        "from": 4,
+                        "to": 6,
+                        "text": "顶层"
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "list",
+                    "ordered": false,
+                    "from": 8,
+                    "to": 23,
+                    "items": [
+                      {
+                        "from": 8,
+                        "to": 23,
+                        "task": false,
+                        "checked": false,
+                        "children": [
+                          {
+                            "kind": "heading",
+                            "level": 2,
+                            "from": 10,
+                            "to": 15,
+                            "inline": [
+                              {
+                                "kind": "text",
+                                "from": 13,
+                                "to": 15,
+                                "text": "二级"
+                              }
+                            ]
+                          },
+                          {
+                            "kind": "heading",
+                            "level": 1,
+                            "from": 19,
+                            "to": 23,
+                            "inline": [
+                              {
+                                "kind": "text",
+                                "from": 21,
+                                "to": 23,
+                                "text": "三级"
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "indented-atx-heading",
+      "source": "  # h\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "  # h\n",
+        "blocks": [
+          {
+            "kind": "heading",
+            "level": 1,
+            "from": 2,
+            "to": 5,
+            "inline": [
+              {
+                "kind": "text",
+                "from": 4,
+                "to": 5,
+                "text": "h"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "indented-hr",
+      "source": "  ---\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "  ---\n",
+        "blocks": [
+          {
+            "kind": "hr",
+            "from": 2,
+            "to": 5
+          }
+        ]
+      }
+    },
+    {
+      "name": "indented-table",
+      "source": "  | a | b |\n  | --- | --- |\n  | c | d |\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "  | a | b |\n  | --- | --- |\n  | c | d |\n",
+        "blocks": [
+          {
+            "kind": "table",
+            "from": 2,
+            "to": 39,
+            "header": [
+              {
+                "from": 4,
+                "to": 5
+              },
+              {
+                "from": 8,
+                "to": 9
+              }
+            ],
+            "aligns": [
+              "",
+              ""
+            ],
+            "rows": [
+              [
+                {
+                  "from": 32,
+                  "to": 33
+                },
+                {
+                  "from": 36,
+                  "to": 37
+                }
+              ]
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "indented-html-block",
+      "source": "  <div>hi</div>\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "  <div>hi</div>\n",
+        "blocks": [
+          {
+            "kind": "htmlBlock",
+            "from": 2,
+            "to": 15,
+            "html": "<div>hi</div>"
+          }
+        ]
+      }
+    },
+    {
+      "name": "indented-fence",
+      "source": "  ```\ncode\n  ```\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "  ```\ncode\n  ```\n",
+        "blocks": [
+          {
+            "kind": "fencedCode",
+            "from": 2,
+            "to": 16,
+            "lang": "",
+            "code": "code",
+            "contentFrom": 6,
+            "contentTo": 10
+          }
+        ]
+      }
+    },
+    {
+      "name": "indented-footnote-def",
+      "source": "  [^a]: x\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "  [^a]: x\n",
+        "blocks": [
+          {
+            "kind": "footnoteDef",
+            "from": 2,
+            "to": 9,
+            "label": "a",
+            "inline": [
+              {
+                "kind": "text",
+                "from": 8,
+                "to": 9,
+                "text": "x"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "tab-heading-is-code",
+      "source": "\t# h\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "\t# h\n",
+        "blocks": [
+          {
+            "kind": "indentedCode",
+            "from": 1,
+            "to": 4,
+            "code": "# h"
+          }
+        ]
+      }
+    },
+    {
+      "name": "tab-quote-in-item",
+      "source": "- x\n\t> q\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "- x\n\t> q\n",
+        "blocks": [
+          {
+            "kind": "list",
+            "ordered": false,
+            "from": 0,
+            "to": 8,
+            "items": [
+              {
+                "from": 0,
+                "to": 8,
+                "task": false,
+                "checked": false,
+                "children": [
+                  {
+                    "kind": "blockquote",
+                    "from": 5,
+                    "to": 8,
+                    "callout": null,
+                    "children": [
+                      {
+                        "kind": "paragraph",
+                        "from": 7,
+                        "to": 8,
+                        "inline": [
+                          {
+                            "kind": "text",
+                            "from": 7,
+                            "to": 8,
+                            "text": "q"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "tab-html-in-item",
+      "source": "- x\n\t<div>hi</div>\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "- x\n\t<div>hi</div>\n",
+        "blocks": [
+          {
+            "kind": "list",
+            "ordered": false,
+            "from": 0,
+            "to": 18,
+            "items": [
+              {
+                "from": 0,
+                "to": 18,
+                "task": false,
+                "checked": false,
+                "children": [
+                  {
+                    "kind": "htmlBlock",
+                    "from": 5,
+                    "to": 18,
+                    "html": "<div>hi</div>"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "tab-table-in-item",
+      "source": "- x\n\t| a | b |\n\t| --- | --- |\n\t| c | d |\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "- x\n\t| a | b |\n\t| --- | --- |\n\t| c | d |\n",
+        "blocks": [
+          {
+            "kind": "list",
+            "ordered": false,
+            "from": 0,
+            "to": 40,
+            "items": [
+              {
+                "from": 0,
+                "to": 40,
+                "task": false,
+                "checked": false,
+                "children": [
+                  {
+                    "kind": "table",
+                    "from": 5,
+                    "to": 40,
+                    "header": [
+                      {
+                        "from": 7,
+                        "to": 8
+                      },
+                      {
+                        "from": 11,
+                        "to": 12
+                      }
+                    ],
+                    "aligns": [
+                      "",
+                      ""
+                    ],
+                    "rows": [
+                      [
+                        {
+                          "from": 33,
+                          "to": 34
+                        },
+                        {
+                          "from": 37,
+                          "to": 38
+                        }
+                      ]
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "quote-space-tab",
+      "source": "> \tq\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "> \tq\n",
+        "blocks": [
+          {
+            "kind": "blockquote",
+            "from": 0,
+            "to": 4,
+            "callout": null,
+            "children": [
+              {
+                "kind": "paragraph",
+                "from": 3,
+                "to": 4,
+                "inline": [
+                  {
+                    "kind": "text",
+                    "from": 3,
+                    "to": 4,
+                    "text": "q"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "quote-tab-nested",
+      "source": ">\t>\tq\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": ">\t>\tq\n",
+        "blocks": [
+          {
+            "kind": "blockquote",
+            "from": 0,
+            "to": 5,
+            "callout": null,
+            "children": [
+              {
+                "kind": "blockquote",
+                "from": 2,
+                "to": 5,
+                "callout": null,
+                "children": [
+                  {
+                    "kind": "paragraph",
+                    "from": 4,
+                    "to": 5,
+                    "inline": [
+                      {
+                        "kind": "text",
+                        "from": 4,
+                        "to": 5,
+                        "text": "q"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "tab-indented-code-double",
+      "source": "\t\tcode\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "\t\tcode\n",
+        "blocks": [
+          {
+            "kind": "indentedCode",
+            "from": 1,
+            "to": 6,
+            "code": "\tcode"
+          }
+        ]
+      }
+    },
+    {
+      "name": "tab-indented-code-space-tab",
+      "source": "    \tcode\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "    \tcode\n",
+        "blocks": [
+          {
+            "kind": "indentedCode",
+            "from": 4,
+            "to": 9,
+            "code": "\tcode"
+          }
+        ]
+      }
+    },
+    {
+      "name": "item-tab-indented-code",
+      "source": "- x\n\n\t\tqual\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "- x\n\n\t\tqual\n",
+        "blocks": [
+          {
+            "kind": "list",
+            "ordered": false,
+            "from": 0,
+            "to": 11,
+            "items": [
+              {
+                "from": 0,
+                "to": 11,
+                "task": false,
+                "checked": false,
+                "children": [
+                  {
+                    "kind": "indentedCode",
+                    "from": 7,
+                    "to": 11,
+                    "code": "qual"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
       "name": "link-trailing-backslash",
       "source": "[a\\\n",
       "mentions": null,
