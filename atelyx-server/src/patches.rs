@@ -409,9 +409,10 @@ fn table_patch_io() -> PatchEntityIo<TableFile, TablePatch> {
     }
 }
 
-/// 补丁端点公共骨架：存在检查 → 解析补丁 → 读盘 → id 守卫 → title 应用 → 漂移冲突守卫 →
-/// 合并 → 原子写 → 旧文件清理 → 广播帧。锁（结构锁 → 路径锁）由 handler 持有后调用。
-fn patch_entity<E: serde::de::DeserializeOwned, P>(
+/// 补丁端点公共骨架：存在检查 → 解析补丁 → 读盘 → id 守卫 → title 应用 → 漂移目标锁 →
+/// 漂移冲突守卫 → 合并 → 原子写 → 旧文件清理 → 广播帧。结构锁与请求路径锁由 handler 持有后调用；
+/// title 漂移产生的第二条落盘路径在本函数内补取路径锁（见下）。
+async fn patch_entity<E: serde::de::DeserializeOwned, P>(
     state: &ServerState,
     space_id: &str,
     path: &Path,
@@ -443,6 +444,14 @@ fn patch_entity<E: serde::de::DeserializeOwned, P>(
         .ok_or_else(|| bad_request(&format!("非法路径：{}", body_path)))?;
     let new_path = parent.join(format!("{}.{}", sanitize_filename((io.entity_title)(&entity)), io.ext));
     let new_rel = rel_with_new_title(body_path, (io.entity_title)(&entity), io.ext);
+    // 漂移目标路径锁：目标路径上的并发 write_file（单路径锁，不进结构锁）可与本端点的
+    // 「写新删旧」交错——不持锁时对方的整文件写会被随后的删旧静默吞掉。补丁与改名是仅有的
+    // 双路径锁持有者且已被结构锁互斥，单锁持有方不会等待第二把锁，持一取二无死锁环。
+    let _drift_lock = if new_path != path {
+        Some(state.path_lock(space_id, &new_rel).await)
+    } else {
+        None
+    };
     if new_path != path {
         ensure_no_id_conflict(
             &new_path,
@@ -477,11 +486,11 @@ pub async fn patch_canvas(
 ) -> Result<Response, ApiError> {
     let root = write_root(&state, &space_id, &user)?;
     let path = root.join(&body.path, false).map_err(join_err)?;
-    // 结构锁 → 同路径锁：补丁可能按文件内 title 把文件漂移落盘到第二条路径（写新删旧），
-    // 与改名端点互斥（改名同样持结构锁 + 双路径锁），防在途改名/补丁互相重建对方路径的文件
+    // 结构锁 → 请求路径锁：与改名端点互斥（改名同样持结构锁 + 双路径锁），防在途改名/补丁
+    // 互相重建对方路径的文件；title 漂移目标的第二把路径锁在骨架内补取（漂移点才可知）
     let _structure = state.structure_lock(&space_id).await;
     let _lock = state.path_lock(&space_id, &body.path).await;
-    patch_entity(&state, &space_id, &path, &body.path, &body.patch, &canvas_patch_io())
+    patch_entity(&state, &space_id, &path, &body.path, &body.patch, &canvas_patch_io()).await
 }
 
 /// 表格补丁端点：锁内 读 → 校验 → 合并 → 原子写 → 广播（与画布同构）。
@@ -493,10 +502,10 @@ pub async fn patch_table(
 ) -> Result<Response, ApiError> {
     let root = write_root(&state, &space_id, &user)?;
     let path = root.join(&body.path, false).map_err(join_err)?;
-    // 结构锁 → 同路径锁（与画布补丁同构，见上）
+    // 结构锁 → 请求路径锁（与画布补丁同构）；漂移目标锁在骨架内补取
     let _structure = state.structure_lock(&space_id).await;
     let _lock = state.path_lock(&space_id, &body.path).await;
-    patch_entity(&state, &space_id, &path, &body.path, &body.patch, &table_patch_io())
+    patch_entity(&state, &space_id, &path, &body.path, &body.patch, &table_patch_io()).await
 }
 
 fn ws_broadcast(state: &ServerState, space_id: &str, kind: &'static str, file: &str, patch: serde_json::Value) {
