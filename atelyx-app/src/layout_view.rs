@@ -9,7 +9,7 @@ use atelyx_core::layout::{self, AppUiState, LayoutNode, TabItem};
 use iced::widget::{button, column, container, row, scrollable, space, text, text_editor, text_input};
 use iced::{Element, Length, Rectangle};
 
-use crate::{App, Message};
+use crate::{markdown_view, App, Message, NoteMode};
 
 pub struct UiMetrics;
 
@@ -464,15 +464,41 @@ fn view_content<'a>(app: &'a App, kind: &str) -> Element<'a, Message> {
     }
 }
 
+/// note 视图：模式分段控件（只读 / 预览编辑 / 源码）+ 对应档位的内容面。
 fn note_view(app: &App) -> Element<'_, Message> {
-    if app.ui.last_note_file.is_some() {
-        text_editor(&app.editor)
+    if app.ui.last_note_file.is_none() {
+        return placeholder("在文件面板选择文件打开");
+    }
+    let bar = row![
+        mode_button("只读", NoteMode::Read, app.note_mode),
+        mode_button("预览编辑", NoteMode::Edit, app.note_mode),
+        mode_button("源码", NoteMode::Source, app.note_mode),
+    ]
+    .spacing(4)
+    .padding([2.0, 4.0]);
+
+    let content: Element<'_, Message> = match app.note_mode {
+        NoteMode::Source => text_editor(&app.editor)
             .height(Length::Fill)
             .on_action(Message::Edited)
-            .into()
-    } else {
-        placeholder("在文件面板选择文件打开")
-    }
+            .into(),
+        NoteMode::Read => match app.preview_doc.as_ref() {
+            Some(doc) => markdown_view::document_view(doc, &app.theme),
+            None => placeholder("正在渲染…"),
+        },
+        NoteMode::Edit => placeholder("预览编辑档不可用"),
+    };
+
+    column![bar, content].width(Length::Fill).height(Length::Fill).into()
+}
+
+/// 模式分段按钮：当前档高亮，其余档为次级样式（预览编辑档点击仅提示）。
+fn mode_button(label: &str, mode: NoteMode, current: NoteMode) -> Element<'static, Message> {
+    button(text(label.to_string()).size(12))
+        .padding([3.0, 10.0])
+        .style(if mode == current { button::primary } else { button::text })
+        .on_press(Message::NoteMode(mode))
+        .into()
 }
 
 /// 一条侧栏可见行：由展开集 + 子目录缓存摊平而来。

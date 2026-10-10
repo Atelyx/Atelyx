@@ -6,6 +6,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod layout_view;
+mod markdown_view;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -15,6 +16,7 @@ use atelyx_core::layout::{
     self, apply_layout_op, normalize, op_passes_shape_check, AppUiState, DetachedWindow,
     LayoutOp, WindowBounds, UI_STATE_SCHEMA,
 };
+use atelyx_core::markdown::MarkdownDocument;
 use atelyx_core::vault;
 use iced::widget::{space, text_editor};
 use iced::window::{self, Level, Mode, Position, Settings};
@@ -51,6 +53,35 @@ fn panel_settings(w: &DetachedWindow) -> Settings {
         settings.platform_specific.skip_taskbar = w.options.skip_taskbar;
     }
     settings
+}
+
+/// note 视图模式：只读渲染 / 预览编辑 / 源码。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoteMode {
+    Read,
+    Edit,
+    Source,
+}
+
+/// 剥离开头的 frontmatter 块（阅读面只渲染正文）；缺闭合定界符时按无 frontmatter 处理，全量正文。
+fn strip_frontmatter(text: &str) -> &str {
+    let head_end = match text.find('\n') {
+        Some(i) => i + 1,
+        None => return text,
+    };
+    if text[..head_end].trim_end() != "---" {
+        return text;
+    }
+    let mut offset = head_end;
+    for line in text[head_end..].split_inclusive('\n') {
+        let end = offset + line.len();
+        let marker = line.trim_end_matches(['\r', '\n']);
+        if marker == "---" || marker == "..." {
+            return &text[end..];
+        }
+        offset = end;
+    }
+    text
 }
 
 fn main() -> iced::Result {
@@ -122,6 +153,10 @@ enum Message {
     Save,
     /// 携带保存发起时冻结的内容：落地后与编辑器现值比对，区分保存完成与在途新编辑。
     Saved(u64, String, Result<(), String>),
+    /// 切换 note 视图模式（只读 / 预览编辑 / 源码）。
+    NoteMode(NoteMode),
+    /// 复制代码块正文到系统剪贴板。
+    CopyCode(String),
     PanelTab(String, String),
     PanelTabClose(String, String),
     PanelTabLock(String, String),
@@ -198,6 +233,10 @@ pub struct App {
     /// note 视图编辑器内容与脏标记（视图实例全局唯一）。
     pub editor: text_editor::Content,
     pub dirty: bool,
+    /// note 视图模式（缺省只读）。
+    pub note_mode: NoteMode,
+    /// 只读档的解析产物：进入只读档或文件载入时重建，避免每帧重解析。
+    pub preview_doc: Option<MarkdownDocument>,
     /// 防抖落盘：有未写盘的模型变更。
     persist_dirty: bool,
     /// 主窗口内容区尺寸（logical；Resized 驱动，把手命中几何用）。
@@ -236,6 +275,8 @@ impl App {
                 children: HashMap::new(),
                 editor: text_editor::Content::new(),
                 dirty: false,
+                note_mode: NoteMode::Read,
+                preview_doc: None,
                 persist_dirty: false,
                 main_size: WINDOW_SIZE,
                 os_positions: HashMap::new(),
@@ -319,6 +360,7 @@ impl App {
                 self.status = "仓库已打开".into();
                 self.children.clear();
                 self.editor = text_editor::Content::new();
+                self.preview_doc = None;
                 self.dirty = false;
                 // last_note_file 跨仓库沿用（相对路径语义）；仓库就绪即恢复其内容
                 let mut task = self.load_children("");
@@ -361,6 +403,8 @@ impl App {
                     return Task::none();
                 }
                 self.ui.last_note_file = Some(rel.clone());
+                // 清掉上一文件的解析产物：载入在途期间只读档不留旧内容
+                self.preview_doc = None;
                 self.schedule_persist();
                 self.load_note(&rel)
             }
@@ -370,6 +414,7 @@ impl App {
                 }
                 self.editor = text_editor::Content::with_text(&text);
                 self.dirty = false;
+                self.refresh_preview();
                 self.status = "已打开".into();
                 Task::none()
             }
@@ -378,6 +423,7 @@ impl App {
                 // 会让 Ctrl+S 把旧内容写进新路径
                 self.editor = text_editor::Content::new();
                 self.dirty = false;
+                self.preview_doc = None;
                 self.status = e;
                 Task::none()
             }
@@ -430,6 +476,25 @@ impl App {
             Message::Saved(_, _, Err(e)) => {
                 self.status = format!("保存失败：{e}");
                 Task::none()
+            }
+            Message::NoteMode(mode) => {
+                match mode {
+                    // 预览编辑档不可用：不改模式，仅提示
+                    NoteMode::Edit => self.status = "预览编辑档不可用".into(),
+                    NoteMode::Read => {
+                        self.note_mode = NoteMode::Read;
+                        self.refresh_preview();
+                    }
+                    NoteMode::Source => {
+                        self.note_mode = NoteMode::Source;
+                        self.preview_doc = None;
+                    }
+                }
+                Task::none()
+            }
+            Message::CopyCode(code) => {
+                self.status = "已复制代码".into();
+                iced::clipboard::write(code)
             }
             Message::PanelTab(panel_id, tab_id) => {
                 self.apply(LayoutOp::SetActive { panel_id, tab_id })
@@ -1015,6 +1080,17 @@ impl App {
             async move { vault::read_dir_filtered(&root, &rel, &exclude) },
             move |result| Message::ChildrenLoaded(rel_for_cb, gen, result),
         )
+    }
+
+    /// 只读档的解析产物：进入只读档或文件载入时重建（渲染面不逐帧解析）。
+    fn refresh_preview(&mut self) {
+        if self.note_mode != NoteMode::Read {
+            self.preview_doc = None;
+            return;
+        }
+        let text = self.editor.text();
+        let body = strip_frontmatter(&text);
+        self.preview_doc = Some(markdown_view::parse_document(body));
     }
 
     /// 读 note 视图文件内容（仓库切换恢复与文件点击共用；根在发起时冻结，
