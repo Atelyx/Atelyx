@@ -245,6 +245,7 @@ dependencies = [
 name = "atelyx"
 version = "0.5.10"
 dependencies = [
+ "atelyx-core",
  "base64 0.22.1",
  "chrono",
  "dunce",
@@ -279,6 +280,13 @@ dependencies = [
 [[package]]
 name = "atelyx-core"
 version = "0.1.0"
+dependencies = [
+ "dunce",
+ "nanoid",
+ "regex",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "atk"

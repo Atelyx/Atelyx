@@ -4,3 +4,15 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.77.2"
 description = "Atelyx UI 无关核心：仓库存储、会话容器、补丁合并与写盘串行化、AI 客户端、协作帧泵、插件进程托管"
+
+[dependencies]
+# 仓库存储（vault）：id 生成 / 链接与标签正则 / 文件类型序列化与配置补丁合并 / Windows 路径归一化
+nanoid = "0.4"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dunce = "1"
+
+[features]
+# 测试基建（TempDir 等）供依赖方的测试构建复用；常规构建不编译
+test-support = []

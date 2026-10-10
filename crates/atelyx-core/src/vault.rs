@@ -36,7 +36,7 @@ pub struct VaultState {
 }
 
 /// 一次仓库会话：根路径 + 该仓库生效的文件面板配置（open_vault 时从配置解析）。
-pub(crate) struct VaultSession {
+pub struct VaultSession {
     pub root: PathBuf,
     /// 排除文件夹名列表（任何层级的同名文件夹不显示/不监听，`excludeFolders` 配置）。
     pub exclude_folders: Vec<String>,
@@ -216,7 +216,7 @@ pub fn is_excluded_rel(rel: &str, exclude: &[String]) -> bool {
 /// 相对路径是否含隐藏段（任一段以 `.` 开头，如 `.atelyx/x`、`a/.git/y`）。AI 工具发现层
 /// （glob/grep/list_dir）对隐藏目录完全屏蔽：遍历结果过滤 + 显式把 path/dir 指向隐藏目录时拒绝。
 /// 排除 `..`（父目录段）——它由 safe_join 的越界校验拒绝，报错语义更准确。
-pub(crate) fn has_hidden_segment(rel: &str) -> bool {
+pub fn has_hidden_segment(rel: &str) -> bool {
     let rel = normalize_rel_separators(rel);
     rel.split('/').any(|seg| {
         seg.starts_with('.') && !seg.is_empty() && seg != "." && seg != ".."
@@ -226,7 +226,7 @@ pub(crate) fn has_hidden_segment(rel: &str) -> bool {
 /// 读取目录条目（相对路径 + 是否目录），应用全仓库统一过滤：
 /// 隐藏项（`.` 前缀）/ 排除文件夹 / `.tmp` 原子写副产物。递归由各 walker 自行组织
 /// （list_tree_in / scan_canvases_in / walk_md_in / scan_atlx_in 共用，过滤规则只维护一处）。
-pub(crate) fn read_dir_filtered(
+pub fn read_dir_filtered(
     dir: &Path,
     rel: &str,
     exclude: &[String],
@@ -333,7 +333,7 @@ fn validate_relative_path(file: &str) -> Result<PathBuf, String> {
 /// 文件可能不存在，故只校验父目录。
 /// `create_parents`：写路径（write_note / rename 目标）父目录不存在时先建目录
 /// （否则 canonicalize 父目录必失败，`write_note` 注释声明的「自动建父目录」不可达）。
-pub(crate) fn safe_join(root: &Path, file: &str, create_parents: bool) -> Result<PathBuf, String> {
+pub fn safe_join(root: &Path, file: &str, create_parents: bool) -> Result<PathBuf, String> {
     let clean = validate_relative_path(file)?;
     let joined = root.join(clean);
     let root_canon = dunce::canonicalize(root).map_err(|_| "仓库根不可达".to_string())?;
@@ -362,7 +362,7 @@ pub(crate) fn safe_join(root: &Path, file: &str, create_parents: bool) -> Result
 /// 文件是否存在（仅元数据查询，不读内容；不限文件类型）：文件不存在（含所在目录被删）返回 false。
 /// 不做父目录可达性校验（与 safe_join 的差异点）：存在性判定的对象是文件本身，
 /// 父目录缺失本身就该回答「不存在」；路径组件过滤与 safe_join 同口径。
-pub(crate) fn file_exists(root: &Path, file: &str) -> Result<bool, String> {
+pub fn file_exists(root: &Path, file: &str) -> Result<bool, String> {
     let clean = validate_relative_path(file)?;
     Ok(root.join(clean).is_file())
 }
@@ -756,7 +756,7 @@ pub fn delete_vault_file(root: &Path, file: &str) -> Result<(), String> {
 /// 超出 NAS/SMB 服务端 ~260 字符路径上限（客户端 `\\?\UNC\` 扩展前缀无效），历史读写
 /// 对这些笔记永久失败。最小转义下侧文件路径长度 ≈ 笔记自身路径 + 常数 overhead。
 /// 注：`commands/search.rs` 另有一份私有编码（搜索请求用，保留字符集不同）——勿合并。
-pub(crate) fn percent_encode(s: &str) -> String {
+pub fn percent_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         let u = c as u32;
@@ -953,7 +953,7 @@ const VAULT_CONFIG_FILE: &str = "config.json";
 /// 读到的空状态会被写回磁盘，等于一次外部编辑/磁盘异常就静默清空用户配置。
 /// 名字带随机后缀：同名目标在 Windows 上会被 rename 静默替换，固定名会让新的损坏冲掉旧备份。
 /// `tag` 只用于日志前缀（便于按模块定位）。
-pub(crate) fn backup_corrupt_config(path: &Path, tag: &str) -> Option<PathBuf> {
+pub fn backup_corrupt_config(path: &Path, tag: &str) -> Option<PathBuf> {
     let name = path.file_name()?.to_string_lossy().into_owned();
     let backup = path.with_file_name(format!("{name}.corrupt-{}", nanoid::nanoid!()));
     match std::fs::rename(path, &backup) {
@@ -1004,7 +1004,7 @@ pub fn read_vault_config_with_backup(root: &Path) -> Result<(VaultConfig, Option
     }
 }
 
-pub(crate) fn write_vault_config(root: &Path, config: &VaultConfig) -> Result<(), String> {
+pub fn write_vault_config(root: &Path, config: &VaultConfig) -> Result<(), String> {
     let path = root.join(".atelyx").join(VAULT_CONFIG_FILE);
     let json = serde_json::to_string_pretty(config).map_err(|e| e.to_string())?;
     atomic_write(&path, &json)
@@ -1119,7 +1119,7 @@ pub fn patch_vault_config(root: &Path, patch: &serde_json::Value) -> Result<Opti
 ///
 /// 合并结果经 `VaultConfig` 反序列化再序列化：这一趟保证输出只含已知字段、保持 `skip_serializing_if`
 /// 的干净形状（未知字段被丢弃，与 `write_vault_config` 同一形状约束）。
-pub(crate) fn merge_vault_config(base_json: &str, patch: &serde_json::Value) -> Result<VaultConfig, String> {
+pub fn merge_vault_config(base_json: &str, patch: &serde_json::Value) -> Result<VaultConfig, String> {
     let patch_obj = patch
         .as_object()
         .ok_or_else(|| "配置补丁必须是 JSON 对象".to_string())?;
@@ -1135,7 +1135,7 @@ pub(crate) fn merge_vault_config(base_json: &str, patch: &serde_json::Value) -> 
 }
 
 /// 递归合并：`null` 删键，两侧同为对象则下钻，其余以补丁值覆盖。
-pub(crate) fn merge_json_objects(
+pub fn merge_json_objects(
     target: &mut serde_json::Map<String, serde_json::Value>,
     patch: &serde_json::Map<String, serde_json::Value>,
 ) {
@@ -1465,7 +1465,7 @@ pub fn append_chat_messages_file(
 /// 消息 .jsonl 追加原始行（会话容器写链专用）：tail 为确定性序列化、以 `\n` 结尾的多行
 /// 文本，原样落盘。文件缺失报错——调用方（chat_container 写链）先核对磁盘内容与内存
 /// 基线一致才追加，不一致或缺失时回落全量重写。
-pub(crate) fn append_chat_messages_raw(root: &Path, file: &str, tail: &str) -> Result<(), String> {
+pub fn append_chat_messages_raw(root: &Path, file: &str, tail: &str) -> Result<(), String> {
     use std::io::Write;
     let path = chat_messages_path(root, file)?;
     let mut handle = std::fs::OpenOptions::new()
@@ -1573,14 +1573,14 @@ pub fn list_chat_sessions_file(root: &Path) -> Result<Vec<ChatSessionRow>, Strin
 /// - 临时名带纳秒时间戳 + 进程内序号：并发写同一目标不交叉同一 tmp。
 /// - 写后 sync_all：崩溃/断电时 rename 已提交但数据未刷盘会丢最后一次保存。
 /// - 任一步失败都清理临时文件，避免残留。
-/// pub(crate)：commands/global.rs 的全局配置/UI 状态写盘复用（保证全项目同一 durability 语义）。
-pub(crate) fn atomic_write(path: &Path, content: &str) -> Result<(), String> {
+/// pub：commands/global.rs 的全局配置/UI 状态写盘复用（保证全项目同一 durability 语义）。
+pub fn atomic_write(path: &Path, content: &str) -> Result<(), String> {
     atomic_write_bytes(path, content.as_bytes())
 }
 
 /// 原子写字节（atomic_write 的字节形态，同一套 tmp → rename + fsync 语义）。
-/// pub(crate)：附件二进制与插件外部文件命令的写盘复用（保证全项目同一 durability 语义）。
-pub(crate) fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
+/// pub：附件二进制与插件外部文件命令的写盘复用（保证全项目同一 durability 语义）。
+pub fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let tmp = write_tmp(path, bytes)?;
     std::fs::rename(&tmp, path).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
@@ -1786,7 +1786,7 @@ pub fn copy_folder(root: &Path, old_dir: &str, new_dir: &str) -> Result<(), Stri
 /// 递归复制目录内容（含隐藏文件与子目录；链接一律跳过——Unix 符号链接与 Windows 符号链接/
 /// 目录联接都由 `DirEntry::file_type`（不跟随链接）报为链接。`fs::copy` 会跟随链接，
 /// 把仓库外文件的内容复制进仓库；链接到目录则整个复制失败）。
-pub(crate) fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
+pub fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
@@ -1980,7 +1980,7 @@ pub fn query_wiki_backlinks(index: &WikiIndex, note_name: &str, note_file: &str)
 }
 
 /// 递归遍历仓库 .md（与文件树同过滤：跳过隐藏目录与用户排除文件夹）。
-pub(crate) fn walk_md_in(
+pub fn walk_md_in(
     root: &Path,
     rel: &str,
     exclude: &[String],
@@ -2299,8 +2299,8 @@ fn normalize_link_path(raw: &str) -> Option<String> {
 }
 
 /// 简易 percent 解码（%XX）；非法序列原样保留（匹配不上自然不命中，不报错）。
-/// pub(crate)：仓库历史聚合（commands/home.rs）解码历史文件名共用。
-pub(crate) fn percent_decode(s: &str) -> String {
+/// pub：仓库历史聚合（commands/home.rs）解码历史文件名共用。
+pub fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -2412,7 +2412,7 @@ fn backtick_close(content: &str, from: usize, n: usize) -> Option<usize> {
 
 /// 链接跨度改写引擎：跳过 frontmatter/围栏代码/缩进代码/原始 HTML/行内代码/图片链接，
 /// 对每个链接跨度调用 `apply`（返回原样 = 不改）。仅用于字节级替换场景（重建/维护），不用于解析。
-pub(crate) fn rewrite_link_spans(content: &str, apply: &mut dyn FnMut(&str) -> String) -> String {
+pub fn rewrite_link_spans(content: &str, apply: &mut dyn FnMut(&str) -> String) -> String {
     let mut out = String::with_capacity(content.len());
     let len = content.len();
     let mut i = 0;
@@ -2528,7 +2528,7 @@ pub(crate) fn rewrite_link_spans(content: &str, apply: &mut dyn FnMut(&str) -> S
 }
 
 /// 取标准链接跨度 `[label](path)` 的 path 部分（wiki 形式 `[[..]]` 返回 None）。
-pub(crate) fn markdown_link_path(span: &str) -> Option<&str> {
+pub fn markdown_link_path(span: &str) -> Option<&str> {
     if span.starts_with("[[") {
         return None;
     }
@@ -2538,7 +2538,7 @@ pub(crate) fn markdown_link_path(span: &str) -> Option<&str> {
 
 /// 收集需更新 markdown 内部链接的笔记（不写盘；事务模式与 collect_canvas_updates 同构）。
 /// `apply`：对每个链接跨度返回替换结果（原样 = 不改）。返回 `(相对路径, 新内容)` 列表。
-pub(crate) fn collect_md_link_updates(
+pub fn collect_md_link_updates(
     root: &Path,
     exclude: &[String],
     apply: &mut dyn FnMut(&str) -> String,
@@ -2563,7 +2563,7 @@ pub(crate) fn collect_md_link_updates(
 /// 写入阶段失败（磁盘满/权限/路径非法）即清理全部 tmp 返回 Err，磁盘保持**全部旧内容**；
 /// 逐个 rename 半途失败时同样清理剩余 tmp（已 rename 的无法回退）。跨多文件的事务在文件系统层
 /// 无法做到真正原子，本函数消除的是「内容写入期失败留下部分文件已改」这一主要半写来源。
-pub(crate) fn flush_md_updates(root: &Path, updates: &[(String, String)]) -> Result<(), String> {
+pub fn flush_md_updates(root: &Path, updates: &[(String, String)]) -> Result<(), String> {
     let mut staged: Vec<(PathBuf, PathBuf)> = Vec::with_capacity(updates.len());
     let discard = |staged: &[(PathBuf, PathBuf)]| {
         for (tmp, _) in staged {
@@ -2616,7 +2616,7 @@ pub(crate) fn flush_md_updates(root: &Path, updates: &[(String, String)]) -> Res
 /// - 匹配顺序：精确路径 → 文件名命中 → **同名歧义取「路径最短（根目录优先）+ 字典序」确定性兜底**
 ///   （对齐前端 noteList 首个命中的可打开语义，防同名链接失效）；
 /// - 全部分支后做大小写不敏感兜底：Windows 文件系统不区分大小写，`方案.MD` 与 `方案.md` 是同一文件。
-pub(crate) fn resolve_link_target(
+pub fn resolve_link_target(
     name: &str,
     exact: &HashSet<String>,
     by_basename: &HashMap<String, Vec<String>>,
@@ -2667,7 +2667,7 @@ pub(crate) fn resolve_link_target(
 /// - 目标笔记不存在 → `[名]()`（空路径，点击可快捷新建）；
 /// - 外部链接 / 非 .md 相对路径 / 图片链接 / 代码块内 → 一律不动（保守不猜）。
 /// `resolve`：笔记名或路径 → 命中时的规范相对路径（None = 未命中）。返回 (新内容, 实际改写处数)。
-pub(crate) fn rewrite_internal_links(
+pub fn rewrite_internal_links(
     content: &str,
     resolve: &dyn Fn(&str) -> Option<String>,
 ) -> (String, usize) {
@@ -3374,15 +3374,15 @@ mod tag_index_tests {
     }
 }
 
-#[cfg(test)]
-pub(crate) mod test_support {
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support {
     use std::path::{Path, PathBuf};
 
     /// 测试用临时目录（纳秒级命名防碰撞）；`Drop` 递归清理，测试失败也不留残留。
-    pub(crate) struct TempDir(PathBuf);
+    pub struct TempDir(PathBuf);
 
     impl TempDir {
-        pub(crate) fn new(tag: &str) -> Self {
+        pub fn new(tag: &str) -> Self {
             let nanos = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -3392,7 +3392,7 @@ pub(crate) mod test_support {
             TempDir(dir)
         }
 
-        pub(crate) fn join(&self, rel: &str) -> PathBuf {
+        pub fn join(&self, rel: &str) -> PathBuf {
             self.0.join(rel)
         }
     }
@@ -3411,7 +3411,7 @@ pub(crate) mod test_support {
     }
 
     /// 目录树下残留的 `.tmp` 文件（相对路径，排序）。
-    pub(crate) fn tmp_leftovers(dir: &Path) -> Vec<String> {
+    pub fn tmp_leftovers(dir: &Path) -> Vec<String> {
         let mut out = Vec::new();
         let mut stack = vec![dir.to_path_buf()];
         while let Some(cur) = stack.pop() {

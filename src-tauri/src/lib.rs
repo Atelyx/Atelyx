@@ -20,7 +20,9 @@ mod net_guard;
 mod plugin_build;
 mod plugin_process;
 mod tray;
-mod vault;
+
+// 存储层实现在 atelyx-core，壳侧经此重导出保持 crate::vault 路径不变。
+pub use atelyx_core::vault;
 
 use std::sync::Arc;
 
