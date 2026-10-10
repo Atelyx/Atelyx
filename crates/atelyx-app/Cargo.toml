@@ -6,8 +6,10 @@ edition = "2021"
 [dependencies]
 # 核心能力（仓库存储/原子写/目录过滤）：与壳共享同一实现
 atelyx-core = { path = "../atelyx-core" }
+# 布局状态（ui-state.json）序列化
+serde_json = "1"
 # GUI 框架：advanced/canvas 为自定义部件与几何绘制接口（自研编辑器部件依赖，
 # 提前引入避免特性变更触发全量重编译）
-iced = { version = "0.14", features = ["advanced", "canvas"] }
+iced = { version = "0.14", features = ["advanced", "canvas", "tokio"] }
 # 系统文件夹选择对话框（AsyncFileDialog 走 iced Task）
 rfd = "0.15"

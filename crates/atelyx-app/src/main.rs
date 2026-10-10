@@ -1,19 +1,25 @@
-//! Atelyx 原生壳：daemon 多窗口 + 窗口内文件标签 + 侧栏文件树 + 纯文本编辑保存。
+//! Atelyx 原生壳：daemon 多窗口 + 布局模型（场景/布局/面板树）+ files/note 视图。
 //!
-//! 存储与目录过滤全部经 atelyx-core 提供，本文件不含磁盘访问语义。
-//! 仓库为全局单激活：任一窗口切换仓库全局生效，所有窗口的文件树与标签
-//! 随之重置（防止旧仓库的标签向新仓库写盘）；在途任务按仓库世代校验丢弃。
+//! 布局状态真源 = atelyx-core::layout（与老壳共用同一 ui-state.json 磁盘格式，
+//! 本壳只读不改格式）；本壳负责窗口副作用（OS 窗口、落盘防抖、输入路由）。
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+mod layout_view;
+
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use atelyx_core::layout::{
+    self, apply_layout_op, normalize, op_passes_shape_check, AppUiState, LayoutOp, UI_STATE_SCHEMA,
+};
 use atelyx_core::vault;
-use iced::widget::{button, column, container, row, scrollable, space, text, text_editor};
+use iced::widget::{space, text_editor};
 use iced::window::{self, Settings};
-use iced::{keyboard, Element, Event, Length, Size, Subscription, Task, Theme, Vector};
+use iced::{keyboard, mouse, Element, Event, Point, Size, Subscription, Task, Theme};
+
+use layout_view::{enumerate_dividers, RenameState, RenameTarget, UiMetrics};
 
 fn main() -> iced::Result {
     iced::daemon(App::boot, App::update, App::view)
@@ -24,96 +30,143 @@ fn main() -> iced::Result {
 }
 
 const WINDOW_SIZE: Size = Size::new(1100.0, 760.0);
+/// 防抖落盘周期：期间多次模型变更合并为一次写盘（拖宽/拖拽等连续操作不逐帧写）。
+const PERSIST_TICK: std::time::Duration = std::time::Duration::from_millis(800);
 
-fn window_settings() -> Settings {
-    Settings {
-        size: WINDOW_SIZE,
-        // 关窗请求统一走 CloseRequested 事件，脏标签在途时可拦截不关
-        exit_on_close_request: false,
-        ..Settings::default()
+/// ui-state.json 落盘路径（与老壳同一应用数据目录，bundle identifier = com.atelyx.desktop）。
+fn ui_state_path() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        std::env::var("APPDATA")
+            .ok()
+            .map(|d| PathBuf::from(d).join("com.atelyx.desktop").join("ui-state.json"))
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .or_else(|_| std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".local/share")))
+            .ok()
+            .map(|d| d.join("com.atelyx.desktop").join("ui-state.json"))
     }
 }
 
-/// 一条侧栏可见行：由展开集 + 子目录缓存摊平而来。
-struct TreeRow {
-    rel: String,
-    name: String,
-    depth: usize,
-    is_dir: bool,
-    expanded: bool,
+/// 从磁盘恢复布局状态：缺失/损坏/schema 不符一律回落默认态（与老壳同口径）。
+fn load_ui_state() -> AppUiState {
+    let mut ui = match ui_state_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|json| serde_json::from_str::<AppUiState>(&json))
+    {
+        Some(Ok(ui)) if ui.schema == UI_STATE_SCHEMA => ui,
+        _ => AppUiState::default(),
+    };
+    normalize(&mut ui);
+    ui
 }
 
-/// 一个打开的文件标签：编辑内容与脏标记随标签走，切换标签不丢内容。
-struct Tab {
-    rel: String,
-    editor: text_editor::Content,
-    dirty: bool,
-}
-
-/// 单个窗口的会话状态：文件树与标签归属窗口，仓库状态不在其内。
-#[derive(Default)]
-struct Window {
-    /// 目录子项缓存（key = 目录相对路径，根为 ""）。懒加载：展开时未命中才读盘。
-    children: HashMap<String, Vec<(String, bool)>>,
-    expanded: HashSet<String>,
-    tabs: Vec<Tab>,
-    active: Option<usize>,
-}
-
-impl Window {
-    fn active_tab(&self) -> Option<&Tab> {
-        self.active.and_then(|i| self.tabs.get(i))
-    }
-
-    fn active_tab_mut(&mut self) -> Option<&mut Tab> {
-        let i = self.active?;
-        self.tabs.get_mut(i)
-    }
+/// 分割把手拖拽在途：尺寸调整基于按下时冻结的起点（轴坐标/区域总长/尺寸数组）。
+struct DividerDrag {
+    split_id: String,
+    gap: usize,
+    horizontal: bool,
+    drag_start: f32,
+    split_len: f32,
+    sizes: Vec<f64>,
 }
 
 #[derive(Debug, Clone)]
 enum Message {
-    NewWindow,
     WindowOpened(window::Id),
-    /// 用户点窗口关闭按钮；此处有机会按脏标记拦截。
     WindowCloseRequested(window::Id),
     WindowClosed(window::Id),
     PickVault,
     VaultPicked(Result<PathBuf, String>),
-    ToggleDir(window::Id, String),
+    ToggleDir(String),
     /// gen = 发起任务时的仓库世代；回调落地前与当前世代比对，过期即丢弃。
-    ChildrenLoaded(window::Id, String, u64, Result<Vec<(String, bool)>, String>),
-    SelectFile(window::Id, String),
-    FileLoaded(window::Id, u64, Result<(String, String), String>),
-    TabSelected(window::Id, usize),
-    TabClosed(window::Id, usize),
-    Edited(window::Id, text_editor::Action),
-    Save(window::Id),
-    /// 携带保存发起时冻结的路径与内容：落地后按路径定位标签、与编辑器现值比对，
-    /// 区分保存完成与在途新编辑（不取活动标签，写盘在途的标签切换不影响判定）。
-    Saved(window::Id, u64, String, String, Result<(), String>),
+    ChildrenLoaded(String, u64, Result<Vec<(String, bool)>, String>),
+    OpenFile(String),
+    FileLoaded(u64, Result<(String, String), String>),
+    Edited(text_editor::Action),
+    Save,
+    /// 携带保存发起时冻结的内容：落地后与编辑器现值比对，区分保存完成与在途新编辑。
+    Saved(u64, String, Result<(), String>),
+    PanelTab(String, String),
+    PanelTabClose(String, String),
+    PanelTabLock(String, String),
+    PanelSplit(String, String),
+    PanelClose(String),
+    LayoutActivate(String),
+    LayoutNew,
+    LayoutRenameStart(String),
+    LayoutRenameInput(String),
+    LayoutRenameCommit,
+    LayoutDelete(String),
+    LayoutShift(String, bool),
+    SceneActivate(String),
+    SceneNew,
+    SceneRenameStart(String),
+    SceneRenameInput(String),
+    SceneDelete(String),
+    PersistTick,
+    PersistDone(Result<(), String>),
+    WindowResized(window::Id, Size),
+    DividerPressed(window::Id),
+    DividerMove(window::Id, Point),
+    DividerEnd,
     ToggleTheme,
 }
 
-struct App {
-    windows: BTreeMap<window::Id, Window>,
+pub struct App {
+    /// 布局状态真源（core 模型；与老壳共用磁盘格式）。
+    pub ui: AppUiState,
     vault: Arc<vault::VaultState>,
-    theme: Theme,
-    /// 当前仓库根（打开仓库后与 vault.root() 一致；仅用于展示）。
-    vault_root: Option<PathBuf>,
-    status: String,
+    pub theme: Theme,
+    pub status: String,
+    /// 当前仓库根（打开仓库后与 vault.root() 一致；仅用于展示与 files 视图判空）。
+    pub vault_root: Option<PathBuf>,
+    /// 主窗口（渲染激活布局树）；None = 首帧在途。
+    main_id: Option<window::Id>,
+    /// 撕裂窗口 OS 注册：iced 窗口 id → 模型窗口 id（撕裂窗口调和在后续步骤接线）。
+    detached_os: HashMap<window::Id, String>,
+    /// files 视图懒加载子项缓存（key = 目录相对路径，根为 ""；运行态不落盘）。
+    pub children: HashMap<String, Vec<(String, bool)>>,
+    /// note 视图编辑器内容与脏标记（视图实例全局唯一）。
+    pub editor: text_editor::Content,
+    pub dirty: bool,
+    /// 防抖落盘：有未写盘的模型变更。
+    persist_dirty: bool,
+    /// 主窗口内容区尺寸（logical；Resized 驱动，把手命中几何用）。
+    main_size: Size,
+    /// 主窗口最近光标位置（按下事件不带坐标，命中判定用最近位置）。
+    cursor: Point,
+    divider: Option<DividerDrag>,
+    pub rename: Option<RenameState>,
 }
 
 impl App {
     fn boot() -> (Self, Task<Message>) {
-        let (_, open) = window::open(window_settings());
+        let (_, open) = window::open(Settings {
+            size: WINDOW_SIZE,
+            exit_on_close_request: false,
+            ..Settings::default()
+        });
         (
             Self {
-                windows: BTreeMap::new(),
+                ui: load_ui_state(),
                 vault: Arc::new(vault::VaultState::default()),
                 theme: Theme::Dark,
-                vault_root: None,
                 status: "打开一个仓库开始".into(),
+                vault_root: None,
+                main_id: None,
+                detached_os: HashMap::new(),
+                children: HashMap::new(),
+                editor: text_editor::Content::new(),
+                dirty: false,
+                persist_dirty: false,
+                main_size: WINDOW_SIZE,
+                cursor: Point::ORIGIN,
+                divider: None,
+                rename: None,
             },
             open.map(Message::WindowOpened),
         )
@@ -121,46 +174,30 @@ impl App {
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::NewWindow => {
-                let Some(last) = self.windows.keys().last().copied() else {
-                    return window::open(window_settings()).1.map(Message::WindowOpened);
-                };
-                window::position(last)
-                    .then(|pos| {
-                        let mut settings = window_settings();
-                        settings.position = pos.map_or(window::Position::Default, |p| {
-                            window::Position::Specific(p + Vector::new(24.0, 24.0))
-                        });
-                        window::open(settings).1
-                    })
-                    .map(Message::WindowOpened)
-            }
             Message::WindowOpened(id) => {
-                self.windows.insert(id, Window::default());
-                self.load_children(id, "")
+                if self.main_id.is_none() {
+                    self.main_id = Some(id);
+                }
+                Task::none()
             }
             Message::WindowCloseRequested(id) => {
-                let dirty = self
-                    .windows
-                    .get(&id)
-                    .is_some_and(|w| w.tabs.iter().any(|t| t.dirty));
-                if dirty {
-                    self.status = "窗口内有未保存改动，先 Ctrl+S 保存".into();
+                if self.dirty {
+                    self.status = "有未保存改动，先 Ctrl+S 保存".into();
                     Task::none()
                 } else {
                     window::close(id)
                 }
             }
             Message::WindowClosed(id) => {
-                self.windows.remove(&id);
-                if self.windows.is_empty() {
+                if self.main_id == Some(id) {
                     iced::exit()
                 } else {
+                    self.detached_os.remove(&id);
                     Task::none()
                 }
             }
             Message::PickVault => {
-                if self.any_dirty() {
+                if self.dirty {
                     self.status = "有未保存改动，先 Ctrl+S 保存".into();
                     return Task::none();
                 }
@@ -181,17 +218,13 @@ impl App {
                 }
                 self.vault_root = self.vault.root().ok();
                 self.status = "仓库已打开".into();
-                // 所有窗口的树与标签都指向旧仓库，全部重置防跨仓库读写
-                let ids: Vec<window::Id> = self.windows.keys().copied().collect();
-                let mut task = Task::none();
-                for id in ids {
-                    if let Some(w) = self.windows.get_mut(&id) {
-                        w.children.clear();
-                        w.expanded.clear();
-                        w.tabs.clear();
-                        w.active = None;
-                    }
-                    task = task.chain(self.load_children(id, ""));
+                self.children.clear();
+                self.editor = text_editor::Content::new();
+                self.dirty = false;
+                // last_note_file 跨仓库沿用（相对路径语义）；仓库就绪即恢复其内容
+                let mut task = self.load_children("");
+                if let Some(rel) = self.ui.last_note_file.clone() {
+                    task = task.chain(self.load_note(&rel));
                 }
                 task
             }
@@ -199,182 +232,255 @@ impl App {
                 self.status = e;
                 Task::none()
             }
-            Message::ToggleDir(id, rel) => {
-                let need_load = if let Some(w) = self.windows.get_mut(&id) {
-                    if !w.expanded.remove(&rel) {
-                        w.expanded.insert(rel.clone());
-                        !w.children.contains_key(&rel)
-                    } else {
-                        false
-                    }
+            Message::ToggleDir(rel) => {
+                let expanded = &mut self.ui.file_explorer_expanded;
+                if let Some(i) = expanded.iter().position(|d| d == &rel) {
+                    expanded.remove(i);
                 } else {
-                    false
-                };
-                if need_load {
-                    return self.load_children(id, &rel);
+                    expanded.push(rel.clone());
+                }
+                self.schedule_persist();
+                if !self.children.contains_key(&rel) {
+                    return self.load_children(&rel);
                 }
                 Task::none()
             }
-            Message::ChildrenLoaded(id, dir, gen, Ok(entries)) => {
+            Message::ChildrenLoaded(dir, gen, Ok(entries)) => {
                 if gen != self.epoch() {
                     return Task::none();
                 }
-                if let Some(w) = self.windows.get_mut(&id) {
-                    w.children.insert(dir, entries);
-                }
+                self.children.insert(dir, entries);
                 Task::none()
             }
-            Message::ChildrenLoaded(_, _, _, Err(e)) => {
+            Message::ChildrenLoaded(_, _, Err(e)) => {
                 self.status = format!("读取目录失败：{e}");
                 Task::none()
             }
-            Message::SelectFile(id, rel) => {
-                // 已开标签直接激活；否则读盘开新标签
-                if let Some(w) = self.windows.get_mut(&id) {
-                    if let Some(i) = w.tabs.iter().position(|t| t.rel == rel) {
-                        w.active = Some(i);
-                        return Task::none();
-                    }
-                }
-                // 仓库根在发起时冻结：任务在途时切换仓库不会让读盘落到新仓库路径。
-                let Ok(root) = self.vault.root() else {
-                    self.status = "仓库未打开".into();
-                    return Task::none();
-                };
-                let gen = self.epoch();
-                Task::perform(
-                    async move {
-                        let path = vault::safe_join(&root, &rel, false)?;
-                        let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
-                        let text = String::from_utf8(bytes)
-                            .map_err(|_| "非 UTF-8 文本文件，暂不支持打开".to_string())?;
-                        Ok((rel, text))
-                    },
-                    move |result| Message::FileLoaded(id, gen, result),
-                )
-            }
-            Message::FileLoaded(id, gen, Ok((rel, text))) => {
-                if gen != self.epoch() {
-                    return Task::none();
-                }
-                if let Some(w) = self.windows.get_mut(&id) {
-                    if let Some(i) = w.tabs.iter().position(|t| t.rel == rel) {
-                        w.active = Some(i);
-                    } else {
-                        w.tabs.push(Tab {
-                            rel,
-                            editor: text_editor::Content::with_text(&text),
-                            dirty: false,
-                        });
-                        w.active = Some(w.tabs.len() - 1);
-                    }
-                    self.status = "已打开".into();
-                }
-                Task::none()
-            }
-            Message::FileLoaded(_, _, Err(e)) => {
-                self.status = e;
-                Task::none()
-            }
-            Message::TabSelected(id, i) => {
-                if let Some(w) = self.windows.get_mut(&id) {
-                    if i < w.tabs.len() {
-                        w.active = Some(i);
-                    }
-                }
-                Task::none()
-            }
-            Message::TabClosed(id, idx) => {
-                let dirty = self
-                    .windows
-                    .get(&id)
-                    .and_then(|w| w.tabs.get(idx))
-                    .is_some_and(|t| t.dirty);
-                if dirty {
+            Message::OpenFile(rel) => {
+                if self.dirty {
                     self.status = "有未保存改动，先 Ctrl+S 保存".into();
                     return Task::none();
                 }
-                let Some(w) = self.windows.get_mut(&id) else {
-                    return Task::none();
-                };
-                if idx >= w.tabs.len() {
+                self.ui.last_note_file = Some(rel.clone());
+                self.schedule_persist();
+                self.load_note(&rel)
+            }
+            Message::FileLoaded(gen, Ok((rel, text))) => {
+                if gen != self.epoch() || self.ui.last_note_file.as_deref() != Some(rel.as_str()) {
                     return Task::none();
                 }
-                w.tabs.remove(idx);
-                w.active = match w.active {
-                    Some(a) if a > idx => Some(a - 1),
-                    Some(a) if a >= w.tabs.len() => w.tabs.len().checked_sub(1),
-                    a => a,
-                };
+                self.editor = text_editor::Content::with_text(&text);
+                self.dirty = false;
+                self.status = "已打开".into();
                 Task::none()
             }
-            Message::Edited(id, action) => {
-                if let Some(w) = self.windows.get_mut(&id) {
-                    if let Some(tab) = w.active_tab_mut() {
-                        // 动作须全部执行（widget 只发布不应用，光标/滚动依赖此处）；
-                        // 置脏只看内容是否实际变化——编辑动作也可能是空操作
-                        // （空缓冲退格等），光标/选区/滚动类直接跳过比对
-                        let may_edit = action.is_edit();
-                        let before = may_edit.then(|| tab.editor.text());
-                        tab.editor.perform(action);
-                        if let Some(before) = before {
-                            if tab.editor.text() != before {
-                                tab.dirty = true;
-                            }
-                        }
+            Message::FileLoaded(_, Err(e)) => {
+                // 载入失败必须清空编辑器：last_note_file 已指向新文件，残留旧内容
+                // 会让 Ctrl+S 把旧内容写进新路径
+                self.editor = text_editor::Content::new();
+                self.dirty = false;
+                self.status = e;
+                Task::none()
+            }
+            Message::Edited(action) => {
+                // 动作须全部执行（widget 只发布不应用）；置脏只看内容是否实际变化
+                let may_edit = action.is_edit();
+                let before = may_edit.then(|| self.editor.text());
+                self.editor.perform(action);
+                if let Some(before) = before {
+                    if self.editor.text() != before {
+                        self.dirty = true;
                     }
                 }
                 Task::none()
             }
-            Message::Save(id) => {
-                let Some(w) = self.windows.get(&id) else {
-                    return Task::none();
-                };
-                let Some(tab) = w.active_tab() else {
+            Message::Save => {
+                let Some(rel) = self.ui.last_note_file.clone() else {
                     self.status = "没有打开的文件".into();
                     return Task::none();
                 };
-                // 仓库根在发起时冻结：写盘目标固定为打开该文件时的仓库，
-                // 不随在途期间的仓库切换漂移（防跨仓库写入）。
+                // 仓库根在发起时冻结：写盘目标固定为打开该文件时的仓库。
                 let Ok(root) = self.vault.root() else {
                     self.status = "仓库未打开".into();
                     return Task::none();
                 };
                 let gen = self.epoch();
-                let rel = tab.rel.clone();
-                let saved_rel = rel.clone();
-                let content = tab.editor.text();
+                let content = self.editor.text();
                 let saved = content.clone();
                 Task::perform(
                     async move {
                         let path = vault::safe_join(&root, &rel, false)?;
                         vault::atomic_write(&path, &content)
                     },
-                    move |result| Message::Saved(id, gen, saved_rel, saved, result),
+                    move |result| Message::Saved(gen, saved, result),
                 )
             }
-            Message::Saved(id, gen, rel, saved, Ok(())) => {
+            Message::Saved(gen, saved, Ok(())) => {
                 if gen != self.epoch() {
                     return Task::none();
                 }
-                // 保存发起时冻结的内容与当前一致才算保存完成；
-                // 在途期间的新编辑保持脏标记
-                if let Some(tab) = self
-                    .windows
-                    .get_mut(&id)
-                    .and_then(|w| w.tabs.iter_mut().find(|t| t.rel == rel))
-                {
-                    if tab.editor.text() == saved {
-                        tab.dirty = false;
-                        self.status = "已保存".into();
-                    } else {
-                        self.status = "保存完成，期间有新修改".into();
+                // 保存发起时冻结的内容与当前一致才算保存完成；在途期间的新编辑保持脏标记
+                if self.editor.text() == saved {
+                    self.dirty = false;
+                    self.status = "已保存".into();
+                } else {
+                    self.status = "保存完成，期间有新修改".into();
+                }
+                Task::none()
+            }
+            Message::Saved(_, _, Err(e)) => {
+                self.status = format!("保存失败：{e}");
+                Task::none()
+            }
+            Message::PanelTab(panel_id, tab_id) => {
+                self.apply(LayoutOp::SetActive { panel_id, tab_id })
+            }
+            Message::PanelTabClose(panel_id, tab_id) => {
+                self.apply(LayoutOp::CloseTab { panel_id, tab_id })
+            }
+            Message::PanelTabLock(panel_id, tab_id) => {
+                let locked = self
+                    .active_tree()
+                    .and_then(|tree| layout::find_tab_in_tree(&tree, &tab_id))
+                    .is_some_and(|(_, t)| t.locked);
+                self.apply(LayoutOp::SetLocked { panel_id, tab_id, locked: !locked })
+            }
+            Message::PanelSplit(panel_id, direction) => self.apply(LayoutOp::SplitPanel {
+                panel_id,
+                direction,
+                position: Some("after".into()),
+            }),
+            Message::PanelClose(panel_id) => self.apply(LayoutOp::ClosePanel { panel_id }),
+            Message::LayoutActivate(id) => self.apply(LayoutOp::ActivateLayout { id }),
+            Message::LayoutNew => self.apply(LayoutOp::AddLayout),
+            Message::LayoutRenameStart(id) => {
+                let name = self
+                    .active_scene()
+                    .and_then(|s| s.layouts.iter().find(|l| l.id == id))
+                    .map(|l| l.name.clone())
+                    .unwrap_or_default();
+                self.rename = Some(RenameState { target: RenameTarget::Layout(id), value: name });
+                Task::none()
+            }
+            Message::LayoutRenameInput(value) => {
+                if let Some(r) = &mut self.rename {
+                    r.value = value;
+                }
+                Task::none()
+            }
+            Message::LayoutRenameCommit => {
+                let Some(r) = self.rename.take() else { return Task::none() };
+                match r.target {
+                    RenameTarget::Layout(id) => self.apply(LayoutOp::RenameLayout { id, name: r.value }),
+                    RenameTarget::Scene(id) => self.apply(LayoutOp::RenameScene { id, name: r.value }),
+                }
+            }
+            Message::LayoutDelete(id) => self.apply(LayoutOp::DeleteLayout { id }),
+            Message::LayoutShift(id, left) => {
+                let Some(scene) = self.active_scene() else { return Task::none() };
+                let Some(i) = scene.layouts.iter().position(|l| l.id == id) else {
+                    return Task::none();
+                };
+                let (from, to) = if left { (i + 1, i) } else { (i + 1, i + 2) };
+                self.apply(LayoutOp::MoveLayout { from_index: from, to_index: to })
+            }
+            Message::SceneActivate(id) => self.apply(LayoutOp::ActivateScene { id }),
+            Message::SceneNew => self.apply(LayoutOp::AddScene),
+            Message::SceneRenameStart(id) => {
+                let name = self
+                    .ui
+                    .scenes
+                    .iter()
+                    .find(|s| s.id == id)
+                    .map(|s| s.name.clone())
+                    .unwrap_or_default();
+                self.rename = Some(RenameState { target: RenameTarget::Scene(id), value: name });
+                Task::none()
+            }
+            Message::SceneRenameInput(value) => {
+                if let Some(r) = &mut self.rename {
+                    r.value = value;
+                }
+                Task::none()
+            }
+            Message::SceneDelete(id) => self.apply(LayoutOp::DeleteScene { id }),
+            Message::PersistTick => {
+                if !self.persist_dirty {
+                    return Task::none();
+                }
+                self.persist_dirty = false;
+                let Some(path) = ui_state_path() else { return Task::none() };
+                match serde_json::to_string(&self.ui) {
+                    Ok(json) => Task::perform(
+                        async move { vault::atomic_write(&path, &json) },
+                        Message::PersistDone,
+                    ),
+                    Err(e) => {
+                        self.status = format!("布局序列化失败：{e}");
+                        Task::none()
+                    }
+                }
+            }
+            Message::PersistDone(Ok(())) => Task::none(),
+            Message::PersistDone(Err(e)) => {
+                // 写盘失败回到脏态，下个周期重试
+                self.persist_dirty = true;
+                self.status = format!("布局落盘失败：{e}");
+                Task::none()
+            }
+            Message::WindowResized(id, size) => {
+                if self.main_id == Some(id) {
+                    self.main_size = size;
+                }
+                Task::none()
+            }
+            Message::DividerPressed(id) => {
+                if self.main_id != Some(id) || self.divider.is_some() {
+                    return Task::none();
+                }
+                let tree = layout::active_layout(&self.ui).tree;
+                for d in enumerate_dividers(&tree, self.content_area()) {
+                    if d.rect.contains(self.cursor) {
+                        self.divider = Some(DividerDrag {
+                            split_id: d.split_id,
+                            gap: d.gap,
+                            horizontal: d.horizontal,
+                            drag_start: if d.horizontal { self.cursor.x } else { self.cursor.y },
+                            split_len: d.split_len,
+                            sizes: d.sizes,
+                        });
+                        break;
                     }
                 }
                 Task::none()
             }
-            Message::Saved(_, _, _, _, Err(e)) => {
-                self.status = format!("保存失败：{e}");
+            Message::DividerMove(id, pos) => {
+                let (Some(id_main), Some(d)) = (self.main_id, &mut self.divider) else {
+                    if self.main_id == Some(id) {
+                        self.cursor = pos;
+                    }
+                    return Task::none();
+                };
+                if id != id_main {
+                    return Task::none();
+                }
+                self.cursor = pos;
+                let axis = if d.horizontal { pos.x } else { pos.y };
+                let sum: f64 = d.sizes.iter().sum();
+                let dfrac = ((axis - d.drag_start) as f64 / d.split_len as f64) * sum;
+                let s0 = d.sizes[d.gap] + dfrac;
+                let s1 = d.sizes[d.gap + 1] - dfrac;
+                if s0 < 0.02 || s1 < 0.02 {
+                    return Task::none();
+                }
+                let split_id = d.split_id.clone();
+                let mut sizes = d.sizes.clone();
+                sizes[d.gap] = s0;
+                sizes[d.gap + 1] = s1;
+                self.apply(LayoutOp::SetLayoutSizes { split_id, sizes })
+            }
+            Message::DividerEnd => {
+                self.divider = None;
                 Task::none()
             }
             Message::ToggleTheme => {
@@ -387,6 +493,20 @@ impl App {
         }
     }
 
+    /// 应用一个布局操作：形状校验 + 变更 + 调度落盘（iced 单状态树天然全窗口可见，无广播层）。
+    fn apply(&mut self, op: LayoutOp) -> Task<Message> {
+        if !op_passes_shape_check(&self.ui, &op) {
+            return Task::none();
+        }
+        let _result = apply_layout_op(&mut self.ui, &op);
+        self.schedule_persist();
+        Task::none()
+    }
+
+    fn schedule_persist(&mut self) {
+        self.persist_dirty = true;
+    }
+
     /// 会话世代：core 在每次切换仓库时自增；在途任务的回调据此判定是否过期。
     fn epoch(&self) -> u64 {
         self.vault
@@ -394,16 +514,26 @@ impl App {
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    /// 任一窗口存在脏标签即视为全局有未保存改动（切仓库前守卫）。
-    fn any_dirty(&self) -> bool {
-        self.windows
-            .values()
-            .any(|w| w.tabs.iter().any(|t| t.dirty))
+    fn active_tree(&self) -> Option<layout::LayoutNode> {
+        Some(layout::active_layout(&self.ui).tree)
+    }
+
+    fn active_scene(&self) -> Option<&layout::Scene> {
+        layout::active_scene(&self.ui).into()
+    }
+
+    /// 主窗口分割树几何区域（头部三行以下的内容区，logical px）。
+    fn content_area(&self) -> iced::Rectangle {
+        iced::Rectangle {
+            x: 0.0,
+            y: UiMetrics::HEADER_H,
+            width: self.main_size.width,
+            height: (self.main_size.height - UiMetrics::HEADER_H).max(0.0),
+        }
     }
 
     /// 读目录子项（core 的统一过滤语义：隐藏项 / 排除夹 / .tmp 副产物）。
-    /// 仓库根与排除列表在发起时冻结，任务在途的仓库切换不影响读盘目标。
-    fn load_children(&mut self, id: window::Id, rel: &str) -> Task<Message> {
+    fn load_children(&mut self, rel: &str) -> Task<Message> {
         let Ok(root) = self.vault.root() else {
             return Task::none();
         };
@@ -416,181 +546,72 @@ impl App {
         let rel_for_cb = rel.clone();
         Task::perform(
             async move { vault::read_dir_filtered(&root, &rel, &exclude) },
-            move |result| Message::ChildrenLoaded(id, rel_for_cb, gen, result),
+            move |result| Message::ChildrenLoaded(rel_for_cb, gen, result),
+        )
+    }
+
+    /// 读 note 视图文件内容（仓库切换恢复与文件点击共用；根在发起时冻结，
+    /// 任务在途时切换仓库不会让读盘落到新仓库路径）。
+    fn load_note(&self, rel: &str) -> Task<Message> {
+        let Ok(root) = self.vault.root() else {
+            return Task::none();
+        };
+        let gen = self.epoch();
+        let rel = rel.to_string();
+        Task::perform(
+            async move {
+                let path = vault::safe_join(&root, &rel, false)?;
+                let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+                let text = String::from_utf8(bytes)
+                    .map_err(|_| "非 UTF-8 文本文件，暂不支持打开".to_string())?;
+                Ok((rel, text))
+            },
+            move |result| Message::FileLoaded(gen, result),
         )
     }
 
     fn title(&self, id: window::Id) -> String {
-        self.windows
-            .get(&id)
-            .and_then(|w| w.active_tab())
-            .map(|t| {
-                let name = t.rel.rsplit('/').next().unwrap_or(&t.rel);
-                format!("Atelyx — {name}")
-            })
-            .unwrap_or_else(|| "Atelyx".into())
+        let _ = id;
+        "Atelyx".into()
     }
 
     fn view(&self, id: window::Id) -> Element<'_, Message> {
-        // 窗口登记（WindowOpened）前的首帧
-        let Some(w) = self.windows.get(&id) else {
-            return space().into();
-        };
-
-        let sidebar = if self.vault_root.is_some() {
-            let mut tree_col = column![];
-            for r in Self::tree_rows(w) {
-                let indent = iced::Padding {
-                    left: 8.0 + r.depth as f32 * 16.0,
-                    ..Default::default()
-                };
-                let label = if r.is_dir {
-                    format!("{} {}", if r.expanded { "▾" } else { "▸" }, r.name)
-                } else {
-                    format!("  {0}", r.name)
-                };
-                let row = button(text(label).size(13).width(Length::Fill))
-                    .padding(indent)
-                    .style(button::text)
-                    .on_press_maybe(if r.is_dir {
-                        Some(Message::ToggleDir(id, r.rel.clone()))
-                    } else {
-                        Some(Message::SelectFile(id, r.rel.clone()))
-                    })
-                    .width(Length::Fill);
-                tree_col = tree_col.push(row);
-            }
-            scrollable(container(tree_col).width(Length::Fill)).width(Length::Fixed(280.0))
+        if self.main_id == Some(id) {
+            layout_view::main_view(self)
+        } else if self.detached_os.contains_key(&id) {
+            layout_view::detached_view(self, &self.detached_os[&id])
         } else {
-            scrollable(
-                button("打开仓库…")
-                    .on_press(Message::PickVault)
-                    .padding(8),
-            )
-            .width(Length::Fixed(280.0))
-        };
-
-        let mut tab_row = row![].spacing(4);
-        for (i, tab) in w.tabs.iter().enumerate() {
-            let name = tab.rel.rsplit('/').next().unwrap_or(&tab.rel).to_string();
-            let label = if tab.dirty { format!("{name} •") } else { name };
-            let is_active = w.active == Some(i);
-            tab_row = tab_row
-                .push(
-                    button(text(label).size(12))
-                        .padding([4, 8])
-                        .style(if is_active {
-                            button::primary
-                        } else {
-                            button::text
-                        })
-                        .on_press_maybe((!is_active).then_some(Message::TabSelected(id, i))),
-                )
-                .push(
-                    button(text("×").size(12))
-                        .padding([4, 6])
-                        .style(button::text)
-                        .on_press(Message::TabClosed(id, i)),
-                );
-        }
-
-        let editor_area: Element<'_, Message> = if let Some(tab) = w.active_tab() {
-            column![
-                tab_row,
-                text_editor(&tab.editor)
-                    .height(Length::Fill)
-                    .on_action(move |action| Message::Edited(id, action)),
-            ]
-            .into()
-        } else {
-            container(text("左侧选择文件打开").size(14))
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .center_x(Length::Fill)
-                .center_y(Length::Fill)
-                .into()
-        };
-
-        let header = row![
-            button("新开窗口").on_press(Message::NewWindow),
-            button("切换仓库")
-                .on_press_maybe(self.vault_root.is_some().then_some(Message::PickVault)),
-            button(if matches!(self.theme, Theme::Dark) {
-                "浅色"
-            } else {
-                "深色"
-            })
-            .on_press(Message::ToggleTheme),
-            text(self.status.clone()).size(12),
-        ]
-        .spacing(8)
-        .padding(8);
-
-        let content = column![
-            header,
-            row![
-                container(sidebar).height(Length::Fill),
-                container(editor_area)
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .padding([0, 8]),
-            ]
-            .height(Length::Fill)
-        ]
-        .height(Length::Fill);
-
-        content.into()
-    }
-
-    /// 由子项缓存 + 展开集摊平侧栏行（目录在前、按名升序）。
-    fn tree_rows(w: &Window) -> Vec<TreeRow> {
-        let mut rows = Vec::new();
-        Self::push_children(&mut rows, w, "", 0);
-        rows
-    }
-
-    /// 递归展开 `dir` 的可见子树（目录在前、忽略大小写按名升序）。
-    fn push_children(rows: &mut Vec<TreeRow>, w: &Window, dir: &str, depth: usize) {
-        let mut entries: Vec<(String, bool)> = w
-            .children
-            .get(dir)
-            .cloned()
-            .unwrap_or_default()
-            .into_iter()
-            .collect();
-        entries.sort_by(|a, b| {
-            b.1.cmp(&a.1).then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase()))
-        });
-        for (rel, is_dir) in entries {
-            let expanded = w.expanded.contains(&rel);
-            let name = rel.rsplit('/').next().unwrap_or(&rel).to_string();
-            rows.push(TreeRow {
-                name,
-                depth,
-                is_dir,
-                expanded,
-                rel: rel.clone(),
-            });
-            if is_dir && expanded {
-                Self::push_children(rows, w, &rel, depth + 1);
-            }
+            space().into()
         }
     }
 
-    /// 快捷键按来源窗口路由（Ctrl+S 存当前焦点窗口的活动标签）；
-    /// 关窗请求与关窗完成也在此统一接入。
     fn subscription(&self) -> Subscription<Message> {
-        iced::event::listen_with(|event, _status, window| match event {
-            Event::Keyboard(keyboard::Event::KeyPressed {
-                key: keyboard::Key::Character(c),
-                modifiers,
-                ..
-            }) if c == "s" && modifiers.control() => Some(Message::Save(window)),
-            Event::Window(window::Event::CloseRequested) => {
-                Some(Message::WindowCloseRequested(window))
-            }
-            Event::Window(window::Event::Closed) => Some(Message::WindowClosed(window)),
-            _ => None,
-        })
+        Subscription::batch([
+            iced::time::every(PERSIST_TICK).map(|_| Message::PersistTick),
+            iced::event::listen_with(|event, _status, window| match event {
+                Event::Keyboard(keyboard::Event::KeyPressed {
+                    key: keyboard::Key::Character(c),
+                    modifiers,
+                    ..
+                }) if c == "s" && modifiers.control() => Some(Message::Save),
+                Event::Window(window::Event::CloseRequested) => {
+                    Some(Message::WindowCloseRequested(window))
+                }
+                Event::Window(window::Event::Closed) => Some(Message::WindowClosed(window)),
+                Event::Window(window::Event::Resized(size)) => {
+                    Some(Message::WindowResized(window, size))
+                }
+                Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                    Some(Message::DividerPressed(window))
+                }
+                Event::Mouse(mouse::Event::CursorMoved { position }) => {
+                    Some(Message::DividerMove(window, position))
+                }
+                Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                    Some(Message::DividerEnd)
+                }
+                _ => None,
+            }),
+        ])
     }
 }
