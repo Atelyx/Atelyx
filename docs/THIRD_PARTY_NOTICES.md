@@ -3,6 +3,13 @@
 本项目包含或依赖以下第三方软件，许可与版权归属如下。完整传递依赖清单可用
 `pnpm licenses list` 审计（本文件记录于 2026-10-04）。
 
+## 随应用分发的 Rust 侧资产（atelyx-app）
+
+| 资产 | 许可 | 版权 | 说明 |
+| --- | --- | --- | --- |
+| `atelyx-app/assets/fonts/IBMPlexSans-*.ttf` | SIL Open Font License 1.1 | © 2019 IBM Corp. | 新壳界面字体（Regular/Medium/SemiBold 三字重，取自 IBM/plex 官方仓库） |
+| `atelyx-app/src/ui/icons.rs`（形状数据） | ISC | © Lucide Contributors | 图标形状数据取自 lucide v1.31（https://lucide.dev），仅路径数据嵌入，绘制代码为本仓库实现 |
+
 ## Vendored 源码
 
 | 目录 | 许可 | 版权 | 说明 |

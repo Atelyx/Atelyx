@@ -1,0 +1,70 @@
+//! 统一弹层壳：锚点定位 + 视口钳制/翻转 + 外点关闭的窗口内覆盖层。
+//! 窗口根部 Stack 叠三层（内容/全窗捕获层/浮层），Esc 由应用层键盘订阅路由。
+
+use iced::widget::{container, mouse_area, space, stack};
+use iced::{Element, Length, Padding, Point, Size, border, widget::container::Style};
+
+use super::palette as pal;
+use crate::Message;
+
+/// 弹层规格：锚点（窗口局部坐标）+ 定宽 + 估算高 + 向上翻转的触发器顶边。
+#[derive(Clone, Copy, Debug)]
+pub struct PopupSpec {
+    pub anchor: Point,
+    pub width: f32,
+    pub height: f32,
+    /// 触发器顶边 y（下方放不下且上方放得下时，底边贴此值翻转）。
+    pub flip_y: Option<f32>,
+}
+
+/// 解析后的弹层矩形（窗口局部坐标，已钳制/翻转）。
+pub struct PopupGeom {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+}
+
+/// 钳制 + 翻转（语义与旧壳一致：视口边距 6px；下方放不下且上方放得下才翻转）。
+pub fn resolve(spec: &PopupSpec, viewport: Size) -> PopupGeom {
+    let (w, h) = (spec.width, spec.height);
+    let max_x = (viewport.width - w - pal::VIEWPORT_GAP).max(pal::VIEWPORT_GAP);
+    let x = spec.anchor.x.clamp(pal::VIEWPORT_GAP, max_x);
+    let mut y = spec.anchor.y;
+    if let Some(flip) = spec.flip_y {
+        let below_fits = spec.anchor.y + h <= viewport.height - pal::VIEWPORT_GAP;
+        let above_fits = flip - h >= pal::VIEWPORT_GAP;
+        if !below_fits && above_fits {
+            y = flip - h;
+        }
+    }
+    let max_y = (viewport.height - h - pal::VIEWPORT_GAP).max(pal::VIEWPORT_GAP);
+    let y = y.clamp(pal::VIEWPORT_GAP, max_y);
+    PopupGeom { x, y, w }
+}
+
+/// 把弹层叠在窗口内容之上：`background` = 该窗口的常规内容元素。
+pub fn layer<'a>(
+    background: Element<'a, Message>,
+    geom: PopupGeom,
+    content: Element<'a, Message>,
+    on_dismiss: Message,
+) -> Element<'a, Message> {
+    let capture = mouse_area(space().width(Length::Fill).height(Length::Fill)).on_press(on_dismiss);
+    let popup = container(content)
+        .width(Length::Fixed(geom.w))
+        .style(move |_t| Style {
+            background: Some(pal::BG_OVERLAY.into()),
+            border: border::rounded(pal::RADIUS_MD).color(pal::BORDER).width(1.0),
+            ..Style::default()
+        });
+    let positioned = container(popup)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(iced::alignment::Horizontal::Left)
+        .align_y(iced::alignment::Vertical::Top)
+        .padding(Padding::ZERO.left(geom.x).top(geom.y));
+    stack![background, capture, positioned]
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+}
