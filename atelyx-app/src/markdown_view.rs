@@ -14,9 +14,9 @@ use iced::{Border, Color, Element, Font, Length, Padding};
 
 use crate::Message;
 
-/// 正文基准字号与行高倍数（空行行的间距按此折算）。
-const BASE_SIZE: f32 = 14.0;
-const LINE_HEIGHT: f32 = 1.625;
+/// 正文基准字号与行高倍数（空行行的间距按此折算；编辑面空行预编辑同源）。
+pub(crate) const BASE_SIZE: f32 = 14.0;
+pub(crate) const LINE_HEIGHT: f32 = 1.625;
 /// 代码字号与代码块最多展示行数（超出转块内纵向滚动）。
 const MONO_SIZE: f32 = 12.0;
 const CODE_MAX_LINES: usize = 18;
@@ -794,8 +794,12 @@ fn rich<'a>(
 }
 
 /// 空行间距元素：一个源码空行 = 一行高。
+/// 宽度须撑满：零宽行与视口的相交恒为空，编辑面会整行跳过空行的光标与选区底色。
 pub fn gap<'a>(lines: usize) -> Element<'a, Message> {
-    Space::new().height(Length::Fixed(lines as f32 * gap_height())).into()
+    Space::new()
+        .width(Length::Fill)
+        .height(Length::Fixed(lines as f32 * gap_height()))
+        .into()
 }
 
 fn gap_height() -> f32 {

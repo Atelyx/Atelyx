@@ -738,6 +738,7 @@ impl App {
                         self.note_mode = NoteMode::Read;
                         self.edit_doc = None;
                         self.edit_meta.clear();
+                        self.edit.focused = false;
                         self.refresh_preview();
                     }
                     NoteMode::Edit => {
@@ -754,6 +755,7 @@ impl App {
                         self.preview_doc = None;
                         self.edit_doc = None;
                         self.edit_meta.clear();
+                        self.edit.focused = false;
                         self.source_editor = text_editor::Content::with_text(&self.note_text);
                     }
                 }
@@ -1794,33 +1796,27 @@ impl App {
                 Some(meta) => if upper { meta.from } else { meta.to },
                 None => 0,
             },
-            HitTarget::GapLine { from, to, upper } => {
-                if upper {
-                    // 空行起点 = 上一块末之后第一个字节
-                    (from + 1).min(to)
-                } else {
-                    to
-                }
-            }
+            HitTarget::GapLine { offset } => offset.min(self.note_text.len()),
             HitTarget::Start => self.edit_meta.first().map_or(0, |m| m.from),
-            HitTarget::End => self.edit_meta.last().map_or(self.note_text.len(), |m| m.to),
+            HitTarget::End => self.note_text.len(),
         }
     }
 
-    /// 活动块 = 光标所在块。光标落在块间空行时不揭示任何块（空行光标由编辑面自绘）；
-    /// 落在文首 / 文末之外时回到最近块，保证光标有宿主。
+    /// 活动块 = 光标所在块。光标落在空白区（文首 / 块间 / 文末的空白行与文末虚拟行）
+    /// 时不揭示任何块，键盘与光标由编辑面托管；其余文外位置回到最近块保住键盘宿主。
     fn sync_active(&mut self) {
-        let caret = self.edit.caret.min(self.note_text.len());
+        let len = self.note_text.len();
+        let caret = self.edit.caret.min(len);
         if let Some(i) = self.block_at(caret) {
             self.edit.active = Some(i);
             return;
         }
-        let outside = self
-            .edit_meta
-            .first()
-            .zip(self.edit_meta.last())
-            .is_some_and(|(f, l)| caret < f.from || caret > l.to);
-        self.edit.active = if outside { self.nearest_block(caret) } else { None };
+        // 文末虚拟行：末块之后还有尾部字节时，caret == len 也由编辑面托管；
+        // caret == 0 落在文首 Gap 行（能走到这里说明首块前有空白行，端点上无相邻块）
+        let on_blank_line = caret == 0
+            || caret < len
+            || self.edit_meta.last().is_some_and(|last| len > last.to);
+        self.edit.active = if on_blank_line { None } else { self.nearest_block(caret) };
     }
 
     /// 选区锚点所在块。
@@ -2013,21 +2009,64 @@ impl App {
         self.sync_active();
     }
 
-    /// 上下越界时的跨块移动：落到相邻块首/末。
+    /// 上下越界时的跨块移动：块内跨到相邻块首 / 末或毗邻的文首 / 文末空白区；
+    /// 空白区光标按行首逐行移动，越过端点落相邻块（见 `markdown_edit::vertical_target`）。
     fn cross_block_move(&mut self, forward: bool, extend: bool) {
-        let Some(idx) = self.edit.active.or_else(|| self.nearest_block(self.edit.caret)) else {
+        let len = self.note_text.len();
+        let caret = self.edit.caret.min(len);
+        let spans: Vec<(usize, usize)> =
+            self.edit_meta.iter().map(|m| (m.from, m.to)).collect();
+        let blank_starts = self.blank_starts_near(caret, &spans, forward);
+        let Some(target) = markdown_edit::vertical_target(caret, &spans, &blank_starts, forward)
+        else {
             return;
         };
-        let target_index = if forward { idx + 1 } else { idx.saturating_sub(1) };
-        let Some(meta) = self.edit_meta.get(target_index).cloned() else {
-            return;
-        };
-        let target = if forward { meta.from } else { meta.to.min(self.note_text.len()) };
+        let target = target.min(len);
         if !extend {
             self.edit.anchor = target;
         }
         self.edit.caret = target;
-        self.edit.active = Some(target_index);
+        self.sync_active();
+    }
+
+    /// 光标所在或行进方向毗邻的空白行行首：光标在空白区取该区；在首块向上 /
+    /// 末块向下时取毗邻的文首 / 文末空白区；其余为空。
+    fn blank_starts_near(
+        &self,
+        caret: usize,
+        spans: &[(usize, usize)],
+        forward: bool,
+    ) -> Vec<usize> {
+        if let Some(i) = spans.iter().position(|&(f, t)| caret >= f && caret <= t) {
+            let region = if !forward && i == 0 {
+                spans.first().map(|&(f, _)| (0, f))
+            } else if forward && i + 1 == spans.len() {
+                spans.last().map(|&(_, t)| (t, self.note_text.len()))
+            } else {
+                None
+            };
+            return region.map_or(Vec::new(), |(f, t)| self.region_blank_starts(f, t));
+        }
+        match spans.iter().rposition(|&(f, _)| f <= caret) {
+            None => self.region_blank_starts(0, spans.first().map_or(0, |&(f, _)| f)),
+            Some(i) => {
+                let from = spans[i].1;
+                let to = spans.get(i + 1).map_or(self.note_text.len(), |&(_, f)| f);
+                self.region_blank_starts(from, to)
+            }
+        }
+    }
+
+    /// 空白区间的空白行行首：文首区第一行也是空白行（不含缩进片段）；
+    /// 文末区含虚拟文末行（文本以换行结尾时）。
+    fn region_blank_starts(&self, from: usize, to: usize) -> Vec<usize> {
+        if to == self.note_text.len() {
+            markdown_edit::tail_blank_starts(&self.note_text, from)
+        } else if from == 0 {
+            markdown_edit::edge_blank_starts(&self.note_text, 0, to)
+        } else {
+            markdown_edit::gap_line_starts(&self.note_text, from, to)
+        }
     }
 
     fn edit_undo(&mut self) {
@@ -2228,13 +2267,14 @@ impl App {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        // 心跳仅在有待过期通知或 tooltip 显现在途时挂载（空闲零开销）
-        let need_tick =
-            !self.notifications.is_empty() || self.tooltip.as_ref().is_some_and(|(_, _, _, shown)| !*shown);
+        // 心跳仅在有待过期通知、tooltip 显现在途或编辑面聚焦（光标闪烁节拍）时挂载
+        let need_tick = !self.notifications.is_empty()
+            || self.tooltip.as_ref().is_some_and(|(_, _, _, shown)| !*shown)
+            || self.edit.focused;
         Subscription::batch([
             iced::time::every(PERSIST_TICK).map(|_| Message::PersistTick),
             if need_tick {
-                iced::time::every(std::time::Duration::from_millis(300)).map(|_| Message::UiTick)
+                iced::time::every(std::time::Duration::from_millis(100)).map(|_| Message::UiTick)
             } else {
                 Subscription::none()
             },

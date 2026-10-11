@@ -1467,12 +1467,33 @@ fn edit_view(app: &App) -> Element<'_, Message> {
         return scrollable(markdown_edit::EditSurface::new(
             rows,
             pal_edit,
+            &doc.source,
             caret,
+            app.edit.anchor,
+            app.edit.preedit.clone(),
             app.edit.focused,
         ))
         .width(Length::Fill)
         .height(Length::Fill)
         .into();
+    }
+    // 文首空白行（首块之前）：文首区每行都是空白行，末尾不带换行的片段是缩进
+    if let Some(first) = app.edit_meta.first() {
+        if first.from > 0 {
+            let line_starts = markdown_edit::edge_blank_starts(&doc.source, 0, first.from);
+            let lines = line_starts.len();
+            if lines > 0 {
+                let covered =
+                    markdown_edit::gap_covered_lines(&line_starts, first.from, sel_from, sel_to);
+                rows.push(SurfaceRow::Gap {
+                    from: 0,
+                    to: first.from,
+                    line_starts,
+                    covered,
+                    element: markdown_view::gap(lines),
+                });
+            }
+        }
     }
     for (index, chunk) in markdown_view::block_chunks(&doc.source, &doc.blocks, &app.theme, true)
         .into_iter()
@@ -1483,10 +1504,13 @@ fn edit_view(app: &App) -> Element<'_, Message> {
         if chunk.gap_before > 0 {
             if let Some(p) = prev {
                 let from = app.edit_meta[p].to;
-                let covered = sel_to > sel_from && sel_from <= from && sel_to >= chunk.from;
+                let line_starts = markdown_edit::gap_line_starts(&doc.source, from, chunk.from);
+                let covered =
+                    markdown_edit::gap_covered_lines(&line_starts, chunk.from, sel_from, sel_to);
                 rows.push(SurfaceRow::Gap {
                     from,
                     to: chunk.from,
+                    line_starts,
                     covered,
                     element: markdown_view::gap(chunk.gap_before),
                 });
@@ -1524,10 +1548,34 @@ fn edit_view(app: &App) -> Element<'_, Message> {
         }
         prev = Some(index);
     }
+    // 文末空白行（末块之后）：块区间未覆盖的尾部空白行；文本以换行结尾时
+    // 末行下方还有一行虚拟空行（点击落光标、可直接输入，对齐整篇文本面行为）
+    if let Some(last) = app.edit_meta.last() {
+        if doc.source.len() > last.to {
+            let line_starts = markdown_edit::tail_blank_starts(&doc.source, last.to);
+            let lines = line_starts.len();
+            if lines > 0 {
+                // 托管区间含虚拟文末行：光标可停在 len（右开）
+                let to = doc.source.len() + 1;
+                let covered =
+                    markdown_edit::gap_covered_lines(&line_starts, to, sel_from, sel_to);
+                rows.push(SurfaceRow::Gap {
+                    from: last.to,
+                    to,
+                    line_starts,
+                    covered,
+                    element: markdown_view::gap(lines),
+                });
+            }
+        }
+    }
     scrollable(markdown_edit::EditSurface::new(
         rows,
         pal_edit,
+        &doc.source,
         caret,
+        app.edit.anchor,
+        app.edit.preedit.clone(),
         app.edit.focused,
     ))
     .width(Length::Fill)

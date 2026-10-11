@@ -343,8 +343,8 @@ pub enum HitTarget {
     BlockText { index: usize, point: Point, width: f32 },
     /// 命中未揭示块（富渲染）：内部几何不可得，按行的上下半区吸到块首 / 块尾。
     BlockEdge { index: usize, upper: bool },
-    /// 命中空行行：吸到空行起点 / 该行末端。
-    GapLine { from: usize, to: usize, upper: bool },
+    /// 命中空行行：已按行首表换算为源偏移（第 k 根空行的行首）。
+    GapLine { offset: usize },
     /// 命中内容区上方 / 下方空白：落到文首 / 文末。
     Start,
     End,
@@ -363,6 +363,14 @@ pub enum Motion {
 
 /// 源码态光标闪烁半周期。
 const BLINK_MS: u128 = 500;
+
+/// Unix 毫秒时间戳（空行光标的闪烁相位取墙钟：任何一帧重绘都能算出确定相位，
+/// 不依赖部件状态与续帧链路）。
+fn unix_millis() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |t| t.as_millis())
+}
 
 type ParagraphT = <iced::Renderer as advanced_text::Renderer>::Paragraph;
 
@@ -768,26 +776,10 @@ impl Widget<Message, Theme, iced::Renderer> for SourceBlock<'_> {
         if !self.focused {
             return;
         }
-        // 闪烁相位：半周期可见
-        let on = state
-            .blink_anchor
-            .map_or(0u128, |anchor| anchor.elapsed().as_millis() / BLINK_MS)
-            .is_multiple_of(2);
-        if !on {
-            return;
-        }
         let clamped = self.caret.clamp(self.from, self.to);
         let caret_char = char_index(&state.content, clamped - self.from);
         let (x, y, h) = caret_xy(p, count, caret_char, line_px);
-        renderer.fill_quad(
-            Quad {
-                bounds: Rectangle::new(origin + Vector::new(x, y), Size::new(1.5, h)),
-                ..Quad::default()
-            },
-            self.pal.text,
-        );
-
-        // 未上屏组合串画在光标处
+        // 未上屏组合串画在光标处（组合期恒可见，不随光标闪烁）
         if let Some(pre) = self.preedit.as_deref().filter(|s| !s.is_empty()) {
             renderer.fill_text(
                 advanced_text::Text {
@@ -806,6 +798,21 @@ impl Widget<Message, Theme, iced::Renderer> for SourceBlock<'_> {
                 bounds,
             );
         }
+        // 闪烁相位：半周期可见
+        let on = state
+            .blink_anchor
+            .map_or(0u128, |anchor| anchor.elapsed().as_millis() / BLINK_MS)
+            .is_multiple_of(2);
+        if !on {
+            return;
+        }
+        renderer.fill_quad(
+            Quad {
+                bounds: Rectangle::new(origin + Vector::new(x, y), Size::new(1.5, h)),
+                ..Quad::default()
+            },
+            self.pal.text,
+        );
     }
 
     fn mouse_interaction(
@@ -845,58 +852,16 @@ impl Widget<Message, Theme, iced::Renderer> for SourceBlock<'_> {
         }
 
         match event {
-            Event::InputMethod(ime) => match ime {
-                ImeEvent::Closed => {
-                    shell.publish(Message::Editor(EditorEvent::Preedit(None)));
-                    shell.request_redraw();
-                }
-                ImeEvent::Preedit(content, _) => {
-                    shell.publish(Message::Editor(EditorEvent::Preedit(Some(content.clone()))));
-                    shell.capture_event();
-                    shell.request_redraw();
-                }
-                ImeEvent::Commit(content) => {
-                    shell.publish(Message::Editor(EditorEvent::Insert(content.clone())));
-                    shell.publish(Message::Editor(EditorEvent::Preedit(None)));
-                    shell.capture_event();
-                    shell.request_redraw();
-                }
-                ImeEvent::Opened => {}
-            },
+            Event::InputMethod(ime) => handle_ime_event(ime, shell),
             Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, text, .. })
                 if self.preedit.is_none() =>
             {
                 // 剪贴板三键就地处理（部件内可直接读写信箱）
                 if modifiers.control() {
                     if let Key::Character(c) = key {
-                        match c.to_lowercase().as_str() {
-                            "c" => {
-                                let sel = self.selected_text();
-                                if !sel.is_empty() {
-                                    clipboard.write(ClipboardKind::Standard, sel);
-                                }
-                                shell.capture_event();
-                                return;
-                            }
-                            "x" => {
-                                let sel = self.selected_text();
-                                if !sel.is_empty() {
-                                    clipboard.write(ClipboardKind::Standard, sel);
-                                    shell.publish(Message::Editor(EditorEvent::DeleteSelection));
-                                    shell.capture_event();
-                                    shell.request_redraw();
-                                }
-                                return;
-                            }
-                            "v" => {
-                                if let Some(t) = clipboard.read(ClipboardKind::Standard) {
-                                    shell.publish(Message::Editor(EditorEvent::Insert(t)));
-                                    shell.capture_event();
-                                    shell.request_redraw();
-                                }
-                                return;
-                            }
-                            _ => {}
+                        let sel = selected_text(self.text, self.anchor, self.caret);
+                        if handle_clipboard_key(c.to_lowercase().as_str(), sel, clipboard, shell) {
+                            return;
                         }
                     }
                 }
@@ -932,17 +897,6 @@ impl Widget<Message, Theme, iced::Renderer> for SourceBlock<'_> {
 }
 
 impl SourceBlock<'_> {
-    /// 选区文本（源区间）。
-    fn selected_text(&self) -> String {
-        let a = self.anchor.min(self.caret).min(self.text.len());
-        let b = self.anchor.max(self.caret).min(self.text.len());
-        if b > a {
-            self.text[a..b].to_string()
-        } else {
-            String::new()
-        }
-    }
-
     /// 已解析按键 → 事件上报。
     fn apply_key(
         &self,
@@ -1012,6 +966,76 @@ enum KeyAction {
     LineDown(bool),
 }
 
+/// 选区文本（源区间，两端夹回文本长度）。
+fn selected_text(text: &str, anchor: usize, caret: usize) -> String {
+    let a = anchor.min(caret).min(text.len());
+    let b = anchor.max(caret).min(text.len());
+    if b > a {
+        text[a..b].to_string()
+    } else {
+        String::new()
+    }
+}
+
+/// Ctrl+C/X/V 就地处理（C 复制非空选区；X 复制并删选区；V 粘贴）。
+/// 剪贴板经部件入参读写，避免应用层往返。返回是否消费该按键。
+fn handle_clipboard_key(
+    ch: &str,
+    sel: String,
+    clipboard: &mut dyn Clipboard,
+    shell: &mut Shell<'_, Message>,
+) -> bool {
+    match ch {
+        "c" => {
+            if !sel.is_empty() {
+                clipboard.write(ClipboardKind::Standard, sel);
+            }
+            shell.capture_event();
+            true
+        }
+        "x" => {
+            if !sel.is_empty() {
+                clipboard.write(ClipboardKind::Standard, sel);
+                shell.publish(Message::Editor(EditorEvent::DeleteSelection));
+                shell.request_redraw();
+            }
+            shell.capture_event();
+            true
+        }
+        "v" => {
+            if let Some(t) = clipboard.read(ClipboardKind::Standard) {
+                shell.publish(Message::Editor(EditorEvent::Insert(t)));
+                shell.capture_event();
+                shell.request_redraw();
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+/// 输入法事件上报（组合态 / 上屏 / 关闭），块内与空行光标共用。
+fn handle_ime_event(ime: &ImeEvent, shell: &mut Shell<'_, Message>) {
+    match ime {
+        ImeEvent::Closed => {
+            shell.publish(Message::Editor(EditorEvent::Preedit(None)));
+            shell.request_redraw();
+        }
+        ImeEvent::Preedit(content, _) => {
+            shell.publish(Message::Editor(EditorEvent::Preedit(Some(content.clone()))));
+            shell.capture_event();
+            shell.request_redraw();
+        }
+        ImeEvent::Commit(content) => {
+            shell.publish(Message::Editor(EditorEvent::Insert(content.clone())));
+            shell.publish(Message::Editor(EditorEvent::Preedit(None)));
+            shell.capture_event();
+            shell.request_redraw();
+        }
+        ImeEvent::Opened => {}
+    }
+}
+
 /// 按键映射（组合期由输入法消化，不进入本函数）。
 fn key_action(key: &Key, modifiers: keyboard::Modifiers, text: Option<&str>) -> Option<KeyAction> {
     let extend = modifiers.shift();
@@ -1068,7 +1092,10 @@ pub(crate) enum SurfaceRow<'a> {
         /// 空行在源文本中的区间（上一块末 → 下一块首）。
         from: usize,
         to: usize,
-        covered: bool,
+        /// 各空行的行首偏移（行数 = 长度；行高 = 行总高 / 行数）。
+        line_starts: Vec<usize>,
+        /// 被选区覆盖的空行序号半开区间（k0, k1）。
+        covered: (usize, usize),
         element: Element<'a, Message>,
     },
 }
@@ -1085,20 +1112,161 @@ impl<'a> SurfaceRow<'a> {
             SurfaceRow::Block { element, .. } | SurfaceRow::Gap { element, .. } => element,
         }
     }
+}
 
-    fn covered(&self) -> bool {
-        match self {
-            SurfaceRow::Block { covered, .. } | SurfaceRow::Gap { covered, .. } => *covered,
+/// 空行区间内各空行的行首偏移（跳过上一块的终止行；空行内可含空白等字符，
+/// 不假设每行一字节）。
+pub(crate) fn gap_line_starts(source: &str, from: usize, to: usize) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut pos = from;
+    for chunk in source[from..to].split_inclusive('\n') {
+        if pos > from {
+            out.push(pos);
+        }
+        pos += chunk.len();
+    }
+    out
+}
+
+/// 文末空白区的行首表：空白行行首 + 文本以换行结尾时的文末虚拟行（len）。
+pub(crate) fn tail_blank_starts(source: &str, from: usize) -> Vec<usize> {
+    let mut starts = gap_line_starts(source, from, source.len());
+    if source.ends_with('\n') {
+        starts.push(source.len());
+    }
+    starts
+}
+
+/// 文首空白区（首块之前）的各空白行行首：第一行也是空白行，不跳过；
+/// 末尾不带换行的片段是首块的行首缩进，不是空白行。
+pub(crate) fn edge_blank_starts(source: &str, from: usize, to: usize) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut pos = from;
+    for chunk in source[from..to].split_inclusive('\n') {
+        if chunk.ends_with('\n') {
+            out.push(pos);
+        }
+        pos += chunk.len();
+    }
+    out
+}
+
+/// 空行行内单行高度（行总高 / 行数，防零防负）。
+fn gap_line_height(height: f32, lines: usize) -> f32 {
+    if lines > 0 {
+        (height / lines as f32).max(1.0)
+    } else {
+        height.max(1.0)
+    }
+}
+
+/// 空行行命中换算：行内纵向位置 → 第 k 根空行 → 该行行首源偏移。超出按最后一根吸附。
+fn gap_hit_offset(line_starts: &[usize], local_y: f32, height: f32) -> usize {
+    let lines = line_starts.len().max(1);
+    let k = ((local_y / gap_line_height(height, lines)) as usize).min(lines - 1);
+    line_starts.get(k).copied().unwrap_or(0)
+}
+
+/// 光标所在的空行序号：行首 ≤ 光标的最后一根，且光标未越过该行行尾。
+fn gap_caret_line(line_starts: &[usize], to: usize, offset: usize) -> Option<usize> {
+    let k = line_starts.iter().rposition(|&s| s <= offset)?;
+    let end = line_starts.get(k + 1).copied().unwrap_or(to);
+    (offset < end).then_some(k)
+}
+
+/// 空行选区覆盖：第 k 根空行占字节 [行首, 下一行首或 to)，选区触及即覆盖该行。
+/// 返回覆盖的空行序号半开区间；无覆盖返回 (0, 0)。
+pub(crate) fn gap_covered_lines(
+    line_starts: &[usize],
+    to: usize,
+    sel_from: usize,
+    sel_to: usize,
+) -> (usize, usize) {
+    if sel_to <= sel_from {
+        return (0, 0);
+    }
+    let (mut k0, mut k1) = (usize::MAX, 0);
+    for (k, &s) in line_starts.iter().enumerate() {
+        let end = line_starts.get(k + 1).copied().unwrap_or(to);
+        if sel_from < end && sel_to > s {
+            k0 = k0.min(k);
+            k1 = k1.max(k + 1);
+        }
+    }
+    if k0 == usize::MAX { (0, 0) } else { (k0, k1) }
+}
+
+/// 上下移动的目标偏移：块内跨到相邻块首 / 末，末块向下 / 首块向上进入毗邻的
+/// 文末 / 文首空白区；空白区光标按 `blank_starts`（该区各空白行行首）逐行移动，
+/// 越过端点落到相邻块。无路可走返回 None。
+pub(crate) fn vertical_target(
+    caret: usize,
+    spans: &[(usize, usize)],
+    blank_starts: &[usize],
+    forward: bool,
+) -> Option<usize> {
+    if let Some(i) = spans.iter().position(|&(f, t)| caret >= f && caret <= t) {
+        return if forward {
+            match blank_starts.iter().find(|&&s| s > caret) {
+                Some(&s) => Some(s),
+                None => spans.get(i + 1).map(|&(f, _)| f),
+            }
+        } else {
+            match blank_starts.iter().rposition(|&s| s < caret) {
+                Some(k) => Some(blank_starts[k]),
+                None => Some(spans[i.checked_sub(1)?].1),
+            }
+        };
+    }
+    match spans.iter().rposition(|&(f, _)| f <= caret) {
+        // 块间 / 文末空白区：逐行走，越过端点落相邻块
+        Some(i) => {
+            let prev_to = spans[i].1;
+            if forward {
+                match blank_starts.iter().find(|&&s| s > caret) {
+                    Some(&s) => Some(s),
+                    None => spans.get(i + 1).map(|&(f, _)| f),
+                }
+            } else {
+                match blank_starts
+                    .iter()
+                    .rposition(|&s| s <= caret)
+                    .and_then(|k| k.checked_sub(1))
+                    .and_then(|k| blank_starts.get(k))
+                {
+                    Some(&s) => Some(s),
+                    None => Some(prev_to),
+                }
+            }
+        }
+        // 文首空白区：向下逐行 / 进首块，向上逐行回退
+        None => {
+            if forward {
+                match blank_starts.iter().find(|&&s| s > caret) {
+                    Some(&s) => Some(s),
+                    None => spans.first().map(|&(f, _)| f),
+                }
+            } else {
+                blank_starts
+                    .iter()
+                    .rposition(|&s| s < caret)
+                    .map(|k| blank_starts[k])
+            }
         }
     }
 }
 
 /// 编辑面容器：纵向排布块行与空行行，统一承接鼠标——按下/拖选按行换算落点、
-/// 点内容区空白落到文末、点编辑面之外收起光标；块间空行的光标由容器自绘。
+/// 点内容区空白落到文末、点编辑面之外收起光标；块间空行的光标由容器自绘，
+/// 键盘 / 输入法 / 剪贴板也由容器托管（空行光标不属任何块）。
 pub struct EditSurface<'a> {
     rows: Vec<SurfaceRow<'a>>,
     pal: EditPalette,
+    /// 正文真相（应用层持有）：空行光标的剪贴板读写用。
+    text: &'a str,
     caret: usize,
+    anchor: usize,
+    preedit: Option<String>,
     focused: bool,
 }
 
@@ -1124,10 +1292,13 @@ impl<'a> EditSurface<'a> {
     pub(crate) fn new(
         rows: Vec<SurfaceRow<'a>>,
         pal: EditPalette,
+        text: &'a str,
         caret: usize,
+        anchor: usize,
+        preedit: Option<String>,
         focused: bool,
     ) -> Self {
-        Self { rows, pal, caret, focused }
+        Self { rows, pal, text, caret, anchor, preedit, focused }
     }
 
     /// 命中行：返回 (行号, 行内局部坐标, 行宽, 行高)；行间无空隙，仅区分上下越界。
@@ -1173,15 +1344,66 @@ impl<'a> EditSurface<'a> {
                         HitTarget::BlockEdge { index: *index, upper: local.y < height / 2.0 }
                     }
                 }
-                SurfaceRow::Gap { from, to, .. } => HitTarget::GapLine {
-                    from: *from,
-                    to: *to,
-                    upper: local.y < height / 2.0,
+                SurfaceRow::Gap { line_starts, .. } => HitTarget::GapLine {
+                    offset: gap_hit_offset(line_starts, local.y, height),
                 },
             },
             RowHit::Above => HitTarget::Start,
             RowHit::Below => HitTarget::End,
         }
+    }
+
+    /// 光标所在的空行行序号。开区间端点归相邻块；文首行 from = 0 之上无相邻块，
+    /// 端点 0 由该行自己托管。
+    fn gap_row_at(&self, offset: usize) -> Option<usize> {
+        self.rows.iter().position(|r| {
+            matches!(r, SurfaceRow::Gap { from, to, .. }
+                if offset < *to && (offset > *from || *from == 0))
+        })
+    }
+
+    /// 空行光标的按键上报（无块内几何，上下移动直接跨块）。
+    fn apply_key(&self, action: KeyAction, shell: &mut Shell<'_, Message>) {
+        let send = |shell: &mut Shell<'_, Message>, e: EditorEvent| {
+            shell.publish(Message::Editor(e));
+            shell.capture_event();
+            shell.request_redraw();
+        };
+        match action {
+            KeyAction::Event(e) => send(shell, e),
+            KeyAction::LineUp(extend) => send(shell, EditorEvent::Move { motion: Motion::Up, extend }),
+            KeyAction::LineDown(extend) => {
+                send(shell, EditorEvent::Move { motion: Motion::Down, extend })
+            }
+        }
+    }
+
+    /// 空行光标的输入法定位与闪烁续帧（块内光标由 SourceBlock 处理）。
+    fn gap_ime(&self, layout: Layout<'_>, shell: &mut Shell<'_, Message>) {
+        if !self.focused {
+            return;
+        }
+        let Some(row_index) = self.gap_row_at(self.caret) else {
+            return;
+        };
+        let Some(SurfaceRow::Gap { to, line_starts, .. }) = self.rows.get(row_index) else {
+            return;
+        };
+        let Some(b) = layout.children().nth(row_index).map(|l| l.bounds()) else {
+            return;
+        };
+        let line_h = gap_line_height(b.height, line_starts.len());
+        let k = gap_caret_line(line_starts, *to, self.caret).unwrap_or(0);
+        let y = b.y + k as f32 * line_h + (line_h - GAP_CARET_H).max(0.0) * 0.5;
+        let ime: InputMethod<&str> = InputMethod::Enabled {
+            cursor: Rectangle::new(Point::new(b.x, y), Size::new(1.0, GAP_CARET_H)),
+            purpose: Purpose::Normal,
+            preedit: None,
+        };
+        shell.request_input_method(&ime);
+        // 闪烁节拍：按墙钟对齐下一个半周期边界
+        let phase = unix_millis() % BLINK_MS;
+        shell.request_redraw_at(Instant::now() + Duration::from_millis((BLINK_MS - phase) as u64));
     }
 }
 
@@ -1250,6 +1472,8 @@ impl Widget<Message, Theme, iced::Renderer> for EditSurface<'_> {
         viewport: &Rectangle,
     ) {
         let tint = self.pal.accent.scale_alpha(0.25);
+        // 闪烁相位：半周期可见（墙钟取模，与帧时机无关）
+        let blink_on = unix_millis() / BLINK_MS % 2 == 0;
         for ((row, state), child_layout) in self.rows.iter().zip(&tree.children).zip(layout.children()) {
             row.element()
                 .as_widget()
@@ -1258,23 +1482,68 @@ impl Widget<Message, Theme, iced::Renderer> for EditSurface<'_> {
             if !bounds.intersects(viewport) {
                 continue;
             }
-            if row.covered() {
-                renderer.fill_quad(Quad { bounds, ..Quad::default() }, tint);
+            match row {
+                SurfaceRow::Block { covered: true, .. } => {
+                    renderer.fill_quad(Quad { bounds, ..Quad::default() }, tint);
+                }
+                // 空行选区底色按空行粒度画（第 k 根空行对应其换行符字节）
+                SurfaceRow::Gap { line_starts, covered: (k0, k1), .. } if k1 > k0 => {
+                    let line_h = gap_line_height(bounds.height, line_starts.len());
+                    for k in *k0..*k1 {
+                        renderer.fill_quad(
+                            Quad {
+                                bounds: Rectangle::new(
+                                    Point::new(bounds.x, bounds.y + k as f32 * line_h),
+                                    Size::new(bounds.width, line_h),
+                                ),
+                                ..Quad::default()
+                            },
+                            tint,
+                        );
+                    }
+                }
+                _ => {}
             }
-            // 空行行的光标：空行不属任何块，光标由容器自绘。
-            // 区间取半开（from, to]：from 是上一块末，归该块的光标，避免同帧画两根。
-            if let SurfaceRow::Gap { from, to, .. } = row {
-                if self.focused && self.caret > *from && self.caret <= *to {
-                    renderer.fill_quad(
-                        Quad {
-                            bounds: Rectangle::new(
-                                bounds.position(),
-                                Size::new(1.5, GAP_CARET_H),
-                            ),
-                            ..Quad::default()
-                        },
-                        self.pal.text,
-                    );
+            // 空行行的光标与预编辑：空行不属任何块，由容器自绘。
+            // 区间端点归相邻块的光标（文首行的 0 端点无相邻块，归自己），避免同帧画两根。
+            if let SurfaceRow::Gap { from, to, line_starts, .. } = row {
+                if self.focused
+                    && self.caret < *to
+                    && (self.caret > *from || *from == 0)
+                {
+                    let line_h = gap_line_height(bounds.height, line_starts.len());
+                    let k = gap_caret_line(line_starts, *to, self.caret).unwrap_or(0);
+                    let y = bounds.y + k as f32 * line_h + (line_h - GAP_CARET_H).max(0.0) * 0.5;
+                    if blink_on {
+                        renderer.fill_quad(
+                            Quad {
+                                bounds: Rectangle::new(Point::new(bounds.x, y), Size::new(1.5, GAP_CARET_H)),
+                                ..Quad::default()
+                            },
+                            self.pal.text,
+                        );
+                    }
+                    // 未上屏组合串画在光标处
+                    if let Some(pre) = self.preedit.as_deref().filter(|s| !s.is_empty()) {
+                        renderer.fill_text(
+                            advanced_text::Text {
+                                content: pre.to_string(),
+                                bounds: Size::new(f32::INFINITY, line_h),
+                                size: crate::markdown_view::BASE_SIZE.into(),
+                                line_height: advanced_text::LineHeight::Relative(
+                                    crate::markdown_view::LINE_HEIGHT,
+                                ),
+                                font: Font::DEFAULT,
+                                align_x: advanced_text::Alignment::Left,
+                                align_y: alignment::Vertical::Top,
+                                shaping: advanced_text::Shaping::Auto,
+                                wrapping: advanced_text::Wrapping::None,
+                            },
+                            Point::new(bounds.x + 2.0, y),
+                            self.pal.muted,
+                            bounds,
+                        );
+                    }
                 }
             }
         }
@@ -1309,15 +1578,14 @@ impl Widget<Message, Theme, iced::Renderer> for EditSurface<'_> {
         if shell.is_event_captured() {
             return;
         }
-        let dragging = tree.state.downcast_ref::<SurfaceState>().dragging;
         let bounds = layout.bounds();
-        let mut set_drag = None;
+        let state = tree.state.downcast_mut::<SurfaceState>();
         match event {
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 // 行命中要拿绝对坐标（行 bounds 是绝对坐标）；position_in 是相对量，不能混用
                 match cursor.position().filter(|p| bounds.contains(*p)) {
                     Some(p) => {
-                        set_drag = Some(true);
+                        state.dragging = true;
                         let target = self.target_of(Self::row_at(layout, p));
                         shell.publish(Message::Editor(EditorEvent::Hit { target, extend: false }));
                         shell.capture_event();
@@ -1326,22 +1594,49 @@ impl Widget<Message, Theme, iced::Renderer> for EditSurface<'_> {
                     None => shell.publish(Message::Editor(EditorEvent::Blur)),
                 }
             }
-            Event::Mouse(mouse::Event::CursorMoved { position }) if dragging => {
+            Event::Mouse(mouse::Event::CursorMoved { .. }) if state.dragging => {
+                // 事件里的 position 是窗口坐标，而滚动容器传下来的 cursor 已平移为
+                // 与行 bounds 同基准的内容坐标，必须用后者，否则滚动后拖选整体错位；
+                // 拖出边界时 cursor 变 Levitating（保持最后位置），land() 取回
+                let Some(p) = cursor.land().position() else {
+                    return;
+                };
                 // 越界拖选：点夹回内容区，仍按最近行换算
                 let clamped = Point::new(
-                    position.x.clamp(bounds.x, bounds.x + bounds.width),
-                    position.y.clamp(bounds.y, bounds.y + bounds.height),
+                    p.x.clamp(bounds.x, bounds.x + bounds.width),
+                    p.y.clamp(bounds.y, bounds.y + bounds.height),
                 );
                 let target = self.target_of(Self::row_at(layout, clamped));
                 shell.publish(Message::Editor(EditorEvent::Hit { target, extend: true }));
             }
             Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
-                set_drag = Some(false);
+                state.dragging = false;
+            }
+            Event::Window(window::Event::RedrawRequested(_)) => {
+                self.gap_ime(layout, shell);
+            }
+            // 空行光标的输入法与键盘托管（块内光标由 SourceBlock 处理，两者互斥）
+            Event::InputMethod(ime) if self.focused && self.gap_row_at(self.caret).is_some() => {
+                handle_ime_event(ime, shell);
+            }
+            Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, text, .. })
+                if self.focused
+                    && self.preedit.is_none()
+                    && self.gap_row_at(self.caret).is_some() =>
+            {
+                if modifiers.control() {
+                    if let Key::Character(c) = key {
+                        let sel = selected_text(self.text, self.anchor, self.caret);
+                        if handle_clipboard_key(c.to_lowercase().as_str(), sel, clipboard, shell) {
+                            return;
+                        }
+                    }
+                }
+                if let Some(action) = key_action(key, *modifiers, text.as_deref()) {
+                    self.apply_key(action, shell);
+                }
             }
             _ => {}
-        }
-        if let Some(d) = set_drag {
-            tree.state.downcast_mut::<SurfaceState>().dragging = d;
         }
     }
 
@@ -1634,5 +1929,124 @@ mod tests {
         assert_eq!(edit.to, 17);
         assert!(outdent_edit("- 甲", 5, 5).is_none());
         assert!(outdent_edit("普通段落", 6, 6).is_none());
+    }
+
+    #[test]
+    fn gap_line_starts_scans_inner_lines() {
+        // "ab\n\ncd" 的空行区间 [2, 4)：终止行跳过，空行行首 = 3
+        assert_eq!(gap_line_starts("ab\n\ncd", 2, 4), vec![3]);
+        // "ab\n\n\ncd" 的空行区间 [2, 5)：两根空行行首 3、4
+        assert_eq!(gap_line_starts("ab\n\n\ncd", 2, 5), vec![3, 4]);
+        // 空行含空白字符：行首仍按实际字节推进
+        assert_eq!(gap_line_starts("ab\n  \n\ncd", 2, 7), vec![3, 6]);
+        // 引用空延续行算一根空行
+        assert_eq!(gap_line_starts("ab\n>\n\ncd", 2, 6), vec![3, 5]);
+    }
+
+    #[test]
+    fn edge_blank_starts_includes_first_line() {
+        // 文首空白区每行都是空白行（含第一行）
+        assert_eq!(edge_blank_starts("\n\n甲", 0, 2), vec![0, 1]);
+        // 末尾不带换行的片段是首块的行首缩进，不算空白行
+        assert_eq!(edge_blank_starts("  甲", 0, 2), Vec::<usize>::new());
+        assert_eq!(edge_blank_starts("  \n  甲", 0, 5), vec![0]);
+    }
+
+    #[test]
+    fn tail_blank_starts_appends_virtual_line() {
+        // "ab\n"：尾部区间无真实空行，虚拟文末行首 = 3（len）
+        assert_eq!(tail_blank_starts("ab\n", 2), vec![3]);
+        // "ab\n\n"：一根真实空行 + 虚拟文末行
+        assert_eq!(tail_blank_starts("ab\n\n", 2), vec![3, 4]);
+        // 不以换行结尾：无虚拟行
+        assert_eq!(tail_blank_starts("ab\n  ", 2), vec![3]);
+    }
+
+    #[test]
+    fn gap_hit_offset_maps_line_to_source_offset() {
+        // 两根空行（行首 10、11）：点上半区落行 0，下半区落行 1，越界吸附最后一根
+        assert_eq!(gap_hit_offset(&[10, 11], 0.0, 40.0), 10);
+        assert_eq!(gap_hit_offset(&[10, 11], 19.0, 40.0), 10);
+        assert_eq!(gap_hit_offset(&[10, 11], 20.0, 40.0), 11);
+        assert_eq!(gap_hit_offset(&[10, 11], 100.0, 40.0), 11);
+    }
+
+    #[test]
+    fn gap_covered_lines_tracks_selection() {
+        let starts = [10, 11];
+        // 选区起于空行 0（offset 10）拖入下一块：两根空行全覆盖
+        assert_eq!(gap_covered_lines(&starts, 12, 10, 20), (0, 2));
+        // 选区只触及空行 0 的换行符
+        assert_eq!(gap_covered_lines(&starts, 12, 5, 11), (0, 1));
+        // 选区止于上一块末（未触及空行）
+        assert_eq!(gap_covered_lines(&starts, 12, 5, 10), (0, 0));
+        // 选区从下一块起（未触及空行）
+        assert_eq!(gap_covered_lines(&starts, 12, 12, 20), (0, 0));
+        // 空选区 / 全区间
+        assert_eq!(gap_covered_lines(&starts, 12, 10, 10), (0, 0));
+        assert_eq!(gap_covered_lines(&starts, 12, 5, 12), (0, 2));
+    }
+
+    #[test]
+    fn vertical_target_crosses_adjacent_blocks() {
+        let spans = [(0, 9), (11, 20)];
+        assert_eq!(vertical_target(5, &spans, &[], true), Some(11));
+        assert_eq!(vertical_target(15, &spans, &[], false), Some(9));
+        // 首块向上 / 末块向下无路
+        assert_eq!(vertical_target(5, &spans, &[], false), None);
+        assert_eq!(vertical_target(15, &spans, &[], true), None);
+    }
+
+    #[test]
+    fn vertical_target_walks_gap_lines() {
+        // 两根空行（行首 10、11）：空行内按行首逐行，越端点落相邻块
+        let spans = [(0, 9), (12, 20)];
+        let starts = [10, 11];
+        assert_eq!(vertical_target(10, &spans, &starts, true), Some(11));
+        assert_eq!(vertical_target(11, &spans, &starts, true), Some(12));
+        assert_eq!(vertical_target(11, &spans, &starts, false), Some(10));
+        assert_eq!(vertical_target(10, &spans, &starts, false), Some(9));
+    }
+
+    #[test]
+    fn vertical_target_walks_whitespace_gap_lines() {
+        // 空行含空白字符（行首 10 的行占 "   \n"）：行移动按行首跳，不逐字节走
+        let spans = [(0, 9), (14, 20)];
+        let starts = [10, 13];
+        assert_eq!(vertical_target(12, &spans, &starts, true), Some(13));
+        assert_eq!(vertical_target(12, &spans, &starts, false), Some(9));
+        assert_eq!(vertical_target(13, &spans, &starts, false), Some(10));
+        assert_eq!(vertical_target(13, &spans, &starts, true), Some(14));
+    }
+
+    #[test]
+    fn vertical_target_edges() {
+        let spans = [(5, 9)];
+        // 文首之前：向下进首块，向上无路
+        assert_eq!(vertical_target(2, &spans, &[], true), Some(5));
+        assert_eq!(vertical_target(2, &spans, &[], false), None);
+        // 文末之后的空行：向上收回块末，向下无路
+        assert_eq!(vertical_target(11, &spans, &[10], false), Some(9));
+        assert_eq!(vertical_target(11, &spans, &[10], true), None);
+    }
+
+    #[test]
+    fn vertical_target_enters_edge_blank_regions() {
+        let spans = [(5, 9)];
+        // 末块向下进文末空白区，区内逐行、末端无路
+        assert_eq!(vertical_target(7, &spans, &[10, 11], true), Some(10));
+        assert_eq!(vertical_target(10, &spans, &[10, 11], true), Some(11));
+        assert_eq!(vertical_target(11, &spans, &[10, 11], true), None);
+        // 区内向上逐行收回块末
+        assert_eq!(vertical_target(11, &spans, &[10, 11], false), Some(10));
+        assert_eq!(vertical_target(10, &spans, &[10, 11], false), Some(9));
+        // 首块向上进文首空白区，区内逐行、顶端无路
+        assert_eq!(vertical_target(6, &spans, &[0, 1, 2], false), Some(2));
+        assert_eq!(vertical_target(2, &spans, &[0, 1, 2], false), Some(1));
+        assert_eq!(vertical_target(1, &spans, &[0, 1, 2], false), Some(0));
+        assert_eq!(vertical_target(0, &spans, &[0, 1, 2], false), None);
+        // 区内向下进首块
+        assert_eq!(vertical_target(2, &spans, &[0, 1, 2], true), Some(5));
+        assert_eq!(vertical_target(1, &spans, &[0, 1, 2], true), Some(2));
     }
 }
