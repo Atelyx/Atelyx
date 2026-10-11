@@ -1,7 +1,7 @@
 //! 菜单内容模型与渲染：条目（动作/分组头/分隔线/子面板钻入/自定义块）+ 多面板导航。
 //!
 //! 面板（pane）机制承接「右键 → 切换视图」两级菜单：`Submenu { pane }` 钻入，
-//! `Back` 返回根面板；一次只渲染一个面板。
+//! 一次只渲染一个面板；子面板（pane > 0）头部固定「返回 + 分隔线」。
 
 use iced::alignment::Vertical;
 use iced::widget::{column, container, row, space, text};
@@ -9,6 +9,7 @@ use iced::{Element, Length, Padding, widget::container::Style};
 
 use super::icon::icon;
 use super::palette as pal;
+use super::UiMsg;
 use crate::Message;
 
 /// 一条菜单内容。渲染顺序即数组顺序。
@@ -20,14 +21,16 @@ pub enum MenuEntry<'a> {
         danger: bool,
         disabled: bool,
         on_press: Option<Message>,
+        /// 行尾角标（「当前/本组/已占用」）：非禁用条目文字转强调色。
+        note: Option<&'static str>,
+        /// 悬停提示文案（None = 无）。
+        hint: Option<String>,
     },
     /// 分组头（灰底小字）。
     Group(String),
     Divider,
     /// 钻入子面板。
     Submenu { label: String, icon: Option<&'static str>, disabled: bool, pane: usize },
-    /// 返回根面板（仅子面板内渲染）。
-    Back,
     /// 自定义内容块（高度调用方给出，用于估高与钳制）。
     Custom(Element<'a, Message>, f32),
 }
@@ -35,7 +38,15 @@ pub enum MenuEntry<'a> {
 impl<'a> MenuEntry<'a> {
     /// 快捷构造：普通动作项。
     pub fn action(label: impl Into<String>, on_press: Message) -> Self {
-        MenuEntry::Action { label: label.into(), icon: None, danger: false, disabled: false, on_press: Some(on_press) }
+        MenuEntry::Action {
+            label: label.into(),
+            icon: None,
+            danger: false,
+            disabled: false,
+            on_press: Some(on_press),
+            note: None,
+            hint: None,
+        }
     }
 
     pub fn action_icon(
@@ -43,29 +54,76 @@ impl<'a> MenuEntry<'a> {
         icon: &'static str,
         on_press: Message,
     ) -> Self {
-        MenuEntry::Action { label: label.into(), icon: Some(icon), danger: false, disabled: false, on_press: Some(on_press) }
+        MenuEntry::Action {
+            label: label.into(),
+            icon: Some(icon),
+            danger: false,
+            disabled: false,
+            on_press: Some(on_press),
+            note: None,
+            hint: None,
+        }
     }
 
     pub fn danger(label: impl Into<String>, icon: &'static str, on_press: Message) -> Self {
-        MenuEntry::Action { label: label.into(), icon: Some(icon), danger: true, disabled: false, on_press: Some(on_press) }
+        MenuEntry::Action {
+            label: label.into(),
+            icon: Some(icon),
+            danger: true,
+            disabled: false,
+            on_press: Some(on_press),
+            note: None,
+            hint: None,
+        }
     }
 
-    pub fn disabled(label: impl Into<String>, icon: Option<&'static str>) -> Self {
-        MenuEntry::Action { label: label.into(), icon, danger: false, disabled: true, on_press: None }
+    /// 带行尾角标的条目（非禁用 = 强调色文字，点击动作；禁用 = 灰字无动作）。
+    pub fn noted(
+        label: impl Into<String>,
+        icon: &'static str,
+        note: &'static str,
+        disabled: bool,
+        on_press: Option<Message>,
+    ) -> Self {
+        MenuEntry::Action {
+            label: label.into(),
+            icon: Some(icon),
+            danger: false,
+            disabled,
+            on_press,
+            note: Some(note),
+            hint: None,
+        }
+    }
+
+    /// 带悬停提示的动作项。
+    pub fn hinted(mut self, hint: impl Into<String>) -> Self {
+        if let MenuEntry::Action { hint: h, .. } = &mut self {
+            *h = Some(hint.into());
+        }
+        self
     }
 }
 
 /// 渲染一个面板（`pane` 0 = 根；`entries` 含全部面板的条目，按 pane 过滤）。
+/// 子面板头部固定「返回 + 分隔线」，其余条目按数组顺序排列。
 pub fn pane_view<'a>(
     entries: Vec<(usize, MenuEntry<'a>)>,
     pane: usize,
+    window: iced::window::Id,
 ) -> (Element<'a, Message>, f32) {
     let mut col = column![].padding(Padding::ZERO.vertical(pal::POPUP_PAD_Y));
     let mut height = pal::POPUP_PAD_Y * 2.0;
-    for (_, entry) in entries.into_iter().filter(|(p, _)| *p == pane) {
+    let remaining = entries.into_iter().filter(|(p, _)| *p == pane);
+    if pane != 0 {
+        col = col.push(back_item(window));
+        col = col.push(divider());
+        height += pal::MENU_ITEM_H + pal::MENU_DIVIDER_H;
+    }
+    for (_, entry) in remaining {
         let (element, h): (Element<'a, Message>, f32) = match entry {
-            MenuEntry::Action { label, icon: ic, danger, disabled, on_press } => {
-                (item(&label, ic, danger, disabled, on_press), pal::MENU_ITEM_H)
+            MenuEntry::Action { label, icon: ic, danger, disabled, on_press, note, hint } => {
+                (item(&label, ic, danger, disabled, on_press, note, hint, window), pal::MENU_ITEM_H)
             }
             MenuEntry::Group(name) => (
                 container(text(name).size(pal::FS_MICRO).color(pal::TEXT_MUTED))
@@ -76,10 +134,9 @@ pub fn pane_view<'a>(
             ),
             MenuEntry::Divider => (divider(), pal::MENU_DIVIDER_H),
             MenuEntry::Submenu { label, icon: ic, disabled, pane: target } => (
-                submenu_item(&label, ic, disabled, target),
+                submenu_item(&label, ic, disabled, target, window),
                 pal::MENU_ITEM_H,
             ),
-            MenuEntry::Back => (back_item(), pal::MENU_ITEM_H),
             MenuEntry::Custom(element, h) => (element, h),
         };
         col = col.push(element);
@@ -88,14 +145,21 @@ pub fn pane_view<'a>(
     (col.into(), height)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn item(
     label: &str,
     icon_name: Option<&'static str>,
     danger: bool,
     disabled: bool,
     on_press: Option<Message>,
+    note: Option<&'static str>,
+    hint: Option<String>,
+    window: iced::window::Id,
 ) -> Element<'static, Message> {
-    let text_color = if disabled {
+    // 行尾角标条目（「当前」）：无论是否禁用都着强调色；其余按 danger/常规取色
+    let text_color = if note.is_some() {
+        pal::ACCENT
+    } else if disabled {
         pal::TEXT_MUTED
     } else if danger {
         pal::DANGER
@@ -112,7 +176,11 @@ fn item(
         row = row.push(icon(name, 13.0, text_color));
     }
     row = row.push(text(label.to_string()).size(pal::FS_CAPTION).color(text_color));
-    item_button(container(row), hover_bg, disabled, on_press)
+    if let Some(note) = note {
+        row = row.push(space().width(Length::Fill));
+        row = row.push(text(note.to_string()).size(pal::FS_MICRO).color(text_color));
+    }
+    item_button(container(row), hover_bg, disabled, on_press, hint, window)
 }
 
 fn submenu_item(
@@ -120,28 +188,30 @@ fn submenu_item(
     icon_name: Option<&'static str>,
     disabled: bool,
     pane: usize,
+    window: iced::window::Id,
 ) -> Element<'static, Message> {
     let text_color = if disabled { pal::TEXT_MUTED } else { pal::TEXT_PRIMARY };
     let mut row = row![].spacing(6).width(Length::Fill);
+    row = row.push(icon("chevron-right", 13.0, text_color));
     if let Some(name) = icon_name {
         row = row.push(icon(name, 13.0, text_color));
     }
     row = row.push(text(label.to_string()).size(pal::FS_CAPTION).color(text_color));
-    row = row.push(space().width(Length::Fill));
-    row = row.push(icon("chevron-right", 13.0, pal::TEXT_MUTED));
     if disabled {
-        item_button(container(row), pal::HOVER, true, None)
+        item_button(container(row), pal::HOVER, true, None, None, window)
     } else {
         item_button(
             container(row),
             pal::HOVER,
             false,
-            Some(Message::Ui(super::UiMsg::PopupPane(pane))),
+            Some(Message::Ui(UiMsg::PopupPane(pane))),
+            None,
+            window,
         )
     }
 }
 
-fn back_item() -> Element<'static, Message> {
+fn back_item(window: iced::window::Id) -> Element<'static, Message> {
     let row = row![
         icon("chevron-left", 13.0, pal::TEXT_PRIMARY),
         text("返回").size(pal::FS_CAPTION).color(pal::TEXT_PRIMARY),
@@ -152,23 +222,28 @@ fn back_item() -> Element<'static, Message> {
         container(row),
         pal::HOVER,
         false,
-        Some(Message::Ui(super::UiMsg::PopupPane(0))),
+        Some(Message::Ui(UiMsg::PopupPane(0))),
+        None,
+        window,
     )
 }
 
-/// 菜单项按钮外壳：清零 iced 默认 padding、定高 MENU_ITEM_H、统一 hover 底。
+/// 菜单项按钮外壳：清零 iced 默认 padding、定高 MENU_ITEM_H、统一 hover 底；
+/// `hint` 非空时经 tooltip 通道（悬停 400ms 显现、移开 120ms 收起）。
 fn item_button(
     content: container::Container<'static, Message>,
     hover_bg: iced::Color,
     disabled: bool,
     on_press: Option<Message>,
+    hint: Option<String>,
+    window: iced::window::Id,
 ) -> Element<'static, Message> {
     let content = content
         .width(Length::Fill)
         .height(Length::Fixed(pal::MENU_ITEM_H))
         .padding(Padding::ZERO.horizontal(12.0))
         .align_y(Vertical::Center);
-    if disabled {
+    let element: Element<'static, Message> = if disabled {
         content.into()
     } else {
         iced::widget::button(content)
@@ -182,10 +257,21 @@ fn item_button(
             })
             .on_press_maybe(on_press)
             .into()
+    };
+    match hint {
+        Some(label) => iced::widget::mouse_area(element)
+            .on_enter(Message::Ui(UiMsg::HoverTip {
+                window,
+                label: label.clone(),
+                box_px: pal::MENU_ITEM_H,
+            }))
+            .on_exit(Message::Ui(UiMsg::HoverTipEnd { window, label }))
+            .into(),
+        None => element,
     }
 }
 
-/// 分隔线：上下 4px 留白 + 1px 线。
+/// 分隔线：上下 4px 留白 + 1px 通栏线。
 fn divider() -> Element<'static, Message> {
     container(
         container(space())
@@ -196,7 +282,7 @@ fn divider() -> Element<'static, Message> {
                 ..Style::default()
             }),
     )
-    .padding(Padding::ZERO.vertical(4.0).horizontal(6.0))
+    .padding(Padding::ZERO.vertical(4.0))
     .width(Length::Fill)
     .into()
 }

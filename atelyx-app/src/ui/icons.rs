@@ -64,6 +64,8 @@ pub const NAMES: &[&str] = &[
     "square",
     "loader-circle",
     "hash",
+    "eye",
+    "code",
 ];
 
 /// 一个图标的组成图元（lucide 图标 = 路径/圆/矩形/线段的组合）。
@@ -140,6 +142,8 @@ pub fn icon(name: &str) -> Option<&'static [Shape]> {
     "square" => &[Shape::Rect(3.0, 3.0, 18.0, 18.0, 2.0)],
     "loader-circle" => &[Shape::Path("M21 12a9 9 0 1 1-6.219-8.56")],
     "hash" => &[Shape::Line([4.0, 9.0, 20.0, 9.0]), Shape::Line([4.0, 15.0, 20.0, 15.0]), Shape::Line([10.0, 3.0, 8.0, 21.0]), Shape::Line([16.0, 3.0, 14.0, 21.0])],
+    "eye" => &[Shape::Path("M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"), Shape::Circle(12.0, 12.0, 3.0)],
+    "code" => &[Shape::Path("m16 18 6-6-6-6"), Shape::Path("m8 6-6 6 6 6")],
         _ => return None,
     })
 }

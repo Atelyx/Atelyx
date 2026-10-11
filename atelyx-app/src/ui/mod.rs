@@ -17,6 +17,9 @@ pub const FONT_REGULAR: &[u8] = include_bytes!("../../assets/fonts/IBMPlexSans-R
 pub const FONT_MEDIUM: &[u8] = include_bytes!("../../assets/fonts/IBMPlexSans-Medium.ttf");
 pub const FONT_SEMIBOLD: &[u8] = include_bytes!("../../assets/fonts/IBMPlexSans-SemiBold.ttf");
 
+/// 随应用分发的 Fraunces（SIL OFL 1.1，可变字重）：品牌名等展示字体。
+pub const FONT_DISPLAY: &[u8] = include_bytes!("../../assets/fonts/Fraunces.ttf");
+
 /// 应用图标（与旧壳同一来源的 PNG）。
 pub const ICON_PNG: &[u8] = include_bytes!("../../assets/icon.png");
 
@@ -30,6 +33,17 @@ pub fn icon_handle() -> iced::widget::image::Handle {
 
 /// 家族名（Font::with_name 与字重选择共用）。
 pub const FONT_FAMILY: &str = "IBM Plex Sans";
+/// 展示字体家族名（品牌名）。
+pub const FONT_DISPLAY_FAMILY: &str = "Fraunces";
+
+/// 展示字体 600（品牌名）。
+pub fn display() -> iced::Font {
+    iced::Font {
+        family: iced::font::Family::Name(FONT_DISPLAY_FAMILY),
+        weight: iced::font::Weight::Semibold,
+        ..iced::Font::default()
+    }
+}
 
 /// 字重 600（标题/分组头等强调文字）。
 pub fn semibold() -> iced::Font {
@@ -43,9 +57,9 @@ pub fn semibold() -> iced::Font {
 /// ui 层上抛的应用消息（应用层统一转译）。
 #[derive(Debug, Clone)]
 pub enum UiMsg {
-    /// 图标按钮悬停开始（label 同时是提示文案）。
-    HoverTip { window: iced::window::Id, label: String },
-    /// 悬停结束。
+    /// 图标按钮悬停开始（label = 提示文案；box_px = 触发钮边长，提示锚在光标下方半边长 + 4 处）。
+    HoverTip { window: iced::window::Id, label: String, box_px: f32 },
+    /// 悬停结束（进入 120ms 收起延迟）。
     HoverTipEnd { window: iced::window::Id, label: String },
     /// 弹层钻入子面板 / 返回根面板。
     PopupPane(usize),

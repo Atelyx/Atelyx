@@ -87,6 +87,8 @@ pub const FS_UI: f32 = 13.0;
 pub const FS_BODY: f32 = 14.0;
 /// 字阶：`--fs-h2`
 pub const FS_H2: f32 = 16.0;
+/// 字阶：`--fs-h1`（占位引导标题档）
+pub const FS_H1: f32 = 20.0;
 
 /// 标题栏高度（旧壳 `h-9`）
 pub const TITLEBAR_H: f32 = 36.0;
@@ -94,8 +96,6 @@ pub const TITLEBAR_H: f32 = 36.0;
 pub const STATUSBAR_H: f32 = 26.0;
 /// 面板标签条高度（旧壳 `h-7`）
 pub const TAB_BAR_H: f32 = 28.0;
-/// 面板标签定宽（拖拽命中与重排序的几何基准，保持与既有几何一致）
-pub const TAB_W: f32 = 96.0;
 /// 视口钳制边距（旧壳 `VIEWPORT_GAP`）
 pub const VIEWPORT_GAP: f32 = 6.0;
 /// 菜单项高度（12px 字行高 16 + 上下 6px 内边距）

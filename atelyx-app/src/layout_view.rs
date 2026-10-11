@@ -26,11 +26,13 @@ impl UiMetrics {
     pub const TITLEBAR_H: f32 = pal::TITLEBAR_H;
     pub const STATUSBAR_H: f32 = pal::STATUSBAR_H;
     pub const TAB_BAR_H: f32 = pal::TAB_BAR_H;
-    pub const DIVIDER_W: f32 = 7.0;
-    /// 标签定宽（拖拽命中与重排序的几何基准；标签显示名均为短词，定宽不截义）。
-    pub const TAB_W: f32 = pal::TAB_W;
+    pub const DIVIDER_W: f32 = 4.0;
+    /// 分割子项最小占比（两侧钳制下限）。
+    pub const MIN_SPLIT_FRAC: f64 = 0.12;
     /// 面板头容器内边距（标签条起点 = 面板左缘 + HEADER_INSET）。
-    pub const HEADER_INSET: f32 = 4.0;
+    pub const HEADER_INSET: f32 = 6.0;
+    /// 标签文字最大宽度（超出省略号截断）。
+    pub const TAB_TEXT_MAX_W: f32 = 120.0;
 }
 
 /// 内置视图 kind 顺序（右键菜单/选择器的呈现序）。
@@ -77,21 +79,59 @@ pub fn view_icon(kind: &str) -> &'static str {
     }
 }
 
-/// 估算文字宽度（拉丁 ≈6.2px、CJK ≈12px / 12px 字号；按字号线性缩放）。
-/// 弹层锚点与布局 tab 宽度用；与真实 shaping 有 ±10% 以内偏差，仅用于定位不用于截断。
+/// 估算文字宽度（拉丁 ≈6.5px、CJK ≈13.5px / 12px 字号；按字号线性缩放）。
+/// 渲染宽度全部由内容自适应（Shrink），本估算仅服务于拖拽命中几何的插入位判定
+/// （标题栏 tab 条起点/宽度、面板标签条插入索引）；与真实 shaping 存在逐字符
+/// 累积的估宽偏差，标签越多插入位偏差越大，不影响渲染。
 pub fn estimate_text_width(text: &str, font_size: f32) -> f32 {
     let k = font_size / 12.0;
     let w: f32 = text
         .chars()
         .map(|c| {
             if c.is_ascii() {
-                6.2
+                6.5
             } else {
-                12.0
+                13.5
             }
         })
         .sum();
     w * k
+}
+
+/// 按估宽截断：超出 `max_w` 时逐字收缩并补省略号（截断口径与渲染定宽同源）。
+pub fn ellipsize(text: &str, max_w: f32, font_size: f32) -> String {
+    if estimate_text_width(text, font_size) <= max_w {
+        return text.to_string();
+    }
+    for (i, _) in text.char_indices().rev() {
+        let candidate = format!("{}…", &text[..i]);
+        if estimate_text_width(&candidate, font_size) <= max_w {
+            return candidate;
+        }
+    }
+    "…".to_string()
+}
+
+/// 面板标签文字（笔记视图打开文件 = 文件名去 .md 后缀，否则视图名）。
+pub fn tab_label(app: &App, view: &str) -> String {
+    if view == "note" {
+        if let Some(f) = app.ui.last_note_file.as_deref() {
+            let name = f.rsplit('/').next().unwrap_or(f);
+            return name
+                .strip_suffix(".md")
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| name.to_string());
+        }
+    }
+    view_label(view).to_string()
+}
+
+/// 面板标签近似宽度（拖拽命中几何用；渲染宽度由内容自适应，见 panel_tab）。
+fn approx_tab_width(label: &str, locked: bool, has_file: bool) -> f32 {
+    let text_w = estimate_text_width(label, 12.0).min(UiMetrics::TAB_TEXT_MAX_W);
+    13.0 + 4.0 + text_w + 16.0 + 2.0
+        + if locked { 13.0 } else { 0.0 }
+        + if has_file && !locked { 19.0 } else { 0.0 }
 }
 
 /// 等宽字体（计数/扩展名标签）。
@@ -141,7 +181,14 @@ impl PopupState {
             PopupState::ViewPicker { .. } => 160.0,
             PopupState::DetachedPanelMenu { .. } => 160.0,
             PopupState::SortMenu => 160.0,
-            PopupState::FileMenu { .. } => 176.0,
+            // 仓库行菜单 192；文件/文件夹菜单 176
+            PopupState::FileMenu { rel, is_root, .. } => {
+                if rel.is_empty() && !*is_root {
+                    192.0
+                } else {
+                    176.0
+                }
+            }
             PopupState::NoteMenu => 144.0,
         }
     }
@@ -153,24 +200,32 @@ pub struct PopupOpen {
     pub point: Point,
     pub flip_y: Option<f32>,
     pub state: PopupState,
+    /// 宽度下限（弹层不窄于触发按钮；0 = 不限）。
+    pub min_width: f32,
 }
 
 /// 按钮触发的弹层：锚点在按钮下缘（光标 y + 16 ≈ 28px 按钮的中点下移），
 /// 翻转线在按钮上缘，弹层不盖住触发按钮。
 fn btn_popup(window: iced::window::Id, cursor: Point, state: PopupState) -> Message {
+    btn_popup_min(window, cursor, state, 0.0)
+}
+
+/// 带宽度下限的按钮弹层（锚定触发按钮：估宽下限保证弹层不窄于按钮）。
+fn btn_popup_min(window: iced::window::Id, cursor: Point, state: PopupState, min_width: f32) -> Message {
     Message::PopupOpen(
         window,
         PopupOpen {
             point: Point::new(cursor.x, cursor.y + 16.0),
             flip_y: Some(cursor.y - 12.0),
             state,
+            min_width,
         },
     )
 }
 
 /// 右键菜单类弹层：锚点 = 光标点，无翻转。
 fn ctx_popup(window: iced::window::Id, cursor: Point, state: PopupState) -> Message {
-    Message::PopupOpen(window, PopupOpen { point: cursor, flip_y: None, state })
+    Message::PopupOpen(window, PopupOpen { point: cursor, flip_y: None, state, min_width: 0.0 })
 }
 
 /// 主窗口：标题栏 + 内容（设置整页或面板网格）+ 状态栏，顶层叠弹层/提示/通知。
@@ -178,7 +233,17 @@ pub fn main_view<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, Mess
     let content: Element<'a, Message> = if app.settings_open {
         settings_view(app)
     } else {
-        render_node(app, active_tree(&app.ui))
+        // 把手悬停态：光标命中检测与渲染同源（enumerate_dividers 几何）
+        let cursor = app.cursor_for(window);
+        let hovered = if app.main_id == Some(window) {
+            enumerate_dividers(&layout::active_layout(&app.ui).tree, content_area_of(app))
+                .into_iter()
+                .find(|d| d.rect.contains(cursor))
+                .map(|d| (d.split_id, d.gap))
+        } else {
+            None
+        };
+        render_node(app, active_tree(&app.ui), hovered.as_ref().map(|(s, g)| (s.as_str(), *g)))
     };
 
     let base = column![
@@ -206,7 +271,22 @@ pub fn main_view<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, Mess
     with_overlays(app, window, base.into())
 }
 
-/// 弹层 / 悬停提示 / 通知的窗口内覆盖。
+/// 主窗口分割树几何区域（标题栏与状态栏之间的内容区，窗口局部坐标；
+/// 与渲染列的两条 1px 分隔线同源：上下各让 1px）。
+pub fn content_area_of(app: &App) -> Rectangle {
+    Rectangle {
+        x: 0.0,
+        y: UiMetrics::TITLEBAR_H + 1.0,
+        width: app.main_size.width,
+        height: (app.main_size.height
+            - UiMetrics::TITLEBAR_H
+            - UiMetrics::STATUSBAR_H
+            - 2.0)
+            .max(0.0),
+    }
+}
+
+/// 弹层 / 悬停提示 / 通知 / 拖拽 ghost 的窗口内覆盖。
 fn with_overlays<'a>(
     app: &'a App,
     window: iced::window::Id,
@@ -218,12 +298,13 @@ fn with_overlays<'a>(
     // 弹层（同窗口至多一个；捕获层点击 = 外点关闭）
     if let Some((w, open)) = &app.popup {
         if *w == window {
-            let (content, height) = popup_element(app, &open.state, app.popup_pane);
+            let (content, height) = popup_element(app, &open.state, app.popup_pane, window);
             let spec = PopupSpec {
                 anchor: open.point,
                 width: open.state.width(),
                 height,
                 flip_y: open.flip_y,
+                min_width: open.min_width,
             };
             let geom = popup::resolve(&spec, viewport);
             element = popup::layer(
@@ -235,24 +316,34 @@ fn with_overlays<'a>(
         }
     }
 
-    // 悬停提示（显现期锚定最近光标下方）
-    if let Some((w, label, _, shown)) = &app.tooltip {
+    // 悬停提示：跟随光标（锚在光标下方半边长 + 4），视口钳制 + 上下翻转
+    if let Some((w, label, _, shown, _, _)) = &app.tooltip {
         if *w == window && *shown {
             let tip = container(text(label.clone()).size(pal::FS_MICRO).color(pal::TEXT_SECONDARY))
                 .padding(Padding::ZERO.horizontal(8.0).vertical(4.0))
-                .max_width(260)
                 .style(|_t| Style {
                     background: Some(pal::BG_OVERLAY.into()),
-                    border: border::rounded(pal::RADIUS_SM).color(pal::BORDER).width(1.0),
+                    border: border::rounded(pal::RADIUS_MD).color(pal::BORDER).width(1.0),
                     ..Style::default()
                 });
             let pos = app.cursor_for(window);
+            let tip_w = (estimate_text_width(label, pal::FS_MICRO) + 16.0).min(260.0);
+            let tip_h = 16.0 + 8.0;
+            let half = app.tooltip_half.unwrap_or(14.0);
+            let spec = PopupSpec {
+                anchor: Point::new(pos.x, pos.y + half + 4.0),
+                width: tip_w,
+                height: tip_h,
+                flip_y: Some(pos.y - half - 4.0),
+                min_width: 0.0,
+            };
+            let geom = popup::resolve(&spec, viewport);
             let positioned = container(tip)
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .align_x(Horizontal::Left)
                 .align_y(Vertical::Top)
-                .padding(Padding::ZERO.left(pos.x).top(pos.y + 18.0));
+                .padding(Padding::ZERO.left(geom.x).top(geom.y));
             element = stack![element, mouse_area(positioned)
                 .on_exit(Message::Ui(crate::ui::UiMsg::HoverTipEnd {
                     window,
@@ -261,6 +352,38 @@ fn with_overlays<'a>(
             .width(Length::Fill)
             .height(Length::Fill)
             .into();
+        }
+    }
+
+    // 拖拽 ghost：跟随光标的预览卡（会话由源窗口发起，显示在光标所在窗口）
+    if let Some(drag) = &app.drag {
+        if drag.cursor_window == window {
+            if let Some(wpos) = app.os_positions.get(&window) {
+                let local = Point::new(drag.current.x - wpos.x, drag.current.y - wpos.y);
+                let ghost = container(
+                    row![
+                        icon(view_icon(&drag.view), 13.0, pal::TEXT_PRIMARY),
+                        text(drag.label.clone()).size(pal::FS_CAPTION).color(pal::TEXT_PRIMARY),
+                    ]
+                    .spacing(6),
+                )
+                .padding(Padding::ZERO.horizontal(10.0).vertical(4.0))
+                .style(|_t| Style {
+                    background: Some(pal::BG_OVERLAY.into()),
+                    border: border::rounded(pal::RADIUS_SM).color(pal::ACCENT).width(1.0),
+                    ..Style::default()
+                });
+                let positioned = container(ghost)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .align_x(Horizontal::Left)
+                    .align_y(Vertical::Top)
+                    .padding(Padding::ZERO.left(local.x + 14.0).top(local.y + 18.0));
+                element = stack![element, mouse_area(positioned)]
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .into();
+            }
         }
     }
 
@@ -288,6 +411,32 @@ fn viewport_of(app: &App, window: iced::window::Id) -> Size {
 
 // ===== 标题栏 =====
 
+/// 品牌名估宽（标题栏布局 tab 条起点几何的组成部分；文字定宽渲染保证几何同源）。
+const BRAND_TEXT: &str = "Atelyx";
+
+/// 标题栏布局 tab 条的条带起点 x 与各 tab (id, 名称, 宽度)（拖拽命中几何；与渲染同源估算）。
+/// 渲染序 = 内边距 4 + 品牌（内衬 8 + 图标 16 + 间距 6 + 定宽文字）+ 行间距 4。
+pub fn titlebar_tab_strip(app: &App) -> (f32, Vec<(String, String, f32)>) {
+    // 品牌行宽 = 左右内衬 8 + 图标 16 + 间距 6 + 定宽文字
+    let brand_w = 8.0 + 16.0 + 6.0 + estimate_text_width(BRAND_TEXT, 12.0) + 8.0;
+    let mut out = vec![(
+        layout::HOME_LAYOUT_ID.to_string(),
+        "主页".to_string(),
+        layout_tab_width("主页"),
+    )];
+    if let Some(scene) = app.active_scene() {
+        for l in &scene.layouts {
+            out.push((l.id.clone(), l.name.clone(), layout_tab_width(&l.name)));
+        }
+    }
+    (4.0 + brand_w + 4.0, out)
+}
+
+/// 布局 tab 宽度：文字估宽 + 内边距 20，钳制 48–120。
+fn layout_tab_width(name: &str) -> f32 {
+    (estimate_text_width(name, 12.0) + 20.0).clamp(48.0, 120.0)
+}
+
 fn titlebar<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, Message> {
     let cursor = app.cursor_for(window);
 
@@ -302,26 +451,32 @@ fn titlebar<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, Message> 
         }
     }
     let tabs = scrollable(container(row![tabs,
-        controls::icon_button("plus", 13.0, 28.0, Variant::Subtle,
+        controls::icon_button("plus", 13.0, 28.0, Variant::SubtleBg,
             Some(Message::LayoutNew), Some((window, "新建布局".into()))),
     ]))
     .direction(scrollable::Direction::Horizontal(scrollable::Scrollbar::new().width(0.0).scroller_width(0.0)))
+    .on_scroll(|v| Message::TabStripScrolled(None, v.absolute_offset().x))
     .width(Length::Shrink)
     .height(Length::Fill);
 
     // 场景选择器
     let scene_name = app.active_scene().map(|s| s.name.clone()).unwrap_or_default();
+    let trigger_w = estimate_text_width(&scene_name, 12.0) + 16.0 + 4.0 + 12.0;
     let selector = button(
-        row![
-            text(scene_name).size(pal::FS_CAPTION).color(pal::TEXT_SECONDARY),
-            icon("chevron-down", 12.0, pal::TEXT_SECONDARY),
-        ]
-        .spacing(4),
+        container(
+            row![
+                text(ellipsize(&scene_name, 120.0, pal::FS_CAPTION)).size(pal::FS_CAPTION).color(pal::TEXT_SECONDARY),
+                icon("chevron-down", 12.0, pal::TEXT_SECONDARY),
+            ]
+            .spacing(4),
+        )
+        .height(Length::Fill)
+        .align_y(Vertical::Center),
     )
     .padding(Padding::ZERO.horizontal(8.0))
     .height(Length::Fixed(28.0))
     .style(hover_btn_style())
-    .on_press(btn_popup(window, cursor, PopupState::SceneSelector { confirm: None }));
+    .on_press(btn_popup_min(window, cursor, PopupState::SceneSelector { confirm: None }, trigger_w));
 
     // 右操作区
     let settings_active = app.settings_open;
@@ -343,13 +498,23 @@ fn titlebar<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, Message> 
     );
 
     let brand = row![
-        iced::widget::image(crate::ui::icon_handle())
-            .width(Length::Fixed(16.0))
-            .height(Length::Fixed(16.0)),
-        text("Atelyx")
+        container(
+            iced::widget::image(crate::ui::icon_handle())
+                .width(Length::Fixed(16.0))
+                .height(Length::Fixed(16.0)),
+        )
+        .width(Length::Fixed(16.0))
+        .height(Length::Fixed(16.0))
+        .clip(true)
+        .style(|_t| Style {
+            border: border::rounded(pal::RADIUS_XS),
+            ..Style::default()
+        }),
+        text(BRAND_TEXT)
             .size(pal::FS_CAPTION)
             .color(pal::TEXT_SECONDARY)
-            .font(crate::ui::semibold()),
+            .font(crate::ui::display())
+            .width(Length::Fixed(estimate_text_width(BRAND_TEXT, 12.0))),
     ]
     .spacing(6)
     .padding(Padding::ZERO.horizontal(8.0));
@@ -357,6 +522,13 @@ fn titlebar<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, Message> 
     // 空白区 = 拖拽区（按下拖动窗口 / 双击最大化）
     let drag_spring = mouse_area(space().width(Length::Fill).height(Length::Fill))
         .on_press(Message::TitleBarPress(window));
+
+    // 窗口控制三钮贴合（组内无间距）
+    let window_controls = row![
+        controls::window_button(controls::WindowButtonKind::Minimize, Message::WindowMinimize(window)),
+        controls::window_button(controls::WindowButtonKind::Maximize, Message::WindowMaximizeToggle(window)),
+        controls::window_button(controls::WindowButtonKind::Close, Message::WindowCloseRequested(window)),
+    ];
 
     // 右操作区单行排布：场景选择器 → 设置 → 全屏 → 窗口控制（无系统边框后为唯一标题栏）
     container(
@@ -367,9 +539,7 @@ fn titlebar<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, Message> 
             selector,
             settings_btn,
             fullscreen_btn,
-            controls::window_button(controls::WindowButtonKind::Minimize, Message::WindowMinimize(window)),
-            controls::window_button(controls::WindowButtonKind::Maximize, Message::WindowMaximizeToggle(window)),
-            controls::window_button(controls::WindowButtonKind::Close, Message::WindowCloseRequested(window)),
+            window_controls,
         ]
         .height(Length::Fill)
         .spacing(4)
@@ -377,6 +547,7 @@ fn titlebar<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, Message> 
     )
     .width(Length::Fill)
     .height(Length::Fixed(pal::TITLEBAR_H))
+    .padding(Padding::ZERO.horizontal(4.0))
     .style(|_t| Style {
         background: Some(pal::BG_SECONDARY.into()),
         ..Style::default()
@@ -384,7 +555,9 @@ fn titlebar<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, Message> 
     .into()
 }
 
-/// 标题栏布局 tab（自适应宽度 48–120；激活 = 三档底 + 2px 金下边；右键 = tab 菜单，双击 = 重命名）。
+/// 标题栏布局 tab（宽度随内容自适应；激活/重命名在途 = 三档底 + 底部金条
+/// （左右缩进 8 圆头）；点击激活（拖拽会话期间忽略）、按下上报拖拽候选（主页除外）、
+/// 右键 = tab 菜单、双击 = 重命名）。
 fn layout_tab(
     app: &App,
     name: &str,
@@ -393,65 +566,98 @@ fn layout_tab(
     window: iced::window::Id,
     cursor: Point,
 ) -> Element<'static, Message> {
-    let width = (estimate_text_width(name, 12.0) + 20.0).clamp(48.0, 120.0);
     let text_color = if active { pal::TEXT_PRIMARY } else { pal::TEXT_SECONDARY };
+    // 重命名在途 = 与激活态同款高亮（底色 + 金下边），无论该 tab 是否激活；
+    // 输入框需要定宽，仅编辑态退回估宽定宽
     let renaming = matches!(
         &app.rename,
         Some(r) if r.target == RenameTarget::Layout(id.to_string())
     );
+    let highlighted = active || renaming;
+    let edit_width = layout_tab_width(name);
     let text_area: Element<'static, Message> = if renaming {
         controls::inline_input(
             "新名称",
             &app.rename.as_ref().map(|r| r.value.clone()).unwrap_or_default(),
-            width - 20.0,
+            edit_width - 20.0,
             Message::LayoutRenameInput,
             Message::LayoutRenameCommit,
+            Message::RenamePressInside,
         )
-        .into()
     } else {
-        container(
-            text(name.to_string())
-                .size(pal::FS_CAPTION)
-                .color(text_color)
-                .width(Length::Fill),
-        )
-        .width(Length::Fill)
-        .height(Length::Fixed(24.0))
-        .align_y(Vertical::Center)
-        .padding(Padding::ZERO.left(12.0).right(8.0))
-        .into()
+        text(ellipsize(name, UiMetrics::TAB_TEXT_MAX_W, 12.0).to_string())
+            .size(pal::FS_CAPTION)
+            .color(text_color)
+            .into()
     };
     let content = column![
         text_area,
-        container(space())
-            .height(Length::Fixed(2.0))
-            .style(move |_t| Style {
-                background: if active { Some(pal::ACCENT.into()) } else { None },
-                ..Style::default()
-            }),
-    ]
-    .width(Length::Fill);
+        // 金条：左右缩进 8、圆头，贴 tab 底缘绘制
+        container(
+            container(space())
+                .width(Length::Fill)
+                .height(Length::Fixed(2.0))
+                .style(move |_t| Style {
+                    background: highlighted.then_some(pal::ACCENT.into()),
+                    border: border::rounded(1.0),
+                    ..Style::default()
+                }),
+        )
+        .width(Length::Fill)
+        .padding(Padding::ZERO.horizontal(8.0)),
+    ];
 
     let underline = container(content)
-        .width(Length::Fixed(width))
         .height(Length::Fixed(28.0))
+        .padding(Padding::ZERO.left(12.0).right(8.0))
         .style(move |_t| Style {
-            background: if active { Some(pal::BG_TERTIARY.into()) } else { None },
+            background: highlighted.then_some(pal::BG_TERTIARY.into()),
             border: border::rounded(pal::RADIUS_SM),
             ..Style::default()
         });
 
+    if id != layout::HOME_LAYOUT_ID {
+        // 按下候选经 PressReporter 上报（主页固定不可拖不挂）；右键/双击照常
+        return controls::PressReporter::new(
+            mouse_area(
+                // 显式零内边距：估宽（layout_tab_width）按内容记账，默认内边距会让命中几何偏窄
+                button(underline)
+                    .padding(0.0)
+                    .style(move |_t, status| button::Style {
+                        background: (!highlighted
+                            && matches!(status, button::Status::Hovered | button::Status::Pressed))
+                        .then_some(pal::BG_TERTIARY.into()),
+                        border: border::rounded(pal::RADIUS_SM),
+                        ..Default::default()
+                    })
+                    .on_press(Message::LayoutActivate(id.to_string())),
+            )
+            .on_double_click(Message::LayoutRenameStart(id.to_string()))
+            .on_right_press(ctx_popup(
+                window,
+                cursor,
+                PopupState::LayoutTabMenu { layout_id: id.to_string() },
+            ))
+            .into(),
+            Message::LayoutTabPress {
+                layout_id: id.to_string(),
+                name: name.to_string(),
+            },
+        )
+        .into();
+    }
     mouse_area(
         button(underline)
+            .padding(0.0)
             .style(move |_t, status| button::Style {
-                background: (!active
+                background: (!highlighted
                     && matches!(status, button::Status::Hovered | button::Status::Pressed))
                 .then_some(pal::BG_TERTIARY.into()),
+                border: border::rounded(pal::RADIUS_SM),
                 ..Default::default()
             })
             .on_press(Message::LayoutActivate(id.to_string())),
     )
-    .on_right_press(ctx_popup(window, cursor, PopupState::LayoutTabMenu { layout_id: id.to_string() }))
     .on_double_click(Message::LayoutRenameStart(id.to_string()))
     .into()
 }
@@ -462,6 +668,7 @@ fn hover_btn_style() -> impl Fn(&iced::Theme, button::Status) -> button::Style {
         background: matches!(status, button::Status::Hovered | button::Status::Pressed)
             .then_some(pal::BG_TERTIARY.into()),
         text_color: pal::TEXT_SECONDARY,
+        border: border::rounded(pal::RADIUS_SM),
         ..Default::default()
     }
 }
@@ -473,22 +680,23 @@ fn status_bar(app: &App) -> Element<'static, Message> {
         Some(root) => ("hard-drive", atelyx_core::vault::vault_display_name(root)),
         None => ("hard-drive", "未打开仓库".to_string()),
     };
+    // 组间 12px、组内 6px 两级间距；文件数统计在途不渲染占位
     let mut left = row![
-        icon(icon_name, 12.0, pal::TEXT_MUTED),
-        text(name).size(pal::FS_MICRO).color(pal::TEXT_SECONDARY),
+        row![
+            icon(icon_name, 12.0, pal::TEXT_MUTED),
+            text(name).size(pal::FS_MICRO).color(pal::TEXT_SECONDARY),
+        ]
+        .spacing(6),
     ]
-    .spacing(6);
-    if app.vault_root.is_some() {
+    .spacing(12);
+    if let (Some(_), Some(n)) = (&app.vault_root, app.file_count) {
         left = left
             .push(vrule())
             .push(
-                text(match app.file_count {
-                    Some(n) => format!("{n} 文件"),
-                    None => "…".into(),
-                })
-                .size(pal::FS_MICRO)
-                .color(pal::TEXT_MUTED)
-                .font(mono()),
+                text(format!("{n} 文件"))
+                    .size(pal::FS_MICRO)
+                    .color(pal::TEXT_MUTED)
+                    .font(mono()),
             );
     }
     container(row![left, space().width(Length::Fill)])
@@ -555,9 +763,14 @@ fn active_tree(ui: &AppUiState) -> &LayoutNode {
 }
 
 /// 布局树节点渲染：Split = 按 sizes 比例分配 + 把手；Panel = 标签组 + 面板操作。
-pub fn render_node<'a>(app: &'a App, node: &'a LayoutNode) -> Element<'a, Message> {
+/// `hovered_divider` = 光标当前命中的 (split_id, gap)，把手悬停转强调色。
+pub fn render_node<'a>(
+    app: &'a App,
+    node: &'a LayoutNode,
+    hovered_divider: Option<(&str, usize)>,
+) -> Element<'a, Message> {
     match node {
-        LayoutNode::Split { direction, children, sizes, .. } => {
+        LayoutNode::Split { id, direction, children, sizes, .. } => {
             let horizontal = direction == "horizontal";
             let sum = sizes.iter().sum::<f64>().max(1e-9);
             let portions: Vec<u16> = sizes
@@ -575,21 +788,24 @@ pub fn render_node<'a>(app: &'a App, node: &'a LayoutNode) -> Element<'a, Messag
                         .height(Length::FillPortion(portions[i]))
                 }
             };
+            let hovered_gap = hovered_divider
+                .filter(|(sid, _)| *sid == id.as_str())
+                .map(|(_, gap)| gap);
             if horizontal {
                 let mut r = row![].height(Length::Fill);
                 for (i, child) in children.iter().enumerate() {
-                    r = r.push(sized(render_node(app, child), i));
+                    r = r.push(sized(render_node(app, child, hovered_divider), i));
                     if i + 1 < children.len() {
-                        r = r.push(divider());
+                        r = r.push(divider(hovered_gap == Some(i), horizontal));
                     }
                 }
                 r.into()
             } else {
                 let mut c = column![].width(Length::Fill);
                 for (i, child) in children.iter().enumerate() {
-                    c = c.push(sized(render_node(app, child), i));
+                    c = c.push(sized(render_node(app, child, hovered_divider), i));
                     if i + 1 < children.len() {
-                        c = c.push(divider());
+                        c = c.push(divider(hovered_gap == Some(i), horizontal));
                     }
                 }
                 c.into()
@@ -599,31 +815,60 @@ pub fn render_node<'a>(app: &'a App, node: &'a LayoutNode) -> Element<'a, Messag
     }
 }
 
-fn divider() -> Element<'static, Message> {
-    container(space())
-        .width(Length::Fixed(UiMetrics::DIVIDER_W))
-        .height(Length::Fill)
-        .style(|_t| Style {
-            background: Some(pal::BORDER.into()),
-            ..Style::default()
-        })
-        .into()
+/// 分割把手（宽 4px；悬停 = 强调色 50%）；光标形态 col-resize / row-resize。
+fn divider(hovered: bool, horizontal: bool) -> Element<'static, Message> {
+    let interaction = if horizontal {
+        iced::mouse::Interaction::ResizingColumn
+    } else {
+        iced::mouse::Interaction::ResizingRow
+    };
+    mouse_area(
+        container(space())
+            .width(Length::Fixed(UiMetrics::DIVIDER_W))
+            .height(Length::Fill)
+            .style(move |_t| Style {
+                background: if hovered {
+                    Some(pal::ACCENT.scale_alpha(0.5).into())
+                } else {
+                    Some(pal::BORDER.into())
+                },
+                ..Style::default()
+            }),
+    )
+    .interaction(interaction)
+    .into()
 }
 
-/// 面板：标签条（底色 + 1px 底线 + 激活标签盖线）+ 内容区。
+/// 面板：标签条（底色 + 1px 底线 + 激活标签盖线）+ 内容区；拖拽悬停期叠 drop 指示。
 fn panel_view<'a>(
     app: &'a App,
     panel_id: &str,
     tabs: &'a [TabItem],
     active_tab_id: &Option<String>,
 ) -> Element<'a, Message> {
+    let window = app.main_id.unwrap_or(iced::window::Id::unique());
     let mut tab_row = row![].spacing(2).height(Length::Fill);
-    for t in tabs {
+    // 拖拽插入条：命中本面板标签条时在插入位渲染 2px 强调竖条（随行内元素移位）
+    let insert_at = app.drag.as_ref().and_then(|d| {
+        let hover = app.drag_hover.as_ref()?;
+        (hover.zone.panel_id.as_deref() == Some(panel_id) && hover.kind == DropZone::Tab)
+            .then(|| {
+                let scroll_x = app.panel_tab_scroll_x.get(panel_id).copied().unwrap_or(0.0);
+                tab_index_at(&hover.zone, d.current.x, scroll_x)
+            })
+    });
+    for (i, t) in tabs.iter().enumerate() {
+        if insert_at == Some(i) {
+            tab_row = tab_row.push(insertion_marker());
+        }
         tab_row = tab_row.push(panel_tab(app, panel_id, t, active_tab_id));
+    }
+    if insert_at == Some(tabs.len()) {
+        tab_row = tab_row.push(insertion_marker());
     }
     let active = tabs.iter().find(|t| Some(t.id.as_str()) == active_tab_id.as_deref());
 
-    // 右侧：状态指示 + ≡ 菜单
+    // 右侧：状态指示 + ≡ 菜单（空面板也有 ≡：删除/分割仍可用）
     let mut right = row![].spacing(4).padding(Padding::ZERO.right(6.0));
     if let Some(t) = active {
         if t.view == "note" {
@@ -631,21 +876,28 @@ fn panel_view<'a>(
                 right = right.push(pill);
             }
         }
-        right = right.push(mouse_area(
+    }
+    right = right.push(
+        mouse_area(
             button(icon("menu", 13.0, pal::TEXT_MUTED))
-                .padding(Padding::ZERO.horizontal(6.0).vertical(4.0))
+                .padding(Padding::ZERO.horizontal(6.0).vertical(2.0))
                 .style(|_t, status| button::Style {
-                    background: matches!(status, button::Status::Hovered | button::Status::Pressed)
-                        .then_some(pal::HOVER.into()),
+                    background: None,
+                    text_color: if matches!(status, button::Status::Hovered | button::Status::Pressed) {
+                        pal::TEXT_MUTED.scale_alpha(0.7)
+                    } else {
+                        pal::TEXT_MUTED
+                    },
+                    border: border::rounded(pal::RADIUS_XS),
                     ..Default::default()
                 }),
         )
         .on_press(btn_popup(
-            app.main_id.unwrap_or(iced::window::Id::unique()),
-            app.cursor_for(app.main_id.unwrap_or(iced::window::Id::unique())),
+            window,
+            app.cursor_for(window),
             PopupState::PanelMenu { panel_id: panel_id.to_string() },
-        )));
-    }
+        )),
+    );
 
     let header = stack![
         container(space())
@@ -663,51 +915,125 @@ fn panel_view<'a>(
                 background: Some(pal::BORDER.into()),
                 ..Style::default()
             }),
-        row![tab_row, space().width(Length::Fill), right]
-            .height(Length::Fixed(UiMetrics::TAB_BAR_H))
-            .padding(Padding::ZERO.left(UiMetrics::HEADER_INSET)),
+        row![
+            scrollable(container(row![tab_row]).padding(Padding::ZERO.left(UiMetrics::HEADER_INSET)))
+                .direction(scrollable::Direction::Horizontal(
+                    scrollable::Scrollbar::new().width(0.0).scroller_width(0.0)
+                ))
+                .on_scroll({
+                    let panel_id = panel_id.to_string();
+                    move |v| Message::TabStripScrolled(Some(panel_id.clone()), v.absolute_offset().x)
+                })
+                .width(Length::Fill)
+                .height(Length::Fill),
+            right,
+        ]
+        .height(Length::Fixed(UiMetrics::TAB_BAR_H)),
     ]
     .width(Length::Fill)
     .height(Length::Fixed(UiMetrics::TAB_BAR_H));
 
     let content: Element<'a, Message> = match active {
-        None => mouse_area(placeholder_panel("空面板"))
+        // 空面板 = 纯空白（右键唤起视图选择器）
+        None => mouse_area(space().width(Length::Fill).height(Length::Fill))
             .on_right_press(Message::PopupOpen(
-                app.main_id.unwrap_or(iced::window::Id::unique()),
+                window,
                 PopupOpen {
-                    point: app.cursor_for(app.main_id.unwrap_or(iced::window::Id::unique())),
+                    point: app.cursor_for(window),
                     flip_y: None,
                     state: PopupState::ViewPicker { panel_id: panel_id.to_string() },
+                    min_width: 0.0,
                 },
             ))
             .into(),
         Some(t) => view_content(app, &t.view),
     };
 
-    let hovered = app.drag_hover.as_ref().is_some_and(|h| {
-        app.drag.is_some() && h.zone.panel_id.as_deref() == Some(panel_id)
+    // 拖拽 drop 指示：中部 = 强调 22% 填充 + 60% 外框圆角 4；四边缘 = 12% 条带
+    let drop = app.drag.as_ref().and_then(|_| {
+        app.drag_hover
+            .as_ref()
+            .filter(|h| h.zone.panel_id.as_deref() == Some(panel_id))
+            .map(|h| h.kind)
     });
-    container(
+    let base = container(
         column![header, container(content).width(Length::Fill).height(Length::Fill)]
             .width(Length::Fill)
             .height(Length::Fill),
     )
     .width(Length::Fill)
-    .height(Length::Fill)
-    .style(move |_t| {
-        if hovered {
-            Style {
-                border: border::rounded(0.0).color(pal::ACCENT).width(2.0),
-                ..Style::default()
-            }
-        } else {
-            Style::default()
+    .height(Length::Fill);
+    match drop {
+        Some(kind) => {
+            let indicator = drop_indicator(kind);
+            stack![base, indicator].width(Length::Fill).height(Length::Fill).into()
         }
-    })
-    .into()
+        None => base.into(),
+    }
 }
 
-/// 面板标签：定宽；激活 = 内容区同色底 + 2px 金下边（盖住标签条底线）。
+/// 标签排序插入位标记（2px 强调竖条，随标签条拉伸）。
+fn insertion_marker() -> Element<'static, Message> {
+    container(space())
+        .width(Length::Fixed(2.0))
+        .height(Length::Fill)
+        .style(|_t| Style {
+            background: Some(pal::ACCENT.into()),
+            ..Style::default()
+        })
+        .into()
+}
+
+/// drop 指示覆盖层：中部 = 强调 22% 填充块 + 60% 1px 外框圆角 4；四边缘 = 12% 条带
+/// （FillPortion 行列实现，带宽随面板尺寸自适应）。
+fn drop_indicator(kind: DropZone) -> Element<'static, Message> {
+    let band_style = |_t: &iced::Theme| Style {
+        background: Some(pal::ACCENT.scale_alpha(0.22).into()),
+        ..Style::default()
+    };
+    let band = || {
+        container(space())
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(band_style)
+    };
+    let rest = || container(space()).width(Length::Fill).height(Length::Fill);
+    match kind {
+        DropZone::Center => container(space())
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(move |_t| Style {
+                background: Some(pal::ACCENT.scale_alpha(0.22).into()),
+                border: iced::border::Border {
+                    color: pal::ACCENT.scale_alpha(0.6),
+                    width: 1.0,
+                    radius: iced::border::Radius::from(4.0),
+                },
+                ..Style::default()
+            })
+            .into(),
+        DropZone::Left => row![band().width(Length::FillPortion(12)), rest().width(Length::FillPortion(88))]
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into(),
+        DropZone::Right => row![rest().width(Length::FillPortion(88)), band().width(Length::FillPortion(12))]
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into(),
+        DropZone::Top => column![band().height(Length::FillPortion(12)), rest().height(Length::FillPortion(88))]
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into(),
+        DropZone::Bottom => column![rest().height(Length::FillPortion(88)), band().height(Length::FillPortion(12))]
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into(),
+        DropZone::Tab => space().into(),
+    }
+}
+
+/// 面板标签（自适应宽 + 视图图标 + 顶部圆角；激活 = 内容区同色底 + 2px 金下边盖线；
+/// 打开文件的 × = 关文件留标签）。
 fn panel_tab<'a>(
     app: &'a App,
     panel_id: &str,
@@ -715,58 +1041,65 @@ fn panel_tab<'a>(
     active_tab_id: &Option<String>,
 ) -> Element<'a, Message> {
     let active = active_tab_id.as_deref() == Some(t.id.as_str());
-    // 文件视图打开文件时显示文件名，否则视图名
-    let label = if t.view == "note" {
-        app.ui
-            .last_note_file
-            .as_deref()
-            .and_then(|f| f.rsplit('/').next())
-            .unwrap_or(view_label(&t.view))
-            .to_string()
-    } else {
-        view_label(&t.view).to_string()
-    };
-    let is_note_open = t.view == "note" && app.ui.last_note_file.is_some();
+    let label = tab_label(app, &t.view);
+    let has_file = t.view == "note" && app.ui.last_note_file.is_some();
+    let window = app.main_id.unwrap_or(iced::window::Id::unique());
+    let cursor = app.cursor_for(window);
 
+    let text_color = if active { pal::TEXT_PRIMARY } else { pal::TEXT_SECONDARY };
     let mut label_row = row![].spacing(4);
+    label_row = label_row.push(icon(view_icon(&t.view), 13.0, text_color));
     label_row = label_row.push(
-        text(label)
+        text(ellipsize(&label, UiMetrics::TAB_TEXT_MAX_W, 12.0))
             .size(pal::FS_CAPTION)
-            .color(if active { pal::TEXT_PRIMARY } else { pal::TEXT_SECONDARY }),
+            .color(text_color),
     );
     if t.locked {
-        label_row = label_row.push(icon("lock", 9.0, pal::TEXT_MUTED));
+        label_row = label_row.push(icon("lock", 9.0, text_color));
     }
-    if is_note_open && !t.locked {
+    if has_file && !t.locked {
         label_row = label_row.push(
             button(icon("x", 11.0, pal::TEXT_MUTED))
                 .padding(2.0)
                 .style(|_t, status| button::Style {
-                    background: matches!(status, button::Status::Hovered | button::Status::Pressed)
-                        .then_some(pal::HOVER.into()),
+                    background: None,
+                    text_color: if matches!(status, button::Status::Hovered | button::Status::Pressed) {
+                        pal::TEXT_MUTED.scale_alpha(0.7)
+                    } else {
+                        pal::TEXT_MUTED
+                    },
+                    border: border::rounded(pal::RADIUS_XS),
                     ..Default::default()
                 })
-                .on_press(Message::PanelTabClose(panel_id.to_string(), t.id.clone())),
+                .on_press(Message::PanelTabFileClose),
         );
     }
 
-    let window = app.main_id.unwrap_or(iced::window::Id::unique());
-    let cursor = app.cursor_for(window);
+    // 顶部圆角（rounded-t）：激活标签底色与内容区同色、直抵底边
+    let top_radius = iced::border::Radius {
+        top_left: pal::RADIUS_SM,
+        top_right: pal::RADIUS_SM,
+        bottom_right: 0.0,
+        bottom_left: 0.0,
+    };
     let content = container(label_row)
-        .width(Length::Fixed(UiMetrics::TAB_W))
         .height(Length::Fill)
         .padding(Padding::ZERO.horizontal(8.0))
         .align_y(Vertical::Center);
 
+    // 显式零内边距：估宽（approx_tab_width）按内容记账，默认内边距会让命中几何偏窄
     let btn = button(container(column![
         content,
-        container(space()).height(Length::Fixed(2.0)).style(move |_t| Style {
-            background: if active { Some(pal::ACCENT.into()) } else { None },
-            ..Style::default()
-        }),
+        container(space())
+            .width(Length::Fill)
+            .height(Length::Fixed(2.0))
+            .style(move |_t| Style {
+                background: if active { Some(pal::ACCENT.into()) } else { None },
+                ..Style::default()
+            }),
     ])
     .height(Length::Fill))
-    .width(Length::Fixed(UiMetrics::TAB_W))
+    .padding(0.0)
     .height(Length::Fixed(UiMetrics::TAB_BAR_H))
     .style(move |_t, status| button::Style {
         background: if active {
@@ -776,22 +1109,65 @@ fn panel_tab<'a>(
         } else {
             None
         },
+        border: iced::border::Border { color: iced::Color::TRANSPARENT, width: 0.0, radius: top_radius },
         ..Default::default()
     })
     .on_press_maybe((!active).then(|| Message::PanelTab(panel_id.to_string(), t.id.clone())));
 
-    mouse_area(btn)
-        .on_right_press(ctx_popup(window, cursor, PopupState::TabContext { panel_id: panel_id.to_string(), tab_id: t.id.clone() }))
-        .into()
+    // 按下候选经 PressReporter 上报（mouse_area 对被按钮捕获的按下事件不触发）；
+    // 锁定标签右键仍开菜单（iced mouse_area 无 maybe 变体），条目全部禁用表达锁定语义
+    controls::PressReporter::new(
+        mouse_area(btn)
+            .on_right_press(ctx_popup(
+                window,
+                cursor,
+                PopupState::TabContext {
+                    panel_id: panel_id.to_string(),
+                    tab_id: t.id.clone(),
+                },
+            ))
+            .into(),
+        Message::PanelTabPress {
+            panel_id: panel_id.to_string(),
+            tab_id: t.id.clone(),
+        },
+    )
+    .into()
 }
 
-/// 笔记保存状态徽标（错误 > 未保存；干净与未打开文件不显示）。
+/// 笔记保存状态徽标：错误 = ErrorPill（红调底 + 重试/关闭），未保存 = 圆点徽标。
 fn note_status_pill(app: &App) -> Option<Element<'static, Message>> {
-    if app.ui.last_note_file.is_none() {
-        return None;
-    }
+    app.ui.last_note_file.as_ref()?;
     if app.save_error.is_some() {
-        Some(controls::status_pill(controls::PillStatus::Error, "保存失败"))
+        Some(
+            container(
+                row![
+                    text(ellipsize(app.save_error.as_deref().unwrap_or("保存失败"), 160.0, 11.0))
+                        .size(pal::FS_MICRO)
+                        .color(pal::DANGER),
+                    button(text("重试").size(pal::FS_MICRO).color(pal::DANGER))
+                        .padding(Padding::ZERO.horizontal(6.0).vertical(1.0))
+                        .style(|_t, _s| button::Style {
+                            background: Some(pal::DANGER.scale_alpha(0.2).into()),
+                            border: border::rounded(pal::RADIUS_XS),
+                            ..Default::default()
+                        })
+                        .on_press(Message::Save),
+                    button(icon("x", 11.0, pal::DANGER))
+                        .padding(1.0)
+                        .style(|_t, _s| button::Style::default())
+                        .on_press(Message::SaveErrorDismiss),
+                ]
+                .spacing(4),
+            )
+            .padding(Padding::ZERO.horizontal(6.0).vertical(2.0))
+            .style(|_t| Style {
+                background: Some(pal::DANGER.scale_alpha(0.12).into()),
+                border: border::rounded(pal::RADIUS_XS),
+                ..Style::default()
+            })
+            .into(),
+        )
     } else if app.dirty {
         Some(controls::status_pill(controls::PillStatus::Pending, "未保存"))
     } else {
@@ -808,13 +1184,12 @@ fn view_content<'a>(app: &'a App, kind: &str) -> Element<'a, Message> {
     }
 }
 
-/// 占位视图：视图图标 + 名称 + 未实现说明。
+/// 占位视图：大图标 + 名称 + 未实现说明（PanelPlaceholder 同款形态）。
 fn placeholder_view(kind: &str) -> Element<'static, Message> {
-    controls::empty_state(
+    controls::view_placeholder(
         view_icon(kind),
         view_label(kind).to_string(),
         "该视图尚未实现".to_string(),
-        None,
     )
 }
 
@@ -841,33 +1216,71 @@ pub fn detached_view<'a>(
     let cursor = app.cursor_for(window);
 
     let mut tab_row = row![].spacing(2).height(Length::Fill);
-    for t in &w.tabs {
+    // 拖拽插入条：命中本撕裂窗标签条时在插入位渲染 2px 强调竖条（与主窗面板一致）
+    let insert_at = app.drag.as_ref().and_then(|d| {
+        let hover = app.drag_hover.as_ref()?;
+        (hover.zone.detached_id.as_deref() == Some(model_id) && hover.kind == DropZone::Tab)
+            .then(|| tab_index_at(&hover.zone, d.current.x, 0.0))
+    });
+    for (i, t) in w.tabs.iter().enumerate() {
+        if insert_at == Some(i) {
+            tab_row = tab_row.push(insertion_marker());
+        }
         let active = w.active_tab_id.as_deref() == Some(t.id.as_str());
+        let label = tab_label(app, &t.view);
+        let has_file = t.view == "note" && app.ui.last_note_file.is_some();
+        let text_color = if active { pal::TEXT_PRIMARY } else { pal::TEXT_SECONDARY };
         let mut label_row = row![].spacing(4);
+        label_row = label_row.push(icon(view_icon(&t.view), 13.0, text_color));
         label_row = label_row.push(
-            text(view_label(&t.view).to_string())
+            text(ellipsize(&label, UiMetrics::TAB_TEXT_MAX_W, 12.0))
                 .size(pal::FS_CAPTION)
-                .color(if active { pal::TEXT_PRIMARY } else { pal::TEXT_SECONDARY }),
+                .color(text_color),
         );
         if t.locked {
-            label_row = label_row.push(icon("lock", 9.0, pal::TEXT_MUTED));
+            label_row = label_row.push(icon("lock", 9.0, text_color));
         }
+        if has_file && !t.locked {
+            label_row = label_row.push(
+                button(icon("x", 11.0, pal::TEXT_MUTED))
+                    .padding(2.0)
+                    .style(|_t, status| button::Style {
+                        background: None,
+                        text_color: if matches!(status, button::Status::Hovered | button::Status::Pressed) {
+                            pal::TEXT_MUTED.scale_alpha(0.7)
+                        } else {
+                            pal::TEXT_MUTED
+                        },
+                        border: border::rounded(pal::RADIUS_XS),
+                        ..Default::default()
+                    })
+                    .on_press(Message::DetachedTabFileClose),
+            );
+        }
+        let top_radius = iced::border::Radius {
+            top_left: pal::RADIUS_SM,
+            top_right: pal::RADIUS_SM,
+            bottom_right: 0.0,
+            bottom_left: 0.0,
+        };
         let content = container(label_row)
-            .width(Length::Fixed(UiMetrics::TAB_W))
             .height(Length::Fill)
             .padding(Padding::ZERO.horizontal(8.0))
             .align_y(Vertical::Center);
-        tab_row = tab_row.push(
+        tab_row = tab_row.push(controls::PressReporter::new(
             mouse_area(
                 button(container(column![
                     content,
-                    container(space()).height(Length::Fixed(2.0)).style(move |_t| Style {
-                        background: if active { Some(pal::ACCENT.into()) } else { None },
-                        ..Style::default()
-                    }),
+                    container(space())
+                        .width(Length::Fill)
+                        .height(Length::Fixed(2.0))
+                        .style(move |_t| Style {
+                            background: if active { Some(pal::ACCENT.into()) } else { None },
+                            ..Style::default()
+                        }),
                 ])
                 .height(Length::Fill))
-                .width(Length::Fixed(UiMetrics::TAB_W))
+                .padding(0.0)
                 .height(Length::Fixed(UiMetrics::TAB_BAR_H))
                 .style(move |_t, status| button::Style {
                     background: if active {
@@ -877,26 +1290,42 @@ pub fn detached_view<'a>(
                     } else {
                         None
                     },
+                    border: iced::border::Border { color: iced::Color::TRANSPARENT, width: 0.0, radius: top_radius },
                     ..Default::default()
                 })
                 .on_press_maybe(
                     (!active).then(|| Message::DetachedTab(w.id.clone(), t.id.clone())),
                 ),
             )
-            .on_right_press(ctx_popup(window, cursor, PopupState::DetachedTabContext { window_id: w.id.clone(), tab_id: t.id.clone(), })),
-        );
+            .on_right_press(ctx_popup(window, cursor, PopupState::DetachedTabContext { window_id: w.id.clone(), tab_id: t.id.clone(), }))
+            .into(),
+            Message::DetachedTabPress {
+                window_id: w.id.clone(),
+                tab_id: t.id.clone(),
+            },
+        ));
+    }
+    if insert_at == Some(w.tabs.len()) {
+        tab_row = tab_row.push(insertion_marker());
     }
 
     let mut right = row![].spacing(4).padding(Padding::ZERO.right(6.0));
     right = right.push(
-        button(icon("menu", 13.0, pal::TEXT_MUTED))
-            .padding(Padding::ZERO.horizontal(6.0).vertical(4.0))
-            .style(|_t, status| button::Style {
-                background: matches!(status, button::Status::Hovered | button::Status::Pressed)
-                    .then_some(pal::HOVER.into()),
-                ..Default::default()
-            })
-            .on_press(btn_popup(window, cursor, PopupState::DetachedPanelMenu { window_id: w.id.clone() })),
+        mouse_area(
+            button(icon("menu", 13.0, pal::TEXT_MUTED))
+                .padding(Padding::ZERO.horizontal(6.0).vertical(2.0))
+                .style(|_t, status| button::Style {
+                    background: None,
+                    text_color: if matches!(status, button::Status::Hovered | button::Status::Pressed) {
+                        pal::TEXT_MUTED.scale_alpha(0.7)
+                    } else {
+                        pal::TEXT_MUTED
+                    },
+                    border: border::rounded(pal::RADIUS_XS),
+                    ..Default::default()
+                }),
+        )
+        .on_press(btn_popup(window, cursor, PopupState::DetachedPanelMenu { window_id: w.id.clone() })),
     );
 
     let header = stack![
@@ -963,34 +1392,31 @@ pub fn detached_view<'a>(
         .as_deref()
         .and_then(|tid| w.tabs.iter().find(|t| t.id == tid))
         .map(|t| view_content(app, &t.view))
-        .unwrap_or_else(|| placeholder_panel("空面板"));
+        .unwrap_or_else(|| space().width(Length::Fill).height(Length::Fill).into());
 
-    let hovered = app.drag_hover.as_ref().is_some_and(|h| {
-        app.drag.is_some() && h.zone.detached_id.as_deref() == Some(model_id)
+    // 拖拽 drop 指示（撕裂窗口 = 整体加标签：中部填充 + 外框）
+    let drop = app.drag.as_ref().and_then(|_| {
+        app.drag_hover
+            .as_ref()
+            .filter(|h| h.zone.detached_id.as_deref() == Some(model_id))
+            .map(|h| h.kind)
     });
     let base = column![titlebar, header, container(content).width(Length::Fill).height(Length::Fill)]
         .width(Length::Fill)
         .height(Length::Fill);
-    let element: Element<'a, Message> = container(base)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .style(move |_t| {
-            if hovered {
-                Style {
-                    border: border::rounded(0.0).color(pal::ACCENT).width(2.0),
-                    ..Style::default()
-                }
-            } else {
-                Style::default()
-            }
-        })
-        .into();
+    let element: Element<'a, Message> = match drop {
+        Some(kind) => stack![base, drop_indicator(kind)]
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into(),
+        None => base.into(),
+    };
     with_overlays(app, window, element)
 }
 
 // ===== files 视图 =====
 
-/// 一条侧栏可见行。
+/// 一条侧栏可见行（`guides` = 该行要画的展开指示线 x 坐标）。
 struct TreeRow {
     rel: String,
     name: String,
@@ -998,21 +1424,19 @@ struct TreeRow {
     is_dir: bool,
     expanded: bool,
     active: bool,
+    guides: Vec<f32>,
 }
 
 fn files_view(app: &App) -> Element<'_, Message> {
-    if app.vault_root.is_none() {
-        return controls::empty_state(
-            "folder-open",
-            "还没有仓库",
-            "打开一个文件夹作为仓库。",
-            Some(("打开文件夹".into(), Message::PickVault)),
-        );
-    }
     let window = app.main_id.unwrap_or(iced::window::Id::unique());
     let cursor = app.cursor_for(window);
 
-    // 工具条
+    // 工具条（未开仓库也渲染：空态文案指向工具条的打开按钮）
+    let (expand_icon, expand_label) = if app.expand_all {
+        ("chevrons-down-up", "收起全部文件夹")
+    } else {
+        ("chevrons-up-down", "展开全部文件夹")
+    };
     let toolbar = container(
         row![
             controls::icon_button("folder-open", 15.0, controls::ICON_MD, Variant::Ghost,
@@ -1022,8 +1446,8 @@ fn files_view(app: &App) -> Element<'_, Message> {
             controls::icon_button("arrow-up-down", 14.0, controls::ICON_MD, Variant::Ghost,
                 Some(btn_popup(window, cursor, PopupState::SortMenu)), Some((window, "排序方式".into()))),
             space().width(Length::Fill),
-            controls::icon_button("chevrons-up-down", 14.0, controls::ICON_MD, Variant::Ghost,
-                Some(Message::NotImplemented("展开全部文件夹")), Some((window, "展开全部文件夹".into()))),
+            controls::icon_button(expand_icon, 14.0, controls::ICON_MD, Variant::Ghost,
+                Some(Message::ExpandAllToggle), Some((window, expand_label.into()))),
         ]
         .spacing(2),
     )
@@ -1034,11 +1458,35 @@ fn files_view(app: &App) -> Element<'_, Message> {
         ..Style::default()
     });
 
+    if app.vault_root.is_none() {
+        return column![
+            toolbar,
+            controls::h_divider_subtle(),
+            controls::empty_state(
+                "folder-open",
+                "还没有仓库",
+                "打开一个文件夹作为仓库（可用工具条的打开按钮，或此处）。",
+                Some(("打开文件夹".into(), Message::PickVault)),
+            ),
+        ]
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into();
+    }
+
     // 树体（根空白右键 = 根目录新建菜单）
     let expanded: HashSet<&str> =
         app.ui.file_explorer_expanded.iter().map(|s| s.as_str()).collect();
     let mut tree_col = column![].padding(Padding::ZERO.top(6.0).bottom(12.0));
     tree_col = tree_col.push(vault_row(app, window, cursor, &expanded));
+    // 重名自动加序号的提醒条（3s 自动消失）
+    if let Some((notice, _)) = &app.rename_notice {
+        tree_col = tree_col.push(
+            container(text(notice.clone()).size(pal::FS_CAPTION).color(pal::WARNING))
+                .width(Length::Fill)
+                .padding(Padding::ZERO.horizontal(12.0).vertical(4.0)),
+        );
+    }
     // 新建草稿输入行：dir = "" 时落在仓库行之后，否则落在对应目录行之后
     let draft_dir = match &app.rename {
         Some(rs) => match &rs.target {
@@ -1048,7 +1496,7 @@ fn files_view(app: &App) -> Element<'_, Message> {
         None => None,
     };
     if draft_dir.as_deref() == Some("") {
-        tree_col = tree_col.push(draft_input_row(app, 0));
+        tree_col = tree_col.push(draft_input_row(app, 1));
     }
     if expanded.contains("") {
         for r in tree_rows(app, &expanded) {
@@ -1065,20 +1513,24 @@ fn files_view(app: &App) -> Element<'_, Message> {
     }
 
     let tree: Element<'static, Message> = mouse_area(
-        scrollable(container(tree_col).width(Length::Fill))
-            .width(Length::Fill)
-            .height(Length::Fill),
+        scrollable(
+            container(tree_col)
+                .width(Length::Fill)
+                .padding(Padding::ZERO.horizontal(4.0)),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill),
     )
     .on_right_press(ctx_popup(window, cursor, PopupState::FileMenu { rel: String::new(), is_dir: true, is_root: true }))
     .into();
 
-    column![toolbar, hline(), tree]
+    column![toolbar, controls::h_divider_subtle(), tree]
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
 }
 
-/// 仓库顶行（激活行金色淡底；右键 = 仓库行菜单）。
+/// 仓库顶行（激活行金色淡底 + 悬停显示完整路径；右键 = 仓库行菜单）。
 fn vault_row(
     app: &App,
     window: iced::window::Id,
@@ -1097,11 +1549,22 @@ fn vault_row(
             14.0,
             pal::TEXT_MUTED,
         ),
-        icon("hard-drive", 14.0, pal::ACCENT),
+        // 协作入口角标：cloud 主体 + 右下 plus 小标（悬停提示由仓库行整行承担）
+        stack![
+            icon("cloud", 14.0, pal::ACCENT),
+            container(icon("plus", 8.0, pal::TEXT_MUTED))
+                .width(Length::Fixed(14.0))
+                .height(Length::Fixed(14.0))
+                .align_x(Horizontal::Right)
+                .align_y(Vertical::Bottom)
+                .padding(Padding::ZERO.left(6.0).top(6.0)),
+        ]
+        .width(Length::Fixed(14.0))
+        .height(Length::Fixed(14.0)),
         text(name)
             .size(pal::FS_CAPTION)
             .color(pal::TEXT_PRIMARY)
-            .font(crate::ui::semibold()),
+            .font(iced::Font { weight: iced::font::Weight::Medium, ..iced::Font::default() }),
     ]
     .spacing(8)
     .padding(Padding::ZERO.horizontal(8.0).vertical(4.0))
@@ -1113,11 +1576,11 @@ fn vault_row(
         .align_y(Vertical::Center)
         .style(|_t| Style {
             background: Some(pal::ACCENT.scale_alpha(0.2).into()),
-            border: border::rounded(pal::RADIUS_XS),
+            border: border::rounded(pal::RADIUS_SM),
             ..Style::default()
         });
 
-    mouse_area(
+    let row_elem = mouse_area(
         button(content)
             .width(Length::Fill)
             .style(|_t, status| button::Style {
@@ -1126,12 +1589,27 @@ fn vault_row(
                 ..Default::default()
             })
             .on_press(Message::ToggleDir(String::new())),
-    )
-    .on_right_press(ctx_popup(window, cursor, PopupState::FileMenu { rel: String::new(), is_dir: true, is_root: false }))
-    .into()
+    );
+    // 悬停提示完整路径（打开仓库才有意义）
+    let row_elem = match app.vault_root.as_ref() {
+        Some(root) => {
+            let path = root.display().to_string();
+            row_elem
+                .on_enter(Message::Ui(crate::ui::UiMsg::HoverTip {
+                    window,
+                    label: path.clone(),
+                    box_px: 32.0,
+                }))
+                .on_exit(Message::Ui(crate::ui::UiMsg::HoverTipEnd { window, label: path }))
+        }
+        None => row_elem,
+    };
+    row_elem
+        .on_right_press(ctx_popup(window, cursor, PopupState::FileMenu { rel: String::new(), is_dir: true, is_root: false }))
+        .into()
 }
 
-/// 目录/文件行（行高 32、缩进 12+16×depth；激活文件 = 金淡底 + 左侧 2px 金轨）。
+/// 目录/文件行（行高 32、缩进 12+16×depth、展开指示线；激活文件 = 金淡底 + 左缘 2px 金轨）。
 fn tree_row_element(
     r: &TreeRow,
     window: iced::window::Id,
@@ -1160,9 +1638,6 @@ fn tree_row_element(
             14.0,
             pal::TEXT_MUTED,
         ));
-    } else {
-        // 文件行让出 chevron 槽位，保持与目录行文字对齐
-        content = content.push(space().width(Length::Fixed(14.0)));
     }
     content = content.push(icon(icon_name, 14.0, icon_color));
     content = content.push(text(r.name.clone()).size(pal::FS_CAPTION).color(name_color));
@@ -1178,26 +1653,26 @@ fn tree_row_element(
 
     let bg = if r.active { pal::ACCENT_SOFT } else { iced::Color::TRANSPARENT };
     let active = r.active;
-    let line = container(space())
-        .width(Length::Fixed(2.0))
+    // 行体：底色 + 圆角
+    let row_body = container(content)
+        .width(Length::Fill)
         .height(Length::Fill)
-        .style(move |_t| Style {
-            background: active.then_some(pal::ACCENT.into()),
+        .padding(Padding::ZERO.left(indent).top(4.0).bottom(4.0).right(8.0))
+        .align_y(Vertical::Center)
+        .style(move |_t: &iced::Theme| Style {
+            background: Some(bg.into()),
+            border: border::rounded(pal::RADIUS_SM),
             ..Style::default()
         });
-    let body = stack![
-        container(content)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .padding(Padding::ZERO.left(indent + 4.0).top(4.0).bottom(4.0).right(8.0))
-            .align_y(Vertical::Center)
-            .style(move |_t| Style {
-                background: Some(bg.into()),
-                border: border::rounded(pal::RADIUS_XS),
-                ..Style::default()
-            }),
-        line,
-    ];
+    // 叠层（自下而上）：行体 → 金轨（激活行左缘 2px 内嵌）→ 展开指示线（1px muted 60%）
+    let mut layers = stack![row_body];
+    if active {
+        layers = layers.push(inset_line(2.0, 0.0, pal::ACCENT));
+    }
+    for x in &r.guides {
+        layers = layers.push(inset_line(1.0, *x, pal::TEXT_MUTED.scale_alpha(0.6)));
+    }
+    let body = layers.width(Length::Fill).height(Length::Fill);
 
     let msg = if r.is_dir {
         Message::ToggleDir(r.rel.clone())
@@ -1220,7 +1695,24 @@ fn tree_row_element(
             })
             .on_press(msg),
     )
-    .on_right_press(Message::PopupOpen(window, PopupOpen { point: cursor, flip_y: None, state }))
+    .on_right_press(Message::PopupOpen(window, PopupOpen { point: cursor, flip_y: None, state, min_width: 0.0 }))
+    .into()
+}
+
+/// 行内叠加竖线（宽 `w` px、左偏移 `x`；行体之上的叠层画法）。
+fn inset_line(w: f32, x: f32, color: iced::Color) -> Element<'static, Message> {
+    container(
+        container(space())
+            .width(Length::Fixed(w))
+            .height(Length::Fill)
+            .style(move |_t| Style {
+                background: Some(color.into()),
+                ..Style::default()
+            }),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .padding(Padding::ZERO.left(x))
     .into()
 }
 
@@ -1246,11 +1738,12 @@ fn draft_input_row(app: &App, depth: usize) -> Element<'static, Message> {
             160.0,
             Message::LayoutRenameInput,
             Message::LayoutRenameCommit,
+            Message::RenamePressInside,
         ),
     )
     .width(Length::Fill)
     .height(Length::Fixed(32.0))
-    .padding(Padding::ZERO.left(12.0 + depth as f32 * 16.0 + 22.0).right(8.0))
+    .padding(Padding::ZERO.left(12.0 + depth as f32 * 16.0).right(8.0))
     .align_y(Vertical::Center)
     .into()
 }
@@ -1258,13 +1751,11 @@ fn draft_input_row(app: &App, depth: usize) -> Element<'static, Message> {
 /// 就地重命名的输入行（渲染在对应行位置）。
 fn file_inline_input(app: &App, r: &TreeRow) -> Option<Element<'static, Message>> {
     let indent = 12.0 + r.depth as f32 * 16.0;
-    let (value, placeholder) = match &app.rename {
-        Some(rs) => match &rs.target {
-            RenameTarget::File(f) if *f == r.rel => (rs.value.clone(), ""),
-            RenameTarget::Folder(d) if *d == r.rel => (rs.value.clone(), ""),
-            _ => return None,
-        },
-        None => return None,
+    let rs = app.rename.as_ref()?;
+    let (value, placeholder) = match &rs.target {
+        RenameTarget::File(f) if *f == r.rel => (rs.value.clone(), ""),
+        RenameTarget::Folder(d) if *d == r.rel => (rs.value.clone(), ""),
+        _ => return None,
     };
     Some(
         container(
@@ -1274,11 +1765,12 @@ fn file_inline_input(app: &App, r: &TreeRow) -> Option<Element<'static, Message>
                 160.0,
                 Message::LayoutRenameInput,
                 Message::LayoutRenameCommit,
+                Message::RenamePressInside,
             ),
         )
         .width(Length::Fill)
         .height(Length::Fixed(32.0))
-        .padding(Padding::ZERO.left(indent + 22.0).right(8.0))
+        .padding(Padding::ZERO.left(indent).right(8.0))
         .align_y(Vertical::Center)
         .into(),
     )
@@ -1299,18 +1791,30 @@ fn file_icon(name: &str) -> &'static str {
     }
 }
 
-/// 扩展名标签（ATLX / CANVAS / MD / ATB / 大写扩展名）。
+/// 扩展名标签（ATLX / CANVAS / MD / ATB / 大写扩展名；前导点文件 = 空串不显示）。
 fn ext_label(name: &str) -> String {
-    match name.rsplit('.').next() {
-        Some(ext) if !ext.is_empty() && ext != name => ext.to_uppercase(),
+    match name.rfind('.') {
+        Some(i) if i > 0 => name[i + 1..].to_uppercase(),
         _ => String::new(),
     }
 }
 
-/// 由子项缓存 + 展开集摊平侧栏行（目录在前、忽略大小写按名升序）。
+/// 由子项缓存 + 展开集摊平侧栏行（目录在前、忽略大小写按名升序；根子项 depth 从 1 起，
+/// 指示线 x 与行缩进由此推导）。
 fn tree_rows(app: &App, expanded: &HashSet<&str>) -> Vec<TreeRow> {
     let mut rows = Vec::new();
-    push_children(app, &mut rows, "", 0, expanded);
+    push_children(app, &mut rows, "", 1, expanded);
+    // 展开指示线：仓库层（x=15）覆盖全部行；目录层 = 祖先目录展开时画在其子树各行
+    for row in &mut rows {
+        let mut guides = vec![15.0];
+        for k in 1..row.depth {
+            let ancestor = row.rel.split('/').take(k).collect::<Vec<_>>().join("/");
+            if expanded.contains(ancestor.as_str()) {
+                guides.push(19.0 + k as f32 * 16.0);
+            }
+        }
+        row.guides = guides;
+    }
     rows
 }
 
@@ -1335,7 +1839,7 @@ fn push_children(
         let is_expanded = expanded.contains(rel.as_str());
         let name = rel.rsplit('/').next().unwrap_or(&rel).to_string();
         let active = !is_dir && app.ui.last_note_file.as_deref() == Some(rel.as_str());
-        rows.push(TreeRow { name, depth, is_dir, expanded: is_expanded, rel: rel.clone(), active });
+        rows.push(TreeRow { name, depth, is_dir, expanded: is_expanded, rel: rel.clone(), active, guides: Vec::new() });
         if is_dir && is_expanded {
             push_children(app, rows, &rel, depth + 1, expanded);
         }
@@ -1347,11 +1851,10 @@ fn push_children(
 /// note 视图：工具条（模式分段 + ···菜单）+ 对应档位的内容面。
 fn note_view(app: &App) -> Element<'_, Message> {
     if app.ui.last_note_file.is_none() {
-        return controls::empty_state(
+        return controls::view_placeholder(
             "file-text",
-            "笔记",
-            "在左侧文件面板选择文件打开。",
-            None,
+            "打开笔记",
+            "在文件面板或搜索面板单击一个 .md 笔记开始编辑。",
         );
     }
     let window = app.main_id.unwrap_or(iced::window::Id::unique());
@@ -1359,9 +1862,9 @@ fn note_view(app: &App) -> Element<'_, Message> {
 
     let mode_control = container(
         row![
-            mode_button("只读", NoteMode::Read, app.note_mode),
-            mode_button("预览编辑", NoteMode::Edit, app.note_mode),
-            mode_button("源码", NoteMode::Source, app.note_mode),
+            mode_button(window, "eye", "只读", "只读：仅查看，双击正文进入编辑", NoteMode::Read, app.note_mode),
+            mode_button(window, "pencil", "预览编辑", "预览编辑：正文可直接修改", NoteMode::Edit, app.note_mode),
+            mode_button(window, "code", "源码", "源码：直接编辑 Markdown 源文", NoteMode::Source, app.note_mode),
         ]
         .spacing(2),
     )
@@ -1372,15 +1875,24 @@ fn note_view(app: &App) -> Element<'_, Message> {
         ..Style::default()
     });
 
+    // ··· 打开态着色（弹层开着 = 强调色）+ subtle 悬停（仅文字提亮）
+    let menu_open = app
+        .popup
+        .as_ref()
+        .is_some_and(|(_, open)| matches!(open.state, PopupState::NoteMenu));
     let toolbar = container(
         row![
             space().width(Length::Fill),
             mode_control,
-            button(icon("ellipsis", 15.0, pal::TEXT_MUTED))
+            button(icon("ellipsis", 15.0, if menu_open { pal::ACCENT } else { pal::TEXT_MUTED }))
                 .padding(Padding::ZERO.horizontal(4.0).vertical(4.0))
                 .style(|_t, status| button::Style {
-                    background: matches!(status, button::Status::Hovered | button::Status::Pressed)
-                        .then_some(pal::HOVER.into()),
+                    background: None,
+                    text_color: if matches!(status, button::Status::Hovered | button::Status::Pressed) {
+                        pal::TEXT_PRIMARY
+                    } else {
+                        pal::TEXT_SECONDARY
+                    },
                     ..Default::default()
                 })
                 .on_press(btn_popup(window, cursor, PopupState::NoteMenu)),
@@ -1388,7 +1900,7 @@ fn note_view(app: &App) -> Element<'_, Message> {
         .spacing(8),
     )
     .width(Length::Fill)
-    .padding(Padding::ZERO.horizontal(12.0).vertical(4.0))
+    .padding(Padding::ZERO.horizontal(12.0).vertical(6.0))
     .style(|_t| Style {
         background: Some(pal::BG_SECONDARY.into()),
         ..Style::default()
@@ -1406,27 +1918,57 @@ fn note_view(app: &App) -> Element<'_, Message> {
         NoteMode::Edit => edit_view(app),
     };
 
-    column![toolbar, hline(), container(content).width(Length::Fill).height(Length::Fill)]
+    column![toolbar, controls::h_divider_subtle(), container(content).width(Length::Fill).height(Length::Fill)]
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
 }
 
-/// 模式分段按钮：当前档 = 强调淡底 + 强调字，其余档次级字色。
-fn mode_button(label: &str, mode: NoteMode, current: NoteMode) -> Element<'static, Message> {
+/// 模式分段按钮（Button sm 档：高 24 / px-8 / 11px / medium；激活 = 强调淡底，悬停文字提亮）。
+fn mode_button(
+    window: iced::window::Id,
+    icon_name: &'static str,
+    label: &str,
+    hint: &str,
+    mode: NoteMode,
+    current: NoteMode,
+) -> Element<'static, Message> {
     let active = mode == current;
-    button(
-        text(label.to_string())
-            .size(pal::FS_CAPTION)
-            .color(if active { pal::ACCENT } else { pal::TEXT_SECONDARY }),
+    let btn = button(
+        container(
+            row![
+                icon(icon_name, 12.0, if active { pal::ACCENT } else { pal::TEXT_SECONDARY }),
+                text(label.to_string())
+                    .size(pal::FS_MICRO)
+                    .font(iced::Font { weight: iced::font::Weight::Medium, ..iced::Font::default() })
+                    .color(if active { pal::ACCENT } else { pal::TEXT_SECONDARY }),
+            ]
+            .spacing(4),
+        )
+        .height(Length::Fill)
+        .align_y(Vertical::Center),
     )
-    .padding(Padding::ZERO.horizontal(10.0).vertical(3.0))
-    .style(move |_t, _status| button::Style {
+    .padding(Padding::ZERO.horizontal(8.0))
+    .height(Length::Fixed(24.0))
+    .style(move |_t, status| button::Style {
         background: active.then_some(pal::ACCENT_SOFT.into()),
+        text_color: if matches!(status, button::Status::Hovered | button::Status::Pressed) && !active {
+            pal::TEXT_PRIMARY
+        } else {
+            pal::TEXT_SECONDARY
+        },
+        border: border::rounded(pal::RADIUS_SM),
         ..Default::default()
     })
-    .on_press(Message::NoteMode(mode))
-    .into()
+    .on_press(Message::NoteMode(mode));
+    iced::widget::mouse_area(btn)
+        .on_enter(Message::Ui(crate::ui::UiMsg::HoverTip {
+            window,
+            label: hint.to_string(),
+            box_px: 24.0,
+        }))
+        .on_exit(Message::Ui(crate::ui::UiMsg::HoverTipEnd { window, label: hint.to_string() }))
+        .into()
 }
 
 /// 预览编辑档：块行与空行行交给编辑面容器统一排布与承接鼠标；非活动块由只读块
@@ -1617,7 +2159,8 @@ fn settings_item(item: &SettingsItem, active_tab: &str) -> Element<'static, Mess
             icon(item.icon, 14.0, if active { pal::ACCENT } else { pal::TEXT_SECONDARY }),
             text(item.label)
                 .size(pal::FS_CAPTION)
-                .color(if active { pal::ACCENT } else { pal::TEXT_SECONDARY }),
+                .color(if active { pal::ACCENT } else { pal::TEXT_SECONDARY })
+                .font(iced::Font { weight: iced::font::Weight::Medium, ..iced::Font::default() }),
         ]
         .spacing(8),
     )
@@ -1639,76 +2182,132 @@ fn settings_item(item: &SettingsItem, active_tab: &str) -> Element<'static, Mess
     .into()
 }
 
-/// 设置整页：左栏分组导航（应用级 / 仓库级 / 关于）+ 右侧分组内容占位。
+/// 设置整页：左栏分组导航（应用级 / 仓库级 / 关于，可折叠）+ 右侧分组内容占位。
 fn settings_view(app: &App) -> Element<'static, Message> {
+    let collapsed = app.settings_collapsed;
+    // 左栏宽度 = 内容区 20%，钳制 180–280；折叠态固定 44
+    let nav_w = if collapsed {
+        44.0
+    } else {
+        (app.main_size.width * 0.2).clamp(180.0, 280.0)
+    };
     let active = app.settings_tab.as_str();
-    let mut nav = column![].spacing(2);
-    nav = nav.push(group_head("应用级", "全局共享", false));
-    for item in APP_SETTINGS {
-        nav = nav.push(settings_item(item, active));
-    }
+    let mut nav = column![].spacing(4);
+    nav = push_group(nav, "应用级", "全局共享", false, APP_SETTINGS, active);
     if app.vault_root.is_some() {
+        nav = nav.push(container(controls::h_divider_subtle()).padding(Padding::ZERO.top(8.0).bottom(12.0)));
         let vault_name = app
             .vault_root
             .as_ref()
             .map(|r| atelyx_core::vault::vault_display_name(r))
             .unwrap_or_default();
-        nav = nav.push(
-            container(controls::h_divider()).padding(Padding::ZERO.top(6.0).bottom(6.0)),
-        );
-        nav = nav.push(group_head("仓库级", &vault_name, true));
-        for item in REPO_SETTINGS {
-            nav = nav.push(settings_item(item, active));
-        }
+        nav = push_group(nav, "仓库级", &vault_name, true, REPO_SETTINGS, active);
     }
-    nav = nav.push(container(controls::h_divider()).padding(Padding::ZERO.top(6.0).bottom(6.0)));
-    nav = nav.push(settings_item(
-        &SettingsItem { id: "about", label: "关于", icon: "info" },
-        active,
-    ));
 
-    let aside = container(
-        column![
-            row![
-                text("设置").size(pal::FS_BODY).color(pal::TEXT_PRIMARY).font(crate::ui::semibold()),
-                space().width(Length::Fill),
-                button(icon("x", 14.0, pal::TEXT_SECONDARY))
-                    .padding(4.0)
-                    .style(|_t, status| button::Style {
-                        background: matches!(status, button::Status::Hovered | button::Status::Pressed)
-                            .then_some(pal::HOVER.into()),
-                        ..Default::default()
-                    })
-                    .on_press(Message::SettingsToggle),
-            ]
-            .padding(Padding::ZERO.horizontal(12.0).vertical(12.0)),
-            scrollable(nav).width(Length::Fill).height(Length::Fill),
-        ]
+    let header: Element<'static, Message> = if collapsed {
+        container(
+            button(icon("arrow-left", 15.0, pal::TEXT_SECONDARY))
+                .padding(6.0)
+                .style(|_t, status| button::Style {
+                    background: matches!(status, button::Status::Hovered | button::Status::Pressed)
+                        .then_some(pal::HOVER.into()),
+                    border: border::rounded(pal::RADIUS_SM),
+                    ..Default::default()
+                })
+                .on_press(Message::SettingsToggle),
+        )
         .width(Length::Fill)
-        .height(Length::Fill),
+        .center_x(Length::Fill)
+        .padding(Padding::ZERO.vertical(12.0))
+        .into()
+    } else {
+        row![
+            text("设置").size(pal::FS_BODY).color(pal::TEXT_PRIMARY).font(crate::ui::semibold()),
+            space().width(Length::Fill),
+            button(icon("x", 14.0, pal::TEXT_SECONDARY))
+                .padding(4.0)
+                .style(|_t, status| button::Style {
+                    background: matches!(status, button::Status::Hovered | button::Status::Pressed)
+                        .then_some(pal::HOVER.into()),
+                    ..Default::default()
+                })
+                .on_press(Message::SettingsToggle),
+        ]
+        .spacing(8)
+        .padding(Padding::ZERO.horizontal(12.0).vertical(12.0))
+        .into()
+    };
+
+    // 左栏：标题行 + 滚动导航 + 底部「关于」（不随分组滚走）+ 折叠钮
+    let mut aside_col = column![header];
+    if !collapsed {
+        aside_col = aside_col.push(scrollable(container(nav).padding(8.0)).width(Length::Fill).height(Length::Fill));
+        aside_col = aside_col.push(controls::h_divider_subtle());
+        aside_col = aside_col.push(
+            container(settings_item(&SettingsItem { id: "about", label: "关于", icon: "info" }, active))
+                .width(Length::Fill)
+                .padding(Padding::ZERO.horizontal(8.0).top(8.0)),
+        );
+    }
+    let collapse_label: Element<'static, Message> = if collapsed {
+        space().width(Length::Fixed(0.0)).into()
+    } else {
+        text("折叠".to_string()).size(pal::FS_CAPTION).color(pal::TEXT_SECONDARY).into()
+    };
+    let collapse_btn = button(
+        row![
+            icon(if collapsed { "chevron-right" } else { "chevron-left" }, 14.0, pal::TEXT_SECONDARY),
+            collapse_label,
+        ]
+        .spacing(4),
     )
-    .width(Length::Fixed(220.0))
-    .height(Length::Fill)
-    .style(|_t| Style {
-        background: Some(pal::BG_PRIMARY.into()),
+    .padding(Padding::ZERO.horizontal(8.0).vertical(6.0))
+    .style(|_t, status| button::Style {
+        background: matches!(status, button::Status::Hovered | button::Status::Pressed)
+            .then_some(pal::HOVER.into()),
+        border: border::rounded(pal::RADIUS_SM),
+        ..Default::default()
+    })
+    .on_press(Message::SettingsNavCollapse);
+    aside_col = aside_col.push(container(collapse_btn).padding(8.0).width(Length::Fill));
+
+    let aside = container(aside_col.width(Length::Fill).height(Length::Fill))
+        .width(Length::Fixed(nav_w))
+        .height(Length::Fill)
+        .style(|_t| Style {
+            background: Some(pal::BG_PRIMARY.into()),
+            ..Style::default()
+        });
+
+    // 页头：标题 + 作用域徽标 + 描述（含仓库名）
+    let (title, scope_vault, desc) = tab_meta(active, app);
+    let scope_pill = container(
+        text(if scope_vault { "仓库级" } else { "应用级" }.to_string()).size(pal::FS_MICRO),
+    )
+    .padding(Padding::ZERO.horizontal(8.0).vertical(2.0))
+    .style(move |_t| Style {
+        background: Some(if scope_vault { pal::ACCENT_SOFT.into() } else { pal::BG_TERTIARY.into() }),
+        border: border::rounded(999.0),
         ..Style::default()
     });
-
-    let (title, desc) = tab_meta(active);
     let body = column![
         container(
             column![
-                text(title)
-                    .size(pal::FS_H2)
-                    .color(pal::TEXT_PRIMARY)
-                    .font(crate::ui::semibold()),
+                row![
+                    text(title.to_string())
+                        .size(pal::FS_H2)
+                        .color(pal::TEXT_PRIMARY)
+                        .font(crate::ui::semibold()),
+                    space().width(Length::Fill),
+                    scope_pill,
+                ],
                 text(desc).size(pal::FS_CAPTION).color(pal::TEXT_MUTED),
             ]
-            .spacing(4),
+            .spacing(2),
         )
         .width(Length::Fill)
         .padding(Padding::ZERO.horizontal(20.0).vertical(12.0)),
-        hline(),
+        controls::h_divider_subtle(),
         controls::empty_state(
             "settings",
             "无设置项",
@@ -1725,6 +2324,23 @@ fn settings_view(app: &App) -> Element<'static, Message> {
         .into()
 }
 
+/// 一组导航：分组头 + 条目（条目间距 4）。
+fn push_group<'a>(
+    nav: iced::widget::Column<'a, Message>,
+    label: &str,
+    hint: &str,
+    repo_level: bool,
+    items: &'static [SettingsItem],
+    active_tab: &str,
+) -> iced::widget::Column<'a, Message> {
+    let mut col = column![group_head(label, hint, repo_level)].spacing(4);
+    for item in items {
+        col = col.push(settings_item(item, active_tab));
+    }
+    nav.push(col)
+}
+
+/// 分组头：竖条 + 标题 + 右对齐 hint。
 fn group_head(label: &str, hint: &str, repo_level: bool) -> Element<'static, Message> {
     let bar_color = if repo_level { pal::ACCENT } else { pal::BORDER_STRONG };
     let text_color = if repo_level { pal::ACCENT } else { pal::TEXT_MUTED };
@@ -1742,31 +2358,44 @@ fn group_head(label: &str, hint: &str, repo_level: bool) -> Element<'static, Mes
                 .size(pal::FS_MICRO)
                 .color(text_color)
                 .font(crate::ui::semibold()),
-            text(hint.to_string()).size(pal::FS_MICRO).color(pal::TEXT_MUTED).font(mono()),
+            space().width(Length::Fill),
+            text(hint.to_string())
+                .size(pal::FS_MICRO)
+                .color(pal::TEXT_MUTED)
+                .font(mono()),
         ]
-        .spacing(6),
+        .spacing(8)
+        .width(Length::Fill),
     )
-    .padding(Padding::ZERO.left(8.0).top(10.0).bottom(6.0))
+    .padding(Padding::ZERO.horizontal(8.0).bottom(8.0))
     .into()
 }
 
-fn tab_meta(tab: &str) -> (&'static str, &'static str) {
+/// 页面标题 / 作用域 / 描述（仓库级描述含仓库名）。
+fn tab_meta(tab: &str, app: &App) -> (&'static str, bool, String) {
+    let vault_name = app
+        .vault_root
+        .as_ref()
+        .map(|r| atelyx_core::vault::vault_display_name(r))
+        .unwrap_or_default();
+    let app_desc = "全库共享 · 存于本机应用配置，跨仓库生效".to_string();
+    let vault_desc = format!("作用于当前仓库（{vault_name}）· 配置随该仓库走，不随其他仓库生效");
     match tab {
-        "general" => ("通用", "全库共享 · 存于本机应用配置"),
-        "theme" => ("主题", "全库共享 · 存于本机应用配置"),
-        "collab" => ("多人协作", "全库共享 · 存于本机应用配置"),
-        "editorPrefs" => ("编辑器", "全库共享 · 存于本机应用配置"),
-        "shortcuts" => ("快捷键", "全库共享 · 存于本机应用配置"),
-        "plugins" => ("插件", "全库共享 · 存于本机应用配置"),
-        "providers" => ("模型供应商", "作用于当前仓库 · 配置随该仓库走"),
-        "modelServices" => ("模型服务", "作用于当前仓库 · 配置随该仓库走"),
-        "agents" => ("Agent", "作用于当前仓库 · 配置随该仓库走"),
-        "search" => ("联网搜索", "作用于当前仓库 · 配置随该仓库走"),
-        "files" => ("文件与路径", "作用于当前仓库 · 配置随该仓库走"),
-        "workspace" => ("工作区", "作用于当前仓库 · 配置随该仓库走"),
-        "editor" => ("编辑器", "作用于当前仓库 · 配置随该仓库走"),
-        "about" => ("关于", "Logo · 版本 · 检查更新 · 项目主页"),
-        _ => ("设置", ""),
+        "general" => ("通用", false, app_desc),
+        "theme" => ("主题", false, app_desc),
+        "collab" => ("多人协作", false, app_desc),
+        "editorPrefs" => ("编辑器", false, app_desc),
+        "shortcuts" => ("快捷键", false, app_desc),
+        "plugins" => ("插件", false, app_desc),
+        "providers" => ("模型供应商", true, vault_desc),
+        "modelServices" => ("模型服务", true, vault_desc),
+        "agents" => ("Agent", true, vault_desc),
+        "search" => ("联网搜索", true, vault_desc),
+        "files" => ("文件与路径", true, vault_desc),
+        "workspace" => ("工作区", true, vault_desc),
+        "editor" => ("编辑器", true, vault_desc),
+        "about" => ("关于", false, "Logo · 版本 · 检查更新 · 项目主页".to_string()),
+        _ => ("设置", false, String::new()),
     }
 }
 
@@ -1777,6 +2406,7 @@ fn popup_element<'a>(
     app: &'a App,
     state: &PopupState,
     pane: usize,
+    window: iced::window::Id,
 ) -> (Element<'a, Message>, f32) {
     let entries: Vec<(usize, MenuEntry)> = match state {
         PopupState::SceneSelector { confirm } => scene_selector_entries(app, confirm),
@@ -1790,9 +2420,6 @@ fn popup_element<'a>(
                 0usize,
                 MenuEntry::action("重命名", Message::LayoutRenameStart(id.clone())),
             )];
-            // 布局 tab 拖拽排序未复刻前，排序经菜单承担
-            entries.push((0, MenuEntry::action("左移", Message::LayoutShift(id.clone(), true))));
-            entries.push((0, MenuEntry::action("右移", Message::LayoutShift(id.clone(), false))));
             if deletable {
                 entries.push((0, MenuEntry::danger("删除", "trash-2", Message::LayoutDelete(id))));
             }
@@ -1824,7 +2451,7 @@ fn popup_element<'a>(
                 (
                     0,
                     MenuEntry::action(if locked { "解锁" } else { "锁定" },
-                        Message::DetachedTabLock(wid.clone(), String::new())),
+                        Message::DetachedTabLock(wid.clone())),
                 ),
                 (0, MenuEntry::action("拖回主窗", Message::DetachedDockBack(wid))),
             ]
@@ -1847,6 +2474,8 @@ fn popup_element<'a>(
                         danger: false,
                         disabled: locked,
                         on_press: (!locked).then(|| Message::DetachedTabClose(wid.clone(), tid.clone())),
+                        note: None,
+                        hint: locked.then(|| "已锁定，需先解锁".to_string()),
                     },
                 ),
                 (
@@ -1859,7 +2488,7 @@ fn popup_element<'a>(
                     },
                 ),
             ];
-            // 视图清单：当前视图停用；他处占用停用；其余可切换
+            // 视图清单：当前视图停用（角标「当前」）；他处占用停用（角标「已占用」）
             let current_view = app
                 .ui
                 .detached_windows
@@ -1869,9 +2498,10 @@ fn popup_element<'a>(
                 .map(|t| t.view.clone());
             for kind in VIEW_KINDS {
                 let entry = if current_view.as_deref() == Some(*kind) {
-                    MenuEntry::disabled(format!("{}（当前）", view_label(kind)), Some(view_icon(kind)))
+                    MenuEntry::noted(view_label(kind), view_icon(kind), "当前", true, None)
                 } else if view_occupied(app, kind, None) {
-                    MenuEntry::disabled(format!("{}（已占用）", view_label(kind)), Some(view_icon(kind)))
+                    MenuEntry::noted(view_label(kind), view_icon(kind), "已占用", true, None)
+                        .hinted("该视图已在其他位置（全局唯一）")
                 } else {
                     MenuEntry::action_icon(
                         view_label(kind),
@@ -1885,7 +2515,6 @@ fn popup_element<'a>(
                 };
                 entries.push((1, entry));
             }
-            entries.push((1, MenuEntry::Back));
             entries
         }
         PopupState::SortMenu => vec![
@@ -1895,14 +2524,14 @@ fn popup_element<'a>(
             (0, MenuEntry::action("编辑时间 (从旧到新)", Message::NotImplemented("排序"))),
         ],
         PopupState::FileMenu { rel, is_dir, is_root } => {
-            file_menu_entries(rel, *is_dir, *is_root)
+            file_menu_entries(app, rel, *is_dir, *is_root)
         }
         PopupState::NoteMenu => vec![
             (0, MenuEntry::action("添加笔记属性", Message::NotImplemented("笔记属性"))),
             (0, MenuEntry::action("历史记录", Message::NotImplemented("历史记录"))),
         ],
     };
-    crate::ui::menu::pane_view(entries, pane)
+    crate::ui::menu::pane_view(entries, pane, window)
 }
 
 /// 视图 kind 是否已被占用（主树全部标签 + 撕裂窗口全部标签；`except_tab` 排除自身）。
@@ -1948,8 +2577,8 @@ fn scene_selector_entries(app: &App, confirm: &Option<String>) -> Vec<(usize, Me
                 96.0,
                 Message::SceneRenameInput,
                 Message::LayoutRenameCommit,
+                Message::RenamePressInside,
             )
-            .into()
         } else {
             button(
                 row![
@@ -1976,24 +2605,38 @@ fn scene_selector_entries(app: &App, confirm: &Option<String>) -> Vec<(usize, Me
         };
         let mut row = row![name_area].spacing(2);
         if !is_default {
+            // 行尾动作钮：圆角 + 悬停底（显形时机 = 常显）
             row = row.push(
                 button(icon("pencil", 11.0, pal::TEXT_MUTED))
                     .padding(2.0)
-                    .style(|_t, _s| button::Style::default())
+                    .style(|_t, status| button::Style {
+                        background: matches!(status, button::Status::Hovered | button::Status::Pressed)
+                            .then_some(pal::HOVER.into()),
+                        border: border::rounded(pal::RADIUS_XS),
+                        ..Default::default()
+                    })
                     .on_press(Message::SceneRenameStart(id.clone())),
             );
             row = row.push(
                 button(icon("trash-2", 11.0, pal::DANGER))
                     .padding(2.0)
-                    .style(|_t, _s| button::Style::default())
+                    .style(|_t, status| button::Style {
+                        background: matches!(status, button::Status::Hovered | button::Status::Pressed)
+                            .then_some(pal::HOVER.into()),
+                        border: border::rounded(pal::RADIUS_XS),
+                        ..Default::default()
+                    })
                     .on_press(Message::SceneDeleteAsk(id.clone())),
             );
         }
-        root.push((0, MenuEntry::Custom(container(row).width(Length::Fill).into(), 34.0)));
+        root.push((0, MenuEntry::Custom(
+            container(row).padding(Padding::ZERO.horizontal(4.0)).width(Length::Fill).into(),
+            34.0,
+        )));
     }
     root.push((0, MenuEntry::action_icon("新建场景", "plus", Message::SceneNew)));
 
-    // 确认面板
+    // 确认面板：标题 medium，按钮区与文案间距 12
     let confirm_entries: Vec<(usize, MenuEntry<'static>)> = if let Some(id) = confirm {
         let scene = app.ui.scenes.iter().find(|s| s.id == *id);
         let name = scene.map(|s| s.name.clone()).unwrap_or_default();
@@ -2001,7 +2644,8 @@ fn scene_selector_entries(app: &App, confirm: &Option<String>) -> Vec<(usize, Me
         let pane = column![
             text(format!("删除场景「{name}」？"))
                 .size(pal::FS_CAPTION)
-                .color(pal::TEXT_PRIMARY),
+                .color(pal::TEXT_PRIMARY)
+                .font(iced::Font { weight: iced::font::Weight::Medium, ..iced::Font::default() }),
             text(format!("其下 {count} 套布局将一并删除。"))
                 .size(pal::FS_CAPTION)
                 .color(pal::TEXT_MUTED),
@@ -2025,33 +2669,40 @@ fn scene_selector_entries(app: &App, confirm: &Option<String>) -> Vec<(usize, Me
                     .on_press(Message::SceneDelete(id.clone())),
             ]
             .spacing(8)
+            .padding(Padding::ZERO.top(8.0))
             .align_y(Vertical::Center),
         ]
         .spacing(4)
         .padding(12.0)
         .width(Length::Fill);
-        vec![(1, MenuEntry::Custom(pane.into(), 110.0))]
+        vec![(1, MenuEntry::Custom(pane.into(), 114.0))]
     } else {
         Vec::new()
     };
     root.into_iter().chain(confirm_entries).collect()
 }
 
-/// 面板 ≡ 菜单：锁定 / 删除面板（最后一个禁用）/ 分割。
+/// 面板 ≡ 菜单：锁定（整块）/ 删除面板（最后一个禁用）/ 分割；空面板无锁定项。
 fn panel_menu_entries(app: &App, panel_id: &str) -> Vec<(usize, MenuEntry<'static>)> {
-    let active = find_active_tab_in(app, panel_id);
-    let locked = active.as_ref().is_some_and(|(_, locked)| *locked);
+    let has_active = find_active_tab_in(app, panel_id).is_some();
     let main_tree = layout::active_layout(&app.ui).tree;
     let panel_count = count_panels(&main_tree);
+    // 整块锁定基准 = 面板全部标签已锁
+    let locked = has_active
+        && panel_tab_ids_in(&layout::active_layout(&app.ui).tree, panel_id)
+            .iter()
+            .all(|id| {
+                layout::find_tab_in_tree(&main_tree, id).is_some_and(|(_, t)| t.locked)
+            });
     let pid = panel_id.to_string();
     let mut entries = Vec::new();
-    if let Some((tab_id, _)) = &active {
+    if has_active {
         entries.push((
             0,
             MenuEntry::action_icon(
                 if locked { "解锁" } else { "锁定" },
                 if locked { "lock-open" } else { "lock" },
-                Message::PanelTabLock(pid.clone(), tab_id.clone()),
+                Message::PanelTabLock(pid.clone()),
             ),
         ));
     }
@@ -2060,10 +2711,12 @@ fn panel_menu_entries(app: &App, panel_id: &str) -> Vec<(usize, MenuEntry<'stati
             0,
             MenuEntry::Action {
                 label: "删除面板".into(),
-                icon: Some("trash-2"),
+                icon: None,
                 danger: true,
                 disabled: panel_count <= 1,
                 on_press: (panel_count > 1).then(|| Message::PanelClose(pid.clone())),
+                note: None,
+                hint: (panel_count <= 1).then(|| "最后一个面板不可删除".to_string()),
             },
         ));
         entries.push((0, MenuEntry::Divider));
@@ -2071,6 +2724,23 @@ fn panel_menu_entries(app: &App, panel_id: &str) -> Vec<(usize, MenuEntry<'stati
         entries.push((0, MenuEntry::action("上下分割", Message::PanelSplit(pid, "vertical".into()))));
     }
     entries
+}
+
+/// 主树面板的全部标签 id（整块锁定判定用）。
+pub fn panel_tab_ids_in(tree: &LayoutNode, panel_id: &str) -> Vec<String> {
+    match tree {
+        LayoutNode::Panel { id, tabs, .. } if id == panel_id => {
+            tabs.iter().map(|t| t.id.clone()).collect()
+        }
+        LayoutNode::Split { children, .. } => children
+            .iter()
+            .find_map(|c| {
+                let ids = panel_tab_ids_in(c, panel_id);
+                (!ids.is_empty()).then_some(ids)
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
 }
 
 /// 主树活动标签信息（(tab_id, locked)）。
@@ -2118,6 +2788,8 @@ fn tab_context_entries(
                 danger: false,
                 disabled: locked,
                 on_press: (!locked).then(|| Message::PanelTabClose(pid.clone(), tid.clone())),
+                note: None,
+                hint: locked.then(|| "已锁定，需先解锁".to_string()),
             },
         ),
         (
@@ -2132,9 +2804,10 @@ fn tab_context_entries(
     ];
     for kind in VIEW_KINDS {
         let entry = if current_view.as_deref() == Some(*kind) {
-            MenuEntry::disabled(format!("{}（当前）", view_label(kind)), Some(view_icon(kind)))
+            MenuEntry::noted(view_label(kind), view_icon(kind), "当前", true, None)
         } else if view_occupied(app, kind, Some(tab_id)) {
-            MenuEntry::disabled(format!("{}（已占用）", view_label(kind)), Some(view_icon(kind)))
+            MenuEntry::noted(view_label(kind), view_icon(kind), "已占用", true, None)
+                .hinted("该视图已在其他位置（全局唯一）")
         } else {
             MenuEntry::action_icon(
                 view_label(kind),
@@ -2144,7 +2817,6 @@ fn tab_context_entries(
         };
         entries.push((1, entry));
     }
-    entries.push((1, MenuEntry::Back));
     entries
 }
 
@@ -2163,16 +2835,23 @@ fn find_tab_in_active(app: &App, tab_id: &str) -> Option<(String, bool)> {
     walk(&tree, tab_id)
 }
 
-/// 空面板右键的视图选择器：本组激活 / 已占用停用 / 其余添加。
+/// 空面板右键的视图选择器：本组 = 点击激活已有标签（角标「本组」）；已占用停用；其余添加。
 fn view_picker_entries(app: &App, panel_id: &str) -> Vec<(usize, MenuEntry<'static>)> {
     let pid = panel_id.to_string();
     VIEW_KINDS
         .iter()
         .map(|kind| {
-            let entry = if panel_has_view(app, panel_id, kind) {
-                MenuEntry::disabled(format!("{}（本组）", view_label(kind)), Some(view_icon(kind)))
+            let entry = if let Some(tab_id) = panel_tab_with_view(app, panel_id, kind) {
+                MenuEntry::noted(
+                    view_label(kind),
+                    view_icon(kind),
+                    "本组",
+                    false,
+                    Some(Message::PanelTab(pid.clone(), tab_id)),
+                )
             } else if view_occupied(app, kind, None) {
-                MenuEntry::disabled(format!("{}（已占用）", view_label(kind)), Some(view_icon(kind)))
+                MenuEntry::noted(view_label(kind), view_icon(kind), "已占用", true, None)
+                    .hinted("该视图已在其他位置（全局唯一）")
             } else {
                 MenuEntry::action_icon(
                     view_label(kind),
@@ -2185,23 +2864,26 @@ fn view_picker_entries(app: &App, panel_id: &str) -> Vec<(usize, MenuEntry<'stat
         .collect()
 }
 
-fn panel_has_view(app: &App, panel_id: &str, kind: &str) -> bool {
-    fn walk(node: &LayoutNode, panel_id: &str, kind: &str) -> bool {
+/// 面板内持有该视图的标签 id。
+fn panel_tab_with_view(app: &App, panel_id: &str, kind: &str) -> Option<String> {
+    fn walk(node: &LayoutNode, panel_id: &str, kind: &str) -> Option<String> {
         match node {
             LayoutNode::Panel { id, tabs, .. } if id == panel_id => {
-                tabs.iter().any(|t| t.view == kind)
+                tabs.iter().find(|t| t.view == kind).map(|t| t.id.clone())
             }
             LayoutNode::Split { children, .. } => {
-                children.iter().any(|c| walk(c, panel_id, kind))
+                children.iter().find_map(|c| walk(c, panel_id, kind))
             }
-            _ => false,
+            _ => None,
         }
     }
     walk(&layout::active_layout(&app.ui).tree, panel_id, kind)
 }
 
-/// 文件树右键菜单：文件夹 / 文件 / 仓库行 / 根空白；删除走 pane 1 就地确认。
+/// 文件树右键菜单：文件夹 / 文件 / 仓库行 / 根空白；删除 = 应用层确认流
+/// （文件进确认 pane；文件夹先计数——空目录直接删、非空带条目数进确认 pane）。
 fn file_menu_entries(
+    app: &App,
     rel: &str,
     is_dir: bool,
     is_root: bool,
@@ -2231,7 +2913,7 @@ fn file_menu_entries(
             entries.push((0, MenuEntry::action_icon("重命名", "pencil",
                 Message::RenameStartFolder(rel.to_string()))));
             entries.push((0, MenuEntry::danger("删除", "trash-2",
-                Message::Ui(crate::ui::UiMsg::PopupPane(1)))));
+                Message::FolderDeleteAsk(rel.to_string()))));
         }
     } else {
         let lower = rel.to_lowercase();
@@ -2247,43 +2929,38 @@ fn file_menu_entries(
         entries.push((0, MenuEntry::Divider));
         entries.push((0, MenuEntry::action_icon("重命名", "pencil",
             Message::RenameStartFile(rel.to_string()))));
-        entries.push((0, MenuEntry::danger("删除", "trash-2", Message::Ui(crate::ui::UiMsg::PopupPane(1)))));
+        entries.push((0, MenuEntry::danger("删除", "trash-2",
+            Message::DeleteAsk(rel.to_string()))));
     }
 
-    // pane 1 = 删除就地确认
+    // pane 1 = 删除就地确认（无标题行：说明文字 + 菜单项形态的确认/取消；
+    // 内容来自应用层 delete_confirm——文件夹计数完成前 pane 1 不渲染）
     if !rel.is_empty() {
-        let kind = if is_dir { "文件夹" } else { "文件" };
-        let confirm = column![
-            text(format!("删除{kind}「{}」？", rel.rsplit('/').next().unwrap_or(rel)))
-                .size(pal::FS_CAPTION)
-                .color(pal::TEXT_PRIMARY),
-            text("删除后不可恢复")
-                .size(pal::FS_CAPTION)
-                .color(pal::TEXT_MUTED),
-            row![
-                button("取消")
-                    .padding(Padding::ZERO.horizontal(10.0).vertical(4.0))
-                    .style(|_t, _s| button::Style {
-                        text_color: pal::TEXT_SECONDARY,
-                        border: border::rounded(pal::RADIUS_SM).color(pal::BORDER).width(1.0),
-                        ..Default::default()
-                    })
-                    .on_press(Message::Ui(crate::ui::UiMsg::PopupPane(0))),
-                button("确认删除")
-                    .padding(Padding::ZERO.horizontal(10.0).vertical(4.0))
-                    .style(|_t, _s| button::Style {
-                        text_color: pal::DANGER,
-                        border: border::rounded(pal::RADIUS_SM).color(pal::DANGER).width(1.0),
-                        ..Default::default()
-                    })
-                    .on_press(Message::DeleteEntry(rel.to_string(), is_dir)),
-            ]
-            .spacing(8),
-        ]
-        .spacing(4)
-        .padding(12.0)
-        .width(Length::Fill);
-        entries.push((1, MenuEntry::Custom(confirm.into(), 104.0)));
+        if let Some((r, dir, count)) = app
+            .delete_confirm
+            .as_ref()
+            .filter(|(cr, _, _)| cr == rel)
+        {
+            let mut height = 12.0 + 16.0 + 4.0;
+            let mut pane_col = column![].spacing(2).padding(Padding::ZERO.vertical(6.0)).width(Length::Fill);
+            if let Some(n) = count {
+                pane_col = pane_col.push(
+                    text(format!("文件夹包含 {n} 个文件/文件夹"))
+                        .size(pal::FS_CAPTION)
+                        .color(pal::TEXT_SECONDARY),
+                );
+                height += 16.0;
+            }
+            pane_col = pane_col.push(
+                text("删除后不可恢复")
+                    .size(pal::FS_CAPTION)
+                    .color(pal::TEXT_MUTED),
+            );
+            entries.push((1, MenuEntry::Custom(pane_col.into(), height)));
+            entries.push((1, MenuEntry::danger("确认删除", "trash-2",
+                Message::DeleteEntry(r.to_string(), *dir))));
+            entries.push((1, MenuEntry::action("取消", Message::DeleteCancel)));
+        }
     }
     entries
 }
@@ -2353,6 +3030,7 @@ fn walk_dividers(node: &LayoutNode, area: Rectangle, out: &mut Vec<DividerInfo>)
 }
 
 /// 一个可停靠面板的落点信息（全局 logical 坐标；与渲染分配规则一致）。
+#[derive(Clone)]
 pub struct PanelZone {
     /// 主窗口树面板 id（撕裂窗口为 None）。
     pub panel_id: Option<String>,
@@ -2360,8 +3038,19 @@ pub struct PanelZone {
     pub detached_id: Option<String>,
     /// 面板客户区矩形（含标签条）。
     pub rect: Rectangle,
-    /// 标签数（重排序插入索引上限）。
-    pub tab_count: usize,
+    /// 各标签宽度（自适应标签的命中几何基准，与渲染同源估算）。
+    pub tab_widths: Vec<f32>,
+}
+
+/// 拖拽 drop 的落点种类（标签条排序 / 中部加标签 / 四边缘分割）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DropZone {
+    Tab,
+    Center,
+    Left,
+    Right,
+    Top,
+    Bottom,
 }
 
 /// 枚举全部窗口的可停靠面板矩形（拖拽会话期间位置尺寸视为稳定）。
@@ -2380,19 +3069,40 @@ pub fn panel_zones(app: &App) -> Vec<PanelZone> {
                     - 2.0)
                     .max(0.0),
             };
-            walk_panels(&layout::active_layout(&app.ui).tree, area, &mut out);
+            walk_panels(&layout::active_layout(&app.ui).tree, area, &mut out, app);
+            // 面板矩形向外扩半把手并钳回内容区：拖拽/按压落进面板间 4px 把手间隙时
+            // 归属邻近面板，不再按悬停为空撕出新窗
+            let half = UiMetrics::DIVIDER_W / 2.0;
+            for z in &mut out {
+                let r = &mut z.rect;
+                r.x = (r.x - half).max(area.x);
+                r.y = (r.y - half).max(area.y);
+                r.width = (r.width + 2.0 * half).min(area.x + area.width - r.x);
+                r.height = (r.height + 2.0 * half).min(area.y + area.height - r.y);
+            }
         }
     }
     // 撕裂窗口落点矩形（标题栏不含分隔线，无 1px 偏差）
     for (os, mid) in &app.detached_os {
         if let (Some(pos), Some(sz)) = (app.os_positions.get(os), app.os_sizes.get(os)) {
-            let tab_count = app
+            let widths = app
                 .ui
                 .detached_windows
                 .iter()
                 .find(|w| &w.id == mid)
-                .map(|w| w.tabs.len())
-                .unwrap_or(0);
+                .map(|w| {
+                    w.tabs
+                        .iter()
+                        .map(|t| {
+                            approx_tab_width(
+                                &tab_label(app, &t.view),
+                                t.locked,
+                                t.view == "note" && app.ui.last_note_file.is_some(),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
             out.push(PanelZone {
                 panel_id: None,
                 detached_id: Some(mid.clone()),
@@ -2402,20 +3112,29 @@ pub fn panel_zones(app: &App) -> Vec<PanelZone> {
                     width: sz.width,
                     height: (sz.height - UiMetrics::TITLEBAR_H).max(0.0),
                 },
-                tab_count,
+                tab_widths: widths,
             });
         }
     }
     out
 }
 
-fn walk_panels(node: &LayoutNode, area: Rectangle, out: &mut Vec<PanelZone>) {
+fn walk_panels(node: &LayoutNode, area: Rectangle, out: &mut Vec<PanelZone>, app: &App) {
     match node {
         LayoutNode::Panel { id, tabs, .. } => out.push(PanelZone {
             panel_id: Some(id.clone()),
             detached_id: None,
             rect: area,
-            tab_count: tabs.len(),
+            tab_widths: tabs
+                .iter()
+                .map(|t| {
+                    approx_tab_width(
+                        &tab_label(app, &t.view),
+                        t.locked,
+                        t.view == "note" && app.ui.last_note_file.is_some(),
+                    )
+                })
+                .collect(),
         }),
         LayoutNode::Split { direction, children, sizes, .. } => {
             let n = children.len();
@@ -2437,32 +3156,49 @@ fn walk_panels(node: &LayoutNode, area: Rectangle, out: &mut Vec<PanelZone>) {
                 } else {
                     Rectangle { x: area.x, y: pos, width: area.width, height: len }
                 };
-                walk_panels(child, child_area, out);
+                walk_panels(child, child_area, out, app);
                 pos += len + UiMetrics::DIVIDER_W;
             }
         }
     }
 }
 
-/// 光标在标签条内的插入索引（半宽细分：左半 = 该标签前，右半 = 该标签后）。
-pub fn tab_index_at(zone: &PanelZone, global_x: f32) -> usize {
-    let idx = ((global_x - zone.rect.x - UiMetrics::HEADER_INSET) / UiMetrics::TAB_W).floor();
-    let half_bumped = if (global_x - zone.rect.x - UiMetrics::HEADER_INSET) % UiMetrics::TAB_W
-        > UiMetrics::TAB_W / 2.0
-    {
-        idx + 1.0
-    } else {
-        idx
-    };
-    (half_bumped.max(0.0) as usize).min(zone.tab_count)
+/// 光标在标签条内的插入索引（按各标签近似宽度 + 行内 2px 间距，半宽细分：
+/// 左半 = 该标签前，右半 = 该标签后；`scroll_x` = 该标签条横向滚动偏移，
+/// 估宽与真实 shaping 的偏差只影响插入位差半格以内）。
+pub fn tab_index_at(zone: &PanelZone, global_x: f32, scroll_x: f32) -> usize {
+    let mut x = zone.rect.x + UiMetrics::HEADER_INSET - scroll_x;
+    for (i, w) in zone.tab_widths.iter().enumerate() {
+        if global_x < x + w / 2.0 {
+            return i;
+        }
+        x += w + 2.0;
+    }
+    zone.tab_widths.len()
 }
 
-/// 光标是否落在标签条内（含标签区横向范围；动作按钮区不算）。
+/// 光标是否落在标签条内（标签条整行高度，动作按钮区同样算入）。
 pub fn in_tab_strip(zone: &PanelZone, global: iced::Point) -> bool {
     let rel_y = global.y - zone.rect.y;
-    let rel_x = global.x - zone.rect.x;
     (0.0..=UiMetrics::TAB_BAR_H).contains(&rel_y)
-        && (UiMetrics::HEADER_INSET
-            ..=UiMetrics::HEADER_INSET + zone.tab_count as f32 * UiMetrics::TAB_W)
-            .contains(&rel_x)
+}
+
+/// 光标落点种类（主窗口面板）：头部 = 标签排序；四边缘 = 12% 分割带（左→右→上→下判定序）；
+/// 其余 = 中部加标签。
+pub fn drop_zone_at(zone: &PanelZone, global: iced::Point) -> DropZone {
+    if in_tab_strip(zone, global) {
+        return DropZone::Tab;
+    }
+    let (w, h) = (zone.rect.width, zone.rect.height);
+    if global.x - zone.rect.x < w * 0.12 {
+        DropZone::Left
+    } else if zone.rect.x + w - global.x < w * 0.12 {
+        DropZone::Right
+    } else if global.y - zone.rect.y < h * 0.12 {
+        DropZone::Top
+    } else if zone.rect.y + h - global.y < h * 0.12 {
+        DropZone::Bottom
+    } else {
+        DropZone::Center
+    }
 }

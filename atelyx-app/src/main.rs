@@ -28,23 +28,9 @@ use iced::{keyboard, mouse, Element, Event, Point, Size, Subscription, Task, The
 use markdown_edit::HitTarget;
 use ui::notify::{Level as NoticeLevel, Notification};
 
-use layout_view::{enumerate_dividers, PopupOpen, RenameState, RenameTarget, UiMetrics};
-
-/// 主窗口树面板的活动标签（拖标签手势的承载对象）。
-fn find_active_tab(tree: &layout::LayoutNode, panel_id: &str) -> Option<(String, String)> {
-    match tree {
-        layout::LayoutNode::Panel { id, tabs, active_tab_id } if id == panel_id => {
-            let t = tabs
-                .iter()
-                .find(|t| Some(t.id.as_str()) == active_tab_id.as_deref())?;
-            Some((t.id.clone(), t.view.clone()))
-        }
-        layout::LayoutNode::Split { children, .. } => {
-            children.iter().find_map(|c| find_active_tab(c, panel_id))
-        }
-        _ => None,
-    }
-}
+use layout_view::{
+    enumerate_dividers, panel_tab_ids_in, PopupOpen, RenameState, RenameTarget, UiMetrics,
+};
 
 /// 撕裂窗口建窗参数：bounds 恢复位置 + 条目 OS 选项（不进任务栏）；无系统边框。
 fn panel_settings(w: &DetachedWindow) -> Settings {
@@ -261,13 +247,22 @@ enum Message {
     SetTabView { panel_id: String, tab_id: String, view: String },
     /// 右键切换撕裂窗口标签视图。
     DetachedSetTabView { window_id: String, tab_id: String, view: String },
+    /// 关闭文件（×：摘下文件、标签保留回未打开态）。
+    PanelTabFileClose,
+    DetachedTabFileClose,
+    /// 标签按下：拖拽候选由标签按钮自证命中（渲染自适应后几何不再可靠）。
+    PanelTabPress { panel_id: String, tab_id: String },
+    DetachedTabPress { window_id: String, tab_id: String },
+    LayoutTabPress { layout_id: String, name: String },
     PanelTabClose(String, String),
-    PanelTabLock(String, String),
+    /// 整块锁定/解锁面板全部标签。
+    PanelTabLock(String),
     PanelSplit(String, String),
     PanelClose(String),
     DetachedTab(String, String),
     DetachedTabClose(String, String),
-    DetachedTabLock(String, String),
+    /// 整块锁定/解锁撕裂窗口全部标签。
+    DetachedTabLock(String),
     DetachedDockBack(String),
     DetachedPin(String),
     DetachedFocusLost(window::Id),
@@ -279,7 +274,10 @@ enum Message {
     LayoutRenameInput(String),
     LayoutRenameCommit,
     LayoutDelete(String),
-    LayoutShift(String, bool),
+    /// 布局 tab 拖拽排序落点（1-based 合成序，主页 = 0 不可动）。
+    LayoutDropped(usize, usize),
+    /// 标签条横向滚动偏移（None = 标题栏布局条，Some = 主窗面板 id；拖拽命中几何对齐渲染）。
+    TabStripScrolled(Option<String>, f32),
     SceneActivate(String),
     SceneNew,
     SceneRenameStart(String),
@@ -289,7 +287,7 @@ enum Message {
     SceneDeleteAsk(String),
     PersistTick,
     PersistDone(Result<(), String>),
-    /// 通知过期与悬停提示显现的统一心跳。
+    /// 通知过期、悬停提示显现/收起与提醒条过期的统一心跳。
     UiTick,
     WindowResized(window::Id, Size),
     /// 窗口位置播种（建窗后主动查询；OS 移动事件为增量权威）。
@@ -308,9 +306,10 @@ enum Message {
     ApplyFullscreen(window::Id, iced::window::Mode),
     /// Esc：先关弹层，再取消行内重命名。
     Escape(window::Id),
-    /// 打开 / 关闭设置整页；设置左栏切 tab。
+    /// 打开 / 关闭设置整页；设置左栏切 tab；折叠钮切换。
     SettingsToggle,
     SettingsTab(String),
+    SettingsNavCollapse,
     /// 打开弹层（几何规格 + 内容形态由 layout_view 定义）。
     PopupOpen(window::Id, PopupOpen),
     /// 仓库文件总数（打开仓库后异步统计；gen 守卫）。
@@ -320,12 +319,29 @@ enum Message {
     /// 文件树：就地重命名起点。
     RenameStartFile(String),
     RenameStartFolder(String),
+    /// 删除入口：文件直接进确认 pane；文件夹先计数（空目录免确认）。
+    DeleteAsk(String),
+    FolderDeleteAsk(String),
+    /// 文件夹条目数落地（core 仅对非空目录回 needs_confirm；带条目数进确认 pane）。
+    FolderCounted(String, usize),
+    /// 取消删除确认。
+    DeleteCancel,
     /// 文件/文件夹删除（菜单内确认后触发）。
     DeleteEntry(String, bool),
     /// 仓库行：在系统文件管理器中打开仓库根。
     RevealVault,
     /// 文件操作落地（gen 守卫 + 结果通知 + 刷新子项 + 打开文件跟随）。
-    OpDone(u64, String, Result<(), String>, FollowUp),
+    OpDone(u64, String, Result<String, String>, FollowUp),
+    /// 展开全部/收起全部文件夹（懒加载树递归展开）。
+    ExpandAllToggle,
+    /// 递归展开过程中的子项落地（累计入展开集并链式下发）。
+    ExpandChildrenLoaded(String, u64, Result<Vec<(String, bool)>, String>),
+    /// 行内输入行被按下（重命名失焦提交的「点在输入行内」标志）。
+    RenamePressInside,
+    /// 分割把手键盘调整（上次拖动过的把手；horizontal + 正向）。
+    DividerAdjust(bool, bool),
+    /// 保存失败徽标的关闭。
+    SaveErrorDismiss,
     /// 未实现功能的占位通知。
     NotImplemented(&'static str),
 }
@@ -357,6 +373,17 @@ fn full_rel(dir: &str, name: &str) -> String {
     }
 }
 
+/// 分割把手两侧配额钳制：双侧各不小于 min，和不足以容纳双下限时对半分。
+fn clamp_split_pair(s0: f64, s1: f64, min: f64) -> (f64, f64) {
+    let pair = s0 + s1;
+    if pair < min * 2.0 {
+        (pair / 2.0, pair / 2.0)
+    } else {
+        let c0 = s0.clamp(min, pair - min);
+        (c0, pair - c0)
+    }
+}
+
 /// 新建草稿种类（决定扩展名与占位文案）。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DraftKind {
@@ -364,21 +391,40 @@ pub enum DraftKind {
     Folder,
 }
 
-/// 跨窗口标签拖拽会话：源窗口只产生输入事件，落点由全局面板几何命中。
+/// 跨窗口标签/布局 tab 拖拽会话：源窗口只产生输入事件，落点由全局面板几何命中。
 struct DragSession {
     tab_id: String,
-    #[allow(dead_code)]
+    /// ghost 图标来源（视图 kind；布局 tab 拖拽为空串 → 拼图兜底）。
     view: String,
+    /// ghost 文案（视图名 / 布局名）。
+    label: String,
     from_panel: Option<String>,
     from_detached: Option<String>,
+    /// 布局 tab 拖拽的 1-based 合成序（标签拖拽恒为 0）。
+    layout_from: usize,
     /// 全局光标（源窗口位置 + 本地坐标）。
     current: Point,
+    /// 光标当前所在窗口（ghost 显示归属）。
+    cursor_window: window::Id,
 }
 
 /// 拖拽悬停落点。
 struct DragHover {
     zone: layout_view::PanelZone,
-    tab_zone: bool,
+    kind: layout_view::DropZone,
+}
+
+/// 拖拽候选来源（按下时由标签按钮自证命中，转正时再查锁定与标签信息）。
+enum PressSource {
+    Panel { panel_id: String, tab_id: String },
+    Detached { window_id: String, tab_id: String },
+    Layout { layout_id: String, name: String },
+}
+
+/// 拖拽按下候选（移动超阈值转正为拖拽会话；未转正释放 = 按钮自行激活）。
+struct TabPress {
+    window: window::Id,
+    source: PressSource,
 }
 
 pub struct App {
@@ -389,8 +435,20 @@ pub struct App {
     /// 应用内通知（右下角；自动消失）。
     pub notifications: Vec<Notification>,
     notify_seq: u64,
-    /// 悬停提示（图标按钮；延迟 400ms 显现）。
-    pub tooltip: Option<(window::Id, String, Instant, bool)>,
+    /// 悬停提示（图标按钮；显现/收起由心跳按光标-锚点距离判定；
+    /// 事件 enter 仅负责启动——批量事件中 exit 会被捕获状态吞掉，不可靠）。
+    pub tooltip: Option<(window::Id, String, Instant, bool, Option<Instant>, Point)>,
+    /// 触发钮半边长（提示锚定其下缘；菜单项 = 半行高）。
+    pub tooltip_half: Option<f32>,
+    /// 重名自动加序号的提醒条（文案 + 出现时刻；3s 自动消失）。
+    pub rename_notice: Option<(String, Instant)>,
+    /// 设置左栏折叠态。
+    pub settings_collapsed: bool,
+    /// 删除确认流（目标相对路径、是否目录、文件夹条目数）。
+    pub delete_confirm: Option<(String, bool, Option<usize>)>,
+    /// 展开全部文件夹进行中（懒加载递归展开的图标/文案双态）。
+    pub expand_all: bool,
+    expand_pending: usize,
     /// 各窗口最近光标位置（右键菜单锚点 / 提示定位）。
     pub cursors: HashMap<window::Id, Point>,
     /// 打开的弹层（同窗口同时至多一个）。
@@ -439,13 +497,25 @@ pub struct App {
     /// 撕裂窗口逻辑尺寸（建窗播种 + Resized 增量；落点矩形用）。
     pub os_sizes: HashMap<window::Id, Size>,
     divider: Option<DividerDrag>,
+    /// 上次拖动过的把手（键盘方向键 ±2% 调整的承接对象）。
+    last_divider: Option<(String, usize, bool)>,
     /// 按压起点（本地坐标；移动超阈值 = 拖标签手势）。
     press: Option<(window::Id, Point)>,
+    /// 标签/布局 tab 拖拽按下候选（标签按钮按下时自证命中）。
+    tab_press: Option<TabPress>,
+    /// 行内输入行按压标志（RenamePressInside 置位，全局 Press 消费后清零）。
+    rename_press_inside: bool,
     drag: Option<DragSession>,
     drag_hover: Option<DragHover>,
+    /// 各仓库独立的文件树展开集（会话内记忆；ui-state 仍只持久化当前仓库一份）。
+    expanded_by_vault: HashMap<PathBuf, Vec<String>>,
     pub rename: Option<RenameState>,
     /// 上次标题栏空白按下（窗口 id + 时刻；双击最大化判定）。
     last_titlebar_press: Option<(window::Id, Instant)>,
+    /// 标题栏布局条横向滚动偏移（拖拽命中几何与渲染对齐）。
+    titlebar_tab_scroll_x: f32,
+    /// 各面板标签条横向滚动偏移（同上；key = 面板 id）。
+    panel_tab_scroll_x: HashMap<String, f32>,
 }
 
 impl App {
@@ -461,6 +531,7 @@ impl App {
         let fonts = iced::font::load(ui::FONT_REGULAR)
             .chain(iced::font::load(ui::FONT_MEDIUM))
             .chain(iced::font::load(ui::FONT_SEMIBOLD))
+            .chain(iced::font::load(ui::FONT_DISPLAY))
             .discard();
         (
             Self {
@@ -470,6 +541,12 @@ impl App {
                 notifications: Vec::new(),
                 notify_seq: 0,
                 tooltip: None,
+                tooltip_half: None,
+                rename_notice: None,
+                settings_collapsed: false,
+                delete_confirm: None,
+                expand_all: false,
+                expand_pending: 0,
                 cursors: HashMap::new(),
                 popup: None,
                 popup_pane: 0,
@@ -496,11 +573,17 @@ impl App {
                 os_positions: HashMap::new(),
                 os_sizes: HashMap::new(),
                 divider: None,
+                last_divider: None,
                 press: None,
+                tab_press: None,
+                rename_press_inside: false,
                 drag: None,
                 drag_hover: None,
+                expanded_by_vault: HashMap::new(),
                 rename: None,
                 last_titlebar_press: None,
+                titlebar_tab_scroll_x: 0.0,
+                panel_tab_scroll_x: HashMap::new(),
             },
             open.map(Message::WindowOpened)
                 .chain(window::position(main_os).map(move |p| Message::PositionKnown(main_os, p)))
@@ -567,6 +650,12 @@ impl App {
                 } else {
                     self.detached_os.remove(&id);
                     self.os_shown.remove(&id);
+                    // 光标记录随窗口消失；该窗在途悬停提示立即清除
+                    // （cursors 缺失会让收起判定恒 false，提示与心跳订阅悬挂）
+                    self.cursors.remove(&id);
+                    if self.tooltip.as_ref().is_some_and(|(w, _, _, _, _, _)| *w == id) {
+                        self.tooltip = None;
+                    }
                     Task::none()
                 }
             }
@@ -586,6 +675,10 @@ impl App {
                 )
             }
             Message::VaultPicked(Ok(path)) => {
+                // 展开集按仓库独立：切走时记忆当前仓库的集合，切回时恢复
+                if let Some(old) = self.vault_root.clone() {
+                    self.expanded_by_vault.insert(old, self.ui.file_explorer_expanded.clone());
+                }
                 if let Err(e) = self.vault.set(path.clone(), Vec::new()) {
                     self.notify(NoticeLevel::Error, e);
                     return Task::none();
@@ -602,7 +695,15 @@ impl App {
                 self.dirty = false;
                 self.save_error = None;
                 self.file_count = None;
+                self.expand_all = false;
+                self.expand_pending = 0;
+                self.rename_notice = None;
                 // last_note_file 跨仓库沿用（相对路径语义）；仓库就绪即恢复其内容
+                self.ui.file_explorer_expanded = self
+                    .expanded_by_vault
+                    .get(&path)
+                    .cloned()
+                    .unwrap_or_default();
                 let mut task = self.load_children("").chain(self.count_files());
                 if let Some(rel) = self.ui.last_note_file.clone() {
                     task = task.chain(self.load_note(&rel));
@@ -643,6 +744,8 @@ impl App {
                     return Task::none();
                 }
                 self.ui.last_note_file = Some(rel.clone());
+                // 打开文件复位只读：笔记视图按文件重新挂载，档位不跨文件延续
+                self.note_mode = NoteMode::Read;
                 // 清掉上一文件的解析产物：载入在途期间两档都不留旧内容
                 self.preview_doc = None;
                 self.edit_doc = None;
@@ -779,6 +882,10 @@ impl App {
                 iced::clipboard::write(code)
             }
             Message::PanelTab(panel_id, tab_id) => {
+                // 拖拽会话结束的按钮释放不触发激活
+                if self.drag.is_some() {
+                    return Task::none();
+                }
                 self.apply(LayoutOp::SetActive { panel_id, tab_id })
             }
             Message::PanelAddView { panel_id, view } => {
@@ -790,15 +897,74 @@ impl App {
             Message::DetachedSetTabView { window_id, tab_id, view } => {
                 self.apply(LayoutOp::DetachedSetTabView { window_id, tab_id, view })
             }
+            // × = 关文件留标签：摘下文件回到未打开态（tab 不动）
+            Message::PanelTabFileClose | Message::DetachedTabFileClose => {
+                if self.dirty {
+                    self.notify(NoticeLevel::Warning, "有未保存改动，先 Ctrl+S 保存");
+                    return Task::none();
+                }
+                self.dismiss_popup();
+                self.ui.last_note_file = None;
+                self.note_text.clear();
+                self.source_editor = text_editor::Content::new();
+                self.edit.reset(0);
+                self.edit_doc = None;
+                self.edit_meta.clear();
+                self.preview_doc = None;
+                self.dirty = false;
+                self.save_error = None;
+                self.schedule_persist();
+                Task::none()
+            }
+            Message::PanelTabPress { panel_id, tab_id } => {
+                self.tab_press = Some(TabPress {
+                    window: self.main_id.unwrap_or(iced::window::Id::unique()),
+                    source: PressSource::Panel { panel_id, tab_id },
+                });
+                Task::none()
+            }
+            Message::DetachedTabPress { window_id, tab_id } => {
+                self.tab_press = Some(TabPress {
+                    window: self
+                        .detached_os
+                        .iter()
+                        .find(|(_, mid)| **mid == window_id)
+                        .map(|(os, _)| *os)
+                        .unwrap_or(iced::window::Id::unique()),
+                    source: PressSource::Detached { window_id, tab_id },
+                });
+                Task::none()
+            }
+            Message::LayoutTabPress { layout_id, name } => {
+                self.tab_press = Some(TabPress {
+                    window: self.main_id.unwrap_or(iced::window::Id::unique()),
+                    source: PressSource::Layout { layout_id, name },
+                });
+                Task::none()
+            }
             Message::PanelTabClose(panel_id, tab_id) => {
                 self.apply(LayoutOp::CloseTab { panel_id, tab_id })
             }
-            Message::PanelTabLock(panel_id, tab_id) => {
-                let locked = self
+            // 整块锁定：面板全部标签统一值，切换基准 = 是否已全部锁定
+            Message::PanelTabLock(panel_id) => {
+                let tab_ids = self
                     .active_tree()
-                    .and_then(|tree| layout::find_tab_in_tree(&tree, &tab_id))
-                    .is_some_and(|(_, t)| t.locked);
-                self.apply(LayoutOp::SetLocked { panel_id, tab_id, locked: !locked })
+                    .map(|tree| panel_tab_ids_in(&tree, &panel_id))
+                    .unwrap_or_default();
+                let locked = self.active_tree().is_some_and(|tree| {
+                    panel_tab_ids_in(&tree, &panel_id).iter().all(|id| {
+                        layout::find_tab_in_tree(&tree, id).is_some_and(|(_, t)| t.locked)
+                    })
+                });
+                let mut task = Task::none();
+                for id in tab_ids {
+                    task = task.chain(self.apply(LayoutOp::SetLocked {
+                        panel_id: panel_id.clone(),
+                        tab_id: id,
+                        locked: !locked,
+                    }));
+                }
+                task
             }
             Message::PanelSplit(panel_id, direction) => self.apply(LayoutOp::SplitPanel {
                 panel_id,
@@ -807,20 +973,38 @@ impl App {
             }),
             Message::PanelClose(panel_id) => self.apply(LayoutOp::ClosePanel { panel_id }),
             Message::DetachedTab(window_id, tab_id) => {
+                if self.drag.is_some() {
+                    return Task::none();
+                }
                 self.apply(LayoutOp::DetachedSetActive { window_id, tab_id })
             }
             Message::DetachedTabClose(window_id, tab_id) => {
                 self.apply(LayoutOp::DetachedCloseTab { window_id, tab_id })
             }
-            Message::DetachedTabLock(window_id, tab_id) => {
+            Message::DetachedTabLock(window_id) => {
                 let locked = self
                     .ui
                     .detached_windows
                     .iter()
                     .find(|w| w.id == window_id)
-                    .and_then(|w| w.tabs.iter().find(|t| t.id == tab_id))
-                    .is_some_and(|t| t.locked);
-                self.apply(LayoutOp::DetachedSetLocked { window_id, tab_id, locked: !locked })
+                    .map(|w| w.tabs.iter().all(|t| t.locked))
+                    .unwrap_or(false);
+                let tab_ids = self
+                    .ui
+                    .detached_windows
+                    .iter()
+                    .find(|w| w.id == window_id)
+                    .map(|w| w.tabs.iter().map(|t| t.id.clone()).collect::<Vec<_>>())
+                    .unwrap_or_default();
+                let mut task = Task::none();
+                for id in tab_ids {
+                    task = task.chain(self.apply(LayoutOp::DetachedSetLocked {
+                        window_id: window_id.clone(),
+                        tab_id: id,
+                        locked: !locked,
+                    }));
+                }
+                task
             }
             Message::DetachedDockBack(window_id) => {
                 let Some(tab_id) = self
@@ -890,7 +1074,13 @@ impl App {
                 }
                 Task::none()
             }
-            Message::LayoutActivate(id) => self.apply(LayoutOp::ActivateLayout { id }),
+            Message::LayoutActivate(id) => {
+                // 布局 tab 拖拽会话中的按钮释放不触发激活（拖拽结束时按钮仍在光标下）
+                if self.drag.is_some() {
+                    return Task::none();
+                }
+                self.apply(LayoutOp::ActivateLayout { id })
+            }
             Message::LayoutNew => self.apply(LayoutOp::AddLayout),
             Message::LayoutRenameStart(id) => {
                 let name = self
@@ -918,13 +1108,21 @@ impl App {
                 }
             }
             Message::LayoutDelete(id) => self.apply(LayoutOp::DeleteLayout { id }),
-            Message::LayoutShift(id, left) => {
-                let Some(scene) = self.active_scene() else { return Task::none() };
-                let Some(i) = scene.layouts.iter().position(|l| l.id == id) else {
+            Message::TabStripScrolled(strip, x) => {
+                match strip {
+                    Some(panel_id) => { self.panel_tab_scroll_x.insert(panel_id, x); }
+                    None => self.titlebar_tab_scroll_x = x,
+                }
+                Task::none()
+            }
+            Message::LayoutDropped(from_index, insert_index) => {
+                // 合成序（主页 0 + 场景内布局 1..）→ MoveLayout（先移除后插入）：
+                // 插入位在原位之后时，移除使后续左移一位
+                let to = if insert_index <= from_index { insert_index } else { insert_index - 1 };
+                if to == 0 || to == from_index {
                     return Task::none();
-                };
-                let (from, to) = if left { (i + 1, i) } else { (i + 1, i + 2) };
-                self.apply(LayoutOp::MoveLayout { from_index: from, to_index: to })
+                }
+                self.apply(LayoutOp::MoveLayout { from_index, to_index: to })
             }
             Message::SceneActivate(id) => self.apply(LayoutOp::ActivateScene { id }),
             Message::SceneNew => self.apply(LayoutOp::AddScene),
@@ -975,10 +1173,37 @@ impl App {
             }
             Message::UiTick => {
                 self.notifications.retain(|n| !n.expired());
-                if let Some((_, _, at, shown)) = &mut self.tooltip {
-                    // 悬停 400ms 后显现（旧壳 Tooltip 出现延迟同档）
-                    if !*shown && at.elapsed().as_millis() >= 400 {
-                        *shown = true;
+                // 重名提醒条 3s 过期
+                if self
+                    .rename_notice
+                    .as_ref()
+                    .is_some_and(|(_, at)| at.elapsed().as_millis() >= 3000)
+                {
+                    self.rename_notice = None;
+                }
+                // 悬停提示收起判定：光标离开触发钮邻域 = 进入收起延迟
+                // （与显现同源的距离判定；批量事件中 exit 会被捕获状态吞掉，事件驱动不可靠）
+                let tip = self
+                    .tooltip
+                    .as_ref()
+                    .map(|(w, _, at, shown, _, anchor)| (*w, *anchor, *shown, at.elapsed().as_millis() >= 400));
+                if let Some((window, anchor, _shown, mature)) = tip {
+                    let away = self
+                        .cursors
+                        .get(&window)
+                        .is_some_and(|p| p.distance(anchor) > 60.0);
+                    if let Some((_, _, _, shown, closed_at, _)) = &mut self.tooltip {
+                        if !*shown && mature {
+                            *shown = true;
+                        }
+                        if *shown && away && closed_at.is_none() {
+                            *closed_at = Some(Instant::now());
+                        }
+                        if let Some(t) = closed_at {
+                            if t.elapsed().as_millis() >= 120 {
+                                self.tooltip = None;
+                            }
+                        }
                     }
                 }
                 Task::none()
@@ -1015,6 +1240,14 @@ impl App {
                     return Task::none();
                 }
                 let cursor = self.cursor_for(id);
+                // 行内重命名失焦提交：按压不在输入行内 = 提交（Enter 同路径）
+                if self.rename.is_some() {
+                    if self.rename_press_inside {
+                        self.rename_press_inside = false;
+                    } else if self.main_id == Some(id) {
+                        return Task::perform(async {}, |_| Message::LayoutRenameCommit);
+                    }
+                }
                 // 把手命中优先（主窗口）；否则记录按压起点（移动超阈值 = 拖标签手势）
                 if self.main_id == Some(id) {
                     let tree = layout::active_layout(&self.ui).tree;
@@ -1022,6 +1255,7 @@ impl App {
                         .into_iter()
                         .find(|d| d.rect.contains(cursor));
                     if let Some(d) = hit {
+                        self.last_divider = Some((d.split_id.clone(), d.gap, d.horizontal));
                         self.divider = Some(DividerDrag {
                             split_id: d.split_id,
                             gap: d.gap,
@@ -1031,6 +1265,17 @@ impl App {
                             sizes: d.sizes,
                         });
                         return Task::none();
+                    }
+                    // 面板聚焦：按压落进面板区 = 聚焦该面板（快捷键门控基准）
+                    let zones = layout_view::panel_zones(self);
+                    if let Some(zone) = zones.iter().find(|z| {
+                        z.panel_id.is_some() && z.rect.contains(cursor)
+                    }) {
+                        let pid = zone.panel_id.clone().unwrap();
+                        if self.ui.focused_panel_id.as_deref() != Some(pid.as_str()) {
+                            self.ui.focused_panel_id = Some(pid);
+                            self.schedule_persist();
+                        }
                     }
                 }
                 self.press = Some((id, cursor));
@@ -1048,44 +1293,66 @@ impl App {
                     let dfrac = ((axis - d.drag_start) as f64 / d.split_len as f64) * sum;
                     let s0 = d.sizes[d.gap] + dfrac;
                     let s1 = d.sizes[d.gap + 1] - dfrac;
-                    if s0 < 0.02 || s1 < 0.02 {
-                        return Task::none();
-                    }
+                    // 双侧钳制 12%
+                    let min = sum * UiMetrics::MIN_SPLIT_FRAC;
+                    let (s0, s1) = clamp_split_pair(s0, s1, min);
                     let split_id = d.split_id.clone();
                     let mut sizes = d.sizes.clone();
                     sizes[d.gap] = s0;
                     sizes[d.gap + 1] = s1;
                     return self.apply(LayoutOp::SetLayoutSizes { split_id, sizes });
                 }
+                // 拖拽候选转正：标签按钮自证命中的候选 + 移动超阈值
+                // （候选在转正前保留，小于阈值的移动不消费）
+                let moved = self
+                    .tab_press
+                    .as_ref()
+                    .zip(self.press.as_ref())
+                    .is_some_and(|(tp, (w, p))| {
+                        *w == tp.window
+                            && ((pos.x - p.x).abs() > 5.0 || (pos.y - p.y).abs() > 5.0)
+                    });
+                if moved {
+                    if let Some(tp) = self.tab_press.take() {
+                        return self.start_drag_from_press(tp);
+                    }
+                }
                 if self.drag.is_some() {
                     if let Some(wpos) = self.os_positions.get(&id) {
                         let global = Point::new(wpos.x + pos.x, wpos.y + pos.y);
                         if let Some(d) = self.drag.as_mut() {
                             d.current = global;
+                            d.cursor_window = id;
                         }
                         let zones = layout_view::panel_zones(self);
                         self.drag_hover = zones
-                            .into_iter()
+                            .iter()
                             .find(|z| z.rect.contains(global))
                             .map(|zone| DragHover {
-                                tab_zone: layout_view::in_tab_strip(&zone, global),
-                                zone,
+                                // 撕裂窗口无面板树：整体 = 加标签 / 头部 = 排序两态（无边缘分割）
+                                kind: match layout_view::drop_zone_at(zone, global) {
+                                    layout_view::DropZone::Tab => layout_view::DropZone::Tab,
+                                    _ if zone.detached_id.is_some() => layout_view::DropZone::Center,
+                                    kind => kind,
+                                },
+                                zone: zone.clone(),
                             });
                     }
                     return Task::none();
                 }
+                // 无拖拽候选的普通按压：超阈值仅清除按压基准（无手势）
                 if let Some((press_win, press_pos)) = self.press {
                     if press_win == id
                         && ((pos.x - press_pos.x).abs() > 5.0 || (pos.y - press_pos.y).abs() > 5.0)
                     {
                         self.press = None;
-                        return self.try_start_tab_drag(id, press_pos);
                     }
                 }
                 Task::none()
             }
             Message::Release => {
                 self.press = None;
+                self.tab_press = None;
                 if self.divider.take().is_some() {
                     return Task::none();
                 }
@@ -1176,7 +1443,9 @@ impl App {
             }
             Message::RenameStartFile(rel) => {
                 self.dismiss_popup();
+                // 笔记重命名初值去 .md 后缀（标题即文件名约定）
                 let name = rel.rsplit('/').next().unwrap_or(&rel).to_string();
+                let name = name.strip_suffix(".md").map(|s| s.to_string()).unwrap_or(name);
                 self.rename = Some(RenameState { target: RenameTarget::File(rel), value: name });
                 Task::none()
             }
@@ -1184,6 +1453,36 @@ impl App {
                 self.dismiss_popup();
                 let name = dir.rsplit('/').next().unwrap_or(&dir).to_string();
                 self.rename = Some(RenameState { target: RenameTarget::Folder(dir), value: name });
+                Task::none()
+            }
+            Message::DeleteAsk(rel) => {
+                // 文件删除 = 直接进确认 pane（无标题行确认态）
+                self.popup_pane = 1;
+                self.delete_confirm = Some((rel, false, None));
+                Task::none()
+            }
+            Message::FolderDeleteAsk(rel) => {
+                // 文件夹删除 = 非强制删除先行：空目录直接删；非空返回条目数进确认 pane
+                let Some(root) = self.vault.root().ok() else { return Task::none() };
+                let gen = self.epoch();
+                let rel_task = rel.clone();
+                Task::perform(
+                    async move { vault::delete_folder(&root, &rel_task, false).map(|r| (r.needs_confirm, r.item_count)).map_err(|e| e) },
+                    move |result| match result {
+                        Ok((false, _)) => Message::OpDone(gen, parent_of(&rel), Ok(rel), FollowUp::None),
+                        Ok((true, n)) => Message::FolderCounted(rel, n),
+                        Err(e) => Message::OpDone(gen, parent_of(&rel), Err(e), FollowUp::None),
+                    },
+                )
+            }
+            Message::FolderCounted(rel, count) => {
+                self.popup_pane = 1;
+                self.delete_confirm = Some((rel, true, Some(count)));
+                Task::none()
+            }
+            Message::DeleteCancel => {
+                self.delete_confirm = None;
+                self.popup_pane = 0;
                 Task::none()
             }
             Message::DeleteEntry(rel, is_dir) => {
@@ -1200,6 +1499,7 @@ impl App {
                     return Task::none();
                 }
                 self.dismiss_popup();
+                self.delete_confirm = None;
                 self.delete_entry(&rel, is_dir)
             }
             Message::RevealVault => {
@@ -1214,11 +1514,25 @@ impl App {
                 }
                 Task::none()
             }
-            Message::OpDone(gen, dir, Ok(()), follow) => {
+            Message::OpDone(gen, dir, Ok(final_rel), mut follow) => {
                 if gen != self.epoch() {
                     return Task::none();
                 }
-                self.notify(NoticeLevel::Success, "完成");
+                self.dismiss_popup();
+                // 重命名去重判定：实际落点与请求名不同 = 发生了去重，提醒条告知，
+                // 且「打开中笔记跟随」必须按实际落点（否则指向幽灵路径）
+                if let FollowUp::Renamed { to, .. } = &mut follow {
+                    if *to != final_rel {
+                        let old_name = to.rsplit('/').next().unwrap_or(to);
+                        let new_name = final_rel.rsplit('/').next().unwrap_or(&final_rel);
+                        self.rename_notice =
+                            Some((format!("「{old_name}」已存在，已重命名为「{new_name}」"), Instant::now()));
+                        *to = final_rel;
+                    }
+                }
+                if !matches!(follow, FollowUp::Renamed { .. }) {
+                    self.notify(NoticeLevel::Success, "完成");
+                }
                 self.apply_follow(&follow);
                 self.load_children(&dir)
             }
@@ -1228,6 +1542,102 @@ impl App {
                 }
                 self.notify(NoticeLevel::Error, e);
                 Task::none()
+            }
+            Message::ExpandAllToggle => {
+                if self.expand_all {
+                    // 收起全部：清空展开集
+                    self.expand_all = false;
+                    self.expand_pending = 0;
+                    self.ui.file_explorer_expanded.clear();
+                    self.schedule_persist();
+                    Task::none()
+                } else {
+                    // 展开全部：从根递归加载（懒加载树逐层补齐）
+                    self.expand_all = true;
+                    self.expand_pending = 1;
+                    self.load_children_for_expand("")
+                }
+            }
+            Message::ExpandChildrenLoaded(dir, gen, Ok(entries)) => {
+                if gen != self.epoch() || !self.expand_all {
+                    return Task::none();
+                }
+                self.expand_pending = self.expand_pending.saturating_sub(1);
+                if !dir.is_empty() && !self.ui.file_explorer_expanded.contains(&dir) {
+                    self.ui.file_explorer_expanded.push(dir.clone());
+                }
+                self.children.insert(dir.clone(), entries.clone());
+                let mut task = Task::none();
+                for (rel, is_dir) in entries {
+                    if !is_dir {
+                        continue;
+                    }
+                    // 已缓存目录直接进展开集；未缓存的才下发加载（缓存 ≠ 已展开）
+                    if !self.ui.file_explorer_expanded.contains(&rel) {
+                        self.ui.file_explorer_expanded.push(rel.clone());
+                    }
+                    if !self.children.contains_key(&rel) {
+                        self.expand_pending += 1;
+                        task = task.chain(self.load_children_for_expand(&rel));
+                    }
+                }
+                if self.expand_pending == 0 {
+                    self.schedule_persist();
+                }
+                task
+            }
+            Message::ExpandChildrenLoaded(_, gen, Err(e)) => {
+                if gen != self.epoch() || !self.expand_all {
+                    return Task::none();
+                }
+                self.expand_pending = self.expand_pending.saturating_sub(1);
+                self.notify(NoticeLevel::Error, format!("读取目录失败：{e}"));
+                Task::none()
+            }
+            Message::RenamePressInside => {
+                self.rename_press_inside = true;
+                Task::none()
+            }
+            Message::SettingsNavCollapse => {
+                self.settings_collapsed = !self.settings_collapsed;
+                Task::none()
+            }
+            Message::SaveErrorDismiss => {
+                self.save_error = None;
+                Task::none()
+            }
+            Message::DividerAdjust(horizontal, positive) => {
+                // 键盘调整上次拖动过的把手（±2%，双侧钳 12%）；
+                // 门控：编辑面聚焦 / 源码档 / 行内重命名在途时方向键属文本操作，不调把手
+                if self.edit.focused
+                    || self.note_mode == NoteMode::Source
+                    || self.rename.is_some()
+                    || self.popup.is_some()
+                {
+                    return Task::none();
+                }
+                let Some((split_id, gap, h)) = self.last_divider.clone() else {
+                    return Task::none();
+                };
+                if h != horizontal {
+                    return Task::none();
+                }
+                let Some(info) = enumerate_dividers(&layout::active_layout(&self.ui).tree, self.content_area())
+                    .into_iter()
+                    .find(|d| d.split_id == split_id && d.gap == gap)
+                else {
+                    return Task::none();
+                };
+                let sum: f64 = info.sizes.iter().sum();
+                let step = sum * 0.02 * if positive { 1.0 } else { -1.0 };
+                let mut sizes = info.sizes.clone();
+                let s0 = sizes[gap] + step;
+                let s1 = sizes[gap + 1] - step;
+                let min = sum * UiMetrics::MIN_SPLIT_FRAC;
+                let (s0, s1) = clamp_split_pair(s0, s1, min);
+                sizes[gap] = s0;
+                sizes[gap + 1] = s1;
+                self.apply(LayoutOp::SetLayoutSizes { split_id, sizes })
             }
             Message::NotImplemented(what) => {
                 self.dismiss_popup();
@@ -1240,13 +1650,19 @@ impl App {
     /// 应用一个布局操作：形状校验 + 变更 + 调度落盘 + 撕裂窗口调和
     /// （iced 单状态树天然全窗口可见，无广播层）。布局操作全部伴随弹层收起。
     fn apply(&mut self, op: LayoutOp) -> Task<Message> {
+        self.apply_op(op).0
+    }
+
+    /// 同 [`Self::apply`]，返回 (调和任务, 操作结果)；SplitPanel 新面板 id 等后续操作需要结果，
+    /// 调和任务（建窗/搬位）必须继续上报运行时，丢弃会丢撕裂窗口。
+    fn apply_op(&mut self, op: LayoutOp) -> (Task<Message>, layout::LayoutOpResult) {
         if !op_passes_shape_check(&self.ui, &op) {
-            return Task::none();
+            return (Task::none(), layout::LayoutOpResult::default());
         }
-        let _result = apply_layout_op(&mut self.ui, &op);
+        let result = apply_layout_op(&mut self.ui, &op);
         self.dismiss_popup();
         self.schedule_persist();
-        self.reconcile()
+        (self.reconcile(), result)
     }
 
     /// 收起当前弹层（菜单动作完成后的统一收尾）。
@@ -1255,46 +1671,94 @@ impl App {
         self.popup_pane = 0;
     }
 
-    /// 拖标签手势成立：按压落在某个窗口的标签条内 → 拖该面板/撕裂窗口的活动标签
-    /// （锁定禁拖，与老壳守卫同语义）。
-    fn try_start_tab_drag(&mut self, window: window::Id, press_local: Point) -> Task<Message> {
-        let Some(wpos) = self.os_positions.get(&window) else {
-            return Task::none();
+    /// 拖拽候选转正：候选由标签按钮按下时自证命中，此处只补齐标签信息并校验锁定
+    /// （锁定禁拖；布局 tab 主页固定不可拖在候选入口已挡）。
+    fn start_drag_from_press(&mut self, tp: TabPress) -> Task<Message> {
+        let wpos = self.os_positions.get(&tp.window).copied();
+        let press_global = match (&self.press, wpos) {
+            (Some((w, p)), Some(wpos)) if *w == tp.window => {
+                Point::new(wpos.x + p.x, wpos.y + p.y)
+            }
+            _ => return Task::none(),
         };
-        let press_global = Point::new(wpos.x + press_local.x, wpos.y + press_local.y);
-        let zones = layout_view::panel_zones(self);
-        let Some(zone) = zones.iter().find(|z| z.rect.contains(press_global)) else {
-            return Task::none();
+        let drag = match tp.source {
+            PressSource::Panel { panel_id, tab_id } => {
+                if self.tab_locked(&tab_id, Some(&panel_id), None) {
+                    return Task::none();
+                }
+                let Some((view, label)) = self
+                    .active_tree()
+                    .and_then(|tree| layout::find_tab_in_tree(&tree, &tab_id))
+                    .map(|(_, t)| (t.view.clone(), layout_view::tab_label(self, &t.view)))
+                else {
+                    return Task::none();
+                };
+                DragSession {
+                    tab_id,
+                    view,
+                    label,
+                    from_panel: Some(panel_id),
+                    from_detached: None,
+                    layout_from: 0,
+                    current: press_global,
+                    cursor_window: tp.window,
+                }
+            }
+            PressSource::Detached { window_id, tab_id } => {
+                let locked = self
+                    .ui
+                    .detached_windows
+                    .iter()
+                    .find(|w| w.id == window_id)
+                    .and_then(|w| w.tabs.iter().find(|t| t.id == tab_id))
+                    .is_some_and(|t| t.locked);
+                if locked {
+                    return Task::none();
+                }
+                let Some((view, label)) = self
+                    .ui
+                    .detached_windows
+                    .iter()
+                    .find(|w| w.id == window_id)
+                    .and_then(|w| w.tabs.iter().find(|t| t.id == tab_id))
+                    .map(|t| (t.view.clone(), layout_view::tab_label(self, &t.view)))
+                else {
+                    return Task::none();
+                };
+                DragSession {
+                    tab_id,
+                    view,
+                    label,
+                    from_panel: None,
+                    from_detached: Some(window_id),
+                    layout_from: 0,
+                    current: press_global,
+                    cursor_window: tp.window,
+                }
+            }
+            PressSource::Layout { layout_id, name } => {
+                // 合成序（主页 = 0 不参与拖拽；入口已挡）；tabs 已含主页占 0 位
+                let (_, tabs) = layout_view::titlebar_tab_strip(self);
+                let from_index = tabs
+                    .iter()
+                    .position(|(id, _, _)| id == &layout_id)
+                    .unwrap_or(0);
+                if from_index == 0 {
+                    return Task::none();
+                }
+                DragSession {
+                    tab_id: layout_id,
+                    view: String::new(),
+                    label: name,
+                    from_panel: None,
+                    from_detached: None,
+                    layout_from: from_index,
+                    current: press_global,
+                    cursor_window: tp.window,
+                }
+            }
         };
-        if !layout_view::in_tab_strip(zone, press_global) {
-            return Task::none();
-        }
-        let active = if let Some(pid) = &zone.panel_id {
-            self.active_tree()
-                .and_then(|tree| find_active_tab(&tree, pid))
-        } else if let Some(mid) = &zone.detached_id {
-            self.ui.detached_windows.iter().find(|w| &w.id == mid).and_then(|w| {
-                let t = w.tabs.iter().find(|t| Some(t.id.as_str()) == w.active_tab_id.as_deref())?;
-                Some((t.id.clone(), t.view.clone()))
-            })
-        } else {
-            None
-        };
-        let Some((tab_id, view)) = active else {
-            return Task::none();
-        };
-        if self
-            .tab_locked(&tab_id, zone.panel_id.as_deref(), zone.detached_id.as_deref())
-        {
-            return Task::none();
-        }
-        self.drag = Some(DragSession {
-            tab_id,
-            view,
-            from_panel: zone.panel_id.clone(),
-            from_detached: zone.detached_id.clone(),
-            current: press_global,
-        });
+        self.drag = Some(drag);
         self.drag_hover = None;
         Task::none()
     }
@@ -1319,8 +1783,35 @@ impl App {
         false
     }
 
-    /// 释放落点解析：同宿主标签条 = 重排序、跨宿主 = 移动/停靠、桌面 = 撕出新窗口。
+    /// 释放落点解析：布局 tab = 排序；同宿主标签条 = 重排序、跨宿主 = 移动/停靠、
+    /// 四边缘 = 分割落点、桌面 = 撕出新窗口。
     fn resolve_drop(&mut self, d: DragSession, hover: Option<DragHover>) -> Task<Message> {
+        // 布局 tab 拖拽（无宿主面板）：落回标题栏 tab 条 = 排序，其余取消
+        // （titlebar_tab_strip 返回主窗口本地坐标，光标须换算回本地）
+        if d.from_panel.is_none() && d.from_detached.is_none() {
+            if let Some(main_id) = self.main_id {
+                if let Some(wpos) = self.os_positions.get(&main_id) {
+                    let local = Point::new(d.current.x - wpos.x, d.current.y - wpos.y);
+                    if local.y <= UiMetrics::TITLEBAR_H {
+                        let (strip_x, tabs) = layout_view::titlebar_tab_strip(self);
+                        if local.x >= strip_x {
+                            // 插入位 = 命中标签中点之前（内容坐标随滚动偏移平移）
+                            let mut insert = tabs.len();
+                            let mut x = strip_x - self.titlebar_tab_scroll_x;
+                            for (i, (_, _, w)) in tabs.iter().enumerate() {
+                                if local.x < x + w / 2.0 {
+                                    insert = i;
+                                    break;
+                                }
+                                x += w + 4.0;
+                            }
+                            return Task::done(Message::LayoutDropped(d.layout_from, insert));
+                        }
+                    }
+                }
+            }
+            return Task::none();
+        }
         let Some(h) = hover else {
             let bounds = WindowBounds {
                 x: d.current.x as f64,
@@ -1343,9 +1834,45 @@ impl App {
                 _ => Task::none(),
             };
         };
-        let index = h
-            .tab_zone
-            .then(|| layout_view::tab_index_at(&h.zone, d.current.x));
+        let scroll_x = h
+            .zone
+            .panel_id
+            .as_deref()
+            .and_then(|pid| self.panel_tab_scroll_x.get(pid).copied())
+            .unwrap_or(0.0);
+        let index = (h.kind == layout_view::DropZone::Tab)
+            .then(|| layout_view::tab_index_at(&h.zone, d.current.x, scroll_x));
+        // 四边缘 = 分割落点（仅主窗口面板；撕裂窗口整体 = 加标签）
+        if h.zone.panel_id.is_some()
+            && matches!(
+                h.kind,
+                layout_view::DropZone::Left
+                    | layout_view::DropZone::Right
+                    | layout_view::DropZone::Top
+                    | layout_view::DropZone::Bottom
+            )
+        {
+            let direction = if matches!(h.kind, layout_view::DropZone::Left | layout_view::DropZone::Right) {
+                "horizontal"
+            } else {
+                "vertical"
+            }
+            .to_string();
+            let position = matches!(h.kind, layout_view::DropZone::Right | layout_view::DropZone::Bottom)
+                .then(|| "after".to_string())
+                .or_else(|| Some("before".to_string()));
+            let target = h.zone.panel_id.clone().unwrap();
+            // 分割出新面板 → 标签移入（返回值携带新面板 id；调和任务串接）
+            let (task, result) = self.apply_op(LayoutOp::SplitPanel {
+                panel_id: target,
+                direction,
+                position,
+            });
+            if let Some(new_panel) = result.split_panel_id {
+                return task.chain(self.move_tab_into(d, new_panel, None));
+            }
+            return task;
+        }
         // 同主窗口面板：标签条 = 重排序，面板体 = 取消
         if h.zone.panel_id.is_some() && h.zone.panel_id == d.from_panel {
             if let (Some(panel_id), Some(to_index)) = (d.from_panel, index) {
@@ -1370,27 +1897,37 @@ impl App {
         }
         // 跨宿主
         if let Some(to_panel) = h.zone.panel_id {
-            if let Some(from_panel_id) = d.from_panel {
-                return self.apply(LayoutOp::MoveTabBetween {
-                    from_panel_id,
-                    to_panel_id: to_panel,
-                    tab_id: d.tab_id,
-                    index,
-                });
-            }
-            if d.from_detached.is_some() {
-                // 来源撕裂窗口条目由 op 内部拖空自动移除（reconcile 随即回收 OS 窗口）
-                return self.apply(LayoutOp::DockIntoPanel {
-                    panel_id: to_panel,
-                    tab_id: d.tab_id,
-                    index,
-                });
-            }
-            return Task::none();
+            return self.move_tab_into(d, to_panel, index);
         }
         if let Some(window_id) = h.zone.detached_id {
             return self.apply(LayoutOp::DockIntoDetached {
                 window_id,
+                tab_id: d.tab_id,
+                index,
+            });
+        }
+        Task::none()
+    }
+
+    /// 把拖拽标签移入目标面板（来源主面板 / 撕裂窗口两路）。
+    fn move_tab_into(
+        &mut self,
+        d: DragSession,
+        to_panel: String,
+        index: Option<usize>,
+    ) -> Task<Message> {
+        if let Some(from_panel_id) = d.from_panel {
+            return self.apply(LayoutOp::MoveTabBetween {
+                from_panel_id,
+                to_panel_id: to_panel,
+                tab_id: d.tab_id,
+                index,
+            });
+        }
+        if d.from_detached.is_some() {
+            // 来源撕裂窗口条目由 op 内部拖空自动移除（reconcile 随即回收 OS 窗口）
+            return self.apply(LayoutOp::DockIntoPanel {
+                panel_id: to_panel,
                 tab_id: d.tab_id,
                 index,
             });
@@ -1485,35 +2022,30 @@ impl App {
         layout::active_scene(&self.ui).into()
     }
 
-    /// 主窗口分割树几何区域（标题栏与状态栏之间的内容区，logical px；
-    /// 与渲染列的两条 1px 分隔线同源：上下各让 1px）。
+    /// 主窗口分割树几何区域（标题栏与状态栏之间的内容区，logical px）。
     fn content_area(&self) -> iced::Rectangle {
-        iced::Rectangle {
-            x: 0.0,
-            y: UiMetrics::TITLEBAR_H + 1.0,
-            width: self.main_size.width,
-            height: (self.main_size.height
-                - UiMetrics::TITLEBAR_H
-                - UiMetrics::STATUSBAR_H
-                - 2.0)
-                .max(0.0),
-        }
+        layout_view::content_area_of(self)
     }
 
     /// ui 层消息转译：提示显隐 / 弹层关闭与面板导航 / 通知关闭。
     fn on_ui(&mut self, msg: ui::UiMsg) -> Task<Message> {
         match msg {
-            ui::UiMsg::HoverTip { window, label } => {
-                self.tooltip = Some((window, label, Instant::now(), false));
+            ui::UiMsg::HoverTip { window, label, box_px } => {
+                let anchor = self.cursor_for(window);
+                self.tooltip = Some((window, label, Instant::now(), false, None, anchor));
+                self.tooltip_half = Some(box_px / 2.0);
                 Task::none()
             }
             ui::UiMsg::HoverTipEnd { window, label } => {
+                // 事件 exit 仍生效（未被捕获吞掉时立即进入收起延迟）
                 if self
                     .tooltip
                     .as_ref()
-                    .is_some_and(|(w, l, _, _)| *w == window && l == &label)
+                    .is_some_and(|(w, l, _, _, closed, _)| *w == window && l == &label && closed.is_none())
                 {
-                    self.tooltip = None;
+                    if let Some((_, _, _, _, closed_at, _)) = &mut self.tooltip {
+                        *closed_at = Some(Instant::now());
+                    }
                 }
                 Task::none()
             }
@@ -1525,6 +2057,7 @@ impl App {
                 if self.popup.as_ref().is_some_and(|(w, _)| *w == window) {
                     self.popup = None;
                     self.popup_pane = 0;
+                    self.delete_confirm = None;
                 }
                 Task::none()
             }
@@ -1594,7 +2127,8 @@ impl App {
     }
 
     /// 文件树重命名/新建草稿提交：按目标种类分派到 core 的写入口；
-    /// 新建对同名做加序号去重（笔记与文件夹都查内存外磁盘事实）。
+    /// 新建与改名对同名做 `-2`/`-3` 加序号去重（以磁盘事实为准，改名排除自身），
+    /// OpDone 携带实际落点供「已重命名为」提醒条判定。
     fn commit_file_rename(&mut self, r: RenameState) -> Task<Message> {
         let Some(root) = self.vault.root().ok() else { return Task::none() };
         let gen = self.epoch();
@@ -1608,7 +2142,7 @@ impl App {
                 let parent = dir.clone();
                 Task::perform(
                     async move {
-                        // 同名加序号：name、name 2、name 3 …（存在性以磁盘为准，目录同名同样让位）
+                        // 同名加序号：name、name-2、name-3 …（存在性以磁盘为准，目录同名同样让位）
                         let base = match kind {
                             DraftKind::Note => format!("{name}.md"),
                             DraftKind::Folder => name.clone(),
@@ -1621,8 +2155,8 @@ impl App {
                                 break;
                             }
                             candidate = match kind {
-                                DraftKind::Note => format!("{name} {seq}.md"),
-                                DraftKind::Folder => format!("{name} {seq}"),
+                                DraftKind::Note => format!("{name}-{seq}.md"),
+                                DraftKind::Folder => format!("{name}-{seq}"),
                             };
                             seq += 1;
                         }
@@ -1630,9 +2164,9 @@ impl App {
                         match kind {
                             DraftKind::Note => {
                                 let path = vault::safe_join(&root, &rel, true)?;
-                                vault::atomic_write(&path, "")
+                                vault::atomic_write(&path, "").map(|_| rel)
                             }
-                            DraftKind::Folder => vault::create_folder(&root, &rel).map(|_| ()),
+                            DraftKind::Folder => vault::create_folder(&root, &rel).map(|_| rel),
                         }
                     },
                     move |result| Message::OpDone(gen, parent, result, FollowUp::None),
@@ -1649,10 +2183,37 @@ impl App {
                     Some(i) => format!("{title}.{}", &old[i + 1..]),
                 };
                 let parent = parent_of(&old);
+                let parent_for_task = parent.clone();
                 let old_for_task = old.clone();
                 let new_for_task = new.clone();
                 Task::perform(
-                    async move { vault::rename_note_file(&root, &old_for_task, &new_for_task) },
+                    async move {
+                        // 目标已存在（排除自身）= 加序号静默落位，实际落点经 OpDone 回传
+                        // （case-only 改名跳过：Windows exists() 大小写不敏感，会误判同名冲突）
+                        let mut target = new_for_task.clone();
+                        if target != old_for_task && !target.eq_ignore_ascii_case(&old_for_task) {
+                            let path = vault::safe_join(&root, &full_rel(&parent_for_task, &target), false)?;
+                            if path.exists() {
+                                let (stem, ext) = match target.rfind('.') {
+                                    Some(i) if i > 0 => (target[..i].to_string(), target[i..].to_string()),
+                                    _ => (target.clone(), String::new()),
+                                };
+                                let mut seq = 2;
+                                loop {
+                                    target = format!("{stem}-{seq}{ext}");
+                                    let p = vault::safe_join(&root, &full_rel(&parent_for_task, &target), false)?;
+                                    if !p.exists() {
+                                        break;
+                                    }
+                                    seq += 1;
+                                }
+                            }
+                        }
+                        if target == old_for_task {
+                            return Ok(target);
+                        }
+                        vault::rename_note_file(&root, &old_for_task, &target).map(|_| target)
+                    },
                     move |result| {
                         Message::OpDone(gen, parent, result, FollowUp::Renamed { from: old, to: new })
                     },
@@ -1671,7 +2232,32 @@ impl App {
                 let old_for_task = old_dir.clone();
                 let new_for_task = new_dir.clone();
                 Task::perform(
-                    async move { vault::rename_folder(&root, &old_for_task, &new_for_task) },
+                    async move {
+                        // 目标已存在（排除自身）= 加序号静默落位；case-only 改名跳过查重
+                        // （Windows exists() 大小写不敏感，会误判同名冲突）
+                        let mut target = new_for_task.clone();
+                        if target != old_for_task && !target.eq_ignore_ascii_case(&old_for_task) {
+                            let path = vault::safe_join(&root, &target, false)?;
+                            if path.exists() {
+                                let mut seq = 2;
+                                loop {
+                                    target = match new_for_task.rfind('/') {
+                                        Some(i) => format!("{}/{}-{seq}", &new_for_task[..i], &new_for_task[i + 1..]),
+                                        None => format!("{new_for_task}-{seq}"),
+                                    };
+                                    let p = vault::safe_join(&root, &target, false)?;
+                                    if !p.exists() {
+                                        break;
+                                    }
+                                    seq += 1;
+                                }
+                            }
+                        }
+                        if target == old_for_task {
+                            return Ok(target);
+                        }
+                        vault::rename_folder(&root, &old_for_task, &target).map(|_| target)
+                    },
                     move |result| {
                         Message::OpDone(
                             gen,
@@ -1686,7 +2272,7 @@ impl App {
         }
     }
 
-    /// 删除文件/文件夹（不可恢复；菜单内已就地确认）。
+    /// 删除文件/文件夹（不可恢复；菜单内已就地确认）。Ok 携带目标相对路径。
     fn delete_entry(&mut self, rel: &str, is_dir: bool) -> Task<Message> {
         let Some(root) = self.vault.root().ok() else { return Task::none() };
         let gen = self.epoch();
@@ -1696,9 +2282,9 @@ impl App {
         Task::perform(
             async move {
                 if is_dir {
-                    vault::delete_folder(&root, &rel_for_task, true).map(|_| ())
+                    vault::delete_folder(&root, &rel_for_task, true).map(|_| rel_for_task)
                 } else {
-                    vault::delete_vault_file(&root, &rel_for_task)
+                    vault::delete_vault_file(&root, &rel_for_task).map(|_| rel_for_task)
                 }
             },
             move |result| {
@@ -1727,6 +2313,23 @@ impl App {
         Task::perform(
             async move { vault::read_dir_filtered(&root, &rel, &exclude) },
             move |result| Message::ChildrenLoaded(rel_for_cb, gen, result),
+        )
+    }
+
+    /// 递归展开用的目录读取（带世代守卫：在途任务不跨仓库落地）。
+    fn load_children_for_expand(&self, rel: &str) -> Task<Message> {
+        let Ok(root) = self.vault.root() else {
+            return Task::none();
+        };
+        let Ok(exclude) = self.vault.exclude_folders() else {
+            return Task::none();
+        };
+        let rel = rel.to_string();
+        let rel_for_cb = rel.clone();
+        let gen = self.epoch();
+        Task::perform(
+            async move { vault::read_dir_filtered(&root, &rel, &exclude) },
+            move |result| Message::ExpandChildrenLoaded(rel_for_cb, gen, result),
         )
     }
 
@@ -2185,6 +2788,11 @@ impl App {
                 match self.resolve_note_path(&path) {
                     Some(rel) => {
                         self.ui.last_note_file = Some(rel.clone());
+                        // 与文件树点击同口径：打开即复位只读
+                        self.note_mode = NoteMode::Read;
+                        self.preview_doc = None;
+                        self.edit_doc = None;
+                        self.edit_meta.clear();
                         self.schedule_persist();
                         self.notify(NoticeLevel::Success, "打开链接");
                         self.load_note(&rel)
@@ -2267,9 +2875,10 @@ impl App {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        // 心跳仅在有待过期通知、tooltip 显现在途或编辑面聚焦（光标闪烁节拍）时挂载
+        // 心跳仅在有待过期通知、提醒条在途、悬停提示在途（距离收起判定）或编辑面聚焦时挂载
         let need_tick = !self.notifications.is_empty()
-            || self.tooltip.as_ref().is_some_and(|(_, _, _, shown)| !*shown)
+            || self.rename_notice.is_some()
+            || self.tooltip.is_some()
             || self.edit.focused;
         Subscription::batch([
             iced::time::every(PERSIST_TICK).map(|_| Message::PersistTick),
@@ -2278,7 +2887,28 @@ impl App {
             } else {
                 Subscription::none()
             },
+            // 分割把手键盘调整：上次拖动过的把手，方向键 ±2%（horizontal = 左右键）
             iced::event::listen_with(|event, _status, window| match event {
+                Event::Keyboard(keyboard::Event::KeyPressed {
+                    key: keyboard::Key::Named(keyboard::key::Named::ArrowLeft),
+                    modifiers,
+                    ..
+                }) if modifiers.is_empty() => Some(Message::DividerAdjust(true, false)),
+                Event::Keyboard(keyboard::Event::KeyPressed {
+                    key: keyboard::Key::Named(keyboard::key::Named::ArrowRight),
+                    modifiers,
+                    ..
+                }) if modifiers.is_empty() => Some(Message::DividerAdjust(true, true)),
+                Event::Keyboard(keyboard::Event::KeyPressed {
+                    key: keyboard::Key::Named(keyboard::key::Named::ArrowUp),
+                    modifiers,
+                    ..
+                }) if modifiers.is_empty() => Some(Message::DividerAdjust(false, false)),
+                Event::Keyboard(keyboard::Event::KeyPressed {
+                    key: keyboard::Key::Named(keyboard::key::Named::ArrowDown),
+                    modifiers,
+                    ..
+                }) if modifiers.is_empty() => Some(Message::DividerAdjust(false, true)),
                 Event::Keyboard(keyboard::Event::KeyPressed {
                     key: keyboard::Key::Character(c),
                     modifiers,

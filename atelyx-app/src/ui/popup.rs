@@ -2,7 +2,7 @@
 //! 窗口根部 Stack 叠三层（内容/全窗捕获层/浮层），Esc 由应用层键盘订阅路由。
 
 use iced::widget::{container, mouse_area, space, stack};
-use iced::{Element, Length, Padding, Point, Size, border, widget::container::Style};
+use iced::{Color, Element, Length, Padding, Point, Size, border, widget::container::Style};
 
 use super::palette as pal;
 use crate::Message;
@@ -15,6 +15,8 @@ pub struct PopupSpec {
     pub height: f32,
     /// 触发器顶边 y（下方放不下且上方放得下时，底边贴此值翻转）。
     pub flip_y: Option<f32>,
+    /// 宽度下限（弹层不窄于触发按钮；0 = 不限）。
+    pub min_width: f32,
 }
 
 /// 解析后的弹层矩形（窗口局部坐标，已钳制/翻转）。
@@ -26,7 +28,8 @@ pub struct PopupGeom {
 
 /// 钳制 + 翻转（语义与旧壳一致：视口边距 6px；下方放不下且上方放得下才翻转）。
 pub fn resolve(spec: &PopupSpec, viewport: Size) -> PopupGeom {
-    let (w, h) = (spec.width, spec.height);
+    let w = spec.width.max(spec.min_width);
+    let h = spec.height;
     let max_x = (viewport.width - w - pal::VIEWPORT_GAP).max(pal::VIEWPORT_GAP);
     let x = spec.anchor.x.clamp(pal::VIEWPORT_GAP, max_x);
     let mut y = spec.anchor.y;
@@ -42,7 +45,15 @@ pub fn resolve(spec: &PopupSpec, viewport: Size) -> PopupGeom {
     PopupGeom { x, y, w }
 }
 
+/// 阴影环外扩量（左右/顶部/底部；与 positioned 偏移配对使用）。
+const SHADOW_PAD_LEFT: f32 = 4.0;
+const SHADOW_PAD_TOP: f32 = 2.0;
+const SHADOW_PAD_BOTTOM: f32 = 14.0;
+
 /// 把弹层叠在窗口内容之上：`background` = 该窗口的常规内容元素。
+///
+/// 阴影用「外扩容器露出的半透明黑底环」近似（iced 无 box-shadow）；
+/// 定位偏移 = 弹层坐标回退外扩量，两处必须同步（见常量）。
 pub fn layer<'a>(
     background: Element<'a, Message>,
     geom: PopupGeom,
@@ -57,12 +68,24 @@ pub fn layer<'a>(
             border: border::rounded(pal::RADIUS_MD).color(pal::BORDER).width(1.0),
             ..Style::default()
         });
-    let positioned = container(popup)
+    let shadow_wrap = container(popup)
+        .padding(Padding {
+            left: SHADOW_PAD_LEFT,
+            top: SHADOW_PAD_TOP,
+            right: SHADOW_PAD_LEFT,
+            bottom: SHADOW_PAD_BOTTOM,
+        })
+        .style(move |_t| Style {
+            background: Some(Color::BLACK.scale_alpha(0.35).into()),
+            border: border::rounded(pal::RADIUS_MD + SHADOW_PAD_LEFT),
+            ..Style::default()
+        });
+    let positioned = container(shadow_wrap)
         .width(Length::Fill)
         .height(Length::Fill)
         .align_x(iced::alignment::Horizontal::Left)
         .align_y(iced::alignment::Vertical::Top)
-        .padding(Padding::ZERO.left(geom.x).top(geom.y));
+        .padding(Padding::ZERO.left(geom.x - SHADOW_PAD_LEFT).top(geom.y - SHADOW_PAD_TOP));
     stack![background, capture, positioned]
         .width(Length::Fill)
         .height(Length::Fill)

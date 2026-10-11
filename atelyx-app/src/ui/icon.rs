@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-use iced::widget::canvas::{self, Canvas, Frame, LineCap, LineDash, LineJoin, Path, Stroke};
+use iced::widget::canvas::{self, Canvas, LineCap, LineDash, LineJoin, Path, Stroke};
 use iced::{Color, Element, Length, Point, Rectangle, Vector};
 
 use super::icons::{self, Shape};
@@ -14,6 +14,9 @@ use super::svgpath;
 
 /// 图标几何缓存：kebab 名 → 展平子路径（24 单位坐标）。
 static CACHE: OnceLock<HashMap<&'static str, Vec<svgpath::Polyline>>> = OnceLock::new();
+
+// 每帧重绘（State = ()）：canvas::Cache 只按尺寸失效，挂实例 State 会把
+// 变色/换形图标画到陈旧几何；展平结果已在静态缓存，每帧只剩描边。
 
 /// 启动时展平全部图标形状（一次性，微秒级）。
 pub fn init() {
@@ -79,11 +82,12 @@ fn rounded_rect(x: f32, y: f32, w: f32, h: f32, r: f32) -> Vec<svgpath::Polyline
     vec![poly]
 }
 
-/// 图标部件：在 `size` 见方的框内绘制。
+/// 图标部件：绘制以实际 bounds 为准（视框边长在 icon_stroke 构造 Canvas 宽高时给定）。
 pub struct Icon {
     pub name: &'static str,
-    pub size: f32,
     pub color: Color,
+    /// 描边宽度（24 单位视框坐标；lucide 缺省 2）。
+    pub stroke_units: f32,
 }
 
 impl<Message> canvas::Program<Message> for Icon
@@ -100,20 +104,19 @@ where
         bounds: Rectangle,
         _cursor: iced::mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
-        let mut frame = Frame::new(renderer, bounds.size());
-        // CACHE 值本身是 'static，直接借用不克隆（每帧零分配）
         let Some(subpaths) = CACHE.get().and_then(|m| m.get(self.name)) else {
             return vec![];
         };
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
         // 24 单位视框 → size 见方，居中
-        let k = self.size / 24.0;
+        let k = frame.width() / 24.0;
         let offset = Vector::new(
-            (bounds.width - 24.0 * k) / 2.0,
-            (bounds.height - 24.0 * k) / 2.0,
+            (frame.width() - 24.0 * k) / 2.0,
+            (frame.height() - 24.0 * k) / 2.0,
         );
         let stroke = Stroke {
             style: canvas::Style::Solid(self.color),
-            width: 2.0,
+            width: self.stroke_units,
             line_cap: LineCap::Round,
             line_join: LineJoin::Round,
             line_dash: LineDash { segments: &[], offset: 0 },
@@ -138,14 +141,24 @@ where
     }
 }
 
-/// 图标元素（`size` 见方；未知图标名画空）。
+/// 图标元素（`size` 见方、缺省 2 单位描边；未知图标名画空）。
 pub fn icon<Message: 'static>(name: &str, size: f32, color: Color) -> Element<'static, Message> {
+    icon_stroke(name, size, color, 2.0)
+}
+
+/// 图标元素（自定描边宽度；lucide strokeWidth 1.5 档等价 stroke_units = 1.5）。
+pub fn icon_stroke<Message: 'static>(
+    name: &str,
+    size: f32,
+    color: Color,
+    stroke_units: f32,
+) -> Element<'static, Message> {
     let name: &'static str = icons::NAMES
         .iter()
         .copied()
         .find(|n| *n == name)
         .unwrap_or("");
-    Canvas::new(Icon { name, size, color })
+    Canvas::new(Icon { name, color, stroke_units })
         .width(Length::Fixed(size))
         .height(Length::Fixed(size))
         .into()
