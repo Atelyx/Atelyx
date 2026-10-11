@@ -2383,9 +2383,9 @@ async fn media_list_enumerates_reserved_dir_safely() {
     assert_eq!(status, 401);
 }
 
-// ===== CORS（桌面 WebView 跨源直连）=====
+// ===== CORS（跨源直连）=====
 
-/// WebView（origin = tauri.localhost）跨源请求先发预检 OPTIONS：服务端必须 200 应答并放行
+/// 跨源请求先发预检 OPTIONS：服务端必须 200 应答并放行
 /// POST / content-type / authorization；实际跨源请求的响应须携带 allow-origin，
 /// 否则浏览器引擎直接中断请求（Failed to fetch）。
 #[tokio::test]
@@ -2393,7 +2393,7 @@ async fn cors_preflight_and_cross_origin_requests_allowed() {
     let dir = tempfile::tempdir().unwrap();
     let ctx = Ctx::new(spawn_server(dir.path()).await);
 
-    // 预检：模拟 WebView origin + 实际请求形态（JSON 体 + Bearer 头）
+    // 预检：模拟跨源 origin + 实际请求形态（JSON 体 + Bearer 头）
     let pre = ctx
         .http
         .request(reqwest::Method::OPTIONS, format!("{}/api/auth/register", ctx.base))
@@ -2723,7 +2723,7 @@ async fn webui_page_sends_security_headers() {
     assert_eq!(h.get("referrer-policy").and_then(|v| v.to_str().ok()), Some("no-referrer"));
 }
 
-/// 邀请码有效时长边界：0 / 负数 / 超上限 / 前端典型溢出量级 400，边界值 1 与 87600 放行。
+/// 邀请码有效时长边界：0 / 负数 / 超上限 / 客户端典型溢出量级 400，边界值 1 与 87600 放行。
 #[tokio::test]
 async fn invite_duration_range_validated() {
     let dir = tempfile::tempdir().unwrap();

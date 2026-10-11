@@ -21,7 +21,7 @@ use std::collections::HashSet;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt as UnixCommandExt;
 
-/// 进程事件（与前端 `services/shell.ts` 的 `ProcessEvent` 逐字对齐）。
+/// 进程事件（serde `tag = "event"`，即上报给调用方的 JSON 契约）。
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "event", rename_all = "lowercase")]
 pub enum ProcessEvent {
@@ -32,7 +32,7 @@ pub enum ProcessEvent {
     Error { message: String },
 }
 
-/// 事件出口：命令侧包一层 Tauri `Channel`，测试侧收进内存。
+/// 事件出口：由调用方注入的闭包（壳侧接事件循环，测试接收集器）。
 pub type EventSink = Arc<dyn Fn(ProcessEvent) + Send + Sync + 'static>;
 
 /// 校验并解析要启动的程序。
@@ -448,9 +448,9 @@ fn spawn_line_reader(
     })
 }
 
-/// 读一行：到 `\n` 或 `\r` 即算一行（终止符含在返回内容里，前端因此仍需按 `\r?\n` 自行切分）。
+/// 读一行：到 `\n` 或 `\r` 即算一行（终止符含在返回内容里，调用方因此仍需按 `\r?\n` 自行切分）。
 ///
-/// 切分语义与 tauri-plugin-shell 的按行上报一致：同一缓冲块内**先找 `\n` 再找 `\r`**（次序影响
+/// 按行上报：同一缓冲块内**先找 `\n` 再找 `\r`**（次序影响
 /// 切分结果），中断读重试，返回 0 = 输出结束。
 fn read_line(reader: &mut impl BufRead, out: &mut Vec<u8>) -> std::io::Result<usize> {
     let mut read = 0;

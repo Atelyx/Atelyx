@@ -1,7 +1,6 @@
-//! 深色主题调色板与度量常量：token 值与旧壳 `styles/index.css` 深色变量一一对应。
+//! 深色主题调色板与度量常量：颜色、字号、圆角与布局尺寸的统一定义。
 //!
-//! 单位约定：颜色用 sRGB 8bit/alpha；尺寸为 logical px；字号/圆角对应旧壳
-//! `--fs-*` / `--radius-*` 档位。
+//! 单位约定：颜色用 sRGB 8bit/alpha；尺寸为 logical px；字号 / 圆角为固定档位。
 
 use iced::{Color, Theme, theme::Palette};
 
@@ -14,89 +13,89 @@ const fn rgba(r: u8, g: u8, b: u8, a: f32) -> Color {
 }
 
 // ===== 背景色阶（sunken < primary < secondary < tertiary < overlay）=====
-/// `--bg-sunken`
+/// 最深背景：内陷区域底（输入框 / 分段控件）
 pub const BG_SUNKEN: Color = rgb(0x0c, 0x0d, 0x10);
-/// `--bg-primary`：面板内容区
+/// 主背景：面板内容区
 pub const BG_PRIMARY: Color = rgb(0x13, 0x14, 0x18);
-/// `--bg-secondary`：面板头 / 工具条 / 标题栏
+/// 次背景：面板头 / 工具条 / 标题栏
 pub const BG_SECONDARY: Color = rgb(0x1b, 0x1e, 0x23);
-/// `--bg-tertiary`：内嵌卡片 / 激活布局 tab 底
+/// 三级背景：内嵌卡片 / 激活布局 tab 底
 pub const BG_TERTIARY: Color = rgb(0x23, 0x27, 0x2e);
-/// `--bg-overlay`：浮层
+/// 浮层背景
 pub const BG_OVERLAY: Color = rgb(0x2a, 0x2e, 0x36);
 
 // ===== 文本 =====
-/// `--text-primary`
+/// 主文字
 pub const TEXT_PRIMARY: Color = rgb(0xe0, 0xdd, 0xd6);
-/// `--text-secondary`
+/// 次要文字
 pub const TEXT_SECONDARY: Color = rgb(0xab, 0xa9, 0xa2);
-/// `--text-muted`
+/// 弱化文字（占位 / 说明）
 pub const TEXT_MUTED: Color = rgb(0x91, 0x8f, 0x88);
 
 // ===== 边与交互态 =====
-/// `--border-subtle`
+/// 最弱分隔线
 pub const BORDER_SUBTLE: Color = rgb(0x25, 0x2a, 0x31);
-/// `--border`
+/// 常规边框
 pub const BORDER: Color = rgb(0x2e, 0x33, 0x3a);
-/// `--border-strong`
+/// 强边框
 pub const BORDER_STRONG: Color = rgb(0x38, 0x3d, 0x44);
-/// `--hover`
+/// 悬停底色
 pub const HOVER: Color = rgb(0x23, 0x27, 0x2e);
 
 // ===== 表单 =====
-/// `--input-placeholder`
+/// 输入框占位文字色
 pub const INPUT_PLACEHOLDER: Color = TEXT_MUTED;
 
 // ===== 强调（黄铜金）=====
-/// `--accent`
+/// 强调色
 pub const ACCENT: Color = rgb(0xe0, 0xa9, 0x4e);
-/// `--accent-soft`
+/// 强调淡底（激活态底色）
 pub const ACCENT_SOFT: Color = rgba(224, 169, 78, 0.14);
 
 // ===== 状态语义色 =====
-/// `--success`
+/// 成功
 pub const SUCCESS: Color = rgb(0x5f, 0xbf, 0x8b);
-/// `--warning`
+/// 警告
 pub const WARNING: Color = ACCENT;
-/// `--danger`
+/// 危险 / 错误
 pub const DANGER: Color = rgb(0xe8, 0x77, 0x6c);
 
 // ===== 标题栏窗口控制 =====
-/// `--titlebar-icon`
+/// 标题栏按钮图标色
 pub const TITLEBAR_ICON: Color = TEXT_SECONDARY;
-/// `--titlebar-hover`
+/// 标题栏按钮悬停底色
 pub const TITLEBAR_HOVER: Color = rgba(255, 255, 255, 0.07);
-/// `--titlebar-close-hover`
+/// 关闭按钮悬停底色
 pub const TITLEBAR_CLOSE_HOVER: Color = rgb(0xe8, 0x11, 0x23);
 
 // ===== 形状与度量 =====
-/// `--radius-xs`
+/// 圆角 xs
 pub const RADIUS_XS: f32 = 4.0;
-/// `--radius-sm`
+/// 圆角 sm
 pub const RADIUS_SM: f32 = 6.0;
-/// `--radius-md`
+/// 圆角 md
 pub const RADIUS_MD: f32 = 10.0;
 
-/// 字阶：`--fs-micro`
+/// 字阶 micro
 pub const FS_MICRO: f32 = 11.0;
-/// 字阶：`--fs-caption`
+/// 字阶 caption
 pub const FS_CAPTION: f32 = 12.0;
-/// 字阶：`--fs-ui`（默认文字档）
+/// 字阶 ui（默认文字档）
 pub const FS_UI: f32 = 13.0;
-/// 字阶：`--fs-body`
+/// 字阶 body
 pub const FS_BODY: f32 = 14.0;
-/// 字阶：`--fs-h2`
+/// 字阶 h2
 pub const FS_H2: f32 = 16.0;
-/// 字阶：`--fs-h1`（占位引导标题档）
+/// 字阶 h1（占位引导标题档）
 pub const FS_H1: f32 = 20.0;
 
-/// 标题栏高度（旧壳 `h-9`）
+/// 标题栏高度
 pub const TITLEBAR_H: f32 = 36.0;
-/// 状态栏高度（旧壳 `h-[26px]`）
+/// 状态栏高度
 pub const STATUSBAR_H: f32 = 26.0;
-/// 面板标签条高度（旧壳 `h-7`）
+/// 面板标签条高度
 pub const TAB_BAR_H: f32 = 28.0;
-/// 视口钳制边距（旧壳 `VIEWPORT_GAP`）
+/// 视口钳制边距
 pub const VIEWPORT_GAP: f32 = 6.0;
 /// 菜单项高度（12px 字行高 16 + 上下 6px 内边距）
 pub const MENU_ITEM_H: f32 = 28.0;
@@ -104,7 +103,7 @@ pub const MENU_ITEM_H: f32 = 28.0;
 pub const MENU_DIVIDER_H: f32 = 9.0;
 /// 菜单分组头高度
 pub const MENU_GROUP_H: f32 = 22.0;
-/// 浮层容器上下内边距（旧壳默认 `py-1`）
+/// 浮层容器上下内边距
 pub const POPUP_PAD_Y: f32 = 4.0;
 
 /// 内置 iced 主题：按本调色板定制（内置部件的 palette 色 = accent 等语义映射）。

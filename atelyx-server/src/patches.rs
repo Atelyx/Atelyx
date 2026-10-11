@@ -125,7 +125,7 @@ pub struct TableField {
     /// singleSelect 的选项列表（其他类型无此字段）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub options: Option<Vec<String>>,
-    /// 用户拖拽调整后的列宽（px；缺省 = 前端按字段名自适应）。
+    /// 用户拖拽调整后的列宽（px；缺省 = 客户端按字段名自适应）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub width: Option<f64>,
     /// 状态栏列自动计算类型（sum/avg/max/min/count；缺省 = 无计算）。
@@ -139,7 +139,7 @@ pub struct TableRow {
     /// 单元格值按字段 id 存（缺 key = 空单元格）。
     #[serde(default)]
     pub values: serde_json::Map<String, serde_json::Value>,
-    /// 用户拖拽调整后的行高（px；缺省 = 前端按内容自然撑开）。
+    /// 用户拖拽调整后的行高（px；缺省 = 客户端按内容自然撑开）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub height: Option<f64>,
     /// 单元格显示样式按字段 id 存（与值正交；缺 key = 默认样式）。

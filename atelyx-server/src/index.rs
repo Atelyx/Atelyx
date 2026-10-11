@@ -33,7 +33,7 @@ pub struct SpaceIndex {
 
 // ===== 反链索引 =====
 
-/// 反链行：引用方笔记的相对路径 + 标题（对应前端 types/canvas.ts）。
+/// 反链行：引用方笔记的相对路径 + 标题。
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(test, derive(Debug))]
@@ -134,7 +134,7 @@ fn file_stamp(path: &FsPath) -> Option<FileStamp> {
 
 // ===== 标签索引 =====
 
-/// 标签行：标签名 + 全空间出现次数（对应前端 types/tags.ts）。
+/// 标签行：标签名 + 全空间出现次数。
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TagRow {

@@ -9,54 +9,43 @@
 
 ## 本地开发
 
-前置要求：Node.js 18+、pnpm、Rust（stable）、Tauri 2 系统依赖。
+前置要求：Rust（stable，仓库根 `rust-toolchain.toml` 锁定版本）。Linux 还需 iced / winit 的系统依赖（X11 或 Wayland 开发库）。
 
 ```bash
 git clone https://github.com/Atelyx/Atelyx.git
 cd Atelyx
-pnpm install
-pnpm run tauri:dev    # 启动开发（自动开 Vite + Tauri 窗口）
+cargo run -p atelyx-app   # 启动开发
 ```
 
 常用命令：
 
 ```bash
-pnpm run check       # 完整门禁（含 cargo test，提交前必须通过；需本机已装 Rust 工具链）
-pnpm run tauri:build # 打包
+cargo test --workspace   # 工作区测试（提交前必须通过）
+cargo build --release    # 打包
 ```
 
 ## 代码约定
 
 ### 分层职责
 
-前端按层组织，跨层只走 store 或 props，组件不直接调 service：
+仓库是 Cargo workspace，依赖方向单向：壳层 crate 依赖 `atelyx-core`，`atelyx-core` 不依赖任何 GUI crate。
 
-| 层 | 路径 | 职责 |
+| crate | 路径 | 职责 |
 | --- | --- | --- |
-| 页面 | `src/pages/` | 组合组件与 store |
-| 组件 | `src/components/` | 纯 UI，props 与回调通信 |
-| 状态 | `src/stores/` | 运行时状态 + 调 service 持久化 |
-| 服务 | `src/services/` | 所有外部 I/O 的唯一出口（invoke / AI / 搜索 / keychain） |
-| 类型 | `src/types/` | 类型契约 |
-| Rust 命令 | `legacy/src-tauri/src/commands/` | Tauri 命令边界 |
-| Rust 模块 | `legacy/src-tauri/src/{vault,watcher}.rs` | 仓库文件读写、文件监听 |
-
-主要目录：
-
-- `components/canvas/` 画布节点与面板，`components/table/` 多维表格，`components/editor/` 笔记编辑器，`components/layout/` 工作区布局，`components/common/` 通用组件
-- `hooks/` 复用交互逻辑，`utils/` 纯函数工具，`constants/` 常量与 schema，`styles/` 主题变量
+| 应用壳 | `atelyx-app/` | iced 窗口与布局、视图、组件库与主题 |
+| 核心 | `atelyx-core/` | UI 无关：仓库存储、会话容器、Markdown 与 frontmatter 解析、协作帧泵、进程托管 |
+| 服务端 | `atelyx-server/` | 协作服务端（独立进程，不进 workspace） |
 
 ### 风格
 
-- TypeScript 严格模式，禁止 `any`、禁止 `@ts-ignore`（类型定义文件除外）。
-- 命名：组件 `PascalCase`，工具 / service `camelCase`，常量 `UPPER_SNAKE_CASE`，数据字段 camelCase。
-- 图标统一用 lucide-react 线性图标。
-- 新增节点组件放 `components/canvas/nodes/`，新增类型放 `src/types/` 并在 barrel export，新增 Rust 命令在 `lib.rs` 注册。
-
+- Rust 2021 edition；沿用仓库既有排版（不整文件跑格式化工具，避免噪音 diff）。
+- 命名：类型 / 枚举 `PascalCase`，函数 / 变量 `snake_case`，常量 `UPPER_SNAKE_CASE`。
+- 注释只写代码表达不了的契约（行为约定、失败与异常、时序与竞态、所有权与副作用），不写控制流复述。
+- 新增 crate 或跨 crate 能力前先确认已有实现能否复用，避免重复造轮子。
 
 ## 提交与 PR
 
 - 分支式开发，一个 PR 只做一件事，说明改动动机与验证方式。
 - 提交前自行审查 diff（`git diff` / `git status`），确认无调试残留、无多余文件。
 - commit 描述用中文、一句话简短点题（如 `feat: 支持 xxx` / `fix: 修复 xxx`），内容与描述一一对应。
-- 合并前确保 `pnpm run check` 通过。
+- 合并前确保 `cargo test --workspace` 通过。

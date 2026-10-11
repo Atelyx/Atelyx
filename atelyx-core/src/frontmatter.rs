@@ -2,7 +2,7 @@
 //!
 //! 解析 = yaml-rust2 事件流搭结构 + 自研 YAML 1.1 标量解析表（js-yaml v3 语义：yes/on/timestamp
 //! 等形态有类型）；序列化 = 自研 emitter（js-yaml dump 形状：块列表缩进、单引号规则、字面量块），
-//! 两侧语义由 `fixtures/frontmatter/parse.json` 对拍锁定（再生见 `frontmatter-fixture.test.ts`）。
+//! 两侧语义由 `fixtures/frontmatter/parse.json` 对拍锁定。
 
 use std::sync::OnceLock;
 

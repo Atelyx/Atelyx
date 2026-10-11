@@ -1,6 +1,6 @@
 //! 基础控件：按钮 / 图标按钮 / 状态徽标 / 空态 / 分隔线 / 输入框。
 //!
-//! 颜色与尺寸档取自 [`super::palette`]（与旧壳 CSS 变量一一对应）；
+//! 颜色与尺寸档取自 [`super::palette`]；
 //! hover/禁用反馈经 `button::Status` 在样式闭包内表达。
 
 use iced::widget::{button, column, container, mouse_area, row, space, text, text_input};

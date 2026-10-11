@@ -93,7 +93,7 @@ impl VaultState {
     }
 
     /// 设置当前仓库会话（canonicalize 消除 `..`/符号链接，保证 safe_join 校验语义一致；
-    /// 用 dunce 去除 Windows `\\?\` 长路径前缀，保证存/回传给前端的路径格式统一）。
+    /// 用 dunce 去除 Windows `\\?\` 长路径前缀，保证存/回传给调用方的路径格式统一）。
     /// 同时清空反链索引缓存并递增会话世代：不同仓库的索引不混用（查询时懒重建），
     /// 且锁外构建中的索引据世代判定作废（见 `generation`）。
     /// 返回 Result：Mutex poisoned 时向上传播而非静默丢弃（与 root() 策略一致）。
@@ -117,8 +117,8 @@ impl VaultState {
     }
 }
 
-// ===== .atlx 文件结构（对应前端 types/canvas.ts）=====
-// data 用 serde_json::Value，不耦合业务字段；rename_all = "camelCase" 对齐前端。
+// ===== .atlx 文件结构 =====
+// data 用 serde_json::Value，不耦合业务字段；rename_all = "camelCase"。
 
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -286,11 +286,11 @@ pub fn read_dir_filtered(
         .collect())
 }
 
-// ===== 文件面板排序（与前端 FileExplorerSortKey 同值域：目录恒名称自然序在前）=====
+// ===== 文件面板排序（按排序键分派：目录恒名称自然序在前）=====
 
 /// 名称自然比较：数字段按数值（`file2` < `file10`，前导零多者排后），其余按码点序。
-/// 与前端 `sort.ts` 的 `localeCompare(…, "zh")` 差异：中文按码点不按拼音（Rust 侧无
-/// ICU，不值得为树内排序引入 collation 依赖），英文大小写同码点序——两端顺序可能不同。
+/// 中文按码点不按拼音（Rust 侧无
+/// ICU，不值得为树内排序引入 collation 依赖），英文大小写同码点序。
 pub fn compare_natural(a: &str, b: &str) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     fn blocks(s: &str) -> Vec<&str> {
@@ -685,7 +685,7 @@ pub fn same_physical_file(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// 画布增量保存补丁（对应前端 types/canvas.ts 的 CanvasPatch）：只含变化/新增/删除的实体，
+/// 画布增量保存补丁（对应 `.atlx` schema）：只含变化/新增/删除的实体，
 /// 按稳定 id 合并——removed 幂等（缺 id 不报错），upsert 覆盖同 id 或追加。
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -705,7 +705,7 @@ pub struct CanvasPatch {
     pub removed_edge_ids: Vec<String>,
 }
 
-/// 表格增量保存补丁（对应前端 types/table.ts 的 TablePatch）。
+/// 表格增量保存补丁（对应 `.atb` schema）。
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct TablePatch {
@@ -778,7 +778,7 @@ fn scan_canvases_in(
     Ok(())
 }
 
-// ===== .atb 表格文件结构（对应前端 types/table.ts）=====
+// ===== .atb 表格文件结构 =====
 // values 用 serde_json::Map（值类型随字段类型：string/number/image = {images, display?} 对象），不耦合单元格业务。
 
 /// `.atb` 表格文件（schema `atelyx-table/v1`）。
@@ -809,11 +809,11 @@ pub struct TableField {
     /// singleSelect 的选项列表（其他类型无此字段）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub options: Option<Vec<String>>,
-    /// 用户拖拽调整后的列宽（px；缺省 = 前端按字段名自适应）。
+    /// 用户拖拽调整后的列宽（px；缺省 = 按字段名自适应）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub width: Option<f64>,
     /// 状态栏列自动计算类型（sum/avg/max/min/count；缺省 = 无计算）。
-    /// 必须在此显式声明，否则 serde 反序列化会丢弃前端传来的该字段，写盘丢失。
+    /// 必须在此显式声明，否则 serde 反序列化会丢弃调用方传来的该字段，写盘丢失。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub calc_type: Option<String>,
 }
@@ -824,8 +824,8 @@ pub struct TableRow {
     /// 单元格值按字段 id 存（缺 key = 空单元格）。
     #[serde(default)]
     pub values: serde_json::Map<String, serde_json::Value>,
-    /// 用户拖拽调整后的行高（px；缺省 = 前端按内容自然撑开）。
-    /// 必须在此显式声明，否则 serde 反序列化会丢弃前端传来的该字段，写盘丢失。
+    /// 用户拖拽调整后的行高（px；缺省 = 按内容自然撑开）。
+    /// 必须在此显式声明，否则 serde 反序列化会丢弃调用方传来的该字段，写盘丢失。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub height: Option<f64>,
     /// 单元格显示样式按字段 id 存（与值正交：字体/粗体/字色/底色等，缺 key = 默认样式）。
@@ -876,7 +876,7 @@ pub fn rename_note_file(root: &Path, old_file: &str, new_file: &str) -> Result<(
         return Err(format!("源不是文件：{}", old_file));
     }
     // 目标已存在直接拒绝（Linux/macOS 的 fs::rename 会静默覆盖，Windows 会报错但语义不一）；
-    // 前端 dedupe 已防重名，此处兜底并发/外部创建。
+    // 调用方已防重名，此处兜底并发/外部创建。
     // 豁免 case-only 重命名（`note.md`→`Note.md`）：大小写不敏感文件系统上 exists() 解析到同一文件，
     // 两个 canonicalize 都成功且相等才豁免；任一失败（身份不明）不豁免，宁可拒绝不可覆盖
     let same_file = same_physical_file(&old_path, &new_path);
@@ -902,9 +902,8 @@ pub fn delete_vault_file(root: &Path, file: &str) -> Result<(), String> {
 // ===== 历史侧文件迁移（随重命名/移动/文件夹改名）=====
 
 /// 侧文件名编码契约（最小百分号转义）：仅转义文件系统非法字符（`% / \ : * ? " < > |`）、
-/// 控制符与 DEL（UTF-8 字节 `%XX`，大写十六进制），中文等合法字符保留原样——与前端
-/// `services/history/index.ts` 的 `encodeSideName` 完全一致，重命名迁移两端各自计算，
-/// 字符集改动须两侧同步（`percent_decode` 对 `%XX` 解码，`%` 本身被转义故无歧义）。
+/// 控制符与 DEL（UTF-8 字节 `%XX`，大写十六进制），中文等合法字符保留原样。
+/// 字符集是侧文件名的磁盘契约（`percent_decode` 对 `%XX` 解码，`%` 本身被转义故无歧义）。
 /// 不能用 encodeURIComponent 式全量转义：CJK 字符会膨胀成 9 字符，中文长路径的侧文件名
 /// 超出 NAS/SMB 服务端 ~260 字符路径上限（客户端 `\\?\UNC\` 扩展前缀无效），历史读写
 /// 对这些笔记永久失败。最小转义下侧文件路径长度 ≈ 笔记自身路径 + 常数 overhead。
@@ -941,13 +940,13 @@ pub fn percent_encode_legacy(s: &str) -> String {
 }
 
 /// 历史侧文件根与 kind 子目录（note 保持旧路径 `.atelyx/history/<enc>.json` 向后兼容；
-/// canvas/table 按 kind 分目录摊平）。与前端 `services/history/index.ts` 的目录结构一致。
+/// canvas/table 按 kind 分目录摊平）。
 const HISTORY_DIR: &str = ".atelyx/history";
 const HISTORY_KIND_SUBDIRS: [&str; 3] = ["", "canvas/", "table/"];
 
 /// 迁移单个文件的全部候选历史侧文件（note/canvas/table 三处只命中存在的一处）：
 /// `.atelyx/history[/<kind>/]<enc(old)>.json` → 同结构新编码路径。
-/// 只认最小编码名——旧 encodeURIComponent 存量须先由前端 `migrateHistoryFile` 迁至新名，
+/// 只认最小编码名——存量旧编码名须先迁至新名，
 /// remap 才找得到源（by_dir 解码文件名，可直读旧名）。
 /// 源不存在（无历史/已迁移过）静默跳过；目标已存在（罕见：新路径已累积历史）跳过不覆盖。
 /// 单个失败不阻断其它（历史尽力而为，不阻塞重命名主流程）。
@@ -1038,7 +1037,7 @@ pub struct VaultModel {
 
 /// 仓库级 AI 供应商（磁盘格式，默认**不含 api_key**——key 走 keychain 条目
 /// `provider-<sha256(root)>-<id>`；仅 `syncKeys` 开启时随仓库落盘 apiKey，多设备同步）。
-/// 运行时含 key 的 `ProviderConfig` 由前端 `settingsStore` 填充。
+/// 运行时含 key 的 `ProviderConfig` 由调用方填充。
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct VaultProvider {
@@ -1048,7 +1047,7 @@ pub struct VaultProvider {
     /// 多模型列表（一个供应商多个模型，含可选昵称）。
     #[serde(default)]
     pub models: Vec<VaultModel>,
-    /// API key（仅 syncKeys 开启时随仓库落盘/读取；关闭时前端剥离不写）。
+    /// API key（仅 syncKeys 开启时随仓库落盘/读取；关闭时调用方剥离不写）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
 }
@@ -1062,7 +1061,7 @@ pub struct VaultSearchConfig {
     pub provider: String,
     #[serde(default)]
     pub searxng_url: String,
-    /// Tavily API key（仅 syncKeys 开启时随仓库落盘/读取；关闭时前端剥离不写）。
+    /// Tavily API key（仅 syncKeys 开启时随仓库落盘/读取；关闭时调用方剥离不写）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tavily_api_key: Option<String>,
 }
@@ -1070,7 +1069,7 @@ pub struct VaultSearchConfig {
 /// 仓库级配置（默认**不含 API key**——key 走 keychain，条目按仓库隔离；
 /// 仅 `syncKeys` 开启时 providers/search 落盘 key 字段，随仓库同步多设备）。
 /// 主题/强调色/字号/字体/自动恢复开关为应用级（`commands/global.rs` 的 `GlobalConfig`）。
-/// serde 类型层守边界：未开启时前端剥离 key 字段再写盘；
+/// serde 类型层守边界：未开启时调用方剥离 key 字段再写盘；
 /// `skip_serializing_if` 让无覆盖字段不落盘，保持 config.json 干净（{} = 无覆盖）。
 #[derive(Serialize, Deserialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
@@ -1078,7 +1077,7 @@ pub struct VaultConfig {
     /// 仓库级默认模型（模型服务 tab 配置；缺省 = 未指定，跟随默认的对话请求报错提示）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// 仓库级默认模型所属供应商（与 model 配对固定供应商；旧配置缺省 = 前端按 model 名反查首个命中，重选后落盘）。
+    /// 仓库级默认模型所属供应商（与 model 配对固定供应商；缺省 = 调用方按 model 名反查首个命中，重选后落盘）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_provider_id: Option<String>,
     /// 仓库级 AI 供应商列表（默认无 key；key 走 keychain 条目 `provider-<sha256(root)>-<id>`，
@@ -1108,7 +1107,7 @@ pub struct VaultConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_naming_model: Option<EditorChatModelOverride>,
     /// 启动仓库时自动切换到的场景 id（缺省 = 不切换，保持上次界面；切换场景恢复该场景记忆的激活布局）。
-    /// 场景列表是应用级的（ui-state.json），id 悬挂（场景已删）由前端解析守卫忽略。
+    /// 场景列表是应用级的（ui-state.json），id 悬挂（场景已删）由调用方解析守卫忽略。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entry_scene_id: Option<String>,
 }
@@ -1141,7 +1140,7 @@ pub fn read_vault_config(root: &Path) -> Result<VaultConfig, String> {
 
 /// 读仓库级配置，并带回「损坏备份文件名」（`None` = 未发生损坏）。
 ///
-/// 解析失败先备份原文再降级：仓库配置由前端做「读 → 改 → 写」与字段级合并补丁，读到的空配置参与
+/// 解析失败先备份原文再降级：仓库配置由调用方做「读 → 改 → 写」与字段级合并补丁，读到的空配置参与
 /// 后续写盘——不备份就等于「一次外部编辑/磁盘异常静默清空供应商/默认模型」。
 /// 备份文件名回传调用方：读到的空配置会让用户看到「设置全没了」，必须能告知原因与备份位置。
 /// **备份失败即报错**（与补丁写路径同口径）：留不下原文还按空配置继续，调用方紧接着就会用
@@ -1198,8 +1197,8 @@ fn config_patch_lock(path: &Path) -> std::sync::Arc<Mutex<()>> {
 
 /// 删除「残留明文 key」的指令只在合并后仍不是同步模式时生效。
 ///
-/// 该指令来自前端**加载时**对文件的观察（见 stores/settingsStore 的 `strayTavilyKeyOnDisk`）：
-/// 期间文件可能已被别的设备改成 `syncKeys: true` 并写入合法 key，而前端内存不会随之更新。只认磁盘事实——合并后仍是同步模式就不接受这次删键，防把别的设备刚写入的
+/// 该指令来自调用方**加载时**对文件的观察：
+/// 期间文件可能已被别的设备改成 `syncKeys: true` 并写入合法 key，而调用方内存不会随之更新。只认磁盘事实——合并后仍是同步模式就不接受这次删键，防把别的设备刚写入的
 /// key 抹掉；用户显式关闭开关时补丁同时带 `syncKeys: false`，删除照常生效。
 fn guard_stale_key_deletion(base_json: &str, patch: &serde_json::Value) -> serde_json::Value {
     let Some(patch_obj) = patch.as_object() else {
@@ -1236,12 +1235,12 @@ fn guard_stale_key_deletion(base_json: &str, patch: &serde_json::Value) -> serde
 /// 把字段级合并补丁应用到 `.atelyx/config.json`（读磁盘原文 → 合并 → 原子写），
 /// 返回损坏原文的备份文件名（`None` = 未发生损坏；调用方据此提示用户）。
 ///
-/// 为什么以磁盘原文为基线、而不以调用方内存态为基线：前端各 setter 只发自己改动的字段，未出现在补丁里
+/// 为什么以磁盘原文为基线、而不以调用方内存态为基线：调用方各 setter 只发自己改动的字段，未出现在补丁里
 /// 的字段必须保留**磁盘上的当前值**。撕裂窗口持独立 store 副本，其内存态可能落后于主窗口刚写入的值；
 /// 若以内存态为基线整文件写，会把主窗口的改动整片抹掉（供应商丢失即此因）。
 ///
 /// 基线损坏**不得当空配置继续**：那会把「仅含补丁字段」的配置写回，其余字段（providers/model…）
-/// 永久删除且不留档（前端只在进仓时读一次配置，之后文件被外部改坏不会有第二次读来触发备份）。
+/// 永久删除且不留档（调用方只在进仓时读一次配置，之后文件被外部改坏不会有第二次读来触发备份）。
 /// 故这里与读路径同口径：先备份原文，再按空基线继续——用户下次改动设置时重新配置，但原文可人工取回。
 /// 损坏判定走类型级反序列化（不只「是不是 JSON」）：合法 JSON 但字段类型错（`{"providers":"oops"}`）
 /// 同样会让合并失败并静默丢掉用户改动，必须与解析失败同口径先留档。备份失败则直接报错不写盘——
@@ -1352,7 +1351,7 @@ pub fn write_prompt_notes_file(root: &Path, files: &[String]) -> Result<(), Stri
 // Agent = 可复用对话预设（名称 + 系统提示词 + 工具），对话节点/面板按 id 引用；
 // 单独落盘避免混入配置字段（与 prompt-notes.json 同策略）。
 
-/// 单条 Agent 配置（字段命名与前端 types/agent.ts 对齐，camelCase）。
+/// 单条 Agent 配置（字段 camelCase）。
 #[derive(Serialize, Deserialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentConfig {
@@ -1440,7 +1439,7 @@ pub const CHAT_META_EXT: &str = ".meta.json";
 /// 面板级覆盖文件（相对仓库根；设备偏好，不跨设备传播、不监听）。
 pub const EDITOR_CHATS_META_FILE: &str = ".atelyx/editor-chats-meta.json";
 
-/// editor-chats-meta.json 的 schema 版本（与前端 constants/editorChats.ts 的 EDITOR_CHATS_META_SCHEMA 对齐）。
+/// editor-chats-meta.json 的 schema 版本。
 pub const EDITOR_CHATS_META_SCHEMA: &str = "atelyx-editor-chats-meta/v1";
 
 /// 会话压缩注解（用户手动触发；边界之前的消息不进模型请求，消息本体不删改）。
@@ -1532,7 +1531,7 @@ fn chat_messages_path(root: &Path, file: &str) -> Result<PathBuf, String> {
     safe_join(root, file, false)
 }
 
-/// 读会话消息正文 .jsonl（文件不存在报错，由前端 catch 降级为空消息）。
+/// 读会话消息正文 .jsonl（文件不存在报错，由调用方降级为空消息）。
 pub fn read_chat_messages_file(root: &Path, file: &str) -> Result<String, String> {
     let path = chat_messages_path(root, file)?;
     std::fs::read_to_string(&path).map_err(|e| e.to_string())
@@ -1550,7 +1549,7 @@ pub fn write_chat_messages_file(root: &Path, file: &str, content: &str) -> Resul
     atomic_write(&path, &normalized)
 }
 
-/// 追加记录：消息 .jsonl 的增量（一行一条消息记录，与前端 serializeChatMessages 字段对齐；
+/// 追加记录：消息 .jsonl 的增量（一行一条消息记录；
 /// refs/steps/attachments 透传 JSON——Rust 侧不镜像嵌套类型，序列化时按字段名原样写出）。
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1590,11 +1589,11 @@ fn build_chat_append_buffer(records: &[ChatMessageRecord], needs_sep: bool) -> R
     Ok(buf)
 }
 
-/// 追加式写会话消息正文 .jsonl（消息增长场景：前端只传新增记录，每记录一行紧凑 JSON，省全量重拼与 IPC 载荷）。
+/// 追加式写会话消息正文 .jsonl（消息增长场景：调用方只传新增记录，每记录一行紧凑 JSON，省全量重拼与 IPC 载荷）。
 /// 真 OS 追加（open append + fsync）而非读-改-写全量重写：多设备并发追加同一会话互不覆盖
 /// （两写皆落、行交错，每行完整 JSON 可独立解析）。写前校验文件以 `\n` 结尾，缺则补 `\n`——
-/// 崩溃残尾（不完整行）与新记录保持分隔，残尾由前端解析时跳过（降级不丢已提交记录）。
-/// 文件缺失直接报错（前端回落全量重写重建历史——新建会话首次落盘走全量写路径，追加永不该建新文件）。
+/// 崩溃残尾（不完整行）与新记录保持分隔，残尾由调用方解析时跳过（降级不丢已提交记录）。
+/// 文件缺失直接报错（调用方回落全量重写重建历史——新建会话首次落盘走全量写路径，追加永不该建新文件）。
 /// 截断场景（回到此处/重新生成删消息）仍走 write_chat_messages_file 全量重写。
 pub fn append_chat_messages_file(
     root: &Path,
@@ -1704,7 +1703,7 @@ pub struct ChatSessionRow {
     pub id: String,
     /// 消息正文 .jsonl 相对仓库根路径（`.atelyx/对话历史/<会话 id>.jsonl`）
     pub file: String,
-    /// 元数据侧车（`.atelyx/对话历史/<会话 id>.meta.json`；缺失/损坏 = 前端按未命名/缺省 Agent 展示）
+    /// 元数据侧车（`.atelyx/对话历史/<会话 id>.meta.json`；缺失/损坏 = 调用方按未命名/缺省 Agent 展示）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub meta: Option<ChatSessionMeta>,
 }
@@ -1807,7 +1806,7 @@ fn sync_dir(dir: &Path) {
 #[cfg(not(unix))]
 fn sync_dir(_dir: &Path) {}
 
-/// 文件名净化：替换 `/\:*?"<>|` 为 `_`（对应前端 utils/filename.ts），
+/// 文件名净化：替换 `/\:*?"<>|` 为 `_`，
 /// 去首尾空白；Windows 保留名（CON/PRN/AUX/NUL/COM1-9/LPT1-9，含任意扩展名）与尾部点/空格
 /// 补 `_` 前缀/后缀避免 I/O 失败（`CON.md`、`foo.` 在 Windows 会被拒绝或截断）。
 pub fn sanitize_filename(title: &str) -> String {
@@ -1850,7 +1849,7 @@ pub fn create_folder(root: &Path, dir: &str) -> Result<String, String> {
     Ok(dir.to_string())
 }
 
-/// 删除文件夹的结果（结构化返回：空目录直接删；非空且未带 force 时返回需确认信息供前端弹窗）。
+/// 删除文件夹的结果（结构化返回：空目录直接删；非空且未带 force 时返回需确认信息供调用方确认）。
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeleteFolderResult {
@@ -1863,7 +1862,7 @@ pub struct DeleteFolderResult {
 }
 
 /// 删除文件夹（相对仓库根路径）。force=false 只删空目录——非空返回
-/// `needs_confirm`（含递归条目数）供前端弹窗确认后以 force=true 重试；
+/// `needs_confirm`（含递归条目数）供调用方确认后以 force=true 重试；
 /// force=true 递归删除全部内容。dir 为空（仓库根）拒绝，防误删整个仓库。
 pub fn delete_folder(root: &Path, dir: &str, force: bool) -> Result<DeleteFolderResult, String> {
     if dir.is_empty() {
@@ -1917,7 +1916,7 @@ pub fn rename_folder(root: &Path, old_dir: &str, new_dir: &str) -> Result<(), St
     if !old_path.is_dir() {
         return Err(format!("目录不存在：{}", old_dir));
     }
-    // 目标已存在拒绝（防覆盖丢数据；前端 dedupe 已防重名，此处兜底并发/外部创建）
+    // 目标已存在拒绝（防覆盖丢数据；调用方已防重名，此处兜底并发/外部创建）
     if new_path.exists() {
         return Err(format!("目标目录已存在：{}", new_dir));
     }
@@ -1936,7 +1935,7 @@ pub fn copy_folder(root: &Path, old_dir: &str, new_dir: &str) -> Result<(), Stri
     if !old_path.is_dir() {
         return Err(format!("目录不存在：{}", old_dir));
     }
-    // 目标已存在拒绝（防覆盖丢数据；前端 dedupe 已防重名，此处兜底并发/外部创建）
+    // 目标已存在拒绝（防覆盖丢数据；调用方已防重名，此处兜底并发/外部创建）
     if new_path.exists() {
         return Err(format!("目标目录已存在：{}", new_dir));
     }
@@ -2027,10 +2026,10 @@ pub fn vault_display_name(root: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// `.atlx` schema 版本号（对应前端 `types/canvas.ts` 的 `CANVAS_SCHEMA`）。
+/// `.atlx` schema 版本号。
 pub const CANVAS_SCHEMA: &str = "atelyx-canvas/v1";
 
-/// `.atb` schema 版本号（对应前端 `types/table.ts` 的 `TABLE_SCHEMA`）。
+/// `.atb` schema 版本号。
 pub const TABLE_SCHEMA: &str = "atelyx-table/v1";
 
 // ===== 反链索引（纯内存缓存，磁盘为真相）=====
@@ -2189,7 +2188,7 @@ fn file_stamp(path: &Path) -> Option<FileStamp> {
 // - 与反链索引同一套指纹增量刷新（mtime+size diff，只重读变化 .md，缺失剔除，外部编辑自愈）；
 // - 只扫 .md（不扫 .atlx/对话历史）；标签须含 ≥1 个字母（排除 `#2024`/`#1` 日期序号误判）。
 // - 正文提取跳过 frontmatter/围栏代码（含 ≤3 空格缩进）/缩进代码（≥4 空格行首）/行内代码；
-//   识别规则与前端渲染一致，渲染层额外跳过链接内文本（链接内标签仅入索引不渲染，视觉从简）。
+//   识别规则：渲染层额外跳过链接内文本（链接内标签仅入索引不渲染，视觉从简）。
 
 /// 标签行：标签名 + 全仓库出现次数（scan_vault_tags 返回，候选按 count 降序）。
 #[derive(Debug, Clone, Serialize)]
@@ -2323,7 +2322,7 @@ fn clean_tag_value(raw: &str) -> &str {
 
 /// 从正文（已剥 frontmatter）提取内联 `#标签`：跳过围栏代码（含 ≤3 空格缩进）/缩进代码/行内代码；
 /// `#` 前一字符非字母/数字/`#`/`_`/`/`（排除 `foo#bar`、`##tag`、URL 片段 `x.com/#faq`），标签须含 ≥1 个字母。
-/// 识别规则与前端渲染一致；渲染层额外跳过链接内文本（标签仅入索引不渲染，视觉从简）。
+/// 识别规则：渲染层额外跳过链接内文本（标签仅入索引不渲染，视觉从简）。
 fn extract_inline_tags(body: &str, tags: &mut HashSet<String>) {
     let bytes = body.as_bytes();
     let len = body.len();
@@ -2762,7 +2761,7 @@ pub fn flush_md_updates(root: &Path, updates: &[(String, String)]) -> Result<(),
 /// 解析内部链接目标（笔记名或相对路径）→ 规范相对路径。
 /// - 候选构造：`name` 已是 `.md` 路径（`[x](路径.md)` 形式）→ 原样作候选；否则按笔记名补 `.md` + 净化变体；
 /// - 匹配顺序：精确路径 → 文件名命中 → **同名歧义取「路径最短（根目录优先）+ 字典序」确定性兜底**
-///   （对齐前端 noteList 首个命中的可打开语义，防同名链接失效）；
+///   （首个命中的可打开语义，防同名链接失效）；
 /// - 全部分支后做大小写不敏感兜底：Windows 文件系统不区分大小写，`方案.MD` 与 `方案.md` 是同一文件。
 pub fn resolve_link_target(
     name: &str,
@@ -3177,7 +3176,7 @@ mod chat_append_tests {
     #[test]
     fn append_line_keeps_attachments_field() {
         // 追加路径按记录序列化：附件引用必须随行保留（serde 不得静默丢字段；
-        // 全量重写走前端原文透传不受此影响，唯独强类型追加曾是丢字段的重灾区）
+        // 全量重写走原文透传不受此影响，唯独强类型追加曾是丢字段的重灾区）
         let mut with_atts = record("a", "看这个");
         with_atts.attachments = Some(serde_json::json!([
             { "kind": "image", "mime": "image/png", "file": ".atelyx/附件/a.png" }
@@ -3918,7 +3917,7 @@ mod merge_vault_config_tests {
 
     #[test]
     fn stale_key_deletion_is_ignored_while_sync_keys_on_disk() {
-        // 删键指令来自前端加载时的观察；磁盘已被别的设备改成 syncKeys=true 时不得生效
+        // 删键指令来自调用方加载时的观察；磁盘已被别的设备改成 syncKeys=true 时不得生效
         //（否则会把另一设备刚写入的合法 key 抹掉）
         let root = TempDir::new("vault-config-stale-key");
         let dir = root.join(".atelyx");
@@ -4111,9 +4110,8 @@ mod flush_md_updates_tests {
 mod sanitize_filename_tests {
     use super::sanitize_filename;
 
-    /// 与前端 `utils/filename.ts::sanitizeFilename` **同一张用例表**（改一侧而另一侧未同步即失败）。
-    /// 前端预测的落盘名必须等于 Rust 实际写盘名，否则改名后的保存目标与列表路径会指错文件。
-    /// 保留名一律只折叠 ASCII 字母（与前端 `/[a-z]/` 折叠一致），不做 Unicode 大小写。
+    /// 净化用例表：落盘名必须稳定，否则改名后的保存目标与列表路径会指错文件。
+    /// 保留名一律只折叠 ASCII 字母，不做 Unicode 大小写。
     #[test]
     fn matches_frontend_sanitize_filename() {
         for (input, expected) in [
@@ -4146,7 +4144,7 @@ mod chat_session_meta_tests {
     use super::{ChatCompaction, ChatSessionMeta};
 
     /// 侧车是按字段白名单序列化的强类型结构（非整对象透传）：新增字段若不同步此结构，
-    /// 前端写入会被 serde 静默丢弃。此用例锁住压缩注解的落盘往返。
+    /// 调用方写入会被 serde 静默丢弃。此用例锁住压缩注解的落盘往返。
     #[test]
     fn compaction_survives_roundtrip() {
         let meta = ChatSessionMeta {
@@ -4169,7 +4167,7 @@ mod chat_session_meta_tests {
         assert_eq!(compaction.up_to_message_id, "m4");
         assert_eq!(compaction.message_count, 5);
         assert_eq!(back.agent_id, None);
-        // camelCase 线名与前端契约一致
+        // camelCase 线名即契约
         assert!(json.contains("\"upToMessageId\""));
         assert!(json.contains("\"messageCount\""));
     }

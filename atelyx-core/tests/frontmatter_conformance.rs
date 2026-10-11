@@ -1,6 +1,5 @@
-//! frontmatter 对拍：TS gray-matter dump 的快照 = 唯一期望源（`fixtures/frontmatter/parse.json`）。
+//! frontmatter 对拍：快照 = 唯一期望源（`fixtures/frontmatter/parse.json`）。
 //!
-//! 快照由 `FM_DUMP=1 pnpm vitest run src/utils/frontmatter-fixture.test.ts` 生成。
 //! data 以 typed 编码进快照（t = 类型标签；map 为键值对数组保键序），Rust 侧按同一编码重建比较。
 
 use atelyx_core::frontmatter::{self, Yaml};
@@ -65,7 +64,7 @@ fn yaml_from_typed(v: &Value) -> Yaml {
 #[test]
 fn conformance_matches_snapshot() {
     let raw = fs::read_to_string(fixture_path()).expect(
-        "fixtures/frontmatter/parse.json 缺失：先跑 FM_DUMP=1 pnpm vitest run src/utils/frontmatter-fixture.test.ts",
+        "fixtures/frontmatter/parse.json 缺失：对拍快照应随源码入库",
     );
     let snapshot: Value = serde_json::from_str(&raw).unwrap();
     let cases = snapshot["cases"].as_array().expect("快照缺 cases 数组");

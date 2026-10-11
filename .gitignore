@@ -1,27 +1,5 @@
-# Dependencies
-node_modules/
-
-# Build output
-dist/
-dist-ssr/
-dist-tsbuildinfo/
-vendor/.tsbuild/
-dist-test.css
-*.tsbuildinfo
-*.local
-
-# Tauri
+# 构建输出
 target/
-# gen/schemas = 能力文件 schema 生成物；gen/android 原生工程入库（构建产物由其内 .gitignore 排除）
-legacy/src-tauri/gen/schemas/
-
-# 插件打包器（不入库；构建前由 scripts/sync-esbuild.mjs 从 esbuild 平台包同步）
-legacy/src-tauri/resources/esbuild/*
-!legacy/src-tauri/resources/esbuild/.gitkeep
-
-# 随应用分发的脚本运行时（不入库；构建前由 scripts/sync-node-runtime.mjs 从 nodejs.org 官方 dist 下载锁定版本）
-legacy/src-tauri/resources/runtime/*
-!legacy/src-tauri/resources/runtime/.gitkeep
 
 # Editor
 .vscode/*
@@ -40,10 +18,6 @@ Thumbs.db
 
 # Logs
 *.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
 
 # 应用数据（开发时本地数据库与媒体）
 .dev-data/

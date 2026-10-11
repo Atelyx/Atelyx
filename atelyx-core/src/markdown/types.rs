@@ -1,8 +1,8 @@
 //! Markdown 内核类型：纯文本 → 源偏移标注块规格（框架无关）。
 //!
-//! 与前端内核块规格逐字段对齐：所有 from/to 均为源文本绝对偏移；
-//! serde 形状 = 前端 `types/markdown.ts` 的 JSON（`tag = "kind"`、camelCase 字段、
-//! 可选字段缺值出 `null`），对拍快照（`fixtures/markdown/parse.json`）据此直读。
+//! 所有 from/to 均为源文本绝对偏移；serde 形状即对拍快照
+//! （`fixtures/markdown/parse.json`）的 JSON 形状（`tag = "kind"`、camelCase 字段、
+//! 可选字段缺值出 `null`）。
 
 use serde::{Deserialize, Serialize};
 

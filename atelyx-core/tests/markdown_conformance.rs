@@ -1,7 +1,6 @@
-//! Markdown 内核对拍：TS 内核 dump 的快照（`fixtures/markdown/parse.json`）= 唯一期望源。
+//! Markdown 内核对拍：快照（`fixtures/markdown/parse.json`）= 唯一期望源。
 //!
-//! 快照由 `MD_DUMP=1 pnpm vitest run src/utils/markdownCore/fixture-dump.test.ts` 生成。
-//! 偏移空间：TS 快照的 from/to 为 UTF-16 单位，本测试按 source 逐字映射转换为
+//! 偏移空间：快照的 from/to 为 UTF-16 单位，本测试按 source 逐字映射转换为
 //! Rust 字节偏移后再比较；Rust 解析器全程使用字节偏移。
 
 use serde_json::Value;
@@ -56,7 +55,7 @@ fn convert_offsets(value: &mut Value, map: &[usize]) {
 
 fn snapshot_cases() -> Vec<(String, Value)> {
     let raw = fs::read_to_string(fixture_path()).expect(
-        "fixtures/markdown/parse.json 缺失：先跑 MD_DUMP=1 pnpm vitest run src/utils/markdownCore/fixture-dump.test.ts",
+        "fixtures/markdown/parse.json 缺失：对拍快照应随源码入库",
     );
     let root: Value = serde_json::from_str(&raw).unwrap();
     let cases = root["cases"].as_array().expect("快照缺 cases 数组");

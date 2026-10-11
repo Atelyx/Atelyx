@@ -1,7 +1,7 @@
-//! 块级解析：行驱动状态机，语义对齐前端内核块规格（对拍快照锁定）。
+//! 块级解析：行驱动状态机，块规格语义由对拍快照 `fixtures/markdown/parse.json` 锁定。
 //!
 //! 容器块（引用/列表项）递归采用「等宽虚拟缓冲」：前缀区间替换为等宽空格后
-//! 全量重解析，块区间平移回原偏移——保证子块区间与前端内核逐值一致。
+//! 全量重解析，块区间平移回原偏移——保证子块区间与快照逐值一致。
 //! 所有偏移均为字节偏移（对拍 harness 负责 UTF-16 ↔ 字节转换）。
 
 use super::inline;
@@ -58,7 +58,7 @@ pub fn parse_inline(source: &str, from: usize, to: usize, options: &ParseOptions
 
 // ===== 行原语 =====
 
-/// 行视图：行尾偏移在 `\n` 之前（CRLF 源文本的 `\r` 属行内容，与前端内核一致）。
+/// 行视图：行尾偏移在 `\n` 之前（CRLF 源文本的 `\r` 属行内容）。
 #[derive(Clone, Copy)]
 struct Line<'a> {
     start: usize,
@@ -650,7 +650,7 @@ fn greedy_quote_prefix(text: &str) -> Option<usize> {
     Some(i)
 }
 
-/// 剔除落在含行内片段的子块区间内的引用前缀（与前端 stripQuotePrefixes 同语义）。
+/// 剔除落在含行内片段的子块区间内的引用前缀。
 fn strip_quote_prefixes(children: &mut [MarkdownBlock], prefixes: Vec<RangeInfo>, source: &str) {
     if prefixes.is_empty() {
         return;
@@ -941,7 +941,7 @@ struct Vc {
     len: usize,
 }
 
-/// 切一行成单元格文本（对齐前端 splitRow 的文本语义）。
+/// 切一行成单元格文本（`|` 分隔；`\|` 转义保留，行首尾 `|` 不计）。
 fn split_row_text(text: &str) -> Vec<String> {
     vchars(text)
         .split(|v| v.c == '|')
@@ -1042,7 +1042,7 @@ fn collect_table(ctx: &Ctx, first: &Line, to: usize) -> (MarkdownBlock, usize) {
     (block, next_after(src, last.end, to))
 }
 
-/// 单元格源区间（对齐前端 splitRow：源区间承载、首尾空白不计、
+/// 单元格源区间（源区间承载、首尾空白不计、
 /// 末字符为 `\|` 时区间终点越过后一字节）。
 fn table_cells(text: &str, abs_start: usize) -> Vec<MarkdownTableCell> {
     let v = vchars(text);
@@ -1228,7 +1228,7 @@ fn math_block_of(ctx: &Ctx, r: RangeInfo) -> MarkdownBlock {
     MarkdownBlock::Paragraph { from: r.from, to: r.to, inline }
 }
 
-/// 段落按交叠数学区间切分（与前端 paragraphSegments 同语义：未消费区间依次
+/// 段落按交叠数学区间切分（未消费区间依次
 /// 消费为 mathBlock，区间外残余保持段落，跨段区间只跳过本段覆盖部分）。
 fn paragraph_segments(
     ctx: &Ctx,
@@ -1447,7 +1447,7 @@ fn map_spans(spans: Vec<InlineSpan>, om: &OffsetMap) -> Vec<InlineSpan> {
         .collect()
 }
 
-// ===== 区间裁剪（callout/引用前缀剔除；与前端 subtract/stripRanges 同语义）=====
+// ===== 区间裁剪（callout/引用前缀剔除）=====
 
 pub(super) fn subtract(from: usize, to: usize, excludes: &[RangeInfo]) -> Vec<RangeInfo> {
     let mut cuts: Vec<&RangeInfo> = excludes.iter().filter(|e| e.to > from && e.from < to).collect();
@@ -1490,7 +1490,7 @@ pub(super) fn strip_ranges(spans: Vec<InlineSpan>, excludes: &[RangeInfo], sourc
     out
 }
 
-// ===== 块级数学预扫（与前端 blockMathRanges 同语义）=====
+// ===== 块级数学预扫 =====
 
 fn block_math_ranges(source: &str) -> Vec<RangeInfo> {
     let mut out = Vec::new();

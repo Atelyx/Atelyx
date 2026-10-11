@@ -1,6 +1,6 @@
 //! UI 组件库：调色板 / 矢量图标 / 基础控件 / 统一弹层 / 菜单 / 通知。
 //!
-//! 视觉 token 与旧壳 CSS 变量一一对应（`palette`）；弹层与菜单是全应用
+//! 视觉 token 定义于 `palette`；弹层与菜单是全应用
 //! 唯一浮层入口，右键菜单、下拉、就地确认都经 [`popup`] + [`menu`] 组合。
 
 pub mod controls;
@@ -20,8 +20,8 @@ pub const FONT_SEMIBOLD: &[u8] = include_bytes!("../../assets/fonts/IBMPlexSans-
 /// 随应用分发的 Fraunces（SIL OFL 1.1，可变字重）：品牌名等展示字体。
 pub const FONT_DISPLAY: &[u8] = include_bytes!("../../assets/fonts/Fraunces.ttf");
 
-/// 应用图标（与旧壳同一来源的 PNG）。
-pub const ICON_PNG: &[u8] = include_bytes!("../../assets/icon.png");
+/// 应用图标（随应用分发的 PNG 资源）。
+pub const ICON_PNG: &[u8] = include_bytes!("../../assets/icons/icon.png");
 
 /// 应用图标句柄（进程内单例：同一 Handle 复用纹理，避免每帧重上传）。
 pub fn icon_handle() -> iced::widget::image::Handle {

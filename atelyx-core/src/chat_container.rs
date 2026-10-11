@@ -17,7 +17,7 @@ use crate::vault::{
     EDITOR_CHATS_META_SCHEMA,
 };
 
-/// 容器增量广播事件名（与前端 wire 常量一致；全窗口订阅，seq 单调去重）。
+/// 容器增量广播事件名（全窗口订阅，seq 单调去重）。
 #[cfg(not(test))]
 pub const DELTA_EVENT: &str = "chat-container-delta";
 /// 执行 op 意图事件（Rust → 主窗口定向；主窗口执行后经 intent_result 回填）。
@@ -63,7 +63,7 @@ pub struct MessagesDelta {
 
 /// 一次变更产出的增量片段（seq 由广播时统一分配）。
 /// metas 元素为手工构造的对象：完整片段恒带 title/agentId/compaction（null = 清除，
-/// 前端按 undefined/null 区分「未变/清除」），移除片段只有 id + removed。
+/// 调用方按 undefined/null 区分「未变/清除」），移除片段只有 id + removed。
 #[derive(Debug, Serialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Fragments {
@@ -101,7 +101,7 @@ pub struct ContainerSnapshot {
     pub effort_override: Option<String>,
 }
 
-/// apply 命令的成功响应（失败走 Err = 前端 invoke 拒绝，与 chatContainerWire 的 ok:false 同语义）。
+/// apply 命令的成功响应（失败走 Err，调用方据此判失败）。
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ApplyOk {
@@ -112,7 +112,7 @@ pub struct ApplyOk {
     pub fragments: Fragments,
 }
 
-/// 镜像 → 真源的写意图（15 种容器 op；serde tag = kind，与前端 union 同形）。
+/// 镜像 → 真源的写意图（15 种容器 op；serde tag = kind，字段 camelCase）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum ChatOp {
@@ -284,7 +284,7 @@ pub struct CommitBatch {
 
 // ===== 真源内部状态 =====
 
-/// 会话内存态（消息保持前端原样 JSON；payload 运行时缓存随形态保留，出线/落盘时剥离）。
+/// 会话内存态（消息保持原样 JSON；payload 运行时缓存随形态保留，出线/落盘时剥离）。
 #[derive(Clone)]
 struct Session {
     id: String,
@@ -454,7 +454,7 @@ pub enum EmitterEvent {
     Intent(Value),
 }
 
-/// 广播出口：事件 → 出口回调。生产侧闭包包装 Tauri emit（全窗口 delta / 定向 intent），
+/// 广播出口：事件 → 出口回调。生产侧闭包接事件循环（全窗口 delta / 定向 intent），
 /// 测试侧为收集器。
 type EmitterFn = Box<dyn Fn(&EmitterEvent) + Send + Sync>;
 
@@ -501,7 +501,7 @@ impl ChatContainerState {
     }
 
     /// 安装广播出口：delta 全窗口广播、intent 定向投递执行体窗口。
-    /// 出口由调用方注入——本 crate 不感知具体传输（壳侧接 Tauri 事件，测试接收集器）。
+    /// 出口由调用方注入——本 crate 不感知具体传输（壳侧接事件循环，测试接收集器）。
     pub fn install_emitter(&self, f: impl Fn(&EmitterEvent) + Send + Sync + 'static) {
         *self.emitter.lock().unwrap_or_else(poison) = Some(Box::new(f));
     }
@@ -791,7 +791,7 @@ impl ChatContainerState {
                 session_id,
                 agent_id,
             } => {
-                // 会话缺失静默跳过（与前端 setSessionAgent 的 map 语义一致）
+                // 会话缺失静默跳过（幂等，无此会话即不动作）
                 if let Some(session) = inner.session_mut(session_id) {
                     session.agent_id = agent_id.clone();
                     acc.meta_patch(session_id, &MetaPatch {
@@ -819,7 +819,7 @@ impl ChatContainerState {
                 session_id,
                 message_id,
             } => {
-                // 守卫与前端 rollbackSession 一致：流式/压缩中或目标位置非法时静默不动作
+                // 守卫：流式/压缩中或目标位置非法时静默不动作
                 if !inner.streaming && inner.compacting.is_none() {
                     let Some(session) = inner.session(session_id) else {
                         return Ok(empty_apply());
@@ -850,7 +850,7 @@ impl ChatContainerState {
                     }
                     _ => unreachable!(),
                 };
-                // 会话缺失静默跳过（幂等；与前端 deleteSession 对不存在 id 的行为一致）
+                // 会话缺失静默跳过（幂等，删不存在的 id 不动作）
                 if let Some(pos) = inner.sessions.iter().position(|s| s.id == session_id) {
                     let session = inner.sessions.remove(pos);
                     inner.dirty_messages.remove(&session_id);
@@ -961,7 +961,7 @@ impl ChatContainerState {
         }
         for append in batch.appends {
             let Some(session) = inner.session_mut(&append.session_id) else {
-                continue; // 会话已删：丢弃（与前端 patchSessionMessage 的存在性守卫一致）
+                continue; // 会话已删：丢弃
             };
             session.messages.extend(append.messages.iter().cloned());
             acc.appended(&append.session_id, &append.messages);
@@ -1210,7 +1210,7 @@ fn same_message_content(a: &Value, b: &Value) -> bool {
     strip_message(a) == strip_message(b)
 }
 
-/// 元数据完整片段（title/agentId/compaction 恒在场：null = 清除，与前端折叠语义对齐）。
+/// 元数据完整片段（title/agentId/compaction 恒在场：null = 清除）。
 fn meta_fragment_full(s: &Session) -> Value {
     json!({
         "id": s.id,
@@ -1242,7 +1242,7 @@ fn fragments_empty(f: &Fragments) -> bool {
     f.metas.is_empty() && f.messages.is_empty() && f.status.is_none()
 }
 
-/// 多片段合并（与前端 mergeFragments 语义一致：数组拼接、id 集合去重、status 后到字段覆盖）。
+/// 多片段合并（数组拼接、id 集合去重、status 后到字段覆盖）。
 fn merge_fragment_list(list: &[Fragments]) -> Fragments {
     let mut merged = Fragments::default();
     let mut message_ids: Vec<String> = Vec::new();
@@ -1597,7 +1597,7 @@ fn chat_message_file(session_id: &str) -> String {
     format!("{CHAT_HISTORY_DIR}/{session_id}{CHAT_MESSAGE_EXT}")
 }
 
-// ===== 磁盘装载（解析与前端 parseChatMessages 同语义：损坏行跳过、steps 收敛）=====
+// ===== 磁盘装载（损坏行跳过、steps 收敛）=====
 
 fn scan_sessions(root: &Path) -> Result<Vec<Session>, String> {
     let rows = list_chat_sessions_file(root)?;
@@ -1686,7 +1686,7 @@ fn parse_messages_jsonl(jsonl: &str) -> Vec<Value> {
     messages
 }
 
-/// 归并被拆开的同轮思考/叙述步（幂等；与前端 coalesceAgentSteps 同语义）：
+/// 归并被拆开的同轮思考/叙述步（幂等）：
 /// 按尾向前合并 reasoning/text，遇工具步即停；running 态合成工具行归一为已中断。
 fn coalesce_agent_steps(steps: &Value) -> Value {
     let Some(items) = steps.as_array() else {
@@ -1755,7 +1755,7 @@ fn append_step_text(acc: &mut Vec<Value>, kind: &str, text: &str) {
     acc.push(json!({ "kind": kind, "text": text }));
 }
 
-// ===== 消息 .jsonl 序列化（与前端 serializeChatMessages 字段与条件对齐）=====
+// ===== 消息 .jsonl 序列化 =====
 
 fn serialize_message_line(m: &Value) -> String {
     let mut obj = serde_json::Map::new();

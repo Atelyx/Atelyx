@@ -466,7 +466,7 @@ pub(crate) fn broadcast_meta_changed(hub: &Hub, room_id: &str, key: &str) {
     }
 }
 
-// ===== 插件消息二进制帧编解码（与前端 framePump.ts 逐字节同构） =====
+// ===== 插件消息二进制帧编解码（WS 二进制帧线格式） =====
 // 布局（小端）：[0]=kind(1) [1]=flags(bit0=有 targetPeerId) [2..3]=channel 字节长
 // [channel utf8] [8B seq] [8B targetPeerId（flags.bit0 时）] [8B senderPeerId] [payload 原样字节]。
 
@@ -823,7 +823,7 @@ pub(crate) async fn run_room_connection(
                         break;
                     }
                     // 心跳回执：回 pong 广播（健康连接每 ≤25s 有人 ping，全员 lastMessageAt 刷新，
-                    // 前端据此 75s 静默即判半开假死主动重连；单人房间亦收到自己的 pong，无空转误判）
+                    // 客户端据此 75s 静默即判半开假死主动重连；单人房间亦收到自己的 pong，无空转误判）
                     "ping" => {
                         trace!(peer_id, "ping → pong");
                         let _ = btx.send(server_msg("pong", None, None, None, None, None, None));

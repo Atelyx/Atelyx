@@ -1,6 +1,6 @@
 //! 行内解析：结构原子扫描（行内代码/链接/图片/autolink/HTML 标签/实体/转义/强调）+
 //! 按行正则补充（注释/高亮/wiki/脚注引用/行内数学/mention/标签）+ 候选合并，
-//! 语义对齐前端内核（对拍快照锁定）。
+//! 语义由对拍快照 `fixtures/markdown/parse.json` 锁定。
 
 use super::parse::Ctx;
 use super::types::{InlineSpan, LinkForm, MentionCandidate, ParseOptions, RangeInfo};
@@ -367,7 +367,7 @@ fn close_backtick_run(bytes: &[u8], from: usize, to: usize, run: usize) -> Optio
     None
 }
 
-/// 行内代码内容：剥定界反引号（与前端 inlineCodeText 同语义，不剥空格）。
+/// 行内代码内容：剥定界反引号（首尾空格保留）。
 fn inline_code_text(raw: &str) -> &str {
     let b = raw.as_bytes();
     if b.first() != Some(&b'`') {
@@ -655,7 +655,7 @@ struct BracketLink {
 
 /// `[text](url)` / `![alt](url)`（含可选 title）解析；不匹配返回 None（保持原文）。
 fn parse_bracket_link(text: &str) -> Option<BracketLink> {
-    // 对齐前端正则形态：label 无 ]；URL 无空白（形态一，可选 title）或无 ) （形态二）
+    // 正则形态：label 无 ]；URL 无空白（形态一，可选 title）或无 ) （形态二）
     if !text.starts_with('[') {
         return None;
     }
@@ -748,7 +748,7 @@ fn classify_link(label: &str, url: &str, options: &ParseOptions) -> LinkForm {
     }
 }
 
-/// 外部链接协议判定（与前端 isOpenableUrl 同语义）。
+/// 外部链接协议判定（`http:`/`https:`/`mailto:`/`xmpp:` 前缀）。
 fn is_openable_url(raw: &str) -> bool {
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| Regex::new(r"^(?:https?:|mailto:|xmpp:)").unwrap());
@@ -1066,7 +1066,7 @@ fn is_word_char(c: char) -> bool {
     c.is_alphanumeric()
 }
 
-/// 行内 `#标签` 区间（与前端 INLINE_TAG_RE 同语义）。
+/// 行内 `#标签` 区间（`#` 前允许非词字符，词内 `#` 不误判）。
 fn inline_tag_ranges(line_text: &str, line_from: usize) -> Vec<RangeInfo> {
     static RE_TAG: OnceLock<Regex> = OnceLock::new();
     let re = RE_TAG.get_or_init(|| Regex::new(r"(?:^|[^\p{L}\p{N}_#/])#([\p{L}\p{N}_\-/]+)").unwrap());

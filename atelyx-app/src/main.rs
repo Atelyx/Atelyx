@@ -1,7 +1,7 @@
 //! Atelyx 原生壳：daemon 多窗口 + 布局模型（场景/布局/面板树）+ files/note 视图。
 //!
-//! 布局状态真源 = atelyx-core::layout（与老壳共用同一 ui-state.json 磁盘格式，
-//! 本壳只读不改格式）；本壳负责窗口副作用（OS 窗口、落盘防抖、输入路由）。
+//! 布局状态真源 = atelyx-core::layout：落盘 ui-state.json（磁盘格式由 schema
+//! 版本标识，本壳只读不改格式）；本壳负责窗口副作用（OS 窗口、落盘防抖、输入路由）。
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -200,7 +200,7 @@ const PERSIST_TICK: std::time::Duration = std::time::Duration::from_millis(800);
 /// 自动保存防抖：最近一次内容变更后停止输入该时长才写回（尾沿 debounce，单定时器链续排）。
 const AUTOSAVE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(500);
 
-/// ui-state.json 落盘路径（与老壳同一应用数据目录，bundle identifier = com.atelyx.desktop）。
+/// ui-state.json 落盘路径（应用数据目录，bundle identifier = com.atelyx.desktop）。
 fn ui_state_path() -> Option<PathBuf> {
     #[cfg(windows)]
     {
@@ -218,7 +218,7 @@ fn ui_state_path() -> Option<PathBuf> {
     }
 }
 
-/// 从磁盘恢复布局状态：缺失/损坏/schema 不符一律回落默认态（与老壳同口径）。
+/// 从磁盘恢复布局状态：缺失/损坏/schema 不符一律回落默认态。
 fn load_ui_state() -> AppUiState {
     let mut ui = match ui_state_path()
         .and_then(|p| std::fs::read_to_string(p).ok())
@@ -564,7 +564,7 @@ enum PendingAfterFlush {
 }
 
 pub struct App {
-    /// 布局状态真源（core 模型；与老壳共用磁盘格式）。
+    /// 布局状态真源（core 模型；磁盘格式由 schema 版本标识）。
     pub ui: AppUiState,
     vault: Arc<vault::VaultState>,
     pub theme: Theme,
@@ -2784,7 +2784,7 @@ impl App {
         }
     }
 
-    /// 选中双链候选：片段替换为 `[标题](路径)` markdown 链接（老壳同形态）。
+    /// 选中双链候选：片段替换为 `[标题](路径)` markdown 链接。
     fn wiki_pick(&mut self, candidate_index: usize) {
         let Some(picker) = self.wiki_picker.clone() else { return };
         let candidates = self.wiki_candidates();

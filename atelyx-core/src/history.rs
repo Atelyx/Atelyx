@@ -1,6 +1,6 @@
 //! 笔记历史侧车：每文件一个隐藏 JSON 侧文件（全文快照 + 行级 diff 摘要），独立于磁盘真相的审计/回滚轴。
 //!
-//! 侧文件格式与前端实现逐字段一致（`{ versions: [...] }`，path = `.atelyx/history/<最小编码>.json`）；
+//! 侧文件格式为 `{ versions: [...] }`，path = `.atelyx/history/<最小编码>.json`；
 //! 记录尽力而为——读缺失/损坏返回空、写失败由调用方决定降级。
 
 use std::path::Path;
@@ -39,7 +39,7 @@ pub enum HistoryAction {
 }
 
 /// 一个历史版本（全文快照；summary = 相对上一版的展示摘要）。
-/// `coAuthors` = 协作署名（前端写入的字段，读侧解析保留、coalesce 滑动更新原样带出）。
+/// `coAuthors` = 协作署名（由协作侧写入的字段，读侧解析保留、coalesce 滑动更新原样带出）。
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct HistoryVersion {

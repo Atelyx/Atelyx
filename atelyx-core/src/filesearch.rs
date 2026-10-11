@@ -10,9 +10,9 @@ use serde::Serialize;
 
 use crate::vault::{has_hidden_segment, read_dir_filtered, safe_join};
 
-/// glob 单次内联返回的路径上限（超限附 total，前端提示收窄）。
+/// glob 单次内联返回的路径上限（超限附 total，调用方据此提示收窄）。
 const GLOB_MAX_RESULTS: usize = 100;
-/// grep 单次内联返回的匹配上限（超限附 total，前端提示收窄）。
+/// grep 单次内联返回的匹配上限（超限附 total，调用方据此提示收窄）。
 const GREP_MAX_MATCHES: usize = 250;
 /// 单行预览的字节上限（截断保持 UTF-8 字符边界）。
 const GREP_MAX_LINE_BYTES: usize = 2000;
@@ -21,10 +21,10 @@ const GREP_BINARY_PROBE_BYTES: usize = 8192;
 /// 单个文件的最大读取字节数：超大文件跳过（防病态输入拖慢整轮检索；普通文本文件远小于此）。
 const GREP_MAX_FILE_BYTES: u64 = 32 * 1024 * 1024;
 /// grep 结果回填的聚合字节预算：单行截断 2000B × 250 条最坏 ~500KB，会撑爆模型上下文；
-/// 与 read_file 分页「不整文件回填」同一口径，超限停止保留（total 仍精确计数，前端据此提示收窄）。
+/// 与 read_file 分页「不整文件回填」同一口径，超限停止保留（total 仍精确计数，调用方据此提示收窄）。
 const GREP_MAX_OUTPUT_BYTES: usize = 64 * 1024;
 
-/// `glob_vault` 返回结果（paths 相对仓库根、`/` 分隔，与前端 read_file/edit_file 同坐标）。
+/// `glob_vault` 返回结果（paths 相对仓库根、`/` 分隔，与 read_file/edit_file 同坐标）。
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GlobVaultResult {

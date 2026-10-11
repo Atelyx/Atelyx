@@ -26,7 +26,7 @@ pub struct PopupGeom {
     pub w: f32,
 }
 
-/// 钳制 + 翻转（语义与旧壳一致：视口边距 6px；下方放不下且上方放得下才翻转）。
+/// 钳制 + 翻转（视口边距 6px；下方放不下且上方放得下才翻转）。
 pub fn resolve(spec: &PopupSpec, viewport: Size) -> PopupGeom {
     let w = spec.width.max(spec.min_width);
     let h = spec.height;

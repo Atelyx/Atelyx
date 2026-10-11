@@ -1,13 +1,13 @@
 //! 联网搜索代理命令：Tavily / SearXNG 统一走 Rust 侧请求。
-//! SearXNG 自建实例无内置 CORS，WebView 直 fetch 必被拦（官方架构即「放反代后面」），Rust 代理天然绕过。
-//! Tavily key 的落点与取值统一由前端配置层处理——本模块不读仓库配置、不依赖本地仓库根（协作空间无 root）。
+//! SearXNG 自建实例常无内置 CORS；统一走 Rust 侧请求，便于集中超时、大小上限与地址策略。
+//! Tavily key 的落点与取值统一由调用方处理——本模块不读仓库配置、不依赖本地仓库根（协作空间无 root）。
 
 use reqwest::Url;
 use serde::Serialize;
 
 use crate::net_guard::{client_for, ensure_local_service_http_url, ClientTimeout, HostPolicy};
 
-/// 单条搜索结果（camelCase 对齐前端 `SearchResultItem`）。
+/// 单条搜索结果（camelCase 序列化）。
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchResultItem {
@@ -16,9 +16,9 @@ pub struct SearchResultItem {
     pub snippet: String,
 }
 
-/// 执行搜索（Tavily / SearXNG，按 provider 分发）。key 与实例地址由前端配置层传值、
+/// 执行搜索（Tavily / SearXNG，按 provider 分发）。key 与实例地址由调用方传值、
 /// Rust 侧只做请求与地址校验（不读仓库配置，本地与协作空间同一路径）。
-/// Err = 网络/HTTP/地址校验失败，前端 `runSearch` 降级为 `SearchResultData.error`（不阻塞对话）；
+/// Err = 网络/HTTP/地址校验失败，调用方降级为错误文本（不阻塞对话）；
 /// 地址策略（Tavily 公网 / SearXNG 本机局域网，重定向逐跳复检）见 `net_guard`。
 pub async fn search_web(
     provider: String,
@@ -170,7 +170,7 @@ mod search_tests {
 
     #[tokio::test]
     async fn tavily_search_rejects_empty_key() {
-        // key 由前端传入；空 key 明确报错而非发出无凭据请求
+        // key 由调用方传入；空 key 明确报错而非发出无凭据请求
         let err = match tavily_search("", "q").await {
             Err(e) => e,
             Ok(_) => panic!("空 key 应报错"),

@@ -1,17 +1,17 @@
 //! 布局迷你窗口管理器的纯模型层：类型 + 布局树/标签组纯操作 + 布局操作应用（唯一变更入口）+
-//! 主页/默认布局构建 + normalize/形状守卫。两壳共用同一模型与磁盘格式；
+//! 主页/默认布局构建 + normalize/形状守卫。模型与磁盘格式由壳侧复用；
 //! 磁盘路径与窗口副作用由壳侧提供，本模块不碰磁盘与窗口。
 
 use nanoid::nanoid;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-// ===== 类型（与前端 types/workspaceLayout.ts + types/uiState.ts 对齐）=====
+// ===== 类型（ui-state.json / 布局磁盘契约）=====
 
 /// 视图类型（插件视图为任意字符串，故用 String）。
 pub type ViewKind = String;
 
-/// 窗口位置尺寸（logical px；与前端 `DetachedWindow.bounds` 一致）。
+/// 窗口位置尺寸（logical px）。
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct WindowBounds {
@@ -20,7 +20,7 @@ pub struct WindowBounds {
     pub width: f64,
     pub height: f64,
     /// DPI scale factor（权威 bounds 注册表的换算基准：OS 全局光标物理 px → logical px）。
-    /// 前端 op 载荷（TearOff）不含此字段，缺失取默认 0。
+    /// TearOff op 载荷不含此字段，缺失取默认 0。
     #[serde(default)]
     pub scale: f64,
 }
@@ -161,21 +161,21 @@ pub struct AppUiState {
     /// 激活布局 id（主页 id 或激活场景内布局 id；缺省 = 主页）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_layout_id: Option<String>,
-    /// 聚焦面板 id（画布快捷键门控；由前端 JS 维护并 patch 到本模块）。
+    /// 聚焦面板 id（画布快捷键门控；由壳侧维护并 patch 到本模块）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub focused_panel_id: Option<String>,
     /// 撕裂出去的独立窗口（应用级、跨布局共享）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub detached_windows: Vec<DetachedWindow>,
-    /// 最近打开的文件（跨仓库、去重置顶、上限截断；结构由前端自持，本模块原样透传）。
+    /// 最近打开的文件（跨仓库、去重置顶、上限截断；结构由壳侧自持，本模块原样透传）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recent_files: Vec<serde_json::Value>,
-    /// single 槽手动胜者覆盖（槽 → 钉住的贡献 id；前端 JS 维护并 patch 到本模块）。
+    /// single 槽手动胜者覆盖（槽 → 钉住的贡献 id；由壳侧维护并 patch 到本模块）。
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub slot_winner_overrides: HashMap<String, String>,
 }
 
-/// ui-state.json 的 schema 版本（与前端 `types/uiState.ts` 对齐；格式变更直接升版，旧文件按默认态处理）。
+/// ui-state.json 的 schema 版本（格式变更直接升版，旧文件按默认态处理）。
 pub const UI_STATE_SCHEMA: &str = "atelyx-ui-state/v2";
 /// 主页布局的稳定 id（固定置顶、不可删除/排序/重命名）。
 pub const HOME_LAYOUT_ID: &str = "home";
@@ -184,9 +184,9 @@ pub const DEFAULT_SCENE_ID: &str = "default";
 /// 最近打开文件列表上限。
 pub const MAX_RECENT_FILES: usize = 50;
 
-// ===== 布局操作命令参数（前端 uiStateStore 逐条映射）=====
+// ===== 布局操作命令参数（壳侧逐条映射到 LayoutOp）=====
 
-/// 布局操作（布局模型唯一变更入口）。op 标签 + 字段均 camelCase，与前端 `LayoutOp` 对齐。
+/// 布局操作（布局模型唯一变更入口）。op 标签 + 字段均 camelCase。
 #[derive(Deserialize, Debug)]
 #[serde(tag = "op", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum LayoutOp {
@@ -298,7 +298,7 @@ pub enum LayoutOp {
     ActivateScene { id: String },
 }
 
-/// 布局操作的返回值（仅 splitPanel/tearOff 需要；其余操作前端靠广播收敛）。
+/// 布局操作的返回值（仅 splitPanel/tearOff 需要；其余操作调用方靠广播收敛）。
 #[derive(Serialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct LayoutOpResult {
@@ -308,7 +308,7 @@ pub struct LayoutOpResult {
     pub detached_window: Option<DetachedWindow>,
 }
 
-/// 非布局字段补丁（前端 JS 拥有这些字段，patch 到本模块合并后由本模块落盘）。
+/// 非布局字段补丁（壳侧拥有这些字段，patch 到本模块合并后由本模块落盘）。
 /// 外层 `Option` = 字段是否在载荷中；内层 = 字段值（内层 None = 显式 null 清除）。
 #[derive(Deserialize, Default, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -325,8 +325,8 @@ pub struct UiStatePatch {
     pub focused_panel_id: Option<Option<String>>,
     #[serde(default)]
     pub recent_files: Option<Vec<serde_json::Value>>,
-    /// 前端钉住表整表替换：JSON `{}` = 清空全部；JSON null 经 serde 解为外层 None（= 不改），
-    /// 与 de_patch_clearable 字段（null = 定向清除）语义不同——前端删键发整表，不在此发 null。
+    /// 钉住表整表替换：JSON `{}` = 清空全部；JSON null 经 serde 解为外层 None（= 不改），
+    /// 与 de_patch_clearable 字段（null = 定向清除）语义不同——删键发整表，不在此发 null。
     #[serde(default)]
     pub slot_winner_overrides: Option<HashMap<String, String>>,
 }
@@ -354,7 +354,7 @@ pub fn normalize(ui: &mut AppUiState) {
         if scene.layouts.is_empty() {
             scene.layouts = vec![create_blank_layout(&scene.name)];
         }
-        // 尺寸形状修复：磁盘上的坏值（长度不符/负值/全零）会被前端按越界值渲染，
+        // 尺寸形状修复：磁盘上的坏值（长度不符/负值/全零）会被按越界值渲染，
         // 而形状守卫只拦新写入、不会覆盖既有坏值 → 该 Split 的拖宽永远只发坏帧而被拒。
         for layout in &mut scene.layouts {
             repair_tree_sizes(&mut layout.tree);
@@ -526,7 +526,7 @@ pub fn create_blank_tree() -> LayoutNode {
     LayoutNode::Panel { id: nanoid!(), tabs: vec![], active_tab_id: None }
 }
 
-// ===== 布局树/标签组纯操作（行为与前端 utils/workspaceLayout.ts 一致）=====
+// ===== 布局树/标签组纯操作（行为契约由本模块测试锁定）=====
 
 impl LayoutNode {
     pub fn node_id(&self) -> &str {
@@ -745,7 +745,7 @@ pub fn prune_empty_windows(windows: Vec<DetachedWindow>) -> Vec<DetachedWindow> 
     windows.into_iter().filter(|w| !w.tabs.is_empty()).collect()
 }
 
-// ---- 标签组共享核心（行为与前端 TabGroup 核心一致）----
+// ---- 标签组共享核心（行为契约由本模块测试锁定）----
 
 /// 插入标签（默认尾部）并激活。
 pub fn group_add_tab(g: &TabGroup, tab: TabItem, index: Option<usize>) -> TabGroup {
@@ -955,7 +955,7 @@ pub fn split_children_count(tree: &LayoutNode, split_id: &str) -> Option<usize> 
 ///
 /// 三处消费：命令入口的预检（`op_passes_shape_check`）、操作应用时的兜底（`apply_layout_op`）、
 /// 读盘归一化时的修复判定（`repair_tree_sizes`）。不校验时长度不符/负值会被接受并持久化，
-/// 前端按这些值布局会越界或塌陷，且坏状态每次启动都被读回（非有限值会让整次序列化失败，
+/// 按这些值布局会越界或塌陷，且坏状态每次启动都被读回（非有限值会让整次序列化失败，
 /// 表现为该次落盘整体丢失）。
 pub fn sizes_valid_for(sizes: &[f64], child_count: usize) -> bool {
     sizes.len() == child_count
@@ -1395,7 +1395,7 @@ pub fn apply_layout_op(ui: &mut AppUiState, op: &LayoutOp) -> LayoutOpResult {
         LayoutOp::SetLayoutSizes { split_id, sizes } => {
             let tree = active_layout(ui).tree;
             // 形状校验（长度 = children 数、有限非负、和 > 0）：坏值一旦落进模型就会被广播并持久化，
-            // 前端随后按它布局可能越界/塌陷，且坏状态每次启动都被读回。不合法 = 忽略本次操作。
+            // 随后按它布局可能越界/塌陷，且坏状态每次启动都被读回。不合法 = 忽略本次操作。
             let valid = split_children_count(&tree, split_id)
                 .is_some_and(|n| sizes_valid_for(sizes, n));
             if valid {
@@ -1587,7 +1587,7 @@ mod tests {
         let w: DetachedWindow = serde_json::from_str(json).unwrap();
         assert!(!w.hidden);
         assert!(w.restore_on_launch);
-        // 新字段序列化恒在场（前端契约类型为必填）
+        // 新字段序列化恒在场（契约字段为必填）
         let text = serde_json::to_string(&w).unwrap();
         assert!(text.contains(r#""hidden":false"#));
         assert!(text.contains(r#""restoreOnLaunch":true"#));
@@ -1652,7 +1652,7 @@ mod tests {
 
     #[test]
     fn normalize_repairs_deformed_split_sizes() {
-        // 磁盘上既有坏值（长度不符/负值）：归一化必须修复，否则前端按越界值渲染，
+        // 磁盘上既有坏值（长度不符/负值）：归一化必须修复，否则按越界值渲染，
         // 且自己持续发坏帧会被形状守卫全部拒绝 → 该 Split 的拖宽永远无效
         let bad_tree = LayoutNode::Split {
             id: "s1".into(),
@@ -1791,7 +1791,7 @@ mod tests {
 
     #[test]
     fn ui_state_patch_slot_winner_overrides_roundtrip() {
-        // 前端把「single 槽手动胜者」整表 patch 进来（JS 权威字段），Rust 原样合并落盘。
+        // 壳侧把「single 槽手动胜者」整表 patch 进来（壳侧权威字段），原样合并落盘。
         let p: UiStatePatch = serde_json::from_str(
             r#"{"slotWinnerOverrides": {"empty/canvas": "com.a:empty/canvas"}}"#,
         )
@@ -1803,11 +1803,11 @@ mod tests {
         // 字段缺失 = 不修改
         let p: UiStatePatch = serde_json::from_str(r#"{}"#).unwrap();
         assert!(p.slot_winner_overrides.is_none());
-        // 空表 = 清空全部（前端删键发整表 `{}`）
+        // 空表 = 清空全部（删键发整表 `{}`）
         let p: UiStatePatch = serde_json::from_str(r#"{"slotWinnerOverrides": {}}"#).unwrap();
         assert_eq!(p.slot_winner_overrides, Some(HashMap::new()));
 
-        // AppUiState 磁盘往返：空表省略、非空保留（camelCase 键与前端 Record 对齐）。
+        // AppUiState 磁盘往返：空表省略、非空保留（camelCase 键）。
         let ui: AppUiState = serde_json::from_str(
             r#"{"schema":"atelyx-ui-state/v2","slotWinnerOverrides":{"empty/canvas":"com.b:empty/canvas"}}"#,
         )

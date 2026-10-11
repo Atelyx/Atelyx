@@ -1,13 +1,12 @@
 //! Atelyx UI 无关核心层：壳之下的存储、会话容器、补丁合并、AI 客户端、协作帧泵与插件进程托管。
 //!
-//! 依赖约束：禁止依赖 tauri、iced 等任何 GUI / 壳层 crate；仅允许平台无关的通用依赖
+//! 依赖约束：禁止依赖 iced 等任何 GUI / 壳层 crate；仅允许平台无关的通用依赖
 //! （序列化、异步运行时、时间与标识、正则 / glob、网络客户端）。
 
 pub mod chat_container;
 pub mod filesearch;
 pub mod frontmatter;
 pub mod history;
-pub mod host_runtime;
 pub mod layout;
 pub mod markdown;
 pub mod net_guard;
