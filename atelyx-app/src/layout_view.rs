@@ -5,11 +5,13 @@
 //! 窗口内容区尺寸纯推导，与 iced FillPortion 的分配规则保持一致。
 
 use std::collections::HashSet;
+use std::path::PathBuf;
 
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::{button, column, container, mouse_area, row, scrollable, space, stack, text, text_input};
-use iced::{Element, Font, Length, Padding, Point, Rectangle, Size, border, widget::container::Style};
+use iced::{Color, Element, Font, Length, Padding, Point, Rectangle, Size, border, widget::container::Style};
 
+use atelyx_core::global_config::RecentVault;
 use atelyx_core::layout::{self, AppUiState, LayoutNode, TabItem};
 
 use crate::ui::controls::{self, Variant};
@@ -169,6 +171,8 @@ pub enum PopupState {
     DetachedTabContext { window_id: String, tab_id: String },
     SortMenu,
     FileMenu { rel: String, is_dir: bool, is_root: bool },
+    /// 最近仓库行菜单（root = 目标仓库根）。
+    VaultMenu { root: String },
     NoteMenu,
     /// 属性面板类型切换菜单（属性行序号）。
     PropTypeMenu { index: usize },
@@ -184,14 +188,9 @@ impl PopupState {
             PopupState::ViewPicker { .. } => 160.0,
             PopupState::DetachedPanelMenu { .. } => 160.0,
             PopupState::SortMenu => 160.0,
-            // 仓库行菜单 192；文件/文件夹菜单 176
-            PopupState::FileMenu { rel, is_root, .. } => {
-                if rel.is_empty() && !*is_root {
-                    192.0
-                } else {
-                    176.0
-                }
-            }
+            // 文件/文件夹菜单 176；最近仓库行菜单 192
+            PopupState::FileMenu { .. } => 176.0,
+            PopupState::VaultMenu { .. } => 192.0,
             PopupState::NoteMenu => 144.0,
             PopupState::PropTypeMenu { .. } => 128.0,
         }
@@ -1604,7 +1603,7 @@ fn files_view(app: &App) -> Element<'_, Message> {
         ..Style::default()
     });
 
-    if app.vault_root.is_none() {
+    if app.global.recent_vaults.is_empty() {
         return column![
             toolbar,
             controls::h_divider_subtle(),
@@ -1620,20 +1619,11 @@ fn files_view(app: &App) -> Element<'_, Message> {
         .into();
     }
 
-    // 树体（根空白右键 = 根目录新建菜单）
+    // 列表体：每个最近仓库一行，激活仓库就地展开文件树，其余收起
     let expanded: HashSet<&str> =
         app.ui.file_explorer_expanded.iter().map(|s| s.as_str()).collect();
-    let mut tree_col = column![].padding(Padding::ZERO.top(6.0).bottom(12.0));
-    tree_col = tree_col.push(vault_row(app, window, cursor, &expanded));
-    // 重名自动加序号的提醒条（3s 自动消失）
-    if let Some((notice, _)) = &app.rename_notice {
-        tree_col = tree_col.push(
-            container(text(notice.clone()).size(pal::FS_CAPTION).color(pal::WARNING))
-                .width(Length::Fill)
-                .padding(Padding::ZERO.horizontal(12.0).vertical(4.0)),
-        );
-    }
-    // 新建草稿输入行：dir = "" 时落在仓库行之后，否则落在对应目录行之后
+    let active_root = app.vault_root.as_ref().map(|r| r.to_string_lossy().into_owned());
+    // 新建草稿输入行：dir = "" 时落在激活仓库行之后，否则落在对应目录行之后
     let draft_dir = match &app.rename {
         Some(rs) => match &rs.target {
             RenameTarget::Draft { dir, .. } => Some(dir.clone()),
@@ -1641,24 +1631,40 @@ fn files_view(app: &App) -> Element<'_, Message> {
         },
         None => None,
     };
-    if draft_dir.as_deref() == Some("") {
-        tree_col = tree_col.push(draft_input_row(app, 1));
-    }
-    if expanded.contains("") {
-        for r in tree_rows(app, &expanded) {
-            // 就地重命名的输入行替换对应行
-            if let Some(input) = file_inline_input(app, &r) {
-                tree_col = tree_col.push(input);
-                continue;
-            }
-            tree_col = tree_col.push(tree_row_element(app, &r, window, cursor));
-            if draft_dir.as_deref() == Some(r.rel.as_str()) {
-                tree_col = tree_col.push(draft_input_row(app, r.depth + 1));
+    let mut tree_col = column![].padding(Padding::ZERO.top(6.0).bottom(12.0));
+    for v in &app.global.recent_vaults {
+        let active = active_root.as_deref() == Some(v.root.as_str());
+        tree_col = tree_col.push(vault_row(app, window, cursor, v, active, &expanded));
+        if !active {
+            continue;
+        }
+        // 重名自动加序号的提醒条（3s 自动消失）
+        if let Some((notice, _)) = &app.rename_notice {
+            tree_col = tree_col.push(
+                container(text(notice.clone()).size(pal::FS_CAPTION).color(pal::WARNING))
+                    .width(Length::Fill)
+                    .padding(Padding::ZERO.horizontal(12.0).vertical(4.0)),
+            );
+        }
+        if draft_dir.as_deref() == Some("") {
+            tree_col = tree_col.push(draft_input_row(app, 1));
+        }
+        if expanded.contains("") {
+            for r in tree_rows(app, &expanded) {
+                // 就地重命名的输入行替换对应行
+                if let Some(input) = file_inline_input(app, &r) {
+                    tree_col = tree_col.push(input);
+                    continue;
+                }
+                tree_col = tree_col.push(tree_row_element(app, &r, window, cursor));
+                if draft_dir.as_deref() == Some(r.rel.as_str()) {
+                    tree_col = tree_col.push(draft_input_row(app, r.depth + 1));
+                }
             }
         }
     }
 
-    let tree: Element<'static, Message> = mouse_area(
+    let body = mouse_area(
         scrollable(
             container(tree_col)
                 .width(Length::Fill)
@@ -1666,9 +1672,18 @@ fn files_view(app: &App) -> Element<'_, Message> {
         )
         .width(Length::Fill)
         .height(Length::Fill),
-    )
-    .on_right_press(ctx_popup(window, cursor, PopupState::FileMenu { rel: String::new(), is_dir: true, is_root: true }))
-    .into();
+    );
+    // 空白处右键 = 在激活仓库根目录新建（未进入仓库时无根可建，不挂菜单）
+    let tree: Element<'static, Message> = if app.vault_root.is_some() {
+        body.on_right_press(ctx_popup(
+            window,
+            cursor,
+            PopupState::FileMenu { rel: String::new(), is_dir: true, is_root: true },
+        ))
+        .into()
+    } else {
+        body.into()
+    };
 
     column![toolbar, controls::h_divider_subtle(), tree]
         .width(Length::Fill)
@@ -1676,40 +1691,26 @@ fn files_view(app: &App) -> Element<'_, Message> {
         .into()
 }
 
-/// 仓库顶行（激活行金色淡底 + 悬停显示完整路径；右键 = 仓库行菜单）。
+/// 最近仓库行（激活行金色淡底 + 就地展开；非激活行点击进入；悬停显示完整路径；右键 = 仓库行菜单）。
 fn vault_row(
     app: &App,
     window: iced::window::Id,
     cursor: Point,
+    vault: &RecentVault,
+    active: bool,
     expanded: &HashSet<&str>,
 ) -> Element<'static, Message> {
-    let name = app
-        .vault_root
-        .as_ref()
-        .map(|r| atelyx_core::vault::vault_display_name(r))
-        .unwrap_or_default();
-    let vault_open = expanded.contains("");
-    // 拖拽悬停仓库行 = 移入根：底色加深提示可放入
-    let drag_target = app.file_drag_target.as_deref() == Some("");
+    let vault_open = active && expanded.contains("");
+    // 拖拽悬停激活仓库行 = 移入根：底色加深提示可放入
+    let drag_target = active && app.file_drag_target.as_deref() == Some("");
     let row = row![
         icon(
             if vault_open { "chevron-down" } else { "chevron-right" },
             14.0,
             pal::TEXT_MUTED,
         ),
-        // 协作入口角标：cloud 主体 + 右下 plus 小标（悬停提示由仓库行整行承担）
-        stack![
-            icon("cloud", 14.0, pal::ACCENT),
-            container(icon("plus", 8.0, pal::TEXT_MUTED))
-                .width(Length::Fixed(14.0))
-                .height(Length::Fixed(14.0))
-                .align_x(Horizontal::Right)
-                .align_y(Vertical::Bottom)
-                .padding(Padding::ZERO.left(6.0).top(6.0)),
-        ]
-        .width(Length::Fixed(14.0))
-        .height(Length::Fixed(14.0)),
-        text(name)
+        icon("hard-drive", 14.0, if active { pal::ACCENT } else { pal::TEXT_MUTED }),
+        text(vault.name.clone())
             .size(pal::FS_CAPTION)
             .color(pal::TEXT_PRIMARY)
             .font(iced::Font { weight: iced::font::Weight::Medium, ..iced::Font::default() }),
@@ -1723,13 +1724,22 @@ fn vault_row(
         .height(Length::Fixed(32.0))
         .align_y(Vertical::Center)
         .style(move |_t| Style {
-            background: Some(
-                if drag_target { pal::ACCENT.scale_alpha(0.35) } else { pal::ACCENT.scale_alpha(0.2) }.into(),
-            ),
+            // 激活行 = 强调淡底（拖拽落点更深）；非激活行透明（悬停高亮由按钮样式给）
+            background: Some(if active {
+                if drag_target { pal::ACCENT.scale_alpha(0.35) } else { pal::ACCENT.scale_alpha(0.2) }
+            } else {
+                Color::TRANSPARENT
+            }
+            .into()),
             border: border::rounded(pal::RADIUS_SM),
             ..Style::default()
         });
 
+    let on_press = if active {
+        Message::ToggleDir(String::new())
+    } else {
+        Message::SelectVault(PathBuf::from(&vault.root))
+    };
     let row_elem = mouse_area(
         button(content)
             .width(Length::Fill)
@@ -1738,30 +1748,25 @@ fn vault_row(
                     .then_some(pal::HOVER.into()),
                 ..Default::default()
             })
-            .on_press(Message::ToggleDir(String::new())),
+            .on_press(on_press),
     );
-    // 悬停提示完整路径（打开仓库才有意义）；文件拖拽会话中悬停 = 落点上报（拖至仓库行 = 移入根）
-    let row_elem = match app.vault_root.as_ref() {
-        Some(root) => {
-            let path = root.display().to_string();
-            if app.file_drag.is_some() {
-                row_elem
-                    .on_enter(Message::FileDragEnter { rel: String::new(), is_dir: true })
-                    .on_exit(Message::FileDragExit { rel: String::new() })
-            } else {
-                row_elem
-                    .on_enter(Message::Ui(crate::ui::UiMsg::HoverTip {
-                        window,
-                        label: path.clone(),
-                        box_px: 32.0,
-                    }))
-                    .on_exit(Message::Ui(crate::ui::UiMsg::HoverTipEnd { window, label: path }))
-            }
-        }
-        None => row_elem,
+    // 悬停提示完整路径；文件拖拽会话中悬停激活仓库行 = 落点上报（拖至该行 = 移入根）
+    let row_elem = if app.file_drag.is_some() && active {
+        row_elem
+            .on_enter(Message::FileDragEnter { rel: String::new(), is_dir: true })
+            .on_exit(Message::FileDragExit { rel: String::new() })
+    } else {
+        let path = vault.root.clone();
+        row_elem
+            .on_enter(Message::Ui(crate::ui::UiMsg::HoverTip {
+                window,
+                label: path.clone(),
+                box_px: 32.0,
+            }))
+            .on_exit(Message::Ui(crate::ui::UiMsg::HoverTipEnd { window, label: path }))
     };
     row_elem
-        .on_right_press(ctx_popup(window, cursor, PopupState::FileMenu { rel: String::new(), is_dir: true, is_root: false }))
+        .on_right_press(ctx_popup(window, cursor, PopupState::VaultMenu { root: vault.root.clone() }))
         .into()
 }
 
@@ -2928,6 +2933,7 @@ fn popup_element<'a>(
         PopupState::FileMenu { rel, is_dir, is_root } => {
             file_menu_entries(app, rel, *is_dir, *is_root)
         }
+        PopupState::VaultMenu { root } => vault_menu_entries(app, root),
         PopupState::NoteMenu => vec![
             (0, MenuEntry::action("添加笔记属性", Message::Props(crate::properties_view::PropsMsg::StartAdd))),
             (0, MenuEntry::action("历史记录", Message::HistoryToggle)),
@@ -3320,7 +3326,48 @@ fn panel_tab_with_view(app: &App, panel_id: &str, kind: &str) -> Option<String> 
     walk(&layout::active_layout(&app.ui).tree, panel_id, kind)
 }
 
-/// 文件树右键菜单：文件夹 / 文件 / 仓库行 / 根空白；删除 = 应用层确认流
+/// 最近仓库行菜单：在系统文件管理器中打开 / 从列表移除（激活仓库行不可移除）。
+/// 移除进二段确认 pane（只移出列表，不删磁盘文件）。
+fn vault_menu_entries(app: &App, root: &str) -> Vec<(usize, MenuEntry<'static>)> {
+    let active = app
+        .vault_root
+        .as_ref()
+        .map(|r| r.to_string_lossy().into_owned())
+        .as_deref()
+        == Some(root);
+    let mut entries: Vec<(usize, MenuEntry)> = vec![
+        (0, MenuEntry::action_icon(
+            "在文件管理器中打开",
+            "folder-open",
+            Message::RevealVaultAt(root.to_string()),
+        )),
+        (0, MenuEntry::Divider),
+        (0, MenuEntry::Action {
+            label: "从列表移除".to_string(),
+            icon: Some("unlink"),
+            danger: true,
+            disabled: active,
+            on_press: (!active).then(|| Message::RemoveVaultAsk(root.to_string())),
+            note: active.then_some("当前仓库"),
+            hint: None,
+        }),
+    ];
+    if app.remove_vault_confirm.as_deref() == Some(root) {
+        let pane = column![text("只从列表移除，不影响磁盘文件")
+            .size(pal::FS_CAPTION)
+            .color(pal::TEXT_MUTED)];
+        entries.push((1, MenuEntry::Custom(pane.into(), 12.0 + 16.0 + 4.0)));
+        entries.push((1, MenuEntry::action_icon(
+            "确认移除",
+            "unlink",
+            Message::RemoveVaultConfirm(root.to_string()),
+        )));
+        entries.push((1, MenuEntry::action("取消", Message::RemoveVaultCancel)));
+    }
+    entries
+}
+
+/// 文件树右键菜单：文件夹 / 文件 / 根空白；删除 = 应用层确认流
 /// （文件进确认 pane；文件夹先计数——空目录直接删、非空带条目数进确认 pane）。
 fn file_menu_entries(
     app: &App,
@@ -3328,14 +3375,6 @@ fn file_menu_entries(
     is_dir: bool,
     is_root: bool,
 ) -> Vec<(usize, MenuEntry<'static>)> {
-    if rel.is_empty() && !is_root {
-        // 仓库行
-        return vec![
-            (0, MenuEntry::action_icon("在文件管理器中打开", "folder-open", Message::RevealVault)),
-            (0, MenuEntry::danger("从列表移除", "unlink", Message::NotImplemented("仓库列表管理"))),
-        ];
-    }
-
     let mut entries: Vec<(usize, MenuEntry)> = Vec::new();
     if is_dir {
         entries.push((0, MenuEntry::action_icon("新建画布", "file-text", Message::NotImplemented("画布"))));

@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+use atelyx_core::global_config;
 use atelyx_core::layout::{
     self, apply_layout_op, normalize, op_passes_shape_check, AppUiState, DetachedWindow,
     LayoutOp, WindowBounds, UI_STATE_SCHEMA,
@@ -200,13 +201,11 @@ const PERSIST_TICK: std::time::Duration = std::time::Duration::from_millis(800);
 /// 自动保存防抖：最近一次内容变更后停止输入该时长才写回（尾沿 debounce，单定时器链续排）。
 const AUTOSAVE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(500);
 
-/// ui-state.json 落盘路径（应用数据目录，bundle identifier = com.atelyx.desktop）。
-fn ui_state_path() -> Option<PathBuf> {
+/// 应用数据目录（bundle identifier = com.atelyx.desktop）；ui-state.json 与 global.json 同放此处。
+fn app_data_dir() -> Option<PathBuf> {
     #[cfg(windows)]
     {
-        std::env::var("APPDATA")
-            .ok()
-            .map(|d| PathBuf::from(d).join("com.atelyx.desktop").join("ui-state.json"))
+        std::env::var("APPDATA").ok().map(PathBuf::from)
     }
     #[cfg(not(windows))]
     {
@@ -214,8 +213,40 @@ fn ui_state_path() -> Option<PathBuf> {
             .map(PathBuf::from)
             .or_else(|_| std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".local/share")))
             .ok()
-            .map(|d| d.join("com.atelyx.desktop").join("ui-state.json"))
     }
+    .map(|d| d.join("com.atelyx.desktop"))
+}
+
+/// ui-state.json 落盘路径（应用级 UI 状态）。
+fn ui_state_path() -> Option<PathBuf> {
+    app_data_dir().map(|d| d.join("ui-state.json"))
+}
+
+/// global.json 落盘路径（应用级全局配置：最近仓库列表）。
+fn global_config_path() -> Option<PathBuf> {
+    app_data_dir().map(|d| d.join("global.json"))
+}
+
+/// 启动读全局配置；读错误（原文损坏且备份失败等）回传文案供通知。
+fn load_global_boot() -> (global_config::GlobalConfig, Option<String>) {
+    let Some(path) = global_config_path() else {
+        return (global_config::GlobalConfig::default(), None);
+    };
+    match global_config::read_global_config(&path) {
+        Ok((config, backup)) => (
+            config,
+            backup.map(|name| format!("全局配置损坏，已留档为 {name}；最近仓库列表已重置")),
+        ),
+        Err(e) => (global_config::GlobalConfig::default(), Some(e)),
+    }
+}
+
+/// 当前 unix 秒（最近仓库的打开时间戳）。
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// 从磁盘恢复布局状态：缺失/损坏/schema 不符一律回落默认态。
@@ -248,6 +279,8 @@ enum Message {
     WindowClosed(window::Id),
     PickVault,
     VaultPicked(Result<PathBuf, String>),
+    /// 从最近仓库列表进入指定仓库（脏拦截统一 flush 放行）。
+    SelectVault(PathBuf),
     ToggleDir(String),
     /// gen = 发起任务时的仓库世代；回调落地前与当前世代比对，过期即丢弃。
     ChildrenLoaded(String, u64, Result<Vec<vault::DirChild>, String>),
@@ -405,8 +438,18 @@ enum Message {
     DeleteCancel,
     /// 文件/文件夹删除（菜单内确认后触发）。
     DeleteEntry(String, bool),
-    /// 仓库行：在系统文件管理器中打开仓库根。
-    RevealVault,
+    /// 仓库行：在系统文件管理器中打开指定仓库根。
+    RevealVaultAt(String),
+    /// 最近仓库行：从列表移除入口（进弹层确认 pane）。
+    RemoveVaultAsk(String),
+    /// 从列表移除确认（只移出列表，不影响磁盘文件与激活态）。
+    RemoveVaultConfirm(String),
+    /// 取消从列表移除。
+    RemoveVaultCancel,
+    /// 全局配置落盘回执（失败提示，不回滚内存态）。
+    GlobalSaved(Result<(), String>),
+    /// 启动期全局配置读错误提示。
+    StartupNotice(String),
     /// 文件操作落地（gen 守卫 + 结果通知 + 刷新子项 + 打开文件跟随）。
     OpDone(u64, String, Result<String, String>, FollowUp),
     /// 展开全部/收起全部文件夹（懒加载树递归展开）。
@@ -553,6 +596,8 @@ enum SaveReason {
 enum PendingAfterFlush {
     OpenFile(String),
     PickVault,
+    /// 从最近仓库列表进入指定仓库。
+    SelectVault(PathBuf),
     CloseMain(window::Id),
     CloseFileTab,
     /// 仓库内笔记链接（已解码；能进 flush 的只有 Path/Wiki/Create 形态，外链直接打开）。
@@ -594,6 +639,12 @@ pub struct App {
     /// 设置整页开启态与左栏 tab。
     pub settings_open: bool,
     pub settings_tab: String,
+    /// 应用级全局配置（最近仓库列表；落盘 global.json）。
+    pub global: global_config::GlobalConfig,
+    /// 最近一次发起的切仓目标：flush 回放时只有与它一致才执行，防快速点选落到非最后目标。
+    vault_switch_target: Option<PathBuf>,
+    /// 从列表移除的确认态（目标仓库根；弹层确认 pane 数据源）。
+    pub remove_vault_confirm: Option<String>,
     /// 当前仓库根（打开仓库后与 vault.root() 一致；仅用于展示与 files 视图判空）。
     pub vault_root: Option<PathBuf>,
     /// 仓库文件总数（打开仓库后异步统计；统计在途为 None）。
@@ -737,6 +788,19 @@ impl App {
             .chain(iced::font::load(ui::FONT_SEMIBOLD))
             .chain(iced::font::load(ui::FONT_DISPLAY))
             .discard();
+        let (global, global_notice) = load_global_boot();
+        // 最近列表首项 = 上次所在仓库，启动直接进入（路径失效则进入失败、停留未激活态）
+        let auto_enter = global.recent_vaults.first().map(|v| PathBuf::from(&v.root));
+        let mut boot = open
+            .map(Message::WindowOpened)
+            .chain(window::position(main_os).map(move |p| Message::PositionKnown(main_os, p)))
+            .chain(fonts);
+        if let Some(text) = global_notice {
+            boot = boot.chain(Task::done(Message::StartupNotice(text)));
+        }
+        if let Some(root) = auto_enter {
+            boot = boot.chain(Task::done(Message::SelectVault(root)));
+        }
         (
             Self {
                 ui: load_ui_state(),
@@ -756,6 +820,9 @@ impl App {
                 popup_pane: 0,
                 settings_open: false,
                 settings_tab: "general".into(),
+                global,
+                vault_switch_target: None,
+                remove_vault_confirm: None,
                 vault_root: None,
                 file_count: None,
                 main_id: None,
@@ -811,9 +878,7 @@ impl App {
                 history: Vec::new(),
                 history_open: false,
             },
-            open.map(Message::WindowOpened)
-                .chain(window::position(main_os).map(move |p| Message::PositionKnown(main_os, p)))
-                .chain(fonts),
+            boot,
         )
     }
 
@@ -927,47 +992,18 @@ impl App {
             }
             Message::PickVault => self.gate(PendingAfterFlush::PickVault),
             Message::VaultPicked(Ok(path)) => {
-                // 展开集按仓库独立：切走时记忆当前仓库的集合，切回时恢复
-                if let Some(old) = self.vault_root.clone() {
-                    self.expanded_by_vault.insert(old, self.ui.file_explorer_expanded.clone());
-                }
-                if let Err(e) = self.vault.set(path.clone(), Vec::new()) {
-                    self.notify(NoticeLevel::Error, e);
-                    return Task::none();
-                }
-                self.vault_root = self.vault.root().ok();
-                self.notify(NoticeLevel::Success, "仓库已打开");
-                self.children.clear();
-                self.note_text.clear();
-                self.source_editor = text_editor::Content::new();
-                self.edit.reset(0);
-                self.edit_doc = None;
-                self.edit_meta.clear();
-                self.preview_doc = None;
-                self.dirty = false;
-                self.save_error = None;
-                self.reset_props();
-                self.file_count = None;
-                self.expand_all = false;
-                self.expand_pending = 0;
-                self.rename_notice = None;
-                // last_note_file 跨仓库沿用（相对路径语义）；仓库就绪即恢复其内容
-                self.ui.file_explorer_expanded = self
-                    .expanded_by_vault
-                    .get(&path)
-                    .cloned()
-                    .unwrap_or_default();
-                let mut task = self.load_children("").chain(self.count_files());
-                task = task.chain(self.refresh_tag_vocab()).chain(self.refresh_note_files());
-                task = task.chain(self.load_vault_meta());
-                if let Some(rel) = self.ui.last_note_file.clone() {
-                    task = task.chain(self.load_note(&rel));
-                }
-                task
+                // 系统目录选择器选定：记为最近切仓目标并进入
+                self.vault_switch_target = Some(path.clone());
+                self.enter_vault(path)
             }
             Message::VaultPicked(Err(e)) => {
                 self.notify(NoticeLevel::Error, e);
                 Task::none()
+            }
+            Message::SelectVault(path) => {
+                // 记录目标：flush 回放时据此丢弃被更晚点选取代的切换
+                self.vault_switch_target = Some(path.clone());
+                self.gate(PendingAfterFlush::SelectVault(path))
             }
             Message::ToggleDir(rel) => {
                 let expanded = &mut self.ui.file_explorer_expanded;
@@ -1973,16 +2009,42 @@ impl App {
                     self.delete_entry(&rel, is_dir)
                 }
             }
-            Message::RevealVault => {
-                let Some(root) = self.vault.root().ok() else { return Task::none() };
+            Message::RevealVaultAt(root) => {
+                let path = PathBuf::from(root);
                 #[cfg(windows)]
                 {
-                    let _ = std::process::Command::new("explorer").arg(&root).spawn();
+                    let _ = std::process::Command::new("explorer").arg(&path).spawn();
                 }
                 #[cfg(not(windows))]
                 {
-                    let _ = std::process::Command::new("xdg-open").arg(&root).spawn();
+                    let _ = std::process::Command::new("xdg-open").arg(&path).spawn();
                 }
+                Task::none()
+            }
+            Message::RemoveVaultAsk(root) => {
+                // 进弹层确认 pane（与删除确认同形）：条目留在当前菜单内二段确认
+                self.remove_vault_confirm = Some(root);
+                self.popup_pane = 1;
+                Task::none()
+            }
+            Message::RemoveVaultConfirm(root) => {
+                self.dismiss_popup();
+                self.remove_vault_confirm = None;
+                self.global.remove_vault(&root);
+                self.save_global()
+            }
+            Message::RemoveVaultCancel => {
+                self.remove_vault_confirm = None;
+                self.popup_pane = 0;
+                Task::none()
+            }
+            Message::GlobalSaved(Err(e)) => {
+                self.notify(NoticeLevel::Error, format!("最近仓库列表保存失败：{e}"));
+                Task::none()
+            }
+            Message::GlobalSaved(Ok(())) => Task::none(),
+            Message::StartupNotice(text) => {
+                self.notify(NoticeLevel::Error, text);
                 Task::none()
             }
             Message::OpDone(gen, dir, Ok(final_rel), mut follow) => {
@@ -2548,6 +2610,13 @@ impl App {
         match pending {
             PendingAfterFlush::OpenFile(rel) => self.open_file(&rel),
             PendingAfterFlush::PickVault => self.start_pick_vault(),
+            PendingAfterFlush::SelectVault(path) => {
+                // 已被更晚的点选取代：丢弃挂起的这次切换（避免落到非最后点击的仓库）
+                if self.vault_switch_target.as_ref() != Some(&path) {
+                    return Task::none();
+                }
+                self.enter_vault(path)
+            }
             PendingAfterFlush::CloseMain(id) => window::close(id),
             PendingAfterFlush::CloseFileTab => self.close_file_tab(),
             PendingAfterFlush::OpenLink(href) => self.open_link_inner(href),
@@ -2607,6 +2676,68 @@ impl App {
                 }
             },
             Message::VaultPicked,
+        )
+    }
+
+    /// 进入仓库：成功则清空旧仓库会话态、登记最近列表并落盘 global.json；失败提示并保持当前态。
+    fn enter_vault(&mut self, path: PathBuf) -> Task<Message> {
+        // 展开集按仓库独立：切走时记忆当前仓库的集合，切回时恢复
+        if let Some(old) = self.vault_root.clone() {
+            self.expanded_by_vault.insert(old, self.ui.file_explorer_expanded.clone());
+        }
+        if let Err(e) = self.vault.set(path.clone(), Vec::new()) {
+            self.vault_switch_target = None;
+            self.notify(NoticeLevel::Error, e);
+            return Task::none();
+        }
+        let root = self.vault.root().ok();
+        self.vault_root = root.clone();
+        // 登记最近仓库：root 用归一化后的仓库根，与列表项、切仓比对同源
+        if let Some(root) = &root {
+            let name = vault::vault_display_name(root);
+            self.global.bump_vault(&root.to_string_lossy(), &name, now_secs());
+        }
+        self.vault_switch_target = None;
+        self.notify(NoticeLevel::Success, "仓库已打开");
+        self.children.clear();
+        self.note_text.clear();
+        self.source_editor = text_editor::Content::new();
+        self.edit.reset(0);
+        self.edit_doc = None;
+        self.edit_meta.clear();
+        self.preview_doc = None;
+        self.dirty = false;
+        self.save_error = None;
+        self.reset_props();
+        self.file_count = None;
+        self.expand_all = false;
+        self.expand_pending = 0;
+        self.rename_notice = None;
+        // last_note_file 跨仓库沿用（相对路径语义）；仓库就绪即恢复其内容
+        self.ui.file_explorer_expanded = self
+            .expanded_by_vault
+            .get(&path)
+            .cloned()
+            .unwrap_or_default();
+        let mut task = self.load_children("").chain(self.count_files());
+        task = task.chain(self.refresh_tag_vocab()).chain(self.refresh_note_files());
+        task = task.chain(self.load_vault_meta());
+        task = task.chain(self.save_global());
+        if let Some(rel) = self.ui.last_note_file.clone() {
+            task = task.chain(self.load_note(&rel));
+        }
+        task
+    }
+
+    /// 落盘 global.json（小文件整写；失败提示，不回滚内存态）。
+    fn save_global(&self) -> Task<Message> {
+        let Some(path) = global_config_path() else {
+            return Task::none();
+        };
+        let config = self.global.clone();
+        Task::perform(
+            async move { global_config::write_global_config(&path, &config) },
+            Message::GlobalSaved,
         )
     }
 
@@ -2956,6 +3087,7 @@ impl App {
                     self.popup = None;
                     self.popup_pane = 0;
                     self.delete_confirm = None;
+                    self.remove_vault_confirm = None;
                 }
                 Task::none()
             }

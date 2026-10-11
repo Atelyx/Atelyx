@@ -6,6 +6,7 @@
 pub mod chat_container;
 pub mod filesearch;
 pub mod frontmatter;
+pub mod global_config;
 pub mod history;
 pub mod layout;
 pub mod markdown;
