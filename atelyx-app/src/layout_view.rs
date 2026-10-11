@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 
 use iced::alignment::{Horizontal, Vertical};
-use iced::widget::{button, column, container, mouse_area, row, scrollable, space, stack, text};
+use iced::widget::{button, column, container, mouse_area, row, scrollable, space, stack, text, text_input};
 use iced::{Element, Font, Length, Padding, Point, Rectangle, Size, border, widget::container::Style};
 
 use atelyx_core::layout::{self, AppUiState, LayoutNode, TabItem};
@@ -170,6 +170,8 @@ pub enum PopupState {
     SortMenu,
     FileMenu { rel: String, is_dir: bool, is_root: bool },
     NoteMenu,
+    /// 属性面板类型切换菜单（属性行序号）。
+    PropTypeMenu { index: usize },
 }
 
 impl PopupState {
@@ -191,6 +193,7 @@ impl PopupState {
                 }
             }
             PopupState::NoteMenu => 144.0,
+            PopupState::PropTypeMenu { .. } => 128.0,
         }
     }
 }
@@ -294,7 +297,9 @@ fn with_overlays<'a>(
     base: Element<'a, Message>,
 ) -> Element<'a, Message> {
     let viewport = viewport_of(app, window);
-    let mut element = base;
+    // 覆盖层（弹层/提示/拖拽 ghost/通知）统一作为同一 Stack 的追加子，内容恒为第 0 子：
+    // 任一覆盖显隐只增删尾部子，内容子树状态不重建——滚动位置与输入焦点得以保留。
+    let mut root = iced::widget::Stack::new().push(base);
 
     // 弹层（同窗口至多一个；捕获层点击 = 外点关闭）
     if let Some((w, open)) = &app.popup {
@@ -308,12 +313,11 @@ fn with_overlays<'a>(
                 min_width: open.min_width,
             };
             let geom = popup::resolve(&spec, viewport);
-            element = popup::layer(
-                element,
+            root = root.push(popup::overlay(
                 geom,
                 content,
                 Message::Ui(crate::ui::UiMsg::PopupClose { window }),
-            );
+            ));
         }
     }
 
@@ -345,14 +349,9 @@ fn with_overlays<'a>(
                 .align_x(Horizontal::Left)
                 .align_y(Vertical::Top)
                 .padding(Padding::ZERO.left(geom.x).top(geom.y));
-            element = stack![element, mouse_area(positioned)
-                .on_exit(Message::Ui(crate::ui::UiMsg::HoverTipEnd {
-                    window,
-                    label: label.clone(),
-                }))]
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into();
+            root = root.push(mouse_area(positioned).on_exit(Message::Ui(
+                crate::ui::UiMsg::HoverTipEnd { window, label: label.clone() },
+            )));
         }
     }
 
@@ -380,23 +379,64 @@ fn with_overlays<'a>(
                     .align_x(Horizontal::Left)
                     .align_y(Vertical::Top)
                     .padding(Padding::ZERO.left(local.x + 14.0).top(local.y + 18.0));
-                element = stack![element, mouse_area(positioned)]
+                root = root.push(mouse_area(positioned));
+            }
+        }
+    }
+
+    // 文件树拖拽 ghost：跟随光标的预览卡 + 悬停目标的动作提示（无目标 = 只显示文件名）。
+    // 不包 mouse_area 捕获——释放走全局订阅，悬停事件须穿透到行上才能上报落点
+    // （与标签拖拽的拦事件语义不同）。
+    if let Some(drag) = &app.file_drag {
+        if drag.cursor_window == window {
+            if let Some(wpos) = app.os_positions.get(&window) {
+                let local = Point::new(drag.current.x - wpos.x, drag.current.y - wpos.y);
+                let icon_name = if drag.is_dir { "folder" } else { file_icon(&drag.label) };
+                let hint = app.file_drag_target.as_ref().map(|dir| {
+                    if dir.is_empty() {
+                        "移到根目录".to_string()
+                    } else {
+                        let name = dir.rsplit('/').next().unwrap_or(dir);
+                        format!("移动到「{name}」")
+                    }
+                });
+                let mut card = column![
+                    row![
+                        icon(icon_name, 13.0, pal::TEXT_PRIMARY),
+                        text(drag.label.clone()).size(pal::FS_CAPTION).color(pal::TEXT_PRIMARY),
+                    ]
+                    .spacing(6),
+                ]
+                .spacing(2);
+                if let Some(hint) = hint {
+                    card = card.push(
+                        text(hint).size(pal::FS_MICRO).color(pal::TEXT_SECONDARY),
+                    );
+                }
+                let ghost = container(card)
+                    .padding(Padding::ZERO.horizontal(10.0).vertical(4.0))
+                    .style(|_t| Style {
+                        background: Some(pal::BG_OVERLAY.into()),
+                        border: border::rounded(pal::RADIUS_SM).color(pal::ACCENT).width(1.0),
+                        ..Style::default()
+                    });
+                let positioned = container(ghost)
                     .width(Length::Fill)
                     .height(Length::Fill)
-                    .into();
+                    .align_x(Horizontal::Left)
+                    .align_y(Vertical::Top)
+                    .padding(Padding::ZERO.left(local.x + 14.0).top(local.y + 18.0));
+                root = root.push(positioned);
             }
         }
     }
 
     // 通知（仅主窗口承载）
     if app.main_id == Some(window) && !app.notifications.is_empty() {
-        element = stack![element, notify::layer(&app.notifications)]
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into();
+        root = root.push(notify::layer(&app.notifications));
     }
 
-    element
+    root.width(Length::Fill).height(Length::Fill).into()
 }
 
 fn viewport_of(app: &App, window: iced::window::Id) -> Size {
@@ -578,6 +618,7 @@ fn layout_tab(
     let edit_width = layout_tab_width(name);
     let text_area: Element<'static, Message> = if renaming {
         controls::inline_input(
+            iced::widget::Id::new(controls::INLINE_RENAME_INPUT),
             "新名称",
             &app.rename.as_ref().map(|r| r.value.clone()).unwrap_or_default(),
             edit_width - 20.0,
@@ -933,6 +974,13 @@ fn panel_view<'a>(
     ]
     .width(Length::Fill)
     .height(Length::Fixed(UiMetrics::TAB_BAR_H));
+    // 头部空白右键 = 视图选择菜单（标签右键为空档位，同样落到此处；与空面板内容区一致）
+    let cursor = app.cursor_for(window);
+    let header = mouse_area(header).on_right_press(ctx_popup(
+        window,
+        cursor,
+        PopupState::ViewPicker { panel_id: panel_id.to_string() },
+    ));
 
     let content: Element<'a, Message> = match active {
         // 空面板 = 纯空白（右键唤起视图选择器）
@@ -947,16 +995,11 @@ fn panel_view<'a>(
                 },
             ))
             .into(),
-        Some(t) => view_content(app, &t.view),
+        Some(t) => view_content(app, window, &t.view),
     };
 
     // 拖拽 drop 指示：中部 = 强调 22% 填充 + 60% 外框圆角 4；四边缘 = 12% 条带
-    let drop = app.drag.as_ref().and_then(|_| {
-        app.drag_hover
-            .as_ref()
-            .filter(|h| h.zone.panel_id.as_deref() == Some(panel_id))
-            .map(|h| h.kind)
-    });
+    // （指示作为追加子叠放，显隐不重建面板内容子树——拖拽会话不丢滚动与焦点）
     let base = container(
         column![header, container(content).width(Length::Fill).height(Length::Fill)]
             .width(Length::Fill)
@@ -964,13 +1007,17 @@ fn panel_view<'a>(
     )
     .width(Length::Fill)
     .height(Length::Fill);
-    match drop {
-        Some(kind) => {
-            let indicator = drop_indicator(kind);
-            stack![base, indicator].width(Length::Fill).height(Length::Fill).into()
-        }
-        None => base.into(),
+    let mut root = iced::widget::Stack::new().push(base);
+    if let Some(kind) = app
+        .drag
+        .as_ref()
+        .and_then(|_| app.drag_hover.as_ref())
+        .filter(|h| h.zone.panel_id.as_deref() == Some(panel_id))
+        .map(|h| h.kind)
+    {
+        root = root.push(drop_indicator(kind));
     }
+    root.width(Length::Fill).height(Length::Fill).into()
 }
 
 /// 标签排序插入位标记（2px 强调竖条，随标签条拉伸）。
@@ -1177,12 +1224,111 @@ fn note_status_pill(app: &App) -> Option<Element<'static, Message>> {
 }
 
 /// 按视图 kind 分派内容（files/note 可用，其余占位）。
-fn view_content<'a>(app: &'a App, kind: &str) -> Element<'a, Message> {
+fn view_content<'a>(app: &'a App, window: iced::window::Id, kind: &str) -> Element<'a, Message> {
     match kind {
         "files" => files_view(app),
         "note" => note_view(app),
+        "search" => search_view(app),
+        "inspector" => inspector_view(app, window),
         kind => placeholder_view(kind),
     }
+}
+
+/// 搜索视图：模式下拉（按文件名可用；全局/按标签为占位禁用）+ 实时过滤 + 结果行点击打开。
+fn search_view(app: &App) -> Element<'_, Message> {
+    let mode_chip = |label: &'static str, enabled: bool| {
+        let color = if enabled { pal::TEXT_PRIMARY } else { pal::TEXT_MUTED };
+        button(text(label).size(pal::FS_MICRO).color(color))
+            .padding(Padding::ZERO.horizontal(8.0).vertical(3.0))
+            .style(move |_t, _s| button::Style {
+                background: Some(pal::BG_TERTIARY.into()),
+                border: border::rounded(pal::RADIUS_SM),
+                text_color: color,
+                ..button::Style::default()
+            })
+    };
+    let mut rows = iced::widget::Column::<Message>::new().spacing(2);
+    let q = app.search_query.trim().to_lowercase();
+    let matched: Vec<(String, String)> = app
+        .note_files
+        .iter()
+        .filter(|(_, name)| q.is_empty() || name.to_lowercase().contains(&q))
+        .cloned()
+        .collect();
+    let empty = matched.is_empty();
+    for (rel, name) in matched {
+        let is_note = rel.ends_with(".md");
+        let open = is_note.then(|| Message::OpenFile(rel.clone()));
+        rows = rows.push(
+            button(
+                row![
+                    icon(if is_note { "file-text" } else { "paperclip" }, 12.0, pal::TEXT_MUTED),
+                    text(name.clone()).size(pal::FS_CAPTION).color(pal::TEXT_PRIMARY),
+                    space(),
+                    text(rel.clone()).size(pal::FS_MICRO).color(pal::TEXT_MUTED),
+                ]
+                .spacing(6),
+            )
+            .width(Length::Fill)
+            .padding(Padding::ZERO.horizontal(8.0).vertical(4.0))
+            .style(|_t, status| button::Style {
+                background: matches!(status, button::Status::Hovered | button::Status::Pressed)
+                    .then_some(pal::HOVER.into()),
+                ..button::Style::default()
+            })
+            .on_press_maybe(open),
+        );
+    }
+    if empty {
+        rows = rows.push(
+            text(if app.note_files.is_empty() { "打开仓库后可搜索文件" } else { "无匹配文件" })
+                .size(pal::FS_CAPTION)
+                .color(pal::TEXT_MUTED),
+        );
+    }
+    container(
+        column![
+            row![
+                mode_chip("按文件名", true),
+                mode_chip("全局搜索", false),
+                mode_chip("按标签搜索", false),
+            ]
+            .spacing(4),
+            iced::widget::text_input("输入文件名过滤…", &app.search_query)
+                .size(pal::FS_CAPTION)
+                .padding(Padding::ZERO.horizontal(8.0).vertical(4.0))
+                .on_input(Message::SearchInput)
+                .style(|_theme, status| text_input::Style {
+                    background: pal::BG_SUNKEN.into(),
+                    border: border::rounded(pal::RADIUS_SM)
+                        .color(if matches!(status, text_input::Status::Focused { .. }) { pal::ACCENT } else { pal::BORDER })
+                        .width(1.0),
+                    icon: pal::TEXT_MUTED,
+                    placeholder: pal::INPUT_PLACEHOLDER,
+                    value: pal::TEXT_PRIMARY,
+                    selection: pal::ACCENT.scale_alpha(0.35),
+                }),
+            scrollable(rows).width(Length::Fill).height(Length::Fill),
+        ]
+        .spacing(8),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .padding(8.0)
+    .into()
+}
+
+/// 属性面板视图：笔记属性（与编辑器属性区同一组件，改动经同一保存链落盘）。
+fn inspector_view<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, Message> {
+    if app.ui.last_note_file.is_none() {
+        return controls::view_placeholder(
+            "info",
+            "笔记属性",
+            "打开一篇笔记后在此查看与编辑其属性。",
+        );
+    }
+    crate::properties_view::props_panel(app, window, true)
+        .unwrap_or_else(|| text("当前笔记无属性").size(pal::FS_CAPTION).color(pal::TEXT_MUTED).into())
 }
 
 /// 占位视图：大图标 + 名称 + 未实现说明（PanelPlaceholder 同款形态）。
@@ -1392,7 +1538,7 @@ pub fn detached_view<'a>(
         .active_tab_id
         .as_deref()
         .and_then(|tid| w.tabs.iter().find(|t| t.id == tid))
-        .map(|t| view_content(app, &t.view))
+        .map(|t| view_content(app, window, &t.view))
         .unwrap_or_else(|| space().width(Length::Fill).height(Length::Fill).into());
 
     // 拖拽 drop 指示（撕裂窗口 = 整体加标签：中部填充 + 外框）
@@ -1405,14 +1551,12 @@ pub fn detached_view<'a>(
     let base = column![titlebar, header, container(content).width(Length::Fill).height(Length::Fill)]
         .width(Length::Fill)
         .height(Length::Fill);
-    let element: Element<'a, Message> = match drop {
-        Some(kind) => stack![base, drop_indicator(kind)]
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into(),
-        None => base.into(),
-    };
-    with_overlays(app, window, element)
+    // drop 指示追加子叠放：显隐不重建内容子树（同面板网格的处理）
+    let mut root = iced::widget::Stack::new().push(base);
+    if let Some(kind) = drop {
+        root = root.push(drop_indicator(kind));
+    }
+    with_overlays(app, window, root.width(Length::Fill).height(Length::Fill).into())
 }
 
 // ===== files 视图 =====
@@ -1506,7 +1650,7 @@ fn files_view(app: &App) -> Element<'_, Message> {
                 tree_col = tree_col.push(input);
                 continue;
             }
-            tree_col = tree_col.push(tree_row_element(&r, window, cursor));
+            tree_col = tree_col.push(tree_row_element(app, &r, window, cursor));
             if draft_dir.as_deref() == Some(r.rel.as_str()) {
                 tree_col = tree_col.push(draft_input_row(app, r.depth + 1));
             }
@@ -1544,6 +1688,8 @@ fn vault_row(
         .map(|r| atelyx_core::vault::vault_display_name(r))
         .unwrap_or_default();
     let vault_open = expanded.contains("");
+    // 拖拽悬停仓库行 = 移入根：底色加深提示可放入
+    let drag_target = app.file_drag_target.as_deref() == Some("");
     let row = row![
         icon(
             if vault_open { "chevron-down" } else { "chevron-right" },
@@ -1575,8 +1721,10 @@ fn vault_row(
         .width(Length::Fill)
         .height(Length::Fixed(32.0))
         .align_y(Vertical::Center)
-        .style(|_t| Style {
-            background: Some(pal::ACCENT.scale_alpha(0.2).into()),
+        .style(move |_t| Style {
+            background: Some(
+                if drag_target { pal::ACCENT.scale_alpha(0.35) } else { pal::ACCENT.scale_alpha(0.2) }.into(),
+            ),
             border: border::rounded(pal::RADIUS_SM),
             ..Style::default()
         });
@@ -1591,17 +1739,23 @@ fn vault_row(
             })
             .on_press(Message::ToggleDir(String::new())),
     );
-    // 悬停提示完整路径（打开仓库才有意义）
+    // 悬停提示完整路径（打开仓库才有意义）；文件拖拽会话中悬停 = 落点上报（拖至仓库行 = 移入根）
     let row_elem = match app.vault_root.as_ref() {
         Some(root) => {
             let path = root.display().to_string();
-            row_elem
-                .on_enter(Message::Ui(crate::ui::UiMsg::HoverTip {
-                    window,
-                    label: path.clone(),
-                    box_px: 32.0,
-                }))
-                .on_exit(Message::Ui(crate::ui::UiMsg::HoverTipEnd { window, label: path }))
+            if app.file_drag.is_some() {
+                row_elem
+                    .on_enter(Message::FileDragEnter { rel: String::new(), is_dir: true })
+                    .on_exit(Message::FileDragExit { rel: String::new() })
+            } else {
+                row_elem
+                    .on_enter(Message::Ui(crate::ui::UiMsg::HoverTip {
+                        window,
+                        label: path.clone(),
+                        box_px: 32.0,
+                    }))
+                    .on_exit(Message::Ui(crate::ui::UiMsg::HoverTipEnd { window, label: path }))
+            }
         }
         None => row_elem,
     };
@@ -1611,14 +1765,22 @@ fn vault_row(
 }
 
 /// 目录/文件行（行高 32、缩进 12+16×depth、展开指示线；激活文件 = 金淡底 + 左缘 2px 金轨）。
+/// 目录行 = 拖拽落点（悬停高亮）；全部行 = 拖拽源候选（PressReporter 上报按下）。
 fn tree_row_element(
+    app: &App,
     r: &TreeRow,
     window: iced::window::Id,
     cursor: Point,
 ) -> Element<'static, Message> {
     let indent = 12.0 + r.depth as f32 * 16.0;
+    let drag_target = app.file_drag_target.as_deref() == Some(r.rel.as_str());
+    let folder_color = if r.is_dir {
+        app.folder_colors.get(&r.rel).and_then(|hex| parse_hex_color(hex))
+    } else {
+        None
+    };
     let (icon_name, icon_color) = if r.is_dir {
-        ("folder", pal::TEXT_MUTED)
+        ("folder", folder_color.unwrap_or(pal::TEXT_MUTED))
     } else {
         let active_icon = pal::ACCENT;
         let color = if r.active { active_icon } else { pal::TEXT_SECONDARY };
@@ -1652,7 +1814,7 @@ fn tree_row_element(
         );
     }
 
-    let bg = if r.active { pal::ACCENT_SOFT } else { iced::Color::TRANSPARENT };
+    let bg = if r.active || drag_target { pal::ACCENT_SOFT } else { iced::Color::TRANSPARENT };
     let active = r.active;
     // 行体：底色 + 圆角
     let row_body = container(content)
@@ -1665,9 +1827,9 @@ fn tree_row_element(
             border: border::rounded(pal::RADIUS_SM),
             ..Style::default()
         });
-    // 叠层（自下而上）：行体 → 金轨（激活行左缘 2px 内嵌）→ 展开指示线（1px muted 60%）
+    // 叠层（自下而上）：行体 → 金轨（激活行左缘 2px 内嵌；拖拽落点同款高亮）→ 展开指示线
     let mut layers = stack![row_body];
-    if active {
+    if active || drag_target {
         layers = layers.push(inset_line(2.0, 0.0, pal::ACCENT));
     }
     for x in &r.guides {
@@ -1685,7 +1847,9 @@ fn tree_row_element(
         is_dir: r.is_dir,
         is_root: false,
     };
-    mouse_area(
+    // 拖拽候选：行按下自证命中（PressReporter；mouse_area 对被按钮捕获的按下不触发）。
+    // 目录行另挂拖拽悬停进出（文件行不是落点不挂）。
+    let row = mouse_area(
         button(body)
             .width(Length::Fill)
             .height(Length::Fixed(32.0))
@@ -1696,7 +1860,17 @@ fn tree_row_element(
             })
             .on_press(msg),
     )
-    .on_right_press(Message::PopupOpen(window, PopupOpen { point: cursor, flip_y: None, state, min_width: 0.0 }))
+    .on_right_press(Message::PopupOpen(window, PopupOpen { point: cursor, flip_y: None, state, min_width: 0.0 }));
+    let row = if r.is_dir {
+        row.on_enter(Message::FileDragEnter { rel: r.rel.clone(), is_dir: true })
+            .on_exit(Message::FileDragExit { rel: r.rel.clone() })
+    } else {
+        row
+    };
+    controls::PressReporter::new(
+        row.into(),
+        Message::FileRowPress { window, rel: r.rel.clone(), is_dir: r.is_dir },
+    )
     .into()
 }
 
@@ -1734,6 +1908,7 @@ fn draft_input_row(app: &App, depth: usize) -> Element<'static, Message> {
     };
     container(
         controls::inline_input(
+            iced::widget::Id::new(controls::INLINE_RENAME_INPUT),
             placeholder,
             &value,
             160.0,
@@ -1761,6 +1936,7 @@ fn file_inline_input(app: &App, r: &TreeRow) -> Option<Element<'static, Message>
     Some(
         container(
             controls::inline_input(
+                iced::widget::Id::new(controls::INLINE_RENAME_INPUT),
                 placeholder,
                 &value,
                 160.0,
@@ -1800,7 +1976,21 @@ fn ext_label(name: &str) -> String {
     }
 }
 
-/// 由子项缓存 + 展开集摊平侧栏行（目录在前、忽略大小写按名升序；根子项 depth 从 1 起，
+/// 十六进制颜色串（`#rrggbb`）→ Color；非法输入返回 None（回落默认图标色）。
+fn parse_hex_color(hex: &str) -> Option<iced::Color> {
+    let hex = hex.strip_prefix('#')?;
+    if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let value = u32::from_str_radix(hex, 16).ok()?;
+    Some(iced::Color::from_rgb8(
+        ((value >> 16) & 0xff) as u8,
+        ((value >> 8) & 0xff) as u8,
+        (value & 0xff) as u8,
+    ))
+}
+
+/// 由子项缓存 + 展开集摊平侧栏行（每层按仓库排序键排列；根子项 depth 从 1 起，
 /// 指示线 x 与行缩进由此推导）。
 fn tree_rows(app: &App, expanded: &HashSet<&str>) -> Vec<TreeRow> {
     let mut rows = Vec::new();
@@ -1826,17 +2016,15 @@ fn push_children(
     depth: usize,
     expanded: &HashSet<&str>,
 ) {
-    let mut entries: Vec<(String, bool)> = app
+    let mut entries: Vec<atelyx_core::vault::DirChild> = app
         .children
         .get(dir)
         .cloned()
-        .unwrap_or_default()
-        .into_iter()
-        .collect();
-    entries.sort_by(|a, b| {
-        b.1.cmp(&a.1).then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase()))
-    });
-    for (rel, is_dir) in entries {
+        .unwrap_or_default();
+    atelyx_core::vault::sort_children(&mut entries, &app.file_sort);
+    for child in entries {
+        let rel = child.rel;
+        let is_dir = child.is_dir;
         let is_expanded = expanded.contains(rel.as_str());
         let name = rel.rsplit('/').next().unwrap_or(&rel).to_string();
         let active = !is_dir && app.ui.last_note_file.as_deref() == Some(rel.as_str());
@@ -1907,22 +2095,41 @@ fn note_view(app: &App) -> Element<'_, Message> {
         ..Style::default()
     });
 
+    // 只读 / 预览编辑两档共用同一 scrollable（同型同位，iced 保留滚动状态）：切档不回顶，
+    // 两档块渲染逐点一致，偏移直接对齐。源码档 text_editor 自带内部滚动，不进共享层。
     let content: Element<'_, Message> = match app.note_mode {
         NoteMode::Source => iced::widget::text_editor(&app.source_editor)
             .height(Length::Fill)
             .on_action(Message::Edited)
             .into(),
-        NoteMode::Read => match app.preview_doc.as_ref() {
-            Some(doc) => markdown_view::document_view(doc, &app.theme),
-            None => placeholder_panel("正在渲染…"),
-        },
-        NoteMode::Edit => edit_view(app),
+        NoteMode::Read | NoteMode::Edit => {
+            let inner: Element<'_, Message> = match app.note_mode {
+                NoteMode::Edit => edit_view(app),
+                _ => match app.preview_doc.as_ref() {
+                    Some(doc) => markdown_view::document_view(doc, &app.theme, &app.note_images),
+                    None => placeholder_panel("正在渲染…"),
+                },
+            };
+            let scrolled = scrollable(inner).width(Length::Fill).height(Length::Fill);
+            if app.note_mode == NoteMode::Edit {
+                wiki_picker_overlay(app, scrolled.into())
+            } else {
+                scrolled.into()
+            }
+        }
     };
+    // 属性面板（只读 / 预览编辑档显示；源码档不渲染）
+    let panel = crate::properties_view::props_panel(app, window, false);
 
-    column![toolbar, controls::h_divider_subtle(), container(content).width(Length::Fill).height(Length::Fill)]
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+    let mut body = column![toolbar, controls::h_divider_subtle()];
+    if let Some(p) = panel {
+        body = body.push(p);
+    }
+    body = body.push(container(content).width(Length::Fill).height(Length::Fill));
+    body = body.push(controls::h_divider_subtle());
+    body = body.push(backlinks_section(app));
+    body = body.push(history_section(app));
+    body.width(Length::Fill).height(Length::Fill).into()
 }
 
 /// 模式分段按钮（Button sm 档：高 24 / px-8 / 11px / medium；激活 = 强调淡底，悬停文字提亮）。
@@ -1974,6 +2181,7 @@ fn mode_button(
 
 /// 预览编辑档：块行与空行行交给编辑面容器统一排布与承接鼠标；非活动块由只读块
 /// 控件承载（视觉逐点一致），仅活动块与选区锚点块回显源码。
+/// 返回裸编辑面（不含滚动容器与双链浮层——由 note_view 统一包外层，切档共用滚动状态）。
 fn edit_view(app: &App) -> Element<'_, Message> {
     use markdown_edit::SurfaceRow;
 
@@ -2007,7 +2215,7 @@ fn edit_view(app: &App) -> Element<'_, Message> {
             }
             .into(),
         });
-        return scrollable(markdown_edit::EditSurface::new(
+        return markdown_edit::EditSurface::new(
             rows,
             pal_edit,
             &doc.source,
@@ -2015,9 +2223,7 @@ fn edit_view(app: &App) -> Element<'_, Message> {
             app.edit.anchor,
             app.edit.preedit.clone(),
             app.edit.focused,
-        ))
-        .width(Length::Fill)
-        .height(Length::Fill)
+        )
         .into();
     }
     // 文首空白行（首块之前）：文首区每行都是空白行，末尾不带换行的片段是缩进
@@ -2038,9 +2244,10 @@ fn edit_view(app: &App) -> Element<'_, Message> {
             }
         }
     }
-    for (index, chunk) in markdown_view::block_chunks(&doc.source, &doc.blocks, &app.theme, true)
-        .into_iter()
-        .enumerate()
+    for (index, chunk) in
+        markdown_view::block_chunks(&doc.source, &doc.blocks, &app.theme, true, &app.note_images)
+            .into_iter()
+            .enumerate()
     {
         let editable = editable.contains(&index);
         let meta = app.edit_meta.get(index);
@@ -2112,7 +2319,7 @@ fn edit_view(app: &App) -> Element<'_, Message> {
             }
         }
     }
-    scrollable(markdown_edit::EditSurface::new(
+    let surface = markdown_edit::EditSurface::new(
         rows,
         pal_edit,
         &doc.source,
@@ -2120,10 +2327,184 @@ fn edit_view(app: &App) -> Element<'_, Message> {
         app.edit.anchor,
         app.edit.preedit.clone(),
         app.edit.focused,
-    ))
-    .width(Length::Fill)
-    .height(Length::Fill)
+    );
+    surface.into()
+}
+
+/// 双链候选浮层（编辑面顶部右侧覆盖；↑↓ 导航、Enter 选中、Esc 关闭）。
+fn wiki_picker_overlay<'a>(app: &'a App, surface: Element<'a, Message>) -> Element<'a, Message> {
+    let Some(picker) = &app.wiki_picker else { return surface };
+    let candidates = app.wiki_candidates();
+    let mut col = iced::widget::Column::<Message>::new().spacing(0);
+    if candidates.is_empty() {
+        col = col.push(
+            container(text("无匹配笔记").size(pal::FS_CAPTION).color(pal::TEXT_MUTED))
+                .padding(Padding::ZERO.horizontal(12.0).vertical(6.0)),
+        );
+    } else {
+        let active = picker.active.min(candidates.len() - 1);
+        for (pos, fi) in candidates.iter().enumerate() {
+            let (_, name) = &app.note_files[*fi];
+            let title = name.trim_end_matches(".md").to_string();
+            let is_active = pos == active;
+            col = col.push(
+                button(
+                    row![
+                        icon("file-text", 13.0, if is_active { pal::TEXT_PRIMARY } else { pal::TEXT_MUTED }),
+                        text(title.clone())
+                            .size(pal::FS_CAPTION)
+                            .color(if is_active { pal::TEXT_PRIMARY } else { pal::TEXT_SECONDARY }),
+                    ]
+                    .spacing(6),
+                )
+                .width(Length::Fill)
+                .padding(Padding::ZERO.horizontal(12.0).vertical(5.0))
+                .style(move |_t, _s| button::Style {
+                    background: is_active.then_some(pal::ACCENT.into()),
+                    ..button::Style::default()
+                })
+                .on_press(Message::WikiPick(*fi)),
+            );
+        }
+    }
+    let panel = container(
+        scrollable(col)
+            .width(Length::Fill)
+            .height(Length::Fixed(264.0))
+            .direction(scrollable::Direction::Vertical(scrollable::Scrollbar::new())),
+    )
+    .width(Length::Fixed(288.0))
+    .style(|_t| Style {
+        background: Some(pal::BG_SECONDARY.into()),
+        border: border::rounded(pal::RADIUS_MD).color(pal::BORDER).width(1.0),
+        ..Style::default()
+    });
+    stack![
+        surface,
+        container(panel)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(iced::alignment::Horizontal::Right)
+            .align_y(iced::alignment::Vertical::Top)
+            .padding(8.0),
+    ]
     .into()
+}
+
+/// 反链区（常驻）：引用当前笔记的笔记列表，点击打开。
+fn backlinks_section(app: &App) -> Element<'_, Message> {
+    let n = app.backlinks.len();
+    let mut col = iced::widget::Column::<Message>::new()
+        .padding(Padding::ZERO.horizontal(16.0).vertical(6.0))
+        .spacing(2);
+    col = col.push(
+        row![
+            icon("unlink", 12.0, pal::TEXT_MUTED),
+            text(format!("反链 ({n})")).size(pal::FS_CAPTION).color(pal::TEXT_SECONDARY),
+        ]
+        .spacing(6),
+    );
+    for link in &app.backlinks {
+        let rel = link.file.clone();
+        col = col.push(
+            button(
+                row![
+                    icon("file-text", 12.0, pal::TEXT_MUTED),
+                    text(link.title.clone()).size(pal::FS_CAPTION).color(pal::TEXT_PRIMARY),
+                ]
+                .spacing(6),
+            )
+            .padding(Padding::ZERO.horizontal(4.0).vertical(2.0))
+            .style(|_t, status| button::Style {
+                background: matches!(status, button::Status::Hovered | button::Status::Pressed)
+                    .then_some(pal::HOVER.into()),
+                ..button::Style::default()
+            })
+            .on_press(Message::OpenFile(rel)),
+        );
+    }
+    if n == 0 {
+        col = col.push(text("暂无其他笔记引用当前笔记").size(pal::FS_MICRO).color(pal::TEXT_MUTED));
+    }
+    container(col).width(Length::Fill).into()
+}
+
+/// 历史区（缺省折叠）：版本列表（序号/时间/署名/摘要）+ 每版回滚按钮。
+fn history_section(app: &App) -> Element<'_, Message> {
+    let n = app.history.len();
+    let chevron = if app.history_open { "chevron-down" } else { "chevron-right" };
+    let mut col = iced::widget::Column::<Message>::new()
+        .padding(Padding::ZERO.horizontal(16.0).vertical(6.0))
+        .spacing(2);
+    col = col.push(
+        button(
+            row![
+                icon(chevron, 12.0, pal::TEXT_MUTED),
+                icon("history", 12.0, pal::TEXT_MUTED),
+                text(format!("历史 ({n})")).size(pal::FS_CAPTION).color(pal::TEXT_SECONDARY),
+            ]
+            .spacing(6),
+        )
+        .padding(2.0)
+        .style(|_t, _s| button::Style { background: None, ..button::Style::default() })
+        .on_press(Message::HistoryToggle),
+    );
+    if app.history_open {
+        if app.history.is_empty() {
+            col = col.push(text("暂无历史版本").size(pal::FS_MICRO).color(pal::TEXT_MUTED));
+        }
+        for v in app.history.iter().rev() {
+            let time = format_ts(v.ts);
+            let action = match v.action {
+                atelyx_core::history::HistoryAction::Restore => "回滚",
+                atelyx_core::history::HistoryAction::Edit => "",
+            };
+            let author = if v.author.name.is_empty() { &v.author.device } else { &v.author.name };
+            col = col.push(
+                row![
+                    text(format!("v{}", v.seq)).size(pal::FS_MICRO).color(pal::TEXT_MUTED),
+                    text(time).size(pal::FS_MICRO).color(pal::TEXT_MUTED),
+                    text(author.clone()).size(pal::FS_MICRO).color(pal::TEXT_MUTED),
+                    text(v.summary.clone().unwrap_or_default())
+                        .size(pal::FS_MICRO)
+                        .color(pal::TEXT_SECONDARY),
+                    space(),
+                    text(action).size(pal::FS_MICRO).color(pal::ACCENT),
+                    button(text("回滚").size(pal::FS_MICRO).color(pal::ACCENT))
+                        .padding(Padding::ZERO.horizontal(6.0).vertical(1.0))
+                        .style(|_t, status| button::Style {
+                            background: matches!(status, button::Status::Hovered | button::Status::Pressed)
+                                .then_some(pal::ACCENT_SOFT.into()),
+                            ..button::Style::default()
+                        })
+                        .on_press(Message::HistoryRestore(v.seq)),
+                ]
+                .spacing(8)
+                .padding(Padding::ZERO.horizontal(4.0).vertical(2.0)),
+            );
+        }
+    }
+    container(col).width(Length::Fill).into()
+}
+
+/// 毫秒时间戳 → 本地短文本（YYYY-MM-DD HH:MM；纪元前显示原值）。
+fn format_ts(ms: i64) -> String {
+    // 天数 → 日期（与 core 历史模块同一 civil 算法的简版；仅展示用）
+    let secs = ms.div_euclid(1000);
+    let days = secs.div_euclid(86400);
+    let secs_of_day = secs.rem_euclid(86400);
+    let (h, m) = (secs_of_day / 3600, (secs_of_day % 3600) / 60);
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mon = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = y + i64::from(mon <= 2);
+    format!("{year:04}-{mon:02}-{d:02} {h:02}:{m:02}")
 }
 
 // ===== 设置整页 =====
@@ -2518,19 +2899,75 @@ fn popup_element<'a>(
             }
             entries
         }
-        PopupState::SortMenu => vec![
-            (0, MenuEntry::action("文件名 (A-Z)", Message::NotImplemented("排序"))),
-            (0, MenuEntry::action("文件名 (Z-A)", Message::NotImplemented("排序"))),
-            (0, MenuEntry::action("编辑时间 (从新到旧)", Message::NotImplemented("排序"))),
-            (0, MenuEntry::action("编辑时间 (从旧到新)", Message::NotImplemented("排序"))),
-        ],
+        PopupState::SortMenu => {
+            const OPTIONS: [(&str, &str); 4] = [
+                ("name-asc", "文件名 (A-Z)"),
+                ("name-desc", "文件名 (Z-A)"),
+                ("mtime-desc", "编辑时间 (从新到旧)"),
+                ("mtime-asc", "编辑时间 (从旧到新)"),
+            ];
+            OPTIONS
+                .iter()
+                .map(|(key, label)| {
+                    (
+                        0,
+                        MenuEntry::Action {
+                            label: (*label).to_string(),
+                            icon: None,
+                            danger: false,
+                            disabled: false,
+                            on_press: Some(Message::SetSort((*key).to_string())),
+                            note: (app.file_sort == *key).then_some("当前"),
+                            hint: None,
+                        },
+                    )
+                })
+                .collect()
+        }
         PopupState::FileMenu { rel, is_dir, is_root } => {
             file_menu_entries(app, rel, *is_dir, *is_root)
         }
         PopupState::NoteMenu => vec![
-            (0, MenuEntry::action("添加笔记属性", Message::NotImplemented("笔记属性"))),
-            (0, MenuEntry::action("历史记录", Message::NotImplemented("历史记录"))),
+            (0, MenuEntry::action("添加笔记属性", Message::Props(crate::properties_view::PropsMsg::StartAdd))),
+            (0, MenuEntry::action("历史记录", Message::HistoryToggle)),
         ],
+        PopupState::PropTypeMenu { index } => {
+            // 固定顺序六类型；徽章键锁定标签（其余项禁用）
+            use atelyx_core::frontmatter::{infer_type, PropType, Yaml};
+            let badge = matches!(app.props.parsed.as_ref(), Some((Yaml::Map(pairs), true)) if pairs.get(*index).is_some_and(|(k, _)| crate::properties_view::is_badge_key(k)));
+            let current = app.props.parsed.as_ref().and_then(|(data, _)| match data {
+                Yaml::Map(pairs) => pairs.get(*index).map(|(_, v)| infer_type(badge, v)),
+                _ => None,
+            });
+            const TYPES: [(PropType, &str, &str); 6] = [
+                (PropType::Text, "type", "文本"),
+                (PropType::Tag, "tag", "标签"),
+                (PropType::Date, "calendar-days", "日期"),
+                (PropType::Number, "hash", "数字"),
+                (PropType::Boolean, "toggle-left", "布尔"),
+                (PropType::List, "list", "列表"),
+            ];
+            TYPES
+                .iter()
+                .map(|(pt, icon_name, label)| {
+                    let locked = badge && *pt != PropType::Tag;
+                    let is_current = current == Some(*pt);
+                    (
+                        0,
+                        MenuEntry::Action {
+                            label: (*label).to_string(),
+                            icon: Some(icon_name),
+                            danger: false,
+                            disabled: locked,
+                            on_press: (!locked)
+                                .then(|| Message::Props(crate::properties_view::PropsMsg::ConvertType(*index, *pt))),
+                            note: is_current.then_some("当前"),
+                            hint: locked.then(|| "预置属性键固定".to_string()),
+                        },
+                    )
+                })
+                .collect()
+        }
     };
     crate::ui::menu::pane_view(entries, pane, window)
 }
@@ -2573,6 +3010,7 @@ fn scene_selector_entries(app: &App, confirm: &Option<String>) -> Vec<(usize, Me
         );
         let name_area: Element<'static, Message> = if renaming {
             controls::inline_input(
+                iced::widget::Id::new(controls::INLINE_RENAME_INPUT),
                 "新名称",
                 &app.rename.as_ref().map(|r| r.value.clone()).unwrap_or_default(),
                 96.0,
@@ -2907,9 +3345,15 @@ fn file_menu_entries(
             Message::DraftStart(rel.to_string(), DraftKind::Folder))));
         if !is_root {
             entries.push((0, MenuEntry::Divider));
-            entries.push((0, MenuEntry::action_icon("图标颜色", "palette", Message::NotImplemented("文件夹颜色"))));
+            entries.push((0, MenuEntry::Submenu {
+                label: "图标颜色".into(),
+                icon: Some("palette"),
+                disabled: false,
+                pane: 2,
+            }));
             entries.push((0, MenuEntry::Divider));
-            entries.push((0, MenuEntry::action_icon("创建副本", "copy", Message::NotImplemented("创建副本"))));
+            entries.push((0, MenuEntry::action_icon("创建副本", "copy",
+                Message::DuplicateEntry(rel.to_string(), true))));
             entries.push((0, MenuEntry::Divider));
             entries.push((0, MenuEntry::action_icon("重命名", "pencil",
                 Message::RenameStartFolder(rel.to_string()))));
@@ -2923,15 +3367,62 @@ fn file_menu_entries(
             entries.push((0, MenuEntry::Divider));
         }
         if lower.ends_with(".md") {
-            entries.push((0, MenuEntry::action_icon("注册为提示词", "bookmark-plus", Message::NotImplemented("提示词"))));
+            // 标记状态决定条目形态（注册/注销）；副本不继承标记
+            let marked = app.prompt_notes.iter().any(|n| n == rel);
+            entries.push((0, MenuEntry::action_icon(
+                if marked { "注销提示词" } else { "注册为提示词" },
+                if marked { "bookmark-minus" } else { "bookmark-plus" },
+                Message::PromptToggle(rel.to_string()),
+            )));
             entries.push((0, MenuEntry::Divider));
         }
-        entries.push((0, MenuEntry::action_icon("创建副本", "copy", Message::NotImplemented("创建副本"))));
+        entries.push((0, MenuEntry::action_icon("创建副本", "copy",
+            Message::DuplicateEntry(rel.to_string(), false))));
         entries.push((0, MenuEntry::Divider));
         entries.push((0, MenuEntry::action_icon("重命名", "pencil",
             Message::RenameStartFile(rel.to_string()))));
         entries.push((0, MenuEntry::danger("删除", "trash-2",
             Message::DeleteAsk(rel.to_string()))));
+    }
+
+    // pane 2 = 图标颜色色板（预设色 + 当前标注 + 恢复默认）
+    if is_dir && !rel.is_empty() {
+        const PRESETS: [&str; 8] = [
+            "#e05252", "#e07b39", "#e0b436", "#4fae6a", "#2f9e8f", "#4f8fd0", "#7a6fd0", "#c05fa8",
+        ];
+        let current = app.folder_colors.get(rel);
+        for hex in PRESETS {
+            let Some(color) = parse_hex_color(hex) else { continue };
+            let is_current = current == Some(&hex.to_string());
+            let swatch = container(space().width(Length::Fixed(12.0)).height(Length::Fixed(12.0)))
+                .style(move |_t| Style {
+                    background: Some(color.into()),
+                    // 当前色 = 强调描边加粗（子面板无行尾角标，选中态画在色块上）
+                    border: border::rounded(3.0)
+                        .color(if is_current { pal::ACCENT } else { pal::BORDER })
+                        .width(if is_current { 2.0 } else { 1.0 }),
+                    ..Style::default()
+                });
+            let row = row![
+                swatch,
+                text(hex.to_string()).size(pal::FS_MICRO).color(pal::TEXT_SECONDARY).font(mono()),
+            ]
+            .spacing(8)
+            .padding(Padding::ZERO.horizontal(12.0))
+            .width(Length::Fill)
+            .align_y(Vertical::Center);
+            entries.push((2, MenuEntry::Custom(iced::widget::button(row)
+                .width(Length::Fill)
+                .style(|_t, status| button::Style {
+                    background: matches!(status, button::Status::Hovered | button::Status::Pressed)
+                        .then_some(pal::HOVER.into()),
+                    ..Default::default()
+                })
+                .on_press(Message::FolderColorSet(rel.to_string(), Some(hex.to_string())))
+                .into(), pal::MENU_ITEM_H)));
+        }
+        entries.push((2, MenuEntry::action_icon("恢复默认", "rotate-ccw",
+            Message::FolderColorSet(rel.to_string(), None))));
     }
 
     // pane 1 = 删除就地确认（无标题行：说明文字 + 菜单项形态的确认/取消；

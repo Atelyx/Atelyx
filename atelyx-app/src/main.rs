@@ -8,10 +8,11 @@
 mod layout_view;
 mod markdown_edit;
 mod markdown_view;
+mod properties_view;
 mod ui;
 
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -21,11 +22,13 @@ use atelyx_core::layout::{
 };
 use atelyx_core::markdown::{LinkForm, MarkdownDocument};
 use atelyx_core::vault;
+use atelyx_core::vault_refs;
 use iced::widget::{space, text_editor};
 use iced::window::{self, Level, Mode, Position, Settings};
 use iced::{keyboard, mouse, Element, Event, Point, Size, Subscription, Task, Theme};
 
 use markdown_edit::HitTarget;
+use properties_view::{PropsMsg, PropsPanel};
 use ui::notify::{Level as NoticeLevel, Notification};
 
 use layout_view::{
@@ -56,25 +59,46 @@ pub enum NoteMode {
     Source,
 }
 
-/// 剥离开头的 frontmatter 块（阅读面只渲染正文）；缺闭合定界符时按无 frontmatter 处理，全量正文。
+/// 剥离开头的 frontmatter 块（阅读/编辑面只处理正文）；缺闭合定界符时按无 frontmatter 处理，全量正文。
 fn strip_frontmatter(text: &str) -> &str {
-    let head_end = match text.find('\n') {
-        Some(i) => i + 1,
-        None => return text,
-    };
-    if text[..head_end].trim_end() != "---" {
-        return text;
+    match atelyx_core::frontmatter::block_end(text) {
+        Some(end) => &text[end..],
+        None => text,
     }
-    let mut offset = head_end;
-    for line in text[head_end..].split_inclusive('\n') {
-        let end = offset + line.len();
-        let marker = line.trim_end_matches(['\r', '\n']);
-        if marker == "---" || marker == "..." {
-            return &text[end..];
+}
+
+/// 展平文件树中的全部文件（树序；(rel, 含扩展名文件名)）。
+fn collect_md_files(tree: &[vault::FileTreeNode], out: &mut Vec<(String, String)>) {
+    for node in tree {
+        if node.is_dir {
+            collect_md_files(&node.children, out);
+        } else {
+            out.push((node.path.clone(), node.name.clone()));
         }
-        offset = end;
     }
-    text
+}
+
+/// 历史署名（本地桌面端：用户名即设备名）。
+fn history_author() -> atelyx_core::history::HistoryAuthor {
+    let user = std::env::var("USERNAME")
+        .or_else(|_| std::env::var("USER"))
+        .unwrap_or_else(|_| "本地".into());
+    atelyx_core::history::HistoryAuthor { id: format!("desktop:{user}"), name: user.clone(), device: user }
+}
+
+/// markdown 链接 href 编码：空格 / 括号 / 百分号百分号化，其余（含中文）原样。
+fn encode_md_href(file: &str) -> String {
+    let mut out = String::with_capacity(file.len());
+    for ch in file.chars() {
+        match ch {
+            ' ' => out.push_str("%20"),
+            '(' => out.push_str("%28"),
+            ')' => out.push_str("%29"),
+            '%' => out.push_str("%25"),
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// 前一个字符边界（`at` 为字符边界）。
@@ -226,7 +250,7 @@ enum Message {
     VaultPicked(Result<PathBuf, String>),
     ToggleDir(String),
     /// gen = 发起任务时的仓库世代；回调落地前与当前世代比对，过期即丢弃。
-    ChildrenLoaded(String, u64, Result<Vec<(String, bool)>, String>),
+    ChildrenLoaded(String, u64, Result<Vec<vault::DirChild>, String>),
     OpenFile(String),
     FileLoaded(u64, Result<(String, String), String>),
     Edited(text_editor::Action),
@@ -239,8 +263,56 @@ enum Message {
     NoteMode(NoteMode),
     /// 编辑面事件（部件只上报，正文/光标/选区真相在应用层）。
     Editor(markdown_edit::EditorEvent),
+    /// 属性面板消息（frontmatter 类型化编辑）。
+    Props(PropsMsg),
+    /// 反链扫描落地（gen 守卫 + 笔记身份守卫：慢扫描回执晚于切文件时丢弃，防串台）。
+    BacklinksLoaded(u64, String, Result<Vec<vault::BacklinkRow>, String>),
+    /// 标签词汇表落地（gen 守卫）。
+    TagVocabLoaded(u64, Result<Vec<vault::TagRow>, String>),
+    /// 全仓库笔记清单落地（双链候选数据源；gen 守卫）。
+    NoteFilesLoaded(u64, Result<Vec<(String, String)>, String>),
+    /// 方向键（先反链候选导航，无候选时调整分割把手）。
+    NavKey(bool, bool),
+    /// 编辑面 Enter（双链候选开启时 = 选中候选）。
+    EnterKey,
+    /// 双链候选选中（候选项序号）。
+    WikiPick(usize),
+    /// 搜索面板查询词输入。
+    SearchInput(String),
+    /// 历史版本列表落地（gen 守卫 + 笔记身份守卫：版本快照随文件绑定，串台会跨文件回滚）。
+    HistoryLoaded(u64, String, Vec<atelyx_core::history::HistoryVersion>),
+    /// 历史区折叠切换。
+    HistoryToggle,
+    /// 回滚到指定版本（全文快照写回走保存链）。
+    HistoryRestore(u64),
+    /// 历史记录/回滚落盘完成 → 重读版本列表。
+    HistoryRecorded(u64),
     /// 打开链接（外链 / 仓库路径 / wiki）。
     OpenLink(String, LinkForm),
+    /// 笔记图片字节落地（gen 守卫 + src；失败进失败集回落占位，不重试）。
+    ImageLoaded(u64, String, Result<Vec<u8>, String>),
+    /// 文件面板排序方式切换（落仓库 config 的 fileExplorerSort）。
+    SetSort(String),
+    /// 创建同目录副本（文件字节复制 / 文件夹递归复制）。
+    DuplicateEntry(String, bool),
+    /// 提示词标记注册/注销切换（.atelyx/prompt-notes.json）。
+    PromptToggle(String),
+    /// 设置/清除文件夹图标颜色（None = 恢复默认）。
+    FolderColorSet(String, Option<String>),
+    /// 仓库元数据（排序 / 提示词标记 / 文件夹颜色）落地（gen 守卫）。
+    VaultMetaLoaded(u64, Result<(String, Vec<String>, HashMap<String, String>), String>),
+    /// 提示词标记清单落地（读或写回后的最新清单；gen 守卫）。
+    PromptNotesLoaded(u64, Result<Vec<String>, String>),
+    /// 文件夹颜色落盘完成（重读后的清单；gen 守卫）。
+    FolderColorsLoaded(u64, Result<HashMap<String, String>, String>),
+    /// 排序方式落盘回执（失败提示，不回滚界面选择）。
+    ConfigSaved(Result<(), String>),
+    /// 文件行按压（拖拽候选；由行 mouse_area 上报，超阈值转正拖拽会话）。
+    FileRowPress { window: window::Id, rel: String, is_dir: bool },
+    /// 拖拽悬停进入可落点（文件夹行 / 仓库行；无会话时忽略）。
+    FileDragEnter { rel: String, is_dir: bool },
+    /// 拖拽悬停离开可落点。
+    FileDragExit { rel: String },
     /// 切换任务勾选框（携带列表项源起点）。
     ToggleTask(usize),
     /// 复制代码块正文到系统剪贴板。
@@ -340,7 +412,7 @@ enum Message {
     /// 展开全部/收起全部文件夹（懒加载树递归展开）。
     ExpandAllToggle,
     /// 递归展开过程中的子项落地（累计入展开集并链式下发）。
-    ExpandChildrenLoaded(String, u64, Result<Vec<(String, bool)>, String>),
+    ExpandChildrenLoaded(String, u64, Result<Vec<vault::DirChild>, String>),
     /// 行内输入行被按下（重命名失焦提交的「点在输入行内」标志）。
     RenamePressInside,
     /// 分割把手键盘调整（上次拖动过的把手；horizontal + 正向）。
@@ -355,8 +427,8 @@ enum Message {
 #[derive(Debug, Clone)]
 pub enum FollowUp {
     None,
-    /// 改名/移动：打开中笔记按前缀跟随。
-    Renamed { from: String, to: String },
+    /// 改名/移动：打开中笔记按前缀跟随；`rewritten` = 引用同步代写的笔记（打开中需重读）。
+    Renamed { from: String, to: String, rewritten: Vec<String> },
     /// 删除：命中打开中笔记即清空编辑器。
     Deleted { rel: String, is_dir: bool },
 }
@@ -369,12 +441,45 @@ fn parent_of(rel: &str) -> String {
     }
 }
 
+/// 行内重命名输入挂焦点：输入行随本帧视图重建挂载，操作在重建后的树上执行。
+fn rename_focus_task() -> Task<Message> {
+    iced::widget::operation::focus(iced::widget::Id::new(ui::controls::INLINE_RENAME_INPUT))
+}
+
 /// 目录相对路径 + 条目名拼完整相对路径（dir = "" 即根）。
 fn full_rel(dir: &str, name: &str) -> String {
     if dir.is_empty() {
         name.to_string()
     } else {
         format!("{dir}/{name}")
+    }
+}
+
+/// 同目录取不重名目标名：候选已占用（排除 `exclude_rel` 自身，如 case-only 改名）时按
+/// `-2`、`-3` 递增。`ext` = 带前导点的扩展名（None/空 = 目录或无扩展名）。
+fn dedupe_sibling(
+    root: &Path,
+    dir: &str,
+    name: &str,
+    ext: Option<&str>,
+    exclude_rel: &str,
+) -> Result<String, String> {
+    let with_ext = |stem: &str| match ext {
+        Some(e) if !e.is_empty() => format!("{stem}{e}"),
+        _ => stem.to_string(),
+    };
+    let mut candidate = with_ext(name);
+    let mut seq = 2;
+    loop {
+        let rel = full_rel(dir, &candidate);
+        if rel == exclude_rel {
+            return Ok(candidate);
+        }
+        if !vault::safe_join(root, &rel, false)?.exists() {
+            return Ok(candidate);
+        }
+        candidate = with_ext(&format!("{name}-{seq}"));
+        seq += 1;
     }
 }
 
@@ -453,6 +558,8 @@ enum PendingAfterFlush {
     /// 仓库内笔记链接（已解码；能进 flush 的只有 Path/Wiki/Create 形态，外链直接打开）。
     OpenLink(String),
     Delete { rel: String, is_dir: bool },
+    /// 文件树拖拽移动（挂起输入先落盘，防代写被未落盘内容回写覆盖）。
+    MoveEntry { from: String, is_dir: bool, to_dir: String },
     RenameFile(RenameState),
 }
 
@@ -498,7 +605,7 @@ pub struct App {
     /// OS 窗口当前可见态（调和比对基准；建窗即视为可见）。
     os_shown: HashMap<window::Id, bool>,
     /// files 视图懒加载子项缓存（key = 目录相对路径，根为 ""；运行态不落盘）。
-    pub children: HashMap<String, Vec<(String, bool)>>,
+    pub children: HashMap<String, Vec<vault::DirChild>>,
     /// note 正文真相（与磁盘逐字节一致；源码档与编辑档共用）。
     pub note_text: String,
     /// 源码档编辑器（进出档按正文重建）。
@@ -510,6 +617,8 @@ pub struct App {
     pub edit_meta: Vec<markdown_view::BlockMeta>,
     /// 编辑档解析选项（链接形态判定；进程内只建一次）。
     pub edit_opts: atelyx_core::markdown::ParseOptions,
+    /// 属性面板（frontmatter 类型化渲染与槽位编辑）。
+    pub props: PropsPanel,
     pub dirty: bool,
     /// 上次保存失败原因（None = 无；保存成功或再次编辑即清除）。
     pub save_error: Option<String>,
@@ -521,6 +630,12 @@ pub struct App {
     pub note_mode: NoteMode,
     /// 只读档的解析产物：进入只读档或文件载入时重建，避免每帧重解析。
     pub preview_doc: Option<MarkdownDocument>,
+    /// 笔记图片句柄缓存（key = src 原文；随文件载入清空，在途与失败集合防重复发起）。
+    pub note_images: markdown_view::ImageHandles,
+    note_images_inflight: HashSet<String>,
+    note_images_failed: HashSet<String>,
+    /// ensure_note_images 收集的载入任务（update 收尾统一 chain，调用点不必逐个穿 Task）。
+    image_loads: Option<Task<Message>>,
     /// 防抖落盘：有未写盘的模型变更。
     persist_dirty: bool,
     /// 主窗口内容区尺寸（logical；Resized 驱动，把手命中几何用）。
@@ -549,6 +664,62 @@ pub struct App {
     titlebar_tab_scroll_x: f32,
     /// 各面板标签条横向滚动偏移（同上；key = 面板 id）。
     panel_tab_scroll_x: HashMap<String, f32>,
+    /// 反链（当前笔记；文件载入与改名/移动后刷新）。
+    pub backlinks: Vec<vault::BacklinkRow>,
+    /// 全仓库标签词汇表（tags 候选；打开仓库与载入笔记后刷新）。
+    pub tag_vocab: Vec<vault::TagRow>,
+    /// 全仓库文件清单（双链候选与搜索面板数据源；树序，全部文件类型）。
+    pub note_files: Vec<(String, String)>,
+    /// 双链候选开启态（None = 关闭；from = 触发符之后的正文起点）。
+    pub wiki_picker: Option<WikiPicker>,
+    /// 最近一次 Esc 关闭的双链触发位置（同位置不再自动重开，直到出现新触发符）。
+    wiki_dismissed_from: Option<usize>,
+    /// 双链候选选中后吞掉随后的编辑面 Newline（Enter 键全局订阅与部件事件双发，见 wiki_pick）。
+    wiki_swallow_newline: bool,
+    /// 搜索面板查询词。
+    pub search_query: String,
+    /// 当前笔记历史版本（文件载入与每次保存落地后刷新）。
+    pub history: Vec<atelyx_core::history::HistoryVersion>,
+    /// 历史区展开态（缺省折叠）。
+    pub history_open: bool,
+    /// 文件面板排序（仓库 config 的 fileExplorerSort；缺省编辑时间从新到旧）。
+    pub file_sort: String,
+    /// 提示词标记清单（.atelyx/prompt-notes.json；会话内存态）。
+    pub prompt_notes: Vec<String>,
+    /// 文件夹图标颜色（.atelyx/folder-colors.json；会话内存态）。
+    pub folder_colors: HashMap<String, String>,
+    /// 文件树拖拽候选（行按压自证命中；超阈值转正会话，未转正释放 = 行为原样）。
+    file_press: Option<FilePress>,
+    /// 文件树拖拽会话（笔记/文件夹移动）。
+    pub file_drag: Option<FileDrag>,
+    /// 拖拽悬停中的落点（文件夹相对路径；None = 不在可落点上）。
+    pub file_drag_target: Option<String>,
+}
+
+/// 文件树拖拽按下候选。
+struct FilePress {
+    window: window::Id,
+    rel: String,
+    is_dir: bool,
+}
+
+/// 文件树拖拽会话（ghost 跟随光标；释放落入文件夹行即移动）。
+pub struct FileDrag {
+    pub from: String,
+    pub is_dir: bool,
+    /// ghost 文案（末段名）。
+    pub label: String,
+    /// 全局光标（源窗口位置 + 本地坐标）。
+    pub current: Point,
+    pub cursor_window: window::Id,
+}
+
+/// 双链候选会话：`from` = 触发符（`[[` / `【【`）之后的正文偏移，查询词随编辑推进。
+#[derive(Clone, Debug)]
+pub struct WikiPicker {
+    pub from: usize,
+    pub query: String,
+    pub active: usize,
 }
 
 impl App {
@@ -597,12 +768,23 @@ impl App {
                 edit_doc: None,
                 edit_meta: Vec::new(),
                 edit_opts: markdown_view::link_options(),
+                props: PropsPanel::default(),
                 dirty: false,
                 save_error: None,
                 autosave_deadline: None,
                 autosave_timer: false,
                 note_mode: NoteMode::Read,
                 preview_doc: None,
+                note_images: markdown_view::ImageHandles::new(),
+                note_images_inflight: HashSet::new(),
+                note_images_failed: HashSet::new(),
+                image_loads: None,
+                file_sort: "mtime-desc".to_string(),
+                prompt_notes: Vec::new(),
+                folder_colors: HashMap::new(),
+                file_press: None,
+                file_drag: None,
+                file_drag_target: None,
                 persist_dirty: false,
                 main_size: WINDOW_SIZE,
                 os_positions: HashMap::new(),
@@ -619,6 +801,15 @@ impl App {
                 last_titlebar_press: None,
                 titlebar_tab_scroll_x: 0.0,
                 panel_tab_scroll_x: HashMap::new(),
+                backlinks: Vec::new(),
+                tag_vocab: Vec::new(),
+                note_files: Vec::new(),
+                wiki_picker: None,
+                wiki_dismissed_from: None,
+                wiki_swallow_newline: false,
+                search_query: String::new(),
+                history: Vec::new(),
+                history_open: false,
             },
             open.map(Message::WindowOpened)
                 .chain(window::position(main_os).map(move |p| Message::PositionKnown(main_os, p)))
@@ -645,8 +836,30 @@ impl App {
         self.cursors.get(&window).copied().unwrap_or(Point::ORIGIN)
     }
 
+    /// 编辑面正文（frontmatter 之后的部分）：编辑面全部坐标相对正文。
+    fn edit_body(&self) -> &str {
+        let n = atelyx_core::frontmatter::block_end(&self.note_text).unwrap_or(0);
+        &self.note_text[n..]
+    }
+
+    /// 用编辑面新正文替换正文（保留 frontmatter 前缀）并置脏、排自动保存。
+    fn set_edit_body(&mut self, body: String) {
+        let n = atelyx_core::frontmatter::block_end(&self.note_text).unwrap_or(0);
+        let mut next = String::with_capacity(n + body.len());
+        next.push_str(&self.note_text[..n]);
+        next.push_str(&body);
+        self.note_text = next;
+        self.dirty = true;
+        self.autosave_deadline = Some(Instant::now() + AUTOSAVE_DEBOUNCE);
+    }
+
     fn update(&mut self, message: Message) -> Task<Message> {
         let task = self.handle(message);
+        // 图片载入任务由 ensure_note_images 收集、此处统一链出（调用点无需穿 Task）
+        let task = match self.image_loads.take() {
+            Some(loads) => task.chain(loads),
+            None => task,
+        };
         self.chain_autosave_timer(task)
     }
 
@@ -733,6 +946,7 @@ impl App {
                 self.preview_doc = None;
                 self.dirty = false;
                 self.save_error = None;
+                self.reset_props();
                 self.file_count = None;
                 self.expand_all = false;
                 self.expand_pending = 0;
@@ -744,6 +958,8 @@ impl App {
                     .cloned()
                     .unwrap_or_default();
                 let mut task = self.load_children("").chain(self.count_files());
+                task = task.chain(self.refresh_tag_vocab()).chain(self.refresh_note_files());
+                task = task.chain(self.load_vault_meta());
                 if let Some(rel) = self.ui.last_note_file.clone() {
                     task = task.chain(self.load_note(&rel));
                 }
@@ -786,10 +1002,17 @@ impl App {
                 self.source_editor = text_editor::Content::with_text(&self.note_text);
                 self.edit.reset(0);
                 self.dirty = false;
+                self.reset_props();
+                self.backlinks.clear();
+                self.history.clear();
+                // 图片缓存随文件清空：同 src 不同仓库指向不同文件，过期句柄不得复用
+                self.note_images.clear();
+                self.note_images_inflight.clear();
+                self.note_images_failed.clear();
                 self.refresh_preview();
                 self.refresh_edit();
                 self.notify(NoticeLevel::Success, "已打开");
-                Task::none()
+                self.refresh_backlinks().chain(self.reload_history())
             }
             Message::FileLoaded(_, Err(e)) => {
                 // 载入失败必须清空编辑器：last_note_file 已指向新文件，残留旧内容
@@ -801,6 +1024,7 @@ impl App {
                 self.edit_meta.clear();
                 self.dirty = false;
                 self.preview_doc = None;
+                self.reset_props();
                 self.notify(NoticeLevel::Error, e);
                 Task::none()
             }
@@ -838,7 +1062,7 @@ impl App {
                     return Task::none();
                 }
                 self.save_error = None;
-                match reason {
+                let proceed = match reason {
                     SaveReason::Flush(pending) => {
                         // 保存发起时冻结的内容与当前一致才算落盘；期间又有输入则再收一轮
                         if self.note_text == saved {
@@ -863,7 +1087,9 @@ impl App {
                         }
                         Task::none()
                     }
-                }
+                };
+                // 落盘即记历史版本（edit；内容 no-op 由记录侧跳过），随后刷新版本列表
+                proceed.chain(self.record_note_history(saved))
             }
             Message::Saved(_, _, reason, Err(e)) => {
                 // flush 被保存失败打断：动作不放行（放行会丢弃未落盘内容），挂起输入保留待重试
@@ -905,12 +1131,177 @@ impl App {
                 Task::none()
             }
             Message::Editor(event) => self.on_editor(event),
+            Message::Props(m) => self.on_props(m),
+            Message::BacklinksLoaded(gen, rel, Ok(rows)) => {
+                // 身份守卫：慢扫描回执晚于切文件时丢弃，防串台显示他篇反链
+                if gen == self.epoch() && self.ui.last_note_file.as_deref() == Some(rel.as_str()) {
+                    self.backlinks = rows;
+                }
+                Task::none()
+            }
+            // 反链尽力而为：扫描失败保持上次结果，不打断编辑
+            Message::BacklinksLoaded(_, _, Err(_)) | Message::TagVocabLoaded(_, Err(_)) | Message::NoteFilesLoaded(_, Err(_)) => Task::none(),
+            Message::TagVocabLoaded(gen, Ok(rows)) => {
+                if gen == self.epoch() {
+                    self.tag_vocab = rows;
+                }
+                Task::none()
+            }
+            Message::NoteFilesLoaded(gen, Ok(files)) => {
+                if gen == self.epoch() {
+                    self.note_files = files;
+                }
+                Task::none()
+            }
+            Message::NavKey(horizontal, positive) => {
+                if self.wiki_picker.is_some() {
+                    let n = self.wiki_candidates().len();
+                    if n > 0 {
+                        if let Some(p) = self.wiki_picker.as_mut() {
+                            p.active = if positive { (p.active + 1) % n } else { (p.active + n - 1) % n };
+                        }
+                    }
+                    Task::none()
+                } else {
+                    self.handle(Message::DividerAdjust(horizontal, positive))
+                }
+            }
+            Message::EnterKey => {
+                if self.wiki_picker.is_some() {
+                    let active = self.wiki_picker.as_ref().map(|p| p.active).unwrap_or(0);
+                    let picked = self.wiki_candidates().get(active).copied().unwrap_or(0);
+                    self.wiki_pick(picked);
+                }
+                Task::none()
+            }
+            Message::WikiPick(i) => {
+                self.wiki_pick(i);
+                Task::none()
+            }
+            Message::SearchInput(s) => {
+                self.search_query = s;
+                Task::none()
+            }
+            Message::HistoryLoaded(gen, rel, versions) => {
+                // 身份守卫：版本快照随文件绑定，串台会让回滚跨文件写盘
+                if gen == self.epoch() && self.ui.last_note_file.as_deref() == Some(rel.as_str()) {
+                    self.history = versions;
+                }
+                Task::none()
+            }
+            Message::HistoryToggle => {
+                self.history_open = !self.history_open;
+                Task::none()
+            }
+            Message::HistoryRestore(seq) => self.history_restore(seq),
+            Message::HistoryRecorded(gen) => {
+                if gen == self.epoch() {
+                    self.reload_history()
+                } else {
+                    Task::none()
+                }
+            }
             Message::OpenLink(href, form) => self.open_link(&href, form),
+            Message::ImageLoaded(gen, key, result) => {
+                self.note_images_inflight.remove(&key);
+                if gen == self.epoch() {
+                    match result {
+                        Ok(bytes) => {
+                            self.note_images.insert(key, iced::widget::image::Handle::from_bytes(bytes));
+                        }
+                        // 失败进失败集：占位回落且本次会话不重试（避免滚动反复发起）
+                        Err(_) => {
+                            self.note_images_failed.insert(key);
+                        }
+                    }
+                }
+                Task::none()
+            }
+            Message::SetSort(key) => {
+                self.file_sort = key.clone();
+                let Some(root) = self.vault.root().ok() else { return Task::none() };
+                let patch = serde_json::json!({ "fileExplorerSort": key });
+                Task::perform(
+                    async move { vault::patch_vault_config(&root, &patch).map(|_| ()) },
+                    Message::ConfigSaved,
+                )
+            }
+            Message::ConfigSaved(Err(e)) => {
+                self.notify(NoticeLevel::Error, format!("保存排序失败：{e}"));
+                Task::none()
+            }
+            Message::ConfigSaved(Ok(())) => Task::none(),
+            Message::DuplicateEntry(rel, is_dir) => {
+                self.dismiss_popup();
+                self.duplicate_entry(&rel, is_dir)
+            }
+            Message::PromptToggle(rel) => {
+                self.dismiss_popup();
+                self.toggle_prompt_note(&rel)
+            }
+            Message::PromptNotesLoaded(gen, result) => {
+                if gen == self.epoch() {
+                    match result {
+                        Ok(notes) => self.prompt_notes = notes,
+                        Err(e) => self.notify(NoticeLevel::Error, format!("保存提示词标记失败：{e}")),
+                    }
+                }
+                Task::none()
+            }
+            Message::FolderColorSet(rel, color) => {
+                self.dismiss_popup();
+                self.set_folder_color(&rel, color)
+            }
+            Message::FolderColorsLoaded(gen, result) => {
+                if gen == self.epoch() {
+                    match result {
+                        Ok(colors) => self.folder_colors = colors,
+                        Err(e) => self.notify(NoticeLevel::Error, format!("保存文件夹颜色失败：{e}")),
+                    }
+                }
+                Task::none()
+            }
+            Message::VaultMetaLoaded(gen, Ok((sort, prompts, colors))) => {
+                if gen == self.epoch() {
+                    self.file_sort = sort;
+                    self.prompt_notes = prompts;
+                    self.folder_colors = colors;
+                }
+                Task::none()
+            }
+            Message::VaultMetaLoaded(_, Err(_)) => Task::none(),
+            Message::FileRowPress { window, rel, is_dir } => {
+                // 拖拽会话 / 弹层 / 重命名输入期间不接纳新候选
+                if self.file_drag.is_none() && self.popup.is_none() && self.rename.is_none() {
+                    self.file_press = Some(FilePress { window, rel, is_dir });
+                }
+                Task::none()
+            }
+            Message::FileDragEnter { rel, is_dir } => {
+                if let Some(d) = &self.file_drag {
+                    if is_dir {
+                        // 拒绝落进自身、自身子树与自身祖先（均构成原地 no-op）
+                        let into_self = d.is_dir
+                            && (rel == d.from
+                                || rel.starts_with(&format!("{}/", d.from))
+                                || d.from.starts_with(&format!("{rel}/")));
+                        if !into_self {
+                            self.file_drag_target = Some(rel);
+                        }
+                    }
+                }
+                Task::none()
+            }
+            Message::FileDragExit { rel } => {
+                if self.file_drag_target.as_deref() == Some(rel.as_str()) {
+                    self.file_drag_target = None;
+                }
+                Task::none()
+            }
             Message::ToggleTask(item_from) => {
-                if let Some((next, at)) = markdown_edit::toggle_task(&self.note_text, item_from) {
+                if let Some((next, at)) = markdown_edit::toggle_task(self.edit_body(), item_from) {
                     self.edit.snapshot(&self.note_text);
-                    self.note_text = next;
-                    self.dirty = true;
+                    self.set_edit_body(next);
                     self.edit.caret = at;
                     self.edit.anchor = at;
                     self.after_edit();
@@ -1114,7 +1505,7 @@ impl App {
                     .map(|l| l.name.clone())
                     .unwrap_or_default();
                 self.rename = Some(RenameState { target: RenameTarget::Layout(id), value: name });
-                Task::none()
+                rename_focus_task()
             }
             Message::LayoutRenameInput(value) => {
                 if let Some(r) = &mut self.rename {
@@ -1128,18 +1519,9 @@ impl App {
                     RenameTarget::Layout(id) => self.apply(LayoutOp::RenameLayout { id, name: r.value }),
                     RenameTarget::Scene(id) => self.apply(LayoutOp::RenameScene { id, name: r.value }),
                     RenameTarget::File(_) | RenameTarget::Folder(_) | RenameTarget::Draft { .. } => {
-                        // 改名命中打开中的笔记（含其祖先目录）：挂起输入先落盘，防在途写在旧路径重建旧文件
-                        let hits_open = self.ui.last_note_file.as_deref().is_some_and(|f| match &r.target {
-                            RenameTarget::File(old) => f == old,
-                            RenameTarget::Folder(dir) => f == dir || f.starts_with(&format!("{dir}/")),
-                            RenameTarget::Draft { .. } => false,
-                            _ => false,
-                        });
-                        if hits_open {
-                            self.gate(PendingAfterFlush::RenameFile(r))
-                        } else {
-                            self.commit_file_rename(r)
-                        }
+                        // 改名/移动一律过 gate：除「目标 = 打开中笔记」外，链接到该笔记的打开中笔记
+                        // 也会被引用同步代写，挂起输入先落盘（gate 无脏时零成本直通）
+                        self.gate(PendingAfterFlush::RenameFile(r))
                     }
                 }
             }
@@ -1171,7 +1553,7 @@ impl App {
                     .map(|s| s.name.clone())
                     .unwrap_or_default();
                 self.rename = Some(RenameState { target: RenameTarget::Scene(id), value: name });
-                Task::none()
+                rename_focus_task()
             }
             Message::SceneRenameInput(value) => {
                 if let Some(r) = &mut self.rename {
@@ -1340,18 +1722,50 @@ impl App {
                 }
                 // 拖拽候选转正：标签按钮自证命中的候选 + 移动超阈值
                 // （候选在转正前保留，小于阈值的移动不消费）
+                if let Some(fp) = self.file_press.take() {
+                    let moved = self.press.as_ref().is_some_and(|(w, p)| {
+                        *w == fp.window && ((pos.x - p.x).abs() > 5.0 || (pos.y - p.y).abs() > 5.0)
+                    });
+                    // 按住候选期间弹层/重命名被打开 = 释放左键之外的交互，放弃起拖
+                    if moved && self.popup.is_none() && self.rename.is_none() {
+                        let label = fp.rel.rsplit('/').next().unwrap_or(&fp.rel).to_string();
+                        let current = self
+                            .os_positions
+                            .get(&id)
+                            .map(|w| Point::new(w.x + pos.x, w.y + pos.y))
+                            .unwrap_or(Point::new(0.0, 0.0));
+                        self.file_drag = Some(FileDrag {
+                            from: fp.rel,
+                            is_dir: fp.is_dir,
+                            label,
+                            current,
+                            cursor_window: id,
+                        });
+                        self.file_drag_target = None;
+                        return Task::none();
+                    }
+                    self.file_press = Some(fp);
+                }
                 let moved = self
                     .tab_press
                     .as_ref()
                     .zip(self.press.as_ref())
                     .is_some_and(|(tp, (w, p))| {
-                        *w == tp.window
-                            && ((pos.x - p.x).abs() > 5.0 || (pos.y - p.y).abs() > 5.0)
+                        *w == tp.window && ((pos.x - p.x).abs() > 5.0 || (pos.y - p.y).abs() > 5.0)
                     });
                 if moved {
                     if let Some(tp) = self.tab_press.take() {
                         return self.start_drag_from_press(tp);
                     }
+                }
+                if self.file_drag.is_some() {
+                    if let Some(d) = self.file_drag.as_mut() {
+                        d.cursor_window = id;
+                        if let Some(wpos) = self.os_positions.get(&id) {
+                            d.current = Point::new(wpos.x + pos.x, wpos.y + pos.y);
+                        }
+                    }
+                    return Task::none();
                 }
                 if self.drag.is_some() {
                     if let Some(wpos) = self.os_positions.get(&id) {
@@ -1389,6 +1803,10 @@ impl App {
             Message::Release => {
                 self.press = None;
                 self.tab_press = None;
+                self.file_press = None;
+                if let Some(d) = self.file_drag.take() {
+                    return self.resolve_file_drop(d);
+                }
                 if self.divider.take().is_some() {
                     return Task::none();
                 }
@@ -1434,10 +1852,23 @@ impl App {
                 if mode == Mode::Fullscreen { Mode::Windowed } else { Mode::Fullscreen },
             ),
             Message::Escape(window) => {
-                // Esc 作用域 = 事件来源窗口：先关该窗口弹层，再取消行内重命名
-                //（行内重命名只渲染在主窗口）
+                // Esc 作用域 = 事件来源窗口：先取消文件拖拽，再关双链候选，再关该窗口弹层，
+                // 再取消属性面板编辑态，再取消行内重命名（行内重命名只渲染在主窗口）
+                if self.file_drag.take().is_some() {
+                    self.file_drag_target = None;
+                    self.file_press = None;
+                    return Task::none();
+                }
+                if self.wiki_picker.is_some() {
+                    self.close_wiki_picker(true);
+                    return Task::none();
+                }
                 if self.popup.as_ref().is_some_and(|(w, _)| *w == window) {
                     self.dismiss_popup();
+                } else if self.main_id == Some(window)
+                    && (self.props.editing.is_some() || self.props.adding.is_some())
+                {
+                    return self.on_props(PropsMsg::CancelSlot);
                 } else if self.main_id == Some(window) && self.rename.take().is_some() {
                     // 行内重命名 Esc = 取消
                 }
@@ -1453,6 +1884,10 @@ impl App {
                 Task::none()
             }
             Message::PopupOpen(window, open) => {
+                // 拖拽会话中不接受弹层（行右键等路径；释放结算后才恢复）
+                if self.file_drag.is_some() {
+                    return Task::none();
+                }
                 self.popup = Some((window, open));
                 self.popup_pane = 0;
                 Task::none()
@@ -1475,7 +1910,7 @@ impl App {
                     target: RenameTarget::Draft { dir, kind },
                     value: String::new(),
                 });
-                Task::none()
+                rename_focus_task()
             }
             Message::RenameStartFile(rel) => {
                 self.dismiss_popup();
@@ -1483,13 +1918,13 @@ impl App {
                 let name = rel.rsplit('/').next().unwrap_or(&rel).to_string();
                 let name = name.strip_suffix(".md").map(|s| s.to_string()).unwrap_or(name);
                 self.rename = Some(RenameState { target: RenameTarget::File(rel), value: name });
-                Task::none()
+                rename_focus_task()
             }
             Message::RenameStartFolder(dir) => {
                 self.dismiss_popup();
                 let name = dir.rsplit('/').next().unwrap_or(&dir).to_string();
                 self.rename = Some(RenameState { target: RenameTarget::Folder(dir), value: name });
-                Task::none()
+                rename_focus_task()
             }
             Message::DeleteAsk(rel) => {
                 // 文件删除 = 直接进确认 pane（无标题行确认态）
@@ -1570,7 +2005,56 @@ impl App {
                     self.notify(NoticeLevel::Success, "完成");
                 }
                 self.apply_follow(&follow);
-                self.load_children(&dir)
+                // 引用同步代写了打开中的笔记（rewritten 键 = 落盘后路径，与跟随后的
+                // last_note_file 比对）：磁盘正文已变，重读对齐——改名/移动的 gate 已先
+                // flush，此刻无未落盘输入可丢
+                let mut reload_note: Option<String> = None;
+                if let FollowUp::Renamed { rewritten, .. } = &follow {
+                    if let Some(f) = self.ui.last_note_file.clone() {
+                        if rewritten.contains(&f) {
+                            reload_note = Some(f);
+                        }
+                    }
+                }
+                // 目录改名/移动：children 缓存按前缀跟随（展开集已在 apply_follow 换路，
+                // 缓存不跟随会让移动后的已展开目录显示「展开但空」）
+                if let FollowUp::Renamed { from, to, .. } = &follow {
+                    let prefix = format!("{from}/");
+                    self.children = self
+                        .children
+                        .drain()
+                        .map(|(k, v)| {
+                            if k == *from {
+                                (to.clone(), v)
+                            } else if let Some(rest) = k.strip_prefix(&prefix) {
+                                (format!("{to}/{rest}"), v)
+                            } else {
+                                (k, v)
+                            }
+                        })
+                        .collect();
+                }
+                // 移动时源目录与目标目录不同，两处树都要刷新；文件操作改变仓库结构：
+                // 双链候选清单与标签词汇表与反链跟进；路径元数据（提示词/颜色）被 core
+                // 代写后重读对齐内存态
+                let mut refresh = self.load_children(&dir);
+                if let FollowUp::Renamed { from, .. } = &follow {
+                    let from_dir = parent_of(from);
+                    if from_dir != dir {
+                        refresh = refresh.chain(self.load_children(&from_dir));
+                    }
+                }
+                let mut next = refresh
+                    .chain(self.refresh_note_files())
+                    .chain(self.refresh_tag_vocab())
+                    .chain(self.refresh_backlinks());
+                if matches!(follow, FollowUp::Renamed { .. }) {
+                    next = next.chain(self.load_vault_meta());
+                }
+                if let Some(rel) = reload_note {
+                    next = next.chain(self.load_note(&rel));
+                }
+                next
             }
             Message::OpDone(gen, _, Err(e), _) => {
                 if gen != self.epoch() {
@@ -1604,7 +2088,8 @@ impl App {
                 }
                 self.children.insert(dir.clone(), entries.clone());
                 let mut task = Task::none();
-                for (rel, is_dir) in entries {
+                for child in entries {
+                    let (rel, is_dir) = (child.rel, child.is_dir);
                     if !is_dir {
                         continue;
                     }
@@ -2072,6 +2557,7 @@ impl App {
                 self.delete_entry(&rel, is_dir)
             }
             PendingAfterFlush::RenameFile(r) => self.commit_file_rename(r),
+            PendingAfterFlush::MoveEntry { from, is_dir, to_dir } => self.move_entry(&from, is_dir, &to_dir),
         }
     }
 
@@ -2136,12 +2622,298 @@ impl App {
         self.preview_doc = None;
         self.dirty = false;
         self.save_error = None;
+        self.reset_props();
+        self.history.clear();
         self.schedule_persist();
         Task::none()
     }
 
     fn active_tree(&self) -> Option<layout::LayoutNode> {
         Some(layout::active_layout(&self.ui).tree)
+    }
+
+    // ===== 反链 / 标签词汇表 / 双链候选 =====
+
+    /// 反链扫描：指纹增量刷新 wiki 索引后查询当前笔记（spawn_blocking，回执 gen 守卫）。
+    fn refresh_backlinks(&self) -> Task<Message> {
+        let Some(rel) = self.ui.last_note_file.clone() else { return Task::none() };
+        let gen = self.epoch();
+        let state = self.vault.clone();
+        let title = rel.rsplit('/').next().unwrap_or(&rel).trim_end_matches(".md").to_string();
+        let rel_for_cb = rel.clone();
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    let (root, exclude, _) = state.session_snapshot()?;
+                    let mut guard = state.wiki.lock().map_err(|e| e.to_string())?;
+                    let index = guard.get_or_insert_with(Default::default);
+                    vault::refresh_wiki_index(&root, &exclude, index)?;
+                    Ok(vault::query_wiki_backlinks(index, &title, &rel))
+                })
+                .await
+                .map_err(|e| e.to_string())?
+            },
+            move |result| Message::BacklinksLoaded(gen, rel_for_cb, result),
+        )
+    }
+
+    /// 标签词汇表扫描（spawn_blocking；候选按 count 降序）。
+    fn refresh_tag_vocab(&self) -> Task<Message> {
+        let gen = self.epoch();
+        let state = self.vault.clone();
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    let (root, exclude, _) = state.session_snapshot()?;
+                    let mut guard = state.tags.lock().map_err(|e| e.to_string())?;
+                    let index = guard.get_or_insert_with(Default::default);
+                    vault::refresh_tag_index(&root, &exclude, index)?;
+                    Ok(vault::aggregate_tag_counts(index))
+                })
+                .await
+                .map_err(|e| e.to_string())?
+            },
+            move |result| Message::TagVocabLoaded(gen, result),
+        )
+    }
+
+    /// 全仓库笔记清单（双链候选数据源；树序）。
+    fn refresh_note_files(&self) -> Task<Message> {
+        let gen = self.epoch();
+        let state = self.vault.clone();
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    let (root, exclude, _) = state.session_snapshot()?;
+                    let tree = vault::list_vault_tree(&root, &exclude)?;
+                    let mut files = Vec::new();
+                    collect_md_files(&tree, &mut files);
+                    Ok(files)
+                })
+                .await
+                .map_err(|e| e.to_string())?
+            },
+            move |result| Message::NoteFilesLoaded(gen, result),
+        )
+    }
+
+    /// 双链候选的过滤序号（.md 笔记按文件名子串过滤、树序，上限 50）。
+    fn wiki_candidates(&self) -> Vec<usize> {
+        let Some(p) = &self.wiki_picker else { return Vec::new() };
+        let q = p.query.trim().to_lowercase();
+        self.note_files
+            .iter()
+            .enumerate()
+            .filter(|(_, (rel, name))| {
+                rel.ends_with(".md") && (q.is_empty() || name.to_lowercase().contains(&q))
+            })
+            .map(|(i, _)| i)
+            .take(50)
+            .collect()
+    }
+
+    /// 输入 / 删除后的双链候选状态推进：光标处于未闭合 `[[` / `【【` 片段时开启或更新。
+    fn sync_wiki_picker(&mut self) {
+        // 先算清决策（片段位置与查询词），再落到状态（避免借用交叠）
+        enum Sync {
+            Close,
+            Open(usize, String),
+        }
+        let decision = {
+                let body = self.edit_body();
+                let caret = self.edit.caret.min(body.len());
+                let ascii = body[..caret].rfind("[[").map(|i| (i, 2usize));
+                let wide = body[..caret].rfind("【【").map(|i| (i, "【【".len()));
+                let found = match (ascii, wide) {
+                    (Some(a), Some(b)) if a.0 >= b.0 => Some(a),
+                    (Some(_), Some(b)) => Some(b),
+                    (a, b) => a.or(b),
+                };
+                match found {
+                    None => Sync::Close,
+                    Some((from, tlen)) => {
+                        let q_start = from + tlen;
+                        if caret < q_start {
+                            Sync::Close
+                        } else {
+                            let query = &body[q_start..caret];
+                            if query.contains(['[', ']', '【', '】', '\n']) {
+                                Sync::Close
+                            } else {
+                                Sync::Open(from, query.to_string())
+                            }
+                        }
+                    }
+                }
+            };
+        match decision {
+            Sync::Close => self.close_wiki_picker(false),
+            Sync::Open(from, query) => match &mut self.wiki_picker {
+                Some(p) if p.from == from => {
+                    if p.query != query {
+                        p.query = query;
+                        p.active = 0;
+                    }
+                }
+                _ => {
+                    if self.wiki_dismissed_from != Some(from) {
+                        self.wiki_dismissed_from = None;
+                        self.wiki_picker = Some(WikiPicker { from, query, active: 0 });
+                    }
+                }
+            },
+        }
+    }
+
+    /// 关闭双链候选；`dismiss` = Esc 主动关闭（同触发位置不再自动重开）。
+    fn close_wiki_picker(&mut self, dismiss: bool) {
+        if let Some(p) = self.wiki_picker.take() {
+            if dismiss {
+                self.wiki_dismissed_from = Some(p.from);
+            }
+        }
+    }
+
+    /// 光标移出候选片段时收起（光标移入编辑面的导航路径调用）。
+    fn close_wiki_picker_if_outside(&mut self) {
+        if let Some(p) = &self.wiki_picker {
+            let caret = self.edit.caret.min(self.edit_body().len());
+            if caret < p.from {
+                self.close_wiki_picker(false);
+            }
+        }
+    }
+
+    /// 选中双链候选：片段替换为 `[标题](路径)` markdown 链接（老壳同形态）。
+    fn wiki_pick(&mut self, candidate_index: usize) {
+        let Some(picker) = self.wiki_picker.clone() else { return };
+        let candidates = self.wiki_candidates();
+        let Some(file_index) = candidates.get(candidate_index).copied() else { return };
+        let Some((file, name)) = self.note_files.get(file_index).cloned() else { return };
+        let body = self.edit_body().to_string();
+        let caret = self.edit.caret.min(body.len());
+        if caret < picker.from {
+            self.wiki_picker = None;
+            return;
+        }
+        let label = name.trim_end_matches(".md").replace(['[', ']'], "");
+        let insert = format!("[{}]({})", label, encode_md_href(&file));
+        let mut next = String::with_capacity(body.len() - (caret - picker.from) + insert.len());
+        next.push_str(&body[..picker.from]);
+        next.push_str(&insert);
+        next.push_str(&body[caret..]);
+        self.edit.snapshot(&self.note_text);
+        self.set_edit_body(next);
+        self.edit.caret = picker.from + insert.len();
+        self.edit.anchor = self.edit.caret;
+        self.wiki_picker = None;
+        self.wiki_dismissed_from = None;
+        // 全局 Enter 订阅与编辑面 Newline 事件对同一次按键双发：本路径先落则吞掉随后的 Newline
+        self.wiki_swallow_newline = true;
+        self.after_edit();
+    }
+
+    // ===== 历史侧车 =====
+
+    /// 读取当前笔记的历史版本（spawn_blocking；尽力而为，读失败 = 空列表）。
+    fn reload_history(&self) -> Task<Message> {
+        let Some(rel) = self.ui.last_note_file.clone() else { return Task::none() };
+        let gen = self.epoch();
+        let state = self.vault.clone();
+        let rel_for_cb = rel.clone();
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    let (root, _, _) = state.session_snapshot()?;
+                    Ok::<_, String>(atelyx_core::history::load_history(&root, atelyx_core::history::HistoryKind::Note, &rel))
+                })
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|r| r)
+                .unwrap_or_default()
+            },
+            move |versions| Message::HistoryLoaded(gen, rel_for_cb, versions),
+        )
+    }
+
+    /// 记录一次保存为历史版本（edit；60s 窗口内同作者连续编辑合并为一版）。
+    /// 历史为尽力而为侧车：写失败静默丢弃（不打扰正文保存链），与读取侧空列表降级同口径。
+    fn record_note_history(&self, content: String) -> Task<Message> {
+        let Some(rel) = self.ui.last_note_file.clone() else { return Task::none() };
+        let gen = self.epoch();
+        let state = self.vault.clone();
+        let author = history_author();
+        Task::perform(
+            async move {
+                let _ = tokio::task::spawn_blocking(move || {
+                    let (root, _, _) = state.session_snapshot()?;
+                    atelyx_core::history::record_version(
+                        &root,
+                        atelyx_core::history::HistoryKind::Note,
+                        &rel,
+                        &atelyx_core::history::RecordOpts {
+                            content,
+                            action: atelyx_core::history::HistoryAction::Edit,
+                            author,
+                            coalesce_edit_ms: Some(60_000),
+                            max_versions: 0,
+                            note: None,
+                        },
+                    )
+                })
+                .await;
+                Message::HistoryRecorded(gen)
+            },
+            |msg| msg,
+        )
+    }
+
+    /// 回滚到指定版本：全文快照替换正文（撤销可回退），保存链写回并记 restore 版本。
+    fn history_restore(&mut self, seq: u64) -> Task<Message> {
+        let Some(version) = self.history.iter().find(|v| v.seq == seq).cloned() else {
+            return Task::none();
+        };
+        self.edit.snapshot(&self.note_text);
+        self.note_text = version.content.clone();
+        // 源码档正文真源 = note_text 派生的编辑器内容：程序化替换须同步重建
+        if self.note_mode == NoteMode::Source {
+            self.source_editor = text_editor::Content::with_text(&self.note_text);
+        }
+        self.dirty = true;
+        self.save_error = None;
+        self.autosave_deadline = Some(Instant::now() + AUTOSAVE_DEBOUNCE);
+        self.refresh_preview();
+        self.refresh_edit();
+        self.refresh_props();
+        let Some(rel) = self.ui.last_note_file.clone() else { return Task::none() };
+        let gen = self.epoch();
+        let state = self.vault.clone();
+        let author = history_author();
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    let (root, _, _) = state.session_snapshot()?;
+                    atelyx_core::history::record_version(
+                        &root,
+                        atelyx_core::history::HistoryKind::Note,
+                        &rel,
+                        &atelyx_core::history::RecordOpts {
+                            content: version.content,
+                            action: atelyx_core::history::HistoryAction::Restore,
+                            author,
+                            coalesce_edit_ms: None,
+                            max_versions: 0,
+                            note: None,
+                        },
+                    )
+                })
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|r| r)
+                .unwrap_or(())
+            },
+            move |()| Message::HistoryRecorded(gen),
+        )
     }
 
     fn active_scene(&self) -> Option<&layout::Scene> {
@@ -2194,11 +2966,20 @@ impl App {
         }
     }
 
-    /// 文件操作成功后对「打开中的笔记」的跟随：改名换前缀、删除清空。
+    /// 文件操作成功后对「打开中的笔记」的跟随：改名换前缀、删除清空；目录改名/移动同步展开集。
     fn apply_follow(&mut self, follow: &FollowUp) {
         match follow {
             FollowUp::None => {}
-            FollowUp::Renamed { from, to } => {
+            FollowUp::Renamed { from, to, .. } => {
+                // 展开集路径跟随（目录改名/移动；文件路径不会成为展开键，前缀判空转无害）
+                let prefix = format!("{from}/");
+                for d in &mut self.ui.file_explorer_expanded {
+                    if d == from {
+                        *d = to.clone();
+                    } else if let Some(rest) = d.strip_prefix(&prefix) {
+                        *d = format!("{to}/{rest}");
+                    }
+                }
                 if let Some(f) = &self.ui.last_note_file {
                     let next = if f == from {
                         Some(to.clone())
@@ -2312,6 +3093,7 @@ impl App {
                 let parent_for_task = parent.clone();
                 let old_for_task = old.clone();
                 let new_for_task = new.clone();
+                let Ok(exclude) = self.vault.exclude_folders() else { return Task::none() };
                 Task::perform(
                     async move {
                         // 目标已存在（排除自身）= 加序号静默落位，实际落点经 OpDone 回传
@@ -2335,13 +3117,23 @@ impl App {
                                 }
                             }
                         }
-                        if target == old_for_task {
-                            return Ok(target);
+                        // 请求名与原名落点全等 = 纯 no-op（case-only 改名字符串不等，
+                        // 走下方事务由 same_physical_file 豁免真正 rename 生效）
+                        let full = full_rel(&parent_for_task, &target);
+                        if full == old_for_task {
+                            return Ok((old_for_task.clone(), Vec::new()));
                         }
-                        vault::rename_note_file(&root, &old_for_task, &target).map(|_| target)
+                        let result = vault_refs::rename_note_synced(&root, &exclude, &old_for_task, &full)?;
+                        Ok((full, result.rewritten))
                     },
-                    move |result| {
-                        Message::OpDone(gen, parent, result, FollowUp::Renamed { from: old, to: new })
+                    move |result| match result {
+                        Ok((full, rewritten)) => Message::OpDone(
+                            gen,
+                            parent,
+                            Ok(full.clone()),
+                            FollowUp::Renamed { from: old, to: full, rewritten },
+                        ),
+                        Err(e) => Message::OpDone(gen, parent, Err(e), FollowUp::None),
                     },
                 )
             }
@@ -2351,12 +3143,12 @@ impl App {
                     return Task::none();
                 }
                 let parent = parent_of(&old_dir);
-                let new_dir = match old_dir.rfind('/') {
+                let new_for_task = match old_dir.rfind('/') {
                     Some(i) => format!("{}/{name}", &old_dir[..i]),
                     None => name,
                 };
                 let old_for_task = old_dir.clone();
-                let new_for_task = new_dir.clone();
+                let Ok(exclude) = self.vault.exclude_folders() else { return Task::none() };
                 Task::perform(
                     async move {
                         // 目标已存在（排除自身）= 加序号静默落位；case-only 改名跳过查重
@@ -2380,17 +3172,19 @@ impl App {
                             }
                         }
                         if target == old_for_task {
-                            return Ok(target);
+                            return Ok((target, Vec::new()));
                         }
-                        vault::rename_folder(&root, &old_for_task, &target).map(|_| target)
+                        let result = vault_refs::rename_folder_synced(&root, &exclude, &old_for_task, &target)?;
+                        Ok((target, result.rewritten))
                     },
-                    move |result| {
-                        Message::OpDone(
+                    move |result| match result {
+                        Ok((full, rewritten)) => Message::OpDone(
                             gen,
                             parent,
-                            result,
-                            FollowUp::Renamed { from: old_dir, to: new_dir },
-                        )
+                            Ok(full.clone()),
+                            FollowUp::Renamed { from: old_dir, to: full, rewritten },
+                        ),
+                        Err(e) => Message::OpDone(gen, parent, Err(e), FollowUp::None),
                     },
                 )
             }
@@ -2437,7 +3231,7 @@ impl App {
         let rel = rel.to_string();
         let rel_for_cb = rel.clone();
         Task::perform(
-            async move { vault::read_dir_filtered(&root, &rel, &exclude) },
+            async move { vault::read_dir_entries(&root, &rel, &exclude) },
             move |result| Message::ChildrenLoaded(rel_for_cb, gen, result),
         )
     }
@@ -2454,7 +3248,7 @@ impl App {
         let rel_for_cb = rel.clone();
         let gen = self.epoch();
         Task::perform(
-            async move { vault::read_dir_filtered(&root, &rel, &exclude) },
+            async move { vault::read_dir_entries(&root, &rel, &exclude) },
             move |result| Message::ExpandChildrenLoaded(rel_for_cb, gen, result),
         )
     }
@@ -2466,23 +3260,230 @@ impl App {
             return;
         }
         let body = strip_frontmatter(&self.note_text).to_string();
-        self.preview_doc = Some(markdown_view::parse_document(&body));
+        let doc = markdown_view::parse_document(&body);
+        self.ensure_note_images(&doc);
+        self.preview_doc = Some(doc);
     }
 
-    /// 编辑档解析产物与块元数据重建。
+    /// 编辑档解析产物与块元数据重建（frontmatter 剥离：编辑面只处理正文，坐标相对正文）。
     fn refresh_edit(&mut self) {
         if self.note_mode != NoteMode::Edit {
             self.edit_doc = None;
             self.edit_meta.clear();
             return;
         }
-        let doc = markdown_view::parse_document(&self.note_text);
-        self.edit_meta = markdown_view::block_meta(&doc.source, &doc.blocks);
+        let body = strip_frontmatter(&self.note_text);
+        let doc = markdown_view::parse_document(body);
+        self.edit_meta = markdown_view::block_meta(body, &doc.blocks);
         // 空文档（无块）也要有光标宿主：补一个空块
         if self.edit_meta.is_empty() {
             self.edit_meta.push(markdown_view::empty_block_meta());
         }
+        self.ensure_note_images(&doc);
         self.edit_doc = Some(doc);
+    }
+
+    /// 文档内块级图片的按需载入：缺句柄且未在途/未失败的 src 发起读盘（仓库相对路径）或
+    /// 公网策略下载（http/https）任务，任务经 update 收尾统一链出。失败不重试（失败集）。
+    fn ensure_note_images(&mut self, doc: &MarkdownDocument) {
+        let srcs = markdown_view::collect_image_srcs(&doc.source, &doc.blocks);
+        if srcs.is_empty() {
+            return;
+        }
+        let gen = self.epoch();
+        let root = self.vault.root().ok();
+        let mut tasks = Vec::new();
+        for src in srcs {
+            if self.note_images.contains_key(&src)
+                || self.note_images_failed.contains(&src)
+                || !self.note_images_inflight.insert(src.clone())
+            {
+                continue;
+            }
+            let task = match (&root, src.starts_with("http://") || src.starts_with("https://")) {
+                (_, true) => {
+                    let url = src.clone();
+                    Task::perform(
+                        async move { atelyx_core::remote_image::fetch_external_image(&url).await },
+                        move |r| Message::ImageLoaded(gen, src.clone(), r),
+                    )
+                }
+                (Some(root), false) => {
+                    let root = root.clone();
+                    let path = src.clone();
+                    Task::perform(
+                        async move { vault::read_file_bytes(&root, &path) },
+                        move |r| Message::ImageLoaded(gen, src.clone(), r),
+                    )
+                }
+                // 无仓库时仓库内图片无落点：保持占位
+                (None, false) => {
+                    self.note_images_inflight.remove(&src);
+                    continue;
+                }
+            };
+            tasks.push(task);
+        }
+        if !tasks.is_empty() {
+            let batch = Task::batch(tasks);
+            self.image_loads = Some(match self.image_loads.take() {
+                Some(prev) => prev.chain(batch),
+                None => batch,
+            });
+        }
+    }
+
+    /// 读取仓库元数据（排序方式 / 提示词标记 / 文件夹颜色；缺省回落不阻塞）。
+    fn load_vault_meta(&self) -> Task<Message> {
+        let Some(root) = self.vault.root().ok() else { return Task::none() };
+        let gen = self.epoch();
+        Task::perform(
+            async move {
+                let sort = vault::read_vault_config(&root)?
+                    .file_explorer_sort
+                    .unwrap_or_else(|| "mtime-desc".to_string());
+                let prompts = vault::read_prompt_notes_file(&root).unwrap_or_default();
+                let colors = vault::read_folder_colors_file(&root).unwrap_or_default();
+                Ok((sort, prompts, colors))
+            },
+            move |result| Message::VaultMetaLoaded(gen, result),
+        )
+    }
+
+    /// 提示词标记注册/注销（读改写原子落盘，回执重读对齐）。
+    fn toggle_prompt_note(&self, rel: &str) -> Task<Message> {
+        let Some(root) = self.vault.root().ok() else { return Task::none() };
+        let rel = rel.to_string();
+        let gen = self.epoch();
+        Task::perform(
+            async move {
+                let mut notes = vault::read_prompt_notes_file(&root)?;
+                if let Some(i) = notes.iter().position(|n| n == &rel) {
+                    notes.remove(i);
+                } else {
+                    notes.push(rel.clone());
+                }
+                vault::write_prompt_notes_file(&root, &notes)?;
+                vault::read_prompt_notes_file(&root)
+            },
+            move |result| Message::PromptNotesLoaded(gen, result),
+        )
+    }
+
+    /// 设置/清除文件夹图标颜色（None = 恢复默认即删键；回执重读对齐）。
+    fn set_folder_color(&self, rel: &str, color: Option<String>) -> Task<Message> {
+        let Some(root) = self.vault.root().ok() else { return Task::none() };
+        let rel = rel.to_string();
+        let gen = self.epoch();
+        Task::perform(
+            async move {
+                let mut colors = vault::read_folder_colors_file(&root)?;
+                match color {
+                    Some(c) => colors.insert(rel, c),
+                    None => colors.remove(&rel),
+                };
+                vault::write_folder_colors_file(&root, &colors)?;
+                vault::read_folder_colors_file(&root)
+            },
+            move |result| Message::FolderColorsLoaded(gen, result),
+        )
+    }
+
+    /// 创建同目录副本（文件字节复制 + .atlx/.atb 重生成 id；文件夹递归复制含 id 重生成）。
+    /// 目标名同名自动加序号，实际落点经 OpDone 回传。
+    fn duplicate_entry(&self, rel: &str, is_dir: bool) -> Task<Message> {
+        let Some(root) = self.vault.root().ok() else { return Task::none() };
+        let gen = self.epoch();
+        let parent = parent_of(rel);
+        let name = rel.rsplit('/').next().unwrap_or(rel).to_string();
+        let rel = rel.to_string();
+        let is_dir_for_task = is_dir;
+        let parent_for_task = parent.clone();
+        Task::perform(
+            async move {
+                let parent = parent_for_task;
+                if is_dir_for_task {
+                    // 副本场景源名必须视为已占用（exclude 传空串），否则首个候选 = 源名自复制
+                    let target = dedupe_sibling(&root, &parent, &name, None, "")?;
+                    vault::copy_folder(&root, &rel, &full_rel(&parent, &target))?;
+                    Ok(full_rel(&parent, &target))
+                } else {
+                    let (stem, ext) = match name.rfind('.') {
+                        Some(0) | None => (name.clone(), String::new()),
+                        Some(i) => (name[..i].to_string(), name[i..].to_string()),
+                    };
+                    let target = dedupe_sibling(&root, &parent, &stem, Some(&ext), "")?;
+                    let new_rel = full_rel(&parent, &target);
+                    let src = vault::safe_join(&root, &rel, false)?;
+                    let dst = vault::safe_join(&root, &new_rel, true)?;
+                    std::fs::copy(&src, &dst).map_err(|e| format!("复制文件失败：{e}"))?;
+                    vault::regenerate_file_id(&dst)?;
+                    Ok(new_rel)
+                }
+            },
+            move |result| Message::OpDone(gen, parent, result, FollowUp::None),
+        )
+    }
+
+    /// 拖拽释放落点 → 移动（挂起输入先落盘：引用同步会代写打开中的笔记，防回写覆盖）。
+    fn resolve_file_drop(&mut self, d: FileDrag) -> Task<Message> {
+        let Some(target_dir) = self.file_drag_target.take() else { return Task::none() };
+        let from_dir = parent_of(&d.from);
+        if target_dir == from_dir {
+            return Task::none();
+        }
+        self.gate(PendingAfterFlush::MoveEntry {
+            from: d.from,
+            is_dir: d.is_dir,
+            to_dir: target_dir,
+        })
+    }
+
+    /// 移动文件/文件夹到目标目录（保持文件名，同名自动加序号；引用同步事务）。
+    fn move_entry(&mut self, from: &str, is_dir: bool, to_dir: &str) -> Task<Message> {
+        let Some(root) = self.vault.root().ok() else { return Task::none() };
+        let Ok(exclude) = self.vault.exclude_folders() else { return Task::none() };
+        let gen = self.epoch();
+        let name = from.rsplit('/').next().unwrap_or(from).to_string();
+        let from = from.to_string();
+        let from_for_task = from.clone();
+        let to_dir = to_dir.to_string();
+        let to_dir_for_task = to_dir.clone();
+        let is_dir_for_task = is_dir;
+        Task::perform(
+            async move {
+                let to_dir = to_dir_for_task;
+                let from = from_for_task;
+                let target = if is_dir_for_task {
+                    dedupe_sibling(&root, &to_dir, &name, None, &from)?
+                } else {
+                    let (stem, ext) = match name.rfind('.') {
+                        Some(0) | None => (name.clone(), String::new()),
+                        Some(i) => (name[..i].to_string(), name[i..].to_string()),
+                    };
+                    dedupe_sibling(&root, &to_dir, &stem, Some(&ext), &from)?
+                };
+                let new_rel = full_rel(&to_dir, &target);
+                if new_rel == from {
+                    return Ok((new_rel, Vec::new()));
+                }
+                let rewritten = if is_dir_for_task {
+                    vault_refs::rename_folder_synced(&root, &exclude, &from, &new_rel)?.rewritten
+                } else {
+                    vault_refs::rename_note_synced(&root, &exclude, &from, &new_rel)?.rewritten
+                };
+                Ok((new_rel, rewritten))
+            },
+            move |result| match result {
+                Ok((full, rewritten)) => Message::OpDone(
+                    gen,
+                    to_dir,
+                    Ok(full.clone()),
+                    FollowUp::Renamed { from, to: full, rewritten },
+                ),
+                Err(e) => Message::OpDone(gen, to_dir, Err(e), FollowUp::None),
+            },
+        )
     }
 
     /// 光标所在块序号（严格落在块区间内；空行 / 文外返回 None）。
@@ -2505,13 +3506,12 @@ impl App {
         }
         self.edit_meta.iter().rposition(|m| m.from <= offset).or(Some(0))
     }
-
-    /// 命中目标 → 源偏移。
+    /// 命中目标 → 正文偏移（编辑面坐标相对正文）。
     fn resolve_hit(&self, target: HitTarget) -> usize {
         match target {
             HitTarget::BlockText { index, point, width } => match self.edit_meta.get(index) {
                 Some(meta) => markdown_edit::offset_in_block(
-                    &self.note_text,
+                    self.edit_body(),
                     meta.from,
                     meta.to,
                     &meta.source,
@@ -2525,17 +3525,18 @@ impl App {
                 Some(meta) => if upper { meta.from } else { meta.to },
                 None => 0,
             },
-            HitTarget::GapLine { offset } => offset.min(self.note_text.len()),
+            HitTarget::GapLine { offset } => offset.min(self.edit_body().len()),
             HitTarget::Start => self.edit_meta.first().map_or(0, |m| m.from),
-            HitTarget::End => self.note_text.len(),
+            HitTarget::End => self.edit_body().len(),
         }
     }
 
     /// 活动块 = 光标所在块。光标落在空白区（文首 / 块间 / 文末的空白行与文末虚拟行）
     /// 时不揭示任何块，键盘与光标由编辑面托管；其余文外位置回到最近块保住键盘宿主。
     fn sync_active(&mut self) {
-        let len = self.note_text.len();
+        let len = self.edit_body().len();
         let caret = self.edit.caret.min(len);
+        self.close_wiki_picker_if_outside();
         if let Some(i) = self.block_at(caret) {
             self.edit.active = Some(i);
             return;
@@ -2550,7 +3551,7 @@ impl App {
 
     /// 选区锚点所在块。
     fn anchor_block(&self) -> Option<usize> {
-        self.block_at(self.edit.anchor.min(self.note_text.len()))
+        self.block_at(self.edit.anchor.min(self.edit_body().len()))
     }
 
     /// 一次编辑落地后的收尾。
@@ -2558,6 +3559,7 @@ impl App {
         self.refresh_edit();
         self.sync_active();
         self.autosave_deadline = Some(Instant::now() + AUTOSAVE_DEBOUNCE);
+        self.sync_wiki_picker();
     }
 
     /// 需要回显源码的块：光标所在块 + 选区锚点所在块（无选区时不揭示锚点块）。
@@ -2590,12 +3592,12 @@ impl App {
         if b <= a {
             return false;
         }
+        let body = self.edit_body().to_string();
         self.edit.snapshot(&self.note_text);
-        let mut next = String::with_capacity(self.note_text.len());
-        next.push_str(&self.note_text[..a]);
-        next.push_str(&self.note_text[b..]);
-        self.note_text = next;
-        self.dirty = true;
+        let mut next = String::with_capacity(body.len());
+        next.push_str(&body[..a]);
+        next.push_str(&body[b..]);
+        self.set_edit_body(next);
         self.edit.caret = a;
         self.edit.anchor = a;
         self.after_edit();
@@ -2607,14 +3609,14 @@ impl App {
         if text.is_empty() {
             return;
         }
+        let body = self.edit_body().to_string();
         self.edit.snapshot(&self.note_text);
         let (a, b) = self.edit.selection();
-        let mut next = String::with_capacity(self.note_text.len() + text.len());
-        next.push_str(&self.note_text[..a]);
+        let mut next = String::with_capacity(body.len() + text.len());
+        next.push_str(&body[..a]);
         next.push_str(&text);
-        next.push_str(&self.note_text[b..]);
-        self.note_text = next;
-        self.dirty = true;
+        next.push_str(&body[b..]);
+        self.set_edit_body(next);
         self.edit.caret = a + text.len();
         self.edit.anchor = self.edit.caret;
         self.after_edit();
@@ -2625,30 +3627,29 @@ impl App {
         if self.delete_selection() {
             return;
         }
+        let body = self.edit_body().to_string();
         if self.is_in_list() {
             if let Some((next, caret)) =
-                markdown_edit::list_backspace_edit(&self.note_text, self.edit.caret)
+                markdown_edit::list_backspace_edit(&body, self.edit.caret)
             {
                 self.edit.snapshot(&self.note_text);
-                self.note_text = next;
-                self.dirty = true;
+                self.set_edit_body(next);
                 self.edit.caret = caret;
                 self.edit.anchor = caret;
                 self.after_edit();
                 return;
             }
         }
-        let caret = self.edit.caret.min(self.note_text.len());
+        let caret = self.edit.caret.min(body.len());
         if caret == 0 {
             return;
         }
-        let prev = prev_boundary(&self.note_text, caret);
+        let prev = prev_boundary(&body, caret);
         self.edit.snapshot(&self.note_text);
-        let mut next = String::with_capacity(self.note_text.len());
-        next.push_str(&self.note_text[..prev]);
-        next.push_str(&self.note_text[caret..]);
-        self.note_text = next;
-        self.dirty = true;
+        let mut next = String::with_capacity(body.len());
+        next.push_str(&body[..prev]);
+        next.push_str(&body[caret..]);
+        self.set_edit_body(next);
         self.edit.caret = prev;
         self.edit.anchor = prev;
         self.after_edit();
@@ -2659,17 +3660,17 @@ impl App {
         if self.delete_selection() {
             return;
         }
-        let caret = self.edit.caret.min(self.note_text.len());
-        if caret >= self.note_text.len() {
+        let body = self.edit_body().to_string();
+        let caret = self.edit.caret.min(body.len());
+        if caret >= body.len() {
             return;
         }
-        let after = next_boundary(&self.note_text, caret);
+        let after = next_boundary(&body, caret);
         self.edit.snapshot(&self.note_text);
-        let mut next = String::with_capacity(self.note_text.len());
-        next.push_str(&self.note_text[..caret]);
-        next.push_str(&self.note_text[after..]);
-        self.note_text = next;
-        self.dirty = true;
+        let mut next = String::with_capacity(body.len());
+        next.push_str(&body[..caret]);
+        next.push_str(&body[after..]);
+        self.set_edit_body(next);
         self.after_edit();
     }
 
@@ -2678,13 +3679,13 @@ impl App {
         if self.delete_selection() {
             return;
         }
+        let body = self.edit_body().to_string();
         if self.is_in_list() {
             if let Some((next, caret)) =
-                markdown_edit::list_enter_edit(&self.note_text, self.edit.caret)
+                markdown_edit::list_enter_edit(&body, self.edit.caret)
             {
                 self.edit.snapshot(&self.note_text);
-                self.note_text = next;
-                self.dirty = true;
+                self.set_edit_body(next);
                 self.edit.caret = caret;
                 self.edit.anchor = caret;
                 self.after_edit();
@@ -2697,17 +3698,17 @@ impl App {
     /// Tab 缩进 / Shift+Tab 反缩进。
     fn edit_indent(&mut self, outdent: bool) {
         let (from, to) = self.edit.selection();
+        let body = self.edit_body().to_string();
         let edit = if outdent {
-            match markdown_edit::outdent_edit(&self.note_text, from, to) {
+            match markdown_edit::outdent_edit(&body, from, to) {
                 Some(edit) => edit,
                 None => return,
             }
         } else {
-            markdown_edit::indent_edit(&self.note_text, from, to)
+            markdown_edit::indent_edit(&body, from, to)
         };
         self.edit.snapshot(&self.note_text);
-        self.note_text = edit.text;
-        self.dirty = true;
+        self.set_edit_body(edit.text);
         self.edit.anchor = edit.from;
         self.edit.caret = edit.to;
         self.after_edit();
@@ -2716,13 +3717,14 @@ impl App {
     /// 光标移动（上下越界时跨块）。
     fn edit_move(&mut self, motion: markdown_edit::Motion, extend: bool) {
         use markdown_edit::Motion;
-        let len = self.note_text.len();
+        let body = self.edit_body();
+        let len = body.len();
         let caret = self.edit.caret.min(len);
         let target = match motion {
-            Motion::Left => prev_boundary(&self.note_text, caret),
-            Motion::Right => next_boundary(&self.note_text, caret),
-            Motion::Home => line_start_of(&self.note_text, caret),
-            Motion::End => line_end_of(&self.note_text, caret),
+            Motion::Left => prev_boundary(body, caret),
+            Motion::Right => next_boundary(body, caret),
+            Motion::Home => line_start_of(body, caret),
+            Motion::End => line_end_of(body, caret),
             Motion::Up => {
                 self.cross_block_move(false, extend);
                 return;
@@ -2742,7 +3744,7 @@ impl App {
     /// 上下越界时的跨块移动：块内跨到相邻块首 / 末或毗邻的文首 / 文末空白区；
     /// 空白区光标按行首逐行移动，越过端点落相邻块（见 `markdown_edit::vertical_target`）。
     fn cross_block_move(&mut self, forward: bool, extend: bool) {
-        let len = self.note_text.len();
+        let len = self.edit_body().len();
         let caret = self.edit.caret.min(len);
         let spans: Vec<(usize, usize)> =
             self.edit_meta.iter().map(|m| (m.from, m.to)).collect();
@@ -2767,54 +3769,67 @@ impl App {
         spans: &[(usize, usize)],
         forward: bool,
     ) -> Vec<usize> {
+        let body = self.edit_body();
         if let Some(i) = spans.iter().position(|&(f, t)| caret >= f && caret <= t) {
             let region = if !forward && i == 0 {
                 spans.first().map(|&(f, _)| (0, f))
             } else if forward && i + 1 == spans.len() {
-                spans.last().map(|&(_, t)| (t, self.note_text.len()))
+                spans.last().map(|&(_, t)| (t, body.len()))
             } else {
                 None
             };
-            return region.map_or(Vec::new(), |(f, t)| self.region_blank_starts(f, t));
+            return region.map_or(Vec::new(), |(f, t)| Self::region_blank_starts(body, f, t));
         }
         match spans.iter().rposition(|&(f, _)| f <= caret) {
-            None => self.region_blank_starts(0, spans.first().map_or(0, |&(f, _)| f)),
+            None => Self::region_blank_starts(body, 0, spans.first().map_or(0, |&(f, _)| f)),
             Some(i) => {
                 let from = spans[i].1;
-                let to = spans.get(i + 1).map_or(self.note_text.len(), |&(_, f)| f);
-                self.region_blank_starts(from, to)
+                let to = spans.get(i + 1).map_or(body.len(), |&(_, f)| f);
+                Self::region_blank_starts(body, from, to)
             }
         }
     }
 
     /// 空白区间的空白行行首：文首区第一行也是空白行（不含缩进片段）；
     /// 文末区含虚拟文末行（文本以换行结尾时）。
-    fn region_blank_starts(&self, from: usize, to: usize) -> Vec<usize> {
-        if to == self.note_text.len() {
-            markdown_edit::tail_blank_starts(&self.note_text, from)
+    fn region_blank_starts(body: &str, from: usize, to: usize) -> Vec<usize> {
+        if to == body.len() {
+            markdown_edit::tail_blank_starts(body, from)
         } else if from == 0 {
-            markdown_edit::edge_blank_starts(&self.note_text, 0, to)
+            markdown_edit::edge_blank_starts(body, 0, to)
         } else {
-            markdown_edit::gap_line_starts(&self.note_text, from, to)
+            markdown_edit::gap_line_starts(body, from, to)
         }
     }
 
     fn edit_undo(&mut self) {
         if let Some((text, caret, anchor)) = self.edit.undo(&self.note_text) {
+            // 撤销栈存全文（含 frontmatter）：直接回填，正文坐标不变。
+            // 属性槽编辑态随内容失效（槽序号可能越界），一律取消
+            self.props.editing = None;
+            self.props.adding = None;
+            self.props.draft.clear();
             self.note_text = text;
             self.dirty = true;
-            self.edit.caret = caret.min(self.note_text.len());
-            self.edit.anchor = anchor.min(self.note_text.len());
+            let body_len = self.edit_body().len();
+            self.edit.caret = caret.min(body_len);
+            self.edit.anchor = anchor.min(body_len);
+            self.refresh_props();
             self.after_edit();
         }
     }
 
     fn edit_redo(&mut self) {
         if let Some((text, caret, anchor)) = self.edit.redo(&self.note_text) {
+            self.props.editing = None;
+            self.props.adding = None;
+            self.props.draft.clear();
             self.note_text = text;
             self.dirty = true;
-            self.edit.caret = caret.min(self.note_text.len());
-            self.edit.anchor = anchor.min(self.note_text.len());
+            let body_len = self.edit_body().len();
+            self.edit.caret = caret.min(body_len);
+            self.edit.anchor = anchor.min(body_len);
+            self.refresh_props();
             self.after_edit();
         }
     }
@@ -2828,7 +3843,7 @@ impl App {
                 if !extend {
                     self.edit.anchor = offset;
                 }
-                self.edit.caret = offset.min(self.note_text.len());
+                self.edit.caret = offset.min(self.edit_body().len());
                 self.edit.focused = true;
                 self.sync_active();
                 Task::none()
@@ -2841,7 +3856,7 @@ impl App {
                 Task::none()
             }
             E::SetCaret { offset, extend } => {
-                let offset = offset.min(self.note_text.len());
+                let offset = offset.min(self.edit_body().len());
                 if !extend {
                     self.edit.anchor = offset;
                 }
@@ -2862,6 +3877,12 @@ impl App {
                 Task::none()
             }
             E::Newline => {
+                // 双链候选开启时 Enter 归候选选中（编辑面无条件上报 Newline）；
+                // 选中路径已先行时吞掉本次 Newline，防换行混入候选替换区间
+                if self.wiki_picker.is_some() || self.wiki_swallow_newline {
+                    self.wiki_swallow_newline = false;
+                    return Task::none();
+                }
                 self.edit_newline();
                 Task::none()
             }
@@ -2887,7 +3908,7 @@ impl App {
             }
             E::SelectAll => {
                 self.edit.anchor = 0;
-                self.edit.caret = self.note_text.len();
+                self.edit.caret = self.edit_body().len();
                 self.edit.active = self.nearest_block(self.edit.caret);
                 Task::none()
             }
@@ -3015,33 +4036,43 @@ impl App {
             } else {
                 Subscription::none()
             },
-            // 分割把手键盘调整：上次拖动过的把手，方向键 ±2%（horizontal = 左右键）
+            // 方向键：双链候选开启时导航候选，否则调整分割把手（语义在 NavKey 处理器分派）
             iced::event::listen_with(|event, _status, window| match event {
                 Event::Keyboard(keyboard::Event::KeyPressed {
                     key: keyboard::Key::Named(keyboard::key::Named::ArrowLeft),
                     modifiers,
                     ..
-                }) if modifiers.is_empty() => Some(Message::DividerAdjust(true, false)),
+                }) if modifiers.is_empty() => Some(Message::NavKey(true, false)),
                 Event::Keyboard(keyboard::Event::KeyPressed {
                     key: keyboard::Key::Named(keyboard::key::Named::ArrowRight),
                     modifiers,
                     ..
-                }) if modifiers.is_empty() => Some(Message::DividerAdjust(true, true)),
+                }) if modifiers.is_empty() => Some(Message::NavKey(true, true)),
                 Event::Keyboard(keyboard::Event::KeyPressed {
                     key: keyboard::Key::Named(keyboard::key::Named::ArrowUp),
                     modifiers,
                     ..
-                }) if modifiers.is_empty() => Some(Message::DividerAdjust(false, false)),
+                }) if modifiers.is_empty() => Some(Message::NavKey(false, false)),
                 Event::Keyboard(keyboard::Event::KeyPressed {
                     key: keyboard::Key::Named(keyboard::key::Named::ArrowDown),
                     modifiers,
                     ..
-                }) if modifiers.is_empty() => Some(Message::DividerAdjust(false, true)),
+                }) if modifiers.is_empty() => Some(Message::NavKey(false, true)),
+                Event::Keyboard(keyboard::Event::KeyPressed {
+                    key: keyboard::Key::Named(keyboard::key::Named::Enter),
+                    modifiers,
+                    ..
+                }) if modifiers.is_empty() => Some(Message::EnterKey),
                 Event::Keyboard(keyboard::Event::KeyPressed {
                     key: keyboard::Key::Character(c),
                     modifiers,
                     ..
                 }) if c == "s" && modifiers.control() => Some(Message::Save),
+                Event::Keyboard(keyboard::Event::KeyPressed {
+                    key: keyboard::Key::Named(keyboard::key::Named::Tab),
+                    modifiers,
+                    ..
+                }) => Some(Message::Props(PropsMsg::CommitMove(if modifiers.shift() { -1 } else { 1 }))),
                 Event::Keyboard(keyboard::Event::KeyPressed {
                     key: keyboard::Key::Named(keyboard::key::Named::Escape),
                     ..
