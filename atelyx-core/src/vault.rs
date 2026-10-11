@@ -226,20 +226,26 @@ pub fn has_hidden_segment(rel: &str) -> bool {
     })
 }
 
-/// 读取 `root/rel` 目录条目（相对路径 + 是否目录），应用全仓库统一过滤：
-/// 隐藏项（`.` 前缀）/ 排除文件夹 / `.tmp` 原子写副产物。递归由各 walker 自行组织
-/// （list_tree_in / scan_canvases_in / walk_md_in / scan_atlx_in 共用，过滤规则只维护一处）。
-pub fn read_dir_filtered(
+/// 目录子项（文件面板懒加载子项；mtime 供「编辑时间」排序）。
+#[derive(Clone, Debug, PartialEq)]
+pub struct DirChild {
+    pub rel: String,
+    pub is_dir: bool,
+    pub mtime: i64,
+}
+
+/// 读取 `root/rel` 目录条目（相对路径 + 是否目录 + mtime），应用全仓库统一过滤。
+pub fn read_dir_entries(
     root: &Path,
     rel: &str,
     exclude: &[String],
-) -> Result<Vec<(String, bool)>, String> {
+) -> Result<Vec<DirChild>, String> {
     let dir = if rel.is_empty() {
         root.to_path_buf()
     } else {
         root.join(rel)
     };
-    let mut out: Vec<(String, bool)> = vec![];
+    let mut out: Vec<DirChild> = vec![];
     for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
         let name = match entry.file_name().to_str() {
@@ -260,9 +266,136 @@ pub fn read_dir_filtered(
             // 跳过 atomic_write 的 `.tmp` 中间文件（原子写 `path.tmp` → rename 副产物）
             continue;
         }
-        out.push((child_rel, is_dir));
+        let mtime = entry.metadata().map(|md| mtime_of(&md)).unwrap_or(0);
+        out.push(DirChild { rel: child_rel, is_dir, mtime });
     }
     Ok(out)
+}
+
+/// 读取 `root/rel` 目录条目（相对路径 + 是否目录），应用全仓库统一过滤：
+/// 隐藏项（`.` 前缀）/ 排除文件夹 / `.tmp` 原子写副产物。递归由各 walker 自行组织
+/// （list_tree_in / scan_canvases_in / walk_md_in / scan_atlx_in 共用，过滤规则只维护一处）。
+pub fn read_dir_filtered(
+    root: &Path,
+    rel: &str,
+    exclude: &[String],
+) -> Result<Vec<(String, bool)>, String> {
+    Ok(read_dir_entries(root, rel, exclude)?
+        .into_iter()
+        .map(|c| (c.rel, c.is_dir))
+        .collect())
+}
+
+// ===== 文件面板排序（与前端 FileExplorerSortKey 同值域：目录恒名称自然序在前）=====
+
+/// 名称自然比较：数字段按数值（`file2` < `file10`，前导零多者排后），其余按码点序。
+/// 与前端 `sort.ts` 的 `localeCompare(…, "zh")` 差异：中文按码点不按拼音（Rust 侧无
+/// ICU，不值得为树内排序引入 collation 依赖），英文大小写同码点序——两端顺序可能不同。
+pub fn compare_natural(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    fn blocks(s: &str) -> Vec<&str> {
+        if s.is_empty() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        let mut start = 0;
+        let mut digit = s.as_bytes()[0].is_ascii_digit();
+        for (i, b) in s.as_bytes().iter().enumerate() {
+            let d = b.is_ascii_digit();
+            if d != digit {
+                out.push(&s[start..i]);
+                start = i;
+                digit = d;
+            }
+        }
+        out.push(&s[start..]);
+        out
+    }
+    let (pa, pb) = (blocks(a), blocks(b));
+    for (sa, sb) in pa.iter().zip(pb.iter()) {
+        let na = sa.as_bytes()[0].is_ascii_digit();
+        let nb = sb.as_bytes()[0].is_ascii_digit();
+        if na && nb {
+            let ta = sa.trim_start_matches('0');
+            let tb = sb.trim_start_matches('0');
+            let ord = ta.len().cmp(&tb.len()).then_with(|| ta.cmp(tb)).then_with(|| sa.len().cmp(&sb.len()));
+            if ord != Ordering::Equal {
+                return ord;
+            }
+        } else if na != nb {
+            // 数字段排前（"章2" < "章A"）
+            return if na { Ordering::Less } else { Ordering::Greater };
+        } else {
+            let ord = sa.cmp(sb);
+            if ord != Ordering::Equal {
+                return ord;
+            }
+        }
+    }
+    pa.len().cmp(&pb.len())
+}
+
+/// 每层排序：文件夹固定按名称 A-Z（自然序）在前，文件按 sortKey
+/// （`name-asc` / `name-desc` / `mtime-desc` / `mtime-asc`；未知值按名称升序）。
+pub fn sort_children(entries: &mut [DirChild], sort: &str) {
+    let dirs: Vec<DirChild> = {
+        let mut d: Vec<DirChild> = entries.iter().filter(|c| c.is_dir).cloned().collect();
+        d.sort_by(|a, b| compare_natural(&a.rel, &b.rel));
+        d
+    };
+    let mut files: Vec<DirChild> = entries.iter().filter(|c| !c.is_dir).cloned().collect();
+    match sort {
+        "name-desc" => files.sort_by(|a, b| compare_natural(&b.rel, &a.rel)),
+        "mtime-asc" => files.sort_by(|a, b| a.mtime.cmp(&b.mtime).then_with(|| compare_natural(&a.rel, &b.rel))),
+        // mtime 相同回落名称序（read_dir 原始序随文件系统而异，不作为展示顺序）
+        "mtime-desc" => files.sort_by(|a, b| b.mtime.cmp(&a.mtime).then_with(|| compare_natural(&a.rel, &b.rel))),
+        _ => files.sort_by(|a, b| compare_natural(&a.rel, &b.rel)),
+    }
+    let mut i = 0;
+    for child in dirs.into_iter().chain(files) {
+        entries[i] = child;
+        i += 1;
+    }
+}
+
+#[cfg(test)]
+mod sort_tests {
+    use super::*;
+
+    fn child(rel: &str, is_dir: bool, mtime: i64) -> DirChild {
+        DirChild { rel: rel.to_string(), is_dir, mtime }
+    }
+
+    #[test]
+    fn compare_natural_orders_numbers_by_value() {
+        assert_eq!(compare_natural("file2", "file10"), std::cmp::Ordering::Less);
+        assert_eq!(compare_natural("章2", "章10"), std::cmp::Ordering::Less);
+        // 前导零多者排后（1 < 01）
+        assert_eq!(compare_natural("1", "01"), std::cmp::Ordering::Less);
+        // 数字段排前
+        assert_eq!(compare_natural("章2", "章A"), std::cmp::Ordering::Less);
+    }
+
+    #[test]
+    fn sort_children_keeps_dirs_first_and_applies_key() {
+        let mut entries = vec![
+            child("b.md", false, 30),
+            child("z", true, 1),
+            child("a.md", false, 20),
+            child("a", true, 2),
+        ];
+        sort_children(&mut entries, "mtime-desc");
+        let rels: Vec<&str> = entries.iter().map(|c| c.rel.as_str()).collect();
+        // 目录恒名称序在前；文件按 mtime 从新到旧
+        assert_eq!(rels, vec!["a", "z", "b.md", "a.md"]);
+        sort_children(&mut entries, "name-asc");
+        let rels: Vec<&str> = entries.iter().map(|c| c.rel.as_str()).collect();
+        assert_eq!(rels, vec!["a", "z", "a.md", "b.md"]);
+        // 未知值回落名称升序
+        sort_children(&mut entries, "bogus");
+        let rels: Vec<&str> = entries.iter().map(|c| c.rel.as_str()).collect();
+        assert_eq!(rels, vec!["a", "z", "a.md", "b.md"]);
+    }
 }
 
 /// 递归枚举仓库文件树（跳过隐藏 `.` 开头 / 排除列表 / `.tmp` 原子写副产物），按 name 升序。
@@ -304,6 +437,28 @@ fn list_tree_in(
 /// 相对路径末段（list_tree_in 展示名用；rel 非空时必有末段）。
 fn rel_last_seg(rel: &str) -> &str {
     rel.rsplit('/').next().unwrap_or(rel)
+}
+
+/// 文件 mtime（Unix 秒；元数据不可得返回 0）。
+pub fn mtime_secs(path: &Path) -> i64 {
+    std::fs::metadata(path).map(|md| mtime_of(&md)).unwrap_or(0)
+}
+
+/// Metadata 的 mtime（Unix 秒；不可得返回 0）。DirEntry 与路径两处取 mtime 共用同一口径。
+pub(crate) fn mtime_of(md: &std::fs::Metadata) -> i64 {
+    md.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// 当前 Unix 秒（引用同步等落盘时间戳用）。
+pub fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 // ===== 路径校验 =====
@@ -764,6 +919,22 @@ pub fn percent_encode(s: &str) -> String {
             }
         } else {
             out.push(c);
+        }
+    }
+    out
+}
+
+/// 存量侧文件名编码（encodeURIComponent 语义：仅字母数字与 `-_.!~*'()` 保留，其余全量 UTF-8 %XX）。
+/// 仅供读取回退路径（新编码名缺失时按此名探查存量侧文件），新产出恒走 `percent_encode`。
+pub fn percent_encode_legacy(s: &str) -> String {
+    let mut out = String::new();
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '!' | '~' | '*' | '\'' | '(' | ')') {
+            out.push(c);
+        } else {
+            for b in c.to_string().bytes() {
+                out.push_str(&format!("%{:02X}", b));
+            }
         }
     }
     out
@@ -1872,8 +2043,8 @@ pub const TABLE_SCHEMA: &str = "atelyx-table/v1";
 //
 // 提取两种链接写法：`[[target]]`/`[[target|别名]]` 与 `[label](path)`（图片 `![..](..)` 不算反链）。
 
-/// 反链行：引用方笔记的相对仓库根路径 + 标题（scan_wiki_backlinks 返回，对应前端 types/canvas.ts）。
-#[derive(Serialize)]
+/// 反链行：引用方笔记的相对仓库根路径 + 标题（去扩展名文件名；scan_wiki_backlinks 返回）。
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BacklinkRow {
     pub file: String,
@@ -2021,7 +2192,7 @@ fn file_stamp(path: &Path) -> Option<FileStamp> {
 //   识别规则与前端渲染一致，渲染层额外跳过链接内文本（链接内标签仅入索引不渲染，视觉从简）。
 
 /// 标签行：标签名 + 全仓库出现次数（scan_vault_tags 返回，候选按 count 降序）。
-#[derive(Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TagRow {
     pub tag: String,
@@ -2085,11 +2256,9 @@ fn extract_note_tags(content: &str) -> HashSet<String> {
     let mut tags: HashSet<String> = HashSet::new();
     let mut body_start = 0;
     // 仅文档开头 `---` 块内的 `tags` 键算 frontmatter（非开头 `---` 是正文横隔条，不算）
-    if content.starts_with("---\n") || content.starts_with("---\r\n") {
-        if let Some(end) = frontmatter_end(content) {
-            parse_fm_tags(&content[..end], &mut tags);
-            body_start = end;
-        }
+    if let Some(end) = crate::frontmatter::block_end(content) {
+        parse_fm_tags(&content[..end], &mut tags);
+        body_start = end;
     }
     extract_inline_tags(&content[body_start..], &mut tags);
     tags
@@ -2366,20 +2535,6 @@ fn fence_close_end(rest: &str, open_char: char, open_len: usize) -> Option<usize
     None
 }
 
-/// 文档开头 frontmatter 结束位置（`---\n ... ---\n` 闭合行之后）；无闭合返回 None。
-fn frontmatter_end(content: &str) -> Option<usize> {
-    let first_nl = content.find('\n')?;
-    let mut pos = first_nl + 1;
-    for line in content[first_nl + 1..].split_inclusive('\n') {
-        let start = pos;
-        pos += line.len();
-        if line.trim_end_matches(['\n', '\r']) == "---" {
-            return Some(start + line.len());
-        }
-    }
-    None
-}
-
 /// 反引号 run 长度（i 处起连续反引号数）。
 fn backtick_run_at(content: &str, i: usize) -> usize {
     content[i..].bytes().take_while(|&b| b == b'`').count()
@@ -2410,8 +2565,8 @@ pub fn rewrite_link_spans(content: &str, apply: &mut dyn FnMut(&str) -> String) 
     let len = content.len();
     let mut i = 0;
     // 文档开头 frontmatter：整体跳过（YAML 里出现 `[[`/`](` 是数据不是链接）
-    if content.starts_with("---\n") || content.starts_with("---\r\n") {
-        if let Some(end) = frontmatter_end(content) {
+    if content.starts_with("---") {
+        if let Some(end) = crate::frontmatter::block_end(content) {
             out.push_str(&content[..end]);
             i = end;
         }
