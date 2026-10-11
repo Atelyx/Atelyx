@@ -13,3 +13,5 @@ serde_json = "1"
 iced = { version = "0.14", features = ["advanced", "canvas", "tokio", "image"] }
 # 系统文件夹选择对话框（AsyncFileDialog 走 iced Task）
 rfd = "0.15"
+# 自动保存防抖定时器（一次性 sleep；执行体为 iced 的 tokio runtime）
+tokio = { version = "1", default-features = false, features = ["time"] }

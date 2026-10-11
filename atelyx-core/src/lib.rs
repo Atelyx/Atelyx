@@ -13,3 +13,4 @@ pub mod plugin_process;
 pub mod search;
 pub mod vault;
 pub mod web;
+pub mod write_queue;

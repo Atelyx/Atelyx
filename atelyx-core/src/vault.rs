@@ -33,6 +33,8 @@ pub struct VaultState {
     pub canvas_cache: Mutex<HashMap<String, CachedFile<CanvasFile>>>,
     /// 已解析 `.atb` 缓存（同 canvas_cache）。
     pub table_cache: Mutex<HashMap<String, CachedFile<TableFile>>>,
+    /// 仓库内容写盘串行队列：笔记等写盘统一经此提交，保证同路径写按提交序落地。
+    pub writes: crate::write_queue::WriteQueue,
 }
 
 /// 一次仓库会话：根路径 + 该仓库生效的文件面板配置（open_vault 时从配置解析）。
@@ -51,6 +53,7 @@ impl Default for VaultState {
             tags: Mutex::new(None),
             canvas_cache: Mutex::new(HashMap::new()),
             table_cache: Mutex::new(HashMap::new()),
+            writes: crate::write_queue::WriteQueue::new(),
         }
     }
 }

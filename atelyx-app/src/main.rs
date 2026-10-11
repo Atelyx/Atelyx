@@ -173,6 +173,9 @@ const WINDOW_SIZE: Size = Size::new(1100.0, 760.0);
 /// 防抖落盘周期：期间多次模型变更合并为一次写盘（拖宽/拖拽等连续操作不逐帧写）。
 const PERSIST_TICK: std::time::Duration = std::time::Duration::from_millis(800);
 
+/// 自动保存防抖：最近一次内容变更后停止输入该时长才写回（尾沿 debounce，单定时器链续排）。
+const AUTOSAVE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// ui-state.json 落盘路径（与老壳同一应用数据目录，bundle identifier = com.atelyx.desktop）。
 fn ui_state_path() -> Option<PathBuf> {
     #[cfg(windows)]
@@ -228,8 +231,10 @@ enum Message {
     FileLoaded(u64, Result<(String, String), String>),
     Edited(text_editor::Action),
     Save,
-    /// 携带保存发起时冻结的内容：落地后与编辑器现值比对，区分保存完成与在途新编辑。
-    Saved(u64, String, Result<(), String>),
+    /// 携带保存发起时冻结的内容与保存动机：落地后与编辑器现值比对，区分保存完成与在途新编辑。
+    Saved(u64, String, SaveReason, Result<(), String>),
+    /// 自动保存防抖定时器到期（单定时器链，见 chain_autosave_timer）。
+    AutosaveTick,
     /// 切换 note 视图模式（只读 / 预览编辑 / 源码）。
     NoteMode(NoteMode),
     /// 编辑面事件（部件只上报，正文/光标/选区真相在应用层）。
@@ -427,6 +432,30 @@ struct TabPress {
     source: PressSource,
 }
 
+/// 保存动机：决定完成回执的处理（提示 / 清脏 / 放行待续动作）。
+#[derive(Debug, Clone)]
+enum SaveReason {
+    /// Ctrl+S：完成提示「已保存」。
+    Manual,
+    /// 停止输入 500ms 防抖自动写回。
+    AutoSave,
+    /// 脏时放行动作前的收尾保存：落地且期间无新输入后执行待续动作。
+    Flush(PendingAfterFlush),
+}
+
+/// flush 放行后继续的动作（挂起输入已落盘才可执行，否则动作会丢失未保存内容或在途写打到旧路径）。
+#[derive(Debug, Clone)]
+enum PendingAfterFlush {
+    OpenFile(String),
+    PickVault,
+    CloseMain(window::Id),
+    CloseFileTab,
+    /// 仓库内笔记链接（已解码；能进 flush 的只有 Path/Wiki/Create 形态，外链直接打开）。
+    OpenLink(String),
+    Delete { rel: String, is_dir: bool },
+    RenameFile(RenameState),
+}
+
 pub struct App {
     /// 布局状态真源（core 模型；与老壳共用磁盘格式）。
     pub ui: AppUiState,
@@ -484,6 +513,10 @@ pub struct App {
     pub dirty: bool,
     /// 上次保存失败原因（None = 无；保存成功或再次编辑即清除）。
     pub save_error: Option<String>,
+    /// 自动保存期限（最近一次内容变更 + 500ms；保存落地或到期触发时清空）。
+    autosave_deadline: Option<Instant>,
+    /// 自动保存定时器在途标志（单定时器链：到期检查期限，被推迟则续排剩余时长）。
+    autosave_timer: bool,
     /// note 视图模式（缺省只读）。
     pub note_mode: NoteMode,
     /// 只读档的解析产物：进入只读档或文件载入时重建，避免每帧重解析。
@@ -566,6 +599,8 @@ impl App {
                 edit_opts: markdown_view::link_options(),
                 dirty: false,
                 save_error: None,
+                autosave_deadline: None,
+                autosave_timer: false,
                 note_mode: NoteMode::Read,
                 preview_doc: None,
                 persist_dirty: false,
@@ -611,6 +646,27 @@ impl App {
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
+        let task = self.handle(message);
+        self.chain_autosave_timer(task)
+    }
+
+    /// 内容变更后补排自动保存定时器（单定时器链）：期限被输入推迟时按剩余时长续排，否则到期触发保存。
+    fn chain_autosave_timer(&mut self, task: Task<Message>) -> Task<Message> {
+        if self.autosave_deadline.is_some() && !self.autosave_timer {
+            self.autosave_timer = true;
+            let delay = self
+                .autosave_deadline
+                .unwrap_or_else(Instant::now)
+                .saturating_duration_since(Instant::now());
+            return task.chain(Task::perform(
+                async move { tokio::time::sleep(delay).await },
+                |_| Message::AutosaveTick,
+            ));
+        }
+        task
+    }
+
+    fn handle(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::WindowOpened(id) => {
                 if self.main_id.is_none() {
@@ -622,11 +678,8 @@ impl App {
             }
             Message::WindowCloseRequested(id) => {
                 if self.main_id == Some(id) {
-                    if self.dirty {
-                        self.notify(NoticeLevel::Warning, "有未保存改动，先 Ctrl+S 保存");
-                        return Task::none();
-                    }
-                    return window::close(id);
+                    // 关窗 = 退出：挂起输入先落盘（保存失败则留在应用内重试）
+                    return self.gate(PendingAfterFlush::CloseMain(id));
                 }
                 // 撕裂窗口按条目选项分流：close_hides = 隐藏不销毁，否则销毁条目
                 let Some(model_id) = self.detached_os.get(&id).cloned() else {
@@ -659,21 +712,7 @@ impl App {
                     Task::none()
                 }
             }
-            Message::PickVault => {
-                if self.dirty {
-                    self.notify(NoticeLevel::Warning, "有未保存改动，先 Ctrl+S 保存");
-                    return Task::none();
-                }
-                Task::perform(
-                    async move {
-                        match rfd::AsyncFileDialog::new().pick_folder().await {
-                            Some(handle) => Ok(handle.path().to_path_buf()),
-                            None => Err("未选择文件夹".into()),
-                        }
-                    },
-                    Message::VaultPicked,
-                )
-            }
+            Message::PickVault => self.gate(PendingAfterFlush::PickVault),
             Message::VaultPicked(Ok(path)) => {
                 // 展开集按仓库独立：切走时记忆当前仓库的集合，切回时恢复
                 if let Some(old) = self.vault_root.clone() {
@@ -738,21 +777,7 @@ impl App {
                 self.notify(NoticeLevel::Error, format!("读取目录失败：{e}"));
                 Task::none()
             }
-            Message::OpenFile(rel) => {
-                if self.dirty {
-                    self.notify(NoticeLevel::Warning, "有未保存改动，先 Ctrl+S 保存");
-                    return Task::none();
-                }
-                self.ui.last_note_file = Some(rel.clone());
-                // 打开文件复位只读：笔记视图按文件重新挂载，档位不跨文件延续
-                self.note_mode = NoteMode::Read;
-                // 清掉上一文件的解析产物：载入在途期间两档都不留旧内容
-                self.preview_doc = None;
-                self.edit_doc = None;
-                self.edit_meta.clear();
-                self.schedule_persist();
-                self.load_note(&rel)
-            }
+            Message::OpenFile(rel) => self.gate(PendingAfterFlush::OpenFile(rel)),
             Message::FileLoaded(gen, Ok((rel, text))) => {
                 if gen != self.epoch() || self.ui.last_note_file.as_deref() != Some(rel.as_str()) {
                     return Task::none();
@@ -790,49 +815,64 @@ impl App {
                         self.note_text = after;
                         self.dirty = true;
                         self.save_error = None;
+                        self.autosave_deadline = Some(Instant::now() + AUTOSAVE_DEBOUNCE);
                         self.refresh_edit();
                     }
                 }
                 Task::none()
             }
-            Message::Save => {
-                let Some(rel) = self.ui.last_note_file.clone() else {
-                    self.notify(NoticeLevel::Warning, "没有打开的文件");
-                    return Task::none();
-                };
-                // 仓库根在发起时冻结：写盘目标固定为打开该文件时的仓库。
-                let Ok(root) = self.vault.root() else {
-                    self.notify(NoticeLevel::Warning, "仓库未打开");
-                    return Task::none();
-                };
-                let gen = self.epoch();
-                let content = self.note_text.clone();
-                let saved = content.clone();
-                Task::perform(
-                    async move {
-                        let path = vault::safe_join(&root, &rel, false)?;
-                        vault::atomic_write(&path, &content)
-                    },
-                    move |result| Message::Saved(gen, saved, result),
-                )
+            Message::Save => self.submit_save(SaveReason::Manual),
+            Message::AutosaveTick => {
+                self.autosave_timer = false;
+                // 期限已到才触发；未到 = 输入推迟了期限，chain_autosave_timer 会按剩余时长续排
+                if self.autosave_deadline.is_some_and(|at| at <= Instant::now()) {
+                    self.autosave_deadline = None;
+                    if self.dirty && self.ui.last_note_file.is_some() {
+                        return self.submit_save(SaveReason::AutoSave);
+                    }
+                }
+                Task::none()
             }
-            Message::Saved(gen, saved, Ok(())) => {
+            Message::Saved(gen, saved, reason, Ok(())) => {
                 if gen != self.epoch() {
                     return Task::none();
                 }
                 self.save_error = None;
-                // 保存发起时冻结的内容与当前一致才算保存完成；在途期间的新编辑保持脏标记
-                if self.note_text == saved {
-                    self.dirty = false;
-                    self.notify(NoticeLevel::Success, "已保存");
-                } else {
-                    self.notify(NoticeLevel::Info, "保存完成，期间有新修改");
+                match reason {
+                    SaveReason::Flush(pending) => {
+                        // 保存发起时冻结的内容与当前一致才算落盘；期间又有输入则再收一轮
+                        if self.note_text == saved {
+                            self.dirty = false;
+                            self.proceed(pending)
+                        } else {
+                            self.submit_save(SaveReason::Flush(pending))
+                        }
+                    }
+                    SaveReason::Manual => {
+                        if self.note_text == saved {
+                            self.dirty = false;
+                            self.notify(NoticeLevel::Success, "已保存");
+                        } else {
+                            self.notify(NoticeLevel::Info, "保存完成，期间有新修改");
+                        }
+                        Task::none()
+                    }
+                    SaveReason::AutoSave => {
+                        if self.note_text == saved {
+                            self.dirty = false;
+                        }
+                        Task::none()
+                    }
                 }
-                Task::none()
             }
-            Message::Saved(_, _, Err(e)) => {
-                self.save_error = Some(e.clone());
-                self.notify(NoticeLevel::Error, format!("保存失败：{e}"));
+            Message::Saved(_, _, reason, Err(e)) => {
+                // flush 被保存失败打断：动作不放行（放行会丢弃未落盘内容），挂起输入保留待重试
+                if matches!(reason, SaveReason::Flush(_)) {
+                    self.notify(NoticeLevel::Error, format!("保存失败，操作未执行：{e}"));
+                } else {
+                    self.notify(NoticeLevel::Error, format!("保存失败：{e}"));
+                }
+                self.save_error = Some(e);
                 Task::none()
             }
             Message::NoteMode(mode) => {
@@ -899,22 +939,7 @@ impl App {
             }
             // × = 关文件留标签：摘下文件回到未打开态（tab 不动）
             Message::PanelTabFileClose | Message::DetachedTabFileClose => {
-                if self.dirty {
-                    self.notify(NoticeLevel::Warning, "有未保存改动，先 Ctrl+S 保存");
-                    return Task::none();
-                }
-                self.dismiss_popup();
-                self.ui.last_note_file = None;
-                self.note_text.clear();
-                self.source_editor = text_editor::Content::new();
-                self.edit.reset(0);
-                self.edit_doc = None;
-                self.edit_meta.clear();
-                self.preview_doc = None;
-                self.dirty = false;
-                self.save_error = None;
-                self.schedule_persist();
-                Task::none()
+                self.gate(PendingAfterFlush::CloseFileTab)
             }
             Message::PanelTabPress { panel_id, tab_id } => {
                 self.tab_press = Some(TabPress {
@@ -1103,7 +1128,18 @@ impl App {
                     RenameTarget::Layout(id) => self.apply(LayoutOp::RenameLayout { id, name: r.value }),
                     RenameTarget::Scene(id) => self.apply(LayoutOp::RenameScene { id, name: r.value }),
                     RenameTarget::File(_) | RenameTarget::Folder(_) | RenameTarget::Draft { .. } => {
-                        self.commit_file_rename(r)
+                        // 改名命中打开中的笔记（含其祖先目录）：挂起输入先落盘，防在途写在旧路径重建旧文件
+                        let hits_open = self.ui.last_note_file.as_deref().is_some_and(|f| match &r.target {
+                            RenameTarget::File(old) => f == old,
+                            RenameTarget::Folder(dir) => f == dir || f.starts_with(&format!("{dir}/")),
+                            RenameTarget::Draft { .. } => false,
+                            _ => false,
+                        });
+                        if hits_open {
+                            self.gate(PendingAfterFlush::RenameFile(r))
+                        } else {
+                            self.commit_file_rename(r)
+                        }
                     }
                 }
             }
@@ -1486,7 +1522,7 @@ impl App {
                 Task::none()
             }
             Message::DeleteEntry(rel, is_dir) => {
-                // 删除命中打开中的笔记且有待落盘输入：拒绝，防未保存内容被静默清空
+                // 删除命中打开中的笔记：挂起输入先落盘（防未保存内容被静默清空）
                 let hits_open = self.ui.last_note_file.as_deref().is_some_and(|f| {
                     if is_dir {
                         f == rel || f.starts_with(&format!("{rel}/"))
@@ -1494,13 +1530,13 @@ impl App {
                         f == rel
                     }
                 });
-                if hits_open && self.dirty {
-                    self.notify(NoticeLevel::Warning, "有未保存改动，先 Ctrl+S 保存");
-                    return Task::none();
+                if hits_open {
+                    self.gate(PendingAfterFlush::Delete { rel, is_dir })
+                } else {
+                    self.dismiss_popup();
+                    self.delete_confirm = None;
+                    self.delete_entry(&rel, is_dir)
                 }
-                self.dismiss_popup();
-                self.delete_confirm = None;
-                self.delete_entry(&rel, is_dir)
             }
             Message::RevealVault => {
                 let Some(root) = self.vault.root().ok() else { return Task::none() };
@@ -2014,6 +2050,96 @@ impl App {
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 
+    /// 脏时先收尾保存挂起输入再放行动作；不脏直接执行。
+    fn gate(&mut self, pending: PendingAfterFlush) -> Task<Message> {
+        if self.dirty {
+            return self.submit_save(SaveReason::Flush(pending));
+        }
+        self.proceed(pending)
+    }
+
+    /// flush 放行后的动作执行体（gate 保证挂起输入已落盘）。
+    fn proceed(&mut self, pending: PendingAfterFlush) -> Task<Message> {
+        match pending {
+            PendingAfterFlush::OpenFile(rel) => self.open_file(&rel),
+            PendingAfterFlush::PickVault => self.start_pick_vault(),
+            PendingAfterFlush::CloseMain(id) => window::close(id),
+            PendingAfterFlush::CloseFileTab => self.close_file_tab(),
+            PendingAfterFlush::OpenLink(href) => self.open_link_inner(href),
+            PendingAfterFlush::Delete { rel, is_dir } => {
+                self.dismiss_popup();
+                self.delete_confirm = None;
+                self.delete_entry(&rel, is_dir)
+            }
+            PendingAfterFlush::RenameFile(r) => self.commit_file_rename(r),
+        }
+    }
+
+    /// 提交一次笔记写盘：仓库根与内容在发起时冻结，写盘经 core 串行队列按提交序执行。
+    fn submit_save(&mut self, reason: SaveReason) -> Task<Message> {
+        let Some(rel) = self.ui.last_note_file.clone() else {
+            self.notify(NoticeLevel::Warning, "没有打开的文件");
+            return Task::none();
+        };
+        let Ok(root) = self.vault.root() else {
+            self.notify(NoticeLevel::Warning, "仓库未打开");
+            return Task::none();
+        };
+        let gen = self.epoch();
+        let content = self.note_text.clone();
+        let saved = content.clone();
+        let queue = self.vault.writes.clone();
+        Task::perform(
+            async move {
+                let path = vault::safe_join(&root, &rel, false)?;
+                queue.write(path, content).await
+            },
+            move |result| Message::Saved(gen, saved, reason, result),
+        )
+    }
+
+    /// 打开文件（脏拦截已由 gate 处理）：复位只读并清掉上一文件的解析产物。
+    fn open_file(&mut self, rel: &str) -> Task<Message> {
+        self.ui.last_note_file = Some(rel.to_string());
+        // 打开文件复位只读：笔记视图按文件重新挂载，档位不跨文件延续
+        self.note_mode = NoteMode::Read;
+        // 清掉上一文件的解析产物：载入在途期间两档都不留旧内容
+        self.preview_doc = None;
+        self.edit_doc = None;
+        self.edit_meta.clear();
+        self.schedule_persist();
+        self.load_note(rel)
+    }
+
+    /// 系统文件夹选择器（切仓库入口，脏拦截已由 gate 处理）。
+    fn start_pick_vault(&mut self) -> Task<Message> {
+        Task::perform(
+            async {
+                match rfd::AsyncFileDialog::new().pick_folder().await {
+                    Some(handle) => Ok(handle.path().to_path_buf()),
+                    None => Err("未选择文件夹".into()),
+                }
+            },
+            Message::VaultPicked,
+        )
+    }
+
+    /// 关闭打开的文件（×：摘下文件、标签保留回未打开态；脏拦截已由 gate 处理）。
+    fn close_file_tab(&mut self) -> Task<Message> {
+        self.dismiss_popup();
+        self.ui.last_note_file = None;
+        self.note_text.clear();
+        self.source_editor = text_editor::Content::new();
+        self.edit.reset(0);
+        self.edit_doc = None;
+        self.edit_meta.clear();
+        self.preview_doc = None;
+        self.dirty = false;
+        self.save_error = None;
+        self.schedule_persist();
+        Task::none()
+    }
+
     fn active_tree(&self) -> Option<layout::LayoutNode> {
         Some(layout::active_layout(&self.ui).tree)
     }
@@ -2431,6 +2557,7 @@ impl App {
     fn after_edit(&mut self) {
         self.refresh_edit();
         self.sync_active();
+        self.autosave_deadline = Some(Instant::now() + AUTOSAVE_DEBOUNCE);
     }
 
     /// 需要回显源码的块：光标所在块 + 选区锚点所在块（无选区时不揭示锚点块）。
@@ -2774,36 +2901,37 @@ impl App {
     /// 打开链接：外链走系统浏览器，仓库路径/wiki 命中即打开笔记。
     fn open_link(&mut self, href: &str, form: LinkForm) -> Task<Message> {
         let decoded = percent_decode(href);
-        let path = decoded.split('#').next().unwrap_or("").trim().to_string();
         match form {
             LinkForm::External => {
                 open_external(&decoded);
                 Task::none()
             }
             LinkForm::Path | LinkForm::Wiki | LinkForm::Create => {
-                if self.dirty {
-                    self.notify(NoticeLevel::Warning, "有未保存改动，先 Ctrl+S 保存");
-                    return Task::none();
-                }
-                match self.resolve_note_path(&path) {
-                    Some(rel) => {
-                        self.ui.last_note_file = Some(rel.clone());
-                        // 与文件树点击同口径：打开即复位只读
-                        self.note_mode = NoteMode::Read;
-                        self.preview_doc = None;
-                        self.edit_doc = None;
-                        self.edit_meta.clear();
-                        self.schedule_persist();
-                        self.notify(NoticeLevel::Success, "打开链接");
-                        self.load_note(&rel)
-                    }
-                    None => {
-                        self.notify(NoticeLevel::Error, format!("未找到笔记：{path}"));
-                        Task::none()
-                    }
-                }
+                self.gate(PendingAfterFlush::OpenLink(decoded))
             }
             LinkForm::Plain => Task::none(),
+        }
+    }
+
+    /// 打开仓库内笔记链接（flush 放行后执行；落点以磁盘事实为准）。
+    fn open_link_inner(&mut self, decoded: String) -> Task<Message> {
+        let path = decoded.split('#').next().unwrap_or("").trim().to_string();
+        match self.resolve_note_path(&path) {
+            Some(rel) => {
+                self.ui.last_note_file = Some(rel.clone());
+                // 与文件树点击同口径：打开即复位只读
+                self.note_mode = NoteMode::Read;
+                self.preview_doc = None;
+                self.edit_doc = None;
+                self.edit_meta.clear();
+                self.schedule_persist();
+                self.notify(NoticeLevel::Success, "打开链接");
+                self.load_note(&rel)
+            }
+            None => {
+                self.notify(NoticeLevel::Error, format!("未找到笔记：{path}"));
+                Task::none()
+            }
         }
     }
 

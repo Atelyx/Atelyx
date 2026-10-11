@@ -151,6 +151,7 @@ pub enum RenameTarget {
     Draft { dir: String, kind: DraftKind },
 }
 
+#[derive(Clone, Debug)]
 pub struct RenameState {
     pub target: RenameTarget,
     pub value: String,
