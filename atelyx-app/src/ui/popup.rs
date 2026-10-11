@@ -1,5 +1,5 @@
 //! 统一弹层壳：锚点定位 + 视口钳制/翻转 + 外点关闭的窗口内覆盖层。
-//! 窗口根部 Stack 叠三层（内容/全窗捕获层/浮层），Esc 由应用层键盘订阅路由。
+//! 覆盖元素由调用方作为追加子叠在窗口内容 Stack 上，Esc 由应用层键盘订阅路由。
 
 use iced::widget::{container, mouse_area, space, stack};
 use iced::{Color, Element, Length, Padding, Point, Size, border, widget::container::Style};
@@ -50,12 +50,12 @@ const SHADOW_PAD_LEFT: f32 = 4.0;
 const SHADOW_PAD_TOP: f32 = 2.0;
 const SHADOW_PAD_BOTTOM: f32 = 14.0;
 
-/// 把弹层叠在窗口内容之上：`background` = 该窗口的常规内容元素。
+/// 弹层覆盖元素（全窗捕获层 + 定位弹层卡）：由调用方作为覆盖子叠在窗口内容之上
+/// （内容恒为 Stack 第 0 子，覆盖显隐不重建内容子树——滚动位置与输入焦点得以保留）。
 ///
 /// 阴影用「外扩容器露出的半透明黑底环」近似（iced 无 box-shadow）；
 /// 定位偏移 = 弹层坐标回退外扩量，两处必须同步（见常量）。
-pub fn layer<'a>(
-    background: Element<'a, Message>,
+pub fn overlay<'a>(
     geom: PopupGeom,
     content: Element<'a, Message>,
     on_dismiss: Message,
@@ -86,7 +86,7 @@ pub fn layer<'a>(
         .align_x(iced::alignment::Horizontal::Left)
         .align_y(iced::alignment::Vertical::Top)
         .padding(Padding::ZERO.left(geom.x - SHADOW_PAD_LEFT).top(geom.y - SHADOW_PAD_TOP));
-    stack![background, capture, positioned]
+    stack![capture, positioned]
         .width(Length::Fill)
         .height(Length::Fill)
         .into()

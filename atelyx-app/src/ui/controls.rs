@@ -268,10 +268,14 @@ fn h_divider_with(color: iced::Color) -> Element<'static, Message> {
         .into()
 }
 
+/// 行内重命名输入的固定部件 id（同窗口同时至多一个重命名会话；发起侧据此挂焦点任务）。
+pub const INLINE_RENAME_INPUT: &str = "inline-rename-input";
+
 /// 行内输入（重命名等场景：透明底、提交走 on_submit；Escape 取消由应用层键盘路由承担）。
 /// `press_inside` = 输入行被按下的上报消息：应用层全局按压据此区分「点在输入行内」
 /// 与「点在外面」（失焦提交的判据；widget 消息先于全局按压消息入队，同帧标志可靠）。
 pub fn inline_input(
+    id: iced::widget::Id,
     placeholder: &str,
     value: &str,
     width: f32,
@@ -280,6 +284,7 @@ pub fn inline_input(
     press_inside: Message,
 ) -> Element<'static, Message> {
     let input = text_input(placeholder, value)
+        .id(id)
         .size(pal::FS_CAPTION)
         .padding(Padding::ZERO.horizontal(6.0).vertical(2.0))
         .width(Length::Fixed(width))

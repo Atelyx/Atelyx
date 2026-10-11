@@ -1,6 +1,8 @@
 //! Markdown 只读渲染：块规格 → iced 控件（阅读面，不含编辑态与源码标记）。
 //! 块间距 = 源码空行数 × 行高（块级不设外边距）；公式与 raw HTML 降级源码文本，
-//! 图片以替代文字占位，链接只作样式。
+//! 独立成段的图片按块渲染（句柄由应用层载入，未载入或行内位置以替代文字占位），链接只作样式。
+
+use std::collections::HashMap;
 
 use atelyx_core::markdown::{
     parse_inline, parse_markdown, InlineSpan, LinkForm, MarkdownBlock, MarkdownDocument,
@@ -13,6 +15,9 @@ use iced::widget::{
 use iced::{Border, Color, Element, Font, Length, Padding};
 
 use crate::Message;
+
+/// 已载入的图片句柄（key = 图片 src 原文；载入与缓存管理在应用层，渲染只读）。
+pub type ImageHandles = HashMap<String, iced::widget::image::Handle>;
 
 /// 正文基准字号与行高倍数（空行行的间距按此折算；编辑面空行预编辑同源）。
 pub(crate) const BASE_SIZE: f32 = 14.0;
@@ -52,29 +57,33 @@ pub enum SourceKind {
 }
 
 /// 块渲染共享入口：`interactive` 为真时链接可点、任务框可勾（编辑档）。
+/// `images` = 已载入的图片句柄（独立成段的图片按块渲染；其余占位）。
 pub fn block_chunks<'a>(
     source: &'a str,
     blocks: &'a [MarkdownBlock],
     theme: &iced::Theme,
     interactive: bool,
+    images: &'a ImageHandles,
 ) -> Vec<BlockChunk<'a>> {
-    let render = Render { pal: Palette::from_theme(theme), opts: link_options(), interactive };
+    let render = Render { pal: Palette::from_theme(theme), opts: link_options(), interactive, images };
     render.chunks(source, blocks)
 }
 
-/// 阅读面入口：正文列放进滚动容器。
-pub fn document_view<'a>(doc: &'a MarkdownDocument, theme: &iced::Theme) -> Element<'a, Message> {
+/// 阅读面入口：正文列（不含滚动容器——由视图层统一包一层，档位切换时滚动位置随
+/// 同一 scrollable 状态保留）。
+pub fn document_view<'a>(
+    doc: &'a MarkdownDocument,
+    theme: &iced::Theme,
+    images: &'a ImageHandles,
+) -> Element<'a, Message> {
     let mut body = column![].width(Length::Fill).spacing(0);
-    for chunk in block_chunks(&doc.source, &doc.blocks, theme, false) {
+    for chunk in block_chunks(&doc.source, &doc.blocks, theme, false, images) {
         if chunk.gap_before > 0 {
             body = body.push(gap(chunk.gap_before));
         }
         body = body.push(chunk.element);
     }
-    scrollable(container(body).width(Length::Fill).padding(16.0))
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+    container(body).width(Length::Fill).padding(16.0).into()
 }
 
 /// 编辑面块元数据。
@@ -245,14 +254,15 @@ fn block_source_style(block: &MarkdownBlock) -> SourceKind {
     }
 }
 
-struct Render {
+struct Render<'a> {
     pal: Palette,
     opts: ParseOptions,
     /// 链接可点、任务框可勾（编辑档）；只读档为假。
     interactive: bool,
+    images: &'a ImageHandles,
 }
 
-impl Render {
+impl Render<'_> {
     /// 块序列：每块附源区间与前置空行数（间距由调用方按空行数补行高）。
     fn chunks<'a>(&self, source: &'a str, blocks: &'a [MarkdownBlock]) -> Vec<BlockChunk<'a>> {
         let mut out = Vec::with_capacity(blocks.len());
@@ -298,13 +308,19 @@ impl Render {
                     iced::alignment::Horizontal::Left,
                 )
             }
-            MarkdownBlock::Paragraph { inline, .. } => rich(
-                self.spans(source, inline, TextStyle::base()),
-                BASE_SIZE,
-                LINE_HEIGHT,
-                None,
-                iced::alignment::Horizontal::Left,
-            ),
+            MarkdownBlock::Paragraph { inline, .. } => {
+                if let Some(InlineSpan::Image { src, alt, width, height, .. }) = image_only(inline) {
+                    self.image_block(src, alt, width.as_deref(), height.as_deref())
+                } else {
+                    rich(
+                        self.spans(source, inline, TextStyle::base()),
+                        BASE_SIZE,
+                        LINE_HEIGHT,
+                        None,
+                        iced::alignment::Horizontal::Left,
+                    )
+                }
+            }
             MarkdownBlock::Blockquote { callout, children, .. } => {
                 self.blockquote(source, callout.as_deref(), children)
             }
@@ -397,18 +413,14 @@ impl Render {
         item: &'a MarkdownListItem,
     ) -> Element<'a, Message> {
         let raw = &source[item.from..item.to];
-        let (marker_len, ordinal) = item_marker(raw);
-        let content_from = item.from + marker_len;
+        let (_, ordinal) = item_marker(raw);
         // 首段内容止于第一个嵌套子块起点（项内后续段落等归 children）
-        let content_end = item.children.first().map(block_from).unwrap_or(item.to);
-        let by = content_end.max(content_from);
-        let content_to = content_from + source[content_from..by].trim_end().len();
-
-        // 项区间跨引用块时续行带 `>` 前缀：剥掉后按独立区间解析（阅读面不依赖源偏移）
-        let content = strip_quote_marks(&source[content_from..content_to]);
+        let content = item_content(source, item);
         let spans = parse_inline(&content, 0, content.len(), &self.opts);
         let mut body = column![].width(Length::Fill).spacing(0);
-        if !spans.is_empty() {
+        if let Some(InlineSpan::Image { src, alt, width, height, .. }) = image_only(&spans) {
+            body = body.push(self.image_block(src, alt, width.as_deref(), height.as_deref()));
+        } else if !spans.is_empty() {
             body = body.push(rich(
                 self.spans(&content, &spans, TextStyle::base()),
                 BASE_SIZE,
@@ -507,7 +519,8 @@ impl Render {
         let columns = (0..cols).map(|i| {
             let head = self.cell(source, header.get(i), aligns.get(i), true);
             // 单元格生成器随行闭包独立持有调色板与解析选项，不借用 self
-            let cells = Render { pal, opts: link_options(), interactive: self.interactive };
+            let images = self.images;
+            let cells = Render { pal, opts: link_options(), interactive: self.interactive, images };
             table::column(head, move |row: usize| {
                 let cell = rows.get(row).and_then(|r| r.get(i));
                 cells.cell(source, cell, aligns.get(i), false)
@@ -754,6 +767,41 @@ impl Render {
         }
     }
 
+    /// 图片块：句柄已载入 → image 部件（`|W` / `|WxH` 尺寸语法生效，缺省自然尺寸且
+    /// 不超出面板宽）；载入中/失败回落替代文字占位。
+    fn image_block<'a>(
+        &self,
+        src: &str,
+        alt: &str,
+        width: Option<&str>,
+        height: Option<&str>,
+    ) -> Element<'a, Message> {
+        let name = if alt.is_empty() { src } else { alt };
+        match self.images.get(src) {
+            Some(handle) => {
+                let mut img = iced::widget::image(handle.clone());
+                if let Some(w) = parse_px(width) {
+                    img = img.width(Length::Fixed(w));
+                }
+                if let Some(h) = parse_px(height) {
+                    img = img.height(Length::Fixed(h));
+                }
+                container(img).width(Length::Fill).into()
+            }
+            None => {
+                let muted = self.pal.muted;
+                container(
+                    text(format!("[图片：{name}]"))
+                        .size(BASE_SIZE)
+                        .font(Font { style: iced::font::Style::Italic, ..Font::DEFAULT })
+                        .color(muted),
+                )
+                .width(Length::Fill)
+                .into()
+            }
+        }
+    }
+
     fn leaf<'a>(&self, content: String, st: TextStyle) -> Span<'a, LinkTarget, Font> {
         let mut span = Span::new(content).font(st.font).strikethrough(st.strike);
         if let Some(color) = st.color {
@@ -769,6 +817,74 @@ impl Render {
             span = span.underline(true);
         }
         span
+    }
+}
+
+/// 段落/列表项内容是否「仅一张图」（忽略纯空白文本片段）：是则返回该图片片段。
+/// 行内图片（图文混排）不按块渲染，保持替代文字占位。
+fn image_only(inline: &[InlineSpan]) -> Option<&InlineSpan> {
+    let mut found: Option<&InlineSpan> = None;
+    for span in inline {
+        if matches!(span, InlineSpan::Text { text, .. } if text.trim().is_empty()) {
+            continue;
+        }
+        if !matches!(span, InlineSpan::Image { .. }) || found.is_some() {
+            return None;
+        }
+        found = Some(span);
+    }
+    found
+}
+
+/// 尺寸语法取值（`|W` / `|WxH` 的 W/H）：正的有限数值才生效，超宽由布局钳到面板内。
+fn parse_px(value: Option<&str>) -> Option<f32> {
+    value
+        .and_then(|s| s.trim().parse::<f32>().ok())
+        .filter(|n| n.is_finite() && *n > 0.0)
+}
+
+/// 列表项首段内容文本：剥标记与引用前缀（项区间跨引用块时续行带 `>`），
+/// 止于第一个嵌套子块起点（项内后续段落归 children）。渲染与图片收集共用。
+fn item_content(source: &str, item: &MarkdownListItem) -> String {
+    let raw = &source[item.from..item.to];
+    let (marker_len, _) = item_marker(raw);
+    let content_from = item.from + marker_len;
+    let content_end = item.children.first().map(block_from).unwrap_or(item.to);
+    let by = content_end.max(content_from);
+    let content_to = content_from + source[content_from..by].trim_end().len();
+    strip_quote_marks(&source[content_from..content_to])
+}
+
+/// 收集文档中按块渲染的图片 src（图片段落与列表项图片内容；行内图片不收集不载入）。
+/// 供应用层发起按需载入；与渲染的块级图片判定同源。
+pub fn collect_image_srcs(source: &str, blocks: &[MarkdownBlock]) -> Vec<String> {
+    let opts = link_options();
+    let mut out = Vec::new();
+    collect_walk(source, &opts, blocks, &mut out);
+    out
+}
+
+fn collect_walk(source: &str, opts: &ParseOptions, blocks: &[MarkdownBlock], out: &mut Vec<String>) {
+    for block in blocks {
+        match block {
+            MarkdownBlock::Paragraph { inline, .. } => {
+                if let Some(InlineSpan::Image { src, .. }) = image_only(inline) {
+                    out.push(src.clone());
+                }
+            }
+            MarkdownBlock::Blockquote { children, .. } => collect_walk(source, opts, children, out),
+            MarkdownBlock::List { items, .. } => {
+                for item in items {
+                    let content = item_content(source, item);
+                    let spans = parse_inline(&content, 0, content.len(), opts);
+                    if let Some(InlineSpan::Image { src, .. }) = image_only(&spans) {
+                        out.push(src.clone());
+                    }
+                    collect_walk(source, opts, &item.children, out);
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -1000,5 +1116,45 @@ mod tests {
             let meta = block_meta(&doc.source, &doc.blocks);
             assert_eq!(meta.first().map(|m| m.exact), Some(exact), "src = {src}");
         }
+    }
+
+    fn paragraph_image(src: &str) -> Option<InlineSpan> {
+        let doc = parse_markdown(src, &link_options());
+        let MarkdownBlock::Paragraph { inline, .. } = doc.blocks.first()? else { return None };
+        image_only(inline).cloned()
+    }
+
+    #[test]
+    fn image_only_matches_standalone_images() {
+        // 独立图片段（含尾随空白）命中；尺寸语法剥离后 src 纯净
+        let span = paragraph_image("![封面](pic.png)").expect("独立图片应命中");
+        assert!(matches!(&span, InlineSpan::Image { src, .. } if src == "pic.png"));
+        assert!(paragraph_image("![封面](pic.png) ").is_some());
+        assert!(paragraph_image("![图|100x50](pic.png)").is_some());
+        // 图文混排与纯文本不命中
+        assert!(paragraph_image("看这张 ![图](pic.png)").is_none());
+        assert!(paragraph_image("普通段落").is_none());
+        // 多张图不命中
+        assert!(paragraph_image("![a](1.png)![b](2.png)").is_none());
+    }
+
+    #[test]
+    fn parse_px_accepts_positive_numbers_only() {
+        assert_eq!(parse_px(Some("100")), Some(100.0));
+        assert_eq!(parse_px(Some(" 12.5 ")), Some(12.5));
+        assert_eq!(parse_px(Some("0")), None);
+        assert_eq!(parse_px(Some("-3")), None);
+        assert_eq!(parse_px(Some("abc")), None);
+        assert_eq!(parse_px(None), None);
+    }
+
+    #[test]
+    fn collect_image_srcs_covers_block_positions() {
+        let src = "![a](p1.png)\n\n> ![b](p2.png)\n\n- ![c](p3.png)\n- 文字 ![d](p4.png)\n\n行内 ![e](p5.png) 混排";
+        let doc = parse_markdown(src, &link_options());
+        assert_eq!(
+            collect_image_srcs(&doc.source, &doc.blocks),
+            vec!["p1.png".to_string(), "p2.png".to_string(), "p3.png".to_string()]
+        );
     }
 }
