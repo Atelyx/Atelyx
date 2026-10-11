@@ -498,7 +498,7 @@ fn titlebar<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, Message> 
     .direction(scrollable::Direction::Horizontal(scrollable::Scrollbar::new().width(0.0).scroller_width(0.0)))
     .on_scroll(|v| Message::TabStripScrolled(None, v.absolute_offset().x))
     .width(Length::Shrink)
-    .height(Length::Fill);
+    .height(Length::Shrink);
 
     // 场景选择器
     let scene_name = app.active_scene().map(|s| s.name.clone()).unwrap_or_default();
@@ -632,9 +632,15 @@ fn layout_tab(
             .color(text_color)
             .into()
     };
-    let content = column![
-        text_area,
-        // 金条：左右缩进 8、圆头，贴 tab 底缘绘制
+    // 列外套一层撑满的容器，列内的 Fill 才拿到真实高度
+    let content = container(column![
+        // 文字左右内边距即 tab 底色盒的留白，取对称值才不偏；宽度保持 Shrink——
+        // tab 条 scrollable 为 Shrink，列在交叉轴被压缩时 Fill 宽会被算成 0 宽
+        container(text_area)
+            .height(Length::Fill)
+            .padding(Padding::ZERO.horizontal(10.0))
+            .align_y(Vertical::Center),
+        // 金条：圆头，贴 tab 底缘；定高才会延迟到宽度已解析的那轮布局
         container(
             container(space())
                 .width(Length::Fill)
@@ -646,12 +652,13 @@ fn layout_tab(
                 }),
         )
         .width(Length::Fill)
-        .padding(Padding::ZERO.horizontal(8.0)),
-    ];
+        .height(Length::Fixed(2.0))
+        .padding(Padding::ZERO.horizontal(2.0)),
+    ])
+    .height(Length::Fill);
 
     let underline = container(content)
         .height(Length::Fixed(28.0))
-        .padding(Padding::ZERO.left(12.0).right(8.0))
         .style(move |_t| Style {
             background: highlighted.then_some(pal::BG_TERTIARY.into()),
             border: border::rounded(pal::RADIUS_SM),
@@ -949,14 +956,10 @@ fn panel_view<'a>(
                 background: Some(pal::BG_SECONDARY.into()),
                 ..Style::default()
             }),
-        container(space())
-            .width(Length::Fill)
+        // 底边线贴底 1px：container 背景铺满自身 bounds，靠上内边距只会把整块染成线色
+        container(hline())
             .height(Length::Fill)
-            .padding(Padding::ZERO.top(UiMetrics::TAB_BAR_H as u16 as f32 - 1.0))
-            .style(|_t| Style {
-                background: Some(pal::BORDER.into()),
-                ..Style::default()
-            }),
+            .align_y(Vertical::Bottom),
         row![
             scrollable(container(row![tab_row]).padding(Padding::ZERO.left(UiMetrics::HEADER_INSET)))
                 .direction(scrollable::Direction::Horizontal(
@@ -970,7 +973,8 @@ fn panel_view<'a>(
                 .height(Length::Fill),
             right,
         ]
-        .height(Length::Fixed(UiMetrics::TAB_BAR_H)),
+        .height(Length::Fixed(UiMetrics::TAB_BAR_H))
+        .align_y(Vertical::Center),
     ]
     .width(Length::Fill)
     .height(Length::Fixed(UiMetrics::TAB_BAR_H));
@@ -1480,20 +1484,17 @@ pub fn detached_view<'a>(
             background: Some(pal::BG_SECONDARY.into()),
             ..Style::default()
         }),
-        container(space())
-            .width(Length::Fill)
+        // 底边线贴底 1px：container 背景铺满自身 bounds，靠上内边距只会把整块染成线色
+        container(hline())
             .height(Length::Fill)
-            .padding(Padding::ZERO.top(UiMetrics::TAB_BAR_H as u16 as f32 - 1.0))
-            .style(|_t| Style {
-                background: Some(pal::BORDER.into()),
-                ..Style::default()
-            }),
+            .align_y(Vertical::Bottom),
         row![
             container(tab_row).padding(Padding::ZERO.left(UiMetrics::HEADER_INSET)),
             space().width(Length::Fill),
             right,
         ]
-        .height(Length::Fixed(UiMetrics::TAB_BAR_H)),
+        .height(Length::Fixed(UiMetrics::TAB_BAR_H))
+        .align_y(Vertical::Center),
     ]
     .width(Length::Fill)
     .height(Length::Fixed(UiMetrics::TAB_BAR_H));
