@@ -1,0 +1,1377 @@
+{
+  "cases": [
+    {
+      "name": "kitchen-sink",
+      "source": "---\ntitle: Hello\ntags: [a, b]\ndone: true\ncount: 3\ndue: 2024-01-15\nempty:\n---\n\n# 正文\n",
+      "parse": {
+        "data": {
+          "t": "map",
+          "v": [
+            [
+              "title",
+              {
+                "t": "str",
+                "v": "Hello"
+              }
+            ],
+            [
+              "tags",
+              {
+                "t": "seq",
+                "v": [
+                  {
+                    "t": "str",
+                    "v": "a"
+                  },
+                  {
+                    "t": "str",
+                    "v": "b"
+                  }
+                ]
+              }
+            ],
+            [
+              "done",
+              {
+                "t": "bool",
+                "v": true
+              }
+            ],
+            [
+              "count",
+              {
+                "t": "num",
+                "v": 3
+              }
+            ],
+            [
+              "due",
+              {
+                "t": "date",
+                "v": "2024-01-15"
+              }
+            ],
+            [
+              "empty",
+              {
+                "t": "null"
+              }
+            ]
+          ]
+        },
+        "body": "\n# 正文\n",
+        "fmPrefix": "---\ntitle: Hello\ntags: [a, b]\ndone: true\ncount: 3\ndue: 2024-01-15\nempty:\n---\n",
+        "ok": true
+      }
+    },
+    {
+      "name": "tags-inline",
+      "source": "---\ntags: [a, b]\n---\nbody\n",
+      "parse": {
+        "data": {
+          "t": "map",
+          "v": [
+            [
+              "tags",
+              {
+                "t": "seq",
+                "v": [
+                  {
+                    "t": "str",
+                    "v": "a"
+                  },
+                  {
+                    "t": "str",
+                    "v": "b"
+                  }
+                ]
+              }
+            ]
+          ]
+        },
+        "body": "body\n",
+        "fmPrefix": "---\ntags: [a, b]\n---\n",
+        "ok": true
+      }
+    },
+    {
+      "name": "tags-block-list",
+      "source": "---\ntags:\n  - alpha\n  - beta\n---\nbody",
+      "parse": {
+        "data": {
+          "t": "map",
+          "v": [
+            [
+              "tags",
+              {
+                "t": "seq",
+                "v": [
+                  {
+                    "t": "str",
+                    "v": "alpha"
+                  },
+                  {
+                    "t": "str",
+                    "v": "beta"
+                  }
+                ]
+              }
+            ]
+          ]
+        },
+        "body": "body",
+        "fmPrefix": "---\ntags:\n  - alpha\n  - beta\n---\n",
+        "ok": true
+      }
+    },
+    {
+      "name": "tags-scalar",
+      "source": "---\ntags: foo\n---\n",
+      "parse": {
+        "data": {
+          "t": "map",
+          "v": [
+            [
+              "tags",
+              {
+                "t": "str",
+                "v": "foo"
+              }
+            ]
+          ]
+        },
+        "body": "",
+        "fmPrefix": "---\ntags: foo\n---\n",
+        "ok": true
+      }
+    },
+    {
+      "name": "no-frontmatter",
+      "source": "# 正文\n内容 --- 分隔\n",
+      "parse": {
+        "data": {
+          "t": "map",
+          "v": []
+        },
+        "body": "# 正文\n内容 --- 分隔\n",
+        "fmPrefix": "",
+        "ok": true
+      }
+    },
+    {
+      "name": "hr-only",
+      "source": "---\n\n正文横隔条\n",
+      "parse": {
+        "data": {
+          "t": "str",
+          "v": "正文横隔条"
+        },
+        "body": "---\n\n正文横隔条\n",
+        "fmPrefix": "",
+        "ok": true
+      }
+    },
+    {
+      "name": "unclosed",
+      "source": "---\ntitle: 未闭合\nbody\n",
+      "parse": {
+        "data": {
+          "t": "map",
+          "v": []
+        },
+        "body": "---\ntitle: 未闭合\nbody\n",
+        "fmPrefix": "",
+        "ok": false
+      }
+    },
+    {
+      "name": "empty-block",
+      "source": "---\n---\nbody\n",
+      "parse": {
+        "data": {
+          "t": "map",
+          "v": []
+        },
+        "body": "body\n",
+        "fmPrefix": "---\n---\n",
+        "ok": true
+      }
+    },
+    {
+      "name": "empty-block-no-body",
+      "source": "---\n---\n",
+      "parse": {
+        "data": {
+          "t": "map",
+          "v": []
+        },
+        "body": "",
+        "fmPrefix": "---\n---\n",
+        "ok": true
+      }
+    },
+    {
+      "name": "crlf",
+      "source": "---\r\ntitle: 你好\r\n---\r\nbody\r\n",
+      "parse": {
+        "data": {
+          "t": "map",
+          "v": [
+            [
+              "title",
+              {
+                "t": "str",
+                "v": "你好"
+              }
+            ]
+          ]
+        },
+        "body": "body\r\n",
+        "fmPrefix": "---\r\ntitle: 你好\r\n---\r\n",
+        "ok": true
+      }
+    },
+    {
+      "name": "crlf-empty",
+      "source": "---\r\n---\r\nx\r\n",
+      "parse": {
+        "data": {
+          "t": "map",
+          "v": []
+        },
+        "body": "x\r\n",
+        "fmPrefix": "---\r\n---\r\n",
+        "ok": true
+      }
+    },
+    {
+      "name": "fm-then-hr-in-body",
+      "source": "---\ntitle: T\n---\n\n---\n\n正文\n",
+      "parse": {
+        "data": {
+          "t": "map",
+          "v": [
+            [
+              "title",
+              {
+                "t": "str",
+                "v": "T"
+              }
+            ]
+          ]
+        },
+        "body": "\n---\n\n正文\n",
+        "fmPrefix": "---\ntitle: T\n---\n",
+        "ok": true
+      }
+    },
+    {
+      "name": "colon-in-value",
+      "source": "---\ntitle: a: b\n---\n",
+      "parse": {
+        "data": {
+          "t": "map",
+          "v": []
+        },
+        "body": "---\ntitle: a: b\n---\n",
+        "fmPrefix": "",
+        "ok": false
+      }
+    },
+    {
+      "name": "quoted-strings",
+      "source": "---\na: \"yes\"\nb: '123'\nc: \"null\"\nd: \"带 空格\"\n---\n",
+      "parse": {
+        "data": {
+          "t": "map",
+          "v": [
+            [
+              "a",
+              {
+                "t": "str",
+                "v": "yes"
+              }
+            ],
+            [
+              "b",
+              {
+                "t": "str",
+                "v": "123"
+              }
+            ],
+            [
+              "c",
+              {
+                "t": "str",
+                "v": "null"
+              }
+            ],
+            [
+              "d",
+              {
+                "t": "str",
+                "v": "带 空格"
+              }
+            ]
+          ]
+        },
+        "body": "",
+        "fmPrefix": "---\na: \"yes\"\nb: '123'\nc: \"null\"\nd: \"带 空格\"\n---\n",
+        "ok": true
+      }
+    },
+    {
+      "name": "numbers",
+      "source": "---\ni: 42\nf: 3.14\nneg: -7\nexp: 1e3\n---\n",
+      "parse": {
+        "data": {
+          "t": "map",
+          "v": [
+            [
+              "i",
+              {
+                "t": "num",
+                "v": 42
+              }
+            ],
+            [
+              "f",
+              {
+                "t": "num",
+                "v": 3.14
+              }
+            ],
+            [
+              "neg",
+              {
+                "t": "num",
+                "v": -7
+              }
+            ],
+            [
+              "exp",
+              {
+                "t": "num",
+                "v": 1000
+              }
+            ]
+          ]
+        },
+        "body": "",
+        "fmPrefix": "---\ni: 42\nf: 3.14\nneg: -7\nexp: 1e3\n---\n",
+        "ok": true
+      }
+    },
+    {
+      "name": "bools-and-null",
+      "source": "---\nyes: true\nno: false\nnothing: null\nnothing2:\n---\n",
+      "parse": {
+        "data": {
+          "t": "map",
+          "v": [
+            [
+              "yes",
+              {
+                "t": "bool",
+                "v": true
+              }
+            ],
+            [
+              "no",
+              {
+                "t": "bool",
+                "v": false
+              }
+            ],
+            [
+              "nothing",
+              {
+                "t": "null"
+              }
+            ],
+            [
+              "nothing2",
+              {
+                "t": "null"
+              }
+            ]
+          ]
+        },
+        "body": "",
+        "fmPrefix": "---\nyes: true\nno: false\nnothing: null\nnothing2:\n---\n",
+        "ok": true
+      }
+    },
+    {
+      "name": "dates",
+      "source": "---\ndue: 2024-01-15\ncreated: 2025-12-31\n---\n",
+      "parse": {
+        "data": {
+          "t": "map",
+          "v": [
+            [
+              "due",
+              {
+                "t": "date",
+                "v": "2024-01-15"
+              }
+            ],
+            [
+              "created",
+              {
+                "t": "date",
+                "v": "2025-12-31"
+              }
+            ]
+          ]
+        },
+        "body": "",
+        "fmPrefix": "---\ndue: 2024-01-15\ncreated: 2025-12-31\n---\n",
+        "ok": true
+      }
+    },
+    {
+      "name": "nested-map",
+      "source": "---\nmeta:\n  depth: 1\n  inner:\n    x: true\n---\n",
+      "parse": {
+        "data": {
+          "t": "map",
+          "v": [
+            [
+              "meta",
+              {
+                "t": "map",
+                "v": [
+                  [
+                    "depth",
+                    {
+                      "t": "num",
+                      "v": 1
+                    }
+                  ],
+                  [
+                    "inner",
+                    {
+                      "t": "map",
+                      "v": [
+                        [
+                          "x",
+                          {
+                            "t": "bool",
+                            "v": true
+                          }
+                        ]
+                      ]
+                    }
+                  ]
+                ]
+              }
+            ]
+          ]
+        },
+        "body": "",
+        "fmPrefix": "---\nmeta:\n  depth: 1\n  inner:\n    x: true\n---\n",
+        "ok": true
+      }
+    },
+    {
+      "name": "nested-seq",
+      "source": "---\nmatrix:\n  - [1, 2]\n  - [3, 4]\n---\n",
+      "parse": {
+        "data": {
+          "t": "map",
+          "v": [
+            [
+              "matrix",
+              {
+                "t": "seq",
+                "v": [
+                  {
+                    "t": "seq",
+                    "v": [
+                      {
+                        "t": "num",
+                        "v": 1
+                      },
+                      {
+                        "t": "num",
+                        "v": 2
+                      }
+                    ]
+                  },
+                  {
+                    "t": "seq",
+                    "v": [
+                      {
+                        "t": "num",
+                        "v": 3
+                      },
+                      {
+                        "t": "num",
+                        "v": 4
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          ]
+        },
+        "body": "",
+        "fmPrefix": "---\nmatrix:\n  - [1, 2]\n  - [3, 4]\n---\n",
+        "ok": true
+      }
+    },
+    {
+      "name": "unicode-keys",
+      "source": "---\n中文键: 值\nmy key: v\n---\n",
+      "parse": {
+        "data": {
+          "t": "map",
+          "v": [
+            [
+              "中文键",
+              {
+                "t": "str",
+                "v": "值"
+              }
+            ],
+            [
+              "my key",
+              {
+                "t": "str",
+                "v": "v"
+              }
+            ]
+          ]
+        },
+        "body": "",
+        "fmPrefix": "---\n中文键: 值\nmy key: v\n---\n",
+        "ok": true
+      }
+    },
+    {
+      "name": "key-order",
+      "source": "---\nzz: 1\naa: 2\nmm: 3\n---\n",
+      "parse": {
+        "data": {
+          "t": "map",
+          "v": [
+            [
+              "zz",
+              {
+                "t": "num",
+                "v": 1
+              }
+            ],
+            [
+              "aa",
+              {
+                "t": "num",
+                "v": 2
+              }
+            ],
+            [
+              "mm",
+              {
+                "t": "num",
+                "v": 3
+              }
+            ]
+          ]
+        },
+        "body": "",
+        "fmPrefix": "---\nzz: 1\naa: 2\nmm: 3\n---\n",
+        "ok": true
+      }
+    },
+    {
+      "name": "trailing-content-on-fence",
+      "source": "--- \ntitle: T\n--- x\nbody\n",
+      "parse": {
+        "data": {
+          "t": "map",
+          "v": [
+            [
+              "title",
+              {
+                "t": "str",
+                "v": "T"
+              }
+            ]
+          ]
+        },
+        "body": "body\n",
+        "fmPrefix": "--- \ntitle: T\n--- x\n",
+        "ok": true
+      }
+    },
+    {
+      "name": "value-with-hash",
+      "source": "---\ntitle: #tag not\nother: \"#tag\"\n---\n",
+      "parse": {
+        "data": {
+          "t": "map",
+          "v": [
+            [
+              "title",
+              {
+                "t": "null"
+              }
+            ],
+            [
+              "other",
+              {
+                "t": "str",
+                "v": "#tag"
+              }
+            ]
+          ]
+        },
+        "body": "",
+        "fmPrefix": "---\ntitle: #tag not\nother: \"#tag\"\n---\n",
+        "ok": true
+      }
+    },
+    {
+      "name": "body-starts-immediately",
+      "source": "---\ntitle: T\n---\n正文紧跟\n",
+      "parse": {
+        "data": {
+          "t": "map",
+          "v": [
+            [
+              "title",
+              {
+                "t": "str",
+                "v": "T"
+              }
+            ]
+          ]
+        },
+        "body": "正文紧跟\n",
+        "fmPrefix": "---\ntitle: T\n---\n",
+        "ok": true
+      }
+    },
+    {
+      "name": "multiline-value",
+      "source": "---\ntext: \"line1\\nline2\"\n---\n",
+      "parse": {
+        "data": {
+          "t": "map",
+          "v": [
+            [
+              "text",
+              {
+                "t": "str",
+                "v": "line1\nline2"
+              }
+            ]
+          ]
+        },
+        "body": "",
+        "fmPrefix": "---\ntext: \"line1\\nline2\"\n---\n",
+        "ok": true
+      }
+    },
+    {
+      "name": "long-value",
+      "source": "---\ntext: 长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长\n---\nbody\n",
+      "parse": {
+        "data": {
+          "t": "map",
+          "v": [
+            [
+              "text",
+              {
+                "t": "str",
+                "v": "长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长"
+              }
+            ]
+          ]
+        },
+        "body": "body\n",
+        "fmPrefix": "---\ntext: 长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长\n---\n",
+        "ok": true
+      }
+    },
+    {
+      "name": "empty-seq-and-map",
+      "source": "---\nseq: []\nmap: {}\n---\n",
+      "parse": {
+        "data": {
+          "t": "map",
+          "v": [
+            [
+              "seq",
+              {
+                "t": "seq",
+                "v": []
+              }
+            ],
+            [
+              "map",
+              {
+                "t": "map",
+                "v": []
+              }
+            ]
+          ]
+        },
+        "body": "",
+        "fmPrefix": "---\nseq: []\nmap: {}\n---\n",
+        "ok": true
+      }
+    },
+    {
+      "name": "stringify:kitchen-sink",
+      "stringify": {
+        "data": {
+          "t": "map",
+          "v": [
+            [
+              "title",
+              {
+                "t": "str",
+                "v": "Hello"
+              }
+            ],
+            [
+              "tags",
+              {
+                "t": "seq",
+                "v": [
+                  {
+                    "t": "str",
+                    "v": "a"
+                  },
+                  {
+                    "t": "str",
+                    "v": "b"
+                  }
+                ]
+              }
+            ],
+            [
+              "done",
+              {
+                "t": "bool",
+                "v": true
+              }
+            ],
+            [
+              "count",
+              {
+                "t": "num",
+                "v": 3
+              }
+            ],
+            [
+              "due",
+              {
+                "t": "date",
+                "v": "2024-01-15"
+              }
+            ]
+          ]
+        },
+        "body": "# 正文\n",
+        "out": "---\ntitle: Hello\ntags:\n  - a\n  - b\ndone: true\ncount: 3\ndue: 2024-01-15T00:00:00.000Z\n---\n# 正文\n"
+      }
+    },
+    {
+      "name": "stringify:empty-data-no-block",
+      "stringify": {
+        "data": {
+          "t": "map",
+          "v": []
+        },
+        "body": "# 正文\n",
+        "out": "# 正文\n"
+      }
+    },
+    {
+      "name": "stringify:body-no-trailing-newline",
+      "stringify": {
+        "data": {
+          "t": "map",
+          "v": [
+            [
+              "title",
+              {
+                "t": "str",
+                "v": "T"
+              }
+            ]
+          ]
+        },
+        "body": "正文无尾换行",
+        "out": "---\ntitle: T\n---\n正文无尾换行"
+      }
+    },
+    {
+      "name": "stringify:crlf-body",
+      "stringify": {
+        "data": {
+          "t": "map",
+          "v": [
+            [
+              "title",
+              {
+                "t": "str",
+                "v": "T"
+              }
+            ]
+          ]
+        },
+        "body": "第一行\r\n第二行\r\n",
+        "out": "---\r\ntitle: T\r\n---\r\n第一行\r\n第二行\r\n"
+      }
+    },
+    {
+      "name": "stringify:empty-body",
+      "stringify": {
+        "data": {
+          "t": "map",
+          "v": [
+            [
+              "title",
+              {
+                "t": "str",
+                "v": "T"
+              }
+            ]
+          ]
+        },
+        "body": "",
+        "out": "---\ntitle: T\n---\n"
+      }
+    },
+    {
+      "name": "stringify:empty-seq",
+      "stringify": {
+        "data": {
+          "t": "map",
+          "v": [
+            [
+              "tags",
+              {
+                "t": "seq",
+                "v": []
+              }
+            ]
+          ]
+        },
+        "body": "b\n",
+        "out": "---\ntags: []\n---\nb\n"
+      }
+    },
+    {
+      "name": "stringify:null-value",
+      "stringify": {
+        "data": {
+          "t": "map",
+          "v": [
+            [
+              "nothing",
+              {
+                "t": "null"
+              }
+            ]
+          ]
+        },
+        "body": "b\n",
+        "out": "---\nnothing: null\n---\nb\n"
+      }
+    },
+    {
+      "name": "stringify:floats",
+      "stringify": {
+        "data": {
+          "t": "map",
+          "v": [
+            [
+              "f",
+              {
+                "t": "num",
+                "v": 1.5
+              }
+            ],
+            [
+              "neg",
+              {
+                "t": "num",
+                "v": -0.5
+              }
+            ],
+            [
+              "big",
+              {
+                "t": "num",
+                "v": 1e+21
+              }
+            ]
+          ]
+        },
+        "body": "b\n",
+        "out": "---\nf: 1.5\nneg: -0.5\nbig: 1e+21\n---\nb\n"
+      }
+    },
+    {
+      "name": "stringify:bool-num",
+      "stringify": {
+        "data": {
+          "t": "map",
+          "v": [
+            [
+              "yes",
+              {
+                "t": "bool",
+                "v": false
+              }
+            ],
+            [
+              "zero",
+              {
+                "t": "num",
+                "v": 0
+              }
+            ]
+          ]
+        },
+        "body": "b\n",
+        "out": "---\n'yes': false\nzero: 0\n---\nb\n"
+      }
+    },
+    {
+      "name": "stringify:special-strings",
+      "stringify": {
+        "data": {
+          "t": "map",
+          "v": [
+            [
+              "a",
+              {
+                "t": "str",
+                "v": "yes"
+              }
+            ],
+            [
+              "b",
+              {
+                "t": "str",
+                "v": "123"
+              }
+            ],
+            [
+              "c",
+              {
+                "t": "str",
+                "v": "null"
+              }
+            ],
+            [
+              "d",
+              {
+                "t": "str",
+                "v": "a: b"
+              }
+            ],
+            [
+              "e",
+              {
+                "t": "str",
+                "v": "#tag"
+              }
+            ],
+            [
+              "f",
+              {
+                "t": "str",
+                "v": "- dash"
+              }
+            ],
+            [
+              "g",
+              {
+                "t": "str",
+                "v": "'quoted'"
+              }
+            ],
+            [
+              "h",
+              {
+                "t": "str",
+                "v": "\"double\""
+              }
+            ],
+            [
+              "i",
+              {
+                "t": "str",
+                "v": " trailing "
+              }
+            ],
+            [
+              "j",
+              {
+                "t": "str",
+                "v": " leading"
+              }
+            ]
+          ]
+        },
+        "body": "b\n",
+        "out": "---\na: 'yes'\nb: '123'\nc: 'null'\nd: 'a: b'\ne: '#tag'\nf: '- dash'\ng: '''quoted'''\nh: '\"double\"'\ni: ' trailing '\nj: ' leading'\n---\nb\n"
+      }
+    },
+    {
+      "name": "stringify:unicode",
+      "stringify": {
+        "data": {
+          "t": "map",
+          "v": [
+            [
+              "中文",
+              {
+                "t": "str",
+                "v": "值"
+              }
+            ],
+            [
+              "key",
+              {
+                "t": "str",
+                "v": "中文内容"
+              }
+            ]
+          ]
+        },
+        "body": "b\n",
+        "out": "---\n中文: 值\nkey: 中文内容\n---\nb\n"
+      }
+    },
+    {
+      "name": "stringify:multiline-string",
+      "stringify": {
+        "data": {
+          "t": "map",
+          "v": [
+            [
+              "text",
+              {
+                "t": "str",
+                "v": "line1\nline2"
+              }
+            ]
+          ]
+        },
+        "body": "b\n",
+        "out": "---\ntext: |-\n  line1\n  line2\n---\nb\n"
+      }
+    },
+    {
+      "name": "stringify:nested-map",
+      "stringify": {
+        "data": {
+          "t": "map",
+          "v": [
+            [
+              "meta",
+              {
+                "t": "map",
+                "v": [
+                  [
+                    "depth",
+                    {
+                      "t": "num",
+                      "v": 1
+                    }
+                  ],
+                  [
+                    "inner",
+                    {
+                      "t": "map",
+                      "v": [
+                        [
+                          "x",
+                          {
+                            "t": "bool",
+                            "v": true
+                          }
+                        ]
+                      ]
+                    }
+                  ]
+                ]
+              }
+            ]
+          ]
+        },
+        "body": "b\n",
+        "out": "---\nmeta:\n  depth: 1\n  inner:\n    x: true\n---\nb\n"
+      }
+    },
+    {
+      "name": "stringify:nested-seq",
+      "stringify": {
+        "data": {
+          "t": "map",
+          "v": [
+            [
+              "matrix",
+              {
+                "t": "seq",
+                "v": [
+                  {
+                    "t": "seq",
+                    "v": [
+                      {
+                        "t": "num",
+                        "v": 1
+                      },
+                      {
+                        "t": "num",
+                        "v": 2
+                      }
+                    ]
+                  },
+                  {
+                    "t": "seq",
+                    "v": [
+                      {
+                        "t": "num",
+                        "v": 3
+                      },
+                      {
+                        "t": "num",
+                        "v": 4
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          ]
+        },
+        "body": "b\n",
+        "out": "---\nmatrix:\n  - - 1\n    - 2\n  - - 3\n    - 4\n---\nb\n"
+      }
+    },
+    {
+      "name": "stringify:seq-of-maps",
+      "stringify": {
+        "data": {
+          "t": "map",
+          "v": [
+            [
+              "items",
+              {
+                "t": "seq",
+                "v": [
+                  {
+                    "t": "map",
+                    "v": [
+                      [
+                        "name",
+                        {
+                          "t": "str",
+                          "v": "a"
+                        }
+                      ]
+                    ]
+                  },
+                  {
+                    "t": "map",
+                    "v": [
+                      [
+                        "name",
+                        {
+                          "t": "str",
+                          "v": "b"
+                        }
+                      ]
+                    ]
+                  }
+                ]
+              }
+            ]
+          ]
+        },
+        "body": "b\n",
+        "out": "---\nitems:\n  - name: a\n  - name: b\n---\nb\n"
+      }
+    },
+    {
+      "name": "stringify:date-and-seq-date",
+      "stringify": {
+        "data": {
+          "t": "map",
+          "v": [
+            [
+              "due",
+              {
+                "t": "date",
+                "v": "2025-12-31"
+              }
+            ],
+            [
+              "dates",
+              {
+                "t": "seq",
+                "v": [
+                  {
+                    "t": "date",
+                    "v": "2024-01-01"
+                  },
+                  {
+                    "t": "date",
+                    "v": "2024-06-30"
+                  }
+                ]
+              }
+            ]
+          ]
+        },
+        "body": "b\n",
+        "out": "---\ndue: 2025-12-31T00:00:00.000Z\ndates:\n  - 2024-01-01T00:00:00.000Z\n  - 2024-06-30T00:00:00.000Z\n---\nb\n"
+      }
+    },
+    {
+      "name": "stringify:special-keys",
+      "stringify": {
+        "data": {
+          "t": "map",
+          "v": [
+            [
+              "my key",
+              {
+                "t": "num",
+                "v": 1
+              }
+            ],
+            [
+              "中文键",
+              {
+                "t": "num",
+                "v": 2
+              }
+            ],
+            [
+              "a:b",
+              {
+                "t": "num",
+                "v": 3
+              }
+            ]
+          ]
+        },
+        "body": "b\n",
+        "out": "---\nmy key: 1\n中文键: 2\n'a:b': 3\n---\nb\n"
+      }
+    },
+    {
+      "name": "stringify:long-string",
+      "stringify": {
+        "data": {
+          "t": "map",
+          "v": [
+            [
+              "text",
+              {
+                "t": "str",
+                "v": "长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长"
+              }
+            ]
+          ]
+        },
+        "body": "b\n",
+        "out": "---\ntext: 长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长\n---\nb\n"
+      }
+    },
+    {
+      "name": "stringify:key-order-preserved",
+      "stringify": {
+        "data": {
+          "t": "map",
+          "v": [
+            [
+              "zz",
+              {
+                "t": "num",
+                "v": 1
+              }
+            ],
+            [
+              "aa",
+              {
+                "t": "num",
+                "v": 2
+              }
+            ],
+            [
+              "mm",
+              {
+                "t": "num",
+                "v": 3
+              }
+            ]
+          ]
+        },
+        "body": "b\n",
+        "out": "---\nzz: 1\naa: 2\nmm: 3\n---\nb\n"
+      }
+    },
+    {
+      "name": "stringify:empty-string-value",
+      "stringify": {
+        "data": {
+          "t": "map",
+          "v": [
+            [
+              "a",
+              {
+                "t": "str",
+                "v": ""
+              }
+            ],
+            [
+              "b",
+              {
+                "t": "str",
+                "v": " "
+              }
+            ]
+          ]
+        },
+        "body": "b\n",
+        "out": "---\na: ''\nb: ' '\n---\nb\n"
+      }
+    },
+    {
+      "name": "stringify:mixed-tags-scalar",
+      "stringify": {
+        "data": {
+          "t": "map",
+          "v": [
+            [
+              "tags",
+              {
+                "t": "seq",
+                "v": [
+                  {
+                    "t": "str",
+                    "v": "single"
+                  }
+                ]
+              }
+            ]
+          ]
+        },
+        "body": "b\n",
+        "out": "---\ntags:\n  - single\n---\nb\n"
+      }
+    }
+  ]
+}

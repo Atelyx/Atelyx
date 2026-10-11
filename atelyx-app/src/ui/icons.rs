@@ -66,6 +66,10 @@ pub const NAMES: &[&str] = &[
     "hash",
     "eye",
     "code",
+    "type",
+    "tag",
+    "toggle-left",
+    "list",
 ];
 
 /// 一个图标的组成图元（lucide 图标 = 路径/圆/矩形/线段的组合）。
@@ -144,6 +148,10 @@ pub fn icon(name: &str) -> Option<&'static [Shape]> {
     "hash" => &[Shape::Line([4.0, 9.0, 20.0, 9.0]), Shape::Line([4.0, 15.0, 20.0, 15.0]), Shape::Line([10.0, 3.0, 8.0, 21.0]), Shape::Line([16.0, 3.0, 14.0, 21.0])],
     "eye" => &[Shape::Path("M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"), Shape::Circle(12.0, 12.0, 3.0)],
     "code" => &[Shape::Path("m16 18 6-6-6-6"), Shape::Path("m8 6-6 6 6 6")],
+    "type" => &[Shape::Path("M4 7V4h16v3"), Shape::Path("M9 20h6"), Shape::Path("M12 4v16")],
+    "tag" => &[Shape::Path("M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l8.704 8.704a2.426 2.426 0 0 0 3.42 0l6.58-6.58a2.426 2.426 0 0 0 0-3.42z"), Shape::Circle(7.5, 7.5, 1.0)],
+    "toggle-left" => &[Shape::Rect(2.0, 7.0, 20.0, 14.0, 7.0), Shape::Circle(8.0, 14.0, 2.0)],
+    "list" => &[Shape::Line([8.0, 6.0, 21.0, 6.0]), Shape::Line([8.0, 12.0, 21.0, 12.0]), Shape::Line([8.0, 18.0, 21.0, 18.0]), Shape::Line([3.0, 6.0, 3.01, 6.0]), Shape::Line([3.0, 12.0, 3.01, 12.0]), Shape::Line([3.0, 18.0, 3.01, 18.0])],
         _ => return None,
     })
 }

@@ -11,6 +11,8 @@ nanoid = "0.4"
 regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# frontmatter：YAML 解析（事件级 API 供自研 1.1 解析表使用，标量样式可区分引号形态）
+yaml-rust2 = "0.10"
 dunce = "1"
 # 会话容器（chat_container）：持久 op 建 id / 写链线程与广播回执（spawn + oneshot + sleep）
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
