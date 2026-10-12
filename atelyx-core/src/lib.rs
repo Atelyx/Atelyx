@@ -4,16 +4,22 @@
 //! （序列化、异步运行时、时间与标识、正则 / glob、网络客户端）。
 
 pub mod chat_container;
+pub mod collab;
+pub mod credentials;
 pub mod filesearch;
 pub mod frontmatter;
 pub mod global_config;
 pub mod history;
 pub mod layout;
 pub mod markdown;
+pub mod merge3;
 pub mod net_guard;
+pub mod note_collab;
 pub mod plugin_process;
 pub mod remote_image;
 pub mod search;
+pub mod space_client;
+pub mod space_frame;
 pub mod table_ops;
 pub mod table_xlsx;
 pub mod vault;

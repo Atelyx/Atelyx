@@ -246,8 +246,9 @@ struct PeerInfo {
 }
 
 /// S→C 帧：`hello-ack`（先于 peers 帧，带房间插件序号头）/ `peers` / `presence` / 各转发帧
-/// （不含自己；`plugin-msg` 广播帧带房间级 seq）/ `meta-changed`（落地广播，只带 `key` 不带值）/
-/// `resync`（慢消费者重新握手）/ `error`。
+/// （不含自己；`plugin-msg` 广播帧带房间级 seq）/ 服务端落地广播帧（`table-patch`、
+/// `canvas-patch`、`renamed`、`fs-changed`、`meta-changed`，发全员含发起者，补丁落地帧带
+/// `landed` 标记与发起者 peerId）/ `resync`（慢消费者重新握手）/ `error`。
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ServerMsg {
@@ -278,6 +279,10 @@ struct ServerMsg {
     /// 元数据键名（`meta-changed` 落地广播帧携带；只广播键名，值由客户端回读磁盘真源）。
     #[serde(skip_serializing_if = "Option::is_none")]
     key: Option<String>,
+    /// 服务端落地标记（HTTP 补丁端点落地广播帧携带；WS 透传帧不带）——
+    /// 客户端据此判定「服务端真源已含本补丁」推进保存基线。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    landed: Option<bool>,
 }
 
 fn server_msg(
@@ -301,6 +306,7 @@ fn server_msg(
         seq: None,
         plugin_seq: None,
         key: None,
+        landed: None,
     }))
 }
 
@@ -322,6 +328,7 @@ fn server_hello_ack(peer_id: u64, plugin_seq: u64) -> WireFrame {
         seq: None,
         plugin_seq: Some(plugin_seq),
         key: None,
+        landed: None,
     }))
 }
 
@@ -345,6 +352,7 @@ fn server_plugin_msg(
         seq,
         plugin_seq: None,
         key: None,
+        landed: None,
     }))
 }
 
@@ -400,13 +408,37 @@ fn resync_due(last: Option<Instant>, now: Instant) -> bool {
 }
 
 /// 服务端主动向房间广播补丁帧（HTTP 补丁端点落地成功后调用）。发给房间内全部成员的
-/// WS 连接，含发起写入者自己——发起者经 HTTP 保存、无转发帧可回声，收到的是落地广播帧；
-/// 帧无 peerId，客户端按远端补丁同一路径幂等应用。房间为空或个别投递失败只记日志：
-/// 真源已落盘，广播失败不回滚落地。
-pub(crate) fn broadcast_patch(hub: &Hub, room_id: &str, kind: &'static str, file: &str, patch: serde_json::Value) {
-    let payload = server_msg(kind, None, None, None, Some(file.to_string()), Some(patch), None);
+/// WS 连接，含发起写入者自己——发起者经 HTTP 保存、无转发帧可回声，收到的是落地广播帧。
+/// 发起者在本房间有连接（同一设备会话）时帧回填其 peerId，客户端据此识别自声回声跳过
+/// 远端合入；无连接的发起者收无 peerId 帧。帧带 `landed` 标记（服务端真源已含本补丁），
+/// 与 WS 透传帧（不落盘）区分。房间为空或个别投递失败只记日志：真源已落盘，广播失败不回滚落地。
+pub(crate) fn broadcast_patch(
+    hub: &Hub,
+    room_id: &str,
+    kind: &'static str,
+    file: &str,
+    patch: serde_json::Value,
+    sender_session: Option<&str>,
+) {
     let rooms = hub.0.lock().unwrap();
     if let Some(room) = rooms.get(room_id) {
+        let sender_peer = sender_session.and_then(|sid| {
+            room.peers.iter().find(|(_, p)| p.session_id == sid).map(|(id, _)| *id)
+        });
+        let payload = WireFrame::Text(server_text_msg(ServerMsg {
+            kind,
+            peer_id: sender_peer,
+            peers: None,
+            presence: None,
+            file: Some(file.to_string()),
+            patch: Some(patch),
+            channel: None,
+            payload: None,
+            seq: None,
+            plugin_seq: None,
+            key: None,
+            landed: Some(true),
+        }));
         for peer in room.peers.values() {
             if peer.tx.send(payload.clone()).is_err() {
                 debug!(room = %room_id, kind = %kind, "补丁帧投递失败（接收端已关闭）");
@@ -455,12 +487,29 @@ pub(crate) fn broadcast_meta_changed(hub: &Hub, room_id: &str, key: &str) {
         seq: None,
         plugin_seq: None,
         key: Some(key.to_string()),
+        landed: None,
     }));
     let rooms = hub.0.lock().unwrap();
     if let Some(room) = rooms.get(room_id) {
         for peer in room.peers.values() {
             if peer.tx.send(payload.clone()).is_err() {
                 debug!(room = %room_id, key = %key, "meta 变更帧投递失败（接收端已关闭）");
+            }
+        }
+    }
+}
+
+/// 服务端主动向房间广播文件结构变更帧（新建/删除文件与文件夹、复制落地成功后调用）。
+/// 帧不带路径——客户端直接重拉整树（增量合并的一致性成本高于全量拉取）。覆盖写（保存）
+/// 不广播：内容级变更各有专用通道（note-sync / table-patch），且高频保存会造成广播风暴。
+/// 发给房间全部成员含发起者，发起者树刷新为 no-op。
+pub(crate) fn broadcast_fs_changed(hub: &Hub, room_id: &str) {
+    let payload = server_msg("fs-changed", None, None, None, None, None, None);
+    let rooms = hub.0.lock().unwrap();
+    if let Some(room) = rooms.get(room_id) {
+        for peer in room.peers.values() {
+            if peer.tx.send(payload.clone()).is_err() {
+                debug!(room = %room_id, "结构变更帧投递失败（接收端已关闭）");
             }
         }
     }
@@ -537,15 +586,15 @@ fn build_plugin_binary(frame: &BinaryPluginFrame) -> Vec<u8> {
 }
 
 /// 已验证的连接进入房间：hello-ack → 入房广播 → 会话有效性回查 → 消息循环 → 离场收尾。
-/// 鉴权由调用方在进入本函数之前完成；`session_alive` 回查设备会话是否仍有效
-/// （鉴权与入房之间会话可能已被吊销，kick_sessions 触及不到尚未入房的连接）。
+/// 鉴权由调用方在进入本函数之前完成；`session_alive` 回查鉴权与入房之间会话/成员资格是否
+/// 仍有效（None = 有效），Some = 踢出原因（会话吊销与被移出空间文案不同，不得混用）。
 pub(crate) async fn run_room_connection(
     socket: WebSocket,
     hub: Hub,
     remote: SocketAddr,
     room_id: String,
     meta: PeerMeta,
-    session_alive: impl Fn(&str) -> bool,
+    session_alive: impl Fn(&str) -> Option<KickReason>,
 ) {
     let (mut sink, mut stream) = socket.split();
     let started_at = Instant::now();
@@ -630,9 +679,10 @@ pub(crate) async fn run_room_connection(
     }
     // 入房后回查会话有效性：鉴权与入房之间会话可能已被吊销（kick_sessions 只触及已入房
     // 连接），此处回查补上这一窗口；入房之后的吊销由踢信号（watch）覆盖，两段合起来无空档
-    let mut kicked = !session_alive(&session_id);
-    if kicked {
-        let _ = btx.send(kick_frame(KickReason::SessionRevoked));
+    let mut kicked = false;
+    if let Some(reason) = session_alive(&session_id) {
+        kicked = true;
+        let _ = btx.send(kick_frame(reason));
     }
 
     // 消息循环：30s 无消息（心跳超时）断开；会话被吊销时投递失效帧后断开
@@ -1111,6 +1161,7 @@ mod tests {
             seq: None,
             plugin_seq: None,
             key: Some("calendar".to_string()),
+            landed: None,
         })
         .unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).expect("meta-changed 帧须为合法 JSON");

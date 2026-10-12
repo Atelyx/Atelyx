@@ -1740,6 +1740,10 @@ async fn patch_landing_broadcasts_frame_to_room() {
     assert_eq!(frame["patch"]["id"], "cv-1");
     assert_eq!(frame["patch"]["upsertNodes"].as_array().unwrap().len(), 1);
     assert_eq!(frame["patch"]["upsertNodes"][0]["id"], "n2");
+    // 发起者有房间连接（同令牌）：落地帧回填其 peerId + landed 标记——客户端据此识别
+    // 自声回声（跳过远端合入与撤销栈作废）
+    assert_eq!(frame["peerId"], ack["peerId"], "落地帧应回填发起者 peerId");
+    assert_eq!(frame["landed"], true);
 
     // 表格补丁同型（文件名与标题一致，无改名路径漂移）
     let tfile = "广播表.atb";
@@ -1813,6 +1817,98 @@ async fn rename_landing_broadcasts_renamed_frame() {
     assert_eq!(frame["type"], "renamed", "应收到改名落地广播帧：{frame}");
     assert_eq!(frame["payload"]["oldPath"], "表格/旧名.atb");
     assert_eq!(frame["payload"]["newPath"], "表格/新名.atb");
+}
+
+/// 结构变更落地 → 房间收到 fs-changed 帧（含发起者自身）：客户端重拉整树刷新文件面板。
+#[tokio::test]
+async fn fs_landing_broadcasts_fs_changed_frame() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let space_id = setup_two_members(&ctx, "alice", "bob").await;
+    let a = login_as(&ctx, "alice").await;
+
+    let mut ws = ws_connect(
+        &ctx.base,
+        "/ws/space",
+        json!({ "type": "hello", "spaceId": space_id, "token": a, "nickname": "爱丽丝", "color": "#ff0000", "deviceName": "A机" }),
+    )
+    .await;
+    let ack = next_frame(&mut ws).await;
+    assert_eq!(ack["type"], "hello-ack");
+
+    let (status, _) = ctx
+        .post(&format!("/api/spaces/{space_id}/folder"), Some(&a), json!({ "path": "新建目录" }))
+        .await;
+    assert_eq!(status, 200);
+
+    let mut frame = next_frame(&mut ws).await;
+    for _ in 0..5 {
+        if frame["type"] == "fs-changed" {
+            break;
+        }
+        frame = next_frame(&mut ws).await;
+    }
+    assert_eq!(frame["type"], "fs-changed", "应收到结构变更广播帧：{frame}");
+    // 纯类型帧：无载荷字段（客户端直接重拉整树）
+    assert_eq!(frame.as_object().map(|o| o.len()), Some(1));
+}
+
+/// 表格补丁 title 漂移（同目录改名）→ 先 renamed 帧后补丁帧：打开中文件先跟随换路，
+/// 否则只收 table-patch（file=新路径）会被整帧丢弃，滞留旧路径后每次保存 404。
+#[tokio::test]
+async fn table_patch_title_drift_broadcasts_renamed_then_patch() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let space_id = setup_two_members(&ctx, "alice", "bob").await;
+    let a = login_as(&ctx, "alice").await;
+
+    let mut ws = ws_connect(
+        &ctx.base,
+        "/ws/space",
+        json!({ "type": "hello", "spaceId": space_id, "token": a, "nickname": "爱丽丝", "color": "#ff0000", "deviceName": "A机" }),
+    )
+    .await;
+    let ack = next_frame(&mut ws).await;
+    assert_eq!(ack["type"], "hello-ack");
+
+    let (status, _) = ctx
+        .put(
+            &format!("/api/spaces/{space_id}/file"),
+            Some(&a),
+            json!({ "path": "表.atb", "content": table_doc("tb-9", "旧名", json!([{ "id": "f1", "name": "名称", "type": "text" }]), json!([])).to_string() }),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let (status, _) = ctx
+        .post(
+            &format!("/api/spaces/{space_id}/patches/table"),
+            Some(&a),
+            json!({ "path": "表.atb", "patch": { "id": "tb-9", "title": "新名" } }),
+        )
+        .await;
+    assert_eq!(status, 200);
+
+    let mut frame = next_frame(&mut ws).await;
+    for _ in 0..5 {
+        if frame["type"] == "renamed" {
+            break;
+        }
+        frame = next_frame(&mut ws).await;
+    }
+    assert_eq!(frame["type"], "renamed", "title 漂移应先广播 renamed 帧：{frame}");
+    assert_eq!(frame["payload"]["oldPath"], "表.atb");
+    assert_eq!(frame["payload"]["newPath"], "新名.atb");
+    let mut frame = next_frame(&mut ws).await;
+    for _ in 0..5 {
+        if frame["type"] == "table-patch" {
+            break;
+        }
+        frame = next_frame(&mut ws).await;
+    }
+    assert_eq!(frame["type"], "table-patch", "renamed 后应随补丁帧：{frame}");
+    assert_eq!(frame["file"], "新名.atb");
+    assert_eq!(frame["peerId"], ack["peerId"], "落地帧应回填发起者 peerId");
+    assert_eq!(frame["landed"], true);
 }
 
 /// 表格/画布的历史记录随改名迁移 + 改名后继续记录（编辑→记录→改名→迁移→再编辑→再记录→聚合可见）。

@@ -180,6 +180,16 @@ pub enum PopupState {
     FileMenu { rel: String, is_dir: bool, is_root: bool },
     /// 最近仓库行菜单（root = 目标仓库根）。
     VaultMenu { root: String },
+    /// 协作空间菜单（登录入口 / 创建 / 邀请码加入）。
+    SpaceMenu,
+    /// 协作登录 / 注册表单（register = 注册模式）。
+    SpaceLogin { register: bool },
+    /// 创建空间（名称输入）。
+    SpaceCreate,
+    /// 邀请码加入（输入邀请码）。
+    SpaceJoin,
+    /// 协作空间行菜单（server_url + space_id）。
+    SpaceRowMenu { server_url: String, space_id: String },
     NoteMenu,
     /// 属性面板类型切换菜单（属性行序号）。
     PropTypeMenu { index: usize },
@@ -230,6 +240,11 @@ impl PopupState {
             // 文件/文件夹菜单 176；最近仓库行菜单 192
             PopupState::FileMenu { .. } => 176.0,
             PopupState::VaultMenu { .. } => 192.0,
+            PopupState::SpaceMenu => 200.0,
+            PopupState::SpaceLogin { .. } => 340.0,
+            PopupState::SpaceCreate => 260.0,
+            PopupState::SpaceJoin => 260.0,
+            PopupState::SpaceRowMenu { .. } => 176.0,
             PopupState::NoteMenu => 144.0,
             PopupState::PropTypeMenu { .. } => 128.0,
             PopupState::TableCellMenu => 128.0,
@@ -849,9 +864,11 @@ fn hover_btn_style() -> impl Fn(&iced::Theme, button::Status) -> button::Style {
 // ===== 状态栏 =====
 
 fn status_bar(app: &App) -> Element<'static, Message> {
-    let (icon_name, name) = match &app.vault_root {
-        Some(root) => ("hard-drive", atelyx_core::vault::vault_display_name(root)),
-        None => ("hard-drive", "未打开仓库".to_string()),
+    // 仓库身份三态：协作空间（空间名 @ 服务器） / 本地仓库 / 未打开
+    let (icon_name, name) = match (&app.vault_root, &app.repo_kind) {
+        (None, crate::RepoKind::Space(s)) => ("cloud", format!("{} @ {}", s.name, s.server_url)),
+        (Some(root), _) => ("hard-drive", atelyx_core::vault::vault_display_name(root)),
+        (None, crate::RepoKind::Local) => ("hard-drive", "未打开仓库".to_string()),
     };
     // 组间 12px、组内 6px 两级间距；文件数统计在途不渲染占位
     let mut left = row![
@@ -862,7 +879,7 @@ fn status_bar(app: &App) -> Element<'static, Message> {
         .spacing(6),
     ]
     .spacing(12);
-    if let (Some(_), Some(n)) = (&app.vault_root, app.file_count) {
+    if let Some(n) = app.file_count {
         left = left
             .push(vrule())
             .push(
@@ -1352,7 +1369,7 @@ fn note_status_pill(app: &App) -> Option<Element<'static, Message>> {
     }
 }
 
-/// 按视图 kind 分派内容（files/note/search/inspector/table 可用，其余占位）。
+/// 按视图 kind 分派内容（files/note/search/inspector/table/collabroom 可用，其余占位）。
 fn view_content<'a>(app: &'a App, window: iced::window::Id, kind: &str) -> Element<'a, Message> {
     match kind {
         "files" => files_view(app),
@@ -1360,8 +1377,101 @@ fn view_content<'a>(app: &'a App, window: iced::window::Id, kind: &str) -> Eleme
         "search" => search_view(app),
         "inspector" => inspector_view(app, window),
         "table" => crate::table_view::table_view(app, window),
+        "collabroom" => collab_room_view(app),
         kind => placeholder_view(kind),
     }
+}
+
+/// 协作房间视图：空间身份 + 在线名册（昵称 / 设备 / 正在编辑，点击打开）。
+fn collab_room_view(app: &App) -> Element<'_, Message> {
+    let mut col = iced::widget::Column::<Message>::new().padding(Padding::ZERO.horizontal(12.0).vertical(10.0));
+    match &app.repo_kind {
+        crate::RepoKind::Space(session) => {
+            col = col.push(group_head(&format!("{} @ {}", session.name, session.server_url), session.role.as_str(), false));
+            col = col.push(
+                container(
+                    row![
+                        icon("users", 13.0, pal::ACCENT),
+                        text(format!("在线 {} 人", app.space_peers.len()))
+                            .size(pal::FS_CAPTION)
+                            .color(pal::TEXT_SECONDARY),
+                    ]
+                    .spacing(6),
+                )
+                .padding(Padding::ZERO.vertical(2.0)),
+            );
+            for peer in &app.space_peers {
+                let editing = peer
+                    .presence
+                    .as_ref()
+                    .and_then(|p| p.get("file").and_then(|f| f.as_str()))
+                    .unwrap_or("")
+                    .to_string();
+                let editing_label = if editing.is_empty() {
+                    String::new()
+                } else {
+                    editing.rsplit('/').next().unwrap_or(&editing).to_string()
+                };
+                let color = parse_hex_color(&peer.color).unwrap_or(pal::TEXT_MUTED);
+                let label: Element<'static, Message> = if editing_label.is_empty() {
+                    text(peer.nickname.clone()).size(pal::FS_MICRO).color(pal::TEXT_MUTED).into()
+                } else {
+                    text(format!("正在编辑 {}", editing_label))
+                        .size(pal::FS_MICRO)
+                        .color(pal::TEXT_MUTED)
+                        .into()
+                };
+                let open = (!editing.is_empty()).then(|| {
+                    Message::OpenFile(editing.clone())
+                });
+                col = col.push(
+                    container(
+                        button(
+                            row![
+                                container(space())
+                                    .width(Length::Fixed(8.0))
+                                    .height(Length::Fixed(8.0))
+                                    .style(move |_t| Style {
+                                        background: Some(color.into()),
+                                        border: border::rounded(999.0),
+                                        ..Style::default()
+                                    }),
+                                text(peer.nickname.clone())
+                                    .size(pal::FS_CAPTION)
+                                    .color(pal::TEXT_PRIMARY),
+                                text(peer.device_name.clone())
+                                    .size(pal::FS_MICRO)
+                                    .color(pal::TEXT_MUTED),
+                                space().width(Length::Fill),
+                                label,
+                            ]
+                            .spacing(6),
+                        )
+                        .padding(Padding::ZERO.horizontal(8.0).vertical(6.0))
+                        .style(|_t, status| button::Style {
+                            background: matches!(status, button::Status::Hovered | button::Status::Pressed)
+                                .then_some(pal::HOVER.into()),
+                            ..Default::default()
+                        })
+                        .on_press_maybe(open),
+                    )
+                    .width(Length::Fill),
+                );
+            }
+        }
+        crate::RepoKind::Local => {
+            col = col.push(controls::empty_state(
+                "users",
+                "未进入协作空间",
+                "经文件面板云钮登录并进入空间后，这里显示在线成员与各自正在编辑的文件。",
+                Some(("协作空间".into(), Message::SpaceMenuOpen)),
+            ));
+        }
+    }
+    scrollable(container(col).width(Length::Fill).height(Length::Fill))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
 }
 
 /// 搜索视图：模式下拉（按文件名可用；全局/按标签为占位禁用）+ 实时过滤 + 结果行点击打开。
@@ -1715,7 +1825,7 @@ fn files_view(app: &App) -> Element<'_, Message> {
             controls::icon_button("folder-open", 15.0, controls::ICON_MD, Variant::Ghost,
                 Some(Message::PickVault), Some((window, "打开文件夹为仓库".into()))),
             controls::icon_button("cloud", 15.0, controls::ICON_MD, Variant::Ghost,
-                Some(Message::NotImplemented("协作空间")), Some((window, "新增协作空间".into()))),
+                Some(Message::SpaceMenuOpen), Some((window, "协作空间".into()))),
             controls::icon_button("arrow-up-down", 14.0, controls::ICON_MD, Variant::Ghost,
                 Some(btn_popup(window, cursor, PopupState::SortMenu)), Some((window, "排序方式".into()))),
             space().width(Length::Fill),
@@ -1731,14 +1841,18 @@ fn files_view(app: &App) -> Element<'_, Message> {
         ..Style::default()
     });
 
-    if app.global.recent_vaults.is_empty() {
+    // 空间列表已拉到（首登尚未产生任何最近记录）时不早退：空间区渲染服务端账号空间
+    if app.global.recent_vaults.is_empty()
+        && app.global.recent_spaces.is_empty()
+        && app.space_list.is_empty()
+    {
         return column![
             toolbar,
             controls::h_divider_subtle(),
             controls::empty_state(
                 "folder-open",
                 "还没有仓库",
-                "打开一个文件夹作为仓库（可用工具条的打开按钮，或此处）。",
+                "打开一个文件夹作为仓库，或经工具条云钮登录协作空间。",
                 Some(("打开文件夹".into(), Message::PickVault)),
             ),
         ]
@@ -1792,6 +1906,63 @@ fn files_view(app: &App) -> Element<'_, Message> {
         }
     }
 
+    // 协作空间区：服务端空间列表在前（登录即见全部账号空间），最近空间兜底补齐
+    // （服务端未加载 / 非本机最近的空间仍可见可点；key = server#spaceId 去重）。
+    // 激活空间就地展开文件树
+    let mut space_entries: Vec<atelyx_core::global_config::RecentSpace> = Vec::new();
+    let mut seen_space = std::collections::HashSet::new();
+    if let Some(identity) = &app.global.last_identity {
+        for s in &app.space_list {
+            if seen_space.insert(format!("{}#{}", identity.server_url, s.space_id)) {
+                space_entries.push(atelyx_core::global_config::RecentSpace {
+                    server_url: identity.server_url.clone(),
+                    space_id: s.space_id.clone(),
+                    name: s.name.clone(),
+                    last_opened_at: 0,
+                });
+            }
+        }
+    }
+    for s in &app.global.recent_spaces {
+        if seen_space.insert(format!("{}#{}", s.server_url, s.space_id)) {
+            space_entries.push(s.clone());
+        }
+    }
+    for s in &space_entries {
+        let active = match &app.repo_kind {
+            crate::RepoKind::Space(session) => {
+                session.server_url == s.server_url && session.space_id == s.space_id
+            }
+            crate::RepoKind::Local => false,
+        };
+        tree_col = tree_col.push(space_row(window, cursor, s, active, &expanded));
+        if !active {
+            continue;
+        }
+        if let Some((notice, _)) = &app.rename_notice {
+            tree_col = tree_col.push(
+                container(text(notice.clone()).size(pal::FS_CAPTION).color(pal::WARNING))
+                    .width(Length::Fill)
+                    .padding(Padding::ZERO.horizontal(12.0).vertical(4.0)),
+            );
+        }
+        if draft_dir.as_deref() == Some("") {
+            tree_col = tree_col.push(draft_input_row(app, 1));
+        }
+        if expanded.contains("") {
+            for r in tree_rows(app, &expanded) {
+                if let Some(input) = file_inline_input(app, &r) {
+                    tree_col = tree_col.push(input);
+                    continue;
+                }
+                tree_col = tree_col.push(tree_row_element(app, &r, window, cursor));
+                if draft_dir.as_deref() == Some(r.rel.as_str()) {
+                    tree_col = tree_col.push(draft_input_row(app, r.depth + 1));
+                }
+            }
+        }
+    }
+
     let body = mouse_area(
         scrollable(
             container(tree_col)
@@ -1801,8 +1972,10 @@ fn files_view(app: &App) -> Element<'_, Message> {
         .width(Length::Fill)
         .height(Length::Fill),
     );
-    // 空白处右键 = 在激活仓库根目录新建（未进入仓库时无根可建，不挂菜单）
-    let tree: Element<'static, Message> = if app.vault_root.is_some() {
+    // 空白处右键 = 在激活仓库/空间根目录新建（未激活时无根可建，不挂菜单）
+    let tree: Element<'static, Message> = if app.vault_root.is_some()
+        || matches!(app.repo_kind, crate::RepoKind::Space(_))
+    {
         body.on_right_press(ctx_popup(
             window,
             cursor,
@@ -1896,6 +2069,130 @@ fn vault_row(
     row_elem
         .on_right_press(ctx_popup(window, cursor, PopupState::VaultMenu { root: vault.root.clone() }))
         .into()
+}
+
+/// 协作者胶囊条（色点 + 昵称；超过 3 个折叠为「+N」）。笔记工具条与表格工具条共用，
+/// 展示顺序由调用方给定的成员序决定（不可点击的纯展示）。
+pub(crate) fn collab_pill_row(members: &[(iced::Color, String)]) -> Element<'static, Message> {
+    const MAX_SHOWN: usize = 3;
+    let mut row = iced::widget::Row::<Message>::new().spacing(4);
+    for (color, name) in members.iter().take(MAX_SHOWN) {
+        let dot = *color;
+        row = row.push(
+            container(
+                iced::widget::row![
+                    container(space())
+                        .width(Length::Fixed(8.0))
+                        .height(Length::Fixed(8.0))
+                        .style(move |_t| Style {
+                            background: Some(dot.into()),
+                            border: border::rounded(999.0),
+                            ..Style::default()
+                        }),
+                    iced::widget::text(name.clone())
+                        .size(pal::FS_MICRO)
+                        .color(pal::TEXT_PRIMARY),
+                ]
+                .spacing(5),
+            )
+            .padding(Padding::ZERO.horizontal(8.0).vertical(4.0))
+            .style(|_t| Style {
+                background: Some(pal::HOVER.into()),
+                border: border::rounded(999.0),
+                ..Style::default()
+            }),
+        );
+    }
+    if members.len() > MAX_SHOWN {
+        row = row.push(
+            container(
+                iced::widget::text(format!("+{}", members.len() - MAX_SHOWN))
+                    .size(pal::FS_MICRO)
+                    .color(pal::TEXT_SECONDARY),
+            )
+            .padding(Padding::ZERO.horizontal(8.0).vertical(4.0))
+            .style(|_t| Style {
+                background: Some(pal::HOVER.into()),
+                border: border::rounded(999.0),
+                ..Style::default()
+            }),
+        );
+    }
+    row.into()
+}
+
+/// 最近空间行（与仓库行同构：激活行就地展开文件树；云图标 + 空间名）。
+fn space_row(
+    window: iced::window::Id,
+    cursor: Point,
+    space: &atelyx_core::global_config::RecentSpace,
+    active: bool,
+    expanded: &HashSet<&str>,
+) -> Element<'static, Message> {
+    let row = row![
+        icon(
+            if active && expanded.contains("") { "chevron-down" } else { "chevron-right" },
+            14.0,
+            pal::TEXT_MUTED,
+        ),
+        icon("cloud", 14.0, if active { pal::ACCENT } else { pal::TEXT_MUTED }),
+        text(space.name.clone())
+            .size(pal::FS_CAPTION)
+            .color(pal::TEXT_PRIMARY)
+            .font(iced::Font { weight: iced::font::Weight::Medium, ..iced::Font::default() }),
+    ]
+    .spacing(8)
+    .padding(Padding::ZERO.horizontal(8.0).vertical(4.0))
+    .width(Length::Fill);
+
+    let content = container(row)
+        .width(Length::Fill)
+        .height(Length::Fixed(32.0))
+        .align_y(Vertical::Center)
+        .style(move |_t| Style {
+            background: Some(if active { pal::ACCENT.scale_alpha(0.2) } else { Color::TRANSPARENT }.into()),
+            border: border::rounded(pal::RADIUS_SM),
+            ..Style::default()
+        });
+
+    let on_press = if active {
+        Message::ToggleDir(String::new())
+    } else {
+        Message::Space(crate::SpaceMsg::SelectSpace {
+            server_url: space.server_url.clone(),
+            space_id: space.space_id.clone(),
+            name: space.name.clone(),
+            from_boot: false,
+        })
+    };
+    mouse_area(
+        button(content)
+            .width(Length::Fill)
+            .style(|_t, status| button::Style {
+                background: matches!(status, button::Status::Hovered | button::Status::Pressed)
+                    .then_some(pal::HOVER.into()),
+                ..Default::default()
+            })
+            .on_press(on_press),
+    )
+    .on_enter(Message::Ui(crate::ui::UiMsg::HoverTip {
+        window,
+        label: format!("{} · {}", space.name, space.server_url),
+        box_px: 32.0,
+    }))
+    .on_exit(Message::Ui(crate::ui::UiMsg::HoverTipEnd {
+        window,
+        label: format!("{} · {}", space.name, space.server_url),
+    }))
+    .on_right_press(ctx_popup(
+        window,
+        cursor,
+        PopupState::SpaceRowMenu {
+            server_url: space.server_url.clone(),
+            space_id: space.space_id.clone(),
+        },
+    ))
+    .into()
 }
 
 /// 目录/文件行（行高 32、缩进 12+16×depth、展开指示线；激活文件 = 金淡底 + 左缘 2px 金轨）。
@@ -2112,7 +2409,7 @@ fn ext_label(name: &str) -> String {
 }
 
 /// 十六进制颜色串（`#rrggbb`）→ Color；非法输入返回 None（回落默认图标色）。
-fn parse_hex_color(hex: &str) -> Option<iced::Color> {
+pub(crate) fn parse_hex_color(hex: &str) -> Option<iced::Color> {
     let hex = hex.strip_prefix('#')?;
     if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
@@ -2162,7 +2459,9 @@ fn push_children(
         let is_dir = child.is_dir;
         let is_expanded = expanded.contains(rel.as_str());
         let name = rel.rsplit('/').next().unwrap_or(&rel).to_string();
-        let active = !is_dir && app.ui.last_note_file.as_deref() == Some(rel.as_str());
+        let active = !is_dir
+            && (app.ui.last_note_file.as_deref() == Some(rel.as_str())
+                || app.ui.last_table_file.as_deref() == Some(rel.as_str()));
         rows.push(TreeRow { name, depth, is_dir, expanded: is_expanded, rel: rel.clone(), active, guides: Vec::new() });
         if is_dir && is_expanded {
             push_children(app, rows, &rel, depth + 1, expanded);
@@ -2204,11 +2503,23 @@ fn note_view(app: &App) -> Element<'_, Message> {
         .popup
         .as_ref()
         .is_some_and(|(_, open)| matches!(open.state, PopupState::NoteMenu));
+    // 协作者胶囊（空间模式；远端 awareness 在场者，色点 + 昵称，多时折叠；名册见协作房间视图）
+    let mut toolbar_row = row![space().width(Length::Fill)].spacing(4);
+    if matches!(app.repo_kind, crate::RepoKind::Space(_)) && !app.remote_cursors.is_empty() {
+        let members: Vec<(iced::Color, String)> = app
+            .remote_cursors
+            .iter()
+            .map(|c| {
+                // 畸形色串回落灰点（与协作房间名册同兜底）
+                (parse_hex_color(&c.color).unwrap_or(pal::TEXT_MUTED), c.name.clone())
+            })
+            .collect();
+        toolbar_row = toolbar_row.push(collab_pill_row(&members));
+    }
     let toolbar = container(
-        row![
-            space().width(Length::Fill),
-            mode_control,
-            button(icon("ellipsis", 15.0, if menu_open { pal::ACCENT } else { pal::TEXT_MUTED }))
+        toolbar_row
+            .push(mode_control)
+            .push(button(icon("ellipsis", 15.0, if menu_open { pal::ACCENT } else { pal::TEXT_MUTED }))
                 .padding(Padding::ZERO.horizontal(4.0).vertical(4.0))
                 .style(|_t, status| button::Style {
                     background: None,
@@ -2220,7 +2531,7 @@ fn note_view(app: &App) -> Element<'_, Message> {
                     ..Default::default()
                 })
                 .on_press(btn_popup(window, cursor, PopupState::NoteMenu)),
-        ]
+        )
         .spacing(8),
     )
     .width(Length::Fill)
@@ -2329,6 +2640,8 @@ fn edit_view(app: &App) -> Element<'_, Message> {
     let mut rows = Vec::new();
     let mut prev: Option<usize> = None;
     let caret = app.edit.caret.min(doc.source.len());
+    // 远端光标以 note_text 全文为参照，编辑面坐标相对正文
+    let body_start = atelyx_core::frontmatter::block_end(&app.note_text).unwrap_or(0);
     // 空文档：补一个空源码块，给光标一个宿主
     if doc.blocks.is_empty() {
         rows.push(SurfaceRow::Block {
@@ -2347,6 +2660,8 @@ fn edit_view(app: &App) -> Element<'_, Message> {
                 pal: pal_edit,
                 opts: &app.edit_opts,
                 focused: app.edit.focused,
+                cursors: &app.remote_cursors,
+                body_start,
             }
             .into(),
         });
@@ -2408,18 +2723,20 @@ fn edit_view(app: &App) -> Element<'_, Message> {
                 exact: true,
                 covered: false,
                 element: markdown_edit::SourceBlock {
-                    from: chunk.from,
-                    to: chunk.to,
-                    text: &doc.source,
-                    caret,
-                    anchor: app.edit.anchor,
-                    preedit: app.edit.preedit.clone(),
-                    source: chunk.source,
-                    pal: pal_edit,
-                    opts: &app.edit_opts,
-                    focused: app.edit.focused && caret >= chunk.from && caret <= chunk.to,
-                }
-                .into(),
+                from: chunk.from,
+                to: chunk.to,
+                text: &doc.source,
+                caret,
+                anchor: app.edit.anchor,
+                preedit: app.edit.preedit.clone(),
+                source: chunk.source,
+                pal: pal_edit,
+                opts: &app.edit_opts,
+                focused: app.edit.focused && caret >= chunk.from && caret <= chunk.to,
+                cursors: &app.remote_cursors,
+                body_start,
+            }
+            .into(),
             });
         } else {
             let covered = sel_to > sel_from && sel_from < chunk.to && sel_to > chunk.from;
@@ -2825,12 +3142,16 @@ fn settings_view(app: &App) -> Element<'static, Message> {
         .width(Length::Fill)
         .padding(Padding::ZERO.horizontal(20.0).vertical(12.0)),
         controls::h_divider_subtle(),
-        controls::empty_state(
-            "settings",
-            "无设置项",
-            "此分区当前没有可配置的设置项。",
-            None,
-        ),
+        if active == "collab" {
+            collab_settings_view(app)
+        } else {
+            controls::empty_state(
+                "settings",
+                "无设置项",
+                "此分区当前没有可配置的设置项。",
+                None,
+            )
+        },
     ]
     .width(Length::Fill)
     .height(Length::Fill);
@@ -2855,6 +3176,123 @@ fn push_group<'a>(
         col = col.push(settings_item(item, active_tab));
     }
     nav.push(col)
+}
+
+/// 设置页「多人协作」：登录身份、协作展示色、设备会话管理、退出登录。
+fn collab_settings_view(app: &App) -> Element<'static, Message> {
+    let mut col = iced::widget::Column::<Message>::new()
+        .spacing(16)
+        .padding(Padding::ZERO.horizontal(20.0));
+    match &app.global.last_identity {
+        None => {
+            return container(controls::empty_state(
+                "users",
+                "未登录",
+                "经文件面板云钮登录协作服务器后，此处管理账号与设备会话。",
+                None,
+            ))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into();
+        }
+        Some(identity) => {
+            col = col.push(group_head("登录身份", &identity.server_url, false));
+            col = col.push(
+                container(
+                    row![
+                        icon("user", 14.0, pal::ACCENT),
+                        text(identity.display_name.clone())
+                            .size(pal::FS_CAPTION)
+                            .color(pal::TEXT_PRIMARY),
+                        text(format!("@ {}", identity.server_url))
+                            .size(pal::FS_CAPTION)
+                            .color(pal::TEXT_MUTED),
+                        space().width(Length::Fill),
+                        controls::btn("退出登录", &controls::BTN_SM, controls::Variant::Ghost, Some(Message::Space(crate::SpaceMsg::Logout))),
+                    ]
+                    .spacing(8),
+                )
+                .width(Length::Fill),
+            );
+            // 协作展示色（只读展示：编辑留待外观设置统一收口）
+            col = col.push(group_head("协作展示色", "远端光标 / 名单", false));
+            let color_swatch = app
+                .global
+                .collab_color
+                .clone()
+                .and_then(|hex| parse_hex_color(&hex))
+                .unwrap_or(pal::TEXT_MUTED);
+            col = col.push(
+                container(
+                    row![
+                        container(space())
+                            .width(Length::Fixed(12.0))
+                            .height(Length::Fixed(12.0))
+                            .style(move |_t| Style {
+                                background: Some(color_swatch.into()),
+                                border: border::rounded(999.0),
+                                ..Style::default()
+                            }),
+                        text(app.global.collab_color.clone().unwrap_or_else(|| "未指派".into()))
+                            .size(pal::FS_CAPTION)
+                            .color(pal::TEXT_SECONDARY)
+                            .font(mono()),
+                    ]
+                    .spacing(8),
+                )
+                .width(Length::Fill),
+            );
+            // 设备会话
+            col = col.push(group_head("设备会话", &format!("{} 台在线记录", app.space_devices.len()), false));
+            for d in &app.space_devices {
+                let badge: Element<'static, Message> = if d.current {
+                    text("本机").size(pal::FS_MICRO).color(pal::TEXT_MUTED).into()
+                } else {
+                    controls::btn(
+                        "吊销",
+                        &controls::BTN_SM,
+                        controls::Variant::Ghost,
+                        Some(Message::Space(crate::SpaceMsg::RevokeDevice(d.id.clone()))),
+                    )
+                    .into()
+                };
+                col = col.push(
+                    container(
+                        row![
+                            icon(
+                                if d.current { "monitor-check" } else { "monitor" },
+                                14.0,
+                                if d.current { pal::ACCENT } else { pal::TEXT_MUTED },
+                            ),
+                            text(d.device_name.clone())
+                                .size(pal::FS_CAPTION)
+                                .color(pal::TEXT_PRIMARY),
+                            text(format!(
+                                "最近活跃 {}",
+                                format_ts(d.last_seen_at * 1000)
+                            ))
+                            .size(pal::FS_MICRO)
+                            .color(pal::TEXT_MUTED),
+                            space().width(Length::Fill),
+                            badge,
+                        ]
+                        .spacing(8),
+                    )
+                    .width(Length::Fill)
+                    .padding(Padding::ZERO.vertical(2.0)),
+                );
+            }
+            if app.space_devices.is_empty() {
+                col = col.push(container(
+                    text("会话列表为空（打开本页时刷新）").size(pal::FS_MICRO).color(pal::TEXT_MUTED),
+                ));
+            }
+        }
+    }
+    scrollable(container(col).padding(Padding::ZERO.top(4.0).bottom(24.0)))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
 }
 
 /// 分组头：竖条 + 标题 + 右对齐 hint。
@@ -3063,6 +3501,72 @@ fn popup_element<'a>(
             file_menu_entries(app, rel, *is_dir, *is_root)
         }
         PopupState::VaultMenu { root } => vault_menu_entries(app, root),
+        PopupState::SpaceMenu => space_menu_entries(app, window),
+        PopupState::SpaceLogin { register } => space_login_entries(app, *register),
+        PopupState::SpaceCreate => vec![
+            (
+                0,
+                MenuEntry::Custom(
+                    space_form_input("空间名", &app.space_form.name.clone(), |v| {
+                        Message::Space(crate::SpaceMsg::LoginField(crate::SpaceField::Name, v))
+                    }, false),
+                    30.0,
+                ),
+            ),
+            (
+                0,
+                MenuEntry::Custom(space_hint("创建后你将是该空间的拥有者（owner）"), 18.0),
+            ),
+            (
+                0,
+                MenuEntry::Custom(space_action_row(
+                    "创建空间",
+                    app.space_busy,
+                    Message::Space(crate::SpaceMsg::CreateSpace),
+                ), 30.0),
+            ),
+        ],
+        PopupState::SpaceJoin => vec![
+            (
+                0,
+                MenuEntry::Custom(
+                    space_form_input("邀请码", &app.space_form.code.clone(), |v| {
+                        Message::Space(crate::SpaceMsg::LoginField(crate::SpaceField::Code, v))
+                    }, false),
+                    30.0,
+                ),
+            ),
+            (
+                0,
+                MenuEntry::Custom(space_action_row(
+                    "加入空间",
+                    app.space_busy,
+                    Message::Space(crate::SpaceMsg::JoinSpace),
+                ), 30.0),
+            ),
+        ],
+        PopupState::SpaceRowMenu { server_url, space_id } => {
+            let active = matches!(
+                app.repo_kind,
+                crate::RepoKind::Space(ref s)
+                    if s.server_url == *server_url && s.space_id == *space_id
+            );
+            vec![(
+                0,
+                MenuEntry::Action {
+                    label: "从列表移除".into(),
+                    icon: Some("x"),
+                    danger: true,
+                    disabled: active,
+                    on_press: (!active).then(|| Message::RemoveSpaceAsk {
+                        server_url: server_url.clone(),
+                        space_id: space_id.clone(),
+                    }),
+                    note: None,
+                    hint: active.then(|| "空间已激活，先进入其他仓库或空间".to_string()),
+                },
+            )]
+        }
         PopupState::NoteMenu => vec![
             (0, MenuEntry::action("添加笔记属性", Message::Props(crate::properties_view::PropsMsg::StartAdd))),
             (0, MenuEntry::action("历史记录", Message::HistoryToggle)),
@@ -4019,6 +4523,149 @@ fn vault_menu_entries(app: &App, root: &str) -> Vec<(usize, MenuEntry<'static>)>
         entries.push((1, MenuEntry::action("取消", Message::RemoveVaultCancel)));
     }
     entries
+}
+
+// ===== 协作空间（文件面板行 + 弹层表单）=====
+
+/// 打开新弹层（同窗口二段导航：菜单 → 表单）。
+fn space_sub_popup(window: iced::window::Id, app: &App, state: PopupState) -> Message {
+    Message::PopupOpen(
+        window,
+        PopupOpen {
+            point: app.cursor_for(window),
+            flip_y: None,
+            state,
+            min_width: 0.0,
+        },
+    )
+}
+
+/// 协作空间菜单：身份概览 / 登录（切换账号）/ 创建 / 邀请码加入。
+/// 账号下的空间直接列在文件面板空间区（登录即见），不在弹层中转。
+fn space_menu_entries(app: &App, window: iced::window::Id) -> Vec<(usize, MenuEntry<'static>)> {
+    let mut entries: Vec<(usize, MenuEntry)> = Vec::new();
+    if let Some(identity) = &app.global.last_identity {
+        entries.push((
+            0,
+            MenuEntry::Custom(
+                space_hint(&format!("{} @ {}", identity.display_name, identity.server_url)),
+                18.0,
+            ),
+        ));
+    }
+    entries.push((
+        0,
+        MenuEntry::action_icon(
+            if app.global.last_identity.is_some() { "登录其他账号" } else { "登录协作服务器" },
+            "log-in",
+            space_sub_popup(window, app, PopupState::SpaceLogin { register: false }),
+        ),
+    ));
+    if app.global.last_identity.is_some() {
+        entries.push((0, MenuEntry::action_icon("创建空间", "plus", space_sub_popup(window, app, PopupState::SpaceCreate))));
+        entries.push((0, MenuEntry::action_icon("邀请码加入", "user-plus", space_sub_popup(window, app, PopupState::SpaceJoin))));
+    }
+    entries
+}
+
+/// 协作登录 / 注册表单（地址 + 账号 + 密码 + 设备名）。
+fn space_login_entries(
+    app: &App,
+    register: bool,
+) -> Vec<(usize, MenuEntry<'static>)> {
+    let form = &app.space_form;
+    let field = |f: crate::SpaceField| move |v: String| Message::Space(crate::SpaceMsg::LoginField(f, v));
+    let mut entries: Vec<(usize, MenuEntry)> = vec![
+        (
+            0,
+            MenuEntry::Custom(
+                space_form_input("服务器地址（如 192.168.1.5:11224）", &form.server.clone(), field(crate::SpaceField::Server), false),
+                30.0,
+            ),
+        ),
+        (
+            0,
+            MenuEntry::Custom(
+                space_form_input("用户名", &form.username.clone(), field(crate::SpaceField::Username), false),
+                30.0,
+            ),
+        ),
+        (
+            0,
+            MenuEntry::Custom(
+                space_form_input("密码", &form.password.clone(), field(crate::SpaceField::Password), true),
+                30.0,
+            ),
+        ),
+        (
+            0,
+            MenuEntry::Custom(
+                space_form_input("设备名（可选）", &form.device.clone(), field(crate::SpaceField::Device), false),
+                30.0,
+            ),
+        ),
+        (
+            0,
+            MenuEntry::Custom(
+                space_action_row(
+                    if register { "注册并登录" } else { "登录" },
+                    app.space_busy,
+                    Message::Space(crate::SpaceMsg::LoginSubmit { register }),
+                ),
+                30.0,
+            ),
+        ),
+    ];
+    let mode = if register {
+        ("已有账号？去登录", false)
+    } else {
+        ("没有账号？去注册", true)
+    };
+    entries.push((0, MenuEntry::action(mode.0, Message::SpaceLoginToggle(mode.1))));
+    entries.push((0, MenuEntry::Custom(space_hint("令牌保存在系统密钥链，不落明文"), 18.0)));
+    entries
+}
+
+/// 弹层表单输入行（占位文案 + 字段映射；secure = 掩码显示，用于密码）。
+fn space_form_input<'a>(
+    placeholder: &str,
+    draft: &str,
+    on_input: impl Fn(String) -> Message + 'a,
+    secure: bool,
+) -> Element<'a, Message> {
+    let input = iced::widget::text_input(placeholder, draft)
+        .size(pal::FS_CAPTION)
+        .padding(Padding::ZERO.horizontal(12.0).vertical(6.0))
+        .on_input(on_input);
+    if secure { input.secure(true).into() } else { input.into() }
+}
+
+/// 弹层表单的说明行。
+fn space_hint(text_content: &str) -> Element<'static, Message> {
+    container(iced::widget::text(text_content.to_string()).size(pal::FS_MICRO).color(pal::TEXT_MUTED))
+        .padding(Padding::ZERO.horizontal(12.0))
+        .width(Length::Fill)
+        .into()
+}
+
+/// 弹层表单的提交行（按钮全宽；在途禁用）。
+fn space_action_row(
+    label: &str,
+    busy: bool,
+    on_press: Message,
+) -> Element<'static, Message> {
+    container(
+        controls::btn(
+            label,
+            &controls::BTN_SM,
+            controls::Variant::Secondary,
+            (!busy).then_some(on_press),
+        )
+        .width(Length::Fill),
+    )
+    .padding(Padding::ZERO.horizontal(12.0))
+    .width(Length::Fill)
+    .into()
 }
 
 /// 文件树右键菜单：文件夹 / 文件 / 根空白；删除 = 应用层确认流

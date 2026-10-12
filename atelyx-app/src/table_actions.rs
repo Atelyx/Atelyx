@@ -7,7 +7,7 @@ use iced::Task;
 use iced::{Point, Rectangle, Size};
 
 use crate::table_view as tv;
-use crate::{App, Message};
+use crate::{space_actions, App, Message};
 use atelyx_core::table_ops as ops;
 use atelyx_core::vault;
 use atelyx_core::vault::TableFile;
@@ -501,7 +501,14 @@ fn on_msg_open(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
         tv::TableMsg::Exported(result) => {
             match result {
                 Ok(0) => app.notify(NoticeLevel::Success, "已导出 xlsx"),
-                Ok(n) => app.notify(NoticeLevel::Warning, format!("已导出 xlsx（{n} 张图片无法嵌入）")),
+                Ok(n) => app.notify(
+                    NoticeLevel::Warning,
+                    if matches!(app.repo_kind, crate::RepoKind::Space(_)) {
+                        format!("已导出 xlsx（{n} 张图片附件在服务端，未嵌入）")
+                    } else {
+                        format!("已导出 xlsx（{n} 张图片无法嵌入）")
+                    },
+                ),
                 Err(e) => app.notify(NoticeLevel::Error, e),
             }
             Task::none()
@@ -577,8 +584,11 @@ pub fn open_table(app: &mut App, rel: &str) -> Task<Message> {
     load_table(app, rel)
 }
 
-/// 载入 .atb（spawn_blocking + 缓存；回执 gen 守卫）。
+/// 载入 .atb（spawn_blocking + 缓存；回执 gen 守卫）。空间模式走服务端读取。
 pub fn load_table(app: &App, rel: &str) -> Task<Message> {
+    if matches!(app.repo_kind, crate::RepoKind::Space(_)) {
+        return space_actions::space_load_table(app, rel);
+    }
     let gen = app.epoch();
     let state = app.vault.clone();
     let rel_owned = rel.to_string();
@@ -611,6 +621,10 @@ fn on_loaded(app: &mut App, gen: u64, file: String, result: Result<TableFile, St
     match result {
         Ok(table) => {
             app.table = Some(tv::TableSession::new(file, table));
+            // 空间模式在场跟随：名册与协作者据此看到本端正在编辑该表格
+            if matches!(app.repo_kind, crate::RepoKind::Space(_)) {
+                space_actions::send_presence(app);
+            }
             app.reload_history()
         }
         Err(e) => {
@@ -649,6 +663,10 @@ pub fn submit_table_save(app: &mut App, reason: tv::SaveReason) -> Task<Message>
     let Some(s) = app.table.as_ref() else { return Task::none() };
     if !s.dirty {
         return Task::none();
+    }
+    // 空间模式：基线 diff → 服务端补丁仲裁（id 不符回退全量），回执走 Space 消息
+    if matches!(app.repo_kind, crate::RepoKind::Space(_)) {
+        return space_actions::space_submit_table_save(app, reason);
     }
     let Some(root) = app.vault.root().ok() else { return Task::none() };
     let gen = app.epoch();
@@ -736,6 +754,10 @@ fn on_saved(
 }
 
 fn record_table_history(app: &App, content: String) -> Task<Message> {
+    // 空间模式：历史已在保存链内经服务端记录，此处不再本地记版
+    if matches!(app.repo_kind, crate::RepoKind::Space(_)) {
+        return Task::none();
+    }
     let Some(s) = app.table.as_ref() else { return Task::none() };
     let rel = s.file.clone();
     let gen = app.epoch();
@@ -1851,12 +1873,11 @@ fn pick_images(row_id: String, field_id: String) -> Task<Message> {
 }
 
 /// 选图入库：逐张生成唯一附件名并经写盘队列落字节，全部落地后一次性写入单元格
-/// （整批一步撤销；超限 / 非图片文件预检拒绝计数）。
+/// （整批一步撤销；超限 / 非图片文件预检拒绝计数）。空间模式走服务端字节上传。
 fn import_images(app: &mut App, row_id: String, field_id: String, files: Vec<(String, Vec<u8>)>) -> Task<Message> {
     let Some(s) = app.table.as_ref() else { return Task::none() };
     let table_id = s.data.id.clone();
-    let Some(root) = app.vault.root().ok() else { return Task::none() };
-    let queue = app.vault.writes.clone();
+    // 预检共用：超限 / 非法名计数，产出上传任务清单
     let mut skipped = 0usize;
     let mut jobs: Vec<(String, Vec<u8>)> = Vec::new();
     for (name, bytes) in files {
@@ -1875,6 +1896,31 @@ fn import_images(app: &mut App, row_id: String, field_id: String, files: Vec<(St
         }
         return Task::none();
     }
+    if matches!(app.repo_kind, crate::RepoKind::Space(_)) {
+        let Some(session) = space_actions::session_of(app) else { return Task::none() };
+        if !session.role.can_write() {
+            app.notify(NoticeLevel::Warning, "该空间为只读身份，无法上传图片");
+            return Task::none();
+        }
+        let client = session.client;
+        let space_id = session.space_id;
+        return Task::perform(
+            async move {
+                let mut rels = Vec::new();
+                let mut failed = skipped;
+                for (rel, bytes) in jobs {
+                    match client.put_file_bytes(&space_id, &rel, &bytes).await {
+                        Ok(()) => rels.push(rel),
+                        Err(_) => failed += 1,
+                    }
+                }
+                Message::Table(tv::TableMsg::ImagesWritten { row_id, field_id, rels, failed })
+            },
+            |m| m,
+        );
+    }
+    let Some(root) = app.vault.root().ok() else { return Task::none() };
+    let queue = app.vault.writes.clone();
     Task::perform(
         async move {
             let mut rels = Vec::new();
@@ -2003,7 +2049,6 @@ pub fn check_long_press(app: &mut App) {
 fn download_lightbox_image(app: &App) -> Task<Message> {
     let Some(s) = app.table.as_ref() else { return Task::none() };
     let Some(lb) = s.view.lightbox.clone() else { return Task::none() };
-    let Some(root) = app.vault.root().ok() else { return Task::none() };
     let images = s
         .data
         .rows
@@ -2013,6 +2058,24 @@ fn download_lightbox_image(app: &App) -> Task<Message> {
         .map(|v| ops::image_entries(v).into_iter().map(str::to_string).collect::<Vec<_>>())
         .unwrap_or_default();
     let Some(rel) = images.get(lb.index).cloned() else { return Task::none() };
+    // 空间模式：图片字节走服务端读取后落下载目录
+    if matches!(app.repo_kind, crate::RepoKind::Space(_)) {
+        let Some(session) = space_actions::session_of(app) else { return Task::none() };
+        let client = session.client;
+        let space_id = session.space_id;
+        return Task::perform(
+            async move {
+                let bytes = client.get_file_bytes(&space_id, &rel).await.map_err(|e| e.to_string())?;
+                let name = std::path::Path::new(&rel)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "图片.png".into());
+                vault::save_image_to_downloads(&name, &bytes)
+            },
+            |r| Message::Table(tv::TableMsg::Downloaded(r)),
+        );
+    }
+    let Some(root) = app.vault.root().ok() else { return Task::none() };
     Task::perform(
         async move {
             tokio::task::spawn_blocking(move || {
@@ -2032,16 +2095,19 @@ fn download_lightbox_image(app: &App) -> Task<Message> {
     )
 }
 
-/// 导出 xlsx（core 纯逻辑 + I/O；单图解析失败跳过不阻断）。
+/// 导出 xlsx（core 纯逻辑 + I/O；单图解析失败跳过不阻断）。空间模式图片在服务端，不传仓库根。
 fn export_xlsx(app: &App, path: Option<std::path::PathBuf>) -> Task<Message> {
     let Some(s) = app.table.as_ref() else { return Task::none() };
     let Some(target) = path else { return Task::none() };
-    let Some(root) = app.vault.root().ok() else { return Task::none() };
+    let root = match app.repo_kind {
+        crate::RepoKind::Space(_) => None,
+        crate::RepoKind::Local => app.vault.root().ok(),
+    };
     let table = s.data.clone();
     Task::perform(
         async move {
             tokio::task::spawn_blocking(move || {
-                atelyx_core::table_xlsx::export_table_xlsx(&table, Some(&root), &target)
+                atelyx_core::table_xlsx::export_table_xlsx(&table, root.as_deref(), &target)
             })
             .await
             .map_err(|e| e.to_string())
@@ -2056,7 +2122,6 @@ fn export_xlsx(app: &App, path: Option<std::path::PathBuf>) -> Task<Message> {
 /// 确保可见区域的图片句柄已发起加载（滚动/载入后调用；失败集不重试）。
 pub fn ensure_image_loads(app: &mut App) -> Option<Task<Message>> {
     let Some(s) = app.table.as_ref() else { return None };
-    let Some(root) = app.vault.root().ok() else { return None };
     let view = &s.view;
     if view.canvas_size.width <= 0.0 {
         return None;
@@ -2089,7 +2154,30 @@ pub fn ensure_image_loads(app: &mut App) -> Option<Task<Message>> {
     }
     let gen = app.epoch();
     let inflight = rels.clone();
-    let task = Task::perform(
+    // 空间模式：逐张走服务端字节读取（无文件指纹，dataURL 同样解码即用）
+    let task = if matches!(app.repo_kind, crate::RepoKind::Space(_)) {
+        let Some(session) = space_actions::session_of(app) else { return None };
+        let client = session.client;
+        let space_id = session.space_id;
+        Task::perform(
+            async move {
+                let mut results: Vec<(String, (u128, u64), Result<Vec<u8>, String>)> = Vec::new();
+                for rel in rels {
+                    let result = if rel.starts_with("data:") {
+                        atelyx_core::table_xlsx::decode_data_url(&rel)
+                            .ok_or_else(|| "图片数据解码失败".to_string())
+                    } else {
+                        client.get_file_bytes(&space_id, &rel).await.map_err(|e| e.to_string())
+                    };
+                    results.push((rel, (0, 0), result));
+                }
+                (gen, results)
+            },
+            |(gen, results)| Message::TableImagesLoaded(gen, results),
+        )
+    } else {
+        let Some(root) = app.vault.root().ok() else { return None };
+        Task::perform(
         async move {
             let results: Vec<(String, (u128, u64), Result<Vec<u8>, String>)> =
                 tokio::task::spawn_blocking(move || {
@@ -2129,7 +2217,8 @@ pub fn ensure_image_loads(app: &mut App) -> Option<Task<Message>> {
             (gen, results)
         },
         |(gen, results)| Message::TableImagesLoaded(gen, results),
-    );
+        )
+    };
     if let Some(s) = app.table.as_mut() {
         for rel in inflight {
             s.view.image_inflight.insert(rel);

@@ -22,7 +22,10 @@ use iced::{Color, Element, Font, Length, Padding, Point, Rectangle, Size, Theme,
 
 use std::time::{Duration, Instant};
 
+use crate::layout_view::parse_hex_color;
 use crate::markdown_view::SourceKind;
+use crate::ui::palette as pal;
+use crate::ui::semibold;
 use crate::Message;
 
 /// 行级缩进单位：两个空格（列表嵌套的通行写法）。
@@ -637,6 +640,29 @@ fn hit_offset(p: &ParagraphT, content: &str, point: Point) -> usize {
     byte_of_char(content, if split { i + 1 } else { i })
 }
 
+/// 远端协作者光标竖条宽（比本端光标 1.5 略宽，便于区分归属）。
+const REMOTE_CARET_W: f32 = 2.0;
+/// 远端名签与光标条的垂直间距（名签画在条上方）。
+const REMOTE_LABEL_GAP: f32 = 2.0;
+
+/// 远端光标（note_text 偏移）→ 本块绘制区间（块内字节偏移）：选区两端夹回块界，
+/// 光标位仅在 head 落在块内时给出。head 在 frontmatter 区（< body_start）时整条不画；
+/// 锚点落在 frontmatter 区时归正文零点，选区伸入正文的部分照画。
+fn remote_span_in_block(
+    head: usize,
+    anchor: usize,
+    body_start: usize,
+    from: usize,
+    to: usize,
+) -> Option<(usize, usize, Option<usize>)> {
+    let head = head.checked_sub(body_start)?;
+    let anchor = anchor.saturating_sub(body_start);
+    let lo = anchor.min(head).clamp(from, to);
+    let hi = anchor.max(head).clamp(from, to);
+    let caret = (from <= head && head <= to).then_some(head);
+    (hi > lo || caret.is_some()).then_some((lo, hi, caret))
+}
+
 /// 源码态块部件：整块源码（标记显形）+ 光标/选区，托管输入法。
 pub struct SourceBlock<'a> {
     pub from: usize,
@@ -650,6 +676,10 @@ pub struct SourceBlock<'a> {
     pub opts: &'a ParseOptions,
     /// 编辑面是否持有光标（应用层状态；为真才显示光标、闪动、接管按键与输入法）。
     pub focused: bool,
+    /// 协作成员远端光标（note_text 字节偏移，绘制时换算到本块）。
+    pub cursors: &'a [crate::RemoteCursorView],
+    /// 正文在 note_text 中的起点（远端偏移 → 编辑面坐标换算基准）。
+    pub body_start: usize,
 }
 
 /// 源码态排版口径：字号与行高倍数。
@@ -772,6 +802,9 @@ impl Widget<Message, Theme, iced::Renderer> for SourceBlock<'_> {
             iced::advanced::widget::text::Style { color: None },
             viewport,
         );
+
+        // 远端协作者光标（不随本端焦点隐藏；本端组合串与光标压其上）
+        self.draw_remote_cursors(renderer, state, p, origin, bounds, count);
 
         if !self.focused {
             return;
@@ -897,6 +930,74 @@ impl Widget<Message, Theme, iced::Renderer> for SourceBlock<'_> {
 }
 
 impl SourceBlock<'_> {
+    /// 远端协作者光标绘制：选区（成员色 25%，压正文上）+ 光标条 + 条上方名签。
+    /// 名签上方无空间时落回块内首行；越出块右缘由块边界裁剪。`count` = 块内字符数（复用主绘制）。
+    fn draw_remote_cursors(
+        &self,
+        renderer: &mut iced::Renderer,
+        state: &SourceState,
+        p: &ParagraphT,
+        origin: Point,
+        bounds: Rectangle,
+        count: usize,
+    ) {
+        if self.cursors.is_empty() {
+            return;
+        }
+        let line_px = source_line_px(&self.source);
+        for cursor in self.cursors {
+            let Some((lo, hi, caret)) =
+                remote_span_in_block(cursor.head, cursor.anchor, self.body_start, self.from, self.to)
+            else {
+                continue;
+            };
+            let Some(color) = parse_hex_color(&cursor.color) else {
+                continue;
+            };
+            if hi > lo {
+                let tint = color.scale_alpha(0.25);
+                for r in selection_rects(
+                    p,
+                    char_index(&state.content, lo - self.from),
+                    char_index(&state.content, hi - self.from),
+                ) {
+                    renderer.fill_quad(
+                        Quad {
+                            bounds: Rectangle::new(origin + Vector::new(r.x, r.y), r.size()),
+                            ..Quad::default()
+                        },
+                        tint,
+                    );
+                }
+            }
+            let Some(caret) = caret else { continue };
+            let (x, y, h) = caret_xy(p, count, char_index(&state.content, caret - self.from), line_px);
+            renderer.fill_quad(
+                Quad {
+                    bounds: Rectangle::new(origin + Vector::new(x, y), Size::new(REMOTE_CARET_W, h)),
+                    ..Quad::default()
+                },
+                color,
+            );
+            renderer.fill_text(
+                advanced_text::Text {
+                    content: cursor.name.clone(),
+                    bounds: Size::new(f32::INFINITY, f32::INFINITY),
+                    size: pal::FS_MICRO.into(),
+                    line_height: advanced_text::LineHeight::Relative(1.0),
+                    font: semibold(),
+                    align_x: advanced_text::Alignment::Left,
+                    align_y: alignment::Vertical::Top,
+                    shaping: advanced_text::Shaping::Auto,
+                    wrapping: advanced_text::Wrapping::None,
+                },
+                origin + Vector::new(x, (y - pal::FS_MICRO - REMOTE_LABEL_GAP).max(0.0)),
+                color,
+                bounds,
+            );
+        }
+    }
+
     /// 已解析按键 → 事件上报。
     fn apply_key(
         &self,
@@ -2048,5 +2149,23 @@ mod tests {
         // 区内向下进首块
         assert_eq!(vertical_target(2, &spans, &[0, 1, 2], true), Some(5));
         assert_eq!(vertical_target(1, &spans, &[0, 1, 2], true), Some(2));
+    }
+
+    #[test]
+    fn remote_span_converts_note_offsets_to_block() {
+        // 前缀剥除：note 偏移 15/17 → 正文 5/7，选区落块 [4, 10) 内
+        assert_eq!(remote_span_in_block(17, 15, 10, 4, 10), Some((5, 7, Some(7))));
+        // 折叠光标：选区为空，光标条保留
+        assert_eq!(remote_span_in_block(16, 16, 10, 4, 10), Some((6, 6, Some(6))));
+        // 块末边界光标归本块（端点闭区间）
+        assert_eq!(remote_span_in_block(20, 20, 10, 4, 10), Some((10, 10, Some(10))));
+        // 选区跨越块界：两端夹回块界，head 在块外则不画光标条
+        assert_eq!(remote_span_in_block(30, 1, 10, 4, 10), Some((4, 10, None)));
+        // 锚点在 frontmatter 区（< body_start）：归正文零点，伸入块内的部分照画
+        assert_eq!(remote_span_in_block(17, 3, 10, 4, 10), Some((4, 7, Some(7))));
+        // head 在 frontmatter 区：整条不画
+        assert_eq!(remote_span_in_block(8, 20, 10, 0, 10), None);
+        // 光标与选区都不触及块
+        assert_eq!(remote_span_in_block(22, 24, 10, 4, 10), None);
     }
 }

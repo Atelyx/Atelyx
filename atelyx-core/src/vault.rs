@@ -115,6 +115,13 @@ impl VaultState {
         let _ = self.table_cache.lock().map(|mut c| c.clear());
         Ok(())
     }
+
+    /// 仅推进世代（不设仓库会话、不清缓存）：进入 / 离开协作空间时调用，
+    /// 使在途的本地仓库异步回执按世代守卫过期，与 `set` 的切换语义对齐。
+    pub fn bump_generation(&self) {
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 // ===== .atlx 文件结构 =====
@@ -2214,6 +2221,11 @@ pub fn regenerate_file_id(path: &Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// 新实体稳定 id（画布 / 表格 / 协作合并按 id 身份；与 regenerate_file_id 同源）。
+pub fn new_entity_id() -> String {
+    nanoid!()
 }
 
 /// 仓库显示名：优先取路径最后一段（文件夹名）；网络共享根（`\\server\share`，无更深子目录）

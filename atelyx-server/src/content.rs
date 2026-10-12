@@ -143,10 +143,23 @@ pub async fn write_file(
     if path.is_dir() {
         return Err(bad_request("目标已是目录"));
     }
-    // 同路径写串行化：锁内完成落盘，同路径并发写严格按到达序执行
+    // 同路径写串行化：锁内完成落盘，同路径并发写严格按到达序执行。
+    // 取锁前记录存在性、锁内复查：等待锁期间 rename(P→Q)/delete_file/补丁漂移已移走或
+    // 删除 P 时无条件写会把旧路径复活（.atb/.atlx 同 id 双文件）——覆盖写（取锁前已存在）
+    // 被拒，新建（取锁前不存在）不受影响。delete_folder 与本端点不互斥（目录删除无路径锁
+    // 协同）：「删目录 → 并发新建目录内文件重建目录」的复活仍可达，但新建分支会广播
+    // fs-changed，各端重拉树后收敛到真实状态，不产生同 id 双文件
+    let pre_exists = path.is_file();
     let _lock = state.path_lock(&space_id, &body.path).await;
+    if pre_exists && !path.is_file() {
+        return Err(not_found("文件已被改名或删除，写入被拒绝"));
+    }
     atomic_write(&path, &bytes)
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    // 新建文件 = 结构变更：广播在线协作者刷新文件树（覆盖写不广播，内容级各有专用通道）
+    if !pre_exists {
+        crate::ws::broadcast_fs_changed(&state.hub(), &format!("space:{space_id}"));
+    }
     let updated_at = file_mtime_secs(&path);
     tracing::info!(space_id = %space_id, path = %body.path, bytes = bytes.len(), "内容写入");
     Ok(Json(json!({ "updatedAt": updated_at })).into_response())
@@ -253,6 +266,7 @@ pub async fn copy(
         .map_err(|e| internal(format!("复制失败：{e}")))?
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("复制失败：{e}")))?;
     tracing::info!(space_id = %space_id, from = %body.from_path, to = %body.to_path, "内容复制");
+    crate::ws::broadcast_fs_changed(&state.hub(), &format!("space:{space_id}"));
     Ok(Json(json!({})))
 }
 
@@ -290,6 +304,7 @@ pub async fn delete_file(
         return Err(bad_request("目标是目录，请走文件夹删除"));
     }
     std::fs::remove_file(&path).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("删除失败：{e}")))?;
+    crate::ws::broadcast_fs_changed(&state.hub(), &format!("space:{space_id}"));
     tracing::info!(space_id = %space_id, path = %query.path, "内容删除");
     Ok(Json(json!({ "deleted": true })))
 }
@@ -312,6 +327,7 @@ pub async fn create_folder(
         return Err(ApiError(StatusCode::CONFLICT, format!("路径已存在：{}", body.path)));
     }
     std::fs::create_dir_all(&path).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("创建目录失败：{e}")))?;
+    crate::ws::broadcast_fs_changed(&state.hub(), &format!("space:{space_id}"));
     Ok(Json(json!({ "path": body.path })))
 }
 
@@ -361,6 +377,7 @@ pub async fn delete_folder(
     .await
     .map_err(|e| internal(format!("删除失败：{e}")))?;
     result.map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("删除失败：{e}")))?;
+    crate::ws::broadcast_fs_changed(&state.hub(), &format!("space:{space_id}"));
     tracing::info!(space_id = %space_id, path = %body.path, "文件夹删除");
     Ok(Json(json!({ "deleted": true, "itemCount": item_count })))
 }

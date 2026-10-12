@@ -9,6 +9,7 @@ mod layout_view;
 mod markdown_edit;
 mod markdown_view;
 mod properties_view;
+mod space_actions;
 mod table_actions;
 mod table_view;
 mod ui;
@@ -18,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use atelyx_core::global_config;
+use atelyx_core::global_config::{self, LastActive};
 use atelyx_core::layout::{
     self, apply_layout_op, normalize, op_passes_shape_check, AppUiState, DetachedWindow,
     LayoutOp, WindowBounds, UI_STATE_SCHEMA,
@@ -30,6 +31,7 @@ use iced::widget::{space, text_editor};
 use iced::window::{self, Level, Mode, Position, Settings};
 use iced::{keyboard, mouse, Element, Event, Point, Size, Subscription, Task, Theme};
 
+use crate::table_view as tv;
 use markdown_edit::HitTarget;
 use properties_view::{PropsMsg, PropsPanel};
 use ui::notify::{Level as NoticeLevel, Notification};
@@ -75,7 +77,7 @@ fn strip_frontmatter(text: &str) -> &str {
 }
 
 /// 展平文件树中的全部文件（树序；(rel, 含扩展名文件名)）。
-fn collect_md_files(tree: &[vault::FileTreeNode], out: &mut Vec<(String, String)>) {
+pub(crate) fn collect_md_files(tree: &[vault::FileTreeNode], out: &mut Vec<(String, String)>) {
     for node in tree {
         if node.is_dir {
             collect_md_files(&node.children, out);
@@ -205,7 +207,7 @@ const WINDOW_SIZE: Size = Size::new(1100.0, 760.0);
 const PERSIST_TICK: std::time::Duration = std::time::Duration::from_millis(800);
 
 /// 自动保存防抖：最近一次内容变更后停止输入该时长才写回（尾沿 debounce，单定时器链续排）。
-const AUTOSAVE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(500);
+pub(crate) const AUTOSAVE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// 应用数据目录（bundle identifier = com.atelyx.desktop）；ui-state.json 与 global.json 同放此处。
 fn app_data_dir() -> Option<PathBuf> {
@@ -248,7 +250,7 @@ fn load_global_boot() -> (global_config::GlobalConfig, Option<String>) {
 }
 
 /// 当前 unix 秒（最近仓库的打开时间戳）。
-fn now_secs() -> u64 {
+pub(crate) fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -361,7 +363,7 @@ enum Message {
     /// 文件夹颜色落盘完成（重读后的清单；gen 守卫）。
     FolderColorsLoaded(u64, Result<HashMap<String, String>, String>),
     /// 排序方式落盘回执（失败提示，不回滚界面选择）。
-    ConfigSaved(Result<(), String>),
+    ConfigSaved(u64, Result<(), String>),
     /// 文件行按压（拖拽候选；由行 mouse_area 上报，超阈值转正拖拽会话）。
     FileRowPress { window: window::Id, rel: String, is_dir: bool },
     /// 拖拽悬停进入可落点（文件夹行 / 仓库行；无会话时忽略）。
@@ -495,6 +497,14 @@ enum Message {
     SaveErrorDismiss,
     /// 未实现功能的占位通知。
     NotImplemented(&'static str),
+    /// 协作空间消息（账号 / 空间切换 / 空间保存回执）。
+    Space(SpaceMsg),
+    /// 文件面板云钮：打开协作空间菜单（未登录先弹登录层）。
+    SpaceMenuOpen,
+    /// 登录层切换注册 / 登录模式（弹层保持打开）。
+    SpaceLoginToggle(bool),
+    /// 最近空间行：从列表移除（仅移出列表，不影响服务端数据与成员资格）。
+    RemoveSpaceAsk { server_url: String, space_id: String },
 }
 
 /// 文件操作成功后对打开中笔记的跟随语义。
@@ -613,8 +623,8 @@ struct TabPress {
 }
 
 /// 保存动机：决定完成回执的处理（提示 / 清脏 / 放行待续动作）。
-#[derive(Debug, Clone)]
-enum SaveReason {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SaveReason {
     /// Ctrl+S：完成提示「已保存」。
     Manual,
     /// 停止输入 500ms 防抖自动写回。
@@ -639,6 +649,130 @@ enum PendingAfterFlush {
     /// 文件树拖拽移动（挂起输入先落盘，防代写被未落盘内容回写覆盖）。
     MoveEntry { from: String, is_dir: bool, to_dir: String },
     RenameFile(RenameState),
+    /// 从空间列表进入指定协作空间（会话恢复可能弹登录层）。
+    SelectSpace { server_url: String, space_id: String, name: String },
+}
+
+/// 仓库容器身份：本地文件夹仓库 or 协作空间（同一时刻互斥激活）。
+/// 本地分派 vault；空间分派 space_actions（内容真源在服务端，`vault` 会话保持空置）。
+#[derive(Clone, Default)]
+pub enum RepoKind {
+    #[default]
+    Local,
+    Space(space_actions::SpaceSession),
+}
+
+/// 协作弹层表单草稿（登录 / 创建空间 / 邀请码加入共用一套草稿位）。
+#[derive(Clone, Debug, Default)]
+pub struct SpaceForm {
+    pub server: String,
+    pub username: String,
+    pub password: String,
+    pub device: String,
+    /// 创建空间：空间名。
+    pub name: String,
+    /// 加入空间：邀请码。
+    pub code: String,
+    /// 登录层当前模式（true = 注册）。
+    pub register: bool,
+}
+
+/// 协作弹层表单字段。
+#[derive(Debug, Clone, Copy)]
+pub enum SpaceField {
+    Server,
+    Username,
+    Password,
+    Device,
+    Name,
+    Code,
+}
+
+/// 协作空间消息：账号 / 空间切换 / 空间保存回执 / 实时事件。
+/// 内容面回执尽量复用既有消息（FileLoaded / OpDone / VaultMetaLoaded 等，gen 守卫同源）。
+#[derive(Debug, Clone)]
+pub enum SpaceMsg {
+    LoginField(SpaceField, String),
+    /// 提交登录 / 注册（register = 注册模式）。
+    LoginSubmit { register: bool },
+    LoginDone {
+        server_url: String,
+        result: Result<atelyx_core::space_client::AuthInfo, atelyx_core::space_client::SpaceError>,
+    },
+    SpacesLoaded {
+        server_url: String,
+        result: Result<Vec<atelyx_core::space_client::SpaceSummary>, atelyx_core::space_client::SpaceError>,
+        window: window::Id,
+    },
+    /// 选择要进入的空间（文件面板空间行 / 创建加入成功后）。
+    SelectSpace { server_url: String, space_id: String, name: String, from_boot: bool },
+    /// 会话恢复回执：Ok = 进入空间；Err = 弹登录层（启动自动进入则静默停留）。
+    RestoreDone {
+        server_url: String,
+        space_id: String,
+        name: String,
+        result: Result<
+            (Arc<atelyx_core::space_client::SpaceClient>, Vec<atelyx_core::space_client::SpaceSummary>),
+            atelyx_core::space_client::SpaceError,
+        >,
+    },
+    CreateSpace,
+    CreateSpaceDone {
+        result: Result<atelyx_core::space_client::SpaceSummary, atelyx_core::space_client::SpaceError>,
+    },
+    JoinSpace,
+    JoinSpaceDone {
+        result: Result<atelyx_core::space_client::AcceptAck, atelyx_core::space_client::SpaceError>,
+    },
+    /// 空间整树落地：切片填充 children / note_files / file_count。
+    TreeLoaded {
+        gen: u64,
+        result: Result<Vec<atelyx_core::space_client::TreeNode>, atelyx_core::space_client::SpaceError>,
+    },
+    /// 空间笔记保存回执（rel = 发起时文件；frozen = 发起时冻结的正文，Ok 携带服务端合流后的最终全文）。
+    NoteSaved {
+        gen: u64,
+        rel: String,
+        frozen: String,
+        reason: SaveReason,
+        result: Result<String, String>,
+    },
+    /// 空间表格补丁回执（new_file = 服务端标题漂移后的实际路径）。
+    TablePatchDone {
+        gen: u64,
+        file: String,
+        new_file: String,
+        reason: tv::SaveReason,
+        result: Result<String, String>,
+        frozen: atelyx_core::vault::TableFile,
+    },
+    /// 文件夹确认删除（needsConfirm 二段式的 force 步）。
+    ForceDeleteFolder { gen: u64, rel: String },
+    HistoryRecorded { err: Option<String> },
+    /// 设备会话列表落地（设置页「多人协作」）。
+    DevicesLoaded {
+        result: Result<Vec<atelyx_core::space_client::DeviceEntry>, atelyx_core::space_client::SpaceError>,
+    },
+    /// 吊销指定设备会话（回执经 DeviceRevoked）。
+    RevokeDevice(String),
+    /// 吊销设备会话回执（吊销后重拉列表）。
+    DeviceRevoked { session_id: String, result: Result<(), atelyx_core::space_client::SpaceError> },
+    /// 退出登录：清密钥链令牌、服务器清单与最近空间，摘掉激活空间身份。
+    Logout,
+    /// 帧泵订阅建立：命令入口回填（此后协作命令经它上行；身份回验防过期泵串会话）。
+    PumpReady {
+        server_url: String,
+        space_id: String,
+        cmds: tokio::sync::mpsc::UnboundedSender<atelyx_core::collab::SpaceCmd>,
+    },
+    /// 帧泵事件（连接 / 名册 / 协作帧 / 断线重连；身份随行供会话回验）。
+    Event {
+        server_url: String,
+        space_id: String,
+        event: Box<atelyx_core::collab::SpaceEvent>,
+    },
+    /// 他端结构变更的树刷新兜底 tick（合并窗口结束后的最终一次刷新）。
+    FsTreeRefresh,
 }
 
 pub struct App {
@@ -690,6 +824,49 @@ pub struct App {
     pub remove_vault_confirm: Option<String>,
     /// 当前仓库根（打开仓库后与 vault.root() 一致；仅用于展示与 files 视图判空）。
     pub vault_root: Option<PathBuf>,
+    /// 仓库容器身份（本地 / 空间；内容面按它分派）。
+    pub repo_kind: RepoKind,
+    /// 空间整树缓存（进入空间后拉取；children / note_files / file_count 共同数据源）。
+    pub space_tree: Option<Vec<atelyx_core::space_client::TreeNode>>,
+    /// 服务端空间列表（登录后拉取；文件面板空间行展示）。
+    pub space_list: Vec<atelyx_core::space_client::SpaceSummary>,
+    /// 协作弹层表单草稿（登录 / 创建 / 加入）。
+    pub space_form: SpaceForm,
+    /// 协作请求在途（弹层提交按钮禁用）。
+    pub space_busy: bool,
+    /// 登录前挂起的目标空间（登录成功自动续接）。
+    space_pending: Option<(String, String, String)>,
+    /// 会话内令牌兜底（密钥链不可用时仅本次会话有效，不落盘）。
+    session_token: Option<(String, String)>,
+    /// 当前打开笔记的「上次确认落盘基线」（空间模式三方合流的祖先；None = 尚未落盘）。
+    pub space_note_flushed: Option<String>,
+    /// 空间笔记保存在途标志（回执即清）：空间保存无写队列可依赖，并发两笔会乱序落地覆盖服务端。
+    space_note_save_inflight: bool,
+    /// 在途保存期间收到 Flush 请求：回执后补一笔串行收尾（关窗/切文件的脏拦截依赖它）。
+    space_note_save_flush_queued: bool,
+    /// 各空间独立的文件树展开集（会话内记忆；键 = 服务器/空间 id）。
+    expanded_by_space: HashMap<String, Vec<String>>,
+    /// 设备会话列表（设置页「多人协作」；打开该页时拉取）。
+    pub space_devices: Vec<atelyx_core::space_client::DeviceEntry>,
+    /// 会话令牌（WS hello 用；登录/恢复会话时置位，登出/离开清空）。
+    space_token: Option<String>,
+    /// 协作帧泵命令入口（订阅建立后回填；None = 泵未就绪）。
+    pub space_cmds: Option<tokio::sync::mpsc::UnboundedSender<atelyx_core::collab::SpaceCmd>>,
+    /// 在线成员名册（Peers / Presence 事件维护）。
+    pub space_peers: Vec<atelyx_core::collab::PeerInfo>,
+    /// 他端结构变更的树刷新节流（上次刷新时刻 + 合并窗口内是否已排兜底 tick）。
+    space_tree_refresh_at: Option<std::time::Instant>,
+    fs_tree_refresh_pending: bool,
+    /// 笔记协作文档绑定（空间模式且打开笔记时）。
+    pub note_collab: Option<atelyx_core::note_collab::NoteCollab>,
+    /// 协作绑定当前挂的文件（None = 未挂）。
+    pub note_collab_file: Option<String>,
+    /// 远端成员光标（awareness 换算为 note_text 字节偏移；编辑面渲染）。
+    pub remote_cursors: Vec<RemoteCursorView>,
+    /// 本端帧泵 peerId（hello-ack 分配）：自声落地帧与名册自条目据此过滤。
+    pub space_own_peer_id: Option<String>,
+    /// 远端光标过期剔除的节流时刻（周期 tick 搭载刷新，避免每 100ms 全文换算）。
+    space_cursor_prune_at: Option<std::time::Instant>,
     /// 仓库文件总数（打开仓库后异步统计；统计在途为 None）。
     pub file_count: Option<usize>,
     /// 主窗口（渲染激活布局树）；None = 首帧在途。
@@ -790,6 +967,15 @@ pub struct App {
     pub file_drag_target: Option<String>,
 }
 
+/// 编辑面渲染用的远端光标视图（字节偏移，UTF-16 已换算）。
+#[derive(Debug, Clone)]
+pub struct RemoteCursorView {
+    pub name: String,
+    pub color: String,
+    pub anchor: usize,
+    pub head: usize,
+}
+
 /// 文件树拖拽按下候选。
 struct FilePress {
     window: window::Id,
@@ -833,8 +1019,12 @@ impl App {
             .chain(iced::font::load(ui::FONT_DISPLAY))
             .discard();
         let (global, global_notice) = load_global_boot();
-        // 最近列表首项 = 上次所在仓库，启动直接进入（路径失效则进入失败、停留未激活态）
-        let auto_enter = global.recent_vaults.first().map(|v| PathBuf::from(&v.root));
+        // 启动自动进入：最后激活身份优先，缺省回落最近仓库首位（路径失效则停留未激活态）
+        let auto_vault: Option<PathBuf> = match &global.last_active {
+            Some(LastActive::Vault { root }) => Some(PathBuf::from(root)),
+            Some(LastActive::Space { .. }) => None,
+            None => global.recent_vaults.first().map(|v| PathBuf::from(&v.root)),
+        };
         let mut boot = open
             .map(Message::WindowOpened)
             .chain(window::position(main_os).map(move |p| Message::PositionKnown(main_os, p)))
@@ -842,8 +1032,22 @@ impl App {
         if let Some(text) = global_notice {
             boot = boot.chain(Task::done(Message::StartupNotice(text)));
         }
-        if let Some(root) = auto_enter {
+        if let Some(root) = auto_vault {
             boot = boot.chain(Task::done(Message::SelectVault(root)));
+        }
+        if let Some(LastActive::Space { server_url, space_id }) = &global.last_active {
+            let name = global
+                .recent_spaces
+                .iter()
+                .find(|s| s.server_url == *server_url && s.space_id == *space_id)
+                .map(|s| s.name.clone())
+                .unwrap_or_else(|| space_id.clone());
+            boot = boot.chain(Task::done(Message::Space(SpaceMsg::SelectSpace {
+                server_url: server_url.clone(),
+                space_id: space_id.clone(),
+                name,
+                from_boot: true,
+            })));
         }
         (
             Self {
@@ -926,6 +1130,28 @@ impl App {
                 flush_pending: None,
                 mods: keyboard::Modifiers::default(),
                 table_popup_draft: String::new(),
+                repo_kind: RepoKind::Local,
+                space_tree: None,
+                space_list: Vec::new(),
+                space_form: SpaceForm::default(),
+                space_busy: false,
+                space_pending: None,
+                session_token: None,
+                space_note_flushed: None,
+                space_note_save_inflight: false,
+                space_note_save_flush_queued: false,
+                expanded_by_space: HashMap::new(),
+                space_devices: Vec::new(),
+                space_token: None,
+                space_cmds: None,
+                space_peers: Vec::new(),
+                space_own_peer_id: None,
+                space_cursor_prune_at: None,
+                space_tree_refresh_at: None,
+                fs_tree_refresh_pending: false,
+                note_collab: None,
+                note_collab_file: None,
+                remote_cursors: Vec::new(),
             },
             boot,
         )
@@ -1083,7 +1309,9 @@ impl App {
                 if gen != self.epoch() || self.ui.last_note_file.as_deref() != Some(rel.as_str()) {
                     return Task::none();
                 }
-                self.note_text = text;
+                self.note_text = text.clone();
+                // 空间模式：载入成功即磁盘基线（三方合流的祖先）
+                self.space_note_flushed = matches!(self.repo_kind, RepoKind::Space(_)).then(|| text.clone());
                 self.source_editor = text_editor::Content::with_text(&self.note_text);
                 self.edit.reset(0);
                 self.dirty = false;
@@ -1097,11 +1325,15 @@ impl App {
                 self.refresh_preview();
                 self.refresh_edit();
                 self.notify(NoticeLevel::Success, "已打开");
+                // 空间模式：笔记接入协作文档（基线通告 + 握手 + 身份帧）
+                if matches!(self.repo_kind, RepoKind::Space(_)) {
+                    space_actions::collab_bind_note(self);
+                }
                 self.refresh_backlinks().chain(self.reload_history())
             }
             Message::FileLoaded(_, Err(e)) => {
                 // 载入失败必须清空编辑器：last_note_file 已指向新文件，残留旧内容
-                // 会让 Ctrl+S 把旧内容写进新路径
+                // 会让 Ctrl+S 把旧内容写进新路径；空间合流基线与协作绑定同样不得残留
                 self.note_text.clear();
                 self.source_editor = text_editor::Content::new();
                 self.edit.reset(0);
@@ -1110,6 +1342,10 @@ impl App {
                 self.dirty = false;
                 self.preview_doc = None;
                 self.reset_props();
+                self.space_note_flushed = None;
+                self.note_collab = None;
+                self.note_collab_file = None;
+                self.remote_cursors.clear();
                 self.notify(NoticeLevel::Error, e);
                 Task::none()
             }
@@ -1126,6 +1362,9 @@ impl App {
                         self.save_error = None;
                         self.autosave_deadline = Some(Instant::now() + AUTOSAVE_DEBOUNCE);
                         self.refresh_edit();
+                        // Source 档同样接入协作：差分合入协作文档并上行（否则本端按键对端不可见，
+                        // 且远端合入后本端继续输入会以旧全文覆盖 note_text 回退远端内容）
+                        space_actions::collab_after_edit(self);
                     }
                 }
                 Task::none()
@@ -1362,18 +1601,25 @@ impl App {
             }
             Message::SetSort(key) => {
                 self.file_sort = key.clone();
+                if matches!(self.repo_kind, RepoKind::Space(_)) {
+                    return space_actions::space_set_sort(self, &key);
+                }
                 let Some(root) = self.vault.root().ok() else { return Task::none() };
                 let patch = serde_json::json!({ "fileExplorerSort": key });
+                let gen = self.epoch();
                 Task::perform(
                     async move { vault::patch_vault_config(&root, &patch).map(|_| ()) },
-                    Message::ConfigSaved,
+                    move |result| Message::ConfigSaved(gen, result),
                 )
             }
-            Message::ConfigSaved(Err(e)) => {
+            Message::ConfigSaved(gen, Err(e)) => {
+                if gen != self.epoch() {
+                    return Task::none();
+                }
                 self.notify(NoticeLevel::Error, format!("保存排序失败：{e}"));
                 Task::none()
             }
-            Message::ConfigSaved(Ok(())) => Task::none(),
+            Message::ConfigSaved(..) => Task::none(),
             Message::DuplicateEntry(rel, is_dir) => {
                 self.dismiss_popup();
                 self.duplicate_entry(&rel, is_dir)
@@ -1736,6 +1982,15 @@ impl App {
                 self.notifications.retain(|n| !n.expired());
                 // 表格图片长按检查（拖拽排序激活）
                 table_actions::check_long_press(self);
+                // 远端光标过期剔除节流（1s）：对端崩溃/断网无离场帧，靠 awareness 超时惰性剔除
+                if self.note_collab.is_some()
+                    && self
+                        .space_cursor_prune_at
+                        .is_none_or(|at| at.elapsed() >= std::time::Duration::from_secs(1))
+                {
+                    self.space_cursor_prune_at = Some(Instant::now());
+                    space_actions::refresh_remote_cursors(self);
+                }
                 // 重名提醒条 3s 过期
                 if self
                     .rename_notice
@@ -2102,7 +2357,11 @@ impl App {
                 Task::none()
             }
             Message::SettingsTab(tab) => {
-                self.settings_tab = tab;
+                self.settings_tab = tab.clone();
+                // 协作页打开即拉设备会话列表（有登录身份才有内容）
+                if tab == "collab" && self.global.last_identity.is_some() {
+                    return space_actions::fetch_devices(self);
+                }
                 Task::none()
             }
             Message::PopupOpen(window, open) => {
@@ -2158,6 +2417,9 @@ impl App {
             }
             Message::FolderDeleteAsk(rel) => {
                 // 文件夹删除 = 非强制删除先行：空目录直接删；非空返回条目数进确认 pane
+                if matches!(self.repo_kind, RepoKind::Space(_)) {
+                    return space_actions::space_delete_entry(self, &rel, true);
+                }
                 let Some(root) = self.vault.root().ok() else { return Task::none() };
                 let gen = self.epoch();
                 let rel_task = rel.clone();
@@ -2288,14 +2550,19 @@ impl App {
                         })
                         .collect();
                 }
-                // 移动时源目录与目标目录不同，两处树都要刷新；文件操作改变仓库结构：
-                // 双链候选清单与标签词汇表与反链跟进；路径元数据（提示词/颜色）被 core
-                // 代写后重读对齐内存态
-                let mut refresh = self.load_children(&dir);
-                if let FollowUp::Renamed { from, .. } = &follow {
-                    let from_dir = parent_of(from);
-                    if from_dir != dir {
-                        refresh = refresh.chain(self.load_children(&from_dir));
+                // 空间模式 children 切片自整树缓存：结构变更后必须先拉新树，
+                // 否则切片复用旧树（新建文件不显示）；Renamed 的源/目标目录已含在整树内
+                let mut refresh = if matches!(self.repo_kind, RepoKind::Space(_)) {
+                    space_actions::refresh_space_tree(self)
+                } else {
+                    self.load_children(&dir)
+                };
+                if !matches!(self.repo_kind, RepoKind::Space(_)) {
+                    if let FollowUp::Renamed { from, .. } = &follow {
+                        let from_dir = parent_of(from);
+                        if from_dir != dir {
+                            refresh = refresh.chain(self.load_children(&from_dir));
+                        }
                     }
                 }
                 let mut next = refresh
@@ -2418,6 +2685,51 @@ impl App {
                 self.dismiss_popup();
                 self.notify(NoticeLevel::Info, format!("「{what}」尚未实现"));
                 Task::none()
+            }
+            Message::Space(msg) => match msg {
+                // 空间切换走脏拦截（登录恢复在途可能有未落盘输入）；启动自动进入直通
+                SpaceMsg::SelectSpace { server_url, space_id, name, from_boot } => {
+                    if from_boot {
+                        space_actions::handle(
+                            self,
+                            SpaceMsg::SelectSpace { server_url, space_id, name, from_boot: true },
+                        )
+                    } else {
+                        self.gate(PendingAfterFlush::SelectSpace {
+                            server_url,
+                            space_id,
+                            name,
+                        })
+                    }
+                }
+                other => space_actions::handle(self, other),
+            },
+            Message::SpaceMenuOpen => {
+                let Some(window) = self.main_id else { return Task::none() };
+                let cursor = self.cursor_for(window);
+                space_actions::open_space_menu(self, window, cursor)
+            }
+            Message::SpaceLoginToggle(register) => {
+                self.space_form.register = register;
+                if let Some(window) = self.popup.as_ref().map(|(w, _)| *w) {
+                    space_actions::open_login_popup(self, window)
+                } else {
+                    Task::none()
+                }
+            }
+            Message::RemoveSpaceAsk { server_url, space_id } => {
+                self.dismiss_popup();
+                // 只影响本机最近记录：服务端账号空间始终随列表展示，移除无效时明示
+                let in_recents = self
+                    .global
+                    .recent_spaces
+                    .iter()
+                    .any(|s| s.server_url == server_url && s.space_id == space_id);
+                self.global.remove_space(&server_url, &space_id);
+                if !in_recents {
+                    self.notify(NoticeLevel::Info, "该空间来自服务器账号，列表展示不受影响");
+                }
+                self.save_global()
             }
         }
     }
@@ -2778,7 +3090,7 @@ impl App {
         task
     }
 
-    fn schedule_persist(&mut self) {
+    pub(crate) fn schedule_persist(&mut self) {
         self.persist_dirty = true;
     }
 
@@ -2852,11 +3164,22 @@ impl App {
             }
             PendingAfterFlush::RenameFile(r) => self.commit_file_rename(r),
             PendingAfterFlush::MoveEntry { from, is_dir, to_dir } => self.move_entry(&from, is_dir, &to_dir),
+            PendingAfterFlush::SelectSpace { server_url, space_id, name } => {
+                // 脏拦截已过：直接进入（不得再经 gate，否则空脏判定重复放行成环）
+                space_actions::handle(
+                    self,
+                    SpaceMsg::SelectSpace { server_url, space_id, name, from_boot: false },
+                )
+            }
         }
     }
 
     /// 提交一次笔记写盘：仓库根与内容在发起时冻结，写盘经 core 串行队列按提交序执行。
+    /// 空间模式分派服务端（回读合流 + PUT + 服务端历史）。
     fn submit_save(&mut self, reason: SaveReason) -> Task<Message> {
+        if matches!(self.repo_kind, RepoKind::Space(_)) {
+            return space_actions::space_submit_save(self, reason);
+        }
         let Some(rel) = self.ui.last_note_file.clone() else {
             self.notify(NoticeLevel::Warning, "没有打开的文件");
             return Task::none();
@@ -2909,7 +3232,11 @@ impl App {
     }
 
     /// 进入仓库：成功则清空旧仓库会话态、登记最近列表并落盘 global.json；失败提示并保持当前态。
+    /// 来自协作空间时先摘掉空间身份（会话态清空与展开集记忆由 leave_space_identity 承担）。
     fn enter_vault(&mut self, path: PathBuf) -> Task<Message> {
+        if matches!(self.repo_kind, RepoKind::Space(_)) {
+            space_actions::leave_space_identity(self);
+        }
         // 展开集按仓库独立：切走时记忆当前仓库的集合，切回时恢复
         if let Some(old) = self.vault_root.clone() {
             self.expanded_by_vault.insert(old, self.ui.file_explorer_expanded.clone());
@@ -2984,8 +3311,16 @@ impl App {
                 self.table = None;
                 // 与笔记关闭同规：历史面板不再有对应文件可查，清空防列表冻结在旧数据
                 self.history.clear();
+                // 空间模式回收在场（名册不再滞留「正在编辑该表格」）
+                if matches!(self.repo_kind, RepoKind::Space(_)) {
+                    space_actions::send_presence(self);
+                }
             }
             _ => {
+                // 空间模式先摘协作绑定（离场帧 + presence 回收）再清编辑态
+                if matches!(self.repo_kind, RepoKind::Space(_)) {
+                    space_actions::collab_unbind_note(self);
+                }
                 self.ui.last_note_file = None;
                 self.note_text.clear();
                 self.source_editor = text_editor::Content::new();
@@ -3011,6 +3346,9 @@ impl App {
 
     /// 反链扫描：指纹增量刷新 wiki 索引后查询当前笔记（spawn_blocking，回执 gen 守卫）。
     fn refresh_backlinks(&self) -> Task<Message> {
+        if matches!(self.repo_kind, RepoKind::Space(_)) {
+            return space_actions::refresh_space_backlinks(self);
+        }
         let Some(rel) = self.ui.last_note_file.clone() else { return Task::none() };
         let gen = self.epoch();
         let state = self.vault.clone();
@@ -3034,6 +3372,9 @@ impl App {
 
     /// 标签词汇表扫描（spawn_blocking；候选按 count 降序）。
     fn refresh_tag_vocab(&self) -> Task<Message> {
+        if matches!(self.repo_kind, RepoKind::Space(_)) {
+            return space_actions::refresh_space_tags(self);
+        }
         let gen = self.epoch();
         let state = self.vault.clone();
         Task::perform(
@@ -3052,8 +3393,11 @@ impl App {
         )
     }
 
-    /// 全仓库笔记清单（双链候选数据源；树序）。
+    /// 全仓库笔记清单（双链候选数据源；树序）。空间模式由整树回执填充，此处直通。
     fn refresh_note_files(&self) -> Task<Message> {
+        if matches!(self.repo_kind, RepoKind::Space(_)) {
+            return Task::none();
+        }
         let gen = self.epoch();
         let state = self.vault.clone();
         Task::perform(
@@ -3192,6 +3536,9 @@ impl App {
 
     /// 读取当前上下文（笔记/表格）的历史版本（spawn_blocking；尽力而为，读失败 = 空列表）。
     fn reload_history(&self) -> Task<Message> {
+        if matches!(self.repo_kind, RepoKind::Space(_)) {
+            return space_actions::reload_space_history(self);
+        }
         let (kind, rel) = match self.history_kind {
             atelyx_core::history::HistoryKind::Note => {
                 (atelyx_core::history::HistoryKind::Note, self.ui.last_note_file.clone())
@@ -3268,6 +3615,9 @@ impl App {
                     self.autosave_deadline = Some(Instant::now() + AUTOSAVE_DEBOUNCE);
                 }
                 let Some(rel) = self.ui.last_table_file.clone() else { return Task::none() };
+                if matches!(self.repo_kind, RepoKind::Space(_)) {
+                    return space_actions::space_record_table_restore(self, rel, version.content);
+                }
                 let gen = self.epoch();
                 let state = self.vault.clone();
                 let author = history_author();
@@ -3316,6 +3666,9 @@ impl App {
         self.refresh_edit();
         self.refresh_props();
         let Some(rel) = self.ui.last_note_file.clone() else { return Task::none() };
+        if matches!(self.repo_kind, RepoKind::Space(_)) {
+            return space_actions::space_record_note_restore(self, rel, version.content);
+        }
         let gen = self.epoch();
         let state = self.vault.clone();
         let author = history_author();
@@ -3454,6 +3807,7 @@ impl App {
                         self.schedule_persist();
                     }
                 }
+                space_actions::collab_follow_rename(self, from, to);
             }
             FollowUp::Deleted { rel, is_dir } => {
                 let hit = self.ui.last_note_file.as_deref().is_some_and(|f| {
@@ -3464,6 +3818,10 @@ impl App {
                     }
                 });
                 if hit {
+                    // 空间模式先摘协作绑定（离场帧 + presence 回收）再清编辑态
+                    if matches!(self.repo_kind, RepoKind::Space(_)) {
+                        space_actions::collab_unbind_note(self);
+                    }
                     self.ui.last_note_file = None;
                     self.note_text.clear();
                     self.source_editor = text_editor::Content::new();
@@ -3485,6 +3843,9 @@ impl App {
                 if hit_table {
                     self.ui.last_table_file = None;
                     self.table = None;
+                    if matches!(self.repo_kind, RepoKind::Space(_)) {
+                        space_actions::send_presence(self);
+                    }
                     self.schedule_persist();
                 }
             }
@@ -3492,7 +3853,11 @@ impl App {
     }
 
     /// 仓库文件总数（排除隐藏/排除夹的树扫描；打开仓库后一次）。
+    /// 空间模式由整树回执填充（count_tree_files），此处直通。
     fn count_files(&self) -> Task<Message> {
+        if matches!(self.repo_kind, RepoKind::Space(_)) {
+            return Task::none();
+        }
         let Ok(root) = self.vault.root() else { return Task::none() };
         let Ok(exclude) = self.vault.exclude_folders() else { return Task::none() };
         let gen = self.epoch();
@@ -3508,8 +3873,19 @@ impl App {
 
     /// 文件树重命名/新建草稿提交：按目标种类分派到 core 的写入口；
     /// 新建与改名对同名做 `-2`/`-3` 加序号去重（以磁盘事实为准，改名排除自身），
-    /// OpDone 携带实际落点供「已重命名为」提醒条判定。
+    /// 文件操作落地（gen 守卫 + 结果通知 + 刷新子项 + 打开文件跟随）。
+    /// 空间模式表单草稿提交分派 space_actions（服务端建条目）。
     fn commit_file_rename(&mut self, r: RenameState) -> Task<Message> {
+        if matches!(self.repo_kind, RepoKind::Space(_)) {
+            if let RenameTarget::Draft { dir, kind } = &r.target {
+                let name = vault::sanitize_filename(r.value.trim());
+                if name.is_empty() {
+                    return Task::none();
+                }
+                return space_actions::space_create_entry(self, dir, *kind, &name);
+            }
+            return space_actions::space_commit_rename(self, r);
+        }
         let Some(root) = self.vault.root().ok() else { return Task::none() };
         let gen = self.epoch();
         match r.target {
@@ -3675,7 +4051,11 @@ impl App {
 
     /// 删除文件/文件夹（不可恢复；菜单内已就地确认）。Ok 携带目标相对路径。
     /// 表格文件随删图片附件目录（按 tableId 划分；读不到 id 跳过，不拦截删除本身）。
+    /// 空间模式：文件直删、文件夹先探需确认（needsConfirm → 确认 pane → force）。
     fn delete_entry(&mut self, rel: &str, is_dir: bool) -> Task<Message> {
+        if matches!(self.repo_kind, RepoKind::Space(_)) {
+            return space_actions::space_delete_entry(self, rel, is_dir);
+        }
         let Some(root) = self.vault.root().ok() else { return Task::none() };
         let gen = self.epoch();
         let parent = parent_of(rel);
@@ -3713,7 +4093,11 @@ impl App {
     }
 
     /// 读目录子项（core 的统一过滤语义：隐藏项 / 排除夹 / .tmp 副产物）。
+    /// 空间模式 = 整树切片（树未就绪先拉树）。
     fn load_children(&mut self, rel: &str) -> Task<Message> {
+        if matches!(self.repo_kind, RepoKind::Space(_)) {
+            return space_actions::space_load_children(self, rel);
+        }
         let Ok(root) = self.vault.root() else {
             return Task::none();
         };
@@ -3731,7 +4115,10 @@ impl App {
     }
 
     /// 递归展开用的目录读取（带世代守卫：在途任务不跨仓库落地）。
-    fn load_children_for_expand(&self, rel: &str) -> Task<Message> {
+    fn load_children_for_expand(&mut self, rel: &str) -> Task<Message> {
+        if matches!(self.repo_kind, RepoKind::Space(_)) {
+            return space_actions::space_load_children_for_expand(self, rel);
+        }
         let Ok(root) = self.vault.root() else {
             return Task::none();
         };
@@ -3748,7 +4135,7 @@ impl App {
     }
 
     /// 只读档的解析产物：进入只读档或文件载入时重建（渲染面不逐帧解析）。
-    fn refresh_preview(&mut self) {
+    pub(crate) fn refresh_preview(&mut self) {
         if self.note_mode != NoteMode::Read {
             self.preview_doc = None;
             return;
@@ -3760,7 +4147,7 @@ impl App {
     }
 
     /// 编辑档解析产物与块元数据重建（frontmatter 剥离：编辑面只处理正文，坐标相对正文）。
-    fn refresh_edit(&mut self) {
+    pub(crate) fn refresh_edit(&mut self) {
         if self.note_mode != NoteMode::Edit {
             self.edit_doc = None;
             self.edit_meta.clear();
@@ -3795,12 +4182,16 @@ impl App {
                 continue;
             }
             let task = match (&root, src.starts_with("http://") || src.starts_with("https://")) {
+                // 空间模式：仓库内路径走服务端字节读取
                 (_, true) => {
                     let url = src.clone();
                     Task::perform(
                         async move { atelyx_core::remote_image::fetch_external_image(&url).await },
                         move |r| Message::ImageLoaded(gen, src.clone(), r),
                     )
+                }
+                (_, false) if matches!(self.repo_kind, RepoKind::Space(_)) => {
+                    space_actions::space_load_image(self, gen, src.clone())
                 }
                 (Some(root), false) => {
                     let root = root.clone();
@@ -3829,6 +4220,9 @@ impl App {
 
     /// 读取仓库元数据（排序方式 / 提示词标记 / 文件夹颜色；缺省回落不阻塞）。
     fn load_vault_meta(&self) -> Task<Message> {
+        if matches!(self.repo_kind, RepoKind::Space(_)) {
+            return space_actions::load_space_meta(self);
+        }
         let Some(root) = self.vault.root().ok() else { return Task::none() };
         let gen = self.epoch();
         Task::perform(
@@ -3845,7 +4239,10 @@ impl App {
     }
 
     /// 提示词标记注册/注销（读改写原子落盘，回执重读对齐）。
-    fn toggle_prompt_note(&self, rel: &str) -> Task<Message> {
+    fn toggle_prompt_note(&mut self, rel: &str) -> Task<Message> {
+        if matches!(self.repo_kind, RepoKind::Space(_)) {
+            return space_actions::space_toggle_prompt_note(self, rel);
+        }
         let Some(root) = self.vault.root().ok() else { return Task::none() };
         let rel = rel.to_string();
         let gen = self.epoch();
@@ -3865,7 +4262,10 @@ impl App {
     }
 
     /// 设置/清除文件夹图标颜色（None = 恢复默认即删键；回执重读对齐）。
-    fn set_folder_color(&self, rel: &str, color: Option<String>) -> Task<Message> {
+    fn set_folder_color(&mut self, rel: &str, color: Option<String>) -> Task<Message> {
+        if matches!(self.repo_kind, RepoKind::Space(_)) {
+            return space_actions::space_set_folder_color(self, rel, color);
+        }
         let Some(root) = self.vault.root().ok() else { return Task::none() };
         let rel = rel.to_string();
         let gen = self.epoch();
@@ -3884,8 +4284,11 @@ impl App {
     }
 
     /// 创建同目录副本（文件字节复制 + .atlx/.atb 重生成 id；文件夹递归复制含 id 重生成）。
-    /// 目标名同名自动加序号，实际落点经 OpDone 回传。
-    fn duplicate_entry(&self, rel: &str, is_dir: bool) -> Task<Message> {
+    /// 目标名同名自动加序号，实际落点经 OpDone 回传。空间模式 = copy 端点 + id 重建。
+    fn duplicate_entry(&mut self, rel: &str, is_dir: bool) -> Task<Message> {
+        if matches!(self.repo_kind, RepoKind::Space(_)) {
+            return space_actions::space_duplicate_entry(self, rel, is_dir);
+        }
         let Some(root) = self.vault.root().ok() else { return Task::none() };
         let gen = self.epoch();
         let parent = parent_of(rel);
@@ -3934,7 +4337,12 @@ impl App {
     }
 
     /// 移动文件/文件夹到目标目录（保持文件名，同名自动加序号；引用同步事务）。
+    /// 空间模式 = 服务端 rename（重名 409 提示）。
     fn move_entry(&mut self, from: &str, is_dir: bool, to_dir: &str) -> Task<Message> {
+        if matches!(self.repo_kind, RepoKind::Space(_)) {
+            let _ = is_dir;
+            return space_actions::space_move_entry(self, from, to_dir);
+        }
         let Some(root) = self.vault.root().ok() else { return Task::none() };
         let Ok(exclude) = self.vault.exclude_folders() else { return Task::none() };
         let gen = self.epoch();
@@ -4054,6 +4462,8 @@ impl App {
         self.sync_active();
         self.autosave_deadline = Some(Instant::now() + AUTOSAVE_DEBOUNCE);
         self.sync_wiki_picker();
+        // 空间模式：差分合入协作文档并上行 Update 帧（不置脏、不排保存）
+        space_actions::collab_after_edit(self);
     }
 
     /// 需要回显源码的块：光标所在块 + 选区锚点所在块（无选区时不揭示锚点块）。
@@ -4470,6 +4880,9 @@ impl App {
     /// 读 note 视图文件内容（仓库切换恢复与文件点击共用；根在发起时冻结，
     /// 任务在途时切换仓库不会让读盘落到新仓库路径）。
     fn load_note(&self, rel: &str) -> Task<Message> {
+        if matches!(self.repo_kind, RepoKind::Space(_)) {
+            return space_actions::space_load_note(self, rel);
+        }
         let Ok(root) = self.vault.root() else {
             return Task::none();
         };
@@ -4518,12 +4931,13 @@ impl App {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        // 心跳仅在有待过期通知、提醒条在途、悬停提示在途（距离收起判定）、编辑面聚焦
-        // 或表格图片长按候选时挂载
+        // 心跳仅在有待过期通知、提醒条在途、悬停提示在途（距离收起判定）、编辑面聚焦、
+        // 远端光标在册（过期剔除节流搭载）或表格图片长按候选时挂载
         let need_tick = !self.notifications.is_empty()
             || self.rename_notice.is_some()
             || self.tooltip.is_some()
             || self.edit.focused
+            || !self.remote_cursors.is_empty()
             || self.table.as_ref().is_some_and(|t| {
                 t.view.press.as_ref().is_some_and(|p| p.img.is_some() && !p.active)
             });
@@ -4643,6 +5057,82 @@ impl App {
                 }
                 _ => None,
             }),
+            self.space_pump_subscription(),
         ])
     }
+
+    /// 协作帧泵订阅：空间会话激活期间保持一条 WS 长连接（心跳 / 断线重连在泵内建）。
+    /// 泵实例经 spec 固定身份（重连不发新 spec）；命令入口由 PumpReady 消息回填，
+    /// 事件流转发为 Event 消息。
+    fn space_pump_subscription(&self) -> Subscription<Message> {
+        let crate::RepoKind::Space(session) = &self.repo_kind else {
+            return Subscription::none();
+        };
+        let Some(token) = self.space_token.clone() else {
+            return Subscription::none();
+        };
+        let nickname = self
+            .global
+            .last_identity
+            .as_ref()
+            .map(|i| i.display_name.clone())
+            .unwrap_or_else(|| "用户".into());
+        let color = self.global.collab_color.clone().unwrap_or_else(|| "#30bced".into());
+        // 泵身份 = 连接五元组（哈希作为订阅标识；换空间/换号自动换泵）
+        let spec = serde_json::json!([
+            session.server_url,
+            session.space_id,
+            token,
+            nickname,
+            color,
+            space_actions::DEFAULT_DEVICE_NAME,
+        ])
+        .to_string();
+        Subscription::run_with(spec, space_pump_stream)
+    }
+}
+
+/// 帧泵订阅流（`run_with` 的 fn 指针构建器）：建泵 → 回填命令入口 → 转发事件。
+fn space_pump_stream(
+    spec: &String,
+) -> impl iced::futures::Stream<Item = Message> + use<> {
+    let spec = spec.clone();
+    iced::stream::channel(64, async move |mut output| {
+        // spec = [url, spaceId, token, nickname, color, deviceName]
+        let Ok(parts) = serde_json::from_str::<Vec<String>>(&spec) else {
+            return;
+        };
+        if parts.len() < 6 {
+            return;
+        }
+        let hello = atelyx_core::collab::HelloFrame {
+            space_id: parts[1].clone(),
+            token: parts[2].clone(),
+            nickname: parts[3].clone(),
+            color: parts[4].clone(),
+            device_name: parts[5].clone(),
+            version: None,
+        };
+        let (cmds, mut events) = atelyx_core::collab::spawn_pump(&parts[0], hello);
+        let _ = iced::futures::SinkExt::send(
+            &mut output,
+            Message::Space(SpaceMsg::PumpReady {
+                server_url: parts[0].clone(),
+                space_id: parts[1].clone(),
+                cmds,
+            }),
+        )
+        .await;
+        while let Some(event) = events.recv().await {
+            let _ = iced::futures::SinkExt::send(
+                &mut output,
+                Message::Space(SpaceMsg::Event {
+                    server_url: parts[0].clone(),
+                    space_id: parts[1].clone(),
+                    event: Box::new(event),
+                }),
+            )
+            .await;
+        }
+    })
 }

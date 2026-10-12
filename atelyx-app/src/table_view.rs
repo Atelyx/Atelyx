@@ -1680,9 +1680,24 @@ pub fn table_view<'a>(app: &'a crate::App, window: iced::window::Id) -> Element<
     if let Some(lb) = &session.view.lightbox {
         stack = stack.push(lightbox_overlay(session, lb, window));
     }
+    // 在场协作者（名册 presence.file 匹配当前表格的空间成员）
+    let collab_members: Vec<(iced::Color, String)> = if matches!(app.repo_kind, crate::RepoKind::Space(_)) {
+        app.space_peers
+            .iter()
+            .filter(|p| {
+                p.presence
+                    .as_ref()
+                    .and_then(|pr| pr.get("file").and_then(|f| f.as_str()))
+                    .is_some_and(|f| f == session.file)
+            })
+            .map(|p| (crate::layout_view::parse_hex_color(&p.color).unwrap_or(pal::TEXT_MUTED), p.nickname.clone()))
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     column![
-        toolbar(session, window),
+        toolbar(&collab_members, session, window),
         stack.width(Length::Fill).height(Length::Fill),
     ]
     .width(Length::Fill)
@@ -1690,8 +1705,12 @@ pub fn table_view<'a>(app: &'a crate::App, window: iced::window::Id) -> Element<
     .into()
 }
 
-/// 顶部工具条：行列统计 + 缩放 + ··· 菜单。
-fn toolbar<'a>(session: &'a TableSession, window: iced::window::Id) -> Element<'a, Message> {
+/// 顶部工具条：协作者胶囊 + 行列统计 + 缩放 + ··· 菜单。
+fn toolbar<'a>(
+    collab_members: &[(iced::Color, String)],
+    session: &'a TableSession,
+    window: iced::window::Id,
+) -> Element<'a, Message> {
     let zoom_label = format!("{}%", (session.view.zoom * 100.0).round() as i32);
     let stats = format!("{} 行 · {} 列", session.data.rows.len(), session.data.fields.len());
     let dirty_pill = if session.dirty {
@@ -1707,8 +1726,10 @@ fn toolbar<'a>(session: &'a TableSession, window: iced::window::Id) -> Element<'
     } else {
         space().width(Length::Shrink).into()
     };
+    let collab_pills: Element<'static, Message> = crate::layout_view::collab_pill_row(collab_members);
     row![
         view_select(window),
+        collab_pills,
         dirty_pill,
         space().width(Length::Fill),
         save_state,

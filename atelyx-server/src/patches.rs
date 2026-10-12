@@ -422,6 +422,7 @@ async fn patch_entity<E: serde::de::DeserializeOwned, P>(
     body_path: &str,
     raw_patch: &serde_json::Value,
     io: &PatchEntityIo<E, P>,
+    sender_session: &str,
 ) -> Result<Response, ApiError> {
     // 磁盘文件缺失：补丁只有变化实体，重建会丢未变化部分——拒绝
     if !path.is_file() {
@@ -473,8 +474,13 @@ async fn patch_entity<E: serde::de::DeserializeOwned, P>(
     (io.set_updated_at)(&mut entity, now_secs());
     (io.write_file)(&new_path, &entity)?;
     remove_replaced_file(path, &new_path, io.kind)?;
+    // 标题漂移改名了路径：补广播 renamed 帧——其他端打开中文件的路径是旧路径，只收
+    // table-patch（file=新路径）会被整帧丢弃，滞留旧路径后每次保存 404
+    if new_rel != body_path {
+        crate::ws::broadcast_rename(&state.hub(), &format!("space:{space_id}"), &body_path, &new_rel);
+    }
     // 落地后向空间房间广播补丁帧（与客户端 WS 透传帧同形状）；失败只记日志不回滚——真源已落盘
-    ws_broadcast(state, space_id, io.broadcast_kind, &new_rel, raw_patch.clone());
+    ws_broadcast(state, space_id, io.broadcast_kind, &new_rel, raw_patch.clone(), sender_session);
     tracing::info!(space_id = %space_id, path = %new_rel, "{}补丁落地", io.kind);
     let updated_at = file_mtime_secs(&new_path);
     Ok(Json(json!({ "updatedAt": updated_at, "file": new_rel })).into_response())
@@ -493,7 +499,7 @@ pub async fn patch_canvas(
     // 互相重建对方路径的文件；title 漂移目标的第二把路径锁在骨架内补取（漂移点才可知）
     let _structure = state.structure_lock(&space_id).await;
     let _lock = state.path_lock(&space_id, &body.path).await;
-    patch_entity(&state, &space_id, &path, &body.path, &body.patch, &canvas_patch_io()).await
+    patch_entity(&state, &space_id, &path, &body.path, &body.patch, &canvas_patch_io(), &user.session_id).await
 }
 
 /// 表格补丁端点：锁内 读 → 校验 → 合并 → 原子写 → 广播（与画布同构）。
@@ -508,9 +514,16 @@ pub async fn patch_table(
     // 结构锁 → 请求路径锁（与画布补丁同构）；漂移目标锁在骨架内补取
     let _structure = state.structure_lock(&space_id).await;
     let _lock = state.path_lock(&space_id, &body.path).await;
-    patch_entity(&state, &space_id, &path, &body.path, &body.patch, &table_patch_io()).await
+    patch_entity(&state, &space_id, &path, &body.path, &body.patch, &table_patch_io(), &user.session_id).await
 }
 
-fn ws_broadcast(state: &ServerState, space_id: &str, kind: &'static str, file: &str, patch: serde_json::Value) {
-    crate::ws::broadcast_patch(&state.hub(), &format!("space:{space_id}"), kind, file, patch);
+fn ws_broadcast(
+    state: &ServerState,
+    space_id: &str,
+    kind: &'static str,
+    file: &str,
+    patch: serde_json::Value,
+    sender_session: &str,
+) {
+    crate::ws::broadcast_patch(&state.hub(), &format!("space:{space_id}"), kind, file, patch, Some(sender_session));
 }

@@ -189,6 +189,14 @@ impl reqwest::dns::Resolve for PolicyDnsResolver {
     }
 }
 
+/// WebSocket 长连接目标的地址边界校验（本机/局域网策略）：URL 先过入口校验，
+/// 再按 DNS 解析结果逐 IP 复核。阻塞解析，调用方须在 `spawn_blocking` 内调用。
+pub fn ensure_ws_target(url: &str) -> Result<(), String> {
+    let parsed = ensure_http_url(url, HostPolicy::LocalService)?;
+    let host = parsed.host_str().ok_or_else(|| "无效 URL host".to_string())?;
+    resolve_and_filter(host, HostPolicy::LocalService).map(|_| ())
+}
+
 #[cfg(test)]
 mod net_guard_tests {
     use super::*;

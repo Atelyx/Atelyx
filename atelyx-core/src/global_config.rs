@@ -9,6 +9,12 @@ use std::path::Path;
 /// 最近打开仓库列表上限。
 pub const MAX_RECENT_VAULTS: usize = 10;
 
+/// 最近打开空间列表上限。
+pub const MAX_RECENT_SPACES: usize = 10;
+
+/// 登录过的服务器清单上限（与最近仓库/空间同量级口径）。
+pub const MAX_SPACE_SERVERS: usize = 10;
+
 /// 最近打开的仓库（文件面板列表层展示）。
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -21,12 +27,59 @@ pub struct RecentVault {
     pub last_opened_at: u64,
 }
 
+/// 登录过的协作服务器（仅地址；令牌在系统密钥链）。
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SpaceServer {
+    /// 服务器地址（含协议与端口）。
+    pub url: String,
+}
+
+/// 最近打开的协作空间（与本地仓库在文件面板平级列出）。
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RecentSpace {
+    /// 所属服务器地址。
+    pub server_url: String,
+    pub space_id: String,
+    pub name: String,
+    /// 最近打开时间（unix 秒）。
+    pub last_opened_at: u64,
+}
+
+/// 最后一次激活的身份（启动自动进入的依据；令牌不在本结构）。
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LastIdentity {
+    pub server_url: String,
+    pub username: String,
+    pub display_name: String,
+}
+
+/// 身份指向：启动自动进入取「最近仓库 vs 最近空间」中较近者。
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum LastActive {
+    Vault { root: String },
+    Space { server_url: String, space_id: String },
+}
+
 /// 全局配置（`global.json`）：应用级、跨仓库共享；缺字段走默认值，未知字段忽略。
-#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct GlobalConfig {
     /// 最近打开的仓库列表（最近打开倒序）。
     pub recent_vaults: Vec<RecentVault>,
+    /// 登录过的协作服务器。
+    pub space_servers: Vec<SpaceServer>,
+    /// 最近打开的协作空间（最近打开倒序）。
+    pub recent_spaces: Vec<RecentSpace>,
+    /// 最后一次登录的账号身份（单服务器口径：重登覆盖）。
+    pub last_identity: Option<LastIdentity>,
+    /// 最后一次激活的仓库 / 空间（启动自动进入依据；缺省回落最近列表首位）。
+    pub last_active: Option<LastActive>,
+    /// 协作展示色（远端光标 / 名单；首次登录时随机指派，应用级共享）。
+    pub collab_color: Option<String>,
 }
 
 impl GlobalConfig {
@@ -42,11 +95,71 @@ impl GlobalConfig {
             },
         );
         self.recent_vaults.truncate(MAX_RECENT_VAULTS);
+        self.last_active = Some(LastActive::Vault { root: root.to_string() });
     }
 
     /// 从最近列表移除某仓库（按 root）；不影响磁盘文件与激活态。
     pub fn remove_vault(&mut self, root: &str) {
         self.recent_vaults.retain(|v| v.root != root);
+    }
+
+    /// 登记服务器（按 url 去重置顶，截断上限）。
+    pub fn bump_server(&mut self, url: &str) {
+        self.space_servers.retain(|s| s.url != url);
+        self.space_servers.insert(0, SpaceServer { url: url.to_string() });
+        self.space_servers.truncate(MAX_SPACE_SERVERS);
+    }
+
+    /// 移除服务器及其全部最近空间（登出 / 从列表移除时调用）。
+    pub fn remove_server(&mut self, url: &str) {
+        self.space_servers.retain(|s| s.url != url);
+        self.recent_spaces.retain(|s| s.server_url != url);
+        if self.last_identity.as_ref().is_some_and(|i| i.server_url == url) {
+            self.last_identity = None;
+        }
+        if self
+            .last_active
+            .as_ref()
+            .is_some_and(|a| matches!(a, LastActive::Space { server_url, .. } if server_url == url))
+        {
+            self.last_active = None;
+        }
+    }
+
+    /// 登记某空间为最近打开：按 (server, spaceId) 去重 → 置顶 → 更新时间 → 截断上限。
+    pub fn bump_space(&mut self, server_url: &str, space_id: &str, name: &str, now_sec: u64) {
+        self.recent_spaces
+            .retain(|s| !(s.server_url == server_url && s.space_id == space_id));
+        self.recent_spaces.insert(
+            0,
+            RecentSpace {
+                server_url: server_url.to_string(),
+                space_id: space_id.to_string(),
+                name: name.to_string(),
+                last_opened_at: now_sec,
+            },
+        );
+        self.recent_spaces.truncate(MAX_RECENT_SPACES);
+        self.last_active = Some(LastActive::Space {
+            server_url: server_url.to_string(),
+            space_id: space_id.to_string(),
+        });
+    }
+
+    /// 从最近列表移除某空间。
+    pub fn remove_space(&mut self, server_url: &str, space_id: &str) {
+        self.recent_spaces
+            .retain(|s| !(s.server_url == server_url && s.space_id == space_id));
+    }
+
+    /// 记录登录身份。
+    pub fn set_identity(&mut self, server_url: &str, username: &str, display_name: &str) {
+        self.last_identity = Some(LastIdentity {
+            server_url: server_url.to_string(),
+            username: username.to_string(),
+            display_name: display_name.to_string(),
+        });
+        self.bump_server(server_url);
     }
 }
 
@@ -168,6 +281,57 @@ mod tests {
         write_global_config(&path, &cfg).unwrap();
         let (loaded, backup) = read_global_config(&path).unwrap();
         assert!(backup.is_none());
-        assert_eq!(loaded.recent_vaults, cfg.recent_vaults);
+        assert_eq!(loaded, cfg);
+    }
+
+    #[test]
+    fn 空间条目去重置顶且记录最后激活() {
+        let mut cfg = GlobalConfig::default();
+        cfg.bump_space("http://s1", "sp1", "空间一", 10);
+        cfg.bump_space("http://s1", "sp2", "空间二", 20);
+        cfg.bump_space("http://s2", "sp1", "另服同名", 30);
+        assert_eq!(cfg.recent_spaces.len(), 3);
+        assert_eq!(cfg.recent_spaces[0].server_url, "http://s2");
+        // 重开置顶并更新
+        cfg.bump_space("http://s1", "sp1", "空间一", 40);
+        assert_eq!(cfg.recent_spaces.len(), 3);
+        assert_eq!(cfg.recent_spaces[0].space_id, "sp1");
+        assert_eq!(cfg.recent_spaces[0].last_opened_at, 40);
+        assert_eq!(
+            cfg.last_active,
+            Some(LastActive::Space { server_url: "http://s1".into(), space_id: "sp1".into() })
+        );
+        cfg.remove_space("http://s1", "sp1");
+        assert_eq!(cfg.recent_spaces.len(), 2);
+    }
+
+    #[test]
+    fn 服务器与身份联动清理() {
+        let mut cfg = GlobalConfig::default();
+        cfg.set_identity("http://s1", "alice", "Alice");
+        cfg.bump_space("http://s1", "sp1", "空间一", 10);
+        cfg.bump_vault("/v", "v", 5);
+        assert_eq!(cfg.space_servers.len(), 1);
+        // 切仓库不清理服务器身份
+        assert!(matches!(cfg.last_active, Some(LastActive::Vault { .. })));
+        cfg.bump_space("http://s1", "sp1", "空间一", 20);
+        cfg.remove_server("http://s1");
+        assert!(cfg.space_servers.is_empty() && cfg.recent_spaces.is_empty());
+        assert!(cfg.last_identity.is_none() && cfg.last_active.is_none());
+    }
+
+    #[test]
+    fn 空间字段序列化向后兼容() {
+        // 旧格式（仅 recentVaults）可读，新字段走默认
+        let cfg: GlobalConfig =
+            serde_json::from_str(r#"{"recentVaults":[{"root":"/a","name":"a","lastOpenedAt":7}]}"#).unwrap();
+        assert!(cfg.space_servers.is_empty() && cfg.recent_spaces.is_empty());
+        // 新字段写入后可往返
+        let mut cfg = GlobalConfig::default();
+        cfg.set_identity("http://s", "u", "d");
+        cfg.bump_space("http://s", "sp", "n", 1);
+        let out = serde_json::to_string(&cfg).unwrap();
+        let back: GlobalConfig = serde_json::from_str(&out).unwrap();
+        assert_eq!(back, cfg);
     }
 }

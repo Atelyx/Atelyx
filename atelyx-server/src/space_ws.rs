@@ -11,7 +11,7 @@ use serde::Deserialize;
 use tracing::warn;
 
 use crate::state::{token_hash, ServerState};
-use crate::ws::{run_room_connection, PeerMeta, HEARTBEAT_TIMEOUT};
+use crate::ws::{run_room_connection, KickReason, PeerMeta, HEARTBEAT_TIMEOUT};
 
 pub async fn upgrade(
     ws: WebSocketUpgrade,
@@ -116,8 +116,31 @@ async fn handle(mut socket: WebSocket, state: ServerState, remote: SocketAddr) {
             version: hello.version,
             session_id: identity.session_id,
         },
-        // 入房后回查：会话在鉴权与入房之间可能已被吊销（如管理台刚执行重置密码/吊销）
-        |session_id: &str| state.read(|p| p.sessions.iter().any(|s| s.id == session_id)),
+        // 入房后回查：会话在鉴权与入房之间可能已被吊销（如管理台刚执行重置密码/吊销）；
+        // 成员移除落在同一窗口时 kick 只触及已入房连接——回查须同时确认仍是该空间成员，
+        // 否则被移除者以成员身份入房且不再有任何再校验。原因区分下发：会话失效与被移出
+        // 空间不是同一件事，同一句话会让被移除者误以为登录出了问题
+        {
+            let space_id = hello.space_id.clone();
+            let user_id = identity.user_id.clone();
+            move |session_id: &str| {
+                state.read(|p| {
+                    let session_live = p.sessions.iter().any(|s| s.id == session_id);
+                    let is_member = p
+                        .spaces
+                        .iter()
+                        .find(|s| s.id == space_id)
+                        .is_some_and(|s| s.members.iter().any(|m| m.user_id == user_id));
+                    if !session_live {
+                        Some(KickReason::SessionRevoked)
+                    } else if !is_member {
+                        Some(KickReason::SpaceMemberRemoved)
+                    } else {
+                        None
+                    }
+                })
+            }
+        },
     )
     .await;
 }

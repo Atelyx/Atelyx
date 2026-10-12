@@ -2,7 +2,7 @@
 name = "atelyx-core"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.77.2"
+rust-version = "1.85"
 description = "Atelyx UI 无关核心：仓库存储、会话容器、补丁合并与写盘串行化、AI 客户端、协作帧泵、插件进程托管"
 
 [dependencies]
@@ -15,7 +15,8 @@ serde_json = "1"
 yaml-rust2 = "0.10"
 dunce = "1"
 # 会话容器（chat_container）：持久 op 建 id / 写链线程与广播回执（spawn + oneshot + sleep）
-tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
+# 协作帧泵（collab）：WS 连接建立用 tokio::net（超时包裹），net 特性显式声明不靠传递启用
+tokio = { version = "1", features = ["rt", "sync", "time", "macros", "net"] }
 uuid = { version = "1", features = ["v4"] }
 # 出网校验（net_guard）：URL 解析与地址枚举
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
@@ -28,6 +29,21 @@ base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp"] }
 # 系统下载/主目录定位（图片下载落盘）
 dirs = "6"
+# 笔记协作（note_collab）：Yjs CRDT 内核，与 yjs 数据互通
+yrs = "0.28"
+# 协作帧泵（collab）：WebSocket 长连接（rustls TLS，webpki 根证书）
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["rustls-tls-webpki-roots", "connect"] }
+# 协作空间客户端（space_client）：错误类型与来源信息
+thiserror = "2"
+# 协作帧泵（collab）：tungstenite 流的 Sink/Stream 组合子
+futures-util = "0.3"
+
+# 凭据（credentials）：令牌存系统密钥链，不落明文。按平台启用真实后端——
+# 不带平台 feature 时 keyring 3.x 落到内存 mock（写入不出进程，跨启动即 NoEntry）
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3.6", features = ["apple-native"] }
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3.6", features = ["sync-secret-service"] }
 
 # 插件进程托管（plugin_process）：Unix 进程组信号（setpgid/killpg/ESRCH 判定）
 [target.'cfg(unix)'.dependencies]
@@ -37,6 +53,7 @@ libc = "0.2"
 # 插件卸载前递归清只读位
 [target.'cfg(target_os = "windows")'.dependencies]
 winapi = { version = "0.3", features = ["winnt", "processthreadsapi", "handleapi", "errhandlingapi", "minwinbase", "jobapi2", "tlhelp32"] }
+keyring = { version = "3.6", features = ["windows-native"] }
 
 [features]
 # 测试基建（TempDir 等）供依赖方的测试构建复用；常规构建不编译
