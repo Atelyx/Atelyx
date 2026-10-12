@@ -3,6 +3,11 @@ resolver = "2"
 members = ["atelyx-app", "atelyx-core"]
 exclude = ["atelyx-server"]
 
+# 本地修改版 winit（基于 0.30.13）：Windows 11 上跨不同 DPI 显示器拖动窗口时
+# 不再自算重定位（见 patches/winit/VENDOR.md）。上游发布包含该修复的版本后可整目录移除。
+[patch.crates-io]
+winit = { path = "patches/winit" }
+
 # profile 仅在 workspace 根生效；发版用 thin LTO + strip。
 [profile.release]
 lto = "thin"
