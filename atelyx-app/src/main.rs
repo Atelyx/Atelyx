@@ -42,6 +42,7 @@ use layout_view::{
 fn panel_settings(w: &DetachedWindow) -> Settings {
     let mut settings = Settings {
         size: Size::new(w.bounds.width.max(200.0) as f32, w.bounds.height.max(160.0) as f32),
+        min_size: Some(PANEL_MIN_SIZE),
         position: Position::Specific(Point::new(w.bounds.x as f32, w.bounds.y as f32)),
         exit_on_close_request: false,
         decorations: false,
@@ -53,6 +54,9 @@ fn panel_settings(w: &DetachedWindow) -> Settings {
     }
     settings
 }
+
+/// 撕裂窗口最小尺寸（OS 缩放下限）。
+const PANEL_MIN_SIZE: Size = Size::new(320.0, 240.0);
 
 /// note 视图模式：只读渲染 / 预览编辑 / 源码。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -434,6 +438,8 @@ enum Message {
     ModsChanged(keyboard::Modifiers),
     /// 标题栏空白区按下：拖拽窗口 / 双击最大化。
     TitleBarPress(window::Id),
+    /// 边缘命中带按下：进入 OS 原生缩放循环（最大化态由 OS 拒绝）。
+    WindowResizeStart(window::Id, window::Direction),
     WindowMinimize(window::Id),
     WindowMaximizeToggle(window::Id),
     /// 全屏切换（查询当前模式 → 反转）。
@@ -814,6 +820,7 @@ impl App {
     fn boot() -> (Self, Task<Message>) {
         let (main_os, open) = window::open(Settings {
             size: WINDOW_SIZE,
+            min_size: Some(WINDOW_SIZE),
             exit_on_close_request: false,
             decorations: false,
             ..Settings::default()
@@ -2033,6 +2040,7 @@ impl App {
                     window::drag(id)
                 }
             }
+            Message::WindowResizeStart(id, dir) => window::drag_resize(id, dir),
             Message::WindowMinimize(id) => window::minimize(id, true),
             Message::WindowMaximizeToggle(id) => window::toggle_maximize(id),
             Message::FullscreenToggle(id) => {

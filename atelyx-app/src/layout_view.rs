@@ -35,6 +35,10 @@ impl UiMetrics {
     pub const HEADER_INSET: f32 = 6.0;
     /// 标签文字最大宽度（超出省略号截断）。
     pub const TAB_TEXT_MAX_W: f32 = 120.0;
+    /// 窗口边缘缩放命中带厚度（四边）。
+    pub const RESIZE_EDGE: f32 = 5.0;
+    /// 窗口边缘缩放命中区边长（四角，叠在四边命中带之上）。
+    pub const RESIZE_CORNER: f32 = 18.0;
 }
 
 /// 内置视图 kind 顺序（右键菜单/选择器的呈现序）。
@@ -341,6 +345,70 @@ pub fn content_area_of(app: &App) -> Rectangle {
     }
 }
 
+/// 窗口边缘缩放命中带（四边 + 四角）：悬停显示对应方向缩放光标，按下进入 OS 原生
+/// 缩放循环；最大化态由 OS 拒绝该循环，无需自行跟踪。命中带只在内容之上、弹层之下，
+/// 弹层打开期间其捕获层先于命中带承接外点。
+fn edge_resize_bands(window: iced::window::Id) -> Element<'static, Message> {
+    use iced::window::Direction;
+
+    let strip =
+        |dir: Direction, width: Length, height: Length, cursor: iced::mouse::Interaction| {
+            mouse_area(container(space()).width(width).height(height))
+                .on_press(Message::WindowResizeStart(window, dir))
+                .interaction(cursor)
+                .into()
+        };
+    let anchored =
+        |el: Element<'static, Message>, x: Horizontal, y: Vertical| -> Element<'static, Message> {
+            container(el)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(x)
+                .align_y(y)
+                .into()
+        };
+
+    let edge = Length::Fixed(UiMetrics::RESIZE_EDGE);
+    let corner = Length::Fixed(UiMetrics::RESIZE_CORNER);
+
+    // 显式 Fill×Fill：Stack 缺省 Shrink、尺寸取第 0 子（北边条），
+    // 其余锚定子会被压缩到 5px 高——必须撑满窗口后各带才能贴边
+    stack![
+        strip(Direction::North, Length::Fill, edge, iced::mouse::Interaction::ResizingVertically),
+        anchored(
+            strip(Direction::South, Length::Fill, edge, iced::mouse::Interaction::ResizingVertically),
+            Horizontal::Left,
+            Vertical::Bottom,
+        ),
+        strip(Direction::West, edge, Length::Fill, iced::mouse::Interaction::ResizingHorizontally),
+        anchored(
+            strip(Direction::East, edge, Length::Fill, iced::mouse::Interaction::ResizingHorizontally),
+            Horizontal::Right,
+            Vertical::Top,
+        ),
+        // 四角命中区叠在四边之上（后推 = 事件优先），角内斜向光标
+        strip(Direction::NorthWest, corner, corner, iced::mouse::Interaction::ResizingDiagonallyDown),
+        anchored(
+            strip(Direction::NorthEast, corner, corner, iced::mouse::Interaction::ResizingDiagonallyUp),
+            Horizontal::Right,
+            Vertical::Top,
+        ),
+        anchored(
+            strip(Direction::SouthWest, corner, corner, iced::mouse::Interaction::ResizingDiagonallyUp),
+            Horizontal::Left,
+            Vertical::Bottom,
+        ),
+        anchored(
+            strip(Direction::SouthEast, corner, corner, iced::mouse::Interaction::ResizingDiagonallyDown),
+            Horizontal::Right,
+            Vertical::Bottom,
+        ),
+    ]
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
+}
+
 /// 弹层 / 悬停提示 / 通知 / 拖拽 ghost 的窗口内覆盖。
 fn with_overlays<'a>(
     app: &'a App,
@@ -351,6 +419,11 @@ fn with_overlays<'a>(
     // 覆盖层（弹层/提示/拖拽 ghost/通知）统一作为同一 Stack 的追加子，内容恒为第 0 子：
     // 任一覆盖显隐只增删尾部子，内容子树状态不重建——滚动位置与输入焦点得以保留。
     let mut root = iced::widget::Stack::new().push(base);
+
+    // 边缘缩放命中带：标签/文件拖拽会话进行中不挂（避免拖拽光标被边缘命中干扰）
+    if app.drag.is_none() && app.file_drag.is_none() {
+        root = root.push(edge_resize_bands(window));
+    }
 
     // 弹层（同窗口至多一个；捕获层点击 = 外点关闭）
     if let Some((w, open)) = &app.popup {
