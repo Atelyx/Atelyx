@@ -1,4 +1,4 @@
-//! 笔记历史侧车：每文件一个隐藏 JSON 侧文件（全文快照 + 行级 diff 摘要），独立于磁盘真相的审计/回滚轴。
+//! 文件历史侧车（笔记/表格）：每文件一个隐藏 JSON 侧文件（全文快照 + 行级 diff 摘要），独立于磁盘真相的审计/回滚轴。
 //!
 //! 侧文件格式为 `{ versions: [...] }`，path = `.atelyx/history/<最小编码>.json`；
 //! 记录尽力而为——读缺失/损坏返回空、写失败由调用方决定降级。
@@ -7,16 +7,18 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-/// 历史作用的文件类型（决定侧文件路径）；当前仅笔记（note 顶层），画布/表格按 kind 分目录。
+/// 历史作用的文件类型（决定侧文件路径）；note 顶层，table 在 `table/` 子目录。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HistoryKind {
     Note,
+    Table,
 }
 
 impl HistoryKind {
     fn dir(self) -> &'static str {
         match self {
             HistoryKind::Note => "",
+            HistoryKind::Table => "table/",
         }
     }
 }

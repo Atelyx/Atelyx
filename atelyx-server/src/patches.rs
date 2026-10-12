@@ -326,6 +326,9 @@ fn apply_canvas_patch(canvas: &mut CanvasFile, patch: &CanvasPatch) {
 
 /// 按稳定 id 合并表格补丁 + fieldOrder/rowOrder 全序重排。
 fn apply_table_patch(table: &mut TableFile, patch: &TablePatch) {
+    if let Some(title) = &patch.title {
+        table.title = title.clone();
+    }
     let removed_fields: HashSet<&String> = patch.removed_field_ids.iter().collect();
     table.fields.retain(|f| !removed_fields.contains(&f.id));
     for f in &patch.upsert_fields {

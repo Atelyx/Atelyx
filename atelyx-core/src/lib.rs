@@ -14,6 +14,8 @@ pub mod net_guard;
 pub mod plugin_process;
 pub mod remote_image;
 pub mod search;
+pub mod table_ops;
+pub mod table_xlsx;
 pub mod vault;
 pub mod vault_refs;
 pub mod web;

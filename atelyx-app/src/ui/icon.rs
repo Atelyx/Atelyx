@@ -82,6 +82,12 @@ fn rounded_rect(x: f32, y: f32, w: f32, h: f32, r: f32) -> Vec<svgpath::Polyline
     vec![poly]
 }
 
+/// 图标展平折线（画布内自绘用）：kebab 名 → 24 单位坐标子路径；未展平（init 前）返回 None。
+pub fn polylines(name: &str) -> Option<&'static [svgpath::Polyline]> {
+    let name: &'static str = icons::NAMES.iter().copied().find(|n| *n == name)?;
+    CACHE.get().and_then(|m| m.get(name)).map(|v| v.as_slice())
+}
+
 /// 图标部件：绘制以实际 bounds 为准（视框边长在 icon_stroke 构造 Canvas 宽高时给定）。
 pub struct Icon {
     pub name: &'static str,

@@ -706,7 +706,7 @@ pub struct CanvasPatch {
 }
 
 /// 表格增量保存补丁（对应 `.atb` schema）。
-#[derive(Deserialize, Default)]
+#[derive(Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct TablePatch {
     /// 表格 id（防串文件守卫）。
@@ -742,6 +742,119 @@ pub fn reorder_by<T>(items: &mut Vec<T>, order: &[String], key: impl Fn(&T) -> &
         .map(|(i, id)| (id.as_str(), i))
         .collect();
     items.sort_by_key(|item| rank.get(key(item)).copied().unwrap_or(usize::MAX));
+}
+
+/// 计算表格增量补丁：与落盘基线按值 diff，只含变化/新增/删除的字段与行；数组顺序是数组属性、
+/// 值 diff 看不见，id 序列不同即视为排序变更并经 field_order/row_order 显式携带。
+/// 无任何变化返回 None（调用方跳过写盘）。title 变化随补丁携带（改名同步磁盘标题）。
+pub fn compute_table_patch(baseline: &TableFile, current: &TableFile) -> Option<TablePatch> {
+    let last_fields: HashMap<&str, &TableField> =
+        baseline.fields.iter().map(|f| (f.id.as_str(), f)).collect();
+    let last_rows: HashMap<&str, &TableRow> =
+        baseline.rows.iter().map(|r| (r.id.as_str(), r)).collect();
+    let upsert_fields: Vec<TableField> = current
+        .fields
+        .iter()
+        .filter(|f| last_fields.get(f.id.as_str()).copied() != Some(*f))
+        .cloned()
+        .collect();
+    let current_field_ids: HashSet<&str> =
+        current.fields.iter().map(|f| f.id.as_str()).collect();
+    let removed_field_ids: Vec<String> = baseline
+        .fields
+        .iter()
+        .filter(|f| !current_field_ids.contains(f.id.as_str()))
+        .map(|f| f.id.clone())
+        .collect();
+    let upsert_rows: Vec<TableRow> = current
+        .rows
+        .iter()
+        .filter(|r| last_rows.get(r.id.as_str()).copied() != Some(*r))
+        .cloned()
+        .collect();
+    let current_row_ids: HashSet<&str> = current.rows.iter().map(|r| r.id.as_str()).collect();
+    let removed_row_ids: Vec<String> = baseline
+        .rows
+        .iter()
+        .filter(|r| !current_row_ids.contains(r.id.as_str()))
+        .map(|r| r.id.clone())
+        .collect();
+    let field_order_changed = !same_id_sequence(&baseline.fields, &current.fields);
+    let row_order_changed = !same_id_sequence(&baseline.rows, &current.rows);
+    let title = (baseline.title != current.title).then(|| current.title.clone());
+    if upsert_fields.is_empty()
+        && upsert_rows.is_empty()
+        && removed_field_ids.is_empty()
+        && removed_row_ids.is_empty()
+        && !field_order_changed
+        && !row_order_changed
+        && title.is_none()
+    {
+        return None;
+    }
+    Some(TablePatch {
+        id: current.id.clone(),
+        title,
+        upsert_fields,
+        removed_field_ids,
+        upsert_rows,
+        removed_row_ids,
+        field_order: field_order_changed.then(|| current.fields.iter().map(|f| f.id.clone()).collect()),
+        row_order: row_order_changed.then(|| current.rows.iter().map(|r| r.id.clone()).collect()),
+    })
+}
+
+/// id 序列是否逐位一致（长度不同即不等）：顺序是数组属性，须显式比对。
+fn same_id_sequence<T: Id>(a: &[T], b: &[T]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.id() == y.id())
+}
+
+/// 表格实体的稳定 id 抽象（补丁 diff 的 id 序列比较共用）。
+trait Id {
+    fn id(&self) -> &str;
+}
+
+impl Id for TableField {
+    fn id(&self) -> &str {
+        &self.id
+    }
+}
+
+impl Id for TableRow {
+    fn id(&self) -> &str {
+        &self.id
+    }
+}
+
+/// 按稳定 id 合并表格补丁到全量文件（removed 幂等；upsert 覆盖同 id 或追加；
+/// field_order/row_order 显式重排——order 未出现的实体保持相对顺序置尾）。
+/// 与磁盘真源合并（而非整文件覆写）：外部改动期间未触及的字段/行不被在途保存冲掉。
+pub fn apply_table_patch(table: &mut TableFile, patch: &TablePatch) {
+    if let Some(title) = &patch.title {
+        table.title = title.clone();
+    }
+    let removed_fields: HashSet<&String> = patch.removed_field_ids.iter().collect();
+    table.fields.retain(|f| !removed_fields.contains(&f.id));
+    for f in &patch.upsert_fields {
+        match table.fields.iter_mut().find(|x| x.id == f.id) {
+            Some(existing) => *existing = f.clone(),
+            None => table.fields.push(f.clone()),
+        }
+    }
+    let removed_rows: HashSet<&String> = patch.removed_row_ids.iter().collect();
+    table.rows.retain(|r| !removed_rows.contains(&r.id));
+    for r in &patch.upsert_rows {
+        match table.rows.iter_mut().find(|x| x.id == r.id) {
+            Some(existing) => *existing = r.clone(),
+            None => table.rows.push(r.clone()),
+        }
+    }
+    if let Some(order) = &patch.field_order {
+        reorder_by(&mut table.fields, order, |f| f.id.as_str());
+    }
+    if let Some(order) = &patch.row_order {
+        reorder_by(&mut table.rows, order, |r| r.id.as_str());
+    }
 }
 
 /// 递归扫描仓库内全部 `.atlx`（跳过隐藏/排除目录与 `.tmp`），返回列表行（按 updatedAt 倒序）。
@@ -782,7 +895,7 @@ fn scan_canvases_in(
 // values 用 serde_json::Map（值类型随字段类型：string/number/image = {images, display?} 对象），不耦合单元格业务。
 
 /// `.atb` 表格文件（schema `atelyx-table/v1`）。
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct TableFile {
     #[serde(default)]
@@ -799,7 +912,7 @@ pub struct TableFile {
     pub updated_at: i64,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct TableField {
     pub id: String,
@@ -818,7 +931,7 @@ pub struct TableField {
     pub calc_type: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct TableRow {
     pub id: String,
     /// 单元格值按字段 id 存（缺 key = 空单元格）。
@@ -848,6 +961,103 @@ pub fn read_table_file(path: &Path) -> Result<TableFile, String> {
 pub fn write_table_file(path: &Path, table: &TableFile) -> Result<(), String> {
     let json = serde_json::to_string_pretty(table).map_err(|e| e.to_string())?;
     atomic_write(path, &json)
+}
+
+// ===== 表格图片附件（.atelyx/temp/tables/<tableId>/，字节由调用方经写盘队列落盘）=====
+
+/// 表格图片附件相对路径：每次导入新文件名 `img-<nanoid>.<ext>`（删除后重导不覆盖旧文件、
+/// 不撞显示缓存）。表格 id 直接进路径，只接受应用生成器的字母表（字母/数字/`-`/`_`），
+/// 拒绝路径语义与空串。
+pub fn table_image_rel_path(table_id: &str, file_name: &str) -> Result<String, String> {
+    let valid = !table_id.is_empty()
+        && table_id.len() <= 128
+        && table_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if !valid {
+        return Err(format!("非法的表格 id：{table_id}"));
+    }
+    let ext = image_ext_of(file_name).ok_or_else(|| format!("非图片文件：{file_name}"))?;
+    let name = format!("img-{}", nanoid!());
+    Ok(format!(".atelyx/temp/tables/{table_id}/{name}.{ext}"))
+}
+
+/// 图片文件名 → 规范扩展名（白名单外拒绝）。
+fn image_ext_of(file_name: &str) -> Option<&'static str> {
+    let ext = std::path::Path::new(file_name).extension()?.to_str()?.to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => Some("png"),
+        "jpg" | "jpeg" => Some("jpg"),
+        "webp" => Some("webp"),
+        "gif" => Some("gif"),
+        _ => None,
+    }
+}
+
+/// 表格图片附件临时目录（`.atelyx/temp/tables/{id}`）。
+fn table_attachment_dir(root: &Path, table_id: &str) -> Result<PathBuf, String> {
+    safe_join(root, &format!(".atelyx/temp/tables/{table_id}"), false)
+}
+
+/// 待删除文件/文件夹涉及的图片附件临时目录（删除前调用：需在文件仍在盘上时读取表 id；
+/// 文件夹递归收集其下所有 `.atb`）。解析失败的文件跳过，附件目录随之残留（尽力而为）。
+pub fn table_attachment_dirs(root: &Path, rel: &str, is_dir: bool) -> Vec<PathBuf> {
+    if !is_dir {
+        let Ok(path) = safe_join(root, rel, false) else { return Vec::new() };
+        let Ok(table) = read_table_file(&path) else { return Vec::new() };
+        return table_attachment_dir(root, &table.id).into_iter().collect();
+    }
+    let Ok(base) = safe_join(root, rel, false) else { return Vec::new() };
+    let mut out = Vec::new();
+    collect_attachment_dirs(&base, root, &mut out);
+    out
+}
+
+fn collect_attachment_dirs(dir: &Path, root: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_attachment_dirs(&path, root, out);
+        } else if path.extension().is_some_and(|ext| ext == "atb") {
+            if let Ok(table) = read_table_file(&path) {
+                if let Ok(d) = table_attachment_dir(root, &table.id) {
+                    out.push(d);
+                }
+            }
+        }
+    }
+}
+
+/// 清理图片附件临时目录（表已删除后的收尾；残留不阻断任何主流程）。
+pub fn purge_table_attachments(dirs: Vec<PathBuf>) {
+    for dir in dirs {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+/// 保存图片字节到系统 Downloads（取文件名主干净化 + 重名自动追加 ` (n)` 序号，不覆盖已有
+/// 文件），返回落盘绝对路径。目录定位失败兜底用户主目录。
+pub fn save_image_to_downloads(file_name: &str, bytes: &[u8]) -> Result<PathBuf, String> {
+    let ext = image_ext_of(file_name).ok_or_else(|| format!("非图片文件：{file_name}"))?;
+    let dir = dirs::download_dir()
+        .or_else(dirs::home_dir)
+        .ok_or("无法定位下载目录")?;
+    // 只取主干：调用方传入的附件名已带扩展名，落盘名由本函数统一拼 ext
+    let stem = std::path::Path::new(file_name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(file_name);
+    let base = sanitize_filename(stem);
+    let base = if base.is_empty() { "图片".to_string() } else { base };
+    let mut path = dir.join(format!("{base}.{ext}"));
+    let mut n = 1;
+    while path.exists() {
+        path = dir.join(format!("{base} ({n}).{ext}"));
+        n += 1;
+    }
+    std::fs::write(&path, bytes).map_err(|e| format!("写入失败：{e}"))?;
+    Ok(path)
 }
 
 // ===== 笔记/*.md 读写 =====
@@ -4180,5 +4390,139 @@ mod chat_session_meta_tests {
         })
         .expect("serialize");
         assert!(!json.contains("compaction"));
+    }
+}
+
+#[cfg(test)]
+mod table_patch_tests {
+    use super::*;
+
+    fn field(id: &str, name: &str, field_type: &str) -> TableField {
+        TableField { id: id.into(), name: name.into(), field_type: field_type.into(), options: None, width: None, calc_type: None }
+    }
+
+    fn row(id: &str, values: Vec<(&str, serde_json::Value)>) -> TableRow {
+        TableRow {
+            id: id.into(),
+            values: values.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+            height: None,
+            styles: None,
+        }
+    }
+
+    fn table(id: &str, fields: Vec<TableField>, rows: Vec<TableRow>) -> TableFile {
+        TableFile {
+            schema: TABLE_SCHEMA.into(),
+            id: id.into(),
+            title: "表格".into(),
+            fields,
+            rows,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    fn cell(v: &str) -> serde_json::Value {
+        serde_json::json!(v)
+    }
+
+    #[test]
+    fn no_change_yields_no_patch() {
+        let base = table("t", vec![field("f1", "名称", "text")], vec![row("r1", vec![("f1", cell("a"))])]);
+        assert!(compute_table_patch(&base, &base).is_none());
+    }
+
+    #[test]
+    fn single_cell_edit_produces_one_row_upsert() {
+        let base = table("t", vec![field("f1", "名称", "text")], vec![
+            row("r1", vec![("f1", cell("a"))]),
+            row("r2", vec![("f1", cell("b"))]),
+        ]);
+        let mut next = base.clone();
+        next.rows[0].values.insert("f1".into(), cell("x"));
+        let patch = compute_table_patch(&base, &next).expect("patch");
+        assert_eq!(patch.upsert_rows.len(), 1);
+        assert_eq!(patch.upsert_rows[0].id, "r1");
+        assert!(patch.upsert_fields.is_empty());
+        assert!(patch.removed_row_ids.is_empty());
+        assert!(patch.field_order.is_none());
+        // 同一实体 id 顺序未变
+        assert!(patch.row_order.is_none());
+    }
+
+    #[test]
+    fn order_change_carries_order_vectors() {
+        let base = table("t", vec![field("f1", "a", "text"), field("f2", "b", "text")], vec![row("r1", vec![])]);
+        let mut next = base.clone();
+        next.fields.reverse();
+        let patch = compute_table_patch(&base, &next).expect("patch");
+        assert!(patch.upsert_fields.is_empty(), "值未变不应产生 upsert");
+        assert_eq!(patch.field_order, Some(vec!["f2".into(), "f1".into()]));
+    }
+
+    #[test]
+    fn add_remove_field_and_row() {
+        let base = table("t", vec![field("f1", "a", "text")], vec![row("r1", vec![])]);
+        let mut next = base.clone();
+        next.fields.push(field("f2", "b", "number"));
+        next.rows.push(row("r2", vec![]));
+        next.rows.remove(0);
+        let patch = compute_table_patch(&base, &next).expect("patch");
+        assert_eq!(patch.upsert_fields.len(), 1);
+        assert_eq!(patch.removed_row_ids, vec!["r1"]);
+        assert_eq!(patch.upsert_rows.len(), 1);
+    }
+
+    #[test]
+    fn apply_patch_merges_onto_disk_truth() {
+        // 磁盘文件含外部新增行（基线里没有）：补丁合并不得冲掉它
+        let base = table("t", vec![field("f1", "a", "text")], vec![row("r1", vec![("f1", cell("a"))])]);
+        let mut next = base.clone();
+        next.rows[0].values.insert("f1".into(), cell("x"));
+        let patch = compute_table_patch(&base, &next).expect("patch");
+
+        let mut disk = base.clone();
+        disk.rows.push(row("r-external", vec![("f1", cell("外部"))]));
+        apply_table_patch(&mut disk, &patch);
+        assert_eq!(disk.rows[0].values["f1"], cell("x"));
+        assert_eq!(disk.rows[1].id, "r-external");
+    }
+
+    #[test]
+    fn apply_patch_reorders_and_preserves_unknown_ids_at_end() {
+        let mut disk = table("t", vec![field("f1", "a", "text"), field("f2", "b", "text")], vec![
+            row("r1", vec![]),
+            row("r2", vec![]),
+        ]);
+        disk.rows.push(row("r-new", vec![]));
+        let patch = TablePatch {
+            id: "t".into(),
+            title: None,
+            upsert_fields: vec![],
+            removed_field_ids: vec![],
+            upsert_rows: vec![],
+            removed_row_ids: vec![],
+            field_order: None,
+            row_order: Some(vec!["r2".into(), "r1".into()]),
+        };
+        apply_table_patch(&mut disk, &patch);
+        let ids: Vec<&str> = disk.rows.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, vec!["r2", "r1", "r-new"]);
+    }
+
+    #[test]
+    fn patch_survives_json_roundtrip() {
+        // TablePatch 线形状即契约（camelCase + type 字段名）
+        let base = table("t", vec![field("f1", "a", "singleSelect")], vec![row("r1", vec![("f1", cell("甲"))])]);
+        let mut next = base.clone();
+        next.fields[0].field_type = "text".into();
+        next.fields[0].options = Some(vec!["甲".into()]);
+        let patch = compute_table_patch(&base, &next).expect("patch");
+        let json = serde_json::to_string(&patch).expect("serialize");
+        assert!(json.contains("\"type\""));
+        let back: TablePatch = serde_json::from_str(&json).expect("deserialize");
+        let mut disk = base.clone();
+        apply_table_patch(&mut disk, &back);
+        assert_eq!(disk.fields, next.fields);
     }
 }

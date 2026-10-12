@@ -81,23 +81,22 @@ pub fn view_icon(kind: &str) -> &'static str {
     }
 }
 
+/// 估宽的单字符口径（估宽与表格行内换行估算共用：两处漂移即行高/命中失配）。
+pub fn estimate_char_w(c: char, font_size: f32) -> f32 {
+    let k = font_size / 12.0;
+    if c.is_ascii() {
+        6.5 * k
+    } else {
+        13.5 * k
+    }
+}
+
 /// 估算文字宽度（拉丁 ≈6.5px、CJK ≈13.5px / 12px 字号；按字号线性缩放）。
 /// 渲染宽度全部由内容自适应（Shrink），本估算仅服务于拖拽命中几何的插入位判定
 /// （标题栏 tab 条起点/宽度、面板标签条插入索引）；与真实 shaping 存在逐字符
 /// 累积的估宽偏差，标签越多插入位偏差越大，不影响渲染。
 pub fn estimate_text_width(text: &str, font_size: f32) -> f32 {
-    let k = font_size / 12.0;
-    let w: f32 = text
-        .chars()
-        .map(|c| {
-            if c.is_ascii() {
-                6.5
-            } else {
-                13.5
-            }
-        })
-        .sum();
-    w * k
+    text.chars().map(|c| estimate_char_w(c, font_size)).sum()
 }
 
 /// 按估宽截断：超出 `max_w` 时逐字收缩并补省略号（截断口径与渲染定宽同源）。
@@ -114,15 +113,19 @@ pub fn ellipsize(text: &str, max_w: f32, font_size: f32) -> String {
     "…".to_string()
 }
 
-/// 面板标签文字（笔记视图打开文件 = 文件名去 .md 后缀，否则视图名）。
+/// 面板标签文字（笔记/表格视图打开文件 = 文件名去扩展名后缀，否则视图名）。
 pub fn tab_label(app: &App, view: &str) -> String {
+    let file_label = |f: &str, ext: &str| {
+        f.rsplit('/').next().unwrap_or(f).strip_suffix(ext).map(|s| s.to_string()).unwrap_or_else(|| f.to_string())
+    };
     if view == "note" {
         if let Some(f) = app.ui.last_note_file.as_deref() {
-            let name = f.rsplit('/').next().unwrap_or(f);
-            return name
-                .strip_suffix(".md")
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| name.to_string());
+            return file_label(f, ".md");
+        }
+    }
+    if view == "table" {
+        if let Some(f) = app.ui.last_table_file.as_deref() {
+            return file_label(f, ".atb");
         }
     }
     view_label(view).to_string()
@@ -176,6 +179,38 @@ pub enum PopupState {
     NoteMenu,
     /// 属性面板类型切换菜单（属性行序号）。
     PropTypeMenu { index: usize },
+    /// 表格：单元格右键（复制/剪切/粘贴/清空）。
+    TableCellMenu,
+    /// 表格：列头 ⋮ 字段管理。
+    TableFieldMenu { field_id: String },
+    /// 表格：字段改名（内联输入）。
+    TableFieldRename { field_id: String },
+    /// 表格：单选选项管理（多行文本，每行一项）。
+    TableOptionsEdit { field_id: String },
+    /// 表格：列头右键。
+    TableColumnMenu { field_id: String },
+    /// 表格：列插入（内联输入；side = -1 左插 / 1 右插）。
+    TableColumnInsert { field_id: String, side: i32 },
+    /// 表格：行号右键。
+    TableRowMenu { row_id: String },
+    /// 表格：添加字段（输入 + 类型列表）。
+    TableAddField,
+    /// 表格：状态栏计算类型。
+    TableStatMenu { field_id: String },
+    /// 表格：全选角钮右键。
+    TableSelectAllMenu,
+    /// 表格：··· 菜单（历史 / 导出）。
+    TableMoreMenu,
+    /// 表格：格式气泡下拉（字体 / 字号 / 字色 / 底色）。
+    TableFontMenu,
+    TableSizeMenu,
+    TableColorMenu { bg: bool },
+    /// 表格：单选下拉（行 + 字段）。
+    TableSelectMenu { row_id: String, field_id: String },
+    /// 表格：灯箱图片右键菜单（下载）。
+    TableLightboxMenu,
+    /// 表格：工具条视图切换下拉（内置表格）。
+    TableViewMenu,
 }
 
 impl PopupState {
@@ -193,6 +228,23 @@ impl PopupState {
             PopupState::VaultMenu { .. } => 192.0,
             PopupState::NoteMenu => 144.0,
             PopupState::PropTypeMenu { .. } => 128.0,
+            PopupState::TableCellMenu => 128.0,
+            PopupState::TableFieldMenu { .. } => 176.0,
+            PopupState::TableFieldRename { .. } => 200.0,
+            PopupState::TableOptionsEdit { .. } => 208.0,
+            PopupState::TableColumnMenu { .. } => 176.0,
+            PopupState::TableColumnInsert { .. } => 200.0,
+            PopupState::TableRowMenu { .. } => 144.0,
+            PopupState::TableAddField => 192.0,
+            PopupState::TableStatMenu { .. } => 128.0,
+            PopupState::TableSelectAllMenu => 160.0,
+            PopupState::TableMoreMenu => 144.0,
+            PopupState::TableFontMenu => 128.0,
+            PopupState::TableSizeMenu => 96.0,
+            PopupState::TableColorMenu { .. } => 168.0,
+            PopupState::TableSelectMenu { .. } => 144.0,
+            PopupState::TableLightboxMenu => 128.0,
+            PopupState::TableViewMenu => 96.0,
         }
     }
 }
@@ -1093,7 +1145,8 @@ fn panel_tab<'a>(
 ) -> Element<'a, Message> {
     let active = active_tab_id.as_deref() == Some(t.id.as_str());
     let label = tab_label(app, &t.view);
-    let has_file = t.view == "note" && app.ui.last_note_file.is_some();
+    let has_file = (t.view == "note" && app.ui.last_note_file.is_some())
+        || (t.view == "table" && app.ui.last_table_file.is_some());
     let window = app.main_id.unwrap_or(iced::window::Id::unique());
     let cursor = app.cursor_for(window);
 
@@ -1122,7 +1175,7 @@ fn panel_tab<'a>(
                     border: border::rounded(pal::RADIUS_XS),
                     ..Default::default()
                 })
-                .on_press(Message::PanelTabFileClose),
+                .on_press(Message::PanelTabFileClose(t.view.clone())),
         );
     }
 
@@ -1226,13 +1279,14 @@ fn note_status_pill(app: &App) -> Option<Element<'static, Message>> {
     }
 }
 
-/// 按视图 kind 分派内容（files/note 可用，其余占位）。
+/// 按视图 kind 分派内容（files/note/search/inspector/table 可用，其余占位）。
 fn view_content<'a>(app: &'a App, window: iced::window::Id, kind: &str) -> Element<'a, Message> {
     match kind {
         "files" => files_view(app),
         "note" => note_view(app),
         "search" => search_view(app),
         "inspector" => inspector_view(app, window),
+        "table" => crate::table_view::table_view(app, window),
         kind => placeholder_view(kind),
     }
 }
@@ -1378,7 +1432,8 @@ pub fn detached_view<'a>(
         }
         let active = w.active_tab_id.as_deref() == Some(t.id.as_str());
         let label = tab_label(app, &t.view);
-        let has_file = t.view == "note" && app.ui.last_note_file.is_some();
+        let has_file = (t.view == "note" && app.ui.last_note_file.is_some())
+            || (t.view == "table" && app.ui.last_table_file.is_some());
         let text_color = if active { pal::TEXT_PRIMARY } else { pal::TEXT_SECONDARY };
         let mut label_row = row![].spacing(4);
         label_row = label_row.push(icon(view_icon(&t.view), 13.0, text_color));
@@ -1404,7 +1459,7 @@ pub fn detached_view<'a>(
                         border: border::rounded(pal::RADIUS_XS),
                         ..Default::default()
                     })
-                    .on_press(Message::DetachedTabFileClose),
+                    .on_press(Message::DetachedTabFileClose(t.view.clone())),
             );
         }
         let top_radius = iced::border::Radius {
@@ -1906,6 +1961,7 @@ fn draft_input_row(app: &App, depth: usize) -> Element<'static, Message> {
                 match kind {
                     DraftKind::Note => "笔记名称",
                     DraftKind::Folder => "文件夹名称",
+                    DraftKind::Table => "表格名称",
                 },
             ),
             _ => (String::new(), ""),
@@ -2975,8 +3031,533 @@ fn popup_element<'a>(
                 })
                 .collect()
         }
+        PopupState::TableCellMenu => vec![
+            (0, MenuEntry::action_icon("复制", "copy", Message::Table(crate::table_view::TableMsg::Menu(Box::new(crate::table_view::TableMsg::Copy))))),
+            (0, MenuEntry::action_icon("剪切", "scissors", Message::Table(crate::table_view::TableMsg::Menu(Box::new(crate::table_view::TableMsg::Cut))))),
+            (0, MenuEntry::action_icon("粘贴", "clipboard-paste", Message::Table(crate::table_view::TableMsg::Menu(Box::new(crate::table_view::TableMsg::Paste))))),
+            (0, MenuEntry::action_icon("格式", "type", Message::Table(crate::table_view::TableMsg::ShowStyleBar))),
+        ],
+        PopupState::TableFieldMenu { field_id } => {
+            let fid = field_id.clone();
+            let ftype = app.table.as_ref().and_then(|s| {
+                s.data.fields.iter().find(|f| f.id == *field_id).map(|f| f.field_type.clone())
+            });
+            let mut entries = vec![
+                (
+                    0,
+                    MenuEntry::action(
+                        "重命名",
+                        Message::PopupOpen(
+                            window,
+                            PopupOpen {
+                                point: app.cursor_for(window),
+                                flip_y: None,
+                                state: PopupState::TableFieldRename { field_id: fid.clone() },
+                                min_width: 0.0,
+                            },
+                        ),
+                    ),
+                ),
+                (
+                    0,
+                    MenuEntry::Submenu { label: "字段类型".into(), icon: None, disabled: false, pane: 2 },
+                ),
+            ];
+            if ftype.as_deref() == Some("singleSelect") {
+                entries.push((
+                    0,
+                    MenuEntry::action(
+                        "单选选项管理",
+                        Message::PopupOpen(
+                            window,
+                            PopupOpen {
+                                point: app.cursor_for(window),
+                                flip_y: None,
+                                state: PopupState::TableOptionsEdit { field_id: fid.clone() },
+                                min_width: 0.0,
+                            },
+                        ),
+                    ),
+                ));
+            }
+            entries.push((0, MenuEntry::Divider));
+            entries.push((
+                0,
+                MenuEntry::Submenu { label: "删除字段".into(), icon: None, disabled: false, pane: 3 },
+            ));
+            // pane 2：类型列表；pane 3：删除确认
+            const FTYPES: [(&str, &str); 5] = [
+                ("text", "文本"),
+                ("number", "数字"),
+                ("duration", "时长（秒）"),
+                ("singleSelect", "单选"),
+                ("image", "图片"),
+            ];
+            for (ft, label) in FTYPES {
+                let is_current = ftype.as_deref() == Some(ft);
+                entries.push((
+                    2,
+                    MenuEntry::Action {
+                        label: label.to_string(),
+                        icon: None,
+                        danger: false,
+                        disabled: false,
+                        on_press: Some(Message::Table(crate::table_view::TableMsg::RetypeField {
+                            field_id: fid.clone(),
+                            ftype: ft.to_string(),
+                        })),
+                        note: is_current.then_some("当前"),
+                        hint: None,
+                    },
+                ));
+            }
+            entries.push((3, MenuEntry::action("确认删除（清空该列全部值）", Message::Table(crate::table_view::TableMsg::DeleteField(fid.clone())))));
+            entries.push((3, MenuEntry::action("取消", Message::Ui(crate::ui::UiMsg::PopupClose { window }))));
+            entries
+        }
+        PopupState::TableFieldRename { field_id } => {
+            let fid = field_id.clone();
+            let current = app
+                .table
+                .as_ref()
+                .and_then(|s| s.data.fields.iter().find(|f| f.id == *field_id))
+                .map(|f| f.name.clone())
+                .unwrap_or_default();
+            let draft = if app.table_popup_draft.is_empty() { current.clone() } else { app.table_popup_draft.clone() };
+            vec![
+                (0, MenuEntry::Custom(popup_text_input(&draft), 30.0)),
+                (
+                    0,
+                    MenuEntry::action("重命名", Message::Table(crate::table_view::TableMsg::RenameField {
+                        field_id: fid,
+                        name: draft,
+                    })),
+                ),
+                (0, MenuEntry::Custom(popup_hint(&format!("当前：{current}")), 18.0)),
+            ]
+        }
+        PopupState::TableOptionsEdit { field_id } => {
+            let fid = field_id.clone();
+            let current = app
+                .table
+                .as_ref()
+                .and_then(|s| s.data.fields.iter().find(|f| f.id == *field_id))
+                .and_then(|f| f.options.clone())
+                .unwrap_or_default();
+            let draft = app.table_popup_draft.clone();
+            // 逐项维护：输入 + 追加；已有选项逐条删除（保持弹层打开，外点关闭）
+            let mut entries = vec![
+                (0, MenuEntry::Custom(popup_text_input(&draft), 30.0)),
+                (
+                    0,
+                    MenuEntry::action("添加选项", Message::Table(crate::table_view::TableMsg::OptionsAdd {
+                        field_id: fid.clone(),
+                        name: draft,
+                    })),
+                ),
+                (0, MenuEntry::Divider),
+            ];
+            for (i, o) in current.iter().enumerate() {
+                entries.push((
+                    0,
+                    MenuEntry::Action {
+                        label: o.clone(),
+                        icon: Some("x"),
+                        danger: true,
+                        disabled: false,
+                        on_press: Some(Message::Table(crate::table_view::TableMsg::OptionsRemove {
+                            field_id: fid.clone(),
+                            index: i,
+                        })),
+                        note: None,
+                        hint: None,
+                    },
+                ));
+            }
+            if current.is_empty() {
+                entries.push((0, MenuEntry::Custom(popup_hint("暂无选项"), 18.0)));
+            }
+            entries
+        }
+        PopupState::TableColumnMenu { field_id } => {
+            let fid = field_id.clone();
+            let entries = vec![
+                (
+                    0,
+                    MenuEntry::action_icon(
+                        "列宽自适应",
+                        "columns-3",
+                        Message::Table(crate::table_view::TableMsg::ColumnAutoWidth(Some(fid.clone()))),
+                    ),
+                ),
+                (
+                    0,
+                    MenuEntry::action_icon(
+                        "格式",
+                        "type",
+                        Message::Table(crate::table_view::TableMsg::ShowStyleBar),
+                    ),
+                ),
+                (
+                    0,
+                    MenuEntry::action_icon(
+                        "左侧插入字段",
+                        "arrow-left",
+                        Message::PopupOpen(
+                            window,
+                            PopupOpen {
+                                point: app.cursor_for(window),
+                                flip_y: None,
+                                state: PopupState::TableColumnInsert { field_id: fid.clone(), side: -1 },
+                                min_width: 0.0,
+                            },
+                        ),
+                    ),
+                ),
+                (
+                    0,
+                    MenuEntry::action_icon(
+                        "右侧插入字段",
+                        "arrow-right",
+                        Message::PopupOpen(
+                            window,
+                            PopupOpen {
+                                point: app.cursor_for(window),
+                                flip_y: None,
+                                state: PopupState::TableColumnInsert { field_id: fid.clone(), side: 1 },
+                                min_width: 0.0,
+                            },
+                        ),
+                    ),
+                ),
+            ];
+            entries
+        }
+        PopupState::TableColumnInsert { field_id, side } => {
+            let side = *side;
+            let draft = app.table_popup_draft.clone();
+            let idx = app.table.as_ref().and_then(|s| {
+                s.data.fields.iter().position(|f| f.id == *field_id).map(|i| if side < 0 { i } else { i + 1 })
+            });
+            vec![
+                (0, MenuEntry::Custom(popup_text_input(&draft), 30.0)),
+                (
+                    0,
+                    MenuEntry::action("添加", Message::Table(crate::table_view::TableMsg::InsertField {
+                        index: idx,
+                        name: draft,
+                    })),
+                ),
+                (0, MenuEntry::action("取消", Message::Ui(crate::ui::UiMsg::PopupClose { window }))),
+            ]
+        }
+        PopupState::TableRowMenu { row_id } => {
+            let rid = row_id.clone();
+            vec![
+                (
+                    0,
+                    MenuEntry::action_icon("复制行", "columns-3", Message::Table(crate::table_view::TableMsg::DuplicateRow(rid.clone()))),
+                ),
+                (
+                    0,
+                    MenuEntry::action("上移", Message::Table(crate::table_view::TableMsg::MoveRow { row_id: rid.clone(), delta: -1 })),
+                ),
+                (
+                    0,
+                    MenuEntry::action("下移", Message::Table(crate::table_view::TableMsg::MoveRow { row_id: rid.clone(), delta: 1 })),
+                ),
+                (
+                    0,
+                    MenuEntry::action_icon("行高自适应", "align-vertical-space-around", Message::Table(crate::table_view::TableMsg::RowHeightAuto(Some(rid.clone())))),
+                ),
+                (
+                    0,
+                    MenuEntry::action_icon("格式", "type", Message::Table(crate::table_view::TableMsg::ShowStyleBar)),
+                ),
+                (0, MenuEntry::Divider),
+                (
+                    0,
+                    MenuEntry::danger("删除行", "trash-2", Message::Table(crate::table_view::TableMsg::DeleteRows(vec![rid]))),
+                ),
+            ]
+        }
+        PopupState::TableAddField => {
+            let draft = app.table_popup_draft.clone();
+            let mut entries = vec![(0, MenuEntry::Custom(popup_text_input(&draft), 30.0))];
+            const FTYPES: [(&str, &str); 5] = [
+                ("text", "文本"),
+                ("number", "数字"),
+                ("duration", "时长（秒）"),
+                ("singleSelect", "单选"),
+                ("image", "图片"),
+            ];
+            for (ft, label) in FTYPES {
+                entries.push((
+                    0,
+                    MenuEntry::Action {
+                        label: format!("添加{label}字段"),
+                        icon: None,
+                        danger: false,
+                        disabled: false,
+                        on_press: Some(Message::Table(crate::table_view::TableMsg::AddField {
+                            name: draft.clone(),
+                            ftype: ft.to_string(),
+                        })),
+                        note: None,
+                        hint: None,
+                    },
+                ));
+            }
+            entries
+        }
+        PopupState::TableStatMenu { field_id } => {
+            let fid = field_id.clone();
+            let field = app
+                .table
+                .as_ref()
+                .and_then(|s| s.data.fields.iter().find(|f| f.id == *field_id).cloned());
+            let mut entries = vec![(
+                0,
+                MenuEntry::Action {
+                    label: "无".into(),
+                    icon: None,
+                    danger: false,
+                    disabled: false,
+                    on_press: Some(Message::Table(crate::table_view::TableMsg::SetCalc {
+                        field_id: fid.clone(),
+                        calc: None,
+                    })),
+                    note: field.as_ref().and_then(|f| f.calc_type.as_deref()).is_none().then_some("当前"),
+                    hint: None,
+                },
+            )];
+            if let Some(f) = field {
+                for calc in atelyx_core::table_ops::calc_types_for(&f.field_type) {
+                    let is_current = f.calc_type.as_deref() == Some(*calc);
+                    entries.push((
+                        0,
+                        MenuEntry::Action {
+                            label: atelyx_core::table_ops::calc_type_label(calc).to_string(),
+                            icon: None,
+                            danger: false,
+                            disabled: false,
+                            on_press: Some(Message::Table(crate::table_view::TableMsg::SetCalc {
+                                field_id: fid.clone(),
+                                calc: Some(calc.to_string()),
+                            })),
+                            note: is_current.then_some("当前"),
+                            hint: None,
+                        },
+                    ));
+                }
+            }
+            entries
+        }
+        PopupState::TableSelectAllMenu => vec![
+            (
+                0,
+                MenuEntry::action_icon("列宽自适应", "columns-3", Message::Table(crate::table_view::TableMsg::ColumnAutoWidth(None))),
+            ),
+            (
+                0,
+                MenuEntry::action_icon("行高自适应", "align-vertical-space-around", Message::Table(crate::table_view::TableMsg::RowHeightAuto(None))),
+            ),
+            (
+                0,
+                MenuEntry::action_icon("格式", "type", Message::Table(crate::table_view::TableMsg::ShowStyleBar)),
+            ),
+        ],
+        PopupState::TableMoreMenu => vec![
+            (0, MenuEntry::action_icon("历史记录", "history", Message::Table(crate::table_view::TableMsg::OpenHistory))),
+            (0, MenuEntry::action_icon("导出 xlsx", "download", Message::Table(crate::table_view::TableMsg::ExportXlsxPick))),
+        ],
+        PopupState::TableFontMenu => {
+            const FONTS: [(&str, &str); 8] = [
+                ("default", "默认"),
+                ("sans", "无衬线"),
+                ("serif", "衬线"),
+                ("mono", "等宽"),
+                ("hei", "黑体"),
+                ("song", "宋体"),
+                ("kai", "楷体"),
+                ("fang", "仿宋"),
+            ];
+            FONTS
+                .iter()
+                .map(|(key, label)| {
+                    (
+                        0,
+                        MenuEntry::Action {
+                            label: label.to_string(),
+                            icon: None,
+                            danger: false,
+                            disabled: false,
+                            on_press: Some(Message::Table(crate::table_view::TableMsg::SetFont(
+                                (*key).to_string().into(),
+                            ))),
+                            note: (*key == "default").then_some("清除"),
+                            hint: None,
+                        },
+                    )
+                })
+                .collect()
+        }
+        PopupState::TableSizeMenu => {
+            const SIZES: [f64; 7] = [12.0, 13.0, 14.0, 16.0, 18.0, 20.0, 24.0];
+            let mut entries = vec![(
+                0,
+                MenuEntry::Action {
+                    label: "默认".into(),
+                    icon: None,
+                    danger: false,
+                    disabled: false,
+                    on_press: Some(Message::Table(crate::table_view::TableMsg::SetSize(None))),
+                    note: Some("清除"),
+                    hint: None,
+                },
+            )];
+            for s in SIZES {
+                entries.push((
+                    0,
+                    MenuEntry::Action {
+                        label: format!("{}", s as i32),
+                        icon: None,
+                        danger: false,
+                        disabled: false,
+                        on_press: Some(Message::Table(crate::table_view::TableMsg::SetSize(Some(s)))),
+                        note: None,
+                        hint: None,
+                    },
+                ));
+            }
+            entries
+        }
+        PopupState::TableColorMenu { bg } => {
+            let bg = *bg;
+            let presets: [&str; 10] = if bg {
+                ["#fde2e2", "#fde7d8", "#fdf0cf", "#e3f3e5", "#dcf1f4", "#e0ecfb", "#ece3fa", "#fbe3f0", "#f0e6d8", "#e8e8e8"]
+            } else {
+                ["#e05252", "#e07b39", "#c99a16", "#4fae6a", "#2fa3b3", "#4f8fd0", "#8a5ad0", "#d94f9c", "#8a6d4a", "#8a8a8a"]
+            };
+            let mut entries = vec![(
+                0,
+                MenuEntry::Action {
+                    label: "默认".into(),
+                    icon: None,
+                    danger: false,
+                    disabled: false,
+                    on_press: Some(Message::Table(crate::table_view::TableMsg::SetColor { bg, color: None })),
+                    note: Some("清除"),
+                    hint: None,
+                },
+            )];
+            for hex in presets {
+                entries.push((
+                    0,
+                    MenuEntry::Action {
+                        label: hex.to_string(),
+                        icon: None,
+                        danger: false,
+                        disabled: false,
+                        on_press: Some(Message::Table(crate::table_view::TableMsg::SetColor {
+                            bg,
+                            color: Some(hex.to_string()),
+                        })),
+                        note: None,
+                        hint: None,
+                    },
+                ));
+            }
+            entries
+        }
+        PopupState::TableSelectMenu { row_id, field_id } => {
+            let (rid, fid) = (row_id.clone(), field_id.clone());
+            let current = app
+                .table
+                .as_ref()
+                .and_then(|s| s.data.rows.iter().find(|r| r.id == *row_id))
+                .and_then(|r| r.values.get(field_id))
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let options = app
+                .table
+                .as_ref()
+                .and_then(|s| s.data.fields.iter().find(|f| f.id == *field_id))
+                .and_then(|f| f.options.clone())
+                .unwrap_or_default();
+            let select = |rid: String, fid: String, value: Option<String>| {
+                Message::Table(crate::table_view::TableMsg::SelectOption { row_id: rid, field_id: fid, value })
+            };
+            let mut entries = vec![(
+                0,
+                match current {
+                    None => MenuEntry::Checked { label: "未选择".into(), on_press: select(rid.clone(), fid.clone(), None) },
+                    Some(_) => MenuEntry::Action {
+                        label: "未选择".into(),
+                        icon: None,
+                        danger: false,
+                        disabled: false,
+                        on_press: Some(select(rid.clone(), fid.clone(), None)),
+                        note: None,
+                        hint: None,
+                    },
+                },
+            )];
+            for o in options {
+                let is_current = current.as_deref() == Some(o.as_str());
+                entries.push((
+                    0,
+                    if is_current {
+                        MenuEntry::Checked { label: o.clone(), on_press: select(rid.clone(), fid.clone(), Some(o)) }
+                    } else {
+                        MenuEntry::Action {
+                            label: o.clone(),
+                            icon: None,
+                            danger: false,
+                            disabled: false,
+                            on_press: Some(select(rid.clone(), fid.clone(), Some(o))),
+                            note: None,
+                            hint: None,
+                        }
+                    },
+                ));
+            }
+            entries
+        }
+        PopupState::TableLightboxMenu => vec![(
+            0,
+            MenuEntry::action_icon("下载图片", "download", Message::Table(crate::table_view::TableMsg::LightboxDownload)),
+        )],
+        PopupState::TableViewMenu => vec![(
+            0,
+            MenuEntry::Action {
+                label: "表格".into(),
+                icon: None,
+                danger: false,
+                disabled: false,
+                on_press: Some(Message::Ui(crate::ui::UiMsg::PopupClose { window })),
+                note: Some("当前"),
+                hint: None,
+            },
+        )],
     };
     crate::ui::menu::pane_view(entries, pane, window)
+}
+
+/// 表格弹层内联输入（单行；提交由菜单项动作携带草稿）。
+fn popup_text_input<'a>(draft: &str) -> Element<'a, Message> {
+    iced::widget::text_input("名称", draft)
+        .size(pal::FS_CAPTION)
+        .padding(Padding::ZERO.horizontal(12.0).vertical(6.0))
+        .on_input(|v: String| Message::Table(crate::table_view::TableMsg::PopupDraft(v)))
+        .into()
+}
+
+fn popup_hint(text_content: &str) -> Element<'static, Message> {
+    container(iced::widget::text(text_content.to_string()).size(pal::FS_MICRO).color(pal::TEXT_MUTED))
+        .padding(Padding::ZERO.horizontal(12.0))
+        .width(Length::Fill)
+        .into()
 }
 
 /// 视图 kind 是否已被占用（主树全部标签 + 撕裂窗口全部标签；`except_tab` 排除自身）。
@@ -3380,7 +3961,7 @@ fn file_menu_entries(
         entries.push((0, MenuEntry::action_icon("新建画布", "file-text", Message::NotImplemented("画布"))));
         entries.push((0, MenuEntry::action_icon("新建笔记", "sticky-note",
             Message::DraftStart(rel.to_string(), DraftKind::Note))));
-        entries.push((0, MenuEntry::action_icon("新建表格", "table", Message::NotImplemented("表格"))));
+        entries.push((0, MenuEntry::action_icon("新建表格", "table", Message::DraftStart(rel.to_string(), crate::DraftKind::Table))));
         entries.push((0, MenuEntry::action_icon("新建文件夹", "folder-plus",
             Message::DraftStart(rel.to_string(), DraftKind::Folder))));
         if !is_root {
@@ -3586,6 +4167,34 @@ pub enum DropZone {
 }
 
 /// 枚举全部窗口的可停靠面板矩形（拖拽会话期间位置尺寸视为稳定）。
+/// 指定窗口当前是否渲染表格视图（活动标签 view = "table"；表格视图全局唯一，同时只在一窗渲染）。
+pub fn window_shows_table(app: &App, window: iced::window::Id) -> bool {
+    let active_is_table = |tabs: &[atelyx_core::layout::TabItem], active: Option<&str>| {
+        active
+            .and_then(|tid| tabs.iter().find(|t| t.id == tid))
+            .is_some_and(|t| t.view == "table")
+    };
+    if app.main_id == Some(window) {
+        fn scan(node: &atelyx_core::layout::LayoutNode) -> bool {
+            match node {
+                atelyx_core::layout::LayoutNode::Panel { tabs, active_tab_id, .. } => {
+                    active_tab_id
+                        .as_deref()
+                        .and_then(|tid| tabs.iter().find(|t| t.id == tid))
+                        .is_some_and(|t| t.view == "table")
+                }
+                atelyx_core::layout::LayoutNode::Split { children, .. } => children.iter().any(scan),
+            }
+        }
+        scan(&atelyx_core::layout::active_layout(&app.ui).tree)
+    } else {
+        app.detached_os
+            .get(&window)
+            .and_then(|model_id| app.ui.detached_windows.iter().find(|w| &w.id == model_id))
+            .is_some_and(|w| active_is_table(&w.tabs, w.active_tab_id.as_deref()))
+    }
+}
+
 pub fn panel_zones(app: &App) -> Vec<PanelZone> {
     let mut out = Vec::new();
     if let Some(main_id) = app.main_id {
@@ -3629,7 +4238,8 @@ pub fn panel_zones(app: &App) -> Vec<PanelZone> {
                             approx_tab_width(
                                 &tab_label(app, &t.view),
                                 t.locked,
-                                t.view == "note" && app.ui.last_note_file.is_some(),
+                                (t.view == "note" && app.ui.last_note_file.is_some())
+                                    || (t.view == "table" && app.ui.last_table_file.is_some()),
                             )
                         })
                         .collect()
@@ -3663,7 +4273,8 @@ fn walk_panels(node: &LayoutNode, area: Rectangle, out: &mut Vec<PanelZone>, app
                     approx_tab_width(
                         &tab_label(app, &t.view),
                         t.locked,
-                        t.view == "note" && app.ui.last_note_file.is_some(),
+                        (t.view == "note" && app.ui.last_note_file.is_some())
+                            || (t.view == "table" && app.ui.last_table_file.is_some()),
                     )
                 })
                 .collect(),

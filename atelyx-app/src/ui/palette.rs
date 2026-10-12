@@ -24,6 +24,12 @@ pub const BG_TERTIARY: Color = rgb(0x23, 0x27, 0x2e);
 /// 浮层背景
 pub const BG_OVERLAY: Color = rgb(0x2a, 0x2e, 0x36);
 
+// ===== 遮罩 =====
+/// 常规遮罩：小控件衬底（图片按钮圆底等），半透明黑
+pub const SCRIM: Color = rgba(0, 0, 0, 0.6);
+/// 强遮罩：灯箱全屏底，半透明黑
+pub const SCRIM_STRONG: Color = rgba(0, 0, 0, 0.85);
+
 // ===== 文本 =====
 /// 主文字
 pub const TEXT_PRIMARY: Color = rgb(0xe0, 0xdd, 0xd6);

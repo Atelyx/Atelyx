@@ -7,6 +7,8 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 /// 一条队列作业。
 enum JobKind {
     Write { path: PathBuf, content: String },
+    /// 字节写：附件二进制（图片导入等）走同一 FIFO，保持与文本写盘的相对顺序。
+    WriteBytes { path: PathBuf, bytes: Vec<u8> },
     /// 旗标作业：不写盘，落地即代表排在其前提交的全部写盘已完成。
     Barrier,
 }
@@ -59,6 +61,12 @@ impl WriteQueue {
         rx.await.map_err(|_| "写盘队列已终止".to_string())?
     }
 
+    /// 提交一次原子字节写（附件二进制）：语义与 `write` 相同，仅载荷为字节。
+    pub async fn write_bytes(&self, path: PathBuf, bytes: Vec<u8>) -> Result<(), String> {
+        let rx = self.push(JobKind::WriteBytes { path, bytes });
+        rx.await.map_err(|_| "写盘队列已终止".to_string())?
+    }
+
     /// 等待此前提交的全部写盘落地（不含本调用之后提交的）。
     pub async fn drain(&self) -> Result<(), String> {
         let rx = self.push(JobKind::Barrier);
@@ -87,6 +95,7 @@ fn worker(inner: Arc<QueueInner>) {
         };
         let result = match job.kind {
             JobKind::Write { path, content } => crate::vault::atomic_write(&path, &content),
+            JobKind::WriteBytes { path, bytes } => crate::vault::atomic_write_bytes(&path, &bytes),
             JobKind::Barrier => Ok(()),
         };
         let _ = job.done.send(result);
@@ -137,5 +146,20 @@ mod tests {
         for i in 0..8 {
             assert_eq!(read(tmp.join(&format!("{i}.md"))).await, i.to_string());
         }
+    }
+
+    #[tokio::test]
+    async fn byte_writes_execute_in_submit_order_with_text() {
+        let tmp = crate::vault::test_support::TempDir::new("wq-bytes");
+        let queue = WriteQueue::new();
+        // 文本写与字节写混排：各自落地且 FIFO 相对顺序成立
+        queue.write(tmp.join("a.md"), "文本".into()).await.unwrap();
+        queue.write_bytes(tmp.join("img.bin"), vec![1, 2, 3]).await.unwrap();
+        queue.drain().await.unwrap();
+        assert_eq!(read(tmp.join("a.md")).await, "文本");
+        let bytes = tokio::task::spawn_blocking(move || std::fs::read(tmp.join("img.bin")).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(bytes, vec![1, 2, 3]);
     }
 }

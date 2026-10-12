@@ -28,6 +28,8 @@ pub enum MenuEntry<'a> {
     },
     /// 分组头（灰底小字）。
     Group(String),
+    /// 当前选中项（下拉选项行形态：强调色文字 + 右侧对勾）。
+    Checked { label: String, on_press: Message },
     Divider,
     /// 钻入子面板。
     Submenu { label: String, icon: Option<&'static str>, disabled: bool, pane: usize },
@@ -133,6 +135,9 @@ pub fn pane_view<'a>(
                 pal::MENU_GROUP_H,
             ),
             MenuEntry::Divider => (divider(), pal::MENU_DIVIDER_H),
+            MenuEntry::Checked { label, on_press } => {
+                (checked_item(&label, on_press, window), pal::MENU_ITEM_H)
+            }
             MenuEntry::Submenu { label, icon: ic, disabled, pane: target } => (
                 submenu_item(&label, ic, disabled, target, window),
                 pal::MENU_ITEM_H,
@@ -183,14 +188,26 @@ fn item(
     item_button(container(row), hover_bg, disabled, on_press, hint, window)
 }
 
+/// 当前选中项（下拉选项行）：强调色文字 + 行尾对勾，与普通条目同款按钮底。
+fn checked_item(
+    label: &str,
+    on_press: Message,
+    window: iced::window::Id,
+) -> Element<'static, Message> {
+    let mut row = row![].spacing(6).width(Length::Fill);
+    row = row.push(text(label.to_string()).size(pal::FS_CAPTION).color(pal::ACCENT));
+    row = row.push(space().width(Length::Fill));
+    row = row.push(icon("check", 13.0, pal::ACCENT));
+    item_button(container(row), pal::HOVER, false, Some(on_press), None, window)
+}
+
 fn submenu_item(
     label: &str,
     icon_name: Option<&'static str>,
     disabled: bool,
     pane: usize,
     window: iced::window::Id,
-) -> Element<'static, Message> {
-    let text_color = if disabled { pal::TEXT_MUTED } else { pal::TEXT_PRIMARY };
+) -> Element<'static, Message> {    let text_color = if disabled { pal::TEXT_MUTED } else { pal::TEXT_PRIMARY };
     let mut row = row![].spacing(6).width(Length::Fill);
     row = row.push(icon("chevron-right", 13.0, text_color));
     if let Some(name) = icon_name {

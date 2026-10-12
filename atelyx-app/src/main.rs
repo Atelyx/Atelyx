@@ -9,6 +9,8 @@ mod layout_view;
 mod markdown_edit;
 mod markdown_view;
 mod properties_view;
+mod table_actions;
+mod table_view;
 mod ui;
 
 use std::collections::{HashMap, HashSet};
@@ -80,7 +82,7 @@ fn collect_md_files(tree: &[vault::FileTreeNode], out: &mut Vec<(String, String)
 }
 
 /// 历史署名（本地桌面端：用户名即设备名）。
-fn history_author() -> atelyx_core::history::HistoryAuthor {
+pub(crate) fn history_author() -> atelyx_core::history::HistoryAuthor {
     let user = std::env::var("USERNAME")
         .or_else(|_| std::env::var("USER"))
         .unwrap_or_else(|_| "本地".into());
@@ -249,6 +251,22 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// Ctrl 组合键分派：表格结构化剪贴板 / 撤销重做 / 全选 / 保存。
+/// 全局订阅不持 App 状态，目标是否消费由处理器按表格焦点自守卫。
+fn table_ctrl_key(c: &str, shift: bool) -> Option<Message> {
+    match c {
+        "s" => Some(Message::Save),
+        "c" => Some(Message::Table(table_view::TableMsg::Copy)),
+        "x" => Some(Message::Table(table_view::TableMsg::Cut)),
+        "v" => Some(Message::Table(table_view::TableMsg::Paste)),
+        "z" if shift => Some(Message::Table(table_view::TableMsg::Redo)),
+        "z" => Some(Message::Table(table_view::TableMsg::Undo)),
+        "y" => Some(Message::Table(table_view::TableMsg::Redo)),
+        "a" => Some(Message::Table(table_view::TableMsg::SelectAll)),
+        _ => None,
+    }
+}
+
 /// 从磁盘恢复布局状态：缺失/损坏/schema 不符一律回落默认态。
 fn load_ui_state() -> AppUiState {
     let mut ui = match ui_state_path()
@@ -319,7 +337,7 @@ enum Message {
     /// 回滚到指定版本（全文快照写回走保存链）。
     HistoryRestore(u64),
     /// 历史记录/回滚落盘完成 → 重读版本列表。
-    HistoryRecorded(u64),
+    HistoryRecorded(u64, Option<String>),
     /// 打开链接（外链 / 仓库路径 / wiki）。
     OpenLink(String, LinkForm),
     /// 笔记图片字节落地（gen 守卫 + src；失败进失败集回落占位，不重试）。
@@ -358,8 +376,9 @@ enum Message {
     /// 右键切换撕裂窗口标签视图。
     DetachedSetTabView { window_id: String, tab_id: String, view: String },
     /// 关闭文件（×：摘下文件、标签保留回未打开态）。
-    PanelTabFileClose,
-    DetachedTabFileClose,
+    /// × = 关文件留标签（kind = "note" / "table"，只关对应面）。
+    PanelTabFileClose(String),
+    DetachedTabFileClose(String),
     /// 标签按下：拖拽候选由标签按钮自证命中（渲染自适应后几何不再可靠）。
     PanelTabPress { panel_id: String, tab_id: String },
     DetachedTabPress { window_id: String, tab_id: String },
@@ -407,6 +426,12 @@ enum Message {
     Release,
     /// ui 层消息（悬停提示 / 弹层关闭与面板导航 / 通知关闭）。
     Ui(ui::UiMsg),
+    /// 表格视图消息（交互 / 命令 / 保存链回执）。
+    Table(table_view::TableMsg),
+    /// 表格可见图片批量加载落地（gen 守卫）。
+    TableImagesLoaded(u64, Vec<(String, (u128, u64), Result<Vec<u8>, String>)>),
+    /// 键盘修饰态（Ctrl+滚轮缩放 / Shift+滚轮横滚判定源）。
+    ModsChanged(keyboard::Modifiers),
     /// 标题栏空白区按下：拖拽窗口 / 双击最大化。
     TitleBarPress(window::Id),
     WindowMinimize(window::Id),
@@ -542,6 +567,7 @@ fn clamp_split_pair(s0: f64, s1: f64, min: f64) -> (f64, f64) {
 pub enum DraftKind {
     Note,
     Folder,
+    Table,
 }
 
 /// 跨窗口标签/布局 tab 拖拽会话：源窗口只产生输入事件，落点由全局面板几何命中。
@@ -587,8 +613,8 @@ enum SaveReason {
     Manual,
     /// 停止输入 500ms 防抖自动写回。
     AutoSave,
-    /// 脏时放行动作前的收尾保存：落地且期间无新输入后执行待续动作。
-    Flush(PendingAfterFlush),
+    /// 脏时放行动作前的收尾保存：落地且期间无新输入后放行 flush_pending（gate 挂起）。
+    Flush,
 }
 
 /// flush 放行后继续的动作（挂起输入已落盘才可执行，否则动作会丢失未保存内容或在途写打到旧路径）。
@@ -599,7 +625,8 @@ enum PendingAfterFlush {
     /// 从最近仓库列表进入指定仓库。
     SelectVault(PathBuf),
     CloseMain(window::Id),
-    CloseFileTab,
+    /// 关文件留标签（kind = "note" / "table"，只关对应面）。
+    CloseFileTab(String),
     /// 仓库内笔记链接（已解码；能进 flush 的只有 Path/Wiki/Create 形态，外链直接打开）。
     OpenLink(String),
     Delete { rel: String, is_dir: bool },
@@ -612,6 +639,16 @@ pub struct App {
     /// 布局状态真源（core 模型；磁盘格式由 schema 版本标识）。
     pub ui: AppUiState,
     vault: Arc<vault::VaultState>,
+    /// 打开的表格会话（数据 + 保存基线 + 视图态；None = 未打开）。
+    pub table: Option<table_view::TableSession>,
+    /// flush 放行后待续的动作（笔记与表格任一脏时挂起，全部落盘后执行）。
+    pub(crate) flush_pending: Option<PendingAfterFlush>,
+    /// 键盘修饰态（Ctrl+滚轮缩放判定源）。
+    pub mods: keyboard::Modifiers,
+    /// 历史面板当前作用的文件类型（载入笔记/表格时置位；读/回滚按它分派）。
+    pub history_kind: atelyx_core::history::HistoryKind,
+    /// 表格弹层内联输入草稿（改名 / 插列 / 添加字段共用；弹层关闭清零）。
+    pub table_popup_draft: String,
     pub theme: Theme,
     /// 应用内通知（右下角；自动消失）。
     pub notifications: Vec<Notification>,
@@ -877,13 +914,18 @@ impl App {
                 search_query: String::new(),
                 history: Vec::new(),
                 history_open: false,
+                history_kind: atelyx_core::history::HistoryKind::Note,
+                table: None,
+                flush_pending: None,
+                mods: keyboard::Modifiers::default(),
+                table_popup_draft: String::new(),
             },
             boot,
         )
     }
 
     /// 追加一条通知（右下角；容量上限防堆积）。
-    fn notify(&mut self, level: NoticeLevel, text: impl Into<String>) {
+    pub(crate) fn notify(&mut self, level: NoticeLevel, text: impl Into<String>) {
         self.notify_seq += 1;
         self.notifications.push(Notification {
             id: self.notify_seq,
@@ -897,7 +939,7 @@ impl App {
     }
 
     /// 世代内的光标位置（按下事件不带坐标，命中判定用最近位置）。
-    fn cursor_for(&self, window: window::Id) -> Point {
+    pub(crate) fn cursor_for(&self, window: window::Id) -> Point {
         self.cursors.get(&window).copied().unwrap_or(Point::ORIGIN)
     }
 
@@ -992,9 +1034,9 @@ impl App {
             }
             Message::PickVault => self.gate(PendingAfterFlush::PickVault),
             Message::VaultPicked(Ok(path)) => {
-                // 系统目录选择器选定：记为最近切仓目标并进入
+                // 系统目录选择器选定：记为最近切仓目标，过 gate（选择器打开期间的输入先落盘）
                 self.vault_switch_target = Some(path.clone());
-                self.enter_vault(path)
+                self.gate(PendingAfterFlush::SelectVault(path))
             }
             Message::VaultPicked(Err(e)) => {
                 self.notify(NoticeLevel::Error, e);
@@ -1081,15 +1123,36 @@ impl App {
                 }
                 Task::none()
             }
-            Message::Save => self.submit_save(SaveReason::Manual),
+            Message::Save => {
+                // Ctrl+S：单元格编辑先提交，笔记与表格各自手动保存（无打开内容 = 提示）
+                table_actions::commit_edit(self);
+                let mut task = Task::none();
+                if self.ui.last_note_file.is_some() {
+                    task = task.chain(self.submit_save(SaveReason::Manual));
+                }
+                if self.table.is_some() {
+                    task = task
+                        .chain(table_actions::submit_table_save(self, table_view::SaveReason::Manual));
+                }
+                if self.ui.last_note_file.is_none() && self.table.is_none() {
+                    self.notify(NoticeLevel::Warning, "没有打开的文件");
+                }
+                task
+            }
             Message::AutosaveTick => {
                 self.autosave_timer = false;
                 // 期限已到才触发；未到 = 输入推迟了期限，chain_autosave_timer 会按剩余时长续排
                 if self.autosave_deadline.is_some_and(|at| at <= Instant::now()) {
                     self.autosave_deadline = None;
+                    let mut task = Task::none();
                     if self.dirty && self.ui.last_note_file.is_some() {
-                        return self.submit_save(SaveReason::AutoSave);
+                        task = task.chain(self.submit_save(SaveReason::AutoSave));
                     }
+                    if self.table.as_ref().is_some_and(|t| t.dirty) {
+                        task = task
+                            .chain(table_actions::submit_table_save(self, table_view::SaveReason::AutoSave));
+                    }
+                    return task;
                 }
                 Task::none()
             }
@@ -1099,13 +1162,13 @@ impl App {
                 }
                 self.save_error = None;
                 let proceed = match reason {
-                    SaveReason::Flush(pending) => {
+                    SaveReason::Flush => {
                         // 保存发起时冻结的内容与当前一致才算落盘；期间又有输入则再收一轮
                         if self.note_text == saved {
                             self.dirty = false;
-                            self.proceed(pending)
+                            self.after_any_flush()
                         } else {
-                            self.submit_save(SaveReason::Flush(pending))
+                            self.submit_save(SaveReason::Flush)
                         }
                     }
                     SaveReason::Manual => {
@@ -1129,7 +1192,7 @@ impl App {
             }
             Message::Saved(_, _, reason, Err(e)) => {
                 // flush 被保存失败打断：动作不放行（放行会丢弃未落盘内容），挂起输入保留待重试
-                if matches!(reason, SaveReason::Flush(_)) {
+                if matches!(reason, SaveReason::Flush) {
                     self.notify(NoticeLevel::Error, format!("保存失败，操作未执行：{e}"));
                 } else {
                     self.notify(NoticeLevel::Error, format!("保存失败：{e}"));
@@ -1198,6 +1261,16 @@ impl App {
                         }
                     }
                     Task::none()
+                } else if horizontal
+                    && self.table.as_ref().is_some_and(|t| t.view.focused && t.view.editing.is_none())
+                {
+                    let dir = if positive { table_view::NavDir::Right } else { table_view::NavDir::Left };
+                    table_actions::on_msg(self, table_view::TableMsg::NavKey(dir))
+                } else if !horizontal
+                    && self.table.as_ref().is_some_and(|t| t.view.focused && t.view.editing.is_none())
+                {
+                    let dir = if positive { table_view::NavDir::Down } else { table_view::NavDir::Up };
+                    table_actions::on_msg(self, table_view::TableMsg::NavKey(dir))
                 } else {
                     self.handle(Message::DividerAdjust(horizontal, positive))
                 }
@@ -1207,8 +1280,24 @@ impl App {
                     let active = self.wiki_picker.as_ref().map(|p| p.active).unwrap_or(0);
                     let picked = self.wiki_candidates().get(active).copied().unwrap_or(0);
                     self.wiki_pick(picked);
+                    Task::none()
+                } else if self
+                    .table
+                    .as_ref()
+                    .is_some_and(|t| t.view.focused && t.view.editing.is_some())
+                {
+                    // 编辑态 Enter 由编辑器 key_binding 转发为 CommitEnter，此处兜底不重放
+                    Task::none()
+                } else if self
+                    .table
+                    .as_ref()
+                    .is_some_and(|t| t.view.focused && t.view.editing.is_none())
+                {
+                    // 选中态 Enter = 下移一行
+                    table_actions::on_msg(self, table_view::TableMsg::NavKey(table_view::NavDir::Down))
+                } else {
+                    Task::none()
                 }
-                Task::none()
             }
             Message::WikiPick(i) => {
                 self.wiki_pick(i);
@@ -1220,7 +1309,15 @@ impl App {
             }
             Message::HistoryLoaded(gen, rel, versions) => {
                 // 身份守卫：版本快照随文件绑定，串台会让回滚跨文件写盘
-                if gen == self.epoch() && self.ui.last_note_file.as_deref() == Some(rel.as_str()) {
+                let file_matches = match self.history_kind {
+                    atelyx_core::history::HistoryKind::Note => {
+                        self.ui.last_note_file.as_deref() == Some(rel.as_str())
+                    }
+                    atelyx_core::history::HistoryKind::Table => {
+                        self.ui.last_table_file.as_deref() == Some(rel.as_str())
+                    }
+                };
+                if gen == self.epoch() && file_matches {
                     self.history = versions;
                 }
                 Task::none()
@@ -1230,7 +1327,10 @@ impl App {
                 Task::none()
             }
             Message::HistoryRestore(seq) => self.history_restore(seq),
-            Message::HistoryRecorded(gen) => {
+            Message::HistoryRecorded(gen, err) => {
+                if let Some(e) = err {
+                    self.notify(NoticeLevel::Error, format!("历史版本记录失败：{e}"));
+                }
                 if gen == self.epoch() {
                     self.reload_history()
                 } else {
@@ -1364,9 +1464,9 @@ impl App {
             Message::DetachedSetTabView { window_id, tab_id, view } => {
                 self.apply(LayoutOp::DetachedSetTabView { window_id, tab_id, view })
             }
-            // × = 关文件留标签：摘下文件回到未打开态（tab 不动）
-            Message::PanelTabFileClose | Message::DetachedTabFileClose => {
-                self.gate(PendingAfterFlush::CloseFileTab)
+            // × = 关文件留标签：摘下对应视图的文件回到未打开态（tab 不动）
+            Message::PanelTabFileClose(kind) | Message::DetachedTabFileClose(kind) => {
+                self.gate(PendingAfterFlush::CloseFileTab(kind))
             }
             Message::PanelTabPress { panel_id, tab_id } => {
                 self.tab_press = Some(TabPress {
@@ -1627,6 +1727,8 @@ impl App {
             }
             Message::UiTick => {
                 self.notifications.retain(|n| !n.expired());
+                // 表格图片长按检查（拖拽排序激活）
+                table_actions::check_long_press(self);
                 // 重名提醒条 3s 过期
                 if self
                     .rename_notice
@@ -1678,6 +1780,15 @@ impl App {
                 Task::none()
             }
             Message::Press(id) => {
+                // 表格焦点：同批表格面按压（画布或菜单，widget 消息先行）已置 press_seen = 保持聚焦；
+                // 否则本次按压在表格面之外 = 失焦（键盘分派随之让位）
+                if let Some(s) = &mut self.table {
+                    if s.view.press_seen {
+                        s.view.press_seen = false;
+                    } else {
+                        s.view.focused = false;
+                    }
+                }
                 // 弹层打开期间按压交由捕获层处理（外点关闭），不触发拖拽手势
                 if self.popup.as_ref().is_some_and(|(w, _)| *w == id) {
                     return Task::none();
@@ -1700,6 +1811,16 @@ impl App {
                         self.rename_press_inside = false;
                     } else if self.main_id == Some(id) {
                         return Task::perform(async {}, |_| Message::LayoutRenameCommit);
+                    }
+                }
+                // 表格编辑器失焦提交：按压不在编辑器浮层内 = 提交（同批 widget 消息已先置 editor_inside）
+                if self.table.as_ref().is_some_and(|t| t.view.editing.is_some()) {
+                    if self.table.as_ref().is_some_and(|t| t.view.editor_inside) {
+                        if let Some(s) = &mut self.table {
+                            s.view.editor_inside = false;
+                        }
+                    } else {
+                        table_actions::commit_edit(self);
                     }
                 }
                 // 把手命中优先（主窗口）；否则记录按压起点（移动超阈值 = 拖标签手势）
@@ -1840,6 +1961,16 @@ impl App {
                 self.press = None;
                 self.tab_press = None;
                 self.file_press = None;
+                // 表格手势悬挂清理：松手在画布外时画布收不到 Release（按压会话作废，
+                // 防下一次无关移动触发幽灵灯箱/翻页/框选；画布内松手已在同批先行消费）
+                if let Some(s) = self.table.as_mut() {
+                    s.view.press = None;
+                    s.view.swipe = None;
+                    s.view.img_drag = None;
+                    s.view.reorder = None;
+                    s.view.col_drag = None;
+                    s.view.row_drag = None;
+                }
                 if let Some(d) = self.file_drag.take() {
                     return self.resolve_file_drop(d);
                 }
@@ -1864,6 +1995,30 @@ impl App {
                 Task::none()
             }
             Message::Ui(msg) => self.on_ui(msg),
+            Message::Table(msg) => {
+                // 数据版本变化 = 表格编辑：与笔记同口径推迟自动保存期限
+                let version_before = self.table.as_ref().map(|t| t.version);
+                let task = table_actions::on_msg(self, msg);
+                if self.table.as_ref().is_some_and(|t| t.dirty)
+                    && self.table.as_ref().map(|t| t.version) != version_before
+                {
+                    self.autosave_deadline = Some(Instant::now() + AUTOSAVE_DEBOUNCE);
+                }
+                // 滚动/载入后补拉可见区图片句柄（无待加载 = 无任务）
+                task.chain(table_actions::ensure_image_loads(self).unwrap_or_default())
+            }
+            Message::TableImagesLoaded(gen, results) => {
+                if gen != self.epoch() {
+                    return Task::none();
+                }
+                Task::batch(results.into_iter().map(|(rel, fp, result)| {
+                    self.handle(Message::Table(table_view::TableMsg::ImageLoaded { rel, fp, result }))
+                }))
+            }
+            Message::ModsChanged(m) => {
+                self.mods = m;
+                Task::none()
+            }
             Message::TitleBarPress(id) => {
                 // 双击（350ms 内同窗口两次空白按下）= 最大化切换；否则进入窗口拖拽
                 let now = Instant::now();
@@ -1907,6 +2062,29 @@ impl App {
                     return self.on_props(PropsMsg::CancelSlot);
                 } else if self.main_id == Some(window) && self.rename.take().is_some() {
                     // 行内重命名 Esc = 取消
+                } else if layout_view::window_shows_table(self, window)
+                    && self.table.as_ref().is_some_and(|t| t.view.lightbox.is_some())
+                {
+                    // 灯箱 Esc = 关闭预览
+                    if let Some(s) = &mut self.table {
+                        s.view.lightbox = None;
+                    }
+                    return Task::none();
+                } else if layout_view::window_shows_table(self, window)
+                    && self.table.as_ref().is_some_and(|t| t.view.focused && t.view.editing.is_some())
+                {
+                    // 编辑态 Esc = 取消并清选中
+                    return table_actions::on_msg(self, table_view::TableMsg::CancelEdit);
+                } else if layout_view::window_shows_table(self, window)
+                    && self
+                        .table
+                        .as_ref()
+                        .is_some_and(|t| t.view.focused && t.view.selection.is_some())
+                {
+                    // 选中态 Esc = 清选中
+                    if let Some(s) = &mut self.table {
+                        s.view.selection = None;
+                    }
                 }
                 Task::none()
             }
@@ -1926,6 +2104,8 @@ impl App {
                 }
                 self.popup = Some((window, open));
                 self.popup_pane = 0;
+                // 表格弹层内联输入以空草稿回退显示当前值
+                self.table_popup_draft.clear();
                 Task::none()
             }
             Message::FileCount(gen, Ok(n)) => {
@@ -1993,14 +2173,18 @@ impl App {
                 Task::none()
             }
             Message::DeleteEntry(rel, is_dir) => {
-                // 删除命中打开中的笔记：挂起输入先落盘（防未保存内容被静默清空）
-                let hits_open = self.ui.last_note_file.as_deref().is_some_and(|f| {
-                    if is_dir {
-                        f == rel || f.starts_with(&format!("{rel}/"))
-                    } else {
-                        f == rel
-                    }
-                });
+                // 删除命中打开中的笔记/表格：挂起输入先落盘（防未保存内容被静默清空）
+                let hits = |open: Option<&str>| {
+                    open.is_some_and(|f| {
+                        if is_dir {
+                            f == rel || f.starts_with(&format!("{rel}/"))
+                        } else {
+                            f == rel
+                        }
+                    })
+                };
+                let hits_open = hits(self.ui.last_note_file.as_deref())
+                    || hits(self.ui.last_table_file.as_deref());
                 if hits_open {
                     self.gate(PendingAfterFlush::Delete { rel, is_dir })
                 } else {
@@ -2249,7 +2433,7 @@ impl App {
     }
 
     /// 收起当前弹层（菜单动作完成后的统一收尾）。
-    fn dismiss_popup(&mut self) {
+    pub(crate) fn dismiss_popup(&mut self) {
         self.popup = None;
         self.popup_pane = 0;
     }
@@ -2591,18 +2775,51 @@ impl App {
     }
 
     /// 会话世代：core 在每次切换仓库时自增；在途任务的回调据此判定是否过期。
-    fn epoch(&self) -> u64 {
+    pub(crate) fn epoch(&self) -> u64 {
         self.vault
             .generation
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    /// 脏时先收尾保存挂起输入再放行动作；不脏直接执行。
+    /// 笔记与表格任一脏。
+    fn any_dirty(&self) -> bool {
+        self.dirty || self.table.as_ref().is_some_and(|t| t.dirty)
+    }
+
+    /// 脏时先收尾挂起输入再放行动作；不脏直接执行。
+    /// 笔记与表格任一脏即挂起 pending，全部落盘后执行（after_any_flush）。
     fn gate(&mut self, pending: PendingAfterFlush) -> Task<Message> {
-        if self.dirty {
-            return self.submit_save(SaveReason::Flush(pending));
+        // 在途单元格草稿先提交（提交即置脏，走下面的 flush；无改动 = 零成本直通）：
+        // 打开/关闭/切仓库/改名/删除都会替换或丢弃表格会话，草稿不得随会话被静默丢弃
+        if self.table.as_ref().is_some_and(|t| t.view.editing.is_some()) {
+            table_actions::commit_edit(self);
+        }
+        if self.any_dirty() {
+            self.flush_pending = Some(pending);
+            return self.flush_dirty_now();
         }
         self.proceed(pending)
+    }
+
+    /// 提交当前所有脏面的保存（flush 语义；全部落地后由回执侧放行 flush_pending）。
+    fn flush_dirty_now(&mut self) -> Task<Message> {
+        let mut task = Task::none();
+        if self.dirty {
+            task = task.chain(self.submit_save(SaveReason::Flush));
+        }
+        if self.table.as_ref().is_some_and(|t| t.dirty) {
+            task = task.chain(table_actions::submit_table_save(self, table_view::SaveReason::Flush));
+        }
+        task
+    }
+
+    /// 任一保存回执后的放行判定：全部干净且有待续动作 = 执行。
+    pub(crate) fn after_any_flush(&mut self) -> Task<Message> {
+        if self.flush_pending.is_some() && !self.any_dirty() {
+            let pending = self.flush_pending.take().expect("flush_pending 已判存在");
+            return self.proceed(pending);
+        }
+        Task::none()
     }
 
     /// flush 放行后的动作执行体（gate 保证挂起输入已落盘）。
@@ -2618,7 +2835,7 @@ impl App {
                 self.enter_vault(path)
             }
             PendingAfterFlush::CloseMain(id) => window::close(id),
-            PendingAfterFlush::CloseFileTab => self.close_file_tab(),
+            PendingAfterFlush::CloseFileTab(kind) => self.close_file_tab(&kind),
             PendingAfterFlush::OpenLink(href) => self.open_link_inner(href),
             PendingAfterFlush::Delete { rel, is_dir } => {
                 self.dismiss_popup();
@@ -2653,8 +2870,12 @@ impl App {
         )
     }
 
-    /// 打开文件（脏拦截已由 gate 处理）：复位只读并清掉上一文件的解析产物。
+    /// 打开文件（脏拦截已由 gate 处理）：按扩展名分流（.atb → 表格），复位只读并清掉上一文件的解析产物。
     fn open_file(&mut self, rel: &str) -> Task<Message> {
+        if rel.ends_with(".atb") {
+            return table_actions::open_table(self, rel);
+        }
+        self.history_kind = atelyx_core::history::HistoryKind::Note;
         self.ui.last_note_file = Some(rel.to_string());
         // 打开文件复位只读：笔记视图按文件重新挂载，档位不跨文件延续
         self.note_mode = NoteMode::Read;
@@ -2713,6 +2934,8 @@ impl App {
         self.expand_all = false;
         self.expand_pending = 0;
         self.rename_notice = None;
+        // 表格会话随仓库切换清空（载入在途不留旧数据）
+        self.table = None;
         // last_note_file 跨仓库沿用（相对路径语义）；仓库就绪即恢复其内容
         self.ui.file_explorer_expanded = self
             .expanded_by_vault
@@ -2725,6 +2948,9 @@ impl App {
         task = task.chain(self.save_global());
         if let Some(rel) = self.ui.last_note_file.clone() {
             task = task.chain(self.load_note(&rel));
+        }
+        if let Some(rel) = self.ui.last_table_file.clone() {
+            task = task.chain(table_actions::load_table(self, &rel));
         }
         task
     }
@@ -2741,20 +2967,30 @@ impl App {
         )
     }
 
-    /// 关闭打开的文件（×：摘下文件、标签保留回未打开态；脏拦截已由 gate 处理）。
-    fn close_file_tab(&mut self) -> Task<Message> {
+    /// 关闭打开的文件（×：摘下对应视图的文件、标签保留回未打开态；脏拦截已由 gate 处理）。
+    fn close_file_tab(&mut self, kind: &str) -> Task<Message> {
         self.dismiss_popup();
-        self.ui.last_note_file = None;
-        self.note_text.clear();
-        self.source_editor = text_editor::Content::new();
-        self.edit.reset(0);
-        self.edit_doc = None;
-        self.edit_meta.clear();
-        self.preview_doc = None;
-        self.dirty = false;
-        self.save_error = None;
-        self.reset_props();
-        self.history.clear();
+        match kind {
+            "table" => {
+                self.ui.last_table_file = None;
+                self.table = None;
+                // 与笔记关闭同规：历史面板不再有对应文件可查，清空防列表冻结在旧数据
+                self.history.clear();
+            }
+            _ => {
+                self.ui.last_note_file = None;
+                self.note_text.clear();
+                self.source_editor = text_editor::Content::new();
+                self.edit.reset(0);
+                self.edit_doc = None;
+                self.edit_meta.clear();
+                self.preview_doc = None;
+                self.dirty = false;
+                self.save_error = None;
+                self.reset_props();
+                self.history.clear();
+            }
+        }
         self.schedule_persist();
         Task::none()
     }
@@ -2946,9 +3182,17 @@ impl App {
 
     // ===== 历史侧车 =====
 
-    /// 读取当前笔记的历史版本（spawn_blocking；尽力而为，读失败 = 空列表）。
+    /// 读取当前上下文（笔记/表格）的历史版本（spawn_blocking；尽力而为，读失败 = 空列表）。
     fn reload_history(&self) -> Task<Message> {
-        let Some(rel) = self.ui.last_note_file.clone() else { return Task::none() };
+        let (kind, rel) = match self.history_kind {
+            atelyx_core::history::HistoryKind::Note => {
+                (atelyx_core::history::HistoryKind::Note, self.ui.last_note_file.clone())
+            }
+            atelyx_core::history::HistoryKind::Table => {
+                (atelyx_core::history::HistoryKind::Table, self.ui.last_table_file.clone())
+            }
+        };
+        let Some(rel) = rel else { return Task::none() };
         let gen = self.epoch();
         let state = self.vault.clone();
         let rel_for_cb = rel.clone();
@@ -2956,7 +3200,7 @@ impl App {
             async move {
                 tokio::task::spawn_blocking(move || {
                     let (root, _, _) = state.session_snapshot()?;
-                    Ok::<_, String>(atelyx_core::history::load_history(&root, atelyx_core::history::HistoryKind::Note, &rel))
+                    Ok::<_, String>(atelyx_core::history::load_history(&root, kind, &rel))
                 })
                 .await
                 .map_err(|e| e.to_string())
@@ -2993,7 +3237,7 @@ impl App {
                     )
                 })
                 .await;
-                Message::HistoryRecorded(gen)
+                Message::HistoryRecorded(gen, None)
             },
             |msg| msg,
         )
@@ -3004,6 +3248,53 @@ impl App {
         let Some(version) = self.history.iter().find(|v| v.seq == seq).cloned() else {
             return Task::none();
         };
+        match self.history_kind {
+            atelyx_core::history::HistoryKind::Table => {
+                // 表格：快照 = TableFile JSON；解析失败静默放弃（历史尽力而为）
+                let Ok(table) = serde_json::from_str::<atelyx_core::vault::TableFile>(&version.content)
+                else {
+                    self.notify(NoticeLevel::Error, "历史版本无法解析");
+                    return Task::none();
+                };
+                if table_actions::apply_history_snapshot(self, table) {
+                    self.autosave_deadline = Some(Instant::now() + AUTOSAVE_DEBOUNCE);
+                }
+                let Some(rel) = self.ui.last_table_file.clone() else { return Task::none() };
+                let gen = self.epoch();
+                let state = self.vault.clone();
+                let author = history_author();
+                let content = version.content.clone();
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            let (root, _, _) = state.session_snapshot()?;
+                            atelyx_core::history::record_version(
+                                &root,
+                                atelyx_core::history::HistoryKind::Table,
+                                &rel,
+                                &atelyx_core::history::RecordOpts {
+                                    content,
+                                    action: atelyx_core::history::HistoryAction::Restore,
+                                    author,
+                                    coalesce_edit_ms: None,
+                                    max_versions: 0,
+                                    note: None,
+                                },
+                            )
+                        })
+                        .await
+                        .map_err(|e| e.to_string())
+                        .and_then(|r| r)
+                    },
+                    move |r: Result<(), String>| Message::HistoryRecorded(gen, r.err()),
+                )
+            }
+            atelyx_core::history::HistoryKind::Note => self.note_history_restore(version),
+        }
+    }
+
+    /// 笔记回滚：全文快照替换正文（撤销可回退），保存链写回并记 restore 版本。
+    fn note_history_restore(&mut self, version: atelyx_core::history::HistoryVersion) -> Task<Message> {
         self.edit.snapshot(&self.note_text);
         self.note_text = version.content.clone();
         // 源码档正文真源 = note_text 派生的编辑器内容：程序化替换须同步重建
@@ -3041,9 +3332,8 @@ impl App {
                 .await
                 .map_err(|e| e.to_string())
                 .and_then(|r| r)
-                .unwrap_or(())
             },
-            move |()| Message::HistoryRecorded(gen),
+            move |r: Result<(), String>| Message::HistoryRecorded(gen, r.err()),
         )
     }
 
@@ -3088,6 +3378,7 @@ impl App {
                     self.popup_pane = 0;
                     self.delete_confirm = None;
                     self.remove_vault_confirm = None;
+                    self.table_popup_draft.clear();
                 }
                 Task::none()
             }
@@ -3125,6 +3416,36 @@ impl App {
                         self.schedule_persist();
                     }
                 }
+                if let Some(f) = &self.ui.last_table_file {
+                    let next = if f == from {
+                        Some(to.clone())
+                    } else if f.starts_with(&format!("{from}/")) {
+                        Some(f.replacen(from, to, 1))
+                    } else {
+                        None
+                    };
+                    if let Some(n) = next {
+                        if let Some(s) = &mut self.table {
+                            if s.file == *f || s.file.starts_with(&format!("{from}/")) {
+                                s.file = n.clone();
+                                // 表格内标题与文件名保持一致（新表以文件名起稿，改名随之同步）
+                                let stem = n
+                                    .rsplit('/')
+                                    .next()
+                                    .unwrap_or(n.as_str())
+                                    .strip_suffix(".atb")
+                                    .unwrap_or(n.as_str());
+                                if s.data.title != stem {
+                                    s.data.title = stem.to_string();
+                                    s.touch();
+                                    self.autosave_deadline = Some(Instant::now() + AUTOSAVE_DEBOUNCE);
+                                }
+                            }
+                        }
+                        self.ui.last_table_file = Some(n);
+                        self.schedule_persist();
+                    }
+                }
             }
             FollowUp::Deleted { rel, is_dir } => {
                 let hit = self.ui.last_note_file.as_deref().is_some_and(|f| {
@@ -3144,6 +3465,18 @@ impl App {
                     self.preview_doc = None;
                     self.dirty = false;
                     self.save_error = None;
+                    self.schedule_persist();
+                }
+                let hit_table = self.ui.last_table_file.as_deref().is_some_and(|f| {
+                    if *is_dir {
+                        f == rel || f.starts_with(&format!("{rel}/"))
+                    } else {
+                        f == rel
+                    }
+                });
+                if hit_table {
+                    self.ui.last_table_file = None;
+                    self.table = None;
                     self.schedule_persist();
                 }
             }
@@ -3185,6 +3518,7 @@ impl App {
                         let base = match kind {
                             DraftKind::Note => format!("{name}.md"),
                             DraftKind::Folder => name.clone(),
+                            DraftKind::Table => format!("{name}.atb"),
                         };
                         let mut candidate = base.clone();
                         let mut seq = 2;
@@ -3196,6 +3530,7 @@ impl App {
                             candidate = match kind {
                                 DraftKind::Note => format!("{name}-{seq}.md"),
                                 DraftKind::Folder => format!("{name}-{seq}"),
+                                DraftKind::Table => format!("{name}-{seq}.atb"),
                             };
                             seq += 1;
                         }
@@ -3206,6 +3541,12 @@ impl App {
                                 vault::atomic_write(&path, "").map(|_| rel)
                             }
                             DraftKind::Folder => vault::create_folder(&root, &rel).map(|_| rel),
+                            DraftKind::Table => {
+                                // 初始 = 一个「名称」文本字段（空白表无字段难用）
+                                let table = atelyx_core::table_ops::new_table_file(&name);
+                                let path = vault::safe_join(&root, &rel, true)?;
+                                vault::write_table_file(&path, &table).map(|_| rel)
+                            }
                         }
                     },
                     move |result| Message::OpDone(gen, parent, result, FollowUp::None),
@@ -3325,6 +3666,7 @@ impl App {
     }
 
     /// 删除文件/文件夹（不可恢复；菜单内已就地确认）。Ok 携带目标相对路径。
+    /// 表格文件随删图片附件目录（按 tableId 划分；读不到 id 跳过，不拦截删除本身）。
     fn delete_entry(&mut self, rel: &str, is_dir: bool) -> Task<Message> {
         let Some(root) = self.vault.root().ok() else { return Task::none() };
         let gen = self.epoch();
@@ -3333,11 +3675,23 @@ impl App {
         let rel_for_follow = rel.to_string();
         Task::perform(
             async move {
-                if is_dir {
+                // 删除前读取：附件目录按表 id 定位（文件夹递归收集其下 .atb），文件删掉后无从读取；
+                // 收集在后台线程执行（大文件夹递归解析不阻塞 UI）
+                let rel = rel_for_task.clone();
+                let root_for_scan = root.clone();
+                let attachment_dirs = tokio::task::spawn_blocking(move || vault::table_attachment_dirs(&root_for_scan, &rel, is_dir))
+                    .await
+                    .unwrap_or_default();
+                let result = if is_dir {
                     vault::delete_folder(&root, &rel_for_task, true).map(|_| rel_for_task)
                 } else {
                     vault::delete_vault_file(&root, &rel_for_task).map(|_| rel_for_task)
+                };
+                // 图片附件目录随表私有：删除后尽力清理（残留不拦截删除本身）
+                if result.is_ok() {
+                    vault::purge_table_attachments(attachment_dirs);
                 }
+                result
             },
             move |result| {
                 Message::OpDone(
@@ -4156,11 +4510,15 @@ impl App {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        // 心跳仅在有待过期通知、提醒条在途、悬停提示在途（距离收起判定）或编辑面聚焦时挂载
+        // 心跳仅在有待过期通知、提醒条在途、悬停提示在途（距离收起判定）、编辑面聚焦
+        // 或表格图片长按候选时挂载
         let need_tick = !self.notifications.is_empty()
             || self.rename_notice.is_some()
             || self.tooltip.is_some()
-            || self.edit.focused;
+            || self.edit.focused
+            || self.table.as_ref().is_some_and(|t| {
+                t.view.press.as_ref().is_some_and(|p| p.img.is_some() && !p.active)
+            });
         Subscription::batch([
             iced::time::every(PERSIST_TICK).map(|_| Message::PersistTick),
             if need_tick {
@@ -4169,7 +4527,11 @@ impl App {
                 Subscription::none()
             },
             // 方向键：双链候选开启时导航候选，否则调整分割把手（语义在 NavKey 处理器分派）
+            // 表格专属键在弹层打开时也照发，由 on_msg 处理器按弹层态自守卫
             iced::event::listen_with(|event, _status, window| match event {
+                Event::Keyboard(keyboard::Event::ModifiersChanged(m)) => {
+                    Some(Message::ModsChanged(m))
+                }
                 Event::Keyboard(keyboard::Event::KeyPressed {
                     key: keyboard::Key::Named(keyboard::key::Named::ArrowLeft),
                     modifiers,
@@ -4196,10 +4558,49 @@ impl App {
                     ..
                 }) if modifiers.is_empty() => Some(Message::EnterKey),
                 Event::Keyboard(keyboard::Event::KeyPressed {
+                    key: keyboard::Key::Named(keyboard::key::Named::Home),
+                    modifiers,
+                    ..
+                }) if modifiers.is_empty() => {
+                    Some(Message::Table(table_view::TableMsg::NavKey(table_view::NavDir::Home)))
+                }
+                Event::Keyboard(keyboard::Event::KeyPressed {
+                    key: keyboard::Key::Named(keyboard::key::Named::End),
+                    modifiers,
+                    ..
+                }) if modifiers.is_empty() => {
+                    Some(Message::Table(table_view::TableMsg::NavKey(table_view::NavDir::End)))
+                }
+                Event::Keyboard(keyboard::Event::KeyPressed {
+                    key: keyboard::Key::Named(keyboard::key::Named::Delete),
+                    modifiers,
+                    ..
+                })
+                | Event::Keyboard(keyboard::Event::KeyPressed {
+                    key: keyboard::Key::Named(keyboard::key::Named::Backspace),
+                    modifiers,
+                    ..
+                }) if modifiers.is_empty() => {
+                    Some(Message::Table(table_view::TableMsg::ClearSelection))
+                }
+                Event::Keyboard(keyboard::Event::KeyPressed {
                     key: keyboard::Key::Character(c),
                     modifiers,
                     ..
-                }) if c == "s" && modifiers.control() => Some(Message::Save),
+                }) if modifiers.control() && !modifiers.alt() && c.len() == 1 => {
+                    table_ctrl_key(&c.to_lowercase(), modifiers.shift())
+                }
+                Event::Keyboard(keyboard::Event::KeyPressed {
+                    key: keyboard::Key::Character(_),
+                    modifiers,
+                    text,
+                    ..
+                }) if modifiers.is_empty() => {
+                    // 打印字符（无修饰）：选区态覆盖输入（编辑态由编辑器部件接管，处理器自守卫）
+                    text.and_then(|t| t.chars().next())
+                        .filter(|ch| !ch.is_control())
+                        .map(|ch| Message::Table(table_view::TableMsg::CharKey(ch)))
+                }
                 Event::Keyboard(keyboard::Event::KeyPressed {
                     key: keyboard::Key::Named(keyboard::key::Named::Tab),
                     modifiers,
