@@ -1,0 +1,11 @@
+[package]
+name = "atelyx-plugin-protocol"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Atelyx 插件协议：握手、JSON-RPC/NDJSON 信封、能力面方法、ViewNode 树与事件（宿主与 SDK 共用的对外契约）"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"

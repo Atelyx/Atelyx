@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["atelyx-app", "atelyx-core"]
+members = ["atelyx-app", "atelyx-core", "atelyx-plugin-protocol", "atelyx-plugin-sdk"]
 exclude = ["atelyx-server"]
 
 # 本地修改版 winit（基于 0.30.13）：Windows 11 上跨不同 DPI 显示器拖动窗口时

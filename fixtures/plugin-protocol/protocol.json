@@ -1,0 +1,171 @@
+{
+  "envelopes": [
+    {
+      "name": "request-with-params",
+      "kind": "request",
+      "method": "fs.readText",
+      "line": "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"fs.readText\",\"params\":{\"path\":\"C:/repo/notes/a.md\"}}"
+    },
+    {
+      "name": "request-null-params",
+      "kind": "request",
+      "method": "state.read",
+      "line": "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"state.read\"}"
+    },
+    {
+      "name": "notification",
+      "kind": "notification",
+      "method": "host:event",
+      "line": "{\"jsonrpc\":\"2.0\",\"method\":\"host:event\",\"params\":{\"name\":\"vault:switch\",\"payload\":{\"kind\":\"local\",\"root\":\"C:/repo\"}}}"
+    },
+    {
+      "name": "response-success",
+      "kind": "response",
+      "method": null,
+      "line": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":\"# A\"}}"
+    },
+    {
+      "name": "response-error",
+      "kind": "response",
+      "method": null,
+      "line": "{\"jsonrpc\":\"2.0\",\"id\":9,\"error\":{\"code\":-32001,\"message\":\"能力未声明：fs.readText\"}}"
+    }
+  ],
+  "viewTree": {
+    "id": "root",
+    "kind": "column",
+    "gap": 8.0,
+    "padding": 12.0,
+    "crossAlign": "start",
+    "children": [
+      {
+        "id": "query",
+        "kind": "textInput",
+        "value": "示例文本",
+        "placeholder": "输入…",
+        "events": ["submit"]
+      },
+      {
+        "id": "size",
+        "kind": "numberInput",
+        "min": 1.0,
+        "max": 100.0,
+        "step": 1.0,
+        "events": ["change"]
+      },
+      {
+        "id": "engine",
+        "kind": "dropdown",
+        "options": ["a", "b"],
+        "selected": 0,
+        "events": ["change"]
+      },
+      {
+        "id": "go",
+        "kind": "button",
+        "label": "开始",
+        "variant": "primary",
+        "events": ["click"]
+      },
+      {
+        "id": "status",
+        "kind": "text",
+        "content": "就绪",
+        "color": "textMuted"
+      },
+      {
+        "id": "shot",
+        "kind": "image",
+        "source": { "type": "private", "path": "shots/last.png" },
+        "fit": "contain"
+      }
+    ]
+  },
+  "handshake": {
+    "params": {
+      "apiVersion": 1,
+      "plugin": { "id": "com.atelyx.echo", "name": "Echo", "version": "0.1.0" }
+    },
+    "result": {
+      "apiVersion": 1,
+      "host": { "name": "Atelyx", "version": "0.6.0" }
+    }
+  },
+  "methods": [
+    {
+      "name": "fs.readText params",
+      "type": "PathParams",
+      "value": { "path": "C:/repo/notes/a.md" }
+    },
+    {
+      "name": "fs.list result",
+      "type": "ListResult",
+      "value": { "entries": [ { "name": "a.md", "kind": "file" }, { "name": "sub", "kind": "dir" } ] }
+    },
+    {
+      "name": "process.spawn params",
+      "type": "SpawnParams",
+      "value": { "program": "sample-service", "args": ["--port", "8080"], "cwd": "C:/svc", "env": { "A": "1" } }
+    },
+    {
+      "name": "process event",
+      "type": "ProcessEventParams",
+      "value": { "pid": 42, "event": { "kind": "stdout", "data": "ok" } }
+    },
+    {
+      "name": "notification.show params",
+      "type": "ShowNotificationParams",
+      "value": { "title": "完成", "body": "已退出", "level": "success" }
+    },
+    {
+      "name": "shortcut.register params",
+      "type": "RegisterShortcutParams",
+      "value": { "accelerator": "Shift+Alt+E" }
+    },
+    {
+      "name": "clipboard payload",
+      "type": "TextPayload",
+      "value": { "text": "x" }
+    },
+    {
+      "name": "dialog.pickFile params",
+      "type": "PickFileParams",
+      "value": { "title": "选择", "save": false, "defaultPath": "C:/a", "filters": [ { "name": "PNG", "extensions": ["png"] } ] }
+    },
+    {
+      "name": "dialog.pickFile result",
+      "type": "PickedPath",
+      "value": { "path": "C:/a/b.png" }
+    },
+    {
+      "name": "http.request params",
+      "type": "HttpRequestParams",
+      "value": { "method": "GET", "url": "http://127.0.0.1:8188", "headers": { "A": "b" }, "timeoutMs": 5000 }
+    },
+    {
+      "name": "http.request result",
+      "type": "HttpResult",
+      "value": { "status": 200, "headers": { "Content-Type": "application/json" }, "bodyBase64": "e30=" }
+    },
+    {
+      "name": "view surface attached",
+      "type": "SurfaceAttachedParams",
+      "value": { "surfaceId": "main", "kind": "panel" }
+    },
+    {
+      "name": "view event params",
+      "type": "ViewEventParams",
+      "value": { "surfaceId": "main", "nodeId": "go", "event": { "kind": "change", "value": "start" } }
+    },
+    {
+      "name": "doc.open params",
+      "type": "DocOpenParams",
+      "value": { "path": "docs/board" }
+    },
+    {
+      "name": "vault:switch payload",
+      "type": "VaultSwitchPayload",
+      "value": { "kind": "local", "root": "C:/repo" }
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+[package]
+name = "atelyx-plugin-sdk"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Atelyx 插件 SDK：握手、能力面代理调用与 ViewNode 树构建（插件侧封装，协议类型见 atelyx-plugin-protocol）"
+
+[dependencies]
+atelyx-plugin-protocol = { path = "../atelyx-plugin-protocol" }
+# Context 的定型调用借 serde 的 Serialize/DeserializeOwned trait（不用 derive）
+serde = { version = "1", default-features = false }
+serde_json = "1"
+base64 = "0.22"
+# 连接泵：stdin/stdout 读写（io-util/io-std）、读写任务与超时（rt/sync/time/macros）；
+# rt-multi-thread 让插件的 #[tokio::main] 开箱即用
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "macros", "io-util", "io-std"] }
+thiserror = "2"
+# PluginHandler 的 async trait：通知处理逐任务分发，future 必须 Send（盒装实现）
+async-trait = "0.1"
+
+[dev-dependencies]
+# e2e：拉起 echo 子进程（process）与超时断言（macros/rt 已在主依赖，process 仅测试需要）
+tokio = { version = "1", features = ["process"] }

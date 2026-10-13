@@ -1,0 +1,157 @@
+//! 协议编码对拍：快照（`fixtures/plugin-protocol/protocol.json`）= 唯一期望源。
+//! 信封行冻结逐字节编码；ViewNode 与握手冻结字段形状。改协议 = 显式改快照并升版本。
+
+use atelyx_plugin_protocol::envelope::{Envelope, RequestId};
+use atelyx_plugin_protocol::event::VaultSwitchPayload;
+use atelyx_plugin_protocol::handshake::{self, InitializeParams, InitializeResult};
+use atelyx_plugin_protocol::method::{
+    DocOpenParams, HttpRequestParams, HttpResult, ListResult, PathParams, PickFileParams,
+    PickedPath, ProcessEventParams, RegisterShortcutParams, ShowNotificationParams,
+    SurfaceAttachedParams, TextPayload, ViewEventParams,
+};
+use atelyx_plugin_protocol::view::{EventKind, NodeBody, ViewNode};
+use serde::de::DeserializeOwned;
+use serde::Serialize;
+use serde_json::Value;
+use std::fs;
+use std::path::PathBuf;
+
+fn fixture_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures/plugin-protocol/protocol.json")
+}
+
+fn load() -> Value {
+    let raw = fs::read_to_string(fixture_path())
+        .expect("fixtures/plugin-protocol/protocol.json 缺失：对拍快照应随源码入库");
+    serde_json::from_str(&raw).unwrap()
+}
+
+#[test]
+fn envelope_lines_are_frozen() {
+    let snapshot = load();
+    let cases = snapshot["envelopes"].as_array().expect("快照缺 envelopes 数组");
+    assert!(cases.len() >= 5, "语料规模兜底：快照疑似被清空");
+
+    for case in cases {
+        let name = case["name"].as_str().unwrap_or_default();
+        let line = case["line"].as_str().unwrap_or_default();
+        let parsed = Envelope::parse(line).unwrap_or_else(|e| panic!("语料 {name} 解析失败：{e}"));
+        assert_eq!(parsed.to_line(), line, "语料 {name}: 编码与快照不一致");
+
+        let expected_kind = case["kind"].as_str().unwrap_or_default();
+        let actual_method = match &parsed {
+            Envelope::Request(r) => {
+                assert_eq!(expected_kind, "request", "语料 {name}: kind 不符");
+                r.method.as_str()
+            }
+            Envelope::Notification(n) => {
+                assert_eq!(expected_kind, "notification", "语料 {name}: kind 不符");
+                n.method.as_str()
+            }
+            Envelope::Response(_) => {
+                assert_eq!(expected_kind, "response", "语料 {name}: kind 不符");
+                ""
+            }
+        };
+        match case["method"].as_str() {
+            Some(expected) => assert_eq!(actual_method, expected, "语料 {name}: method 不符"),
+            None => assert_eq!(actual_method, "", "语料 {name}: 不应有 method"),
+        }
+    }
+}
+
+#[test]
+fn view_tree_shape_is_frozen() {
+    let snapshot = load();
+    let tree: ViewNode =
+        serde_json::from_value(snapshot["viewTree"].clone()).expect("快照 viewTree 应可反序列化");
+    tree.validate().unwrap_or_else(|e| panic!("快照 viewTree 应通过校验：{e}"));
+
+    let root = &tree.children;
+    assert_eq!(root.len(), 6, "语料规模兜底：快照疑似被清空");
+    assert!(matches!(root[0].body, NodeBody::TextInput { .. }));
+    assert_eq!(root[0].events, vec![EventKind::Submit]);
+    assert!(matches!(root[3].body, NodeBody::Button { .. }));
+
+    // 冻结编码：序列化产物与快照值逐字段一致
+    assert_eq!(serde_json::to_value(&tree).unwrap(), snapshot["viewTree"], "ViewNode 编码与快照不一致");
+}
+
+#[test]
+fn handshake_shape_is_frozen_and_version_checked() {
+    let snapshot = load();
+    let params: InitializeParams =
+        serde_json::from_value(snapshot["handshake"]["params"].clone()).expect("握手 params 可反序列化");
+    let result: InitializeResult =
+        serde_json::from_value(snapshot["handshake"]["result"].clone()).expect("握手 result 可反序列化");
+
+    assert_eq!(params.api_version, 1);
+    assert_eq!(params.plugin.id, "com.atelyx.echo");
+    assert_eq!(result.host.name, "Atelyx");
+    assert!(handshake::compatible(params.api_version, result.api_version));
+    assert!(!handshake::compatible(1, 2), "版本不一致必须判不兼容");
+}
+
+/// host: 前缀判定：宿主保留命名空间的方向约定。
+#[test]
+fn host_prefix_is_reserved() {
+    assert!(atelyx_plugin_protocol::is_host_method("host:view.event"));
+    assert!(!atelyx_plugin_protocol::is_host_method("fs.readText"));
+    // 非 host: 前缀的宿主方法名（如 hostile）不误判
+    assert!(!atelyx_plugin_protocol::is_host_method("hostile.method"));
+}
+
+/// 请求 id 数字与字符串两形态都要能落回 [`RequestId`]。
+#[test]
+fn request_id_untagged_forms() {
+    let by_num = Envelope::parse(r#"{"jsonrpc":"2.0","id":3,"method":"m"}"#).unwrap();
+    assert_eq!(
+        by_num,
+        Envelope::request(RequestId::Num(3), "m", Value::Null)
+    );
+    let by_str = Envelope::parse(r#"{"jsonrpc":"2.0","id":"a-1","method":"m"}"#).unwrap();
+    assert_eq!(
+        by_str,
+        Envelope::request(RequestId::Str("a-1".into()), "m", Value::Null)
+    );
+}
+
+/// 能力面类型的 wire 形状逐域冻结：快照值反序列化再序列化必须与快照一致
+/// （字段名漂移、Option 缺省语义变化都会在此现形）。
+#[test]
+fn method_type_shapes_are_frozen() {
+    let snapshot = load();
+    let cases = snapshot["methods"].as_array().expect("快照缺 methods 数组");
+    assert!(cases.len() >= 15, "语料规模兜底：快照疑似被清空");
+
+    for case in cases {
+        let name = case["name"].as_str().unwrap_or_default();
+        let value = case["value"].clone();
+        let ok = match case["type"].as_str().unwrap_or_default() {
+            "PathParams" => frozen_roundtrip::<PathParams>(&value),
+            "ListResult" => frozen_roundtrip::<ListResult>(&value),
+            "SpawnParams" => frozen_roundtrip::<atelyx_plugin_protocol::method::SpawnParams>(&value),
+            "ProcessEventParams" => frozen_roundtrip::<ProcessEventParams>(&value),
+            "ShowNotificationParams" => frozen_roundtrip::<ShowNotificationParams>(&value),
+            "RegisterShortcutParams" => frozen_roundtrip::<RegisterShortcutParams>(&value),
+            "TextPayload" => frozen_roundtrip::<TextPayload>(&value),
+            "PickFileParams" => frozen_roundtrip::<PickFileParams>(&value),
+            "PickedPath" => frozen_roundtrip::<PickedPath>(&value),
+            "HttpRequestParams" => frozen_roundtrip::<HttpRequestParams>(&value),
+            "HttpResult" => frozen_roundtrip::<HttpResult>(&value),
+            "SurfaceAttachedParams" => frozen_roundtrip::<SurfaceAttachedParams>(&value),
+            "ViewEventParams" => frozen_roundtrip::<ViewEventParams>(&value),
+            "DocOpenParams" => frozen_roundtrip::<DocOpenParams>(&value),
+            "VaultSwitchPayload" => frozen_roundtrip::<VaultSwitchPayload>(&value),
+            other => panic!("语料 {name}: 未知类型 {other}"),
+        };
+        assert!(ok, "语料 {name}: 编码与快照不一致");
+    }
+}
+
+fn frozen_roundtrip<T: DeserializeOwned + Serialize>(value: &Value) -> bool {
+    match serde_json::from_value::<T>(value.clone()) {
+        Ok(parsed) => &serde_json::to_value(&parsed).unwrap() == value,
+        Err(_) => false,
+    }
+}
