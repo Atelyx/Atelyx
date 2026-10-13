@@ -155,8 +155,8 @@ async fn read_capped(mut resp: reqwest::Response, cap: usize) -> Result<(Vec<u8>
     Ok((out, false))
 }
 
-/// 请求方法白名单校验 + 归一化（缺省 GET）。
-fn normalize_method(raw: Option<&str>) -> Result<reqwest::Method, String> {
+/// 请求方法白名单校验 + 归一化（缺省 GET）。插件 http 能力面复用同一白名单（口径一处定义）。
+pub(crate) fn normalize_method(raw: Option<&str>) -> Result<reqwest::Method, String> {
     let method = raw.unwrap_or("GET").to_uppercase();
     if !ALLOWED_METHODS.contains(&method.as_str()) {
         return Err(format!("不支持的请求方法：{method}"));

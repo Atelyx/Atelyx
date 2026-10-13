@@ -232,17 +232,15 @@ pub(crate) const AUTOSAVE_DEBOUNCE: std::time::Duration = std::time::Duration::f
 /// 应用数据目录（bundle identifier = com.atelyx.desktop）；ui-state.json 与 global.json 同放此处。
 fn app_data_dir() -> Option<PathBuf> {
     #[cfg(windows)]
-    {
-        std::env::var("APPDATA").ok().map(PathBuf::from)
-    }
+    let base = std::env::var("APPDATA").ok().map(PathBuf::from);
     #[cfg(not(windows))]
-    {
-        std::env::var("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .or_else(|_| std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".local/share")))
-            .ok()
-    }
-    .map(|d| d.join("com.atelyx.desktop"))
+    let base = std::env::var("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|_| std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".local/share")))
+        .ok();
+    // 拼接写在 cfg 之外：紧跟 cfg 块的 `.map(...)` 会被同一条 cfg 一并裁掉，Windows 上会静默
+    // 退回未加标识符的裸目录（应用级文件与插件根随之漂移）
+    base.map(|d| d.join("com.atelyx.desktop"))
 }
 
 /// ui-state.json 落盘路径（应用级 UI 状态）。
@@ -3893,6 +3891,14 @@ impl App {
             Some(set) => set.clone(),
             None => vec![String::new()],
         };
+        // 容器已换：未声明保活的插件重载、声明的收到 vault:switch（旧仓库上下文此刻起失效）
+        if let Some(root) = &root {
+            self.plugins.on_vault_switch(
+                atelyx_core::plugin_runtime::VaultSwitchPayload::Local {
+                    root: root.to_string_lossy().into_owned(),
+                },
+            );
+        }
         self.schedule_persist();
         let mut task = Task::none();
         // 展开集内的目录逐层补齐子项缓存（children 按目录缓存，进仓库后为空；根也在集合内）
@@ -6044,6 +6050,7 @@ impl App {
             }),
             self.space_pump_subscription(),
             self.plugin_events_subscription(),
+            self.plugin_host_requests_subscription(),
         ])
     }
 
@@ -6052,6 +6059,14 @@ impl App {
         Subscription::run_with(
             settings_view::plugins::RuntimeSpec(self.plugins.clone()),
             settings_view::plugins::runtime_stream,
+        )
+    }
+
+    /// 壳侧服务请求订阅：对话框请求走无界通道（不丢帧），与事件广播分属两条流。
+    fn plugin_host_requests_subscription(&self) -> Subscription<Message> {
+        Subscription::run_with(
+            settings_view::plugins::RuntimeSpec(self.plugins.clone()),
+            settings_view::plugins::host_requests_stream,
         )
     }
 

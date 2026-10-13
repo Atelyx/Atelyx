@@ -849,6 +849,10 @@ pub fn enter_space(app: &mut App, session: SpaceSession) -> Task<Message> {
     app.repo_kind = crate::RepoKind::Space(session.clone());
     app.vault_root = None;
     app.vault_switch_target = None;
+    // 容器已换：未声明保活的插件重载、声明的收到 vault:switch（旧容器上下文此刻起失效）
+    app.plugins.on_vault_switch(atelyx_core::plugin_runtime::VaultSwitchPayload::Space {
+        space_id: session.space_id.clone(),
+    });
     clear_session_state(app);
     app.space_tree = None;
     let key = format!("{}/{}", session.server_url, session.space_id);

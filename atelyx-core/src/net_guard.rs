@@ -149,16 +149,19 @@ pub enum ClientTimeout {
     IdleRead(u64),
 }
 
-/// 策略守卫客户端的统一构建入口（全部出网 HTTP 客户端必须经此构建）：
-/// 入口校验用同一策略的 `check`，DNS 解析结果逐 IP 过策略（重定向跳到的新域名同口径），
-/// 重定向每跳复检——SSRF 防线单点收口，杜绝某处构建漏挂守卫。
-pub fn client_for(policy: HostPolicy, timeout: ClientTimeout) -> Result<reqwest::Client, String> {
-    let check: fn(&str) -> Result<Url, String> = match policy {
+/// 策略 → 入口校验函数：重定向每跳复检与调用方入口预检共用同一策略（两边不漂移）。
+pub fn check_for(policy: HostPolicy) -> fn(&str) -> Result<Url, String> {
+    match policy {
         HostPolicy::PublicOnly => ensure_public_http_url,
         HostPolicy::LocalService => ensure_local_service_http_url,
-    };
+    }
+}
+
+/// 策略守卫客户端的统一构建入口（异步形态）：入口校验用同一策略的 `check`，DNS 解析结果逐 IP 过策略
+/// （重定向跳到的新域名同口径），重定向每跳复检——SSRF 防线单点收口，杜绝某处构建漏挂守卫。
+pub fn client_for(policy: HostPolicy, timeout: ClientTimeout) -> Result<reqwest::Client, String> {
     let mut builder = reqwest::Client::builder()
-        .redirect(redirect_policy(check))
+        .redirect(redirect_policy(check_for(policy)))
         .dns_resolver(Arc::new(PolicyDnsResolver { policy }));
     builder = match timeout {
         ClientTimeout::Total(secs) => builder.timeout(std::time::Duration::from_secs(secs)),
@@ -168,6 +171,21 @@ pub fn client_for(policy: HostPolicy, timeout: ClientTimeout) -> Result<reqwest:
         ClientTimeout::IdleRead(secs) => builder.read_timeout(std::time::Duration::from_secs(secs)),
     };
     builder.build().map_err(|e| format!("客户端初始化失败：{e}"))
+}
+
+/// 同 [`client_for`] 的阻塞形态（插件 http 能力面在插件进程的 stdout 读线程上同步执行请求，见
+/// `plugin_runtime/http.rs`）：同一策略、同一入口校验、同一重定向复检、同一 DNS 逐 IP 过滤。
+/// blocking 构建器只有总超时一种，故此处直接收秒数（调用方的 [`ClientTimeout`] 语义不适用）。
+pub fn blocking_client_for(
+    policy: HostPolicy,
+    timeout_secs: u64,
+) -> Result<reqwest::blocking::Client, String> {
+    reqwest::blocking::Client::builder()
+        .redirect(redirect_policy(check_for(policy)))
+        .dns_resolver(Arc::new(PolicyDnsResolver { policy }))
+        .timeout(std::time::Duration::from_secs(timeout_secs))
+        .build()
+        .map_err(|e| format!("客户端初始化失败：{e}"))
 }
 
 /// 该跳是否放行：跳数在上限内且目标过同一策略校验。

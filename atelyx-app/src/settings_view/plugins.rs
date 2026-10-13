@@ -7,8 +7,8 @@ use iced::widget::{container, row, scrollable, space, text, Column};
 use iced::{border, widget::container::Style, Element, Length, Padding, Task};
 
 use atelyx_core::plugin_runtime::{
-    AuditRecord, NotificationLevel, Permission, PluginEvent, PluginRuntime, PluginStatus,
-    PluginSummary,
+    AuditRecord, DialogKind, DialogRequest, HostRequest, NotificationLevel, Permission, PluginEvent,
+    PluginRuntime, PluginStatus, PluginSummary,
 };
 
 use crate::settings_view::{card, group_head};
@@ -58,6 +58,9 @@ pub enum PluginsMsg {
     /// 打开 / 关闭详情。
     Detail(String),
     DetailClose,
+    /// 壳侧服务请求：替插件弹系统对话框（选定的路径经 `resolve_dialog` 回填给等待中的调用）。
+    DialogAsk { request_id: u64, dialog: DialogRequest },
+    DialogDone { request_id: u64, path: Option<String> },
 }
 
 /// 订阅标识：运行时 `Arc` 指针哈希（同一运行时不重建订阅流）。
@@ -87,6 +90,21 @@ pub fn runtime_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<Item = M
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
+        }
+    })
+}
+
+/// 壳侧服务请求流：运行时用无界通道送请求（对话框），这里接进 Elm update。
+pub fn host_requests_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<Item = Message> + use<> {
+    let runtime = spec.0.clone();
+    iced::stream::channel(16, async move |mut output| {
+        while let Some(request) = runtime.recv_host_request().await {
+            let message = match request {
+                HostRequest::Dialog { request_id, dialog, .. } => {
+                    Message::Plugins(PluginsMsg::DialogAsk { request_id, dialog })
+                }
+            };
+            let _ = iced::futures::SinkExt::send(&mut output, message).await;
         }
     })
 }
@@ -136,7 +154,7 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
             app.plugins_state.installing = false;
             match result {
                 Ok(Some(id)) => {
-                    app.notify(NoticeLevel::Success, format!("已安装 {id}"));
+                    app.notify(NoticeLevel::Success, format!("已安装 {id}，可在列表里启用"));
                 }
                 Ok(None) => {}
                 Err(e) => app.notify(NoticeLevel::Error, format!("安装失败：{e}")),
@@ -165,7 +183,42 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
             app.plugins_state.detail = None;
             Task::none()
         }
+        PluginsMsg::DialogAsk { request_id, dialog } => Task::perform(pick(dialog), move |path| {
+            Message::Plugins(PluginsMsg::DialogDone { request_id, path })
+        }),
+        PluginsMsg::DialogDone { request_id, path } => {
+            app.plugins.resolve_dialog(request_id, path);
+            Task::none()
+        }
     }
+}
+
+/// 替插件弹系统对话框，返回用户选定的路径（取消 = `None`）。
+async fn pick(request: DialogRequest) -> Option<String> {
+    let mut dialog = rfd::AsyncFileDialog::new();
+    if let Some(title) = &request.title {
+        dialog = dialog.set_title(title);
+    }
+    if let Some(default_path) = &request.default_path {
+        // 协议给的是路径：目录部分作起始目录，文件名部分预填进名称栏
+        let path = std::path::Path::new(default_path);
+        if let Some(parent) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+            dialog = dialog.set_directory(parent);
+        }
+        if let Some(name) = path.file_name() {
+            dialog = dialog.set_file_name(name.to_string_lossy());
+        }
+    }
+    for filter in &request.filters {
+        let extensions: Vec<&str> = filter.extensions.iter().map(String::as_str).collect();
+        dialog = dialog.add_filter(&filter.name, &extensions);
+    }
+    let picked = match (request.kind, request.save) {
+        (DialogKind::Directory, _) => dialog.pick_folder().await,
+        (DialogKind::File, true) => dialog.save_file().await,
+        (DialogKind::File, false) => dialog.pick_file().await,
+    };
+    picked.map(|handle| handle.path().to_string_lossy().into_owned())
 }
 
 /// 运行时事件：通知 / 未声明调用 / 失败与熔断呈现；只有会改变列表状态的事件才触发刷新。

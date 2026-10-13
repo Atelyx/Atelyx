@@ -18,13 +18,15 @@ use atelyx_plugin_protocol::handshake::{self, HostInfo, InitializeParams, Initia
 use atelyx_plugin_protocol::manifest::Manifest;
 use atelyx_plugin_protocol::method;
 use atelyx_plugin_protocol::{view, API_VERSION};
+use base64::Engine;
 use serde::de::DeserializeOwned;
+use serde::Serialize;
 use serde_json::{json, Value};
 
-use crate::plugin_process::{EventSink, PluginProcessHost, ProcessEvent};
+use crate::plugin_process::{EventSink, PluginProcessHost, ProcessEvent as HostEvent};
 
-use super::capability;
-use super::{AuditRecord, PluginEvent, PluginRuntime, PluginStatus};
+use super::{capability, child_process, fs, http, shortcut};
+use super::{AuditRecord, DialogKind, DialogRequest, PluginEvent, PluginRuntime, PluginStatus};
 
 /// 崩溃判定窗口：窗口内累计达到 [`CRASH_LIMIT`] 即熔断。
 const CRASH_WINDOW: Duration = Duration::from_secs(60);
@@ -48,9 +50,14 @@ pub(crate) struct Instance {
     dir: PathBuf,
     state_dir: PathBuf,
     process_host: Arc<PluginProcessHost>,
+    shortcuts: Arc<shortcut::Registrar>,
     events: tokio::sync::broadcast::Sender<PluginEvent>,
     /// 供崩溃退避线程回调用（弱引用，避免与运行时的强引用成环）。
     runtime: Mutex<Weak<PluginRuntime>>,
+    /// 本插件托管的子进程 pid（`process.spawn` 起的是宿主的子进程，不在插件进程树下）。
+    children: child_process::Spawned,
+    /// 会话闸门：OS 资源获取（子进程 / 全局快捷键）与停用收尾互斥，见 [`Instance::with_session`]。
+    resources: Mutex<()>,
     /// 当前插件进程 pid（0 = 未在跑）。
     pid: AtomicU64,
     /// 运行令牌：每次启动 / 停止递增，用于丢弃上次启动遗留的进程输出。
@@ -74,6 +81,7 @@ impl Instance {
         dir: PathBuf,
         state_dir: PathBuf,
         process_host: Arc<PluginProcessHost>,
+        shortcuts: Arc<shortcut::Registrar>,
         events: tokio::sync::broadcast::Sender<PluginEvent>,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -82,8 +90,11 @@ impl Instance {
             dir,
             state_dir,
             process_host,
+            shortcuts,
             events,
             runtime: Mutex::new(Weak::new()),
+            children: child_process::Spawned::default(),
+            resources: Mutex::new(()),
             pid: AtomicU64::new(0),
             run_token: AtomicU64::new(0),
             handshaken: AtomicBool::new(false),
@@ -177,12 +188,7 @@ impl Instance {
         let _guard = self.transition.lock().unwrap();
         self.generation.fetch_add(1, Ordering::SeqCst);
         self.run_token.fetch_add(1, Ordering::SeqCst);
-        let pid = self.pid.swap(0, Ordering::SeqCst) as u32;
-        if pid != 0 {
-            if let Err(e) = self.process_host.kill_process_tree(pid) {
-                eprintln!("[plugin {}] 结束进程树失败：{e}", self.id);
-            }
-        }
+        self.teardown();
         self.set_status(PluginStatus::Stopped);
     }
 
@@ -190,12 +196,55 @@ impl Instance {
     fn fail(self: &Arc<Self>, reason: String) {
         self.set_status(PluginStatus::Failed(reason));
         self.run_token.fetch_add(1, Ordering::SeqCst);
+        self.teardown();
+    }
+
+    /// 结束插件进程树（pid = 0 时跳过）并收掉随插件记账的宿主资源。
+    fn teardown(&self) {
         let pid = self.pid.swap(0, Ordering::SeqCst) as u32;
         if pid != 0 {
             if let Err(e) = self.process_host.kill_process_tree(pid) {
                 eprintln!("[plugin {}] 结束进程树失败：{e}", self.id);
             }
         }
+        self.release_resources();
+    }
+
+    /// 收掉随插件记账的宿主资源：托管子进程、已注册的全局快捷键、在途的对话框请求与本会话订阅。
+    /// 停用 / 失败 / 崩溃 / 卸载四条路径共用——漏掉任何一条都会留下孤儿服务或永久悬挂的调用。
+    fn release_resources(&self) {
+        // 与资源获取互斥：本段跑完之后到达的登记一律被 [`Instance::with_session`] 拒掉
+        let _gate = self.resources.lock().unwrap();
+        self.subscriptions.lock().unwrap().clear();
+        for child in self.children.take_all() {
+            if let Err(e) = self.process_host.kill_process_tree(child) {
+                eprintln!("[plugin {}] 结束子进程 {child} 失败：{e}", self.id);
+            }
+        }
+        self.shortcuts.release_plugin(&self.id);
+        self.fail_pending_dialogs("插件已停止，对话框已取消");
+    }
+
+    /// 让本插件在途的对话框请求立即以可读失败收场，避免等待它的读线程无限期悬挂。
+    fn fail_pending_dialogs(&self, reason: &str) {
+        let runtime = self.runtime.lock().unwrap().clone();
+        if let Some(runtime) = runtime.upgrade() {
+            runtime.fail_dialogs_of(&self.id, reason);
+        }
+    }
+
+    /// 在会话闸门内执行一次 OS 资源获取（起子进程 / 注册全局快捷键），锁内复查请求所属的会话令牌。
+    ///
+    /// 这道闸门是「登记与收尾不得交错」的保证：没有它，读线程上一次已在途的请求可能在
+    /// [`Instance::release_resources`] 跑完之后才落表——那个子进程 / 热键就逃过了本次停用收尾，
+    /// 变成「插件已停、本机服务仍在跑 / 热键仍被占用」。令牌换代即拒，故跨会话的迟到请求也不会
+    /// 污染新会话的登记。
+    fn with_session<T>(&self, token: u64, acquire: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+        let _gate = self.resources.lock().unwrap();
+        if token != self.run_token.load(Ordering::SeqCst) {
+            return Err("插件会话已结束，本次请求已作废".to_string());
+        }
+        acquire()
     }
 
     /// 握手截止检查：令牌已被取代 / 已握手 / 已不在运行态时都不动作。
@@ -216,28 +265,34 @@ impl Instance {
 
     // ---------- 进程事件 ----------
 
-    fn handle_process_event(self: &Arc<Self>, token: u64, event: ProcessEvent) {
+    fn handle_process_event(self: &Arc<Self>, token: u64, event: HostEvent) {
         // 上次启动遗留的输出（含延迟到达的退出上报）一律丢弃：pid / 状态已被新一次启动改写
         if token != self.run_token.load(Ordering::SeqCst) {
             return;
         }
         match event {
-            ProcessEvent::Stdout { data } => {
+            HostEvent::Stdout { data } => {
                 for line in data.lines() {
                     let line = line.trim();
                     if !line.is_empty() {
-                        self.handle_line(line);
+                        self.handle_line_for_session(token, line);
                     }
                 }
             }
             // 插件 stderr 归入诊断输出（协议正文只走 stdout）
-            ProcessEvent::Stderr { data } => eprint!("[plugin {}] {data}", self.id),
-            ProcessEvent::Terminated { code } => self.on_exit(code),
-            ProcessEvent::Error { message } => eprintln!("[plugin {}] {message}", self.id),
+            HostEvent::Stderr { data } => eprint!("[plugin {}] {data}", self.id),
+            HostEvent::Terminated { code } => self.on_exit(code),
+            HostEvent::Error { message } => eprintln!("[plugin {}] {message}", self.id),
         }
     }
 
+    /// 处理一行插件输出（当前会话）——测试与不关心会话身份的调用走这条。
+    #[cfg(test)]
     fn handle_line(self: &Arc<Self>, line: &str) {
+        self.handle_line_for_session(self.run_token.load(Ordering::SeqCst), line);
+    }
+
+    fn handle_line_for_session(self: &Arc<Self>, token: u64, line: &str) {
         let envelope = match Envelope::parse(line) {
             Ok(envelope) => envelope,
             Err(e) => {
@@ -246,7 +301,7 @@ impl Instance {
             }
         };
         match envelope {
-            Envelope::Request(request) => self.handle_request(request),
+            Envelope::Request(request) => self.handle_request(token, request),
             Envelope::Response(_) => eprintln!(
                 "[plugin {}] 收到插件的响应（协议约定插件→宿主只有请求，宿主→插件只有通知）",
                 self.id
@@ -268,6 +323,10 @@ impl Instance {
             return;
         }
         self.pid.store(0, Ordering::SeqCst);
+        // 本次会话就此结束：令牌换代让在途的资源获取请求作废（读线程上一次请求可能正在起子进程 /
+        // 注册热键），再把随它记账的资源收掉——托管服务不能因宿主崩溃而留成孤儿
+        self.run_token.fetch_add(1, Ordering::SeqCst);
+        self.release_resources();
         let count = record_crash(&mut self.crash_times.lock().unwrap(), Instant::now());
         if count >= CRASH_LIMIT {
             eprintln!(
@@ -299,7 +358,7 @@ impl Instance {
 
     // ---------- 插件 → 宿主请求 ----------
 
-    fn handle_request(self: &Arc<Self>, request: Request) {
+    fn handle_request(self: &Arc<Self>, token: u64, request: Request) {
         let method = request.method.as_str();
         let id = request.id;
         if let Some(permission) = capability::permission_for(method) {
@@ -313,13 +372,71 @@ impl Instance {
                 return;
             }
         }
-        match self.dispatch(method, &request.params) {
+        // 对话框由用户决定耗时（无上限），不能在读线程上等：分流为异步应答（结果由回填线程写回），
+        // 读线程继续消费插件输出——否则对话框期间插件输出与退出上报都被拖住。
+        // （http 有明确超时上限，按顺序处理不破「读线程串行处理请求」这条既有语义。）
+        if method == method::dialog::PICK_FILE || method == method::dialog::PICK_DIRECTORY {
+            self.handle_dialog_request(token, id, method, &request.params);
+            return;
+        }
+        match self.dispatch_for_session(token, method, &request.params) {
             Ok(value) => self.respond(id, Some(value), None),
             Err(error) => self.respond(id, None, Some(error)),
         }
     }
 
+    /// 打开一次对话框并在独立线程上等结果回执。
+    fn handle_dialog_request(
+        self: &Arc<Self>,
+        token: u64,
+        id: RequestId,
+        method_name: &str,
+        params: &Value,
+    ) {
+        let request = match dialog_request(method_name, params) {
+            Ok(request) => request,
+            Err(error) => {
+                self.respond(id, None, Some(error));
+                return;
+            }
+        };
+        let runtime = self.runtime.lock().unwrap().clone();
+        let Some(runtime) = runtime.upgrade() else {
+            self.respond(id, None, Some(RpcError::failed("对话框不可用：宿主运行时不可用")));
+            return;
+        };
+        let opened = self.with_session(token, || runtime.open_dialog(&self.id, request));
+        let rx = match opened {
+            Ok(rx) => rx,
+            Err(e) => {
+                self.respond(id, None, Some(RpcError::failed(e)));
+                return;
+            }
+        };
+        let instance = self.clone();
+        std::thread::spawn(move || match rx.recv() {
+            Ok(Ok(path)) => match encode_picked(path) {
+                Ok(value) => instance.respond(id, Some(value), None),
+                Err(error) => instance.respond(id, None, Some(error)),
+            },
+            Ok(Err(reason)) => instance.respond(id, None, Some(RpcError::failed(reason))),
+            // 发送端被丢弃（在途登记已失效）：会话结束，不悬挂
+            Err(_) => instance.respond(id, None, Some(RpcError::failed("对话框请求已取消"))),
+        });
+    }
+
+    /// 分派一条请求（当前会话）——测试与不关心会话身份的调用走这条。
+    #[cfg(test)]
     fn dispatch(self: &Arc<Self>, method: &str, params: &Value) -> Result<Value, RpcError> {
+        self.dispatch_for_session(self.run_token.load(Ordering::SeqCst), method, params)
+    }
+
+    fn dispatch_for_session(
+        self: &Arc<Self>,
+        token: u64,
+        method: &str,
+        params: &Value,
+    ) -> Result<Value, RpcError> {
         match method {
             handshake::INITIALIZE => self.on_initialize(params),
             event::SUBSCRIBE => self.on_subscribe(params),
@@ -342,6 +459,102 @@ impl Instance {
                     level: p.level,
                 });
                 Ok(json!({}))
+            }
+            // ---------- fs ----------
+            method::fs::PRIVATE_DIR => {
+                let path = fs::private_dir(&self.state_dir).map_err(RpcError::failed)?;
+                Ok(json!({ "path": path }))
+            }
+            method::fs::READ_TEXT => {
+                let p: method::PathParams = parse(params)?;
+                let content = fs::read_text(&p.path).map_err(RpcError::failed)?;
+                Ok(json!({ "content": content }))
+            }
+            method::fs::WRITE_TEXT => {
+                let p: method::WriteTextParams = parse(params)?;
+                fs::write_text(&p.path, &p.content).map_err(RpcError::failed)?;
+                Ok(json!({}))
+            }
+            method::fs::READ_BINARY => {
+                let p: method::PathParams = parse(params)?;
+                let bytes = fs::read_binary(&p.path).map_err(RpcError::failed)?;
+                Ok(json!({ "base64": base64::engine::general_purpose::STANDARD.encode(bytes) }))
+            }
+            method::fs::WRITE_BINARY => {
+                let p: method::WriteBinaryParams = parse(params)?;
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(&p.base64)
+                    .map_err(|e| RpcError::failed(format!("base64 解码失败：{e}")))?;
+                fs::write_binary(&p.path, &bytes).map_err(RpcError::failed)?;
+                Ok(json!({}))
+            }
+            method::fs::REMOVE => {
+                let p: method::PathParams = parse(params)?;
+                fs::remove(&p.path).map_err(RpcError::failed)?;
+                Ok(json!({}))
+            }
+            method::fs::EXISTS => {
+                let p: method::PathParams = parse(params)?;
+                Ok(json!({ "exists": fs::exists(&p.path) }))
+            }
+            method::fs::LIST => {
+                let p: method::PathParams = parse(params)?;
+                let entries = fs::list(&p.path).map_err(RpcError::failed)?;
+                Ok(json!({ "entries": entries }))
+            }
+
+            // ---------- process ----------
+            method::process::SPAWN => {
+                let p: method::SpawnParams = parse(params)?;
+                let pid = self.spawn_child(token, p).map_err(RpcError::failed)?;
+                Ok(json!({ "pid": pid }))
+            }
+            method::process::WRITE_STDIN => {
+                let p: method::WriteStdinParams = parse(params)?;
+                self.require_child(p.pid)?;
+                self.process_host.write_stdin(p.pid, &p.data).map_err(RpcError::failed)?;
+                Ok(json!({}))
+            }
+            method::process::CLOSE_STDIN => {
+                let p: method::PidParams = parse(params)?;
+                self.require_child(p.pid)?;
+                self.process_host.close_stdin(p.pid);
+                Ok(json!({}))
+            }
+            method::process::KILL => {
+                let p: method::PidParams = parse(params)?;
+                if !self.children.remove(p.pid) {
+                    return Err(RpcError::failed(format!("进程 {} 不是本插件启动的", p.pid)));
+                }
+                self.process_host.kill_process_tree(p.pid).map_err(RpcError::failed)?;
+                Ok(json!({}))
+            }
+
+            // ---------- shortcuts ----------
+            method::shortcut::REGISTER => {
+                let p: method::RegisterShortcutParams = parse(params)?;
+                self.with_session(token, || self.shortcuts.register(&self.id, &p.accelerator))
+                    .map_err(RpcError::failed)?;
+                Ok(json!({}))
+            }
+            method::shortcut::UNREGISTER => {
+                let p: method::AcceleratorParams = parse(params)?;
+                self.with_session(token, || self.shortcuts.unregister(&self.id, &p.accelerator))
+                    .map_err(RpcError::failed)?;
+                Ok(json!({}))
+            }
+
+            // ---------- http / dialog ----------
+            method::http::REQUEST => {
+                let p: method::HttpRequestParams = parse(params)?;
+                let result = http::request(&p).map_err(RpcError::failed)?;
+                serde_json::to_value(result)
+                    .map_err(|e| RpcError::failed(format!("应答序列化失败：{e}")))
+            }
+
+            // 对话框走异步应答（见 handle_request 的分流），不经此处同步应答
+            method::dialog::PICK_FILE | method::dialog::PICK_DIRECTORY => {
+                Err(RpcError::failed("对话框请求须走异步应答路径"))
             }
             // 已声明但尚未实现的能力面：以可读失败收场，不静默成功
             other if capability::permission_for(other).is_some() => {
@@ -394,6 +607,104 @@ impl Instance {
         Ok(json!({ "applied": true }))
     }
 
+    // ---------- 能力面实现 ----------
+
+    /// 起一个托管子进程并记账。事件回调要先于 spawn 就绪、pid 只有 spawn 返回后才知道，故用槽位
+    /// 中转：pid 未定前到达的事件先按序暂存，定下后补齐——直接丢弃会丢掉子进程最早几行输出
+    /// （`plugin_process` 的读线程先于 spawn 返回启动，启动快的子进程能在那之前就写出第一行）。
+    /// 整段在会话闸门内完成——「起进程 + 记账」与停用收尾互斥，否则刚起的子进程会逃过本次收尾。
+    fn spawn_child(self: &Arc<Self>, token: u64, p: method::SpawnParams) -> Result<u32, String> {
+        let env: Option<std::collections::HashMap<String, String>> =
+            p.env.map(|env| env.into_iter().collect());
+        let slot = Arc::new(Mutex::new(SpawnSlot::default()));
+        let slot_for_sink = slot.clone();
+        let instance = self.clone();
+        let sink: EventSink = Arc::new(move |event| {
+            let mut slot = slot_for_sink.lock().unwrap();
+            if let Some(pid) = slot.pid {
+                drop(slot);
+                instance.on_child_event(pid, event);
+            } else {
+                slot.pending.push(event);
+            }
+        });
+        self.with_session(token, || {
+            let pid =
+                self.process_host
+                    .spawn(&p.program, &p.args, p.cwd.as_deref(), env.as_ref(), sink)?;
+            self.children.add(pid);
+            let queued = {
+                let mut slot = slot.lock().unwrap();
+                slot.pid = Some(pid);
+                std::mem::take(&mut slot.pending)
+            };
+            for event in queued {
+                self.on_child_event(pid, event);
+            }
+            Ok(pid)
+        })
+    }
+
+    /// 校验 pid 确属本插件（`process.writeStdin` / `closeStdin` 不得操作别人的进程）。
+    fn require_child(&self, pid: u32) -> Result<(), RpcError> {
+        if self.children.contains(pid) {
+            Ok(())
+        } else {
+            Err(RpcError::failed(format!("进程 {pid} 不是本插件启动的")))
+        }
+    }
+
+    /// 托管子进程的输出与退出：转发为 `host:process.event` 通知；退出即摘除记账。
+    fn on_child_event(self: &Arc<Self>, pid: u32, event: HostEvent) {
+        let terminated = matches!(&event, HostEvent::Terminated { .. });
+        self.notify(
+            method::process::HOST_EVENT,
+            &method::ProcessEventParams { pid, event: child_process::to_protocol_event(event) },
+        );
+        if terminated {
+            self.children.remove(pid);
+        }
+    }
+
+    /// 是否声明「切仓库容器时保持挂载」（未声明者由宿主在切容器时重载）。
+    pub(crate) fn keep_mounted_on_vault_switch(&self) -> bool {
+        self.manifest.keep_mounted_on_vault_switch
+    }
+
+    /// 是否订阅了某宿主广播事件。
+    pub(crate) fn subscribed_to(&self, name: &str) -> bool {
+        self.subscriptions.lock().unwrap().contains(name)
+    }
+
+    /// 转投一条全局快捷键触发（`host:shortcut.triggered`）。
+    pub(crate) fn notify_shortcut(&self, accelerator: &str) {
+        self.notify(method::shortcut::HOST_TRIGGERED, &shortcut::triggered_params(accelerator));
+    }
+
+    /// 广播一条宿主领域事件（`host:event`）。
+    pub(crate) fn notify_domain_event(&self, name: &str, payload: &impl Serialize) {
+        let payload = match serde_json::to_value(payload) {
+            Ok(payload) => payload,
+            Err(e) => {
+                eprintln!("[plugin {}] 事件 {name} 载荷序列化失败：{e}", self.id);
+                return;
+            }
+        };
+        self.notify(event::HOST_PUBLISH, &event::PublishParams { name: name.to_string(), payload });
+    }
+
+    /// 向插件发一条宿主通知（`host:` 前缀方法）。进程未在跑时静默丢弃（对端已不在）。
+    fn notify(&self, method_name: &str, params: &impl Serialize) {
+        let params = match serde_json::to_value(params) {
+            Ok(value) => value,
+            Err(e) => {
+                eprintln!("[plugin {}] 通知 {method_name} 序列化失败：{e}", self.id);
+                return;
+            }
+        };
+        self.write_envelope(Envelope::notification(method_name, params), "通知");
+    }
+
     fn record_denied(&self, method: &str, params: &Value) {
         let detail = params
             .get("path")
@@ -414,13 +725,18 @@ impl Instance {
         });
     }
 
-    /// 回执一条响应（写往插件 stdin）。进程已停时静默丢弃（对端已不在）。
+    /// 回执一条响应（写往插件 stdin）。
     fn respond(&self, id: RequestId, result: Option<Value>, error: Option<RpcError>) {
-        let envelope = match (result, error) {
-            (Some(result), None) => Envelope::success(id, result),
-            (_, Some(error)) => Envelope::failure(id, error),
-            (None, None) => Envelope::success(id, Value::Null),
+        let (envelope, what) = match (result, error) {
+            (Some(result), None) => (Envelope::success(id, result), "回执"),
+            (_, Some(error)) => (Envelope::failure(id, error), "错误回执"),
+            (None, None) => (Envelope::success(id, Value::Null), "回执"),
         };
+        self.write_envelope(envelope, what);
+    }
+
+    /// 写一条信封到插件 stdin。进程已停时静默丢弃（对端已不在）；写失败只留诊断输出。
+    fn write_envelope(&self, envelope: Envelope, what: &str) {
         let pid = self.pid.load(Ordering::SeqCst) as u32;
         if pid == 0 {
             return;
@@ -428,9 +744,49 @@ impl Instance {
         let mut line = envelope.to_line();
         line.push('\n');
         if let Err(e) = self.process_host.write_stdin(pid, &line) {
-            eprintln!("[plugin {}] 回执写入失败：{e}", self.id);
+            eprintln!("[plugin {}] {what}写入失败：{e}", self.id);
         }
     }
+}
+
+/// `process.spawn` 的 pid 槽位：pid 定下前到达的子进程事件先按序暂存，定下后补齐（见 `spawn_child`）。
+#[derive(Default)]
+struct SpawnSlot {
+    pid: Option<u32>,
+    pending: Vec<HostEvent>,
+}
+
+/// 按方法名解析对话框请求（`dialog.pickFile` / `dialog.pickDirectory`）。
+fn dialog_request(method_name: &str, params: &Value) -> Result<DialogRequest, RpcError> {
+    match method_name {
+        method::dialog::PICK_FILE => {
+            let p: method::PickFileParams = parse(params)?;
+            Ok(DialogRequest {
+                kind: DialogKind::File,
+                title: p.title,
+                save: p.save.unwrap_or(false),
+                default_path: p.default_path,
+                filters: p.filters,
+            })
+        }
+        method::dialog::PICK_DIRECTORY => {
+            let p: method::PickDirectoryParams = parse(params)?;
+            Ok(DialogRequest {
+                kind: DialogKind::Directory,
+                title: p.title,
+                save: false,
+                default_path: None,
+                filters: Vec::new(),
+            })
+        }
+        _ => Err(RpcError::failed(format!("不是对话框方法：{method_name}"))),
+    }
+}
+
+/// 对话框结果 → 应答（用户取消时 `path` 缺省，与 [`method::PickedPath`] 的序列化口径一致）。
+fn encode_picked(path: Option<String>) -> Result<Value, RpcError> {
+    serde_json::to_value(method::PickedPath { path })
+        .map_err(|e| RpcError::failed(format!("应答序列化失败：{e}")))
 }
 
 /// 退避延迟：第 n 次崩溃取 `base * 2^(n-1)`，封顶 [`BACKOFF_MAX`]。
@@ -446,8 +802,11 @@ fn record_crash(times: &mut Vec<Instant>, now: Instant) -> usize {
     times.len()
 }
 
+/// 解析 params。缺省 params（信封里 `params` 为 null）按空对象处理：全可选入参的方法
+/// （如 `dialog.pickDirectory`）本就允许不带参数，null 与 `{}` 是同一件事。
 fn parse<T: DeserializeOwned>(params: &Value) -> Result<T, RpcError> {
-    serde_json::from_value(params.clone()).map_err(|e| RpcError::failed(format!("params 不可解析：{e}")))
+    let value = if params.is_null() { json!({}) } else { params.clone() };
+    serde_json::from_value(value).map_err(|e| RpcError::failed(format!("params 不可解析：{e}")))
 }
 
 fn now_secs() -> u64 {
@@ -483,6 +842,8 @@ mod tests {
             dir,
             tmp.join("state"),
             Arc::new(PluginProcessHost::new()),
+            // 无 OS 层的注册器：单测不落真实热键，注册路径以可读失败收场
+            shortcut::Registrar::unavailable("全局快捷键不可用：测试"),
             events,
         );
         (tmp, instance)
@@ -490,6 +851,11 @@ mod tests {
 
     fn initialize_params(api_version: u32, id: &str) -> Value {
         json!({ "apiVersion": api_version, "plugin": { "id": id, "name": "Demo", "version": "1.0.0" } })
+    }
+
+    /// 造一行插件→宿主请求（走 `handle_line`，闸门与审计都在那条路径上）。
+    fn request_line(method_name: &str, params: &Value) -> String {
+        json!({ "jsonrpc": "2.0", "id": 1, "method": method_name, "params": params }).to_string()
     }
 
     #[test]
@@ -556,12 +922,137 @@ mod tests {
 
     #[test]
     fn declared_but_unimplemented_capability_fails() {
-        let (_tmp, instance) = make_instance(vec![Permission::Fs]);
+        let (_tmp, instance) = make_instance(vec![Permission::Clipboard]);
         let error = instance
-            .dispatch(method::fs::READ_TEXT, &json!({ "path": "x" }))
+            .dispatch(method::clipboard::READ_TEXT, &Value::Null)
             .expect_err("已声明但未实现的能力面应返回失败");
         assert_eq!(error.code, RpcError::FAILED);
         assert!(error.message.contains("尚未实现"), "{}", error.message);
+    }
+
+    /// 各能力面「未声明被拒」：闸门只认 manifest 声明，未声明一律 fail-closed 且记审计。
+    #[test]
+    fn undeclared_calls_of_each_face_are_denied() {
+        let cases: [(Permission, &str, Value); 5] = [
+            // 入参一律取「必然执行失败但不会真的落盘 / 出网 / 弹框」的形态
+            (Permission::Process, method::process::SPAWN, json!({ "program": "atelyx-no-such-program" })),
+            (Permission::Fs, method::fs::LIST, json!({ "path": "atelyx-no-such-dir" })),
+            (Permission::Shortcuts, method::shortcut::REGISTER, json!({ "accelerator": "Ctrl+F9" })),
+            (Permission::Http, method::http::REQUEST, json!({ "method": "GET", "url": "ftp://example.com" })),
+            (Permission::Dialog, method::dialog::PICK_DIRECTORY, Value::Null),
+        ];
+        for (permission, method_name, params) in cases {
+            // 未声明：拒绝并留痕（响应写往不存在的插件进程，观测点在审计记录）
+            let (_tmp, undeclared) = make_instance(Vec::new());
+            undeclared.handle_line(&request_line(method_name, &params));
+            assert_eq!(undeclared.denied_count(), 1, "{method_name} 未声明必须被拒并留痕");
+            // 已声明：进入真实执行路径（不再被闸门挡下）
+            let (_tmp2, declared) = make_instance(vec![permission]);
+            let error = declared.dispatch(method_name, &params).expect_err("入参不成立，应报执行错误");
+            assert_ne!(
+                error.code,
+                RpcError::PERMISSION_DENIED,
+                "{method_name} 已声明却仍被闸门拒绝"
+            );
+        }
+    }
+
+    #[test]
+    fn fs_roundtrip_through_dispatch() {
+        let (tmp, instance) = make_instance(vec![Permission::Fs]);
+        let file = tmp.join("note.txt").to_string_lossy().into_owned();
+        instance
+            .dispatch(method::fs::WRITE_TEXT, &json!({ "path": file, "content": "hello" }))
+            .expect("写文件应成功");
+        let read = instance
+            .dispatch(method::fs::READ_TEXT, &json!({ "path": file }))
+            .expect("读文件应成功");
+        assert_eq!(read["content"], "hello");
+        let exists = instance
+            .dispatch(method::fs::EXISTS, &json!({ "path": file }))
+            .expect("存在性查询应成功");
+        assert_eq!(exists["exists"], true);
+        instance
+            .dispatch(method::fs::WRITE_BINARY, &json!({ "path": file, "base64": "AAEC" }))
+            .expect("写二进制应成功");
+        let binary = instance
+            .dispatch(method::fs::READ_BINARY, &json!({ "path": file }))
+            .expect("读二进制应成功");
+        assert_eq!(binary["base64"], "AAEC");
+        instance.dispatch(method::fs::REMOVE, &json!({ "path": file })).expect("删除应成功");
+        assert!(!std::path::Path::new(&file).exists());
+        // privateDir 返回插件私有目录且已建立
+        let private = instance.dispatch(method::fs::PRIVATE_DIR, &Value::Null).unwrap();
+        assert!(std::path::Path::new(private["path"].as_str().unwrap()).is_dir());
+    }
+
+    #[test]
+    fn process_child_calls_are_confined_to_own_bookkeeping() {
+        let (_tmp, instance) = make_instance(vec![Permission::Process]);
+        for (method_name, params) in [
+            (method::process::KILL, json!({ "pid": 4242 })),
+            (method::process::WRITE_STDIN, json!({ "pid": 4242, "data": "x" })),
+            (method::process::CLOSE_STDIN, json!({ "pid": 4242 })),
+        ] {
+            let error = instance.dispatch(method_name, &params).expect_err("非本插件的进程不得操作");
+            assert!(error.message.contains("不是本插件启动的"), "{method_name}: {}", error.message);
+        }
+    }
+
+    #[test]
+    fn shortcut_registration_reports_platform_unavailability() {
+        let (_tmp, instance) = make_instance(vec![Permission::Shortcuts]);
+        let error = instance
+            .dispatch(method::shortcut::REGISTER, &json!({ "accelerator": "Ctrl+F9" }))
+            .expect_err("无 OS 层时注册必须可读失败");
+        assert!(error.message.contains("不可用"), "{}", error.message);
+        // 注销是幂等空操作（本就没注册成）
+        assert!(instance
+            .dispatch(method::shortcut::UNREGISTER, &json!({ "accelerator": "Ctrl+F9" }))
+            .is_ok());
+    }
+
+    /// 会话闸门：令牌换代（停用 / 崩溃收尾）之后到达的资源获取请求一律被拒——否则在停用收尾跑完
+    /// 之后才落表的子进程 / 全局快捷键会逃过本次收尾（「插件已停、本机服务仍在跑 / 热键仍被占用」）。
+    #[test]
+    fn stale_session_resource_acquisition_is_refused() {
+        let (_tmp, instance) = make_instance(vec![Permission::Process, Permission::Shortcuts]);
+        let stale = instance.run_token.load(Ordering::SeqCst) + 1;
+        for (method_name, params) in [
+            (method::process::SPAWN, json!({ "program": "atelyx-no-such-program" })),
+            (method::shortcut::REGISTER, json!({ "accelerator": "Ctrl+F9" })),
+        ] {
+            let error = instance
+                .dispatch_for_session(stale, method_name, &params)
+                .expect_err("旧会话的资源获取应被拒");
+            assert!(error.message.contains("会话已结束"), "{method_name}: {}", error.message);
+        }
+        // 当前会话照常放行到实现层（此处的注册器没有 OS 层，故以「不可用」收场）
+        let current = instance.run_token.load(Ordering::SeqCst);
+        let error = instance
+            .dispatch_for_session(current, method::shortcut::REGISTER, &json!({ "accelerator": "Ctrl+F9" }))
+            .expect_err("无 OS 层时注册应可读失败");
+        assert!(error.message.contains("不可用"), "{}", error.message);
+    }
+
+    #[test]
+    fn dialog_request_maps_params() {
+        // 缺省 params（params 为 null）按空对象处理：全可选入参的对话框方法本就允许不带参数
+        let dir = dialog_request(method::dialog::PICK_DIRECTORY, &Value::Null).expect("缺省 params 应可解析");
+        assert_eq!(dir.kind, DialogKind::Directory);
+        assert!(!dir.save);
+
+        let file = dialog_request(
+            method::dialog::PICK_FILE,
+            &json!({ "title": "选模型", "save": true, "filters": [{ "name": "模型", "extensions": ["gguf"] }] }),
+        )
+        .expect("pickFile 应可解析");
+        assert_eq!(file.kind, DialogKind::File);
+        assert!(file.save);
+        assert_eq!(file.title.as_deref(), Some("选模型"));
+        assert_eq!(file.filters[0].extensions, vec!["gguf"]);
+
+        assert!(dialog_request(method::fs::READ_TEXT, &Value::Null).is_err(), "非对话框方法应被拒");
     }
 
     #[test]
@@ -595,11 +1086,11 @@ mod tests {
         instance.set_status(PluginStatus::Running);
         // 令牌不匹配（上次启动遗留）的退出上报必须被丢弃：不判崩溃、不改状态
         let stale = instance.run_token.load(Ordering::SeqCst) + 1;
-        instance.handle_process_event(stale, ProcessEvent::Terminated { code: Some(1) });
+        instance.handle_process_event(stale, HostEvent::Terminated { code: Some(1) });
         assert_eq!(instance.status(), PluginStatus::Running);
         // 令牌匹配时按崩溃处理：进入退避重启
         let current = instance.run_token.load(Ordering::SeqCst);
-        instance.handle_process_event(current, ProcessEvent::Terminated { code: Some(1) });
+        instance.handle_process_event(current, HostEvent::Terminated { code: Some(1) });
         assert_eq!(instance.status(), PluginStatus::Restarting);
     }
 

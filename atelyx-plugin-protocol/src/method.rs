@@ -307,6 +307,7 @@ pub struct PickFileParams {
     /// true = 保存对话框；取消时 result 的 `path` 字段缺省。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub save: Option<bool>,
+    /// 预填路径：目录部分作起始目录，文件名部分预填进名称栏。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_path: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

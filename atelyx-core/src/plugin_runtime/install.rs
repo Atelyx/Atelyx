@@ -1,6 +1,7 @@
 //! 插件安装 / 卸载 / 上一代轮换。目录安装与 zip 安装都先落到临时目录、校验通过后再落位：
 //! 暂存与校验失败不动旧版本；轮换后的落位失败按回滚恢复旧内容（插件数据始终保留）。
-//! zip 解压带路径穿越、符号链接、压缩比与总量四道防御。
+//! 安装完成只落位内容，**不置启用标记**（是否启用由用户在设置页决定）；zip 解压带路径穿越、
+//! 符号链接、压缩比与总量四道防御。
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -35,7 +36,6 @@ pub(crate) fn install_from_dir(root: &Path, src: &Path) -> Result<String, String
         let _ = std::fs::remove_dir_all(&temp);
     }
     staged?;
-    layout::set_enabled(root, &id, true)?;
     Ok(id)
 }
 
@@ -52,9 +52,7 @@ pub(crate) fn install_from_zip(root: &Path, zip_path: &Path) -> Result<String, S
         Ok(id)
     })();
     let _ = std::fs::remove_dir_all(&temp);
-    let id = staged?;
-    layout::set_enabled(root, &id, true)?;
-    Ok(id)
+    staged
 }
 
 /// 卸载：删整个插件目录（安装内容、私有数据、上一代与启用标记都在其内）。调用方须先停插件。
@@ -364,7 +362,7 @@ mod tests {
     }
 
     #[test]
-    fn install_from_dir_places_and_enables() {
+    fn install_from_dir_places_without_enabling() {
         let tmp = TempDir::new("plugin-install-dir");
         let root: &Path = &tmp;
         let src = tmp.join("src");
@@ -372,7 +370,7 @@ mod tests {
         let id = install_from_dir(root, &src).expect("目录安装应成功");
         assert_eq!(id, "com.example.demo");
         assert!(layout::plugin_dir(root, &id).join(MANIFEST_FILE).is_file());
-        assert!(layout::is_enabled(root, &id), "安装即启用");
+        assert!(!layout::is_enabled(root, &id), "安装只落位内容，不自动启用");
     }
 
     #[test]
@@ -384,6 +382,8 @@ mod tests {
         let id = install_from_dir(root, &src).unwrap();
         let plugin = layout::plugin_dir(root, &id);
         std::fs::write(plugin.join("marker"), "v1").unwrap();
+        // 已启用的插件重装：启用标记属于宿主管理项，更新必须原位保留
+        layout::set_enabled(root, &id, true).unwrap();
         // 宿主私有数据：更新必须保留
         std::fs::create_dir_all(layout::data_dir(root, &id)).unwrap();
         std::fs::write(layout::data_dir(root, &id).join("state.json"), "{\"keep\":true}").unwrap();
@@ -472,7 +472,7 @@ mod tests {
         );
         let id = install_from_zip(root, &zip).expect("zip 安装应成功");
         assert_eq!(id, "com.example.demo");
-        assert!(layout::is_enabled(root, &id));
+        assert!(!layout::is_enabled(root, &id), "安装只落位内容，不自动启用");
         uninstall(root, &id).unwrap();
         assert!(!layout::plugin_dir(root, &id).exists());
     }

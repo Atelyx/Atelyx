@@ -18,8 +18,9 @@ dunce = "1"
 # 协作帧泵（collab）：WS 连接建立用 tokio::net（超时包裹），net 特性显式声明不靠传递启用
 tokio = { version = "1", features = ["rt", "sync", "time", "macros", "net"] }
 uuid = { version = "1", features = ["v4"] }
-# 出网校验（net_guard）：URL 解析与地址枚举
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# 出网校验（net_guard）：URL 解析与地址枚举；blocking 供插件 http 能力面
+# （宿主侧在插件进程的 stdout 读线程上同步执行请求，见 plugin_runtime/http.rs）
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
 # 仓库内文件检索（filesearch）：glob 模式匹配（`**/` 任意深度语义，即 ripgrep 所用引擎）
 globset = "0.4"
 # 表格 xlsx 导出（table_xlsx）
@@ -44,6 +45,9 @@ sha2 = "0.10"
 hex = "0.4"
 # 协作帧泵（collab）：tungstenite 流的 Sink/Stream 组合子
 futures-util = "0.3"
+# 全局快捷键（plugin_runtime/shortcut）：OS 级热键注册与触发；Windows 走消息窗 + RegisterHotKey，
+# Linux 走 X11 XGrabKey（Wayland 无标准机制，按平台预检判不可用）
+global-hotkey = "0.8"
 
 # 凭据（credentials）：令牌存系统密钥链，不落明文。按平台启用真实后端——
 # 不带平台 feature 时 keyring 3.x 落到内存 mock（写入不出进程，跨启动即 NoEntry）
@@ -59,7 +63,7 @@ libc = "0.2"
 # 插件进程托管（plugin_process）：作业对象（创建/配置/加入/结束）与「挂起创建 → 恢复主线程」、
 # 插件卸载前递归清只读位
 [target.'cfg(target_os = "windows")'.dependencies]
-winapi = { version = "0.3", features = ["winnt", "processthreadsapi", "handleapi", "errhandlingapi", "minwinbase", "jobapi", "jobapi2", "tlhelp32", "winerror"] }
+winapi = { version = "0.3", features = ["winnt", "processthreadsapi", "handleapi", "errhandlingapi", "minwinbase", "jobapi", "jobapi2", "tlhelp32", "winerror", "winuser"] }
 keyring = { version = "3.6", features = ["windows-native"] }
 
 [features]

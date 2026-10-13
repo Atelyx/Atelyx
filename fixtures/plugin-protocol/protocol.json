@@ -176,9 +176,14 @@
       "value": { "path": "docs/board" }
     },
     {
-      "name": "vault:switch payload",
+      "name": "vault:switch payload (local)",
       "type": "VaultSwitchPayload",
       "value": { "kind": "local", "root": "C:/repo" }
+    },
+    {
+      "name": "vault:switch payload (space)",
+      "type": "VaultSwitchPayload",
+      "value": { "kind": "space", "spaceId": "space-1" }
     }
   ]
 }

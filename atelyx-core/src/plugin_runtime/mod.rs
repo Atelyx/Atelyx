@@ -3,15 +3,21 @@
 //! 的单一广播通道进入壳的 update。进程创建与清理一律经 [`crate::plugin_process`]。
 
 mod capability;
+mod child_process;
+mod fs;
+mod http;
 mod install;
 mod instance;
 mod layout;
 mod manifest;
+mod shortcut;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use atelyx_plugin_protocol::event;
 use atelyx_plugin_protocol::manifest::Manifest;
 
 use crate::plugin_process::PluginProcessHost;
@@ -19,8 +25,9 @@ use crate::plugin_process::PluginProcessHost;
 use instance::Instance;
 
 /// 协议类型再导出：壳只依赖 `atelyx-core`，不直接依赖协议 crate。
+pub use atelyx_plugin_protocol::event::VaultSwitchPayload;
 pub use atelyx_plugin_protocol::manifest::Permission;
-pub use atelyx_plugin_protocol::method::NotificationLevel;
+pub use atelyx_plugin_protocol::method::{FileFilter, NotificationLevel};
 
 /// 插件运行状态。
 #[derive(Clone, Debug, PartialEq)]
@@ -47,12 +54,38 @@ pub struct AuditRecord {
     pub at: u64,
 }
 
-/// 运行时 → 壳的事件（单一通道）。
+/// 运行时 → 壳的广播事件（状态 / 通知 / 拒调用；允许落后丢帧）。
 #[derive(Clone, Debug)]
 pub enum PluginEvent {
     StatusChanged { id: String, status: PluginStatus },
     Notification { id: String, title: String, body: Option<String>, level: NotificationLevel },
     PermissionDenied { id: String, method: String, detail: String },
+}
+
+/// 对话框种类。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DialogKind {
+    File,
+    Directory,
+}
+
+/// 对话框请求（运行时 → 壳）：壳按此弹系统对话框，用户的选择经 [`PluginRuntime::resolve_dialog`]
+/// 回填给等待中的插件调用。
+#[derive(Clone, Debug)]
+pub struct DialogRequest {
+    pub kind: DialogKind,
+    pub title: Option<String>,
+    /// 文件对话框是否为「保存」形态（目录对话框恒 false）。
+    pub save: bool,
+    pub default_path: Option<String>,
+    pub filters: Vec<FileFilter>,
+}
+
+/// 运行时 → 壳的服务请求。与 [`PluginEvent`] 广播分属两条通道：服务请求必须无损送达——丢一条
+/// 会让插件的调用永久悬挂，故走无界通道而非可落后的广播。
+#[derive(Clone, Debug)]
+pub enum HostRequest {
+    Dialog { plugin_id: String, request_id: u64, dialog: DialogRequest },
 }
 
 /// 插件列表项（设置页渲染用）。
@@ -88,7 +121,16 @@ struct Discovered {
 pub struct PluginRuntime {
     root: PathBuf,
     process_host: Arc<PluginProcessHost>,
+    shortcuts: Arc<shortcut::Registrar>,
     events: tokio::sync::broadcast::Sender<PluginEvent>,
+    host_requests: tokio::sync::mpsc::UnboundedSender<HostRequest>,
+    /// 服务请求接收端（壳侧订阅流持有；见 [`PluginRuntime::recv_host_request`]）。
+    host_requests_rx: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<HostRequest>>,
+    /// 在途对话框：request_id → (插件 id, 结果通道)。插件进程的读线程在此等待壳回填结果。
+    dialogs: Mutex<HashMap<u64, (String, std::sync::mpsc::Sender<Result<Option<String>, String>>)>>,
+    next_dialog_id: AtomicU64,
+    /// 当前容器身份（见 [`PluginRuntime::on_vault_switch`]）：同一容器重复进入不动作，据此判别首次激活。
+    container: Mutex<Option<String>>,
     discovered: Mutex<HashMap<String, Discovered>>,
     instances: Mutex<HashMap<String, Arc<Instance>>>,
 }
@@ -98,18 +140,104 @@ impl PluginRuntime {
     pub fn new(root: PathBuf) -> Arc<Self> {
         layout::sweep_temp(&root);
         let (events, _) = tokio::sync::broadcast::channel(256);
-        Arc::new(Self {
+        let (host_requests, host_requests_rx) = tokio::sync::mpsc::unbounded_channel();
+        let runtime = Arc::new(Self {
             root,
             process_host: Arc::new(PluginProcessHost::new()),
+            shortcuts: shortcut::Registrar::new(),
             events,
+            host_requests,
+            host_requests_rx: tokio::sync::Mutex::new(host_requests_rx),
+            dialogs: Mutex::new(HashMap::new()),
+            next_dialog_id: AtomicU64::new(1),
+            container: Mutex::new(None),
             discovered: Mutex::new(HashMap::new()),
             instances: Mutex::new(HashMap::new()),
-        })
+        });
+        // 快捷键触发在 OS 消息线程上到达：经注册器的派发线程回查归属后转投对应插件
+        let weak = Arc::downgrade(&runtime);
+        runtime.shortcuts.set_sink(Arc::new(move |plugin_id, accelerator| {
+            if let Some(runtime) = weak.upgrade() {
+                runtime.notify_shortcut(&plugin_id, &accelerator);
+            }
+        }));
+        runtime
     }
 
     /// 订阅运行时事件；壳把它接成订阅流（内层用广播，重复订阅 / 订阅重建都安全）。
     pub fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<PluginEvent> {
         self.events.subscribe()
+    }
+
+    /// 取一条待处理的服务请求（对话框等）；壳把它接成订阅流。返回 `None` = 运行时已销毁。
+    /// 无界通道不丢帧：请求被落到这里之前就已在队列里，壳无需担心「收不到」。
+    pub async fn recv_host_request(&self) -> Option<HostRequest> {
+        self.host_requests_rx.lock().await.recv().await
+    }
+
+    /// 登记一条对话框请求并把请求交给壳，返回结果接收端。调用方在结果到达后自行回执调用方——
+    /// 对话框由用户决定耗时，不得占住插件进程的输出读线程（否则该期间插件输出与退出上报都被拖住）。
+    /// 插件停用 / 崩溃 / 宿主退出会经 [`PluginRuntime::fail_dialogs_of`] / [`PluginRuntime::shutdown`]
+    /// 把在途请求以可读失败收场，不会永久悬挂。
+    pub(crate) fn open_dialog(
+        &self,
+        plugin_id: &str,
+        dialog: DialogRequest,
+    ) -> Result<std::sync::mpsc::Receiver<Result<Option<String>, String>>, String> {
+        let request_id = self.next_dialog_id.fetch_add(1, Ordering::SeqCst);
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.dialogs
+            .lock()
+            .unwrap()
+            .insert(request_id, (plugin_id.to_string(), tx));
+        let request = HostRequest::Dialog {
+            plugin_id: plugin_id.to_string(),
+            request_id,
+            dialog,
+        };
+        if self.host_requests.send(request).is_err() {
+            self.dialogs.lock().unwrap().remove(&request_id);
+            return Err("对话框不可用：宿主已退出".to_string());
+        }
+        Ok(rx)
+    }
+
+    /// 壳侧回填对话框结果（用户选定路径；取消 = `None`）。未登记的 id 是空操作
+    /// （插件已停用 / 已崩溃时在途请求已由 [`PluginRuntime::fail_dialogs_of`] 收场）。
+    pub fn resolve_dialog(&self, request_id: u64, path: Option<String>) {
+        let waiter = self.dialogs.lock().unwrap().remove(&request_id);
+        if let Some((_, tx)) = waiter {
+            let _ = tx.send(Ok(path));
+        }
+    }
+
+    /// 让某插件全部在途对话框以可读失败收场（插件停用 / 失败 / 崩溃时调用）。
+    pub(crate) fn fail_dialogs_of(&self, plugin_id: &str, reason: &str) {
+        let ids: Vec<u64> = {
+            let dialogs = self.dialogs.lock().unwrap();
+            dialogs
+                .iter()
+                .filter(|(_, (owner, _))| owner == plugin_id)
+                .map(|(id, _)| *id)
+                .collect()
+        };
+        for id in ids {
+            let waiter = self.dialogs.lock().unwrap().remove(&id);
+            if let Some((_, tx)) = waiter {
+                let _ = tx.send(Err(reason.to_string()));
+            }
+        }
+    }
+
+    /// 让全部在途对话框以可读失败收场（宿主退出收尾；逐插件路径已先收一遍，此处防漏网）。
+    fn fail_all_dialogs(&self, reason: &str) {
+        let waiters: Vec<std::sync::mpsc::Sender<Result<Option<String>, String>>> = {
+            let mut dialogs = self.dialogs.lock().unwrap();
+            dialogs.drain().map(|(_, (_, tx))| tx).collect()
+        };
+        for tx in waiters {
+            let _ = tx.send(Err(reason.to_string()));
+        }
     }
 
     /// 扫描磁盘：刷新已安装清单与启用标记，并停掉磁盘上已消失的插件实例。
@@ -266,6 +394,7 @@ impl PluginRuntime {
         for instance in instances {
             instance.stop();
         }
+        self.fail_all_dialogs("宿主已退出");
         self.process_host.shutdown_children();
     }
 
@@ -277,14 +406,64 @@ impl PluginRuntime {
         }
     }
 
+    /// 切仓库容器（本地仓库 ↔ 协作空间 / 换仓库）后的插件侧处置：
+    /// 声明 `keepMountedOnVaultSwitch` 的插件保持挂载，订阅了 `vault:switch` 的收到新容器身份；
+    /// 未声明的插件由宿主重载（停进程再起）——它拿的旧仓库上下文已失效。
+    ///
+    /// 两种情形不动作：容器未变（同一仓库被再次选中）；首次激活（启动自动进入）——那一刻插件刚由
+    /// 宿主启动、本就没有旧容器上下文，重载纯属白起一次，而广播仍是保活插件得知容器身份的唯一来源。
+    pub fn on_vault_switch(self: &Arc<Self>, payload: VaultSwitchPayload) {
+        let identity = container_identity(&payload);
+        let first_activation = {
+            let mut container = self.container.lock().unwrap();
+            if container.as_deref() == Some(identity.as_str()) {
+                return;
+            }
+            let first = container.is_none();
+            *container = Some(identity);
+            first
+        };
+        let targets: Vec<Arc<Instance>> = self.instances.lock().unwrap().values().cloned().collect();
+        for instance in targets {
+            // 只有跑着的实例才持有旧容器上下文：未运行的重载无意义、也无从送达事件
+            if instance.status() != PluginStatus::Running {
+                continue;
+            }
+            if !instance.keep_mounted_on_vault_switch() {
+                if first_activation {
+                    continue;
+                }
+                instance.stop();
+                if let Err(e) = instance.start() {
+                    eprintln!("[plugin {}] 切仓库重载失败：{e}", instance.id);
+                }
+                continue;
+            }
+            if instance.subscribed_to(event::name::VAULT_SWITCH) {
+                instance.notify_domain_event(event::name::VAULT_SWITCH, &payload);
+            }
+        }
+    }
+
+    /// 转投一条全局快捷键触发给登记它的插件。
+    pub(crate) fn notify_shortcut(&self, plugin_id: &str, accelerator: &str) {
+        let instance = self.instances.lock().unwrap().get(plugin_id).cloned();
+        if let Some(instance) = instance {
+            instance.notify_shortcut(accelerator);
+        }
+    }
+
+    /// 安装 / 更新后的收尾：重扫清单。更新的若是曾启用的插件，先停旧进程再用新内容重启
+    /// （否则旧进程继续跑、新内容不生效）；**新装的插件不自动启用**，由用户在设置页启用。
     fn after_install(self: &Arc<Self>, id: &str) -> Result<String, String> {
+        let was_enabled = layout::is_enabled(&self.root, id);
         self.scan();
-        // 更新已启用的插件：先停旧进程再启新版本（否则旧进程继续跑，新内容不生效）
-        let existing = self.instances.lock().unwrap().get(id).cloned();
-        if let Some(instance) = existing {
+        if let Some(instance) = self.instances.lock().unwrap().get(id).cloned() {
             instance.stop();
         }
-        self.start_by_id(id)?;
+        if was_enabled {
+            self.start_by_id(id)?;
+        }
         Ok(id.to_string())
     }
 
@@ -326,11 +505,20 @@ impl PluginRuntime {
             dir.to_path_buf(),
             layout::data_dir(&self.root, &manifest.id),
             self.process_host.clone(),
+            self.shortcuts.clone(),
             self.events.clone(),
         );
         instance.attach_runtime(self);
         instances.insert(manifest.id.clone(), instance.clone());
         instance
+    }
+}
+
+/// 容器身份的规范化串（本地仓库与协作空间分别加前缀，两者取值域互不重叠）。
+fn container_identity(payload: &VaultSwitchPayload) -> String {
+    match payload {
+        VaultSwitchPayload::Local { root } => format!("local:{root}"),
+        VaultSwitchPayload::Space { space_id } => format!("space:{space_id}"),
     }
 }
 
@@ -412,5 +600,40 @@ mod tests {
         assert!(runtime.set_enabled("com.example.none", true).is_err());
         // 未安装的 id 卸载幂等成功
         assert!(runtime.uninstall("com.example.none").is_ok());
+    }
+
+    fn dialog(kind: DialogKind) -> DialogRequest {
+        DialogRequest { kind, title: None, save: false, default_path: None, filters: Vec::new() }
+    }
+
+    #[test]
+    fn dialog_request_is_resolved_by_the_shell() {
+        let tmp = TempDir::new("runtime-dialog");
+        let root: &Path = &tmp;
+        let runtime = PluginRuntime::new(root.to_path_buf());
+        let rx = runtime.open_dialog("com.a.one", dialog(DialogKind::File)).unwrap();
+        let request_id = *runtime.dialogs.lock().unwrap().keys().next().unwrap();
+        runtime.resolve_dialog(request_id, Some("/models/m.gguf".into()));
+        assert_eq!(rx.recv().unwrap().unwrap().as_deref(), Some("/models/m.gguf"));
+        // 登记随结果落地而摘除；重复回填是空操作
+        assert!(runtime.dialogs.lock().unwrap().is_empty());
+        runtime.resolve_dialog(request_id, None);
+    }
+
+    #[test]
+    fn pending_dialogs_fail_with_the_plugin_and_are_per_plugin() {
+        let tmp = TempDir::new("runtime-dialog-fail");
+        let root: &Path = &tmp;
+        let runtime = PluginRuntime::new(root.to_path_buf());
+        let mine = runtime.open_dialog("com.a.one", dialog(DialogKind::Directory)).unwrap();
+        let other = runtime.open_dialog("com.a.two", dialog(DialogKind::Directory)).unwrap();
+
+        runtime.fail_dialogs_of("com.a.one", "插件已停止，对话框已取消");
+        assert_eq!(mine.recv().unwrap().unwrap_err(), "插件已停止，对话框已取消");
+        assert_eq!(runtime.dialogs.lock().unwrap().len(), 1, "别的插件的在途请求不受影响");
+
+        runtime.shutdown();
+        assert_eq!(other.recv().unwrap().unwrap_err(), "宿主已退出");
+        assert!(runtime.dialogs.lock().unwrap().is_empty());
     }
 }

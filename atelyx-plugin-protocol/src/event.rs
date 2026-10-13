@@ -14,9 +14,9 @@ pub mod name {
     pub const VAULT_SWITCH: &str = "vault:switch";
 }
 
-/// [`name::VAULT_SWITCH`] 的 payload。
+/// [`name::VAULT_SWITCH`] 的 payload（`kind` 与字段名均 camelCase，与协议其余类型同一口径）。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum VaultSwitchPayload {
     Local { root: String },
     Space { space_id: String },

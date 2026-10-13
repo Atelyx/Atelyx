@@ -91,8 +91,9 @@ async fn handshake(stub: &mut Stub) {
 
 /// 消费订阅与首次提交（顺序不敏感，按方法名分流），返回首棵树。
 async fn consume_initial(stub: &mut Stub) -> SubmitParams {
-    let mut submitted = None;
-    for _ in 0..2 {
+    let mut subscribed: Vec<String> = Vec::new();
+    // 订阅条数由插件自定（当前为 echo.ping 与 vault:switch 两条），只以「收到首棵界面树」为终点
+    loop {
         let line = stub.next_line().await;
         let request = match Envelope::parse(line.trim_end()).expect("初始请求应为合法信封") {
             Envelope::Request(r) => r,
@@ -100,19 +101,22 @@ async fn consume_initial(stub: &mut Stub) -> SubmitParams {
         };
         match request.method.as_str() {
             m if m == event::SUBSCRIBE => {
-                assert_eq!(request.params["name"], "echo.ping");
+                subscribed.push(request.params["name"].as_str().unwrap_or_default().to_string());
                 stub.reply_ok(request.id, json!({"subscribed": true})).await;
             }
             m if m == method::view::SUBMIT => {
                 let params: SubmitParams = serde_json::from_value(request.params).expect("提交 params 应定型");
                 params.tree.validate().expect("首棵树应通过校验");
                 stub.reply_ok(request.id, json!({"applied": true})).await;
-                submitted = Some(params);
+                assert!(
+                    subscribed.iter().any(|name| name == "echo.ping"),
+                    "应订阅 echo.ping，实际：{subscribed:?}"
+                );
+                return params;
             }
             other => panic!("未知初始请求：{other}"),
         }
     }
-    submitted.expect("应收到首次 view.submit")
 }
 
 /// 等到下一条 view.submit，回显其请求 id，返回 params。
@@ -179,6 +183,33 @@ async fn full_roundtrip_with_echo_plugin() {
     assert_eq!(status_text(&after_ping), "回声：\"hello\"", "回显应与读回值一致");
 
     // EOF 收场：丢弃桩（stdin 句柄随 drop 关闭，shutdown 不等于关管道）→ 插件正常退出
+    drop(stub);
+    let status = tokio::time::timeout(TIMEOUT, child.wait())
+        .await
+        .expect("等插件退出超时")
+        .expect("wait 失败");
+    assert!(status.success(), "插件应正常退出，实际：{status:?}");
+}
+
+/// 容器切换事件：插件按 `PublishParams` 收到并把 payload 落进自持数据（宿主端到端对拍据此判定
+/// 事件确已送达，形状由协议 `VaultSwitchPayload` 定义）。
+#[tokio::test]
+async fn vault_switch_event_reaches_fixture_as_typed_payload() {
+    let (mut child, mut stub) = spawn_echo().await;
+    handshake(&mut stub).await;
+    consume_initial(&mut stub).await;
+
+    stub.send(&Envelope::notification(
+        event::HOST_PUBLISH,
+        json!({"name": "vault:switch", "payload": {"kind": "space", "spaceId": "s1"}}),
+    ))
+    .await;
+    let (id, write) = stub.expect_request(method::state::WRITE).await;
+    let payload: event::VaultSwitchPayload = serde_json::from_value(write["json"]["vault_switch"].clone())
+        .expect("广播载荷应按 VaultSwitchPayload 定型");
+    assert_eq!(payload, event::VaultSwitchPayload::Space { space_id: "s1".into() });
+    stub.reply_ok(id, json!({})).await;
+
     drop(stub);
     let status = tokio::time::timeout(TIMEOUT, child.wait())
         .await
