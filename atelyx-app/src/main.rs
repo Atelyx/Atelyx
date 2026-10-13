@@ -40,6 +40,7 @@ use atelyx_core::layout::{
     LayoutOp, WindowBounds, UI_STATE_SCHEMA,
 };
 use atelyx_core::markdown::{LinkForm, MarkdownDocument};
+use atelyx_core::plugin_runtime::{PluginEvent, PluginRuntime};
 use atelyx_core::vault;
 use atelyx_core::vault_refs;
 use iced::widget::{space, text_editor};
@@ -510,6 +511,10 @@ enum Message {
     SettingsNavCollapse,
     /// AI 设置页消息（子分区 / 供应商 / 模型服务 / Agent / 搜索）。
     Ai(settings_view::ai::AiMsg),
+    /// 设置-插件页消息（安装 / 启停 / 卸载 / 详情）。
+    Plugins(settings_view::plugins::PluginsMsg),
+    /// 插件运行时事件（单一通道进 update）。
+    PluginEvent(Box<PluginEvent>),
     /// 打开弹层（几何规格 + 内容形态由 layout_view 定义）。
     PopupOpen(window::Id, PopupOpen),
     /// 仓库文件总数（打开仓库后异步统计；gen 守卫）。
@@ -954,6 +959,10 @@ pub struct App {
     /// 快捷键录制中的命令（None = 未录制；录制态吃掉命令候选键，
     /// Esc / 切设置分区 / 关弹层取消）。
     pub shortcut_recording: Option<commands::CommandId>,
+    /// 插件宿主运行时（进程内单例；多窗口共享）。
+    pub plugins: Arc<PluginRuntime>,
+    /// 设置-插件页状态（列表缓存 / 详情 / 卸载确认 / 安装在途）。
+    pub plugins_state: settings_view::plugins::PluginsState,
     /// 应用级全局配置（最近仓库列表；落盘 global.json）。
     pub global: global_config::GlobalConfig,
     /// 设置-通用：界面字号草稿（None = 显示当前生效值）。
@@ -1230,6 +1239,11 @@ impl App {
             .chain(iced::font::load(ui::FONT_SEMIBOLD))
             .chain(iced::font::load(ui::FONT_DISPLAY))
             .discard();
+        // 插件运行时：根 = 应用数据目录下 `plugins/`（数据目录不可用时回落系统临时目录，功能降级不崩溃）
+        let plugins_root = app_data_dir()
+            .map(|d| d.join("plugins"))
+            .unwrap_or_else(|| std::env::temp_dir().join("atelyx-plugins"));
+        let plugins = PluginRuntime::new(plugins_root);
         let (global, global_notice) = load_global_boot();
         // 界面基准字号随配置（缺字段走默认档；越界钳回合法区间）
         ui::palette::set_ui_base(global.font_size.clamp(12, 20));
@@ -1290,6 +1304,8 @@ impl App {
                 settings_open: false,
                 settings_tab: "general".into(),
                 shortcut_recording: None,
+                plugins: plugins.clone(),
+                plugins_state: settings_view::plugins::PluginsState::default(),
                 ai_sub_tab: "providers".into(),
                 repo_config: vault::VaultConfig::default(),
                 agents: Vec::new(),
@@ -1422,6 +1438,9 @@ impl App {
                     .insert(root.clone(), app.ui.file_explorer_expanded.clone());
             }
         }
+        // 插件运行时：扫描已安装清单并启动已启用插件
+        app.plugins.scan();
+        app.plugins.start_enabled();
         (app, boot)
     }
 
@@ -1544,6 +1563,8 @@ impl App {
             }
             Message::WindowClosed(id) => {
                 if self.main_id == Some(id) {
+                    // 主窗关闭即退出：显式收尾插件运行时（停全部插件并结束托管进程树）
+                    self.plugins.shutdown();
                     iced::exit()
                 } else {
                     self.detached_os.remove(&id);
@@ -2763,6 +2784,10 @@ impl App {
                 if tab == "ai" {
                     return settings_view::ai::load_agents(self);
                 }
+                // 插件页打开即刷新已装列表
+                if tab == "plugins" {
+                    return settings_view::plugins::update(self, settings_view::plugins::PluginsMsg::Refresh);
+                }
                 Task::none()
             }
             Message::KeyCommand { key, mods } => self.on_key_command(key, mods),
@@ -2776,6 +2801,11 @@ impl App {
                 Task::none()
             }
             Message::Ai(msg) => settings_view::ai::update(self, msg),
+            Message::Plugins(msg) => settings_view::plugins::update(self, msg),
+            Message::PluginEvent(event) => {
+                settings_view::plugins::on_event(self, *event);
+                Task::none()
+            }
             Message::AgentsLoaded(gen, result) => {
                 if gen == self.epoch() {
                     match result {
@@ -6013,7 +6043,16 @@ impl App {
                 _ => None,
             }),
             self.space_pump_subscription(),
+            self.plugin_events_subscription(),
         ])
+    }
+
+    /// 插件运行时事件订阅：单一广播通道接进 update（同一运行时不重建流）。
+    fn plugin_events_subscription(&self) -> Subscription<Message> {
+        Subscription::run_with(
+            settings_view::plugins::RuntimeSpec(self.plugins.clone()),
+            settings_view::plugins::runtime_stream,
+        )
     }
 
     /// 协作帧泵订阅：空间会话激活期间保持一条 WS 长连接（心跳 / 断线重连在泵内建）。

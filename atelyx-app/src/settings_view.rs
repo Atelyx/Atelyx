@@ -17,6 +17,7 @@ pub(crate) mod editor;
 mod editor_prefs;
 mod files;
 mod general;
+pub(crate) mod plugins;
 mod shortcuts;
 mod workspace;
 // 关于页许可模态由 layout_view 的覆盖层分派挂载
@@ -226,6 +227,7 @@ fn settings_body(app: &App, window: iced::window::Id) -> Element<'static, Messag
         "collab" => collab_settings_view(app),
         "editorPrefs" => editor_prefs::view(app),
         "shortcuts" => shortcuts::view(app, window),
+        "plugins" => plugins::view(app),
         "ai" => ai::view(app, window),
         "files" => files::view(app),
         "workspace" => workspace::view(app, window),

@@ -381,6 +381,7 @@ dependencies = [
 name = "atelyx-core"
 version = "0.1.0"
 dependencies = [
+ "atelyx-plugin-protocol",
  "base64 0.22.1",
  "dirs",
  "dunce",
@@ -404,6 +405,7 @@ dependencies = [
  "winapi",
  "yaml-rust2",
  "yrs",
+ "zip 2.4.2",
 ]
 
 [[package]]
@@ -420,6 +422,7 @@ name = "atelyx-plugin-sdk"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "atelyx-core",
  "atelyx-plugin-protocol",
  "base64 0.22.1",
  "serde",
@@ -4072,7 +4075,7 @@ version = "0.89.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2a34eb37ee39e82b74f8a56cf0fe425586cee6e721839f14469d2648352651db"
 dependencies = [
- "zip",
+ "zip 4.6.1",
 ]
 
 [[package]]
@@ -6320,6 +6323,23 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.7",
+]
+
+[[package]]
+name = "zip"
+version = "2.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fabe6324e908f85a1c52063ce7aa26b68dcb7eb6dbc83a2d148403c9bc3eba50"
+dependencies = [
+ "arbitrary",
+ "crc32fast",
+ "crossbeam-utils",
+ "displaydoc",
+ "flate2",
+ "indexmap",
+ "memchr",
+ "thiserror 2.0.21",
+ "zopfli",
 ]
 
 [[package]]

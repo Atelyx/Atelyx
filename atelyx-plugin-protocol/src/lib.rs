@@ -5,6 +5,7 @@
 pub mod envelope;
 pub mod event;
 pub mod handshake;
+pub mod manifest;
 pub mod method;
 pub mod view;
 

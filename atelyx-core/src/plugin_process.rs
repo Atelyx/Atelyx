@@ -269,6 +269,58 @@ impl PluginProcessHost {
         self.groups.lock().unwrap().remove(&pid);
     }
 
+    /// 结束**单个**在册进程的整棵进程树（停用 / 卸载 / 更新时按调用方记账收尾）。
+    ///
+    /// 全局作业对象只提供「全部结束」，单树收尾得自行处置：Windows 先确认该 pid 仍在本作业里
+    /// （进程已退出后 pid 会被系统复用给无关进程，按 pid 直接终止会误杀），再从 pid 递归枚举全部
+    /// 子孙（先枚举再终止，否则父先死会让未枚举的子孙逃逸成孤儿），逐个 `TerminateProcess`；
+    /// Unix 按进程组 `killpg`（pid 即组 id），一次覆盖包装层与全部子孙。
+    ///
+    /// 只负责终止，不改动在册条目——stdin 条目与 Unix 进程组由守望线程在 `wait` 返回后按
+    /// **句柄身份**处置（防 pid 复用误摘新进程）。进程已退出 / 不在本作业时为幂等的空操作；
+    /// 真实的取句柄或终止失败原样上抛（失败不静默）。
+    ///
+    /// 已知边界：顶层进程已退出而它再起的孙子进程仍在作业里时，本函数不动作（作业成员身份是
+    /// 唯一可靠的判据，此刻按 pid 枚举会落到复用后的无关进程树上）；这些孙进程由应用退出的
+    /// 作业对象收尾。
+    pub fn kill_process_tree(&self, pid: u32) -> Result<(), String> {
+        #[cfg(windows)]
+        {
+            let mut slot = self.job.lock().unwrap();
+            if !in_job(&mut slot, pid) {
+                return Ok(());
+            }
+            for child in descendants(pid) {
+                if let Err(e) = terminate_process(child) {
+                    eprintln!("[plugin-process] 结束子进程 {child} 失败：{e}");
+                }
+            }
+            terminate_process(pid)
+        }
+        #[cfg(unix)]
+        {
+            // pid 即组 id；非正或超出 pid_t 正区间会把 killpg 翻成负号指向无关进程组，先挡在边界外
+            let pgid = i32::try_from(pid)
+                .ok()
+                .filter(|pgid| *pgid > 0)
+                .ok_or_else(|| format!("进程 id 非法：{pid}"))?;
+            if unsafe { libc::killpg(pgid, libc::SIGKILL) } == 0 {
+                return Ok(());
+            }
+            let err = std::io::Error::last_os_error();
+            // 进程组已不存在（已退出）：幂等收尾，不是失败
+            if err.raw_os_error() == Some(libc::ESRCH) {
+                return Ok(());
+            }
+            Err(format!("结束进程组 {pgid} 失败：{err}"))
+        }
+        #[cfg(not(any(windows, unix)))]
+        {
+            let _ = pid;
+            Err("当前平台不支持托管插件进程".to_string())
+        }
+    }
+
     /// 结束全部在册插件托管进程（应用退出时调用一次）。
     ///
     /// 置收尾标志与结束动作必须同时成立（见 `create` 的互斥说明），故 Windows 侧在作业对象槽位
@@ -491,27 +543,33 @@ fn read_line(reader: &mut impl BufRead, out: &mut Vec<u8>) -> std::io::Result<us
 // ---------- Windows：作业对象 ----------
 
 #[cfg(windows)]
-use winapi::shared::minwindef::{DWORD, FALSE, LPVOID};
+use winapi::shared::minwindef::{BOOL, DWORD, FALSE, LPVOID};
 #[cfg(windows)]
 use winapi::shared::ntdef::HANDLE;
+#[cfg(windows)]
+use winapi::shared::winerror::ERROR_INVALID_PARAMETER;
 #[cfg(windows)]
 use winapi::um::errhandlingapi::GetLastError;
 #[cfg(windows)]
 use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
 #[cfg(windows)]
+use winapi::um::jobapi::IsProcessInJob;
+#[cfg(windows)]
 use winapi::um::jobapi2::{
     AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject, TerminateJobObject,
 };
 #[cfg(windows)]
-use winapi::um::processthreadsapi::{OpenThread, ResumeThread};
+use winapi::um::processthreadsapi::{OpenProcess, OpenThread, ResumeThread, TerminateProcess};
 #[cfg(windows)]
 use winapi::um::tlhelp32::{
-    CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
+    CreateToolhelp32Snapshot, Process32First, Process32Next, Thread32First, Thread32Next,
+    PROCESSENTRY32, TH32CS_SNAPPROCESS, TH32CS_SNAPTHREAD, THREADENTRY32,
 };
 #[cfg(windows)]
 use winapi::um::winnt::{
     JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, THREAD_SUSPEND_RESUME,
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
+    THREAD_SUSPEND_RESUME,
 };
 
 /// `CreateProcess` 创建后挂起主线程（在加入作业对象之前不让子进程执行任何代码）。
@@ -582,6 +640,76 @@ fn resume_main_thread(pid: u32) -> Result<(), String> {
             "恢复进程 {pid} 主线程失败：{}",
             std::io::Error::last_os_error()
         ));
+    }
+    Ok(())
+}
+
+/// 枚举 pid 的全部子孙进程（不含自身）。
+///
+/// 单树收尾只发生在停用 / 卸载等显式操作上，进程树不深，按父进程链逐层展开、不限定遍历次序；
+/// 快照期间新生／已退的进程可能漏进漏出，但已枚举到的子树都会被终止（顶层 pid 自身另由调用方终止）。
+#[cfg(windows)]
+fn descendants(pid: u32) -> Vec<u32> {
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return Vec::new();
+    }
+    let mut entry: PROCESSENTRY32 = unsafe { std::mem::zeroed() };
+    entry.dwSize = std::mem::size_of::<PROCESSENTRY32>() as DWORD;
+    let mut pairs: Vec<(u32, u32)> = Vec::new();
+    let mut ok = unsafe { Process32First(snapshot, &mut entry) };
+    while ok != 0 {
+        pairs.push((entry.th32ProcessID, entry.th32ParentProcessID));
+        ok = unsafe { Process32Next(snapshot, &mut entry) };
+    }
+    unsafe { CloseHandle(snapshot) };
+
+    let mut found: Vec<u32> = Vec::new();
+    let mut frontier = vec![pid];
+    while let Some(parent) = frontier.pop() {
+        for (child, ppid) in &pairs {
+            if *ppid == parent && *child != pid && !found.contains(child) {
+                found.push(*child);
+                frontier.push(*child);
+            }
+        }
+    }
+    found
+}
+
+/// pid 是否仍在本作业对象里（作业成员身份即「这个进程是我们起的」的判据）。
+/// 作业槽位为空（从未启动过托管进程）或进程已不存在时返回 false。
+#[cfg(windows)]
+fn in_job(slot: &mut Option<JobHandle>, pid: u32) -> bool {
+    let Some(job) = slot.as_ref() else {
+        return false;
+    };
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid) };
+    if handle.is_null() {
+        return false;
+    }
+    let mut result: BOOL = 0;
+    let ok = unsafe { IsProcessInJob(handle, job.0, &mut result) };
+    unsafe { CloseHandle(handle) };
+    ok != 0 && result != 0
+}
+
+/// 强制终止单个进程：进程已不存在（`ERROR_INVALID_PARAMETER`）按幂等成功；其余失败如实返回原因。
+#[cfg(windows)]
+fn terminate_process(pid: u32) -> Result<(), String> {
+    let handle = unsafe { OpenProcess(PROCESS_TERMINATE, FALSE, pid) };
+    if handle.is_null() {
+        let code = unsafe { GetLastError() };
+        if code == ERROR_INVALID_PARAMETER {
+            return Ok(());
+        }
+        let reason = std::io::Error::from_raw_os_error(code as i32);
+        return Err(format!("打开进程 {pid} 失败：{reason}（错误码 {code}）"));
+    }
+    let ok = unsafe { TerminateProcess(handle, 1) };
+    unsafe { CloseHandle(handle) };
+    if ok == 0 {
+        return Err(format!("终止进程 {pid} 失败：{}", std::io::Error::last_os_error()));
     }
     Ok(())
 }
@@ -709,5 +837,69 @@ mod tests {
         assert_eq!(wait_terminated(&seen), Some(0), "进程应已退出");
         let err = host.write_stdin(pid, "late\n").expect_err("退出后写入 stdin 必须报错");
         assert!(err.contains(&pid.to_string()), "错误原因应指明 pid：{err}");
+    }
+
+    /// 长时间运行、只能被外部终止的进程（供单树终止测试）。
+    fn long_running_program() -> (String, Vec<String>) {
+        #[cfg(windows)]
+        {
+            let comspec = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string());
+            (comspec, vec!["/C".to_string(), "ping -n 60 127.0.0.1".to_string()])
+        }
+        #[cfg(unix)]
+        ("/bin/sh".to_string(), vec!["-c".to_string(), "sleep 60".to_string()])
+    }
+
+    /// 等任一退出事件出现（被杀进程的退出码按平台不同：Windows 有码、Unix 为 None，
+    /// 故不能复用只判退出码的 `wait_terminated`）。
+    fn wait_any_terminated(seen: &Arc<std::sync::Mutex<Vec<ProcessEvent>>>) -> bool {
+        for _ in 0..50 {
+            if seen
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| matches!(e, ProcessEvent::Terminated { .. }))
+            {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        false
+    }
+
+    /// 单树终止：终止在跑的托管进程后应上报退出，且守望线程摘除其 stdin 条目。
+    #[test]
+    fn kill_process_tree_terminates_running_process() {
+        let host = Arc::new(PluginProcessHost::new());
+        let (seen, sink) = event_recorder();
+        let (program, args) = long_running_program();
+        let pid = host.spawn(&program, &args, None, None, sink).expect("启动进程失败");
+        // 留出进程起步时间；即便尚未起步，终止也须幂等成立
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        host.kill_process_tree(pid).expect("终止进程树失败");
+        assert!(wait_any_terminated(&seen), "终止后应上报退出事件");
+
+        // 退出收尾后 stdin 条目被摘除：写入必然报错（而不是写进悬空管道后静默）
+        let mut errored = false;
+        for _ in 0..30 {
+            if host.write_stdin(pid, "x").is_err() {
+                errored = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(errored, "终止后写入 stdin 应报错");
+    }
+
+    /// 重复终止与终止已退出的进程都须幂等（不 panic、不报错）。
+    #[test]
+    fn kill_process_tree_is_idempotent() {
+        let host = Arc::new(PluginProcessHost::new());
+        let (seen, sink) = event_recorder();
+        let (program, args) = shell_program();
+        let pid = host.spawn(&program, &args, None, None, sink).expect("启动进程失败");
+        assert_eq!(wait_terminated(&seen), Some(0), "进程应正常退出");
+        host.kill_process_tree(pid).expect("终止已退出进程应幂等成功");
+        host.kill_process_tree(pid).expect("重复终止应幂等成功");
     }
 }

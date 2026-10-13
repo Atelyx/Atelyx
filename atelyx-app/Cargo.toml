@@ -20,7 +20,8 @@ nanoid = "0.4"
 # 图片尺寸读取（附件白名单口径：png/jpeg/gif/bmp/webp；与 core 转码声明合并取并集）
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp"] }
 # 自动保存防抖定时器与索引扫描线程池（一次性 sleep / spawn_blocking；执行体为 iced 的 tokio runtime）
-tokio = { version = "1", default-features = false, features = ["time", "rt"] }
+# 插件事件订阅用 tokio::sync::broadcast 接收端
+tokio = { version = "1", default-features = false, features = ["time", "rt", "sync"] }
 
 # 开机自启（autostart）：Windows 注册表 Run 键；应用内更新（update）：ShellExecuteW 拉起安装器
 [target.'cfg(target_os = "windows")'.dependencies]

@@ -92,6 +92,27 @@ fn handshake_shape_is_frozen_and_version_checked() {
     assert!(!handshake::compatible(1, 2), "版本不一致必须判不兼容");
 }
 
+/// manifest 编码冻结：camelCase 字段名、平台入口映射、权限封闭枚举与未知字段忽略。
+#[test]
+fn manifest_shape_is_frozen() {
+    let snapshot = load();
+    let value = snapshot["manifest"].clone();
+    let manifest: atelyx_plugin_protocol::manifest::Manifest =
+        serde_json::from_value(value.clone()).expect("快照 manifest 应可反序列化");
+    manifest.validate_shape().expect("快照 manifest 应通过结构校验");
+    assert_eq!(manifest.entry.windows.as_deref(), Some("bin/studio.exe"));
+    assert_eq!(
+        manifest.permissions,
+        vec![
+            atelyx_plugin_protocol::manifest::Permission::Fs,
+            atelyx_plugin_protocol::manifest::Permission::Process,
+            atelyx_plugin_protocol::manifest::Permission::Notification,
+        ]
+    );
+    assert!(manifest.singleton && !manifest.keep_mounted_on_vault_switch);
+    assert_eq!(serde_json::to_value(&manifest).unwrap(), value, "manifest 编码与快照不一致");
+}
+
 /// host: 前缀判定：宿主保留命名空间的方向约定。
 #[test]
 fn host_prefix_is_reserved() {

@@ -25,6 +25,10 @@ globset = "0.4"
 # 表格 xlsx 导出（table_xlsx）
 rust_xlsxwriter = "0.89"
 base64 = "0.22"
+# 插件协议类型（宿主运行时：信封解析、握手、能力面方法、ViewNode 树）
+atelyx-plugin-protocol = { path = "../atelyx-plugin-protocol" }
+# 插件安装（plugin_runtime）：zip 解压（仅 deflate；防御见 install.rs）
+zip = { version = "2", default-features = false, features = ["deflate"] }
 # xlsx 不支持的图片格式（webp 等）导出前转 PNG
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp"] }
 # 系统下载/主目录定位（图片下载落盘）
@@ -55,7 +59,7 @@ libc = "0.2"
 # 插件进程托管（plugin_process）：作业对象（创建/配置/加入/结束）与「挂起创建 → 恢复主线程」、
 # 插件卸载前递归清只读位
 [target.'cfg(target_os = "windows")'.dependencies]
-winapi = { version = "0.3", features = ["winnt", "processthreadsapi", "handleapi", "errhandlingapi", "minwinbase", "jobapi2", "tlhelp32"] }
+winapi = { version = "0.3", features = ["winnt", "processthreadsapi", "handleapi", "errhandlingapi", "minwinbase", "jobapi", "jobapi2", "tlhelp32", "winerror"] }
 keyring = { version = "3.6", features = ["windows-native"] }
 
 [features]

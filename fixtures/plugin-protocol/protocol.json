@@ -91,6 +91,19 @@
       "host": { "name": "Atelyx", "version": "0.6.0" }
     }
   },
+  "manifest": {
+    "id": "com.example.studio",
+    "name": "Studio",
+    "version": "1.2.0",
+    "apiVersion": 1,
+    "entry": { "windows": "bin/studio.exe", "linux": "bin/studio" },
+    "permissions": ["fs", "process", "notification"],
+    "singleton": true,
+    "keepMountedOnVaultSwitch": false,
+    "docTypeRegistrations": [
+      { "extension": "board", "label": "画板", "icon": "layout-dashboard" }
+    ]
+  },
   "methods": [
     {
       "name": "fs.readText params",
