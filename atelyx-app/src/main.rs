@@ -1036,6 +1036,9 @@ pub struct App {
     pub space_own_peer_id: Option<String>,
     /// 远端光标过期剔除的节流时刻（周期 tick 搭载刷新，避免每 100ms 全文换算）。
     space_cursor_prune_at: Option<std::time::Instant>,
+    /// 泵被服务端拒绝后的停闸标志：订阅据此不再重生泵（重连无意义，防无退避风暴）。
+    /// 容器切换时复位；重进空间重新放行。
+    pub(crate) space_pump_denied: bool,
     /// 仓库文件总数（打开仓库后异步统计；统计在途为 None）。
     pub file_count: Option<usize>,
     /// 主窗口（渲染激活布局树）；None = 首帧在途。
@@ -1400,6 +1403,7 @@ impl App {
                 space_invite_confirm: None,
                 space_own_peer_id: None,
                 space_cursor_prune_at: None,
+                space_pump_denied: false,
                 space_tree_refresh_at: None,
                 fs_tree_refresh_pending: false,
                 note_collab: None,
@@ -2336,6 +2340,11 @@ impl App {
                 {
                     self.space_cursor_prune_at = Some(Instant::now());
                     space_actions::refresh_remote_cursors(self);
+                }
+                // awareness 保活重发（core 内 15s 限频，连接期间搭载）：空闲端身份帧
+                // 否则被对端 30s 超时剔除——后加入者与对端互见都依赖周期重发
+                if self.space_connected {
+                    space_actions::awareness_keepalive(self);
                 }
                 // 重名提醒条 3s 过期
                 if self
@@ -5994,6 +6003,10 @@ impl App {
     /// 泵实例经 spec 固定身份（重连不发新 spec）；命令入口由 PumpReady 消息回填，
     /// 事件流转发为 Event 消息。
     fn space_pump_subscription(&self) -> Subscription<Message> {
+        if self.space_pump_denied {
+            // 服务端已拒绝（令牌失效 / 被移出）：重连无意义，停闸防订阅重算重生泵
+            return Subscription::none();
+        }
         let crate::RepoKind::Space(session) = &self.repo_kind else {
             return Subscription::none();
         };

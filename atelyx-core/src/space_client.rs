@@ -213,6 +213,8 @@ pub struct GrepResult {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FolderDeleteAck {
+    /// 仅确认询问响应携带；落地响应缺省（serde default 防误判失败）。
+    #[serde(default)]
     pub needs_confirm: bool,
     /// 服务端仅在删除落地的响应携带；needsConfirm 响应缺省。
     #[serde(default)]
@@ -571,6 +573,7 @@ impl SpaceClient {
 
     async fn put_file_raw(&self, space_id: &str, path: &str, bytes: &[u8], base64_enc: bool) -> Result<(), SpaceError> {
         #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
         struct WriteAck {
             #[allow(dead_code)]
             updated_at: i64,
@@ -848,6 +851,35 @@ fn urlencode_component(s: &str) -> String {
 mod tests {
     use super::*;
 
+    /// 单请求 JSON 假服务端：读完整请求头后按给定响应体回 200（回执解码回归用）。
+    fn spawn_json_server(body: &'static str) -> (String, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("回环端口可绑");
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("客户端会连入");
+            let mut reader = std::io::BufReader::new(stream);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                if std::io::BufRead::read_line(&mut reader, &mut line).unwrap_or(0) == 0 {
+                    break;
+                }
+                if line == "\r\n" || line == "\n" {
+                    break;
+                }
+            }
+            let mut stream = reader.into_inner();
+            use std::io::Write as _;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(resp.as_bytes()).expect("响应写出");
+        });
+        (format!("http://{addr}"), server)
+    }
+
     #[test]
     fn 地址规整补协议去尾斜杠() {
         assert_eq!(normalize_server_url("192.168.1.5:11224"), "http://192.168.1.5:11224");
@@ -907,5 +939,32 @@ mod tests {
         let _ = client.list_spaces().await;
         let header = server.join().expect("抓头线程不 panic");
         assert_eq!(header, "Bearer tok123");
+    }
+
+    /// 写文件回执按服务端真实形状（camelCase）解码：字段名不匹配会把落盘成功当失败上报。
+    #[tokio::test]
+    async fn 写文件回执按服务端键名解码() {
+        let (base, server) = spawn_json_server(r#"{"updatedAt": 123}"#);
+        let client = SpaceClient::new(&base, "tok".to_string()).expect("回环放行");
+        client
+            .put_file_text("s1", "notes/a.md", "正文")
+            .await
+            .expect("camelCase 回执应可解码");
+        server.join().expect("服务端线程不 panic");
+    }
+
+    /// 删文件夹落地回执不含 needsConfirm（仅确认询问响应携带）：缺省按 false 解码。
+    #[tokio::test]
+    async fn 删文件夹落地回执缺确认键可解码() {
+        let (base, server) = spawn_json_server(r#"{"deleted": true, "itemCount": 2}"#);
+        let client = SpaceClient::new(&base, "tok".to_string()).expect("回环放行");
+        let ack = client
+            .delete_folder("s1", "notes", true)
+            .await
+            .expect("落地回执应可解码");
+        assert!(!ack.needs_confirm);
+        assert!(ack.deleted);
+        assert_eq!(ack.item_count, 2);
+        server.join().expect("服务端线程不 panic");
     }
 }

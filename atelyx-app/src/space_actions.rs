@@ -906,6 +906,7 @@ fn clear_session_state(app: &mut App) {
     // 忙标志同属会话态：容器切换清零，防旧回执被 gen 守卫丢弃后卡死新容器操作
     app.space_busy = false;
     app.space_connected = false;
+    app.space_pump_denied = false;
     app.space_members = None;
     app.space_members_loading = false;
     app.space_members_error = None;
@@ -2503,6 +2504,24 @@ fn send_note_frames(app: &App, file: &str, frames: Vec<Vec<u8>>) {
     }
 }
 
+/// note-aware 通道帧上行（编辑选区随行与保活重发共用出口）。
+fn send_awareness(app: &App, file: &str, payload: Vec<u8>) {
+    send_cmd(app, atelyx_core::collab::SpaceCmd::NoteAware { file: file.to_string(), payload });
+}
+
+/// awareness 保活重发（UiTick 搭载，core 内 15s 限频）：空闲端身份帧否则被对端 30s 超时剔除。
+pub(crate) fn awareness_keepalive(app: &mut App) {
+    let Some(file) = app.note_collab_file.clone() else { return };
+    let Some(frame) = app
+        .note_collab
+        .as_mut()
+        .and_then(|nc| nc.keepalive_if_due(std::time::Instant::now()))
+    else {
+        return;
+    };
+    send_awareness(app, &file, frame);
+}
+
 /// 当前打开文件路径集合（笔记 + 表格平级，≤3；presence 与协作房间视图共用）。
 pub(crate) fn open_file_paths(app: &App) -> Vec<String> {
     let mut files = Vec::new();
@@ -2563,7 +2582,7 @@ pub(crate) fn peer_open_files(presence: Option<&serde_json::Value>) -> Vec<Strin
         .unwrap_or_default()
 }
 
-/// 本端 awareness 身份 JSON（昵称 / 协作色）。
+/// 本端 awareness 身份 JSON（昵称 / 协作色；core `set_local_state` 外层再包 user 键，此处传裸对象）。
 fn local_user_json(app: &App) -> String {
     let name = app
         .global
@@ -2572,10 +2591,8 @@ fn local_user_json(app: &App) -> String {
         .map(|i| i.display_name.clone())
         .unwrap_or_else(|| "用户".into());
     let color = app.global.collab_color.clone().unwrap_or_else(|| DEFAULT_COLLAB_COLOR.into());
-    serde_json::json!({
-        "user": { "name": name, "color": color, "colorLight": format!("{color}33") }
-    })
-    .to_string()
+    serde_json::json!({ "name": name, "color": color, "colorLight": format!("{color}33") })
+        .to_string()
 }
 
 /// 绑定当前打开笔记到协作文档（打开 / 重连后调用）：基线通告 + 握手 + 身份帧。
@@ -2668,12 +2685,11 @@ pub fn collab_after_edit(app: &mut App) {
     let selection = {
         let start = app.edit.selection().0.min(app.edit.caret);
         let end = app.edit.selection().1.max(app.edit.caret);
-        // 编辑面坐标相对正文（剥 frontmatter 前缀）；awareness 偏移以全文为基准。
-        // 选区契约上限 u16（UTF-16 单位）：超界文档不广播选区（对端只见身份不见光标）
+        // 编辑面坐标相对正文（剥 frontmatter 前缀）；awareness 偏移以全文为基准
         let base = atelyx_core::frontmatter::block_end(&new).unwrap_or(0);
         let anchor = base + start;
         let head = base + end;
-        let units = |byte: usize| u16::try_from(atelyx_core::space_frame::byte_to_utf16_offset(&new, byte.min(new.len()))).ok();
+        let units = |byte: usize| u32::try_from(atelyx_core::space_frame::byte_to_utf16_offset(&new, byte.min(new.len()))).ok();
         match (units(anchor), units(head)) {
             (Some(a), Some(h)) => Some((a, h)),
             _ => None,
@@ -2696,7 +2712,7 @@ pub fn collab_after_edit(app: &mut App) {
         .as_mut()
         .and_then(|nc| nc.set_local_state(&user_json, selection));
     if let Some(aw) = aware {
-        send_cmd(app, atelyx_core::collab::SpaceCmd::NoteAware { file: rel, payload: aw });
+        send_awareness(app, &rel, aw);
     }
 }
 
@@ -2721,7 +2737,7 @@ pub(crate) fn refresh_remote_cursors(app: &mut App) {
     app.remote_cursors = cursors
         .into_iter()
         .filter_map(|c| {
-            let head: u16 = c.head?;
+            let head: u32 = c.head?;
             let anchor = c.anchor.unwrap_or(head);
             Some(crate::RemoteCursorView {
                 name: c.name,
@@ -2809,8 +2825,16 @@ fn on_space_event(app: &mut App, event: atelyx_core::collab::SpaceEvent) -> Task
             Task::none()
         }
         E::Error { message } => {
-            // 服务端拒绝（令牌无效 / 非成员 / 被移出空间）：泵已终结不再重连，
-            // 清命令入口防继续上行；重新进入空间时由 enter_space 重建
+            // 连接失败（地址校验被拒 / 网络不可达）：泵仍按退避重连，命令经泵缓冲
+            // 断线期照常上行；命令入口保留（PumpReady 只在流建立时回填一次，清了无法再生）
+            app.space_connected = false;
+            app.notify(NoticeLevel::Warning, format!("协作连接失败：{message}"));
+            Task::none()
+        }
+        E::Denied { message } => {
+            // 服务端拒绝（令牌无效 / 非成员 / 被移出空间）：泵已终结，停闸防订阅重算
+            // 重生泵形成无退避风暴；容器切换复位标志，重进空间重新放行
+            app.space_pump_denied = true;
             app.space_cmds = None;
             app.space_connected = false;
             app.notify(NoticeLevel::Error, format!("协作：{message}"));

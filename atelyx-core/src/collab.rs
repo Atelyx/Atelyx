@@ -103,6 +103,9 @@ pub enum SpaceEvent {
     /// 服务端提示本端消费过慢：需重新握手补齐状态。
     Resync,
     Error { message: String },
+    /// 服务端拒绝（无效令牌 / 非成员 / 被移出空间）：泵终结且重连无意义，壳侧须停订阅
+    /// 防订阅重算把已终结的泵原样重生（否则形成无退避的重连风暴）。
+    Denied { message: String },
     /// 已就绪的连接断开（壳侧应重发握手态）。
     Disconnected,
     /// 每次重连尝试前发出（attempt 从 1 起）。
@@ -518,7 +521,7 @@ async fn handle_text_frame(text: &str, ready: bool, events: &EventSink) -> Frame
         "error" => {
             // 服务端拒绝（会话吊销 / 移出空间 / 无效令牌 / 非成员）：重连无意义，泵终结
             let message = str_field(&frame, "message").unwrap_or_default();
-            if events.send(SpaceEvent::Error { message }).await {
+            if events.send(SpaceEvent::Denied { message }).await {
                 FrameFlow::Fatal
             } else {
                 FrameFlow::Abort
@@ -1033,6 +1036,29 @@ mod tests {
         drop(cmd_tx);
         let done = tokio::time::timeout(Duration::from_secs(2), events.recv()).await;
         assert!(matches!(done, Ok(None)), "Bye 后事件流应结束：{done:?}");
+        server.await.unwrap();
+    }
+
+    /// 服务端拒绝：error 帧转 Denied 事件且泵终结（事件流结束，不再重连）。
+    #[tokio::test]
+    async fn server_error_denies_and_ends_stream() {
+        let (base, server) = spawn_handshake_server(|mut ws| async move {
+            send_json(&mut ws, json!({"type": "error", "message": "被移出空间"})).await;
+            // 挂住连接等客户端收尾，防任务提前结束引入多余事件
+            let _ = tokio::time::timeout(Duration::from_secs(2), ws.next()).await;
+        })
+        .await;
+        let (_cmd_tx, mut events) = spawn_pump_with(&base, test_hello(), test_config());
+        assert_eq!(
+            recv_event(&mut events).await,
+            SpaceEvent::Ready { peer_id: "1".to_string() }
+        );
+        assert_eq!(
+            recv_event(&mut events).await,
+            SpaceEvent::Denied { message: "被移出空间".to_string() }
+        );
+        let done = tokio::time::timeout(Duration::from_secs(2), events.recv()).await;
+        assert!(matches!(done, Ok(None)), "Denied 后事件流应结束：{done:?}");
         server.await.unwrap();
     }
 

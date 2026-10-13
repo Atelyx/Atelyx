@@ -32,6 +32,8 @@ const SEED_CLIENT_ID: u64 = 1;
 const BASELINE_REPLY_INTERVAL: Duration = Duration::from_secs(2);
 /// 远端 awareness 状态超时：期间无更新视为离线剔除。
 const AWARENESS_TIMEOUT: Duration = Duration::from_secs(30);
+/// awareness 保活重发间隔：空闲端（不再编辑/重连）的身份帧须按此周期重发，否则被对端超时剔除。
+const AWARENESS_KEEPALIVE: Duration = Duration::from_secs(15);
 /// awareness state 缺失或解析失败时的光标颜色兜底。
 const FALLBACK_CURSOR_COLOR: &str = "#9aa0a6";
 
@@ -61,8 +63,8 @@ pub struct RemoteCursor {
     pub client_id: u64,
     pub name: String,
     pub color: String,
-    pub anchor: Option<u16>,
-    pub head: Option<u16>,
+    pub anchor: Option<u32>,
+    pub head: Option<u32>,
 }
 
 struct RemoteState {
@@ -95,10 +97,12 @@ pub struct NoteCollab {
     incompatible: HashSet<String>,
     // ---- awareness 本端与远端状态 ----
     local_user_json: Option<String>,
-    local_selection: Option<(u16, u16)>,
+    local_selection: Option<(u32, u32)>,
     local_clock: u64,
     /// 本端 state JSON 上次广播值：变化才产出增量。
     local_state_json: Option<String>,
+    /// 本端身份帧上次广播时刻（保活限频记账）。
+    awareness_sent_at: Option<Instant>,
     remote_states: HashMap<u64, RemoteState>,
 }
 
@@ -115,6 +119,7 @@ impl NoteCollab {
             local_selection: None,
             local_clock: 0,
             local_state_json: None,
+            awareness_sent_at: None,
             remote_states: HashMap::new(),
         }
     }
@@ -281,7 +286,7 @@ impl NoteCollab {
     pub fn set_local_state(
         &mut self,
         user_json: &str,
-        selection: Option<(u16, u16)>,
+        selection: Option<(u32, u32)>,
     ) -> Option<Vec<u8>> {
         let state = match selection {
             Some((anchor, head)) => {
@@ -297,6 +302,7 @@ impl NoteCollab {
         self.local_selection = selection;
         self.local_state_json = Some(state.clone());
         self.local_clock += 1;
+        self.awareness_sent_at = Some(Instant::now());
         Some(encode_awareness_update(&[AwarenessEntry {
             client_id,
             clock: self.local_clock,
@@ -309,6 +315,21 @@ impl NoteCollab {
         self.local_state_json = None;
         let json = self.local_user_json.clone()?;
         self.set_local_state(&json, self.local_selection)
+    }
+
+    /// 到期保活：重发本端身份帧（无文档 / 未发过身份 / 未到间隔 = None）。
+    /// 空闲端不重发就被对端按 [`AWARENESS_TIMEOUT`] 剔除（互见消失）；`now` 由壳传入便于测试。
+    pub fn keepalive_if_due(&mut self, now: Instant) -> Option<Vec<u8>> {
+        if self.doc.is_none() {
+            return None;
+        }
+        if !self
+            .awareness_sent_at
+            .is_none_or(|at| now.duration_since(at) >= AWARENESS_KEEPALIVE)
+        {
+            return None;
+        }
+        self.resend_awareness()
     }
 
     /// 合入远端 awareness（只应用不回发，防回环）。clock 已记忆的更小值丢弃；**同 clock
@@ -775,11 +796,11 @@ fn cursor_from_state(client_id: u64, state_json: &str) -> RemoteCursor {
         anchor: selection
             .and_then(|s| s.get("anchor"))
             .and_then(Value::as_u64)
-            .and_then(|v| u16::try_from(v).ok()),
+            .and_then(|v| u32::try_from(v).ok()),
         head: selection
             .and_then(|s| s.get("head"))
             .and_then(Value::as_u64)
-            .and_then(|v| u16::try_from(v).ok()),
+            .and_then(|v| u32::try_from(v).ok()),
     }
 }
 
@@ -1190,5 +1211,45 @@ mod tests {
         assert!(nc
             .set_local_state(r##"{"name":"我","color":"#111111"}"##, None)
             .is_none());
+    }
+
+    /// 保活限频：身份已发未到期不重发；到期重发且 clock 递增；无文档或未发过身份恒不产帧。
+    /// 时间戳记账为真实时钟（`set_local_state` 内盖戳），判定时刻以真实时钟加偏移构造。
+    #[test]
+    fn 保活到期才重发身份帧() {
+        let mut nc = NoteCollab::new("a".to_owned());
+        let t0 = Instant::now();
+        assert!(nc.keepalive_if_due(t0).is_none(), "未打开文档不产帧");
+        nc.open("f.md", "v1\n");
+        assert!(nc.keepalive_if_due(t0).is_none(), "未发过身份不产帧");
+        nc.set_local_state(r##"{"name":"我","color":"#111111"}"##, None)
+            .unwrap();
+        assert!(
+            nc.keepalive_if_due(Instant::now() + Duration::from_secs(14))
+                .is_none(),
+            "未到期不重发"
+        );
+        let again = nc
+            .keepalive_if_due(Instant::now() + Duration::from_secs(15))
+            .expect("到期应重发");
+        assert_eq!(decode_awareness_update(&again).unwrap()[0].clock, 2);
+    }
+
+    /// 选区偏移 u32 往返：超 u16 的长文选区编解码不丢失。
+    #[test]
+    fn 选区偏移u32往返() {
+        let mut a = NoteCollab::new("a".to_owned());
+        a.open("f.md", "v1\n");
+        let frame = a
+            .set_local_state(r##"{"name":"我","color":"#111111"}"##, Some((70_000, 70_010)))
+            .unwrap();
+        let mut b = NoteCollab::new("b".to_owned());
+        b.open("f.md", "v1\n");
+        let now = Instant::now();
+        b.apply_awareness(&frame, now);
+        let cursors = b.remote_states(now);
+        assert_eq!(cursors.len(), 1);
+        assert_eq!(cursors[0].anchor, Some(70_000));
+        assert_eq!(cursors[0].head, Some(70_010));
     }
 }
