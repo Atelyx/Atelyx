@@ -66,6 +66,18 @@ pub const WARNING: Color = ACCENT;
 /// 危险 / 错误
 pub const DANGER: Color = rgb(0xe8, 0x77, 0x6c);
 
+// ===== 日程色板 =====
+/// 日程标记 7 色循环（`CalendarItem.color` 存对应 hex，顺序即循环序）
+pub const EVENT_COLORS: [Color; 7] = [
+    rgb(0xe0, 0x6c, 0x75),
+    rgb(0x61, 0xaf, 0xef),
+    rgb(0x98, 0xc3, 0x79),
+    rgb(0xe5, 0xc0, 0x7b),
+    rgb(0xc6, 0x78, 0xdd),
+    rgb(0x56, 0xb6, 0xc2),
+    rgb(0xd1, 0x9a, 0x66),
+];
+
 // ===== 标题栏窗口控制 =====
 /// 标题栏按钮图标色
 pub const TITLEBAR_ICON: Color = TEXT_SECONDARY;
@@ -82,18 +94,56 @@ pub const RADIUS_SM: f32 = 6.0;
 /// 圆角 md
 pub const RADIUS_MD: f32 = 10.0;
 
+/// 字阶档位（rem 语义：实际 px = 档位 × 界面基准字号 / 16）。
+const FS_MICRO_REM: f32 = 11.0;
+const FS_CAPTION_REM: f32 = 12.0;
+const FS_UI_REM: f32 = 13.0;
+const FS_BODY_REM: f32 = 14.0;
+const FS_H2_REM: f32 = 16.0;
+const FS_H1_REM: f32 = 20.0;
+
+/// 界面基准字号（px，12–20；缺省 16）。进程单例：视图每帧取值，改值即全局生效。
+/// 不经 App 状态：字号进 palette 函数而非逐控件传参，与字体句柄同为进程内单例。
+static UI_BASE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(16);
+
+/// 当前界面基准字号（px）。
+pub fn ui_base() -> f32 {
+    UI_BASE.load(std::sync::atomic::Ordering::Relaxed) as f32
+}
+
+/// 设置界面基准字号（px；调用方负责钳制 12–20）。
+pub fn set_ui_base(px: u32) {
+    UI_BASE.store(px, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn font_scale() -> f32 {
+    ui_base() / 16.0
+}
+
 /// 字阶 micro
-pub const FS_MICRO: f32 = 11.0;
+pub fn fs_micro() -> f32 {
+    FS_MICRO_REM * font_scale()
+}
 /// 字阶 caption
-pub const FS_CAPTION: f32 = 12.0;
+pub fn fs_caption() -> f32 {
+    FS_CAPTION_REM * font_scale()
+}
 /// 字阶 ui（默认文字档）
-pub const FS_UI: f32 = 13.0;
+pub fn fs_ui() -> f32 {
+    FS_UI_REM * font_scale()
+}
 /// 字阶 body
-pub const FS_BODY: f32 = 14.0;
+pub fn fs_body() -> f32 {
+    FS_BODY_REM * font_scale()
+}
 /// 字阶 h2
-pub const FS_H2: f32 = 16.0;
+pub fn fs_h2() -> f32 {
+    FS_H2_REM * font_scale()
+}
 /// 字阶 h1（占位引导标题档）
-pub const FS_H1: f32 = 20.0;
+pub fn fs_h1() -> f32 {
+    FS_H1_REM * font_scale()
+}
 
 /// 标题栏高度
 pub const TITLEBAR_H: f32 = 36.0;

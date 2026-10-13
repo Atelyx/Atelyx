@@ -6,6 +6,8 @@ edition = "2021"
 [dependencies]
 # 核心能力（仓库存储/原子写/目录过滤）：与壳共享同一实现
 atelyx-core = { path = "../atelyx-core" }
+# 最近打开条目（ui-state 透传字段）的序列化派生
+serde = { version = "1", features = ["derive"] }
 # 布局状态（ui-state.json）序列化
 serde_json = "1"
 # GUI 框架：advanced/canvas 为自定义部件与几何绘制接口（自研编辑器部件依赖，
@@ -19,3 +21,12 @@ nanoid = "0.4"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp"] }
 # 自动保存防抖定时器与索引扫描线程池（一次性 sleep / spawn_blocking；执行体为 iced 的 tokio runtime）
 tokio = { version = "1", default-features = false, features = ["time", "rt"] }
+
+# 开机自启（autostart）：Windows 注册表 Run 键；应用内更新（update）：ShellExecuteW 拉起安装器
+[target.'cfg(target_os = "windows")'.dependencies]
+winreg = "0.55"
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+
+# 开机自启（autostart）：Linux XDG autostart 目录定位
+[target.'cfg(target_os = "linux")'.dependencies]
+dirs = "6"

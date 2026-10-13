@@ -20,6 +20,8 @@ pub enum Variant {
     AccentSoft,
     /// 透明底 + hover 出三级底（工具条「+」等触发钮）。
     SubtleBg,
+    /// 危险动作（回滚确认 / 批量重建等）：红调文字，hover 出红色淡底。
+    Danger,
 }
 
 /// 文字按钮尺寸档（高度 / 水平内边距 / 字号 / 圆角）。
@@ -31,7 +33,9 @@ pub struct TextSize {
 }
 
 /// `sm`（h-6）
-pub const BTN_SM: TextSize = TextSize { h: 24.0, pad_x: 8.0, font: pal::FS_MICRO, radius: pal::RADIUS_SM };
+pub fn btn_sm() -> TextSize {
+    TextSize { h: 24.0, pad_x: 8.0, font: pal::fs_micro(), radius: pal::RADIUS_SM }
+}
 
 /// 图标按钮边长档（与文字按钮高度同档）。
 pub const ICON_MD: f32 = 28.0;
@@ -69,6 +73,12 @@ fn variant_style(v: Variant) -> VariantStyle {
             bg_hover: pal::BG_TERTIARY,
             text: pal::TEXT_MUTED,
             text_hover: pal::TEXT_PRIMARY,
+        },
+        Variant::Danger => VariantStyle {
+            bg: Color::TRANSPARENT,
+            bg_hover: pal::DANGER.scale_alpha(0.14),
+            text: pal::DANGER,
+            text_hover: pal::DANGER,
         },
     }
 }
@@ -177,7 +187,7 @@ pub fn status_pill(status: PillStatus, label: impl Into<String>) -> Element<'sta
                 border: border::rounded(3.0),
                 ..Style::default()
             }),
-        text(label.into()).size(pal::FS_MICRO).color(color),
+        text(label.into()).size(pal::fs_micro()).color(color),
     ]
     .spacing(6)
     .into()
@@ -202,18 +212,18 @@ pub fn empty_state(
                 ..Style::default()
             }),
         text(title.into())
-            .size(pal::FS_BODY)
+            .size(pal::fs_body())
             .color(pal::TEXT_PRIMARY)
             .font(iced::Font { weight: iced::font::Weight::Medium, ..iced::Font::default() }),
         text(desc.into())
-            .size(pal::FS_UI)
+            .size(pal::fs_ui())
             .color(pal::TEXT_MUTED),
     ]
     .spacing(8)
     .align_x(iced::alignment::Horizontal::Center);
     if let Some((label, msg)) = action {
         col = col.push(
-            container(btn(label, &BTN_SM, Variant::Secondary, Some(msg)))
+            container(btn(label, &btn_sm(), Variant::Secondary, Some(msg)))
             .padding(Padding::ZERO.top(4.0)),
         );
     }
@@ -235,11 +245,11 @@ pub fn view_placeholder(
         column![
             icon_stroke(icon_name, 64.0, pal::TEXT_MUTED.scale_alpha(0.6), 1.5),
             text(title.into())
-                .size(pal::FS_H1)
+                .size(pal::fs_h1())
                 .color(pal::TEXT_PRIMARY)
                 .font(crate::ui::semibold()),
             text(desc.into())
-                .size(pal::FS_BODY)
+                .size(pal::fs_body())
                 .color(pal::TEXT_MUTED),
         ]
         .spacing(16)
@@ -285,7 +295,7 @@ pub fn inline_input(
 ) -> Element<'static, Message> {
     let input = text_input(placeholder, value)
         .id(id)
-        .size(pal::FS_CAPTION)
+        .size(pal::fs_caption())
         .padding(Padding::ZERO.horizontal(6.0).vertical(2.0))
         .width(Length::Fixed(width))
         .on_input(on_input)
@@ -301,6 +311,153 @@ pub fn inline_input(
             selection: pal::ACCENT.scale_alpha(0.35),
         });
     mouse_area(input).on_press(press_inside).into()
+}
+
+// ===== 开关 / 下拉触发 / 数字输入（设置表单基元） =====
+
+/// 开关（32×16 轨道 + 12px 滑块；开 = 强调底，关 = 内陷底）。
+/// `on_toggle` None = 禁用展示：轨道与滑块取弱化色，与可用态区分。
+pub fn toggle(on: bool, on_toggle: Option<Message>) -> Element<'static, Message> {
+    let enabled = on_toggle.is_some();
+    let knob = container(space())
+        .width(Length::Fixed(12.0))
+        .height(Length::Fixed(12.0))
+        .style(move |_t| Style {
+            background: Some(if on {
+                Color::WHITE
+            } else if enabled {
+                pal::TEXT_MUTED
+            } else {
+                pal::TEXT_MUTED.scale_alpha(0.5)
+            }
+            .into()),
+            border: border::rounded(6.0),
+            ..Style::default()
+        });
+    let track = container(knob)
+        .width(Length::Fixed(32.0))
+        .height(Length::Fixed(16.0))
+        .padding(Padding::ZERO.left(if on { 18.0 } else { 2.0 }).right(if on { 2.0 } else { 18.0 }))
+        .align_y(iced::alignment::Vertical::Center)
+        .style(move |_t| Style {
+            background: Some(if on {
+                if enabled { pal::ACCENT } else { pal::ACCENT.scale_alpha(0.4) }
+            } else {
+                pal::BG_SUNKEN
+            }
+            .into()),
+            border: border::rounded(8.0)
+                .color(if enabled { pal::BORDER } else { pal::BORDER.scale_alpha(0.5) })
+                .width(1.0),
+            ..Style::default()
+        });
+    let widget = button(track).padding(0.0).style(|_t, _s| button::Style {
+        ..Default::default()
+    });
+    match on_toggle {
+        Some(m) => widget.on_press(m),
+        None => widget,
+    }
+    .into()
+}
+
+/// 下拉触发钮（当前值 + 行尾 chevron；选项弹层由调用方经 popup 系统打开）。
+pub fn dropdown_trigger(label: &str, width: f32, on_open: Option<Message>) -> Element<'static, Message> {
+    let content = row![
+        text(label.to_string()).size(pal::fs_caption()).color(pal::TEXT_PRIMARY),
+        space().width(Length::Fill),
+        icon("chevron-down", 12.0, pal::TEXT_MUTED),
+    ]
+    .spacing(6);
+    let widget = button(
+        container(content)
+            .width(Length::Fill)
+            .padding(Padding::ZERO.horizontal(8.0))
+            .height(Length::Fixed(26.0))
+            .align_y(iced::alignment::Vertical::Center),
+    )
+    .width(Length::Fixed(width))
+    .padding(0.0)
+    .style(move |_t, _status| button::Style {
+        background: Some(pal::BG_SUNKEN.into()),
+        border: border::rounded(pal::RADIUS_SM).color(pal::BORDER).width(1.0),
+        ..Default::default()
+    });
+    match on_open {
+        Some(m) => widget.on_press(m),
+        None => widget,
+    }
+    .into()
+}
+
+/// 表单输入（设置页表单项；Enter 提交，输入过滤语义由调用方承担）。
+pub fn form_input(
+    placeholder: &str,
+    value: &str,
+    width: f32,
+    on_input: impl Fn(String) -> Message + 'static,
+    on_submit: Message,
+) -> Element<'static, Message> {
+    styled_input(placeholder, value, width, Some(on_input), Some(on_submit), false)
+}
+
+/// 只读展示输入（无输入/提交处理：值由服务端管理等场景）。
+pub fn form_input_static(placeholder: &str, value: &str, width: f32) -> Element<'static, Message> {
+    styled_input(placeholder, value, width, None::<fn(String) -> Message>, None, false)
+}
+
+/// 密文输入（API key 等敏感值：掩码显示，其余同 form_input）。
+pub fn secret_input(
+    placeholder: &str,
+    value: &str,
+    width: f32,
+    on_input: impl Fn(String) -> Message + 'static,
+    on_submit: Message,
+) -> Element<'static, Message> {
+    styled_input(placeholder, value, width, Some(on_input), Some(on_submit), true)
+}
+
+/// form_input / secret_input 共用的样式构建（处理器缺省 = 不可编辑）。
+fn styled_input(
+    placeholder: &str,
+    value: &str,
+    width: f32,
+    on_input: Option<impl Fn(String) -> Message + 'static>,
+    on_submit: Option<Message>,
+    secure: bool,
+) -> Element<'static, Message> {
+    let mut input = text_input(placeholder, value)
+        .size(pal::fs_caption())
+        .padding(Padding::ZERO.horizontal(8.0))
+        .width(Length::Fixed(width))
+        .secure(secure)
+        .style(|_theme, status| text_input::Style {
+            background: pal::BG_SUNKEN.into(),
+            border: border::rounded(pal::RADIUS_SM)
+                .color(if matches!(status, text_input::Status::Focused { .. }) { pal::ACCENT } else { pal::BORDER })
+                .width(1.0),
+            icon: pal::TEXT_MUTED,
+            placeholder: pal::INPUT_PLACEHOLDER,
+            value: pal::TEXT_PRIMARY,
+            selection: pal::ACCENT.scale_alpha(0.35),
+        });
+    if let Some(f) = on_input {
+        input = input.on_input(f);
+    }
+    if let Some(m) = on_submit {
+        input = input.on_submit(m);
+    }
+    input.into()
+}
+
+/// 数字输入（数字过滤与草稿提交语义由调用方承担；Enter 提交）。
+pub fn number_input(
+    value: &str,
+    width: f32,
+    on_input: impl Fn(String) -> Message + 'static,
+    on_submit: Message,
+) -> Element<'static, Message> {
+    form_input("", value, width, on_input, on_submit)
 }
 
 // ===== 窗口控制按钮（canvas 自绘：背景悬停态与图标悬停变色需同源判定） =====

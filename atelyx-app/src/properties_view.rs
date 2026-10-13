@@ -136,12 +136,12 @@ pub fn props_panel<'a>(
         Some((_data, false)) => row![
             icon("triangle-alert", 13.0, pal::DANGER),
             text("YAML 格式错误，属性面板暂不可编辑")
-                .size(pal::FS_CAPTION)
+                .size(pal::fs_caption())
                 .color(pal::TEXT_SECONDARY),
             space(),
             controls::btn(
                 "打开源码模式",
-                &BTN_TINY,
+                &btn_tiny(),
                 controls::Variant::Secondary,
                 Some(Message::Props(PropsMsg::OpenSourceMode)),
             ),
@@ -176,7 +176,7 @@ fn props_column<'a>(
                 row![
                     icon(chevron, 12.0, pal::TEXT_MUTED),
                     text(format!("笔记属性 ({})", pairs.len()))
-                        .size(pal::FS_CAPTION)
+                        .size(pal::fs_caption())
                         .color(pal::TEXT_SECONDARY),
                 ]
                 .spacing(6),
@@ -200,8 +200,9 @@ fn plain_btn() -> button::Style {
     button::Style { background: None, ..button::Style::default() }
 }
 
-const BTN_TINY: controls::TextSize =
-    controls::TextSize { h: 18.0, pad_x: 6.0, font: pal::FS_MICRO, radius: pal::RADIUS_XS };
+fn btn_tiny() -> controls::TextSize {
+    controls::TextSize { h: 18.0, pad_x: 6.0, font: pal::fs_micro(), radius: pal::RADIUS_XS }
+}
 
 /// 单个属性行：类型图标（点击弹类型菜单）+ 键名 + 值区 + 删除。
 fn prop_row<'a>(
@@ -232,7 +233,7 @@ fn prop_row<'a>(
         slot_input(app, "键名", PropsMsg::CommitMove(1)).into()
     } else {
         button(
-            container(text(key.to_string()).size(pal::FS_CAPTION).color(pal::TEXT_MUTED))
+            container(text(key.to_string()).size(pal::fs_caption()).color(pal::TEXT_MUTED))
                 .width(Length::Fill)
                 .align_y(iced::alignment::Vertical::Center),
         )
@@ -277,7 +278,7 @@ fn value_display<'a>(value: &'a Yaml, ptype: PropType, index: usize) -> Element<
     match value {
         Yaml::Bool(b) => controls::btn(
             if *b { "true" } else { "false" },
-            &BTN_TINY,
+            &btn_tiny(),
             controls::Variant::Secondary,
             Some(Message::Props(PropsMsg::ToggleBool(index))),
         )
@@ -288,7 +289,7 @@ fn value_display<'a>(value: &'a Yaml, ptype: PropType, index: usize) -> Element<
                 list = list.push(
                     row![
                         icon("clock", 11.0, pal::TEXT_MUTED),
-                        button(text(item_text(item)).size(pal::FS_CAPTION).color(pal::TEXT_PRIMARY))
+                        button(text(item_text(item)).size(pal::fs_caption()).color(pal::TEXT_PRIMARY))
                             .padding(Padding::ZERO.horizontal(4.0).vertical(1.0))
                             .style(|_t, _s| plain_btn())
                             .on_press(Message::Props(PropsMsg::StartEdit(Slot::Item(index, j)))),
@@ -297,7 +298,7 @@ fn value_display<'a>(value: &'a Yaml, ptype: PropType, index: usize) -> Element<
                 );
             }
             list = list.push(
-                button(text("添加").size(pal::FS_MICRO).color(pal::TEXT_MUTED))
+                button(text("添加").size(pal::fs_micro()).color(pal::TEXT_MUTED))
                     .padding(Padding::ZERO.horizontal(4.0).vertical(1.0))
                     .style(|_t, _s| plain_btn())
                     .on_press(Message::Props(PropsMsg::AddItem(index))),
@@ -309,7 +310,7 @@ fn value_display<'a>(value: &'a Yaml, ptype: PropType, index: usize) -> Element<
             for (j, item) in items.iter().enumerate() {
                 flow = flow.push(
                     button(
-                        container(text(format!("#{}", item_text(item))).size(pal::FS_MICRO).color(pal::ACCENT))
+                        container(text(format!("#{}", item_text(item))).size(pal::fs_micro()).color(pal::ACCENT))
                             .padding(Padding::ZERO.horizontal(6.0).vertical(2.0)),
                     )
                     .padding(0.0)
@@ -343,7 +344,7 @@ fn value_display<'a>(value: &'a Yaml, ptype: PropType, index: usize) -> Element<
             button(
                 container(
                     text(shown)
-                        .size(pal::FS_CAPTION)
+                        .size(pal::fs_caption())
                         .color(if s.is_empty() { pal::TEXT_MUTED } else { pal::TEXT_PRIMARY }),
                 )
                 .width(Length::Fill)
@@ -355,7 +356,7 @@ fn value_display<'a>(value: &'a Yaml, ptype: PropType, index: usize) -> Element<
             .on_press(Message::Props(PropsMsg::StartEdit(Slot::Value(index))))
             .into()
         }
-        other => text(item_text(other)).size(pal::FS_CAPTION).color(pal::TEXT_SECONDARY).into(),
+        other => text(item_text(other)).size(pal::fs_caption()).color(pal::TEXT_SECONDARY).into(),
     }
 }
 
@@ -365,7 +366,7 @@ fn add_area<'a>(app: &'a App) -> Element<'a, Message> {
         return button(
             row![
                 icon("plus", 11.0, pal::TEXT_MUTED),
-                text("添加属性").size(pal::FS_MICRO).color(pal::TEXT_MUTED),
+                text("添加属性").size(pal::fs_micro()).color(pal::TEXT_MUTED),
             ]
             .spacing(4),
         )
@@ -380,7 +381,7 @@ fn add_area<'a>(app: &'a App) -> Element<'a, Message> {
             col = col.push(slot_input(app, "属性名", PropsMsg::AddCommit));
             for name in key_suggestions(app, &app.props.draft) {
                 col = col.push(
-                    button(text(name.to_string()).size(pal::FS_MICRO).color(pal::TEXT_SECONDARY))
+                    button(text(name.to_string()).size(pal::fs_micro()).color(pal::TEXT_SECONDARY))
                         .width(Length::Fill)
                         .padding(Padding::ZERO.horizontal(6.0).vertical(2.0))
                         .style(|_t, status| button::Style {
@@ -395,7 +396,7 @@ fn add_area<'a>(app: &'a App) -> Element<'a, Message> {
         AddStep::Value => {
             col = col.push(
                 row![
-                    container(text(format!("#{}", form.key)).size(pal::FS_MICRO).color(pal::ACCENT))
+                    container(text(format!("#{}", form.key)).size(pal::fs_micro()).color(pal::ACCENT))
                         .padding(Padding::ZERO.horizontal(6.0).vertical(2.0))
                         .style(|_t| iced::widget::container::Style {
                             background: Some(pal::ACCENT_SOFT.into()),
@@ -413,7 +414,7 @@ fn add_area<'a>(app: &'a App) -> Element<'a, Message> {
                         button(
                             row![
                                 icon("tag", 11.0, pal::TEXT_MUTED),
-                                text(format!("#{tag}")).size(pal::FS_MICRO).color(pal::TEXT_SECONDARY),
+                                text(format!("#{tag}")).size(pal::fs_micro()).color(pal::TEXT_SECONDARY),
                             ]
                             .spacing(4),
                         )
@@ -431,7 +432,7 @@ fn add_area<'a>(app: &'a App) -> Element<'a, Message> {
         }
     }
     if let Some(dup) = &app.props.duplicate {
-        col = col.push(text(dup.clone()).size(pal::FS_MICRO).color(pal::DANGER));
+        col = col.push(text(dup.clone()).size(pal::fs_micro()).color(pal::DANGER));
     }
     col.into()
 }
@@ -480,7 +481,7 @@ fn tag_suggestions(app: &App, query: &str) -> Vec<String> {
 /// 槽位输入框（透明底、聚焦描边；输入统一写 draft，Enter 提交动机由调用方给定）。
 fn slot_input<'a>(app: &'a App, placeholder: &str, submit: PropsMsg) -> text_input::TextInput<'a, Message> {
     text_input(placeholder, &app.props.draft)
-        .size(pal::FS_CAPTION)
+        .size(pal::fs_caption())
         .padding(Padding::ZERO.horizontal(4.0).vertical(2.0))
         .width(Length::Fill)
         .id(app.props.focus_id.clone())

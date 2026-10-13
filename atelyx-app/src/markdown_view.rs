@@ -19,11 +19,15 @@ use crate::Message;
 /// 已载入的图片句柄（key = 图片 src 原文；载入与缓存管理在应用层，渲染只读）。
 pub type ImageHandles = HashMap<String, iced::widget::image::Handle>;
 
-/// 正文基准字号与行高倍数（空行行的间距按此折算；编辑面空行预编辑同源）。
-pub(crate) const BASE_SIZE: f32 = 14.0;
+/// 正文基准字号（随界面基准字号缩放）与行高倍数（空行行的间距按此折算；编辑面空行预编辑同源）。
+pub(crate) fn base_size() -> f32 {
+    crate::ui::palette::fs_body()
+}
 pub(crate) const LINE_HEIGHT: f32 = 1.625;
 /// 代码字号与代码块最多展示行数（超出转块内纵向滚动）。
-const MONO_SIZE: f32 = 12.0;
+fn mono_size() -> f32 {
+    crate::ui::palette::fs_caption()
+}
 const CODE_MAX_LINES: usize = 18;
 /// 列表标记悬挂列宽（内容与标记分列，嵌套列表随之逐层缩进）。
 const LIST_MARKER_W: f32 = 20.0;
@@ -58,14 +62,18 @@ pub enum SourceKind {
 
 /// 块渲染共享入口：`interactive` 为真时链接可点、任务框可勾（编辑档）。
 /// `images` = 已载入的图片句柄（独立成段的图片按块渲染；其余占位）。
+/// `soft_break` = 宽松换行（段内单个换行渲染为换行；false 按 Markdown 标准渲染为空格；
+/// 编辑档恒 true——富渲染须与源文本同形，换行折叠会破坏落点换算）。
 pub fn block_chunks<'a>(
     source: &'a str,
     blocks: &'a [MarkdownBlock],
     theme: &iced::Theme,
     interactive: bool,
     images: &'a ImageHandles,
+    soft_break: bool,
 ) -> Vec<BlockChunk<'a>> {
-    let render = Render { pal: Palette::from_theme(theme), opts: link_options(), interactive, images };
+    let render =
+        Render { pal: Palette::from_theme(theme), opts: link_options(), interactive, images, soft_break };
     render.chunks(source, blocks)
 }
 
@@ -75,9 +83,10 @@ pub fn document_view<'a>(
     doc: &'a MarkdownDocument,
     theme: &iced::Theme,
     images: &'a ImageHandles,
+    soft_break: bool,
 ) -> Element<'a, Message> {
     let mut body = column![].width(Length::Fill).spacing(0);
-    for chunk in block_chunks(&doc.source, &doc.blocks, theme, false, images) {
+    for chunk in block_chunks(&doc.source, &doc.blocks, theme, false, images, soft_break) {
         if chunk.gap_before > 0 {
             body = body.push(gap(chunk.gap_before));
         }
@@ -145,7 +154,7 @@ pub fn empty_block_meta() -> BlockMeta {
         to: 0,
         list: false,
         exact: true,
-        source: SourceKind::Prose { size: BASE_SIZE, line_height: LINE_HEIGHT },
+        source: SourceKind::Prose { size: base_size(), line_height: LINE_HEIGHT },
     }
 }
 
@@ -220,7 +229,7 @@ impl TextStyle {
 
 /// 标题字号：按层级逐级放大。
 fn heading_size(level: u8) -> f32 {
-    BASE_SIZE
+    base_size()
         * match level {
             1 => 1.5,
             2 => 1.35,
@@ -240,17 +249,17 @@ fn block_source_style(block: &MarkdownBlock) -> SourceKind {
         MarkdownBlock::Paragraph { .. }
         | MarkdownBlock::List { .. }
         | MarkdownBlock::Blockquote { .. } => {
-            SourceKind::Prose { size: BASE_SIZE, line_height: LINE_HEIGHT }
+            SourceKind::Prose { size: base_size(), line_height: LINE_HEIGHT }
         }
         MarkdownBlock::FootnoteDef { .. } => {
-            SourceKind::Prose { size: BASE_SIZE * 0.9, line_height: LINE_HEIGHT }
+            SourceKind::Prose { size: base_size() * 0.9, line_height: LINE_HEIGHT }
         }
         MarkdownBlock::FencedCode { .. }
         | MarkdownBlock::IndentedCode { .. }
         | MarkdownBlock::Table { .. }
         | MarkdownBlock::HtmlBlock { .. }
         | MarkdownBlock::MathBlock { .. }
-        | MarkdownBlock::Hr { .. } => SourceKind::Mono { size: MONO_SIZE },
+        | MarkdownBlock::Hr { .. } => SourceKind::Mono { size: mono_size() },
     }
 }
 
@@ -260,6 +269,8 @@ struct Render<'a> {
     /// 链接可点、任务框可勾（编辑档）；只读档为假。
     interactive: bool,
     images: &'a ImageHandles,
+    /// 宽松换行（false = 段内单个换行渲染为空格；编辑档恒 true，见 block_chunks）。
+    soft_break: bool,
 }
 
 impl Render<'_> {
@@ -314,7 +325,7 @@ impl Render<'_> {
                 } else {
                     rich(
                         self.spans(source, inline, TextStyle::base()),
-                        BASE_SIZE,
+                        base_size(),
                         LINE_HEIGHT,
                         None,
                         iced::alignment::Horizontal::Left,
@@ -423,7 +434,7 @@ impl Render<'_> {
         } else if !spans.is_empty() {
             body = body.push(rich(
                 self.spans(&content, &spans, TextStyle::base()),
-                BASE_SIZE,
+                base_size(),
                 LINE_HEIGHT,
                 None,
                 iced::alignment::Horizontal::Left,
@@ -445,7 +456,7 @@ impl Render<'_> {
                 .into()
         } else {
             let label = if ordered { ordinal } else { "•".to_string() };
-            container(text(label).size(BASE_SIZE).color(self.pal.muted))
+            container(text(label).size(base_size()).color(self.pal.muted))
                 .width(Length::Fixed(LIST_MARKER_W))
                 .into()
         };
@@ -478,9 +489,9 @@ impl Render<'_> {
         });
 
         let lines = code.trim_end_matches('\n').lines().count().max(1);
-        let height = lines.min(CODE_MAX_LINES) as f32 * MONO_SIZE * 1.4 + 16.0;
+        let height = lines.min(CODE_MAX_LINES) as f32 * mono_size() * 1.4 + 16.0;
         let body = scrollable(
-            container(text(code.to_string()).size(MONO_SIZE).font(Font::MONOSPACE).wrapping(Wrapping::None))
+            container(text(code.to_string()).size(mono_size()).font(Font::MONOSPACE).wrapping(Wrapping::None))
                 .padding(8.0),
         )
         .direction(scrollable::Direction::Both {
@@ -520,7 +531,13 @@ impl Render<'_> {
             let head = self.cell(source, header.get(i), aligns.get(i), true);
             // 单元格生成器随行闭包独立持有调色板与解析选项，不借用 self
             let images = self.images;
-            let cells = Render { pal, opts: link_options(), interactive: self.interactive, images };
+            let cells = Render {
+                pal,
+                opts: link_options(),
+                interactive: self.interactive,
+                images,
+                soft_break: self.soft_break,
+            };
             table::column(head, move |row: usize| {
                 let cell = rows.get(row).and_then(|r| r.get(i));
                 cells.cell(source, cell, aligns.get(i), false)
@@ -560,7 +577,7 @@ impl Render<'_> {
         };
         container(rich(
             self.spans(source, &spans, TextStyle::base()),
-            BASE_SIZE,
+            base_size(),
             LINE_HEIGHT,
             None,
             alignment,
@@ -580,7 +597,7 @@ impl Render<'_> {
         let panel = self.pal.panel;
         let border = self.pal.border;
         container(
-            text(content).size(MONO_SIZE).font(Font::MONOSPACE).color(self.pal.muted),
+            text(content).size(mono_size()).font(Font::MONOSPACE).color(self.pal.muted),
         )
         .width(Length::Fill)
         .padding(8.0)
@@ -627,7 +644,7 @@ impl Render<'_> {
             });
         let content = container(rich(
             spans,
-            BASE_SIZE * 0.9,
+            base_size() * 0.9,
             LINE_HEIGHT,
             Some(self.pal.muted),
             iced::alignment::Horizontal::Left,
@@ -659,7 +676,15 @@ impl Render<'_> {
         out: &mut Vec<Span<'a, LinkTarget, Font>>,
     ) {
         match span {
-            InlineSpan::Text { text, .. } => out.push(self.leaf(text.clone(), st)),
+            InlineSpan::Text { text, .. } => {
+                // 宽松换行折叠：CRLF 先归一为 LF，孤 \r 同样按换行折叠为空格
+                let text = if self.soft_break {
+                    text.clone()
+                } else {
+                    text.replace("\r\n", "\n").replace('\r', " ").replace('\n', " ")
+                };
+                out.push(self.leaf(text, st));
+            }
             InlineSpan::Strong { children, .. } => {
                 let inner = TextStyle { font: Font { weight: iced::font::Weight::Bold, ..st.font }, ..st };
                 for c in children {
@@ -733,7 +758,7 @@ impl Render<'_> {
             }
             InlineSpan::FootnoteRef { label, .. } => {
                 let inner = TextStyle { color: Some(self.pal.accent), ..st };
-                out.push(self.leaf(format!("[{label}]"), inner).size(BASE_SIZE * 0.85));
+                out.push(self.leaf(format!("[{label}]"), inner).size(base_size() * 0.85));
             }
             InlineSpan::Mention { key: _, label, trigger, .. } => {
                 let inner = TextStyle {
@@ -792,7 +817,7 @@ impl Render<'_> {
                 let muted = self.pal.muted;
                 container(
                     text(format!("[图片：{name}]"))
-                        .size(BASE_SIZE)
+                        .size(base_size())
                         .font(Font { style: iced::font::Style::Italic, ..Font::DEFAULT })
                         .color(muted),
                 )
@@ -919,7 +944,7 @@ pub fn gap<'a>(lines: usize) -> Element<'a, Message> {
 }
 
 fn gap_height() -> f32 {
-    BASE_SIZE * LINE_HEIGHT
+    base_size() * LINE_HEIGHT
 }
 
 /// 区间内的完整空行数（首尾两个片段不算完整行）：行内只有空白或引用标记 `>` 才算空行。

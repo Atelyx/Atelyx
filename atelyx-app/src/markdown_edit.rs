@@ -22,6 +22,7 @@ use iced::{Color, Element, Font, Length, Padding, Point, Rectangle, Size, Theme,
 
 use std::time::{Duration, Instant};
 
+use crate::commands::{self, NoteBindings};
 use crate::layout_view::parse_hex_color;
 use crate::markdown_view::SourceKind;
 use crate::ui::palette as pal;
@@ -680,6 +681,8 @@ pub struct SourceBlock<'a> {
     pub cursors: &'a [crate::RemoteCursorView],
     /// 正文在 note_text 中的起点（远端偏移 → 编辑面坐标换算基准）。
     pub body_start: usize,
+    /// 撤销/重做键位（设置覆盖解析结果，每帧由壳传入）。
+    pub bindings: NoteBindings,
 }
 
 /// 源码态排版口径：字号与行高倍数。
@@ -898,7 +901,7 @@ impl Widget<Message, Theme, iced::Renderer> for SourceBlock<'_> {
                         }
                     }
                 }
-                if let Some(action) = key_action(key, *modifiers, text.as_deref()) {
+                if let Some(action) = key_action(key, *modifiers, text.as_deref(), &self.bindings) {
                     self.apply_key(action, state, shell);
                 }
             }
@@ -983,7 +986,7 @@ impl SourceBlock<'_> {
                 advanced_text::Text {
                     content: cursor.name.clone(),
                     bounds: Size::new(f32::INFINITY, f32::INFINITY),
-                    size: pal::FS_MICRO.into(),
+                    size: pal::fs_micro().into(),
                     line_height: advanced_text::LineHeight::Relative(1.0),
                     font: semibold(),
                     align_x: advanced_text::Alignment::Left,
@@ -991,7 +994,7 @@ impl SourceBlock<'_> {
                     shaping: advanced_text::Shaping::Auto,
                     wrapping: advanced_text::Wrapping::None,
                 },
-                origin + Vector::new(x, (y - pal::FS_MICRO - REMOTE_LABEL_GAP).max(0.0)),
+                origin + Vector::new(x, (y - pal::fs_micro() - REMOTE_LABEL_GAP).max(0.0)),
                 color,
                 bounds,
             );
@@ -1137,19 +1140,32 @@ fn handle_ime_event(ime: &ImeEvent, shell: &mut Shell<'_, Message>) {
     }
 }
 
-/// 按键映射（组合期由输入法消化，不进入本函数）。
-fn key_action(key: &Key, modifiers: keyboard::Modifiers, text: Option<&str>) -> Option<KeyAction> {
+/// 按键映射（组合期由输入法消化，不进入本函数）。撤销/重做查注入绑定表
+/// （键位可重映射，修饰集合精确匹配）；命中即消费，未命中维持原事件。
+fn key_action(
+    key: &Key,
+    modifiers: keyboard::Modifiers,
+    text: Option<&str>,
+    bindings: &NoteBindings,
+) -> Option<KeyAction> {
     let extend = modifiers.shift();
-    if modifiers.control() {
+    if modifiers.control() || modifiers.logo() {
+        if commands::matches(&bindings.undo, modifiers, key) {
+            return Some(KeyAction::Event(EditorEvent::Undo));
+        }
+        if commands::matches(&bindings.redo, modifiers, key) {
+            return Some(KeyAction::Event(EditorEvent::Redo));
+        }
+        // 重做别名：redo 未被重定义时 mod+shift+z 沿用（既有习惯键位）
+        if bindings.redo_alias && modifiers.shift() && commands::key_text(key) == "z" {
+            return Some(KeyAction::Event(EditorEvent::Redo));
+        }
         let ch = match key {
             Key::Character(c) => c.to_lowercase(),
             _ => return None,
         };
         return match ch.as_str() {
             "a" => Some(KeyAction::Event(EditorEvent::SelectAll)),
-            "z" if modifiers.shift() => Some(KeyAction::Event(EditorEvent::Redo)),
-            "z" => Some(KeyAction::Event(EditorEvent::Undo)),
-            "y" => Some(KeyAction::Event(EditorEvent::Redo)),
             _ => None,
         };
     }
@@ -1369,6 +1385,8 @@ pub struct EditSurface<'a> {
     anchor: usize,
     preedit: Option<String>,
     focused: bool,
+    /// 撤销/重做键位（空行光标路径的按键匹配源）。
+    bindings: NoteBindings,
 }
 
 /// 编辑面容器的持久状态（跨帧存活：拖选在途）。
@@ -1398,8 +1416,9 @@ impl<'a> EditSurface<'a> {
         anchor: usize,
         preedit: Option<String>,
         focused: bool,
+        bindings: NoteBindings,
     ) -> Self {
-        Self { rows, pal, text, caret, anchor, preedit, focused }
+        Self { rows, pal, text, caret, anchor, preedit, focused, bindings }
     }
 
     /// 命中行：返回 (行号, 行内局部坐标, 行宽, 行高)；行间无空隙，仅区分上下越界。
@@ -1630,7 +1649,7 @@ impl Widget<Message, Theme, iced::Renderer> for EditSurface<'_> {
                             advanced_text::Text {
                                 content: pre.to_string(),
                                 bounds: Size::new(f32::INFINITY, line_h),
-                                size: crate::markdown_view::BASE_SIZE.into(),
+                                size: crate::markdown_view::base_size().into(),
                                 line_height: advanced_text::LineHeight::Relative(
                                     crate::markdown_view::LINE_HEIGHT,
                                 ),
@@ -1733,7 +1752,7 @@ impl Widget<Message, Theme, iced::Renderer> for EditSurface<'_> {
                         }
                     }
                 }
-                if let Some(action) = key_action(key, *modifiers, text.as_deref()) {
+                if let Some(action) = key_action(key, *modifiers, text.as_deref(), &self.bindings) {
                     self.apply_key(action, shell);
                 }
             }

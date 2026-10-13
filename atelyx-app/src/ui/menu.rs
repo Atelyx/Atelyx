@@ -128,7 +128,7 @@ pub fn pane_view<'a>(
                 (item(&label, ic, danger, disabled, on_press, note, hint, window), pal::MENU_ITEM_H)
             }
             MenuEntry::Group(name) => (
-                container(text(name).size(pal::FS_MICRO).color(pal::TEXT_MUTED))
+                container(text(name).size(pal::fs_micro()).color(pal::TEXT_MUTED))
                     .padding(Padding::ZERO.left(12.0).top(6.0).bottom(2.0))
                     .width(Length::Fill)
                     .into(),
@@ -180,10 +180,10 @@ fn item(
     if let Some(name) = icon_name {
         row = row.push(icon(name, 13.0, text_color));
     }
-    row = row.push(text(label.to_string()).size(pal::FS_CAPTION).color(text_color));
+    row = row.push(text(label.to_string()).size(pal::fs_caption()).color(text_color));
     if let Some(note) = note {
         row = row.push(space().width(Length::Fill));
-        row = row.push(text(note.to_string()).size(pal::FS_MICRO).color(text_color));
+        row = row.push(text(note.to_string()).size(pal::fs_micro()).color(text_color));
     }
     item_button(container(row), hover_bg, disabled, on_press, hint, window)
 }
@@ -195,7 +195,7 @@ fn checked_item(
     window: iced::window::Id,
 ) -> Element<'static, Message> {
     let mut row = row![].spacing(6).width(Length::Fill);
-    row = row.push(text(label.to_string()).size(pal::FS_CAPTION).color(pal::ACCENT));
+    row = row.push(text(label.to_string()).size(pal::fs_caption()).color(pal::ACCENT));
     row = row.push(space().width(Length::Fill));
     row = row.push(icon("check", 13.0, pal::ACCENT));
     item_button(container(row), pal::HOVER, false, Some(on_press), None, window)
@@ -213,7 +213,7 @@ fn submenu_item(
     if let Some(name) = icon_name {
         row = row.push(icon(name, 13.0, text_color));
     }
-    row = row.push(text(label.to_string()).size(pal::FS_CAPTION).color(text_color));
+    row = row.push(text(label.to_string()).size(pal::fs_caption()).color(text_color));
     if disabled {
         item_button(container(row), pal::HOVER, true, None, None, window)
     } else {
@@ -231,7 +231,7 @@ fn submenu_item(
 fn back_item(window: iced::window::Id) -> Element<'static, Message> {
     let row = row![
         icon("chevron-left", 13.0, pal::TEXT_PRIMARY),
-        text("返回").size(pal::FS_CAPTION).color(pal::TEXT_PRIMARY),
+        text("返回").size(pal::fs_caption()).color(pal::TEXT_PRIMARY),
     ]
     .spacing(6)
     .width(Length::Fill);
