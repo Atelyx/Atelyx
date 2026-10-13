@@ -1,9 +1,9 @@
-//! 仓库历史视图：全库版本流按文件分组展示（只读元数据聚合），
-//! 行点击打开该文件的历史弹层；本地扫侧文件元数据，空间走服务端聚合端点。
+//! 仓库历史视图：文件组卡片列表（只读元数据聚合），组头点击打开该文件的历史弹层；
+//! 本地扫侧文件元数据，空间走服务端聚合端点。
 
-use iced::widget::{button, container, row, scrollable, space, text};
-use iced::widget::container::Style;
-use iced::{border, Element, Length, Padding, Task};
+use iced::alignment::Vertical;
+use iced::widget::{button, column, container, row, scrollable, space, text};
+use iced::{Element, Length, Padding, Task};
 
 use atelyx_core::history::HistoryKind;
 use atelyx_core::space_client::HistoryAggregate;
@@ -13,7 +13,7 @@ use crate::ui::controls;
 use crate::ui::icon::icon;
 use crate::ui::notify::Level as NoticeLevel;
 use crate::ui::palette as pal;
-use crate::{App, Message, RepoKind, layout_view, recent_view};
+use crate::{App, Message, RepoKind, layout_view};
 
 /// 组内版本行（只读元数据；本地侧文件聚合与服务端聚合的共同投影）。
 #[derive(Debug, Clone)]
@@ -31,11 +31,6 @@ pub struct RepoHistoryGroup {
     pub file: String,
     pub versions: Vec<RepoVersionRow>,
 }
-
-/// 默认展开的分组数（其余默认折叠；展开/折叠记忆为覆盖表）。
-const DEFAULT_OPEN_GROUPS: usize = 15;
-/// 组内展示的版本行上限（超出显示「还有 N 版」，完整列表进历史弹层）。
-const GROUP_ROW_CAP: usize = 20;
 
 /// 本地侧文件聚合 → 分组（collect_all 版本为旧→新，展示前按时间新→旧重排；空侧文件丢弃）。
 pub fn groups_from_local(files: Vec<atelyx_core::history::RepoHistoryFile>) -> Vec<RepoHistoryGroup> {
@@ -189,21 +184,10 @@ pub fn on_loaded(app: &mut App, gen: u64, result: Result<Vec<RepoHistoryGroup>, 
     Task::none()
 }
 
-/// 切换分组折叠：覆盖表记录与当前生效态相反的显式态（缺省 = 组序前 15 组展开）。
-pub fn toggle_fold(app: &mut App, file: &str) {
-    let groups = match &app.repo_history {
-        Some(Ok(groups)) => groups,
-        _ => return,
-    };
-    let default_open = groups.iter().position(|g| g.file == file).is_some_and(|i| i < DEFAULT_OPEN_GROUPS);
-    let open = app.repo_history_fold.get(file).copied().unwrap_or(default_open);
-    app.repo_history_fold.insert(file.to_string(), !open);
-}
-
-/// 仓库历史视图：分组折叠列表 + 版本行（相对时间 / 动作 / 作者 / 摘要）。
+/// 仓库历史视图：文件组卡片列表 + 组头（图标 + 文件名 + 全路径 + 版本数徽标）。
 pub fn repohistory_view(app: &App, window: iced::window::Id) -> Element<'_, Message> {
     if !container_ready(app) {
-        return controls::empty_state("history", "未打开仓库", "进入仓库后显示全库历史。", None);
+        return controls::empty_state("history", "未打开仓库", "打开仓库后显示", None);
     }
     let header = container(
         row![
@@ -221,11 +205,19 @@ pub fn repohistory_view(app: &App, window: iced::window::Id) -> Element<'_, Mess
     )
     .padding(Padding::ZERO.horizontal(12.0).vertical(8.0));
     let body: Element<'_, Message> = match &app.repo_history {
-        Some(Err(e)) => text(format!("加载失败：{e}")).size(pal::fs_caption()).color(pal::TEXT_MUTED).into(),
-        Some(Ok(groups)) if groups.is_empty() => {
-            text("暂无历史记录").size(pal::fs_caption()).color(pal::TEXT_MUTED).into()
-        }
-        Some(Ok(groups)) => group_list(app, groups, window),
+        Some(Err(e)) => controls::empty_state(
+            "triangle-alert",
+            "历史聚合失败",
+            e.clone(),
+            Some(("重试".into(), Message::RepoHistoryRefresh)),
+        ),
+        Some(Ok(groups)) if groups.is_empty() => controls::empty_state(
+            "history",
+            "暂无历史记录",
+            "暂无版本记录",
+            None,
+        ),
+        Some(Ok(groups)) => group_list(groups, window),
         // None = 未加载或在途（发起即置 loading，此分支只持续到下个 tick）
         None => {
             text(if app.repo_history_loading { "加载中…" } else { "暂无历史记录" })
@@ -241,106 +233,61 @@ pub fn repohistory_view(app: &App, window: iced::window::Id) -> Element<'_, Mess
         .into()
 }
 
-/// 分组列表：组头（折叠箭头 + 图标 + 文件名 + 全路径灰字 + 版本数徽标）+ 展开组的版本行。
-fn group_list<'a>(app: &'a App, groups: &'a [RepoHistoryGroup], window: iced::window::Id) -> Element<'a, Message> {
+/// 文件组卡片列表：组卡片（图标 + 文件名 + 全路径 + 版本数徽标），点击打开该文件的历史弹层。
+fn group_list<'a>(groups: &'a [RepoHistoryGroup], window: iced::window::Id) -> Element<'a, Message> {
     let mut col = iced::widget::Column::<Message>::new()
-        .padding(Padding::ZERO.horizontal(12.0).vertical(2.0));
-    for (idx, g) in groups.iter().enumerate() {
-        let open = app.repo_history_fold.get(&g.file).copied().unwrap_or(idx < DEFAULT_OPEN_GROUPS);
-        col = col.push(group_header(g, open));
-        if open {
-            col = col.push(version_rows(g, window));
-        }
+        .padding(Padding::ZERO.horizontal(12.0).vertical(4.0))
+        .spacing(6);
+    for g in groups {
+        col = col.push(group_card(g, window));
     }
     container(col).width(Length::Fill).into()
 }
 
-fn group_header(g: &RepoHistoryGroup, open: bool) -> Element<'static, Message> {
+/// 组卡片：kind 图标 + 文件名 + 全路径灰字 + 版本数徽标；点击 = 历史弹层（组内完整版本列表在弹层内浏览）。
+fn group_card(g: &RepoHistoryGroup, window: iced::window::Id) -> Element<'static, Message> {
     let name = g.file.rsplit('/').next().unwrap_or(&g.file).to_string();
-    let count = g.versions.len().to_string();
-    let chevron = if open { "chevron-down" } else { "chevron-right" };
+    let count = format!("{} 版", g.versions.len());
     container(
         button(
             row![
-                icon(chevron, 12.0, pal::TEXT_MUTED),
-                icon(kind_icon(g.kind), 12.0, pal::TEXT_MUTED),
-                text(name).size(pal::fs_caption()).color(pal::TEXT_PRIMARY),
-                text(g.file.clone()).size(pal::fs_micro()).color(pal::TEXT_MUTED),
-                space().width(Length::Fill),
-                container(text(count).size(pal::fs_micro()).color(pal::TEXT_SECONDARY))
-                    .padding(Padding::ZERO.horizontal(5.0).vertical(1.0))
-                    .style(|_t| Style {
-                        background: Some(pal::BG_TERTIARY.into()),
-                        border: border::rounded(pal::RADIUS_XS),
-                        ..Style::default()
-                    }),
+                icon(kind_icon(g.kind), 14.0, pal::TEXT_MUTED),
+                column![
+                    row![
+                        text(name)
+                            .size(pal::fs_body())
+                            .color(pal::TEXT_PRIMARY)
+                            .font(iced::Font { weight: iced::font::Weight::Medium, ..iced::Font::default() }),
+                        space().width(Length::Fill),
+                        controls::badge(count, pal::BG_SUNKEN, pal::TEXT_SECONDARY),
+                    ]
+                    .spacing(8)
+                    .align_y(Vertical::Center),
+                    text(g.file.clone()).size(pal::fs_micro()).color(pal::TEXT_MUTED),
+                ]
+                .spacing(2)
+                .width(Length::Fill),
             ]
-            .spacing(6),
+            .spacing(10)
+            .align_y(Vertical::Center),
         )
         .width(Length::Fill)
-        .padding(Padding::ZERO.horizontal(8.0).vertical(5.0))
-        .style(|_t, status| button::Style {
-            background: matches!(status, button::Status::Hovered | button::Status::Pressed)
-                .then_some(pal::HOVER.into()),
-            ..button::Style::default()
-        })
-        .on_press(Message::RepoHistoryToggleFold(g.file.clone())),
+        .padding(0.0)
+        .style(controls::row_style(false, pal::RADIUS_MD))
+        .on_press(Message::History(crate::history_browser::HistoryBrowserMsg::Open {
+            window,
+            kind: g.kind,
+            file: g.file.clone(),
+        })),
     )
     .width(Length::Fill)
+    .padding(Padding::ZERO.horizontal(10.0).vertical(8.0))
+    .style(|_t| iced::widget::container::Style {
+        background: Some(pal::BG_TERTIARY.into()),
+        border: iced::border::rounded(pal::RADIUS_MD),
+        ..iced::widget::container::Style::default()
+    })
     .into()
-}
-
-/// 展开组的版本行（新→旧，上限 GROUP_ROW_CAP；行点击打开该文件的历史弹层）。
-fn version_rows(g: &RepoHistoryGroup, window: iced::window::Id) -> Element<'static, Message> {
-    let now = crate::now_secs() as i64;
-    let mut col = iced::widget::Column::<Message>::new();
-    for v in g.versions.iter().take(GROUP_ROW_CAP) {
-        let action = match v.action {
-            atelyx_core::history::HistoryAction::Edit => "编辑",
-            atelyx_core::history::HistoryAction::Restore => "回滚",
-        };
-        let time = recent_view::relative_ts(v.ts.div_euclid(1000), now);
-        let summary = v.summary.clone().unwrap_or_default();
-        col = col.push(
-            container(
-                button(
-                    row![
-                        text(time).size(pal::fs_micro()).color(pal::TEXT_MUTED),
-                        text(action).size(pal::fs_micro()).color(pal::TEXT_SECONDARY),
-                        text(v.author_name.clone()).size(pal::fs_micro()).color(pal::TEXT_MUTED),
-                        space().width(Length::Fill),
-                        text(summary).size(pal::fs_micro()).color(pal::TEXT_MUTED),
-                    ]
-                    .spacing(8),
-                )
-                .width(Length::Fill)
-                .padding(Padding::ZERO.horizontal(8.0).vertical(4.0))
-                .style(|_t, status| button::Style {
-                    background: matches!(status, button::Status::Hovered | button::Status::Pressed)
-                        .then_some(pal::HOVER.into()),
-                    ..button::Style::default()
-                })
-                .on_press(Message::History(crate::history_browser::HistoryBrowserMsg::Open {
-                    window,
-                    kind: g.kind,
-                    file: g.file.clone(),
-                })),
-            )
-            .width(Length::Fill)
-            .padding(Padding::ZERO.left(26.0)),
-        );
-    }
-    if g.versions.len() > GROUP_ROW_CAP {
-        col = col.push(
-            container(
-                text(format!("还有 {} 版", g.versions.len() - GROUP_ROW_CAP))
-                    .size(pal::fs_micro())
-                    .color(pal::TEXT_MUTED),
-            )
-            .padding(Padding::ZERO.left(34.0).top(2.0)),
-        );
-    }
-    col.into()
 }
 
 /// kind → 行首图标（仓库历史行与日历天详情行共用）。

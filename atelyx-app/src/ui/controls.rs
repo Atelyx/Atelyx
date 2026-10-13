@@ -1,4 +1,4 @@
-//! 基础控件：按钮 / 图标按钮 / 状态徽标 / 空态 / 分隔线 / 输入框。
+//! 基础控件：按钮 / 图标按钮 / 列表行 / 徽标 / 复选框 / 分段 tab / 空态 / 分隔线 / 输入框 / 进度条。
 //!
 //! 颜色与尺寸档取自 [`super::palette`]；
 //! hover/禁用反馈经 `button::Status` 在样式闭包内表达。
@@ -315,13 +315,21 @@ pub fn inline_input(
 
 // ===== 开关 / 下拉触发 / 数字输入（设置表单基元） =====
 
-/// 开关（32×16 轨道 + 12px 滑块；开 = 强调底，关 = 内陷底）。
+/// 开关几何：轨道 44×24 + 滑块 20，内边距 2。
+const TOGGLE_TRACK_W: f32 = 44.0;
+const TOGGLE_TRACK_H: f32 = 24.0;
+const TOGGLE_KNOB: f32 = 20.0;
+const TOGGLE_PAD: f32 = 2.0;
+/// 滑块位移（关态贴左、开态贴右）。
+const TOGGLE_SHIFT: f32 = TOGGLE_TRACK_W - TOGGLE_KNOB - TOGGLE_PAD;
+
+/// 开关（44×24 轨道 + 20px 滑块；开 = 强调底，关 = 内陷底）。
 /// `on_toggle` None = 禁用展示：轨道与滑块取弱化色，与可用态区分。
 pub fn toggle(on: bool, on_toggle: Option<Message>) -> Element<'static, Message> {
     let enabled = on_toggle.is_some();
     let knob = container(space())
-        .width(Length::Fixed(12.0))
-        .height(Length::Fixed(12.0))
+        .width(Length::Fixed(TOGGLE_KNOB))
+        .height(Length::Fixed(TOGGLE_KNOB))
         .style(move |_t| Style {
             background: Some(if on {
                 Color::WHITE
@@ -331,13 +339,13 @@ pub fn toggle(on: bool, on_toggle: Option<Message>) -> Element<'static, Message>
                 pal::TEXT_MUTED.scale_alpha(0.5)
             }
             .into()),
-            border: border::rounded(6.0),
+            border: border::rounded(TOGGLE_KNOB / 2.0),
             ..Style::default()
         });
     let track = container(knob)
-        .width(Length::Fixed(32.0))
-        .height(Length::Fixed(16.0))
-        .padding(Padding::ZERO.left(if on { 18.0 } else { 2.0 }).right(if on { 2.0 } else { 18.0 }))
+        .width(Length::Fixed(TOGGLE_TRACK_W))
+        .height(Length::Fixed(TOGGLE_TRACK_H))
+        .padding(Padding::ZERO.left(if on { TOGGLE_SHIFT } else { TOGGLE_PAD }).right(if on { TOGGLE_PAD } else { TOGGLE_SHIFT }))
         .align_y(iced::alignment::Vertical::Center)
         .style(move |_t| Style {
             background: Some(if on {
@@ -346,7 +354,7 @@ pub fn toggle(on: bool, on_toggle: Option<Message>) -> Element<'static, Message>
                 pal::BG_SUNKEN
             }
             .into()),
-            border: border::rounded(8.0)
+            border: border::rounded(TOGGLE_TRACK_H / 2.0)
                 .color(if enabled { pal::BORDER } else { pal::BORDER.scale_alpha(0.5) })
                 .width(1.0),
             ..Style::default()
@@ -362,6 +370,7 @@ pub fn toggle(on: bool, on_toggle: Option<Message>) -> Element<'static, Message>
 }
 
 /// 下拉触发钮（当前值 + 行尾 chevron；选项弹层由调用方经 popup 系统打开）。
+/// 高度与表单输入一致（内边距 6 + caption 行高）。
 pub fn dropdown_trigger(label: &str, width: f32, on_open: Option<Message>) -> Element<'static, Message> {
     let content = row![
         text(label.to_string()).size(pal::fs_caption()).color(pal::TEXT_PRIMARY),
@@ -373,7 +382,7 @@ pub fn dropdown_trigger(label: &str, width: f32, on_open: Option<Message>) -> El
         container(content)
             .width(Length::Fill)
             .padding(Padding::ZERO.horizontal(8.0))
-            .height(Length::Fixed(26.0))
+            .height(Length::Fixed(30.0))
             .align_y(iced::alignment::Vertical::Center),
     )
     .width(Length::Fixed(width))
@@ -428,7 +437,7 @@ fn styled_input(
 ) -> Element<'static, Message> {
     let mut input = text_input(placeholder, value)
         .size(pal::fs_caption())
-        .padding(Padding::ZERO.horizontal(8.0))
+        .padding(Padding::ZERO.horizontal(8.0).vertical(6.0))
         .width(Length::Fixed(width))
         .secure(secure)
         .style(|_theme, status| text_input::Style {
@@ -458,6 +467,130 @@ pub fn number_input(
     on_submit: Message,
 ) -> Element<'static, Message> {
     form_input("", value, width, on_input, on_submit)
+}
+
+// ===== 列表行样式 / 胶囊徽标 / 键串 / 复选框 / 分段 tab / 进度条 =====
+
+/// 列表行按钮样式：透明底、悬停/按下 HOVER 底、`selected` = ACCENT_SOFT 底。
+/// 内容文字色由文字部件自带，样式层只兜底主文字色。
+pub fn row_style(selected: bool, radius: f32) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_t, status| button::Style {
+        background: if selected {
+            Some(pal::ACCENT_SOFT.into())
+        } else if matches!(status, button::Status::Hovered | button::Status::Pressed) {
+            Some(pal::HOVER.into())
+        } else {
+            None
+        },
+        text_color: pal::TEXT_PRIMARY,
+        border: border::rounded(radius),
+        ..Default::default()
+    }
+}
+
+/// 胶囊徽标（底色/字色由调用方按语义给，几何与字号统一）。
+pub fn badge(label: impl Into<String>, bg: Color, fg: Color) -> Element<'static, Message> {
+    container(text(label.into()).size(pal::fs_micro()).color(fg))
+        .padding(Padding::ZERO.horizontal(8.0).vertical(2.0))
+        .style(move |_t| Style {
+            background: Some(bg.into()),
+            border: border::rounded(999.0),
+            ..Style::default()
+        })
+        .into()
+}
+
+/// 键串徽标（mono 字体、内陷底、细描边），快捷键设置等场景。
+pub fn kbd(label: impl Into<String>) -> Element<'static, Message> {
+    container(
+        text(label.into())
+            .size(pal::fs_caption())
+            .color(pal::TEXT_SECONDARY)
+            .font(crate::ui::mono()),
+    )
+    .padding(Padding::ZERO.horizontal(8.0).vertical(2.0))
+    .style(|_t| Style {
+        background: Some(pal::BG_SUNKEN.into()),
+        border: border::rounded(pal::RADIUS_XS).color(pal::BORDER).width(1.0),
+        ..Style::default()
+    })
+    .into()
+}
+
+/// 复选框三态（全选 / 部分 / 空）。
+#[derive(Clone, Copy, PartialEq)]
+pub enum CheckState {
+    On,
+    Partial,
+    Off,
+}
+
+/// 复选框（lucide 形状：✓ 全选 / — 部分 / □ 空；`on_press` None = 禁用展示）。
+pub fn checkbox(state: CheckState, on_press: Option<Message>) -> Element<'static, Message> {
+    let (glyph, color) = match state {
+        CheckState::On => ("check", pal::ACCENT),
+        CheckState::Partial => ("minus", pal::ACCENT),
+        CheckState::Off => ("square", pal::TEXT_MUTED),
+    };
+    let widget = button(icon(glyph, 13.0, color))
+        .padding(2.0)
+        .style(|_t, status| button::Style {
+            background: matches!(status, button::Status::Hovered | button::Status::Pressed)
+                .then_some(pal::HOVER.into()),
+            border: border::rounded(3.0),
+            ..Default::default()
+        });
+    match on_press {
+        Some(m) => widget.on_press(m),
+        None => widget,
+    }
+    .into()
+}
+
+/// 分段 tab 条（子分区切换）：选中 ACCENT_SOFT 底 + ACCENT 字，未选悬停 HOVER 底。
+/// `on_select` 收到 tab id，返回切换消息。
+pub fn segmented_tabs(
+    tabs: &[(&'static str, &'static str)],
+    active_id: &str,
+    on_select: impl Fn(&'static str) -> Message + 'static,
+) -> Element<'static, Message> {
+    let mut bar = row![].spacing(4);
+    for (id, label) in tabs {
+        let active = *id == active_id;
+        bar = bar.push(
+            button(
+                text((*label).to_string())
+                    .size(pal::fs_caption())
+                    .color(if active { pal::ACCENT } else { pal::TEXT_SECONDARY }),
+            )
+            .padding(Padding::ZERO.horizontal(10.0).vertical(5.0))
+            .style(row_style(active, pal::RADIUS_SM))
+            .on_press(on_select(id)),
+        );
+    }
+    bar.into()
+}
+
+/// 进度条（轨道定宽；`ratio` 0–1 外值钳制；total 未知时由调用方传 0 值比例）。
+pub fn progress_bar(ratio: f32, track_w: f32) -> Element<'static, Message> {
+    container(
+        container(space())
+            .width(Length::Fixed(track_w * ratio.clamp(0.0, 1.0)))
+            .height(Length::Fill)
+            .style(|_t| Style {
+                background: Some(pal::ACCENT.into()),
+                border: border::rounded(2.0),
+                ..Style::default()
+            }),
+    )
+    .width(Length::Fixed(track_w))
+    .height(Length::Fixed(3.0))
+    .style(|_t| Style {
+        background: Some(pal::BG_SUNKEN.into()),
+        border: border::rounded(2.0),
+        ..Style::default()
+    })
+    .into()
 }
 
 // ===== 窗口控制按钮（canvas 自绘：背景悬停态与图标悬停变色需同源判定） =====

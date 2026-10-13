@@ -138,8 +138,8 @@ fn on_done(app: &mut App, gen: u64, result: Result<RebuildReport, String>) -> Ta
 }
 
 pub fn view(app: &App) -> Element<'static, Message> {
-    let mut col = column![].spacing(16).padding(Padding::ZERO.horizontal(20.0));
-    col = col.push(group_head("批量操作", "仓库内容", true));
+    let mut col = column![].spacing(8).padding(Padding::ZERO.horizontal(20.0));
+    col = col.push(group_head("批量操作", "", true));
     col = col.push(rebuild_card(app));
     scrollable(container(col).padding(Padding::ZERO.top(4.0).bottom(24.0)))
         .width(Length::Fill)
@@ -186,11 +186,11 @@ fn rebuild_card(app: &App) -> Element<'static, Message> {
     let mut card = column![
         row![
             column![
-                row![icon("triangle-alert", 13.0, pal::DANGER), text("重建内部链接").size(pal::fs_caption()).color(pal::TEXT_PRIMARY).font(semibold())]
+                row![icon("triangle-alert", 13.0, pal::DANGER), text("重建内部链接").size(pal::fs_body()).color(pal::TEXT_PRIMARY).font(semibold())]
                     .spacing(6)
                     .align_y(Vertical::Center),
-                text("将批量改写仓库内全部 .md 的链接写法，统一为标准 Markdown 链接。此操作不可撤销，建议先备份重要笔记。")
-                    .size(pal::fs_micro())
+                text("把全库 .md 链接统一改写为标准 Markdown 链接，不可撤销")
+                    .size(pal::fs_caption())
                     .color(pal::TEXT_MUTED),
             ]
             .spacing(4)
@@ -217,9 +217,9 @@ fn rebuild_card(app: &App) -> Element<'static, Message> {
     }
     container(card)
         .width(Length::Fill)
-        .padding(12.0)
+        .padding(Padding::ZERO.horizontal(12.0).vertical(10.0))
         .style(|_t| Style {
-            background: Some(pal::BG_PRIMARY.into()),
+            background: Some(pal::DANGER.scale_alpha(0.06).into()),
             border: border::rounded(pal::RADIUS_MD).color(pal::DANGER).width(1.0),
             ..Style::default()
         })

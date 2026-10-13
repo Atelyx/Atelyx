@@ -24,8 +24,8 @@ pub fn view(app: &App) -> Element<'static, Message> {
     ]
     .spacing(6)
     .align_y(iced::alignment::Vertical::Center);
-    let mut col = column![].spacing(16).padding(Padding::ZERO.horizontal(20.0));
-    col = col.push(group_head("阅读", "global.json", false));
+    let mut col = column![].spacing(8).padding(Padding::ZERO.horizontal(20.0));
+    col = col.push(group_head("阅读", "", false));
     col = col.push(setting_row(
         "宽松换行",
         "单个换行渲染为换行；关闭按 Markdown 标准需空行换行",
@@ -36,7 +36,7 @@ pub fn view(app: &App) -> Element<'static, Message> {
         "正文顶部显示文件名，点击可重命名",
         controls::toggle(app.global.in_page_title, Some(Message::InPageTitleToggle)),
     ));
-    col = col.push(group_head("正文", "global.json", false));
+    col = col.push(group_head("正文", "", false));
     col = col.push(setting_row("正文行宽", "正文区最大宽度（px）", width_input.into()));
     scrollable(container(col).padding(Padding::ZERO.top(4.0).bottom(24.0)))
         .width(Length::Fill)

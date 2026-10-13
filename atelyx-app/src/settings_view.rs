@@ -174,15 +174,11 @@ pub fn settings_view(app: &App, window: iced::window::Id) -> Element<'static, Me
 
     // 页头：标题 + 作用域徽标 + 描述（含仓库名）
     let (title, scope_vault, desc) = tab_meta(active, app);
-    let scope_pill = container(
-        text(if scope_vault { "仓库级" } else { "应用级" }.to_string()).size(pal::fs_micro()),
-    )
-    .padding(Padding::ZERO.horizontal(8.0).vertical(2.0))
-    .style(move |_t| Style {
-        background: Some(if scope_vault { pal::ACCENT_SOFT.into() } else { pal::BG_TERTIARY.into() }),
-        border: border::rounded(999.0),
-        ..Style::default()
-    });
+    let scope_pill = controls::badge(
+        if scope_vault { "仓库级" } else { "应用级" },
+        if scope_vault { pal::ACCENT_SOFT } else { pal::BG_TERTIARY },
+        if scope_vault { pal::ACCENT } else { pal::TEXT_PRIMARY },
+    );
     let body = column![
         container(
             column![
@@ -233,21 +229,24 @@ fn settings_body(app: &App, window: iced::window::Id) -> Element<'static, Messag
         "workspace" => workspace::view(app, window),
         "editor" => editor::view(app),
         "about" => about::view(app),
-        _ => controls::empty_state("settings", "无设置项", "此分区当前没有可配置的设置项。", None),
+        _ => controls::empty_state("puzzle", "暂无设置项", "该分组暂无可配置项", None),
     }
 }
 
-/// 设置行：左标题与一句话描述，右控件（垂直居中）。
+/// 设置行卡片：左标题与描述，右控件（垂直居中）。
 pub fn setting_row(
     title: &str,
     desc: &str,
     control: Element<'static, Message>,
 ) -> Element<'static, Message> {
-    container(
+    card(
         row![
             column![
-                text(title.to_string()).size(pal::fs_caption()).color(pal::TEXT_PRIMARY),
-                text(desc.to_string()).size(pal::fs_micro()).color(pal::TEXT_MUTED),
+                text(title.to_string())
+                    .size(pal::fs_body())
+                    .color(pal::TEXT_PRIMARY)
+                    .font(iced::Font { weight: iced::font::Weight::Medium, ..iced::Font::default() }),
+                text(desc.to_string()).size(pal::fs_caption()).color(pal::TEXT_MUTED),
             ]
             .spacing(2)
             .width(Length::Fill),
@@ -256,9 +255,19 @@ pub fn setting_row(
         .spacing(12)
         .align_y(iced::alignment::Vertical::Center),
     )
-    .width(Length::Fill)
-    .padding(Padding::ZERO.horizontal(8.0).vertical(6.0))
-    .into()
+}
+
+/// 设置页卡片容器（条目行 / 信息行的统一体块形态）。
+pub(crate) fn card(content: iced::widget::Row<'static, Message>) -> Element<'static, Message> {
+    container(content)
+        .width(Length::Fill)
+        .padding(Padding::ZERO.horizontal(12.0).vertical(10.0))
+        .style(|_t| Style {
+            background: Some(pal::BG_TERTIARY.into()),
+            border: border::rounded(pal::RADIUS_MD),
+            ..Style::default()
+        })
+        .into()
 }
 
 /// 一组导航：分组头 + 条目（条目间距 4）。
@@ -280,14 +289,14 @@ fn push_group<'a>(
 /// 设置页「多人协作」：登录身份、协作展示色、设备会话管理、退出登录。
 fn collab_settings_view(app: &App) -> Element<'static, Message> {
     let mut col = iced::widget::Column::<Message>::new()
-        .spacing(16)
+        .spacing(8)
         .padding(Padding::ZERO.horizontal(20.0));
     match &app.global.last_identity {
         None => {
             return container(controls::empty_state(
                 "users",
                 "未登录",
-                "经文件面板云钮登录协作服务器后，此处管理账号与设备会话。",
+                "登录后管理账号与设备会话",
                 None,
             ))
             .width(Length::Fill)
@@ -296,28 +305,27 @@ fn collab_settings_view(app: &App) -> Element<'static, Message> {
         }
         Some(identity) => {
             col = col.push(group_head("登录身份", &identity.server_url, false));
-            col = col.push(
-                container(
-                    row![
-                        icon("user", 14.0, pal::ACCENT),
-                        text(identity.display_name.clone())
-                            .size(pal::fs_caption())
-                            .color(pal::TEXT_PRIMARY),
-                        text(format!("@ {}", identity.server_url))
-                            .size(pal::fs_caption())
-                            .color(pal::TEXT_MUTED),
-                        space().width(Length::Fill),
-                        controls::btn(
-                            "退出登录",
-                            &controls::btn_sm(),
-                            controls::Variant::Ghost,
-                            Some(Message::Space(crate::SpaceMsg::Logout)),
-                        ),
-                    ]
-                    .spacing(8),
-                )
-                .width(Length::Fill),
-            );
+            col = col.push(card(
+                row![
+                    icon("user", 14.0, pal::ACCENT),
+                    text(identity.display_name.clone())
+                        .size(pal::fs_body())
+                        .color(pal::TEXT_PRIMARY)
+                        .font(iced::Font { weight: iced::font::Weight::Medium, ..iced::Font::default() }),
+                    text(format!("@ {}", identity.server_url))
+                        .size(pal::fs_caption())
+                        .color(pal::TEXT_MUTED),
+                    space().width(Length::Fill),
+                    controls::btn(
+                        "退出登录",
+                        &controls::btn_sm(),
+                        controls::Variant::Ghost,
+                        Some(Message::Space(crate::SpaceMsg::Logout)),
+                    ),
+                ]
+                .spacing(8)
+                .align_y(iced::alignment::Vertical::Center),
+            ));
             // 协作展示色（只读展示：编辑留待外观设置统一收口）
             col = col.push(group_head("协作展示色", "远端光标 / 名单", false));
             let color_swatch = app
@@ -326,26 +334,24 @@ fn collab_settings_view(app: &App) -> Element<'static, Message> {
                 .clone()
                 .and_then(|hex| parse_hex_color(&hex))
                 .unwrap_or(pal::TEXT_MUTED);
-            col = col.push(
-                container(
-                    row![
-                        container(space())
-                            .width(Length::Fixed(12.0))
-                            .height(Length::Fixed(12.0))
-                            .style(move |_t| Style {
-                                background: Some(color_swatch.into()),
-                                border: border::rounded(999.0),
-                                ..Style::default()
-                            }),
-                        text(app.global.collab_color.clone().unwrap_or_else(|| "未指派".into()))
-                            .size(pal::fs_caption())
-                            .color(pal::TEXT_SECONDARY)
-                            .font(mono()),
-                    ]
-                    .spacing(8),
-                )
-                .width(Length::Fill),
-            );
+            col = col.push(card(
+                row![
+                    container(space())
+                        .width(Length::Fixed(12.0))
+                        .height(Length::Fixed(12.0))
+                        .style(move |_t| Style {
+                            background: Some(color_swatch.into()),
+                            border: border::rounded(999.0),
+                            ..Style::default()
+                        }),
+                    text(app.global.collab_color.clone().unwrap_or_else(|| "未指派".into()))
+                        .size(pal::fs_caption())
+                        .color(pal::TEXT_SECONDARY)
+                        .font(mono()),
+                ]
+                .spacing(8)
+                .align_y(iced::alignment::Vertical::Center),
+            ));
             // 设备会话
             col = col.push(group_head("设备会话", &format!("{} 台在线记录", app.space_devices.len()), false));
             for d in &app.space_devices {
@@ -360,32 +366,30 @@ fn collab_settings_view(app: &App) -> Element<'static, Message> {
                     )
                     .into()
                 };
-                col = col.push(
-                    container(
-                        row![
-                            icon(
-                                if d.current { "monitor-check" } else { "monitor" },
-                                14.0,
-                                if d.current { pal::ACCENT } else { pal::TEXT_MUTED },
-                            ),
-                            text(d.device_name.clone())
-                                .size(pal::fs_caption())
-                                .color(pal::TEXT_PRIMARY),
-                            text(format!("最近活跃 {}", format_ts(d.last_seen_at * 1000)))
-                                .size(pal::fs_micro())
-                                .color(pal::TEXT_MUTED),
-                            space().width(Length::Fill),
-                            badge,
-                        ]
-                        .spacing(8),
-                    )
-                    .width(Length::Fill)
-                    .padding(Padding::ZERO.vertical(2.0)),
-                );
+                col = col.push(card(
+                    row![
+                        icon(
+                            if d.current { "monitor-check" } else { "monitor" },
+                            14.0,
+                            if d.current { pal::ACCENT } else { pal::TEXT_MUTED },
+                        ),
+                        text(d.device_name.clone())
+                            .size(pal::fs_body())
+                            .color(pal::TEXT_PRIMARY)
+                            .font(iced::Font { weight: iced::font::Weight::Medium, ..iced::Font::default() }),
+                        text(format!("最近活跃 {}", format_ts(d.last_seen_at * 1000)))
+                            .size(pal::fs_caption())
+                            .color(pal::TEXT_MUTED),
+                        space().width(Length::Fill),
+                        badge,
+                    ]
+                    .spacing(8)
+                    .align_y(iced::alignment::Vertical::Center),
+                ));
             }
             if app.space_devices.is_empty() {
                 col = col.push(container(
-                    text("会话列表为空（打开本页时刷新）").size(pal::fs_micro()).color(pal::TEXT_MUTED),
+                    text("暂无设备记录").size(pal::fs_micro()).color(pal::TEXT_MUTED),
                 ));
             }
         }
@@ -396,39 +400,41 @@ fn collab_settings_view(app: &App) -> Element<'static, Message> {
         .into()
 }
 
-/// 分组头：竖条 + 标题 + 右对齐 hint。
+/// 分组头：竖条 + 标题 + 右对齐 hint（hint 空串 = 不展示）。
 pub fn group_head(label: &str, hint: &str, repo_level: bool) -> Element<'static, Message> {
     let bar_color = if repo_level { pal::ACCENT } else { pal::BORDER_STRONG };
     let text_color = if repo_level { pal::ACCENT } else { pal::TEXT_MUTED };
-    container(
-        row![
-            container(space())
-                .width(Length::Fixed(3.0))
-                .height(Length::Fixed(11.0))
-                .style(move |_t| Style {
-                    background: Some(bar_color.into()),
-                    border: border::rounded(2.0),
-                    ..Style::default()
-                }),
-            text(label.to_string())
-                .size(pal::fs_micro())
-                .color(text_color)
-                .font(semibold()),
-            space().width(Length::Fill),
-            text(hint.to_string()).size(pal::fs_micro()).color(pal::TEXT_MUTED).font(mono()),
-        ]
-        .spacing(8)
-        .width(Length::Fill),
-    )
-    .padding(Padding::ZERO.horizontal(8.0).bottom(8.0))
-    .into()
+    let mut head = row![
+        container(space())
+            .width(Length::Fixed(3.0))
+            .height(Length::Fixed(11.0))
+            .style(move |_t| Style {
+                background: Some(bar_color.into()),
+                border: border::rounded(2.0),
+                ..Style::default()
+            }),
+        text(label.to_string())
+            .size(pal::fs_micro())
+            .color(text_color)
+            .font(semibold()),
+    ]
+    .spacing(8)
+    .width(Length::Fill);
+    if !hint.is_empty() {
+        head = head
+            .push(space().width(Length::Fill))
+            .push(text(hint.to_string()).size(pal::fs_micro()).color(pal::TEXT_MUTED).font(mono()));
+    }
+    container(head)
+        .padding(Padding::ZERO.horizontal(8.0).bottom(8.0))
+        .into()
 }
 
 /// 页面标题 / 作用域 / 描述（仓库级描述含仓库名）。
 fn tab_meta(tab: &str, app: &App) -> (&'static str, bool, String) {
     let vault_name = repo_display_name(app).unwrap_or_default();
-    let app_desc = "全库共享 · 存于本机应用配置，跨仓库生效".to_string();
-    let vault_desc = format!("作用于当前仓库（{vault_name}）· 配置随该仓库走，不随其他仓库生效");
+    let app_desc = "全局共享配置".to_string();
+    let vault_desc = format!("作用于当前仓库（{vault_name}）");
     match tab {
         "general" => ("通用", false, app_desc),
         "collab" => ("多人协作", false, app_desc),

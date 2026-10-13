@@ -166,12 +166,12 @@ pub enum AiMsg {
 
 pub fn view(app: &App, window: iced::window::Id) -> Element<'static, Message> {
     if super::repo_display_name(app).is_none() {
-        return container(controls::empty_state("bot", "未打开仓库", "进入仓库后配置 AI 供应商与 Agent。", None))
+        return container(controls::empty_state("bot", "未打开仓库", "打开仓库后配置", None))
             .width(Length::Fill)
             .height(Length::Fill)
             .into();
     }
-    let mut col = column![].spacing(16).padding(Padding::ZERO.horizontal(20.0));
+    let mut col = column![].spacing(8).padding(Padding::ZERO.horizontal(20.0));
     col = col.push(sub_tab_bar(app));
     if readonly(app) {
         col = col.push(read_only_banner());
@@ -245,34 +245,9 @@ fn open_popup(app: &App, window: iced::window::Id, state: PopupState) -> Message
 }
 
 fn sub_tab_bar(app: &App) -> Element<'static, Message> {
-    const TABS: [(&str, &str); 4] =
+    const TABS: [(&'static str, &'static str); 4] =
         [("providers", "供应商"), ("models", "模型服务"), ("agents", "Agent"), ("search", "联网搜索")];
-    let mut bar = row![].spacing(4);
-    for (id, label) in TABS {
-        let active = app.ai_sub_tab == id;
-        bar = bar.push(
-            button(
-                text(label.to_string())
-                    .size(pal::fs_caption())
-                    .color(if active { pal::ACCENT } else { pal::TEXT_SECONDARY }),
-            )
-            .padding(Padding::ZERO.horizontal(10.0).vertical(5.0))
-            .style(move |_t, status| button::Style {
-                background: if active {
-                    Some(pal::ACCENT_SOFT.into())
-                } else if matches!(status, button::Status::Hovered | button::Status::Pressed) {
-                    Some(pal::HOVER.into())
-                } else {
-                    None
-                },
-                text_color: pal::TEXT_PRIMARY,
-                border: border::rounded(pal::RADIUS_SM),
-                ..Default::default()
-            })
-            .on_press(Message::Ai(AiMsg::SubTab(id))),
-        );
-    }
-    bar.into()
+    controls::segmented_tabs(&TABS, &app.ai_sub_tab, |id| Message::Ai(AiMsg::SubTab(id)))
 }
 
 fn read_only_banner() -> Element<'static, Message> {
@@ -297,7 +272,7 @@ fn read_only_banner() -> Element<'static, Message> {
 fn value_text(v: &str) -> Element<'static, Message> {
     container(text(v.to_string()).size(pal::fs_caption()).color(pal::TEXT_SECONDARY))
         .width(Length::Fixed(FORM_W))
-        .padding(Padding::ZERO.vertical(4.0))
+        .padding(Padding::ZERO.vertical(6.0))
         .into()
 }
 
@@ -857,18 +832,7 @@ fn provider_card(p: &vault::VaultProvider, selected: bool) -> Element<'static, M
     )
     .width(Length::Fill)
     .padding(Padding::ZERO.horizontal(10.0).vertical(6.0))
-    .style(move |_t, status| button::Style {
-        background: if selected {
-            Some(pal::ACCENT_SOFT.into())
-        } else if matches!(status, button::Status::Hovered | button::Status::Pressed) {
-            Some(pal::HOVER.into())
-        } else {
-            None
-        },
-        text_color: pal::TEXT_PRIMARY,
-        border: border::rounded(pal::RADIUS_SM),
-        ..Default::default()
-    })
+    .style(controls::row_style(selected, pal::RADIUS_SM))
     .on_press(Message::Ai(AiMsg::ProviderSelect(p.id.clone())))
     .into()
 }
@@ -988,7 +952,7 @@ fn models_view(app: &App, window: iced::window::Id) -> Element<'static, Message>
     let ro = readonly(app);
     let model_count = app.repo_config.providers.iter().flatten().map(|p| p.models.len()).sum::<usize>();
     let mut col = column![].spacing(8);
-    col = col.push(super::group_head("默认模型", "config.json", true));
+    col = col.push(super::group_head("默认模型", "", true));
     let default_trigger = controls::dropdown_trigger(
         &default_model_label(app),
         FORM_W,
@@ -1001,7 +965,7 @@ fn models_view(app: &App, window: iced::window::Id) -> Element<'static, Message>
         ));
     }
 
-    col = col.push(super::group_head("话题自动命名", "config.json", true));
+    col = col.push(super::group_head("话题自动命名", "", true));
     let mode = naming_mode(app);
     let mode_trigger = controls::dropdown_trigger(
         &naming_label(mode),
@@ -1104,31 +1068,12 @@ fn agent_card(a: &vault::AgentConfig, selected: bool) -> Element<'static, Messag
             .color(if selected { pal::ACCENT } else { pal::TEXT_PRIMARY }),
     );
     if a.builtin.unwrap_or(false) {
-        line = line.push(
-            container(text("预置").size(pal::fs_micro()))
-                .padding(Padding::ZERO.horizontal(4.0))
-                .style(|_t| Style {
-                    background: Some(pal::BG_TERTIARY.into()),
-                    border: border::rounded(999.0),
-                    ..Style::default()
-                }),
-        );
+        line = line.push(controls::badge("预置", pal::BG_TERTIARY, pal::TEXT_SECONDARY));
     }
     button(line)
         .width(Length::Fill)
         .padding(Padding::ZERO.horizontal(10.0).vertical(6.0))
-        .style(move |_t, status| button::Style {
-            background: if selected {
-                Some(pal::ACCENT_SOFT.into())
-            } else if matches!(status, button::Status::Hovered | button::Status::Pressed) {
-                Some(pal::HOVER.into())
-            } else {
-                None
-            },
-            text_color: pal::TEXT_PRIMARY,
-            border: border::rounded(pal::RADIUS_SM),
-            ..Default::default()
-        })
+        .style(controls::row_style(selected, pal::RADIUS_SM))
         .on_press(Message::Ai(AiMsg::AgentSelect(a.id.clone())))
         .into()
 }
@@ -1171,7 +1116,7 @@ fn agent_form(app: &App, a: &vault::AgentConfig, window: iced::window::Id) -> El
     for (ci, cat) in TOOL_CATEGORIES.iter().enumerate() {
         let state = category_state(&tools, cat);
         let head = row![
-            checkbox(state, (!ro).then(|| Message::Ai(AiMsg::AgentCategoryToggle(ci)))),
+            controls::checkbox(state, (!ro).then(|| Message::Ai(AiMsg::AgentCategoryToggle(ci)))),
             text(cat.label.to_string())
                 .size(pal::fs_caption())
                 .color(pal::TEXT_PRIMARY)
@@ -1183,7 +1128,10 @@ fn agent_form(app: &App, a: &vault::AgentConfig, window: iced::window::Id) -> El
         for t in cat.tools {
             let on = tools.iter().any(|x| x == t);
             let tool_row = row![
-                checkbox(if on { CheckState::On } else { CheckState::Off }, (!ro).then(|| Message::Ai(AiMsg::AgentToolToggle(t.to_string())))),
+                controls::checkbox(
+                    if on { controls::CheckState::On } else { controls::CheckState::Off },
+                    (!ro).then(|| Message::Ai(AiMsg::AgentToolToggle(t.to_string()))),
+                ),
                 text(t.to_string()).size(pal::fs_caption()).color(pal::TEXT_SECONDARY).font(mono()),
             ]
             .spacing(6)
@@ -1216,45 +1164,15 @@ fn agent_form(app: &App, a: &vault::AgentConfig, window: iced::window::Id) -> El
     col.into()
 }
 
-/// 勾选框三态（部分态仅分类头出现）。
-#[derive(Clone, Copy, PartialEq)]
-enum CheckState {
-    On,
-    Partial,
-    Off,
-}
-
-fn category_state(tools: &[String], cat: &ToolCategory) -> CheckState {
+fn category_state(tools: &[String], cat: &ToolCategory) -> controls::CheckState {
     let hit = cat.tools.iter().filter(|t| tools.iter().any(|x| x == *t)).count();
     if hit == 0 {
-        CheckState::Off
+        controls::CheckState::Off
     } else if hit == cat.tools.len() {
-        CheckState::On
+        controls::CheckState::On
     } else {
-        CheckState::Partial
+        controls::CheckState::Partial
     }
-}
-
-/// 勾选框（lucide 形状：✓ 全选 / — 部分 / □ 空）。
-fn checkbox(state: CheckState, on_press: Option<Message>) -> Element<'static, Message> {
-    let (glyph, color) = match state {
-        CheckState::On => ("check", pal::ACCENT),
-        CheckState::Partial => ("minus", pal::ACCENT),
-        CheckState::Off => ("square", pal::TEXT_MUTED),
-    };
-    let widget = button(icon(glyph, 13.0, color))
-        .padding(2.0)
-        .style(|_t, status| button::Style {
-            background: matches!(status, button::Status::Hovered | button::Status::Pressed)
-                .then_some(pal::HOVER.into()),
-            border: border::rounded(3.0),
-            ..Default::default()
-        });
-    match on_press {
-        Some(m) => widget.on_press(m),
-        None => widget,
-    }
-    .into()
 }
 
 // ===== 联网搜索 =====
@@ -1285,7 +1203,7 @@ fn search_view(app: &App, window: iced::window::Id) -> Element<'static, Message>
     };
 
     let mut col = column![].spacing(8);
-    col = col.push(super::group_head("搜索源", "config.json", true));
+    col = col.push(super::group_head("搜索源", "", true));
     col = col.push(super::setting_row("搜索提供方", "AI 联网搜索工具使用的后端", provider_control));
     if provider == "searxng" {
         let url_control = if ro {

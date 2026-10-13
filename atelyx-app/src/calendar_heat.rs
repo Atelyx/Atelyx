@@ -22,7 +22,7 @@ const HEAT_MONTHS: u32 = 12;
 /// 色阶透明度（1-3 档 accent 递增；0 档 = BG_TERTIARY）。
 const LEVEL_ALPHAS: [f32; 3] = [0.25, 0.55, 0.9];
 
-/// 活动热力图（横向滚动，滚动条隐藏）。
+/// 活动热力图：单行 12 个月，超宽部分横向滚动（滚动条可见）。
 pub fn heatmap(app: &App, window: iced::window::Id) -> Element<'static, Message> {
     let counts = activity_counts(app);
     let (ey, em) = display_month(app);
@@ -59,7 +59,7 @@ pub fn heatmap(app: &App, window: iced::window::Id) -> Element<'static, Message>
     let mut col = iced::widget::Column::<Message>::new().push(
         scrollable(container(blocks))
             .direction(Direction::Horizontal(
-                Scrollbar::new().width(0.0).scroller_width(0.0),
+                Scrollbar::new().width(6.0).scroller_width(6.0),
             ))
             .width(Length::Fill),
     );

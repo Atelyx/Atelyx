@@ -54,6 +54,14 @@ pub fn semibold() -> iced::Font {
     }
 }
 
+/// 等宽字体（计数 / 键串 / 扩展名标签）。
+pub fn mono() -> iced::Font {
+    iced::Font {
+        family: iced::font::Family::Monospace,
+        ..iced::Font::with_name(FONT_FAMILY)
+    }
+}
+
 /// ui 层上抛的应用消息（应用层统一转译）。
 #[derive(Debug, Clone)]
 pub enum UiMsg {

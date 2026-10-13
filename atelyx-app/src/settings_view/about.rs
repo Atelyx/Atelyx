@@ -1,7 +1,7 @@
 //! 「关于」分区：Logo、版本、检查更新、项目主页。
 
 use iced::alignment::Vertical;
-use iced::widget::{column, container, mouse_area, row, space, text};
+use iced::widget::{button, column, container, row, scrollable, space, text};
 use iced::{Element, Length, Padding};
 
 use atelyx_core::markdown::LinkForm;
@@ -66,20 +66,29 @@ pub fn view(app: &App) -> Element<'static, Message> {
     let col = column![
         container(
             row![
+                // Logo：56px 图标 + 4px 内衬 = 64px ring 盒
                 container(
                     iced::widget::image(icon_handle())
-                        .width(Length::Fixed(48.0))
-                        .height(Length::Fixed(48.0))
+                        .width(Length::Fixed(56.0))
+                        .height(Length::Fixed(56.0)),
                 )
-                .padding(Padding::ZERO.right(4.0)),
+                .padding(4.0)
+                .style(|_t| iced::widget::container::Style {
+                    background: Some(pal::BG_TERTIARY.into()),
+                    border: iced::border::rounded(pal::RADIUS_MD)
+                        .color(pal::BORDER_STRONG)
+                        .width(1.0),
+                    ..iced::widget::container::Style::default()
+                }),
                 column![
                     text("Atelyx").size(pal::fs_h1()).color(pal::TEXT_PRIMARY).font(semibold()),
                     text(format!("版本 {version}")).size(pal::fs_caption()).color(pal::TEXT_SECONDARY),
                 ]
                 .spacing(2),
             ]
-            .spacing(8)
-            .padding(Padding::ZERO.horizontal(8.0)),
+            .spacing(12)
+            .padding(Padding::ZERO.horizontal(8.0))
+            .align_y(Vertical::Center),
         )
         .width(Length::Fill)
         .padding(Padding::ZERO.bottom(16.0)),
@@ -91,25 +100,23 @@ pub fn view(app: &App) -> Element<'static, Message> {
         ]
         .spacing(6)
         .padding(Padding::ZERO.horizontal(8.0)),
-        mouse_area(
-            container(home)
-                .width(Length::Fill)
+        container(
+            button(home)
                 .padding(Padding::ZERO.horizontal(8.0).vertical(4.0))
-                .style(move |_t| iced::widget::container::Style {
-                    background: Some(pal::HOVER.into()),
-                    border: iced::border::rounded(pal::RADIUS_SM),
-                    ..iced::widget::container::Style::default()
-                }),
+                .width(Length::Fill)
+                .style(controls::row_style(false, pal::RADIUS_SM))
+                .on_press(Message::OpenLink(
+                    String::from("https://github.com/Atelyx/Atelyx"),
+                    LinkForm::External,
+                )),
         )
-        .on_press(Message::OpenLink(
-            String::from("https://github.com/Atelyx/Atelyx"),
-            LinkForm::External,
-        )),
+        .width(Length::Fill),
         container(update_row)
             .width(Length::Fill)
             .padding(Padding::ZERO.horizontal(8.0).top(8.0)),
     ];
-    container(col.width(Length::Fill).padding(Padding::ZERO.horizontal(12.0).top(4.0)))
+    scrollable(container(col.width(Length::Fill).padding(Padding::ZERO.horizontal(12.0).top(4.0).bottom(24.0))))
         .width(Length::Fill)
+        .height(Length::Fill)
         .into()
 }

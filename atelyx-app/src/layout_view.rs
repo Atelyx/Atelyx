@@ -20,7 +20,7 @@ use crate::ui::icon::icon;
 use crate::ui::menu::MenuEntry;
 use crate::ui::palette as pal;
 use crate::ui::popup::{self, PopupSpec};
-use crate::ui::{FONT_FAMILY, notify};
+use crate::ui::notify;
 use crate::{App, DraftKind, Message, NoteMode, markdown_edit, markdown_view};
 
 pub struct UiMetrics;
@@ -146,10 +146,7 @@ fn approx_tab_width(label: &str, locked: bool, has_file: bool) -> f32 {
 
 /// 等宽字体（计数/扩展名标签）。
 pub(crate) fn mono() -> Font {
-    Font {
-        family: iced::font::Family::Monospace,
-        ..Font::with_name(FONT_FAMILY)
-    }
+    crate::ui::mono()
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1416,7 +1413,9 @@ fn view_content<'a>(app: &'a App, window: iced::window::Id, kind: &str) -> Eleme
 
 /// 协作房间视图：连接状态头部 + 空间成员名册 + 在线设备（打开文件可点开）+ 设置入口。
 fn collab_room_view(app: &App) -> Element<'_, Message> {
-    let mut col = iced::widget::Column::<Message>::new().padding(Padding::ZERO.horizontal(12.0).vertical(10.0));
+    let mut col = iced::widget::Column::<Message>::new()
+        .spacing(6)
+        .padding(Padding::ZERO.horizontal(12.0).vertical(10.0));
     match &app.repo_kind {
         crate::RepoKind::Space(_) => {
             // 连接状态头部（帧泵 Ready 置位 / 断开与摘泵清零）+ 设置入口
@@ -1466,22 +1465,36 @@ fn collab_room_view(app: &App) -> Element<'_, Message> {
                 }
                 (None, Some(list)) => {
                     for m in list {
+                        // 成员卡片：显示名 + 角色徽标一行，@username 次行
                         col = col.push(
                             container(
-                                row![
-                                    text(m.display_name.clone())
-                                        .size(pal::fs_caption())
-                                        .color(pal::TEXT_PRIMARY),
+                                column![
+                                    row![
+                                        text(m.display_name.clone())
+                                            .size(pal::fs_body())
+                                            .color(pal::TEXT_PRIMARY)
+                                            .font(iced::Font {
+                                                weight: iced::font::Weight::Medium,
+                                                ..iced::Font::default()
+                                            }),
+                                        space().width(Length::Fill),
+                                        role_badge(m.role),
+                                    ]
+                                    .spacing(6)
+                                    .align_y(iced::alignment::Vertical::Center),
                                     text(format!("@{}", m.username))
                                         .size(pal::fs_micro())
                                         .color(pal::TEXT_MUTED),
-                                    space().width(Length::Fill),
-                                    role_badge(m.role),
                                 ]
-                                .spacing(6),
+                                .spacing(2),
                             )
                             .width(Length::Fill)
-                            .padding(Padding::ZERO.vertical(3.0)),
+                            .padding(Padding::ZERO.horizontal(10.0).vertical(6.0))
+                            .style(|_t| Style {
+                                background: Some(pal::BG_TERTIARY.into()),
+                                border: border::rounded(pal::RADIUS_MD),
+                                ..Style::default()
+                            }),
                         );
                     }
                 }
@@ -1519,12 +1532,9 @@ fn collab_room_view(app: &App) -> Element<'_, Message> {
             }
             if app.space_peers.is_empty() {
                 col = col.push(
-                    container(
-                        text(if app.space_connected { "当前空间没有其他设备在线" } else { "连接中…" })
-                            .size(pal::fs_micro())
-                            .color(pal::TEXT_MUTED),
-                    )
-                    .padding(Padding::ZERO.vertical(3.0)),
+                    text(if app.space_connected { "当前空间没有其他设备在线" } else { "连接中…" })
+                        .size(pal::fs_micro())
+                        .color(pal::TEXT_MUTED),
                 );
             }
         }
@@ -1532,7 +1542,7 @@ fn collab_room_view(app: &App) -> Element<'_, Message> {
             col = col.push(controls::empty_state(
                 "users",
                 "未进入协作空间",
-                "经文件面板云钮登录并进入空间后，这里显示在线成员与各自正在编辑的文件。",
+                "登录并进入空间后显示在线成员",
                 Some(("协作空间".into(), Message::SpaceMenuOpen)),
             ));
         }
@@ -1543,7 +1553,7 @@ fn collab_room_view(app: &App) -> Element<'_, Message> {
         .into()
 }
 
-/// 在线设备行：色点 + 昵称（自己标「我」）+ 设备名灰字 + 打开文件清单（点击打开）。
+/// 在线设备卡片：色点 + 昵称（自己标「我」）一行，设备名次行，打开文件清单可点击。
 fn device_row(
     nickname: String,
     color_hex: String,
@@ -1561,49 +1571,56 @@ fn device_row(
                 border: border::rounded(999.0),
                 ..Style::default()
             }),
-        text(nickname).size(pal::fs_caption()).color(pal::TEXT_PRIMARY),
+        text(nickname).size(pal::fs_body()).color(pal::TEXT_PRIMARY).font(iced::Font {
+            weight: iced::font::Weight::Medium,
+            ..iced::Font::default()
+        }),
     ]
-    .spacing(6);
+    .spacing(6)
+    .align_y(iced::alignment::Vertical::Center);
     if is_self {
         head = head.push(mini_badge("我", pal::ACCENT));
     }
-    head = head.push(text(device).size(pal::fs_micro()).color(pal::TEXT_MUTED));
     let mut col = iced::widget::Column::<Message>::new()
-        .spacing(2)
-        .push(container(head.width(Length::Fill)).padding(Padding::ZERO.vertical(2.0)));
+        .spacing(3)
+        .push(head);
+    col = col.push(
+        text(device)
+            .size(pal::fs_micro())
+            .color(pal::TEXT_MUTED),
+    );
     if files.is_empty() {
-        col = col.push(
-            container(text("暂无打开文件").size(pal::fs_micro()).color(pal::TEXT_MUTED))
-                .padding(Padding::ZERO.left(14.0)),
-        );
+        col = col.push(text("暂无打开文件").size(pal::fs_micro()).color(pal::TEXT_MUTED));
     } else {
         for rel in files {
             let name = rel.rsplit('/').next().unwrap_or(&rel).to_string();
             col = col.push(
-                container(
-                    button(
-                        row![
-                            icon(file_icon(&name), 11.0, pal::TEXT_SECONDARY),
-                            text(name).size(pal::fs_micro()).color(pal::TEXT_SECONDARY),
-                        ]
-                        .spacing(4),
-                    )
-                    .padding(Padding::ZERO.horizontal(4.0).vertical(1.0))
-                    .style(|_t, status| button::Style {
-                        background: matches!(status, button::Status::Hovered | button::Status::Pressed)
-                            .then_some(pal::HOVER.into()),
-                        border: border::rounded(pal::RADIUS_XS),
-                        ..Default::default()
-                    })
-                    .on_press(Message::OpenFile(rel)),
+                button(
+                    row![
+                        icon(file_icon(&name), 11.0, pal::TEXT_SECONDARY),
+                        text(name).size(pal::fs_micro()).color(pal::TEXT_SECONDARY),
+                    ]
+                    .spacing(4),
                 )
-                .padding(Padding::ZERO.left(14.0)),
+                .padding(Padding::ZERO.horizontal(4.0).vertical(1.0))
+                .style(|_t, status| button::Style {
+                    background: matches!(status, button::Status::Hovered | button::Status::Pressed)
+                        .then_some(pal::HOVER.into()),
+                    border: border::rounded(pal::RADIUS_XS),
+                    ..Default::default()
+                })
+                .on_press(Message::OpenFile(rel)),
             );
         }
     }
     container(col)
         .width(Length::Fill)
-        .padding(Padding::ZERO.vertical(2.0))
+        .padding(Padding::ZERO.horizontal(10.0).vertical(6.0))
+        .style(|_t| Style {
+            background: Some(pal::BG_TERTIARY.into()),
+            border: border::rounded(pal::RADIUS_MD),
+            ..Style::default()
+        })
         .into()
 }
 

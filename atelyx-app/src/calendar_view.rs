@@ -1,8 +1,8 @@
 //! 日历视图入口与月份导航：视图分派、月份偏移与本地「今天」的公共口径，
 //! 以及月网格 / 天详情共用的色点与条目取色；分区渲染在 calendar_heat / calendar_month / calendar_day。
 
-use iced::widget::{column, container, row, text};
-use iced::{Element, Length};
+use iced::widget::{column, container, row, space, text};
+use iced::{Element, Length, Padding};
 
 use atelyx_core::calendar::CalendarItem;
 use atelyx_core::history;
@@ -19,12 +19,13 @@ use crate::{App, Message, layout_view};
 /// 日历视图（kind "calendar"）：垂直滚动承载各分区。
 pub fn calendar_view(app: &App, window: iced::window::Id) -> Element<'_, Message> {
     if !crate::repohistory_view::container_ready(app) {
-        return controls::empty_state("calendar-days", "未打开仓库", "进入仓库后显示日历。", None);
+        return controls::empty_state("calendar-days", "未打开仓库", "打开仓库后显示", None);
     }
     let content = column![
-        nav_bar(app),
+        nav_bar(app, window),
         calendar_heat::heatmap(app, window),
-        calendar_month::month_grid(app),
+        controls::h_divider_subtle(),
+        calendar_month::month_grid(app, window),
         calendar_day::day_detail(app, window),
     ]
     .spacing(12)
@@ -68,33 +69,34 @@ pub(crate) fn dot(color: iced::Color, size: f32) -> Element<'static, Message> {
         .into()
 }
 
-/// 顶部月份导航：‹ YYYY年M月 › + 今天。
-fn nav_bar(app: &App) -> Element<'static, Message> {
+/// 顶部月份导航：‹ YYYY年M月 › 组偏左居中，「今天」贴右侧。
+fn nav_bar(app: &App, window: iced::window::Id) -> Element<'static, Message> {
     let (y, m) = display_month(app);
     row![
+        space().width(Length::Fill),
         controls::icon_button(
             "chevron-left",
             13.0,
             24.0,
             controls::Variant::Secondary,
             Some(Message::Calendar(CalendarMsg::PrevMonth)),
-            None,
+            Some((window, "上一月".into())),
         ),
         container(
             text(format!("{y}年{m}月"))
                 .size(pal::fs_body())
                 .font(semibold())
         )
-        .width(Length::Fill)
-        .center_x(Length::Fill),
+        .padding(Padding::ZERO.horizontal(4.0)),
         controls::icon_button(
             "chevron-right",
             13.0,
             24.0,
             controls::Variant::Secondary,
             Some(Message::Calendar(CalendarMsg::NextMonth)),
-            None,
+            Some((window, "下一月".into())),
         ),
+        space().width(Length::Fill),
         controls::btn(
             "今天",
             &controls::btn_sm(),

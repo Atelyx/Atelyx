@@ -27,7 +27,7 @@ const DAY_HISTORY_CAP: usize = 20;
 pub fn day_detail(app: &App, window: iced::window::Id) -> Element<'static, Message> {
     let Some(day) = app.calendar.selected else {
         return container(
-            text("点选日期查看当日日程与历史")
+            text("点选日期查看日程与历史")
                 .size(pal::fs_caption())
                 .color(pal::TEXT_MUTED),
         )
@@ -41,7 +41,7 @@ pub fn day_detail(app: &App, window: iced::window::Id) -> Element<'static, Messa
         section_title(&format!("{m}月{d}日")),
         day_history(app, day, window),
         section_title("日程"),
-        schedule_section(app, day),
+        schedule_section(app, day, window),
     ]
     .spacing(6)
     .width(Length::Fill)
@@ -94,11 +94,7 @@ fn day_history(app: &App, day: i64, window: iced::window::Id) -> Element<'static
                 )
                 .width(Length::Fill)
                 .padding(Padding::ZERO.horizontal(8.0).vertical(4.0))
-                .style(|_t, status| button::Style {
-                    background: matches!(status, button::Status::Hovered | button::Status::Pressed)
-                        .then_some(pal::HOVER.into()),
-                    ..button::Style::default()
-                })
+                .style(controls::row_style(false, pal::RADIUS_SM))
                 .on_press(Message::History(crate::history_browser::HistoryBrowserMsg::Open {
                     window,
                     kind: e.kind,
@@ -114,8 +110,8 @@ fn day_history(app: &App, day: i64, window: iced::window::Id) -> Element<'static
     col.into()
 }
 
-/// 当日日程区：已有日程行（色点循环 / 行内改题 / 删除）+ 添加行。
-fn schedule_section(app: &App, day: i64) -> Element<'static, Message> {
+/// 当日日程区：已有日程行（色点循环 / 行内改题 / 删除二段确认）+ 添加行。
+fn schedule_section(app: &App, day: i64, window: iced::window::Id) -> Element<'static, Message> {
     let mut items: Vec<CalendarItem> = app
         .calendar
         .items
@@ -129,14 +125,14 @@ fn schedule_section(app: &App, day: i64) -> Element<'static, Message> {
         col = col.push(muted("当日无日程"));
     }
     for item in &items {
-        col = col.push(schedule_row(app, item));
+        col = col.push(schedule_row(app, item, window));
     }
     col = col.push(add_row(app));
     col.width(Length::Fill).into()
 }
 
-/// 单条日程行：色点（点击循环换色）+ 标题（点击行内编辑）+ 删除。
-fn schedule_row(app: &App, item: &CalendarItem) -> Element<'static, Message> {
+/// 单条日程行：色点（点击循环换色）+ 标题（点击行内编辑）+ 删除（二段确认行内完成）。
+fn schedule_row(app: &App, item: &CalendarItem, window: iced::window::Id) -> Element<'static, Message> {
     let color = item_color(item);
     let title: Element<Message> =
         if app.calendar.edit.as_ref().is_some_and(|(id, _)| id == &item.id) {
@@ -162,29 +158,46 @@ fn schedule_row(app: &App, item: &CalendarItem) -> Element<'static, Message> {
                     .color(pal::TEXT_PRIMARY),
             )
             .padding(Padding::ZERO.horizontal(6.0).vertical(2.0))
-            .style(|_t, status| button::Style {
-                background: matches!(status, button::Status::Hovered | button::Status::Pressed)
-                    .then_some(pal::HOVER.into()),
-                ..button::Style::default()
-            })
+            .style(controls::row_style(false, pal::RADIUS_XS))
             .on_press(Message::Calendar(CalendarMsg::EditStart(item.id.clone())))
             .into()
+        };
+    let tail: Element<'static, Message> =
+        if app.calendar.delete_confirm.as_deref() == Some(item.id.as_str()) {
+            row![
+                controls::btn(
+                    "确认删除",
+                    &controls::btn_sm(),
+                    controls::Variant::Danger,
+                    Some(Message::Calendar(CalendarMsg::DeleteConfirm(item.id.clone()))),
+                ),
+                controls::btn(
+                    "取消",
+                    &controls::btn_sm(),
+                    controls::Variant::Ghost,
+                    Some(Message::Calendar(CalendarMsg::DeleteCancel)),
+                ),
+            ]
+            .spacing(4)
+            .into()
+        } else {
+            controls::icon_button(
+                "trash-2",
+                12.0,
+                22.0,
+                controls::Variant::Secondary,
+                Some(Message::Calendar(CalendarMsg::Delete(item.id.clone()))),
+                Some((window, "删除".into())),
+            )
         };
     row![
         button(dot(color, DOT))
             .padding(0.0)
-            .style(|_t, _s| button::Style::default())
+            .style(controls::row_style(false, pal::RADIUS_XS))
             .on_press(Message::Calendar(CalendarMsg::CycleColor(item.id.clone()))),
         title,
         space().width(Length::Fill),
-        controls::icon_button(
-            "trash-2",
-            12.0,
-            22.0,
-            controls::Variant::Secondary,
-            Some(Message::Calendar(CalendarMsg::Delete(item.id.clone()))),
-            None,
-        ),
+        tail,
     ]
     .spacing(6)
     .width(Length::Fill)

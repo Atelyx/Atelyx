@@ -15,7 +15,7 @@ pub fn view(app: &App, window: iced::window::Id) -> Element<'static, Message> {
         return container(controls::empty_state(
             "panels-top-left",
             "未打开仓库",
-            "进入仓库后配置工作区。",
+            "打开仓库后配置",
             None,
         ))
         .width(Length::Fill)
@@ -50,15 +50,15 @@ pub fn view(app: &App, window: iced::window::Id) -> Element<'static, Message> {
             )
         }),
     );
-    let mut col = column![].spacing(16).padding(Padding::ZERO.horizontal(20.0));
+    let mut col = column![].spacing(8).padding(Padding::ZERO.horizontal(20.0));
     if space_mode {
         col = col.push(
-            text("协作空间的文件与路径设置由服务端管理")
+            text("协作空间下由服务端管理")
                 .size(pal::fs_caption())
                 .color(pal::TEXT_MUTED),
         );
     }
-    col = col.push(group_head("启动", "config.json", true));
+    col = col.push(group_head("启动", "", true));
     col = col.push(setting_row(
         "启动时切换场景",
         "进入仓库时切到指定场景（跟随当前 = 保持上次界面）",

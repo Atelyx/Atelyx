@@ -114,6 +114,7 @@ fn card<'a>(n: &'a Notification, on_dismiss: Message) -> Element<'a, Message> {
                 .style(|_t, status| button::Style {
                     background: matches!(status, button::Status::Hovered | button::Status::Pressed)
                         .then_some(pal::HOVER.into()),
+                    border: border::rounded(pal::RADIUS_XS),
                     ..Default::default()
                 })
                 .on_press(on_dismiss),
@@ -122,7 +123,10 @@ fn card<'a>(n: &'a Notification, on_dismiss: Message) -> Element<'a, Message> {
     ]
     .spacing(6);
     if let Some(p) = n.progress {
-        col = col.push(progress_bar(p));
+        // 轨道定宽：卡片整体为 Shrink 宽，Fill 链在此不放量，比例用 Fixed 像素表达
+        const TRACK_W: f32 = 216.0;
+        let ratio = if p.total > 0 { p.received as f32 / p.total as f32 } else { 0.0 };
+        col = col.push(controls::progress_bar(ratio, TRACK_W));
     }
     if !n.actions.is_empty() {
         let mut actions = row![].spacing(6);
@@ -154,30 +158,6 @@ fn card<'a>(n: &'a Notification, on_dismiss: Message) -> Element<'a, Message> {
             ..Style::default()
         })
         .into()
-}
-
-/// 进度条（轨道定宽：卡片整体为 Shrink 宽，Fill 链在此不放量，比例用 Fixed 像素表达）。
-fn progress_bar(p: Progress) -> Element<'static, Message> {
-    const TRACK_W: f32 = 216.0;
-    let ratio = if p.total > 0 { (p.received as f32 / p.total as f32).clamp(0.0, 1.0) } else { 0.0 };
-    container(
-        container(space())
-            .width(Length::Fixed(TRACK_W * ratio))
-            .height(Length::Fill)
-            .style(|_t| Style {
-                background: Some(pal::ACCENT.into()),
-                border: border::rounded(2.0),
-                ..Style::default()
-            }),
-    )
-    .width(Length::Fixed(TRACK_W))
-    .height(Length::Fixed(3.0))
-    .style(|_t| Style {
-        background: Some(pal::BG_SUNKEN.into()),
-        border: border::rounded(2.0),
-        ..Style::default()
-    })
-    .into()
 }
 
 /// 通知区盖在内容之上（占满窗口、透明）：仅卡片本体承接点击。

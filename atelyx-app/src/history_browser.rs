@@ -17,8 +17,8 @@ use crate::{App, Message};
 
 /// 弹层卡定宽。
 pub const CARD_WIDTH: f32 = 560.0;
-/// 版本行近似高度（估高用；实际随内容自适应）。
-const ROW_H: f32 = 32.0;
+/// 版本行近似高度（估高用：卡片上下 padding 12 + 单行内容 ≈ 22，实际随内容自适应）。
+const ROW_H: f32 = 36.0;
 /// 展开预览区限高（内部滚动）。
 const PREVIEW_H: f32 = 200.0;
 /// 预览/列表顶部之外的卡头与分隔估高。
@@ -130,12 +130,12 @@ fn browser_card<'a>(
                 .font(semibold()),
             space().width(Length::Fill),
             controls::icon_button(
-                "关闭",
+                "x",
                 14.0,
                 26.0,
                 controls::Variant::Ghost,
                 Some(Message::Ui(crate::ui::UiMsg::PopupClose { window })),
-                None,
+                Some((window, "关闭".into())),
             ),
         ]
         .spacing(8)
@@ -149,12 +149,12 @@ fn browser_card<'a>(
     } else if app.history.is_empty() {
         stand_placeholder("暂无历史记录")
     } else {
-        let mut list = iced::widget::Column::<Message>::new().padding(6.0).spacing(2);
+        let mut list = iced::widget::Column::<Message>::new().padding(6.0).spacing(6);
         // 新→旧：版本列表按追加序（旧→新）存放，倒序展示；预览 diff 相对前一版
         // 空间 viewer 只读：回滚按钮禁用（写请求服务端本会 403，此处界面级降级）
         let viewer = matches!(&app.repo_kind, crate::RepoKind::Space(s) if !s.role.can_write());
         for (i, v) in app.history.iter().enumerate().rev() {
-            list = list.push(version_row(v, viewer, window));
+            list = list.push(version_row(v, viewer, app.history_expanded == Some(v.seq), window));
             if app.history_expanded == Some(v.seq) {
                 list = list.push(preview_block(app, kind, i, v));
             }
@@ -165,12 +165,12 @@ fn browser_card<'a>(
             .into()
     };
 
-    // 卡高 = 内容估高钳制在 70vh 内（超出走内滚动）
+    // 卡高 = 内容估高钳制在 70vh 内（超出走内滚动）；估高含卡片间距 6 与列表上下 padding 12
     let content_h = if app.history_loading || app.history.is_empty() {
         60.0
     } else {
-        app.history.len() as f32 * ROW_H
-            + app.history_expanded.map(|_| PREVIEW_H + 6.0).unwrap_or(0.0)
+        let n = app.history.len() as f32;
+        n * (ROW_H + 6.0) + 12.0 + app.history_expanded.map(|_| PREVIEW_H + 6.0).unwrap_or(0.0)
     };
     let confirm_h = if app.history_confirm.is_some() { CONFIRM_H } else { 0.0 };
     let card_h = (CARD_CHROME_H + content_h + confirm_h).min(viewport.height * 0.7);
@@ -202,8 +202,8 @@ fn stand_placeholder(label: &str) -> Element<'static, Message> {
         .into()
 }
 
-/// 版本行（点击展开预览）：动作 + 作者 + 摘要，右侧时间 + 回滚入口（viewer 禁用并提示）。
-fn version_row(v: &HistoryVersion, viewer: bool, window: iced::window::Id) -> Element<'_, Message> {
+/// 版本卡片：chevron + 动作 + 作者 + 摘要 + 时间，右侧回滚入口（viewer 禁用并提示）。
+fn version_row(v: &HistoryVersion, viewer: bool, expanded: bool, window: iced::window::Id) -> Element<'_, Message> {
     let action = match v.action {
         HistoryAction::Edit => "编辑",
         HistoryAction::Restore => "回滚",
@@ -211,8 +211,13 @@ fn version_row(v: &HistoryVersion, viewer: bool, window: iced::window::Id) -> El
     let seq = v.seq;
     let expand = button(
         row![
+            icon(
+                if expanded { "chevron-down" } else { "chevron-right" },
+                12.0,
+                pal::TEXT_MUTED,
+            ),
             text(action)
-                .size(pal::fs_micro())
+                .size(pal::fs_caption())
                 .color(pal::ACCENT)
                 .font(iced::Font { weight: iced::font::Weight::Medium, ..iced::Font::default() }),
             text(author_line(v)).size(pal::fs_micro()).color(pal::TEXT_SECONDARY),
@@ -220,44 +225,55 @@ fn version_row(v: &HistoryVersion, viewer: bool, window: iced::window::Id) -> El
             space().width(Length::Fill),
             text(format_ts(v.ts)).size(pal::fs_micro()).color(pal::TEXT_MUTED),
         ]
-        .spacing(10)
+        .spacing(8)
         .align_y(Vertical::Center),
     )
-    .padding(Padding::ZERO.horizontal(8.0).vertical(5.0))
+    .padding(0.0)
     .width(Length::Fill)
-    .style(|_t, status| button::Style {
-        background: matches!(status, button::Status::Hovered | button::Status::Pressed)
-            .then_some(pal::HOVER.into()),
-        border: border::rounded(pal::RADIUS_SM),
-        ..button::Style::default()
-    })
+    .style(controls::row_style(false, pal::RADIUS_SM))
     .on_press(Message::History(HistoryBrowserMsg::Toggle(seq)));
-    let rollback = controls::btn(
-        "回滚",
-        &controls::btn_sm(),
-        controls::Variant::AccentSoft,
-        (!viewer).then_some(Message::History(HistoryBrowserMsg::Ask(seq))),
-    );
-    let rollback: Element<'static, Message> = if viewer {
-        // 禁用态补悬停提示（tooltip 通道与菜单项同款）
-        iced::widget::mouse_area(rollback)
-            .on_enter(Message::Ui(crate::ui::UiMsg::HoverTip {
-                window,
-                label: "当前角色为只读".to_string(),
-                box_px: controls::btn_sm().h,
-            }))
-            .on_exit(Message::Ui(crate::ui::UiMsg::HoverTipEnd {
-                window,
-                label: "当前角色为只读".to_string(),
-            }))
-            .into()
-    } else {
-        rollback.into()
+    // 回滚：金色文字钮（viewer 无 on_press = 禁用态，内容降透明度并补只读提示）
+    let fg = if viewer { pal::ACCENT.scale_alpha(0.4) } else { pal::ACCENT };
+    let rollback_inner = row![
+        icon("rotate-ccw", 12.0, fg),
+        text("回滚").size(pal::fs_caption()).color(fg),
+    ]
+    .spacing(4)
+    .align_y(Vertical::Center);
+    let rollback: Element<'static, Message> = {
+        let widget = button(rollback_inner)
+            .padding(Padding::ZERO.horizontal(6.0).vertical(3.0))
+            .style(|_t, status| button::Style {
+                background: matches!(status, button::Status::Hovered | button::Status::Pressed)
+                    .then_some(pal::HOVER.into()),
+                border: border::rounded(pal::RADIUS_SM),
+                ..button::Style::default()
+            });
+        let widget = if viewer { widget } else { widget.on_press(Message::History(HistoryBrowserMsg::Ask(seq))) };
+        if viewer {
+            iced::widget::mouse_area(widget)
+                .on_enter(Message::Ui(crate::ui::UiMsg::HoverTip {
+                    window,
+                    label: "当前角色为只读".to_string(),
+                    box_px: controls::btn_sm().h,
+                }))
+                .on_exit(Message::Ui(crate::ui::UiMsg::HoverTipEnd {
+                    window,
+                    label: "当前角色为只读".to_string(),
+                }))
+                .into()
+        } else {
+            widget.into()
+        }
     };
-    row![expand, rollback]
-        .spacing(6)
-        .align_y(Vertical::Center)
+    container(row![expand, rollback].spacing(6).align_y(Vertical::Center))
         .width(Length::Fill)
+        .padding(Padding::ZERO.horizontal(8.0).vertical(6.0))
+        .style(|_t| Style {
+            background: Some(pal::BG_TERTIARY.into()),
+            border: border::rounded(pal::RADIUS_MD),
+            ..Style::default()
+        })
         .into()
 }
 
@@ -265,13 +281,10 @@ fn version_row(v: &HistoryVersion, viewer: bool, window: iced::window::Id) -> El
 fn confirm_bar(seq: u64, ts: i64) -> Element<'static, Message> {
     container(
         row![
-            text(format!(
-                "回滚到 {} 的版本？当前未保存的编辑将被覆盖，此操作会记录一条「回滚」历史。",
-                format_ts(ts)
-            ))
-            .size(pal::fs_caption())
-            .color(pal::TEXT_SECONDARY)
-            .width(Length::Fill),
+            text(format!("回滚到 {} 的版本？未保存的编辑将被覆盖", format_ts(ts)))
+                .size(pal::fs_caption())
+                .color(pal::TEXT_SECONDARY)
+                .width(Length::Fill),
             controls::btn(
                 "取消",
                 &controls::btn_sm(),
@@ -359,7 +372,7 @@ fn stat_line(label: String) -> Element<'static, Message> {
         .into()
 }
 
-/// 差异行追加（每行一条；差异为空不追加）。
+/// 差异行追加（每行一条；差异为空不追加）。「删除」红、「新增」绿，其余次级色。
 fn push_diff(
     mut inner: iced::widget::Column<'static, Message>,
     prev: &str,
@@ -367,7 +380,14 @@ fn push_diff(
     diff: fn(&str, &str) -> Vec<String>,
 ) -> iced::widget::Column<'static, Message> {
     for line in diff(prev, cur) {
-        inner = inner.push(text(line).size(pal::fs_micro()).color(pal::TEXT_SECONDARY));
+        let color = if line.starts_with("删除") {
+            pal::DANGER
+        } else if line.starts_with("新增") {
+            pal::SUCCESS
+        } else {
+            pal::TEXT_SECONDARY
+        };
+        inner = inner.push(text(line).size(pal::fs_micro()).color(color));
     }
     inner
 }

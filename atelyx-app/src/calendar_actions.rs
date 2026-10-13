@@ -96,6 +96,8 @@ pub struct CalendarState {
     pub draft_color: usize,
     /// 标题行内编辑会话（条目 id + 草稿；None = 无）。
     pub edit: Option<(String, String)>,
+    /// 待确认删除的日程 id（二段确认：Delete 进确认态，DeleteConfirm 才落变更）。
+    pub delete_confirm: Option<String>,
     /// 编辑输入行按压标志（全局 Press 失焦提交判定，见 controls::inline_input）。
     pub press_inside: bool,
     /// 空间写单飞（在途时变更入队，落地后续发；防并发读改写互相覆盖）。
@@ -123,7 +125,12 @@ pub enum CalendarMsg {
     EditPressInside,
     EditCommit,
     CycleColor(String),
+    /// 进入删除二段确认（行内「确认删除 / 取消」）。
     Delete(String),
+    /// 确认删除（真正落变更）。
+    DeleteConfirm(String),
+    /// 取消删除确认。
+    DeleteCancel,
     /// 日程装载回执（gen + 变更序双守卫）。
     Loaded(u64, u64, Result<Vec<CalendarItem>, String>),
     /// 变更落盘回执（本地读改写回读 / 空间 PATCH 后清单；Err 提示并回读真源）。
@@ -137,19 +144,23 @@ pub fn on_msg(app: &mut App, msg: CalendarMsg) -> Task<Message> {
     match msg {
         CalendarMsg::PrevMonth => {
             app.calendar.month_offset -= 1;
+            app.calendar.delete_confirm = None;
             Task::none()
         }
         CalendarMsg::NextMonth => {
             app.calendar.month_offset += 1;
+            app.calendar.delete_confirm = None;
             Task::none()
         }
         CalendarMsg::Today => {
             app.calendar.month_offset = 0;
             app.calendar.selected = Some(day_key(crate::now_secs() as i64 * 1000));
+            app.calendar.delete_confirm = None;
             Task::none()
         }
         CalendarMsg::SelectDay(day) => {
             app.calendar.selected = Some(day);
+            app.calendar.delete_confirm = None;
             Task::none()
         }
         CalendarMsg::DraftInput(value) => {
@@ -174,7 +185,18 @@ pub fn on_msg(app: &mut App, msg: CalendarMsg) -> Task<Message> {
         }
         CalendarMsg::EditCommit => commit_edit(app),
         CalendarMsg::CycleColor(id) => cycle_color(app, &id),
-        CalendarMsg::Delete(id) => delete_item(app, &id),
+        CalendarMsg::Delete(id) => {
+            app.calendar.delete_confirm = Some(id);
+            Task::none()
+        }
+        CalendarMsg::DeleteConfirm(id) => {
+            app.calendar.delete_confirm = None;
+            delete_item(app, &id)
+        }
+        CalendarMsg::DeleteCancel => {
+            app.calendar.delete_confirm = None;
+            Task::none()
+        }
         CalendarMsg::Loaded(gen, rev, result) => on_loaded(app, gen, rev, result),
         CalendarMsg::Committed(gen, rev, result) => on_committed(app, gen, rev, result),
         CalendarMsg::ActivityLoaded(gen, result) => on_activity(app, gen, result),

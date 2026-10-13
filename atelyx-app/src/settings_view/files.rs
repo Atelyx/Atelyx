@@ -14,7 +14,7 @@ pub fn view(app: &App) -> Element<'static, Message> {
         return container(controls::empty_state(
             "folder-tree",
             "未打开仓库",
-            "进入仓库后配置文件与路径。",
+            "打开仓库后配置",
             None,
         ))
         .width(Length::Fill)
@@ -29,7 +29,7 @@ pub fn view(app: &App) -> Element<'static, Message> {
         .attachment_folder_draft
         .clone()
         .unwrap_or_else(|| app.attachment_folder.clone().unwrap_or_default());
-    let mut col = column![].spacing(16).padding(Padding::ZERO.horizontal(20.0));
+    let mut col = column![].spacing(8).padding(Padding::ZERO.horizontal(20.0));
     if space_mode {
         col = col.push(
             text("协作空间的文件与路径设置由服务端管理")
@@ -37,7 +37,7 @@ pub fn view(app: &App) -> Element<'static, Message> {
                 .color(pal::TEXT_MUTED),
         );
     }
-    col = col.push(group_head("文件面板", "config.json", true));
+    col = col.push(group_head("文件面板", "", true));
     col = col.push(setting_row(
         "排除文件夹",
         "逗号分隔；同名文件夹不在文件树显示（重开仓库生效）",
@@ -53,7 +53,7 @@ pub fn view(app: &App) -> Element<'static, Message> {
             )
         },
     ));
-    col = col.push(group_head("附件", "config.json", true));
+    col = col.push(group_head("附件", "", true));
     col = col.push(setting_row(
         "附件文件夹",
         "导入附件的默认目录（相对仓库根，可含子路径）",

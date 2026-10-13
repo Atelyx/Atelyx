@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use iced::widget::{button, container, row, scrollable, space, text};
+use iced::widget::{button, column, container, row, scrollable, space, text};
 use iced::{Element, Length, Padding, Task};
 
 use serde::{Deserialize, Serialize};
@@ -202,25 +202,21 @@ pub(crate) fn relative_ts(secs: i64, now: i64) -> String {
 /// 最近打开视图：按当前仓库身份过滤，行点击打开（复用 OpenFile，按扩展名分流笔记/表格）。
 pub fn recent_view(app: &App) -> Element<'_, Message> {
     let Some(key) = vault_key_of(app) else {
-        return controls::empty_state(
-            "clock",
-            "未打开仓库",
-            "进入仓库后显示最近打开的文件。",
-            None,
-        );
+        return controls::empty_state("clock", "未打开仓库", "打开仓库后显示", None);
     };
     let items = recent_for(&decode(&app.ui), &key);
     if items.is_empty() {
         return controls::empty_state(
             "clock",
-            "暂无最近打开的文件",
-            "打开文件后在此快速回到最近使用的笔记与表格。",
+            "暂无最近打开",
+            "打开文件后出现在这里",
             None,
         );
     }
     let now = crate::now_secs() as i64;
     let mut col = iced::widget::Column::<Message>::new()
-        .padding(Padding::ZERO.horizontal(12.0).vertical(10.0));
+        .padding(Padding::ZERO.horizontal(12.0).vertical(10.0))
+        .spacing(6);
     for e in items {
         let name = e.file.rsplit('/').next().unwrap_or(&e.file).to_string();
         let parent = e.file.rsplit_once('/').map(|(d, _)| d.to_string()).unwrap_or_default();
@@ -230,27 +226,37 @@ pub fn recent_view(app: &App) -> Element<'_, Message> {
             container(
                 button(
                     row![
-                        icon(kind_icon, 13.0, pal::TEXT_MUTED),
-                        text(name).size(pal::fs_caption()).color(pal::TEXT_PRIMARY),
-                        text(parent).size(pal::fs_micro()).color(pal::TEXT_MUTED),
-                        space().width(Length::Fill),
-                        text(time).size(pal::fs_micro()).color(pal::TEXT_MUTED),
+                        icon(kind_icon, 14.0, pal::TEXT_MUTED),
+                        column![
+                            text(name)
+                                .size(pal::fs_body())
+                                .color(pal::TEXT_PRIMARY)
+                                .font(iced::Font { weight: iced::font::Weight::Medium, ..iced::Font::default() }),
+                            row![
+                                text(parent).size(pal::fs_micro()).color(pal::TEXT_MUTED),
+                                space().width(Length::Fill),
+                                text(time).size(pal::fs_micro()).color(pal::TEXT_MUTED),
+                            ]
+                            .width(Length::Fill),
+                        ]
+                        .spacing(2)
+                        .width(Length::Fill),
                     ]
-                    .spacing(6),
+                    .spacing(10)
+                    .align_y(iced::alignment::Vertical::Center),
                 )
                 .width(Length::Fill)
-                .padding(Padding::ZERO.horizontal(8.0).vertical(6.0))
-                .style(|_t, status| button::Style {
-                    background: matches!(
-                        status,
-                        button::Status::Hovered | button::Status::Pressed
-                    )
-                    .then_some(pal::HOVER.into()),
-                    ..button::Style::default()
-                })
+                .padding(0.0)
+                .style(controls::row_style(false, pal::RADIUS_MD))
                 .on_press(Message::OpenFile(e.file.clone())),
             )
-            .width(Length::Fill),
+            .width(Length::Fill)
+            .padding(Padding::ZERO.horizontal(10.0).vertical(8.0))
+            .style(|_t| iced::widget::container::Style {
+                background: Some(pal::BG_TERTIARY.into()),
+                border: iced::border::rounded(pal::RADIUS_MD),
+                ..iced::widget::container::Style::default()
+            }),
         );
     }
     scrollable(container(col).width(Length::Fill).height(Length::Fill))

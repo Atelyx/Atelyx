@@ -2,22 +2,21 @@
 
 use iced::alignment::Vertical;
 use iced::widget::{column, container, mouse_area, row, scrollable, space, text};
-use iced::{Element, Length, Padding, border, widget::container::Style};
+use iced::{Element, Length, Padding};
 
 use crate::commands::{self, CommandId, Scope};
-use crate::layout_view::mono;
 use crate::settings_view::group_head;
-use crate::ui::icon::icon;
+use crate::ui::controls;
 use crate::ui::palette as pal;
-use crate::ui::{UiMsg, controls};
+use crate::ui::UiMsg;
 use crate::{App, Message};
 
 pub fn view(app: &App, window: iced::window::Id) -> Element<'static, Message> {
     let resolved = commands::resolve(&app.global.command_shortcuts);
-    let mut col = column![].spacing(4).padding(Padding::ZERO.horizontal(20.0));
-    col = col.push(group_head("命令键位", "global.json", false));
+    let mut col = column![].spacing(8).padding(Padding::ZERO.horizontal(20.0));
+    col = col.push(group_head("命令键位", "", false));
     col = col.push(
-        text("点「修改」后按下新组合键；同作用域键位相同时，先登记的命令生效")
+        text("点「修改」录制新键位；冲突时先登记者生效")
             .size(pal::fs_micro())
             .color(pal::TEXT_MUTED),
     );
@@ -42,12 +41,7 @@ fn command_row(
         text("按下组合键，Esc 取消").size(pal::fs_caption()).color(pal::ACCENT).into()
     } else {
         let mut r = row![].spacing(8).align_y(Vertical::Center);
-        r = r.push(
-            text(display_keys(binding))
-                .size(pal::fs_caption())
-                .color(pal::TEXT_SECONDARY)
-                .font(mono()),
-        );
+        r = r.push(controls::kbd(display_keys(binding)));
         if let Some(mark) = conflict_mark(window, resolved, id) {
             r = r.push(mark);
         }
@@ -68,19 +62,19 @@ fn command_row(
         }
         r.into()
     };
-    container(
+    crate::settings_view::card(
         row![
             scope_badge(id.scope()),
-            text(id.label()).size(pal::fs_caption()).color(pal::TEXT_PRIMARY),
+            text(id.label())
+                .size(pal::fs_body())
+                .color(pal::TEXT_PRIMARY)
+                .font(iced::Font { weight: iced::font::Weight::Medium, ..iced::Font::default() }),
             space().width(Length::Fill),
             control,
         ]
         .spacing(10)
         .align_y(Vertical::Center),
     )
-    .width(Length::Fill)
-    .padding(Padding::ZERO.horizontal(8.0).vertical(6.0))
-    .into()
 }
 
 /// 作用域徽标（笔记 / 表格）。
@@ -89,17 +83,10 @@ fn scope_badge(scope: Scope) -> Element<'static, Message> {
         Scope::Note => ("笔记", pal::ACCENT),
         Scope::Table => ("表格", pal::TEXT_SECONDARY),
     };
-    container(text(label).size(pal::fs_micro()).color(color))
-        .padding(Padding::ZERO.horizontal(6.0).vertical(1.0))
-        .style(move |_t| Style {
-            background: Some(pal::BG_TERTIARY.into()),
-            border: border::rounded(999.0),
-            ..Style::default()
-        })
-        .into()
+    controls::badge(label, pal::BG_SUNKEN, color)
 }
 
-/// 同作用域键串冲突警示（悬停列出相撞命令；无冲突 = None）。
+/// 同作用域键串冲突警示：底色随 UiTick 心跳两态交替（呼吸感），悬停列出相撞命令。
 fn conflict_mark(
     window: iced::window::Id,
     resolved: &[(CommandId, String)],
@@ -111,9 +98,10 @@ fn conflict_mark(
     }
     let names: Vec<String> = others.iter().map(|c| c.label().to_string()).collect();
     let tip = format!("与 {} 冲突，按键时先登记的命令生效", names.join("、"));
+    let bg = if crate::now_secs() % 2 == 0 { pal::ACCENT_SOFT } else { pal::BG_TERTIARY };
     Some(
-        mouse_area(icon("triangle-alert", 13.0, pal::WARNING))
-            .on_enter(Message::Ui(UiMsg::HoverTip { window, label: tip.clone(), box_px: 20.0 }))
+        mouse_area(controls::badge("冲突", bg, pal::WARNING))
+            .on_enter(Message::Ui(UiMsg::HoverTip { window, label: tip.clone(), box_px: 24.0 }))
             .on_exit(Message::Ui(UiMsg::HoverTipEnd { window, label: tip }))
             .into(),
     )

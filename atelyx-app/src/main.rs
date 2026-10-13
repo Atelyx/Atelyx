@@ -385,8 +385,6 @@ enum Message {
     RepoHistoryLoaded(u64, Result<Vec<repohistory_view::RepoHistoryGroup>, String>),
     /// 仓库历史面板刷新（失效重取）。
     RepoHistoryRefresh,
-    /// 仓库历史分组折叠切换（键 = 文件路径）。
-    RepoHistoryToggleFold(String),
     /// 日历视图消息（日程增删改 / 月份导航 / 装载回执）。
     Calendar(calendar_actions::CalendarMsg),
     /// 打开链接（外链 / 仓库路径 / wiki）。
@@ -1136,8 +1134,6 @@ pub struct App {
     pub repo_history: Option<Result<Vec<repohistory_view::RepoHistoryGroup>, String>>,
     /// 仓库历史聚合在途。
     pub repo_history_loading: bool,
-    /// 仓库历史分组折叠覆盖（键 = 文件路径，true 折叠 / false 展开；缺省前 15 组展开，会话内记忆）。
-    pub repo_history_fold: HashMap<String, bool>,
     /// 日历视图会话态（日程清单 / 月导航 / 活动密度缓存）。
     pub calendar: calendar_actions::CalendarState,
     /// 最近打开条目存在性校验的上次发起时刻（视图展示期节流）。
@@ -1367,7 +1363,6 @@ impl App {
                 history_confirm: None,
                 repo_history: None,
                 repo_history_loading: false,
-                repo_history_fold: HashMap::new(),
                 calendar: calendar_actions::CalendarState::default(),
                 recent_checked_at: None,
                 rebuild_links: settings_view::editor::RebuildLinksState::Idle,
@@ -1909,10 +1904,6 @@ impl App {
             }
             Message::RepoHistoryLoaded(gen, result) => repohistory_view::on_loaded(self, gen, result),
             Message::RepoHistoryRefresh => repohistory_view::refresh(self),
-            Message::RepoHistoryToggleFold(file) => {
-                repohistory_view::toggle_fold(self, &file);
-                Task::none()
-            }
             Message::Calendar(m) => calendar_actions::on_msg(self, m),
             Message::OpenLink(href, form) => self.open_link(&href, form),
             Message::ImageLoaded(gen, key, result) => {
@@ -3844,7 +3835,6 @@ impl App {
         // 仓库历史面板缓存随切仓失效（进面板后重取）
         self.repo_history = None;
         self.repo_history_loading = false;
-        self.repo_history_fold.clear();
         // 日历会话态随切仓重置（日程 / 选中天 / 活动密度一并重取）
         self.calendar = calendar_actions::CalendarState::default();
         self.rebuild_links = settings_view::editor::RebuildLinksState::Idle;
@@ -5882,12 +5872,13 @@ impl App {
 
     fn subscription(&self) -> Subscription<Message> {
         // 心跳仅在有待过期通知、提醒条在途、悬停提示在途（距离收起判定）、编辑面聚焦、
-        // 远端光标在册（过期剔除节流搭载）或表格图片长按候选时挂载
+        // 远端光标在册（过期剔除节流搭载）、表格图片长按候选或快捷键页展示中（冲突警示两态闪烁）时挂载
         let need_tick = !self.notifications.is_empty()
             || self.rename_notice.is_some()
             || self.tooltip.is_some()
             || self.edit.focused
             || !self.remote_cursors.is_empty()
+            || (self.settings_open && self.settings_tab == "shortcuts")
             || self.table.as_ref().is_some_and(|t| {
                 t.view.press.as_ref().is_some_and(|p| p.img.is_some() && !p.active)
             });

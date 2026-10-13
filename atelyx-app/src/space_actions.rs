@@ -893,7 +893,6 @@ fn clear_session_state(app: &mut App) {
     // 仓库历史面板缓存随容器切换失效（进面板后重取）
     app.repo_history = None;
     app.repo_history_loading = false;
-    app.repo_history_fold.clear();
     // 日历会话态随容器切换重置（日程 / 选中天 / 活动密度一并重取）
     app.calendar = crate::calendar_actions::CalendarState::default();
     app.rebuild_links = crate::settings_view::editor::RebuildLinksState::Idle;
