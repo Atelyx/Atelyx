@@ -31,6 +31,11 @@ pub fn icon_handle() -> iced::widget::image::Handle {
         .clone()
 }
 
+/// 窗口图标（任务栏 / Alt-Tab / 窗口切换器）；构造失败回退系统默认图标。
+pub fn window_icon() -> Option<iced::window::icon::Icon> {
+    iced::window::icon::from_file_data(ICON_PNG, None).ok()
+}
+
 /// 家族名（Font::with_name 与字重选择共用）。
 pub const FONT_FAMILY: &str = "IBM Plex Sans";
 /// 展示字体家族名（品牌名）。
@@ -75,4 +80,15 @@ pub enum UiMsg {
     PopupClose { window: iced::window::Id },
     /// 关闭一条通知。
     NotifyDismiss(u64),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 内嵌图标资源损坏（重新编码出错 / 文件被换）须在测试里暴露，而不是等建窗时才表现成无图标。
+    #[test]
+    fn embedded_icon_png_decodes_into_window_icon() {
+        assert!(window_icon().is_some());
+    }
 }

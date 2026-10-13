@@ -246,6 +246,9 @@ async fn login_merges_sessions_by_device_id() {
     let list = devices.as_array().unwrap();
     assert_eq!(list.len(), 2);
     assert!(list.iter().all(|d| d["id"].as_str().unwrap() != legacy_session.as_str()));
+    // 无 deviceId 的旧会话已清理：其令牌立即失效
+    let (status, _) = ctx.get("/api/auth/devices", Some(&legacy_token), &[]).await;
+    assert_eq!(status, 401);
 }
 
 // ===== 两账号共享空间 + 内容 CRUD =====

@@ -63,6 +63,7 @@ fn panel_settings(w: &DetachedWindow) -> Settings {
         position: Position::Specific(Point::new(w.bounds.x as f32, w.bounds.y as f32)),
         exit_on_close_request: false,
         decorations: false,
+        icon: ui::window_icon(),
         ..Settings::default()
     };
     #[cfg(windows)]
@@ -1219,6 +1220,7 @@ impl App {
             min_size: Some(MIN_WINDOW_SIZE),
             exit_on_close_request: false,
             decorations: false,
+            icon: ui::window_icon(),
             ..Settings::default()
         });
         ui::icon::init();

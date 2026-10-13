@@ -30,3 +30,7 @@ windows = { version = "0.62", features = ["Win32_Foundation", "Win32_UI_Shell", 
 # 开机自启（autostart）：Linux XDG autostart 目录定位
 [target.'cfg(target_os = "linux")'.dependencies]
 dirs = "6"
+
+# exe 文件图标（资源管理器 / 开始菜单 / 快捷方式显示；任务栏图标由窗口图标承担）
+[build-dependencies]
+winresource = "0.1"
