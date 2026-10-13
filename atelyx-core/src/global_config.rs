@@ -4,6 +4,7 @@
 
 use crate::vault::{atomic_write, backup_corrupt_config};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::Path;
 
 /// 最近打开仓库列表上限。
@@ -14,6 +15,11 @@ pub const MAX_RECENT_SPACES: usize = 10;
 
 /// 登录过的服务器清单上限（与最近仓库/空间同量级口径）。
 pub const MAX_SPACE_SERVERS: usize = 10;
+
+/// 界面基准字号缺省（px）。
+const DEFAULT_FONT_SIZE: u32 = 16;
+/// 正文行宽缺省（px；0 = 不限）。
+const DEFAULT_CONTENT_WIDTH: u32 = 780;
 
 /// 最近打开的仓库（文件面板列表层展示）。
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -64,8 +70,8 @@ pub enum LastActive {
     Space { server_url: String, space_id: String },
 }
 
-/// 全局配置（`global.json`）：应用级、跨仓库共享；缺字段走默认值，未知字段忽略。
-#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+/// 全局配置（`global.json`）：应用级、跨仓库共享；缺字段按 `Default` 补齐，未知字段忽略。
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct GlobalConfig {
     /// 最近打开的仓库列表（最近打开倒序）。
@@ -80,6 +86,41 @@ pub struct GlobalConfig {
     pub last_active: Option<LastActive>,
     /// 协作展示色（远端光标 / 名单；首次登录时随机指派，应用级共享）。
     pub collab_color: Option<String>,
+    /// 界面基准字号（px，12–20）。
+    pub font_size: u32,
+    /// 启动恢复上次打开的文件。
+    pub auto_restore: bool,
+    /// 启动静默检查更新。
+    pub auto_update: bool,
+    /// 宽松换行：段内单个换行渲染为换行（关闭 = 按 Markdown 标准需空行换行）。
+    pub soft_wrap: bool,
+    /// 页面内标题：正文顶部显示文件名标题。
+    pub in_page_title: bool,
+    /// 正文行宽上限（px；0 = 不限，随面板铺满）。
+    pub content_width: u32,
+    /// 命令键位覆盖（键 = 命令 id，值 = 键串；缺项用默认表）。
+    #[serde(default)]
+    pub command_shortcuts: HashMap<String, String>,
+}
+
+impl Default for GlobalConfig {
+    fn default() -> Self {
+        Self {
+            recent_vaults: Vec::new(),
+            space_servers: Vec::new(),
+            recent_spaces: Vec::new(),
+            last_identity: None,
+            last_active: None,
+            collab_color: None,
+            font_size: DEFAULT_FONT_SIZE,
+            auto_restore: true,
+            auto_update: false,
+            soft_wrap: true,
+            in_page_title: false,
+            content_width: DEFAULT_CONTENT_WIDTH,
+            command_shortcuts: HashMap::new(),
+        }
+    }
 }
 
 impl GlobalConfig {
@@ -245,9 +286,15 @@ mod tests {
         let out = serde_json::to_string(&cfg).unwrap();
         assert!(!out.contains("theme"));
         assert!(out.contains("lastOpenedAt"));
-        // 缺 recentVaults 走默认空
+        // 缺 recentVaults 走默认空；应用级偏好按 Default 补齐（字号/行宽档位、开关态）
         let cfg: GlobalConfig = serde_json::from_str("{}").unwrap();
         assert!(cfg.recent_vaults.is_empty());
+        assert_eq!(cfg.font_size, 16);
+        assert!(cfg.auto_restore);
+        assert!(!cfg.auto_update);
+        assert!(cfg.soft_wrap);
+        assert!(!cfg.in_page_title);
+        assert_eq!(cfg.content_width, 780);
     }
 
     #[test]

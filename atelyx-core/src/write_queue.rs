@@ -9,6 +9,9 @@ enum JobKind {
     Write { path: PathBuf, content: String },
     /// 字节写：附件二进制（图片导入等）走同一 FIFO，保持与文本写盘的相对顺序。
     WriteBytes { path: PathBuf, bytes: Vec<u8> },
+    /// 批量作业：闭包内自管多文件读改写（全库批量重建等），整体占一个执行序位，
+    /// 内部多次写盘不与其它作业交错。
+    Bulk(Box<dyn FnOnce() -> Result<(), String> + Send>),
     /// 旗标作业：不写盘，落地即代表排在其前提交的全部写盘已完成。
     Barrier,
 }
@@ -67,6 +70,26 @@ impl WriteQueue {
         rx.await.map_err(|_| "写盘队列已终止".to_string())?
     }
 
+    /// 提交一次批量作业：闭包在队列工作线程内执行（内部多文件读改写整体串行，
+    /// 不与其它写盘作业交错）；排在其前的写盘全部落地后才开始，回执闭包结果。
+    /// 闭包 panic 不终止队列线程，回执 Err；仓库根等会话参数由调用方在提交时捕获，
+    /// 执行期不重读当前会话（排队期间切仓不改变作业目标）。
+    pub async fn bulk<T: Send + 'static>(
+        &self,
+        job: impl FnOnce() -> Result<T, String> + Send + 'static,
+    ) -> Result<T, String> {
+        let (value_tx, value_rx) = tokio::sync::oneshot::channel();
+        let boxed: Box<dyn FnOnce() -> Result<(), String> + Send> = Box::new(move || {
+            // panic 被拦截为 Err 回执：worker 线程常驻，闭包炸掉会拖死后续全部写盘
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job))
+                .unwrap_or_else(|_| Err("内部写作业异常终止".to_string()));
+            value_tx.send(outcome).map_err(|_| "批量作业回执接收端已关闭".to_string())
+        });
+        let rx = self.push(JobKind::Bulk(boxed));
+        rx.await.map_err(|_| "写盘队列已终止".to_string())??;
+        value_rx.await.map_err(|_| "写盘队列已终止".to_string())?
+    }
+
     /// 等待此前提交的全部写盘落地（不含本调用之后提交的）。
     pub async fn drain(&self) -> Result<(), String> {
         let rx = self.push(JobKind::Barrier);
@@ -96,6 +119,7 @@ fn worker(inner: Arc<QueueInner>) {
         let result = match job.kind {
             JobKind::Write { path, content } => crate::vault::atomic_write(&path, &content),
             JobKind::WriteBytes { path, bytes } => crate::vault::atomic_write_bytes(&path, &bytes),
+            JobKind::Bulk(job) => job(),
             JobKind::Barrier => Ok(()),
         };
         let _ = job.done.send(result);
@@ -132,6 +156,48 @@ mod tests {
         let queue = WriteQueue::new();
         let err = queue.write(blocker.join("child.md"), "x".into()).await;
         assert!(err.is_err());
+    }
+
+    #[tokio::test]
+    async fn bulk_job_runs_between_writes_in_order() {
+        let tmp = crate::vault::test_support::TempDir::new("wq-bulk");
+        let queue = WriteQueue::new();
+        let p1 = tmp.join("a.md");
+        let p2 = tmp.join("b.md");
+        let p3 = tmp.join("c.md");
+        queue.write(p1.clone(), "1".into()).await.unwrap();
+        // 批量作业闭包内多文件读改写：整体串行，前序写已落地、后序写未开始
+        let probe1 = p1.clone();
+        let probe3 = p3.clone();
+        let bulk_path = tmp.join("bulk.md");
+        queue
+            .bulk(move || {
+                assert_eq!(std::fs::read_to_string(&probe1).unwrap(), "1");
+                assert!(!probe3.exists());
+                std::fs::write(&bulk_path, "bulk").unwrap();
+                Ok(())
+            })
+            .await
+            .unwrap();
+        queue.write(p3.clone(), "3".into()).await.unwrap();
+        assert_eq!(std::fs::read_to_string(p2).unwrap_or_default(), "");
+        assert_eq!(std::fs::read_to_string(tmp.join("bulk.md")).unwrap(), "bulk");
+        // 闭包错误原样回执
+        let err: Result<(), String> = queue.bulk(|| Err("失败".into())).await;
+        assert_eq!(err.unwrap_err(), "失败");
+    }
+
+    #[tokio::test]
+    async fn bulk_job_panic_returns_err_and_queue_survives() {
+        let tmp = crate::vault::test_support::TempDir::new("wq-panic");
+        let queue = WriteQueue::new();
+        // 闭包 panic 被拦截为 Err 回执，不杀死常驻 worker
+        let err: Result<(), String> = queue.bulk(|| -> Result<(), String> { panic!("boom") }).await;
+        assert_eq!(err.unwrap_err(), "内部写作业异常终止");
+        // panic 后队列仍可用：后续写盘照常落地
+        let path = tmp.join("after.md");
+        queue.write(path.clone(), "ok".into()).await.unwrap();
+        assert_eq!(read(path).await, "ok");
     }
 
     #[tokio::test]

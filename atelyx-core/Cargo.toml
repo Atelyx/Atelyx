@@ -35,6 +35,9 @@ yrs = "0.28"
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["rustls-tls-webpki-roots", "connect"] }
 # 协作空间客户端（space_client）：错误类型与来源信息
 thiserror = "2"
+# 自动更新（updater）：安装包 sha256 流式校验
+sha2 = "0.10"
+hex = "0.4"
 # 协作帧泵（collab）：tungstenite 流的 Sink/Stream 组合子
 futures-util = "0.3"
 

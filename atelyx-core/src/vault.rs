@@ -1244,7 +1244,7 @@ pub fn read_file_bytes(root: &Path, file: &str) -> Result<Vec<u8>, String> {
 // ===== 仓库级配置（.atelyx/config.json）=====
 
 /// 供应商下的单个模型：id = API 请求用的模型名；nickname = 可选显示昵称（缺省 = id）。
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct VaultModel {
     pub id: String,
@@ -1253,8 +1253,8 @@ pub struct VaultModel {
 }
 
 /// 仓库级 AI 供应商（磁盘格式，默认**不含 api_key**——key 走 keychain 条目
-/// `provider-<sha256(root)>-<id>`；仅 `syncKeys` 开启时随仓库落盘 apiKey，多设备同步）。
-/// 运行时含 key 的 `ProviderConfig` 由调用方填充。
+/// `provider-<sha256(root)>.<id>`，root = 仓库根（本地）或「服务器地址/空间 id」（空间）；
+/// 仅 `syncKeys` 开启时随仓库落盘 apiKey，多设备同步）。运行时含 key 的 `ProviderConfig` 由调用方填充。
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct VaultProvider {
@@ -1269,8 +1269,22 @@ pub struct VaultProvider {
     pub api_key: Option<String>,
 }
 
+/// 手写 Debug：key 字段只输出有无标记，不落明文（Debug 被日志/消息派生链引用）。
+impl std::fmt::Debug for VaultProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VaultProvider")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("base_url", &self.base_url)
+            .field("models", &self.models)
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
 /// 仓库级搜索源配置（默认**不含 API key**——Tavily key 走 keychain 条目
-/// `provider-<sha256(root)>-search-tavily`；仅 `syncKeys` 开启时随仓库落盘 tavily_api_key）。
+/// `provider-<sha256(root)>.search-tavily`（root 口径同 VaultProvider）；仅 `syncKeys`
+/// 开启时随仓库落盘 tavily_api_key）。
 #[derive(Serialize, Deserialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct VaultSearchConfig {
@@ -1283,12 +1297,23 @@ pub struct VaultSearchConfig {
     pub tavily_api_key: Option<String>,
 }
 
+/// 手写 Debug：key 字段只输出有无标记，不落明文（Debug 被日志/消息派生链引用）。
+impl std::fmt::Debug for VaultSearchConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VaultSearchConfig")
+            .field("provider", &self.provider)
+            .field("searxng_url", &self.searxng_url)
+            .field("tavily_api_key", &self.tavily_api_key.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
 /// 仓库级配置（默认**不含 API key**——key 走 keychain，条目按仓库隔离；
 /// 仅 `syncKeys` 开启时 providers/search 落盘 key 字段，随仓库同步多设备）。
 /// 主题/强调色/字号/字体/自动恢复开关为应用级（`commands/global.rs` 的 `GlobalConfig`）。
 /// serde 类型层守边界：未开启时调用方剥离 key 字段再写盘；
 /// `skip_serializing_if` 让无覆盖字段不落盘，保持 config.json 干净（{} = 无覆盖）。
-#[derive(Serialize, Deserialize, Clone, Default)]
+#[derive(Serialize, Deserialize, Clone, Default, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct VaultConfig {
     /// 仓库级默认模型（模型服务 tab 配置；缺省 = 未指定，跟随默认的对话请求报错提示）。
@@ -1297,12 +1322,12 @@ pub struct VaultConfig {
     /// 仓库级默认模型所属供应商（与 model 配对固定供应商；缺省 = 调用方按 model 名反查首个命中，重选后落盘）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_provider_id: Option<String>,
-    /// 仓库级 AI 供应商列表（默认无 key；key 走 keychain 条目 `provider-<sha256(root)>-<id>`，
+    /// 仓库级 AI 供应商列表（默认无 key；key 走 keychain 条目 `provider-<sha256(root)>.<id>`，
     /// `syncKeys` 开启时随仓库落盘 apiKey）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub providers: Option<Vec<VaultProvider>>,
     /// 仓库级搜索源配置（默认无 key；Tavily key 走 keychain 条目
-    /// `provider-<sha256(root)>-search-tavily`，`syncKeys` 开启时随仓库落盘 tavily_api_key）。
+    /// `provider-<sha256(root)>.search-tavily`，`syncKeys` 开启时随仓库落盘 tavily_api_key）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub search: Option<VaultSearchConfig>,
     /// API key 是否随仓库保存（多设备同步）：开启后 key 明文落盘本文件随仓库同步；
@@ -1568,8 +1593,11 @@ pub fn write_prompt_notes_file(root: &Path, files: &[String]) -> Result<(), Stri
 // Agent = 可复用对话预设（名称 + 系统提示词 + 工具），对话节点/面板按 id 引用；
 // 单独落盘避免混入配置字段（与 prompt-notes.json 同策略）。
 
+/// agents.json 的 schema 版本（协作空间写盘同源引用，与本地写函数同一口径）。
+pub const AGENTS_SCHEMA: &str = "atelyx-agents/v1";
+
 /// 单条 Agent 配置（字段 camelCase）。
-#[derive(Serialize, Deserialize, Clone, Default)]
+#[derive(Serialize, Deserialize, Clone, Default, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentConfig {
     pub id: String,
@@ -1608,7 +1636,7 @@ pub fn read_agents_file(root: &Path) -> Result<Vec<AgentConfig>, String> {
 pub fn write_agents_file(root: &Path, agents: &[AgentConfig]) -> Result<(), String> {
     let path = root.join(".atelyx").join("agents.json");
     let file = AgentConfigFile {
-        schema: "atelyx-agents/v1".to_string(),
+        schema: AGENTS_SCHEMA.to_string(),
         agents: agents.to_vec(),
     };
     let json = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
@@ -1696,7 +1724,7 @@ pub struct ChatSessionMeta {
 }
 
 /// 面板级模型覆盖（优先于仓库默认模型）。
-#[derive(Serialize, Deserialize, Clone, Default)]
+#[derive(Serialize, Deserialize, Clone, Default, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct EditorChatModelOverride {
     pub provider_id: String,
