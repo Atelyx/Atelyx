@@ -14,6 +14,7 @@ use iced::{Color, Element, Font, Length, Padding, Point, Rectangle, Size, border
 use atelyx_core::global_config::RecentVault;
 use atelyx_core::layout::{self, AppUiState, LayoutNode, TabItem};
 
+use crate::settings_view::ai;
 use crate::ui::controls::{self, Variant};
 use crate::ui::icon::icon;
 use crate::ui::menu::MenuEntry;
@@ -144,7 +145,7 @@ fn approx_tab_width(label: &str, locked: bool, has_file: bool) -> f32 {
 }
 
 /// 等宽字体（计数/扩展名标签）。
-fn mono() -> Font {
+pub(crate) fn mono() -> Font {
     Font {
         family: iced::font::Family::Monospace,
         ..Font::with_name(FONT_FAMILY)
@@ -177,6 +178,8 @@ pub enum PopupState {
     DetachedPanelMenu { window_id: String },
     DetachedTabContext { window_id: String, tab_id: String },
     SortMenu,
+    /// 设置-工作区：启动场景选择（场景列表 + 跟随当前）。
+    EntrySceneMenu,
     FileMenu { rel: String, is_dir: bool, is_root: bool },
     /// 最近仓库行菜单（root = 目标仓库根）。
     VaultMenu { root: String },
@@ -190,6 +193,10 @@ pub enum PopupState {
     SpaceJoin,
     /// 协作空间行菜单（server_url + space_id）。
     SpaceRowMenu { server_url: String, space_id: String },
+    /// 成员管理（激活空间；数据取 App.space_members 缓存）。
+    SpaceMembers,
+    /// 邀请码管理（激活空间且 owner；表单草稿在 App.space_invite_form）。
+    SpaceInvite,
     NoteMenu,
     /// 属性面板类型切换菜单（属性行序号）。
     PropTypeMenu { index: usize },
@@ -225,6 +232,22 @@ pub enum PopupState {
     TableLightboxMenu,
     /// 表格：工具条视图切换下拉（内置表格）。
     TableViewMenu,
+    /// 设置-AI：添加供应商（预设 / 自定义）。
+    AiProviderAddMenu,
+    /// 设置-AI：模型下拉（for_naming = 话题命名模型，选项不含「不指定」）。
+    AiModelMenu { for_naming: bool },
+    /// 设置-AI：话题自动命名模式。
+    AiNamingMenu,
+    /// 设置-AI：Agent 系统提示词选择。
+    AiAgentPromptMenu,
+    /// 设置-AI：删除供应商二段确认（pane 1 = 确认）。
+    AiProviderDeleteMenu,
+    /// 设置-AI：删除 Agent 二段确认（pane 1 = 确认）。
+    AiAgentDeleteMenu,
+    /// 设置-AI：搜索源下拉。
+    AiSearchProviderMenu,
+    /// 历史记录弹层（居中模态；kind+file 定位侧文件）。
+    HistoryBrowser { kind: atelyx_core::history::HistoryKind, file: String },
 }
 
 impl PopupState {
@@ -237,6 +260,7 @@ impl PopupState {
             PopupState::ViewPicker { .. } => 160.0,
             PopupState::DetachedPanelMenu { .. } => 160.0,
             PopupState::SortMenu => 160.0,
+            PopupState::EntrySceneMenu => 176.0,
             // 文件/文件夹菜单 176；最近仓库行菜单 192
             PopupState::FileMenu { .. } => 176.0,
             PopupState::VaultMenu { .. } => 192.0,
@@ -245,6 +269,9 @@ impl PopupState {
             PopupState::SpaceCreate => 260.0,
             PopupState::SpaceJoin => 260.0,
             PopupState::SpaceRowMenu { .. } => 176.0,
+            // 成员行带 @username 与角色徽标；邀请码表单含两个数字输入
+            PopupState::SpaceMembers => 320.0,
+            PopupState::SpaceInvite => 320.0,
             PopupState::NoteMenu => 144.0,
             PopupState::PropTypeMenu { .. } => 128.0,
             PopupState::TableCellMenu => 128.0,
@@ -264,6 +291,15 @@ impl PopupState {
             PopupState::TableSelectMenu { .. } => 144.0,
             PopupState::TableLightboxMenu => 128.0,
             PopupState::TableViewMenu => 96.0,
+            // AI 设置：模型 id / 笔记名可能较长，给足一行的宽度
+            PopupState::AiProviderAddMenu => 168.0,
+            PopupState::AiModelMenu { .. } => 224.0,
+            PopupState::AiNamingMenu => 144.0,
+            PopupState::AiAgentPromptMenu => 208.0,
+            PopupState::AiProviderDeleteMenu | PopupState::AiAgentDeleteMenu => 208.0,
+            PopupState::AiSearchProviderMenu => 144.0,
+            // 居中模态不走锚点几何，估高由 history_browser 自行钳制
+            PopupState::HistoryBrowser { .. } => crate::history_browser::CARD_WIDTH,
         }
     }
 }
@@ -305,7 +341,7 @@ fn ctx_popup(window: iced::window::Id, cursor: Point, state: PopupState) -> Mess
 /// 主窗口：标题栏 + 内容（设置整页或面板网格）+ 状态栏，顶层叠弹层/提示/通知。
 pub fn main_view<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, Message> {
     let content: Element<'a, Message> = if app.settings_open {
-        settings_view(app)
+        crate::settings_view::settings_view(app, window)
     } else {
         // 把手悬停态：光标命中检测与渲染同源（enumerate_dividers 几何）
         let cursor = app.cursor_for(window);
@@ -440,9 +476,9 @@ fn with_overlays<'a>(
         root = root.push(edge_resize_bands(window));
     }
 
-    // 弹层（同窗口至多一个；捕获层点击 = 外点关闭）
+    // 弹层（同窗口至多一个；捕获层点击 = 外点关闭；历史记录模态另行居中渲染）
     if let Some((w, open)) = &app.popup {
-        if *w == window {
+        if *w == window && !matches!(open.state, PopupState::HistoryBrowser { .. }) {
             let (content, height) = popup_element(app, &open.state, app.popup_pane, window);
             let spec = PopupSpec {
                 anchor: open.point,
@@ -460,10 +496,15 @@ fn with_overlays<'a>(
         }
     }
 
+    // 历史记录模态（优先级在锚点弹层之上、通知之下）
+    if let Some(el) = crate::history_browser::overlay(app, window, viewport) {
+        root = root.push(el);
+    }
+
     // 悬停提示：跟随光标（锚在光标下方半边长 + 4），视口钳制 + 上下翻转
     if let Some((w, label, _, shown, _, _)) = &app.tooltip {
         if *w == window && *shown {
-            let tip = container(text(label.clone()).size(pal::FS_MICRO).color(pal::TEXT_SECONDARY))
+            let tip = container(text(label.clone()).size(pal::fs_micro()).color(pal::TEXT_SECONDARY))
                 .padding(Padding::ZERO.horizontal(8.0).vertical(4.0))
                 .style(|_t| Style {
                     background: Some(pal::BG_OVERLAY.into()),
@@ -471,7 +512,7 @@ fn with_overlays<'a>(
                     ..Style::default()
                 });
             let pos = app.cursor_for(window);
-            let tip_w = (estimate_text_width(label, pal::FS_MICRO) + 16.0).min(260.0);
+            let tip_w = (estimate_text_width(label, pal::fs_micro()) + 16.0).min(260.0);
             let tip_h = 16.0 + 8.0;
             let half = app.tooltip_half.unwrap_or(14.0);
             let spec = PopupSpec {
@@ -502,7 +543,7 @@ fn with_overlays<'a>(
                 let ghost = container(
                     row![
                         icon(view_icon(&drag.view), 13.0, pal::TEXT_PRIMARY),
-                        text(drag.label.clone()).size(pal::FS_CAPTION).color(pal::TEXT_PRIMARY),
+                        text(drag.label.clone()).size(pal::fs_caption()).color(pal::TEXT_PRIMARY),
                     ]
                     .spacing(6),
                 )
@@ -542,14 +583,14 @@ fn with_overlays<'a>(
                 let mut card = column![
                     row![
                         icon(icon_name, 13.0, pal::TEXT_PRIMARY),
-                        text(drag.label.clone()).size(pal::FS_CAPTION).color(pal::TEXT_PRIMARY),
+                        text(drag.label.clone()).size(pal::fs_caption()).color(pal::TEXT_PRIMARY),
                     ]
                     .spacing(6),
                 ]
                 .spacing(2);
                 if let Some(hint) = hint {
                     card = card.push(
-                        text(hint).size(pal::FS_MICRO).color(pal::TEXT_SECONDARY),
+                        text(hint).size(pal::fs_micro()).color(pal::TEXT_SECONDARY),
                     );
                 }
                 let ghost = container(card)
@@ -645,7 +686,7 @@ fn titlebar<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, Message> 
     let selector = button(
         container(
             row![
-                text(ellipsize(&scene_name, 120.0, pal::FS_CAPTION)).size(pal::FS_CAPTION).color(pal::TEXT_SECONDARY),
+                text(ellipsize(&scene_name, 120.0, pal::fs_caption())).size(pal::fs_caption()).color(pal::TEXT_SECONDARY),
                 icon("chevron-down", 12.0, pal::TEXT_SECONDARY),
             ]
             .spacing(4),
@@ -691,7 +732,7 @@ fn titlebar<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, Message> 
             ..Style::default()
         }),
         text(BRAND_TEXT)
-            .size(pal::FS_CAPTION)
+            .size(pal::fs_caption())
             .color(pal::TEXT_SECONDARY)
             .font(crate::ui::display())
             .width(Length::Fixed(estimate_text_width(BRAND_TEXT, 12.0))),
@@ -767,7 +808,7 @@ fn layout_tab(
         )
     } else {
         text(ellipsize(name, UiMetrics::TAB_TEXT_MAX_W, 12.0).to_string())
-            .size(pal::FS_CAPTION)
+            .size(pal::fs_caption())
             .color(text_color)
             .into()
     };
@@ -874,7 +915,7 @@ fn status_bar(app: &App) -> Element<'static, Message> {
     let mut left = row![
         row![
             icon(icon_name, 12.0, pal::TEXT_MUTED),
-            text(name).size(pal::FS_MICRO).color(pal::TEXT_SECONDARY),
+            text(name).size(pal::fs_micro()).color(pal::TEXT_SECONDARY),
         ]
         .spacing(6),
     ]
@@ -884,7 +925,7 @@ fn status_bar(app: &App) -> Element<'static, Message> {
             .push(vrule())
             .push(
                 text(format!("{n} 文件"))
-                    .size(pal::FS_MICRO)
+                    .size(pal::fs_micro())
                     .color(pal::TEXT_MUTED)
                     .font(mono()),
             );
@@ -917,18 +958,6 @@ fn hline() -> Element<'static, Message> {
     container(space())
         .width(Length::Fill)
         .height(Length::Fixed(1.0))
-        .style(|_t| Style {
-            background: Some(pal::BORDER.into()),
-            ..Style::default()
-        })
-        .into()
-}
-
-/// 竖向细线（左右分栏分隔）。
-fn vline() -> Element<'static, Message> {
-    container(space())
-        .width(Length::Fixed(1.0))
-        .height(Length::Fill)
         .style(|_t| Style {
             background: Some(pal::BORDER.into()),
             ..Style::default()
@@ -1245,7 +1274,7 @@ fn panel_tab<'a>(
     label_row = label_row.push(icon(view_icon(&t.view), 13.0, text_color));
     label_row = label_row.push(
         text(ellipsize(&label, UiMetrics::TAB_TEXT_MAX_W, 12.0))
-            .size(pal::FS_CAPTION)
+            .size(pal::fs_caption())
             .color(text_color),
     );
     if t.locked {
@@ -1337,9 +1366,9 @@ fn note_status_pill(app: &App) -> Option<Element<'static, Message>> {
             container(
                 row![
                     text(ellipsize(app.save_error.as_deref().unwrap_or("保存失败"), 160.0, 11.0))
-                        .size(pal::FS_MICRO)
+                        .size(pal::fs_micro())
                         .color(pal::DANGER),
-                    button(text("重试").size(pal::FS_MICRO).color(pal::DANGER))
+                    button(text("重试").size(pal::fs_micro()).color(pal::DANGER))
                         .padding(Padding::ZERO.horizontal(6.0).vertical(1.0))
                         .style(|_t, _s| button::Style {
                             background: Some(pal::DANGER.scale_alpha(0.2).into()),
@@ -1369,7 +1398,7 @@ fn note_status_pill(app: &App) -> Option<Element<'static, Message>> {
     }
 }
 
-/// 按视图 kind 分派内容（files/note/search/inspector/table/collabroom 可用，其余占位）。
+/// 按视图 kind 分派内容（files/note/search/inspector/table/collabroom/recent/repohistory/calendar 可用，其余占位）。
 fn view_content<'a>(app: &'a App, window: iced::window::Id, kind: &str) -> Element<'a, Message> {
     match kind {
         "files" => files_view(app),
@@ -1378,84 +1407,124 @@ fn view_content<'a>(app: &'a App, window: iced::window::Id, kind: &str) -> Eleme
         "inspector" => inspector_view(app, window),
         "table" => crate::table_view::table_view(app, window),
         "collabroom" => collab_room_view(app),
+        "recent" => crate::recent_view::recent_view(app),
+        "repohistory" => crate::repohistory_view::repohistory_view(app, window),
+        "calendar" => crate::calendar_view::calendar_view(app, window),
         kind => placeholder_view(kind),
     }
 }
 
-/// 协作房间视图：空间身份 + 在线名册（昵称 / 设备 / 正在编辑，点击打开）。
+/// 协作房间视图：连接状态头部 + 空间成员名册 + 在线设备（打开文件可点开）+ 设置入口。
 fn collab_room_view(app: &App) -> Element<'_, Message> {
     let mut col = iced::widget::Column::<Message>::new().padding(Padding::ZERO.horizontal(12.0).vertical(10.0));
     match &app.repo_kind {
-        crate::RepoKind::Space(session) => {
-            col = col.push(group_head(&format!("{} @ {}", session.name, session.server_url), session.role.as_str(), false));
+        crate::RepoKind::Space(_) => {
+            // 连接状态头部（帧泵 Ready 置位 / 断开与摘泵清零）+ 设置入口
+            let (net_icon, net_label, net_color) = if app.space_connected {
+                ("wifi", "已连接", pal::SUCCESS)
+            } else {
+                ("wifi-off", "未连接", pal::TEXT_MUTED)
+            };
             col = col.push(
                 container(
                     row![
-                        icon("users", 13.0, pal::ACCENT),
-                        text(format!("在线 {} 人", app.space_peers.len()))
-                            .size(pal::FS_CAPTION)
-                            .color(pal::TEXT_SECONDARY),
-                    ]
-                    .spacing(6),
-                )
-                .padding(Padding::ZERO.vertical(2.0)),
-            );
-            for peer in &app.space_peers {
-                let editing = peer
-                    .presence
-                    .as_ref()
-                    .and_then(|p| p.get("file").and_then(|f| f.as_str()))
-                    .unwrap_or("")
-                    .to_string();
-                let editing_label = if editing.is_empty() {
-                    String::new()
-                } else {
-                    editing.rsplit('/').next().unwrap_or(&editing).to_string()
-                };
-                let color = parse_hex_color(&peer.color).unwrap_or(pal::TEXT_MUTED);
-                let label: Element<'static, Message> = if editing_label.is_empty() {
-                    text(peer.nickname.clone()).size(pal::FS_MICRO).color(pal::TEXT_MUTED).into()
-                } else {
-                    text(format!("正在编辑 {}", editing_label))
-                        .size(pal::FS_MICRO)
-                        .color(pal::TEXT_MUTED)
-                        .into()
-                };
-                let open = (!editing.is_empty()).then(|| {
-                    Message::OpenFile(editing.clone())
-                });
-                col = col.push(
-                    container(
+                        icon(net_icon, 13.0, net_color),
+                        text(net_label).size(pal::fs_caption()).color(net_color),
+                        space().width(Length::Fill),
                         button(
                             row![
-                                container(space())
-                                    .width(Length::Fixed(8.0))
-                                    .height(Length::Fixed(8.0))
-                                    .style(move |_t| Style {
-                                        background: Some(color.into()),
-                                        border: border::rounded(999.0),
-                                        ..Style::default()
-                                    }),
-                                text(peer.nickname.clone())
-                                    .size(pal::FS_CAPTION)
-                                    .color(pal::TEXT_PRIMARY),
-                                text(peer.device_name.clone())
-                                    .size(pal::FS_MICRO)
-                                    .color(pal::TEXT_MUTED),
-                                space().width(Length::Fill),
-                                label,
+                                icon("settings", 12.0, pal::TEXT_SECONDARY),
+                                text("协作设置").size(pal::fs_micro()).color(pal::TEXT_SECONDARY),
                             ]
-                            .spacing(6),
+                            .spacing(4),
                         )
-                        .padding(Padding::ZERO.horizontal(8.0).vertical(6.0))
+                        .padding(Padding::ZERO.horizontal(8.0).vertical(3.0))
                         .style(|_t, status| button::Style {
                             background: matches!(status, button::Status::Hovered | button::Status::Pressed)
                                 .then_some(pal::HOVER.into()),
+                            border: border::rounded(pal::RADIUS_SM),
                             ..Default::default()
                         })
-                        .on_press_maybe(open),
+                        .on_press(Message::Space(crate::SpaceMsg::OpenCollabSettings)),
+                    ]
+                    .spacing(6),
+                )
+                .width(Length::Fill)
+                .padding(Padding::ZERO.vertical(2.0)),
+            );
+
+            // 空间成员名册（list_members 缓存，展示中由 members_tick 懒装载）
+            let roster_count = app.space_members.as_ref().map(Vec::len).unwrap_or(0);
+            col = col.push(crate::settings_view::group_head("空间成员", &format!("{roster_count} 人"), false));
+            match (&app.space_members_error, app.space_members.as_ref()) {
+                (Some(err), _) => {
+                    col = col.push(
+                        text(format!("成员名册加载失败：{err}"))
+                            .size(pal::fs_micro())
+                            .color(pal::DANGER),
+                    );
+                }
+                (None, Some(list)) => {
+                    for m in list {
+                        col = col.push(
+                            container(
+                                row![
+                                    text(m.display_name.clone())
+                                        .size(pal::fs_caption())
+                                        .color(pal::TEXT_PRIMARY),
+                                    text(format!("@{}", m.username))
+                                        .size(pal::fs_micro())
+                                        .color(pal::TEXT_MUTED),
+                                    space().width(Length::Fill),
+                                    role_badge(m.role),
+                                ]
+                                .spacing(6),
+                            )
+                            .width(Length::Fill)
+                            .padding(Padding::ZERO.vertical(3.0)),
+                        );
+                    }
+                }
+                (None, None) => {
+                    col = col.push(
+                        text(if app.space_members_loading { "加载中…" } else { "暂无名册" })
+                            .size(pal::fs_micro())
+                            .color(pal::TEXT_MUTED),
+                    );
+                }
+            }
+
+            // 在线设备（presence）：自己一行 + 他人按「昵称::设备」合并，打开文件点击即开
+            col = col.push(crate::settings_view::group_head(
+                "在线设备",
+                &format!("{} 台在线", app.space_peers.len() + 1),
+                false,
+            ));
+            col = col.push(device_row(
+                app.global
+                    .last_identity
+                    .as_ref()
+                    .map(|i| i.display_name.clone())
+                    .unwrap_or_else(|| "用户".into()),
+                app.global
+                    .collab_color
+                    .clone()
+                    .unwrap_or_else(|| crate::space_actions::DEFAULT_COLLAB_COLOR.into()),
+                crate::space_actions::DEFAULT_DEVICE_NAME.to_string(),
+                crate::space_actions::open_file_paths(app),
+                true,
+            ));
+            for (nickname, device, color, files) in merge_peers(&app.space_peers) {
+                col = col.push(device_row(nickname, color, device, files, false));
+            }
+            if app.space_peers.is_empty() {
+                col = col.push(
+                    container(
+                        text(if app.space_connected { "当前空间没有其他设备在线" } else { "连接中…" })
+                            .size(pal::fs_micro())
+                            .color(pal::TEXT_MUTED),
                     )
-                    .width(Length::Fill),
+                    .padding(Padding::ZERO.vertical(3.0)),
                 );
             }
         }
@@ -1474,11 +1543,99 @@ fn collab_room_view(app: &App) -> Element<'_, Message> {
         .into()
 }
 
+/// 在线设备行：色点 + 昵称（自己标「我」）+ 设备名灰字 + 打开文件清单（点击打开）。
+fn device_row(
+    nickname: String,
+    color_hex: String,
+    device: String,
+    files: Vec<String>,
+    is_self: bool,
+) -> Element<'static, Message> {
+    let color = parse_hex_color(&color_hex).unwrap_or(pal::TEXT_MUTED);
+    let mut head = row![
+        container(space())
+            .width(Length::Fixed(8.0))
+            .height(Length::Fixed(8.0))
+            .style(move |_t| Style {
+                background: Some(color.into()),
+                border: border::rounded(999.0),
+                ..Style::default()
+            }),
+        text(nickname).size(pal::fs_caption()).color(pal::TEXT_PRIMARY),
+    ]
+    .spacing(6);
+    if is_self {
+        head = head.push(mini_badge("我", pal::ACCENT));
+    }
+    head = head.push(text(device).size(pal::fs_micro()).color(pal::TEXT_MUTED));
+    let mut col = iced::widget::Column::<Message>::new()
+        .spacing(2)
+        .push(container(head.width(Length::Fill)).padding(Padding::ZERO.vertical(2.0)));
+    if files.is_empty() {
+        col = col.push(
+            container(text("暂无打开文件").size(pal::fs_micro()).color(pal::TEXT_MUTED))
+                .padding(Padding::ZERO.left(14.0)),
+        );
+    } else {
+        for rel in files {
+            let name = rel.rsplit('/').next().unwrap_or(&rel).to_string();
+            col = col.push(
+                container(
+                    button(
+                        row![
+                            icon(file_icon(&name), 11.0, pal::TEXT_SECONDARY),
+                            text(name).size(pal::fs_micro()).color(pal::TEXT_SECONDARY),
+                        ]
+                        .spacing(4),
+                    )
+                    .padding(Padding::ZERO.horizontal(4.0).vertical(1.0))
+                    .style(|_t, status| button::Style {
+                        background: matches!(status, button::Status::Hovered | button::Status::Pressed)
+                            .then_some(pal::HOVER.into()),
+                        border: border::rounded(pal::RADIUS_XS),
+                        ..Default::default()
+                    })
+                    .on_press(Message::OpenFile(rel)),
+                )
+                .padding(Padding::ZERO.left(14.0)),
+            );
+        }
+    }
+    container(col)
+        .width(Length::Fill)
+        .padding(Padding::ZERO.vertical(2.0))
+        .into()
+}
+
+/// 在线设备按「昵称::设备」合并（同身份多连接）；打开文件并集去重，色取首条。
+fn merge_peers(
+    peers: &[atelyx_core::collab::PeerInfo],
+) -> Vec<(String, String, String, Vec<String>)> {
+    let mut rows: Vec<(String, String, String, Vec<String>)> = Vec::new();
+    for p in peers {
+        let files = crate::space_actions::peer_open_files(p.presence.as_ref());
+        match rows
+            .iter_mut()
+            .find(|(n, d, _, _)| *n == p.nickname && *d == p.device_name)
+        {
+            Some(entry) => {
+                for f in files {
+                    if !entry.3.contains(&f) {
+                        entry.3.push(f);
+                    }
+                }
+            }
+            None => rows.push((p.nickname.clone(), p.device_name.clone(), p.color.clone(), files)),
+        }
+    }
+    rows
+}
+
 /// 搜索视图：模式下拉（按文件名可用；全局/按标签为占位禁用）+ 实时过滤 + 结果行点击打开。
 fn search_view(app: &App) -> Element<'_, Message> {
     let mode_chip = |label: &'static str, enabled: bool| {
         let color = if enabled { pal::TEXT_PRIMARY } else { pal::TEXT_MUTED };
-        button(text(label).size(pal::FS_MICRO).color(color))
+        button(text(label).size(pal::fs_micro()).color(color))
             .padding(Padding::ZERO.horizontal(8.0).vertical(3.0))
             .style(move |_t, _s| button::Style {
                 background: Some(pal::BG_TERTIARY.into()),
@@ -1503,9 +1660,9 @@ fn search_view(app: &App) -> Element<'_, Message> {
             button(
                 row![
                     icon(if is_note { "file-text" } else { "paperclip" }, 12.0, pal::TEXT_MUTED),
-                    text(name.clone()).size(pal::FS_CAPTION).color(pal::TEXT_PRIMARY),
+                    text(name.clone()).size(pal::fs_caption()).color(pal::TEXT_PRIMARY),
                     space(),
-                    text(rel.clone()).size(pal::FS_MICRO).color(pal::TEXT_MUTED),
+                    text(rel.clone()).size(pal::fs_micro()).color(pal::TEXT_MUTED),
                 ]
                 .spacing(6),
             )
@@ -1522,7 +1679,7 @@ fn search_view(app: &App) -> Element<'_, Message> {
     if empty {
         rows = rows.push(
             text(if app.note_files.is_empty() { "打开仓库后可搜索文件" } else { "无匹配文件" })
-                .size(pal::FS_CAPTION)
+                .size(pal::fs_caption())
                 .color(pal::TEXT_MUTED),
         );
     }
@@ -1535,7 +1692,7 @@ fn search_view(app: &App) -> Element<'_, Message> {
             ]
             .spacing(4),
             iced::widget::text_input("输入文件名过滤…", &app.search_query)
-                .size(pal::FS_CAPTION)
+                .size(pal::fs_caption())
                 .padding(Padding::ZERO.horizontal(8.0).vertical(4.0))
                 .on_input(Message::SearchInput)
                 .style(|_theme, status| text_input::Style {
@@ -1568,7 +1725,7 @@ fn inspector_view<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, Mes
         );
     }
     crate::properties_view::props_panel(app, window, true)
-        .unwrap_or_else(|| text("当前笔记无属性").size(pal::FS_CAPTION).color(pal::TEXT_MUTED).into())
+        .unwrap_or_else(|| text("当前笔记无属性").size(pal::fs_caption()).color(pal::TEXT_MUTED).into())
 }
 
 /// 占位视图：大图标 + 名称 + 未实现说明（PanelPlaceholder 同款形态）。
@@ -1581,7 +1738,7 @@ fn placeholder_view(kind: &str) -> Element<'static, Message> {
 }
 
 fn placeholder_panel(label: &str) -> Element<'static, Message> {
-    container(text(label.to_string()).size(pal::FS_UI).color(pal::TEXT_MUTED))
+    container(text(label.to_string()).size(pal::fs_ui()).color(pal::TEXT_MUTED))
         .width(Length::Fill)
         .height(Length::Fill)
         .center_x(Length::Fill)
@@ -1622,7 +1779,7 @@ pub fn detached_view<'a>(
         label_row = label_row.push(icon(view_icon(&t.view), 13.0, text_color));
         label_row = label_row.push(
             text(ellipsize(&label, UiMetrics::TAB_TEXT_MAX_W, 12.0))
-                .size(pal::FS_CAPTION)
+                .size(pal::fs_caption())
                 .color(text_color),
         );
         if t.locked {
@@ -1756,7 +1913,7 @@ pub fn detached_view<'a>(
     .into();
     let titlebar = container(
         row![
-            text(active_title).size(pal::FS_CAPTION).color(pal::TEXT_SECONDARY),
+            text(active_title).size(pal::fs_caption()).color(pal::TEXT_SECONDARY),
             mouse_area(space().width(Length::Fill).height(Length::Fill))
                 .on_press(Message::TitleBarPress(window)),
             pin_btn,
@@ -1883,7 +2040,7 @@ fn files_view(app: &App) -> Element<'_, Message> {
         // 重名自动加序号的提醒条（3s 自动消失）
         if let Some((notice, _)) = &app.rename_notice {
             tree_col = tree_col.push(
-                container(text(notice.clone()).size(pal::FS_CAPTION).color(pal::WARNING))
+                container(text(notice.clone()).size(pal::fs_caption()).color(pal::WARNING))
                     .width(Length::Fill)
                     .padding(Padding::ZERO.horizontal(12.0).vertical(4.0)),
             );
@@ -1941,7 +2098,7 @@ fn files_view(app: &App) -> Element<'_, Message> {
         }
         if let Some((notice, _)) = &app.rename_notice {
             tree_col = tree_col.push(
-                container(text(notice.clone()).size(pal::FS_CAPTION).color(pal::WARNING))
+                container(text(notice.clone()).size(pal::fs_caption()).color(pal::WARNING))
                     .width(Length::Fill)
                     .padding(Padding::ZERO.horizontal(12.0).vertical(4.0)),
             );
@@ -2012,7 +2169,7 @@ fn vault_row(
         ),
         icon("hard-drive", 14.0, if active { pal::ACCENT } else { pal::TEXT_MUTED }),
         text(vault.name.clone())
-            .size(pal::FS_CAPTION)
+            .size(pal::fs_caption())
             .color(pal::TEXT_PRIMARY)
             .font(iced::Font { weight: iced::font::Weight::Medium, ..iced::Font::default() }),
     ]
@@ -2090,7 +2247,7 @@ pub(crate) fn collab_pill_row(members: &[(iced::Color, String)]) -> Element<'sta
                             ..Style::default()
                         }),
                     iced::widget::text(name.clone())
-                        .size(pal::FS_MICRO)
+                        .size(pal::fs_micro())
                         .color(pal::TEXT_PRIMARY),
                 ]
                 .spacing(5),
@@ -2107,7 +2264,7 @@ pub(crate) fn collab_pill_row(members: &[(iced::Color, String)]) -> Element<'sta
         row = row.push(
             container(
                 iced::widget::text(format!("+{}", members.len() - MAX_SHOWN))
-                    .size(pal::FS_MICRO)
+                    .size(pal::fs_micro())
                     .color(pal::TEXT_SECONDARY),
             )
             .padding(Padding::ZERO.horizontal(8.0).vertical(4.0))
@@ -2137,7 +2294,7 @@ fn space_row(
         ),
         icon("cloud", 14.0, if active { pal::ACCENT } else { pal::TEXT_MUTED }),
         text(space.name.clone())
-            .size(pal::FS_CAPTION)
+            .size(pal::fs_caption())
             .color(pal::TEXT_PRIMARY)
             .font(iced::Font { weight: iced::font::Weight::Medium, ..iced::Font::default() }),
     ]
@@ -2234,12 +2391,12 @@ fn tree_row_element(
         ));
     }
     content = content.push(icon(icon_name, 14.0, icon_color));
-    content = content.push(text(r.name.clone()).size(pal::FS_CAPTION).color(name_color));
+    content = content.push(text(r.name.clone()).size(pal::fs_caption()).color(name_color));
     if !r.is_dir {
         content = content.push(space().width(Length::Fill));
         content = content.push(
             text(ext_label(&r.name))
-                .size(pal::FS_MICRO)
+                .size(pal::fs_micro())
                 .color(if r.active { pal::ACCENT } else { pal::TEXT_MUTED })
                 .font(mono()),
         );
@@ -2552,9 +2709,27 @@ fn note_view(app: &App) -> Element<'_, Message> {
             let inner: Element<'_, Message> = match app.note_mode {
                 NoteMode::Edit => edit_view(app),
                 _ => match app.preview_doc.as_ref() {
-                    Some(doc) => markdown_view::document_view(doc, &app.theme, &app.note_images),
+                    Some(doc) => {
+                        markdown_view::document_view(doc, &app.theme, &app.note_images, app.global.soft_wrap)
+                    }
                     None => placeholder_panel("正在渲染…"),
                 },
+            };
+            // 页面内标题：正文列顶部（两档共用；源码档不渲染）
+            let mut body_col = column![].width(Length::Fill);
+            if app.global.in_page_title {
+                body_col = body_col.push(page_title(app));
+            }
+            body_col = body_col.push(inner);
+            // 正文行宽：>0 时钳制只读/预览编辑正文区最大宽度并水平居中（源码档不受限）
+            let inner: Element<'_, Message> = if app.global.content_width > 0 {
+                container(body_col)
+                    .width(Length::Fill)
+                    .max_width(app.global.content_width as f32)
+                    .center_x(Length::Fill)
+                    .into()
+            } else {
+                body_col.into()
             };
             let scrolled = scrollable(inner).width(Length::Fill).height(Length::Fill);
             if app.note_mode == NoteMode::Edit {
@@ -2574,8 +2749,25 @@ fn note_view(app: &App) -> Element<'_, Message> {
     body = body.push(container(content).width(Length::Fill).height(Length::Fill));
     body = body.push(controls::h_divider_subtle());
     body = body.push(backlinks_section(app));
-    body = body.push(history_section(app));
     body.width(Length::Fill).height(Length::Fill).into()
+}
+
+/// 页面内标题：正文列顶部的文件名标题（不含扩展名）；点击进入重命名（复用文件树行内改名）。
+fn page_title(app: &App) -> Element<'_, Message> {
+    let rel = app.ui.last_note_file.clone().unwrap_or_default();
+    let name = rel.rsplit('/').next().unwrap_or(&rel);
+    let name = name.strip_suffix(".md").unwrap_or(name);
+    mouse_area(
+        container(
+            text(name.to_string())
+                .size(pal::fs_h1())
+                .color(pal::TEXT_PRIMARY)
+                .font(crate::ui::semibold()),
+        )
+        .padding(Padding::ZERO.top(12.0).bottom(4.0)),
+    )
+    .on_press(Message::RenameStartFile(rel))
+    .into()
 }
 
 /// 模式分段按钮（Button sm 档：高 24 / px-8 / 11px / medium；激活 = 强调淡底，悬停文字提亮）。
@@ -2593,7 +2785,7 @@ fn mode_button(
             row![
                 icon(icon_name, 12.0, if active { pal::ACCENT } else { pal::TEXT_SECONDARY }),
                 text(label.to_string())
-                    .size(pal::FS_MICRO)
+                    .size(pal::fs_micro())
                     .font(iced::Font { weight: iced::font::Weight::Medium, ..iced::Font::default() })
                     .color(if active { pal::ACCENT } else { pal::TEXT_SECONDARY }),
             ]
@@ -2636,6 +2828,7 @@ fn edit_view(app: &App) -> Element<'_, Message> {
     };
     let editable = app.editable_blocks();
     let pal_edit = markdown_edit::EditPalette::from_theme(&app.theme);
+    let note_bindings = crate::commands::note_bindings(&app.global.command_shortcuts);
     let (sel_from, sel_to) = app.edit.selection();
     let mut rows = Vec::new();
     let mut prev: Option<usize> = None;
@@ -2662,6 +2855,7 @@ fn edit_view(app: &App) -> Element<'_, Message> {
                 focused: app.edit.focused,
                 cursors: &app.remote_cursors,
                 body_start,
+                bindings: note_bindings.clone(),
             }
             .into(),
         });
@@ -2673,6 +2867,7 @@ fn edit_view(app: &App) -> Element<'_, Message> {
             app.edit.anchor,
             app.edit.preedit.clone(),
             app.edit.focused,
+            note_bindings,
         )
         .into();
     }
@@ -2695,7 +2890,7 @@ fn edit_view(app: &App) -> Element<'_, Message> {
         }
     }
     for (index, chunk) in
-        markdown_view::block_chunks(&doc.source, &doc.blocks, &app.theme, true, &app.note_images)
+        markdown_view::block_chunks(&doc.source, &doc.blocks, &app.theme, true, &app.note_images, true)
             .into_iter()
             .enumerate()
     {
@@ -2735,6 +2930,7 @@ fn edit_view(app: &App) -> Element<'_, Message> {
                 focused: app.edit.focused && caret >= chunk.from && caret <= chunk.to,
                 cursors: &app.remote_cursors,
                 body_start,
+                bindings: note_bindings.clone(),
             }
             .into(),
             });
@@ -2779,6 +2975,7 @@ fn edit_view(app: &App) -> Element<'_, Message> {
         app.edit.anchor,
         app.edit.preedit.clone(),
         app.edit.focused,
+        note_bindings,
     );
     surface.into()
 }
@@ -2790,7 +2987,7 @@ fn wiki_picker_overlay<'a>(app: &'a App, surface: Element<'a, Message>) -> Eleme
     let mut col = iced::widget::Column::<Message>::new().spacing(0);
     if candidates.is_empty() {
         col = col.push(
-            container(text("无匹配笔记").size(pal::FS_CAPTION).color(pal::TEXT_MUTED))
+            container(text("无匹配笔记").size(pal::fs_caption()).color(pal::TEXT_MUTED))
                 .padding(Padding::ZERO.horizontal(12.0).vertical(6.0)),
         );
     } else {
@@ -2804,7 +3001,7 @@ fn wiki_picker_overlay<'a>(app: &'a App, surface: Element<'a, Message>) -> Eleme
                     row![
                         icon("file-text", 13.0, if is_active { pal::TEXT_PRIMARY } else { pal::TEXT_MUTED }),
                         text(title.clone())
-                            .size(pal::FS_CAPTION)
+                            .size(pal::fs_caption())
                             .color(if is_active { pal::TEXT_PRIMARY } else { pal::TEXT_SECONDARY }),
                     ]
                     .spacing(6),
@@ -2852,7 +3049,7 @@ fn backlinks_section(app: &App) -> Element<'_, Message> {
     col = col.push(
         row![
             icon("unlink", 12.0, pal::TEXT_MUTED),
-            text(format!("反链 ({n})")).size(pal::FS_CAPTION).color(pal::TEXT_SECONDARY),
+            text(format!("反链 ({n})")).size(pal::fs_caption()).color(pal::TEXT_SECONDARY),
         ]
         .spacing(6),
     );
@@ -2862,7 +3059,7 @@ fn backlinks_section(app: &App) -> Element<'_, Message> {
             button(
                 row![
                     icon("file-text", 12.0, pal::TEXT_MUTED),
-                    text(link.title.clone()).size(pal::FS_CAPTION).color(pal::TEXT_PRIMARY),
+                    text(link.title.clone()).size(pal::fs_caption()).color(pal::TEXT_PRIMARY),
                 ]
                 .spacing(6),
             )
@@ -2876,73 +3073,15 @@ fn backlinks_section(app: &App) -> Element<'_, Message> {
         );
     }
     if n == 0 {
-        col = col.push(text("暂无其他笔记引用当前笔记").size(pal::FS_MICRO).color(pal::TEXT_MUTED));
-    }
-    container(col).width(Length::Fill).into()
-}
-
-/// 历史区（缺省折叠）：版本列表（序号/时间/署名/摘要）+ 每版回滚按钮。
-fn history_section(app: &App) -> Element<'_, Message> {
-    let n = app.history.len();
-    let chevron = if app.history_open { "chevron-down" } else { "chevron-right" };
-    let mut col = iced::widget::Column::<Message>::new()
-        .padding(Padding::ZERO.horizontal(16.0).vertical(6.0))
-        .spacing(2);
-    col = col.push(
-        button(
-            row![
-                icon(chevron, 12.0, pal::TEXT_MUTED),
-                icon("history", 12.0, pal::TEXT_MUTED),
-                text(format!("历史 ({n})")).size(pal::FS_CAPTION).color(pal::TEXT_SECONDARY),
-            ]
-            .spacing(6),
-        )
-        .padding(2.0)
-        .style(|_t, _s| button::Style { background: None, ..button::Style::default() })
-        .on_press(Message::HistoryToggle),
-    );
-    if app.history_open {
-        if app.history.is_empty() {
-            col = col.push(text("暂无历史版本").size(pal::FS_MICRO).color(pal::TEXT_MUTED));
-        }
-        for v in app.history.iter().rev() {
-            let time = format_ts(v.ts);
-            let action = match v.action {
-                atelyx_core::history::HistoryAction::Restore => "回滚",
-                atelyx_core::history::HistoryAction::Edit => "",
-            };
-            let author = if v.author.name.is_empty() { &v.author.device } else { &v.author.name };
-            col = col.push(
-                row![
-                    text(format!("v{}", v.seq)).size(pal::FS_MICRO).color(pal::TEXT_MUTED),
-                    text(time).size(pal::FS_MICRO).color(pal::TEXT_MUTED),
-                    text(author.clone()).size(pal::FS_MICRO).color(pal::TEXT_MUTED),
-                    text(v.summary.clone().unwrap_or_default())
-                        .size(pal::FS_MICRO)
-                        .color(pal::TEXT_SECONDARY),
-                    space(),
-                    text(action).size(pal::FS_MICRO).color(pal::ACCENT),
-                    button(text("回滚").size(pal::FS_MICRO).color(pal::ACCENT))
-                        .padding(Padding::ZERO.horizontal(6.0).vertical(1.0))
-                        .style(|_t, status| button::Style {
-                            background: matches!(status, button::Status::Hovered | button::Status::Pressed)
-                                .then_some(pal::ACCENT_SOFT.into()),
-                            ..button::Style::default()
-                        })
-                        .on_press(Message::HistoryRestore(v.seq)),
-                ]
-                .spacing(8)
-                .padding(Padding::ZERO.horizontal(4.0).vertical(2.0)),
-            );
-        }
+        col = col.push(text("暂无其他笔记引用当前笔记").size(pal::fs_micro()).color(pal::TEXT_MUTED));
     }
     container(col).width(Length::Fill).into()
 }
 
 /// 毫秒时间戳 → 本地短文本（YYYY-MM-DD HH:MM；纪元前显示原值）。
-fn format_ts(ms: i64) -> String {
-    // 天数 → 日期（与 core 历史模块同一 civil 算法的简版；仅展示用）
-    let secs = ms.div_euclid(1000);
+pub(crate) fn format_ts(ms: i64) -> String {
+    // 天数 → 日期（与 core 历史模块同一 civil 算法的简版；仅展示用，按本地时区偏移折算）
+    let secs = (ms + atelyx_core::history::local_offset_ms()).div_euclid(1000);
     let days = secs.div_euclid(86400);
     let secs_of_day = secs.rem_euclid(86400);
     let (h, m) = (secs_of_day / 3600, (secs_of_day % 3600) / 60);
@@ -2957,401 +3096,6 @@ fn format_ts(ms: i64) -> String {
     let mon = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = y + i64::from(mon <= 2);
     format!("{year:04}-{mon:02}-{d:02} {h:02}:{m:02}")
-}
-
-// ===== 设置整页 =====
-
-struct SettingsItem {
-    id: &'static str,
-    label: &'static str,
-    icon: &'static str,
-}
-
-const APP_SETTINGS: &[SettingsItem] = &[
-    SettingsItem { id: "general", label: "通用", icon: "settings" },
-    SettingsItem { id: "theme", label: "主题", icon: "palette" },
-    SettingsItem { id: "collab", label: "多人协作", icon: "users" },
-    SettingsItem { id: "editorPrefs", label: "编辑器", icon: "pen-line" },
-    SettingsItem { id: "shortcuts", label: "快捷键", icon: "keyboard" },
-    SettingsItem { id: "plugins", label: "插件", icon: "puzzle" },
-];
-
-const REPO_SETTINGS: &[SettingsItem] = &[
-    SettingsItem { id: "providers", label: "模型供应商", icon: "server" },
-    SettingsItem { id: "modelServices", label: "模型服务", icon: "bot" },
-    SettingsItem { id: "agents", label: "Agent", icon: "sparkles" },
-    SettingsItem { id: "search", label: "联网搜索", icon: "search" },
-    SettingsItem { id: "files", label: "文件与路径", icon: "folder-tree" },
-    SettingsItem { id: "workspace", label: "工作区", icon: "panels-top-left" },
-    SettingsItem { id: "editor", label: "编辑器", icon: "pen-line" },
-];
-
-fn settings_item(item: &SettingsItem, active_tab: &str) -> Element<'static, Message> {
-    let active = item.id == active_tab;
-    button(
-        row![
-            icon(item.icon, 14.0, if active { pal::ACCENT } else { pal::TEXT_SECONDARY }),
-            text(item.label)
-                .size(pal::FS_CAPTION)
-                .color(if active { pal::ACCENT } else { pal::TEXT_SECONDARY })
-                .font(iced::Font { weight: iced::font::Weight::Medium, ..iced::Font::default() }),
-        ]
-        .spacing(8),
-    )
-    .padding(Padding::ZERO.horizontal(10.0).vertical(6.0))
-    .width(Length::Fill)
-    .style(move |_t, status| button::Style {
-        background: if active {
-            Some(pal::ACCENT_SOFT.into())
-        } else if matches!(status, button::Status::Hovered | button::Status::Pressed) {
-            Some(pal::HOVER.into())
-        } else {
-            None
-        },
-        text_color: pal::TEXT_PRIMARY,
-        border: border::rounded(pal::RADIUS_SM),
-        ..Default::default()
-    })
-    .on_press(Message::SettingsTab(item.id.to_string()))
-    .into()
-}
-
-/// 设置整页：左栏分组导航（应用级 / 仓库级 / 关于，可折叠）+ 右侧分组内容占位。
-fn settings_view(app: &App) -> Element<'static, Message> {
-    let collapsed = app.settings_collapsed;
-    // 左栏宽度 = 内容区 20%，钳制 180–280；折叠态固定 44
-    let nav_w = if collapsed {
-        44.0
-    } else {
-        (app.main_size.width * 0.2).clamp(180.0, 280.0)
-    };
-    let active = app.settings_tab.as_str();
-    let mut nav = column![].spacing(4);
-    nav = push_group(nav, "应用级", "全局共享", false, APP_SETTINGS, active);
-    if app.vault_root.is_some() {
-        nav = nav.push(container(controls::h_divider_subtle()).padding(Padding::ZERO.top(8.0).bottom(12.0)));
-        let vault_name = app
-            .vault_root
-            .as_ref()
-            .map(|r| atelyx_core::vault::vault_display_name(r))
-            .unwrap_or_default();
-        nav = push_group(nav, "仓库级", &vault_name, true, REPO_SETTINGS, active);
-    }
-
-    let header: Element<'static, Message> = if collapsed {
-        container(
-            button(icon("arrow-left", 15.0, pal::TEXT_SECONDARY))
-                .padding(6.0)
-                .style(|_t, status| button::Style {
-                    background: matches!(status, button::Status::Hovered | button::Status::Pressed)
-                        .then_some(pal::HOVER.into()),
-                    border: border::rounded(pal::RADIUS_SM),
-                    ..Default::default()
-                })
-                .on_press(Message::SettingsToggle),
-        )
-        .width(Length::Fill)
-        .center_x(Length::Fill)
-        .padding(Padding::ZERO.vertical(12.0))
-        .into()
-    } else {
-        row![
-            text("设置").size(pal::FS_BODY).color(pal::TEXT_PRIMARY).font(crate::ui::semibold()),
-            space().width(Length::Fill),
-            button(icon("x", 14.0, pal::TEXT_SECONDARY))
-                .padding(4.0)
-                .style(|_t, status| button::Style {
-                    background: matches!(status, button::Status::Hovered | button::Status::Pressed)
-                        .then_some(pal::HOVER.into()),
-                    ..Default::default()
-                })
-                .on_press(Message::SettingsToggle),
-        ]
-        .spacing(8)
-        .padding(Padding::ZERO.horizontal(12.0).vertical(12.0))
-        .into()
-    };
-
-    // 左栏：标题行 + 滚动导航 + 底部「关于」（不随分组滚走）+ 折叠钮
-    let mut aside_col = column![header];
-    if !collapsed {
-        aside_col = aside_col.push(scrollable(container(nav).padding(8.0)).width(Length::Fill).height(Length::Fill));
-        aside_col = aside_col.push(controls::h_divider_subtle());
-        aside_col = aside_col.push(
-            container(settings_item(&SettingsItem { id: "about", label: "关于", icon: "info" }, active))
-                .width(Length::Fill)
-                .padding(Padding::ZERO.horizontal(8.0).top(8.0)),
-        );
-    }
-    let collapse_label: Element<'static, Message> = if collapsed {
-        space().width(Length::Fixed(0.0)).into()
-    } else {
-        text("折叠".to_string()).size(pal::FS_CAPTION).color(pal::TEXT_SECONDARY).into()
-    };
-    let collapse_btn = button(
-        row![
-            icon(if collapsed { "chevron-right" } else { "chevron-left" }, 14.0, pal::TEXT_SECONDARY),
-            collapse_label,
-        ]
-        .spacing(4),
-    )
-    .padding(Padding::ZERO.horizontal(8.0).vertical(6.0))
-    .style(|_t, status| button::Style {
-        background: matches!(status, button::Status::Hovered | button::Status::Pressed)
-            .then_some(pal::HOVER.into()),
-        border: border::rounded(pal::RADIUS_SM),
-        ..Default::default()
-    })
-    .on_press(Message::SettingsNavCollapse);
-    aside_col = aside_col.push(container(collapse_btn).padding(8.0).width(Length::Fill));
-
-    let aside = container(aside_col.width(Length::Fill).height(Length::Fill))
-        .width(Length::Fixed(nav_w))
-        .height(Length::Fill)
-        .style(|_t| Style {
-            background: Some(pal::BG_PRIMARY.into()),
-            ..Style::default()
-        });
-
-    // 页头：标题 + 作用域徽标 + 描述（含仓库名）
-    let (title, scope_vault, desc) = tab_meta(active, app);
-    let scope_pill = container(
-        text(if scope_vault { "仓库级" } else { "应用级" }.to_string()).size(pal::FS_MICRO),
-    )
-    .padding(Padding::ZERO.horizontal(8.0).vertical(2.0))
-    .style(move |_t| Style {
-        background: Some(if scope_vault { pal::ACCENT_SOFT.into() } else { pal::BG_TERTIARY.into() }),
-        border: border::rounded(999.0),
-        ..Style::default()
-    });
-    let body = column![
-        container(
-            column![
-                row![
-                    text(title.to_string())
-                        .size(pal::FS_H2)
-                        .color(pal::TEXT_PRIMARY)
-                        .font(crate::ui::semibold()),
-                    space().width(Length::Fill),
-                    scope_pill,
-                ],
-                text(desc).size(pal::FS_CAPTION).color(pal::TEXT_MUTED),
-            ]
-            .spacing(2),
-        )
-        .width(Length::Fill)
-        .padding(Padding::ZERO.horizontal(20.0).vertical(12.0)),
-        controls::h_divider_subtle(),
-        if active == "collab" {
-            collab_settings_view(app)
-        } else {
-            controls::empty_state(
-                "settings",
-                "无设置项",
-                "此分区当前没有可配置的设置项。",
-                None,
-            )
-        },
-    ]
-    .width(Length::Fill)
-    .height(Length::Fill);
-
-    row![aside, vline(), container(body).width(Length::Fill).height(Length::Fill)]
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
-}
-
-/// 一组导航：分组头 + 条目（条目间距 4）。
-fn push_group<'a>(
-    nav: iced::widget::Column<'a, Message>,
-    label: &str,
-    hint: &str,
-    repo_level: bool,
-    items: &'static [SettingsItem],
-    active_tab: &str,
-) -> iced::widget::Column<'a, Message> {
-    let mut col = column![group_head(label, hint, repo_level)].spacing(4);
-    for item in items {
-        col = col.push(settings_item(item, active_tab));
-    }
-    nav.push(col)
-}
-
-/// 设置页「多人协作」：登录身份、协作展示色、设备会话管理、退出登录。
-fn collab_settings_view(app: &App) -> Element<'static, Message> {
-    let mut col = iced::widget::Column::<Message>::new()
-        .spacing(16)
-        .padding(Padding::ZERO.horizontal(20.0));
-    match &app.global.last_identity {
-        None => {
-            return container(controls::empty_state(
-                "users",
-                "未登录",
-                "经文件面板云钮登录协作服务器后，此处管理账号与设备会话。",
-                None,
-            ))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into();
-        }
-        Some(identity) => {
-            col = col.push(group_head("登录身份", &identity.server_url, false));
-            col = col.push(
-                container(
-                    row![
-                        icon("user", 14.0, pal::ACCENT),
-                        text(identity.display_name.clone())
-                            .size(pal::FS_CAPTION)
-                            .color(pal::TEXT_PRIMARY),
-                        text(format!("@ {}", identity.server_url))
-                            .size(pal::FS_CAPTION)
-                            .color(pal::TEXT_MUTED),
-                        space().width(Length::Fill),
-                        controls::btn("退出登录", &controls::BTN_SM, controls::Variant::Ghost, Some(Message::Space(crate::SpaceMsg::Logout))),
-                    ]
-                    .spacing(8),
-                )
-                .width(Length::Fill),
-            );
-            // 协作展示色（只读展示：编辑留待外观设置统一收口）
-            col = col.push(group_head("协作展示色", "远端光标 / 名单", false));
-            let color_swatch = app
-                .global
-                .collab_color
-                .clone()
-                .and_then(|hex| parse_hex_color(&hex))
-                .unwrap_or(pal::TEXT_MUTED);
-            col = col.push(
-                container(
-                    row![
-                        container(space())
-                            .width(Length::Fixed(12.0))
-                            .height(Length::Fixed(12.0))
-                            .style(move |_t| Style {
-                                background: Some(color_swatch.into()),
-                                border: border::rounded(999.0),
-                                ..Style::default()
-                            }),
-                        text(app.global.collab_color.clone().unwrap_or_else(|| "未指派".into()))
-                            .size(pal::FS_CAPTION)
-                            .color(pal::TEXT_SECONDARY)
-                            .font(mono()),
-                    ]
-                    .spacing(8),
-                )
-                .width(Length::Fill),
-            );
-            // 设备会话
-            col = col.push(group_head("设备会话", &format!("{} 台在线记录", app.space_devices.len()), false));
-            for d in &app.space_devices {
-                let badge: Element<'static, Message> = if d.current {
-                    text("本机").size(pal::FS_MICRO).color(pal::TEXT_MUTED).into()
-                } else {
-                    controls::btn(
-                        "吊销",
-                        &controls::BTN_SM,
-                        controls::Variant::Ghost,
-                        Some(Message::Space(crate::SpaceMsg::RevokeDevice(d.id.clone()))),
-                    )
-                    .into()
-                };
-                col = col.push(
-                    container(
-                        row![
-                            icon(
-                                if d.current { "monitor-check" } else { "monitor" },
-                                14.0,
-                                if d.current { pal::ACCENT } else { pal::TEXT_MUTED },
-                            ),
-                            text(d.device_name.clone())
-                                .size(pal::FS_CAPTION)
-                                .color(pal::TEXT_PRIMARY),
-                            text(format!(
-                                "最近活跃 {}",
-                                format_ts(d.last_seen_at * 1000)
-                            ))
-                            .size(pal::FS_MICRO)
-                            .color(pal::TEXT_MUTED),
-                            space().width(Length::Fill),
-                            badge,
-                        ]
-                        .spacing(8),
-                    )
-                    .width(Length::Fill)
-                    .padding(Padding::ZERO.vertical(2.0)),
-                );
-            }
-            if app.space_devices.is_empty() {
-                col = col.push(container(
-                    text("会话列表为空（打开本页时刷新）").size(pal::FS_MICRO).color(pal::TEXT_MUTED),
-                ));
-            }
-        }
-    }
-    scrollable(container(col).padding(Padding::ZERO.top(4.0).bottom(24.0)))
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
-}
-
-/// 分组头：竖条 + 标题 + 右对齐 hint。
-fn group_head(label: &str, hint: &str, repo_level: bool) -> Element<'static, Message> {
-    let bar_color = if repo_level { pal::ACCENT } else { pal::BORDER_STRONG };
-    let text_color = if repo_level { pal::ACCENT } else { pal::TEXT_MUTED };
-    container(
-        row![
-            container(space())
-                .width(Length::Fixed(3.0))
-                .height(Length::Fixed(11.0))
-                .style(move |_t| Style {
-                    background: Some(bar_color.into()),
-                    border: border::rounded(2.0),
-                    ..Style::default()
-                }),
-            text(label.to_string())
-                .size(pal::FS_MICRO)
-                .color(text_color)
-                .font(crate::ui::semibold()),
-            space().width(Length::Fill),
-            text(hint.to_string())
-                .size(pal::FS_MICRO)
-                .color(pal::TEXT_MUTED)
-                .font(mono()),
-        ]
-        .spacing(8)
-        .width(Length::Fill),
-    )
-    .padding(Padding::ZERO.horizontal(8.0).bottom(8.0))
-    .into()
-}
-
-/// 页面标题 / 作用域 / 描述（仓库级描述含仓库名）。
-fn tab_meta(tab: &str, app: &App) -> (&'static str, bool, String) {
-    let vault_name = app
-        .vault_root
-        .as_ref()
-        .map(|r| atelyx_core::vault::vault_display_name(r))
-        .unwrap_or_default();
-    let app_desc = "全库共享 · 存于本机应用配置，跨仓库生效".to_string();
-    let vault_desc = format!("作用于当前仓库（{vault_name}）· 配置随该仓库走，不随其他仓库生效");
-    match tab {
-        "general" => ("通用", false, app_desc),
-        "theme" => ("主题", false, app_desc),
-        "collab" => ("多人协作", false, app_desc),
-        "editorPrefs" => ("编辑器", false, app_desc),
-        "shortcuts" => ("快捷键", false, app_desc),
-        "plugins" => ("插件", false, app_desc),
-        "providers" => ("模型供应商", true, vault_desc),
-        "modelServices" => ("模型服务", true, vault_desc),
-        "agents" => ("Agent", true, vault_desc),
-        "search" => ("联网搜索", true, vault_desc),
-        "files" => ("文件与路径", true, vault_desc),
-        "workspace" => ("工作区", true, vault_desc),
-        "editor" => ("编辑器", true, vault_desc),
-        "about" => ("关于", false, "Logo · 版本 · 检查更新 · 项目主页".to_string()),
-        _ => ("设置", false, String::new()),
-    }
 }
 
 // ===== 弹层内容 =====
@@ -3497,6 +3241,31 @@ fn popup_element<'a>(
                 })
                 .collect()
         }
+        PopupState::EntrySceneMenu => {
+            let pick = |id: Option<String>| Message::EntryScenePick(id);
+            let current = app.entry_scene_id.as_deref();
+            let mut entries: Vec<(usize, MenuEntry<'static>)> = vec![(
+                0,
+                if current.is_none() {
+                    MenuEntry::Checked { label: "跟随当前".into(), on_press: pick(None) }
+                } else {
+                    MenuEntry::action("跟随当前", pick(None))
+                },
+            )];
+            for s in &app.ui.scenes {
+                let is_current = current == Some(s.id.as_str());
+                let (id, name) = (s.id.clone(), s.name.clone());
+                entries.push((
+                    0,
+                    if is_current {
+                        MenuEntry::Checked { label: name, on_press: pick(Some(id)) }
+                    } else {
+                        MenuEntry::action(name, pick(Some(id)))
+                    },
+                ));
+            }
+            entries
+        }
         PopupState::FileMenu { rel, is_dir, is_root } => {
             file_menu_entries(app, rel, *is_dir, *is_root)
         }
@@ -3551,7 +3320,60 @@ fn popup_element<'a>(
                 crate::RepoKind::Space(ref s)
                     if s.server_url == *server_url && s.space_id == *space_id
             );
-            vec![(
+            // 权限口径对齐服务端：名册对全部成员可见（进空间后可看），
+            // 邀请码（列出/生成/撤销）与管理操作为 owner 专属
+            let owner = active
+                && matches!(&app.repo_kind, crate::RepoKind::Space(s) if s.role == atelyx_core::space_client::SpaceRole::Owner);
+            let mut entries: Vec<(usize, MenuEntry<'static>)> = vec![(
+                0,
+                MenuEntry::Action {
+                    label: "成员管理".into(),
+                    icon: Some("users"),
+                    danger: false,
+                    disabled: !active,
+                    on_press: active.then(|| {
+                        Message::PopupOpen(
+                            window,
+                            PopupOpen {
+                                point: app.cursor_for(window),
+                                flip_y: None,
+                                state: PopupState::SpaceMembers,
+                                min_width: 0.0,
+                            },
+                        )
+                    }),
+                    note: None,
+                    hint: (!active).then(|| "进入空间后可查看成员".to_string()),
+                },
+            )];
+            entries.push((
+                0,
+                MenuEntry::Action {
+                    label: "邀请码".into(),
+                    icon: Some("user-plus"),
+                    danger: false,
+                    disabled: !owner,
+                    on_press: owner.then(|| {
+                        Message::PopupOpen(
+                            window,
+                            PopupOpen {
+                                point: app.cursor_for(window),
+                                flip_y: None,
+                                state: PopupState::SpaceInvite,
+                                min_width: 0.0,
+                            },
+                        )
+                    }),
+                    note: None,
+                    hint: Some(if active {
+                        "邀请码仅空间所有者可管理".to_string()
+                    } else {
+                        "进入空间后可管理".to_string()
+                    }),
+                },
+            ));
+            entries.push((0, MenuEntry::Divider));
+            entries.push((
                 0,
                 MenuEntry::Action {
                     label: "从列表移除".into(),
@@ -3565,12 +3387,35 @@ fn popup_element<'a>(
                     note: None,
                     hint: active.then(|| "空间已激活，先进入其他仓库或空间".to_string()),
                 },
-            )]
+            ));
+            entries
         }
-        PopupState::NoteMenu => vec![
-            (0, MenuEntry::action("添加笔记属性", Message::Props(crate::properties_view::PropsMsg::StartAdd))),
-            (0, MenuEntry::action("历史记录", Message::HistoryToggle)),
-        ],
+        PopupState::SpaceMembers => space_members_entries(app),
+        PopupState::SpaceInvite => space_invite_entries(app),
+        PopupState::NoteMenu => {
+            let note_open = app.ui.last_note_file.is_some();
+            vec![
+                (0, MenuEntry::action("添加笔记属性", Message::Props(crate::properties_view::PropsMsg::StartAdd))),
+                (
+                    0,
+                    MenuEntry::Action {
+                        label: "历史记录".into(),
+                        icon: Some("history"),
+                        danger: false,
+                        disabled: !note_open,
+                        on_press: app.ui.last_note_file.clone().map(|file| {
+                            Message::History(crate::history_browser::HistoryBrowserMsg::Open {
+                                window,
+                                kind: atelyx_core::history::HistoryKind::Note,
+                                file,
+                            })
+                        }),
+                        note: None,
+                        hint: (!note_open).then(|| "未打开笔记".to_string()),
+                    },
+                ),
+            ]
+        }
         PopupState::PropTypeMenu { index } => {
             // 固定顺序六类型；徽章键锁定标签（其余项禁用）
             use atelyx_core::frontmatter::{infer_type, PropType, Yaml};
@@ -3944,10 +3789,30 @@ fn popup_element<'a>(
                 MenuEntry::action_icon("格式", "type", Message::Table(crate::table_view::TableMsg::ShowStyleBar)),
             ),
         ],
-        PopupState::TableMoreMenu => vec![
-            (0, MenuEntry::action_icon("历史记录", "history", Message::Table(crate::table_view::TableMsg::OpenHistory))),
-            (0, MenuEntry::action_icon("导出 xlsx", "download", Message::Table(crate::table_view::TableMsg::ExportXlsxPick))),
-        ],
+        PopupState::TableMoreMenu => {
+            let table_open = app.ui.last_table_file.is_some();
+            vec![
+                (
+                    0,
+                    MenuEntry::Action {
+                        label: "历史记录".into(),
+                        icon: Some("history"),
+                        danger: false,
+                        disabled: !table_open,
+                        on_press: app.ui.last_table_file.clone().map(|file| {
+                            Message::History(crate::history_browser::HistoryBrowserMsg::Open {
+                                window,
+                                kind: atelyx_core::history::HistoryKind::Table,
+                                file,
+                            })
+                        }),
+                        note: None,
+                        hint: (!table_open).then(|| "未打开表格".to_string()),
+                    },
+                ),
+                (0, MenuEntry::action_icon("导出 xlsx", "download", Message::Table(crate::table_view::TableMsg::ExportXlsxPick))),
+            ]
+        }
         PopupState::TableFontMenu => {
             const FONTS: [(&str, &str); 8] = [
                 ("default", "默认"),
@@ -4117,6 +3982,149 @@ fn popup_element<'a>(
                 hint: None,
             },
         )],
+        PopupState::AiProviderAddMenu => {
+            let mut entries: Vec<(usize, MenuEntry)> = ai::PROVIDER_PRESETS
+                .iter()
+                .enumerate()
+                .map(|(i, p)| {
+                    (0, MenuEntry::action(p.name, Message::Ai(ai::AiMsg::ProviderAddPreset(i))))
+                })
+                .collect();
+            entries.push((0, MenuEntry::Divider));
+            entries.push((0, MenuEntry::action("自定义", Message::Ai(ai::AiMsg::ProviderAddCustom))));
+            entries
+        }
+        PopupState::AiModelMenu { for_naming } => {
+            let mut entries: Vec<(usize, MenuEntry)> = Vec::new();
+            if !for_naming {
+                let unset = app.repo_config.model.is_none();
+                let pick = Message::Ai(ai::AiMsg::DefaultModelPick(None));
+                entries.push((0, if unset {
+                    MenuEntry::Checked { label: "不指定".into(), on_press: pick }
+                } else {
+                    MenuEntry::action("不指定", pick)
+                }));
+            }
+            for p in app.repo_config.providers.iter().flatten() {
+                if p.models.is_empty() {
+                    continue;
+                }
+                entries.push((0, MenuEntry::Group(p.name.clone())));
+                for m in &p.models {
+                    let is_current = if *for_naming {
+                        app.repo_config.auto_naming_model.as_ref().is_some_and(|o| o.provider_id == p.id && o.model == m.id)
+                    } else {
+                        app.repo_config.model.as_deref() == Some(m.id.as_str())
+                            && app.repo_config.model_provider_id.as_deref() == Some(p.id.as_str())
+                    };
+                    let pick = Message::Ai(if *for_naming {
+                        ai::AiMsg::NamingModelPick(Some((p.id.clone(), m.id.clone())))
+                    } else {
+                        ai::AiMsg::DefaultModelPick(Some((p.id.clone(), m.id.clone())))
+                    });
+                    entries.push((0, if is_current {
+                        MenuEntry::Checked { label: m.id.clone(), on_press: pick }
+                    } else {
+                        MenuEntry::action(m.id.clone(), pick)
+                    }));
+                }
+            }
+            if entries.is_empty() {
+                entries.push((0, MenuEntry::Custom(popup_hint("先在「供应商」添加模型"), 18.0)));
+            }
+            entries
+        }
+        PopupState::AiNamingMenu => {
+            let mode = ai::naming_mode(app);
+            [
+                (ai::NamingMode::Off, "不启用"),
+                (ai::NamingMode::FollowDefault, "跟随默认"),
+                (ai::NamingMode::Custom, "指定模型"),
+            ]
+            .into_iter()
+            .map(|(m, label)| {
+                let pick = Message::Ai(ai::AiMsg::NamingModePick(m));
+                (0, if mode == m {
+                    MenuEntry::Checked { label: label.into(), on_press: pick }
+                } else {
+                    MenuEntry::action(label, pick)
+                })
+            })
+            .collect()
+        }
+        PopupState::AiAgentPromptMenu => {
+            // 弹层由 Agent 表单触发：当前值以草稿优先（可能含未保存的改动）
+            let current = app.ai.agent_draft.as_ref().and_then(|d| d.prompt_file.clone());
+            let mut entries: Vec<(usize, MenuEntry)> = vec![(
+                0,
+                if current.is_none() {
+                    MenuEntry::Checked { label: "无".into(), on_press: Message::Ai(ai::AiMsg::AgentPromptPick(None)) }
+                } else {
+                    MenuEntry::action("无", Message::Ai(ai::AiMsg::AgentPromptPick(None)))
+                },
+            )];
+            for rel in &app.prompt_notes {
+                let label = rel.rsplit('/').next().unwrap_or(rel).trim_end_matches(".md").to_string();
+                let is_current = current.as_deref() == Some(rel.as_str());
+                let pick = Message::Ai(ai::AiMsg::AgentPromptPick(Some(rel.clone())));
+                entries.push((0, if is_current {
+                    MenuEntry::Checked { label, on_press: pick }
+                } else {
+                    MenuEntry::action(label, pick)
+                }));
+            }
+            if app.prompt_notes.is_empty() {
+                entries.push((0, MenuEntry::Custom(popup_hint("暂无提示词标记（文件右键可注册）"), 18.0)));
+            }
+            entries
+        }
+        PopupState::AiProviderDeleteMenu => {
+            vec![
+                (
+                    0,
+                    MenuEntry::Submenu { label: "删除供应商".into(), icon: Some("trash-2"), disabled: false, pane: 1 },
+                ),
+                (
+                    1,
+                    MenuEntry::danger("确认删除（并清除其密钥链条目）", "trash-2", Message::Ai(ai::AiMsg::ProviderDelete)),
+                ),
+                (1, MenuEntry::action("取消", Message::Ui(crate::ui::UiMsg::PopupClose { window }))),
+            ]
+        }
+        PopupState::AiAgentDeleteMenu => {
+            vec![
+                (
+                    0,
+                    MenuEntry::Submenu { label: "删除 Agent".into(), icon: Some("trash-2"), disabled: false, pane: 1 },
+                ),
+                (1, MenuEntry::danger("确认删除", "trash-2", Message::Ai(ai::AiMsg::AgentDelete))),
+                (1, MenuEntry::action("取消", Message::Ui(crate::ui::UiMsg::PopupClose { window }))),
+            ]
+        }
+        PopupState::AiSearchProviderMenu => {
+            let current = app
+                .ai
+                .search_draft
+                .as_ref()
+                .map(|d| d.provider.clone())
+                .or_else(|| app.repo_config.search.as_ref().map(|s| s.provider.clone()))
+                .unwrap_or_default();
+            [("tavily", "Tavily"), ("searxng", "SearXNG")]
+                .into_iter()
+                .map(|(key, label)| {
+                    // 空值 = 未配置，缺省语义按 Tavily 展示
+                    let is_current = current == key || (current.is_empty() && key == "tavily");
+                    let pick = Message::Ai(ai::AiMsg::SearchProviderPick(key.to_string()));
+                    (0, if is_current {
+                        MenuEntry::Checked { label: label.into(), on_press: pick }
+                    } else {
+                        MenuEntry::action(label, pick)
+                    })
+                })
+                .collect()
+        }
+        // 居中模态不经锚点渲染（with_overlays 分流到 history_browser::overlay）
+        PopupState::HistoryBrowser { .. } => Vec::new(),
     };
     crate::ui::menu::pane_view(entries, pane, window)
 }
@@ -4124,14 +4132,14 @@ fn popup_element<'a>(
 /// 表格弹层内联输入（单行；提交由菜单项动作携带草稿）。
 fn popup_text_input<'a>(draft: &str) -> Element<'a, Message> {
     iced::widget::text_input("名称", draft)
-        .size(pal::FS_CAPTION)
+        .size(pal::fs_caption())
         .padding(Padding::ZERO.horizontal(12.0).vertical(6.0))
         .on_input(|v: String| Message::Table(crate::table_view::TableMsg::PopupDraft(v)))
         .into()
 }
 
 fn popup_hint(text_content: &str) -> Element<'static, Message> {
-    container(iced::widget::text(text_content.to_string()).size(pal::FS_MICRO).color(pal::TEXT_MUTED))
+    container(iced::widget::text(text_content.to_string()).size(pal::fs_micro()).color(pal::TEXT_MUTED))
         .padding(Padding::ZERO.horizontal(12.0))
         .width(Length::Fill)
         .into()
@@ -4157,6 +4165,25 @@ fn view_occupied(app: &App, kind: &str, except_tab: Option<&str>) -> bool {
             .any(|t| t.view == kind && except_tab != Some(t.id.as_str()))
     });
     main_hit || detached_hit
+}
+
+/// 该视图是否正展示在任一窗口（主窗口激活布局的各面板激活标签 / 撕裂窗口激活标签）；
+/// 面板懒加载（PersistTick 搭载）据此判定是否发起数据任务。
+pub fn view_displayed(app: &App, kind: &str) -> bool {
+    fn tree_shows(node: &LayoutNode, kind: &str) -> bool {
+        match node {
+            LayoutNode::Panel { tabs, active_tab_id, .. } => tabs
+                .iter()
+                .any(|t| t.view == kind && active_tab_id.as_deref() == Some(t.id.as_str())),
+            LayoutNode::Split { children, .. } => children.iter().any(|c| tree_shows(c, kind)),
+        }
+    }
+    tree_shows(&layout::active_layout(&app.ui).tree, kind)
+        || app.ui.detached_windows.iter().any(|w| {
+            w.active_tab_id.as_deref().is_some_and(|aid| {
+                w.tabs.iter().any(|t| t.id == aid && t.view == kind)
+            })
+        })
 }
 
 /// 场景选择器：根面板（场景行 + 新建）与删除确认面板。
@@ -4187,7 +4214,7 @@ fn scene_selector_entries(app: &App, confirm: &Option<String>) -> Vec<(usize, Me
             button(
                 row![
                     text(name.clone())
-                        .size(pal::FS_CAPTION)
+                        .size(pal::fs_caption())
                         .color(if is_active { pal::ACCENT } else { pal::TEXT_PRIMARY }),
                 ]
                 .push(if is_active {
@@ -4247,11 +4274,11 @@ fn scene_selector_entries(app: &App, confirm: &Option<String>) -> Vec<(usize, Me
         let count = scene.map(|s| s.layouts.len()).unwrap_or(0);
         let pane = column![
             text(format!("删除场景「{name}」？"))
-                .size(pal::FS_CAPTION)
+                .size(pal::fs_caption())
                 .color(pal::TEXT_PRIMARY)
                 .font(iced::Font { weight: iced::font::Weight::Medium, ..iced::Font::default() }),
             text(format!("其下 {count} 套布局将一并删除。"))
-                .size(pal::FS_CAPTION)
+                .size(pal::fs_caption())
                 .color(pal::TEXT_MUTED),
             row![
                 container(button("取消")
@@ -4512,7 +4539,7 @@ fn vault_menu_entries(app: &App, root: &str) -> Vec<(usize, MenuEntry<'static>)>
     ];
     if app.remove_vault_confirm.as_deref() == Some(root) {
         let pane = column![text("只从列表移除，不影响磁盘文件")
-            .size(pal::FS_CAPTION)
+            .size(pal::fs_caption())
             .color(pal::TEXT_MUTED)];
         entries.push((1, MenuEntry::Custom(pane.into(), 12.0 + 16.0 + 4.0)));
         entries.push((1, MenuEntry::action_icon(
@@ -4634,7 +4661,7 @@ fn space_form_input<'a>(
     secure: bool,
 ) -> Element<'a, Message> {
     let input = iced::widget::text_input(placeholder, draft)
-        .size(pal::FS_CAPTION)
+        .size(pal::fs_caption())
         .padding(Padding::ZERO.horizontal(12.0).vertical(6.0))
         .on_input(on_input);
     if secure { input.secure(true).into() } else { input.into() }
@@ -4642,7 +4669,7 @@ fn space_form_input<'a>(
 
 /// 弹层表单的说明行。
 fn space_hint(text_content: &str) -> Element<'static, Message> {
-    container(iced::widget::text(text_content.to_string()).size(pal::FS_MICRO).color(pal::TEXT_MUTED))
+    container(iced::widget::text(text_content.to_string()).size(pal::fs_micro()).color(pal::TEXT_MUTED))
         .padding(Padding::ZERO.horizontal(12.0))
         .width(Length::Fill)
         .into()
@@ -4657,7 +4684,7 @@ fn space_action_row(
     container(
         controls::btn(
             label,
-            &controls::BTN_SM,
+            &controls::btn_sm(),
             controls::Variant::Secondary,
             (!busy).then_some(on_press),
         )
@@ -4666,6 +4693,400 @@ fn space_action_row(
     .padding(Padding::ZERO.horizontal(12.0))
     .width(Length::Fill)
     .into()
+}
+
+/// 弹层红字错误条（数据加载失败的非静默呈现）。
+fn popup_error_bar(message: &str) -> Element<'static, Message> {
+    container(
+        row![
+            icon("info", 12.0, pal::DANGER),
+            text(message.to_string()).size(pal::fs_micro()).color(pal::DANGER),
+        ]
+        .spacing(6),
+    )
+    .padding(Padding::ZERO.horizontal(12.0).vertical(3.0))
+    .width(Length::Fill)
+    .into()
+}
+
+/// 角色徽标（所有者 / 编辑者 / 只读）。
+fn role_badge(role: atelyx_core::space_client::SpaceRole) -> Element<'static, Message> {
+    use atelyx_core::space_client::SpaceRole;
+    let (label, color) = match role {
+        SpaceRole::Owner => ("所有者", pal::ACCENT),
+        SpaceRole::Editor => ("编辑者", pal::TEXT_SECONDARY),
+        SpaceRole::Viewer => ("只读", pal::TEXT_MUTED),
+    };
+    mini_badge(label, color)
+}
+
+/// 小徽标（淡底圆角 + 着色文字）。
+fn mini_badge(label: &str, color: iced::Color) -> Element<'static, Message> {
+    container(text(label.to_string()).size(pal::fs_micro()).color(color))
+        .padding(Padding::ZERO.horizontal(6.0).vertical(1.0))
+        .style(move |_t| Style {
+            background: Some(color.scale_alpha(0.14).into()),
+            border: border::rounded(pal::RADIUS_XS),
+            ..Style::default()
+        })
+        .into()
+}
+
+/// 成员管理弹层：名册行（显示名 + @username + 角色徽标）+ owner 的行内二段确认 + 错误条。
+/// 管理操作仅 owner 可见（服务端同口径）；owner 行无操作。
+fn space_members_entries(
+    app: &App,
+) -> Vec<(usize, MenuEntry<'static>)> {
+    use atelyx_core::space_client::SpaceRole;
+    let mut entries: Vec<(usize, MenuEntry)> = Vec::new();
+    if let Some(err) = &app.space_members_error {
+        entries.push((0, MenuEntry::Custom(popup_error_bar(err), 22.0)));
+    } else if app.space_members.is_none() {
+        entries.push((0, MenuEntry::Custom(space_hint(if app.space_members_loading { "加载中…" } else { "暂无名册" }), 18.0)));
+    }
+    let owner = matches!(
+        &app.repo_kind,
+        crate::RepoKind::Space(s) if s.role == SpaceRole::Owner
+    );
+    for m in app.space_members.iter().flatten() {
+        // 行内二段确认态：整行替换为问题 + 确认/取消
+        if let Some(op) = app
+            .space_member_confirm
+            .as_ref()
+            .filter(|(uid, _)| uid == &m.user_id)
+            .map(|(_, op)| *op)
+        {
+            let (question, ok_label, variant, ok_msg) = match op {
+                crate::space_actions::MemberConfirm::Transfer => (
+                    "转让管理权给该成员？",
+                    "确认转让",
+                    Variant::Secondary,
+                    Message::Space(crate::SpaceMsg::MemberTransfer(m.user_id.clone())),
+                ),
+                crate::space_actions::MemberConfirm::Remove => (
+                    "将该成员移出空间？",
+                    "确认移除",
+                    Variant::Danger,
+                    Message::Space(crate::SpaceMsg::MemberRemove(m.user_id.clone())),
+                ),
+            };
+            entries.push((
+                0,
+                MenuEntry::Custom(
+                    container(
+                        row![
+                            text(question).size(pal::fs_caption()).color(pal::TEXT_SECONDARY),
+                            space().width(Length::Fill),
+                            controls::btn(ok_label, &controls::btn_sm(), variant, Some(ok_msg)),
+                            controls::btn(
+                                "取消",
+                                &controls::btn_sm(),
+                                Variant::Ghost,
+                                Some(Message::Space(crate::SpaceMsg::MemberAskCancel)),
+                            ),
+                        ]
+                        .spacing(6),
+                    )
+                    .padding(Padding::ZERO.horizontal(12.0))
+                    .width(Length::Fill)
+                    .height(Length::Fixed(pal::MENU_ITEM_H))
+                    .align_y(Vertical::Center)
+                    .into(),
+                    pal::MENU_ITEM_H,
+                ),
+            ));
+            continue;
+        }
+        let mut row = row![
+            text(m.display_name.clone()).size(pal::fs_caption()).color(pal::TEXT_PRIMARY),
+            text(format!("@{}", m.username)).size(pal::fs_micro()).color(pal::TEXT_MUTED),
+            role_badge(m.role),
+            space().width(Length::Fill),
+        ]
+        .spacing(6);
+        if owner && m.role != SpaceRole::Owner {
+            let uid = m.user_id.clone();
+            row = row
+                .push(controls::btn(
+                    "转让",
+                    &controls::btn_sm(),
+                    Variant::Secondary,
+                    Some(Message::Space(crate::SpaceMsg::MemberAsk(
+                        uid.clone(),
+                        crate::space_actions::MemberConfirm::Transfer,
+                    ))),
+                ))
+                .push(controls::btn(
+                    "移除",
+                    &controls::btn_sm(),
+                    Variant::Danger,
+                    Some(Message::Space(crate::SpaceMsg::MemberAsk(
+                        uid,
+                        crate::space_actions::MemberConfirm::Remove,
+                    ))),
+                ));
+        }
+        entries.push((
+            0,
+            MenuEntry::Custom(
+                container(row)
+                    .padding(Padding::ZERO.horizontal(12.0))
+                    .width(Length::Fill)
+                    .height(Length::Fixed(pal::MENU_ITEM_H))
+                    .align_y(Vertical::Center)
+                    .into(),
+                pal::MENU_ITEM_H,
+            ),
+        ));
+    }
+    entries
+}
+
+/// 邀请码元信息行：{角色} · 有效期 · 次数。
+fn invite_meta_line(info: &atelyx_core::space_client::InviteInfo) -> String {
+    use atelyx_core::space_client::SpaceRole;
+    let role = match info.role {
+        SpaceRole::Owner => "所有者",
+        SpaceRole::Editor => "编辑者",
+        SpaceRole::Viewer => "只读",
+    };
+    let expires = match info.expires_at {
+        None => "永久有效".to_string(),
+        Some(secs) => format!("过期于 {}", format_ts(secs * 1000)),
+    };
+    let uses = match info.max_uses {
+        None => "不限次数".to_string(),
+        Some(n) => format!("限用 {n} 次"),
+    };
+    format!("{role} · {expires} · {uses}")
+}
+
+/// 邀请码红字撤销入口 / 二段确认行。
+fn invite_revoke_row(code: String, confirmed: bool) -> Element<'static, Message> {
+    if confirmed {
+        return container(
+            row![
+                text("撤销后该邀请码立即失效").size(pal::fs_micro()).color(pal::TEXT_SECONDARY),
+                space().width(Length::Fill),
+                controls::btn(
+                    "确认撤销",
+                    &controls::btn_sm(),
+                    Variant::Danger,
+                    Some(Message::Space(crate::SpaceMsg::RevokeInvite(code))),
+                ),
+                controls::btn(
+                    "取消",
+                    &controls::btn_sm(),
+                    Variant::Ghost,
+                    Some(Message::Space(crate::SpaceMsg::InviteRevokeCancel)),
+                ),
+            ]
+            .spacing(6),
+        )
+        .padding(Padding::ZERO.horizontal(12.0).vertical(2.0))
+        .width(Length::Fill)
+        .into();
+    }
+    container(
+        button(
+            text("撤销该邀请码").size(pal::fs_micro()).color(pal::DANGER),
+        )
+        .padding(Padding::ZERO.horizontal(6.0).vertical(2.0))
+        .style(|_t, status| button::Style {
+            background: matches!(status, button::Status::Hovered | button::Status::Pressed)
+                .then_some(pal::DANGER.scale_alpha(0.12).into()),
+            border: border::rounded(pal::RADIUS_XS),
+            ..Default::default()
+        })
+        .on_press(Message::Space(crate::SpaceMsg::InviteRevokeAsk(code))),
+    )
+    .padding(Padding::ZERO.horizontal(12.0).vertical(2.0))
+    .into()
+}
+
+/// 邀请码弹层：表单（角色 / 过期小时 / 次数）+ 最近生成结果块 + 已有邀请码列表 + 错误条。
+fn space_invite_entries(
+    app: &App,
+) -> Vec<(usize, MenuEntry<'static>)> {
+    use atelyx_core::space_client::SpaceRole;
+    let mut entries: Vec<(usize, MenuEntry)> = vec![
+        (
+            0,
+            MenuEntry::Submenu {
+                label: format!("角色：{}", match app.space_invite_form.role {
+                    SpaceRole::Owner | SpaceRole::Editor => "编辑者",
+                    SpaceRole::Viewer => "只读",
+                }),
+                icon: None,
+                disabled: false,
+                pane: 1,
+            },
+        ),
+        (
+            0,
+            MenuEntry::Custom(
+                space_form_input(
+                    "过期小时（空 = 永久有效）",
+                    &app.space_invite_form.hours.clone(),
+                    |v| Message::Space(crate::SpaceMsg::LoginField(crate::SpaceField::InviteHours, v)),
+                    false,
+                ),
+                30.0,
+            ),
+        ),
+        (
+            0,
+            MenuEntry::Custom(
+                space_form_input(
+                    "次数上限（空 = 不限）",
+                    &app.space_invite_form.uses.clone(),
+                    |v| Message::Space(crate::SpaceMsg::LoginField(crate::SpaceField::InviteUses, v)),
+                    false,
+                ),
+                30.0,
+            ),
+        ),
+        (
+            0,
+            MenuEntry::Custom(
+                space_action_row(
+                    if app.space_invite_result.is_some() { "重新生成" } else { "生成邀请码" },
+                    app.space_busy,
+                    Message::Space(crate::SpaceMsg::CreateInvite),
+                ),
+                30.0,
+            ),
+        ),
+    ];
+
+    // 最近生成结果块：等宽 code + 复制（点击转「已复制」）+ 元信息 + 红字撤销
+    if let Some(info) = &app.space_invite_result {
+        let copy_label = if app.space_invite_copied { "已复制" } else { "复制" };
+        entries.push((
+            0,
+            MenuEntry::Custom(
+                column![
+                    container(
+                        row![
+                            text(info.code.clone()).size(pal::fs_body()).color(pal::ACCENT).font(mono()),
+                            space().width(Length::Fill),
+                            controls::btn(
+                                copy_label,
+                                &controls::btn_sm(),
+                                Variant::Secondary,
+                                Some(Message::Space(crate::SpaceMsg::InviteCopy(info.code.clone()))),
+                            ),
+                        ]
+                        .spacing(8),
+                    )
+                    .padding(Padding::ZERO.horizontal(12.0))
+                    .width(Length::Fill),
+                    container(
+                        text(invite_meta_line(info)).size(pal::fs_micro()).color(pal::TEXT_MUTED),
+                    )
+                    .padding(Padding::ZERO.horizontal(12.0))
+                    .width(Length::Fill),
+                    invite_revoke_row(info.code.clone(), app.space_invite_confirm.as_deref() == Some(info.code.as_str())),
+                ]
+                .spacing(4)
+                .padding(Padding::ZERO.vertical(4.0))
+                .width(Length::Fill)
+                .into(),
+                92.0,
+            ),
+        ));
+    }
+
+    // 已有邀请码（owner 端点列出；结果块中的那一条不重复展示）
+    if let Some(list) = &app.space_invites {
+        let rows: Vec<_> = list
+            .iter()
+            .filter(|i| app.space_invite_result.as_ref().is_none_or(|r| r.code != i.code))
+            .collect();
+        if !rows.is_empty() {
+            entries.push((0, MenuEntry::Group("已有邀请码".into())));
+            for info in rows {
+                let confirmed = app.space_invite_confirm.as_deref() == Some(info.code.as_str());
+                entries.push((
+                    0,
+                    MenuEntry::Custom(
+                        if confirmed {
+                            container(
+                                row![
+                                    text("撤销该邀请码？").size(pal::fs_caption()).color(pal::TEXT_SECONDARY),
+                                    space().width(Length::Fill),
+                                    controls::btn(
+                                        "确认撤销",
+                                        &controls::btn_sm(),
+                                        Variant::Danger,
+                                        Some(Message::Space(crate::SpaceMsg::RevokeInvite(info.code.clone()))),
+                                    ),
+                                    controls::btn(
+                                        "取消",
+                                        &controls::btn_sm(),
+                                        Variant::Ghost,
+                                        Some(Message::Space(crate::SpaceMsg::InviteRevokeCancel)),
+                                    ),
+                                ]
+                                .spacing(6),
+                            )
+                            .padding(Padding::ZERO.horizontal(12.0))
+                            .width(Length::Fill)
+                            .height(Length::Fixed(pal::MENU_ITEM_H))
+                            .align_y(Vertical::Center)
+                            .into()
+                        } else {
+                            container(
+                                row![
+                                    text(info.code.clone()).size(pal::fs_micro()).color(pal::TEXT_PRIMARY).font(mono()),
+                                    text(invite_meta_line(info)).size(pal::fs_micro()).color(pal::TEXT_MUTED),
+                                    space().width(Length::Fill),
+                                    button(
+                                        text("撤销").size(pal::fs_micro()).color(pal::DANGER),
+                                    )
+                                    .padding(Padding::ZERO.horizontal(6.0).vertical(2.0))
+                                    .style(|_t, status| button::Style {
+                                        background: matches!(status, button::Status::Hovered | button::Status::Pressed)
+                                            .then_some(pal::DANGER.scale_alpha(0.12).into()),
+                                        border: border::rounded(pal::RADIUS_XS),
+                                        ..Default::default()
+                                    })
+                                    .on_press(Message::Space(crate::SpaceMsg::InviteRevokeAsk(info.code.clone()))),
+                                ]
+                                .spacing(8),
+                            )
+                            .padding(Padding::ZERO.horizontal(12.0))
+                            .width(Length::Fill)
+                            .height(Length::Fixed(pal::MENU_ITEM_H))
+                            .align_y(Vertical::Center)
+                            .into()
+                        },
+                        pal::MENU_ITEM_H,
+                    ),
+                ));
+            }
+        }
+    }
+
+    if let Some(err) = &app.space_invites_error {
+        entries.push((0, MenuEntry::Custom(popup_error_bar(err), 22.0)));
+    } else if app.space_invites_loading && app.space_invites.is_none() {
+        entries.push((0, MenuEntry::Custom(space_hint("加载中…"), 18.0)));
+    }
+
+    // pane 1 = 角色下拉（服务端仅接受 editor / viewer 两档）
+    for (role, label) in [(SpaceRole::Editor, "编辑者"), (SpaceRole::Viewer, "只读")] {
+        let pick = Message::Space(crate::SpaceMsg::InviteRolePick(role));
+        entries.push((
+            1,
+            if app.space_invite_form.role == role {
+                MenuEntry::Checked { label: label.into(), on_press: pick }
+            } else {
+                MenuEntry::action(label, pick)
+            },
+        ));
+    }
+    entries
 }
 
 /// 文件树右键菜单：文件夹 / 文件 / 根空白；删除 = 应用层确认流
@@ -4708,13 +5129,21 @@ fn file_menu_entries(
             entries.push((0, MenuEntry::Divider));
         }
         if lower.ends_with(".md") {
-            // 标记状态决定条目形态（注册/注销）；副本不继承标记
+            // 标记状态决定条目形态（注册/注销）；副本不继承标记；viewer 只读降级（与 AI 设置同口径）
+            let viewer = matches!(
+                &app.repo_kind,
+                crate::RepoKind::Space(s) if !s.role.can_write()
+            );
             let marked = app.prompt_notes.iter().any(|n| n == rel);
-            entries.push((0, MenuEntry::action_icon(
-                if marked { "注销提示词" } else { "注册为提示词" },
-                if marked { "bookmark-minus" } else { "bookmark-plus" },
-                Message::PromptToggle(rel.to_string()),
-            )));
+            entries.push((0, MenuEntry::Action {
+                label: if marked { "注销提示词" } else { "注册为提示词" }.into(),
+                icon: Some(if marked { "bookmark-minus" } else { "bookmark-plus" }),
+                danger: false,
+                disabled: viewer,
+                on_press: (!viewer).then(|| Message::PromptToggle(rel.to_string())),
+                note: None,
+                hint: viewer.then(|| "当前角色为只读，无法修改提示词".to_string()),
+            }));
             entries.push((0, MenuEntry::Divider));
         }
         entries.push((0, MenuEntry::action_icon("创建副本", "copy",
@@ -4746,7 +5175,7 @@ fn file_menu_entries(
                 });
             let row = row![
                 swatch,
-                text(hex.to_string()).size(pal::FS_MICRO).color(pal::TEXT_SECONDARY).font(mono()),
+                text(hex.to_string()).size(pal::fs_micro()).color(pal::TEXT_SECONDARY).font(mono()),
             ]
             .spacing(8)
             .padding(Padding::ZERO.horizontal(12.0))
@@ -4779,14 +5208,14 @@ fn file_menu_entries(
             if let Some(n) = count {
                 pane_col = pane_col.push(
                     text(format!("文件夹包含 {n} 个文件/文件夹"))
-                        .size(pal::FS_CAPTION)
+                        .size(pal::fs_caption())
                         .color(pal::TEXT_SECONDARY),
                 );
                 height += 16.0;
             }
             pane_col = pane_col.push(
                 text("删除后不可恢复")
-                    .size(pal::FS_CAPTION)
+                    .size(pal::fs_caption())
                     .color(pal::TEXT_MUTED),
             );
             entries.push((1, MenuEntry::Custom(pane_col.into(), height)));

@@ -529,11 +529,6 @@ fn on_msg_open(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
             open_table_popup(app, window, crate::layout_view::PopupState::TableColorMenu { bg }, None);
             Task::none()
         }
-        tv::TableMsg::OpenHistory => {
-            app.dismiss_popup();
-            app.history_open = true;
-            Task::none()
-        }
         tv::TableMsg::PopupDraft(v) => {
             app.table_popup_draft = v;
             Task::none()
@@ -620,7 +615,9 @@ fn on_loaded(app: &mut App, gen: u64, file: String, result: Result<TableFile, St
     }
     match result {
         Ok(table) => {
-            app.table = Some(tv::TableSession::new(file, table));
+            app.table = Some(tv::TableSession::new(file.clone(), table));
+            // 内容载入成功即登记最近打开（本地与空间模式同链回执）
+            crate::recent_view::record(app, &file, crate::recent_view::RecentKind::Table);
             // 空间模式在场跟随：名册与协作者据此看到本端正在编辑该表格
             if matches!(app.repo_kind, crate::RepoKind::Space(_)) {
                 space_actions::send_presence(app);
@@ -714,6 +711,7 @@ fn on_saved(
     }
     match result {
         Err(e) => {
+            app.settle_history_restore(false);
             let Some(s) = app.table.as_mut() else { return Task::none() };
             s.save_error = Some(e.clone());
             if matches!(reason, tv::SaveReason::Flush) {
@@ -742,6 +740,7 @@ fn on_saved(
                 task = task.chain(app.after_any_flush());
             }
             if stable {
+                app.settle_history_restore(true);
                 match serde_json::to_string(&frozen) {
                     Ok(content) => task = task.chain(record_table_history(app, content)),
                     // 序列化失败：宁缺版本也不把空串写入历史（结构体序列化失败为极端异常）

@@ -30,8 +30,12 @@ pub const MAX_ZOOM: f32 = 2.0;
 
 const CELL_PAD_X: f32 = 6.0;
 const CELL_PAD_Y: f32 = 5.0;
-const CELL_FONT: f32 = pal::FS_UI;
-const NUM_FONT: f32 = pal::FS_CAPTION;
+fn cell_font() -> f32 {
+    pal::fs_ui()
+}
+fn num_font() -> f32 {
+    pal::fs_caption()
+}
 const LINE_FACTOR: f32 = 1.45;
 const COL_HANDLE_W: f32 = 8.0;
 const ROW_HANDLE_H: f32 = 6.0;
@@ -434,8 +438,6 @@ pub enum TableMsg {
     OpenFontMenu(iced::window::Id),
     OpenSizeMenu(iced::window::Id),
     OpenColorMenu { window: iced::window::Id, bg: bool },
-    /// 打开历史侧栏（表格上下文）。
-    OpenHistory,
     /// 无操作（吞键位）。
     Noop,
     /// 表格弹层内联输入草稿（改名 / 插列 / 添加字段共用）。
@@ -792,8 +794,8 @@ fn wrap_lines_text(text: &str, size: f32, max_w: f32) -> Vec<String> {
 /// 字段基准字号：数字 / 时长列小一档。
 fn base_font_size(field: &TableField) -> f32 {
     match field.field_type.as_str() {
-        "number" | "duration" => NUM_FONT,
-        _ => CELL_FONT,
+        "number" | "duration" => num_font(),
+        _ => cell_font(),
     }
 }
 
@@ -1174,8 +1176,8 @@ fn draw_table(session: &TableSession, frame: &mut canvas::Frame, size: Size, hov
         fill_text(
             frame,
             &num,
-            Point::new(6.0 * g.z, y + (rh - NUM_FONT * g.z * LINE_FACTOR) / 2.0),
-            NUM_FONT * g.z,
+            Point::new(6.0 * g.z, y + (rh - num_font() * g.z * LINE_FACTOR) / 2.0),
+            num_font() * g.z,
             mono_font(),
             pal::TEXT_MUTED,
         );
@@ -1226,8 +1228,8 @@ fn draw_table(session: &TableSession, frame: &mut canvas::Frame, size: Size, hov
         fill_text(
             frame,
             "新行",
-            Point::new(nr.x + 26.0 * g.z, nr.y + (nr.height - NUM_FONT * g.z * LINE_FACTOR) / 2.0),
-            NUM_FONT * g.z,
+            Point::new(nr.x + 26.0 * g.z, nr.y + (nr.height - num_font() * g.z * LINE_FACTOR) / 2.0),
+            num_font() * g.z,
             ui_font(),
             pal::TEXT_MUTED,
         );
@@ -1370,7 +1372,7 @@ fn draw_chrome(session: &TableSession, frame: &mut canvas::Frame, size: Size) {
 fn draw_header(session: &TableSession, g: &Geo, frame: &mut canvas::Frame) {
     let view = &session.view;
     let h = g.header_h();
-    let font_size = NUM_FONT * g.z;
+    let font_size = num_font() * g.z;
     draw_icon(frame, "maximize-2", Point::new(g.gutter_w() / 2.0 - 5.0 * g.z, (h - 10.0 * g.z) / 2.0), 10.0 * g.z, pal::TEXT_MUTED);
     for (c, field) in session.data.fields.iter().enumerate() {
         let x = g.cache.col_x[c] - view.scroll_x + g.gutter_w();
@@ -1420,7 +1422,7 @@ fn draw_status(session: &TableSession, g: &Geo, frame: &mut canvas::Frame) {
         }
         let Some(calc) = table_ops::compute_column_calc(field, &session.data.rows) else { continue };
         let label = format!("{} {}", table_ops::calc_type_label(field.calc_type.as_deref().unwrap_or("")), calc);
-        let size = NUM_FONT * g.z;
+        let size = num_font() * g.z;
         let text = ellipsize_text(&label, w - 2.0 * CELL_PAD_X * g.z, size);
         fill_text(
             frame,
@@ -1719,8 +1721,8 @@ fn toolbar<'a>(
         space().width(Length::Shrink).into()
     };
     let save_state: Element<Message> = if let Some(err) = &session.save_error {
-        text(crate::layout_view::ellipsize(err, 220.0, pal::FS_MICRO))
-            .size(pal::FS_MICRO)
+        text(crate::layout_view::ellipsize(err, 220.0, pal::fs_micro()))
+            .size(pal::fs_micro())
             .color(pal::DANGER)
             .into()
     } else {
@@ -1733,8 +1735,8 @@ fn toolbar<'a>(
         dirty_pill,
         space().width(Length::Fill),
         save_state,
-        text(zoom_label).size(pal::FS_CAPTION).color(pal::TEXT_MUTED),
-        text(stats).size(pal::FS_CAPTION).color(pal::TEXT_SECONDARY),
+        text(zoom_label).size(pal::fs_caption()).color(pal::TEXT_MUTED),
+        text(stats).size(pal::fs_caption()).color(pal::TEXT_SECONDARY),
         icon_btn(window, "ellipsis", "更多", Message::Table(TableMsg::OpenMoreMenu(window))),
     ]
     .spacing(10)
@@ -1748,8 +1750,8 @@ fn toolbar<'a>(
 fn view_select(window: iced::window::Id) -> Element<'static, Message> {
     iced::widget::button(
         row![
-            text("视图").size(pal::FS_CAPTION).color(pal::TEXT_MUTED),
-            text("表格").size(pal::FS_CAPTION).color(pal::TEXT_PRIMARY),
+            text("视图").size(pal::fs_caption()).color(pal::TEXT_MUTED),
+            text("表格").size(pal::fs_caption()).color(pal::TEXT_PRIMARY),
             crate::ui::icon::icon("chevron-down", 11.0, pal::TEXT_MUTED),
         ]
         .spacing(4),
@@ -1914,7 +1916,7 @@ fn font_pick<'a>(app: &'a crate::App, window: iced::window::Id, summary: &table_
         OptState::Value(None) => "默认".to_string(),
         OptState::Value(Some(f)) => table_ops_font_label(f),
     };
-    let btn = iced::widget::button(text(label).size(pal::FS_CAPTION).color(pal::TEXT_PRIMARY))
+    let btn = iced::widget::button(text(label).size(pal::fs_caption()).color(pal::TEXT_PRIMARY))
         .padding(iced::Padding::ZERO.horizontal(6.0).vertical(3.0))
         .style(bar_btn_style())
         .on_press_maybe(app.table.as_ref().map(|_| Message::Table(TableMsg::OpenFontMenu(window))));
@@ -1927,7 +1929,7 @@ fn size_pick(window: iced::window::Id, summary: &table_ops::StyleSummary) -> Ele
         OptState::Value(None) => "字号".to_string(),
         OptState::Value(Some(s)) => format!("{}", *s as i32),
     };
-    iced::widget::button(text(label).size(pal::FS_CAPTION).color(pal::TEXT_PRIMARY))
+    iced::widget::button(text(label).size(pal::fs_caption()).color(pal::TEXT_PRIMARY))
         .padding(iced::Padding::ZERO.horizontal(6.0).vertical(3.0))
         .style(bar_btn_style())
         .on_press(Message::Table(TableMsg::OpenSizeMenu(window)))
@@ -1963,7 +1965,7 @@ fn tri_btn(label: &'static str, key: StyleKey, state: &OptState<bool>) -> Elemen
         OptState::Mixed => (false, true),
         _ => (false, false),
     };
-    iced::widget::button(text(label).size(pal::FS_CAPTION).color(if on { pal::ACCENT } else { pal::TEXT_PRIMARY }))
+    iced::widget::button(text(label).size(pal::fs_caption()).color(if on { pal::ACCENT } else { pal::TEXT_PRIMARY }))
         .padding(iced::Padding::ZERO.horizontal(6.0).vertical(3.0))
         .style(move |_t, status| iced::widget::button::Style {
             background: (on || mixed || matches!(status, iced::widget::button::Status::Hovered))
@@ -1989,7 +1991,7 @@ fn color_btn<'a>(app: &'a crate::App, window: iced::window::Id, bg: bool, state:
             ..Default::default()
         });
     let label = if bg { "底" } else { "字" };
-    let btn = iced::widget::button(row![text(label).size(pal::FS_CAPTION).color(pal::TEXT_PRIMARY), swatch].spacing(3))
+    let btn = iced::widget::button(row![text(label).size(pal::fs_caption()).color(pal::TEXT_PRIMARY), swatch].spacing(3))
         .padding(iced::Padding::ZERO.horizontal(6.0).vertical(3.0))
         .style(bar_btn_style())
         .on_press_maybe(
@@ -2034,7 +2036,7 @@ fn lightbox_overlay<'a>(
     // 四周留 48px 遮罩边距，点击遮罩关闭；图片本体吞按压、右键弹下载菜单
     let big: Element<'_, Message> = iced::widget::responsive(move |size| {
         if empty {
-            return container(text("图片已清空").size(pal::FS_CAPTION).color(pal::TEXT_MUTED))
+            return container(text("图片已清空").size(pal::fs_caption()).color(pal::TEXT_MUTED))
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .center(iced::Length::Fill)
@@ -2062,7 +2064,7 @@ fn lightbox_overlay<'a>(
                 .center(iced::Length::Fill)
                 .into()
             }
-            _ => container(text("图片加载中").size(pal::FS_CAPTION).color(pal::TEXT_MUTED))
+            _ => container(text("图片加载中").size(pal::fs_caption()).color(pal::TEXT_MUTED))
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .center(iced::Length::Fill)
@@ -2108,7 +2110,7 @@ fn lightbox_overlay<'a>(
                 .padding(8.0),
         );
         stack = stack.push(
-            container(text(format!("{}/{}", index + 1, images.len())).size(pal::FS_CAPTION).color(pal::TEXT_PRIMARY))
+            container(text(format!("{}/{}", index + 1, images.len())).size(pal::fs_caption()).color(pal::TEXT_PRIMARY))
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .align_y(alignment::Vertical::Bottom)

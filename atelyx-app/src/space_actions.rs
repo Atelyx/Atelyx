@@ -13,7 +13,7 @@ use crate::{
     SpaceMsg,
 };
 use atelyx_core::space_client::{
-    self, AcceptAck, SpaceClient, SpaceError, SpaceRole, SpaceSummary,
+    self, AcceptAck, InviteInfo, MemberInfo, SpaceClient, SpaceError, SpaceRole, SpaceSummary,
 };
 use atelyx_core::credentials;
 use std::collections::HashMap;
@@ -26,6 +26,9 @@ const HISTORY_COALESCE_MS: i64 = 60_000;
 /// 设备名缺省值（登录表单留空 / WS hello）。
 pub(crate) const DEFAULT_DEVICE_NAME: &str = "桌面端";
 
+/// 协作在场色缺省值（用户未自定义 collab_color 时的设备标色）。
+pub(crate) const DEFAULT_COLLAB_COLOR: &str = "#30bced";
+
 /// 他端结构变更的树刷新合并窗口：连续建删（批量导入等）只刷一次。
 const FS_TREE_REFRESH_COALESCE: std::time::Duration = std::time::Duration::from_millis(600);
 
@@ -37,6 +40,45 @@ pub struct SpaceSession {
     pub space_id: String,
     pub name: String,
     pub role: SpaceRole,
+}
+
+/// 成员管理操作（成员弹层行内二段确认的确认对象）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberConfirm {
+    /// 转让管理权（自身降为编辑者）。
+    Transfer,
+    /// 移出空间。
+    Remove,
+}
+
+impl MemberConfirm {
+    fn done_label(self) -> &'static str {
+        match self {
+            MemberConfirm::Transfer => "转让失败",
+            MemberConfirm::Remove => "移除成员失败",
+        }
+    }
+
+    fn ok_notice(self) -> &'static str {
+        match self {
+            MemberConfirm::Transfer => "管理权已转让",
+            MemberConfirm::Remove => "成员已移除",
+        }
+    }
+}
+
+/// 邀请码表单草稿（数字字段保留原文，空 = 服务端缺省语义）。
+#[derive(Debug, Clone)]
+pub struct InviteForm {
+    pub role: SpaceRole,
+    pub hours: String,
+    pub uses: String,
+}
+
+impl Default for InviteForm {
+    fn default() -> Self {
+        InviteForm { role: SpaceRole::Editor, hours: String::new(), uses: String::new() }
+    }
 }
 
 /// 服务端文件树 → 本地树模型（字段逐一对应，消费方复用本地遍历函数）。
@@ -142,6 +184,22 @@ mod tests {
         assert!(out.contains("[页](dir2/sub/n.md)"));
         assert!(out.contains("[页2](dir2/other.md)"));
         assert_eq!(rewrite_note_links("[无关](x/n.md)", "dir", "dir2"), None);
+    }
+
+    #[test]
+    fn 对端打开文件清单优先open_files并回退旧版单字段() {
+        let multi = serde_json::json!({
+            "file": "a/n.md", "view": "note",
+            "openFiles": [{ "file": "a/n.md", "view": "note" }, { "file": "t.atb", "view": "table" }]
+        });
+        assert_eq!(peer_open_files(Some(&multi)), vec!["a/n.md".to_string(), "t.atb".to_string()]);
+        // 旧版客户端只发 file/view 单字段
+        let legacy = serde_json::json!({ "file": "t.atb", "view": "table" });
+        assert_eq!(peer_open_files(Some(&legacy)), vec!["t.atb".to_string()]);
+        // 空在场：新旧两种空形态都解析为空
+        let none = serde_json::json!({ "file": null, "view": null, "openFiles": [] });
+        assert!(peer_open_files(Some(&none)).is_empty());
+        assert!(peer_open_files(None).is_empty());
     }
 }
 
@@ -439,6 +497,274 @@ pub fn open_space_menu(app: &mut App, window: iced::window::Id, cursor: iced::Po
         .unwrap_or_else(|_| Task::none())
 }
 
+// ===== 成员名册与邀请码 =====
+
+/// 拉取空间成员名册（协作房间视图与成员弹层共用缓存；各展示方自带装载守卫）。
+pub fn fetch_members(app: &mut App) -> Task<Message> {
+    let Some(session) = session_of(app) else { return Task::none() };
+    app.space_members_loading = true;
+    let gen = app.epoch();
+    let client = session.client;
+    let space_id = session.space_id;
+    Task::perform(
+        async move { client.list_members(&space_id).await },
+        move |result| Message::Space(SpaceMsg::MembersLoaded { gen, result }),
+    )
+}
+
+/// 成员名册懒装载（PersistTick 搭载）：名册视图或成员弹层在展示且无有效缓存时拉取。
+/// 加载失败不自动重试（重开弹层即重拉），防失败后周期空转。
+pub fn members_tick(app: &mut App) -> Task<Message> {
+    if app.space_members_loading
+        || app.space_members.is_some()
+        || app.space_members_error.is_some()
+    {
+        return Task::none();
+    }
+    let shown = layout_view::view_displayed(app, "collabroom")
+        || matches!(
+            app.popup.as_ref().map(|(_, open)| &open.state),
+            Some(layout_view::PopupState::SpaceMembers)
+        );
+    if !shown || session_of(app).is_none() {
+        return Task::none();
+    }
+    fetch_members(app)
+}
+
+fn on_members_loaded(
+    app: &mut App,
+    gen: u64,
+    result: Result<Vec<MemberInfo>, SpaceError>,
+) -> Task<Message> {
+    if gen != app.epoch() {
+        return Task::none();
+    }
+    app.space_members_loading = false;
+    match result {
+        Ok(list) => {
+            app.space_members = Some(list);
+            app.space_members_error = None;
+        }
+        Err(e) => app.space_members_error = Some(e.to_string()),
+    }
+    Task::none()
+}
+
+/// 成员操作前置：仅 owner 可管理（入口已隐藏，此处兜底防在途角色漂移）。
+fn require_owner(app: &mut App) -> Option<SpaceSession> {
+    let session = session_of(app)?;
+    if session.role != SpaceRole::Owner {
+        app.notify(NoticeLevel::Warning, "仅空间所有者可执行此操作");
+        return None;
+    }
+    Some(session)
+}
+
+/// 转让管理权（owner 专属）：成功后自身降为编辑者，重拉名册并刷新空间列表对齐角色。
+fn member_transfer(app: &mut App, user_id: String) -> Task<Message> {
+    let Some(session) = require_owner(app) else { return Task::none() };
+    if app.space_busy {
+        return Task::none();
+    }
+    app.space_busy = true;
+    let gen = app.epoch();
+    let client = session.client;
+    let space_id = session.space_id;
+    Task::perform(
+        async move { client.transfer_space(&space_id, &user_id).await },
+        move |result| {
+            Message::Space(SpaceMsg::MemberOpDone { gen, op: MemberConfirm::Transfer, result })
+        },
+    )
+}
+
+/// 移出成员（owner 专属）。
+fn member_remove(app: &mut App, user_id: String) -> Task<Message> {
+    let Some(session) = require_owner(app) else { return Task::none() };
+    if app.space_busy {
+        return Task::none();
+    }
+    app.space_busy = true;
+    let gen = app.epoch();
+    let client = session.client;
+    let space_id = session.space_id;
+    Task::perform(
+        async move { client.remove_member(&space_id, &user_id).await },
+        move |result| {
+            Message::Space(SpaceMsg::MemberOpDone { gen, op: MemberConfirm::Remove, result })
+        },
+    )
+}
+
+fn on_member_op_done(
+    app: &mut App,
+    gen: u64,
+    op: MemberConfirm,
+    result: Result<(), SpaceError>,
+) -> Task<Message> {
+    if gen != app.epoch() {
+        return Task::none();
+    }
+    app.space_busy = false;
+    app.space_member_confirm = None;
+    match result {
+        Err(e) => on_error(app, e, op.done_label()),
+        Ok(()) => {
+            app.notify(NoticeLevel::Success, op.ok_notice());
+            let task = fetch_members(app);
+            // 转让后自身角色变化：刷新空间列表（会话角色 / 行菜单权限随回执对齐）
+            if op == MemberConfirm::Transfer {
+                if let Some(session) = session_of(app) {
+                    let window = app
+                        .popup
+                        .as_ref()
+                        .map(|(w, _)| *w)
+                        .or(app.main_id)
+                        .unwrap_or_else(iced::window::Id::unique);
+                    return task.chain(refresh_spaces(app, window, session.client));
+                }
+            }
+            task
+        }
+    }
+}
+
+/// 拉取邀请码列表（owner 专属端点；非 owner 打开弹层清缓存只提示不空跑）。
+pub fn fetch_invites(app: &mut App) -> Task<Message> {
+    let Some(session) = session_of(app) else { return Task::none() };
+    if session.role != SpaceRole::Owner {
+        // 角色已非 owner（如转让后）：缓存连同撤销入口一并失效
+        app.space_invites = None;
+        app.space_invites_loading = false;
+        app.space_invites_error = Some("邀请码仅空间所有者可管理".to_string());
+        return Task::none();
+    }
+    app.space_invites_loading = true;
+    let gen = app.epoch();
+    let client = session.client;
+    let space_id = session.space_id;
+    Task::perform(
+        async move { client.list_invites(&space_id).await },
+        move |result| Message::Space(SpaceMsg::InvitesLoaded { gen, result }),
+    )
+}
+
+fn on_invites_loaded(
+    app: &mut App,
+    gen: u64,
+    result: Result<Vec<InviteInfo>, SpaceError>,
+) -> Task<Message> {
+    if gen != app.epoch() {
+        return Task::none();
+    }
+    app.space_invites_loading = false;
+    match result {
+        Ok(list) => {
+            app.space_invites = Some(list);
+            app.space_invites_error = None;
+        }
+        Err(e) => app.space_invites_error = Some(e.to_string()),
+    }
+    Task::none()
+}
+
+/// 生成邀请码（表单草稿 → 服务端；数字字段空 = 服务端缺省）。
+fn create_invite(app: &mut App) -> Task<Message> {
+    let Some(session) = require_owner(app) else { return Task::none() };
+    if app.space_busy {
+        return Task::none();
+    }
+    let form = app.space_invite_form.clone();
+    let hours = match form.hours.trim().parse::<i64>() {
+        Ok(h) => Some(h),
+        Err(_) if form.hours.trim().is_empty() => None,
+        Err(_) => {
+            app.notify(NoticeLevel::Warning, "过期小时须为整数");
+            return Task::none();
+        }
+    };
+    let uses = match form.uses.trim().parse::<u32>() {
+        Ok(n) => Some(n),
+        Err(_) if form.uses.trim().is_empty() => None,
+        Err(_) => {
+            app.notify(NoticeLevel::Warning, "次数上限须为正整数");
+            return Task::none();
+        }
+    };
+    app.space_busy = true;
+    let gen = app.epoch();
+    let client = session.client;
+    let space_id = session.space_id;
+    let role = form.role;
+    Task::perform(
+        async move { client.create_invite(&space_id, role, hours, uses).await },
+        move |result| Message::Space(SpaceMsg::InviteCreated { gen, result }),
+    )
+}
+
+fn on_invite_created(
+    app: &mut App,
+    gen: u64,
+    result: Result<InviteInfo, SpaceError>,
+) -> Task<Message> {
+    if gen != app.epoch() {
+        return Task::none();
+    }
+    app.space_busy = false;
+    match result {
+        Err(e) => on_error(app, e, "生成邀请码失败"),
+        Ok(info) => {
+            app.space_invite_result = Some(info);
+            app.space_invite_copied = false;
+            app.space_invite_confirm = None;
+            fetch_invites(app)
+        }
+    }
+}
+
+/// 撤销邀请码（owner 专属；二段确认后调用）。
+fn invite_revoke(app: &mut App, code: String) -> Task<Message> {
+    let Some(session) = require_owner(app) else { return Task::none() };
+    if app.space_busy {
+        return Task::none();
+    }
+    app.space_busy = true;
+    let gen = app.epoch();
+    let client = session.client;
+    let space_id = session.space_id;
+    Task::perform(
+        async move {
+            let r = client.revoke_invite(&space_id, &code).await;
+            (code, r)
+        },
+        move |(code, result)| Message::Space(SpaceMsg::InviteRevoked { gen, code, result }),
+    )
+}
+
+fn on_invite_revoked(
+    app: &mut App,
+    gen: u64,
+    code: String,
+    result: Result<(), SpaceError>,
+) -> Task<Message> {
+    if gen != app.epoch() {
+        return Task::none();
+    }
+    app.space_busy = false;
+    app.space_invite_confirm = None;
+    match result {
+        Err(e) => on_error(app, e, "撤销邀请码失败"),
+        Ok(()) => {
+            app.notify(NoticeLevel::Success, "邀请码已撤销");
+            if app.space_invite_result.as_ref().is_some_and(|i| i.code == code) {
+                app.space_invite_result = None;
+            }
+            fetch_invites(app)
+        }
+    }
+}
+
 /// 恢复会话并进入目标空间：密钥链 / 会话内令牌 → list_spaces 校验 → 进入或弹登录。
 fn restore_and_enter(app: &mut App, server_url: String, space_id: String, name: String, from_boot: bool) -> Task<Message> {
     let username = app.global.last_identity.as_ref().map(|i| i.username.clone());
@@ -558,7 +884,40 @@ fn clear_session_state(app: &mut App) {
     app.tag_vocab.clear();
     app.note_files.clear();
     app.history.clear();
+    app.history_gen = 0;
+    app.history_loading = false;
+    app.history_expanded = None;
+    app.history_confirm = None;
+    // 未落盘的回滚提示随容器切换作废（旧保存链回执不再消费）
+    app.history_restore_pending = false;
+    // 仓库历史面板缓存随容器切换失效（进面板后重取）
+    app.repo_history = None;
+    app.repo_history_loading = false;
+    app.repo_history_fold.clear();
+    // 日历会话态随容器切换重置（日程 / 选中天 / 活动密度一并重取）
+    app.calendar = crate::calendar_actions::CalendarState::default();
+    app.rebuild_links = crate::settings_view::editor::RebuildLinksState::Idle;
     app.remote_cursors.clear();
+    // 仓库级配置基线与 AI 编辑态随容器切换清空（VaultMetaLoaded 落地后回填），
+    // 残留会把上一容器的供应商清单写进下一容器
+    app.repo_config = vault::VaultConfig::default();
+    app.agents.clear();
+    app.ai = crate::settings_view::ai::AiState::default();
+    // 成员名册与邀请码缓存随空间会话失效（视图 / 弹层展示时重取）
+    // 忙标志同属会话态：容器切换清零，防旧回执被 gen 守卫丢弃后卡死新容器操作
+    app.space_busy = false;
+    app.space_connected = false;
+    app.space_members = None;
+    app.space_members_loading = false;
+    app.space_members_error = None;
+    app.space_member_confirm = None;
+    app.space_invites = None;
+    app.space_invites_loading = false;
+    app.space_invites_error = None;
+    app.space_invite_result = None;
+    app.space_invite_confirm = None;
+    app.space_invite_copied = false;
+    app.space_invite_form = InviteForm::default();
 }
 
 /// 离开当前空间身份（进入本地仓库 / 登出时调用）：摘泵、清空间会话态并推进世代
@@ -588,6 +947,8 @@ pub fn handle(app: &mut App, msg: SpaceMsg) -> Task<Message> {
                 SpaceField::Device => app.space_form.device = value,
                 SpaceField::Name => app.space_form.name = value,
                 SpaceField::Code => app.space_form.code = value,
+                SpaceField::InviteHours => app.space_invite_form.hours = value,
+                SpaceField::InviteUses => app.space_invite_form.uses = value,
             }
             Task::none()
         }
@@ -637,9 +998,11 @@ pub fn handle(app: &mut App, msg: SpaceMsg) -> Task<Message> {
         }
         SpaceMsg::HistoryRecorded { err } => {
             if let Some(e) = err {
-                // 历史为尽力而为侧车：失败提示但不阻塞正文链
-                app.notify(NoticeLevel::Warning, format!("历史版本记录失败：{e}"));
+                // 历史为尽力而为侧车：失败提示但不阻塞正文链（文案由发起方按失败点拼装）
+                app.notify(NoticeLevel::Warning, e);
             }
+            // 侧文件有新版本：面板聚合缓存失效，下个 tick 重取（展示中）
+            app.repo_history = None;
             Task::none()
         }
         SpaceMsg::DevicesLoaded { result } => match result {
@@ -673,6 +1036,49 @@ pub fn handle(app: &mut App, msg: SpaceMsg) -> Task<Message> {
                 on_space_event(app, *event)
             } else {
                 Task::none()
+            }
+        }
+        SpaceMsg::MembersLoaded { gen, result } => on_members_loaded(app, gen, result),
+        SpaceMsg::MemberAsk(user_id, op) => {
+            app.space_member_confirm = Some((user_id, op));
+            Task::none()
+        }
+        SpaceMsg::MemberAskCancel => {
+            app.space_member_confirm = None;
+            Task::none()
+        }
+        SpaceMsg::MemberTransfer(user_id) => member_transfer(app, user_id),
+        SpaceMsg::MemberRemove(user_id) => member_remove(app, user_id),
+        SpaceMsg::MemberOpDone { gen, op, result } => on_member_op_done(app, gen, op, result),
+        SpaceMsg::InvitesLoaded { gen, result } => on_invites_loaded(app, gen, result),
+        SpaceMsg::InviteRolePick(role) => {
+            app.space_invite_form.role = role;
+            app.popup_pane = 0;
+            Task::none()
+        }
+        SpaceMsg::CreateInvite => create_invite(app),
+        SpaceMsg::InviteCreated { gen, result } => on_invite_created(app, gen, result),
+        SpaceMsg::InviteRevokeAsk(code) => {
+            app.space_invite_confirm = Some(code);
+            Task::none()
+        }
+        SpaceMsg::InviteRevokeCancel => {
+            app.space_invite_confirm = None;
+            Task::none()
+        }
+        SpaceMsg::RevokeInvite(code) => invite_revoke(app, code),
+        SpaceMsg::InviteRevoked { gen, code, result } => on_invite_revoked(app, gen, code, result),
+        SpaceMsg::InviteCopy(code) => {
+            app.space_invite_copied = true;
+            iced::clipboard::write(code)
+        }
+        SpaceMsg::OpenCollabSettings => {
+            // 已在设置页只切分区，否则切分区后再开整页
+            let tab = Task::done(Message::SettingsTab("collab".to_string()));
+            if app.settings_open {
+                tab
+            } else {
+                tab.chain(Task::done(Message::SettingsToggle))
             }
         }
     }
@@ -1048,6 +1454,7 @@ fn on_note_saved(
     let mut task = Task::none();
     match result {
         Err(e) => {
+            app.settle_history_restore(false);
             app.save_error = Some(e.clone());
             if matches!(reason, SaveReason::Flush) {
                 app.notify(NoticeLevel::Error, format!("保存失败，操作未执行：{e}"));
@@ -1080,6 +1487,9 @@ fn on_note_saved(
                 }
             }
             let stable = app.note_text == merged;
+            if stable {
+                app.settle_history_restore(true);
+            }
             match reason {
                 SaveReason::Flush => {
                     if stable {
@@ -1281,6 +1691,7 @@ fn on_table_patch_done(
     let mut task = Task::none();
     match result {
         Err(e) => {
+            app.settle_history_restore(false);
             let Some(s) = app.table.as_mut() else { return Task::none() };
             s.save_error = Some(e.clone());
             // 404 = 文件被改名（他端标题漂移未广播时）或删除：明示刷新，不做路径猜测
@@ -1320,6 +1731,9 @@ fn on_table_patch_done(
                     s.saved = frozen.clone();
                 }
             }
+            if stable {
+                app.settle_history_restore(true);
+            }
             match reason {
                 // Flush 回执期间有新编辑（unstable）：重收一轮 Flush——脏拦截已在放行前 flush，
                 // 此轮丢失会让关闭/切换动作静默挂起（对齐笔记保存链）
@@ -1340,7 +1754,7 @@ fn on_table_patch_done(
 
 // ===== 元数据 / 索引 / 图片 / 历史 =====
 
-/// 空间模式元数据读取（排序 / 提示词标记 / 文件夹颜色：`.atelyx/` 下文件，缺失走默认）。
+/// 空间模式元数据读取（仓库配置 / 提示词标记 / 文件夹颜色：`.atelyx/` 下文件，缺失走默认）。
 pub fn load_space_meta(app: &App) -> Task<Message> {
     let Some(session) = session_of(app) else { return Task::none() };
     let gen = app.epoch();
@@ -1348,20 +1762,18 @@ pub fn load_space_meta(app: &App) -> Task<Message> {
     let space_id = session.space_id;
     Task::perform(
         async move {
-            let sort = match client.get_file_text(&space_id, ".atelyx/config.json").await {
-                Ok(raw) => serde_json::from_str::<serde_json::Value>(&raw)
-                    .ok()
-                    .and_then(|v| v.get("fileExplorerSort").and_then(|s| s.as_str()).map(str::to_owned))
-                    .unwrap_or_else(|| "mtime-desc".to_string()),
-                Err(_) => "mtime-desc".to_string(),
-            };
+            let config: vault::VaultConfig =
+                match client.get_file_text(&space_id, ".atelyx/config.json").await {
+                    Ok(raw) => serde_json::from_str(&raw).unwrap_or_default(),
+                    Err(_) => vault::VaultConfig::default(),
+                };
             let prompts = read_json_string_list(&client, &space_id, ".atelyx/prompt-notes.json").await;
             let colors: HashMap<String, String> =
                 match client.get_file_text(&space_id, ".atelyx/folder-colors.json").await {
                     Ok(raw) => serde_json::from_str(&raw).unwrap_or_default(),
                     Err(_) => HashMap::new(),
                 };
-            Ok((sort, prompts, colors))
+            Ok((config, prompts, colors))
         },
         move |result| {
             Message::VaultMetaLoaded(gen, result.map_err(err_text))
@@ -1451,6 +1863,88 @@ pub fn space_set_sort(app: &mut App, sort: &str) -> Task<Message> {
     )
 }
 
+/// 仓库级配置补丁（空间模式：读改写 `.atelyx/config.json`，按补丁键合并；null = 删键）。
+pub fn space_patch_config(app: &mut App, patch: serde_json::Value) -> Task<Message> {
+    let Some(session) = require_write(app) else { return Task::none() };
+    let gen = app.epoch();
+    let client = session.client;
+    let space_id = session.space_id;
+    Task::perform(
+        async move {
+            let mut config: serde_json::Value =
+                match client.get_file_text(&space_id, ".atelyx/config.json").await {
+                    Ok(raw) => serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({})),
+                    Err(_) => serde_json::json!({}),
+                };
+            if let (serde_json::Value::Object(base), serde_json::Value::Object(keys)) =
+                (&mut config, patch)
+            {
+                // 与本地补丁同口径：null = 删键（缺省语义回正）
+                for (key, value) in keys {
+                    if value.is_null() {
+                        base.remove(&key);
+                    } else {
+                        base.insert(key, value);
+                    }
+                }
+            }
+            client
+                .put_file_text(&space_id, ".atelyx/config.json", &serde_json::to_string_pretty(&config).unwrap_or_default())
+                .await?;
+            Ok::<_, SpaceError>(())
+        },
+        move |result| Message::ConfigSaved(gen, result.map_err(err_text)),
+    )
+}
+
+/// Agent 配置读取（空间模式：GET `.atelyx/agents.json`，缺失/损坏按空清单）。
+pub fn space_load_agents(app: &App) -> Task<Message> {
+    let Some(session) = session_of(app) else { return Task::none() };
+    let gen = app.epoch();
+    let client = session.client;
+    let space_id = session.space_id;
+    Task::perform(
+        async move {
+            match client.get_file_text(&space_id, ".atelyx/agents.json").await {
+                Ok(raw) => {
+                    Ok::<_, SpaceError>(
+                        serde_json::from_str::<vault::AgentConfigFile>(&raw)
+                            .map(|f| f.agents)
+                            .unwrap_or_default(),
+                    )
+                }
+                // 缺失 = 尚无配置（与本地读路径同口径，不算错误）
+                Err(SpaceError::NotFound) => Ok(Vec::new()),
+                Err(e) => Err(e),
+            }
+        },
+        move |result| Message::AgentsLoaded(gen, result.map_err(err_text)),
+    )
+}
+
+/// Agent 配置写盘（空间模式：整表 PUT 后重读回执；viewer 由 require_write 拦截）。
+pub fn space_write_agents(app: &mut App, agents: Vec<vault::AgentConfig>) -> Task<Message> {
+    let Some(session) = require_write(app) else { return Task::none() };
+    let gen = app.epoch();
+    let client = session.client;
+    let space_id = session.space_id;
+    Task::perform(
+        async move {
+            let file = vault::AgentConfigFile { schema: vault::AGENTS_SCHEMA.to_string(), agents };
+            let raw = serde_json::to_string_pretty(&file).unwrap_or_default();
+            client.put_file_text(&space_id, ".atelyx/agents.json", &raw).await?;
+            match client.get_file_text(&space_id, ".atelyx/agents.json").await {
+                Ok(raw) => Ok(serde_json::from_str::<vault::AgentConfigFile>(&raw)
+                    .map(|f| f.agents)
+                    .unwrap_or_default()),
+                Err(SpaceError::NotFound) => Ok(Vec::new()),
+                Err(e) => Err(e),
+            }
+        },
+        move |result| Message::AgentsLoaded(gen, result.map_err(err_text)),
+    )
+}
+
 /// 反链（空间模式：服务端索引端点）。
 pub fn refresh_space_backlinks(app: &App) -> Task<Message> {
     let Some(session) = session_of(app) else { return Task::none() };
@@ -1504,7 +1998,6 @@ pub fn space_load_image(app: &App, gen: u64, src: String) -> Task<Message> {
 
 /// 历史版本列表（空间模式：服务端侧文件端点；缺失 / 损坏 = 空列表）。
 pub fn reload_space_history(app: &App) -> Task<Message> {
-    let Some(session) = session_of(app) else { return Task::none() };
     let (kind, rel) = match app.history_kind {
         atelyx_core::history::HistoryKind::Note => {
             (atelyx_core::history::HistoryKind::Note, app.ui.last_note_file.clone())
@@ -1512,15 +2005,26 @@ pub fn reload_space_history(app: &App) -> Task<Message> {
         atelyx_core::history::HistoryKind::Table => {
             (atelyx_core::history::HistoryKind::Table, app.ui.last_table_file.clone())
         }
+        // 画布视图未接线：无打开上下文可读（弹层按显式 kind+file 经 space_history_task 读取）
+        atelyx_core::history::HistoryKind::Canvas => (atelyx_core::history::HistoryKind::Canvas, None),
     };
-    let Some(rel) = rel else { return Task::none() };
+    match rel {
+        Some(rel) => space_history_task(app, kind, &rel),
+        None => Task::none(),
+    }
+}
+
+/// 按 kind+file 拉取历史版本列表（历史弹层显式定位入口；缺失 / 损坏 = 空列表）。
+pub fn space_history_task(app: &App, kind: atelyx_core::history::HistoryKind, rel: &str) -> Task<Message> {
+    let Some(session) = session_of(app) else { return Task::none() };
     let gen = app.epoch();
-    let rel_for_cb = rel.clone();
+    let rel_for_cb = rel.to_string();
+    let rel = rel.to_string();
     let client = session.client;
     let space_id = session.space_id;
     Task::perform(
         async move { client.history_versions(&space_id, kind, &rel).await },
-        move |result| Message::HistoryLoaded(gen, rel_for_cb, result.unwrap_or_default()),
+        move |result| Message::HistoryLoaded(gen, kind, rel_for_cb, result.unwrap_or_default()),
     )
 }
 
@@ -1556,7 +2060,9 @@ fn record_space_history(app: &App, kind: &str, rel: String, content: String, act
                 )
                 .await
         },
-        |result| Message::Space(SpaceMsg::HistoryRecorded { err: result.err().map(|e| e.to_string()) }),
+        move |result| {
+            Message::Space(SpaceMsg::HistoryRecorded { err: result.err().map(|e| format!("历史版本记录失败：{e}")) })
+        },
     )
 }
 
@@ -1568,6 +2074,43 @@ pub fn space_record_note_restore(app: &App, rel: String, content: String) -> Tas
 /// 表格回滚记录（空间模式）。
 pub fn space_record_table_restore(app: &App, rel: String, content: String) -> Task<Message> {
     record_space_history(app, "table", rel, content, "restore")
+}
+
+/// 画布回滚（空间模式）：快照写回服务端真源后记 restore 历史（无本地副本、无会话链）。
+pub fn space_restore_canvas(app: &mut App, rel: String, content: String) -> Task<Message> {
+    let Some(session) = require_write(app) else { return Task::none() };
+    let client = session.client;
+    let space_id = session.space_id;
+    let author = crate::history_author();
+    Task::perform(
+        async move {
+            client
+                .put_file_text(&space_id, &rel, &content)
+                .await
+                .map_err(|e| format!("回滚写入失败：{e}"))?;
+            let req = space_client::HistoryRecordReq {
+                kind: "canvas".into(),
+                file: rel,
+                content,
+                action: "restore".into(),
+                author: space_client::HistoryAuthorReq {
+                    id: author.id.clone(),
+                    name: author.name.clone(),
+                    device: author.device.clone(),
+                },
+                summary: None,
+                note: None,
+                coalesce_edit_ms: None,
+                max_versions: None,
+                byte_budget: Some(atelyx_core::history::HISTORY_BYTE_BUDGET),
+            };
+            client
+                .history_record(&space_id, &req)
+                .await
+                .map_err(|e| format!("历史版本记录失败：{e}"))
+        },
+        |result| Message::Space(SpaceMsg::HistoryRecorded { err: result.err() }),
+    )
 }
 
 // ===== 文件操作 =====
@@ -1920,6 +2463,7 @@ fn teardown_pump(app: &mut App) {
     }
     app.space_peers.clear();
     app.space_own_peer_id = None;
+    app.space_connected = false;
     app.remote_cursors.clear();
 }
 
@@ -1960,19 +2504,64 @@ fn send_note_frames(app: &App, file: &str, frames: Vec<Vec<u8>>) {
     }
 }
 
-/// 本端 presence 上行（正在编辑的文件 + 视图；名册展示与跳转用）。
-/// 笔记优先（协作文档在场），其次表格；无打开文件 = 清空在场。
+/// 当前打开文件路径集合（笔记 + 表格平级，≤3；presence 与协作房间视图共用）。
+pub(crate) fn open_file_paths(app: &App) -> Vec<String> {
+    let mut files = Vec::new();
+    if let Some(f) = &app.ui.last_note_file {
+        files.push(f.clone());
+    }
+    if let Some(f) = &app.ui.last_table_file {
+        files.push(f.clone());
+    }
+    files.truncate(3);
+    files
+}
+
+/// 当前打开文件集合的 presence 上行形态（笔记与表格平级；多窗口共用同一份打开态）。
+fn presence_open_files(app: &App) -> Vec<serde_json::Value> {
+    open_file_paths(app)
+        .into_iter()
+        .map(|f| {
+            let view = if f.ends_with(".atb") { "table" } else { "note" };
+            serde_json::json!({ "file": f, "view": view })
+        })
+        .collect()
+}
+
+/// 本端 presence 上行（打开文件清单；名册展示与跳转用）。
+/// 旧字段 file/view 保留为主打开文件（旧版客户端只认这两个字段）。
 pub fn send_presence(app: &App) {
-    let editing = app
-        .note_collab_file
-        .clone()
-        .map(|f| (f, "note"))
-        .or_else(|| app.ui.last_table_file.clone().map(|f| (f, "table")));
-    let presence = match editing {
-        Some((file, view)) => serde_json::json!({ "file": file, "view": view }),
-        None => serde_json::json!({ "file": null, "view": null }),
+    let open_files = presence_open_files(app);
+    let presence = match open_files.first() {
+        Some(primary) => serde_json::json!({
+            "file": primary["file"], "view": primary["view"],
+            "openFiles": open_files,
+        }),
+        None => serde_json::json!({ "file": null, "view": null, "openFiles": [] }),
     };
     send_cmd(app, atelyx_core::collab::SpaceCmd::Presence { presence });
+}
+
+/// 对端 presence 的打开文件清单（优先 openFiles，回退旧版单 file 字段；空 = 无打开文件）。
+pub(crate) fn peer_open_files(presence: Option<&serde_json::Value>) -> Vec<String> {
+    let Some(p) = presence else { return Vec::new() };
+    let from_list: Vec<String> = p
+        .get("openFiles")
+        .and_then(|v| v.as_array())
+        .map(|list| {
+            list.iter()
+                .filter_map(|v| v.get("file").and_then(|f| f.as_str()).map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    if !from_list.is_empty() {
+        return from_list;
+    }
+    p.get("file")
+        .and_then(|f| f.as_str())
+        .filter(|f| !f.is_empty())
+        .map(|f| vec![f.to_string()])
+        .unwrap_or_default()
 }
 
 /// 本端 awareness 身份 JSON（昵称 / 协作色）。
@@ -1983,7 +2572,7 @@ fn local_user_json(app: &App) -> String {
         .as_ref()
         .map(|i| i.display_name.clone())
         .unwrap_or_else(|| "用户".into());
-    let color = app.global.collab_color.clone().unwrap_or_else(|| "#30bced".into());
+    let color = app.global.collab_color.clone().unwrap_or_else(|| DEFAULT_COLLAB_COLOR.into());
     serde_json::json!({
         "user": { "name": name, "color": color, "colorLight": format!("{color}33") }
     })
@@ -2155,6 +2744,7 @@ fn on_space_event(app: &mut App, event: atelyx_core::collab::SpaceEvent) -> Task
     match event {
         E::Ready { peer_id } => {
             app.space_own_peer_id = Some(peer_id);
+            app.space_connected = true;
             app.notify(NoticeLevel::Success, "协作已连接");
             collab_bind_note(app);
             Task::none()
@@ -2190,12 +2780,22 @@ fn on_space_event(app: &mut App, event: atelyx_core::collab::SpaceEvent) -> Task
         E::TablePatch { peer_id, file, patch, landed } => {
             on_remote_table_patch(app, peer_id, file, patch, landed)
         }
-        E::MetaChanged { .. } => {
-            if matches!(app.repo_kind, crate::RepoKind::Space(_)) {
-                load_space_meta(app)
+        E::MetaChanged { key } => {
+            if !matches!(app.repo_kind, crate::RepoKind::Space(_)) {
+                return Task::none();
+            }
+            // 日历日程落在团队 meta：他人变更到达时重载（不在展示中则仅失效，保留导航态）
+            let calendar_task = if key == crate::calendar_actions::META_KEY {
+                if layout_view::view_displayed(app, "calendar") {
+                    crate::calendar_actions::reload(app)
+                } else {
+                    app.calendar.ready = false;
+                    Task::none()
+                }
             } else {
                 Task::none()
-            }
+            };
+            calendar_task.chain(load_space_meta(app))
         }
         E::Renamed { old_path, new_path } => {
             on_space_renamed(app, &old_path, &new_path)
@@ -2213,10 +2813,12 @@ fn on_space_event(app: &mut App, event: atelyx_core::collab::SpaceEvent) -> Task
             // 服务端拒绝（令牌无效 / 非成员 / 被移出空间）：泵已终结不再重连，
             // 清命令入口防继续上行；重新进入空间时由 enter_space 重建
             app.space_cmds = None;
+            app.space_connected = false;
             app.notify(NoticeLevel::Error, format!("协作：{message}"));
             Task::none()
         }
         E::Disconnected => {
+            app.space_connected = false;
             app.notify(NoticeLevel::Warning, "协作连接断开，正在重连");
             Task::none()
         }
