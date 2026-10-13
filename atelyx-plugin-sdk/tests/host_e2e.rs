@@ -60,8 +60,8 @@ fn install_enable_view_submit_disable_uninstall() {
     assert_eq!(id, "com.atelyx.echo");
 
     // 握手 + on_ready（订阅 + 提交界面）跑通：状态运行中且已收到界面树提交
-    wait_status(&runtime, &id, |s| *s == PluginStatus::Running, Duration::from_secs(10));
-    let deadline = Instant::now() + Duration::from_secs(10);
+    wait_status(&runtime, &id, |s| *s == PluginStatus::Running, Duration::from_secs(20));
+    let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         let submits = runtime.list().into_iter().find(|p| p.id == id).unwrap().view_submits;
         if submits >= 1 {

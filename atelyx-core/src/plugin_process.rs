@@ -547,7 +547,7 @@ use winapi::shared::minwindef::{BOOL, DWORD, FALSE, LPVOID};
 #[cfg(windows)]
 use winapi::shared::ntdef::HANDLE;
 #[cfg(windows)]
-use winapi::shared::winerror::ERROR_INVALID_PARAMETER;
+use winapi::shared::winerror::{ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER};
 #[cfg(windows)]
 use winapi::um::errhandlingapi::GetLastError;
 #[cfg(windows)]
@@ -694,7 +694,9 @@ fn in_job(slot: &mut Option<JobHandle>, pid: u32) -> bool {
     ok != 0 && result != 0
 }
 
-/// 强制终止单个进程：进程已不存在（`ERROR_INVALID_PARAMETER`）按幂等成功；其余失败如实返回原因。
+/// 强制终止单个进程。两类「进程已不在可终止状态」的返回码按幂等成功处理：
+/// `ERROR_INVALID_PARAMETER`（pid 已不存在）与 `ERROR_ACCESS_DENIED`（进程已在退出路径上——
+/// Windows 对已收到结束指令、尚未走完退出的进程就回这个码，不是权限问题）；其余失败如实返回原因。
 #[cfg(windows)]
 fn terminate_process(pid: u32) -> Result<(), String> {
     let handle = unsafe { OpenProcess(PROCESS_TERMINATE, FALSE, pid) };
@@ -707,11 +709,13 @@ fn terminate_process(pid: u32) -> Result<(), String> {
         return Err(format!("打开进程 {pid} 失败：{reason}（错误码 {code}）"));
     }
     let ok = unsafe { TerminateProcess(handle, 1) };
+    let code = if ok == 0 { unsafe { GetLastError() } } else { 0 };
     unsafe { CloseHandle(handle) };
-    if ok == 0 {
-        return Err(format!("终止进程 {pid} 失败：{}", std::io::Error::last_os_error()));
+    if code == 0 || code == ERROR_ACCESS_DENIED || code == ERROR_INVALID_PARAMETER {
+        return Ok(());
     }
-    Ok(())
+    let reason = std::io::Error::from_raw_os_error(code as i32);
+    Err(format!("终止进程 {pid} 失败：{reason}（错误码 {code}）"))
 }
 
 /// 测试共用替身（与 `commands::process` 的测试共享，避免逐字副本）。
@@ -840,14 +844,15 @@ mod tests {
     }
 
     /// 长时间运行、只能被外部终止的进程（供单树终止测试）。
+    /// 直接用无包装的单进程：经 shell 包装会派生孙进程，孙进程持有 stdout 会让退出上报延后，
+    /// 使断言依赖时序（快照与终止之间的派生竞态）。
     fn long_running_program() -> (String, Vec<String>) {
         #[cfg(windows)]
         {
-            let comspec = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string());
-            (comspec, vec!["/C".to_string(), "ping -n 60 127.0.0.1".to_string()])
+            ("ping".to_string(), vec!["-n".to_string(), "60".to_string(), "127.0.0.1".to_string()])
         }
         #[cfg(unix)]
-        ("/bin/sh".to_string(), vec!["-c".to_string(), "sleep 60".to_string()])
+        ("/bin/sleep".to_string(), vec!["60".to_string()])
     }
 
     /// 等任一退出事件出现（被杀进程的退出码按平台不同：Windows 有码、Unix 为 None，
