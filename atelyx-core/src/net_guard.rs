@@ -57,6 +57,36 @@ pub fn ensure_local_service_http_url(raw: &str) -> Result<Url, String> {
     ensure_http_url(raw, HostPolicy::LocalService)
 }
 
+/// 用户配置的服务地址（AI 供应商 baseUrl 等，公网 API 与本机/局域网自建实例都可能出现）的策略选择：
+/// localhost 与回环/私网/ULA 的 IP 字面量判入 LocalService，其余判入 PublicOnly。
+/// 域名形态不预判内网归属——解析结果由所选策略的 DNS 过滤兜底（解析到内网的域名走公网策略会被拒）。
+pub fn policy_for_configured_url(raw: &str) -> HostPolicy {
+    let Ok(url) = Url::parse(raw.trim()) else {
+        return HostPolicy::PublicOnly;
+    };
+    let Some(host) = url.host_str() else {
+        return HostPolicy::PublicOnly;
+    };
+    // IPv6 字面量在 host 里带方括号，剥掉后按 IpAddr 判定（与 ensure_http_url 同口径）
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    if bare.eq_ignore_ascii_case("localhost") {
+        return HostPolicy::LocalService;
+    }
+    if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
+        let internal = match ip {
+            std::net::IpAddr::V4(v4) => v4.is_loopback() || v4.is_private(),
+            std::net::IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+                Some(v4) => v4.is_loopback() || v4.is_private(),
+                None => v6.is_loopback() || v6.is_unique_local(),
+            },
+        };
+        if internal {
+            return HostPolicy::LocalService;
+        }
+    }
+    HostPolicy::PublicOnly
+}
+
 /// 该 IP 是否被策略拒绝。
 fn blocked_addr(ip: std::net::IpAddr, policy: HostPolicy) -> bool {
     match ip {
@@ -310,6 +340,26 @@ mod net_guard_tests {
         let mixed = [addr("93.184.216.34"), addr("10.0.0.5")];
         assert!(filter_resolved_addrs(&mixed, HostPolicy::PublicOnly).is_err());
         assert!(filter_resolved_addrs(&[], HostPolicy::PublicOnly).is_err());
+    }
+
+    /// 配置型地址的策略判定按主机形态分流（公网 API / 自建实例都可能出现）。
+    #[test]
+    fn configured_url_policy_matches_host_kind() {
+        let is_local = |raw: &str| matches!(policy_for_configured_url(raw), HostPolicy::LocalService);
+        let is_public = |raw: &str| matches!(policy_for_configured_url(raw), HostPolicy::PublicOnly);
+        assert!(is_public("https://api.openai.com/v1"));
+        assert!(is_public("https://93.184.216.34/v1"));
+        assert!(is_local("http://localhost:11434/v1"));
+        assert!(is_local("http://127.0.0.1:11434/v1"));
+        assert!(is_local("http://192.168.1.9:11434/v1"));
+        assert!(is_local("http://10.0.0.5/v1"));
+        assert!(is_local("http://[::1]:11434/v1"));
+        assert!(is_local("http://[fc00::1]/v1"));
+        // IPv4-mapped 私网字面量按映射后的 v4 判定
+        assert!(is_local("http://[::ffff:192.168.1.9]/v1"));
+        assert!(is_public("http://[2001:db8::1]/v1"));
+        // 无法解析的输入按公网策略兜底（后续入口校验会拒绝）
+        assert!(is_public("not a url"));
     }
 
     /// 解析 + 过滤直测（IP 字面量不发起真实 DNS）：公网策略拒内网解析结果，本机策略放行回环/私网。

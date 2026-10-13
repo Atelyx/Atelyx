@@ -1,6 +1,8 @@
-//! 系统密钥链凭据存取：协作空间登录令牌按「服务器地址摘要 + 用户名」条目存取，不落明文。
+//! 系统密钥链凭据存取：协作空间登录令牌按「服务器地址摘要 + 用户名」条目存取，不落明文；
+//! AI 供应商 / 搜索源 API key 按「仓库（空间）摘要 + 条目尾」存取。
 
 use keyring::Entry;
+use sha2::{Digest, Sha256};
 
 /// 密钥链服务名（条目命名空间）。
 const SERVICE: &str = "atelyx-space";
@@ -46,6 +48,50 @@ pub fn delete_token(server_url: &str, username: &str) -> Result<(), String> {
     }
 }
 
+// ===== API key 条目（AI 供应商 / 搜索源） =====
+// 条目名 `provider-<sha256(scope)>.<tail>`：scope = 仓库根路径（本地仓库）或「服务器地址/空间 id」
+// （协作空间），tail = 供应商 id 或 `search-tavily`。与空间令牌分服务名，互不干扰。
+
+/// API key 密钥链服务名（条目命名空间）。
+const KEY_SERVICE: &str = "atelyx-keys";
+
+fn scope_digest(scope: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(scope.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+fn api_key_entry(scope: &str, tail: &str) -> Result<Entry, String> {
+    // Windows 凭据目标名对分隔字符敏感：摘要 + tail 均为 [A-Za-z0-9_-]，用「.」连接
+    Entry::new(KEY_SERVICE, &format!("provider-{}.{}", scope_digest(scope), tail))
+        .map_err(|e| format!("密钥链不可用：{e}"))
+}
+
+/// 存 API key（覆盖同条目旧值）。
+pub fn store_provider_key(scope: &str, tail: &str, key: &str) -> Result<(), String> {
+    api_key_entry(scope, tail)?
+        .set_password(key)
+        .map_err(|e| format!("写入密钥链失败：{e}"))
+}
+
+/// 取 API key；条目不存在（未在本机存过）返回 `None`。
+pub fn load_provider_key(scope: &str, tail: &str) -> Result<Option<String>, String> {
+    match api_key_entry(scope, tail)?.get_password() {
+        Ok(key) => Ok(Some(key)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(format!("读取密钥链失败：{e}")),
+    }
+}
+
+/// 删除 API key（供应商删除后清理；条目不存在视为已删除）。
+pub fn delete_provider_key(scope: &str, tail: &str) -> Result<(), String> {
+    match api_key_entry(scope, tail)?.delete_credential() {
+        Ok(()) => Ok(()),
+        Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => Err(format!("清除密钥链失败：{e}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -79,5 +125,33 @@ mod tests {
     fn 地址摘要稳定且互异() {
         assert_eq!(entry_digest("http://a:1"), entry_digest("http://a:1"));
         assert_ne!(entry_digest("http://a:1"), entry_digest("http://a:2"));
+    }
+
+    #[test]
+    fn api_key存取删除往返() {
+        // 平台无密钥链后端时跳过（与令牌往返同口径）
+        let scope = "e:\\test-vault";
+        let entry = match api_key_entry(scope, "prov-1") {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        if entry.set_password("k3y").is_err() {
+            return;
+        }
+        let loaded = api_key_entry(scope, "prov-1").unwrap().get_password();
+        if matches!(loaded, Err(keyring::Error::NoEntry)) {
+            return;
+        }
+        assert_eq!(loaded.ok().as_deref(), Some("k3y"));
+        delete_provider_key(scope, "prov-1").unwrap();
+        assert_eq!(load_provider_key(scope, "prov-1").unwrap(), None);
+        // 重复删除幂等
+        delete_provider_key(scope, "prov-1").unwrap();
+    }
+
+    #[test]
+    fn scope摘要区分条目且稳定() {
+        assert_eq!(scope_digest("e:\\a"), scope_digest("e:\\a"));
+        assert_ne!(scope_digest("e:\\a"), scope_digest("e:\\b"));
     }
 }
