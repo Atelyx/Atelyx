@@ -1,10 +1,12 @@
 //! 统一弹层壳：锚点定位 + 视口钳制/翻转 + 外点关闭的窗口内覆盖层。
 //! 覆盖元素由调用方作为追加子叠在窗口内容 Stack 上，Esc 由应用层键盘订阅路由。
 
+use iced::alignment::{Horizontal, Vertical};
 use iced::widget::{container, mouse_area, space, stack};
 use iced::{Color, Element, Length, Padding, Point, Size, border, widget::container::Style};
 
 use super::palette as pal;
+use super::UiMsg;
 use crate::Message;
 
 /// 弹层规格：锚点（窗口局部坐标）+ 定宽 + 估算高 + 向上翻转的触发器顶边。
@@ -87,6 +89,42 @@ pub fn overlay<'a>(
         .align_y(iced::alignment::Vertical::Top)
         .padding(Padding::ZERO.left(geom.x - SHADOW_PAD_LEFT).top(geom.y - SHADOW_PAD_TOP));
     stack![capture, positioned]
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+}
+
+/// 居中模态覆盖层：全屏半透明黑遮罩（点击关闭）+ 阴影环 + 水平垂直居中卡。
+/// 卡片内容与尺寸由调用方构建（历史记录 / 许可信息等阻断式面板共用此壳）。
+pub fn modal_overlay<'a>(window: iced::window::Id, card: Element<'a, Message>) -> Element<'a, Message> {
+    let capture = mouse_area(
+        container(space().width(Length::Fill).height(Length::Fill))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(|_t| Style {
+                background: Some(pal::SCRIM.into()),
+                ..Style::default()
+            }),
+    )
+    .on_press(Message::Ui(UiMsg::PopupClose { window }));
+    let shadow_wrap = container(card)
+        .padding(Padding {
+            left: SHADOW_PAD_LEFT,
+            top: SHADOW_PAD_TOP,
+            right: SHADOW_PAD_LEFT,
+            bottom: SHADOW_PAD_BOTTOM,
+        })
+        .style(|_t| Style {
+            background: Some(Color::BLACK.scale_alpha(0.35).into()),
+            border: border::rounded(pal::RADIUS_MD + SHADOW_PAD_LEFT),
+            ..Style::default()
+        });
+    let centered = container(shadow_wrap)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(Horizontal::Center)
+        .align_y(Vertical::Center);
+    stack![capture, centered]
         .width(Length::Fill)
         .height(Length::Fill)
         .into()

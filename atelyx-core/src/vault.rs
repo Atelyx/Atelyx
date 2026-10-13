@@ -293,7 +293,7 @@ pub fn read_dir_filtered(
         .collect())
 }
 
-// ===== 文件面板排序（按排序键分派：目录恒名称自然序在前）=====
+// ===== 文件面板排序（同级文件夹分组在前，两组各自按排序键）=====
 
 /// 名称自然比较：数字段按数值（`file2` < `file10`，前导零多者排后），其余按码点序。
 /// 中文按码点不按拼音（Rust 侧无
@@ -342,27 +342,20 @@ pub fn compare_natural(a: &str, b: &str) -> std::cmp::Ordering {
     pa.len().cmp(&pb.len())
 }
 
-/// 每层排序：文件夹固定按名称 A-Z（自然序）在前，文件按 sortKey
+/// 每层排序：同级文件夹恒在文件前，两组各自按 sortKey
 /// （`name-asc` / `name-desc` / `mtime-desc` / `mtime-asc`；未知值按名称升序）。
 pub fn sort_children(entries: &mut [DirChild], sort: &str) {
-    let dirs: Vec<DirChild> = {
-        let mut d: Vec<DirChild> = entries.iter().filter(|c| c.is_dir).cloned().collect();
-        d.sort_by(|a, b| compare_natural(&a.rel, &b.rel));
-        d
+    let key = |a: &DirChild, b: &DirChild| -> std::cmp::Ordering {
+        match sort {
+            "name-desc" => compare_natural(&b.rel, &a.rel),
+            "mtime-asc" => a.mtime.cmp(&b.mtime).then_with(|| compare_natural(&a.rel, &b.rel)),
+            // mtime 相同回落名称序（read_dir 原始序随文件系统而异，不作为展示顺序）
+            "mtime-desc" => b.mtime.cmp(&a.mtime).then_with(|| compare_natural(&a.rel, &b.rel)),
+            _ => compare_natural(&a.rel, &b.rel),
+        }
     };
-    let mut files: Vec<DirChild> = entries.iter().filter(|c| !c.is_dir).cloned().collect();
-    match sort {
-        "name-desc" => files.sort_by(|a, b| compare_natural(&b.rel, &a.rel)),
-        "mtime-asc" => files.sort_by(|a, b| a.mtime.cmp(&b.mtime).then_with(|| compare_natural(&a.rel, &b.rel))),
-        // mtime 相同回落名称序（read_dir 原始序随文件系统而异，不作为展示顺序）
-        "mtime-desc" => files.sort_by(|a, b| b.mtime.cmp(&a.mtime).then_with(|| compare_natural(&a.rel, &b.rel))),
-        _ => files.sort_by(|a, b| compare_natural(&a.rel, &b.rel)),
-    }
-    let mut i = 0;
-    for child in dirs.into_iter().chain(files) {
-        entries[i] = child;
-        i += 1;
-    }
+    // is_dir 反向比较 = 文件夹（true）排前
+    entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| key(a, b)));
 }
 
 #[cfg(test)]
@@ -384,20 +377,29 @@ mod sort_tests {
     }
 
     #[test]
-    fn sort_children_keeps_dirs_first_and_applies_key() {
+    fn sort_children_groups_dirs_first_and_applies_key() {
         let mut entries = vec![
             child("b.md", false, 30),
             child("z", true, 1),
             child("a.md", false, 20),
             child("a", true, 2),
         ];
-        sort_children(&mut entries, "mtime-desc");
-        let rels: Vec<&str> = entries.iter().map(|c| c.rel.as_str()).collect();
-        // 目录恒名称序在前；文件按 mtime 从新到旧
-        assert_eq!(rels, vec!["a", "z", "b.md", "a.md"]);
+        // 名称升序：文件夹在前，两组各自按名称自然序
         sort_children(&mut entries, "name-asc");
         let rels: Vec<&str> = entries.iter().map(|c| c.rel.as_str()).collect();
         assert_eq!(rels, vec!["a", "z", "a.md", "b.md"]);
+        // 名称降序：两组各自反转
+        sort_children(&mut entries, "name-desc");
+        let rels: Vec<&str> = entries.iter().map(|c| c.rel.as_str()).collect();
+        assert_eq!(rels, vec!["z", "a", "b.md", "a.md"]);
+        // mtime 从新到旧：两组各自按 mtime，文件夹仍在文件前
+        sort_children(&mut entries, "mtime-desc");
+        let rels: Vec<&str> = entries.iter().map(|c| c.rel.as_str()).collect();
+        assert_eq!(rels, vec!["a", "z", "b.md", "a.md"]);
+        // mtime 从旧到新
+        sort_children(&mut entries, "mtime-asc");
+        let rels: Vec<&str> = entries.iter().map(|c| c.rel.as_str()).collect();
+        assert_eq!(rels, vec!["z", "a", "a.md", "b.md"]);
         // 未知值回落名称升序
         sort_children(&mut entries, "bogus");
         let rels: Vec<&str> = entries.iter().map(|c| c.rel.as_str()).collect();

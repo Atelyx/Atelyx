@@ -243,6 +243,8 @@ pub enum PopupState {
     AiAgentDeleteMenu,
     /// 设置-AI：搜索源下拉。
     AiSearchProviderMenu,
+    /// 设置-关于：开源许可条目（字体官方主页外链）。
+    LicenseInfo,
     /// 历史记录弹层（居中模态；kind+file 定位侧文件）。
     HistoryBrowser { kind: atelyx_core::history::HistoryKind, file: String },
 }
@@ -295,7 +297,8 @@ impl PopupState {
             PopupState::AiAgentPromptMenu => 208.0,
             PopupState::AiProviderDeleteMenu | PopupState::AiAgentDeleteMenu => 208.0,
             PopupState::AiSearchProviderMenu => 144.0,
-            // 居中模态不走锚点几何，估高由 history_browser 自行钳制
+            // 居中模态不走锚点几何，估高由各自 overlay 钳制
+            PopupState::LicenseInfo => crate::settings_view::LICENSE_CARD_WIDTH,
             PopupState::HistoryBrowser { .. } => crate::history_browser::CARD_WIDTH,
         }
     }
@@ -333,6 +336,19 @@ fn btn_popup_min(window: iced::window::Id, cursor: Point, state: PopupState, min
 /// 右键菜单类弹层：锚点 = 光标点，无翻转。
 fn ctx_popup(window: iced::window::Id, cursor: Point, state: PopupState) -> Message {
     Message::PopupOpen(window, PopupOpen { point: cursor, flip_y: None, state, min_width: 0.0 })
+}
+
+/// 设置-关于：开源许可模态的打开消息（居中模态不走锚点几何）。
+pub(crate) fn license_popup(window: iced::window::Id) -> Message {
+    Message::PopupOpen(
+        window,
+        PopupOpen {
+            point: Point::ORIGIN,
+            flip_y: None,
+            state: PopupState::LicenseInfo,
+            min_width: 0.0,
+        },
+    )
 }
 
 /// 主窗口：标题栏 + 内容（设置整页或面板网格）+ 状态栏，顶层叠弹层/提示/通知。
@@ -473,9 +489,11 @@ fn with_overlays<'a>(
         root = root.push(edge_resize_bands(window));
     }
 
-    // 弹层（同窗口至多一个；捕获层点击 = 外点关闭；历史记录模态另行居中渲染）
+    // 弹层（同窗口至多一个；捕获层点击 = 外点关闭；居中模态另行渲染，见下方）
     if let Some((w, open)) = &app.popup {
-        if *w == window && !matches!(open.state, PopupState::HistoryBrowser { .. }) {
+        if *w == window
+            && !matches!(open.state, PopupState::HistoryBrowser { .. } | PopupState::LicenseInfo)
+        {
             let (content, height) = popup_element(app, &open.state, app.popup_pane, window);
             let spec = PopupSpec {
                 anchor: open.point,
@@ -495,6 +513,11 @@ fn with_overlays<'a>(
 
     // 历史记录模态（优先级在锚点弹层之上、通知之下）
     if let Some(el) = crate::history_browser::overlay(app, window, viewport) {
+        root = root.push(el);
+    }
+
+    // 开源许可模态（与历史记录同级）
+    if let Some(el) = crate::settings_view::license_overlay(app, window) {
         root = root.push(el);
     }
 
@@ -3235,8 +3258,8 @@ fn popup_element<'a>(
         }
         PopupState::SortMenu => {
             const OPTIONS: [(&str, &str); 4] = [
-                ("name-asc", "文件名 (A-Z)"),
-                ("name-desc", "文件名 (Z-A)"),
+                ("name-asc", "名称 (A-Z)"),
+                ("name-desc", "名称 (Z-A)"),
                 ("mtime-desc", "编辑时间 (从新到旧)"),
                 ("mtime-asc", "编辑时间 (从旧到新)"),
             ];
@@ -4140,8 +4163,8 @@ fn popup_element<'a>(
                 })
                 .collect()
         }
-        // 居中模态不经锚点渲染（with_overlays 分流到 history_browser::overlay）
-        PopupState::HistoryBrowser { .. } => Vec::new(),
+        // 居中模态不经锚点渲染（with_overlays 分流到各自 overlay）
+        PopupState::HistoryBrowser { .. } | PopupState::LicenseInfo => Vec::new(),
     };
     crate::ui::menu::pane_view(entries, pane, window)
 }
@@ -4152,6 +4175,7 @@ fn popup_text_input<'a>(draft: &str) -> Element<'a, Message> {
         .size(pal::fs_caption())
         .padding(Padding::ZERO.horizontal(12.0).vertical(6.0))
         .on_input(|v: String| Message::Table(crate::table_view::TableMsg::PopupDraft(v)))
+        .style(|_theme, status| controls::form_input_style(status))
         .into()
 }
 
@@ -4680,7 +4704,8 @@ fn space_form_input<'a>(
     let input = iced::widget::text_input(placeholder, draft)
         .size(pal::fs_caption())
         .padding(Padding::ZERO.horizontal(12.0).vertical(6.0))
-        .on_input(on_input);
+        .on_input(on_input)
+        .style(|_theme, status| controls::form_input_style(status));
     if secure { input.secure(true).into() } else { input.into() }
 }
 

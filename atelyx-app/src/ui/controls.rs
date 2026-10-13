@@ -18,6 +18,10 @@ pub enum Variant {
     Ghost,
     /// 强调淡底（设置入口激活态等）。
     AccentSoft,
+    /// 金底实心（卡片主动作：强调按钮）。
+    Primary,
+    /// 深底描边（卡片次级动作）。
+    Outline,
     /// 透明底 + hover 出三级底（工具条「+」等触发钮）。
     SubtleBg,
     /// 危险动作（回滚确认 / 批量重建等）：红调文字，hover 出红色淡底。
@@ -37,6 +41,11 @@ pub fn btn_sm() -> TextSize {
     TextSize { h: 24.0, pad_x: 8.0, font: pal::fs_micro(), radius: pal::RADIUS_SM }
 }
 
+/// 胶囊档（全圆角；卡片行尾动作按钮）。
+pub fn btn_pill() -> TextSize {
+    TextSize { h: 26.0, pad_x: 14.0, font: pal::fs_micro(), radius: 999.0 }
+}
+
 /// 图标按钮边长档（与文字按钮高度同档）。
 pub const ICON_MD: f32 = 28.0;
 pub const ICON_LG: f32 = 32.0;
@@ -46,6 +55,8 @@ struct VariantStyle {
     bg_hover: Color,
     text: Color,
     text_hover: Color,
+    /// 描边色；TRANSPARENT = 无描边。
+    border: Color,
 }
 
 fn variant_style(v: Variant) -> VariantStyle {
@@ -55,30 +66,49 @@ fn variant_style(v: Variant) -> VariantStyle {
             bg_hover: pal::HOVER,
             text: pal::TEXT_PRIMARY,
             text_hover: pal::TEXT_PRIMARY,
+            border: Color::TRANSPARENT,
         },
         Variant::Ghost => VariantStyle {
             bg: Color::TRANSPARENT,
             bg_hover: pal::HOVER,
             text: pal::TEXT_SECONDARY,
             text_hover: pal::TEXT_PRIMARY,
+            border: Color::TRANSPARENT,
         },
         Variant::AccentSoft => VariantStyle {
             bg: pal::ACCENT_SOFT,
             bg_hover: pal::ACCENT_SOFT,
             text: pal::ACCENT,
             text_hover: pal::ACCENT,
+            border: Color::TRANSPARENT,
+        },
+        Variant::Primary => VariantStyle {
+            bg: pal::ACCENT,
+            bg_hover: pal::ACCENT_HOVER,
+            text: pal::ACCENT_FG,
+            text_hover: pal::ACCENT_FG,
+            border: Color::TRANSPARENT,
+        },
+        Variant::Outline => VariantStyle {
+            bg: pal::BG_SUNKEN,
+            bg_hover: pal::BG_OVERLAY,
+            text: pal::TEXT_PRIMARY,
+            text_hover: pal::TEXT_PRIMARY,
+            border: pal::BORDER_STRONG,
         },
         Variant::SubtleBg => VariantStyle {
             bg: Color::TRANSPARENT,
             bg_hover: pal::BG_TERTIARY,
             text: pal::TEXT_MUTED,
             text_hover: pal::TEXT_PRIMARY,
+            border: Color::TRANSPARENT,
         },
         Variant::Danger => VariantStyle {
             bg: Color::TRANSPARENT,
             bg_hover: pal::DANGER.scale_alpha(0.14),
             text: pal::DANGER,
             text_hover: pal::DANGER,
+            border: Color::TRANSPARENT,
         },
     }
 }
@@ -94,7 +124,9 @@ fn style_for(v: Variant, radius: f32) -> impl Fn(&Theme, button::Status) -> butt
         button::Style {
             background: Some(bg.into()),
             text_color,
-            border: border::rounded(radius),
+            border: border::rounded(radius)
+                .color(s.border)
+                .width(if s.border == Color::TRANSPARENT { 0.0 } else { 1.0 }),
             ..button::Style::default()
         }
     }
@@ -426,6 +458,20 @@ pub fn secret_input(
     styled_input(placeholder, value, width, Some(on_input), Some(on_submit), true)
 }
 
+/// 表单输入统一样式（设置表单与弹层表单同口径）。
+pub(crate) fn form_input_style(status: text_input::Status) -> text_input::Style {
+    text_input::Style {
+        background: pal::BG_TERTIARY.into(),
+        border: border::rounded(pal::RADIUS_SM)
+            .color(if matches!(status, text_input::Status::Focused { .. }) { pal::ACCENT } else { pal::BORDER_STRONG })
+            .width(1.0),
+        icon: pal::TEXT_MUTED,
+        placeholder: pal::INPUT_PLACEHOLDER,
+        value: pal::TEXT_PRIMARY,
+        selection: pal::ACCENT.scale_alpha(0.35),
+    }
+}
+
 /// form_input / secret_input 共用的样式构建（处理器缺省 = 不可编辑）。
 fn styled_input(
     placeholder: &str,
@@ -440,16 +486,7 @@ fn styled_input(
         .padding(Padding::ZERO.horizontal(8.0).vertical(6.0))
         .width(Length::Fixed(width))
         .secure(secure)
-        .style(|_theme, status| text_input::Style {
-            background: pal::BG_SUNKEN.into(),
-            border: border::rounded(pal::RADIUS_SM)
-                .color(if matches!(status, text_input::Status::Focused { .. }) { pal::ACCENT } else { pal::BORDER })
-                .width(1.0),
-            icon: pal::TEXT_MUTED,
-            placeholder: pal::INPUT_PLACEHOLDER,
-            value: pal::TEXT_PRIMARY,
-            selection: pal::ACCENT.scale_alpha(0.35),
-        });
+        .style(|_theme, status| form_input_style(status));
     if let Some(f) = on_input {
         input = input.on_input(f);
     }
@@ -498,23 +535,6 @@ pub fn badge(label: impl Into<String>, bg: Color, fg: Color) -> Element<'static,
             ..Style::default()
         })
         .into()
-}
-
-/// 键串徽标（mono 字体、内陷底、细描边），快捷键设置等场景。
-pub fn kbd(label: impl Into<String>) -> Element<'static, Message> {
-    container(
-        text(label.into())
-            .size(pal::fs_caption())
-            .color(pal::TEXT_SECONDARY)
-            .font(crate::ui::mono()),
-    )
-    .padding(Padding::ZERO.horizontal(8.0).vertical(2.0))
-    .style(|_t| Style {
-        background: Some(pal::BG_SUNKEN.into()),
-        border: border::rounded(pal::RADIUS_XS).color(pal::BORDER).width(1.0),
-        ..Style::default()
-    })
-    .into()
 }
 
 /// 复选框三态（全选 / 部分 / 空）。

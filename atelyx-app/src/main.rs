@@ -217,7 +217,10 @@ fn main() -> iced::Result {
         .run()
 }
 
-const WINDOW_SIZE: Size = Size::new(1100.0, 760.0);
+/// 主窗口默认大小（逻辑像素）。
+const DEFAULT_WINDOW_SIZE: Size = Size::new(1440.0, 900.0);
+/// 主窗口最小大小（逻辑像素）。
+const MIN_WINDOW_SIZE: Size = Size::new(1100.0, 760.0);
 /// 防抖落盘周期：期间多次模型变更合并为一次写盘（拖宽/拖拽等连续操作不逐帧写）。
 const PERSIST_TICK: std::time::Duration = std::time::Duration::from_millis(800);
 
@@ -1212,8 +1215,8 @@ pub struct WikiPicker {
 impl App {
     fn boot() -> (Self, Task<Message>) {
         let (main_os, open) = window::open(Settings {
-            size: WINDOW_SIZE,
-            min_size: Some(WINDOW_SIZE),
+            size: DEFAULT_WINDOW_SIZE,
+            min_size: Some(MIN_WINDOW_SIZE),
             exit_on_close_request: false,
             decorations: false,
             ..Settings::default()
@@ -1241,7 +1244,7 @@ impl App {
         if let Some(text) = global_notice {
             boot = boot.chain(Task::done(Message::StartupNotice(text)));
         }
-        if let Some(root) = auto_vault {
+        if let Some(root) = auto_vault.clone() {
             boot = boot.chain(Task::done(Message::SelectVault(root)));
         }
         if let Some(LastActive::Space { server_url, space_id }) = &global.last_active {
@@ -1266,8 +1269,7 @@ impl App {
                 manual: false,
             })));
         }
-        (
-            Self {
+        let mut app = Self {
                 ui: load_ui_state(),
                 vault: Arc::new(vault::VaultState::default()),
                 theme: ui::palette::app_theme(),
@@ -1336,7 +1338,7 @@ impl App {
                 file_drag: None,
                 file_drag_target: None,
                 persist_dirty: false,
-                main_size: WINDOW_SIZE,
+                main_size: DEFAULT_WINDOW_SIZE,
                 os_positions: HashMap::new(),
                 os_sizes: HashMap::new(),
                 divider: None,
@@ -1409,9 +1411,16 @@ impl App {
                 note_collab: None,
                 note_collab_file: None,
                 remote_cursors: Vec::new(),
-            },
-            boot,
-        )
+        };
+        // 启动自动进入的仓库：把持久化的展开集预置为该仓库的记忆（enter_vault 据此恢复子目录展开）；
+        // 空集不种子（全新安装 / 上次全收起），走无记忆的根行保底
+        if let Some(root) = &auto_vault {
+            if !app.ui.file_explorer_expanded.is_empty() {
+                app.expanded_by_vault
+                    .insert(root.clone(), app.ui.file_explorer_expanded.clone());
+            }
+        }
+        (app, boot)
     }
 
     /// 追加一条通知（右下角；容量上限防堆积，溢出优先淘汰最旧的非常驻条）。
@@ -3847,16 +3856,22 @@ impl App {
         // 日历会话态随切仓重置（日程 / 选中天 / 活动密度一并重取）
         self.calendar = calendar_actions::CalendarState::default();
         self.rebuild_links = settings_view::editor::RebuildLinksState::Idle;
-        // last_note_file 跨仓库沿用（相对路径语义）；仓库就绪即恢复其内容
-        self.ui.file_explorer_expanded = self
-            .expanded_by_vault
-            .get(&path)
-            .cloned()
-            .unwrap_or_default();
-        let mut task = self.load_children("").chain(self.count_files());
+        // 展开集按仓库独立：切走时记忆当前仓库的集合，切回时恢复；全新进入（无记忆）保底展开根行
+        self.ui.file_explorer_expanded = match self.expanded_by_vault.get(&path) {
+            Some(set) => set.clone(),
+            None => vec![String::new()],
+        };
+        self.schedule_persist();
+        let mut task = Task::none();
+        // 展开集内的目录逐层补齐子项缓存（children 按目录缓存，进仓库后为空；根也在集合内）
+        for dir in self.ui.file_explorer_expanded.clone() {
+            task = task.chain(self.load_children(&dir));
+        }
+        task = task.chain(self.count_files());
         task = task.chain(self.refresh_tag_vocab()).chain(self.refresh_note_files());
         task = task.chain(self.load_vault_meta());
         task = task.chain(self.save_global());
+        // last_note_file 跨仓库沿用（相对路径语义）；仓库就绪即恢复其内容
         // 自动恢复关闭：不恢复上次打开的文件（打开记录保留，仅跳过载入）
         if self.global.auto_restore {
             if let Some(rel) = self.ui.last_note_file.clone() {

@@ -37,7 +37,7 @@ pub enum CommandId {
 }
 
 impl CommandId {
-    /// 全部命令（默认表顺序 = 命中优先序）。
+    /// 全部命令（默认表顺序 = 命中优先序；快捷键设置页按此顺序按作用域分组展示）。
     pub const ALL: &'static [CommandId] = &[
         CommandId::NoteUndo,
         CommandId::NoteRedo,
@@ -92,17 +92,25 @@ impl CommandId {
         }
     }
 
-    /// 展示名（快捷键设置行）。
+    /// 展示名（快捷键设置行；归属由分组标题承载，不含领域前缀）。
     pub fn label(self) -> &'static str {
         match self {
-            CommandId::NoteUndo => "笔记：撤销",
-            CommandId::NoteRedo => "笔记：重做",
-            CommandId::TableUndo => "表格：撤销",
-            CommandId::TableRedo => "表格：重做",
-            CommandId::TableCopy => "表格：复制",
-            CommandId::TableCut => "表格：剪切",
-            CommandId::TablePaste => "表格：粘贴",
-            CommandId::TableClear => "表格：清空选区",
+            CommandId::NoteUndo | CommandId::TableUndo => "撤销",
+            CommandId::NoteRedo | CommandId::TableRedo => "重做",
+            CommandId::TableCopy => "复制",
+            CommandId::TableCut => "剪切",
+            CommandId::TablePaste => "粘贴",
+            CommandId::TableClear => "清空选区",
+        }
+    }
+}
+
+impl Scope {
+    /// 快捷键设置页的分组标题。
+    pub fn label(self) -> &'static str {
+        match self {
+            Scope::Note => "笔记",
+            Scope::Table => "表格",
         }
     }
 }

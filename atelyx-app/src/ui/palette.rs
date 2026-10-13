@@ -55,7 +55,11 @@ pub const INPUT_PLACEHOLDER: Color = TEXT_MUTED;
 // ===== 强调（黄铜金）=====
 /// 强调色
 pub const ACCENT: Color = rgb(0xe0, 0xa9, 0x4e);
-/// 强调淡底（激活态底色）
+/// 强调悬停（金提亮一档）。
+pub const ACCENT_HOVER: Color = rgb(0xf0, 0xbc, 0x66);
+/// 强调底上的前景（金底配深字）。
+pub const ACCENT_FG: Color = rgb(0x14, 0x14, 0x14);
+/// 强调淡底（激活态底色）。
 pub const ACCENT_SOFT: Color = rgba(224, 169, 78, 0.14);
 
 // ===== 状态语义色 =====

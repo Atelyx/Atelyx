@@ -3,7 +3,7 @@
 //! 回滚复用各保存链：笔记/表格走会话回滚，画布为快照直写仓库（无会话链）。
 
 use iced::alignment::{Horizontal, Vertical};
-use iced::widget::{button, column, container, mouse_area, row, scrollable, space, stack, text};
+use iced::widget::{button, column, container, row, scrollable, space, text};
 use iced::{Element, Length, Padding, Point, Size, Task, border, widget::container::Style};
 use atelyx_core::history::{HistoryAction, HistoryKind, HistoryVersion};
 
@@ -80,7 +80,7 @@ pub fn on_msg(app: &mut App, msg: HistoryBrowserMsg) -> Task<Message> {
     }
 }
 
-/// 居中模态覆盖元素（SCRIM 捕获层 + 居中卡；非本形态弹层 / 非本窗口返回 None）。
+/// 居中模态覆盖元素（遮罩捕获层 + 居中卡；非本形态弹层 / 非本窗口返回 None）。
 pub fn overlay<'a>(app: &'a App, window: iced::window::Id, viewport: Size) -> Option<Element<'a, Message>> {
     let (w, open) = app.popup.as_ref()?;
     if *w != window {
@@ -89,23 +89,8 @@ pub fn overlay<'a>(app: &'a App, window: iced::window::Id, viewport: Size) -> Op
     let PopupState::HistoryBrowser { kind, file } = &open.state else {
         return None;
     };
-    let capture = mouse_area(space().width(Length::Fill).height(Length::Fill))
-        .on_press(Message::Ui(crate::ui::UiMsg::PopupClose { window }));
     let card = browser_card(app, *kind, file, window, viewport);
-    // 阴影环与 popup::overlay 同做法：外扩容器露出的半透明黑底环
-    let shadow_wrap = container(card)
-        .padding(Padding { left: 4.0, top: 2.0, right: 4.0, bottom: 14.0 })
-        .style(|_t| Style {
-            background: Some(iced::Color::BLACK.scale_alpha(0.35).into()),
-            border: border::rounded(pal::RADIUS_MD + 4.0),
-            ..Style::default()
-        });
-    let centered = container(shadow_wrap)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .align_x(Horizontal::Center)
-        .align_y(Vertical::Center);
-    Some(stack![capture, centered].width(Length::Fill).height(Length::Fill).into())
+    Some(crate::ui::popup::modal_overlay(window, card))
 }
 
 fn browser_card<'a>(

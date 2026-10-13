@@ -19,6 +19,8 @@ mod files;
 mod general;
 mod shortcuts;
 mod workspace;
+// 关于页许可模态由 layout_view 的覆盖层分派挂载
+pub(crate) use about::{LICENSE_CARD_WIDTH, license_overlay};
 
 /// 当前仓库容器（本地仓库或协作空间）的展示名；未打开 = None。
 pub(crate) fn repo_display_name(app: &App) -> Option<String> {
@@ -228,7 +230,7 @@ fn settings_body(app: &App, window: iced::window::Id) -> Element<'static, Messag
         "files" => files::view(app),
         "workspace" => workspace::view(app, window),
         "editor" => editor::view(app),
-        "about" => about::view(app),
+        "about" => about::view(app, window),
         _ => controls::empty_state("puzzle", "暂无设置项", "该分组暂无可配置项", None),
     }
 }
