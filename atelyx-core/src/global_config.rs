@@ -86,6 +86,8 @@ pub struct GlobalConfig {
     pub last_active: Option<LastActive>,
     /// 协作展示色（远端光标 / 名单；首次登录时随机指派，应用级共享）。
     pub collab_color: Option<String>,
+    /// 本机稳定设备 id（首次登录时生成；服务端据此合并同账号会话）。
+    pub device_id: Option<String>,
     /// 界面基准字号（px，12–20）。
     pub font_size: u32,
     /// 启动恢复上次打开的文件。
@@ -112,6 +114,7 @@ impl Default for GlobalConfig {
             last_identity: None,
             last_active: None,
             collab_color: None,
+            device_id: None,
             font_size: DEFAULT_FONT_SIZE,
             auto_restore: true,
             auto_update: false,

@@ -369,13 +369,19 @@ fn login_submit(app: &mut App, register: bool) -> Task<Message> {
     } else {
         form.device.trim().to_string()
     };
+    // 稳定设备 id：首次登录生成并随 global.json 持久化；服务端据此合并同账号会话
+    let device_id = app
+        .global
+        .device_id
+        .get_or_insert_with(|| nanoid::nanoid!(21))
+        .clone();
     Task::perform(
         async move {
             let client = SpaceClient::new(&server_url, String::new()).map_err(SpaceError::Network)?;
             let auth = if register {
-                client.register(&username, &password, None, Some(&device)).await?
+                client.register(&username, &password, None, Some(&device), Some(&device_id)).await?
             } else {
-                client.login(&username, &password, Some(&device)).await?
+                client.login(&username, &password, Some(&device), Some(&device_id)).await?
             };
             Ok::<_, SpaceError>(auth)
         },
@@ -421,6 +427,8 @@ fn on_login_done(
         if session.server_url == server_url {
             session.client = client.clone();
             teardown_pump(app);
+            // 换发令牌会踢掉旧连接：泵可能已因 Denied 置闸，重登后复位以重建长连接
+            app.space_pump_denied = false;
         }
     }
     app.notify(NoticeLevel::Success, "已登录");
@@ -844,7 +852,11 @@ pub fn enter_space(app: &mut App, session: SpaceSession) -> Task<Message> {
     clear_session_state(app);
     app.space_tree = None;
     let key = format!("{}/{}", session.server_url, session.space_id);
-    app.ui.file_explorer_expanded = app.expanded_by_space.get(&key).cloned().unwrap_or_default();
+    // 展开集按空间独立：切走时记忆当前集合，切回时恢复；全新进入（无记忆）保底展开根行
+    app.ui.file_explorer_expanded = match app.expanded_by_space.get(&key) {
+        Some(set) => set.clone(),
+        None => vec![String::new()],
+    };
     app.global.bump_space(&session.server_url, &session.space_id, &session.name, crate::now_secs());
     let mut task = refresh_space_tree(app);
     task = task.chain(refresh_space_backlinks(app));

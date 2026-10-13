@@ -380,6 +380,7 @@ impl SpaceClient {
         password: &str,
         display_name: Option<&str>,
         device_name: Option<&str>,
+        device_id: Option<&str>,
     ) -> Result<AuthInfo, SpaceError> {
         self.post_json(
             "/api/auth/register",
@@ -388,6 +389,7 @@ impl SpaceClient {
                 "password": password,
                 "displayName": display_name,
                 "deviceName": device_name,
+                "deviceId": device_id,
             }),
         )
         .await
@@ -398,6 +400,7 @@ impl SpaceClient {
         username: &str,
         password: &str,
         device_name: Option<&str>,
+        device_id: Option<&str>,
     ) -> Result<AuthInfo, SpaceError> {
         self.post_json(
             "/api/auth/login",
@@ -405,6 +408,7 @@ impl SpaceClient {
                 "username": username,
                 "password": password,
                 "deviceName": device_name,
+                "deviceId": device_id,
             }),
         )
         .await

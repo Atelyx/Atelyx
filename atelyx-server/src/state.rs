@@ -38,6 +38,9 @@ pub struct Session {
     pub user_id: String,
     pub token_hash: String,
     pub device_name: String,
+    /// 客户端稳定设备 id（None = 旧版客户端的会话；新客户端登录时按残留清理）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
     pub created_at: i64,
     pub last_seen_at: i64,
 }

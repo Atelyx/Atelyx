@@ -197,6 +197,57 @@ async fn register_login_and_session_management() {
     assert_eq!(status, 401);
 }
 
+// ===== 同设备登录合并会话 =====
+
+#[tokio::test]
+async fn login_merges_sessions_by_device_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let (status, _) = ctx.post("/api/auth/register", None, json!({ "username": "alice", "password": "pass-123456" })).await;
+    assert_eq!(status, 200);
+
+    let (status, first) = ctx
+        .post("/api/auth/login", None, json!({ "username": "alice", "password": "pass-123456", "deviceName": "台式机", "deviceId": "dev-1" }))
+        .await;
+    assert_eq!(status, 200);
+    let token1 = first["token"].as_str().unwrap().to_string();
+    let session1 = first["sessionId"].as_str().unwrap().to_string();
+
+    // 同 deviceId 再次登录：会话条目沿用，令牌换发
+    let (status, second) = ctx
+        .post("/api/auth/login", None, json!({ "username": "alice", "password": "pass-123456", "deviceName": "台式机", "deviceId": "dev-1" }))
+        .await;
+    assert_eq!(status, 200);
+    let token2 = second["token"].as_str().unwrap().to_string();
+    assert_eq!(second["sessionId"].as_str().unwrap(), session1.as_str());
+    assert_ne!(token1, token2);
+    let (status, devices) = ctx.get("/api/auth/devices", Some(&token2), &[]).await;
+    assert_eq!(status, 200);
+    assert_eq!(devices.as_array().unwrap().len(), 1);
+    // 旧令牌随换发失效
+    let (status, _) = ctx.get("/api/auth/devices", Some(&token1), &[]).await;
+    assert_eq!(status, 401);
+
+    // 无 deviceId 的登录（旧版客户端）：照常新增会话
+    let (status, legacy) = ctx
+        .post("/api/auth/login", None, json!({ "username": "alice", "password": "pass-123456" }))
+        .await;
+    assert_eq!(status, 200);
+    let legacy_token = legacy["token"].as_str().unwrap().to_string();
+    let legacy_session = legacy["sessionId"].as_str().unwrap().to_string();
+
+    // 带 deviceId 的新客户端登录：同账号无 deviceId 的残留会话被清理
+    let (status, _) = ctx
+        .post("/api/auth/login", None, json!({ "username": "alice", "password": "pass-123456", "deviceId": "dev-2" }))
+        .await;
+    assert_eq!(status, 200);
+    let (status, devices) = ctx.get("/api/auth/devices", Some(&token2), &[]).await;
+    assert_eq!(status, 200);
+    let list = devices.as_array().unwrap();
+    assert_eq!(list.len(), 2);
+    assert!(list.iter().all(|d| d["id"].as_str().unwrap() != legacy_session.as_str()));
+}
+
 // ===== 两账号共享空间 + 内容 CRUD =====
 
 #[tokio::test]

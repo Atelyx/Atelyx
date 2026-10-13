@@ -1,6 +1,6 @@
-//! 账号与会话：开放注册 / 登录 / 登出 / 设备会话列表与吊销。
+//! 账号与会话：开放注册 / 登录 / 登出 / 设备会话列表与吊销；日志只记元数据，密码与令牌不入日志。
 //! 密码 argon2 哈希；令牌随机 256 位 hex、经 `Authorization: Bearer` 传递，服务端只存 SHA-256 摘要。
-//! 一次登录 = 一个设备会话，同账号多会话并存、可逐个吊销；日志只记用户名等元数据，密码与令牌一律不入日志。
+//! 会话携带客户端设备 id：同账号同设备再次登录原地换发令牌，无设备 id 的会话在新客户端登录时清理。
 
 use argon2::password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
@@ -12,7 +12,8 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::state::{now_secs, random_hex, token_hash, ServerState, Session, User};
+use crate::state::{now_secs, random_hex, token_hash, Persisted, ServerState, Session, User};
+use crate::ws::KickReason;
 use crate::{ApiError, ApiResult};
 
 const USERNAME_MAX: usize = 32;
@@ -53,6 +54,8 @@ pub struct Credentials {
     display_name: Option<String>,
     #[serde(default)]
     device_name: Option<String>,
+    #[serde(default)]
+    device_id: Option<String>,
 }
 
 /// 创建用户 + 首个设备会话，返回令牌原文（仅此一次出现在响应中）。
@@ -82,7 +85,7 @@ async fn create_account(state: ServerState, body: Credentials) -> ApiResult<axum
         display_name,
         created_at: now_secs(),
     };
-    let (session, token) = new_session(&user.id, body.device_name);
+    let (session, token) = new_session(&user.id, body.device_name, body.device_id);
     state.mutate(|p| {
         if p.users.iter().any(|u| u.username == body.username) {
             return Err(ApiError(StatusCode::CONFLICT, "用户名已被占用".to_string()));
@@ -102,7 +105,7 @@ async fn create_account(state: ServerState, body: Credentials) -> ApiResult<axum
     .into_response())
 }
 
-fn new_session(user_id: &str, device_name: Option<String>) -> (Session, String) {
+fn new_session(user_id: &str, device_name: Option<String>, device_id: Option<String>) -> (Session, String) {
     let token = random_hex(32);
     let session = Session {
         id: random_hex(8),
@@ -114,10 +117,36 @@ fn new_session(user_id: &str, device_name: Option<String>) -> (Session, String) 
             .chars()
             .take(64)
             .collect(),
+        // 设备 id 只作合并键：空串视同未提供，长度截断防恶意超长入盘
+        device_id: device_id.filter(|s| !s.is_empty()).map(|d| d.chars().take(64).collect()),
         created_at: now_secs(),
         last_seen_at: now_secs(),
     };
     (session, token)
+}
+
+/// 登录会话安装：同账号同 device_id 的既有会话原地换发令牌（沿用条目，返回 true 表示换发）；
+/// 无 device_id 的既有会话按旧版残留清理（仅新客户端登录时，避免旧登录无限堆积）。
+/// 换发后旧令牌摘要被覆盖，持有旧令牌的在途连接由调用方踢出。
+fn install_session(p: &mut Persisted, user_id: &str, session: Session) -> (Session, bool) {
+    if session.device_id.is_some() {
+        p.sessions.retain(|s| !(s.user_id == user_id && s.device_id.is_none()));
+    }
+    let Some(device_id) = session.device_id.clone() else {
+        p.sessions.push(session.clone());
+        return (session, false);
+    };
+    if let Some(existing) = p.sessions.iter_mut().find(|s| {
+        s.user_id == user_id && s.device_id.as_deref() == Some(device_id.as_str())
+    }) {
+        existing.token_hash = session.token_hash.clone();
+        existing.device_name = session.device_name.clone();
+        existing.last_seen_at = session.last_seen_at;
+        let merged = Session { id: existing.id.clone(), created_at: existing.created_at, ..session };
+        return (merged, true);
+    }
+    p.sessions.push(session.clone());
+    (session, false)
 }
 
 pub async fn register(State(state): State<ServerState>, Json(body): Json<Credentials>) -> ApiResult<axum::response::Response> {
@@ -133,12 +162,13 @@ pub async fn login(State(state): State<ServerState>, Json(body): Json<Credential
         // 用户名存在与否统一口径（不给枚举账号的线索）
         return Err(ApiError(StatusCode::UNAUTHORIZED, "用户名或密码错误".to_string()));
     }
-    let (session, token) = new_session(&user.id, body.device_name);
+    let (session, token) = new_session(&user.id, body.device_name, body.device_id);
+    let (session, reused) = state.mutate(|p| Ok::<_, ApiError>(install_session(p, &user.id, session)))?;
     let session_id = session.id.clone();
-    state.mutate(|p| {
-        p.sessions.push(session.clone());
-        Ok(())
-    })?;
+    // 换发令牌 = 旧令牌即刻失效：踢掉仍持旧令牌的在途连接，强制以新令牌重连
+    if reused {
+        state.hub().kick_sessions(None, std::slice::from_ref(&session_id), KickReason::SessionRevoked);
+    }
     tracing::info!(username = %user.username, device = %session.device_name, "用户登录");
     Ok(Json(json!({
         "userId": user.id,
