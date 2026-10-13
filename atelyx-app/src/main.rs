@@ -5,20 +5,35 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod autostart;
+mod calendar_actions;
+mod calendar_day;
+mod calendar_grid;
+mod calendar_heat;
+mod calendar_month;
+mod calendar_view;
+mod commands;
+mod history_browser;
 mod layout_view;
 mod markdown_edit;
 mod markdown_view;
 mod properties_view;
+mod recent_view;
+mod repohistory_view;
+mod settings_view;
 mod space_actions;
 mod table_actions;
 mod table_view;
 mod ui;
+mod update;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use atelyx_core::credentials;
 use atelyx_core::global_config::{self, LastActive};
 use atelyx_core::layout::{
     self, apply_layout_op, normalize, op_passes_shape_check, AppUiState, DetachedWindow,
@@ -34,10 +49,10 @@ use iced::{keyboard, mouse, Element, Event, Point, Size, Subscription, Task, The
 use crate::table_view as tv;
 use markdown_edit::HitTarget;
 use properties_view::{PropsMsg, PropsPanel};
-use ui::notify::{Level as NoticeLevel, Notification};
+use ui::notify::{Level as NoticeLevel, Notification, Progress as NoticeProgress};
 
 use layout_view::{
-    enumerate_dividers, panel_tab_ids_in, PopupOpen, RenameState, RenameTarget, UiMetrics,
+    enumerate_dividers, panel_tab_ids_in, PopupOpen, PopupState, RenameState, RenameTarget, UiMetrics,
 };
 
 /// 撕裂窗口建窗参数：bounds 恢复位置 + 条目 OS 选项（不进任务栏）；无系统边框。
@@ -235,6 +250,16 @@ fn global_config_path() -> Option<PathBuf> {
     app_data_dir().map(|d| d.join("global.json"))
 }
 
+/// 更新包下载目录（应用数据目录下 updates；boot 即创建，失败留给下载侧如实报错；
+/// 应用数据目录不可用（极少见）回落系统临时目录）。
+fn update_download_dir() -> PathBuf {
+    let dir = app_data_dir()
+        .map(|d| d.join("updates"))
+        .unwrap_or_else(|| std::env::temp_dir().join("atelyx-updates"));
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
 /// 启动读全局配置；读错误（原文损坏且备份失败等）回传文案供通知。
 fn load_global_boot() -> (global_config::GlobalConfig, Option<String>) {
     let Some(path) = global_config_path() else {
@@ -257,18 +282,26 @@ pub(crate) fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// Ctrl 组合键分派：表格结构化剪贴板 / 撤销重做 / 全选 / 保存。
-/// 全局订阅不持 App 状态，目标是否消费由处理器按表格焦点自守卫。
-fn table_ctrl_key(c: &str, shift: bool) -> Option<Message> {
-    match c {
-        "s" => Some(Message::Save),
-        "c" => Some(Message::Table(table_view::TableMsg::Copy)),
-        "x" => Some(Message::Table(table_view::TableMsg::Cut)),
-        "v" => Some(Message::Table(table_view::TableMsg::Paste)),
-        "z" if shift => Some(Message::Table(table_view::TableMsg::Redo)),
-        "z" => Some(Message::Table(table_view::TableMsg::Undo)),
-        "y" => Some(Message::Table(table_view::TableMsg::Redo)),
-        "a" => Some(Message::Table(table_view::TableMsg::SelectAll)),
+/// 命令候选键形态：Ctrl/Cmd + 单字符（撤销/重做/剪贴板类），或命名键（任意修饰，
+/// 覆盖 NoMod 清空类与其余注册表键位）。全局订阅不持 App 状态，是否命中与消费
+/// 由处理器按录制态与作用域焦点自守卫。
+fn command_key_candidate(key: &keyboard::Key, mods: keyboard::Modifiers) -> bool {
+    match key {
+        keyboard::Key::Character(c) => c.len() == 1 && (mods.control() || mods.logo()),
+        keyboard::Key::Named(_) => true,
+        keyboard::Key::Unidentified => false,
+    }
+}
+
+/// 注册表命令 → 表格消息（Note 域命令由编辑面部件内的绑定表消费，不产表格消息）。
+fn table_msg_of(id: commands::CommandId) -> Option<tv::TableMsg> {
+    match id {
+        commands::CommandId::TableUndo => Some(tv::TableMsg::Undo),
+        commands::CommandId::TableRedo => Some(tv::TableMsg::Redo),
+        commands::CommandId::TableCopy => Some(tv::TableMsg::Copy),
+        commands::CommandId::TableCut => Some(tv::TableMsg::Cut),
+        commands::CommandId::TablePaste => Some(tv::TableMsg::Paste),
+        commands::CommandId::TableClear => Some(tv::TableMsg::ClearSelection),
         _ => None,
     }
 }
@@ -336,14 +369,26 @@ enum Message {
     WikiPick(usize),
     /// 搜索面板查询词输入。
     SearchInput(String),
-    /// 历史版本列表落地（gen 守卫 + 笔记身份守卫：版本快照随文件绑定，串台会跨文件回滚）。
-    HistoryLoaded(u64, String, Vec<atelyx_core::history::HistoryVersion>),
-    /// 历史区折叠切换。
-    HistoryToggle,
-    /// 回滚到指定版本（全文快照写回走保存链）。
-    HistoryRestore(u64),
+    /// 历史版本列表落地（gen 守卫 + kind/文件身份守卫：版本快照随文件绑定，串台会跨文件回滚）。
+    HistoryLoaded(u64, atelyx_core::history::HistoryKind, String, Vec<atelyx_core::history::HistoryVersion>),
+    /// 历史记录弹层（打开 / 展开预览 / 回滚二段确认）。
+    History(history_browser::HistoryBrowserMsg),
+    /// 画布回滚写盘回执（gen 守卫；失败提示不阻塞）。
+    CanvasHistoryRestored(u64, String, Result<(), String>),
+    /// 重建内部链接（设置-编辑器：二段确认 / 队列执行 / 回执）。
+    RebuildLinks(settings_view::editor::RebuildLinksMsg),
     /// 历史记录/回滚落盘完成 → 重读版本列表。
     HistoryRecorded(u64, Option<String>),
+    /// 最近打开条目失效剔除（确认缺失的 (vaultKey, file) 对）。
+    RecentPruned(Vec<(String, String)>),
+    /// 仓库历史聚合落地（gen 守卫）。
+    RepoHistoryLoaded(u64, Result<Vec<repohistory_view::RepoHistoryGroup>, String>),
+    /// 仓库历史面板刷新（失效重取）。
+    RepoHistoryRefresh,
+    /// 仓库历史分组折叠切换（键 = 文件路径）。
+    RepoHistoryToggleFold(String),
+    /// 日历视图消息（日程增删改 / 月份导航 / 装载回执）。
+    Calendar(calendar_actions::CalendarMsg),
     /// 打开链接（外链 / 仓库路径 / wiki）。
     OpenLink(String, LinkForm),
     /// 笔记图片字节落地（gen 守卫 + src；失败进失败集回落占位，不重试）。
@@ -356,13 +401,15 @@ enum Message {
     PromptToggle(String),
     /// 设置/清除文件夹图标颜色（None = 恢复默认）。
     FolderColorSet(String, Option<String>),
-    /// 仓库元数据（排序 / 提示词标记 / 文件夹颜色）落地（gen 守卫）。
-    VaultMetaLoaded(u64, Result<(String, Vec<String>, HashMap<String, String>), String>),
+    /// 仓库级配置与元数据（config / 提示词标记 / 文件夹颜色）落地（gen 守卫）。
+    VaultMetaLoaded(u64, Result<(vault::VaultConfig, Vec<String>, HashMap<String, String>), String>),
     /// 提示词标记清单落地（读或写回后的最新清单；gen 守卫）。
     PromptNotesLoaded(u64, Result<Vec<String>, String>),
+    /// Agent 配置清单落地（agents.json 读或写后重读；gen 守卫）。
+    AgentsLoaded(u64, Result<Vec<vault::AgentConfig>, String>),
     /// 文件夹颜色落盘完成（重读后的清单；gen 守卫）。
     FolderColorsLoaded(u64, Result<HashMap<String, String>, String>),
-    /// 排序方式落盘回执（失败提示，不回滚界面选择）。
+    /// 仓库级配置落盘回执（失败提示，不回滚界面选择）。
     ConfigSaved(u64, Result<(), String>),
     /// 文件行按压（拖拽候选；由行 mouse_area 上报，超阈值转正拖拽会话）。
     FileRowPress { window: window::Id, rel: String, is_dir: bool },
@@ -449,10 +496,18 @@ enum Message {
     ApplyFullscreen(window::Id, iced::window::Mode),
     /// Esc：先关弹层，再取消行内重命名。
     Escape(window::Id),
+    /// 命令候选键（注册表键位 + Ctrl+S/A 兜底的统一入口）。
+    KeyCommand { key: keyboard::Key, mods: keyboard::Modifiers },
+    /// 设置-快捷键：命令行进入录制态。
+    ShortcutRecord(commands::CommandId),
+    /// 设置-快捷键：清除该命令的键位覆盖（恢复默认表）。
+    ShortcutReset(commands::CommandId),
     /// 打开 / 关闭设置整页；设置左栏切 tab；折叠钮切换。
     SettingsToggle,
     SettingsTab(String),
     SettingsNavCollapse,
+    /// AI 设置页消息（子分区 / 供应商 / 模型服务 / Agent / 搜索）。
+    Ai(settings_view::ai::AiMsg),
     /// 打开弹层（几何规格 + 内容形态由 layout_view 定义）。
     PopupOpen(window::Id, PopupOpen),
     /// 仓库文件总数（打开仓库后异步统计；gen 守卫）。
@@ -505,6 +560,36 @@ enum Message {
     SpaceLoginToggle(bool),
     /// 最近空间行：从列表移除（仅移出列表，不影响服务端数据与成员资格）。
     RemoveSpaceAsk { server_url: String, space_id: String },
+    /// 设置-通用：界面字号草稿输入（数字过滤；合法档位实时生效）。
+    FontSizeInput(String),
+    /// 设置-通用：字号提交（非法草稿回退显示当前生效值）。
+    FontSizeCommit,
+    /// 设置-通用：自动恢复上次打开文件开关。
+    AutoRestoreToggle,
+    /// 设置-通用：自动检查更新开关（启动静默检查的开关源）。
+    AutoUpdateToggle,
+    /// 设置-通用：开机自启开关（写系统启动项；失败提示并回读真实状态）。
+    AutostartToggle,
+    /// 设置-编辑器：宽松换行开关。
+    SoftWrapToggle,
+    /// 设置-编辑器：页面内标题开关。
+    InPageTitleToggle,
+    /// 设置-编辑器：正文行宽草稿输入（数字过滤）。
+    ContentWidthInput(String),
+    /// 设置-编辑器：正文行宽提交（0 = 不限；越界非法值忽略）。
+    ContentWidthCommit,
+    /// 设置-文件：排除文件夹草稿输入（逗号分隔）。
+    ExcludeFoldersInput(String),
+    /// 设置-文件：排除文件夹提交（空 = 删除该键）。
+    ExcludeFoldersCommit,
+    /// 设置-文件：附件文件夹草稿输入。
+    AttachmentFolderInput(String),
+    /// 设置-文件：附件文件夹提交（空 = 删除该键）。
+    AttachmentFolderCommit,
+    /// 设置-工作区：启动场景选择（None = 跟随当前，删除该键）。
+    EntryScenePick(Option<String>),
+    /// 更新流程（检查 / 下载 / 安装状态机）。
+    Update(update::UpdateMsg),
 }
 
 /// 文件操作成功后对打开中笔记的跟随语义。
@@ -651,6 +736,8 @@ enum PendingAfterFlush {
     RenameFile(RenameState),
     /// 从空间列表进入指定协作空间（会话恢复可能弹登录层）。
     SelectSpace { server_url: String, space_id: String, name: String },
+    /// 安装就绪的更新包（挂起输入先落盘，安装器替换文件不丢未保存内容）。
+    InstallUpdate,
 }
 
 /// 仓库容器身份：本地文件夹仓库 or 协作空间（同一时刻互斥激活）。
@@ -686,6 +773,10 @@ pub enum SpaceField {
     Device,
     Name,
     Code,
+    /// 邀请码表单：有效时长（小时原文，空 = 服务端缺省）。
+    InviteHours,
+    /// 邀请码表单：次数上限（原文，空 = 不限）。
+    InviteUses,
 }
 
 /// 协作空间消息：账号 / 空间切换 / 空间保存回执 / 实时事件。
@@ -773,6 +864,48 @@ pub enum SpaceMsg {
     },
     /// 他端结构变更的树刷新兜底 tick（合并窗口结束后的最终一次刷新）。
     FsTreeRefresh,
+    /// 空间成员名册落地（协作房间视图与成员弹层共用缓存；gen 防跨空间串台）。
+    MembersLoaded {
+        gen: u64,
+        result: Result<Vec<atelyx_core::space_client::MemberInfo>, atelyx_core::space_client::SpaceError>,
+    },
+    /// 成员行内二段确认进入 / 取消（转让或移除）。
+    MemberAsk(String, space_actions::MemberConfirm),
+    MemberAskCancel,
+    MemberTransfer(String),
+    MemberRemove(String),
+    /// 成员操作回执（成功后重拉名册；转让另刷空间列表对齐自身角色；gen 防跨空间串台）。
+    MemberOpDone {
+        gen: u64,
+        op: space_actions::MemberConfirm,
+        result: Result<(), atelyx_core::space_client::SpaceError>,
+    },
+    /// 邀请码列表落地（owner 专属端点；gen 防跨空间串台）。
+    InvitesLoaded {
+        gen: u64,
+        result: Result<Vec<atelyx_core::space_client::InviteInfo>, atelyx_core::space_client::SpaceError>,
+    },
+    /// 邀请码表单：角色选择（选后回根面板）。
+    InviteRolePick(atelyx_core::space_client::SpaceRole),
+    /// 按表单草稿生成邀请码。
+    CreateInvite,
+    InviteCreated {
+        gen: u64,
+        result: Result<atelyx_core::space_client::InviteInfo, atelyx_core::space_client::SpaceError>,
+    },
+    /// 撤销邀请码二段确认进入 / 取消（code）。
+    InviteRevokeAsk(String),
+    InviteRevokeCancel,
+    RevokeInvite(String),
+    InviteRevoked {
+        gen: u64,
+        code: String,
+        result: Result<(), atelyx_core::space_client::SpaceError>,
+    },
+    /// 复制邀请码（按钮转「已复制」）。
+    InviteCopy(String),
+    /// 协作房间视图 → 设置页「多人协作」分区（SettingsTab + SettingsToggle 组合）。
+    OpenCollabSettings,
 }
 
 pub struct App {
@@ -816,8 +949,25 @@ pub struct App {
     /// 设置整页开启态与左栏 tab。
     pub settings_open: bool,
     pub settings_tab: String,
+    /// 快捷键录制中的命令（None = 未录制；录制态吃掉命令候选键，
+    /// Esc / 切设置分区 / 关弹层取消）。
+    pub shortcut_recording: Option<commands::CommandId>,
     /// 应用级全局配置（最近仓库列表；落盘 global.json）。
     pub global: global_config::GlobalConfig,
+    /// 设置-通用：界面字号草稿（None = 显示当前生效值）。
+    pub font_size_draft: Option<String>,
+    /// 设置-通用：开机自启系统态缓存（打开设置页 / 切换后刷新；None = 未读）。
+    pub autostart_enabled: Option<bool>,
+    /// 更新流程状态机（检查 / 下载 / 安装）。
+    pub update: update::UpdateState,
+    /// 在途下载的取消标志（None = 无在途下载）。
+    update_cancel: Option<Arc<AtomicBool>>,
+    /// 更新包下载目录（boot 定位并创建）。
+    update_download_dir: PathBuf,
+    /// 下载进度暂存（下载回调线程只写；ProgressTick 读走刷入状态与常驻通知）。
+    update_progress: Arc<Mutex<(u64, u64)>>,
+    /// 当前检查是否手动发起（Checked 回执据此决定提示方式）。
+    update_manual_check: bool,
     /// 最近一次发起的切仓目标：flush 回放时只有与它一致才执行，防快速点选落到非最后目标。
     vault_switch_target: Option<PathBuf>,
     /// 从列表移除的确认态（目标仓库根；弹层确认 pane 数据源）。
@@ -854,6 +1004,27 @@ pub struct App {
     pub space_cmds: Option<tokio::sync::mpsc::UnboundedSender<atelyx_core::collab::SpaceCmd>>,
     /// 在线成员名册（Peers / Presence 事件维护）。
     pub space_peers: Vec<atelyx_core::collab::PeerInfo>,
+    /// 帧泵连接态（Ready 置位；断开 / 服务端拒绝 / 摘泵清零）。
+    pub space_connected: bool,
+    /// 空间成员名册缓存（协作房间视图与成员弹层共用；进入/离开空间清空）。
+    pub space_members: Option<Vec<atelyx_core::space_client::MemberInfo>>,
+    pub space_members_loading: bool,
+    /// 名册加载失败（弹层与视图内红字；操作失败走通知，不入此字段）。
+    pub space_members_error: Option<String>,
+    /// 成员行内二段确认（目标 userId + 动作）。
+    pub space_member_confirm: Option<(String, space_actions::MemberConfirm)>,
+    /// 邀请码列表缓存（owner 专属端点；进入/离开空间清空）。
+    pub space_invites: Option<Vec<atelyx_core::space_client::InviteInfo>>,
+    pub space_invites_loading: bool,
+    pub space_invites_error: Option<String>,
+    /// 邀请码表单草稿（角色 + 可空数字字段原文，空 = 服务端缺省）。
+    pub space_invite_form: space_actions::InviteForm,
+    /// 最近一次生成的邀请码（撤销后清除；跨弹层开关保留）。
+    pub space_invite_result: Option<atelyx_core::space_client::InviteInfo>,
+    /// 复制反馈（点击复制后按钮转「已复制」；重新生成或重开弹层复位）。
+    pub space_invite_copied: bool,
+    /// 撤销邀请码的二段确认（code）。
+    pub space_invite_confirm: Option<String>,
     /// 他端结构变更的树刷新节流（上次刷新时刻 + 合并窗口内是否已排兜底 tick）。
     space_tree_refresh_at: Option<std::time::Instant>,
     fs_tree_refresh_pending: bool,
@@ -949,12 +1120,49 @@ pub struct App {
     wiki_swallow_newline: bool,
     /// 搜索面板查询词。
     pub search_query: String,
-    /// 当前笔记历史版本（文件载入与每次保存落地后刷新）。
+    /// 历史弹层/上下文的版本列表（打开弹层与每次保存后刷新；旧→新序）。
     pub history: Vec<atelyx_core::history::HistoryVersion>,
-    /// 历史区展开态（缺省折叠）。
-    pub history_open: bool,
+    /// 列表加载世代（回滚守卫：容器/仓库切换后列表过期）。
+    pub history_gen: u64,
+    /// 弹层版本列表加载中。
+    pub history_loading: bool,
+    /// 弹层展开预览的版本 seq（互斥；None = 全收起）。
+    pub history_expanded: Option<u64>,
+    /// 弹层回滚二段确认的版本 seq。
+    pub history_confirm: Option<u64>,
+    /// 回滚已发起、等待保存链稳定落盘的一次性标志（成功回执消费并提示，失败/切容器清除）。
+    pub(crate) history_restore_pending: bool,
+    /// 仓库历史面板缓存（None = 未加载/已失效；Err = 加载失败待手动刷新）。
+    pub repo_history: Option<Result<Vec<repohistory_view::RepoHistoryGroup>, String>>,
+    /// 仓库历史聚合在途。
+    pub repo_history_loading: bool,
+    /// 仓库历史分组折叠覆盖（键 = 文件路径，true 折叠 / false 展开；缺省前 15 组展开，会话内记忆）。
+    pub repo_history_fold: HashMap<String, bool>,
+    /// 日历视图会话态（日程清单 / 月导航 / 活动密度缓存）。
+    pub calendar: calendar_actions::CalendarState,
+    /// 最近打开条目存在性校验的上次发起时刻（视图展示期节流）。
+    recent_checked_at: Option<Instant>,
+    /// 设置-编辑器：重建内部链接会话态。
+    pub rebuild_links: settings_view::editor::RebuildLinksState,
     /// 文件面板排序（仓库 config 的 fileExplorerSort；缺省编辑时间从新到旧）。
     pub file_sort: String,
+    /// 仓库级文件面板配置（打开仓库后随仓库配置读入；设置页展示与提交基线）。
+    pub exclude_folders: Vec<String>,
+    pub attachment_folder: Option<String>,
+    /// 启动时切换的目标场景（仓库 config 的 entrySceneId；None = 跟随当前）。
+    pub entry_scene_id: Option<String>,
+    /// 仓库级配置基线（打开容器后随元数据读入；设置-AI 的展示与提交基线）。
+    pub repo_config: vault::VaultConfig,
+    /// Agent 配置清单（agents.json；打开 AI 设置页时读入）。
+    pub agents: Vec<vault::AgentConfig>,
+    /// 设置-AI 分区的会话内编辑状态（容器切换时整体清空）。
+    pub ai: settings_view::ai::AiState,
+    /// AI 设置子分区（供应商 | 模型服务 | Agent | 联网搜索）。
+    pub ai_sub_tab: String,
+    /// 设置页文本项草稿（正文行宽 / 排除文件夹 / 附件文件夹；None = 显示当前值）。
+    pub content_width_draft: Option<String>,
+    pub exclude_folders_draft: Option<String>,
+    pub attachment_folder_draft: Option<String>,
     /// 提示词标记清单（.atelyx/prompt-notes.json；会话内存态）。
     pub prompt_notes: Vec<String>,
     /// 文件夹图标颜色（.atelyx/folder-colors.json；会话内存态）。
@@ -1019,6 +1227,8 @@ impl App {
             .chain(iced::font::load(ui::FONT_DISPLAY))
             .discard();
         let (global, global_notice) = load_global_boot();
+        // 界面基准字号随配置（缺字段走默认档；越界钳回合法区间）
+        ui::palette::set_ui_base(global.font_size.clamp(12, 20));
         // 启动自动进入：最后激活身份优先，缺省回落最近仓库首位（路径失效则停留未激活态）
         let auto_vault: Option<PathBuf> = match &global.last_active {
             Some(LastActive::Vault { root }) => Some(PathBuf::from(root)),
@@ -1049,6 +1259,14 @@ impl App {
                 from_boot: true,
             })));
         }
+        // 启动静默检查更新（autoUpdate 开启时；debug 构建跳过，避免开发期噪音）
+        if !cfg!(debug_assertions)
+            && update::UpdateState::Idle.can_auto_check(global.auto_update)
+        {
+            boot = boot.chain(Task::done(Message::Update(update::UpdateMsg::Check {
+                manual: false,
+            })));
+        }
         (
             Self {
                 ui: load_ui_state(),
@@ -1068,7 +1286,19 @@ impl App {
                 popup_pane: 0,
                 settings_open: false,
                 settings_tab: "general".into(),
+                shortcut_recording: None,
+                ai_sub_tab: "providers".into(),
+                repo_config: vault::VaultConfig::default(),
+                agents: Vec::new(),
+                ai: settings_view::ai::AiState::default(),
                 global,
+                font_size_draft: None,
+                autostart_enabled: None,
+                update: update::UpdateState::Idle,
+                update_cancel: None,
+                update_download_dir: update_download_dir(),
+                update_progress: Arc::new(Mutex::new((0, 0))),
+                update_manual_check: false,
                 vault_switch_target: None,
                 remove_vault_confirm: None,
                 vault_root: None,
@@ -1095,6 +1325,12 @@ impl App {
                 note_images_failed: HashSet::new(),
                 image_loads: None,
                 file_sort: "mtime-desc".to_string(),
+                exclude_folders: Vec::new(),
+                attachment_folder: None,
+                entry_scene_id: None,
+                content_width_draft: None,
+                exclude_folders_draft: None,
+                attachment_folder_draft: None,
                 prompt_notes: Vec::new(),
                 folder_colors: HashMap::new(),
                 file_press: None,
@@ -1124,7 +1360,17 @@ impl App {
                 wiki_swallow_newline: false,
                 search_query: String::new(),
                 history: Vec::new(),
-                history_open: false,
+                history_gen: 0,
+                history_restore_pending: false,
+                history_loading: false,
+                history_expanded: None,
+                history_confirm: None,
+                repo_history: None,
+                repo_history_loading: false,
+                repo_history_fold: HashMap::new(),
+                calendar: calendar_actions::CalendarState::default(),
+                recent_checked_at: None,
+                rebuild_links: settings_view::editor::RebuildLinksState::Idle,
                 history_kind: atelyx_core::history::HistoryKind::Note,
                 table: None,
                 flush_pending: None,
@@ -1145,6 +1391,18 @@ impl App {
                 space_token: None,
                 space_cmds: None,
                 space_peers: Vec::new(),
+                space_connected: false,
+                space_members: None,
+                space_members_loading: false,
+                space_members_error: None,
+                space_member_confirm: None,
+                space_invites: None,
+                space_invites_loading: false,
+                space_invites_error: None,
+                space_invite_form: space_actions::InviteForm::default(),
+                space_invite_result: None,
+                space_invite_copied: false,
+                space_invite_confirm: None,
                 space_own_peer_id: None,
                 space_cursor_prune_at: None,
                 space_tree_refresh_at: None,
@@ -1157,18 +1415,42 @@ impl App {
         )
     }
 
-    /// 追加一条通知（右下角；容量上限防堆积）。
+    /// 追加一条通知（右下角；容量上限防堆积，溢出优先淘汰最旧的非常驻条）。
     pub(crate) fn notify(&mut self, level: NoticeLevel, text: impl Into<String>) {
         self.notify_seq += 1;
-        self.notifications.push(Notification {
-            id: self.notify_seq,
-            level,
-            text: text.into(),
-            at: Instant::now(),
-        });
+        self.notifications.push(Notification::new(self.notify_seq, level, text));
         if self.notifications.len() > 5 {
-            self.notifications.remove(0);
+            let evict = self
+                .notifications
+                .iter()
+                .position(|n| !n.persistent)
+                .unwrap_or(0);
+            self.notifications.remove(evict);
         }
+    }
+
+    /// 置换更新流程的常驻通知（同一时刻至多一条：先移除旧常驻条再置入）。
+    /// 动作表以分配到的通知 id 合成（[跳过] / [稍后] 等关闭动作需要它）。
+    fn set_update_notice(
+        &mut self,
+        level: NoticeLevel,
+        text: String,
+        progress: Option<NoticeProgress>,
+        actions: impl FnOnce(u64) -> Vec<(String, Message)>,
+    ) {
+        self.dismiss_update_notice();
+        self.notify_seq += 1;
+        let id = self.notify_seq;
+        let mut n = Notification::new(id, level, text);
+        n.persistent = true;
+        n.progress = progress;
+        n.actions = actions(id);
+        self.notifications.push(n);
+    }
+
+    /// 移除更新流程的常驻通知（置入新常驻条前同样先走这里）。
+    fn dismiss_update_notice(&mut self) {
+        self.notifications.retain(|n| !n.persistent);
     }
 
     /// 世代内的光标位置（按下事件不带坐标，命中判定用最近位置）。
@@ -1309,6 +1591,8 @@ impl App {
                 if gen != self.epoch() || self.ui.last_note_file.as_deref() != Some(rel.as_str()) {
                     return Task::none();
                 }
+                // 内容载入成功即登记最近打开（本地与空间模式同链回执）
+                recent_view::record(self, &rel, recent_view::RecentKind::Note);
                 self.note_text = text.clone();
                 // 空间模式：载入成功即磁盘基线（三方合流的祖先）
                 self.space_note_flushed = matches!(self.repo_kind, RepoKind::Space(_)).then(|| text.clone());
@@ -1412,6 +1696,7 @@ impl App {
                         // 保存发起时冻结的内容与当前一致才算落盘；期间又有输入则再收一轮
                         if self.note_text == saved {
                             self.dirty = false;
+                            self.settle_history_restore(true);
                             self.after_any_flush()
                         } else {
                             self.submit_save(SaveReason::Flush)
@@ -1420,6 +1705,7 @@ impl App {
                     SaveReason::Manual => {
                         if self.note_text == saved {
                             self.dirty = false;
+                            self.settle_history_restore(true);
                             self.notify(NoticeLevel::Success, "已保存");
                         } else {
                             self.notify(NoticeLevel::Info, "保存完成，期间有新修改");
@@ -1429,6 +1715,7 @@ impl App {
                     SaveReason::AutoSave => {
                         if self.note_text == saved {
                             self.dirty = false;
+                            self.settle_history_restore(true);
                         }
                         Task::none()
                     }
@@ -1437,6 +1724,7 @@ impl App {
                 proceed.chain(self.record_note_history(saved))
             }
             Message::Saved(_, _, reason, Err(e)) => {
+                self.settle_history_restore(false);
                 // flush 被保存失败打断：动作不放行（放行会丢弃未落盘内容），挂起输入保留待重试
                 if matches!(reason, SaveReason::Flush) {
                     self.notify(NoticeLevel::Error, format!("保存失败，操作未执行：{e}"));
@@ -1553,36 +1841,79 @@ impl App {
                 self.search_query = s;
                 Task::none()
             }
-            Message::HistoryLoaded(gen, rel, versions) => {
-                // 身份守卫：版本快照随文件绑定，串台会让回滚跨文件写盘
-                let file_matches = match self.history_kind {
+            Message::HistoryLoaded(gen, kind, rel, versions) => {
+                // 身份守卫：版本快照随 kind+文件绑定（弹层显式指定，或当前上下文同源），
+                // 串台会让回滚跨文件写盘
+                let popup_matches = matches!(
+                    &self.popup,
+                    Some((_, open)) if matches!(
+                        &open.state,
+                        PopupState::HistoryBrowser { kind: k, file } if *k == kind && file == &rel
+                    )
+                );
+                let ctx_matches = match kind {
                     atelyx_core::history::HistoryKind::Note => {
-                        self.ui.last_note_file.as_deref() == Some(rel.as_str())
+                        self.history_kind == atelyx_core::history::HistoryKind::Note
+                            && self.ui.last_note_file.as_deref() == Some(rel.as_str())
                     }
                     atelyx_core::history::HistoryKind::Table => {
-                        self.ui.last_table_file.as_deref() == Some(rel.as_str())
+                        self.history_kind == atelyx_core::history::HistoryKind::Table
+                            && self.ui.last_table_file.as_deref() == Some(rel.as_str())
                     }
+                    atelyx_core::history::HistoryKind::Canvas => false,
                 };
-                if gen == self.epoch() && file_matches {
+                if gen == self.epoch() && (popup_matches || ctx_matches) {
                     self.history = versions;
+                    self.history_gen = gen;
+                    self.history_loading = false;
                 }
                 Task::none()
             }
-            Message::HistoryToggle => {
-                self.history_open = !self.history_open;
-                Task::none()
+            Message::History(m) => history_browser::on_msg(self, m),
+            Message::CanvasHistoryRestored(gen, rel, result) => {
+                if gen != self.epoch() {
+                    return Task::none();
+                }
+                match result {
+                    Err(e) => {
+                        self.notify(NoticeLevel::Error, format!("画布回滚失败：{e}"));
+                        Task::none()
+                    }
+                    Ok(()) => {
+                        self.notify(NoticeLevel::Success, "已回滚");
+                        // 记 restore 版本（尽力而为；回执经 HistoryRecorded 刷新弹层列表）
+                        self.record_canvas_restore_history(rel)
+                    }
+                }
             }
-            Message::HistoryRestore(seq) => self.history_restore(seq),
+            Message::RebuildLinks(m) => settings_view::editor::on_msg(self, m),
             Message::HistoryRecorded(gen, err) => {
                 if let Some(e) = err {
                     self.notify(NoticeLevel::Error, format!("历史版本记录失败：{e}"));
                 }
+                // 侧文件有新版本：面板聚合缓存失效，下个 tick 重取（展示中）
+                self.repo_history = None;
+                // 日历活动密度随记版失效（版本与 mtime 计数已变）
+                calendar_actions::invalidate_activity(self);
                 if gen == self.epoch() {
                     self.reload_history()
                 } else {
                     Task::none()
                 }
             }
+            Message::RecentPruned(gone) => {
+                if !gone.is_empty() {
+                    recent_view::prune(self, &gone);
+                }
+                Task::none()
+            }
+            Message::RepoHistoryLoaded(gen, result) => repohistory_view::on_loaded(self, gen, result),
+            Message::RepoHistoryRefresh => repohistory_view::refresh(self),
+            Message::RepoHistoryToggleFold(file) => {
+                repohistory_view::toggle_fold(self, &file);
+                Task::none()
+            }
+            Message::Calendar(m) => calendar_actions::on_msg(self, m),
             Message::OpenLink(href, form) => self.open_link(&href, form),
             Message::ImageLoaded(gen, key, result) => {
                 self.note_images_inflight.remove(&key);
@@ -1616,10 +1947,21 @@ impl App {
                 if gen != self.epoch() {
                     return Task::none();
                 }
-                self.notify(NoticeLevel::Error, format!("保存排序失败：{e}"));
+                self.notify(NoticeLevel::Error, format!("保存配置失败：{e}"));
                 Task::none()
             }
-            Message::ConfigSaved(..) => Task::none(),
+            Message::ConfigSaved(gen, Ok(())) => {
+                if gen != self.epoch() {
+                    return Task::none();
+                }
+                // 供应商删除挂起的密钥链清理：配置落盘成功才执行（失败保留原状）
+                if let Some((scope, id)) = self.ai.provider_key_delete_pending.take() {
+                    if let Err(e) = credentials::delete_provider_key(&scope, &id) {
+                        self.notify(NoticeLevel::Warning, format!("密钥链清理失败：{e}"));
+                    }
+                }
+                Task::none()
+            }
             Message::DuplicateEntry(rel, is_dir) => {
                 self.dismiss_popup();
                 self.duplicate_entry(&rel, is_dir)
@@ -1650,9 +1992,16 @@ impl App {
                 }
                 Task::none()
             }
-            Message::VaultMetaLoaded(gen, Ok((sort, prompts, colors))) => {
+            Message::VaultMetaLoaded(gen, Ok((config, prompts, colors))) => {
                 if gen == self.epoch() {
-                    self.file_sort = sort;
+                    // 配置基线先整份留存（设置-AI 的展示与提交基线），字段抽取沿用既有会话态
+                    self.repo_config = config.clone();
+                    self.file_sort = config
+                        .file_explorer_sort
+                        .unwrap_or_else(|| "mtime-desc".to_string());
+                    self.exclude_folders = config.exclude_folders.unwrap_or_default();
+                    self.attachment_folder = config.attachment_folder;
+                    self.entry_scene_id = config.entry_scene_id;
                     self.prompt_notes = prompts;
                     self.folder_colors = colors;
                 }
@@ -1955,19 +2304,25 @@ impl App {
                 self.apply(LayoutOp::DeleteScene { id })
             }
             Message::PersistTick => {
+                // 主页面板懒加载搭载：历史面板缓存失效时聚合，最近打开条目按节流校验存在性，日历按需装载
+                let lazy = repohistory_view::tick(self)
+                    .chain(recent_view::tick(self))
+                    .chain(calendar_actions::tick(self))
+                    .chain(space_actions::members_tick(self));
                 if !self.persist_dirty {
-                    return Task::none();
+                    return lazy;
                 }
                 self.persist_dirty = false;
-                let Some(path) = ui_state_path() else { return Task::none() };
+                let Some(path) = ui_state_path() else { return lazy };
                 match serde_json::to_string(&self.ui) {
                     Ok(json) => Task::perform(
                         async move { vault::atomic_write(&path, &json) },
                         Message::PersistDone,
-                    ),
+                    )
+                    .chain(lazy),
                     Err(e) => {
                         self.notify(NoticeLevel::Error, format!("布局序列化失败：{e}"));
-                        Task::none()
+                        lazy
                     }
                 }
             }
@@ -2024,6 +2379,10 @@ impl App {
                         }
                     }
                 }
+                // 下载进度刷新搭载同一心跳：Downloading 时派发 ProgressTick 读暂存刷入
+                if matches!(self.update, update::UpdateState::Downloading { .. }) {
+                    return Task::done(Message::Update(update::UpdateMsg::ProgressTick));
+                }
                 Task::none()
             }
             Message::WindowResized(id, size) => {
@@ -2073,6 +2432,16 @@ impl App {
                         self.rename_press_inside = false;
                     } else if self.main_id == Some(id) {
                         return Task::perform(async {}, |_| Message::LayoutRenameCommit);
+                    }
+                }
+                // 日历日程标题编辑失焦提交：按压不在输入行内 = 提交（Enter 同路径；编辑会话至多一个）
+                if self.calendar.edit.is_some() {
+                    if self.calendar.press_inside {
+                        self.calendar.press_inside = false;
+                    } else {
+                        return Task::perform(async {}, |_| {
+                            Message::Calendar(calendar_actions::CalendarMsg::EditCommit)
+                        });
                     }
                 }
                 // 表格编辑器失焦提交：按压不在编辑器浮层内 = 提交（同批 widget 消息已先置 editor_inside）
@@ -2257,6 +2626,7 @@ impl App {
                 Task::none()
             }
             Message::Ui(msg) => self.on_ui(msg),
+            Message::Update(msg) => self.on_update(msg),
             Message::Table(msg) => {
                 // 数据版本变化 = 表格编辑：与笔记同口径推迟自动保存期限
                 let version_before = self.table.as_ref().map(|t| t.version);
@@ -2306,6 +2676,10 @@ impl App {
                 if mode == Mode::Fullscreen { Mode::Windowed } else { Mode::Fullscreen },
             ),
             Message::Escape(window) => {
+                // 录制态：Esc 仅取消录制，不触发其余 Esc 语义
+                if self.shortcut_recording.take().is_some() {
+                    return Task::none();
+                }
                 // Esc 作用域 = 事件来源窗口：先取消文件拖拽，再关双链候选，再关该窗口弹层，
                 // 再取消属性面板编辑态，再取消行内重命名（行内重命名只渲染在主窗口）
                 if self.file_drag.take().is_some() {
@@ -2323,6 +2697,8 @@ impl App {
                     && (self.props.editing.is_some() || self.props.adding.is_some())
                 {
                     return self.on_props(PropsMsg::CancelSlot);
+                } else if self.calendar.edit.take().is_some() {
+                    // 日历日程标题编辑 Esc = 取消（草稿丢弃）
                 } else if self.main_id == Some(window) && self.rename.take().is_some() {
                     // 行内重命名 Esc = 取消
                 } else if layout_view::window_shows_table(self, window)
@@ -2354,13 +2730,167 @@ impl App {
             Message::SettingsToggle => {
                 self.settings_open = !self.settings_open;
                 self.dismiss_popup();
+                // 打开设置页刷新开机自启缓存（用户可能在系统侧改过启动项）
+                if self.settings_open {
+                    self.autostart_enabled = Some(autostart::enabled());
+                }
                 Task::none()
             }
             Message::SettingsTab(tab) => {
+                // 切分区即取消快捷键录制（录制行不在新分区，防录制态悬挂吃键）
+                self.shortcut_recording = None;
                 self.settings_tab = tab.clone();
                 // 协作页打开即拉设备会话列表（有登录身份才有内容）
                 if tab == "collab" && self.global.last_identity.is_some() {
                     return space_actions::fetch_devices(self);
+                }
+                // 通用页打开即刷新开机自启缓存
+                if tab == "general" {
+                    self.autostart_enabled = Some(autostart::enabled());
+                }
+                // AI 页打开即拉 Agent 配置清单
+                if tab == "ai" {
+                    return settings_view::ai::load_agents(self);
+                }
+                Task::none()
+            }
+            Message::KeyCommand { key, mods } => self.on_key_command(key, mods),
+            Message::ShortcutRecord(id) => {
+                self.shortcut_recording = Some(id);
+                Task::none()
+            }
+            Message::ShortcutReset(id) => {
+                self.global.command_shortcuts.remove(id.key());
+                self.save_global_now();
+                Task::none()
+            }
+            Message::Ai(msg) => settings_view::ai::update(self, msg),
+            Message::AgentsLoaded(gen, result) => {
+                if gen == self.epoch() {
+                    match result {
+                        Ok(agents) => self.agents = agents,
+                        Err(e) => self.notify(NoticeLevel::Error, format!("Agent 配置读取失败：{e}")),
+                    }
+                }
+                Task::none()
+            }
+            Message::FontSizeInput(v) => {
+                let digits: String = v.chars().filter(|c| c.is_ascii_digit()).take(2).collect();
+                // 合法档位实时生效并落盘；非法值不动当前生效字号
+                if let Ok(size) = digits.parse::<u32>() {
+                    if (12..=20).contains(&size) && size != self.global.font_size {
+                        self.global.font_size = size;
+                        ui::palette::set_ui_base(size);
+                        // 编辑面块度量以行高换算落点，字号变更须随基字号重建
+                        self.refresh_edit();
+                        if let Some(t) = self.table.as_mut() {
+                            t.rebuild_layout();
+                        }
+                        self.save_global_now();
+                    }
+                }
+                self.font_size_draft = Some(digits);
+                Task::none()
+            }
+            Message::FontSizeCommit => {
+                // 清草稿 = 回退显示当前生效值
+                self.font_size_draft = None;
+                Task::none()
+            }
+            Message::AutoRestoreToggle => {
+                self.global.auto_restore = !self.global.auto_restore;
+                self.save_global_now();
+                Task::none()
+            }
+            Message::AutoUpdateToggle => {
+                self.global.auto_update = !self.global.auto_update;
+                self.save_global_now();
+                Task::none()
+            }
+            Message::AutostartToggle => {
+                let target = !self.autostart_enabled.unwrap_or_else(autostart::enabled);
+                if let Err(e) = autostart::set_enabled(target) {
+                    self.notify(NoticeLevel::Error, format!("设置开机自启失败：{e}"));
+                }
+                // 回读系统真实状态：写失败时开关不虚报
+                self.autostart_enabled = Some(autostart::enabled());
+                Task::none()
+            }
+            Message::SoftWrapToggle => {
+                self.global.soft_wrap = !self.global.soft_wrap;
+                self.save_global_now();
+                Task::none()
+            }
+            Message::InPageTitleToggle => {
+                self.global.in_page_title = !self.global.in_page_title;
+                self.save_global_now();
+                Task::none()
+            }
+            Message::ContentWidthInput(v) => {
+                let digits: String = v.chars().filter(|c| c.is_ascii_digit()).take(5).collect();
+                self.content_width_draft = Some(digits);
+                Task::none()
+            }
+            Message::ContentWidthCommit => {
+                if let Some(w) = self.content_width_draft.take().and_then(|d| d.parse::<u32>().ok()) {
+                    if w <= 5000 && w != self.global.content_width {
+                        self.global.content_width = w;
+                        self.save_global_now();
+                    }
+                }
+                Task::none()
+            }
+            Message::ExcludeFoldersInput(v) => {
+                self.exclude_folders_draft = Some(v);
+                Task::none()
+            }
+            Message::ExcludeFoldersCommit => {
+                if let Some(draft) = self.exclude_folders_draft.take() {
+                    let folders: Vec<String> = draft
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                        .collect();
+                    if folders != self.exclude_folders {
+                        self.exclude_folders = folders.clone();
+                        // 空清单删键（缺省 = 无排除，保持 config 干净）
+                        let value = if folders.is_empty() {
+                            serde_json::Value::Null
+                        } else {
+                            serde_json::json!(folders)
+                        };
+                        return self.patch_repo_config(serde_json::json!({ "excludeFolders": value }));
+                    }
+                }
+                Task::none()
+            }
+            Message::AttachmentFolderInput(v) => {
+                self.attachment_folder_draft = Some(v);
+                Task::none()
+            }
+            Message::AttachmentFolderCommit => {
+                let folder = self
+                    .attachment_folder_draft
+                    .take()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+                let value = (!folder.is_empty()).then_some(folder);
+                if value != self.attachment_folder {
+                    self.attachment_folder = value.clone();
+                    // 空值发 null = 删键（缺省 = 仓库根目录）
+                    return self
+                        .patch_repo_config(serde_json::json!({ "attachmentFolder": value }));
+                }
+                Task::none()
+            }
+            Message::EntryScenePick(id) => {
+                self.dismiss_popup();
+                if id != self.entry_scene_id {
+                    self.entry_scene_id = id.clone();
+                    // None 发 null = 删键（缺省 = 保持上次界面）
+                    return self.patch_repo_config(serde_json::json!({ "entrySceneId": id }));
                 }
                 Task::none()
             }
@@ -2369,11 +2899,24 @@ impl App {
                 if self.file_drag.is_some() {
                     return Task::none();
                 }
+                // 成员 / 邀请码弹层：打开即重置交互态并拉取数据（重开 = 强制刷新）
+                let fetch = match &open.state {
+                    PopupState::SpaceMembers => {
+                        self.space_member_confirm = None;
+                        Some(space_actions::fetch_members(self))
+                    }
+                    PopupState::SpaceInvite => {
+                        self.space_invite_confirm = None;
+                        self.space_invite_copied = false;
+                        Some(space_actions::fetch_invites(self))
+                    }
+                    _ => None,
+                };
                 self.popup = Some((window, open));
                 self.popup_pane = 0;
                 // 表格弹层内联输入以空草稿回退显示当前值
                 self.table_popup_draft.clear();
-                Task::none()
+                fetch.unwrap_or_else(Task::none)
             }
             Message::FileCount(gen, Ok(n)) => {
                 if gen != self.epoch() {
@@ -2756,6 +3299,8 @@ impl App {
     pub(crate) fn dismiss_popup(&mut self) {
         self.popup = None;
         self.popup_pane = 0;
+        // 弹层收起即取消快捷键录制（录制态不得跨弹层存续吃键）
+        self.shortcut_recording = None;
     }
 
     /// 拖拽候选转正：候选由标签按钮按下时自证命中，此处只补齐标签信息并校验锁定
@@ -3154,7 +3699,13 @@ impl App {
                 }
                 self.enter_vault(path)
             }
-            PendingAfterFlush::CloseMain(id) => window::close(id),
+            PendingAfterFlush::CloseMain(id) => {
+                // 退出前取消在途下载（`.part` 保留为完整前缀，下次启动续传）
+                if let Some(flag) = &self.update_cancel {
+                    flag.store(true, Relaxed);
+                }
+                window::close(id)
+            }
             PendingAfterFlush::CloseFileTab(kind) => self.close_file_tab(&kind),
             PendingAfterFlush::OpenLink(href) => self.open_link_inner(href),
             PendingAfterFlush::Delete { rel, is_dir } => {
@@ -3171,6 +3722,7 @@ impl App {
                     SpaceMsg::SelectSpace { server_url, space_id, name, from_boot: false },
                 )
             }
+            PendingAfterFlush::InstallUpdate => self.install_ready_update(),
         }
     }
 
@@ -3241,7 +3793,11 @@ impl App {
         if let Some(old) = self.vault_root.clone() {
             self.expanded_by_vault.insert(old, self.ui.file_explorer_expanded.clone());
         }
-        if let Err(e) = self.vault.set(path.clone(), Vec::new()) {
+        // 排除文件夹随仓库配置快照进会话（树过滤读取会话副本；改动需重开仓库生效）
+        let exclude = vault::read_vault_config(&path)
+            .map(|c| c.exclude_folders.unwrap_or_default())
+            .unwrap_or_default();
+        if let Err(e) = self.vault.set(path.clone(), exclude) {
             self.vault_switch_target = None;
             self.notify(NoticeLevel::Error, e);
             return Task::none();
@@ -3271,6 +3827,27 @@ impl App {
         self.rename_notice = None;
         // 表格会话随仓库切换清空（载入在途不留旧数据）
         self.table = None;
+        // 仓库级配置会话态随切仓清空（VaultMetaLoaded 落地后回填）
+        self.exclude_folders.clear();
+        self.attachment_folder = None;
+        self.entry_scene_id = None;
+        self.exclude_folders_draft = None;
+        self.attachment_folder_draft = None;
+        // AI 配置基线与编辑态一并清空：残留会把上一仓库的供应商清单写进新仓库
+        self.repo_config = vault::VaultConfig::default();
+        self.agents.clear();
+        self.ai = settings_view::ai::AiState::default();
+        // 历史弹层交互态与重建链接会话态随切仓清空
+        self.history_loading = false;
+        self.history_expanded = None;
+        self.history_confirm = None;
+        // 仓库历史面板缓存随切仓失效（进面板后重取）
+        self.repo_history = None;
+        self.repo_history_loading = false;
+        self.repo_history_fold.clear();
+        // 日历会话态随切仓重置（日程 / 选中天 / 活动密度一并重取）
+        self.calendar = calendar_actions::CalendarState::default();
+        self.rebuild_links = settings_view::editor::RebuildLinksState::Idle;
         // last_note_file 跨仓库沿用（相对路径语义）；仓库就绪即恢复其内容
         self.ui.file_explorer_expanded = self
             .expanded_by_vault
@@ -3281,11 +3858,14 @@ impl App {
         task = task.chain(self.refresh_tag_vocab()).chain(self.refresh_note_files());
         task = task.chain(self.load_vault_meta());
         task = task.chain(self.save_global());
-        if let Some(rel) = self.ui.last_note_file.clone() {
-            task = task.chain(self.load_note(&rel));
-        }
-        if let Some(rel) = self.ui.last_table_file.clone() {
-            task = task.chain(table_actions::load_table(self, &rel));
+        // 自动恢复关闭：不恢复上次打开的文件（打开记录保留，仅跳过载入）
+        if self.global.auto_restore {
+            if let Some(rel) = self.ui.last_note_file.clone() {
+                task = task.chain(self.load_note(&rel));
+            }
+            if let Some(rel) = self.ui.last_table_file.clone() {
+                task = task.chain(table_actions::load_table(self, &rel));
+            }
         }
         task
     }
@@ -3299,6 +3879,27 @@ impl App {
         Task::perform(
             async move { global_config::write_global_config(&path, &config) },
             Message::GlobalSaved,
+        )
+    }
+
+    /// 同步落盘 global.json（设置项单值写：串行于 UI 线程，连续输入不会产生写回序错乱）。
+    fn save_global_now(&mut self) {
+        let Some(path) = global_config_path() else { return };
+        if let Err(e) = global_config::write_global_config(&path, &self.global) {
+            self.notify(NoticeLevel::Error, format!("保存全局配置失败：{e}"));
+        }
+    }
+
+    /// 仓库级配置补丁落盘（本地 = patch_vault_config；空间 = 服务端 config.json 读改写）。
+    fn patch_repo_config(&mut self, patch: serde_json::Value) -> Task<Message> {
+        if matches!(self.repo_kind, RepoKind::Space(_)) {
+            return space_actions::space_patch_config(self, patch);
+        }
+        let Some(root) = self.vault.root().ok() else { return Task::none() };
+        let gen = self.epoch();
+        Task::perform(
+            async move { vault::patch_vault_config(&root, &patch).map(|_| ()) },
+            move |result| Message::ConfigSaved(gen, result),
         )
     }
 
@@ -3534,11 +4135,8 @@ impl App {
 
     // ===== 历史侧车 =====
 
-    /// 读取当前上下文（笔记/表格）的历史版本（spawn_blocking；尽力而为，读失败 = 空列表）。
+    /// 读取当前上下文（笔记/表格）的历史版本（尽力而为，读失败 = 空列表）。
     fn reload_history(&self) -> Task<Message> {
-        if matches!(self.repo_kind, RepoKind::Space(_)) {
-            return space_actions::reload_space_history(self);
-        }
         let (kind, rel) = match self.history_kind {
             atelyx_core::history::HistoryKind::Note => {
                 (atelyx_core::history::HistoryKind::Note, self.ui.last_note_file.clone())
@@ -3546,10 +4144,24 @@ impl App {
             atelyx_core::history::HistoryKind::Table => {
                 (atelyx_core::history::HistoryKind::Table, self.ui.last_table_file.clone())
             }
+            // 画布视图未接线：无打开上下文可读（弹层按显式 kind+file 经 load_history_for 读取）
+            atelyx_core::history::HistoryKind::Canvas => (atelyx_core::history::HistoryKind::Canvas, None),
         };
-        let Some(rel) = rel else { return Task::none() };
+        match rel {
+            Some(rel) => self.load_history_for(kind, &rel),
+            None => Task::none(),
+        }
+    }
+
+    /// 按 kind+file 读取历史版本（本地 spawn_blocking / 空间模式走服务端端点）；
+    /// 回执经 HistoryLoaded 落地（gen + kind/文件身份守卫）。
+    pub(crate) fn load_history_for(&self, kind: atelyx_core::history::HistoryKind, rel: &str) -> Task<Message> {
+        if matches!(self.repo_kind, RepoKind::Space(_)) {
+            return space_actions::space_history_task(self, kind, rel);
+        }
         let gen = self.epoch();
         let state = self.vault.clone();
+        let rel = rel.to_string();
         let rel_for_cb = rel.clone();
         Task::perform(
             async move {
@@ -3562,7 +4174,7 @@ impl App {
                 .and_then(|r| r)
                 .unwrap_or_default()
             },
-            move |versions| Message::HistoryLoaded(gen, rel_for_cb, versions),
+            move |versions| Message::HistoryLoaded(gen, kind, rel_for_cb, versions),
         )
     }
 
@@ -3598,12 +4210,13 @@ impl App {
         )
     }
 
-    /// 回滚到指定版本：全文快照替换正文（撤销可回退），保存链写回并记 restore 版本。
-    fn history_restore(&mut self, seq: u64) -> Task<Message> {
-        let Some(version) = self.history.iter().find(|v| v.seq == seq).cloned() else {
-            return Task::none();
-        };
-        match self.history_kind {
+    /// 回滚到指定版本：全文快照写回走各保存链（画布走 canvas_history_restore 快照直写）。
+    pub(crate) fn history_restore(
+        &mut self,
+        kind: atelyx_core::history::HistoryKind,
+        version: atelyx_core::history::HistoryVersion,
+    ) -> Task<Message> {
+        match kind {
             atelyx_core::history::HistoryKind::Table => {
                 // 表格：快照 = TableFile JSON；解析失败静默放弃（历史尽力而为）
                 let Ok(table) = serde_json::from_str::<atelyx_core::vault::TableFile>(&version.content)
@@ -3648,7 +4261,83 @@ impl App {
                 )
             }
             atelyx_core::history::HistoryKind::Note => self.note_history_restore(version),
+            // 画布回滚走 canvas_history_restore（快照直写仓库，无会话链）
+            atelyx_core::history::HistoryKind::Canvas => Task::none(),
         }
+    }
+
+    /// 画布回滚：快照校验后写回仓库真源（本地经写盘队列批量作业，空间模式先写服务端再记历史）。
+    pub(crate) fn canvas_history_restore(
+        &mut self,
+        rel: String,
+        version: atelyx_core::history::HistoryVersion,
+    ) -> Task<Message> {
+        if let Err(e) = atelyx_core::history::validate_snapshot(
+            atelyx_core::history::HistoryKind::Canvas,
+            &version.content,
+        ) {
+            self.notify(NoticeLevel::Error, e);
+            return Task::none();
+        }
+        if matches!(self.repo_kind, RepoKind::Space(_)) {
+            return space_actions::space_restore_canvas(self, rel, version.content);
+        }
+        let gen = self.epoch();
+        // 根在入队前快照：作业排队期间切仓不改变执行目标（闭包内不重读会话）
+        let root = self.vault.root();
+        let queue = self.vault.writes.clone();
+        let content = version.content.clone();
+        Task::perform(
+            async move {
+                let rel_for_cb = rel.clone();
+                let r = queue.bulk(move || {
+                    atelyx_core::history::restore_snapshot(
+                        &root?,
+                        atelyx_core::history::HistoryKind::Canvas,
+                        &rel,
+                        &content,
+                    )
+                })
+                .await;
+                Message::CanvasHistoryRestored(gen, rel_for_cb, r)
+            },
+            |m| m,
+        )
+    }
+
+    /// 画布回滚落盘后的 restore 版本记录（尽力而为）。
+    fn record_canvas_restore_history(&self, rel: String) -> Task<Message> {
+        // 快照即回滚写入的原文：从磁盘事实取内容（队列写已完成，读到的是回滚后状态）
+        let gen = self.epoch();
+        let state = self.vault.clone();
+        let author = history_author();
+        Task::perform(
+            async move {
+                let r = tokio::task::spawn_blocking(move || {
+                    let (root, _, _) = state.session_snapshot()?;
+                    let path = atelyx_core::vault::safe_join(&root, &rel, false)?;
+                    let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+                    atelyx_core::history::record_version(
+                        &root,
+                        atelyx_core::history::HistoryKind::Canvas,
+                        &rel,
+                        &atelyx_core::history::RecordOpts {
+                            content,
+                            action: atelyx_core::history::HistoryAction::Restore,
+                            author,
+                            coalesce_edit_ms: None,
+                            max_versions: 0,
+                            note: None,
+                        },
+                    )
+                })
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|r| r);
+                Message::HistoryRecorded(gen, r.err())
+            },
+            |m| m,
+        )
     }
 
     /// 笔记回滚：全文快照替换正文（撤销可回退），保存链写回并记 restore 版本。
@@ -3698,6 +4387,17 @@ impl App {
         )
     }
 
+    /// 消费回滚落盘回执（一次性）：成功出「已回滚」，失败仅清标志（失败详情由保存链提示）。
+    pub(crate) fn settle_history_restore(&mut self, ok: bool) {
+        if !self.history_restore_pending {
+            return;
+        }
+        self.history_restore_pending = false;
+        if ok {
+            self.notify(NoticeLevel::Success, "已回滚");
+        }
+    }
+
     fn active_scene(&self) -> Option<&layout::Scene> {
         layout::active_scene(&self.ui).into()
     }
@@ -3740,11 +4440,177 @@ impl App {
                     self.delete_confirm = None;
                     self.remove_vault_confirm = None;
                     self.table_popup_draft.clear();
+                    // 弹层收起即取消快捷键录制（与 dismiss_popup 同口径）
+                    self.shortcut_recording = None;
                 }
                 Task::none()
             }
             ui::UiMsg::NotifyDismiss(id) => {
                 self.notifications.retain(|n| n.id != id);
+                Task::none()
+            }
+        }
+    }
+
+    /// 更新流程消息处理（状态迁移语义在 update::UpdateState；此处只做任务发起与通知编排）。
+    fn on_update(&mut self, msg: update::UpdateMsg) -> Task<Message> {
+        use update::UpdateMsg;
+        match msg {
+            UpdateMsg::Check { manual } => {
+                if !self.update.start_check() {
+                    return Task::none();
+                }
+                self.update_manual_check = manual;
+                Task::perform(atelyx_core::updater::latest_release(), |result| {
+                    Message::Update(UpdateMsg::Checked(result))
+                })
+            }
+            UpdateMsg::Checked(result) => {
+                let manual = self.update_manual_check;
+                match result {
+                    Ok(release) => match self.update.finish_check(env!("CARGO_PKG_VERSION"), release) {
+                        Ok(()) => {
+                            if let update::UpdateState::Available { version, .. } = &self.update {
+                                let version = version.clone();
+                                self.set_update_notice(
+                                    NoticeLevel::Info,
+                                    format!("发现新版本 {version}"),
+                                    None,
+                                    |id| {
+                                        vec![
+                                            ("下载".into(), Message::Update(UpdateMsg::Download)),
+                                            ("跳过".into(), Message::Ui(ui::UiMsg::NotifyDismiss(id))),
+                                        ]
+                                    },
+                                );
+                            } else if manual {
+                                self.notify(NoticeLevel::Info, "已是最新版本");
+                            }
+                        }
+                        // 有新版本但本机平台无安装包：手动检查转开发布页，静默检查仅提示
+                        Err(page) => {
+                            if manual {
+                                return self.open_link(&page, LinkForm::External);
+                            }
+                            self.notify(NoticeLevel::Info, "发现新版本，请到发布页下载");
+                        }
+                    },
+                    Err(e) => {
+                        self.update.fail_check();
+                        if manual {
+                            self.notify(NoticeLevel::Error, e);
+                        }
+                    }
+                }
+                Task::none()
+            }
+            UpdateMsg::Download => {
+                // 地址与摘要只在 Available 态持有，先取出再迁移状态
+                let Some((version, url, sha256)) = (match &self.update {
+                    update::UpdateState::Available { version, download_url, sha256 } => {
+                        Some((version.clone(), download_url.clone(), sha256.clone()))
+                    }
+                    _ => None,
+                }) else {
+                    return Task::none();
+                };
+                if self.update.start_download().is_none() {
+                    return Task::none();
+                }
+                self.dismiss_update_notice();
+                let cancel = update::cancel_flag();
+                self.update_cancel = Some(Arc::clone(&cancel));
+                *self.update_progress.lock().expect("进度暂存锁失效") = (0, 0);
+                self.set_update_notice(
+                    NoticeLevel::Info,
+                    format!("正在下载 {version}"),
+                    Some(NoticeProgress { received: 0, total: 0 }),
+                    |_| vec![("取消".into(), Message::Update(UpdateMsg::Cancel))],
+                );
+                let dir = self.update_download_dir.clone();
+                let progress = Arc::clone(&self.update_progress);
+                Task::perform(
+                    async move {
+                        // 进度回调在任务线程执行，只写暂存不碰 App；心跳派发的 ProgressTick 读走
+                        atelyx_core::updater::download(
+                            &dir,
+                            &url,
+                            sha256.as_deref(),
+                            cancel,
+                            Arc::new(move |received, total| {
+                                *progress.lock().expect("进度暂存锁失效") = (received, total);
+                            }),
+                        )
+                        .await
+                    },
+                    |result| Message::Update(UpdateMsg::Downloaded(result)),
+                )
+            }
+            UpdateMsg::ProgressTick => {
+                if !matches!(self.update, update::UpdateState::Downloading { .. }) {
+                    return Task::none();
+                }
+                let (received, total) = *self.update_progress.lock().expect("进度暂存锁失效");
+                self.update.set_progress(received, total);
+                let progress = Some(NoticeProgress { received, total });
+                for n in &mut self.notifications {
+                    if n.persistent {
+                        n.progress = progress;
+                    }
+                }
+                Task::none()
+            }
+            UpdateMsg::Downloaded(result) => {
+                // 取消后迟到的回执：状态已离开 Downloading，静默丢弃
+                if !matches!(self.update, update::UpdateState::Downloading { .. }) {
+                    self.update_cancel = None;
+                    return Task::none();
+                }
+                self.update.finish_download(result.clone());
+                self.update_cancel = None;
+                self.dismiss_update_notice();
+                match result {
+                    Ok(_) => self.set_update_notice(
+                        NoticeLevel::Success,
+                        "新版本已就绪".into(),
+                        None,
+                        |id| {
+                            vec![
+                                ("立即安装".into(), Message::Update(UpdateMsg::Install)),
+                                ("稍后".into(), Message::Ui(ui::UiMsg::NotifyDismiss(id))),
+                            ]
+                        },
+                    ),
+                    Err(e) => self.notify(NoticeLevel::Error, format!("下载失败：{e}")),
+                }
+                Task::none()
+            }
+            UpdateMsg::Cancel => {
+                let was_downloading = matches!(self.update, update::UpdateState::Downloading { .. });
+                if let Some(flag) = &self.update_cancel {
+                    flag.store(true, Relaxed);
+                }
+                self.update_cancel = None;
+                self.update.cancel();
+                if was_downloading {
+                    self.dismiss_update_notice();
+                }
+                Task::none()
+            }
+            UpdateMsg::Install => self.gate(PendingAfterFlush::InstallUpdate),
+        }
+    }
+
+    /// 安装就绪的更新包（flush 放行后执行）：拉起安装器成功即退出进程让出 exe 占用；
+    /// 失败提示且应用继续运行。
+    fn install_ready_update(&mut self) -> Task<Message> {
+        let update::UpdateState::Ready { path, .. } = &self.update else {
+            return Task::none();
+        };
+        match update::launch_installer(path) {
+            Ok(()) => iced::exit(),
+            Err(e) => {
+                self.notify(NoticeLevel::Error, e);
                 Task::none()
             }
         }
@@ -4218,7 +5084,7 @@ impl App {
         }
     }
 
-    /// 读取仓库元数据（排序方式 / 提示词标记 / 文件夹颜色；缺省回落不阻塞）。
+    /// 读取仓库元数据（仓库配置 / 提示词标记 / 文件夹颜色；缺省回落不阻塞）。
     fn load_vault_meta(&self) -> Task<Message> {
         if matches!(self.repo_kind, RepoKind::Space(_)) {
             return space_actions::load_space_meta(self);
@@ -4227,12 +5093,10 @@ impl App {
         let gen = self.epoch();
         Task::perform(
             async move {
-                let sort = vault::read_vault_config(&root)?
-                    .file_explorer_sort
-                    .unwrap_or_else(|| "mtime-desc".to_string());
+                let config = vault::read_vault_config(&root)?;
                 let prompts = vault::read_prompt_notes_file(&root).unwrap_or_default();
                 let colors = vault::read_folder_colors_file(&root).unwrap_or_default();
-                Ok((sort, prompts, colors))
+                Ok((config, prompts, colors))
             },
             move |result| Message::VaultMetaLoaded(gen, result),
         )
@@ -4738,6 +5602,92 @@ impl App {
         }
     }
 
+    /// 命令候选键分派：录制态先吃按键；注册表按序先到先得——Note 域让位给
+    /// 编辑面部件内的绑定表（部件持焦点即已消费本键，未持焦点则放行后命者），
+    /// Table 域在表格持焦点时转发既有 TableMsg。注册表外的 Ctrl+S（保存）与
+    /// Ctrl+A（表格全选）保持硬编码，下游按焦点自守卫。
+    fn on_key_command(&mut self, key: keyboard::Key, mods: keyboard::Modifiers) -> Task<Message> {
+        if self.shortcut_recording.is_some() {
+            return self.on_shortcut_key(key, mods);
+        }
+        let resolved = commands::resolve(&self.global.command_shortcuts);
+        for (id, binding) in &resolved {
+            if !commands::matches(binding, mods, &key) {
+                continue;
+            }
+            match id.scope() {
+                commands::Scope::Note => {
+                    if self.edit.focused {
+                        return Task::none();
+                    }
+                }
+                commands::Scope::Table => {
+                    if self.table.as_ref().is_some_and(|t| t.view.focused) {
+                        if let Some(msg) = table_msg_of(*id) {
+                            return self.handle(Message::Table(msg));
+                        }
+                    }
+                }
+            }
+        }
+        // 重做别名：redo 未被重定义时 mod+shift+z 沿用（编辑面聚焦走部件内注入，表格直接分派）
+        if (mods.control() || mods.logo())
+            && mods.shift()
+            && !mods.alt()
+            && matches!(&key, keyboard::Key::Character(c) if c.to_lowercase() == "z")
+        {
+            if self.edit.focused {
+                return Task::none();
+            }
+            if self.table.as_ref().is_some_and(|t| t.view.focused)
+                && commands::redo_alias_active(&self.global.command_shortcuts, commands::Scope::Table)
+            {
+                return self.handle(Message::Table(tv::TableMsg::Redo));
+            }
+        }
+        // 退格 = 清空选区的既有别名（清空键位保持默认 delete 且表格持焦点时沿用）
+        if mods.is_empty()
+            && matches!(key, keyboard::Key::Named(keyboard::key::Named::Backspace))
+            && resolved
+                .iter()
+                .find(|(c, _)| *c == commands::CommandId::TableClear)
+                .is_some_and(|(_, b)| b == "delete")
+            && self.table.as_ref().is_some_and(|t| t.view.focused)
+        {
+            return self.handle(Message::Table(tv::TableMsg::ClearSelection));
+        }
+        if (mods.control() || mods.logo()) && !mods.alt() {
+            if let keyboard::Key::Character(c) = &key {
+                return match c.to_lowercase().as_str() {
+                    "s" => self.handle(Message::Save),
+                    "a" => self.handle(Message::Table(tv::TableMsg::SelectAll)),
+                    _ => Task::none(),
+                };
+            }
+        }
+        Task::none()
+    }
+
+    /// 录制态按键：捕获 → 校验 → 写覆盖并落盘收尾。校验失败提示后保持录制态；
+    /// 纯修饰键 / 未注册键名忽略（继续等待）；Esc 取消由 Escape 处理器先行。
+    fn on_shortcut_key(&mut self, key: keyboard::Key, mods: keyboard::Modifiers) -> Task<Message> {
+        let Some(id) = self.shortcut_recording else { return Task::none() };
+        let Some(binding) = commands::capture(mods, &key) else {
+            return Task::none();
+        };
+        if let Err(reason) = commands::validate(id, &binding) {
+            self.notify(NoticeLevel::Warning, reason);
+            return Task::none();
+        }
+        // 首个通过校验的组合键即写入覆盖并退出录制态
+        self.global
+            .command_shortcuts
+            .insert(id.key().to_string(), binding);
+        self.shortcut_recording = None;
+        self.save_global_now();
+        Task::none()
+    }
+
     /// 编辑面事件处理。
     fn on_editor(&mut self, event: markdown_edit::EditorEvent) -> Task<Message> {
         use markdown_edit::EditorEvent as E;
@@ -4994,25 +5944,6 @@ impl App {
                     Some(Message::Table(table_view::TableMsg::NavKey(table_view::NavDir::End)))
                 }
                 Event::Keyboard(keyboard::Event::KeyPressed {
-                    key: keyboard::Key::Named(keyboard::key::Named::Delete),
-                    modifiers,
-                    ..
-                })
-                | Event::Keyboard(keyboard::Event::KeyPressed {
-                    key: keyboard::Key::Named(keyboard::key::Named::Backspace),
-                    modifiers,
-                    ..
-                }) if modifiers.is_empty() => {
-                    Some(Message::Table(table_view::TableMsg::ClearSelection))
-                }
-                Event::Keyboard(keyboard::Event::KeyPressed {
-                    key: keyboard::Key::Character(c),
-                    modifiers,
-                    ..
-                }) if modifiers.control() && !modifiers.alt() && c.len() == 1 => {
-                    table_ctrl_key(&c.to_lowercase(), modifiers.shift())
-                }
-                Event::Keyboard(keyboard::Event::KeyPressed {
                     key: keyboard::Key::Character(_),
                     modifiers,
                     text,
@@ -5032,6 +5963,13 @@ impl App {
                     key: keyboard::Key::Named(keyboard::key::Named::Escape),
                     ..
                 }) => Some(Message::Escape(window)),
+                // 命令候选键（撤销/重做/剪贴板/清空 + Ctrl+S/A 兜底）：置于具名键臂之后，
+                // 不抢占 NavKey / CharKey / Tab / Escape 既有路径
+                Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
+                    if command_key_candidate(&key, modifiers) =>
+                {
+                    Some(Message::KeyCommand { key, mods: modifiers })
+                }
                 Event::Window(window::Event::CloseRequested) => {
                     Some(Message::WindowCloseRequested(window))
                 }
@@ -5077,7 +6015,11 @@ impl App {
             .as_ref()
             .map(|i| i.display_name.clone())
             .unwrap_or_else(|| "用户".into());
-        let color = self.global.collab_color.clone().unwrap_or_else(|| "#30bced".into());
+        let color = self
+            .global
+            .collab_color
+            .clone()
+            .unwrap_or_else(|| space_actions::DEFAULT_COLLAB_COLOR.into());
         // 泵身份 = 连接五元组（哈希作为订阅标识；换空间/换号自动换泵）
         let spec = serde_json::json!([
             session.server_url,
