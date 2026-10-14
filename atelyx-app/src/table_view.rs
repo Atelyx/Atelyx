@@ -1155,14 +1155,6 @@ fn draw_table(session: &TableSession, frame: &mut canvas::Frame, size: Size, hov
         if y + rh < g.header_h() || y > g.rows_bottom() {
             continue;
         }
-        // 行内选区高亮
-        if let Some(region) = region {
-            if r >= region.row_start && r <= region.row_end {
-                let x0 = g.cache.col_x[region.col_start] - view.scroll_x + g.gutter_w();
-                let x1 = g.cache.col_x[region.col_end] + g.cache.col_w[region.col_end] - view.scroll_x + g.gutter_w();
-                frame.fill_rectangle(Point::new(x0, y), Size::new(x1 - x0, rh), pal::ACCENT_SOFT);
-            }
-        }
         // 行号格
         let selected_row = matches!(&view.selection, Some(TableSelection::Row(id)) if data.rows.get(r).is_some_and(|x| &x.id == id));
         frame.fill_rectangle(Point::new(0.0, y), Size::new(g.gutter_w(), rh), if selected_row { pal::BG_TERTIARY } else { pal::BG_SECONDARY });
