@@ -787,7 +787,7 @@ impl Widget<Message, Theme, iced::Renderer> for SourceBlock<'_> {
         let sel_from = self.anchor.min(self.caret).max(self.from).min(self.to) - self.from;
         let sel_to = self.anchor.max(self.caret).max(self.from).min(self.to) - self.from;
         if sel_to > sel_from {
-            let tint = self.pal.accent.scale_alpha(0.25);
+            let tint = pal::SELECTION;
             for r in selection_rects(p, char_index(&state.content, sel_from), char_index(&state.content, sel_to)) {
                 renderer.fill_quad(
                     Quad { bounds: Rectangle::new(origin + Vector::new(r.x, r.y), r.size()), ..Quad::default() },
@@ -1385,6 +1385,8 @@ pub struct EditSurface<'a> {
     anchor: usize,
     preedit: Option<String>,
     focused: bool,
+    /// 进编辑档待落光标（应用层置位；首个释放事件按落点揭示块并定位光标后经 EditorEvent 归零）。
+    pending_caret: bool,
     /// 撤销/重做键位（空行光标路径的按键匹配源）。
     bindings: NoteBindings,
 }
@@ -1417,9 +1419,10 @@ impl<'a> EditSurface<'a> {
         anchor: usize,
         preedit: Option<String>,
         focused: bool,
+        pending_caret: bool,
         bindings: NoteBindings,
     ) -> Self {
-        Self { rows, pal, text, caret, anchor, preedit, focused, bindings }
+        Self { rows, pal, text, caret, anchor, preedit, focused, pending_caret, bindings }
     }
 
     /// 命中行：返回 (行号, 行内局部坐标, 行宽, 行高)；行间无空隙，仅区分上下越界。
@@ -1694,6 +1697,24 @@ impl Widget<Message, Theme, iced::Renderer> for EditSurface<'_> {
                 shell,
                 viewport,
             );
+        }
+        // 进编辑档待落光标：释放事件按落点揭示块并定位光标（双击进入的落点）。
+        // 先于子部件捕获判定消化，不受链接 / 勾选框接管影响；落点夹回内容区，
+        // 内容区外释放 = 吸到文首 / 文末，与内容区空白落点同语义。
+        if self.pending_caret
+            && matches!(event, Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)))
+        {
+            if let Some(p) = cursor.land().position() {
+                let bounds = layout.bounds();
+                let clamped = Point::new(
+                    p.x.clamp(bounds.x, bounds.x + bounds.width),
+                    p.y.clamp(bounds.y, bounds.y + bounds.height),
+                );
+                let target = self.target_of(Self::row_at(layout, clamped));
+                shell.publish(Message::Editor(EditorEvent::Hit { target, extend: false }));
+            } else {
+                shell.publish(Message::Editor(EditorEvent::Blur));
+            }
         }
         // 子控件（链接 / 勾选框）已接管则不再换算落点
         if shell.is_event_captured() {

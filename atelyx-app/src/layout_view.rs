@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use iced::alignment::{Horizontal, Vertical};
-use iced::widget::{button, column, container, mouse_area, row, scrollable, space, stack, text, text_input};
+use iced::widget::{button, column, container, mouse_area, row, scrollable, space, stack, text, text_editor, text_input};
 use iced::{Color, Element, Font, Length, Padding, Point, Rectangle, Size, border, widget::container::Style};
 
 use atelyx_core::global_config::RecentVault;
@@ -1776,7 +1776,7 @@ fn search_view(app: &App) -> Element<'_, Message> {
                     icon: pal::TEXT_MUTED,
                     placeholder: pal::INPUT_PLACEHOLDER,
                     value: pal::TEXT_PRIMARY,
-                    selection: pal::ACCENT.scale_alpha(0.35),
+                    selection: pal::SELECTION,
                 }),
             scrollable(rows).width(Length::Fill).height(Length::Fill),
         ]
@@ -2269,7 +2269,7 @@ fn vault_row(
     let on_press = if active {
         Message::ToggleDir(String::new())
     } else {
-        Message::SelectVault(PathBuf::from(&vault.root))
+        Message::SelectVault { path: PathBuf::from(&vault.root), from_boot: false }
     };
     let row_elem = mouse_area(
         button(content)
@@ -2777,6 +2777,13 @@ fn note_view(app: &App) -> Element<'_, Message> {
         NoteMode::Source => iced::widget::text_editor(&app.source_editor)
             .height(Length::Fill)
             .on_action(Message::Edited)
+            .style(|_t, _s| text_editor::Style {
+                background: iced::Background::Color(iced::Color::TRANSPARENT),
+                border: border::Border::default(),
+                placeholder: pal::TEXT_MUTED,
+                value: pal::TEXT_PRIMARY,
+                selection: pal::SELECTION,
+            })
             .into(),
         NoteMode::Read | NoteMode::Edit => {
             let inner: Element<'_, Message> = match app.note_mode {
@@ -2805,10 +2812,15 @@ fn note_view(app: &App) -> Element<'_, Message> {
                 body_col.into()
             };
             let scrolled = scrollable(inner).width(Length::Fill).height(Length::Fill);
+            // 两档同包一层 mouse_area（同型同位保滚动状态）；双击进编辑只在只读档挂处理器
+            // （编辑档不挂：编辑面按压即捕获，双击语义由块内自管）
             if app.note_mode == NoteMode::Edit {
-                wiki_picker_overlay(app, scrolled.into())
+                wiki_picker_overlay(app, mouse_area(scrolled).into())
             } else {
-                scrolled.into()
+                // 只读档双击正文进预览编辑档（光标落点由编辑面按释放点换算）
+                mouse_area(scrolled)
+                    .on_double_click(Message::NoteEnterEdit)
+                    .into()
             }
         }
     };
@@ -2822,7 +2834,13 @@ fn note_view(app: &App) -> Element<'_, Message> {
     body = body.push(container(content).width(Length::Fill).height(Length::Fill));
     body = body.push(controls::h_divider_subtle());
     body = body.push(backlinks_section(app));
-    body.width(Length::Fill).height(Length::Fill).into()
+    // 面板内按压转播：编辑档「点击其他地方退出」的面板内外判定源。
+    // 不用 mouse_area：其子部件（按钮 / 输入框 / 编辑面）会捕获按压令其跳过上报。
+    controls::PressReporter::new(
+        body.width(Length::Fill).height(Length::Fill).into(),
+        Message::NotePressInside,
+    )
+    .into()
 }
 
 /// 页面内标题：正文列顶部的文件名标题（不含扩展名）；点击进入重命名（复用文件树行内改名）。
@@ -2940,6 +2958,7 @@ fn edit_view(app: &App) -> Element<'_, Message> {
             app.edit.anchor,
             app.edit.preedit.clone(),
             app.edit.focused,
+            app.note_edit_caret_pending,
             note_bindings,
         )
         .into();
@@ -3048,6 +3067,7 @@ fn edit_view(app: &App) -> Element<'_, Message> {
         app.edit.anchor,
         app.edit.preedit.clone(),
         app.edit.focused,
+        app.note_edit_caret_pending,
         note_bindings,
     );
     surface.into()

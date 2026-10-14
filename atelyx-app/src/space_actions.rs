@@ -724,7 +724,7 @@ fn restore_and_enter(app: &mut App, server_url: String, space_id: String, name: 
             let spaces = client.list_spaces().await?;
             Ok::<_, SpaceError>((Arc::new(client), spaces))
         },
-        move |result| Message::Space(SpaceMsg::RestoreDone { server_url: server_url_for_msg, space_id, name, result }),
+        move |result| Message::Space(SpaceMsg::RestoreDone { server_url: server_url_for_msg, space_id, name, from_boot, result }),
     )
 }
 
@@ -733,6 +733,7 @@ fn on_restore_done(
     server_url: String,
     space_id: String,
     name: String,
+    from_boot: bool,
     result: Result<(Arc<SpaceClient>, Vec<SpaceSummary>), SpaceError>,
 ) -> Task<Message> {
     app.space_busy = false;
@@ -747,13 +748,15 @@ fn on_restore_done(
                 .map(|s| s.role)
                 .unwrap_or(SpaceRole::Editor);
             let session = SpaceSession { client, server_url, space_id, name, role };
-            enter_space(app, session)
+            enter_space(app, session, from_boot)
         }
     }
 }
 
 /// 进入空间：推进世代使本地在途回执过期，清空两域会话态，拉整树与元数据。
-pub fn enter_space(app: &mut App, session: SpaceSession) -> Task<Message> {
+/// 启动自动进入（from_boot）按「自动恢复」设置载入上次打开的文件；
+/// 运行中切换在 gate 保存后关闭当前打开的文件，进入新空间为未打开态。
+pub fn enter_space(app: &mut App, session: SpaceSession, from_boot: bool) -> Task<Message> {
     // 换空间 = 换泵：旧连接先 bye 再重建（订阅按 topic 换血）
     teardown_pump(app);
     // 展开集按空间独立记忆
@@ -783,11 +786,23 @@ pub fn enter_space(app: &mut App, session: SpaceSession) -> Task<Message> {
     task = task.chain(refresh_space_tags(app));
     task = task.chain(load_space_meta(app));
     task = task.chain(app.save_global());
-    if let Some(rel) = app.ui.last_note_file.clone() {
-        task = task.chain(space_load_note(app, &rel));
+    // 运行中切换：当前打开的笔记与表格一并关闭（保存已由 gate 完成），
+    // 「上次打开」记录随之清除，进入新空间为未打开态
+    if !from_boot {
+        app.ui.last_note_file = None;
+        app.ui.last_table_file = None;
+        app.note_mode = crate::NoteMode::Read;
+        app.note_edit_caret_pending = false;
+        app.note_press_inside = false;
+        app.history.clear();
     }
-    if let Some(rel) = app.ui.last_table_file.clone() {
-        task = task.chain(space_load_table(app, &rel));
+    if from_boot && app.global.auto_restore {
+        if let Some(rel) = app.ui.last_note_file.clone() {
+            task = task.chain(space_load_note(app, &rel));
+        }
+        if let Some(rel) = app.ui.last_table_file.clone() {
+            task = task.chain(space_load_table(app, &rel));
+        }
     }
     task
 }
@@ -902,8 +917,8 @@ pub fn handle(app: &mut App, msg: SpaceMsg) -> Task<Message> {
             }
             restore_and_enter(app, server_url, space_id, name, from_boot)
         }
-        SpaceMsg::RestoreDone { server_url, space_id, name, result } => {
-            on_restore_done(app, server_url, space_id, name, result)
+        SpaceMsg::RestoreDone { server_url, space_id, name, from_boot, result } => {
+            on_restore_done(app, server_url, space_id, name, from_boot, result)
         }
         SpaceMsg::CreateSpace => create_space(app),
         SpaceMsg::CreateSpaceDone { result } => on_space_created(app, result),

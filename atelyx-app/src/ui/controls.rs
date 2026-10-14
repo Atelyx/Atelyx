@@ -340,7 +340,7 @@ pub fn inline_input(
             icon: pal::TEXT_MUTED,
             placeholder: pal::INPUT_PLACEHOLDER,
             value: pal::TEXT_PRIMARY,
-            selection: pal::ACCENT.scale_alpha(0.35),
+            selection: pal::SELECTION,
         });
     mouse_area(input).on_press(press_inside).into()
 }
@@ -468,7 +468,7 @@ pub(crate) fn form_input_style(status: text_input::Status) -> text_input::Style 
         icon: pal::TEXT_MUTED,
         placeholder: pal::INPUT_PLACEHOLDER,
         value: pal::TEXT_PRIMARY,
-        selection: pal::ACCENT.scale_alpha(0.35),
+        selection: pal::SELECTION,
     }
 }
 

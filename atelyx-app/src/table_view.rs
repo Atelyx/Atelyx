@@ -1808,7 +1808,7 @@ fn editor_overlay<'a>(session: &'a TableSession) -> Option<Element<'a, Message>>
             border: iced::Border { color: Color::TRANSPARENT, width: 0.0, radius: 0.0.into() },
             placeholder: pal::TEXT_MUTED,
             value: style_color_value,
-            selection: pal::ACCENT_SOFT,
+            selection: pal::SELECTION,
         });
     // 编辑框不另包 mouse_area：编辑器内按压必被 text_editor 捕获（外层观察不到），
     // 「按压在编辑器内」由 Edited 的鼠标动作（Click/Drag 等）作信号上报

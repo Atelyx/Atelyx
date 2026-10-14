@@ -61,6 +61,8 @@ pub const ACCENT_HOVER: Color = rgb(0xf0, 0xbc, 0x66);
 pub const ACCENT_FG: Color = rgb(0x14, 0x14, 0x14);
 /// 强调淡底（激活态底色）。
 pub const ACCENT_SOFT: Color = rgba(224, 169, 78, 0.14);
+/// 文本选区高亮（全应用唯一取值：输入框、编辑器与自绘选区共用）。
+pub const SELECTION: Color = rgba(224, 169, 78, 0.25);
 
 // ===== 状态语义色 =====
 /// 成功

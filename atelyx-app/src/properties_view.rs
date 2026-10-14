@@ -495,7 +495,7 @@ fn slot_input<'a>(app: &'a App, placeholder: &str, submit: PropsMsg) -> text_inp
             icon: pal::TEXT_MUTED,
             placeholder: pal::INPUT_PLACEHOLDER,
             value: pal::TEXT_PRIMARY,
-            selection: pal::ACCENT.scale_alpha(0.35),
+            selection: pal::SELECTION,
         })
 }
 

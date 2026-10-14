@@ -349,7 +349,8 @@ enum Message {
     PickVault,
     VaultPicked(Result<PathBuf, String>),
     /// 从最近仓库列表进入指定仓库（脏拦截统一 flush 放行）。
-    SelectVault(PathBuf),
+    /// 启动自动进入 = from_boot；运行中切换在 gate 保存后关闭当前打开的文件。
+    SelectVault { path: PathBuf, from_boot: bool },
     ToggleDir(String),
     /// gen = 发起任务时的仓库世代；回调落地前与当前世代比对，过期即丢弃。
     ChildrenLoaded(String, u64, Result<Vec<vault::DirChild>, String>),
@@ -363,6 +364,10 @@ enum Message {
     AutosaveTick,
     /// 切换 note 视图模式（只读 / 预览编辑 / 源码）。
     NoteMode(NoteMode),
+    /// 只读档正文双击：进预览编辑档并把光标落到双击点。
+    NoteEnterEdit,
+    /// 笔记面板内按压上报（PressRelay 转播；编辑档外点退出据此区分面板内外）。
+    NotePressInside,
     /// 编辑面事件（部件只上报，正文/光标/选区真相在应用层）。
     Editor(markdown_edit::EditorEvent),
     /// 属性面板消息（frontmatter 类型化编辑）。
@@ -753,8 +758,8 @@ pub enum SaveReason {
 enum PendingAfterFlush {
     OpenFile(String),
     PickVault,
-    /// 从最近仓库列表进入指定仓库。
-    SelectVault(PathBuf),
+    /// 从最近仓库列表进入指定仓库（from_boot 区分启动进入与运行中切换）。
+    SelectVault { path: PathBuf, from_boot: bool },
     CloseMain(window::Id),
     /// 关文件留标签（kind = "note" / "table"，只关对应面）。
     CloseFileTab(String),
@@ -832,6 +837,7 @@ pub enum SpaceMsg {
         server_url: String,
         space_id: String,
         name: String,
+        from_boot: bool,
         result: Result<
             (Arc<atelyx_core::space_client::SpaceClient>, Vec<atelyx_core::space_client::SpaceSummary>),
             atelyx_core::space_client::SpaceError,
@@ -1117,6 +1123,10 @@ pub struct App {
     autosave_timer: bool,
     /// note 视图模式（缺省只读）。
     pub note_mode: NoteMode,
+    /// 笔记面板内按压标志（NotePressInside 同批置位，全局 Press 消费）。
+    note_press_inside: bool,
+    /// 进编辑档待落光标（只读档双击进入时置位，首个编辑面事件消化）。
+    note_edit_caret_pending: bool,
     /// 只读档的解析产物：进入只读档或文件载入时重建，避免每帧重解析。
     pub preview_doc: Option<MarkdownDocument>,
     /// 笔记图片句柄缓存（key = src 原文；随文件载入清空，在途与失败集合防重复发起）。
@@ -1294,7 +1304,7 @@ impl App {
             boot = boot.chain(Task::done(Message::StartupNotice(text)));
         }
         if let Some(root) = auto_vault.clone() {
-            boot = boot.chain(Task::done(Message::SelectVault(root)));
+            boot = boot.chain(Task::done(Message::SelectVault { path: root, from_boot: true }));
         }
         if let Some(LastActive::Space { server_url, space_id }) = &global.last_active {
             let name = global
@@ -1376,6 +1386,8 @@ impl App {
                 autosave_deadline: None,
                 autosave_timer: false,
                 note_mode: NoteMode::Read,
+                note_press_inside: false,
+                note_edit_caret_pending: false,
                 preview_doc: None,
                 note_images: markdown_view::ImageHandles::new(),
                 note_images_inflight: HashSet::new(),
@@ -1622,16 +1634,16 @@ impl App {
             Message::VaultPicked(Ok(path)) => {
                 // 系统目录选择器选定：记为最近切仓目标，过 gate（选择器打开期间的输入先落盘）
                 self.vault_switch_target = Some(path.clone());
-                self.gate(PendingAfterFlush::SelectVault(path))
+                self.gate(PendingAfterFlush::SelectVault { path, from_boot: false })
             }
             Message::VaultPicked(Err(e)) => {
                 self.notify(NoticeLevel::Error, e);
                 Task::none()
             }
-            Message::SelectVault(path) => {
+            Message::SelectVault { path, from_boot } => {
                 // 记录目标：flush 回放时据此丢弃被更晚点选取代的切换
                 self.vault_switch_target = Some(path.clone());
-                self.gate(PendingAfterFlush::SelectVault(path))
+                self.gate(PendingAfterFlush::SelectVault { path, from_boot })
             }
             Message::ToggleDir(rel) => {
                 let expanded = &mut self.ui.file_explorer_expanded;
@@ -1807,21 +1819,10 @@ impl App {
             }
             Message::NoteMode(mode) => {
                 match mode {
-                    NoteMode::Read => {
-                        self.note_mode = NoteMode::Read;
-                        self.edit_doc = None;
-                        self.edit_meta.clear();
-                        self.edit.focused = false;
-                        self.refresh_preview();
-                    }
+                    NoteMode::Read => self.enter_read_mode(),
                     NoteMode::Edit => {
-                        self.note_mode = NoteMode::Edit;
-                        self.preview_doc = None;
-                        // 进入编辑档不揭示任何块、不持光标：首帧即全篇按块渲染，无源码回显
-                        self.edit.active = None;
-                        self.edit.preedit = None;
-                        self.edit.focused = false;
-                        self.refresh_edit();
+                        self.note_edit_caret_pending = false;
+                        self.enter_edit_mode();
                     }
                     NoteMode::Source => {
                         self.note_mode = NoteMode::Source;
@@ -1829,9 +1830,20 @@ impl App {
                         self.edit_doc = None;
                         self.edit_meta.clear();
                         self.edit.focused = false;
+                        self.note_edit_caret_pending = false;
                         self.source_editor = text_editor::Content::with_text(&self.note_text);
                     }
                 }
+                Task::none()
+            }
+            Message::NoteEnterEdit => {
+                self.enter_edit_mode();
+                // 光标落点交给编辑面在释放事件消化（同批按压由 PressRelay 上报，不误判外点退出）
+                self.note_edit_caret_pending = true;
+                Task::none()
+            }
+            Message::NotePressInside => {
+                self.note_press_inside = true;
                 Task::none()
             }
             Message::Editor(event) => self.on_editor(event),
@@ -2473,6 +2485,8 @@ impl App {
                 Task::none()
             }
             Message::Press(id) => {
+                // 笔记面板内按压标志：同批 widget 消息（PressRelay）先行置位，此处一次性消费
+                let note_press_inside = std::mem::take(&mut self.note_press_inside);
                 // 表格焦点：同批表格面按压（画布或菜单，widget 消息先行）已置 press_seen = 保持聚焦；
                 // 否则本次按压在表格面之外 = 失焦（键盘分派随之让位）
                 if let Some(s) = &mut self.table {
@@ -2485,6 +2499,11 @@ impl App {
                 // 弹层打开期间按压交由捕获层处理（外点关闭），不触发拖拽手势
                 if self.popup.as_ref().is_some_and(|(w, _)| *w == id) {
                     return Task::none();
+                }
+                // 笔记编辑档外点退出：按压未落在笔记面板内 = 回只读档（面板内含工具条 / 属性 / 反链；
+                // 弹层打开期间由上方早退守卫豁免，源码档不参与）
+                if self.note_mode == NoteMode::Edit && !note_press_inside {
+                    self.enter_read_mode();
                 }
                 // 拖拽会话中收到新按压 = 释放事件丢失的兜底：按当前悬停落点收尾
                 if self.drag.is_some() {
@@ -3811,12 +3830,12 @@ impl App {
         match pending {
             PendingAfterFlush::OpenFile(rel) => self.open_file(&rel),
             PendingAfterFlush::PickVault => self.start_pick_vault(),
-            PendingAfterFlush::SelectVault(path) => {
+            PendingAfterFlush::SelectVault { path, from_boot } => {
                 // 已被更晚的点选取代：丢弃挂起的这次切换（避免落到非最后点击的仓库）
                 if self.vault_switch_target.as_ref() != Some(&path) {
                     return Task::none();
                 }
-                self.enter_vault(path)
+                self.enter_vault(path, from_boot)
             }
             PendingAfterFlush::CloseMain(id) => {
                 // 退出前取消在途下载（`.part` 保留为完整前缀，下次启动续传）
@@ -3904,7 +3923,9 @@ impl App {
 
     /// 进入仓库：成功则清空旧仓库会话态、登记最近列表并落盘 global.json；失败提示并保持当前态。
     /// 来自协作空间时先摘掉空间身份（会话态清空与展开集记忆由 leave_space_identity 承担）。
-    fn enter_vault(&mut self, path: PathBuf) -> Task<Message> {
+    /// 启动自动进入（from_boot）按「自动恢复」设置载入上次打开的文件；
+    /// 运行中切换在 gate 保存后关闭当前打开的文件，进入新仓库为未打开态。
+    fn enter_vault(&mut self, path: PathBuf, from_boot: bool) -> Task<Message> {
         if matches!(self.repo_kind, RepoKind::Space(_)) {
             space_actions::leave_space_identity(self);
         }
@@ -3930,6 +3951,16 @@ impl App {
         }
         self.vault_switch_target = None;
         self.notify(NoticeLevel::Success, "仓库已打开");
+        // 运行中切换：当前打开的笔记与表格一并关闭（保存已由 gate 完成），
+        // 「上次打开」记录随之清除，进入新仓库为未打开态
+        if !from_boot {
+            self.ui.last_note_file = None;
+            self.ui.last_table_file = None;
+            self.note_mode = NoteMode::Read;
+            self.note_edit_caret_pending = false;
+            self.note_press_inside = false;
+            self.history.clear();
+        }
         self.children.clear();
         self.note_text.clear();
         self.source_editor = text_editor::Content::new();
@@ -3989,9 +4020,8 @@ impl App {
         task = task.chain(self.refresh_tag_vocab()).chain(self.refresh_note_files());
         task = task.chain(self.load_vault_meta());
         task = task.chain(self.save_global());
-        // last_note_file 跨仓库沿用（相对路径语义）；仓库就绪即恢复其内容
-        // 自动恢复关闭：不恢复上次打开的文件（打开记录保留，仅跳过载入）
-        if self.global.auto_restore {
+        // 启动自动进入且「自动恢复」开启：恢复上次打开的文件；运行中切换不恢复（文件已随切仓关闭）
+        if from_boot && self.global.auto_restore {
             if let Some(rel) = self.ui.last_note_file.clone() {
                 task = task.chain(self.load_note(&rel));
             }
@@ -5132,6 +5162,26 @@ impl App {
         )
     }
 
+    /// 进入只读档：清编辑态解析产物并重建只读渲染。
+    fn enter_read_mode(&mut self) {
+        self.note_mode = NoteMode::Read;
+        self.edit_doc = None;
+        self.edit_meta.clear();
+        self.edit.focused = false;
+        self.note_edit_caret_pending = false;
+        self.refresh_preview();
+    }
+
+    /// 进入预览编辑档：不揭示任何块、不持光标，首帧全篇按块渲染。
+    fn enter_edit_mode(&mut self) {
+        self.note_mode = NoteMode::Edit;
+        self.preview_doc = None;
+        self.edit.active = None;
+        self.edit.preedit = None;
+        self.edit.focused = false;
+        self.refresh_edit();
+    }
+
     /// 只读档的解析产物：进入只读档或文件载入时重建（渲染面不逐帧解析）。
     pub(crate) fn refresh_preview(&mut self) {
         if self.note_mode != NoteMode::Read {
@@ -5823,6 +5873,8 @@ impl App {
     /// 编辑面事件处理。
     fn on_editor(&mut self, event: markdown_edit::EditorEvent) -> Task<Message> {
         use markdown_edit::EditorEvent as E;
+        // 进编辑档待落光标在首个编辑面事件消化（部件侧据此定位光标，见 EditSurface 释放路径）
+        self.note_edit_caret_pending = false;
         match event {
             E::Hit { target, extend } => {
                 let offset = self.resolve_hit(target);

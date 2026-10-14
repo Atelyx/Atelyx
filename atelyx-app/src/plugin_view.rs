@@ -337,7 +337,7 @@ fn multiline_input<'a>(
             border: iced::border::rounded(pal::RADIUS_SM).color(pal::BORDER_STRONG).width(1.0),
             placeholder: pal::INPUT_PLACEHOLDER,
             value: pal::TEXT_PRIMARY,
-            selection: pal::ACCENT.scale_alpha(0.35),
+            selection: pal::SELECTION,
         })
         .on_action(move |action| Message::PluginTextEdit {
             plugin_id: plugin_id.clone(),
