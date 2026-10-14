@@ -458,6 +458,17 @@ pub fn secret_input(
     styled_input(placeholder, value, width, Some(on_input), Some(on_submit), true)
 }
 
+/// 插件卡片容器样式（ViewNode card：列表条目、信息分组；accent = 选中强调边框）。
+pub fn plugin_card_style(accent: bool) -> container::Style {
+    container::Style {
+        background: Some(pal::BG_TERTIARY.into()),
+        border: border::rounded(pal::RADIUS_SM)
+            .color(if accent { pal::ACCENT } else { pal::BORDER })
+            .width(1.0),
+        ..Default::default()
+    }
+}
+
 /// 表单输入统一样式（设置表单与弹层表单同口径）。
 pub(crate) fn form_input_style(status: text_input::Status) -> text_input::Style {
     text_input::Style {

@@ -12,8 +12,8 @@ use iced::widget::{
 use iced::{Color, Element, Length, Padding};
 
 use atelyx_core::plugin_runtime::{
-    Align, Axis, ButtonVariant, ColorToken, EventKind, EventValue, ImageFit, ImageSource, NodeBody,
-    TextWeight, ViewEvent, ViewNode,
+    Align, Axis, ButtonVariant, ColorToken, EventKind, EventValue, Fill, ImageFit, ImageSource,
+    NodeBody, TextWeight, ViewEvent, ViewNode,
 };
 
 use crate::plugin_actions::{contribution, declares, image_key, input_display, node_value_text, PopupEntry};
@@ -38,13 +38,27 @@ struct Ctx {
 
 /// 插件面板内容：取投影缓存里的树渲染；贡献缺失 / 树未提交时给可读占位。
 pub fn panel_view<'a>(app: &'a App, window: iced::window::Id, view: &str) -> Element<'a, Message> {
+    surface_view(app, window, view, "插件面板")
+}
+
+/// 设置页里的插件面（tab 内容）：与面板同一套面树渲染，仅占位文案不同。
+pub fn settings_view<'a>(app: &'a App, window: iced::window::Id, view: &str) -> Element<'a, Message> {
+    surface_view(app, window, view, "插件设置")
+}
+
+fn surface_view<'a>(
+    app: &'a App,
+    window: iced::window::Id,
+    view: &str,
+    kind_label: &str,
+) -> Element<'a, Message> {
     let Some((plugin_id, surface_id)) = crate::plugin_actions::parse_view_kind(view) else {
-        return placeholder("puzzle", "插件面板", "视图 kind 非法");
+        return placeholder("puzzle", kind_label, "视图 kind 非法");
     };
     let Some(contribution) = contribution(app, plugin_id, surface_id) else {
         return placeholder(
             "puzzle",
-            &format!("插件面板 {plugin_id}"),
+            &format!("{kind_label} {plugin_id}"),
             "插件不可用：未安装、未启用或已卸载",
         );
     };
@@ -76,7 +90,9 @@ fn placeholder<'a>(icon_name: &str, title: &str, desc: &str) -> Element<'a, Mess
 /// Shrink 根列内的 Fill 子项会塌缩成 0 高）。嵌套容器保持收缩语义。
 fn render_root<'a>(app: &'a App, ctx: &Ctx, node: &'a ViewNode) -> Element<'a, Message> {
     match &node.body {
-        NodeBody::Column { .. } | NodeBody::Row { .. } => render_node_in(app, ctx, node, true),
+        NodeBody::Column { .. } | NodeBody::Row { .. } | NodeBody::Card { .. } => {
+            render_node_in(app, ctx, node, true)
+        }
         _ => render_node_in(app, ctx, node, false),
     }
 }
@@ -106,10 +122,21 @@ fn render_node_in<'a>(
             }
             col.into()
         }
-        NodeBody::Row { gap, padding, align, cross_align } => {
+        NodeBody::Row { gap, padding, align, cross_align, fill } => {
             let mut line = row(children_elements(app, ctx, node))
                 .spacing(gap.unwrap_or(DEFAULT_GAP))
                 .align_y(cross_align.map(vertical).unwrap_or(Vertical::Center));
+            // fill 行：宽度 Fill 关掉子项的宽度压缩（Fill 子项均分剩余宽度）；
+            // both 再加高度 Fill，让行延迟到父列的第三趟布局、占满剩余高度（分栏的前提）
+            match fill {
+                Some(Fill::Both) => {
+                    line = line.width(Length::Fill).height(Length::Fill);
+                }
+                Some(Fill::Width) => {
+                    line = line.width(Length::Fill);
+                }
+                None => {}
+            }
             if fill_height {
                 line = line.height(Length::Fill);
             }
@@ -124,6 +151,21 @@ fn render_node_in<'a>(
                     .into(),
                 None => line.into(),
             }
+        }
+        NodeBody::Card { padding, accent } => {
+            let inner = keyed_column(children(app, ctx, node))
+                .width(Length::Fill)
+                .height(Length::Shrink)
+                .spacing(DEFAULT_GAP);
+            let accent = accent.unwrap_or_default();
+            let mut card = container(inner)
+                .width(Length::Fill)
+                .padding(Padding::from(padding.unwrap_or(10.0)))
+                .style(move |_t| controls::plugin_card_style(accent));
+            if fill_height {
+                card = card.height(Length::Fill);
+            }
+            card.into()
         }
         NodeBody::Scroll { direction } => {
             let inner: Element<Message> = match direction.unwrap_or(Axis::Vertical) {

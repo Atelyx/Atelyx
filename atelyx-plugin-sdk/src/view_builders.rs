@@ -28,7 +28,7 @@ impl NodeExt for ViewNode {
 }
 
 pub fn row(id: &str, children: Vec<ViewNode>) -> ViewNode {
-    node(id, NodeBody::Row { gap: None, padding: None, align: None, cross_align: None })
+    node(id, NodeBody::Row { gap: None, padding: None, align: None, cross_align: None, fill: None })
         .with_children(children)
 }
 

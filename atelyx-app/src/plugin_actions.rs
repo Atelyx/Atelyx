@@ -226,11 +226,36 @@ pub fn sync_surfaces(app: &mut App) -> bool {
     true
 }
 
+/// 设置贡献的挂载差分：注册即挂载（宿主立即回 attached，插件常驻设置树），
+/// 贡献撤销 / 插件停用随差分回 detached 并撤掉本地投影。运行中的插件才有贡献，
+/// 重启后随贡献恢复自动重新挂载。
+pub fn sync_settings_surfaces(app: &mut App) {
+    let now: HashSet<(String, String)> = contributions_of(app, ContributionSlot::Settings)
+        .map(|c| (c.plugin_id.clone(), c.id.clone()))
+        .collect();
+    if now == app.plugin_settings_surfaces {
+        return;
+    }
+    for (plugin_id, surface_id) in now.difference(&app.plugin_settings_surfaces) {
+        app.plugins
+            .notify_surface_attached(plugin_id, surface_id, SurfaceKind::Settings);
+    }
+    let removed: Vec<(String, String)> =
+        app.plugin_settings_surfaces.difference(&now).cloned().collect();
+    for (plugin_id, surface_id) in &removed {
+        app.plugins.notify_surface_detached(plugin_id, surface_id);
+        drop_node_state(app, plugin_id, surface_id);
+    }
+    app.plugin_settings_surfaces = now;
+}
+
 /// 把贡献与已挂面的树投影进壳状态，并按需发起界面图片载入（返回的任务由调用方链出）。
 pub fn refresh_projection(app: &mut App) -> Task<Message> {
     let contributions = app.plugins.contributions();
     app.plugin_contributions = contributions;
-    let surfaces: Vec<(String, String)> = app.plugin_surfaces.iter().cloned().collect();
+    sync_settings_surfaces(app);
+    let mut surfaces: Vec<(String, String)> = app.plugin_surfaces.iter().cloned().collect();
+    surfaces.extend(app.plugin_settings_surfaces.iter().cloned());
     let mut canvas_keys = HashSet::new();
     for (plugin_id, surface_id) in surfaces {
         let key = (plugin_id.clone(), surface_id.clone());

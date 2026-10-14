@@ -65,6 +65,11 @@ pub enum NodeBody {
         align: Option<Align>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cross_align: Option<Align>,
+        /// 撑满语义：`both` = 行占满父容器剩余宽高、Fill 子项均分剩余宽度（如左右分栏）；
+        /// `width` = 仅占满宽度（高度仍按内容，用于工具行左右分布）。
+        /// 缺省行宽收缩、子项 Fill 按各自内容宽解析；fill 行内 `align` 不生效。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fill: Option<Fill>,
     },
     Column {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -73,6 +78,14 @@ pub enum NodeBody {
         padding: Option<f32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cross_align: Option<Align>,
+    },
+    /// 卡片容器：主题化背景 + 边框 + 圆角的分组盒（列表条目、信息分组）。
+    Card {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        padding: Option<f32>,
+        /// 强调态（列表选中项）：accent 边框。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        accent: Option<bool>,
     },
     Scroll {
         /// 子节点按主轴单向排列：`horizontal` 排成行，其余（含缺省）排成列。
@@ -175,13 +188,17 @@ pub enum NodeBody {
 impl NodeBody {
     /// 容器类节点（可携带 children）：布局容器、滚动容器、网格与列表。
     pub fn allows_children(&self) -> bool {
-        matches!(self, Self::Row { .. } | Self::Column { .. } | Self::Scroll { .. } | Self::Grid { .. } | Self::List { .. })
+        matches!(
+            self,
+            Self::Row { .. } | Self::Column { .. } | Self::Card { .. } | Self::Scroll { .. } | Self::Grid { .. } | Self::List { .. }
+        )
     }
 
     pub fn kind_name(&self) -> &'static str {
         match self {
             Self::Row { .. } => "row",
             Self::Column { .. } => "column",
+            Self::Card { .. } => "card",
             Self::Scroll { .. } => "scroll",
             Self::Grid { .. } => "grid",
             Self::List { .. } => "list",
@@ -206,6 +223,16 @@ pub enum Align {
     Start,
     Center,
     End,
+}
+
+/// 行的撑满语义（[`NodeBody::Row`] 的 `fill`）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Fill {
+    /// 宽高都撑满（分栏行：Fill 子项均分剩余宽度、行占满剩余高度）。
+    Both,
+    /// 仅宽度撑满（高度仍按内容：工具行的左右分布）。
+    Width,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -436,6 +463,52 @@ mod tests {
         let mut leaf = sample_tree();
         leaf.children[1].children = vec![leaf.children[0].clone()];
         assert!(leaf.validate().unwrap_err().contains("不得携带 children"));
+    }
+
+    #[test]
+    fn row_fill_field_roundtrips_and_defaults_off() {
+        let fill = NodeBody::Row {
+            gap: None,
+            padding: None,
+            align: None,
+            cross_align: None,
+            fill: Some(Fill::Both),
+        };
+        let json = serde_json::to_value(&fill).unwrap();
+        assert_eq!(json["fill"], "both");
+        assert_eq!(serde_json::from_value::<NodeBody>(json).unwrap(), fill);
+
+        let width_only = NodeBody::Row {
+            gap: None,
+            padding: None,
+            align: None,
+            cross_align: None,
+            fill: Some(Fill::Width),
+        };
+        assert_eq!(
+            serde_json::to_value(&width_only).unwrap()["fill"],
+            "width"
+        );
+
+        // 旧树没有 fill 字段：反序列化照常，行为按缺省（收缩）处理
+        let legacy: NodeBody =
+            serde_json::from_value(serde_json::json!({ "kind": "row" })).unwrap();
+        assert_eq!(
+            legacy,
+            NodeBody::Row { gap: None, padding: None, align: None, cross_align: None, fill: None }
+        );
+    }
+
+    #[test]
+    fn card_body_roundtrips() {
+        let card = NodeBody::Card { padding: Some(10.0), accent: Some(true) };
+        let json = serde_json::to_value(&card).unwrap();
+        assert_eq!(json["kind"], "card");
+        assert_eq!(json["accent"], true);
+        assert_eq!(serde_json::from_value::<NodeBody>(json).unwrap(), card);
+        let plain: NodeBody =
+            serde_json::from_value(serde_json::json!({ "kind": "card" })).unwrap();
+        assert_eq!(plain, NodeBody::Card { padding: None, accent: None });
     }
 
     #[test]

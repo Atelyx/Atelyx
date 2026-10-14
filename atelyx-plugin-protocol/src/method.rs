@@ -86,7 +86,7 @@ pub mod canvas {
 #[serde(rename_all = "camelCase")]
 pub struct SurfaceAttachedParams {
     pub surface_id: String,
-    /// 面的类型：面板 / 插件窗口 / 整页接管 / 全接管。
+    /// 面的类型：面板 / 插件窗口 / 整页接管 / 全接管 / 设置页。
     pub kind: SurfaceKind,
 }
 
@@ -97,6 +97,7 @@ pub enum SurfaceKind {
     Window,
     Page,
     Takeover,
+    Settings,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -126,6 +127,8 @@ pub enum ContributionSlot {
     Panel,
     /// 表格编辑器工具条「视图」下拉条目。
     TableView,
+    /// 设置页顶层 tab（注册即挂载：宿主立即回 `host:surface.attached`，插件常驻设置树）。
+    Settings,
 }
 
 /// `view.register` 的 params：声明一个贡献点。`id` 插件内唯一且不得含 `:`（宿主的面标识以它作分隔），
@@ -413,4 +416,21 @@ pub struct HttpResult {
 pub struct DocOpenParams {
     /// 仓库容器内的相对路径（本地仓库）或服务端内容路径（协作空间），与 vault 口径一致。
     pub path: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slot_and_surface_kind_serde_uses_camel_case() {
+        assert_eq!(serde_json::to_value(ContributionSlot::Panel).unwrap(), "panel");
+        assert_eq!(serde_json::to_value(ContributionSlot::TableView).unwrap(), "tableView");
+        assert_eq!(serde_json::to_value(ContributionSlot::Settings).unwrap(), "settings");
+        assert_eq!(serde_json::to_value(SurfaceKind::Settings).unwrap(), "settings");
+        let kind: SurfaceKind = serde_json::from_value(serde_json::json!("settings")).unwrap();
+        assert_eq!(kind, SurfaceKind::Settings);
+        let slot: ContributionSlot = serde_json::from_value(serde_json::json!("settings")).unwrap();
+        assert_eq!(slot, ContributionSlot::Settings);
+    }
 }

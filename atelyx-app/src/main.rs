@@ -997,6 +997,8 @@ pub struct App {
     pub plugin_contributions: Vec<atelyx_core::plugin_runtime::Contribution>,
     /// 当前呈现布局里已挂的插件面（布局变化时重算并差额通知插件）。
     pub plugin_surfaces: HashSet<(String, String)>,
+    /// 已挂载的插件设置面（注册即挂载，贡献变化时差额通知插件）。
+    pub plugin_settings_surfaces: HashSet<(String, String)>,
     /// 已挂面的最新界面树投影（键 = 插件 id + 面 id）。
     pub plugin_trees: HashMap<(String, String), atelyx_core::plugin_runtime::ViewNode>,
     /// 单行 / 数字输入的宿主草稿（键 = 插件 id + 面 id + 节点 id）。
@@ -1355,6 +1357,7 @@ impl App {
                 plugins_state: settings_view::plugins::PluginsState::default(),
                 plugin_contributions: Vec::new(),
                 plugin_surfaces: HashSet::new(),
+                plugin_settings_surfaces: HashSet::new(),
                 plugin_trees: HashMap::new(),
                 plugin_drafts: HashMap::new(),
                 plugin_editors: HashMap::new(),

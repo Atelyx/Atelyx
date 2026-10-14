@@ -31,7 +31,7 @@ pub use atelyx_plugin_protocol::manifest::Permission;
 pub use atelyx_plugin_protocol::method::{ContributionSlot, FileFilter, NotificationLevel, SurfaceKind};
 pub use atelyx_plugin_protocol::view::{
     Align, Axis, ButtonVariant, CanvasEventKind, CanvasPointer, ColorToken, EventKind, EventValue,
-    ImageFit, ImageSource, MenuItem, MouseButton, NodeBody, TextWeight, ViewEvent, ViewNode,
+    Fill, ImageFit, ImageSource, MenuItem, MouseButton, NodeBody, TextWeight, ViewEvent, ViewNode,
 };
 
 /// 插件运行状态。

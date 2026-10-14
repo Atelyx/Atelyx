@@ -4,6 +4,8 @@
 use iced::widget::{button, column, container, row, scrollable, space, text};
 use iced::{Element, Length, Padding, border, widget::container::Style};
 
+use atelyx_core::plugin_runtime::ContributionSlot;
+
 use crate::layout_view::{format_ts, mono, parse_hex_color};
 use crate::ui::controls;
 use crate::ui::icon::icon;
@@ -53,11 +55,16 @@ const REPO_SETTINGS: &[SettingsItem] = &[
 ];
 
 fn settings_item(item: &SettingsItem, active_tab: &str) -> Element<'static, Message> {
-    let active = item.id == active_tab;
+    settings_item_dyn(item.id, item.label, item.icon, active_tab)
+}
+
+/// 动态导航项（插件设置 tab：id/label 取自贡献，icon 名已由贡献查询解析为形状表静态名）。
+fn settings_item_dyn(id: &str, label: &str, icon_name: &'static str, active_tab: &str) -> Element<'static, Message> {
+    let active = id == active_tab;
     button(
         row![
-            icon(item.icon, 14.0, if active { pal::ACCENT } else { pal::TEXT_SECONDARY }),
-            text(item.label)
+            icon(icon_name, 14.0, if active { pal::ACCENT } else { pal::TEXT_SECONDARY }),
+            text(label.to_string())
                 .size(pal::fs_caption())
                 .color(if active { pal::ACCENT } else { pal::TEXT_SECONDARY })
                 .font(iced::Font { weight: iced::font::Weight::Medium, ..iced::Font::default() }),
@@ -78,12 +85,12 @@ fn settings_item(item: &SettingsItem, active_tab: &str) -> Element<'static, Mess
         border: border::rounded(pal::RADIUS_SM),
         ..Default::default()
     })
-    .on_press(Message::SettingsTab(item.id.to_string()))
+    .on_press(Message::SettingsTab(id.to_string()))
     .into()
 }
 
 /// 设置整页：左栏分组导航（应用级 / 仓库级 / 关于，可折叠）+ 右侧分区内容。
-pub fn settings_view(app: &App, window: iced::window::Id) -> Element<'static, Message> {
+pub fn settings_view<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, Message> {
     let collapsed = app.settings_collapsed;
     // 左栏宽度 = 内容区 20%，钳制 180–280；折叠态固定 44
     let nav_w = if collapsed {
@@ -93,7 +100,26 @@ pub fn settings_view(app: &App, window: iced::window::Id) -> Element<'static, Me
     };
     let active = app.settings_tab.as_str();
     let mut nav = column![].spacing(4);
+    // 插件设置 tab：运行中插件的设置贡献（label/icon 取自注册），与应用级设置并列
+    let plugin_items: Vec<(String, String, &'static str)> =
+        crate::plugin_actions::contributions_of(app, ContributionSlot::Settings)
+            .map(|c| {
+                (
+                    crate::plugin_actions::view_kind(&c.plugin_id, &c.id),
+                    c.label.clone(),
+                    crate::plugin_actions::contribution_icon(app, &c.plugin_id, &c.id),
+                )
+            })
+            .collect();
     nav = push_group(nav, "应用级", "全局共享", false, APP_SETTINGS, active);
+    if !plugin_items.is_empty() {
+        nav = nav.push(container(controls::h_divider_subtle()).padding(Padding::ZERO.top(8.0).bottom(4.0)));
+        let mut plugin_col = column![group_head("插件设置", "由插件提供", false)].spacing(4);
+        for (id, label, icon_name) in &plugin_items {
+            plugin_col = plugin_col.push(settings_item_dyn(id, label, icon_name, active));
+        }
+        nav = nav.push(plugin_col);
+    }
     // 仓库级分组：本地仓库与协作空间（配置真源分别在本地 .atelyx/ 与服务端）都可达
     if let Some(repo_name) = repo_display_name(app) {
         nav = nav.push(container(controls::h_divider_subtle()).padding(Padding::ZERO.top(8.0).bottom(12.0)));
@@ -221,7 +247,7 @@ fn vline() -> Element<'static, Message> {
 }
 
 /// 分区内容分派（未实现分区 = 占位空态）。
-fn settings_body(app: &App, window: iced::window::Id) -> Element<'static, Message> {
+fn settings_body<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, Message> {
     match app.settings_tab.as_str() {
         "general" => general::view(app),
         "collab" => collab_settings_view(app),
@@ -233,6 +259,10 @@ fn settings_body(app: &App, window: iced::window::Id) -> Element<'static, Messag
         "workspace" => workspace::view(app, window),
         "editor" => editor::view(app),
         "about" => about::view(app, window),
+        // 插件设置 tab：tab id = 插件面的 view kind，渲染复用面板的面树解释器
+        tab if crate::plugin_actions::parse_view_kind(tab).is_some() => {
+            crate::plugin_view::settings_view(app, window, tab)
+        }
         _ => controls::empty_state("puzzle", "暂无设置项", "该分组暂无可配置项", None),
     }
 }
@@ -435,21 +465,28 @@ pub fn group_head(label: &str, hint: &str, repo_level: bool) -> Element<'static,
 }
 
 /// 页面标题 / 作用域 / 描述（仓库级描述含仓库名）。
-fn tab_meta(tab: &str, app: &App) -> (&'static str, bool, String) {
+fn tab_meta(tab: &str, app: &App) -> (String, bool, String) {
     let vault_name = repo_display_name(app).unwrap_or_default();
     let app_desc = "全局共享配置".to_string();
     let vault_desc = format!("作用于当前仓库（{vault_name}）");
+    // 插件设置 tab：标题取贡献 label
+    if let Some((plugin_id, contribution_id)) = crate::plugin_actions::parse_view_kind(tab) {
+        let title = crate::plugin_actions::contribution(app, plugin_id, contribution_id)
+            .map(|c| c.label.clone())
+            .unwrap_or_else(|| "插件设置".to_string());
+        return (title, false, "由插件提供".to_string());
+    }
     match tab {
-        "general" => ("通用", false, app_desc),
-        "collab" => ("多人协作", false, app_desc),
-        "editorPrefs" => ("编辑器", false, app_desc),
-        "shortcuts" => ("快捷键", false, app_desc),
-        "plugins" => ("插件", false, app_desc),
-        "ai" => ("AI 设置", true, vault_desc),
-        "files" => ("文件与路径", true, vault_desc),
-        "workspace" => ("工作区", true, vault_desc),
-        "editor" => ("编辑器", true, vault_desc),
-        "about" => ("关于", false, "版本 · 检查更新 · 项目主页".to_string()),
-        _ => ("设置", false, String::new()),
+        "general" => ("通用".to_string(), false, app_desc),
+        "collab" => ("多人协作".to_string(), false, app_desc),
+        "editorPrefs" => ("编辑器".to_string(), false, app_desc),
+        "shortcuts" => ("快捷键".to_string(), false, app_desc),
+        "plugins" => ("插件".to_string(), false, app_desc),
+        "ai" => ("AI 设置".to_string(), true, vault_desc),
+        "files" => ("文件与路径".to_string(), true, vault_desc),
+        "workspace" => ("工作区".to_string(), true, vault_desc),
+        "editor" => ("编辑器".to_string(), true, vault_desc),
+        "about" => ("关于".to_string(), false, "版本 · 检查更新 · 项目主页".to_string()),
+        _ => ("设置".to_string(), false, String::new()),
     }
 }
