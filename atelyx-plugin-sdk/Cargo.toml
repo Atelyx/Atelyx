@@ -19,7 +19,7 @@ thiserror = "2"
 async-trait = "0.1"
 
 [dev-dependencies]
-# e2e：拉起 echo 子进程（process）与超时断言（macros/rt 已在主依赖，process 仅测试需要）
+# e2e：拉起 stub / crasher 子进程（process）与超时断言（macros/rt 已在主依赖，process 仅测试需要）
 tokio = { version = "1", features = ["process"] }
 # 宿主运行时端到端：仅测试用，插件侧生产依赖仍只有 protocol（core 不依赖 sdk，方向不反转）
 atelyx-core = { path = "../atelyx-core", features = ["test-support"] }

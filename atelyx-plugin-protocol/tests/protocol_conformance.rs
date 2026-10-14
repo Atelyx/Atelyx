@@ -5,9 +5,9 @@ use atelyx_plugin_protocol::envelope::{Envelope, RequestId};
 use atelyx_plugin_protocol::event::VaultSwitchPayload;
 use atelyx_plugin_protocol::handshake::{self, InitializeParams, InitializeResult};
 use atelyx_plugin_protocol::method::{
-    DocOpenParams, HttpRequestParams, HttpResult, ListResult, PathParams, PickFileParams,
-    PickedPath, ProcessEventParams, RegisterParams, RegisterShortcutParams, ShowNotificationParams,
-    SurfaceAttachedParams, TextPayload, UnregisterParams, ViewEventParams,
+    CanvasSubmitParams, DocOpenParams, HttpRequestParams, HttpResult, ListResult, PathParams,
+    PickFileParams, PickedPath, ProcessEventParams, RegisterParams, RegisterShortcutParams,
+    ShowNotificationParams, SurfaceAttachedParams, TextPayload, UnregisterParams, ViewEventParams,
 };
 use atelyx_plugin_protocol::view::{EventKind, NodeBody, ViewNode};
 use serde::de::DeserializeOwned;
@@ -78,7 +78,7 @@ fn view_tree_shape_is_frozen() {
     walk(&tree, &mut kinds);
     for expected in [
         "row", "column", "scroll", "grid", "list", "text", "textInput", "numberInput", "dropdown",
-        "checkbox", "button", "iconButton", "image", "progress", "menu",
+        "checkbox", "button", "iconButton", "image", "progress", "menu", "canvas",
     ] {
         assert!(kinds.contains(expected), "控件集 v1 缺快照覆盖：{expected}");
     }
@@ -92,6 +92,8 @@ fn view_tree_shape_is_frozen() {
     assert!(matches!(find(&tree, "go").unwrap().body, NodeBody::Button { .. }));
     let menu = find(&tree, "more").unwrap();
     assert!(matches!(&menu.body, NodeBody::Menu { items, .. } if items.len() == 2));
+    let canvas = find(&tree, "board").unwrap();
+    assert!(matches!(&canvas.body, NodeBody::Canvas { mouse_events } if mouse_events.len() == 6));
 
     // 冻结编码：序列化产物与快照值逐字段一致
     assert_eq!(serde_json::to_value(&tree).unwrap(), snapshot["viewTree"], "ViewNode 编码与快照不一致");
@@ -184,6 +186,7 @@ fn method_type_shapes_are_frozen() {
             "RegisterParams" => frozen_roundtrip::<RegisterParams>(&value),
             "UnregisterParams" => frozen_roundtrip::<UnregisterParams>(&value),
             "ViewEventParams" => frozen_roundtrip::<ViewEventParams>(&value),
+            "CanvasSubmitParams" => frozen_roundtrip::<CanvasSubmitParams>(&value),
             "DocOpenParams" => frozen_roundtrip::<DocOpenParams>(&value),
             "VaultSwitchPayload" => frozen_roundtrip::<VaultSwitchPayload>(&value),
             other => panic!("语料 {name}: 未知类型 {other}"),

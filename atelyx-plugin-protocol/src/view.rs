@@ -20,6 +20,14 @@ pub struct ViewNode {
 }
 
 impl ViewNode {
+    /// 树里按 id 找节点（宿主事件定位、画布清单校验、测试共用）。
+    pub fn find(&self, node_id: &str) -> Option<&ViewNode> {
+        if self.id == node_id {
+            return Some(self);
+        }
+        self.children.iter().find_map(|child| child.find(node_id))
+    }
+
     /// 宿主挂载前的结构校验：id 非空且全树唯一、叶子无 children。
     pub fn validate(&self) -> Result<(), String> {
         let mut ids = HashSet::new();
@@ -156,6 +164,12 @@ pub enum NodeBody {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         icon: Option<String>,
     },
+    /// 自绘画布：宿主保留一块区域执行 `canvas.submit` 提交的指令清单（见 [`crate::canvas`]）。
+    /// 指针事件按 `mouseEvents` 声明子集回发，未声明不上行；命中由插件按指令几何自算。
+    Canvas {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        mouse_events: Vec<CanvasEventKind>,
+    },
 }
 
 impl NodeBody {
@@ -181,6 +195,7 @@ impl NodeBody {
             Self::Image { .. } => "image",
             Self::Progress { .. } => "progress",
             Self::Menu { .. } => "menu",
+            Self::Canvas { .. } => "canvas",
         }
     }
 }
@@ -295,6 +310,8 @@ pub enum ViewEvent {
     Submit { value: EventValue },
     Focus,
     Blur,
+    /// 画布指针事件（仅 `canvas` 节点按 `mouseEvents` 声明后回发）。
+    Canvas { pointer: CanvasPointer },
 }
 
 /// 事件值的三形态。untagged 按序匹配即可无歧义区分（字符串 / 数值 / 布尔互不重叠）。
@@ -304,6 +321,57 @@ pub enum EventValue {
     Text(String),
     Number(f64),
     Bool(bool),
+}
+
+/// 画布指针事件种类：节点 `mouseEvents` 声明要收的子集，宿主只回发声明的。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CanvasEventKind {
+    PointerDown,
+    PointerMove,
+    PointerUp,
+    PointerLeave,
+    Wheel,
+    DoubleClick,
+}
+
+impl CanvasEventKind {
+    /// 指针负载是否属于该事件种类（宿主回发前按节点声明过滤）。
+    pub fn matches(self, pointer: &CanvasPointer) -> bool {
+        matches!(
+            (self, pointer),
+            (Self::PointerDown, CanvasPointer::Down { .. })
+                | (Self::PointerMove, CanvasPointer::Move { .. })
+                | (Self::PointerUp, CanvasPointer::Up { .. })
+                | (Self::PointerLeave, CanvasPointer::Leave)
+                | (Self::Wheel, CanvasPointer::Wheel { .. })
+                | (Self::DoubleClick, CanvasPointer::DoubleClick { .. })
+        )
+    }
+}
+
+/// 鼠标按键。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MouseButton {
+    Left,
+    Right,
+    Middle,
+}
+
+/// 画布指针事件负载。坐标 = 节点本地逻辑像素、左上原点；
+/// wheel 增量为行数，正 = 向下 / 向右（Web 惯例，宿主负责与平台滚动方向换算）。
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(rename_all_fields = "camelCase")]
+pub enum CanvasPointer {
+    Down { x: f32, y: f32, button: MouseButton },
+    Move { x: f32, y: f32 },
+    Up { x: f32, y: f32, button: MouseButton },
+    Leave,
+    Wheel { x: f32, y: f32, delta_x: f32, delta_y: f32 },
+    /// 宿主判定（同键二次按下、间隔与位移都在阈值内），插件无需自己算。
+    DoubleClick { x: f32, y: f32, button: MouseButton },
 }
 
 #[cfg(test)]
@@ -368,5 +436,16 @@ mod tests {
         let mut leaf = sample_tree();
         leaf.children[1].children = vec![leaf.children[0].clone()];
         assert!(leaf.validate().unwrap_err().contains("不得携带 children"));
+    }
+
+    #[test]
+    fn canvas_event_kind_matches_only_its_payload() {
+        use CanvasEventKind::*;
+        let down = CanvasPointer::Down { x: 1.0, y: 2.0, button: MouseButton::Left };
+        assert!(PointerDown.matches(&down));
+        assert!(!PointerUp.matches(&down));
+        assert!(!Wheel.matches(&down));
+        assert!(Wheel.matches(&CanvasPointer::Wheel { x: 0.0, y: 0.0, delta_x: 0.0, delta_y: 1.0 }));
+        assert!(DoubleClick.matches(&CanvasPointer::DoubleClick { x: 0.0, y: 0.0, button: MouseButton::Right }));
     }
 }

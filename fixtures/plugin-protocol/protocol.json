@@ -150,10 +150,9 @@
         ]
       },
       {
-        "id": "status",
-        "kind": "text",
-        "content": "就绪",
-        "color": "textMuted"
+        "id": "board",
+        "kind": "canvas",
+        "mouseEvents": ["pointerDown", "pointerMove", "pointerUp", "pointerLeave", "wheel", "doubleClick"]
       }
     ]
   },
@@ -275,6 +274,49 @@
       "name": "vault:switch payload (space)",
       "type": "VaultSwitchPayload",
       "value": { "kind": "space", "spaceId": "space-1" }
+    },
+    {
+      "name": "canvas.submit params",
+      "type": "CanvasSubmitParams",
+      "value": {
+        "surfaceId": "panel",
+        "nodeId": "board",
+        "commands": [
+          { "kind": "line", "x1": 0.0, "y1": 0.5, "x2": 10.0, "y2": 0.5, "stroke": { "type": "token", "name": "accent" }, "width": 2.0 },
+          { "kind": "rect", "x": 1.0, "y": 2.0, "w": 8.0, "h": 4.0, "fill": null, "stroke": { "type": "rgba", "rgba": [200, 64, 64, 255] }, "strokeWidth": 1.5, "cornerRadius": 2.0 },
+          { "kind": "path", "points": [ { "x": 0.0, "y": 0.0 }, { "x": 4.5, "y": 5.0 }, { "x": 9.0, "y": 0.0 } ], "closed": true, "fill": { "type": "token", "name": "success" }, "stroke": null },
+          { "kind": "circle", "cx": 5.0, "cy": 5.0, "r": 3.0, "fill": null, "stroke": { "type": "token", "name": "textMuted" } },
+          { "kind": "text", "x": 1.0, "y": 1.0, "content": "播放头", "size": 12.0, "color": { "type": "token", "name": "text" }, "weight": "medium" },
+          { "kind": "image", "source": { "type": "vault", "path": "assets/tile.png" }, "x": 0.0, "y": 0.0, "w": 16.0, "h": 16.0 }
+        ]
+      }
+    },
+    {
+      "name": "view event canvas pointer",
+      "type": "ViewEventParams",
+      "value": {
+        "surfaceId": "panel",
+        "nodeId": "board",
+        "event": { "kind": "canvas", "pointer": { "kind": "down", "x": 12.5, "y": 3.0, "button": "left" } }
+      }
+    },
+    {
+      "name": "view event canvas wheel",
+      "type": "ViewEventParams",
+      "value": {
+        "surfaceId": "panel",
+        "nodeId": "board",
+        "event": { "kind": "canvas", "pointer": { "kind": "wheel", "x": 8.0, "y": 8.0, "deltaX": 0.0, "deltaY": 1.0 } }
+      }
+    },
+    {
+      "name": "view event canvas double click",
+      "type": "ViewEventParams",
+      "value": {
+        "surfaceId": "panel",
+        "nodeId": "board",
+        "event": { "kind": "canvas", "pointer": { "kind": "doubleClick", "x": 8.0, "y": 8.0, "button": "left" } }
+      }
     }
   ]
 }

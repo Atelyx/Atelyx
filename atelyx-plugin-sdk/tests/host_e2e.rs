@@ -1,11 +1,11 @@
-//! 宿主运行时端到端：以真实插件进程（`echo` / `crasher` 夹具）验证安装即启用、握手与界面提交、
+//! 宿主运行时端到端：以真实插件进程（`stub` / `crasher` 夹具）验证安装即启用、握手与界面提交、
 //! 停用结束进程、崩溃退避与熔断。宿主侧只经 `atelyx_core::plugin_runtime` 访问插件。
 
 use std::time::{Duration, Instant};
 
 use atelyx_core::plugin_runtime::{
-    ContributionSlot, EventValue, NodeBody, PluginRuntime, PluginStatus, SurfaceKind, VaultSwitchPayload,
-    ViewEvent, ViewNode,
+    CanvasPointer, ContributionSlot, DrawCommand, EventValue, MouseButton, NodeBody, PluginRuntime,
+    PluginStatus, SurfaceKind, VaultSwitchPayload, ViewEvent, ViewNode,
 };
 use atelyx_core::vault::test_support::TempDir;
 use atelyx_plugin_sdk::protocol::manifest::MANIFEST_FILE;
@@ -65,15 +65,15 @@ fn wait_state_contains(path: &std::path::Path, needle: &str) {
     }
 }
 
-/// 装一个 echo、启用并等到首次界面提交。返回（临时目录守卫、运行时、插件 id、插件自持数据路径）。
-fn install_ready_echo(keep_mounted: bool) -> (TempDir, std::sync::Arc<PluginRuntime>, String, std::path::PathBuf) {
+/// 装一个 stub、启用并等到首次界面提交。返回（临时目录守卫、运行时、插件 id、插件自持数据路径）。
+fn install_ready_stub(keep_mounted: bool) -> (TempDir, std::sync::Arc<PluginRuntime>, String, std::path::PathBuf) {
     let tmp = TempDir::new("plugin-host-vault-switch");
     let root = tmp.join("plugins");
     let runtime = PluginRuntime::new(root.clone());
     let src = tmp.join("src");
     let extra = if keep_mounted { r#","keepMountedOnVaultSwitch":true"# } else { "" };
-    make_plugin(&src, "com.atelyx.echo", env!("CARGO_BIN_EXE_echo"), extra);
-    let id = runtime.install_dir(&src).expect("安装 echo 应成功");
+    make_plugin(&src, "com.atelyx.stub", env!("CARGO_BIN_EXE_stub"), extra);
+    let id = runtime.install_dir(&src).expect("安装 stub 应成功");
     runtime.set_enabled(&id, true).expect("启用应成功");
     wait_status(&runtime, &id, |s| *s == PluginStatus::Running, Duration::from_secs(10));
     wait_submits(&runtime, &id, 1);
@@ -102,13 +102,13 @@ fn wait_status(runtime: &PluginRuntime, id: &str, want: fn(&PluginStatus) -> boo
 /// 安装即启用 → 握手完成并提交界面 → 停用结束进程 → 卸载移除。
 #[test]
 fn install_enable_view_submit_disable_uninstall() {
-    let tmp = TempDir::new("plugin-host-echo");
+    let tmp = TempDir::new("plugin-host-stub");
     let runtime = PluginRuntime::new(tmp.join("plugins"));
     let src = tmp.join("src");
-    make_plugin(&src, "com.atelyx.echo", env!("CARGO_BIN_EXE_echo"), "");
+    make_plugin(&src, "com.atelyx.stub", env!("CARGO_BIN_EXE_stub"), "");
 
-    let id = runtime.install_dir(&src).expect("安装 echo 应成功");
-    assert_eq!(id, "com.atelyx.echo");
+    let id = runtime.install_dir(&src).expect("安装 stub 应成功");
+    assert_eq!(id, "com.atelyx.stub");
     // 安装只落位内容，不自动启用：未启用即不在运行
     assert!(!runtime.list().into_iter().find(|p| p.id == id).unwrap().enabled);
     assert_eq!(
@@ -125,7 +125,7 @@ fn install_enable_view_submit_disable_uninstall() {
         if submits >= 1 {
             break;
         }
-        assert!(Instant::now() < deadline, "等待 echo 首次界面提交超时");
+        assert!(Instant::now() < deadline, "等待 stub 首次界面提交超时");
         std::thread::sleep(Duration::from_millis(100));
     }
 
@@ -175,23 +175,107 @@ fn submits_of(runtime: &PluginRuntime, id: &str) -> u64 {
 
 /// 界面树里的文本节点内容。
 fn text_of(tree: &ViewNode, node_id: &str) -> String {
-    fn find<'a>(node: &'a ViewNode, node_id: &str) -> Option<&'a ViewNode> {
-        if node.id == node_id {
-            return Some(node);
-        }
-        node.children.iter().find_map(|child| find(child, node_id))
-    }
-    match &find(tree, node_id).unwrap_or_else(|| panic!("树里应有 {node_id} 节点")).body {
+    match &tree.find(node_id).unwrap_or_else(|| panic!("树里应有 {node_id} 节点")).body {
         NodeBody::Text { content, .. } => content.clone(),
         other => panic!("{node_id} 应为 text 节点，实际：{other:?}"),
     }
+}
+
+/// 轮询等画布清单满足条件（超时即失败），返回满足条件时的清单快照。
+fn wait_canvas(
+    runtime: &PluginRuntime,
+    id: &str,
+    want: impl Fn(&[DrawCommand]) -> bool,
+) -> std::sync::Arc<Vec<DrawCommand>> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(list) = runtime.surface_canvas(id, "panel", "board") {
+            if want(&list) {
+                return list;
+            }
+        }
+        assert!(Instant::now() < deadline, "等待画布清单满足条件超时");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// 清单里的文字指令内容（stub 用提示文字回报最近一次指针事件）。
+fn canvas_text(commands: &[DrawCommand]) -> String {
+    for command in commands {
+        if let DrawCommand::Text { content, .. } = command {
+            return content.clone();
+        }
+    }
+    String::new()
+}
+
+/// 清单里折线指令的点数（无折线 = `None`）。
+fn canvas_path_points(commands: &[DrawCommand]) -> Option<usize> {
+    commands.iter().find_map(|command| match command {
+        DrawCommand::Path { points, .. } => Some(points.len()),
+        _ => None,
+    })
+}
+
+/// 画布闭环：挂载后插件提交清单 → 指针事件回发驱动清单更新 → 停用清单清空。
+#[test]
+fn canvas_submit_and_pointer_event_roundtrip() {
+    let (_tmp, runtime, id, _state) = install_ready_stub(false);
+
+    // 树里有画布节点，指针事件按 mouseEvents 声明
+    let tree = runtime.surface_tree(&id, "panel").expect("应已存档首棵树");
+    let NodeBody::Canvas { mouse_events } = &tree.find("board").expect("树里应有画布节点").body
+    else {
+        panic!("board 应为 canvas 节点");
+    };
+    assert!(mouse_events.contains(&atelyx_core::plugin_runtime::CanvasEventKind::PointerDown));
+
+    // 面挂载：插件重发界面并提交画布清单（网格 + 提示文字）
+    runtime.notify_surface_attached(&id, "panel", SurfaceKind::Panel);
+    wait_submits(&runtime, &id, 2);
+    wait_canvas(&runtime, &id, |list| !list.is_empty());
+
+    // 指针按下：插件采点并重发清单（提示文字变化）
+    runtime.send_view_event(
+        &id,
+        "panel",
+        "board",
+        ViewEvent::Canvas {
+            pointer: CanvasPointer::Down { x: 10.0, y: 10.0, button: MouseButton::Left },
+        },
+    );
+    wait_canvas(&runtime, &id, |list| canvas_text(list).contains("拖拽画线"));
+
+    // 移动采点：折线指令出现（两点）
+    runtime.send_view_event(
+        &id,
+        "panel",
+        "board",
+        ViewEvent::Canvas { pointer: CanvasPointer::Move { x: 20.0, y: 20.0 } },
+    );
+    wait_canvas(&runtime, &id, |list| canvas_path_points(list) == Some(2));
+
+    // 双击清空：折线消失
+    runtime.send_view_event(
+        &id,
+        "panel",
+        "board",
+        ViewEvent::Canvas {
+            pointer: CanvasPointer::DoubleClick { x: 20.0, y: 20.0, button: MouseButton::Left },
+        },
+    );
+    wait_canvas(&runtime, &id, |list| canvas_path_points(list).is_none());
+
+    // 停用：画布清单随会话收尾清空
+    runtime.set_enabled(&id, false).expect("停用应成功");
+    assert!(runtime.surface_canvas(&id, "panel", "board").is_none(), "停用后画布清单应清空");
 }
 
 /// 贡献注册 → 面挂载通知 → 节点事件回发 → 界面树更新 → 停用撤贡献：
 /// 界面贡献的完整闭环（宿主侧只经 `plugin_runtime` 的公开面观察）。
 #[test]
 fn contribution_surface_event_loop_and_teardown() {
-    let (_tmp, runtime, id, _state) = install_ready_echo(false);
+    let (_tmp, runtime, id, _state) = install_ready_stub(false);
 
     // 握手后注册贡献：id 即该面挂载后的 surfaceId
     let contributions = runtime.contributions();
@@ -226,7 +310,7 @@ fn contribution_surface_event_loop_and_teardown() {
 /// 首次激活与「同一容器再次进入」都不重载，真正换容器才重载未声明保活的插件。
 #[test]
 fn vault_switch_reloads_plugin_without_keep_mounted() {
-    let (_tmp, runtime, id, state_path) = install_ready_echo(false);
+    let (_tmp, runtime, id, state_path) = install_ready_stub(false);
 
     runtime.on_vault_switch(VaultSwitchPayload::Local { root: "/vaults/first".into() });
     std::thread::sleep(Duration::from_secs(1));
@@ -254,7 +338,7 @@ fn vault_switch_reloads_plugin_without_keep_mounted() {
 /// 自持数据（首次激活即送达——这是保活插件得知当前容器的唯一来源）。
 #[test]
 fn vault_switch_keeps_mounted_subscriber_informed() {
-    let (_tmp, runtime, id, state_path) = install_ready_echo(true);
+    let (_tmp, runtime, id, state_path) = install_ready_stub(true);
 
     runtime.on_vault_switch(VaultSwitchPayload::Local { root: "/vaults/first".into() });
     wait_state_contains(&state_path, "/vaults/first");

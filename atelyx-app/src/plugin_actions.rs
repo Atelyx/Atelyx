@@ -12,8 +12,8 @@ use iced::Task;
 
 use atelyx_core::layout::{self, LayoutNode};
 use atelyx_core::plugin_runtime::{
-    Contribution, ContributionSlot, EventKind, EventValue, ImageSource, NodeBody, SurfaceKind,
-    ViewEvent, ViewNode,
+    CanvasPointer, Contribution, ContributionSlot, DrawCommand, EventKind, EventValue, ImageSource,
+    NodeBody, SurfaceKind, ViewEvent, ViewNode,
 };
 
 use crate::{App, Message};
@@ -138,28 +138,40 @@ pub fn number_event_value(body: &NodeBody, text: &str) -> Option<EventValue> {
     Some(EventValue::Number(clamped))
 }
 
-/// 树里按 id 找节点（草稿维护与事件处理共用）。
+/// 树里按 id 找节点（草稿维护与事件处理共用；查找实现在协议类型 [`ViewNode::find`]）。
 pub fn find_node<'a>(tree: &'a ViewNode, node_id: &str) -> Option<&'a ViewNode> {
-    if tree.id == node_id {
-        return Some(tree);
-    }
-    tree.children.iter().find_map(|child| find_node(child, node_id))
+    tree.find(node_id)
 }
 
-/// 事件是否由节点声明（未声明不上行）。
+/// 事件是否由节点声明（未声明不上行）。画布节点的指针事件按 `mouseEvents` 声明子集判定。
 pub(crate) fn declares(node: &ViewNode, kind: EventKind) -> bool {
     node.events.contains(&kind)
 }
 
-/// 事件对应的声明种类（上行闸门按它判定）。
-fn event_kind(event: &ViewEvent) -> EventKind {
+/// 事件对应的声明种类（上行闸门按它判定）。画布指针事件有独立的声明集（`mouseEvents`），
+/// 不经此映射（返回 `None`）。
+fn event_kind(event: &ViewEvent) -> Option<EventKind> {
     match event {
-        ViewEvent::Click => EventKind::Click,
-        ViewEvent::Change { .. } => EventKind::Change,
-        ViewEvent::Submit { .. } => EventKind::Submit,
-        ViewEvent::Focus => EventKind::Focus,
-        ViewEvent::Blur => EventKind::Blur,
+        ViewEvent::Click => Some(EventKind::Click),
+        ViewEvent::Change { .. } => Some(EventKind::Change),
+        ViewEvent::Submit { .. } => Some(EventKind::Submit),
+        ViewEvent::Focus => Some(EventKind::Focus),
+        ViewEvent::Blur => Some(EventKind::Blur),
+        ViewEvent::Canvas { .. } => None,
     }
+}
+
+/// 画布指针事件是否由节点声明。
+fn declares_pointer(node_body: &NodeBody, pointer: &CanvasPointer) -> bool {
+    let NodeBody::Canvas { mouse_events } = node_body else {
+        return false;
+    };
+    mouse_events.iter().any(|kind| kind.matches(pointer))
+}
+
+/// 画布指针事件构造（画布部件回发用）。
+pub(crate) fn view_event_canvas(pointer: CanvasPointer) -> ViewEvent {
+    ViewEvent::Canvas { pointer }
 }
 
 // ===== 布局里的面与投影 =====
@@ -219,30 +231,46 @@ pub fn refresh_projection(app: &mut App) -> Task<Message> {
     let contributions = app.plugins.contributions();
     app.plugin_contributions = contributions;
     let surfaces: Vec<(String, String)> = app.plugin_surfaces.iter().cloned().collect();
+    let mut canvas_keys = HashSet::new();
     for (plugin_id, surface_id) in surfaces {
         let key = (plugin_id.clone(), surface_id.clone());
         match app.plugins.surface_tree(&plugin_id, &surface_id) {
             Some(tree) => {
                 sync_editors(app, &plugin_id, &surface_id, &tree);
                 prune_node_state(app, &plugin_id, &surface_id, &tree);
-                app.plugin_trees.insert(key, tree);
+                app.plugin_trees.insert(key.clone(), tree);
             }
             None => {
                 app.plugin_trees.remove(&key);
                 drop_node_state(app, &plugin_id, &surface_id);
             }
         }
+        // 画布清单投影：树里每个 canvas 节点取最新清单（收尾 / 树重发的孤儿清单不投影）
+        let mut canvases = Vec::new();
+        if let Some(tree) = app.plugin_trees.get(&key) {
+            collect_canvas_nodes(tree, &mut canvases);
+        }
+        for node_id in canvases {
+            if let Some(list) = app.plugins.surface_canvas(&plugin_id, &surface_id, &node_id) {
+                let canvas_key = (plugin_id.clone(), surface_id.clone(), node_id);
+                canvas_keys.insert(canvas_key.clone());
+                app.plugin_canvases.insert(canvas_key, list);
+            }
+        }
     }
+    app.plugin_canvases.retain(|key, _| canvas_keys.contains(key));
     ensure_images(app)
 }
 
-/// 撤掉某面的本地草稿、多行编辑器与树投影（面移除 / 插件停用）。
+/// 撤掉某面的本地草稿、多行编辑器、画布清单与树投影（面移除 / 插件停用）。
 pub fn drop_node_state(app: &mut App, plugin_id: &str, surface_id: &str) {
     app.plugin_trees
         .remove(&(plugin_id.to_string(), surface_id.to_string()));
     app.plugin_drafts
         .retain(|key, _| !(key.0 == plugin_id && key.1 == surface_id));
     app.plugin_editors
+        .retain(|key, _| !(key.0 == plugin_id && key.1 == surface_id));
+    app.plugin_canvases
         .retain(|key, _| !(key.0 == plugin_id && key.1 == surface_id));
 }
 
@@ -298,6 +326,16 @@ fn collect_multiline<'a>(node: &'a ViewNode, out: &mut impl FnMut(&'a str, Strin
     }
 }
 
+/// 收集树里的画布节点 id（清单投影按它对齐）。
+fn collect_canvas_nodes(node: &ViewNode, out: &mut Vec<String>) {
+    if matches!(node.body, NodeBody::Canvas { .. }) {
+        out.push(node.id.clone());
+    }
+    for child in &node.children {
+        collect_canvas_nodes(child, out);
+    }
+}
+
 // ===== 界面图片 =====
 
 /// 界面图片来源的内容键：私有目录取绝对路径（与仓库相对路径取值域不重叠，仓库来源沿仓库口径）。
@@ -334,6 +372,15 @@ fn ensure_images(app: &mut App) -> Task<Message> {
         for source in sources {
             if let Some(key) = image_key(app, plugin_id, source) {
                 pending.push((key, source.clone()));
+            }
+        }
+    }
+    for ((plugin_id, _, _), list) in &app.plugin_canvases {
+        for command in list.iter() {
+            if let DrawCommand::Image { source, .. } = command {
+                if let Some(key) = image_key(app, plugin_id, source) {
+                    pending.push((key, source.clone()));
+                }
             }
         }
     }
@@ -443,7 +490,10 @@ pub fn on_view_event(
         }
         other => other,
     };
-    if !events.contains(&event_kind(&event)) {
+    if !match &event {
+        ViewEvent::Canvas { pointer } => declares_pointer(&body, pointer),
+        other => event_kind(other).is_some_and(|kind| events.contains(&kind)),
+    } {
         return Task::none();
     }
     app.plugins
@@ -630,7 +680,11 @@ mod tests {
         node.events = vec![EventKind::Submit];
         assert!(!declares(&node, EventKind::Change));
         assert!(declares(&node, EventKind::Submit));
-        assert_eq!(event_kind(&ViewEvent::Submit { value: EventValue::Text("v".into()) }), EventKind::Submit);
-        assert_eq!(event_kind(&ViewEvent::Click), EventKind::Click);
+        assert_eq!(
+            event_kind(&ViewEvent::Submit { value: EventValue::Text("v".into()) }),
+            Some(EventKind::Submit)
+        );
+        assert_eq!(event_kind(&ViewEvent::Click), Some(EventKind::Click));
+        assert_eq!(event_kind(&ViewEvent::Canvas { pointer: CanvasPointer::Leave }), None);
     }
 }

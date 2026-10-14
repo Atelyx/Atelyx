@@ -25,12 +25,13 @@ use crate::plugin_process::PluginProcessHost;
 use instance::Instance;
 
 /// 协议类型再导出：壳只依赖 `atelyx-core`，不直接依赖协议 crate。
+pub use atelyx_plugin_protocol::canvas::{CanvasColor, CanvasPoint, DrawCommand};
 pub use atelyx_plugin_protocol::event::VaultSwitchPayload;
 pub use atelyx_plugin_protocol::manifest::Permission;
 pub use atelyx_plugin_protocol::method::{ContributionSlot, FileFilter, NotificationLevel, SurfaceKind};
 pub use atelyx_plugin_protocol::view::{
-    Align, Axis, ButtonVariant, ColorToken, EventKind, EventValue, ImageFit, ImageSource, MenuItem,
-    NodeBody, TextWeight, ViewEvent, ViewNode,
+    Align, Axis, ButtonVariant, CanvasEventKind, CanvasPointer, ColorToken, EventKind, EventValue,
+    ImageFit, ImageSource, MenuItem, MouseButton, NodeBody, TextWeight, ViewEvent, ViewNode,
 };
 
 /// 插件运行状态。
@@ -326,6 +327,20 @@ impl PluginRuntime {
             .unwrap()
             .get(plugin_id)
             .and_then(|i| i.surface_tree(surface_id))
+    }
+
+    /// 取某插件某面某画布节点的最新绘图指令清单（整发整换；未提交 / 已清除时为 `None`）。
+    pub fn surface_canvas(
+        &self,
+        plugin_id: &str,
+        surface_id: &str,
+        node_id: &str,
+    ) -> Option<std::sync::Arc<Vec<DrawCommand>>> {
+        self.instances
+            .lock()
+            .unwrap()
+            .get(plugin_id)
+            .and_then(|i| i.surface_canvas(surface_id, node_id))
     }
 
     /// 回发一条界面事件给插件。插件未在跑时静默丢弃（对端已不在）。

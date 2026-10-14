@@ -18,6 +18,7 @@ mod layout_view;
 mod markdown_edit;
 mod markdown_view;
 mod plugin_actions;
+mod plugin_canvas;
 mod plugin_view;
 mod properties_view;
 mod recent_view;
@@ -1002,6 +1003,9 @@ pub struct App {
     pub plugin_drafts: HashMap<plugin_actions::InputKey, plugin_actions::InputDraft>,
     /// 多行输入的本机编辑器状态（内容与光标归宿主所有）。
     pub plugin_editors: HashMap<plugin_actions::InputKey, plugin_actions::EditorState>,
+    /// 画布节点的最新绘图指令清单投影（键 = 插件 id + 面 id + 节点 id；随树投影刷新）。
+    pub plugin_canvases:
+        HashMap<plugin_actions::InputKey, std::sync::Arc<Vec<atelyx_core::plugin_runtime::DrawCommand>>>,
     /// 应用级全局配置（最近仓库列表；落盘 global.json）。
     pub global: global_config::GlobalConfig,
     /// 设置-通用：界面字号草稿（None = 显示当前生效值）。
@@ -1354,6 +1358,7 @@ impl App {
                 plugin_trees: HashMap::new(),
                 plugin_drafts: HashMap::new(),
                 plugin_editors: HashMap::new(),
+                plugin_canvases: HashMap::new(),
                 ai_sub_tab: "providers".into(),
                 repo_config: vault::VaultConfig::default(),
                 agents: Vec::new(),

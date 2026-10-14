@@ -55,7 +55,7 @@ pub fn panel_view<'a>(app: &'a App, window: iced::window::Id, view: &str) -> Ele
     };
     let key = (ctx.plugin_id.clone(), ctx.surface_id.clone());
     match app.plugin_trees.get(&key) {
-        Some(tree) => container(render_node(app, &ctx, tree))
+        Some(tree) => container(render_root(app, &ctx, tree))
             .width(Length::Fill)
             .height(Length::Fill)
             .padding(Padding::ZERO.horizontal(12.0).vertical(10.0))
@@ -72,13 +72,31 @@ fn placeholder<'a>(icon_name: &str, title: &str, desc: &str) -> Element<'a, Mess
     controls::view_placeholder(icon_name, title.to_string(), desc.to_string())
 }
 
+/// 根节点渲染：容器按面区域撑满高度（Fill 子项——画布 / 列表——才有可分配空间；
+/// Shrink 根列内的 Fill 子项会塌缩成 0 高）。嵌套容器保持收缩语义。
+fn render_root<'a>(app: &'a App, ctx: &Ctx, node: &'a ViewNode) -> Element<'a, Message> {
+    match &node.body {
+        NodeBody::Column { .. } | NodeBody::Row { .. } => render_node_in(app, ctx, node, true),
+        _ => render_node_in(app, ctx, node, false),
+    }
+}
+
 /// 单节点解释：容器递归渲染子节点；叶子按控件语义取主题 token 与事件绑定。
 fn render_node<'a>(app: &'a App, ctx: &Ctx, node: &'a ViewNode) -> Element<'a, Message> {
+    render_node_in(app, ctx, node, false)
+}
+
+fn render_node_in<'a>(
+    app: &'a App,
+    ctx: &Ctx,
+    node: &'a ViewNode,
+    fill_height: bool,
+) -> Element<'a, Message> {
     match &node.body {
         NodeBody::Column { gap, padding, cross_align } => {
             let mut col = keyed_column(children(app, ctx, node))
                 .width(Length::Fill)
-                .height(Length::Shrink)
+                .height(if fill_height { Length::Fill } else { Length::Shrink })
                 .spacing(gap.unwrap_or(DEFAULT_GAP));
             if let Some(pad) = padding {
                 col = col.padding(Padding::from(*pad));
@@ -92,6 +110,9 @@ fn render_node<'a>(app: &'a App, ctx: &Ctx, node: &'a ViewNode) -> Element<'a, M
             let mut line = row(children_elements(app, ctx, node))
                 .spacing(gap.unwrap_or(DEFAULT_GAP))
                 .align_y(cross_align.map(vertical).unwrap_or(Vertical::Center));
+            if fill_height {
+                line = line.height(Length::Fill);
+            }
             if let Some(pad) = padding {
                 line = line.padding(Padding::from(*pad));
             }
@@ -233,6 +254,20 @@ fn render_node<'a>(app: &'a App, ctx: &Ctx, node: &'a ViewNode) -> Element<'a, M
                 (None, None) => controls::dropdown_trigger("…", Length::Fill, open),
             }
         }
+        NodeBody::Canvas { mouse_events } => {
+            crate::plugin_canvas::PluginCanvas {
+                app,
+                window: ctx.window,
+                plugin_id: ctx.plugin_id.clone(),
+                surface_id: ctx.surface_id.clone(),
+                node_id: &node.id,
+                list: app
+                    .plugin_canvases
+                    .get(&(ctx.plugin_id.clone(), ctx.surface_id.clone(), node.id.clone())),
+                mouse_events,
+            }
+            .into()
+        }
     }
 }
 
@@ -358,26 +393,11 @@ fn image_node<'a>(app: &'a App, plugin_id: &str, source: &ImageSource, fit: Imag
 }
 
 fn token_color(token: ColorToken) -> Color {
-    match token {
-        ColorToken::Text => pal::TEXT_PRIMARY,
-        ColorToken::TextSecondary => pal::TEXT_SECONDARY,
-        ColorToken::TextMuted => pal::TEXT_MUTED,
-        ColorToken::Accent => pal::ACCENT,
-        ColorToken::Danger => pal::DANGER,
-        ColorToken::Success => pal::SUCCESS,
-        ColorToken::Warning => pal::WARNING,
-    }
+    crate::plugin_canvas::token_color(token)
 }
 
 fn text_weight(weight: TextWeight) -> iced::Font {
-    match weight {
-        TextWeight::Normal => iced::Font::default(),
-        TextWeight::Medium => iced::Font {
-            weight: iced::font::Weight::Medium,
-            ..iced::Font::default()
-        },
-        TextWeight::SemiBold => crate::ui::semibold(),
-    }
+    crate::plugin_canvas::font_of(weight)
 }
 
 fn button_variant(variant: Option<ButtonVariant>) -> Variant {

@@ -2,6 +2,7 @@
 //! 握手校验 API 版本；信封为 JSON-RPC 2.0 over NDJSON；能力面方法、ViewNode 树与事件均为
 //! 封闭枚举 + 版本号，破坏性变更必须升 [`API_VERSION`]（握手失败即响亮拒绝）。
 
+pub mod canvas;
 pub mod envelope;
 pub mod event;
 pub mod handshake;

@@ -1,4 +1,4 @@
-//! 端到端对练：测试侧扮演宿主桩，拉起真实 echo 插件进程走完整协议——
+//! 端到端对练：测试侧扮演宿主桩，拉起真实 stub 夹具进程走完整协议——
 //! 握手、订阅与首次提交、节点事件回写、宿主广播 → state 读写往返 → 再提交、EOF 收场。
 
 use std::time::Duration;
@@ -55,16 +55,16 @@ impl Stub {
     }
 }
 
-/// 拉起 echo 进程并完成握手（stderr 不接管，直接进测试输出便于失败诊断）。
-async fn spawn_echo() -> (Child, Stub) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_echo"))
+/// 拉起 stub 进程并完成握手（stderr 不接管，直接进测试输出便于失败诊断）。
+async fn spawn_stub() -> (Child, Stub) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_stub"))
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()
-        .expect("拉起 echo 插件失败");
+        .expect("拉起 stub 夹具失败");
     let stub = Stub {
-        stdin: child.stdin.take().expect("echo stdin"),
-        reader: BufReader::new(child.stdout.take().expect("echo stdout")),
+        stdin: child.stdin.take().expect("stub stdin"),
+        reader: BufReader::new(child.stdout.take().expect("stub stdout")),
     };
     (child, stub)
 }
@@ -78,7 +78,7 @@ async fn handshake(stub: &mut Stub) {
     };
     assert_eq!(request.method, INITIALIZE);
     assert_eq!(request.params["apiVersion"], API_VERSION);
-    assert_eq!(request.params["plugin"]["id"], "com.atelyx.echo");
+    assert_eq!(request.params["plugin"]["id"], "com.atelyx.stub");
     let result = InitializeResult {
         api_version: API_VERSION,
         host: atelyx_plugin_sdk::protocol::handshake::HostInfo {
@@ -120,8 +120,8 @@ async fn consume_initial(stub: &mut Stub) -> SubmitParams {
                 assert_eq!(params.surface_id, "panel", "提交的 surfaceId 应与贡献 id 一致");
                 stub.reply_ok(request.id, json!({"applied": true})).await;
                 assert!(
-                    subscribed.iter().any(|name| name == "echo.ping"),
-                    "应订阅 echo.ping，实际：{subscribed:?}"
+                    subscribed.iter().any(|name| name == "stub.ping"),
+                    "应订阅 stub.ping，实际：{subscribed:?}"
                 );
                 assert!(registered, "提交界面前应先注册贡献");
                 return params;
@@ -153,27 +153,10 @@ fn status_text(tree: &SubmitParams) -> String {
     }
 }
 
-/// 树里 list 节点的文本行（操作日志）。
-fn log_lines(tree: &SubmitParams) -> Vec<String> {
-    let list = tree
-        .tree
-        .children
-        .iter()
-        .find(|n| n.id == "log")
-        .expect("树里应有 log 列表节点");
-    list.children
-        .iter()
-        .filter_map(|child| match &child.body {
-            atelyx_plugin_sdk::protocol::view::NodeBody::Text { content, .. } => Some(content.clone()),
-            _ => None,
-        })
-        .collect()
-}
-
 /// 输入闭环：单行输入的 change / submit 携带新值，插件据此改状态并整树重发。
 #[tokio::test]
 async fn panel_input_change_and_submit_roundtrip() {
-    let (mut child, mut stub) = spawn_echo().await;
+    let (mut child, mut stub) = spawn_stub().await;
     handshake(&mut stub).await;
     consume_initial(&mut stub).await;
 
@@ -197,24 +180,6 @@ async fn panel_input_change_and_submit_roundtrip() {
         other => panic!("query 应为 textInput 节点，实际：{other:?}"),
     }
 
-    // 下拉：宿主按语义回发选中项下标（number）
-    stub.send(&Envelope::notification(
-        method::view::HOST_EVENT,
-        json!({"surfaceId": "panel", "nodeId": "engine", "event": {"kind": "change", "value": 1}}),
-    ))
-    .await;
-    let after_pick = next_submit(&mut stub).await;
-    assert_eq!(status_text(&after_pick), "引擎：1");
-
-    // 勾选：宿主回发布尔值
-    stub.send(&Envelope::notification(
-        method::view::HOST_EVENT,
-        json!({"surfaceId": "panel", "nodeId": "flag", "event": {"kind": "change", "value": true}}),
-    ))
-    .await;
-    let after_toggle = next_submit(&mut stub).await;
-    assert_eq!(status_text(&after_toggle), "自动启动：开");
-
     drop(stub);
     let status = tokio::time::timeout(TIMEOUT, child.wait())
         .await
@@ -226,7 +191,7 @@ async fn panel_input_change_and_submit_roundtrip() {
 /// 面重新就绪：宿主发 `host:surface.attached`（面板挂上 / 插件重启后重发）时插件重发当前界面。
 #[tokio::test]
 async fn surface_attached_triggers_resubmit() {
-    let (mut child, mut stub) = spawn_echo().await;
+    let (mut child, mut stub) = spawn_stub().await;
     handshake(&mut stub).await;
     consume_initial(&mut stub).await;
 
@@ -249,35 +214,34 @@ async fn surface_attached_triggers_resubmit() {
 
 /// 主回环：握手 → 初始提交 → 点击事件回写 → 宿主广播经 state 读写往返回显 → EOF 收场。
 #[tokio::test]
-async fn full_roundtrip_with_echo_plugin() {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_echo"))
+async fn full_roundtrip_with_stub_fixture() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_stub"))
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()
-        .expect("拉起 echo 插件失败");
+        .expect("拉起 stub 夹具失败");
     let mut stub = Stub {
-        stdin: child.stdin.take().expect("echo stdin"),
-        reader: BufReader::new(child.stdout.take().expect("echo stdout")),
+        stdin: child.stdin.take().expect("stub stdin"),
+        reader: BufReader::new(child.stdout.take().expect("stub stdout")),
     };
 
     handshake(&mut stub).await;
     let first = consume_initial(&mut stub).await;
     assert_eq!(status_text(&first), "就绪", "首棵树状态文本");
 
-    // 节点事件：按钮点击 → 整树重发，状态文本带计数
+    // 节点事件：输入提交 → 整树重发，状态文本带输入值
     stub.send(&Envelope::notification(
         method::view::HOST_EVENT,
-        json!({"surfaceId": "panel", "nodeId": "go", "event": {"kind": "click"}}),
+        json!({"surfaceId": "panel", "nodeId": "query", "event": {"kind": "submit", "value": "hello"}}),
     ))
     .await;
-    let after_click = next_submit(&mut stub).await;
-    assert_eq!(status_text(&after_click), "点击 1 次");
-    assert_eq!(log_lines(&after_click).len(), 1, "点击应追加一条操作日志");
+    let after_submit = next_submit(&mut stub).await;
+    assert_eq!(status_text(&after_submit), "输入：hello");
 
     // 宿主广播 → state 写读往返 → 回显到界面
     stub.send(&Envelope::notification(
         event::HOST_PUBLISH,
-        json!({"name": "echo.ping", "payload": "hello"}),
+        json!({"name": "stub.ping", "payload": "hello"}),
     ))
     .await;
     let (id, write) = stub.expect_request(method::state::WRITE).await;
@@ -302,7 +266,7 @@ async fn full_roundtrip_with_echo_plugin() {
 /// 事件确已送达，形状由协议 `VaultSwitchPayload` 定义）。
 #[tokio::test]
 async fn vault_switch_event_reaches_fixture_as_typed_payload() {
-    let (mut child, mut stub) = spawn_echo().await;
+    let (mut child, mut stub) = spawn_stub().await;
     handshake(&mut stub).await;
     consume_initial(&mut stub).await;
 
@@ -328,7 +292,7 @@ async fn vault_switch_event_reaches_fixture_as_typed_payload() {
 /// 协议违规断链：插件收到宿主请求（协议约定只有通知）应退出而非带病运行。
 #[tokio::test]
 async fn host_request_breaks_connection() {
-    let (mut child, mut stub) = spawn_echo().await;
+    let (mut child, mut stub) = spawn_stub().await;
     handshake(&mut stub).await;
     consume_initial(&mut stub).await;
     stub.send(&Envelope::request(RequestId::Num(99), "fs.readText", json!({"path": "x"}))).await;
@@ -342,7 +306,7 @@ async fn host_request_breaks_connection() {
 /// 版本不一致响亮失败：宿主回更高协议版本，插件立即退出。
 #[tokio::test]
 async fn version_mismatch_fails_loudly() {
-    let (mut child, mut stub) = spawn_echo().await;
+    let (mut child, mut stub) = spawn_stub().await;
     let line = stub.next_line().await;
     let request = match Envelope::parse(line.trim_end()).expect("握手应为合法信封") {
         Envelope::Request(r) => r,

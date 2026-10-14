@@ -2,7 +2,7 @@
 //! 事件声明保持显式——构造器不替调用方挂事件，避免「按钮没反应」这类静默偏差。
 
 use crate::protocol::view::{
-    ButtonVariant, EventKind, ImageSource, MenuItem, NodeBody, ViewNode,
+    ButtonVariant, CanvasEventKind, EventKind, ImageSource, MenuItem, NodeBody, ViewNode,
 };
 
 fn node(id: &str, body: NodeBody) -> ViewNode {
@@ -86,4 +86,10 @@ pub fn progress(id: &str, value: f64) -> ViewNode {
 
 pub fn menu(id: &str, label: &str, items: Vec<MenuItem>) -> ViewNode {
     node(id, NodeBody::Menu { items, label: Some(label.into()), icon: None })
+}
+
+/// 自绘画布节点：`mouse_events` 声明要接收的指针事件子集（未声明不上行）。
+/// 内容经 `Context::submit_canvas` 提交指令清单，命中由插件按指令几何自算。
+pub fn canvas(id: &str, mouse_events: Vec<CanvasEventKind>) -> ViewNode {
+    node(id, NodeBody::Canvas { mouse_events })
 }

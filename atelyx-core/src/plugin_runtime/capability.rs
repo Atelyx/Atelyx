@@ -71,6 +71,7 @@ mod tests {
         // 运行时时序方法不占权限
         assert_eq!(permission_for("initialize"), None);
         assert_eq!(permission_for(method::view::SUBMIT), None);
+        assert_eq!(permission_for(method::canvas::SUBMIT), None, "画布清单是界面通道，不占权限声明");
     }
 
     #[test]

@@ -126,6 +126,22 @@ impl Context {
             .await
     }
 
+    /// 提交一份画布指令清单（整发整换，空清单 = 清空画布）。目标节点须在当前界面树里
+    /// 且为 canvas 节点，否则宿主可读拒绝；指令合法性由宿主校验（结果在错误里带指令下标）。
+    pub async fn submit_canvas(
+        &self,
+        surface_id: &str,
+        node_id: &str,
+        commands: Vec<crate::protocol::canvas::DrawCommand>,
+    ) -> Result<SubmitResult, RpcError> {
+        let params = crate::protocol::method::CanvasSubmitParams {
+            surface_id: surface_id.into(),
+            node_id: node_id.into(),
+            commands,
+        };
+        self.call_typed(method::canvas::SUBMIT, &params).await
+    }
+
     /// 注册一个贡献点，使其出现在宿主对应入口（面板 / 表格视图下拉）。
     /// `id` 插件内唯一且不得含 `:`，同时是该面挂载后的 surfaceId；重复或非法 id 由宿主可读拒绝。
     pub async fn register(

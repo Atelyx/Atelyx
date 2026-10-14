@@ -20,7 +20,7 @@ use atelyx_plugin_protocol::method::{
     self, ContributionSlot, RegisterParams, SurfaceAttachedParams, SurfaceDetachedParams,
     UnregisterParams, ViewEventParams,
 };
-use atelyx_plugin_protocol::{view, API_VERSION};
+use atelyx_plugin_protocol::{canvas, view, API_VERSION};
 use base64::Engine;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -79,11 +79,16 @@ pub(crate) struct Instance {
     denied: Mutex<Vec<AuditRecord>>,
     /// 各面最新界面树（surface id → 树）；会话收尾一并清除（撤贡献）。
     surfaces: Mutex<HashMap<String, ViewNode>>,
+    /// 各面画布节点的最新绘图指令清单（整发整换，合帧应用）。
+    canvases: CanvasLists,
     /// 已注册贡献点（按注册序）；id 插件内唯一，撤销按 id 摘除。
     contributions: Mutex<Vec<ContributionEntry>>,
     view_submits: AtomicU64,
     crash_times: Mutex<Vec<Instant>>,
 }
+
+/// 画布节点 → 指令清单存档（(面 id, 节点 id) → 清单）。
+type CanvasLists = Mutex<HashMap<(String, String), Arc<Vec<canvas::DrawCommand>>>>;
 
 /// 一个已注册贡献点（不含插件 id；插件 id 由汇总侧补上）。
 struct ContributionEntry {
@@ -122,6 +127,7 @@ impl Instance {
             subscriptions: Mutex::new(HashSet::new()),
             denied: Mutex::new(Vec::new()),
             surfaces: Mutex::new(HashMap::new()),
+            canvases: Mutex::new(HashMap::new()),
             contributions: Mutex::new(Vec::new()),
             view_submits: AtomicU64::new(0),
             crash_times: Mutex::new(Vec::new()),
@@ -151,6 +157,19 @@ impl Instance {
     /// 某面的最新界面树（会话收尾即清空，插件未提交过 = `None`）。
     pub(crate) fn surface_tree(&self, surface_id: &str) -> Option<ViewNode> {
         self.surfaces.lock().unwrap().get(surface_id).cloned()
+    }
+
+    /// 某面某画布节点的最新绘图指令清单（整发整换；会话收尾即清空）。
+    pub(crate) fn surface_canvas(
+        &self,
+        surface_id: &str,
+        node_id: &str,
+    ) -> Option<Arc<Vec<canvas::DrawCommand>>> {
+        self.canvases
+            .lock()
+            .unwrap()
+            .get(&(surface_id.to_string(), node_id.to_string()))
+            .cloned()
     }
 
     /// 本插件已注册贡献点（补上插件 id）。
@@ -260,6 +279,8 @@ impl Instance {
         self.subscriptions.lock().unwrap().clear();
         let surfaces_dropped = !self.surfaces.lock().unwrap().is_empty();
         self.surfaces.lock().unwrap().clear();
+        let canvases_dropped = !self.canvases.lock().unwrap().is_empty();
+        self.canvases.lock().unwrap().clear();
         let contributions_dropped = !self.contributions.lock().unwrap().is_empty();
         self.contributions.lock().unwrap().clear();
         for child in self.children.take_all() {
@@ -270,7 +291,7 @@ impl Instance {
         self.shortcuts.release_plugin(&self.id);
         self.fail_pending_dialogs("插件已停止，对话框已取消");
         // 界面与贡献变化广播给壳：壳据此停下已停插件界面的渲染并清掉菜单条目
-        if surfaces_dropped {
+        if surfaces_dropped || canvases_dropped {
             let _ = self.events.send(PluginEvent::ViewSubmitted { id: self.id.clone() });
         }
         if contributions_dropped {
@@ -496,6 +517,7 @@ impl Instance {
             method::view::SUBMIT => self.on_submit(token, params),
             method::view::REGISTER => self.on_register(token, params),
             method::view::UNREGISTER => self.on_unregister(token, params),
+            method::canvas::SUBMIT => self.on_canvas_submit(token, params),
             method::state::READ => {
                 let json = capability::read_state(&self.state_dir).map_err(RpcError::failed)?;
                 Ok(json!({ "json": json }))
@@ -660,8 +682,48 @@ impl Instance {
         }
         view::ViewNode::validate(&p.tree).map_err(RpcError::failed)?;
         self.with_session(token, || {
-            self.surfaces.lock().unwrap().insert(p.surface_id.clone(), p.tree);
+            let mut surfaces = self.surfaces.lock().unwrap();
+            // 树整发整换：新树里已不存在的画布节点，其清单随之清除（清单存档不得比界面树活得久）
+            let mut canvases = self.canvases.lock().unwrap();
+            canvases.retain(|(surface_id, node_id), _| {
+                surface_id != &p.surface_id || has_canvas_node(&p.tree, node_id)
+            });
+            surfaces.insert(p.surface_id.clone(), p.tree);
             self.view_submits.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        })
+        .map_err(RpcError::failed)?;
+        let _ = self.events.send(PluginEvent::ViewSubmitted { id: self.id.clone() });
+        Ok(json!({ "applied": true }))
+    }
+
+    /// 校验并接收画布指令清单：面须已有界面树、节点须在树里且为 canvas 节点，指令逐条校验。
+    /// 清单整发整换，空清单 = 清空画布；存档与会话闸门同口径（收尾后到达的提交不得让清单复活）。
+    fn on_canvas_submit(self: &Arc<Self>, token: u64, params: &Value) -> Result<Value, RpcError> {
+        let p: method::CanvasSubmitParams = parse(params)?;
+        if p.surface_id.trim().is_empty() {
+            return Err(RpcError::failed("surfaceId 不能为空"));
+        }
+        if p.node_id.trim().is_empty() {
+            return Err(RpcError::failed("nodeId 不能为空"));
+        }
+        canvas::validate_commands(&p.commands).map_err(RpcError::failed)?;
+        self.with_session(token, || {
+            let surfaces = self.surfaces.lock().unwrap();
+            let tree = surfaces
+                .get(&p.surface_id)
+                .ok_or_else(|| format!("面尚未提交界面树：{}", p.surface_id))?;
+            let node = tree
+                .find(&p.node_id)
+                .ok_or_else(|| format!("画布节点不在当前界面树里：{}", p.node_id))?;
+            if !matches!(node.body, view::NodeBody::Canvas { .. }) {
+                return Err(format!("节点不是画布：{}", p.node_id));
+            }
+            drop(surfaces);
+            self.canvases
+                .lock()
+                .unwrap()
+                .insert((p.surface_id.clone(), p.node_id.clone()), Arc::new(p.commands));
             Ok(())
         })
         .map_err(RpcError::failed)?;
@@ -711,6 +773,10 @@ impl Instance {
                 return Err(format!("未注册的贡献 id：{}", p.id));
             }
             self.surfaces.lock().unwrap().remove(&p.id);
+            self.canvases
+                .lock()
+                .unwrap()
+                .retain(|(surface_id, _), _| surface_id != &p.id);
             Ok(())
         })
         .map_err(RpcError::failed)?;
@@ -934,6 +1000,11 @@ fn record_crash(times: &mut Vec<Instant>, now: Instant) -> usize {
     times.retain(|t| now.duration_since(*t) < CRASH_WINDOW);
     times.push(now);
     times.len()
+}
+
+/// 树里是否存在指定 id 的 canvas 节点（树重发时清理孤儿清单的判据）。
+fn has_canvas_node(tree: &ViewNode, node_id: &str) -> bool {
+    tree.find(node_id).is_some_and(|node| matches!(node.body, view::NodeBody::Canvas { .. }))
 }
 
 /// 解析 params。缺省 params（信封里 `params` 为 null）按空对象处理：全可选入参的方法
@@ -1354,5 +1425,89 @@ mod tests {
         }
         assert!(instance.surface_tree("main").is_none());
         assert!(instance.contributions().is_empty());
+    }
+
+    /// 画布清单提交：面须已有树、节点须在树里且为 canvas、指令逐条校验；存档按 (面, 节点) 键合帧覆盖。
+    #[test]
+    fn canvas_submit_requires_canvas_node_in_tree() {
+        let (_tmp, instance) = make_instance(Vec::new());
+        let canvas_tree = || {
+            json!({ "id": "root", "kind": "column", "children": [
+                { "id": "board", "kind": "canvas", "mouseEvents": ["pointerDown"] },
+                { "id": "hint", "kind": "text", "content": "x" }
+            ]})
+        };
+        let commands = json!([
+            { "kind": "line", "x1": 0.0, "y1": 0.0, "x2": 5.0, "y2": 5.0, "stroke": { "type": "rgba", "rgba": [0, 0, 0, 255] } }
+        ]);
+        let submit = |node_id: &str| {
+            json!({ "surfaceId": "main", "nodeId": node_id, "commands": commands })
+        };
+        assert!(
+            instance.dispatch(method::canvas::SUBMIT, &submit("board")).is_err(),
+            "面没有界面树时应被拒"
+        );
+        instance
+            .dispatch(method::view::SUBMIT, &json!({ "surfaceId": "main", "tree": canvas_tree() }))
+            .unwrap();
+        assert!(
+            instance.dispatch(method::canvas::SUBMIT, &submit("missing")).is_err(),
+            "节点不在树里应被拒"
+        );
+        assert!(
+            instance.dispatch(method::canvas::SUBMIT, &submit("hint")).is_err(),
+            "非 canvas 节点应被拒"
+        );
+        instance.dispatch(method::canvas::SUBMIT, &submit("board")).expect("合法提交应被接收");
+        assert_eq!(instance.surface_canvas("main", "board").unwrap().len(), 1);
+        assert!(instance.surface_canvas("main", "hint").is_none());
+
+        let bad = json!({ "surfaceId": "main", "nodeId": "board", "commands": [
+            { "kind": "circle", "cx": 0.0, "cy": 0.0, "r": 1.0, "fill": null, "stroke": null }
+        ]});
+        assert!(
+            instance.dispatch(method::canvas::SUBMIT, &bad).is_err(),
+            "无填充也无描边的指令应被拒"
+        );
+        assert_eq!(instance.surface_canvas("main", "board").unwrap().len(), 1, "被拒的提交不得改写存档");
+    }
+
+    /// 树重发清掉已消失节点的清单；重复提交覆盖同一节点；空清单 = 清空画布；收尾清全部。
+    #[test]
+    fn canvas_lists_follow_the_tree_lifecycle() {
+        let (_tmp, instance) = make_instance(Vec::new());
+        let tree = |with_second: bool| {
+            let mut children = vec![json!({ "id": "board", "kind": "canvas" })];
+            if with_second {
+                children.push(json!({ "id": "second", "kind": "canvas" }));
+            }
+            json!({ "id": "root", "kind": "column", "children": children })
+        };
+        let submit_canvas = |node_id: &str, count: usize| {
+            let commands: Vec<Value> = (0..count)
+                .map(|_| json!({ "kind": "circle", "cx": 1.0, "cy": 1.0, "r": 1.0, "fill": { "type": "rgba", "rgba": [1, 2, 3, 4] } }))
+                .collect();
+            json!({ "surfaceId": "main", "nodeId": node_id, "commands": commands })
+        };
+        instance
+            .dispatch(method::view::SUBMIT, &json!({ "surfaceId": "main", "tree": tree(true) }))
+            .unwrap();
+        instance.dispatch(method::canvas::SUBMIT, &submit_canvas("board", 1)).unwrap();
+        instance.dispatch(method::canvas::SUBMIT, &submit_canvas("second", 2)).unwrap();
+        instance.dispatch(method::canvas::SUBMIT, &submit_canvas("board", 3)).unwrap();
+        assert_eq!(instance.surface_canvas("main", "board").unwrap().len(), 3, "同节点重复提交应覆盖");
+        assert_eq!(instance.surface_canvas("main", "second").unwrap().len(), 2);
+
+        // 树重发后 second 不在树里：清单随树清除；空清单 = 清空 board（存档仍在）
+        instance
+            .dispatch(method::view::SUBMIT, &json!({ "surfaceId": "main", "tree": tree(false) }))
+            .unwrap();
+        assert!(instance.surface_canvas("main", "second").is_none(), "孤儿清单应随树清除");
+        instance.dispatch(method::canvas::SUBMIT, &submit_canvas("board", 0)).unwrap();
+        let cleared = instance.surface_canvas("main", "board").unwrap();
+        assert_eq!(cleared.len(), 0, "空清单 = 清空画布");
+
+        instance.stop();
+        assert!(instance.surface_canvas("main", "board").is_none(), "收尾后清单应清空");
     }
 }

@@ -75,6 +75,11 @@ pub mod doc {
     pub const HOST_OPEN: &str = "host:doc.open";
 }
 
+pub mod canvas {
+    /// 插件提交一份绘图指令清单到某个画布节点。宿主合帧应用（渲染每帧只取最新一份）。
+    pub const SUBMIT: &str = "canvas.submit";
+}
+
 // ---------- view / surface ----------
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -148,6 +153,16 @@ pub struct ViewEventParams {
     pub surface_id: String,
     pub node_id: String,
     pub event: crate::view::ViewEvent,
+}
+
+/// `canvas.submit` 的 params：清单整发整换（无增量协议），空清单 = 清空画布。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanvasSubmitParams {
+    pub surface_id: String,
+    /// 目标画布节点 id（须在当前 `view.submit` 树里且为 canvas 节点）。
+    pub node_id: String,
+    pub commands: Vec<crate::canvas::DrawCommand>,
 }
 
 // ---------- fs ----------
