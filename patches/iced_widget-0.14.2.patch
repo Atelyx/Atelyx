@@ -1,0 +1,12 @@
+diff -ruN a/src/keyed/column.rs b/src/keyed/column.rs
+--- a/src/keyed/column.rs	2026-10-15 00:07:33.377734200 +0800
++++ b/src/keyed/column.rs	2026-10-15 00:07:33.415285700 +0800
+@@ -231,7 +231,7 @@
+         tree::diff_children_custom_with_search(
+             children,
+             &self.children,
+-            |tree, child| child.as_widget().diff(tree),
++            |tree, child| tree.diff(child.as_widget()),
+             |index| {
+                 self.keys.get(index).or_else(|| self.keys.last()).copied()
+                     != Some(state.keys[index])
