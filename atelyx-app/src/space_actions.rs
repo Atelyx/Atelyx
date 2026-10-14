@@ -119,90 +119,6 @@ fn count_tree_files(tree: &[space_client::TreeNode]) -> usize {
         .sum()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use atelyx_core::space_client::TreeNode;
-
-    fn node(name: &str, path: &str, is_dir: bool, children: Vec<TreeNode>) -> TreeNode {
-        TreeNode { name: name.to_string(), path: path.to_string(), is_dir, updated_at: 0, children }
-    }
-
-    #[test]
-    fn 整树填充各目录切片() {
-        // 三层树：a/{b/{c.md}, d.md}、顶层 x.md——每个目录键的切片都应含直接子项
-        let tree = vec![
-            node(
-                "a",
-                "a",
-                true,
-                vec![
-                    node("b", "a/b", true, vec![node("c.md", "a/b/c.md", false, Vec::new())]),
-                    node("d.md", "a/d.md", false, Vec::new()),
-                ],
-            ),
-            node("x.md", "x.md", false, Vec::new()),
-        ];
-        let mut out = HashMap::new();
-        fill_children(&tree, "", &mut out);
-        assert_eq!(out[""].len(), 2, "顶层应含 a 与 x.md");
-        assert_eq!(out["a"].len(), 2, "a 应含 b 与 d.md");
-        assert_eq!(out["a/b"].len(), 1, "a/b 应含 c.md");
-        assert!(!out.contains_key("a/b/c.md"), "文件节点不进缓存（只目录需要子项表）");
-    }
-
-    #[test]
-    fn 目录切片按路径逐段定位() {
-        let tree = vec![node(
-            "a",
-            "a",
-            true,
-            vec![node("b", "a/b", true, vec![node("c.md", "a/b/c.md", false, Vec::new())])],
-        )];
-        // 整树按路径切片：两级目录都能取到直接子项
-        assert_eq!(children_of_tree(&tree, "a").len(), 1);
-        assert_eq!(children_of_tree(&tree, "a/b").len(), 1);
-        assert_eq!(children_of_tree(&tree, "a/b/c.md").len(), 0, "文件无子项");
-        assert_eq!(children_of_tree(&tree, "缺的").len(), 0, "不存在的目录 = 空列表");
-    }
-
-    #[test]
-    fn 链接改写只动精确命中的路径形链接() {
-        let text = "见 [笔记](a/old.md) 与 [[old]]（wiki 名动态解析，不改写）\n\n```rust\n// [x](a/old.md) 代码块不动\n```\n\n![图](a/old.md) 图片不动\n\n[其他目录同名](b/old.md) 不误伤";
-        let out = rewrite_note_links(text, "a/old.md", "a/new.md").expect("有路径形命中应改写");
-        assert!(out.contains("[笔记](a/new.md)"));
-        assert!(out.contains("[[old]]"), "wiki 名不参与改名改写");
-        assert!(out.contains("// [x](a/old.md)"), "代码块内不改写");
-        assert!(out.contains("![图](a/old.md)"), "图片链接不改写");
-        assert!(out.contains("[其他目录同名](b/old.md)"), "异目录同名路径不误伤");
-    }
-
-    #[test]
-    fn 链接改写文件夹移动按前缀替换() {
-        let text = "[页](dir/sub/n.md) 与 [页2](dir/other.md)";
-        let out = rewrite_note_links(text, "dir", "dir2").expect("前缀命中应改写");
-        assert!(out.contains("[页](dir2/sub/n.md)"));
-        assert!(out.contains("[页2](dir2/other.md)"));
-        assert_eq!(rewrite_note_links("[无关](x/n.md)", "dir", "dir2"), None);
-    }
-
-    #[test]
-    fn 对端打开文件清单优先open_files并回退旧版单字段() {
-        let multi = serde_json::json!({
-            "file": "a/n.md", "view": "note",
-            "openFiles": [{ "file": "a/n.md", "view": "note" }, { "file": "t.atb", "view": "table" }]
-        });
-        assert_eq!(peer_open_files(Some(&multi)), vec!["a/n.md".to_string(), "t.atb".to_string()]);
-        // 旧版客户端只发 file/view 单字段
-        let legacy = serde_json::json!({ "file": "t.atb", "view": "table" });
-        assert_eq!(peer_open_files(Some(&legacy)), vec!["t.atb".to_string()]);
-        // 空在场：新旧两种空形态都解析为空
-        let none = serde_json::json!({ "file": null, "view": null, "openFiles": [] });
-        assert!(peer_open_files(Some(&none)).is_empty());
-        assert!(peer_open_files(None).is_empty());
-    }
-}
-
 pub fn session_of(app: &App) -> Option<SpaceSession> {
     match &app.repo_kind {
         crate::RepoKind::Space(s) => Some(s.clone()),
@@ -1377,13 +1293,12 @@ pub fn space_submit_save(app: &mut App, reason: SaveReason) -> Task<Message> {
         return Task::none();
     };
     if app.space_note_save_inflight {
-        match reason {
-            // 在途回执后串行补发收尾（关窗/切文件的脏拦截依赖它）
-            SaveReason::Flush => app.space_note_save_flush_queued = true,
-            // 手动/自动顺延：在途保存的冻结内容已覆盖提交时刻的全文；此后若仍有输入，
-            // 编辑链自会排防抖计时器接续，无需在此重挂（避免留下无定时器的死期限）
-            _ => {}
+        // 在途回执后串行补发收尾（关窗/切文件的脏拦截依赖它）
+        if let SaveReason::Flush = reason {
+            app.space_note_save_flush_queued = true;
         }
+        // 手动/自动顺延：在途保存的冻结内容已覆盖提交时刻的全文；此后若仍有输入，
+        // 编辑链自会排防抖计时器接续，无需在此重挂（避免留下无定时器的死期限）
         return Task::none();
     }
     app.space_note_save_inflight = true;
@@ -1750,17 +1665,14 @@ fn on_table_patch_done(
             if stable {
                 app.settle_history_restore(true);
             }
-            match reason {
-                // Flush 回执期间有新编辑（unstable）：重收一轮 Flush——脏拦截已在放行前 flush，
-                // 此轮丢失会让关闭/切换动作静默挂起（对齐笔记保存链）
-                tv::SaveReason::Flush => {
-                    if stable {
-                        task = task.chain(app.after_any_flush());
-                    } else {
-                        task = task.chain(space_submit_table_save(app, tv::SaveReason::Flush));
-                    }
+            // Flush 回执期间有新编辑（unstable）：重收一轮 Flush——脏拦截已在放行前 flush，
+            // 此轮丢失会让关闭/切换动作静默挂起（对齐笔记保存链）
+            if let tv::SaveReason::Flush = reason {
+                if stable {
+                    task = task.chain(app.after_any_flush());
+                } else {
+                    task = task.chain(space_submit_table_save(app, tv::SaveReason::Flush));
                 }
-                _ => {}
             }
             task = task.chain(reload_space_history(app));
         }
@@ -2164,7 +2076,7 @@ pub fn space_create_entry(app: &mut App, dir: &str, kind: DraftKind, name: &str)
             };
             let mut candidate = base.clone();
             let mut seq = 2;
-            while taken.iter().any(|t| *t == candidate) {
+            while taken.contains(&candidate) {
                 candidate = format!("{stem}-{seq}{ext}");
                 seq += 1;
             }
@@ -3009,10 +2921,10 @@ pub fn collab_follow_rename(app: &mut App, old: &str, new: &str) {
     let map = |p: &str| -> Option<String> {
         if p == old {
             Some(new.to_owned())
-        } else if let Some(rest) = p.strip_prefix(old).and_then(|r| r.strip_prefix('/')) {
-            Some(format!("{new}/{rest}"))
         } else {
-            None
+            p.strip_prefix(old)
+                .and_then(|r| r.strip_prefix('/'))
+                .map(|rest| format!("{new}/{rest}"))
         }
     };
     if let Some(next) = app.note_collab_file.clone().and_then(|p| map(&p)) {
@@ -3027,5 +2939,89 @@ fn parent_of(rel: &str) -> String {
     match rel.rfind('/') {
         Some(i) => rel[..i].to_string(),
         None => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use atelyx_core::space_client::TreeNode;
+
+    fn node(name: &str, path: &str, is_dir: bool, children: Vec<TreeNode>) -> TreeNode {
+        TreeNode { name: name.to_string(), path: path.to_string(), is_dir, updated_at: 0, children }
+    }
+
+    #[test]
+    fn 整树填充各目录切片() {
+        // 三层树：a/{b/{c.md}, d.md}、顶层 x.md——每个目录键的切片都应含直接子项
+        let tree = vec![
+            node(
+                "a",
+                "a",
+                true,
+                vec![
+                    node("b", "a/b", true, vec![node("c.md", "a/b/c.md", false, Vec::new())]),
+                    node("d.md", "a/d.md", false, Vec::new()),
+                ],
+            ),
+            node("x.md", "x.md", false, Vec::new()),
+        ];
+        let mut out = HashMap::new();
+        fill_children(&tree, "", &mut out);
+        assert_eq!(out[""].len(), 2, "顶层应含 a 与 x.md");
+        assert_eq!(out["a"].len(), 2, "a 应含 b 与 d.md");
+        assert_eq!(out["a/b"].len(), 1, "a/b 应含 c.md");
+        assert!(!out.contains_key("a/b/c.md"), "文件节点不进缓存（只目录需要子项表）");
+    }
+
+    #[test]
+    fn 目录切片按路径逐段定位() {
+        let tree = vec![node(
+            "a",
+            "a",
+            true,
+            vec![node("b", "a/b", true, vec![node("c.md", "a/b/c.md", false, Vec::new())])],
+        )];
+        // 整树按路径切片：两级目录都能取到直接子项
+        assert_eq!(children_of_tree(&tree, "a").len(), 1);
+        assert_eq!(children_of_tree(&tree, "a/b").len(), 1);
+        assert_eq!(children_of_tree(&tree, "a/b/c.md").len(), 0, "文件无子项");
+        assert_eq!(children_of_tree(&tree, "缺的").len(), 0, "不存在的目录 = 空列表");
+    }
+
+    #[test]
+    fn 链接改写只动精确命中的路径形链接() {
+        let text = "见 [笔记](a/old.md) 与 [[old]]（wiki 名动态解析，不改写）\n\n```rust\n// [x](a/old.md) 代码块不动\n```\n\n![图](a/old.md) 图片不动\n\n[其他目录同名](b/old.md) 不误伤";
+        let out = rewrite_note_links(text, "a/old.md", "a/new.md").expect("有路径形命中应改写");
+        assert!(out.contains("[笔记](a/new.md)"));
+        assert!(out.contains("[[old]]"), "wiki 名不参与改名改写");
+        assert!(out.contains("// [x](a/old.md)"), "代码块内不改写");
+        assert!(out.contains("![图](a/old.md)"), "图片链接不改写");
+        assert!(out.contains("[其他目录同名](b/old.md)"), "异目录同名路径不误伤");
+    }
+
+    #[test]
+    fn 链接改写文件夹移动按前缀替换() {
+        let text = "[页](dir/sub/n.md) 与 [页2](dir/other.md)";
+        let out = rewrite_note_links(text, "dir", "dir2").expect("前缀命中应改写");
+        assert!(out.contains("[页](dir2/sub/n.md)"));
+        assert!(out.contains("[页2](dir2/other.md)"));
+        assert_eq!(rewrite_note_links("[无关](x/n.md)", "dir", "dir2"), None);
+    }
+
+    #[test]
+    fn 对端打开文件清单优先open_files并回退旧版单字段() {
+        let multi = serde_json::json!({
+            "file": "a/n.md", "view": "note",
+            "openFiles": [{ "file": "a/n.md", "view": "note" }, { "file": "t.atb", "view": "table" }]
+        });
+        assert_eq!(peer_open_files(Some(&multi)), vec!["a/n.md".to_string(), "t.atb".to_string()]);
+        // 旧版客户端只发 file/view 单字段
+        let legacy = serde_json::json!({ "file": "t.atb", "view": "table" });
+        assert_eq!(peer_open_files(Some(&legacy)), vec!["t.atb".to_string()]);
+        // 空在场：新旧两种空形态都解析为空
+        let none = serde_json::json!({ "file": null, "view": null, "openFiles": [] });
+        assert!(peer_open_files(Some(&none)).is_empty());
+        assert!(peer_open_files(None).is_empty());
     }
 }

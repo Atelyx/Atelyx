@@ -621,14 +621,10 @@ impl ChatContainerState {
             .await
             .map_err(|_| "执行体未响应（意图通道已关闭）".to_string())?;
         let mut inner = self.lock();
-        let window = match inner
+        let window = inner
             .intent_windows
             .iter()
-            .position(|w| w.request_id == request_id)
-        {
-            Some(i) => Some(inner.intent_windows.remove(i)),
-            None => None,
-        };
+            .position(|w| w.request_id == request_id).map(|i| inner.intent_windows.remove(i));
         match result {
             IntentResult::Ok {
                 value,

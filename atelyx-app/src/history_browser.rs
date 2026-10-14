@@ -322,7 +322,7 @@ fn preview_block<'a>(
             );
         }
         HistoryKind::Table => {
-            if let Some(t) = serde_json::from_str::<atelyx_core::vault::TableFile>(&v.content).ok() {
+            if let Ok(t) = serde_json::from_str::<atelyx_core::vault::TableFile>(&v.content) {
                 inner = inner.push(stat_line(format!("「{}」 · {} 字段 · {} 行", t.title, t.fields.len(), t.rows.len())));
             }
             inner = push_diff(inner, prev, &v.content, atelyx_core::history_diff::table_diff);

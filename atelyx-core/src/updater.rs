@@ -521,9 +521,15 @@ mod tests {
         }
     }
 
+    /// 进度回调（received, total）。
+    type ProgressSink = Arc<dyn Fn(u64, u64) + Send + Sync>;
+
+    /// 进度事件采样缓冲（received, total）。
+    type ProgressEvents = Arc<Mutex<Vec<(u64, u64)>>>;
+
     /// 进度收集器。
-    fn progress_sink() -> (Arc<dyn Fn(u64, u64) + Send + Sync>, Arc<Mutex<Vec<(u64, u64)>>>) {
-        let events: Arc<Mutex<Vec<(u64, u64)>>> = Arc::new(Mutex::new(Vec::new()));
+    fn progress_sink() -> (ProgressSink, ProgressEvents) {
+        let events: ProgressEvents = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&events);
         (
             Arc::new(move |received, total| sink.lock().unwrap().push((received, total))),

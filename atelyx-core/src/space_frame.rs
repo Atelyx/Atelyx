@@ -326,24 +326,24 @@ mod tests {
         };
         let inner = unhex("0101b2f21900040104746578741de4b880e6aeb5e59fbae7babfe6ada3e696870ae7acace4ba8ce8a18c0a00");
         assert_eq!(
-            hex(&encode_note_sync(&tag, &inner)),
+            hex(encode_note_sync(&tag, &inner)),
             "03070ce8aebee5a48741236162313210622d313370707074682d7763776361702c0101b2f21900040104746578741de4b880e6aeb5e59fbae7babfe6ada3e696870ae7acace4ba8ce8a18c0a00"
         );
         assert_eq!(
-            hex(&encode_note_baseline(&tag, "一段基线正文\n第二行\n", "一段基线正文\n第二行\n\n当前追加")),
+            hex(encode_note_baseline(&tag, "一段基线正文\n第二行\n", "一段基线正文\n第二行\n\n当前追加")),
             "42070ce8aebee5a48741236162313210622d313370707074682d7763776361701de4b880e6aeb5e59fbae7babfe6ada3e696870ae7acace4ba8ce8a18c0a2ae4b880e6aeb5e59fbae7babfe6ada3e696870ae7acace4ba8ce8a18c0a0ae5bd93e5898de8bfbde58aa0"
         );
         assert_eq!(
-            hex(&encode_note_baseline(
+            hex(encode_note_baseline(
                 &DocTag { seq: 0, author: String::new(), id: baseline_id_of("") },
                 "",
                 ""
             )),
             "42000010302d7a746e7466702d313777647271780000"
         );
-        assert_eq!(hex(&encode_note_resync(1)), "4301");
+        assert_eq!(hex(encode_note_resync(1)), "4301");
         assert_eq!(
-            hex(&encode_note_relocate("笔记/旧 名.md", "子/新名.md")),
+            hex(encode_note_relocate("笔记/旧 名.md", "子/新名.md")),
             "4411e7ac94e8aeb02fe697a720e5908d2e6d640de5ad902fe696b0e5908d2e6d64"
         );
     }
@@ -410,7 +410,7 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].clock, 1);
         assert!(entries[0].state_json.contains("\"selection\":{\"anchor\":3,\"head\":7}"));
-        assert_eq!(hex(&encode_awareness_update(&entries)), hex(&raw));
+        assert_eq!(hex(encode_awareness_update(&entries)), hex(&raw));
         // 截断 / 尾随字节拒绝
         assert_eq!(decode_awareness_update(&raw[..raw.len() - 1]), None);
         assert_eq!(decode_awareness_update(&raw[..5]), None);

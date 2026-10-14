@@ -7,7 +7,7 @@ use iced::Task;
 use iced::{Point, Rectangle, Size};
 
 use crate::table_view as tv;
-use crate::{space_actions, App, Message};
+use crate::{space_actions, App, ImageLoadBatch, Message};
 use atelyx_core::table_ops as ops;
 use atelyx_core::vault;
 use atelyx_core::vault::TableFile;
@@ -549,7 +549,7 @@ fn open_table_popup(
     app.table_popup_draft.clear();
     app.popup = Some((
         window,
-        crate::layout_view::PopupOpen { point, flip_y: flip_y, state, min_width: 0.0 },
+        crate::layout_view::PopupOpen { point, flip_y, state, min_width: 0.0 },
     ));
 }
 
@@ -1570,7 +1570,7 @@ pub fn commit_edit(app: &mut App) {
                 }
             }
         }
-        _ => (!text.is_empty()).then(|| serde_json::Value::String(text)),
+        _ => (!text.is_empty()).then_some(serde_json::Value::String(text)),
     };
     // 变化判定与 set_cell_value 同口径（空串 ≈ 缺键等归一化）：否则压入无差异的幽灵撤销步
     let changed = s
@@ -2120,7 +2120,7 @@ fn export_xlsx(app: &App, path: Option<std::path::PathBuf>) -> Task<Message> {
 
 /// 确保可见区域的图片句柄已发起加载（滚动/载入后调用；失败集不重试）。
 pub fn ensure_image_loads(app: &mut App) -> Option<Task<Message>> {
-    let Some(s) = app.table.as_ref() else { return None };
+    let s = app.table.as_ref()?;
     let view = &s.view;
     if view.canvas_size.width <= 0.0 {
         return None;
@@ -2155,12 +2155,12 @@ pub fn ensure_image_loads(app: &mut App) -> Option<Task<Message>> {
     let inflight = rels.clone();
     // 空间模式：逐张走服务端字节读取（无文件指纹，dataURL 同样解码即用）
     let task = if matches!(app.repo_kind, crate::RepoKind::Space(_)) {
-        let Some(session) = space_actions::session_of(app) else { return None };
+        let session = space_actions::session_of(app)?;
         let client = session.client;
         let space_id = session.space_id;
         Task::perform(
             async move {
-                let mut results: Vec<(String, (u128, u64), Result<Vec<u8>, String>)> = Vec::new();
+                let mut results: ImageLoadBatch = Vec::new();
                 for rel in rels {
                     let result = if rel.starts_with("data:") {
                         atelyx_core::table_xlsx::decode_data_url(&rel)
@@ -2175,10 +2175,10 @@ pub fn ensure_image_loads(app: &mut App) -> Option<Task<Message>> {
             |(gen, results)| Message::TableImagesLoaded(gen, results),
         )
     } else {
-        let Some(root) = app.vault.root().ok() else { return None };
+        let root = app.vault.root().ok()?;
         Task::perform(
         async move {
-            let results: Vec<(String, (u128, u64), Result<Vec<u8>, String>)> =
+            let results: ImageLoadBatch =
                 tokio::task::spawn_blocking(move || {
                     let mut out = Vec::new();
                     for rel in rels {

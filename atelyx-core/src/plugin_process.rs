@@ -810,7 +810,7 @@ mod tests {
         #[cfg(unix)]
         let (program, args) = ("sh", vec!["-c".to_string(), "read line; echo \"got:$line\"".to_string()]);
 
-        let pid = host.spawn(&program, &args, None, None, sink).expect("启动进程失败");
+        let pid = host.spawn(program, &args, None, None, sink).expect("启动进程失败");
         host.write_stdin(pid, "hello\n").expect("写入 stdin 失败");
         host.close_stdin(pid);
         assert_eq!(wait_terminated(&seen), Some(0), "关闭 stdin 后子进程应正常退出");
@@ -837,7 +837,7 @@ mod tests {
         #[cfg(unix)]
         let (program, args) = ("sh", vec!["-c".to_string(), "echo x".to_string()]);
 
-        let pid = host.spawn(&program, &args, None, None, sink).expect("启动进程失败");
+        let pid = host.spawn(program, &args, None, None, sink).expect("启动进程失败");
         assert_eq!(wait_terminated(&seen), Some(0), "进程应已退出");
         let err = host.write_stdin(pid, "late\n").expect_err("退出后写入 stdin 必须报错");
         assert!(err.contains(&pid.to_string()), "错误原因应指明 pid：{err}");

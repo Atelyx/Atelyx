@@ -681,7 +681,7 @@ impl Render<'_> {
                 let text = if self.soft_break {
                     text.clone()
                 } else {
-                    text.replace("\r\n", "\n").replace('\r', " ").replace('\n', " ")
+                    text.replace("\r\n", "\n").replace(['\r', '\n'], " ")
                 };
                 out.push(self.leaf(text, st));
             }

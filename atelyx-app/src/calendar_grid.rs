@@ -68,7 +68,7 @@ pub fn month_cells(y: i64, m: u32) -> Vec<Option<u32>> {
     (0..weeks * 7)
         .map(|i| {
             let day = i - offset + 1;
-            (1..=last as i64).contains(&day).then(|| day as u32)
+            (1..=last as i64).contains(&day).then_some(day as u32)
         })
         .collect()
 }
@@ -135,7 +135,7 @@ pub fn entries_on_day(groups: &[RepoHistoryGroup], day: i64) -> Vec<DayEntry> {
                 })
         })
         .collect();
-    out.sort_by(|a, b| b.ts.cmp(&a.ts));
+    out.sort_by_key(|v| std::cmp::Reverse(v.ts));
     out
 }
 
@@ -240,7 +240,7 @@ mod tests {
         assert_eq!(date_string(days_from_civil(2024, 2, 29)), "2024-02-29");
         assert_eq!(parse_date("2026-10-13"), Some(days_from_civil(2026, 10, 13)));
         // 闰年 2-29 合法、平年 2-29 非法、月份与日越界拒绝
-        assert_eq!(parse_date("2024-02-29").is_some(), true);
+        assert!(parse_date("2024-02-29").is_some());
         assert_eq!(parse_date("2026-02-29"), None);
         assert_eq!(parse_date("2026-13-01"), None);
         assert_eq!(parse_date("2026-10-00"), None);

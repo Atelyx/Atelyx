@@ -23,7 +23,7 @@ pub fn export_table_xlsx(table: &TableFile, root: Option<&Path>, target_path: &P
     let mut workbook = Workbook::new();
     let sheet = workbook.add_worksheet();
     sheet
-        .set_name(&sheet_name_of(&table.title))
+        .set_name(sheet_name_of(&table.title))
         .map_err(|e| format!("设置工作表名失败：{e}"))?;
 
     let header_fmt = Format::new()

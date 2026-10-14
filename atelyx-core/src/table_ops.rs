@@ -157,7 +157,7 @@ fn is_non_empty_value(v: Option<&Value>) -> bool {
     match v {
         None => false,
         Some(v) if v.is_number() => true,
-        Some(v) if v.is_string() => v.as_str().map_or(false, |s| !s.trim().is_empty()),
+        Some(v) if v.is_string() => v.as_str().is_some_and(|s| !s.trim().is_empty()),
         Some(v) => !image_entries(v).is_empty(),
     }
 }
@@ -503,16 +503,11 @@ fn write_style(row: &mut TableRow, field_id: &str, st: &CellStyle) {
 }
 
 /// 样式补丁键位（Keep = 不动；Set(None) = 清除该键）。
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub enum KeyOp<T> {
+    #[default]
     Keep,
     Set(Option<T>),
-}
-
-impl<T> Default for KeyOp<T> {
-    fn default() -> Self {
-        KeyOp::Keep
-    }
 }
 
 impl<T> KeyOp<T> {
@@ -603,10 +598,7 @@ pub fn style_summary(
     region: &Region,
 ) -> StyleSummary {
     let cell = |r: usize, c: usize| -> CellStyle {
-        match rows.get(r).and_then(|row| fields.get(c).map(|f| style_of(row, &f.id))) {
-            Some(st) => st,
-            None => CellStyle::default(),
-        }
+        rows.get(r).and_then(|row| fields.get(c).map(|f| style_of(row, &f.id))).unwrap_or_default()
     };
     let uniform = |pick: &dyn Fn(&CellStyle) -> OptState<bool>| -> OptState<bool> {
         let base = pick(&cell(region.row_start, region.col_start));
@@ -1036,7 +1028,7 @@ mod tests {
             ..Default::default()
         };
         assert!(apply_style_patch(&t.fields, &mut t.rows, &region, &patch));
-        assert_eq!(style_of(&t.rows[0], "f1").b, true);
+        assert!(style_of(&t.rows[0], "f1").b);
         assert_eq!(style_of(&t.rows[0], "f1").color.as_deref(), Some("#e05252"));
         // 同补丁再应用 = 无变化
         assert!(!apply_style_patch(&t.fields, &mut t.rows, &region, &patch));

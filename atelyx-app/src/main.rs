@@ -334,6 +334,13 @@ struct DividerDrag {
     sizes: Vec<f64>,
 }
 
+/// 仓库级配置与元数据回执（config / 提示词标记 / 文件夹颜色）。
+pub(crate) type VaultMetaResult =
+    Result<(vault::VaultConfig, Vec<String>, HashMap<String, String>), String>;
+
+/// 表格可见图片批量加载回执：相对路径 + 文件指纹 + 字节或错误。
+pub(crate) type ImageLoadBatch = Vec<(String, (u128, u64), Result<Vec<u8>, String>)>;
+
 #[derive(Debug, Clone)]
 enum Message {
     WindowOpened(window::Id),
@@ -405,7 +412,7 @@ enum Message {
     /// 设置/清除文件夹图标颜色（None = 恢复默认）。
     FolderColorSet(String, Option<String>),
     /// 仓库级配置与元数据（config / 提示词标记 / 文件夹颜色）落地（gen 守卫）。
-    VaultMetaLoaded(u64, Result<(vault::VaultConfig, Vec<String>, HashMap<String, String>), String>),
+    VaultMetaLoaded(u64, VaultMetaResult),
     /// 提示词标记清单落地（读或写回后的最新清单；gen 守卫）。
     PromptNotesLoaded(u64, Result<Vec<String>, String>),
     /// Agent 配置清单落地（agents.json 读或写后重读；gen 守卫）。
@@ -485,7 +492,7 @@ enum Message {
     /// 表格视图消息（交互 / 命令 / 保存链回执）。
     Table(table_view::TableMsg),
     /// 表格可见图片批量加载落地（gen 守卫）。
-    TableImagesLoaded(u64, Vec<(String, (u128, u64), Result<Vec<u8>, String>)>),
+    TableImagesLoaded(u64, ImageLoadBatch),
     /// 键盘修饰态（Ctrl+滚轮缩放 / Shift+滚轮横滚判定源）。
     ModsChanged(keyboard::Modifiers),
     /// 标题栏空白区按下：拖拽窗口 / 双击最大化。
@@ -3071,7 +3078,7 @@ impl App {
                 let gen = self.epoch();
                 let rel_task = rel.clone();
                 Task::perform(
-                    async move { vault::delete_folder(&root, &rel_task, false).map(|r| (r.needs_confirm, r.item_count)).map_err(|e| e) },
+                    async move { vault::delete_folder(&root, &rel_task, false).map(|r| (r.needs_confirm, r.item_count)) },
                     move |result| match result {
                         Ok((false, _)) => Message::OpDone(gen, parent_of(&rel), Ok(rel), FollowUp::None),
                         Ok((true, n)) => Message::FolderCounted(rel, n),
@@ -6178,15 +6185,15 @@ impl App {
             space_actions::DEFAULT_DEVICE_NAME,
         ])
         .to_string();
-        Subscription::run_with(spec, space_pump_stream)
+        Subscription::run_with(spec, |spec: &String| space_pump_stream(spec.as_str()))
     }
 }
 
-/// 帧泵订阅流（`run_with` 的 fn 指针构建器）：建泵 → 回填命令入口 → 转发事件。
+/// 帧泵订阅流构建器（`run_with` 经闭包适配调用）：建泵 → 回填命令入口 → 转发事件。
 fn space_pump_stream(
-    spec: &String,
+    spec: &str,
 ) -> impl iced::futures::Stream<Item = Message> + use<> {
-    let spec = spec.clone();
+    let spec = spec.to_owned();
     iced::stream::channel(64, async move |mut output| {
         // spec = [url, spaceId, token, nickname, color, deviceName]
         let Ok(parts) = serde_json::from_str::<Vec<String>>(&spec) else {

@@ -327,9 +327,9 @@ fn timestamp_to_date(s: &str) -> Option<String> {
     }
     let mut total = days_from_civil(y, month, 1) + (day - 1);
     if let (Some(h), Some(mi), Some(sec)) = (caps.get(4), caps.get(5), caps.get(6)) {
-        let secs = i64::from(h.as_str().parse::<i64>().ok()?) * 3600
-            + i64::from(mi.as_str().parse::<i64>().ok()?) * 60
-            + i64::from(sec.as_str().parse::<i64>().ok()?);
+        let secs = h.as_str().parse::<i64>().ok()? * 3600
+            + mi.as_str().parse::<i64>().ok()? * 60
+            + sec.as_str().parse::<i64>().ok()?;
         total = total * 86400 + secs;
         if let Some(z) = caps.get(8) {
             let offset: i64 = if z.as_str() == "Z" {
@@ -551,8 +551,8 @@ fn js_num(v: f64) -> String {
 /// 块内换行跟随正文 CRLF 风格（逐个 `\n` 转 `\r\n`，`\r\n` 保持不变）。
 fn lf_to_crlf(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 8);
-    let mut chars = s.char_indices().peekable();
-    while let Some((i, c)) = chars.next() {
+    let chars = s.char_indices().peekable();
+    for (i, c) in chars {
         if c == '\n' && (i == 0 || !s[..i].ends_with('\r')) {
             out.push('\r');
         }

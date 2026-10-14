@@ -221,10 +221,12 @@ fn html_to_text(html: &str) -> String {
                 continue;
             }
             // 常规标签：块级开标签给换行（防整页糊成一行）
-            if !closing && NEWLINE_OPEN.contains(&name.as_str()) {
-                if !out.is_empty() && !out.ends_with('\n') {
-                    out.push('\n');
-                }
+            if !closing
+                && NEWLINE_OPEN.contains(&name.as_str())
+                && !out.is_empty()
+                && !out.ends_with('\n')
+            {
+                out.push('\n');
             }
             i = j + 1;
             continue;

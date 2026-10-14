@@ -1235,7 +1235,7 @@ fn panel_view<'a>(
     if let Some(kind) = app
         .drag
         .as_ref()
-        .and_then(|_| app.drag_hover.as_ref())
+        .and(app.drag_hover.as_ref())
         .filter(|h| h.zone.panel_id.as_deref() == Some(panel_id))
         .map(|h| h.kind)
     {

@@ -294,7 +294,7 @@ fn scan_atoms(ctx: &Ctx, from: usize, to: usize) -> Vec<Atom> {
 fn bare_autolink_end(src: &str, i: usize, to: usize) -> Option<usize> {
     let rest = &src[i..to];
     let after = if i > 0 { src[..i].chars().next_back() } else { None };
-    let ok_precede = after.map_or(true, |c| c.is_whitespace() || matches!(c, '*' | '_' | '~' | '('));
+    let ok_precede = after.is_none_or(|c| c.is_whitespace() || matches!(c, '*' | '_' | '~' | '('));
     if !ok_precede {
         return None;
     }
@@ -731,7 +731,7 @@ fn is_size_spec(s: &str) -> bool {
         return false;
     }
     let ok = |t: &str| !t.is_empty() && t.bytes().all(|c| c.is_ascii_digit());
-    ok(w) && h.map_or(true, ok)
+    ok(w) && h.is_none_or(ok)
 }
 
 /// 链接形态：create（空 URL）/ external（内置判定）/ 其余交宿主判定。
@@ -790,8 +790,8 @@ struct Delim {
 
 /// 左右 flanking 判定（CommonMark；`_` 另有词内限制）。
 fn flanking(before: Option<char>, after: Option<char>, ch: u8) -> (bool, bool) {
-    let ws_before = before.map_or(true, |c| c.is_whitespace());
-    let ws_after = after.map_or(true, |c| c.is_whitespace());
+    let ws_before = before.is_none_or(|c| c.is_whitespace());
+    let ws_after = after.is_none_or(|c| c.is_whitespace());
     let p_before = before.is_some_and(is_punct_char);
     let p_after = after.is_some_and(is_punct_char);
     let left = !ws_after && (!p_after || ws_before || p_before);
@@ -1002,7 +1002,7 @@ fn scan_one_line(ctx: &Ctx, line_text: &str, line_from: usize, out: &mut Vec<Ato
                 };
                 let prev_ok = at == 0 || {
                     let prev = prev_char(line_text, at);
-                    prev.map_or(true, |c| !is_word_char(c))
+                    prev.is_none_or(|c| !is_word_char(c))
                 };
                 if !prev_ok {
                     i = at + 1;

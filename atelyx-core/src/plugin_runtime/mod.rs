@@ -137,6 +137,12 @@ struct Discovered {
     enabled: bool,
 }
 
+/// 对话框结果回传通道（用户选定值；取消 = `None`）。
+type DialogReplyTx = std::sync::mpsc::Sender<Result<Option<String>, String>>;
+
+/// 在途对话框等待项：发起插件 id + 结果回传通道。
+type DialogWait = (String, DialogReplyTx);
+
 /// 插件宿主运行时。
 pub struct PluginRuntime {
     root: PathBuf,
@@ -146,8 +152,8 @@ pub struct PluginRuntime {
     host_requests: tokio::sync::mpsc::UnboundedSender<HostRequest>,
     /// 服务请求接收端（壳侧订阅流持有；见 [`PluginRuntime::recv_host_request`]）。
     host_requests_rx: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<HostRequest>>,
-    /// 在途对话框：request_id → (插件 id, 结果通道)。插件进程的读线程在此等待壳回填结果。
-    dialogs: Mutex<HashMap<u64, (String, std::sync::mpsc::Sender<Result<Option<String>, String>>)>>,
+    /// 在途对话框：request_id → 等待项。插件进程的读线程在此等待壳回填结果。
+    dialogs: Mutex<HashMap<u64, DialogWait>>,
     next_dialog_id: AtomicU64,
     /// 当前容器身份（见 [`PluginRuntime::on_vault_switch`]）：同一容器重复进入不动作，据此判别首次激活。
     container: Mutex<Option<String>>,

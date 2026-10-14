@@ -245,7 +245,7 @@ fn open_popup(app: &App, window: iced::window::Id, state: PopupState) -> Message
 }
 
 fn sub_tab_bar(app: &App) -> Element<'static, Message> {
-    const TABS: [(&'static str, &'static str); 4] =
+    const TABS: [(&str, &str); 4] =
         [("providers", "供应商"), ("models", "模型服务"), ("agents", "Agent"), ("search", "联网搜索")];
     controls::segmented_tabs(&TABS, &app.ai_sub_tab, |id| Message::Ai(AiMsg::SubTab(id)))
 }
@@ -968,7 +968,7 @@ fn models_view(app: &App, window: iced::window::Id) -> Element<'static, Message>
     col = col.push(super::group_head("话题自动命名", "", true));
     let mode = naming_mode(app);
     let mode_trigger = controls::dropdown_trigger(
-        &naming_label(mode),
+        naming_label(mode),
         FORM_W,
         (!ro).then(|| open_popup(app, window, PopupState::AiNamingMenu)),
     );

@@ -1,5 +1,5 @@
-//! 多维表格视图：canvas 自绘主体（网格 / 文本 / 样式 / 图片 / 选中框 / 把手 / 虚拟窗口）
-//! + 顶部工具条 + 编辑器浮层 + 格式气泡 + 灯箱。模型真源 = core `TableFile`；
+//! 多维表格视图：canvas 自绘主体（网格 / 文本 / 样式 / 图片 / 选中框 / 把手 / 虚拟窗口）、
+//! 顶部工具条、编辑器浮层、格式气泡与灯箱。模型真源 = core `TableFile`；
 //! 模型变换走 `table_ops` 纯函数，消息处理与保存链在 `table_actions`。
 
 use std::collections::{HashMap, HashSet};
@@ -1004,9 +1004,7 @@ impl canvas::Program<Message> for TableView<'_> {
             }
             Ev::Mouse(MouseEv::WheelScrolled { delta }) => {
                 // iced 把全窗口鼠标事件广播给所有 widget：只认光标落在画布内的滚轮（防跨面板串扰）
-                if cursor.position_in(bounds).is_none() {
-                    return None;
-                }
+                cursor.position_in(bounds)?;
                 let (dx, dy) = match delta {
                     iced::mouse::ScrollDelta::Lines { x, y } => (x * WHEEL_LINE_PX, y * WHEEL_LINE_PX),
                     iced::mouse::ScrollDelta::Pixels { x, y } => (*x, *y),
@@ -1530,6 +1528,7 @@ fn draw_cell_content(
 }
 
 /// 图片单元格（轮播 / 九宫格 + hover 圆钮 + 拖拽影子）。
+#[allow(clippy::too_many_arguments)]
 fn draw_image_cell(
     session: &TableSession,
     g: &Geo,
@@ -1578,7 +1577,7 @@ fn draw_image_cell(
             if rect.x + rect.width < cell.x || rect.x > cell.x + cell.width {
                 continue;
             }
-            draw_image_contain(session, frame, &images[page as usize], rect);
+            draw_image_contain(session, frame, images[page as usize], rect);
         }
         // 队列条
         for (i, (rel, rect)) in layout.thumbs.iter().enumerate() {

@@ -93,7 +93,7 @@ pub fn canvas_diff(prev_json: &str, cur_json: &str) -> Vec<String> {
         nodes
             .iter()
             .find(|n| n.id == id)
-            .map(|n| node_label(n))
+            .map(node_label)
             .unwrap_or_else(|| "未知节点".to_string())
     };
     let prev_nodes: HashMap<&str, &crate::vault::CanvasFileNode> =

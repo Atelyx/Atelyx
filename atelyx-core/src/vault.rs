@@ -741,7 +741,7 @@ pub struct TablePatch {
 
 /// 按 id 顺序重排数组（稳定排序）：order 未出现的 id（同批删除/对端新增）保持相对顺序置于末尾。
 /// 用于补丁合并后应用 field_order/row_order——拖拽排序/复制行/左右插列的顺序变化落盘。
-pub fn reorder_by<T>(items: &mut Vec<T>, order: &[String], key: impl Fn(&T) -> &str) {
+pub fn reorder_by<T>(items: &mut [T], order: &[String], key: impl Fn(&T) -> &str) {
     if items.len() <= 1 {
         return;
     }
@@ -871,7 +871,7 @@ pub fn apply_table_patch(table: &mut TableFile, patch: &TablePatch) {
 pub fn list_canvas_files(root: &Path, exclude: &[String]) -> Result<Vec<CanvasFileRow>, String> {
     let mut rows: Vec<CanvasFileRow> = vec![];
     scan_canvases_in(root, "", exclude, &mut rows)?;
-    rows.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    rows.sort_by_key(|r| std::cmp::Reverse(r.updated_at));
     Ok(rows)
 }
 
@@ -1988,6 +1988,7 @@ pub fn list_chat_sessions_file(root: &Path) -> Result<Vec<ChatSessionRow>, Strin
 /// - 临时名带纳秒时间戳 + 进程内序号：并发写同一目标不交叉同一 tmp。
 /// - 写后 sync_all：崩溃/断电时 rename 已提交但数据未刷盘会丢最后一次保存。
 /// - 任一步失败都清理临时文件，避免残留。
+///
 /// pub：commands/global.rs 的全局配置/UI 状态写盘复用（保证全项目同一 durability 语义）。
 pub fn atomic_write(path: &Path, content: &str) -> Result<(), String> {
     atomic_write_bytes(path, content.as_bytes())
@@ -3065,6 +3066,7 @@ pub fn resolve_link_target(
 /// - `[名]()` 空路径 → 按 label 当笔记名解析，命中则补全为规范路径，仍不存在则保持空路径；
 /// - 目标笔记不存在 → `[名]()`（空路径，点击可快捷新建）；
 /// - 外部链接 / 非 .md 相对路径 / 图片链接 / 代码块内 → 一律不动（保守不猜）。
+///
 /// `resolve`：笔记名或路径 → 命中时的规范相对路径（None = 未命中）。返回 (新内容, 实际改写处数)。
 pub fn rewrite_internal_links(
     content: &str,
@@ -3072,7 +3074,6 @@ pub fn rewrite_internal_links(
 ) -> (String, usize) {
     let mut count = 0usize;
     let out = rewrite_link_spans(content, &mut |span: &str| {
-        let replaced: String;
         let is_wiki = span.starts_with("[[");
         let (label, target): (&str, Option<String>) = if is_wiki {
             let inner = &span[2..span.len() - 2];
@@ -3107,7 +3108,7 @@ pub fn rewrite_internal_links(
             }
             (label, resolved)
         };
-        replaced = match target {
+        let replaced: String = match target {
             Some(p) => format!("[{label}]({p})"),
             None => format!("[{label}]()"),
         };

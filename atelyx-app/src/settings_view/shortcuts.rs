@@ -138,7 +138,7 @@ fn conflict_mark(
     }
     let names: Vec<String> = others.iter().map(|c| c.label().to_string()).collect();
     let tip = format!("与 {} 冲突，按键时先登记的命令生效", names.join("、"));
-    let bg = if crate::now_secs() % 2 == 0 { pal::ACCENT_SOFT } else { pal::BG_TERTIARY };
+    let bg = if crate::now_secs().is_multiple_of(2) { pal::ACCENT_SOFT } else { pal::BG_TERTIARY };
     Some(
         mouse_area(controls::badge("冲突", bg, pal::WARNING))
             .on_enter(Message::Ui(UiMsg::HoverTip { window, label: tip.clone(), box_px: 24.0 }))

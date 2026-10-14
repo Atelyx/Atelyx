@@ -53,9 +53,9 @@ pub fn groups_from_local(files: Vec<atelyx_core::history::RepoHistoryFile>) -> V
         })
         .collect();
     for g in &mut groups {
-        g.versions.sort_by(|a, b| b.ts.cmp(&a.ts));
+        g.versions.sort_by_key(|v| std::cmp::Reverse(v.ts));
     }
-    groups.sort_by(|a, b| b.versions[0].ts.cmp(&a.versions[0].ts));
+    groups.sort_by_key(|g| std::cmp::Reverse(g.versions[0].ts));
     groups
 }
 
@@ -78,9 +78,9 @@ pub fn groups_from_space(agg: HistoryAggregate) -> Vec<RepoHistoryGroup> {
         }
     }
     for g in &mut groups {
-        g.versions.sort_by(|a, b| b.ts.cmp(&a.ts));
+        g.versions.sort_by_key(|v| std::cmp::Reverse(v.ts));
     }
-    groups.sort_by(|a, b| b.versions[0].ts.cmp(&a.versions[0].ts));
+    groups.sort_by_key(|g| std::cmp::Reverse(g.versions[0].ts));
     groups
 }
 

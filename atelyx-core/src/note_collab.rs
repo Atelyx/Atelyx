@@ -154,7 +154,7 @@ impl NoteCollab {
     /// 销毁活动文档。返回离场 awareness 帧（null 条目，对端收到后移除本端光标；
     /// 从未发过身份 = None）。序号记忆跨文档保留；该文件的实证黑名单与限频随路径身份一并作废。
     pub fn close(&mut self) -> Option<Vec<u8>> {
-        let Some(active) = self.doc.take() else { return None };
+        let active = self.doc.take()?;
         let file = active.file;
         self.clear_incompatible(&file);
         self.baseline_reply_at.remove(&file);
@@ -320,9 +320,7 @@ impl NoteCollab {
     /// 到期保活：重发本端身份帧（无文档 / 未发过身份 / 未到间隔 = None）。
     /// 空闲端不重发就被对端按 [`AWARENESS_TIMEOUT`] 剔除（互见消失）；`now` 由壳传入便于测试。
     pub fn keepalive_if_due(&mut self, now: Instant) -> Option<Vec<u8>> {
-        if self.doc.is_none() {
-            return None;
-        }
+        self.doc.as_ref()?;
         if !self
             .awareness_sent_at
             .is_none_or(|at| now.duration_since(at) >= AWARENESS_KEEPALIVE)
@@ -636,10 +634,10 @@ impl NoteCollab {
         let map = |p: &str| -> Option<String> {
             if p == old {
                 Some(new.to_owned())
-            } else if let Some(rest) = p.strip_prefix(old).and_then(|r| r.strip_prefix('/')) {
-                Some(format!("{new}/{rest}"))
             } else {
-                None
+                p.strip_prefix(old)
+                    .and_then(|r| r.strip_prefix('/'))
+                    .map(|rest| format!("{new}/{rest}"))
             }
         };
         if let Some(active) = self.doc.as_mut() {

@@ -53,7 +53,7 @@ fn push_recent(mut list: Vec<RecentFile>, entry: RecentFile, max: usize) -> Vec<
 fn recent_for(list: &[RecentFile], vault_key: &str) -> Vec<RecentFile> {
     let mut out: Vec<RecentFile> =
         list.iter().filter(|e| e.vault_key == vault_key).cloned().collect();
-    out.sort_by(|a, b| b.opened_at.cmp(&a.opened_at));
+    out.sort_by_key(|e| std::cmp::Reverse(e.opened_at));
     out
 }
 

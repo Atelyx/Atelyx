@@ -341,7 +341,7 @@ fn atx_heading(body: &str) -> Option<AtxContent> {
         return None;
     }
     // `#` 后必须是空白或行尾
-    if !b.get(run).map_or(true, |&c| c == b' ' || c == b'\t') {
+    if !b.get(run).is_none_or(|&c| c == b' ' || c == b'\t') {
         return None;
     }
     let content_from = run + b[run..].iter().take_while(|&&c| c == b' ' || c == b'\t').count();
@@ -893,7 +893,7 @@ fn task_marker_of(content: &str) -> (bool, bool) {
     if b.first() == Some(&b'[') && b.get(2) == Some(&b']') {
         let mark = b[1];
         if (mark == b' ' || mark == b'x' || mark == b'X')
-            && b.get(3).map_or(true, |c| *c == b' ' || *c == b'\t')
+            && b.get(3).is_none_or(|c| *c == b' ' || *c == b'\t')
         {
             return (true, mark != b' ');
         }

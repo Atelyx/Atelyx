@@ -1408,6 +1408,7 @@ enum RowHit {
 }
 
 impl<'a> EditSurface<'a> {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         rows: Vec<SurfaceRow<'a>>,
         pal: EditPalette,
@@ -1593,7 +1594,7 @@ impl Widget<Message, Theme, iced::Renderer> for EditSurface<'_> {
     ) {
         let tint = self.pal.accent.scale_alpha(0.25);
         // 闪烁相位：半周期可见（墙钟取模，与帧时机无关）
-        let blink_on = unix_millis() / BLINK_MS % 2 == 0;
+        let blink_on = (unix_millis() / BLINK_MS).is_multiple_of(2);
         for ((row, state), child_layout) in self.rows.iter().zip(&tree.children).zip(layout.children()) {
             row.element()
                 .as_widget()

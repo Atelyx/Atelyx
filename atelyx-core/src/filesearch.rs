@@ -270,6 +270,7 @@ fn scan_file(root: &Path, rel: &str, re: &Regex, retained: &mut Vec<GrepMatchRow
 
 /// 递归搜索目录树内文件（可选 include 正向 glob 过滤），单文件基准时只搜该文件。
 /// 目录遍历复用 walk_files（与 glob 同一套过滤/排序，顺序确定），避免两套遍历实现。
+#[allow(clippy::too_many_arguments)]
 fn scan_for_matches(
     root: &Path,
     base_rel: &str,
