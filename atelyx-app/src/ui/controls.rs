@@ -402,8 +402,8 @@ pub fn toggle(on: bool, on_toggle: Option<Message>) -> Element<'static, Message>
 }
 
 /// 下拉触发钮（当前值 + 行尾 chevron；选项弹层由调用方经 popup 系统打开）。
-/// 高度与表单输入一致（内边距 6 + caption 行高）。
-pub fn dropdown_trigger(label: &str, width: f32, on_open: Option<Message>) -> Element<'static, Message> {
+/// 高度与表单输入一致（内边距 6 + caption 行高）；`width` 取 `Length`（表单固定宽、面板内容填满）。
+pub fn dropdown_trigger(label: &str, width: impl Into<Length>, on_open: Option<Message>) -> Element<'static, Message> {
     let content = row![
         text(label.to_string()).size(pal::fs_caption()).color(pal::TEXT_PRIMARY),
         space().width(Length::Fill),
@@ -417,7 +417,7 @@ pub fn dropdown_trigger(label: &str, width: f32, on_open: Option<Message>) -> El
             .height(Length::Fixed(30.0))
             .align_y(iced::alignment::Vertical::Center),
     )
-    .width(Length::Fixed(width))
+    .width(width.into())
     .padding(0.0)
     .style(move |_t, _status| button::Style {
         background: Some(pal::BG_SUNKEN.into()),

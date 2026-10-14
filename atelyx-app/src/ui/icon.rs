@@ -147,6 +147,11 @@ where
     }
 }
 
+/// 图标名归一：命中形状表返回 'static 名，未知 / 空串返回空（画空图标）。
+pub fn icon_name(name: &str) -> &'static str {
+    icons::NAMES.iter().copied().find(|n| *n == name).unwrap_or("")
+}
+
 /// 图标元素（`size` 见方、缺省 2 单位描边；未知图标名画空）。
 pub fn icon<Message: 'static>(name: &str, size: f32, color: Color) -> Element<'static, Message> {
     icon_stroke(name, size, color, 2.0)
@@ -159,12 +164,7 @@ pub fn icon_stroke<Message: 'static>(
     color: Color,
     stroke_units: f32,
 ) -> Element<'static, Message> {
-    let name: &'static str = icons::NAMES
-        .iter()
-        .copied()
-        .find(|n| *n == name)
-        .unwrap_or("");
-    Canvas::new(Icon { name, color, stroke_units })
+    Canvas::new(Icon { name: icon_name(name), color, stroke_units })
         .width(Length::Fixed(size))
         .height(Length::Fixed(size))
         .into()

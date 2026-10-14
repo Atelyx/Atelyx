@@ -1,5 +1,7 @@
 //! ViewNode 声明式控件树：插件提交树描述，宿主解释渲染并回发事件。
 //! 控件集为封闭枚举（`kind` 标签），扩容逐版评审；叶子节点不得携带 children。
+//! 事件值按控件定型：文本 → `text`、数字输入 → `number`（越界按声明钳制）、勾选 → `bool`、
+//! 下拉 → `number`（选中项下标）、菜单条目 → `text`（条目的 action）。
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -65,6 +67,7 @@ pub enum NodeBody {
         cross_align: Option<Align>,
     },
     Scroll {
+        /// 子节点按主轴单向排列：`horizontal` 排成行，其余（含缺省）排成列。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         direction: Option<Axis>,
     },
@@ -89,6 +92,7 @@ pub enum NodeBody {
         value: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         placeholder: Option<String>,
+        /// 多行：宿主按多行编辑器渲染，Enter 换行（`submit` 事件只对单行生效）。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         multiline: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -108,6 +112,7 @@ pub enum NodeBody {
     },
     Dropdown {
         options: Vec<String>,
+        /// 选中项下标；`change` 事件的值同为下标（[`EventValue::Number`]）。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         selected: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -134,6 +139,7 @@ pub enum NodeBody {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         enabled: Option<bool>,
     },
+    /// 无尺寸字段：宿主按图片原始尺寸渲染，`fit` 在父容器给定尺寸时生效。
     Image {
         source: ImageSource,
         #[serde(default, skip_serializing_if = "Option::is_none")]

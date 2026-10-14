@@ -6,8 +6,8 @@ use atelyx_plugin_protocol::event::VaultSwitchPayload;
 use atelyx_plugin_protocol::handshake::{self, InitializeParams, InitializeResult};
 use atelyx_plugin_protocol::method::{
     DocOpenParams, HttpRequestParams, HttpResult, ListResult, PathParams, PickFileParams,
-    PickedPath, ProcessEventParams, RegisterShortcutParams, ShowNotificationParams,
-    SurfaceAttachedParams, TextPayload, ViewEventParams,
+    PickedPath, ProcessEventParams, RegisterParams, RegisterShortcutParams, ShowNotificationParams,
+    SurfaceAttachedParams, TextPayload, UnregisterParams, ViewEventParams,
 };
 use atelyx_plugin_protocol::view::{EventKind, NodeBody, ViewNode};
 use serde::de::DeserializeOwned;
@@ -67,11 +67,31 @@ fn view_tree_shape_is_frozen() {
         serde_json::from_value(snapshot["viewTree"].clone()).expect("快照 viewTree 应可反序列化");
     tree.validate().unwrap_or_else(|e| panic!("快照 viewTree 应通过校验：{e}"));
 
-    let root = &tree.children;
-    assert_eq!(root.len(), 6, "语料规模兜底：快照疑似被清空");
-    assert!(matches!(root[0].body, NodeBody::TextInput { .. }));
-    assert_eq!(root[0].events, vec![EventKind::Submit]);
-    assert!(matches!(root[3].body, NodeBody::Button { .. }));
+    // 语料规模兜底 + 控件集 v1 覆盖：容器类与事件绑定都能从快照里数出来
+    fn walk(node: &ViewNode, kinds: &mut std::collections::HashSet<&'static str>) {
+        kinds.insert(node.body.kind_name());
+        for child in &node.children {
+            walk(child, kinds);
+        }
+    }
+    let mut kinds = std::collections::HashSet::new();
+    walk(&tree, &mut kinds);
+    for expected in [
+        "row", "column", "scroll", "grid", "list", "text", "textInput", "numberInput", "dropdown",
+        "checkbox", "button", "iconButton", "image", "progress", "menu",
+    ] {
+        assert!(kinds.contains(expected), "控件集 v1 缺快照覆盖：{expected}");
+    }
+    fn find<'a>(node: &'a ViewNode, id: &str) -> Option<&'a ViewNode> {
+        if node.id == id {
+            return Some(node);
+        }
+        node.children.iter().find_map(|c| find(c, id))
+    }
+    assert_eq!(find(&tree, "query").unwrap().events, vec![EventKind::Submit]);
+    assert!(matches!(find(&tree, "go").unwrap().body, NodeBody::Button { .. }));
+    let menu = find(&tree, "more").unwrap();
+    assert!(matches!(&menu.body, NodeBody::Menu { items, .. } if items.len() == 2));
 
     // 冻结编码：序列化产物与快照值逐字段一致
     assert_eq!(serde_json::to_value(&tree).unwrap(), snapshot["viewTree"], "ViewNode 编码与快照不一致");
@@ -161,6 +181,8 @@ fn method_type_shapes_are_frozen() {
             "HttpRequestParams" => frozen_roundtrip::<HttpRequestParams>(&value),
             "HttpResult" => frozen_roundtrip::<HttpResult>(&value),
             "SurfaceAttachedParams" => frozen_roundtrip::<SurfaceAttachedParams>(&value),
+            "RegisterParams" => frozen_roundtrip::<RegisterParams>(&value),
+            "UnregisterParams" => frozen_roundtrip::<UnregisterParams>(&value),
             "ViewEventParams" => frozen_roundtrip::<ViewEventParams>(&value),
             "DocOpenParams" => frozen_roundtrip::<DocOpenParams>(&value),
             "VaultSwitchPayload" => frozen_roundtrip::<VaultSwitchPayload>(&value),

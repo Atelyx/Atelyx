@@ -89,10 +89,11 @@ async fn handshake(stub: &mut Stub) {
     stub.reply_ok(request.id, serde_json::to_value(&result).unwrap()).await;
 }
 
-/// 消费订阅与首次提交（顺序不敏感，按方法名分流），返回首棵树。
+/// 消费订阅、贡献注册与首次提交（顺序不敏感，按方法名分流），返回首棵树。
 async fn consume_initial(stub: &mut Stub) -> SubmitParams {
     let mut subscribed: Vec<String> = Vec::new();
-    // 订阅条数由插件自定（当前为 echo.ping 与 vault:switch 两条），只以「收到首棵界面树」为终点
+    let mut registered = false;
+    // 订阅条数与注册条数由插件自定，只以「收到首棵界面树」为终点
     loop {
         let line = stub.next_line().await;
         let request = match Envelope::parse(line.trim_end()).expect("初始请求应为合法信封") {
@@ -104,14 +105,25 @@ async fn consume_initial(stub: &mut Stub) -> SubmitParams {
                 subscribed.push(request.params["name"].as_str().unwrap_or_default().to_string());
                 stub.reply_ok(request.id, json!({"subscribed": true})).await;
             }
+            m if m == method::view::REGISTER => {
+                let params: method::RegisterParams =
+                    serde_json::from_value(request.params).expect("注册 params 应定型");
+                assert_eq!(params.slot, method::ContributionSlot::Panel);
+                assert_eq!(params.id, "panel", "贡献 id 同时是该面挂载后的 surfaceId");
+                assert!(!params.label.is_empty(), "贡献必须带展示名");
+                registered = true;
+                stub.reply_ok(request.id, json!({})).await;
+            }
             m if m == method::view::SUBMIT => {
                 let params: SubmitParams = serde_json::from_value(request.params).expect("提交 params 应定型");
                 params.tree.validate().expect("首棵树应通过校验");
+                assert_eq!(params.surface_id, "panel", "提交的 surfaceId 应与贡献 id 一致");
                 stub.reply_ok(request.id, json!({"applied": true})).await;
                 assert!(
                     subscribed.iter().any(|name| name == "echo.ping"),
                     "应订阅 echo.ping，实际：{subscribed:?}"
                 );
+                assert!(registered, "提交界面前应先注册贡献");
                 return params;
             }
             other => panic!("未知初始请求：{other}"),
@@ -141,6 +153,100 @@ fn status_text(tree: &SubmitParams) -> String {
     }
 }
 
+/// 树里 list 节点的文本行（操作日志）。
+fn log_lines(tree: &SubmitParams) -> Vec<String> {
+    let list = tree
+        .tree
+        .children
+        .iter()
+        .find(|n| n.id == "log")
+        .expect("树里应有 log 列表节点");
+    list.children
+        .iter()
+        .filter_map(|child| match &child.body {
+            atelyx_plugin_sdk::protocol::view::NodeBody::Text { content, .. } => Some(content.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// 输入闭环：单行输入的 change / submit 携带新值，插件据此改状态并整树重发。
+#[tokio::test]
+async fn panel_input_change_and_submit_roundtrip() {
+    let (mut child, mut stub) = spawn_echo().await;
+    handshake(&mut stub).await;
+    consume_initial(&mut stub).await;
+
+    stub.send(&Envelope::notification(
+        method::view::HOST_EVENT,
+        json!({"surfaceId": "panel", "nodeId": "query", "event": {"kind": "change", "value": "模型"}}),
+    ))
+    .await;
+    let after_change = next_submit(&mut stub).await;
+    assert_eq!(status_text(&after_change), "输入：模型");
+    let query = after_change
+        .tree
+        .children
+        .iter()
+        .find(|n| n.id == "query")
+        .expect("树里应有 query 输入节点");
+    match &query.body {
+        atelyx_plugin_sdk::protocol::view::NodeBody::TextInput { value, .. } => {
+            assert_eq!(value, "模型", "插件应把收到的值写回界面");
+        }
+        other => panic!("query 应为 textInput 节点，实际：{other:?}"),
+    }
+
+    // 下拉：宿主按语义回发选中项下标（number）
+    stub.send(&Envelope::notification(
+        method::view::HOST_EVENT,
+        json!({"surfaceId": "panel", "nodeId": "engine", "event": {"kind": "change", "value": 1}}),
+    ))
+    .await;
+    let after_pick = next_submit(&mut stub).await;
+    assert_eq!(status_text(&after_pick), "引擎：1");
+
+    // 勾选：宿主回发布尔值
+    stub.send(&Envelope::notification(
+        method::view::HOST_EVENT,
+        json!({"surfaceId": "panel", "nodeId": "flag", "event": {"kind": "change", "value": true}}),
+    ))
+    .await;
+    let after_toggle = next_submit(&mut stub).await;
+    assert_eq!(status_text(&after_toggle), "自动启动：开");
+
+    drop(stub);
+    let status = tokio::time::timeout(TIMEOUT, child.wait())
+        .await
+        .expect("等插件退出超时")
+        .expect("wait 失败");
+    assert!(status.success(), "插件应正常退出，实际：{status:?}");
+}
+
+/// 面重新就绪：宿主发 `host:surface.attached`（面板挂上 / 插件重启后重发）时插件重发当前界面。
+#[tokio::test]
+async fn surface_attached_triggers_resubmit() {
+    let (mut child, mut stub) = spawn_echo().await;
+    handshake(&mut stub).await;
+    consume_initial(&mut stub).await;
+
+    stub.send(&Envelope::notification(
+        method::view::HOST_ATTACHED,
+        json!({"surfaceId": "panel", "kind": "panel"}),
+    ))
+    .await;
+    let resubmitted = next_submit(&mut stub).await;
+    assert_eq!(resubmitted.surface_id, "panel");
+    assert_eq!(status_text(&resubmitted), "就绪", "重发的是当前状态");
+
+    drop(stub);
+    let status = tokio::time::timeout(TIMEOUT, child.wait())
+        .await
+        .expect("等插件退出超时")
+        .expect("wait 失败");
+    assert!(status.success(), "插件应正常退出，实际：{status:?}");
+}
+
 /// 主回环：握手 → 初始提交 → 点击事件回写 → 宿主广播经 state 读写往返回显 → EOF 收场。
 #[tokio::test]
 async fn full_roundtrip_with_echo_plugin() {
@@ -161,11 +267,12 @@ async fn full_roundtrip_with_echo_plugin() {
     // 节点事件：按钮点击 → 整树重发，状态文本带计数
     stub.send(&Envelope::notification(
         method::view::HOST_EVENT,
-        json!({"surfaceId": "main", "nodeId": "go", "event": {"kind": "click"}}),
+        json!({"surfaceId": "panel", "nodeId": "go", "event": {"kind": "click"}}),
     ))
     .await;
     let after_click = next_submit(&mut stub).await;
     assert_eq!(status_text(&after_click), "点击 1 次");
+    assert_eq!(log_lines(&after_click).len(), 1, "点击应追加一条操作日志");
 
     // 宿主广播 → state 写读往返 → 回显到界面
     stub.send(&Envelope::notification(

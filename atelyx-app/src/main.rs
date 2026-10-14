@@ -17,6 +17,8 @@ mod history_browser;
 mod layout_view;
 mod markdown_edit;
 mod markdown_view;
+mod plugin_actions;
+mod plugin_view;
 mod properties_view;
 mod recent_view;
 mod repohistory_view;
@@ -40,7 +42,7 @@ use atelyx_core::layout::{
     LayoutOp, WindowBounds, UI_STATE_SCHEMA,
 };
 use atelyx_core::markdown::{LinkForm, MarkdownDocument};
-use atelyx_core::plugin_runtime::{PluginEvent, PluginRuntime};
+use atelyx_core::plugin_runtime::{PluginEvent, PluginRuntime, PluginStatus, SurfaceKind};
 use atelyx_core::vault;
 use atelyx_core::vault_refs;
 use iced::widget::{space, text_editor};
@@ -513,6 +515,22 @@ enum Message {
     Plugins(settings_view::plugins::PluginsMsg),
     /// 插件运行时事件（单一通道进 update）。
     PluginEvent(Box<PluginEvent>),
+    /// 插件界面节点事件（点击 / 变更 / 提交）。
+    PluginView {
+        plugin_id: String,
+        surface_id: String,
+        node_id: String,
+        event: atelyx_core::plugin_runtime::ViewEvent,
+    },
+    /// 插件菜单 / 下拉节点被按下：用光标锚点打开弹层。
+    PluginList { window: window::Id, entries: Vec<plugin_actions::PopupEntry> },
+    /// 插件多行输入的编辑器动作。
+    PluginTextEdit {
+        plugin_id: String,
+        surface_id: String,
+        node_id: String,
+        action: text_editor::Action,
+    },
     /// 打开弹层（几何规格 + 内容形态由 layout_view 定义）。
     PopupOpen(window::Id, PopupOpen),
     /// 仓库文件总数（打开仓库后异步统计；gen 守卫）。
@@ -948,7 +966,7 @@ pub struct App {
     /// 各窗口最近光标位置（右键菜单锚点 / 提示定位）。
     pub cursors: HashMap<window::Id, Point>,
     /// 打开的弹层（同窗口同时至多一个）。
-    pub popup: Option<(window::Id, PopupOpen)>,
+    pub(crate) popup: Option<(window::Id, PopupOpen)>,
     /// 弹层面板导航（两 pane 菜单）。
     pub popup_pane: usize,
     /// 设置整页开启态与左栏 tab。
@@ -961,6 +979,16 @@ pub struct App {
     pub plugins: Arc<PluginRuntime>,
     /// 设置-插件页状态（列表缓存 / 详情 / 卸载确认 / 安装在途）。
     pub plugins_state: settings_view::plugins::PluginsState,
+    /// 已注册贡献投影（运行时事件后刷新；菜单、标签与面板渲染都读它）。
+    pub plugin_contributions: Vec<atelyx_core::plugin_runtime::Contribution>,
+    /// 当前呈现布局里已挂的插件面（布局变化时重算并差额通知插件）。
+    pub plugin_surfaces: HashSet<(String, String)>,
+    /// 已挂面的最新界面树投影（键 = 插件 id + 面 id）。
+    pub plugin_trees: HashMap<(String, String), atelyx_core::plugin_runtime::ViewNode>,
+    /// 单行 / 数字输入的宿主草稿（键 = 插件 id + 面 id + 节点 id）。
+    pub plugin_drafts: HashMap<plugin_actions::InputKey, plugin_actions::InputDraft>,
+    /// 多行输入的本机编辑器状态（内容与光标归宿主所有）。
+    pub plugin_editors: HashMap<plugin_actions::InputKey, plugin_actions::EditorState>,
     /// 应用级全局配置（最近仓库列表；落盘 global.json）。
     pub global: global_config::GlobalConfig,
     /// 设置-通用：界面字号草稿（None = 显示当前生效值）。
@@ -1304,6 +1332,11 @@ impl App {
                 shortcut_recording: None,
                 plugins: plugins.clone(),
                 plugins_state: settings_view::plugins::PluginsState::default(),
+                plugin_contributions: Vec::new(),
+                plugin_surfaces: HashSet::new(),
+                plugin_trees: HashMap::new(),
+                plugin_drafts: HashMap::new(),
+                plugin_editors: HashMap::new(),
                 ai_sub_tab: "providers".into(),
                 repo_config: vault::VaultConfig::default(),
                 agents: Vec::new(),
@@ -1436,9 +1469,11 @@ impl App {
                     .insert(root.clone(), app.ui.file_explorer_expanded.clone());
             }
         }
-        // 插件运行时：扫描已安装清单并启动已启用插件
+        // 插件运行时：扫描已安装清单并启动已启用插件；布局里现存的插件面就绪即通知
         app.plugins.scan();
         app.plugins.start_enabled();
+        plugin_actions::sync_surfaces(&mut app);
+        boot = boot.chain(plugin_actions::refresh_projection(&mut app));
         (app, boot)
     }
 
@@ -2801,8 +2836,38 @@ impl App {
             Message::Ai(msg) => settings_view::ai::update(self, msg),
             Message::Plugins(msg) => settings_view::plugins::update(self, msg),
             Message::PluginEvent(event) => {
+                // 插件（重启 / 重新启用后）就绪：已挂的面重新通知，插件据此重建界面
+                if let PluginEvent::StatusChanged { id, status } = event.as_ref() {
+                    if *status == PluginStatus::Running {
+                        for (plugin_id, surface_id) in self.plugin_surfaces.iter() {
+                            if plugin_id == id {
+                                self.plugins
+                                    .notify_surface_attached(plugin_id, surface_id, SurfaceKind::Panel);
+                            }
+                        }
+                    }
+                }
                 settings_view::plugins::on_event(self, *event);
-                Task::none()
+                // 运行时事件（界面提交 / 贡献变化 / 状态变化）后重投影：树与贡献都取最新快照
+                plugin_actions::refresh_projection(self)
+            }
+            Message::PluginView { plugin_id, surface_id, node_id, event } => {
+                plugin_actions::on_view_event(self, plugin_id, surface_id, node_id, event)
+            }
+            Message::PluginList { window, entries } => {
+                let point = self.cursor_for(window);
+                Task::done(Message::PopupOpen(
+                    window,
+                    PopupOpen {
+                        point: Point::new(point.x, point.y + 16.0),
+                        flip_y: Some(point.y - 12.0),
+                        state: PopupState::PluginList { entries },
+                        min_width: 0.0,
+                    },
+                ))
+            }
+            Message::PluginTextEdit { plugin_id, surface_id, node_id, action } => {
+                plugin_actions::on_text_edit(self, plugin_id, surface_id, node_id, action)
             }
             Message::AgentsLoaded(gen, result) => {
                 if gen == self.epoch() {
@@ -3331,7 +3396,15 @@ impl App {
         let result = apply_layout_op(&mut self.ui, &op);
         self.dismiss_popup();
         self.schedule_persist();
-        (self.reconcile(), result)
+        // 布局变化可能增减插件面：差额通知插件（attached / detached）；面集合确实变了才重投影
+        // （改分割比例这类高频布局操作不触发重投影）
+        let surfaces_changed = plugin_actions::sync_surfaces(self);
+        let reconcile = self.reconcile();
+        let task = match surfaces_changed {
+            true => reconcile.chain(plugin_actions::refresh_projection(self)),
+            false => reconcile,
+        };
+        (task, result)
     }
 
     /// 收起当前弹层（菜单动作完成后的统一收尾）。
@@ -5915,7 +5988,7 @@ impl App {
             .and_then(|w| {
                 w.active_tab_id.as_deref().and_then(|tid| {
                     w.tabs.iter().find(|t| t.id == tid).map(|t| {
-                        format!("Atelyx — {}", layout_view::view_label(&t.view))
+                        format!("Atelyx — {}", layout_view::view_label(self, &t.view))
                     })
                 })
             })

@@ -126,6 +126,29 @@ impl Context {
             .await
     }
 
+    /// 注册一个贡献点，使其出现在宿主对应入口（面板 / 表格视图下拉）。
+    /// `id` 插件内唯一且不得含 `:`，同时是该面挂载后的 surfaceId；重复或非法 id 由宿主可读拒绝。
+    pub async fn register(
+        &self,
+        slot: ContributionSlot,
+        id: &str,
+        label: &str,
+        icon: Option<&str>,
+    ) -> Result<(), RpcError> {
+        let params = RegisterParams {
+            slot,
+            id: id.into(),
+            label: label.into(),
+            icon: icon.map(Into::into),
+        };
+        self.call_unit(method::view::REGISTER, &params).await
+    }
+
+    /// 按 id 撤销自己的一个贡献点（未注册的 id 报可读错误）。
+    pub async fn unregister(&self, id: &str) -> Result<(), RpcError> {
+        self.call_unit(method::view::UNREGISTER, &UnregisterParams { id: id.into() }).await
+    }
+
     pub async fn subscribe(&self, name: &str) -> Result<bool, RpcError> {
         let result: SubscribeResult = self.call_typed(crate::protocol::event::SUBSCRIBE, &SubscribeParams { name: name.into() }).await?;
         Ok(result.subscribed)

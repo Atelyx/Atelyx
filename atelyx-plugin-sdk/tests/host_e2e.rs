@@ -3,7 +3,10 @@
 
 use std::time::{Duration, Instant};
 
-use atelyx_core::plugin_runtime::{PluginRuntime, PluginStatus, VaultSwitchPayload};
+use atelyx_core::plugin_runtime::{
+    ContributionSlot, EventValue, NodeBody, PluginRuntime, PluginStatus, SurfaceKind, VaultSwitchPayload,
+    ViewEvent, ViewNode,
+};
 use atelyx_core::vault::test_support::TempDir;
 use atelyx_plugin_sdk::protocol::manifest::MANIFEST_FILE;
 
@@ -168,6 +171,55 @@ fn crash_restarts_then_circuit_breaks() {
 /// 某插件的界面提交次数（重启即重新提交，是「被宿主重载」的可观测信号）。
 fn submits_of(runtime: &PluginRuntime, id: &str) -> u64 {
     runtime.list().into_iter().find(|p| p.id == id).map(|p| p.view_submits).unwrap_or(0)
+}
+
+/// 界面树里的文本节点内容。
+fn text_of(tree: &ViewNode, node_id: &str) -> String {
+    fn find<'a>(node: &'a ViewNode, node_id: &str) -> Option<&'a ViewNode> {
+        if node.id == node_id {
+            return Some(node);
+        }
+        node.children.iter().find_map(|child| find(child, node_id))
+    }
+    match &find(tree, node_id).unwrap_or_else(|| panic!("树里应有 {node_id} 节点")).body {
+        NodeBody::Text { content, .. } => content.clone(),
+        other => panic!("{node_id} 应为 text 节点，实际：{other:?}"),
+    }
+}
+
+/// 贡献注册 → 面挂载通知 → 节点事件回发 → 界面树更新 → 停用撤贡献：
+/// 界面贡献的完整闭环（宿主侧只经 `plugin_runtime` 的公开面观察）。
+#[test]
+fn contribution_surface_event_loop_and_teardown() {
+    let (_tmp, runtime, id, _state) = install_ready_echo(false);
+
+    // 握手后注册贡献：id 即该面挂载后的 surfaceId
+    let contributions = runtime.contributions();
+    assert_eq!(contributions.len(), 1, "示例插件应注册一个面板贡献");
+    assert_eq!(contributions[0].plugin_id, id);
+    assert_eq!(contributions[0].slot, ContributionSlot::Panel);
+    assert_eq!(contributions[0].id, "panel");
+    assert!(!contributions[0].label.is_empty());
+
+    // 界面树按面存档：停用前可读到插件提交的最新树
+    let first = runtime.surface_tree(&id, "panel").expect("应已存档首棵树");
+    assert_eq!(text_of(&first, "status"), "就绪");
+
+    // 面挂载：插件重发界面（宿主在布局变化 / 插件重启时都会发这一条）
+    runtime.notify_surface_attached(&id, "panel", SurfaceKind::Panel);
+    let submits = wait_submits(&runtime, &id, 2);
+    assert!(submits >= 2, "面挂载应触发一次重发，实际提交 {submits} 次");
+
+    // 节点事件回发：输入变更 → 插件改状态并整树重发
+    runtime.send_view_event(&id, "panel", "query", ViewEvent::Change { value: EventValue::Text("模型".into()) });
+    wait_submits(&runtime, &id, 3);
+    let updated = runtime.surface_tree(&id, "panel").expect("事件后应读到新树");
+    assert_eq!(text_of(&updated, "status"), "输入：模型");
+
+    // 停用：贡献注册与界面树随会话收尾一并撤销，不再对外可见
+    runtime.set_enabled(&id, false).expect("停用应成功");
+    assert!(runtime.contributions().is_empty(), "停用后贡献注册应撤销");
+    assert!(runtime.surface_tree(&id, "panel").is_none(), "停用后界面树应清空");
 }
 
 /// 切仓库容器：首次激活（启动自动进入）只广播不重载——插件刚由宿主启动、本就没有旧容器上下文；

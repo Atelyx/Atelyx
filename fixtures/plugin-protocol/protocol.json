@@ -13,6 +13,12 @@
       "line": "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"state.read\"}"
     },
     {
+      "name": "view-register-request",
+      "kind": "request",
+      "method": "view.register",
+      "line": "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"view.register\",\"params\":{\"id\":\"com.atelyx.llama.models\",\"label\":\"模型\",\"slot\":\"panel\"}}"
+    },
+    {
       "name": "notification",
       "kind": "notification",
       "method": "host:event",
@@ -39,6 +45,14 @@
     "crossAlign": "start",
     "children": [
       {
+        "id": "title",
+        "kind": "text",
+        "content": "模型管理",
+        "size": 15.0,
+        "weight": "semiBold",
+        "color": "text"
+      },
+      {
         "id": "query",
         "kind": "textInput",
         "value": "示例文本",
@@ -61,23 +75,85 @@
         "events": ["change"]
       },
       {
-        "id": "go",
-        "kind": "button",
-        "label": "开始",
-        "variant": "primary",
-        "events": ["click"]
+        "id": "flag",
+        "kind": "checkbox",
+        "checked": true,
+        "label": "自动启动",
+        "events": ["change"]
+      },
+      {
+        "id": "tools",
+        "kind": "row",
+        "gap": 6.0,
+        "align": "center",
+        "crossAlign": "center",
+        "children": [
+          {
+            "id": "shot",
+            "kind": "iconButton",
+            "icon": "camera",
+            "tooltip": "截图",
+            "events": ["click"]
+          },
+          {
+            "id": "go",
+            "kind": "button",
+            "label": "开始",
+            "variant": "primary",
+            "events": ["click"]
+          },
+          {
+            "id": "load",
+            "kind": "progress",
+            "value": 0.4
+          }
+        ]
+      },
+      {
+        "id": "paneGrid",
+        "kind": "grid",
+        "columns": 2,
+        "gap": 6.0,
+        "children": [
+          {
+            "id": "last",
+            "kind": "image",
+            "source": { "type": "private", "path": "shots/last.png" },
+            "fit": "contain"
+          },
+          {
+            "id": "more",
+            "kind": "menu",
+            "label": "更多",
+            "icon": "ellipsis",
+            "items": [
+              { "label": "重载", "action": "reload" },
+              { "label": "清除", "action": "purge", "danger": true }
+            ],
+            "events": ["change"]
+          }
+        ]
+      },
+      {
+        "id": "scroller",
+        "kind": "scroll",
+        "direction": "vertical",
+        "children": [
+          {
+            "id": "log",
+            "kind": "list",
+            "children": [
+              { "id": "log1", "kind": "text", "content": "已加载" },
+              { "id": "log2", "kind": "text", "content": "就绪", "color": "textMuted" }
+            ]
+          }
+        ]
       },
       {
         "id": "status",
         "kind": "text",
         "content": "就绪",
         "color": "textMuted"
-      },
-      {
-        "id": "shot",
-        "kind": "image",
-        "source": { "type": "private", "path": "shots/last.png" },
-        "fit": "contain"
       }
     ]
   },
@@ -159,6 +235,21 @@
       "name": "http.request result",
       "type": "HttpResult",
       "value": { "status": 200, "headers": { "Content-Type": "application/json" }, "bodyBase64": "e30=" }
+    },
+    {
+      "name": "view.register params (panel registration)",
+      "type": "RegisterParams",
+      "value": { "slot": "panel", "id": "com.atelyx.llama.models", "label": "模型", "icon": "box" }
+    },
+    {
+      "name": "view.register params (tableView slot, icon omitted)",
+      "type": "RegisterParams",
+      "value": { "slot": "tableView", "id": "com.atelyx.table.timeline", "label": "时间线" }
+    },
+    {
+      "name": "view.unregister params",
+      "type": "UnregisterParams",
+      "value": { "id": "com.atelyx.llama.models" }
     },
     {
       "name": "view surface attached",

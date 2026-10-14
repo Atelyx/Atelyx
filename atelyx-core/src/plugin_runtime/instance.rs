@@ -6,7 +6,7 @@
 //! 每次启动领一个运行令牌（[`Instance::run_token`]）：令牌不匹配的输出（上次启动遗留）一律丢弃，
 //! 否则「停用 → 启用」后到达的旧进程事件会被当成新进程的崩溃，抹掉新 pid 并再起一个实例。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -16,7 +16,10 @@ use atelyx_plugin_protocol::envelope::{Envelope, Request, RequestId, RpcError};
 use atelyx_plugin_protocol::event;
 use atelyx_plugin_protocol::handshake::{self, HostInfo, InitializeParams, InitializeResult};
 use atelyx_plugin_protocol::manifest::Manifest;
-use atelyx_plugin_protocol::method;
+use atelyx_plugin_protocol::method::{
+    self, ContributionSlot, RegisterParams, SurfaceAttachedParams, SurfaceDetachedParams,
+    UnregisterParams, ViewEventParams,
+};
 use atelyx_plugin_protocol::{view, API_VERSION};
 use base64::Engine;
 use serde::de::DeserializeOwned;
@@ -26,7 +29,10 @@ use serde_json::{json, Value};
 use crate::plugin_process::{EventSink, PluginProcessHost, ProcessEvent as HostEvent};
 
 use super::{capability, child_process, fs, http, shortcut};
-use super::{AuditRecord, DialogKind, DialogRequest, PluginEvent, PluginRuntime, PluginStatus};
+use super::{
+    AuditRecord, Contribution, DialogKind, DialogRequest, PluginEvent, PluginRuntime, PluginStatus,
+    SurfaceKind, ViewEvent, ViewNode,
+};
 
 /// 崩溃判定窗口：窗口内累计达到 [`CRASH_LIMIT`] 即熔断。
 const CRASH_WINDOW: Duration = Duration::from_secs(60);
@@ -71,8 +77,20 @@ pub(crate) struct Instance {
     transition: Mutex<()>,
     subscriptions: Mutex<HashSet<String>>,
     denied: Mutex<Vec<AuditRecord>>,
+    /// 各面最新界面树（surface id → 树）；会话收尾一并清除（撤贡献）。
+    surfaces: Mutex<HashMap<String, ViewNode>>,
+    /// 已注册贡献点（按注册序）；id 插件内唯一，撤销按 id 摘除。
+    contributions: Mutex<Vec<ContributionEntry>>,
     view_submits: AtomicU64,
     crash_times: Mutex<Vec<Instant>>,
+}
+
+/// 一个已注册贡献点（不含插件 id；插件 id 由汇总侧补上）。
+struct ContributionEntry {
+    slot: ContributionSlot,
+    id: String,
+    label: String,
+    icon: Option<String>,
 }
 
 impl Instance {
@@ -103,6 +121,8 @@ impl Instance {
             transition: Mutex::new(()),
             subscriptions: Mutex::new(HashSet::new()),
             denied: Mutex::new(Vec::new()),
+            surfaces: Mutex::new(HashMap::new()),
+            contributions: Mutex::new(Vec::new()),
             view_submits: AtomicU64::new(0),
             crash_times: Mutex::new(Vec::new()),
         })
@@ -126,6 +146,27 @@ impl Instance {
 
     pub(crate) fn view_submits(&self) -> u64 {
         self.view_submits.load(Ordering::Relaxed)
+    }
+
+    /// 某面的最新界面树（会话收尾即清空，插件未提交过 = `None`）。
+    pub(crate) fn surface_tree(&self, surface_id: &str) -> Option<ViewNode> {
+        self.surfaces.lock().unwrap().get(surface_id).cloned()
+    }
+
+    /// 本插件已注册贡献点（补上插件 id）。
+    pub(crate) fn contributions(&self) -> Vec<Contribution> {
+        self.contributions
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|entry| Contribution {
+                plugin_id: self.id.clone(),
+                slot: entry.slot,
+                id: entry.id.clone(),
+                label: entry.label.clone(),
+                icon: entry.icon.clone(),
+            })
+            .collect()
     }
 
     /// 手动重试前清零崩溃计数（否则窗口内的旧崩溃会立刻把新会话判为熔断）。
@@ -210,12 +251,17 @@ impl Instance {
         self.release_resources();
     }
 
-    /// 收掉随插件记账的宿主资源：托管子进程、已注册的全局快捷键、在途的对话框请求与本会话订阅。
-    /// 停用 / 失败 / 崩溃 / 卸载四条路径共用——漏掉任何一条都会留下孤儿服务或永久悬挂的调用。
+    /// 收掉随插件记账的宿主资源：托管子进程、已注册的全局快捷键、在途的对话框请求、本会话订阅
+    /// 与界面贡献（各面树 + 贡献注册）。停用 / 失败 / 崩溃 / 卸载四条路径共用——漏掉任何一条都会
+    /// 留下孤儿服务、永久悬挂的调用，或让已停插件的界面继续对外呈现。
     fn release_resources(&self) {
         // 与资源获取互斥：本段跑完之后到达的登记一律被 [`Instance::with_session`] 拒掉
         let _gate = self.resources.lock().unwrap();
         self.subscriptions.lock().unwrap().clear();
+        let surfaces_dropped = !self.surfaces.lock().unwrap().is_empty();
+        self.surfaces.lock().unwrap().clear();
+        let contributions_dropped = !self.contributions.lock().unwrap().is_empty();
+        self.contributions.lock().unwrap().clear();
         for child in self.children.take_all() {
             if let Err(e) = self.process_host.kill_process_tree(child) {
                 eprintln!("[plugin {}] 结束子进程 {child} 失败：{e}", self.id);
@@ -223,6 +269,13 @@ impl Instance {
         }
         self.shortcuts.release_plugin(&self.id);
         self.fail_pending_dialogs("插件已停止，对话框已取消");
+        // 界面与贡献变化广播给壳：壳据此停下已停插件界面的渲染并清掉菜单条目
+        if surfaces_dropped {
+            let _ = self.events.send(PluginEvent::ViewSubmitted { id: self.id.clone() });
+        }
+        if contributions_dropped {
+            let _ = self.events.send(PluginEvent::ContributionsChanged { id: self.id.clone() });
+        }
     }
 
     /// 让本插件在途的对话框请求立即以可读失败收场，避免等待它的读线程无限期悬挂。
@@ -440,7 +493,9 @@ impl Instance {
         match method {
             handshake::INITIALIZE => self.on_initialize(params),
             event::SUBSCRIBE => self.on_subscribe(params),
-            method::view::SUBMIT => self.on_submit(params),
+            method::view::SUBMIT => self.on_submit(token, params),
+            method::view::REGISTER => self.on_register(token, params),
+            method::view::UNREGISTER => self.on_unregister(token, params),
             method::state::READ => {
                 let json = capability::read_state(&self.state_dir).map_err(RpcError::failed)?;
                 Ok(json!({ "json": json }))
@@ -596,15 +651,72 @@ impl Instance {
         Ok(json!({ "subscribed": true }))
     }
 
-    /// 校验并接收界面树：只校验与计数，本层不保留树（挂载由宿主界面层承担）。surfaceId 为空即拒。
-    fn on_submit(&self, params: &Value) -> Result<Value, RpcError> {
+    /// 校验并接收界面树：只校验与存档，渲染由宿主界面层承担。surfaceId 为空即拒。
+    /// 存档与贡献登记都在会话闸门内——收尾跑完之后到达的提交不得让已停插件的界面继续存活。
+    fn on_submit(self: &Arc<Self>, token: u64, params: &Value) -> Result<Value, RpcError> {
         let p: method::SubmitParams = parse(params)?;
         if p.surface_id.trim().is_empty() {
             return Err(RpcError::failed("surfaceId 不能为空"));
         }
         view::ViewNode::validate(&p.tree).map_err(RpcError::failed)?;
-        self.view_submits.fetch_add(1, Ordering::Relaxed);
+        self.with_session(token, || {
+            self.surfaces.lock().unwrap().insert(p.surface_id.clone(), p.tree);
+            self.view_submits.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        })
+        .map_err(RpcError::failed)?;
+        let _ = self.events.send(PluginEvent::ViewSubmitted { id: self.id.clone() });
         Ok(json!({ "applied": true }))
+    }
+
+    /// 注册一个贡献点：id 插件内唯一、非空且不含 `:`（宿主的面标识以它作命名空间分隔）。
+    /// 贡献注册是 UI 面声明，无权限门槛；停用 / 崩溃 / 卸载随会话收尾由宿主清除。
+    fn on_register(self: &Arc<Self>, token: u64, params: &Value) -> Result<Value, RpcError> {
+        let p: RegisterParams = parse(params)?;
+        if p.id.trim().is_empty() {
+            return Err(RpcError::failed("贡献 id 不能为空"));
+        }
+        if p.id.contains(':') {
+            return Err(RpcError::failed(format!("贡献 id 不得含 `:`：{}", p.id)));
+        }
+        if p.label.trim().is_empty() {
+            return Err(RpcError::failed("贡献 label 不能为空"));
+        }
+        self.with_session(token, || {
+            let mut contributions = self.contributions.lock().unwrap();
+            if contributions.iter().any(|entry| entry.id == p.id) {
+                return Err(format!("贡献 id 已注册：{}", p.id));
+            }
+            contributions.push(ContributionEntry {
+                slot: p.slot,
+                id: p.id,
+                label: p.label,
+                icon: p.icon,
+            });
+            Ok(())
+        })
+        .map_err(RpcError::failed)?;
+        let _ = self.events.send(PluginEvent::ContributionsChanged { id: self.id.clone() });
+        Ok(json!({}))
+    }
+
+    /// 撤销一个贡献点并撤掉它的界面树；未注册的 id 报可读错误。
+    fn on_unregister(self: &Arc<Self>, token: u64, params: &Value) -> Result<Value, RpcError> {
+        let p: UnregisterParams = parse(params)?;
+        self.with_session(token, || {
+            let mut contributions = self.contributions.lock().unwrap();
+            let before = contributions.len();
+            contributions.retain(|entry| entry.id != p.id);
+            if contributions.len() == before {
+                return Err(format!("未注册的贡献 id：{}", p.id));
+            }
+            self.surfaces.lock().unwrap().remove(&p.id);
+            Ok(())
+        })
+        .map_err(RpcError::failed)?;
+        let _ = self.events.send(PluginEvent::ContributionsChanged { id: self.id.clone() });
+        let _ = self.events.send(PluginEvent::ViewSubmitted { id: self.id.clone() });
+        Ok(json!({}))
     }
 
     // ---------- 能力面实现 ----------
@@ -679,6 +791,28 @@ impl Instance {
     /// 转投一条全局快捷键触发（`host:shortcut.triggered`）。
     pub(crate) fn notify_shortcut(&self, accelerator: &str) {
         self.notify(method::shortcut::HOST_TRIGGERED, &shortcut::triggered_params(accelerator));
+    }
+
+    /// 回发一条节点界面事件（`host:view.event`）。
+    pub(crate) fn notify_view_event(&self, surface_id: &str, node_id: &str, event: ViewEvent) {
+        let params = ViewEventParams {
+            surface_id: surface_id.to_string(),
+            node_id: node_id.to_string(),
+            event,
+        };
+        self.notify(method::view::HOST_EVENT, &params);
+    }
+
+    /// 告知插件某个面已挂载（`host:surface.attached`）。
+    pub(crate) fn notify_surface_attached(&self, surface_id: &str, kind: SurfaceKind) {
+        let params = SurfaceAttachedParams { surface_id: surface_id.to_string(), kind };
+        self.notify(method::view::HOST_ATTACHED, &params);
+    }
+
+    /// 告知插件某个面已移除（`host:surface.detached`）。
+    pub(crate) fn notify_surface_detached(&self, surface_id: &str) {
+        let params = SurfaceDetachedParams { surface_id: surface_id.to_string() };
+        self.notify(method::view::HOST_DETACHED, &params);
     }
 
     /// 广播一条宿主领域事件（`host:event`）。
@@ -821,6 +955,7 @@ mod tests {
     use super::*;
     use crate::vault::test_support::TempDir;
     use atelyx_plugin_protocol::manifest::{Entry, Permission};
+    use atelyx_plugin_protocol::view::NodeBody;
 
     /// 构造一个不落进程的实例（`entry` 留空：单元测试只驱动请求分派与状态，不启动进程）。
     fn make_instance(permissions: Vec<Permission>) -> (TempDir, Arc<Instance>) {
@@ -1123,5 +1258,101 @@ mod tests {
                 .is_err(),
             "surfaceId 为空应被拒"
         );
+    }
+
+    /// 界面树按面存档（壳据此渲染最新树）；重复提交覆盖同一面。
+    #[test]
+    fn submitted_trees_are_stored_per_surface() {
+        let (_tmp, instance) = make_instance(Vec::new());
+        let tree = |content: &str| json!({ "id": "root", "kind": "text", "content": content });
+        instance
+            .dispatch(method::view::SUBMIT, &json!({ "surfaceId": "panel", "tree": tree("一") }))
+            .unwrap();
+        instance
+            .dispatch(method::view::SUBMIT, &json!({ "surfaceId": "other", "tree": tree("二") }))
+            .unwrap();
+        instance
+            .dispatch(method::view::SUBMIT, &json!({ "surfaceId": "panel", "tree": tree("三") }))
+            .unwrap();
+        let stored = |id: &str| match instance.surface_tree(id) {
+            Some(ViewNode { body: NodeBody::Text { content, .. }, .. }) => content,
+            other => panic!("面 {id} 的树应存在且为文本节点，实际：{other:?}"),
+        };
+        assert_eq!(stored("panel"), "三", "重复提交应覆盖同一面的旧树");
+        assert_eq!(stored("other"), "二");
+        assert!(instance.surface_tree("missing").is_none());
+    }
+
+    /// 贡献注册：登记成功、重复 id 与非法 id 被拒、撤销后消失。
+    #[test]
+    fn contributions_register_and_unregister() {
+        let (_tmp, instance) = make_instance(Vec::new());
+        let panel = json!({ "slot": "panel", "id": "models", "label": "模型", "icon": "box" });
+        instance.dispatch(method::view::REGISTER, &panel).expect("面板注册应成功");
+        instance
+            .dispatch(method::view::REGISTER, &json!({ "slot": "tableView", "id": "timeline", "label": "时间线" }))
+            .expect("表格视图注册应成功");
+        let listed = instance.contributions();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].id, "models");
+        assert_eq!(listed[0].slot, ContributionSlot::Panel);
+        assert_eq!(listed[0].icon.as_deref(), Some("box"));
+        assert_eq!(listed[0].plugin_id, "com.example.demo");
+
+        // 重复 id 与非法的空 id / 含 `:` 的 id 一律可读拒绝
+        for bad in [
+            panel.clone(),
+            json!({ "slot": "panel", "id": "  ", "label": "空" }),
+            json!({ "slot": "panel", "id": "a:b", "label": "分隔符" }),
+            json!({ "slot": "panel", "id": "blank", "label": " " }),
+        ] {
+            assert!(instance.dispatch(method::view::REGISTER, &bad).is_err(), "应拒绝：{bad}");
+        }
+
+        instance
+            .dispatch(method::view::UNREGISTER, &json!({ "id": "models" }))
+            .expect("撤销应成功");
+        assert_eq!(instance.contributions().len(), 1);
+        assert!(
+            instance.dispatch(method::view::UNREGISTER, &json!({ "id": "models" })).is_err(),
+            "撤销未注册的 id 应报可读错误"
+        );
+    }
+
+    /// 会话收尾清空界面树与贡献注册：停用 / 崩溃 / 卸载后壳不该再看到已停插件的界面。
+    #[test]
+    fn teardown_drops_surfaces_and_contributions() {
+        let (_tmp, instance) = make_instance(Vec::new());
+        instance
+            .dispatch(method::view::REGISTER, &json!({ "slot": "panel", "id": "main", "label": "面板" }))
+            .unwrap();
+        instance
+            .dispatch(
+                method::view::SUBMIT,
+                &json!({ "surfaceId": "main", "tree": json!({ "id": "root", "kind": "text", "content": "x" }) }),
+            )
+            .unwrap();
+        instance.stop();
+        assert!(instance.surface_tree("main").is_none(), "收尾后界面树应清空");
+        assert!(instance.contributions().is_empty(), "收尾后贡献注册应清空");
+    }
+
+    /// 会话闸门同样覆盖界面登记：令牌换代后到达的提交 / 注册一律作废（不得让已停插件的界面存活）。
+    #[test]
+    fn stale_session_view_registration_is_refused() {
+        let (_tmp, instance) = make_instance(Vec::new());
+        let stale = instance.run_token.load(Ordering::SeqCst) + 1;
+        let tree = json!({ "id": "root", "kind": "text", "content": "x" });
+        for (method_name, params) in [
+            (method::view::SUBMIT, json!({ "surfaceId": "main", "tree": tree })),
+            (method::view::REGISTER, json!({ "slot": "panel", "id": "main", "label": "面板" })),
+        ] {
+            let error = instance
+                .dispatch_for_session(stale, method_name, &params)
+                .expect_err("旧会话的界面登记应被拒");
+            assert!(error.message.contains("会话已结束"), "{method_name}: {}", error.message);
+        }
+        assert!(instance.surface_tree("main").is_none());
+        assert!(instance.contributions().is_empty());
     }
 }

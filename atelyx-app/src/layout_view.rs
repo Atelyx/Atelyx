@@ -13,6 +13,7 @@ use iced::{Color, Element, Font, Length, Padding, Point, Rectangle, Size, border
 
 use atelyx_core::global_config::RecentVault;
 use atelyx_core::layout::{self, AppUiState, LayoutNode, TabItem};
+use atelyx_core::plugin_runtime::ContributionSlot;
 
 use crate::settings_view::ai;
 use crate::ui::controls::{self, Variant};
@@ -48,9 +49,9 @@ pub const VIEW_KINDS: &[&str] = &[
     "calendar", "repohistory", "recent",
 ];
 
-/// 内置视图显示名（面板头标签；插件 kind 原样显示）。
-pub fn view_label(kind: &str) -> &str {
-    match kind {
+/// 内置视图显示名（面板头标签）；插件面板取贡献 label，贡献缺失（未装 / 停用）回落插件 id。
+pub fn view_label(app: &App, kind: &str) -> String {
+    let builtin = match kind {
         "canvas" => "画布",
         "note" => "笔记",
         "table" => "表格",
@@ -63,27 +64,53 @@ pub fn view_label(kind: &str) -> &str {
         "repohistory" => "仓库历史",
         "recent" => "最近打开",
         "empty" => "空面板",
-        other => other,
+        _ => "",
+    };
+    if !builtin.is_empty() {
+        return builtin.to_string();
     }
+    if let Some((plugin_id, id)) = crate::plugin_actions::parse_view_kind(kind) {
+        return crate::plugin_actions::contribution(app, plugin_id, id)
+            .map(|c| c.label.clone())
+            .unwrap_or_else(|| plugin_id.to_string());
+    }
+    kind.to_string()
 }
 
-/// 内置视图图标（lucide 名；未知 kind 用拼图兜底）。
-pub fn view_icon(kind: &str) -> &'static str {
-    match kind {
-        "canvas" => "palette",
-        "note" => "file-text",
-        "table" => "table",
-        "files" => "files",
-        "search" => "search",
-        "inspector" => "info",
-        "aichat" => "sparkles",
-        "collabroom" => "users",
-        "calendar" => "calendar-days",
-        "repohistory" => "history",
-        "recent" => "clock",
-        "empty" => "layout-template",
-        _ => "puzzle",
+/// 内置视图图标（lucide 名）；插件面板取贡献 icon（缺省拼图）；未知 kind 拼图。
+pub fn view_icon(app: &App, kind: &str) -> &'static str {
+    let builtin = match kind {
+        "canvas" => Some("palette"),
+        "note" => Some("file-text"),
+        "table" => Some("table"),
+        "files" => Some("files"),
+        "search" => Some("search"),
+        "inspector" => Some("info"),
+        "aichat" => Some("sparkles"),
+        "collabroom" => Some("users"),
+        "calendar" => Some("calendar-days"),
+        "repohistory" => Some("history"),
+        "recent" => Some("clock"),
+        "empty" => Some("layout-template"),
+        _ => None,
+    };
+    if let Some(name) = builtin {
+        return name;
     }
+    if let Some((plugin_id, id)) = crate::plugin_actions::parse_view_kind(kind) {
+        return crate::plugin_actions::contribution_icon(app, plugin_id, id);
+    }
+    "puzzle"
+}
+
+/// 可选视图 kind 清单：内置视图 + 已注册的插件面板贡献（壳侧命名空间化 kind）。
+pub fn available_view_kinds(app: &App) -> Vec<String> {
+    let mut kinds: Vec<String> = VIEW_KINDS.iter().map(|kind| (*kind).to_string()).collect();
+    kinds.extend(
+        crate::plugin_actions::contributions_of(app, ContributionSlot::Panel)
+            .map(|c| crate::plugin_actions::view_kind(&c.plugin_id, &c.id)),
+    );
+    kinds
 }
 
 /// 估宽的单字符口径（估宽与表格行内换行估算共用：两处漂移即行高/命中失配）。
@@ -133,7 +160,7 @@ pub fn tab_label(app: &App, view: &str) -> String {
             return file_label(f, ".atb");
         }
     }
-    view_label(view).to_string()
+    view_label(app, view)
 }
 
 /// 面板标签近似宽度（拖拽命中几何用；渲染宽度由内容自适应，见 panel_tab）。
@@ -166,7 +193,7 @@ pub struct RenameState {
 
 /// 弹层内容形态（几何与交互数据随形态携带）。
 #[derive(Clone, Debug)]
-pub enum PopupState {
+pub(crate) enum PopupState {
     SceneSelector { confirm: Option<String> },
     LayoutTabMenu { layout_id: String },
     PanelMenu { panel_id: String },
@@ -247,6 +274,8 @@ pub enum PopupState {
     LicenseInfo,
     /// 历史记录弹层（居中模态；kind+file 定位侧文件）。
     HistoryBrowser { kind: atelyx_core::history::HistoryKind, file: String },
+    /// 插件菜单 / 下拉节点的弹层（条目由插件界面树带来，点击回发节点事件）。
+    PluginList { entries: Vec<crate::plugin_actions::PopupEntry> },
 }
 
 impl PopupState {
@@ -300,13 +329,14 @@ impl PopupState {
             // 居中模态不走锚点几何，估高由各自 overlay 钳制
             PopupState::LicenseInfo => crate::settings_view::LICENSE_CARD_WIDTH,
             PopupState::HistoryBrowser { .. } => crate::history_browser::CARD_WIDTH,
+            PopupState::PluginList { .. } => 176.0,
         }
     }
 }
 
 /// 打开弹层的请求：锚点（窗口局部坐标）+ 触发器顶边 + 内容形态。
 #[derive(Clone, Debug)]
-pub struct PopupOpen {
+pub(crate) struct PopupOpen {
     pub point: Point,
     pub flip_y: Option<f32>,
     pub state: PopupState,
@@ -562,7 +592,7 @@ fn with_overlays<'a>(
                 let local = Point::new(drag.current.x - wpos.x, drag.current.y - wpos.y);
                 let ghost = container(
                     row![
-                        icon(view_icon(&drag.view), 13.0, pal::TEXT_PRIMARY),
+                        icon(view_icon(app, &drag.view), 13.0, pal::TEXT_PRIMARY),
                         text(drag.label.clone()).size(pal::fs_caption()).color(pal::TEXT_PRIMARY),
                     ]
                     .spacing(6),
@@ -1291,7 +1321,7 @@ fn panel_tab<'a>(
 
     let text_color = if active { pal::TEXT_PRIMARY } else { pal::TEXT_SECONDARY };
     let mut label_row = row![].spacing(4);
-    label_row = label_row.push(icon(view_icon(&t.view), 13.0, text_color));
+    label_row = label_row.push(icon(view_icon(app, &t.view), 13.0, text_color));
     label_row = label_row.push(
         text(ellipsize(&label, UiMetrics::TAB_TEXT_MAX_W, 12.0))
             .size(pal::fs_caption())
@@ -1418,8 +1448,11 @@ fn note_status_pill(app: &App) -> Option<Element<'static, Message>> {
     }
 }
 
-/// 按视图 kind 分派内容（files/note/search/inspector/table/collabroom/recent/repohistory/calendar 可用，其余占位）。
+/// 按视图 kind 分派内容（内置视图按 kind；插件面板按贡献 kind 走 ViewNode 解释渲染）。
 fn view_content<'a>(app: &'a App, window: iced::window::Id, kind: &str) -> Element<'a, Message> {
+    if crate::plugin_actions::parse_view_kind(kind).is_some() {
+        return crate::plugin_view::panel_view(app, window, kind);
+    }
     match kind {
         "files" => files_view(app),
         "note" => note_view(app),
@@ -1430,7 +1463,7 @@ fn view_content<'a>(app: &'a App, window: iced::window::Id, kind: &str) -> Eleme
         "recent" => crate::recent_view::recent_view(app),
         "repohistory" => crate::repohistory_view::repohistory_view(app, window),
         "calendar" => crate::calendar_view::calendar_view(app, window),
-        kind => placeholder_view(kind),
+        kind => placeholder_view(app, kind),
     }
 }
 
@@ -1769,10 +1802,10 @@ fn inspector_view<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, Mes
 }
 
 /// 占位视图：大图标 + 名称 + 未实现说明（PanelPlaceholder 同款形态）。
-fn placeholder_view(kind: &str) -> Element<'static, Message> {
+fn placeholder_view(app: &App, kind: &str) -> Element<'static, Message> {
     controls::view_placeholder(
-        view_icon(kind),
-        view_label(kind).to_string(),
+        view_icon(app, kind),
+        view_label(app, kind),
         "该视图尚未实现".to_string(),
     )
 }
@@ -1816,7 +1849,7 @@ pub fn detached_view<'a>(
             || (t.view == "table" && app.ui.last_table_file.is_some());
         let text_color = if active { pal::TEXT_PRIMARY } else { pal::TEXT_SECONDARY };
         let mut label_row = row![].spacing(4);
-        label_row = label_row.push(icon(view_icon(&t.view), 13.0, text_color));
+        label_row = label_row.push(icon(view_icon(app, &t.view), 13.0, text_color));
         label_row = label_row.push(
             text(ellipsize(&label, UiMetrics::TAB_TEXT_MAX_W, 12.0))
                 .size(pal::fs_caption())
@@ -1938,7 +1971,7 @@ pub fn detached_view<'a>(
         .active_tab_id
         .as_deref()
         .and_then(|tid| w.tabs.iter().find(|t| t.id == tid))
-        .map(|t| view_label(&t.view).to_string())
+        .map(|t| view_label(app, &t.view))
         .unwrap_or_else(|| "Atelyx".into());
     let pin_btn: Element<'static, Message> = mouse_area(
         button(icon("lock-open", 14.0, pal::TEXT_SECONDARY))
@@ -3235,20 +3268,20 @@ fn popup_element<'a>(
                 .find(|w| w.id == *window_id)
                 .and_then(|w| w.tabs.iter().find(|t| t.id == *tab_id))
                 .map(|t| t.view.clone());
-            for kind in VIEW_KINDS {
-                let entry = if current_view.as_deref() == Some(*kind) {
-                    MenuEntry::noted(view_label(kind), view_icon(kind), "当前", true, None)
-                } else if view_occupied(app, kind, None) {
-                    MenuEntry::noted(view_label(kind), view_icon(kind), "已占用", true, None)
+            for kind in available_view_kinds(app) {
+                let entry = if current_view.as_deref() == Some(kind.as_str()) {
+                    MenuEntry::noted(view_label(app, &kind), view_icon(app, &kind), "当前", true, None)
+                } else if view_occupied(app, &kind, None) {
+                    MenuEntry::noted(view_label(app, &kind), view_icon(app, &kind), "已占用", true, None)
                         .hinted("该视图已在其他位置（全局唯一）")
                 } else {
                     MenuEntry::action_icon(
-                        view_label(kind),
-                        view_icon(kind),
+                        view_label(app, &kind),
+                        view_icon(app, &kind),
                         Message::DetachedSetTabView {
                             window_id: wid.clone(),
                             tab_id: tid.clone(),
-                            view: kind.to_string(),
+                            view: kind,
                         },
                     )
                 };
@@ -4010,18 +4043,33 @@ fn popup_element<'a>(
             0,
             MenuEntry::action_icon("下载图片", "download", Message::Table(crate::table_view::TableMsg::LightboxDownload)),
         )],
-        PopupState::TableViewMenu => vec![(
-            0,
-            MenuEntry::Action {
-                label: "表格".into(),
-                icon: None,
-                danger: false,
-                disabled: false,
-                on_press: Some(Message::Ui(crate::ui::UiMsg::PopupClose { window })),
-                note: Some("当前"),
-                hint: None,
-            },
-        )],
+        PopupState::TableViewMenu => {
+            let mut entries: Vec<(usize, MenuEntry)> = vec![(
+                0,
+                MenuEntry::Action {
+                    label: "表格".into(),
+                    icon: None,
+                    danger: false,
+                    disabled: false,
+                    on_press: Some(Message::Ui(crate::ui::UiMsg::PopupClose { window })),
+                    note: Some("当前"),
+                    hint: None,
+                },
+            )];
+            // 插件表格视图挂点：声明与入口已就绪，表格服务域开放前选中只给未开放提示
+            let plugins: Vec<String> = crate::plugin_actions::contributions_of(app, ContributionSlot::TableView)
+                .map(|c| c.label.clone())
+                .collect();
+            if !plugins.is_empty() {
+                entries.push((0, MenuEntry::Divider));
+                entries.extend(
+                    plugins
+                        .into_iter()
+                        .map(|label| (0usize, MenuEntry::action(label, Message::NotImplemented("插件表格视图（表格服务未开放）")))),
+                );
+            }
+            entries
+        }
         PopupState::AiProviderAddMenu => {
             let mut entries: Vec<(usize, MenuEntry)> = ai::PROVIDER_PRESETS
                 .iter()
@@ -4165,6 +4213,24 @@ fn popup_element<'a>(
         }
         // 居中模态不经锚点渲染（with_overlays 分流到各自 overlay）
         PopupState::HistoryBrowser { .. } | PopupState::LicenseInfo => Vec::new(),
+        // 插件菜单 / 下拉节点：条目由插件界面树带来（选中项带「当前」角标）
+        PopupState::PluginList { entries } => entries
+            .iter()
+            .map(|entry| {
+                (
+                    0usize,
+                    MenuEntry::Action {
+                        label: entry.label.clone(),
+                        icon: None,
+                        danger: entry.danger,
+                        disabled: entry.disabled,
+                        on_press: (!entry.disabled).then(|| entry.on_press.clone()),
+                        note: entry.current.then_some("当前"),
+                        hint: None,
+                    },
+                )
+            })
+            .collect(),
     };
     crate::ui::menu::pane_view(entries, pane, window)
 }
@@ -4474,17 +4540,17 @@ fn tab_context_entries(
             },
         ),
     ];
-    for kind in VIEW_KINDS {
-        let entry = if current_view.as_deref() == Some(*kind) {
-            MenuEntry::noted(view_label(kind), view_icon(kind), "当前", true, None)
-        } else if view_occupied(app, kind, Some(tab_id)) {
-            MenuEntry::noted(view_label(kind), view_icon(kind), "已占用", true, None)
+    for kind in available_view_kinds(app) {
+        let entry = if current_view.as_deref() == Some(kind.as_str()) {
+            MenuEntry::noted(view_label(app, &kind), view_icon(app, &kind), "当前", true, None)
+        } else if view_occupied(app, &kind, Some(tab_id)) {
+            MenuEntry::noted(view_label(app, &kind), view_icon(app, &kind), "已占用", true, None)
                 .hinted("该视图已在其他位置（全局唯一）")
         } else {
             MenuEntry::action_icon(
-                view_label(kind),
-                view_icon(kind),
-                Message::SetTabView { panel_id: pid.clone(), tab_id: tid.clone(), view: kind.to_string() },
+                view_label(app, &kind),
+                view_icon(app, &kind),
+                Message::SetTabView { panel_id: pid.clone(), tab_id: tid.clone(), view: kind },
             )
         };
         entries.push((1, entry));
@@ -4510,25 +4576,25 @@ fn find_tab_in_active(app: &App, tab_id: &str) -> Option<(String, bool)> {
 /// 空面板右键的视图选择器：本组 = 点击激活已有标签（角标「本组」）；已占用停用；其余添加。
 fn view_picker_entries(app: &App, panel_id: &str) -> Vec<(usize, MenuEntry<'static>)> {
     let pid = panel_id.to_string();
-    VIEW_KINDS
-        .iter()
+    available_view_kinds(app)
+        .into_iter()
         .map(|kind| {
-            let entry = if let Some(tab_id) = panel_tab_with_view(app, panel_id, kind) {
+            let entry = if let Some(tab_id) = panel_tab_with_view(app, panel_id, &kind) {
                 MenuEntry::noted(
-                    view_label(kind),
-                    view_icon(kind),
+                    view_label(app, &kind),
+                    view_icon(app, &kind),
                     "本组",
                     false,
                     Some(Message::PanelTab(pid.clone(), tab_id)),
                 )
-            } else if view_occupied(app, kind, None) {
-                MenuEntry::noted(view_label(kind), view_icon(kind), "已占用", true, None)
+            } else if view_occupied(app, &kind, None) {
+                MenuEntry::noted(view_label(app, &kind), view_icon(app, &kind), "已占用", true, None)
                     .hinted("该视图已在其他位置（全局唯一）")
             } else {
                 MenuEntry::action_icon(
-                    view_label(kind),
-                    view_icon(kind),
-                    Message::PanelAddView { panel_id: pid.clone(), view: kind.to_string() },
+                    view_label(app, &kind),
+                    view_icon(app, &kind),
+                    Message::PanelAddView { panel_id: pid.clone(), view: kind },
                 )
             };
             (0, entry)

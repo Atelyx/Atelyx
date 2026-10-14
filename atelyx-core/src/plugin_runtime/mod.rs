@@ -27,7 +27,11 @@ use instance::Instance;
 /// 协议类型再导出：壳只依赖 `atelyx-core`，不直接依赖协议 crate。
 pub use atelyx_plugin_protocol::event::VaultSwitchPayload;
 pub use atelyx_plugin_protocol::manifest::Permission;
-pub use atelyx_plugin_protocol::method::{FileFilter, NotificationLevel};
+pub use atelyx_plugin_protocol::method::{ContributionSlot, FileFilter, NotificationLevel, SurfaceKind};
+pub use atelyx_plugin_protocol::view::{
+    Align, Axis, ButtonVariant, ColorToken, EventKind, EventValue, ImageFit, ImageSource, MenuItem,
+    NodeBody, TextWeight, ViewEvent, ViewNode,
+};
 
 /// 插件运行状态。
 #[derive(Clone, Debug, PartialEq)]
@@ -54,12 +58,28 @@ pub struct AuditRecord {
     pub at: u64,
 }
 
-/// 运行时 → 壳的广播事件（状态 / 通知 / 拒调用；允许落后丢帧）。
+/// 运行时 → 壳的广播事件（状态 / 通知 / 拒调用 / 界面与贡献变化；允许落后丢帧）。
 #[derive(Clone, Debug)]
 pub enum PluginEvent {
     StatusChanged { id: String, status: PluginStatus },
     Notification { id: String, title: String, body: Option<String>, level: NotificationLevel },
     PermissionDenied { id: String, method: String, detail: String },
+    /// 某插件提交了新的界面树（树本身经 [`PluginRuntime::surface_tree`] 取；丢帧不影响最终渲染）。
+    ViewSubmitted { id: String },
+    /// 某插件的贡献注册表变化（注册 / 撤销 / 随会话收尾清空）。
+    ContributionsChanged { id: String },
+}
+
+/// 一个已注册的贡献点（菜单与标签渲染用）。
+#[derive(Clone, Debug, PartialEq)]
+pub struct Contribution {
+    pub plugin_id: String,
+    pub slot: ContributionSlot,
+    /// 贡献 id（插件内唯一、不含 `:`），同时是该面挂载后的 `surfaceId`。
+    pub id: String,
+    pub label: String,
+    /// 宿主图标形状表里的图标名；插件未声明时为 `None`（宿主回落拼图）。
+    pub icon: Option<String>,
 }
 
 /// 对话框种类。
@@ -291,6 +311,57 @@ impl PluginRuntime {
                 eprintln!("[plugin {id}] 启动失败：{e}");
             }
         }
+    }
+
+    /// 取某插件某个面的最新界面树（从未提交 / 已随会话收尾清除时为 `None`）。
+    pub fn surface_tree(&self, plugin_id: &str, surface_id: &str) -> Option<ViewNode> {
+        self.instances
+            .lock()
+            .unwrap()
+            .get(plugin_id)
+            .and_then(|i| i.surface_tree(surface_id))
+    }
+
+    /// 回发一条界面事件给插件。插件未在跑时静默丢弃（对端已不在）。
+    pub fn send_view_event(&self, plugin_id: &str, surface_id: &str, node_id: &str, event: ViewEvent) {
+        let instance = self.instances.lock().unwrap().get(plugin_id).cloned();
+        if let Some(instance) = instance {
+            instance.notify_view_event(surface_id, node_id, event);
+        }
+    }
+
+    /// 告知插件某个面已挂载（贡献标签出现在布局里）。插件未在跑时静默丢弃。
+    pub fn notify_surface_attached(&self, plugin_id: &str, surface_id: &str, kind: SurfaceKind) {
+        let instance = self.instances.lock().unwrap().get(plugin_id).cloned();
+        if let Some(instance) = instance {
+            instance.notify_surface_attached(surface_id, kind);
+        }
+    }
+
+    /// 告知插件某个面已移除（贡献标签不再出现在布局里；插件重启时宿主会重新 attached）。
+    pub fn notify_surface_detached(&self, plugin_id: &str, surface_id: &str) {
+        let instance = self.instances.lock().unwrap().get(plugin_id).cloned();
+        if let Some(instance) = instance {
+            instance.notify_surface_detached(surface_id);
+        }
+    }
+
+    /// 全部已注册贡献（跨插件汇总，按插件 id + 贡献 id 排序；未运行插件无贡献）。
+    pub fn contributions(&self) -> Vec<Contribution> {
+        let instances: Vec<Arc<Instance>> =
+            self.instances.lock().unwrap().values().cloned().collect();
+        let mut all: Vec<Contribution> = instances.iter().flat_map(|i| i.contributions()).collect();
+        all.sort_by(|a, b| (&a.plugin_id, &a.id).cmp(&(&b.plugin_id, &b.id)));
+        all
+    }
+
+    /// 某插件的私有数据目录（`<插件目录>/data`）；未安装 = `None`。壳据此读插件自带资源（界面图片）。
+    pub fn plugin_data_dir(&self, plugin_id: &str) -> Option<PathBuf> {
+        self.discovered
+            .lock()
+            .unwrap()
+            .contains_key(plugin_id)
+            .then(|| layout::data_dir(&self.root, plugin_id))
     }
 
     /// 列表（按 id 排序）：已安装插件 + 启用态 + 运行状态 + 审计计数。

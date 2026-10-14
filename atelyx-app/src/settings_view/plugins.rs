@@ -251,6 +251,8 @@ pub fn on_event(app: &mut App, event: PluginEvent) {
             ),
             _ => {}
         },
+        // 界面与贡献变化由壳的投影刷新统一处理（见 main.rs 的事件分支）
+        PluginEvent::ViewSubmitted { .. } | PluginEvent::ContributionsChanged { .. } => {}
     }
     if list_changed && app.settings_open && app.settings_tab == "plugins" {
         refresh(app);

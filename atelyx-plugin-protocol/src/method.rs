@@ -9,6 +9,10 @@ use serde_json::Value;
 pub mod view {
     /// 插件提交一棵界面树到某个面（面板 / 窗口 / 接管区）。宿主校验后按键 diff 挂载。
     pub const SUBMIT: &str = "view.submit";
+    /// 插件注册一个贡献点（面板 / 表格视图），使其出现在宿主对应的入口里。
+    pub const REGISTER: &str = "view.register";
+    /// 插件按 id 撤销自己的一个贡献点。
+    pub const UNREGISTER: &str = "view.unregister";
     /// 宿主回发节点事件（通知）。
     pub const HOST_EVENT: &str = "host:view.event";
     /// 宿主告知插件某个面已就绪 / 已移除（通知）。
@@ -107,6 +111,35 @@ pub struct SubmitParams {
 #[serde(rename_all = "camelCase")]
 pub struct SubmitResult {
     pub applied: bool,
+}
+
+/// 贡献点位置（封闭枚举；扩容随协议升版）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ContributionSlot {
+    /// 工作区面板（「添加面板 / 切换视图」菜单条目）。
+    Panel,
+    /// 表格编辑器工具条「视图」下拉条目。
+    TableView,
+}
+
+/// `view.register` 的 params：声明一个贡献点。`id` 插件内唯一且不得含 `:`（宿主的面标识以它作分隔），
+/// 同时是该面挂载后的 `surfaceId`；`icon` 缺省时宿主用拼图图标。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegisterParams {
+    pub slot: ContributionSlot,
+    pub id: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+}
+
+/// `view.unregister` 的 params：按 id 撤销自己的贡献；id 未注册时报可读错误。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnregisterParams {
+    pub id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
