@@ -201,6 +201,39 @@ impl Context {
         self.call_unit(method::search::RESPOND, &params).await
     }
 
+    // ---------- ai ----------
+
+    /// 发起 / 续聊一轮 AI 对话（须在 manifest 声明 `ai` 权限）。回执 = run 已就位，
+    /// 流式事件经 [`PluginHandler::on_chat_event`] 流达。供应商 / 模型 / Agent 用仓库
+    /// AI 设置的默认值；`session_id` 缺省 = 新建会话。
+    /// 受 [`CALL_TIMEOUT`] 约束：超时后宿主侧 run 可能已启动（事件照常流达），
+    /// 调用方应把超时当作「结果未知」而非「未发送」。
+    pub async fn chat_send(&self, text: &str, session_id: Option<&str>) -> Result<ChatSendResult, RpcError> {
+        self.call_typed(
+            method::ai::CHAT_SEND,
+            &ChatSendParams { text: text.into(), session_id: session_id.map(Into::into) },
+        )
+        .await
+    }
+
+    /// 中断一个会话的活跃 run（幂等：无活跃 run 也成功）。
+    pub async fn chat_stop(&self, session_id: &str) -> Result<(), RpcError> {
+        self.call_unit(method::ai::CHAT_STOP, &ChatStopParams { session_id: session_id.into() }).await
+    }
+
+    /// 读当前仓库的会话清单（`session_id` = `None`）或单会话消息历史。
+    pub async fn chat_history(
+        &self,
+        session_id: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<ChatHistoryResult, RpcError> {
+        self.call_typed(
+            method::ai::CHAT_HISTORY,
+            &ChatHistoryParams { session_id: session_id.map(Into::into), limit },
+        )
+        .await
+    }
+
     pub async fn subscribe(&self, name: &str) -> Result<bool, RpcError> {
         let result: SubscribeResult = self.call_typed(crate::protocol::event::SUBSCRIBE, &SubscribeParams { name: name.into() }).await?;
         Ok(result.subscribed)

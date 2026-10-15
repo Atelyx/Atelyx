@@ -15,7 +15,7 @@ use serde_json::Value;
 /// 常驻退出入口与按窗生效兜底。OS 资源消耗型方法（起进程 / 开窗等）一律占权限。
 pub(crate) fn permission_for(name: &str) -> Option<Permission> {
     use Permission::*;
-    use method::{clipboard, dialog, fs, http, notification, process, shortcut, state, window};
+    use method::{ai, clipboard, dialog, fs, http, notification, process, shortcut, state, window};
     match name {
         fs::PRIVATE_DIR | fs::READ_TEXT | fs::WRITE_TEXT | fs::READ_BINARY | fs::WRITE_BINARY
         | fs::REMOVE | fs::EXISTS | fs::LIST => Some(Fs),
@@ -27,6 +27,7 @@ pub(crate) fn permission_for(name: &str) -> Option<Permission> {
         dialog::PICK_FILE | dialog::PICK_DIRECTORY => Some(Dialog),
         http::REQUEST => Some(Http),
         window::OPEN | window::CLOSE => Some(Window),
+        ai::CHAT_SEND | ai::CHAT_STOP | ai::CHAT_HISTORY => Some(Ai),
         _ => None,
     }
 }
@@ -71,6 +72,9 @@ mod tests {
         assert_eq!(permission_for(method::notification::SHOW), Some(Permission::Notification));
         assert_eq!(permission_for(method::shortcut::REGISTER), Some(Permission::Shortcuts));
         assert_eq!(permission_for(method::http::REQUEST), Some(Permission::Http));
+        assert_eq!(permission_for(method::ai::CHAT_SEND), Some(Permission::Ai));
+        assert_eq!(permission_for(method::ai::CHAT_STOP), Some(Permission::Ai));
+        assert_eq!(permission_for(method::ai::CHAT_HISTORY), Some(Permission::Ai));
         // 运行时时序方法不占权限
         assert_eq!(permission_for("initialize"), None);
         assert_eq!(permission_for(method::view::SUBMIT), None);

@@ -22,6 +22,8 @@ use std::time::Duration;
 
 use atelyx_plugin_protocol::event;
 use atelyx_plugin_protocol::manifest::Manifest;
+use atelyx_plugin_protocol::method;
+use serde_json::Value;
 
 use crate::plugin_process::PluginProcessHost;
 
@@ -43,8 +45,9 @@ pub use atelyx_plugin_protocol::canvas::{CanvasColor, CanvasPoint, DrawCommand};
 pub use atelyx_plugin_protocol::event::VaultSwitchPayload;
 pub use atelyx_plugin_protocol::manifest::{DocTypeRegistration, Permission};
 pub use atelyx_plugin_protocol::method::{
-    ContributionSlot, FileFilter, NotificationLevel, SearchResult, ServiceContract, SurfaceKind,
-    TakeoverScope, WindowOpenParams,
+    ChatEvent, ChatEventParams, ChatHistoryParams, ChatHistoryResult, ChatSendParams,
+    ChatSessionSummary, ChatSessionWire, ChatStopParams, ContributionSlot, FileFilter,
+    NotificationLevel, SearchResult, ServiceContract, SurfaceKind, TakeoverScope, WindowOpenParams,
 };
 pub use atelyx_plugin_protocol::view::{
     Align, Axis, ButtonVariant, CanvasEventKind, CanvasPointer, ColorToken, EventKind, EventValue,
@@ -140,6 +143,13 @@ pub enum HostRequest {
     OpenWindow { plugin_id: String, request_id: u64, params: WindowOpenParams },
     /// 插件请求关闭自己打开的一个窗口。
     CloseWindow { plugin_id: String, request_id: u64, window_id: String },
+    /// 插件请求发起 / 续聊一轮 AI 对话（须声明 `ai` 权限；壳编排后经
+    /// [`PluginRuntime::resolve_chat_call`] 回填，事件随后经 `host:ai.chat.event` 流达插件）。
+    ChatSend { plugin_id: String, request_id: u64, params: method::ChatSendParams },
+    /// 插件请求中断一个会话的活跃 run。
+    ChatStop { plugin_id: String, request_id: u64, params: method::ChatStopParams },
+    /// 插件请求读会话清单或单会话消息历史。
+    ChatHistory { plugin_id: String, request_id: u64, params: method::ChatHistoryParams },
 }
 
 /// 插件列表项（设置页渲染用）。
@@ -186,6 +196,12 @@ type UiCallWait = (String, UiReplyTx);
 /// 在途搜索查询等待项：上岗插件 id + 结果回传通道。
 type SearchWait = (String, std::sync::mpsc::Sender<Result<Vec<SearchResult>, String>>);
 
+/// AI 对话调用结果回传通道（send / stop / history 的应答载荷）。
+type ChatReplyTx = std::sync::mpsc::Sender<Result<Value, String>>;
+
+/// 在途 AI 对话调用等待项：发起插件 id + 结果回传通道。
+type ChatCallWait = (String, ChatReplyTx);
+
 /// 插件宿主运行时。
 pub struct PluginRuntime {
     root: PathBuf,
@@ -204,6 +220,9 @@ pub struct PluginRuntime {
     /// 在途搜索查询：request_id → 等待项（上岗插件回结果或超时回落）。
     search_pending: Mutex<HashMap<u64, SearchWait>>,
     next_search_id: AtomicU64,
+    /// 在途 AI 对话调用（send / stop / history）：request_id → 等待项。
+    chat_calls: Mutex<HashMap<u64, ChatCallWait>>,
+    next_chat_call_id: AtomicU64,
     /// 服务实现声明簿：契约 → 已声明插件 id 列表（声明是候选不是上岗）。
     services: Mutex<HashMap<ServiceContract, Vec<String>>>,
     /// 用户指定的搜索提供方上岗插件 id（`None` = 内置 Tavily / SearXNG）。
@@ -233,6 +252,8 @@ impl PluginRuntime {
             next_ui_call_id: AtomicU64::new(1),
             search_pending: Mutex::new(HashMap::new()),
             next_search_id: AtomicU64::new(1),
+            chat_calls: Mutex::new(HashMap::new()),
+            next_chat_call_id: AtomicU64::new(1),
             services: Mutex::new(HashMap::new()),
             search_provider: Mutex::new(None),
             container: Mutex::new(None),
@@ -347,6 +368,9 @@ impl PluginRuntime {
                 window_id,
             },
             HostRequest::Dialog { .. } => return Err("界面服务请求形态不符".to_string()),
+            HostRequest::ChatSend { .. }
+            | HostRequest::ChatStop { .. }
+            | HostRequest::ChatHistory { .. } => return Err("界面服务请求形态不符".to_string()),
         };
         self.ui_calls
             .lock()
@@ -385,11 +409,93 @@ impl PluginRuntime {
         }
     }
 
+    /// 登记一个 AI 对话调用（send / stop / history）并把请求交给壳，返回结果接收端。
+    fn open_chat_call(&self, request: HostRequest) -> Result<std::sync::mpsc::Receiver<Result<Value, String>>, String> {
+        let request_id = self.next_chat_call_id.fetch_add(1, Ordering::SeqCst);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let request = match request {
+            HostRequest::ChatSend { plugin_id, params, .. } => HostRequest::ChatSend {
+                plugin_id,
+                request_id,
+                params,
+            },
+            HostRequest::ChatStop { plugin_id, params, .. } => HostRequest::ChatStop {
+                plugin_id,
+                request_id,
+                params,
+            },
+            HostRequest::ChatHistory { plugin_id, params, .. } => HostRequest::ChatHistory {
+                plugin_id,
+                request_id,
+                params,
+            },
+            _ => return Err("AI 对话请求形态不符".to_string()),
+        };
+        self.chat_calls
+            .lock()
+            .unwrap()
+            .insert(request_id, (request_plugin_id(&request).to_string(), tx));
+        if self.host_requests.send(request).is_err() {
+            self.chat_calls.lock().unwrap().remove(&request_id);
+            return Err("AI 对话服务不可用：宿主已退出".to_string());
+        }
+        Ok(rx)
+    }
+
+    /// 壳侧回填一次 AI 对话调用的结果（send 的会话 / 消息 id、history 的清单或会话；失败带可读原因）。
+    pub fn resolve_chat_call(&self, request_id: u64, result: Result<Value, String>) {
+        let waiter = self.chat_calls.lock().unwrap().remove(&request_id);
+        if let Some((_, tx)) = waiter {
+            let _ = tx.send(result);
+        }
+    }
+
+    /// 让某插件全部在途 AI 对话调用以可读失败收场（插件停用 / 失败 / 崩溃时调用）。
+    pub(crate) fn fail_chat_calls_of(&self, plugin_id: &str, reason: &str) {
+        let ids: Vec<u64> = {
+            let chat_calls = self.chat_calls.lock().unwrap();
+            chat_calls
+                .iter()
+                .filter(|(_, (owner, _))| owner == plugin_id)
+                .map(|(id, _)| *id)
+                .collect()
+        };
+        for id in ids {
+            let waiter = self.chat_calls.lock().unwrap().remove(&id);
+            if let Some((_, tx)) = waiter {
+                let _ = tx.send(Err(reason.to_string()));
+            }
+        }
+    }
+
+    /// 向发起会话的插件下发一条对话事件（`host:ai.chat.event`）。进程未在跑时静默丢弃
+    /// （插件停用后的 run 不中断——会话归仓库，事件随进程消失）。
+    pub fn notify_chat_event(&self, plugin_id: &str, params: &method::ChatEventParams) {
+        let instance = {
+            let instances = self.instances.lock().unwrap();
+            instances.get(plugin_id).cloned()
+        };
+        if let Some(instance) = instance {
+            instance.notify_chat_event(params);
+        }
+    }
+
     /// 让全部在途界面服务请求以可读失败收场（宿主退出收尾）。
     fn fail_all_ui_calls(&self, reason: &str) {
         let waiters: Vec<UiReplyTx> = {
             let mut ui_calls = self.ui_calls.lock().unwrap();
             ui_calls.drain().map(|(_, (_, tx))| tx).collect()
+        };
+        for tx in waiters {
+            let _ = tx.send(Err(reason.to_string()));
+        }
+    }
+
+    /// 让全部在途 AI 对话调用以可读失败收场（宿主退出收尾）。
+    fn fail_all_chat_calls(&self, reason: &str) {
+        let waiters: Vec<ChatReplyTx> = {
+            let mut chat_calls = self.chat_calls.lock().unwrap();
+            chat_calls.drain().map(|(_, (_, tx))| tx).collect()
         };
         for tx in waiters {
             let _ = tx.send(Err(reason.to_string()));
@@ -921,6 +1027,7 @@ impl PluginRuntime {
         }
         self.fail_all_dialogs("宿主已退出");
         self.fail_all_ui_calls("宿主已退出");
+        self.fail_all_chat_calls("宿主已退出");
         self.process_host.shutdown_children();
     }
 
@@ -1054,7 +1161,10 @@ fn request_plugin_id(request: &HostRequest) -> &str {
         HostRequest::Dialog { plugin_id, .. }
         | HostRequest::Takeover { plugin_id, .. }
         | HostRequest::OpenWindow { plugin_id, .. }
-        | HostRequest::CloseWindow { plugin_id, .. } => plugin_id,
+        | HostRequest::CloseWindow { plugin_id, .. }
+        | HostRequest::ChatSend { plugin_id, .. }
+        | HostRequest::ChatStop { plugin_id, .. }
+        | HostRequest::ChatHistory { plugin_id, .. } => plugin_id,
     }
 }
 

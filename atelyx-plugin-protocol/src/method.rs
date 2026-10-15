@@ -108,6 +108,19 @@ pub mod canvas {
     pub const SUBMIT: &str = "canvas.submit";
 }
 
+pub mod ai {
+    /// 插件发起 / 续聊一轮对话（须声明 `ai` 权限）。回执 = run 已就位，事件随后经
+    /// [`HOST_CHAT_EVENT`] 流达。会话 = 仓库普通会话（主面板可见）；供应商 / 模型 / Agent
+    /// 一律用仓库 AI 设置的默认值，插件不指定、不带 key。
+    pub const CHAT_SEND: &str = "ai.chat.send";
+    /// 中断一个会话的活跃 run（幂等：无活跃 run 也成功）。
+    pub const CHAT_STOP: &str = "ai.chat.stop";
+    /// 读当前激活仓库的会话清单或单会话消息历史。
+    pub const CHAT_HISTORY: &str = "ai.chat.history";
+    /// 对话事件流（通知）：快照节流拍 + 终态 + 命名结果。
+    pub const HOST_CHAT_EVENT: &str = "host:ai.chat.event";
+}
+
 // ---------- view / surface ----------
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -559,6 +572,102 @@ pub struct SearchRespondParams {
     pub error: Option<String>,
 }
 
+// ---------- ai ----------
+
+/// [`ai::CHAT_SEND`] 的 params：`session_id` 缺省 = 新建会话；非缺省 = 在该会话续聊
+/// （会话须存在于当前仓库，否则可读拒绝）。同会话已有活跃 run 时拒绝（每会话单 run）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatSendParams {
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+}
+
+/// [`ai::CHAT_SEND`] 的 result：run 已就位；流式事件随后经 [`ai::HOST_CHAT_EVENT`] 流达。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatSendResult {
+    pub session_id: String,
+    /// 本轮 assistant 消息 id（后续事件载荷同源）。
+    pub message_id: String,
+}
+
+/// [`ai::CHAT_STOP`] 的 params。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatStopParams {
+    pub session_id: String,
+}
+
+/// [`ai::CHAT_HISTORY`] 的 params：`session_id` 缺省 = 列会话清单；非缺省 = 读该会话消息。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatHistoryParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// 消息条数上限（读单会话时生效；缺省全量，超出取末尾）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+/// 一条会话摘要（清单模式）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatSessionSummary {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    pub updated_at: i64,
+    pub message_count: u64,
+}
+
+/// 单会话读取模式的 result：元数据 + 消息数组（消息形态与会话磁盘格式同源：
+/// `id` / `role` / `content` / `displayContent` / `steps` / 压缩注解）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatSessionWire {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub messages: Vec<Value>,
+}
+
+/// [`ai::CHAT_HISTORY`] 的 result：清单模式只填 `sessions`；单会话模式只填 `session`。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatHistoryResult {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sessions: Vec<ChatSessionSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<ChatSessionWire>,
+}
+
+/// [`ai::HOST_CHAT_EVENT`] 的 params：载荷按 [`ChatEvent`] 分型。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatEventParams {
+    pub session_id: String,
+    pub message_id: String,
+    pub event: ChatEvent,
+}
+
+/// 对话事件（快照级）：整条消息替换渲染，丢拍由后拍自愈；终态只发一次。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum ChatEvent {
+    /// 流式节流拍：该消息当前完整形态（含 steps 行）。
+    Message { rev: u64, message: Value },
+    /// run 收敛（含中断：`reason` = `stop` 正常收敛 / `interrupted` 用户中断，中断的行已归一）。
+    Finished { reason: String },
+    /// run 失败收场。
+    Failed { error: String },
+    /// 话题自动命名完成（`None` = 命名未启用或失败，插件维持原展示）。
+    Titled { title: Option<String> },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -578,5 +687,12 @@ mod tests {
         assert_eq!(slot, ContributionSlot::Settings);
         let scope: TakeoverScope = serde_json::from_value(serde_json::json!("full")).unwrap();
         assert_eq!(scope, TakeoverScope::Full);
+        // ai 面：事件 tagged 形态与 send 缺省 sessionId
+        assert_eq!(
+            serde_json::to_value(ChatEvent::Finished { reason: "stop".into() }).unwrap(),
+            serde_json::json!({ "kind": "finished", "reason": "stop" })
+        );
+        let send: ChatSendParams = serde_json::from_value(serde_json::json!({ "text": "hi" })).unwrap();
+        assert_eq!(send.session_id, None);
     }
 }

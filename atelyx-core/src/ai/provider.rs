@@ -5,7 +5,9 @@ use crate::net_guard::{self, ClientTimeout};
 /// 测试供应商端点连通性（`key` 非空时带 `Authorization: Bearer` 头）。
 /// 地址策略按主机形态选择（见 `net_guard::policy_for_configured_url`），
 /// 入口校验、重定向每跳与 DNS 解析同策略。Err = 地址非法或网络/HTTP 失败（不含 key）。
-pub async fn test_endpoint(base_url: &str, api_key: &str) -> Result<(), String> {
+/// 端点连通性测试（GET {baseUrl}/models）。成功返回耗时毫秒（UI 展示用）。
+pub async fn test_endpoint(base_url: &str, api_key: &str) -> Result<u128, String> {
+    let started = std::time::Instant::now();
     let base = base_url.trim().trim_end_matches('/');
     if base.is_empty() {
         return Err("未配置 baseUrl".to_string());
@@ -22,7 +24,7 @@ pub async fn test_endpoint(base_url: &str, api_key: &str) -> Result<(), String> 
     if !resp.status().is_success() {
         return Err(format!("HTTP {}", resp.status()));
     }
-    Ok(())
+    Ok(started.elapsed().as_millis())
 }
 
 #[cfg(test)]

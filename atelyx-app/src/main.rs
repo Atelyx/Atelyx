@@ -6254,7 +6254,7 @@ impl App {
             },
             // 方向键：双链候选开启时导航候选，否则调整分割把手（语义在 NavKey 处理器分派）
             // 表格专属键在弹层打开时也照发，由 on_msg 处理器按弹层态自守卫
-            iced::event::listen_with(|event, _status, window| match event {
+            iced::event::listen_with(|event, status, window| match event {
                 Event::Keyboard(keyboard::Event::ModifiersChanged(m)) => {
                     Some(Message::ModsChanged(m))
                 }
@@ -6278,11 +6278,14 @@ impl App {
                     modifiers,
                     ..
                 }) if modifiers.is_empty() => Some(Message::NavKey(false, true)),
+                // 已被组件捕获的 Enter（文本编辑器发送 / 表格编辑提交等）不再全局派发
                 Event::Keyboard(keyboard::Event::KeyPressed {
                     key: keyboard::Key::Named(keyboard::key::Named::Enter),
                     modifiers,
                     ..
-                }) if modifiers.is_empty() => Some(Message::EnterKey),
+                }) if modifiers.is_empty() && status == iced::event::Status::Ignored => {
+                    Some(Message::EnterKey)
+                }
                 Event::Keyboard(keyboard::Event::KeyPressed {
                     key: keyboard::Key::Named(keyboard::key::Named::Home),
                     modifiers,

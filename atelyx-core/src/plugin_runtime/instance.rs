@@ -30,8 +30,8 @@ use crate::plugin_process::{EventSink, PluginProcessHost, ProcessEvent as HostEv
 
 use super::{capability, child_process, fs, http, shortcut};
 use super::{
-    AuditRecord, Contribution, DialogKind, DialogRequest, PluginEvent, PluginRuntime, PluginStatus,
-    SurfaceKind, ViewEvent, ViewNode,
+    AuditRecord, Contribution, DialogKind, DialogRequest, HostRequest, PluginEvent, PluginRuntime,
+    PluginStatus, SurfaceKind, ViewEvent, ViewNode,
 };
 
 /// 崩溃判定窗口：窗口内累计达到 [`CRASH_LIMIT`] 即熔断。
@@ -292,6 +292,7 @@ impl Instance {
         self.fail_pending_dialogs("插件已停止，对话框已取消");
         self.fail_pending_ui_calls("插件已停止，界面服务请求已取消");
         self.fail_pending_searches("插件已停止");
+        self.fail_pending_chat_calls("插件已停止，AI 对话请求已取消");
         if let Some(runtime) = self.runtime.lock().unwrap().upgrade() {
             runtime.retract_services_of(&self.id);
         }
@@ -326,6 +327,19 @@ impl Instance {
         if let Some(runtime) = runtime.upgrade() {
             runtime.fail_searches_of(&self.id, reason);
         }
+    }
+
+    /// 让本插件在途的 AI 对话调用以可读失败收场（等待壳回填的线程不再悬挂）。
+    fn fail_pending_chat_calls(&self, reason: &str) {
+        let runtime = self.runtime.lock().unwrap().clone();
+        if let Some(runtime) = runtime.upgrade() {
+            runtime.fail_chat_calls_of(&self.id, reason);
+        }
+    }
+
+    /// 下发一条对话事件（`host:ai.chat.event`）。
+    pub(crate) fn notify_chat_event(&self, params: &method::ChatEventParams) {
+        self.notify(method::ai::HOST_CHAT_EVENT, params);
     }
 
     /// 在会话闸门内执行一次 OS 资源获取（起子进程 / 注册全局快捷键），锁内复查请求所属的会话令牌。
@@ -483,6 +497,14 @@ impl Instance {
             self.handle_ui_request(token, id, method, &request.params);
             return;
         }
+        // AI 对话的编排（会话就位 / 配置解析 / run 启动）在壳，结果由壳回填——同为异步应答。
+        if matches!(
+            method,
+            method::ai::CHAT_SEND | method::ai::CHAT_STOP | method::ai::CHAT_HISTORY
+        ) {
+            self.handle_chat_request(token, id, method, &request.params);
+            return;
+        }
         match self.dispatch_for_session(token, method, &request.params) {
             Ok(value) => self.respond(id, Some(value), None),
             Err(error) => self.respond(id, None, Some(error)),
@@ -574,6 +596,56 @@ impl Instance {
             Ok(Ok(())) => instance.respond(id, Some(json!({})), None),
             Ok(Err(reason)) => instance.respond(id, None, Some(RpcError::failed(reason))),
             Err(_) => instance.respond(id, None, Some(RpcError::failed("界面服务请求已取消"))),
+        });
+    }
+
+    /// 转发一次 AI 对话调用（send / stop / history）并在独立线程上等壳回填。
+    fn handle_chat_request(
+        self: &Arc<Self>,
+        token: u64,
+        id: RequestId,
+        method_name: &str,
+        params: &Value,
+    ) {
+        let runtime = self.runtime.lock().unwrap().clone();
+        let Some(runtime) = runtime.upgrade() else {
+            self.respond(id, None, Some(RpcError::failed("AI 对话服务不可用：宿主运行时不可用")));
+            return;
+        };
+        let opened = self.with_session(token, || {
+            // parse 的 RpcError 统一转可读串（本闭包的错误类型是 String）
+            let request = match method_name {
+                method::ai::CHAT_SEND => HostRequest::ChatSend {
+                    plugin_id: self.id.clone(),
+                    request_id: 0,
+                    params: parse(params).map_err(|e| e.to_string())?,
+                },
+                method::ai::CHAT_STOP => HostRequest::ChatStop {
+                    plugin_id: self.id.clone(),
+                    request_id: 0,
+                    params: parse(params).map_err(|e| e.to_string())?,
+                },
+                method::ai::CHAT_HISTORY => HostRequest::ChatHistory {
+                    plugin_id: self.id.clone(),
+                    request_id: 0,
+                    params: parse(params).map_err(|e| e.to_string())?,
+                },
+                _ => return Err("未知 AI 对话请求".to_string()),
+            };
+            runtime.open_chat_call(request)
+        });
+        let rx = match opened {
+            Ok(rx) => rx,
+            Err(e) => {
+                self.respond(id, None, Some(RpcError::failed(e)));
+                return;
+            }
+        };
+        let instance = self.clone();
+        std::thread::spawn(move || match rx.recv() {
+            Ok(Ok(value)) => instance.respond(id, Some(value), None),
+            Ok(Err(reason)) => instance.respond(id, None, Some(RpcError::failed(reason))),
+            Err(_) => instance.respond(id, None, Some(RpcError::failed("AI 对话请求已取消"))),
         });
     }
 
@@ -751,6 +823,10 @@ impl Instance {
             // 对话框走异步应答（见 handle_request 的分流），不经此处同步应答
             method::dialog::PICK_FILE | method::dialog::PICK_DIRECTORY => {
                 Err(RpcError::failed("对话框请求须走异步应答路径"))
+            }
+            // AI 对话走异步应答（见 handle_request 的分流），不经此处同步应答
+            method::ai::CHAT_SEND | method::ai::CHAT_STOP | method::ai::CHAT_HISTORY => {
+                Err(RpcError::failed("AI 对话请求须走异步应答路径"))
             }
             // 已声明但尚未实现的能力面：以可读失败收场，不静默成功
             other if capability::permission_for(other).is_some() => {
@@ -1291,6 +1367,27 @@ mod tests {
     }
 
     #[test]
+    fn undeclared_ai_calls_are_denied_and_audited() {
+        // ai 权限 fail-closed：send / stop / history 逐项未声明被拒并留审计
+        let (_tmp, instance) = make_instance(Vec::new());
+        for (name, params) in [
+            (method::ai::CHAT_SEND, json!({ "text": "你好" })),
+            (method::ai::CHAT_STOP, json!({ "sessionId": "s1" })),
+            (method::ai::CHAT_HISTORY, json!({})),
+        ] {
+            instance.handle_line(&request_line(name, &params));
+        }
+        assert_eq!(
+            instance.denied_count(),
+            3,
+            "未声明 ai 能力的三方法必须全部被拒并留记录"
+        );
+        for record in instance.audit() {
+            assert!(record.method.starts_with("ai.chat."));
+        }
+    }
+
+    #[test]
     fn service_declarations_roundtrip_through_instance() {
         let tmp = TempDir::new("instance-service");
         let runtime = PluginRuntime::new(tmp.to_path_buf());
@@ -1377,6 +1474,48 @@ mod tests {
             panic!("应投递关窗请求");
         };
         assert_eq!(window_id, "float");
+    }
+
+    /// AI 对话三方法路由到壳并可回填（已声明 ai 权限；声明缺失走 fail-closed 被拒测试）。
+    #[test]
+    fn chat_requests_route_to_shell_and_resolve() {
+        let tmp = TempDir::new("instance-chat-request");
+        let runtime = PluginRuntime::new(tmp.to_path_buf());
+        let (_t, instance) = make_instance(vec![Permission::Ai]);
+        instance.attach_runtime(&runtime);
+        runtime
+            .instances
+            .lock()
+            .unwrap()
+            .insert("com.example.demo".to_string(), instance.clone());
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        instance.handle_line(&request_line(method::ai::CHAT_SEND, &json!({ "text": "你好" })));
+        let request = rt.block_on(runtime.recv_host_request()).unwrap();
+        let HostRequest::ChatSend { request_id, params, .. } = request else {
+            panic!("应投递对话发送请求");
+        };
+        assert_eq!(params.text, "你好");
+        runtime.resolve_chat_call(request_id, Ok(json!({ "sessionId": "s1", "messageId": "m1" })));
+
+        instance.handle_line(&request_line(method::ai::CHAT_STOP, &json!({ "sessionId": "s1" })));
+        let request = rt.block_on(runtime.recv_host_request()).unwrap();
+        let HostRequest::ChatStop { request_id, params, .. } = request else {
+            panic!("应投递对话中断请求");
+        };
+        assert_eq!(params.session_id, "s1");
+        runtime.resolve_chat_call(request_id, Ok(json!({})));
+
+        instance.handle_line(&request_line(method::ai::CHAT_HISTORY, &json!({ "sessionId": "s1" })));
+        let request = rt.block_on(runtime.recv_host_request()).unwrap();
+        let HostRequest::ChatHistory { request_id, params, .. } = request else {
+            panic!("应投递历史读取请求");
+        };
+        assert_eq!(params.session_id.as_deref(), Some("s1"));
+        runtime.resolve_chat_call(request_id, Err("会话 s1 不存在".to_string()));
     }
 
     #[test]

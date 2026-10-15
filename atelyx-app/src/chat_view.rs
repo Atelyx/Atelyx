@@ -1,7 +1,7 @@
 //! AI 对话面板：会话侧栏 + 顶部行 + 消息流 + 输入区（user 气泡右对齐、assistant
 //! 无气泡全宽、思考/工具步折叠、悬浮操作按钮组、发送/停止圆钮）。
 
-use iced::widget::{button, column, container, row, scrollable, stack, text, Space};
+use iced::widget::{button, column, container, row, scrollable, stack, text, text_editor, Space};
 use iced::{border, Length, Padding};
 use serde_json::{json, Value};
 
@@ -629,6 +629,22 @@ fn input_area(app: &App) -> iced::Element<'_, Message> {
         iced::widget::text_editor(&app.chat.input)
             .placeholder("输入消息…")
             .on_action(|a| Message::Chat(ChatMsg::InputAction(a)))
+            .key_binding(|press| {
+                // Enter 发送、Shift+Enter 换行；仅编辑器聚焦时接管。
+                // IME 守卫：组合期间 Windows 上送的是 Process 键（VK_PROCESSKEY），
+                // 组合确认的 Enter 不进此分支，天然不误发。
+                let is_enter =
+                    matches!(press.key, iced::keyboard::Key::Named(iced::keyboard::key::Named::Enter));
+                if is_enter && matches!(press.status, text_editor::Status::Focused { .. }) {
+                    if press.modifiers.shift() {
+                        Some(text_editor::Binding::Enter)
+                    } else {
+                        Some(text_editor::Binding::Custom(Message::Chat(ChatMsg::Send)))
+                    }
+                } else {
+                    text_editor::Binding::from_key_press(press)
+                }
+            })
             .height(110.0),
     )
     .width(Length::Fill)

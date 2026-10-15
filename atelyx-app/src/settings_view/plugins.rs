@@ -130,6 +130,27 @@ pub fn host_requests_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<It
                 HostRequest::CloseWindow { plugin_id, request_id, window_id } => {
                     Message::PluginWindowClose { request_id, plugin_id, window_key: window_id }
                 }
+                HostRequest::ChatSend { plugin_id, request_id, params } => Message::Chat(
+                    crate::chat_actions::ChatMsg::PluginSend {
+                        request_id,
+                        plugin_id,
+                        text: params.text,
+                        session_id: params.session_id,
+                    },
+                ),
+                HostRequest::ChatStop { request_id, params, .. } => Message::Chat(
+                    crate::chat_actions::ChatMsg::PluginStop {
+                        request_id,
+                        session_id: params.session_id,
+                    },
+                ),
+                HostRequest::ChatHistory { request_id, params, .. } => Message::Chat(
+                    crate::chat_actions::ChatMsg::PluginHistory {
+                        request_id,
+                        session_id: params.session_id,
+                        limit: params.limit,
+                    },
+                ),
             };
             let _ = iced::futures::SinkExt::send(&mut output, message).await;
         }

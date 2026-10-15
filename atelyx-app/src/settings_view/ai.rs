@@ -91,6 +91,8 @@ pub struct AiState {
     pub search_draft: Option<SearchDraft>,
     /// 连通性测试在途（防重入）。
     pub testing: bool,
+    /// 最近一次连通性测试结果（成功带耗时毫秒 / 失败带原因；切换供应商时清除）。
+    pub test_result: Option<Result<u128, String>>,
     /// 待清理的密钥链条目 (scope, 供应商 id)：供应商删除在配置落盘成功后执行。
     pub provider_key_delete_pending: Option<(String, String)>,
 }
@@ -139,7 +141,7 @@ pub enum AiMsg {
     ProviderSyncToggle,
     ProviderSave,
     ProviderTest,
-    ProviderTestDone(u64, Result<(), String>),
+    ProviderTestDone(u64, Result<u128, String>),
     ProviderDelete,
     // 模型服务
     DefaultModelPick(Option<(String, String)>),
@@ -291,6 +293,7 @@ pub fn update(app: &mut App, msg: AiMsg) -> Task<Message> {
         // ---- 供应商 ----
         AiMsg::ProviderSelect(id) => {
             app.ai.provider_sel = Some(id.clone());
+            app.ai.test_result = None;
             app.ai.provider_draft = app
                 .repo_config
                 .providers
@@ -344,7 +347,7 @@ pub fn update(app: &mut App, msg: AiMsg) -> Task<Message> {
             if let Some(d) = app.ai.provider_draft.as_mut() {
                 d.models.remove(i);
             }
-            Task::none()
+            update(app, AiMsg::ProviderSave)
         }
         AiMsg::ProviderKey(v) => {
             if let Some(d) = app.ai.provider_draft.as_mut() {
@@ -356,10 +359,12 @@ pub fn update(app: &mut App, msg: AiMsg) -> Task<Message> {
             if let Some(d) = app.ai.provider_draft.as_mut() {
                 d.sync_keys = !d.sync_keys;
             }
-            Task::none()
+            update(app, AiMsg::ProviderSave)
         }
         AiMsg::ProviderSave => {
             let Some(draft) = app.ai.provider_draft.clone() else { return Task::none() };
+            // 保存后旧地址的连通性结果不再适用，一并清除
+            app.ai.test_result = None;
             save_provider(app, draft)
         }
         AiMsg::ProviderTest => {
@@ -372,6 +377,7 @@ pub fn update(app: &mut App, msg: AiMsg) -> Task<Message> {
                 return Task::none();
             }
             app.ai.testing = true;
+            app.ai.test_result = None;
             let gen = app.epoch();
             Task::perform(
                 async move { atelyx_core::ai::provider::test_endpoint(&base_url, &key).await },
@@ -383,10 +389,11 @@ pub fn update(app: &mut App, msg: AiMsg) -> Task<Message> {
                 return Task::none();
             }
             app.ai.testing = false;
-            match result {
-                Ok(()) => app.notify(NoticeLevel::Success, "连接成功"),
+            match &result {
+                Ok(ms) => app.notify(NoticeLevel::Success, format!("连接成功（{ms}ms）")),
                 Err(e) => app.notify(NoticeLevel::Error, format!("连接失败：{e}")),
             }
+            app.ai.test_result = Some(result);
             Task::none()
         }
         AiMsg::ProviderDelete => {
@@ -488,7 +495,7 @@ pub fn update(app: &mut App, msg: AiMsg) -> Task<Message> {
             if let Some(d) = app.ai.agent_draft.as_mut() {
                 d.prompt_file = rel;
             }
-            Task::none()
+            update(app, AiMsg::AgentSave)
         }
         AiMsg::AgentToolToggle(tool) => {
             if let Some(d) = app.ai.agent_draft.as_mut() {
@@ -498,7 +505,7 @@ pub fn update(app: &mut App, msg: AiMsg) -> Task<Message> {
                     d.tools.push(tool);
                 }
             }
-            Task::none()
+            update(app, AiMsg::AgentSave)
         }
         AiMsg::AgentCategoryToggle(i) => {
             let Some(cat) = TOOL_CATEGORIES.get(i) else { return Task::none() };
@@ -514,7 +521,7 @@ pub fn update(app: &mut App, msg: AiMsg) -> Task<Message> {
                     }
                 }
             }
-            Task::none()
+            update(app, AiMsg::AgentSave)
         }
         AiMsg::AgentSave => {
             let Some(draft) = app.ai.agent_draft.clone() else { return Task::none() };
@@ -548,7 +555,7 @@ pub fn update(app: &mut App, msg: AiMsg) -> Task<Message> {
         // ---- 联网搜索 ----
         AiMsg::SearchProviderPick(v) => {
             ensure_search_draft(app).provider = v;
-            Task::none()
+            update(app, AiMsg::SearchSave)
         }
         AiMsg::SearchTavilyKey(v) => {
             ensure_search_draft(app).tavily_key = v;
@@ -916,24 +923,32 @@ fn provider_form(app: &App, p: &vault::VaultProvider, window: iced::window::Id) 
         "开启后 key 明文写入仓库配置（多设备同步有泄露风险）；关闭则只存本机密钥链",
         controls::toggle(sync, (!ro).then(|| Message::Ai(AiMsg::ProviderSyncToggle))),
     ));
+    let test_result_text = match &app.ai.test_result {
+        Some(Ok(ms)) => text(format!("成功 · {ms}ms"))
+            .size(pal::fs_micro())
+            .color(pal::TEXT_MUTED),
+        Some(Err(e)) => text(format!("失败 · {e}"))
+            .size(pal::fs_micro())
+            .color(pal::TEXT_MUTED),
+        None => text(""),
+    };
     col = col.push(super::setting_row(
         "测试连通性",
         "GET {baseUrl}/models 校验地址与凭据",
-        controls::btn(
-            if app.ai.testing { "测试中…" } else { "测试连通性" },
-            &controls::btn_sm(),
-            controls::Variant::Secondary,
-            (!ro && !app.ai.testing).then(|| Message::Ai(AiMsg::ProviderTest)),
-        )
+        row![
+            controls::btn(
+                if app.ai.testing { "测试中…" } else { "测试连通性" },
+                &controls::btn_sm(),
+                controls::Variant::Secondary,
+                (!ro && !app.ai.testing).then(|| Message::Ai(AiMsg::ProviderTest)),
+            ),
+            test_result_text,
+        ]
+        .spacing(10)
+        .align_y(iced::alignment::Vertical::Center)
         .into(),
     ));
     let mut actions = row![].spacing(8);
-    actions = actions.push(controls::btn(
-        "保存",
-        &controls::btn_sm(),
-        controls::Variant::Secondary,
-        (!ro).then(|| Message::Ai(AiMsg::ProviderSave)),
-    ));
     if !ro {
         actions = actions.push(controls::btn(
             "删除",
@@ -1141,12 +1156,6 @@ fn agent_form(app: &App, a: &vault::AgentConfig, window: iced::window::Id) -> El
     }
 
     let mut actions = row![].spacing(8);
-    actions = actions.push(controls::btn(
-        "保存",
-        &controls::btn_sm(),
-        controls::Variant::Secondary,
-        (!ro).then(|| Message::Ai(AiMsg::AgentSave)),
-    ));
     if !builtin && !ro {
         actions = actions.push(controls::btn(
             "删除",
@@ -1240,14 +1249,5 @@ fn search_view(app: &App, window: iced::window::Id) -> Element<'static, Message>
         };
         col = col.push(super::setting_row("Tavily API Key", "请求鉴权凭据", key_control));
     }
-    col = col.push(container(
-        controls::btn(
-            "保存",
-            &controls::btn_sm(),
-            controls::Variant::Secondary,
-            (!ro).then(|| Message::Ai(AiMsg::SearchSave)),
-        )
-        .width(Length::Fixed(60.0)),
-    ));
     col.into()
 }

@@ -78,6 +78,8 @@ pub enum RunEvent {
     Finished {
         session_id: String,
         message_id: String,
+        /// 收敛原因：`stop` = 正常收敛；`interrupted` = 用户中断（行已归一）。
+        reason: String,
     },
     Failed {
         session_id: String,
@@ -365,7 +367,7 @@ impl AgentHub {
     }
 
     /// 启动 run：注册取消信号 → 占位 assistant 消息落真源 → 起循环任务。
-    /// 会话已有活跃 run 时拒绝（run 不变量）。
+    /// 返回占位 assistant 消息 id（编排方回执发起方用）。会话已有活跃 run 时拒绝（run 不变量）。
     #[allow(clippy::too_many_arguments)]
     pub async fn start(
         self: &Arc<Self>,
@@ -376,7 +378,7 @@ impl AgentHub {
         config: RunConfig,
         history: Vec<Value>,
         ctx: ToolCtx,
-    ) -> Result<(), String> {
+    ) -> Result<String, String> {
         let (cancel_tx, cancel_rx) = watch::channel(false);
         let message_id = uuid_v4();
         let run_id = uuid_v4();
@@ -414,6 +416,7 @@ impl AgentHub {
         });
         let hub = Arc::clone(self);
         let sid = session_id.clone();
+        let reply_message_id = message_id.clone();
         tokio::spawn(async move {
             run_loop(RunParams {
                 store,
@@ -434,7 +437,7 @@ impl AgentHub {
                 .unwrap_or_else(|e| e.into_inner())
                 .retain(|_, (_, rid)| rid != &run_id);
         });
-        Ok(())
+        Ok(reply_message_id)
     }
 }
 
@@ -655,12 +658,17 @@ async fn run_loop(p: RunParams) {
             let _ = events.send(RunEvent::Finished {
                 session_id,
                 message_id,
+                reason: "stop".to_string(),
             });
         }
         Err(e) => {
             finalize_interrupted(&store, &session_id, &message_id, created_at, &mut state, &e);
             if e == ABORTED {
-                let _ = events.send(RunEvent::Finished { session_id, message_id });
+                let _ = events.send(RunEvent::Finished {
+                    session_id,
+                    message_id,
+                    reason: "interrupted".to_string(),
+                });
             } else {
                 let _ = events.send(RunEvent::Failed {
                     session_id,
