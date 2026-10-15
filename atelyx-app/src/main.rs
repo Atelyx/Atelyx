@@ -12,6 +12,8 @@ mod calendar_grid;
 mod calendar_heat;
 mod calendar_month;
 mod calendar_view;
+mod chat_actions;
+mod chat_view;
 mod commands;
 mod history_browser;
 mod layout_view;
@@ -403,6 +405,10 @@ enum Message {
     RepoHistoryLoaded(u64, Result<Vec<repohistory_view::RepoHistoryGroup>, String>),
     /// 仓库历史面板刷新（失效重取）。
     RepoHistoryRefresh,
+    /// AI 对话面板消息（会话 / run 事件 / 编排）。
+    Chat(chat_actions::ChatMsg),
+    /// 无操作（后台任务回执无界面变化时的统一落点）。
+    Noop,
     /// 日历视图消息（日程增删改 / 月份导航 / 装载回执）。
     Calendar(calendar_actions::CalendarMsg),
     /// 打开链接（外链 / 仓库路径 / wiki）。
@@ -1254,7 +1260,10 @@ pub struct App {
     /// 设置-AI 分区的会话内编辑状态（容器切换时整体清空）。
     pub ai: settings_view::ai::AiState,
     /// AI 设置子分区（供应商 | 模型服务 | Agent | 联网搜索）。
+    /// 设置-AI 的子分区 tab 与会话内编辑状态（容器切换时整体清空）。
     pub ai_sub_tab: String,
+    /// AI 对话面板状态（会话投影 / run 订阅 / 输入草稿）。
+    pub chat: chat_actions::ChatState,
     /// 设置页文本项草稿（正文行宽 / 排除文件夹 / 附件文件夹；None = 显示当前值）。
     pub content_width_draft: Option<String>,
     pub exclude_folders_draft: Option<String>,
@@ -1408,6 +1417,7 @@ impl App {
                 focused_window: None,
                 market_cache_path,
                 ai_sub_tab: "providers".into(),
+                chat: chat_actions::ChatState::new(),
                 repo_config: vault::VaultConfig::default(),
                 agents: Vec::new(),
                 ai: settings_view::ai::AiState::default(),
@@ -2143,10 +2153,17 @@ impl App {
                     self.entry_scene_id = config.entry_scene_id;
                     self.prompt_notes = prompts;
                     self.folder_colors = colors;
+                    // 会话磁盘真源装载（进仓 / 切仓；同根幂等）；空间仓库无本地真源，脱离
+                    match self.vault_root.clone() {
+                        Some(root) => chat_actions::load_vault(self, &root),
+                        None => chat_actions::detach_vault(self),
+                    }
                 }
                 Task::none()
             }
             Message::VaultMetaLoaded(_, Err(_)) => Task::none(),
+            Message::Chat(msg) => chat_actions::update(self, msg),
+            Message::Noop => Task::none(),
             Message::FileRowPress { window, rel, is_dir } => {
                 // 拖拽会话 / 弹层 / 重命名输入期间不接纳新候选
                 if self.file_drag.is_none() && self.popup.is_none() && self.rename.is_none() {
@@ -6336,6 +6353,8 @@ impl App {
             self.space_pump_subscription(),
             self.plugin_events_subscription(),
             self.plugin_host_requests_subscription(),
+            chat_actions::run_events_subscription(),
+            chat_actions::control_subscription(),
         ])
     }
 

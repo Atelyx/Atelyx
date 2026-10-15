@@ -11,6 +11,8 @@ path = "src/main.rs"
 [dependencies]
 # 核心能力（仓库存储/原子写/目录过滤）：与壳共享同一实现
 atelyx-core = { path = "../atelyx-core" }
+# AI 对话：会话 id / 消息 id 生成（与 core 写链同版本）
+uuid = { version = "1", features = ["v4"] }
 # 最近打开条目（ui-state 透传字段）的序列化派生
 serde = { version = "1", features = ["derive"] }
 # 布局状态（ui-state.json）序列化

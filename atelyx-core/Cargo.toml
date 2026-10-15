@@ -20,7 +20,8 @@ tokio = { version = "1", features = ["rt", "sync", "time", "macros", "net"] }
 uuid = { version = "1", features = ["v4"] }
 # 出网校验（net_guard）：URL 解析与地址枚举；blocking 供插件 http 能力面
 # （宿主侧在插件进程的 stdout 读线程上同步执行请求，见 plugin_runtime/http.rs）
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
+# stream 供 AI 对话流式客户端（bytes_stream 逐块读 SSE）
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking", "stream"] }
 # 仓库内文件检索（filesearch）：glob 模式匹配（`**/` 任意深度语义，即 ripgrep 所用引擎）
 globset = "0.4"
 # 表格 xlsx 导出（table_xlsx）

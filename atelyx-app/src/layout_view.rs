@@ -1538,6 +1538,7 @@ fn view_content<'a>(app: &'a App, window: iced::window::Id, kind: &str) -> Eleme
         "search" => search_view(app),
         "inspector" => inspector_view(app, window),
         "table" => crate::table_view::table_view(app, window),
+        "aichat" => crate::chat_view::chat_view(app, window),
         "collabroom" => collab_room_view(app),
         "recent" => crate::recent_view::recent_view(app),
         "repohistory" => crate::repohistory_view::repohistory_view(app, window),

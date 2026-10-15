@@ -374,7 +374,7 @@ pub fn update(app: &mut App, msg: AiMsg) -> Task<Message> {
             app.ai.testing = true;
             let gen = app.epoch();
             Task::perform(
-                async move { atelyx_core::ai_provider::test_endpoint(&base_url, &key).await },
+                async move { atelyx_core::ai::provider::test_endpoint(&base_url, &key).await },
                 move |result| Message::Ai(AiMsg::ProviderTestDone(gen, result)),
             )
         }

@@ -1877,8 +1877,8 @@ pub fn append_chat_messages_file(
     Ok(())
 }
 
-/// 消息 .jsonl 追加原始行（会话容器写链专用）：tail 为确定性序列化、以 `\n` 结尾的多行
-/// 文本，原样落盘。文件缺失报错——调用方（chat_container 写链）先核对磁盘内容与内存
+/// 消息 .jsonl 追加原始行（会话写链专用）：tail 为确定性序列化、以 `\n` 结尾的多行
+/// 文本，原样落盘。文件缺失报错——调用方（ai::session 写链）先核对磁盘内容与内存
 /// 基线一致才追加，不一致或缺失时回落全量重写。
 pub fn append_chat_messages_raw(root: &Path, file: &str, tail: &str) -> Result<(), String> {
     use std::io::Write;
