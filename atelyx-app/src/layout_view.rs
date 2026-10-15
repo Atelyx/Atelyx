@@ -3013,52 +3013,82 @@ fn mode_button(
         .into()
 }
 
-/// 预览编辑档：块行与空行行交给编辑面容器统一排布与承接鼠标；非活动块由只读块
-/// 控件承载（视觉逐点一致），仅活动块与选区锚点块回显源码。
-/// 返回裸编辑面（不含滚动容器与双链浮层——由 note_view 统一包外层，切档共用滚动状态）。
+/// 揭示态的源码面元素（行装饰由渲染面给出的包装沿用）。
+#[allow(clippy::too_many_arguments)]
+fn source_block_element<'a>(
+    app: &'a App,
+    body: &'a str,
+    from: usize,
+    to: usize,
+    source: markdown_view::SourceKind,
+    pal: markdown_edit::EditPalette,
+    bindings: crate::commands::NoteBindings,
+    body_start: usize,
+) -> Element<'a, Message> {
+    markdown_edit::SourceBlock {
+        from,
+        to,
+        text: body,
+        caret: app.edit.caret,
+        anchor: app.edit.anchor,
+        preedit: app.edit.preedit.clone(),
+        source,
+        pal,
+        opts: &app.edit_opts,
+        focused: app.edit.focused && app.edit.caret >= from && app.edit.caret <= to,
+        cursors: &app.remote_cursors,
+        body_start,
+        bindings,
+    }
+    .into()
+}
+
+/// 预览编辑档：行清单由渲染面产出（富渲染件 + 源锚 + 可见片段），已揭示的行以源码面
+/// 替换其内容、行装饰照旧；块内空行与块间空行同为可点的空行行（光标由编辑面自绘）。
 fn edit_view(app: &App) -> Element<'_, Message> {
     use markdown_edit::SurfaceRow;
+    use markdown_view::RowKind;
 
     let Some(doc) = app.edit_doc.as_ref() else {
         return placeholder_panel("正在解析…");
     };
-    let editable = app.editable_blocks();
     let pal_edit = markdown_edit::EditPalette::from_theme(&app.theme);
     let note_bindings = crate::commands::note_bindings(&app.global.command_shortcuts);
+    let body = doc.source.as_str();
+    let caret = app.edit.caret.min(body.len());
     let (sel_from, sel_to) = app.edit.selection();
-    let mut rows = Vec::new();
-    let mut prev: Option<usize> = None;
-    let caret = app.edit.caret.min(doc.source.len());
+    let has_selection = sel_to > sel_from;
+    // 光标停在空白行时不揭示所在行（空行行自己托管光标）
+    let caret_blank = markdown_edit::line_is_blank(body, caret);
     // 远端光标以 note_text 全文为参照，编辑面坐标相对正文
     let body_start = atelyx_core::frontmatter::block_end(&app.note_text).unwrap_or(0);
-    // 空文档：补一个空源码块，给光标一个宿主
+    let mut rows = Vec::new();
+    // 空文档：补一个空源码行，给光标一个宿主
     if doc.blocks.is_empty() {
-        rows.push(SurfaceRow::Block {
-            index: 0,
-            editable: true,
-            exact: true,
+        rows.push(SurfaceRow::Row {
+            from: 0,
+            to: 0,
+            revealed: true,
+            runs: Vec::new(),
+            indent: 0.0,
+            source: markdown_view::empty_block_meta().source,
+            code: None,
             covered: false,
-            element: markdown_edit::SourceBlock {
-                from: 0,
-                to: 0,
-                text: &doc.source,
-                caret,
-                anchor: app.edit.anchor,
-                preedit: app.edit.preedit.clone(),
-                source: markdown_view::empty_block_meta().source,
-                pal: pal_edit,
-                opts: &app.edit_opts,
-                focused: app.edit.focused,
-                cursors: &app.remote_cursors,
+            element: source_block_element(
+                app,
+                body,
+                0,
+                0,
+                markdown_view::empty_block_meta().source,
+                pal_edit,
+                note_bindings.clone(),
                 body_start,
-                bindings: note_bindings.clone(),
-            }
-            .into(),
+            ),
         });
         return markdown_edit::EditSurface::new(
             rows,
             pal_edit,
-            &doc.source,
+            body,
             caret,
             app.edit.anchor,
             app.edit.preedit.clone(),
@@ -3068,114 +3098,85 @@ fn edit_view(app: &App) -> Element<'_, Message> {
         )
         .into();
     }
-    // 文首空白行（首块之前）：文首区每行都是空白行，末尾不带换行的片段是缩进
-    if let Some(first) = app.edit_meta.first() {
-        if first.from > 0 {
-            let line_starts = markdown_edit::edge_blank_starts(&doc.source, 0, first.from);
-            let lines = line_starts.len();
-            if lines > 0 {
+
+    for row in markdown_view::edit_rows(body, &doc.blocks, &app.theme, &app.note_images) {
+        let (from, to) = (row.from, row.to);
+        match row.kind {
+            RowKind::Gap => {
                 let covered =
-                    markdown_edit::gap_covered_lines(&line_starts, first.from, sel_from, sel_to);
-                rows.push(SurfaceRow::Gap {
-                    from: 0,
-                    to: first.from,
-                    line_starts,
-                    covered,
-                    element: markdown_view::gap(lines),
-                });
-            }
-        }
-    }
-    for (index, chunk) in
-        markdown_view::block_chunks(&doc.source, &doc.blocks, &app.theme, true, &app.note_images, true)
-            .into_iter()
-            .enumerate()
-    {
-        let editable = editable.contains(&index);
-        let meta = app.edit_meta.get(index);
-        if chunk.gap_before > 0 {
-            if let Some(p) = prev {
-                let from = app.edit_meta[p].to;
-                let line_starts = markdown_edit::gap_line_starts(&doc.source, from, chunk.from);
-                let covered =
-                    markdown_edit::gap_covered_lines(&line_starts, chunk.from, sel_from, sel_to);
+                    markdown_edit::gap_covered_lines(&row.gap_lines, to, sel_from, sel_to);
                 rows.push(SurfaceRow::Gap {
                     from,
-                    to: chunk.from,
-                    line_starts,
-                    covered,
-                    element: markdown_view::gap(chunk.gap_before),
-                });
-            }
-        }
-        if editable {
-            rows.push(SurfaceRow::Block {
-                index,
-                editable: true,
-                exact: true,
-                covered: false,
-                element: markdown_edit::SourceBlock {
-                from: chunk.from,
-                to: chunk.to,
-                text: &doc.source,
-                caret,
-                anchor: app.edit.anchor,
-                preedit: app.edit.preedit.clone(),
-                source: chunk.source,
-                pal: pal_edit,
-                opts: &app.edit_opts,
-                focused: app.edit.focused && caret >= chunk.from && caret <= chunk.to,
-                cursors: &app.remote_cursors,
-                body_start,
-                bindings: note_bindings.clone(),
-            }
-            .into(),
-            });
-        } else {
-            let covered = sel_to > sel_from && sel_from < chunk.to && sel_to > chunk.from;
-            rows.push(SurfaceRow::Block {
-                index,
-                editable: false,
-                exact: meta.is_some_and(|m| m.exact),
-                covered,
-                element: chunk.element,
-            });
-        }
-        prev = Some(index);
-    }
-    // 文末空白行（末块之后）：块区间未覆盖的尾部空白行；文本以换行结尾时
-    // 末行下方还有一行虚拟空行（点击落光标、可直接输入，对齐整篇文本面行为）
-    if let Some(last) = app.edit_meta.last() {
-        if doc.source.len() > last.to {
-            let line_starts = markdown_edit::tail_blank_starts(&doc.source, last.to);
-            let lines = line_starts.len();
-            if lines > 0 {
-                // 托管区间含虚拟文末行：光标可停在 len（右开）
-                let to = doc.source.len() + 1;
-                let covered =
-                    markdown_edit::gap_covered_lines(&line_starts, to, sel_from, sel_to);
-                rows.push(SurfaceRow::Gap {
-                    from: last.to,
                     to,
-                    line_starts,
+                    line_starts: row.gap_lines,
                     covered,
-                    element: markdown_view::gap(lines),
+                    indent: row.indent,
+                    element: row.element,
+                });
+            }
+            RowKind::Deco => {
+                // 装饰行不承载光标：单击落点吸到该行起点（应用层按行首换算）
+                rows.push(SurfaceRow::Row {
+                    from: row.reveal.0,
+                    to: row.reveal.1,
+                    revealed: false,
+                    runs: Vec::new(),
+                    indent: row.indent,
+                    source: row.source,
+                    code: None,
+                    covered: false,
+                    element: row.element,
+                });
+            }
+            RowKind::Block | RowKind::Unit => {
+                let (reveal_from, reveal_to) = row.reveal;
+                let in_caret = caret >= reveal_from && caret <= reveal_to;
+                let in_anchor =
+                    has_selection && app.edit.anchor >= reveal_from && app.edit.anchor <= reveal_to;
+                let revealed = (in_caret && !caret_blank) || in_anchor;
+                let covered =
+                    !revealed && sel_to > sel_from && sel_from < to && sel_to > from;
+                let source = row.source;
+                let element: Element<'_, Message> = if revealed {
+                    row.revealed(source_block_element(
+                        app,
+                        body,
+                        reveal_from,
+                        reveal_to,
+                        source,
+                        pal_edit,
+                        note_bindings.clone(),
+                        body_start,
+                    ))
+                } else {
+                    row.element
+                };
+                rows.push(SurfaceRow::Row {
+                    from,
+                    to,
+                    revealed,
+                    runs: row.runs,
+                    indent: row.indent,
+                    source,
+                    code: row.code,
+                    covered,
+                    element,
                 });
             }
         }
     }
-    let surface = markdown_edit::EditSurface::new(
+    markdown_edit::EditSurface::new(
         rows,
         pal_edit,
-        &doc.source,
+        body,
         caret,
         app.edit.anchor,
         app.edit.preedit.clone(),
         app.edit.focused,
         app.note_edit_caret_pending,
         note_bindings,
-    );
-    surface.into()
+    )
+    .into()
 }
 
 /// 双链候选浮层（编辑面顶部右侧覆盖；↑↓ 导航、Enter 选中、Esc 关闭）。

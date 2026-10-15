@@ -39,42 +39,43 @@ pub struct LinkTarget {
     pub form: LinkForm,
 }
 
-/// 一个顶层块的渲染产物：源区间 + 前置空行数 + 控件。
-/// 编辑档与只读档由同一入口产出，非活动块据此逐点一致（档位切换不重排）。
+/// 行内可见片段：可见文本 + 该文本对应的源区间 + 样式。
+/// 渲染与编辑面的落点换算（源映射探针）共用同一份走查，避免两处规则分叉。
+#[derive(Clone)]
+pub struct LineRun {
+    /// 可见文本（与进渲染 span 的文本逐字相同）。
+    pub text: String,
+    /// 可见文本对应的源区间；替换形态（图片 / 角标等）与源长度不等时按整段取边界。
+    pub src: (usize, usize),
+    /// 样式（字体随加粗 / 斜体 / 等宽变化）。
+    pub(crate) st: TextStyle,
+    /// 相对字号倍数（脚注角标等）。
+    pub(crate) scale: f32,
+    link: Option<LinkTarget>,
+}
+
+impl LineRun {
+    /// 渲染字体（探针排版按同一字体取字宽）。
+    pub(crate) fn font(&self) -> Font {
+        self.st.font
+    }
+
+}
+
+/// 一个顶层块的渲染产物：前置空行数 + 控件。
 pub struct BlockChunk<'a> {
-    pub from: usize,
-    pub to: usize,
     /// 与上一块之间的源码空行数（首块为 0；块间距 = 空行数 × 行高）。
     pub gap_before: usize,
-    /// 源码态排版口径（编辑档回显源码时与该块类型一致）。
-    pub source: SourceKind,
     pub element: Element<'a, Message>,
 }
 
 /// 源码态排版口径。
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum SourceKind {
     /// 散文类块：字号与行高随块类型（标题逐级放大）。
     Prose { size: f32, line_height: f32 },
     /// 代码类块：等宽小字。
     Mono { size: f32 },
-}
-
-/// 块渲染共享入口：`interactive` 为真时链接可点、任务框可勾（编辑档）。
-/// `images` = 已载入的图片句柄（独立成段的图片按块渲染；其余占位）。
-/// `soft_break` = 宽松换行（段内单个换行渲染为换行；false 按 Markdown 标准渲染为空格；
-/// 编辑档恒 true——富渲染须与源文本同形，换行折叠会破坏落点换算）。
-pub fn block_chunks<'a>(
-    source: &'a str,
-    blocks: &'a [MarkdownBlock],
-    theme: &iced::Theme,
-    interactive: bool,
-    images: &'a ImageHandles,
-    soft_break: bool,
-) -> Vec<BlockChunk<'a>> {
-    let render =
-        Render { pal: Palette::from_theme(theme), opts: link_options(), interactive, images, soft_break };
-    render.chunks(source, blocks)
 }
 
 /// 阅读面入口：正文列（不含滚动容器——由视图层统一包一层，档位切换时滚动位置随
@@ -85,8 +86,15 @@ pub fn document_view<'a>(
     images: &'a ImageHandles,
     soft_break: bool,
 ) -> Element<'a, Message> {
+    let render = Render {
+        pal: Palette::from_theme(theme),
+        opts: link_options(),
+        interactive: false,
+        images,
+        soft_break,
+    };
     let mut body = column![].width(Length::Fill).spacing(0);
-    for chunk in block_chunks(&doc.source, &doc.blocks, theme, false, images, soft_break) {
+    for chunk in render.chunks(&doc.source, &doc.blocks) {
         if chunk.gap_before > 0 {
             body = body.push(gap(chunk.gap_before));
         }
@@ -102,36 +110,11 @@ pub struct BlockMeta {
     pub to: usize,
     /// 列表块（Enter 延续项、空项退格用）。
     pub list: bool,
-    /// 富渲染与源码渲染几何是否一致（一致才可按源文本精确换算落点）。
-    pub exact: bool,
     pub source: SourceKind,
 }
 
-/// 富渲染与源码渲染几何是否一致：只有「纯文本段落」（无任何隐藏标记）两者逐点相同——
-/// 落点可按源文本精确换算，且揭示不引起重排；其余块富形态带标记或缩进列，只能按块边界吸附。
-fn rich_equals_source(source: &str, from: usize, to: usize, block: &MarkdownBlock) -> bool {
-    let MarkdownBlock::Paragraph { inline, .. } = block else {
-        return false;
-    };
-    if to <= from || to > source.len() {
-        return false;
-    }
-    let slice = &source[from..to];
-    if slice.starts_with(char::is_whitespace) {
-        return false;
-    }
-    let mut len = 0;
-    for span in inline {
-        match span {
-            InlineSpan::Text { text, .. } => len += text.len(),
-            _ => return false,
-        }
-    }
-    len == slice.len()
-}
-
 /// 编辑面块元数据（按顶层块序）。
-pub fn block_meta(source: &str, blocks: &[MarkdownBlock]) -> Vec<BlockMeta> {
+pub fn block_meta(blocks: &[MarkdownBlock]) -> Vec<BlockMeta> {
     blocks
         .iter()
         .map(|b| {
@@ -140,7 +123,6 @@ pub fn block_meta(source: &str, blocks: &[MarkdownBlock]) -> Vec<BlockMeta> {
                 from,
                 to,
                 list: matches!(b, MarkdownBlock::List { .. }),
-                exact: rich_equals_source(source, from, to, b),
                 source: block_source_style(b),
             }
         })
@@ -153,7 +135,6 @@ pub fn empty_block_meta() -> BlockMeta {
         from: 0,
         to: 0,
         list: false,
-        exact: true,
         source: SourceKind::Prose { size: base_size(), line_height: LINE_HEIGHT },
     }
 }
@@ -204,7 +185,7 @@ impl Palette {
 
 /// 行内样式累加器：容器片段（加粗/斜体/删除线/高亮）向下传递，叶子片段据它产出 span。
 #[derive(Clone, Copy)]
-struct TextStyle {
+pub(crate) struct TextStyle {
     font: Font,
     color: Option<Color>,
     strike: bool,
@@ -263,6 +244,158 @@ fn block_source_style(block: &MarkdownBlock) -> SourceKind {
     }
 }
 
+/// 引用内边距（每层引用 10px）。
+const QUOTE_PAD: f32 = 10.0;
+/// 引用竖线宽度。
+const QUOTE_BAR_W: f32 = 3.0;
+/// 脚注竖线宽度。
+const FOOTNOTE_BAR_W: f32 = 2.0;
+
+/// 行装饰：外层左内缩与左侧竖线。渲染件与揭示态的源码面共用同一套包装。
+#[derive(Clone)]
+pub enum RowWrap {
+    /// 左内缩（列表子行 / 项内子块）。
+    Pad(f32),
+    /// 左侧竖线 + 左内边距 + 可选底色（引用 / callout / 脚注）。
+    Bar { color: Color, width: f32, pad: f32, bg: Option<Color> },
+}
+
+/// 行件包装：按装饰逐层包住内层（`wraps` 外层在前）。
+pub fn wrap_row<'a>(wraps: &[RowWrap], inner: Element<'a, Message>) -> Element<'a, Message> {
+    let mut el = inner;
+    for wrap in wraps.iter().rev() {
+        el = match wrap {
+            RowWrap::Pad(left) => container(el)
+                .width(Length::Fill)
+                .padding(Padding { left: *left, ..Padding::default() })
+                .into(),
+            RowWrap::Bar { color, width, pad, bg } => {
+                let bg = *bg;
+                Stack::new()
+                    .push(
+                        container(el)
+                            .width(Length::Fill)
+                            .padding(Padding { left: *pad, ..Padding::default() })
+                            .style(move |_theme: &iced::Theme| container::Style {
+                                background: bg.map(Into::into),
+                                ..Default::default()
+                            }),
+                    )
+                    .push(bar_line(*color, *width))
+                    .width(Length::Fill)
+                    .into()
+            }
+        };
+    }
+    el
+}
+
+/// 装饰累计的可见正文左偏移（行内落点换算与空行自绘光标用）。
+fn wrap_indent(wraps: &[RowWrap]) -> f32 {
+    wraps
+        .iter()
+        .map(|w| match w {
+            RowWrap::Pad(left) => *left,
+            RowWrap::Bar { pad, .. } => *pad,
+        })
+        .sum()
+}
+
+/// 竖线件：撑满所在行高（Stack 覆盖层按收紧限高布局）。
+fn bar_line<'a>(color: Color, width: f32) -> Element<'a, Message> {
+    container(Space::new())
+        .width(Length::Fixed(width))
+        .height(Length::Fill)
+        .style(move |_theme: &iced::Theme| container::Style {
+            background: Some(color.into()),
+            ..Default::default()
+        })
+        .into()
+}
+
+/// callout 类型徽标。
+fn callout_badge<'a>(name: &str, color: Color) -> Element<'a, Message> {
+    container(
+        text(name.to_uppercase())
+            .size(11)
+            .font(Font { weight: iced::font::Weight::Semibold, ..Font::DEFAULT })
+            .color(color),
+    )
+    .padding([1.0, 6.0])
+    .style(move |_theme: &iced::Theme| container::Style {
+        background: Some(color.scale_alpha(0.16).into()),
+        border: Border { radius: 8.0.into(), ..Border::default() },
+        ..Default::default()
+    })
+    .into()
+}
+
+/// 脚注正文件（左侧竖线由行装饰提供）。
+fn footnote_content<'a>(spans: Vec<Span<'a, LinkTarget, Font>>, size: f32, color: Color) -> Element<'a, Message> {
+    rich(spans, size, LINE_HEIGHT, Some(color), iced::alignment::Horizontal::Left)
+}
+
+/// 编辑档行类别：揭示单位按类别定——`Block` 整块回显源码、`Unit` 只回显本行、`Gap` / `Deco` 不揭示。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowKind {
+    /// 整块一行（段落 / 标题 / 脚注 / 表格 / 图片 / 分隔线 / 公式 / raw HTML / 围栏代码）。
+    Block,
+    /// 可独立揭示的一行（列表项内容行、引用内的子块行）。
+    Unit,
+    /// 空行行（块间与块内）：不揭示，光标与选区由编辑面自绘。
+    Gap,
+    /// 装饰行（callout 徽标）：命中吸到相邻内容行，不揭示。
+    Deco,
+}
+
+/// 编辑档一行：未揭示时的富渲染件 + 源锚 + 可见片段（源映射）与行装饰。
+pub struct EditRow<'a> {
+    pub kind: RowKind,
+    /// 行区间：正文行 = 行内源区间；空行行 = 空行区间（`gap_lines` 为各空行行首）。
+    pub from: usize,
+    pub to: usize,
+    /// 揭示时回显源码的区间（块级 = 整块；行级 = 本行）。
+    pub reveal: (usize, usize),
+    /// 可见片段（源映射探针）；空行行 / 图片块 / 表格等无逐字映射的为空。
+    pub runs: Vec<LineRun>,
+    /// 可见片段相对行左缘的横向偏移。
+    pub indent: f32,
+    /// 探针排版口径（与富渲染同一字号行高）。
+    pub source: SourceKind,
+    /// 空行行内各空行的行首。
+    pub gap_lines: Vec<usize>,
+    /// 围栏代码正文的源区间（代码正文的行列换算基准）。
+    pub code: Option<(usize, usize)>,
+    /// 行装饰（渲染与揭示态共用）。
+    pub wraps: Vec<RowWrap>,
+    /// 未揭示时的富渲染件。
+    pub element: Element<'a, Message>,
+}
+
+impl<'a> EditRow<'a> {
+    /// 揭示态的行件：源码面替换本行内容，行装饰照旧。
+    pub fn revealed(&self, inner: Element<'a, Message>) -> Element<'a, Message> {
+        wrap_row(&self.wraps, inner)
+    }
+}
+
+/// 编辑档行清单入口（富渲染 + 源锚 + 可见片段）。
+pub fn edit_rows<'a>(
+    source: &'a str,
+    blocks: &'a [MarkdownBlock],
+    theme: &iced::Theme,
+    images: &'a ImageHandles,
+) -> Vec<EditRow<'a>> {
+    let render = Render {
+        pal: Palette::from_theme(theme),
+        opts: link_options(),
+        interactive: true,
+        images,
+        soft_break: true,
+    };
+    render.rows(source, blocks)
+}
+
 struct Render<'a> {
     pal: Palette,
     opts: ParseOptions,
@@ -282,26 +415,31 @@ impl Render<'_> {
             let gap_before = prev.map_or(0, |p| {
                 blank_line_count(source, block_to(p), block_from(block))
             });
-            out.push(BlockChunk {
-                from: block_from(block),
-                to: block_to(block),
-                gap_before,
-                source: block_source_style(block),
-                element: self.block(source, block),
-            });
+            out.push(BlockChunk { gap_before, element: self.block(source, block) });
             prev = Some(block);
         }
         out
     }
 
-    /// 子块列表 → 列（块间按源码空行数补行高间距）。
-    fn blocks_column<'a>(&self, source: &'a str, blocks: &'a [MarkdownBlock]) -> Element<'a, Message> {
+    /// 子块列表 → 列（块间与首个子块之前的源码空行各补一行高间距）。
+    /// `lead_from` = 首个子块之前的源码位置（列表项内容末尾 / 引用起点），
+    /// 用于把「项内容 ↔ 首个子块」「引用起点 ↔ 首个段落」之间的空行也渲染成行。
+    fn blocks_column<'a>(
+        &self,
+        source: &'a str,
+        lead_from: Option<usize>,
+        blocks: &'a [MarkdownBlock],
+    ) -> Element<'a, Message> {
         let mut col = column![].width(Length::Fill).spacing(0);
-        for chunk in self.chunks(source, blocks) {
-            if chunk.gap_before > 0 {
-                col = col.push(gap(chunk.gap_before));
+        for (pos, block) in blocks.iter().enumerate() {
+            let lead = if pos == 0 { lead_from } else { Some(block_to(&blocks[pos - 1])) };
+            if let Some(lead) = lead {
+                let n = blank_line_count(source, lead, block_from(block));
+                if n > 0 {
+                    col = col.push(gap(n));
+                }
             }
-            col = col.push(chunk.element);
+            col = col.push(self.block(source, block));
         }
         col.into()
     }
@@ -332,12 +470,12 @@ impl Render<'_> {
                     )
                 }
             }
-            MarkdownBlock::Blockquote { callout, children, .. } => {
-                self.blockquote(source, callout.as_deref(), children)
+            MarkdownBlock::Blockquote { from, callout, children, .. } => {
+                self.blockquote(source, *from, callout.as_deref(), children)
             }
             MarkdownBlock::List { ordered, items, .. } => self.list(source, *ordered, items),
-            MarkdownBlock::FencedCode { lang, code, .. } => self.code_block(lang, code),
-            MarkdownBlock::IndentedCode { code, .. } => self.code_block("", code),
+            MarkdownBlock::FencedCode { lang, code, .. } => self.code_block(lang, code, None),
+            MarkdownBlock::IndentedCode { code, .. } => self.code_block("", code, None),
             MarkdownBlock::Hr { .. } => self.hr(),
             MarkdownBlock::Table { header, aligns, rows, .. } => {
                 self.table(source, header, aligns, rows)
@@ -350,52 +488,392 @@ impl Render<'_> {
         }
     }
 
+    // ===== 编辑档行清单 =====
+    //
+    // 编辑面按「行」排布与命中：行 = 可揭示单位（整块 / 列表项 / 引用内子块）+ 空行行。
+    // 行清单复用本模块同一批渲染函数，与只读档逐点一致；只读档不经此入口。
+
+    /// 编辑档行清单：顶层块序列 → 行序列（含块间 / 块内空行行与嵌套缩进）。
+    fn rows<'a>(&self, source: &'a str, blocks: &'a [MarkdownBlock]) -> Vec<EditRow<'a>> {
+        let mut rows = Vec::new();
+        let Some(first) = blocks.first() else {
+            return rows;
+        };
+        let first_from = block_from(first);
+        if first_from > 0 {
+            let lines = crate::markdown_edit::edge_blank_starts(source, 0, first_from);
+            if !lines.is_empty() {
+                rows.push(self.gap_row(lines, 0, first_from, Vec::new()));
+            }
+        }
+        for (index, block) in blocks.iter().enumerate() {
+            if index > 0 {
+                let prev_to = block_to(&blocks[index - 1]);
+                self.push_blank_rows(source, prev_to, block_from(block), &[], &mut rows);
+            }
+            self.push_block_rows(source, block, Vec::new(), &mut rows);
+        }
+        let last_to = block_to(blocks.last().unwrap());
+        if source.len() > last_to {
+            let lines = crate::markdown_edit::tail_blank_starts(source, last_to);
+            if !lines.is_empty() {
+                rows.push(self.gap_row(lines, last_to, source.len() + 1, Vec::new()));
+            }
+        }
+        rows
+    }
+
+    /// 空行行：一根源码空行一行高；光标由编辑面自绘（不揭示）。
+    fn gap_row<'a>(
+        &self,
+        lines: Vec<usize>,
+        from: usize,
+        to: usize,
+        wraps: Vec<RowWrap>,
+    ) -> EditRow<'a> {
+        let height = lines.len().max(1);
+        EditRow {
+            kind: RowKind::Gap,
+            from,
+            to,
+            reveal: (from, to),
+            runs: Vec::new(),
+            indent: wrap_indent(&wraps),
+            source: SourceKind::Prose { size: base_size(), line_height: LINE_HEIGHT },
+            gap_lines: lines,
+            code: None,
+            element: wrap_row(&wraps, gap(height)),
+            wraps,
+        }
+    }
+
+    /// 区间内的空行行（块间与块内同口径：区间里全是空行才成行）。
+    fn push_blank_rows<'a>(
+        &self,
+        source: &str,
+        from: usize,
+        to: usize,
+        wraps: &[RowWrap],
+        rows: &mut Vec<EditRow<'a>>,
+    ) {
+        if to <= from || blank_line_count(source, from, to) == 0 {
+            return;
+        }
+        let mut lines = crate::markdown_edit::gap_line_starts(source, from, to);
+        // 区间末尾未以换行收尾时，末段是下一行行首的装饰（缩进 / 引用标记）：去掉这根伪行
+        if !source[from..to].ends_with('\n') {
+            lines.pop();
+        }
+        if lines.is_empty() {
+            return;
+        }
+        rows.push(self.gap_row(lines, from, to, wraps.to_vec()));
+    }
+
+    fn push_block_rows<'a>(
+        &self,
+        source: &'a str,
+        block: &'a MarkdownBlock,
+        wraps: Vec<RowWrap>,
+        rows: &mut Vec<EditRow<'a>>,
+    ) {
+        match block {
+            MarkdownBlock::List { ordered, items, .. } => {
+                self.push_list_rows(source, *ordered, items, wraps, rows)
+            }
+            MarkdownBlock::Blockquote { from, callout, children, .. } => {
+                self.push_quote_rows(source, *from, callout.as_deref(), children, wraps, rows)
+            }
+            _ => rows.push(self.block_row(source, block, wraps)),
+        }
+    }
+
+    /// 单个整块行（段落 / 标题 / 脚注 / 表格 / 图片 / 分隔线 / 公式 / raw HTML / 代码块）。
+    fn block_row<'a>(
+        &self,
+        source: &'a str,
+        block: &'a MarkdownBlock,
+        wraps: Vec<RowWrap>,
+    ) -> EditRow<'a> {
+        let (from, to) = (block_from(block), block_to(block));
+        let mut runs = Vec::new();
+        let mut code = None;
+        let mut row_wraps = wraps.clone();
+        let inner: Element<'a, Message> = match block {
+            MarkdownBlock::Heading { level, inline, .. } => {
+                let st = TextStyle {
+                    font: Font { weight: iced::font::Weight::Semibold, ..Font::DEFAULT },
+                    ..TextStyle::base()
+                };
+                runs = self.runs(source, inline, st);
+                rich(
+                    self.run_spans(runs.clone()),
+                    heading_size(*level),
+                    1.3,
+                    None,
+                    iced::alignment::Horizontal::Left,
+                )
+            }
+            MarkdownBlock::Paragraph { inline, .. } => {
+                if let Some(InlineSpan::Image { src, alt, width, height, .. }) = image_only(inline) {
+                    self.image_block(src, alt, width.as_deref(), height.as_deref())
+                } else {
+                    runs = self.runs(source, inline, TextStyle::base());
+                    rich(
+                        self.run_spans(runs.clone()),
+                        base_size(),
+                        LINE_HEIGHT,
+                        None,
+                        iced::alignment::Horizontal::Left,
+                    )
+                }
+            }
+            MarkdownBlock::FencedCode { lang, code: body, content_from, content_to, .. } => {
+                code = Some((*content_from, *content_to));
+                self.code_block(lang, body, Some(((*content_from, *content_to), mono_size())))
+            }
+            MarkdownBlock::IndentedCode { code: body, .. } => self.code_block("", body, None),
+            MarkdownBlock::Hr { .. } => self.hr(),
+            MarkdownBlock::Table { header, aligns, rows, .. } => self.table(source, header, aligns, rows),
+            MarkdownBlock::MathBlock { tex, .. } => self.source_block(format!("$$\n{tex}\n$$")),
+            MarkdownBlock::HtmlBlock { html, .. } => self.source_block(html.clone()),
+            MarkdownBlock::FootnoteDef { label, inline, .. } => {
+                runs = self.footnote_runs(source, from, label, inline);
+                row_wraps.push(RowWrap::Bar {
+                    color: self.pal.border,
+                    width: FOOTNOTE_BAR_W,
+                    pad: 8.0,
+                    bg: None,
+                });
+                footnote_content(
+                    self.run_spans(runs.clone()),
+                    base_size() * 0.9,
+                    self.pal.muted,
+                )
+            }
+            MarkdownBlock::List { .. } | MarkdownBlock::Blockquote { .. } => {
+                unreachable!("列表与引用按行拆开，不产生整块行")
+            }
+        };
+        EditRow {
+            kind: RowKind::Block,
+            from,
+            to,
+            reveal: (from, to),
+            runs,
+            indent: wrap_indent(&row_wraps),
+            source: block_source_style(block),
+            gap_lines: Vec::new(),
+            code,
+            element: wrap_row(&row_wraps, inner),
+            wraps: row_wraps,
+        }
+    }
+
+    /// 列表行：每项一行（标记列 + 内容），项间空行、项内容与首个子块之间的空行、
+    /// 子块之间空行各自成空行行，嵌套子块按一个标记列的缩进递加。
+    fn push_list_rows<'a>(
+        &self,
+        source: &'a str,
+        ordered: bool,
+        items: &'a [MarkdownListItem],
+        wraps: Vec<RowWrap>,
+        rows: &mut Vec<EditRow<'a>>,
+    ) {
+        for (pos, item) in items.iter().enumerate() {
+            if pos > 0 {
+                self.push_blank_rows(source, items[pos - 1].to, item.from, &wraps, rows);
+            }
+            let (_, ordinal) = item_marker(&source[item.from..item.to]);
+            let (runs, content) = self.item_content_row(source, item);
+            let (_, content_to) = item_content_range(source, item);
+            let marker = self.item_marker_cell(item, ordered, &ordinal);
+            rows.push(EditRow {
+                kind: RowKind::Unit,
+                from: item.from,
+                to: content_to,
+                reveal: (item.from, content_to),
+                runs,
+                indent: wrap_indent(&wraps) + LIST_MARKER_W,
+                source: SourceKind::Prose { size: base_size(), line_height: LINE_HEIGHT },
+                gap_lines: Vec::new(),
+                code: None,
+                element: wrap_row(&wraps, row![marker, content].width(Length::Fill).into()),
+                wraps: wraps.clone(),
+            });
+            if item.children.is_empty() {
+                continue;
+            }
+            let mut child_wraps = wraps.clone();
+            child_wraps.push(RowWrap::Pad(LIST_MARKER_W));
+            for (pos, child) in item.children.iter().enumerate() {
+                let lead = if pos == 0 {
+                    content_to
+                } else {
+                    block_to(&item.children[pos - 1])
+                };
+                self.push_blank_rows(source, lead, block_from(child), &child_wraps, rows);
+                self.push_block_rows(source, child, child_wraps.clone(), rows);
+            }
+        }
+    }
+
+    /// 引用 / callout 行：内部子块各自成行，行间空行成空行行；每行带竖线（callout 另有底色）。
+    /// 类型徽标成一条装饰行（命中吸到内容首行；随该行揭示让位）。
+    fn push_quote_rows<'a>(
+        &self,
+        source: &'a str,
+        from: usize,
+        callout: Option<&str>,
+        children: &'a [MarkdownBlock],
+        wraps: Vec<RowWrap>,
+        rows: &mut Vec<EditRow<'a>>,
+    ) {
+        let color = callout.map(|name| self.callout_color(name)).unwrap_or(self.pal.border);
+        let bg = callout.map(|_| self.pal.text.scale_alpha(0.04));
+        let mut inner_wraps = wraps;
+        inner_wraps.push(RowWrap::Bar { color, width: QUOTE_BAR_W, pad: QUOTE_PAD, bg });
+        if let Some(name) = callout {
+            let badge = callout_badge(name, color);
+            rows.push(EditRow {
+                kind: RowKind::Deco,
+                from,
+                to: from,
+                reveal: (from, from),
+                runs: Vec::new(),
+                indent: wrap_indent(&inner_wraps),
+                source: SourceKind::Prose { size: base_size(), line_height: LINE_HEIGHT },
+                gap_lines: Vec::new(),
+                code: None,
+                element: wrap_row(
+                    &inner_wraps,
+                    container(badge).padding(Padding { bottom: 4.0, ..Padding::default() }).into(),
+                ),
+                wraps: inner_wraps.clone(),
+            });
+        }
+        for (pos, child) in children.iter().enumerate() {
+            let lead = if pos == 0 { from } else { block_to(&children[pos - 1]) };
+            self.push_blank_rows(source, lead, block_from(child), &inner_wraps, rows);
+            let start = rows.len();
+            self.push_block_rows(source, child, inner_wraps.clone(), rows);
+            // 引用内的子块按行揭示：整块行降为行级（列表项行本就是行级）
+            for row in &mut rows[start..] {
+                if row.kind == RowKind::Block {
+                    row.kind = RowKind::Unit;
+                }
+            }
+        }
+    }
+
+    /// 列表项内容件：可见片段 + 富渲染件（图片项走图片块、空项占一行高）。
+    /// 项区间跨引用块时渲染按剥前缀后的文本（既有口径），源映射回落行级。
+    fn item_content_row<'a>(
+        &self,
+        source: &'a str,
+        item: &'a MarkdownListItem,
+    ) -> (Vec<LineRun>, Element<'a, Message>) {
+        let (content_from, content_to) = item_content_range(source, item);
+        let raw = &source[content_from..content_to];
+        let stripped = strip_quote_marks(raw);
+        if stripped == raw {
+            let inline = parse_inline(source, content_from, content_to, &self.opts);
+            if let Some(InlineSpan::Image { src, alt, width, height, .. }) = image_only(&inline) {
+                return (Vec::new(), self.image_block(src, alt, width.as_deref(), height.as_deref()));
+            }
+            let runs = self.runs(source, &inline, TextStyle::base());
+            if runs.is_empty() {
+                return (Vec::new(), self.empty_item_filler());
+            }
+            let spans = self.run_spans(runs.clone());
+            return (
+                runs,
+                rich(spans, base_size(), LINE_HEIGHT, None, iced::alignment::Horizontal::Left),
+            );
+        }
+        let inline = parse_inline(&stripped, 0, stripped.len(), &self.opts);
+        if let Some(InlineSpan::Image { src, alt, width, height, .. }) = image_only(&inline) {
+            return (Vec::new(), self.image_block(src, alt, width.as_deref(), height.as_deref()));
+        }
+        if inline.is_empty() {
+            return (Vec::new(), self.empty_item_filler());
+        }
+        let spans = self.run_spans(self.runs(&stripped, &inline, TextStyle::base()));
+        (
+            Vec::new(),
+            rich(spans, base_size(), LINE_HEIGHT, None, iced::alignment::Horizontal::Left),
+        )
+    }
+
+    /// 空项的内容位：零高占位（行高由标记列决定）。
+    fn empty_item_filler<'a>(&self) -> Element<'a, Message> {
+        Space::new().width(Length::Fill).into()
+    }
+
+    /// 列表项标记位：任务框取代圆点/序号；有序项沿用源序号文本。
+    fn item_marker_cell<'a>(
+        &self,
+        item: &MarkdownListItem,
+        ordered: bool,
+        ordinal: &str,
+    ) -> Element<'a, Message> {
+        if item.task {
+            let from = item.from;
+            let box_widget = checkbox(item.checked);
+            let box_widget = if self.interactive {
+                box_widget.on_toggle(move |_| Message::ToggleTask(from))
+            } else {
+                box_widget
+            };
+            container(box_widget)
+                .width(Length::Fixed(LIST_MARKER_W))
+                .padding(Padding { top: 2.0, ..Padding::default() })
+                .into()
+        } else {
+            let label = if ordered { ordinal.to_string() } else { "•".to_string() };
+            container(text(label).size(base_size()).color(self.pal.muted))
+                .width(Length::Fixed(LIST_MARKER_W))
+                .into()
+        }
+    }
+
+    /// 脚注定义的可见片段：定义标记（原子，落定义起点）+ 正文片段。
+    fn footnote_runs(&self, source: &str, from: usize, label: &str, inline: &[InlineSpan]) -> Vec<LineRun> {
+        let mut runs = vec![LineRun {
+            text: format!("[{label}] "),
+            src: (from, from),
+            st: TextStyle { color: Some(self.pal.accent), ..TextStyle::base() },
+            scale: 1.0,
+            link: None,
+        }];
+        runs.extend(self.runs(source, inline, TextStyle { color: Some(self.pal.muted), ..TextStyle::base() }));
+        runs
+    }
+
     /// 引用 / callout：左侧竖线 + 缩进；callout 另加类型徽标与底色。
     /// 竖线走 Stack 覆盖层：滚动容器内 `Fill` 高度会被压缩，而 Stack 的非基础层
     /// 用收紧限高重新布局，`Fill` 高度即内容高度。
     fn blockquote<'a>(
         &self,
         source: &'a str,
+        from: usize,
         callout: Option<&str>,
         children: &'a [MarkdownBlock],
     ) -> Element<'a, Message> {
         let line = callout.map(|name| self.callout_color(name)).unwrap_or(self.pal.border);
-        let content = self.blocks_column(source, children);
-        let content = match callout {
-            Some(name) => {
-                let badge = container(
-                    text(name.to_uppercase())
-                        .size(11)
-                        .font(Font { weight: iced::font::Weight::Semibold, ..Font::DEFAULT })
-                        .color(line),
-                )
-                .padding([1.0, 6.0])
-                .style(move |_theme: &iced::Theme| container::Style {
-                    background: Some(line.scale_alpha(0.16).into()),
-                    border: Border { radius: 8.0.into(), ..Border::default() },
-                    ..Default::default()
-                });
-                column![badge, content].width(Length::Fill).spacing(4.0).into()
-            }
+        let content = self.blocks_column(source, Some(from), children);
+        let content: Element<'a, Message> = match callout {
+            Some(name) => column![callout_badge(name, line), content]
+                .width(Length::Fill)
+                .spacing(4.0)
+                .into(),
             None => content,
         };
-
-        let bar = container(Space::new())
-            .width(Length::Fixed(3.0))
-            .height(Length::Fill)
-            .style(move |_theme: &iced::Theme| container::Style {
-                background: Some(line.into()),
-                ..Default::default()
-            });
         let bg = callout.map(|_| self.pal.text.scale_alpha(0.04));
-        let inner = container(content)
-            .width(Length::Fill)
-            .padding(Padding { left: 10.0, ..Padding::default() })
-            .style(move |_theme: &iced::Theme| container::Style {
-                background: bg.map(Into::into),
-                ..Default::default()
-            });
-        Stack::new().push(inner).push(bar).width(Length::Fill).into()
+        wrap_row(
+            &[RowWrap::Bar { color: line, width: QUOTE_BAR_W, pad: QUOTE_PAD, bg }],
+            content,
+        )
     }
 
     fn list<'a>(
@@ -423,48 +901,25 @@ impl Render<'_> {
         ordered: bool,
         item: &'a MarkdownListItem,
     ) -> Element<'a, Message> {
-        let raw = &source[item.from..item.to];
-        let (_, ordinal) = item_marker(raw);
-        // 首段内容止于第一个嵌套子块起点（项内后续段落等归 children）
-        let content = item_content(source, item);
-        let spans = parse_inline(&content, 0, content.len(), &self.opts);
-        let mut body = column![].width(Length::Fill).spacing(0);
-        if let Some(InlineSpan::Image { src, alt, width, height, .. }) = image_only(&spans) {
-            body = body.push(self.image_block(src, alt, width.as_deref(), height.as_deref()));
-        } else if !spans.is_empty() {
-            body = body.push(rich(
-                self.spans(&content, &spans, TextStyle::base()),
-                base_size(),
-                LINE_HEIGHT,
-                None,
-                iced::alignment::Horizontal::Left,
-            ));
-        }
-        body = body.push(self.blocks_column(source, &item.children));
-
-        // 任务框取代圆点/序号；有序项沿用源序号文本
-        let marker: Element<'_, Message> = if item.task {
-            let box_widget = checkbox(item.checked);
-            let box_widget = if self.interactive {
-                box_widget.on_toggle(move |_| Message::ToggleTask(item.from))
-            } else {
-                box_widget
-            };
-            container(box_widget)
-                .width(Length::Fixed(LIST_MARKER_W))
-                .padding(Padding { top: 2.0, ..Padding::default() })
-                .into()
-        } else {
-            let label = if ordered { ordinal } else { "•".to_string() };
-            container(text(label).size(base_size()).color(self.pal.muted))
-                .width(Length::Fixed(LIST_MARKER_W))
-                .into()
-        };
+        let (_, ordinal) = item_marker(&source[item.from..item.to]);
+        let (_, content) = self.item_content_row(source, item);
+        let marker = self.item_marker_cell(item, ordered, &ordinal);
+        let (_, content_to) = item_content_range(source, item);
+        let body = column![content]
+            .width(Length::Fill)
+            .spacing(0)
+            .push(self.blocks_column(source, Some(content_to), &item.children));
         row![marker, body].width(Length::Fill).into()
     }
 
     /// 围栏 / 缩进代码块：语言标签 + 复制按钮 + 等宽正文（不换行，超宽横向滚动）。
-    fn code_block<'a>(&self, lang: &str, code: &str) -> Element<'a, Message> {
+    /// `hit` = 编辑档的正文源区间与等宽字号（正文内落点换算基准）。
+    fn code_block<'a>(
+        &self,
+        lang: &str,
+        code: &str,
+        hit: Option<((usize, usize), f32)>,
+    ) -> Element<'a, Message> {
         let panel = self.pal.panel;
         let border = self.pal.border;
         let label = if lang.trim().is_empty() { "代码".to_string() } else { lang.to_string() };
@@ -491,8 +946,7 @@ impl Render<'_> {
         let lines = code.trim_end_matches('\n').lines().count().max(1);
         let height = lines.min(CODE_MAX_LINES) as f32 * mono_size() * 1.4 + 16.0;
         let body = scrollable(
-            container(text(code.to_string()).size(mono_size()).font(Font::MONOSPACE).wrapping(Wrapping::None))
-                .padding(8.0),
+            container(Self::code_body(code, hit)).padding(8.0),
         )
         .direction(scrollable::Direction::Both {
             vertical: scrollable::Scrollbar::new().width(6.0),
@@ -511,7 +965,20 @@ impl Render<'_> {
             .into()
     }
 
-    /// 表格：交给 iced 的 table 部件——分隔线由表格按列/行边界绘制（单元格不各自描边），
+    /// 等宽代码正文件：编辑档另包一层局部坐标上报（正文内落点换算需要正文自己的原点）。
+fn code_body<'a>(code: &str, hit: Option<((usize, usize), f32)>) -> Element<'a, Message> {
+    let text: Element<'a, Message> = text(code.to_string())
+        .size(mono_size())
+        .font(Font::MONOSPACE)
+        .wrapping(Wrapping::None)
+        .into();
+    match hit {
+        Some((content, size)) => crate::markdown_edit::CodeBody::new(text, content, size).into(),
+        None => text,
+    }
+}
+
+/// 表格：交给 iced 的 table 部件——分隔线由表格按列/行边界绘制（单元格不各自描边），
     /// 同一行的单元格高度不齐也不会把边框画到行中间。
     fn table<'a>(
         &self,
@@ -634,24 +1101,15 @@ impl Render<'_> {
             self.leaf(" ".to_string(), st),
         ];
         spans.extend(self.spans(source, inline, st));
-        let line = self.pal.border;
-        let bar = container(Space::new())
-            .width(Length::Fixed(2.0))
-            .height(Length::Fill)
-            .style(move |_theme: &iced::Theme| container::Style {
-                background: Some(line.into()),
-                ..Default::default()
-            });
-        let content = container(rich(
-            spans,
-            base_size() * 0.9,
-            LINE_HEIGHT,
-            Some(self.pal.muted),
-            iced::alignment::Horizontal::Left,
-        ))
-        .width(Length::Fill)
-        .padding(Padding { left: 8.0, ..Padding::default() });
-        Stack::new().push(content).push(bar).width(Length::Fill).into()
+        wrap_row(
+            &[RowWrap::Bar {
+                color: self.pal.border,
+                width: FOOTNOTE_BAR_W,
+                pad: 8.0,
+                bg: None,
+            }],
+            footnote_content(spans, base_size() * 0.9, self.pal.muted),
+        )
     }
 
     fn callout_color(&self, name: &str) -> Color {
@@ -660,122 +1118,221 @@ impl Render<'_> {
 
     // ===== 行内 =====
 
-    fn spans<'a>(&self, source: &str, list: &[InlineSpan], st: TextStyle) -> Vec<Span<'a, LinkTarget, Font>> {
+    /// 行内可见片段表（渲染与编辑面源映射的唯一走查）。
+    fn runs(&self, source: &str, list: &[InlineSpan], st: TextStyle) -> Vec<LineRun> {
         let mut out = Vec::new();
         for span in list {
-            self.push_span(source, span, st, &mut out);
+            self.push_run(source, span, st, &mut out);
         }
         out
     }
 
-    fn push_span<'a>(
-        &self,
-        source: &str,
-        span: &InlineSpan,
-        st: TextStyle,
-        out: &mut Vec<Span<'a, LinkTarget, Font>>,
-    ) {
+    /// 可见文本与其源区间的对齐：文本在源区间内原样出现时取其精确位置
+    /// （代码 / 链接标签等被定界符包裹的形态），否则整段取边界。
+    fn aligned_src(source: &str, from: usize, to: usize, text: &str) -> (usize, usize) {
+        if text.len() == to.saturating_sub(from) {
+            return (from, to);
+        }
+        match source.get(from..to).and_then(|s| s.find(text)) {
+            Some(k) => (from + k, from + k + text.len()),
+            None => (from, to),
+        }
+    }
+
+    fn push_run(&self, source: &str, span: &InlineSpan, st: TextStyle, out: &mut Vec<LineRun>) {
         match span {
-            InlineSpan::Text { text, .. } => {
+            InlineSpan::Text { from, to, text } => {
                 // 宽松换行折叠：CRLF 先归一为 LF，孤 \r 同样按换行折叠为空格
                 let text = if self.soft_break {
                     text.clone()
                 } else {
                     text.replace("\r\n", "\n").replace(['\r', '\n'], " ")
                 };
-                out.push(self.leaf(text, st));
+                out.push(LineRun { text, src: (*from, *to), st, scale: 1.0, link: None });
             }
             InlineSpan::Strong { children, .. } => {
                 let inner = TextStyle { font: Font { weight: iced::font::Weight::Bold, ..st.font }, ..st };
                 for c in children {
-                    self.push_span(source, c, inner, out);
+                    self.push_run(source, c, inner, out);
                 }
             }
             InlineSpan::Em { children, .. } => {
                 let inner = TextStyle { font: Font { style: iced::font::Style::Italic, ..st.font }, ..st };
                 for c in children {
-                    self.push_span(source, c, inner, out);
+                    self.push_run(source, c, inner, out);
                 }
             }
             InlineSpan::Strike { children, .. } => {
                 let inner = TextStyle { strike: true, ..st };
                 for c in children {
-                    self.push_span(source, c, inner, out);
+                    self.push_run(source, c, inner, out);
                 }
             }
             InlineSpan::Highlight { children, .. } => {
                 let inner = TextStyle { bg: Some(self.pal.mark_bg), ..st };
                 for c in children {
-                    self.push_span(source, c, inner, out);
+                    self.push_run(source, c, inner, out);
                 }
             }
-            InlineSpan::Code { text, .. } => {
+            InlineSpan::Code { from, to, text } => {
                 let inner = TextStyle { font: Font::MONOSPACE, bg: Some(self.pal.panel), ..st };
-                out.push(self.leaf(text.clone(), inner));
+                let src = Self::aligned_src(source, *from, *to, text);
+                out.push(LineRun { text: text.clone(), src, st: inner, scale: 1.0, link: None });
             }
             // 公式降级为源码文本
             InlineSpan::MathInline { from, to, .. } => {
                 let inner = TextStyle { color: Some(self.pal.muted), ..st };
-                out.push(self.leaf(source[*from..*to].to_string(), TextStyle { font: Font { style: iced::font::Style::Italic, ..inner.font }, ..inner }));
+                out.push(LineRun {
+                    text: source[*from..*to].to_string(),
+                    src: (*from, *to),
+                    st: TextStyle { font: Font { style: iced::font::Style::Italic, ..inner.font }, ..inner },
+                    scale: 1.0,
+                    link: None,
+                });
             }
             InlineSpan::Comment { .. } => {}
-            InlineSpan::Link { from, to, label, form, href, .. } => match form {
-                LinkForm::Plain => out.push(self.leaf(source[*from..*to].to_string(), st)),
-                LinkForm::External | LinkForm::Path | LinkForm::Wiki => {
-                    let inner = TextStyle { color: Some(self.pal.accent), underline: true, ..st };
-                    let leaf = self.leaf(label.clone(), inner);
-                    out.push(self.linked(leaf, href.clone(), *form));
+            InlineSpan::Link { from, to, href, label, form, .. } => {
+                let src = Self::aligned_src(source, *from, *to, label);
+                match form {
+                    LinkForm::Plain => out.push(LineRun {
+                        text: source[*from..*to].to_string(),
+                        src: (*from, *to),
+                        st,
+                        scale: 1.0,
+                        link: None,
+                    }),
+                    LinkForm::External | LinkForm::Path | LinkForm::Wiki => {
+                        let inner = TextStyle { color: Some(self.pal.accent), underline: true, ..st };
+                        out.push(LineRun {
+                            text: label.clone(),
+                            src,
+                            st: inner,
+                            scale: 1.0,
+                            link: Some(LinkTarget { href: href.clone(), form: *form }),
+                        });
+                    }
+                    LinkForm::Create => {
+                        let inner = TextStyle { color: Some(self.pal.muted), underline: true, ..st };
+                        out.push(LineRun { text: label.clone(), src, st: inner, scale: 1.0, link: None });
+                    }
                 }
-                LinkForm::Create => {
-                    let inner = TextStyle { color: Some(self.pal.muted), underline: true, ..st };
-                    out.push(self.leaf(label.clone(), inner));
-                }
-            },
-            InlineSpan::Autolink { href, label, .. } => {
-                let inner = TextStyle { color: Some(self.pal.accent), underline: true, ..st };
-                let leaf = self.leaf(label.clone(), inner);
-                out.push(self.linked(leaf, href.clone(), LinkForm::External));
             }
-            InlineSpan::Wiki { target, label, .. } => {
+            InlineSpan::Autolink { from, to, href, label } => {
                 let inner = TextStyle { color: Some(self.pal.accent), underline: true, ..st };
-                let leaf = self.leaf(label.clone(), inner);
-                out.push(self.linked(leaf, target.clone(), LinkForm::Wiki));
+                out.push(LineRun {
+                    text: label.clone(),
+                    src: Self::aligned_src(source, *from, *to, label),
+                    st: inner,
+                    scale: 1.0,
+                    link: Some(LinkTarget { href: href.clone(), form: LinkForm::External }),
+                });
+            }
+            InlineSpan::Wiki { from, to, target, label } => {
+                let inner = TextStyle { color: Some(self.pal.accent), underline: true, ..st };
+                out.push(LineRun {
+                    text: label.clone(),
+                    src: Self::aligned_src(source, *from, *to, label),
+                    st: inner,
+                    scale: 1.0,
+                    link: Some(LinkTarget { href: target.clone(), form: LinkForm::Wiki }),
+                });
             }
             // 图片以替代文字占位（不加载图片字节）
-            InlineSpan::Image { src, alt, .. } => {
-                let name = if alt.is_empty() { src } else { alt };
+            InlineSpan::Image { from, to, src: path, alt, .. } => {
+                let name = if alt.is_empty() { path } else { alt };
                 let inner = TextStyle { color: Some(self.pal.muted), ..st };
-                out.push(self.leaf(format!("[图片：{name}]"), TextStyle { font: Font { style: iced::font::Style::Italic, ..inner.font }, ..inner }));
+                out.push(LineRun {
+                    text: format!("[图片：{name}]"),
+                    src: (*from, *to),
+                    st: TextStyle { font: Font { style: iced::font::Style::Italic, ..inner.font }, ..inner },
+                    scale: 1.0,
+                    link: None,
+                });
             }
-            InlineSpan::Tag { tag, .. } => {
+            InlineSpan::Tag { from, to, tag } => {
                 let inner = TextStyle {
                     color: Some(self.pal.accent),
                     bg: Some(self.pal.accent.scale_alpha(0.14)),
                     chip: true,
                     ..st
                 };
-                out.push(self.leaf(format!("#{tag}"), inner));
+                let text = format!("#{tag}");
+                out.push(LineRun {
+                    src: Self::aligned_src(source, *from, *to, &text),
+                    text,
+                    st: inner,
+                    scale: 1.0,
+                    link: None,
+                });
             }
-            InlineSpan::FootnoteRef { label, .. } => {
+            InlineSpan::FootnoteRef { from, to, label } => {
                 let inner = TextStyle { color: Some(self.pal.accent), ..st };
-                out.push(self.leaf(format!("[{label}]"), inner).size(base_size() * 0.85));
+                let text = format!("[{label}]");
+                out.push(LineRun {
+                    src: Self::aligned_src(source, *from, *to, &text),
+                    text,
+                    st: inner,
+                    scale: 0.85,
+                    link: None,
+                });
             }
-            InlineSpan::Mention { key: _, label, trigger, .. } => {
+            InlineSpan::Mention { from, to, label, trigger, .. } => {
                 let inner = TextStyle {
                     color: Some(self.pal.accent),
                     bg: Some(self.pal.accent.scale_alpha(0.18)),
                     chip: true,
                     ..st
                 };
-                out.push(self.leaf(format!("{trigger}{label}"), inner));
+                let text = format!("{trigger}{label}");
+                out.push(LineRun {
+                    src: Self::aligned_src(source, *from, *to, &text),
+                    text,
+                    st: inner,
+                    scale: 1.0,
+                    link: None,
+                });
             }
             // raw HTML 降级为源码文本
             InlineSpan::Html { from, to, .. } => {
                 let inner = TextStyle { color: Some(self.pal.muted), ..st };
-                out.push(self.leaf(source[*from..*to].to_string(), inner));
+                out.push(LineRun {
+                    text: source[*from..*to].to_string(),
+                    src: (*from, *to),
+                    st: inner,
+                    scale: 1.0,
+                    link: None,
+                });
             }
-            InlineSpan::HardBreak { .. } => out.push(self.leaf("\n".to_string(), st)),
+            InlineSpan::HardBreak { from, to } => {
+                out.push(LineRun {
+                    text: "\n".to_string(),
+                    src: Self::aligned_src(source, *from, *to, "\n"),
+                    st,
+                    scale: 1.0,
+                    link: None,
+                });
+            }
         }
+    }
+
+    /// 片段表 → 渲染 span（与 {@link Render::runs} 同一份走查的渲染侧）。
+    fn run_spans<'a>(&self, runs: Vec<LineRun>) -> Vec<Span<'a, LinkTarget, Font>> {
+        runs.into_iter()
+            .map(|run| {
+                let mut leaf = self.leaf(run.text, run.st);
+                if run.scale != 1.0 {
+                    leaf = leaf.size(base_size() * run.scale);
+                }
+                match run.link {
+                    Some(target) => self.linked(leaf, target.href, target.form),
+                    None => leaf,
+                }
+            })
+            .collect()
+    }
+
+    fn spans<'a>(&self, source: &str, list: &[InlineSpan], st: TextStyle) -> Vec<Span<'a, LinkTarget, Font>> {
+        self.run_spans(self.runs(source, list, st))
     }
 
     /// 交互档给链接片段挂触点（只读档不挂，链接仅作样式）。
@@ -868,16 +1425,22 @@ fn parse_px(value: Option<&str>) -> Option<f32> {
         .filter(|n| n.is_finite() && *n > 0.0)
 }
 
-/// 列表项首段内容文本：剥标记与引用前缀（项区间跨引用块时续行带 `>`），
-/// 止于第一个嵌套子块起点（项内后续段落归 children）。渲染与图片收集共用。
-fn item_content(source: &str, item: &MarkdownListItem) -> String {
+/// 列表项首段内容的源区间：剥标记（止于第一个嵌套子块起点，去掉尾部空白）。
+fn item_content_range(source: &str, item: &MarkdownListItem) -> (usize, usize) {
     let raw = &source[item.from..item.to];
     let (marker_len, _) = item_marker(raw);
     let content_from = item.from + marker_len;
     let content_end = item.children.first().map(block_from).unwrap_or(item.to);
     let by = content_end.max(content_from);
     let content_to = content_from + source[content_from..by].trim_end().len();
-    strip_quote_marks(&source[content_from..content_to])
+    (content_from, content_to)
+}
+
+/// 列表项首段内容文本：剥标记与引用前缀（项区间跨引用块时续行带 `>`），
+/// 止于第一个嵌套子块起点（项内后续段落归 children）。渲染与图片收集共用。
+fn item_content(source: &str, item: &MarkdownListItem) -> String {
+    let (from, to) = item_content_range(source, item);
+    strip_quote_marks(&source[from..to])
 }
 
 /// 收集文档中按块渲染的图片 src（图片段落与列表项图片内容；行内图片不收集不载入）。
@@ -1124,24 +1687,38 @@ mod tests {
     }
 
     #[test]
-    fn block_meta_exact_only_for_plain_paragraphs() {
-        // 富渲染与源码渲染几何一致才可精确换算落点：仅纯文本段落成立
-        for (src, exact) in [
-            ("普通段落", true),
-            ("first line\nsecond line", true),
-            ("## 标题", false),
-            ("- 甲", false),
-            ("> 引用", false),
-            ("*斜*体", false),
-            ("**粗**体", false),
-            ("[链接](a.md)", false),
-            ("`code`", false),
-        ] {
-            let doc = parse_markdown(src, &link_options());
-            let meta = block_meta(&doc.source, &doc.blocks);
-            assert_eq!(meta.first().map(|m| m.exact), Some(exact), "src = {src}");
-        }
+    fn edit_rows_make_in_block_blank_lines_rows() {
+        // 松散列表：项行 / 项间空行行 / 项行 / 文末虚拟空行行
+        let source = "- 甲\n\n- 乙\n";
+        let doc = parse_document(source);
+        let images = ImageHandles::default();
+        let rows = edit_rows(source, &doc.blocks, &iced::Theme::Dark, &images);
+        let kinds: Vec<RowKind> = rows.iter().map(|r| r.kind).collect();
+        assert_eq!(kinds, vec![RowKind::Unit, RowKind::Gap, RowKind::Unit, RowKind::Gap]);
+        // 项间空行的行首（"- 甲\n" 之后的那根空行）
+        assert_eq!(rows[1].gap_lines, vec![6]);
+        // 项行只揭示自己那一行（标记入内、块间空行不入内）
+        assert_eq!(rows[0].reveal, (0, 5));
+        assert_eq!(rows[2].reveal, (7, 12));
+        // 可见片段与源偏移一一对应（内容不含标记列）
+        assert_eq!(rows[0].runs.len(), 1);
+        assert_eq!(rows[0].runs[0].src, (2, 5));
+        assert_eq!(rows[0].indent, LIST_MARKER_W);
     }
+
+    #[test]
+    fn edit_rows_keep_quote_children_and_gaps_apart() {
+        // 引用内两段之间有空行：段行 / 空行行 / 段行，行装饰带竖线
+        let source = "> 甲\n>\n> 乙\n";
+        let doc = parse_document(source);
+        let images = ImageHandles::default();
+        let rows = edit_rows(source, &doc.blocks, &iced::Theme::Dark, &images);
+        let kinds: Vec<RowKind> = rows.iter().map(|r| r.kind).collect();
+        assert_eq!(kinds, vec![RowKind::Unit, RowKind::Gap, RowKind::Unit, RowKind::Gap]);
+        assert_eq!(rows[1].gap_lines, vec![6]);
+        assert!(matches!(rows[0].wraps.as_slice(), [RowWrap::Bar { pad, .. }] if *pad == QUOTE_PAD));
+    }
+
 
     fn paragraph_image(src: &str) -> Option<InlineSpan> {
         let doc = parse_markdown(src, &link_options());

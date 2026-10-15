@@ -5371,7 +5371,7 @@ impl App {
         }
         let body = strip_frontmatter(&self.note_text);
         let doc = markdown_view::parse_document(body);
-        self.edit_meta = markdown_view::block_meta(body, &doc.blocks);
+        self.edit_meta = markdown_view::block_meta(&doc.blocks);
         // 空文档（无块）也要有光标宿主：补一个空块
         if self.edit_meta.is_empty() {
             self.edit_meta.push(markdown_view::empty_block_meta());
@@ -5622,28 +5622,30 @@ impl App {
         }
         self.edit_meta.iter().rposition(|m| m.from <= offset).or(Some(0))
     }
-    /// 命中目标 → 正文偏移（编辑面坐标相对正文）。
+    /// 命中目标 → 正文偏移（编辑面坐标相对正文）。行内换算多由编辑面就地完成，
+    /// 这里只处理源码排版换算、行边界吸附与文首 / 文末。
     fn resolve_hit(&self, target: HitTarget) -> usize {
+        let len = self.edit_body().len();
         match target {
-            HitTarget::BlockText { index, point, width } => match self.edit_meta.get(index) {
-                Some(meta) => markdown_edit::offset_in_block(
-                    self.edit_body(),
-                    meta.from,
-                    meta.to,
-                    &meta.source,
-                    width,
-                    point,
-                    &self.edit_opts,
-                ),
-                None => 0,
-            },
-            HitTarget::BlockEdge { index, upper } => match self.edit_meta.get(index) {
-                Some(meta) => if upper { meta.from } else { meta.to },
-                None => 0,
-            },
-            HitTarget::GapLine { offset } => offset.min(self.edit_body().len()),
+            HitTarget::Offset(offset) => offset.min(len),
+            HitTarget::RowEdge { from, to, upper } => if upper { from } else { to }.min(len),
+            HitTarget::SourceText { from, to, source, point, width } => markdown_edit::offset_in_block(
+                self.edit_body(),
+                from,
+                to,
+                &source,
+                width,
+                point,
+                &self.edit_opts,
+            ),
+            HitTarget::CodeBody { content, size, point, width } => {
+                let code = &self.edit_body()[content.0.min(len)..content.1.min(len)];
+                let code = code.trim_end_matches('\n');
+                content.0 + markdown_edit::code_offset(code, size, width, point)
+            }
+            HitTarget::GapLine { offset } => offset.min(len),
             HitTarget::Start => self.edit_meta.first().map_or(0, |m| m.from),
-            HitTarget::End => self.edit_body().len(),
+            HitTarget::End => len,
         }
     }
 
@@ -5844,11 +5846,11 @@ impl App {
             Motion::Home => line_start_of(body, caret),
             Motion::End => line_end_of(body, caret),
             Motion::Up => {
-                self.cross_block_move(false, extend);
+                self.edit_move_line(false, extend);
                 return;
             }
             Motion::Down => {
-                self.cross_block_move(true, extend);
+                self.edit_move_line(true, extend);
                 return;
             }
         };
@@ -5859,17 +5861,22 @@ impl App {
         self.sync_active();
     }
 
-    /// 上下越界时的跨块移动：块内跨到相邻块首 / 末或毗邻的文首 / 文末空白区；
-    /// 空白区光标按行首逐行移动，越过端点落相邻块（见 `markdown_edit::vertical_target`）。
-    fn cross_block_move(&mut self, forward: bool, extend: bool) {
-        let len = self.edit_body().len();
+    /// 上下移动逐行走：上一行 / 下一行行首（空行与文末虚拟行同样是行；越界不动）。
+    /// 行内同列的上下移动由行自己的源码面承接，走到行的边界才落到相邻行。
+    fn edit_move_line(&mut self, forward: bool, extend: bool) {
+        let body = self.edit_body();
+        let len = body.len();
         let caret = self.edit.caret.min(len);
-        let spans: Vec<(usize, usize)> =
-            self.edit_meta.iter().map(|m| (m.from, m.to)).collect();
-        let blank_starts = self.blank_starts_near(caret, &spans, forward);
-        let Some(target) = markdown_edit::vertical_target(caret, &spans, &blank_starts, forward)
-        else {
+        let line_start = line_start_of(body, caret);
+        let target = if forward {
+            match body[line_start..].find('\n') {
+                Some(i) => line_start + i + 1,
+                None => return,
+            }
+        } else if line_start == 0 {
             return;
+        } else {
+            line_start_of(body, line_start - 1)
         };
         let target = target.min(len);
         if !extend {
@@ -5877,47 +5884,6 @@ impl App {
         }
         self.edit.caret = target;
         self.sync_active();
-    }
-
-    /// 光标所在或行进方向毗邻的空白行行首：光标在空白区取该区；在首块向上 /
-    /// 末块向下时取毗邻的文首 / 文末空白区；其余为空。
-    fn blank_starts_near(
-        &self,
-        caret: usize,
-        spans: &[(usize, usize)],
-        forward: bool,
-    ) -> Vec<usize> {
-        let body = self.edit_body();
-        if let Some(i) = spans.iter().position(|&(f, t)| caret >= f && caret <= t) {
-            let region = if !forward && i == 0 {
-                spans.first().map(|&(f, _)| (0, f))
-            } else if forward && i + 1 == spans.len() {
-                spans.last().map(|&(_, t)| (t, body.len()))
-            } else {
-                None
-            };
-            return region.map_or(Vec::new(), |(f, t)| Self::region_blank_starts(body, f, t));
-        }
-        match spans.iter().rposition(|&(f, _)| f <= caret) {
-            None => Self::region_blank_starts(body, 0, spans.first().map_or(0, |&(f, _)| f)),
-            Some(i) => {
-                let from = spans[i].1;
-                let to = spans.get(i + 1).map_or(body.len(), |&(_, f)| f);
-                Self::region_blank_starts(body, from, to)
-            }
-        }
-    }
-
-    /// 空白区间的空白行行首：文首区第一行也是空白行（不含缩进片段）；
-    /// 文末区含虚拟文末行（文本以换行结尾时）。
-    fn region_blank_starts(body: &str, from: usize, to: usize) -> Vec<usize> {
-        if to == body.len() {
-            markdown_edit::tail_blank_starts(body, from)
-        } else if from == 0 {
-            markdown_edit::edge_blank_starts(body, 0, to)
-        } else {
-            markdown_edit::gap_line_starts(body, from, to)
-        }
     }
 
     fn edit_undo(&mut self) {

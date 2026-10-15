@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 
 use crate::commands::{self, NoteBindings};
 use crate::layout_view::parse_hex_color;
-use crate::markdown_view::SourceKind;
+use crate::markdown_view::{LineRun, SourceKind};
 use crate::ui::palette as pal;
 use crate::ui::semibold;
 use crate::Message;
@@ -340,13 +340,19 @@ pub enum EditorEvent {
     Preedit(Option<String>),
 }
 
-/// 编辑面命中目标。
+/// 编辑面命中目标。行内落点由编辑面就地换算（免去应用层持有行几何），
+/// 仅源码排版换算与代码正文行列换算需要应用层的解析选项与块元数据。
 #[derive(Debug, Clone, Copy)]
 pub enum HitTarget {
-    /// 命中已揭示块（源码态）：按其源码排版精确换算落点。
-    BlockText { index: usize, point: Point, width: f32 },
-    /// 命中未揭示块（富渲染）：内部几何不可得，按行的上下半区吸到块首 / 块尾。
-    BlockEdge { index: usize, upper: bool },
+    /// 已换算的源偏移（富渲染行按可见片段探针 / 空行行按行首表）。
+    Offset(usize),
+    /// 无逐字映射的富渲染行（表格 / 图片 / 分隔线等）：按行内上下半区吸到行首 / 行尾。
+    RowEdge { from: usize, to: usize, upper: bool },
+    /// 已揭示行：按其源码排版精确换算落点。
+    SourceText { from: usize, to: usize, source: SourceKind, point: Point, width: f32 },
+    /// 代码正文内的局部坐标（相对正文文本左上角）：正文在面板内层滚动容器里，
+    /// 原点不可由外部推得，故由正文自己上报。
+    CodeBody { content: (usize, usize), size: f32, point: Point, width: f32 },
     /// 命中空行行：已按行首表换算为源偏移（第 k 根空行的行首）。
     GapLine { offset: usize },
     /// 命中内容区上方 / 下方空白：落到文首 / 文末。
@@ -1187,6 +1193,11 @@ fn key_action(
         Key::Named(Named::Enter) => Some(KeyAction::Event(EditorEvent::Newline)),
         Key::Named(Named::Tab) if modifiers.shift() => Some(KeyAction::Event(EditorEvent::Outdent)),
         Key::Named(Named::Tab) => Some(KeyAction::Event(EditorEvent::Indent)),
+        // 空格键是命名键而非字符键（平台按命名键上报），按本键产生的文本插入；
+        // 文本缺失时回落半角空格
+        Key::Named(Named::Space) => Some(KeyAction::Event(EditorEvent::Insert(
+            text.filter(|t| !t.is_empty()).unwrap_or(" ").to_string(),
+        ))),
         Key::Character(_) => text
             .filter(|t| !t.is_empty())
             .map(|t| KeyAction::Event(EditorEvent::Insert(t.to_string()))),
@@ -1194,25 +1205,35 @@ fn key_action(
     }
 }
 
-/// 编辑面容器的一行：块行或空行行。
+/// 编辑面容器的一行：可揭示行或空行行。
 pub(crate) enum SurfaceRow<'a> {
-    Block {
-        index: usize,
-        /// 该行渲染为源码态（已揭示）：落点恒可按源码排版精确换算。
-        editable: bool,
-        /// 富渲染与源码渲染几何一致（未揭示时也可精确换算）。
-        exact: bool,
+    Row {
+        /// 行源区间（揭示时源码面的区间）。
+        from: usize,
+        to: usize,
+        /// 该行已揭示（以源码面替换内容）。
+        revealed: bool,
+        /// 可见片段（富渲染行的落点探针）；无逐字映射的富渲染行为空。
+        runs: Vec<LineRun>,
+        /// 可见片段相对行左缘的横向偏移。
+        indent: f32,
+        /// 探针排版口径（与富渲染同一字号行高）。
+        source: SourceKind,
+        /// 代码正文源区间（未揭示时正文内的行列换算基准）。
+        code: Option<(usize, usize)>,
         covered: bool,
         element: Element<'a, Message>,
     },
     Gap {
-        /// 空行在源文本中的区间（上一块末 → 下一块首）。
+        /// 空行在源文本中的区间（上一行末 → 下一行首）。
         from: usize,
         to: usize,
         /// 各空行的行首偏移（行数 = 长度；行高 = 行总高 / 行数）。
         line_starts: Vec<usize>,
         /// 被选区覆盖的空行序号半开区间（k0, k1）。
         covered: (usize, usize),
+        /// 行左内缩（自绘光标与预编辑串的横向起点）。
+        indent: f32,
         element: Element<'a, Message>,
     },
 }
@@ -1220,13 +1241,21 @@ pub(crate) enum SurfaceRow<'a> {
 impl<'a> SurfaceRow<'a> {
     fn element(&self) -> &Element<'a, Message> {
         match self {
-            SurfaceRow::Block { element, .. } | SurfaceRow::Gap { element, .. } => element,
+            SurfaceRow::Row { element, .. } | SurfaceRow::Gap { element, .. } => element,
         }
     }
 
     fn element_mut(&mut self) -> &mut Element<'a, Message> {
         match self {
-            SurfaceRow::Block { element, .. } | SurfaceRow::Gap { element, .. } => element,
+            SurfaceRow::Row { element, .. } | SurfaceRow::Gap { element, .. } => element,
+        }
+    }
+
+    /// 空行行的左内缩（其余行不参与自绘光标）。
+    fn gap_indent(&self) -> f32 {
+        match self {
+            SurfaceRow::Gap { indent, .. } => *indent,
+            SurfaceRow::Row { .. } => 0.0,
         }
     }
 }
@@ -1313,67 +1342,7 @@ pub(crate) fn gap_covered_lines(
     if k0 == usize::MAX { (0, 0) } else { (k0, k1) }
 }
 
-/// 上下移动的目标偏移：块内跨到相邻块首 / 末，末块向下 / 首块向上进入毗邻的
-/// 文末 / 文首空白区；空白区光标按 `blank_starts`（该区各空白行行首）逐行移动，
-/// 越过端点落到相邻块。无路可走返回 None。
-pub(crate) fn vertical_target(
-    caret: usize,
-    spans: &[(usize, usize)],
-    blank_starts: &[usize],
-    forward: bool,
-) -> Option<usize> {
-    if let Some(i) = spans.iter().position(|&(f, t)| caret >= f && caret <= t) {
-        return if forward {
-            match blank_starts.iter().find(|&&s| s > caret) {
-                Some(&s) => Some(s),
-                None => spans.get(i + 1).map(|&(f, _)| f),
-            }
-        } else {
-            match blank_starts.iter().rposition(|&s| s < caret) {
-                Some(k) => Some(blank_starts[k]),
-                None => Some(spans[i.checked_sub(1)?].1),
-            }
-        };
-    }
-    match spans.iter().rposition(|&(f, _)| f <= caret) {
-        // 块间 / 文末空白区：逐行走，越过端点落相邻块
-        Some(i) => {
-            let prev_to = spans[i].1;
-            if forward {
-                match blank_starts.iter().find(|&&s| s > caret) {
-                    Some(&s) => Some(s),
-                    None => spans.get(i + 1).map(|&(f, _)| f),
-                }
-            } else {
-                match blank_starts
-                    .iter()
-                    .rposition(|&s| s <= caret)
-                    .and_then(|k| k.checked_sub(1))
-                    .and_then(|k| blank_starts.get(k))
-                {
-                    Some(&s) => Some(s),
-                    None => Some(prev_to),
-                }
-            }
-        }
-        // 文首空白区：向下逐行 / 进首块，向上逐行回退
-        None => {
-            if forward {
-                match blank_starts.iter().find(|&&s| s > caret) {
-                    Some(&s) => Some(s),
-                    None => spans.first().map(|&(f, _)| f),
-                }
-            } else {
-                blank_starts
-                    .iter()
-                    .rposition(|&s| s < caret)
-                    .map(|k| blank_starts[k])
-            }
-        }
-    }
-}
-
-/// 编辑面容器：纵向排布块行与空行行，统一承接鼠标——按下/拖选按行换算落点、
+/// 编辑面容器：纵向排布可揭示行与空行行，统一承接鼠标——按下/拖选按行换算落点、
 /// 点内容区空白落到文末、点编辑面之外收起光标；块间空行的光标由容器自绘，
 /// 键盘 / 输入法 / 剪贴板也由容器托管（空行光标不属任何块）。
 pub struct EditSurface<'a> {
@@ -1456,16 +1425,28 @@ impl<'a> EditSurface<'a> {
         }
     }
 
-    /// 命中 → 目标。已揭示块与几何一致的富块可精确换算；其余富块内部几何不可得，
-    /// 按行的上下半区吸到块首 / 块尾（该块的选区本就只画块级底色，吸附与所见一致）。
+    /// 命中 → 目标：已揭示行按源码排版换算；富渲染行按可见片段探针换算（无逐字映射时
+    /// 吸到行首 / 行尾）；空行行按行首表换算。
     fn target_of(&self, hit: RowHit) -> HitTarget {
         match hit {
             RowHit::Row(i, local, width, height) => match &self.rows[i] {
-                SurfaceRow::Block { index, editable, exact, .. } => {
-                    if *editable || *exact {
-                        HitTarget::BlockText { index: *index, point: local, width }
+                SurfaceRow::Row { from, to, revealed, runs, indent, source, code, .. } => {
+                    if *revealed {
+                        HitTarget::SourceText { from: *from, to: *to, source: *source, point: local, width }
+                    } else if !runs.is_empty() {
+                        match probe_offset(runs, source, width, *indent, local) {
+                            Some(offset) => HitTarget::Offset(offset),
+                            None => HitTarget::RowEdge {
+                                from: *from,
+                                to: *to,
+                                upper: local.y < height / 2.0,
+                            },
+                        }
+                    } else if let Some((content_from, _)) = code {
+                        // 代码正文内部另有局部坐标上报（未接时落正文首行）
+                        HitTarget::Offset(*content_from)
                     } else {
-                        HitTarget::BlockEdge { index: *index, upper: local.y < height / 2.0 }
+                        HitTarget::RowEdge { from: *from, to: *to, upper: local.y < height / 2.0 }
                     }
                 }
                 SurfaceRow::Gap { line_starts, .. } => HitTarget::GapLine {
@@ -1513,6 +1494,7 @@ impl<'a> EditSurface<'a> {
         let Some(SurfaceRow::Gap { to, line_starts, .. }) = self.rows.get(row_index) else {
             return;
         };
+        let indent = self.rows[row_index].gap_indent();
         let Some(b) = layout.children().nth(row_index).map(|l| l.bounds()) else {
             return;
         };
@@ -1520,7 +1502,7 @@ impl<'a> EditSurface<'a> {
         let k = gap_caret_line(line_starts, *to, self.caret).unwrap_or(0);
         let y = b.y + k as f32 * line_h + (line_h - GAP_CARET_H).max(0.0) * 0.5;
         let ime: InputMethod<&str> = InputMethod::Enabled {
-            cursor: Rectangle::new(Point::new(b.x, y), Size::new(1.0, GAP_CARET_H)),
+            cursor: Rectangle::new(Point::new(b.x + indent, y), Size::new(1.0, GAP_CARET_H)),
             purpose: Purpose::Normal,
             preedit: None,
         };
@@ -1607,7 +1589,7 @@ impl Widget<Message, Theme, iced::Renderer> for EditSurface<'_> {
                 continue;
             }
             match row {
-                SurfaceRow::Block { covered: true, .. } => {
+                SurfaceRow::Row { covered: true, .. } => {
                     renderer.fill_quad(Quad { bounds, ..Quad::default() }, tint);
                 }
                 // 空行选区底色按空行粒度画（第 k 根空行对应其换行符字节）
@@ -1635,13 +1617,14 @@ impl Widget<Message, Theme, iced::Renderer> for EditSurface<'_> {
                     && self.caret < *to
                     && (self.caret > *from || *from == 0)
                 {
+                    let x0 = bounds.x + row.gap_indent();
                     let line_h = gap_line_height(bounds.height, line_starts.len());
                     let k = gap_caret_line(line_starts, *to, self.caret).unwrap_or(0);
                     let y = bounds.y + k as f32 * line_h + (line_h - GAP_CARET_H).max(0.0) * 0.5;
                     if blink_on {
                         renderer.fill_quad(
                             Quad {
-                                bounds: Rectangle::new(Point::new(bounds.x, y), Size::new(1.5, GAP_CARET_H)),
+                                bounds: Rectangle::new(Point::new(x0, y), Size::new(1.5, GAP_CARET_H)),
                                 ..Quad::default()
                             },
                             self.pal.text,
@@ -1663,7 +1646,7 @@ impl Widget<Message, Theme, iced::Renderer> for EditSurface<'_> {
                                 shaping: advanced_text::Shaping::Auto,
                                 wrapping: advanced_text::Wrapping::None,
                             },
-                            Point::new(bounds.x + 2.0, y),
+                            Point::new(x0 + 2.0, y),
                             self.pal.muted,
                             bounds,
                         );
@@ -1716,12 +1699,17 @@ impl Widget<Message, Theme, iced::Renderer> for EditSurface<'_> {
                 shell.publish(Message::Editor(EditorEvent::Blur));
             }
         }
+        let bounds = layout.bounds();
+        let state = tree.state.downcast_mut::<SurfaceState>();
+        // 行内子控件（代码正文等）可能已接管本次按压：仍要记下拖选起点，
+        // 光标移出该子控件后由编辑面按行继续换算
+        if let Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) = event {
+            state.dragging = cursor.position().is_some_and(|p| bounds.contains(p));
+        }
         // 子控件（链接 / 勾选框）已接管则不再换算落点
         if shell.is_event_captured() {
             return;
         }
-        let bounds = layout.bounds();
-        let state = tree.state.downcast_mut::<SurfaceState>();
         match event {
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 // 行命中要拿绝对坐标（行 bounds 是绝对坐标）；position_in 是相对量，不能混用
@@ -1838,6 +1826,226 @@ impl<'a> From<SourceBlock<'a>> for Element<'a, Message> {
     fn from(block: SourceBlock<'a>) -> Self {
         Element::new(block)
     }
+}
+
+/// 等宽代码正文的行高倍数：正文文本未显式设行高，与 iced 文本部件默认一致。
+const CODE_LINE_HEIGHT: f32 = 1.2;
+
+/// 代码正文落点换算：等宽正文按同一文本建探针（不换行），取最近字符换算成正文内字节偏移。
+pub(crate) fn code_offset(code: &str, size: f32, width: f32, point: Point) -> usize {
+    if code.is_empty() {
+        return 0;
+    }
+    let paragraph = ParagraphT::with_text(advanced_text::Text {
+        content: code,
+        bounds: Size::new(width.max(1.0), f32::INFINITY),
+        size: size.into(),
+        line_height: advanced_text::LineHeight::Relative(CODE_LINE_HEIGHT),
+        font: Font::MONOSPACE,
+        align_x: advanced_text::Alignment::Left,
+        align_y: alignment::Vertical::Top,
+        shaping: advanced_text::Shaping::Auto,
+        wrapping: advanced_text::Wrapping::None,
+    });
+    byte_of_char(code, char_at_point(&paragraph, code.chars().count(), point))
+}
+
+/// 代码正文的局部坐标上报：转发子件的布局与绘制，按压时把正文内坐标交给应用层
+/// （正文在面板内层滚动容器里，外部拿不到其原点与滚动偏移）。
+/// 拖选（跨越正文边界）仍由编辑面按行换算，故这里只接管按压。
+pub struct CodeBody<'a> {
+    element: Element<'a, Message>,
+    content: (usize, usize),
+    size: f32,
+}
+
+impl<'a> CodeBody<'a> {
+    pub(crate) fn new(element: Element<'a, Message>, content: (usize, usize), size: f32) -> Self {
+        Self { element, content, size }
+    }
+}
+
+impl Widget<Message, Theme, iced::Renderer> for CodeBody<'_> {
+    fn size(&self) -> Size<Length> {
+        self.element.as_widget().size()
+    }
+
+    fn state(&self) -> widget::tree::State {
+        widget::tree::State::new(())
+    }
+
+    fn children(&self) -> Vec<widget::Tree> {
+        vec![widget::Tree::new(self.element.as_widget())]
+    }
+
+    fn diff(&self, tree: &mut widget::Tree) {
+        tree.diff_children(std::slice::from_ref(&self.element));
+    }
+
+    fn layout(
+        &mut self,
+        tree: &mut widget::Tree,
+        renderer: &iced::Renderer,
+        limits: &layout::Limits,
+    ) -> layout::Node {
+        self.element.as_widget_mut().layout(&mut tree.children[0], renderer, limits)
+    }
+
+    fn operate(
+        &mut self,
+        tree: &mut widget::Tree,
+        layout: Layout<'_>,
+        renderer: &iced::Renderer,
+        operation: &mut dyn widget::Operation,
+    ) {
+        self.element.as_widget_mut().operate(&mut tree.children[0], layout, renderer, operation);
+    }
+
+    fn update(
+        &mut self,
+        tree: &mut widget::Tree,
+        event: &Event,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        renderer: &iced::Renderer,
+        clipboard: &mut dyn Clipboard,
+        shell: &mut Shell<'_, Message>,
+        viewport: &Rectangle,
+    ) {
+        self.element.as_widget_mut().update(
+            &mut tree.children[0],
+            event,
+            layout,
+            cursor,
+            renderer,
+            clipboard,
+            shell,
+            viewport,
+        );
+        if shell.is_event_captured() {
+            return;
+        }
+        let Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) = event else {
+            return;
+        };
+        let bounds = layout.bounds();
+        let Some(p) = cursor.position().filter(|p| bounds.contains(*p)) else {
+            return;
+        };
+        shell.publish(Message::Editor(EditorEvent::Hit {
+            target: HitTarget::CodeBody {
+                content: self.content,
+                size: self.size,
+                point: Point::new(p.x - bounds.x, p.y - bounds.y),
+                width: bounds.width,
+            },
+            extend: false,
+        }));
+        shell.capture_event();
+        shell.request_redraw();
+    }
+
+    fn mouse_interaction(
+        &self,
+        tree: &widget::Tree,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+        renderer: &iced::Renderer,
+    ) -> mouse::Interaction {
+        self.element
+            .as_widget()
+            .mouse_interaction(&tree.children[0], layout, cursor, viewport, renderer)
+    }
+
+    fn draw(
+        &self,
+        tree: &widget::Tree,
+        renderer: &mut iced::Renderer,
+        theme: &Theme,
+        style: &iced::advanced::renderer::Style,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+    ) {
+        self.element.as_widget().draw(
+            &tree.children[0],
+            renderer,
+            theme,
+            style,
+            layout,
+            cursor,
+            viewport,
+        );
+    }
+}
+
+impl<'a> From<CodeBody<'a>> for Element<'a, Message> {
+    fn from(body: CodeBody<'a>) -> Self {
+        Element::new(body)
+    }
+}
+
+/// 富渲染行的落点换算：按行的可见片段建探针排版（与富渲染同一份文本、字体、行高
+/// 与宽度），取离落点最近的可见字符，再映射回源偏移。
+/// 片段表为空（图片 / 表格 / 分隔线等无逐字映射的行）返回 None，由调用方吸附行首 / 行尾。
+fn probe_offset(
+    runs: &[crate::markdown_view::LineRun],
+    source: &SourceKind,
+    width: f32,
+    indent: f32,
+    point: Point,
+) -> Option<usize> {
+    let (size, line_height) = source_metrics(source);
+    let mut spans: Vec<Span<'static, (), Font>> = Vec::new();
+    // 逐可见字符的源区间：1:1 片段按字节线性对应，替换形态整段取边界
+    let mut offsets: Vec<(usize, usize)> = Vec::new();
+    for run in runs {
+        let (src_from, src_to) = run.src;
+        let aligned = src_to.saturating_sub(src_from) == run.text.len();
+        for (k, ch) in run.text.chars().enumerate() {
+            spans.push(Span::new(ch.to_string()).font(run.font()));
+            offsets.push(if aligned {
+                (
+                    src_from + byte_of_char(&run.text, k),
+                    src_from + byte_of_char(&run.text, k + 1),
+                )
+            } else {
+                (src_from, src_to)
+            });
+        }
+    }
+    if spans.is_empty() {
+        return None;
+    }
+    let paragraph = ParagraphT::with_spans(advanced_text::Text {
+        content: spans.as_slice(),
+        bounds: Size::new(width.max(1.0), f32::INFINITY),
+        size: size.into(),
+        line_height: advanced_text::LineHeight::Relative(line_height),
+        font: Font::DEFAULT,
+        align_x: advanced_text::Alignment::Left,
+        align_y: alignment::Vertical::Top,
+        shaping: advanced_text::Shaping::Auto,
+        wrapping: advanced_text::Wrapping::default(),
+    });
+    let local = Point::new(point.x - indent, point.y);
+    let i = char_at_point(&paragraph, offsets.len(), local);
+    let (from, to) = offsets[i];
+    if to <= from {
+        return None;
+    }
+    let split = paragraph
+        .span_bounds(i)
+        .into_iter()
+        .next()
+        .is_some_and(|r| local.x > r.x + r.width / 2.0);
+    Some(if split { to } else { from })
+}
+
+/// 源码行是否空白（仅空白字符）：块内空行的光标不揭示所在块。
+pub(crate) fn line_is_blank(text: &str, offset: usize) -> bool {
+    line_text_at(text, offset).trim().is_empty()
 }
 
 /// 命中换算：在已揭示块内按源码排版求落点（块外或富渲染块不走此入口）。
@@ -2129,67 +2337,31 @@ mod tests {
         assert_eq!(gap_covered_lines(&starts, 12, 5, 12), (0, 2));
     }
 
-    #[test]
-    fn vertical_target_crosses_adjacent_blocks() {
-        let spans = [(0, 9), (11, 20)];
-        assert_eq!(vertical_target(5, &spans, &[], true), Some(11));
-        assert_eq!(vertical_target(15, &spans, &[], false), Some(9));
-        // 首块向上 / 末块向下无路
-        assert_eq!(vertical_target(5, &spans, &[], false), None);
-        assert_eq!(vertical_target(15, &spans, &[], true), None);
-    }
+
+
+
+
 
     #[test]
-    fn vertical_target_walks_gap_lines() {
-        // 两根空行（行首 10、11）：空行内按行首逐行，越端点落相邻块
-        let spans = [(0, 9), (12, 20)];
-        let starts = [10, 11];
-        assert_eq!(vertical_target(10, &spans, &starts, true), Some(11));
-        assert_eq!(vertical_target(11, &spans, &starts, true), Some(12));
-        assert_eq!(vertical_target(11, &spans, &starts, false), Some(10));
-        assert_eq!(vertical_target(10, &spans, &starts, false), Some(9));
-    }
-
-    #[test]
-    fn vertical_target_walks_whitespace_gap_lines() {
-        // 空行含空白字符（行首 10 的行占 "   \n"）：行移动按行首跳，不逐字节走
-        let spans = [(0, 9), (14, 20)];
-        let starts = [10, 13];
-        assert_eq!(vertical_target(12, &spans, &starts, true), Some(13));
-        assert_eq!(vertical_target(12, &spans, &starts, false), Some(9));
-        assert_eq!(vertical_target(13, &spans, &starts, false), Some(10));
-        assert_eq!(vertical_target(13, &spans, &starts, true), Some(14));
-    }
-
-    #[test]
-    fn vertical_target_edges() {
-        let spans = [(5, 9)];
-        // 文首之前：向下进首块，向上无路
-        assert_eq!(vertical_target(2, &spans, &[], true), Some(5));
-        assert_eq!(vertical_target(2, &spans, &[], false), None);
-        // 文末之后的空行：向上收回块末，向下无路
-        assert_eq!(vertical_target(11, &spans, &[10], false), Some(9));
-        assert_eq!(vertical_target(11, &spans, &[10], true), None);
-    }
-
-    #[test]
-    fn vertical_target_enters_edge_blank_regions() {
-        let spans = [(5, 9)];
-        // 末块向下进文末空白区，区内逐行、末端无路
-        assert_eq!(vertical_target(7, &spans, &[10, 11], true), Some(10));
-        assert_eq!(vertical_target(10, &spans, &[10, 11], true), Some(11));
-        assert_eq!(vertical_target(11, &spans, &[10, 11], true), None);
-        // 区内向上逐行收回块末
-        assert_eq!(vertical_target(11, &spans, &[10, 11], false), Some(10));
-        assert_eq!(vertical_target(10, &spans, &[10, 11], false), Some(9));
-        // 首块向上进文首空白区，区内逐行、顶端无路
-        assert_eq!(vertical_target(6, &spans, &[0, 1, 2], false), Some(2));
-        assert_eq!(vertical_target(2, &spans, &[0, 1, 2], false), Some(1));
-        assert_eq!(vertical_target(1, &spans, &[0, 1, 2], false), Some(0));
-        assert_eq!(vertical_target(0, &spans, &[0, 1, 2], false), None);
-        // 区内向下进首块
-        assert_eq!(vertical_target(2, &spans, &[0, 1, 2], true), Some(5));
-        assert_eq!(vertical_target(1, &spans, &[0, 1, 2], true), Some(2));
+    fn space_key_inserts_produced_text() {
+        let b = NoteBindings::default();
+        let none = keyboard::Modifiers::default();
+        let insert = |action: Option<KeyAction>| match action {
+            Some(KeyAction::Event(EditorEvent::Insert(t))) => Some(t),
+            _ => None,
+        };
+        // 空格是命名键：按本键产生的文本插入
+        assert_eq!(
+            insert(key_action(&Key::Named(Named::Space), none, Some(" "), &b)),
+            Some(" ".to_string()),
+        );
+        // 文本缺失时回落半角空格
+        assert_eq!(
+            insert(key_action(&Key::Named(Named::Space), none, None, &b)),
+            Some(" ".to_string()),
+        );
+        // Ctrl+空格不插入（组合键归快捷键与系统输入法切换）
+        assert!(key_action(&Key::Named(Named::Space), keyboard::Modifiers::CTRL, Some(" "), &b).is_none());
     }
 
     #[test]
