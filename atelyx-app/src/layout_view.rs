@@ -256,12 +256,11 @@ pub(crate) enum PopupState {
     TableLightboxMenu,
     /// 表格：工具条视图切换下拉（内置表格）。
     TableViewMenu,
-    /// 设置-AI：模型下拉（for_naming = 话题命名模型，选项不含「不指定」）。
-    AiModelMenu { for_naming: bool },
+    /// 设置-AI：话题命名模型下拉。
+    AiModelMenu,
     /// AI 对话面板：模型下拉（面板级覆盖；不指定 = 跟随仓库默认）。
     ChatModelMenu,
     /// AI 对话面板：推理等级下拉（面板级覆盖；跟随默认 = 不发送推理参数）。
-    ChatEffortMenu,
     /// AI 对话面板：Agent 下拉（会话级 agentId；含缺省「对话」）。
     ChatAgentMenu,
     /// 设置-AI：话题自动命名模式。
@@ -324,9 +323,8 @@ impl PopupState {
             PopupState::TableLightboxMenu => 128.0,
             PopupState::TableViewMenu => 96.0,
             // AI 设置：模型 id / 笔记名可能较长，给足一行的宽度
-            PopupState::AiModelMenu { .. } => 224.0,
+            PopupState::AiModelMenu => 224.0,
             PopupState::ChatModelMenu => 224.0,
-            PopupState::ChatEffortMenu => 160.0,
             PopupState::ChatAgentMenu => 200.0,
             PopupState::AiNamingMenu => 144.0,
             PopupState::AiAgentPromptMenu => 208.0,
@@ -4202,38 +4200,25 @@ fn popup_element<'a>(
             }
             entries
         }
-        PopupState::AiModelMenu { for_naming } => {
+        PopupState::AiModelMenu => {
             let mut entries: Vec<(usize, MenuEntry)> = Vec::new();
-            if !for_naming {
-                let unset = app.repo_config.model.is_none();
-                let pick = Message::Ai(ai::AiMsg::DefaultModelPick(None));
-                entries.push((0, if unset {
-                    MenuEntry::Checked { label: "不指定".into(), on_press: pick }
-                } else {
-                    MenuEntry::action("不指定", pick)
-                }));
-            }
             for p in app.repo_config.providers.iter().flatten() {
                 if p.models.is_empty() {
                     continue;
                 }
                 entries.push((0, MenuEntry::Group(p.name.clone())));
                 for m in &p.models {
-                    let is_current = if *for_naming {
-                        app.repo_config.auto_naming_model.as_ref().is_some_and(|o| o.provider_id == p.id && o.model == m.id)
-                    } else {
-                        app.repo_config.model.as_deref() == Some(m.id.as_str())
-                            && app.repo_config.model_provider_id.as_deref() == Some(p.id.as_str())
-                    };
-                    let pick = Message::Ai(if *for_naming {
-                        ai::AiMsg::NamingModelPick(Some((p.id.clone(), m.id.clone())))
-                    } else {
-                        ai::AiMsg::DefaultModelPick(Some((p.id.clone(), m.id.clone())))
-                    });
+                    let is_current = app
+                        .repo_config
+                        .auto_naming_model
+                        .as_ref()
+                        .is_some_and(|o| o.provider_id == p.id && o.model == m.id);
+                    let pick =
+                        Message::Ai(ai::AiMsg::NamingModelPick(Some((p.id.clone(), m.id.clone()))));
                     entries.push((0, if is_current {
-                        MenuEntry::Checked { label: m.id.clone(), on_press: pick }
+                        MenuEntry::Checked { label: model_display(m), on_press: pick }
                     } else {
-                        MenuEntry::action(m.id.clone(), pick)
+                        MenuEntry::action(model_display(m), pick)
                     }));
                 }
             }
@@ -4243,7 +4228,11 @@ fn popup_element<'a>(
             entries
         }
         PopupState::ChatAgentMenu => {
-            let current = app.chat.active_agent_id();
+            // 未选过 = 内置「对话」生效；名册由装载时种子补齐，恒含「对话」
+            let current = app
+                .chat
+                .active_agent_id()
+                .unwrap_or_else(|| atelyx_core::vault::BUILTIN_AGENT_CHAT_ID.to_string());
             let mut entries: Vec<(usize, MenuEntry)> = Vec::new();
             for agent in &app.agents {
                 let pick = Message::Chat(crate::chat_actions::ChatMsg::AgentPick(Some(
@@ -4251,95 +4240,67 @@ fn popup_element<'a>(
                 )));
                 entries.push((
                     0,
-                    if current.as_deref() == Some(agent.id.as_str()) {
+                    if current == agent.id {
                         MenuEntry::Checked { label: agent.name.clone(), on_press: pick }
                     } else {
                         MenuEntry::action(agent.name.clone(), pick)
                     },
                 ));
             }
-            let default_pick = Message::Chat(crate::chat_actions::ChatMsg::AgentPick(None));
-            entries.push((
-                0,
-                if current.is_none() {
-                    MenuEntry::Checked { label: "对话（缺省）".into(), on_press: default_pick }
-                } else {
-                    MenuEntry::action("对话（缺省）", default_pick)
-                },
-            ));
             entries
         }
         PopupState::ChatModelMenu => {
-            let current = app
-                .chat
-                .model_override
-                .as_ref()
-                .and_then(|v| {
-                    let provider = v.get("providerId").and_then(serde_json::Value::as_str)?;
-                    let model = v.get("model").and_then(serde_json::Value::as_str)?;
-                    Some((provider.to_string(), model.to_string()))
-                });
-            let mut entries: Vec<(usize, MenuEntry)> = Vec::new();
-            let follow = Message::Chat(crate::chat_actions::ChatMsg::ModelPicked(None));
-            entries.push((
-                0,
-                if current.is_none() {
-                    MenuEntry::Checked { label: "跟随仓库默认".into(), on_press: follow }
-                } else {
-                    MenuEntry::action("跟随仓库默认", follow)
-                },
-            ));
-            for p in app.repo_config.providers.iter().flatten() {
-                if p.models.is_empty() {
-                    continue;
+            // 两级菜单（pane 0 根 / 1 模型 / 2 推理等级）：模型与等级为正交覆盖。
+            // 条目元组首元素是 pane 归属标签，pane_view 按当前 pane 过滤——必须与所在面板同值
+            match pane {
+                2 => {
+                    let current = app.chat.effort.clone();
+                    [
+                        (None, "默认"),
+                        (Some("off".to_string()), "关闭"),
+                        (Some("low".to_string()), "低"),
+                        (Some("medium".to_string()), "中"),
+                        (Some("high".to_string()), "高"),
+                    ]
+                    .into_iter()
+                    .map(|(value, label)| {
+                        let pick = Message::Chat(crate::chat_actions::ChatMsg::EffortPicked(
+                            value.clone(),
+                        ));
+                        let is_current = current == value;
+                        (
+                            2,
+                            if is_current {
+                                MenuEntry::Checked { label: label.into(), on_press: pick }
+                            } else {
+                                MenuEntry::action(label, pick)
+                            },
+                        )
+                    })
+                    .collect::<Vec<_>>()
                 }
-                entries.push((0, MenuEntry::Group(p.name.clone())));
-                for m in &p.models {
-                    let is_current = current
-                        .as_ref()
-                        .is_some_and(|(provider, model)| provider == &p.id && model == &m.id);
-                    let pick = Message::Chat(crate::chat_actions::ChatMsg::ModelPicked(Some((
-                        p.id.clone(),
-                        m.id.clone(),
-                    ))));
-                    entries.push((
+                1 => chat_model_entries(app).into_iter().map(|(_, e)| (1, e)).collect(),
+                _ => vec![
+                    (
                         0,
-                        if is_current {
-                            MenuEntry::Checked { label: m.id.clone(), on_press: pick }
-                        } else {
-                            MenuEntry::action(m.id.clone(), pick)
+                        MenuEntry::Submenu {
+                            label: format!("模型：{}", chat_model_trigger_label(app)),
+                            icon: None,
+                            disabled: false,
+                            pane: 1,
                         },
-                    ));
-                }
+                    ),
+                    (
+                        0,
+                        MenuEntry::Submenu {
+                            label: format!("推理等级：{}", chat_effort_label(app)),
+                            icon: None,
+                            disabled: false,
+                            pane: 2,
+                        },
+                    ),
+                ],
             }
-            if entries.len() == 1 {
-                entries.push((0, MenuEntry::Custom(popup_hint("先在「供应商」添加模型"), 18.0)));
-            }
-            entries
-        }
-        PopupState::ChatEffortMenu => {
-            let current = app.chat.effort.clone();
-            [
-                (None, "跟随默认"),
-                (Some("low".to_string()), "low"),
-                (Some("medium".to_string()), "medium"),
-                (Some("high".to_string()), "high"),
-            ]
-            .into_iter()
-            .map(|(value, label)| {
-                let pick =
-                    Message::Chat(crate::chat_actions::ChatMsg::EffortPicked(value.clone()));
-                let is_current = current == value;
-                (
-                    0,
-                    if is_current {
-                        MenuEntry::Checked { label: label.into(), on_press: pick }
-                    } else {
-                        MenuEntry::action(label, pick)
-                    },
-                )
-            })
-            .collect()
         }
         PopupState::AiNamingMenu => {
             let mode = ai::naming_mode(app);
@@ -4462,6 +4423,102 @@ fn popup_text_input<'a>(draft: &str) -> Element<'a, Message> {
         .on_input(|v: String| Message::Table(crate::table_view::TableMsg::PopupDraft(v)))
         .style(|_theme, status| controls::form_input_style(status))
         .into()
+}
+
+/// 面板当前生效模型的显示名：覆盖的模型（跨供应商同名带供应商名消歧）；未选择 = 提示文案。
+pub(crate) fn chat_model_trigger_label(app: &App) -> String {
+    let Some(v) = &app.chat.model_override else {
+        return "选择模型".to_string();
+    };
+    let (pid, model) = match (
+        v.get("providerId").and_then(serde_json::Value::as_str),
+        v.get("model").and_then(serde_json::Value::as_str),
+    ) {
+        (Some(pid), Some(model)) => (pid, model),
+        _ => return "选择模型".to_string(),
+    };
+    // 昵称取自覆盖所指向的供应商（同名模型跨供应商昵称可能不同）；供应商已删回落 id
+    let display = app
+        .repo_config
+        .providers
+        .iter()
+        .flatten()
+        .find(|p| p.id == pid)
+        .and_then(|p| p.models.iter().find(|m| m.id == model).map(model_display))
+        .unwrap_or_else(|| model.to_string());
+    // 同名模型跨供应商时带供应商名消歧
+    let ambiguous = app
+        .repo_config
+        .providers
+        .iter()
+        .flatten()
+        .any(|p| p.id != pid && p.models.iter().any(|m| m.id == model));
+    if ambiguous {
+        let provider_name = app
+            .repo_config
+            .providers
+            .iter()
+            .flatten()
+            .find(|p| p.id == pid)
+            .map(|p| p.name.clone())
+            .unwrap_or_else(|| pid.to_string());
+        format!("{provider_name} · {display}")
+    } else {
+        display
+    }
+}
+
+/// 面板推理等级显示名（触发器/根菜单行用；未选 = 默认）。
+pub(crate) fn chat_effort_label(app: &App) -> &'static str {
+    match app.chat.effort.as_deref() {
+        Some("off") => "关闭",
+        Some("low") => "低",
+        Some("medium") => "中",
+        Some("high") => "高",
+        _ => "默认",
+    }
+}
+
+/// 面板模型子面板条目：按供应商分组，昵称显示。
+fn chat_model_entries(app: &App) -> Vec<(usize, MenuEntry<'static>)> {
+    let current = app.chat.model_override.as_ref().and_then(|v| {
+        let provider = v.get("providerId").and_then(serde_json::Value::as_str)?;
+        let model = v.get("model").and_then(serde_json::Value::as_str)?;
+        Some((provider.to_string(), model.to_string()))
+    });
+    let mut entries: Vec<(usize, MenuEntry<'static>)> = Vec::new();
+    for p in app.repo_config.providers.iter().flatten() {
+        if p.models.is_empty() {
+            continue;
+        }
+        entries.push((0, MenuEntry::Group(p.name.clone())));
+        for m in &p.models {
+            let is_current = current
+                .as_ref()
+                .is_some_and(|(provider, model)| provider == &p.id && model == &m.id);
+            let pick = Message::Chat(crate::chat_actions::ChatMsg::ModelPicked(Some((
+                p.id.clone(),
+                m.id.clone(),
+            ))));
+            entries.push((0, if is_current {
+                MenuEntry::Checked { label: model_display(m), on_press: pick }
+            } else {
+                MenuEntry::action(model_display(m), pick)
+            }));
+        }
+    }
+    if entries.is_empty() {
+        entries.push((0, MenuEntry::Custom(popup_hint("先在「供应商」添加模型"), 18.0)));
+    }
+    entries
+}
+
+/// 模型显示名：昵称优先（空昵称回落 id）。
+fn model_display(m: &atelyx_core::vault::VaultModel) -> String {
+    m.nickname
+        .clone()
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or_else(|| m.id.clone())
 }
 
 fn popup_hint(text_content: &str) -> Element<'static, Message> {

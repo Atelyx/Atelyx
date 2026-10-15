@@ -16,26 +16,58 @@ pub fn chat_view(app: &App, window: iced::window::Id) -> iced::Element<'_, Messa
 }
 
 
-fn chat_root(app: &App, window: iced::window::Id) -> iced::Element<'_, Message> {
-    let mut root = row![].height(Length::Fill);
-    if app.chat.sidebar_open {
-        root = root.push(sidebar(app));
-        // 侧栏与对话列之间的 1px 分隔（独立元素，避免 Border 单边构造差异）
-        root = root.push(
-            container(Space::new())
-                .width(1.0)
-                .height(Length::Fill)
-                .style(|_| container::Style {
-                    background: Some(pal::BORDER.into()),
-                    ..Default::default()
-                }),
-        );
+/// 侧栏并排的最小面板宽（228 侧栏 + 对话列最低可读宽）。
+const SIDEBAR_INLINE_MIN_W: f32 = 640.0;
+/// 转圈动画每拍旋转角（UiTick 100ms 一拍；约 1 圈 / 秒）。
+const SPIN_STEP_RAD: f32 = 0.63;
+/// 折叠态摘要的单行字符上限（中英文混排按字符计）。
+const SUMMARY_LINE_CHARS: usize = 56;
+
+fn chat_root<'a>(app: &'a App, window: iced::window::Id) -> iced::Element<'a, Message> {
+    if !app.chat.sidebar_open {
+        return container(chat_column(app, window))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into();
     }
-    root = root.push(chat_column(app, window));
-    container(root)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+    // 宽度自适应：够宽 = 并排常驻；不足 = 盖层（点对话区收起，面板内按压不穿透）
+    iced::widget::responsive(move |size| {
+        if size.width >= SIDEBAR_INLINE_MIN_W {
+            row![
+                sidebar(app),
+                // 侧栏与对话列之间的 1px 分隔（独立元素，避免 Border 单边构造差异）
+                container(Space::new())
+                    .width(1.0)
+                    .height(Length::Fill)
+                    .style(|_| container::Style {
+                        background: Some(pal::BORDER.into()),
+                        ..Default::default()
+                    }),
+                chat_column(app, window),
+            ]
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+        } else {
+            // 三层堆叠：底层全屏捕获（点对话区空白收起）→ 对话列（控件捕获时不穿透，
+            // 点发送/模型钮不会连带收起侧栏）→ 侧栏面板（面板内按压吞掉）
+            iced::widget::stack![
+                iced::widget::mouse_area(Space::new().width(Length::Fill).height(Length::Fill))
+                    .on_press(Message::Chat(ChatMsg::ToggleSidebar)),
+                container(chat_column(app, window))
+                    .width(Length::Fill)
+                    .height(Length::Fill),
+                iced::widget::mouse_area(sidebar(app))
+                    .on_press(Message::Chat(ChatMsg::OverlayPress)),
+            ]
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+        }
+    })
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
 }
 
 // ===== 会话侧栏 =====
@@ -204,7 +236,7 @@ fn chat_column(app: &App, window: iced::window::Id) -> iced::Element<'_, Message
     column![
         top_bar(app, window),
         controls::h_divider_subtle(),
-        message_flow(app),
+        message_flow(app, window),
         input_area(app, window),
     ]
     .width(Length::Fill)
@@ -233,11 +265,36 @@ fn top_bar(app: &App, window: iced::window::Id) -> iced::Element<'_, Message> {
         left = left.push(
             text(active_title(app))
                 .size(pal::fs_caption())
-                .color(pal::TEXT_PRIMARY)
-                .width(Length::Fill),
+                .color(pal::TEXT_PRIMARY),
         );
     }
-    let renaming = app.chat.active.is_some() && !is_streaming(app);
+    // 手动重新生成标题：紧贴会话标题右侧（有会话且非流式时可用；
+    // 命名在途 = 转圈动画且不可再点，完成前禁止重复触发）
+    if let Some(session_id) = app.chat.active.clone() {
+        if !is_streaming(app) {
+            if app.chat.renaming.contains(&session_id) {
+                // 转圈：UiTick 100ms 一拍递增 spin_tick，视图按计数取旋转角
+                let angle = app.chat.spin_tick as f32 * SPIN_STEP_RAD;
+                left = left.push(crate::ui::icon::icon_spin(
+                    "loader-circle",
+                    14.0,
+                    pal::ACCENT,
+                    1.5,
+                    angle,
+                ));
+            } else {
+                left = left.push(controls::icon_button(
+                    "refresh-cw",
+                    12.0,
+                    22.0,
+                    controls::Variant::Ghost,
+                    Some(Message::Chat(ChatMsg::RegenTitle)),
+                    Some((window, "重新生成标题".to_string())),
+                ));
+            }
+        }
+    }
+    left = left.push(Space::new().width(Length::Fill));
     // 压缩会话历史只对「有内容的会话」有意义：空会话 / 无会话时不出现（免成无意义按钮）
     let compactions = app
         .chat
@@ -265,16 +322,6 @@ fn top_bar(app: &App, window: iced::window::Id) -> iced::Element<'_, Message> {
         ),
     ]
     .spacing(4);
-    if renaming {
-        right = right.push(controls::icon_button(
-            "pen-line",
-            13.0,
-            24.0,
-            controls::Variant::Ghost,
-            Some(Message::Chat(ChatMsg::Rename)),
-            Some((window, "重新命名（按会话内容生成标题）".to_string())),
-        ));
-    }
     if compactions {
         right = right.push(if app.chat.compacting.is_some() {
             controls::icon_button("loader-circle", 13.0, 24.0, controls::Variant::Ghost, None, None)
@@ -337,7 +384,7 @@ fn is_streaming(app: &App) -> bool {
 
 // ===== 消息流 =====
 
-fn message_flow(app: &App) -> iced::Element<'_, Message> {
+fn message_flow(app: &App, window: iced::window::Id) -> iced::Element<'_, Message> {
     let Some(session_id) = app.chat.active.clone() else {
         return empty_flow();
     };
@@ -363,8 +410,8 @@ fn message_flow(app: &App) -> iced::Element<'_, Message> {
         }
         let is_streaming_msg = streaming && i == last_idx && m["role"] == json!("assistant");
         match m["role"].as_str() {
-            Some("user") => col = col.push(user_bubble(app, m)),
-            Some("assistant") => col = col.push(assistant_block(app, m, is_streaming_msg)),
+            Some("user") => col = col.push(user_bubble(app, window, m)),
+            Some("assistant") => col = col.push(assistant_block(app, window, m, is_streaming_msg)),
             _ => {}
         }
     }
@@ -375,7 +422,11 @@ fn message_flow(app: &App) -> iced::Element<'_, Message> {
         }
     }
     // 覆盖层恒定 Stack 承载、按需追加：显隐不换型（Scrollable ↔ Stack 换型会整树重建、丢滚动位置）
-    let flow = scrollable(container(col).width(Length::Fill))
+    let flow = scrollable(
+        container(col)
+            .width(Length::Fill)
+            .padding(Padding::ZERO.right(10.0)),
+    )
         .id(crate::chat_actions::chat_flow_id())
         .on_scroll(|v| Message::Chat(ChatMsg::FlowScrolled(v.relative_offset().y)))
         .width(Length::Fill)
@@ -463,7 +514,11 @@ fn compaction_marker(session: &Value) -> Option<iced::Element<'static, Message>>
 }
 
 /// user 气泡（右对齐、按内容收缩、上限 560px、displayContent 优先）。
-fn user_bubble<'a>(app: &'a App, m: &'a Value) -> iced::Element<'a, Message> {
+fn user_bubble<'a>(
+    app: &'a App,
+    window: iced::window::Id,
+    m: &'a Value,
+) -> iced::Element<'a, Message> {
     let source = m
         .get("displayContent")
         .and_then(Value::as_str)
@@ -493,14 +548,19 @@ fn user_bubble<'a>(app: &'a App, m: &'a Value) -> iced::Element<'a, Message> {
                 ..Default::default()
             }),
     );
-    col = col.push(action_row(app, m, false));
+    col = col.push(action_row(app, window, m, false));
     container(container(col).align_x(iced::alignment::Horizontal::Right).width(Length::Fill))
         .width(Length::Fill)
         .into()
 }
 
 /// assistant 块（无气泡全宽）：步骤块（思考 / 工具可折叠 / 叙述行）+ 最终正文 + 操作。
-fn assistant_block<'a>(app: &'a App, m: &'a Value, streaming: bool) -> iced::Element<'a, Message> {
+fn assistant_block<'a>(
+    app: &'a App,
+    window: iced::window::Id,
+    m: &'a Value,
+    streaming: bool,
+) -> iced::Element<'a, Message> {
     let content = m.get("content").and_then(Value::as_str).unwrap_or("");
     let message_id = m.get("id").and_then(Value::as_str).unwrap_or("").to_string();
     let steps = m.get("steps").and_then(Value::as_array);
@@ -535,7 +595,7 @@ fn assistant_block<'a>(app: &'a App, m: &'a Value, streaming: bool) -> iced::Ele
     } else if streaming && steps.map(|ss| ss.is_empty()).unwrap_or(true) {
         col = col.push(text("生成中…").size(pal::fs_caption()).color(pal::TEXT_MUTED));
     }
-    col = col.push(action_row(app, m, true));
+    col = col.push(action_row(app, window, m, true));
     container(col).width(Length::Fill).into()
 }
 
@@ -604,7 +664,7 @@ fn tool_block<'a>(app: &'a App, s: &'a Value, key: &str) -> iced::Element<'a, Me
                 icon(tool_icon(&name), 12.0, pal::TEXT_MUTED),
                 icon(status_icon, 11.0, status_color),
             ],
-            title: name,
+            title: crate::settings_view::ai::tool_label(&name).to_string(),
             summary,
             mono_summary: true,
             body: detail,
@@ -642,6 +702,16 @@ struct StepBlock<'a> {
 
 /// 可折叠步骤块（思考 / 工具共用）：折叠态一行，展开态正文（超高滚动）。
 /// 展开态存 `ChatState.expanded`（键 = 消息 id + 步骤序号）。
+/// 折叠块摘要单行化：换行折叠为空格 + 按字符数截断加省略号（工具结果天然多行）。
+fn one_line(s: &str, cap_chars: usize) -> String {
+    let mut out: String = s.chars().filter(|c| !c.is_control()).take(cap_chars + 1).collect();
+    if out.chars().count() > cap_chars {
+        out = out.chars().take(cap_chars).collect();
+        out.push('\u{2026}');
+    }
+    out
+}
+
 fn details_block<'a>(app: &'a App, key: &str, spec: StepBlock<'a>) -> iced::Element<'a, Message> {
     let StepBlock {
         leading,
@@ -664,7 +734,11 @@ fn details_block<'a>(app: &'a App, key: &str, spec: StepBlock<'a>) -> iced::Elem
     }
     head = head.push(text(title).size(pal::fs_micro()).color(pal::TEXT_SECONDARY));
     if !summary.is_empty() {
-        let mut summary_text = text(summary).size(pal::fs_micro()).color(pal::TEXT_MUTED);
+        // 折叠态头部恒一行：超长摘要视图层截断（展开正文仍完整），防头部被撑成多行
+        let mut summary_text =
+            text(one_line(&summary, SUMMARY_LINE_CHARS))
+                .size(pal::fs_micro())
+                .color(pal::TEXT_MUTED);
         if mono_summary {
             summary_text = summary_text.font(crate::layout_view::mono());
         }
@@ -672,7 +746,7 @@ fn details_block<'a>(app: &'a App, key: &str, spec: StepBlock<'a>) -> iced::Elem
     }
     let header = button(container(head).width(Length::Fill))
         .width(Length::Fill)
-        .padding(Padding::ZERO.horizontal(6.0).vertical(5.0))
+        .padding(Padding::ZERO.vertical(5.0))
         .style(controls::row_style(false, pal::RADIUS_XS))
         .on_press(Message::Chat(ChatMsg::ToggleStep(key.to_string())));
     let mut col = column![header];
@@ -683,17 +757,18 @@ fn details_block<'a>(app: &'a App, key: &str, spec: StepBlock<'a>) -> iced::Elem
                 scrollable(
                     container(text(body.to_string()).size(pal::fs_micro()).color(pal::TEXT_SECONDARY))
                         .width(Length::Fill)
-                        .padding(Padding::new(6.0)),
+                        .padding(Padding::ZERO.vertical(6.0)),
                 )
                 .height(160.0),
             );
         } else if !empty_hint.is_empty() {
             col = col.push(
                 container(text(empty_hint.to_string()).size(pal::fs_micro()).color(pal::TEXT_MUTED))
-                    .padding(Padding::new(6.0)),
+                    .padding(Padding::ZERO.vertical(6.0)),
             );
         }
     }
+    // 卡片与回复正文同宽同位：正文已无根留白，卡片无需额外内缩（消息列边距即两者共同边界）
     container(col)
         .width(Length::Fill)
         .style(|_| container::Style {
@@ -709,7 +784,12 @@ fn details_block<'a>(app: &'a App, key: &str, spec: StepBlock<'a>) -> iced::Elem
 }
 
 /// 消息操作按钮组（复制 / 回到此处 / 重新生成；条件与对话面板约定一致）。
-fn action_row<'a>(app: &'a App, m: &'a Value, is_assistant: bool) -> iced::Element<'a, Message> {
+fn action_row<'a>(
+    app: &'a App,
+    window: iced::window::Id,
+    m: &'a Value,
+    is_assistant: bool,
+) -> iced::Element<'a, Message> {
     let content = m.get("content").and_then(Value::as_str).unwrap_or("");
     let display = m
         .get("displayContent")
@@ -726,7 +806,7 @@ fn action_row<'a>(app: &'a App, m: &'a Value, is_assistant: bool) -> iced::Eleme
             22.0,
             controls::Variant::Ghost,
             Some(Message::CopyCode(payload)),
-            None,
+            Some((window, "复制".to_string())),
         ));
     }
     if is_assistant && !content.is_empty() && !content.starts_with("[错误]") {
@@ -736,18 +816,18 @@ fn action_row<'a>(app: &'a App, m: &'a Value, is_assistant: bool) -> iced::Eleme
             22.0,
             controls::Variant::Ghost,
             Some(Message::Chat(ChatMsg::Rollback(message_id.clone()))),
-            None,
+            Some((window, "回到此处（该消息之后转为新话题）".to_string())),
         ));
-        if is_last_message(app, m) && !is_streaming(app) {
-            row = row.push(controls::icon_button(
-                "refresh-cw",
-                12.0,
-                22.0,
-                controls::Variant::Ghost,
-                Some(Message::Chat(ChatMsg::Regenerate)),
-                None,
-            ));
-        }
+        // 重新生成回复常驻显示（中断 / 历史消息位置不消失）；仅在「最后一条 + 非流式」时可点
+        let actionable = is_last_message(app, m) && !is_streaming(app);
+        row = row.push(controls::icon_button(
+            "refresh-cw",
+            12.0,
+            22.0,
+            controls::Variant::Ghost,
+            actionable.then(|| Message::Chat(ChatMsg::Regenerate)),
+            Some((window, "重新生成回复".to_string())),
+        ));
     }
     if app.chat.rollback_confirm.as_deref() == Some(message_id.as_str()) {
         row = row.push(
@@ -766,6 +846,7 @@ fn action_row<'a>(app: &'a App, m: &'a Value, is_assistant: bool) -> iced::Eleme
     row.into()
 }
 
+/// 该消息是否为当前会话的最后一条（重新生成回复按钮的可点条件之一）。
 fn is_last_message(app: &App, m: &Value) -> bool {
     let Some(session_id) = &app.chat.active else {
         return false;
@@ -776,10 +857,7 @@ fn is_last_message(app: &App, m: &Value) -> bool {
         .find(|s| s["id"] == json!(session_id))
         .and_then(|s| s.get("messages").and_then(Value::as_array))
         .and_then(|ms| ms.last())
-        .map(|last| {
-            last.get("id").and_then(Value::as_str) == m.get("id").and_then(Value::as_str)
-                && !m.get("content").and_then(Value::as_str).unwrap_or("").is_empty()
-        })
+        .map(|last| last.get("id").and_then(Value::as_str) == m.get("id").and_then(Value::as_str))
         .unwrap_or(false)
 }
 
@@ -808,8 +886,7 @@ fn input_area(app: &App, window: iced::window::Id) -> iced::Element<'_, Message>
     };
     let tool_row = row![
         agent_trigger(app, window),
-        model_trigger(app, window),
-        effort_trigger(app, window),
+        model_select_trigger(app, window),
         Space::new().width(Length::Fill),
         send_btn,
     ]
@@ -903,13 +980,18 @@ fn agent_trigger(app: &App, window: iced::window::Id) -> iced::Element<'static, 
     .into()
 }
 
-/// 模型触发钮：显示面板级覆盖，未覆盖 = 「默认模型」（跟随仓库默认）。
-fn model_trigger(app: &App, window: iced::window::Id) -> iced::Element<'static, Message> {
-    let label = model_label(app);
+/// 模型/推理等级复合触发钮：显示「模型 · 等级」，两级菜单分别设置（面板级覆盖，正交）。
+fn model_select_trigger(app: &App, window: iced::window::Id) -> iced::Element<'static, Message> {
     button(
         row![
             icon("sparkles", 12.0, pal::TEXT_SECONDARY),
-            text(label).size(pal::fs_micro()).color(pal::TEXT_SECONDARY),
+            text(format!(
+                "{} · {}",
+                crate::layout_view::chat_model_trigger_label(app),
+                crate::layout_view::chat_effort_label(app)
+            ))
+            .size(pal::fs_micro())
+            .color(pal::TEXT_SECONDARY),
             icon("chevron-down", 10.0, pal::TEXT_MUTED),
         ]
         .spacing(4)
@@ -926,44 +1008,6 @@ fn model_trigger(app: &App, window: iced::window::Id) -> iced::Element<'static, 
     .into()
 }
 
-/// 推理等级触发钮（面板级覆盖；跟随默认 = 不发送推理参数）。
-fn effort_trigger(app: &App, window: iced::window::Id) -> iced::Element<'static, Message> {
-    let label = match app.chat.effort.as_deref() {
-        Some(level) => format!("推理：{level}"),
-        None => "推理：默认".to_string(),
-    };
-    button(
-        row![
-            icon("layers", 12.0, pal::TEXT_SECONDARY),
-            text(label).size(pal::fs_micro()).color(pal::TEXT_SECONDARY),
-            icon("chevron-down", 10.0, pal::TEXT_MUTED),
-        ]
-        .spacing(4)
-        .align_y(iced::alignment::Vertical::Center),
-    )
-    .padding(Padding::new(6.0).vertical(3.0))
-    .style(controls::row_style(false, pal::RADIUS_XS))
-    .on_press(crate::layout_view::btn_popup_min(
-        window,
-        app.cursor_for(window),
-        crate::layout_view::PopupState::ChatEffortMenu,
-        0.0,
-    ))
-    .into()
-}
-
-/// 面板级模型标签（覆盖缺失 / 供应商已删除时回落「默认模型」）。
-fn model_label(app: &App) -> String {    let Some(model) = app
-        .chat
-        .model_override
-        .as_ref()
-        .and_then(|v| v.get("model").and_then(Value::as_str))
-    else {
-        return "默认模型".to_string();
-    };
-    model.to_string()
-}
-
 /// 对话消息 markdown 渲染（复用阅读面管线；解析缓存由 ChatState 维护，
 /// 未命中回落纯文本）。图片暂不参与（对话消息内嵌图片走后续批次）。
 fn markdown_doc<'a>(app: &'a App, source: &'a str) -> iced::Element<'a, Message> {
@@ -971,7 +1015,7 @@ fn markdown_doc<'a>(app: &'a App, source: &'a str) -> iced::Element<'a, Message>
         std::sync::OnceLock::new();
     let images = EMPTY_IMAGES.get_or_init(std::collections::HashMap::new);
     match app.chat.docs.get(&crate::chat_actions::source_hash(source)) {
-        Some(doc) => crate::markdown_view::document_view(doc, &app.theme, images, true),
+        Some(doc) => crate::markdown_view::document_body(doc, &app.theme, images, true),
         None => text(source.to_string())
             .size(pal::fs_body())
             .color(pal::TEXT_PRIMARY)

@@ -143,7 +143,7 @@ pub struct ChatState {
     pub pending_action: Option<PendingChatAction>,
     /// 已取回待用的 Agent 提示词正文（一次性，随本次发送消费）。
     pub pending_prompt: Option<String>,
-    /// 面板级模型覆盖（None = 跟随仓库默认；值形如 `{providerId, model}`）。
+    /// 面板级模型选择（None = 未选择，发送前检查拒绝；值形如 `{providerId, model}`）。
     pub model_override: Option<Value>,
     /// 面板级推理等级覆盖（None = 跟随默认不发送；值 = 线格式 low/medium/high）。
     pub effort: Option<String>,
@@ -157,6 +157,10 @@ pub struct ChatState {
     pub input: text_editor::Content,
     /// 新对话待固化 Agent（发送首条消息时落会话 agentId）。
     pub draft_agent_id: Option<String>,
+    /// 面板级 Agent 选择（上次选择，随面板覆盖持久化；新建会话继承）。
+    pub agent_override: Option<String>,
+    /// 标题重生成转圈动画节拍（UiTick 在命名在途时递增；视图按计数取旋转角）。
+    pub spin_tick: u32,
     /// 活跃 run 的会话集合。
     pub streaming: HashSet<String>,
     /// 压缩中的会话。
@@ -191,16 +195,17 @@ impl ChatState {
         Self::default()
     }
 
-    /// 当前会话的 agentId（会话值优先，缺省回落新对话草稿）。
+    /// 当前生效的 Agent：活跃会话严格取会话值（存量会话未设 agentId 不被面板
+    /// 上次选择接管）；无活跃会话时回落新对话草稿 → 面板上次选择。
     pub fn active_agent_id(&self) -> Option<String> {
         if let Some(id) = &self.active {
             if let Some(s) = self.sessions.iter().find(|s| s["id"] == json!(id)) {
-                if let Some(agent) = s.get("agentId").and_then(Value::as_str) {
-                    return Some(agent.to_string());
-                }
+                return s.get("agentId").and_then(Value::as_str).map(str::to_string);
             }
         }
-        self.draft_agent_id.clone()
+        self.draft_agent_id
+            .clone()
+            .or_else(|| self.agent_override.clone())
     }
 
     fn session_mut(&mut self, id: &str) -> Option<&mut Value> {
@@ -309,15 +314,15 @@ pub enum ChatMsg {
     InputAction(text_editor::Action),
     Send,
     Stop,
+    /// 重新生成最后一条回复（截断到最后一条 user 后重跑）。
     Regenerate,
     /// 回到此处（二段确认：首次按下进入确认态，再按执行）。
     Rollback(String),
     RollbackCancel,
     Compact,
-    Rename,
     /// 展开 / 收起一个步骤块（思考 / 工具）。
     ToggleStep(String),
-    /// 面板级模型选择（None = 跟随仓库默认）。
+    /// 面板级模型选择（None = 清除选择）。
     ModelPicked(Option<(String, String)>),
     /// 面板级推理等级覆盖（None = 清除覆盖，跟随默认不发送）。
     EffortPicked(Option<String>),
@@ -327,6 +332,10 @@ pub enum ChatMsg {
     RowHover(Option<String>),
     /// 回到底部浮钮。
     ScrollToBottom,
+    /// 按压落在盖层侧栏面板内（吞掉事件，防触发底层的「点外部收起」）。
+    OverlayPress,
+    /// 重新生成当前会话标题（AI 命名，手动触发）。
+    RegenTitle,
     /// 清除顶部行的错误提示。
     ClearError,
     /// run 循环事件（core → Elm）。
@@ -367,7 +376,6 @@ pub enum PendingChatAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AidKind {
     Compact,
-    ManualRename,
     AutoRename,
 }
 
@@ -435,6 +443,7 @@ fn prepare_load(app: &mut App) {
     app.chat.pending_prompt = None;
     app.chat.model_override = None;
     app.chat.effort = None;
+    app.chat.agent_override = None;
 }
 
 /// 装载就绪：投影快照 + 活动会话按最近更新回落 + 历史消息解析缓存重建。
@@ -444,6 +453,7 @@ fn apply_snapshot(app: &mut App, snap: StoreSnapshot) {
     app.chat.persist_error = snap.persist_error.map(|e| (e.message, e.at));
     app.chat.model_override = snap.model_override.filter(|v| !v.is_null());
     app.chat.effort = snap.effort_override;
+    app.chat.agent_override = snap.agent_override;
     // 装载后回到「新对话」态：不自动选中最近会话、不展开会话侧栏——历史会话由用户主动选取
     app.chat.active = None;
     app.chat.sidebar_open = false;
@@ -514,24 +524,15 @@ fn resolve_run_config(
     space_prompt: Option<String>,
     for_run: bool,
 ) -> Result<RunConfig, String> {
-    // 面板级覆盖优先（不指定 = 跟随仓库默认）
+    // 模型来源 = 面板选择（唯一来源；未选择由下方报错拒绝）
     let override_pick = app.chat.model_override.as_ref().and_then(|v| {
         let provider_id = v.get("providerId").and_then(Value::as_str)?;
         let model = v.get("model").and_then(Value::as_str)?;
         Some((provider_id.to_string(), model.to_string()))
     });
-    let from_override = override_pick.is_some();
-    let (provider_id, model) = match override_pick {
-        Some(pick) => pick,
-        None => {
-            let Some(model) = app.repo_config.model.clone() else {
-                return Err("未配置默认模型（设置 → AI 设置 → 模型服务）".to_string());
-            };
-            (
-                app.repo_config.model_provider_id.clone().unwrap_or_default(),
-                model,
-            )
-        }
+    // 模型来源 = 面板选择（上次选择随面板覆盖持久化；设置页不再有默认模型）
+    let Some((provider_id, model)) = override_pick else {
+        return Err("未选择模型：点击输入区下方的模型按钮选择".to_string());
     };
     let Some(provider) = app
         .repo_config
@@ -539,11 +540,7 @@ fn resolve_run_config(
         .as_ref()
         .and_then(|ps| ps.iter().find(|p| p.id == provider_id))
     else {
-        return Err(if from_override {
-            "所选模型的供应商已失效，请在输入区重新选择".to_string()
-        } else {
-            "默认模型的供应商已失效，请重新选择".to_string()
-        });
+        return Err("所选模型的供应商已失效，请在输入区重新选择".to_string());
     };
     let api_key = match &provider.api_key {
         Some(k) if !k.is_empty() => k.clone(),
@@ -564,11 +561,13 @@ fn resolve_run_config(
         }
         Some(_) => None,
     };
+    // 无 Agent = 内置「对话」的工具集（单一维护点在 core builtin_agents）
     let tool_ids = agent.map(|a| a.tools.clone()).unwrap_or_else(|| {
-        ["web_search", "web_fetch", "read_file", "glob", "grep", "list_dir", "read_history"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect()
+        atelyx_core::vault::builtin_agents()
+            .into_iter()
+            .next()
+            .map(|a| a.tools)
+            .unwrap_or_default()
     });
     Ok(RunConfig {
         base_url: provider.base_url.clone(),
@@ -688,6 +687,7 @@ pub fn update(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
             iced::Task::none()
         }
         ChatMsg::ModelPicked(pick) => {
+            app.dismiss_popup();
             let value = pick
                 .map(|(provider_id, model)| json!({ "providerId": provider_id, "model": model }));
             if store()
@@ -695,6 +695,7 @@ pub fn update(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
                     overrides: OverridesPatch {
                         model_override: Some(value.clone()),
                         effort_override: None,
+                        agent_override: None,
                     },
                     ..Default::default()
                 })
@@ -707,11 +708,13 @@ pub fn update(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
             iced::Task::none()
         }
         ChatMsg::EffortPicked(pick) => {
+            app.dismiss_popup();
             if store()
                 .commit(CommitBatch {
                     overrides: OverridesPatch {
                         model_override: None,
                         effort_override: Some(pick.clone()),
+                        agent_override: None,
                     },
                     ..Default::default()
                 })
@@ -731,6 +734,8 @@ pub fn update(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
             app.chat.row_hover = id;
             iced::Task::none()
         }
+        ChatMsg::OverlayPress => iced::Task::none(),
+        ChatMsg::RegenTitle => regenerate_title(app),
         ChatMsg::ScrollToBottom => {
             app.chat.follow_bottom = true;
             scroll_flow_bottom()
@@ -767,23 +772,44 @@ pub fn update(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
             iced::Task::none()
         }
         ChatMsg::AgentPick(id) => {
-            match app.chat.active.clone() {
-                Some(session_id) => {
-                    if let Some(s) = app.chat.session_mut(&session_id) {
-                        s["agentId"] = id.clone().map(|v| serde_json::json!(v)).unwrap_or(Value::Null);
-                    }
-                    let _ = store().commit(CommitBatch {
+            app.dismiss_popup();
+            // 选择同时固化为面板覆盖（新建会话继承上次选择）
+            app.chat.agent_override = id.clone();
+            app.chat.draft_agent_id = id.clone();
+            if let Some(session_id) = app.chat.active.clone() {
+                if let Some(s) = app.chat.session_mut(&session_id) {
+                    s["agentId"] = id.clone().map(|v| serde_json::json!(v)).unwrap_or(Value::Null);
+                }
+                if store()
+                    .commit(CommitBatch {
                         metas: vec![MetaPatch {
                             id: session_id,
                             title: None,
-                            agent_id: Some(id),
+                            agent_id: Some(id.clone()),
                             compaction: None,
                             updated_at: None,
                         }],
+                        overrides: OverridesPatch {
+                            agent_override: Some(id),
+                            ..Default::default()
+                        },
                         ..Default::default()
-                    });
+                    })
+                    .is_err()
+                {
+                    app.chat.error = Some("Agent 选择保存失败".to_string());
                 }
-                None => app.chat.draft_agent_id = id,
+            } else if store()
+                .commit(CommitBatch {
+                    overrides: OverridesPatch {
+                        agent_override: Some(id),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+                .is_err()
+            {
+                app.chat.error = Some("Agent 选择保存失败".to_string());
             }
             iced::Task::none()
         }
@@ -799,7 +825,8 @@ pub fn update(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
         }
         ChatMsg::NewSession => {
             app.chat.active = None;
-            app.chat.draft_agent_id = None;
+            // 新会话继承上次使用的 Agent（面板覆盖；未选过 = 内置「对话」走名册缺省）
+            app.chat.draft_agent_id = app.chat.agent_override.clone();
             app.chat.error = None;
             app.chat.rollback_confirm = None;
             iced::Task::none()
@@ -882,7 +909,6 @@ pub fn update(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
             iced::Task::none()
         }
         ChatMsg::Compact => compact(app),
-        ChatMsg::Rename => manual_rename(app),
         ChatMsg::Run(event) => on_run_event(app, event),
         ChatMsg::PluginSend { request_id, plugin_id, text, session_id } => {
             plugin_chat_send(app, request_id, &plugin_id, text, session_id)
@@ -940,24 +966,6 @@ pub fn update(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
                         }
                     } else {
                         app.chat.error = Some("压缩失败".to_string());
-                    }
-                }
-                AidKind::ManualRename => {
-                    app.chat.renaming.remove(&session_id);
-                    match result {
-                        Some(title) => {
-                            let _ = store().commit(CommitBatch {
-                                metas: vec![MetaPatch {
-                                    id: session_id.clone(),
-                                    title: Some(title),
-                                    agent_id: None,
-                                    compaction: None,
-                                    updated_at: None,
-                                }],
-                                ..Default::default()
-                            });
-                        }
-                        None => app.chat.error = Some("命名失败".to_string()),
                     }
                 }
                 AidKind::AutoRename => {
@@ -1029,6 +1037,48 @@ fn chat_entry(app: &mut App, action: PendingChatAction) -> iced::Task<Message> {
         PendingChatAction::Send => send_now(app, prompt),
         PendingChatAction::Regenerate => regenerate_now(app, prompt),
     }
+}
+
+fn regenerate_now(app: &mut App, space_prompt: Option<String>) -> iced::Task<Message> {
+    let Some(session_id) = app.chat.active.clone() else {
+        return iced::Task::none();
+    };
+    if app.chat.streaming.contains(&session_id) || app.chat.compacting.is_some() {
+        return iced::Task::none();
+    }
+    let Some(session) = app.chat.sessions.iter().find(|s| s["id"] == json!(session_id)) else {
+        return iced::Task::none();
+    };
+    let messages = session
+        .get("messages")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    // 找最后一条 user：重生成 = 截断到它（含）并以 displayContent 重发
+    let Some(last_user_idx) = messages.iter().rposition(|m| m["role"] == json!("user")) else {
+        return iced::Task::none();
+    };
+    let config = match resolve_run_config(app, session.get("agentId").and_then(Value::as_str), space_prompt, true) {
+        Ok(c) => c,
+        Err(e) => {
+            app.chat.error = Some(e);
+            return iced::Task::none();
+        }
+    };
+    if let Err(e) = store().commit(CommitBatch {
+        truncations: vec![TruncateEntry {
+            session_id: session_id.clone(),
+            keep_count: last_user_idx + 1,
+        }],
+        ..Default::default()
+    }) {
+        app.chat.error = Some(format!("回退失败：{e}"));
+        return iced::Task::none();
+    }
+    let history = store().session_messages(&session_id).unwrap_or_default();
+    let compaction = session.get("compaction").cloned().filter(|c| !c.is_null());
+    app.chat.refresh_session(&session_id);
+    start_run(config, session_id, compaction, history, app)
 }
 
 fn send_now(app: &mut App, space_prompt: Option<String>) -> iced::Task<Message> {
@@ -1148,47 +1198,6 @@ fn start_run(
     })
 }
 
-fn regenerate_now(app: &mut App, space_prompt: Option<String>) -> iced::Task<Message> {
-    let Some(session_id) = app.chat.active.clone() else {
-        return iced::Task::none();
-    };
-    if app.chat.streaming.contains(&session_id) || app.chat.compacting.is_some() {
-        return iced::Task::none();
-    }
-    let Some(session) = app.chat.sessions.iter().find(|s| s["id"] == json!(session_id)) else {
-        return iced::Task::none();
-    };
-    let messages = session
-        .get("messages")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    // 找最后一条 user：重生成 = 截断到它（含）并以 displayContent 重发
-    let Some(last_user_idx) = messages.iter().rposition(|m| m["role"] == json!("user")) else {
-        return iced::Task::none();
-    };
-    let config = match resolve_run_config(app, session.get("agentId").and_then(Value::as_str), space_prompt, true) {
-        Ok(c) => c,
-        Err(e) => {
-            app.chat.error = Some(e);
-            return iced::Task::none();
-        }
-    };
-    if let Err(e) = store().commit(CommitBatch {
-        truncations: vec![TruncateEntry {
-            session_id: session_id.clone(),
-            keep_count: last_user_idx + 1,
-        }],
-        ..Default::default()
-    }) {
-        app.chat.error = Some(format!("回退失败：{e}"));
-        return iced::Task::none();
-    }
-    let history = store().session_messages(&session_id).unwrap_or_default();
-    let compaction = session.get("compaction").cloned().filter(|c| !c.is_null());
-    app.chat.refresh_session(&session_id);
-    start_run(config, session_id, compaction, history, app)
-}
 
 fn rollback(app: &mut App, message_id: &str) -> iced::Task<Message> {
     let Some(session_id) = app.chat.active.clone() else {
@@ -1296,46 +1305,6 @@ fn compact(app: &mut App) -> iced::Task<Message> {
     })
 }
 
-fn manual_rename(app: &mut App) -> iced::Task<Message> {
-    let Some(session_id) = app.chat.active.clone() else {
-        return iced::Task::none();
-    };
-    if app.chat.renaming.contains(&session_id) || app.chat.streaming.contains(&session_id) {
-        return iced::Task::none();
-    }
-    let config = match resolve_run_config(app, app.chat.active_agent_id().as_deref(), None, false) {
-        Ok(c) => c,
-        Err(e) => {
-            app.chat.error = Some(e);
-            return iced::Task::none();
-        }
-    };
-    let Some(session) = app.chat.sessions.iter().find(|s| s["id"] == json!(session_id)) else {
-        return iced::Task::none();
-    };
-    let messages = session
-        .get("messages")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let excerpt = transcript_excerpt(&messages);
-    app.chat.renaming.insert(session_id.clone());
-    iced::Task::future(async move {
-        let Some(client) = agent::aid_client(&config.base_url) else {
-            return Message::Chat(ChatMsg::AidDone(AidKind::ManualRename, session_id, None));
-        };
-        let title = agent::auto_title(
-            &client,
-            &config.base_url,
-            &config.api_key,
-            &config.model,
-            &excerpt,
-        )
-        .await;
-        Message::Chat(ChatMsg::AidDone(AidKind::ManualRename, session_id, title))
-    })
-}
-
 fn transcript_excerpt(messages: &[Value]) -> String {
     messages
         .iter()
@@ -1440,6 +1409,7 @@ fn maybe_auto_name(app: &mut App, session_id: &str) -> Option<iced::Task<Message
         return None;
     }
     let session = app.chat.sessions.iter().find(|s| s["id"] == json!(session_id))?;
+    // 自动命名只补空标题；已有标题走面板的「重新生成标题」
     if session.get("title").and_then(Value::as_str).is_some() {
         return None;
     }
@@ -1449,9 +1419,51 @@ fn maybe_auto_name(app: &mut App, session_id: &str) -> Option<iced::Task<Message
     {
         return None;
     }
-    let agent_id = session.get("agentId").and_then(Value::as_str);
-    let default = resolve_run_config(app, agent_id, None, false).ok()?;
-    // 命名路由：设置指定模型 > 默认模型（供应商失效不跨家替换）
+    spawn_title_task(app, session_id, &messages)
+}
+
+/// 命名在途的转圈动画节拍（UiTick 递增；视图按计数取旋转角）。
+pub fn on_ui_tick(app: &mut App) {
+    if !app.chat.renaming.is_empty() {
+        app.chat.spin_tick = app.chat.spin_tick.wrapping_add(1);
+    }
+}
+
+/// 手动重新生成当前会话标题（无视命名模式开关；命名路由与自动命名一致）。
+fn regenerate_title(app: &mut App) -> iced::Task<Message> {
+    let Some(session_id) = app.chat.active.clone() else {
+        return iced::Task::none();
+    };
+    if app.chat.streaming.contains(&session_id) || app.chat.renaming.contains(&session_id) {
+        return iced::Task::none();
+    }
+    let Some(session) = app.chat.sessions.iter().find(|s| s["id"] == json!(session_id)) else {
+        return iced::Task::none();
+    };
+    let Some(messages) = session.get("messages").and_then(Value::as_array).cloned() else {
+        return iced::Task::none();
+    };
+    if !messages.iter().any(|m| m["role"] == json!("user"))
+        || !messages.iter().any(|m| m["role"] == json!("assistant"))
+    {
+        return iced::Task::none();
+    }
+    spawn_title_task(app, &session_id, &messages).unwrap_or_else(|| {
+        app.chat.error = Some("标题生成不可用：未选择模型或命名模型未配置".to_string());
+        iced::Task::none()
+    })
+}
+
+/// 发布命名任务：命名路由 = 设置指定模型 > 面板当前模型；发起即登记 renaming（回执按会话摘除）。
+fn spawn_title_task(
+    app: &mut App,
+    session_id: &str,
+    messages: &[Value],
+) -> Option<iced::Task<Message>> {
+    use crate::settings_view::ai::NamingMode;
+    let session = app.chat.sessions.iter().find(|s| s["id"] == json!(session_id))?;
+    let agent_ref = session.get("agentId").and_then(Value::as_str).map(str::to_string);
+    // 命名路由：设置指定模型优先（不依赖面板选择）；跟随所选 = 面板当前生效模型
     let (base_url, api_key, model) = match crate::settings_view::ai::naming_mode(app) {
         NamingMode::Custom => {
             let pick = app.repo_config.auto_naming_model.clone()?;
@@ -1471,9 +1483,12 @@ fn maybe_auto_name(app: &mut App, session_id: &str) -> Option<iced::Task<Message
             };
             (provider.base_url.clone(), api_key, pick.model)
         }
-        _ => (default.base_url.clone(), default.api_key.clone(), default.model.clone()),
+        _ => {
+            let default = resolve_run_config(app, agent_ref.as_deref(), None, false).ok()?;
+            (default.base_url.clone(), default.api_key.clone(), default.model.clone())
+        }
     };
-    let excerpt = transcript_excerpt(&messages);
+    let excerpt = transcript_excerpt(messages);
     app.chat.renaming.insert(session_id.to_string());
     let sid = session_id.to_string();
     Some(iced::Task::future(async move {
@@ -1508,7 +1523,7 @@ fn plugin_chat_send(
         deny(app, request_id, e);
         return iced::Task::none();
     }
-    // 插件会话一律用仓库 AI 设置的默认 Agent 与模型（不指定、不带 key）
+    // 插件会话不指定 Agent 与 key：模型跟随面板当前选择（唯一模型来源），未选择即拒绝并回传原因
     let config = match resolve_run_config(app, None, None, false) {
         Ok(config) => config,
         Err(e) => {

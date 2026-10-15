@@ -7,7 +7,7 @@ use iced::{Element, Length, Padding, Point, Task, border, widget::container::Sty
 use atelyx_core::credentials;
 use atelyx_core::vault;
 
-use crate::layout_view::{PopupOpen, PopupState, mono};
+use crate::layout_view::{PopupOpen, PopupState};
 use crate::space_actions;
 use crate::ui::controls;
 use crate::ui::icon::icon;
@@ -59,6 +59,29 @@ const TOOL_CATEGORIES: &[ToolCategory] = &[
     ToolCategory { label: "插件", tools: &["plugin"] },
 ];
 
+/// 工具显示名（对话面板工具行 / 设置页工具清单共用）。
+pub(crate) fn tool_label(id: &str) -> &'static str {
+    match id {
+        "web_search" => "联网搜索",
+        "web_fetch" => "抓取网页",
+        "read_file" => "读取文件",
+        "glob" => "查找文件",
+        "grep" => "搜索内容",
+        "list_dir" => "列出目录",
+        "read_history" => "读取历史",
+        "edit_file" => "编辑文件",
+        "append_file" => "追加内容",
+        "write_file" => "写入文件",
+        "rename_file" => "重命名文件",
+        "move_file" => "移动文件",
+        "delete_file" => "删除文件",
+        "delete_dir" => "删除目录",
+        "todo_write" => "任务清单",
+        "plugin" => "插件工具",
+        _ => "工具",
+    }
+}
+
 /// 话题自动命名模式。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum NamingMode {
@@ -101,6 +124,29 @@ pub fn ensure_selection(app: &mut App) {
         app.ai.agent_sel = app.agents.first().map(|a| a.id.clone());
         app.ai.agent_draft = app.agents.first().map(agent_draft_of);
     }
+    if app.ai.collapsed_cats.len() != TOOL_CATEGORIES.len() {
+        app.ai.collapsed_cats = vec![true; TOOL_CATEGORIES.len()];
+    }
+    app.ai.search_ready = search_source_ready(app);
+}
+
+/// 搜索源就绪：tavily = 密钥可用（随仓明文或本机密钥链）；searxng = 地址非空。
+fn search_source_ready(app: &App) -> bool {
+    let Some(search) = &app.repo_config.search else { return false };
+    match search.provider.as_str() {
+        "tavily" => {
+            if search.tavily_api_key.as_deref().is_some_and(|k| !k.is_empty()) {
+                return true;
+            }
+            key_scope(app)
+                .and_then(|scope| {
+                    crate::credentials::load_provider_key(&scope, "search-tavily").ok().flatten()
+                })
+                .is_some_and(|k| !k.is_empty())
+        }
+        "searxng" => !search.searxng_url.is_empty(),
+        _ => false,
+    }
 }
 
 // ===== 会话内编辑状态 =====
@@ -125,6 +171,12 @@ pub struct AiState {
     pub fetch_error: Option<String>,
     /// 待清理的密钥链条目 (scope, 供应商 id)：供应商删除在配置落盘成功后执行。
     pub provider_key_delete_pending: Option<(String, String)>,
+    /// Agent 列表悬停行（悬停显形复制/删除操作钮）。
+    pub agent_hover: Option<String>,
+    /// 工具分类折叠状态（缺省全折叠；不持久化，进设置页重置）。
+    pub collapsed_cats: Vec<bool>,
+    /// 搜索源就绪（未就绪时工具行的联网项给降级提示）。
+    pub search_ready: bool,
 }
 
 /// 供应商表单草稿（api_key 明文仅存内存；保存按 syncKeys 决定落点）。
@@ -184,7 +236,6 @@ pub enum AiMsg {
     ProviderNickname(usize, String),
     ProviderDelete,
     // 模型服务
-    DefaultModelPick(Option<(String, String)>),
     NamingModePick(NamingMode),
     NamingModelPick(Option<(String, String)>),
     // Agent
@@ -197,6 +248,14 @@ pub enum AiMsg {
     AgentCategoryToggle(usize),
     AgentSave,
     AgentDelete,
+    /// Agent 列表行悬停（悬停显形操作钮）。
+    AgentHover(Option<String>),
+    /// 复制 Agent（新 id 副本，紧随原条目入列）。
+    AgentDuplicate(String),
+    /// 工具分类折叠切换。
+    AgentCatCollapse(usize),
+    /// 提示词失效收敛完成（missing = 已不存在的路径集合）。
+    PromptPruneDone(u64, Vec<String>),
     // 联网搜索
     SearchProviderPick(String),
     SearchTavilyKey(String),
@@ -246,7 +305,79 @@ pub fn load_agents(app: &App) -> Task<Message> {
     )
 }
 
+/// 提示词失效收敛（幂等自愈）：注册列表与 Agent 引用中指向已删除笔记的路径清零。
+/// 存在性校验失败（网络抖动等）按存在处理，本轮跳过；写盘失败静默，下轮再收敛。
+pub fn prune_missing_prompts(app: &App) -> Task<Message> {
+    let mut paths = app.prompt_notes.clone();
+    for f in app.agents.iter().filter_map(|a| a.system_prompt_file.clone()) {
+        if !paths.contains(&f) {
+            paths.push(f);
+        }
+    }
+    if paths.is_empty() {
+        return Task::none();
+    }
+    let gen = app.epoch();
+    let probe = match &app.repo_kind {
+        crate::RepoKind::Local => {
+            let Some(root) = app.vault_root.clone() else { return Task::none() };
+            Probe::Local { root, paths }
+        }
+        crate::RepoKind::Space(session) => Probe::Space {
+            client: session.client.clone(),
+            space_id: session.space_id.clone(),
+            paths,
+        },
+    };
+    Task::perform(
+        async move {
+            let mut missing: Vec<String> = Vec::new();
+            match probe {
+                Probe::Local { root, paths } => {
+                    for f in paths {
+                        // 只认「文件不在」：读权限/占用类失败不误判为已删除
+                        if !atelyx_core::vault::note_exists(&root, &f) {
+                            missing.push(f);
+                        }
+                    }
+                }
+                Probe::Space { client, space_id, paths } => {
+                    for f in paths {
+                        // NotFound = 已删除；其余错误按存在处理（本轮跳过）
+                        let gone = matches!(
+                            client.get_file_text(&space_id, &f).await,
+                            Err(atelyx_core::space_client::SpaceError::NotFound)
+                        );
+                        if gone {
+                            missing.push(f);
+                        }
+                    }
+                }
+            }
+            missing
+        },
+        move |missing| Message::Ai(AiMsg::PromptPruneDone(gen, missing)),
+    )
+}
+
+/// 存在性探针：把仓库访问凭据从 App 拆出，供异步块独立持有。
+enum Probe {
+    Local {
+        root: std::path::PathBuf,
+        paths: Vec<String>,
+    },
+    Space {
+        client: std::sync::Arc<atelyx_core::space_client::SpaceClient>,
+        space_id: String,
+        paths: Vec<String>,
+    },
+}
+
 /// agents.json 写盘（本地 = 原子写后重读；空间 = 整表 PUT 后重读；回执经 AgentsLoaded）。
+pub fn save_agents_pub(app: &mut App, agents: Vec<vault::AgentConfig>) -> Task<Message> {
+    save_agents(app, agents)
+}
+
 fn save_agents(app: &mut App, agents: Vec<vault::AgentConfig>) -> Task<Message> {
     if let crate::RepoKind::Space(_) = app.repo_kind {
         return space_actions::space_write_agents(app, agents);
@@ -329,9 +460,94 @@ pub fn update(app: &mut App, msg: AiMsg) -> Task<Message> {
             app.ai_sub_tab = id.to_string();
             ensure_selection(app);
             if id == "agents" {
-                return load_agents(app);
+                let prune = prune_missing_prompts(app);
+                return Task::batch([load_agents(app), prune]);
             }
             Task::none()
+        }
+        AiMsg::PromptPruneDone(gen, missing) => {
+            if gen != app.epoch() || missing.is_empty() {
+                return Task::none();
+            }
+            let mut tasks: Vec<Task<Message>> = Vec::new();
+            // 注册列表收敛（写回执经 PromptNotesLoaded 对齐内存）
+            let notes: Vec<String> = app
+                .prompt_notes
+                .iter()
+                .filter(|f| !missing.contains(f))
+                .cloned()
+                .collect();
+            if notes.len() != app.prompt_notes.len() {
+                let cleared = app.prompt_notes.len() - notes.len();
+                app.prompt_notes = notes.clone();
+                let gen = app.epoch();
+                match &app.repo_kind {
+                    crate::RepoKind::Local => {
+                        if let Some(root) = app.vault_root.clone() {
+                            tasks.push(Task::perform(
+                                async move {
+                                    atelyx_core::vault::write_prompt_notes_file(&root, &notes)?;
+                                    atelyx_core::vault::read_prompt_notes_file(&root)
+                                },
+                                move |result| Message::PromptNotesLoaded(gen, result),
+                            ));
+                        }
+                    }
+                    crate::RepoKind::Space(session) => {
+                        // 只读成员不发起无权限写盘（服务端会拒绝并污染通知）
+                        if !session.role.can_write() {
+                            app.notify(NoticeLevel::Info, "只读身份：跳过提示词失效清理");
+                        } else {
+                            let client = session.client.clone();
+                            let space_id = session.space_id.clone();
+                            let json = serde_json::to_string(&notes).unwrap_or_default();
+                            tasks.push(Task::perform(
+                                async move {
+                                    client
+                                        .put_file_text(&space_id, ".atelyx/prompt-notes.json", &json)
+                                        .await?;
+                                    Ok::<_, atelyx_core::space_client::SpaceError>(notes)
+                                },
+                                move |result| {
+                                    Message::PromptNotesLoaded(gen, result.map_err(|e| e.to_string()))
+                                },
+                            ));
+                        }
+                    }
+                }
+                app.notify(NoticeLevel::Info, format!("已清理 {cleared} 条失效提示词标记"));
+            }
+            // Agent 引用收敛（与注册列表对称；写失败不回滚注册列表，下轮再收敛残留）
+            let mut cleared_refs = 0usize;
+            let agents: Vec<vault::AgentConfig> = app
+                .agents
+                .iter()
+                .map(|a| {
+                    let mut a = a.clone();
+                    if a.system_prompt_file
+                        .as_deref()
+                        .is_some_and(|f| missing.iter().any(|m| m == f))
+                    {
+                        a.system_prompt_file = None;
+                        cleared_refs += 1;
+                    }
+                    a
+                })
+                .collect();
+            if cleared_refs > 0 {
+                app.agents = agents.clone();
+                app.ai.agent_draft = None;
+                tasks.push(save_agents(app, agents));
+                app.notify(
+                    NoticeLevel::Info,
+                    format!("移除 {cleared_refs} 个 Agent 的提示词引用"),
+                );
+            }
+            if tasks.is_empty() {
+                Task::none()
+            } else {
+                Task::batch(tasks)
+            }
         }
 
         // ---- 供应商 ----
@@ -511,19 +727,6 @@ pub fn update(app: &mut App, msg: AiMsg) -> Task<Message> {
         }
 
         // ---- 模型服务 ----
-        AiMsg::DefaultModelPick(pick) => {
-            app.dismiss_popup();
-            let (model, provider_id) = match pick {
-                Some((pid, mid)) => (Some(mid.clone()), Some(pid)),
-                None => (None, None),
-            };
-            app.repo_config.model = model;
-            app.repo_config.model_provider_id = provider_id;
-            app.patch_repo_config(serde_json::json!({
-                "model": app.repo_config.model,
-                "modelProviderId": app.repo_config.model_provider_id,
-            }))
-        }
         AiMsg::NamingModePick(mode) => {
             app.dismiss_popup();
             let enabled = mode != NamingMode::Off;
@@ -634,12 +837,52 @@ pub fn update(app: &mut App, msg: AiMsg) -> Task<Message> {
             app.agents = agents.clone();
             save_agents(app, agents)
         }
+        AiMsg::AgentHover(id) => {
+            app.ai.agent_hover = id;
+            Task::none()
+        }
+        AiMsg::AgentDuplicate(id) => {
+            app.dismiss_popup();
+            if readonly(app) {
+                return Task::none();
+            }
+            let Some(src) = app.agents.iter().find(|a| a.id == id).cloned() else {
+                return Task::none();
+            };
+            let mut agents = app.agents.clone();
+            if let Some(pos) = agents.iter().position(|a| a.id == id) {
+                let copy = vault::AgentConfig {
+                    id: format!("agent-{}", nanoid::nanoid!(8)),
+                    name: format!("{} 副本", src.name),
+                    system_prompt_file: src.system_prompt_file.clone(),
+                    tools: src.tools.clone(),
+                    builtin: None,
+                };
+                agents.insert(pos + 1, copy);
+            }
+            save_agents(app, agents)
+        }
+        AiMsg::AgentCatCollapse(i) => {
+            if let Some(v) = app.ai.collapsed_cats.get_mut(i) {
+                *v = !*v;
+            }
+            Task::none()
+        }
         AiMsg::AgentDelete => {
             app.dismiss_popup();
             if readonly(app) {
                 return Task::none();
             }
-            let Some(id) = app.ai.agent_sel.take() else { return Task::none() };
+            let Some(id) = app.ai.agent_sel.clone() else { return Task::none() };
+            // 内置 Agent 兜底保护（入口按钮已隐藏，防其它路径误删）：守卫先行，不动选中态
+            if app
+                .agents
+                .iter()
+                .any(|a| a.id == id && a.builtin.unwrap_or(false))
+            {
+                return Task::none();
+            }
+            app.ai.agent_sel = None;
             app.ai.agent_draft = None;
             let mut agents = app.agents.clone();
             agents.retain(|a| a.id != id);
@@ -1310,13 +1553,6 @@ fn models_view(app: &App, window: iced::window::Id) -> Element<'static, Message>
     let ro = readonly(app);
     let model_count = app.repo_config.providers.iter().flatten().map(|p| p.models.len()).sum::<usize>();
     let mut col = column![].spacing(8);
-    col = col.push(super::group_head("默认模型", "", true));
-    let default_trigger = controls::dropdown_trigger(
-        &default_model_label(app),
-        FORM_W,
-        (!ro && model_count > 0).then(|| open_popup(app, window, PopupState::AiModelMenu { for_naming: false })),
-    );
-    col = col.push(super::setting_row("默认模型", "对话与话题命名缺省使用的模型", default_trigger));
     if model_count == 0 {
         col = col.push(container(controls::empty_state(
             "sparkles",
@@ -1342,9 +1578,9 @@ fn models_view(app: &App, window: iced::window::Id) -> Element<'static, Message>
         let model_trigger = controls::dropdown_trigger(
             &naming_model_label(app),
             FORM_W,
-            (!ro && model_count > 0).then(|| open_popup(app, window, PopupState::AiModelMenu { for_naming: true })),
+            (!ro && model_count > 0).then(|| open_popup(app, window, PopupState::AiModelMenu)),
         );
-        col = col.push(super::setting_row("命名模型", "话题命名一般用小模型；跟随默认 = 用默认模型", model_trigger));
+        col = col.push(super::setting_row("命名模型", "话题命名一般用小模型；跟随所选 = 用对话时选择的模型", model_trigger));
     }
     scrollable(container(col).padding(Padding::ZERO.bottom(24.0)))
         .width(Length::Fill)
@@ -1362,22 +1598,10 @@ fn provider_name(app: &App, id: &str) -> String {
         .unwrap_or_else(|| id.to_string())
 }
 
-fn model_label(app: &App, model: Option<&String>, provider_id: Option<&String>) -> String {
-    match (model, provider_id) {
-        (Some(m), Some(pid)) => format!("{} / {}", provider_name(app, pid), m),
-        (Some(m), None) => m.clone(),
-        _ => "不指定".into(),
-    }
-}
-
-fn default_model_label(app: &App) -> String {
-    model_label(app, app.repo_config.model.as_ref(), app.repo_config.model_provider_id.as_ref())
-}
-
 fn naming_label(mode: NamingMode) -> &'static str {
     match mode {
         NamingMode::Off => "不启用",
-        NamingMode::FollowDefault => "跟随默认",
+        NamingMode::FollowDefault => "跟随所选模型",
         NamingMode::Custom => "指定模型",
     }
 }
@@ -1385,7 +1609,7 @@ fn naming_label(mode: NamingMode) -> &'static str {
 fn naming_model_label(app: &App) -> String {
     match &app.repo_config.auto_naming_model {
         Some(o) => format!("{} / {}", provider_name(app, &o.provider_id), o.model),
-        None => "跟随默认".into(),
+        None => "跟随所选模型".into(),
     }
 }
 
@@ -1395,7 +1619,12 @@ fn agents_view(app: &App, window: iced::window::Id) -> Element<'static, Message>
     let ro = readonly(app);
     let mut list = column![].spacing(4);
     for a in &app.agents {
-        list = list.push(agent_card(a, app.ai.agent_sel.as_deref() == Some(a.id.as_str())));
+        list = list.push(agent_card(
+            app,
+            window,
+            a,
+            app.ai.agent_sel.as_deref() == Some(a.id.as_str()),
+        ));
     }
     if app.agents.is_empty() {
         list = list.push(text("暂无 Agent，点「新建」开始").size(pal::fs_caption()).color(pal::TEXT_MUTED));
@@ -1447,22 +1676,68 @@ fn agents_view(app: &App, window: iced::window::Id) -> Element<'static, Message>
     .into()
 }
 
-fn agent_card(a: &vault::AgentConfig, selected: bool) -> Element<'static, Message> {
-    let mut line = row![].spacing(6);
+fn agent_card(
+    app: &App,
+    window: iced::window::Id,
+    a: &vault::AgentConfig,
+    selected: bool,
+) -> Element<'static, Message> {
+    let builtin = a.builtin.unwrap_or(false);
+    let summary = match &a.system_prompt_file {
+        Some(f) => {
+            let title = f.rsplit('/').next().unwrap_or(f).trim_end_matches(".md");
+            format!("已注册提示词：{title}")
+        }
+        None => "无提示词".to_string(),
+    };
+    let mut line = row![].spacing(6).align_y(iced::alignment::Vertical::Center);
     line = line.push(
-        text(a.name.clone())
-            .size(pal::fs_caption())
-            .color(if selected { pal::ACCENT } else { pal::TEXT_PRIMARY }),
+        column![
+            row![
+                text(a.name.clone())
+                    .size(pal::fs_caption())
+                    .color(if selected { pal::ACCENT } else { pal::TEXT_PRIMARY }),
+                (builtin).then(|| controls::badge("预置", pal::BG_TERTIARY, pal::TEXT_SECONDARY)),
+            ]
+            .spacing(6)
+            .align_y(iced::alignment::Vertical::Center),
+            text(summary).size(pal::fs_micro()).color(pal::TEXT_MUTED),
+        ]
+        .spacing(2)
+        .width(Length::Fill),
     );
-    if a.builtin.unwrap_or(false) {
-        line = line.push(controls::badge("预置", pal::BG_TERTIARY, pal::TEXT_SECONDARY));
+    // 悬停显形操作钮（预置无删除）；按钮独立于选中按钮，避免行点击误触
+    if app.ai.agent_hover.as_deref() == Some(a.id.as_str()) {
+        line = line.push(controls::icon_button(
+            "copy",
+            12.0,
+            22.0,
+            controls::Variant::Ghost,
+            (!readonly(app)).then(|| Message::Ai(AiMsg::AgentDuplicate(a.id.clone()))),
+            Some((window, "复制 Agent".to_string())),
+        ));
+        if !builtin {
+            let del = open_popup(app, window, PopupState::AiAgentDeleteMenu);
+            line = line.push(controls::icon_button(
+                "trash-2",
+                12.0,
+                22.0,
+                controls::Variant::Ghost,
+                Some(del),
+                Some((window, "删除 Agent".to_string())),
+            ));
+        }
     }
-    button(line)
-        .width(Length::Fill)
-        .padding(Padding::ZERO.horizontal(10.0).vertical(6.0))
-        .style(controls::row_style(selected, pal::RADIUS_SM))
-        .on_press(Message::Ai(AiMsg::AgentSelect(a.id.clone())))
-        .into()
+    iced::widget::mouse_area(
+        button(line)
+            .width(Length::Fill)
+            .padding(Padding::ZERO.horizontal(10.0).vertical(6.0))
+            .style(controls::row_style(selected, pal::RADIUS_SM))
+            .on_press(Message::Ai(AiMsg::AgentSelect(a.id.clone()))),
+    )
+    .on_enter(Message::Ai(AiMsg::AgentHover(Some(a.id.clone()))))
+    .on_exit(Message::Ai(AiMsg::AgentHover(None)))
+    .into()
 }
 
 fn agent_form(app: &App, a: &vault::AgentConfig, window: iced::window::Id) -> Element<'static, Message> {
@@ -1501,8 +1776,37 @@ fn agent_form(app: &App, a: &vault::AgentConfig, window: iced::window::Id) -> El
 
     col = col.push(super::group_head("工具", "勾选后该 Agent 的对话可调用", true));
     for (ci, cat) in TOOL_CATEGORIES.iter().enumerate() {
+        // 插件工具未接入（无插件贡献工具），整组隐藏
+        if cat.label == "插件" {
+            continue;
+        }
         let state = category_state(&tools, cat);
+        let collapsed = app.ai.collapsed_cats.get(ci).copied().unwrap_or(true);
+        // 分类头整行可点折叠；复选框只切全选/全不选
+        if cat.tools.len() == 1 {
+            // 单工具分类不设分组头，直接给工具行
+            let t = cat.tools[0];
+            let on = tools.iter().any(|x| x == t);
+            let tool_line = row![
+                controls::checkbox(
+                    if on { controls::CheckState::On } else { controls::CheckState::Off },
+                    (!ro).then(|| Message::Ai(AiMsg::AgentToolToggle(t.to_string()))),
+                ),
+                text(tool_label(t))
+                    .size(pal::fs_caption())
+                    .color(pal::TEXT_SECONDARY),
+            ]
+            .spacing(6)
+            .align_y(iced::alignment::Vertical::Center);
+            col = col.push(container(tool_line).padding(Padding::ZERO.horizontal(8.0).top(4.0)));
+            continue;
+        }
         let head = row![
+            icon(
+                if collapsed { "chevron-right" } else { "chevron-down" },
+                12.0,
+                pal::TEXT_MUTED
+            ),
             controls::checkbox(state, (!ro).then(|| Message::Ai(AiMsg::AgentCategoryToggle(ci)))),
             text(cat.label.to_string())
                 .size(pal::fs_caption())
@@ -1511,19 +1815,37 @@ fn agent_form(app: &App, a: &vault::AgentConfig, window: iced::window::Id) -> El
         ]
         .spacing(6)
         .align_y(iced::alignment::Vertical::Center);
-        col = col.push(container(head).padding(Padding::ZERO.horizontal(8.0).top(4.0)));
+        col = col.push(
+            iced::widget::mouse_area(
+                container(head).padding(Padding::ZERO.horizontal(8.0).top(4.0)).width(Length::Fill),
+            )
+            .on_press(Message::Ai(AiMsg::AgentCatCollapse(ci))),
+        );
+        if collapsed {
+            continue;
+        }
         for t in cat.tools {
             let on = tools.iter().any(|x| x == t);
-            let tool_row = row![
+            let needs_search = *t == "web_search";
+            let mut tool_line = row![
                 controls::checkbox(
                     if on { controls::CheckState::On } else { controls::CheckState::Off },
                     (!ro).then(|| Message::Ai(AiMsg::AgentToolToggle(t.to_string()))),
                 ),
-                text(t.to_string()).size(pal::fs_caption()).color(pal::TEXT_SECONDARY).font(mono()),
+                text(tool_label(t))
+                    .size(pal::fs_caption())
+                    .color(pal::TEXT_SECONDARY),
             ]
             .spacing(6)
             .align_y(iced::alignment::Vertical::Center);
-            col = col.push(container(tool_row).padding(Padding::ZERO.left(20.0)));
+            if needs_search && !app.ai.search_ready {
+                tool_line = tool_line.push(
+                    text("（未配置搜索源，发送时自动降级）")
+                        .size(pal::fs_micro())
+                        .color(pal::TEXT_MUTED),
+                );
+            }
+            col = col.push(container(tool_line).padding(Padding::ZERO.left(20.0)));
         }
     }
 
