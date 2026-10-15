@@ -245,18 +245,29 @@ fn expand_assistant(content: &str, steps: Option<&Value>, out: &mut Vec<LlmMessa
         }
         return;
     };
-    // 分组：每轮 = 思考/叙述段 + 其后工具行；末轮（无工具行）为最终正文候选
+    // 分组：每轮 = 思考/叙述段 + 其后连续工具行；末轮（无工具行）为最终正文候选
     let mut rounds: Vec<(String, Vec<&Value>)> = Vec::new();
     let mut narration = String::new();
+    // 当前轮是否已收工具：同一轮的连续工具调用必须归进同一条 assistant(tool_calls)，
+    // 拆成多条会与实时请求形状不一致（下一轮请求的历史保真度受损）
+    let mut round_open = false;
     for s in steps {
         match s.get("kind").and_then(Value::as_str) {
             Some("text") => {
                 if let Some(t) = s.get("text").and_then(Value::as_str) {
                     narration.push_str(t);
                 }
+                round_open = false; // 叙述之后再有工具 = 新一轮
             }
             Some("tool") => {
-                rounds.push((std::mem::take(&mut narration), vec![s]));
+                if round_open {
+                    if let Some(last) = rounds.last_mut() {
+                        last.1.push(s);
+                    }
+                } else {
+                    rounds.push((std::mem::take(&mut narration), vec![s]));
+                    round_open = true;
+                }
             }
             _ => {} // reasoning 不进上下文
         }
@@ -504,7 +515,6 @@ async fn run_loop(p: RunParams) {
         ctx,
         mut cancel,
     } = p;
-    let client = http_client(&config.base_url);
     let tool_defs: Vec<ToolDecl> = builtin_tools()
         .into_iter()
         .filter(|t| config.tool_ids.iter().any(|id| id == t.name))
@@ -519,6 +529,19 @@ async fn run_loop(p: RunParams) {
         steps: Vec::new(),
         content: String::new(),
         rev: 1,
+    };
+    let client = match http_client(&config.base_url) {
+        Ok(client) => client,
+        Err(e) => {
+            // 出网守卫客户端构建失败：按 run 失败收场（不回落无守卫客户端）
+            finalize_interrupted(&store, &session_id, &message_id, created_at, &mut state, &e);
+            let _ = events.send(RunEvent::Failed {
+                session_id,
+                message_id,
+                error: e,
+            });
+            return;
+        }
     };
     let outcome: Result<(), String> = loop {
         if *cancel.borrow() {
@@ -617,6 +640,8 @@ async fn run_loop(p: RunParams) {
         }
         // 叙述增量固化为叙述步：插到本轮首个工具行之前（保持发生顺序）
         let narration = std::mem::take(&mut *round_text.lock().unwrap_or_else(|e| e.into_inner()));
+        // 同一段文本已进步骤：清掉流式期间写进 content 的那份，否则面板与续聊历史各显示一次
+        state.content.clear();
         if !narration.is_empty() {
             let insert_at = state.steps[steps_base..]
                 .iter()
@@ -680,13 +705,15 @@ async fn run_loop(p: RunParams) {
     }
 }
 
-/// 供应商流式客户端（策略按地址形态选择：公网供应商公网策略、本机供应商放行回环）。
-fn http_client(base_url: &str) -> reqwest::Client {
+/// 供应商流式客户端：入口先过地址策略校验，客户端构建失败即返回错误——
+/// 不得回落默认客户端（那会摘掉重定向逐跳复检与 DNS 逐 IP 过滤，出网守卫失效）。
+fn http_client(base_url: &str) -> Result<reqwest::Client, String> {
+    let policy = crate::net_guard::policy_for_configured_url(base_url);
+    crate::net_guard::ensure_http_url(base_url, policy)?;
     crate::net_guard::client_for(
-        crate::net_guard::policy_for_configured_url(base_url),
+        policy,
         crate::net_guard::ClientTimeout::IdleRead(60),
     )
-    .unwrap_or_default()
 }
 
 fn system_then(system: &Option<String>, history: &[LlmMessage]) -> Vec<LlmMessage> {
@@ -926,8 +953,15 @@ fn stream_error_text(e: crate::ai::stream::StreamError) -> String {
 // ===== 辅助调用（命名 / 压缩）：不算 run，不追加 assistant 消息 =====
 
 /// 辅助调用客户端（压缩 / 命名共用；策略按地址形态选择）。
-pub fn aid_client(base_url: &str) -> reqwest::Client {
-    http_client(base_url)
+/// 不可用时返回 None 并留日志：调用方以「辅助调用失败」收尾（可见失败 + 可定位原因）。
+pub fn aid_client(base_url: &str) -> Option<reqwest::Client> {
+    match http_client(base_url) {
+        Ok(client) => Some(client),
+        Err(e) => {
+            eprintln!("辅助调用客户端不可用：{e}");
+            None
+        }
+    }
 }
 
 /// 上下文压缩摘要：结构化检查点指令（非流式；失败 None，不写半成品）。
@@ -1022,6 +1056,48 @@ pub fn clean_title(raw: &str) -> String {
 mod tests {
     use super::*;
     use crate::ai::stream::request_body;
+
+    #[test]
+    fn same_round_tool_calls_share_one_assistant_message() {
+        // 同一轮的两个工具调用（并发段）必须归进同一条 assistant(tool_calls)：
+        // 拆成多条会让下一轮请求的历史形状与实时请求不一致
+        let history = vec![
+            json!({ "id": "u1", "role": "user", "content": "读两个文件", "createdAt": 1 }),
+            json!({
+                "id": "a1", "role": "assistant", "content": "最终回复", "createdAt": 2,
+                "steps": [
+                    { "kind": "text", "text": "并行读取" },
+                    { "kind": "tool", "run": { "id": "c1", "name": "read_file", "status": "done",
+                        "args": { "path": "a.md" }, "result": "A", "resultSummary": "a.md" } },
+                    { "kind": "tool", "run": { "id": "c2", "name": "read_file", "status": "done",
+                        "args": { "path": "b.md" }, "result": "B", "resultSummary": "b.md" } },
+                    { "kind": "text", "text": "再查一次" },
+                    { "kind": "tool", "run": { "id": "c3", "name": "grep", "status": "done",
+                        "args": { "pattern": "x" }, "result": "命中", "resultSummary": "1 命中" } },
+                ]
+            }),
+        ];
+        let msgs = history_to_llm_messages(&history, None);
+        // user + 第一轮 assistant(2 调用) + 2 条 tool + 第二轮 assistant(1 调用) + 1 条 tool + 最终正文
+        assert_eq!(msgs.len(), 7);
+        match &msgs[1] {
+            LlmMessage::Assistant { content, tool_calls } => {
+                assert_eq!(content.as_deref(), Some("并行读取"));
+                assert_eq!(tool_calls.len(), 2);
+                assert_eq!(tool_calls[0].id, "c1");
+                assert_eq!(tool_calls[1].id, "c2");
+            }
+            other => panic!("{other:?}"),
+        }
+        match &msgs[4] {
+            LlmMessage::Assistant { content, tool_calls } => {
+                assert_eq!(content.as_deref(), Some("再查一次"));
+                assert_eq!(tool_calls.len(), 1);
+                assert_eq!(tool_calls[0].id, "c3");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
 
     #[test]
     fn history_conversion_expands_tools_and_filters() {

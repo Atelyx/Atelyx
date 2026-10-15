@@ -880,6 +880,8 @@ pub fn leave_space_identity(app: &mut App) {
     // 空间在途回执按 enter_space 时的 gen 判定：离开必须推进，否则穿越身份切换
     app.vault.bump_generation();
     clear_session_state(app);
+    // 空间会话真源随身份离开而不可达：停 run 并清投影
+    crate::chat_actions::detach_vault(app);
 }
 
 // ===== 消息入口 =====

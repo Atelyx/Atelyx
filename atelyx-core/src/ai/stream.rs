@@ -57,6 +57,16 @@ impl ReasoningEffort {
             ReasoningEffort::High => Some("high"),
         }
     }
+
+    /// 线格式（覆盖存储 / 请求字段取值）→ 枚举。
+    pub fn parse_wire(s: &str) -> Option<Self> {
+        match s {
+            "low" => Some(Self::Low),
+            "medium" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            _ => None,
+        }
+    }
 }
 
 /// 一次流式请求的全部输入。
@@ -134,7 +144,8 @@ pub struct StreamAccum {
     reasoning: String,
     tool_slots: BTreeMap<usize, ToolSlot>,
     saw_event: bool,
-    done: bool,
+    /// 终止事件只发一次：finish_reason 帧与 `[DONE]` 可能先后或同批到达。
+    finish_emitted: bool,
 }
 
 impl StreamAccum {
@@ -147,18 +158,24 @@ impl StreamAccum {
         self.saw_event
     }
 
-    /// 是否已收到 `[DONE]`（流完整收尾的信号；供网络层据此提前收束）。
-    pub fn done_seen(&self) -> bool {
-        self.done
-    }
-
     /// 喂入一个 SSE 帧（单个 `data:` 行的内容，已去前缀）；返回产出事件。
-    /// `frame` 为 `data: ` 之后的载荷；`[DONE]` 终止并落完整工具调用。
+    /// `frame` 为 `data: ` 之后的载荷。
     pub fn feed(&mut self, frame: &str) -> Vec<StreamEvent> {
         let frame = frame.trim();
         if frame == "[DONE]" {
-            self.done = true;
-            return self.finish();
+            // 收束信号在部分网关替代 finish_reason：补齐终止事件，网络层据此立即返回，
+            // 否则要等连接关闭（或读超时）才判定收束，被误报为「空闲超时」中断
+            let mut events = self.finish();
+            if !self.finish_emitted {
+                self.finish_emitted = true;
+                let reason = if events.is_empty() {
+                    StopReason::Stop
+                } else {
+                    StopReason::ToolCalls
+                };
+                events.push(StreamEvent::Finish { reason });
+            }
+            return events;
         }
         let Ok(v) = serde_json::from_str::<Value>(frame) else {
             return Vec::new(); // 单帧解析失败跳过（网关噪声）
@@ -274,9 +291,12 @@ impl StreamAccum {
             if !reason.is_empty() {
                 let mut out = events;
                 out.extend(self.finish());
-                out.push(StreamEvent::Finish {
-                    reason: StopReason::parse(reason),
-                });
+                if !self.finish_emitted {
+                    self.finish_emitted = true;
+                    out.push(StreamEvent::Finish {
+                        reason: StopReason::parse(reason),
+                    });
+                }
                 return out;
             }
         }
@@ -568,6 +588,7 @@ mod tests {
             })),
         );
         let events = feed(&mut acc, "data: [DONE]\n\n");
+        // [DONE] 除落完整工具调用外还要补终止事件：只发 [DONE] 的网关据此立即收束
         assert_eq!(
             events,
             vec![
@@ -581,6 +602,7 @@ mod tests {
                     name: "glob".into(),
                     arguments: "{}".into(),
                 } },
+                StreamEvent::Finish { reason: StopReason::ToolCalls },
             ]
         );
     }

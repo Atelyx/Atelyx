@@ -838,7 +838,7 @@ async fn parse_json<T: serde::de::DeserializeOwned>(resp: reqwest::Response) -> 
 }
 
 /// 查询参数段转义：非 RFC 3986 unreserved 字符按字节 `%XX` 编码。
-fn urlencode_component(s: &str) -> String {
+pub(crate) fn urlencode_component(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {

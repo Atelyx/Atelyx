@@ -90,6 +90,16 @@ pub const NAMES: &[&str] = &[
     "clipboard-paste",
     "columns-3",
     "align-vertical-space-around",
+    // 对话面板与设置页用到的形状
+    "arrow-up",
+    "message-square",
+    "file-plus",
+    "layers",
+    "more-horizontal",
+    "corner-up-left",
+    "brain",
+    "wrench",
+    "link",
 ];
 
 /// 一个图标的组成图元（lucide 图标 = 路径/圆/矩形/线段的组合）。
@@ -192,6 +202,24 @@ pub fn icon(name: &str) -> Option<&'static [Shape]> {
     "maximize-2" => &[Shape::Path("M15 3h6v6"), Shape::Path("M9 21H3v-6"), Shape::Path("M21 3l-7 7"), Shape::Path("M3 21l7-7")],
     "eraser" => &[Shape::Path("m7 21-4.3-4.3c-1-1-1-2.5 0-3.4l9.6-9.6c1-1 2.5-1 3.4 0l5.6 5.6c1 1 1 2.5 0 3.4L13 21"), Shape::Path("M22 21H7"), Shape::Path("m5 11 9 9")],
     "download" => &[Shape::Path("M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"), Shape::Path("m7 10 5 5 5-5"), Shape::Path("M12 15V3")],
+    "arrow-up" => &[Shape::Path("m5 12 7-7 7 7"), Shape::Path("M12 19V5")],
+    "message-square" => &[Shape::Path("M22 17a2 2 0 0 1-2 2H6.828a2 2 0 0 0-1.414.586l-2.202 2.202A.71.71 0 0 1 2 21.286V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2z")],
+    "file-plus" => &[Shape::Path("M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"), Shape::Path("M14 2v4a2 2 0 0 0 2 2h4"), Shape::Path("M9 15h6"), Shape::Path("M12 18v-6")],
+    "layers" => &[Shape::Path("M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83z"), Shape::Path("M2 12a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 12"), Shape::Path("M2 17a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 17")],
+    "more-horizontal" => &[Shape::Circle(12.0, 12.0, 1.0), Shape::Circle(19.0, 12.0, 1.0), Shape::Circle(5.0, 12.0, 1.0)],
+    "corner-up-left" => &[Shape::Path("M20 20v-7a4 4 0 0 0-4-4H4"), Shape::Path("M9 14 4 9l5-5")],
+    "brain" => &[
+        Shape::Path("M12 18V5"),
+        Shape::Path("M15 13a4.17 4.17 0 0 1-3-4 4.17 4.17 0 0 1-3 4"),
+        Shape::Path("M17.598 6.5A3 3 0 1 0 12 5a3 3 0 1 0-5.598 1.5"),
+        Shape::Path("M17.997 5.125a4 4 0 0 1 2.526 5.77"),
+        Shape::Path("M18 18a4 4 0 0 0 2-7.464"),
+        Shape::Path("M19.967 17.483A4 4 0 1 1 12 18a4 4 0 1 1-7.967-.517"),
+        Shape::Path("M6 18a4 4 0 0 1-2-7.464"),
+        Shape::Path("M6.003 5.125a4 4 0 0 0-2.526 5.77"),
+    ],
+    "wrench" => &[Shape::Path("M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.106-3.105c.32-.322.863-.22.983.218a6 6 0 0 1-8.259 7.057l-7.91 7.91a1 1 0 0 1-2.999-3l7.91-7.91a6 6 0 0 1 7.057-8.259c.438.12.54.662.219.984z")],
+    "link" => &[Shape::Path("M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"), Shape::Path("M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71")],
         _ => return None,
     })
 }

@@ -8,5 +8,6 @@ pub mod agent;
 pub const PENDING_RUN_ID_PREFIX: &str = "pending:";
 pub mod provider;
 pub mod session;
+pub mod session_io;
 pub mod stream;
 pub mod tools;

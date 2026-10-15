@@ -3,11 +3,12 @@
 //! Agent 工具名册与执行：四分类归组；文件写经 `WriteQueue` 与壳同出口。
 //! 路径一律仓库相对，执行前做越界校验；结果一律以文本回传模型。
 
-use std::path::{Path, PathBuf};
-
+use std::sync::Arc;
 
 use serde_json::{json, Value};
 
+use crate::space_client::SpaceClient;
+use crate::vault;
 use crate::write_queue::WriteQueue;
 
 /// 单次工具执行的回传（text 即模型可见结果；is_error 供展示层标红）。
@@ -276,11 +277,17 @@ pub struct SearchConfig {
     pub searxng_url: Option<String>,
 }
 
-/// 工具执行环境：仓库根 + 与壳同出口的写盘队列 + 已解析的搜索配置 + 排除清单。
+/// 仓库访问后端：本地磁盘（写经写盘队列，与壳同出口）与协作空间（经服务端端点）。
+#[derive(Clone)]
+pub enum RepoAccess {
+    Local { root: std::path::PathBuf, queue: WriteQueue },
+    Space { client: Arc<SpaceClient>, space_id: String },
+}
+
+/// 工具执行环境：仓库访问后端 + 已解析的搜索配置 + 排除清单。
 #[derive(Clone)]
 pub struct ToolCtx {
-    pub root: PathBuf,
-    pub queue: WriteQueue,
+    pub repo: RepoAccess,
     pub search: SearchConfig,
     /// 仓库排除文件夹清单（检索工具跳过）。
     pub exclude: Vec<String>,
@@ -298,37 +305,23 @@ fn arg<'a>(args: &'a Value, key: &str) -> Result<&'a str, ToolResult> {
         .ok_or_else(|| ToolResult::err(format!("工具参数错误：缺少 {key}")))
 }
 
-/// 仓库相对路径校验与定位：拒绝绝对路径与 `..` 逃逸；返回绝对路径。
-/// 不要求文件存在（写类工具要新建）。
-fn resolve_rel(root: &Path, rel: &str) -> Result<PathBuf, ToolResult> {
-    let p = Path::new(rel);
-    // has_root 单独拦截：Windows 上 `/x`（有 root 无 prefix）不算绝对路径，
-    // 但 join 会替换除 prefix 外的基路径——不拦即写穿到盘符根
-    if p.is_absolute() || p.has_root() || rel.split(['/', '\\']).any(|seg| seg == "..") {
-        return Err(ToolResult::err(format!(
-            "路径须为仓库相对路径（拒绝绝对路径与 ..）：{rel}"
-        )));
-    }
-    Ok(root.join(p))
-}
-
 /// 执行内置工具。名称未知 = 错误文本；实现内部失败 = 错误文本（不抛断对话循环）。
 pub async fn execute(ctx: &ToolCtx, name: &str, args: Value) -> ToolResult {
     match name {
         "web_search" => web_search(ctx, &args).await,
         "web_fetch" => web_fetch(&args).await,
-        "read_file" => read_file(ctx, &args),
-        "glob" => glob(ctx, &args),
-        "grep" => grep(ctx, &args),
-        "list_dir" => list_dir(ctx, &args),
-        "read_history" => read_history(ctx, &args),
+        "read_file" => read_file(ctx, &args).await,
+        "glob" => glob(ctx, &args).await,
+        "grep" => grep(ctx, &args).await,
+        "list_dir" => list_dir(ctx, &args).await,
+        "read_history" => read_history(ctx, &args).await,
         "write_file" => write_file(ctx, &args).await,
         "append_file" => append_file(ctx, &args).await,
         "edit_file" => edit_file(ctx, &args).await,
-        "rename_file" => rename_file(ctx, &args),
-        "move_file" => move_file(ctx, &args),
-        "delete_file" => delete_file(ctx, &args),
-        "delete_dir" => delete_dir(ctx, &args),
+        "rename_file" => rename_file(ctx, &args).await,
+        "move_file" => move_file(ctx, &args).await,
+        "delete_file" => delete_file(ctx, &args).await,
+        "delete_dir" => delete_dir(ctx, &args).await,
         "todo_write" => todo_write(ctx, &args).await,
         other => ToolResult::err(format!("未知工具：{other}")),
     }
@@ -383,21 +376,16 @@ async fn web_fetch(args: &Value) -> ToolResult {
     }
 }
 
-fn read_file(ctx: &ToolCtx, args: &Value) -> ToolResult {
-    let Ok(rel) = arg(args, "path") else {
-        return ToolResult::err("工具参数错误：缺少 path");
-    };
-    let path = match resolve_rel(&ctx.root, rel) {
-        Ok(p) => p,
-        Err(e) => return e,
-    };
-    let Ok(bytes) = std::fs::read(&path) else {
-        return ToolResult::err(format!("文件不存在或不可读：{rel}"));
-    };
-    if bytes[..bytes.len().min(4096)].contains(&0) {
-        return ToolResult::err(format!("二进制文件不支持读取：{rel}"));
-    }
-    let content = String::from_utf8_lossy(&bytes);
+/// 仓库相对路径校验：拒绝绝对路径 / `..` / 隐藏段（`.atelyx` 等不对模型开放）。
+fn rel_path(rel: &str) -> Result<String, ToolResult> {
+    vault::validate_ai_path(rel).map_err(ToolResult::err)
+}
+
+/// 单条检索命中（路径 / 行号 / 行文本）：本地与空间后端归一后的共用形状。
+type GrepRow = (String, u64, String);
+
+/// 行号分页渲染：本地与空间取到全文后共用同一口径（页脚续读位按实际渲染到的行给出）。
+fn render_numbered(content: &str, args: &Value, rel: &str) -> ToolResult {
     let total = content.lines().count();
     let offset = args
         .get("offset")
@@ -413,45 +401,93 @@ fn read_file(ctx: &ToolCtx, args: &Value) -> ToolResult {
     let start = offset.min(total);
     let end = (start + limit).min(total);
     let mut out = String::new();
+    let mut shown_until = start;
     for (i, line) in content.lines().enumerate().skip(start).take(end - start) {
         out.push_str(&format!("{}| {line}\n", i + 1));
+        shown_until = i + 1;
         if out.len() > READ_CHARS_CAP {
             out.push_str("…（结果过长截断）\n");
             break;
         }
     }
-    if end < total {
+    if shown_until < total {
         out.push_str(&format!(
             "\n（共 {total} 行，显示 {}-{}；续读传 offset={}）",
             start + 1,
-            end,
-            end + 1
+            shown_until,
+            shown_until + 1
         ));
     } else if out.is_empty() {
-        out.push_str("（空文件）");
+        out.push_str(&format!("（空文件：{rel}）"));
     }
     ToolResult::ok(out)
 }
 
-fn glob(ctx: &ToolCtx, args: &Value) -> ToolResult {
+async fn read_file(ctx: &ToolCtx, args: &Value) -> ToolResult {
+    let Ok(rel) = arg(args, "path") else {
+        return ToolResult::err("工具参数错误：缺少 path");
+    };
+    let rel = match rel_path(rel) {
+        Ok(rel) => rel,
+        Err(e) => return e,
+    };
+    let content = match &ctx.repo {
+        RepoAccess::Local { root, .. } => {
+            let path = match vault::safe_join(root, &rel, false) {
+                Ok(path) => path,
+                Err(e) => return ToolResult::err(e),
+            };
+            match std::fs::read(&path) {
+                Ok(bytes) => {
+                    if bytes[..bytes.len().min(4096)].contains(&0) {
+                        return ToolResult::err(format!("二进制文件不支持读取：{rel}"));
+                    }
+                    String::from_utf8_lossy(&bytes).into_owned()
+                }
+                Err(e) => return ToolResult::err(format!("文件不存在或不可读：{rel}（{e}）")),
+            }
+        }
+        RepoAccess::Space { client, space_id } => match client.get_file_text(space_id, &rel).await {
+            Ok(text) => text,
+            Err(e) => return ToolResult::err(format!("文件不存在或不可读：{rel}（{e}）")),
+        },
+    };
+    render_numbered(&content, args, &rel)
+}
+
+async fn glob(ctx: &ToolCtx, args: &Value) -> ToolResult {
     let Ok(pattern) = arg(args, "pattern") else {
         return ToolResult::err("工具参数错误：缺少 pattern");
     };
-    let path = args.get("path").and_then(Value::as_str).map(str::to_string);
-    let result = crate::filesearch::glob_vault_blocking(
-        ctx.root.clone(),
-        ctx.exclude.clone(),
-        pattern.to_string(),
-        path,
-    );
+    let sub = match args.get("path").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+        Some(path) => match rel_path(path) {
+            Ok(path) => Some(path),
+            Err(e) => return e,
+        },
+        None => None,
+    };
+    let result: Result<(Vec<String>, u64, bool), String> = match &ctx.repo {
+        RepoAccess::Local { root, .. } => crate::filesearch::glob_vault_blocking(
+            root.clone(),
+            ctx.exclude.clone(),
+            pattern.to_string(),
+            sub.clone(),
+        )
+        .map(|r| (r.paths, r.total as u64, r.capped)),
+        RepoAccess::Space { client, space_id } => client
+            .glob(space_id, pattern, sub.as_deref())
+            .await
+            .map(|r| (r.paths, r.total, r.capped))
+            .map_err(|e| e.to_string()),
+    };
     match result {
-        Ok(r) => {
-            if r.paths.is_empty() {
+        Ok((paths, total, capped)) => {
+            if paths.is_empty() {
                 return ToolResult::ok("无匹配文件");
             }
-            let mut text = r.paths.join("\n");
-            if r.capped {
-                text.push_str(&format!("\n…（共 {} 条，已截断）", r.total));
+            let mut text = paths.join("\n");
+            if capped {
+                text.push_str(&format!("\n…（共 {total} 条，已截断）"));
             }
             ToolResult::ok(text)
         }
@@ -459,37 +495,65 @@ fn glob(ctx: &ToolCtx, args: &Value) -> ToolResult {
     }
 }
 
-fn grep(ctx: &ToolCtx, args: &Value) -> ToolResult {
+async fn grep(ctx: &ToolCtx, args: &Value) -> ToolResult {
     let Ok(pattern) = arg(args, "pattern") else {
         return ToolResult::err("工具参数错误：缺少 pattern");
     };
-    let path = args.get("path").and_then(Value::as_str).map(str::to_string);
+    let sub = match args.get("path").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+        Some(path) => match rel_path(path) {
+            Ok(path) => Some(path),
+            Err(e) => return e,
+        },
+        None => None,
+    };
     let include = args
         .get("include")
         .and_then(Value::as_str)
         .map(str::to_string);
-    let result = crate::filesearch::grep_vault_blocking(
-        ctx.root.clone(),
-        ctx.exclude.clone(),
-        pattern.to_string(),
-        path,
-        include,
-    );
+    let result: Result<(Vec<GrepRow>, u64, bool), String> = match &ctx.repo {
+        RepoAccess::Local { root, .. } => crate::filesearch::grep_vault_blocking(
+            root.clone(),
+            ctx.exclude.clone(),
+            pattern.to_string(),
+            sub.clone(),
+            include.clone(),
+        )
+        .map(|r| {
+            let rows = r
+                .matches
+                .into_iter()
+                .map(|m| (m.path, m.line_number as u64, m.line))
+                .collect();
+            (rows, r.total as u64, r.capped)
+        }),
+        RepoAccess::Space { client, space_id } => client
+            .grep(space_id, pattern, sub.as_deref(), include.as_deref())
+            .await
+            .map(|r| {
+                let rows = r
+                    .matches
+                    .into_iter()
+                    .map(|m| (m.path, m.line_number, m.line))
+                    .collect();
+                (rows, r.total, r.capped)
+            })
+            .map_err(|e| e.to_string()),
+    };
     match result {
-        Ok(r) => {
-            if r.matches.is_empty() {
+        Ok((matches, total, capped)) => {
+            if matches.is_empty() {
                 return ToolResult::ok("无命中");
             }
             let mut text = String::new();
-            for m in r.matches.iter() {
-                text.push_str(&format!("{}:{}: {}\n", m.path, m.line_number, m.line));
+            for (path, line_number, line) in matches.iter() {
+                text.push_str(&format!("{path}:{line_number}: {line}\n"));
                 if text.len() > READ_CHARS_CAP {
                     text.push_str("…（结果过长截断）\n");
                     break;
                 }
             }
-            if r.capped {
-                text.push_str(&format!("…（共 {} 条命中，已截断）", r.total));
+            if capped {
+                text.push_str(&format!("…（共 {total} 条命中，已截断）"));
             }
             ToolResult::ok(text)
         }
@@ -497,29 +561,52 @@ fn grep(ctx: &ToolCtx, args: &Value) -> ToolResult {
     }
 }
 
-fn list_dir(ctx: &ToolCtx, args: &Value) -> ToolResult {
-    let rel = args
+async fn list_dir(ctx: &ToolCtx, args: &Value) -> ToolResult {
+    let dir = args
         .get("dir")
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .unwrap_or("");
-    let path = match resolve_rel(&ctx.root, rel) {
-        Ok(p) => p,
-        Err(e) => return e,
+    let dir = if dir.is_empty() {
+        String::new()
+    } else {
+        match rel_path(dir) {
+            Ok(dir) => dir,
+            Err(e) => return e,
+        }
     };
-    let Ok(entries) = std::fs::read_dir(&path) else {
-        return ToolResult::err(format!("目录不存在或不可读：{}", if rel.is_empty() { "." } else { rel }));
+    let mut rows: Vec<String> = match &ctx.repo {
+        RepoAccess::Local { root, .. } => {
+            let path = if dir.is_empty() {
+                root.clone()
+            } else {
+                match vault::safe_join(root, &dir, false) {
+                    Ok(path) => path,
+                    Err(e) => return ToolResult::err(e),
+                }
+            };
+            let Ok(entries) = std::fs::read_dir(&path) else {
+                return ToolResult::err(format!(
+                    "目录不存在或不可读：{}",
+                    if dir.is_empty() { "." } else { dir.as_str() }
+                ));
+            };
+            let mut rows = Vec::new();
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.starts_with('.') {
+                    continue; // 隐藏项不对模型开放
+                }
+                let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                rows.push(if is_dir { format!("{name}/") } else { name });
+            }
+            rows
+        }
+        RepoAccess::Space { client, space_id } => match client.tree(space_id).await {
+            Ok(tree) => space_dir_rows(&tree, &dir),
+            Err(e) => return ToolResult::err(format!("目录不存在或不可读：{e}")),
+        },
     };
-    let mut rows: Vec<String> = Vec::new();
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        rows.push(if is_dir {
-            format!("{name}/")
-        } else {
-            name
-        });
-    }
     rows.sort();
     if rows.is_empty() {
         ToolResult::ok("（空目录）")
@@ -528,15 +615,67 @@ fn list_dir(ctx: &ToolCtx, args: &Value) -> ToolResult {
     }
 }
 
-fn read_history(ctx: &ToolCtx, args: &Value) -> ToolResult {
+/// 空间整树 → 目标目录的直接子项（隐藏项过滤；目录带尾 `/`）。
+fn space_dir_rows(tree: &[crate::space_client::TreeNode], dir: &str) -> Vec<String> {
+    let children: &[crate::space_client::TreeNode] = if dir.is_empty() {
+        tree
+    } else {
+        match find_tree_node(tree, dir) {
+            Some(node) => &node.children,
+            None => return Vec::new(),
+        }
+    };
+    children
+        .iter()
+        .filter(|node| !node.name.starts_with('.'))
+        .map(|node| {
+            if node.is_dir {
+                format!("{}/", node.name)
+            } else {
+                node.name.clone()
+            }
+        })
+        .collect()
+}
+
+fn find_tree_node<'a>(
+    nodes: &'a [crate::space_client::TreeNode],
+    path: &str,
+) -> Option<&'a crate::space_client::TreeNode> {
+    for node in nodes {
+        if node.path == path {
+            return Some(node);
+        }
+        if let Some(hit) = find_tree_node(&node.children, path) {
+            return Some(hit);
+        }
+    }
+    None
+}
+
+async fn read_history(ctx: &ToolCtx, args: &Value) -> ToolResult {
     let Ok(rel) = arg(args, "path") else {
         return ToolResult::err("工具参数错误：缺少 path");
     };
-    let versions = crate::history::load_history(
-        &ctx.root,
-        crate::history::HistoryKind::Note,
-        rel,
-    );
+    let rel = match rel_path(rel) {
+        Ok(rel) => rel,
+        Err(e) => return e,
+    };
+    let versions = match &ctx.repo {
+        RepoAccess::Local { root, .. } => Ok(crate::history::load_history(
+            root,
+            crate::history::HistoryKind::Note,
+            &rel,
+        )),
+        RepoAccess::Space { client, space_id } => client
+            .history_versions(space_id, crate::history::HistoryKind::Note, &rel)
+            .await
+            .map_err(|e| e.to_string()),
+    };
+    let versions = match versions {
+        Ok(versions) => versions,
+        Err(e) => return ToolResult::err(format!("历史读取失败：{e}")),
+    };
     if versions.is_empty() {
         return ToolResult::ok("无历史版本");
     }
@@ -562,18 +701,28 @@ async fn write_file(ctx: &ToolCtx, args: &Value) -> ToolResult {
     ) else {
         return ToolResult::err("工具参数错误：需要 path 与 content");
     };
-    let path = match resolve_rel(&ctx.root, &rel) {
-        Ok(p) => p,
+    let rel = match rel_path(&rel) {
+        Ok(rel) => rel,
         Err(e) => return e,
     };
-    if let Some(parent) = path.parent() {
-        if std::fs::create_dir_all(parent).is_err() {
-            return ToolResult::err(format!("无法创建父目录：{rel}"));
+    match &ctx.repo {
+        RepoAccess::Local { root, queue } => {
+            let path = match vault::safe_join(root, &rel, true) {
+                Ok(path) => path,
+                Err(e) => return ToolResult::err(e),
+            };
+            queue
+                .write(path, content.to_string())
+                .await
+                .map(|_| ToolResult::ok(format!("已写入 {rel}")))
+                .unwrap_or_else(|e| ToolResult::err(format!("写入失败：{e}")))
         }
+        RepoAccess::Space { client, space_id } => client
+            .put_file_text(space_id, &rel, content)
+            .await
+            .map(|_| ToolResult::ok(format!("已写入 {rel}")))
+            .unwrap_or_else(|e| ToolResult::err(format!("写入失败：{e}"))),
     }
-    ctx.queue.write(path, content.to_string()).await
-        .map(|_| ToolResult::ok(format!("已写入 {rel}")))
-        .unwrap_or_else(|e| ToolResult::err(format!("写入失败：{e}")))
 }
 
 async fn append_file(ctx: &ToolCtx, args: &Value) -> ToolResult {
@@ -583,18 +732,41 @@ async fn append_file(ctx: &ToolCtx, args: &Value) -> ToolResult {
     ) else {
         return ToolResult::err("工具参数错误：需要 path 与 content");
     };
-    let path = match resolve_rel(&ctx.root, &rel) {
-        Ok(p) => p,
+    let rel = match rel_path(&rel) {
+        Ok(rel) => rel,
         Err(e) => return e,
     };
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    let next = format!("{existing}{content}");
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+    match &ctx.repo {
+        RepoAccess::Local { root, queue } => {
+            let root = root.clone();
+            let target = rel.clone();
+            let content = content.to_string();
+            // 读改写整段落在写盘队列内：与壳的笔记保存同一条串行链，避免两侧互相覆盖
+            queue
+                .bulk(move || {
+                    let path = vault::safe_join(&root, &target, true)?;
+                    let existing = read_existing_text(&path, &target)?;
+                    vault::write_note(&root, &target, &format!("{existing}{content}"))
+                })
+                .await
+                .map(|_| ToolResult::ok(format!("已追加到 {rel}")))
+                .unwrap_or_else(|e| ToolResult::err(format!("追加失败：{e}")))
+        }
+        RepoAccess::Space { client, space_id } => {
+            // 空间端点无原子读改写：读与写之间他方（其他设备/成员）的写入会被本次整体覆盖，
+            // 这是服务端契约约束下的已知窗口（本地分支经写盘队列串行化，两侧出口语义不同源）
+            let existing = match client.get_file_text(space_id, &rel).await {
+                Ok(text) => text,
+                Err(crate::space_client::SpaceError::NotFound) => String::new(),
+                Err(e) => return ToolResult::err(format!("文件不可读：{rel}（{e}）")),
+            };
+            client
+                .put_file_text(space_id, &rel, &format!("{existing}{content}"))
+                .await
+                .map(|_| ToolResult::ok(format!("已追加到 {rel}")))
+                .unwrap_or_else(|e| ToolResult::err(format!("追加失败：{e}")))
+        }
     }
-    ctx.queue.write(path, next).await
-        .map(|_| ToolResult::ok(format!("已追加到 {rel}")))
-        .unwrap_or_else(|e| ToolResult::err(format!("写入失败：{e}")))
 }
 
 async fn edit_file(ctx: &ToolCtx, args: &Value) -> ToolResult {
@@ -607,23 +779,55 @@ async fn edit_file(ctx: &ToolCtx, args: &Value) -> ToolResult {
     let Some(replace) = args.get("replace").and_then(Value::as_str) else {
         return ToolResult::err("工具参数错误：缺少 replace");
     };
-    let path = match resolve_rel(&ctx.root, rel) {
-        Ok(p) => p,
+    let rel = match rel_path(rel) {
+        Ok(rel) => rel,
         Err(e) => return e,
     };
-    let Ok(existing) = std::fs::read_to_string(&path) else {
-        return ToolResult::err(format!("文件不存在或不可读：{rel}"));
-    };
-    if find.is_empty() || !existing.contains(find) {
-        return ToolResult::err(format!("未找到要替换的原文（find 精确匹配失败）：{rel}"));
+    let find = find.to_string();
+    let replace = replace.to_string();
+    match &ctx.repo {
+        RepoAccess::Local { root, queue } => {
+            let root = root.clone();
+            let target = rel.clone();
+            queue
+                .bulk(move || {
+                    let path = vault::safe_join(&root, &target, false)?;
+                    let existing = read_existing_text(&path, &target)?;
+                    if find.is_empty() || !existing.contains(&find) {
+                        return Err(format!("未找到要替换的原文（find 精确匹配失败）：{target}"));
+                    }
+                    vault::write_note(&root, &target, &existing.replace(&find, &replace))
+                })
+                .await
+                .map(|_| ToolResult::ok(format!("已编辑 {rel}")))
+                .unwrap_or_else(ToolResult::err)
+        }
+        RepoAccess::Space { client, space_id } => {
+            let existing = match client.get_file_text(space_id, &rel).await {
+                Ok(text) => text,
+                Err(e) => return ToolResult::err(format!("文件不存在或不可读：{rel}（{e}）")),
+            };
+            if find.is_empty() || !existing.contains(&find) {
+                return ToolResult::err(format!("未找到要替换的原文（find 精确匹配失败）：{rel}"));
+            }
+            client
+                .put_file_text(space_id, &rel, &existing.replace(&find, &replace))
+                .await
+                .map(|_| ToolResult::ok(format!("已编辑 {rel}")))
+                .unwrap_or_else(|e| ToolResult::err(format!("写入失败：{e}")))
+        }
     }
-    let next = existing.replace(find, replace);
-    ctx.queue.write(path, next).await
-        .map(|_| ToolResult::ok(format!("已编辑 {rel}")))
-        .unwrap_or_else(|e| ToolResult::err(format!("写入失败：{e}")))
 }
 
-fn rename_file(ctx: &ToolCtx, args: &Value) -> ToolResult {
+/// 读既有文本：不存在 = 空（新建），不可读 = 错误（不得当空内容覆盖）。
+fn read_existing_text(path: &std::path::Path, rel: &str) -> Result<String, String> {
+    if !path.exists() {
+        return Ok(String::new());
+    }
+    std::fs::read_to_string(path).map_err(|e| format!("文件不可读：{rel}（{e}）"))
+}
+
+async fn rename_file(ctx: &ToolCtx, args: &Value) -> ToolResult {
     let Ok(rel) = arg(args, "path") else {
         return ToolResult::err("工具参数错误：缺少 path");
     };
@@ -633,83 +837,112 @@ fn rename_file(ctx: &ToolCtx, args: &Value) -> ToolResult {
     if new_name.contains(['/', '\\']) || new_name == "." || new_name == ".." {
         return ToolResult::err("newName 只能是名称，不含路径分隔符");
     }
-    let path = match resolve_rel(&ctx.root, rel) {
-        Ok(p) => p,
+    let rel = match rel_path(rel) {
+        Ok(rel) => rel,
         Err(e) => return e,
     };
-    let target = match path.parent() {
-        Some(parent) => parent.join(new_name),
-        None => return ToolResult::err(format!("路径异常：{rel}")),
+    let parent = rel.rsplit_once('/').map(|(dir, _)| dir.to_string()).unwrap_or_default();
+    let target = if parent.is_empty() {
+        new_name.to_string()
+    } else {
+        format!("{parent}/{new_name}")
     };
-    std::fs::rename(&path, &target)
-        .map(|_| ToolResult::ok(format!("已重命名 {rel} → {new_name}")))
-        .unwrap_or_else(|e| ToolResult::err(format!("重命名失败：{e}")))
+    let target = match rel_path(&target) {
+        Ok(target) => target,
+        Err(e) => return e,
+    };
+    move_entry(ctx, &rel, &target, &format!("已重命名 {rel} → {new_name}")).await
 }
 
-fn move_file(ctx: &ToolCtx, args: &Value) -> ToolResult {
+async fn move_file(ctx: &ToolCtx, args: &Value) -> ToolResult {
     let Ok(from) = arg(args, "from") else {
         return ToolResult::err("工具参数错误：缺少 from");
     };
     let Ok(to) = arg(args, "to") else {
         return ToolResult::err("工具参数错误：缺少 to");
     };
-    let src = match resolve_rel(&ctx.root, from) {
-        Ok(p) => p,
+    let from = match rel_path(from) {
+        Ok(from) => from,
         Err(e) => return e,
     };
-    let dst = match resolve_rel(&ctx.root, to) {
-        Ok(p) => p,
+    let to = match rel_path(to) {
+        Ok(to) => to,
         Err(e) => return e,
     };
-    if let Some(parent) = dst.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    std::fs::rename(&src, &dst)
-        .map(|_| ToolResult::ok(format!("已移动 {from} → {to}")))
-        .unwrap_or_else(|e| ToolResult::err(format!("移动失败：{e}")))
+    move_entry(ctx, &from, &to, &format!("已移动 {from} → {to}")).await
 }
 
-fn delete_file(ctx: &ToolCtx, args: &Value) -> ToolResult {
+/// 改名 / 移动共用实现：本地经引用同步（全库 `.md` 链接、元数据路径一并改写），
+/// 空间走服务端 rename（客户端引用改写由壳负责，与文件树操作同链）。
+async fn move_entry(ctx: &ToolCtx, from: &str, to: &str, ok: &str) -> ToolResult {
+    match &ctx.repo {
+        RepoAccess::Local { root, .. } => {
+            let is_dir = vault::safe_join(root, from, false)
+                .map(|path| path.is_dir())
+                .unwrap_or(false);
+            let synced = if is_dir {
+                crate::vault_refs::rename_folder_synced(root, &ctx.exclude, from, to)
+            } else {
+                crate::vault_refs::rename_note_synced(root, &ctx.exclude, from, to)
+            };
+            synced.map(|_| ToolResult::ok(ok.to_string())).unwrap_or_else(|e| {
+                ToolResult::err(format!("操作失败：{e}"))
+            })
+        }
+        RepoAccess::Space { client, space_id } => client
+            .rename_file(space_id, from, to)
+            .await
+            .map(|_| ToolResult::ok(ok.to_string()))
+            .unwrap_or_else(|e| ToolResult::err(format!("操作失败：{e}"))),
+    }
+}
+
+async fn delete_file(ctx: &ToolCtx, args: &Value) -> ToolResult {
     let Ok(rel) = arg(args, "path") else {
         return ToolResult::err("工具参数错误：缺少 path");
     };
-    let path = match resolve_rel(&ctx.root, rel) {
-        Ok(p) => p,
+    let rel = match rel_path(rel) {
+        Ok(rel) => rel,
         Err(e) => return e,
     };
-    if path.is_dir() {
-        return ToolResult::err(format!("目标是目录，请用 delete_dir：{rel}"));
+    match &ctx.repo {
+        RepoAccess::Local { root, .. } => vault::delete_vault_file(root, &rel)
+            .map(|_| ToolResult::ok(format!("已删除 {rel}")))
+            .unwrap_or_else(ToolResult::err),
+        RepoAccess::Space { client, space_id } => client
+            .delete_file(space_id, &rel)
+            .await
+            .map(|_| ToolResult::ok(format!("已删除 {rel}")))
+            .unwrap_or_else(|e| ToolResult::err(format!("删除失败：{e}"))),
     }
-    std::fs::remove_file(&path)
-        .map(|_| ToolResult::ok(format!("已删除 {rel}")))
-        .unwrap_or_else(|e| ToolResult::err(format!("删除失败：{e}")))
 }
 
-fn delete_dir(ctx: &ToolCtx, args: &Value) -> ToolResult {
+async fn delete_dir(ctx: &ToolCtx, args: &Value) -> ToolResult {
     let Ok(rel) = arg(args, "dir") else {
         return ToolResult::err("工具参数错误：缺少 dir");
     };
-    let path = match resolve_rel(&ctx.root, rel) {
-        Ok(p) => p,
+    let rel = match rel_path(rel) {
+        Ok(rel) => rel,
         Err(e) => return e,
     };
-    if !path.is_dir() {
-        return ToolResult::err(format!("目录不存在：{rel}"));
-    }
     let force = args.get("force").and_then(Value::as_bool).unwrap_or(false);
-    let result = if force {
-        std::fs::remove_dir_all(&path)
-    } else {
-        std::fs::remove_dir(&path)
-    };
-    match result {
-        Ok(()) => ToolResult::ok(format!("已删除目录 {rel}")),
-        Err(_) if !force => ToolResult::err(format!("目录非空（force 可强制删除）：{rel}")),
-        Err(e) => ToolResult::err(format!("删除失败：{e}")),
+    match &ctx.repo {
+        RepoAccess::Local { root, .. } => match vault::delete_folder(root, &rel, force) {
+            Ok(result) if result.deleted => ToolResult::ok(format!("已删除目录 {rel}")),
+            Ok(_) => ToolResult::err(format!("目录非空（force 可强制删除）：{rel}")),
+            Err(e) => ToolResult::err(format!("删除失败：{e}")),
+        },
+        RepoAccess::Space { client, space_id } => {
+            match client.delete_folder(space_id, &rel, force).await {
+                Ok(ack) if ack.deleted => ToolResult::ok(format!("已删除目录 {rel}")),
+                Ok(_) => ToolResult::err(format!("目录非空（force 可强制删除）：{rel}")),
+                Err(e) => ToolResult::err(format!("删除失败：{e}")),
+            }
+        }
     }
 }
 
-/// 任务清单落点（仓库相对）。
+/// 任务清单落点（仓库相对；空间落用户元数据同键）。
 pub const TODO_FILE: &str = ".atelyx/todos/agent.json";
 
 async fn todo_write(ctx: &ToolCtx, args: &Value) -> ToolResult {
@@ -728,22 +961,36 @@ async fn todo_write(ctx: &ToolCtx, args: &Value) -> ToolResult {
             }))
         })
         .collect();
-    let content = serde_json::to_string_pretty(&json!({
+    let payload = json!({
         "schema": 1,
         "updatedAt": std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0),
         "todos": cleaned,
-    }))
-    .unwrap_or_else(|_| "[]".to_string());
-    let path = ctx.root.join(TODO_FILE);
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+    });
+    let Ok(content) = serde_json::to_string_pretty(&payload) else {
+        return ToolResult::err("任务清单序列化失败".to_string());
+    };
+    match &ctx.repo {
+        // 落点是工具私有路径（`.atelyx/`），不走 AI 路径校验
+        RepoAccess::Local { root, queue } => {
+            let path = root.join(TODO_FILE);
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            queue
+                .write(path, content)
+                .await
+                .map(|_| ToolResult::ok(format!("任务清单已更新（{} 项）", todos.len())))
+                .unwrap_or_else(|e| ToolResult::err(format!("写入失败：{e}")))
+        }
+        RepoAccess::Space { client, space_id } => client
+            .my_meta_patch(space_id, &[(TODO_FILE.to_string(), content)])
+            .await
+            .map(|_| ToolResult::ok(format!("任务清单已更新（{} 项）", todos.len())))
+            .unwrap_or_else(|e| ToolResult::err(format!("写入失败：{e}"))),
     }
-    ctx.queue.write(path, content).await
-        .map(|_| ToolResult::ok(format!("任务清单已更新（{} 项）", todos.len())))
-        .unwrap_or_else(|e| ToolResult::err(format!("写入失败：{e}")))
 }
 
 #[cfg(test)]
@@ -753,11 +1000,60 @@ mod tests {
 
     fn ctx(dir: &TempDir) -> ToolCtx {
         ToolCtx {
-            root: dir.to_path_buf(),
-            queue: WriteQueue::new(),
+            repo: RepoAccess::Local {
+                root: dir.to_path_buf(),
+                queue: WriteQueue::new(),
+            },
             search: SearchConfig::default(),
             exclude: Vec::new(),
         }
+    }
+
+    /// 本地写盘队列（测试等待落盘用）。
+    fn queue_of(ctx: &ToolCtx) -> &WriteQueue {
+        match &ctx.repo {
+            RepoAccess::Local { queue, .. } => queue,
+            RepoAccess::Space { .. } => panic!("测试上下文恒为本地后端"),
+        }
+    }
+
+    #[test]
+    fn ai_path_rules_reject_hidden_segments_and_escapes() {
+        // 隐藏目录（仓库配置与密钥所在处）不对模型开放
+        assert!(vault::validate_ai_path(".atelyx/config.json").is_err());
+        assert!(vault::validate_ai_path("a/.git/y").is_err());
+        assert!(vault::validate_ai_path("../x").is_err());
+        assert!(vault::validate_ai_path("/x").is_err());
+        // 普通仓库相对路径原样通过（分隔符归一为 `/`，空间端点直接可用）
+        assert_eq!(vault::validate_ai_path("笔记/待办.md").unwrap(), "笔记/待办.md");
+        assert_eq!(vault::validate_ai_path("./笔记/a.md").unwrap(), "笔记/a.md");
+    }
+
+    #[test]
+    fn space_dir_rows_lists_direct_children_and_hides_dot_entries() {
+        fn node(path: &str, is_dir: bool, children: Vec<crate::space_client::TreeNode>) -> crate::space_client::TreeNode {
+            crate::space_client::TreeNode {
+                name: path.rsplit('/').next().unwrap_or(path).to_string(),
+                path: path.to_string(),
+                is_dir,
+                updated_at: 0,
+                children,
+            }
+        }
+        let tree = vec![
+            node("笔记", true, vec![
+                node("笔记/a.md", false, vec![]),
+                node("笔记/子目录", true, vec![]),
+            ]),
+            node(".atelyx", true, vec![]),
+            node("根文件.md", false, vec![]),
+        ];
+        // 根目录：隐藏项过滤
+        assert_eq!(space_dir_rows(&tree, ""), vec!["笔记/", "根文件.md"]);
+        // 子目录：列出直接子项，目录带尾斜杠
+        assert_eq!(space_dir_rows(&tree, "笔记"), vec!["a.md", "子目录/"]);
+        // 目录不存在 = 空（调用方按空目录呈现）
+        assert!(space_dir_rows(&tree, "无此目录").is_empty());
     }
 
     #[tokio::test]
@@ -802,7 +1098,7 @@ mod tests {
             std::fs::read_to_string(dir.join("笔记/待办.md")).unwrap();
         assert!(content.contains("- [x] 二"));
         // 写盘队列异步落盘（等队列排空后校验磁盘）
-        ctx.queue.drain().await.unwrap();
+        queue_of(&ctx).drain().await.unwrap();
         assert_eq!(
             std::fs::read_to_string(dir.join("笔记/待办.md")).unwrap(),
             content

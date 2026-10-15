@@ -6,7 +6,6 @@
 //! Elm 循环（订阅流），事件按会话身份守卫后应用到投影。
 
 use std::collections::HashSet;
-use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
 use iced::widget::text_editor;
@@ -16,16 +15,17 @@ use tokio::sync::mpsc;
 use atelyx_core::ai::{
     agent::{self, AgentHub, RunConfig, RunEvent},
     session::{
-        AppendBatch, CommitBatch, DeleteEntry, MetaPatch, SessionDef, SessionStore,
-        TruncateEntry, WriteChainConfig,
+        AppendBatch, CommitBatch, DeleteEntry, MetaPatch, OverridesPatch, SessionDef, SessionStore,
+        StoreSnapshot, TruncateEntry, WriteChainConfig,
     },
     stream::LlmMessage,
-    tools::{SearchConfig, ToolCtx},
+    tools::{RepoAccess, SearchConfig, ToolCtx},
 };
 use atelyx_core::plugin_runtime::{ChatEvent, ChatEventParams, ChatHistoryResult, ChatSessionSummary, ChatSessionWire};
 
 use crate::Message;
 use crate::App;
+use crate::RepoKind;
 
 // ===== 进程级共享运行时 =====
 
@@ -57,6 +57,19 @@ fn store() -> &'static Arc<SessionStore> {
 
 fn hub() -> &'static Arc<AgentHub> {
     HUB.get_or_init(|| Arc::new(AgentHub::new()))
+}
+
+/// 消息流滚动容器 id（视图挂载与滚动命令共用）。
+pub fn chat_flow_id() -> iced::widget::Id {
+    iced::widget::Id::new("chat-flow")
+}
+
+/// 消息流滚到底（跟随与回底浮钮共用；超大偏移由滚动容器钳制到末端）。
+pub fn scroll_flow_bottom() -> iced::Task<Message> {
+    iced::widget::operation::scroll_to(
+        chat_flow_id(),
+        iced::widget::scrollable::AbsoluteOffset { x: Some(0.0), y: Some(1.0e9) },
+    )
 }
 
 fn run_event_channel() -> &'static EventSlot<RunEvent> {
@@ -120,12 +133,24 @@ pub fn control_subscription() -> iced::Subscription<Message> {
 /// 面板状态（跨窗口共享一份；会话真源在 store）。
 #[derive(Default)]
 pub struct ChatState {
-    /// 已装载的仓库根（None = 未进仓 / 未装载）。
-    pub loaded_root: Option<PathBuf>,
+    /// 已装载真源的身份键（本地 = 仓库根；空间 = 「服务器地址/空间 id」；None = 未装载）。
+    pub session_key: Option<String>,
     /// 会话出线投影（store snapshot 快照；显示真相）。
     pub sessions: Vec<Value>,
-    /// 消息正文的 markdown 解析缓存（键 = 源文本哈希；视图按哈希取用）。
+    /// 消息正文的 markdown 解析缓存（键 = 源文本哈希；按会话刷新时收敛）。
     pub docs: std::collections::HashMap<u64, atelyx_core::markdown::MarkdownDocument>,
+    /// 发送 / 重生成在等 Agent 提示词取回（空间模式：提示词文件在服务端）。
+    pub pending_action: Option<PendingChatAction>,
+    /// 已取回待用的 Agent 提示词正文（一次性，随本次发送消费）。
+    pub pending_prompt: Option<String>,
+    /// 面板级模型覆盖（None = 跟随仓库默认；值形如 `{providerId, model}`）。
+    pub model_override: Option<Value>,
+    /// 面板级推理等级覆盖（None = 跟随默认不发送；值 = 线格式 low/medium/high）。
+    pub effort: Option<String>,
+    /// 消息流贴底跟随（true = 新内容自动滚到底；上翻即脱离，回底浮钮恢复）。
+    pub follow_bottom: bool,
+    /// 会话列表悬停行（操作钮显形用）。
+    pub row_hover: Option<String>,
     /// 当前会话（None = 新对话态，首条消息发出时创建会话）。
     pub active: Option<String>,
     /// 输入草稿（多行）。
@@ -138,6 +163,8 @@ pub struct ChatState {
     pub compacting: Option<String>,
     /// 请求级错误（顶部行展示；X 清除）。
     pub error: Option<String>,
+    /// 展开的步骤块（键 = 「消息 id:步骤序号」；思考与工具步共用）。
+    pub expanded: HashSet<String>,
     /// 落盘失败（写链观察者回填；恢复自动清除）。
     pub persist_error: Option<(String, i64)>,
     pub sidebar_open: bool,
@@ -148,8 +175,6 @@ pub struct ChatState {
     pub delete_confirm: Option<String>,
     /// 重新命名请求在途的会话集合（多会话并行，按会话防重）。
     pub renaming: HashSet<String>,
-    /// Agent 选择浮层开启态。
-    pub agent_menu_open: bool,
     /// 投影刷新节流（流式增量事件按间隔取样，避免每 token 全量重建）。
     pub last_refresh: Option<std::time::Instant>,
     /// 回滚二段确认（messageId）。
@@ -162,10 +187,8 @@ pub struct ChatState {
 
 impl ChatState {
     pub fn new() -> Self {
-        Self {
-            sidebar_open: true,
-            ..Default::default()
-        }
+        // 会话侧栏默认收起：面板初始为「新对话」态，历史会话由用户主动展开
+        Self::default()
     }
 
     /// 当前会话的 agentId（会话值优先，缺省回落新对话草稿）。
@@ -185,11 +208,14 @@ impl ChatState {
     }
 
     /// 从 store 拉取单会话最新投影（run 事件 / 提交后调用），并预解析消息正文。
+    /// 解析缓存按「本会话 ∪ 当前显示会话」收敛——流式期间正文每拍换哈希，只增不删会让
+    /// 长对话把整段历史常驻内存；而后台会话的节流刷新不得清掉正在显示的会话缓存。
     fn refresh_session(&mut self, session_id: &str) {
         let store = store();
         let messages = store.session_messages(session_id);
         match messages {
             Some(messages) => {
+                let mut used: HashSet<u64> = HashSet::new();
                 for m in &messages {
                     let sources = [
                         m.get("displayContent").and_then(Value::as_str),
@@ -200,6 +226,7 @@ impl ChatState {
                             continue;
                         }
                         let key = source_hash(src);
+                        used.insert(key);
                         self.docs
                             .entry(key)
                             .or_insert_with(|| crate::markdown_view::parse_document(src));
@@ -210,6 +237,7 @@ impl ChatState {
                                 if let Some(text) = st.get("text").and_then(Value::as_str) {
                                     if !text.is_empty() {
                                         let key = source_hash(text);
+                                        used.insert(key);
                                         self.docs.entry(key).or_insert_with(|| {
                                             crate::markdown_view::parse_document(text)
                                         });
@@ -218,6 +246,17 @@ impl ChatState {
                             }
                         }
                     }
+                }
+                if let Some(active) = self.active.clone() {
+                    if active != session_id {
+                        // 并行 run 的后台刷新：把显示中会话引用的哈希并入保留集
+                        if let Some(active_msgs) = store.session_messages(&active) {
+                            collect_doc_keys(&active_msgs, &mut used);
+                        }
+                    }
+                }
+                if self.docs.len() > used.len() {
+                    self.docs.retain(|hash, _| used.contains(hash));
                 }
                 let wire = session_wire(session_id, messages);
                 match self.session_mut(session_id) {
@@ -265,8 +304,7 @@ pub enum ChatMsg {
     ToggleSidebar,
     SidebarSearch(String),
     SessionMenu(Option<String>),
-    /// Agent 选择浮层（选择固化到当前会话 / 新对话草稿）。
-    AgentMenu(bool),
+    /// Agent 选择（选择固化到当前会话 / 新对话草稿；None = 缺省「对话」）。
     AgentPick(Option<String>),
     InputAction(text_editor::Action),
     Send,
@@ -277,8 +315,28 @@ pub enum ChatMsg {
     RollbackCancel,
     Compact,
     Rename,
+    /// 展开 / 收起一个步骤块（思考 / 工具）。
+    ToggleStep(String),
+    /// 面板级模型选择（None = 跟随仓库默认）。
+    ModelPicked(Option<(String, String)>),
+    /// 面板级推理等级覆盖（None = 清除覆盖，跟随默认不发送）。
+    EffortPicked(Option<String>),
+    /// 消息流滚动位置回报（y 相对偏移；贴底 = 跟随开启）。
+    FlowScrolled(f32),
+    /// 会话行悬停态（操作钮显形）。
+    RowHover(Option<String>),
+    /// 回到底部浮钮。
+    ScrollToBottom,
+    /// 清除顶部行的错误提示。
+    ClearError,
     /// run 循环事件（core → Elm）。
     Run(RunEvent),
+    /// 会话真源装载完成（空间模式在自建线程上装载，回执经控制通道回 Elm）。
+    RepoLoaded(u64, Result<(), String>),
+    /// Agent 提示词取回（空间模式发送前置步骤）。
+    PromptReady(u64, Result<String, String>),
+    /// 退出前落盘回执。
+    FlushDone(Result<(), String>),
     /// 辅助调用收尾（压缩 / 手动命名完成；携带结果）。
     AidDone(AidKind, String, Option<String>),
     /// 插件请求发起 / 续聊一轮对话（ai.chat.send 的宿主编排）。
@@ -298,6 +356,13 @@ pub enum ChatMsg {
     },
 }
 
+/// 用户发起的对话动作（决定提示词补齐后回到哪个入口续跑）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingChatAction {
+    Send,
+    Regenerate,
+}
+
 /// 辅助调用类别（不算 run）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AidKind {
@@ -308,38 +373,57 @@ pub enum AidKind {
 
 // ===== 仓库装载 =====
 
-/// 进仓 / 切仓调用：停全部在途 run（在途提交会随换根失效）、装载磁盘真源并刷新投影。
+/// 进仓 / 切仓调用（本地）：装载磁盘真源并刷新投影。
 pub fn load_vault(app: &mut App, root: &std::path::Path) {
-    hub().stop_all();
-    app.chat.plugin_sessions.clear();
-    match store().load(root) {
-        Ok(_) => {
-            app.chat.loaded_root = Some(root.to_path_buf());
-            let snap = store().snapshot();
-            app.chat.sessions = snap.sessions;
-            app.chat.persist_error = snap.persist_error.map(|e| (e.message, e.at));
-            let current = app.chat.active.clone();
-            app.chat.active = current
-                .filter(|id| app.chat.sessions.iter().any(|s| s["id"] == json!(id)))
-                .or_else(|| latest_session_id(&app.chat.sessions));
-            app.chat.error = None;
-            app.chat.streaming.clear();
-            app.chat.compacting = None;
-            app.chat.docs.clear();
-            app.chat.delete_confirm = None;
-            app.chat.rollback_confirm = None;
-        }
-        Err(e) => {
-            app.chat.error = Some(format!("会话装载失败：{e}"));
-        }
+    prepare_load(app);
+    let ticket = store().begin_load();
+    match store().load(ticket, atelyx_core::ai::session_io::local_io(root)) {
+        Ok(Some(snap)) => apply_snapshot(app, snap),
+        // 已被更新的装载取代：真源状态归那次装载，本次不再回填投影
+        Ok(None) => {}
+        Err(e) => app.chat.error = Some(format!("会话装载失败：{e}")),
     }
 }
 
-/// 空间仓库脱离：本地会话真源不可达，清投影防跨仓读写。
-pub fn detach_vault(app: &mut App) {
+/// 进协作空间调用：装载空间真源（用户元数据：`chat/messages` 等键）。
+/// 空间后端是阻塞 HTTP，装载落在自建线程上（tokio 线程上阻塞会 panic），回执经控制通道回 Elm。
+pub fn load_space_sessions(app: &mut App) -> iced::Task<Message> {
+    prepare_load(app);
+    let Some(session) = crate::space_actions::session_of(app) else {
+        app.chat.error = Some("会话装载失败：协作空间会话缺失".to_string());
+        return iced::Task::none();
+    };
+    let Some(token) = app.space_token.clone() else {
+        app.chat.error = Some("会话装载失败：协作空间未登录".to_string());
+        return iced::Task::none();
+    };
+    let io = match atelyx_core::ai::session_io::space_io(
+        &session.server_url,
+        token,
+        session.space_id.clone(),
+    ) {
+        Ok(io) => io,
+        Err(e) => {
+            app.chat.error = Some(format!("会话装载失败：{e}"));
+            return iced::Task::none();
+        }
+    };
+    let gen = app.epoch();
+    let ticket = store().begin_load();
+    let store = Arc::clone(store());
+    let tx = control_channel().0.clone();
+    std::thread::spawn(move || {
+        let result = store.load(ticket, io).map(|_| ());
+        let _ = tx.send(ChatMsg::RepoLoaded(gen, result));
+    });
+    iced::Task::none()
+}
+
+/// 装载前置：停全部在途 run（在途提交随换源失效）、清插件会话归属与上一容器的投影。
+fn prepare_load(app: &mut App) {
     hub().stop_all();
     app.chat.plugin_sessions.clear();
-    app.chat.loaded_root = None;
+    app.chat.session_key = None;
     app.chat.sessions.clear();
     app.chat.active = None;
     app.chat.streaming.clear();
@@ -347,23 +431,119 @@ pub fn detach_vault(app: &mut App) {
     app.chat.docs.clear();
     app.chat.delete_confirm = None;
     app.chat.rollback_confirm = None;
+    app.chat.pending_action = None;
+    app.chat.pending_prompt = None;
+    app.chat.model_override = None;
+    app.chat.effort = None;
+}
+
+/// 装载就绪：投影快照 + 活动会话按最近更新回落 + 历史消息解析缓存重建。
+fn apply_snapshot(app: &mut App, snap: StoreSnapshot) {
+    app.chat.session_key = Some(snap.session_vault_key.clone());
+    app.chat.sessions = snap.sessions;
+    app.chat.persist_error = snap.persist_error.map(|e| (e.message, e.at));
+    app.chat.model_override = snap.model_override.filter(|v| !v.is_null());
+    app.chat.effort = snap.effort_override;
+    // 装载后回到「新对话」态：不自动选中最近会话、不展开会话侧栏——历史会话由用户主动选取
+    app.chat.active = None;
+    app.chat.sidebar_open = false;
+    app.chat.error = None;
+    app.chat.streaming.clear();
+    app.chat.compacting = None;
+    app.chat.docs.clear();
+    app.chat.delete_confirm = None;
+    app.chat.rollback_confirm = None;
+    app.chat.follow_bottom = true;
+    app.chat.row_hover = None;
+    app.chat.expanded.clear();
+    app.chat.session_menu = None;
+}
+
+/// 无真源（离开空间 / 未进仓）：清投影，防跨源读写。
+pub fn detach_vault(app: &mut App) {
+    prepare_load(app);
+    // 跨源后上一容器的错误条不再适用
+    app.chat.error = None;
+    app.chat.persist_error = None;
+}
+
+/// 消息集引用的正文源哈希（docs 缓存保留集计算用）。
+fn collect_doc_keys(messages: &[Value], keys: &mut HashSet<u64>) {
+    for m in messages {
+        let sources = [
+            m.get("displayContent").and_then(Value::as_str),
+            m.get("content").and_then(Value::as_str),
+        ];
+        for src in sources.into_iter().flatten() {
+            if !src.is_empty() {
+                keys.insert(source_hash(src));
+            }
+        }
+        if let Some(steps) = m.get("steps").and_then(Value::as_array) {
+            for st in steps {
+                if st.get("kind").and_then(Value::as_str) == Some("text") {
+                    if let Some(text) = st.get("text").and_then(Value::as_str) {
+                        if !text.is_empty() {
+                            keys.insert(source_hash(text));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// 退出前落盘会话真源：写链是防抖的，未 flush 的变更会随进程结束丢失。
+/// 只等一轮（成功或失败），失败走提示 + 下次启动的退避重试，退出不无限等待。
+pub fn flush_sessions() -> iced::Task<Message> {
+    let store = Arc::clone(store());
+    iced::Task::perform(async move { store.flush().await }, |result| {
+        Message::Chat(ChatMsg::FlushDone(result))
+    })
 }
 
 // ===== 配置解析 =====
 
 /// 解析 run 配置（供应商路由 / 模型 / Agent 名册）。配置缺失 = Err（面板提示）。
-fn resolve_run_config(app: &App, agent_id: Option<&str>) -> Result<RunConfig, String> {
-    let Some(model) = app.repo_config.model.clone() else {
-        return Err("未配置默认模型（设置 → AI 设置 → 模型服务）".to_string());
+/// `space_prompt`：空间模式下已取回的 Agent 提示词正文（本地模式自取，传 None）。
+/// `for_run`：辅助调用（压缩 / 命名）不消费提示词，传 false 跳过提示词解析，
+/// 空间模式下带提示词文件的 Agent 不因此报错。
+fn resolve_run_config(
+    app: &App,
+    agent_id: Option<&str>,
+    space_prompt: Option<String>,
+    for_run: bool,
+) -> Result<RunConfig, String> {
+    // 面板级覆盖优先（不指定 = 跟随仓库默认）
+    let override_pick = app.chat.model_override.as_ref().and_then(|v| {
+        let provider_id = v.get("providerId").and_then(Value::as_str)?;
+        let model = v.get("model").and_then(Value::as_str)?;
+        Some((provider_id.to_string(), model.to_string()))
+    });
+    let from_override = override_pick.is_some();
+    let (provider_id, model) = match override_pick {
+        Some(pick) => pick,
+        None => {
+            let Some(model) = app.repo_config.model.clone() else {
+                return Err("未配置默认模型（设置 → AI 设置 → 模型服务）".to_string());
+            };
+            (
+                app.repo_config.model_provider_id.clone().unwrap_or_default(),
+                model,
+            )
+        }
     };
-    let provider_id = app.repo_config.model_provider_id.clone().unwrap_or_default();
     let Some(provider) = app
         .repo_config
         .providers
         .as_ref()
         .and_then(|ps| ps.iter().find(|p| p.id == provider_id))
     else {
-        return Err("默认模型的供应商已失效，请重新选择".to_string());
+        return Err(if from_override {
+            "所选模型的供应商已失效，请在输入区重新选择".to_string()
+        } else {
+            "默认模型的供应商已失效，请重新选择".to_string()
+        });
     };
     let api_key = match &provider.api_key {
         Some(k) if !k.is_empty() => k.clone(),
@@ -376,13 +556,14 @@ fn resolve_run_config(app: &App, agent_id: Option<&str>) -> Result<RunConfig, St
     };
     // Agent 名册：缺省预置「对话」（无提示词 + 只读工具）；指定 id 缺失时同样降级
     let agent = app.agents.iter().find(|a| Some(a.id.as_str()) == agent_id);
-    let system_prompt = agent
-        .and_then(|a| a.system_prompt_file.clone())
-        .map(|file| {
-            let root = app.vault_root.clone().unwrap_or_default();
-            std::fs::read_to_string(root.join(&file)).unwrap_or_default()
-        })
-        .filter(|s| !s.trim().is_empty());
+    let system_prompt = match agent.and_then(|a| a.system_prompt_file.clone()) {
+        None => None,
+        // 辅助调用不消费提示词：直接跳过解析（空间下该文件需异步预取，这里没有）
+        Some(file) if for_run => {
+            Some(prompt_text(app, &file, space_prompt)?).filter(|s| !s.trim().is_empty())
+        }
+        Some(_) => None,
+    };
     let tool_ids = agent.map(|a| a.tools.clone()).unwrap_or_else(|| {
         ["web_search", "web_fetch", "read_file", "glob", "grep", "list_dir", "read_history"]
             .iter()
@@ -393,12 +574,64 @@ fn resolve_run_config(app: &App, agent_id: Option<&str>) -> Result<RunConfig, St
         base_url: provider.base_url.clone(),
         api_key,
         model,
-        reasoning_effort: None,
+        // 面板级推理等级覆盖（线格式解析失败 = 不发送，与未覆盖同语义）
+        reasoning_effort: app
+            .chat
+            .effort
+            .as_deref()
+            .and_then(atelyx_core::ai::stream::ReasoningEffort::parse_wire),
         system_prompt,
         tool_ids,
         search: search_config(app),
         exclude: app.repo_config.exclude_folders.clone().unwrap_or_default(),
     })
+}
+
+/// Agent 提示词正文：本地经 core 出口读仓库内文件（路径越界被拒）；
+/// 空间由调用方先行取回（服务端读，见 `prompt_prefetch`）。
+fn prompt_text(app: &App, file: &str, space_prompt: Option<String>) -> Result<String, String> {
+    match &app.repo_kind {
+        RepoKind::Local => {
+            let root = app
+                .vault_root
+                .as_ref()
+                .ok_or_else(|| "仓库未打开".to_string())?;
+            atelyx_core::vault::read_note(root, file)
+                .map_err(|e| format!("提示词文件读取失败（{file}）：{e}"))
+        }
+        RepoKind::Space(_) => {
+            space_prompt.ok_or_else(|| format!("提示词文件未取到（{file}）"))
+        }
+    }
+}
+
+/// 空间模式下 Agent 提示词文件在服务端：发送 / 重生成前异步取一次。
+/// 返回 Some(task) = 已在取（回执 `ChatMsg::PromptReady` 后回到同一入口续跑）。
+fn prompt_prefetch(
+    app: &mut App,
+    action: PendingChatAction,
+) -> Option<iced::Task<Message>> {
+    let RepoKind::Space(session) = &app.repo_kind else {
+        return None;
+    };
+    let file = app
+        .agents
+        .iter()
+        .find(|a| Some(a.id.as_str()) == app.chat.active_agent_id().as_deref())
+        .and_then(|a| a.system_prompt_file.clone())?;
+    let gen = app.epoch();
+    let client = session.client.clone();
+    let space_id = session.space_id.clone();
+    app.chat.pending_action = Some(action);
+    Some(iced::Task::perform(
+        async move {
+            client
+                .get_file_text(&space_id, &file)
+                .await
+                .map_err(|e| e.to_string())
+        },
+        move |result| Message::Chat(ChatMsg::PromptReady(gen, result)),
+    ))
 }
 
 fn search_config(app: &App) -> SearchConfig {
@@ -427,10 +660,20 @@ fn key_scope(app: &App) -> Option<String> {
     }
 }
 
+/// 工具执行环境：按容器身份选仓库访问后端（本地 = 仓库根 + 写盘队列；空间 = 服务端客户端）。
 fn tool_ctx(app: &App) -> ToolCtx {
+    let repo = match &app.repo_kind {
+        RepoKind::Local => RepoAccess::Local {
+            root: app.vault_root.clone().unwrap_or_default(),
+            queue: app.vault.writes.clone(),
+        },
+        RepoKind::Space(session) => RepoAccess::Space {
+            client: session.client.clone(),
+            space_id: session.space_id.clone(),
+        },
+    };
     ToolCtx {
-        root: app.vault_root.clone().unwrap_or_default(),
-        queue: app.vault.writes.clone(),
+        repo,
         search: search_config(app),
         exclude: app.repo_config.exclude_folders.clone().unwrap_or_default(),
     }
@@ -442,6 +685,73 @@ pub fn update(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
     match msg {
         ChatMsg::PersistStatus(status) => {
             app.chat.persist_error = status;
+            iced::Task::none()
+        }
+        ChatMsg::ModelPicked(pick) => {
+            let value = pick
+                .map(|(provider_id, model)| json!({ "providerId": provider_id, "model": model }));
+            if store()
+                .commit(CommitBatch {
+                    overrides: OverridesPatch {
+                        model_override: Some(value.clone()),
+                        effort_override: None,
+                    },
+                    ..Default::default()
+                })
+                .is_err()
+            {
+                app.chat.error = Some("模型选择保存失败".to_string());
+                return iced::Task::none();
+            }
+            app.chat.model_override = value;
+            iced::Task::none()
+        }
+        ChatMsg::EffortPicked(pick) => {
+            if store()
+                .commit(CommitBatch {
+                    overrides: OverridesPatch {
+                        model_override: None,
+                        effort_override: Some(pick.clone()),
+                    },
+                    ..Default::default()
+                })
+                .is_err()
+            {
+                app.chat.error = Some("推理等级保存失败".to_string());
+                return iced::Task::none();
+            }
+            app.chat.effort = pick;
+            iced::Task::none()
+        }
+        ChatMsg::FlowScrolled(y) => {
+            app.chat.follow_bottom = y >= 0.995;
+            iced::Task::none()
+        }
+        ChatMsg::RowHover(id) => {
+            app.chat.row_hover = id;
+            iced::Task::none()
+        }
+        ChatMsg::ScrollToBottom => {
+            app.chat.follow_bottom = true;
+            scroll_flow_bottom()
+        }
+        ChatMsg::ToggleStep(key) => {
+            if !app.chat.expanded.remove(&key) {
+                app.chat.expanded.insert(key);
+            }
+            iced::Task::none()
+        }
+        ChatMsg::ClearError => {
+            app.chat.error = None;
+            app.chat.persist_error = None;
+            iced::Task::none()
+        }
+        ChatMsg::FlushDone(result) => {
+            if let Err(e) = result {
+                // 退出前的最后一次落盘失败：提示可见（若窗口已关，至少留下可定位原因）
+                eprintln!("会话落盘失败（退出前）：{e}");
+                app.notify(crate::ui::notify::Level::Error, format!("会话落盘失败：{e}"));
+            }
             iced::Task::none()
         }
         ChatMsg::ToggleSidebar => {
@@ -456,12 +766,7 @@ pub fn update(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
             app.chat.session_menu = menu;
             iced::Task::none()
         }
-        ChatMsg::AgentMenu(open) => {
-            app.chat.agent_menu_open = open;
-            iced::Task::none()
-        }
         ChatMsg::AgentPick(id) => {
-            app.chat.agent_menu_open = false;
             match app.chat.active.clone() {
                 Some(session_id) => {
                     if let Some(s) = app.chat.session_mut(&session_id) {
@@ -483,10 +788,14 @@ pub fn update(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
             iced::Task::none()
         }
         ChatMsg::SessionPicked(id) => {
-            app.chat.active = Some(id);
+            app.chat.active = Some(id.clone());
             app.chat.rollback_confirm = None;
             app.chat.error = None;
-            iced::Task::none()
+            // 切换会话即重建该会话的解析缓存（装载后历史消息不退化纯文本）
+            app.chat.refresh_session(&id);
+            // 切会话直接呈现到最新消息（贴底跟随一并复位）
+            app.chat.follow_bottom = true;
+            scroll_flow_bottom()
         }
         ChatMsg::NewSession => {
             app.chat.active = None;
@@ -525,8 +834,40 @@ pub fn update(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
             }
             iced::Task::none()
         }
-        ChatMsg::Send => send(app),
-        ChatMsg::Regenerate => regenerate(app),
+        ChatMsg::Send => chat_entry(app, PendingChatAction::Send),
+        ChatMsg::Regenerate => chat_entry(app, PendingChatAction::Regenerate),
+        ChatMsg::RepoLoaded(gen, result) => {
+            if gen != app.epoch() {
+                // 装载在途期间换了容器：旧真源快照整体丢弃
+                return iced::Task::none();
+            }
+            match result {
+                Ok(()) => apply_snapshot(app, store().snapshot()),
+                Err(e) => app.chat.error = Some(format!("会话装载失败：{e}")),
+            }
+            iced::Task::none()
+        }
+        ChatMsg::PromptReady(gen, result) => {
+            if gen != app.epoch() {
+                app.chat.pending_action = None;
+                app.chat.pending_prompt = None;
+                return iced::Task::none();
+            }
+            let Some(action) = app.chat.pending_action.take() else {
+                return iced::Task::none(); // 已被更早的回执消费（重复请求）
+            };
+            match result {
+                Ok(text) => {
+                    app.chat.pending_prompt = Some(text);
+                    chat_entry(app, action)
+                }
+                Err(e) => {
+                    app.chat.pending_prompt = None;
+                    app.chat.error = Some(format!("Agent 提示词读取失败，已取消本次操作：{e}"));
+                    iced::Task::none()
+                }
+            }
+        }
         ChatMsg::Rollback(message_id) => {
             if app.chat.rollback_confirm.as_deref() == Some(message_id.as_str()) {
                 app.chat.rollback_confirm = None;
@@ -675,7 +1016,22 @@ fn uuid_v4() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-fn send(app: &mut App) -> iced::Task<Message> {
+/// 发送 / 重生成共用入口：空间模式先取 Agent 提示词文件，取回后回到本入口执行本体。
+fn chat_entry(app: &mut App, action: PendingChatAction) -> iced::Task<Message> {
+    if app.chat.pending_prompt.is_none() {
+        if let Some(task) = prompt_prefetch(app, action) {
+            return task;
+        }
+    }
+    let prompt = app.chat.pending_prompt.take();
+    app.chat.pending_action = None;
+    match action {
+        PendingChatAction::Send => send_now(app, prompt),
+        PendingChatAction::Regenerate => regenerate_now(app, prompt),
+    }
+}
+
+fn send_now(app: &mut App, space_prompt: Option<String>) -> iced::Task<Message> {
     let text = app.chat.input.text().trim().to_string();
     if text.is_empty() || app.chat.compacting.is_some() {
         return iced::Task::none();
@@ -684,7 +1040,7 @@ fn send(app: &mut App) -> iced::Task<Message> {
         app.chat.error = Some(e);
         return iced::Task::none();
     }
-    let config = match resolve_run_config(app, app.chat.active_agent_id().as_deref()) {
+    let config = match resolve_run_config(app, app.chat.active_agent_id().as_deref(), space_prompt, true) {
         Ok(c) => c,
         Err(e) => {
             app.chat.error = Some(e);
@@ -744,22 +1100,24 @@ fn send(app: &mut App) -> iced::Task<Message> {
     }
     app.chat.input = text_editor::Content::new();
     app.chat.refresh_session(&session_id);
+    // 发送即回底跟随（run 事件链会持续把新内容带到视野）
+    app.chat.follow_bottom = true;
     let compaction = app
         .chat
         .session_mut(&session_id)
         .and_then(|s| s.get("compaction").cloned())
         .filter(|c| !c.is_null());
     history.push(user_message);
-    start_run(config, session_id, compaction, history, app)
+    start_run(config, session_id, compaction, history, app).chain(scroll_flow_bottom())
 }
 
-/// 发送前置检查（供应商 / 模型 / 密钥 / 仓库就位）。
+/// 发送前置检查（会话真源已装载）。
 fn check_ready(app: &App) -> Result<(), String> {
-    if app.vault_root.is_none() {
-        return Err("未打开仓库".to_string());
+    if app.chat.session_key.is_none() {
+        return Err("会话未装载：请先打开仓库或进入协作空间".to_string());
     }
-    if app.chat.loaded_root.is_none() {
-        return Err("会话仓库未就绪".to_string());
+    if matches!(app.repo_kind, RepoKind::Local) && app.vault_root.is_none() {
+        return Err("仓库未打开".to_string());
     }
     Ok(())
 }
@@ -790,7 +1148,7 @@ fn start_run(
     })
 }
 
-fn regenerate(app: &mut App) -> iced::Task<Message> {
+fn regenerate_now(app: &mut App, space_prompt: Option<String>) -> iced::Task<Message> {
     let Some(session_id) = app.chat.active.clone() else {
         return iced::Task::none();
     };
@@ -809,7 +1167,7 @@ fn regenerate(app: &mut App) -> iced::Task<Message> {
     let Some(last_user_idx) = messages.iter().rposition(|m| m["role"] == json!("user")) else {
         return iced::Task::none();
     };
-    let config = match resolve_run_config(app, session.get("agentId").and_then(Value::as_str)) {
+    let config = match resolve_run_config(app, session.get("agentId").and_then(Value::as_str), space_prompt, true) {
         Ok(c) => c,
         Err(e) => {
             app.chat.error = Some(e);
@@ -878,7 +1236,7 @@ fn compact(app: &mut App) -> iced::Task<Message> {
     if app.chat.streaming.contains(&session_id) || app.chat.compacting.is_some() {
         return iced::Task::none();
     }
-    let config = match resolve_run_config(app, app.chat.active_agent_id().as_deref()) {
+    let config = match resolve_run_config(app, app.chat.active_agent_id().as_deref(), None, false) {
         Ok(c) => c,
         Err(e) => {
             app.chat.error = Some(e);
@@ -923,7 +1281,9 @@ fn compact(app: &mut App) -> iced::Task<Message> {
     }
     app.chat.compacting = Some(session_id.clone());
     iced::Task::future(async move {
-        let client = agent::aid_client(&config.base_url);
+        let Some(client) = agent::aid_client(&config.base_url) else {
+            return Message::Chat(ChatMsg::AidDone(AidKind::Compact, session_id, None));
+        };
         let summary = agent::compact_summary(
             &client,
             &config.base_url,
@@ -943,7 +1303,7 @@ fn manual_rename(app: &mut App) -> iced::Task<Message> {
     if app.chat.renaming.contains(&session_id) || app.chat.streaming.contains(&session_id) {
         return iced::Task::none();
     }
-    let config = match resolve_run_config(app, app.chat.active_agent_id().as_deref()) {
+    let config = match resolve_run_config(app, app.chat.active_agent_id().as_deref(), None, false) {
         Ok(c) => c,
         Err(e) => {
             app.chat.error = Some(e);
@@ -961,7 +1321,9 @@ fn manual_rename(app: &mut App) -> iced::Task<Message> {
     let excerpt = transcript_excerpt(&messages);
     app.chat.renaming.insert(session_id.clone());
     iced::Task::future(async move {
-        let client = agent::aid_client(&config.base_url);
+        let Some(client) = agent::aid_client(&config.base_url) else {
+            return Message::Chat(ChatMsg::AidDone(AidKind::ManualRename, session_id, None));
+        };
         let title = agent::auto_title(
             &client,
             &config.base_url,
@@ -996,6 +1358,16 @@ fn transcript_excerpt(messages: &[Value]) -> String {
 
 fn on_run_event(app: &mut App, event: RunEvent) -> iced::Task<Message> {
     let session_id = event_session(&event).to_string();
+    // 贴底跟随只对当前显示的会话生效（并行 run 不打扰别的会话视图）
+    let follow =
+        app.chat.follow_bottom && app.chat.active.as_deref() == Some(session_id.as_str());
+    let tail = |follow: bool| {
+        if follow {
+            scroll_flow_bottom()
+        } else {
+            iced::Task::none()
+        }
+    };
     let forced = !matches!(
         event,
         RunEvent::TextDelta { .. } | RunEvent::ReasoningDelta { .. } | RunEvent::ToolStart { .. }
@@ -1013,15 +1385,18 @@ fn on_run_event(app: &mut App, event: RunEvent) -> iced::Task<Message> {
             app.chat.streaming.insert(session_id.clone());
             app.chat.error = None;
             app.chat.refresh_session(&session_id);
+            tail(follow)
         }
         RunEvent::TextDelta { .. } | RunEvent::ReasoningDelta { .. } | RunEvent::ToolStart { .. } => {
             if due {
                 app.chat.last_refresh = Some(std::time::Instant::now());
                 app.chat.refresh_session(&session_id);
             }
+            tail(follow)
         }
         RunEvent::ToolEnd { .. } => {
             app.chat.refresh_session(&session_id);
+            tail(follow)
         }
         RunEvent::Finished { .. } => {
             app.chat.streaming.remove(&session_id);
@@ -1029,8 +1404,9 @@ fn on_run_event(app: &mut App, event: RunEvent) -> iced::Task<Message> {
             app.chat.refresh_session(&session_id);
             // 话题自动命名：新会话无标题且命名模式开启时触发（独立轻量调用，不算 run）
             if let Some(task) = maybe_auto_name(app, &session_id) {
-                return task;
+                return task.chain(tail(follow));
             }
+            tail(follow)
         }
         RunEvent::Failed { error, .. } => {
             app.chat.streaming.remove(&session_id);
@@ -1038,9 +1414,9 @@ fn on_run_event(app: &mut App, event: RunEvent) -> iced::Task<Message> {
                 app.chat.error = Some(error.clone());
             }
             app.chat.refresh_session(&session_id);
+            tail(follow)
         }
     }
-    iced::Task::none()
 }
 
 fn event_session(event: &RunEvent) -> &str {
@@ -1074,7 +1450,7 @@ fn maybe_auto_name(app: &mut App, session_id: &str) -> Option<iced::Task<Message
         return None;
     }
     let agent_id = session.get("agentId").and_then(Value::as_str);
-    let default = resolve_run_config(app, agent_id).ok()?;
+    let default = resolve_run_config(app, agent_id, None, false).ok()?;
     // 命名路由：设置指定模型 > 默认模型（供应商失效不跨家替换）
     let (base_url, api_key, model) = match crate::settings_view::ai::naming_mode(app) {
         NamingMode::Custom => {
@@ -1101,7 +1477,9 @@ fn maybe_auto_name(app: &mut App, session_id: &str) -> Option<iced::Task<Message
     app.chat.renaming.insert(session_id.to_string());
     let sid = session_id.to_string();
     Some(iced::Task::future(async move {
-        let client = agent::aid_client(&base_url);
+        let Some(client) = agent::aid_client(&base_url) else {
+            return Message::Chat(ChatMsg::AidDone(AidKind::AutoRename, sid, None));
+        };
         let title = agent::auto_title(&client, &base_url, &api_key, &model, &excerpt).await;
         Message::Chat(ChatMsg::AidDone(AidKind::AutoRename, sid, title))
     }))
@@ -1131,7 +1509,7 @@ fn plugin_chat_send(
         return iced::Task::none();
     }
     // 插件会话一律用仓库 AI 设置的默认 Agent 与模型（不指定、不带 key）
-    let config = match resolve_run_config(app, None) {
+    let config = match resolve_run_config(app, None, None, false) {
         Ok(config) => config,
         Err(e) => {
             deny(app, request_id, e);

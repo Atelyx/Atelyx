@@ -118,7 +118,12 @@ async fn chat_contract_roundtrip_via_plugin() {
     let vault = tmp.join("vault");
     let store = Arc::new(SessionStore::new(WriteChainConfig::default()));
     store.spawn_writer();
-    store.load(&vault).expect("装载空仓库应成功");
+    store
+        .load(
+            store.begin_load(),
+            atelyx_core::ai::session_io::local_io(vault.clone()),
+        )
+        .expect("装载空仓库应成功");
     let session_id = "e2e-session";
     store
         .commit(CommitBatch {
@@ -188,8 +193,10 @@ async fn chat_contract_roundtrip_via_plugin() {
                 },
                 history,
                 ToolCtx {
-                    root: vault.clone(),
-                    queue: Default::default(),
+                    repo: atelyx_core::ai::tools::RepoAccess::Local {
+                        root: vault.clone(),
+                        queue: Default::default(),
+                    },
                     search: SearchConfig::default(),
                     exclude: Vec::new(),
                 },

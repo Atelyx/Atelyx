@@ -2,19 +2,16 @@
 //! 展示状态（流式 / 压缩中）由编排方自持；本模块只管「磁盘上有什么」。
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use crate::ai::session_io::{session_meta_file, SessionIo};
 use crate::ai::PENDING_RUN_ID_PREFIX;
 use crate::vault::{
-    append_chat_messages_raw, delete_chat_messages_file, delete_chat_session_meta_file,
-    list_chat_sessions_file, read_chat_messages_file, read_editor_chats_meta_file,
-    write_chat_messages_file, write_chat_session_meta_file, write_editor_chats_meta_file,
-    ChatMetaFile, ChatSessionMeta, EditorChatModelOverride, CHAT_HISTORY_DIR, CHAT_META_EXT,
-    CHAT_MESSAGE_EXT, EDITOR_CHATS_META_SCHEMA,
+    ChatMetaFile, ChatSessionMeta, EditorChatModelOverride, CHAT_HISTORY_DIR, CHAT_MESSAGE_EXT,
+    EDITOR_CHATS_META_SCHEMA,
 };
 
 /// 写链失败的 persistError 文案（同文案重复失败不重复上报）。
@@ -200,7 +197,11 @@ struct PersistedBase {
 }
 
 struct Inner {
-    loaded_root: Option<PathBuf>,
+    /// 会话真源后端（None = 未装载）。本地目录与协作空间用户元数据在此统一。
+    backend: Option<Arc<dyn SessionIo>>,
+    /// 待删会话侧文件：删除走写盘轮，与在途写盘串行（否则在途全量重写会把已删文件写回）。
+    /// 记所属后端——换真源后仍要删回原真源，不落到新真源的同名文件上。
+    pending_deletes: Vec<(Arc<dyn SessionIo>, String)>,
     sessions: Vec<Session>,
     persist_error: Option<PersistError>,
     model_override: Option<Value>,
@@ -235,7 +236,10 @@ impl Inner {
     }
 
     fn has_dirty(&self) -> bool {
-        !self.dirty_messages.is_empty() || !self.dirty_meta.is_empty() || self.overrides_dirty
+        !self.dirty_messages.is_empty()
+            || !self.dirty_meta.is_empty()
+            || self.overrides_dirty
+            || !self.pending_deletes.is_empty()
     }
 
     /// 写链脏标记（每次内容变化都必须伴随调用，否则变更只存在于内存）。
@@ -259,13 +263,6 @@ impl Inner {
         self.overrides_dirty = true;
         self.overrides_version += 1;
         self.last_mark = Some(Instant::now());
-    }
-}
-
-fn vault_key_of(root: Option<&Path>) -> String {
-    match root {
-        Some(root) => format!("local:{}", root.to_string_lossy()),
-        None => String::new(),
     }
 }
 
@@ -300,6 +297,9 @@ pub struct SessionStore {
     io_lock: Mutex<()>,
     status_hook: Mutex<Option<StatusHook>>,
     config: WriteChainConfig,
+    /// 装载票：异步装载（空间）先取票、读真源后才落状态；期间若有更新的装载取票，
+    /// 过期票不再改写真源状态（否则慢装载会覆盖新容器的真源）。
+    load_seq: std::sync::atomic::AtomicU64,
 }
 
 impl SessionStore {
@@ -307,7 +307,8 @@ impl SessionStore {
         Self {
             io_lock: Mutex::new(()),
             inner: Mutex::new(Inner {
-                loaded_root: None,
+                backend: None,
+                pending_deletes: Vec::new(),
                 sessions: Vec::new(),
                 persist_error: None,
                 model_override: None,
@@ -329,7 +330,13 @@ impl SessionStore {
             sched: Condvar::new(),
             status_hook: Mutex::new(None),
             config,
+            load_seq: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    /// 取装载票：换容器时先取票，装载（可含网络）完成后凭票落状态；过期票的结果整体丢弃。
+    pub fn begin_load(&self) -> u64 {
+        self.load_seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
     }
 
     /// 安装落盘失败观察者（persistError 置位 / 恢复各回调一次；重复安装覆盖前者）。
@@ -373,26 +380,40 @@ impl SessionStore {
         })
     }
 
-    /// 装载仓库（进仓 / 切仓调用）：同根幂等；换根先落旧仓库在途写，再读盘重建。
-    pub fn load(&self, root: &Path) -> Result<StoreSnapshot, String> {
+    /// 装载真源（进仓 / 切仓 / 进协作空间调用）：同源幂等；换源先落旧真源在途写。
+    /// 读真源（可含网络）在锁外完成，只有落状态这一步与写轮串行；返回 None = 本次装载
+    /// 已被更新的装载取代（调用方不得再应用其结果）。
+    ///
+    /// 空间后端是阻塞 HTTP，调用方必须在非 tokio 线程上执行（见 `session_io` 模块头）。
+    pub fn load(
+        &self,
+        ticket: u64,
+        io: Arc<dyn SessionIo>,
+    ) -> Result<Option<StoreSnapshot>, String> {
+        let key = io.vault_key();
         {
             let inner = self.lock();
-            if inner.loaded_root.as_deref() == Some(root) {
-                return Ok(snapshot_of(&inner));
+            if backend_key(&inner).as_deref() == Some(key.as_str()) {
+                return Ok(Some(snapshot_of(&inner)));
             }
         }
-        // 换根前先落旧仓库在途写（失败不阻塞切换：错误可见 + 退避重试，与 flush 同语义）
+        // 换根前先落旧真源在途写（失败不阻塞切换：错误可见 + 退避重试，与 flush 同语义）
         if self.lock().has_dirty() {
             self.run_write_cycle();
         }
-        let mut inner = self.lock();
-        if inner.loaded_root.as_deref() == Some(root) {
-            return Ok(snapshot_of(&inner)); // 并发 load 已完成
+        // 读真源：锁外完成（空间后端在此走网络，不能占着 io_lock 让别的装载排队）
+        let sessions = scan_sessions(io.as_ref())?;
+        let editor_meta = io.read_overrides()?;
+        let _io = self.io_lock.lock().unwrap_or_else(poison);
+        if self.load_seq.load(std::sync::atomic::Ordering::SeqCst) != ticket {
+            return Ok(None); // 期间已有更新的装载：真源状态不归本次改写
         }
-        let sessions = scan_sessions(root)?;
-        let editor_meta = read_editor_chats_meta_file(root)?;
+        let mut inner = self.lock();
+        if backend_key(&inner).as_deref() == Some(key.as_str()) {
+            return Ok(Some(snapshot_of(&inner))); // 并发 load 已完成
+        }
         inner.epoch += 1;
-        inner.loaded_root = Some(root.to_path_buf());
+        inner.backend = Some(io);
         inner.sessions = sessions;
         inner.persist_error = None;
         inner.dirty_messages.clear();
@@ -420,7 +441,7 @@ impl SessionStore {
         inner.last_mark = None;
         inner.next_retry_at = None;
         inner.retry_attempt = 0;
-        Ok(snapshot_of(&inner))
+        Ok(Some(snapshot_of(&inner)))
     }
 
     // ===== 提交 =====
@@ -428,7 +449,7 @@ impl SessionStore {
     /// 编排方变更统一入口：批次校验（未装载 / 会话 id 冲突即整体拒绝）后一次应用并标脏。
     pub fn commit(&self, batch: CommitBatch) -> Result<(), String> {
         let mut inner = self.lock();
-        if inner.loaded_root.is_none() {
+        if inner.backend.is_none() {
             return Err("会话仓库未装载".to_string());
         }
         // created 先整体校验（批内重复 / 与既有冲突都拒绝，避免半应用）
@@ -557,7 +578,7 @@ impl SessionStore {
             }
             inner.mark_overrides();
         }
-        // 删除即删即落（锁外 I/O）：删除 = 删文件；失败仅影响磁盘残留，下次进仓兜底
+        // 删除：内存立即摘除，落盘排进写盘轮（与在途写盘串行，防在途全量重写把文件写回）
         let to_delete: Vec<(String, String, bool)> = batch
             .deletes
             .iter()
@@ -579,26 +600,23 @@ impl SessionStore {
                 .patch_revs
                 .retain(|(sid, _), _| sid != id);
         }
-        drop(inner);
-        // 脏标记就绪即唤醒写链线程（写链在无脏时无限期等待，无人唤醒则永不落盘）
-        self.sched.notify_all();
-        let root = {
-            let inner = self.lock();
-            inner.loaded_root.clone()
-        };
-        if let Some(root) = root {
-            for (_, file, remove_files) in to_delete {
+        if let Some(io) = inner.backend.clone() {
+            let mut queued = false;
+            for (_, file, remove_files) in &to_delete {
                 if !remove_files {
                     continue;
                 }
-                if let Err(e) = delete_chat_messages_file(&root, &file) {
-                    eprintln!("删除会话消息文件失败：{e}");
-                }
-                if let Err(e) = delete_chat_session_meta_file(&root, &chat_meta_file(&file)) {
-                    eprintln!("删除会话元数据文件失败：{e}");
-                }
+                inner.pending_deletes.push((Arc::clone(&io), file.clone()));
+                queued = true;
+            }
+            if queued {
+                // 起防抖计时：删除同样以尾沿 500ms 落，避免与在途写盘抢同一文件
+                inner.last_mark = Some(Instant::now());
             }
         }
+        drop(inner);
+        // 脏标记就绪即唤醒写链线程（写链在无脏时无限期等待，无人唤醒则永不落盘）
+        self.sched.notify_all();
         Ok(())
     }
 
@@ -659,37 +677,31 @@ impl SessionStore {
                 let mut inner = state.lock();
                 loop {
                     let now = Instant::now();
-                    let retry_due = inner
-                        .next_retry_at
-                        .map(|at| now >= at)
-                        .unwrap_or(false);
-                    let debounce_due = inner
-                        .last_mark
-                        .map(|mark| now.duration_since(mark) >= state.config.debounce)
-                        .unwrap_or(false);
-                    if inner.flush_requested
-                        || (inner.has_dirty() && (debounce_due || retry_due))
-                    {
+                    // 退避优先：失败后只按 next_retry_at 起轮。若仍看防抖到期，失败轮会立刻
+                    // 满足 debounce_due 而成紧循环重试（退避序列形同失效）。
+                    let retrying = inner.next_retry_at.is_some();
+                    let due = if retrying {
+                        inner.next_retry_at.map(|at| now >= at).unwrap_or(false)
+                    } else {
+                        inner
+                            .last_mark
+                            .map(|mark| now.duration_since(mark) >= state.config.debounce)
+                            .unwrap_or(true)
+                    };
+                    if inner.flush_requested || (inner.has_dirty() && due) {
                         break;
                     }
-                    // 等待到最近一个到期点（无待办则无限等待）
+                    // 等待到下一个到期点（无待办则无限等待）
                     let wait = if inner.has_dirty() {
-                        let mark_due = inner.last_mark.map(|mark| {
-                            state
-                                .config
-                                .debounce
-                                .checked_sub(now.duration_since(mark))
-                                .unwrap_or(Duration::ZERO)
-                        });
-                        let retry_due =
-                            inner.next_retry_at.map(|at| at.saturating_duration_since(now));
-                        Some(
-                            mark_due
-                                .into_iter()
-                                .chain(retry_due)
-                                .min()
-                                .unwrap_or(Duration::ZERO),
-                        )
+                        if retrying {
+                            inner.next_retry_at.map(|at| at.saturating_duration_since(now))
+                        } else {
+                            let delay = inner
+                                .last_mark
+                                .map(|mark| state.config.debounce.saturating_sub(now.duration_since(mark)))
+                                .unwrap_or(Duration::ZERO);
+                            Some(delay)
+                        }
                     } else {
                         None
                     };
@@ -741,7 +753,11 @@ fn session_to_wire(s: &Session) -> Value {
 
 fn snapshot_of(inner: &Inner) -> StoreSnapshot {
     StoreSnapshot {
-        session_vault_key: vault_key_of(inner.loaded_root.as_deref()),
+        session_vault_key: inner
+            .backend
+            .as_ref()
+            .map(|io| io.vault_key())
+            .unwrap_or_default(),
         sessions: inner.sessions.iter().map(session_to_wire).collect(),
         model_override: inner.model_override.clone(),
         effort_override: inner.effort_override.clone(),
@@ -779,23 +795,25 @@ pub fn chat_message_file(session_id: &str) -> String {
     format!("{CHAT_HISTORY_DIR}/{session_id}{CHAT_MESSAGE_EXT}")
 }
 
-/// 消息文件名 → 元数据侧车文件名（同基名换 `.meta.json` 后缀）。
-fn chat_meta_file(messages_file: &str) -> String {
-    match messages_file.strip_suffix(CHAT_MESSAGE_EXT) {
-        Some(base) => format!("{base}{CHAT_META_EXT}"),
-        None => messages_file.to_string(),
-    }
-}
-
 // ===== 磁盘装载（损坏行跳过、steps 收敛）=====
 
-fn scan_sessions(root: &Path) -> Result<Vec<Session>, String> {
-    let rows = list_chat_sessions_file(root)?;
+fn backend_key(inner: &Inner) -> Option<String> {
+    inner.backend.as_ref().map(|io| io.vault_key())
+}
+
+/// 装载磁盘真源：损坏行跳过、steps 收敛；单文件读取失败即跳过该会话并留日志——
+/// 读取失败的会话不进内存，写链就不会用空内容覆盖它（宁可这次看不到，不可丢内容）。
+fn scan_sessions(io: &dyn SessionIo) -> Result<Vec<Session>, String> {
+    let rows = io.list_sessions()?;
     let mut sessions = Vec::new();
     for row in rows {
-        let messages = read_chat_messages_file(root, &row.file)
-            .map(|jsonl| parse_messages_jsonl(&jsonl))
-            .unwrap_or_default();
+        let messages = match io.read_messages(&row.file) {
+            Ok(jsonl) => parse_messages_jsonl(&jsonl),
+            Err(e) => {
+                eprintln!("会话读取失败，本次跳过（不覆盖磁盘内容）：{} — {e}", row.file);
+                continue;
+            }
+        };
         let (title, agent_id, compaction) = match &row.meta {
             Some(meta) => (
                 meta.title.clone(),
@@ -1027,18 +1045,23 @@ enum WorkKind {
     Overrides {
         file: ChatMetaFile,
     },
+    /// 删会话侧文件（消息 + 元数据）；幂等，项自带所属后端（换真源后仍删回原真源）。
+    Delete {
+        io: Arc<dyn SessionIo>,
+        file: String,
+    },
 }
 
 struct WorkSnapshot {
     epoch: u64,
-    root: Option<PathBuf>,
+    backend: Option<Arc<dyn SessionIo>>,
     items: Vec<WorkItem>,
 }
 
 impl Inner {
     fn collect_work(&mut self) -> WorkSnapshot {
         let epoch = self.epoch;
-        let root = self.loaded_root.clone();
+        let backend = self.backend.clone();
         let mut items = Vec::new();
         let ids: Vec<String> = self.dirty_messages.iter().cloned().collect();
         for id in ids {
@@ -1082,19 +1105,33 @@ impl Inner {
                 continue;
             };
             let version = self.change_versions.get(&id).copied().unwrap_or(0);
-            let compaction = session
-                .compaction
-                .as_ref()
-                .and_then(|v| serde_json::from_value::<crate::vault::ChatCompaction>(v.clone()).ok());
+            // 压缩注解解析不了就不落这次元数据写：宁可留待下轮，也不静默清掉磁盘上已有的注解
+            let compaction = match session.compaction.as_ref() {
+                None => None,
+                Some(v) => match serde_json::from_value::<crate::vault::ChatCompaction>(v.clone()) {
+                    Ok(c) => Some(c),
+                    Err(e) => {
+                        eprintln!("压缩注解无法写出，本次跳过该会话元数据写盘：{e}");
+                        continue;
+                    }
+                },
+            };
             let meta = ChatSessionMeta {
                 id: session.id.clone(),
                 title: session.title.clone(),
                 agent_id: session.agent_id.clone(),
                 compaction,
             };
+            let meta_file = match session_meta_file(&session.file) {
+                Ok(file) => file,
+                Err(e) => {
+                    eprintln!("会话元数据路径异常，本次跳过：{e}");
+                    continue;
+                }
+            };
             items.push(WorkItem {
                 kind: WorkKind::Meta {
-                    file: chat_meta_file(&session.file),
+                    file: meta_file,
                     meta,
                 },
                 session_id: Some(id),
@@ -1102,23 +1139,35 @@ impl Inner {
             });
         }
         if self.overrides_dirty {
-            let model_override = self
-                .model_override
-                .as_ref()
-                .and_then(|v| serde_json::from_value::<EditorChatModelOverride>(v.clone()).ok());
-            items.push(WorkItem {
-                kind: WorkKind::Overrides {
-                    file: ChatMetaFile {
-                        schema: EDITOR_CHATS_META_SCHEMA.to_string(),
-                        model_override,
-                        effort_override: self.effort_override.clone(),
+            // 面板覆盖解析不了就不写：不静默清掉磁盘上已有的模型 / 推理等级覆盖
+            let parsed = match self.model_override.as_ref() {
+                None => Ok(None),
+                Some(v) => serde_json::from_value::<EditorChatModelOverride>(v.clone()).map(Some),
+            };
+            match parsed {
+                Ok(model_override) => items.push(WorkItem {
+                    kind: WorkKind::Overrides {
+                        file: ChatMetaFile {
+                            schema: EDITOR_CHATS_META_SCHEMA.to_string(),
+                            model_override,
+                            effort_override: self.effort_override.clone(),
+                        },
                     },
-                },
+                    session_id: None,
+                    version: self.overrides_version,
+                }),
+                Err(e) => eprintln!("面板模型覆盖无法写出，本次跳过该写盘：{e}"),
+            }
+        }
+        // 待删项排在本轮最后：同一文件的本轮写入先落地，删除再收尾，终态恒为「不存在」
+        for (io, file) in self.pending_deletes.clone() {
+            items.push(WorkItem {
+                kind: WorkKind::Delete { io, file },
                 session_id: None,
-                version: self.overrides_version,
+                version: 0,
             });
         }
-        WorkSnapshot { epoch, root, items }
+        WorkSnapshot { epoch, backend, items }
     }
 
     /// 写回结果应用：基线推进 / 脏清理 / 退避调度 / persistError 置位。
@@ -1134,7 +1183,23 @@ impl Inner {
         }
         let mut failed = false;
         for (item, result) in work.items.iter().zip(results) {
-            // 写轮在途期间会话被删：丢弃该项（不推进基线、不清脏），防文件被重建复活
+            // 删除项：成功即摘除待删记录；失败保留由下轮重试（意图不丢，文件不残留）
+            if let WorkKind::Delete { io, file } = &item.kind {
+                match result {
+                    Ok(()) => {
+                        let key = io.vault_key();
+                        self.pending_deletes.retain(|(pending_io, pending_file)| {
+                            !(pending_file == file && pending_io.vault_key() == key)
+                        });
+                    }
+                    Err(e) => {
+                        failed = true;
+                        eprintln!("删除会话文件失败（将重试）：{file} — {e}");
+                    }
+                }
+                continue;
+            }
+            // 写轮在途期间会话被删：丢弃该项（不推进基线、不清脏），删除项在本轮末尾收尾
             if let Some(id) = &item.session_id {
                 if self.session(id).is_none() {
                     continue;
@@ -1185,6 +1250,7 @@ impl Inner {
                             }
                         }
                         WorkKind::Overrides { .. } => self.overrides_dirty = false,
+                        WorkKind::Delete { .. } => {}
                     }
                 }
                 Err(e) => {
@@ -1228,6 +1294,23 @@ impl Inner {
             } else {
                 None
             }
+        } else if work.items.is_empty() && self.has_dirty() {
+            // 本轮没有产出任何工作项但仍有脏项（注解解析失败被跳过等）：
+            // 同样按退避节奏重试，否则写链线程会以全速紧循环空转
+            let delay = config
+                .retries
+                .get(self.retry_attempt)
+                .copied()
+                .unwrap_or_else(|| {
+                    config
+                        .retries
+                        .last()
+                        .copied()
+                        .unwrap_or(Duration::from_millis(30000))
+                });
+            self.retry_attempt += 1;
+            self.next_retry_at = Some(Instant::now() + delay);
+            None
         } else {
             self.retry_attempt = 0;
             self.next_retry_at = None;
@@ -1240,43 +1323,37 @@ impl Inner {
     }
 }
 
-/// 执行写盘工作项（锁外 I/O；各项独立成败）。消息追加前核对磁盘内容与内存基线一致
-/// （字节级；写函数恒补尾 '\n'，故比对 `去尾 == 基线`），不一致或文件缺失回落全量重写
-/// ——磁盘事实不假设只由本仓库改写。
+/// 执行写盘工作项（锁外 I/O；各项独立成败）。追加前由后端按磁盘事实复核基线，
+/// 不一致即回落全量重写——磁盘内容不假设只由本进程改写。
 fn perform_writes(work: &WorkSnapshot) -> Vec<Result<(), String>> {
-    let Some(root) = &work.root else {
-        return work
-            .items
-            .iter()
-            .map(|_| Err("仓库未装载，无法写盘".to_string()))
-            .collect();
-    };
     work.items
         .iter()
         .map(|item| match &item.kind {
+            // 删除项自带后端（换真源后仍删回原真源）
+            WorkKind::Delete { io, file } => io.delete_session_files(file),
             WorkKind::Messages {
                 file,
                 append_from,
                 rewrite,
             } => {
-                if let Some((base_jsonl, tail)) = append_from {
-                    let matches_base = read_chat_messages_file(root, file)
-                        .map(|existing| {
-                            if existing.is_empty() {
-                                base_jsonl.is_empty()
-                            } else {
-                                existing.strip_suffix('\n') == Some(base_jsonl.as_str())
-                            }
-                        })
-                        .unwrap_or(false);
-                    if matches_base && append_chat_messages_raw(root, file, tail).is_ok() {
+                let Some(io) = &work.backend else {
+                    return Err("会话仓库未装载，无法写盘".to_string());
+                };
+                if let Some((base, tail)) = append_from {
+                    if io.append_messages(file, base, tail).is_ok() {
                         return Ok(());
                     }
                 }
-                write_chat_messages_file(root, file, rewrite)
+                io.write_messages(file, rewrite)
             }
-            WorkKind::Meta { file, meta } => write_chat_session_meta_file(root, file, meta),
-            WorkKind::Overrides { file } => write_editor_chats_meta_file(root, file),
+            WorkKind::Meta { file, meta } => match &work.backend {
+                Some(io) => io.write_session_meta(file, meta),
+                None => Err("会话仓库未装载，无法写盘".to_string()),
+            },
+            WorkKind::Overrides { file } => match &work.backend {
+                Some(io) => io.write_overrides(file),
+                None => Err("会话仓库未装载，无法写盘".to_string()),
+            },
         })
         .collect()
 }
@@ -1284,6 +1361,9 @@ fn perform_writes(work: &WorkSnapshot) -> Vec<Result<(), String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ai::session_io::{appended_body, local_io, matches_append_base};
+    use crate::vault::ChatSessionRow;
+    use crate::vault::append_chat_messages_raw;
     use crate::vault::test_support::TempDir;
 
     fn msg(id: &str, role: &str, content: &str) -> Value {
@@ -1379,7 +1459,7 @@ mod tests {
     fn write_chain_appends_then_rewrites_and_stays_idempotent() {
         let dir = TempDir::new("ai-session");
         let store = SessionStore::new(test_config());
-        store.load(&dir).unwrap();
+        store.load(store.begin_load(), local_io(dir.to_path_buf())).unwrap();
         let sid = "s1";
         store
             .commit(CommitBatch {
@@ -1452,7 +1532,7 @@ mod tests {
         let sink = Arc::clone(&events);
         store.install_status_hook(move |status| sink.lock().unwrap().push(status));
         // 未装载仓库时提交的脏数据写盘必失败
-        store.load(&dir).unwrap();
+        store.load(store.begin_load(), local_io(dir.to_path_buf())).unwrap();
         store
             .commit(CommitBatch {
                 created: vec![SessionDef {
@@ -1510,7 +1590,7 @@ mod tests {
             debounce: Duration::from_secs(3600), // 防抖拉长：只允许 flush 通道触发写盘
             retries: vec![Duration::ZERO],
         }));
-        store.load(&dir).unwrap();
+        store.load(store.begin_load(), local_io(dir.to_path_buf())).unwrap();
         store
             .commit(CommitBatch {
                 created: vec![SessionDef {
@@ -1550,7 +1630,7 @@ mod tests {
     fn truncate_falls_back_to_full_rewrite() {
         let dir = TempDir::new("ai-session");
         let store = SessionStore::new(test_config());
-        store.load(&dir).unwrap();
+        store.load(store.begin_load(), local_io(dir.to_path_buf())).unwrap();
         store
             .commit(CommitBatch {
                 created: vec![SessionDef {
@@ -1602,7 +1682,7 @@ mod tests {
     fn commit_rev_gating() {
         let dir = TempDir::new("ai-session");
         let store = SessionStore::new(test_config());
-        store.load(&dir).unwrap();
+        store.load(store.begin_load(), local_io(dir.to_path_buf())).unwrap();
         store
             .commit(CommitBatch {
                 created: vec![SessionDef {
@@ -1651,7 +1731,7 @@ mod tests {
     fn commit_create_conflicts_rejected_atomically() {
         let dir = TempDir::new("ai-session");
         let store = SessionStore::new(test_config());
-        store.load(&dir).unwrap();
+        store.load(store.begin_load(), local_io(dir.to_path_buf())).unwrap();
         let def = |id: &str| SessionDef {
             id: id.into(),
             file: chat_message_file(id),
@@ -1691,7 +1771,7 @@ mod tests {
     fn delete_removes_files_and_detach_keeps_them() {
         let dir = TempDir::new("ai-session");
         let store = SessionStore::new(test_config());
-        store.load(&dir).unwrap();
+        store.load(store.begin_load(), local_io(dir.to_path_buf())).unwrap();
         let def = |id: &str| SessionDef {
             id: id.into(),
             file: chat_message_file(id),
@@ -1756,7 +1836,7 @@ mod tests {
     fn load_resets_and_rereads_disk() {
         let dir = TempDir::new("ai-session");
         let store = SessionStore::new(test_config());
-        store.load(&dir).unwrap();
+        store.load(store.begin_load(), local_io(dir.to_path_buf())).unwrap();
         store
             .commit(CommitBatch {
                 created: vec![SessionDef {
@@ -1774,16 +1854,241 @@ mod tests {
             .unwrap();
         store.run_write_cycle();
         // 同根幂等
-        store.load(&dir).unwrap();
+        store.load(store.begin_load(), local_io(dir.to_path_buf())).unwrap();
         assert_eq!(store.snapshot().sessions.len(), 1);
         // 换根再回：磁盘重建（写入已在途刷掉）
         let other = TempDir::new("ai-session");
-        store.load(&other).unwrap();
+        store.load(store.begin_load(), local_io(other.to_path_buf())).unwrap();
         assert!(store.snapshot().sessions.is_empty());
-        store.load(&dir).unwrap();
+        store.load(store.begin_load(), local_io(dir.to_path_buf())).unwrap();
         let snap = store.snapshot();
         assert_eq!(snap.sessions.len(), 1);
         assert_eq!(snap.sessions[0]["title"], json!("标题"));
         assert_eq!(snap.session_vault_key, format!("local:{}", dir.to_string_lossy()));
+    }
+
+    // ===== 写链时序（注入真源后端：读失败与在途删除的不变量）=====
+
+    /// 写盘门：让写轮停在中途，构造「写盘在途 + 删除」的真实交错。
+    struct Gate {
+        open: Mutex<bool>,
+        cv: Condvar,
+    }
+
+    impl Gate {
+        fn new() -> Self {
+            Self { open: Mutex::new(false), cv: Condvar::new() }
+        }
+
+        fn pass(&self) {
+            let mut open = self.open.lock().unwrap();
+            while !*open {
+                open = self.cv.wait(open).unwrap();
+            }
+        }
+
+        fn release(&self) {
+            *self.open.lock().unwrap() = true;
+            self.cv.notify_all();
+        }
+    }
+
+    /// 内存真源：可注入读失败、可让写入阻塞；不落真实磁盘，只验写链时序与内容不变量。
+    #[derive(Default)]
+    struct FakeIo {
+        files: Mutex<HashMap<String, String>>,
+        unreadable: Mutex<HashSet<String>>,
+        gate: Option<Arc<Gate>>,
+        write_log: Mutex<Vec<String>>,
+        wrote: Mutex<bool>,
+    }
+
+    impl FakeIo {
+        fn with_gate(gate: Arc<Gate>) -> Self {
+            Self { gate: Some(gate), ..Default::default() }
+        }
+
+        fn seed(&self, file: &str, content: &str) {
+            self.files.lock().unwrap().insert(file.to_string(), content.to_string());
+        }
+
+        fn deny_read(&self, file: &str) {
+            self.unreadable.lock().unwrap().insert(file.to_string());
+        }
+
+        fn content(&self, file: &str) -> Option<String> {
+            self.files.lock().unwrap().get(file).cloned()
+        }
+
+        fn writes(&self) -> Vec<String> {
+            self.write_log.lock().unwrap().clone()
+        }
+
+        /// 等写轮进入写盘（写轮在另一线程上跑，轮询到它真的开始再制造交错）。
+        fn wait_write_started(&self) {
+            for _ in 0..300 {
+                if *self.wrote.lock().unwrap() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            panic!("写轮未进入写盘");
+        }
+
+        fn enter_write(&self, file: &str) {
+            self.write_log.lock().unwrap().push(file.to_string());
+            *self.wrote.lock().unwrap() = true;
+            if let Some(gate) = &self.gate {
+                gate.pass();
+            }
+        }
+    }
+
+    impl SessionIo for FakeIo {
+        fn vault_key(&self) -> String {
+            "fake:io".to_string()
+        }
+
+        fn list_sessions(&self) -> Result<Vec<ChatSessionRow>, String> {
+            let prefix = format!("{CHAT_HISTORY_DIR}/");
+            Ok(self
+                .files
+                .lock()
+                .unwrap()
+                .keys()
+                .filter_map(|file| {
+                    let id = file.strip_prefix(&prefix)?.strip_suffix(CHAT_MESSAGE_EXT)?;
+                    Some(ChatSessionRow { id: id.to_string(), file: file.clone(), meta: None })
+                })
+                .collect())
+        }
+
+        fn read_messages(&self, file: &str) -> Result<String, String> {
+            if self.unreadable.lock().unwrap().contains(file) {
+                return Err("读取失败".to_string());
+            }
+            self.files
+                .lock()
+                .unwrap()
+                .get(file)
+                .cloned()
+                .ok_or_else(|| format!("会话消息不存在：{file}"))
+        }
+
+        fn write_messages(&self, file: &str, content: &str) -> Result<(), String> {
+            self.enter_write(file);
+            self.files.lock().unwrap().insert(file.to_string(), content.to_string());
+            Ok(())
+        }
+
+        fn append_messages(&self, file: &str, base: &str, tail: &str) -> Result<(), String> {
+            self.enter_write(file);
+            let mut files = self.files.lock().unwrap();
+            let existing = files.get(file).cloned().unwrap_or_default();
+            if !matches_append_base(&existing, base) {
+                return Err("内容与追加基线不一致".to_string());
+            }
+            files.insert(file.to_string(), appended_body(base, tail));
+            Ok(())
+        }
+
+        fn read_session_meta(&self, _file: &str) -> Result<Option<ChatSessionMeta>, String> {
+            Ok(None)
+        }
+
+        fn write_session_meta(&self, _file: &str, _meta: &ChatSessionMeta) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn delete_session_files(&self, file: &str) -> Result<(), String> {
+            self.write_log.lock().unwrap().push(format!("delete:{file}"));
+            self.files.lock().unwrap().remove(file);
+            Ok(())
+        }
+
+        fn read_overrides(&self) -> Result<ChatMetaFile, String> {
+            Ok(ChatMetaFile::default())
+        }
+
+        fn write_overrides(&self, _file: &ChatMetaFile) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    fn def(id: &str) -> SessionDef {
+        SessionDef {
+            id: id.to_string(),
+            file: chat_message_file(id),
+            title: None,
+            agent_id: None,
+            compaction: None,
+            created_at: 1,
+            updated_at: 1,
+            messages: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn delete_committed_during_in_flight_write_leaves_no_file() {
+        let gate = Arc::new(Gate::new());
+        let fake = Arc::new(FakeIo::with_gate(Arc::clone(&gate)));
+        let store = Arc::new(SessionStore::new(test_config()));
+        let io: Arc<dyn SessionIo> = fake.clone();
+        store.load(store.begin_load(), io).unwrap();
+        store
+            .commit(CommitBatch {
+                created: vec![def("s1")],
+                appends: vec![AppendBatch {
+                    session_id: "s1".into(),
+                    messages: vec![msg("m1", "user", "x")],
+                }],
+                ..Default::default()
+            })
+            .unwrap();
+        // 写轮在途（阻塞在写入中途），此时用户删掉该会话
+        let writing = {
+            let store = Arc::clone(&store);
+            std::thread::spawn(move || store.run_write_cycle())
+        };
+        fake.wait_write_started();
+        store
+            .commit(CommitBatch {
+                deletes: vec![DeleteEntry { session_id: "s1".into(), remove_files: true }],
+                ..Default::default()
+            })
+            .unwrap();
+        gate.release();
+        writing.join().unwrap();
+        // 收尾轮执行删除：终态必须是「文件不存在」（在途全量重写不得把已删文件留下）
+        store.run_write_cycle();
+        assert_eq!(fake.content(&chat_message_file("s1")), None);
+    }
+
+    #[test]
+    fn unreadable_session_is_skipped_and_never_overwritten() {
+        let file = chat_message_file("s1");
+        let raw = "{\"id\":\"m1\",\"role\":\"user\",\"content\":\"原文\",\"createdAt\":1}\n".to_string();
+        let fake = Arc::new(FakeIo::default());
+        fake.seed(&file, &raw);
+        fake.deny_read(&file);
+        let store = SessionStore::new(test_config());
+        let io: Arc<dyn SessionIo> = fake.clone();
+        let snap = store.load(store.begin_load(), io).unwrap().expect("首次装载应落状态");
+        // 读失败 = 本次看不到（不落内存基线），而不是「空会话」
+        assert!(snap.sessions.is_empty());
+        // 其余会话正常写入也不得触碰它：磁盘内容原样、从未写过该文件
+        store
+            .commit(CommitBatch {
+                created: vec![def("s2")],
+                appends: vec![AppendBatch {
+                    session_id: "s2".into(),
+                    messages: vec![msg("m2", "user", "y")],
+                }],
+                ..Default::default()
+            })
+            .unwrap();
+        store.run_write_cycle();
+        assert_eq!(fake.content(&file), Some(raw));
+        assert!(!fake.writes().iter().any(|f| f == &file));
     }
 }

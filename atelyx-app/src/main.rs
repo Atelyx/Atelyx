@@ -2142,24 +2142,34 @@ impl App {
                 Task::none()
             }
             Message::VaultMetaLoaded(gen, Ok((config, prompts, colors))) => {
-                if gen == self.epoch() {
-                    // 配置基线先整份留存（设置-AI 的展示与提交基线），字段抽取沿用既有会话态
-                    self.repo_config = config.clone();
-                    self.file_sort = config
-                        .file_explorer_sort
-                        .unwrap_or_else(|| "mtime-desc".to_string());
-                    self.exclude_folders = config.exclude_folders.unwrap_or_default();
-                    self.attachment_folder = config.attachment_folder;
-                    self.entry_scene_id = config.entry_scene_id;
-                    self.prompt_notes = prompts;
-                    self.folder_colors = colors;
-                    // 会话磁盘真源装载（进仓 / 切仓；同根幂等）；空间仓库无本地真源，脱离
-                    match self.vault_root.clone() {
-                        Some(root) => chat_actions::load_vault(self, &root),
-                        None => chat_actions::detach_vault(self),
-                    }
+                if gen != self.epoch() {
+                    return Task::none();
                 }
-                Task::none()
+                // 配置基线先整份留存（设置-AI 的展示与提交基线），字段抽取沿用既有会话态
+                self.repo_config = config.clone();
+                self.file_sort = config
+                    .file_explorer_sort
+                    .unwrap_or_else(|| "mtime-desc".to_string());
+                self.exclude_folders = config.exclude_folders.unwrap_or_default();
+                self.attachment_folder = config.attachment_folder;
+                self.entry_scene_id = config.entry_scene_id;
+                self.prompt_notes = prompts;
+                self.folder_colors = colors;
+                // Agent 名册随容器装载（会话的 agentId / 提示词 / 工具集不依赖打开设置页）
+                let mut task = settings_view::ai::load_agents(self);
+                // 会话真源装载（进仓 / 切仓 / 进空间；同源幂等）：空间后端是阻塞 HTTP，
+                // 装载落在自建线程上并回执；本地同步完成
+                task = task.chain(match &self.repo_kind {
+                    RepoKind::Space(_) => chat_actions::load_space_sessions(self),
+                    RepoKind::Local => {
+                        match self.vault_root.clone() {
+                            Some(root) => chat_actions::load_vault(self, &root),
+                            None => chat_actions::detach_vault(self),
+                        }
+                        Task::none()
+                    }
+                });
+                task
             }
             Message::VaultMetaLoaded(_, Err(_)) => Task::none(),
             Message::Chat(msg) => chat_actions::update(self, msg),
@@ -2925,8 +2935,9 @@ impl App {
                 if tab == "general" {
                     self.autostart_enabled = Some(autostart::enabled());
                 }
-                // AI 页打开即拉 Agent 配置清单
+                // AI 页打开即拉 Agent 配置清单（并兜底选中首项）
                 if tab == "ai" {
+                    settings_view::ai::ensure_selection(self);
                     return settings_view::ai::load_agents(self);
                 }
                 // 插件页打开即刷新已装列表
@@ -3023,7 +3034,10 @@ impl App {
             Message::AgentsLoaded(gen, result) => {
                 if gen == self.epoch() {
                     match result {
-                        Ok(agents) => self.agents = agents,
+                        Ok(agents) => {
+                            self.agents = agents;
+                            settings_view::ai::ensure_selection(self);
+                        }
                         Err(e) => self.notify(NoticeLevel::Error, format!("Agent 配置读取失败：{e}")),
                     }
                 }
@@ -3967,7 +3981,8 @@ impl App {
                 if let Some(flag) = &self.update_cancel {
                     flag.store(true, Relaxed);
                 }
-                window::close(id)
+                // 会话真源的最后一次落盘：写链防抖未到的变更不落盘即随进程丢失
+                chat_actions::flush_sessions().chain(window::close(id))
             }
             PendingAfterFlush::CloseFileTab(kind) => self.close_file_tab(&kind),
             PendingAfterFlush::OpenLink(href) => self.open_link_inner(href),

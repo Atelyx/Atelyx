@@ -79,6 +79,30 @@ pub(crate) fn naming_mode(app: &App) -> NamingMode {
     }
 }
 
+/// 选中项兜底：打开 AI 页 / 切子分区 / 清单变化时，未选中就落到首位——
+/// 右侧直接呈现首项表单，不留「选择或添加」的占位空态（清单为空时另有空态）。
+pub fn ensure_selection(app: &mut App) {
+    let providers = app.repo_config.providers.clone().unwrap_or_default();
+    let provider_gone = app
+        .ai
+        .provider_sel
+        .as_ref()
+        .is_none_or(|id| !providers.iter().any(|p| &p.id == id));
+    if provider_gone {
+        app.ai.provider_sel = providers.first().map(|p| p.id.clone());
+        app.ai.provider_draft = providers.first().map(|p| provider_draft_of(app, p));
+    }
+    let agent_gone = app
+        .ai
+        .agent_sel
+        .as_ref()
+        .is_none_or(|id| !app.agents.iter().any(|a| &a.id == id));
+    if agent_gone {
+        app.ai.agent_sel = app.agents.first().map(|a| a.id.clone());
+        app.ai.agent_draft = app.agents.first().map(agent_draft_of);
+    }
+}
+
 // ===== 会话内编辑状态 =====
 
 /// 设置-AI 的会话内编辑状态（选中项与草稿；容器切换时整体清空）。
@@ -93,6 +117,12 @@ pub struct AiState {
     pub testing: bool,
     /// 最近一次连通性测试结果（成功带耗时毫秒 / 失败带原因；切换供应商时清除）。
     pub test_result: Option<Result<u128, String>>,
+    /// 模型列表拉取在途（防重入；与测试互斥）。
+    pub fetching: bool,
+    /// 最近一次拉取到的供应商模型 id（None = 未拉取或失败；切换供应商时清除）。
+    pub fetched: Option<Vec<String>>,
+    /// 最近一次拉取失败原因（切换供应商时清除）。
+    pub fetch_error: Option<String>,
     /// 待清理的密钥链条目 (scope, 供应商 id)：供应商删除在配置落盘成功后执行。
     pub provider_key_delete_pending: Option<(String, String)>,
 }
@@ -103,7 +133,10 @@ pub struct ProviderDraft {
     pub id: String,
     pub name: String,
     pub base_url: String,
-    pub models: Vec<String>,
+    /// 已选模型（含可选昵称；清单来自服务端拉取勾选或手动添加）。
+    pub models: Vec<vault::VaultModel>,
+    /// 手动添加模型的输入草稿（回车 / 点添加入列）。
+    pub manual_draft: String,
     pub api_key: String,
     pub sync_keys: bool,
 }
@@ -134,14 +167,21 @@ pub enum AiMsg {
     ProviderAddCustom,
     ProviderName(String),
     ProviderUrl(String),
-    ProviderModel(usize, String),
-    ProviderModelAdd,
     ProviderModelRemove(usize),
     ProviderKey(String),
     ProviderSyncToggle,
     ProviderSave,
     ProviderTest,
     ProviderTestDone(u64, Result<u128, String>),
+    /// 拉取供应商模型列表（GET /models；成功回填勾选清单）。
+    ProviderFetch,
+    ProviderFetchDone(u64, Result<(Vec<String>, u128), String>),
+    /// 勾选 / 取消一个服务端模型（按模型 id）。
+    ProviderModelToggle(String),
+    /// 手动添加模型输入（回车或点「添加」入列）。
+    ProviderManualDraft(String),
+    ProviderManualAdd,
+    ProviderNickname(usize, String),
     ProviderDelete,
     // 模型服务
     DefaultModelPick(Option<(String, String)>),
@@ -173,21 +213,24 @@ pub fn view(app: &App, window: iced::window::Id) -> Element<'static, Message> {
             .height(Length::Fill)
             .into();
     }
-    let mut col = column![].spacing(8).padding(Padding::ZERO.horizontal(20.0));
+    let mut col = column![].spacing(8).padding(Padding::ZERO.horizontal(20.0).top(4.0));
     col = col.push(sub_tab_bar(app));
     if readonly(app) {
         col = col.push(read_only_banner());
     }
-    col = col.push(match app.ai_sub_tab.as_str() {
-        "models" => models_view(app, window),
-        "agents" => agents_view(app, window),
-        "search" => search_view(app, window),
-        _ => providers_view(app, window),
-    });
-    scrollable(container(col).padding(Padding::ZERO.top(4.0).bottom(24.0)))
+    // 子分区自持滚动：列表列与表单列各自滚动，中间分隔线随行高撑满
+    // （套一层外层滚动会把 Fill 高的两栏压扁，表单只剩首行）
+    col = col.push(
+        container(match app.ai_sub_tab.as_str() {
+            "models" => models_view(app, window),
+            "agents" => agents_view(app, window),
+            "search" => search_view(app, window),
+            _ => providers_view(app, window),
+        })
         .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+        .height(Length::Fill),
+    );
+    container(col).width(Length::Fill).height(Length::Fill).into()
 }
 
 /// Agent 配置读取（打开 AI 设置页时；本地读文件，空间走服务端）。
@@ -284,6 +327,7 @@ pub fn update(app: &mut App, msg: AiMsg) -> Task<Message> {
     match msg {
         AiMsg::SubTab(id) => {
             app.ai_sub_tab = id.to_string();
+            ensure_selection(app);
             if id == "agents" {
                 return load_agents(app);
             }
@@ -294,6 +338,9 @@ pub fn update(app: &mut App, msg: AiMsg) -> Task<Message> {
         AiMsg::ProviderSelect(id) => {
             app.ai.provider_sel = Some(id.clone());
             app.ai.test_result = None;
+            // 拉取结果按供应商区分：切换即清空（下个供应商要重新拉取）
+            app.ai.fetched = None;
+            app.ai.fetch_error = None;
             app.ai.provider_draft = app
                 .repo_config
                 .providers
@@ -304,19 +351,11 @@ pub fn update(app: &mut App, msg: AiMsg) -> Task<Message> {
             Task::none()
         }
         AiMsg::ProviderAddPreset(i) => {
-            app.dismiss_popup();
             let Some(p) = PROVIDER_PRESETS.get(i) else { return Task::none() };
-            add_provider(
-                app,
-                p.name,
-                p.base_url,
-                p.models.iter().map(|m| m.to_string()).collect(),
-            )
+            let models = p.models.iter().map(|m| vault::VaultModel { id: m.to_string(), nickname: None }).collect();
+            add_provider(app, p.name, p.base_url, models)
         }
-        AiMsg::ProviderAddCustom => {
-            app.dismiss_popup();
-            add_provider(app, "自定义", "", Vec::new())
-        }
+        AiMsg::ProviderAddCustom => add_provider(app, "自定义", "", Vec::new()),
         AiMsg::ProviderName(v) => {
             if let Some(d) = app.ai.provider_draft.as_mut() {
                 d.name = v;
@@ -329,17 +368,37 @@ pub fn update(app: &mut App, msg: AiMsg) -> Task<Message> {
             }
             Task::none()
         }
-        AiMsg::ProviderModel(i, v) => {
+        AiMsg::ProviderModelToggle(id) => {
+            let Some(d) = app.ai.provider_draft.as_mut() else { return Task::none() };
+            if let Some(pos) = d.models.iter().position(|m| m.id == id) {
+                d.models.remove(pos);
+            } else {
+                d.models.push(vault::VaultModel { id, nickname: None });
+            }
+            update(app, AiMsg::ProviderSave)
+        }
+        AiMsg::ProviderManualDraft(v) => {
             if let Some(d) = app.ai.provider_draft.as_mut() {
-                if let Some(m) = d.models.get_mut(i) {
-                    *m = v;
-                }
+                d.manual_draft = v;
             }
             Task::none()
         }
-        AiMsg::ProviderModelAdd => {
+        AiMsg::ProviderManualAdd => {
+            let Some(d) = app.ai.provider_draft.as_mut() else { return Task::none() };
+            let id = d.manual_draft.trim().to_string();
+            d.manual_draft.clear();
+            if id.is_empty() || d.models.iter().any(|m| m.id == id) {
+                return Task::none();
+            }
+            d.models.push(vault::VaultModel { id, nickname: None });
+            update(app, AiMsg::ProviderSave)
+        }
+        AiMsg::ProviderNickname(i, v) => {
             if let Some(d) = app.ai.provider_draft.as_mut() {
-                d.models.push(String::new());
+                if let Some(m) = d.models.get_mut(i) {
+                    let v = v.trim().to_string();
+                    m.nickname = (!v.is_empty()).then_some(v);
+                }
             }
             Task::none()
         }
@@ -394,6 +453,42 @@ pub fn update(app: &mut App, msg: AiMsg) -> Task<Message> {
                 Err(e) => app.notify(NoticeLevel::Error, format!("连接失败：{e}")),
             }
             app.ai.test_result = Some(result);
+            Task::none()
+        }
+        AiMsg::ProviderFetch => {
+            if app.ai.fetching || readonly(app) {
+                return Task::none();
+            }
+            let (base_url, key) = provider_test_inputs(app);
+            if base_url.trim().is_empty() {
+                app.notify(NoticeLevel::Warning, "先填写 baseUrl");
+                return Task::none();
+            }
+            app.ai.fetching = true;
+            app.ai.fetch_error = None;
+            let gen = app.epoch();
+            Task::perform(
+                async move { atelyx_core::ai::provider::list_models(&base_url, &key).await },
+                move |result| Message::Ai(AiMsg::ProviderFetchDone(gen, result)),
+            )
+        }
+        AiMsg::ProviderFetchDone(gen, result) => {
+            if gen != app.epoch() {
+                // 容器已切换：拉取结果不回投，但必须解除在途标记（新容器重建 AiState 时才会归零）
+                app.ai.fetching = false;
+                return Task::none();
+            }
+            app.ai.fetching = false;
+            match result {
+                Ok((ids, ms)) => {
+                    app.ai.fetched = Some(ids);
+                    app.ai.test_result = Some(Ok(ms));
+                }
+                Err(e) => {
+                    app.ai.fetched = None;
+                    app.ai.fetch_error = Some(e);
+                }
+            }
             Task::none()
         }
         AiMsg::ProviderDelete => {
@@ -578,7 +673,8 @@ fn provider_draft_of(app: &App, p: &vault::VaultProvider) -> ProviderDraft {
         id: p.id.clone(),
         name: p.name.clone(),
         base_url: p.base_url.clone(),
-        models: p.models.iter().map(|m| m.id.clone()).collect(),
+        models: p.models.clone(),
+        manual_draft: String::new(),
         // 关同步不回显已存密钥（密钥链读取放测试/保存时按需取）
         api_key: sync.then(|| p.api_key.clone()).flatten().unwrap_or_default(),
         sync_keys: sync,
@@ -608,17 +704,18 @@ fn ensure_search_draft(app: &mut App) -> &mut SearchDraft {
 }
 
 /// 新增供应商：预设/空模板即刻入列并写盘（默认无 key），选中进入编辑。
-fn add_provider(app: &mut App, name: &str, base_url: &str, models: Vec<String>) -> Task<Message> {
+fn add_provider(app: &mut App, name: &str, base_url: &str, models: Vec<vault::VaultModel>) -> Task<Message> {
     if readonly(app) {
         return Task::none();
     }
     let id = format!("prov-{}", nanoid::nanoid!(8));
+    let draft_models = models.clone();
     let mut providers = app.repo_config.providers.clone().unwrap_or_default();
     providers.push(vault::VaultProvider {
         id: id.clone(),
         name: name.to_string(),
         base_url: base_url.to_string(),
-        models: models.iter().map(|m| vault::VaultModel { id: m.clone(), nickname: None }).collect(),
+        models,
         api_key: None,
     });
     let Ok(list) = serde_json::to_value(&providers) else {
@@ -627,11 +724,15 @@ fn add_provider(app: &mut App, name: &str, base_url: &str, models: Vec<String>) 
     };
     app.repo_config.providers = Some(providers);
     app.ai.provider_sel = Some(id.clone());
+    app.ai.fetched = None;
+    app.ai.fetch_error = None;
+    // 草稿与入库条目同基线：否则后续任一次保存会用空清单覆盖预设模型
     app.ai.provider_draft = Some(ProviderDraft {
         id,
         name: name.to_string(),
         base_url: base_url.to_string(),
-        models,
+        models: draft_models,
+        manual_draft: String::new(),
         api_key: String::new(),
         sync_keys: app.repo_config.sync_keys.unwrap_or(false),
     });
@@ -650,17 +751,20 @@ fn save_provider(app: &mut App, draft: ProviderDraft) -> Task<Message> {
         app.notify(NoticeLevel::Warning, "供应商已被删除");
         return Task::none();
     };
-    let models: Vec<String> = draft
+    let models: Vec<vault::VaultModel> = draft
         .models
         .iter()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+        .map(|m| vault::VaultModel {
+            id: m.id.trim().to_string(),
+            nickname: m.nickname.clone().filter(|n| !n.trim().is_empty()),
+        })
+        .filter(|m| !m.id.is_empty())
         .collect();
     let sync = draft.sync_keys;
     let entry = &mut providers[index];
     entry.name = draft.name.trim().to_string();
     entry.base_url = draft.base_url.trim().to_string();
-    entry.models = models.into_iter().map(|m| vault::VaultModel { id: m, nickname: None }).collect();
+    entry.models = models;
     entry.api_key = sync.then(|| draft.api_key.clone()).filter(|k| !k.is_empty());
 
     // 关同步 = key 只进密钥链：补丁按数组整体替换，所有明文（含其他供应商与搜索源的）
@@ -788,21 +892,50 @@ fn providers_view(app: &App, window: iced::window::Id) -> Element<'static, Messa
     let ro = readonly(app);
     let providers: Vec<&vault::VaultProvider> = app.repo_config.providers.iter().flatten().collect();
 
-    let mut list = column![].spacing(4);
+    // 左列：供应商卡片 + 底部「快速添加」（预设与自定义直接入列）
+    let mut list = column![].spacing(6);
     for p in &providers {
         list = list.push(provider_card(p, app.ai.provider_sel.as_deref() == Some(p.id.as_str())));
     }
     if providers.is_empty() {
         list = list.push(
-            text("暂无供应商，点「添加」开始").size(pal::fs_caption()).color(pal::TEXT_MUTED),
+            text(if is_space(app) { "该空间还没有配置模型供应商" } else { "还没有供应商，从下方添加" })
+                .size(pal::fs_caption())
+                .color(pal::TEXT_MUTED),
         );
     }
-    let add_btn = controls::btn(
-        "添加",
-        &controls::btn_sm(),
-        controls::Variant::Secondary,
-        (!ro).then(|| open_popup(app, window, PopupState::AiProviderAddMenu)),
+    let mut quick = column![].spacing(2);
+    quick = quick.push(
+        text("快速添加".to_string())
+            .size(pal::fs_micro())
+            .color(pal::TEXT_MUTED),
     );
+    for (i, p) in PROVIDER_PRESETS.iter().enumerate() {
+        quick = quick.push(quick_add_row(p.name, (!ro).then(|| Message::Ai(AiMsg::ProviderAddPreset(i)))));
+    }
+    quick = quick.push(quick_add_row("自定义", (!ro).then(|| Message::Ai(AiMsg::ProviderAddCustom))));
+
+    let left = container(
+        scrollable(
+            container(
+                column![
+                    list,
+                    space().height(Length::Fixed(12.0)),
+                    controls::h_divider_subtle(),
+                    container(quick)
+                        .width(Length::Fill)
+                        .padding(Padding::ZERO.left(4.0).top(10.0)),
+                ]
+                .width(Length::Fill),
+            )
+            .width(Length::Fill)
+            .padding(Padding::ZERO.right(4.0).bottom(12.0)),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill),
+    )
+    .width(Length::Fixed(LIST_W))
+    .height(Length::Fill);
 
     let right: Element<'static, Message> = match app
         .ai
@@ -810,157 +943,367 @@ fn providers_view(app: &App, window: iced::window::Id) -> Element<'static, Messa
         .as_ref()
         .and_then(|id| providers.iter().find(|p| &p.id == id))
     {
-        None => container(text("选择或添加供应商").size(pal::fs_caption()).color(pal::TEXT_MUTED))
-            .width(Length::Fill)
-            .padding(Padding::ZERO.top(24.0))
-            .into(),
-        Some(p) => provider_form(app, p, window),
+        // 空态要在整列里居中，不套滚动
+        None => container(controls::empty_state(
+            "bot",
+            "还没有配置供应商",
+            "从左侧快速添加一个预设（OpenAI / DeepSeek / 通义千问）或自定义，填好地址与 API Key 后即可对话",
+            (!ro).then(|| (
+                "添加自定义供应商".to_string(),
+                Message::Ai(AiMsg::ProviderAddCustom),
+            )),
+        ))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into(),
+        Some(p) => scrollable(
+            container(provider_form(app, p, window)).padding(Padding::ZERO.left(20.0).bottom(24.0)),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into(),
     };
 
-    row![
-        container(column![list, space().height(Length::Fixed(8.0)), add_btn].width(Length::Fill))
-            .width(Length::Fixed(LIST_W)),
-        container(right).width(Length::Fill).padding(Padding::ZERO.left(20.0)),
+    let body = row![
+        left,
+        list_divider(),
+        container(right).width(Length::Fill).height(Length::Fill),
     ]
+    .height(Length::Fill);
+
+    // 底栏：本地仓库 = key 落盘策略开关；空间 = 团队共享说明（key 由服务端承载，无开关）
+    let bottom: Element<'static, Message> = if is_space(app) {
+        container(
+            text("协作空间下供应商配置（含 API Key）保存在服务端、空间成员共用一份".to_string())
+                .size(pal::fs_caption())
+                .color(if ro { pal::WARNING } else { pal::TEXT_MUTED }),
+        )
+        .width(Length::Fill)
+        .into()
+    } else {
+        let sync = app
+            .ai
+            .provider_draft
+            .as_ref()
+            .map(|d| d.sync_keys)
+            .unwrap_or_else(|| app.repo_config.sync_keys.unwrap_or(false));
+        row![
+            column![
+                text("API key 随仓库保存".to_string()).size(pal::fs_caption()).color(pal::TEXT_PRIMARY),
+                text("开启后 key 明文写入仓库配置（多设备同步有泄露风险）；关闭则只存本机密钥链".to_string())
+                    .size(pal::fs_micro())
+                    .color(pal::TEXT_MUTED),
+            ]
+            .spacing(2)
+            .width(Length::Fill),
+            controls::toggle(sync, (!ro && app.ai.provider_draft.is_some()).then(|| Message::Ai(AiMsg::ProviderSyncToggle))),
+        ]
+        .spacing(12)
+        .align_y(iced::alignment::Vertical::Center)
+        .into()
+    };
+
+    column![
+        body,
+        controls::h_divider_subtle(),
+        container(bottom).width(Length::Fill).padding(Padding::new(20.0).vertical(8.0)),
+    ]
+    .width(Length::Fill)
+    .height(Length::Fill)
     .into()
 }
 
-fn provider_card(p: &vault::VaultProvider, selected: bool) -> Element<'static, Message> {
+fn is_space(app: &App) -> bool {
+    matches!(&app.repo_kind, crate::RepoKind::Space(_))
+}
+
+/// 快速添加行（+ 图标 + 名称；整行可点）。
+fn quick_add_row(label: &str, on_press: Option<Message>) -> Element<'static, Message> {
     button(
-        column![
-            text(p.name.clone())
-                .size(pal::fs_caption())
-                .color(if selected { pal::ACCENT } else { pal::TEXT_PRIMARY }),
-            text(if p.base_url.is_empty() { "未配置 baseUrl".to_string() } else { p.base_url.clone() })
-                .size(pal::fs_micro())
-                .color(pal::TEXT_MUTED),
+        row![
+            icon("plus", 11.0, pal::TEXT_SECONDARY),
+            text(label.to_string()).size(pal::fs_caption()).color(pal::TEXT_SECONDARY),
         ]
-        .spacing(2),
+        .spacing(6)
+        .align_y(iced::alignment::Vertical::Center),
     )
     .width(Length::Fill)
-    .padding(Padding::ZERO.horizontal(10.0).vertical(6.0))
-    .style(controls::row_style(selected, pal::RADIUS_SM))
+    .padding(Padding::new(8.0).vertical(5.0))
+    .style(controls::row_style(false, pal::RADIUS_SM))
+    .on_press_maybe(on_press)
+    .into()
+}
+
+/// 列表列与表单列之间的 1px 分隔（两个功能区）。
+fn list_divider() -> Element<'static, Message> {
+    container(space())
+        .width(Length::Fixed(1.0))
+        .height(Length::Fill)
+        .style(|_t| Style {
+            background: Some(pal::BORDER_SUBTLE.into()),
+            ..Style::default()
+        })
+        .into()
+}
+
+/// 供应商卡片：名称 + 模型数徽标 + 去 协议 主机名（选中 = 强调描边 + 柔底）。
+fn provider_card(p: &vault::VaultProvider, selected: bool) -> Element<'static, Message> {
+    let host = p
+        .base_url
+        .trim()
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+    let host = if host.is_empty() { "未设置地址" } else { host };
+    button(
+        column![
+            row![
+                text(p.name.clone())
+                    .size(pal::fs_caption())
+                    .color(if selected { pal::ACCENT } else { pal::TEXT_PRIMARY })
+                    .width(Length::Fill),
+                controls::badge(format!("{} 模型", p.models.len()), pal::BG_TERTIARY, pal::TEXT_MUTED),
+            ]
+            .spacing(4)
+            .align_y(iced::alignment::Vertical::Center),
+            text(host.to_string()).size(pal::fs_micro()).color(pal::TEXT_MUTED),
+        ]
+        .spacing(3),
+    )
+    .width(Length::Fill)
+    .padding(Padding::new(10.0).vertical(7.0))
+    .style(move |_t, status| {
+        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        button::Style {
+            background: Some(
+                if selected {
+                    pal::ACCENT_SOFT
+                } else if hovered {
+                    pal::HOVER
+                } else {
+                    pal::BG_TERTIARY
+                }
+                .into(),
+            ),
+            text_color: pal::TEXT_PRIMARY,
+            border: border::Border {
+                width: if selected { 1.0 } else { 0.5 },
+                radius: pal::RADIUS_MD.into(),
+                color: if selected { pal::ACCENT } else { pal::BORDER },
+            },
+            ..Default::default()
+        }
+    })
     .on_press(Message::Ai(AiMsg::ProviderSelect(p.id.clone())))
     .into()
 }
 
+/// 表单字段（标签在上、控件在下；旧壳 Field 布局）。
+fn field(label: impl Into<String>, control: Element<'static, Message>) -> Element<'static, Message> {
+    column![
+        text(label.into()).size(pal::fs_micro()).color(pal::TEXT_MUTED),
+        container(control).width(Length::Fill).padding(Padding::ZERO.top(2.0)),
+    ]
+    .spacing(0)
+    .into()
+}
+
 fn provider_form(app: &App, p: &vault::VaultProvider, window: iced::window::Id) -> Element<'static, Message> {
+    let _ = window;
     let ro = readonly(app);
     let draft = app.ai.provider_draft.as_ref().filter(|d| d.id == p.id);
     let name = draft.map(|d| d.name.clone()).unwrap_or_else(|| p.name.clone());
     let base_url = draft.map(|d| d.base_url.clone()).unwrap_or_else(|| p.base_url.clone());
-    let models = draft.map(|d| d.models.clone()).unwrap_or_else(|| p.models.iter().map(|m| m.id.clone()).collect());
+    let models = draft.map(|d| d.models.clone()).unwrap_or_else(|| p.models.clone());
     let key = draft.map(|d| d.api_key.clone()).unwrap_or_default();
     let sync = draft.map(|d| d.sync_keys).unwrap_or_else(|| app.repo_config.sync_keys.unwrap_or(false));
 
     let name_control = if ro {
         value_text(&name)
     } else {
-        controls::form_input("名称", &name, FORM_W, |v| Message::Ai(AiMsg::ProviderName(v)), Message::Ai(AiMsg::ProviderSave))
+        controls::form_input("My Provider", &name, FORM_W, |v| Message::Ai(AiMsg::ProviderName(v)), Message::Ai(AiMsg::ProviderSave))
     };
     let url_control = if ro {
         value_text(&base_url)
     } else {
-        controls::form_input("https://api.example.com/v1", &base_url, FORM_W, |v| {
+        controls::form_input("https://api.openai.com/v1", &base_url, FORM_W, |v| {
             Message::Ai(AiMsg::ProviderUrl(v))
         }, Message::Ai(AiMsg::ProviderSave))
     };
 
-    let mut model_col = column![].spacing(4);
-    for (i, m) in models.iter().enumerate() {
-        let model_control = if ro {
-            value_text(m)
-        } else {
-            controls::form_input("模型 id（如 gpt-4o-mini）", m, 200.0, move |v| {
-                Message::Ai(AiMsg::ProviderModel(i, v))
-            }, Message::Ai(AiMsg::ProviderSave))
-        };
-        model_col = model_col.push(
-            row![
-                model_control,
-                controls::icon_button(
-                    "删除该模型",
-                    12.0,
-                    20.0,
-                    controls::Variant::Ghost,
-                    (!ro).then(|| Message::Ai(AiMsg::ProviderModelRemove(i))),
-                    None,
-                ),
-            ]
-            .spacing(4)
-            .align_y(iced::alignment::Vertical::Center),
-        );
-    }
-    model_col = model_col.push(controls::btn(
-        "添加模型",
-        &controls::btn_sm(),
-        controls::Variant::Ghost,
-        (!ro).then(|| Message::Ai(AiMsg::ProviderModelAdd)),
-    ));
-
+    // API Key 行：密文输入 + 测试连通性按钮（结果行内反馈，不弹通知）
     let key_control = if ro {
         value_text(if key.is_empty() && p.api_key.is_none() { "—" } else { "已配置" })
     } else {
         let hint = if sync { "明文随仓库保存" } else { "只存本机密钥链；留空 = 不更改已存" };
-        container(
-            column![
-                controls::secret_input("API Key", &key, FORM_W, |v| Message::Ai(AiMsg::ProviderKey(v)), Message::Ai(AiMsg::ProviderSave)),
-                text(hint.to_string()).size(pal::fs_micro()).color(pal::TEXT_MUTED),
-            ]
-            .spacing(2),
-        )
-        .into()
+        let test_btn = controls::btn(
+            if app.ai.testing { "测试中…" } else { "测试连通性" },
+            &controls::btn_sm(),
+            controls::Variant::Secondary,
+            (!ro && !app.ai.testing).then(|| Message::Ai(AiMsg::ProviderTest)),
+        );
+        let mut key_col = column![
+            row![controls::secret_input("sk-...", &key, FORM_W, |v| Message::Ai(AiMsg::ProviderKey(v)), Message::Ai(AiMsg::ProviderSave)), test_btn]
+                .spacing(8)
+                .align_y(iced::alignment::Vertical::Center),
+            text(hint.to_string()).size(pal::fs_micro()).color(pal::TEXT_MUTED),
+        ]
+        .spacing(4);
+        match &app.ai.test_result {
+            Some(Ok(ms)) => {
+                key_col = key_col.push(
+                    row![
+                        icon("check", 12.0, pal::SUCCESS),
+                        text(format!("连接成功 · {ms}ms")).size(pal::fs_micro()).color(pal::SUCCESS),
+                    ]
+                    .spacing(4),
+                );
+            }
+            Some(Err(e)) => {
+                key_col = key_col.push(
+                    row![
+                        icon("x", 12.0, pal::DANGER),
+                        text(format!("连接失败 · {e}")).size(pal::fs_micro()).color(pal::DANGER),
+                    ]
+                    .spacing(4),
+                );
+            }
+            None => {}
+        }
+        key_col.into()
     };
 
-    let mut col = column![].spacing(8);
-    col = col.push(super::group_head("供应商", &p.id, true));
-    col = col.push(super::setting_row("名称", "列表与下拉中的显示名", name_control));
-    col = col.push(super::setting_row("baseUrl", "OpenAI 兼容接口地址", url_control));
-    col = col.push(super::setting_row("模型清单", "对话可选用的模型", model_col.into()));
-    col = col.push(super::setting_row("API Key", "请求鉴权凭据", key_control));
-    col = col.push(super::setting_row(
-        "Key 随仓库同步",
-        "开启后 key 明文写入仓库配置（多设备同步有泄露风险）；关闭则只存本机密钥链",
-        controls::toggle(sync, (!ro).then(|| Message::Ai(AiMsg::ProviderSyncToggle))),
-    ));
-    let test_result_text = match &app.ai.test_result {
-        Some(Ok(ms)) => text(format!("成功 · {ms}ms"))
-            .size(pal::fs_micro())
-            .color(pal::TEXT_MUTED),
-        Some(Err(e)) => text(format!("失败 · {e}"))
-            .size(pal::fs_micro())
-            .color(pal::TEXT_MUTED),
-        None => text(""),
-    };
-    col = col.push(super::setting_row(
-        "测试连通性",
-        "GET {baseUrl}/models 校验地址与凭据",
-        row![
-            controls::btn(
-                if app.ai.testing { "测试中…" } else { "测试连通性" },
-                &controls::btn_sm(),
-                controls::Variant::Secondary,
-                (!ro && !app.ai.testing).then(|| Message::Ai(AiMsg::ProviderTest)),
-            ),
-            test_result_text,
-        ]
-        .spacing(10)
-        .align_y(iced::alignment::Vertical::Center)
-        .into(),
-    ));
-    let mut actions = row![].spacing(8);
-    if !ro {
-        actions = actions.push(controls::btn(
-            "删除",
-            &controls::btn_sm(),
-            controls::Variant::Ghost,
-            Some(open_popup(app, window, PopupState::AiProviderDeleteMenu)),
-        ));
+    // 模型区：拉取按钮 + 服务端清单勾选 ∪ 手动模型（徽标标示）+ 昵称 + 手动添加
+    let fetched = app.ai.fetched.clone();
+    let fetch_btn = controls::btn(
+        if app.ai.fetching { "获取中…" } else { "获取模型列表" },
+        &controls::btn_sm(),
+        controls::Variant::Secondary,
+        (!ro && !app.ai.fetching).then(|| Message::Ai(AiMsg::ProviderFetch)),
+    );
+    let mut model_area = column![].spacing(4);
+    model_area = model_area.push(
+        row![fetch_btn, text("勾选要使用的模型，可设置昵称".to_string()).size(pal::fs_micro()).color(pal::TEXT_MUTED)]
+            .spacing(10)
+            .align_y(iced::alignment::Vertical::Center),
+    );
+    if let Some(e) = &app.ai.fetch_error {
+        model_area = model_area.push(
+            row![
+                icon("x", 12.0, pal::DANGER),
+                text(format!("获取失败：{e}")).size(pal::fs_micro()).color(pal::DANGER),
+            ]
+            .spacing(4),
+        );
     }
-    col = col.push(container(actions).width(Length::Fill));
+    // 行 = 服务端模型（可勾选）∪ 已添加但不在服务端清单的手动模型（固定选中）
+    let mut rows: Vec<(String, bool)> = fetched
+        .unwrap_or_default()
+        .into_iter()
+        .map(|id| (id, true))
+        .collect();
+    for m in &models {
+        if !rows.iter().any(|(id, _)| id == &m.id) {
+            rows.push((m.id.clone(), false));
+        }
+    }
+    if rows.is_empty() && app.ai.fetch_error.is_none() {
+        model_area = model_area.push(
+            text("点击「获取模型列表」拉取，或在下方手动添加模型 ID".to_string())
+                .size(pal::fs_micro())
+                .color(pal::TEXT_MUTED),
+        );
+    }
+    for (id, from_server) in &rows {
+        let sel = models.iter().position(|m| &m.id == id);
+        let mut row_ctrl = row![].spacing(8).align_y(iced::alignment::Vertical::Center);
+        if *from_server {
+            row_ctrl = row_ctrl.push(controls::checkbox(
+                if sel.is_some() { controls::CheckState::On } else { controls::CheckState::Off },
+                (!ro).then(|| Message::Ai(AiMsg::ProviderModelToggle(id.clone()))),
+            ));
+        } else {
+            row_ctrl = row_ctrl.push(controls::badge("手动", pal::BG_TERTIARY, pal::TEXT_MUTED));
+        }
+        row_ctrl = row_ctrl.push(
+            text(id.clone())
+                .size(pal::fs_caption())
+                .color(pal::TEXT_PRIMARY)
+                .width(Length::Fill),
+        );
+        if let Some(pos) = sel {
+            if !ro {
+                let nickname = models[pos].nickname.clone().unwrap_or_default();
+                row_ctrl = row_ctrl.push(controls::form_input(
+                    "昵称（可选）",
+                    &nickname,
+                    140.0,
+                    move |v| Message::Ai(AiMsg::ProviderNickname(pos, v)),
+                    Message::Ai(AiMsg::ProviderSave),
+                ));
+            }
+            row_ctrl = row_ctrl.push(controls::icon_button(
+                "x",
+                12.0,
+                20.0,
+                controls::Variant::Ghost,
+                (!ro).then(|| Message::Ai(AiMsg::ProviderModelRemove(pos))),
+                None,
+            ));
+        }
+        model_area = model_area.push(
+            container(row_ctrl)
+                .width(Length::Fill)
+                .padding(Padding::new(8.0).vertical(4.0))
+                .style(|_t| Style {
+                    background: Some(pal::BG_SECONDARY.into()),
+                    border: border::rounded(pal::RADIUS_SM),
+                    ..Style::default()
+                }),
+        );
+    }
+    if !ro {
+        model_area = model_area.push(
+            row![
+                controls::form_input(
+                    "手动添加模型 ID（模型不在列表中时）",
+                    &draft.map(|d| d.manual_draft.clone()).unwrap_or_default(),
+                    FORM_W,
+                    |v| Message::Ai(AiMsg::ProviderManualDraft(v)),
+                    Message::Ai(AiMsg::ProviderManualAdd),
+                ),
+                controls::btn(
+                    "添加",
+                    &controls::btn_sm(),
+                    controls::Variant::Secondary,
+                    Some(Message::Ai(AiMsg::ProviderManualAdd)),
+                ),
+            ]
+            .spacing(8)
+            .align_y(iced::alignment::Vertical::Center),
+        );
+    }
+
+    let mut col = column![].spacing(14);
+    col = col.push(super::group_head("供应商", &p.id, true));
+    col = col.push(field("名称", name_control));
+    col = col.push(field("Base URL", url_control));
+    col = col.push(field("API Key", key_control));
+    col = col.push(field(format!("模型（已选 {} 个）", models.len()), model_area.into()));
+    if !ro {
+        col = col.push(
+            container(controls::btn(
+                "删除该供应商",
+                &controls::btn_sm(),
+                controls::Variant::Ghost,
+                Some(open_popup(app, window, PopupState::AiProviderDeleteMenu)),
+            ))
+            .width(Length::Fill)
+            .align_x(iced::alignment::Horizontal::Right)
+            .padding(Padding::ZERO.top(6.0)),
+        );
+    }
     col.into()
 }
-
 // ===== 模型服务 =====
 
 fn models_view(app: &App, window: iced::window::Id) -> Element<'static, Message> {
@@ -975,9 +1318,16 @@ fn models_view(app: &App, window: iced::window::Id) -> Element<'static, Message>
     );
     col = col.push(super::setting_row("默认模型", "对话与话题命名缺省使用的模型", default_trigger));
     if model_count == 0 {
-        col = col.push(container(
-            text("先在「供应商」添加模型").size(pal::fs_micro()).color(pal::TEXT_MUTED),
-        ));
+        col = col.push(container(controls::empty_state(
+            "sparkles",
+            "还没有可用的模型",
+            "模型清单来自供应商；先去「供应商」添加并填入模型清单",
+            (!ro).then(|| (
+                "去添加供应商".to_string(),
+                Message::Ai(AiMsg::SubTab("providers")),
+            )),
+        ))
+        .height(Length::Fixed(220.0)));
     }
 
     col = col.push(super::group_head("话题自动命名", "", true));
@@ -996,7 +1346,10 @@ fn models_view(app: &App, window: iced::window::Id) -> Element<'static, Message>
         );
         col = col.push(super::setting_row("命名模型", "话题命名一般用小模型；跟随默认 = 用默认模型", model_trigger));
     }
-    col.into()
+    scrollable(container(col).padding(Padding::ZERO.bottom(24.0)))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
 }
 
 fn provider_name(app: &App, id: &str) -> String {
@@ -1060,18 +1413,37 @@ fn agents_view(app: &App, window: iced::window::Id) -> Element<'static, Message>
         .as_ref()
         .and_then(|id| app.agents.iter().find(|a| &a.id == id))
     {
-        None => container(text("选择或新建 Agent").size(pal::fs_caption()).color(pal::TEXT_MUTED))
-            .width(Length::Fill)
-            .padding(Padding::ZERO.top(24.0))
-            .into(),
-        Some(a) => agent_form(app, a, window),
+        // 空态要在整列里居中，不套滚动
+        None => container(controls::empty_state(
+            "bot",
+            "还没有配置 Agent",
+            "Agent = 系统提示词 + 工具集；新建后可在对话输入区选择使用",
+            (!ro).then(|| ("新建 Agent".to_string(), Message::Ai(AiMsg::AgentNew))),
+        ))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into(),
+        Some(a) => scrollable(
+            container(agent_form(app, a, window)).padding(Padding::ZERO.left(20.0).bottom(24.0)),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into(),
     };
 
     row![
-        container(column![list, space().height(Length::Fixed(8.0)), new_btn].width(Length::Fill))
-            .width(Length::Fixed(LIST_W)),
-        container(right).width(Length::Fill).padding(Padding::ZERO.left(20.0)),
+        container(
+            scrollable(container(column![list, space().height(Length::Fixed(8.0)), new_btn]).padding(
+                Padding::ZERO.right(12.0).bottom(24.0)
+            ))
+            .height(Length::Fill)
+        )
+        .width(Length::Fixed(LIST_W))
+        .height(Length::Fill),
+        list_divider(),
+        container(right).width(Length::Fill).height(Length::Fill),
     ]
+    .height(Length::Fill)
     .into()
 }
 
@@ -1249,5 +1621,8 @@ fn search_view(app: &App, window: iced::window::Id) -> Element<'static, Message>
         };
         col = col.push(super::setting_row("Tavily API Key", "请求鉴权凭据", key_control));
     }
-    col.into()
+    scrollable(container(col).padding(Padding::ZERO.bottom(24.0)))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
 }
