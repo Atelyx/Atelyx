@@ -1087,6 +1087,15 @@ pub fn read_note(root: &Path, file: &str) -> Result<String, String> {
     std::fs::read_to_string(&path).map_err(|e| e.to_string())
 }
 
+/// 提示词笔记存在性（只回答「文件在不在」）：
+/// 路径非法 = 不存在；读取权限/占用类失败不算，避免把瞬时读错误误判为已删除。
+pub fn note_exists(root: &Path, file: &str) -> bool {
+    match safe_join(root, file, false) {
+        Ok(path) => path.is_file(),
+        Err(_) => false,
+    }
+}
+
 /// 原子写 .md（同时建父目录）。
 pub fn write_note(root: &Path, file: &str, content: &str) -> Result<(), String> {
     let path = safe_join(root, file, true)?;
@@ -1610,7 +1619,7 @@ pub fn write_prompt_notes_file(root: &Path, files: &[String]) -> Result<(), Stri
 pub const AGENTS_SCHEMA: &str = "atelyx-agents/v1";
 
 /// 单条 Agent 配置（字段 camelCase）。
-#[derive(Serialize, Deserialize, Clone, Default, Debug)]
+#[derive(Serialize, Deserialize, Clone, Default, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentConfig {
     pub id: String,
@@ -1631,6 +1640,73 @@ pub struct AgentConfig {
 pub struct AgentConfigFile {
     pub schema: String,
     pub agents: Vec<AgentConfig>,
+}
+
+/// 内置「对话」Agent 固定 id（不可删除；新会话缺省选择）。
+pub const BUILTIN_AGENT_CHAT_ID: &str = "builtin-chat";
+/// 内置「Agent」Agent 固定 id（不可删除；全工具集，作自定义 Agent 的起点）。
+pub const BUILTIN_AGENT_AGENT_ID: &str = "builtin-agent";
+
+/// 内置 Agent 名册（顺序 = 列表/菜单展示顺序，恒置顶）：
+/// 「对话」= 联网 + 只读工具（显式允许清单，防后续新增写入类工具漏进无写入语义的缺省 Agent）；
+/// 「Agent」= 全部工具。可编辑（改名/改工具/配提示词），不可删除。
+pub fn builtin_agents() -> Vec<AgentConfig> {
+    vec![
+        AgentConfig {
+            id: BUILTIN_AGENT_CHAT_ID.to_string(),
+            name: "对话".to_string(),
+            system_prompt_file: None,
+            tools: [
+                "web_search",
+                "web_fetch",
+                "read_file",
+                "glob",
+                "grep",
+                "list_dir",
+                "read_history",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+            builtin: Some(true),
+        },
+        AgentConfig {
+            id: BUILTIN_AGENT_AGENT_ID.to_string(),
+            name: "Agent".to_string(),
+            system_prompt_file: None,
+            tools: [
+                "web_search",
+                "web_fetch",
+                "read_file",
+                "glob",
+                "grep",
+                "list_dir",
+                "read_history",
+                "edit_file",
+                "append_file",
+                "write_file",
+                "rename_file",
+                "move_file",
+                "delete_file",
+                "delete_dir",
+                "todo_write",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+            builtin: Some(true),
+        },
+    ]
+}
+
+/// 名册缺失的内置 Agent 前置补齐（幂等；已有同 id 条目不动，保用户编辑）。
+pub fn ensure_builtin_agents(agents: Vec<AgentConfig>) -> Vec<AgentConfig> {
+    let mut merged: Vec<AgentConfig> = builtin_agents()
+        .into_iter()
+        .filter(|b| !agents.iter().any(|a| a.id == b.id))
+        .collect();
+    merged.extend(agents);
+    merged
 }
 
 /// 读 Agent 配置列表（不存在/解析失败返回空——手编辑损坏不阻塞，与 prompt-notes 同策略）。
@@ -1754,6 +1830,9 @@ pub struct ChatMetaFile {
     /// 面板级推理等级覆盖（off/low/medium/high；null = 不指定/跟随默认；与模型覆盖正交）。
     #[serde(default)]
     pub effort_override: Option<String>,
+    /// 面板级 Agent 选择（上次选择；新建会话继承；null = 未选过，走内置「对话」）。
+    #[serde(default)]
+    pub agent_override: Option<String>,
 }
 
 /// 读面板级覆盖（.atelyx/editor-chats-meta.json；不存在/解析失败返回默认）。

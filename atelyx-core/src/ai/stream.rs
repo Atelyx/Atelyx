@@ -58,9 +58,10 @@ impl ReasoningEffort {
         }
     }
 
-    /// 线格式（覆盖存储 / 请求字段取值）→ 枚举。
+    /// 线格式（覆盖存储 / 请求字段取值）→ 枚举。off = 显式关闭（同样不下发字段）。
     pub fn parse_wire(s: &str) -> Option<Self> {
         match s {
+            "off" => Some(Self::Off),
             "low" => Some(Self::Low),
             "medium" => Some(Self::Medium),
             "high" => Some(Self::High),

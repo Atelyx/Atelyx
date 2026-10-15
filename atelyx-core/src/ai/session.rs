@@ -129,6 +129,8 @@ pub struct OverridesPatch {
     pub model_override: Option<Option<Value>>,
     #[serde(default)]
     pub effort_override: Option<Option<String>>,
+    #[serde(default)]
+    pub agent_override: Option<Option<String>>,
 }
 
 /// 一次提交：登记 / 元数据 / 消息追加 / 内容补丁 / 截断 / 删除 / 覆盖项，
@@ -172,6 +174,7 @@ pub struct StoreSnapshot {
     pub sessions: Vec<Value>,
     pub model_override: Option<Value>,
     pub effort_override: Option<String>,
+    pub agent_override: Option<String>,
     pub persist_error: Option<PersistError>,
 }
 
@@ -206,6 +209,7 @@ struct Inner {
     persist_error: Option<PersistError>,
     model_override: Option<Value>,
     effort_override: Option<String>,
+    agent_override: Option<String>,
     // 写链脏集合与基线
     dirty_messages: HashSet<String>,
     dirty_meta: HashSet<String>,
@@ -313,6 +317,7 @@ impl SessionStore {
                 persist_error: None,
                 model_override: None,
                 effort_override: None,
+                agent_override: None,
                 dirty_messages: HashSet::new(),
                 dirty_meta: HashSet::new(),
                 overrides_dirty: false,
@@ -438,6 +443,7 @@ impl SessionStore {
             .model_override
             .and_then(|o| serde_json::to_value(o).ok());
         inner.effort_override = editor_meta.effort_override;
+        inner.agent_override = editor_meta.agent_override;
         inner.last_mark = None;
         inner.next_retry_at = None;
         inner.retry_attempt = 0;
@@ -569,12 +575,18 @@ impl SessionStore {
                 }
             }
         }
-        if batch.overrides.model_override.is_some() || batch.overrides.effort_override.is_some() {
+        if batch.overrides.model_override.is_some()
+            || batch.overrides.effort_override.is_some()
+            || batch.overrides.agent_override.is_some()
+        {
             if let Some(ov) = &batch.overrides.model_override {
                 inner.model_override = ov.clone();
             }
             if let Some(effort) = &batch.overrides.effort_override {
                 inner.effort_override = effort.clone();
+            }
+            if let Some(agent) = &batch.overrides.agent_override {
+                inner.agent_override = agent.clone();
             }
             inner.mark_overrides();
         }
@@ -761,6 +773,7 @@ fn snapshot_of(inner: &Inner) -> StoreSnapshot {
         sessions: inner.sessions.iter().map(session_to_wire).collect(),
         model_override: inner.model_override.clone(),
         effort_override: inner.effort_override.clone(),
+        agent_override: inner.agent_override.clone(),
         persist_error: inner.persist_error.clone(),
     }
 }
@@ -1151,6 +1164,7 @@ impl Inner {
                             schema: EDITOR_CHATS_META_SCHEMA.to_string(),
                             model_override,
                             effort_override: self.effort_override.clone(),
+                            agent_override: self.agent_override.clone(),
                         },
                     },
                     session_id: None,
@@ -2090,5 +2104,54 @@ mod tests {
         store.run_write_cycle();
         assert_eq!(fake.content(&file), Some(raw));
         assert!(!fake.writes().iter().any(|f| f == &file));
+    }
+
+    #[test]
+    fn agent_override_persists_and_reloads() {
+        let dir = TempDir::new("ai-session");
+        let store = SessionStore::new(test_config());
+        store
+            .load(store.begin_load(), local_io(dir.to_path_buf()))
+            .unwrap();
+        store
+            .commit(CommitBatch {
+                overrides: OverridesPatch {
+                    agent_override: Some(Some("builtin-chat".into())),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .unwrap();
+        store.run_write_cycle();
+        // 磁盘文件带 agentOverride；新 store 重载后快照带回
+        let meta = std::fs::read_to_string(
+            dir.to_path_buf()
+                .join(".atelyx")
+                .join("editor-chats-meta.json"),
+        )
+        .unwrap();
+        assert!(meta.contains("agentOverride"), "落盘应含 agentOverride：{meta}");
+        let store2 = SessionStore::new(test_config());
+        let snap = store2
+            .load(store2.begin_load(), local_io(dir.to_path_buf()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(snap.agent_override.as_deref(), Some("builtin-chat"));
+        // 清除覆盖 → 磁盘为空 → 重载为 None
+        store2
+            .commit(CommitBatch {
+                overrides: OverridesPatch {
+                    agent_override: Some(None),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .unwrap();
+        store2.run_write_cycle();
+        let snap = store2
+            .load(store2.begin_load(), local_io(dir.to_path_buf()))
+            .unwrap()
+            .unwrap();
+        assert!(snap.agent_override.is_none());
     }
 }
