@@ -80,6 +80,12 @@ pub enum UiMsg {
     PopupClose { window: iced::window::Id },
     /// 关闭一条通知。
     NotifyDismiss(u64),
+    /// 设置输入逐键编辑：转发编辑值，并武装失焦提交消息（Enter 与外点共用该提交）。
+    InputEdit { edit: Box<crate::Message>, arm: Box<crate::Message> },
+    /// 设置输入提交（Enter 触发）：解除武装后执行提交。
+    InputSubmit { commit: Box<crate::Message> },
+    /// 外点收口：提交最近一次武装的输入（未武装 = no-op）。
+    CommitPendingInput,
 }
 
 #[cfg(test)]

@@ -248,6 +248,14 @@ fn vline() -> Element<'static, Message> {
 
 /// 分区内容分派（未实现分区 = 占位空态）。
 fn settings_body<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, Message> {
+    // 外点收口：设置输入武装的待提交消息在点击别处时统一落盘（失焦提交）
+    let body = settings_tab_body(app, window);
+    iced::widget::mouse_area(body)
+        .on_press(Message::Ui(crate::ui::UiMsg::CommitPendingInput))
+        .into()
+}
+
+fn settings_tab_body<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, Message> {
     match app.settings_tab.as_str() {
         "general" => general::view(app),
         "collab" => collab_settings_view(app),

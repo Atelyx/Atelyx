@@ -441,7 +441,27 @@ pub fn form_input(
     on_input: impl Fn(String) -> Message + 'static,
     on_submit: Message,
 ) -> Element<'static, Message> {
+    let (on_input, on_submit) = arm_input(on_input, on_submit);
     styled_input(placeholder, value, width, Some(on_input), Some(on_submit), false)
+}
+
+/// 设置输入双提交装配：逐键武装失焦提交消息（同一提交消息也挂在 Enter 上），
+/// 点击输入区外即收口（见 UiMsg::CommitPendingInput）。
+fn arm_input(
+    on_input: impl Fn(String) -> Message + 'static,
+    on_submit: Message,
+) -> (impl Fn(String) -> Message, Message) {
+    let submit = on_submit.clone();
+    let wrapped = move |v: String| {
+        Message::Ui(crate::ui::UiMsg::InputEdit {
+            edit: Box::new(on_input(v)),
+            arm: Box::new(on_submit.clone()),
+        })
+    };
+    (
+        wrapped,
+        Message::Ui(crate::ui::UiMsg::InputSubmit { commit: Box::new(submit) }),
+    )
 }
 
 /// 只读展示输入（无输入/提交处理：值由服务端管理等场景）。
@@ -457,6 +477,7 @@ pub fn secret_input(
     on_input: impl Fn(String) -> Message + 'static,
     on_submit: Message,
 ) -> Element<'static, Message> {
+    let (on_input, on_submit) = arm_input(on_input, on_submit);
     styled_input(placeholder, value, width, Some(on_input), Some(on_submit), true)
 }
 

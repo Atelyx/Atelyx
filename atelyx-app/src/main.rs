@@ -1012,6 +1012,8 @@ pub struct App {
     pub(crate) popup: Option<(window::Id, PopupOpen)>,
     /// 弹层面板导航（两 pane 菜单）。
     pub popup_pane: usize,
+    /// 设置输入的待提交消息（逐键武装；Enter/外点收口，见 UiMsg::InputSubmit / CommitPendingInput）。
+    arm_commit: Option<Message>,
     /// 设置整页开启态与左栏 tab。
     pub settings_open: bool,
     pub settings_tab: String,
@@ -1398,6 +1400,7 @@ impl App {
                 cursors: HashMap::new(),
                 popup: None,
                 popup_pane: 0,
+                arm_commit: None,
                 settings_open: false,
                 settings_tab: "general".into(),
                 shortcut_recording: None,
@@ -2147,6 +2150,7 @@ impl App {
                 }
                 // 配置基线先整份留存（设置-AI 的展示与提交基线），字段抽取沿用既有会话态
                 self.repo_config = config.clone();
+                self.arm_commit = None;
                 self.file_sort = config
                     .file_explorer_sort
                     .unwrap_or_else(|| "mtime-desc".to_string());
@@ -2504,6 +2508,7 @@ impl App {
                 Task::none()
             }
             Message::UiTick => {
+                chat_actions::on_ui_tick(self);
                 self.notifications.retain(|n| !n.expired());
                 // 表格图片长按检查（拖拽排序激活）
                 table_actions::check_long_press(self);
@@ -3035,8 +3040,23 @@ impl App {
                 if gen == self.epoch() {
                     match result {
                         Ok(agents) => {
-                            self.agents = agents;
+                            // 内置 Agent 缺失即补：本地写盘（种子补齐落 agents.json），
+                            // 空间仅内存补齐（种子不是用户操作，不改团队共享清单）
+                            let disk_len = agents.len();
+                            let seeded = atelyx_core::vault::ensure_builtin_agents(agents);
+                            // 以「种子是否新增条目」判定（比较磁盘名单而非内存——内存可能只是还没跟上
+                            // 最近一次保存的回执），避免每次改名都追加一次相同内容的写盘
+                            let added = seeded.len() > disk_len;
+                            self.agents = seeded;
                             settings_view::ai::ensure_selection(self);
+                            // 本地缺失写盘；空间不动团队共享清单（种子仅在内存生效）。
+                            // 先更新内存再写：写后回执名单齐备，种子不再新增，不会二次保存
+                            if added {
+                                if let crate::RepoKind::Local = self.repo_kind {
+                                    let agents = self.agents.clone();
+                                    return settings_view::ai::save_agents_pub(self, agents);
+                                }
+                            }
                         }
                         Err(e) => self.notify(NoticeLevel::Error, format!("Agent 配置读取失败：{e}")),
                     }
@@ -4759,6 +4779,21 @@ impl App {
                 self.popup_pane = pane;
                 Task::none()
             }
+            ui::UiMsg::InputEdit { edit, arm } => {
+                self.arm_commit = Some(*arm);
+                self.update(*edit)
+            }
+            ui::UiMsg::InputSubmit { commit } => {
+                self.arm_commit = None;
+                self.update(*commit)
+            }
+            ui::UiMsg::CommitPendingInput => match self.arm_commit.take() {
+                Some(m) => {
+                    self.arm_commit = None;
+                    self.update(m)
+                }
+                None => Task::none(),
+            },
             ui::UiMsg::PopupClose { window } => {
                 if self.popup.as_ref().is_some_and(|(w, _)| *w == window) {
                     self.popup = None;
@@ -6223,6 +6258,7 @@ impl App {
             || self.tooltip.is_some()
             || self.edit.focused
             || !self.remote_cursors.is_empty()
+            || !self.chat.renaming.is_empty()
             || (self.settings_open && self.settings_tab == "shortcuts")
             || self.table.as_ref().is_some_and(|t| {
                 t.view.press.as_ref().is_some_and(|p| p.img.is_some() && !p.active)
