@@ -1,0 +1,4 @@
+# MSVC 目标静态链接 VC++ 运行库：发行 exe 自包含，目标机器无需预装 VC++ Redistributable，
+# 安装器也无需捆绑运行库安装程序。
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Atelyx
+Comment=以人为本的可拓展桌面工作台
+Exec=atelyx
+Icon=atelyx
+Terminal=false
+Categories=Office;Utility;
+StartupWMClass=atelyx

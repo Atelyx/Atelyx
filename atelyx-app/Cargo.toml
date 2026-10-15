@@ -3,6 +3,11 @@ name = "atelyx-app"
 version = "0.6.0"
 edition = "2021"
 
+# 可执行文件定名 atelyx（安装器 / 快捷方式 / 任务栏进程名的统一基准）。
+[[bin]]
+name = "atelyx"
+path = "src/main.rs"
+
 [dependencies]
 # 核心能力（仓库存储/原子写/目录过滤）：与壳共享同一实现
 atelyx-core = { path = "../atelyx-core" }
