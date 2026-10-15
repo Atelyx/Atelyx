@@ -114,7 +114,8 @@ fn on_msg_open(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
                 type_ok.then_some((r, ci))
             });
             if let Some((r, ci)) = hit {
-                return begin_edit_with(app, r, ci, c.to_string(), false);
+                // 初值即用户敲下的字符：会话已属「输入」，提交必须落值
+                return begin_edit_with(app, r, ci, c.to_string(), false, true);
             }
             Task::none()
         }
@@ -1108,7 +1109,7 @@ fn exec_cell_action(app: &mut App, window: iced::window::Id, action: CellAction,
             }
             Task::none()
         }
-        CellAction::BeginEdit { r, c, draft } => begin_edit_with(app, r, c, draft, true),
+        CellAction::BeginEdit { r, c, draft } => begin_edit_with(app, r, c, draft, true, false),
         CellAction::ShowBar { row_id, field_id } => {
             // 仍选中该格且未进入编辑 = 单击已选格（非双击首击），此时弹样式工具条
             let selected = app.table.as_ref().is_some_and(|s| {
@@ -1521,7 +1522,16 @@ fn selection_cell(s: &tv::TableSession) -> Option<(usize, usize)> {
 /// 进入单元格编辑（双击 / 首字符；即编辑会话入口）。
 /// `from_press` = 按压发起（双击）：同批全局 Press 会走「失焦提交」分支，置位编辑器内标志让其放行；
 /// 键盘发起同批无 Press，不置位（否则标志残留吞掉下一次画布外点击的提交）。
-fn begin_edit_with(app: &mut App, r: usize, c: usize, draft: String, from_press: bool) -> Task<Message> {
+/// `touched` = 起稿文本本身即用户输入（选中后敲字，初值就是敲下的字符）：置位后提交即落值；
+/// 双击取原值起稿不置位（未输入 = 放弃会话，原值保留）。
+fn begin_edit_with(
+    app: &mut App,
+    r: usize,
+    c: usize,
+    draft: String,
+    from_press: bool,
+    touched: bool,
+) -> Task<Message> {
     let Some(s) = app.table.as_mut() else { return Task::none() };
     let (row_id, field_id) = (s.data.rows[r].id.clone(), s.data.fields[c].id.clone());
     s.view.edit_session = Some(tv::EditSession {
@@ -1540,7 +1550,7 @@ fn begin_edit_with(app: &mut App, r: usize, c: usize, draft: String, from_press:
     };
     // 起稿光标落内容尾部（Move 非编辑动作，不计 touched）
     content.perform(text_editor::Action::Move(text_editor::Motion::DocumentEnd));
-    s.view.editing = Some(tv::CellEdit { row_id, field_id, content, touched: false });
+    s.view.editing = Some(tv::CellEdit { row_id, field_id, content, touched });
     iced::widget::operation::focus(iced::widget::Id::new(tv::CELL_EDITOR_ID))
         .map(|()| Message::Table(tv::TableMsg::Noop))
 }

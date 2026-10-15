@@ -3216,7 +3216,7 @@ impl App {
             Message::FolderDeleteAsk(rel) => {
                 // 文件夹删除 = 非强制删除先行：空目录直接删；非空返回条目数进确认 pane
                 if matches!(self.repo_kind, RepoKind::Space(_)) {
-                    return space_actions::space_delete_entry(self, &rel, true);
+                    return space_actions::space_delete_entry(self, &rel, true, false);
                 }
                 let Some(root) = self.vault.root().ok() else { return Task::none() };
                 let gen = self.epoch();
@@ -5246,10 +5246,11 @@ impl App {
 
     /// 删除文件/文件夹（不可恢复；菜单内已就地确认）。Ok 携带目标相对路径。
     /// 表格文件随删图片附件目录（按 tableId 划分；读不到 id 跳过，不拦截删除本身）。
-    /// 空间模式：文件直删、文件夹先探需确认（needsConfirm → 确认 pane → force）。
+    /// 空间模式：文件直删，文件夹直接落删（needsConfirm 的探测在菜单删除入口，不在此处）。
     fn delete_entry(&mut self, rel: &str, is_dir: bool) -> Task<Message> {
         if matches!(self.repo_kind, RepoKind::Space(_)) {
-            return space_actions::space_delete_entry(self, rel, is_dir);
+            // 本入口即「用户已确认」（菜单内二段确认已过）：文件夹直接落删，不再探测
+            return space_actions::space_delete_entry(self, rel, is_dir, true);
         }
         let Some(root) = self.vault.root().ok() else { return Task::none() };
         let gen = self.epoch();

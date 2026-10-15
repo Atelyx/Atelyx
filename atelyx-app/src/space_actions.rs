@@ -2109,12 +2109,13 @@ pub fn space_create_entry(app: &mut App, dir: &str, kind: DraftKind, name: &str)
     )
 }
 
-/// 删除入口（空间模式）：文件直接删；文件夹先探需确认（needsConfirm + 条目数进确认 pane），
-/// 确认 pane 的再次进入（delete_confirm 已挂同一目标）= force 落删。
-pub fn space_delete_entry(app: &mut App, rel: &str, is_dir: bool) -> Task<Message> {
+/// 删除入口（空间模式）：文件直接删；文件夹先探需确认（needsConfirm + 条目数进确认 pane）。
+/// `confirm` = 调用方已确认（确认 pane 的动作）：文件夹跳过探测直接 force 落删。
+/// 确认与否由调用方参数表达，不得读环境态（确认 pane 的收尾会先清状态，读状态必然退化成再探测）。
+pub fn space_delete_entry(app: &mut App, rel: &str, is_dir: bool, confirm: bool) -> Task<Message> {
     let Some(session) = require_write(app) else { return Task::none() };
     let gen = app.epoch();
-    if is_dir && app.delete_confirm.as_ref().is_some_and(|(r, dir, _)| *dir && r == rel) {
+    if is_dir && confirm {
         let confirmed = rel.to_string();
         return Task::done(Message::Space(SpaceMsg::ForceDeleteFolder { gen, rel: confirmed }));
     }

@@ -403,6 +403,8 @@ pub fn toggle(on: bool, on_toggle: Option<Message>) -> Element<'static, Message>
 
 /// 下拉触发钮（当前值 + 行尾 chevron；选项弹层由调用方经 popup 系统打开）。
 /// 高度与表单输入一致（内边距 6 + caption 行高）；`width` 取 `Length`（表单固定宽、面板内容填满）。
+/// 底与边取表单输入同档（`form_input_style`：BG_TERTIARY + BORDER_STRONG）——两者是同一视觉角色，
+/// 同层同色，不得用下沉底把它们拉到更低层级。
 pub fn dropdown_trigger(label: &str, width: impl Into<Length>, on_open: Option<Message>) -> Element<'static, Message> {
     let content = row![
         text(label.to_string()).size(pal::fs_caption()).color(pal::TEXT_PRIMARY),
@@ -420,8 +422,8 @@ pub fn dropdown_trigger(label: &str, width: impl Into<Length>, on_open: Option<M
     .width(width.into())
     .padding(0.0)
     .style(move |_t, _status| button::Style {
-        background: Some(pal::BG_SUNKEN.into()),
-        border: border::rounded(pal::RADIUS_SM).color(pal::BORDER).width(1.0),
+        background: Some(pal::BG_TERTIARY.into()),
+        border: border::rounded(pal::RADIUS_SM).color(pal::BORDER_STRONG).width(1.0),
         ..Default::default()
     });
     match on_open {
