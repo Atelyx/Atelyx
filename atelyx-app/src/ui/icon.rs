@@ -94,6 +94,8 @@ pub struct Icon {
     pub color: Color,
     /// 描边宽度（24 单位视框坐标；lucide 缺省 2）。
     pub stroke_units: f32,
+    /// 旋转角（弧度；0 = 不转，转圈动画用）。
+    pub rotation: f32,
 }
 
 impl<Message> canvas::Program<Message> for Icon
@@ -130,6 +132,12 @@ where
         frame.with_save(|f| {
             f.translate(offset);
             f.scale(k);
+            if self.rotation != 0.0 {
+                // 旋转轴 = 视框中心（rotate 绕当前原点，须先平移中心再转回）
+                f.translate(Vector::new(12.0, 12.0));
+                f.rotate(self.rotation);
+                f.translate(Vector::new(-12.0, -12.0));
+            }
             for poly in subpaths.iter() {
                 if poly.len() < 2 {
                     continue;
@@ -152,9 +160,9 @@ pub fn icon_name(name: &str) -> &'static str {
     icons::NAMES.iter().copied().find(|n| *n == name).unwrap_or("")
 }
 
-/// 图标元素（`size` 见方、缺省 2 单位描边；未知图标名画空）。
+/// 图标元素（`size` 见方、缺省 1.5 单位描边；未知图标名画空）。
 pub fn icon<Message: 'static>(name: &str, size: f32, color: Color) -> Element<'static, Message> {
-    icon_stroke(name, size, color, 2.0)
+    icon_stroke(name, size, color, 1.5)
 }
 
 /// 图标元素（自定描边宽度；lucide strokeWidth 1.5 档等价 stroke_units = 1.5）。
@@ -164,7 +172,18 @@ pub fn icon_stroke<Message: 'static>(
     color: Color,
     stroke_units: f32,
 ) -> Element<'static, Message> {
-    Canvas::new(Icon { name: icon_name(name), color, stroke_units })
+    icon_spin(name, size, color, stroke_units, 0.0)
+}
+
+/// 旋转图标（转圈动画：调用方按节拍递增 rotation）。
+pub fn icon_spin<Message: 'static>(
+    name: &str,
+    size: f32,
+    color: Color,
+    stroke_units: f32,
+    rotation: f32,
+) -> Element<'static, Message> {
+    Canvas::new(Icon { name: icon_name(name), color, stroke_units, rotation })
         .width(Length::Fixed(size))
         .height(Length::Fixed(size))
         .into()

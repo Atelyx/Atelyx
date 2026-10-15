@@ -103,6 +103,30 @@ pub fn document_view<'a>(
     container(body).width(Length::Fill).padding(16.0).into()
 }
 
+/// 无根留白的正文体（调用方自带边距的场景，如对话面板——消息列已有 12px 边距）。
+pub fn document_body<'a>(
+    doc: &'a MarkdownDocument,
+    theme: &iced::Theme,
+    images: &'a ImageHandles,
+    soft_break: bool,
+) -> Element<'a, Message> {
+    let render = Render {
+        pal: Palette::from_theme(theme),
+        opts: link_options(),
+        interactive: false,
+        images,
+        soft_break,
+    };
+    let mut body = column![].width(Length::Fill).spacing(0);
+    for chunk in render.chunks(&doc.source, &doc.blocks) {
+        if chunk.gap_before > 0 {
+            body = body.push(gap(chunk.gap_before));
+        }
+        body = body.push(chunk.element);
+    }
+    body.width(Length::Fill).into()
+}
+
 /// 编辑面块元数据。
 #[derive(Clone)]
 pub struct BlockMeta {
