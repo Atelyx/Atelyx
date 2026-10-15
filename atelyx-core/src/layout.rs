@@ -152,6 +152,9 @@ pub struct AppUiState {
     pub last_note_file: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_table_file: Option<String>,
+    /// 上次打开的插件领域文档（相对仓库根路径；打开路由按扩展名分派给注册该文档类型的插件）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_doc_file: Option<String>,
     /// 场景列表（布局之上的容器；缺省 = 空，normalize 种子化默认场景）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scenes: Vec<Scene>,
@@ -321,6 +324,8 @@ pub struct UiStatePatch {
     pub last_note_file: Option<Option<String>>,
     #[serde(default, deserialize_with = "de_patch_clearable")]
     pub last_table_file: Option<Option<String>>,
+    #[serde(default, deserialize_with = "de_patch_clearable")]
+    pub last_doc_file: Option<Option<String>>,
     #[serde(default, deserialize_with = "de_patch_clearable")]
     pub focused_panel_id: Option<Option<String>>,
     #[serde(default)]

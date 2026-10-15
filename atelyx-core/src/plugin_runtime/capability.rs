@@ -10,10 +10,12 @@ use atelyx_plugin_protocol::manifest::Permission;
 use atelyx_plugin_protocol::method;
 use serde_json::Value;
 
-/// 方法所属能力面。`None` = 运行时时序方法（握手 / 事件订阅 / 视图提交），不占权限声明。
+/// 方法所属能力面。`None` = 运行时时序方法（握手 / 事件订阅 / 视图提交 / 贡献与服务声明 /
+/// 接管请求）不占权限声明——它们只编排插件自己的界面与声明，不触碰宿主资源；接管另有
+/// 常驻退出入口与按窗生效兜底。OS 资源消耗型方法（起进程 / 开窗等）一律占权限。
 pub(crate) fn permission_for(name: &str) -> Option<Permission> {
     use Permission::*;
-    use method::{clipboard, dialog, fs, http, notification, process, shortcut, state};
+    use method::{clipboard, dialog, fs, http, notification, process, shortcut, state, window};
     match name {
         fs::PRIVATE_DIR | fs::READ_TEXT | fs::WRITE_TEXT | fs::READ_BINARY | fs::WRITE_BINARY
         | fs::REMOVE | fs::EXISTS | fs::LIST => Some(Fs),
@@ -24,6 +26,7 @@ pub(crate) fn permission_for(name: &str) -> Option<Permission> {
         clipboard::WRITE_TEXT | clipboard::READ_TEXT => Some(Clipboard),
         dialog::PICK_FILE | dialog::PICK_DIRECTORY => Some(Dialog),
         http::REQUEST => Some(Http),
+        window::OPEN | window::CLOSE => Some(Window),
         _ => None,
     }
 }

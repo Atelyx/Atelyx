@@ -93,3 +93,9 @@ pub fn menu(id: &str, label: &str, items: Vec<MenuItem>) -> ViewNode {
 pub fn canvas(id: &str, mouse_events: Vec<CanvasEventKind>) -> ViewNode {
     node(id, NodeBody::Canvas { mouse_events })
 }
+
+/// 拖动热区：自身不渲染内容，用户在其占位区域内按下即由宿主发起整窗拖动
+/// （全接管时自绘标题栏的拖动把手）。占位大小由父容器布局决定。
+pub fn drag_region(id: &str) -> ViewNode {
+    node(id, NodeBody::DragRegion {})
+}

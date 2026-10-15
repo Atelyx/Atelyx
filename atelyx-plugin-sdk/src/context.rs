@@ -165,6 +165,42 @@ impl Context {
         self.call_unit(method::view::UNREGISTER, &UnregisterParams { id: id.into() }).await
     }
 
+    /// 请求把本插件的一个贡献面接管到当前聚焦窗口（整页 / 全接管）。`surface_id` 须为已注册的
+    /// 贡献 id；退出接管入口由宿主常驻提供，接管期间布局真源不动，退出即恢复原布局。
+    pub async fn takeover(&self, scope: TakeoverScope, surface_id: &str) -> Result<(), RpcError> {
+        self.call_unit(
+            method::view::TAKEOVER,
+            &TakeoverParams { scope, surface_id: surface_id.into() },
+        )
+        .await
+    }
+
+    /// 打开一个独立窗口承载自己的界面树：`id` 插件内唯一且不得含 `:`，同时是该窗口面的
+    /// surfaceId（树经 [`Context::submit_view`] 提交）。重复 id 或宿主不可开窗由宿主可读拒绝。
+    pub async fn window_open(&self, params: WindowOpenParams) -> Result<(), RpcError> {
+        self.call_unit(method::window::OPEN, &params).await
+    }
+
+    /// 关闭自己打开的一个窗口（未打开的 id 报可读错误）。
+    pub async fn window_close(&self, id: &str) -> Result<(), RpcError> {
+        self.call_unit(method::window::CLOSE, &WindowCloseParams { id: id.into() }).await
+    }
+
+    /// 声明自己实现某服务契约（候选上岗；是否上岗由用户指定，声明本身不占权限）。
+    pub async fn service_register(&self, contract: ServiceContract) -> Result<(), RpcError> {
+        self.call_unit(method::service::REGISTER, &ServiceRegisterParams { contract }).await
+    }
+
+    /// 撤销自己的服务实现声明（未注册的契约报可读错误）。
+    pub async fn service_unregister(&self, contract: ServiceContract) -> Result<(), RpcError> {
+        self.call_unit(method::service::UNREGISTER, &ServiceRegisterParams { contract }).await
+    }
+
+    /// 回一次搜索查询结果（`error` 非空 = 本次查询失败，宿主按单次回落内置处理）。
+    pub async fn search_respond(&self, params: SearchRespondParams) -> Result<(), RpcError> {
+        self.call_unit(method::search::RESPOND, &params).await
+    }
+
     pub async fn subscribe(&self, name: &str) -> Result<bool, RpcError> {
         let result: SubscribeResult = self.call_typed(crate::protocol::event::SUBSCRIBE, &SubscribeParams { name: name.into() }).await?;
         Ok(result.subscribed)

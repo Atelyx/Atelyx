@@ -19,6 +19,18 @@
       "line": "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"view.register\",\"params\":{\"id\":\"com.atelyx.llama.models\",\"label\":\"模型\",\"slot\":\"panel\"}}"
     },
     {
+      "name": "view-takeover-request",
+      "kind": "request",
+      "method": "view.takeover",
+      "line": "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"view.takeover\",\"params\":{\"scope\":\"full\",\"surfaceId\":\"main\"}}"
+    },
+    {
+      "name": "window-closed-notification",
+      "kind": "notification",
+      "method": "host:window.closed",
+      "line": "{\"jsonrpc\":\"2.0\",\"method\":\"host:window.closed\",\"params\":{\"id\":\"chat-float\"}}"
+    },
+    {
       "name": "notification",
       "kind": "notification",
       "method": "host:event",
@@ -153,6 +165,10 @@
         "id": "board",
         "kind": "canvas",
         "mouseEvents": ["pointerDown", "pointerMove", "pointerUp", "pointerLeave", "wheel", "doubleClick"]
+      },
+      {
+        "id": "titleDrag",
+        "kind": "dragRegion"
       }
     ]
   },
@@ -176,7 +192,7 @@
     "singleton": true,
     "keepMountedOnVaultSwitch": false,
     "docTypeRegistrations": [
-      { "extension": "board", "label": "画板", "icon": "layout-dashboard" }
+      { "extension": "board", "label": "画板", "icon": "layout-dashboard", "surface": "board-view" }
     ]
   },
   "methods": [
@@ -263,7 +279,50 @@
     {
       "name": "doc.open params",
       "type": "DocOpenParams",
-      "value": { "path": "docs/board" }
+      "value": { "path": "docs/board", "surfaceId": "doc:1" }
+    },
+    {
+      "name": "doc.close params",
+      "type": "DocCloseParams",
+      "value": { "path": "docs/board", "surfaceId": "doc:1" }
+    },
+    {
+      "name": "view.takeover params",
+      "type": "TakeoverParams",
+      "value": { "scope": "page", "surfaceId": "main" }
+    },
+    {
+      "name": "window.open params",
+      "type": "WindowOpenParams",
+      "value": { "id": "chat-float", "title": "快捷对话", "width": 360.0, "height": 480.0, "alwaysOnTop": true, "skipTaskbar": true, "hideOnBlur": true }
+    },
+    {
+      "name": "window.close params",
+      "type": "WindowCloseParams",
+      "value": { "id": "chat-float" }
+    },
+    {
+      "name": "window.closed params",
+      "type": "WindowClosedParams",
+      "value": { "id": "chat-float" }
+    },
+    {
+      "name": "service.register params",
+      "type": "ServiceRegisterParams",
+      "value": { "contract": "webSearch" }
+    },
+    {
+      "name": "search.query params",
+      "type": "SearchQueryParams",
+      "value": { "requestId": 7, "query": "rust iced" }
+    },
+    {
+      "name": "search.respond params",
+      "type": "SearchRespondParams",
+      "value": {
+        "requestId": 7,
+        "results": [ { "title": "iced", "url": "https://iced.rs", "snippet": "A cross-platform GUI library" } ]
+      }
     },
     {
       "name": "vault:switch payload (local)",

@@ -4,7 +4,9 @@
 use atelyx_plugin_sdk::canvas_builders::{circle, draw_text, line, path, rect, rgba, token};
 use atelyx_plugin_sdk::protocol::canvas::DrawCommand;
 use atelyx_plugin_sdk::protocol::event;
-use atelyx_plugin_sdk::protocol::method::ContributionSlot;
+use atelyx_plugin_sdk::protocol::method::{
+    ContributionSlot, SearchRespondParams, ServiceContract, SearchResult,
+};
 use atelyx_plugin_sdk::protocol::view::{
     CanvasEventKind, CanvasPointer, ColorToken, EventKind, EventValue, MouseButton, ViewEvent,
     ViewNode,
@@ -177,6 +179,10 @@ impl PluginHandler for Stub {
         if let Err(e) = ctx.register(ContributionSlot::Panel, PANEL, "面板", Some("puzzle")).await {
             eprintln!("注册面板贡献失败：{e}");
         }
+        // 服务契约声明：候选上岗（是否上岗由用户指定，宿主按声明簿路由）
+        if let Err(e) = ctx.service_register(ServiceContract::WebSearch).await {
+            eprintln!("声明搜索提供方失败：{e}");
+        }
         self.apply(ctx, |m| {
             m.status = "就绪".into();
             if m.radius == 0.0 {
@@ -184,6 +190,28 @@ impl PluginHandler for Stub {
             }
         })
         .await;
+    }
+
+    /// 搜索查询：回一条固定结果（`search.respond` 请求回填宿主等待方）。
+    async fn on_search_query(
+        &self,
+        ctx: &Context,
+        params: atelyx_plugin_sdk::protocol::method::SearchQueryParams,
+    ) {
+        if let Err(e) = ctx
+            .search_respond(SearchRespondParams {
+                request_id: params.request_id,
+                results: vec![SearchResult {
+                    title: "stub-result".into(),
+                    url: "https://example.com/stub".into(),
+                    snippet: params.query,
+                }],
+                error: None,
+            })
+            .await
+        {
+            eprintln!("回搜索结果失败：{e}");
+        }
     }
 
     async fn on_view_event(

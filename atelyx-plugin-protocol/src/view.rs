@@ -183,6 +183,9 @@ pub enum NodeBody {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         mouse_events: Vec<CanvasEventKind>,
     },
+    /// 拖动热区：自身不渲染任何内容，用户在其占位区域内按下即由宿主发起整窗拖动
+    /// （全接管时插件自绘标题栏的拖动把手）。事件不回发。
+    DragRegion {},
 }
 
 impl NodeBody {
@@ -213,6 +216,7 @@ impl NodeBody {
             Self::Progress { .. } => "progress",
             Self::Menu { .. } => "menu",
             Self::Canvas { .. } => "canvas",
+            Self::DragRegion { .. } => "dragRegion",
         }
     }
 }

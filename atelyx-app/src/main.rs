@@ -544,6 +544,27 @@ enum Message {
         node_id: String,
         action: text_editor::Action,
     },
+    /// 插件请求接管聚焦窗口（壳应用后经运行时回填插件）。
+    PluginTakeoverAsk {
+        request_id: u64,
+        plugin_id: String,
+        scope: atelyx_core::plugin_runtime::TakeoverScope,
+        surface_id: String,
+    },
+    /// 插件请求打开独立窗口。
+    PluginWindowOpen {
+        request_id: u64,
+        plugin_id: String,
+        params: atelyx_core::plugin_runtime::WindowOpenParams,
+    },
+    /// 插件请求关闭自己的一个窗口。
+    PluginWindowClose { request_id: u64, plugin_id: String, window_key: String },
+    /// 全接管标题栏的拖动热区被按下（宿主代执行整窗拖动）。
+    PluginWindowDrag(window::Id),
+    /// 退出接管（常驻退出入口 / Esc）。
+    PluginExitTakeover(window::Id),
+    /// 窗口获得焦点（接管请求作用域 = 最近聚焦窗口）。
+    WindowFocused(window::Id),
     /// 打开弹层（几何规格 + 内容形态由 layout_view 定义）。
     PopupOpen(window::Id, PopupOpen),
     /// 仓库文件总数（打开仓库后异步统计；gen 守卫）。
@@ -700,11 +721,13 @@ fn clamp_split_pair(s0: f64, s1: f64, min: f64) -> (f64, f64) {
 }
 
 /// 新建草稿种类（决定扩展名与占位文案）。
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum DraftKind {
     Note,
     Folder,
     Table,
+    /// 插件领域文档（扩展名与展示标签取自插件注册）。
+    Doc { extension: String, label: String },
 }
 
 /// 跨窗口标签/布局 tab 拖拽会话：源窗口只产生输入事件，落点由全局面板几何命中。
@@ -1008,6 +1031,18 @@ pub struct App {
     /// 画布节点的最新绘图指令清单投影（键 = 插件 id + 面 id + 节点 id；随树投影刷新）。
     pub plugin_canvases:
         HashMap<plugin_actions::InputKey, std::sync::Arc<Vec<atelyx_core::plugin_runtime::DrawCommand>>>,
+    /// 各窗口的接管态（键 = OS 窗口 id；布局真源不动，退出即恢复）。
+    pub plugin_takeovers: HashMap<window::Id, plugin_actions::TakeoverActive>,
+    /// 插件窗口记账（键 = OS 窗口 id；随窗口关闭 / 插件停用收尾）。
+    pub plugin_windows: HashMap<window::Id, plugin_actions::PluginWindowActive>,
+    /// 打开中的插件文档实例（单实例；切换文件即换实例）。
+    pub doc_open: Option<plugin_actions::DocOpenInstance>,
+    /// 全部已安装插件注册的领域文档类型投影（随贡献刷新；文件树图标与新建菜单读它）。
+    pub plugin_doc_types: Vec<atelyx_core::plugin_runtime::DocTypeInfo>,
+    /// 最近聚焦的窗口（插件接管请求的作用域）。
+    pub focused_window: Option<window::Id>,
+    /// 市场索引缓存落盘路径（应用数据目录不可用时为 None：不缓存，市场仅内存展示）。
+    pub market_cache_path: Option<PathBuf>,
     /// 应用级全局配置（最近仓库列表；落盘 global.json）。
     pub global: global_config::GlobalConfig,
     /// 设置-通用：界面字号草稿（None = 显示当前生效值）。
@@ -1294,6 +1329,10 @@ impl App {
             .unwrap_or_else(|| std::env::temp_dir().join("atelyx-plugins"));
         let plugins = PluginRuntime::new(plugins_root);
         let (global, global_notice) = load_global_boot();
+        // 搜索提供方上岗者随配置恢复（插件未声明契约时调用侧自动回落内置）
+        plugins.set_search_provider(global.search_provider.clone());
+        // 市场索引缓存落应用数据目录根（与 plugins/ 平级；目录不可用 = 不缓存）
+        let market_cache_path = app_data_dir().map(|d| d.join("market-cache.json"));
         // 界面基准字号随配置（缺字段走默认档；越界钳回合法区间）
         ui::palette::set_ui_base(global.font_size.clamp(12, 20));
         // 启动自动进入：最后激活身份优先，缺省回落最近仓库首位（路径失效则停留未激活态）
@@ -1362,6 +1401,12 @@ impl App {
                 plugin_drafts: HashMap::new(),
                 plugin_editors: HashMap::new(),
                 plugin_canvases: HashMap::new(),
+                plugin_takeovers: HashMap::new(),
+                plugin_windows: HashMap::new(),
+                doc_open: None,
+                plugin_doc_types: Vec::new(),
+                focused_window: None,
+                market_cache_path,
                 ai_sub_tab: "providers".into(),
                 repo_config: vault::VaultConfig::default(),
                 agents: Vec::new(),
@@ -1626,9 +1671,16 @@ impl App {
                     // 主窗关闭即退出：显式收尾插件运行时（停全部插件并结束托管进程树）
                     self.plugins.shutdown();
                     iced::exit()
+                } else if self.plugin_windows.contains_key(&id) {
+                    plugin_actions::on_plugin_window_closed(self, id)
                 } else {
                     self.detached_os.remove(&id);
                     self.os_shown.remove(&id);
+                    // 被接管窗口的接管条目随窗口消失（防悬挂：插件重启不再向死面重发 attached）
+                    let _ = plugin_actions::exit_takeover(self, id);
+                    if self.focused_window == Some(id) {
+                        self.focused_window = None;
+                    }
                     // 光标记录随窗口消失；该窗在途悬停提示立即清除
                     // （cursors 缺失会让收起判定恒 false，提示与心跳订阅悬挂）
                     self.cursors.remove(&id);
@@ -2276,6 +2328,10 @@ impl App {
                 self.apply(LayoutOp::SetDetachedWindowPinned { window_id, pinned: !pinned })
             }
             Message::DetachedFocusLost(os_id) => {
+                // 插件窗口：声明 hide_on_blur 的隐藏（浮窗形态）
+                if self.plugin_windows.contains_key(&os_id) {
+                    return plugin_actions::on_plugin_window_blur(self, os_id);
+                }
                 let Some(model_id) = self.detached_os.get(&os_id).cloned() else {
                     return Task::none();
                 };
@@ -2493,6 +2549,8 @@ impl App {
                 Task::none()
             }
             Message::Press(id) => {
+                // 焦点窗口跟踪（接管请求作用域 = 最近按压的窗口）
+                self.focused_window = Some(id);
                 // 笔记面板内按压标志：同批 widget 消息（PressRelay）先行置位，此处一次性消费
                 let note_press_inside = std::mem::take(&mut self.note_press_inside);
                 // 表格焦点：同批表格面按压（画布或菜单，widget 消息先行）已置 press_seen = 保持聚焦；
@@ -2780,7 +2838,7 @@ impl App {
                     return Task::none();
                 }
                 // Esc 作用域 = 事件来源窗口：先取消文件拖拽，再关双链候选，再关该窗口弹层，
-                // 再取消属性面板编辑态，再取消行内重命名（行内重命名只渲染在主窗口）
+                // 再退出接管（接管面内的弹层先于接管退出），再取消属性面板编辑态与行内重命名
                 if self.file_drag.take().is_some() {
                     self.file_drag_target = None;
                     self.file_press = None;
@@ -2792,6 +2850,9 @@ impl App {
                 }
                 if self.popup.as_ref().is_some_and(|(w, _)| *w == window) {
                     self.dismiss_popup();
+                } else if self.plugin_takeovers.contains_key(&window) {
+                    // 接管窗口：弹层已关（上一分支），Esc = 退出接管（退出入口常驻，Esc 是后备通道）
+                    return plugin_actions::exit_takeover(self, window);
                 } else if self.main_id == Some(window)
                     && (self.props.editing.is_some() || self.props.adding.is_some())
                 {
@@ -2870,7 +2931,9 @@ impl App {
             Message::Ai(msg) => settings_view::ai::update(self, msg),
             Message::Plugins(msg) => settings_view::plugins::update(self, msg),
             Message::PluginEvent(event) => {
-                // 插件（重启 / 重新启用后）就绪：已挂的面重新通知，插件据此重建界面
+                // 插件（重启 / 重新启用后）就绪：已挂的面重新通知，插件据此重建界面；
+                // 停用 / 失败 / 熔断：该插件的窗口随会话收尾关闭（重启退避中不动作）
+                let mut task = Task::none();
                 if let PluginEvent::StatusChanged { id, status } = event.as_ref() {
                     if *status == PluginStatus::Running {
                         for (plugin_id, surface_id) in self.plugin_surfaces.iter() {
@@ -2879,11 +2942,26 @@ impl App {
                                     .notify_surface_attached(plugin_id, surface_id, SurfaceKind::Panel);
                             }
                         }
+                        // 插件窗口 / 接管面 / 打开中的文档实例随重启重新就绪
+                        plugin_actions::resync_surfaces_on_running(self, id);
+                    } else if matches!(
+                        status,
+                        PluginStatus::Stopped | PluginStatus::Failed(_) | PluginStatus::CircuitBroken
+                    ) {
+                        let to_close: Vec<window::Id> = self
+                            .plugin_windows
+                            .iter()
+                            .filter(|(_, w)| w.plugin_id == *id)
+                            .map(|(os, _)| *os)
+                            .collect();
+                        for os in to_close {
+                            task = task.chain(window::close(os));
+                        }
                     }
                 }
                 settings_view::plugins::on_event(self, *event);
                 // 运行时事件（界面提交 / 贡献变化 / 状态变化）后重投影：树与贡献都取最新快照
-                plugin_actions::refresh_projection(self)
+                task.chain(plugin_actions::refresh_projection(self))
             }
             Message::PluginView { plugin_id, surface_id, node_id, event } => {
                 plugin_actions::on_view_event(self, plugin_id, surface_id, node_id, event)
@@ -2902,6 +2980,28 @@ impl App {
             }
             Message::PluginTextEdit { plugin_id, surface_id, node_id, action } => {
                 plugin_actions::on_text_edit(self, plugin_id, surface_id, node_id, action)
+            }
+            Message::PluginTakeoverAsk { request_id, plugin_id, scope, surface_id } => {
+                plugin_actions::on_takeover_request(self, request_id, plugin_id, scope, surface_id)
+            }
+            Message::PluginWindowOpen { request_id, plugin_id, params } => {
+                plugin_actions::on_window_open(self, request_id, plugin_id, params)
+            }
+            Message::PluginWindowClose { request_id, plugin_id, window_key } => {
+                plugin_actions::on_window_close(self, request_id, plugin_id, window_key)
+            }
+            Message::PluginWindowDrag(id) => {
+                // 拖动热区只在工作区窗口的接管态生效（普通面板里的 dragRegion 不拖宿主窗口）
+                if self.plugin_takeovers.contains_key(&id) {
+                    window::drag(id)
+                } else {
+                    Task::none()
+                }
+            }
+            Message::PluginExitTakeover(id) => plugin_actions::exit_takeover(self, id),
+            Message::WindowFocused(id) => {
+                self.focused_window = Some(id);
+                Task::none()
             }
             Message::AgentsLoaded(gen, result) => {
                 if gen == self.epoch() {
@@ -3417,7 +3517,7 @@ impl App {
 
     /// 应用一个布局操作：形状校验 + 变更 + 调度落盘 + 撕裂窗口调和
     /// （iced 单状态树天然全窗口可见，无广播层）。布局操作全部伴随弹层收起。
-    fn apply(&mut self, op: LayoutOp) -> Task<Message> {
+    pub(crate) fn apply(&mut self, op: LayoutOp) -> Task<Message> {
         self.apply_op(op).0
     }
 
@@ -3899,10 +3999,20 @@ impl App {
         )
     }
 
-    /// 打开文件（脏拦截已由 gate 处理）：按扩展名分流（.atb → 表格），复位只读并清掉上一文件的解析产物。
+    /// 打开文件（脏拦截已由 gate 处理）：按扩展名分流（.atb → 表格、插件注册的领域扩展名 → 插件文档面），
+    /// 复位只读并清掉上一文件的解析产物。
     fn open_file(&mut self, rel: &str) -> Task<Message> {
         if rel.ends_with(".atb") {
             return table_actions::open_table(self, rel);
+        }
+        if let Some(extension) = rel.rsplit('.').next() {
+            if self
+                .plugin_doc_types
+                .iter()
+                .any(|info| info.registration.extension.eq_ignore_ascii_case(extension))
+            {
+                return plugin_actions::open_doc(self, rel);
+            }
         }
         self.history_kind = atelyx_core::history::HistoryKind::Note;
         self.ui.last_note_file = Some(rel.to_string());
@@ -3964,6 +4074,8 @@ impl App {
         if !from_boot {
             self.ui.last_note_file = None;
             self.ui.last_table_file = None;
+            // 打开中的插件文档实例随切仓库关闭（旧容器路径失效，实例面撤下；投影任务丢弃，后续刷新兜底）
+            let _ = plugin_actions::close_doc(self);
             self.note_mode = NoteMode::Read;
             self.note_edit_caret_pending = false;
             self.note_press_inside = false;
@@ -4053,7 +4165,7 @@ impl App {
     }
 
     /// 同步落盘 global.json（设置项单值写：串行于 UI 线程，连续输入不会产生写回序错乱）。
-    fn save_global_now(&mut self) {
+    pub(crate) fn save_global_now(&mut self) {
         let Some(path) = global_config_path() else { return };
         if let Err(e) = global_config::write_global_config(&path, &self.global) {
             self.notify(NoticeLevel::Error, format!("保存全局配置失败：{e}"));
@@ -4076,6 +4188,18 @@ impl App {
     /// 关闭打开的文件（×：摘下对应视图的文件、标签保留回未打开态；脏拦截已由 gate 处理）。
     fn close_file_tab(&mut self, kind: &str) -> Task<Message> {
         self.dismiss_popup();
+        // 插件文档视图：关闭当前文档实例（标签保留回未打开态）
+        if crate::plugin_actions::parse_view_kind(kind).is_some() {
+            let is_doc_view = self
+                .doc_open
+                .as_ref()
+                .is_some_and(|d| plugin_actions::doc_view_kind(&d.plugin_id, &d.contribution_id) == kind);
+            return if is_doc_view {
+                plugin_actions::close_doc(self)
+            } else {
+                Task::none()
+            };
+        }
         match kind {
             "table" => {
                 self.ui.last_table_file = None;
@@ -4884,6 +5008,17 @@ impl App {
                     }
                     self.schedule_persist();
                 }
+                // 打开中的插件文档被删 / 所在目录被删：实例随磁盘事实关闭
+                let hit_doc = self.doc_open.as_ref().is_some_and(|d| {
+                    if *is_dir {
+                        d.path == *rel || d.path.starts_with(&format!("{rel}/"))
+                    } else {
+                        d.path == *rel
+                    }
+                });
+                if hit_doc {
+                    let _ = plugin_actions::close_doc(self);
+                }
             }
         }
     }
@@ -4918,7 +5053,7 @@ impl App {
                 if name.is_empty() {
                     return Task::none();
                 }
-                return space_actions::space_create_entry(self, dir, *kind, &name);
+                return space_actions::space_create_entry(self, dir, kind.clone(), &name);
             }
             return space_actions::space_commit_rename(self, r);
         }
@@ -4930,47 +5065,54 @@ impl App {
                 if name.is_empty() {
                     return Task::none();
                 }
-                // 新条目落 dir 内部：完成后刷新 dir 本身的子项缓存
-                let parent = dir.clone();
-                Task::perform(
-                    async move {
-                        // 同名加序号：name、name-2、name-3 …（存在性以磁盘为准，目录同名同样让位）
-                        let base = match kind {
-                            DraftKind::Note => format!("{name}.md"),
-                            DraftKind::Folder => name.clone(),
-                            DraftKind::Table => format!("{name}.atb"),
-                        };
-                        let mut candidate = base.clone();
-                        let mut seq = 2;
-                        loop {
-                            let path = vault::safe_join(&root, &full_rel(&dir, &candidate), false)?;
-                            if !path.exists() {
-                                break;
-                            }
-                            candidate = match kind {
-                                DraftKind::Note => format!("{name}-{seq}.md"),
-                                DraftKind::Folder => format!("{name}-{seq}"),
-                                DraftKind::Table => format!("{name}-{seq}.atb"),
-                            };
-                            seq += 1;
-                        }
-                        let rel = full_rel(&dir, &candidate);
-                        match kind {
-                            DraftKind::Note => {
-                                let path = vault::safe_join(&root, &rel, true)?;
-                                vault::atomic_write(&path, "").map(|_| rel)
-                            }
-                            DraftKind::Folder => vault::create_folder(&root, &rel).map(|_| rel),
-                            DraftKind::Table => {
-                                // 初始 = 一个「名称」文本字段（空白表无字段难用）
-                                let table = atelyx_core::table_ops::new_table_file(&name);
-                                let path = vault::safe_join(&root, &rel, true)?;
-                                vault::write_table_file(&path, &table).map(|_| rel)
-                            }
-                        }
-                    },
-                    move |result| Message::OpDone(gen, parent, result, FollowUp::None),
-                )
+                        // 新条目落 dir 内部：完成后刷新 dir 本身的子项缓存
+                        let parent = dir.clone();
+                        Task::perform(
+                            async move {
+                                // 同名加序号：name、name-2、name-3 …（存在性以磁盘为准，目录同名同样让位）
+                                let base = match &kind {
+                                    DraftKind::Note => format!("{name}.md"),
+                                    DraftKind::Folder => name.clone(),
+                                    DraftKind::Table => format!("{name}.atb"),
+                                    DraftKind::Doc { extension, .. } => format!("{name}.{extension}"),
+                                };
+                                let mut candidate = base.clone();
+                                let mut seq = 2;
+                                loop {
+                                    let path = vault::safe_join(&root, &full_rel(&dir, &candidate), false)?;
+                                    if !path.exists() {
+                                        break;
+                                    }
+                                    candidate = match &kind {
+                                        DraftKind::Note => format!("{name}-{seq}.md"),
+                                        DraftKind::Folder => format!("{name}-{seq}"),
+                                        DraftKind::Table => format!("{name}-{seq}.atb"),
+                                        DraftKind::Doc { extension, .. } => format!("{name}-{seq}.{extension}"),
+                                    };
+                                    seq += 1;
+                                }
+                                let rel = full_rel(&dir, &candidate);
+                                match kind {
+                                    DraftKind::Note => {
+                                        let path = vault::safe_join(&root, &rel, true)?;
+                                        vault::atomic_write(&path, "").map(|_| rel)
+                                    }
+                                    DraftKind::Folder => vault::create_folder(&root, &rel).map(|_| rel),
+                                    DraftKind::Table => {
+                                        // 初始 = 一个「名称」文本字段（空白表无字段难用）
+                                        let table = atelyx_core::table_ops::new_table_file(&name);
+                                        let path = vault::safe_join(&root, &rel, true)?;
+                                        vault::write_table_file(&path, &table).map(|_| rel)
+                                    }
+                                    // 领域文档初始为空文件：骨架内容随插件打开时自定（协作空间同构，通用文件对待）
+                                    DraftKind::Doc { .. } => {
+                                        let path = vault::safe_join(&root, &rel, true)?;
+                                        vault::atomic_write(&path, "").map(|_| rel)
+                                    }
+                                }
+                            },
+                            move |result| Message::OpDone(gen, parent, result, FollowUp::None),
+                        )
             }
             RenameTarget::File(old) => {
                 let title = vault::sanitize_filename(r.value.trim());
@@ -6067,6 +6209,8 @@ impl App {
             layout_view::main_view(self, id)
         } else if let Some(model_id) = self.detached_os.get(&id) {
             layout_view::detached_view(self, id, model_id)
+        } else if self.plugin_windows.contains_key(&id) {
+            layout_view::plugin_window_view(self, id)
         } else {
             space().into()
         }
@@ -6174,6 +6318,7 @@ impl App {
                     Some(Message::WindowMoved(window, pos))
                 }
                 Event::Window(window::Event::Unfocused) => Some(Message::DetachedFocusLost(window)),
+                Event::Window(window::Event::Focused) => Some(Message::WindowFocused(window)),
                 Event::Window(window::Event::Rescaled(sf)) => {
                     Some(Message::ScaleKnown(window, sf))
                 }

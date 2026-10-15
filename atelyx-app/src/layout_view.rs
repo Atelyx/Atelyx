@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use iced::alignment::{Horizontal, Vertical};
-use iced::widget::{button, column, container, mouse_area, row, scrollable, space, stack, text, text_editor, text_input};
+use iced::widget::{button, column, container, mouse_area, row, scrollable, space, stack, text, text_editor, text_input, Stack};
 use iced::{Color, Element, Font, Length, Padding, Point, Rectangle, Size, border, widget::container::Style};
 
 use atelyx_core::global_config::RecentVault;
@@ -383,6 +383,10 @@ pub(crate) fn license_popup(window: iced::window::Id) -> Message {
 
 /// 主窗口：标题栏 + 内容（设置整页或面板网格）+ 状态栏，顶层叠弹层/提示/通知。
 pub fn main_view<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, Message> {
+    // 接管中的窗口：整窗视图由插件面替换（page 保留宿主标题栏与状态栏），退出入口常驻
+    if let Some(t) = app.plugin_takeovers.get(&window) {
+        return takeover_view(app, window, t);
+    }
     let content: Element<'a, Message> = if app.settings_open {
         crate::settings_view::settings_view(app, window)
     } else {
@@ -399,7 +403,79 @@ pub fn main_view<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, Mess
         render_node(app, active_tree(&app.ui), hovered.as_ref().map(|(s, g)| (s.as_str(), *g)))
     };
 
-    let base = column![
+    let base = workspace_chrome(app, window, content);
+
+    with_overlays(app, window, base)
+}
+
+/// 接管视图（按窗生效）：page = 宿主标题栏与状态栏保留、内容区归插件；full = 整窗归插件呈现
+/// （含标题栏区域：拖动由插件 dragRegion 热区发起、缩放沿用边缘命中带、关闭走宿主关窗拦截链）。
+/// 右上角退出入口常驻（Esc 为后备）。接管期间布局真源不动，退出即恢复原视图。
+pub fn takeover_view<'a>(
+    app: &'a App,
+    window: iced::window::Id,
+    t: &'a crate::plugin_actions::TakeoverActive,
+) -> Element<'a, Message> {
+    let content = crate::plugin_view::takeover_content(app, window, &t.plugin_id, &t.surface_id);
+    let base: Element<'a, Message> = if t.full {
+        container(content)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(|_t| Style {
+                background: Some(pal::BG_PRIMARY.into()),
+                ..Style::default()
+            })
+            .into()
+    } else {
+        workspace_chrome(app, window, content)
+    };
+    takeover_shell(app, window, base)
+}
+
+/// 插件窗口：面树铺满整窗，弹层 / 悬停提示 / 通知沿用工作区覆盖层（窗口内下拉与菜单依赖它）。
+pub fn plugin_window_view<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, Message> {
+    let Some(entry) = app.plugin_windows.get(&window) else {
+        return space().into();
+    };
+    let content = crate::plugin_view::window_view(app, window, entry);
+    with_overlays(app, window, content)
+}
+
+/// 接管视图的退出浮层与覆盖层组装（base 之上叠右上角常驻退出入口，
+/// 再挂工作区同一套弹层 / 悬停提示 / 通知 / 边缘缩放命中带）。
+fn takeover_shell<'a>(
+    app: &'a App,
+    window: iced::window::Id,
+    base: Element<'a, Message>,
+) -> Element<'a, Message> {
+    let exit: Element<'static, Message> = container(controls::btn(
+        "退出接管",
+        &controls::btn_sm(),
+        controls::Variant::Ghost,
+        Some(Message::PluginExitTakeover(window)),
+    ))
+    .padding(Padding::from(6.0))
+    .into();
+    let overlay = container(exit)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(Horizontal::Right)
+        .align_y(Vertical::Top);
+    let inner = Stack::new()
+        .push(base)
+        .push(overlay)
+        .width(Length::Fill)
+        .height(Length::Fill);
+    with_overlays(app, window, inner.into())
+}
+
+/// 工作区 chrome 骨架（标题栏 + 分隔线 + 内容 + 分隔线 + 状态栏）；主窗与整页接管共用。
+fn workspace_chrome<'a>(
+    app: &'a App,
+    window: iced::window::Id,
+    content: Element<'a, Message>,
+) -> Element<'a, Message> {
+    column![
         titlebar(app, window),
         hline(),
         container(content)
@@ -419,9 +495,8 @@ pub fn main_view<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, Mess
         status_bar(app),
     ]
     .width(Length::Fill)
-    .height(Length::Fill);
-
-    with_overlays(app, window, base.into())
+    .height(Length::Fill)
+    .into()
 }
 
 /// 主窗口分割树几何区域（标题栏与状态栏之间的内容区，窗口局部坐标；
@@ -621,7 +696,7 @@ fn with_overlays<'a>(
         if drag.cursor_window == window {
             if let Some(wpos) = app.os_positions.get(&window) {
                 let local = Point::new(drag.current.x - wpos.x, drag.current.y - wpos.y);
-                let icon_name = if drag.is_dir { "folder" } else { file_icon(&drag.label) };
+                let icon_name = if drag.is_dir { "folder" } else { file_icon(app, &drag.label) };
                 let hint = app.file_drag_target.as_ref().map(|dir| {
                     if dir.is_empty() {
                         "移到根目录".to_string()
@@ -1315,7 +1390,11 @@ fn panel_tab<'a>(
     let active = active_tab_id.as_deref() == Some(t.id.as_str());
     let label = tab_label(app, &t.view);
     let has_file = (t.view == "note" && app.ui.last_note_file.is_some())
-        || (t.view == "table" && app.ui.last_table_file.is_some());
+        || (t.view == "table" && app.ui.last_table_file.is_some())
+        || app
+            .doc_open
+            .as_ref()
+            .is_some_and(|d| crate::plugin_actions::doc_view_kind(&d.plugin_id, &d.contribution_id) == t.view);
     let window = app.main_id.unwrap_or(iced::window::Id::unique());
     let cursor = app.cursor_for(window);
 
@@ -1653,7 +1732,7 @@ fn device_row(
             col = col.push(
                 button(
                     row![
-                        icon(file_icon(&name), 11.0, pal::TEXT_SECONDARY),
+                        icon(file_icon_base(&name), 11.0, pal::TEXT_SECONDARY),
                         text(name).size(pal::fs_micro()).color(pal::TEXT_SECONDARY),
                     ]
                     .spacing(4),
@@ -1830,6 +1909,10 @@ pub fn detached_view<'a>(
     let Some(w) = app.ui.detached_windows.iter().find(|w| w.id == model_id) else {
         return space().into();
     };
+    // 接管中的撕裂窗口：整窗视图由插件面替换（与主窗同一套接管组装）
+    if let Some(t) = app.plugin_takeovers.get(&window) {
+        return takeover_view(app, window, t);
+    }
     let cursor = app.cursor_for(window);
 
     let mut tab_row = row![].spacing(2).height(Length::Fill);
@@ -1846,7 +1929,11 @@ pub fn detached_view<'a>(
         let active = w.active_tab_id.as_deref() == Some(t.id.as_str());
         let label = tab_label(app, &t.view);
         let has_file = (t.view == "note" && app.ui.last_note_file.is_some())
-            || (t.view == "table" && app.ui.last_table_file.is_some());
+            || (t.view == "table" && app.ui.last_table_file.is_some())
+            || app
+                .doc_open
+                .as_ref()
+                .is_some_and(|d| crate::plugin_actions::doc_view_kind(&d.plugin_id, &d.contribution_id) == t.view);
         let text_color = if active { pal::TEXT_PRIMARY } else { pal::TEXT_SECONDARY };
         let mut label_row = row![].spacing(4);
         label_row = label_row.push(icon(view_icon(app, &t.view), 13.0, text_color));
@@ -2445,7 +2532,7 @@ fn tree_row_element(
     } else {
         let active_icon = pal::ACCENT;
         let color = if r.active { active_icon } else { pal::TEXT_SECONDARY };
-        (file_icon(&r.name), color)
+        (file_icon(app, &r.name), color)
     };
     let name_color = if r.is_dir {
         pal::TEXT_SECONDARY
@@ -2562,6 +2649,7 @@ fn draft_input_row(app: &App, depth: usize) -> Element<'static, Message> {
                     DraftKind::Note => "笔记名称",
                     DraftKind::Folder => "文件夹名称",
                     DraftKind::Table => "表格名称",
+                    DraftKind::Doc { label, .. } => label,
                 },
             ),
             _ => (String::new(), ""),
@@ -2615,7 +2703,23 @@ fn file_inline_input(app: &App, r: &TreeRow) -> Option<Element<'static, Message>
     )
 }
 
-fn file_icon(name: &str) -> &'static str {
+fn file_icon(app: &App, name: &str) -> &'static str {
+    // 插件领域文档类型按注册图标呈现（扩展名大小写不敏感），其余走内置映射
+    // （投影缓存随贡献刷新，避免文件树逐行渲染时重查运行时）
+    if let Some(ext) = name.rsplit('.').next() {
+        if let Some(info) = app
+            .plugin_doc_types
+            .iter()
+            .find(|i| i.registration.extension.eq_ignore_ascii_case(ext))
+        {
+            return crate::plugin_actions::normalize_icon(&info.registration.icon, "paperclip");
+        }
+    }
+    file_icon_base(name)
+}
+
+/// 内置扩展名图标映射（无 app 上下文的调用点用）。
+fn file_icon_base(name: &str) -> &'static str {
     let lower = name.to_lowercase();
     if lower.ends_with(".atlx") {
         "file-text"
@@ -5231,6 +5335,22 @@ fn file_menu_entries(
         entries.push((0, MenuEntry::action_icon("新建笔记", "sticky-note",
             Message::DraftStart(rel.to_string(), DraftKind::Note))));
         entries.push((0, MenuEntry::action_icon("新建表格", "table", Message::DraftStart(rel.to_string(), crate::DraftKind::Table))));
+        // 插件领域文档类型的新建入口（扩展名 / 标签 / 图标取自插件注册）
+        for info in &app.plugin_doc_types {
+            let extension = info.registration.extension.clone();
+            let label = format!("新建{}", info.registration.label);
+            entries.push((
+                0,
+                MenuEntry::action_icon(
+                    &label,
+                    crate::plugin_actions::normalize_icon(&info.registration.icon, "file-text"),
+                    Message::DraftStart(
+                        rel.to_string(),
+                        DraftKind::Doc { extension, label: info.registration.label.clone() },
+                    ),
+                ),
+            ));
+        }
         entries.push((0, MenuEntry::action_icon("新建文件夹", "folder-plus",
             Message::DraftStart(rel.to_string(), DraftKind::Folder))));
         if !is_root {

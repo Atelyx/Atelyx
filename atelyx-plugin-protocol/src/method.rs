@@ -7,17 +7,35 @@ use serde_json::Value;
 // ---------- 方法名常量 ----------
 
 pub mod view {
-    /// 插件提交一棵界面树到某个面（面板 / 窗口 / 接管区）。宿主校验后按键 diff 挂载。
+    /// 插件提交一棵界面树到某个面（面板 / 窗口 / 接管区 / 文档实例）。宿主校验后按键 diff 挂载。
     pub const SUBMIT: &str = "view.submit";
-    /// 插件注册一个贡献点（面板 / 表格视图），使其出现在宿主对应的入口里。
+    /// 插件注册一个贡献点（面板 / 表格视图 / 设置页），使其出现在宿主对应的入口里。
     pub const REGISTER: &str = "view.register";
     /// 插件按 id 撤销自己的一个贡献点。
     pub const UNREGISTER: &str = "view.unregister";
+    /// 插件请求接管当前聚焦窗口（整页 / 全接管）。宿主按窗应用，退出入口由宿主常驻提供。
+    pub const TAKEOVER: &str = "view.takeover";
     /// 宿主回发节点事件（通知）。
     pub const HOST_EVENT: &str = "host:view.event";
     /// 宿主告知插件某个面已就绪 / 已移除（通知）。
     pub const HOST_ATTACHED: &str = "host:surface.attached";
     pub const HOST_DETACHED: &str = "host:surface.detached";
+}
+
+pub mod window {
+    /// 插件请求打开一个独立窗口承载自己的界面树（声明的 `id` 即该窗口面的 `surfaceId`）。
+    pub const OPEN: &str = "window.open";
+    /// 插件关闭自己打开的一个窗口。
+    pub const CLOSE: &str = "window.close";
+    /// 宿主告知插件某个窗口已被用户关闭（通知）。
+    pub const HOST_CLOSED: &str = "host:window.closed";
+}
+
+pub mod service {
+    /// 插件声明自己实现某服务契约，进入该契约的候选上岗名单（上岗与否由用户指定）。
+    pub const REGISTER: &str = "service.register";
+    /// 插件撤销自己的服务实现声明。
+    pub const UNREGISTER: &str = "service.unregister";
 }
 
 pub mod fs {
@@ -71,8 +89,18 @@ pub mod http {
 }
 
 pub mod doc {
-    /// 用户打开了插件注册的领域文档类型文件（通知）。
+    /// 用户打开了插件注册的领域文档类型文件（通知）。`surfaceId` 为宿主分配的实例面标识，
+    /// 插件据此以 `view.submit` 提交该文档实例的界面树。
     pub const HOST_OPEN: &str = "host:doc.open";
+    /// 文档实例已关闭 / 已切换走（通知）。插件此后不得再向该 surfaceId 提交树。
+    pub const HOST_CLOSE: &str = "host:doc.close";
+}
+
+pub mod search {
+    /// 宿主向已上岗的插件搜索提供方发起一次查询（通知）；插件以 [`RESPOND`] 请求回结果。
+    pub const HOST_QUERY: &str = "host:search.query";
+    /// 插件回一次查询结果（插件→宿主请求）；`error` 非空 = 本次查询失败。
+    pub const RESPOND: &str = "search.respond";
 }
 
 pub mod canvas {
@@ -148,6 +176,77 @@ pub struct RegisterParams {
 #[serde(rename_all = "camelCase")]
 pub struct UnregisterParams {
     pub id: String,
+}
+
+/// 接管范围（封闭枚举）。`page` = 内容区全给插件（宿主标题栏保留）；`full` = 整窗归插件呈现
+/// （含标题栏区域，窗口拖动 / 缩放 / 关闭由宿主代执行）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TakeoverScope {
+    Page,
+    Full,
+}
+
+/// `view.takeover` 的 params：把本插件的一个贡献面接管到当前聚焦窗口。`surfaceId` 须为
+/// 已注册的贡献 id（与该面共享同一棵提交树）；退出接管入口由宿主常驻提供，插件无需声明退路。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TakeoverParams {
+    pub scope: TakeoverScope,
+    pub surface_id: String,
+}
+
+/// `window.open` 的 params：`id` 插件内唯一、非空且不含 `:`，同时是该窗口面的 `surfaceId`。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowOpenParams {
+    pub id: String,
+    pub title: String,
+    /// 逻辑像素；缺省由宿主取默认尺寸。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<f32>,
+    /// 置顶浮窗。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub always_on_top: Option<bool>,
+    /// 不进任务栏。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_taskbar: Option<bool>,
+    /// 失焦即收起（隐藏窗口，从托盘 / 快捷键等入口再唤起是插件自己的事）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hide_on_blur: Option<bool>,
+}
+
+/// `window.close` 的 params。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowCloseParams {
+    pub id: String,
+}
+
+/// [`window::HOST_CLOSED`] 的 params：用户（而非插件）关闭了该窗口。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowClosedParams {
+    pub id: String,
+}
+
+/// 服务契约（封闭枚举；扩容随协议升版）。每个契约定义宿主与插件间的调用形态。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ServiceContract {
+    /// 网页搜索提供方：宿主经 [`search::HOST_QUERY`] 下发查询，插件经 [`search::RESPOND`] 回结果
+    /// （与内置 Tavily / SearXNG 的结果同构）。
+    WebSearch,
+}
+
+/// `service.register` / `service.unregister` 的 params：声明或撤销自己实现某契约。
+/// 注册是声明不是上岗——是否上岗由用户在设置页指定；停用 / 崩溃 / 卸载随会话收尾自动摘除声明。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceRegisterParams {
+    pub contract: ServiceContract,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -416,6 +515,48 @@ pub struct HttpResult {
 pub struct DocOpenParams {
     /// 仓库容器内的相对路径（本地仓库）或服务端内容路径（协作空间），与 vault 口径一致。
     pub path: String,
+    /// 宿主为本实例分配的面标识：插件据此以 `view.submit` 提交该文档实例的界面树。
+    pub surface_id: String,
+}
+
+/// [`doc::HOST_CLOSE`] 的 params：实例随标签关闭 / 换文件被关闭。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocCloseParams {
+    pub surface_id: String,
+    pub path: String,
+}
+
+// ---------- search ----------
+
+/// 一条搜索结果（与内置 Tavily / SearXNG 提供方的结果同构）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchResult {
+    pub title: String,
+    pub url: String,
+    pub snippet: String,
+}
+
+/// [`search::HOST_QUERY`] 的 params（宿主 → 插件通知）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchQueryParams {
+    /// 查询标识：插件经 [`search::RESPOND`] 回结果时原样带回。
+    pub request_id: u64,
+    pub query: String,
+}
+
+/// [`search::RESPOND`] 的 params（插件 → 宿主请求）。`error` 非空 = 本次查询失败
+/// （宿主按单次回落内置处理），此时 `results` 为空。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchRespondParams {
+    pub request_id: u64,
+    #[serde(default)]
+    pub results: Vec<SearchResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[cfg(test)]
@@ -428,9 +569,14 @@ mod tests {
         assert_eq!(serde_json::to_value(ContributionSlot::TableView).unwrap(), "tableView");
         assert_eq!(serde_json::to_value(ContributionSlot::Settings).unwrap(), "settings");
         assert_eq!(serde_json::to_value(SurfaceKind::Settings).unwrap(), "settings");
+        assert_eq!(serde_json::to_value(TakeoverScope::Page).unwrap(), "page");
+        assert_eq!(serde_json::to_value(TakeoverScope::Full).unwrap(), "full");
+        assert_eq!(serde_json::to_value(ServiceContract::WebSearch).unwrap(), "webSearch");
         let kind: SurfaceKind = serde_json::from_value(serde_json::json!("settings")).unwrap();
         assert_eq!(kind, SurfaceKind::Settings);
         let slot: ContributionSlot = serde_json::from_value(serde_json::json!("settings")).unwrap();
         assert_eq!(slot, ContributionSlot::Settings);
+        let scope: TakeoverScope = serde_json::from_value(serde_json::json!("full")).unwrap();
+        assert_eq!(scope, TakeoverScope::Full);
     }
 }

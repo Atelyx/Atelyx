@@ -69,7 +69,7 @@ pub enum Permission {
     Dialog,
 }
 
-/// 领域文档类型注册：扩展名、展示标签与图标名。
+/// 领域文档类型注册：扩展名、展示标签、图标名与承载文档内容的贡献 id。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DocTypeRegistration {
@@ -78,6 +78,9 @@ pub struct DocTypeRegistration {
     pub label: String,
     /// 宿主图标形状表中的图标名。
     pub icon: String,
+    /// 承载该文档实例界面树的贡献 id（插件须同时以 `view.register` 注册同名贡献，
+    /// `slot` 为面板）；打开该扩展名文件时宿主按文件实例分配 surfaceId 并通知插件提交树。
+    pub surface: String,
 }
 
 /// 纯结构校验：id 形态与目录安全、名称/版本非空、协议版本已填。平台入口存在性与
@@ -93,6 +96,14 @@ impl Manifest {
         }
         if self.api_version == 0 {
             return Err("apiVersion 不能为空或 0".into());
+        }
+        for reg in &self.doc_type_registrations {
+            if reg.extension.trim().is_empty() || reg.extension.contains('.') {
+                return Err(format!("文档类型扩展名非法：{}", reg.extension));
+            }
+            if reg.surface.trim().is_empty() {
+                return Err(format!("文档类型 {} 缺承载贡献 id（surface）", reg.extension));
+            }
         }
         Ok(())
     }

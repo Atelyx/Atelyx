@@ -1,14 +1,17 @@
-//! 设置-插件：已安装列表 / 启用停用 / 卸载 / 本地目录与 zip 安装 / 详情（版本、权限、失败与被拒原因）。
+//! 设置-插件：已安装列表 / 启停 / 卸载 / 本地与 zip 安装 / 详情（版本、权限、失败与被拒原因）
+//! / 市场（官方索引浏览 / 安装 / 更新）/ 服务接管上岗指定。
 //! 列表与状态来自 `atelyx_core::plugin_runtime`（运行时为进程内单例，壳持有 `Arc`）。
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use iced::widget::{container, row, scrollable, space, text, Column};
 use iced::{border, widget::container::Style, Element, Length, Padding, Task};
 
+use atelyx_core::plugin_runtime::market::{self, MarketSnapshot};
 use atelyx_core::plugin_runtime::{
-    AuditRecord, DialogKind, DialogRequest, HostRequest, NotificationLevel, Permission, PluginEvent,
-    PluginRuntime, PluginStatus, PluginSummary,
+    AuditRecord, DialogKind, DialogRequest, HostRequest, NotificationLevel, Permission,
+    PluginEvent, PluginRuntime, PluginStatus, PluginSummary, ServiceContract,
 };
 
 use crate::settings_view::{card, group_head};
@@ -21,7 +24,7 @@ use crate::{layout_view, App, Message};
 /// 数据落盘时刻格式化用的毫秒口径（审计记录为 unix 秒）。
 const MS_PER_SEC: u64 = 1000;
 
-/// 插件页状态（列表缓存 + 详情 + 卸载二段确认 + 安装在途）。
+/// 插件页状态（列表缓存 + 详情 + 卸载二段确认 + 安装在途 + 市场快照 + 服务接管上岗）。
 #[derive(Default)]
 pub struct PluginsState {
     /// 已装插件摘要（打开插件页 / 收到事件 / 动作后刷新）。
@@ -34,6 +37,12 @@ pub struct PluginsState {
     pub confirm_uninstall: Option<String>,
     /// 安装（目录 / zip）在途：按钮禁用，防并发安装互踩。
     pub installing: bool,
+    /// 市场快照（缓存秒开 + 后台刷新；None = 尚未拉取）。
+    pub market: Option<MarketSnapshot>,
+    /// 市场索引刷新在途。
+    pub market_loading: bool,
+    /// 市场操作在途的插件 id（该卡片按钮禁用 + 进度文案）。
+    pub market_busy: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -61,6 +70,15 @@ pub enum PluginsMsg {
     /// 壳侧服务请求：替插件弹系统对话框（选定的路径经 `resolve_dialog` 回填给等待中的调用）。
     DialogAsk { request_id: u64, dialog: DialogRequest },
     DialogDone { request_id: u64, path: Option<String> },
+    /// 市场索引刷新（缓存先行，网络覆盖）。
+    MarketRefresh,
+    MarketLoaded(Result<MarketSnapshot, String>),
+    /// 市场安装（Release zip 下载 + 既有安装链）与更新（Release 版本比对后同链）。
+    MarketInstall { id: String, repo: String },
+    MarketUpdate { id: String, repo: String },
+    MarketDone { id: String, result: Result<String, String> },
+    /// 搜索提供方上岗指定（`None` = 回到内置）。
+    SetSearchProvider(Option<String>),
 }
 
 /// 订阅标识：运行时 `Arc` 指针哈希（同一运行时不重建订阅流）。
@@ -94,7 +112,7 @@ pub fn runtime_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<Item = M
     })
 }
 
-/// 壳侧服务请求流：运行时用无界通道送请求（对话框），这里接进 Elm update。
+/// 壳侧服务请求流：运行时用无界通道送请求（对话框 / 接管 / 插件窗口），这里接进 Elm update。
 pub fn host_requests_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<Item = Message> + use<> {
     let runtime = spec.0.clone();
     iced::stream::channel(16, async move |mut output| {
@@ -102,6 +120,15 @@ pub fn host_requests_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<It
             let message = match request {
                 HostRequest::Dialog { request_id, dialog, .. } => {
                     Message::Plugins(PluginsMsg::DialogAsk { request_id, dialog })
+                }
+                HostRequest::Takeover { plugin_id, request_id, scope, surface_id } => {
+                    Message::PluginTakeoverAsk { request_id, plugin_id, scope, surface_id }
+                }
+                HostRequest::OpenWindow { plugin_id, request_id, params } => {
+                    Message::PluginWindowOpen { request_id, plugin_id, params }
+                }
+                HostRequest::CloseWindow { plugin_id, request_id, window_id } => {
+                    Message::PluginWindowClose { request_id, plugin_id, window_key: window_id }
                 }
             };
             let _ = iced::futures::SinkExt::send(&mut output, message).await;
@@ -114,6 +141,10 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
     match msg {
         PluginsMsg::Refresh => {
             refresh(app);
+            // 市场首开即拉快照：缓存秒开 + 网络覆盖（失败保留缓存展示并提示）
+            if app.plugins_state.market.is_none() {
+                return update(app, PluginsMsg::MarketRefresh);
+            }
             Task::none()
         }
         PluginsMsg::Toggle(id, on) => {
@@ -190,7 +221,111 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
             app.plugins.resolve_dialog(request_id, path);
             Task::none()
         }
+        PluginsMsg::MarketRefresh => {
+            app.plugins_state.market_loading = true;
+            match market_cache_path(app) {
+                Some(cache) => {
+                    if app.plugins_state.market.is_none() {
+                        app.plugins_state.market = market::read_cache(&cache);
+                    }
+                    Task::perform(
+                        async move { market::fetch_snapshot(&cache).await },
+                        |result| Message::Plugins(PluginsMsg::MarketLoaded(result)),
+                    )
+                }
+                None => {
+                    app.plugins_state.market_loading = false;
+                    app.notify(
+                        NoticeLevel::Error,
+                        "应用数据目录不可用：市场索引无法缓存，刷新中止".to_string(),
+                    );
+                    Task::none()
+                }
+            }
+        }
+        PluginsMsg::MarketLoaded(result) => {
+            app.plugins_state.market_loading = false;
+            match result {
+                Ok(snapshot) => app.plugins_state.market = Some(snapshot),
+                Err(e) => {
+                    let have_cache = app.plugins_state.market.is_some();
+                    app.notify(
+                        NoticeLevel::Warning,
+                        if have_cache {
+                            format!("市场索引刷新失败，当前展示缓存内容：{e}")
+                        } else {
+                            format!("市场索引拉取失败：{e}")
+                        },
+                    );
+                }
+            }
+            Task::none()
+        }
+        PluginsMsg::MarketInstall { id, repo } => start_market_fetch(app, id, repo, false),
+        PluginsMsg::MarketUpdate { id, repo } => start_market_fetch(app, id, repo, true),
+        PluginsMsg::MarketDone { id, result } => {
+            app.plugins_state.market_busy = None;
+            match result {
+                Ok(message) => app.notify(NoticeLevel::Success, message),
+                Err(e) => app.notify(NoticeLevel::Error, format!("插件市场操作失败：{e}")),
+            }
+            let _ = id;
+            refresh(app);
+            Task::none()
+        }
+        PluginsMsg::SetSearchProvider(plugin_id) => {
+            app.global.search_provider = plugin_id.clone();
+            app.plugins.set_search_provider(plugin_id);
+            app.save_global_now();
+            Task::none()
+        }
     }
+}
+
+/// 市场缓存的落盘路径（插件根旁；根不可用 = 不缓存只内存展示）。
+fn market_cache_path(app: &App) -> Option<std::path::PathBuf> {
+    app.market_cache_path.clone()
+}
+
+/// 市场安装 / 更新：取 Release 信息（更新先比对版本）→ 下载平台 zip → 既有安装链落位。
+/// 与本地安装共用互斥（任意一条安装链在途即拒绝新发起），防两条链并发落位互踩。
+fn start_market_fetch(app: &mut App, id: String, repo: String, check_update: bool) -> Task<Message> {
+    if app.plugins_state.market_busy.is_some() || app.plugins_state.installing {
+        return Task::none();
+    }
+    app.plugins_state.market_busy = Some(id.clone());
+    let runtime = app.plugins.clone();
+    let id_for_task = id.clone();
+    Task::perform(
+        async move {
+            let release = market::latest_plugin_release(&repo, &id_for_task).await?;
+            if check_update {
+                let installed = runtime
+                    .list()
+                    .into_iter()
+                    .find(|p| p.id == id_for_task)
+                    .map(|p| p.version)
+                    .unwrap_or_default();
+                if !installed.is_empty()
+                    && atelyx_core::updater::compare_versions(&installed, &release.version) != std::cmp::Ordering::Less
+                {
+                    return Ok(format!("已是最新版本（v{installed}）"));
+                }
+            }
+            let cancel = Arc::new(AtomicBool::new(false));
+            let zip = market::download_release_asset(
+                &release,
+                &id_for_task,
+                std::env::temp_dir().join("atelyx-market").as_path(),
+                cancel,
+                Arc::new(|_, _| {}),
+            )
+            .await?;
+            let installed_id = run_blocking(move || runtime.install_zip(&zip)).await?;
+            Ok(format!("已安装 {installed_id} v{}", release.version))
+        },
+        move |result| Message::Plugins(PluginsMsg::MarketDone { id, result }),
+    )
 }
 
 /// 替插件弹系统对话框，返回用户选定的路径（取消 = `None`）。
@@ -225,7 +360,9 @@ async fn pick(request: DialogRequest) -> Option<String> {
 pub fn on_event(app: &mut App, event: PluginEvent) {
     let list_changed = matches!(
         event,
-        PluginEvent::StatusChanged { .. } | PluginEvent::PermissionDenied { .. }
+        PluginEvent::StatusChanged { .. }
+            | PluginEvent::PermissionDenied { .. }
+            | PluginEvent::ServicesChanged { .. }
     );
     match &event {
         PluginEvent::Notification { id, title, body, level } => {
@@ -253,6 +390,7 @@ pub fn on_event(app: &mut App, event: PluginEvent) {
         },
         // 界面与贡献变化由壳的投影刷新统一处理（见 main.rs 的事件分支）
         PluginEvent::ViewSubmitted { .. } | PluginEvent::ContributionsChanged { .. } => {}
+        PluginEvent::ServicesChanged { .. } => {}
     }
     if list_changed && app.settings_open && app.settings_tab == "plugins" {
         refresh(app);
@@ -266,9 +404,10 @@ fn refresh(app: &mut App) {
     }
 }
 
-/// 起一次安装：先弹文件选择器，再在阻塞线程池里安装（重活不占异步 worker；失败即回执为可读错误）。
+/// 起一次本地安装：先弹文件选择器，再在阻塞线程池里安装（重活不占异步 worker；失败即回执为可读错误）。
+/// 与市场安装共用互斥（`installing` 同时挡住两条链），防并发落位互踩。
 fn start_install(app: &mut App, from_dir: bool) -> Task<Message> {
-    if app.plugins_state.installing {
+    if app.plugins_state.installing || app.plugins_state.market_busy.is_some() {
         return Task::none();
     }
     app.plugins_state.installing = true;
@@ -317,7 +456,7 @@ fn notice_level(level: NotificationLevel) -> NoticeLevel {
     }
 }
 
-/// 插件页视图：安装入口 + 已装列表 + 详情。
+/// 插件页视图：安装入口 + 服务接管 + 已装列表 + 市场 + 详情。
 pub fn view(app: &App) -> Element<'static, Message> {
     let installing = app.plugins_state.installing;
     let mut col = Column::new()
@@ -338,6 +477,7 @@ pub fn view(app: &App) -> Element<'static, Message> {
     ));
 
     let installed = &app.plugins_state.list;
+    col = col.push(service_group(app));
     col = col.push(group_head(
         "已安装",
         &format!("共 {} 个", installed.len()),
@@ -355,6 +495,8 @@ pub fn view(app: &App) -> Element<'static, Message> {
         col = col.push(plugin_card(app, summary));
     }
 
+    col = col.push(market_group(app));
+
     if let Some(id) = app.plugins_state.detail.as_ref() {
         if let Some(summary) = installed.iter().find(|p| &p.id == id) {
             col = col.push(detail_card(app, summary));
@@ -365,6 +507,187 @@ pub fn view(app: &App) -> Element<'static, Message> {
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
+}
+
+/// 服务接管分组：网页搜索提供方的候选与上岗指定（内置 = 默认上岗；失效自动回落内置）。
+fn service_group(app: &App) -> Element<'static, Message> {
+    let mut col = Column::new().spacing(8);
+    col = col.push(group_head("服务接管", "插件声明的服务契约与上岗指定", false));
+    let candidates = app.plugins.service_candidates(ServiceContract::WebSearch);
+    let names_of = |ids: &[String]| -> Vec<(String, String)> {
+        ids.iter()
+            .map(|id| {
+                let name = app
+                    .plugins_state
+                    .list
+                    .iter()
+                    .find(|p| &p.id == id)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| id.clone());
+                (id.clone(), name)
+            })
+            .collect()
+    };
+    let assigned = app.global.search_provider.clone();
+    let mut rows: Vec<Element<'static, Message>> = Vec::new();
+    rows.push(
+        row![
+            text("网页搜索").size(pal::fs_body()).color(pal::TEXT_PRIMARY),
+            space().width(Length::Fill),
+        ]
+        .into(),
+    );
+    // 内置提供方行（Tavily / SearXNG 按工作区「联网搜索」配置取用）
+    let builtin_current = assigned.is_none();
+    rows.push(
+        row![
+            text("内置提供方").size(pal::fs_caption()).color(pal::TEXT_PRIMARY),
+            text("Tavily / SearXNG").size(pal::fs_caption()).color(pal::TEXT_MUTED),
+            space().width(Length::Fill),
+            controls::toggle(
+                builtin_current,
+                (!builtin_current).then_some(Message::Plugins(PluginsMsg::SetSearchProvider(None))),
+            ),
+        ]
+        .spacing(8)
+        .align_y(iced::alignment::Vertical::Center)
+        .into(),
+    );
+    for (id, name) in names_of(&candidates) {
+        let current = assigned.as_deref() == Some(id.as_str());
+        rows.push(
+            row![
+                text(name).size(pal::fs_caption()).color(pal::TEXT_PRIMARY),
+                text(id.clone()).size(pal::fs_caption()).color(pal::TEXT_MUTED),
+                space().width(Length::Fill),
+                controls::toggle(
+                    current,
+                    (!current).then_some(Message::Plugins(PluginsMsg::SetSearchProvider(Some(id)))),
+                ),
+            ]
+            .spacing(8)
+            .align_y(iced::alignment::Vertical::Center)
+            .into(),
+        );
+    }
+    if candidates.is_empty() {
+        rows.push(
+            text("暂无插件声明搜索提供方（插件经 service.register 声明后出现在此）")
+                .size(pal::fs_caption())
+                .color(pal::TEXT_MUTED)
+                .into(),
+        );
+    }
+    col = col.push(stacked_card(rows));
+    col.into()
+}
+
+/// 市场分组：官方索引浏览（缓存秒开 + 刷新）+ 条目卡片（徽标 / 安装 / 更新）。
+fn market_group(app: &App) -> Element<'static, Message> {
+    let mut col = Column::new().spacing(8);
+    col = col.push(group_head("市场", "浏览并安装社区插件", false));
+    let loading = app.plugins_state.market_loading;
+    let refresh = controls::btn(
+        if loading { "刷新中…" } else { "刷新索引" },
+        &controls::btn_sm(),
+        controls::Variant::Ghost,
+        (!loading).then_some(Message::Plugins(PluginsMsg::MarketRefresh)),
+    );
+    let head = row![
+        space().width(Length::Fill),
+        refresh,
+    ]
+    .align_y(iced::alignment::Vertical::Center);
+    col = col.push(card(head));
+
+    let Some(snapshot) = &app.plugins_state.market else {
+        return col.push(controls::empty_state(
+            "store",
+            "市场未加载",
+            "刷新索引后浏览可安装的插件",
+            None,
+        )).into();
+    };
+    for entry in &snapshot.items {
+        col = col.push(market_card(app, entry));
+    }
+    col.into()
+}
+
+/// 市场条目卡片：名称 / 简介 / 徽标 / 仓库 / 安装或更新动作（在途显示进度态）。
+fn market_card(
+    app: &App,
+    entry: &atelyx_core::plugin_runtime::market::MarketEntry,
+) -> Element<'static, Message> {
+    let installed = app
+        .plugins_state
+        .list
+        .iter()
+        .find(|p| p.id == entry.id);
+    let busy = app.plugins_state.market_busy.as_deref() == Some(entry.id.as_str());
+    let mut header = row![
+        icon("puzzle", 14.0, pal::TEXT_SECONDARY),
+        text(entry.name.clone()).size(pal::fs_body()).color(pal::TEXT_PRIMARY),
+    ]
+    .spacing(8)
+    .align_y(iced::alignment::Vertical::Center);
+    if let Some(badge) = entry.badge {
+        header = header.push(controls::badge(
+            badge.label(),
+            pal::BG_TERTIARY,
+            match badge {
+                market::Badge::Official => pal::SUCCESS,
+                market::Badge::Endorsed => pal::WARNING,
+            },
+        ));
+    }
+    if installed.is_some() {
+        header = header.push(controls::badge(
+            format!("已安装 v{}", installed.map(|p| p.version.clone()).unwrap_or_default()),
+            pal::BG_TERTIARY,
+            pal::TEXT_SECONDARY,
+        ));
+    }
+    header = header.push(space().width(Length::Fill));
+    let action = match (installed, busy) {
+        (_, true) => controls::btn("处理中…", &controls::btn_sm(), controls::Variant::Ghost, None),
+        (Some(_), false) => controls::btn(
+            "检查更新",
+            &controls::btn_sm(),
+            controls::Variant::Ghost,
+            Some(Message::Plugins(PluginsMsg::MarketUpdate {
+                id: entry.id.clone(),
+                repo: entry.repo.clone(),
+            })),
+        ),
+        (None, false) => controls::btn(
+            "安装",
+            &controls::btn_sm(),
+            controls::Variant::Primary,
+            Some(Message::Plugins(PluginsMsg::MarketInstall {
+                id: entry.id.clone(),
+                repo: entry.repo.clone(),
+            })),
+        ),
+    };
+    header = header.push(action);
+
+    let mut rows = vec![header.into()];
+    if let Some(tagline) = &entry.tagline {
+        rows.push(
+            text(tagline.clone())
+                .size(pal::fs_caption())
+                .color(pal::TEXT_SECONDARY)
+                .into(),
+        );
+    }
+    rows.push(
+        text(entry.repo.clone())
+            .size(pal::fs_caption())
+            .color(pal::TEXT_MUTED)
+            .into(),
+    );
+    stacked_card(rows)
 }
 
 fn install_button(label: &str, msg: PluginsMsg, disabled: bool) -> Element<'static, Message> {

@@ -1,5 +1,5 @@
 //! 插件界面面的状态与接线：壳侧视图 kind 编解码、贡献查询、输入草稿与多行编辑器、面树的投影刷新、
-//! 界面图片按需载入、节点事件回发。
+//! 界面图片按需载入、节点事件回发；接管与插件窗口的壳侧应用、领域文档实例的打开路由。
 //!
 //! 贡献与面树的投影缓存在 `App`（`plugin_contributions` / `plugin_surfaces` / `plugin_trees`），
 //! 由 [`refresh_projection`] 随运行时事件刷新；渲染在 [`crate::plugin_view`]。
@@ -8,12 +8,12 @@ use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 
 use iced::widget::text_editor;
-use iced::Task;
+use iced::{Task, window};
 
 use atelyx_core::layout::{self, LayoutNode};
 use atelyx_core::plugin_runtime::{
     CanvasPointer, Contribution, ContributionSlot, DrawCommand, EventKind, EventValue, ImageSource,
-    NodeBody, SurfaceKind, ViewEvent, ViewNode,
+    NodeBody, SurfaceKind, TakeoverScope, ViewEvent, ViewNode, WindowOpenParams,
 };
 
 use crate::{App, Message};
@@ -58,8 +58,13 @@ pub fn contribution_icon(app: &App, plugin_id: &str, contribution_id: &str) -> &
     let name = contribution(app, plugin_id, contribution_id)
         .and_then(|c| c.icon.as_deref())
         .unwrap_or("puzzle");
+    normalize_icon(name, "puzzle")
+}
+
+/// 图标名归一为宿主形状表里的 'static 名；未知 / 空名回落指定兜底。
+pub fn normalize_icon(name: &str, fallback: &'static str) -> &'static str {
     match crate::ui::icon::icon_name(name) {
-        "" => "puzzle",
+        "" => fallback,
         resolved => resolved,
     }
 }
@@ -250,12 +255,27 @@ pub fn sync_settings_surfaces(app: &mut App) {
 }
 
 /// 把贡献与已挂面的树投影进壳状态，并按需发起界面图片载入（返回的任务由调用方链出）。
+/// 投影面 = 布局面板 + 设置面 + 插件窗口 + 接管面 + 文档实例（后三类不在布局里，键在此补齐）。
 pub fn refresh_projection(app: &mut App) -> Task<Message> {
     let contributions = app.plugins.contributions();
     app.plugin_contributions = contributions;
+    app.plugin_doc_types = app.plugins.doc_types();
     sync_settings_surfaces(app);
     let mut surfaces: Vec<(String, String)> = app.plugin_surfaces.iter().cloned().collect();
     surfaces.extend(app.plugin_settings_surfaces.iter().cloned());
+    surfaces.extend(
+        app.plugin_windows
+            .values()
+            .map(|w| (w.plugin_id.clone(), w.window_key.clone())),
+    );
+    surfaces.extend(
+        app.plugin_takeovers
+            .values()
+            .map(|t| (t.plugin_id.clone(), t.surface_id.clone())),
+    );
+    if let Some(doc) = &app.doc_open {
+        surfaces.push((doc.plugin_id.clone(), doc.surface_id.clone()));
+    }
     let mut canvas_keys = HashSet::new();
     for (plugin_id, surface_id) in surfaces {
         let key = (plugin_id.clone(), surface_id.clone());
@@ -457,6 +477,357 @@ fn collect_image_sources<'a>(node: &'a ViewNode, out: &mut Vec<&'a ImageSource>)
     }
     for child in &node.children {
         collect_image_sources(child, out);
+    }
+}
+
+// ===== 接管与插件窗口 =====
+
+/// 一个窗口的接管态（按窗生效；布局真源不动，退出即恢复原视图）。
+#[derive(Clone, Debug)]
+pub struct TakeoverActive {
+    pub plugin_id: String,
+    /// 接管的贡献 id（与面板共享同一棵提交树）。
+    pub surface_id: String,
+    /// true = 全接管（含标题栏区域：拖动 / 缩放 / 关闭由宿主代执行）；false = 只接管内容区。
+    pub full: bool,
+}
+
+/// 一个插件窗口的壳侧记账（os 窗口 id → 条目）。
+#[derive(Clone, Debug)]
+pub struct PluginWindowActive {
+    pub plugin_id: String,
+    /// 插件声明的窗口 id（= 该窗口面的 surfaceId）。
+    pub window_key: String,
+    pub hide_on_blur: bool,
+}
+
+/// 插件接管请求：应用到当前聚焦窗口。贡献未注册 / 目标不可接管（插件窗口 / 已关闭窗口 /
+/// 已在接管中）都以可读原因回填失败。接管不占权限声明——它是渲染编排（只呈现插件自己注册
+/// 的贡献树），且退出入口由宿主常驻提供。
+pub fn on_takeover_request(
+    app: &mut App,
+    request_id: u64,
+    plugin_id: String,
+    scope: TakeoverScope,
+    surface_id: String,
+) -> Task<Message> {
+    let result = (|| -> Result<(), String> {
+        let Some(os_id) = app.focused_window else {
+            return Err("没有可接管的窗口".to_string());
+        };
+        // 接管只作用于工作区窗口（主窗 / 撕裂窗）：插件窗口有自己的承载语义
+        if app.plugin_windows.contains_key(&os_id) {
+            return Err("插件窗口不可被接管".to_string());
+        }
+        let is_workspace_window =
+            app.main_id == Some(os_id) || app.detached_os.contains_key(&os_id);
+        if !is_workspace_window {
+            return Err("目标窗口已关闭".to_string());
+        }
+        if app.plugin_takeovers.contains_key(&os_id) {
+            return Err("该窗口已在接管中".to_string());
+        }
+        if !app
+            .plugin_contributions
+            .iter()
+            .any(|c| c.plugin_id == plugin_id && c.id == surface_id)
+        {
+            return Err(format!("接管的贡献未注册：{surface_id}"));
+        }
+        let full = matches!(scope, TakeoverScope::Full);
+        app.plugin_takeovers.insert(
+            os_id,
+            TakeoverActive { plugin_id: plugin_id.clone(), surface_id: surface_id.clone(), full },
+        );
+        // 面就绪通知：贡献面未挂载时插件尚未提交树，接管成功即告知（与面板挂载同一通知形态）
+        let kind = if full { SurfaceKind::Takeover } else { SurfaceKind::Page };
+        app.plugins.notify_surface_attached(&plugin_id, &surface_id, kind);
+        Ok(())
+    })();
+    app.plugins.resolve_ui_call(request_id, result);
+    refresh_projection(app)
+}
+
+/// 退出某窗口的接管（宿主常驻退出入口 / Esc / 窗口关闭随清理）。未在接管中 = 空操作。
+pub fn exit_takeover(app: &mut App, os_id: window::Id) -> Task<Message> {
+    if app.plugin_takeovers.remove(&os_id).is_some() {
+        // 布局事件（拖拽命中带等）在接管期间被抑制，退出即恢复
+        app.schedule_persist();
+    }
+    Task::none()
+}
+
+/// 插件开窗请求：校验后建 OS 窗口（重复 id 以可读原因拒绝；窗口参数声明尺寸 / 置顶 /
+/// 不进任务栏 / 失焦收起）。`window::open` 返回的 OS id 即壳侧映射键。
+pub fn on_window_open(
+    app: &mut App,
+    request_id: u64,
+    plugin_id: String,
+    params: WindowOpenParams,
+) -> Task<Message> {
+    let dup = app
+        .plugin_windows
+        .values()
+        .any(|w| w.plugin_id == plugin_id && w.window_key == params.id);
+    if dup {
+        app.plugins
+            .resolve_ui_call(request_id, Err(format!("窗口 id 已存在：{}", params.id)));
+        return Task::none();
+    }
+    let mut settings = iced::window::Settings {
+        size: iced::Size::new(
+            params.width.unwrap_or(480.0).max(160.0),
+            params.height.unwrap_or(640.0).max(120.0),
+        ),
+        exit_on_close_request: true,
+        icon: crate::ui::window_icon(),
+        ..iced::window::Settings::default()
+    };
+    settings.min_size = Some(iced::Size::new(160.0, 120.0));
+    #[cfg(windows)]
+    {
+        settings.platform_specific.skip_taskbar = params.skip_taskbar.unwrap_or(false);
+    }
+    let hide_on_blur = params.hide_on_blur.unwrap_or(false);
+    let (os_id, open) = iced::window::open(settings);
+    app.plugin_windows.insert(
+        os_id,
+        PluginWindowActive {
+            plugin_id: plugin_id.clone(),
+            window_key: params.id.clone(),
+            hide_on_blur,
+        },
+    );
+    app.plugins.resolve_ui_call(request_id, Ok(()));
+    // 面就绪通知先于窗口可见（进程在跑时插件即刻可提交树；树投影由 ViewSubmitted 事件刷新）
+    app.plugins.notify_surface_attached(&plugin_id, &params.id, SurfaceKind::Window);
+    let level = if params.always_on_top.unwrap_or(false) {
+        iced::window::Level::AlwaysOnTop
+    } else {
+        iced::window::Level::Normal
+    };
+    open.map(move |_| Message::WindowOpened(os_id))
+        .chain(iced::window::set_level(os_id, level))
+        .chain(iced::window::scale_factor(os_id).map(move |sf| Message::ScaleKnown(os_id, sf)))
+        .chain(refresh_projection(app))
+}
+
+/// 插件请求关闭自己的一个窗口。
+pub fn on_window_close(app: &mut App, request_id: u64, plugin_id: String, window_key: String) -> Task<Message> {
+    let found = app
+        .plugin_windows
+        .iter()
+        .find(|(_, w)| w.plugin_id == plugin_id && w.window_key == window_key)
+        .map(|(os, _)| *os);
+    match found {
+        Some(os_id) => {
+            app.plugins.resolve_ui_call(request_id, Ok(()));
+            window::close(os_id)
+        }
+        None => {
+            app.plugins
+                .resolve_ui_call(request_id, Err(format!("窗口未打开：{window_key}")));
+            Task::none()
+        }
+    }
+}
+
+/// OS 窗口已关闭（用户关闭插件窗口）：摘记账、撤投影并通知插件（`host:window.closed`）；
+/// 若该窗口在接管中（不可达路径，防御性清理）一并摘除接管条目。
+pub fn on_plugin_window_closed(app: &mut App, os_id: window::Id) -> Task<Message> {
+    app.plugin_takeovers.remove(&os_id);
+    if app.focused_window == Some(os_id) {
+        app.focused_window = None;
+    }
+    let Some(entry) = app.plugin_windows.remove(&os_id) else {
+        return refresh_projection(app);
+    };
+    app.plugins
+        .notify_surface_detached(&entry.plugin_id, &entry.window_key);
+    drop_node_state(app, &entry.plugin_id, &entry.window_key);
+    refresh_projection(app)
+}
+
+/// 插件窗口失焦：声明了 hide_on_blur 的隐藏窗口（浮窗形态）。
+pub fn on_plugin_window_blur(app: &mut App, os_id: window::Id) -> Task<Message> {
+    let hide = app
+        .plugin_windows
+        .get(&os_id)
+        .is_some_and(|w| w.hide_on_blur);
+    if hide {
+        iced::window::set_mode(os_id, iced::window::Mode::Hidden)
+    } else {
+        Task::none()
+    }
+}
+
+/// 插件停用 / 崩溃后重启就绪：按当前壳侧状态重发面就绪通知（面板 / 设置 / 插件窗口 / 接管面），
+/// 插件据此重建全部界面。
+pub fn resync_surfaces_on_running(app: &mut App, plugin_id: &str) {
+    let takeovers: Vec<(String, String, bool)> = app
+        .plugin_takeovers
+        .values()
+        .filter(|t| t.plugin_id == plugin_id)
+        .map(|t| (t.plugin_id.clone(), t.surface_id.clone(), t.full))
+        .collect();
+    for (pid, surface_id, full) in takeovers {
+        let kind = if full { SurfaceKind::Takeover } else { SurfaceKind::Page };
+        app.plugins.notify_surface_attached(&pid, &surface_id, kind);
+    }
+    let windows: Vec<(String, String)> = app
+        .plugin_windows
+        .values()
+        .filter(|w| w.plugin_id == plugin_id)
+        .map(|w| (w.plugin_id.clone(), w.window_key.clone()))
+        .collect();
+    for (plugin_id, surface_id) in windows {
+        app.plugins.notify_surface_attached(&plugin_id, &surface_id, SurfaceKind::Window);
+    }
+    // 打开中的领域文档实例：重启后实例面已清空，按当前文档重新告知
+    if let Some(doc) = &app.doc_open {
+        if doc.plugin_id == plugin_id {
+            app.plugins.notify_doc_open(plugin_id, &doc.surface_id, &doc.path);
+        }
+    }
+}
+
+// ===== 领域文档类型 =====
+
+/// 一个打开中的插件文档实例（单实例：同一时间至多一个打开的插件文档，切换文件即换实例）。
+#[derive(Clone, Debug)]
+pub struct DocOpenInstance {
+    pub plugin_id: String,
+    /// 承载文档内容的贡献 id（manifest docTypeRegistrations.surface）；
+    /// 实例面标识 = 贡献 id 本身（单实例，与该贡献的面板树同一键空间）。
+    pub contribution_id: String,
+    pub path: String,
+    /// 实例面标识（= contribution_id；插件据此提交文档界面树）。
+    pub surface_id: String,
+}
+
+/// 文档视图 kind：插件领域文档视图沿用插件视图 kind 命名空间。
+pub fn doc_view_kind(plugin_id: &str, contribution_id: &str) -> String {
+    view_kind(plugin_id, contribution_id)
+}
+
+/// 按扩展名找文档类型注册（多个插件注册同一扩展名时按插件 id 排序取第一个，
+/// 返回的候选数供调用方提示）。
+pub fn doc_type_for_extension(
+    app: &App,
+    extension: &str,
+) -> Option<(String, atelyx_core::plugin_runtime::DocTypeRegistration, usize)> {
+    let matches: Vec<atelyx_core::plugin_runtime::DocTypeInfo> = app
+        .plugins
+        .doc_types()
+        .into_iter()
+        .filter(|info| info.registration.extension.eq_ignore_ascii_case(extension))
+        .collect();
+    let count = matches.len();
+    let first = matches.into_iter().next()?;
+    Some((first.plugin_id, first.registration, count))
+}
+
+/// 打开一个插件领域文档（文件打开路由分派）：登记实例、确保文档视图标签存在并激活、
+/// 通知插件（`host:doc.open`）。实例面标识换新（旧实例先关闭通知）。
+pub fn open_doc(app: &mut App, rel: &str) -> Task<Message> {
+    let extension = rel.rsplit('.').next().unwrap_or_default().to_string();
+    let Some((plugin_id, reg, candidates)) = doc_type_for_extension(app, &extension) else {
+        app.notify(
+            crate::ui::notify::Level::Error,
+            format!("没有插件注册 .{extension} 文档类型"),
+        );
+        return Task::none();
+    };
+    if candidates > 1 {
+        app.notify(
+            crate::ui::notify::Level::Info,
+            format!(".{extension} 由多个插件注册，已用 {plugin_id} 打开"),
+        );
+    }
+    // 换文件即换实例：旧实例先通知关闭（同插件同贡献时插件可按路径自辨，无需重建面）
+    if let Some(old) = app.doc_open.take() {
+        app.plugins.notify_doc_close(&old.plugin_id, &old.surface_id, &old.path);
+        drop_node_state(app, &old.plugin_id, &old.surface_id);
+    }
+    // 实例面标识 = 贡献 id：渲染 / 事件 / 清理与面板树共用同一键空间（单实例语义）
+    let surface_id = reg.surface.clone();
+    app.plugins.notify_doc_open(&plugin_id, &surface_id, rel);
+    app.doc_open = Some(DocOpenInstance {
+        plugin_id: plugin_id.clone(),
+        contribution_id: surface_id.clone(),
+        path: rel.to_string(),
+        surface_id,
+    });
+    app.ui.last_doc_file = Some(rel.to_string());
+    app.schedule_persist();
+    ensure_doc_tab(app, &plugin_id, &reg.surface)
+}
+
+/// 关闭当前打开的插件文档（文档标签关闭 / 文件删除 / 换仓库）。
+pub fn close_doc(app: &mut App) -> Task<Message> {
+    let Some(doc) = app.doc_open.take() else {
+        return Task::none();
+    };
+    app.ui.last_doc_file = None;
+    app.plugins.notify_doc_close(&doc.plugin_id, &doc.surface_id, &doc.path);
+    drop_node_state(app, &doc.plugin_id, &doc.surface_id);
+    app.schedule_persist();
+    refresh_projection(app)
+}
+
+/// 确保文档视图标签存在并激活（复用「添加面板」的布局通道；视图被占用时仅激活）。
+fn ensure_doc_tab(app: &mut App, plugin_id: &str, contribution_id: &str) -> Task<Message> {
+    let view = doc_view_kind(plugin_id, contribution_id);
+    // 文档视图已存在（主树或撕裂窗口）= 只需激活所在标签
+    if let Some(task) = activate_existing_view(app, &view) {
+        return task;
+    }
+    let panel_id = app
+        .ui
+        .focused_panel_id
+        .clone()
+        .or_else(|| first_panel_id(&layout::active_layout(&app.ui).tree));
+    let Some(panel_id) = panel_id else {
+        app.notify(
+            crate::ui::notify::Level::Error,
+            "没有可放置文档视图的面板".to_string(),
+        );
+        return Task::none();
+    };
+    app.apply(layout::LayoutOp::AddView { panel_id, view })
+}
+
+/// 布局里已存在某视图标签时激活它（主树 / 撕裂窗口各查一层）；未找到 = `None`。
+fn activate_existing_view(app: &mut App, view: &str) -> Option<Task<Message>> {
+    fn find_in(node: &LayoutNode, view: &str) -> Option<(String, String)> {
+        match node {
+            LayoutNode::Panel { id, tabs, .. } => tabs
+                .iter()
+                .find(|t| t.view == view)
+                .map(|t| (id.clone(), t.id.clone())),
+            LayoutNode::Split { children, .. } => {
+                children.iter().find_map(|child| find_in(child, view))
+            }
+        }
+    }
+    if let Some((panel_id, tab_id)) = find_in(&layout::active_layout(&app.ui).tree, view) {
+        return Some(app.apply(layout::LayoutOp::SetActive { panel_id, tab_id }));
+    }
+    for window in &app.ui.detached_windows {
+        if let Some(tab) = window.tabs.iter().find(|t| t.view == view) {
+            return Some(app.apply(layout::LayoutOp::DetachedSetActive {
+                window_id: window.id.clone(),
+                tab_id: tab.id.clone(),
+            }));
+        }
+    }
+    None
+}
+
+fn first_panel_id(node: &LayoutNode) -> Option<String> {
+    match node {
+        LayoutNode::Panel { id, .. } => Some(id.clone()),
+        LayoutNode::Split { children, .. } => children.iter().find_map(first_panel_id),
     }
 }
 

@@ -5,9 +5,11 @@ use atelyx_plugin_protocol::envelope::{Envelope, RequestId};
 use atelyx_plugin_protocol::event::VaultSwitchPayload;
 use atelyx_plugin_protocol::handshake::{self, InitializeParams, InitializeResult};
 use atelyx_plugin_protocol::method::{
-    CanvasSubmitParams, DocOpenParams, HttpRequestParams, HttpResult, ListResult, PathParams,
-    PickFileParams, PickedPath, ProcessEventParams, RegisterParams, RegisterShortcutParams,
-    ShowNotificationParams, SurfaceAttachedParams, TextPayload, UnregisterParams, ViewEventParams,
+    CanvasSubmitParams, DocCloseParams, DocOpenParams, HttpRequestParams, HttpResult, ListResult,
+    PathParams, PickFileParams, PickedPath, ProcessEventParams, RegisterParams,
+    RegisterShortcutParams, SearchQueryParams, SearchRespondParams, ServiceRegisterParams,
+    ShowNotificationParams, SurfaceAttachedParams, TakeoverParams, TextPayload, UnregisterParams,
+    ViewEventParams, WindowCloseParams, WindowClosedParams, WindowOpenParams,
 };
 use atelyx_plugin_protocol::view::{EventKind, NodeBody, ViewNode};
 use serde::de::DeserializeOwned;
@@ -78,7 +80,7 @@ fn view_tree_shape_is_frozen() {
     walk(&tree, &mut kinds);
     for expected in [
         "row", "column", "scroll", "grid", "list", "text", "textInput", "numberInput", "dropdown",
-        "checkbox", "button", "iconButton", "image", "progress", "menu", "canvas",
+        "checkbox", "button", "iconButton", "image", "progress", "menu", "canvas", "dragRegion",
     ] {
         assert!(kinds.contains(expected), "控件集 v1 缺快照覆盖：{expected}");
     }
@@ -188,6 +190,14 @@ fn method_type_shapes_are_frozen() {
             "ViewEventParams" => frozen_roundtrip::<ViewEventParams>(&value),
             "CanvasSubmitParams" => frozen_roundtrip::<CanvasSubmitParams>(&value),
             "DocOpenParams" => frozen_roundtrip::<DocOpenParams>(&value),
+            "DocCloseParams" => frozen_roundtrip::<DocCloseParams>(&value),
+            "TakeoverParams" => frozen_roundtrip::<TakeoverParams>(&value),
+            "WindowOpenParams" => frozen_roundtrip::<WindowOpenParams>(&value),
+            "WindowCloseParams" => frozen_roundtrip::<WindowCloseParams>(&value),
+            "WindowClosedParams" => frozen_roundtrip::<WindowClosedParams>(&value),
+            "ServiceRegisterParams" => frozen_roundtrip::<ServiceRegisterParams>(&value),
+            "SearchQueryParams" => frozen_roundtrip::<SearchQueryParams>(&value),
+            "SearchRespondParams" => frozen_roundtrip::<SearchRespondParams>(&value),
             "VaultSwitchPayload" => frozen_roundtrip::<VaultSwitchPayload>(&value),
             other => panic!("语料 {name}: 未知类型 {other}"),
         };

@@ -2058,15 +2058,16 @@ pub fn space_restore_canvas(app: &mut App, rel: String, content: String) -> Task
 
 // ===== 文件操作 =====
 
-/// 新建条目（空间模式）：文件夹 = create_folder；笔记 = 空文本；表格 = 初始单字段结构。
+/// 新建条目（空间模式）：文件夹 = create_folder；笔记 / 插件领域文档 = 空文本；表格 = 初始单字段结构。
 pub fn space_create_entry(app: &mut App, dir: &str, kind: DraftKind, name: &str) -> Task<Message> {
     let Some(session) = require_write(app) else { return Task::none() };
     let gen = app.epoch();
     let dir = dir.to_string();
-    let base = match kind {
+    let base = match &kind {
         DraftKind::Note => format!("{name}.md"),
         DraftKind::Folder => name.to_string(),
         DraftKind::Table => format!("{name}.atb"),
+        DraftKind::Doc { extension, .. } => format!("{name}.{extension}"),
     };
     let client = session.client;
     let space_id = session.space_id;

@@ -290,6 +290,11 @@ impl Instance {
         }
         self.shortcuts.release_plugin(&self.id);
         self.fail_pending_dialogs("插件已停止，对话框已取消");
+        self.fail_pending_ui_calls("插件已停止，界面服务请求已取消");
+        self.fail_pending_searches("插件已停止");
+        if let Some(runtime) = self.runtime.lock().unwrap().upgrade() {
+            runtime.retract_services_of(&self.id);
+        }
         // 界面与贡献变化广播给壳：壳据此停下已停插件界面的渲染并清掉菜单条目
         if surfaces_dropped || canvases_dropped {
             let _ = self.events.send(PluginEvent::ViewSubmitted { id: self.id.clone() });
@@ -304,6 +309,22 @@ impl Instance {
         let runtime = self.runtime.lock().unwrap().clone();
         if let Some(runtime) = runtime.upgrade() {
             runtime.fail_dialogs_of(&self.id, reason);
+        }
+    }
+
+    /// 让本插件在途的接管 / 插件窗口请求以可读失败收场（等待壳回填的线程不再悬挂）。
+    fn fail_pending_ui_calls(&self, reason: &str) {
+        let runtime = self.runtime.lock().unwrap().clone();
+        if let Some(runtime) = runtime.upgrade() {
+            runtime.fail_ui_calls_of(&self.id, reason);
+        }
+    }
+
+    /// 让等待本插件回结果的在途搜索查询立即失败收场（调用方按单次回落内置处理）。
+    fn fail_pending_searches(&self, reason: &str) {
+        let runtime = self.runtime.lock().unwrap().clone();
+        if let Some(runtime) = runtime.upgrade() {
+            runtime.fail_searches_of(&self.id, reason);
         }
     }
 
@@ -453,6 +474,15 @@ impl Instance {
             self.handle_dialog_request(token, id, method, &request.params);
             return;
         }
+        // 接管与插件窗口的落地在壳（OS 窗口副作用只由壳触发），结果由壳回填——分流为异步应答，
+        // 读线程不等待窗口创建与接管应用。
+        if matches!(
+            method,
+            method::view::TAKEOVER | method::window::OPEN | method::window::CLOSE
+        ) {
+            self.handle_ui_request(token, id, method, &request.params);
+            return;
+        }
         match self.dispatch_for_session(token, method, &request.params) {
             Ok(value) => self.respond(id, Some(value), None),
             Err(error) => self.respond(id, None, Some(error)),
@@ -499,6 +529,92 @@ impl Instance {
         });
     }
 
+    /// 接管与插件窗口请求：登记后在独立线程上等壳回填结果（窗口创建与接管应用由壳执行）。
+    fn handle_ui_request(
+        self: &Arc<Self>,
+        token: u64,
+        id: RequestId,
+        method_name: &str,
+        params: &Value,
+    ) {
+        let runtime = self.runtime.lock().unwrap().clone();
+        let Some(runtime) = runtime.upgrade() else {
+            self.respond(id, None, Some(RpcError::failed("界面服务不可用：宿主运行时不可用")));
+            return;
+        };
+        let opened = self.with_session(token, || {
+            // parse 的 RpcError 统一转可读串（本闭包的错误类型是 String）
+            match method_name {
+                method::view::TAKEOVER => {
+                    let p: method::TakeoverParams = parse(params).map_err(|e| e.to_string())?;
+                    runtime.open_takeover(&self.id, p.scope, &p.surface_id)
+                }
+                method::window::OPEN => {
+                    let p: method::WindowOpenParams =
+                        parse(params).map_err(|e| e.to_string())?;
+                    runtime.open_plugin_window(&self.id, p)
+                }
+                method::window::CLOSE => {
+                    let p: method::WindowCloseParams =
+                        parse(params).map_err(|e| e.to_string())?;
+                    runtime.close_plugin_window(&self.id, &p.id)
+                }
+                _ => Err("未知界面服务请求".to_string()),
+            }
+        });
+        let rx = match opened {
+            Ok(rx) => rx,
+            Err(e) => {
+                self.respond(id, None, Some(RpcError::failed(e)));
+                return;
+            }
+        };
+        let instance = self.clone();
+        std::thread::spawn(move || match rx.recv() {
+            Ok(Ok(())) => instance.respond(id, Some(json!({})), None),
+            Ok(Err(reason)) => instance.respond(id, None, Some(RpcError::failed(reason))),
+            Err(_) => instance.respond(id, None, Some(RpcError::failed("界面服务请求已取消"))),
+        });
+    }
+
+    /// 声明自己实现某服务契约（幂等；候选上岗名单见运行时服务注册簿）。
+    fn on_service_register(self: &Arc<Self>, params: &Value) -> Result<Value, RpcError> {
+        let p: method::ServiceRegisterParams = parse(params)?;
+        let runtime = self.runtime.lock().unwrap().clone();
+        let Some(runtime) = runtime.upgrade() else {
+            return Err(RpcError::failed("服务注册不可用：宿主运行时不可用"));
+        };
+        runtime.declare_service(&self.id, p.contract);
+        Ok(json!({}))
+    }
+
+    /// 撤销服务实现声明；未注册的契约报可读错误。
+    fn on_service_unregister(self: &Arc<Self>, params: &Value) -> Result<Value, RpcError> {
+        let p: method::ServiceRegisterParams = parse(params)?;
+        let runtime = self.runtime.lock().unwrap().clone();
+        let Some(runtime) = runtime.upgrade() else {
+            return Err(RpcError::failed("服务注册不可用：宿主运行时不可用"));
+        };
+        runtime
+            .retract_service(&self.id, p.contract)
+            .map_err(RpcError::failed)?;
+        Ok(json!({}))
+    }
+
+    /// 回一次搜索查询结果：按请求 id 送达等待方；未知 id（已超时回落 / 已取消）静默丢弃。
+    fn on_search_respond(self: &Arc<Self>, params: &Value) -> Result<Value, RpcError> {
+        let p: method::SearchRespondParams = parse(params)?;
+        let runtime = self.runtime.lock().unwrap().clone();
+        if let Some(runtime) = runtime.upgrade() {
+            if let Some(error) = p.error {
+                runtime.resolve_search(p.request_id, Err(error));
+            } else {
+                runtime.resolve_search(p.request_id, Ok(p.results));
+            }
+        }
+        Ok(json!({}))
+    }
+
     /// 分派一条请求（当前会话）——测试与不关心会话身份的调用走这条。
     #[cfg(test)]
     fn dispatch(self: &Arc<Self>, method: &str, params: &Value) -> Result<Value, RpcError> {
@@ -518,6 +634,9 @@ impl Instance {
             method::view::REGISTER => self.on_register(token, params),
             method::view::UNREGISTER => self.on_unregister(token, params),
             method::canvas::SUBMIT => self.on_canvas_submit(token, params),
+            method::service::REGISTER => self.on_service_register(params),
+            method::service::UNREGISTER => self.on_service_unregister(params),
+            method::search::RESPOND => self.on_search_respond(params),
             method::state::READ => {
                 let json = capability::read_state(&self.state_dir).map_err(RpcError::failed)?;
                 Ok(json!({ "json": json }))
@@ -893,6 +1012,36 @@ impl Instance {
         self.notify(event::HOST_PUBLISH, &event::PublishParams { name: name.to_string(), payload });
     }
 
+    /// 告知插件一个文档实例已打开（`host:doc.open`）：surfaceId 为宿主分配的实例面标识。
+    pub(crate) fn notify_doc_open(&self, surface_id: &str, path: &str) {
+        let params = method::DocOpenParams {
+            path: path.to_string(),
+            surface_id: surface_id.to_string(),
+        };
+        self.notify(method::doc::HOST_OPEN, &params);
+    }
+
+    /// 告知插件一个文档实例已关闭（`host:doc.close`）。
+    pub(crate) fn notify_doc_close(&self, surface_id: &str, path: &str) {
+        let params = method::DocCloseParams {
+            path: path.to_string(),
+            surface_id: surface_id.to_string(),
+        };
+        self.notify(method::doc::HOST_CLOSE, &params);
+    }
+
+    /// 告知插件一个它打开的窗口已被用户关闭（`host:window.closed`）。
+    pub(crate) fn notify_window_closed(&self, window_id: &str) {
+        let params = method::WindowClosedParams { id: window_id.to_string() };
+        self.notify(method::window::HOST_CLOSED, &params);
+    }
+
+    /// 下发一次搜索查询（`host:search.query`）；结果由插件经 `search.respond` 请求回填。
+    pub(crate) fn notify_search_query(&self, request_id: u64, query: &str) {
+        let params = method::SearchQueryParams { request_id, query: query.to_string() };
+        self.notify(method::search::HOST_QUERY, &params);
+    }
+
     /// 向插件发一条宿主通知（`host:` 前缀方法）。进程未在跑时静默丢弃（对端已不在）。
     fn notify(&self, method_name: &str, params: &impl Serialize) {
         let params = match serde_json::to_value(params) {
@@ -1026,7 +1175,11 @@ mod tests {
     use super::*;
     use crate::vault::test_support::TempDir;
     use atelyx_plugin_protocol::manifest::{Entry, Permission};
+    use atelyx_plugin_protocol::method::TakeoverScope;
     use atelyx_plugin_protocol::view::NodeBody;
+
+    #[allow(unused_imports)]
+    use super::super::{HostRequest, ServiceContract};
 
     /// 构造一个不落进程的实例（`entry` 留空：单元测试只驱动请求分派与状态，不启动进程）。
     fn make_instance(permissions: Vec<Permission>) -> (TempDir, Arc<Instance>) {
@@ -1124,6 +1277,106 @@ mod tests {
         let audit = instance.audit();
         assert_eq!(audit[0].method, "fs.readText");
         assert_eq!(audit[0].detail, "C:/x");
+    }
+
+    #[test]
+    fn undeclared_window_call_is_denied_and_audited() {
+        let (_tmp, instance) = make_instance(Vec::new());
+        instance.handle_line(&request_line(
+            method::window::OPEN,
+            &json!({ "id": "w", "title": "窗口" }),
+        ));
+        assert_eq!(instance.denied_count(), 1, "未声明 window 能力的开窗请求必须被拒并留记录");
+        assert_eq!(instance.audit()[0].method, method::window::OPEN);
+    }
+
+    #[test]
+    fn service_declarations_roundtrip_through_instance() {
+        let tmp = TempDir::new("instance-service");
+        let runtime = PluginRuntime::new(tmp.to_path_buf());
+        let (_t, instance) = make_instance(Vec::new());
+        instance.attach_runtime(&runtime);
+
+        instance
+            .dispatch(method::service::REGISTER, &json!({ "contract": "webSearch" }))
+            .expect("服务声明应成功");
+        assert_eq!(
+            runtime.service_candidates(ServiceContract::WebSearch),
+            vec!["com.example.demo".to_string()]
+        );
+        instance
+            .dispatch(method::service::REGISTER, &json!({ "contract": "webSearch" }))
+            .expect("重复声明应幂等成功");
+        assert_eq!(runtime.service_candidates(ServiceContract::WebSearch).len(), 1);
+
+        instance
+            .dispatch(method::service::UNREGISTER, &json!({ "contract": "webSearch" }))
+            .expect("撤销声明应成功");
+        assert!(runtime.service_candidates(ServiceContract::WebSearch).is_empty());
+        assert!(
+            instance
+                .dispatch(method::service::UNREGISTER, &json!({ "contract": "webSearch" }))
+                .is_err(),
+            "未声明的契约撤销应报可读错误"
+        );
+
+        // 随会话收尾自动摘除
+        instance.dispatch(method::service::REGISTER, &json!({ "contract": "webSearch" })).unwrap();
+        instance.stop();
+        assert!(runtime.service_candidates(ServiceContract::WebSearch).is_empty());
+    }
+
+    #[test]
+    fn takeover_and_window_requests_route_to_shell_and_resolve() {
+        let tmp = TempDir::new("instance-ui-request");
+        let runtime = PluginRuntime::new(tmp.to_path_buf());
+        let (_t, instance) = make_instance(vec![Permission::Window]);
+        instance.attach_runtime(&runtime);
+        // 界面服务请求的目标校验（贡献注册）查运行时实例表：手工构造的实例须先登记
+        runtime
+            .instances
+            .lock()
+            .unwrap()
+            .insert("com.example.demo".to_string(), instance.clone());
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        // 接管要求目标贡献已注册：先注册再请求
+        instance
+            .dispatch(method::view::REGISTER, &json!({ "slot": "panel", "id": "main", "label": "主面" }))
+            .expect("贡献注册应成功");
+        instance.handle_line(&request_line(
+            method::view::TAKEOVER,
+            &json!({ "scope": "full", "surfaceId": "main" }),
+        ));
+        let request = rt.block_on(runtime.recv_host_request()).unwrap();
+        let HostRequest::Takeover { request_id, scope, surface_id, .. } = request else {
+            panic!("应投递接管请求");
+        };
+        assert_eq!(scope, TakeoverScope::Full);
+        assert_eq!(surface_id, "main");
+        runtime.resolve_ui_call(request_id, Ok(()));
+
+        instance.handle_line(&request_line(
+            method::window::OPEN,
+            &json!({ "id": "float", "title": "浮窗", "alwaysOnTop": true }),
+        ));
+        let request = rt.block_on(runtime.recv_host_request()).unwrap();
+        let HostRequest::OpenWindow { request_id, params, .. } = request else {
+            panic!("应投递开窗请求");
+        };
+        assert_eq!(params.id, "float");
+        assert_eq!(params.always_on_top, Some(true));
+        runtime.resolve_ui_call(request_id, Err("窗口数量已达上限".to_string()));
+
+        instance.handle_line(&request_line(method::window::CLOSE, &json!({ "id": "float" })));
+        let request = rt.block_on(runtime.recv_host_request()).unwrap();
+        let HostRequest::CloseWindow { window_id, .. } = request else {
+            panic!("应投递关窗请求");
+        };
+        assert_eq!(window_id, "float");
     }
 
     #[test]

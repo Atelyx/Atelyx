@@ -114,6 +114,12 @@ async fn consume_initial(stub: &mut Stub) -> SubmitParams {
                 registered = true;
                 stub.reply_ok(request.id, json!({})).await;
             }
+            m if m == method::service::REGISTER => {
+                let params: method::ServiceRegisterParams =
+                    serde_json::from_value(request.params).expect("服务声明 params 应定型");
+                assert_eq!(params.contract, method::ServiceContract::WebSearch);
+                stub.reply_ok(request.id, json!({})).await;
+            }
             m if m == method::view::SUBMIT => {
                 let params: SubmitParams = serde_json::from_value(request.params).expect("提交 params 应定型");
                 params.tree.validate().expect("首棵树应通过校验");

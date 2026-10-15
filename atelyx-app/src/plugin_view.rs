@@ -6,8 +6,8 @@
 
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::{
-    column, container, grid, image, keyed_column, progress_bar, row, scrollable, text, text_editor,
-    text_input,
+    column, container, grid, image, keyed_column, progress_bar, row, scrollable, space, text,
+    text_editor, text_input,
 };
 use iced::{Color, Element, Length, Padding};
 
@@ -44,6 +44,57 @@ pub fn panel_view<'a>(app: &'a App, window: iced::window::Id, view: &str) -> Ele
 /// 设置页里的插件面（tab 内容）：与面板同一套面树渲染，仅占位文案不同。
 pub fn settings_view<'a>(app: &'a App, window: iced::window::Id, view: &str) -> Element<'a, Message> {
     surface_view(app, window, view, "插件设置")
+}
+
+/// 插件窗口内容：独立 OS 窗口承载的面树（无面板内边距，铺满窗口）。
+pub fn window_view<'a>(
+    app: &'a App,
+    window: iced::window::Id,
+    entry: &crate::plugin_actions::PluginWindowActive,
+) -> Element<'a, Message> {
+    let key = (entry.plugin_id.clone(), entry.window_key.clone());
+    match app.plugin_trees.get(&key) {
+        Some(tree) => {
+            let ctx = Ctx {
+                plugin_id: entry.plugin_id.clone(),
+                surface_id: entry.window_key.clone(),
+                window,
+            };
+            container(render_root(app, &ctx, tree))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into()
+        }
+        None => placeholder(
+            "puzzle",
+            "插件窗口",
+            "等待插件提交界面（插件未运行或尚未就绪）",
+        ),
+    }
+}
+
+/// 接管面内容：与面板同一套面树渲染，无内边距铺满可用区域（接管态由 layout_view 组装）。
+pub fn takeover_content<'a>(
+    app: &'a App,
+    window: iced::window::Id,
+    plugin_id: &str,
+    surface_id: &str,
+) -> Element<'a, Message> {
+    let key = (plugin_id.to_string(), surface_id.to_string());
+    match app.plugin_trees.get(&key) {
+        Some(tree) => {
+            let ctx = Ctx {
+                plugin_id: plugin_id.to_string(),
+                surface_id: surface_id.to_string(),
+                window,
+            };
+            container(render_root(app, &ctx, tree))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into()
+        }
+        None => placeholder("puzzle", "接管面", "等待插件提交界面"),
+    }
 }
 
 fn surface_view<'a>(
@@ -310,6 +361,13 @@ fn render_node_in<'a>(
             }
             .into()
         }
+        NodeBody::DragRegion {} => iced::widget::mouse_area(
+            container(space())
+                .width(Length::Fill)
+                .height(Length::Fill),
+        )
+        .on_press(Message::PluginWindowDrag(ctx.window))
+        .into(),
     }
 }
 
