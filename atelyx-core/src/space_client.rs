@@ -2,7 +2,7 @@
 //! 错误体 `{"error":"<信息>"}` 按状态码映射 `SpaceError`；401 统一判会话过期由调用方收口。
 
 use crate::net_guard::{self, ClientTimeout, HostPolicy};
-use crate::vault::TablePatch;
+use crate::vault::{CanvasPatch, TablePatch};
 use base64::Engine;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
@@ -651,6 +651,15 @@ impl SpaceClient {
     pub async fn table_patch(&self, space_id: &str, path: &str, patch: &TablePatch) -> Result<PatchAck, SpaceError> {
         self.post_json(
             &format!("/api/spaces/{space_id}/patches/table"),
+            &serde_json::json!({ "path": path, "patch": patch }),
+        )
+        .await
+    }
+
+    /// 画布增量补丁：服务端按稳定 id 合并、title 漂移算新路径；补丁 id 与文件 id 不符 → 400。
+    pub async fn canvas_patch(&self, space_id: &str, path: &str, patch: &CanvasPatch) -> Result<PatchAck, SpaceError> {
+        self.post_json(
+            &format!("/api/spaces/{space_id}/patches/canvas"),
             &serde_json::json!({ "path": path, "patch": patch }),
         )
         .await

@@ -144,7 +144,7 @@ pub struct CanvasFile {
     pub updated_at: i64,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CanvasFileNode {
     pub id: String,
@@ -159,7 +159,7 @@ pub struct CanvasFileNode {
     pub data: serde_json::Value,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CanvasFileEdge {
     pub id: String,
@@ -707,7 +707,7 @@ pub fn same_physical_file(a: &Path, b: &Path) -> bool {
 
 /// 画布增量保存补丁（对应 `.atlx` schema）：只含变化/新增/删除的实体，
 /// 按稳定 id 合并——removed 幂等（缺 id 不报错），upsert 覆盖同 id 或追加。
-#[derive(Deserialize, Default)]
+#[derive(Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct CanvasPatch {
     /// 画布 id（防串文件守卫）。
@@ -874,6 +874,84 @@ pub fn apply_table_patch(table: &mut TableFile, patch: &TablePatch) {
     }
     if let Some(order) = &patch.row_order {
         reorder_by(&mut table.rows, order, |r| r.id.as_str());
+    }
+}
+
+/// 计算画布增量补丁：与落盘基线按值 diff，只含变化/新增/删除的卡与连线。
+/// 卡坐标/尺寸/data 任一变化即整卡 upsert（补丁粒度 = 整卡，与合并语义对齐）；
+/// 数组顺序无业务语义（位置在 x/y 里），不做全序重排。无任何变化返回 None（调用方跳过写盘）。
+/// title 变化随补丁携带（title 变更 = 同目录改文件名，由壳侧执行改名）。
+pub fn compute_canvas_patch(baseline: &CanvasFile, current: &CanvasFile) -> Option<CanvasPatch> {
+    let last_nodes: HashMap<&str, &CanvasFileNode> =
+        baseline.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+    let last_edges: HashMap<&str, &CanvasFileEdge> =
+        baseline.edges.iter().map(|e| (e.id.as_str(), e)).collect();
+    let upsert_nodes: Vec<CanvasFileNode> = current
+        .nodes
+        .iter()
+        .filter(|n| last_nodes.get(n.id.as_str()).copied() != Some(*n))
+        .cloned()
+        .collect();
+    let current_node_ids: HashSet<&str> = current.nodes.iter().map(|n| n.id.as_str()).collect();
+    let removed_node_ids: Vec<String> = baseline
+        .nodes
+        .iter()
+        .filter(|n| !current_node_ids.contains(n.id.as_str()))
+        .map(|n| n.id.clone())
+        .collect();
+    let upsert_edges: Vec<CanvasFileEdge> = current
+        .edges
+        .iter()
+        .filter(|e| last_edges.get(e.id.as_str()).copied() != Some(*e))
+        .cloned()
+        .collect();
+    let current_edge_ids: HashSet<&str> = current.edges.iter().map(|e| e.id.as_str()).collect();
+    let removed_edge_ids: Vec<String> = baseline
+        .edges
+        .iter()
+        .filter(|e| !current_edge_ids.contains(e.id.as_str()))
+        .map(|e| e.id.clone())
+        .collect();
+    let title = (baseline.title != current.title).then(|| current.title.clone());
+    if upsert_nodes.is_empty()
+        && removed_node_ids.is_empty()
+        && upsert_edges.is_empty()
+        && removed_edge_ids.is_empty()
+        && title.is_none()
+    {
+        return None;
+    }
+    Some(CanvasPatch {
+        id: current.id.clone(),
+        title,
+        upsert_nodes,
+        removed_node_ids,
+        upsert_edges,
+        removed_edge_ids,
+    })
+}
+
+/// 按稳定 id 合并画布补丁到全量文件（removed 幂等；upsert 覆盖同 id 或追加）。
+/// 与磁盘真源合并（而非整文件覆写）：外部改动期间未触及的卡/连线不被在途保存冲掉。
+pub fn apply_canvas_patch(canvas: &mut CanvasFile, patch: &CanvasPatch) {
+    if let Some(title) = &patch.title {
+        canvas.title = title.clone();
+    }
+    let removed_nodes: HashSet<&String> = patch.removed_node_ids.iter().collect();
+    canvas.nodes.retain(|n| !removed_nodes.contains(&n.id));
+    for n in &patch.upsert_nodes {
+        match canvas.nodes.iter_mut().find(|x| x.id == n.id) {
+            Some(existing) => *existing = n.clone(),
+            None => canvas.nodes.push(n.clone()),
+        }
+    }
+    let removed_edges: HashSet<&String> = patch.removed_edge_ids.iter().collect();
+    canvas.edges.retain(|e| !removed_edges.contains(&e.id));
+    for e in &patch.upsert_edges {
+        match canvas.edges.iter_mut().find(|x| x.id == e.id) {
+            Some(existing) => *existing = e.clone(),
+            None => canvas.edges.push(e.clone()),
+        }
     }
 }
 
@@ -4680,5 +4758,147 @@ mod table_patch_tests {
         let mut disk = base.clone();
         apply_table_patch(&mut disk, &back);
         assert_eq!(disk.fields, next.fields);
+    }
+}
+
+#[cfg(test)]
+mod canvas_patch_tests {
+    use super::*;
+
+    fn canvas(id: &str, nodes: Vec<CanvasFileNode>, edges: Vec<CanvasFileEdge>) -> CanvasFile {
+        CanvasFile {
+            schema: "atelyx-canvas/v1".into(),
+            id: id.into(),
+            title: "画布".into(),
+            nodes,
+            edges,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    fn node(id: &str, x: f64, y: f64) -> CanvasFileNode {
+        CanvasFileNode { id: id.into(), node_type: "text".into(), x, y, width: Some(200.0), height: None, data: serde_json::json!({}) }
+    }
+
+    fn edge(id: &str, source: &str, target: &str) -> CanvasFileEdge {
+        CanvasFileEdge { id: id.into(), source: source.into(), target: target.into(), source_handle: None, target_handle: None, directed: None, link_mode: None, created_at: 0 }
+    }
+
+    #[test]
+    fn no_change_yields_no_patch() {
+        let base = canvas("c", vec![node("n1", 0.0, 0.0)], vec![edge("e1", "n1", "n2")]);
+        assert!(compute_canvas_patch(&base, &base).is_none());
+    }
+
+    #[test]
+    fn node_move_produces_single_upsert() {
+        let base = canvas("c", vec![node("n1", 0.0, 0.0), node("n2", 100.0, 0.0)], vec![]);
+        let mut next = base.clone();
+        next.nodes[0].x = 42.0;
+        let patch = compute_canvas_patch(&base, &next).expect("patch");
+        assert_eq!(patch.upsert_nodes.len(), 1);
+        assert_eq!(patch.upsert_nodes[0].id, "n1");
+        assert!(patch.upsert_edges.is_empty());
+        assert!(patch.removed_node_ids.is_empty());
+        assert!(patch.removed_edge_ids.is_empty());
+        assert!(patch.title.is_none());
+    }
+
+    #[test]
+    fn edge_directed_toggle_produces_upsert() {
+        let base = canvas("c", vec![], vec![edge("e1", "n1", "n2")]);
+        let mut next = base.clone();
+        next.edges[0].directed = Some(false);
+        let patch = compute_canvas_patch(&base, &next).expect("patch");
+        assert!(patch.upsert_nodes.is_empty());
+        assert_eq!(patch.upsert_edges.len(), 1);
+        assert_eq!(patch.upsert_edges[0].id, "e1");
+    }
+
+    #[test]
+    fn add_and_remove_nodes_and_edges() {
+        let base = canvas("c", vec![node("n1", 0.0, 0.0)], vec![edge("e1", "n1", "n2")]);
+        let mut next = base.clone();
+        next.nodes.push(node("n2", 10.0, 10.0));
+        next.nodes.retain(|n| n.id != "n1");
+        next.edges.clear();
+        let patch = compute_canvas_patch(&base, &next).expect("patch");
+        assert_eq!(patch.upsert_nodes.len(), 1);
+        assert_eq!(patch.upsert_nodes[0].id, "n2");
+        assert_eq!(patch.removed_node_ids, vec!["n1"]);
+        assert!(patch.upsert_edges.is_empty());
+        assert_eq!(patch.removed_edge_ids, vec!["e1"]);
+    }
+
+    #[test]
+    fn title_only_change_carries_no_entities() {
+        let base = canvas("c", vec![node("n1", 0.0, 0.0)], vec![]);
+        let mut next = base.clone();
+        next.title = "新名".into();
+        let patch = compute_canvas_patch(&base, &next).expect("patch");
+        assert_eq!(patch.title.as_deref(), Some("新名"));
+        assert!(patch.upsert_nodes.is_empty());
+        assert!(patch.removed_node_ids.is_empty());
+        assert!(patch.upsert_edges.is_empty());
+        assert!(patch.removed_edge_ids.is_empty());
+    }
+
+    #[test]
+    fn apply_merges_with_disk_state_keeping_external_additions() {
+        // 磁盘真源含外部新增卡：合并后不被在途保存冲掉
+        let base = canvas("c", vec![node("n1", 0.0, 0.0)], vec![]);
+        let mut next = base.clone();
+        next.nodes.retain(|n| n.id != "n1");
+        let patch = compute_canvas_patch(&base, &next).expect("patch");
+        let mut disk = canvas("c", vec![node("n1", 0.0, 0.0), node("n-ext", 5.0, 5.0)], vec![]);
+        apply_canvas_patch(&mut disk, &patch);
+        let ids: Vec<&str> = disk.nodes.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(ids, vec!["n-ext"]);
+    }
+
+    #[test]
+    fn apply_upsert_overrides_same_id_and_removed_ids_are_idempotent() {
+        let mut disk = canvas("c", vec![node("n1", 0.0, 0.0)], vec![]);
+        let patch = CanvasPatch {
+            id: "c".into(),
+            title: None,
+            upsert_nodes: vec![node("n1", 9.0, 9.0), node("n2", 1.0, 1.0)],
+            removed_node_ids: vec!["n-gone".into()],
+            upsert_edges: vec![],
+            removed_edge_ids: vec!["e-gone".into()],
+        };
+        apply_canvas_patch(&mut disk, &patch);
+        assert_eq!(disk.nodes.len(), 2);
+        assert_eq!(disk.nodes[0].x, 9.0);
+        assert_eq!(disk.nodes[1].id, "n2");
+    }
+
+    #[test]
+    fn apply_title_updates_model() {
+        let mut disk = canvas("c", vec![], vec![]);
+        let patch = CanvasPatch { id: "c".into(), title: Some("改名".into()), ..Default::default() };
+        apply_canvas_patch(&mut disk, &patch);
+        assert_eq!(disk.title, "改名");
+    }
+
+    #[test]
+    fn patch_survives_json_roundtrip() {
+        // CanvasPatch 线形状即契约（camelCase + 卡的 type 字段名）
+        let base = canvas("c", vec![node("n1", 0.0, 0.0)], vec![edge("e1", "n1", "n2")]);
+        let mut next = base.clone();
+        next.nodes[0].node_type = "conversation".into();
+        next.nodes[0].data = serde_json::json!({ "bodyMd": "正文" });
+        next.title = "新名".into();
+        let patch = compute_canvas_patch(&base, &next).expect("patch");
+        let json = serde_json::to_string(&patch).expect("serialize");
+        assert!(json.contains("\"type\""));
+        assert!(json.contains("\"upsertNodes\""));
+        assert!(json.contains("\"removedNodeIds\""));
+        let back: CanvasPatch = serde_json::from_str(&json).expect("deserialize");
+        let mut disk = base.clone();
+        apply_canvas_patch(&mut disk, &back);
+        assert_eq!(disk.nodes, next.nodes);
+        assert_eq!(disk.title, next.title);
     }
 }

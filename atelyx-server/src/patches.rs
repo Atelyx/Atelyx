@@ -23,7 +23,7 @@ const CANVAS_SCHEMA: &str = "atelyx-canvas/v1";
 /// `.atb` schema 版本号。
 const TABLE_SCHEMA: &str = "atelyx-table/v1";
 
-// ===== .atlx 文件结构（与客户端 types/canvas.ts 同形状；data 不耦合业务字段）=====
+// ===== .atlx 文件结构（data 不耦合业务字段）=====
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -77,7 +77,7 @@ pub struct CanvasFileEdge {
     pub created_at: i64,
 }
 
-/// 画布增量补丁（与客户端 types/canvas.ts 的 CanvasPatch 同形状）：只含变化/新增/删除的实体。
+/// 画布增量补丁：只含变化/新增/删除的实体。
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct CanvasPatch {
