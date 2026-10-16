@@ -25,8 +25,7 @@ use std::time::{Duration, Instant};
 use atelyx_core::ai::refs::{self, RefEntry};
 
 use crate::markdown_edit::{
-    byte_of_char, caret_xy, char_at_point, char_index, hit_offset, line_end_at, line_start_at,
-    selection_rects, ParagraphT,
+    byte_of_char, char_index, line_end_at, line_start_at, selection_rects, ParagraphT,
 };
 use crate::ui::palette as pal;
 use crate::Message;
@@ -202,6 +201,8 @@ struct InputState {
     content: String,
     size: f32,
     width: f32,
+    /// 可视行表（随段落重建；命中与光标几何的纵向基准）。
+    rows: Vec<Row>,
     blink_anchor: Option<Instant>,
     seen_caret: usize,
     /// 纵向滚动偏移（内容超可视上限时）。
@@ -237,6 +238,143 @@ fn build_paragraph(content: &str, size: f32, width: f32) -> ParagraphT {
         shaping: advanced_text::Shaping::Advanced,
         wrapping: advanced_text::Wrapping::default(),
     })
+}
+
+/// 可视行：字形行或推算的无字形行（空行 / 文末虚拟行）。
+#[derive(Clone, Copy)]
+struct Row {
+    /// 行带顶（字形矩形 y 口径；空行按相邻字形行网格推算）。
+    y: f32,
+    /// 行首字节偏移。
+    start: usize,
+    kind: RowKind,
+}
+
+#[derive(Clone, Copy)]
+enum RowKind {
+    /// 字形行：行内字符区间（换行段必含字形，空行只会由连续换行产生）。
+    Glyph { first: usize, last: usize },
+    /// 无字形行：光标恒落行首。
+    Empty,
+}
+
+/// 行表构建：字形按 y 聚带；首带前（前导换行）、带间（连续换行）、
+/// 末带后（结尾换行的文末虚拟行）按行高网格推算。行表按视觉序、行首字节升序。
+fn rows_of(p: &ParagraphT, content: &str, line_px: f32) -> Vec<Row> {
+    let count = content.chars().count();
+    let byte_at = |i: usize| byte_of_char(content, i.min(count));
+    let mut bands: Vec<(f32, usize, usize)> = Vec::new();
+    for i in 0..count {
+        let Some(r) = p.span_bounds(i).into_iter().next() else {
+            continue;
+        };
+        match bands.last_mut() {
+            Some((y, _, last)) if (r.y - *y).abs() < 0.5 => *last = i,
+            _ => bands.push((r.y, i, i)),
+        }
+    }
+    let Some(&(y0, first0, _)) = bands.first() else {
+        // 无字形：空文本或纯换行 —— 行号即字符下标（含文末虚拟行）
+        return (0..=count)
+            .map(|k| Row { y: k as f32 * line_px, start: byte_at(k), kind: RowKind::Empty })
+            .collect();
+    };
+    let mut rows: Vec<Row> = Vec::new();
+    for k in 0..first0 {
+        let start = byte_at(k);
+        rows.push(Row {
+            y: y0 - (first0 - k) as f32 * line_px,
+            start,
+            kind: RowKind::Empty,
+        });
+    }
+    for (i, &(y, first, last)) in bands.iter().enumerate() {
+        rows.push(Row { y, start: byte_at(first), kind: RowKind::Glyph { first, last } });
+        let n_empty = if i + 1 == bands.len() {
+            count - (last + 1)
+        } else {
+            let next_y = bands[i + 1].0;
+            (((next_y - y) / line_px).round() as i32 - 1).max(0) as usize
+        };
+        for j in 1..=n_empty {
+            let start = byte_at(last + 1 + j);
+            rows.push(Row { y: y + j as f32 * line_px, start, kind: RowKind::Empty });
+        }
+    }
+    rows
+}
+
+/// 纵向定位：点所在行（行盒 `[y, y + line_px)` 分箱，越界夹回首末行）。
+fn row_at(rows: &[Row], y: f32, line_px: f32) -> &Row {
+    let idx = rows.partition_point(|r| r.y + line_px <= y);
+    rows.get(idx).unwrap_or_else(|| rows.last().expect("行表非空"))
+}
+
+/// 命中 → 字节偏移：行表定位纵向（空行 / 文末虚拟行落行首），
+/// 字形行内取 x 最近字符并以字形中点分左右。
+fn hit_offset_rows(
+    rows: &[Row],
+    p: &ParagraphT,
+    content: &str,
+    point: Point,
+    line_px: f32,
+) -> usize {
+    let count = content.chars().count();
+    let row = row_at(rows, point.y, line_px);
+    let RowKind::Glyph { first, last } = row.kind else {
+        return row.start;
+    };
+    let mut best: Option<(usize, f32, bool)> = None; // (字符, |dx|, 越过中点)
+    for i in first..=last {
+        let Some(r) = p.span_bounds(i).into_iter().next() else {
+            continue;
+        };
+        let dx = if point.x < r.x {
+            r.x - point.x
+        } else if point.x > r.x + r.width {
+            point.x - (r.x + r.width)
+        } else {
+            0.0
+        };
+        let past = point.x > r.x + r.width / 2.0;
+        if best.map_or(true, |(_, bdx, _)| dx < bdx) {
+            best = Some((i, dx, past));
+        }
+    }
+    match best {
+        Some((i, _, past)) => byte_of_char(content, (if past { i + 1 } else { i }).min(count)),
+        None => row.start,
+    }
+}
+
+/// 光标几何（行表口径）：字形位取字形矩形；行尾（终止换行前）、
+/// 空行与文末虚拟行按行表落位。返回 (x, y, h)。
+fn caret_row_pos(
+    rows: &[Row],
+    p: &ParagraphT,
+    content: &str,
+    idx: usize,
+    line_px: f32,
+) -> (f32, f32, f32) {
+    let count = content.chars().count();
+    let idx = idx.min(count);
+    if idx < count {
+        if let Some(r) = p.span_bounds(idx).into_iter().next() {
+            return (r.x, r.y, r.height);
+        }
+    }
+    let byte = byte_of_char(content, idx);
+    let ri = rows.partition_point(|r| r.start <= byte).saturating_sub(1);
+    let Some(row) = rows.get(ri) else {
+        return (0.0, 0.0, line_px);
+    };
+    match row.kind {
+        RowKind::Empty => (0.0, row.y, line_px),
+        RowKind::Glyph { last, .. } => match p.span_bounds(last).into_iter().next() {
+            Some(r) => (r.x + r.width, r.y, r.height),
+            None => (0.0, row.y, line_px),
+        },
+    }
 }
 
 /// 词边界：`backward` = 跳过尾部空白后回退到词首；否则前进到词尾。
@@ -354,12 +492,15 @@ impl Widget<Message, Theme, iced::Renderer> for Input<'_> {
             let width = limits.max().width;
             let size = pal::fs_body();
             let text = &self.draft.text;
+            let line_px = size * LINE_FACTOR;
             let state = tree.state.downcast_mut::<InputState>();
             if state.stale(text, size, width) {
                 state.paragraph = Some(build_paragraph(text, size, width));
-                state.content = text.clone();
+                state.content = text.to_string();
                 state.size = size;
                 state.width = width;
+                let p = state.paragraph.as_ref().expect("段落已建");
+                state.rows = rows_of(p, text, line_px);
             }
             let line_px = size * LINE_FACTOR;
             let content_h = state
@@ -395,123 +536,153 @@ impl Widget<Message, Theme, iced::Renderer> for Input<'_> {
             return;
         };
         let line_px = state.size * LINE_FACTOR;
-        let count = state.content.chars().count();
         let origin = bounds.position() + Vector::new(0.0, -state.scroll_y);
         let text_bounds = Rectangle::new(origin, Size::new(bounds.width, f32::INFINITY));
+        let clip = bounds.intersection(viewport).unwrap_or(bounds);
 
-        // # 引用标签高亮（选区样式；正文底下）
-        for hit in refs::scan_hits(&self.draft.text, self.refs) {
-            let (lo, hi) = (hit.start, hit.start + hit.len);
-            for r in selection_rects(
+        // 全部内容画进按 bounds 裁剪的层：滚动时超出可视区的部分不外溢
+        renderer.with_layer(clip, |renderer| {
+            // # 引用标签高亮（选区样式；正文底下）
+            for hit in refs::scan_hits(&self.draft.text, self.refs) {
+                let (lo, hi) = (hit.start, hit.start + hit.len);
+                for r in selection_rects(
+                    p,
+                    char_index(&state.content, lo),
+                    char_index(&state.content, hi),
+                ) {
+                    renderer.fill_quad(
+                        Quad {
+                            bounds: Rectangle::new(
+                                origin + Vector::new(r.x, r.y + r.height * 0.15),
+                                Size::new(r.width, r.height * 0.85),
+                            ),
+                            border: iced::border::Border {
+                                radius: 2.0.into(),
+                                ..Default::default()
+                            },
+                            ..Quad::default()
+                        },
+                        pal::ACCENT_SOFT,
+                    );
+                }
+            }
+
+            // 选区（压正文下，覆盖标签高亮更醒目）
+            let (sel_a, sel_b) = self.draft.selection();
+            if sel_b > sel_a {
+                for r in selection_rects(
+                    p,
+                    char_index(&state.content, sel_a),
+                    char_index(&state.content, sel_b),
+                ) {
+                    renderer.fill_quad(
+                        Quad {
+                            bounds: Rectangle::new(origin + Vector::new(r.x, r.y), r.size()),
+                            ..Quad::default()
+                        },
+                        pal::SELECTION,
+                    );
+                }
+            }
+
+            // 正文（纵向滚动 = bounds 平移，可视区裁剪）
+            iced::advanced::widget::text::draw(
+                renderer,
+                style,
+                text_bounds,
                 p,
-                char_index(&state.content, lo),
-                char_index(&state.content, hi),
-            ) {
-                renderer.fill_quad(
-                    Quad {
-                        bounds: Rectangle::new(
-                            origin + Vector::new(r.x, r.y + r.height * 0.15),
-                            Size::new(r.width, r.height * 0.85),
-                        ),
-                        border: iced::border::Border { radius: 2.0.into(), ..Default::default() },
-                        ..Quad::default()
+                iced::advanced::widget::text::Style { color: None },
+                &clip,
+            );
+
+            // 占位符
+            if self.draft.text.is_empty() && self.draft.preedit.is_none() {
+                renderer.fill_text(
+                    advanced_text::Text {
+                        content: self.placeholder.to_string(),
+                        bounds: Size::new(bounds.width, line_px),
+                        size: state.size.into(),
+                        line_height: advanced_text::LineHeight::Relative(LINE_FACTOR),
+                        font: Font::DEFAULT,
+                        align_x: advanced_text::Alignment::Left,
+                        align_y: alignment::Vertical::Top,
+                        shaping: advanced_text::Shaping::Auto,
+                        wrapping: advanced_text::Wrapping::None,
                     },
-                    pal::ACCENT_SOFT,
+                    bounds.position(),
+                    pal::TEXT_MUTED,
+                    bounds,
                 );
             }
-        }
 
-        // 选区（压正文下，覆盖标签高亮更醒目）
-        let (sel_a, sel_b) = self.draft.selection();
-        if sel_b > sel_a {
-            for r in selection_rects(
-                p,
-                char_index(&state.content, sel_a),
-                char_index(&state.content, sel_b),
-            ) {
-                renderer.fill_quad(
-                    Quad {
-                        bounds: Rectangle::new(origin + Vector::new(r.x, r.y), r.size()),
-                        ..Quad::default()
-                    },
-                    pal::SELECTION,
-                );
+            if !self.draft.focused {
+                return;
             }
-        }
-
-        // 正文（纵向滚动 = bounds 平移，可视区裁剪）
-        iced::advanced::widget::text::draw(
-            renderer,
-            style,
-            text_bounds,
-            p,
-            iced::advanced::widget::text::Style { color: None },
-            viewport,
-        );
-
-        // 占位符
-        if self.draft.text.is_empty() && self.draft.preedit.is_none() {
-            renderer.fill_text(
-                advanced_text::Text {
-                    content: self.placeholder.to_string(),
-                    bounds: Size::new(bounds.width, line_px),
-                    size: state.size.into(),
-                    line_height: advanced_text::LineHeight::Relative(LINE_FACTOR),
-                    font: Font::DEFAULT,
-                    align_x: advanced_text::Alignment::Left,
-                    align_y: alignment::Vertical::Top,
-                    shaping: advanced_text::Shaping::Auto,
-                    wrapping: advanced_text::Wrapping::None,
-                },
-                bounds.position(),
-                pal::TEXT_MUTED,
-                bounds,
-            );
-        }
-
-        if !self.draft.focused {
-            return;
-        }
-        let caret = self.draft.caret.clamp(0, self.draft.text.len());
-        let caret_char = char_index(&state.content, caret);
-        let (x, y, h) = caret_xy(p, count, caret_char, line_px);
-        // 组合串画在光标处（组合期恒可见）
-        if let Some(pre) = self.draft.preedit.as_deref().filter(|s| !s.is_empty()) {
-            renderer.fill_text(
-                advanced_text::Text {
-                    content: pre.to_string(),
-                    bounds: Size::new(f32::INFINITY, h),
-                    size: state.size.into(),
-                    line_height: advanced_text::LineHeight::Relative(LINE_FACTOR),
-                    font: Font::DEFAULT,
-                    align_x: advanced_text::Alignment::Left,
-                    align_y: alignment::Vertical::Top,
-                    shaping: advanced_text::Shaping::Auto,
-                    wrapping: advanced_text::Wrapping::None,
-                },
-                origin + Vector::new(x, y),
-                pal::TEXT_SECONDARY,
-                bounds,
-            );
-        }
-        // 闪烁相位：半周期可见
-        let on = state
-            .blink_anchor
-            .map_or(0u128, |anchor| anchor.elapsed().as_millis() / BLINK_MS)
-            .is_multiple_of(2);
-        if !on {
-            return;
-        }
-        renderer.fill_quad(
-            Quad {
-                bounds: Rectangle::new(
+            let caret = self.draft.caret.clamp(0, self.draft.text.len());
+            let caret_char = char_index(&state.content, caret);
+            let (x, y, h) = caret_row_pos(&state.rows, p, &state.content, caret_char, line_px);
+            // 组合串画在光标处（组合期恒可见）
+            if let Some(pre) = self.draft.preedit.as_deref().filter(|s| !s.is_empty()) {
+                renderer.fill_text(
+                    advanced_text::Text {
+                        content: pre.to_string(),
+                        bounds: Size::new(f32::INFINITY, h),
+                        size: state.size.into(),
+                        line_height: advanced_text::LineHeight::Relative(LINE_FACTOR),
+                        font: Font::DEFAULT,
+                        align_x: advanced_text::Alignment::Left,
+                        align_y: alignment::Vertical::Top,
+                        shaping: advanced_text::Shaping::Auto,
+                        wrapping: advanced_text::Wrapping::None,
+                    },
                     origin + Vector::new(x, y),
-                    Size::new(1.5, h.max(line_px)),
-                ),
-                ..Quad::default()
-            },
-            pal::TEXT_PRIMARY,
-        );
+                    pal::TEXT_SECONDARY,
+                    bounds,
+                );
+            }
+            // 闪烁相位：半周期可见
+            let on = state
+                .blink_anchor
+                .map_or(0u128, |anchor| anchor.elapsed().as_millis() / BLINK_MS)
+                .is_multiple_of(2);
+            if !on {
+                return;
+            }
+            renderer.fill_quad(
+                Quad {
+                    bounds: Rectangle::new(
+                        origin + Vector::new(x, y),
+                        Size::new(1.5, h.max(line_px)),
+                    ),
+                    ..Quad::default()
+                },
+                pal::TEXT_PRIMARY,
+            );
+        });
+
+        // 滚动条（内容超出可视区时）
+        let content_h = p.min_bounds().height;
+        if content_h > bounds.height + 0.5 {
+            let max_scroll = content_h - bounds.height;
+            let track = bounds.height - 8.0;
+            let thumb_h = (track * bounds.height / content_h).max(24.0).min(track);
+            let thumb_y =
+                bounds.y + 4.0 + (state.scroll_y / max_scroll) * (track - thumb_h);
+            renderer.fill_quad(
+                Quad {
+                    bounds: Rectangle::new(
+                        Point::new(bounds.x + bounds.width - 6.0, thumb_y),
+                        Size::new(3.0, thumb_h),
+                    ),
+                    border: iced::border::Border {
+                        radius: 1.5.into(),
+                        ..Default::default()
+                    },
+                    ..Quad::default()
+                },
+                pal::BORDER,
+            );
+        }
     }
 
     fn mouse_interaction(
@@ -542,6 +713,7 @@ impl Widget<Message, Theme, iced::Renderer> for Input<'_> {
     ) {
         let bounds = layout.bounds();
         let state = tree.state.downcast_mut::<InputState>();
+        let line_px = state.size * LINE_FACTOR;
         if state.seen_caret != self.draft.caret {
             state.seen_caret = self.draft.caret;
             state.blink_anchor = Some(Instant::now());
@@ -565,9 +737,8 @@ impl Widget<Message, Theme, iced::Renderer> for Input<'_> {
                     if t.elapsed().as_millis() <= DOUBLE_CLICK_MS
                         && { let d = p - pos; d.x * d.x + d.y * d.y <= DOUBLE_CLICK_DRIFT * DOUBLE_CLICK_DRIFT }
                     {
-                        let count = state.content.chars().count();
                         let byte = state.paragraph.as_ref().map_or(0, |p| {
-                            byte_of_char(&state.content, char_at_point(p, count, local))
+                            hit_offset_rows(&state.rows, p, &state.content, local, line_px)
                         });
                         let (lo, hi) = word_range_at(&self.draft.text, byte);
                         state.last_click = None;
@@ -580,7 +751,7 @@ impl Widget<Message, Theme, iced::Renderer> for Input<'_> {
                 }
                 state.last_click = Some((Instant::now(), pos));
                 let caret = state.paragraph.as_ref().map_or(0, |p| {
-                    hit_offset(p, &state.content, local)
+                    hit_offset_rows(&state.rows, p, &state.content, local, line_px)
                 });
                 // 点击落在标签内 = 整标签选中
                 if let Some(tag) = self.tag_at(caret) {
@@ -601,7 +772,8 @@ impl Widget<Message, Theme, iced::Renderer> for Input<'_> {
                 };
                 let local = Point::new(pos.x, pos.y + state.scroll_y);
                 if let Some(p) = state.paragraph.as_ref() {
-                    let caret = hit_offset(p, &state.content, local);
+                    let caret =
+                        hit_offset_rows(&state.rows, p, &state.content, local, line_px);
                     self.publish(
                         shell,
                         InputEvent::Select { caret, anchor: self.draft.anchor },
@@ -662,12 +834,11 @@ impl Widget<Message, Theme, iced::Renderer> for Input<'_> {
                 self.handle_key(key, *modifiers, text.as_deref(), state, clipboard, shell);
             }
             Event::Window(window::Event::RedrawRequested(_)) => {
-                let count = state.content.chars().count();
                 let caret = self.draft.caret.clamp(0, self.draft.text.len());
                 let caret_char = char_index(&state.content, caret);
-                let line_px = state.size * LINE_FACTOR;
                 if let Some(p) = state.paragraph.as_ref() {
-                    let (x, y, h) = caret_xy(p, count, caret_char, line_px);
+                    let (x, y, h) =
+                        caret_row_pos(&state.rows, p, &state.content, caret_char, line_px);
                     // 光标滚入可视区
                     let view_h = bounds.height;
                     if y < state.scroll_y {
@@ -929,10 +1100,9 @@ impl Input<'_> {
             return;
         };
         let line_px = state.size * LINE_FACTOR;
-        let count = state.content.chars().count();
         let caret = self.draft.caret.clamp(0, self.draft.text.len());
         let idx = char_index(&state.content, caret);
-        let (x, y, _) = caret_xy(p, count, idx, line_px);
+        let (x, y, _) = caret_row_pos(&state.rows, p, &state.content, idx, line_px);
         let up = matches!(key, Key::Named(Named::ArrowUp));
         let target_y = if up { y - line_px } else { y + line_px };
         let content_h = p.min_bounds().height;
@@ -943,8 +1113,13 @@ impl Input<'_> {
                 self.draft.text.len()
             }
         } else {
-            let ci = char_at_point(p, count, Point::new(x, target_y + line_px / 2.0));
-            byte_of_char(&state.content, ci)
+            hit_offset_rows(
+                &state.rows,
+                p,
+                &state.content,
+                Point::new(x, target_y + line_px / 2.0),
+                line_px,
+            )
         };
         self.publish(
             shell,
