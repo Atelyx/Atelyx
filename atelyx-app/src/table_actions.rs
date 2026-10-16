@@ -762,7 +762,7 @@ fn record_table_history(app: &App, content: String) -> Task<Message> {
     let rel = s.file.clone();
     let gen = app.epoch();
     let state = app.vault.clone();
-    let author = crate::history_author();
+    let author = crate::history_author(app);
     Task::perform(
         async move {
             let r = tokio::task::spawn_blocking(move || {

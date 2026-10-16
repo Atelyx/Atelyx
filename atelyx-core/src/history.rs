@@ -351,7 +351,7 @@ pub fn record_version(root: &Path, kind: HistoryKind, file: &str, opts: &RecordO
         last.content = opts.content.clone();
         last.ts = now;
         last.author = opts.author.clone();
-        last.summary = Some(diff_summary(&prev, &opts.content));
+        last.summary = Some(version_summary(kind, &prev, &opts.content));
         if opts.note.is_some() {
             last.note = opts.note.clone();
         }
@@ -365,7 +365,7 @@ pub fn record_version(root: &Path, kind: HistoryKind, file: &str, opts: &RecordO
         author: opts.author.clone(),
         action: opts.action,
         content: opts.content.clone(),
-        summary: Some(diff_summary(&prev_content, &opts.content)),
+        summary: Some(version_summary(kind, &prev_content, &opts.content)),
         note: opts.note.clone(),
         co_authors: None,
     };
@@ -432,6 +432,24 @@ fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+/// 版本摘要按文件类型生成：笔记取正文行级增删，表格/画布取实体计数（新增/删除 N 行、修改 N 个单元格…）。
+/// 表格/画布的记录摘要与展开差异共用同一份对比口径；`prev` 为空或损坏时按首版（新建统计）。
+pub fn version_summary(kind: HistoryKind, prev: &str, next: &str) -> String {
+    if prev == next {
+        return "未改动".into();
+    }
+    let summary = match kind {
+        HistoryKind::Note => diff_summary(prev, next),
+        HistoryKind::Table => crate::history_diff::summarize_table(prev, next),
+        HistoryKind::Canvas => crate::history_diff::summarize_canvas(prev, next),
+    };
+    // 实体口径认不出的差异（列宽/字段类型/样式等非实体改动）：内容确有变化，不得写成「未改动」
+    if summary.is_empty() || summary == "未改动" {
+        return "其他改动".into();
+    }
+    summary
 }
 
 /// 行级 diff 摘要（+N 行 −M 行；纯增删字符时回退字数估算；未变 = 「未改动」）。

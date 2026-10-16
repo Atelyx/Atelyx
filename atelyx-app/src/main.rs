@@ -110,8 +110,16 @@ pub(crate) fn collect_md_files(tree: &[vault::FileTreeNode], out: &mut Vec<(Stri
     }
 }
 
-/// 历史署名（本地桌面端：用户名即设备名）。
-pub(crate) fn history_author() -> atelyx_core::history::HistoryAuthor {
+/// 历史署名身份：已登录用登录身份的显示名（与协作成员名同源），未登录回落本机用户名（用户名即设备名）。
+/// id 随身份走——切换账号/空间即换身份，连续编辑合并只发生在同一身份内。
+pub(crate) fn history_author(app: &App) -> atelyx_core::history::HistoryAuthor {
+    if let Some(id) = app.global.last_identity.as_ref().filter(|i| !i.display_name.trim().is_empty()) {
+        return atelyx_core::history::HistoryAuthor {
+            id: format!("space:{}@{}", id.username, id.server_url),
+            name: id.display_name.clone(),
+            device: crate::space_actions::DEFAULT_DEVICE_NAME.to_string(),
+        };
+    }
     let user = std::env::var("USERNAME")
         .or_else(|_| std::env::var("USER"))
         .unwrap_or_else(|_| "本地".into());
@@ -1235,6 +1243,8 @@ pub struct App {
     pub history_loading: bool,
     /// 弹层展开预览的版本 seq（互斥；None = 全收起）。
     pub history_expanded: Option<u64>,
+    /// 展开版本的预览内容缓存（按 seq 绑定；展开时算一次，避免每帧重算 diff）。
+    pub history_preview: Option<history_browser::HistoryPreview>,
     /// 弹层回滚二段确认的版本 seq。
     pub history_confirm: Option<u64>,
     /// 回滚已发起、等待保存链稳定落盘的一次性标志（成功回执消费并提示，失败/切容器清除）。
@@ -1500,6 +1510,7 @@ impl App {
                 history_restore_pending: false,
                 history_loading: false,
                 history_expanded: None,
+                history_preview: None,
                 history_confirm: None,
                 repo_history: None,
                 repo_history_loading: false,
@@ -1998,7 +2009,7 @@ impl App {
                 self.search_query = s;
                 Task::none()
             }
-            Message::HistoryLoaded(gen, kind, rel, versions) => {
+            Message::HistoryLoaded(gen, kind, rel, mut versions) => {
                 // 身份守卫：版本快照随 kind+文件绑定（弹层显式指定，或当前上下文同源），
                 // 串台会让回滚跨文件写盘
                 let popup_matches = matches!(
@@ -2020,9 +2031,24 @@ impl App {
                     atelyx_core::history::HistoryKind::Canvas => false,
                 };
                 if gen == self.epoch() && (popup_matches || ctx_matches) {
+                    // 无摘要的版本（协作空间早前记录、回滚）在加载时按 kind 补规模描述：
+                    // 列表逐帧渲染，摘要回落若留在渲染路径会每帧整解析快照
+                    for v in versions.iter_mut() {
+                        if v.summary.as_deref().unwrap_or_default().is_empty() {
+                            v.summary = Some(history_browser::scope_line(kind, &v.content));
+                        }
+                    }
                     self.history = versions;
                     self.history_gen = gen;
                     self.history_loading = false;
+                    // 保存后刷新列表：展开态的预览可能已随版本变化失效，按当前展开项重算；
+                    // 展开项已不在新列表（剪枝）时一并收起，避免留孤儿展开态占预览高度
+                    self.history_preview = self
+                        .history_expanded
+                        .and_then(|seq| history_browser::build_preview(self, seq));
+                    if self.history_preview.is_none() {
+                        self.history_expanded = None;
+                    }
                 }
                 Task::none()
             }
@@ -4168,6 +4194,7 @@ impl App {
         // 历史弹层交互态与重建链接会话态随切仓清空
         self.history_loading = false;
         self.history_expanded = None;
+        self.history_preview = None;
         self.history_confirm = None;
         // 仓库历史面板缓存随切仓失效（进面板后重取）
         self.repo_history = None;
@@ -4536,7 +4563,7 @@ impl App {
         let Some(rel) = self.ui.last_note_file.clone() else { return Task::none() };
         let gen = self.epoch();
         let state = self.vault.clone();
-        let author = history_author();
+        let author = history_author(self);
         Task::perform(
             async move {
                 let _ = tokio::task::spawn_blocking(move || {
@@ -4585,7 +4612,7 @@ impl App {
                 }
                 let gen = self.epoch();
                 let state = self.vault.clone();
-                let author = history_author();
+                let author = history_author(self);
                 let content = version.content.clone();
                 Task::perform(
                     async move {
@@ -4662,7 +4689,7 @@ impl App {
         // 快照即回滚写入的原文：从磁盘事实取内容（队列写已完成，读到的是回滚后状态）
         let gen = self.epoch();
         let state = self.vault.clone();
-        let author = history_author();
+        let author = history_author(self);
         Task::perform(
             async move {
                 let r = tokio::task::spawn_blocking(move || {
@@ -4712,7 +4739,7 @@ impl App {
         }
         let gen = self.epoch();
         let state = self.vault.clone();
-        let author = history_author();
+        let author = history_author(self);
         Task::perform(
             async move {
                 tokio::task::spawn_blocking(move || {

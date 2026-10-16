@@ -6,6 +6,7 @@ use iced::alignment::{Horizontal, Vertical};
 use iced::widget::{button, column, container, row, scrollable, space, text};
 use iced::{Element, Length, Padding, Point, Size, Task, border, widget::container::Style};
 use atelyx_core::history::{HistoryAction, HistoryKind, HistoryVersion};
+use atelyx_core::history_diff::{DiffLine, DiffLineKind, TableDiffItem};
 
 use crate::layout_view::{PopupOpen, PopupState, format_ts, mono};
 use crate::ui::controls;
@@ -25,6 +26,8 @@ const PREVIEW_H: f32 = 200.0;
 const CARD_CHROME_H: f32 = 56.0;
 /// 二段确认条估高。
 const CONFIRM_H: f32 = 60.0;
+/// 笔记预览逐行着色的改动行数上限（超出 = 整段重写，着色无信息增益且部件数过多）。
+const NOTE_CHANGED_LINES_CAP: usize = 300;
 
 /// 历史记录弹层消息。
 #[derive(Debug, Clone)]
@@ -41,12 +44,31 @@ pub enum HistoryBrowserMsg {
     Restore(u64),
 }
 
-/// 打开弹层并按 kind+file 加载版本列表（先清交互态：展开/确认不跨文件延续）。
+/// 展开预览的内容（差异只在展开时算一次，渲染每帧读缓存）。
+pub struct HistoryPreview {
+    /// 对应版本 seq（与展开态比对，防切换后错用旧预览）。
+    pub seq: u64,
+    /// 首行统计（表格/画布规模统计或「初始版本快照」；笔记无）。
+    pub stat: Option<String>,
+    pub body: PreviewBody,
+}
+
+/// 预览正文（按文件类型的差异形态）。
+pub enum PreviewBody {
+    /// 首版无可比对象（表格/画布）。
+    Empty,
+    Note(Vec<DiffLine>),
+    Table(Vec<TableDiffItem>),
+    Canvas(Vec<DiffLine>),
+}
+
+/// 打开弹层并按 kind+file 加载版本列表（先清交互态：展开/确认/预览不跨文件延续）。
 pub fn open(app: &mut App, window: iced::window::Id, kind: HistoryKind, file: String) -> Task<Message> {
     app.dismiss_popup();
     app.history.clear();
     app.history_loading = true;
     app.history_expanded = None;
+    app.history_preview = None;
     app.history_confirm = None;
     app.popup = Some((
         window,
@@ -60,12 +82,58 @@ pub fn open(app: &mut App, window: iced::window::Id, kind: HistoryKind, file: St
     app.load_history_for(kind, &file)
 }
 
+/// 构建某版本的展开预览：差异相对该版本的前一版；首版无前版（表格/画布只示「初始版本快照」）。
+/// 供弹层展开与列表刷新共用（刷新后展开项可能已失效 → None，调用方据此收起）。
+pub(crate) fn build_preview(app: &App, seq: u64) -> Option<HistoryPreview> {
+    let (_, open) = app.popup.as_ref()?;
+    let PopupState::HistoryBrowser { kind, .. } = &open.state else {
+        return None;
+    };
+    let kind = *kind;
+    let index = app.history.iter().position(|v| v.seq == seq)?;
+    let v = &app.history[index];
+    let prev = index
+        .checked_sub(1)
+        .and_then(|i| app.history.get(i))
+        .map(|p| p.content.as_str())
+        .unwrap_or("");
+    if index == 0 {
+        // 笔记首版仍可逐行查看（自比对 = 全部未改动行）；表格/画布无前版可比，只报规模
+        let body = match kind {
+            HistoryKind::Note => PreviewBody::Note(atelyx_core::history_diff::note_diff(&v.content, &v.content)),
+            HistoryKind::Table | HistoryKind::Canvas => PreviewBody::Empty,
+        };
+        let stat = (kind != HistoryKind::Note)
+            .then(|| format!("初始版本快照 · {}", scope_line(kind, &v.content)));
+        return Some(HistoryPreview { seq, stat, body });
+    }
+    let body = match kind {
+        HistoryKind::Note => PreviewBody::Note(atelyx_core::history_diff::note_diff(prev, &v.content)),
+        HistoryKind::Table => PreviewBody::Table(atelyx_core::history_diff::table_diff(prev, &v.content)),
+        HistoryKind::Canvas => PreviewBody::Canvas(atelyx_core::history_diff::canvas_diff(prev, &v.content)),
+    };
+    let stat = match kind {
+        HistoryKind::Note => None,
+        HistoryKind::Table => serde_json::from_str::<atelyx_core::vault::TableFile>(&v.content)
+            .ok()
+            .map(|t| format!("「{}」 · {}", t.title, scope_line(kind, &v.content))),
+        HistoryKind::Canvas => Some(scope_line(kind, &v.content)),
+    };
+    Some(HistoryPreview { seq, stat, body })
+}
+
 /// 弹层消息处理。
 pub fn on_msg(app: &mut App, msg: HistoryBrowserMsg) -> Task<Message> {
     match msg {
         HistoryBrowserMsg::Open { window, kind, file } => open(app, window, kind, file),
         HistoryBrowserMsg::Toggle(seq) => {
-            app.history_expanded = if app.history_expanded == Some(seq) { None } else { Some(seq) };
+            if app.history_expanded == Some(seq) {
+                app.history_expanded = None;
+                app.history_preview = None;
+            } else {
+                app.history_expanded = Some(seq);
+                app.history_preview = build_preview(app, seq);
+            }
             Task::none()
         }
         HistoryBrowserMsg::Ask(seq) => {
@@ -135,13 +203,13 @@ fn browser_card<'a>(
         stand_placeholder("暂无历史记录")
     } else {
         let mut list = iced::widget::Column::<Message>::new().padding(6.0).spacing(6);
-        // 新→旧：版本列表按追加序（旧→新）存放，倒序展示；预览 diff 相对前一版
+        // 新→旧：版本列表按追加序（旧→新）存放，倒序展示；预览差异取展开时算好的缓存
         // 空间 viewer 只读：回滚按钮禁用（写请求服务端本会 403，此处界面级降级）
         let viewer = matches!(&app.repo_kind, crate::RepoKind::Space(s) if !s.role.can_write());
-        for (i, v) in app.history.iter().enumerate().rev() {
+        for v in app.history.iter().rev() {
             list = list.push(version_row(v, viewer, app.history_expanded == Some(v.seq), window));
             if app.history_expanded == Some(v.seq) {
-                list = list.push(preview_block(app, kind, i, v));
+                list = list.push(preview_block(app, v));
             }
         }
         scrollable(container(list).width(Length::Fill))
@@ -206,7 +274,7 @@ fn version_row(v: &HistoryVersion, viewer: bool, expanded: bool, window: iced::w
                 .color(pal::ACCENT)
                 .font(iced::Font { weight: iced::font::Weight::Medium, ..iced::Font::default() }),
             text(author_line(v)).size(pal::fs_micro()).color(pal::TEXT_SECONDARY),
-            text(summary_line(v)).size(pal::fs_micro()).color(pal::TEXT_MUTED),
+            text(v.summary.clone().unwrap_or_default()).size(pal::fs_micro()).color(pal::TEXT_MUTED),
             space().width(Length::Fill),
             text(format_ts(v.ts)).size(pal::fs_micro()).color(pal::TEXT_MUTED),
         ]
@@ -296,42 +364,23 @@ fn confirm_bar(seq: u64, ts: i64) -> Element<'static, Message> {
     .into()
 }
 
-/// 展开预览（限高内滚动）：笔记 = 全文只读快照；表格/画布 = 规模统计 + 相对前一版的差异行。
-fn preview_block<'a>(
-    app: &'a App,
-    kind: HistoryKind,
-    index: usize,
-    v: &'a HistoryVersion,
-) -> Element<'a, Message> {
-    // 前一版快照内容（首版无前版 = 空串，diff 解析失败自然返回空差异）
-    let prev = index
-        .checked_sub(1)
-        .and_then(|i| app.history.get(i))
-        .map(|p| p.content.as_str())
-        .unwrap_or("");
+/// 展开预览（限高内滚动）：读展开时算好的差异缓存（表格/画布另有规模统计行）。
+fn preview_block<'a>(app: &'a App, v: &'a HistoryVersion) -> Element<'a, Message> {
     let mut inner = iced::widget::Column::<Message>::new().spacing(4);
-    match kind {
-        HistoryKind::Note => {
-            inner = inner.push(
-                text(v.content.clone())
-                    .font(mono())
-                    .shaping(iced::advanced::text::Shaping::Advanced)
-                    .size(pal::fs_micro())
-                    .color(pal::TEXT_PRIMARY)
-                    .width(Length::Fill),
-            );
+    if let Some(preview) = app.history_preview.as_ref().filter(|p| p.seq == v.seq) {
+        if let Some(stat) = &preview.stat {
+            inner = inner.push(stat_line(stat.clone()));
         }
-        HistoryKind::Table => {
-            if let Ok(t) = serde_json::from_str::<atelyx_core::vault::TableFile>(&v.content) {
-                inner = inner.push(stat_line(format!("「{}」 · {} 字段 · {} 行", t.title, t.fields.len(), t.rows.len())));
+        inner = match &preview.body {
+            PreviewBody::Empty => inner,
+            // 改动行过多（整段重写）时逐行着色既无信息增益又部件爆炸：退回整篇快照
+            PreviewBody::Note(lines) if changed_lines(lines) > NOTE_CHANGED_LINES_CAP => {
+                inner.push(note_plain_block(&[v.content.as_str()]))
             }
-            inner = push_diff(inner, prev, &v.content, atelyx_core::history_diff::table_diff);
-        }
-        HistoryKind::Canvas => {
-            let (nodes, edges, messages) = atelyx_core::history_diff::canvas_summary(&v.content);
-            inner = inner.push(stat_line(format!("{nodes} 节点 · {edges} 连线 · {messages} 消息")));
-            inner = push_diff(inner, prev, &v.content, atelyx_core::history_diff::canvas_diff);
-        }
+            PreviewBody::Note(lines) => render_note_lines(inner, lines),
+            PreviewBody::Table(items) => render_table_items(inner, items),
+            PreviewBody::Canvas(lines) => render_diff_lines(inner, lines),
+        };
     }
     container(
         scrollable(container(inner).width(Length::Fill).padding(8.0))
@@ -348,6 +397,115 @@ fn preview_block<'a>(
     .into()
 }
 
+/// 改动行条数（非 Same 行；决定是否逐行着色）。
+fn changed_lines(lines: &[DiffLine]) -> usize {
+    lines.iter().filter(|l| l.kind != DiffLineKind::Same).count()
+}
+
+/// 笔记行级预览：未改动行按连续段合并成整块文本（控制部件数），改动行逐行着色——
+/// 新增行绿底、被删行红底插在删除位置。
+fn render_note_lines<'a>(
+    mut inner: iced::widget::Column<'a, Message>,
+    lines: &'a [DiffLine],
+) -> iced::widget::Column<'a, Message> {
+    let mut same: Vec<&str> = Vec::new();
+    for l in lines {
+        if l.kind == DiffLineKind::Same {
+            same.push(l.text.as_str());
+            continue;
+        }
+        if !same.is_empty() {
+            inner = inner.push(note_plain_block(&same));
+            same.clear();
+        }
+        inner = inner.push(note_diff_line(l));
+    }
+    if !same.is_empty() {
+        inner = inner.push(note_plain_block(&same));
+    }
+    inner
+}
+
+/// 未改动块的合并渲染（保持多行形态）。
+fn note_plain_block<'a>(lines: &[&'a str]) -> Element<'a, Message> {
+    text(lines.join("\n"))
+        .font(mono())
+        .shaping(iced::advanced::text::Shaping::Advanced)
+        .size(pal::fs_micro())
+        .color(pal::TEXT_PRIMARY)
+        .width(Length::Fill)
+        .into()
+}
+
+/// 改动行（空行补空格保持行高）。
+fn note_diff_line<'a>(l: &'a DiffLine) -> Element<'a, Message> {
+    let (bg, fg) = match l.kind {
+        DiffLineKind::Add => (pal::SUCCESS.scale_alpha(0.14), pal::TEXT_PRIMARY),
+        _ => (pal::DANGER.scale_alpha(0.14), pal::TEXT_PRIMARY),
+    };
+    let content = if l.text.is_empty() { " ".to_string() } else { l.text.clone() };
+    container(
+        text(content)
+            .font(mono())
+            .shaping(iced::advanced::text::Shaping::Advanced)
+            .size(pal::fs_micro())
+            .color(fg)
+            .width(Length::Fill),
+    )
+    .width(Length::Fill)
+    .padding(Padding::ZERO.horizontal(4.0))
+    .style(move |_t| Style {
+        background: Some(bg.into()),
+        ..Style::default()
+    })
+    .into()
+}
+
+/// 表格差异项：「字段 · 第 N 行：旧 → 新」的单元格行与其余单行，按类型着色。
+fn render_table_items<'a>(
+    mut inner: iced::widget::Column<'a, Message>,
+    items: &'a [TableDiffItem],
+) -> iced::widget::Column<'a, Message> {
+    for item in items {
+        match item {
+            TableDiffItem::Line(l) => inner = inner.push(colored_diff_line(l)),
+            TableDiffItem::Cell(c) => {
+                inner = inner.push(
+                    text(format!("{} · 第 {} 行：{} → {}", c.field, c.row, c.from, c.to))
+                        .size(pal::fs_micro())
+                        .color(pal::TEXT_SECONDARY)
+                        .width(Length::Fill),
+                )
+            }
+        }
+    }
+    inner
+}
+
+/// 画布差异行。
+fn render_diff_lines<'a>(
+    mut inner: iced::widget::Column<'a, Message>,
+    lines: &'a [DiffLine],
+) -> iced::widget::Column<'a, Message> {
+    for l in lines {
+        inner = inner.push(colored_diff_line(l));
+    }
+    inner
+}
+
+/// 差异行着色：新增绿、删除红、修改与截断提示次级色。
+fn colored_diff_line(l: &DiffLine) -> Element<'_, Message> {
+    text(l.text.clone()).size(pal::fs_micro()).color(diff_color(l.kind)).into()
+}
+
+fn diff_color(kind: DiffLineKind) -> iced::Color {
+    match kind {
+        DiffLineKind::Add => pal::SUCCESS,
+        DiffLineKind::Remove => pal::DANGER,
+        DiffLineKind::Change | DiffLineKind::Same => pal::TEXT_SECONDARY,
+    }
+}
+
 /// 统计行（表格/画布预览首行）。
 fn stat_line(label: String) -> Element<'static, Message> {
     text(label)
@@ -355,26 +513,6 @@ fn stat_line(label: String) -> Element<'static, Message> {
         .color(pal::TEXT_SECONDARY)
         .font(iced::Font { weight: iced::font::Weight::Medium, ..iced::Font::default() })
         .into()
-}
-
-/// 差异行追加（每行一条；差异为空不追加）。「删除」红、「新增」绿，其余次级色。
-fn push_diff(
-    mut inner: iced::widget::Column<'static, Message>,
-    prev: &str,
-    cur: &str,
-    diff: fn(&str, &str) -> Vec<String>,
-) -> iced::widget::Column<'static, Message> {
-    for line in diff(prev, cur) {
-        let color = if line.starts_with("删除") {
-            pal::DANGER
-        } else if line.starts_with("新增") {
-            pal::SUCCESS
-        } else {
-            pal::TEXT_SECONDARY
-        };
-        inner = inner.push(text(line).size(pal::fs_micro()).color(color));
-    }
-    inner
 }
 
 /// 作者署名：单作者 name·device 同名只显 name（name 空 = device）；协作署名按名去重顿号连接。
@@ -394,13 +532,22 @@ fn author_line(v: &HistoryVersion) -> String {
     names.join("、")
 }
 
-/// 摘要展示：summary 缺省时按快照字节数估字数（历史侧主要为中文正文，按 3 字节/字近似）。
-fn summary_line(v: &HistoryVersion) -> String {
-    v.summary
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("{} 字", v.content.len() / 3))
+/// 版本规模描述（版本无摘要时的回落）：表格按字段/行数、画布按节点/连线/消息数、笔记按字节估字数
+/// （历史侧主要为中文正文，按 3 字节/字近似）。解析失败给中性文案，不谎报空快照。
+pub(crate) fn scope_line(kind: HistoryKind, content: &str) -> String {
+    match kind {
+        HistoryKind::Note => format!("{} 字", content.len() / 3),
+        HistoryKind::Table => serde_json::from_str::<atelyx_core::vault::TableFile>(content)
+            .map(|t| format!("{} 字段 · {} 行", t.fields.len(), t.rows.len()))
+            .unwrap_or_else(|_| "表格快照".to_string()),
+        HistoryKind::Canvas => match serde_json::from_str::<atelyx_core::vault::CanvasFile>(content) {
+            Ok(c) => {
+                let messages = atelyx_core::history_diff::canvas_summary(content).2;
+                format!("{} 节点 · {} 连线 · {messages} 消息", c.nodes.len(), c.edges.len())
+            }
+            Err(_) => "画布快照".to_string(),
+        },
+    }
 }
 
 /// 回滚执行（守卫：列表加载世代 + 打开文件身份；确认后关弹层再走各保存链）。

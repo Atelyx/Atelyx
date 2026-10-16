@@ -834,6 +834,7 @@ fn clear_session_state(app: &mut App) {
     app.history_gen = 0;
     app.history_loading = false;
     app.history_expanded = None;
+    app.history_preview = None;
     app.history_confirm = None;
     // 未落盘的回滚提示随容器切换作废（旧保存链回执不再消费）
     app.history_restore_pending = false;
@@ -1326,7 +1327,7 @@ pub fn space_submit_save(app: &mut App, reason: SaveReason) -> Task<Message> {
     let base = app.space_note_flushed.clone();
     let client = session.client;
     let space_id = session.space_id;
-    let author = crate::history_author();
+    let author = crate::history_author(app);
     Task::perform(
         async move {
             // PUT 前回读：服务端内容与上次落盘基线不一致 = 他人已落盘，三方合流后整文上行
@@ -1348,6 +1349,13 @@ pub fn space_submit_save(app: &mut App, reason: SaveReason) -> Task<Message> {
                 _ => content.clone(),
             };
             client.put_file_text(&space_id, &rel, &merged).await?;
+            // 摘要对比 PUT 前回读的服务端内容（本次被替换的上一版；他人已写入时合并前的真源）；
+            // 其他端记录的内容与序号以服务端为准，此处仅算展示用摘要
+            let summary = atelyx_core::history::version_summary(
+                atelyx_core::history::HistoryKind::Note,
+                &server_text,
+                &merged,
+            );
             // 历史尽力而为：失败不阻塞正文链
             let _ = client
                 .history_record(
@@ -1362,7 +1370,7 @@ pub fn space_submit_save(app: &mut App, reason: SaveReason) -> Task<Message> {
                             name: author.name.clone(),
                             device: author.device.clone(),
                         },
-                        summary: None,
+                        summary: Some(summary),
                         note: None,
                         coalesce_edit_ms: Some(HISTORY_COALESCE_MS),
                         max_versions: None,
@@ -1545,7 +1553,7 @@ pub fn space_submit_table_save(app: &mut App, reason: tv::SaveReason) -> Task<Me
     let frozen = s.data.clone();
     let client = session.client;
     let space_id = session.space_id;
-    let author = crate::history_author();
+    let author = crate::history_author(app);
     let frozen_for_msg = frozen.clone();
     let file_for_msg = file.clone();
     Task::perform(
@@ -1586,20 +1594,27 @@ pub fn space_submit_table_save(app: &mut App, reason: tv::SaveReason) -> Task<Me
                     file.clone()
                 }
             };
+            // 摘要对比保存基线（上版全文）：字段/行/单元格级实体计数
+            let content_json = serde_json::to_string(&frozen).unwrap_or_default();
+            let summary = atelyx_core::history::version_summary(
+                atelyx_core::history::HistoryKind::Table,
+                &serde_json::to_string(&baseline).unwrap_or_default(),
+                &content_json,
+            );
             let _ = client
                 .history_record(
                     &space_id,
                     &space_client::HistoryRecordReq {
                         kind: "table".into(),
                         file: file.clone(),
-                        content: serde_json::to_string(&frozen).unwrap_or_default(),
+                        content: content_json,
                         action: "edit".into(),
                         author: space_client::HistoryAuthorReq {
                             id: author.id.clone(),
                             name: author.name.clone(),
                             device: author.device.clone(),
                         },
-                        summary: None,
+                        summary: Some(summary),
                         note: None,
                         coalesce_edit_ms: Some(HISTORY_COALESCE_MS),
                         max_versions: None,
@@ -1978,7 +1993,7 @@ fn record_space_history(app: &App, kind: &str, rel: String, content: String, act
     let Some(session) = session_of(app) else { return Task::none() };
     let client = session.client;
     let space_id = session.space_id;
-    let author = crate::history_author();
+    let author = crate::history_author(app);
     let kind = kind.to_string();
     let action = action.to_string();
     Task::perform(
@@ -2026,7 +2041,7 @@ pub fn space_restore_canvas(app: &mut App, rel: String, content: String) -> Task
     let Some(session) = require_write(app) else { return Task::none() };
     let client = session.client;
     let space_id = session.space_id;
-    let author = crate::history_author();
+    let author = crate::history_author(app);
     Task::perform(
         async move {
             client

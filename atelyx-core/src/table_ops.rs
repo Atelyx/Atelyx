@@ -103,7 +103,7 @@ pub fn new_table_file(title: &str) -> TableFile {
 // ===== 单元格值工具 =====
 
 /// 值是否为图片形态（新 `{images}` 对象或旧 `string[]`）。
-fn is_image_value(v: &Value) -> bool {
+pub(crate) fn is_image_value(v: &Value) -> bool {
     v.is_array() || v.get("images").is_some_and(|i| i.is_array())
 }
 
