@@ -4,10 +4,11 @@
 //! 几何计算与渲染共用同一套度量（UiMetrics）：把手/落点命中矩形由布局树 +
 //! 窗口内容区尺寸纯推导，与 iced FillPortion 的分配规则保持一致。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use iced::alignment::{Horizontal, Vertical};
+use iced::widget::text::{LineHeight, Wrapping};
 use iced::widget::{button, column, container, mouse_area, row, scrollable, space, stack, text, text_editor, text_input, Stack};
 use iced::{Color, Element, Font, Length, Padding, Point, Rectangle, Size, border, widget::container::Style};
 
@@ -133,12 +134,17 @@ pub fn estimate_text_width(text: &str, font_size: f32) -> f32 {
 
 /// 按估宽截断：超出 `max_w` 时逐字收缩并补省略号（截断口径与渲染定宽同源）。
 pub fn ellipsize(text: &str, max_w: f32, font_size: f32) -> String {
-    if estimate_text_width(text, font_size) <= max_w {
+    truncate_to_width(text, max_w, |s| estimate_text_width(s, font_size))
+}
+
+/// 截断到 max_w：超宽时逐字收缩并补省略号（measure 注入：估宽与实测宽共用同一截断口径）。
+fn truncate_to_width(text: &str, max_w: f32, measure: impl Fn(&str) -> f32) -> String {
+    if measure(text) <= max_w {
         return text.to_string();
     }
     for (i, _) in text.char_indices().rev() {
         let candidate = format!("{}…", &text[..i]);
-        if estimate_text_width(&candidate, font_size) <= max_w {
+        if measure(&candidate) <= max_w {
             return candidate;
         }
     }
@@ -189,6 +195,17 @@ pub enum RenameTarget {
 pub struct RenameState {
     pub target: RenameTarget,
     pub value: String,
+    /// 输入框所在窗口：失焦提交与 Esc 取消按该窗口判定（页面内标题可在撕裂窗口就地改名）。
+    pub window: iced::window::Id,
+    /// 由页面内标题发起：输入框渲染在正文列标题处，文件树对应行不再渲染输入框。
+    pub from_title: bool,
+}
+
+/// 重名去重提醒条：文案 + 出现时刻（3s 过期）+ 渲染位置（标题发起 = 贴标题，否则在文件树）。
+pub struct RenameNotice {
+    pub text: String,
+    pub at: std::time::Instant,
+    pub at_title: bool,
 }
 
 /// 弹层内容形态（几何与交互数据随形态携带）。
@@ -1541,7 +1558,7 @@ fn view_content<'a>(app: &'a App, window: iced::window::Id, kind: &str) -> Eleme
     }
     match kind {
         "files" => files_view(app),
-        "note" => note_view(app),
+        "note" => note_view(app, window),
         "search" => search_view(app),
         "inspector" => inspector_view(app, window),
         "table" => crate::table_view::table_view(app, window),
@@ -2205,10 +2222,10 @@ fn files_view(app: &App) -> Element<'_, Message> {
         if !active {
             continue;
         }
-        // 重名自动加序号的提醒条（3s 自动消失）
-        if let Some((notice, _)) = &app.rename_notice {
+        // 重名自动加序号的提醒条（3s 自动消失）；标题发起的改名提示贴标题，不在此重复
+        if let Some(n) = app.rename_notice.as_ref().filter(|n| !n.at_title) {
             tree_col = tree_col.push(
-                container(text(notice.clone()).size(pal::fs_caption()).color(pal::WARNING))
+                container(text(n.text.clone()).size(pal::fs_caption()).color(pal::WARNING))
                     .width(Length::Fill)
                     .padding(Padding::ZERO.horizontal(12.0).vertical(4.0)),
             );
@@ -2264,9 +2281,10 @@ fn files_view(app: &App) -> Element<'_, Message> {
         if !active {
             continue;
         }
-        if let Some((notice, _)) = &app.rename_notice {
+        // 重名自动加序号的提醒条（3s 自动消失）；标题发起的改名提示贴标题，不在此重复
+        if let Some(n) = app.rename_notice.as_ref().filter(|n| !n.at_title) {
             tree_col = tree_col.push(
-                container(text(notice.clone()).size(pal::fs_caption()).color(pal::WARNING))
+                container(text(n.text.clone()).size(pal::fs_caption()).color(pal::WARNING))
                     .width(Length::Fill)
                     .padding(Padding::ZERO.horizontal(12.0).vertical(4.0)),
             );
@@ -2686,6 +2704,10 @@ fn draft_input_row(app: &App, depth: usize) -> Element<'static, Message> {
 fn file_inline_input(app: &App, r: &TreeRow) -> Option<Element<'static, Message>> {
     let indent = 12.0 + r.depth as f32 * 16.0;
     let rs = app.rename.as_ref()?;
+    // 页面内标题发起的改名：输入框渲染在正文列标题处，此处不渲染（同一输入框 id 同帧唯一）
+    if rs.from_title {
+        return None;
+    }
     let (value, placeholder) = match &rs.target {
         RenameTarget::File(f) if *f == r.rel => (rs.value.clone(), ""),
         RenameTarget::Folder(d) if *d == r.rel => (rs.value.clone(), ""),
@@ -2813,8 +2835,14 @@ fn push_children(
 
 // ===== note 视图 =====
 
+/// 笔记显示标题：相对路径末段去 `.md` 后缀（页面内标题与改名初值同源）。
+pub fn note_title_label(rel: &str) -> String {
+    let name = rel.rsplit('/').next().unwrap_or(rel);
+    name.strip_suffix(".md").unwrap_or(name).to_string()
+}
+
 /// note 视图：工具条（模式分段 + ···菜单）+ 对应档位的内容面。
-fn note_view(app: &App) -> Element<'_, Message> {
+fn note_view(app: &App, window: iced::window::Id) -> Element<'_, Message> {
     if app.ui.last_note_file.is_none() {
         return controls::view_placeholder(
             "file-text",
@@ -2822,7 +2850,6 @@ fn note_view(app: &App) -> Element<'_, Message> {
             "在文件面板或搜索面板单击一个 .md 笔记开始编辑。",
         );
     }
-    let window = app.main_id.unwrap_or(iced::window::Id::unique());
     let cursor = app.cursor_for(window);
 
     let mode_control = container(
@@ -2907,23 +2934,11 @@ fn note_view(app: &App) -> Element<'_, Message> {
                     None => placeholder_panel("正在渲染…"),
                 },
             };
-            // 页面内标题：正文列顶部（两档共用；源码档不渲染）
-            let mut body_col = column![].width(Length::Fill);
-            if app.global.in_page_title {
-                body_col = body_col.push(page_title(app));
-            }
-            body_col = body_col.push(inner);
             // 正文行宽：>0 时钳制只读/预览编辑正文区最大宽度并水平居中（源码档不受限）
-            let inner: Element<'_, Message> = if app.global.content_width > 0 {
-                container(body_col)
+            let scrolled =
+                scrollable(bounded_column(inner, app.global.content_width))
                     .width(Length::Fill)
-                    .max_width(app.global.content_width as f32)
-                    .center_x(Length::Fill)
-                    .into()
-            } else {
-                body_col.into()
-            };
-            let scrolled = scrollable(inner).width(Length::Fill).height(Length::Fill);
+                    .height(Length::Fill);
             // 两档同包一层 mouse_area（同型同位保滚动状态）；双击进编辑只在只读档挂处理器
             // （编辑档不挂：编辑面按压即捕获，双击语义由块内自管）
             if app.note_mode == NoteMode::Edit {
@@ -2946,7 +2961,14 @@ fn note_view(app: &App) -> Element<'_, Message> {
         pal::ACCENT
     };
 
+    // 页面内标题：钉在正文列顶部（只有正文滚动），与属性区 / 正文同宽居中；源码档不渲染
+    let title = (app.global.in_page_title && app.note_mode != NoteMode::Source)
+        .then(|| bounded_column(page_title(app, window), app.global.content_width));
+
     let mut body = column![toolbar, controls::h_divider_subtle()];
+    if let Some(t) = title {
+        body = body.push(t);
+    }
     if let Some(p) = panel {
         body = body.push(p);
     }
@@ -2970,22 +2992,156 @@ fn note_view(app: &App) -> Element<'_, Message> {
     .into()
 }
 
-/// 页面内标题：正文列顶部的文件名标题（不含扩展名）；点击进入重命名（复用文件树行内改名）。
-fn page_title(app: &App) -> Element<'_, Message> {
+/// 正文行宽钳制：宽度 > 0 时给正文列加上限宽并水平居中（0 = 不限，铺满面板）。
+fn bounded_column<'a>(el: Element<'a, Message>, width: u32) -> Element<'a, Message> {
+    if width > 0 {
+        container(el)
+            .width(Length::Fill)
+            .max_width(width as f32)
+            .center_x(Length::Fill)
+            .into()
+    } else {
+        el
+    }
+}
+
+/// 页面内标题度量：左右内边距与正文 16px 内边距对齐；行高 1.4 = 20px 字 / 28px 行。
+const TITLE_PAD_X: f32 = 16.0;
+const TITLE_PAD_TOP: f32 = 12.0;
+const TITLE_PAD_BOTTOM: f32 = 4.0;
+const TITLE_LINE_RATIO: f32 = 1.4;
+/// 标题截断缓存条目上限（键 = 原文 + 可用宽 + 字号；超限整体清空）。
+const TITLE_CLIP_CAP: usize = 32;
+
+thread_local! {
+    /// 标题截断结果缓存：标题只在切文件 / 改宽 / 改字号时变，避免每帧重跑 shaping 与逐字试宽。
+    static TITLE_CLIP: std::cell::RefCell<HashMap<(String, u32, u32), String>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// 页面内标题：正文列顶部的文件名（去扩展名）；点击就地改名，重命名在途 = 原位输入框。
+fn page_title(app: &App, window: iced::window::Id) -> Element<'_, Message> {
     let rel = app.ui.last_note_file.clone().unwrap_or_default();
-    let name = rel.rsplit('/').next().unwrap_or(&rel);
-    let name = name.strip_suffix(".md").unwrap_or(name);
-    mouse_area(
-        container(
-            text(name.to_string())
-                .size(pal::fs_h1())
-                .color(pal::TEXT_PRIMARY)
-                .font(crate::ui::semibold()),
-        )
-        .padding(Padding::ZERO.top(12.0).bottom(4.0)),
-    )
-    .on_press(Message::RenameStartFile(rel))
+    let title = note_title_label(&rel);
+    let (renaming, value) = match &app.rename {
+        Some(r) if r.from_title => (true, r.value.clone()),
+        _ => (false, String::new()),
+    };
+    // 重名去重提示渲染位置随提醒条自身：标题发起的改名贴标题下方
+    let notice = app
+        .rename_notice
+        .as_ref()
+        .filter(|n| n.at_title)
+        .map(|n| n.text.clone());
+    // 可用宽在布局期才知：省略号截断按 responsive 给出的宽计算
+    iced::widget::responsive(move |size| {
+        let mut col = column![].padding(
+            Padding::ZERO
+                .left(TITLE_PAD_X)
+                .right(TITLE_PAD_X)
+                .top(TITLE_PAD_TOP)
+                .bottom(TITLE_PAD_BOTTOM),
+        );
+        if renaming {
+            col = col.push(title_input(&value));
+        } else {
+            let avail = (size.width - TITLE_PAD_X * 2.0).max(0.0);
+            col = col.push(title_label(window, clipped_title(&title, avail)));
+        }
+        if let Some(notice) = &notice {
+            col = col.push(
+                text(notice.clone())
+                    .size(pal::fs_caption())
+                    .color(pal::WARNING),
+            );
+        }
+        col.into()
+    })
+    .width(Length::Fill)
+    .height(Length::Shrink)
     .into()
+}
+
+/// 显示态标题：整行可点；按下在释放时上报，避开同批全局按压（失焦提交判定）把刚起的改名立即提交。
+/// 光标由按钮给出（Pointer）：MouseArea 的显式 interaction 仅在其子部件无 interaction 时生效。
+fn title_label(window: iced::window::Id, label: String) -> Element<'static, Message> {
+    let label = text(label)
+        .size(pal::fs_h1())
+        .font(crate::ui::semibold())
+        .line_height(LineHeight::Relative(TITLE_LINE_RATIO))
+        .wrapping(Wrapping::None);
+    mouse_area(
+        button(label)
+            .padding(0)
+            .width(Length::Fill)
+            .style(|_t, status| button::Style {
+                background: None,
+                text_color: if matches!(status, button::Status::Hovered | button::Status::Pressed) {
+                    pal::TEXT_SECONDARY
+                } else {
+                    pal::TEXT_PRIMARY
+                },
+                ..Default::default()
+            })
+            .on_press(Message::NoteTitleRenameStart(window)),
+    )
+    .into()
+}
+
+/// 编辑态标题：与显示态同字阶 / 字重 / 行高与内边距（进入编辑文字不跳位），下沿 1px 色带表改名中。
+fn title_input(value: &str) -> Element<'static, Message> {
+    let input = text_input("", value)
+        .id(iced::widget::Id::new(controls::INLINE_RENAME_INPUT))
+        .size(pal::fs_h1())
+        .font(crate::ui::semibold())
+        .line_height(LineHeight::Relative(TITLE_LINE_RATIO))
+        .padding(Padding::ZERO)
+        .width(Length::Fill)
+        .on_input(Message::LayoutRenameInput)
+        .on_submit(Message::LayoutRenameCommit)
+        .style(|_t, _s| text_input::Style {
+            background: Color::TRANSPARENT.into(),
+            border: border::Border::default(),
+            icon: pal::TEXT_MUTED,
+            placeholder: pal::INPUT_PLACEHOLDER,
+            value: pal::TEXT_PRIMARY,
+            selection: pal::SELECTION,
+        });
+    column![
+        // 输入框内按压 = 不触发失焦提交（与文件树行内输入同一标志）
+        controls::PressReporter::new(input.into(), Message::RenamePressInside),
+        container(space())
+            .width(Length::Fill)
+            .height(Length::Fixed(1.0))
+            .style(|_t| Style {
+                background: Some(pal::BORDER_STRONG.into()),
+                ..Style::default()
+            }),
+    ]
+    .into()
+}
+
+/// 单行标题按可用宽截断补省略号（结果缓存：同文同宽同字号只算一次 shaping）。
+fn clipped_title(title: &str, avail_w: f32) -> String {
+    let avail_w = avail_w.max(0.0);
+    let key = (title.to_string(), (avail_w * 100.0) as u32, pal::fs_h1().to_bits());
+    if let Some(hit) = TITLE_CLIP.with(|c| c.borrow().get(&key).cloned()) {
+        return hit;
+    }
+    let clipped = truncate_to_width(title, avail_w, title_text_width);
+    TITLE_CLIP.with(|c| {
+        let mut cache = c.borrow_mut();
+        if cache.len() >= TITLE_CLIP_CAP {
+            cache.clear();
+        }
+        cache.insert(key, clipped.clone());
+    });
+    clipped
+}
+
+/// 单行标题实测宽（与标题渲染同字号同字重 shaping）。
+fn title_text_width(s: &str) -> f32 {
+    crate::markdown_edit::measured_text_width(s, pal::fs_h1(), TITLE_LINE_RATIO, crate::ui::semibold())
 }
 
 /// 模式分段按钮（Button sm 档：高 24 / px-8 / 11px / medium；激活 = 强调淡底，悬停文字提亮）。
@@ -5929,5 +6085,48 @@ pub fn drop_zone_at(zone: &PanelZone, global: iced::Point) -> DropZone {
         DropZone::Bottom
     } else {
         DropZone::Center
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{note_title_label, truncate_to_width};
+
+    /// 固定度量：每字符 1 单位（截断只按字符数收缩，与字体 shaping 解耦）。
+    fn per_char(s: &str) -> f32 {
+        s.chars().count() as f32
+    }
+
+    #[test]
+    fn title_label_takes_file_stem() {
+        assert_eq!(note_title_label("a/b/笔记.md"), "笔记");
+        assert_eq!(note_title_label("笔记.md"), "笔记");
+        assert_eq!(note_title_label("a/b/v1.2.md"), "v1.2");
+        // 非 .md 与无扩展名按整名（标题即文件名，不猜扩展名）
+        assert_eq!(note_title_label("a/表.atb"), "表.atb");
+        assert_eq!(note_title_label("readme"), "readme");
+    }
+
+    #[test]
+    fn keeps_title_that_fits() {
+        assert_eq!(truncate_to_width("abc", 3.0, per_char), "abc");
+        assert_eq!(truncate_to_width("", 0.0, per_char), "");
+    }
+
+    #[test]
+    fn clips_and_appends_ellipsis() {
+        // 宽 4：保留 3 字 + 省略号（省略号自身占 1 单位）
+        assert_eq!(truncate_to_width("abcdef", 4.0, per_char), "abc…");
+    }
+
+    #[test]
+    fn clips_to_ellipsis_only_when_no_room() {
+        assert_eq!(truncate_to_width("abcdef", 1.0, per_char), "…");
+        assert_eq!(truncate_to_width("abcdef", 0.0, per_char), "…");
+    }
+
+    #[test]
+    fn clips_at_char_boundary() {
+        assert_eq!(truncate_to_width("中文测试", 3.0, per_char), "中文…");
     }
 }

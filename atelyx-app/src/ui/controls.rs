@@ -342,7 +342,8 @@ pub fn inline_input(
             value: pal::TEXT_PRIMARY,
             selection: pal::SELECTION,
         });
-    mouse_area(input).on_press(press_inside).into()
+    // 按下上报走 PressReporter：输入框自行捕获左键按下（摆光标 / 起拖选），mouse_area 会漏报
+    PressReporter::new(input.into(), press_inside).into()
 }
 
 // ===== 开关 / 下拉触发 / 数字输入（设置表单基元） =====

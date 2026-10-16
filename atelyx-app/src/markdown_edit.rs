@@ -384,6 +384,23 @@ fn unix_millis() -> u128 {
 
 pub(crate) type ParagraphT = <iced::Renderer as advanced_text::Renderer>::Paragraph;
 
+/// 单行文本实测宽（不换行）：与 iced 文本部件同字体字号 shaping，供自绘与截断判宽用。
+pub(crate) fn measured_text_width(text: &str, size: f32, line_height: f32, font: Font) -> f32 {
+    ParagraphT::with_text(advanced_text::Text {
+        content: text,
+        bounds: Size::new(f32::INFINITY, f32::INFINITY),
+        size: size.into(),
+        line_height: advanced_text::LineHeight::Relative(line_height),
+        font,
+        align_x: advanced_text::Alignment::Left,
+        align_y: alignment::Vertical::Top,
+        shaping: advanced_text::Shaping::Auto,
+        wrapping: advanced_text::Wrapping::None,
+    })
+    .min_bounds()
+    .width
+}
+
 /// 源码态单字符样式。
 #[derive(Clone, Copy, Default)]
 struct CharStyle {
@@ -567,19 +584,7 @@ pub(crate) fn char_index(content: &str, byte: usize) -> usize {
 
 /// 组合串（未上屏文本）单行字宽：与画组合串同字体字号实测，光标竖条据此落在串尾。
 pub(crate) fn preedit_width(pre: &str, size: f32, line_height: f32) -> f32 {
-    ParagraphT::with_text(advanced_text::Text {
-        content: pre,
-        bounds: Size::new(f32::INFINITY, f32::INFINITY),
-        size: size.into(),
-        line_height: advanced_text::LineHeight::Relative(line_height),
-        font: Font::DEFAULT,
-        align_x: advanced_text::Alignment::Left,
-        align_y: alignment::Vertical::Top,
-        shaping: advanced_text::Shaping::Auto,
-        wrapping: advanced_text::Wrapping::None,
-    })
-    .min_bounds()
-    .width
+    measured_text_width(pre, size, line_height, Font::DEFAULT)
 }
 
 /// 组合串尾的光标竖条 x：让到串尾，串尾越出可用右缘 `right` 即贴边（不早于串首 `x`，

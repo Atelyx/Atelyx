@@ -589,6 +589,8 @@ enum Message {
     /// 文件树：就地重命名起点。
     RenameStartFile(String),
     RenameStartFolder(String),
+    /// 页面内标题：就地重命名起点（窗口 = 标题所在窗口；注记 = 当前打开笔记，落点由处理时取值）。
+    NoteTitleRenameStart(window::Id),
     /// 删除入口：文件直接进确认 pane；文件夹先计数（空目录免确认）。
     DeleteAsk(String),
     FolderDeleteAsk(String),
@@ -1006,8 +1008,10 @@ pub struct App {
     pub tooltip: Option<(window::Id, String, Instant, bool, Option<Instant>, Point)>,
     /// 触发钮半边长（提示锚定其下缘；菜单项 = 半行高）。
     pub tooltip_half: Option<f32>,
-    /// 重名自动加序号的提醒条（文案 + 出现时刻；3s 自动消失）。
-    pub rename_notice: Option<(String, Instant)>,
+    /// 重名自动加序号的提醒条（文案 + 出现时刻 + 渲染位置；3s 自动消失）。
+    pub rename_notice: Option<layout_view::RenameNotice>,
+    /// 提醒条的待定渲染位置：发起处为页面内标题时为真，落盘确认去重时随提醒条一起定型。
+    pub rename_origin_at_title: bool,
     /// 设置左栏折叠态。
     pub settings_collapsed: bool,
     /// 删除确认流（目标相对路径、是否目录、文件夹条目数）。
@@ -1404,6 +1408,7 @@ impl App {
                 tooltip: None,
                 tooltip_half: None,
                 rename_notice: None,
+                rename_origin_at_title: false,
                 settings_collapsed: false,
                 delete_confirm: None,
                 expand_all: false,
@@ -2443,7 +2448,7 @@ impl App {
                     .and_then(|s| s.layouts.iter().find(|l| l.id == id))
                     .map(|l| l.name.clone())
                     .unwrap_or_default();
-                self.rename = Some(RenameState { target: RenameTarget::Layout(id), value: name });
+                self.rename = Some(self.rename_state(RenameTarget::Layout(id), name));
                 rename_focus_task()
             }
             Message::LayoutRenameInput(value) => {
@@ -2454,6 +2459,8 @@ impl App {
             }
             Message::LayoutRenameCommit => {
                 let Some(r) = self.rename.take() else { return Task::none() };
+                // 去重提醒条的渲染位置跟随改名发起处：标题发起 = 标题下方，否则文件树
+                self.rename_origin_at_title = r.from_title;
                 match r.target {
                     RenameTarget::Layout(id) => self.apply(LayoutOp::RenameLayout { id, name: r.value }),
                     RenameTarget::Scene(id) => self.apply(LayoutOp::RenameScene { id, name: r.value }),
@@ -2491,7 +2498,7 @@ impl App {
                     .find(|s| s.id == id)
                     .map(|s| s.name.clone())
                     .unwrap_or_default();
-                self.rename = Some(RenameState { target: RenameTarget::Scene(id), value: name });
+                self.rename = Some(self.rename_state(RenameTarget::Scene(id), name));
                 rename_focus_task()
             }
             Message::SceneRenameInput(value) => {
@@ -2557,7 +2564,7 @@ impl App {
                 if self
                     .rename_notice
                     .as_ref()
-                    .is_some_and(|(_, at)| at.elapsed().as_millis() >= 3000)
+                    .is_some_and(|n| n.at.elapsed().as_millis() >= 3000)
                 {
                     self.rename_notice = None;
                 }
@@ -2647,11 +2654,13 @@ impl App {
                     return Task::none();
                 }
                 let cursor = self.cursor_for(id);
-                // 行内重命名失焦提交：按压不在输入行内 = 提交（Enter 同路径）
-                if self.rename.is_some() {
+                // 行内重命名失焦提交：按压不在输入行内 = 提交（Enter 同路径）；
+                // 判定窗口 = 输入框所在窗口（标题就地改名可在撕裂窗口）
+                let rename_window = self.rename.as_ref().map(|r| r.window);
+                if rename_window.is_some() {
                     if self.rename_press_inside {
                         self.rename_press_inside = false;
-                    } else if self.main_id == Some(id) {
+                    } else if rename_window == Some(id) {
                         return Task::perform(async {}, |_| Message::LayoutRenameCommit);
                     }
                 }
@@ -2923,8 +2932,9 @@ impl App {
                     return self.on_props(PropsMsg::CancelSlot);
                 } else if self.calendar.edit.take().is_some() {
                     // 日历日程标题编辑 Esc = 取消（草稿丢弃）
-                } else if self.main_id == Some(window) && self.rename.take().is_some() {
+                } else if self.rename.as_ref().is_some_and(|r| r.window == window) {
                     // 行内重命名 Esc = 取消
+                    self.rename = None;
                 } else if layout_view::window_shows_table(self, window)
                     && self.table.as_ref().is_some_and(|t| t.view.lightbox.is_some())
                 {
@@ -3253,24 +3263,39 @@ impl App {
             }
             Message::DraftStart(dir, kind) => {
                 self.dismiss_popup();
-                self.rename = Some(RenameState {
-                    target: RenameTarget::Draft { dir, kind },
-                    value: String::new(),
-                });
+                self.rename = Some(self.rename_state(
+                    RenameTarget::Draft { dir, kind },
+                    String::new(),
+                ));
                 rename_focus_task()
             }
             Message::RenameStartFile(rel) => {
                 self.dismiss_popup();
                 // 笔记重命名初值去 .md 后缀（标题即文件名约定）
-                let name = rel.rsplit('/').next().unwrap_or(&rel).to_string();
-                let name = name.strip_suffix(".md").map(|s| s.to_string()).unwrap_or(name);
-                self.rename = Some(RenameState { target: RenameTarget::File(rel), value: name });
+                self.rename = Some(self.rename_state(
+                    RenameTarget::File(rel.clone()),
+                    layout_view::note_title_label(&rel),
+                ));
                 rename_focus_task()
+            }
+            Message::NoteTitleRenameStart(window) => {
+                // 目标按处理时刻的打开笔记取（按压可能已先提交一次树内改名并改写了路径）
+                let Some(rel) = self.ui.last_note_file.clone() else { return Task::none() };
+                self.rename = Some(RenameState {
+                    target: RenameTarget::File(rel.clone()),
+                    value: layout_view::note_title_label(&rel),
+                    window,
+                    from_title: true,
+                });
+                // 进入即全选：输入即整体替换
+                let id = iced::widget::Id::new(ui::controls::INLINE_RENAME_INPUT);
+                iced::widget::operation::focus(id.clone())
+                    .chain(iced::widget::operation::select_all(id))
             }
             Message::RenameStartFolder(dir) => {
                 self.dismiss_popup();
                 let name = dir.rsplit('/').next().unwrap_or(&dir).to_string();
-                self.rename = Some(RenameState { target: RenameTarget::Folder(dir), value: name });
+                self.rename = Some(self.rename_state(RenameTarget::Folder(dir), name));
                 rename_focus_task()
             }
             Message::DeleteAsk(rel) => {
@@ -3376,8 +3401,11 @@ impl App {
                     if *to != final_rel {
                         let old_name = to.rsplit('/').next().unwrap_or(to);
                         let new_name = final_rel.rsplit('/').next().unwrap_or(&final_rel);
-                        self.rename_notice =
-                            Some((format!("「{old_name}」已存在，已重命名为「{new_name}」"), Instant::now()));
+                        self.rename_notice = Some(layout_view::RenameNotice {
+                            text: format!("「{old_name}」已存在，已重命名为「{new_name}」"),
+                            at: Instant::now(),
+                            at_title: self.rename_origin_at_title,
+                        });
                         *to = final_rel;
                     }
                 }
@@ -5140,6 +5168,16 @@ impl App {
             },
             move |result| Message::FileCount(gen, result),
         )
+    }
+
+    /// 文件树 / 布局 / 场景的改名状态：输入框渲染在主窗口。
+    fn rename_state(&self, target: RenameTarget, value: String) -> RenameState {
+        RenameState {
+            target,
+            value,
+            window: self.main_id.unwrap_or_else(iced::window::Id::unique),
+            from_title: false,
+        }
     }
 
     /// 文件树重命名/新建草稿提交：按目标种类分派到 core 的写入口；
