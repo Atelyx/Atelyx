@@ -655,6 +655,10 @@ pub fn hit_at(g: &Geo, pos: Point) -> Hit {
     }
     let cy = g.content_y(pos.y);
     if cy >= g.cache.content_h {
+        // 行号列区段属覆盖层，新行条带从其右缘起（命中与绘制同口径）
+        if pos.x < g.gutter_w() {
+            return Hit::None;
+        }
         return Hit::NewRow;
     }
     if pos.x < g.gutter_w() {
@@ -854,8 +858,11 @@ fn style_size(st: &CellStyle, base: f32, zoom: f32) -> f32 {
 /// 图片单元格子元素布局（绘制与命中共用；坐标相对画布）。
 pub struct ImageLayout {
     pub main: Option<Rectangle>,
-    pub thumbs: Vec<(String, Rectangle)>,
-    pub tiles: Vec<(String, Rectangle)>,
+    /// 队列缩略图（真实图片下标、附件相对路径、绘制区）；窗口随当前页滚动，
+    /// 故下标不等于切片位置，命中/重排必须用携带的真实下标。
+    pub thumbs: Vec<(usize, String, Rectangle)>,
+    /// 九宫格图块（真实图片下标、附件相对路径、绘制区）。
+    pub tiles: Vec<(usize, String, Rectangle)>,
     pub mode_btn: Option<Rectangle>,
     pub add_btn: Option<Rectangle>,
     pub remove_btn: Option<Rectangle>,
@@ -863,7 +870,8 @@ pub struct ImageLayout {
     pub empty_add: Option<Rectangle>,
 }
 
-pub fn image_layout_of(cell: Rectangle, v: &serde_json::Value, zoom: f32) -> ImageLayout {
+/// `current` = 轮播当前页（队列条据此滚动，保证当前缩略图可见）。
+pub fn image_layout_of(cell: Rectangle, v: &serde_json::Value, zoom: f32, current: usize) -> ImageLayout {
     let images = table_ops::image_entries(v);
     let pad_x = CELL_PAD_X * zoom;
     let pad_y = CELL_PAD_Y * zoom;
@@ -883,6 +891,8 @@ pub fn image_layout_of(cell: Rectangle, v: &serde_json::Value, zoom: f32) -> Ima
         };
     }
     let btn = 22.0 * zoom;
+    let multi = images.len() > 1;
+    let current = current.min(images.len() - 1);
     if table_ops::image_display(v) == Some("grid") {
         let cols = grid_cols(cell.width, zoom, images.len());
         let tile_w = grid_tile_w(cell.width, zoom, cols);
@@ -892,6 +902,7 @@ pub fn image_layout_of(cell: Rectangle, v: &serde_json::Value, zoom: f32) -> Ima
             let r = i / cols;
             let c = i % cols;
             tiles.push((
+                i,
                 img.to_string(),
                 Rectangle::new(
                     Point::new(
@@ -906,7 +917,7 @@ pub fn image_layout_of(cell: Rectangle, v: &serde_json::Value, zoom: f32) -> Ima
             main: None,
             thumbs: vec![],
             tiles,
-            mode_btn: Some(Rectangle::new(inner.position(), Size::new(btn, btn))),
+            mode_btn: multi.then(|| Rectangle::new(inner.position(), Size::new(btn, btn))),
             add_btn: Some(Rectangle::new(
                 Point::new(inner.x + btn + IMAGE_GAP * zoom, inner.y),
                 Size::new(btn, btn),
@@ -915,20 +926,24 @@ pub fn image_layout_of(cell: Rectangle, v: &serde_json::Value, zoom: f32) -> Ima
             empty_add: None,
         }
     } else {
-        let queue_h = if images.len() > 1 { IMAGE_QUEUE_H * zoom } else { 0.0 };
+        let queue_h = if multi { IMAGE_QUEUE_H * zoom } else { 0.0 };
         let main = Rectangle::new(inner.position(), Size::new(inner.width, (inner.height - queue_h).max(0.0)));
         // 队列条仅多图时存在（单图 = 主图区铺满，无缩略图行）；
-        // 数量超出格宽时截断（canvas 无逐格裁剪，画出去会盖到邻格，命中也落邻格）
+        // 数量超出格宽时截断（canvas 无逐格裁剪，画出去会盖到邻格，命中也落邻格）；
+        // 窗口恒以当前页收尾（无状态派生：图片增删后无需窗口钳制，当前页总可见）
         let mut thumbs = Vec::new();
-        if images.len() > 1 {
+        if multi {
             let thumb_step = (IMAGE_THUMB + IMAGE_GAP) * zoom;
-            let max_thumbs = (((inner.width - 4.0 * zoom) / thumb_step).floor() as usize).max(1);
-            for (i, img) in images.iter().enumerate().take(max_thumbs) {
+            let capacity = (((inner.width - 4.0 * zoom) / thumb_step).floor() as usize).max(1);
+            let start = current.saturating_sub(capacity - 1);
+            for (i, img) in images.iter().enumerate().skip(start).take(capacity) {
+                let j = i - start;
                 thumbs.push((
+                    i,
                     img.to_string(),
                     Rectangle::new(
                         Point::new(
-                            inner.x + 2.0 * zoom + i as f32 * (IMAGE_THUMB + IMAGE_GAP) * zoom,
+                            inner.x + 2.0 * zoom + j as f32 * (IMAGE_THUMB + IMAGE_GAP) * zoom,
                             inner.y + main.height + 4.0 * zoom,
                         ),
                         Size::new(IMAGE_THUMB * zoom, IMAGE_THUMB * zoom),
@@ -940,14 +955,15 @@ pub fn image_layout_of(cell: Rectangle, v: &serde_json::Value, zoom: f32) -> Ima
             main: Some(main),
             thumbs,
             tiles: vec![],
-            mode_btn: (images.len() > 1).then(|| Rectangle::new(inner.position(), Size::new(btn, btn))),
+            mode_btn: multi.then(|| Rectangle::new(inner.position(), Size::new(btn, btn))),
             add_btn: Some(Rectangle::new(
                 Point::new(inner.x + btn + IMAGE_GAP * zoom, inner.y),
                 Size::new(btn, btn),
             )),
-            remove_btn: (images.len() > 1).then(|| {
-                Rectangle::new(Point::new(inner.x + inner.width - btn, inner.y), Size::new(btn, btn))
-            }),
+            remove_btn: Some(Rectangle::new(
+                Point::new(inner.x + inner.width - btn, inner.y),
+                Size::new(btn, btn),
+            )),
             empty_add: None,
         }
     }
@@ -1079,10 +1095,10 @@ impl canvas::Program<Message> for TableChrome<'_> {
         renderer: &iced::Renderer,
         _theme: &iced::Theme,
         bounds: Rectangle,
-        _cursor: iced::mouse::Cursor,
+        cursor: iced::mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
         let mut frame = canvas::Frame::new(renderer, bounds.size());
-        draw_chrome(self.session, &mut frame, bounds.size());
+        draw_chrome(self.session, &mut frame, bounds.size(), cursor.position_in(bounds));
         vec![frame.into_geometry()]
     }
 
@@ -1155,25 +1171,8 @@ fn draw_table(session: &TableSession, frame: &mut canvas::Frame, size: Size, hov
         if y + rh < g.header_h() || y > g.rows_bottom() {
             continue;
         }
-        // 行号格
-        let selected_row = matches!(&view.selection, Some(TableSelection::Row(id)) if data.rows.get(r).is_some_and(|x| &x.id == id));
-        frame.fill_rectangle(Point::new(0.0, y), Size::new(g.gutter_w(), rh), if selected_row { pal::BG_TERTIARY } else { pal::BG_SECONDARY });
-        if selected_row {
-            frame.fill_rectangle(Point::new(0.0, y), Size::new(2.0, rh), pal::ACCENT);
-        }
-        let num = (r + 1).to_string();
-        // 行号靠左、拖拽钮靠右，恒显示不重叠
-        fill_text(
-            frame,
-            &num,
-            Point::new(6.0 * g.z, y + (rh - num_font() * g.z * LINE_FACTOR) / 2.0),
-            num_font() * g.z,
-            mono_font(),
-            pal::TEXT_MUTED,
-        );
-        draw_icon(frame, "grip-vertical", Point::new(g.gutter_w() - 15.0 * g.z, y + rh / 2.0 - 5.0 * g.z), 10.0 * g.z, if selected_row { pal::TEXT_SECONDARY } else { pal::BORDER_STRONG });
-        // 行边线
-        frame.fill_rectangle(Point::new(0.0, y + rh - 1.0), Size::new(w, 1.0), pal::BORDER_SUBTLE);
+        // 行边线（行号列区段由 chrome 覆盖层绘制）
+        frame.fill_rectangle(Point::new(g.gutter_w(), y + rh - 1.0), Size::new(w - g.gutter_w(), 1.0), pal::BORDER_SUBTLE);
 
         // 各列
         for (c, field) in data.fields.iter().enumerate() {
@@ -1206,10 +1205,10 @@ fn draw_table(session: &TableSession, frame: &mut canvas::Frame, size: Size, hov
         }
     }
 
-    // 「+ 新行」
+    // 「+ 新行」（行号列区段属于 chrome 覆盖层，条带从行号列右缘起）
     let new_row_y = g.cache.content_h - view.scroll_y + g.header_h();
     if new_row_y < g.rows_bottom() {
-        let nr = rect(0.0, new_row_y, g.total_w() - view.scroll_x, NEW_ROW_H * g.z);
+        let nr = rect(g.gutter_w(), new_row_y, (g.total_w() - view.scroll_x - g.gutter_w()).max(0.0), NEW_ROW_H * g.z);
         let hovered = hover.is_some_and(|p| nr.contains(p));
         if hovered {
             frame.fill_rectangle(nr.position(), nr.size(), pal::HOVER);
@@ -1248,7 +1247,7 @@ fn draw_table(session: &TableSession, frame: &mut canvas::Frame, size: Size, hov
     if let Some(reo) = &view.reorder {
         if reo.active {
             let y = insert_line_y(&g, reo.insert_at);
-            frame.fill_rectangle(Point::new(0.0, y - 1.0), Size::new(w, 2.0), pal::ACCENT);
+            frame.fill_rectangle(Point::new(g.gutter_w(), y - 1.0), Size::new(w - g.gutter_w(), 2.0), pal::ACCENT);
         }
     }
 }
@@ -1335,10 +1334,13 @@ fn ellipsize_text(text: &str, max_w: f32, size: f32) -> String {
     format!("{out}…")
 }
 
-/// chrome 覆盖层内容：表头 / 状态栏带体 + 滚动条（覆盖在同画布行内容之上，滚动不透底）。
-fn draw_chrome(session: &TableSession, frame: &mut canvas::Frame, size: Size) {
+/// chrome 覆盖层内容：行号列 / 表头 / 状态栏带体 + 滚动条 + 图片单元格 hover 圆钮
+/// （覆盖在同画布行内容之上，滚动不透底）。
+fn draw_chrome(session: &TableSession, frame: &mut canvas::Frame, size: Size, hover: Option<Point>) {
     let g = geo(session, size);
     let view = &session.view;
+    // 行号列最先画：部分滚出可视区的行会画过表头/状态栏区带，由其后的不透明底色压回
+    draw_gutter(session, &g, frame);
     frame.fill_rectangle(Point::ORIGIN, Size::new(g.width, g.header_h()), pal::BG_SECONDARY);
     draw_header(session, &g, frame);
     frame.fill_rectangle(Point::new(0.0, g.rows_bottom()), Size::new(g.width, g.status_h()), pal::BG_SECONDARY);
@@ -1355,6 +1357,88 @@ fn draw_chrome(session: &TableSession, frame: &mut canvas::Frame, size: Size) {
         let track = rect(g.width - VSCROLLBAR_W, g.header_h(), VSCROLLBAR_W, g.rows_bottom() - HSCROLLBAR_H - g.header_h());
         frame.fill_rectangle(track.position(), track.size(), pal::BG_SUNKEN);
         frame.fill_rectangle(bar.position(), bar.size(), if view.vscroll_drag.is_some() { pal::ACCENT } else { pal::BORDER_STRONG });
+    }
+    draw_image_buttons(session, &g, frame, hover);
+}
+
+/// 图片单元格 hover 圆钮（画在覆盖层：主体画布中图片恒渲染在同画布所有几何之上，
+/// 圆钮画在主体画布会被图片压住）。
+fn draw_image_buttons(session: &TableSession, g: &Geo, frame: &mut canvas::Frame, hover: Option<Point>) {
+    let Some(pos) = hover else { return };
+    let view = &session.view;
+    let data = &session.data;
+    let (first, last) = g.visible_rows(data.rows.len());
+    for r in first..=last {
+        let y = g.cache.row_y[r] - view.scroll_y + g.header_h();
+        let rh = g.cache.row_h[r];
+        if y + rh < g.header_h() || y > g.rows_bottom() || !(y..y + rh).contains(&pos.y) {
+            continue;
+        }
+        for (c, field) in data.fields.iter().enumerate() {
+            if field.field_type != "image" {
+                continue;
+            }
+            let x = g.cache.col_x[c] - view.scroll_x + g.gutter_w();
+            if x > g.width || x + g.cache.col_w[c] < g.gutter_w() || !(x..x + g.cache.col_w[c]).contains(&pos.x) {
+                continue;
+            }
+            let empty = serde_json::json!({ "images": [] });
+            let v = data.rows[r].values.get(&field.id).unwrap_or(&empty);
+            if table_ops::image_entries(v).is_empty() {
+                continue;
+            }
+            let row = &data.rows[r];
+            let idx = view
+                .carousel
+                .get(&(row.id.clone(), field.id.clone()))
+                .copied()
+                .unwrap_or(0);
+            let layout = image_layout_of(rect(x, y, g.cache.col_w[c], rh), v, g.z, idx);
+            if let Some(btn) = layout.mode_btn {
+                circle_btn(frame, btn, "columns-2");
+            }
+            if let Some(btn) = layout.add_btn {
+                circle_btn(frame, btn, "plus");
+            }
+            if let Some(btn) = layout.remove_btn {
+                circle_btn(frame, btn, "x");
+            }
+            return;
+        }
+    }
+}
+
+/// 行号列（画在覆盖层：主体画布中文字与图片恒渲染在同画布所有几何之上，
+/// 单元格内容压不住主体画布里的行号底色，横向滚动后须由上层覆盖件盖住）。
+fn draw_gutter(session: &TableSession, g: &Geo, frame: &mut canvas::Frame) {
+    let view = &session.view;
+    let data = &session.data;
+    let gw = g.gutter_w();
+    frame.fill_rectangle(Point::ORIGIN, Size::new(gw, (g.rows_bottom() - g.header_h()).max(0.0)), pal::BG_SECONDARY);
+    let (first, last) = g.visible_rows(data.rows.len());
+    for r in first..=last {
+        let y = g.cache.row_y[r] - view.scroll_y + g.header_h();
+        let rh = g.cache.row_h[r];
+        if y + rh < g.header_h() || y > g.rows_bottom() {
+            continue;
+        }
+        let selected_row = matches!(&view.selection, Some(TableSelection::Row(id)) if data.rows.get(r).is_some_and(|x| &x.id == id));
+        if selected_row {
+            frame.fill_rectangle(Point::new(0.0, y), Size::new(gw, rh), pal::BG_TERTIARY);
+            frame.fill_rectangle(Point::new(0.0, y), Size::new(2.0, rh), pal::ACCENT);
+        }
+        let num = (r + 1).to_string();
+        // 行号靠左、拖拽钮靠右，恒显示不重叠
+        fill_text(
+            frame,
+            &num,
+            Point::new(6.0 * g.z, y + (rh - num_font() * g.z * LINE_FACTOR) / 2.0),
+            num_font() * g.z,
+            mono_font(),
+            pal::TEXT_MUTED,
+        );
+        draw_icon(frame, "grip-vertical", Point::new(gw - 15.0 * g.z, y + rh / 2.0 - 5.0 * g.z), 10.0 * g.z, if selected_row { pal::TEXT_SECONDARY } else { pal::BORDER_STRONG });
+        frame.fill_rectangle(Point::new(0.0, y + rh - 1.0), Size::new(gw, 1.0), pal::BORDER_SUBTLE);
     }
 }
 
@@ -1535,8 +1619,14 @@ fn draw_image_cell(
     let view = &session.view;
     let field = &session.data.fields[c];
     let row = &session.data.rows[r];
-    let layout = image_layout_of(cell, v, g.z);
     let images = table_ops::image_entries(v);
+    let idx = view
+        .carousel
+        .get(&(row.id.clone(), field.id.clone()))
+        .copied()
+        .unwrap_or(0)
+        .min(images.len().saturating_sub(1));
+    let layout = image_layout_of(cell, v, g.z, idx);
     let hovered = hover.is_some_and(|p| cell.contains(p));
 
     if let Some(empty_add) = layout.empty_add {
@@ -1549,7 +1639,6 @@ fn draw_image_cell(
 
     if let Some(main) = &layout.main {
         // 轮播：当前页；滑动跟手时补画相邻页（canvas 无逐格裁剪，静止不画邻页防溢出单元格）
-        let idx = view.carousel.get(&(row.id.clone(), field.id.clone())).copied().unwrap_or(0).min(images.len().saturating_sub(1));
         let swipe_dx = view
             .swipe
             .as_ref()
@@ -1571,41 +1660,23 @@ fn draw_image_cell(
             }
             draw_image_contain(session, frame, images[page as usize], rect);
         }
-        // 队列条
-        for (i, (rel, rect)) in layout.thumbs.iter().enumerate() {
-            let current = i == idx;
+        // 队列条（窗口随当前页滚动，下标取布局携带的真实图片下标）
+        for (img_idx, rel, rect) in &layout.thumbs {
+            let current = *img_idx == idx;
             frame.fill_rectangle(rect.position(), rect.size(), pal::BG_SUNKEN);
             draw_image_contain(session, frame, rel, shrink(*rect, 2.0 * g.z));
             outline(frame, *rect, 2.0 * g.z, if current { pal::ACCENT } else { pal::BORDER });
         }
-        if hovered {
-            if let Some(btn) = layout.mode_btn {
-                circle_btn(frame, btn, "columns-2");
-            }
-            if let Some(btn) = layout.add_btn {
-                circle_btn(frame, btn, "plus");
-            }
-            if let Some(btn) = layout.remove_btn {
-                circle_btn(frame, btn, "x");
-            }
-        }
+        // hover 圆钮在 chrome 覆盖层绘制（draw_image_buttons）：同画布几何会被图片压住
     } else {
-        for (rel, rect) in &layout.tiles {
+        for (_, rel, rect) in &layout.tiles {
             frame.fill_rectangle(rect.position(), rect.size(), pal::BG_SUNKEN);
             draw_image_contain(session, frame, rel, *rect);
-        }
-        if hovered {
-            if let Some(btn) = layout.mode_btn {
-                circle_btn(frame, btn, "columns-2");
-            }
-            if let Some(btn) = layout.add_btn {
-                circle_btn(frame, btn, "plus");
-            }
         }
         // 拖拽占位（被拖格描边）
         if let Some(drag) = &view.img_drag {
             if drag.row_id == row.id && drag.field_id == field.id {
-                if let Some((_, from_rect)) = layout.tiles.get(drag.from) {
+                if let Some((_, _, from_rect)) = layout.tiles.get(drag.from) {
                     outline(frame, *from_rect, 1.0, pal::ACCENT);
                 }
             }

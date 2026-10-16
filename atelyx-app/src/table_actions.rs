@@ -972,9 +972,16 @@ fn cell_press_plan(
         let empty = serde_json::json!({ "images": [] });
         let v = s.data.rows[r].values.get(&field_id).unwrap_or(&empty);
         let cell = tv::cell_rect(&tv::geo(s, s.view.canvas_size), r, c);
-        let layout = tv::image_layout_of(cell, v, s.view.zoom);
         let images = ops::image_entries(v).len();
-        let idx = s.view.carousel.get(&(row_id.clone(), field_id.clone())).copied().unwrap_or(0);
+        // carousel 停留页在图片删减后可能越界，钳到现存末页（绘制侧同口径）
+        let idx = s
+            .view
+            .carousel
+            .get(&(row_id.clone(), field_id.clone()))
+            .copied()
+            .unwrap_or(0)
+            .min(images.saturating_sub(1));
+        let layout = tv::image_layout_of(cell, v, s.view.zoom, idx);
         let contains = |rect: &Option<Rectangle>| rect.as_ref().is_some_and(|b| b.contains(pos));
         if contains(&layout.mode_btn) {
             return CellAction::ToggleMode { row_id, field_id };
@@ -985,9 +992,9 @@ fn cell_press_plan(
         if contains(&layout.remove_btn) {
             return CellAction::RemoveImage { row_id, field_id, index: idx };
         }
-        for (i, (_, rect)) in layout.thumbs.iter().chain(layout.tiles.iter()).enumerate() {
+        for (img_idx, _, rect) in layout.thumbs.iter().chain(layout.tiles.iter()) {
             if rect.contains(pos) {
-                s.view.carousel.insert((row_id.clone(), field_id.clone()), i);
+                s.view.carousel.insert((row_id.clone(), field_id.clone()), *img_idx);
                 s.view.press = Some(tv::PressState {
                     start: pos,
                     active: false,
@@ -996,7 +1003,7 @@ fn cell_press_plan(
                     img: Some(tv::ImagePress {
                         row_id,
                         field_id,
-                        kind: tv::ImagePressKind::Thumb(i),
+                        kind: tv::ImagePressKind::Thumb(*img_idx),
                         at: std::time::Instant::now(),
                         start: pos,
                     }),
@@ -1983,7 +1990,7 @@ fn write_row_images(s: &mut tv::TableSession, row_id: &str, field_id: &str, imag
     row.values.insert(field_id.to_string(), serde_json::json!({ "images": images }));
 }
 
-/// 提交图片拖拽顺序：命中槽位重排（图数变化 = 放弃）。
+/// 提交图片拖拽顺序：命中槽位重排（槽位下标 = 布局携带的真实图片下标）。
 fn commit_image_drag(s: &mut tv::TableSession, drag: tv::ImageDrag) {
     let Some(images) = row_images_of(s, &drag.row_id, &drag.field_id) else { return };
     let Some((r, c)) = s.cell_index(&drag.row_id, &drag.field_id) else { return };
@@ -1993,19 +2000,25 @@ fn commit_image_drag(s: &mut tv::TableSession, drag: tv::ImageDrag) {
         Some(v) => v.clone(),
         None => return,
     };
-    let layout = tv::image_layout_of(cell, &v, s.view.zoom);
-    let slots: Vec<&Rectangle> = if layout.tiles.is_empty() {
-        layout.thumbs.iter().map(|(_, r)| r).collect()
+    let idx = s
+        .view
+        .carousel
+        .get(&(drag.row_id.clone(), drag.field_id.clone()))
+        .copied()
+        .unwrap_or(0);
+    let layout = tv::image_layout_of(cell, &v, s.view.zoom, idx);
+    let slots: Vec<(usize, &Rectangle)> = if layout.tiles.is_empty() {
+        layout.thumbs.iter().map(|(i, _, r)| (*i, r)).collect()
     } else {
-        layout.tiles.iter().map(|(_, r)| r).collect()
+        layout.tiles.iter().map(|(i, _, r)| (*i, r)).collect()
     };
-    if slots.len() != images.len() {
+    if drag.from >= images.len() {
         return;
     }
     let mut target = drag.from;
-    for (i, rect) in slots.iter().enumerate() {
+    for (img_idx, rect) in &slots {
         if rect.contains(drag.pos) {
-            target = i;
+            target = *img_idx;
             break;
         }
     }
