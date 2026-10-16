@@ -565,6 +565,29 @@ pub(crate) fn char_index(content: &str, byte: usize) -> usize {
     content[..b].chars().count()
 }
 
+/// 组合串（未上屏文本）单行字宽：与画组合串同字体字号实测，光标竖条据此落在串尾。
+pub(crate) fn preedit_width(pre: &str, size: f32, line_height: f32) -> f32 {
+    ParagraphT::with_text(advanced_text::Text {
+        content: pre,
+        bounds: Size::new(f32::INFINITY, f32::INFINITY),
+        size: size.into(),
+        line_height: advanced_text::LineHeight::Relative(line_height),
+        font: Font::DEFAULT,
+        align_x: advanced_text::Alignment::Left,
+        align_y: alignment::Vertical::Top,
+        shaping: advanced_text::Shaping::Auto,
+        wrapping: advanced_text::Wrapping::None,
+    })
+    .min_bounds()
+    .width
+}
+
+/// 组合串尾的光标竖条 x：让到串尾，串尾越出可用右缘 `right` 即贴边（不早于串首 `x`，
+/// 组合串在面内被裁时竖条仍留在面内）。
+pub(crate) fn caret_after_preedit(x: f32, pre_w: f32, right: f32) -> f32 {
+    (x + pre_w).min(right - 1.5).max(x)
+}
+
 /// 字符下标 → 光标坐标 (x, y, 行高像素)；空块退回行高像素。
 pub(crate) fn caret_xy(p: &ParagraphT, count: usize, idx: usize, line_px: f32) -> (f32, f32, f32) {
     if idx < count {
@@ -821,8 +844,11 @@ impl Widget<Message, Theme, iced::Renderer> for SourceBlock<'_> {
         let clamped = self.caret.clamp(self.from, self.to);
         let caret_char = char_index(&state.content, clamped - self.from);
         let (x, y, h) = caret_xy(p, count, caret_char, line_px);
-        // 未上屏组合串画在光标处（组合期恒可见，不随光标闪烁）
-        if let Some(pre) = self.preedit.as_deref().filter(|s| !s.is_empty()) {
+        // 未上屏组合串画在光标处（组合期恒可见，不随光标闪烁）；竖条让到串尾
+        let preedit = self.preedit.as_deref().filter(|s| !s.is_empty());
+        let pre_w = preedit.map_or(0.0, |pre| preedit_width(pre, state.size, state.line_height));
+        let caret_x = caret_after_preedit(x, pre_w, bounds.width);
+        if let Some(pre) = preedit {
             renderer.fill_text(
                 advanced_text::Text {
                     content: pre.to_string(),
@@ -850,7 +876,7 @@ impl Widget<Message, Theme, iced::Renderer> for SourceBlock<'_> {
         }
         renderer.fill_quad(
             Quad {
-                bounds: Rectangle::new(origin + Vector::new(x, y), Size::new(1.5, h)),
+                bounds: Rectangle::new(origin + Vector::new(caret_x, y), Size::new(1.5, h)),
                 ..Quad::default()
             },
             self.pal.text,
@@ -1621,17 +1647,29 @@ impl Widget<Message, Theme, iced::Renderer> for EditSurface<'_> {
                     let line_h = gap_line_height(bounds.height, line_starts.len());
                     let k = gap_caret_line(line_starts, *to, self.caret).unwrap_or(0);
                     let y = bounds.y + k as f32 * line_h + (line_h - GAP_CARET_H).max(0.0) * 0.5;
+                    // 未上屏组合串画在光标处、竖条让到串尾（与源码态块同口径）
+                    let preedit = self.preedit.as_deref().filter(|s| !s.is_empty());
+                    let pre_w = preedit.map_or(0.0, |pre| {
+                        preedit_width(
+                            pre,
+                            crate::markdown_view::base_size(),
+                            crate::markdown_view::LINE_HEIGHT,
+                        )
+                    });
+                    let caret_x = caret_after_preedit(x0, pre_w, bounds.x + bounds.width);
                     if blink_on {
                         renderer.fill_quad(
                             Quad {
-                                bounds: Rectangle::new(Point::new(x0, y), Size::new(1.5, GAP_CARET_H)),
+                                bounds: Rectangle::new(
+                                    Point::new(caret_x, y),
+                                    Size::new(1.5, GAP_CARET_H),
+                                ),
                                 ..Quad::default()
                             },
                             self.pal.text,
                         );
                     }
-                    // 未上屏组合串画在光标处
-                    if let Some(pre) = self.preedit.as_deref().filter(|s| !s.is_empty()) {
+                    if let Some(pre) = preedit {
                         renderer.fill_text(
                             advanced_text::Text {
                                 content: pre.to_string(),
@@ -1646,7 +1684,7 @@ impl Widget<Message, Theme, iced::Renderer> for EditSurface<'_> {
                                 shaping: advanced_text::Shaping::Auto,
                                 wrapping: advanced_text::Wrapping::None,
                             },
-                            Point::new(x0 + 2.0, y),
+                            Point::new(x0, y),
                             self.pal.muted,
                             bounds,
                         );
@@ -2133,6 +2171,28 @@ impl EditorState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 组合串字宽须等于绘制末字的右缘（竖条才落在拼音末尾）：同参数造单 span 段落取几何比对；
+    /// 顺带确认字宽随串长增长（测量没有退化成 0）。
+    #[test]
+    fn preedit_width_matches_drawn_end() {
+        let (size, line_height) = (14.0, 1.5);
+        let text = "gai'c'zhe'y";
+        let paragraph = ParagraphT::with_text(advanced_text::Text {
+            content: text,
+            bounds: Size::new(f32::INFINITY, f32::INFINITY),
+            size: size.into(),
+            line_height: advanced_text::LineHeight::Relative(line_height),
+            font: Font::DEFAULT,
+            align_x: advanced_text::Alignment::Left,
+            align_y: alignment::Vertical::Top,
+            shaping: advanced_text::Shaping::Auto,
+            wrapping: advanced_text::Wrapping::None,
+        });
+        let line = paragraph.span_bounds(0).into_iter().next().unwrap();
+        assert!((preedit_width(text, size, line_height) - (line.x + line.width)).abs() < 0.5);
+        assert!(preedit_width("gai", size, line_height) > preedit_width("g", size, line_height));
+    }
 
     #[test]
     fn list_enter_continues_bullet() {

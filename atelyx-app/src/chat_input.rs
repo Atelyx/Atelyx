@@ -25,7 +25,8 @@ use std::time::{Duration, Instant};
 use atelyx_core::ai::refs::{self, RefEntry};
 
 use crate::markdown_edit::{
-    byte_of_char, char_index, line_end_at, line_start_at, selection_rects, ParagraphT,
+    byte_of_char, caret_after_preedit, char_index, line_end_at, line_start_at, preedit_width,
+    selection_rects, ParagraphT,
 };
 use crate::ui::palette as pal;
 use crate::Message;
@@ -621,8 +622,11 @@ impl Widget<Message, Theme, iced::Renderer> for Input<'_> {
             let caret = self.draft.caret.clamp(0, self.draft.text.len());
             let caret_char = char_index(&state.content, caret);
             let (x, y, h) = caret_row_pos(&state.rows, p, &state.content, caret_char, line_px);
-            // 组合串画在光标处（组合期恒可见）
-            if let Some(pre) = self.draft.preedit.as_deref().filter(|s| !s.is_empty()) {
+            // 组合串画在光标处（组合期恒可见）；竖条让到串尾
+            let preedit = self.draft.preedit.as_deref().filter(|s| !s.is_empty());
+            let pre_w = preedit.map_or(0.0, |pre| preedit_width(pre, state.size, LINE_FACTOR));
+            let caret_x = caret_after_preedit(x, pre_w, bounds.width);
+            if let Some(pre) = preedit {
                 renderer.fill_text(
                     advanced_text::Text {
                         content: pre.to_string(),
@@ -651,7 +655,7 @@ impl Widget<Message, Theme, iced::Renderer> for Input<'_> {
             renderer.fill_quad(
                 Quad {
                     bounds: Rectangle::new(
-                        origin + Vector::new(x, y),
+                        origin + Vector::new(caret_x, y),
                         Size::new(1.5, h.max(line_px)),
                     ),
                     ..Quad::default()
