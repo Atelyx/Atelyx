@@ -10,11 +10,15 @@ use serde_json::{json, Value};
 pub const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// 线上消息（与 OpenAI chat.completions 消息同构；用户内容为文本段序列，
-/// 引用文件内容以文本段内联）。
+/// 引用文件内容以文本段内联，图片附件以 image_url 段上行）。
 #[derive(Debug, Clone)]
 pub enum LlmMessage {
     System { content: String },
-    User { parts: Vec<String> },
+    User {
+        parts: Vec<String>,
+        /// 图片附件的 dataURL（`data:image/...;base64,...`；空 = 无图片）。
+        images: Vec<String>,
+    },
     Assistant {
         content: Option<String>,
         tool_calls: Vec<ToolCall>,
@@ -363,17 +367,20 @@ pub fn request_body(req: &StreamRequest) -> Value {
 fn message_to_wire(m: &LlmMessage) -> Value {
     match m {
         LlmMessage::System { content } => json!({ "role": "system", "content": content }),
-        LlmMessage::User { parts } => {
-            if parts.len() == 1 {
+        LlmMessage::User { parts, images } => {
+            // 单文本段且无图片 = 纯字符串 content（部分端点对 multipart 数组更挑剔）；
+            // 其余 = 文本段 + 图片段数组
+            if images.is_empty() && parts.len() == 1 {
                 json!({ "role": "user", "content": parts[0] })
             } else {
-                json!({
-                    "role": "user",
-                    "content": parts
-                        .iter()
-                        .map(|p| json!({ "type": "text", "text": p }))
-                        .collect::<Vec<_>>()
-                })
+                let mut content: Vec<Value> = parts
+                    .iter()
+                    .map(|p| json!({ "type": "text", "text": p }))
+                    .collect();
+                content.extend(images.iter().map(|url| {
+                    json!({ "type": "image_url", "image_url": { "url": url } })
+                }));
+                json!({ "role": "user", "content": content })
             }
         }
         LlmMessage::Assistant { content, tool_calls } => {
@@ -702,6 +709,7 @@ mod tests {
                 },
                 LlmMessage::User {
                     parts: vec!["u1".into(), "u2".into()],
+                    images: Vec::new(),
                 },
                 LlmMessage::Assistant {
                     content: Some("".into()),
@@ -741,5 +749,28 @@ mod tests {
         assert_eq!(msgs[2]["tool_calls"][0]["id"], json!("c1"));
         assert_eq!(msgs[3]["role"], json!("tool"));
         assert_eq!(body["tools"][0]["function"]["name"], json!("glob"));
+    }
+
+    #[test]
+    fn user_images_wire_as_multipart_and_single_text_stays_string() {
+        let wire = |m: &LlmMessage| message_to_wire(m);
+        // 图片随消息 → 文本段 + 图片段数组
+        let with_img = wire(&LlmMessage::User {
+            parts: vec!["看图".into()],
+            images: vec!["data:image/png;base64,QUJD".into()],
+        });
+        assert_eq!(
+            with_img["content"],
+            json!([
+                { "type": "text", "text": "看图" },
+                { "type": "image_url", "image_url": { "url": "data:image/png;base64,QUJD" } }
+            ])
+        );
+        // 单文本段无图片 = 纯字符串
+        let plain = wire(&LlmMessage::User {
+            parts: vec!["普通".into()],
+            images: Vec::new(),
+        });
+        assert_eq!(plain["content"], json!("普通"));
     }
 }

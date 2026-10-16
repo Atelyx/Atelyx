@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use base64::Engine as _;
 use serde_json::{json, Value};
 
 use crate::space_client::SpaceClient;
@@ -291,6 +292,52 @@ pub struct ToolCtx {
     pub search: SearchConfig,
     /// 仓库排除文件夹清单（检索工具跳过）。
     pub exclude: Vec<String>,
+}
+
+/// 把历史 user 消息里图片附件的路径引用读回 dataURL 填进 `payload`
+/// （运行时字段，消息落盘时被序列化剥离）。单个附件读回失败 = payload 留空，
+/// 该附件在请求组装时跳过，不拖垮整轮对话。非图片附件不读。
+pub async fn resolve_image_attachments(messages: &mut [Value], repo: &RepoAccess) {
+    for m in messages.iter_mut() {
+        if m.get("role").and_then(Value::as_str) != Some("user") {
+            continue;
+        }
+        let Some(atts) = m.get_mut("attachments").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for a in atts.iter_mut() {
+            if a.get("kind").and_then(Value::as_str) != Some("image") {
+                continue;
+            }
+            if a.get("payload").and_then(Value::as_str).is_some_and(|p| !p.is_empty()) {
+                continue;
+            }
+            let Some(rel) = a.get("file").and_then(Value::as_str) else {
+                continue;
+            };
+            let mime = a
+                .get("mime")
+                .and_then(Value::as_str)
+                .unwrap_or("application/octet-stream");
+            let bytes = match repo {
+                RepoAccess::Local { root, .. } => vault::safe_join(root, rel, false)
+                    .and_then(|path| std::fs::read(&path).map_err(|e| e.to_string())),
+                RepoAccess::Space { client, space_id } => client
+                    .get_file_bytes(space_id, rel)
+                    .await
+                    .map_err(|e| e.to_string()),
+            };
+            let Ok(bytes) = bytes else {
+                // 失败可见性：stderr 留痕（该附件跳过，不拖垮整轮对话）
+                eprintln!("图片附件读回失败，该附件不入本轮请求：{rel}");
+                continue;
+            };
+            a["payload"] = json!(format!(
+                "data:{mime};base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(bytes)
+            ));
+        }
+    }
 }
 
 /// 单行读取上限与结果文本上限（防一条结果撑爆上下文）。
@@ -1027,6 +1074,35 @@ mod tests {
         // 普通仓库相对路径原样通过（分隔符归一为 `/`，空间端点直接可用）
         assert_eq!(vault::validate_ai_path("笔记/待办.md").unwrap(), "笔记/待办.md");
         assert_eq!(vault::validate_ai_path("./笔记/a.md").unwrap(), "笔记/a.md");
+    }
+
+    #[tokio::test]
+    async fn image_attachments_resolve_to_data_urls_and_skip_failures() {
+        let dir = TempDir::new("ai-attach");
+        let root = dir.to_path_buf();
+        let good = root.join(".atelyx/temp/chats/s1/img-ok.png");
+        std::fs::create_dir_all(good.parent().unwrap()).unwrap();
+        std::fs::write(&good, b"\x89PNG").unwrap();
+        let mut messages = vec![
+            json!({
+                "id": "u1", "role": "user", "content": "看图", "createdAt": 1,
+                "attachments": [
+                    { "kind": "image", "mime": "image/png", "file": ".atelyx/temp/chats/s1/img-ok.png" },
+                    { "kind": "image", "mime": "image/png", "file": ".atelyx/temp/chats/s1/img-missing.png" },
+                    { "kind": "image", "mime": "image/png" }
+                ]
+            }),
+            json!({ "id": "u2", "role": "user", "content": "无附件", "createdAt": 2 }),
+        ];
+        let repo = RepoAccess::Local { root, queue: WriteQueue::new() };
+        resolve_image_attachments(&mut messages, &repo).await;
+        let atts = messages[0]["attachments"].as_array().unwrap();
+        assert!(atts[0]["payload"].as_str().unwrap().starts_with("data:image/png;base64,"));
+        // 读回失败与缺引用：payload 不出现
+        assert!(atts[1].get("payload").is_none());
+        assert!(atts[2].get("payload").is_none());
+        // 无附件消息不产生 attachments 键
+        assert!(messages[1].get("attachments").is_none());
     }
 
     #[test]

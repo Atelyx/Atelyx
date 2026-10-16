@@ -7,6 +7,7 @@ pub mod agent;
 /// 参数生成中的合成工具步 id 前缀（流式占位行；收敛时 running 态归一为已中断）。
 pub const PENDING_RUN_ID_PREFIX: &str = "pending:";
 pub mod provider;
+pub mod refs;
 pub mod session;
 pub mod session_io;
 pub mod stream;

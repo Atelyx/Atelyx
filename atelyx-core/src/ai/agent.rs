@@ -12,7 +12,7 @@ use crate::ai::session::{AppendBatch, CommitBatch, PatchEntry, SessionStore};
 use crate::ai::stream::{
     LlmMessage, ReasoningEffort, StreamEvent, StreamRequest, ToolCall, ToolDecl,
 };
-use crate::ai::tools::{builtin_tools, SearchConfig, ToolCtx};
+use crate::ai::tools::{builtin_tools, resolve_image_attachments, SearchConfig, ToolCtx};
 
 /// 工具并行段上限（同一 parallel_safe 段内最多同时执行的工具数）。
 const MAX_PARALLEL_TOOLS: usize = 10;
@@ -42,6 +42,22 @@ pub struct RunConfig {
     pub tool_ids: Vec<String>,
     pub search: SearchConfig,
     pub exclude: Vec<String>,
+}
+
+impl std::fmt::Debug for RunConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // api_key 不进调试输出（该结构随消息/载荷派生 Debug，明文不得外泄）
+        f.debug_struct("RunConfig")
+            .field("base_url", &self.base_url)
+            .field("api_key", &"<redacted>")
+            .field("model", &self.model)
+            .field("reasoning_effort", &self.reasoning_effort)
+            .field("system_prompt", &self.system_prompt)
+            .field("tool_ids", &self.tool_ids)
+            .field("search", &self.search)
+            .field("exclude", &self.exclude)
+            .finish()
+    }
 }
 
 /// 编排方可见的 run 事件（会话 + 消息双重身份携带，防迟到事件串会话）。
@@ -199,7 +215,20 @@ pub fn history_to_llm_messages(
                         }
                     }
                 }
-                out.push(LlmMessage::User { parts });
+                // 图片附件：payload 为调用方读回的 dataURL（空/缺 = 读回失败，该附件跳过）
+                let images: Vec<String> = m
+                    .get("attachments")
+                    .and_then(Value::as_array)
+                    .map(|atts| {
+                        atts.iter()
+                            .filter(|a| a.get("kind").and_then(Value::as_str) == Some("image"))
+                            .filter_map(|a| a.get("payload").and_then(Value::as_str))
+                            .filter(|p| !p.is_empty())
+                            .map(|p| p.to_string())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                out.push(LlmMessage::User { parts, images });
             }
             "assistant" => expand_assistant(content, m.get("steps"), &mut out),
             _ => {}
@@ -524,7 +553,12 @@ async fn run_loop(p: RunParams) {
             parameters: t.parameters,
         })
         .collect();
-    let mut llm_history = history_to_llm_messages(&history, compaction.as_ref());
+    let mut llm_history = {
+        // 先折叠压缩再读回附件：被折叠的消息不再产生读盘 / 网络读取
+        let mut folded = apply_compaction(&history, compaction.as_ref());
+        resolve_image_attachments(&mut folded, &ctx.repo).await;
+        history_to_llm_messages(&folded, None)
+    };
     let mut state = RunState {
         steps: Vec::new(),
         content: String::new(),
@@ -982,6 +1016,7 @@ pub async fn compact_summary(
             },
             LlmMessage::User {
                 parts: vec![format!("压缩以下对话历史：\n\n{transcript}")],
+                images: Vec::new(),
             },
         ],
         tools: Vec::new(),
@@ -1018,6 +1053,7 @@ pub async fn auto_title(
             },
             LlmMessage::User {
                 parts: vec![format!("为下面的对话起一个简洁的标题：\n\n{excerpt}")],
+                images: Vec::new(),
             },
         ],
         tools: Vec::new(),
@@ -1144,6 +1180,27 @@ mod tests {
     }
 
     #[test]
+    fn history_conversion_collects_image_payloads_and_skips_failures() {
+        let history = vec![json!({
+            "id": "u1", "role": "user", "content": "看图", "createdAt": 1,
+            "attachments": [
+                { "kind": "image", "mime": "image/png", "file": "a.png",
+                  "payload": "data:image/png;base64,QUJD" },
+                { "kind": "image", "mime": "image/png", "file": "b.png" }
+            ]
+        })];
+        let msgs = history_to_llm_messages(&history, None);
+        match &msgs[0] {
+            LlmMessage::User { parts, images } => {
+                assert_eq!(parts, &["看图".to_string()]);
+                // 读回失败的附件（无 payload）不进请求
+                assert_eq!(images, &["data:image/png;base64,QUJD".to_string()]);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
     fn pure_narration_round_degrades_to_text() {
         let history = vec![json!({
             "id": "a", "role": "assistant", "content": "", "createdAt": 1,
@@ -1196,7 +1253,7 @@ mod tests {
         let msgs = history_to_llm_messages(&history, Some(&compaction));
         assert_eq!(msgs.len(), 2);
         match &msgs[0] {
-            LlmMessage::User { parts } => assert!(parts[0].contains("压缩摘要")),
+            LlmMessage::User { parts, .. } => assert!(parts[0].contains("压缩摘要")),
             other => panic!("{other:?}"),
         }
         let bad = json!({ "summary": "x", "upToMessageId": "不存在" });

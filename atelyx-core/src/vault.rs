@@ -1002,8 +1002,8 @@ pub fn table_image_rel_path(table_id: &str, file_name: &str) -> Result<String, S
     Ok(format!(".atelyx/temp/tables/{table_id}/{name}.{ext}"))
 }
 
-/// 图片文件名 → 规范扩展名（白名单外拒绝）。
-fn image_ext_of(file_name: &str) -> Option<&'static str> {
+/// 图片文件名 → 规范扩展名（白名单外拒绝；对话附件托盘与表格导入共用）。
+pub fn image_ext_of(file_name: &str) -> Option<&'static str> {
     let ext = std::path::Path::new(file_name).extension()?.to_str()?.to_ascii_lowercase();
     match ext.as_str() {
         "png" => Some("png"),
@@ -2070,6 +2070,29 @@ pub fn list_chat_sessions_file(root: &Path) -> Result<Vec<ChatSessionRow>, Strin
     }
     rows.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(rows)
+}
+
+// ===== 会话图片附件临时区（.atelyx/temp/chats/<会话id>/，字节由调用方经写盘队列落盘）=====
+
+/// 会话图片附件相对路径：`img-<nanoid>.<ext>`（每次导入新文件名，重发不覆盖旧文件）。
+/// 会话 id 与消息 .jsonl 同源（uuid 十六进制 + 连字符），只接受该字母表，拒绝路径语义与空串。
+pub fn chat_image_rel_path(session_id: &str, file_name: &str) -> Result<String, String> {
+    let valid = !session_id.is_empty()
+        && session_id.len() <= 128
+        && session_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-');
+    if !valid {
+        return Err(format!("非法的会话 id：{session_id}"));
+    }
+    let ext = image_ext_of(file_name).ok_or_else(|| format!("非图片文件：{file_name}"))?;
+    let name = format!("img-{}", nanoid!());
+    Ok(format!(".atelyx/temp/chats/{session_id}/{name}.{ext}"))
+}
+
+/// 会话图片附件临时目录（`.atelyx/temp/chats/{id}`；删除会话时整体清理）。
+pub fn chat_attachment_dir(root: &Path, session_id: &str) -> Result<PathBuf, String> {
+    safe_join(root, &format!(".atelyx/temp/chats/{session_id}"), false)
 }
 
 // ===== 工具 =====
