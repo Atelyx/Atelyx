@@ -1,7 +1,7 @@
 //! AI 对话面板：会话侧栏 + 顶部行 + 消息流 + 输入区（user 气泡右对齐、assistant
 //! 无气泡全宽、思考/工具步折叠、悬浮操作按钮组、发送/停止圆钮）。
 
-use iced::widget::{button, column, container, mouse_area, row, scrollable, space, stack, text, text_editor, Space};
+use iced::widget::{button, column, container, mouse_area, row, scrollable, space, stack, text, Space};
 use iced::widget::container::Style;
 use iced::{border, Length, Padding};
 use serde_json::{json, Value};
@@ -513,20 +513,26 @@ fn compaction_marker(session: &Value) -> Option<iced::Element<'static, Message>>
     )
 }
 
-/// user 气泡（右对齐、按内容收缩、上限 560px、displayContent 优先）。
+/// user 气泡（右对齐、按内容收缩、上限 560px、displayContent 优先；引用标签按
+/// mention 胶囊渲染，图片附件出缩略图行）。
 fn user_bubble<'a>(
     app: &'a App,
     window: iced::window::Id,
     m: &'a Value,
 ) -> iced::Element<'a, Message> {
-    let source = m
-        .get("displayContent")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| m.get("content").and_then(Value::as_str).unwrap_or(""));
-    let mut col = column![].spacing(2);
-    // 单行纯文本直接按文本渲染：Markdown 整段渲染恒撑满宽度，短句会得到一个巨大的空盒子
-    let body: iced::Element<'a, Message> = if is_plain_line(source) {
+    // displayContent 存在即以它为正文（可为空——纯图消息）；缺失（旧消息）回落 content
+    let source = match m.get("displayContent") {
+        Some(Value::String(s)) => s.as_str(),
+        _ => m.get("content").and_then(Value::as_str).unwrap_or(""),
+    };
+    // 引用标签签名与解析缓存同源（前缀：标签），命中才走 mention 胶囊文档
+    let sig = crate::chat_actions::mention_sig(m);
+    let mut col = column![].spacing(4);
+    // 正文：单行纯文本直接按文本渲染（Markdown 整段渲染恒撑满宽度，短句会得到
+    // 一个巨大的空盒子）；带引用的消息用 mention 候选解析（胶囊高亮）
+    let body: iced::Element<'a, Message> = if !sig.is_empty() {
+        doc_by_key(app, source, crate::chat_actions::doc_key(source, &sig))
+    } else if is_plain_line(source) {
         text(source.to_string())
             .size(pal::fs_body())
             .color(pal::TEXT_PRIMARY)
@@ -548,10 +554,52 @@ fn user_bubble<'a>(
                 ..Default::default()
             }),
     );
+    // 图片附件缩略图行（句柄未载入期间显示占位）
+    let thumbs = m
+        .get("attachments")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|a| a.get("kind").and_then(Value::as_str) == Some("image"))
+        .filter_map(|a| a.get("file").and_then(Value::as_str))
+        .map(|rel| attachment_thumb(app, rel));
+    let thumbs: Vec<_> = thumbs.collect();
+    if !thumbs.is_empty() {
+        col = col.push(row(thumbs).spacing(6));
+    }
     col = col.push(action_row(app, window, m, false));
     container(container(col).align_x(iced::alignment::Horizontal::Right).width(Length::Fill))
         .width(Length::Fill)
         .into()
+}
+
+/// 附件缩略图（上限 160px 见方；未载入显示占位块）。
+fn attachment_thumb<'a>(app: &'a App, rel: &str) -> iced::Element<'a, Message> {
+    let placeholder = || {
+        container(icon("image", 20.0, pal::TEXT_MUTED))
+            .width(96.0)
+            .height(64.0)
+            .align_y(iced::alignment::Vertical::Center)
+            .align_x(iced::alignment::Horizontal::Center)
+            .style(|_| container::Style {
+                background: Some(pal::BG_TERTIARY.into()),
+                border: border::Border {
+                    width: 0.5,
+                    radius: pal::RADIUS_SM.into(),
+                    color: pal::BORDER,
+                },
+                ..Default::default()
+            })
+            .into()
+    };
+    match app.note_images.get(rel) {
+        Some(handle) => iced::widget::image(handle.clone())
+            .width(Length::Fixed(160.0))
+            .height(Length::Fixed(160.0))
+            .filter_method(iced::widget::image::FilterMethod::Linear)
+            .into(),
+        None => placeholder(),
+    }
 }
 
 /// assistant 块（无气泡全宽）：步骤块（思考 / 工具可折叠 / 叙述行）+ 最终正文 + 操作。
@@ -863,6 +911,11 @@ fn is_last_message(app: &App, m: &Value) -> bool {
 
 // ===== 输入区 =====
 
+/// 自绘输入面事件的 Elm 路由。
+fn chat_input_msg(event: crate::chat_input::InputEvent) -> Message {
+    Message::Chat(ChatMsg::Input(event))
+}
+
 fn input_area(app: &App, window: iced::window::Id) -> iced::Element<'_, Message> {
     let streaming = is_streaming(app);
     let send_btn = if streaming {
@@ -884,7 +937,22 @@ fn input_area(app: &App, window: iced::window::Id) -> iced::Element<'_, Message>
             Some((window, "发送（Enter）".to_string())),
         )
     };
+    // 工具排（盒子内底部，与输入面同属一块、不画分隔线）：左 + / Agent / 模型；右 发送 / 停止
+    let plus_open = app
+        .popup
+        .as_ref()
+        .is_some_and(|(_, open)| matches!(open.state, crate::layout_view::PopupState::ChatPlusMenu));
+    let plus_btn = button(icon("plus", 13.0, if plus_open { pal::ACCENT } else { pal::TEXT_SECONDARY }))
+        .padding(Padding::new(6.0).vertical(4.0))
+        .style(controls::row_style(false, pal::RADIUS_XS))
+        .on_press(crate::layout_view::btn_popup_min(
+            window,
+            app.cursor_for(window),
+            crate::layout_view::PopupState::ChatPlusMenu,
+            0.0,
+        ));
     let tool_row = row![
+        plus_btn,
         agent_trigger(app, window),
         model_select_trigger(app, window),
         Space::new().width(Length::Fill),
@@ -892,58 +960,129 @@ fn input_area(app: &App, window: iced::window::Id) -> iced::Element<'_, Message>
     ]
     .spacing(6)
     .align_y(iced::alignment::Vertical::Center);
-    // 输入盒内纵向三段：输入面 → 工具排（同一块内，不画分隔线）；输入盒是这里唯一的「盒子」
-    let input_box = container(
-        column![
-            iced::widget::text_editor(&app.chat.input)
-                .placeholder("输入消息，Enter 发送，Shift+Enter 换行")
-                .on_action(|a| Message::Chat(ChatMsg::InputAction(a)))
-                .key_binding(|press| {
-                    // Enter 发送、Shift+Enter 换行；仅编辑器聚焦时接管。
-                    // IME 守卫：组合期间 Windows 上送的是 Process 键（VK_PROCESSKEY），
-                    // 组合确认的 Enter 不进此分支，天然不误发。
-                    let is_enter = matches!(
-                        press.key,
-                        iced::keyboard::Key::Named(iced::keyboard::key::Named::Enter)
-                    );
-                    if is_enter && matches!(press.status, text_editor::Status::Focused { .. }) {
-                        if press.modifiers.shift() {
-                            Some(text_editor::Binding::Enter)
-                        } else {
-                            Some(text_editor::Binding::Custom(Message::Chat(ChatMsg::Send)))
-                        }
-                    } else {
-                        text_editor::Binding::from_key_press(press)
-                    }
-                })
-                .height(96.0),
-            container(tool_row)
-                .width(Length::Fill)
-                .padding(Padding::ZERO.top(4.0)),
-        ]
-        .spacing(0),
+
+    // 自绘输入面（# 标签高亮 / 整标签交互由部件托管）
+    let surface = crate::chat_input::Input::new(
+        &app.chat.input,
+        &app.chat.mention_refs,
+        chat_input_msg,
     )
-    .width(Length::Fill)
-    .padding(Padding::new(8.0))
-    .style(|_| container::Style {
-        background: Some(pal::BG_SUNKEN.into()),
-        border: border::Border {
-            width: 0.5,
-            radius: pal::RADIUS_MD.into(),
-            color: pal::BORDER,
-        },
-        ..Default::default()
+    .picker_open(app.chat.mention_picker.is_some())
+    .placeholder("输入消息，Enter 发送，Shift+Enter 换行");
+    let surface = container(iced::Element::new(surface))
+        .width(Length::Fill)
+        .padding(Padding::ZERO.left(2.0).right(2.0).top(8.0));
+
+    // 输入盒内纵向三段：# 候选浮层（打开时）→ 输入面 → 工具排
+    let mut inner = column![].spacing(0).width(Length::Fill);
+    if let Some(picker) = &app.chat.mention_picker {
+        inner = inner.push(mention_picker_view(picker));
+    }
+    inner = inner.push(surface);
+    inner = inner.push(container(tool_row).width(Length::Fill).padding(Padding::ZERO.top(4.0)));
+    let input_box = container(inner)
+        .width(Length::Fill)
+        .padding(Padding::new(8.0))
+        .style(|_| container::Style {
+            background: Some(pal::BG_SUNKEN.into()),
+            border: border::Border {
+                width: 0.5,
+                radius: pal::RADIUS_MD.into(),
+                color: pal::BORDER,
+            },
+            ..Default::default()
+        });
+
+    // 输入区不铺底色：只一条 1px 上边线 + 图片托盘行（非空时）+ 输入盒本体
+    let mut area = column![controls::h_divider_subtle()].width(Length::Fill);
+    if !app.chat.pending_images.is_empty() {
+        area = area.push(image_tray(app));
+    }
+    area = area.push(
+        container(input_box)
+            .width(Length::Fill)
+            .padding(Padding::new(12.0).top(8.0).bottom(10.0)),
+    );
+    container(area).width(Length::Fill).into()
+}
+
+/// # 引用候选浮层：输入面上方弹出（锚在输入盒顶部，随候选行数自高）。
+fn mention_picker_view<'a>(
+    picker: &'a crate::chat_actions::MentionPicker,
+) -> iced::Element<'a, Message> {
+    let rows = picker.candidates.iter().enumerate().map(|(i, (rel, is_dir))| {
+        let selected = i == picker.selected;
+        let icon_name = if *is_dir {
+            "folder"
+        } else {
+            match atelyx_core::ai::refs::kind_of_file(rel) {
+                Some(atelyx_core::ai::refs::RefKind::Table) => "table",
+                Some(atelyx_core::ai::refs::RefKind::Canvas) => "layers",
+                _ => "file-text",
+            }
+        };
+        let label = rel.rsplit('/').next().unwrap_or(rel).to_string();
+        let dir = rel.rsplit_once('/').map(|(d, _)| d.to_string());
+        let press = Message::Chat(ChatMsg::MentionPick(i));
+        let row_content = row![
+            icon(icon_name, 12.0, if selected { pal::ACCENT } else { pal::TEXT_SECONDARY }),
+            text(label)
+                .size(pal::fs_caption())
+                .color(if selected { pal::TEXT_PRIMARY } else { pal::TEXT_SECONDARY }),
+            dir.map(|d| text(d).size(pal::fs_micro()).color(pal::TEXT_MUTED)),
+        ]
+        .spacing(6)
+        .align_y(iced::alignment::Vertical::Center);
+        button(container(row_content).width(Length::Fill))
+            .padding(Padding::new(10.0).vertical(4.0))
+            .style(move |_, _| iced::widget::button::Style {
+                background: if selected { Some(pal::ACCENT_SOFT.into()) } else { None },
+                ..Default::default()
+            })
+            .on_press(press)
     });
-    // 输入区不铺底色：只一条 1px 上边线 + 输入盒本体（下拉浮层走统一弹层，不在此自叠浮层）
-    container(
-        column![
-            controls::h_divider_subtle(),
-            container(input_box).width(Length::Fill).padding(Padding::new(12.0).top(8.0).bottom(10.0)),
-        ]
-        .width(Length::Fill),
+    let list = container(
+        scrollable(column(rows.map(iced::Element::from)).spacing(0).width(Length::Fill))
+            .height(iced::Length::Shrink)
+            .width(Length::Fill),
     )
-    .width(Length::Fill)
-    .into()
+    .max_height(224.0);
+    container(list)
+        .width(Length::Fill)
+        .style(|_| container::Style {
+            background: Some(pal::BG_SECONDARY.into()),
+            border: border::Border {
+                width: 0.5,
+                radius: pal::RADIUS_MD.into(),
+                color: pal::BORDER,
+            },
+            ..Default::default()
+        })
+        .into()
+}
+
+/// 待发送图片托盘：输入盒上方一行缩略图 chip（点击移除）。
+fn image_tray(app: &App) -> iced::Element<'_, Message> {
+    let chips = app.chat.pending_images.iter().enumerate().map(|(i, img)| {
+        let remove = Message::Chat(ChatMsg::RemoveAttachment(i));
+        let name = img.file_name.clone();
+        button(
+            row![
+                icon("image", 12.0, pal::TEXT_SECONDARY),
+                text(name).size(pal::fs_micro()).color(pal::TEXT_SECONDARY),
+                icon("x", 10.0, pal::TEXT_MUTED),
+            ]
+            .spacing(4)
+            .align_y(iced::alignment::Vertical::Center),
+        )
+        .padding(Padding::new(8.0).vertical(3.0))
+        .style(controls::row_style(false, pal::RADIUS_XS))
+        .on_press(remove)
+    });
+    container(scrollable(row(chips.map(iced::Element::from)).spacing(6)))
+        .width(Length::Fill)
+        .padding(Padding::new(12.0).top(8.0).bottom(0.0))
+        .into()
 }
 
 fn agent_label(app: &App) -> String {
@@ -1011,10 +1150,15 @@ fn model_select_trigger(app: &App, window: iced::window::Id) -> iced::Element<'s
 /// 对话消息 markdown 渲染（复用阅读面管线；解析缓存由 ChatState 维护，
 /// 未命中回落纯文本）。图片暂不参与（对话消息内嵌图片走后续批次）。
 fn markdown_doc<'a>(app: &'a App, source: &'a str) -> iced::Element<'a, Message> {
+    doc_by_key(app, source, crate::chat_actions::source_hash(source))
+}
+
+/// 按缓存键取解析文档渲染（键由调用方决定：普通 = 源哈希；带引用 = 源 + 引用签名）。
+fn doc_by_key<'a>(app: &'a App, source: &'a str, key: u64) -> iced::Element<'a, Message> {
     static EMPTY_IMAGES: std::sync::OnceLock<crate::markdown_view::ImageHandles> =
         std::sync::OnceLock::new();
     let images = EMPTY_IMAGES.get_or_init(std::collections::HashMap::new);
-    match app.chat.docs.get(&crate::chat_actions::source_hash(source)) {
+    match app.chat.docs.get(&key) {
         Some(doc) => crate::markdown_view::document_body(doc, &app.theme, images, true),
         None => text(source.to_string())
             .size(pal::fs_body())

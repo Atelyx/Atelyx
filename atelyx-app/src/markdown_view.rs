@@ -168,6 +168,16 @@ pub fn parse_document(source: &str) -> MarkdownDocument {
     parse_markdown(source, &link_options())
 }
 
+/// 带 mention 候选的解析入口（对话消息引用标签的胶囊渲染；候选命中按 mention 原子输出）。
+pub fn parse_document_with_mentions(
+    source: &str,
+    mentions: Vec<atelyx_core::markdown::MentionCandidate>,
+) -> MarkdownDocument {
+    let mut opts = link_options();
+    opts.mentions = mentions;
+    parse_markdown(source, &opts)
+}
+
 /// 解析选项：非外链地址一律判为仓库内路径（不做存在性判定）。
 pub(crate) fn link_options() -> ParseOptions {
     ParseOptions {

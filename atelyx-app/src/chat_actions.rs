@@ -8,12 +8,13 @@
 use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
 
-use iced::widget::text_editor;
+
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
 use atelyx_core::ai::{
     agent::{self, AgentHub, RunConfig, RunEvent},
+    refs as ai_refs,
     session::{
         AppendBatch, CommitBatch, DeleteEntry, MetaPatch, OverridesPatch, SessionDef, SessionStore,
         StoreSnapshot, TruncateEntry, WriteChainConfig,
@@ -23,6 +24,7 @@ use atelyx_core::ai::{
 };
 use atelyx_core::plugin_runtime::{ChatEvent, ChatEventParams, ChatHistoryResult, ChatSessionSummary, ChatSessionWire};
 
+use crate::chat_input;
 use crate::Message;
 use crate::App;
 use crate::RepoKind;
@@ -153,8 +155,16 @@ pub struct ChatState {
     pub row_hover: Option<String>,
     /// 当前会话（None = 新对话态，首条消息发出时创建会话）。
     pub active: Option<String>,
-    /// 输入草稿（多行）。
-    pub input: text_editor::Content,
+    /// 输入草稿（自绘输入面真相：文本 / 光标 / 选区 / 组合串 / 撤销栈）。
+    pub input: chat_input::Draft,
+    /// 本草稿已登记的 # 引用（发送时按正文命中注入；标签删除即作废）。
+    pub mention_refs: Vec<atelyx_core::ai::refs::RefEntry>,
+    /// # 引用候选浮层（None = 收起）。
+    pub mention_picker: Option<MentionPicker>,
+    /// 同批按压落在输入面内的标志（外点失焦判定，全局按压消息消费）。
+    pub press_inside: bool,
+    /// 待发送图片托盘（拖入 / 粘贴 / 选择器；发送时落临时区）。
+    pub pending_images: Vec<PendingImage>,
     /// 新对话待固化 Agent（发送首条消息时落会话 agentId）。
     pub draft_agent_id: Option<String>,
     /// 面板级 Agent 选择（上次选择，随面板覆盖持久化；新建会话继承）。
@@ -222,6 +232,9 @@ impl ChatState {
             Some(messages) => {
                 let mut used: HashSet<u64> = HashSet::new();
                 for m in &messages {
+                    // user 消息显示原文里的引用标签按 mention 胶囊渲染（refs 作候选传入；
+                    // 缓存键并入 refs 签名，防同文不同引用串档）
+                    let user_mentions = message_mentions(m);
                     let sources = [
                         m.get("displayContent").and_then(Value::as_str),
                         m.get("content").and_then(Value::as_str),
@@ -230,11 +243,32 @@ impl ChatState {
                         if src.is_empty() {
                             continue;
                         }
-                        let key = source_hash(src);
+                        let is_user_display = m["role"] == json!("user")
+                            && !user_mentions.is_empty()
+                            && m.get("displayContent").and_then(Value::as_str) == Some(src);
+                        let (key, parse) = if is_user_display {
+                            let sig: Vec<String> =
+                                user_mentions.iter().map(|mn| mn.label.clone()).collect();
+                            let _ = &sig;
+                            let mns = user_mentions.clone();
+                            let src = src.to_string();
+                            (
+                                doc_key(src.as_str(), &sig),
+                                Box::new(move || {
+                                    crate::markdown_view::parse_document_with_mentions(&src, mns)
+                                })
+                                    as Box<dyn FnOnce() -> atelyx_core::markdown::MarkdownDocument>,
+                            )
+                        } else {
+                            let src = src.to_string();
+                            (
+                                source_hash(src.as_str()),
+                                Box::new(move || crate::markdown_view::parse_document(&src))
+                                    as Box<dyn FnOnce() -> atelyx_core::markdown::MarkdownDocument>,
+                            )
+                        };
                         used.insert(key);
-                        self.docs
-                            .entry(key)
-                            .or_insert_with(|| crate::markdown_view::parse_document(src));
+                        self.docs.entry(key).or_insert_with(parse);
                     }
                     if let Some(steps) = m.get("steps").and_then(Value::as_array) {
                         for st in steps {
@@ -311,7 +345,26 @@ pub enum ChatMsg {
     SessionMenu(Option<String>),
     /// Agent 选择（选择固化到当前会话 / 新对话草稿；None = 缺省「对话」）。
     AgentPick(Option<String>),
-    InputAction(text_editor::Action),
+    /// 自绘输入面事件（文本突变 / 选区 / 焦点 / 发送 / 浮层转交）。
+    Input(chat_input::InputEvent),
+    /// # 候选浮层内点击某条候选。
+    MentionPick(usize),
+    /// 工具栏「添加上下文」：光标处插入 `#` 并唤起候选浮层。
+    TriggerMention,
+    /// 工具栏「上传附件」：系统文件选择器选图片进托盘。
+    UploadAttachment,
+    /// 文件选择器 / 拖入的文件路径回执（按扩展名过滤图片进托盘）。
+    AttachmentsPicked(Vec<std::path::PathBuf>),
+    /// 附件字节落盘回执（两段式发送第二段；Err = 附件未能落盘，图片与引用原样归还）。
+    SendReady {
+        payload: SendPayload,
+        images: Vec<PendingImage>,
+        result: Result<Vec<serde_json::Value>, String>,
+    },
+    /// 从托盘移除一张待发送图片（下标）。
+    RemoveAttachment(usize),
+    /// 外部文件拖入窗口（是否纳用由编排按当前布局是否开着对话面板判定）。
+    FileDropped { window: iced::window::Id, path: std::path::PathBuf },
     Send,
     Stop,
     /// 重新生成最后一条回复（截断到最后一条 user 后重跑）。
@@ -569,6 +622,17 @@ fn resolve_run_config(
             .map(|a| a.tools)
             .unwrap_or_default()
     });
+    // # 引用 / 打开文件上下文只发路径，读取引导随名册含 read_file 才追加
+    // （模型没有读取能力时注入无意义）
+    let system_prompt = system_prompt.map(|mut prompt| {
+        if tool_ids.iter().any(|t| t == "read_file") {
+            if !prompt.trim().is_empty() {
+                prompt.push_str("\n\n");
+            }
+            prompt.push_str(ai_refs::FILE_REFERENCE_PROMPT);
+        }
+        prompt
+    });
     Ok(RunConfig {
         base_url: provider.base_url.clone(),
         api_key,
@@ -681,6 +745,12 @@ fn tool_ctx(app: &App) -> ToolCtx {
 // ===== 更新循环 =====
 
 pub fn update(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
+    let task = update_inner(app, msg);
+    // 附件缩略图按需载入（挂接在每次面板消息处理尾部；去重由缓存与在途集合承担）
+    ensure_chat_images(app).chain(task)
+}
+
+fn update_inner(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
     match msg {
         ChatMsg::PersistStatus(status) => {
             app.chat.persist_error = status;
@@ -849,10 +919,50 @@ pub fn update(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
             if app.chat.active.as_deref() == Some(id.as_str()) {
                 app.chat.active = latest_session_id(&app.chat.sessions);
             }
+            // 附件临时目录随会话清理（本地仓库自管区；空间侧附件随服务端内容）
+            if matches!(app.repo_kind, RepoKind::Local) {
+                if let Some(root) = app.vault_root.clone() {
+                    if let Ok(dir) = atelyx_core::vault::chat_attachment_dir(&root, &id) {
+                        if let Err(e) = std::fs::remove_dir_all(&dir) {
+                            app.notify(
+                                crate::NoticeLevel::Warning,
+                                format!("会话附件临时目录清理失败：{e}"),
+                            );
+                        }
+                    }
+                }
+            }
             iced::Task::none()
         }
-        ChatMsg::InputAction(action) => {
-            app.chat.input.perform(action);
+        ChatMsg::Input(event) => on_input(app, event),
+        ChatMsg::MentionPick(index) => {
+            // 点选浮层行不算外点：保持输入面焦点，继续键入接在插入的标签之后
+            app.chat.input.focused = true;
+            app.chat.press_inside = true;
+            commit_mention(app, index);
+            iced::Task::none()
+        }
+        ChatMsg::TriggerMention => {
+            trigger_mention(app);
+            iced::Task::none()
+        }
+        ChatMsg::UploadAttachment => upload_attachment(),
+        ChatMsg::AttachmentsPicked(paths) => {
+            add_attachments(app, paths);
+            iced::Task::none()
+        }
+        ChatMsg::RemoveAttachment(index) => {
+            if index < app.chat.pending_images.len() {
+                app.chat.pending_images.remove(index);
+            }
+            iced::Task::none()
+        }
+        ChatMsg::FileDropped { window, path } => {
+            if crate::layout_view::window_has_view(app, "aichat")
+                && app.main_id.is_some_and(|main| main == window)
+            {
+                add_attachments(app, vec![path]);
+            }
             iced::Task::none()
         }
         ChatMsg::Stop => {
@@ -863,6 +973,16 @@ pub fn update(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
         }
         ChatMsg::Send => chat_entry(app, PendingChatAction::Send),
         ChatMsg::Regenerate => chat_entry(app, PendingChatAction::Regenerate),
+        ChatMsg::SendReady { payload, images, result } => match result {
+            Ok(attachments) => finish_send(app, payload, attachments),
+            Err(e) => {
+                // materialize 失败时图片原样带回（托盘恢复原样）；引用一并归还
+                app.chat.pending_images = images;
+                app.chat.mention_refs = payload.refs;
+                app.notify(crate::NoticeLevel::Warning, format!("图片发送失败：{e}"));
+                iced::Task::none()
+            }
+        },
         ChatMsg::RepoLoaded(gen, result) => {
             if gen != app.epoch() {
                 // 装载在途期间换了容器：旧真源快照整体丢弃
@@ -1013,6 +1133,11 @@ pub(crate) fn source_hash(s: &str) -> u64 {
     std::hash::Hasher::finish(&h)
 }
 
+/// 文档缓存键（并入引用签名：同文不同引用的 mention 解析结果不同，防串档）。
+pub(crate) fn doc_key(source: &str, mention_sig: &[String]) -> u64 {
+    source_hash(&format!("{source}\u{1}{}", mention_sig.join("\u{1}")))
+}
+
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1077,23 +1202,106 @@ fn regenerate_now(app: &mut App, space_prompt: Option<String>) -> iced::Task<Mes
     }
     let history = store().session_messages(&session_id).unwrap_or_default();
     let compaction = session.get("compaction").cloned().filter(|c| !c.is_null());
+    // 末条 user 的注入块按当下状态重拼：引用块按 displayContent + refs 重扫
+    //（标签删除 = 作废），打开文件块按当前窗口状态重写；块随请求内联，不改写磁盘消息。
+    let mut history = history;
+    if let Some(last) = history.last_mut() {
+        if last["role"] == json!("user") {
+            rebuild_user_injection(app, last);
+        }
+    }
     app.chat.refresh_session(&session_id);
     start_run(config, session_id, compaction, history, app)
 }
 
+/// 重建一条 user 消息的注入内容（重生成路径）：无 refs 的旧消息原样保留；
+/// 有 refs 的按 displayContent 重扫命中，重拼引用路径块与打开文件块。
+fn rebuild_user_injection(app: &App, message: &mut Value) {
+    let refs = message_refs(message);
+    if refs.is_empty() {
+        return;
+    }
+    let display = message
+        .get("displayContent")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| message.get("content").and_then(Value::as_str).unwrap_or(""))
+        .to_string();
+    let hits = ai_refs::scan_hits(&display, &refs);
+    let mut content = ai_refs::reference_path_block(&hits);
+    content.push_str(&display);
+    if let Some(block) = ai_refs::open_files_context_block(&open_files_context(app)) {
+        content.push_str("\n\n");
+        content.push_str(&block);
+    }
+    message["content"] = json!(content);
+}
+
+/// 消息的引用标签签名（缓存键与解析候选同源：前缀：标签，与正文逐字一致）。
+pub(crate) fn mention_sig(message: &Value) -> Vec<String> {
+    message_mentions(message).into_iter().map(|mn| mn.label).collect()
+}
+
+/// 消息 refs → mention 候选（标签文本 = 前缀：标签，与正文中的引用标签逐字一致）。
+pub(crate) fn message_mentions(message: &Value) -> Vec<atelyx_core::markdown::MentionCandidate> {
+    message_refs(message)
+        .iter()
+        .map(|r| atelyx_core::markdown::MentionCandidate {
+            key: r.path.clone(),
+            label: format!("{}：{}", r.kind.prefix(), r.label),
+        })
+        .collect()
+}
+
+/// 消息 refs 字段 → 内存引用条目（畸形条目跳过）。
+pub(crate) fn message_refs(message: &Value) -> Vec<ai_refs::RefEntry> {
+    message
+        .get("refs")
+        .and_then(Value::as_array)
+        .map(|refs| {
+            refs.iter()
+                .filter_map(|r| {
+                    let path = r.get("path").and_then(Value::as_str)?;
+                    let label = r.get("label").and_then(Value::as_str)?;
+                    let kind = ai_refs::RefKind::parse_key(
+                        r.get("refKind").and_then(Value::as_str).unwrap_or(""),
+                    )?;
+                    Some(ai_refs::RefEntry {
+                        path: path.to_string(),
+                        label: label.to_string(),
+                        kind,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn send_now(app: &mut App, space_prompt: Option<String>) -> iced::Task<Message> {
-    let text = app.chat.input.text().trim().to_string();
-    if text.is_empty() || app.chat.compacting.is_some() {
+    let display = app.chat.input.text.trim().to_string();
+    let images = std::mem::take(&mut app.chat.pending_images);
+    let refs = std::mem::take(&mut app.chat.mention_refs);
+    // 任何早退路径都要把托盘与引用原样归还（半发状态不可接受）
+    macro_rules! restore {
+        () => {{
+            app.chat.pending_images = images;
+            app.chat.mention_refs = refs;
+        }};
+    }
+    if (display.is_empty() && images.is_empty()) || app.chat.compacting.is_some() {
+        restore!();
         return iced::Task::none();
     }
     if let Err(e) = check_ready(app) {
         app.chat.error = Some(e);
+        restore!();
         return iced::Task::none();
     }
     let config = match resolve_run_config(app, app.chat.active_agent_id().as_deref(), space_prompt, true) {
         Ok(c) => c,
         Err(e) => {
             app.chat.error = Some(e);
+            restore!();
             return iced::Task::none();
         }
     };
@@ -1119,6 +1327,7 @@ fn send_now(app: &mut App, space_prompt: Option<String>) -> iced::Task<Message> 
                 .is_err()
             {
                 app.chat.error = Some("会话创建失败".to_string());
+                restore!();
                 return iced::Task::none();
             }
             app.chat.active = Some(id.clone());
@@ -1127,15 +1336,153 @@ fn send_now(app: &mut App, space_prompt: Option<String>) -> iced::Task<Message> 
         }
     };
     if app.chat.streaming.contains(&session_id) || hub().is_running(&session_id) {
+        restore!();
         return iced::Task::none(); // run 不变量：同会话单 run（以 hub 注册表为准）
     }
-    // 历史快照先于追加（user 消息由 run 入参携带）
+    // 附件字节先落仓库临时区（两段式：回执后落消息并启动 run；落盘失败不产生消息）
+    let backend = match image_backend(app) {
+        Ok(backend) => backend,
+        Err(e) => {
+            app.chat.error = Some(e);
+            restore!();
+            return iced::Task::none();
+        }
+    };
+    let payload = SendPayload { session_id, config, display, refs };
+    let sid = payload.session_id.clone();
+    iced::Task::perform(
+        materialize_images(backend, sid, images),
+        move |result| match result {
+            Ok(attachments) => Message::Chat(ChatMsg::SendReady {
+                payload: payload.clone(),
+                images: Vec::new(),
+                result: Ok(attachments),
+            }),
+            Err((images, e)) => Message::Chat(ChatMsg::SendReady {
+                payload: payload.clone(),
+                images,
+                result: Err(e),
+            }),
+        },
+    )
+}
+
+/// 两段式发送的续跑包（附件落盘回执后消费）。
+#[derive(Debug, Clone)]
+pub struct SendPayload {
+    pub session_id: String,
+    pub config: RunConfig,
+    /// 用户原始输入（trim 后；含 # 标签文本）。
+    pub display: String,
+    /// 本草稿登记的引用（发送时按正文命中筛选）。
+    pub refs: Vec<ai_refs::RefEntry>,
+}
+
+/// 附件落盘后端（本地写盘队列 / 空间端点）。
+enum ImageBackend {
+    Local {
+        root: std::path::PathBuf,
+        queue: atelyx_core::write_queue::WriteQueue,
+    },
+    Space {
+        client: Arc<atelyx_core::space_client::SpaceClient>,
+        space_id: String,
+    },
+}
+
+fn image_backend(app: &App) -> Result<ImageBackend, String> {
+    match &app.repo_kind {
+        RepoKind::Space(_) => {
+            let session =
+                crate::space_actions::session_of(app).ok_or_else(|| "协作空间未连接".to_string())?;
+            if !session.role.can_write() {
+                return Err("该空间为只读身份，无法发送图片".to_string());
+            }
+            Ok(ImageBackend::Space { client: session.client, space_id: session.space_id })
+        }
+        RepoKind::Local => {
+            let root = app.vault_root.clone().ok_or_else(|| "仓库未打开".to_string())?;
+            Ok(ImageBackend::Local { root, queue: app.vault.writes.clone() })
+        }
+    }
+}
+
+/// 托盘图片逐张落临时区（`img-<nanoid>.<ext>` 每次新文件名，重发不覆盖），
+/// 返回消息 attachments 元数据（路径引用；字节不进消息）。
+/// 任一张失败 = 已处理图片与余量整体原样带回（托盘恢复原样，不产生半发消息）。
+async fn materialize_images(
+    backend: ImageBackend,
+    session_id: String,
+    images: Vec<PendingImage>,
+) -> Result<Vec<Value>, (Vec<PendingImage>, String)> {
+    let mut attachments = Vec::new();
+    let mut pending: std::collections::VecDeque<PendingImage> = images.into_iter().collect();
+    while let Some(img) = pending.pop_front() {
+        let rel = match atelyx_core::vault::chat_image_rel_path(&session_id, &img.file_name) {
+            Ok(rel) => rel,
+            Err(e) => return Err((pending.into_iter().collect(), e)),
+        };
+        let write = match &backend {
+            ImageBackend::Local { root, queue } => {
+                let path = match atelyx_core::vault::safe_join(root, &rel, true) {
+                    Ok(path) => path,
+                    Err(e) => return Err((pending.into_iter().collect(), e)),
+                };
+                queue.write_bytes(path, img.bytes.clone()).await
+            }
+            ImageBackend::Space { client, space_id } => client
+                .put_file_bytes(space_id, &rel, &img.bytes)
+                .await
+                .map_err(|e| e.to_string()),
+        };
+        if let Err(e) = write {
+            let mut restore: Vec<PendingImage> = pending.into_iter().collect();
+            restore.insert(0, img);
+            return Err((restore, format!("图片落盘失败（{rel}）：{e}")));
+        }
+        attachments.push(json!({ "kind": "image", "mime": img.mime, "file": rel }));
+    }
+    Ok(attachments)
+}
+
+/// 附件落盘回执：成功 = 注入块落消息并启动 run；失败 = 引用原样归还并通知
+/// （输入草稿本就未清；落盘成功的临时文件随会话删除回收）。
+fn finish_send(app: &mut App, payload: SendPayload, attachments: Vec<Value>) -> iced::Task<Message> {
+    let SendPayload { session_id, config, display, refs } = payload;
+    macro_rules! restore {
+        () => {{
+            app.chat.mention_refs = refs;
+        }};
+    }
+    if app.chat.streaming.contains(&session_id) || hub().is_running(&session_id) {
+        restore!();
+        app.notify(crate::NoticeLevel::Warning, "该会话已有对话进行中，消息未发送");
+        return iced::Task::none(); // run 不变量：同会话单 run
+    }
+    // 历史快照先于追加（user 消息由 run 入参携带；commit 后快照已含新消息，会重复）
     let mut history = store().session_messages(&session_id).unwrap_or_default();
+    // 引用命中（标签被手动删掉 = 该引用作废）→ 路径块 + 打开的文件块随消息持久化
+    let hits = ai_refs::scan_hits(&display, &refs);
+    let mut content = ai_refs::reference_path_block(&hits);
+    content.push_str(&display);
+    if let Some(block) = ai_refs::open_files_context_block(&open_files_context(app)) {
+        content.push_str("\n\n");
+        content.push_str(&block);
+    }
+    let refs_json: Vec<Value> = refs
+        .iter()
+        .filter(|r| hits.iter().any(|h| h.path == r.path))
+        .map(|r| {
+            json!({ "kind": "file", "path": r.path, "label": r.label, "refKind": r.kind.key() })
+        })
+        .collect();
     let user_message = json!({
         "id": uuid_v4(),
         "role": "user",
-        "content": text.clone(),
-        "displayContent": text,
+        "content": content,
+        "displayContent": display,
+        "refs": refs_json,
+        "attachments": attachments,
         "createdAt": now_ms(),
     });
     if let Err(e) = store().commit(CommitBatch {
@@ -1145,10 +1492,12 @@ fn send_now(app: &mut App, space_prompt: Option<String>) -> iced::Task<Message> 
         }],
         ..Default::default()
     }) {
+        restore!();
         app.chat.error = Some(format!("消息写入失败：{e}"));
         return iced::Task::none();
     }
-    app.chat.input = text_editor::Content::new();
+    app.chat.input.clear();
+    app.chat.mention_picker = None;
     app.chat.refresh_session(&session_id);
     // 发送即回底跟随（run 事件链会持续把新内容带到视野）
     app.chat.follow_bottom = true;
@@ -1159,6 +1508,332 @@ fn send_now(app: &mut App, space_prompt: Option<String>) -> iced::Task<Message> 
         .filter(|c| !c.is_null());
     history.push(user_message);
     start_run(config, session_id, compaction, history, app).chain(scroll_flow_bottom())
+}
+
+/// 当前打开的文件（布局模型笔记 / 表格 / 画布三槽位 = 全部窗口正在查看的文件）。
+fn open_files_context(app: &App) -> Vec<ai_refs::OpenFileCtx> {
+    let mut out: Vec<ai_refs::OpenFileCtx> = Vec::new();
+    for slot in [&app.ui.last_note_file, &app.ui.last_table_file, &app.ui.last_canvas_file] {
+        if let Some(path) = slot {
+            if !out.iter().any(|f| &f.path == path) {
+                out.push(ai_refs::OpenFileCtx { path: path.clone(), viewing: true });
+            }
+        }
+    }
+    out
+}
+
+/// 会话消息附件缩略图的按需载入：显示中会话的图片附件缺句柄且未在途/未失败时发起读盘
+/// （本地读盘 / 空间端点；缓存与在途集合与笔记图片共用，键 = 仓库相对路径）。
+fn ensure_chat_images(app: &mut App) -> iced::Task<Message> {
+    let Some(active) = app.chat.active.clone() else {
+        return iced::Task::none();
+    };
+    // 只读借用收集路径（避免整份消息数组深拷贝）
+    let mut srcs = Vec::new();
+    if let Some(messages) = app
+        .chat
+        .sessions
+        .iter()
+        .find(|s| s["id"] == json!(active))
+        .and_then(|s| s.get("messages").and_then(Value::as_array))
+    {
+        for m in messages {
+            for a in m.get("attachments").and_then(Value::as_array).into_iter().flatten() {
+                if a.get("kind").and_then(Value::as_str) == Some("image") {
+                    if let Some(rel) = a.get("file").and_then(Value::as_str) {
+                        srcs.push(rel.to_string());
+                    }
+                }
+            }
+        }
+    }
+    if srcs.is_empty() {
+        return iced::Task::none();
+    }
+    let gen = app.epoch();
+    let root = app.vault.root().ok();
+    let mut tasks = Vec::new();
+    for src in srcs {
+        if app.note_images.contains_key(&src)
+            || app.note_images_failed.contains(&src)
+            || !app.note_images_inflight.insert(src.clone())
+        {
+            continue;
+        }
+        let task = match (&root, matches!(app.repo_kind, RepoKind::Space(_))) {
+            (None, false) => {
+                app.note_images_inflight.remove(&src);
+                continue;
+            }
+            (_, true) => crate::space_actions::space_load_image(app, gen, src.clone()),
+            (Some(root), false) => {
+                let root = root.clone();
+                let path = src.clone();
+                iced::Task::perform(
+                    async move { atelyx_core::vault::read_file_bytes(&root, &path) },
+                    move |r| Message::ImageLoaded(gen, src.clone(), r),
+                )
+            }
+        };
+        tasks.push(task);
+    }
+    iced::Task::batch(tasks)
+}
+
+// ===== 输入面与 # 引用 =====
+
+/// # 引用候选浮层状态。
+pub struct MentionPicker {
+    /// 触发 `#` 的字节位置。
+    pub at: usize,
+    /// 触发位到光标之间的查询串。
+    pub query: String,
+    /// 键盘选中行。
+    pub selected: usize,
+    /// 过滤后的候选（仓库相对路径 + 是否目录）。
+    pub candidates: Vec<(String, bool)>,
+}
+
+/// 候选条数上限（超出只显示前 N 条，继续键入收窄）。
+const MENTION_CANDIDATE_CAP: usize = 50;
+
+/// 自绘输入面事件落地：草稿突变、选区、焦点、发送与浮层转交。
+fn on_input(app: &mut App, event: chat_input::InputEvent) -> iced::Task<Message> {
+    match event {
+        chat_input::InputEvent::Focus => {
+            app.chat.input.focused = true;
+            // 同批全局按压消息据此判定「按压在输入面内」
+            app.chat.press_inside = true;
+        }
+        chat_input::InputEvent::Edited { text, caret, anchor } => {
+            app.chat.input.apply_edited(text, caret, anchor);
+            sync_mention_picker(app);
+        }
+        chat_input::InputEvent::Select { caret, anchor } => {
+            app.chat.input.caret = caret;
+            app.chat.input.anchor = anchor;
+            sync_mention_picker(app);
+        }
+        chat_input::InputEvent::Preedit(preedit) => {
+            app.chat.input.preedit = preedit;
+        }
+        chat_input::InputEvent::Send => return chat_entry(app, PendingChatAction::Send),
+        chat_input::InputEvent::Undo => {
+            app.chat.input.undo_step();
+            sync_mention_picker(app);
+        }
+        chat_input::InputEvent::Redo => {
+            app.chat.input.redo_step();
+            sync_mention_picker(app);
+        }
+        chat_input::InputEvent::PickerNav(delta) => {
+            if let Some(p) = &mut app.chat.mention_picker {
+                let len = p.candidates.len();
+                if len > 0 {
+                    let next = p.selected as i32 + delta;
+                    p.selected = next.rem_euclid(len as i32) as usize;
+                }
+            }
+        }
+        chat_input::InputEvent::PickerCommit => {
+            let selected = app.chat.mention_picker.as_ref().map_or(0, |p| p.selected);
+            commit_mention(app, selected);
+        }
+        chat_input::InputEvent::PickerClose => app.chat.mention_picker = None,
+    }
+    iced::Task::none()
+}
+
+/// 候选浮层状态机：光标前的 `#` 触发段激活 = 开启（或刷新查询）；退出触发段 = 关闭。
+fn sync_mention_picker(app: &mut App) {
+    let draft = &app.chat.input;
+    let Some(at) = draft.active_mention_at() else {
+        app.chat.mention_picker = None;
+        return;
+    };
+    let caret = draft.caret.min(draft.text.len());
+    let query = draft.text[at + 1..caret].to_string();
+    // 拍下触发位与查询后再取可变借用（候选收集要读文件树缓存）
+    let same_trigger = app
+        .chat
+        .mention_picker
+        .as_ref()
+        .is_some_and(|p| p.at == at);
+    if !same_trigger {
+        let candidates = mention_candidates(app, &query);
+        app.chat.mention_picker = (!candidates.is_empty())
+            .then_some(MentionPicker { at, query, selected: 0, candidates });
+        return;
+    }
+    let stale = app
+        .chat
+        .mention_picker
+        .as_ref()
+        .is_some_and(|p| p.query != query);
+    if stale {
+        let candidates = mention_candidates(app, &query);
+        if let Some(p) = app.chat.mention_picker.as_mut() {
+            p.query = query;
+            p.candidates = candidates;
+            p.selected = 0;
+        }
+    }
+    if app
+        .chat
+        .mention_picker
+        .as_ref()
+        .is_some_and(|p| p.candidates.is_empty())
+    {
+        app.chat.mention_picker = None;
+    }
+}
+
+/// 从文件树缓存收集引用候选（md / atb / atlx 文件与目录；隐藏与排除目录不在
+/// 缓存内自然缺席），按查询子串过滤（不区分大小写），文件树序（同级目录在前）。
+fn mention_candidates(app: &App, query: &str) -> Vec<(String, bool)> {
+    let mut out = Vec::new();
+    collect_candidates(app, "", query, &mut out);
+    out
+}
+
+fn collect_candidates(app: &App, dir: &str, query: &str, out: &mut Vec<(String, bool)>) {
+    if out.len() >= MENTION_CANDIDATE_CAP {
+        return;
+    }
+    let mut children = app.children.get(dir).cloned().unwrap_or_default();
+    atelyx_core::vault::sort_children(&mut children, &app.file_sort);
+    for child in children {
+        let hit = query.is_empty()
+            || child.rel.to_lowercase().contains(&query.to_lowercase());
+        if hit {
+            out.push((child.rel.clone(), child.is_dir));
+            if out.len() >= MENTION_CANDIDATE_CAP {
+                return;
+            }
+        }
+        if child.is_dir {
+            collect_candidates(app, &child.rel, query, out);
+        }
+    }
+}
+
+/// 候选落地：触发段替换为标签文本（尾随空格），路径登记进本草稿引用（同路径只记一条）。
+fn commit_mention(app: &mut App, index: usize) {
+    let Some(picker) = app.chat.mention_picker.as_ref() else {
+        return;
+    };
+    let Some((rel, is_dir)) = picker.candidates.get(index).cloned() else {
+        return;
+    };
+    let kind = if is_dir {
+        ai_refs::RefKind::Dir
+    } else {
+        match ai_refs::kind_of_file(&rel) {
+            Some(k) => k,
+            None => {
+                app.chat.mention_picker = None;
+                return;
+            }
+        }
+    };
+    let at = picker.at;
+    let taken: Vec<(&str, &str)> = app
+        .chat
+        .mention_refs
+        .iter()
+        .map(|r| (r.path.as_str(), r.label.as_str()))
+        .collect();
+    let label = ai_refs::make_label(&rel, &taken);
+    let tag = format!("#{}：{} ", kind.prefix(), label);
+    let text = app.chat.input.text.clone();
+    let caret = app.chat.input.caret.min(text.len());
+    let to = caret.max(at + 1).min(text.len());
+    let mut next = String::with_capacity(text.len() - (to - at) + tag.len());
+    next.push_str(&text[..at]);
+    next.push_str(&tag);
+    next.push_str(&text[to..]);
+    let caret_after = at + tag.len();
+    if !app.chat.mention_refs.iter().any(|r| r.path == rel) {
+        app.chat.mention_refs.push(ai_refs::RefEntry { path: rel, label, kind });
+    }
+    app.chat.input.apply_edited(next, caret_after, caret_after);
+    app.chat.mention_picker = None;
+}
+
+/// 工具栏「添加上下文」：光标处插入 `#` 并唤起候选浮层（与键入同状态）。
+fn trigger_mention(app: &mut App) {
+    let draft = &mut app.chat.input;
+    draft.focused = true;
+    let (a, b) = draft.selection();
+    let mut text = String::with_capacity(draft.text.len() - (b - a) + 1);
+    text.push_str(&draft.text[..a]);
+    text.push('#');
+    text.push_str(&draft.text[b..]);
+    let caret_after = a + 1;
+    draft.apply_edited(text, caret_after, caret_after);
+    sync_mention_picker(app);
+}
+
+/// 工具栏「上传附件」：系统文件选择器（图片过滤），选中文件进待发送托盘。
+fn upload_attachment() -> iced::Task<Message> {
+    iced::Task::future(async move {
+        let files = rfd::AsyncFileDialog::new()
+            .add_filter("图片", &["png", "jpg", "jpeg", "webp", "gif"])
+            .pick_files()
+            .await;
+        Message::Chat(ChatMsg::AttachmentsPicked(
+            files
+                .map(|fs| fs.into_iter().map(|f| f.path().to_path_buf()).collect())
+                .unwrap_or_default(),
+        ))
+    })
+}
+
+/// 附件拖入 / 选择器回执：按扩展名过滤图片入托盘，其余提示不支持。
+fn add_attachments(app: &mut App, paths: Vec<std::path::PathBuf>) {
+    for path in paths {
+        let Some(name) = path.file_name().and_then(|n| n.to_str()).map(str::to_string) else {
+            continue;
+        };
+        let Some(ext) = atelyx_core::vault::image_ext_of(&name) else {
+            app.notify(
+                crate::NoticeLevel::Warning,
+                format!("暂不支持发送该类型文件：{name}（仅图片）"),
+            );
+            continue;
+        };
+        match std::fs::read(&path) {
+            Ok(bytes) => app.chat.pending_images.push(PendingImage {
+                file_name: name,
+                bytes,
+                mime: image_mime(ext),
+            }),
+            Err(e) => app.notify(
+                crate::NoticeLevel::Warning,
+                format!("图片读取失败：{}（{e}）", path.display()),
+            ),
+        }
+    }
+}
+
+/// 扩展名 → MIME（托盘四类图片）。
+fn image_mime(ext: &str) -> String {
+    match ext {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        _ => "image/gif",
+    }
+    .to_string()
+}
+
+/// 待发送图片附件（托盘运行时项；发送时字节落仓库临时区，消息只持久化路径引用）。
+#[derive(Debug, Clone)]
+pub struct PendingImage {
+    pub file_name: String,
+    pub bytes: Vec<u8>,
+    pub mime: String,
 }
 
 /// 发送前置检查（会话真源已装载）。
@@ -1268,7 +1943,7 @@ fn compact(app: &mut App) -> iced::Task<Message> {
     let mut transcript = String::new();
     for m in agent::history_to_llm_messages(&messages, compaction.as_ref()) {
         match m {
-            LlmMessage::User { parts } => {
+            LlmMessage::User { parts, .. } => {
                 transcript.push_str(&format!("用户：{}\n\n", parts.join("\n")));
             }
             LlmMessage::Assistant { content, tool_calls } => {

@@ -13,6 +13,7 @@ mod calendar_heat;
 mod calendar_month;
 mod calendar_view;
 mod chat_actions;
+mod chat_input;
 mod chat_view;
 mod commands;
 mod history_browser;
@@ -2585,6 +2586,11 @@ impl App {
                 self.focused_window = Some(id);
                 // 笔记面板内按压标志：同批 widget 消息（PressRelay）先行置位，此处一次性消费
                 let note_press_inside = std::mem::take(&mut self.note_press_inside);
+                // 对话输入面外点失焦：同批输入部件按压（Focus 事件）先行置位
+                let chat_press_inside = std::mem::take(&mut self.chat.press_inside);
+                if self.chat.input.focused && !chat_press_inside {
+                    self.chat.input.focused = false;
+                }
                 // 表格焦点：同批表格面按压（画布或菜单，widget 消息先行）已置 press_seen = 保持聚焦；
                 // 否则本次按压在表格面之外 = 失焦（键盘分派随之让位）
                 if let Some(s) = &mut self.table {
@@ -6368,6 +6374,10 @@ impl App {
                 }
                 Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
                     Some(Message::Release)
+                }
+                Event::Window(window::Event::FileDropped(path)) => {
+                    // 外部文件拖入：路由到对话面板（是否纳用由编排按当前布局判定）
+                    Some(Message::Chat(chat_actions::ChatMsg::FileDropped { window, path }))
                 }
                 _ => None,
             }),

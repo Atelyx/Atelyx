@@ -260,6 +260,8 @@ pub(crate) enum PopupState {
     AiModelMenu,
     /// AI 对话面板：模型下拉（面板级覆盖；不指定 = 跟随仓库默认）。
     ChatModelMenu,
+    /// AI 对话面板：输入区「+」菜单（添加上下文 / 上传附件）。
+    ChatPlusMenu,
     /// AI 对话面板：推理等级下拉（面板级覆盖；跟随默认 = 不发送推理参数）。
     /// AI 对话面板：Agent 下拉（会话级 agentId；含缺省「对话」）。
     ChatAgentMenu,
@@ -326,6 +328,7 @@ impl PopupState {
             PopupState::AiModelMenu => 224.0,
             PopupState::ChatModelMenu => 224.0,
             PopupState::ChatAgentMenu => 200.0,
+            PopupState::ChatPlusMenu => 176.0,
             PopupState::AiNamingMenu => 144.0,
             PopupState::AiAgentPromptMenu => 208.0,
             PopupState::AiProviderDeleteMenu | PopupState::AiAgentDeleteMenu => 208.0,
@@ -4249,6 +4252,14 @@ fn popup_element<'a>(
             }
             entries
         }
+        PopupState::ChatPlusMenu => {
+            let add_ctx = Message::Chat(crate::chat_actions::ChatMsg::TriggerMention);
+            let upload = Message::Chat(crate::chat_actions::ChatMsg::UploadAttachment);
+            vec![
+                (0, MenuEntry::action("添加上下文", add_ctx)),
+                (0, MenuEntry::action("上传附件", upload)),
+            ]
+        }
         PopupState::ChatModelMenu => {
             // 两级菜单（pane 0 根 / 1 模型 / 2 推理等级）：模型与等级为正交覆盖。
             // 条目元组首元素是 pane 归属标签，pane_view 按当前 pane 过滤——必须与所在面板同值
@@ -4892,6 +4903,17 @@ fn panel_tab_with_view(app: &App, panel_id: &str, kind: &str) -> Option<String> 
         }
     }
     walk(&layout::active_layout(&app.ui).tree, panel_id, kind)
+}
+
+/// 当前布局内是否存在某视图的面板标签（外部文件拖入的路由判据）。
+pub(crate) fn window_has_view(app: &App, kind: &str) -> bool {
+    fn walk(node: &LayoutNode, kind: &str) -> bool {
+        match node {
+            LayoutNode::Panel { tabs, .. } => tabs.iter().any(|t| t.view == kind),
+            LayoutNode::Split { children, .. } => children.iter().any(|c| walk(c, kind)),
+        }
+    }
+    walk(&layout::active_layout(&app.ui).tree, kind)
 }
 
 /// 最近仓库行菜单：在系统文件管理器中打开 / 从列表移除（激活仓库行不可移除）。
