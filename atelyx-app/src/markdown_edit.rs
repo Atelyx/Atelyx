@@ -40,7 +40,7 @@ pub struct LineEdit {
 }
 
 /// `offset` 所在行的行首偏移（offset 非字符边界时向下取整）。
-fn line_start_at(text: &str, offset: usize) -> usize {
+pub(crate) fn line_start_at(text: &str, offset: usize) -> usize {
     let mut offset = offset.min(text.len());
     while !text.is_char_boundary(offset) {
         offset -= 1;
@@ -49,7 +49,7 @@ fn line_start_at(text: &str, offset: usize) -> usize {
 }
 
 /// 自 `offset` 起本行行尾偏移（不含换行符）。
-fn line_end_at(text: &str, offset: usize) -> usize {
+pub(crate) fn line_end_at(text: &str, offset: usize) -> usize {
     let mut offset = offset.min(text.len());
     while !text.is_char_boundary(offset) {
         offset -= 1;
@@ -382,7 +382,7 @@ fn unix_millis() -> u128 {
         .map_or(0, |t| t.as_millis())
 }
 
-type ParagraphT = <iced::Renderer as advanced_text::Renderer>::Paragraph;
+pub(crate) type ParagraphT = <iced::Renderer as advanced_text::Renderer>::Paragraph;
 
 /// 源码态单字符样式。
 #[derive(Clone, Copy, Default)]
@@ -557,7 +557,7 @@ fn build_paragraph(
 }
 
 /// 块内字节偏移 → 字符下标。
-fn char_index(content: &str, byte: usize) -> usize {
+pub(crate) fn char_index(content: &str, byte: usize) -> usize {
     let mut b = byte.min(content.len());
     while !content.is_char_boundary(b) {
         b -= 1;
@@ -566,7 +566,7 @@ fn char_index(content: &str, byte: usize) -> usize {
 }
 
 /// 字符下标 → 光标坐标 (x, y, 行高像素)；空块退回行高像素。
-fn caret_xy(p: &ParagraphT, count: usize, idx: usize, line_px: f32) -> (f32, f32, f32) {
+pub(crate) fn caret_xy(p: &ParagraphT, count: usize, idx: usize, line_px: f32) -> (f32, f32, f32) {
     if idx < count {
         if let Some(r) = p.span_bounds(idx).into_iter().next() {
             return (r.x, r.y, r.height);
@@ -581,7 +581,7 @@ fn caret_xy(p: &ParagraphT, count: usize, idx: usize, line_px: f32) -> (f32, f32
 }
 
 /// 选区矩形：同行的字符矩形合并。
-fn selection_rects(p: &ParagraphT, from: usize, to: usize) -> Vec<Rectangle> {
+pub(crate) fn selection_rects(p: &ParagraphT, from: usize, to: usize) -> Vec<Rectangle> {
     let mut out: Vec<Rectangle> = Vec::new();
     for i in from..to {
         let Some(r) = p.span_bounds(i).into_iter().next() else {
@@ -600,7 +600,7 @@ fn selection_rects(p: &ParagraphT, from: usize, to: usize) -> Vec<Rectangle> {
 
 /// 最近字符下标：按逐字符矩形取与点位最近的字符。
 /// 不用 `hit_test`——它的下标是所在行内的下标，多行块上无法直接换算成块内偏移。
-fn char_at_point(p: &ParagraphT, count: usize, point: Point) -> usize {
+pub(crate) fn char_at_point(p: &ParagraphT, count: usize, point: Point) -> usize {
     let mut best: Option<(usize, f32, f32, Rectangle)> = None;
     for i in 0..count {
         for r in p.span_bounds(i) {
@@ -631,12 +631,12 @@ fn char_at_point(p: &ParagraphT, count: usize, point: Point) -> usize {
 }
 
 /// 字符下标 → 内容内字节偏移。
-fn byte_of_char(content: &str, index: usize) -> usize {
+pub(crate) fn byte_of_char(content: &str, index: usize) -> usize {
     content.char_indices().nth(index).map_or(content.len(), |(b, _)| b)
 }
 
 /// 命中换算：局部坐标 → 内容内字节偏移（按命中字符的左右半取边界）。
-fn hit_offset(p: &ParagraphT, content: &str, point: Point) -> usize {
+pub(crate) fn hit_offset(p: &ParagraphT, content: &str, point: Point) -> usize {
     let count = content.chars().count();
     let i = char_at_point(p, count, point);
     let split = p
