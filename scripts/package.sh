@@ -42,16 +42,21 @@ package_windows() {
     echo "错误：未找到 makensis；安装 NSIS 后重试，或用 NSIS_EXE 环境变量指向 makensis.exe" >&2
     exit 1
   }
+  local log="$dist/nsis-build.log"
   echo "==> makensis：产出 Windows 安装包"
-  "$makensis" \
+  # 编译器输出整份落日志：失败必须把尾部回显到 stderr，不得只留一个非零退出码
+  if ! "$makensis" \
     -DVERSION="$version" \
     -DEXE="$(win_path "$exe")" \
     -DLICENSE="$(win_path "$repo_root/LICENSE")" \
     -DNOTICES="$(win_path "$notices")" \
     -DICON="$(win_path "$icon")" \
     -DOUTFILE="$(win_path "$dist/Atelyx_${version}_x64-setup.exe")" \
-    "$(win_path "$nsi")" >"$dist/nsis-build.log"
-  tail -n 1 "$dist/nsis-build.log"
+    "$(win_path "$nsi")" >"$log"; then
+    echo "错误：makensis 编译失败，日志尾部：" >&2
+    tail -n 20 "$log" >&2
+    exit 1
+  fi
   echo "==> 产物：$dist/Atelyx_${version}_x64-setup.exe"
 }
 
@@ -102,7 +107,8 @@ package_appimage() {
   local appdir="$repo_root/target/pkg/appimage/Atelyx.AppDir"
   rm -rf "$appdir"
   mkdir -p "$appdir"
-  stage_payload "$appdir/usr" "$exe"
+  # stage_payload 自带 usr/ 前缀，这里传 AppDir 根，否则会铺成 usr/usr/
+  stage_payload "$appdir" "$exe"
   # AppImage 惯例：AppRun、desktop 与图标置于 AppDir 根
   ln -s usr/bin/atelyx "$appdir/AppRun"
   cp "$repo_root/distribution/linux/com.atelyx.desktop" "$appdir/atelyx.desktop"
@@ -112,7 +118,13 @@ package_appimage() {
     echo "错误：未找到 appimagetool；从 https://github.com/AppImage/appimagetool/releases 下载后放入 PATH" >&2
     exit 1
   fi
-  ARCH=x86_64 appimagetool "$appdir" "$dist/Atelyx_${version}-x86_64.AppImage" >"$dist/appimage-build.log"
+  local log="$dist/appimage-build.log"
+  # 同上：appimagetool 失败要把日志尾部回显出来（缺 mksquashfs 等依赖只在日志里可见）
+  if ! ARCH=x86_64 appimagetool "$appdir" "$dist/Atelyx_${version}-x86_64.AppImage" >"$log"; then
+    echo "错误：appimagetool 打包失败，日志尾部：" >&2
+    tail -n 20 "$log" >&2
+    exit 1
+  fi
   echo "==> 产物：$dist/Atelyx_${version}-x86_64.AppImage"
 }
 
