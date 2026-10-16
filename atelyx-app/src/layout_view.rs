@@ -2939,11 +2939,26 @@ fn note_view(app: &App) -> Element<'_, Message> {
     // 属性面板（只读 / 预览编辑档显示；源码档不渲染）
     let panel = crate::properties_view::props_panel(app, window, false);
 
+    // 编辑态高亮边框：预览编辑 / 源码档给正文区一圈 1px 强调边；只读档同宽透明，切档不位移。
+    let frame = if app.note_mode == NoteMode::Read {
+        Color::TRANSPARENT
+    } else {
+        pal::ACCENT
+    };
+
     let mut body = column![toolbar, controls::h_divider_subtle()];
     if let Some(p) = panel {
         body = body.push(p);
     }
-    body = body.push(container(content).width(Length::Fill).height(Length::Fill));
+    body = body.push(
+        container(content)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(move |_t| Style {
+                border: border::rounded(0.0).color(frame).width(1.0),
+                ..Style::default()
+            }),
+    );
     body = body.push(controls::h_divider_subtle());
     body = body.push(backlinks_section(app));
     // 面板内按压转播：编辑档「点击其他地方退出」的面板内外判定源。

@@ -8,12 +8,15 @@ use atelyx_core::markdown::{
     parse_inline, parse_markdown, InlineSpan, LinkForm, MarkdownBlock, MarkdownDocument,
     MarkdownListItem, MarkdownTableCell, ParseOptions,
 };
+use iced::advanced::text::{self as advanced_text, Paragraph as _};
+use iced::alignment;
 use iced::widget::text::{LineHeight, Rich, Span, Wrapping};
 use iced::widget::{
     button, checkbox, column, container, row, scrollable, table, text, Space, Stack,
 };
-use iced::{Border, Color, Element, Font, Length, Padding};
+use iced::{Border, Color, Element, Font, Length, Padding, Size};
 
+use crate::markdown_edit::ParagraphT;
 use crate::Message;
 
 /// 已载入的图片句柄（key = 图片 src 原文；载入与缓存管理在应用层，渲染只读）。
@@ -29,7 +32,7 @@ fn mono_size() -> f32 {
     crate::ui::palette::fs_caption()
 }
 const CODE_MAX_LINES: usize = 18;
-/// 列表标记悬挂列宽（内容与标记分列，嵌套列表随之逐层缩进）。
+/// 任务项标记列宽（勾选框所在窄列）。普通项的列宽按源码标记串实测，见 `item_marker_width`。
 const LIST_MARKER_W: f32 = 20.0;
 
 /// 编辑档可点的链接目标（外链 / 仓库路径 / wiki），命中后由视图层打开。
@@ -705,7 +708,7 @@ impl Render<'_> {
     }
 
     /// 列表行：每项一行（标记列 + 内容），项间空行、项内容与首个子块之间的空行、
-    /// 子块之间空行各自成空行行，嵌套子块按一个标记列的缩进递加。
+    /// 子块之间空行各自成空行行，嵌套子块按本项标记列宽递进缩进。
     fn push_list_rows<'a>(
         &self,
         source: &'a str,
@@ -718,17 +721,18 @@ impl Render<'_> {
             if pos > 0 {
                 self.push_blank_rows(source, items[pos - 1].to, item.from, &wraps, rows);
             }
-            let (_, ordinal) = item_marker(&source[item.from..item.to]);
+            let (marker_len, ordinal) = item_marker(&source[item.from..item.to]);
+            let marker_w = item_marker_width(source, item, marker_len);
             let (runs, content) = self.item_content_row(source, item);
             let (_, content_to) = item_content_range(source, item);
-            let marker = self.item_marker_cell(item, ordered, &ordinal);
+            let marker = self.item_marker_cell(item, ordered, &ordinal, marker_w);
             rows.push(EditRow {
                 kind: RowKind::Unit,
                 from: item.from,
                 to: content_to,
                 reveal: (item.from, content_to),
                 runs,
-                indent: wrap_indent(&wraps) + LIST_MARKER_W,
+                indent: wrap_indent(&wraps) + marker_w,
                 source: SourceKind::Prose { size: base_size(), line_height: LINE_HEIGHT },
                 gap_lines: Vec::new(),
                 code: None,
@@ -739,7 +743,7 @@ impl Render<'_> {
                 continue;
             }
             let mut child_wraps = wraps.clone();
-            child_wraps.push(RowWrap::Pad(LIST_MARKER_W));
+            child_wraps.push(RowWrap::Pad(marker_w));
             for (pos, child) in item.children.iter().enumerate() {
                 let lead = if pos == 0 {
                     content_to
@@ -850,6 +854,7 @@ impl Render<'_> {
         item: &MarkdownListItem,
         ordered: bool,
         ordinal: &str,
+        width: f32,
     ) -> Element<'a, Message> {
         if item.task {
             let from = item.from;
@@ -860,13 +865,13 @@ impl Render<'_> {
                 box_widget
             };
             container(box_widget)
-                .width(Length::Fixed(LIST_MARKER_W))
+                .width(Length::Fixed(width))
                 .padding(Padding { top: 2.0, ..Padding::default() })
                 .into()
         } else {
             let label = if ordered { ordinal.to_string() } else { "•".to_string() };
             container(text(label).size(base_size()).color(self.pal.muted))
-                .width(Length::Fixed(LIST_MARKER_W))
+                .width(Length::Fixed(width))
                 .into()
         }
     }
@@ -935,9 +940,10 @@ impl Render<'_> {
         ordered: bool,
         item: &'a MarkdownListItem,
     ) -> Element<'a, Message> {
-        let (_, ordinal) = item_marker(&source[item.from..item.to]);
+        let (marker_len, ordinal) = item_marker(&source[item.from..item.to]);
+        let marker_w = item_marker_width(source, item, marker_len);
         let (_, content) = self.item_content_row(source, item);
-        let marker = self.item_marker_cell(item, ordered, &ordinal);
+        let marker = self.item_marker_cell(item, ordered, &ordinal, marker_w);
         let (_, content_to) = item_content_range(source, item);
         let body = column![content]
             .width(Length::Fill)
@@ -1624,6 +1630,57 @@ fn item_marker(raw: &str) -> (usize, String) {
     (i, ordinal)
 }
 
+/// 列表项标记列宽：任务项维持勾选框窄列，其余按源码标记串（标记符与其后空白）的实测字宽——
+/// 编辑档揭示本行时正文列落在标记串之后，列宽取自源码字宽才能与渲染态重合、切揭示不横移。
+fn item_marker_width(source: &str, item: &MarkdownListItem, marker_len: usize) -> f32 {
+    if item.task {
+        return LIST_MARKER_W;
+    }
+    marker_column_width(&source[item.from..item.from + marker_len])
+}
+
+thread_local! {
+    /// 标记串字宽表（键 = 串 + 字号位）：字宽由 (串, 字号) 决定，字体在启动时载入。
+    static MARKER_WIDTHS: std::cell::RefCell<HashMap<(String, u32), f32>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// 字宽表条数上限（超出整体清空）。
+const MARKER_WIDTH_CAP: usize = 4096;
+
+/// 标记串字宽：与源码面同一逐字符 span 排版实测（列宽与揭示态对齐才不横移），
+/// 按 (串, 字号) 复用字宽表，免长列表每帧逐项重排。
+fn marker_column_width(marker: &str) -> f32 {
+    let key = (marker.to_string(), base_size().to_bits());
+    let cached = MARKER_WIDTHS.with(|cache| cache.borrow().get(&key).copied());
+    if let Some(width) = cached {
+        return width;
+    }
+    let spans: Vec<Span<'static, (), Font>> =
+        marker.chars().map(|ch| Span::new(ch.to_string()).font(Font::DEFAULT)).collect();
+    let width = ParagraphT::with_spans(advanced_text::Text {
+        content: spans.as_slice(),
+        bounds: Size::new(f32::INFINITY, f32::INFINITY),
+        size: base_size().into(),
+        line_height: LineHeight::Relative(LINE_HEIGHT),
+        font: Font::DEFAULT,
+        align_x: advanced_text::Alignment::Left,
+        align_y: alignment::Vertical::Top,
+        shaping: advanced_text::Shaping::Advanced,
+        wrapping: Wrapping::None,
+    })
+    .min_bounds()
+    .width;
+    MARKER_WIDTHS.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.len() > MARKER_WIDTH_CAP {
+            cache.clear();
+        }
+        cache.insert(key, width);
+    });
+    width
+}
+
 fn block_from(block: &MarkdownBlock) -> usize {
     match block {
         MarkdownBlock::Heading { from, .. }
@@ -1737,6 +1794,20 @@ mod tests {
         // 可见片段与源偏移一一对应（内容不含标记列）
         assert_eq!(rows[0].runs.len(), 1);
         assert_eq!(rows[0].runs[0].src, (2, 5));
+        // 标记列宽 = 源码标记串实测字宽（揭示本行时正文列不横移）
+        assert_eq!(rows[0].indent, marker_column_width("- "));
+    }
+
+    #[test]
+    fn marker_column_width_follows_source_marker() {
+        // 标记后的空白计入列宽（揭示态正文紧跟其后）；序号位数越多列越宽
+        assert!(marker_column_width("- ") > marker_column_width("-"));
+        assert!(marker_column_width("12) ") > marker_column_width("1. "));
+        // 任务项维持勾选框窄列
+        let source = "- [ ] 甲\n";
+        let doc = parse_document(source);
+        let images = ImageHandles::default();
+        let rows = edit_rows(source, &doc.blocks, &iced::Theme::Dark, &images);
         assert_eq!(rows[0].indent, LIST_MARKER_W);
     }
 
