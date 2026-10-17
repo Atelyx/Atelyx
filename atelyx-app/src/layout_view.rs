@@ -151,7 +151,7 @@ fn truncate_to_width(text: &str, max_w: f32, measure: impl Fn(&str) -> f32) -> S
     "…".to_string()
 }
 
-/// 面板标签文字（笔记/表格视图打开文件 = 文件名去扩展名后缀，否则视图名）。
+/// 面板标签文字（笔记/表格/画布视图打开文件 = 文件名去扩展名后缀，否则视图名）。
 pub fn tab_label(app: &App, view: &str) -> String {
     let file_label = |f: &str, ext: &str| {
         f.rsplit('/').next().unwrap_or(f).strip_suffix(ext).map(|s| s.to_string()).unwrap_or_else(|| f.to_string())
@@ -164,6 +164,11 @@ pub fn tab_label(app: &App, view: &str) -> String {
     if view == "table" {
         if let Some(f) = app.ui.last_table_file.as_deref() {
             return file_label(f, ".atb");
+        }
+    }
+    if view == "canvas" {
+        if let Some(f) = app.ui.last_canvas_file.as_deref() {
+            return file_label(f, ".atlx");
         }
     }
     view_label(app, view)
@@ -1415,6 +1420,7 @@ fn panel_tab<'a>(
     let label = tab_label(app, &t.view);
     let has_file = (t.view == "note" && app.ui.last_note_file.is_some())
         || (t.view == "table" && app.ui.last_table_file.is_some())
+        || (t.view == "canvas" && app.ui.last_canvas_file.is_some())
         || app
             .doc_open
             .as_ref()
@@ -1562,6 +1568,7 @@ fn view_content<'a>(app: &'a App, window: iced::window::Id, kind: &str) -> Eleme
         "search" => search_view(app),
         "inspector" => inspector_view(app, window),
         "table" => crate::table_view::table_view(app, window),
+        "canvas" => crate::canvas_view::canvas_view(app, window),
         "aichat" => crate::chat_view::chat_view(app, window),
         "collabroom" => collab_room_view(app),
         "recent" => crate::recent_view::recent_view(app),
@@ -1892,8 +1899,13 @@ fn search_view(app: &App) -> Element<'_, Message> {
     .into()
 }
 
-/// 属性面板视图：笔记属性（与编辑器属性区同一组件，改动经同一保存链落盘）。
+/// 属性面板视图：画布正作为激活标签展示（任一窗口前台）= 画布属性区，否则笔记属性
+/// （与编辑器属性区同一组件，改动经同一保存链落盘）。
 fn inspector_view<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, Message> {
+    // 画布属性只在画布处于前台时呈现：其他标签在前台时不得被画布属性顶掉
+    if app.canvas.is_some() && view_displayed(app, "canvas") {
+        return crate::canvas_view::props_panel(app);
+    }
     if app.ui.last_note_file.is_none() {
         return controls::view_placeholder(
             "info",
@@ -1955,6 +1967,7 @@ pub fn detached_view<'a>(
         let label = tab_label(app, &t.view);
         let has_file = (t.view == "note" && app.ui.last_note_file.is_some())
             || (t.view == "table" && app.ui.last_table_file.is_some())
+            || (t.view == "canvas" && app.ui.last_canvas_file.is_some())
             || app
                 .doc_open
                 .as_ref()
@@ -2675,6 +2688,7 @@ fn draft_input_row(app: &App, depth: usize) -> Element<'static, Message> {
                     DraftKind::Note => "笔记名称",
                     DraftKind::Folder => "文件夹名称",
                     DraftKind::Table => "表格名称",
+                    DraftKind::Canvas => "画布名称",
                     DraftKind::Doc { label, .. } => label,
                 },
             ),
@@ -2752,7 +2766,7 @@ fn file_icon(app: &App, name: &str) -> &'static str {
 fn file_icon_base(name: &str) -> &'static str {
     let lower = name.to_lowercase();
     if lower.ends_with(".atlx") {
-        "file-text"
+        "palette"
     } else if lower.ends_with(".canvas") {
         "layout-dashboard"
     } else if lower.ends_with(".md") {
@@ -2825,7 +2839,8 @@ fn push_children(
         let name = rel.rsplit('/').next().unwrap_or(&rel).to_string();
         let active = !is_dir
             && (app.ui.last_note_file.as_deref() == Some(rel.as_str())
-                || app.ui.last_table_file.as_deref() == Some(rel.as_str()));
+                || app.ui.last_table_file.as_deref() == Some(rel.as_str())
+                || app.ui.last_canvas_file.as_deref() == Some(rel.as_str()));
         rows.push(TreeRow { name, depth, is_dir, expanded: is_expanded, rel: rel.clone(), active, guides: Vec::new() });
         if is_dir && is_expanded {
             push_children(app, rows, &rel, depth + 1, expanded);
@@ -5676,7 +5691,7 @@ fn file_menu_entries(
 ) -> Vec<(usize, MenuEntry<'static>)> {
     let mut entries: Vec<(usize, MenuEntry)> = Vec::new();
     if is_dir {
-        entries.push((0, MenuEntry::action_icon("新建画布", "file-text", Message::NotImplemented("画布"))));
+        entries.push((0, MenuEntry::action_icon("新建画布", "palette", Message::DraftStart(rel.to_string(), crate::DraftKind::Canvas))));
         entries.push((0, MenuEntry::action_icon("新建笔记", "sticky-note",
             Message::DraftStart(rel.to_string(), DraftKind::Note))));
         entries.push((0, MenuEntry::action_icon("新建表格", "table", Message::DraftStart(rel.to_string(), crate::DraftKind::Table))));
@@ -5981,7 +5996,8 @@ pub fn panel_zones(app: &App) -> Vec<PanelZone> {
                                 &tab_label(app, &t.view),
                                 t.locked,
                                 (t.view == "note" && app.ui.last_note_file.is_some())
-                                    || (t.view == "table" && app.ui.last_table_file.is_some()),
+                                    || (t.view == "table" && app.ui.last_table_file.is_some())
+                                    || (t.view == "canvas" && app.ui.last_canvas_file.is_some()),
                             )
                         })
                         .collect()
@@ -6016,7 +6032,8 @@ fn walk_panels(node: &LayoutNode, area: Rectangle, out: &mut Vec<PanelZone>, app
                         &tab_label(app, &t.view),
                         t.locked,
                         (t.view == "note" && app.ui.last_note_file.is_some())
-                            || (t.view == "table" && app.ui.last_table_file.is_some()),
+                            || (t.view == "table" && app.ui.last_table_file.is_some())
+                            || (t.view == "canvas" && app.ui.last_canvas_file.is_some()),
                     )
                 })
                 .collect(),

@@ -1504,8 +1504,10 @@ fn on_wheel(app: &mut App, delta_y: f32, delta_x: f32) -> Task<Message> {
         (g.max_scroll_x(), g.max_scroll_y())
     };
     // winit 滚上 / 滚右为正：视口取负（内容随手势同向移动）
-    if app.mods.shift() {
-        s.view.scroll_x = (s.view.scroll_x - delta_y).clamp(0.0, max_x);
+    if app.mods.shift() || app.mods.alt() {
+        // Shift / Alt 横滚：普通鼠标只有纵向分量，退回 delta_y 驱动左右
+        let d = if delta_x != 0.0 { delta_x } else { delta_y };
+        s.view.scroll_x = (s.view.scroll_x - d).clamp(0.0, max_x);
     } else {
         s.view.scroll_y = (s.view.scroll_y - delta_y).clamp(0.0, max_y);
         s.view.scroll_x = (s.view.scroll_x - delta_x).clamp(0.0, max_x);

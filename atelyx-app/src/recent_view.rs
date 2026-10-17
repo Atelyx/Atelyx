@@ -25,6 +25,7 @@ use crate::{App, Message, RepoKind};
 pub enum RecentKind {
     Note,
     Table,
+    Canvas,
 }
 
 /// 最近打开条目（ui-state `recentFiles` 透传字段的磁盘结构，camelCase 契约）。
@@ -199,7 +200,7 @@ pub(crate) fn relative_ts(secs: i64, now: i64) -> String {
         .to_string()
 }
 
-/// 最近打开视图：按当前仓库身份过滤，行点击打开（复用 OpenFile，按扩展名分流笔记/表格）。
+/// 最近打开视图：按当前仓库身份过滤，行点击打开（复用 OpenFile，按扩展名分流笔记/表格/画布）。
 pub fn recent_view(app: &App) -> Element<'_, Message> {
     let Some(key) = vault_key_of(app) else {
         return controls::empty_state("clock", "未打开仓库", "打开仓库后显示", None);
@@ -221,7 +222,11 @@ pub fn recent_view(app: &App) -> Element<'_, Message> {
         let name = e.file.rsplit('/').next().unwrap_or(&e.file).to_string();
         let parent = e.file.rsplit_once('/').map(|(d, _)| d.to_string()).unwrap_or_default();
         let time = relative_ts(e.opened_at, now);
-        let kind_icon = if e.kind == RecentKind::Note { "file-text" } else { "table" };
+        let kind_icon = match e.kind {
+            RecentKind::Note => "file-text",
+            RecentKind::Table => "table",
+            RecentKind::Canvas => "palette",
+        };
         col = col.push(
             container(
                 button(

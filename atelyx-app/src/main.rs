@@ -12,8 +12,11 @@ mod calendar_grid;
 mod calendar_heat;
 mod calendar_month;
 mod calendar_view;
+mod canvas_actions;
+mod canvas_view;
 mod chat_actions;
 mod chat_input;
+mod chat_stream;
 mod chat_view;
 mod commands;
 mod history_browser;
@@ -460,7 +463,7 @@ enum Message {
     /// 右键切换撕裂窗口标签视图。
     DetachedSetTabView { window_id: String, tab_id: String, view: String },
     /// 关闭文件（×：摘下文件、标签保留回未打开态）。
-    /// × = 关文件留标签（kind = "note" / "table"，只关对应面）。
+    /// × = 关文件留标签（kind = "note" / "table" / "canvas"，只关对应面）。
     PanelTabFileClose(String),
     DetachedTabFileClose(String),
     /// 标签按下：拖拽候选由标签按钮自证命中（渲染自适应后几何不再可靠）。
@@ -512,6 +515,7 @@ enum Message {
     Ui(ui::UiMsg),
     /// 表格视图消息（交互 / 命令 / 保存链回执）。
     Table(table_view::TableMsg),
+    Canvas(canvas_view::CanvasMsg),
     /// 表格可见图片批量加载落地（gen 守卫）。
     TableImagesLoaded(u64, ImageLoadBatch),
     /// 键盘修饰态（Ctrl+滚轮缩放 / Shift+滚轮横滚判定源）。
@@ -743,6 +747,8 @@ pub enum DraftKind {
     Note,
     Folder,
     Table,
+    /// 画布（.atlx，初始空画布）。
+    Canvas,
     /// 插件领域文档（扩展名与展示标签取自插件注册）。
     Doc { extension: String, label: String },
 }
@@ -802,7 +808,7 @@ enum PendingAfterFlush {
     /// 从最近仓库列表进入指定仓库（from_boot 区分启动进入与运行中切换）。
     SelectVault { path: PathBuf, from_boot: bool },
     CloseMain(window::Id),
-    /// 关文件留标签（kind = "note" / "table"，只关对应面）。
+    /// 关文件留标签（kind = "note" / "table" / "canvas"，只关对应面）。
     CloseFileTab(String),
     /// 仓库内笔记链接（已解码；能进 flush 的只有 Path/Wiki/Create 形态，外链直接打开）。
     OpenLink(String),
@@ -914,9 +920,20 @@ pub enum SpaceMsg {
         result: Result<String, String>,
         frozen: atelyx_core::vault::TableFile,
     },
+    /// 空间画布补丁回执（new_file = 服务端标题漂移后的实际路径）。
+    CanvasPatchDone {
+        gen: u64,
+        file: String,
+        new_file: String,
+        reason: canvas_view::SaveReason,
+        result: Result<String, String>,
+        frozen: atelyx_core::vault::CanvasFile,
+    },
     /// 文件夹确认删除（needsConfirm 二段式的 force 步）。
     ForceDeleteFolder { gen: u64, rel: String },
     HistoryRecorded { err: Option<String> },
+    /// 画布回滚回执（成功且该画布仍打开则按服务端事实重读）。
+    CanvasRestored { gen: u64, rel: String, result: Result<(), String> },
     /// 设备会话列表落地（设置页「多人协作」）。
     DevicesLoaded {
         result: Result<Vec<atelyx_core::space_client::DeviceEntry>, atelyx_core::space_client::SpaceError>,
@@ -991,11 +1008,13 @@ pub struct App {
     vault: Arc<vault::VaultState>,
     /// 打开的表格会话（数据 + 保存基线 + 视图态；None = 未打开）。
     pub table: Option<table_view::TableSession>,
-    /// flush 放行后待续的动作（笔记与表格任一脏时挂起，全部落盘后执行）。
+    /// 画布会话（对称表格会话；None = 未打开）。
+    pub canvas: Option<canvas_view::CanvasSession>,
+    /// flush 放行后待续的动作（笔记 / 表格 / 画布任一脏时挂起，全部落盘后执行）。
     pub(crate) flush_pending: Option<PendingAfterFlush>,
     /// 键盘修饰态（Ctrl+滚轮缩放判定源）。
     pub mods: keyboard::Modifiers,
-    /// 历史面板当前作用的文件类型（载入笔记/表格时置位；读/回滚按它分派）。
+    /// 历史面板当前作用的文件类型（载入笔记/表格/画布时置位；读/回滚按它分派）。
     pub history_kind: atelyx_core::history::HistoryKind,
     /// 表格弹层内联输入草稿（改名 / 插列 / 添加字段共用；弹层关闭清零）。
     pub table_popup_draft: String,
@@ -1524,6 +1543,7 @@ impl App {
                 rebuild_links: settings_view::editor::RebuildLinksState::Idle,
                 history_kind: atelyx_core::history::HistoryKind::Note,
                 table: None,
+                canvas: None,
                 flush_pending: None,
                 mods: keyboard::Modifiers::default(),
                 table_popup_draft: String::new(),
@@ -1827,7 +1847,7 @@ impl App {
                 Task::none()
             }
             Message::Save => {
-                // Ctrl+S：单元格编辑先提交，笔记与表格各自手动保存（无打开内容 = 提示）
+                // Ctrl+S：单元格编辑先提交，笔记 / 表格 / 画布各自手动保存（无打开内容 = 提示）
                 table_actions::commit_edit(self);
                 let mut task = Task::none();
                 if self.ui.last_note_file.is_some() {
@@ -1837,7 +1857,13 @@ impl App {
                     task = task
                         .chain(table_actions::submit_table_save(self, table_view::SaveReason::Manual));
                 }
-                if self.ui.last_note_file.is_none() && self.table.is_none() {
+                if self.canvas.is_some() {
+                    task = task.chain(canvas_actions::submit_canvas_save(
+                        self,
+                        canvas_view::SaveReason::Manual,
+                    ));
+                }
+                if self.ui.last_note_file.is_none() && self.table.is_none() && self.canvas.is_none() {
                     self.notify(NoticeLevel::Warning, "没有打开的文件");
                 }
                 task
@@ -1854,6 +1880,12 @@ impl App {
                     if self.table.as_ref().is_some_and(|t| t.dirty) {
                         task = task
                             .chain(table_actions::submit_table_save(self, table_view::SaveReason::AutoSave));
+                    }
+                    if self.canvas.as_ref().is_some_and(|c| c.dirty) {
+                        task = task.chain(canvas_actions::submit_canvas_save(
+                            self,
+                            canvas_view::SaveReason::AutoSave,
+                        ));
                     }
                     return task;
                 }
@@ -2033,7 +2065,10 @@ impl App {
                         self.history_kind == atelyx_core::history::HistoryKind::Table
                             && self.ui.last_table_file.as_deref() == Some(rel.as_str())
                     }
-                    atelyx_core::history::HistoryKind::Canvas => false,
+                    atelyx_core::history::HistoryKind::Canvas => {
+                        self.history_kind == atelyx_core::history::HistoryKind::Canvas
+                            && self.ui.last_canvas_file.as_deref() == Some(rel.as_str())
+                    }
                 };
                 if gen == self.epoch() && (popup_matches || ctx_matches) {
                     // 无摘要的版本（协作空间早前记录、回滚）在加载时按 kind 补规模描述：
@@ -2069,8 +2104,13 @@ impl App {
                     }
                     Ok(()) => {
                         self.notify(NoticeLevel::Success, "已回滚");
+                        // 打开中的画布随磁盘事实重读会话（回滚直写不经会话链）
+                        let mut task = Task::none();
+                        if self.ui.last_canvas_file.as_deref() == Some(rel.as_str()) {
+                            task = task.chain(canvas_actions::load_canvas(self, &rel));
+                        }
                         // 记 restore 版本（尽力而为；回执经 HistoryRecorded 刷新弹层列表）
-                        self.record_canvas_restore_history(rel)
+                        task.chain(self.record_canvas_restore_history(rel))
                     }
                 }
             }
@@ -2869,6 +2909,17 @@ impl App {
                 // 滚动/载入后补拉可见区图片句柄（无待加载 = 无任务）
                 task.chain(table_actions::ensure_image_loads(self).unwrap_or_default())
             }
+            Message::Canvas(msg) => {
+                // 数据版本变化 = 画布编辑：与表格同口径推迟自动保存期限（拖拽中不排，松手收口）
+                let version_before = self.canvas.as_ref().map(|c| c.version);
+                let task = canvas_actions::on_msg(self, msg);
+                if self.canvas.as_ref().is_some_and(|c| {
+                    c.dirty && c.version != version_before.unwrap_or(0) && c.view.drag.is_none()
+                }) {
+                    self.autosave_deadline = Some(Instant::now() + AUTOSAVE_DEBOUNCE);
+                }
+                task
+            }
             Message::TableImagesLoaded(gen, results) => {
                 if gen != self.epoch() {
                     return Task::none();
@@ -3332,19 +3383,15 @@ impl App {
                 Task::none()
             }
             Message::DeleteEntry(rel, is_dir) => {
-                // 删除命中打开中的笔记/表格：挂起输入先落盘（防未保存内容被静默清空）
-                let hits = |open: Option<&str>| {
-                    open.is_some_and(|f| {
-                        if is_dir {
-                            f == rel || f.starts_with(&format!("{rel}/"))
-                        } else {
-                            f == rel
-                        }
-                    })
+                // 删除命中打开中的文件：挂起输入先落盘（防未保存内容被静默清空）
+                let hits = |open: &str| {
+                    if is_dir {
+                        open == rel || open.starts_with(&format!("{rel}/"))
+                    } else {
+                        open == rel
+                    }
                 };
-                let hits_open = hits(self.ui.last_note_file.as_deref())
-                    || hits(self.ui.last_table_file.as_deref());
-                if hits_open {
+                if space_actions::open_file_paths(self).iter().any(|f| hits(f)) {
                     self.gate(PendingAfterFlush::Delete { rel, is_dir })
                 } else {
                     self.dismiss_popup();
@@ -4003,13 +4050,15 @@ impl App {
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    /// 笔记与表格任一脏。
+    /// 笔记 / 表格 / 画布任一脏。
     fn any_dirty(&self) -> bool {
-        self.dirty || self.table.as_ref().is_some_and(|t| t.dirty)
+        self.dirty
+            || self.table.as_ref().is_some_and(|t| t.dirty)
+            || self.canvas.as_ref().is_some_and(|c| c.dirty)
     }
 
     /// 脏时先收尾挂起输入再放行动作；不脏直接执行。
-    /// 笔记与表格任一脏即挂起 pending，全部落盘后执行（after_any_flush）。
+    /// 笔记 / 表格 / 画布任一脏即挂起 pending，全部落盘后执行（after_any_flush）。
     fn gate(&mut self, pending: PendingAfterFlush) -> Task<Message> {
         // 在途单元格草稿先提交（提交即置脏，走下面的 flush；无改动 = 零成本直通）：
         // 打开/关闭/切仓库/改名/删除都会替换或丢弃表格会话，草稿不得随会话被静默丢弃
@@ -4031,6 +4080,9 @@ impl App {
         }
         if self.table.as_ref().is_some_and(|t| t.dirty) {
             task = task.chain(table_actions::submit_table_save(self, table_view::SaveReason::Flush));
+        }
+        if self.canvas.as_ref().is_some_and(|c| c.dirty) {
+            task = task.chain(canvas_actions::submit_canvas_save(self, canvas_view::SaveReason::Flush));
         }
         task
     }
@@ -4111,9 +4163,12 @@ impl App {
         )
     }
 
-    /// 打开文件（脏拦截已由 gate 处理）：按扩展名分流（.atb → 表格、插件注册的领域扩展名 → 插件文档面），
-    /// 复位只读并清掉上一文件的解析产物。
+    /// 打开文件（脏拦截已由 gate 处理）：按扩展名分流（.atlx → 画布、.atb → 表格、
+    /// 插件注册的领域扩展名 → 插件文档面），复位只读并清掉上一文件的解析产物。
     fn open_file(&mut self, rel: &str) -> Task<Message> {
+        if rel.ends_with(".atlx") {
+            return canvas_actions::open_canvas(self, rel);
+        }
         if rel.ends_with(".atb") {
             return table_actions::open_table(self, rel);
         }
@@ -4181,11 +4236,12 @@ impl App {
         }
         self.vault_switch_target = None;
         self.notify(NoticeLevel::Success, "仓库已打开");
-        // 运行中切换：当前打开的笔记与表格一并关闭（保存已由 gate 完成），
+        // 运行中切换：当前打开的笔记 / 表格 / 画布一并关闭（保存已由 gate 完成），
         // 「上次打开」记录随之清除，进入新仓库为未打开态
         if !from_boot {
             self.ui.last_note_file = None;
             self.ui.last_table_file = None;
+            self.ui.last_canvas_file = None;
             // 打开中的插件文档实例随切仓库关闭（旧容器路径失效，实例面撤下；投影任务丢弃，后续刷新兜底）
             let _ = plugin_actions::close_doc(self);
             self.note_mode = NoteMode::Read;
@@ -4209,6 +4265,8 @@ impl App {
         self.rename_notice = None;
         // 表格会话随仓库切换清空（载入在途不留旧数据）
         self.table = None;
+        // 画布会话随仓库切换清空（载入在途不留旧数据）
+        self.canvas = None;
         // 仓库级配置会话态随切仓清空（VaultMetaLoaded 落地后回填）
         self.exclude_folders.clear();
         self.attachment_folder = None;
@@ -4260,6 +4318,9 @@ impl App {
             }
             if let Some(rel) = self.ui.last_table_file.clone() {
                 task = task.chain(table_actions::load_table(self, &rel));
+            }
+            if let Some(rel) = self.ui.last_canvas_file.clone() {
+                task = task.chain(canvas_actions::load_canvas(self, &rel));
             }
         }
         task
@@ -4320,6 +4381,14 @@ impl App {
                 // 与笔记关闭同规：历史面板不再有对应文件可查，清空防列表冻结在旧数据
                 self.history.clear();
                 // 空间模式回收在场（名册不再滞留「正在编辑该表格」）
+                if matches!(self.repo_kind, RepoKind::Space(_)) {
+                    space_actions::send_presence(self);
+                }
+            }
+            "canvas" => {
+                self.ui.last_canvas_file = None;
+                self.canvas = None;
+                self.history.clear();
                 if matches!(self.repo_kind, RepoKind::Space(_)) {
                     space_actions::send_presence(self);
                 }
@@ -4542,7 +4611,7 @@ impl App {
 
     // ===== 历史侧车 =====
 
-    /// 读取当前上下文（笔记/表格）的历史版本（尽力而为，读失败 = 空列表）。
+    /// 读取当前上下文（笔记 / 表格 / 画布）的历史版本（尽力而为，读失败 = 空列表）。
     fn reload_history(&self) -> Task<Message> {
         let (kind, rel) = match self.history_kind {
             atelyx_core::history::HistoryKind::Note => {
@@ -4551,8 +4620,9 @@ impl App {
             atelyx_core::history::HistoryKind::Table => {
                 (atelyx_core::history::HistoryKind::Table, self.ui.last_table_file.clone())
             }
-            // 画布视图未接线：无打开上下文可读（弹层按显式 kind+file 经 load_history_for 读取）
-            atelyx_core::history::HistoryKind::Canvas => (atelyx_core::history::HistoryKind::Canvas, None),
+            atelyx_core::history::HistoryKind::Canvas => {
+                (atelyx_core::history::HistoryKind::Canvas, self.ui.last_canvas_file.clone())
+            }
         };
         match rel {
             Some(rel) => self.load_history_for(kind, &rel),
@@ -5095,6 +5165,36 @@ impl App {
                         self.schedule_persist();
                     }
                 }
+                if let Some(f) = &self.ui.last_canvas_file {
+                    let next = if f == from {
+                        Some(to.clone())
+                    } else if f.starts_with(&format!("{from}/")) {
+                        Some(f.replacen(from, to, 1))
+                    } else {
+                        None
+                    };
+                    if let Some(n) = next {
+                        if let Some(s) = &mut self.canvas {
+                            if s.file == *f || s.file.starts_with(&format!("{from}/")) {
+                                s.file = n.clone();
+                                // 画布内标题与文件名保持一致（空间服务端按 title 推导落盘路径）
+                                let stem = n
+                                    .rsplit('/')
+                                    .next()
+                                    .unwrap_or(n.as_str())
+                                    .strip_suffix(".atlx")
+                                    .unwrap_or(n.as_str());
+                                if s.data.title != stem {
+                                    s.data.title = stem.to_string();
+                                    s.touch();
+                                    self.autosave_deadline = Some(Instant::now() + AUTOSAVE_DEBOUNCE);
+                                }
+                            }
+                        }
+                        self.ui.last_canvas_file = Some(n);
+                        self.schedule_persist();
+                    }
+                }
                 space_actions::collab_follow_rename(self, from, to);
             }
             FollowUp::Deleted { rel, is_dir } => {
@@ -5131,6 +5231,21 @@ impl App {
                 if hit_table {
                     self.ui.last_table_file = None;
                     self.table = None;
+                    if matches!(self.repo_kind, RepoKind::Space(_)) {
+                        space_actions::send_presence(self);
+                    }
+                    self.schedule_persist();
+                }
+                let hit_canvas = self.ui.last_canvas_file.as_deref().is_some_and(|f| {
+                    if *is_dir {
+                        f == rel || f.starts_with(&format!("{rel}/"))
+                    } else {
+                        f == rel
+                    }
+                });
+                if hit_canvas {
+                    self.ui.last_canvas_file = None;
+                    self.canvas = None;
                     if matches!(self.repo_kind, RepoKind::Space(_)) {
                         space_actions::send_presence(self);
                     }
@@ -5212,6 +5327,7 @@ impl App {
                                     DraftKind::Note => format!("{name}.md"),
                                     DraftKind::Folder => name.clone(),
                                     DraftKind::Table => format!("{name}.atb"),
+                                    DraftKind::Canvas => format!("{name}.atlx"),
                                     DraftKind::Doc { extension, .. } => format!("{name}.{extension}"),
                                 };
                                 let mut candidate = base.clone();
@@ -5225,6 +5341,7 @@ impl App {
                                         DraftKind::Note => format!("{name}-{seq}.md"),
                                         DraftKind::Folder => format!("{name}-{seq}"),
                                         DraftKind::Table => format!("{name}-{seq}.atb"),
+                                        DraftKind::Canvas => format!("{name}-{seq}.atlx"),
                                         DraftKind::Doc { extension, .. } => format!("{name}-{seq}.{extension}"),
                                     };
                                     seq += 1;
@@ -5241,6 +5358,21 @@ impl App {
                                         let table = atelyx_core::table_ops::new_table_file(&name);
                                         let path = vault::safe_join(&root, &rel, true)?;
                                         vault::write_table_file(&path, &table).map(|_| rel)
+                                    }
+                                    DraftKind::Canvas => {
+                                        // 初始 = 空画布（标题随文件名起稿）
+                                        let now = now_secs() as i64;
+                                        let canvas = atelyx_core::vault::CanvasFile {
+                                            schema: vault::CANVAS_SCHEMA.into(),
+                                            id: uuid::Uuid::new_v4().to_string(),
+                                            title: name,
+                                            nodes: vec![],
+                                            edges: vec![],
+                                            created_at: now,
+                                            updated_at: now,
+                                        };
+                                        let path = vault::safe_join(&root, &rel, true)?;
+                                        vault::write_canvas_file(&path, &canvas).map(|_| rel)
                                     }
                                     // 领域文档初始为空文件：骨架内容随插件打开时自定（协作空间同构，通用文件对待）
                                     DraftKind::Doc { .. } => {

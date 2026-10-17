@@ -89,29 +89,19 @@ pub fn document_view<'a>(
     images: &'a ImageHandles,
     soft_break: bool,
 ) -> Element<'a, Message> {
-    let render = Render {
-        pal: Palette::from_theme(theme),
-        opts: link_options(),
-        interactive: false,
-        images,
-        soft_break,
-    };
-    let mut body = column![].width(Length::Fill).spacing(0);
-    for chunk in render.chunks(&doc.source, &doc.blocks) {
-        if chunk.gap_before > 0 {
-            body = body.push(gap(chunk.gap_before));
-        }
-        body = body.push(chunk.element);
-    }
-    container(body).width(Length::Fill).padding(16.0).into()
+    container(document_body_scaled(doc, theme, images, soft_break, 1.0))
+        .width(Length::Fill)
+        .padding(16.0)
+        .into()
 }
 
-/// 无根留白的正文体（调用方自带边距的场景，如对话面板——消息列已有 12px 边距）。
-pub fn document_body<'a>(
+/// 无根留白的正文体，字号按 `scale` 等比缩放（调用方自带边距；画布卡浮层传视口缩放、面板传 1.0）。
+pub fn document_body_scaled<'a>(
     doc: &'a MarkdownDocument,
     theme: &iced::Theme,
     images: &'a ImageHandles,
     soft_break: bool,
+    scale: f32,
 ) -> Element<'a, Message> {
     let render = Render {
         pal: Palette::from_theme(theme),
@@ -119,11 +109,12 @@ pub fn document_body<'a>(
         interactive: false,
         images,
         soft_break,
+        scale,
     };
     let mut body = column![].width(Length::Fill).spacing(0);
     for chunk in render.chunks(&doc.source, &doc.blocks) {
         if chunk.gap_before > 0 {
-            body = body.push(gap(chunk.gap_before));
+            body = body.push(gap(chunk.gap_before, render.scale));
         }
         body = body.push(chunk.element);
     }
@@ -150,7 +141,7 @@ pub fn block_meta(blocks: &[MarkdownBlock]) -> Vec<BlockMeta> {
                 from,
                 to,
                 list: matches!(b, MarkdownBlock::List { .. }),
-                source: block_source_style(b),
+                source: block_source_style(b, 1.0),
             }
         })
         .collect()
@@ -258,26 +249,26 @@ fn heading_size(level: u8) -> f32 {
         }
 }
 
-/// 块的源码态口径：结构块与散文块统一按整块源码回显，字号随块类型。
-fn block_source_style(block: &MarkdownBlock) -> SourceKind {
+/// 块的源码态口径：结构块与散文块统一按整块源码回显，字号随块类型（按 `scale` 缩放）。
+fn block_source_style(block: &MarkdownBlock, scale: f32) -> SourceKind {
     match block {
         MarkdownBlock::Heading { level, .. } => {
-            SourceKind::Prose { size: heading_size(*level), line_height: 1.3 }
+            SourceKind::Prose { size: heading_size(*level) * scale, line_height: 1.3 }
         }
         MarkdownBlock::Paragraph { .. }
         | MarkdownBlock::List { .. }
         | MarkdownBlock::Blockquote { .. } => {
-            SourceKind::Prose { size: base_size(), line_height: LINE_HEIGHT }
+            SourceKind::Prose { size: base_size() * scale, line_height: LINE_HEIGHT }
         }
         MarkdownBlock::FootnoteDef { .. } => {
-            SourceKind::Prose { size: base_size() * 0.9, line_height: LINE_HEIGHT }
+            SourceKind::Prose { size: base_size() * scale * 0.9, line_height: LINE_HEIGHT }
         }
         MarkdownBlock::FencedCode { .. }
         | MarkdownBlock::IndentedCode { .. }
         | MarkdownBlock::Table { .. }
         | MarkdownBlock::HtmlBlock { .. }
         | MarkdownBlock::MathBlock { .. }
-        | MarkdownBlock::Hr { .. } => SourceKind::Mono { size: mono_size() },
+        | MarkdownBlock::Hr { .. } => SourceKind::Mono { size: mono_size() * scale },
     }
 }
 
@@ -351,10 +342,10 @@ fn bar_line<'a>(color: Color, width: f32) -> Element<'a, Message> {
 }
 
 /// callout 类型徽标。
-fn callout_badge<'a>(name: &str, color: Color) -> Element<'a, Message> {
+fn callout_badge<'a>(name: &str, color: Color, scale: f32) -> Element<'a, Message> {
     container(
         text(name.to_uppercase())
-            .size(11)
+            .size(11.0 * scale)
             .font(Font { weight: iced::font::Weight::Semibold, ..Font::DEFAULT })
             .color(color),
     )
@@ -429,6 +420,7 @@ pub fn edit_rows<'a>(
         interactive: true,
         images,
         soft_break: true,
+        scale: 1.0,
     };
     render.rows(source, blocks)
 }
@@ -441,9 +433,24 @@ struct Render<'a> {
     images: &'a ImageHandles,
     /// 宽松换行（false = 段内单个换行渲染为空格；编辑档恒 true，见 block_chunks）。
     soft_break: bool,
+    /// 字号与行高倍数（画布卡浮层按视口缩放；面板与编辑面传 1.0）。
+    scale: f32,
 }
 
 impl Render<'_> {
+    // 字号助手：渲染链上的字号一律经此，随 scale 等比。
+    fn base(&self) -> f32 {
+        base_size() * self.scale
+    }
+
+    fn mono(&self) -> f32 {
+        mono_size() * self.scale
+    }
+
+    fn heading(&self, level: u8) -> f32 {
+        heading_size(level) * self.scale
+    }
+
     /// 块序列：每块附源区间与前置空行数（间距由调用方按空行数补行高）。
     fn chunks<'a>(&self, source: &'a str, blocks: &'a [MarkdownBlock]) -> Vec<BlockChunk<'a>> {
         let mut out = Vec::with_capacity(blocks.len());
@@ -473,7 +480,7 @@ impl Render<'_> {
             if let Some(lead) = lead {
                 let n = blank_line_count(source, lead, block_from(block));
                 if n > 0 {
-                    col = col.push(gap(n));
+                    col = col.push(gap(n, self.scale));
                 }
             }
             col = col.push(self.block(source, block));
@@ -488,7 +495,7 @@ impl Render<'_> {
                 st.font.weight = iced::font::Weight::Semibold;
                 rich(
                     self.spans(source, inline, st),
-                    heading_size(*level),
+                    self.heading(*level),
                     1.3,
                     None,
                     iced::alignment::Horizontal::Left,
@@ -500,7 +507,7 @@ impl Render<'_> {
                 } else {
                     rich(
                         self.spans(source, inline, TextStyle::base()),
-                        base_size(),
+                        self.base(),
                         LINE_HEIGHT,
                         None,
                         iced::alignment::Horizontal::Left,
@@ -576,10 +583,10 @@ impl Render<'_> {
             reveal: (from, to),
             runs: Vec::new(),
             indent: wrap_indent(&wraps),
-            source: SourceKind::Prose { size: base_size(), line_height: LINE_HEIGHT },
+            source: SourceKind::Prose { size: self.base(), line_height: LINE_HEIGHT },
             gap_lines: lines,
             code: None,
-            element: wrap_row(&wraps, gap(height)),
+            element: wrap_row(&wraps, gap(height, self.scale)),
             wraps,
         }
     }
@@ -645,7 +652,7 @@ impl Render<'_> {
                 runs = self.runs(source, inline, st);
                 rich(
                     self.run_spans(runs.clone()),
-                    heading_size(*level),
+                    self.heading(*level),
                     1.3,
                     None,
                     iced::alignment::Horizontal::Left,
@@ -658,7 +665,7 @@ impl Render<'_> {
                     runs = self.runs(source, inline, TextStyle::base());
                     rich(
                         self.run_spans(runs.clone()),
-                        base_size(),
+                        self.base(),
                         LINE_HEIGHT,
                         None,
                         iced::alignment::Horizontal::Left,
@@ -667,7 +674,7 @@ impl Render<'_> {
             }
             MarkdownBlock::FencedCode { lang, code: body, content_from, content_to, .. } => {
                 code = Some((*content_from, *content_to));
-                self.code_block(lang, body, Some(((*content_from, *content_to), mono_size())))
+                self.code_block(lang, body, Some(((*content_from, *content_to), self.mono())))
             }
             MarkdownBlock::IndentedCode { code: body, .. } => self.code_block("", body, None),
             MarkdownBlock::Hr { .. } => self.hr(),
@@ -684,7 +691,7 @@ impl Render<'_> {
                 });
                 footnote_content(
                     self.run_spans(runs.clone()),
-                    base_size() * 0.9,
+                    self.base() * 0.9,
                     self.pal.muted,
                 )
             }
@@ -699,7 +706,7 @@ impl Render<'_> {
             reveal: (from, to),
             runs,
             indent: wrap_indent(&row_wraps),
-            source: block_source_style(block),
+            source: block_source_style(block, 1.0),
             gap_lines: Vec::new(),
             code,
             element: wrap_row(&row_wraps, inner),
@@ -722,7 +729,7 @@ impl Render<'_> {
                 self.push_blank_rows(source, items[pos - 1].to, item.from, &wraps, rows);
             }
             let (marker_len, ordinal) = item_marker(&source[item.from..item.to]);
-            let marker_w = item_marker_width(source, item, marker_len);
+            let marker_w = item_marker_width(source, item, marker_len, self.scale);
             let (runs, content) = self.item_content_row(source, item);
             let (_, content_to) = item_content_range(source, item);
             let marker = self.item_marker_cell(item, ordered, &ordinal, marker_w);
@@ -733,7 +740,7 @@ impl Render<'_> {
                 reveal: (item.from, content_to),
                 runs,
                 indent: wrap_indent(&wraps) + marker_w,
-                source: SourceKind::Prose { size: base_size(), line_height: LINE_HEIGHT },
+                source: SourceKind::Prose { size: self.base(), line_height: LINE_HEIGHT },
                 gap_lines: Vec::new(),
                 code: None,
                 element: wrap_row(&wraps, row![marker, content].width(Length::Fill).into()),
@@ -772,7 +779,7 @@ impl Render<'_> {
         let mut inner_wraps = wraps;
         inner_wraps.push(RowWrap::Bar { color, width: QUOTE_BAR_W, pad: QUOTE_PAD, bg });
         if let Some(name) = callout {
-            let badge = callout_badge(name, color);
+            let badge = callout_badge(name, color, self.scale);
             rows.push(EditRow {
                 kind: RowKind::Deco,
                 from,
@@ -780,7 +787,7 @@ impl Render<'_> {
                 reveal: (from, from),
                 runs: Vec::new(),
                 indent: wrap_indent(&inner_wraps),
-                source: SourceKind::Prose { size: base_size(), line_height: LINE_HEIGHT },
+                source: SourceKind::Prose { size: self.base(), line_height: LINE_HEIGHT },
                 gap_lines: Vec::new(),
                 code: None,
                 element: wrap_row(
@@ -826,7 +833,7 @@ impl Render<'_> {
             let spans = self.run_spans(runs.clone());
             return (
                 runs,
-                rich(spans, base_size(), LINE_HEIGHT, None, iced::alignment::Horizontal::Left),
+                rich(spans, self.base(), LINE_HEIGHT, None, iced::alignment::Horizontal::Left),
             );
         }
         let inline = parse_inline(&stripped, 0, stripped.len(), &self.opts);
@@ -839,7 +846,7 @@ impl Render<'_> {
         let spans = self.run_spans(self.runs(&stripped, &inline, TextStyle::base()));
         (
             Vec::new(),
-            rich(spans, base_size(), LINE_HEIGHT, None, iced::alignment::Horizontal::Left),
+            rich(spans, self.base(), LINE_HEIGHT, None, iced::alignment::Horizontal::Left),
         )
     }
 
@@ -870,7 +877,7 @@ impl Render<'_> {
                 .into()
         } else {
             let label = if ordered { ordinal.to_string() } else { "•".to_string() };
-            container(text(label).size(base_size()).color(self.pal.muted))
+            container(text(label).size(self.base()).color(self.pal.muted))
                 .width(Length::Fixed(width))
                 .into()
         }
@@ -902,7 +909,7 @@ impl Render<'_> {
         let line = callout.map(|name| self.callout_color(name)).unwrap_or(self.pal.border);
         let content = self.blocks_column(source, Some(from), children);
         let content: Element<'a, Message> = match callout {
-            Some(name) => column![callout_badge(name, line), content]
+            Some(name) => column![callout_badge(name, line, self.scale), content]
                 .width(Length::Fill)
                 .spacing(4.0)
                 .into(),
@@ -926,7 +933,7 @@ impl Render<'_> {
             if index > 0 {
                 let n = blank_line_count(source, items[index - 1].to, item.from);
                 if n > 0 {
-                    col = col.push(gap(n));
+                    col = col.push(gap(n, self.scale));
                 }
             }
             col = col.push(self.list_item(source, ordered, item));
@@ -941,7 +948,7 @@ impl Render<'_> {
         item: &'a MarkdownListItem,
     ) -> Element<'a, Message> {
         let (marker_len, ordinal) = item_marker(&source[item.from..item.to]);
-        let marker_w = item_marker_width(source, item, marker_len);
+        let marker_w = item_marker_width(source, item, marker_len, self.scale);
         let (_, content) = self.item_content_row(source, item);
         let marker = self.item_marker_cell(item, ordered, &ordinal, marker_w);
         let (_, content_to) = item_content_range(source, item);
@@ -965,9 +972,9 @@ impl Render<'_> {
         let label = if lang.trim().is_empty() { "代码".to_string() } else { lang.to_string() };
         let head = container(
             row![
-                text(label).size(11).font(Font::MONOSPACE).color(self.pal.muted),
+                text(label).size(11.0 * self.scale).font(Font::MONOSPACE).color(self.pal.muted),
                 Space::new().width(Length::Fill),
-                button(text("复制").size(11))
+                button(text("复制").size(11.0 * self.scale))
                     .padding([2.0, 6.0])
                     .style(button::text)
                     .on_press(Message::CopyCode(code.to_string())),
@@ -984,9 +991,9 @@ impl Render<'_> {
         });
 
         let lines = code.trim_end_matches('\n').lines().count().max(1);
-        let height = lines.min(CODE_MAX_LINES) as f32 * mono_size() * 1.4 + 16.0;
+        let height = lines.min(CODE_MAX_LINES) as f32 * self.mono() * 1.4 + 16.0;
         let body = scrollable(
-            container(Self::code_body(code, hit)).padding(8.0),
+            container(Self::code_body(code, hit, self.scale)).padding(8.0),
         )
         .direction(scrollable::Direction::Both {
             vertical: scrollable::Scrollbar::new().width(6.0),
@@ -1006,9 +1013,9 @@ impl Render<'_> {
     }
 
     /// 等宽代码正文件：编辑档另包一层局部坐标上报（正文内落点换算需要正文自己的原点）。
-fn code_body<'a>(code: &str, hit: Option<((usize, usize), f32)>) -> Element<'a, Message> {
+fn code_body<'a>(code: &str, hit: Option<((usize, usize), f32)>, scale: f32) -> Element<'a, Message> {
     let text: Element<'a, Message> = text(code.to_string())
-        .size(mono_size())
+        .size(mono_size() * scale)
         .font(Font::MONOSPACE)
         .wrapping(Wrapping::None)
         .into();
@@ -1044,6 +1051,7 @@ fn code_body<'a>(code: &str, hit: Option<((usize, usize), f32)>) -> Element<'a, 
                 interactive: self.interactive,
                 images,
                 soft_break: self.soft_break,
+                scale: self.scale,
             };
             table::column(head, move |row: usize| {
                 let cell = rows.get(row).and_then(|r| r.get(i));
@@ -1084,7 +1092,7 @@ fn code_body<'a>(code: &str, hit: Option<((usize, usize), f32)>) -> Element<'a, 
         };
         container(rich(
             self.spans(source, &spans, TextStyle::base()),
-            base_size(),
+            self.base(),
             LINE_HEIGHT,
             None,
             alignment,
@@ -1104,7 +1112,7 @@ fn code_body<'a>(code: &str, hit: Option<((usize, usize), f32)>) -> Element<'a, 
         let panel = self.pal.panel;
         let border = self.pal.border;
         container(
-            text(content).size(mono_size()).font(Font::MONOSPACE).color(self.pal.muted),
+            text(content).size(self.mono()).font(Font::MONOSPACE).color(self.pal.muted),
         )
         .width(Length::Fill)
         .padding(8.0)
@@ -1124,7 +1132,7 @@ fn code_body<'a>(code: &str, hit: Option<((usize, usize), f32)>) -> Element<'a, 
                 background: Some(color.into()),
                 ..Default::default()
             });
-        let half = (gap_height() - 1.0) / 2.0;
+        let half = (gap_height(self.scale) - 1.0) / 2.0;
         container(line)
             .width(Length::Fill)
             .padding(Padding { top: half, bottom: half, ..Padding::default() })
@@ -1148,7 +1156,7 @@ fn code_body<'a>(code: &str, hit: Option<((usize, usize), f32)>) -> Element<'a, 
                 pad: 8.0,
                 bg: None,
             }],
-            footnote_content(spans, base_size() * 0.9, self.pal.muted),
+            footnote_content(spans, self.base() * 0.9, self.pal.muted),
         )
     }
 
@@ -1361,7 +1369,7 @@ fn code_body<'a>(code: &str, hit: Option<((usize, usize), f32)>) -> Element<'a, 
             .map(|run| {
                 let mut leaf = self.leaf(run.text, run.st);
                 if run.scale != 1.0 {
-                    leaf = leaf.size(base_size() * run.scale);
+                    leaf = leaf.size(self.base() * run.scale);
                 }
                 match run.link {
                     Some(target) => self.linked(leaf, target.href, target.form),
@@ -1414,7 +1422,7 @@ fn code_body<'a>(code: &str, hit: Option<((usize, usize), f32)>) -> Element<'a, 
                 let muted = self.pal.muted;
                 container(
                     text(format!("[图片：{name}]"))
-                        .size(base_size())
+                        .size(self.base())
                         .font(Font { style: iced::font::Style::Italic, ..Font::DEFAULT })
                         .color(muted),
                 )
@@ -1537,17 +1545,18 @@ fn rich<'a>(
     text.into()
 }
 
-/// 空行间距元素：一个源码空行 = 一行高。
+/// 空行间距元素：一个源码空行 = 一行高（行高按 `scale` 缩放）。
 /// 宽度须撑满：零宽行与视口的相交恒为空，编辑面会整行跳过空行的光标与选区底色。
-pub fn gap<'a>(lines: usize) -> Element<'a, Message> {
+pub fn gap<'a>(lines: usize, scale: f32) -> Element<'a, Message> {
     Space::new()
         .width(Length::Fill)
-        .height(Length::Fixed(lines as f32 * gap_height()))
+        .height(Length::Fixed(lines as f32 * gap_height(scale)))
         .into()
 }
 
-fn gap_height() -> f32 {
-    base_size() * LINE_HEIGHT
+/// 单根源码空行的行高随 `scale` 缩放。
+fn gap_height(scale: f32) -> f32 {
+    base_size() * scale * LINE_HEIGHT
 }
 
 /// 区间内的完整空行数（首尾两个片段不算完整行）：行内只有空白或引用标记 `>` 才算空行。
@@ -1632,11 +1641,11 @@ fn item_marker(raw: &str) -> (usize, String) {
 
 /// 列表项标记列宽：任务项维持勾选框窄列，其余按源码标记串（标记符与其后空白）的实测字宽——
 /// 编辑档揭示本行时正文列落在标记串之后，列宽取自源码字宽才能与渲染态重合、切揭示不横移。
-fn item_marker_width(source: &str, item: &MarkdownListItem, marker_len: usize) -> f32 {
+fn item_marker_width(source: &str, item: &MarkdownListItem, marker_len: usize, scale: f32) -> f32 {
     if item.task {
         return LIST_MARKER_W;
     }
-    marker_column_width(&source[item.from..item.from + marker_len])
+    marker_column_width(&source[item.from..item.from + marker_len], scale)
 }
 
 thread_local! {
@@ -1650,8 +1659,9 @@ const MARKER_WIDTH_CAP: usize = 4096;
 
 /// 标记串字宽：与源码面同一逐字符 span 排版实测（列宽与揭示态对齐才不横移），
 /// 按 (串, 字号) 复用字宽表，免长列表每帧逐项重排。
-fn marker_column_width(marker: &str) -> f32 {
-    let key = (marker.to_string(), base_size().to_bits());
+fn marker_column_width(marker: &str, scale: f32) -> f32 {
+    let size = base_size() * scale;
+    let key = (marker.to_string(), size.to_bits());
     let cached = MARKER_WIDTHS.with(|cache| cache.borrow().get(&key).copied());
     if let Some(width) = cached {
         return width;
@@ -1661,7 +1671,7 @@ fn marker_column_width(marker: &str) -> f32 {
     let width = ParagraphT::with_spans(advanced_text::Text {
         content: spans.as_slice(),
         bounds: Size::new(f32::INFINITY, f32::INFINITY),
-        size: base_size().into(),
+        size: size.into(),
         line_height: LineHeight::Relative(LINE_HEIGHT),
         font: Font::DEFAULT,
         align_x: advanced_text::Alignment::Left,
@@ -1795,14 +1805,14 @@ mod tests {
         assert_eq!(rows[0].runs.len(), 1);
         assert_eq!(rows[0].runs[0].src, (2, 5));
         // 标记列宽 = 源码标记串实测字宽（揭示本行时正文列不横移）
-        assert_eq!(rows[0].indent, marker_column_width("- "));
+        assert_eq!(rows[0].indent, marker_column_width("- ", 1.0));
     }
 
     #[test]
     fn marker_column_width_follows_source_marker() {
         // 标记后的空白计入列宽（揭示态正文紧跟其后）；序号位数越多列越宽
-        assert!(marker_column_width("- ") > marker_column_width("-"));
-        assert!(marker_column_width("12) ") > marker_column_width("1. "));
+        assert!(marker_column_width("- ", 1.0) > marker_column_width("-", 1.0));
+        assert!(marker_column_width("12) ", 1.0) > marker_column_width("1. ", 1.0));
         // 任务项维持勾选框窄列
         let source = "- [ ] 甲\n";
         let doc = parse_document(source);

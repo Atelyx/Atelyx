@@ -1,5 +1,5 @@
-//! AI 对话面板：会话侧栏 + 顶部行 + 消息流 + 输入区（user 气泡右对齐、assistant
-//! 无气泡全宽、思考/工具步折叠、悬浮操作按钮组、发送/停止圆钮）。
+//! AI 对话面板：会话侧栏 + 顶部行 + 输入区（发送/停止圆钮）；消息流渲染走
+//! [`crate::chat_stream`] 公共段（面板与画布对话卡共用，悬浮操作按钮组经操作钩子注入）。
 
 use iced::widget::{button, column, container, mouse_area, row, scrollable, space, stack, text, Space};
 use iced::widget::container::Style;
@@ -20,8 +20,6 @@ pub fn chat_view(app: &App, window: iced::window::Id) -> iced::Element<'_, Messa
 const SIDEBAR_INLINE_MIN_W: f32 = 640.0;
 /// 转圈动画每拍旋转角（UiTick 100ms 一拍；约 1 圈 / 秒）。
 const SPIN_STEP_RAD: f32 = 0.63;
-/// 折叠态摘要的单行字符上限（中英文混排按字符计）。
-const SUMMARY_LINE_CHARS: usize = 56;
 
 fn chat_root<'a>(app: &'a App, window: iced::window::Id) -> iced::Element<'a, Message> {
     if !app.chat.sidebar_open {
@@ -208,13 +206,6 @@ fn session_row<'a>(app: &'a App, s: &'a Value) -> iced::Element<'a, Message> {
     .into()
 }
 
-/// 单行纯文本（无行内 / 块级标记）= 可直接按文本渲染并按内容收缩。
-fn is_plain_line(source: &str) -> bool {
-    !source.contains('\n')
-        && source.chars().count() <= 200
-        && !source.contains(['*', '_', '`', '[', ']', '#', '>', '|', '\\', '~'])
-}
-
 fn rel_time(ts: i64) -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -397,30 +388,25 @@ fn message_flow(app: &App, window: iced::window::Id) -> iced::Element<'_, Messag
     if messages.is_empty() {
         return empty_flow();
     }
+    // 流式态只指向末条消息（渲染段按消息 id 判定，仅 assistant 块消费该标记）
     let streaming = is_streaming(app);
-    let last_idx = messages.len() - 1;
-    // 压缩标记插在折叠块之后、首条未折叠消息之前（锚点由注解携带）
-    let marker_idx = compaction_index(session);
-    let mut col = column![].spacing(10).padding(Padding::new(12.0));
-    for (i, m) in messages.iter().enumerate() {
-        if Some(i) == marker_idx {
-            if let Some(marker) = compaction_marker(session) {
-                col = col.push(marker);
-            }
-        }
-        let is_streaming_msg = streaming && i == last_idx && m["role"] == json!("assistant");
-        match m["role"].as_str() {
-            Some("user") => col = col.push(user_bubble(app, window, m)),
-            Some("assistant") => col = col.push(assistant_block(app, window, m, is_streaming_msg)),
-            _ => {}
-        }
-    }
-    // 折叠覆盖到末尾（刚压缩完的常态）：标记落在列表最后
-    if marker_idx == Some(messages.len()) {
-        if let Some(marker) = compaction_marker(session) {
-            col = col.push(marker);
-        }
-    }
+    let streaming_id = streaming
+        .then(|| messages.last())
+        .flatten()
+        .and_then(|m| m.get("id").and_then(Value::as_str));
+    let actions: crate::chat_stream::ActionsHook<'_> =
+        Box::new(move |m, is_assistant| action_row(app, window, m, is_assistant));
+    let ctx = crate::chat_stream::StreamCtx {
+        docs: &app.chat.docs,
+        images: &app.note_images,
+        expanded: &app.chat.expanded,
+        theme: &app.theme,
+        scale: 1.0,
+        actions: Some(actions),
+        streaming_id,
+        toggle: crate::chat_stream::ToggleRoute::Panel,
+    };
+    let col = crate::chat_stream::message_column(messages, session, ctx);
     // 覆盖层恒定 Stack 承载、按需追加：显隐不换型（Scrollable ↔ Stack 换型会整树重建、丢滚动位置）
     let flow = scrollable(
         container(col)
@@ -457,385 +443,15 @@ fn message_flow(app: &App, window: iced::window::Id) -> iced::Element<'_, Messag
     layered.into()
 }
 
-/// 压缩标记的插入位（消息数组下标；= 长度表示落在列表末尾）；无注解 / 锚点失配 = None。
-fn compaction_index(session: &Value) -> Option<usize> {
-    let compaction = session.get("compaction")?;
-    if compaction.is_null() {
-        return None;
-    }
-    let messages = session.get("messages").and_then(Value::as_array)?;
-    let anchor = compaction.get("upToMessageId").and_then(Value::as_str)?;
-    Some(
-        messages
-            .iter()
-            .position(|m| m.get("id").and_then(Value::as_str) == Some(anchor))
-            .map(|i| i + 1)
-            .unwrap_or(messages.len()),
-    )
-}
-
 fn empty_flow() -> iced::Element<'static, Message> {
     controls::empty_state("message-square", "开始新的 AI 对话", "", None)
-}
-
-/// 压缩注解标记（锚点为最后一条消息时渲染于列表末尾）。
-fn compaction_marker(session: &Value) -> Option<iced::Element<'static, Message>> {
-    let c = session.get("compaction")?;
-    if c.is_null() {
-        return None;
-    }
-    let summary = c.get("summary").and_then(Value::as_str).unwrap_or("");
-    let count = c.get("messageCount").and_then(Value::as_u64).unwrap_or(0);
-    let mut col = column![].spacing(4);
-    col = col.push(
-        text(format!("上下文已压缩 · 以上 {count} 条已折叠为摘要"))
-            .size(pal::fs_micro())
-            .color(pal::TEXT_MUTED),
-    );
-    if !summary.is_empty() {
-        col = col.push(
-            text(summary.to_string()).size(pal::fs_micro()).color(pal::TEXT_SECONDARY),
-        );
-    }
-    Some(
-        container(col)
-            .width(Length::Fill)
-            .padding(8.0)
-            .style(|_| container::Style {
-                border: border::Border {
-                    width: 0.5,
-                    radius: pal::RADIUS_MD.into(),
-                    color: pal::BORDER,
-                },
-                ..Default::default()
-            })
-            .into(),
-    )
-}
-
-/// user 气泡（右对齐、按内容收缩、上限 560px、displayContent 优先；引用标签按
-/// mention 胶囊渲染，图片附件出缩略图行）。
-fn user_bubble<'a>(
-    app: &'a App,
-    window: iced::window::Id,
-    m: &'a Value,
-) -> iced::Element<'a, Message> {
-    // displayContent 存在即以它为正文（可为空——纯图消息）；缺失（旧消息）回落 content
-    let source = match m.get("displayContent") {
-        Some(Value::String(s)) => s.as_str(),
-        _ => m.get("content").and_then(Value::as_str).unwrap_or(""),
-    };
-    // 引用标签签名与解析缓存同源（前缀：标签），命中才走 mention 胶囊文档
-    let sig = crate::chat_actions::mention_sig(m);
-    let mut col = column![].spacing(4);
-    // 正文：单行纯文本直接按文本渲染（Markdown 整段渲染恒撑满宽度，短句会得到
-    // 一个巨大的空盒子）；带引用的消息用 mention 候选解析（胶囊高亮）
-    let body: iced::Element<'a, Message> = if !sig.is_empty() {
-        doc_by_key(app, source, crate::chat_actions::doc_key(source, &sig))
-    } else if is_plain_line(source) {
-        text(source.to_string())
-            .size(pal::fs_body())
-            .color(pal::TEXT_PRIMARY)
-            .into()
-    } else {
-        markdown_doc(app, source)
-    };
-    col = col.push(
-        container(body)
-            .max_width(560.0)
-            .padding(10.0)
-            .style(|_| container::Style {
-                background: Some(pal::BG_TERTIARY.into()),
-                border: border::Border {
-                    width: 0.5,
-                    radius: pal::RADIUS_MD.into(),
-                    color: pal::BORDER,
-                },
-                ..Default::default()
-            }),
-    );
-    // 图片附件缩略图行（句柄未载入期间显示占位）
-    let thumbs = m
-        .get("attachments")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|a| a.get("kind").and_then(Value::as_str) == Some("image"))
-        .filter_map(|a| a.get("file").and_then(Value::as_str))
-        .map(|rel| attachment_thumb(app, rel));
-    let thumbs: Vec<_> = thumbs.collect();
-    if !thumbs.is_empty() {
-        col = col.push(row(thumbs).spacing(6));
-    }
-    col = col.push(action_row(app, window, m, false));
-    container(container(col).align_x(iced::alignment::Horizontal::Right).width(Length::Fill))
-        .width(Length::Fill)
-        .into()
-}
-
-/// 附件缩略图（上限 160px 见方；未载入显示占位块）。
-fn attachment_thumb<'a>(app: &'a App, rel: &str) -> iced::Element<'a, Message> {
-    let placeholder = || {
-        container(icon("image", 20.0, pal::TEXT_MUTED))
-            .width(96.0)
-            .height(64.0)
-            .align_y(iced::alignment::Vertical::Center)
-            .align_x(iced::alignment::Horizontal::Center)
-            .style(|_| container::Style {
-                background: Some(pal::BG_TERTIARY.into()),
-                border: border::Border {
-                    width: 0.5,
-                    radius: pal::RADIUS_SM.into(),
-                    color: pal::BORDER,
-                },
-                ..Default::default()
-            })
-            .into()
-    };
-    match app.note_images.get(rel) {
-        Some(handle) => iced::widget::image(handle.clone())
-            .width(Length::Fixed(160.0))
-            .height(Length::Fixed(160.0))
-            .filter_method(iced::widget::image::FilterMethod::Linear)
-            .into(),
-        None => placeholder(),
-    }
-}
-
-/// assistant 块（无气泡全宽）：步骤块（思考 / 工具可折叠 / 叙述行）+ 最终正文 + 操作。
-fn assistant_block<'a>(
-    app: &'a App,
-    window: iced::window::Id,
-    m: &'a Value,
-    streaming: bool,
-) -> iced::Element<'a, Message> {
-    let content = m.get("content").and_then(Value::as_str).unwrap_or("");
-    let message_id = m.get("id").and_then(Value::as_str).unwrap_or("").to_string();
-    let steps = m.get("steps").and_then(Value::as_array);
-    let mut col = column![].spacing(6);
-    if let Some(steps) = steps {
-        let last_step = steps.len().saturating_sub(1);
-        for (idx, s) in steps.iter().enumerate() {
-            let key = format!("{message_id}:{idx}");
-            match s.get("kind").and_then(Value::as_str) {
-                Some("reasoning") => {
-                    col = col.push(reasoning_block(app, s, streaming && idx == last_step, &key))
-                }
-                Some("text") => {
-                    let t = s.get("text").and_then(Value::as_str).unwrap_or("");
-                    if !t.is_empty() {
-                        col = col.push(markdown_doc(app, t));
-                    }
-                }
-                Some("tool") => col = col.push(tool_block(app, s, &key)),
-                _ => {}
-            }
-        }
-    }
-    let has_tools = steps
-        .map(|ss| ss.iter().any(|s| s.get("kind") == Some(&json!("tool"))))
-        .unwrap_or(false);
-    if has_tools && !content.is_empty() {
-        col = col.push(controls::h_divider_subtle());
-    }
-    if !content.is_empty() {
-        col = col.push(markdown_doc(app, content));
-    } else if streaming && steps.map(|ss| ss.is_empty()).unwrap_or(true) {
-        col = col.push(text("生成中…").size(pal::fs_caption()).color(pal::TEXT_MUTED));
-    }
-    col = col.push(action_row(app, window, m, true));
-    container(col).width(Length::Fill).into()
-}
-
-/// 思考块：折叠态一行摘要（流式取最新一行、完成后取首行）。
-fn reasoning_block<'a>(
-    app: &'a App,
-    s: &'a Value,
-    streaming: bool,
-    key: &str,
-) -> iced::Element<'a, Message> {
-    let full = s.get("text").and_then(Value::as_str).unwrap_or("");
-    let summary = if streaming {
-        full.lines().rfind(|l| !l.trim().is_empty()).unwrap_or("").trim()
-    } else {
-        full.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim()
-    };
-    details_block(
-        app,
-        key,
-        StepBlock {
-            leading: vec![icon("brain", 12.0, pal::TEXT_MUTED)],
-            title: "思考过程".to_string(),
-            summary: summary.to_string(),
-            mono_summary: false,
-            body: full.to_string(),
-            empty_hint: "思考内容为空",
-        },
-    )
-}
-
-/// 工具块：折叠态 = 状态色图示 + 工具名 + 等宽参数/结果摘要；展开态 = 参数与结果分节。
-fn tool_block<'a>(app: &'a App, s: &'a Value, key: &str) -> iced::Element<'a, Message> {
-    let run = s.get("run").cloned().unwrap_or(Value::Null);
-    let name = run.get("name").and_then(Value::as_str).unwrap_or("tool").to_string();
-    let status = run.get("status").and_then(Value::as_str).unwrap_or("running");
-    let args_summary = run.get("argsSummary").and_then(Value::as_str).unwrap_or("");
-    let result_summary = run.get("resultSummary").and_then(Value::as_str).unwrap_or("");
-    let args_json = run.get("args").map(pretty_json).unwrap_or_default();
-    let result = run.get("result").and_then(Value::as_str).unwrap_or("");
-    let detail = format!(
-        "参数\n{}\n\n结果\n{}",
-        if args_json.is_empty() { "—" } else { args_json.as_str() },
-        if status == "running" {
-            "进行中…".to_string()
-        } else if result.is_empty() {
-            result_summary.to_string()
-        } else {
-            result.to_string()
-        }
-    );
-    let summary = if result_summary.is_empty() {
-        args_summary.to_string()
-    } else {
-        format!("{args_summary} · {result_summary}")
-    };
-    let (status_icon, status_color) = match status {
-        "error" => ("circle-x", pal::DANGER),
-        "done" => ("check", pal::SUCCESS),
-        _ => ("loader-circle", pal::TEXT_MUTED),
-    };
-    details_block(
-        app,
-        key,
-        StepBlock {
-            leading: vec![
-                icon(tool_icon(&name), 12.0, pal::TEXT_MUTED),
-                icon(status_icon, 11.0, status_color),
-            ],
-            title: crate::settings_view::ai::tool_label(&name).to_string(),
-            summary,
-            mono_summary: true,
-            body: detail,
-            empty_hint: "",
-        },
-    )
-}
-
-fn pretty_json(v: &Value) -> String {
-    serde_json::to_string_pretty(v).unwrap_or_else(|_| v.to_string())
-}
-
-fn tool_icon(name: &str) -> &'static str {
-    match name {
-        "web_search" => "globe",
-        "web_fetch" => "link",
-        "read_file" | "read_history" => "file-text",
-        "glob" | "grep" => "search",
-        "edit_file" => "pen-line",
-        "write_file" | "append_file" => "file-plus",
-        _ => "wrench",
-    }
-}
-
-/// 步骤块的展示内容：折叠态（前置图形 + 标题 + 摘要）与展开态正文。
-struct StepBlock<'a> {
-    leading: Vec<iced::Element<'a, Message>>,
-    title: String,
-    summary: String,
-    /// 摘要是否等宽字体（工具参数 / 结果摘要用）。
-    mono_summary: bool,
-    body: String,
-    empty_hint: &'a str,
-}
-
-/// 可折叠步骤块（思考 / 工具共用）：折叠态一行，展开态正文（超高滚动）。
-/// 展开态存 `ChatState.expanded`（键 = 消息 id + 步骤序号）。
-/// 折叠块摘要单行化：换行折叠为空格 + 按字符数截断加省略号（工具结果天然多行）。
-fn one_line(s: &str, cap_chars: usize) -> String {
-    let mut out: String = s.chars().filter(|c| !c.is_control()).take(cap_chars + 1).collect();
-    if out.chars().count() > cap_chars {
-        out = out.chars().take(cap_chars).collect();
-        out.push('\u{2026}');
-    }
-    out
-}
-
-fn details_block<'a>(app: &'a App, key: &str, spec: StepBlock<'a>) -> iced::Element<'a, Message> {
-    let StepBlock {
-        leading,
-        title,
-        summary,
-        mono_summary,
-        body,
-        empty_hint,
-    } = spec;
-    let open = app.chat.expanded.contains(key);
-    let mut head = row![icon(
-        if open { "chevron-down" } else { "chevron-right" },
-        12.0,
-        pal::TEXT_MUTED
-    )]
-    .spacing(6)
-    .align_y(iced::alignment::Vertical::Center);
-    for item in leading {
-        head = head.push(item);
-    }
-    head = head.push(text(title).size(pal::fs_micro()).color(pal::TEXT_SECONDARY));
-    if !summary.is_empty() {
-        // 折叠态头部恒一行：超长摘要视图层截断（展开正文仍完整），防头部被撑成多行
-        let mut summary_text =
-            text(one_line(&summary, SUMMARY_LINE_CHARS))
-                .size(pal::fs_micro())
-                .color(pal::TEXT_MUTED);
-        if mono_summary {
-            summary_text = summary_text.font(crate::layout_view::mono());
-        }
-        head = head.push(summary_text);
-    }
-    let header = button(container(head).width(Length::Fill))
-        .width(Length::Fill)
-        .padding(Padding::ZERO.vertical(5.0))
-        .style(controls::row_style(false, pal::RADIUS_XS))
-        .on_press(Message::Chat(ChatMsg::ToggleStep(key.to_string())));
-    let mut col = column![header];
-    if open {
-        if !body.is_empty() {
-            col = col.push(controls::h_divider_subtle());
-            col = col.push(
-                scrollable(
-                    container(text(body.to_string()).size(pal::fs_micro()).color(pal::TEXT_SECONDARY))
-                        .width(Length::Fill)
-                        .padding(Padding::ZERO.vertical(6.0)),
-                )
-                .height(160.0),
-            );
-        } else if !empty_hint.is_empty() {
-            col = col.push(
-                container(text(empty_hint.to_string()).size(pal::fs_micro()).color(pal::TEXT_MUTED))
-                    .padding(Padding::ZERO.vertical(6.0)),
-            );
-        }
-    }
-    // 卡片与回复正文同宽同位：正文已无根留白，卡片无需额外内缩（消息列边距即两者共同边界）
-    container(col)
-        .width(Length::Fill)
-        .style(|_| container::Style {
-            background: Some(pal::BG_SUNKEN.into()),
-            border: border::Border {
-                width: 0.5,
-                radius: pal::RADIUS_SM.into(),
-                color: pal::BORDER,
-            },
-            ..Default::default()
-        })
-        .into()
 }
 
 /// 消息操作按钮组（复制 / 回到此处 / 重新生成；条件与对话面板约定一致）。
 fn action_row<'a>(
     app: &'a App,
     window: iced::window::Id,
-    m: &'a Value,
+    m: &Value,
     is_assistant: bool,
 ) -> iced::Element<'a, Message> {
     let content = m.get("content").and_then(Value::as_str).unwrap_or("");
@@ -1145,24 +761,4 @@ fn model_select_trigger(app: &App, window: iced::window::Id) -> iced::Element<'s
         0.0,
     ))
     .into()
-}
-
-/// 对话消息 markdown 渲染（复用阅读面管线；解析缓存由 ChatState 维护，
-/// 未命中回落纯文本）。图片暂不参与（对话消息内嵌图片走后续批次）。
-fn markdown_doc<'a>(app: &'a App, source: &'a str) -> iced::Element<'a, Message> {
-    doc_by_key(app, source, crate::chat_actions::source_hash(source))
-}
-
-/// 按缓存键取解析文档渲染（键由调用方决定：普通 = 源哈希；带引用 = 源 + 引用签名）。
-fn doc_by_key<'a>(app: &'a App, source: &'a str, key: u64) -> iced::Element<'a, Message> {
-    static EMPTY_IMAGES: std::sync::OnceLock<crate::markdown_view::ImageHandles> =
-        std::sync::OnceLock::new();
-    let images = EMPTY_IMAGES.get_or_init(std::collections::HashMap::new);
-    match app.chat.docs.get(&key) {
-        Some(doc) => crate::markdown_view::document_body(doc, &app.theme, images, true),
-        None => text(source.to_string())
-            .size(pal::fs_body())
-            .color(pal::TEXT_PRIMARY)
-            .into(),
-    }
 }

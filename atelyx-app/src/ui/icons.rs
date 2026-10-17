@@ -90,7 +90,7 @@ pub const NAMES: &[&str] = &[
     "clipboard-paste",
     "columns-3",
     "align-vertical-space-around",
-    // 对话面板与设置页用到的形状
+    // 对话面板 / 画布 / 设置页用到的形状
     "arrow-up",
     "message-square",
     "file-plus",
@@ -100,6 +100,11 @@ pub const NAMES: &[&str] = &[
     "brain",
     "wrench",
     "link",
+    "image",
+    "align-left",
+    "box",
+    "zoom-in",
+    "zoom-out",
 ];
 
 /// 一个图标的组成图元（lucide 图标 = 路径/圆/矩形/线段的组合）。
@@ -220,6 +225,11 @@ pub fn icon(name: &str) -> Option<&'static [Shape]> {
     ],
     "wrench" => &[Shape::Path("M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.106-3.105c.32-.322.863-.22.983.218a6 6 0 0 1-8.259 7.057l-7.91 7.91a1 1 0 0 1-2.999-3l7.91-7.91a6 6 0 0 1 7.057-8.259c.438.12.54.662.219.984z")],
     "link" => &[Shape::Path("M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"), Shape::Path("M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71")],
+    "image" => &[Shape::Rect(3.0, 3.0, 18.0, 18.0, 2.0), Shape::Circle(9.0, 9.0, 2.0), Shape::Path("m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21")],
+    "align-left" => &[Shape::Line([21.0, 6.0, 3.0, 6.0]), Shape::Line([15.0, 12.0, 3.0, 12.0]), Shape::Line([17.0, 18.0, 3.0, 18.0])],
+    "box" => &[Shape::Path("M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"), Shape::Path("m3.3 7 8.7 5 8.7-5"), Shape::Path("M12 22V12")],
+    "zoom-in" => &[Shape::Circle(11.0, 11.0, 8.0), Shape::Line([21.0, 21.0, 16.65, 16.65]), Shape::Line([11.0, 8.0, 11.0, 14.0]), Shape::Line([8.0, 11.0, 14.0, 11.0])],
+    "zoom-out" => &[Shape::Circle(11.0, 11.0, 8.0), Shape::Line([21.0, 21.0, 16.65, 16.65]), Shape::Line([8.0, 11.0, 14.0, 11.0])],
         _ => return None,
     })
 }

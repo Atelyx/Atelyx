@@ -127,7 +127,7 @@ impl VaultState {
 // ===== .atlx 文件结构 =====
 // data 用 serde_json::Value，不耦合业务字段；rename_all = "camelCase"。
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct CanvasFile {
     #[serde(default)]

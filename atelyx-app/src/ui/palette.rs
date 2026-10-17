@@ -84,6 +84,17 @@ pub const EVENT_COLORS: [Color; 7] = [
     rgb(0xd1, 0x9a, 0x66),
 ];
 
+// ===== 画布分组色板 =====
+/// 画布分组卡 6 色（`data.color` 存 "1".."6"，序即取值）
+pub const CANVAS_GROUP_COLORS: [Color; 6] = [
+    rgb(0x5f, 0xbf, 0x8b),
+    rgb(0xe0, 0xa9, 0x4e),
+    rgb(0xe8, 0x77, 0x6c),
+    rgb(0x64, 0xa8, 0xf0),
+    rgb(0xb0, 0x8c, 0xe0),
+    rgb(0x64, 0xc8, 0xc8),
+];
+
 // ===== 标题栏窗口控制 =====
 /// 标题栏按钮图标色
 pub const TITLEBAR_ICON: Color = TEXT_SECONDARY;

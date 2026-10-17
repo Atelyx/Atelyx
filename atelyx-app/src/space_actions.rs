@@ -6,6 +6,7 @@ use iced::Task;
 use iced::widget::text_editor;
 
 use crate::layout_view::{RenameState, RenameTarget};
+use crate::canvas_actions;
 use crate::table_view as tv;
 use crate::ui::notify::Level as NoticeLevel;
 use crate::{
@@ -786,11 +787,12 @@ pub fn enter_space(app: &mut App, session: SpaceSession, from_boot: bool) -> Tas
     task = task.chain(refresh_space_tags(app));
     task = task.chain(load_space_meta(app));
     task = task.chain(app.save_global());
-    // 运行中切换：当前打开的笔记与表格一并关闭（保存已由 gate 完成），
+    // 运行中切换：当前打开的笔记、表格与画布一并关闭（保存已由 gate 完成），
     // 「上次打开」记录随之清除，进入新空间为未打开态
     if !from_boot {
         app.ui.last_note_file = None;
         app.ui.last_table_file = None;
+        app.ui.last_canvas_file = None;
         app.note_mode = crate::NoteMode::Read;
         app.note_edit_caret_pending = false;
         app.note_press_inside = false;
@@ -802,6 +804,9 @@ pub fn enter_space(app: &mut App, session: SpaceSession, from_boot: bool) -> Tas
         }
         if let Some(rel) = app.ui.last_table_file.clone() {
             task = task.chain(space_load_table(app, &rel));
+        }
+        if let Some(rel) = app.ui.last_canvas_file.clone() {
+            task = task.chain(crate::canvas_actions::load_canvas(app, &rel));
         }
     }
     task
@@ -824,6 +829,7 @@ fn clear_session_state(app: &mut App) {
     app.expand_pending = 0;
     app.rename_notice = None;
     app.table = None;
+    app.canvas = None;
     app.space_note_flushed = None;
     app.space_note_save_inflight = false;
     app.space_note_save_flush_queued = false;
@@ -934,6 +940,9 @@ pub fn handle(app: &mut App, msg: SpaceMsg) -> Task<Message> {
         SpaceMsg::TablePatchDone { gen, file, new_file, reason, result, frozen } => {
             on_table_patch_done(app, gen, file, new_file, reason, result, frozen)
         }
+        SpaceMsg::CanvasPatchDone { gen, file, new_file, reason, result, frozen } => {
+            on_canvas_patch_done(app, gen, file, new_file, reason, result, frozen)
+        }
         SpaceMsg::ForceDeleteFolder { gen, rel } => {
             app.dismiss_popup();
             app.delete_confirm = None;
@@ -954,6 +963,29 @@ pub fn handle(app: &mut App, msg: SpaceMsg) -> Task<Message> {
             // 侧文件有新版本：面板聚合缓存失效，下个 tick 重取（展示中）
             app.repo_history = None;
             Task::none()
+        }
+        SpaceMsg::CanvasRestored { gen, rel, result } => {
+            // 世代守卫：切空间 / 切仓库后回执过期，不得越会话提示或触发重读
+            if gen != app.epoch() {
+                return Task::none();
+            }
+            match result {
+                Err(e) => {
+                    app.notify(NoticeLevel::Warning, e);
+                    app.repo_history = None;
+                    Task::none()
+                }
+                Ok(()) => {
+                    app.notify(NoticeLevel::Success, "已回滚");
+                    app.repo_history = None;
+                    // 快照直写不经会话链：仍打开的画布须按服务端事实重读，否则界面与 `saved` 基线停在回滚前
+                    if app.ui.last_canvas_file.as_deref() == Some(rel.as_str()) {
+                        space_load_canvas(app, &rel)
+                    } else {
+                        Task::none()
+                    }
+                }
+            }
         }
         SpaceMsg::DevicesLoaded { result } => match result {
             Err(e) => on_error(app, e, "设备列表获取失败"),
@@ -1712,6 +1744,254 @@ fn on_table_patch_done(
     task
 }
 
+// ===== 画布（空间模式） =====
+
+/// 空间模式载入 .atlx：画布文本 + 引用内容一并拉取（文本 / 媒体 / 图片取字节端点，表格走文本端点）。
+pub fn space_load_canvas(app: &App, rel: &str) -> Task<Message> {
+    let Some(session) = session_of(app) else { return Task::none() };
+    let gen = app.epoch();
+    let rel_owned = rel.to_string();
+    let rel_for_cb = rel_owned.clone();
+    let client = session.client;
+    let space_id = session.space_id;
+    Task::perform(
+        async move {
+            let rel = rel_owned;
+            let text = client.get_file_text(&space_id, &rel).await.map_err(err_text)?;
+            let canvas: atelyx_core::vault::CanvasFile =
+                serde_json::from_str(&text).map_err(|e| format!("画布解析失败：{e}"))?;
+            let docs = canvas_actions::prepare_docs(&canvas);
+            let mut refs: HashMap<String, canvas_actions::RefRaw> = HashMap::new();
+            for (path, kind) in canvas_actions::collect_ref_paths(&canvas) {
+                // 与本地同口径：取原始字节，UTF-8 可解码 = 文本，否则 = 二进制占位，读不到 = 缺失。
+                // 不经文本端点——它按 lossy 解码返回，非文本内容与缺失在响应里无从区分
+                let raw = match kind {
+                    canvas_actions::RefKind::Text | canvas_actions::RefKind::Media => {
+                        match client.get_file_bytes(&space_id, &path).await {
+                            Ok(bytes) => match String::from_utf8(bytes) {
+                                Ok(t) => canvas_actions::RefRaw::Text(t),
+                                Err(_) => canvas_actions::RefRaw::Binary,
+                            },
+                            Err(_) => canvas_actions::RefRaw::Missing,
+                        }
+                    }
+                    canvas_actions::RefKind::Image => match client.get_file_bytes(&space_id, &path).await {
+                        Ok(bytes) => {
+                            let (width, height) = canvas_actions::image_dimensions(&bytes);
+                            canvas_actions::RefRaw::Image { bytes, width, height }
+                        }
+                        Err(_) => canvas_actions::RefRaw::Missing,
+                    },
+                    canvas_actions::RefKind::Table => match client.get_file_text(&space_id, &path).await {
+                        Ok(t) => serde_json::from_str::<atelyx_core::vault::TableFile>(&t)
+                            .map(|tb| canvas_actions::RefRaw::Table {
+                                summary: format!("{} 字段 · {} 行", tb.fields.len(), tb.rows.len()),
+                            })
+                            .unwrap_or(canvas_actions::RefRaw::Missing),
+                        Err(_) => canvas_actions::RefRaw::Missing,
+                    },
+                };
+                refs.insert(path, raw);
+            }
+            let text_docs = canvas_actions::prepare_text_docs(&canvas, &refs);
+            Ok(canvas_actions::LoadOut { canvas, docs, text_docs, refs })
+        },
+        move |result| Message::Canvas(crate::canvas_view::CanvasMsg::Loaded(gen, rel_for_cb, result)),
+    )
+}
+
+/// 空间模式画布保存：基线 diff → 服务端补丁仲裁（id 不符回退全量），回执走 Space 消息。
+/// 对称 space_submit_table_save；title 漂移 = 服务端改路径，本端随回执跟随。
+pub fn space_submit_canvas_save(app: &mut App, reason: crate::canvas_view::SaveReason) -> Task<Message> {
+    let Some(s) = app.canvas.as_ref() else { return Task::none() };
+    if !s.dirty {
+        return Task::none();
+    }
+    let Some(session) = session_of(app) else { return Task::none() };
+    if !session.role.can_write() {
+        if !matches!(reason, crate::canvas_view::SaveReason::AutoSave) {
+            app.notify(NoticeLevel::Warning, "该空间为只读身份，无法保存");
+        }
+        return Task::none();
+    }
+    let gen = app.epoch();
+    let file = s.file.clone();
+    let baseline = s.saved.clone();
+    let frozen = s.data.clone();
+    let client = session.client;
+    let space_id = session.space_id;
+    let author = crate::history_author(app);
+    let frozen_for_msg = frozen.clone();
+    let file_for_msg = file.clone();
+    Task::perform(
+        async move {
+            let new_file = match atelyx_core::vault::compute_canvas_patch(&baseline, &frozen) {
+                Some(p) => match client.canvas_patch(&space_id, &file, &p).await {
+                    Ok(ack) => ack.file,
+                    // 补丁被拒（id 不符 / 文件损坏等）：回退前对拍服务端——文件仍为本端
+                    // 保存基线才整文恢复；已被他人改写时不覆盖（内容红线），提示刷新
+                    Err(SpaceError::BadRequest(_)) => {
+                        let server = client.get_file_text(&space_id, &file).await?;
+                        let server_id = serde_json::from_str::<serde_json::Value>(&server)
+                            .ok()
+                            .and_then(|v| v.get("id").and_then(|i| i.as_str()).map(|s| s.to_owned()));
+                        if server_id.as_deref() != Some(baseline.id.as_str()) {
+                            return Err(SpaceError::Conflict(
+                                "画布已被他人修改，请刷新后重试".to_string(),
+                            ));
+                        }
+                        let json = serde_json::to_string_pretty(&frozen)
+                            .map_err(|e| SpaceError::Network(e.to_string()))?;
+                        client.put_file_text(&space_id, &file, &json).await?;
+                        file.clone()
+                    }
+                    Err(e) => return Err(e),
+                },
+                None => {
+                    // 无差异（编辑后复原 / 拖回原位）：不盲目整文 PUT——服务端可能已有
+                    // 本端未收到的改动（漏帧），以服务端现状与本端保存基线对拍后才动作
+                    let server = client.get_file_text(&space_id, &file).await?;
+                    let server_id = serde_json::from_str::<serde_json::Value>(&server)
+                        .ok()
+                        .and_then(|v| v.get("id").and_then(|i| i.as_str()).map(|s| s.to_owned()));
+                    if server_id.as_deref() != Some(baseline.id.as_str()) {
+                        return Err(SpaceError::Conflict(
+                            "画布已被他人修改，请刷新后重试".to_string(),
+                        ));
+                    }
+                    file.clone()
+                }
+            };
+            // 摘要对比保存基线（上版全文）：卡 / 连线 / 消息计数
+            let content_json = serde_json::to_string(&frozen).unwrap_or_default();
+            let summary = atelyx_core::history::version_summary(
+                atelyx_core::history::HistoryKind::Canvas,
+                &serde_json::to_string(&baseline).unwrap_or_default(),
+                &content_json,
+            );
+            let _ = client
+                .history_record(
+                    &space_id,
+                    &space_client::HistoryRecordReq {
+                        kind: "canvas".into(),
+                        file: file.clone(),
+                        content: content_json,
+                        action: "edit".into(),
+                        author: space_client::HistoryAuthorReq {
+                            id: author.id.clone(),
+                            name: author.name.clone(),
+                            device: author.device.clone(),
+                        },
+                        summary: Some(summary),
+                        note: None,
+                        coalesce_edit_ms: Some(HISTORY_COALESCE_MS),
+                        max_versions: None,
+                        byte_budget: Some(atelyx_core::history::HISTORY_BYTE_BUDGET),
+                    },
+                )
+                .await;
+            Ok(new_file)
+        },
+        move |result| {
+            let (new_file, inner) = match &result {
+                Ok(f) => (f.clone(), Ok(f.clone())),
+                Err(e) => (file_for_msg.clone(), Err(e.to_string())),
+            };
+            Message::Space(SpaceMsg::CanvasPatchDone {
+                gen,
+                file: file_for_msg,
+                new_file,
+                reason,
+                result: inner,
+                frozen: frozen_for_msg,
+            })
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn on_canvas_patch_done(
+    app: &mut App,
+    gen: u64,
+    file: String,
+    new_file: String,
+    reason: crate::canvas_view::SaveReason,
+    result: Result<String, String>,
+    frozen: atelyx_core::vault::CanvasFile,
+) -> Task<Message> {
+    if gen != app.epoch() {
+        return Task::none();
+    }
+    // 身份守卫：gen + 文件路径（或标题漂移后的新路径）双校验
+    if !app.canvas.as_ref().is_some_and(|s| s.file == file || s.file == new_file) {
+        return Task::none();
+    }
+    let mut task = Task::none();
+    match result {
+        Err(e) => {
+            app.settle_history_restore(false);
+            let Some(s) = app.canvas.as_mut() else { return Task::none() };
+            s.save_error = Some(e.clone());
+            // 404 = 文件被改名（他端标题漂移未广播时）或删除：明示刷新，不做路径猜测
+            let hint = if e.contains("不存在") {
+                "画布已被他人改名或删除，请刷新空间后重新打开"
+            } else {
+                "保存失败"
+            };
+            if matches!(reason, crate::canvas_view::SaveReason::Flush) {
+                app.notify(NoticeLevel::Error, format!("{hint}，操作未执行：{e}"));
+            } else {
+                app.notify(NoticeLevel::Error, format!("{hint}：{e}"));
+            }
+            return refresh_space_tree(app);
+        }
+        Ok(_) => {
+            // 标题漂移：服务端按 title 重算路径，本端跟随（会话与最近画布路径）
+            if new_file != file {
+                if let Some(s) = app.canvas.as_mut() {
+                    s.file = new_file.clone();
+                }
+                if app.ui.last_canvas_file.as_deref() == Some(file.as_str()) {
+                    app.ui.last_canvas_file = Some(new_file.clone());
+                    app.schedule_persist();
+                }
+                task = task.chain(refresh_space_tree(app));
+            }
+            // 只认磁盘事实：冻结快照与当前数据一致才算落盘（时间戳不参与）
+            let stable = app
+                .canvas
+                .as_ref()
+                .is_some_and(|s| {
+                    s.data.title == frozen.title
+                        && s.data.nodes == frozen.nodes
+                        && s.data.edges == frozen.edges
+                });
+            {
+                let Some(s) = app.canvas.as_mut() else { return Task::none() };
+                s.save_error = None;
+                if stable {
+                    s.dirty = false;
+                    s.saved = frozen.clone();
+                }
+            }
+            if stable {
+                app.settle_history_restore(true);
+            }
+            // Flush 回执期间有新编辑（unstable）：重收一轮 Flush——脏拦截已在放行前 flush，
+            // 此轮丢失会让关闭/切换动作静默挂起（对齐笔记 / 表格保存链）
+            if let crate::canvas_view::SaveReason::Flush = reason {
+                if stable {
+                    task = task.chain(app.after_any_flush());
+                } else {
+                    task = task.chain(space_submit_canvas_save(app, crate::canvas_view::SaveReason::Flush));
+                }
+            }
+            task = task.chain(reload_space_history(app));
+        }
+    }
+    task
+}
+
 // ===== 元数据 / 索引 / 图片 / 历史 =====
 
 /// 空间模式元数据读取（仓库配置 / 提示词标记 / 文件夹颜色：`.atelyx/` 下文件，缺失走默认）。
@@ -1965,8 +2245,9 @@ pub fn reload_space_history(app: &App) -> Task<Message> {
         atelyx_core::history::HistoryKind::Table => {
             (atelyx_core::history::HistoryKind::Table, app.ui.last_table_file.clone())
         }
-        // 画布视图未接线：无打开上下文可读（弹层按显式 kind+file 经 space_history_task 读取）
-        atelyx_core::history::HistoryKind::Canvas => (atelyx_core::history::HistoryKind::Canvas, None),
+        atelyx_core::history::HistoryKind::Canvas => {
+            (atelyx_core::history::HistoryKind::Canvas, app.ui.last_canvas_file.clone())
+        }
     };
     match rel {
         Some(rel) => space_history_task(app, kind, &rel),
@@ -2036,12 +2317,15 @@ pub fn space_record_table_restore(app: &App, rel: String, content: String) -> Ta
     record_space_history(app, "table", rel, content, "restore")
 }
 
-/// 画布回滚（空间模式）：快照写回服务端真源后记 restore 历史（无本地副本、无会话链）。
+/// 画布回滚（空间模式）：快照写回服务端真源后记 restore 历史；打开中的画布随服务端事实重读
+/// （快照直写不经会话链，不重读则界面与 `saved` 基线都停在回滚前）。
 pub fn space_restore_canvas(app: &mut App, rel: String, content: String) -> Task<Message> {
     let Some(session) = require_write(app) else { return Task::none() };
+    let gen = app.epoch();
     let client = session.client;
     let space_id = session.space_id;
     let author = crate::history_author(app);
+    let rel_cb = rel.clone();
     Task::perform(
         async move {
             client
@@ -2069,7 +2353,7 @@ pub fn space_restore_canvas(app: &mut App, rel: String, content: String) -> Task
                 .await
                 .map_err(|e| format!("历史版本记录失败：{e}"))
         },
-        |result| Message::Space(SpaceMsg::HistoryRecorded { err: result.err() }),
+        move |result| Message::Space(SpaceMsg::CanvasRestored { gen, rel: rel_cb, result }),
     )
 }
 
@@ -2084,6 +2368,7 @@ pub fn space_create_entry(app: &mut App, dir: &str, kind: DraftKind, name: &str)
         DraftKind::Note => format!("{name}.md"),
         DraftKind::Folder => name.to_string(),
         DraftKind::Table => format!("{name}.atb"),
+        DraftKind::Canvas => format!("{name}.atlx"),
         DraftKind::Doc { extension, .. } => format!("{name}.{extension}"),
     };
     let client = session.client;
@@ -2092,6 +2377,20 @@ pub fn space_create_entry(app: &mut App, dir: &str, kind: DraftKind, name: &str)
     let initial = match kind {
         DraftKind::Table => serde_json::to_string_pretty(&atelyx_core::table_ops::new_table_file(name))
             .unwrap_or_default(),
+        DraftKind::Canvas => {
+            // 初始 = 空画布（标题随文件名起稿）
+            let now = crate::now_secs() as i64;
+            serde_json::to_string_pretty(&atelyx_core::vault::CanvasFile {
+                schema: atelyx_core::vault::CANVAS_SCHEMA.into(),
+                id: uuid::Uuid::new_v4().to_string(),
+                title: name.to_string(),
+                nodes: vec![],
+                edges: vec![],
+                created_at: now,
+                updated_at: now,
+            })
+            .unwrap_or_default()
+        }
         _ => String::new(),
     };
     Task::perform(
@@ -2484,7 +2783,7 @@ pub(crate) fn awareness_keepalive(app: &mut App) {
     send_awareness(app, &file, frame);
 }
 
-/// 当前打开文件路径集合（笔记 + 表格平级，≤3；presence 与协作房间视图共用）。
+/// 当前打开文件路径集合（笔记 + 表格 + 画布平级，≤3；presence、协作房间视图与删除命中判定共用）。
 pub(crate) fn open_file_paths(app: &App) -> Vec<String> {
     let mut files = Vec::new();
     if let Some(f) = &app.ui.last_note_file {
@@ -2493,16 +2792,25 @@ pub(crate) fn open_file_paths(app: &App) -> Vec<String> {
     if let Some(f) = &app.ui.last_table_file {
         files.push(f.clone());
     }
+    if let Some(f) = &app.ui.last_canvas_file {
+        files.push(f.clone());
+    }
     files.truncate(3);
     files
 }
 
-/// 当前打开文件集合的 presence 上行形态（笔记与表格平级；多窗口共用同一份打开态）。
+/// 当前打开文件集合的 presence 上行形态（笔记 / 表格 / 画布平级；多窗口共用同一份打开态）。
 fn presence_open_files(app: &App) -> Vec<serde_json::Value> {
     open_file_paths(app)
         .into_iter()
         .map(|f| {
-            let view = if f.ends_with(".atb") { "table" } else { "note" };
+            let view = if f.ends_with(".atb") {
+                "table"
+            } else if f.ends_with(".atlx") {
+                "canvas"
+            } else {
+                "note"
+            };
             serde_json::json!({ "file": f, "view": view })
         })
         .collect()
@@ -2900,6 +3208,30 @@ fn on_space_renamed(app: &mut App, old_path: &str, new_path: &str) -> Task<Messa
         app.schedule_persist();
         if let Some(s) = app.table.as_mut() {
             s.file = new_path.to_string();
+        }
+    }
+    if app.ui.last_canvas_file.as_deref() == Some(old_path) {
+        app.ui.last_canvas_file = Some(new_path.to_string());
+        app.schedule_persist();
+        // 会话路径与内嵌标题一并跟随：滞留旧路径让后续补丁打到不存在的文件；
+        // 标题落后于文件名则服务端下次保存按 title 推导路径，会把已改的名漂回旧名
+        let name = new_path.rsplit('/').next().unwrap_or(new_path);
+        let stem = name.strip_suffix(".atlx").unwrap_or(name);
+        let touched = match app.canvas.as_mut() {
+            Some(s) => {
+                s.file = new_path.to_string();
+                if s.data.title != stem {
+                    s.data.title = stem.to_string();
+                    s.touch();
+                    true
+                } else {
+                    false
+                }
+            }
+            None => false,
+        };
+        if touched {
+            app.autosave_deadline = Some(Instant::now() + crate::AUTOSAVE_DEBOUNCE);
         }
     }
     collab_follow_rename(app, old_path, new_path);
