@@ -923,7 +923,9 @@ fn is_hr(body: &str) -> bool {
 // ===== 表格 =====
 
 fn is_table_delim_row(body: &str) -> bool {
-    let cells = split_row_text(body);
+    // 按裁空后的行文本切格：行尾空白（含 CRLF 源的 `\r`）会让行尾 `|` 不再居末，
+    // 直接切会多出一个空格子而判假
+    let cells = split_row_text(body.trim());
     !cells.is_empty()
         && cells.iter().all(|c| {
             let t = c.trim();
@@ -998,12 +1000,12 @@ fn collect_table(ctx: &Ctx, first: &Line, to: usize) -> (MarkdownBlock, usize) {
         lines.push(line);
         pos = next_pos(&line, to, src);
     }
-    // 行文本 trim 后的绝对起点
+    // 行文本裁空后的绝对起点：位移只按行首空白计，行尾空白（含 CRLF 源的 `\r`）不属行内容、不参与回推
     let row_texts: Vec<(String, usize)> = lines
         .iter()
         .map(|l| {
-            let t = l.text.trim();
-            (t.to_string(), l.start + (l.text.len() - t.len()))
+            let body = l.text.trim_start();
+            (body.trim_end().to_string(), l.start + (l.text.len() - body.len()))
         })
         .collect();
     let header = table_cells(&row_texts[0].0, row_texts[0].1);

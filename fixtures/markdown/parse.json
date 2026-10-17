@@ -1237,6 +1237,90 @@
       }
     },
     {
+      "name": "table-trailing-whitespace",
+      "source": "| 抓 | 数量 | \n| --- | --- |\n| a | 中 |\t\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "| 抓 | 数量 | \n| --- | --- |\n| a | 中 |\t\n",
+        "blocks": [
+          {
+            "kind": "table",
+            "from": 0,
+            "to": 36,
+            "header": [
+              {
+                "from": 2,
+                "to": 3
+              },
+              {
+                "from": 6,
+                "to": 8
+              }
+            ],
+            "aligns": [
+              "",
+              ""
+            ],
+            "rows": [
+              [
+                {
+                  "from": 28,
+                  "to": 29
+                },
+                {
+                  "from": 32,
+                  "to": 33
+                }
+              ]
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "table-crlf-rows",
+      "source": "| 抓 | 数量 |\r\n| --- | --- | \r\n| a | 中 |\t\r\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "| 抓 | 数量 |\r\n| --- | --- | \r\n| a | 中 |\t\r\n",
+        "blocks": [
+          {
+            "kind": "table",
+            "from": 0,
+            "to": 39,
+            "header": [
+              {
+                "from": 2,
+                "to": 3
+              },
+              {
+                "from": 6,
+                "to": 8
+              }
+            ],
+            "aligns": [
+              "",
+              ""
+            ],
+            "rows": [
+              [
+                {
+                  "from": 30,
+                  "to": 31
+                },
+                {
+                  "from": 34,
+                  "to": 35
+                }
+              ]
+            ]
+          }
+        ]
+      }
+    },
+    {
       "name": "html-tags-nonascent",
       "source": "<b>x</b> plain #tag <i>y</i>\n",
       "mentions": null,
