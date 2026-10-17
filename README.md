@@ -16,25 +16,27 @@ Atelyx 是一款以人为本的可拓展桌面工作台：对话、笔记、表�
 
 ## 设计理念
 
-平时工作需要在多个工具之间来回切换：写作用一个软件、表格用一个软件、沟通再切到聊天工具，每次切换都会打断思路。Atelyx 把常用场景放进同一张工作台：
+笔记、表格、沟通分散在多个软件里，每次切换都打断思路。Atelyx 把这些场景收进同一张工作台：
 
-- **一个工作台装下常用工作** — 对话、笔记、表格、文件、搜索在同一工作台并排打开；标签可停靠，面板可拆成独立窗口，布局自由组合。
-- **AI 辅助随手可用** — AI 内嵌在对话、笔记、表格、文件与搜索等场景里，边写边用，不必切到单独的 AI 工具；工作由人主导，AI 提供辅助。
-- **素材可复用** — 搜索结果、提炼的段落、粘贴的素材会沉淀为可复用资产，可随时接入任意对话。
-- **协作空间** — 在自建服务端上开一个协作空间：成员实时互见，同编一篇笔记、同改一块画布、同看一张表格；内容真源在服务端，局域网与公网均可部署。
-- **文件即仓库** — 个人仓库没有数据库：笔记、表格、附件都是本地普通文件，可备份、可 Git 同步；与协作空间在文件面板并排使用。
+- **一个工作台装下常用工作** — 对话、笔记、表格、文件、搜索并排打开；标签可停靠，面板可拆成独立窗口。
+- **AI 辅助随手可用** — AI 内嵌在对话、笔记、表格、文件与搜索中，边写边用；工作由人主导。
+- **素材可复用** — 搜索结果、摘录与粘贴的素材沉淀为资产，可接入任意对话。
+- **协作空间** — 自建服务端开一个空间：成员实时互见，同编一篇笔记、同改一块画布、同看一张表格；内容真源在服务端，局域网与公网均可部署。
+- **文件即仓库** — 个人仓库无数据库：笔记、表格、附件都是本地普通文件，可备份、可 Git 同步，与协作空间并排使用。
 
 ## 技术形态
 
-纯 Rust 原生单体应用：GUI 走 [iced](https://iced.rs)（Elm 架构）。仓库根是一个 Cargo workspace：
+纯 Rust 原生单体应用，GUI 采用 [iced](https://iced.rs)（Elm 架构）。仓库根是一个 Cargo workspace：
 
 | 目录 | 职责 |
 | --- | --- |
 | `atelyx-app/` | iced 桌面壳：窗口与布局、编辑器与各功能视图、主题与组件库 |
-| `atelyx-core/` | UI 无关核心：仓库存储、会话容器、Markdown 与 frontmatter 解析、协作帧泵、插件进程托管 |
-| `atelyx-server/` | 协作服务端（独立进程，不进 workspace） |
+| `atelyx-core/` | UI 无关核心：仓库存储、Markdown 与 frontmatter 解析、会话与布局模型、插件宿主运行时、进程托管 |
+| `atelyx-plugin-protocol/` | 插件协议契约：握手、JSON-RPC 信封、ViewNode 界面树、manifest |
+| `atelyx-plugin-sdk/` | 插件侧 SDK：连接泵、能力面代理、界面构建辅助 |
+| `atelyx-server/` | 协作服务端（独立 Cargo 工程，不进 workspace） |
 
-依赖方向：两个 crate → `atelyx-core`；`atelyx-core` 不依赖任何 GUI crate。
+依赖方向：`atelyx-app` → `atelyx-core` → `atelyx-plugin-protocol`；`atelyx-plugin-sdk` → `atelyx-plugin-protocol`。`atelyx-core` 无 GUI 依赖；`atelyx-server` 不被任何 crate 依赖，客户端只经 HTTP/WS 访问。
 
 ## 平台
 
@@ -43,17 +45,18 @@ Windows 10/11（x64）+ Linux（Wayland 原生，兼容 X11）。
 ## 开发命令
 
 ```bash
-cargo run -p atelyx-app     # 启动桌面应用
-cargo test --workspace      # 工作区测试
-cargo test --manifest-path atelyx-server/Cargo.toml   # 服务端测试
-cargo build -p atelyx-app --release                   # 打包
+bash patches/apply.sh    # 新克隆后执行一次：物化本地依赖补丁的源码目录
+cargo run -p atelyx-app  # 启动桌面应用
+cargo test --workspace   # 工作区测试
+cargo test --manifest-path atelyx-server/Cargo.toml  # 服务端测试
+bash scripts/package.sh  # 构建 release 并产出当前平台安装包到 target/dist/
 ```
 
-前置要求：Rust（stable，仓库根 `rust-toolchain.toml` 锁定版本）。Linux 需要 iced/winit 的系统依赖（X11 或 Wayland 开发库）。
+前置要求：Rust stable（版本由 `rust-toolchain.toml` 锁定），Linux 另需 X11 / Wayland 开发库。打包另需 Windows 上的 NSIS 与 Linux 上的 `appimagetool`。
 
 ## 自建协作服务端
 
-协作空间的内容真源在服务端（`atelyx-server/`，Rust 单进程），一台 Linux 机器或 NAS 即可部署：
+`atelyx-server/` 是协作空间的内容真源（Rust 单进程），一台 Linux 机器或 NAS 即可部署：
 
 ```bash
 # 方式一：Docker Compose（数据落在 ./data，备份 = 拷贝该目录）
@@ -64,8 +67,8 @@ sudo bash atelyx-server/install.sh
 # 自定义端口 / 数据目录：sudo bash atelyx-server/install.sh 13000 /mnt/nas/atelyx-data
 ```
 
-- 服务端口默认 `11224`；设 `TLS_CERT` + `TLS_KEY` 即启用 HTTPS/WSS，更多配置见 `atelyx-server/docker-compose.yml` 与 `install.sh` 头注释。
-- 部署后浏览器打开 `http://<服务器>:11224` 进入管理台：注册账号（首个注册账号为管理员）、创建空间并邀请成员。
+- 默认端口 `11224`；设 `TLS_CERT` + `TLS_KEY` 即启用 HTTPS/WSS，其余配置见 `atelyx-server/docker-compose.yml` 与 `install.sh`。
+- 部署后打开 `http://<服务器>:11224` 进入管理台：注册账号（首个为管理员）、创建空间、邀请成员。
 
 ## 参与贡献
 
