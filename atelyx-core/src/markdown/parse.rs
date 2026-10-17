@@ -923,8 +923,8 @@ fn is_hr(body: &str) -> bool {
 // ===== 表格 =====
 
 fn is_table_delim_row(body: &str) -> bool {
-    // 按裁空后的行文本切格：行尾空白（含 CRLF 源的 `\r`）会让行尾 `|` 不再居末，
-    // 直接切会多出一个空格子而判假
+    // 判定按裁空后的行文本切格（与 collect_table 的裁空行文本同一口径）：行尾空白（含 CRLF
+    // 源的 `\r`）会让行尾 `|` 不再居末，直接切会多出一个空格子而判假
     let cells = split_row_text(body.trim());
     !cells.is_empty()
         && cells.iter().all(|c| {

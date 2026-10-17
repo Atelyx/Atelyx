@@ -50,6 +50,7 @@ const TOKENS: &[&str] = &[
     "```rs 甲", "```", "~~~ 乙", "    缩进正文 甲", "`行内码 甲`", "``a`b``",
     "| 列甲 | 列乙 |", "| --- | :-: |", "| www.例.com | [文本](目标) |", "| 甲 | `码 乙` | 尾 |",
     "| 中文 | 甲 |  ", "| 乙 | 丙 |\t", "| 头 | 甲 |\n| --- |\n| 乙 |\t",
+    "　| 甲 | 乙 |", "| 甲 | 乙 |　", "| 甲 |\r| 乙 |\n",
     "[链接](http://www.example.com/甲)", "![图](甲.png)", "![尺寸](甲.png|100x200)",
     "[[]]", "[[双链 甲]]", "[^1] 脚注 甲", "中文[^注]乙", "[ref]: http://www.example.com 甲",
     "<http://例.中国/x>", "<b>粗 甲</b>", "</b>游离", "<!-- 注释 甲 -->",
@@ -198,7 +199,10 @@ fn check_doc(source: &str) -> Option<String> {
             return Some(format!("区间 [{from},{to}) 重解析 panic: {msg}"));
         }
     }
-    let value = serde_json::to_value(&doc.blocks).ok()?;
+    let value = match serde_json::to_value(&doc.blocks) {
+        Ok(v) => v,
+        Err(e) => return Some(format!("块规格序列化失败: {e}")),
+    };
     let mut bad = None;
     walk_offsets(&value, source, &mut bad);
     bad
