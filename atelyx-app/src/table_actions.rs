@@ -1430,6 +1430,9 @@ fn on_release(app: &mut App, pos: Point) -> Task<Message> {
         return Task::none();
     }
     if s.view.col_drag.take().is_some() || s.view.row_drag.take().is_some() {
+        // 拖拽期间被拖列不实测（见 `rebuild_layout`）：松手后补一次重建，行高与行段回到实测口径
+        s.rebuild_layout();
+        clamp_scroll(s);
         return Task::none();
     }
     if let Some(reo) = s.view.reorder.take() {

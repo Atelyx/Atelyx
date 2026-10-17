@@ -32,6 +32,7 @@ mod repohistory_view;
 mod settings_view;
 mod space_actions;
 mod table_actions;
+mod table_text;
 mod table_view;
 mod ui;
 mod update;

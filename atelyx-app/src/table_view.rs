@@ -10,6 +10,7 @@ use iced::widget::text_editor;
 use iced::widget::{column, container, mouse_area, row, space, text};
 use iced::{alignment, Color, Element, Length, Point, Rectangle, Size, Vector};
 
+use crate::table_text::{TextLine, WrapCache, LINE_FACTOR};
 use crate::ui::icon::polylines;
 use crate::ui::palette as pal;
 use crate::Message;
@@ -36,7 +37,20 @@ fn cell_font() -> f32 {
 fn num_font() -> f32 {
     pal::fs_caption()
 }
-const LINE_FACTOR: f32 = 1.45;
+/// 单元格正文字体（样式族 + 粗斜体）：画布绘制、断行测量与编辑浮层同口径。
+fn cell_text_font(st: &CellStyle) -> iced::Font {
+    iced::Font {
+        weight: if st.b { iced::font::Weight::Bold } else { iced::font::Weight::Normal },
+        style: if st.i { iced::font::Style::Italic } else { iced::font::Style::Normal },
+        ..style_font(st)
+    }
+}
+
+/// 正文可用宽 = 格宽去掉左右内衬（行高、绘制与浮层的换行同式）。
+fn wrap_width(cell_w: f32, zoom: f32) -> f32 {
+    (cell_w - 2.0 * CELL_PAD_X * zoom).max(8.0)
+}
+
 const COL_HANDLE_W: f32 = 8.0;
 const ROW_HANDLE_H: f32 = 6.0;
 /// 按压转框选 / 行拖拽排序的位移阈值（px）。
@@ -149,25 +163,33 @@ impl TableSession {
         col_x.push(x);
         let total_w = x + ADD_COL_W * zoom;
 
+        // 行段缓存随布局滚动：收口时丢掉本轮没再用到的键
+        let mut wrap = self.view.layout.take().map(|cache| cache.wrap).unwrap_or_default();
+        wrap.begin_pass();
+        // 列宽拖拽在途：该列换行宽每帧都变，实测会把每次指针移动变成整表重排。
+        // 这列本轮不实测（定高与绘制同走字符估算），松手后的重建回到实测口径
+        let dragging = self.view.col_drag.as_ref().map(|d| d.field_id.clone());
         let mut row_h = Vec::with_capacity(data.rows.len());
         let mut row_y = Vec::with_capacity(data.rows.len() + 1);
         let mut y = 0.0f32;
         for row in &data.rows {
             row_y.push(y);
-            let h = if let Some(h) = row.height {
+            // 显式行高的行同样实测：绘制这些格的正文要有行段可取
+            let mut content = 0.0f32;
+            for (i, f) in data.fields.iter().enumerate() {
+                let slot = if dragging.as_deref() == Some(f.id.as_str()) { None } else { Some(&mut wrap) };
+                content = content.max(cell_content_height(slot, f, row, row.values.get(&f.id), col_w[i], zoom));
+            }
+            let h = match row.height {
                 // 磁盘存量可能小于下限（写入侧钳制不覆盖旧数据）：读取侧同样钳到把手命中区下限
-                (h as f32).max(table_ops::MIN_ROW_HEIGHT as f32) * zoom
-            } else {
-                let mut content = 0.0f32;
-                for (i, f) in data.fields.iter().enumerate() {
-                    content = content.max(cell_content_height(f, row, row.values.get(&f.id), col_w[i], zoom));
-                }
-                (content + 2.0 * CELL_PAD_Y * zoom).max(32.0 * zoom)
+                Some(h) => (h as f32).max(table_ops::MIN_ROW_HEIGHT as f32) * zoom,
+                None => (content + 2.0 * CELL_PAD_Y * zoom).max(32.0 * zoom),
             };
             row_h.push(h);
             y += h;
         }
         row_y.push(y);
+        wrap.end_pass();
         self.view.layout = Some(LayoutCache {
             version: self.version,
             zoom,
@@ -177,6 +199,7 @@ impl TableSession {
             row_h,
             row_y,
             content_h: y + NEW_ROW_H * zoom,
+            wrap,
         });
     }
 }
@@ -351,6 +374,8 @@ pub struct LayoutCache {
     pub row_h: Vec<f32>,
     pub row_y: Vec<f32>,
     pub content_h: f32,
+    /// 本轮布局的断行结果（行高与绘制共用）。
+    pub wrap: WrapCache,
 }
 
 // ===== 消息 =====
@@ -690,9 +715,11 @@ pub fn cell_rect(g: &Geo, r: usize, c: usize) -> Rectangle {
     Rectangle::new(Point::new(x, y), Size::new(g.cache.col_w[c], g.cache.row_h[r]))
 }
 
-/// 单元格内容自然高度（不含上下内衬；image 区自带高度）。字号口径与绘制一致：
-/// 基准字号 × zoom 再叠加单元格样式字号。
+/// 单元格内容自然高度（不含上下内衬；image 区自带高度）。字号、字体与换行宽口径与绘制一致：
+/// 基准字号 × zoom 再叠加单元格样式字号，行数取编辑浮层同一套实测行段。
+/// `wrap` 为 None = 本轮不做实测（该列正在被拖宽），行数改用字符估算。
 fn cell_content_height(
+    wrap: Option<&mut WrapCache>,
     field: &TableField,
     row: &TableRow,
     v: Option<&serde_json::Value>,
@@ -713,8 +740,12 @@ fn cell_content_height(
     if text.is_empty() {
         return 0.0;
     }
-    let wrap_w = (col_w - 2.0 * CELL_PAD_X * zoom).max(8.0);
-    wrap_lines(&text, size, wrap_w) as f32 * size * LINE_FACTOR
+    let wrap_w = wrap_width(col_w, zoom);
+    let lines = match wrap {
+        Some(wrap) => wrap.lines(&text, size, cell_text_font(&st), wrap_w).len(),
+        None => estimate_lines(&text, size, wrap_w).len(),
+    };
+    lines as f32 * size * LINE_FACTOR
 }
 
 /// 图片单元格高度（轮播 = 主图区 + 多图队列条；九宫格 = 方块行高累计 + 内衬）。
@@ -749,34 +780,15 @@ fn grid_tile_w(col_w: f32, zoom: f32, cols: usize) -> f32 {
     ((inner - (cols.saturating_sub(1)) as f32 * IMAGE_GAP * zoom) / cols as f32).max(24.0 * zoom)
 }
 
-// ===== 文本估算（复用 chrome 估宽的单字符口径，行高/换行/截断同源）=====
+// ===== 文本估算（复用 chrome 估宽的单字符口径；单行截断与缺行段时的兜底）=====
 
 fn text_width(text: &str, size: f32) -> f32 {
     text.chars().map(|c| crate::layout_view::estimate_char_w(c, size)).sum()
 }
 
-/// 按字符单位贪心换行的总行数（行高与绘制同源）。
-fn wrap_lines(text: &str, size: f32, max_w: f32) -> usize {
-    text.split('\n')
-        .map(|line| {
-            let mut lines = 1;
-            let mut w = 0.0f32;
-            for ch in line.chars() {
-                let cw = crate::layout_view::estimate_char_w(ch, size);
-                if w + cw > max_w && w > 0.0 {
-                    lines += 1;
-                    w = cw;
-                } else {
-                    w += cw;
-                }
-            }
-            lines
-        })
-        .sum()
-}
-
-/// 逐行拆分（绘制用）：贪心按字符断行。
-fn wrap_lines_text(text: &str, size: f32, max_w: f32) -> Vec<String> {
+/// 按字符单位贪心断行的行段：本轮布局没覆盖该口径时的兜底，正文照样画得出，
+/// 折行点与编辑浮层可能有字符级差异。
+fn estimate_lines(text: &str, size: f32, max_w: f32) -> Vec<TextLine> {
     let mut out = Vec::new();
     for line in text.split('\n') {
         let mut cur = String::new();
@@ -784,13 +796,13 @@ fn wrap_lines_text(text: &str, size: f32, max_w: f32) -> Vec<String> {
         for ch in line.chars() {
             let cw = crate::layout_view::estimate_char_w(ch, size);
             if w + cw > max_w && w > 0.0 {
-                out.push(std::mem::take(&mut cur));
+                out.push(TextLine { text: std::mem::take(&mut cur), width: w });
                 w = 0.0;
             }
             cur.push(ch);
             w += cw;
         }
-        out.push(cur);
+        out.push(TextLine { text: cur, width: w });
     }
     out
 }
@@ -1269,7 +1281,8 @@ fn mono_font() -> iced::Font {
     iced::Font { family: iced::font::Family::Monospace, ..iced::Font::default() }
 }
 
-/// 基础文本（左上锚定，Wrapping::None——换行由估算层负责）。
+/// 基础文本（左上锚定，Wrapping::None——换行由行段测量负责）。
+/// 字距恒用 Advanced：与编辑浮层的排版口径一致，切换编辑时同一行文字才不跳位。
 fn fill_text(frame: &mut canvas::Frame, content: &str, pos: Point, size: f32, font: iced::Font, color: Color) {
     if content.is_empty() || size <= 0.0 {
         return;
@@ -1285,7 +1298,7 @@ fn fill_text(frame: &mut canvas::Frame, content: &str, pos: Point, size: f32, fo
             font,
             align_x: iced::advanced::text::Alignment::Left,
             align_y: alignment::Vertical::Top,
-            shaping: iced::advanced::text::Shaping::Auto,
+            shaping: iced::advanced::text::Shaping::Advanced,
         },
     );
 }
@@ -1548,7 +1561,7 @@ fn draw_cell_content(
                 &text,
                 Point::new(cell.x + CELL_PAD_X * g.z, cell.y + (cell.height - size * LINE_FACTOR) / 2.0),
                 size,
-                style_font(st),
+                cell_text_font(st),
                 color,
             );
             draw_icon(
@@ -1569,7 +1582,7 @@ fn draw_cell_content(
                 &text,
                 Point::new(cell.x + CELL_PAD_X * g.z, cell.y + (cell.height - size * LINE_FACTOR) / 2.0),
                 size,
-                style_font(st),
+                cell_text_font(st),
                 style_color(st),
             );
         }
@@ -1579,22 +1592,26 @@ fn draw_cell_content(
                 return;
             }
             let size = style_size(st, base, g.z);
-            let font = iced::Font {
-                weight: if st.b { iced::font::Weight::Bold } else { iced::font::Weight::Normal },
-                style: if st.i { iced::font::Style::Italic } else { iced::font::Style::Normal },
-                ..style_font(st)
+            let font = cell_text_font(st);
+            let wrap_w = wrap_width(cell.width, g.z);
+            // 行段来自本轮布局的实测（与编辑浮层同折行口径）；缺键说明该口径没被覆盖，兜底仍按字符估算断行
+            let fallback: Vec<TextLine>;
+            let lines: &[TextLine] = match g.cache.wrap.peek(s, size, font, wrap_w) {
+                Some(lines) => lines,
+                None => {
+                    fallback = estimate_lines(s, size, wrap_w);
+                    &fallback
+                }
             };
-            let wrap_w = (cell.width - 2.0 * CELL_PAD_X * g.z).max(8.0);
             let lh = size * LINE_FACTOR;
             let mut y = cell.y + CELL_PAD_Y * g.z;
-            for line in wrap_lines_text(s, size, wrap_w) {
-                fill_text(frame, &line, Point::new(cell.x + CELL_PAD_X * g.z, y), size, font, style_color(st));
+            for line in lines {
+                fill_text(frame, &line.text, Point::new(cell.x + CELL_PAD_X * g.z, y), size, font, style_color(st));
+                let w = line.width.min(wrap_w);
                 if st.u {
-                    let w = text_width(&line, size).min(wrap_w);
                     frame.fill_rectangle(Point::new(cell.x + CELL_PAD_X * g.z, y + lh - 1.5), Size::new(w, 1.0), style_color(st));
                 }
                 if st.s {
-                    let w = text_width(&line, size).min(wrap_w);
                     frame.fill_rectangle(Point::new(cell.x + CELL_PAD_X * g.z, y + lh / 2.0), Size::new(w, 1.0), style_color(st));
                 }
                 y += lh;
@@ -1859,18 +1876,25 @@ fn editor_overlay<'a>(session: &'a TableSession) -> Option<Element<'a, Message>>
     let field = &session.data.fields[ci];
     let st = table_ops::style_of(&session.data.rows[ri], &field.id);
     let is_text = !matches!(field.field_type.as_str(), "number" | "duration" | "image" | "singleSelect");
+    let zoom = session.view.zoom;
+    let size = style_size(&st, base_font_size(field) * zoom, zoom);
+    // 浮层内衬 = 画布绘制内衬；数字/时长格画布垂直居中，等值上内衬复现同一落点
+    let pad_y = if is_text {
+        CELL_PAD_Y * zoom
+    } else {
+        ((cell.height - size * LINE_FACTOR) / 2.0).max(0.0)
+    };
     let style_color_value = style_color(&st);
     let editor = text_editor(&edit.content)
         .id(iced::widget::Id::new(CELL_EDITOR_ID))
         .on_action(move |a| Message::Table(TableMsg::Edited(a)))
         .key_binding(move |kp| table_key_binding(&kp, is_text))
-        .size(style_size(&st, base_font_size(field) * session.view.zoom, session.view.zoom))
-        .font(iced::Font {
-            weight: if st.b { iced::font::Weight::Bold } else { iced::font::Weight::Normal },
-            style: if st.i { iced::font::Style::Italic } else { iced::font::Style::Normal },
-            ..style_font(&st)
-        })
-        .padding(iced::Padding::ZERO.horizontal((CELL_PAD_X - 2.0) * session.view.zoom).vertical(2.0 * session.view.zoom))
+        .size(size)
+        .font(cell_text_font(&st))
+        // 行高与折行同画布实测口径（行段测量用这一套参数）
+        .line_height(iced::advanced::text::LineHeight::Relative(LINE_FACTOR))
+        .wrapping(iced::advanced::text::Wrapping::WordOrGlyph)
+        .padding(iced::Padding::ZERO.horizontal(CELL_PAD_X * zoom).vertical(pad_y))
         .width(cell.width.max(40.0))
         .height(cell.height.max(24.0))
         .style(move |_t, _s| text_editor::Style {
@@ -2200,5 +2224,60 @@ impl TableSession {
         let r = self.data.rows.iter().position(|r| r.id == row_id)?;
         let c = self.data.fields.iter().position(|f| f.id == field_id)?;
         Some((r, c))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vault::{TableField, TableFile, TableRow};
+
+    fn text_session(values: &[&str]) -> TableSession {
+        let field = TableField {
+            id: "f1".to_string(),
+            name: "正文".to_string(),
+            field_type: "text".to_string(),
+            options: None,
+            width: Some(120.0),
+            calc_type: None,
+        };
+        let rows = values
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                let mut cell = serde_json::Map::new();
+                cell.insert("f1".to_string(), serde_json::Value::String(v.to_string()));
+                TableRow { id: format!("r{i}"), values: cell, height: None, styles: None }
+            })
+            .collect();
+        TableSession::new(
+            "t.atb".to_string(),
+            TableFile {
+                schema: String::new(),
+                id: "t".to_string(),
+                title: String::new(),
+                fields: vec![field],
+                rows,
+                created_at: 0,
+                updated_at: 0,
+            },
+        )
+    }
+
+    /// 自动行高按实测行段累加：一行放不下的正文把行撑高（同批行段供画布绘制与编辑浮层共用）。
+    #[test]
+    fn auto_row_height_follows_measured_lines() {
+        let long = "需要折行的很长很长很长很长很长很长很长很长很长的一段中文正文";
+        let s = text_session(&["短", long]);
+        let layout = s.view.layout.as_ref().expect("布局缓存在载入时建立");
+        assert_eq!(layout.row_h[0], 32.0, "单行正文停在行高下限");
+
+        let size = cell_font();
+        let lines = layout
+            .wrap
+            .peek(long, size, cell_text_font(&CellStyle::default()), wrap_width(120.0, 1.0))
+            .expect("布局实测后行段可取");
+        assert!(lines.len() > 1, "放不进一行的正文要折出多行");
+        assert_eq!(layout.row_h[1], lines.len() as f32 * size * LINE_FACTOR + 2.0 * CELL_PAD_Y);
     }
 }
