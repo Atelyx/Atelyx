@@ -6,7 +6,7 @@
 
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::{
-    column, container, grid, image, keyed_column, progress_bar, row, scrollable, space, text,
+    column, container, grid, image, keyed_column, progress_bar, row, scrollable, space,
     text_editor, text_input,
 };
 use iced::{Color, Element, Length, Padding};
@@ -19,6 +19,7 @@ use atelyx_core::plugin_runtime::{
 use crate::plugin_actions::{contribution, declares, image_key, input_display, node_value_text, PopupEntry};
 use crate::ui::controls::{self, Variant};
 use crate::ui::palette as pal;
+use crate::ui::text;
 use crate::{App, Message};
 
 /// 容器缺省间距（插件未声明 gap 时）。
@@ -423,6 +424,7 @@ fn single_line_input<'a>(
     let value = input_display(&plugin_value, app.plugin_drafts.get(&key));
     let input = text_input(placeholder, value.as_str())
         .size(pal::fs_ui())
+        .font(crate::ui::regular())
         .padding(Padding::ZERO.horizontal(INPUT_PAD_X).vertical(INPUT_PAD_Y))
         .width(Length::Fill)
         .secure(password)
@@ -465,6 +467,7 @@ fn multiline_input<'a>(
     text_editor(&state.content)
         .placeholder(placeholder)
         .size(pal::fs_ui())
+        .font(crate::ui::regular())
         .padding(Padding::ZERO.horizontal(INPUT_PAD_X).vertical(INPUT_PAD_Y))
         .height(Length::Fixed(EDITOR_H))
         .style(|_theme, _status| text_editor::Style {

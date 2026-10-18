@@ -47,10 +47,10 @@ pub fn resolve(spec: &PopupSpec, viewport: Size) -> PopupGeom {
     PopupGeom { x, y, w }
 }
 
-/// 阴影环外扩量（左右/顶部/底部；与 positioned 偏移配对使用）。
-const SHADOW_PAD_LEFT: f32 = 4.0;
-const SHADOW_PAD_TOP: f32 = 2.0;
-const SHADOW_PAD_BOTTOM: f32 = 14.0;
+/// 阴影环外扩量（左右/顶部/底部；与 positioned 偏移配对使用，调用方算可用高度时也按此扣）。
+pub const SHADOW_PAD_LEFT: f32 = 4.0;
+pub const SHADOW_PAD_TOP: f32 = 2.0;
+pub const SHADOW_PAD_BOTTOM: f32 = 14.0;
 
 /// 弹层覆盖元素（全窗捕获层 + 定位弹层卡）：由调用方作为覆盖子叠在窗口内容之上
 /// （内容恒为 Stack 第 0 子，覆盖显隐不重建内容子树——滚动位置与输入焦点得以保留）。

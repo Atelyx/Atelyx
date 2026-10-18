@@ -90,6 +90,8 @@ pub struct GlobalConfig {
     pub device_id: Option<String>,
     /// 界面基准字号（px，12–20）。
     pub font_size: u32,
+    /// 界面字体族名（取自系统已安装字体；None = 跟随系统 UI 字体）。
+    pub font_family: Option<String>,
     /// 启动恢复上次打开的文件。
     pub auto_restore: bool,
     /// 启动静默检查更新。
@@ -119,6 +121,7 @@ impl Default for GlobalConfig {
             collab_color: None,
             device_id: None,
             font_size: DEFAULT_FONT_SIZE,
+            font_family: None,
             auto_restore: true,
             auto_update: false,
             soft_wrap: true,
@@ -297,11 +300,22 @@ mod tests {
         let cfg: GlobalConfig = serde_json::from_str("{}").unwrap();
         assert!(cfg.recent_vaults.is_empty());
         assert_eq!(cfg.font_size, 16);
+        assert_eq!(cfg.font_family, None);
         assert!(cfg.auto_restore);
         assert!(!cfg.auto_update);
         assert!(cfg.soft_wrap);
         assert!(!cfg.in_page_title);
         assert_eq!(cfg.content_width, 780);
+    }
+
+    #[test]
+    fn 界面字体族按驼峰键往返() {
+        let cfg: GlobalConfig = serde_json::from_str(r#"{"fontFamily":"Microsoft YaHei"}"#).unwrap();
+        assert_eq!(cfg.font_family.as_deref(), Some("Microsoft YaHei"));
+        let out = serde_json::to_string(&cfg).unwrap();
+        assert!(out.contains(r#""fontFamily":"Microsoft YaHei""#));
+        let back: GlobalConfig = serde_json::from_str(&out).unwrap();
+        assert_eq!(back.font_family, cfg.font_family);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! 日历天详情：点选日期后展开的当日历史版本（点击打开该文件历史弹层）
 //! 与手动日程增删改（色点循环换色、标题行内编辑、添加行）。
 
-use iced::widget::{button, column, container, row, space, text};
+use iced::widget::{button, column, container, row, space};
 use iced::{Element, Length, Padding, border};
 
 use atelyx_core::calendar::CalendarItem;
@@ -14,6 +14,7 @@ use crate::repohistory_view;
 use crate::ui::controls;
 use crate::ui::icon::icon;
 use crate::ui::palette as pal;
+use crate::ui::text;
 use crate::{App, Message};
 
 /// 日程色点直径。
@@ -52,7 +53,7 @@ pub fn day_detail(app: &App, window: iced::window::Id) -> Element<'static, Messa
 fn section_title(label: &str) -> Element<'static, Message> {
     text(label.to_string())
         .size(pal::fs_caption())
-        .font(crate::ui::semibold())
+        .font(crate::ui::bold())
         .color(pal::TEXT_SECONDARY)
         .into()
 }

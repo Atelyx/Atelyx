@@ -1,7 +1,7 @@
 //! AI 对话面板：会话侧栏 + 顶部行 + 输入区（发送/停止圆钮）；消息流渲染走
 //! [`crate::chat_stream`] 公共段（面板与画布对话卡共用，悬浮操作按钮组经操作钩子注入）。
 
-use iced::widget::{button, column, container, mouse_area, row, scrollable, space, stack, text, Space};
+use iced::widget::{button, column, container, mouse_area, row, scrollable, space, stack, Space};
 use iced::widget::container::Style;
 use iced::{border, Length, Padding};
 use serde_json::{json, Value};
@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 use crate::chat_actions::ChatMsg;
 use crate::ui::icon::icon;
 use crate::ui::{controls, palette as pal};
+use crate::ui::text;
 use crate::{App, Message};
 
 pub fn chat_view(app: &App, window: iced::window::Id) -> iced::Element<'_, Message> {

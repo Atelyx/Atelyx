@@ -1,12 +1,13 @@
 //! 设置-工作区：启动场景选择（仓库级，写仓库 config 的 entrySceneId）。
 
-use iced::widget::{column, container, scrollable, text};
-use iced::{Element, Length, Padding, Point};
+use iced::widget::{column, container, scrollable};
+use iced::{Element, Length, Padding};
 
-use crate::layout_view::{PopupOpen, PopupState};
+use crate::layout_view::PopupState;
 use crate::settings_view::{group_head, setting_row};
 use crate::ui::controls;
 use crate::ui::palette as pal;
+use crate::ui::text;
 use crate::{App, Message, RepoKind};
 
 pub fn view(app: &App, window: iced::window::Id) -> Element<'static, Message> {
@@ -34,21 +35,10 @@ pub fn view(app: &App, window: iced::window::Id) -> Element<'static, Message> {
                 .unwrap_or(id)
         })
         .unwrap_or_else(|| "跟随当前".into());
-    let cursor = app.cursor_for(window);
     let trigger = controls::dropdown_trigger(
         &current,
         160.0,
-        (!space_mode).then(|| {
-            Message::PopupOpen(
-                window,
-                PopupOpen {
-                    point: Point::new(cursor.x, cursor.y + 16.0),
-                    flip_y: Some(cursor.y - 12.0),
-                    state: PopupState::EntrySceneMenu,
-                    min_width: 0.0,
-                },
-            )
-        }),
+        (!space_mode).then(|| super::open_popup(app, window, PopupState::EntrySceneMenu)),
     );
     let mut col = column![].spacing(8).padding(Padding::ZERO.horizontal(20.0));
     if space_mode {

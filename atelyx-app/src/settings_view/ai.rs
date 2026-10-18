@@ -1,18 +1,19 @@
 //! 设置-AI：供应商 / 模型服务 / Agent / 联网搜索（仓库级，本地落 `.atelyx/`，空间落服务端）。
 //! 编辑走草稿 + 保存；API key 缺省只进密钥链，`syncKeys` 开启才随仓库落盘（切换落点先迁移不丢 key）。
 
-use iced::widget::{button, column, container, row, scrollable, space, text};
-use iced::{Element, Length, Padding, Point, Task, border, widget::container::Style};
+use iced::widget::{button, column, container, row, scrollable, space};
+use iced::{Element, Length, Padding, Task, border, widget::container::Style};
 
 use atelyx_core::credentials;
 use atelyx_core::vault;
 
-use crate::layout_view::{PopupOpen, PopupState};
+use crate::layout_view::PopupState;
 use crate::space_actions;
 use crate::ui::controls;
 use crate::ui::icon::icon;
 use crate::ui::notify::Level as NoticeLevel;
 use crate::ui::palette as pal;
+use crate::ui::text;
 use crate::{App, Message};
 
 /// 表单输入宽度。
@@ -404,20 +405,6 @@ fn key_scope(app: &App) -> Option<String> {
 /// 空间 viewer 只读（写控件降级 + 写路径拦截）。
 fn readonly(app: &App) -> bool {
     matches!(&app.repo_kind, crate::RepoKind::Space(s) if !s.role.can_write())
-}
-
-/// 光标锚定的弹层打开消息（表单下拉统一入口）。
-fn open_popup(app: &App, window: iced::window::Id, state: PopupState) -> Message {
-    let cursor = app.cursor_for(window);
-    Message::PopupOpen(
-        window,
-        PopupOpen {
-            point: Point::new(cursor.x, cursor.y + 16.0),
-            flip_y: Some(cursor.y - 12.0),
-            state,
-            min_width: 0.0,
-        },
-    )
 }
 
 fn sub_tab_bar(app: &App) -> Element<'static, Message> {
@@ -1538,7 +1525,7 @@ fn provider_form(app: &App, p: &vault::VaultProvider, window: iced::window::Id) 
                 "删除该供应商",
                 &controls::btn_sm(),
                 controls::Variant::Ghost,
-                Some(open_popup(app, window, PopupState::AiProviderDeleteMenu)),
+                Some(super::open_popup(app, window, PopupState::AiProviderDeleteMenu)),
             ))
             .width(Length::Fill)
             .align_x(iced::alignment::Horizontal::Right)
@@ -1571,14 +1558,14 @@ fn models_view(app: &App, window: iced::window::Id) -> Element<'static, Message>
     let mode_trigger = controls::dropdown_trigger(
         naming_label(mode),
         FORM_W,
-        (!ro).then(|| open_popup(app, window, PopupState::AiNamingMenu)),
+        (!ro).then(|| super::open_popup(app, window, PopupState::AiNamingMenu)),
     );
     col = col.push(super::setting_row("自动命名", "新话题首条消息后自动起标题", mode_trigger));
     if mode == NamingMode::Custom {
         let model_trigger = controls::dropdown_trigger(
             &naming_model_label(app),
             FORM_W,
-            (!ro && model_count > 0).then(|| open_popup(app, window, PopupState::AiModelMenu)),
+            (!ro && model_count > 0).then(|| super::open_popup(app, window, PopupState::AiModelMenu)),
         );
         col = col.push(super::setting_row("命名模型", "话题命名一般用小模型；跟随所选 = 用对话时选择的模型", model_trigger));
     }
@@ -1717,7 +1704,7 @@ fn agent_card(
             Some((window, "复制 Agent".to_string())),
         ));
         if !builtin {
-            let del = open_popup(app, window, PopupState::AiAgentDeleteMenu);
+            let del = super::open_popup(app, window, PopupState::AiAgentDeleteMenu);
             line = line.push(controls::icon_button(
                 "trash-2",
                 12.0,
@@ -1762,7 +1749,7 @@ fn agent_form(app: &App, a: &vault::AgentConfig, window: iced::window::Id) -> El
     let prompt_control = if ro {
         value_text(&prompt_label)
     } else {
-        controls::dropdown_trigger(&prompt_label, FORM_W, Some(open_popup(app, window, PopupState::AiAgentPromptMenu)))
+        controls::dropdown_trigger(&prompt_label, FORM_W, Some(super::open_popup(app, window, PopupState::AiAgentPromptMenu)))
     };
 
     let mut col = column![].spacing(8);
@@ -1811,7 +1798,7 @@ fn agent_form(app: &App, a: &vault::AgentConfig, window: iced::window::Id) -> El
             text(cat.label.to_string())
                 .size(pal::fs_caption())
                 .color(pal::TEXT_PRIMARY)
-                .font(iced::Font { weight: iced::font::Weight::Medium, ..iced::Font::default() }),
+                .font(crate::ui::bold()),
         ]
         .spacing(6)
         .align_y(iced::alignment::Vertical::Center);
@@ -1855,7 +1842,7 @@ fn agent_form(app: &App, a: &vault::AgentConfig, window: iced::window::Id) -> El
             "删除",
             &controls::btn_sm(),
             controls::Variant::Ghost,
-            Some(open_popup(app, window, PopupState::AiAgentDeleteMenu)),
+            Some(super::open_popup(app, window, PopupState::AiAgentDeleteMenu)),
         ));
     }
     col = col.push(container(actions).width(Length::Fill));
@@ -1902,7 +1889,7 @@ fn search_view(app: &App, window: iced::window::Id) -> Element<'static, Message>
     let provider_control = if ro {
         value_text(provider_label)
     } else {
-        controls::dropdown_trigger(provider_label, FORM_W, Some(open_popup(app, window, PopupState::AiSearchProviderMenu)))
+        controls::dropdown_trigger(provider_label, FORM_W, Some(super::open_popup(app, window, PopupState::AiSearchProviderMenu)))
     };
 
     let mut col = column![].spacing(8);

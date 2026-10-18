@@ -26,7 +26,7 @@ use crate::commands::{self, NoteBindings};
 use crate::layout_view::parse_hex_color;
 use crate::markdown_view::{LineRun, SourceKind};
 use crate::ui::palette as pal;
-use crate::ui::semibold;
+use crate::ui::bold;
 use crate::Message;
 
 /// 行级缩进单位：两个空格（列表嵌套的通行写法）。
@@ -538,7 +538,7 @@ fn build_paragraph(
     let mut spans: Vec<Span<'static, (), Font>> = Vec::with_capacity(content.chars().count());
     for (k, ch) in content.chars().enumerate() {
         let st = styles.get(k).copied().unwrap_or_default();
-        let base = if st.mono { Font::MONOSPACE } else { Font::DEFAULT };
+        let base = if st.mono { crate::ui::mono() } else { crate::ui::regular() };
         let font = Font {
             weight: if st.bold { iced::font::Weight::Bold } else { base.weight },
             style: if st.italic { iced::font::Style::Italic } else { base.style },
@@ -565,7 +565,7 @@ fn build_paragraph(
         bounds: Size::new(width, f32::INFINITY),
         size: size.into(),
         line_height: advanced_text::LineHeight::Relative(line_height),
-        font: Font::DEFAULT,
+        font: crate::ui::regular(),
         align_x: advanced_text::Alignment::Left,
         align_y: alignment::Vertical::Top,
         shaping: advanced_text::Shaping::Advanced,
@@ -584,7 +584,7 @@ pub(crate) fn char_index(content: &str, byte: usize) -> usize {
 
 /// 组合串（未上屏文本）单行字宽：与画组合串同字体字号实测，光标竖条据此落在串尾。
 pub(crate) fn preedit_width(pre: &str, size: f32, line_height: f32) -> f32 {
-    measured_text_width(pre, size, line_height, Font::DEFAULT)
+    measured_text_width(pre, size, line_height, crate::ui::regular())
 }
 
 /// 组合串尾的光标竖条 x：让到串尾，串尾越出可用右缘 `right` 即贴边（不早于串首 `x`，
@@ -740,6 +740,8 @@ struct SourceState {
     size: f32,
     line_height: f32,
     width: f32,
+    /// 建段时的界面字体（换族后旧行段与光标几何即失效）。
+    font: iced::Font,
     /// 闪烁相位基准：光标或内容变化时重置（输入时保持可见）。
     blink_anchor: Option<Instant>,
     /// 已见光标位（变化即重置相位）。
@@ -772,10 +774,12 @@ impl Widget<Message, Theme, iced::Renderer> for SourceBlock<'_> {
             let from = self.from.min(to);
             let content = &self.text[from..to];
             let state = tree.state.downcast_mut::<SourceState>();
+            let font = crate::ui::regular();
             let stale = state.paragraph.is_none()
                 || state.content.as_str() != content
                 || state.size != size
                 || state.line_height != line_height
+                || state.font != font
                 || (state.width - width).abs() > 0.5;
             if stale {
                 let styles = source_styles(self.text, from, to, self.opts);
@@ -783,6 +787,7 @@ impl Widget<Message, Theme, iced::Renderer> for SourceBlock<'_> {
                 state.content = content.to_string();
                 state.size = size;
                 state.line_height = line_height;
+                state.font = font;
                 state.width = width;
                 // 内容变化即重置闪烁相位：输入时保持光标可见
                 state.blink_anchor = Some(Instant::now());
@@ -860,7 +865,7 @@ impl Widget<Message, Theme, iced::Renderer> for SourceBlock<'_> {
                     bounds: Size::new(f32::INFINITY, h),
                     size: state.size.into(),
                     line_height: advanced_text::LineHeight::Relative(state.line_height),
-                    font: Font::DEFAULT,
+                    font: crate::ui::regular(),
                     align_x: advanced_text::Alignment::Left,
                     align_y: alignment::Vertical::Top,
                     shaping: advanced_text::Shaping::Auto,
@@ -1025,7 +1030,7 @@ impl SourceBlock<'_> {
                     bounds: Size::new(f32::INFINITY, f32::INFINITY),
                     size: pal::fs_micro().into(),
                     line_height: advanced_text::LineHeight::Relative(1.0),
-                    font: semibold(),
+                    font: bold(),
                     align_x: advanced_text::Alignment::Left,
                     align_y: alignment::Vertical::Top,
                     shaping: advanced_text::Shaping::Auto,
@@ -1683,7 +1688,7 @@ impl Widget<Message, Theme, iced::Renderer> for EditSurface<'_> {
                                 line_height: advanced_text::LineHeight::Relative(
                                     crate::markdown_view::LINE_HEIGHT,
                                 ),
-                                font: Font::DEFAULT,
+                                font: crate::ui::regular(),
                                 align_x: advanced_text::Alignment::Left,
                                 align_y: alignment::Vertical::Top,
                                 shaping: advanced_text::Shaping::Auto,
@@ -1884,7 +1889,7 @@ pub(crate) fn code_offset(code: &str, size: f32, width: f32, point: Point) -> us
         bounds: Size::new(width.max(1.0), f32::INFINITY),
         size: size.into(),
         line_height: advanced_text::LineHeight::Relative(CODE_LINE_HEIGHT),
-        font: Font::MONOSPACE,
+        font: crate::ui::mono(),
         align_x: advanced_text::Alignment::Left,
         align_y: alignment::Vertical::Top,
         shaping: advanced_text::Shaping::Auto,
@@ -2066,7 +2071,7 @@ fn probe_offset(
         bounds: Size::new(width.max(1.0), f32::INFINITY),
         size: size.into(),
         line_height: advanced_text::LineHeight::Relative(line_height),
-        font: Font::DEFAULT,
+        font: crate::ui::regular(),
         align_x: advanced_text::Alignment::Left,
         align_y: alignment::Vertical::Top,
         shaping: advanced_text::Shaping::Auto,
@@ -2188,7 +2193,7 @@ mod tests {
             bounds: Size::new(f32::INFINITY, f32::INFINITY),
             size: size.into(),
             line_height: advanced_text::LineHeight::Relative(line_height),
-            font: Font::DEFAULT,
+            font: crate::ui::regular(),
             align_x: advanced_text::Alignment::Left,
             align_y: alignment::Vertical::Top,
             shaping: advanced_text::Shaping::Auto,

@@ -1,7 +1,7 @@
 //! 日历视图入口与月份导航：视图分派、月份偏移与本地「今天」的公共口径，
 //! 以及月网格 / 天详情共用的色点与条目取色；分区渲染在 calendar_heat / calendar_month / calendar_day。
 
-use iced::widget::{column, container, row, space, text};
+use iced::widget::{column, container, row, space};
 use iced::{Element, Length, Padding};
 
 use atelyx_core::calendar::CalendarItem;
@@ -13,7 +13,8 @@ use crate::calendar_heat;
 use crate::calendar_month;
 use crate::ui::controls;
 use crate::ui::palette as pal;
-use crate::ui::semibold;
+use crate::ui::text;
+use crate::ui::bold;
 use crate::{App, Message, layout_view};
 
 /// 日历视图（kind "calendar"）：垂直滚动承载各分区。
@@ -85,7 +86,7 @@ fn nav_bar(app: &App, window: iced::window::Id) -> Element<'static, Message> {
         container(
             text(format!("{y}年{m}月"))
                 .size(pal::fs_body())
-                .font(semibold())
+                .font(bold())
         )
         .padding(Padding::ZERO.horizontal(4.0)),
         controls::icon_button(

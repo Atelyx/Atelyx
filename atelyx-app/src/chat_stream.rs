@@ -4,13 +4,14 @@
 
 use std::collections::{HashMap, HashSet};
 
-use iced::widget::{button, column, container, row, scrollable, text};
+use iced::widget::{button, column, container, row, scrollable};
 use iced::{border, Length, Padding};
 use serde_json::{json, Value};
 
 use crate::chat_actions::ChatMsg;
 use crate::ui::icon::icon;
 use crate::ui::{controls, palette as pal};
+use crate::ui::text;
 use crate::Message;
 
 /// 折叠态摘要的单行字符上限（中英文混排按字符计）。
@@ -418,7 +419,7 @@ fn details_block<'a>(
                 .size(pal::fs_micro() * s)
                 .color(pal::TEXT_MUTED);
         if mono_summary {
-            summary_text = summary_text.font(crate::layout_view::mono());
+            summary_text = summary_text.font(crate::ui::mono());
         }
         head = head.push(summary_text);
     }

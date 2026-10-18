@@ -14,12 +14,13 @@ use iced::event::Event;
 use iced::widget::canvas::{
     self, Canvas, Frame, LineDash, Path, Stroke, Text as CanvasText,
 };
-use iced::widget::{column, container, responsive, row, scrollable, space, stack, text};
+use iced::widget::{column, container, responsive, row, scrollable, space, stack};
 use iced::{alignment, Color, Length, Padding, Point, Rectangle, Size, Vector};
 use serde_json::Value;
 
 use crate::ui::icon::{icon, polylines};
 use crate::ui::{controls, palette as pal};
+use crate::ui::text;
 use crate::{layout_view, App, Message};
 
 // ===== 常量 =====
@@ -707,7 +708,7 @@ fn draw_group(frame: &mut Frame, view: &View, n: &atelyx_core::vault::CanvasFile
             color: pal::TEXT_PRIMARY,
             size: size.into(),
             line_height: iced::advanced::text::LineHeight::Relative(1.3),
-            font: iced::Font { weight: iced::font::Weight::Medium, ..iced::Font::default() },
+            font: crate::ui::bold(),
             align_x: iced::advanced::text::Alignment::Left,
             align_y: alignment::Vertical::Top,
             shaping: Shaping::Advanced,
@@ -891,7 +892,7 @@ fn draw_card(
         color: pal::TEXT_PRIMARY,
         size: title_size.into(),
         line_height: iced::advanced::text::LineHeight::Relative(1.3),
-        font: iced::Font { weight: iced::font::Weight::Medium, ..iced::Font::default() },
+        font: crate::ui::bold(),
         align_x: iced::advanced::text::Alignment::Left,
         align_y: alignment::Vertical::Top,
         shaping: Shaping::Advanced,
@@ -1057,7 +1058,7 @@ fn draw_preview_lines(frame: &mut Frame, body: &str, area: Rectangle, size: f32)
                 color: pal::TEXT_SECONDARY,
                 size: size.into(),
                 line_height: iced::advanced::text::LineHeight::Relative(1.45),
-                font: iced::Font::default(),
+                font: crate::ui::regular(),
                 align_x: iced::advanced::text::Alignment::Left,
                 align_y: alignment::Vertical::Top,
                 shaping: Shaping::Advanced,
@@ -1096,7 +1097,7 @@ fn draw_hint(frame: &mut Frame, hint: &str, area: Rectangle, size: f32, color: C
         color,
         size: size.into(),
         line_height: iced::advanced::text::LineHeight::Relative(1.4),
-        font: iced::Font::default(),
+        font: crate::ui::regular(),
         align_x: iced::advanced::text::Alignment::Left,
         align_y: alignment::Vertical::Top,
         shaping: Shaping::Advanced,

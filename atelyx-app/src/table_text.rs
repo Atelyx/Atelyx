@@ -20,7 +20,7 @@ pub struct TextLine {
 #[derive(Default)]
 pub struct WrapCache {
     entries: HashMap<WrapKey, WrapEntry>,
-    /// 上次测量时的字体库版本（应用字体在启动后才注册，换库即作废旧行段）
+    /// 上次测量时的字体库版本（字体集会随系统变化，换库即作废旧行段）
     font_version: Option<Version>,
     pass: u64,
 }

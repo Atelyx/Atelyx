@@ -1,9 +1,10 @@
-//! UI 组件库：调色板 / 矢量图标 / 基础控件 / 统一弹层 / 菜单 / 通知。
+//! UI 组件库：调色板 / 矢量图标 / 字体 / 基础控件 / 统一弹层 / 菜单 / 通知。
 //!
 //! 视觉 token 定义于 `palette`；弹层与菜单是全应用
 //! 唯一浮层入口，右键菜单、下拉、就地确认都经 [`popup`] + [`menu`] 组合。
 
 pub mod controls;
+pub mod font;
 pub mod icon;
 pub mod icons;
 pub mod menu;
@@ -12,13 +13,7 @@ pub mod palette;
 pub mod popup;
 pub mod svgpath;
 
-/// 随应用分发的 IBM Plex Sans（SIL OFL 1.1）：400 / 500 / 600 三字重。
-pub const FONT_REGULAR: &[u8] = include_bytes!("../../assets/fonts/IBMPlexSans-Regular.ttf");
-pub const FONT_MEDIUM: &[u8] = include_bytes!("../../assets/fonts/IBMPlexSans-Medium.ttf");
-pub const FONT_SEMIBOLD: &[u8] = include_bytes!("../../assets/fonts/IBMPlexSans-SemiBold.ttf");
-
-/// 随应用分发的 Fraunces（SIL OFL 1.1，可变字重）：品牌名等展示字体。
-pub const FONT_DISPLAY: &[u8] = include_bytes!("../../assets/fonts/Fraunces.ttf");
+pub use font::{bold, epoch, family, italic, mono, regular, set_family, text};
 
 /// 应用图标（随应用分发的 PNG 资源）。
 pub const ICON_PNG: &[u8] = include_bytes!("../../assets/icons/icon.png");
@@ -34,37 +29,6 @@ pub fn icon_handle() -> iced::widget::image::Handle {
 /// 窗口图标（任务栏 / Alt-Tab / 窗口切换器）；构造失败回退系统默认图标。
 pub fn window_icon() -> Option<iced::window::icon::Icon> {
     iced::window::icon::from_file_data(ICON_PNG, None).ok()
-}
-
-/// 家族名（Font::with_name 与字重选择共用）。
-pub const FONT_FAMILY: &str = "IBM Plex Sans";
-/// 展示字体家族名（品牌名）。
-pub const FONT_DISPLAY_FAMILY: &str = "Fraunces";
-
-/// 展示字体 600（品牌名）。
-pub fn display() -> iced::Font {
-    iced::Font {
-        family: iced::font::Family::Name(FONT_DISPLAY_FAMILY),
-        weight: iced::font::Weight::Semibold,
-        ..iced::Font::default()
-    }
-}
-
-/// 字重 600（标题/分组头等强调文字）。
-pub fn semibold() -> iced::Font {
-    iced::Font {
-        family: iced::font::Family::Name(FONT_FAMILY),
-        weight: iced::font::Weight::Semibold,
-        ..iced::Font::default()
-    }
-}
-
-/// 等宽字体（计数 / 键串 / 扩展名标签）。
-pub fn mono() -> iced::Font {
-    iced::Font {
-        family: iced::font::Family::Monospace,
-        ..iced::Font::with_name(FONT_FAMILY)
-    }
 }
 
 /// ui 层上抛的应用消息（应用层统一转译）。

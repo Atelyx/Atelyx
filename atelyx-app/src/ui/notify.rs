@@ -6,11 +6,12 @@
 use std::time::{Duration, Instant};
 
 use iced::alignment::{Horizontal, Vertical};
-use iced::widget::{button, column, container, row, space, text};
+use iced::widget::{button, column, container, row, space};
 use iced::{Color, Element, Length, Padding, border, widget::container::Style};
 
 use super::icon::icon;
 use super::palette as pal;
+use super::text;
 use super::{UiMsg, controls};
 use crate::Message;
 

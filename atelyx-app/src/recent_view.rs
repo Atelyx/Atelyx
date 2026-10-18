@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use iced::widget::{button, column, container, row, scrollable, space, text};
+use iced::widget::{button, column, container, row, scrollable, space};
 use iced::{Element, Length, Padding, Task};
 
 use serde::{Deserialize, Serialize};
@@ -17,6 +17,7 @@ use crate::space_actions;
 use crate::ui::controls;
 use crate::ui::icon::icon;
 use crate::ui::palette as pal;
+use crate::ui::text;
 use crate::{App, Message, RepoKind};
 
 /// 最近打开的文件类型。
@@ -236,7 +237,7 @@ pub fn recent_view(app: &App) -> Element<'_, Message> {
                             text(name)
                                 .size(pal::fs_body())
                                 .color(pal::TEXT_PRIMARY)
-                                .font(iced::Font { weight: iced::font::Weight::Medium, ..iced::Font::default() }),
+                                .font(crate::ui::bold()),
                             row![
                                 text(parent).size(pal::fs_micro()).color(pal::TEXT_MUTED),
                                 space().width(Length::Fill),

@@ -1,11 +1,12 @@
 //! 设置-文件与路径：排除文件夹与附件文件夹（仓库级，随仓库 config 走）。
 
-use iced::widget::{column, container, scrollable, text};
+use iced::widget::{column, container, scrollable};
 use iced::{Element, Length, Padding};
 
 use crate::settings_view::{group_head, setting_row};
 use crate::ui::controls;
 use crate::ui::palette as pal;
+use crate::ui::text;
 use crate::{App, Message, RepoKind};
 
 pub fn view(app: &App) -> Element<'static, Message> {

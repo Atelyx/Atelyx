@@ -229,10 +229,15 @@ fn open_external(url: &str) {
 }
 
 fn main() -> iced::Result {
+    // 字体族清单必须在建渲染器之前备好：default_font 只在渲染器创建时读一次
+    ui::font::init();
     iced::daemon(App::boot, App::update, App::view)
         .title(App::title)
         .theme(|app: &App, _id| app.theme.clone())
-        .default_font(iced::Font::with_name("IBM Plex Sans"))
+        .default_font(iced::Font {
+            family: ui::family(),
+            ..iced::Font::default()
+        })
         .subscription(App::subscription)
         .run()
 }
@@ -643,6 +648,10 @@ enum Message {
     FontSizeInput(String),
     /// 设置-通用：字号提交（非法草稿回退显示当前生效值）。
     FontSizeCommit,
+    /// 字体选择弹层：过滤草稿（逐键收窄族清单）。
+    FontPickerQuery(String),
+    /// 设置-通用：界面字体族选定（None = 跟随系统）；立即生效并落盘。
+    InterfaceFontSet(Option<String>),
     /// 设置-通用：自动恢复上次打开文件开关。
     AutoRestoreToggle,
     /// 设置-通用：自动检查更新开关（启动静默检查的开关源）。
@@ -1088,6 +1097,8 @@ pub struct App {
     pub global: global_config::GlobalConfig,
     /// 设置-通用：界面字号草稿（None = 显示当前生效值）。
     pub font_size_draft: Option<String>,
+    /// 字体选择弹层的过滤草稿（打开弹层时清空）。
+    pub font_picker_query: String,
     /// 设置-通用：开机自启系统态缓存（打开设置页 / 切换后刷新；None = 未读）。
     pub autostart_enabled: Option<bool>,
     /// 更新流程状态机（检查 / 下载 / 安装）。
@@ -1363,12 +1374,6 @@ impl App {
             ..Settings::default()
         });
         ui::icon::init();
-        // 字体加载完成前首帧以系统回退字体渲染，随后自动替换
-        let fonts = iced::font::load(ui::FONT_REGULAR)
-            .chain(iced::font::load(ui::FONT_MEDIUM))
-            .chain(iced::font::load(ui::FONT_SEMIBOLD))
-            .chain(iced::font::load(ui::FONT_DISPLAY))
-            .discard();
         // 插件运行时：根 = 应用数据目录下 `plugins/`（数据目录不可用时回落系统临时目录，功能降级不崩溃）
         let plugins_root = app_data_dir()
             .map(|d| d.join("plugins"))
@@ -1381,6 +1386,8 @@ impl App {
         let market_cache_path = app_data_dir().map(|d| d.join("market-cache.json"));
         // 界面基准字号随配置（缺字段走默认档；越界钳回合法区间）
         ui::palette::set_ui_base(global.font_size.clamp(12, 20));
+        // 界面字体族随配置（未安装或空值 = 跟随系统 UI 字体）
+        ui::set_family(global.font_family.as_deref());
         // 启动自动进入：最后激活身份优先，缺省回落最近仓库首位（路径失效则停留未激活态）
         let auto_vault: Option<PathBuf> = match &global.last_active {
             Some(LastActive::Vault { root }) => Some(PathBuf::from(root)),
@@ -1389,8 +1396,7 @@ impl App {
         };
         let mut boot = open
             .map(Message::WindowOpened)
-            .chain(window::position(main_os).map(move |p| Message::PositionKnown(main_os, p)))
-            .chain(fonts);
+            .chain(window::position(main_os).map(move |p| Message::PositionKnown(main_os, p)));
         if let Some(text) = global_notice {
             boot = boot.chain(Task::done(Message::StartupNotice(text)));
         }
@@ -1462,6 +1468,7 @@ impl App {
                 ai: settings_view::ai::AiState::default(),
                 global,
                 font_size_draft: None,
+                font_picker_query: String::new(),
                 autostart_enabled: None,
                 update: update::UpdateState::Idle,
                 update_cancel: None,
@@ -3180,6 +3187,25 @@ impl App {
                 self.font_size_draft = None;
                 Task::none()
             }
+            Message::FontPickerQuery(query) => {
+                self.font_picker_query = query;
+                Task::none()
+            }
+            Message::InterfaceFontSet(name) => {
+                self.global.font_family = name.clone();
+                ui::set_family(name.as_deref());
+                self.dismiss_popup();
+                // 族名变了，行段度量与编辑面块度量都要按新字体重算
+                self.refresh_edit();
+                if let Some(t) = self.table.as_mut() {
+                    t.rebuild_layout();
+                }
+                if let Some(c) = self.canvas.as_mut() {
+                    c.redraw();
+                }
+                self.save_global_now();
+                Task::none()
+            }
             Message::AutoRestoreToggle => {
                 self.global.auto_restore = !self.global.auto_restore;
                 self.save_global_now();
@@ -3299,6 +3325,7 @@ impl App {
                 self.popup_pane = 0;
                 // 表格弹层内联输入以空草稿回退显示当前值
                 self.table_popup_draft.clear();
+                self.font_picker_query.clear();
                 fetch.unwrap_or_else(Task::none)
             }
             Message::FileCount(gen, Ok(n)) => {

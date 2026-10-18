@@ -1,6 +1,6 @@
 //! 插件自绘画布部件：执行插件提交的绘图指令清单（`canvas.submit` 存档），指针事件按节点声明
-//! 子集回发（命中由插件按指令几何自算）。缓存按「清单 Arc 指针 + 尺寸」失效——清单整发整换，
-//! 指针不变即清单未变，直接复用上次几何。
+//! 子集回发（命中由插件按指令几何自算）。缓存按「清单 Arc 指针 + 尺寸 + 界面字体族变更计数」
+//! 失效——清单整发整换，指针不变即清单未变，直接复用上次几何。
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -28,6 +28,8 @@ pub struct CanvasState {
     cache: canvas::Cache,
     /// 上次绘制用的清单标识（Arc 指针地址，0 = 无清单）；变化即清缓存。
     list_key: std::cell::Cell<usize>,
+    /// 上次绘制用的界面字体族变更计数；换族后文字几何要重画（清单不变也得失效）。
+    font_epoch: std::cell::Cell<u64>,
     /// 按下中：Move / Up 走绝对坐标换算（拖出画布不丢事件，抬起为止）。
     pressed: std::cell::Cell<bool>,
     /// 悬停中：Leave 按「从内到外」边沿触发，不逐帧重发。
@@ -40,6 +42,7 @@ impl Default for CanvasState {
         Self {
             cache: canvas::Cache::new(),
             list_key: std::cell::Cell::new(0),
+            font_epoch: std::cell::Cell::new(0),
             pressed: std::cell::Cell::new(false),
             inside: std::cell::Cell::new(false),
             last_press: std::cell::RefCell::new(None),
@@ -184,9 +187,11 @@ impl canvas::Program<Message> for PluginCanvas<'_> {
             .list
             .map(|list| Arc::as_ptr(list) as usize)
             .unwrap_or_default();
-        if state.list_key.get() != list_key {
+        let epoch = crate::ui::epoch();
+        if state.list_key.get() != list_key || state.font_epoch.get() != epoch {
             state.cache.clear();
             state.list_key.set(list_key);
+            state.font_epoch.set(epoch);
         }
         let commands: &[DrawCommand] = self.list.map(|list| list.as_slice()).unwrap_or(&[]);
         let geometry = state.cache.draw(renderer, bounds.size(), |frame| {
@@ -275,7 +280,7 @@ fn execute(frame: &mut canvas::Frame, command: &DrawCommand, widget: &PluginCanv
                 position: Point::new(*x, *y),
                 color: color(*text_color),
                 size: (*size).into(),
-                font: weight.map(font_of).unwrap_or_default(),
+                font: weight.map(font_of).unwrap_or_else(crate::ui::regular),
                 // 缺省 Shaping::Auto 已覆盖 CJK 文本
                 ..CanvasText::default()
             });
@@ -329,12 +334,11 @@ fn color(value: CanvasColor) -> Color {
     }
 }
 
-/// 字重 → 字体（同 [`crate::plugin_view`] 的控件口径）。
+/// 字重 → 字体（同 [`crate::plugin_view`] 的控件口径）；插件只有常规与强调两档。
 pub(crate) fn font_of(weight: TextWeight) -> iced::Font {
     match weight {
-        TextWeight::Normal => iced::Font::default(),
-        TextWeight::Medium => iced::Font { weight: iced::font::Weight::Medium, ..iced::Font::default() },
-        TextWeight::SemiBold => crate::ui::semibold(),
+        TextWeight::Normal => crate::ui::regular(),
+        TextWeight::Medium | TextWeight::SemiBold => crate::ui::bold(),
     }
 }
 

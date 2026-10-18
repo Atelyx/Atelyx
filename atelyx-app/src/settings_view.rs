@@ -1,16 +1,16 @@
 //! 设置整页：左栏分组导航（应用级 / 仓库级 / 关于）+ 右侧分区内容（本模块或 `settings_view/` 子模块）。
 //! 分区只渲染表单，配置真源在 `App.global`（应用级）与仓库 `VaultConfig`（仓库级）。
 
-use iced::widget::{button, column, container, row, scrollable, space, text};
-use iced::{Element, Length, Padding, border, widget::container::Style};
+use iced::widget::{button, column, container, row, scrollable, space};
+use iced::{Element, Length, Padding, Point, border, widget::container::Style};
 
 use atelyx_core::plugin_runtime::ContributionSlot;
 
-use crate::layout_view::{format_ts, mono, parse_hex_color};
+use crate::layout_view::{PopupOpen, PopupState, format_ts, parse_hex_color};
 use crate::ui::controls;
 use crate::ui::icon::icon;
 use crate::ui::palette as pal;
-use crate::ui::semibold;
+use crate::ui::{bold, mono, text};
 use crate::{App, Message};
 
 mod about;
@@ -67,7 +67,7 @@ fn settings_item_dyn(id: &str, label: &str, icon_name: &'static str, active_tab:
             text(label.to_string())
                 .size(pal::fs_caption())
                 .color(if active { pal::ACCENT } else { pal::TEXT_SECONDARY })
-                .font(iced::Font { weight: iced::font::Weight::Medium, ..iced::Font::default() }),
+                .font(bold()),
         ]
         .spacing(8),
     )
@@ -144,7 +144,7 @@ pub fn settings_view<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, 
         .into()
     } else {
         row![
-            text("设置").size(pal::fs_body()).color(pal::TEXT_PRIMARY).font(semibold()),
+            text("设置").size(pal::fs_body()).color(pal::TEXT_PRIMARY).font(bold()),
             space().width(Length::Fill),
             button(icon("x", 14.0, pal::TEXT_SECONDARY))
                 .padding(4.0)
@@ -212,7 +212,7 @@ pub fn settings_view<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, 
         container(
             column![
                 row![
-                    text(title.to_string()).size(pal::fs_h2()).color(pal::TEXT_PRIMARY).font(semibold()),
+                    text(title.to_string()).size(pal::fs_h2()).color(pal::TEXT_PRIMARY).font(bold()),
                     space().width(Length::Fill),
                     scope_pill,
                 ],
@@ -257,7 +257,7 @@ fn settings_body<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, Mess
 
 fn settings_tab_body<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, Message> {
     match app.settings_tab.as_str() {
-        "general" => general::view(app),
+        "general" => general::view(app, window),
         "collab" => collab_settings_view(app),
         "editorPrefs" => editor_prefs::view(app),
         "shortcuts" => shortcuts::view(app, window),
@@ -287,7 +287,7 @@ pub fn setting_row(
                 text(title.to_string())
                     .size(pal::fs_body())
                     .color(pal::TEXT_PRIMARY)
-                    .font(iced::Font { weight: iced::font::Weight::Medium, ..iced::Font::default() }),
+                    .font(bold()),
                 text(desc.to_string()).size(pal::fs_caption()).color(pal::TEXT_MUTED),
             ]
             .spacing(2)
@@ -310,6 +310,20 @@ pub(crate) fn card(content: iced::widget::Row<'static, Message>) -> Element<'sta
             ..Style::default()
         })
         .into()
+}
+
+/// 光标锚定的弹层打开消息（设置页表单下拉统一入口）。
+pub(crate) fn open_popup(app: &App, window: iced::window::Id, state: PopupState) -> Message {
+    let cursor = app.cursor_for(window);
+    Message::PopupOpen(
+        window,
+        PopupOpen {
+            point: Point::new(cursor.x, cursor.y + 16.0),
+            flip_y: Some(cursor.y - 12.0),
+            state,
+            min_width: 0.0,
+        },
+    )
 }
 
 /// 一组导航：分组头 + 条目（条目间距 4）。
@@ -353,7 +367,7 @@ fn collab_settings_view(app: &App) -> Element<'static, Message> {
                     text(identity.display_name.clone())
                         .size(pal::fs_body())
                         .color(pal::TEXT_PRIMARY)
-                        .font(iced::Font { weight: iced::font::Weight::Medium, ..iced::Font::default() }),
+                        .font(bold()),
                     text(format!("@ {}", identity.server_url))
                         .size(pal::fs_caption())
                         .color(pal::TEXT_MUTED),
@@ -418,7 +432,7 @@ fn collab_settings_view(app: &App) -> Element<'static, Message> {
                         text(d.device_name.clone())
                             .size(pal::fs_body())
                             .color(pal::TEXT_PRIMARY)
-                            .font(iced::Font { weight: iced::font::Weight::Medium, ..iced::Font::default() }),
+                            .font(bold()),
                         text(format!("最近活跃 {}", format_ts(d.last_seen_at * 1000)))
                             .size(pal::fs_caption())
                             .color(pal::TEXT_MUTED),
@@ -458,7 +472,7 @@ pub fn group_head(label: &str, hint: &str, repo_level: bool) -> Element<'static,
         text(label.to_string())
             .size(pal::fs_micro())
             .color(text_color)
-            .font(semibold()),
+            .font(bold()),
     ]
     .spacing(8)
     .width(Length::Fill);

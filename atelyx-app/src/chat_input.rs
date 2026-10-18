@@ -202,6 +202,8 @@ struct InputState {
     content: String,
     size: f32,
     width: f32,
+    /// 建段时的界面字体（换族后旧行段与命中几何即失效）。
+    font: iced::Font,
     /// 可视行表（随段落重建；命中与光标几何的纵向基准）。
     rows: Vec<Row>,
     blink_anchor: Option<Instant>,
@@ -215,10 +217,11 @@ struct InputState {
 }
 
 impl InputState {
-    fn stale(&self, content: &str, size: f32, width: f32) -> bool {
+    fn stale(&self, content: &str, size: f32, width: f32, font: iced::Font) -> bool {
         self.paragraph.is_none()
             || self.content.as_str() != content
             || self.size != size
+            || self.font != font
             || (self.width - width).abs() > 0.5
     }
 }
@@ -233,7 +236,7 @@ fn build_paragraph(content: &str, size: f32, width: f32) -> ParagraphT {
         bounds: Size::new(width, f32::INFINITY),
         size: size.into(),
         line_height: advanced_text::LineHeight::Relative(LINE_FACTOR),
-        font: Font::DEFAULT,
+        font: crate::ui::regular(),
         align_x: advanced_text::Alignment::Left,
         align_y: alignment::Vertical::Top,
         shaping: advanced_text::Shaping::Advanced,
@@ -495,10 +498,12 @@ impl Widget<Message, Theme, iced::Renderer> for Input<'_> {
             let text = &self.draft.text;
             let line_px = size * LINE_FACTOR;
             let state = tree.state.downcast_mut::<InputState>();
-            if state.stale(text, size, width) {
+            let font = crate::ui::regular();
+            if state.stale(text, size, width, font) {
                 state.paragraph = Some(build_paragraph(text, size, width));
                 state.content = text.to_string();
                 state.size = size;
+                state.font = font;
                 state.width = width;
                 let p = state.paragraph.as_ref().expect("段落已建");
                 state.rows = rows_of(p, text, line_px);
@@ -604,7 +609,7 @@ impl Widget<Message, Theme, iced::Renderer> for Input<'_> {
                         bounds: Size::new(bounds.width, line_px),
                         size: state.size.into(),
                         line_height: advanced_text::LineHeight::Relative(LINE_FACTOR),
-                        font: Font::DEFAULT,
+                        font: crate::ui::regular(),
                         align_x: advanced_text::Alignment::Left,
                         align_y: alignment::Vertical::Top,
                         shaping: advanced_text::Shaping::Auto,
@@ -633,7 +638,7 @@ impl Widget<Message, Theme, iced::Renderer> for Input<'_> {
                         bounds: Size::new(f32::INFINITY, h),
                         size: state.size.into(),
                         line_height: advanced_text::LineHeight::Relative(LINE_FACTOR),
-                        font: Font::DEFAULT,
+                        font: crate::ui::regular(),
                         align_x: advanced_text::Alignment::Left,
                         align_y: alignment::Vertical::Top,
                         shaping: advanced_text::Shaping::Auto,

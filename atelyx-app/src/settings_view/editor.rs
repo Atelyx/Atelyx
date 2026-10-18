@@ -1,7 +1,7 @@
 //! 设置-编辑器（仓库级）：批量重建内部链接（危险操作卡，二段确认 + 写盘队列执行）。
 
 use iced::alignment::Vertical;
-use iced::widget::{column, container, row, scrollable, text};
+use iced::widget::{column, container, row, scrollable};
 use iced::{Element, Length, Padding, Task, border, widget::container::Style};
 use atelyx_core::rebuild_links;
 
@@ -10,7 +10,8 @@ use crate::ui::controls;
 use crate::ui::icon::icon;
 use crate::ui::notify::Level as NoticeLevel;
 use crate::ui::palette as pal;
-use crate::ui::semibold;
+use crate::ui::text;
+use crate::ui::bold;
 use crate::{App, Message, RepoKind};
 
 /// 重建链接会话态（设置-编辑器；随容器切换清空）。
@@ -186,7 +187,7 @@ fn rebuild_card(app: &App) -> Element<'static, Message> {
     let mut card = column![
         row![
             column![
-                row![icon("triangle-alert", 13.0, pal::DANGER), text("重建内部链接").size(pal::fs_body()).color(pal::TEXT_PRIMARY).font(semibold())]
+                row![icon("triangle-alert", 13.0, pal::DANGER), text("重建内部链接").size(pal::fs_body()).color(pal::TEXT_PRIMARY).font(bold())]
                     .spacing(6)
                     .align_y(Vertical::Center),
                 text("把全库 .md 链接统一改写为标准 Markdown 链接，不可撤销")

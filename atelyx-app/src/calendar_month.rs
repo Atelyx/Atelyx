@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use iced::widget::{button, column, container, mouse_area, row, space, text};
+use iced::widget::{button, column, container, mouse_area, row, space};
 use iced::{Element, Length, Padding, border};
 
 use atelyx_core::calendar::CalendarItem;
@@ -13,6 +13,7 @@ use crate::calendar_grid;
 use crate::calendar_view::{display_month, dot, item_color, today};
 use crate::ui::UiMsg;
 use crate::ui::palette as pal;
+use crate::ui::text;
 use crate::{App, Message};
 
 /// 月视图格子高度（日号 + 两条日程条目块的最小内容高，留 2px 余量）。

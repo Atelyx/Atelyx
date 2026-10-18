@@ -4,11 +4,12 @@
 //! 一次只渲染一个面板；子面板（pane > 0）头部固定「返回 + 分隔线」。
 
 use iced::alignment::Vertical;
-use iced::widget::{column, container, row, space, text};
+use iced::widget::{column, container, row, scrollable, space};
 use iced::{Element, Length, Padding, widget::container::Style};
 
 use super::icon::icon;
 use super::palette as pal;
+use super::text;
 use super::UiMsg;
 use crate::Message;
 
@@ -35,6 +36,8 @@ pub enum MenuEntry<'a> {
     Submenu { label: String, icon: Option<&'static str>, disabled: bool, pane: usize },
     /// 自定义内容块（高度调用方给出，用于估高与钳制）。
     Custom(Element<'a, Message>, f32),
+    /// 长清单滚动区（族名表等）：内部条目按菜单行渲染，`height` = 可视区高度（同时计入估高）。
+    Scroll { entries: Vec<MenuEntry<'a>>, height: f32 },
 }
 
 impl<'a> MenuEntry<'a> {
@@ -123,31 +126,51 @@ pub fn pane_view<'a>(
         height += pal::MENU_ITEM_H + pal::MENU_DIVIDER_H;
     }
     for (_, entry) in remaining {
-        let (element, h): (Element<'a, Message>, f32) = match entry {
-            MenuEntry::Action { label, icon: ic, danger, disabled, on_press, note, hint } => {
-                (item(&label, ic, danger, disabled, on_press, note, hint, window), pal::MENU_ITEM_H)
-            }
-            MenuEntry::Group(name) => (
-                container(text(name).size(pal::fs_micro()).color(pal::TEXT_MUTED))
-                    .padding(Padding::ZERO.left(12.0).top(6.0).bottom(2.0))
-                    .width(Length::Fill)
-                    .into(),
-                pal::MENU_GROUP_H,
-            ),
-            MenuEntry::Divider => (divider(), pal::MENU_DIVIDER_H),
-            MenuEntry::Checked { label, on_press } => {
-                (checked_item(&label, on_press, window), pal::MENU_ITEM_H)
-            }
-            MenuEntry::Submenu { label, icon: ic, disabled, pane: target } => (
-                submenu_item(&label, ic, disabled, target, window),
-                pal::MENU_ITEM_H,
-            ),
-            MenuEntry::Custom(element, h) => (element, h),
-        };
+        let (element, h) = entry_element(entry, window);
         col = col.push(element);
         height += h;
     }
     (col.into(), height)
+}
+
+/// 渲染单条目，并返回它占用的竖向高度（供弹层估高与钳制）。
+fn entry_element<'a>(entry: MenuEntry<'a>, window: iced::window::Id) -> (Element<'a, Message>, f32) {
+    match entry {
+        MenuEntry::Action { label, icon: ic, danger, disabled, on_press, note, hint } => {
+            (item(&label, ic, danger, disabled, on_press, note, hint, window), pal::MENU_ITEM_H)
+        }
+        MenuEntry::Group(name) => (
+            container(text(name).size(pal::fs_micro()).color(pal::TEXT_MUTED))
+                .padding(Padding::ZERO.left(12.0).top(6.0).bottom(2.0))
+                .width(Length::Fill)
+                .into(),
+            pal::MENU_GROUP_H,
+        ),
+        MenuEntry::Divider => (divider(), pal::MENU_DIVIDER_H),
+        MenuEntry::Checked { label, on_press } => {
+            (checked_item(&label, on_press, window), pal::MENU_ITEM_H)
+        }
+        MenuEntry::Submenu { label, icon: ic, disabled, pane: target } => {
+            (submenu_item(&label, ic, disabled, target, window), pal::MENU_ITEM_H)
+        }
+        MenuEntry::Custom(element, h) => (element, h),
+        MenuEntry::Scroll { entries, height } => {
+            let mut col = column![];
+            for entry in entries {
+                col = col.push(entry_element(entry, window).0);
+            }
+            (
+                scrollable(col)
+                    .width(Length::Fill)
+                    .height(Length::Fixed(height))
+                    .direction(scrollable::Direction::Vertical(
+                        scrollable::Scrollbar::new().width(6.0).scroller_width(6.0),
+                    ))
+                    .into(),
+                height,
+            )
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

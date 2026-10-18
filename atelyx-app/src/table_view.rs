@@ -7,12 +7,13 @@ use std::time::Instant;
 
 use iced::widget::canvas::{self, Canvas, LineCap, LineDash, LineJoin, Path, Stroke};
 use iced::widget::text_editor;
-use iced::widget::{column, container, mouse_area, row, space, text};
+use iced::widget::{column, container, mouse_area, row, space};
 use iced::{alignment, Color, Element, Length, Point, Rectangle, Size, Vector};
 
 use crate::table_text::{TextLine, WrapCache, LINE_FACTOR};
 use crate::ui::icon::polylines;
 use crate::ui::palette as pal;
+use crate::ui::text;
 use crate::Message;
 
 use atelyx_core::table_ops::{self, CellStyle, OptState, TableSelection};
@@ -815,23 +816,29 @@ fn base_font_size(field: &TableField) -> f32 {
     }
 }
 
-/// 样式字体映射：随应用 IBM Plex Sans（default/sans）、系统通用族（serif/mono）、
-/// 中文预设按系统字体名解析（缺字体回落默认，跨平台不保证）。
+/// 样式字体映射：默认随界面字体族，`serif` / `mono` 走系统通用族，其余值按族名解析。
 pub fn style_font(st: &CellStyle) -> iced::Font {
-    let base = iced::Font { family: iced::font::Family::Name(crate::ui::FONT_FAMILY), ..iced::Font::default() };
-    match st.font.as_deref() {
-        Some("serif") => iced::Font { family: iced::font::Family::Serif, ..base },
-        Some("mono") => iced::Font { family: iced::font::Family::Monospace, ..base },
-        Some("hei") => named("Microsoft YaHei"),
-        Some("song") => named("SimSun"),
-        Some("kai") => named("KaiTi"),
-        Some("fang") => named("FangSong"),
-        _ => base,
-    }
+    let base = crate::ui::regular();
+    let family = match st.font.as_deref() {
+        Some("serif") => iced::font::Family::Serif,
+        Some("mono") => iced::font::Family::Monospace,
+        Some(value) => named_family(value),
+        None => base.family,
+    };
+    iced::Font { family, ..base }
 }
 
-fn named(name: &'static str) -> iced::Font {
-    iced::Font { family: iced::font::Family::Name(name), ..iced::Font::default() }
+/// 单元格字体值 → 字体族：旧中文预设键（hei/song/kai/fang）先换成对应系统字体名，
+/// 再与族名一起按已安装清单解析；解析不到（含旧 `default` / `sans`）回落界面字体族。
+fn named_family(value: &str) -> iced::font::Family {
+    let name = match value {
+        "hei" => "Microsoft YaHei",
+        "song" => "SimSun",
+        "kai" => "KaiTi",
+        "fang" => "FangSong",
+        other => other,
+    };
+    crate::ui::font::lookup(name).map_or_else(crate::ui::family, iced::font::Family::Name)
 }
 
 /// hex 颜色解析（#RGB / #RRGGBB；非法 = None）。数据来自 .atb 文件值，先验十六进制再切片。
@@ -1274,11 +1281,11 @@ fn rect(x: f32, y: f32, w: f32, h: f32) -> Rectangle {
 }
 
 fn ui_font() -> iced::Font {
-    iced::Font { family: iced::font::Family::Name(crate::ui::FONT_FAMILY), ..iced::Font::default() }
+    crate::ui::regular()
 }
 
 fn mono_font() -> iced::Font {
-    iced::Font { family: iced::font::Family::Monospace, ..iced::Font::default() }
+    crate::ui::mono()
 }
 
 /// 基础文本（左上锚定，Wrapping::None——换行由行段测量负责）。
@@ -2022,6 +2029,7 @@ fn size_pick(window: iced::window::Id, summary: &table_ops::StyleSummary) -> Ele
         .into()
 }
 
+/// 单元格字体值的菜单标签：旧中文预设键保留中文名，其余值即已安装族名，原样显示。
 fn table_ops_font_label(key: &str) -> String {
     match key {
         "default" => "默认",
@@ -2032,7 +2040,7 @@ fn table_ops_font_label(key: &str) -> String {
         "song" => "宋体",
         "kai" => "楷体",
         "fang" => "仿宋",
-        _ => "默认",
+        other => return other.to_string(),
     }
     .to_string()
 }

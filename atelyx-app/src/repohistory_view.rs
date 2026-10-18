@@ -2,7 +2,7 @@
 //! 本地扫侧文件元数据，空间走服务端聚合端点。
 
 use iced::alignment::Vertical;
-use iced::widget::{button, column, container, row, scrollable, space, text};
+use iced::widget::{button, column, container, row, scrollable, space};
 use iced::{Element, Length, Padding, Task};
 
 use atelyx_core::history::HistoryKind;
@@ -13,6 +13,7 @@ use crate::ui::controls;
 use crate::ui::icon::icon;
 use crate::ui::notify::Level as NoticeLevel;
 use crate::ui::palette as pal;
+use crate::ui::text;
 use crate::{App, Message, RepoKind, layout_view};
 
 /// 组内版本行（只读元数据；本地侧文件聚合与服务端聚合的共同投影）。
@@ -257,7 +258,7 @@ fn group_card(g: &RepoHistoryGroup, window: iced::window::Id) -> Element<'static
                         text(name)
                             .size(pal::fs_body())
                             .color(pal::TEXT_PRIMARY)
-                            .font(iced::Font { weight: iced::font::Weight::Medium, ..iced::Font::default() }),
+                            .font(crate::ui::bold()),
                         space().width(Length::Fill),
                         controls::badge(count, pal::BG_SUNKEN, pal::TEXT_SECONDARY),
                     ]

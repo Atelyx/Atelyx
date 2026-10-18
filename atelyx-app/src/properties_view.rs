@@ -5,13 +5,14 @@
 //! 所有改动经 `stringify` 拼回全文，走与正文同一保存链与撤销栈。
 
 use atelyx_core::frontmatter::{self, PropType, Yaml};
-use iced::widget::{button, column, container, operation, row, space, text, text_input, Column, Id};
+use iced::widget::{button, column, container, operation, row, space, text_input, Column, Id};
 use iced::{border, Color, Element, Length, Padding, Point, Task};
 use std::time::Instant;
 
 use crate::layout_view::PopupState;
 use crate::ui::icon::icon;
 use crate::ui::palette as pal;
+use crate::ui::text;
 use crate::ui::controls;
 use crate::ui::notify::Level as NoticeLevel;
 use crate::{App, Message, NoteMode, AUTOSAVE_DEBOUNCE};
@@ -482,6 +483,7 @@ fn tag_suggestions(app: &App, query: &str) -> Vec<String> {
 fn slot_input<'a>(app: &'a App, placeholder: &str, submit: PropsMsg) -> text_input::TextInput<'a, Message> {
     text_input(placeholder, &app.props.draft)
         .size(pal::fs_caption())
+        .font(crate::ui::regular())
         .padding(Padding::ZERO.horizontal(4.0).vertical(2.0))
         .width(Length::Fill)
         .id(app.props.focus_id.clone())

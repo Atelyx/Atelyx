@@ -12,11 +12,12 @@ use iced::advanced::text::{self as advanced_text, Paragraph as _};
 use iced::alignment;
 use iced::widget::text::{LineHeight, Rich, Span, Wrapping};
 use iced::widget::{
-    button, checkbox, column, container, row, scrollable, table, text, Space, Stack,
+    button, checkbox, column, container, row, scrollable, table, Space, Stack,
 };
 use iced::{Border, Color, Element, Font, Length, Padding, Size};
 
 use crate::markdown_edit::ParagraphT;
+use crate::ui::text;
 use crate::Message;
 
 /// 已载入的图片句柄（key = 图片 src 原文；载入与缓存管理在应用层，渲染只读）。
@@ -226,7 +227,7 @@ pub(crate) struct TextStyle {
 impl TextStyle {
     fn base() -> Self {
         Self {
-            font: Font::DEFAULT,
+            font: crate::ui::regular(),
             color: None,
             strike: false,
             underline: false,
@@ -346,7 +347,7 @@ fn callout_badge<'a>(name: &str, color: Color, scale: f32) -> Element<'a, Messag
     container(
         text(name.to_uppercase())
             .size(11.0 * scale)
-            .font(Font { weight: iced::font::Weight::Semibold, ..Font::DEFAULT })
+            .font(crate::ui::bold())
             .color(color),
     )
     .padding([1.0, 6.0])
@@ -492,7 +493,7 @@ impl Render<'_> {
         match block {
             MarkdownBlock::Heading { level, inline, .. } => {
                 let mut st = TextStyle::base();
-                st.font.weight = iced::font::Weight::Semibold;
+                st.font.weight = iced::font::Weight::Bold;
                 rich(
                     self.spans(source, inline, st),
                     self.heading(*level),
@@ -646,7 +647,7 @@ impl Render<'_> {
         let inner: Element<'a, Message> = match block {
             MarkdownBlock::Heading { level, inline, .. } => {
                 let st = TextStyle {
-                    font: Font { weight: iced::font::Weight::Semibold, ..Font::DEFAULT },
+                    font: crate::ui::bold(),
                     ..TextStyle::base()
                 };
                 runs = self.runs(source, inline, st);
@@ -972,7 +973,7 @@ impl Render<'_> {
         let label = if lang.trim().is_empty() { "代码".to_string() } else { lang.to_string() };
         let head = container(
             row![
-                text(label).size(11.0 * self.scale).font(Font::MONOSPACE).color(self.pal.muted),
+                text(label).size(11.0 * self.scale).font(crate::ui::mono()).color(self.pal.muted),
                 Space::new().width(Length::Fill),
                 button(text("复制").size(11.0 * self.scale))
                     .padding([2.0, 6.0])
@@ -1016,7 +1017,7 @@ impl Render<'_> {
 fn code_body<'a>(code: &str, hit: Option<((usize, usize), f32)>, scale: f32) -> Element<'a, Message> {
     let text: Element<'a, Message> = text(code.to_string())
         .size(mono_size() * scale)
-        .font(Font::MONOSPACE)
+        .font(crate::ui::mono())
         .wrapping(Wrapping::None)
         .into();
     match hit {
@@ -1112,7 +1113,7 @@ fn code_body<'a>(code: &str, hit: Option<((usize, usize), f32)>, scale: f32) -> 
         let panel = self.pal.panel;
         let border = self.pal.border;
         container(
-            text(content).size(self.mono()).font(Font::MONOSPACE).color(self.pal.muted),
+            text(content).size(self.mono()).font(crate::ui::mono()).color(self.pal.muted),
         )
         .width(Length::Fill)
         .padding(8.0)
@@ -1223,7 +1224,7 @@ fn code_body<'a>(code: &str, hit: Option<((usize, usize), f32)>, scale: f32) -> 
                 }
             }
             InlineSpan::Code { from, to, text } => {
-                let inner = TextStyle { font: Font::MONOSPACE, bg: Some(self.pal.panel), ..st };
+                let inner = TextStyle { font: crate::ui::mono(), bg: Some(self.pal.panel), ..st };
                 let src = Self::aligned_src(source, *from, *to, text);
                 out.push(LineRun { text: text.clone(), src, st: inner, scale: 1.0, link: None });
             }
@@ -1423,7 +1424,7 @@ fn code_body<'a>(code: &str, hit: Option<((usize, usize), f32)>, scale: f32) -> 
                 container(
                     text(format!("[图片：{name}]"))
                         .size(self.base())
-                        .font(Font { style: iced::font::Style::Italic, ..Font::DEFAULT })
+                        .font(crate::ui::italic())
                         .color(muted),
                 )
                 .width(Length::Fill)
@@ -1534,6 +1535,7 @@ fn rich<'a>(
     align: iced::alignment::Horizontal,
 ) -> Element<'a, Message> {
     let mut text = Rich::<'a, LinkTarget, Message>::with_spans(spans)
+        .font(crate::ui::regular())
         .size(size)
         .line_height(LineHeight::Relative(line_height))
         .align_x(align)
@@ -1649,8 +1651,8 @@ fn item_marker_width(source: &str, item: &MarkdownListItem, marker_len: usize, s
 }
 
 thread_local! {
-    /// 标记串字宽表（键 = 串 + 字号位）：字宽由 (串, 字号) 决定，字体在启动时载入。
-    static MARKER_WIDTHS: std::cell::RefCell<HashMap<(String, u32), f32>> =
+    /// 标记串字宽表（键 = 串 + 字号位 + 界面字体）：字宽由这三者决定，换字体族即换键。
+    static MARKER_WIDTHS: std::cell::RefCell<HashMap<(String, u32, Font), f32>> =
         std::cell::RefCell::new(HashMap::new());
 }
 
@@ -1658,22 +1660,23 @@ thread_local! {
 const MARKER_WIDTH_CAP: usize = 4096;
 
 /// 标记串字宽：与源码面同一逐字符 span 排版实测（列宽与揭示态对齐才不横移），
-/// 按 (串, 字号) 复用字宽表，免长列表每帧逐项重排。
+/// 按 (串, 字号, 字体) 复用字宽表，免长列表每帧逐项重排。
 fn marker_column_width(marker: &str, scale: f32) -> f32 {
     let size = base_size() * scale;
-    let key = (marker.to_string(), size.to_bits());
+    let font = crate::ui::regular();
+    let key = (marker.to_string(), size.to_bits(), font);
     let cached = MARKER_WIDTHS.with(|cache| cache.borrow().get(&key).copied());
     if let Some(width) = cached {
         return width;
     }
     let spans: Vec<Span<'static, (), Font>> =
-        marker.chars().map(|ch| Span::new(ch.to_string()).font(Font::DEFAULT)).collect();
+        marker.chars().map(|ch| Span::new(ch.to_string()).font(font)).collect();
     let width = ParagraphT::with_spans(advanced_text::Text {
         content: spans.as_slice(),
         bounds: Size::new(f32::INFINITY, f32::INFINITY),
         size: size.into(),
         line_height: LineHeight::Relative(LINE_HEIGHT),
-        font: Font::DEFAULT,
+        font,
         align_x: advanced_text::Alignment::Left,
         align_y: alignment::Vertical::Top,
         shaping: advanced_text::Shaping::Advanced,

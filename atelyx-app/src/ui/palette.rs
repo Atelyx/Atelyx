@@ -120,7 +120,7 @@ const FS_H2_REM: f32 = 16.0;
 const FS_H1_REM: f32 = 20.0;
 
 /// 界面基准字号（px，12–20；缺省 16）。进程单例：视图每帧取值，改值即全局生效。
-/// 不经 App 状态：字号进 palette 函数而非逐控件传参，与字体句柄同为进程内单例。
+/// 不经 App 状态：字号进 palette 函数而非逐控件传参，与界面字体族同为进程内单例。
 static UI_BASE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(16);
 
 /// 当前界面基准字号（px）。

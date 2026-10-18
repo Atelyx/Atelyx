@@ -519,7 +519,13 @@ fn on_msg_open(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
             Task::none()
         }
         tv::TableMsg::OpenFontMenu(window) => {
-            open_table_popup(app, window, crate::layout_view::PopupState::TableFontMenu, None);
+            app.font_picker_query.clear();
+            open_table_popup(
+                app,
+                window,
+                crate::layout_view::PopupState::FontPicker { for_table: true },
+                None,
+            );
             Task::none()
         }
         tv::TableMsg::OpenSizeMenu(window) => {

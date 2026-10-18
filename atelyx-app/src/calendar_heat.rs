@@ -5,11 +5,12 @@ use std::collections::HashMap;
 
 use iced::widget::container::Style;
 use iced::widget::scrollable::{Direction, Scrollbar};
-use iced::widget::{container, mouse_area, scrollable, space, text};
+use iced::widget::{container, mouse_area, scrollable, space};
 use iced::{Element, Length, border};
 
 use crate::calendar_grid;
 use crate::ui::palette as pal;
+use crate::ui::text;
 use crate::ui::UiMsg;
 use crate::{App, Message, RepoKind};
 use crate::calendar_view::display_month;

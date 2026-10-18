@@ -1,7 +1,7 @@
 //! 「关于」分区：居中品牌区（Logo / 名称 / 版本 / 定位）+ 信息卡片（检查更新 / 项目主页 / 开源许可）。
 
 use iced::alignment::{Horizontal, Vertical};
-use iced::widget::{column, container, row, space, text};
+use iced::widget::{column, container, row, space};
 use iced::{Element, Length, Padding};
 
 use atelyx_core::markdown::LinkForm;
@@ -9,13 +9,13 @@ use atelyx_core::markdown::LinkForm;
 use crate::ui::controls;
 use crate::ui::icon::icon;
 use crate::ui::palette as pal;
-use crate::ui::{display, icon_handle, semibold};
+use crate::ui::text;
+use crate::ui::{bold, icon_handle};
 use crate::{update, App, Message};
 
-/// 开源许可条目（名称 + 官方主页）。
-const LICENSES: [(&str, &str); 2] = [
-    ("IBM Plex Sans", "https://github.com/IBM/plex"),
-    ("Fraunces", "https://github.com/undercasetype/Fraunces"),
+/// 开源许可条目（名称 + 许可 + 官方主页）：只列随应用分发的第三方资产。
+const LICENSES: [(&str, &str, &str); 1] = [
+    ("Lucide 图标形状数据", "ISC", "https://lucide.dev"),
 ];
 /// 许可模态卡宽。
 pub(crate) const LICENSE_CARD_WIDTH: f32 = 380.0;
@@ -43,7 +43,7 @@ pub fn view(app: &App, window: iced::window::Id) -> Element<'static, Message> {
         row![text("github.com/Atelyx/Atelyx")
             .size(pal::fs_micro())
             .color(pal::TEXT_SECONDARY)
-            .font(crate::layout_view::mono())]
+            .font(crate::ui::mono())]
             .into(),
         controls::btn(
             "前往",
@@ -59,7 +59,7 @@ pub fn view(app: &App, window: iced::window::Id) -> Element<'static, Message> {
     cards = cards.push(info_card(
         "file-text",
         "开源许可",
-        text("IBM Plex Sans · Fraunces（SIL OFL 1.1）")
+        text("Lucide 图标形状数据（ISC）")
             .size(pal::fs_micro())
             .color(pal::TEXT_SECONDARY)
             .into(),
@@ -83,7 +83,7 @@ pub fn view(app: &App, window: iced::window::Id) -> Element<'static, Message> {
 /// 信息卡片区宽度上限（与品牌区同轴的居中列）。
 const CARD_AREA_WIDTH: f32 = 550.0;
 
-/// 品牌区：Logo + 显示字体名称 + 版本胶囊 + 一句话定位，整块居中。
+/// 品牌区：Logo + 强调字重的名称 + 版本胶囊 + 一句话定位，整块居中。
 fn brand_block(version: &str) -> Element<'static, Message> {
     container(
         column![
@@ -94,7 +94,7 @@ fn brand_block(version: &str) -> Element<'static, Message> {
                 text("Atelyx")
                     .size(pal::fs_h1())
                     .color(pal::TEXT_PRIMARY)
-                    .font(display()),
+                    .font(bold()),
                 controls::badge(version, pal::ACCENT_SOFT, pal::ACCENT),
             ]
             .spacing(10)
@@ -137,7 +137,7 @@ fn info_card(
                 text(title)
                     .size(pal::fs_body())
                     .color(pal::TEXT_PRIMARY)
-                    .font(iced::Font { weight: iced::font::Weight::Medium, ..iced::Font::default() }),
+                    .font(crate::ui::bold()),
                 subline,
             ]
             .spacing(2),
@@ -166,7 +166,7 @@ pub fn license_overlay(app: &App, window: iced::window::Id) -> Option<Element<'s
     let header = container(
         row![
             icon("file-text", 14.0, pal::TEXT_SECONDARY),
-            text("开源许可").size(pal::fs_body()).color(pal::TEXT_PRIMARY).font(semibold()),
+            text("开源许可").size(pal::fs_body()).color(pal::TEXT_PRIMARY).font(bold()),
             space().width(Length::Fill),
             controls::icon_button(
                 "x",
@@ -183,8 +183,8 @@ pub fn license_overlay(app: &App, window: iced::window::Id) -> Option<Element<'s
     .width(Length::Fill)
     .padding(Padding::ZERO.horizontal(12.0).vertical(10.0));
     let mut rows = column![].spacing(8).padding(12.0);
-    for (name, url) in LICENSES {
-        rows = rows.push(license_row(name, url));
+    for (name, license, url) in LICENSES {
+        rows = rows.push(license_row(name, license, url));
     }
     let card = container(column![header, controls::h_divider_subtle(), rows].width(Length::Fill))
         .width(Length::Fixed(LICENSE_CARD_WIDTH))
@@ -197,12 +197,12 @@ pub fn license_overlay(app: &App, window: iced::window::Id) -> Option<Element<'s
 }
 
 /// 许可条目行：名称与许可证类型，右侧前往官方主页。
-fn license_row(name: &'static str, url: &'static str) -> Element<'static, Message> {
+fn license_row(name: &'static str, license: &'static str, url: &'static str) -> Element<'static, Message> {
     container(
         row![
             column![
                 text(name).size(pal::fs_body()).color(pal::TEXT_PRIMARY),
-                text("SIL OFL 1.1").size(pal::fs_micro()).color(pal::TEXT_MUTED),
+                text(license).size(pal::fs_micro()).color(pal::TEXT_MUTED),
             ]
             .spacing(2),
             space().width(Length::Fill),

@@ -9,8 +9,8 @@ use std::path::PathBuf;
 
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::text::{LineHeight, Wrapping};
-use iced::widget::{button, column, container, mouse_area, row, scrollable, space, stack, text, text_editor, text_input, Stack};
-use iced::{Color, Element, Font, Length, Padding, Point, Rectangle, Size, border, widget::container::Style};
+use iced::widget::{button, column, container, mouse_area, row, scrollable, space, stack, text_editor, text_input, Stack};
+use iced::{Color, Element, Length, Padding, Point, Rectangle, Size, border, widget::container::Style};
 
 use atelyx_core::global_config::RecentVault;
 use atelyx_core::layout::{self, AppUiState, LayoutNode, TabItem};
@@ -21,6 +21,7 @@ use crate::ui::controls::{self, Variant};
 use crate::ui::icon::icon;
 use crate::ui::menu::MenuEntry;
 use crate::ui::palette as pal;
+use crate::ui::{mono, text};
 use crate::ui::popup::{self, PopupSpec};
 use crate::ui::notify;
 use crate::{App, DraftKind, Message, NoteMode, markdown_edit, markdown_view};
@@ -182,11 +183,6 @@ fn approx_tab_width(label: &str, locked: bool, has_file: bool) -> f32 {
         + if has_file && !locked { 19.0 } else { 0.0 }
 }
 
-/// 等宽字体（计数/扩展名标签）。
-pub(crate) fn mono() -> Font {
-    crate::ui::mono()
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub enum RenameTarget {
     Layout(String),
@@ -268,8 +264,9 @@ pub(crate) enum PopupState {
     TableSelectAllMenu,
     /// 表格：··· 菜单（历史 / 导出）。
     TableMoreMenu,
-    /// 表格：格式气泡下拉（字体 / 字号 / 字色 / 底色）。
-    TableFontMenu,
+    /// 字体选择弹层（for_table = 选表格单元格字体，否则选界面字体）。
+    FontPicker { for_table: bool },
+    /// 表格：格式气泡下拉（字号 / 字色 / 底色）。
     TableSizeMenu,
     TableColorMenu { bg: bool },
     /// 表格：单选下拉（行 + 字段）。
@@ -297,7 +294,7 @@ pub(crate) enum PopupState {
     AiAgentDeleteMenu,
     /// 设置-AI：搜索源下拉。
     AiSearchProviderMenu,
-    /// 设置-关于：开源许可条目（字体官方主页外链）。
+    /// 设置-关于：开源许可条目（第三方资产官方主页外链）。
     LicenseInfo,
     /// 历史记录弹层（居中模态；kind+file 定位侧文件）。
     HistoryBrowser { kind: atelyx_core::history::HistoryKind, file: String },
@@ -340,7 +337,7 @@ impl PopupState {
             PopupState::TableStatMenu { .. } => 128.0,
             PopupState::TableSelectAllMenu => 160.0,
             PopupState::TableMoreMenu => 144.0,
-            PopupState::TableFontMenu => 128.0,
+            PopupState::FontPicker { .. } => 240.0,
             PopupState::TableSizeMenu => 96.0,
             PopupState::TableColorMenu { .. } => 168.0,
             PopupState::TableSelectMenu { .. } => 144.0,
@@ -888,7 +885,7 @@ fn titlebar<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, Message> 
         text(BRAND_TEXT)
             .size(pal::fs_caption())
             .color(pal::TEXT_SECONDARY)
-            .font(crate::ui::display())
+            .font(crate::ui::bold())
             .width(Length::Fixed(estimate_text_width(BRAND_TEXT, 12.0))),
     ]
     .spacing(6)
@@ -1640,10 +1637,7 @@ fn collab_room_view(app: &App) -> Element<'_, Message> {
                                         text(m.display_name.clone())
                                             .size(pal::fs_body())
                                             .color(pal::TEXT_PRIMARY)
-                                            .font(iced::Font {
-                                                weight: iced::font::Weight::Medium,
-                                                ..iced::Font::default()
-                                            }),
+                                            .font(crate::ui::bold()),
                                         space().width(Length::Fill),
                                         role_badge(m.role),
                                     ]
@@ -1738,10 +1732,7 @@ fn device_row(
                 border: border::rounded(999.0),
                 ..Style::default()
             }),
-        text(nickname).size(pal::fs_body()).color(pal::TEXT_PRIMARY).font(iced::Font {
-            weight: iced::font::Weight::Medium,
-            ..iced::Font::default()
-        }),
+        text(nickname).size(pal::fs_body()).color(pal::TEXT_PRIMARY).font(crate::ui::bold()),
     ]
     .spacing(6)
     .align_y(iced::alignment::Vertical::Center);
@@ -1877,6 +1868,7 @@ fn search_view(app: &App) -> Element<'_, Message> {
             .spacing(4),
             iced::widget::text_input("输入文件名过滤…", &app.search_query)
                 .size(pal::fs_caption())
+                .font(crate::ui::regular())
                 .padding(Padding::ZERO.horizontal(8.0).vertical(4.0))
                 .on_input(Message::SearchInput)
                 .style(|_theme, status| text_input::Style {
@@ -2370,7 +2362,7 @@ fn vault_row(
         text(vault.name.clone())
             .size(pal::fs_caption())
             .color(pal::TEXT_PRIMARY)
-            .font(iced::Font { weight: iced::font::Weight::Medium, ..iced::Font::default() }),
+            .font(crate::ui::bold()),
     ]
     .spacing(8)
     .padding(Padding::ZERO.horizontal(8.0).vertical(4.0))
@@ -2445,7 +2437,7 @@ pub(crate) fn collab_pill_row(members: &[(iced::Color, String)]) -> Element<'sta
                             border: border::rounded(999.0),
                             ..Style::default()
                         }),
-                    iced::widget::text(name.clone())
+                    text(name.clone())
                         .size(pal::fs_micro())
                         .color(pal::TEXT_PRIMARY),
                 ]
@@ -2462,7 +2454,7 @@ pub(crate) fn collab_pill_row(members: &[(iced::Color, String)]) -> Element<'sta
     if members.len() > MAX_SHOWN {
         row = row.push(
             container(
-                iced::widget::text(format!("+{}", members.len() - MAX_SHOWN))
+                text(format!("+{}", members.len() - MAX_SHOWN))
                     .size(pal::fs_micro())
                     .color(pal::TEXT_SECONDARY),
             )
@@ -2495,7 +2487,7 @@ fn space_row(
         text(space.name.clone())
             .size(pal::fs_caption())
             .color(pal::TEXT_PRIMARY)
-            .font(iced::Font { weight: iced::font::Weight::Medium, ..iced::Font::default() }),
+            .font(crate::ui::bold()),
     ]
     .spacing(8)
     .padding(Padding::ZERO.horizontal(8.0).vertical(4.0))
@@ -2930,6 +2922,7 @@ fn note_view(app: &App, window: iced::window::Id) -> Element<'_, Message> {
     let content: Element<'_, Message> = match app.note_mode {
         NoteMode::Source => iced::widget::text_editor(&app.source_editor)
             .height(Length::Fill)
+            .font(crate::ui::regular())
             .on_action(Message::Edited)
             .style(|_t, _s| text_editor::Style {
                 background: iced::Background::Color(iced::Color::TRANSPARENT),
@@ -3025,12 +3018,12 @@ const TITLE_PAD_X: f32 = 16.0;
 const TITLE_PAD_TOP: f32 = 12.0;
 const TITLE_PAD_BOTTOM: f32 = 4.0;
 const TITLE_LINE_RATIO: f32 = 1.4;
-/// 标题截断缓存条目上限（键 = 原文 + 可用宽 + 字号；超限整体清空）。
+/// 标题截断缓存条目上限（键 = 原文 + 可用宽 + 字号 + 字体；超限整体清空）。
 const TITLE_CLIP_CAP: usize = 32;
 
 thread_local! {
-    /// 标题截断结果缓存：标题只在切文件 / 改宽 / 改字号时变，避免每帧重跑 shaping 与逐字试宽。
-    static TITLE_CLIP: std::cell::RefCell<HashMap<(String, u32, u32), String>> =
+    /// 标题截断结果缓存：标题只在切文件 / 改宽 / 改字号 / 换字体族时变，避免每帧重跑 shaping 与逐字试宽。
+    static TITLE_CLIP: std::cell::RefCell<HashMap<(String, u32, u32, iced::Font), String>> =
         std::cell::RefCell::new(HashMap::new());
 }
 
@@ -3082,7 +3075,7 @@ fn page_title(app: &App, window: iced::window::Id) -> Element<'_, Message> {
 fn title_label(window: iced::window::Id, label: String) -> Element<'static, Message> {
     let label = text(label)
         .size(pal::fs_h1())
-        .font(crate::ui::semibold())
+        .font(crate::ui::bold())
         .line_height(LineHeight::Relative(TITLE_LINE_RATIO))
         .wrapping(Wrapping::None);
     mouse_area(
@@ -3108,7 +3101,7 @@ fn title_input(value: &str) -> Element<'static, Message> {
     let input = text_input("", value)
         .id(iced::widget::Id::new(controls::INLINE_RENAME_INPUT))
         .size(pal::fs_h1())
-        .font(crate::ui::semibold())
+        .font(crate::ui::bold())
         .line_height(LineHeight::Relative(TITLE_LINE_RATIO))
         .padding(Padding::ZERO)
         .width(Length::Fill)
@@ -3139,7 +3132,7 @@ fn title_input(value: &str) -> Element<'static, Message> {
 /// 单行标题按可用宽截断补省略号（结果缓存：同文同宽同字号只算一次 shaping）。
 fn clipped_title(title: &str, avail_w: f32) -> String {
     let avail_w = avail_w.max(0.0);
-    let key = (title.to_string(), (avail_w * 100.0) as u32, pal::fs_h1().to_bits());
+    let key = (title.to_string(), (avail_w * 100.0) as u32, pal::fs_h1().to_bits(), crate::ui::bold());
     if let Some(hit) = TITLE_CLIP.with(|c| c.borrow().get(&key).cloned()) {
         return hit;
     }
@@ -3156,10 +3149,10 @@ fn clipped_title(title: &str, avail_w: f32) -> String {
 
 /// 单行标题实测宽（与标题渲染同字号同字重 shaping）。
 fn title_text_width(s: &str) -> f32 {
-    crate::markdown_edit::measured_text_width(s, pal::fs_h1(), TITLE_LINE_RATIO, crate::ui::semibold())
+    crate::markdown_edit::measured_text_width(s, pal::fs_h1(), TITLE_LINE_RATIO, crate::ui::bold())
 }
 
-/// 模式分段按钮（Button sm 档：高 24 / px-8 / 11px / medium；激活 = 强调淡底，悬停文字提亮）。
+/// 模式分段按钮（Button sm 档：高 24 / px-8 / 11px / 强调字重；激活 = 强调淡底，悬停文字提亮）。
 fn mode_button(
     window: iced::window::Id,
     icon_name: &'static str,
@@ -3175,7 +3168,7 @@ fn mode_button(
                 icon(icon_name, 12.0, if active { pal::ACCENT } else { pal::TEXT_SECONDARY }),
                 text(label.to_string())
                     .size(pal::fs_micro())
-                    .font(iced::Font { weight: iced::font::Weight::Medium, ..iced::Font::default() })
+                    .font(crate::ui::bold())
                     .color(if active { pal::ACCENT } else { pal::TEXT_SECONDARY }),
             ]
             .spacing(4),
@@ -3939,7 +3932,7 @@ fn popup_element<'a>(
                 .unwrap_or_default();
             let draft = if app.table_popup_draft.is_empty() { current.clone() } else { app.table_popup_draft.clone() };
             vec![
-                (0, MenuEntry::Custom(popup_text_input(&draft), 30.0)),
+                (0, MenuEntry::Custom(table_popup_input(&draft), 30.0)),
                 (
                     0,
                     MenuEntry::action("重命名", Message::Table(crate::table_view::TableMsg::RenameField {
@@ -3961,7 +3954,7 @@ fn popup_element<'a>(
             let draft = app.table_popup_draft.clone();
             // 逐项维护：输入 + 追加；已有选项逐条删除（保持弹层打开，外点关闭）
             let mut entries = vec![
-                (0, MenuEntry::Custom(popup_text_input(&draft), 30.0)),
+                (0, MenuEntry::Custom(table_popup_input(&draft), 30.0)),
                 (
                     0,
                     MenuEntry::action("添加选项", Message::Table(crate::table_view::TableMsg::OptionsAdd {
@@ -4054,7 +4047,7 @@ fn popup_element<'a>(
                 s.data.fields.iter().position(|f| f.id == *field_id).map(|i| if side < 0 { i } else { i + 1 })
             });
             vec![
-                (0, MenuEntry::Custom(popup_text_input(&draft), 30.0)),
+                (0, MenuEntry::Custom(table_popup_input(&draft), 30.0)),
                 (
                     0,
                     MenuEntry::action("添加", Message::Table(crate::table_view::TableMsg::InsertField {
@@ -4097,7 +4090,7 @@ fn popup_element<'a>(
         }
         PopupState::TableAddField => {
             let draft = app.table_popup_draft.clone();
-            let mut entries = vec![(0, MenuEntry::Custom(popup_text_input(&draft), 30.0))];
+            let mut entries = vec![(0, MenuEntry::Custom(table_popup_input(&draft), 30.0))];
             const FTYPES: [(&str, &str); 5] = [
                 ("text", "文本"),
                 ("number", "数字"),
@@ -4205,37 +4198,7 @@ fn popup_element<'a>(
                 (0, MenuEntry::action_icon("导出 xlsx", "download", Message::Table(crate::table_view::TableMsg::ExportXlsxPick))),
             ]
         }
-        PopupState::TableFontMenu => {
-            const FONTS: [(&str, &str); 8] = [
-                ("default", "默认"),
-                ("sans", "无衬线"),
-                ("serif", "衬线"),
-                ("mono", "等宽"),
-                ("hei", "黑体"),
-                ("song", "宋体"),
-                ("kai", "楷体"),
-                ("fang", "仿宋"),
-            ];
-            FONTS
-                .iter()
-                .map(|(key, label)| {
-                    (
-                        0,
-                        MenuEntry::Action {
-                            label: label.to_string(),
-                            icon: None,
-                            danger: false,
-                            disabled: false,
-                            on_press: Some(Message::Table(crate::table_view::TableMsg::SetFont(
-                                (*key).to_string().into(),
-                            ))),
-                            note: (*key == "default").then_some("清除"),
-                            hint: None,
-                        },
-                    )
-                })
-                .collect()
-        }
+        PopupState::FontPicker { for_table } => font_picker_entries(app, *for_table, window),
         PopupState::TableSizeMenu => {
             const SIZES: [f64; 7] = [12.0, 13.0, 14.0, 16.0, 18.0, 20.0, 24.0];
             let mut entries = vec![(
@@ -4612,12 +4575,22 @@ fn popup_element<'a>(
     crate::ui::menu::pane_view(entries, pane, window)
 }
 
-/// 表格弹层内联输入（单行；提交由菜单项动作携带草稿）。
-fn popup_text_input<'a>(draft: &str) -> Element<'a, Message> {
-    iced::widget::text_input("名称", draft)
+/// 表格弹层内联输入（草稿 = 表格弹层草稿；提交由菜单项动作携带）。
+fn table_popup_input(draft: &str) -> Element<'static, Message> {
+    popup_text_input("名称", draft, |v| Message::Table(crate::table_view::TableMsg::PopupDraft(v)))
+}
+
+/// 弹层内联输入（单行；提交由菜单项动作携带草稿）。
+fn popup_text_input(
+    placeholder: &str,
+    draft: &str,
+    on_input: impl Fn(String) -> Message + 'static,
+) -> Element<'static, Message> {
+    iced::widget::text_input(placeholder, draft)
         .size(pal::fs_caption())
+        .font(crate::ui::regular())
         .padding(Padding::ZERO.horizontal(12.0).vertical(6.0))
-        .on_input(|v: String| Message::Table(crate::table_view::TableMsg::PopupDraft(v)))
+        .on_input(on_input)
         .style(|_theme, status| controls::form_input_style(status))
         .into()
 }
@@ -4710,6 +4683,93 @@ fn chat_model_entries(app: &App) -> Vec<(usize, MenuEntry<'static>)> {
     entries
 }
 
+/// 字体选择弹层条目：过滤输入 + 复位项 + 命中族清单（清单定高，超出走内滚动）。
+fn font_picker_entries(
+    app: &App,
+    for_table: bool,
+    window: iced::window::Id,
+) -> Vec<(usize, MenuEntry<'static>)> {
+    const SEARCH_H: f32 = 30.0;
+    /// 清单可视区行数上下限（再多也只给滚动区，不让弹层顶满屏幕）。
+    const MIN_ROWS: usize = 2;
+    const MAX_ROWS: usize = 16;
+
+    let hits = crate::ui::font::filter(&app.font_picker_query);
+    let current = if for_table { table_cell_font(app) } else { app.global.font_family.clone() };
+    let resolved_current = current.as_deref().and_then(crate::ui::font::lookup);
+    let reset = if for_table {
+        Message::Table(crate::table_view::TableMsg::SetFont(None))
+    } else {
+        Message::InterfaceFontSet(None)
+    };
+    let reset_label = if for_table { "默认" } else { "跟随系统" };
+    let mut entries: Vec<(usize, MenuEntry<'static>)> = vec![
+        (
+            0,
+            MenuEntry::Custom(
+                popup_text_input("搜索字体…", &app.font_picker_query, Message::FontPickerQuery),
+                SEARCH_H,
+            ),
+        ),
+        (0, MenuEntry::Divider),
+    ];
+    let reset_entry = if current.is_none() {
+        MenuEntry::Checked { label: reset_label.to_string(), on_press: reset }
+    } else {
+        MenuEntry::Action {
+            label: reset_label.to_string(),
+            icon: None,
+            danger: false,
+            disabled: false,
+            on_press: Some(reset),
+            note: for_table.then_some("清除"),
+            hint: None,
+        }
+    };
+    entries.push((0, reset_entry));
+    if hits.is_empty() {
+        entries.push((0, MenuEntry::Custom(popup_hint("没有匹配的字体"), 18.0)));
+        return entries;
+    }
+    // 可视区高度 = 窗口高 − 弹层固定部分（上下内边距 + 搜索行 + 分隔线 + 复位行）− 阴影环 − 上下留白
+    let chrome = pal::POPUP_PAD_Y * 2.0
+        + SEARCH_H
+        + pal::MENU_DIVIDER_H
+        + pal::MENU_ITEM_H
+        + popup::SHADOW_PAD_TOP
+        + popup::SHADOW_PAD_BOTTOM
+        + pal::VIEWPORT_GAP * 2.0;
+    let budget = (viewport_of(app, window).height - chrome).max(MIN_ROWS as f32 * pal::MENU_ITEM_H);
+    let list_h = (hits.len().min(MAX_ROWS) as f32 * pal::MENU_ITEM_H).min(budget);
+    let rows = hits.into_iter().map(|hit| {
+        let name = hit.name.clone();
+        let pick = if for_table {
+            Message::Table(crate::table_view::TableMsg::SetFont(Some(name.clone())))
+        } else {
+            Message::InterfaceFontSet(Some(name.clone()))
+        };
+        // 存量值可能是同族的另一语言写法（如 SimSun 与 宋体），按解析后的展示名认当前项
+        if resolved_current.as_deref() == Some(name.as_str()) {
+            MenuEntry::Checked { label: name, on_press: pick }
+        } else {
+            MenuEntry::action(name, pick)
+        }
+    });
+    entries.push((0, MenuEntry::Scroll { entries: rows.collect(), height: list_h }));
+    entries
+}
+
+/// 表格字体弹层的当前值：选中区统一字体（混合或未设 = 无当前项）。
+fn table_cell_font(app: &App) -> Option<String> {
+    use atelyx_core::table_ops as ops;
+    let session = app.table.as_ref()?;
+    let region = ops::region_of(session.view.selection.as_ref(), &session.data.fields, &session.data.rows)?;
+    match ops::style_summary(&session.data.fields, &session.data.rows, &region).font {
+        ops::OptState::Value(font) => font,
+        ops::OptState::Mixed => None,
+    }
+}
+
 /// 模型显示名：昵称优先（空昵称回落 id）。
 fn model_display(m: &atelyx_core::vault::VaultModel) -> String {
     m.nickname
@@ -4719,7 +4779,7 @@ fn model_display(m: &atelyx_core::vault::VaultModel) -> String {
 }
 
 fn popup_hint(text_content: &str) -> Element<'static, Message> {
-    container(iced::widget::text(text_content.to_string()).size(pal::fs_micro()).color(pal::TEXT_MUTED))
+    container(text(text_content.to_string()).size(pal::fs_micro()).color(pal::TEXT_MUTED))
         .padding(Padding::ZERO.horizontal(12.0))
         .width(Length::Fill)
         .into()
@@ -4847,7 +4907,7 @@ fn scene_selector_entries(app: &App, confirm: &Option<String>) -> Vec<(usize, Me
     }
     root.push((0, MenuEntry::action_icon("新建场景", "plus", Message::SceneNew)));
 
-    // 确认面板：标题 medium，按钮区与文案间距 12
+    // 确认面板：标题用强调字重，按钮区与文案间距 12
     let confirm_entries: Vec<(usize, MenuEntry<'static>)> = if let Some(id) = confirm {
         let scene = app.ui.scenes.iter().find(|s| s.id == *id);
         let name = scene.map(|s| s.name.clone()).unwrap_or_default();
@@ -4856,12 +4916,12 @@ fn scene_selector_entries(app: &App, confirm: &Option<String>) -> Vec<(usize, Me
             text(format!("删除场景「{name}」？"))
                 .size(pal::fs_caption())
                 .color(pal::TEXT_PRIMARY)
-                .font(iced::Font { weight: iced::font::Weight::Medium, ..iced::Font::default() }),
+                .font(crate::ui::bold()),
             text(format!("其下 {count} 套布局将一并删除。"))
                 .size(pal::fs_caption())
                 .color(pal::TEXT_MUTED),
             row![
-                container(button("取消")
+                container(button(text("取消"))
                     .padding(Padding::ZERO.horizontal(10.0).vertical(4.0))
                     .style(|_t, _s| button::Style {
                         text_color: pal::TEXT_SECONDARY,
@@ -4870,7 +4930,7 @@ fn scene_selector_entries(app: &App, confirm: &Option<String>) -> Vec<(usize, Me
                     })
                     .on_press(Message::Ui(crate::ui::UiMsg::PopupPane(0))))
                 .align_x(Horizontal::Right),
-                button("删除")
+                button(text("删除"))
                     .padding(Padding::ZERO.horizontal(10.0).vertical(4.0))
                     .style(|_t, _s| button::Style {
                         text_color: pal::DANGER,
@@ -5253,6 +5313,7 @@ fn space_form_input<'a>(
 ) -> Element<'a, Message> {
     let input = iced::widget::text_input(placeholder, draft)
         .size(pal::fs_caption())
+        .font(crate::ui::regular())
         .padding(Padding::ZERO.horizontal(12.0).vertical(6.0))
         .on_input(on_input)
         .style(|_theme, status| controls::form_input_style(status));
@@ -5261,7 +5322,7 @@ fn space_form_input<'a>(
 
 /// 弹层表单的说明行。
 fn space_hint(text_content: &str) -> Element<'static, Message> {
-    container(iced::widget::text(text_content.to_string()).size(pal::fs_micro()).color(pal::TEXT_MUTED))
+    container(text(text_content.to_string()).size(pal::fs_micro()).color(pal::TEXT_MUTED))
         .padding(Padding::ZERO.horizontal(12.0))
         .width(Length::Fill)
         .into()

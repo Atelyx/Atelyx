@@ -3,11 +3,12 @@
 //! 颜色与尺寸档取自 [`super::palette`]；
 //! hover/禁用反馈经 `button::Status` 在样式闭包内表达。
 
-use iced::widget::{button, column, container, mouse_area, row, space, text, text_input};
+use iced::widget::{button, column, container, mouse_area, row, space, text_input};
 use iced::{Color, Element, Length, Padding, Theme, border, widget::container::Style};
 
 use super::icon::{icon, icon_stroke};
 use super::palette as pal;
+use super::{bold, regular, text};
 use super::UiMsg;
 use crate::Message;
 
@@ -143,7 +144,7 @@ pub fn btn(
         container(
             text(label.into())
                 .size(size.font)
-                .font(iced::Font { weight: iced::font::Weight::Medium, ..iced::Font::default() }),
+                .font(bold()),
         )
         .height(Length::Fill)
         .align_y(iced::alignment::Vertical::Center),
@@ -246,7 +247,7 @@ pub fn empty_state(
         text(title.into())
             .size(pal::fs_body())
             .color(pal::TEXT_PRIMARY)
-            .font(iced::Font { weight: iced::font::Weight::Medium, ..iced::Font::default() }),
+            .font(bold()),
         text(desc.into())
             .size(pal::fs_ui())
             .color(pal::TEXT_MUTED),
@@ -279,7 +280,7 @@ pub fn view_placeholder(
             text(title.into())
                 .size(pal::fs_h1())
                 .color(pal::TEXT_PRIMARY)
-                .font(crate::ui::semibold()),
+                .font(bold()),
             text(desc.into())
                 .size(pal::fs_body())
                 .color(pal::TEXT_MUTED),
@@ -328,6 +329,7 @@ pub fn inline_input(
     let input = text_input(placeholder, value)
         .id(id)
         .size(pal::fs_caption())
+        .font(regular())
         .padding(Padding::ZERO.horizontal(6.0).vertical(2.0))
         .width(Length::Fixed(width))
         .on_input(on_input)
@@ -518,6 +520,7 @@ fn styled_input(
 ) -> Element<'static, Message> {
     let mut input = text_input(placeholder, value)
         .size(pal::fs_caption())
+        .font(regular())
         .padding(Padding::ZERO.horizontal(8.0).vertical(6.0))
         .width(Length::Fixed(width))
         .secure(secure)

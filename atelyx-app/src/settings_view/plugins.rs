@@ -5,7 +5,7 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use iced::widget::{container, row, scrollable, space, text, Column};
+use iced::widget::{container, row, scrollable, space, Column};
 use iced::{border, widget::container::Style, Element, Length, Padding, Task};
 
 use atelyx_core::plugin_runtime::market::{self, MarketSnapshot};
@@ -19,6 +19,7 @@ use crate::ui::controls;
 use crate::ui::icon::icon;
 use crate::ui::notify::Level as NoticeLevel;
 use crate::ui::palette as pal;
+use crate::ui::text;
 use crate::{layout_view, App, Message};
 
 /// 数据落盘时刻格式化用的毫秒口径（审计记录为 unix 秒）。

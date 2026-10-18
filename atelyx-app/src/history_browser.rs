@@ -3,17 +3,19 @@
 //! 回滚复用各保存链：笔记/表格走会话回滚，画布为快照直写仓库（无会话链）。
 
 use iced::alignment::{Horizontal, Vertical};
-use iced::widget::{button, column, container, row, scrollable, space, text};
+use iced::widget::{button, column, container, row, scrollable, space};
 use iced::{Element, Length, Padding, Point, Size, Task, border, widget::container::Style};
 use atelyx_core::history::{HistoryAction, HistoryKind, HistoryVersion};
 use atelyx_core::history_diff::{DiffLine, DiffLineKind, TableDiffItem};
 
-use crate::layout_view::{PopupOpen, PopupState, format_ts, mono};
+use crate::layout_view::{PopupOpen, PopupState, format_ts};
 use crate::ui::controls;
 use crate::ui::icon::icon;
+use crate::ui::mono;
 use crate::ui::notify::Level as NoticeLevel;
 use crate::ui::palette as pal;
-use crate::ui::semibold;
+use crate::ui::text;
+use crate::ui::bold;
 use crate::{App, Message};
 
 /// 弹层卡定宽。
@@ -180,7 +182,7 @@ fn browser_card<'a>(
             text(format!("历史记录 · {kind_label} · {name}"))
                 .size(pal::fs_body())
                 .color(pal::TEXT_PRIMARY)
-                .font(semibold()),
+                .font(bold()),
             space().width(Length::Fill),
             controls::icon_button(
                 "x",
@@ -272,7 +274,7 @@ fn version_row(v: &HistoryVersion, viewer: bool, expanded: bool, window: iced::w
             text(action)
                 .size(pal::fs_caption())
                 .color(pal::ACCENT)
-                .font(iced::Font { weight: iced::font::Weight::Medium, ..iced::Font::default() }),
+                .font(crate::ui::bold()),
             text(author_line(v)).size(pal::fs_micro()).color(pal::TEXT_SECONDARY),
             text(v.summary.clone().unwrap_or_default()).size(pal::fs_micro()).color(pal::TEXT_MUTED),
             space().width(Length::Fill),
@@ -511,7 +513,7 @@ fn stat_line(label: String) -> Element<'static, Message> {
     text(label)
         .size(pal::fs_micro())
         .color(pal::TEXT_SECONDARY)
-        .font(iced::Font { weight: iced::font::Weight::Medium, ..iced::Font::default() })
+        .font(crate::ui::bold())
         .into()
 }
 

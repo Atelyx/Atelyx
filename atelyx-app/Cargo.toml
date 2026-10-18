@@ -33,7 +33,7 @@ tokio = { version = "1", default-features = false, features = ["time", "rt", "sy
 # 开机自启（autostart）：Windows 注册表 Run 键；应用内更新（update）：ShellExecuteW 拉起安装器
 [target.'cfg(target_os = "windows")'.dependencies]
 winreg = "0.55"
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 # 开机自启（autostart）：Linux XDG autostart 目录定位
 [target.'cfg(target_os = "linux")'.dependencies]

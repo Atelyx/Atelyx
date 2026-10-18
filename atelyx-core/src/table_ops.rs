@@ -1042,6 +1042,25 @@ mod tests {
         assert!(t.rows[0].styles.is_none(), "全默认样式应删键");
     }
 
+    /// 字体值承载系统已安装族名（可含空格）：补丁 → 落盘 JSON → 回读 → 汇总 全链一致，清除后随全默认删键。
+    #[test]
+    fn 字体族名值随样式落盘往返() {
+        let mut t = table(vec![field("f1", "a", "text")], vec![row("r1", vec![])]);
+        let region = Region { row_start: 0, row_end: 0, col_start: 0, col_end: 0 };
+        let patch = StylePatch { font: KeyOp::Set(Some("Microsoft YaHei".into())), ..Default::default() };
+        assert!(apply_style_patch(&t.fields, &mut t.rows, &region, &patch));
+        assert_eq!(t.rows[0].styles.as_ref().unwrap()["f1"]["font"], Value::String("Microsoft YaHei".into()));
+        let mut back: TableFile = serde_json::from_str(&serde_json::to_string(&t).unwrap()).unwrap();
+        assert_eq!(style_of(&back.rows[0], "f1").font.as_deref(), Some("Microsoft YaHei"));
+        assert_eq!(
+            style_summary(&back.fields, &back.rows, &region).font,
+            OptState::Value(Some("Microsoft YaHei".into()))
+        );
+        let clear = StylePatch { font: KeyOp::Set(None), ..Default::default() };
+        assert!(apply_style_patch(&back.fields, &mut back.rows, &region, &clear));
+        assert!(back.rows[0].styles.is_none(), "清除字体后全默认样式应删键");
+    }
+
     #[test]
     fn row_ops_move_and_duplicate() {
         let mut t = table(vec![field("f1", "a", "text")], vec![row("r1", vec![]), row("r2", vec![]), row("r3", vec![])]);
