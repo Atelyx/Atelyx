@@ -988,6 +988,23 @@ fn utf8_len(first: u8) -> usize {
     }
 }
 
+/// 行是否终止表格：按块级构造起始判定（缩进代码 / 围栏 / ATX 标题 / HTML 块 /
+/// 引用 / 列表 / 分割线 / 数学块）。
+fn table_row_starts_block(text: &str) -> bool {
+    let (ind, cols) = indent_prefix(text);
+    if cols >= 4 {
+        return true;
+    }
+    let body = &text[ind..];
+    fence_open(body).is_some()
+        || atx_heading(body).is_some()
+        || html_block_open(body).is_some()
+        || body.starts_with('>')
+        || list_kind(body).is_some()
+        || is_hr(body)
+        || body.starts_with("$$")
+}
+
 fn collect_table(ctx: &Ctx, first: &Line, to: usize) -> (MarkdownBlock, usize) {
     let src = ctx.source;
     let mut pos = first.start;
@@ -995,6 +1012,10 @@ fn collect_table(ctx: &Ctx, first: &Line, to: usize) -> (MarkdownBlock, usize) {
     while pos < to {
         let line = read_line(src, pos, to);
         if is_blank(line.text) {
+            break;
+        }
+        // 表头与分隔行成表后，后续行起始为其他块级构造即断表；普通文本行仍作单格行
+        if lines.len() >= 2 && table_row_starts_block(line.text) {
             break;
         }
         lines.push(line);
@@ -1063,7 +1084,8 @@ fn table_cells(text: &str, abs_start: usize) -> Vec<MarkdownTableCell> {
 }
 
 fn cell_range(seg: &[&Vc], abs_start: usize) -> MarkdownTableCell {
-    let is_space = |v: &Vc| v.len == 1 && (v.c == ' ' || v.c == '\t');
+    // 与行级裁空同一空白口径（含 CRLF 源的 `\r` 与全角空格）；`\|` 占位符的 `\0` 不属空白
+    let is_space = |v: &Vc| v.c.is_whitespace();
     let mut lo = 0;
     let mut hi = seg.len();
     while lo < hi && is_space(seg[lo]) {

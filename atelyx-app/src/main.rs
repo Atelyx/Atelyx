@@ -1364,6 +1364,11 @@ pub struct WikiPicker {
 }
 
 impl App {
+    /// 编辑面是否持键盘：属性槽位输入激活时键盘归属性面板，直到 Enter/Tab/Esc 退出。
+    pub(crate) fn edit_surface_focused(&self) -> bool {
+        self.edit.focused && self.props.editing.is_none() && self.props.adding.is_none()
+    }
+
     fn boot() -> (Self, Task<Message>) {
         let (main_os, open) = window::open(Settings {
             size: DEFAULT_WINDOW_SIZE,
@@ -1961,6 +1966,10 @@ impl App {
                         self.edit_meta.clear();
                         self.edit.focused = false;
                         self.note_edit_caret_pending = false;
+                        // 属性面板随源码档卸载，槽位编辑态不得留存（否则回编辑档后键盘无归属）
+                        self.props.editing = None;
+                        self.props.adding = None;
+                        self.props.draft.clear();
                         self.source_editor = text_editor::Content::with_text(&self.note_text);
                     }
                 }

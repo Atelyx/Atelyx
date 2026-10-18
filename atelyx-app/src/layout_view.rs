@@ -3221,7 +3221,7 @@ fn source_block_element<'a>(
         source,
         pal,
         opts: &app.edit_opts,
-        focused: app.edit.focused && app.edit.caret >= from && app.edit.caret <= to,
+        focused: app.edit_surface_focused() && app.edit.caret >= from && app.edit.caret <= to,
         cursors: &app.remote_cursors,
         body_start,
         bindings,
@@ -3278,7 +3278,7 @@ fn edit_view(app: &App) -> Element<'_, Message> {
             caret,
             app.edit.anchor,
             app.edit.preedit.clone(),
-            app.edit.focused,
+            app.edit_surface_focused(),
             app.note_edit_caret_pending,
             note_bindings,
         )
@@ -3358,7 +3358,7 @@ fn edit_view(app: &App) -> Element<'_, Message> {
         caret,
         app.edit.anchor,
         app.edit.preedit.clone(),
-        app.edit.focused,
+        app.edit_surface_focused(),
         app.note_edit_caret_pending,
         note_bindings,
     )
