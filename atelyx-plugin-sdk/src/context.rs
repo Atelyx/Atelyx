@@ -186,21 +186,6 @@ impl Context {
         self.call_unit(method::window::CLOSE, &WindowCloseParams { id: id.into() }).await
     }
 
-    /// 声明自己实现某服务契约（候选上岗；是否上岗由用户指定，声明本身不占权限）。
-    pub async fn service_register(&self, contract: ServiceContract) -> Result<(), RpcError> {
-        self.call_unit(method::service::REGISTER, &ServiceRegisterParams { contract }).await
-    }
-
-    /// 撤销自己的服务实现声明（未注册的契约报可读错误）。
-    pub async fn service_unregister(&self, contract: ServiceContract) -> Result<(), RpcError> {
-        self.call_unit(method::service::UNREGISTER, &ServiceRegisterParams { contract }).await
-    }
-
-    /// 回一次搜索查询结果（`error` 非空 = 本次查询失败，宿主按单次回落内置处理）。
-    pub async fn search_respond(&self, params: SearchRespondParams) -> Result<(), RpcError> {
-        self.call_unit(method::search::RESPOND, &params).await
-    }
-
     // ---------- ai ----------
 
     /// 发起 / 续聊一轮 AI 对话（须在 manifest 声明 `ai` 权限）。回执 = run 已就位，
@@ -232,6 +217,44 @@ impl Context {
             &ChatHistoryParams { session_id: session_id.map(Into::into), limit },
         )
         .await
+    }
+
+    /// 注册一个可被 Agent 调用的工具：名称全局唯一（不得与内置工具或其他插件的工具重名），
+    /// `parameters` 为 JSON Schema 对象。同一插件重复注册同名工具即原地更新描述与 schema。
+    pub async fn register_tool(
+        &self,
+        name: &str,
+        description: &str,
+        parameters: Value,
+    ) -> Result<(), RpcError> {
+        let params = RegisterToolParams {
+            name: name.into(),
+            description: description.into(),
+            parameters,
+        };
+        self.call_unit(method::ai::REGISTER_TOOL, &params).await
+    }
+
+    /// 撤销自己注册的一个工具（未注册报可读错误）。
+    pub async fn unregister_tool(&self, name: &str) -> Result<(), RpcError> {
+        let params = UnregisterToolParams { name: name.into() };
+        self.call_unit(method::ai::UNREGISTER_TOOL, &params).await
+    }
+
+    /// 回报一次工具调用结果：`call_id` 原样带回 [`PluginHandler::on_tool_call`] 收到的值，
+    /// `content` 为模型可见文本。
+    pub async fn tool_result(
+        &self,
+        call_id: &str,
+        content: &str,
+        is_error: bool,
+    ) -> Result<(), RpcError> {
+        let params = ToolResultParams {
+            call_id: call_id.into(),
+            content: content.into(),
+            is_error,
+        };
+        self.call_unit(method::ai::TOOL_RESULT, &params).await
     }
 
     pub async fn subscribe(&self, name: &str) -> Result<bool, RpcError> {
@@ -281,6 +304,31 @@ impl Context {
     pub async fn list(&self, path: &str) -> Result<Vec<FsEntry>, RpcError> {
         let result: ListResult = self.call_typed(method::fs::LIST, &PathParams { path: path.into() }).await?;
         Ok(result.entries)
+    }
+
+    // ---------- vault（当前激活仓库；协作空间由宿主转发服务端） ----------
+
+    pub async fn vault_read_text(&self, path: &str) -> Result<String, RpcError> {
+        let result: TextContent =
+            self.call_typed(method::vault::READ_TEXT, &PathParams { path: path.into() }).await?;
+        Ok(result.content)
+    }
+
+    pub async fn vault_write_text(&self, path: &str, content: &str) -> Result<(), RpcError> {
+        let params = WriteTextParams { path: path.into(), content: content.into() };
+        self.call_unit(method::vault::WRITE_TEXT, &params).await
+    }
+
+    pub async fn vault_list(&self, path: &str) -> Result<Vec<FsEntry>, RpcError> {
+        let result: ListResult =
+            self.call_typed(method::vault::LIST, &PathParams { path: path.into() }).await?;
+        Ok(result.entries)
+    }
+
+    pub async fn vault_exists(&self, path: &str) -> Result<bool, RpcError> {
+        let result: ExistsResult =
+            self.call_typed(method::vault::EXISTS, &PathParams { path: path.into() }).await?;
+        Ok(result.exists)
     }
 
     // ---------- process ----------

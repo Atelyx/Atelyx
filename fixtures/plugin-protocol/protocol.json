@@ -65,6 +65,11 @@
         "color": "text"
       },
       {
+        "id": "guide",
+        "kind": "markdown",
+        "content": "## 使用说明\n\n- 支持 **强调** 与 `行内代码`\n- 链接按仓库路径解析"
+      },
+      {
         "id": "query",
         "kind": "textInput",
         "value": "示例文本",
@@ -174,11 +179,11 @@
   },
   "handshake": {
     "params": {
-      "apiVersion": 1,
+      "apiVersion": 2,
       "plugin": { "id": "com.atelyx.echo", "name": "Echo", "version": "0.1.0" }
     },
     "result": {
-      "apiVersion": 1,
+      "apiVersion": 2,
       "host": { "name": "Atelyx", "version": "0.6.0" }
     }
   },
@@ -186,7 +191,7 @@
     "id": "com.example.studio",
     "name": "Studio",
     "version": "1.2.0",
-    "apiVersion": 1,
+    "apiVersion": 2,
     "entry": { "windows": "bin/studio.exe", "linux": "bin/studio" },
     "permissions": ["fs", "process", "notification"],
     "singleton": true,
@@ -277,6 +282,11 @@
       "value": { "surfaceId": "main", "nodeId": "go", "event": { "kind": "change", "value": "start" } }
     },
     {
+      "name": "view event null value",
+      "type": "ViewEventParams",
+      "value": { "surfaceId": "main", "nodeId": "size", "event": { "kind": "change", "value": null } }
+    },
+    {
       "name": "doc.open params",
       "type": "DocOpenParams",
       "value": { "path": "docs/board", "surfaceId": "doc:1" }
@@ -305,24 +315,6 @@
       "name": "window.closed params",
       "type": "WindowClosedParams",
       "value": { "id": "chat-float" }
-    },
-    {
-      "name": "service.register params",
-      "type": "ServiceRegisterParams",
-      "value": { "contract": "webSearch" }
-    },
-    {
-      "name": "search.query params",
-      "type": "SearchQueryParams",
-      "value": { "requestId": 7, "query": "rust iced" }
-    },
-    {
-      "name": "search.respond params",
-      "type": "SearchRespondParams",
-      "value": {
-        "requestId": 7,
-        "results": [ { "title": "iced", "url": "https://iced.rs", "snippet": "A cross-platform GUI library" } ]
-      }
     },
     {
       "name": "vault:switch payload (local)",
@@ -376,6 +368,30 @@
         "nodeId": "board",
         "event": { "kind": "canvas", "pointer": { "kind": "doubleClick", "x": 8.0, "y": 8.0, "button": "left" } }
       }
+    },
+    {
+      "name": "ai.registerTool params",
+      "type": "RegisterToolParams",
+      "value": {
+        "name": "find_notes",
+        "description": "按关键词搜索仓库笔记",
+        "parameters": { "type": "object", "properties": { "q": { "type": "string" } }, "required": ["q"] }
+      }
+    },
+    {
+      "name": "ai.unregisterTool params",
+      "type": "UnregisterToolParams",
+      "value": { "name": "find_notes" }
+    },
+    {
+      "name": "host:ai.toolCall params",
+      "type": "ToolCallParams",
+      "value": { "callId": "tool-1", "name": "find_notes", "arguments": { "q": "周报" } }
+    },
+    {
+      "name": "ai.toolResult params",
+      "type": "ToolResultParams",
+      "value": { "callId": "tool-1", "content": "命中 2 条", "isError": false }
     }
   ]
 }

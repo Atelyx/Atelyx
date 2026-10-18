@@ -143,7 +143,7 @@ mod tests {
             id: "com.atelyx.echo".into(),
             name: "Echo".into(),
             version: "0.1.0".into(),
-            api_version: 1,
+            api_version: 2,
             entry: Entry { windows: Some("echo.exe".into()), linux: Some("echo".into()) },
             permissions: vec![Permission::State],
             ..Manifest::default()
@@ -180,7 +180,7 @@ mod tests {
     #[test]
     fn serde_uses_camel_case_and_defaults_missing() {
         let m: Manifest = serde_json::from_str(
-            r#"{"id":"com.atelyx.echo","name":"Echo","version":"0.1.0","apiVersion":1,
+            r#"{"id":"com.atelyx.echo","name":"Echo","version":"0.1.0","apiVersion":2,
                 "entry":{"windows":"echo.exe"},"permissions":["state","notification"]}"#,
         )
         .unwrap();
@@ -191,6 +191,6 @@ mod tests {
         // 未知字段忽略、缺省字段不写回
         let out = serde_json::to_string(&m).unwrap();
         assert!(!out.contains("\"linux\""));
-        assert!(out.contains("\"apiVersion\":1"));
+        assert!(out.contains("\"apiVersion\":2"));
     }
 }

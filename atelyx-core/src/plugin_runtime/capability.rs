@@ -1,6 +1,5 @@
 //! 能力面闸门与 `state` 自持数据实现：方法 → 权限映射（未声明一律 fail-closed 拒绝），
-//! 以及自持数据的读写。其余能力面的方法分派在 `instance`，尚未实现的面（如 `clipboard`）由运行时
-//! 按「已声明但未实现」返回可读失败。
+//! 以及自持数据的读写。其余能力面的方法分派在 `instance`。
 //!
 //! 未声明被拒的判定只认 manifest 声明（不看插件自报），故 API 不暴露插件 id 参数。
 
@@ -10,15 +9,16 @@ use atelyx_plugin_protocol::manifest::Permission;
 use atelyx_plugin_protocol::method;
 use serde_json::Value;
 
-/// 方法所属能力面。`None` = 运行时时序方法（握手 / 事件订阅 / 视图提交 / 贡献与服务声明 /
+/// 方法所属能力面。`None` = 运行时时序方法（握手 / 事件订阅 / 视图提交 / 贡献声明 /
 /// 接管请求）不占权限声明——它们只编排插件自己的界面与声明，不触碰宿主资源；接管另有
 /// 常驻退出入口与按窗生效兜底。OS 资源消耗型方法（起进程 / 开窗等）一律占权限。
 pub(crate) fn permission_for(name: &str) -> Option<Permission> {
     use Permission::*;
-    use method::{ai, clipboard, dialog, fs, http, notification, process, shortcut, state, window};
+    use method::{ai, clipboard, dialog, fs, http, notification, process, shortcut, state, vault, window};
     match name {
         fs::PRIVATE_DIR | fs::READ_TEXT | fs::WRITE_TEXT | fs::READ_BINARY | fs::WRITE_BINARY
         | fs::REMOVE | fs::EXISTS | fs::LIST => Some(Fs),
+        vault::READ_TEXT | vault::WRITE_TEXT | vault::LIST | vault::EXISTS => Some(Vault),
         process::SPAWN | process::WRITE_STDIN | process::CLOSE_STDIN | process::KILL => Some(Process),
         state::READ | state::WRITE => Some(State),
         notification::SHOW => Some(Notification),
@@ -27,7 +27,8 @@ pub(crate) fn permission_for(name: &str) -> Option<Permission> {
         dialog::PICK_FILE | dialog::PICK_DIRECTORY => Some(Dialog),
         http::REQUEST => Some(Http),
         window::OPEN | window::CLOSE => Some(Window),
-        ai::CHAT_SEND | ai::CHAT_STOP | ai::CHAT_HISTORY => Some(Ai),
+        ai::CHAT_SEND | ai::CHAT_STOP | ai::CHAT_HISTORY | ai::REGISTER_TOOL
+        | ai::UNREGISTER_TOOL | ai::TOOL_RESULT => Some(Ai),
         _ => None,
     }
 }
@@ -71,10 +72,14 @@ mod tests {
         assert_eq!(permission_for(method::state::WRITE), Some(Permission::State));
         assert_eq!(permission_for(method::notification::SHOW), Some(Permission::Notification));
         assert_eq!(permission_for(method::shortcut::REGISTER), Some(Permission::Shortcuts));
+        assert_eq!(permission_for(method::clipboard::READ_TEXT), Some(Permission::Clipboard));
+        assert_eq!(permission_for(method::vault::WRITE_TEXT), Some(Permission::Vault));
         assert_eq!(permission_for(method::http::REQUEST), Some(Permission::Http));
         assert_eq!(permission_for(method::ai::CHAT_SEND), Some(Permission::Ai));
         assert_eq!(permission_for(method::ai::CHAT_STOP), Some(Permission::Ai));
         assert_eq!(permission_for(method::ai::CHAT_HISTORY), Some(Permission::Ai));
+        assert_eq!(permission_for(method::ai::REGISTER_TOOL), Some(Permission::Ai));
+        assert_eq!(permission_for(method::ai::TOOL_RESULT), Some(Permission::Ai));
         // 运行时时序方法不占权限
         assert_eq!(permission_for("initialize"), None);
         assert_eq!(permission_for(method::view::SUBMIT), None);

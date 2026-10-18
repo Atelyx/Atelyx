@@ -1,5 +1,5 @@
 //! 设置-插件：已安装列表 / 启停 / 卸载 / 本地与 zip 安装 / 详情（版本、权限、失败与被拒原因）
-//! / 市场（官方索引浏览 / 安装 / 更新）/ 服务接管上岗指定。
+//! / 市场（官方索引浏览 / 安装 / 更新）。
 //! 列表与状态来自 `atelyx_core::plugin_runtime`（运行时为进程内单例，壳持有 `Arc`）。
 
 use std::sync::Arc;
@@ -11,7 +11,7 @@ use iced::{border, widget::container::Style, Element, Length, Padding, Task};
 use atelyx_core::plugin_runtime::market::{self, MarketSnapshot};
 use atelyx_core::plugin_runtime::{
     AuditRecord, DialogKind, DialogRequest, HostRequest, NotificationLevel, Permission,
-    PluginEvent, PluginRuntime, PluginStatus, PluginSummary, ServiceContract,
+    PluginEvent, PluginRuntime, PluginStatus, PluginSummary,
 };
 
 use crate::settings_view::{card, group_head};
@@ -20,12 +20,12 @@ use crate::ui::icon::icon;
 use crate::ui::notify::Level as NoticeLevel;
 use crate::ui::palette as pal;
 use crate::ui::text;
-use crate::{layout_view, App, Message};
+use crate::{layout_view, vault, App, Message};
 
 /// 数据落盘时刻格式化用的毫秒口径（审计记录为 unix 秒）。
 const MS_PER_SEC: u64 = 1000;
 
-/// 插件页状态（列表缓存 + 详情 + 卸载二段确认 + 安装在途 + 市场快照 + 服务接管上岗）。
+/// 插件页状态（列表缓存 + 详情 + 卸载二段确认 + 安装在途 + 市场快照）。
 #[derive(Default)]
 pub struct PluginsState {
     /// 已装插件摘要（打开插件页 / 收到事件 / 动作后刷新）。
@@ -78,8 +78,17 @@ pub enum PluginsMsg {
     MarketInstall { id: String, repo: String },
     MarketUpdate { id: String, repo: String },
     MarketDone { id: String, result: Result<String, String> },
-    /// 搜索提供方上岗指定（`None` = 回到内置）。
-    SetSearchProvider(Option<String>),
+    /// 剪贴板读写（系统剪贴板只能经壳的 iced 任务访问）。
+    ClipboardWrite { request_id: u64, text: String },
+    ClipboardWritten { request_id: u64 },
+    ClipboardRead { request_id: u64 },
+    ClipboardReadDone { request_id: u64, text: Option<String> },
+    /// 仓库读写（本地仓库直接落盘；协作空间转发服务端）。`VaultCallDone` 统一回填。
+    VaultRead { request_id: u64, path: String },
+    VaultWrite { request_id: u64, path: String, content: String },
+    VaultList { request_id: u64, path: String },
+    VaultExists { request_id: u64, path: String },
+    VaultCallDone { request_id: u64, result: Result<serde_json::Value, String> },
 }
 
 /// 订阅标识：运行时 `Arc` 指针哈希（同一运行时不重建订阅流）。
@@ -152,6 +161,24 @@ pub fn host_requests_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<It
                         limit: params.limit,
                     },
                 ),
+                HostRequest::ClipboardWrite { request_id, text, .. } => {
+                    Message::Plugins(PluginsMsg::ClipboardWrite { request_id, text })
+                }
+                HostRequest::ClipboardRead { request_id, .. } => {
+                    Message::Plugins(PluginsMsg::ClipboardRead { request_id })
+                }
+                HostRequest::VaultReadText { request_id, path, .. } => {
+                    Message::Plugins(PluginsMsg::VaultRead { request_id, path })
+                }
+                HostRequest::VaultWriteText { request_id, path, content, .. } => {
+                    Message::Plugins(PluginsMsg::VaultWrite { request_id, path, content })
+                }
+                HostRequest::VaultList { request_id, path, .. } => {
+                    Message::Plugins(PluginsMsg::VaultList { request_id, path })
+                }
+                HostRequest::VaultExists { request_id, path, .. } => {
+                    Message::Plugins(PluginsMsg::VaultExists { request_id, path })
+                }
             };
             let _ = iced::futures::SinkExt::send(&mut output, message).await;
         }
@@ -295,13 +322,216 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
             refresh(app);
             Task::none()
         }
-        PluginsMsg::SetSearchProvider(plugin_id) => {
-            app.global.search_provider = plugin_id.clone();
-            app.plugins.set_search_provider(plugin_id);
-            app.save_global_now();
+        PluginsMsg::ClipboardWrite { request_id, text } => iced::clipboard::write(text)
+            .map(move |_: ()| Message::Plugins(PluginsMsg::ClipboardWritten { request_id })),
+        PluginsMsg::ClipboardWritten { request_id } => {
+            app.plugins
+                .resolve_shell_call(request_id, Ok(serde_json::json!({})));
             Task::none()
         }
+        PluginsMsg::ClipboardRead { request_id } => iced::clipboard::read().map(move |text| {
+            Message::Plugins(PluginsMsg::ClipboardReadDone { request_id, text })
+        }),
+        PluginsMsg::ClipboardReadDone { request_id, text } => {
+            let text = text.unwrap_or_default();
+            app.plugins
+                .resolve_shell_call(request_id, Ok(serde_json::json!({ "text": text })));
+            Task::none()
+        }
+        PluginsMsg::VaultRead { request_id, path } => {
+            let rel = match tool_path(Some(&path)) {
+                Ok(rel) => rel,
+                Err(e) => return resolve_vault(app, request_id, Err(e)),
+            };
+            match app.repo_kind.clone() {
+                crate::RepoKind::Local => match app.vault.root() {
+                    Ok(root) => Task::perform(
+                        async move {
+                            run_blocking(move || vault::read_note(&root, &rel))
+                                .await
+                                .map(|content| serde_json::json!({ "content": content }))
+                        },
+                        move |result| Message::Plugins(PluginsMsg::VaultCallDone { request_id, result }),
+                    ),
+                    Err(e) => resolve_vault(app, request_id, Err(e)),
+                },
+                crate::RepoKind::Space(space) => {
+                    let (client, space_id) = (space.client.clone(), space.space_id.clone());
+                    Task::perform(
+                        async move {
+                            client
+                                .get_file_text(&space_id, &rel)
+                                .await
+                                .map(|content| serde_json::json!({ "content": content }))
+                                .map_err(|e| e.to_string())
+                        },
+                        move |result| Message::Plugins(PluginsMsg::VaultCallDone { request_id, result }),
+                    )
+                }
+            }
+        }
+        PluginsMsg::VaultWrite { request_id, path, content } => {
+            let rel = match tool_path(Some(&path)) {
+                Ok(rel) => rel,
+                Err(e) => return resolve_vault(app, request_id, Err(e)),
+            };
+            if let Some(open) = open_file_conflict(app, &rel) {
+                return resolve_vault(
+                    app,
+                    request_id,
+                    Err(format!("文件正在编辑器中打开，拒绝写入：{open}")),
+                );
+            }
+            match app.repo_kind.clone() {
+                crate::RepoKind::Local => match app.vault.root() {
+                    Ok(root) => {
+                        let writes = app.vault.writes.clone();
+                        Task::perform(
+                            async move {
+                                let target = run_blocking(move || vault::safe_join(&root, &rel, true)).await?;
+                                writes
+                                    .write(target, content)
+                                    .await
+                                    .map(|_| serde_json::json!({}))
+                            },
+                            move |result| Message::Plugins(PluginsMsg::VaultCallDone { request_id, result }),
+                        )
+                    }
+                    Err(e) => resolve_vault(app, request_id, Err(e)),
+                },
+                crate::RepoKind::Space(space) => {
+                    let (client, space_id) = (space.client.clone(), space.space_id.clone());
+                    Task::perform(
+                        async move {
+                            client
+                                .put_file_text(&space_id, &rel, &content)
+                                .await
+                                .map(|_| serde_json::json!({}))
+                                .map_err(|e| e.to_string())
+                        },
+                        move |result| Message::Plugins(PluginsMsg::VaultCallDone { request_id, result }),
+                    )
+                }
+            }
+        }
+        PluginsMsg::VaultList { request_id, path } => {
+            let rel = match tool_path((!path.is_empty()).then_some(path.as_str())) {
+                Ok(rel) => rel,
+                Err(e) => return resolve_vault(app, request_id, Err(e)),
+            };
+            match app.repo_kind.clone() {
+                crate::RepoKind::Local => match app.vault.root() {
+                    Ok(root) => {
+                        let exclude = app.vault.exclude_folders().unwrap_or_default();
+                        Task::perform(
+                            async move {
+                                run_blocking(move || {
+                                    let children = vault::read_dir_entries(&root, &rel, &exclude)?;
+                                    Ok(dir_entries_json(&children))
+                                })
+                                .await
+                            },
+                            move |result| Message::Plugins(PluginsMsg::VaultCallDone { request_id, result }),
+                        )
+                    }
+                    Err(e) => resolve_vault(app, request_id, Err(e)),
+                },
+                crate::RepoKind::Space(space) => {
+                    let (client, space_id) = (space.client.clone(), space.space_id.clone());
+                    Task::perform(
+                        async move {
+                            let tree = client.tree(&space_id).await.map_err(|e| e.to_string())?;
+                            Ok(dir_entries_json(&crate::space_actions::children_of_tree(&tree, &rel)))
+                        },
+                        move |result| Message::Plugins(PluginsMsg::VaultCallDone { request_id, result }),
+                    )
+                }
+            }
+        }
+        PluginsMsg::VaultExists { request_id, path } => {
+            let rel = match tool_path(Some(&path)) {
+                Ok(rel) => rel,
+                Err(e) => return resolve_vault(app, request_id, Err(e)),
+            };
+            match app.repo_kind.clone() {
+                crate::RepoKind::Local => match app.vault.root() {
+                    Ok(root) => Task::perform(
+                        async move {
+                            let rel = rel.clone();
+                            let exists =
+                                run_blocking(move || vault::file_exists(&root, &rel)).await?;
+                            Ok(serde_json::json!({ "exists": exists }))
+                        },
+                        move |result| Message::Plugins(PluginsMsg::VaultCallDone { request_id, result }),
+                    ),
+                    Err(e) => resolve_vault(app, request_id, Err(e)),
+                },
+                crate::RepoKind::Space(space) => {
+                    let (client, space_id) = (space.client.clone(), space.space_id.clone());
+                    Task::perform(
+                        async move {
+                            let tree = client.tree(&space_id).await.map_err(|e| e.to_string())?;
+                            let exists = crate::space_actions::tree_has_file(&tree, &rel);
+                            Ok(serde_json::json!({ "exists": exists }))
+                        },
+                        move |result| Message::Plugins(PluginsMsg::VaultCallDone { request_id, result }),
+                    )
+                }
+            }
+        }
+        PluginsMsg::VaultCallDone { request_id, result } => {
+            resolve_vault(app, request_id, result)
+        }
     }
+}
+
+/// 仓库相对路径校验：`None` = 仓库根（仅列目录允许根路径）。
+fn tool_path(path: Option<&str>) -> Result<String, String> {
+    match path {
+        None => Ok(String::new()),
+        Some(path) => vault::validate_tool_path(path),
+    }
+}
+
+/// 目录条目转协议形态（`FsEntry` 只有 name + kind：name 取条目相对路径的最后一段，与 `fs.list` 同口径）。
+fn dir_entries_json(children: &[vault::DirChild]) -> serde_json::Value {
+    let entries: Vec<serde_json::Value> = children
+        .iter()
+        .map(|child| {
+            let name = child.rel.rsplit('/').next().unwrap_or(child.rel.as_str());
+            serde_json::json!({
+                "name": name,
+                "kind": if child.is_dir { "dir" } else { "file" },
+            })
+        })
+        .collect();
+    serde_json::json!({ "entries": entries })
+}
+
+/// 回填一次仓库调用并结束消息处理。
+fn resolve_vault(
+    app: &App,
+    request_id: u64,
+    result: Result<serde_json::Value, String>,
+) -> Task<Message> {
+    app.plugins.resolve_shell_call(request_id, result);
+    Task::none()
+}
+
+/// 写入目标是否正由编辑器持有：壳的会话里保留着该文件的内存副本，插件覆盖会与之竞争。
+/// 比较归一化相对路径（`\` 与 `/` 同义）。
+fn open_file_conflict(app: &App, rel: &str) -> Option<String> {
+    let target = rel.replace('\\', "/");
+    let open = [
+        app.ui.last_note_file.as_deref(),
+        app.table.as_ref().map(|t| t.file.as_str()),
+        app.canvas.as_ref().map(|c| c.file.as_str()),
+        app.doc_open.as_ref().map(|d| d.path.as_str()),
+    ];
+    open.into_iter()
+        .flatten()
+        .find(|path| path.replace('\\', "/") == target)
+        .map(str::to_string)
 }
 
 /// 市场缓存的落盘路径（插件根旁；根不可用 = 不缓存只内存展示）。
@@ -384,7 +614,6 @@ pub fn on_event(app: &mut App, event: PluginEvent) {
         event,
         PluginEvent::StatusChanged { .. }
             | PluginEvent::PermissionDenied { .. }
-            | PluginEvent::ServicesChanged { .. }
     );
     match &event {
         PluginEvent::Notification { id, title, body, level } => {
@@ -410,9 +639,10 @@ pub fn on_event(app: &mut App, event: PluginEvent) {
             ),
             _ => {}
         },
-        // 界面与贡献变化由壳的投影刷新统一处理（见 main.rs 的事件分支）
-        PluginEvent::ViewSubmitted { .. } | PluginEvent::ContributionsChanged { .. } => {}
-        PluginEvent::ServicesChanged { .. } => {}
+        // 界面 / 贡献 / AI 工具变化由壳的投影刷新统一处理（见 main.rs 的事件分支）
+        PluginEvent::ViewSubmitted { .. }
+        | PluginEvent::ContributionsChanged { .. }
+        | PluginEvent::AiToolsChanged { .. } => {}
     }
     if list_changed && app.settings_open && app.settings_tab == "plugins" {
         refresh(app);
@@ -478,7 +708,7 @@ fn notice_level(level: NotificationLevel) -> NoticeLevel {
     }
 }
 
-/// 插件页视图：安装入口 + 服务接管 + 已装列表 + 市场 + 详情。
+/// 插件页视图：安装入口 + 已装列表 + 市场 + 详情。
 pub fn view(app: &App) -> Element<'static, Message> {
     let installing = app.plugins_state.installing;
     let mut col = Column::new()
@@ -499,7 +729,6 @@ pub fn view(app: &App) -> Element<'static, Message> {
     ));
 
     let installed = &app.plugins_state.list;
-    col = col.push(service_group(app));
     col = col.push(group_head(
         "已安装",
         &format!("共 {} 个", installed.len()),
@@ -529,79 +758,6 @@ pub fn view(app: &App) -> Element<'static, Message> {
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
-}
-
-/// 服务接管分组：网页搜索提供方的候选与上岗指定（内置 = 默认上岗；失效自动回落内置）。
-fn service_group(app: &App) -> Element<'static, Message> {
-    let mut col = Column::new().spacing(8);
-    col = col.push(group_head("服务接管", "插件声明的服务契约与上岗指定", false));
-    let candidates = app.plugins.service_candidates(ServiceContract::WebSearch);
-    let names_of = |ids: &[String]| -> Vec<(String, String)> {
-        ids.iter()
-            .map(|id| {
-                let name = app
-                    .plugins_state
-                    .list
-                    .iter()
-                    .find(|p| &p.id == id)
-                    .map(|p| p.name.clone())
-                    .unwrap_or_else(|| id.clone());
-                (id.clone(), name)
-            })
-            .collect()
-    };
-    let assigned = app.global.search_provider.clone();
-    let mut rows: Vec<Element<'static, Message>> = Vec::new();
-    rows.push(
-        row![
-            text("网页搜索").size(pal::fs_body()).color(pal::TEXT_PRIMARY),
-            space().width(Length::Fill),
-        ]
-        .into(),
-    );
-    // 内置提供方行（Tavily / SearXNG 按工作区「联网搜索」配置取用）
-    let builtin_current = assigned.is_none();
-    rows.push(
-        row![
-            text("内置提供方").size(pal::fs_caption()).color(pal::TEXT_PRIMARY),
-            text("Tavily / SearXNG").size(pal::fs_caption()).color(pal::TEXT_MUTED),
-            space().width(Length::Fill),
-            controls::toggle(
-                builtin_current,
-                (!builtin_current).then_some(Message::Plugins(PluginsMsg::SetSearchProvider(None))),
-            ),
-        ]
-        .spacing(8)
-        .align_y(iced::alignment::Vertical::Center)
-        .into(),
-    );
-    for (id, name) in names_of(&candidates) {
-        let current = assigned.as_deref() == Some(id.as_str());
-        rows.push(
-            row![
-                text(name).size(pal::fs_caption()).color(pal::TEXT_PRIMARY),
-                text(id.clone()).size(pal::fs_caption()).color(pal::TEXT_MUTED),
-                space().width(Length::Fill),
-                controls::toggle(
-                    current,
-                    (!current).then_some(Message::Plugins(PluginsMsg::SetSearchProvider(Some(id)))),
-                ),
-            ]
-            .spacing(8)
-            .align_y(iced::alignment::Vertical::Center)
-            .into(),
-        );
-    }
-    if candidates.is_empty() {
-        rows.push(
-            text("暂无插件声明搜索提供方（插件经 service.register 声明后出现在此）")
-                .size(pal::fs_caption())
-                .color(pal::TEXT_MUTED)
-                .into(),
-        );
-    }
-    col = col.push(stacked_card(rows));
-    col.into()
 }
 
 /// 市场分组：官方索引浏览（缓存秒开 + 刷新）+ 条目卡片（徽标 / 安装 / 更新）。

@@ -739,6 +739,8 @@ fn tool_ctx(app: &App) -> ToolCtx {
         repo,
         search: search_config(app),
         exclude: app.repo_config.exclude_folders.clone().unwrap_or_default(),
+        plugin_tools: app.plugins.plugin_tools(),
+        plugins: Some(app.plugins.clone()),
     }
 }
 
@@ -1035,12 +1037,12 @@ fn update_inner(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
         }
         ChatMsg::PluginStop { request_id, session_id } => {
             hub().stop(&session_id);
-            app.plugins.resolve_chat_call(request_id, Ok(json!({})));
+            app.plugins.resolve_shell_call(request_id, Ok(json!({})));
             iced::Task::none()
         }
         ChatMsg::PluginHistory { request_id, session_id, limit } => {
             let result = plugin_history(&session_id, limit);
-            app.plugins.resolve_chat_call(request_id, result);
+            app.plugins.resolve_shell_call(request_id, result);
             iced::Task::none()
         }
         ChatMsg::AidDone(kind, session_id, result) => {
@@ -2187,7 +2189,7 @@ fn plugin_chat_send(
     session_id: Option<String>,
 ) -> iced::Task<Message> {
     let deny = |app: &App, request_id: u64, reason: String| {
-        app.plugins.resolve_chat_call(request_id, Err(reason));
+        app.plugins.resolve_shell_call(request_id, Err(reason));
     };
     let text = text.trim().to_string();
     if text.is_empty() {
@@ -2288,7 +2290,7 @@ fn plugin_chat_send(
             Ok(message_id) => Ok(json!({ "sessionId": session_id, "messageId": message_id })),
             Err(e) => Err(e),
         };
-        runtime.resolve_chat_call(request_id, result);
+        runtime.resolve_shell_call(request_id, result);
         Message::Noop
     })
 }

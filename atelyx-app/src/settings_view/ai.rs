@@ -41,7 +41,7 @@ pub(crate) const PROVIDER_PRESETS: &[ProviderPreset] = &[
     },
 ];
 
-/// 工具四分类（id 与 AI 工具注册名一致；空清单 = 纯对话）。
+/// 工具分组（id 与 AI 工具注册名一致；空清单 = 纯对话）。
 struct ToolCategory {
     label: &'static str,
     tools: &'static [&'static str],
@@ -57,11 +57,39 @@ const TOOL_CATEGORIES: &[ToolCategory] = &[
         ],
     },
     ToolCategory { label: "任务清单", tools: &["todo_write"] },
-    ToolCategory { label: "插件", tools: &["plugin"] },
 ];
 
-/// 工具显示名（对话面板工具行 / 设置页工具清单共用）。
-pub(crate) fn tool_label(id: &str) -> &'static str {
+/// 插件工具在 `TOOL_CATEGORIES` 之后单列一组（动态清单，不占静态表）。
+fn plugin_cat_index() -> usize {
+    TOOL_CATEGORIES.len()
+}
+
+/// 一类工具的勾选清单（id + 显示名）：静态分类取名册，插件组取当前注册工具的 selection id。
+fn category_items(app: &App, index: usize) -> Vec<(String, String)> {
+    if index == plugin_cat_index() {
+        app.plugins
+            .plugin_tools()
+            .into_iter()
+            .map(|t| {
+                let label = format!("{} · {}", t.plugin_name, t.name);
+                (t.selection_id(), label)
+            })
+            .collect()
+    } else {
+        TOOL_CATEGORIES
+            .get(index)
+            .map(|cat| {
+                cat.tools
+                    .iter()
+                    .map(|t| (t.to_string(), tool_label(t)))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+/// 工具显示名（对话面板工具行 / 设置页工具清单共用）。未知 id 原样返回。
+pub(crate) fn tool_label(id: &str) -> String {
     match id {
         "web_search" => "联网搜索",
         "web_fetch" => "抓取网页",
@@ -78,9 +106,9 @@ pub(crate) fn tool_label(id: &str) -> &'static str {
         "delete_file" => "删除文件",
         "delete_dir" => "删除目录",
         "todo_write" => "任务清单",
-        "plugin" => "插件工具",
-        _ => "工具",
+        other => other,
     }
+    .to_string()
 }
 
 /// 话题自动命名模式。
@@ -125,8 +153,8 @@ pub fn ensure_selection(app: &mut App) {
         app.ai.agent_sel = app.agents.first().map(|a| a.id.clone());
         app.ai.agent_draft = app.agents.first().map(agent_draft_of);
     }
-    if app.ai.collapsed_cats.len() != TOOL_CATEGORIES.len() {
-        app.ai.collapsed_cats = vec![true; TOOL_CATEGORIES.len()];
+    if app.ai.collapsed_cats.len() != TOOL_CATEGORIES.len() + 1 {
+        app.ai.collapsed_cats = vec![true; TOOL_CATEGORIES.len() + 1];
     }
     app.ai.search_ready = search_source_ready(app);
 }
@@ -793,15 +821,18 @@ pub fn update(app: &mut App, msg: AiMsg) -> Task<Message> {
             update(app, AiMsg::AgentSave)
         }
         AiMsg::AgentCategoryToggle(i) => {
-            let Some(cat) = TOOL_CATEGORIES.get(i) else { return Task::none() };
+            let items = category_items(app, i);
+            if items.is_empty() {
+                return Task::none();
+            }
             if let Some(d) = app.ai.agent_draft.as_mut() {
-                let all_on = cat.tools.iter().all(|t| d.tools.iter().any(|x| x == t));
+                let all_on = items.iter().all(|(t, _)| d.tools.iter().any(|x| x == t));
                 if all_on {
-                    d.tools.retain(|x| !cat.tools.contains(&x.as_str()));
+                    d.tools.retain(|x| !items.iter().any(|(t, _)| t == x));
                 } else {
-                    for t in cat.tools {
+                    for (t, _) in &items {
                         if !d.tools.iter().any(|x| x == t) {
-                            d.tools.push(t.to_string());
+                            d.tools.push(t.clone());
                         }
                     }
                 }
@@ -1763,77 +1794,19 @@ fn agent_form(app: &App, a: &vault::AgentConfig, window: iced::window::Id) -> El
 
     col = col.push(super::group_head("工具", "勾选后该 Agent 的对话可调用", true));
     for (ci, cat) in TOOL_CATEGORIES.iter().enumerate() {
-        // 插件工具未接入（无插件贡献工具），整组隐藏
-        if cat.label == "插件" {
-            continue;
-        }
-        let state = category_state(&tools, cat);
-        let collapsed = app.ai.collapsed_cats.get(ci).copied().unwrap_or(true);
-        // 分类头整行可点折叠；复选框只切全选/全不选
-        if cat.tools.len() == 1 {
-            // 单工具分类不设分组头，直接给工具行
-            let t = cat.tools[0];
-            let on = tools.iter().any(|x| x == t);
-            let tool_line = row![
-                controls::checkbox(
-                    if on { controls::CheckState::On } else { controls::CheckState::Off },
-                    (!ro).then(|| Message::Ai(AiMsg::AgentToolToggle(t.to_string()))),
-                ),
-                text(tool_label(t))
-                    .size(pal::fs_caption())
-                    .color(pal::TEXT_SECONDARY),
-            ]
-            .spacing(6)
-            .align_y(iced::alignment::Vertical::Center);
-            col = col.push(container(tool_line).padding(Padding::ZERO.horizontal(8.0).top(4.0)));
-            continue;
-        }
-        let head = row![
-            icon(
-                if collapsed { "chevron-right" } else { "chevron-down" },
-                12.0,
-                pal::TEXT_MUTED
-            ),
-            controls::checkbox(state, (!ro).then(|| Message::Ai(AiMsg::AgentCategoryToggle(ci)))),
-            text(cat.label.to_string())
-                .size(pal::fs_caption())
-                .color(pal::TEXT_PRIMARY)
-                .font(crate::ui::bold()),
-        ]
-        .spacing(6)
-        .align_y(iced::alignment::Vertical::Center);
-        col = col.push(
-            iced::widget::mouse_area(
-                container(head).padding(Padding::ZERO.horizontal(8.0).top(4.0)).width(Length::Fill),
-            )
-            .on_press(Message::Ai(AiMsg::AgentCatCollapse(ci))),
-        );
-        if collapsed {
-            continue;
-        }
-        for t in cat.tools {
-            let on = tools.iter().any(|x| x == t);
-            let needs_search = *t == "web_search";
-            let mut tool_line = row![
-                controls::checkbox(
-                    if on { controls::CheckState::On } else { controls::CheckState::Off },
-                    (!ro).then(|| Message::Ai(AiMsg::AgentToolToggle(t.to_string()))),
-                ),
-                text(tool_label(t))
-                    .size(pal::fs_caption())
-                    .color(pal::TEXT_SECONDARY),
-            ]
-            .spacing(6)
-            .align_y(iced::alignment::Vertical::Center);
-            if needs_search && !app.ai.search_ready {
-                tool_line = tool_line.push(
-                    text("（未配置搜索源，发送时自动降级）")
-                        .size(pal::fs_micro())
-                        .color(pal::TEXT_MUTED),
-                );
-            }
-            col = col.push(container(tool_line).padding(Padding::ZERO.left(20.0)));
-        }
+        let items = category_items(app, ci);
+        col = col.push(tool_category_block(app, &tools, ro, ci, cat.label, &items));
+    }
+    let plugin_items = category_items(app, plugin_cat_index());
+    if !plugin_items.is_empty() {
+        col = col.push(tool_category_block(
+            app,
+            &tools,
+            ro,
+            plugin_cat_index(),
+            "插件",
+            &plugin_items,
+        ));
     }
 
     let mut actions = row![].spacing(8);
@@ -1854,11 +1827,79 @@ fn agent_form(app: &App, a: &vault::AgentConfig, window: iced::window::Id) -> El
     col.into()
 }
 
-fn category_state(tools: &[String], cat: &ToolCategory) -> controls::CheckState {
-    let hit = cat.tools.iter().filter(|t| tools.iter().any(|x| x == *t)).count();
+/// 一类工具的勾选块：分组头整行可点折叠，复选框只切全选 / 全不选；单工具分类不设分组头。
+fn tool_category_block<'a>(
+    app: &App,
+    tools: &[String],
+    ro: bool,
+    index: usize,
+    label: &str,
+    items: &[(String, String)],
+) -> Element<'a, Message> {
+    if items.len() == 1 {
+        let (id, name) = &items[0];
+        let on = tools.iter().any(|x| x == id);
+        let line = row![
+            controls::checkbox(
+                if on { controls::CheckState::On } else { controls::CheckState::Off },
+                (!ro).then(|| Message::Ai(AiMsg::AgentToolToggle(id.clone()))),
+            ),
+            text(name.clone()).size(pal::fs_caption()).color(pal::TEXT_SECONDARY),
+        ]
+        .spacing(6)
+        .align_y(iced::alignment::Vertical::Center);
+        return container(line).padding(Padding::ZERO.horizontal(8.0).top(4.0)).into();
+    }
+    let collapsed = app.ai.collapsed_cats.get(index).copied().unwrap_or(true);
+    let head = row![
+        icon(
+            if collapsed { "chevron-right" } else { "chevron-down" },
+            12.0,
+            pal::TEXT_MUTED
+        ),
+        controls::checkbox(state_of(tools, items), (!ro).then(|| Message::Ai(AiMsg::AgentCategoryToggle(index)))),
+        text(label.to_string())
+            .size(pal::fs_caption())
+            .color(pal::TEXT_PRIMARY)
+            .font(crate::ui::bold()),
+    ]
+    .spacing(6)
+    .align_y(iced::alignment::Vertical::Center);
+    let mut col = column![iced::widget::mouse_area(
+        container(head).padding(Padding::ZERO.horizontal(8.0).top(4.0)).width(Length::Fill),
+    )
+    .on_press(Message::Ai(AiMsg::AgentCatCollapse(index)))];
+    if collapsed {
+        return col.into();
+    }
+    for (id, name) in items {
+        let on = tools.iter().any(|x| x == id);
+        let mut tool_line = row![
+            controls::checkbox(
+                if on { controls::CheckState::On } else { controls::CheckState::Off },
+                (!ro).then(|| Message::Ai(AiMsg::AgentToolToggle(id.clone()))),
+            ),
+            text(name.clone()).size(pal::fs_caption()).color(pal::TEXT_SECONDARY),
+        ]
+        .spacing(6)
+        .align_y(iced::alignment::Vertical::Center);
+        if id == "web_search" && !app.ai.search_ready {
+            tool_line = tool_line.push(
+                text("（未配置搜索源，发送时自动降级）")
+                    .size(pal::fs_micro())
+                    .color(pal::TEXT_MUTED),
+            );
+        }
+        col = col.push(container(tool_line).padding(Padding::ZERO.left(20.0)));
+    }
+    col.into()
+}
+
+fn state_of(tools: &[String], items: &[(String, String)]) -> controls::CheckState {
+    let hit = items.iter().filter(|(id, _)| tools.iter().any(|x| x == id)).count();
     if hit == 0 {
         controls::CheckState::Off
-    } else if hit == cat.tools.len() {
+    } else if hit == items.len() {
         controls::CheckState::On
     } else {
         controls::CheckState::Partial

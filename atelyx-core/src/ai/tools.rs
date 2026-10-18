@@ -1,6 +1,6 @@
 //! Agent 工具协议与内置工具：名册（schema 声明）、参数校验、执行与结果回传文本。
 //!
-//! Agent 工具名册与执行：四分类归组；文件写经 `WriteQueue` 与壳同出口。
+//! Agent 工具名册与执行：内置工具按分类归组，插件工具由宿主名册单列；文件写经 `WriteQueue` 与壳同出口。
 //! 路径一律仓库相对，执行前做越界校验；结果一律以文本回传模型。
 
 use std::sync::Arc;
@@ -35,13 +35,12 @@ impl ToolResult {
     }
 }
 
-/// 工具四分类（与 Agent 设置勾选分组一致）。
+/// 内置工具分类（与 Agent 设置页的勾选分组一致）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolCategory {
     Web,
     File,
     Task,
-    Plugin,
 }
 
 /// 工具名册项：schema、归属分类、是否可并行执行。
@@ -285,13 +284,17 @@ pub enum RepoAccess {
     Space { client: Arc<SpaceClient>, space_id: String },
 }
 
-/// 工具执行环境：仓库访问后端 + 已解析的搜索配置 + 排除清单。
+/// 工具执行环境：仓库访问后端 + 已解析的搜索配置 + 排除清单 + 插件工具。
 #[derive(Clone)]
 pub struct ToolCtx {
     pub repo: RepoAccess,
     pub search: SearchConfig,
     /// 仓库排除文件夹清单（检索工具跳过）。
     pub exclude: Vec<String>,
+    /// 插件注册的 AI 工具（Agent 勾选按 `selection_id` 过滤，执行经运行时转发）。
+    pub plugin_tools: Vec<crate::plugin_runtime::PluginToolSpec>,
+    /// 插件运行时（`None` = 无插件工具可执行）。
+    pub plugins: Option<Arc<crate::plugin_runtime::PluginRuntime>>,
 }
 
 /// 把历史 user 消息里图片附件的路径引用读回 dataURL 填进 `payload`
@@ -352,7 +355,8 @@ fn arg<'a>(args: &'a Value, key: &str) -> Result<&'a str, ToolResult> {
         .ok_or_else(|| ToolResult::err(format!("工具参数错误：缺少 {key}")))
 }
 
-/// 执行内置工具。名称未知 = 错误文本；实现内部失败 = 错误文本（不抛断对话循环）。
+/// 执行内置工具与插件注册的工具。名称未知 = 错误文本；实现内部失败 = 错误文本
+/// （不抛断对话循环）。插件工具只在当前上下文登记过时才可执行。
 pub async fn execute(ctx: &ToolCtx, name: &str, args: Value) -> ToolResult {
     match name {
         "web_search" => web_search(ctx, &args).await,
@@ -370,7 +374,39 @@ pub async fn execute(ctx: &ToolCtx, name: &str, args: Value) -> ToolResult {
         "delete_file" => delete_file(ctx, &args).await,
         "delete_dir" => delete_dir(ctx, &args).await,
         "todo_write" => todo_write(ctx, &args).await,
-        other => ToolResult::err(format!("未知工具：{other}")),
+        other => match ctx.plugin_tools.iter().find(|t| t.name == other) {
+            Some(spec) => execute_plugin_tool(ctx, spec, args).await,
+            None => ToolResult::err(format!("未知工具：{other}")),
+        },
+    }
+}
+
+/// 转发一次插件工具调用：结果文本与错误标记回传模型，超长结果截断。
+async fn execute_plugin_tool(
+    ctx: &ToolCtx,
+    spec: &crate::plugin_runtime::PluginToolSpec,
+    args: Value,
+) -> ToolResult {
+    let Some(runtime) = &ctx.plugins else {
+        return ToolResult::err(format!("插件工具不可用：宿主运行时不可用（{}）", spec.plugin_id));
+    };
+    match runtime.call_tool(&spec.name, args).await {
+        Ok(output) => {
+            let mut text = output.content;
+            if text.len() > READ_CHARS_CAP {
+                let mut cut = READ_CHARS_CAP;
+                while !text.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                text.truncate(cut);
+                text.push_str("…（结果过长截断）");
+            }
+            ToolResult {
+                text,
+                is_error: output.is_error,
+            }
+        }
+        Err(e) => ToolResult::err(e),
     }
 }
 
@@ -425,7 +461,7 @@ async fn web_fetch(args: &Value) -> ToolResult {
 
 /// 仓库相对路径校验：拒绝绝对路径 / `..` / 隐藏段（`.atelyx` 等不对模型开放）。
 fn rel_path(rel: &str) -> Result<String, ToolResult> {
-    vault::validate_ai_path(rel).map_err(ToolResult::err)
+    vault::validate_tool_path(rel).map_err(ToolResult::err)
 }
 
 /// 单条检索命中（路径 / 行号 / 行文本）：本地与空间后端归一后的共用形状。
@@ -1053,6 +1089,8 @@ mod tests {
             },
             search: SearchConfig::default(),
             exclude: Vec::new(),
+            plugin_tools: Vec::new(),
+            plugins: None,
         }
     }
 
@@ -1067,13 +1105,13 @@ mod tests {
     #[test]
     fn ai_path_rules_reject_hidden_segments_and_escapes() {
         // 隐藏目录（仓库配置与密钥所在处）不对模型开放
-        assert!(vault::validate_ai_path(".atelyx/config.json").is_err());
-        assert!(vault::validate_ai_path("a/.git/y").is_err());
-        assert!(vault::validate_ai_path("../x").is_err());
-        assert!(vault::validate_ai_path("/x").is_err());
+        assert!(vault::validate_tool_path(".atelyx/config.json").is_err());
+        assert!(vault::validate_tool_path("a/.git/y").is_err());
+        assert!(vault::validate_tool_path("../x").is_err());
+        assert!(vault::validate_tool_path("/x").is_err());
         // 普通仓库相对路径原样通过（分隔符归一为 `/`，空间端点直接可用）
-        assert_eq!(vault::validate_ai_path("笔记/待办.md").unwrap(), "笔记/待办.md");
-        assert_eq!(vault::validate_ai_path("./笔记/a.md").unwrap(), "笔记/a.md");
+        assert_eq!(vault::validate_tool_path("笔记/待办.md").unwrap(), "笔记/待办.md");
+        assert_eq!(vault::validate_tool_path("./笔记/a.md").unwrap(), "笔记/a.md");
     }
 
     #[tokio::test]
@@ -1260,7 +1298,7 @@ mod tests {
     }
 
     #[test]
-    fn registry_covers_four_categories() {
+    fn registry_covers_categories() {
         let tools = builtin_tools();
         assert_eq!(tools.iter().filter(|t| t.name == "web_search").count(), 1);
         let by_cat = |c: ToolCategory| tools.iter().filter(|t| t.category == c).count();

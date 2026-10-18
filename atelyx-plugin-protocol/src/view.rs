@@ -108,6 +108,12 @@ pub enum NodeBody {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         color: Option<ColorToken>,
     },
+    /// 只读 Markdown 正文：宿主按笔记同源解析器渲染（标题 / 列表 / 引用 / 代码块 / 表格 / 链接）。
+    /// 块级图片与笔记同源载入：http(s) 走下载，其余按仓库相对路径。
+    /// 无编辑态与事件：插件要交互请用其他控件。
+    Markdown {
+        content: String,
+    },
     TextInput {
         #[serde(default)]
         value: String,
@@ -206,6 +212,7 @@ impl NodeBody {
             Self::Grid { .. } => "grid",
             Self::List { .. } => "list",
             Self::Text { .. } => "text",
+            Self::Markdown { .. } => "markdown",
             Self::TextInput { .. } => "textInput",
             Self::NumberInput { .. } => "numberInput",
             Self::Dropdown { .. } => "dropdown",
@@ -345,13 +352,15 @@ pub enum ViewEvent {
     Canvas { pointer: CanvasPointer },
 }
 
-/// 事件值的三形态。untagged 按序匹配即可无歧义区分（字符串 / 数值 / 布尔互不重叠）。
+/// 事件值的四形态。untagged 按序匹配即可无歧义区分（字符串 / 数值 / 布尔 / null 互不重叠）；
+/// 数字输入清空时上报 `Null`，与「值为 0」区分。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum EventValue {
     Text(String),
     Number(f64),
     Bool(bool),
+    Null,
 }
 
 /// 画布指针事件种类：节点 `mouseEvents` 声明要收的子集，宿主只回发声明的。
@@ -455,6 +464,16 @@ mod tests {
         assert_eq!(json["children"][1]["id"], "go");
         // roundtrip 保持一致
         assert_eq!(serde_json::from_value::<ViewNode>(json).unwrap(), tree);
+    }
+
+    #[test]
+    fn event_value_null_roundtrips_apart_from_zero() {
+        assert_eq!(serde_json::to_value(EventValue::Null).unwrap(), serde_json::Value::Null);
+        assert_eq!(
+            serde_json::from_value::<EventValue>(serde_json::Value::Null).unwrap(),
+            EventValue::Null
+        );
+        assert_eq!(serde_json::to_value(EventValue::Number(0.0)).unwrap(), serde_json::json!(0.0));
     }
 
     #[test]

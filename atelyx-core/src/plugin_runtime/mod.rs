@@ -2,6 +2,7 @@
 //! 运行时为进程内单例（壳持 `Arc`，多窗口共享）；插件事件经 [`PluginRuntime::subscribe_events`]
 //! 的单一广播通道进入壳的 update。进程创建与清理一律经 [`crate::plugin_process`]。
 
+mod ai_tools;
 mod capability;
 mod child_process;
 mod fs;
@@ -18,7 +19,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use atelyx_plugin_protocol::event;
 use atelyx_plugin_protocol::manifest::Manifest;
@@ -27,27 +27,18 @@ use serde_json::Value;
 
 use crate::plugin_process::PluginProcessHost;
 
+use ai_tools::ToolCallWait;
 use instance::Instance;
 
-/// 插件侧搜索查询的等待上限（到点未回结果即该次回落内置提供方）。
-const SEARCH_QUERY_TIMEOUT: Duration = Duration::from_secs(15);
-
-/// 内置搜索提供方配置（壳侧「联网搜索」设置的投影；插件上岗时不使用）。
-#[derive(Clone, Debug, Default)]
-pub struct BuiltinSearchConfig {
-    pub provider: String,
-    pub searxng_url: Option<String>,
-    pub tavily_key: Option<String>,
-}
-
 /// 协议类型再导出：壳只依赖 `atelyx-core`，不直接依赖协议 crate。
+pub use ai_tools::{PluginToolOutput, PluginToolSpec};
 pub use atelyx_plugin_protocol::canvas::{CanvasColor, CanvasPoint, DrawCommand};
 pub use atelyx_plugin_protocol::event::VaultSwitchPayload;
 pub use atelyx_plugin_protocol::manifest::{DocTypeRegistration, Permission};
 pub use atelyx_plugin_protocol::method::{
     ChatEvent, ChatEventParams, ChatHistoryParams, ChatHistoryResult, ChatSendParams,
     ChatSessionSummary, ChatSessionWire, ChatStopParams, ContributionSlot, FileFilter,
-    NotificationLevel, SearchResult, ServiceContract, SurfaceKind, TakeoverScope, WindowOpenParams,
+    NotificationLevel, SurfaceKind, TakeoverScope, WindowOpenParams,
 };
 pub use atelyx_plugin_protocol::view::{
     Align, Axis, ButtonVariant, CanvasEventKind, CanvasPointer, ColorToken, EventKind, EventValue,
@@ -89,8 +80,8 @@ pub enum PluginEvent {
     ViewSubmitted { id: String },
     /// 某插件的贡献注册表变化（注册 / 撤销 / 随会话收尾清空）。
     ContributionsChanged { id: String },
-    /// 某插件的服务实现声明变化（注册 / 撤销 / 随会话收尾清空）。
-    ServicesChanged { id: String },
+    /// 某插件注册的 AI 工具变化（注册 / 撤销 / 随会话收尾清空）。
+    AiToolsChanged { id: String },
 }
 
 /// 一个已注册的贡献点（菜单与标签渲染用）。
@@ -144,12 +135,24 @@ pub enum HostRequest {
     /// 插件请求关闭自己打开的一个窗口。
     CloseWindow { plugin_id: String, request_id: u64, window_id: String },
     /// 插件请求发起 / 续聊一轮 AI 对话（须声明 `ai` 权限；壳编排后经
-    /// [`PluginRuntime::resolve_chat_call`] 回填，事件随后经 `host:ai.chat.event` 流达插件）。
+    /// [`PluginRuntime::resolve_shell_call`] 回填，事件随后经 `host:ai.chat.event` 流达插件）。
     ChatSend { plugin_id: String, request_id: u64, params: method::ChatSendParams },
     /// 插件请求中断一个会话的活跃 run。
     ChatStop { plugin_id: String, request_id: u64, params: method::ChatStopParams },
     /// 插件请求读会话清单或单会话消息历史。
     ChatHistory { plugin_id: String, request_id: u64, params: method::ChatHistoryParams },
+    /// 插件请求写系统剪贴板（壳在 Elm 循环外执行，结果经 [`PluginRuntime::resolve_shell_call`] 回填）。
+    ClipboardWrite { plugin_id: String, request_id: u64, text: String },
+    /// 插件请求读系统剪贴板（无文本内容时回空串）。
+    ClipboardRead { plugin_id: String, request_id: u64 },
+    /// 插件请求读当前仓库内一个文本文件（`path` 为相对仓库根路径）。
+    VaultReadText { plugin_id: String, request_id: u64, path: String },
+    /// 插件请求写当前仓库内一个文本文件（路径校验与打开中文件的写保护由壳执行）。
+    VaultWriteText { plugin_id: String, request_id: u64, path: String, content: String },
+    /// 插件请求列当前仓库内一个目录（空路径 = 仓库根）。
+    VaultList { plugin_id: String, request_id: u64, path: String },
+    /// 插件请求判定当前仓库内一个文件是否存在。
+    VaultExists { plugin_id: String, request_id: u64, path: String },
 }
 
 /// 插件列表项（设置页渲染用）。
@@ -193,14 +196,11 @@ type UiReplyTx = std::sync::mpsc::Sender<Result<(), String>>;
 /// 在途界面服务等待项：发起插件 id + 结果回传通道。
 type UiCallWait = (String, UiReplyTx);
 
-/// 在途搜索查询等待项：上岗插件 id + 结果回传通道。
-type SearchWait = (String, std::sync::mpsc::Sender<Result<Vec<SearchResult>, String>>);
+/// 壳侧服务调用结果回传通道（AI 对话 / 剪贴板 / 仓库读写共用，载荷为可序列化结果）。
+type ShellReplyTx = std::sync::mpsc::Sender<Result<Value, String>>;
 
-/// AI 对话调用结果回传通道（send / stop / history 的应答载荷）。
-type ChatReplyTx = std::sync::mpsc::Sender<Result<Value, String>>;
-
-/// 在途 AI 对话调用等待项：发起插件 id + 结果回传通道。
-type ChatCallWait = (String, ChatReplyTx);
+/// 在途壳侧服务调用：发起插件 id + 结果回传通道。
+type ShellCallWait = (String, ShellReplyTx);
 
 /// 插件宿主运行时。
 pub struct PluginRuntime {
@@ -217,16 +217,14 @@ pub struct PluginRuntime {
     /// 在途界面服务请求（接管 / 插件窗口）：request_id → 等待项。
     ui_calls: Mutex<HashMap<u64, UiCallWait>>,
     next_ui_call_id: AtomicU64,
-    /// 在途搜索查询：request_id → 等待项（上岗插件回结果或超时回落）。
-    search_pending: Mutex<HashMap<u64, SearchWait>>,
-    next_search_id: AtomicU64,
-    /// 在途 AI 对话调用（send / stop / history）：request_id → 等待项。
-    chat_calls: Mutex<HashMap<u64, ChatCallWait>>,
-    next_chat_call_id: AtomicU64,
-    /// 服务实现声明簿：契约 → 已声明插件 id 列表（声明是候选不是上岗）。
-    services: Mutex<HashMap<ServiceContract, Vec<String>>>,
-    /// 用户指定的搜索提供方上岗插件 id（`None` = 内置 Tavily / SearXNG）。
-    search_provider: Mutex<Option<String>>,
+    /// 在途壳侧服务调用（AI 对话 / 剪贴板 / 仓库读写）：request_id → 等待项。
+    shell_calls: Mutex<HashMap<u64, ShellCallWait>>,
+    next_shell_call_id: AtomicU64,
+    /// 已注册的插件 AI 工具（工具名 → 声明；名在内置工具与其他插件之间全局唯一）。
+    tools: Mutex<HashMap<String, PluginToolSpec>>,
+    /// 在途 AI 工具调用：callId → 等待项。
+    tool_calls: Mutex<HashMap<String, ToolCallWait>>,
+    next_tool_call_id: AtomicU64,
     /// 当前容器身份（见 [`PluginRuntime::on_vault_switch`]）：同一容器重复进入不动作，据此判别首次激活。
     container: Mutex<Option<String>>,
     discovered: Mutex<HashMap<String, Discovered>>,
@@ -250,12 +248,11 @@ impl PluginRuntime {
             next_dialog_id: AtomicU64::new(1),
             ui_calls: Mutex::new(HashMap::new()),
             next_ui_call_id: AtomicU64::new(1),
-            search_pending: Mutex::new(HashMap::new()),
-            next_search_id: AtomicU64::new(1),
-            chat_calls: Mutex::new(HashMap::new()),
-            next_chat_call_id: AtomicU64::new(1),
-            services: Mutex::new(HashMap::new()),
-            search_provider: Mutex::new(None),
+            shell_calls: Mutex::new(HashMap::new()),
+            next_shell_call_id: AtomicU64::new(1),
+            tools: Mutex::new(HashMap::new()),
+            tool_calls: Mutex::new(HashMap::new()),
+            next_tool_call_id: AtomicU64::new(1),
             container: Mutex::new(None),
             discovered: Mutex::new(HashMap::new()),
             instances: Mutex::new(HashMap::new()),
@@ -370,7 +367,13 @@ impl PluginRuntime {
             HostRequest::Dialog { .. } => return Err("界面服务请求形态不符".to_string()),
             HostRequest::ChatSend { .. }
             | HostRequest::ChatStop { .. }
-            | HostRequest::ChatHistory { .. } => return Err("界面服务请求形态不符".to_string()),
+            | HostRequest::ChatHistory { .. }
+            | HostRequest::ClipboardWrite { .. }
+            | HostRequest::ClipboardRead { .. }
+            | HostRequest::VaultReadText { .. }
+            | HostRequest::VaultWriteText { .. }
+            | HostRequest::VaultList { .. }
+            | HostRequest::VaultExists { .. } => return Err("界面服务请求形态不符".to_string()),
         };
         self.ui_calls
             .lock()
@@ -409,9 +412,9 @@ impl PluginRuntime {
         }
     }
 
-    /// 登记一个 AI 对话调用（send / stop / history）并把请求交给壳，返回结果接收端。
-    fn open_chat_call(&self, request: HostRequest) -> Result<std::sync::mpsc::Receiver<Result<Value, String>>, String> {
-        let request_id = self.next_chat_call_id.fetch_add(1, Ordering::SeqCst);
+    /// 登记一个壳侧服务调用并把请求交给壳，返回结果接收端。
+    fn open_shell_call(&self, request: HostRequest) -> Result<std::sync::mpsc::Receiver<Result<Value, String>>, String> {
+        let request_id = self.next_shell_call_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = std::sync::mpsc::channel();
         let request = match request {
             HostRequest::ChatSend { plugin_id, params, .. } => HostRequest::ChatSend {
@@ -429,39 +432,70 @@ impl PluginRuntime {
                 request_id,
                 params,
             },
-            _ => return Err("AI 对话请求形态不符".to_string()),
+            HostRequest::ClipboardWrite { plugin_id, text, .. } => HostRequest::ClipboardWrite {
+                plugin_id,
+                request_id,
+                text,
+            },
+            HostRequest::ClipboardRead { plugin_id, .. } => HostRequest::ClipboardRead {
+                plugin_id,
+                request_id,
+            },
+            HostRequest::VaultReadText { plugin_id, path, .. } => HostRequest::VaultReadText {
+                plugin_id,
+                request_id,
+                path,
+            },
+            HostRequest::VaultWriteText { plugin_id, path, content, .. } => HostRequest::VaultWriteText {
+                plugin_id,
+                request_id,
+                path,
+                content,
+            },
+            HostRequest::VaultList { plugin_id, path, .. } => HostRequest::VaultList {
+                plugin_id,
+                request_id,
+                path,
+            },
+            HostRequest::VaultExists { plugin_id, path, .. } => HostRequest::VaultExists {
+                plugin_id,
+                request_id,
+                path,
+            },
+            _ => return Err("壳侧服务请求形态不符".to_string()),
         };
-        self.chat_calls
+        self.shell_calls
             .lock()
             .unwrap()
             .insert(request_id, (request_plugin_id(&request).to_string(), tx));
         if self.host_requests.send(request).is_err() {
-            self.chat_calls.lock().unwrap().remove(&request_id);
-            return Err("AI 对话服务不可用：宿主已退出".to_string());
+            self.shell_calls.lock().unwrap().remove(&request_id);
+            return Err("壳侧服务不可用：宿主已退出".to_string());
         }
         Ok(rx)
     }
 
-    /// 壳侧回填一次 AI 对话调用的结果（send 的会话 / 消息 id、history 的清单或会话；失败带可读原因）。
-    pub fn resolve_chat_call(&self, request_id: u64, result: Result<Value, String>) {
-        let waiter = self.chat_calls.lock().unwrap().remove(&request_id);
+    /// 壳侧回填一次服务调用的结果（AI 对话：会话 / 消息 id、清单或历史；剪贴板：文本；
+    /// 仓库：文件内容 / 写入完成 / 目录清单 / 存在性）。失败带可读原因。
+    pub fn resolve_shell_call(&self, request_id: u64, result: Result<Value, String>) {
+        let waiter = self.shell_calls.lock().unwrap().remove(&request_id);
         if let Some((_, tx)) = waiter {
             let _ = tx.send(result);
         }
     }
 
-    /// 让某插件全部在途 AI 对话调用以可读失败收场（插件停用 / 失败 / 崩溃时调用）。
-    pub(crate) fn fail_chat_calls_of(&self, plugin_id: &str, reason: &str) {
+    /// 让某插件全部在途壳侧服务调用以可读失败收场（插件停用 / 失败 / 崩溃时调用）。
+    pub(crate) fn fail_shell_calls_of(&self, plugin_id: &str, reason: &str) {
         let ids: Vec<u64> = {
-            let chat_calls = self.chat_calls.lock().unwrap();
-            chat_calls
+            let shell_calls = self.shell_calls.lock().unwrap();
+            shell_calls
                 .iter()
                 .filter(|(_, (owner, _))| owner == plugin_id)
                 .map(|(id, _)| *id)
                 .collect()
         };
         for id in ids {
-            let waiter = self.chat_calls.lock().unwrap().remove(&id);
+            let waiter = self.shell_calls.lock().unwrap().remove(&id);
             if let Some((_, tx)) = waiter {
                 let _ = tx.send(Err(reason.to_string()));
             }
@@ -491,11 +525,11 @@ impl PluginRuntime {
         }
     }
 
-    /// 让全部在途 AI 对话调用以可读失败收场（宿主退出收尾）。
-    fn fail_all_chat_calls(&self, reason: &str) {
-        let waiters: Vec<ChatReplyTx> = {
-            let mut chat_calls = self.chat_calls.lock().unwrap();
-            chat_calls.drain().map(|(_, (_, tx))| tx).collect()
+    /// 让全部在途壳侧服务调用以可读失败收场（宿主退出收尾）。
+    fn fail_all_shell_calls(&self, reason: &str) {
+        let waiters: Vec<ShellReplyTx> = {
+            let mut shell_calls = self.shell_calls.lock().unwrap();
+            shell_calls.drain().map(|(_, (_, tx))| tx).collect()
         };
         for tx in waiters {
             let _ = tx.send(Err(reason.to_string()));
@@ -557,201 +591,6 @@ impl PluginRuntime {
             request_id: 0,
             window_id: window_id.to_string(),
         })
-    }
-
-    // ---------- 服务接管 ----------
-
-    /// 插件声明实现某服务契约（幂等；候选名单变化才广播给壳）。
-    pub(crate) fn declare_service(&self, plugin_id: &str, contract: ServiceContract) {
-        let changed = {
-            let mut services = self.services.lock().unwrap();
-            let list = services.entry(contract).or_default();
-            let changed = !list.iter().any(|id| id == plugin_id);
-            if changed {
-                list.push(plugin_id.to_string());
-            }
-            changed
-        };
-        if changed {
-            let _ = self.events.send(PluginEvent::ServicesChanged { id: plugin_id.to_string() });
-        }
-    }
-
-    /// 插件撤销服务实现声明；未注册的契约报可读错误（测试与运行时收尾共用）。
-    pub fn retract_service(&self, plugin_id: &str, contract: ServiceContract) -> Result<(), String> {
-        let mut services = self.services.lock().unwrap();
-        let Some(list) = services.get_mut(&contract) else {
-            return Err(format!("未声明该服务契约：{contract:?}"));
-        };
-        let before = list.len();
-        list.retain(|id| id != plugin_id);
-        let removed = list.len() != before;
-        if list.is_empty() {
-            services.remove(&contract);
-        }
-        drop(services);
-        if !removed {
-            return Err(format!("未声明该服务契约：{contract:?}"));
-        }
-        let _ = self.events.send(PluginEvent::ServicesChanged { id: plugin_id.to_string() });
-        Ok(())
-    }
-
-    /// 收掉某插件的全部服务声明（随会话收尾；停用 / 崩溃 / 卸载即自动摘除候选资格）。
-    pub(crate) fn retract_services_of(&self, plugin_id: &str) {
-        let dropped = {
-            let mut services = self.services.lock().unwrap();
-            let mut dropped = false;
-            services.retain(|_, list| {
-                let before = list.len();
-                list.retain(|id| id != plugin_id);
-                dropped = dropped || list.len() != before;
-                !list.is_empty()
-            });
-            dropped
-        };
-        if dropped {
-            let _ = self.events.send(PluginEvent::ServicesChanged { id: plugin_id.to_string() });
-        }
-    }
-
-    /// 已声明某契约的全部插件 id（设置页候选名单）。
-    pub fn service_candidates(&self, contract: ServiceContract) -> Vec<String> {
-        self.services
-            .lock()
-            .unwrap()
-            .get(&contract)
-            .cloned()
-            .unwrap_or_default()
-    }
-
-    /// 用户指定的搜索提供方上岗插件 id（`None` = 内置）。
-    pub fn search_provider(&self) -> Option<String> {
-        self.search_provider.lock().unwrap().clone()
-    }
-
-    /// 设置搜索提供方上岗者（壳从持久化配置应用；`None` = 回到内置）。
-    pub fn set_search_provider(&self, plugin_id: Option<String>) {
-        *self.search_provider.lock().unwrap() = plugin_id;
-    }
-
-    /// 当前搜索上岗者是否有效（已声明契约且进程在跑）。失效即调用方直接走内置，不发起插件查询。
-    fn assigned_search_plugin(&self) -> Option<String> {
-        let assigned = self.search_provider.lock().unwrap().clone()?;
-        let declared = self
-            .services
-            .lock()
-            .unwrap()
-            .get(&ServiceContract::WebSearch)
-            .map(|list| list.iter().any(|id| id == &assigned))
-            .unwrap_or(false);
-        if !declared {
-            return None;
-        }
-        let running = self
-            .instances
-            .lock()
-            .unwrap()
-            .get(&assigned)
-            .map(|i| i.status() == PluginStatus::Running)
-            .unwrap_or(false);
-        running.then_some(assigned)
-    }
-
-    /// 执行一次网页搜索：上岗插件有效则向其下发查询（超时 / 失败即该次回落内置并留可见提示），
-    /// 否则直接走内置 Tavily / SearXNG。
-    pub async fn web_search(
-        &self,
-        query: &str,
-        builtin: &BuiltinSearchConfig,
-    ) -> Result<Vec<SearchResult>, String> {
-        let assigned = self.assigned_search_plugin();
-        if let Some(id) = assigned {
-            match self.query_plugin_search(&id, query).await {
-                Ok(results) => return Ok(results),
-                Err(reason) => {
-                    let _ = self.events.send(PluginEvent::Notification {
-                        id,
-                        title: "网页搜索已回落内置提供方".to_string(),
-                        body: Some(reason),
-                        level: NotificationLevel::Warning,
-                    });
-                }
-            }
-        }
-        crate::search::search_web(
-            builtin.provider.clone(),
-            query.to_string(),
-            builtin.searxng_url.clone(),
-            builtin.tavily_key.clone(),
-        )
-        .await
-        .map(|items| {
-            items
-                .into_iter()
-                .map(|i| SearchResult { title: i.title, url: i.url, snippet: i.snippet })
-                .collect()
-        })
-    }
-
-    /// 向上岗插件下发一次查询并等结果（超时 / 插件停止 / 插件报错都以可读失败收场）。
-    /// 登记与进程在跑检查之间仍有微小竞态窗口（teardown 执行中），由收尾的
-    /// [`PluginRuntime::fail_searches_of`] 与下方超时兜底——最坏一次调用等到超时后回落内置。
-    async fn query_plugin_search(&self, plugin_id: &str, query: &str) -> Result<Vec<SearchResult>, String> {
-        let instance = {
-            let instances = self.instances.lock().unwrap();
-            instances
-                .get(plugin_id)
-                .filter(|i| i.status() == PluginStatus::Running)
-                .cloned()
-                .ok_or_else(|| "插件未在运行".to_string())?
-        };
-        let request_id = self.next_search_id.fetch_add(1, Ordering::SeqCst);
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.search_pending
-            .lock()
-            .unwrap()
-            .insert(request_id, (plugin_id.to_string(), tx));
-        // 登记后复查：插件在登记与下发之间被收尾时立即失败收场，不挂满超时
-        if instance.status() != PluginStatus::Running {
-            self.search_pending.lock().unwrap().remove(&request_id);
-            return Err("插件未在运行".to_string());
-        }
-        instance.notify_search_query(request_id, query);
-        let wait = tokio::task::spawn_blocking(move || {
-            rx.recv_timeout(SEARCH_QUERY_TIMEOUT)
-                .map_err(|_| format!("搜索查询超时（{}s）", SEARCH_QUERY_TIMEOUT.as_secs()))?
-        });
-        let joined = wait.await;
-        // 无论等待成功、超时还是任务被取消，在途登记一律摘除（不随 `?` 提前返回泄漏）
-        self.search_pending.lock().unwrap().remove(&request_id);
-        joined.map_err(|e| format!("搜索等待任务失败：{e}"))?
-    }
-
-    /// 插件回一次查询结果；未知请求 id（已超时回落 / 已取消）静默丢弃。
-    pub(crate) fn resolve_search(&self, request_id: u64, result: Result<Vec<SearchResult>, String>) {
-        let waiter = self.search_pending.lock().unwrap().remove(&request_id);
-        if let Some((_, tx)) = waiter {
-            let _ = tx.send(result);
-        }
-    }
-
-    /// 让等待某插件结果的在途搜索查询立即失败收场（插件停用 / 崩溃时调用；调用方按单次回落内置处理）。
-    pub(crate) fn fail_searches_of(&self, plugin_id: &str, reason: &str) {
-        let ids: Vec<u64> = {
-            let pending = self.search_pending.lock().unwrap();
-            pending
-                .iter()
-                .filter(|(_, (owner, _))| owner == plugin_id)
-                .map(|(id, _)| *id)
-                .collect()
-        };
-        for id in ids {
-            let waiter = self.search_pending.lock().unwrap().remove(&id);
-            if let Some((_, tx)) = waiter {
-                let _ = tx.send(Err(reason.to_string()));
-            }
-        }
     }
 
     // ---------- 领域文档类型 ----------
@@ -1027,7 +866,8 @@ impl PluginRuntime {
         }
         self.fail_all_dialogs("宿主已退出");
         self.fail_all_ui_calls("宿主已退出");
-        self.fail_all_chat_calls("宿主已退出");
+        self.fail_all_shell_calls("宿主已退出");
+        self.fail_all_tool_calls("宿主已退出");
         self.process_host.shutdown_children();
     }
 
@@ -1155,7 +995,7 @@ fn container_identity(payload: &VaultSwitchPayload) -> String {
     }
 }
 
-/// 界面服务请求的发起插件 id（登记归属用）。
+/// 壳侧服务请求的发起插件 id（登记归属用）。
 fn request_plugin_id(request: &HostRequest) -> &str {
     match request {
         HostRequest::Dialog { plugin_id, .. }
@@ -1164,7 +1004,13 @@ fn request_plugin_id(request: &HostRequest) -> &str {
         | HostRequest::CloseWindow { plugin_id, .. }
         | HostRequest::ChatSend { plugin_id, .. }
         | HostRequest::ChatStop { plugin_id, .. }
-        | HostRequest::ChatHistory { plugin_id, .. } => plugin_id,
+        | HostRequest::ChatHistory { plugin_id, .. }
+        | HostRequest::ClipboardWrite { plugin_id, .. }
+        | HostRequest::ClipboardRead { plugin_id, .. }
+        | HostRequest::VaultReadText { plugin_id, .. }
+        | HostRequest::VaultWriteText { plugin_id, .. }
+        | HostRequest::VaultList { plugin_id, .. }
+        | HostRequest::VaultExists { plugin_id, .. } => plugin_id,
     }
 }
 
@@ -1189,7 +1035,7 @@ mod tests {
         std::fs::write(
             dir.join(MANIFEST_FILE),
             format!(
-                r#"{{"id":"{id}","name":"Demo","version":"1.0.0","apiVersion":1,"entry":{{"windows":"app.exe","linux":"app"}},"permissions":[]}}"#
+                r#"{{"id":"{id}","name":"Demo","version":"1.0.0","apiVersion":2,"entry":{{"windows":"app.exe","linux":"app"}},"permissions":[]}}"#
             ),
         )
         .unwrap();
@@ -1284,6 +1130,44 @@ mod tests {
     }
 
     #[test]
+    fn shell_calls_resolve_and_fail_per_plugin() {
+        let tmp = TempDir::new("runtime-shell-call");
+        let runtime = PluginRuntime::new(tmp.to_path_buf());
+        let rx = runtime
+            .open_shell_call(HostRequest::ClipboardRead {
+                plugin_id: "com.a.one".into(),
+                request_id: 0,
+            })
+            .unwrap();
+        let request_id = *runtime.shell_calls.lock().unwrap().keys().next().unwrap();
+        runtime.resolve_shell_call(request_id, Ok(serde_json::json!({ "text": "hi" })));
+        assert_eq!(rx.recv().unwrap().unwrap()["text"], "hi");
+        assert!(runtime.shell_calls.lock().unwrap().is_empty());
+
+        // 按插件失败只影响该插件；宿主退出收掉全部在途调用
+        let mine = runtime
+            .open_shell_call(HostRequest::VaultReadText {
+                plugin_id: "com.a.one".into(),
+                request_id: 0,
+                path: "a.md".into(),
+            })
+            .unwrap();
+        let other = runtime
+            .open_shell_call(HostRequest::VaultReadText {
+                plugin_id: "com.a.two".into(),
+                request_id: 0,
+                path: "a.md".into(),
+            })
+            .unwrap();
+        runtime.fail_shell_calls_of("com.a.one", "插件已停止");
+        assert_eq!(mine.recv().unwrap().unwrap_err(), "插件已停止");
+        assert_eq!(runtime.shell_calls.lock().unwrap().len(), 1, "别的插件的在途调用不受影响");
+        runtime.shutdown();
+        assert_eq!(other.recv().unwrap().unwrap_err(), "宿主已退出");
+        assert!(runtime.shell_calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn ui_call_roundtrip_and_per_plugin_failure() {
         let tmp = TempDir::new("runtime-ui-call");
         let runtime = PluginRuntime::new(tmp.to_path_buf());
@@ -1353,71 +1237,6 @@ mod tests {
     }
 
     #[test]
-    fn service_declarations_roundtrip_and_stop_retracts() {
-        let tmp = TempDir::new("runtime-service");
-        let runtime = PluginRuntime::new(tmp.to_path_buf());
-        runtime.declare_service("com.a", ServiceContract::WebSearch);
-        runtime.declare_service("com.a", ServiceContract::WebSearch);
-        assert_eq!(
-            runtime.service_candidates(ServiceContract::WebSearch),
-            vec!["com.a".to_string()],
-            "重复声明应幂等"
-        );
-        runtime.retract_service("com.a", ServiceContract::WebSearch).unwrap();
-        assert!(runtime.service_candidates(ServiceContract::WebSearch).is_empty());
-        assert!(runtime.retract_service("com.a", ServiceContract::WebSearch).is_err());
-    }
-
-    #[tokio::test]
-    async fn search_falls_back_to_builtin_when_provider_not_running() {
-        let tmp = TempDir::new("runtime-search");
-        let runtime = PluginRuntime::new(tmp.to_path_buf());
-        // 指定了上岗者但插件未运行 / 未声明：不走插件路径，直接回落内置
-        runtime.set_search_provider(Some("com.example.search".into()));
-        let builtin = BuiltinSearchConfig {
-            provider: "unknown-provider".into(),
-            ..BuiltinSearchConfig::default()
-        };
-        let err = runtime.web_search("q", &builtin).await.unwrap_err();
-        assert!(err.contains("未知搜索源"), "未上岗时应走内置分发路径：{err}");
-    }
-
-    #[test]
-    fn search_results_are_resolved_and_failed_per_plugin() {
-        let tmp = TempDir::new("runtime-search-pending");
-        let runtime = PluginRuntime::new(tmp.to_path_buf());
-        let (tx, rx) = std::sync::mpsc::channel();
-        runtime
-            .search_pending
-            .lock()
-            .unwrap()
-            .insert(7, ("com.a".to_string(), tx));
-        runtime.resolve_search(
-            7,
-            Ok(vec![SearchResult {
-                title: "t".into(),
-                url: "https://a".into(),
-                snippet: "s".into(),
-            }]),
-        );
-        assert_eq!(rx.recv().unwrap().unwrap().len(), 1);
-        assert!(runtime.search_pending.lock().unwrap().is_empty());
-
-        // 未知请求 id 静默丢弃；按插件失败只影响该插件
-        runtime.resolve_search(99, Ok(Vec::new()));
-        let (tx, rx) = std::sync::mpsc::channel();
-        runtime
-            .search_pending
-            .lock()
-            .unwrap()
-            .insert(8, ("com.a".to_string(), tx));
-        runtime.fail_searches_of("com.b", "插件已停止");
-        assert_eq!(runtime.search_pending.lock().unwrap().len(), 1);
-        runtime.fail_searches_of("com.a", "插件已停止");
-        assert_eq!(rx.recv().unwrap(), Err("插件已停止".to_string()));
-    }
-
-    #[test]
     fn doc_types_are_collected_from_manifests() {
         let tmp = TempDir::new("runtime-doctypes");
         let root: &Path = &tmp;
@@ -1426,7 +1245,7 @@ mod tests {
         let entry = if cfg!(windows) { "app.exe" } else { "app" };
         std::fs::write(
             dir.join(MANIFEST_FILE),
-            r#"{"id":"com.example.board","name":"Board","version":"1.0.0","apiVersion":1,
+            r#"{"id":"com.example.board","name":"Board","version":"1.0.0","apiVersion":2,
                 "entry":{"windows":"app.exe","linux":"app"},"permissions":[],
                 "docTypeRegistrations":[{"extension":"board","label":"画板","icon":"layout-dashboard","surface":"board-view"}]}"#,
         )
@@ -1441,5 +1260,79 @@ mod tests {
         assert_eq!(doc_types[0].registration.extension, "board");
         assert_eq!(doc_types[0].registration.surface, "board-view");
         assert_eq!(doc_types[0].registration.label, "画板");
+    }
+
+    fn tool_params(
+        name: &str,
+        description: &str,
+    ) -> atelyx_plugin_protocol::method::RegisterToolParams {
+        atelyx_plugin_protocol::method::RegisterToolParams {
+            name: name.into(),
+            description: description.into(),
+            parameters: serde_json::json!({ "type": "object", "properties": {} }),
+        }
+    }
+
+    #[test]
+    fn plugin_tools_register_uniquely_and_validate() {
+        let tmp = TempDir::new("runtime-ai-tools");
+        let runtime = PluginRuntime::new(tmp.to_path_buf());
+        let mut events = runtime.subscribe_events();
+        runtime
+            .register_tool("com.a.one", "One", tool_params("find_notes", "按关键词找笔记"))
+            .unwrap();
+        assert!(matches!(
+            events.try_recv(),
+            Ok(PluginEvent::AiToolsChanged { id }) if id == "com.a.one"
+        ));
+        let tools = runtime.plugin_tools();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].selection_id(), "plugin:com.a.one:find_notes");
+
+        // 同名跨插件被拒；同插件重复注册原地更新
+        assert!(runtime
+            .register_tool("com.a.two", "Two", tool_params("find_notes", "别的"))
+            .is_err());
+        runtime
+            .register_tool("com.a.one", "One", tool_params("find_notes", "新描述"))
+            .unwrap();
+        assert_eq!(runtime.plugin_tools().len(), 1);
+        assert_eq!(runtime.plugin_tools()[0].description, "新描述");
+
+        // 非法名 / 空描述 / 非对象 schema / 内置工具重名
+        assert!(runtime
+            .register_tool("com.a.one", "One", tool_params("bad name", "x"))
+            .is_err());
+        assert!(runtime
+            .register_tool("com.a.one", "One", tool_params("ok_name", "  "))
+            .is_err());
+        let mut scalar = tool_params("ok_name", "x");
+        scalar.parameters = serde_json::json!("object");
+        assert!(runtime.register_tool("com.a.one", "One", scalar).is_err());
+        assert!(runtime
+            .register_tool("com.a.one", "One", tool_params("read_file", "抢占内置名"))
+            .is_err());
+        assert_eq!(runtime.plugin_tools().len(), 1, "被拒的注册不得留下条目");
+    }
+
+    #[test]
+    fn plugin_tool_unregister_and_clear_are_owner_scoped() {
+        let tmp = TempDir::new("runtime-ai-tools-owner");
+        let runtime = PluginRuntime::new(tmp.to_path_buf());
+        runtime
+            .register_tool("com.a.one", "One", tool_params("tool_one", "一"))
+            .unwrap();
+        runtime
+            .register_tool("com.a.two", "Two", tool_params("tool_two", "二"))
+            .unwrap();
+        assert!(
+            runtime.unregister_tool("com.a.one", "tool_two").is_err(),
+            "不得摘除别的插件的工具"
+        );
+        assert!(runtime.unregister_tool("com.a.two", "tool_two").is_ok());
+        assert!(runtime.unregister_tool("com.a.two", "tool_two").is_err(), "重复摘除报可读错误");
+        assert_eq!(runtime.plugin_tools().len(), 1);
+        runtime.clear_tools_of("com.a.one");
+        assert!(runtime.plugin_tools().is_empty());
     }
 }

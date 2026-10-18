@@ -1,5 +1,5 @@
-//! 插件面板渲染：把 [`ViewNode`] 树解释成 iced 控件（布局容器 / 文本 / 输入 / 按钮 / 列表 / 图片 /
-//! 进度条 / 菜单），按主题 token 取色、按节点声明绑定事件。
+//! 插件面板渲染：把 [`ViewNode`] 树解释成 iced 控件（布局容器 / 文本 / markdown / 输入 / 按钮 /
+//! 列表 / 图片 / 进度条 / 菜单），按主题 token 取色、按节点声明绑定事件。
 //!
 //! 状态与接线（视图 kind 编解码、贡献查询、输入草稿、面树投影、事件回发）在
 //! [`crate::plugin_actions`]；本模块只读 `App` 里的投影缓存，不持运行时锁。
@@ -245,6 +245,19 @@ fn render_node_in<'a>(
             .color(token_color(color.unwrap_or(ColorToken::Text)))
             .width(Length::Fill)
             .into(),
+        NodeBody::Markdown { .. } => {
+            let key = (ctx.plugin_id.clone(), ctx.surface_id.clone(), node.id.clone());
+            match app.plugin_markdown.get(&key) {
+                Some(entry) => crate::markdown_view::document_body_scaled(
+                    &entry.doc,
+                    &app.theme,
+                    &app.note_images,
+                    app.global.soft_wrap,
+                    1.0,
+                ),
+                None => text("").into(),
+            }
+        }
         NodeBody::TextInput { placeholder, multiline, password, .. } => {
             if multiline.unwrap_or(false) {
                 multiline_input(app, ctx, node, placeholder.as_deref().unwrap_or_default())

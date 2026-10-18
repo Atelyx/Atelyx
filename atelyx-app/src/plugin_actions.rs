@@ -109,6 +109,12 @@ pub struct EditorState {
     reported: String,
 }
 
+/// markdown 节点的解析投影：`source` 用于变更比对（源码不变不重解析）。
+pub struct MarkdownNode {
+    pub(crate) source: String,
+    pub(crate) doc: atelyx_core::markdown::MarkdownDocument,
+}
+
 /// 输入节点的值文本（单行取原值、数字按无多余零的十进制；草稿比对与事件回发共用它）。
 pub fn node_value_text(body: &NodeBody) -> Option<String> {
     match body {
@@ -132,12 +138,17 @@ fn is_input(body: &NodeBody) -> bool {
     matches!(body, NodeBody::TextInput { .. } | NodeBody::NumberInput { .. })
 }
 
-/// 数字输入的文本 → 事件值：不可解析为有限数值时不发事件，越界按声明的 min / max 钳制。
+/// 数字输入的文本 → 事件值：清空上报 `Null`（与 0 区分），不可解析为有限数值时不发事件，
+/// 越界按声明的 min / max 钳制。
 pub fn number_event_value(body: &NodeBody, text: &str) -> Option<EventValue> {
     let NodeBody::NumberInput { min, max, .. } = body else {
         return None;
     };
-    let parsed = text.trim().parse::<f64>().ok().filter(|v| v.is_finite())?;
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Some(EventValue::Null);
+    }
+    let parsed = trimmed.parse::<f64>().ok().filter(|v| v.is_finite())?;
     let clamped = min.map_or(parsed, |lo| parsed.max(lo));
     let clamped = max.map_or(clamped, |hi| clamped.min(hi));
     Some(EventValue::Number(clamped))
@@ -283,6 +294,7 @@ pub fn refresh_projection(app: &mut App) -> Task<Message> {
             Some(tree) => {
                 sync_editors(app, &plugin_id, &surface_id, &tree);
                 prune_node_state(app, &plugin_id, &surface_id, &tree);
+                sync_markdown(app, &plugin_id, &surface_id, &tree);
                 app.plugin_trees.insert(key.clone(), tree);
             }
             None => {
@@ -316,6 +328,8 @@ pub fn drop_node_state(app: &mut App, plugin_id: &str, surface_id: &str) {
     app.plugin_editors
         .retain(|key, _| !(key.0 == plugin_id && key.1 == surface_id));
     app.plugin_canvases
+        .retain(|key, _| !(key.0 == plugin_id && key.1 == surface_id));
+    app.plugin_markdown
         .retain(|key, _| !(key.0 == plugin_id && key.1 == surface_id));
 }
 
@@ -371,6 +385,38 @@ fn collect_multiline<'a>(node: &'a ViewNode, out: &mut impl FnMut(&'a str, Strin
     }
 }
 
+/// markdown 节点解析投影同步：源码变化才重解析；树里已移除的节点随面清退。
+fn sync_markdown(app: &mut App, plugin_id: &str, surface_id: &str, tree: &ViewNode) {
+    let mut wanted: Vec<(&str, &str)> = Vec::new();
+    collect_markdown(tree, &mut wanted);
+    let mut alive = HashSet::new();
+    for (node_id, content) in wanted {
+        let key = (plugin_id.to_string(), surface_id.to_string(), node_id.to_string());
+        alive.insert(key.clone());
+        let cached = app.plugin_markdown.get(&key);
+        if cached.is_none_or(|entry| entry.source != content) {
+            app.plugin_markdown.insert(
+                key,
+                MarkdownNode {
+                    source: content.to_string(),
+                    doc: crate::markdown_view::parse_document(content),
+                },
+            );
+        }
+    }
+    app.plugin_markdown
+        .retain(|key, _| key.0 != plugin_id || key.1 != surface_id || alive.contains(key));
+}
+
+fn collect_markdown<'a>(node: &'a ViewNode, out: &mut Vec<(&'a str, &'a str)>) {
+    if let NodeBody::Markdown { content } = &node.body {
+        out.push((node.id.as_str(), content.as_str()));
+    }
+    for child in &node.children {
+        collect_markdown(child, out);
+    }
+}
+
 /// 收集树里的画布节点 id（清单投影按它对齐）。
 fn collect_canvas_nodes(node: &ViewNode, out: &mut Vec<String>) {
     if matches!(node.body, NodeBody::Canvas { .. }) {
@@ -410,6 +456,15 @@ fn safe_private_path(dir: &Path, rel: &str) -> Option<PathBuf> {
 /// 界面图片按需载入：缺句柄且未在途 / 未失败的来源发起读盘或下载任务。
 /// 句柄与笔记图片共用同一缓存（同来源即同字节，键不重叠）。
 fn ensure_images(app: &mut App) -> Task<Message> {
+    // markdown 节点的块级图片走笔记图片同一条载入链（渲染端按 src 取同一句柄表）
+    let markdown_srcs: Vec<String> = app
+        .plugin_markdown
+        .values()
+        .flat_map(|entry| {
+            crate::markdown_view::collect_image_srcs(&entry.doc.source, &entry.doc.blocks)
+        })
+        .collect();
+    app.ensure_image_srcs(markdown_srcs);
     let mut pending: Vec<(String, ImageSource)> = Vec::new();
     for ((plugin_id, _), tree) in &app.plugin_trees {
         let mut sources = Vec::new();
@@ -549,12 +604,36 @@ pub fn on_takeover_request(
 }
 
 /// 退出某窗口的接管（宿主常驻退出入口 / Esc / 窗口关闭随清理）。未在接管中 = 空操作。
+/// 该面没有其他挂载点（布局 / 设置 / 插件窗口 / 接管面 / 文档实例）时一并撤投影并通知插件。
 pub fn exit_takeover(app: &mut App, os_id: window::Id) -> Task<Message> {
-    if app.plugin_takeovers.remove(&os_id).is_some() {
-        // 布局事件（拖拽命中带等）在接管期间被抑制，退出即恢复
-        app.schedule_persist();
+    let Some(entry) = app.plugin_takeovers.remove(&os_id) else {
+        return Task::none();
+    };
+    // 布局事件（拖拽命中带等）在接管期间被抑制，退出即恢复
+    app.schedule_persist();
+    let mounted_elsewhere = app
+        .plugin_surfaces
+        .contains(&(entry.plugin_id.clone(), entry.surface_id.clone()))
+        || app
+            .plugin_settings_surfaces
+            .contains(&(entry.plugin_id.clone(), entry.surface_id.clone()))
+        || app
+            .plugin_windows
+            .values()
+            .any(|w| w.plugin_id == entry.plugin_id && w.window_key == entry.surface_id)
+        || app
+            .plugin_takeovers
+            .values()
+            .any(|t| t.plugin_id == entry.plugin_id && t.surface_id == entry.surface_id)
+        || app.doc_open.as_ref().is_some_and(|doc| {
+            doc.plugin_id == entry.plugin_id && doc.surface_id == entry.surface_id
+        });
+    if !mounted_elsewhere {
+        app.plugins
+            .notify_surface_detached(&entry.plugin_id, &entry.surface_id);
+        drop_node_state(app, &entry.plugin_id, &entry.surface_id);
     }
-    Task::none()
+    refresh_projection(app)
 }
 
 /// 插件开窗请求：校验后建 OS 窗口（重复 id 以可读原因拒绝；窗口参数声明尺寸 / 置顶 /
@@ -1002,7 +1081,8 @@ mod tests {
         assert_eq!(number_event_value(&body, " 4 "), Some(EventValue::Number(4.0)));
         assert_eq!(number_event_value(&body, "0.5"), Some(EventValue::Number(1.0)));
         assert_eq!(number_event_value(&body, "99"), Some(EventValue::Number(10.0)));
-        for bad in ["", "abc", "1e999", "NaN"] {
+        assert_eq!(number_event_value(&body, "   "), Some(EventValue::Null), "清空上报 null");
+        for bad in ["abc", "1e999", "NaN"] {
             assert!(number_event_value(&body, bad).is_none(), "应不发事件：{bad}");
         }
     }

@@ -1,7 +1,7 @@
-//! 端到端测试夹具：握手后发起一轮 AI 对话（`ai` 权限），把收到的最新快照与终态
-//! 写进自持数据——仅供 `ai_chat_e2e` 拉起真实进程验证对话契约链路，非示例插件。
+//! 端到端测试夹具：握手后注册一个回声工具并发起一轮 AI 对话（`ai` 权限），把收到的最新快照
+//! 与终态写进自持数据——仅供 `ai_chat_e2e` 拉起真实进程验证对话与工具桥契约，非示例插件。
 
-use atelyx_plugin_sdk::protocol::method::ChatEventParams;
+use atelyx_plugin_sdk::protocol::method::{ChatEventParams, ToolCallParams};
 use atelyx_plugin_sdk::{run_stdio, Context, PluginHandler, PluginInfo};
 use serde_json::{json, Map, Value};
 use tokio::sync::Mutex as AsyncMutex;
@@ -21,6 +21,23 @@ impl AiStub {
 #[async_trait::async_trait]
 impl PluginHandler for AiStub {
     async fn on_ready(&self, ctx: &Context) {
+        // 工具桥夹具：注册一个回声工具，宿主下发调用时应原样回传 text 参数
+        if let Err(e) = ctx
+            .register_tool(
+                "echo_text",
+                "回传 text 参数（端到端夹具）",
+                json!({
+                    "type": "object",
+                    "properties": { "text": { "type": "string" } },
+                    "required": ["text"]
+                }),
+            )
+            .await
+        {
+            let mut model = self.model.lock().await;
+            model.insert("toolRegisterError".into(), json!(e.message));
+            self.flush_locked(ctx, &mut model).await;
+        }
         let result = ctx.chat_send("你好", None).await;
         let mut model = self.model.lock().await;
         match result {
@@ -33,6 +50,15 @@ impl PluginHandler for AiStub {
             }
         }
         self.flush_locked(ctx, &mut model).await;
+    }
+
+    async fn on_tool_call(&self, ctx: &Context, params: ToolCallParams) {
+        let text = params
+            .arguments
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let _ = ctx.tool_result(&params.call_id, &format!("echo:{text}"), false).await;
     }
 
     async fn on_chat_event(&self, ctx: &Context, params: ChatEventParams) {

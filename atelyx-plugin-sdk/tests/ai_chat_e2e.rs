@@ -88,6 +88,23 @@ fn wait_state(path: &std::path::Path, want: impl Fn(&Value) -> bool) -> Value {
     }
 }
 
+/// 安装并启用 ai-stub（权限 = 自持数据 + 对话 / 工具桥），等到进程运行。
+fn install_ai_stub(runtime: &Arc<PluginRuntime>, tmp: &std::path::Path) -> String {
+    let src = tmp.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        src.join(MANIFEST_FILE),
+        r#"{"id":"com.atelyx.ai-stub","name":"AiStub","version":"1.0.0","apiVersion":2,
+            "entry":{"windows":"plugin.exe","linux":"plugin"},"permissions":["state","ai"]}"#,
+    )
+    .unwrap();
+    std::fs::copy(env!("CARGO_BIN_EXE_ai_stub"), src.join(entry_name())).expect("拷贝入口失败");
+    let id = runtime.install_dir(&src).expect("安装 ai-stub 应成功");
+    runtime.set_enabled(&id, true).expect("启用应成功");
+    wait_status(runtime, &id, Duration::from_secs(20));
+    id
+}
+
 /// 对话契约全链路：插件 send 请求路由到宿主 → 编排起 run（假 SSE 供应商）→
 /// 回执 sessionId/messageId → 快照与终态事件流达插件 → 会话真源含模型回复。
 /// 多线程运行时：run 循环与事件转发是 spawn 的任务，单线程运行时会被轮询阻塞饿死。
@@ -99,20 +116,7 @@ async fn chat_contract_roundtrip_via_plugin() {
     let tmp = TempDir::new("plugin-ai-chat-e2e");
     let root = tmp.join("plugins");
     let runtime = PluginRuntime::new(root.clone());
-
-    // 安装 ai-stub：权限 = state（自持数据）+ ai（对话契约）
-    let src = tmp.join("src");
-    std::fs::create_dir_all(&src).unwrap();
-    std::fs::write(
-        src.join(MANIFEST_FILE),
-        r#"{"id":"com.atelyx.ai-stub","name":"AiStub","version":"1.0.0","apiVersion":1,
-            "entry":{"windows":"plugin.exe","linux":"plugin"},"permissions":["state","ai"]}"#,
-    )
-    .unwrap();
-    std::fs::copy(env!("CARGO_BIN_EXE_ai_stub"), src.join(entry_name())).expect("拷贝入口失败");
-    let id = runtime.install_dir(&src).expect("安装 ai-stub 应成功");
-    runtime.set_enabled(&id, true).expect("启用应成功");
-    wait_status(&runtime, &id, Duration::from_secs(20));
+    let id = install_ai_stub(&runtime, &tmp);
 
     // 会话真源就位（仓库装载 + 一个已存在会话，供 send 路由校验与落盘断言）
     let vault = tmp.join("vault");
@@ -199,13 +203,15 @@ async fn chat_contract_roundtrip_via_plugin() {
                     },
                     search: SearchConfig::default(),
                     exclude: Vec::new(),
+                    plugin_tools: Vec::new(),
+                    plugins: None,
                 },
             )
             .await
         }
     };
     let message_id = start.await.expect("run 启动应成功");
-    runtime.resolve_chat_call(
+    runtime.resolve_shell_call(
         request_id,
         Ok(json!({ "sessionId": session_id, "messageId": message_id })),
     );
@@ -283,4 +289,41 @@ async fn chat_contract_roundtrip_via_plugin() {
 
     // 停用即收尾：在途调用失败收场（此处无在途），进程结束
     runtime.set_enabled(&id, false).expect("停用应成功");
+}
+
+/// 工具桥端到端：插件注册的工具进入宿主名册 → 宿主下发 `host:ai.toolCall` → 插件经
+/// `ai.toolResult` 回填 → 停用后名册摘除。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_bridge_roundtrip_via_plugin() {
+    let tmp = TempDir::new("plugin-ai-tool-e2e");
+    let runtime = PluginRuntime::new(tmp.join("plugins"));
+    let id = install_ai_stub(&runtime, &tmp);
+
+    // on_ready 里注册的工具要等握手完成才进入名册
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let spec = loop {
+        if let Some(spec) = runtime
+            .plugin_tools()
+            .into_iter()
+            .find(|t| t.name == "echo_text")
+        {
+            break spec;
+        }
+        assert!(Instant::now() < deadline, "等待插件注册工具超时");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert_eq!(spec.plugin_id, id);
+    assert_eq!(spec.selection_id(), format!("plugin:{id}:echo_text"));
+    assert!(!spec.description.is_empty());
+    assert!(spec.parameters.is_object());
+
+    let output = runtime
+        .call_tool("echo_text", json!({ "text": "你好" }))
+        .await
+        .expect("插件应回传工具结果");
+    assert_eq!(output.content, "echo:你好");
+    assert!(!output.is_error);
+
+    runtime.set_enabled(&id, false).expect("停用应成功");
+    assert!(runtime.plugin_tools().is_empty(), "停用后工具名册应清空");
 }

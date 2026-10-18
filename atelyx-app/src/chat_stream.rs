@@ -338,7 +338,7 @@ fn tool_block<'a>(ctx: &StreamCtx<'a>, s: &'a Value, key: &str) -> iced::Element
                 icon(tool_icon(&name), 12.0 * ctx.scale, pal::TEXT_MUTED),
                 icon(status_icon, 11.0 * ctx.scale, status_color),
             ],
-            title: crate::settings_view::ai::tool_label(&name).to_string(),
+            title: crate::settings_view::ai::tool_label(&name),
             summary,
             mono_summary: true,
             body: detail,

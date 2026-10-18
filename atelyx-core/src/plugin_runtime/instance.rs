@@ -68,6 +68,9 @@ pub(crate) struct Instance {
     pid: AtomicU64,
     /// 运行令牌：每次启动 / 停止递增，用于丢弃上次启动遗留的进程输出。
     run_token: AtomicU64,
+    /// 会话是否仍活跃：启动成功后置真，停用 / 失败 / 崩溃收尾开始前置假。
+    /// 工具调用登记在资源闸门内复查它，收尾扫表之后到达的登记不再落表（见 [`Instance::with_active_session`]）。
+    session_active: AtomicBool,
     /// 本次启动是否已完成握手（握手截止检查依据）。
     handshaken: AtomicBool,
     status: Mutex<PluginStatus>,
@@ -120,6 +123,7 @@ impl Instance {
             resources: Mutex::new(()),
             pid: AtomicU64::new(0),
             run_token: AtomicU64::new(0),
+            session_active: AtomicBool::new(false),
             handshaken: AtomicBool::new(false),
             status: Mutex::new(PluginStatus::Stopped),
             generation: AtomicU64::new(0),
@@ -233,6 +237,7 @@ impl Instance {
             .spawn(&program, &[], Some(&cwd), None, sink)
             .map_err(|e| format!("启动插件进程失败：{e}"))?;
         self.pid.store(pid as u64, Ordering::SeqCst);
+        self.session_active.store(true, Ordering::SeqCst);
         self.set_status(PluginStatus::Running);
         // 握手截止：到点仍未握手即判失败（进程在跑却永不通信不能被当成正常）
         let watchdog = self.clone();
@@ -247,6 +252,8 @@ impl Instance {
     pub(crate) fn stop(&self) {
         let _guard = self.transition.lock().unwrap();
         self.generation.fetch_add(1, Ordering::SeqCst);
+        // 先作废会话再跑收尾：收尾扫过之后到达的工具调用登记会被闸门拒掉，不能落表等满超时
+        self.session_active.store(false, Ordering::SeqCst);
         self.run_token.fetch_add(1, Ordering::SeqCst);
         self.teardown();
         self.set_status(PluginStatus::Stopped);
@@ -254,6 +261,7 @@ impl Instance {
 
     /// 判定为不可装载 / 握手失败：置 `Failed` 并结束进程（避免僵死连接）。
     fn fail(self: &Arc<Self>, reason: String) {
+        self.session_active.store(false, Ordering::SeqCst);
         self.set_status(PluginStatus::Failed(reason));
         self.run_token.fetch_add(1, Ordering::SeqCst);
         self.teardown();
@@ -291,11 +299,8 @@ impl Instance {
         self.shortcuts.release_plugin(&self.id);
         self.fail_pending_dialogs("插件已停止，对话框已取消");
         self.fail_pending_ui_calls("插件已停止，界面服务请求已取消");
-        self.fail_pending_searches("插件已停止");
-        self.fail_pending_chat_calls("插件已停止，AI 对话请求已取消");
-        if let Some(runtime) = self.runtime.lock().unwrap().upgrade() {
-            runtime.retract_services_of(&self.id);
-        }
+        self.fail_pending_shell_calls("插件已停止，宿主调用已取消");
+        self.release_ai_tools();
         // 界面与贡献变化广播给壳：壳据此停下已停插件界面的渲染并清掉菜单条目
         if surfaces_dropped || canvases_dropped {
             let _ = self.events.send(PluginEvent::ViewSubmitted { id: self.id.clone() });
@@ -321,19 +326,20 @@ impl Instance {
         }
     }
 
-    /// 让等待本插件回结果的在途搜索查询立即失败收场（调用方按单次回落内置处理）。
-    fn fail_pending_searches(&self, reason: &str) {
+    /// 让本插件在途的壳侧服务调用以可读失败收场（等待壳回填的线程不再悬挂）。
+    fn fail_pending_shell_calls(&self, reason: &str) {
         let runtime = self.runtime.lock().unwrap().clone();
         if let Some(runtime) = runtime.upgrade() {
-            runtime.fail_searches_of(&self.id, reason);
+            runtime.fail_shell_calls_of(&self.id, reason);
         }
     }
 
-    /// 让本插件在途的 AI 对话调用以可读失败收场（等待壳回填的线程不再悬挂）。
-    fn fail_pending_chat_calls(&self, reason: &str) {
+    /// 摘除本插件注册的 AI 工具并让在途工具调用以可读失败收场。
+    fn release_ai_tools(&self) {
         let runtime = self.runtime.lock().unwrap().clone();
         if let Some(runtime) = runtime.upgrade() {
-            runtime.fail_chat_calls_of(&self.id, reason);
+            runtime.clear_tools_of(&self.id);
+            runtime.fail_tool_calls_of(&self.id, "插件已停止，工具调用已取消");
         }
     }
 
@@ -354,6 +360,21 @@ impl Instance {
             return Err("插件会话已结束，本次请求已作废".to_string());
         }
         acquire()
+    }
+
+    /// 在资源闸门内复查会话仍活跃后执行一次登记（工具调用待答表落表 + 下发通知）。
+    ///
+    /// 收尾路径先置 [`Instance::session_active`] 为假再取闸门扫表，故本闭包要么先于扫表落表
+    /// （随后被收尾以可读失败收场），要么在扫表之后被拒——不会留下无人认领、只能等满超时的登记。
+    pub(crate) fn with_active_session<T>(
+        &self,
+        register: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        let _gate = self.resources.lock().unwrap();
+        if !self.session_active.load(Ordering::SeqCst) || self.status() != PluginStatus::Running {
+            return Err(format!("插件未运行：{}", self.id));
+        }
+        register()
     }
 
     /// 握手截止检查：令牌已被取代 / 已握手 / 已不在运行态时都不动作。
@@ -433,7 +454,9 @@ impl Instance {
         }
         self.pid.store(0, Ordering::SeqCst);
         // 本次会话就此结束：令牌换代让在途的资源获取请求作废（读线程上一次请求可能正在起子进程 /
-        // 注册热键），再把随它记账的资源收掉——托管服务不能因宿主崩溃而留成孤儿
+        // 注册热键），再把随它记账的资源收掉——托管服务不能因宿主崩溃而留成孤儿。
+        // 先置会话失效再跑收尾：收尾扫过之后到达的工具调用登记不得落表（否则等满调用超时）。
+        self.session_active.store(false, Ordering::SeqCst);
         self.run_token.fetch_add(1, Ordering::SeqCst);
         self.release_resources();
         let count = record_crash(&mut self.crash_times.lock().unwrap(), Instant::now());
@@ -497,12 +520,21 @@ impl Instance {
             self.handle_ui_request(token, id, method, &request.params);
             return;
         }
-        // AI 对话的编排（会话就位 / 配置解析 / run 启动）在壳，结果由壳回填——同为异步应答。
+        // AI 对话编排在壳、剪贴板与仓库读写由壳执行（协作空间经服务端；打开中文件的写保护也只在
+        // 壳侧可知）——这些调用分流为异步应答，结果由回填线程写回，读线程继续消费插件输出。
         if matches!(
             method,
-            method::ai::CHAT_SEND | method::ai::CHAT_STOP | method::ai::CHAT_HISTORY
+            method::ai::CHAT_SEND
+                | method::ai::CHAT_STOP
+                | method::ai::CHAT_HISTORY
+                | method::clipboard::WRITE_TEXT
+                | method::clipboard::READ_TEXT
+                | method::vault::READ_TEXT
+                | method::vault::WRITE_TEXT
+                | method::vault::LIST
+                | method::vault::EXISTS
         ) {
-            self.handle_chat_request(token, id, method, &request.params);
+            self.handle_shell_request(token, id, method, &request.params);
             return;
         }
         match self.dispatch_for_session(token, method, &request.params) {
@@ -599,8 +631,8 @@ impl Instance {
         });
     }
 
-    /// 转发一次 AI 对话调用（send / stop / history）并在独立线程上等壳回填。
-    fn handle_chat_request(
+    /// 转发一次壳侧服务调用（AI 对话 / 剪贴板 / 仓库读写）并在独立线程上等壳回填。
+    fn handle_shell_request(
         self: &Arc<Self>,
         token: u64,
         id: RequestId,
@@ -609,7 +641,7 @@ impl Instance {
     ) {
         let runtime = self.runtime.lock().unwrap().clone();
         let Some(runtime) = runtime.upgrade() else {
-            self.respond(id, None, Some(RpcError::failed("AI 对话服务不可用：宿主运行时不可用")));
+            self.respond(id, None, Some(RpcError::failed("宿主服务不可用：宿主运行时不可用")));
             return;
         };
         let opened = self.with_session(token, || {
@@ -630,9 +662,54 @@ impl Instance {
                     request_id: 0,
                     params: parse(params).map_err(|e| e.to_string())?,
                 },
-                _ => return Err("未知 AI 对话请求".to_string()),
+                method::clipboard::WRITE_TEXT => {
+                    let p: method::TextPayload = parse(params).map_err(|e| e.to_string())?;
+                    HostRequest::ClipboardWrite {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        text: p.text,
+                    }
+                }
+                method::clipboard::READ_TEXT => HostRequest::ClipboardRead {
+                    plugin_id: self.id.clone(),
+                    request_id: 0,
+                },
+                method::vault::READ_TEXT => {
+                    let p: method::PathParams = parse(params).map_err(|e| e.to_string())?;
+                    HostRequest::VaultReadText {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        path: p.path,
+                    }
+                }
+                method::vault::WRITE_TEXT => {
+                    let p: method::WriteTextParams = parse(params).map_err(|e| e.to_string())?;
+                    HostRequest::VaultWriteText {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        path: p.path,
+                        content: p.content,
+                    }
+                }
+                method::vault::LIST => {
+                    let p: method::PathParams = parse(params).map_err(|e| e.to_string())?;
+                    HostRequest::VaultList {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        path: p.path,
+                    }
+                }
+                method::vault::EXISTS => {
+                    let p: method::PathParams = parse(params).map_err(|e| e.to_string())?;
+                    HostRequest::VaultExists {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        path: p.path,
+                    }
+                }
+                _ => return Err("未知宿主服务请求".to_string()),
             };
-            runtime.open_chat_call(request)
+            runtime.open_shell_call(request)
         });
         let rx = match opened {
             Ok(rx) => rx,
@@ -645,46 +722,8 @@ impl Instance {
         std::thread::spawn(move || match rx.recv() {
             Ok(Ok(value)) => instance.respond(id, Some(value), None),
             Ok(Err(reason)) => instance.respond(id, None, Some(RpcError::failed(reason))),
-            Err(_) => instance.respond(id, None, Some(RpcError::failed("AI 对话请求已取消"))),
+            Err(_) => instance.respond(id, None, Some(RpcError::failed("宿主服务请求已取消"))),
         });
-    }
-
-    /// 声明自己实现某服务契约（幂等；候选上岗名单见运行时服务注册簿）。
-    fn on_service_register(self: &Arc<Self>, params: &Value) -> Result<Value, RpcError> {
-        let p: method::ServiceRegisterParams = parse(params)?;
-        let runtime = self.runtime.lock().unwrap().clone();
-        let Some(runtime) = runtime.upgrade() else {
-            return Err(RpcError::failed("服务注册不可用：宿主运行时不可用"));
-        };
-        runtime.declare_service(&self.id, p.contract);
-        Ok(json!({}))
-    }
-
-    /// 撤销服务实现声明；未注册的契约报可读错误。
-    fn on_service_unregister(self: &Arc<Self>, params: &Value) -> Result<Value, RpcError> {
-        let p: method::ServiceRegisterParams = parse(params)?;
-        let runtime = self.runtime.lock().unwrap().clone();
-        let Some(runtime) = runtime.upgrade() else {
-            return Err(RpcError::failed("服务注册不可用：宿主运行时不可用"));
-        };
-        runtime
-            .retract_service(&self.id, p.contract)
-            .map_err(RpcError::failed)?;
-        Ok(json!({}))
-    }
-
-    /// 回一次搜索查询结果：按请求 id 送达等待方；未知 id（已超时回落 / 已取消）静默丢弃。
-    fn on_search_respond(self: &Arc<Self>, params: &Value) -> Result<Value, RpcError> {
-        let p: method::SearchRespondParams = parse(params)?;
-        let runtime = self.runtime.lock().unwrap().clone();
-        if let Some(runtime) = runtime.upgrade() {
-            if let Some(error) = p.error {
-                runtime.resolve_search(p.request_id, Err(error));
-            } else {
-                runtime.resolve_search(p.request_id, Ok(p.results));
-            }
-        }
-        Ok(json!({}))
     }
 
     /// 分派一条请求（当前会话）——测试与不关心会话身份的调用走这条。
@@ -706,9 +745,6 @@ impl Instance {
             method::view::REGISTER => self.on_register(token, params),
             method::view::UNREGISTER => self.on_unregister(token, params),
             method::canvas::SUBMIT => self.on_canvas_submit(token, params),
-            method::service::REGISTER => self.on_service_register(params),
-            method::service::UNREGISTER => self.on_service_unregister(params),
-            method::search::RESPOND => self.on_search_respond(params),
             method::state::READ => {
                 let json = capability::read_state(&self.state_dir).map_err(RpcError::failed)?;
                 Ok(json!({ "json": json }))
@@ -824,9 +860,44 @@ impl Instance {
             method::dialog::PICK_FILE | method::dialog::PICK_DIRECTORY => {
                 Err(RpcError::failed("对话框请求须走异步应答路径"))
             }
-            // AI 对话走异步应答（见 handle_request 的分流），不经此处同步应答
-            method::ai::CHAT_SEND | method::ai::CHAT_STOP | method::ai::CHAT_HISTORY => {
-                Err(RpcError::failed("AI 对话请求须走异步应答路径"))
+            // AI 工具注册与回报：登记 / 摘除在会话闸门内，收尾跑完之后到达的迟到请求不得复活工具
+            method::ai::REGISTER_TOOL => {
+                let p: method::RegisterToolParams = parse(params)?;
+                let runtime = self.runtime_upgrade()?;
+                self.with_session(token, || {
+                    runtime.register_tool(&self.id, &self.manifest.name, p)
+                })
+                .map_err(RpcError::failed)?;
+                Ok(json!({}))
+            }
+            method::ai::UNREGISTER_TOOL => {
+                let p: method::UnregisterToolParams = parse(params)?;
+                let runtime = self.runtime_upgrade()?;
+                self.with_session(token, || runtime.unregister_tool(&self.id, &p.name))
+                    .map_err(RpcError::failed)?;
+                Ok(json!({}))
+            }
+            method::ai::TOOL_RESULT => {
+                let p: method::ToolResultParams = parse(params)?;
+                self.runtime_upgrade()?.resolve_tool_result(
+                    &self.id,
+                    &p.call_id,
+                    p.content,
+                    p.is_error,
+                );
+                Ok(json!({}))
+            }
+            // AI 对话 / 剪贴板 / 仓库读写走异步应答（见 handle_request 的分流），不经此处同步应答
+            method::ai::CHAT_SEND
+            | method::ai::CHAT_STOP
+            | method::ai::CHAT_HISTORY
+            | method::clipboard::WRITE_TEXT
+            | method::clipboard::READ_TEXT
+            | method::vault::READ_TEXT
+            | method::vault::WRITE_TEXT
+            | method::vault::LIST
+            | method::vault::EXISTS => {
+                Err(RpcError::failed("宿主服务请求须走异步应答路径"))
             }
             // 已声明但尚未实现的能力面：以可读失败收场，不静默成功
             other if capability::permission_for(other).is_some() => {
@@ -1112,12 +1183,6 @@ impl Instance {
         self.notify(method::window::HOST_CLOSED, &params);
     }
 
-    /// 下发一次搜索查询（`host:search.query`）；结果由插件经 `search.respond` 请求回填。
-    pub(crate) fn notify_search_query(&self, request_id: u64, query: &str) {
-        let params = method::SearchQueryParams { request_id, query: query.to_string() };
-        self.notify(method::search::HOST_QUERY, &params);
-    }
-
     /// 向插件发一条宿主通知（`host:` 前缀方法）。进程未在跑时静默丢弃（对端已不在）。
     fn notify(&self, method_name: &str, params: &impl Serialize) {
         let params = match serde_json::to_value(params) {
@@ -1128,6 +1193,25 @@ impl Instance {
             }
         };
         self.write_envelope(Envelope::notification(method_name, params), "通知");
+    }
+
+    /// 取宿主运行时的强引用（弱引用失效 = 宿主已销毁）。
+    fn runtime_upgrade(&self) -> Result<Arc<PluginRuntime>, RpcError> {
+        self.runtime
+            .lock()
+            .unwrap()
+            .upgrade()
+            .ok_or_else(|| RpcError::failed("宿主运行时不可用"))
+    }
+
+    /// 下发一次 AI 工具调用（`host:ai.toolCall`）；插件须用同一 `callId` 经 `ai.toolResult` 回报。
+    pub(crate) fn notify_tool_call(&self, call_id: &str, name: &str, arguments: Value) {
+        let params = method::ToolCallParams {
+            call_id: call_id.to_string(),
+            name: name.to_string(),
+            arguments,
+        };
+        self.notify(method::ai::HOST_TOOL_CALL, &params);
     }
 
     fn record_denied(&self, method: &str, params: &Value) {
@@ -1255,7 +1339,7 @@ mod tests {
     use atelyx_plugin_protocol::view::NodeBody;
 
     #[allow(unused_imports)]
-    use super::super::{HostRequest, ServiceContract};
+    use super::super::HostRequest;
 
     /// 构造一个不落进程的实例（`entry` 留空：单元测试只驱动请求分派与状态，不启动进程）。
     fn make_instance(permissions: Vec<Permission>) -> (TempDir, Arc<Instance>) {
@@ -1388,42 +1472,6 @@ mod tests {
     }
 
     #[test]
-    fn service_declarations_roundtrip_through_instance() {
-        let tmp = TempDir::new("instance-service");
-        let runtime = PluginRuntime::new(tmp.to_path_buf());
-        let (_t, instance) = make_instance(Vec::new());
-        instance.attach_runtime(&runtime);
-
-        instance
-            .dispatch(method::service::REGISTER, &json!({ "contract": "webSearch" }))
-            .expect("服务声明应成功");
-        assert_eq!(
-            runtime.service_candidates(ServiceContract::WebSearch),
-            vec!["com.example.demo".to_string()]
-        );
-        instance
-            .dispatch(method::service::REGISTER, &json!({ "contract": "webSearch" }))
-            .expect("重复声明应幂等成功");
-        assert_eq!(runtime.service_candidates(ServiceContract::WebSearch).len(), 1);
-
-        instance
-            .dispatch(method::service::UNREGISTER, &json!({ "contract": "webSearch" }))
-            .expect("撤销声明应成功");
-        assert!(runtime.service_candidates(ServiceContract::WebSearch).is_empty());
-        assert!(
-            instance
-                .dispatch(method::service::UNREGISTER, &json!({ "contract": "webSearch" }))
-                .is_err(),
-            "未声明的契约撤销应报可读错误"
-        );
-
-        // 随会话收尾自动摘除
-        instance.dispatch(method::service::REGISTER, &json!({ "contract": "webSearch" })).unwrap();
-        instance.stop();
-        assert!(runtime.service_candidates(ServiceContract::WebSearch).is_empty());
-    }
-
-    #[test]
     fn takeover_and_window_requests_route_to_shell_and_resolve() {
         let tmp = TempDir::new("instance-ui-request");
         let runtime = PluginRuntime::new(tmp.to_path_buf());
@@ -1499,7 +1547,7 @@ mod tests {
             panic!("应投递对话发送请求");
         };
         assert_eq!(params.text, "你好");
-        runtime.resolve_chat_call(request_id, Ok(json!({ "sessionId": "s1", "messageId": "m1" })));
+        runtime.resolve_shell_call(request_id, Ok(json!({ "sessionId": "s1", "messageId": "m1" })));
 
         instance.handle_line(&request_line(method::ai::CHAT_STOP, &json!({ "sessionId": "s1" })));
         let request = rt.block_on(runtime.recv_host_request()).unwrap();
@@ -1507,7 +1555,7 @@ mod tests {
             panic!("应投递对话中断请求");
         };
         assert_eq!(params.session_id, "s1");
-        runtime.resolve_chat_call(request_id, Ok(json!({})));
+        runtime.resolve_shell_call(request_id, Ok(json!({})));
 
         instance.handle_line(&request_line(method::ai::CHAT_HISTORY, &json!({ "sessionId": "s1" })));
         let request = rt.block_on(runtime.recv_host_request()).unwrap();
@@ -1515,17 +1563,85 @@ mod tests {
             panic!("应投递历史读取请求");
         };
         assert_eq!(params.session_id.as_deref(), Some("s1"));
-        runtime.resolve_chat_call(request_id, Err("会话 s1 不存在".to_string()));
+        runtime.resolve_shell_call(request_id, Err("会话 s1 不存在".to_string()));
+    }
+
+    /// 剪贴板与仓库读写路由到壳：request 落到宿主通道，结果经统一回填接口送回。
+    #[test]
+    fn clipboard_and_vault_requests_route_to_shell_and_resolve() {
+        let tmp = TempDir::new("instance-shell-request");
+        let runtime = PluginRuntime::new(tmp.to_path_buf());
+        let (_t, instance) = make_instance(vec![Permission::Clipboard, Permission::Vault]);
+        instance.attach_runtime(&runtime);
+        runtime
+            .instances
+            .lock()
+            .unwrap()
+            .insert("com.example.demo".to_string(), instance.clone());
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        instance.handle_line(&request_line(method::clipboard::READ_TEXT, &Value::Null));
+        let request = rt.block_on(runtime.recv_host_request()).unwrap();
+        let HostRequest::ClipboardRead { request_id, .. } = request else {
+            panic!("应投递剪贴板读取请求");
+        };
+        runtime.resolve_shell_call(request_id, Ok(json!({ "text": "hi" })));
+
+        instance.handle_line(&request_line(method::clipboard::WRITE_TEXT, &json!({ "text": "hi" })));
+        let request = rt.block_on(runtime.recv_host_request()).unwrap();
+        let HostRequest::ClipboardWrite { request_id, text, .. } = request else {
+            panic!("应投递剪贴板写入请求");
+        };
+        assert_eq!(text, "hi");
+        runtime.resolve_shell_call(request_id, Ok(json!({})));
+
+        instance.handle_line(&request_line(method::vault::READ_TEXT, &json!({ "path": "a.md" })));
+        let request = rt.block_on(runtime.recv_host_request()).unwrap();
+        let HostRequest::VaultReadText { request_id, path, .. } = request else {
+            panic!("应投递仓库读取请求");
+        };
+        assert_eq!(path, "a.md");
+        runtime.resolve_shell_call(request_id, Ok(json!({ "content": "正文" })));
+
+        instance.handle_line(&request_line(
+            method::vault::WRITE_TEXT,
+            &json!({ "path": "a.md", "content": "正文" }),
+        ));
+        let request = rt.block_on(runtime.recv_host_request()).unwrap();
+        let HostRequest::VaultWriteText { request_id, path, content, .. } = request else {
+            panic!("应投递仓库写入请求");
+        };
+        assert_eq!((path.as_str(), content.as_str()), ("a.md", "正文"));
+        runtime.resolve_shell_call(request_id, Ok(json!({})));
+
+        instance.handle_line(&request_line(method::vault::LIST, &json!({ "path": "" })));
+        let request = rt.block_on(runtime.recv_host_request()).unwrap();
+        let HostRequest::VaultList { request_id, path, .. } = request else {
+            panic!("应投递目录列举请求");
+        };
+        assert_eq!(path, "");
+        runtime.resolve_shell_call(request_id, Ok(json!({ "entries": [] })));
+
+        instance.handle_line(&request_line(method::vault::EXISTS, &json!({ "path": "a.md" })));
+        let request = rt.block_on(runtime.recv_host_request()).unwrap();
+        let HostRequest::VaultExists { request_id, path, .. } = request else {
+            panic!("应投递存在性请求");
+        };
+        assert_eq!(path, "a.md");
+        runtime.resolve_shell_call(request_id, Ok(json!({ "exists": true })));
     }
 
     #[test]
-    fn declared_but_unimplemented_capability_fails() {
+    fn shell_routed_capabilities_reject_synchronous_dispatch() {
         let (_tmp, instance) = make_instance(vec![Permission::Clipboard]);
         let error = instance
             .dispatch(method::clipboard::READ_TEXT, &Value::Null)
-            .expect_err("已声明但未实现的能力面应返回失败");
+            .expect_err("剪贴板调用必须走异步应答路径");
         assert_eq!(error.code, RpcError::FAILED);
-        assert!(error.message.contains("尚未实现"), "{}", error.message);
+        assert!(error.message.contains("异步应答"), "{}", error.message);
     }
 
     /// 各能力面「未声明被拒」：闸门只认 manifest 声明，未声明一律 fail-closed 且记审计。
@@ -1901,5 +2017,103 @@ mod tests {
 
         instance.stop();
         assert!(instance.surface_canvas("main", "board").is_none(), "收尾后清单应清空");
+    }
+
+    /// 等在途工具调用落表（发起任务被调度后才登记）。
+    async fn wait_call_id(runtime: &PluginRuntime) -> String {
+        for _ in 0..100 {
+            if let Some(id) = runtime.tool_calls.lock().unwrap().keys().next() {
+                return id.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("工具调用未在预期时间内登记");
+    }
+
+    #[tokio::test]
+    async fn ai_tool_registration_and_call_roundtrip() {
+        let tmp = TempDir::new("instance-ai-tool");
+        let runtime = PluginRuntime::new(tmp.to_path_buf());
+        let (_t, instance) = make_instance(vec![Permission::Ai]);
+        instance.attach_runtime(&runtime);
+        instance.set_status(PluginStatus::Running);
+        instance.session_active.store(true, Ordering::SeqCst);
+        runtime
+            .instances
+            .lock()
+            .unwrap()
+            .insert(instance.id.clone(), instance.clone());
+
+        instance
+            .dispatch(
+                method::ai::REGISTER_TOOL,
+                &json!({
+                    "name": "find_notes",
+                    "description": "按关键词搜索仓库笔记",
+                    "parameters": { "type": "object", "properties": { "q": { "type": "string" } } }
+                }),
+            )
+            .expect("注册应成功");
+        assert_eq!(runtime.plugin_tools().len(), 1);
+
+        let call = tokio::spawn({
+            let runtime = runtime.clone();
+            async move { runtime.call_tool("find_notes", json!({ "q": "周报" })).await }
+        });
+        let call_id = wait_call_id(&runtime).await;
+        instance
+            .dispatch(
+                method::ai::TOOL_RESULT,
+                &json!({ "callId": call_id, "content": "命中 2 条", "isError": false }),
+            )
+            .expect("结果回报应成功");
+        let output = call.await.unwrap().expect("调用应拿到插件回传");
+        assert_eq!(output.content, "命中 2 条");
+        assert!(!output.is_error);
+
+        // 停用：工具随会话摘除，在途调用以可读失败收场
+        let pending = tokio::spawn({
+            let runtime = runtime.clone();
+            async move { runtime.call_tool("find_notes", json!({})).await }
+        });
+        let _ = wait_call_id(&runtime).await;
+        instance.stop();
+        assert!(runtime.plugin_tools().is_empty(), "停用后工具必须摘除");
+        assert_eq!(pending.await.unwrap().unwrap_err(), "插件已停止，工具调用已取消");
+    }
+
+    /// 工具调用登记在资源闸门内复查会话活跃：会话已失效时立即可读失败，不落表等满调用超时。
+    #[tokio::test]
+    async fn tool_call_is_refused_once_session_is_inactive() {
+        let tmp = TempDir::new("instance-ai-tool-session");
+        let runtime = PluginRuntime::new(tmp.to_path_buf());
+        let (_t, instance) = make_instance(vec![Permission::Ai]);
+        instance.attach_runtime(&runtime);
+        instance.set_status(PluginStatus::Running);
+        instance.session_active.store(true, Ordering::SeqCst);
+        runtime
+            .instances
+            .lock()
+            .unwrap()
+            .insert(instance.id.clone(), instance.clone());
+        instance
+            .dispatch(
+                method::ai::REGISTER_TOOL,
+                &json!({
+                    "name": "find_notes",
+                    "description": "按关键词搜索仓库笔记",
+                    "parameters": { "type": "object", "properties": { "q": { "type": "string" } } }
+                }),
+            )
+            .expect("注册应成功");
+
+        // 仅作废会话（状态仍是 Running）：模拟收尾已开始、在途调用到达的那一瞬
+        instance.session_active.store(false, Ordering::SeqCst);
+        let error = runtime
+            .call_tool("find_notes", json!({ "q": "周报" }))
+            .await
+            .expect_err("会话失效后不得再登记工具调用");
+        assert!(error.contains("插件未运行"), "{error}");
+        assert!(runtime.tool_calls.lock().unwrap().is_empty(), "被拒的调用不得落表");
     }
 }

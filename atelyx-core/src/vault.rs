@@ -495,13 +495,13 @@ fn validate_relative_path(file: &str) -> Result<PathBuf, String> {
     Ok(clean)
 }
 
-/// AI 工具路径校验：在通用相对路径校验之上拒绝隐藏段（`.atelyx` / `.git` 等——仓库配置与
-/// 密钥所在处不对模型开放），返回以 `/` 分隔的净化相对路径（空间端点直接使用该形态）。
-pub fn validate_ai_path(rel: &str) -> Result<String, String> {
+/// 外部工具路径校验：在通用相对路径校验之上拒绝隐藏段（`.atelyx` / `.git` 等——仓库配置与
+/// 密钥所在处不对插件与 AI 工具开放），返回以 `/` 分隔的净化相对路径（空间端点直接使用该形态）。
+pub fn validate_tool_path(rel: &str) -> Result<String, String> {
     let clean = validate_relative_path(rel)?;
     let text = clean.to_string_lossy().replace('\\', "/");
     if has_hidden_segment(&text) {
-        return Err(format!("路径不可访问（隐藏目录不对 AI 工具开放）：{rel}"));
+        return Err(format!("路径不可访问（隐藏目录不对插件与 AI 工具开放）：{rel}"));
     }
     Ok(text)
 }

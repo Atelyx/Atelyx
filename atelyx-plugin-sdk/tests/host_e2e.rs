@@ -26,7 +26,7 @@ fn make_plugin(dir: &std::path::Path, id: &str, exe: &str, extra: &str) {
     std::fs::write(
         dir.join(MANIFEST_FILE),
         format!(
-            r#"{{"id":"{id}","name":"Fixture","version":"1.0.0","apiVersion":1,
+            r#"{{"id":"{id}","name":"Fixture","version":"1.0.0","apiVersion":2,
                 "entry":{{"windows":"plugin.exe","linux":"plugin"}},"permissions":["state"]{extra}}}"#
         ),
     )
@@ -348,34 +348,4 @@ fn vault_switch_keeps_mounted_subscriber_informed() {
 
     // 保活即不重载：界面提交次数仍是 on_ready 那一次
     assert_eq!(submits_of(&runtime, &id), 1, "声明保活的插件不应被重载");
-}
-
-/// 服务接管往返：插件声明契约 → 指定上岗 → 查询经 `host:search.query` 下发、
-/// 结果经 `search.respond` 回填等待方（真实进程覆盖宿主→插件通知与插件→宿主请求两条新路径）。
-#[tokio::test]
-async fn search_provider_roundtrip_via_plugin() {
-    let (_tmp, runtime, id, _state) = install_ready_stub(false);
-    assert!(
-        runtime
-            .service_candidates(atelyx_core::plugin_runtime::ServiceContract::WebSearch)
-            .iter()
-            .any(|candidate| candidate == &id),
-        "stub 握手后应已声明搜索契约"
-    );
-
-    runtime.set_search_provider(Some(id.clone()));
-    let builtin = atelyx_core::plugin_runtime::BuiltinSearchConfig {
-        provider: "unknown-provider".into(),
-        ..Default::default()
-    };
-    let results = runtime.web_search("模型", &builtin).await.expect("插件上岗时应回结果");
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].title, "stub-result");
-    assert_eq!(results[0].snippet, "模型");
-
-    // 摘除岗位：声明撤销后同一次调用走内置分发（stub 场景内置源未知 = 可读失败）
-    runtime.retract_service(&id, atelyx_core::plugin_runtime::ServiceContract::WebSearch)
-        .expect("撤销声明应成功");
-    let err = runtime.web_search("q", &builtin).await.unwrap_err();
-    assert!(err.contains("未知搜索源"), "未上岗时应走内置路径：{err}");
 }

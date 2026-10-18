@@ -1081,6 +1081,8 @@ pub struct App {
     /// 画布节点的最新绘图指令清单投影（键 = 插件 id + 面 id + 节点 id；随树投影刷新）。
     pub plugin_canvases:
         HashMap<plugin_actions::InputKey, std::sync::Arc<Vec<atelyx_core::plugin_runtime::DrawCommand>>>,
+    /// markdown 节点的解析投影（键 = 插件 id + 面 id + 节点 id；源码不变不重解析）。
+    pub plugin_markdown: HashMap<plugin_actions::InputKey, plugin_actions::MarkdownNode>,
     /// 各窗口的接管态（键 = OS 窗口 id；布局真源不动，退出即恢复）。
     pub plugin_takeovers: HashMap<window::Id, plugin_actions::TakeoverActive>,
     /// 插件窗口记账（键 = OS 窗口 id；随窗口关闭 / 插件停用收尾）。
@@ -1226,7 +1228,7 @@ pub struct App {
     pub note_images: markdown_view::ImageHandles,
     note_images_inflight: HashSet<String>,
     note_images_failed: HashSet<String>,
-    /// ensure_note_images 收集的载入任务（update 收尾统一 chain，调用点不必逐个穿 Task）。
+    /// ensure_image_srcs 收集的载入任务（update 收尾统一 chain，调用点不必逐个穿 Task）。
     image_loads: Option<Task<Message>>,
     /// 防抖落盘：有未写盘的模型变更。
     persist_dirty: bool,
@@ -1385,8 +1387,6 @@ impl App {
             .unwrap_or_else(|| std::env::temp_dir().join("atelyx-plugins"));
         let plugins = PluginRuntime::new(plugins_root);
         let (global, global_notice) = load_global_boot();
-        // 搜索提供方上岗者随配置恢复（插件未声明契约时调用侧自动回落内置）
-        plugins.set_search_provider(global.search_provider.clone());
         // 市场索引缓存落应用数据目录根（与 plugins/ 平级；目录不可用 = 不缓存）
         let market_cache_path = app_data_dir().map(|d| d.join("market-cache.json"));
         // 界面基准字号随配置（缺字段走默认档；越界钳回合法区间）
@@ -1460,6 +1460,7 @@ impl App {
                 plugin_drafts: HashMap::new(),
                 plugin_editors: HashMap::new(),
                 plugin_canvases: HashMap::new(),
+                plugin_markdown: HashMap::new(),
                 plugin_takeovers: HashMap::new(),
                 plugin_windows: HashMap::new(),
                 doc_open: None,
@@ -1674,7 +1675,7 @@ impl App {
 
     fn update(&mut self, message: Message) -> Task<Message> {
         let task = self.handle(message);
-        // 图片载入任务由 ensure_note_images 收集、此处统一链出（调用点无需穿 Task）
+        // 图片载入任务由 ensure_image_srcs 收集、此处统一链出（调用点无需穿 Task）
         let task = match self.image_loads.take() {
             Some(loads) => task.chain(loads),
             None => task,
@@ -1740,7 +1741,7 @@ impl App {
                     self.detached_os.remove(&id);
                     self.os_shown.remove(&id);
                     // 被接管窗口的接管条目随窗口消失（防悬挂：插件重启不再向死面重发 attached）
-                    let _ = plugin_actions::exit_takeover(self, id);
+                    let takeover_task = plugin_actions::exit_takeover(self, id);
                     if self.focused_window == Some(id) {
                         self.focused_window = None;
                     }
@@ -1750,7 +1751,7 @@ impl App {
                     if self.tooltip.as_ref().is_some_and(|(w, _, _, _, _, _)| *w == id) {
                         self.tooltip = None;
                     }
-                    Task::none()
+                    takeover_task
                 }
             }
             Message::PickVault => self.gate(PendingAfterFlush::PickVault),
@@ -5686,10 +5687,15 @@ impl App {
         self.edit_doc = Some(doc);
     }
 
-    /// 文档内块级图片的按需载入：缺句柄且未在途/未失败的 src 发起读盘（仓库相对路径）或
-    /// 公网策略下载（http/https）任务，任务经 update 收尾统一链出。失败不重试（失败集）。
+    /// 文档内块级图片的按需载入（src 取自 `markdown_view::collect_image_srcs`）。
     fn ensure_note_images(&mut self, doc: &MarkdownDocument) {
         let srcs = markdown_view::collect_image_srcs(&doc.source, &doc.blocks);
+        self.ensure_image_srcs(srcs);
+    }
+
+    /// 一组图片 src 的按需载入：缺句柄且未在途/未失败的 src 发起读盘（仓库相对路径）或
+    /// 公网策略下载（http/https）任务，任务经 update 收尾统一链出。失败不重试（失败集）。
+    pub(crate) fn ensure_image_srcs(&mut self, srcs: Vec<String>) {
         if srcs.is_empty() {
             return;
         }

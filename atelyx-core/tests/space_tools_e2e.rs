@@ -235,6 +235,8 @@ fn space_ctx(server_url: &str) -> ToolCtx {
         repo: RepoAccess::Space { client, space_id: "s1".to_string() },
         search: atelyx_core::ai::tools::SearchConfig::default(),
         exclude: Vec::new(),
+        plugin_tools: Vec::new(),
+        plugins: None,
     }
 }
 

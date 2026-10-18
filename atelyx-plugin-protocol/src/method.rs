@@ -31,13 +31,6 @@ pub mod window {
     pub const HOST_CLOSED: &str = "host:window.closed";
 }
 
-pub mod service {
-    /// 插件声明自己实现某服务契约，进入该契约的候选上岗名单（上岗与否由用户指定）。
-    pub const REGISTER: &str = "service.register";
-    /// 插件撤销自己的服务实现声明。
-    pub const UNREGISTER: &str = "service.unregister";
-}
-
 pub mod fs {
     pub const PRIVATE_DIR: &str = "fs.privateDir";
     pub const READ_TEXT: &str = "fs.readText";
@@ -56,6 +49,15 @@ pub mod process {
     pub const KILL: &str = "process.kill";
     /// 托管进程的输出与退出（通知）。
     pub const HOST_EVENT: &str = "host:process.event";
+}
+
+/// 当前激活仓库的按路径读写（`path` 为相对仓库根的路径）。协作空间模式下同一能力面
+/// 由宿主转发到服务端，插件不感知容器类型。
+pub mod vault {
+    pub const READ_TEXT: &str = "vault.readText";
+    pub const WRITE_TEXT: &str = "vault.writeText";
+    pub const LIST: &str = "vault.list";
+    pub const EXISTS: &str = "vault.exists";
 }
 
 pub mod state {
@@ -96,13 +98,6 @@ pub mod doc {
     pub const HOST_CLOSE: &str = "host:doc.close";
 }
 
-pub mod search {
-    /// 宿主向已上岗的插件搜索提供方发起一次查询（通知）；插件以 [`RESPOND`] 请求回结果。
-    pub const HOST_QUERY: &str = "host:search.query";
-    /// 插件回一次查询结果（插件→宿主请求）；`error` 非空 = 本次查询失败。
-    pub const RESPOND: &str = "search.respond";
-}
-
 pub mod canvas {
     /// 插件提交一份绘图指令清单到某个画布节点。宿主合帧应用（渲染每帧只取最新一份）。
     pub const SUBMIT: &str = "canvas.submit";
@@ -119,6 +114,14 @@ pub mod ai {
     pub const CHAT_HISTORY: &str = "ai.chat.history";
     /// 对话事件流（通知）：快照节流拍 + 终态 + 命名结果。
     pub const HOST_CHAT_EVENT: &str = "host:ai.chat.event";
+    /// 注册一个可被 Agent 调用的工具（名称全局唯一，不得与内置工具或其他插件的工具重名）。
+    pub const REGISTER_TOOL: &str = "ai.registerTool";
+    /// 撤销自己注册的工具（未注册的名称报可读错误）。
+    pub const UNREGISTER_TOOL: &str = "ai.unregisterTool";
+    /// 回报一次工具调用结果（`callId` 原样带回宿主下发值）。
+    pub const TOOL_RESULT: &str = "ai.toolResult";
+    /// 宿主请求插件执行一次工具调用（通知）；插件处理完经 [`TOOL_RESULT`] 回报。
+    pub const HOST_TOOL_CALL: &str = "host:ai.toolCall";
 }
 
 // ---------- view / surface ----------
@@ -245,23 +248,6 @@ pub struct WindowClosedParams {
     pub id: String,
 }
 
-/// 服务契约（封闭枚举；扩容随协议升版）。每个契约定义宿主与插件间的调用形态。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum ServiceContract {
-    /// 网页搜索提供方：宿主经 [`search::HOST_QUERY`] 下发查询，插件经 [`search::RESPOND`] 回结果
-    /// （与内置 Tavily / SearXNG 的结果同构）。
-    WebSearch,
-}
-
-/// `service.register` / `service.unregister` 的 params：声明或撤销自己实现某契约。
-/// 注册是声明不是上岗——是否上岗由用户在设置页指定；停用 / 崩溃 / 卸载随会话收尾自动摘除声明。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ServiceRegisterParams {
-    pub contract: ServiceContract,
-}
-
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ViewEventParams {
@@ -288,7 +274,8 @@ pub struct PrivateDirResult {
     pub path: String,
 }
 
-/// `path` 一律绝对路径。信任模型与进程托管一致：插件本就是任意权限的用户进程，
+/// `path` 的口径由能力面决定：`fs` 用绝对路径，`vault` 用相对仓库根的路径。
+/// 信任模型与进程托管一致：插件本就是任意权限的用户进程，
 /// 声明式权限是透明度机制而非沙箱边界；`fs` 服务的价值在统一出口与审计事实。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -540,38 +527,6 @@ pub struct DocCloseParams {
     pub path: String,
 }
 
-// ---------- search ----------
-
-/// 一条搜索结果（与内置 Tavily / SearXNG 提供方的结果同构）。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SearchResult {
-    pub title: String,
-    pub url: String,
-    pub snippet: String,
-}
-
-/// [`search::HOST_QUERY`] 的 params（宿主 → 插件通知）。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SearchQueryParams {
-    /// 查询标识：插件经 [`search::RESPOND`] 回结果时原样带回。
-    pub request_id: u64,
-    pub query: String,
-}
-
-/// [`search::RESPOND`] 的 params（插件 → 宿主请求）。`error` 非空 = 本次查询失败
-/// （宿主按单次回落内置处理），此时 `results` 为空。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SearchRespondParams {
-    pub request_id: u64,
-    #[serde(default)]
-    pub results: Vec<SearchResult>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
-
 // ---------- ai ----------
 
 /// [`ai::CHAT_SEND`] 的 params：`session_id` 缺省 = 新建会话；非缺省 = 在该会话续聊
@@ -645,6 +600,42 @@ pub struct ChatHistoryResult {
     pub session: Option<ChatSessionWire>,
 }
 
+/// [`ai::REGISTER_TOOL`] 的 params：`name` 为模型可见的工具名（字母 / 数字 / `_` / `-`，
+/// 最长 64 字符），`parameters` 为 JSON Schema 对象。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegisterToolParams {
+    pub name: String,
+    pub description: String,
+    pub parameters: Value,
+}
+
+/// [`ai::UNREGISTER_TOOL`] 的 params。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnregisterToolParams {
+    pub name: String,
+}
+
+/// [`ai::HOST_TOOL_CALL`] 的 params：插件须用同一 `callId` 经 [`ai::TOOL_RESULT`] 回报。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolCallParams {
+    pub call_id: String,
+    pub name: String,
+    pub arguments: Value,
+}
+
+/// [`ai::TOOL_RESULT`] 的 params：`content` 即模型可见结果文本。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolResultParams {
+    pub call_id: String,
+    pub content: String,
+    #[serde(default)]
+    pub is_error: bool,
+}
+
 /// [`ai::HOST_CHAT_EVENT`] 的 params：载荷按 [`ChatEvent`] 分型。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -680,7 +671,6 @@ mod tests {
         assert_eq!(serde_json::to_value(SurfaceKind::Settings).unwrap(), "settings");
         assert_eq!(serde_json::to_value(TakeoverScope::Page).unwrap(), "page");
         assert_eq!(serde_json::to_value(TakeoverScope::Full).unwrap(), "full");
-        assert_eq!(serde_json::to_value(ServiceContract::WebSearch).unwrap(), "webSearch");
         let kind: SurfaceKind = serde_json::from_value(serde_json::json!("settings")).unwrap();
         assert_eq!(kind, SurfaceKind::Settings);
         let slot: ContributionSlot = serde_json::from_value(serde_json::json!("settings")).unwrap();

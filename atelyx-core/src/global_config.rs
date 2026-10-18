@@ -105,9 +105,6 @@ pub struct GlobalConfig {
     /// 命令键位覆盖（键 = 命令 id，值 = 键串；缺项用默认表）。
     #[serde(default)]
     pub command_shortcuts: HashMap<String, String>,
-    /// 搜索提供方上岗插件 id（`None` = 内置 Tavily / SearXNG；插件未声明契约时调用回落内置）。
-    #[serde(default)]
-    pub search_provider: Option<String>,
 }
 
 impl Default for GlobalConfig {
@@ -128,7 +125,6 @@ impl Default for GlobalConfig {
             in_page_title: false,
             content_width: DEFAULT_CONTENT_WIDTH,
             command_shortcuts: HashMap::new(),
-            search_provider: None,
         }
     }
 }

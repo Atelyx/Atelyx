@@ -7,8 +7,9 @@ use atelyx_plugin_protocol::handshake::{self, InitializeParams, InitializeResult
 use atelyx_plugin_protocol::method::{
     CanvasSubmitParams, DocCloseParams, DocOpenParams, HttpRequestParams, HttpResult, ListResult,
     PathParams, PickFileParams, PickedPath, ProcessEventParams, RegisterParams,
-    RegisterShortcutParams, SearchQueryParams, SearchRespondParams, ServiceRegisterParams,
-    ShowNotificationParams, SurfaceAttachedParams, TakeoverParams, TextPayload, UnregisterParams,
+    RegisterShortcutParams, RegisterToolParams,
+    ShowNotificationParams, SurfaceAttachedParams, TakeoverParams, TextPayload, ToolCallParams,
+    ToolResultParams, UnregisterParams, UnregisterToolParams,
     ViewEventParams, WindowCloseParams, WindowClosedParams, WindowOpenParams,
 };
 use atelyx_plugin_protocol::view::{EventKind, NodeBody, ViewNode};
@@ -79,8 +80,9 @@ fn view_tree_shape_is_frozen() {
     let mut kinds = std::collections::HashSet::new();
     walk(&tree, &mut kinds);
     for expected in [
-        "row", "column", "scroll", "grid", "list", "text", "textInput", "numberInput", "dropdown",
-        "checkbox", "button", "iconButton", "image", "progress", "menu", "canvas", "dragRegion",
+        "row", "column", "scroll", "grid", "list", "text", "markdown", "textInput", "numberInput",
+        "dropdown", "checkbox", "button", "iconButton", "image", "progress", "menu", "canvas",
+        "dragRegion",
     ] {
         assert!(kinds.contains(expected), "控件集 v1 缺快照覆盖：{expected}");
     }
@@ -109,7 +111,7 @@ fn handshake_shape_is_frozen_and_version_checked() {
     let result: InitializeResult =
         serde_json::from_value(snapshot["handshake"]["result"].clone()).expect("握手 result 可反序列化");
 
-    assert_eq!(params.api_version, 1);
+    assert_eq!(params.api_version, 2);
     assert_eq!(params.plugin.id, "com.atelyx.echo");
     assert_eq!(result.host.name, "Atelyx");
     assert!(handshake::compatible(params.api_version, result.api_version));
@@ -195,10 +197,11 @@ fn method_type_shapes_are_frozen() {
             "WindowOpenParams" => frozen_roundtrip::<WindowOpenParams>(&value),
             "WindowCloseParams" => frozen_roundtrip::<WindowCloseParams>(&value),
             "WindowClosedParams" => frozen_roundtrip::<WindowClosedParams>(&value),
-            "ServiceRegisterParams" => frozen_roundtrip::<ServiceRegisterParams>(&value),
-            "SearchQueryParams" => frozen_roundtrip::<SearchQueryParams>(&value),
-            "SearchRespondParams" => frozen_roundtrip::<SearchRespondParams>(&value),
             "VaultSwitchPayload" => frozen_roundtrip::<VaultSwitchPayload>(&value),
+            "RegisterToolParams" => frozen_roundtrip::<RegisterToolParams>(&value),
+            "UnregisterToolParams" => frozen_roundtrip::<UnregisterToolParams>(&value),
+            "ToolCallParams" => frozen_roundtrip::<ToolCallParams>(&value),
+            "ToolResultParams" => frozen_roundtrip::<ToolResultParams>(&value),
             other => panic!("语料 {name}: 未知类型 {other}"),
         };
         assert!(ok, "语料 {name}: 编码与快照不一致");

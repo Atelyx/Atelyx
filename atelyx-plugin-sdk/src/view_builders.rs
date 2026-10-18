@@ -52,6 +52,11 @@ pub fn text(id: &str, content: impl Into<String>) -> ViewNode {
     node(id, NodeBody::Text { content: content.into(), size: None, weight: None, color: None })
 }
 
+/// 只读 Markdown 正文（宿主按笔记同源解析器渲染）。
+pub fn markdown(id: &str, content: impl Into<String>) -> ViewNode {
+    node(id, NodeBody::Markdown { content: content.into() })
+}
+
 pub fn text_input(id: &str, value: impl Into<String>) -> ViewNode {
     node(id, NodeBody::TextInput { value: value.into(), placeholder: None, multiline: None, password: None })
 }

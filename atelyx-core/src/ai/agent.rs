@@ -38,7 +38,7 @@ pub struct RunConfig {
     pub reasoning_effort: Option<ReasoningEffort>,
     /// 系统提示词（Agent 提示词 + 提示词标记注入后的最终文本；None = 无 system）。
     pub system_prompt: Option<String>,
-    /// Agent 勾选的内置工具 id 清单。
+    /// Agent 勾选的工具 id 清单（内置工具取工具名，插件工具取 `plugin:<插件 id>:<工具名>`）。
     pub tool_ids: Vec<String>,
     pub search: SearchConfig,
     pub exclude: Vec<String>,
@@ -541,10 +541,13 @@ async fn run_loop(p: RunParams) {
         config,
         history,
         compaction,
-        ctx,
+        mut ctx,
         mut cancel,
     } = p;
-    let tool_defs: Vec<ToolDecl> = builtin_tools()
+    // 执行侧与声明同口径：模型返回的未勾选插件工具不得被派发
+    ctx.plugin_tools
+        .retain(|t| config.tool_ids.iter().any(|id| id == &t.selection_id()));
+    let mut tool_defs: Vec<ToolDecl> = builtin_tools()
         .into_iter()
         .filter(|t| config.tool_ids.iter().any(|id| id == t.name))
         .map(|t| ToolDecl {
@@ -553,6 +556,11 @@ async fn run_loop(p: RunParams) {
             parameters: t.parameters,
         })
         .collect();
+    tool_defs.extend(ctx.plugin_tools.iter().map(|t| ToolDecl {
+        name: t.name.clone(),
+        description: t.description.clone(),
+        parameters: t.parameters.clone(),
+    }));
     let mut llm_history = {
         // 先折叠压缩再读回附件：被折叠的消息不再产生读盘 / 网络读取
         let mut folded = apply_compaction(&history, compaction.as_ref());

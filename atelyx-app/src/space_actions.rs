@@ -97,7 +97,7 @@ fn to_file_tree(nodes: &[space_client::TreeNode]) -> Vec<vault::FileTreeNode> {
 }
 
 /// 树中定位目录并产出子项列表（rel 为空 = 根）。目录不存在 = 空列表（与本地语义一致）。
-fn children_of_tree(tree: &[space_client::TreeNode], rel: &str) -> Vec<vault::DirChild> {
+pub(crate) fn children_of_tree(tree: &[space_client::TreeNode], rel: &str) -> Vec<vault::DirChild> {
     let mut current = tree;
     if !rel.is_empty() {
         for seg in rel.split('/') {
@@ -111,6 +111,14 @@ fn children_of_tree(tree: &[space_client::TreeNode], rel: &str) -> Vec<vault::Di
         .iter()
         .map(|n| vault::DirChild { rel: n.path.clone(), is_dir: n.is_dir, mtime: n.updated_at })
         .collect()
+}
+
+/// 树中是否存在指定相对路径的文件（目录不算）。
+pub(crate) fn tree_has_file(tree: &[space_client::TreeNode], rel: &str) -> bool {
+    let parent = rel.rsplit_once('/').map(|(parent, _)| parent).unwrap_or("");
+    children_of_tree(tree, parent)
+        .iter()
+        .any(|child| !child.is_dir && child.rel == rel)
 }
 
 /// 从整树统计文件数（目录不计）。
