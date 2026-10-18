@@ -629,11 +629,13 @@ pub fn convert_value(value: &Yaml, target: PropType) -> Option<Yaml> {
             _ => None,
         },
         PropType::Boolean => match value {
+            // 空值 = false：空属性可直接切成布尔，无需先输入有意义的值
+            Yaml::Null => Some(Yaml::Bool(false)),
             Yaml::Bool(b) => Some(Yaml::Bool(*b)),
             Yaml::Num(f) => Some(Yaml::Bool(*f != 0.0)),
             Yaml::Str(s) => match s.trim().to_ascii_lowercase().as_str() {
+                "" | "false" | "no" | "0" => Some(Yaml::Bool(false)),
                 "true" | "yes" | "1" => Some(Yaml::Bool(true)),
-                "false" | "no" | "0" => Some(Yaml::Bool(false)),
                 _ => None,
             },
             _ => None,

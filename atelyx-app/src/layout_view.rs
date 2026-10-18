@@ -240,8 +240,8 @@ pub(crate) enum PopupState {
     /// 邀请码管理（激活空间且 owner；表单草稿在 App.space_invite_form）。
     SpaceInvite,
     NoteMenu,
-    /// 属性面板类型切换菜单（属性行序号）。
-    PropTypeMenu { index: usize },
+    /// 属性面板类型切换菜单（属性键名）。
+    PropTypeMenu { key: String },
     /// 表格：单元格右键（复制/剪切/粘贴/清空）。
     TableCellMenu,
     /// 表格：列头 ⋮ 字段管理。
@@ -3801,14 +3801,15 @@ fn popup_element<'a>(
                 ),
             ]
         }
-        PopupState::PropTypeMenu { index } => {
+        PopupState::PropTypeMenu { key } => {
             // 固定顺序六类型；徽章键锁定标签（其余项禁用）
             use atelyx_core::frontmatter::{infer_type, PropType, Yaml};
-            let badge = matches!(app.props.parsed.as_ref(), Some((Yaml::Map(pairs), true)) if pairs.get(*index).is_some_and(|(k, _)| crate::properties_view::is_badge_key(k)));
-            let current = app.props.parsed.as_ref().and_then(|(data, _)| match data {
-                Yaml::Map(pairs) => pairs.get(*index).map(|(_, v)| infer_type(badge, v)),
+            let row = match app.props.parsed.as_ref() {
+                Some((Yaml::Map(pairs), true)) => pairs.iter().find(|(k, _)| k == key),
                 _ => None,
-            });
+            };
+            let badge = row.is_some_and(|(k, _)| crate::properties_view::is_badge_key(k));
+            let current = row.map(|(_, v)| infer_type(badge, v));
             const TYPES: [(PropType, &str, &str); 6] = [
                 (PropType::Text, "type", "文本"),
                 (PropType::Tag, "tag", "标签"),
@@ -3820,7 +3821,8 @@ fn popup_element<'a>(
             TYPES
                 .iter()
                 .map(|(pt, icon_name, label)| {
-                    let locked = badge && *pt != PropType::Tag;
+                    // 标签类型只属于 tags：其余键没有 `#` 渲染语义，禁用避免误以为是标签
+                    let locked = if badge { *pt != PropType::Tag } else { *pt == PropType::Tag };
                     let is_current = current == Some(*pt);
                     (
                         0,
@@ -3830,9 +3832,11 @@ fn popup_element<'a>(
                             danger: false,
                             disabled: locked,
                             on_press: (!locked)
-                                .then(|| Message::Props(crate::properties_view::PropsMsg::ConvertType(*index, *pt))),
+                                .then(|| Message::Props(crate::properties_view::PropsMsg::ConvertType(key.clone(), *pt))),
                             note: is_current.then_some("当前"),
-                            hint: locked.then(|| "预置属性键固定".to_string()),
+                            hint: locked.then(|| {
+                                if badge { "tags 恒为标签" } else { "仅 tags 属性可用" }.to_string()
+                            }),
                         },
                     )
                 })

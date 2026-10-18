@@ -1,25 +1,23 @@
 //! 笔记属性面板：frontmatter 的类型化渲染与槽位编辑（数据源 = core frontmatter 宽类型）。
 //!
-//! 交互语义：槽位 = 键/值/数组项的线性序，Enter/Tab 提交并前进、Shift+Tab 后退、Esc 取消；
-//! 添加属性两段式（键名 → 值，键名带常用键建议）；徽章键（tags 类）恒存字符串数组；
-//! 所有改动经 `stringify` 拼回全文，走与正文同一保存链与撤销栈。
+//! 改动经 `stringify` 拼回全文，与正文同一条保存链；交互语义见 `PropsMsg` 与 `commit_slot_data`。
 
 use atelyx_core::frontmatter::{self, PropType, Yaml};
-use iced::widget::{button, column, container, operation, row, space, text_input, Column, Id};
+use iced::widget::{button, column, container, mouse_area, operation, row, space, text_input, Column, Id};
 use iced::{border, Color, Element, Length, Padding, Point, Task};
 use std::time::Instant;
 
-use crate::layout_view::PopupState;
+use crate::layout_view::{estimate_text_width, PopupState};
+use crate::ui::controls;
 use crate::ui::icon::icon;
+use crate::ui::notify::Level as NoticeLevel;
 use crate::ui::palette as pal;
 use crate::ui::text;
-use crate::ui::controls;
-use crate::ui::notify::Level as NoticeLevel;
 use crate::{App, Message, NoteMode, AUTOSAVE_DEBOUNCE};
 use iced::widget::text_editor;
 
-/// 徽章键（值渲染为 `#` 胶囊流，恒存字符串数组）。
-pub const BADGE_KEYS: &[&str] = &["tags", "aliases", "cssclasses"];
+/// 徽章键（值渲染为 `#` 胶囊流，恒存字符串数组）：仅 tags；aliases / cssclasses 是普通列表。
+pub const BADGE_KEYS: &[&str] = &["tags"];
 
 /// 常用键名建议（聚焦即展示、键入子串过滤、排除已有）。
 const COMMON_KEYS: &[&str] = &[
@@ -40,6 +38,35 @@ pub enum Slot {
     Value(usize),
     /// 属性行序号 + 数组项序号。
     Item(usize, usize),
+    /// 数组行尚未写入的新项（提交非空才追加；空提交 = 取消）。
+    NewItem(usize),
+}
+
+/// 行内动作的行身份：渲染时的键名 + （数组项）下标与文本。
+/// 提交式失焦可能删行 / 拆项使下标漂移，动作先按身份重定位再执行，找不到即放弃。
+#[derive(Clone, Debug, PartialEq)]
+pub struct RowRef {
+    pub key: String,
+    pub item: Option<(usize, String)>,
+}
+
+impl RowRef {
+    fn row(key: &str) -> Self {
+        Self { key: key.to_string(), item: None }
+    }
+
+    fn item(key: &str, index: usize, value: &Yaml) -> Self {
+        Self { key: key.to_string(), item: Some((index, item_text(value))) }
+    }
+}
+
+/// 候选列表状态：query 进入编辑时为空（展示候选池顶部），键入才过滤；
+/// armed = 按过 ↑↓（仅此时 Enter 选中候选，否则提交手输文本）。
+#[derive(Clone, Debug, Default)]
+pub struct Suggest {
+    pub index: usize,
+    pub armed: bool,
+    pub query: String,
 }
 
 /// 添加表单两段式步骤。
@@ -68,6 +95,13 @@ pub struct PropsPanel {
     pub duplicate: Option<String>,
     /// 缓存的 frontmatter 解析产物：Some((data, ok)) = 有开头块；None = 无块。
     pub parsed: Option<(Yaml, bool)>,
+    /// 候选高亮与过滤。
+    suggest: Suggest,
+    /// 悬停行 / 悬停数组项（删除钮显隐；带序号防迟到离场清掉新悬停）。
+    hover_row: Option<usize>,
+    hover_item: Option<(usize, usize)>,
+    /// 同批按压落在属性面板内（PressReporter 上报，`Message::Press` 消费）。
+    pub press_inside: bool,
     /// 当前编辑输入框的焦点 id（同时至多一个输入框挂载，共用一个 id）。
     focus_id: Id,
 }
@@ -81,6 +115,10 @@ impl Default for PropsPanel {
             adding: None,
             duplicate: None,
             parsed: None,
+            suggest: Suggest::default(),
+            hover_row: None,
+            hover_item: None,
+            press_inside: false,
             focus_id: Id::unique(),
         }
     }
@@ -90,29 +128,40 @@ impl Default for PropsPanel {
 #[derive(Clone, Debug)]
 pub enum PropsMsg {
     ToggleCollapse,
-    StartEdit(Slot),
+    /// 进入槽编辑；`row` = 渲染时的行身份（提交式失焦可能删行，动作按键名 / 项文本重定位）。
+    StartEdit(Slot, RowRef),
     Draft(String),
-    /// 提交当前槽并移动：0 = 仅提交；1 / -1 = 前进 / 后退（前进越界接续添加表单）。
+    /// Enter：候选已用 ↑↓ 高亮则选中候选，否则提交手输文本。
+    Submit,
+    /// Tab / Shift+Tab：提交并前进 / 后退（不选候选）。
     CommitMove(i32),
     CancelSlot,
-    DeleteProp(usize),
-    ToggleBool(usize),
-    AddItem(usize),
+    DeleteProp(RowRef),
+    /// 删除数组项（行身份含项下标与文本）。
+    DeleteItem(RowRef),
+    ToggleBool(RowRef),
+    AddItem(RowRef),
     StartAdd,
-    /// 添加表单内 Enter：键名步进值步；值步落盘。
-    AddCommit,
-    AddCancel,
     KeySuggestPick(String),
-    /// tags 候选点击：以逗号追加进值输入，不直接落盘。
+    /// 标签候选：以逗号追加进值输入，不直接落盘。
     TagSuggestPick(String),
-    ConvertType(usize, PropType),
+    /// 候选点击（恒选中）。
+    SuggestPick(String),
+    /// 候选高亮移动（↑↓）。
+    SuggestMove(i32),
+    ConvertType(String, PropType),
+    OpenTypeMenu {
+        key: String,
+        window: iced::window::Id,
+        cursor: Point,
+    },
     OpenSourceMode,
-}
-
-impl PropsPanel {
-    pub fn focus_id(&self) -> Id {
-        self.focus_id.clone()
-    }
+    HoverRow(usize),
+    UnhoverRow(usize),
+    HoverItem(usize, usize),
+    UnhoverItem(usize, usize),
+    /// 同批按压落在属性面板内。
+    PressInside,
 }
 
 /// 属性面板渲染：Some(element) = 应显示面板。
@@ -157,7 +206,14 @@ pub fn props_panel<'a>(
         // 无块：无属性行，仅添加表单
         None => props_column(app, window, cursor, &[]).into(),
     };
-    Some(column![body, controls::h_divider_subtle()].into())
+    // 面板内按压转播：外点失焦提交的「内 / 外」判定源（按钮与输入框会捕获按压，mouse_area 不上报）
+    Some(
+        controls::PressReporter::new(
+            column![body, controls::h_divider_subtle()].into(),
+            Message::Props(PropsMsg::PressInside),
+        )
+        .into(),
+    )
 }
 
 /// 属性列（折叠头 + 属性行 + 添加表单）；`pairs` = 解析出的键值对（无块传空）。
@@ -205,7 +261,27 @@ fn btn_tiny() -> controls::TextSize {
     controls::TextSize { h: 18.0, pad_x: 6.0, font: pal::fs_micro(), radius: pal::RADIUS_XS }
 }
 
-/// 单个属性行：类型图标（点击弹类型菜单）+ 键名 + 值区 + 删除。
+/// 单行悬停删除钮（显示即红色；不可见时等宽占位不接事件，避免布局跳动）。
+fn hover_delete<'a>(size: f32, visible: bool, msg: Message) -> Element<'a, Message> {
+    if !visible {
+        return space().width(Length::Fixed(size)).height(Length::Fixed(size)).into();
+    }
+    button(
+        container(icon("x", (size - 4.0).max(8.0), pal::DANGER))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(iced::alignment::Horizontal::Center)
+            .align_y(iced::alignment::Vertical::Center),
+    )
+    .width(Length::Fixed(size))
+    .height(Length::Fixed(size))
+    .padding(0.0)
+    .style(|_t, _s| plain_btn())
+    .on_press(msg)
+    .into()
+}
+
+/// 单个属性行：类型图标（点击弹类型菜单）+ 键名（悬停删除整行）+ 值区。
 fn prop_row<'a>(
     app: &'a App,
     window: iced::window::Id,
@@ -214,8 +290,8 @@ fn prop_row<'a>(
     key: &str,
     value: &'a Yaml,
 ) -> Element<'a, Message> {
-    let badge = is_badge_key(key);
-    let ptype = frontmatter::infer_type(badge, value);
+    let ptype = frontmatter::infer_type(is_badge_key(key), value);
+    let key_ref = RowRef::row(key);
 
     let type_btn = button(
         container(icon(type_icon(ptype), 13.0, pal::TEXT_MUTED))
@@ -228,103 +304,180 @@ fn prop_row<'a>(
     .height(Length::Fixed(20.0))
     .padding(0.0)
     .style(|_t, _s| plain_btn())
-    .on_press(open_type_menu(window, cursor, index));
+    .on_press(Message::Props(PropsMsg::OpenTypeMenu {
+        key: key.to_string(),
+        window,
+        cursor,
+    }));
 
     let key_cell: Element<'a, Message> = if app.props.editing.as_ref() == Some(&Slot::Key(index)) {
-        slot_input(app, "键名", PropsMsg::CommitMove(1)).into()
+        slot_input(app, "键名", Length::Fill).into()
     } else {
         button(
             container(text(key.to_string()).size(pal::fs_caption()).color(pal::TEXT_MUTED))
                 .width(Length::Fill)
                 .align_y(iced::alignment::Vertical::Center),
         )
-        .width(Length::Fixed(96.0))
+        .width(Length::Fill)
         .padding(Padding::ZERO.horizontal(4.0).vertical(3.0))
         .style(|_t, _s| plain_btn())
-        .on_press(Message::Props(PropsMsg::StartEdit(Slot::Key(index))))
+        .on_press(Message::Props(PropsMsg::StartEdit(Slot::Key(index), key_ref.clone())))
         .into()
     };
-
-    let value_cell: Element<'a, Message> = match app.props.editing.as_ref() {
-        Some(Slot::Value(i)) if *i == index => slot_input(app, "属性值", PropsMsg::CommitMove(1)).into(),
-        Some(Slot::Item(pi, _ii)) if *pi == index => slot_input(app, "项", PropsMsg::CommitMove(1)).into(),
-        _ => value_display(value, ptype, index),
-    };
-
-    let del = button(
-        container(icon("x", 11.0, pal::TEXT_MUTED))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .align_x(iced::alignment::Horizontal::Center)
+    // 整行删除钮只在悬停键名列时露出（含预留按钮位，移到按钮上仍保持显示）
+    let key_area = mouse_area(
+        container(
+            row![
+                key_cell,
+                hover_delete(
+                    14.0,
+                    app.props.hover_row == Some(index),
+                    Message::Props(PropsMsg::DeleteProp(key_ref)),
+                ),
+            ]
+            .spacing(2)
             .align_y(iced::alignment::Vertical::Center),
+        )
+        .width(Length::Fixed(96.0))
+        .align_y(iced::alignment::Vertical::Center),
     )
-    .width(Length::Fixed(18.0))
-    .height(Length::Fixed(18.0))
-    .padding(0.0)
-    .style(|_t, status| button::Style {
-        text_color: if matches!(status, button::Status::Hovered | button::Status::Pressed) {
-            pal::DANGER
-        } else {
-            pal::TEXT_MUTED
-        },
-        ..plain_btn()
-    })
-    .on_press(Message::Props(PropsMsg::DeleteProp(index)));
+    .on_enter(Message::Props(PropsMsg::HoverRow(index)))
+    .on_exit(Message::Props(PropsMsg::UnhoverRow(index)));
 
-    row![type_btn, key_cell, value_cell, del].spacing(6).width(Length::Fill).into()
+    let value_cell = value_display(app, index, key, value, ptype);
+    let header = row![type_btn, key_area, value_cell].spacing(6).width(Length::Fill);
+
+    let mut col = Column::<Message>::new().spacing(2).push(header);
+    if let Some((items, tags)) = row_suggestions(app, index) {
+        if !items.is_empty() {
+            col = col.push(suggest_card(app, &items, tags));
+        }
+    }
+    col.into()
 }
 
 /// 值区展示与编辑入口（按类型分形态：布尔开关 / 徽章流 / 列表 / 可编辑文本 / 只读展示）。
-fn value_display<'a>(value: &'a Yaml, ptype: PropType, index: usize) -> Element<'a, Message> {
+fn value_display<'a>(
+    app: &'a App,
+    index: usize,
+    key: &str,
+    value: &'a Yaml,
+    ptype: PropType,
+) -> Element<'a, Message> {
+    let editing = app.props.editing.as_ref();
     match value {
         Yaml::Bool(b) => controls::btn(
             if *b { "true" } else { "false" },
             &btn_tiny(),
             controls::Variant::Secondary,
-            Some(Message::Props(PropsMsg::ToggleBool(index))),
+            Some(Message::Props(PropsMsg::ToggleBool(RowRef::row(key)))),
         )
         .into(),
         Yaml::Seq(items) if ptype == PropType::List => {
             let mut list = Column::<Message>::new().spacing(0);
             for (j, item) in items.iter().enumerate() {
+                let row_ref = RowRef::item(key, j, item);
+                let item_cell: Element<'a, Message> = if editing == Some(&Slot::Item(index, j)) {
+                    slot_input(app, "项", item_input_width(&app.props.draft)).into()
+                } else if scalar_text(item).is_some() {
+                    button(text(item_text(item)).size(pal::fs_caption()).color(pal::TEXT_PRIMARY))
+                        .padding(Padding::ZERO.horizontal(4.0).vertical(1.0))
+                        .style(|_t, _s| plain_btn())
+                        .on_press(Message::Props(PropsMsg::StartEdit(Slot::Item(index, j), row_ref.clone())))
+                        .into()
+                } else {
+                    text(item_text(item)).size(pal::fs_caption()).color(pal::TEXT_PRIMARY).into()
+                };
+                let line = row![
+                    icon("clock", 11.0, pal::TEXT_MUTED),
+                    item_cell,
+                    hover_delete(
+                        13.0,
+                        app.props.hover_item == Some((index, j)),
+                        Message::Props(PropsMsg::DeleteItem(row_ref)),
+                    ),
+                ]
+                .spacing(4)
+                .align_y(iced::alignment::Vertical::Center);
+                list = list.push(
+                    mouse_area(line)
+                        .on_enter(Message::Props(PropsMsg::HoverItem(index, j)))
+                        .on_exit(Message::Props(PropsMsg::UnhoverItem(index, j))),
+                );
+            }
+            if editing == Some(&Slot::NewItem(index)) {
                 list = list.push(
                     row![
                         icon("clock", 11.0, pal::TEXT_MUTED),
-                        button(text(item_text(item)).size(pal::fs_caption()).color(pal::TEXT_PRIMARY))
-                            .padding(Padding::ZERO.horizontal(4.0).vertical(1.0))
-                            .style(|_t, _s| plain_btn())
-                            .on_press(Message::Props(PropsMsg::StartEdit(Slot::Item(index, j)))),
+                        slot_input(app, "项", item_input_width(&app.props.draft)),
                     ]
-                    .spacing(4),
+                    .spacing(4)
+                    .align_y(iced::alignment::Vertical::Center),
+                );
+            } else {
+                list = list.push(
+                    button(text("添加").size(pal::fs_micro()).color(pal::TEXT_MUTED))
+                        .padding(Padding::ZERO.horizontal(4.0).vertical(1.0))
+                        .style(|_t, _s| plain_btn())
+                        .on_press(Message::Props(PropsMsg::AddItem(RowRef::row(key)))),
                 );
             }
-            list = list.push(
-                button(text("添加").size(pal::fs_micro()).color(pal::TEXT_MUTED))
-                    .padding(Padding::ZERO.horizontal(4.0).vertical(1.0))
-                    .style(|_t, _s| plain_btn())
-                    .on_press(Message::Props(PropsMsg::AddItem(index))),
-            );
             list.into()
         }
         Yaml::Seq(items) => {
-            let mut flow = row!().spacing(4);
+            let mut flow = row!().spacing(4).align_y(iced::alignment::Vertical::Center);
             for (j, item) in items.iter().enumerate() {
+                let row_ref = RowRef::item(key, j, item);
+                if editing == Some(&Slot::Item(index, j)) {
+                    flow = flow.push(slot_input(app, "标签", item_input_width(&app.props.draft)));
+                    continue;
+                }
+                let editable = scalar_text(item).is_some();
+                let label = text(format!("#{}", item_text(item))).size(pal::fs_micro()).color(pal::ACCENT);
+                let text_cell: Element<'a, Message> = if editable {
+                    button(label)
+                        .padding(Padding::ZERO.horizontal(2.0).vertical(2.0))
+                        .style(|_t, _s| plain_btn())
+                        .on_press(Message::Props(PropsMsg::StartEdit(Slot::Item(index, j), row_ref.clone())))
+                        .into()
+                } else {
+                    container(label).padding(Padding::ZERO.horizontal(2.0).vertical(2.0)).into()
+                };
+                let pill = container(
+                    row![
+                        text_cell,
+                        hover_delete(
+                            12.0,
+                            app.props.hover_item == Some((index, j)),
+                            Message::Props(PropsMsg::DeleteItem(row_ref)),
+                        ),
+                    ]
+                    .spacing(1)
+                    .align_y(iced::alignment::Vertical::Center),
+                )
+                .padding(Padding::ZERO.horizontal(5.0).vertical(2.0))
+                .style(|_t| iced::widget::container::Style {
+                    background: Some(pal::ACCENT_SOFT.into()),
+                    border: border::rounded(9.0),
+                    ..iced::widget::container::Style::default()
+                });
                 flow = flow.push(
-                    button(
-                        container(text(format!("#{}", item_text(item))).size(pal::fs_micro()).color(pal::ACCENT))
-                            .padding(Padding::ZERO.horizontal(6.0).vertical(2.0)),
-                    )
-                    .padding(0.0)
-                    .style(|_t, _s| button::Style {
-                        background: Some(pal::ACCENT_SOFT.into()),
-                        border: border::rounded(9.0),
-                        ..button::Style::default()
-                    })
-                    .on_press(Message::Props(PropsMsg::StartEdit(Slot::Item(index, j)))),
+                    mouse_area(pill)
+                        .on_enter(Message::Props(PropsMsg::HoverItem(index, j)))
+                        .on_exit(Message::Props(PropsMsg::UnhoverItem(index, j))),
                 );
             }
-            flow = flow.push(
-                button(container(icon("plus", 11.0, pal::TEXT_MUTED)))
+            if editing == Some(&Slot::NewItem(index)) {
+                flow = flow.push(slot_input(app, "标签", item_input_width(&app.props.draft)));
+            } else {
+                flow = flow.push(
+                    button(
+                        container(icon("plus", 11.0, pal::TEXT_MUTED))
+                            .width(Length::Fill)
+                            .height(Length::Fill)
+                            .align_x(iced::alignment::Horizontal::Center)
+                            .align_y(iced::alignment::Vertical::Center),
+                    )
                     .width(Length::Fixed(18.0))
                     .height(Length::Fixed(18.0))
                     .padding(0.0)
@@ -336,32 +489,37 @@ fn value_display<'a>(value: &'a Yaml, ptype: PropType, index: usize) -> Element<
                         },
                         ..plain_btn()
                     })
-                    .on_press(Message::Props(PropsMsg::AddItem(index))),
-            );
+                    .on_press(Message::Props(PropsMsg::AddItem(RowRef::row(key)))),
+                );
+            }
             flow.into()
         }
         Yaml::Str(s) => {
-            let shown = if s.is_empty() { "（空）".to_string() } else { s.clone() };
-            button(
-                container(
-                    text(shown)
-                        .size(pal::fs_caption())
-                        .color(if s.is_empty() { pal::TEXT_MUTED } else { pal::TEXT_PRIMARY }),
+            if editing == Some(&Slot::Value(index)) {
+                slot_input(app, "属性值", Length::Fill).into()
+            } else {
+                let shown = if s.is_empty() { "（空）".to_string() } else { s.clone() };
+                button(
+                    container(
+                        text(shown)
+                            .size(pal::fs_caption())
+                            .color(if s.is_empty() { pal::TEXT_MUTED } else { pal::TEXT_PRIMARY }),
+                    )
+                    .width(Length::Fill)
+                    .align_y(iced::alignment::Vertical::Center),
                 )
                 .width(Length::Fill)
-                .align_y(iced::alignment::Vertical::Center),
-            )
-            .width(Length::Fill)
-            .padding(Padding::ZERO.horizontal(4.0).vertical(3.0))
-            .style(|_t, _s| plain_btn())
-            .on_press(Message::Props(PropsMsg::StartEdit(Slot::Value(index))))
-            .into()
+                .padding(Padding::ZERO.horizontal(4.0).vertical(3.0))
+                .style(|_t, _s| plain_btn())
+                .on_press(Message::Props(PropsMsg::StartEdit(Slot::Value(index), RowRef::row(key))))
+                .into()
+            }
         }
         other => text(item_text(other)).size(pal::fs_caption()).color(pal::TEXT_SECONDARY).into(),
     }
 }
 
-/// 添加表单（两段式 + 键名建议内联下拉）与面板底部「添加属性」按钮。
+/// 添加表单（两段式 + 内联候选）与面板底部「添加属性」按钮。
 fn add_area<'a>(app: &'a App) -> Element<'a, Message> {
     let Some(form) = &app.props.adding else {
         return button(
@@ -369,65 +527,42 @@ fn add_area<'a>(app: &'a App) -> Element<'a, Message> {
                 icon("plus", 11.0, pal::TEXT_MUTED),
                 text("添加属性").size(pal::fs_micro()).color(pal::TEXT_MUTED),
             ]
-            .spacing(4),
+            .spacing(4)
+            .align_y(iced::alignment::Vertical::Center),
         )
         .padding(Padding::ZERO.horizontal(4.0).vertical(3.0))
         .style(|_t, _s| plain_btn())
         .on_press(Message::Props(PropsMsg::StartAdd))
         .into();
     };
+    let query = &app.props.suggest.query;
     let mut col = Column::<Message>::new().spacing(2);
     match form.step {
         AddStep::Key => {
-            col = col.push(slot_input(app, "属性名", PropsMsg::AddCommit));
-            for name in key_suggestions(app, &app.props.draft) {
-                col = col.push(
-                    button(text(name.to_string()).size(pal::fs_micro()).color(pal::TEXT_SECONDARY))
-                        .width(Length::Fill)
-                        .padding(Padding::ZERO.horizontal(6.0).vertical(2.0))
-                        .style(|_t, status| button::Style {
-                            background: matches!(status, button::Status::Hovered | button::Status::Pressed)
-                                .then_some(pal::ACCENT_SOFT.into()),
-                            ..plain_btn()
-                        })
-                        .on_press(Message::Props(PropsMsg::KeySuggestPick(name.to_string()))),
-                );
+            col = col.push(slot_input(app, "属性名", Length::Fill));
+            let items = key_suggestions(app, query);
+            if !items.is_empty() {
+                col = col.push(suggest_card(app, &items, false));
             }
         }
         AddStep::Value => {
+            // 键名按属性行的键名样式展示（空出类型图标位对齐值列），不用标签胶囊
             col = col.push(
                 row![
-                    container(text(format!("#{}", form.key)).size(pal::fs_micro()).color(pal::ACCENT))
-                        .padding(Padding::ZERO.horizontal(6.0).vertical(2.0))
-                        .style(|_t| iced::widget::container::Style {
-                            background: Some(pal::ACCENT_SOFT.into()),
-                            border: border::rounded(9.0),
-                            ..iced::widget::container::Style::default()
-                        }),
-                    slot_input(app, "属性值（逗号分隔为数组）", PropsMsg::AddCommit),
+                    space().width(Length::Fixed(20.0)),
+                    container(text(form.key.clone()).size(pal::fs_caption()).color(pal::TEXT_MUTED))
+                        .width(Length::Fixed(96.0))
+                        .padding(Padding::ZERO.horizontal(4.0).vertical(3.0))
+                        .align_y(iced::alignment::Vertical::Center),
+                    slot_input(app, "属性值（逗号分隔为数组）", Length::Fill),
                 ]
-                .spacing(6),
+                .spacing(6)
+                .align_y(iced::alignment::Vertical::Center),
             );
-            // 徽章键 = 全仓库标签候选（子串过滤、排除本笔记已有，上限 8）
             if is_badge_key(&form.key) {
-                for tag in tag_suggestions(app, &app.props.draft) {
-                    col = col.push(
-                        button(
-                            row![
-                                icon("tag", 11.0, pal::TEXT_MUTED),
-                                text(format!("#{tag}")).size(pal::fs_micro()).color(pal::TEXT_SECONDARY),
-                            ]
-                            .spacing(4),
-                        )
-                        .width(Length::Fill)
-                        .padding(Padding::ZERO.horizontal(6.0).vertical(2.0))
-                        .style(|_t, status| button::Style {
-                            background: matches!(status, button::Status::Hovered | button::Status::Pressed)
-                                .then_some(pal::ACCENT_SOFT.into()),
-                            ..plain_btn()
-                        })
-                        .on_press(Message::Props(PropsMsg::TagSuggestPick(tag))),
-                    );
+                let items = tag_suggestions(app, query);
+                if !items.is_empty() {
+                    col = col.push(suggest_card(app, &items, true));
                 }
             }
         }
@@ -438,8 +573,60 @@ fn add_area<'a>(app: &'a App) -> Element<'a, Message> {
     col.into()
 }
 
+/// 当前编辑槽可用的候选（不可候选的槽返回 None）。
+fn row_suggestions(app: &App, index: usize) -> Option<(Vec<String>, bool)> {
+    let query = &app.props.suggest.query;
+    match app.props.editing.as_ref()? {
+        Slot::Key(i) if *i == index => Some((key_suggestions(app, query), false)),
+        Slot::Item(i, _) | Slot::NewItem(i) if *i == index => {
+            let key = match app.props.parsed.as_ref() {
+                Some((Yaml::Map(pairs), true)) => &pairs.get(*i)?.0,
+                _ => return None,
+            };
+            is_badge_key(key).then(|| (tag_suggestions(app, query), true))
+        }
+        _ => None,
+    }
+}
+
+/// 内联候选卡：高亮只在按过 ↑↓ 后出现（未高亮时 Enter 提交手输文本）。
+fn suggest_card<'a>(app: &'a App, items: &[String], tags: bool) -> Element<'a, Message> {
+    let idx = app.props.suggest.index.min(items.len().saturating_sub(1));
+    let mut col = Column::<Message>::new().spacing(0);
+    for (i, item) in items.iter().enumerate() {
+        let selected = app.props.suggest.armed && i == idx;
+        let label: Element<'a, Message> = if tags {
+            row![
+                icon("tag", 11.0, pal::TEXT_MUTED),
+                text(format!("#{item}")).size(pal::fs_micro()).color(pal::TEXT_SECONDARY),
+            ]
+            .spacing(4)
+            .align_y(iced::alignment::Vertical::Center)
+            .into()
+        } else {
+            text(item.clone()).size(pal::fs_micro()).color(pal::TEXT_SECONDARY).into()
+        };
+        col = col.push(
+            button(label)
+                .width(Length::Fill)
+                .padding(Padding::ZERO.horizontal(6.0).vertical(2.0))
+                .style(controls::row_style(selected, pal::RADIUS_XS))
+                .on_press(Message::Props(PropsMsg::SuggestPick(item.clone()))),
+        );
+    }
+    container(col)
+        .width(Length::Fill)
+        .padding(Padding::ZERO.vertical(2.0))
+        .style(|_t| iced::widget::container::Style {
+            background: Some(pal::BG_TERTIARY.into()),
+            border: border::rounded(pal::RADIUS_SM),
+            ..iced::widget::container::Style::default()
+        })
+        .into()
+}
+
 /// 键名建议：常用键按子串过滤（不区分大小写）、排除已有，上限 8 条。
-fn key_suggestions(app: &App, query: &str) -> Vec<&'static str> {
+fn key_suggestions(app: &App, query: &str) -> Vec<String> {
     let existing: Vec<String> = match &app.props.parsed {
         Some((Yaml::Map(pairs), true)) => pairs.iter().map(|(k, _)| k.clone()).collect(),
         _ => Vec::new(),
@@ -449,14 +636,14 @@ fn key_suggestions(app: &App, query: &str) -> Vec<&'static str> {
         .iter()
         .filter(|k| !existing.iter().any(|e| e == **k))
         .filter(|k| q.is_empty() || k.to_ascii_lowercase().contains(&q))
-        .copied()
         .take(8)
+        .map(|k| (*k).to_string())
         .collect()
 }
 
-/// tags 候选：全仓库词汇表按子串过滤（不区分大小写）、排除本笔记徽章键（tags/aliases/cssclasses）值并集，上限 8 条。
+/// tags 候选：全仓库词汇表按最后一段子串过滤、排除已有徽章值与草稿里已键入的项，上限 8 条。
 fn tag_suggestions(app: &App, query: &str) -> Vec<String> {
-    let existing: Vec<String> = match &app.props.parsed {
+    let mut existing: Vec<String> = match &app.props.parsed {
         Some((Yaml::Map(pairs), true)) => pairs
             .iter()
             .filter(|(k, _)| is_badge_key(k))
@@ -467,9 +654,9 @@ fn tag_suggestions(app: &App, query: &str) -> Vec<String> {
             .collect(),
         _ => Vec::new(),
     };
+    existing.extend(split_comma_list(query));
     // 只按最后一段过滤（值输入是逗号分隔的多段）
-    let q = query.trim().to_lowercase();
-    let last = q.rsplit(['，', ',']).next().unwrap_or("").trim().to_string();
+    let last = query.rsplit(['，', ',']).next().unwrap_or("").trim().to_lowercase();
     app.tag_vocab
         .iter()
         .filter(|row| !existing.iter().any(|e| e == &row.tag))
@@ -479,16 +666,16 @@ fn tag_suggestions(app: &App, query: &str) -> Vec<String> {
         .collect()
 }
 
-/// 槽位输入框（透明底、聚焦描边；输入统一写 draft，Enter 提交动机由调用方给定）。
-fn slot_input<'a>(app: &'a App, placeholder: &str, submit: PropsMsg) -> text_input::TextInput<'a, Message> {
+/// 槽位输入框（透明底、聚焦描边；输入统一写 draft，Enter 走 `Submit` 统一决策）。
+fn slot_input<'a>(app: &'a App, placeholder: &str, width: Length) -> text_input::TextInput<'a, Message> {
     text_input(placeholder, &app.props.draft)
         .size(pal::fs_caption())
         .font(crate::ui::regular())
         .padding(Padding::ZERO.horizontal(4.0).vertical(2.0))
-        .width(Length::Fill)
+        .width(width)
         .id(app.props.focus_id.clone())
         .on_input(|s| Message::Props(PropsMsg::Draft(s)))
-        .on_submit(Message::Props(submit))
+        .on_submit(Message::Props(PropsMsg::Submit))
         .style(|_theme, status| text_input::Style {
             background: Color::TRANSPARENT.into(),
             border: border::rounded(pal::RADIUS_XS)
@@ -499,6 +686,11 @@ fn slot_input<'a>(app: &'a App, placeholder: &str, submit: PropsMsg) -> text_inp
             value: pal::TEXT_PRIMARY,
             selection: pal::SELECTION,
         })
+}
+
+/// 数组项输入框定宽：按草稿估宽 + 内衬与光标余量（只服务输入宽度，不参与渲染排版口径）。
+fn item_input_width(draft: &str) -> Length {
+    Length::Fixed((estimate_text_width(draft, pal::fs_caption()) + 20.0).max(44.0))
 }
 
 fn type_icon(t: PropType) -> &'static str {
@@ -532,13 +724,13 @@ fn display_num(v: f64) -> String {
     }
 }
 
-fn open_type_menu(window: iced::window::Id, cursor: Point, index: usize) -> Message {
+fn open_type_menu(window: iced::window::Id, cursor: Point, key: String) -> Message {
     Message::PopupOpen(
         window,
         crate::layout_view::PopupOpen {
             point: Point::new(cursor.x, cursor.y + 14.0),
             flip_y: Some(cursor.y - 12.0),
-            state: PopupState::PropTypeMenu { index },
+            state: PopupState::PropTypeMenu { key },
             min_width: 0.0,
         },
     )
@@ -553,49 +745,196 @@ impl App {
         operation::focus(id.clone()).chain(operation::select_all(id))
     }
 
+    fn reset_suggest(&mut self) {
+        self.props.suggest = Suggest::default();
+    }
+
+    /// 结束槽编辑（不提交）。
+    fn cancel_slot_edit(&mut self) {
+        self.props.editing = None;
+        self.props.draft.clear();
+        self.reset_suggest();
+    }
+
+    fn close_add(&mut self) {
+        self.props.adding = None;
+        self.props.duplicate = None;
+        self.props.draft.clear();
+        self.reset_suggest();
+    }
+
+    /// 清空槽编辑 / 添加表单的全部交互态（切档位 / 撤销重做 / 切文件 / 切仓库）。
+    pub(crate) fn clear_props_edit(&mut self) {
+        self.props.editing = None;
+        self.props.adding = None;
+        self.props.duplicate = None;
+        self.props.draft.clear();
+        self.props.suggest = Suggest::default();
+        self.props.hover_row = None;
+        self.props.hover_item = None;
+    }
+
+    /// 失焦与动作切换前的统一收尾：槽 = 提交（dir 0），添加表单 = 值步非空提交、键名步取消。
+    /// 返回槽被删空（动作指向的行 / 项身份随之消失，不能再按下标兜底）。
+    pub(crate) fn finish_props_edit(&mut self) -> bool {
+        if self.props.editing.is_some() {
+            self.commit_slot_report(0).1
+        } else if self.props.adding.is_some() {
+            if self.props.adding.as_ref().is_some_and(|f| f.step == AddStep::Value) {
+                let _ = self.add_commit(false);
+            } else {
+                self.close_add();
+            }
+            false
+        } else {
+            false
+        }
+    }
+
     pub(crate) fn on_props(&mut self, m: PropsMsg) -> Task<Message> {
         match m {
+            PropsMsg::PressInside => {
+                self.props.press_inside = true;
+                Task::none()
+            }
+            PropsMsg::HoverRow(i) => {
+                self.props.hover_row = Some(i);
+                Task::none()
+            }
+            PropsMsg::UnhoverRow(i) => {
+                if self.props.hover_row == Some(i) {
+                    self.props.hover_row = None;
+                }
+                Task::none()
+            }
+            PropsMsg::HoverItem(r, j) => {
+                self.props.hover_item = Some((r, j));
+                Task::none()
+            }
+            PropsMsg::UnhoverItem(r, j) => {
+                if self.props.hover_item == Some((r, j)) {
+                    self.props.hover_item = None;
+                }
+                Task::none()
+            }
             PropsMsg::ToggleCollapse => {
+                self.finish_props_edit();
                 self.props.collapsed = !self.props.collapsed;
                 Task::none()
             }
             PropsMsg::OpenSourceMode => {
-                self.props.editing = None;
-                self.props.adding = None;
+                self.clear_props_edit();
                 self.handle(Message::NoteMode(NoteMode::Source))
             }
-            PropsMsg::StartEdit(slot) => {
-                // 编辑槽与添加表单互斥（共用一个输入框 id，不得同时挂载）
+            PropsMsg::StartEdit(slot, row) => {
+                let pre = self.props_data().and_then(|d| resolve_row(&d, &row));
+                let deleted = self.finish_props_edit();
+                let Some(data) = self.props_data() else { return Task::none() };
+                // 同一行刚被提交改掉键名（行未删）时键名已变，按渲染下标重定位行级槽
+                let resolved = match resolve_slot(&data, &slot, &row) {
+                    Some(s) => Some(s),
+                    None if !deleted => pre.and_then(|i| slot_at(&data, &slot, i)),
+                    None => None,
+                };
+                let Some(resolved) = resolved else { return Task::none() };
                 self.props.adding = None;
-                self.props.editing = Some(slot);
+                self.props.editing = Some(resolved);
                 self.props.draft = self.slot_text();
                 self.props.duplicate = None;
+                self.reset_suggest();
                 self.focus_slot()
             }
             PropsMsg::Draft(s) => {
                 if self.props.editing.is_some() || self.props.adding.is_some() {
-                    self.props.draft = s;
+                    self.props.draft = s.clone();
+                    self.props.suggest.query = s;
+                    self.props.suggest.index = 0;
+                    self.props.suggest.armed = false;
+                    self.props.duplicate = None;
                 }
                 Task::none()
             }
+            PropsMsg::Submit => {
+                if self.props.editing.is_none() && self.props.adding.is_none() {
+                    return Task::none();
+                }
+                if self.props.suggest.armed {
+                    return self.pick_suggestion(1);
+                }
+                if self.props.adding.is_some() {
+                    return self.add_commit(true);
+                }
+                self.commit_slot(1)
+            }
+            PropsMsg::CommitMove(dir) => {
+                if self.props.adding.is_some() {
+                    return if dir > 0 { self.add_commit(true) } else { Task::none() };
+                }
+                self.commit_slot(dir)
+            }
+            PropsMsg::SuggestMove(delta) => {
+                let n = self.props_suggestions().len();
+                if n > 0 {
+                    // 首次按方向键 = 点亮首 / 尾项（armed 前的 index 无意义）
+                    self.props.suggest.index = if self.props.suggest.armed {
+                        let cur = self.props.suggest.index.min(n - 1) as i32;
+                        (cur + delta).clamp(0, n as i32 - 1) as usize
+                    } else if delta > 0 {
+                        0
+                    } else {
+                        n - 1
+                    };
+                    self.props.suggest.armed = true;
+                }
+                Task::none()
+            }
+            PropsMsg::SuggestPick(text) => self.pick_suggestion_text(text, 0),
             PropsMsg::CancelSlot => {
                 self.props.editing = None;
                 self.props.adding = None;
                 self.props.draft.clear();
+                self.props.duplicate = None;
+                self.reset_suggest();
                 Task::none()
             }
-            PropsMsg::CommitMove(dir) => self.commit_slot(dir),
-            PropsMsg::DeleteProp(i) => {
-                if let Some(mut data) = self.props_data() {
-                    if i < data.len() {
-                        data.remove(i);
-                        self.apply_props(data);
+            PropsMsg::DeleteProp(row) => {
+                let pre = self.props_data().and_then(|d| resolve_row(&d, &row));
+                let deleted = self.finish_props_edit();
+                let i = self.action_row(&row, pre, deleted);
+                if let (Some(i), Some(mut data)) = (i, self.props_data()) {
+                    data.remove(i);
+                    self.apply_props(data);
+                }
+                self.props.hover_row = None;
+                Task::none()
+            }
+            PropsMsg::DeleteItem(row) => {
+                // 同行刚被删空：身份已消失，防按文本重复匹配到另一项上
+                let same = self.props_data().is_some_and(|d| match &self.props.editing {
+                    Some(Slot::Item(i, _) | Slot::Key(i) | Slot::Value(i)) => {
+                        d.get(*i).is_some_and(|(k, _)| k == &row.key)
+                    }
+                    _ => false,
+                });
+                let deleted = self.finish_props_edit();
+                if !(deleted && same) {
+                    if let Some(mut data) = self.props_data() {
+                        if let Some(i) = resolve_row(&data, &row) {
+                            let Yaml::Seq(items) = &mut data[i].1 else { return Task::none() };
+                            let Some((j, _)) = &row.item else { return Task::none() };
+                            items.remove(*j);
+                            self.apply_props(data);
+                        }
                     }
                 }
+                self.props.hover_item = None;
                 Task::none()
             }
-            PropsMsg::ToggleBool(i) => {
-                if let Some(mut data) = self.props_data() {
+            PropsMsg::ToggleBool(row) => {
+                let pre = self.props_data().and_then(|d| resolve_row(&d, &row));
+                let deleted = self.finish_props_edit();
+                let i = self.action_row(&row, pre, deleted);
+                if let (Some(i), Some(mut data)) = (i, self.props_data()) {
                     if let Some((_, Yaml::Bool(b))) = data.get_mut(i) {
                         *b = !*b;
                         self.apply_props(data);
@@ -603,18 +942,21 @@ impl App {
                 }
                 Task::none()
             }
-            PropsMsg::AddItem(pi) => {
-                if let Some(mut data) = self.props_data() {
-                    if let Some((_, Yaml::Seq(items))) = data.get_mut(pi) {
-                        items.push(Yaml::Str(String::new()));
-                        let j = items.len() - 1;
-                        self.apply_props(data);
-                        self.props.editing = Some(Slot::Item(pi, j));
-                        self.props.draft.clear();
-                        return self.focus_slot();
-                    }
+            PropsMsg::AddItem(row) => {
+                let pre = self.props_data().and_then(|d| resolve_row(&d, &row));
+                let deleted = self.finish_props_edit();
+                let i = self.action_row(&row, pre, deleted);
+                let Some(data) = self.props_data() else { return Task::none() };
+                let Some(i) = i else { return Task::none() };
+                if !matches!(data[i].1, Yaml::Seq(_)) {
+                    return Task::none();
                 }
-                Task::none()
+                self.props.adding = None;
+                self.props.editing = Some(Slot::NewItem(i));
+                self.props.draft.clear();
+                self.props.duplicate = None;
+                self.reset_suggest();
+                self.focus_slot()
             }
             PropsMsg::StartAdd => {
                 // 源码档：无 frontmatter 块时在文首插入空骨架（已有块静默不动，不切模式）
@@ -632,14 +974,17 @@ impl App {
                     }
                     return Task::none();
                 }
+                self.finish_props_edit();
                 self.props.editing = None;
                 self.props.adding = Some(AddForm { key: String::new(), step: AddStep::Key });
                 self.props.collapsed = false;
                 self.props.draft.clear();
                 self.props.duplicate = None;
+                self.reset_suggest();
                 self.focus_slot()
             }
             PropsMsg::KeySuggestPick(name) => {
+                self.reset_suggest();
                 if let Some(form) = self.props.adding.as_mut() {
                     form.key = name;
                     form.step = AddStep::Value;
@@ -649,32 +994,43 @@ impl App {
                 self.focus_slot()
             }
             PropsMsg::TagSuggestPick(tag) => {
-                // 候选点击 = 追加进值输入（中文逗号分隔），由 Enter 统一落盘
-                let trimmed = self.props.draft.trim().to_string();
-                self.props.draft = if trimmed.is_empty() {
-                    tag
-                } else {
-                    format!("{trimmed}，{tag}")
-                };
-                self.focus_slot()
+                let draft = append_tag(&self.props.draft, &tag);
+                self.props.draft = draft.clone();
+                self.props.suggest.query = draft;
+                self.props.suggest.index = 0;
+                self.props.suggest.armed = false;
+                // 只聚焦不全选：选集候选是往草稿末尾追加，接着输入不应覆盖已有标签
+                operation::focus(self.props.focus_id.clone())
             }
-            PropsMsg::AddCommit => self.add_commit(),
-            PropsMsg::AddCancel => {
-                self.props.adding = None;
-                self.props.draft.clear();
-                self.props.duplicate = None;
-                Task::none()
-            }
-            PropsMsg::ConvertType(i, target) => {
+            PropsMsg::ConvertType(key, target) => {
+                self.finish_props_edit();
                 if let Some(mut data) = self.props_data() {
-                    if let Some((_, v)) = data.get_mut(i) {
-                        if let Some(converted) = frontmatter::convert_value(v, target) {
-                            *v = converted;
-                            self.apply_props(data);
+                    if let Some(i) = data.iter().position(|(k, _)| k == &key) {
+                        match frontmatter::convert_value(&data[i].1, target) {
+                            Some(converted) if converted != data[i].1 => {
+                                data[i].1 = converted;
+                                self.apply_props(data);
+                            }
+                            Some(_) => {}
+                            None => self.notify(NoticeLevel::Info, "当前值无法转换为该类型"),
                         }
                     }
                 }
                 Task::none()
+            }
+            PropsMsg::OpenTypeMenu { key, window, cursor } => {
+                let pre = self.props_data().and_then(|d| d.iter().position(|(k, _)| k == &key));
+                let deleted = self.finish_props_edit();
+                let target = self.props_data().and_then(|d| {
+                    d.iter()
+                        .position(|(k, _)| k == &key)
+                        .or_else(|| if deleted { None } else { pre.filter(|i| *i < d.len()) })
+                        .map(|i| d[i].0.clone())
+                });
+                match target {
+                    Some(key) => Task::done(open_type_menu(window, cursor, key)),
+                    None => Task::none(),
+                }
             }
         }
     }
@@ -685,6 +1041,17 @@ impl App {
             Some((Yaml::Map(pairs), true)) => Some(pairs.clone()),
             _ => None,
         }
+    }
+
+    /// 动作目标行：提交式失焦后先按键名重定位；刚把该行键名改掉（未删行）时按下标兜底。
+    fn action_row(&self, row: &RowRef, pre: Option<usize>, deleted: bool) -> Option<usize> {
+        let data = self.props_data()?;
+        resolve_row(&data, row).or_else(|| {
+            if deleted {
+                return None;
+            }
+            pre.filter(|i| *i < data.len())
+        })
     }
 
     /// 当前编辑槽的现值（进入编辑时的草稿初值）。
@@ -702,12 +1069,62 @@ impl App {
         text.unwrap_or_default()
     }
 
+    /// 当前编辑上下文可选的候选（与渲染同一口径）。
+    fn props_suggestions(&self) -> Vec<String> {
+        let query = &self.props.suggest.query;
+        if let Some(form) = &self.props.adding {
+            return match form.step {
+                AddStep::Key => key_suggestions(self, query),
+                AddStep::Value if is_badge_key(&form.key) => tag_suggestions(self, query),
+                AddStep::Value => Vec::new(),
+            };
+        }
+        match &self.props.editing {
+            Some(Slot::Key(i)) => row_suggestions(self, *i).map(|(items, _)| items).unwrap_or_default(),
+            Some(Slot::Item(i, _) | Slot::NewItem(i)) => {
+                row_suggestions(self, *i).map(|(items, _)| items).unwrap_or_default()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Enter：选中当前高亮候选（dir = 提交后前进方向），无候选则走普通提交。
+    fn pick_suggestion(&mut self, dir: i32) -> Task<Message> {
+        let items = self.props_suggestions();
+        let idx = self.props.suggest.index.min(items.len().saturating_sub(1));
+        match items.into_iter().nth(idx) {
+            Some(text) => self.pick_suggestion_text(text, dir),
+            None if self.props.adding.is_some() => self.add_commit(true),
+            None => self.commit_slot(dir),
+        }
+    }
+
+    /// 候选选中：编辑槽替换草稿后提交；添加表单键名步进值步、值步追加进草稿。
+    fn pick_suggestion_text(&mut self, text: String, dir: i32) -> Task<Message> {
+        self.props.suggest.armed = false;
+        if let Some(form) = &self.props.adding {
+            return match form.step {
+                AddStep::Key => self.on_props(PropsMsg::KeySuggestPick(text)),
+                AddStep::Value => self.on_props(PropsMsg::TagSuggestPick(text)),
+            };
+        }
+        if matches!(self.props.editing, Some(Slot::Key(_) | Slot::Item(..) | Slot::NewItem(_))) {
+            self.props.draft = text;
+        }
+        self.commit_slot(dir)
+    }
+
     /// 提交当前编辑槽并按方向移动（槽被删空则不前进；前进越界接续添加表单）。
     fn commit_slot(&mut self, dir: i32) -> Task<Message> {
-        let Some(slot) = self.props.editing.clone() else { return Task::none() };
+        self.commit_slot_report(dir).0
+    }
+
+    /// `.1` = 槽被删空（行 / 项已消失，调用方的行身份失去兜底依据）。
+    fn commit_slot_report(&mut self, dir: i32) -> (Task<Message>, bool) {
+        let Some(slot) = self.props.editing.clone() else { return (Task::none(), false) };
         let Some(mut data) = self.props_data() else {
-            self.props.editing = None;
-            return Task::none();
+            self.cancel_slot_edit();
+            return (Task::none(), false);
         };
         // 槽越界守卫（undo 重建的属性数据可能比编辑发起时少项）：越界 = 取消编辑不提交
         let valid = match &slot {
@@ -715,22 +1132,34 @@ impl App {
             Slot::Item(pi, ii) => data.get(*pi).is_some_and(|(_, v)| {
                 matches!(v, Yaml::Seq(items) if *ii < items.len())
             }),
+            Slot::NewItem(pi) => data.get(*pi).is_some_and(|(_, v)| matches!(v, Yaml::Seq(_))),
         };
         if !valid {
-            self.props.editing = None;
-            return Task::none();
+            self.cancel_slot_edit();
+            return (Task::none(), false);
         }
         let draft = std::mem::take(&mut self.props.draft);
-        let (changed, deleted) = commit_slot_data(&mut data, &slot, &draft);
-        if changed {
+        let outcome = commit_slot_data(&mut data, &slot, &draft);
+        if outcome.changed {
             self.apply_props(data.clone());
         }
-        self.props.editing = None;
-        if deleted || dir == 0 {
-            return Task::none();
+        self.cancel_slot_edit();
+        if outcome.deleted || dir == 0 {
+            return (Task::none(), outcome.deleted);
         }
+        let anchor = match &slot {
+            Slot::Key(i) => Some(Slot::Key(*i)),
+            Slot::Value(i) => Some(Slot::Value(*i)),
+            Slot::Item(pi, ii) => Some(match outcome.item_span {
+                Some((_, last)) if dir > 0 => Slot::Item(*pi, last),
+                Some((first, _)) => Slot::Item(*pi, first),
+                None => Slot::Item(*pi, *ii),
+            }),
+            Slot::NewItem(_) => None,
+        };
+        let Some(anchor) = anchor else { return (Task::none(), false) };
         let slots = flatten_slots(&data);
-        let target = match slots.iter().position(|s| *s == slot) {
+        let target = match slots.iter().position(|s| *s == anchor) {
             Some(p) if dir > 0 => slots.get(p + 1).cloned(),
             Some(p) => p.checked_sub(1).and_then(|q| slots.get(q).cloned()),
             None => None,
@@ -739,22 +1168,24 @@ impl App {
             Some(next) => {
                 self.props.editing = Some(next);
                 self.props.draft = self.slot_text();
-                self.focus_slot()
+                (self.focus_slot(), false)
             }
-            None if dir > 0 => self.on_props(PropsMsg::StartAdd),
-            None => Task::none(),
+            None if dir > 0 => (self.on_props(PropsMsg::StartAdd), false),
+            None => (Task::none(), false),
         }
     }
 
-    /// 添加表单 Enter：键名步进值步；值步落盘（徽章键恒数组、含逗号拆数组、重复键回键名步）。
-    /// 输入缓冲统一用 `draft`（键名步 = 键名草稿，值步 = 值草稿）。
-    fn add_commit(&mut self) -> Task<Message> {
+    /// 添加表单提交：键名步进值步；值步落盘（tags 恒数组、含逗号拆数组）。
+    /// `explicit_commit` = 回车 / Tab 显式提交：空值即建空属性，重复键退回键名步；
+    /// 失焦提交则空值取消、重复键关闭表单并提示（不否决点击外部）。
+    fn add_commit(&mut self, explicit_commit: bool) -> Task<Message> {
         let Some(form) = self.props.adding.clone() else { return Task::none() };
         match form.step {
             AddStep::Key => {
                 let name = self.props.draft.trim().to_string();
                 if name.is_empty() {
-                    return self.on_props(PropsMsg::AddCancel);
+                    self.close_add();
+                    return Task::none();
                 }
                 let dup = self.props_data().is_some_and(|d| d.iter().any(|(k, _)| k == &name));
                 if dup {
@@ -766,23 +1197,34 @@ impl App {
                     f.step = AddStep::Value;
                 }
                 self.props.draft.clear();
+                self.reset_suggest();
                 self.focus_slot()
             }
             AddStep::Value => {
                 let name = form.key.clone();
                 let value = self.props.draft.trim().to_string();
-                if value.is_empty() {
-                    return self.on_props(PropsMsg::AddCancel);
+                if value.is_empty() && !explicit_commit {
+                    self.close_add();
+                    return Task::none();
                 }
                 let badge = is_badge_key(&name);
                 let mut data = self.props_data().unwrap_or_default();
-                let items: Vec<String> = split_comma_list(&value);
+                let items = split_comma_list(&value);
                 match data.iter().position(|(k, _)| k == &name) {
                     Some(i) if badge && matches!(data[i].1, Yaml::Seq(_)) => {
                         // 徽章键且原值是数组 = 直接追加进数组
+                        if items.is_empty() {
+                            self.close_add();
+                            return Task::none();
+                        }
                         if let Yaml::Seq(list) = &mut data[i].1 {
                             list.extend(items.into_iter().map(Yaml::Str));
                         }
+                    }
+                    Some(_) if !explicit_commit => {
+                        self.close_add();
+                        self.notify(NoticeLevel::Info, format!("属性「{name}」已存在，未写入"));
+                        return Task::none();
                     }
                     Some(_) => {
                         self.props.duplicate = Some(format!("属性「{name}」已存在，请改键名或编辑该属性"));
@@ -790,6 +1232,7 @@ impl App {
                             f.step = AddStep::Key;
                             self.props.draft = f.key.clone();
                         }
+                        self.reset_suggest();
                         return self.focus_slot();
                     }
                     None => {
@@ -801,9 +1244,7 @@ impl App {
                         data.push((name, val));
                     }
                 }
-                self.props.adding = None;
-                self.props.duplicate = None;
-                self.props.draft.clear();
+                self.close_add();
                 self.apply_props(data);
                 Task::none()
             }
@@ -838,71 +1279,157 @@ impl App {
 
     /// 清空属性面板交互态（切文件 / 关文件 / 切仓库时）。
     pub fn reset_props(&mut self) {
-        self.props.editing = None;
-        self.props.adding = None;
-        self.props.duplicate = None;
-        self.props.draft.clear();
+        self.clear_props_edit();
+        self.props.press_inside = false;
         self.refresh_props();
     }
 }
 
-/// 槽位提交：返回（数据是否有变化、槽是否被删空）。
-/// 键名 trim 空 = 删属性；改名撞已有键或未变 = 无变化（保守退出）；
-/// 单值 trim 空 = 删属性；数组项 trim 空 = 删项；数组项含逗号 = 拆多项替换。
-fn commit_slot_data(data: &mut Vec<(String, Yaml)>, slot: &Slot, draft: &str) -> (bool, bool) {
+/// 按行身份解析行下标；带项身份时校验下标处的文本仍一致（拆项 / 删项后下标会漂移）。
+fn resolve_row(data: &[(String, Yaml)], row: &RowRef) -> Option<usize> {
+    let i = data.iter().position(|(k, _)| k == &row.key)?;
+    if let Some((j, text)) = &row.item {
+        let Yaml::Seq(items) = &data[i].1 else { return None };
+        if item_text(items.get(*j)?) != *text {
+            return None;
+        }
+    }
+    Some(i)
+}
+
+/// 按行身份把渲染时的槽重定位到当前数据（动作先提交失焦槽，数据可能已变）。
+fn resolve_slot(data: &[(String, Yaml)], slot: &Slot, row: &RowRef) -> Option<Slot> {
+    let i = resolve_row(data, row)?;
+    match slot {
+        Slot::Key(_) => Some(Slot::Key(i)),
+        Slot::Value(_) => matches!(data[i].1, Yaml::Str(_)).then_some(Slot::Value(i)),
+        Slot::Item(..) => {
+            let (j, _) = row.item.as_ref()?;
+            let Yaml::Seq(items) = &data[i].1 else { return None };
+            scalar_text(items.get(*j)?).map(|_| Slot::Item(i, *j))
+        }
+        Slot::NewItem(_) => Some(Slot::NewItem(i)),
+    }
+}
+
+/// 按行下标重定位槽（同行编辑刚改掉键名时使用）；数组项须走文本身份，不做下标兜底。
+fn slot_at(data: &[(String, Yaml)], slot: &Slot, i: usize) -> Option<Slot> {
+    let (_, value) = data.get(i)?;
+    match slot {
+        Slot::Key(_) => Some(Slot::Key(i)),
+        Slot::Value(_) => matches!(value, Yaml::Str(_)).then_some(Slot::Value(i)),
+        Slot::NewItem(_) => matches!(value, Yaml::Seq(_)).then_some(Slot::NewItem(i)),
+        Slot::Item(..) => None,
+    }
+}
+
+/// 槽位提交结果：`item_span` = 数组项提交后占用的下标区间（前进落点用）。
+struct CommitOutcome {
+    changed: bool,
+    deleted: bool,
+    item_span: Option<(usize, usize)>,
+}
+
+impl CommitOutcome {
+    fn unchanged() -> Self {
+        Self { changed: false, deleted: false, item_span: None }
+    }
+
+    fn removed() -> Self {
+        Self { changed: true, deleted: true, item_span: None }
+    }
+}
+
+/// 槽位提交：返回数据是否变化与槽是否被删空。
+/// 草稿与原值一致 = 无变化（原本即空也不清删）；键名撞已有键 = 无变化；
+/// 单值清空 = 留空属性（可再切类型）；键名 / 数组项 trim 空 = 删；数组项含逗号 = 拆多项替换。
+fn commit_slot_data(data: &mut Vec<(String, Yaml)>, slot: &Slot, draft: &str) -> CommitOutcome {
     let value = draft.trim();
     match slot {
         Slot::Key(i) => {
-            let name = value.to_string();
-            if name.is_empty() {
+            // 未输入（与原地一致）不写盘：空键可能本来就存在，先判同再判删
+            if value == data[*i].0.trim()
+                || data.iter().enumerate().any(|(j, (k, _))| j != *i && k == value)
+            {
+                CommitOutcome::unchanged()
+            } else if value.is_empty() {
                 data.remove(*i);
-                (true, true)
-            } else if name == data[*i].0 || data.iter().enumerate().any(|(j, (k, _))| j != *i && k == &name) {
-                (false, false)
+                CommitOutcome::removed()
             } else {
-                data[*i].0 = name;
-                (true, false)
+                data[*i].0 = value.to_string();
+                CommitOutcome { changed: true, deleted: false, item_span: None }
             }
         }
         Slot::Value(i) => {
-            if value.is_empty() {
-                data.remove(*i);
-                (true, true)
+            // 草稿未变（含原本就是空串）= 回归原状；改空 = 保留空属性
+            let same = matches!(&data[*i].1, Yaml::Str(s) if s.trim() == value);
+            if same {
+                CommitOutcome::unchanged()
             } else {
                 data[*i].1 = Yaml::Str(value.to_string());
-                (true, false)
+                CommitOutcome { changed: true, deleted: false, item_span: None }
             }
         }
         Slot::Item(pi, ii) => {
-            let Yaml::Seq(items) = &mut data[*pi].1 else { return (false, false) };
+            let Yaml::Seq(items) = &mut data[*pi].1 else { return CommitOutcome::unchanged() };
+            let original = item_text(&items[*ii]);
             if value.is_empty() {
+                if original.trim().is_empty() {
+                    return CommitOutcome::unchanged();
+                }
                 items.remove(*ii);
-                (true, true)
+                CommitOutcome::removed()
             } else {
-                let parts: Vec<String> = split_comma_list(value);
+                let parts = split_comma_list(value);
                 if parts.len() == 1 {
+                    if parts[0] == original.trim() {
+                        return CommitOutcome::unchanged();
+                    }
                     items[*ii] = Yaml::Str(parts.into_iter().next().unwrap());
                 } else {
+                    let count = parts.len();
                     items.splice(*ii..=*ii, parts.into_iter().map(Yaml::Str));
+                    return CommitOutcome {
+                        changed: true,
+                        deleted: false,
+                        item_span: Some((*ii, *ii + count - 1)),
+                    };
                 }
-                (true, false)
+                CommitOutcome { changed: true, deleted: false, item_span: Some((*ii, *ii)) }
+            }
+        }
+        Slot::NewItem(pi) => {
+            let Yaml::Seq(items) = &mut data[*pi].1 else { return CommitOutcome::unchanged() };
+            let parts = split_comma_list(value);
+            if parts.is_empty() {
+                return CommitOutcome::unchanged();
+            }
+            let first = items.len();
+            items.extend(parts.into_iter().map(Yaml::Str));
+            CommitOutcome {
+                changed: true,
+                deleted: false,
+                item_span: Some((first, items.len() - 1)),
             }
         }
     }
 }
 
-/// 槽位线性序（键 → 值 / 数组项）。
+/// 槽位线性序（键 → 可编辑值 / 数组项）；只读值（布尔 / 嵌套）不入序，前进不落在不可编辑项上。
 fn flatten_slots(data: &[(String, Yaml)]) -> Vec<Slot> {
     let mut slots = Vec::new();
     for (i, (_, v)) in data.iter().enumerate() {
         slots.push(Slot::Key(i));
         match v {
+            Yaml::Str(_) => slots.push(Slot::Value(i)),
             Yaml::Seq(items) => {
-                for j in 0..items.len() {
-                    slots.push(Slot::Item(i, j));
+                for (j, item) in items.iter().enumerate() {
+                    if scalar_text(item).is_some() {
+                        slots.push(Slot::Item(i, j));
+                    }
                 }
             }
-            _ => slots.push(Slot::Value(i)),
+            _ => {}
         }
     }
     slots
@@ -923,4 +1450,162 @@ fn split_comma_list(s: &str) -> Vec<String> {
         .map(|p| p.trim().to_string())
         .filter(|p| !p.is_empty())
         .collect()
+}
+
+/// 标签候选追加：草稿已以逗号结尾时直接拼接，避免双逗号。
+fn append_tag(draft: &str, tag: &str) -> String {
+    let trimmed = draft.trim();
+    if trimmed.is_empty() {
+        tag.to_string()
+    } else if trimmed.ends_with([',', '，']) {
+        format!("{trimmed}{tag}")
+    } else {
+        format!("{trimmed}，{tag}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn data() -> Vec<(String, Yaml)> {
+        vec![
+            ("tags".into(), Yaml::Seq(vec![Yaml::Str("a".into()), Yaml::Str("b".into())])),
+            ("status".into(), Yaml::Str("done".into())),
+        ]
+    }
+
+    fn items(data: &[(String, Yaml)], i: usize) -> Vec<String> {
+        match &data[i].1 {
+            Yaml::Seq(items) => items.iter().map(item_text).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    #[test]
+    fn unchanged_value_does_not_write() {
+        let mut d = data();
+        let out = commit_slot_data(&mut d, &Slot::Value(1), "done");
+        assert!(!out.changed && !out.deleted);
+        assert_eq!(d[1].1, Yaml::Str("done".into()));
+    }
+
+    #[test]
+    fn empty_value_keeps_property() {
+        let mut d = data();
+        let out = commit_slot_data(&mut d, &Slot::Value(1), "  ");
+        assert!(out.changed && !out.deleted);
+        assert_eq!(d.len(), 2);
+        assert_eq!(d[1].1, Yaml::Str(String::new()));
+    }
+
+    #[test]
+    fn empty_key_deletes_property() {
+        let mut d = data();
+        let out = commit_slot_data(&mut d, &Slot::Key(0), "");
+        assert!(out.deleted);
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].0, "status");
+    }
+
+    #[test]
+    fn duplicate_key_rename_is_ignored() {
+        let mut d = data();
+        let out = commit_slot_data(&mut d, &Slot::Key(0), "status");
+        assert!(!out.changed);
+        assert_eq!(d[0].0, "tags");
+    }
+
+    #[test]
+    fn empty_item_deletes_item() {
+        let mut d = data();
+        let out = commit_slot_data(&mut d, &Slot::Item(0, 1), "");
+        assert!(out.deleted);
+        assert_eq!(items(&d, 0), vec!["a"]);
+    }
+
+    #[test]
+    fn comma_item_splits_and_reports_span() {
+        let mut d = data();
+        let out = commit_slot_data(&mut d, &Slot::Item(0, 1), "b,c，d");
+        assert!(out.changed && !out.deleted);
+        assert_eq!(out.item_span, Some((1, 3)));
+        assert_eq!(items(&d, 0), vec!["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn unchanged_item_does_not_write() {
+        let mut d = data();
+        let out = commit_slot_data(&mut d, &Slot::Item(0, 0), " a ");
+        assert!(!out.changed);
+        assert_eq!(items(&d, 0), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn unchanged_empty_value_is_kept() {
+        let mut d = vec![("note".into(), Yaml::Str(String::new()))];
+        let out = commit_slot_data(&mut d, &Slot::Value(0), "");
+        assert!(!out.changed && !out.deleted);
+        assert_eq!(d, vec![("note".to_string(), Yaml::Str(String::new()))]);
+    }
+
+    #[test]
+    fn unchanged_empty_item_is_kept() {
+        let mut d = vec![
+            ("tags".into(), Yaml::Seq(vec![Yaml::Str(String::new()), Yaml::Str("a".into())])),
+        ];
+        let out = commit_slot_data(&mut d, &Slot::Item(0, 0), "");
+        assert!(!out.changed && !out.deleted);
+        assert_eq!(items(&d, 0), vec!["", "a"]);
+    }
+
+    #[test]
+    fn new_item_appends_only_when_non_empty() {
+        let mut d = data();
+        let out = commit_slot_data(&mut d, &Slot::NewItem(0), "");
+        assert!(!out.changed);
+        assert_eq!(items(&d, 0), vec!["a", "b"]);
+
+        let out = commit_slot_data(&mut d, &Slot::NewItem(0), "c，d");
+        assert!(out.changed);
+        assert_eq!(out.item_span, Some((2, 3)));
+        assert_eq!(items(&d, 0), vec!["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn row_ref_tracks_row_after_removal() {
+        let mut d = data();
+        d.remove(0);
+        assert_eq!(resolve_row(&d, &RowRef::row("status")), Some(0));
+        assert!(resolve_row(&d, &RowRef::row("tags")).is_none());
+    }
+
+    #[test]
+    fn item_row_ref_requires_same_text() {
+        let d = data();
+        let hit = RowRef { key: "tags".into(), item: Some((0, "a".into())) };
+        let miss = RowRef { key: "tags".into(), item: Some((0, "b".into())) };
+        let out_of_range = RowRef { key: "tags".into(), item: Some((9, "a".into())) };
+        assert_eq!(resolve_row(&d, &hit), Some(0));
+        assert!(resolve_row(&d, &miss).is_none());
+        assert!(resolve_row(&d, &out_of_range).is_none());
+    }
+
+    #[test]
+    fn flatten_slots_skips_readonly_values() {
+        let d = vec![
+            ("count".into(), Yaml::Num(3.0)),
+            ("flag".into(), Yaml::Bool(true)),
+            ("name".into(), Yaml::Str("x".into())),
+        ];
+        assert_eq!(flatten_slots(&d), vec![Slot::Key(0), Slot::Key(1), Slot::Key(2), Slot::Value(2)]);
+    }
+
+    #[test]
+    fn append_tag_handles_trailing_comma() {
+        assert_eq!(append_tag("", "a"), "a");
+        assert_eq!(append_tag("x", "a"), "x，a");
+        assert_eq!(append_tag("x，", "a"), "x，a");
+        assert_eq!(append_tag("x, ", "a"), "x,a");
+    }
 }

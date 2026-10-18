@@ -1967,9 +1967,7 @@ impl App {
                         self.edit.focused = false;
                         self.note_edit_caret_pending = false;
                         // 属性面板随源码档卸载，槽位编辑态不得留存（否则回编辑档后键盘无归属）
-                        self.props.editing = None;
-                        self.props.adding = None;
-                        self.props.draft.clear();
+                        self.clear_props_edit();
                         self.source_editor = text_editor::Content::with_text(&self.note_text);
                     }
                 }
@@ -2009,6 +2007,13 @@ impl App {
                 Task::none()
             }
             Message::NavKey(horizontal, positive) => {
+                // 属性输入：↑↓ 走候选高亮（左右仍是输入框光标），不落到分割把手
+                if self.props.editing.is_some() || self.props.adding.is_some() {
+                    if horizontal {
+                        return Task::none();
+                    }
+                    return self.on_props(PropsMsg::SuggestMove(if positive { 1 } else { -1 }));
+                }
                 if self.wiki_picker.is_some() {
                     let n = self.wiki_candidates().len();
                     if n > 0 {
@@ -2689,6 +2694,13 @@ impl App {
                     } else {
                         s.view.focused = false;
                     }
+                }
+                // 属性输入失焦即提交：同批属性面板按压（PressReporter）先行置位；
+                // 面板内按压由控件自身动作先提交（切槽 / 删除等），此处只处理外点。
+                // 须先于弹层早退消费：弹层开着时按压仍应结算属性输入
+                let props_press_inside = std::mem::take(&mut self.props.press_inside);
+                if (self.props.editing.is_some() || self.props.adding.is_some()) && !props_press_inside {
+                    self.finish_props_edit();
                 }
                 // 弹层打开期间按压交由捕获层处理（外点关闭），不触发拖拽手势
                 if self.popup.as_ref().is_some_and(|(w, _)| *w == id) {
@@ -6184,9 +6196,7 @@ impl App {
         if let Some((text, caret, anchor)) = self.edit.undo(&self.note_text) {
             // 撤销栈存全文（含 frontmatter）：直接回填，正文坐标不变。
             // 属性槽编辑态随内容失效（槽序号可能越界），一律取消
-            self.props.editing = None;
-            self.props.adding = None;
-            self.props.draft.clear();
+            self.clear_props_edit();
             self.note_text = text;
             self.dirty = true;
             let body_len = self.edit_body().len();
@@ -6199,9 +6209,7 @@ impl App {
 
     fn edit_redo(&mut self) {
         if let Some((text, caret, anchor)) = self.edit.redo(&self.note_text) {
-            self.props.editing = None;
-            self.props.adding = None;
-            self.props.draft.clear();
+            self.clear_props_edit();
             self.note_text = text;
             self.dirty = true;
             let body_len = self.edit_body().len();

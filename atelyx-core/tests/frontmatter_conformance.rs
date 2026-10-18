@@ -91,6 +91,25 @@ fn conformance_matches_snapshot() {
     }
 }
 
+/// 空属性（空串 / null）可直接切换为布尔与空列表，供面板「先建空属性再改类型」的流程使用。
+#[test]
+fn empty_value_converts_to_bool_and_empty_list() {
+    use atelyx_core::frontmatter::PropType;
+    let empty = Yaml::Str(String::new());
+    assert_eq!(
+        frontmatter::convert_value(&empty, PropType::Boolean),
+        Some(Yaml::Bool(false))
+    );
+    assert_eq!(
+        frontmatter::convert_value(&Yaml::Null, PropType::Boolean),
+        Some(Yaml::Bool(false))
+    );
+    assert_eq!(
+        frontmatter::convert_value(&empty, PropType::List),
+        Some(Yaml::Seq(Vec::new()))
+    );
+}
+
 /// 行首空白的多行字符串：字面量块不安全，序列化回落双引号转义；产物必须可解析回原值。
 #[test]
 fn multiline_with_leading_space_roundtrips_via_double_quotes() {
