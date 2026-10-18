@@ -415,8 +415,10 @@ impl Context {
         Ok(result.path)
     }
 
+    /// 出网请求：等待上限由 params 的 `timeoutMs` 决定（宿主据此设请求超时），SDK 不另设等待
+    /// 上限——宿主不对 http 施加地址 / 大小 / 超时限制，超时完全由插件自负其责。
     pub async fn http_request(&self, params: HttpRequestParams) -> Result<HttpResult, RpcError> {
-        self.call_typed(method::http::REQUEST, &params).await
+        self.call_typed_unbounded(method::http::REQUEST, &params).await
     }
 
     async fn call_unit<P: Serialize>(&self, method: &str, params: &P) -> Result<(), RpcError> {

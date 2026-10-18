@@ -1,22 +1,17 @@
-//! 网页抓取代理命令（`fetch_web`，返回 title + 正文纯文本供 AI `fetch_url` 工具回填）+
-//! 通用 HTTP 请求命令（`http_request`，返回状态码 + 响应头 + 原样文本体，插件 `ctx.http` 面）。
-//! 由 Rust 侧执行：统一超时与大小上限；地址按命令身份分策略（见 `RequestKind`），边界校验见 `net_guard`。
-//! 失败一律 Err（非 http/https、方法白名单外、地址被拒、网络/HTTP 错误），由调用方降级为错误文本。
-
-use std::collections::HashMap;
+//! 网页抓取代理命令（`fetch_web`，返回 title + 正文纯文本供 AI `fetch_url` 工具回填）。
+//! 由 Rust 侧执行：统一超时与响应上限；地址走公网策略（见 `net_guard`，防提示注入诱导抓内网）。
+//! 失败一律 Err（非 http/https、地址被拒、网络/HTTP 错误），由调用方降级为错误文本。
 
 use reqwest::header::{ACCEPT, USER_AGENT};
-use reqwest::Url;
-use serde::{Deserialize, Serialize};
 
-use crate::net_guard::{client_for, ensure_local_service_http_url, ensure_public_http_url, ClientTimeout, HostPolicy};
+use serde::Serialize;
+
+use crate::net_guard::{client_for, ensure_public_http_url, ClientTimeout, HostPolicy};
 
 /// 抓取响应上限（字节）。防超大页面/二进制拖死请求，超出即截断。
 const MAX_RESPONSE_BYTES: usize = 1_000_000;
 /// 回填文本的字符上限（防一条 tool 消息撑爆上下文）。
 const MAX_TEXT_CHARS: usize = 20_000;
-/// 允许的 HTTP 方法（白名单：其余一律拒绝，防 CONNECT/TRACE 等非预期语义）。
-const ALLOWED_METHODS: [&str; 6] = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"];
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -28,59 +23,10 @@ pub struct FetchedWebPage {
     pub truncated: bool,
 }
 
-/// 通用 HTTP 请求输入。
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct HttpRequest {
-    pub url: String,
-    /// 缺省 GET（白名单见 ALLOWED_METHODS）。
-    pub method: Option<String>,
-    pub headers: Option<HashMap<String, String>>,
-    /// 请求体（GET/HEAD 也可带，由调用方自行决定）。
-    pub body: Option<String>,
-}
-
-/// 通用 HTTP 响应（正文为文本；非 UTF-8 用替换字符容错）。
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct HttpResponse {
-    pub status: u16,
-    pub headers: HashMap<String, String>,
-    pub body: String,
-    /// 正文是否命中 MAX_RESPONSE_BYTES 被截断。
-    pub truncated: bool,
-}
-
-/// 出网请求类别：地址策略按类别选择（身份天然按命令分离——fetch_web 仅被 AI fetch_url 工具
-/// 消费、http_request 仅被插件 ctx.http 消费，无需身份参数下传）。
-#[derive(Clone, Copy)]
-enum RequestKind {
-    /// 网页抓取（模型工具，可被提示注入诱导）：公网策略，防诱导抓内网。
-    WebFetch,
-    /// 插件通用 HTTP（可信主体）：本机/局域网策略，回环/私网/ULA 放行、云元数据/链路本地仍拒。
-    HttpRequest,
-}
-
-/// 类别 → 地址策略（入口校验与 DNS 解析器共用同一策略，避免两边漂移）。
-fn policy_for(kind: RequestKind) -> HostPolicy {
-    match kind {
-        RequestKind::WebFetch => HostPolicy::PublicOnly,
-        RequestKind::HttpRequest => HostPolicy::LocalService,
-    }
-}
-
-/// 类别 → 入口地址校验函数（客户端构建统一走 net_guard::client_for，此处仅供入口 URL 预检与测试）。
-fn url_check_for(kind: RequestKind) -> fn(&str) -> Result<Url, String> {
-    match policy_for(kind) {
-        HostPolicy::PublicOnly => ensure_public_http_url,
-        HostPolicy::LocalService => ensure_local_service_http_url,
-    }
-}
-
 /// 抓取网页正文（`https://`/`http://`）。
 pub async fn fetch_web(url: String) -> Result<FetchedWebPage, String> {
-    let parsed = url_check_for(RequestKind::WebFetch)(&url)?;
-    let client = client_for(policy_for(RequestKind::WebFetch), ClientTimeout::Total(20))?;
+    let parsed = ensure_public_http_url(&url)?;
+    let client = client_for(HostPolicy::PublicOnly, ClientTimeout::Total(20))?;
     let resp = client
         .get(parsed)
         .header(USER_AGENT, "Mozilla/5.0 (compatible; AtelyxWebFetch/1.0)")
@@ -104,42 +50,6 @@ pub async fn fetch_web(url: String) -> Result<FetchedWebPage, String> {
     })
 }
 
-/// 通用 HTTP 请求（插件 `ctx.http`）：方法白名单 + 统一超时/响应上限，响应头与正文原样返回。
-/// 走本机/局域网策略（回环/私网放行、云元数据/链路本地仍拒）——插件是可信主体，与模型
-/// 工具的 `fetch_web` 公网限制区分；重定向每跳与 DNS 解析结果同样过该策略。
-pub async fn http_request(req: HttpRequest) -> Result<HttpResponse, String> {
-    let url = url_check_for(RequestKind::HttpRequest)(&req.url)?;
-    let method = normalize_method(req.method.as_deref())?;
-    let client = client_for(policy_for(RequestKind::HttpRequest), ClientTimeout::Total(20))?;
-    let mut builder = client.request(method, url);
-    for (name, value) in req.headers.unwrap_or_default() {
-        builder = builder.header(name, value);
-    }
-    if let Some(body) = req.body {
-        builder = builder.body(body);
-    }
-    let resp = builder.send().await.map_err(|e| format!("请求失败：{}", e))?;
-    let status = resp.status().as_u16();
-    let headers = resp
-        .headers()
-        .iter()
-        .filter_map(|(name, value)| {
-            value
-                .to_str()
-                .ok()
-                .map(|v| (name.as_str().to_string(), v.to_string()))
-        })
-        .collect();
-    let (bytes, truncated) = read_capped(resp, MAX_RESPONSE_BYTES).await?;
-    let body = String::from_utf8_lossy(&bytes).into_owned();
-    Ok(HttpResponse {
-        status,
-        headers,
-        body,
-        truncated,
-    })
-}
-
 /// 边收边计读到上限即停：避免把超大响应整包读进内存（`bytes()` 先全量下载再截断，
 /// 上限形同虚设——2GB 响应会在超时前把内存打满）。返回值第二项 = 是否被上限截断。
 async fn read_capped(mut resp: reqwest::Response, cap: usize) -> Result<(Vec<u8>, bool), String> {
@@ -153,15 +63,6 @@ async fn read_capped(mut resp: reqwest::Response, cap: usize) -> Result<(Vec<u8>
         out.extend_from_slice(&chunk);
     }
     Ok((out, false))
-}
-
-/// 请求方法白名单校验 + 归一化（缺省 GET）。插件 http 能力面复用同一白名单（口径一处定义）。
-pub(crate) fn normalize_method(raw: Option<&str>) -> Result<reqwest::Method, String> {
-    let method = raw.unwrap_or("GET").to_uppercase();
-    if !ALLOWED_METHODS.contains(&method.as_str()) {
-        return Err(format!("不支持的请求方法：{method}"));
-    }
-    reqwest::Method::from_bytes(method.as_bytes()).map_err(|e| format!("请求方法无效：{e}"))
 }
 
 /// 提取 `<title>` 内容（去标签、去空白）。基于 ASCII 小写做字节定位（长度不变，安全）。
@@ -325,34 +226,6 @@ fn limit_chars(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod web_tests {
     use super::*;
-
-    #[test]
-    fn request_kind_policy_split_is_by_command_identity() {
-        // 两命令的策略必须不同：http_request 本机/局域网（回环/私网放行、云元数据仍拒），
-        // fetch_web 公网（回环/私网全拒）——身份按命令分离，杜绝模型工具借道内网。
-        assert!(matches!(policy_for(RequestKind::HttpRequest), HostPolicy::LocalService));
-        assert!(matches!(policy_for(RequestKind::WebFetch), HostPolicy::PublicOnly));
-        // 入口校验与 DNS 解析器都从同一 policy_for 派生：两边配对由该单一真源保证。
-        let local = url_check_for(RequestKind::HttpRequest);
-        assert!(local("http://127.0.0.1:11434/").is_ok());
-        assert!(local("http://192.168.1.10:8080/").is_ok());
-        assert!(local("http://169.254.169.254/latest/meta-data").is_err());
-        let public = url_check_for(RequestKind::WebFetch);
-        assert!(public("https://example.com/").is_ok());
-        assert!(public("http://127.0.0.1:11434/").is_err());
-        assert!(public("http://169.254.169.254/latest/meta-data").is_err());
-    }
-
-    #[test]
-    fn method_whitelist_allows_common_verbs_and_defaults_to_get() {
-        assert!(normalize_method(None).is_ok());
-        assert_eq!(normalize_method(Some("post")).unwrap(), reqwest::Method::POST);
-        assert!(normalize_method(Some("get")).is_ok());
-        // 白名单外拒绝（含 CONNECT/TRACE 等非预期语义）。
-        assert!(normalize_method(Some("TRACE")).is_err());
-        assert!(normalize_method(Some("CONNECT")).is_err());
-        assert!(normalize_method(Some("")).is_err());
-    }
 
     #[test]
     fn truncate_chars_marks_overflow() {
