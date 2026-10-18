@@ -31,9 +31,10 @@ pub fn on_msg(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
         }
         return on_msg_open(app, *inner);
     }
-    // 键盘来源的消息在弹层打开时一律不接（弹层输入自管，表格全局键不得干扰弹层）；
+    // 键盘来源的消息在弹层 / 灯箱打开时一律不接（前者自管输入，后者为模态预览）；
     // 表中各分支为键盘唯一入口，画布/菜单/回执来源不受限
-    if app.popup.is_some() {
+    let lightbox_open = app.table.as_ref().is_some_and(|t| t.view.lightbox.is_some());
+    if app.popup.is_some() || lightbox_open {
         match msg {
             tv::TableMsg::CharKey(_)
             | tv::TableMsg::NavKey(_)
@@ -462,8 +463,12 @@ fn on_msg_open(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
                 return Task::none();
             }
             lb.index = (lb.index as i32 + delta).rem_euclid(count as i32) as usize;
+            lb.reset_view();
             Task::none()
         }
+        tv::TableMsg::LightboxZoom { pos, view, delta_y } => on_lightbox_zoom(app, pos, view, delta_y),
+        tv::TableMsg::LightboxPress(pos) => on_lightbox_press(app, pos),
+        tv::TableMsg::LightboxPan { pos, view } => on_lightbox_pan(app, pos, view),
         tv::TableMsg::LightboxDownload => {
             app.dismiss_popup();
             download_lightbox_image(app)
@@ -1479,7 +1484,7 @@ fn on_release(app: &mut App, pos: Point) -> Task<Message> {
         .unwrap_or(0);
     match img.kind {
         tv::ImagePressKind::Main => {
-            s.view.lightbox = Some(tv::Lightbox { row_id: img.row_id, field_id: img.field_id, index: idx });
+            s.view.lightbox = Some(tv::Lightbox::new(img.row_id, img.field_id, idx));
         }
         tv::ImagePressKind::Thumb(i) => {
             let is_grid = s
@@ -1491,7 +1496,7 @@ fn on_release(app: &mut App, pos: Point) -> Task<Message> {
                 .and_then(|v| ops::image_display(v))
                 == Some("grid");
             if is_grid {
-                s.view.lightbox = Some(tv::Lightbox { row_id: img.row_id, field_id: img.field_id, index: i });
+                s.view.lightbox = Some(tv::Lightbox::new(img.row_id, img.field_id, i));
             }
         }
     }
@@ -1526,6 +1531,75 @@ fn on_wheel(app: &mut App, delta_y: f32, delta_x: f32) -> Task<Message> {
 
 fn distance(a: Point, b: Point) -> f32 {
     ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt()
+}
+
+// ===== 灯箱缩放 / 平移 =====
+
+/// 滚轮缩放：以光标为锚点，倍率区间 [适应窗口, 上限]。
+fn on_lightbox_zoom(app: &mut App, pos: Point, view: Size, delta_y: f32) -> Task<Message> {
+    let Some(s) = app.table.as_mut() else { return Task::none() };
+    let Some((w, h)) = s
+        .view
+        .lightbox
+        .as_ref()
+        .and_then(|lb| tv::lightbox_image(s, lb))
+        .map(|c| c.size)
+        .filter(|(w, h)| *w > 0.0 && *h > 0.0)
+    else {
+        return Task::none();
+    };
+    let Some(lb) = s.view.lightbox.as_mut() else { return Task::none() };
+    let next = tv::lightbox_zoom_level(lb.zoom, delta_y);
+    if (next - lb.zoom).abs() < f32::EPSILON {
+        return Task::none();
+    }
+    lb.pan = tv::lightbox_zoom_pan(view, (w, h), lb.zoom, next, lb.pan, pos);
+    lb.zoom = next;
+    Task::none()
+}
+
+/// 图片按压：双击复位；放大后按住即进入拖动。
+fn on_lightbox_press(app: &mut App, pos: Point) -> Task<Message> {
+    let Some(s) = app.table.as_mut() else { return Task::none() };
+    let Some(lb) = s.view.lightbox.as_mut() else { return Task::none() };
+    let now = std::time::Instant::now();
+    let double = lb.last_press.take().is_some_and(|(t, p)| {
+        now.duration_since(t).as_millis() < tv::DOUBLE_CLICK_MS
+            && (p.x - pos.x).abs() < tv::LIGHTBOX_CLICK_SLOP
+            && (p.y - pos.y).abs() < tv::LIGHTBOX_CLICK_SLOP
+    });
+    if double {
+        lb.reset_view();
+    } else {
+        lb.last_press = Some((now, pos));
+        lb.drag = Some(pos);
+    }
+    Task::none()
+}
+
+/// 拖动平移：按光标位移更新偏移（None = 松开）。
+fn on_lightbox_pan(app: &mut App, pos: Option<Point>, view: Size) -> Task<Message> {
+    let Some(s) = app.table.as_mut() else { return Task::none() };
+    let img = s
+        .view
+        .lightbox
+        .as_ref()
+        .and_then(|lb| tv::lightbox_image(s, lb))
+        .map(|c| c.size)
+        .filter(|(w, h)| *w > 0.0 && *h > 0.0);
+    let Some(lb) = s.view.lightbox.as_mut() else { return Task::none() };
+    match pos {
+        Some(p) => {
+            if let Some(last) = lb.drag {
+                if let Some(img) = img {
+                    lb.pan = tv::lightbox_clamp_pan(view, img, lb.zoom, lb.pan + (p - last));
+                }
+                lb.drag = Some(p);
+            }
+        }
+        None => lb.drag = None,
+    }
+    Task::none()
 }
 
 // ===== 编辑会话 =====

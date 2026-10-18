@@ -2879,6 +2879,10 @@ impl App {
                     s.view.reorder = None;
                     s.view.col_drag = None;
                     s.view.row_drag = None;
+                    // 灯箱拖动同理：松手落在预览层外时拖动会话不得悬挂
+                    if let Some(lb) = s.view.lightbox.as_mut() {
+                        lb.drag = None;
+                    }
                 }
                 if let Some(d) = self.file_drag.take() {
                     return self.resolve_file_drop(d);

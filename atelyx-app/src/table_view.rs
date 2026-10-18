@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use iced::widget::canvas::{self, Canvas, LineCap, LineDash, LineJoin, Path, Stroke};
 use iced::widget::text_editor;
-use iced::widget::{column, container, mouse_area, row, space};
+use iced::widget::{column, container, row, space};
 use iced::{alignment, Color, Element, Length, Point, Rectangle, Size, Vector};
 
 use crate::table_text::{TextLine, WrapCache, LINE_FACTOR};
@@ -69,6 +69,11 @@ const WHEEL_LINE_PX: f32 = 40.0;
 const BAR_GAP: f32 = 34.0;
 /// 灯箱图片四周遮罩边距（px；点击遮罩关闭的命中区）。
 const LIGHTBOX_MARGIN: f32 = 48.0;
+/// 灯箱缩放倍率上限（相对适应窗口）与滚轮指数系数（px → 倍率）。
+const LIGHTBOX_MAX_ZOOM: f32 = 8.0;
+const LIGHTBOX_ZOOM_RATE: f32 = 0.0035;
+/// 双击复位允许的按压位移（px）。
+pub const LIGHTBOX_CLICK_SLOP: f32 = 4.0;
 
 // 图片单元格
 const IMAGE_CAROUSEL_H: f32 = 96.0;
@@ -363,6 +368,28 @@ pub struct Lightbox {
     pub row_id: String,
     pub field_id: String,
     pub index: usize,
+    /// 缩放倍率（1 = 适应窗口）。
+    pub zoom: f32,
+    /// 图片中心相对可视区中心的平移（px，按显示尺寸夹紧）。
+    pub pan: Vector,
+    /// 拖动平移的上一光标点（None = 未拖动）。
+    pub drag: Option<Point>,
+    /// 上次按压（双击复位判定）。
+    pub last_press: Option<(Instant, Point)>,
+}
+
+impl Lightbox {
+    pub fn new(row_id: String, field_id: String, index: usize) -> Self {
+        Self { row_id, field_id, index, zoom: 1.0, pan: Vector::ZERO, drag: None, last_press: None }
+    }
+
+    /// 回到适应窗口（双击复位 / 翻页）。
+    pub fn reset_view(&mut self) {
+        self.zoom = 1.0;
+        self.pan = Vector::ZERO;
+        self.drag = None;
+        self.last_press = None;
+    }
 }
 
 /// 行高 / 列位布局缓存（version 或 zoom 变更即重建）。
@@ -448,6 +475,12 @@ pub enum TableMsg {
     LightboxClose,
     LightboxNav(i32),
     LightboxDownload,
+    /// 灯箱滚轮缩放（pos = 灯箱局部坐标，view = 灯箱尺寸）。
+    LightboxZoom { pos: Point, view: Size, delta_y: f32 },
+    /// 灯箱图片按压（双击复位 / 放大后开始拖动）。
+    LightboxPress(Point),
+    /// 灯箱拖动平移（Some = 拖动中的光标点，None = 松开）。
+    LightboxPan { pos: Option<Point>, view: Size },
     /// 打开灯箱右键菜单（下载图片）。
     OpenLightboxMenu(iced::window::Id),
     /// 打开工具条视图切换下拉。
@@ -1765,9 +1798,6 @@ pub fn table_view<'a>(app: &'a crate::App, window: iced::window::Id) -> Element<
     if let Some(bar) = format_bar(app, session, window) {
         stack = stack.push(bar);
     }
-    if let Some(lb) = &session.view.lightbox {
-        stack = stack.push(lightbox_overlay(session, lb, window));
-    }
     // 在场协作者（名册 presence.file 匹配当前表格的空间成员）
     let collab_members: Vec<(iced::Color, String)> = if matches!(app.repo_kind, crate::RepoKind::Space(_)) {
         app.space_peers
@@ -1784,13 +1814,18 @@ pub fn table_view<'a>(app: &'a crate::App, window: iced::window::Id) -> Element<
         Vec::new()
     };
 
-    column![
+    let body = column![
         toolbar(&collab_members, session, window),
         stack.width(Length::Fill).height(Length::Fill),
     ]
     .width(Length::Fill)
-    .height(Length::Fill)
-    .into()
+    .height(Length::Fill);
+    // 灯箱覆盖整个表格视图（含工具条）：预览期间表格收不到鼠标事件
+    let mut root = iced::widget::Stack::new().push(body);
+    if let Some(lb) = &session.view.lightbox {
+        root = root.push(lightbox_overlay(session, lb, window));
+    }
+    root.width(Length::Fill).height(Length::Fill).into()
 }
 
 /// 顶部工具条：协作者胶囊 + 行列统计 + 缩放 + ··· 菜单。
@@ -2104,7 +2139,205 @@ fn clear_btn() -> Element<'static, Message> {
         .into()
 }
 
-/// 灯箱：点击图片外关闭；右键图片弹下载菜单；多图显示左右翻页与计数。
+// ===== 灯箱几何与交互 =====
+
+/// 灯箱可视区（四周留遮罩边距）。
+fn lightbox_inner(view: Size) -> Rectangle {
+    Rectangle::new(
+        Point::new(LIGHTBOX_MARGIN, LIGHTBOX_MARGIN),
+        Size::new(
+            (view.width - 2.0 * LIGHTBOX_MARGIN).max(1.0),
+            (view.height - 2.0 * LIGHTBOX_MARGIN).max(1.0),
+        ),
+    )
+}
+
+/// 当前灯箱图片的缓存（索引越界或未加载 = None）。
+pub fn lightbox_image<'a>(session: &'a TableSession, lb: &Lightbox) -> Option<&'a CachedImage> {
+    let images = session
+        .data
+        .rows
+        .iter()
+        .find(|r| r.id == lb.row_id)?
+        .values
+        .get(&lb.field_id)
+        .map(table_ops::image_entries)?;
+    let index = lb.index.min(images.len().checked_sub(1)?);
+    session.view.images.get(images[index])
+}
+
+/// 适应可视区并乘以倍率后的显示尺寸。
+fn lightbox_display(view: Size, img: (f32, f32), zoom: f32) -> Size {
+    let inner = lightbox_inner(view);
+    let scale = (inner.width / img.0).min(inner.height / img.1) * zoom;
+    Size::new(img.0 * scale, img.1 * scale)
+}
+
+/// 平移量按显示尺寸夹紧：放得下的方向居中，放不下的方向不露白边。
+pub fn lightbox_clamp_pan(view: Size, img: (f32, f32), zoom: f32, pan: Vector) -> Vector {
+    let inner = lightbox_inner(view);
+    let d = lightbox_display(view, img, zoom);
+    let max_x = ((d.width - inner.width) / 2.0).max(0.0);
+    let max_y = ((d.height - inner.height) / 2.0).max(0.0);
+    Vector::new(pan.x.clamp(-max_x, max_x), pan.y.clamp(-max_y, max_y))
+}
+
+/// 图片显示矩形（可视区居中 + 夹紧后的平移）。
+fn lightbox_rect(view: Size, img: (f32, f32), zoom: f32, pan: Vector) -> Rectangle {
+    let inner = lightbox_inner(view);
+    let d = lightbox_display(view, img, zoom);
+    let pan = lightbox_clamp_pan(view, img, zoom, pan);
+    let c = inner.center();
+    Rectangle::new(Point::new(c.x + pan.x - d.width / 2.0, c.y + pan.y - d.height / 2.0), d)
+}
+
+/// 滚轮缩放后的倍率（指数曲线；winit 滚上为正 → 放大）。
+pub fn lightbox_zoom_level(zoom: f32, delta_y: f32) -> f32 {
+    (zoom * (delta_y * LIGHTBOX_ZOOM_RATE).exp()).clamp(1.0, LIGHTBOX_MAX_ZOOM)
+}
+
+/// 以光标为锚点缩放：缩放前后光标下的图片点保持不动（两端平移均夹紧）。
+pub fn lightbox_zoom_pan(view: Size, img: (f32, f32), zoom: f32, next: f32, pan: Vector, cursor: Point) -> Vector {
+    let c = lightbox_inner(view).center();
+    let cv = Vector::new(cursor.x - c.x, cursor.y - c.y);
+    let pan = lightbox_clamp_pan(view, img, zoom, pan);
+    lightbox_clamp_pan(view, img, next, cv - (cv - pan) * (next / zoom))
+}
+
+/// 灯箱交互画布：绘制当前图片，接管滚轮缩放、拖动平移、双击复位与遮罩点击关闭。
+/// 覆盖整个表格视图（含工具条），预览期间表格收不到鼠标事件。
+struct LightboxCanvas<'a> {
+    session: &'a TableSession,
+    lb: &'a Lightbox,
+    window: iced::window::Id,
+}
+
+impl LightboxCanvas<'_> {
+    fn image_rect(&self, view: Size) -> Option<Rectangle> {
+        let cached = lightbox_image(self.session, self.lb)?;
+        let (w, h) = cached.size;
+        (w > 0.0 && h > 0.0).then(|| lightbox_rect(view, (w, h), self.lb.zoom, self.lb.pan))
+    }
+}
+
+impl canvas::Program<Message> for LightboxCanvas<'_> {
+    type State = ();
+
+    fn update(
+        &self,
+        _state: &mut Self::State,
+        event: &canvas::Event,
+        bounds: Rectangle,
+        cursor: iced::mouse::Cursor,
+    ) -> Option<iced::widget::Action<Message>> {
+        use canvas::Event as Ev;
+        use iced::mouse::Event as MouseEv;
+        match event {
+            Ev::Mouse(MouseEv::WheelScrolled { delta }) => {
+                let pos = cursor.position_in(bounds)?;
+                let dy = match delta {
+                    iced::mouse::ScrollDelta::Lines { y, .. } => y * WHEEL_LINE_PX,
+                    iced::mouse::ScrollDelta::Pixels { y, .. } => *y,
+                };
+                Some(
+                    iced::widget::Action::publish(Message::Table(TableMsg::LightboxZoom {
+                        pos,
+                        view: bounds.size(),
+                        delta_y: dy,
+                    }))
+                    .and_capture(),
+                )
+            }
+            Ev::Mouse(MouseEv::ButtonPressed(iced::mouse::Button::Left)) => {
+                let pos = cursor.position_in(bounds)?;
+                let inside = self.image_rect(bounds.size()).is_some_and(|r| r.contains(pos));
+                let msg = if inside { TableMsg::LightboxPress(pos) } else { TableMsg::LightboxClose };
+                Some(iced::widget::Action::publish(Message::Table(msg)).and_capture())
+            }
+            Ev::Mouse(MouseEv::ButtonPressed(iced::mouse::Button::Right)) => {
+                let pos = cursor.position_in(bounds)?;
+                let inside = self.image_rect(bounds.size()).is_some_and(|r| r.contains(pos));
+                if inside {
+                    return Some(
+                        iced::widget::Action::publish(Message::Table(TableMsg::OpenLightboxMenu(self.window)))
+                            .and_capture(),
+                    );
+                }
+                Some(iced::widget::Action::capture())
+            }
+            Ev::Mouse(MouseEv::CursorMoved { .. }) => {
+                let pos = cursor.position_in(bounds)?;
+                // 预览为模态：预览层内吞掉全部移动，下层工具条不产生悬停提示
+                if self.lb.drag.is_none() {
+                    return Some(iced::widget::Action::capture());
+                }
+                Some(
+                    iced::widget::Action::publish(Message::Table(TableMsg::LightboxPan {
+                        pos: Some(pos),
+                        view: bounds.size(),
+                    }))
+                    .and_capture(),
+                )
+            }
+            Ev::Mouse(MouseEv::ButtonReleased(iced::mouse::Button::Left)) => {
+                self.lb.drag?;
+                let msg = TableMsg::LightboxPan { pos: None, view: bounds.size() };
+                Some(iced::widget::Action::publish(Message::Table(msg)).and_capture())
+            }
+            _ => None,
+        }
+    }
+
+    fn draw(
+        &self,
+        _state: &Self::State,
+        renderer: &iced::Renderer,
+        _theme: &iced::Theme,
+        bounds: Rectangle,
+        _cursor: iced::mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        let Some(cached) = lightbox_image(self.session, self.lb) else { return Vec::new() };
+        let (w, h) = cached.size;
+        if w <= 0.0 || h <= 0.0 {
+            return Vec::new();
+        }
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let rect = lightbox_rect(bounds.size(), (w, h), self.lb.zoom, self.lb.pan);
+        frame.draw_image(rect, iced::advanced::image::Image::new(cached.handle.clone()));
+        vec![frame.into_geometry()]
+    }
+
+    fn mouse_interaction(
+        &self,
+        _state: &Self::State,
+        bounds: Rectangle,
+        cursor: iced::mouse::Cursor,
+    ) -> iced::mouse::Interaction {
+        if self.lb.zoom <= 1.0 {
+            return iced::mouse::Interaction::default();
+        }
+        if self.lb.drag.is_some() {
+            return iced::mouse::Interaction::Grabbing;
+        }
+        let Some(pos) = cursor.position_in(bounds) else {
+            return iced::mouse::Interaction::default();
+        };
+        if self.image_rect(bounds.size()).is_some_and(|r| r.contains(pos)) {
+            iced::mouse::Interaction::Grab
+        } else {
+            iced::mouse::Interaction::default()
+        }
+    }
+}
+
+impl<'a> From<LightboxCanvas<'a>> for Element<'a, Message> {
+    fn from(w: LightboxCanvas<'a>) -> Element<'a, Message> {
+        Canvas::new(w).width(Length::Fill).height(Length::Fill).into()
+    }
+}
+
+/// 灯箱：画布接管滚轮缩放 / 拖动平移 / 双击复位；点击图片外关闭；右键图片弹下载菜单；
+/// 多图显示左右翻页与计数。
 fn lightbox_overlay<'a>(
     session: &'a TableSession,
     lb: &'a Lightbox,
@@ -2120,65 +2353,22 @@ fn lightbox_overlay<'a>(
         .unwrap_or_default();
     let empty = images.is_empty();
     let index = lb.index.min(images.len().saturating_sub(1));
-    let handle = images.get(index).and_then(|rel| session.view.images.get(*rel)).map(|c| c.handle.clone());
-    let img_size = images
-        .get(index)
-        .and_then(|rel| session.view.images.get(*rel))
-        .map(|c| c.size);
     let multi = !empty && images.len() > 1;
-    // 图片 widget 按实际比例与可视区算尺寸（Contain 顶格会让点击关闭区域归零）：
-    // 四周留 48px 遮罩边距，点击遮罩关闭；图片本体吞按压、右键弹下载菜单
-    let big: Element<'_, Message> = iced::widget::responsive(move |size| {
-        if empty {
-            return container(text("图片已清空").size(pal::fs_caption()).color(pal::TEXT_MUTED))
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .center(iced::Length::Fill)
-                .into();
-        }
-        let inner = Size::new(
-            (size.width - 2.0 * LIGHTBOX_MARGIN).max(1.0),
-            (size.height - 2.0 * LIGHTBOX_MARGIN).max(1.0),
-        );
-        match (&handle, img_size) {
-            (Some(h), Some((w, h_px))) if w > 0.0 && h_px > 0.0 => {
-                let scale = (inner.width / w).min(inner.height / h_px);
-                let (dw, dh) = (w * scale, h_px * scale);
-                container(
-                    mouse_area(
-                        iced::widget::image(h.clone())
-                            .width(Length::Fixed(dw))
-                            .height(Length::Fixed(dh)),
-                    )
-                    .on_press(Message::Table(TableMsg::Noop))
-                    .on_right_press(Message::Table(TableMsg::OpenLightboxMenu(window))),
-                )
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .center(iced::Length::Fill)
-                .into()
-            }
-            _ => container(text("图片加载中").size(pal::fs_caption()).color(pal::TEXT_MUTED))
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .center(iced::Length::Fill)
-                .into(),
-        }
-    })
-    .into();
-    // 遮罩：图片铺满可视区（Contain 居中），按压落在图片外 = 关闭
-    let mask = mouse_area(
-        container(big)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .style(|_t| iced::widget::container::Style {
-                background: Some(iced::Background::Color(pal::SCRIM_STRONG)),
-                ..Default::default()
-            }),
-    )
-    .on_press(Message::Table(TableMsg::LightboxClose));
-
-    let mut stack = iced::widget::Stack::new().push(mask);
+    let scrim = container(space())
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(|_t| iced::widget::container::Style {
+            background: Some(iced::Background::Color(pal::SCRIM_STRONG)),
+            ..Default::default()
+        });
+    let canvas: Element<'_, Message> = LightboxCanvas { session, lb, window }.into();
+    let mut stack = iced::widget::Stack::new().push(scrim).push(canvas);
+    // 图片未就绪时由文字层提示；文字层不吃事件，滚轮与按压仍由画布接管
+    if empty {
+        stack = stack.push(lightbox_placeholder("图片已清空"));
+    } else if lightbox_image(session, lb).is_none() {
+        stack = stack.push(lightbox_placeholder("图片加载中"));
+    }
     if multi {
         let nav_btn = |name: &'static str, msg: Message| -> Element<'static, Message> {
             iced::widget::button(circle_btn_element(name))
@@ -2213,6 +2403,14 @@ fn lightbox_overlay<'a>(
         );
     }
     stack.width(Length::Fill).height(Length::Fill).into()
+}
+
+fn lightbox_placeholder(label: &'static str) -> Element<'static, Message> {
+    container(text(label).size(pal::fs_caption()).color(pal::TEXT_MUTED))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .center(iced::Length::Fill)
+        .into()
 }
 
 /// 灯箱翻页圆钮（组件库外自绘口径，与图片单元格 hover 圆钮同款）。
@@ -2287,5 +2485,54 @@ mod tests {
             .expect("布局实测后行段可取");
         assert!(lines.len() > 1, "放不进一行的正文要折出多行");
         assert_eq!(layout.row_h[1], lines.len() as f32 * size * LINE_FACTOR + 2.0 * CELL_PAD_Y);
+    }
+
+    /// 1× 时图片按可视区等比铺满并居中（四周遮罩边距不变）。
+    #[test]
+    fn lightbox_fit_is_centered_in_inner_area() {
+        let view = Size::new(1000.0, 800.0);
+        let rect = lightbox_rect(view, (4000.0, 2000.0), 1.0, Vector::ZERO);
+        let inner = lightbox_inner(view);
+        assert!((rect.width - inner.width).abs() < 0.01, "长边贴满可视区宽度");
+        assert!((rect.center().x - inner.center().x).abs() < 0.01);
+        assert!((rect.center().y - inner.center().y).abs() < 0.01);
+    }
+
+    /// 平移只在图片超出可视区的方向生效，且边缘不露白。
+    #[test]
+    fn lightbox_pan_clamps_to_visible_edges() {
+        let view = Size::new(1000.0, 800.0);
+        let img = (4000.0, 2000.0);
+        assert_eq!(lightbox_clamp_pan(view, img, 1.0, Vector::new(100.0, -100.0)), Vector::ZERO, "放得下时居中");
+        let d = lightbox_display(view, img, 2.0);
+        let inner = lightbox_inner(view);
+        let max_x = (d.width - inner.width) / 2.0;
+        let max_y = (d.height - inner.height) / 2.0;
+        let clamped = lightbox_clamp_pan(view, img, 2.0, Vector::new(1000.0, -1000.0));
+        assert!((clamped.x - max_x).abs() < 0.01);
+        assert!((clamped.y + max_y).abs() < 0.01);
+    }
+
+    /// 光标锚点缩放：光标下的图片点在缩放前后保持不动。
+    #[test]
+    fn lightbox_zoom_keeps_cursor_anchor() {
+        let view = Size::new(1000.0, 800.0);
+        let img = (4000.0, 2000.0);
+        let cursor = Point::new(700.0, 300.0);
+        let c = lightbox_inner(view).center();
+        let old_pan = Vector::new(10.0, -20.0);
+        let new_pan = lightbox_zoom_pan(view, img, 2.0, 3.0, old_pan, cursor);
+        let before = Vector::new(cursor.x - c.x, cursor.y - c.y) - old_pan;
+        let after = Vector::new(cursor.x - c.x, cursor.y - c.y) - new_pan;
+        assert!((before.x / 2.0 - after.x / 3.0).abs() < 0.01);
+        assert!((before.y / 2.0 - after.y / 3.0).abs() < 0.01);
+    }
+
+    /// 滚轮倍率夹紧在 [适应窗口, 上限]。
+    #[test]
+    fn lightbox_zoom_level_is_clamped() {
+        assert_eq!(lightbox_zoom_level(1.0, -100.0), 1.0);
+        assert_eq!(lightbox_zoom_level(8.0, 100.0), 8.0);
+        assert!(lightbox_zoom_level(1.0, 40.0) > 1.0);
     }
 }
