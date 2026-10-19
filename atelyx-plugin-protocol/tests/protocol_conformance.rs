@@ -2,13 +2,14 @@
 //! 信封行冻结逐字节编码；ViewNode 与握手冻结字段形状。改协议 = 显式改快照并升版本。
 
 use atelyx_plugin_protocol::envelope::{Envelope, RequestId};
-use atelyx_plugin_protocol::event::VaultSwitchPayload;
+use atelyx_plugin_protocol::event::{TableChangedPayload, VaultSwitchPayload};
 use atelyx_plugin_protocol::handshake::{self, InitializeParams, InitializeResult};
 use atelyx_plugin_protocol::method::{
     CanvasSubmitParams, DocCloseParams, DocOpenParams, HttpRequestParams, HttpResult, ListResult,
     PathParams, PickFileParams, PickedPath, ProcessEventParams, RegisterParams,
     RegisterShortcutParams, RegisterToolParams,
-    ShowNotificationParams, SurfaceAttachedParams, TakeoverParams, TextPayload, ToolCallParams,
+    ShowNotificationParams, SurfaceAttachedParams, TableAddRowResult, TableRowIdParams,
+    TableSnapshot, TableUpdateCellParams, TakeoverParams, TextPayload, ToolCallParams,
     ToolResultParams, UnregisterParams, UnregisterToolParams,
     ViewEventParams, WindowCloseParams, WindowClosedParams, WindowOpenParams,
 };
@@ -198,6 +199,11 @@ fn method_type_shapes_are_frozen() {
             "WindowCloseParams" => frozen_roundtrip::<WindowCloseParams>(&value),
             "WindowClosedParams" => frozen_roundtrip::<WindowClosedParams>(&value),
             "VaultSwitchPayload" => frozen_roundtrip::<VaultSwitchPayload>(&value),
+            "TableChangedPayload" => frozen_roundtrip::<TableChangedPayload>(&value),
+            "TableSnapshot" => frozen_roundtrip::<TableSnapshot>(&value),
+            "TableUpdateCellParams" => frozen_roundtrip::<TableUpdateCellParams>(&value),
+            "TableAddRowResult" => frozen_roundtrip::<TableAddRowResult>(&value),
+            "TableRowIdParams" => frozen_roundtrip::<TableRowIdParams>(&value),
             "RegisterToolParams" => frozen_roundtrip::<RegisterToolParams>(&value),
             "UnregisterToolParams" => frozen_roundtrip::<UnregisterToolParams>(&value),
             "ToolCallParams" => frozen_roundtrip::<ToolCallParams>(&value),

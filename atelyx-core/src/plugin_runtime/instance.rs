@@ -533,6 +533,11 @@ impl Instance {
                 | method::vault::WRITE_TEXT
                 | method::vault::LIST
                 | method::vault::EXISTS
+                | method::table::SNAPSHOT
+                | method::table::UPDATE_CELL
+                | method::table::ADD_ROW
+                | method::table::REMOVE_ROW
+                | method::table::SELECT_ROW
         ) {
             self.handle_shell_request(token, id, method, &request.params);
             return;
@@ -705,6 +710,40 @@ impl Instance {
                         plugin_id: self.id.clone(),
                         request_id: 0,
                         path: p.path,
+                    }
+                }
+                method::table::SNAPSHOT => HostRequest::TableSnapshot {
+                    plugin_id: self.id.clone(),
+                    request_id: 0,
+                },
+                method::table::UPDATE_CELL => {
+                    let p: method::TableUpdateCellParams = parse(params).map_err(|e| e.to_string())?;
+                    HostRequest::TableUpdateCell {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        row_id: p.row_id,
+                        field_id: p.field_id,
+                        value: p.value,
+                    }
+                }
+                method::table::ADD_ROW => HostRequest::TableAddRow {
+                    plugin_id: self.id.clone(),
+                    request_id: 0,
+                },
+                method::table::REMOVE_ROW => {
+                    let p: method::TableRowIdParams = parse(params).map_err(|e| e.to_string())?;
+                    HostRequest::TableRemoveRow {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        row_id: p.row_id,
+                    }
+                }
+                method::table::SELECT_ROW => {
+                    let p: method::TableRowIdParams = parse(params).map_err(|e| e.to_string())?;
+                    HostRequest::TableSelectRow {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        row_id: p.row_id,
                     }
                 }
                 _ => return Err("未知宿主服务请求".to_string()),
@@ -887,7 +926,7 @@ impl Instance {
                 );
                 Ok(json!({}))
             }
-            // AI 对话 / 剪贴板 / 仓库读写走异步应答（见 handle_request 的分流），不经此处同步应答
+            // AI 对话 / 剪贴板 / 仓库读写 / 表格读写走异步应答（见 handle_request 的分流），不经此处同步应答
             method::ai::CHAT_SEND
             | method::ai::CHAT_STOP
             | method::ai::CHAT_HISTORY
@@ -896,7 +935,12 @@ impl Instance {
             | method::vault::READ_TEXT
             | method::vault::WRITE_TEXT
             | method::vault::LIST
-            | method::vault::EXISTS => {
+            | method::vault::EXISTS
+            | method::table::SNAPSHOT
+            | method::table::UPDATE_CELL
+            | method::table::ADD_ROW
+            | method::table::REMOVE_ROW
+            | method::table::SELECT_ROW => {
                 Err(RpcError::failed("宿主服务请求须走异步应答路径"))
             }
             // 已声明但尚未实现的能力面：以可读失败收场，不静默成功
@@ -932,10 +976,22 @@ impl Instance {
 
     fn on_subscribe(&self, params: &Value) -> Result<Value, RpcError> {
         let p: event::SubscribeParams = parse(params)?;
-        if p.name != event::name::VAULT_SWITCH {
+        if p.name != event::name::VAULT_SWITCH && p.name != event::name::TABLE_CHANGED {
             return Err(RpcError::failed(format!("未知事件名：{}", p.name)));
         }
-        self.subscriptions.lock().unwrap().insert(p.name);
+        self.subscriptions.lock().unwrap().insert(p.name.clone());
+        // 表格变更订阅：已有打开表格即补发当前路径——广播只达订阅时刻之后的时点，
+        // 迟到的订阅者（插件启动晚于表格打开）不补发就不知道当前状态
+        if p.name == event::name::TABLE_CHANGED {
+            if let Ok(runtime) = self.runtime_upgrade() {
+                if let Some(path) = runtime.current_table_path() {
+                    self.notify_domain_event(
+                        event::name::TABLE_CHANGED,
+                        &event::TableChangedPayload { path: Some(path) },
+                    );
+                }
+            }
+        }
         Ok(json!({ "subscribed": true }))
     }
 
@@ -1566,12 +1622,12 @@ mod tests {
         runtime.resolve_shell_call(request_id, Err("会话 s1 不存在".to_string()));
     }
 
-    /// 剪贴板与仓库读写路由到壳：request 落到宿主通道，结果经统一回填接口送回。
+    /// 壳侧服务请求路由到壳：request 落到宿主通道，结果经统一回填接口送回。
     #[test]
-    fn clipboard_and_vault_requests_route_to_shell_and_resolve() {
+    fn shell_side_service_requests_route_and_resolve() {
         let tmp = TempDir::new("instance-shell-request");
         let runtime = PluginRuntime::new(tmp.to_path_buf());
-        let (_t, instance) = make_instance(vec![Permission::Clipboard, Permission::Vault]);
+        let (_t, instance) = make_instance(vec![Permission::Clipboard, Permission::Vault, Permission::Table]);
         instance.attach_runtime(&runtime);
         runtime
             .instances
@@ -1632,6 +1688,48 @@ mod tests {
         };
         assert_eq!(path, "a.md");
         runtime.resolve_shell_call(request_id, Ok(json!({ "exists": true })));
+
+        instance.handle_line(&request_line(method::table::SNAPSHOT, &Value::Null));
+        let request = rt.block_on(runtime.recv_host_request()).unwrap();
+        let HostRequest::TableSnapshot { request_id, .. } = request else {
+            panic!("应投递表格快照请求");
+        };
+        runtime.resolve_shell_call(request_id, Ok(json!({ "open": false })));
+
+        instance.handle_line(&request_line(
+            method::table::UPDATE_CELL,
+            &json!({ "rowId": "r1", "fieldId": "f1", "value": "甲" }),
+        ));
+        let request = rt.block_on(runtime.recv_host_request()).unwrap();
+        let HostRequest::TableUpdateCell { request_id, row_id, field_id, value, .. } = request else {
+            panic!("应投递逐格写请求");
+        };
+        assert_eq!((row_id.as_str(), field_id.as_str()), ("r1", "f1"));
+        assert_eq!(value, json!("甲"));
+        runtime.resolve_shell_call(request_id, Ok(json!({})));
+
+        instance.handle_line(&request_line(method::table::ADD_ROW, &Value::Null));
+        let request = rt.block_on(runtime.recv_host_request()).unwrap();
+        let HostRequest::TableAddRow { request_id, .. } = request else {
+            panic!("应投递新增行请求");
+        };
+        runtime.resolve_shell_call(request_id, Ok(json!({ "rowId": "r9" })));
+
+        instance.handle_line(&request_line(method::table::REMOVE_ROW, &json!({ "rowId": "r1" })));
+        let request = rt.block_on(runtime.recv_host_request()).unwrap();
+        let HostRequest::TableRemoveRow { request_id, row_id, .. } = request else {
+            panic!("应投递删行请求");
+        };
+        assert_eq!(row_id, "r1");
+        runtime.resolve_shell_call(request_id, Ok(json!({})));
+
+        instance.handle_line(&request_line(method::table::SELECT_ROW, &json!({ "rowId": "r1" })));
+        let request = rt.block_on(runtime.recv_host_request()).unwrap();
+        let HostRequest::TableSelectRow { request_id, row_id, .. } = request else {
+            panic!("应投递选行请求");
+        };
+        assert_eq!(row_id, "r1");
+        runtime.resolve_shell_call(request_id, Ok(json!({})));
     }
 
     #[test]
@@ -1647,13 +1745,14 @@ mod tests {
     /// 各能力面「未声明被拒」：闸门只认 manifest 声明，未声明一律 fail-closed 且记审计。
     #[test]
     fn undeclared_calls_of_each_face_are_denied() {
-        let cases: [(Permission, &str, Value); 5] = [
+        let cases: [(Permission, &str, Value); 6] = [
             // 入参一律取「必然执行失败但不会真的落盘 / 出网 / 弹框」的形态
             (Permission::Process, method::process::SPAWN, json!({ "program": "atelyx-no-such-program" })),
             (Permission::Fs, method::fs::LIST, json!({ "path": "atelyx-no-such-dir" })),
             (Permission::Shortcuts, method::shortcut::REGISTER, json!({ "accelerator": "Ctrl+F9" })),
             (Permission::Http, method::http::REQUEST, json!({ "method": "GET", "url": "ftp://example.com" })),
             (Permission::Dialog, method::dialog::PICK_DIRECTORY, Value::Null),
+            (Permission::Table, method::table::SNAPSHOT, Value::Null),
         ];
         for (permission, method_name, params) in cases {
             // 未声明：拒绝并留痕（响应写往不存在的插件进程，观测点在审计记录）
@@ -1791,7 +1890,35 @@ mod tests {
         assert!(instance
             .dispatch(event::SUBSCRIBE, &json!({ "name": event::name::VAULT_SWITCH }))
             .is_ok());
+        assert!(instance
+            .dispatch(event::SUBSCRIBE, &json!({ "name": event::name::TABLE_CHANGED }))
+            .is_ok());
         assert!(instance.dispatch(event::SUBSCRIBE, &json!({ "name": "nope" })).is_err());
+    }
+
+    /// table:changed 订阅注册，且运行时缓存最近广播的表格路径（迟到订阅补发的数据源）。
+    #[test]
+    fn table_changed_subscription_tracks_current_table() {
+        let tmp = TempDir::new("instance-table-sub");
+        let runtime = PluginRuntime::new(tmp.to_path_buf());
+        let (_t, instance) = make_instance(Vec::new());
+        instance.attach_runtime(&runtime);
+        runtime
+            .instances
+            .lock()
+            .unwrap()
+            .insert("com.example.demo".to_string(), instance.clone());
+
+        assert!(instance
+            .dispatch(event::SUBSCRIBE, &json!({ "name": event::name::TABLE_CHANGED }))
+            .is_ok());
+        assert!(instance.subscribed_to(event::name::TABLE_CHANGED));
+
+        runtime.on_table_changed(Some("a.atb"));
+        assert_eq!(runtime.current_table_path().as_deref(), Some("a.atb"));
+        // 关闭表格 = 缓存清空，迟到订阅者不再补发旧路径
+        runtime.on_table_changed(None);
+        assert_eq!(runtime.current_table_path(), None);
     }
 
     #[test]

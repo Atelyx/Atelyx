@@ -265,6 +265,34 @@ pub fn sync_settings_surfaces(app: &mut App) {
     app.plugin_settings_surfaces = now;
 }
 
+/// 表格视图面挂载差分：面板里当前选中的插件表格视图即挂在表格面板上的面
+/// （换视图 / 关表格 / 切文件即旧面 detached）。返回是否变化——变化才需重投影。
+pub fn sync_table_surfaces(app: &mut App) -> bool {
+    let now: HashSet<(String, String)> = app
+        .table
+        .as_ref()
+        .and_then(|session| session.view.active_view.as_deref())
+        .and_then(parse_view_kind)
+        .map(|(plugin_id, id)| (plugin_id.to_string(), id.to_string()))
+        .into_iter()
+        .collect();
+    if now == app.plugin_table_surfaces {
+        return false;
+    }
+    for (plugin_id, surface_id) in now.difference(&app.plugin_table_surfaces) {
+        app.plugins
+            .notify_surface_attached(plugin_id, surface_id, SurfaceKind::TableView);
+    }
+    let removed: Vec<(String, String)> =
+        app.plugin_table_surfaces.difference(&now).cloned().collect();
+    for (plugin_id, surface_id) in &removed {
+        app.plugins.notify_surface_detached(plugin_id, surface_id);
+        drop_node_state(app, plugin_id, surface_id);
+    }
+    app.plugin_table_surfaces = now;
+    true
+}
+
 /// 把贡献与已挂面的树投影进壳状态，并按需发起界面图片载入（返回的任务由调用方链出）。
 /// 投影面 = 布局面板 + 设置面 + 插件窗口 + 接管面 + 文档实例（后三类不在布局里，键在此补齐）。
 pub fn refresh_projection(app: &mut App) -> Task<Message> {
@@ -272,8 +300,10 @@ pub fn refresh_projection(app: &mut App) -> Task<Message> {
     app.plugin_contributions = contributions;
     app.plugin_doc_types = app.plugins.doc_types();
     sync_settings_surfaces(app);
+    sync_table_surfaces(app);
     let mut surfaces: Vec<(String, String)> = app.plugin_surfaces.iter().cloned().collect();
     surfaces.extend(app.plugin_settings_surfaces.iter().cloned());
+    surfaces.extend(app.plugin_table_surfaces.iter().cloned());
     surfaces.extend(
         app.plugin_windows
             .values()
@@ -740,7 +770,7 @@ pub fn on_plugin_window_blur(app: &mut App, os_id: window::Id) -> Task<Message> 
     }
 }
 
-/// 插件停用 / 崩溃后重启就绪：按当前壳侧状态重发面就绪通知（面板 / 设置 / 插件窗口 / 接管面），
+/// 插件停用 / 崩溃后重启就绪：按当前壳侧状态重发面就绪通知（面板 / 设置 / 表格视图 / 插件窗口 / 接管面），
 /// 插件据此重建全部界面。
 pub fn resync_surfaces_on_running(app: &mut App, plugin_id: &str) {
     let takeovers: Vec<(String, String, bool)> = app
@@ -752,6 +782,13 @@ pub fn resync_surfaces_on_running(app: &mut App, plugin_id: &str) {
     for (pid, surface_id, full) in takeovers {
         let kind = if full { SurfaceKind::Takeover } else { SurfaceKind::Page };
         app.plugins.notify_surface_attached(&pid, &surface_id, kind);
+    }
+    // 表格视图面：挂载状态由壳侧会话选择决定、不随贡献增删差分，重启后须显式重发
+    let table_surfaces: Vec<(String, String)> = app.plugin_table_surfaces.iter().cloned().collect();
+    for (pid, surface_id) in table_surfaces {
+        if pid == plugin_id {
+            app.plugins.notify_surface_attached(&pid, &surface_id, SurfaceKind::TableView);
+        }
     }
     let windows: Vec<(String, String)> = app
         .plugin_windows

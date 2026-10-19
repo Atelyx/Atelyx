@@ -12,6 +12,9 @@ pub mod name {
     /// 当前仓库容器切换（本地仓库 ↔ 协作空间，或换仓库）。payload 见 [`VaultSwitchPayload`]。
     /// 未声明 `keepMountedOnVaultSwitch` 的插件收到它之前就已被宿主重载。
     pub const VAULT_SWITCH: &str = "vault:switch";
+    /// 当前打开表格的内容变更（打开 / 切换 / 关闭表格、本地编辑结算、协作远端补丁落地）。
+    /// payload 见 [`TableChangedPayload`]。
+    pub const TABLE_CHANGED: &str = "table:changed";
 }
 
 /// [`name::VAULT_SWITCH`] 的 payload（`kind` 与字段名均 camelCase，与协议其余类型同一口径）。
@@ -20,6 +23,14 @@ pub mod name {
 pub enum VaultSwitchPayload {
     Local { root: String },
     Space { space_id: String },
+}
+
+/// [`name::TABLE_CHANGED`] 的 payload：当前打开表格的仓库相对路径（无打开表格 = 缺省）。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct TableChangedPayload {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 /// 宿主广播的通知 params（[`HOST_PUBLISH`]）。

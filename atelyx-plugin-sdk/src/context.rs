@@ -331,6 +331,40 @@ impl Context {
         Ok(result.exists)
     }
 
+    // ---------- table（当前打开表格；写入与宿主编辑同一出口，由宿主合并落盘并广播协作补丁） ----------
+
+    /// 读当前打开表格的只读快照（字段 / 行 / 路径）；未打开表格 = `open: false`。
+    pub async fn table_snapshot(&self) -> Result<TableSnapshot, RpcError> {
+        self.call_null(method::table::SNAPSHOT).await
+    }
+
+    /// 逐格写：只改指定字段（不整行替换，不覆盖同行其它字段与并发编辑）；`value` 按字段类型
+    /// 定形态，`null` = 清空该格。
+    pub async fn table_update_cell(
+        &self,
+        row_id: &str,
+        field_id: &str,
+        value: Value,
+    ) -> Result<(), RpcError> {
+        let params = TableUpdateCellParams { row_id: row_id.into(), field_id: field_id.into(), value };
+        self.call_unit(method::table::UPDATE_CELL, &params).await
+    }
+
+    /// 新增一行：返回宿主分配的新行 id（随后按它引用该行）。
+    pub async fn table_add_row(&self) -> Result<String, RpcError> {
+        let result: TableAddRowResult = self.call_null(method::table::ADD_ROW).await?;
+        Ok(result.row_id)
+    }
+
+    pub async fn table_remove_row(&self, row_id: &str) -> Result<(), RpcError> {
+        self.call_unit(method::table::REMOVE_ROW, &TableRowIdParams { row_id: row_id.into() }).await
+    }
+
+    /// 把该行设为表格选中行（与网格选中态联动）。
+    pub async fn table_select_row(&self, row_id: &str) -> Result<(), RpcError> {
+        self.call_unit(method::table::SELECT_ROW, &TableRowIdParams { row_id: row_id.into() }).await
+    }
+
     // ---------- process ----------
 
     pub async fn spawn(

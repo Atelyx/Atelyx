@@ -134,6 +134,8 @@ pub enum PluginsMsg {
     VaultList { request_id: u64, path: String },
     VaultExists { request_id: u64, path: String },
     VaultCallDone { request_id: u64, result: Result<serde_json::Value, String> },
+    /// 表格只读快照（读壳的表格会话；写走表格消息流）。
+    TableSnapshot { request_id: u64 },
 }
 
 /// 订阅标识：运行时 `Arc` 指针哈希（同一运行时不重建订阅流）。
@@ -223,6 +225,28 @@ pub fn host_requests_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<It
                 }
                 HostRequest::VaultExists { request_id, path, .. } => {
                     Message::Plugins(PluginsMsg::VaultExists { request_id, path })
+                }
+                // 表格读写：读走本页回填；写出壳的表格消息流承担（与本地编辑同一出口，
+                // 自动保存期限与 table:changed 广播都由该流统一处理）
+                HostRequest::TableSnapshot { request_id, .. } => {
+                    Message::Plugins(PluginsMsg::TableSnapshot { request_id })
+                }
+                HostRequest::TableUpdateCell { request_id, row_id, field_id, value, .. } => {
+                    Message::Table(crate::table_view::TableMsg::PluginSetCell {
+                        request_id,
+                        row_id,
+                        field_id,
+                        value,
+                    })
+                }
+                HostRequest::TableAddRow { request_id, .. } => {
+                    Message::Table(crate::table_view::TableMsg::PluginAddRow { request_id })
+                }
+                HostRequest::TableRemoveRow { request_id, row_id, .. } => {
+                    Message::Table(crate::table_view::TableMsg::PluginRemoveRow { request_id, row_id })
+                }
+                HostRequest::TableSelectRow { request_id, row_id, .. } => {
+                    Message::Table(crate::table_view::TableMsg::PluginSelectRow { request_id, row_id })
                 }
             };
             let _ = iced::futures::SinkExt::send(&mut output, message).await;
@@ -550,6 +574,16 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
         }
         PluginsMsg::VaultCallDone { request_id, result } => {
             resolve_vault(app, request_id, result)
+        }
+        PluginsMsg::TableSnapshot { request_id } => {
+            let snapshot: atelyx_core::plugin_runtime::TableSnapshot = match &app.table {
+                Some(session) => atelyx_core::plugin_runtime::table::snapshot(&session.file, &session.data),
+                None => atelyx_core::plugin_runtime::TableSnapshot::default(),
+            };
+            let result = serde_json::to_value(snapshot)
+                .map_err(|e| format!("表格快照序列化失败：{e}"));
+            app.plugins.resolve_shell_call(request_id, result);
+            Task::none()
         }
     }
 }
@@ -1390,6 +1424,7 @@ fn permission_label(permission: Permission) -> &'static str {
         Permission::Notification => "通知",
         Permission::Shortcuts => "快捷键",
         Permission::Vault => "仓库",
+        Permission::Table => "表格",
         Permission::Clipboard => "剪贴板",
         Permission::Window => "窗口",
         Permission::Tray => "托盘",

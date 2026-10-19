@@ -481,6 +481,38 @@ fn on_msg_open(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
             open_table_popup(app, window, crate::layout_view::PopupState::TableViewMenu, None);
             Task::none()
         }
+        tv::TableMsg::SetView(kind) => {
+            if let Some(session) = app.table.as_mut() {
+                session.view.active_view = kind;
+            }
+            app.dismiss_popup();
+            Task::none()
+        }
+        // 插件表格写：与本地编辑同一出口（同撤销栈、同置脏与保存链），结果按 request_id 回填
+        tv::TableMsg::PluginSetCell { request_id, row_id, field_id, value } => {
+            let result = plugin_set_cell(app, &row_id, &field_id, value);
+            resolve_plugin_call(app, request_id, result.map(|()| serde_json::json!({})));
+            Task::none()
+        }
+        tv::TableMsg::PluginAddRow { request_id } => {
+            let result = plugin_add_row(app);
+            resolve_plugin_call(
+                app,
+                request_id,
+                result.map(|row_id| serde_json::json!({ "rowId": row_id })),
+            );
+            Task::none()
+        }
+        tv::TableMsg::PluginRemoveRow { request_id, row_id } => {
+            let result = plugin_remove_row(app, &row_id);
+            resolve_plugin_call(app, request_id, result.map(|()| serde_json::json!({})));
+            Task::none()
+        }
+        tv::TableMsg::PluginSelectRow { request_id, row_id } => {
+            let result = plugin_select_row(app, &row_id);
+            resolve_plugin_call(app, request_id, result.map(|()| serde_json::json!({})));
+            Task::none()
+        }
         tv::TableMsg::Downloaded(result) => {
             match result {
                 Ok(path) => app.notify(NoticeLevel::Success, format!("已保存到 {}", path.display())),
@@ -814,6 +846,101 @@ fn with_session(app: &mut App, f: impl FnOnce(&mut tv::TableSession)) {
     if let Some(s) = app.table.as_mut() {
         f(s);
     }
+}
+
+/// 回填一次插件表格调用（成功值 / 可读失败原因）。
+fn resolve_plugin_call(app: &App, request_id: u64, result: Result<serde_json::Value, String>) {
+    app.plugins.resolve_shell_call(request_id, result);
+}
+
+/// 插件逐格写：只改指定字段（不整行替换），与本地编辑共用撤销栈与置脏口径。
+fn plugin_set_cell(
+    app: &mut App,
+    row_id: &str,
+    field_id: &str,
+    value: serde_json::Value,
+) -> Result<(), String> {
+    let Some(session) = app.table.as_mut() else {
+        return Err("未打开表格，无法写入".to_string());
+    };
+    if !session.data.fields.iter().any(|f| f.id == field_id) {
+        return Err(format!("字段不存在：{field_id}"));
+    }
+    if !session.data.rows.iter().any(|r| r.id == row_id) {
+        return Err(format!("行不存在：{row_id}"));
+    }
+    push_undo(session);
+    let next = (!value.is_null()).then_some(value);
+    let changed = session
+        .data
+        .rows
+        .iter_mut()
+        .find(|r| r.id == row_id)
+        .is_some_and(|row| ops::set_cell_value(row, field_id, next));
+    if changed {
+        session.touch();
+    } else {
+        drop_undo(session);
+    }
+    Ok(())
+}
+
+/// 插件新增行：返回宿主分配的新行 id（插件据此继续引用该行）。
+fn plugin_add_row(app: &mut App) -> Result<String, String> {
+    let Some(session) = app.table.as_mut() else {
+        return Err("未打开表格，无法新增行".to_string());
+    };
+    push_undo(session);
+    let id = ops::add_row(&mut session.data, nanoid::nanoid!());
+    session.touch();
+    Ok(id)
+}
+
+/// 插件删行：连带清掉失效选中并钳回滚动范围。
+fn plugin_remove_row(app: &mut App, row_id: &str) -> Result<(), String> {
+    let Some(session) = app.table.as_mut() else {
+        return Err("未打开表格，无法删除行".to_string());
+    };
+    if !session.data.rows.iter().any(|r| r.id == row_id) {
+        return Err(format!("行不存在：{row_id}"));
+    }
+    push_undo(session);
+    ops::remove_rows(&mut session.data, &[row_id.to_string()]);
+    session.touch();
+    clear_invalid_selection(session);
+    clamp_scroll(session);
+    Ok(())
+}
+
+/// 插件选中行：与网格选中态联动；该行不在视口内时把它滚到视口中央。
+fn plugin_select_row(app: &mut App, row_id: &str) -> Result<(), String> {
+    let Some(session) = app.table.as_mut() else {
+        return Err("未打开表格，无法选中行".to_string());
+    };
+    let Some(index) = session.data.rows.iter().position(|r| r.id == row_id) else {
+        return Err(format!("行不存在：{row_id}"));
+    };
+    session.view.selection = Some(ops::TableSelection::Row(row_id.to_string()));
+    let target = scroll_target_for_row(session, index);
+    if let Some(next) = target {
+        session.view.scroll_y = next;
+        clamp_scroll(session);
+    }
+    Ok(())
+}
+
+/// 该行滚到视口中央所需的目标滚动量；行已在视口内或视口尺寸未知 = `None`（不滚动）。
+fn scroll_target_for_row(session: &tv::TableSession, index: usize) -> Option<f32> {
+    let size = session.view.canvas_size;
+    if size.height <= 0.0 {
+        return None;
+    }
+    let layout = session.view.layout.as_ref()?;
+    let (y, h) = (layout.row_y.get(index)?.to_owned(), layout.row_h.get(index)?.to_owned());
+    let geo = tv::geo(session, size);
+    let top = geo.content_y(geo.header_h());
+    let bottom = geo.content_y(geo.rows_bottom());
+    (y < top || y + h > bottom).then_some((y - size.height * 0.5 + h * 0.5).max(0.0))
 }
 
 /// 内容尺寸缩小时把滚动钳回有效范围（缩放 / 删行删列 / 历史回滚后调用），防整面滚出视口。

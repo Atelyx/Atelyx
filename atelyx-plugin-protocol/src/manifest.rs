@@ -61,6 +61,7 @@ pub enum Permission {
     Notification,
     Shortcuts,
     Vault,
+    Table,
     Clipboard,
     Window,
     Tray,

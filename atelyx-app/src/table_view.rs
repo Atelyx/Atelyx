@@ -212,6 +212,8 @@ impl TableSession {
 
 #[derive(Default)]
 pub struct TableViewState {
+    /// 面板内展示的视图：`None` = 内置网格；`Some` = 插件表格视图的壳侧 kind。
+    pub active_view: Option<String>,
     pub scroll_x: f32,
     pub scroll_y: f32,
     pub zoom: f32,
@@ -505,6 +507,17 @@ pub enum TableMsg {
     Loaded(u64, String, Result<TableFile, String>),
     TableSaved(u64, String, SaveReason, Result<(), String>, TableFile),
     PasteText(String),
+    // 插件表格视图
+    /// 切换面板内展示的视图（`None` = 内置表格网格；`Some` = 插件表格视图的壳侧 kind）。
+    SetView(Option<String>),
+    /// 插件写：逐格写（经同一出口：同撤销栈、同置脏与保存链；结果按 `request_id` 回填）。
+    PluginSetCell { request_id: u64, row_id: String, field_id: String, value: serde_json::Value },
+    /// 插件写：新增行（结果回带新行 id）。
+    PluginAddRow { request_id: u64 },
+    /// 插件写：删除行。
+    PluginRemoveRow { request_id: u64, row_id: String },
+    /// 插件写：选中行（与网格联动）。
+    PluginSelectRow { request_id: u64, row_id: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1789,6 +1802,18 @@ pub fn table_view<'a>(app: &'a crate::App, window: iced::window::Id) -> Element<
         return crate::ui::controls::empty_state("table", "未打开表格", "从文件面板打开一个 .atb 文件", None);
     };
 
+    // 插件表格视图：面板内以插件面替掉网格（工具条保留，「视图」下拉可切回内置网格）
+    if let Some(kind) = session.view.active_view.as_deref() {
+        let members = collab_members(app, session);
+        return column![
+            toolbar(&members, session, window),
+            crate::plugin_view::surface_view(app, window, kind, "表格视图"),
+        ]
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into();
+    }
+
     let canvas: Element<Message> = TableView { session, window }.into();
     let chrome: Element<Message> = TableChrome { session }.into();
     let mut stack = iced::widget::Stack::new().push(canvas).push(chrome);
@@ -1799,20 +1824,7 @@ pub fn table_view<'a>(app: &'a crate::App, window: iced::window::Id) -> Element<
         stack = stack.push(bar);
     }
     // 在场协作者（名册 presence.file 匹配当前表格的空间成员）
-    let collab_members: Vec<(iced::Color, String)> = if matches!(app.repo_kind, crate::RepoKind::Space(_)) {
-        app.space_peers
-            .iter()
-            .filter(|p| {
-                p.presence
-                    .as_ref()
-                    .and_then(|pr| pr.get("file").and_then(|f| f.as_str()))
-                    .is_some_and(|f| f == session.file)
-            })
-            .map(|p| (crate::layout_view::parse_hex_color(&p.color).unwrap_or(pal::TEXT_MUTED), p.nickname.clone()))
-            .collect()
-    } else {
-        Vec::new()
-    };
+    let collab_members = collab_members(app, session);
 
     let body = column![
         toolbar(&collab_members, session, window),
@@ -1826,6 +1838,23 @@ pub fn table_view<'a>(app: &'a crate::App, window: iced::window::Id) -> Element<
         root = root.push(lightbox_overlay(session, lb, window));
     }
     root.width(Length::Fill).height(Length::Fill).into()
+}
+
+/// 在场协作者：名册里 presence.file 指向当前表格的空间成员（颜色 + 昵称）。
+fn collab_members(app: &crate::App, session: &TableSession) -> Vec<(iced::Color, String)> {
+    if !matches!(app.repo_kind, crate::RepoKind::Space(_)) {
+        return Vec::new();
+    }
+    app.space_peers
+        .iter()
+        .filter(|p| {
+            p.presence
+                .as_ref()
+                .and_then(|pr| pr.get("file").and_then(|f| f.as_str()))
+                .is_some_and(|f| f == session.file)
+        })
+        .map(|p| (crate::layout_view::parse_hex_color(&p.color).unwrap_or(pal::TEXT_MUTED), p.nickname.clone()))
+        .collect()
 }
 
 /// 顶部工具条：协作者胶囊 + 行列统计 + 缩放 + ··· 菜单。

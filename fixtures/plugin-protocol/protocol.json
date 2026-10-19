@@ -392,6 +392,41 @@
       "name": "ai.toolResult params",
       "type": "ToolResultParams",
       "value": { "callId": "tool-1", "content": "命中 2 条", "isError": false }
+    },
+    {
+      "name": "table.snapshot result",
+      "type": "TableSnapshot",
+      "value": {
+        "open": true,
+        "path": "plan.atb",
+        "fields": [ { "id": "f1", "name": "名称", "type": "text", "options": ["甲", "乙"] } ],
+        "rows": [ { "id": "r1", "values": { "f1": "甲" } } ]
+      }
+    },
+    {
+      "name": "table.snapshot result (no open table)",
+      "type": "TableSnapshot",
+      "value": { "open": false }
+    },
+    {
+      "name": "table.updateCell params",
+      "type": "TableUpdateCellParams",
+      "value": { "rowId": "r1", "fieldId": "f1", "value": null }
+    },
+    {
+      "name": "table.addRow result",
+      "type": "TableAddRowResult",
+      "value": { "rowId": "r9" }
+    },
+    {
+      "name": "table.selectRow params",
+      "type": "TableRowIdParams",
+      "value": { "rowId": "r1" }
+    },
+    {
+      "name": "table:changed payload",
+      "type": "TableChangedPayload",
+      "value": { "path": "plan.atb" }
     }
   ]
 }

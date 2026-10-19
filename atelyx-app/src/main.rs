@@ -1072,6 +1072,10 @@ pub struct App {
     pub plugin_surfaces: HashSet<(String, String)>,
     /// 已挂载的插件设置面（注册即挂载，贡献变化时差额通知插件）。
     pub plugin_settings_surfaces: HashSet<(String, String)>,
+    /// 已挂载的插件表格视图面（表格面板内当前选中的视图；换视图 / 关表格即差额通知插件）。
+    pub plugin_table_surfaces: HashSet<(String, String)>,
+    /// 最近一次广播 `table:changed` 时的表格路径（身份差分用；None = 广播过「无打开表格」）。
+    pub table_event_path: Option<String>,
     /// 已挂面的最新界面树投影（键 = 插件 id + 面 id）。
     pub plugin_trees: HashMap<(String, String), atelyx_core::plugin_runtime::ViewNode>,
     /// 单行 / 数字输入的宿主草稿（键 = 插件 id + 面 id + 节点 id）。
@@ -1456,6 +1460,8 @@ impl App {
                 plugin_contributions: Vec::new(),
                 plugin_surfaces: HashSet::new(),
                 plugin_settings_surfaces: HashSet::new(),
+                plugin_table_surfaces: HashSet::new(),
+                table_event_path: None,
                 plugin_trees: HashMap::new(),
                 plugin_drafts: HashMap::new(),
                 plugin_editors: HashMap::new(),
@@ -1680,7 +1686,25 @@ impl App {
             Some(loads) => task.chain(loads),
             None => task,
         };
+        // 表格视图面挂载差分：换视图 / 开合 / 切换表格后差额通知插件（面集变了才重投影）
+        let task = if plugin_actions::sync_table_surfaces(self) {
+            task.chain(plugin_actions::refresh_projection(self))
+        } else {
+            task
+        };
+        self.notify_table_switch();
         self.chain_autosave_timer(task)
+    }
+
+    /// 表格身份变化（打开 / 切换 / 关闭表格）即广播 `table:changed`；
+    /// 内容变更的广播在自动保存结算点与协作远端补丁落地处发出。
+    fn notify_table_switch(&mut self) {
+        let current = self.table.as_ref().map(|t| t.file.clone());
+        if current == self.table_event_path {
+            return;
+        }
+        self.plugins.on_table_changed(current.as_deref());
+        self.table_event_path = current;
     }
 
     /// 内容变更后补排自动保存定时器（单定时器链）：期限被输入推迟时按剩余时长续排，否则到期触发保存。
@@ -1892,6 +1916,8 @@ impl App {
                         task = task.chain(self.submit_save(SaveReason::AutoSave));
                     }
                     if self.table.as_ref().is_some_and(|t| t.dirty) {
+                        // 内容结算点即广播：本地编辑已稳定，插件据此重读
+                        self.plugins.on_table_changed(self.table.as_ref().map(|t| t.file.as_str()));
                         task = task
                             .chain(table_actions::submit_table_save(self, table_view::SaveReason::AutoSave));
                     }

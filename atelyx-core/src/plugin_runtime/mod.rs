@@ -14,6 +14,8 @@ mod manifest;
 /// 市场数据源（公开给壳：索引拉取 / 缓存 / Release 取数）。
 pub mod market;
 mod shortcut;
+/// 表格服务面的纯映射（公开给壳：表格真源 → 协议只读快照）。
+pub mod table;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -33,12 +35,13 @@ use instance::Instance;
 /// 协议类型再导出：壳只依赖 `atelyx-core`，不直接依赖协议 crate。
 pub use ai_tools::{PluginToolOutput, PluginToolSpec};
 pub use atelyx_plugin_protocol::canvas::{CanvasColor, CanvasPoint, DrawCommand};
-pub use atelyx_plugin_protocol::event::VaultSwitchPayload;
+pub use atelyx_plugin_protocol::event::{TableChangedPayload, VaultSwitchPayload};
 pub use atelyx_plugin_protocol::manifest::{DocTypeRegistration, Permission};
 pub use atelyx_plugin_protocol::method::{
     ChatEvent, ChatEventParams, ChatHistoryParams, ChatHistoryResult, ChatSendParams,
     ChatSessionSummary, ChatSessionWire, ChatStopParams, ContributionSlot, FileFilter,
-    NotificationLevel, SurfaceKind, TakeoverScope, WindowOpenParams,
+    NotificationLevel, SurfaceKind, TableField, TableRow, TableSnapshot, TakeoverScope,
+    WindowOpenParams,
 };
 pub use atelyx_plugin_protocol::view::{
     Align, Axis, ButtonVariant, CanvasEventKind, CanvasPointer, ColorToken, EventKind, EventValue,
@@ -153,6 +156,22 @@ pub enum HostRequest {
     VaultList { plugin_id: String, request_id: u64, path: String },
     /// 插件请求判定当前仓库内一个文件是否存在。
     VaultExists { plugin_id: String, request_id: u64, path: String },
+    /// 插件请求读当前打开表格的只读快照（真源在壳的表格会话）。
+    TableSnapshot { plugin_id: String, request_id: u64 },
+    /// 插件请求逐格写表格（经壳的表格会话与补丁 / 保存链，与本地编辑同出口）。
+    TableUpdateCell {
+        plugin_id: String,
+        request_id: u64,
+        row_id: String,
+        field_id: String,
+        value: Value,
+    },
+    /// 插件请求新增一行（结果回带宿主分配的新行 id）。
+    TableAddRow { plugin_id: String, request_id: u64 },
+    /// 插件请求删除一行。
+    TableRemoveRow { plugin_id: String, request_id: u64, row_id: String },
+    /// 插件请求写宿主表格选中态。
+    TableSelectRow { plugin_id: String, request_id: u64, row_id: String },
 }
 
 /// 插件列表项（设置页渲染用）。
@@ -227,6 +246,9 @@ pub struct PluginRuntime {
     next_tool_call_id: AtomicU64,
     /// 当前容器身份（见 [`PluginRuntime::on_vault_switch`]）：同一容器重复进入不动作，据此判别首次激活。
     container: Mutex<Option<String>>,
+    /// 最近一次 `table:changed` 广播的表格路径：插件迟到订阅时补发当前状态（否则订阅前的
+    /// 广播已丢失，插件只能盲等下一次变更）。
+    current_table: Mutex<Option<String>>,
     discovered: Mutex<HashMap<String, Discovered>>,
     instances: Mutex<HashMap<String, Arc<Instance>>>,
 }
@@ -254,6 +276,7 @@ impl PluginRuntime {
             tool_calls: Mutex::new(HashMap::new()),
             next_tool_call_id: AtomicU64::new(1),
             container: Mutex::new(None),
+            current_table: Mutex::new(None),
             discovered: Mutex::new(HashMap::new()),
             instances: Mutex::new(HashMap::new()),
         });
@@ -373,7 +396,12 @@ impl PluginRuntime {
             | HostRequest::VaultReadText { .. }
             | HostRequest::VaultWriteText { .. }
             | HostRequest::VaultList { .. }
-            | HostRequest::VaultExists { .. } => return Err("界面服务请求形态不符".to_string()),
+            | HostRequest::VaultExists { .. }
+            | HostRequest::TableSnapshot { .. }
+            | HostRequest::TableUpdateCell { .. }
+            | HostRequest::TableAddRow { .. }
+            | HostRequest::TableRemoveRow { .. }
+            | HostRequest::TableSelectRow { .. } => return Err("界面服务请求形态不符".to_string()),
         };
         self.ui_calls
             .lock()
@@ -461,6 +489,33 @@ impl PluginRuntime {
                 plugin_id,
                 request_id,
                 path,
+            },
+            HostRequest::TableSnapshot { plugin_id, .. } => HostRequest::TableSnapshot {
+                plugin_id,
+                request_id,
+            },
+            HostRequest::TableUpdateCell { plugin_id, row_id, field_id, value, .. } => {
+                HostRequest::TableUpdateCell {
+                    plugin_id,
+                    request_id,
+                    row_id,
+                    field_id,
+                    value,
+                }
+            }
+            HostRequest::TableAddRow { plugin_id, .. } => HostRequest::TableAddRow {
+                plugin_id,
+                request_id,
+            },
+            HostRequest::TableRemoveRow { plugin_id, row_id, .. } => HostRequest::TableRemoveRow {
+                plugin_id,
+                request_id,
+                row_id,
+            },
+            HostRequest::TableSelectRow { plugin_id, row_id, .. } => HostRequest::TableSelectRow {
+                plugin_id,
+                request_id,
+                row_id,
             },
             _ => return Err("壳侧服务请求形态不符".to_string()),
         };
@@ -918,6 +973,28 @@ impl PluginRuntime {
         }
     }
 
+    /// 广播当前打开表格的变更（打开 / 切换 / 关闭表格、本地编辑结算、协作远端补丁落地）
+    /// 给订阅了 `table:changed` 的运行中插件；`path` = 无打开表格（payload 缺省路径）。
+    /// 路径同步缓存，供迟到的订阅者补发当前状态（见 [`PluginRuntime::current_table_path`]）。
+    pub fn on_table_changed(self: &Arc<Self>, path: Option<&str>) {
+        *self.current_table.lock().unwrap() = path.map(str::to_string);
+        let payload = TableChangedPayload { path: path.map(str::to_string) };
+        let targets: Vec<Arc<Instance>> = self.instances.lock().unwrap().values().cloned().collect();
+        for instance in targets {
+            if instance.status() != PluginStatus::Running {
+                continue;
+            }
+            if instance.subscribed_to(event::name::TABLE_CHANGED) {
+                instance.notify_domain_event(event::name::TABLE_CHANGED, &payload);
+            }
+        }
+    }
+
+    /// 最近一次 `table:changed` 广播的表格路径（无打开表格 = `None`）。
+    pub(crate) fn current_table_path(&self) -> Option<String> {
+        self.current_table.lock().unwrap().clone()
+    }
+
     /// 转投一条全局快捷键触发给登记它的插件。
     pub(crate) fn notify_shortcut(&self, plugin_id: &str, accelerator: &str) {
         let instance = self.instances.lock().unwrap().get(plugin_id).cloned();
@@ -1010,7 +1087,12 @@ fn request_plugin_id(request: &HostRequest) -> &str {
         | HostRequest::VaultReadText { plugin_id, .. }
         | HostRequest::VaultWriteText { plugin_id, .. }
         | HostRequest::VaultList { plugin_id, .. }
-        | HostRequest::VaultExists { plugin_id, .. } => plugin_id,
+        | HostRequest::VaultExists { plugin_id, .. }
+        | HostRequest::TableSnapshot { plugin_id, .. }
+        | HostRequest::TableUpdateCell { plugin_id, .. }
+        | HostRequest::TableAddRow { plugin_id, .. }
+        | HostRequest::TableRemoveRow { plugin_id, .. }
+        | HostRequest::TableSelectRow { plugin_id, .. } => plugin_id,
     }
 }
 

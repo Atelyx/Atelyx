@@ -98,7 +98,8 @@ pub fn takeover_content<'a>(
     }
 }
 
-fn surface_view<'a>(
+/// 面内容解释渲染（面板 / 表格视图共用）：按壳侧视图 kind 取插件贡献与树。
+pub(crate) fn surface_view<'a>(
     app: &'a App,
     window: iced::window::Id,
     view: &str,

@@ -60,6 +60,20 @@ pub mod vault {
     pub const EXISTS: &str = "vault.exists";
 }
 
+/// 表格面：读写当前打开表格。写入与宿主自身编辑同一出口（宿主合并落盘并广播协作补丁），
+/// 插件不得旁路读写 `.atb` 真源。
+pub mod table {
+    /// 读当前打开表格的只读快照（字段 / 行 / 仓库相对路径）；未打开表格 = `open: false`。
+    pub const SNAPSHOT: &str = "table.snapshot";
+    /// 逐格写：只改指定字段，不整行替换（不覆盖同行其它字段与并发编辑）。
+    pub const UPDATE_CELL: &str = "table.updateCell";
+    /// 新增一行（结果回传新行 id，避免按行 id 差集定位的并发歧义）。
+    pub const ADD_ROW: &str = "table.addRow";
+    pub const REMOVE_ROW: &str = "table.removeRow";
+    /// 写宿主选中态（视图与表格联动用）。
+    pub const SELECT_ROW: &str = "table.selectRow";
+}
+
 pub mod state {
     pub const READ: &str = "state.read";
     pub const WRITE: &str = "state.write";
@@ -142,6 +156,8 @@ pub enum SurfaceKind {
     Page,
     Takeover,
     Settings,
+    /// 表格编辑器内的插件表格视图（挂载在表格面板内，替掉网格）。
+    TableView,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -659,6 +675,66 @@ pub enum ChatEvent {
     Titled { title: Option<String> },
 }
 
+// ---------- table ----------
+
+/// [`table::SNAPSHOT`] 的 result：当前打开表格的只读快照。未打开表格 = `open: false`（其余字段缺省）。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct TableSnapshot {
+    pub open: bool,
+    /// 当前打开表格的仓库相对路径。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<TableField>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rows: Vec<TableRow>,
+}
+
+/// 快照里的字段：只读面带 id / 名称 / 类型 / 选项。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableField {
+    pub id: String,
+    pub name: String,
+    #[serde(rename = "type")]
+    pub field_type: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
+}
+
+/// 快照里的行：单元格值按字段 id 存（缺 key = 空单元格）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableRow {
+    pub id: String,
+    #[serde(default)]
+    pub values: serde_json::Map<String, Value>,
+}
+
+/// [`table::UPDATE_CELL`] 的 params：`value` 为单元格新值（`null` = 清空；形态随字段类型）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableUpdateCellParams {
+    pub row_id: String,
+    pub field_id: String,
+    pub value: Value,
+}
+
+/// [`table::ADD_ROW`] 的 result：新行 id（宿主分配，插件按它继续引用该行）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableAddRowResult {
+    pub row_id: String,
+}
+
+/// [`table::REMOVE_ROW`] 与 [`table::SELECT_ROW`] 的 params。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableRowIdParams {
+    pub row_id: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -669,6 +745,7 @@ mod tests {
         assert_eq!(serde_json::to_value(ContributionSlot::TableView).unwrap(), "tableView");
         assert_eq!(serde_json::to_value(ContributionSlot::Settings).unwrap(), "settings");
         assert_eq!(serde_json::to_value(SurfaceKind::Settings).unwrap(), "settings");
+        assert_eq!(serde_json::to_value(SurfaceKind::TableView).unwrap(), "tableView");
         assert_eq!(serde_json::to_value(TakeoverScope::Page).unwrap(), "page");
         assert_eq!(serde_json::to_value(TakeoverScope::Full).unwrap(), "full");
         let kind: SurfaceKind = serde_json::from_value(serde_json::json!("settings")).unwrap();
@@ -677,6 +754,20 @@ mod tests {
         assert_eq!(slot, ContributionSlot::Settings);
         let scope: TakeoverScope = serde_json::from_value(serde_json::json!("full")).unwrap();
         assert_eq!(scope, TakeoverScope::Full);
+        // table 面：字段名与类型字段走 camelCase / `type` 原名，缺省行按空值集
+        let snapshot: TableSnapshot = serde_json::from_value(serde_json::json!({
+            "open": true,
+            "path": "a.atb",
+            "fields": [{ "id": "f1", "name": "名称", "type": "text", "options": ["甲", "乙"] }],
+            "rows": [{ "id": "r1", "values": { "f1": "甲" } }]
+        }))
+        .unwrap();
+        assert!(snapshot.open);
+        assert_eq!(snapshot.fields[0].field_type, "text");
+        assert_eq!(snapshot.fields[0].options, vec!["甲", "乙"]);
+        assert_eq!(snapshot.rows[0].values["f1"], "甲");
+        let closed: TableSnapshot = serde_json::from_value(serde_json::json!({ "open": false })).unwrap();
+        assert_eq!(closed, TableSnapshot::default(), "未打开表格 = 全缺省");
         // ai 面：事件 tagged 形态与 send 缺省 sessionId
         assert_eq!(
             serde_json::to_value(ChatEvent::Finished { reason: "stop".into() }).unwrap(),

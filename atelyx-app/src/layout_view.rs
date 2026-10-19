@@ -4335,29 +4335,35 @@ fn popup_element<'a>(
             MenuEntry::action_icon("下载图片", "download", Message::Table(crate::table_view::TableMsg::LightboxDownload)),
         )],
         PopupState::TableViewMenu => {
+            // 视图选择：内置网格 + 各插件注册的表格视图（选中项带「当前」，切换即挂载 / 分离面）
+            let active = app
+                .table
+                .as_ref()
+                .and_then(|t| t.view.active_view.as_deref())
+                .map(str::to_string);
+            let grid = Message::Table(crate::table_view::TableMsg::SetView(None));
             let mut entries: Vec<(usize, MenuEntry)> = vec![(
                 0,
-                MenuEntry::Action {
-                    label: "表格".into(),
-                    icon: None,
-                    danger: false,
-                    disabled: false,
-                    on_press: Some(Message::Ui(crate::ui::UiMsg::PopupClose { window })),
-                    note: Some("当前"),
-                    hint: None,
+                if active.is_none() {
+                    MenuEntry::Checked { label: "表格".into(), on_press: grid }
+                } else {
+                    MenuEntry::action("表格", grid)
                 },
             )];
-            // 插件表格视图挂点：声明与入口已就绪，表格服务域开放前选中只给未开放提示
-            let plugins: Vec<String> = crate::plugin_actions::contributions_of(app, ContributionSlot::TableView)
-                .map(|c| c.label.clone())
-                .collect();
-            if !plugins.is_empty() {
+            let views: Vec<(String, String)> =
+                crate::plugin_actions::contributions_of(app, ContributionSlot::TableView)
+                    .map(|c| (c.label.clone(), crate::plugin_actions::view_kind(&c.plugin_id, &c.id)))
+                    .collect();
+            if !views.is_empty() {
                 entries.push((0, MenuEntry::Divider));
-                entries.extend(
-                    plugins
-                        .into_iter()
-                        .map(|label| (0usize, MenuEntry::action(label, Message::NotImplemented("插件表格视图（表格服务未开放）")))),
-                );
+                for (label, kind) in views {
+                    let pick = Message::Table(crate::table_view::TableMsg::SetView(Some(kind.clone())));
+                    entries.push((0, if active.as_deref() == Some(kind.as_str()) {
+                        MenuEntry::Checked { label, on_press: pick }
+                    } else {
+                        MenuEntry::action(label, pick)
+                    }));
+                }
             }
             entries
         }

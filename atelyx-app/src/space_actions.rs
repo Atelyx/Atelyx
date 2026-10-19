@@ -3199,6 +3199,8 @@ fn on_remote_table_patch(
             s.saved = s.data.clone();
         }
     }
+    // 远端补丁落地即广播：打开中的插件表格视图由此重读（本地结算点不覆盖这条路径）
+    app.plugins.on_table_changed(Some(file.as_str()));
     if refresh {
         return refresh_space_tree(app);
     }
