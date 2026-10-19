@@ -1048,14 +1048,7 @@ fn market_card(
     .spacing(8)
     .align_y(iced::alignment::Vertical::Center);
     if let Some(badge) = entry.badge {
-        header = header.push(controls::badge(
-            badge.label(),
-            pal::BG_TERTIARY,
-            match badge {
-                market::Badge::Official => pal::SUCCESS,
-                market::Badge::Endorsed => pal::WARNING,
-            },
-        ));
+        header = header.push(controls::badge(badge.label(), pal::BG_TERTIARY, pal::SUCCESS));
     }
     if let Some(installed) = installed {
         header = header.push(controls::badge(

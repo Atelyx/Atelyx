@@ -2,7 +2,6 @@
 //! GitHub Release 上的平台 zip 走既有安装链（解压防御由安装模块承担，本模块只管取数与落位）。
 //! 纯解析与判定函数与网络路径分离，前者单测覆盖。
 
-use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -15,8 +14,6 @@ use crate::updater;
 
 /// 官方插件索引（CDN 直链，沿用官方索引仓库的发布形态）。
 pub const INDEX_URL: &str = "https://cdn.jsdelivr.net/gh/Atelyx/Atelyx-plugin-index@main/index.json";
-/// 精选插件表（`owner/repo` → 理由的映射；缺失或拉取失败按空表处理）。
-pub const ENDORSED_URL: &str = "https://cdn.jsdelivr.net/gh/Atelyx/Atelyx-plugin-index@main/endorsed.json";
 /// 官方账号名单：repo owner 命中即 official 徽标。
 pub const OFFICIAL_PLUGIN_ORGS: &[&str] = &["Atelyx"];
 /// 索引本地缓存有效期（毫秒）。
@@ -24,20 +21,18 @@ pub const INDEX_CACHE_MS: u64 = 6 * 60 * 60 * 1000;
 /// 单次索引 / 发布信息请求的总超时（秒）。
 const FETCH_TIMEOUT_SECS: u64 = 15;
 
-/// 条目徽标：official 按 repo owner 命中官方名单；endorsed 严格按 `owner/repo` 命中精选表。
-/// 不按自报 id 授予（id 可被伪造，仓库归属是背书事实），同 id 不同作者仓库不继承徽标。
+/// 条目徽标：official 按 repo owner 命中官方名单。不按自报 id 授予（id 可被伪造，
+/// 仓库归属是背书事实），同 id 不同作者仓库不继承徽标。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Badge {
     Official,
-    Endorsed,
 }
 
 impl Badge {
     pub fn label(self) -> &'static str {
         match self {
             Badge::Official => "官方",
-            Badge::Endorsed => "精选",
         }
     }
 }
@@ -80,12 +75,13 @@ pub struct MarketSnapshot {
 }
 
 /// 某插件仓库的最新 Release 取数结果。`asset_url` 缺失 = 该 Release 没挂本平台的 zip
-/// （调用方按「无安装包」呈现，不报错）。
+/// （调用方按「无安装包」呈现，不报错）。`sha256` 为资产摘要（资产未提供摘要时 `None`）。
 #[derive(Clone, Debug, PartialEq)]
 pub struct PluginRelease {
     /// tag 剥 `v`/`V` 前缀后的版本号。
     pub version: String,
     pub asset_url: Option<String>,
+    pub sha256: Option<String>,
 }
 
 /// 解析官方索引：返回生成时间与条目列表。缺 `items` 视为空市场；单个条目形态不符
@@ -114,21 +110,10 @@ pub fn parse_index(value: &Value) -> Result<(String, Vec<MarketEntry>), String> 
     Ok((generated_at, items))
 }
 
-/// 解析精选表（`owner/repo` 键集合）；形态不符按空表处理。
-pub fn parse_endorsed(value: &Value) -> HashSet<String> {
-    value
-        .as_object()
-        .map(|obj| obj.keys().cloned().collect())
-        .unwrap_or_default()
-}
-
-/// 徽标判定：owner 命中官方名单 = official；命中精选表 = endorsed。
-pub fn badge_for(repo: &str, endorsed: &HashSet<String>) -> Option<Badge> {
+/// 徽标判定：owner 命中官方名单即 official，其余无徽标。
+pub fn badge_for(repo: &str) -> Option<Badge> {
     let owner = repo.split('/').next().unwrap_or_default();
-    if OFFICIAL_PLUGIN_ORGS.contains(&owner) {
-        return Some(Badge::Official);
-    }
-    endorsed.contains(repo).then_some(Badge::Endorsed)
+    OFFICIAL_PLUGIN_ORGS.contains(&owner).then_some(Badge::Official)
 }
 
 /// 当前平台的 Release 资产标签。
@@ -158,19 +143,15 @@ pub fn read_cache(cache_path: &std::path::Path) -> Option<MarketSnapshot> {
     serde_json::from_str(&raw).ok()
 }
 
-/// 拉取市场索引与精选表并落缓存。网络失败直接报错（由调用方提示），不回退缓存——
+/// 拉取市场索引并落缓存。网络失败直接报错（由调用方提示），不回退缓存——
 /// 缓存只作秒开来源，是否回退到缓存展示由壳决定。
 pub async fn fetch_snapshot(cache_path: &std::path::Path) -> Result<MarketSnapshot, String> {
     let (generated_at, mut items) = fetch_json(INDEX_URL)
         .await
         .and_then(|value| parse_index(&value))
         .map_err(|e| format!("拉取插件索引失败：{e}"))?;
-    let endorsed = match fetch_json(ENDORSED_URL).await {
-        Ok(value) => parse_endorsed(&value),
-        Err(_) => HashSet::new(),
-    };
     for item in &mut items {
-        item.badge = badge_for(&item.repo, &endorsed);
+        item.badge = badge_for(&item.repo);
     }
     let snapshot = MarketSnapshot {
         generated_at,
@@ -216,6 +197,8 @@ struct GitHubRelease {
 struct GitHubAsset {
     name: Option<String>,
     browser_download_url: Option<String>,
+    /// `sha256:<hex>` 形态的资产摘要（旧资产可能没有）。
+    digest: Option<String>,
 }
 
 /// 查插件仓库的最新 Release：版本取 tag（剥 `v`/`V`），资产按命名约定匹配本平台 zip。
@@ -247,7 +230,7 @@ pub async fn latest_plugin_release(repo: &str, plugin_id: &str) -> Result<Plugin
         return Err(format!("插件仓库 {repo} 的最新发布缺少版本号"));
     }
     let expected = asset_name(plugin_id, &version);
-    let asset_url = release
+    let asset = release
         .assets
         .unwrap_or_default()
         .into_iter()
@@ -256,9 +239,18 @@ pub async fn latest_plugin_release(repo: &str, plugin_id: &str) -> Result<Plugin
                 .name
                 .as_deref()
                 .is_some_and(|name| name.eq_ignore_ascii_case(&expected))
-        })
-        .and_then(|asset| asset.browser_download_url);
-    Ok(PluginRelease { version, asset_url })
+        });
+    let (asset_url, sha256) = match asset {
+        Some(asset) => (asset.browser_download_url, digest_sha256(asset.digest.as_deref())),
+        None => (None, None),
+    };
+    Ok(PluginRelease { version, asset_url, sha256 })
+}
+
+/// GitHub 资产摘要（`sha256:<hex>`）转成纯 hex；形态不符按「无摘要」处理（下载器跳过校验）。
+fn digest_sha256(digest: Option<&str>) -> Option<String> {
+    let hex = digest?.trim().strip_prefix("sha256:")?;
+    (hex.len() == 64 && hex.chars().all(|c| c.is_ascii_hexdigit())).then(|| hex.to_ascii_lowercase())
 }
 
 /// 下载某插件最新 Release 的平台 zip 到 `dest_dir`（断点续传与取消由下载器承担），
@@ -291,7 +283,7 @@ pub async fn download_release_asset(
             asset_name(plugin_id, &release.version)
         ));
     };
-    updater::download(dest_dir, url, None, cancel, on_progress).await
+    updater::download(dest_dir, url, release.sha256.as_deref(), cancel, on_progress).await
 }
 
 /// 当前 unix 毫秒时刻（缓存新鲜度判定用）。
@@ -333,12 +325,10 @@ mod tests {
 
     #[test]
     fn badge_uses_repo_ownership_not_self_reported_id() {
-        let endorsed: HashSet<String> = ["third/plugin".to_string()].into();
-        assert_eq!(badge_for("Atelyx/demo", &endorsed), Some(Badge::Official));
-        assert_eq!(badge_for("third/plugin", &endorsed), Some(Badge::Endorsed));
-        assert_eq!(badge_for("random/dev", &endorsed), None);
+        assert_eq!(badge_for("Atelyx/demo"), Some(Badge::Official));
+        assert_eq!(badge_for("third/plugin"), None);
         // 同 id 不同作者仓库不继承徽标（判定只认 repo）
-        assert_eq!(badge_for("impersonator/demo", &endorsed), None);
+        assert_eq!(badge_for("impersonator/demo"), None);
     }
 
     #[test]
@@ -349,6 +339,16 @@ mod tests {
         } else {
             assert_eq!(name, "com.atelyx.demo-1.2.0-linux-x64.zip");
         }
+    }
+
+    #[test]
+    fn digest_is_normalized_and_malformed_is_ignored() {
+        let hex = "A".repeat(64);
+        assert_eq!(digest_sha256(Some(&format!("sha256:{hex}"))), Some("a".repeat(64)));
+        // 形态不符 / 缺失一律按无摘要（下载器跳过校验，不阻断安装）
+        assert_eq!(digest_sha256(Some("sha512:abcd")), None);
+        assert_eq!(digest_sha256(Some("sha256:xyz")), None);
+        assert_eq!(digest_sha256(None), None);
     }
 
     #[test]
