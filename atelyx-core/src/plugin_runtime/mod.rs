@@ -10,6 +10,7 @@ mod http;
 mod install;
 mod instance;
 mod layout;
+mod log;
 mod manifest;
 /// 市场数据源（公开给壳：索引拉取 / 缓存 / Release 取数）。
 pub mod market;
@@ -193,6 +194,16 @@ pub struct PluginSummary {
     pub denied: usize,
     /// 已接收的界面树提交次数。
     pub view_submits: u64,
+    /// 安装来源目录（本地目录安装时记下的绝对路径；zip / 市场安装为 `None`）。
+    pub source: Option<String>,
+}
+
+/// 一次安装的结果：内容已落位。`start_error` = 曾启用的插件未能用新内容启动——
+/// 内容装上了、只是没跑起来（与「安装失败」是两回事，提示与重试入口都不同）。
+#[derive(Clone, Debug)]
+pub struct InstallOutcome {
+    pub id: String,
+    pub start_error: Option<String>,
 }
 
 /// 磁盘上发现的一个插件。
@@ -820,31 +831,40 @@ impl PluginRuntime {
 
     /// 列表（按 id 排序）：已安装插件 + 启用态 + 运行状态 + 审计计数。
     pub fn list(&self) -> Vec<PluginSummary> {
-        let discovered = self.discovered.lock().unwrap();
-        let instances = self.instances.lock().unwrap();
-        let mut ids: Vec<&String> = discovered.keys().collect();
-        ids.sort();
-        ids.into_iter()
-            .map(|id| {
-                let entry = &discovered[id];
-                let instance = instances.get(id);
-                let manifest = entry.manifest.as_ref().ok();
-                PluginSummary {
-                    id: id.clone(),
-                    name: manifest.map(|m| m.name.clone()).unwrap_or_default(),
-                    version: manifest.map(|m| m.version.clone()).unwrap_or_default(),
-                    api_version: manifest.map(|m| m.api_version).unwrap_or(0),
-                    permissions: manifest.map(|m| m.permissions.clone()).unwrap_or_default(),
-                    singleton: manifest.is_some_and(|m| m.singleton),
-                    keep_mounted_on_vault_switch: manifest.is_some_and(|m| m.keep_mounted_on_vault_switch),
-                    enabled: entry.enabled,
-                    status: instance.map(|i| i.status()).unwrap_or(PluginStatus::Stopped),
-                    load_error: entry.manifest.as_ref().err().cloned(),
-                    denied: instance.map(|i| i.denied_count()).unwrap_or(0),
-                    view_submits: instance.map(|i| i.view_submits()).unwrap_or(0),
-                }
-            })
-            .collect()
+        let mut summaries: Vec<PluginSummary> = {
+            let discovered = self.discovered.lock().unwrap();
+            let instances = self.instances.lock().unwrap();
+            let mut ids: Vec<&String> = discovered.keys().collect();
+            ids.sort();
+            ids.into_iter()
+                .map(|id| {
+                    let entry = &discovered[id];
+                    let instance = instances.get(id);
+                    let manifest = entry.manifest.as_ref().ok();
+                    PluginSummary {
+                        id: id.clone(),
+                        name: manifest.map(|m| m.name.clone()).unwrap_or_default(),
+                        version: manifest.map(|m| m.version.clone()).unwrap_or_default(),
+                        api_version: manifest.map(|m| m.api_version).unwrap_or(0),
+                        permissions: manifest.map(|m| m.permissions.clone()).unwrap_or_default(),
+                        singleton: manifest.is_some_and(|m| m.singleton),
+                        keep_mounted_on_vault_switch: manifest
+                            .is_some_and(|m| m.keep_mounted_on_vault_switch),
+                        enabled: entry.enabled,
+                        status: instance.map(|i| i.status()).unwrap_or(PluginStatus::Stopped),
+                        load_error: entry.manifest.as_ref().err().cloned(),
+                        denied: instance.map(|i| i.denied_count()).unwrap_or(0),
+                        view_submits: instance.map(|i| i.view_submits()).unwrap_or(0),
+                        source: None,
+                    }
+                })
+                .collect()
+        };
+        // 安装来源是磁盘事实（不进 discovered 缓存）：出锁后再读，不持锁做 I/O
+        for summary in &mut summaries {
+            summary.source = layout::read_source(&self.root, &summary.id);
+        }
+        summaries
     }
 
     /// 启用 / 停用。启用时不可装载或启动失败即回滚启用态并返回原因。
@@ -879,16 +899,41 @@ impl PluginRuntime {
         instance.start()
     }
 
-    /// 从本地目录安装：只落位内容，不置启用标记；曾启用的插件更新后由宿主重启。返回安装的插件 id。
-    pub fn install_dir(self: &Arc<Self>, src: &Path) -> Result<String, String> {
+    /// 从本地目录安装：只落位内容，不置启用标记；记下来源目录供「从来源更新」。
+    /// 曾启用的插件更新后由宿主重启；重启失败不影响安装结果（见 [`InstallOutcome`]）。
+    pub fn install_dir(self: &Arc<Self>, src: &Path) -> Result<InstallOutcome, String> {
         let id = install::install_from_dir(&self.root, src)?;
         self.after_install(&id)
     }
 
-    /// 从 zip 安装：只落位内容，不置启用标记；曾启用的插件更新后由宿主重启。返回安装的插件 id。
-    pub fn install_zip(self: &Arc<Self>, zip_path: &Path) -> Result<String, String> {
-        let id = install::install_from_zip(&self.root, zip_path)?;
+    /// 从 zip 安装；`expected_id` 为来源方声明的插件 id（市场条目），与安装包清单不一致即拒收。
+    pub fn install_zip(
+        self: &Arc<Self>,
+        zip_path: &Path,
+        expected_id: Option<&str>,
+    ) -> Result<InstallOutcome, String> {
+        let id = install::install_from_zip(&self.root, zip_path, expected_id)?;
         self.after_install(&id)
+    }
+
+    /// 用上次的安装来源目录重新安装（开发回路：构建产物更新后一键重装并重启）。
+    /// 来源缺失 / 目录已不存在 / 来源清单 id 与已安装插件不一致都以可读原因拒绝。
+    pub fn install_from_source(self: &Arc<Self>, id: &str) -> Result<InstallOutcome, String> {
+        let source = layout::read_source(&self.root, id).ok_or_else(|| {
+            format!("{id} 没有安装来源记录：市场或 zip 安装的插件不支持从来源更新")
+        })?;
+        let src = PathBuf::from(&source);
+        if !src.is_dir() {
+            return Err(format!("安装来源已不存在：{source}"));
+        }
+        let manifest = manifest::read_manifest(&src)?;
+        if manifest.id != id {
+            return Err(format!(
+                "来源目录的插件 id（{}）与已安装插件不一致：{id}",
+                manifest.id
+            ));
+        }
+        self.install_dir(&src)
     }
 
     /// 卸载：先停插件，再删安装内容、私有数据与上一代。
@@ -910,6 +955,20 @@ impl PluginRuntime {
             .get(id)
             .map(|i| i.audit())
             .unwrap_or_default()
+    }
+
+    /// 某插件日志的尾部（详情页展示；没有日志 = 空串）。
+    pub fn log_tail(&self, id: &str) -> String {
+        log::tail(&layout::log_file(&self.root, id))
+    }
+
+    /// 某插件日志文件的路径（设置页展示位置；未安装 = `None`）。
+    pub fn log_path(&self, id: &str) -> Option<String> {
+        self.discovered
+            .lock()
+            .unwrap()
+            .contains_key(id)
+            .then(|| layout::log_file(&self.root, id).to_string_lossy().into_owned())
     }
 
     /// 应用退出：停全部插件并结束全部托管进程（含插件再起的子进程）。
@@ -1005,16 +1064,17 @@ impl PluginRuntime {
 
     /// 安装 / 更新后的收尾：重扫清单。更新的若是曾启用的插件，先停旧进程再用新内容重启
     /// （否则旧进程继续跑、新内容不生效）；**新装的插件不自动启用**，由用户在设置页启用。
-    fn after_install(self: &Arc<Self>, id: &str) -> Result<String, String> {
+    /// 重启失败不改判安装结果——内容已落位，失败只是这次没跑起来。
+    fn after_install(self: &Arc<Self>, id: &str) -> Result<InstallOutcome, String> {
         let was_enabled = layout::is_enabled(&self.root, id);
         self.scan();
         if let Some(instance) = self.instances.lock().unwrap().get(id).cloned() {
             instance.stop();
+            // 新内容有新机会：旧崩溃计数不能让重装后的首次启动直接落进熔断
+            instance.reset_crash_history();
         }
-        if was_enabled {
-            self.start_by_id(id)?;
-        }
-        Ok(id.to_string())
+        let start_error = if was_enabled { self.start_by_id(id).err() } else { None };
+        Ok(InstallOutcome { id: id.to_string(), start_error })
     }
 
     fn start_by_id(self: &Arc<Self>, id: &str) -> Result<(), String> {
@@ -1416,5 +1476,57 @@ mod tests {
         assert_eq!(runtime.plugin_tools().len(), 1);
         runtime.clear_tools_of("com.a.one");
         assert!(runtime.plugin_tools().is_empty());
+    }
+
+    /// 从来源更新 = 按记录下来的本地目录重装：内容替换为新构建，来源与 id 都要对得上。
+    #[test]
+    fn install_from_recorded_source_replaces_content() {
+        let tmp = TempDir::new("runtime-install-source");
+        let root = tmp.join("plugins");
+        let src = tmp.join("dist");
+        std::fs::create_dir_all(&src).unwrap();
+        let entry = if cfg!(windows) { "app.exe" } else { "app" };
+        std::fs::write(
+            src.join(MANIFEST_FILE),
+            r#"{"id":"com.example.demo","name":"Demo","version":"1.0.0","apiVersion":1,
+                "entry":{"windows":"app.exe","linux":"app"},"permissions":[]}"#,
+        )
+        .unwrap();
+        std::fs::write(src.join(entry), b"v1").unwrap();
+
+        let runtime = PluginRuntime::new(root.clone());
+        let outcome = runtime.install_dir(&src).expect("目录安装应成功");
+        assert_eq!(outcome.id, "com.example.demo");
+        assert!(outcome.start_error.is_none(), "新装插件不启动，也就没有启动失败");
+        let source = runtime.list()[0].source.clone().expect("应记录安装来源");
+        assert_eq!(std::path::PathBuf::from(source), dunce::canonicalize(&src).unwrap());
+
+        // 构建产物更新后从来源重装
+        std::fs::write(src.join(entry), b"v2").unwrap();
+        runtime.install_from_source("com.example.demo").expect("从来源更新应成功");
+        assert_eq!(
+            std::fs::read(layout::plugin_dir(&root, "com.example.demo").join(entry)).unwrap(),
+            b"v2"
+        );
+
+        // 来源清单换成另一个 id：拒收（否则会用别的插件覆盖这一份）
+        std::fs::write(
+            src.join(MANIFEST_FILE),
+            r#"{"id":"com.example.other","name":"Other","version":"1.0.0","apiVersion":1,
+                "entry":{"windows":"app.exe","linux":"app"},"permissions":[]}"#,
+        )
+        .unwrap();
+        let err = runtime
+            .install_from_source("com.example.demo")
+            .expect_err("来源 id 不一致应被拒");
+        assert!(err.contains("不一致"), "{err}");
+
+        // 来源目录消失与无来源记录（zip / 市场安装）都按可读原因拒绝
+        std::fs::remove_dir_all(&src).unwrap();
+        let err = runtime
+            .install_from_source("com.example.demo")
+            .expect_err("来源目录不存在应被拒");
+        assert!(err.contains("安装来源"), "{err}");
+        assert!(runtime.install_from_source("com.example.absent").is_err());
     }
 }

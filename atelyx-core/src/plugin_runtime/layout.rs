@@ -4,19 +4,24 @@
 //! plugins/
 //!   <id>/                 插件目录：安装内容（plugin.json + 入口 + 插件自带文件）
 //!     data/               宿主管理：插件私有数据（state.json 与私有文件；更新保留、卸载清除）
+//!     logs/               宿主管理：插件日志（插件 stderr、协议违规与生命周期失败；更新保留）
 //!     previous/<ts>/      宿主管理：上一代内容（只留一代，供回退）
 //!     enabled             宿主管理：启用标记（空文件；存在即启用）
+//!     source              宿主管理：安装来源（本地目录安装时记下的绝对路径，供「从来源更新」）
 //!   _tmp-<唯一名>/        安装临时目录（下划线开头，反域名 id 不可能与之相撞；安装结束即清）
 //! ```
-//! 顶层只有插件目录，无隐藏目录约定；宿主保留插件目录内的顶层名 `data` / `previous` / `enabled`
+//! 顶层只有插件目录，无隐藏目录约定；宿主保留插件目录内的顶层名 [`RESERVED_TOP_LEVEL`]
 //! （安装时拒收插件自带同名内容），其余空间归插件自由使用。
 
 use std::path::{Path, PathBuf};
 
 use atelyx_plugin_protocol::manifest::MANIFEST_FILE;
 
-/// 宿主在插件目录内保留的顶层名。
-pub(crate) const RESERVED_TOP_LEVEL: [&str; 3] = ["data", "previous", "enabled"];
+/// 宿主在插件目录内保留的顶层名（安装时拒收插件自带同名内容）。
+pub(crate) const RESERVED_TOP_LEVEL: [&str; 5] = ["data", "logs", "previous", "enabled", "source"];
+/// 换代时**原位保留**的宿主管理项：描述内容之外的状态（私有数据、日志、启用标记）。
+/// 来源记录（`source`）描述的是当前内容从哪来，随内容换代——旧来源留在上一代里自然失效。
+pub(crate) const PRESERVED_ON_UPDATE: [&str; 4] = ["data", "logs", "previous", "enabled"];
 /// 安装临时目录前缀。用下划线开头：插件 id 为反域名（每段仅字母数字与 `-`），不可能以此开头。
 pub(crate) const TEMP_PREFIX: &str = "_tmp-";
 
@@ -28,6 +33,34 @@ pub(crate) fn plugin_dir(root: &Path, id: &str) -> PathBuf {
 /// 插件私有数据目录 `<root>/<id>/data`。
 pub(crate) fn data_dir(root: &Path, id: &str) -> PathBuf {
     plugin_dir(root, id).join("data")
+}
+
+/// 插件日志文件名（插件目录 `logs/` 内）。
+pub(crate) const LOG_FILE: &str = "runtime.log";
+
+/// 插件日志文件 `<root>/<id>/logs/runtime.log`（宿主写，插件不感知）。
+pub(crate) fn log_file(root: &Path, id: &str) -> PathBuf {
+    log_file_in(&plugin_dir(root, id))
+}
+
+/// 按插件目录取日志文件（实例侧只有插件目录，没有插件根）。
+pub(crate) fn log_file_in(plugin_dir: &Path) -> PathBuf {
+    plugin_dir.join("logs").join(LOG_FILE)
+}
+
+/// 安装来源文件名（插件目录顶层，内容 = 源目录绝对路径）。
+pub(crate) const SOURCE_NAME: &str = "source";
+
+/// 安装来源文件 `<root>/<id>/source`。
+pub(crate) fn source_file(root: &Path, id: &str) -> PathBuf {
+    plugin_dir(root, id).join(SOURCE_NAME)
+}
+
+/// 读安装来源；未记录或读失败 = `None`（来源只是便利信息，不承载任何状态判定）。
+pub(crate) fn read_source(root: &Path, id: &str) -> Option<String> {
+    let text = std::fs::read_to_string(source_file(root, id)).ok()?;
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_string())
 }
 
 /// 上一代内容根 `<root>/<id>/previous`（其下按代次分子目录，只保留一代）。

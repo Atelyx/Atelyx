@@ -11,8 +11,8 @@ use iced::{border, widget::container::Style, Element, Length, Padding, Task};
 
 use atelyx_core::plugin_runtime::market::{self, MarketSnapshot};
 use atelyx_core::plugin_runtime::{
-    AuditRecord, DialogKind, DialogRequest, HostRequest, NotificationLevel, Permission,
-    PluginEvent, PluginRuntime, PluginStatus, PluginSummary,
+    AuditRecord, DialogKind, DialogRequest, HostRequest, InstallOutcome, NotificationLevel,
+    Permission, PluginEvent, PluginRuntime, PluginStatus, PluginSummary,
 };
 
 use crate::settings_view::{card, group_head};
@@ -32,6 +32,9 @@ const DETAIL_CARD_WIDTH: f32 = 460.0;
 const DETAIL_AUDIT_MAX_H: f32 = 200.0;
 /// 市场安装确认模态卡宽。
 const CONFIRM_CARD_WIDTH: f32 = 380.0;
+/// 日志模态卡宽与日志区固定高度。
+const LOG_CARD_WIDTH: f32 = 620.0;
+const LOG_MAX_H: f32 = 360.0;
 
 /// 插件页模式：已安装列表 / 市场浏览。
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,6 +54,21 @@ pub struct MarketInstallAsk {
     pub name: String,
     /// 官方仓库归属：官方插件直接安装，只有非官方插件进确认弹窗。
     pub official: bool,
+}
+
+/// 市场安装 / 更新回执：内容已落位（重启失败单独给出）+ 版本 + 是否更新。
+#[derive(Clone, Debug)]
+pub struct MarketOutcome {
+    pub result: InstallOutcome,
+    pub version: String,
+    pub update: bool,
+}
+
+/// 市场操作结果：版本比对判为无需更新，或内容已落位。
+#[derive(Clone, Debug)]
+pub enum MarketResult {
+    UpToDate(String),
+    Installed(MarketOutcome),
 }
 
 /// 插件页状态（列表缓存 + 详情 + 卸载二段确认 + 安装在途 + 市场快照与筛选）。
@@ -80,6 +98,9 @@ pub struct PluginsState {
     pub market_type: Option<String>,
     /// 非官方插件的安装确认目标。
     pub confirm_install: Option<MarketInstallAsk>,
+    /// 日志模态的目标插件 id（`Some` = 日志模态打开）与读到的内容。
+    pub log_target: Option<String>,
+    pub log_text: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -98,12 +119,20 @@ pub enum PluginsMsg {
     InstallDir,
     InstallZip,
     /// 安装回执（Ok(None) = 用户取消）。
-    Installed(Result<Option<String>, String>),
+    Installed(Result<Option<InstallOutcome>, String>),
+    /// 从记录下来的安装来源重新安装（开发回路：构建产物更新后一键重装）。
+    ReinstallSource(String),
+    Reinstalled(Result<InstallOutcome, String>),
     /// 卸载回执（携带目标 id 供提示文案）。
     Uninstalled(String, Result<(), String>),
     /// 打开 / 关闭详情。
     Detail(String),
     DetailClose,
+    /// 日志模态：打开并读尾部 / 关闭。
+    LogOpen(String),
+    LogClose,
+    /// 日志读取回执（带目标 id：连开两个插件时先发的读取不能覆盖后一个的显示）。
+    LogLoaded { id: String, text: String },
     /// 壳侧服务请求：替插件弹系统对话框（选定的路径经 `resolve_dialog` 回填给等待中的调用）。
     DialogAsk { request_id: u64, dialog: DialogRequest },
     DialogDone { request_id: u64, path: Option<String> },
@@ -120,9 +149,9 @@ pub enum PluginsMsg {
     MarketInstallAsk(MarketInstallAsk),
     MarketInstallConfirm,
     MarketInstallCancel,
-    /// 市场更新（Release 版本比对后走既有压装链）。
+    /// 市场更新（Release 版本比对后走既有压缩安装链）。
     MarketUpdate { id: String, repo: String },
-    MarketDone(Result<String, String>),
+    MarketDone(Result<MarketResult, String>),
     /// 剪贴板读写（系统剪贴板只能经壳的 iced 任务访问）。
     ClipboardWrite { request_id: u64, text: String },
     ClipboardWritten { request_id: u64 },
@@ -301,14 +330,35 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
         PluginsMsg::InstallZip => start_install(app, false),
         PluginsMsg::Installed(result) => {
             app.plugins_state.installing = false;
+            refresh(app);
             match result {
-                Ok(Some(id)) => {
-                    app.notify(NoticeLevel::Success, format!("已安装 {id}，可在列表里启用"));
-                }
+                Ok(Some(outcome)) => notify_installed(app, &outcome, "已安装"),
                 Ok(None) => {}
                 Err(e) => app.notify(NoticeLevel::Error, format!("安装失败：{e}")),
             }
+            Task::none()
+        }
+        PluginsMsg::ReinstallSource(id) => {
+            if app.plugins_state.installing || app.plugins_state.market_busy.is_some() {
+                return Task::none();
+            }
+            app.plugins_state.installing = true;
+            let runtime = app.plugins.clone();
+            Task::perform(
+                async move {
+                    let target = id.clone();
+                    run_blocking(move || runtime.install_from_source(&target)).await
+                },
+                |result| Message::Plugins(PluginsMsg::Reinstalled(result)),
+            )
+        }
+        PluginsMsg::Reinstalled(result) => {
+            app.plugins_state.installing = false;
             refresh(app);
+            match result {
+                Ok(outcome) => notify_installed(app, &outcome, "已从来源更新"),
+                Err(e) => app.notify(NoticeLevel::Error, format!("从来源更新失败：{e}")),
+            }
             Task::none()
         }
         PluginsMsg::Uninstalled(id, result) => {
@@ -316,6 +366,11 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
             match result {
                 Ok(()) => {
                     app.plugins_state.detail = None;
+                    // 日志模态跟着插件走：已卸载的插件没有日志可看
+                    if app.plugins_state.log_target.as_deref() == Some(id.as_str()) {
+                        app.plugins_state.log_target = None;
+                        app.plugins_state.log_text = None;
+                    }
                     app.notify(NoticeLevel::Success, format!("已卸载 {id}"));
                 }
                 Err(e) => app.notify(NoticeLevel::Error, format!("卸载失败：{e}")),
@@ -330,6 +385,32 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
         }
         PluginsMsg::DetailClose => {
             app.plugins_state.detail = None;
+            Task::none()
+        }
+        PluginsMsg::LogOpen(id) => {
+            app.plugins_state.log_target = Some(id.clone());
+            app.plugins_state.log_text = None;
+            let runtime = app.plugins.clone();
+            let for_task = id.clone();
+            Task::perform(
+                async move {
+                    run_blocking(move || Ok(runtime.log_tail(&for_task)))
+                        .await
+                        .unwrap_or_default()
+                },
+                move |text| Message::Plugins(PluginsMsg::LogLoaded { id, text }),
+            )
+        }
+        PluginsMsg::LogClose => {
+            app.plugins_state.log_target = None;
+            app.plugins_state.log_text = None;
+            Task::none()
+        }
+        PluginsMsg::LogLoaded { id, text } => {
+            // 目标已换（连开另一个插件）或模态已关：这次读取的结果不再对应屏幕上的内容
+            if app.plugins_state.log_target.as_deref() == Some(id.as_str()) {
+                app.plugins_state.log_text = Some(text);
+            }
             Task::none()
         }
         PluginsMsg::DialogAsk { request_id, dialog } => Task::perform(pick(dialog), move |path| {
@@ -408,11 +489,12 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
         PluginsMsg::MarketUpdate { id, repo } => start_market_fetch(app, id, repo, true),
         PluginsMsg::MarketDone(result) => {
             app.plugins_state.market_busy = None;
+            refresh(app);
             match result {
-                Ok(message) => app.notify(NoticeLevel::Success, message),
+                Ok(MarketResult::UpToDate(text)) => app.notify(NoticeLevel::Info, text),
+                Ok(MarketResult::Installed(done)) => notify_market(app, &done),
                 Err(e) => app.notify(NoticeLevel::Error, format!("插件市场操作失败：{e}")),
             }
-            refresh(app);
             Task::none()
         }
         PluginsMsg::ClipboardWrite { request_id, text } => iced::clipboard::write(text)
@@ -682,6 +764,8 @@ fn start_market_load(app: &mut App, cache: PathBuf) -> Task<Message> {
 
 /// 市场安装 / 更新：取 Release 信息（更新先比对版本）→ 下载平台 zip → 既有安装链落位。
 /// 与本地安装共用互斥（任意一条安装链在途即拒绝新发起），防两条链并发落位互踩。
+/// 安装包清单 id 必须与市场条目 id 一致（否则一份包可以覆盖另一个插件的目录），
+/// 下载物只服务本次安装，装完即删。
 fn start_market_fetch(app: &mut App, id: String, repo: String, check_update: bool) -> Task<Message> {
     if app.plugins_state.market_busy.is_some() || app.plugins_state.installing {
         return Task::none();
@@ -692,17 +776,18 @@ fn start_market_fetch(app: &mut App, id: String, repo: String, check_update: boo
     Task::perform(
         async move {
             let release = market::latest_plugin_release(&repo, &id_for_task).await?;
+            let installed = runtime
+                .list()
+                .into_iter()
+                .find(|p| p.id == id_for_task)
+                .map(|p| p.version);
             if check_update {
-                let installed = runtime
-                    .list()
-                    .into_iter()
-                    .find(|p| p.id == id_for_task)
-                    .map(|p| p.version)
-                    .unwrap_or_default();
-                if !installed.is_empty()
-                    && atelyx_core::updater::compare_versions(&installed, &release.version) != std::cmp::Ordering::Less
-                {
-                    return Ok(format!("已是最新版本（v{installed}）"));
+                if let Some(installed) = &installed {
+                    if atelyx_core::updater::compare_versions(installed, &release.version)
+                        != std::cmp::Ordering::Less
+                    {
+                        return Ok(MarketResult::UpToDate(format!("已是最新版本（v{installed}）")));
+                    }
                 }
             }
             let cancel = Arc::new(AtomicBool::new(false));
@@ -714,8 +799,18 @@ fn start_market_fetch(app: &mut App, id: String, repo: String, check_update: boo
                 Arc::new(|_, _| {}),
             )
             .await?;
-            let installed_id = run_blocking(move || runtime.install_zip(&zip)).await?;
-            Ok(format!("已安装 {installed_id} v{}", release.version))
+            let installer = runtime.clone();
+            let expected = id_for_task.clone();
+            let install_path = zip.clone();
+            let outcome =
+                run_blocking(move || installer.install_zip(&install_path, Some(&expected))).await;
+            // 下载物只服务本次安装：无论成败都清掉（残留会占容量，且下次复用到旧包更难排查）
+            let _ = std::fs::remove_file(&zip);
+            Ok(MarketResult::Installed(MarketOutcome {
+                result: outcome?,
+                version: release.version,
+                update: installed.is_some(),
+            }))
         },
         move |result| Message::Plugins(PluginsMsg::MarketDone(result)),
     )
@@ -797,6 +892,48 @@ fn refresh(app: &mut App) {
     }
 }
 
+/// 安装完成提示：内容已落位。重启失败与「还没启用」给出不同下一步——两者都不是安装失败。
+fn notify_installed(app: &mut App, outcome: &InstallOutcome, done: &str) {
+    let enabled = app
+        .plugins_state
+        .list
+        .iter()
+        .any(|p| p.id == outcome.id && p.enabled);
+    let (level, text) = match (&outcome.start_error, enabled) {
+        (Some(err), _) => (
+            NoticeLevel::Warning,
+            format!("{done} {}，但启动失败：{err}（可在列表里重试）", outcome.id),
+        ),
+        (None, true) => (
+            NoticeLevel::Success,
+            format!("{done} {}，已用新内容重启", outcome.id),
+        ),
+        (None, false) => (
+            NoticeLevel::Success,
+            format!("{done} {}，可在列表里启用", outcome.id),
+        ),
+    };
+    app.notify(level, text);
+}
+
+/// 市场安装 / 更新完成提示（新装不自动启用，更新按启用态由宿主重启）。
+fn notify_market(app: &mut App, done: &MarketOutcome) {
+    let head = if done.update {
+        format!("已更新 {} 到 v{}", done.result.id, done.version)
+    } else {
+        format!("已安装 {} v{}", done.result.id, done.version)
+    };
+    let (level, text) = match &done.result.start_error {
+        Some(err) => (
+            NoticeLevel::Warning,
+            format!("{head}，但启动失败：{err}（可在列表里重试）"),
+        ),
+        None if done.update => (NoticeLevel::Success, head),
+        None => (NoticeLevel::Success, format!("{head}，可在列表里启用")),
+    };
+    app.notify(level, text);
+}
+
 /// 起一次本地安装：先弹文件选择器，再在阻塞线程池里安装（重活不占异步 worker；失败即回执为可读错误）。
 /// 与市场安装共用互斥（`installing` 同时挡住两条链），防并发落位互踩。
 fn start_install(app: &mut App, from_dir: bool) -> Task<Message> {
@@ -823,7 +960,7 @@ fn start_install(app: &mut App, from_dir: bool) -> Task<Message> {
             let result = if from_dir {
                 run_blocking(move || runtime.install_dir(&path)).await
             } else {
-                run_blocking(move || runtime.install_zip(&path)).await
+                run_blocking(move || runtime.install_zip(&path, None)).await
             };
             result.map(Some)
         },
@@ -1147,6 +1284,17 @@ fn plugin_card(app: &App, summary: &PluginSummary) -> Element<'static, Message> 
     .align_y(iced::alignment::Vertical::Center);
 
     header = header.push(space().width(Length::Fill));
+    // 有安装来源的插件（本地目录安装）可从来源原样重装：构建产物更新后一键替换并重启
+    if summary.source.is_some() {
+        header = header.push(controls::btn(
+            "从来源更新",
+            &controls::btn_sm(),
+            controls::Variant::Ghost,
+            (!app.plugins_state.installing).then_some(Message::Plugins(
+                PluginsMsg::ReinstallSource(id.clone()),
+            )),
+        ));
+    }
     if retryable {
         header = header.push(controls::btn(
             "重试",
@@ -1216,6 +1364,9 @@ pub fn overlay(app: &App, window: iced::window::Id) -> Option<Element<'static, M
     if let Some(ask) = &app.plugins_state.confirm_install {
         return Some(install_confirm_modal(ask));
     }
+    if let Some(id) = app.plugins_state.log_target.clone() {
+        return Some(log_modal(app, window, &id));
+    }
     let id = app.plugins_state.detail.as_ref()?;
     let summary = app.plugins_state.list.iter().find(|p| &p.id == id)?;
     Some(detail_modal(app, window, summary))
@@ -1230,6 +1381,12 @@ fn detail_modal(app: &App, window: iced::window::Id, summary: &PluginSummary) ->
             .color(pal::TEXT_PRIMARY)
             .font(bold()),
         space().width(Length::Fill),
+        controls::btn(
+            "日志",
+            &controls::btn_sm(),
+            controls::Variant::Ghost,
+            Some(Message::Plugins(PluginsMsg::LogOpen(summary.id.clone()))),
+        ),
         controls::icon_button(
             "x",
             14.0,
@@ -1263,6 +1420,14 @@ fn detail_modal(app: &App, window: iced::window::Id, summary: &PluginSummary) ->
     if !flags.is_empty() {
         rows.push(
             text(format!("声明：{}", flags.join(" · ")))
+                .size(pal::fs_caption())
+                .color(pal::TEXT_MUTED)
+                .into(),
+        );
+    }
+    if let Some(source) = &summary.source {
+        rows.push(
+            text(format!("安装来源：{source}"))
                 .size(pal::fs_caption())
                 .color(pal::TEXT_MUTED)
                 .into(),
@@ -1326,6 +1491,73 @@ fn detail_modal(app: &App, window: iced::window::Id, summary: &PluginSummary) ->
     .spacing(10)
     .padding(12.0);
     modal_card(DETAIL_CARD_WIDTH, content.into(), Message::Plugins(PluginsMsg::DetailClose))
+}
+
+/// 插件日志模态：插件 stderr、协议违规与生命周期失败（宿主没有控制台，这里是唯一可查处）。
+fn log_modal(app: &App, window: iced::window::Id, id: &str) -> Element<'static, Message> {
+    let title = app
+        .plugins_state
+        .list
+        .iter()
+        .find(|p| p.id == id)
+        .map(|p| p.name.clone())
+        .unwrap_or_else(|| id.to_string());
+    let header = row![
+        icon("file-text", 14.0, pal::TEXT_SECONDARY),
+        text(format!("{title} 日志"))
+            .size(pal::fs_body())
+            .color(pal::TEXT_PRIMARY)
+            .font(bold()),
+        space().width(Length::Fill),
+        controls::btn(
+            "刷新",
+            &controls::btn_sm(),
+            controls::Variant::Ghost,
+            Some(Message::Plugins(PluginsMsg::LogOpen(id.to_string()))),
+        ),
+        controls::icon_button(
+            "x",
+            14.0,
+            26.0,
+            controls::Variant::Ghost,
+            Some(Message::Plugins(PluginsMsg::LogClose)),
+            Some((window, "关闭".into())),
+        ),
+    ]
+    .spacing(8)
+    .align_y(iced::alignment::Vertical::Center);
+
+    let body: Element<'static, Message> = match &app.plugins_state.log_text {
+        Some(lines) if !lines.trim().is_empty() => scrollable(
+            text(lines.clone())
+                .size(pal::fs_caption())
+                .color(pal::TEXT_SECONDARY),
+        )
+        .width(Length::Fill)
+        .height(Length::Fixed(LOG_MAX_H))
+        .into(),
+        Some(_) => text("暂无日志")
+            .size(pal::fs_caption())
+            .color(pal::TEXT_MUTED)
+            .into(),
+        None => text("读取中…")
+            .size(pal::fs_caption())
+            .color(pal::TEXT_MUTED)
+            .into(),
+    };
+
+    let content = Column::new()
+        .spacing(10)
+        .padding(12.0)
+        .push(header)
+        .push(controls::h_divider_subtle())
+        .push(
+            text(app.plugins.log_path(id).unwrap_or_default())
+                .size(pal::fs_caption())
+                .color(pal::TEXT_MUTED),
+        )
+        .push(body);
+    modal_card(LOG_CARD_WIDTH, content.into(), Message::Plugins(PluginsMsg::LogClose))
 }
 
 /// 市场安装确认模态（非官方插件；官方插件直接安装，不经此窗）。

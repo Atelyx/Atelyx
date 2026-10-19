@@ -28,7 +28,7 @@ use serde_json::{json, Value};
 
 use crate::plugin_process::{EventSink, PluginProcessHost, ProcessEvent as HostEvent};
 
-use super::{capability, child_process, fs, http, shortcut};
+use super::{capability, child_process, fs, http, log, shortcut};
 use super::{
     AuditRecord, Contribution, DialogKind, DialogRequest, HostRequest, PluginEvent, PluginRuntime,
     PluginStatus, SurfaceKind, ViewEvent, ViewNode,
@@ -88,6 +88,8 @@ pub(crate) struct Instance {
     contributions: Mutex<Vec<ContributionEntry>>,
     view_submits: AtomicU64,
     crash_times: Mutex<Vec<Instant>>,
+    /// 本插件日志（插件 stderr、协议违规与生命周期失败的唯一可查落点）。
+    log: Arc<log::LogSink>,
 }
 
 /// 画布节点 → 指令清单存档（(面 id, 节点 id) → 清单）。
@@ -110,6 +112,7 @@ impl Instance {
         shortcuts: Arc<shortcut::Registrar>,
         events: tokio::sync::broadcast::Sender<PluginEvent>,
     ) -> Arc<Self> {
+        let log = Arc::new(log::LogSink::new(super::layout::log_file_in(&dir)));
         Arc::new(Self {
             id: manifest.id.clone(),
             manifest,
@@ -135,6 +138,7 @@ impl Instance {
             contributions: Mutex::new(Vec::new()),
             view_submits: AtomicU64::new(0),
             crash_times: Mutex::new(Vec::new()),
+            log,
         })
     }
 
@@ -239,6 +243,7 @@ impl Instance {
         self.pid.store(pid as u64, Ordering::SeqCst);
         self.session_active.store(true, Ordering::SeqCst);
         self.set_status(PluginStatus::Running);
+        self.log.line(&format!("[启动] 进程已启动（pid {pid}，入口 {entry}）"));
         // 握手截止：到点仍未握手即判失败（进程在跑却永不通信不能被当成正常）
         let watchdog = self.clone();
         std::thread::spawn(move || {
@@ -255,12 +260,17 @@ impl Instance {
         // 先作废会话再跑收尾：收尾扫过之后到达的工具调用登记会被闸门拒掉，不能落表等满超时
         self.session_active.store(false, Ordering::SeqCst);
         self.run_token.fetch_add(1, Ordering::SeqCst);
+        // 日志写端由收尾关闭，本行须在收尾之前写；本来就没在跑（扫描 / 重装后的兜底停止）不记
+        if self.status() != PluginStatus::Stopped {
+            self.log.line("[生命周期] 已停止");
+        }
         self.teardown();
         self.set_status(PluginStatus::Stopped);
     }
 
     /// 判定为不可装载 / 握手失败：置 `Failed` 并结束进程（避免僵死连接）。
     fn fail(self: &Arc<Self>, reason: String) {
+        self.log.line(&format!("[失败] {reason}"));
         self.session_active.store(false, Ordering::SeqCst);
         self.set_status(PluginStatus::Failed(reason));
         self.run_token.fetch_add(1, Ordering::SeqCst);
@@ -275,6 +285,8 @@ impl Instance {
                 eprintln!("[plugin {}] 结束进程树失败：{e}", self.id);
             }
         }
+        // 日志写端不跨会话持有：卸载要删整个插件目录，Windows 上打开着的文件会让删除失败
+        self.log.close();
         self.release_resources();
     }
 
@@ -409,10 +421,21 @@ impl Instance {
                     }
                 }
             }
-            // 插件 stderr 归入诊断输出（协议正文只走 stdout）
-            HostEvent::Stderr { data } => eprint!("[plugin {}] {data}", self.id),
+            // 插件 stderr 归入诊断输出（协议正文只走 stdout）：控制台 + 插件日志两处落点
+            HostEvent::Stderr { data } => {
+                for line in data.lines() {
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    eprintln!("[plugin {}] {line}", self.id);
+                    self.log.line(&format!("[stderr] {line}"));
+                }
+            }
             HostEvent::Terminated { code } => self.on_exit(code),
-            HostEvent::Error { message } => eprintln!("[plugin {}] {message}", self.id),
+            HostEvent::Error { message } => {
+                eprintln!("[plugin {}] {message}", self.id);
+                self.log.line(&format!("[进程] {message}"));
+            }
         }
     }
 
@@ -426,20 +449,27 @@ impl Instance {
         let envelope = match Envelope::parse(line) {
             Ok(envelope) => envelope,
             Err(e) => {
+                // 违规行原样落日志：stdout 被日志污染是插件最常见的一类故障
+                self.log.line(&format!("[协议] 非信封输出（已停机）：{line}"));
                 self.fail(format!("插件输出非协议内容（stdout 只允许 JSON-RPC 信封）：{e}"));
                 return;
             }
         };
         match envelope {
             Envelope::Request(request) => self.handle_request(token, request),
-            Envelope::Response(_) => eprintln!(
-                "[plugin {}] 收到插件的响应（协议约定插件→宿主只有请求，宿主→插件只有通知）",
-                self.id
-            ),
-            Envelope::Notification(notification) => eprintln!(
-                "[plugin {}] 收到插件通知（协议约定插件→宿主只有请求）：{}",
-                self.id, notification.method
-            ),
+            Envelope::Response(_) => {
+                let text = "收到插件的响应（协议约定插件→宿主只有请求，宿主→插件只有通知）";
+                eprintln!("[plugin {}] {text}", self.id);
+                self.log.line(&format!("[协议] {text}"));
+            }
+            Envelope::Notification(notification) => {
+                let text = format!(
+                    "收到插件通知（协议约定插件→宿主只有请求）：{}",
+                    notification.method
+                );
+                eprintln!("[plugin {}] {text}", self.id);
+                self.log.line(&format!("[协议] {text}"));
+            }
         }
     }
 
@@ -460,12 +490,17 @@ impl Instance {
         self.run_token.fetch_add(1, Ordering::SeqCst);
         self.release_resources();
         let count = record_crash(&mut self.crash_times.lock().unwrap(), Instant::now());
+        self.log.line(&format!("[进程] 意外退出（退出码 {code:?}）"));
         if count >= CRASH_LIMIT {
             eprintln!(
                 "[plugin {}] {} 秒内崩溃 {count} 次，已熔断（需手动重试）",
                 self.id,
                 CRASH_WINDOW.as_secs()
             );
+            self.log.line(&format!(
+                "[熔断] {} 秒内崩溃 {count} 次，需手动重试",
+                CRASH_WINDOW.as_secs()
+            ));
             self.set_status(PluginStatus::CircuitBroken);
             return;
         }
@@ -476,6 +511,8 @@ impl Instance {
             code,
             delay.as_secs_f64()
         );
+        self.log
+            .line(&format!("[重启] {:.1} 秒后重试（第 {count} 次崩溃）", delay.as_secs_f64()));
         self.set_status(PluginStatus::Restarting);
         let runtime = self.runtime.lock().unwrap().clone();
         let id = self.id.clone();
@@ -964,6 +1001,10 @@ impl Instance {
             return Err(RpcError::failed("插件自报 id 与安装 id 不一致"));
         }
         self.handshaken.store(true, Ordering::SeqCst);
+        self.log.line(&format!(
+            "[握手] 完成（插件 {} v{}，apiVersion {}）",
+            p.plugin.name, p.plugin.version, p.api_version
+        ));
         let result = InitializeResult {
             api_version: API_VERSION,
             host: HostInfo {

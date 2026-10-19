@@ -73,7 +73,7 @@ fn install_ready_stub(keep_mounted: bool) -> (TempDir, std::sync::Arc<PluginRunt
     let src = tmp.join("src");
     let extra = if keep_mounted { r#","keepMountedOnVaultSwitch":true"# } else { "" };
     make_plugin(&src, "com.atelyx.stub", env!("CARGO_BIN_EXE_stub"), extra);
-    let id = runtime.install_dir(&src).expect("安装 stub 应成功");
+    let id = runtime.install_dir(&src).expect("安装 stub 应成功").id;
     runtime.set_enabled(&id, true).expect("启用应成功");
     wait_status(&runtime, &id, |s| *s == PluginStatus::Running, Duration::from_secs(10));
     wait_submits(&runtime, &id, 1);
@@ -107,7 +107,7 @@ fn install_enable_view_submit_disable_uninstall() {
     let src = tmp.join("src");
     make_plugin(&src, "com.atelyx.stub", env!("CARGO_BIN_EXE_stub"), "");
 
-    let id = runtime.install_dir(&src).expect("安装 stub 应成功");
+    let id = runtime.install_dir(&src).expect("安装 stub 应成功").id;
     assert_eq!(id, "com.atelyx.stub");
     // 安装只落位内容，不自动启用：未启用即不在运行
     assert!(!runtime.list().into_iter().find(|p| p.id == id).unwrap().enabled);
@@ -149,7 +149,7 @@ fn crash_restarts_then_circuit_breaks() {
     let src = tmp.join("src");
     make_plugin(&src, "com.atelyx.crasher", env!("CARGO_BIN_EXE_crasher"), "");
 
-    let id = runtime.install_dir(&src).expect("安装 crasher 应成功");
+    let id = runtime.install_dir(&src).expect("安装 crasher 应成功").id;
     runtime.set_enabled(&id, true).expect("启用应成功");
     // 退避序列 1+2+4+8 秒后第 5 次崩溃熔断；留足余量
     let status = wait_status(
@@ -159,6 +159,11 @@ fn crash_restarts_then_circuit_breaks() {
         Duration::from_secs(45),
     );
     assert_eq!(status, PluginStatus::CircuitBroken);
+
+    // 崩溃过程落进插件日志（正式构建没有控制台，日志是唯一可查处）
+    let log = runtime.log_tail(&id);
+    assert!(log.contains("[进程] 意外退出"), "日志应含退出记录：{log}");
+    assert!(log.contains("[熔断]"), "日志应含熔断记录：{log}");
 
     // 熔断后可手动重试：状态离开熔断（随即又因崩溃进入重启 / 熔断路径）
     runtime.retry(&id).expect("重试应成功");

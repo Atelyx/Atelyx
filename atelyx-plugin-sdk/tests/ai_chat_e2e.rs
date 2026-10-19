@@ -99,7 +99,7 @@ fn install_ai_stub(runtime: &Arc<PluginRuntime>, tmp: &std::path::Path) -> Strin
     )
     .unwrap();
     std::fs::copy(env!("CARGO_BIN_EXE_ai_stub"), src.join(entry_name())).expect("拷贝入口失败");
-    let id = runtime.install_dir(&src).expect("安装 ai-stub 应成功");
+    let id = runtime.install_dir(&src).expect("安装 ai-stub 应成功").id;
     runtime.set_enabled(&id, true).expect("启用应成功");
     wait_status(runtime, &id, Duration::from_secs(20));
     id
