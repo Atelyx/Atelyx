@@ -2,7 +2,8 @@
 //! 顶部工具条、编辑器浮层、格式气泡与灯箱。模型真源 = core `TableFile`；
 //! 模型变换走 `table_ops` 纯函数，消息处理与保存链在 `table_actions`。
 
-use std::collections::{HashMap, HashSet};
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
 
 use iced::widget::canvas::{self, Canvas, LineCap, LineDash, LineJoin, Path, Stroke};
@@ -258,6 +259,8 @@ pub struct TableViewState {
     pub images: HashMap<String, CachedImage>,
     pub image_inflight: HashSet<String>,
     pub image_failed: HashSet<String>,
+    /// 缩略图纹理常驻登记（绘制时登记，见 [`ThumbPins`]）。
+    pub pins: RefCell<ThumbPins>,
     pub lightbox: Option<Lightbox>,
     /// 上次按压（双击判定）。
     pub last_press: Option<(Instant, Point)>,
@@ -377,9 +380,140 @@ pub struct SwipeState {
 #[derive(Clone)]
 pub struct CachedImage {
     pub fp: (u128, u64),
+    /// 原图句柄（灯箱按全分辨率绘制）。
     pub handle: iced::widget::image::Handle,
-    /// 原始像素尺寸（载入时经 image crate 读得；contain 缩放用）。
+    /// 单元格缩略图句柄（长边不超过 `THUMB_MAX_EDGE`，绘制即用它）。
+    pub thumb: iced::widget::image::Handle,
+    /// 原图像素尺寸（contain 缩放与灯箱几何用；与 `handle` 解码所得一致）。
     pub size: (f32, f32),
+    /// 缩略图是否已绘制过（纹理已上传）。常驻登记以此为前提：登记只取分配、不触发上传。
+    pub drawn: Cell<bool>,
+}
+
+impl CachedImage {
+    /// 由载入结果构建（缩略图尚未绘制）。
+    pub fn new(fp: (u128, u64), loaded: LoadedImage) -> Self {
+        let thumb = loaded.thumb;
+        Self {
+            fp,
+            handle: iced::widget::image::Handle::from_bytes(loaded.bytes),
+            thumb: iced::widget::image::Handle::from_rgba(thumb.width, thumb.height, thumb.rgba),
+            size: loaded.size,
+            drawn: Cell::new(false),
+        }
+    }
+}
+
+/// 图片加载结果：原图字节（灯箱按需解码）与单元格缩略图。
+#[derive(Clone)]
+pub struct LoadedImage {
+    pub bytes: Vec<u8>,
+    pub size: (f32, f32),
+    pub thumb: atelyx_core::image_thumb::Thumb,
+}
+
+impl std::fmt::Debug for LoadedImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoadedImage")
+            .field("size", &self.size)
+            .field("bytes", &self.bytes.len())
+            .field("thumb", &self.thumb)
+            .finish_non_exhaustive()
+    }
+}
+
+/// 常驻缩略图的显存预算（解码后字节数）。
+pub const THUMB_PIN_BUDGET: usize = 192 * 1024 * 1024;
+
+/// 单元格缩略图纹理的常驻登记。
+///
+/// 渲染层的图片缓存在有新图上传时回收当帧未绘制的纹理；持有 [`Allocation`] 即被保留。
+/// 分配只有渲染器能给，所以登记发生在绘制时（见 `pin_visible_thumbs`），按字节预算淘汰
+/// 最久未登记的条目。
+///
+/// [`Allocation`]: iced::advanced::image::Allocation
+#[derive(Default)]
+pub struct ThumbPins {
+    budget: PinBudget,
+    allocations: HashMap<String, iced::advanced::image::Allocation>,
+}
+
+impl ThumbPins {
+    pub fn contains(&self, rel: &str) -> bool {
+        self.allocations.contains_key(rel)
+    }
+
+    /// 取消登记（同一路径换了一份图：旧分配对应旧句柄，留着只会白占纹理）。
+    pub fn unpin(&mut self, rel: &str) {
+        if self.allocations.remove(rel).is_some() {
+            self.budget.forget(rel);
+        }
+    }
+
+    /// 登记一张缩略图的分配；超预算的条目在此释放。
+    pub fn pin(
+        &mut self,
+        rel: String,
+        allocation: iced::advanced::image::Allocation,
+        visible: &HashSet<String>,
+    ) {
+        if self.allocations.contains_key(&rel) {
+            return;
+        }
+        let size = allocation.size();
+        let bytes = size.width as usize * size.height as usize * 4;
+        for evicted in self.budget.insert(&rel, bytes, visible) {
+            self.allocations.remove(&evicted);
+        }
+        self.allocations.insert(rel, allocation);
+    }
+}
+
+/// 常驻预算记账：按登记顺序淘汰，可见区内的条目不淘汰。
+#[derive(Debug)]
+pub struct PinBudget {
+    limit: usize,
+    total: usize,
+    order: VecDeque<(String, usize)>,
+}
+
+impl Default for PinBudget {
+    fn default() -> Self {
+        Self { limit: THUMB_PIN_BUDGET, total: 0, order: VecDeque::new() }
+    }
+}
+
+impl PinBudget {
+    /// 取消记账（条目已被调用方释放）。
+    pub fn forget(&mut self, rel: &str) {
+        if let Some(index) = self.order.iter().position(|(key, _)| key == rel) {
+            if let Some((_, size)) = self.order.remove(index) {
+                self.total = self.total.saturating_sub(size);
+            }
+        }
+    }
+
+    /// 记入一条并返回因超预算被淘汰的键；可见区放不下时宁可超预算（不重传正在看的图）。
+    pub fn insert(&mut self, rel: &str, bytes: usize, visible: &HashSet<String>) -> Vec<String> {
+        self.order.push_back((rel.to_string(), bytes));
+        self.total += bytes;
+        let mut evicted = Vec::new();
+        while self.total > self.limit {
+            let Some(index) = self
+                .order
+                .iter()
+                .position(|(key, _)| key.as_str() != rel && !visible.contains(key))
+            else {
+                break;
+            };
+            let Some((key, size)) = self.order.remove(index) else {
+                break;
+            };
+            self.total = self.total.saturating_sub(size);
+            evicted.push(key);
+        }
+        evicted
+    }
 }
 
 #[derive(Clone)]
@@ -489,18 +623,22 @@ pub enum TableMsg {
     // 图片
     ImageImportPick { row_id: String, field_id: String },
     ImagesPicked { row_id: String, field_id: String, files: Vec<(String, Vec<u8>)> },
-    ImageLoaded { rel: String, fp: (u128, u64), result: Result<Vec<u8>, String> },
+    ImageLoaded { rel: String, fp: (u128, u64), result: Result<LoadedImage, String> },
     ImagesWritten { row_id: String, field_id: String, rels: Vec<String>, failed: usize },
     LightboxClose,
     LightboxNav(i32),
     LightboxDownload,
+    /// 灯箱：复制当前图到系统剪贴板。
+    LightboxCopy,
+    /// 复制到系统剪贴板的结果。
+    Copied(Result<(), String>),
     /// 灯箱滚轮缩放（pos = 灯箱局部坐标，view = 灯箱尺寸）。
     LightboxZoom { pos: Point, view: Size, delta_y: f32 },
     /// 灯箱图片按压（双击复位 / 放大后开始拖动）。
     LightboxPress(Point),
     /// 灯箱拖动平移（Some = 拖动中的光标点，None = 松开）。
     LightboxPan { pos: Option<Point>, view: Size },
-    /// 打开灯箱右键菜单（下载图片）。
+    /// 打开灯箱右键菜单（复制 / 下载图片）。
     OpenLightboxMenu(iced::window::Id),
     /// 打开工具条视图切换下拉。
     OpenViewMenu(iced::window::Id),
@@ -1127,6 +1265,7 @@ impl canvas::Program<Message> for TableView<'_> {
         cursor: iced::mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
         let mut frame = canvas::Frame::new(renderer, bounds.size());
+        pin_visible_thumbs(self.session, renderer, bounds.size());
         draw_table(self.session, &mut frame, bounds.size(), cursor.position_in(bounds));
         vec![frame.into_geometry()]
     }
@@ -1213,6 +1352,44 @@ pub fn geo(session: &TableSession, size: Size) -> Geo<'_> {
 
 // ===== 绘制 =====
 
+/// 可见区缩略图纹理的常驻登记（滚动回来时不重传；预算见 [`THUMB_PIN_BUDGET`]）。
+///
+/// 只登记已经绘制过、纹理已上传的图：登记只取分配，不触发上传。未就绪的留到下一帧。
+fn pin_visible_thumbs(session: &TableSession, renderer: &iced::Renderer, size: Size) {
+    use iced::advanced::image::Renderer as _;
+
+    if session.view.images.is_empty() || session.view.layout.is_none() {
+        return;
+    }
+    let g = geo(session, size);
+    let (first, last) = g.visible_rows(session.data.rows.len());
+    let mut visible: HashSet<String> = HashSet::new();
+    for r in first..=last {
+        let Some(row) = session.data.rows.get(r) else { continue };
+        for field in &session.data.fields {
+            if field.field_type != "image" {
+                continue;
+            }
+            if let Some(value) = row.values.get(&field.id) {
+                visible.extend(table_ops::image_entries(value).into_iter().map(str::to_string));
+            }
+        }
+    }
+    for rel in &visible {
+        if session.view.pins.borrow().contains(rel) {
+            continue;
+        }
+        let Some(cached) = session.view.images.get(rel) else { continue };
+        // 已绘制过 = 纹理已上传：此时取分配不会触发上传（也不阻塞在这一帧）
+        if !cached.drawn.get() || renderer.measure_image(&cached.thumb).is_none() {
+            continue;
+        }
+        if let Ok(allocation) = renderer.load_image(&cached.thumb) {
+            session.view.pins.borrow_mut().pin(rel.clone(), allocation, &visible);
+        }
+    }
+}
+
 fn draw_table(session: &TableSession, frame: &mut canvas::Frame, size: Size, hover: Option<Point>) {
     let g = geo(session, size);
     let view = &session.view;
@@ -1285,8 +1462,7 @@ fn draw_table(session: &TableSession, frame: &mut canvas::Frame, size: Size, hov
                 Point::new(drag.pos.x - size / 2.0, drag.pos.y - size / 2.0),
                 Size::new(size, size),
             );
-            let handle = cached.handle.clone();
-            let mut img = iced::advanced::image::Image::new(handle);
+            let mut img = iced::advanced::image::Image::new(cached.thumb.clone());
             img.opacity = 0.92;
             frame.draw_image(rect, img);
         }
@@ -1750,20 +1926,20 @@ fn draw_image_cell(
             if rect.x + rect.width < cell.x || rect.x > cell.x + cell.width {
                 continue;
             }
-            draw_image_contain(session, frame, images[page as usize], rect);
+            draw_thumb_contain(session, frame, images[page as usize], rect);
         }
         // 队列条（窗口随当前页滚动，下标取布局携带的真实图片下标）
         for (img_idx, rel, rect) in &layout.thumbs {
             let current = *img_idx == idx;
             frame.fill_rectangle(rect.position(), rect.size(), pal::BG_SUNKEN);
-            draw_image_contain(session, frame, rel, shrink(*rect, 2.0 * g.z));
+            draw_thumb_contain(session, frame, rel, shrink(*rect, 2.0 * g.z));
             outline(frame, *rect, 2.0 * g.z, if current { pal::ACCENT } else { pal::BORDER });
         }
         // hover 圆钮在 chrome 覆盖层绘制（draw_image_buttons）：同画布几何会被图片压住
     } else {
         for (_, rel, rect) in &layout.tiles {
             frame.fill_rectangle(rect.position(), rect.size(), pal::BG_SUNKEN);
-            draw_image_contain(session, frame, rel, *rect);
+            draw_thumb_contain(session, frame, rel, *rect);
         }
         // 拖拽占位（被拖格描边）
         if let Some(drag) = &view.img_drag {
@@ -1783,11 +1959,21 @@ fn shrink(rect: Rectangle, by: f32) -> Rectangle {
     )
 }
 
-/// contain 缩放画图（载入时缓存的原始尺寸；未加载 = 不画）。
-fn draw_image_contain(session: &TableSession, frame: &mut canvas::Frame, rel: &str, rect: Rectangle) {
+/// 单元格图片：按相对路径取缩略图并 contain 绘制（未加载 = 不画）。
+fn draw_thumb_contain(session: &TableSession, frame: &mut canvas::Frame, rel: &str, rect: Rectangle) {
     let Some(cached) = session.view.images.get(rel) else { return };
-    let handle = cached.handle.clone();
-    let (w, h) = cached.size;
+    cached.drawn.set(true);
+    draw_image_fit(frame, &cached.thumb, cached.size, rect);
+}
+
+/// contain 缩放画图（尺寸取原图像素尺寸）。
+fn draw_image_fit(
+    frame: &mut canvas::Frame,
+    handle: &iced::widget::image::Handle,
+    size: (f32, f32),
+    rect: Rectangle,
+) {
+    let (w, h) = size;
     let scale = (rect.width / w).min(rect.height / h);
     let dw = (w * scale).min(rect.width);
     let dh = (h * scale).min(rect.height);
@@ -1795,7 +1981,7 @@ fn draw_image_contain(session: &TableSession, frame: &mut canvas::Frame, rel: &s
         Point::new(rect.x + (rect.width - dw) / 2.0, rect.y + (rect.height - dh) / 2.0),
         Size::new(dw, dh),
     );
-    frame.draw_image(bounds, iced::advanced::image::Image::new(handle));
+    frame.draw_image(bounds, iced::advanced::image::Image::new(handle.clone()));
 }
 
 fn outline(frame: &mut canvas::Frame, area: Rectangle, w: f32, color: Color) {
@@ -2450,7 +2636,10 @@ impl canvas::Program<Message> for LightboxCanvas<'_> {
         }
         let mut frame = canvas::Frame::new(renderer, bounds.size());
         let rect = lightbox_rect(bounds.size(), (w, h), self.lb.zoom, self.lb.pan);
-        frame.draw_image(rect, iced::advanced::image::Image::new(cached.handle.clone()));
+        // 原图解码未完成时先铺缩略图（同矩形；原图就绪后覆盖其上）
+        for handle in [cached.thumb.clone(), cached.handle.clone()] {
+            frame.draw_image(rect, iced::advanced::image::Image::new(handle));
+        }
         vec![frame.into_geometry()]
     }
 
@@ -2782,5 +2971,35 @@ mod tests {
         let mut s = bar_session(window, origin, "r0");
         s.view.active_view = Some("plugin:view".to_string());
         assert!(bar_placement(&s, window, viewport).is_none(), "插件表格面在场时不弹");
+    }
+
+    fn rels(keys: &[&str]) -> HashSet<String> {
+        keys.iter().map(|key| (*key).to_string()).collect()
+    }
+
+    #[test]
+    fn pin_budget_evicts_oldest_outside_view() {
+        let mut budget = PinBudget::default();
+        let half = THUMB_PIN_BUDGET / 2;
+        assert!(budget.insert("a", half, &rels(&["a"])).is_empty());
+        assert!(budget.insert("b", half, &rels(&["b"])).is_empty());
+        assert_eq!(budget.insert("c", 1, &rels(&["c"])), vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn pin_budget_keeps_viewed_entries_over_limit() {
+        let mut budget = PinBudget::default();
+        let half = THUMB_PIN_BUDGET / 2;
+        budget.insert("a", half, &rels(&["a"]));
+        budget.insert("b", half, &rels(&["b"]));
+        // 可见区放不下：宁可超预算，也不让正在看的图重传
+        assert!(budget.insert("c", THUMB_PIN_BUDGET, &rels(&["a", "b", "c"])).is_empty());
+    }
+
+    #[test]
+    fn pin_budget_never_evicts_the_new_entry() {
+        let mut budget = PinBudget::default();
+        budget.insert("a", THUMB_PIN_BUDGET, &rels(&[]));
+        assert_eq!(budget.insert("b", THUMB_PIN_BUDGET, &rels(&[])), vec!["a".to_string()]);
     }
 }

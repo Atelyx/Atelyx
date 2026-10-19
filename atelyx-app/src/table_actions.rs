@@ -8,6 +8,7 @@ use iced::{Point, Rectangle, Size};
 
 use crate::table_view as tv;
 use crate::{space_actions, App, ImageLoadBatch, Message};
+use atelyx_core::image_thumb;
 use atelyx_core::table_ops as ops;
 use atelyx_core::vault;
 use atelyx_core::vault::TableFile;
@@ -424,16 +425,10 @@ fn on_msg_open(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
             let Some(s) = app.table.as_mut() else { return Task::none() };
             s.view.image_inflight.remove(&rel);
             match result {
-                Ok(bytes) => {
-                    let size = image_dimensions(&bytes).unwrap_or((1.0, 1.0));
-                    s.view.images.insert(
-                        rel.clone(),
-                        tv::CachedImage {
-                            fp,
-                            handle: iced::widget::image::Handle::from_bytes(bytes),
-                            size,
-                        },
-                    );
+                Ok(loaded) => {
+                    // 同一路径换了新字节：旧缩略图的常驻登记作废（新句柄另行登记）
+                    s.view.pins.borrow_mut().unpin(&rel);
+                    s.view.images.insert(rel.clone(), tv::CachedImage::new(fp, loaded));
                     s.view.image_failed.remove(&rel);
                 }
                 Err(_) => {
@@ -472,6 +467,17 @@ fn on_msg_open(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
         tv::TableMsg::LightboxDownload => {
             app.dismiss_popup();
             download_lightbox_image(app)
+        }
+        tv::TableMsg::LightboxCopy => {
+            app.dismiss_popup();
+            copy_lightbox_image(app)
+        }
+        tv::TableMsg::Copied(result) => {
+            match result {
+                Ok(()) => app.notify(NoticeLevel::Success, "已复制图片到剪贴板"),
+                Err(e) => app.notify(NoticeLevel::Error, e),
+            }
+            Task::none()
         }
         tv::TableMsg::OpenLightboxMenu(window) => {
             open_table_popup(app, window, crate::layout_view::PopupState::TableLightboxMenu, None);
@@ -2282,19 +2288,24 @@ pub fn check_long_press(app: &mut App) {
     s.view.img_drag = Some(tv::ImageDrag { row_id, field_id, rel, from, pos });
 }
 
+/// 灯箱当前图的仓库相对路径（越界 / 图已删 = None）。
+fn lightbox_rel(s: &tv::TableSession, lb: &tv::Lightbox) -> Option<String> {
+    let entries = s
+        .data
+        .rows
+        .iter()
+        .find(|r| r.id == lb.row_id)?
+        .values
+        .get(&lb.field_id)
+        .map(|v| ops::image_entries(v))?;
+    entries.get(lb.index).map(|rel| rel.to_string())
+}
+
 /// 下载灯箱当前图到系统 Downloads（文件名 = 附件名；重名自动加序号）。
 fn download_lightbox_image(app: &App) -> Task<Message> {
     let Some(s) = app.table.as_ref() else { return Task::none() };
     let Some(lb) = s.view.lightbox.clone() else { return Task::none() };
-    let images = s
-        .data
-        .rows
-        .iter()
-        .find(|r| r.id == lb.row_id)
-        .and_then(|r| r.values.get(&lb.field_id))
-        .map(|v| ops::image_entries(v).into_iter().map(str::to_string).collect::<Vec<_>>())
-        .unwrap_or_default();
-    let Some(rel) = images.get(lb.index).cloned() else { return Task::none() };
+    let Some(rel) = lightbox_rel(s, &lb) else { return Task::none() };
     // 空间模式：图片字节走服务端读取后落下载目录
     if matches!(app.repo_kind, crate::RepoKind::Space(_)) {
         let Some(session) = space_actions::session_of(app) else { return Task::none() };
@@ -2330,6 +2341,65 @@ fn download_lightbox_image(app: &App) -> Task<Message> {
         },
         |r| Message::Table(tv::TableMsg::Downloaded(r)),
     )
+}
+
+/// 复制灯箱当前图到系统剪贴板（原图全分辨率；动图取首帧）。
+fn copy_lightbox_image(app: &App) -> Task<Message> {
+    let Some(s) = app.table.as_ref() else { return Task::none() };
+    let Some(lb) = s.view.lightbox.clone() else { return Task::none() };
+    let Some(rel) = lightbox_rel(s, &lb) else { return Task::none() };
+    // 遗留内嵌 dataURL：解码即用
+    if rel.starts_with("data:") {
+        return Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    let bytes = atelyx_core::table_xlsx::decode_data_url(&rel)
+                        .ok_or_else(|| "图片数据解码失败".to_string())?;
+                    copy_image_bytes(&bytes)
+                })
+                .await
+                .map_err(|e| e.to_string())?
+            },
+            |r| Message::Table(tv::TableMsg::Copied(r)),
+        );
+    }
+    // 空间模式：图片字节走服务端读取
+    if matches!(app.repo_kind, crate::RepoKind::Space(_)) {
+        let Some(session) = space_actions::session_of(app) else { return Task::none() };
+        let client = session.client;
+        let space_id = session.space_id;
+        return Task::perform(
+            async move {
+                let bytes = client
+                    .get_file_bytes(&space_id, &rel)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                tokio::task::spawn_blocking(move || copy_image_bytes(&bytes))
+                    .await
+                    .map_err(|e| e.to_string())?
+            },
+            |r| Message::Table(tv::TableMsg::Copied(r)),
+        );
+    }
+    let Some(root) = app.vault.root().ok() else { return Task::none() };
+    Task::perform(
+        async move {
+            tokio::task::spawn_blocking(move || {
+                let path = vault::safe_join(&root, &rel, false)?;
+                let bytes = std::fs::read(&path).map_err(|e| format!("读取图片失败：{e}"))?;
+                copy_image_bytes(&bytes)
+            })
+            .await
+            .map_err(|e| e.to_string())?
+        },
+        |r| Message::Table(tv::TableMsg::Copied(r)),
+    )
+}
+
+/// 解码为 RGBA 后写系统剪贴板（调用方在线程池上执行）。
+fn copy_image_bytes(bytes: &[u8]) -> Result<(), String> {
+    let pixels = image_thumb::decode_rgba(bytes)?;
+    crate::image_clipboard::write_image(pixels.width, pixels.height, pixels.rgba)
 }
 
 /// 导出 xlsx（core 纯逻辑 + I/O；单图解析失败跳过不阻断）。空间模式图片在服务端，不传仓库根。
@@ -2398,7 +2468,7 @@ pub fn ensure_image_loads(app: &mut App) -> Option<Task<Message>> {
         let space_id = session.space_id;
         Task::perform(
             async move {
-                let mut results: ImageLoadBatch = Vec::new();
+                let mut fetched: Vec<(String, Result<Vec<u8>, String>)> = Vec::new();
                 for rel in rels {
                     let result = if rel.starts_with("data:") {
                         atelyx_core::table_xlsx::decode_data_url(&rel)
@@ -2406,8 +2476,17 @@ pub fn ensure_image_loads(app: &mut App) -> Option<Task<Message>> {
                     } else {
                         client.get_file_bytes(&space_id, &rel).await.map_err(|e| e.to_string())
                     };
-                    results.push((rel, (0, 0), result));
+                    fetched.push((rel, result));
                 }
+                // 解码与缩放走线程池（不占异步执行线程）
+                let results: ImageLoadBatch = tokio::task::spawn_blocking(move || {
+                    fetched
+                        .into_iter()
+                        .map(|(rel, bytes)| (rel, (0, 0), bytes.and_then(loaded_image)))
+                        .collect()
+                })
+                .await
+                .unwrap_or_default();
                 (gen, results)
             },
             |(gen, results)| Message::TableImagesLoaded(gen, results),
@@ -2423,7 +2502,8 @@ pub fn ensure_image_loads(app: &mut App) -> Option<Task<Message>> {
                         // 遗留 dataURL 内嵌图：解码即用（无文件指纹）；路径引用经 safe_join 读仓库附件
                         if rel.starts_with("data:") {
                             let result = atelyx_core::table_xlsx::decode_data_url(&rel)
-                                .ok_or_else(|| "图片数据解码失败".to_string());
+                                .ok_or_else(|| "图片数据解码失败".to_string())
+                                .and_then(loaded_image);
                             out.push((rel, (0, 0), result));
                             continue;
                         }
@@ -2444,7 +2524,9 @@ pub fn ensure_image_loads(app: &mut App) -> Option<Task<Message>> {
                                 ))
                             })
                             .unwrap_or((0, 0));
-                        let result = std::fs::read(&path).map_err(|e| e.to_string());
+                        let result = std::fs::read(&path)
+                            .map_err(|e| e.to_string())
+                            .and_then(loaded_image);
                         out.push((rel, fp, result));
                     }
                     out
@@ -2464,9 +2546,9 @@ pub fn ensure_image_loads(app: &mut App) -> Option<Task<Message>> {
     Some(task)
 }
 
-/// 图片尺寸读取（只读头，不解码全部像素）。
-fn image_dimensions(bytes: &[u8]) -> Option<(f32, f32)> {
-    let reader = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().ok()?;
-    let (w, h) = reader.into_dimensions().ok()?;
-    Some((w as f32, h as f32))
+/// 载入结果：原图字节（灯箱解码）+ 缩略图像素（单元格绘制）。解码与缩放在调用线程做。
+fn loaded_image(bytes: Vec<u8>) -> Result<tv::LoadedImage, String> {
+    let thumb = image_thumb::thumbnail(&bytes, image_thumb::THUMB_MAX_EDGE)?;
+    let size = (thumb.source.0 as f32, thumb.source.1 as f32);
+    Ok(tv::LoadedImage { bytes, size, thumb })
 }

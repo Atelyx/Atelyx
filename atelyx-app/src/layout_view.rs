@@ -4336,10 +4336,16 @@ fn popup_element<'a>(
             }
             entries
         }
-        PopupState::TableLightboxMenu => vec![(
-            0,
-            MenuEntry::action_icon("下载图片", "download", Message::Table(crate::table_view::TableMsg::LightboxDownload)),
-        )],
+        PopupState::TableLightboxMenu => vec![
+            (
+                0,
+                MenuEntry::action_icon("复制图片", "copy", Message::Table(crate::table_view::TableMsg::LightboxCopy)),
+            ),
+            (
+                0,
+                MenuEntry::action_icon("下载图片", "download", Message::Table(crate::table_view::TableMsg::LightboxDownload)),
+            ),
+        ],
         PopupState::TableViewMenu => {
             // 视图选择：内置网格 + 各插件注册的表格视图（选中项带「当前」，切换即挂载 / 分离面）
             let active = app

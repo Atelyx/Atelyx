@@ -12,6 +12,7 @@ pub mod frontmatter;
 pub mod global_config;
 pub mod history;
 pub mod history_diff;
+pub mod image_thumb;
 pub mod layout;
 pub mod markdown;
 pub mod merge3;

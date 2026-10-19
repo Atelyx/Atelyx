@@ -20,6 +20,7 @@ mod chat_stream;
 mod chat_view;
 mod commands;
 mod history_browser;
+mod image_clipboard;
 mod layout_view;
 mod markdown_edit;
 mod markdown_view;
@@ -359,8 +360,9 @@ struct DividerDrag {
 pub(crate) type VaultMetaResult =
     Result<(vault::VaultConfig, Vec<String>, HashMap<String, String>), String>;
 
-/// 表格可见图片批量加载回执：相对路径 + 文件指纹 + 字节或错误。
-pub(crate) type ImageLoadBatch = Vec<(String, (u128, u64), Result<Vec<u8>, String>)>;
+/// 表格可见图片批量加载回执：相对路径 + 文件指纹 + 载入结果（原图字节与缩略图）或错误。
+pub(crate) type ImageLoadBatch =
+    Vec<(String, (u128, u64), Result<table_view::LoadedImage, String>)>;
 
 #[derive(Debug, Clone)]
 enum Message {
