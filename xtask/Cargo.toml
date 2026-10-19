@@ -1,0 +1,9 @@
+[package]
+name = "xtask"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "仓库维护任务：从协议源码生成对外 API 参考（不进发布物）"
+
+# 只读源码文件与写文档，无外部依赖：不引入解析库，靠顶层项边界抽取原文。
+[dependencies]

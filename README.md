@@ -38,6 +38,14 @@ Atelyx 是一款以人为本的可拓展桌面工作台：对话、笔记、表�
 
 依赖方向：`atelyx-app` → `atelyx-core` → `atelyx-plugin-protocol`；`atelyx-plugin-sdk` → `atelyx-plugin-protocol`。`atelyx-core` 无 GUI 依赖；`atelyx-server` 不被任何 crate 依赖，客户端只经 HTTP/WS 访问。
 
+## 插件开发
+
+插件是独立进程：宿主启动它，经 stdin/stdout 上的 JSON-RPC 与它通信；界面由插件提交声明式控件树或绘图指令，宿主负责渲染。语言不限，官方提供 Rust SDK。
+
+- 上手、构建打包、本地调试与上架：见 [插件开发文档](docs/plugin-development.md)。
+- 逐字段 / 逐方法的契约：[插件 API 参考](docs/plugin-api.md)（由协议源码生成，改协议后重跑 `cargo run -p xtask -- docs`）。
+- 契约真源 `atelyx-plugin-protocol/`，插件侧封装 `atelyx-plugin-sdk/`。
+
 ## 平台
 
 Windows 10/11（x64）+ Linux（Wayland 原生，兼容 X11）。
@@ -48,6 +56,7 @@ Windows 10/11（x64）+ Linux（Wayland 原生，兼容 X11）。
 bash patches/apply.sh    # 新克隆后执行一次：物化本地依赖补丁的源码目录
 cargo run -p atelyx-app  # 启动桌面应用
 cargo test --workspace   # 工作区测试
+cargo run -p xtask -- docs  # 重新生成插件 API 参考（协议改动后）
 cargo test --manifest-path atelyx-server/Cargo.toml  # 服务端测试
 bash scripts/package.sh  # 构建 release 并产出当前平台安装包到 target/dist/
 ```
