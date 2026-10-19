@@ -120,7 +120,7 @@ pub mod canvas {
 pub mod ai {
     /// 插件发起 / 续聊一轮对话（须声明 `ai` 权限）。回执 = run 已就位，事件随后经
     /// [`HOST_CHAT_EVENT`] 流达。会话 = 仓库普通会话（主面板可见）；供应商 / 模型 / Agent
-    /// 一律用仓库 AI 设置的默认值，插件不指定、不带 key。
+    /// 一律跟随对话面板当前选择（不指定、不带 key），未选择时拒绝并把原因回传插件。
     pub const CHAT_SEND: &str = "ai.chat.send";
     /// 中断一个会话的活跃 run（幂等：无活跃 run 也成功）。
     pub const CHAT_STOP: &str = "ai.chat.stop";

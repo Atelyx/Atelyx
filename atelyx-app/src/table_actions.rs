@@ -61,7 +61,7 @@ fn on_msg_open(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
         }
         tv::TableMsg::Press { window, pos, size, origin } => on_press(app, window, pos, size, origin),
         tv::TableMsg::Context { window, pos, size } => on_context(app, window, pos, size),
-        tv::TableMsg::Move { pos, size } => on_move(app, pos, size),
+        tv::TableMsg::Move { window, pos, size, origin } => on_move(app, window, pos, size, origin),
         tv::TableMsg::Release(pos) => on_release(app, pos),
         tv::TableMsg::Wheel { delta_y, delta_x } => on_wheel(app, delta_y, delta_x),
         tv::TableMsg::Edited(action) => {
@@ -958,6 +958,7 @@ fn on_press(app: &mut App, window: iced::window::Id, pos: Point, size: Size, ori
     s.view.focused = true;
     s.view.press_seen = true;
     s.view.canvas_size = size;
+    s.view.canvas_origin = Some((window, origin));
     // 防御：按压落在编辑器矩形内 = 编辑器内部交互（移光标 / 拖选），画布不接管不提交
     // （正常路径下编辑器内按压被 text_editor 捕获、画布收不到；此分支兜底捕获行为变化）
     let in_editor = s
@@ -1401,9 +1402,11 @@ fn on_context(app: &mut App, window: iced::window::Id, pos: Point, size: Size) -
     Task::none()
 }
 
-fn on_move(app: &mut App, pos: Point, size: Size) -> Task<Message> {
+fn on_move(app: &mut App, window: iced::window::Id, pos: Point, size: Size, origin: Point) -> Task<Message> {
     let Some(s) = app.table.as_mut() else { return Task::none() };
     s.view.hover = pos;
+    // 每次画布悬停都回写原点：格式气泡的窗口锚点须与本窗口当前画布位置同源
+    s.view.canvas_origin = Some((window, origin));
     if s.view.canvas_size != size {
         // 首帧悬停播种画布尺寸（打开表格后图片即按可见区加载，无需先按压）
         s.view.canvas_size = size;

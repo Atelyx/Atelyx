@@ -620,6 +620,11 @@ fn with_overlays<'a>(
         root = root.push(edge_resize_bands(window));
     }
 
+    // 表格格式气泡：叠在面板之上、弹层之下——宽度只受窗口约束，越出面板也不被压扁
+    if let Some(el) = crate::table_view::format_bar_overlay(app, window, viewport) {
+        root = root.push(el);
+    }
+
     // 弹层（同窗口至多一个；捕获层点击 = 外点关闭；居中模态另行渲染，见下方）
     if let Some((w, open)) = &app.popup {
         if *w == window
@@ -775,7 +780,8 @@ fn with_overlays<'a>(
     root.width(Length::Fill).height(Length::Fill).into()
 }
 
-fn viewport_of(app: &App, window: iced::window::Id) -> Size {
+/// 窗口视口尺寸（弹层 / 格式气泡钳制与翻转判据的基准）。
+pub fn viewport_of(app: &App, window: iced::window::Id) -> Size {
     if app.main_id == Some(window) {
         app.main_size
     } else {

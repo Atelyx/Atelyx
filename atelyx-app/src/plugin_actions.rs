@@ -741,7 +741,7 @@ pub fn on_window_close(app: &mut App, request_id: u64, plugin_id: String, window
     }
 }
 
-/// OS 窗口已关闭（用户关闭插件窗口）：摘记账、撤投影并通知插件（`host:window.closed`）；
+/// OS 窗口已关闭（用户关闭插件窗口）：摘记账、撤投影并发 `host:surface.detached`（`host:window.closed` 未接线）；
 /// 若该窗口在接管中（不可达路径，防御性清理）一并摘除接管条目。
 pub fn on_plugin_window_closed(app: &mut App, os_id: window::Id) -> Task<Message> {
     app.plugin_takeovers.remove(&os_id);

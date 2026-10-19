@@ -2706,6 +2706,11 @@ impl App {
             Message::Press(id) => {
                 // 焦点窗口跟踪（接管请求作用域 = 最近按压的窗口）
                 self.focused_window = Some(id);
+                let cursor = self.cursor_for(id);
+                // 格式气泡可越出面板（窗口层覆盖）：命中其矩形即按表格面按压处理，
+                // 表格键盘焦点与被压住面板的面板焦点都不外漂
+                let table_bar_press = crate::table_view::format_bar_rect(self, id, layout_view::viewport_of(self, id))
+                    .is_some_and(|rect| rect.contains(cursor));
                 // 笔记面板内按压标志：同批 widget 消息（PressRelay）先行置位，此处一次性消费
                 let note_press_inside = std::mem::take(&mut self.note_press_inside);
                 // 对话输入面外点失焦：同批输入部件按压（Focus 事件）先行置位
@@ -2716,7 +2721,7 @@ impl App {
                 // 表格焦点：同批表格面按压（画布或菜单，widget 消息先行）已置 press_seen = 保持聚焦；
                 // 否则本次按压在表格面之外 = 失焦（键盘分派随之让位）
                 if let Some(s) = &mut self.table {
-                    if s.view.press_seen {
+                    if s.view.press_seen || table_bar_press {
                         s.view.press_seen = false;
                     } else {
                         s.view.focused = false;
@@ -2749,7 +2754,6 @@ impl App {
                 if self.divider.is_some() {
                     return Task::none();
                 }
-                let cursor = self.cursor_for(id);
                 // 行内重命名失焦提交：按压不在输入行内 = 提交（Enter 同路径）；
                 // 判定窗口 = 输入框所在窗口（标题就地改名可在撕裂窗口）
                 let rename_window = self.rename.as_ref().map(|r| r.window);
@@ -2781,11 +2785,12 @@ impl App {
                     }
                 }
                 // 把手命中优先（主窗口）；否则记录按压起点（移动超阈值 = 拖标签手势）
+                // 格式气泡可越出面板压住把手：命中气泡时不抢把手（按压交回气泡按钮）
                 if self.main_id == Some(id) {
                     let tree = layout::active_layout(&self.ui).tree;
                     let hit = enumerate_dividers(&tree, self.content_area())
                         .into_iter()
-                        .find(|d| d.rect.contains(cursor));
+                        .find(|d| !table_bar_press && d.rect.contains(cursor));
                     if let Some(d) = hit {
                         self.last_divider = Some((d.split_id.clone(), d.gap, d.horizontal));
                         self.divider = Some(DividerDrag {
@@ -2801,7 +2806,7 @@ impl App {
                     // 面板聚焦：按压落进面板区 = 聚焦该面板（快捷键门控基准）
                     let zones = layout_view::panel_zones(self);
                     if let Some(zone) = zones.iter().find(|z| {
-                        z.panel_id.is_some() && z.rect.contains(cursor)
+                        z.panel_id.is_some() && !table_bar_press && z.rect.contains(cursor)
                     }) {
                         let pid = zone.panel_id.clone().unwrap();
                         if self.ui.focused_panel_id.as_deref() != Some(pid.as_str()) {

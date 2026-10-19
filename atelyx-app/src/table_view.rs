@@ -10,6 +10,7 @@ use iced::widget::text_editor;
 use iced::widget::{column, container, row, space};
 use iced::{alignment, Color, Element, Length, Point, Rectangle, Size, Vector};
 
+use crate::layout_view::estimate_text_width;
 use crate::table_text::{TextLine, WrapCache, LINE_FACTOR};
 use crate::ui::icon::polylines;
 use crate::ui::palette as pal;
@@ -65,8 +66,21 @@ const FIELD_BTN_W: f32 = 18.0;
 const GRIP_HIT_R: f32 = 9.0;
 /// 滚轮一格的滚动距离（px；winit Lines 档换算）。
 const WHEEL_LINE_PX: f32 = 40.0;
-/// 格式气泡与锚点的垂直间距（px）。
-const BAR_GAP: f32 = 34.0;
+/// 格式气泡与选区的间距（px）。
+const BAR_GAP: f32 = 4.0;
+/// 格式气泡估宽余量（px）：估宽按平均字宽，长字体族名可能低估，余量保证钳位后行内仍不折字。
+const BAR_W_MARGIN: f32 = 16.0;
+/// 格式气泡几何：估宽估高算式与气泡构造共用同一口径，改尺寸须同步两处。
+const BAR_PAD_X: f32 = 6.0;
+const BAR_PAD_Y: f32 = 4.0;
+const BAR_BTN_PAD_X: f32 = 6.0;
+const BAR_BTN_PAD_Y: f32 = 3.0;
+const BAR_ERASER_PAD_X: f32 = 5.0;
+const BAR_SWATCH: f32 = 10.0;
+const BAR_SWATCH_GAP: f32 = 3.0;
+const BAR_ERASER_ICON: f32 = 13.0;
+const BAR_DIVIDER_W: f32 = 1.0;
+const BAR_ITEM_GAP: f32 = 4.0;
 /// 灯箱图片四周遮罩边距（px；点击遮罩关闭的命中区）。
 const LIGHTBOX_MARGIN: f32 = 48.0;
 /// 灯箱缩放倍率上限（相对适应窗口）与滚轮指数系数（px → 倍率）。
@@ -249,6 +263,9 @@ pub struct TableViewState {
     pub last_press: Option<(Instant, Point)>,
     /// 画布尺寸（Press/Context 播种；Move/Release 期间的命中几何用）。
     pub canvas_size: Size,
+    /// 画布在窗口中的原点与来源窗口（Press/Move 播种）：格式气泡据此把选区偏移换算成窗口锚点。
+    /// 窗口不符（切窗 / 撕裂）或画布未收到过事件 = 锚点不成立，气泡不弹。
+    pub canvas_origin: Option<(iced::window::Id, Point)>,
     pub layout: Option<LayoutCache>,
     /// 编辑器浮层按压标志（全局 Press 的「点在编辑器内」判定；由编辑器的鼠标动作消息置位）。
     pub editor_inside: bool,
@@ -417,8 +434,8 @@ pub enum TableMsg {
     Press { window: iced::window::Id, pos: Point, size: Size, origin: Point },
     /// 画布内右键按下（上下文菜单）。
     Context { window: iced::window::Id, pos: Point, size: Size },
-    /// 画布内鼠标移动（携带画布尺寸：首帧悬停即播种 canvas_size，供可见区图片加载）。
-    Move { pos: Point, size: Size },
+    /// 画布内鼠标移动（携带画布尺寸与画布原点：首帧悬停即播种 canvas_size / canvas_origin）。
+    Move { window: iced::window::Id, pos: Point, size: Size, origin: Point },
     Release(Point),
     /// 滚轮（ctrl = 缩放，修饰态由 App.mods 维护）。
     Wheel { delta_y: f32, delta_x: f32 },
@@ -1075,7 +1092,12 @@ impl canvas::Program<Message> for TableView<'_> {
             }
             Ev::Mouse(MouseEv::CursorMoved { .. }) => {
                 cursor.position_in(bounds).map(|p| {
-                    iced::widget::Action::publish(Message::Table(TableMsg::Move { pos: p, size: bounds.size() }))
+                    iced::widget::Action::publish(Message::Table(TableMsg::Move {
+                        window,
+                        pos: p,
+                        size: bounds.size(),
+                        origin: bounds.position(),
+                    }))
                 })
             }
             Ev::Mouse(MouseEv::ButtonReleased(iced::mouse::Button::Left)) => {
@@ -1820,9 +1842,6 @@ pub fn table_view<'a>(app: &'a crate::App, window: iced::window::Id) -> Element<
     if let Some(overlay) = editor_overlay(session) {
         stack = stack.push(overlay);
     }
-    if let Some(bar) = format_bar(app, session, window) {
-        stack = stack.push(bar);
-    }
     // 在场协作者（名册 presence.file 匹配当前表格的空间成员）
     let collab_members = collab_members(app, session);
 
@@ -2009,24 +2028,114 @@ fn table_key_binding(kp: &text_editor::KeyPress, is_text: bool) -> Option<text_e
     }
 }
 
-/// 格式气泡（单击已选中格弹出；编辑态 / 换选即隐藏）。
-fn format_bar<'a>(app: &'a crate::App, session: &'a TableSession, window: iced::window::Id) -> Option<Element<'a, Message>> {
+/// 格式气泡的窗口落位（矩形为窗口坐标；宽高均为估算，渲染尺寸由内容自适应）。
+struct BarPlacement {
+    rect: Rectangle,
+    summary: table_ops::StyleSummary,
+}
+
+/// 格式气泡落位（单击已选中格弹出；编辑态 / 换选即隐藏）：锚 = 选区左上角，
+/// 上方放不下翻到选区下缘，两端按窗口视口钳制——气泡叠在窗口覆盖层，不受面板边界约束。
+fn bar_placement(
+    session: &TableSession,
+    window: iced::window::Id,
+    viewport: Size,
+) -> Option<BarPlacement> {
     let view = &session.view;
-    if view.editing.is_some() || !view.bar_shown || view.selection.is_none() {
+    // 面板内替掉网格的形态（灯箱全屏遮罩、插件表格面）期间不出气泡：气泡在窗口层会盖过它们
+    if view.editing.is_some()
+        || view.lightbox.is_some()
+        || view.active_view.is_some()
+        || !view.bar_shown
+        || view.selection.is_none()
+    {
         return None;
     }
+    let (_, origin) = view.canvas_origin.filter(|(w, _)| *w == window)?;
     let region = table_ops::region_of(view.selection.as_ref(), &session.data.fields, &session.data.rows)?;
+    // 伪尺寸取几何：只用于 cell_rect 等纯位置换算，不得触 max_scroll/rows_bottom（依赖真实宽高）
     let g = geo(session, Size::new(f32::MAX, f32::MAX));
-    // 气泡画在锚点上方 34px 处（画布局部坐标），锚点距画布顶不足时隐藏；x 钳制防左溢
     let x0 = (g.cache.col_x[region.col_start] - view.scroll_x + g.gutter_w()).max(8.0);
     let y0 = g.cache.row_y[region.row_start] - view.scroll_y + g.header_h();
-    if y0 < BAR_GAP {
+    let y1 = g.cache.row_y[region.row_end] + g.cache.row_h[region.row_end] - view.scroll_y + g.header_h();
+    let summary = table_ops::style_summary(&session.data.fields, &session.data.rows, &region);
+    let w = bar_est_width(&bar_font_label(&summary), &bar_size_label(&summary));
+    let h = bar_est_height();
+    // 竖向留在网格区（画布矩形）内：上方贴不进（首行、或选区已滚出网格顶缘）就翻到选区下缘，
+    // 越界则贴网格上下缘——气泡只横向越出面板，不压宿主标题栏与状态栏
+    let grid_top = origin.y;
+    let grid_bottom = (origin.y + view.canvas_size.height).min(viewport.height);
+    let above = grid_top + y0 - h - BAR_GAP;
+    let want_y = if above >= grid_top { above } else { grid_top + y1 + BAR_GAP };
+    let max_y = (grid_bottom - h - pal::VIEWPORT_GAP).max(grid_top);
+    // 横向钳位用估宽：真实气泡不大于估宽，钳后左侧起点仍留得住完整一条
+    let max_x = (viewport.width - w - pal::VIEWPORT_GAP).max(pal::VIEWPORT_GAP);
+    Some(BarPlacement {
+        rect: Rectangle::new(
+            Point::new((origin.x + x0).clamp(pal::VIEWPORT_GAP, max_x), want_y.clamp(grid_top, max_y)),
+            Size::new(w, h),
+        ),
+        summary,
+    })
+}
+
+/// 格式气泡估高：按钮字阶行高（12px 档 = 16，与菜单条目同口径）随界面基准字号放大 + 上下内衬。
+/// 驱动窗口内的翻转与钳制判据，渲染高度仍由内容自适应（不做实测回填）。
+fn bar_est_height() -> f32 {
+    pal::fs_caption() * (16.0 / 12.0) + 2.0 * (BAR_PAD_Y + BAR_BTN_PAD_Y)
+}
+
+/// 格式气泡估宽：当前标签的估字宽 + 固定件之和 + 余量（仅供钳制与命中判定，不参与渲染）。
+fn bar_est_width(font_label: &str, size_label: &str) -> f32 {
+    let fs = pal::fs_caption();
+    let chip = |label: &str| estimate_text_width(label, fs) + 2.0 * BAR_BTN_PAD_X;
+    2.0 * BAR_PAD_X
+        + chip(font_label)
+        + chip(size_label)
+        + 4.0 * chip("B")
+        + 2.0 * (estimate_text_width("字", fs) + BAR_SWATCH + BAR_SWATCH_GAP + 2.0 * BAR_BTN_PAD_X)
+        + (BAR_ERASER_ICON + 2.0 * BAR_ERASER_PAD_X)
+        + 3.0 * BAR_DIVIDER_W
+        + 11.0 * BAR_ITEM_GAP
+        + BAR_W_MARGIN
+}
+
+/// 本窗口是否渲染表格视图，及其格式气泡落位（面板已切走 / 不满足弹出条件 = None）。
+fn bar_in_window<'a>(
+    app: &'a crate::App,
+    window: iced::window::Id,
+    viewport: Size,
+) -> Option<(&'a TableSession, BarPlacement)> {
+    // 接管面与设置整页把整窗内容换掉（布局真源不动），此时网格不在场
+    if app.plugin_takeovers.contains_key(&window)
+        || (app.main_id == Some(window) && app.settings_open)
+    {
         return None;
     }
-    let summary = table_ops::style_summary(&session.data.fields, &session.data.rows, &region);
+    if !crate::layout_view::window_shows_table(app, window) {
+        return None;
+    }
+    let session = app.table.as_ref()?;
+    let placement = bar_placement(session, window, viewport)?;
+    Some((session, placement))
+}
+
+/// 格式气泡的矩形（窗口坐标，宽高为估算）：供全局按压判定「点在气泡上 = 表格面按压」。
+pub fn format_bar_rect(app: &crate::App, window: iced::window::Id, viewport: Size) -> Option<Rectangle> {
+    bar_in_window(app, window, viewport).map(|(_, p)| p.rect)
+}
+
+/// 格式气泡覆盖层：由窗口覆盖层作为追加子叠在面板之上（显隐不重建面板子树）。
+pub fn format_bar_overlay<'a>(
+    app: &'a crate::App,
+    window: iced::window::Id,
+    viewport: Size,
+) -> Option<Element<'a, Message>> {
+    let (_session, placement) = bar_in_window(app, window, viewport)?;
+    let summary = &placement.summary;
     let bar = row![
-        font_pick(app, window, &summary),
-        size_pick(window, &summary),
+        font_pick(app, window, summary),
+        size_pick(window, summary),
         divider_el(),
         tri_btn("B", StyleKey::Bold, &summary.bold),
         tri_btn("I", StyleKey::Italic, &summary.italic),
@@ -2038,8 +2147,8 @@ fn format_bar<'a>(app: &'a crate::App, session: &'a TableSession, window: iced::
         divider_el(),
         clear_btn(),
     ]
-    .spacing(4)
-    .padding(iced::Padding::ZERO.horizontal(6.0).vertical(4.0));
+    .spacing(BAR_ITEM_GAP)
+    .padding(iced::Padding::ZERO.horizontal(BAR_PAD_X).vertical(BAR_PAD_Y));
     let bar = container(bar).style(|_t| iced::widget::container::Style {
         background: Some(pal::BG_OVERLAY.into()),
         border: iced::border::rounded(pal::RADIUS_SM).color(pal::BORDER_STRONG).width(1.0),
@@ -2051,14 +2160,14 @@ fn format_bar<'a>(app: &'a crate::App, session: &'a TableSession, window: iced::
             .height(Length::Fill)
             .align_x(alignment::Horizontal::Left)
             .align_y(alignment::Vertical::Top)
-            .padding(iced::Padding::ZERO.left(x0).top(y0 - BAR_GAP))
+            .padding(iced::Padding::ZERO.left(placement.rect.x).top(placement.rect.y))
             .into(),
     )
 }
 
 fn divider_el() -> Element<'static, Message> {
     container(space())
-        .width(Length::Fixed(1.0))
+        .width(Length::Fixed(BAR_DIVIDER_W))
         .height(Length::Fixed(18.0))
         .style(|_t| iced::widget::container::Style {
             background: Some(pal::BORDER.into()),
@@ -2067,27 +2176,34 @@ fn divider_el() -> Element<'static, Message> {
         .into()
 }
 
-fn font_pick<'a>(app: &'a crate::App, window: iced::window::Id, summary: &table_ops::StyleSummary) -> Element<'a, Message> {
-    let label = match &summary.font {
+/// 字体按钮标签（估宽与渲染同一取词口径）。
+fn bar_font_label(summary: &table_ops::StyleSummary) -> String {
+    match &summary.font {
         OptState::Mixed => "字体".to_string(),
         OptState::Value(None) => "默认".to_string(),
         OptState::Value(Some(f)) => table_ops_font_label(f),
-    };
-    let btn = iced::widget::button(text(label).size(pal::fs_caption()).color(pal::TEXT_PRIMARY))
-        .padding(iced::Padding::ZERO.horizontal(6.0).vertical(3.0))
+    }
+}
+
+/// 字号按钮标签（估宽与渲染同一取词口径）。
+fn bar_size_label(summary: &table_ops::StyleSummary) -> String {
+    match &summary.size {
+        OptState::Value(Some(s)) => format!("{}", *s as i32),
+        _ => "字号".to_string(),
+    }
+}
+
+fn font_pick<'a>(app: &'a crate::App, window: iced::window::Id, summary: &table_ops::StyleSummary) -> Element<'a, Message> {
+    let btn = iced::widget::button(text(bar_font_label(summary)).size(pal::fs_caption()).color(pal::TEXT_PRIMARY))
+        .padding(iced::Padding::ZERO.horizontal(BAR_BTN_PAD_X).vertical(BAR_BTN_PAD_Y))
         .style(bar_btn_style())
         .on_press_maybe(app.table.as_ref().map(|_| Message::Table(TableMsg::OpenFontMenu(window))));
     btn.into()
 }
 
 fn size_pick(window: iced::window::Id, summary: &table_ops::StyleSummary) -> Element<'static, Message> {
-    let label = match &summary.size {
-        OptState::Mixed => "字号".to_string(),
-        OptState::Value(None) => "字号".to_string(),
-        OptState::Value(Some(s)) => format!("{}", *s as i32),
-    };
-    iced::widget::button(text(label).size(pal::fs_caption()).color(pal::TEXT_PRIMARY))
-        .padding(iced::Padding::ZERO.horizontal(6.0).vertical(3.0))
+    iced::widget::button(text(bar_size_label(summary)).size(pal::fs_caption()).color(pal::TEXT_PRIMARY))
+        .padding(iced::Padding::ZERO.horizontal(BAR_BTN_PAD_X).vertical(BAR_BTN_PAD_Y))
         .style(bar_btn_style())
         .on_press(Message::Table(TableMsg::OpenSizeMenu(window)))
         .into()
@@ -2124,7 +2240,7 @@ fn tri_btn(label: &'static str, key: StyleKey, state: &OptState<bool>) -> Elemen
         _ => (false, false),
     };
     iced::widget::button(text(label).size(pal::fs_caption()).color(if on { pal::ACCENT } else { pal::TEXT_PRIMARY }))
-        .padding(iced::Padding::ZERO.horizontal(6.0).vertical(3.0))
+        .padding(iced::Padding::ZERO.horizontal(BAR_BTN_PAD_X).vertical(BAR_BTN_PAD_Y))
         .style(move |_t, status| iced::widget::button::Style {
             background: (on || mixed || matches!(status, iced::widget::button::Status::Hovered))
                 .then_some(if on { pal::ACCENT_SOFT } else { pal::HOVER }.into()),
@@ -2141,28 +2257,30 @@ fn color_btn<'a>(app: &'a crate::App, window: iced::window::Id, bg: bool, state:
         OptState::Mixed => None,
     };
     let swatch = container(space())
-        .width(Length::Fixed(10.0))
-        .height(Length::Fixed(10.0))
+        .width(Length::Fixed(BAR_SWATCH))
+        .height(Length::Fixed(BAR_SWATCH))
         .style(move |_t| iced::widget::container::Style {
             background: Some(current.unwrap_or(pal::TEXT_PRIMARY).into()),
             border: iced::border::rounded(pal::RADIUS_XS).color(pal::BORDER_STRONG).width(1.0),
             ..Default::default()
         });
     let label = if bg { "底" } else { "字" };
-    let btn = iced::widget::button(row![text(label).size(pal::fs_caption()).color(pal::TEXT_PRIMARY), swatch].spacing(3))
-        .padding(iced::Padding::ZERO.horizontal(6.0).vertical(3.0))
-        .style(bar_btn_style())
-        .on_press_maybe(
-            app.table
-                .as_ref()
-                .map(|_| Message::Table(TableMsg::OpenColorMenu { window, bg })),
-        );
+    let btn = iced::widget::button(
+        row![text(label).size(pal::fs_caption()).color(pal::TEXT_PRIMARY), swatch].spacing(BAR_SWATCH_GAP),
+    )
+    .padding(iced::Padding::ZERO.horizontal(BAR_BTN_PAD_X).vertical(BAR_BTN_PAD_Y))
+    .style(bar_btn_style())
+    .on_press_maybe(
+        app.table
+            .as_ref()
+            .map(|_| Message::Table(TableMsg::OpenColorMenu { window, bg })),
+    );
     btn.into()
 }
 
 fn clear_btn() -> Element<'static, Message> {
-    iced::widget::button(crate::ui::icon::icon("eraser", 13.0, pal::TEXT_PRIMARY))
-        .padding(iced::Padding::ZERO.horizontal(5.0).vertical(3.0))
+    iced::widget::button(crate::ui::icon::icon("eraser", BAR_ERASER_ICON, pal::TEXT_PRIMARY))
+        .padding(iced::Padding::ZERO.horizontal(BAR_ERASER_PAD_X).vertical(BAR_BTN_PAD_Y))
         .style(bar_btn_style())
         .on_press(Message::Table(TableMsg::ClearFormat))
         .into()
@@ -2563,5 +2681,106 @@ mod tests {
         assert_eq!(lightbox_zoom_level(1.0, -100.0), 1.0);
         assert_eq!(lightbox_zoom_level(8.0, 100.0), 8.0);
         assert!(lightbox_zoom_level(1.0, 40.0) > 1.0);
+    }
+
+    /// 选中首列某格的格式气泡会话（origin = 画布在窗口中的原点，None = 画布未收到过事件）。
+    fn bar_session(window: iced::window::Id, origin: Option<Point>, row_id: &str) -> TableSession {
+        let mut s = text_session(&["短", "短"]);
+        s.view.selection = Some(TableSelection::Cell {
+            row_id: row_id.to_string(),
+            field_id: "f1".to_string(),
+        });
+        s.view.bar_shown = true;
+        s.view.canvas_origin = origin.map(|p| (window, p));
+        // 画布尺寸与原点同源播种（气泡竖向留在网格区内）
+        s.view.canvas_size = Size::new(600.0, 300.0);
+        s
+    }
+
+    /// 网格几何里的选区上下缘换算到窗口坐标（zoom 1 时 header_h 与行高均为 32）。
+    fn sel_edges(s: &TableSession, origin: Point, row: usize) -> (f32, f32) {
+        let g = geo(s, Size::new(f32::MAX, f32::MAX));
+        let top = origin.y + g.cache.row_y[row] - s.view.scroll_y + g.header_h();
+        let bottom = origin.y + g.cache.row_y[row] + g.cache.row_h[row] - s.view.scroll_y + g.header_h();
+        (top, bottom)
+    }
+
+    /// 靠右窗边的选区：气泡按窗口视口钳位、整条留在窗口内（钳制基准是窗口，不是面板）。
+    #[test]
+    fn format_bar_placement_clamps_inside_window() {
+        let window = iced::window::Id::unique();
+        let viewport = Size::new(900.0, 500.0);
+        let origin = Point::new(700.0, 200.0);
+        let s = bar_session(window, Some(origin), "r1");
+        let p = bar_placement(&s, window, viewport).expect("锚点成立即落位");
+        assert!(p.rect.x < 700.0, "越出右缘时向左收拢");
+        assert!(
+            p.rect.x + p.rect.width <= viewport.width - pal::VIEWPORT_GAP + 0.01,
+            "估宽范围内整条不越出窗口"
+        );
+        let (sel_top, _) = sel_edges(&s, origin, 1);
+        assert!(p.rect.y + p.rect.height <= sel_top, "上方有余量时贴在选区之上");
+    }
+
+    /// 选区首行上方贴不进网格区（再往上是本面板工具条与标签条）= 翻到选区下缘落位。
+    #[test]
+    fn format_bar_placement_flips_below_selection() {
+        let window = iced::window::Id::unique();
+        let viewport = Size::new(900.0, 500.0);
+        let origin = Point::new(100.0, 200.0);
+        let s = bar_session(window, Some(origin), "r0");
+        let (_, sel_bottom) = sel_edges(&s, origin, 0);
+        let p = bar_placement(&s, window, viewport).expect("上方无余量仍要落位");
+        assert!(p.rect.y >= sel_bottom, "翻到选区下方");
+        assert!(p.rect.y >= origin.y, "不越到网格区上方压工具条");
+        assert!(p.rect.y + p.rect.height <= origin.y + s.view.canvas_size.height, "仍在网格区内");
+    }
+
+    /// 选区滚出网格下缘（下方无容身处）= 贴网格下缘，不越出去压宿主状态栏。
+    #[test]
+    fn format_bar_placement_clamps_to_canvas_bottom() {
+        let window = iced::window::Id::unique();
+        let viewport = Size::new(900.0, 500.0);
+        let origin = Point::new(100.0, 200.0);
+        let mut s = bar_session(window, Some(origin), "r1");
+        s.view.canvas_size = Size::new(600.0, 40.0);
+        s.view.scroll_y = 40.0;
+        let p = bar_placement(&s, window, viewport).expect("选区滚出网格仍要落位");
+        assert!(p.rect.y >= origin.y, "不越到网格区上方压工具条");
+        assert!(p.rect.y + p.rect.height <= origin.y + s.view.canvas_size.height, "贴网格下缘不越出");
+    }
+
+    /// 锚点基准：画布原点未播种或来自别的窗口 = 落位不成立（气泡不弹）。
+    #[test]
+    fn format_bar_placement_requires_matching_canvas_origin() {
+        let window = iced::window::Id::unique();
+        let viewport = Size::new(900.0, 500.0);
+        let s = bar_session(window, None, "r0");
+        assert!(bar_placement(&s, window, viewport).is_none(), "画布未收到过事件即不弹");
+        let s = bar_session(window, Some(Point::new(100.0, 200.0)), "r0");
+        assert!(bar_placement(&s, iced::window::Id::unique(), viewport).is_none(), "换窗后旧原点不作数");
+    }
+
+    /// 面板内替掉网格的形态（编辑态 / 灯箱 / 插件表格面）期间不弹气泡：
+    /// 气泡在窗口层，叠上去会盖过这些形态。
+    #[test]
+    fn format_bar_placement_hidden_by_covering_states() {
+        let window = iced::window::Id::unique();
+        let viewport = Size::new(900.0, 500.0);
+        let origin = Some(Point::new(100.0, 200.0));
+        let mut s = bar_session(window, origin, "r0");
+        s.view.lightbox = Some(Lightbox {
+            row_id: "r0".to_string(),
+            field_id: "f1".to_string(),
+            index: 0,
+            zoom: 1.0,
+            pan: Vector::ZERO,
+            drag: None,
+            last_press: None,
+        });
+        assert!(bar_placement(&s, window, viewport).is_none(), "灯箱预览期间不弹");
+        let mut s = bar_session(window, origin, "r0");
+        s.view.active_view = Some("plugin:view".to_string());
+        assert!(bar_placement(&s, window, viewport).is_none(), "插件表格面在场时不弹");
     }
 }
