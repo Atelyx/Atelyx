@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
 description = "Atelyx 插件协议：握手、JSON-RPC/NDJSON 信封、能力面方法、ViewNode 树与事件（宿主与 SDK 共用的对外契约）"
+license = "Apache-2.0"
+repository = "https://github.com/Atelyx/Atelyx"
+readme = "../README.md"
+# 对拍快照在仓库根 fixtures/（crate 目录之外）：发布包跑不了这条测试，不入包
+exclude = ["tests"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

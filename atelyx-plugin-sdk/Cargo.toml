@@ -4,9 +4,15 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
 description = "Atelyx 插件 SDK：握手、能力面代理调用与 ViewNode 树构建（插件侧封装，协议类型见 atelyx-plugin-protocol）"
+license = "Apache-2.0"
+repository = "https://github.com/Atelyx/Atelyx"
+readme = "../README.md"
+# 端到端夹具与测试依赖仓库内的宿主 crate：发布包只出 SDK 本体，不带上它们
+exclude = ["src/bin", "tests"]
 
 [dependencies]
-atelyx-plugin-protocol = { path = "../atelyx-plugin-protocol" }
+# version 供 crates.io 解析，path 供仓库内直接构建（打包时 path 会被去掉）
+atelyx-plugin-protocol = { version = "0.1.0", path = "../atelyx-plugin-protocol" }
 # Context 的定型调用借 serde 的 Serialize/DeserializeOwned trait（不用 derive）
 serde = { version = "1", default-features = false }
 serde_json = "1"
