@@ -872,10 +872,15 @@ pub mod process {
 ```rust
 // atelyx-plugin-protocol/src/method.rs
 /// 当前激活仓库的按路径读写（`path` 为相对仓库根的路径）。协作空间模式下同一能力面
-/// 由宿主转发到服务端，插件不感知容器类型。
+/// 由宿主转发到服务端，插件不感知容器类型。写入与宿主自身写同出口（写盘队列 / 服务端内容面），
+/// 插件不得用 `fs` 直改仓库（会与内存态和协作广播互踩）。
 pub mod vault {
     pub const READ_TEXT: &str = "vault.readText";
     pub const WRITE_TEXT: &str = "vault.writeText";
+    /// 读二进制文件（base64；单次上限见宿主实现，超限可读失败）。
+    pub const READ_BINARY: &str = "vault.readBinary";
+    /// 写二进制文件（base64；父目录自动创建；正在编辑器中打开的文件拒写）。
+    pub const WRITE_BINARY: &str = "vault.writeBinary";
     pub const LIST: &str = "vault.list";
     pub const EXISTS: &str = "vault.exists";
 }
@@ -928,6 +933,8 @@ pub mod shortcut {
 pub mod clipboard {
     pub const WRITE_TEXT: &str = "clipboard.writeText";
     pub const READ_TEXT: &str = "clipboard.readText";
+    /// 读剪贴板中的图片（PNG，base64；无图片时字段缺省）。
+    pub const READ_IMAGE: &str = "clipboard.readImage";
 }
 ```
 
@@ -1218,6 +1225,27 @@ pub struct TextPayload {
 
 ```rust
 // atelyx-plugin-protocol/src/method.rs
+/// 剪贴板图片：统一编成 PNG（插件不需要自己处理系统剪贴板的像素格式）。
+#[serde(rename_all = "camelCase")]
+pub struct ClipboardImage {
+    pub base64: String,
+    pub width: u32,
+    pub height: u32,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+#[serde(rename_all = "camelCase")]
+pub struct ClipboardImageResult {
+    /// 剪贴板里没有图片时整个字段缺省（与「有图片但为空」不做区分——空图片不成立）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<ClipboardImage>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
 #[serde(rename_all = "camelCase")]
 pub struct PickFileParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1485,12 +1513,34 @@ pub struct TableSnapshot {
     pub fields: Vec<TableField>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rows: Vec<TableRow>,
+    /// 用户当前选区（未打开表格或无选区时缺省）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<TableSelection>,
 }
 ```
 
 ```rust
 // atelyx-plugin-protocol/src/method.rs
-/// 快照里的字段：只读面带 id / 名称 / 类型 / 选项。
+/// 表格选区形态（与宿主表格会话同构）：插件据此把视图对齐到用户正在看的行 / 格。
+#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(rename_all_fields = "camelCase")]
+pub enum TableSelection {
+    /// 单个单元格。
+    Cell { row_id: String, field_id: String },
+    /// 矩形区域：`anchor` 为拖选起点，另一组为当前端点。
+    Range { anchor_row_id: String, anchor_field_id: String, row_id: String, field_id: String },
+    /// 整行。
+    Row { row_id: String },
+    /// 整列。
+    Column { field_id: String },
+    /// 全表。
+    All,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 快照里的字段：id / 名称 / 类型 / 选项 / 列宽。
 #[serde(rename_all = "camelCase")]
 pub struct TableField {
     pub id: String,
@@ -1499,6 +1549,9 @@ pub struct TableField {
     pub field_type: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub options: Vec<String>,
+    /// 用户拖拽调整后的列宽（px）；缺省 = 宿主按字段名自适应。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<f64>,
 }
 ```
 
@@ -1510,6 +1563,10 @@ pub struct TableRow {
     pub id: String,
     #[serde(default)]
     pub values: serde_json::Map<String, Value>,
+    /// 单元格显示样式按字段 id 存（粗体 / 斜体 / 删除线 / 字色 / 底色 / 字号等，形态随宿主
+    /// 表格格式模型）。原样透传：宿主不解释内容，插件按需取用。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub styles: Option<serde_json::Map<String, Value>>,
 }
 ```
 

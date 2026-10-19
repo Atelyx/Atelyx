@@ -31,7 +31,7 @@ use crate::plugin_process::{EventSink, PluginProcessHost, ProcessEvent as HostEv
 use super::{capability, child_process, fs, http, log, shortcut};
 use super::{
     AuditRecord, Contribution, DialogKind, DialogRequest, HostRequest, PluginEvent, PluginRuntime,
-    PluginStatus, SurfaceKind, ViewEvent, ViewNode,
+    PluginStatus, SurfaceKind, ViewEvent, ViewNode, MAX_VAULT_BINARY_BYTES,
 };
 
 /// 崩溃判定窗口：窗口内累计达到 [`CRASH_LIMIT`] 即熔断。
@@ -566,8 +566,11 @@ impl Instance {
                 | method::ai::CHAT_HISTORY
                 | method::clipboard::WRITE_TEXT
                 | method::clipboard::READ_TEXT
+                | method::clipboard::READ_IMAGE
                 | method::vault::READ_TEXT
                 | method::vault::WRITE_TEXT
+                | method::vault::READ_BINARY
+                | method::vault::WRITE_BINARY
                 | method::vault::LIST
                 | method::vault::EXISTS
                 | method::table::SNAPSHOT
@@ -716,6 +719,10 @@ impl Instance {
                     plugin_id: self.id.clone(),
                     request_id: 0,
                 },
+                method::clipboard::READ_IMAGE => HostRequest::ClipboardReadImage {
+                    plugin_id: self.id.clone(),
+                    request_id: 0,
+                },
                 method::vault::READ_TEXT => {
                     let p: method::PathParams = parse(params).map_err(|e| e.to_string())?;
                     HostRequest::VaultReadText {
@@ -739,6 +746,25 @@ impl Instance {
                         plugin_id: self.id.clone(),
                         request_id: 0,
                         path: p.path,
+                    }
+                }
+                method::vault::READ_BINARY => {
+                    let p: method::PathParams = parse(params).map_err(|e| e.to_string())?;
+                    HostRequest::VaultReadBinary {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        path: p.path,
+                    }
+                }
+                method::vault::WRITE_BINARY => {
+                    let p: method::WriteBinaryParams = parse(params).map_err(|e| e.to_string())?;
+                    // 上限在分派处判：壳不必为一次注定失败的写入再搬一遍数据
+                    let bytes = decode_vault_binary(&p.base64, MAX_VAULT_BINARY_BYTES)?;
+                    HostRequest::VaultWriteBinary {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        path: p.path,
+                        bytes,
                     }
                 }
                 method::vault::EXISTS => {
@@ -969,8 +995,11 @@ impl Instance {
             | method::ai::CHAT_HISTORY
             | method::clipboard::WRITE_TEXT
             | method::clipboard::READ_TEXT
+            | method::clipboard::READ_IMAGE
             | method::vault::READ_TEXT
             | method::vault::WRITE_TEXT
+            | method::vault::READ_BINARY
+            | method::vault::WRITE_BINARY
             | method::vault::LIST
             | method::vault::EXISTS
             | method::table::SNAPSHOT
@@ -1420,6 +1449,20 @@ fn parse<T: DeserializeOwned>(params: &Value) -> Result<T, RpcError> {
     serde_json::from_value(value).map_err(|e| RpcError::failed(format!("params 不可解析：{e}")))
 }
 
+/// 解码仓库二进制写入负载并判上限。超限不截断——截断写进仓库就是内容损坏。
+fn decode_vault_binary(base64_text: &str, limit: usize) -> Result<Vec<u8>, String> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(base64_text)
+        .map_err(|e| format!("base64 解码失败：{e}"))?;
+    if bytes.len() > limit {
+        return Err(format!(
+            "内容超过仓库二进制上限（{} MiB），请改用 fs",
+            limit / (1024 * 1024)
+        ));
+    }
+    Ok(bytes)
+}
+
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1494,6 +1537,16 @@ mod tests {
         // 窗口外的旧记录被剔除：新一次崩溃只算 1
         let later = t0 + CRASH_WINDOW + Duration::from_secs(1);
         assert_eq!(record_crash(&mut times, later), 1);
+    }
+
+    #[test]
+    fn vault_binary_decode_enforces_limit_without_truncating() {
+        use base64::Engine;
+        let ok = base64::engine::general_purpose::STANDARD.encode([0u8, 1, 2]);
+        assert_eq!(decode_vault_binary(&ok, 3).unwrap(), vec![0, 1, 2]);
+        let err = decode_vault_binary(&ok, 2).expect_err("超限应拒绝");
+        assert!(err.contains("上限"), "{err}");
+        assert!(decode_vault_binary("不是 base64", 3).is_err());
     }
 
     #[test]
@@ -1712,6 +1765,33 @@ mod tests {
             panic!("应投递仓库写入请求");
         };
         assert_eq!((path.as_str(), content.as_str()), ("a.md", "正文"));
+        runtime.resolve_shell_call(request_id, Ok(json!({})));
+
+        instance.handle_line(&request_line(method::vault::READ_BINARY, &json!({ "path": "a.png" })));
+        let request = rt.block_on(runtime.recv_host_request()).unwrap();
+        let HostRequest::VaultReadBinary { request_id, path, .. } = request else {
+            panic!("应投递仓库二进制读取请求");
+        };
+        assert_eq!(path, "a.png");
+        runtime.resolve_shell_call(request_id, Ok(crate::plugin_runtime::binary_payload(&[1, 2])));
+
+        instance.handle_line(&request_line(
+            method::vault::WRITE_BINARY,
+            &json!({ "path": "a.png", "base64": "AAEC" }),
+        ));
+        let request = rt.block_on(runtime.recv_host_request()).unwrap();
+        let HostRequest::VaultWriteBinary { request_id, path, bytes, .. } = request else {
+            panic!("应投递仓库二进制写入请求");
+        };
+        assert_eq!(path, "a.png");
+        assert_eq!(bytes, vec![0, 1, 2]);
+        runtime.resolve_shell_call(request_id, Ok(json!({})));
+
+        instance.handle_line(&request_line(method::clipboard::READ_IMAGE, &Value::Null));
+        let request = rt.block_on(runtime.recv_host_request()).unwrap();
+        let HostRequest::ClipboardReadImage { request_id, .. } = request else {
+            panic!("应投递剪贴板读图请求");
+        };
         runtime.resolve_shell_call(request_id, Ok(json!({})));
 
         instance.handle_line(&request_line(method::vault::LIST, &json!({ "path": "" })));

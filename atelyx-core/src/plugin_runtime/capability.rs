@@ -18,14 +18,15 @@ pub(crate) fn permission_for(name: &str) -> Option<Permission> {
     match name {
         fs::PRIVATE_DIR | fs::READ_TEXT | fs::WRITE_TEXT | fs::READ_BINARY | fs::WRITE_BINARY
         | fs::REMOVE | fs::EXISTS | fs::LIST => Some(Fs),
-        vault::READ_TEXT | vault::WRITE_TEXT | vault::LIST | vault::EXISTS => Some(Vault),
+        vault::READ_TEXT | vault::WRITE_TEXT | vault::READ_BINARY | vault::WRITE_BINARY
+        | vault::LIST | vault::EXISTS => Some(Vault),
         table::SNAPSHOT | table::UPDATE_CELL | table::ADD_ROW | table::REMOVE_ROW
         | table::SELECT_ROW => Some(Table),
         process::SPAWN | process::WRITE_STDIN | process::CLOSE_STDIN | process::KILL => Some(Process),
         state::READ | state::WRITE => Some(State),
         notification::SHOW => Some(Notification),
         shortcut::REGISTER | shortcut::UNREGISTER => Some(Shortcuts),
-        clipboard::WRITE_TEXT | clipboard::READ_TEXT => Some(Clipboard),
+        clipboard::WRITE_TEXT | clipboard::READ_TEXT | clipboard::READ_IMAGE => Some(Clipboard),
         dialog::PICK_FILE | dialog::PICK_DIRECTORY => Some(Dialog),
         http::REQUEST => Some(Http),
         window::OPEN | window::CLOSE => Some(Window),
@@ -75,7 +76,10 @@ mod tests {
         assert_eq!(permission_for(method::notification::SHOW), Some(Permission::Notification));
         assert_eq!(permission_for(method::shortcut::REGISTER), Some(Permission::Shortcuts));
         assert_eq!(permission_for(method::clipboard::READ_TEXT), Some(Permission::Clipboard));
+        assert_eq!(permission_for(method::clipboard::READ_IMAGE), Some(Permission::Clipboard));
         assert_eq!(permission_for(method::vault::WRITE_TEXT), Some(Permission::Vault));
+        assert_eq!(permission_for(method::vault::READ_BINARY), Some(Permission::Vault));
+        assert_eq!(permission_for(method::vault::WRITE_BINARY), Some(Permission::Vault));
         assert_eq!(permission_for(method::table::SNAPSHOT), Some(Permission::Table));
         assert_eq!(permission_for(method::table::UPDATE_CELL), Some(Permission::Table));
         assert_eq!(permission_for(method::table::ADD_ROW), Some(Permission::Table));

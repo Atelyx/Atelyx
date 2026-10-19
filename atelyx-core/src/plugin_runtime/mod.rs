@@ -40,9 +40,9 @@ pub use atelyx_plugin_protocol::event::{TableChangedPayload, VaultSwitchPayload}
 pub use atelyx_plugin_protocol::manifest::{DocTypeRegistration, Permission};
 pub use atelyx_plugin_protocol::method::{
     ChatEvent, ChatEventParams, ChatHistoryParams, ChatHistoryResult, ChatSendParams,
-    ChatSessionSummary, ChatSessionWire, ChatStopParams, ContributionSlot, FileFilter,
-    NotificationLevel, SurfaceKind, TableField, TableRow, TableSnapshot, TakeoverScope,
-    WindowOpenParams,
+    ChatSessionSummary, ChatSessionWire, ChatStopParams, ClipboardImage, ContributionSlot,
+    FileFilter, NotificationLevel, SurfaceKind, TableField, TableSelection, TableRow, TableSnapshot,
+    TakeoverScope, WindowOpenParams,
 };
 pub use atelyx_plugin_protocol::view::{
     Align, Axis, ButtonVariant, CanvasEventKind, CanvasPointer, ColorToken, EventKind, EventValue,
@@ -126,6 +126,29 @@ pub struct DialogRequest {
     pub filters: Vec<FileFilter>,
 }
 
+/// 仓库二进制单次读写上限：内容面数据走 JSON 单行传输，过大的文件应由插件用 `fs` 自行处理
+/// （那条面不承载宿主内容真源）。超限以可读失败收场，不做截断。
+pub const MAX_VAULT_BINARY_BYTES: usize = 32 * 1024 * 1024;
+
+/// 二进制负载的 wire 形态（`{ "base64": ... }`，与 `fs.readBinary` 同编码）。
+pub fn binary_payload(bytes: &[u8]) -> Value {
+    serde_json::json!({ "base64": encode_base64(bytes) })
+}
+
+/// 标准 base64 编码（协议里所有二进制通道共用一种编码）。
+pub fn encode_base64(bytes: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+/// 剪贴板图片的 wire 形态（`{ "image": { base64, width, height } }`；无图片 = 空对象）。
+pub fn clipboard_image_payload(image: Option<ClipboardImage>) -> Value {
+    match image {
+        Some(image) => serde_json::json!({ "image": image }),
+        None => serde_json::json!({}),
+    }
+}
+
 /// 运行时 → 壳的服务请求。与 [`PluginEvent`] 广播分属两条通道：服务请求必须无损送达——丢一条
 /// 会让插件的调用永久悬挂，故走无界通道而非可落后的广播。
 #[derive(Clone, Debug)]
@@ -153,6 +176,12 @@ pub enum HostRequest {
     VaultReadText { plugin_id: String, request_id: u64, path: String },
     /// 插件请求写当前仓库内一个文本文件（路径校验与打开中文件的写保护由壳执行）。
     VaultWriteText { plugin_id: String, request_id: u64, path: String, content: String },
+    /// 插件请求读当前仓库内一个二进制文件（结果以 [`binary_payload`] 回填）。
+    VaultReadBinary { plugin_id: String, request_id: u64, path: String },
+    /// 插件请求写当前仓库内一个二进制文件（`bytes` 已在分派处解码并校验大小）。
+    VaultWriteBinary { plugin_id: String, request_id: u64, path: String, bytes: Vec<u8> },
+    /// 插件请求读剪贴板中的图片（结果以 [`ClipboardImage`] 形态回填，无图 = `null`）。
+    ClipboardReadImage { plugin_id: String, request_id: u64 },
     /// 插件请求列当前仓库内一个目录（空路径 = 仓库根）。
     VaultList { plugin_id: String, request_id: u64, path: String },
     /// 插件请求判定当前仓库内一个文件是否存在。
@@ -404,8 +433,11 @@ impl PluginRuntime {
             | HostRequest::ChatHistory { .. }
             | HostRequest::ClipboardWrite { .. }
             | HostRequest::ClipboardRead { .. }
+            | HostRequest::ClipboardReadImage { .. }
             | HostRequest::VaultReadText { .. }
             | HostRequest::VaultWriteText { .. }
+            | HostRequest::VaultReadBinary { .. }
+            | HostRequest::VaultWriteBinary { .. }
             | HostRequest::VaultList { .. }
             | HostRequest::VaultExists { .. }
             | HostRequest::TableSnapshot { .. }
@@ -480,6 +512,10 @@ impl PluginRuntime {
                 plugin_id,
                 request_id,
             },
+            HostRequest::ClipboardReadImage { plugin_id, .. } => HostRequest::ClipboardReadImage {
+                plugin_id,
+                request_id,
+            },
             HostRequest::VaultReadText { plugin_id, path, .. } => HostRequest::VaultReadText {
                 plugin_id,
                 request_id,
@@ -491,6 +527,19 @@ impl PluginRuntime {
                 path,
                 content,
             },
+            HostRequest::VaultReadBinary { plugin_id, path, .. } => HostRequest::VaultReadBinary {
+                plugin_id,
+                request_id,
+                path,
+            },
+            HostRequest::VaultWriteBinary { plugin_id, path, bytes, .. } => {
+                HostRequest::VaultWriteBinary {
+                    plugin_id,
+                    request_id,
+                    path,
+                    bytes,
+                }
+            }
             HostRequest::VaultList { plugin_id, path, .. } => HostRequest::VaultList {
                 plugin_id,
                 request_id,
@@ -1144,8 +1193,11 @@ fn request_plugin_id(request: &HostRequest) -> &str {
         | HostRequest::ChatHistory { plugin_id, .. }
         | HostRequest::ClipboardWrite { plugin_id, .. }
         | HostRequest::ClipboardRead { plugin_id, .. }
+        | HostRequest::ClipboardReadImage { plugin_id, .. }
         | HostRequest::VaultReadText { plugin_id, .. }
         | HostRequest::VaultWriteText { plugin_id, .. }
+        | HostRequest::VaultReadBinary { plugin_id, .. }
+        | HostRequest::VaultWriteBinary { plugin_id, .. }
         | HostRequest::VaultList { plugin_id, .. }
         | HostRequest::VaultExists { plugin_id, .. }
         | HostRequest::TableSnapshot { plugin_id, .. }

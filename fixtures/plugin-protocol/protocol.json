@@ -237,6 +237,36 @@
       "value": { "text": "x" }
     },
     {
+      "name": "clipboard.readImage result",
+      "type": "ClipboardImageResult",
+      "value": { "image": { "base64": "iVBORw0KGgo=", "width": 2, "height": 1 } }
+    },
+    {
+      "name": "clipboard.readImage result (no image)",
+      "type": "ClipboardImageResult",
+      "value": {}
+    },
+    {
+      "name": "vault.readBinary result",
+      "type": "BinaryContent",
+      "value": { "base64": "AAEC" }
+    },
+    {
+      "name": "vault.writeBinary params",
+      "type": "WriteBinaryParams",
+      "value": { "path": "assets/logo.png", "base64": "AAEC" }
+    },
+    {
+      "name": "vault.readText result",
+      "type": "TextContent",
+      "value": { "content": "正文" }
+    },
+    {
+      "name": "vault.writeText params",
+      "type": "WriteTextParams",
+      "value": { "path": "notes/a.md", "content": "正文" }
+    },
+    {
       "name": "dialog.pickFile params",
       "type": "PickFileParams",
       "value": { "title": "选择", "save": false, "defaultPath": "C:/a", "filters": [ { "name": "PNG", "extensions": ["png"] } ] }
@@ -399,8 +429,9 @@
       "value": {
         "open": true,
         "path": "plan.atb",
-        "fields": [ { "id": "f1", "name": "名称", "type": "text", "options": ["甲", "乙"] } ],
-        "rows": [ { "id": "r1", "values": { "f1": "甲" } } ]
+        "fields": [ { "id": "f1", "name": "名称", "type": "text", "options": ["甲", "乙"], "width": 180.0 } ],
+        "rows": [ { "id": "r1", "values": { "f1": "甲" }, "styles": { "f1": { "bold": true, "color": "#c0392b" } } } ],
+        "selection": { "kind": "range", "anchorRowId": "r1", "anchorFieldId": "f1", "rowId": "r2", "fieldId": "f2" }
       }
     },
     {

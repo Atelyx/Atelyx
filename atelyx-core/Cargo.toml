@@ -31,6 +31,8 @@ base64 = "0.22"
 atelyx-plugin-protocol = { path = "../atelyx-plugin-protocol" }
 # 插件安装（plugin_runtime）：zip 解压（仅 deflate；防御见 install.rs）
 zip = { version = "2", default-features = false, features = ["deflate"] }
+# 目录安装按源目录 .gitignore 过滤（git 语义：嵌套规则 / 反选 / `**` / 目录锚定）
+ignore = "0.4"
 # xlsx 不支持的图片格式（webp 等）导出前转 PNG
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp"] }
 # 系统下载/主目录定位（图片下载落盘）

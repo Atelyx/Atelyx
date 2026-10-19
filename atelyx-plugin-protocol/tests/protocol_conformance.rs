@@ -177,12 +177,25 @@ fn method_type_shapes_are_frozen() {
         let value = case["value"].clone();
         let ok = match case["type"].as_str().unwrap_or_default() {
             "PathParams" => frozen_roundtrip::<PathParams>(&value),
+            "TextContent" => frozen_roundtrip::<atelyx_plugin_protocol::method::TextContent>(&value),
+            "BinaryContent" => {
+                frozen_roundtrip::<atelyx_plugin_protocol::method::BinaryContent>(&value)
+            }
+            "WriteTextParams" => {
+                frozen_roundtrip::<atelyx_plugin_protocol::method::WriteTextParams>(&value)
+            }
+            "WriteBinaryParams" => {
+                frozen_roundtrip::<atelyx_plugin_protocol::method::WriteBinaryParams>(&value)
+            }
             "ListResult" => frozen_roundtrip::<ListResult>(&value),
             "SpawnParams" => frozen_roundtrip::<atelyx_plugin_protocol::method::SpawnParams>(&value),
             "ProcessEventParams" => frozen_roundtrip::<ProcessEventParams>(&value),
             "ShowNotificationParams" => frozen_roundtrip::<ShowNotificationParams>(&value),
             "RegisterShortcutParams" => frozen_roundtrip::<RegisterShortcutParams>(&value),
             "TextPayload" => frozen_roundtrip::<TextPayload>(&value),
+            "ClipboardImageResult" => {
+                frozen_roundtrip::<atelyx_plugin_protocol::method::ClipboardImageResult>(&value)
+            }
             "PickFileParams" => frozen_roundtrip::<PickFileParams>(&value),
             "PickedPath" => frozen_roundtrip::<PickedPath>(&value),
             "HttpRequestParams" => frozen_roundtrip::<HttpRequestParams>(&value),

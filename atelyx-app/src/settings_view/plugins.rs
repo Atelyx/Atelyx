@@ -11,8 +11,9 @@ use iced::{border, widget::container::Style, Element, Length, Padding, Task};
 
 use atelyx_core::plugin_runtime::market::{self, MarketSnapshot};
 use atelyx_core::plugin_runtime::{
-    AuditRecord, DialogKind, DialogRequest, HostRequest, InstallOutcome, NotificationLevel,
-    Permission, PluginEvent, PluginRuntime, PluginStatus, PluginSummary,
+    AuditRecord, ClipboardImage, DialogKind, DialogRequest, HostRequest, InstallOutcome,
+    NotificationLevel, Permission, PluginEvent, PluginRuntime, PluginStatus, PluginSummary,
+    MAX_VAULT_BINARY_BYTES,
 };
 
 use crate::settings_view::{card, group_head};
@@ -157,9 +158,14 @@ pub enum PluginsMsg {
     ClipboardWritten { request_id: u64 },
     ClipboardRead { request_id: u64 },
     ClipboardReadDone { request_id: u64, text: Option<String> },
+    /// 剪贴板图片（arboard 在阻塞线程池读，编成 PNG 后 base64 回填）。
+    ClipboardReadImage { request_id: u64 },
+    ClipboardImageDone { request_id: u64, result: Result<Option<ClipboardImage>, String> },
     /// 仓库读写（本地仓库直接落盘；协作空间转发服务端）。`VaultCallDone` 统一回填。
     VaultRead { request_id: u64, path: String },
     VaultWrite { request_id: u64, path: String, content: String },
+    VaultReadBinary { request_id: u64, path: String },
+    VaultWriteBinary { request_id: u64, path: String, bytes: Vec<u8> },
     VaultList { request_id: u64, path: String },
     VaultExists { request_id: u64, path: String },
     VaultCallDone { request_id: u64, result: Result<serde_json::Value, String> },
@@ -243,11 +249,20 @@ pub fn host_requests_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<It
                 HostRequest::ClipboardRead { request_id, .. } => {
                     Message::Plugins(PluginsMsg::ClipboardRead { request_id })
                 }
+                HostRequest::ClipboardReadImage { request_id, .. } => {
+                    Message::Plugins(PluginsMsg::ClipboardReadImage { request_id })
+                }
                 HostRequest::VaultReadText { request_id, path, .. } => {
                     Message::Plugins(PluginsMsg::VaultRead { request_id, path })
                 }
                 HostRequest::VaultWriteText { request_id, path, content, .. } => {
                     Message::Plugins(PluginsMsg::VaultWrite { request_id, path, content })
+                }
+                HostRequest::VaultReadBinary { request_id, path, .. } => {
+                    Message::Plugins(PluginsMsg::VaultReadBinary { request_id, path })
+                }
+                HostRequest::VaultWriteBinary { request_id, path, bytes, .. } => {
+                    Message::Plugins(PluginsMsg::VaultWriteBinary { request_id, path, bytes })
                 }
                 HostRequest::VaultList { request_id, path, .. } => {
                     Message::Plugins(PluginsMsg::VaultList { request_id, path })
@@ -513,6 +528,15 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
                 .resolve_shell_call(request_id, Ok(serde_json::json!({ "text": text })));
             Task::none()
         }
+        PluginsMsg::ClipboardReadImage { request_id } => Task::perform(
+            async move { run_blocking(read_clipboard_image).await },
+            move |result| Message::Plugins(PluginsMsg::ClipboardImageDone { request_id, result }),
+        ),
+        PluginsMsg::ClipboardImageDone { request_id, result } => {
+            let result = result.map(atelyx_core::plugin_runtime::clipboard_image_payload);
+            app.plugins.resolve_shell_call(request_id, result);
+            Task::none()
+        }
         PluginsMsg::VaultRead { request_id, path } => {
             let rel = match tool_path(Some(&path)) {
                 Ok(rel) => rel,
@@ -580,6 +604,86 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
                         async move {
                             client
                                 .put_file_text(&space_id, &rel, &content)
+                                .await
+                                .map(|_| serde_json::json!({}))
+                                .map_err(|e| e.to_string())
+                        },
+                        move |result| Message::Plugins(PluginsMsg::VaultCallDone { request_id, result }),
+                    )
+                }
+            }
+        }
+        PluginsMsg::VaultReadBinary { request_id, path } => {
+            let rel = match tool_path(Some(&path)) {
+                Ok(rel) => rel,
+                Err(e) => return resolve_vault(app, request_id, Err(e)),
+            };
+            match app.repo_kind.clone() {
+                crate::RepoKind::Local => match app.vault.root() {
+                    Ok(root) => Task::perform(
+                        async move {
+                            run_blocking(move || read_vault_binary(&root, &rel))
+                                .await
+                                .map(|bytes| atelyx_core::plugin_runtime::binary_payload(&bytes))
+                        },
+                        move |result| Message::Plugins(PluginsMsg::VaultCallDone { request_id, result }),
+                    ),
+                    Err(e) => resolve_vault(app, request_id, Err(e)),
+                },
+                crate::RepoKind::Space(space) => {
+                    let (client, space_id) = (space.client.clone(), space.space_id.clone());
+                    Task::perform(
+                        async move {
+                            let bytes = client
+                                .get_file_bytes(&space_id, &rel)
+                                .await
+                                .map_err(|e| e.to_string())?;
+                            if bytes.len() > MAX_VAULT_BINARY_BYTES {
+                                return Err(vault_binary_too_large());
+                            }
+                            Ok(atelyx_core::plugin_runtime::binary_payload(&bytes))
+                        },
+                        move |result| Message::Plugins(PluginsMsg::VaultCallDone { request_id, result }),
+                    )
+                }
+            }
+        }
+        PluginsMsg::VaultWriteBinary { request_id, path, bytes } => {
+            let rel = match tool_path(Some(&path)) {
+                Ok(rel) => rel,
+                Err(e) => return resolve_vault(app, request_id, Err(e)),
+            };
+            if let Some(open) = open_file_conflict(app, &rel) {
+                return resolve_vault(
+                    app,
+                    request_id,
+                    Err(format!("文件正在编辑器中打开，拒绝写入：{open}")),
+                );
+            }
+            match app.repo_kind.clone() {
+                crate::RepoKind::Local => match app.vault.root() {
+                    Ok(root) => {
+                        let writes = app.vault.writes.clone();
+                        Task::perform(
+                            async move {
+                                let target =
+                                    run_blocking(move || vault::safe_join(&root, &rel, true)).await?;
+                                writes
+                                    .write_bytes(target, bytes)
+                                    .await
+                                    .map(|_| serde_json::json!({}))
+                            },
+                            move |result| Message::Plugins(PluginsMsg::VaultCallDone { request_id, result }),
+                        )
+                    }
+                    Err(e) => resolve_vault(app, request_id, Err(e)),
+                },
+                crate::RepoKind::Space(space) => {
+                    let (client, space_id) = (space.client.clone(), space.space_id.clone());
+                    Task::perform(
+                        async move {
+                            client
+                                .put_file_bytes(&space_id, &rel, &bytes)
                                 .await
                                 .map(|_| serde_json::json!({}))
                                 .map_err(|e| e.to_string())
@@ -659,7 +763,11 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
         }
         PluginsMsg::TableSnapshot { request_id } => {
             let snapshot: atelyx_core::plugin_runtime::TableSnapshot = match &app.table {
-                Some(session) => atelyx_core::plugin_runtime::table::snapshot(&session.file, &session.data),
+                Some(session) => atelyx_core::plugin_runtime::table::snapshot(
+                    &session.file,
+                    &session.data,
+                    session.view.selection.as_ref(),
+                ),
                 None => atelyx_core::plugin_runtime::TableSnapshot::default(),
             };
             let result = serde_json::to_value(snapshot)
@@ -717,6 +825,52 @@ fn open_file_conflict(app: &App, rel: &str) -> Option<String> {
         .flatten()
         .find(|path| path.replace('\\', "/") == target)
         .map(str::to_string)
+}
+
+/// 读仓库内一个二进制文件（与文本读同一路径校验）。按上限 +1 限量读取：既挡住超限文件，
+/// 也免掉「先查大小再读」之间文件被并发改大的窗口。
+fn read_vault_binary(root: &std::path::Path, rel: &str) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+
+    let target = vault::safe_join(root, rel, false)?;
+    let file = std::fs::File::open(&target)
+        .map_err(|e| format!("读取文件失败（{rel}）：{e}"))?;
+    let mut bytes = Vec::new();
+    file.take((MAX_VAULT_BINARY_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("读取文件失败（{rel}）：{e}"))?;
+    if bytes.len() > MAX_VAULT_BINARY_BYTES {
+        return Err(vault_binary_too_large());
+    }
+    Ok(bytes)
+}
+
+fn vault_binary_too_large() -> String {
+    format!(
+        "文件超过仓库二进制上限（{} MiB），请改用 fs",
+        MAX_VAULT_BINARY_BYTES / (1024 * 1024)
+    )
+}
+
+/// 读系统剪贴板里的图片并编成 PNG（阻塞调用，在任务线程池执行）。像素读取走常驻剪贴板线程
+/// （与写串行化，系统剪贴板同一时刻只能被一个线程打开）；协议侧拿 PNG，插件不处理像素格式；
+/// 剪贴板里没有图片是新常态，按 `None` 回填。
+fn read_clipboard_image() -> Result<Option<ClipboardImage>, String> {
+    use image::ImageEncoder;
+
+    let Some((width, height, rgba)) = crate::image_clipboard::read_image()? else {
+        return Ok(None);
+    };
+    let (width, height) = (width as u32, height as u32);
+    let mut png: Vec<u8> = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut png)
+        .write_image(&rgba, width, height, image::ExtendedColorType::Rgba8)
+        .map_err(|e| format!("编码剪贴板图片失败：{e}"))?;
+    Ok(Some(ClipboardImage {
+        base64: atelyx_core::plugin_runtime::encode_base64(&png),
+        width,
+        height,
+    }))
 }
 
 /// 市场缓存的落盘路径（插件根旁；根不可用 = 不缓存只内存展示）。

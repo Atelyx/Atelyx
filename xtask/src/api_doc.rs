@@ -177,6 +177,8 @@ const SECTIONS: &[Section] = &[
             "method.rs": "AcceleratorParams",
             "method.rs": "ShortcutTriggeredParams",
             "method.rs": "TextPayload",
+            "method.rs": "ClipboardImage",
+            "method.rs": "ClipboardImageResult",
             "method.rs": "PickFileParams",
             "method.rs": "FileFilter",
             "method.rs": "PickDirectoryParams",
@@ -211,6 +213,7 @@ const SECTIONS: &[Section] = &[
         intro: "表格面读写当前打开的表格；真源在宿主会话，插件不得旁路读写 `.atb`。",
         items: items!(
             "method.rs": "TableSnapshot",
+            "method.rs": "TableSelection",
             "method.rs": "TableField",
             "method.rs": "TableRow",
             "method.rs": "TableUpdateCellParams",

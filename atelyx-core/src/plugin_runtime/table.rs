@@ -1,17 +1,24 @@
 //! 表格服务面的纯映射：将宿主表格真源转成协议的只读快照形态。
 //! 只做形状转换，不读写磁盘——写入路径由壳的表格会话与补丁 / 保存链承担。
 
-use atelyx_plugin_protocol::method::{TableField, TableRow, TableSnapshot};
+use atelyx_plugin_protocol::method::{TableField, TableRow, TableSelection, TableSnapshot};
 
+use crate::table_ops::TableSelection as SourceSelection;
 use crate::vault::{TableField as SourceField, TableFile, TableRow as SourceRow};
 
-/// 构建某表格的只读快照：字段只带 id / 名称 / 类型 / 选项，行只带 id / 值集。
-pub fn snapshot(path: &str, file: &TableFile) -> TableSnapshot {
+/// 构建某表格的只读快照：字段带 id / 名称 / 类型 / 选项 / 列宽，行带 id / 值集 / 单元格样式，
+/// 另附用户当前选区（快照要能还原「用户看到的样子」，不只是数据本身）。
+pub fn snapshot(
+    path: &str,
+    file: &TableFile,
+    selection: Option<&SourceSelection>,
+) -> TableSnapshot {
     TableSnapshot {
         open: true,
         path: Some(path.to_string()),
         fields: file.fields.iter().map(field).collect(),
         rows: file.rows.iter().map(row).collect(),
+        selection: selection.map(selection_of),
     }
 }
 
@@ -21,11 +28,37 @@ fn field(source: &SourceField) -> TableField {
         name: source.name.clone(),
         field_type: source.field_type.clone(),
         options: source.options.clone().unwrap_or_default(),
+        width: source.width,
     }
 }
 
 fn row(source: &SourceRow) -> TableRow {
-    TableRow { id: source.id.clone(), values: source.values.clone() }
+    TableRow {
+        id: source.id.clone(),
+        values: source.values.clone(),
+        styles: source.styles.clone(),
+    }
+}
+
+/// 选区形态一一对应（宿主会话的选区就是协议的五形态）。
+fn selection_of(source: &SourceSelection) -> TableSelection {
+    match source {
+        SourceSelection::Cell { row_id, field_id } => TableSelection::Cell {
+            row_id: row_id.clone(),
+            field_id: field_id.clone(),
+        },
+        SourceSelection::Range { anchor_row_id, anchor_field_id, row_id, field_id } => {
+            TableSelection::Range {
+                anchor_row_id: anchor_row_id.clone(),
+                anchor_field_id: anchor_field_id.clone(),
+                row_id: row_id.clone(),
+                field_id: field_id.clone(),
+            }
+        }
+        SourceSelection::Row(row_id) => TableSelection::Row { row_id: row_id.clone() },
+        SourceSelection::Column(field_id) => TableSelection::Column { field_id: field_id.clone() },
+        SourceSelection::All => TableSelection::All,
+    }
 }
 
 #[cfg(test)]
@@ -49,7 +82,12 @@ mod tests {
                 id: "r1".into(),
                 values: serde_json::json!({ "f1": "甲" }).as_object().unwrap().clone(),
                 height: Some(40.0),
-                styles: None,
+                styles: Some(
+                    serde_json::json!({ "f1": { "bold": true } })
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
             }],
             created_at: 0,
             updated_at: 0,
@@ -57,26 +95,66 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_maps_fields_and_rows() {
-        let snapshot = snapshot("a.atb", &table());
+    fn snapshot_maps_fields_rows_and_view_properties() {
+        let selection = SourceSelection::Row("r1".into());
+        let snapshot = snapshot("a.atb", &table(), Some(&selection));
         assert!(snapshot.open);
         assert_eq!(snapshot.path.as_deref(), Some("a.atb"));
         assert_eq!(snapshot.fields.len(), 1);
         assert_eq!(snapshot.fields[0].field_type, "singleSelect");
         assert_eq!(snapshot.fields[0].options, vec!["甲", "乙"]);
+        assert_eq!(snapshot.fields[0].width, Some(180.0));
         assert_eq!(snapshot.rows[0].id, "r1");
         assert_eq!(snapshot.rows[0].values["f1"], "甲");
-        // 视图专属字段（列宽 / 行高）不进快照
+        assert_eq!(snapshot.rows[0].styles.as_ref().unwrap()["f1"]["bold"], true);
+        assert_eq!(snapshot.selection, Some(TableSelection::Row { row_id: "r1".into() }));
+        // 行高是宿主布局参数，不进快照
         let wire = serde_json::to_value(&snapshot).unwrap();
-        assert!(wire["fields"][0].get("width").is_none());
         assert!(wire["rows"][0].get("height").is_none());
+    }
+
+    #[test]
+    fn snapshot_without_selection_stays_empty() {
+        let snapshot = snapshot("a.atb", &table(), None);
+        assert_eq!(snapshot.selection, None);
+        let wire = serde_json::to_value(&snapshot).unwrap();
+        assert!(wire.get("selection").is_none(), "无选区时字段缺省");
+    }
+
+    #[test]
+    fn selection_shapes_are_mapped_one_to_one() {
+        let cases = [
+            (
+                SourceSelection::Cell { row_id: "r1".into(), field_id: "f1".into() },
+                TableSelection::Cell { row_id: "r1".into(), field_id: "f1".into() },
+            ),
+            (
+                SourceSelection::Range {
+                    anchor_row_id: "r1".into(),
+                    anchor_field_id: "f1".into(),
+                    row_id: "r2".into(),
+                    field_id: "f2".into(),
+                },
+                TableSelection::Range {
+                    anchor_row_id: "r1".into(),
+                    anchor_field_id: "f1".into(),
+                    row_id: "r2".into(),
+                    field_id: "f2".into(),
+                },
+            ),
+            (SourceSelection::Column("f1".into()), TableSelection::Column { field_id: "f1".into() }),
+            (SourceSelection::All, TableSelection::All),
+        ];
+        for (source, expected) in cases {
+            assert_eq!(selection_of(&source), expected);
+        }
     }
 
     #[test]
     fn snapshot_carries_empty_options_for_plain_fields() {
         let mut file = table();
         file.fields[0].options = None;
-        let snapshot = snapshot("a.atb", &file);
+        let snapshot = snapshot("a.atb", &file, None);
         assert!(snapshot.fields[0].options.is_empty());
     }
 }

@@ -319,6 +319,24 @@ impl Context {
         self.call_unit(method::vault::WRITE_TEXT, &params).await
     }
 
+    /// 读仓库内二进制文件（与文本读写同一出口；单次上限由宿主设定，超限回可读错误）。
+    pub async fn vault_read_binary(&self, path: &str) -> Result<Vec<u8>, RpcError> {
+        let result: BinaryContent =
+            self.call_typed(method::vault::READ_BINARY, &PathParams { path: path.into() }).await?;
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD
+            .decode(result.base64)
+            .map_err(|e| RpcError::failed(format!("vault.readBinary 应答 base64 解码失败：{e}")))
+    }
+
+    /// 写仓库内二进制文件（父目录自动创建；正在编辑器打开的文件会被宿主拒写）。
+    pub async fn vault_write_binary(&self, path: &str, bytes: &[u8]) -> Result<(), RpcError> {
+        use base64::Engine;
+        let base64_text = base64::engine::general_purpose::STANDARD.encode(bytes);
+        let params = WriteBinaryParams { path: path.into(), base64: base64_text };
+        self.call_unit(method::vault::WRITE_BINARY, &params).await
+    }
+
     pub async fn vault_list(&self, path: &str) -> Result<Vec<FsEntry>, RpcError> {
         let result: ListResult =
             self.call_typed(method::vault::LIST, &PathParams { path: path.into() }).await?;
@@ -434,6 +452,13 @@ impl Context {
     pub async fn clipboard_read(&self) -> Result<String, RpcError> {
         let result: TextPayload = self.call_null(method::clipboard::READ_TEXT).await?;
         Ok(result.text)
+    }
+
+    /// 读剪贴板图片（PNG 字节在 `base64` 字段，需自行解码；`width` / `height` 为像素尺寸）；
+    /// 剪贴板里没有图片 = `None`。
+    pub async fn clipboard_read_image(&self) -> Result<Option<ClipboardImage>, RpcError> {
+        let result: ClipboardImageResult = self.call_null(method::clipboard::READ_IMAGE).await?;
+        Ok(result.image)
     }
 
     /// 选择文件：等待用户交互，不设等待上限（取消对话框会立即返回 `None`）。

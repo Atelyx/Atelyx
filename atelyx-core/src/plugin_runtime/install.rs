@@ -1,13 +1,12 @@
-//! 插件安装 / 卸载 / 上一代轮换。目录安装与 zip 安装都先落到临时目录、校验通过后再落位：
-//! 暂存与校验失败不动旧版本；轮换后的落位失败按回滚恢复旧内容（插件数据始终保留）。
-//! 安装完成只落位内容，**不置启用标记**（是否启用由用户在设置页决定）；zip 解压带路径穿越、
-//! 符号链接、压缩比与总量四道防御。
+//! 插件安装 / 卸载 / 上一代轮换：内容先落临时目录、校验通过后再落位，轮换失败按回滚恢复旧内容。
+//! 安装完成只落位内容、**不置启用标记**（是否启用由用户决定）；zip 解压与目录安装各有防御（见下）。
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use atelyx_plugin_protocol::manifest::{Manifest, MANIFEST_FILE};
+use ignore::WalkBuilder;
 
 use super::layout;
 use super::manifest;
@@ -16,26 +15,30 @@ use super::manifest;
 const MAX_ENTRY_RATIO: u64 = 100;
 /// 压缩比判定的最小原始体积：小文件天然高比值，低于此值不参与比值判定。
 const RATIO_MIN_SIZE: u64 = 64 * 1024;
-/// 解压总量上限（字节）。绝对上限只作兜底，真正拦炸弹的是压缩比。
+/// 安装内容总量上限（字节）。zip 与目录两条链同口径。
 const MAX_TOTAL_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 /// 删除目录的重试次数与间隔：从容忍「刚被终止的进程尚未释放文件占用」的短暂失败。
 const REMOVE_RETRY_ATTEMPTS: usize = 10;
 const REMOVE_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 /// 目录安装的复制层级上限（正常插件目录远低于此）。
 const MAX_COPY_DEPTH: usize = 32;
+/// 版本库元数据目录名：git 自己不跟踪它，`.gitignore` 也不会列它，按内容口径恒跳过。
+const GIT_DIR: &str = ".git";
 
 /// 从本地目录安装：目录根须含合法 `plugin.json`。返回安装的插件 id。
 ///
 /// 记下源目录绝对路径（`source`），供「从来源更新」再次安装；内容先落临时目录，校验与入口
-/// 权限就位后才动旧版本。
+/// 权限就位后才动旧版本。发布内容按源目录的 `.gitignore` 取（见 [`copy_published_tree`]）。
 pub(crate) fn install_from_dir(root: &Path, src: &Path) -> Result<String, String> {
     let manifest = manifest::read_manifest(src)?;
     let id = manifest.id.clone();
     let source = source_outside_root(root, src)?;
     let temp = layout::temp_dir(root);
     let staged = (|| -> Result<(), String> {
-        copy_tree(src, &temp)?;
+        precheck_source(src)?;
+        copy_published_tree(src, &temp)?;
         reject_reserved(&temp)?;
+        require_staged_entry(&temp, &manifest)?;
         grant_entry_execute(&temp, &manifest)?;
         // 来源记录写进暂存内容：与这一代内容一起落位，换代时随旧内容一起轮换掉
         let recorded = source.to_string_lossy();
@@ -240,33 +243,116 @@ fn locate_plugin_root(temp: &Path) -> Result<PathBuf, String> {
     }
 }
 
-/// 递归复制目录；符号链接拒收（指向何处不可控，跟随复制会越出源目录）。
-fn copy_tree(src: &Path, dest: &Path) -> Result<(), String> {
-    copy_tree_inner(src, dest, 0)
-}
-
-/// 层级上限：目录联接（Windows junction 不被 `is_symlink` 识别）可以指回安装根，跟随复制会无限
-/// 加深直到路径超长或磁盘写满；超过上限即拒收，不赌源目录里没有环。
-fn copy_tree_inner(src: &Path, dest: &Path, depth: usize) -> Result<(), String> {
-    if depth > MAX_COPY_DEPTH {
-        return Err(format!("源目录层级过深，拒收：{}", src.display()));
-    }
-    std::fs::create_dir_all(dest).map_err(|e| format!("创建目录失败：{e}"))?;
-    let entries = std::fs::read_dir(src).map_err(|e| format!("读取目录失败：{e}"))?;
-    for entry in entries {
-        let entry = entry.map_err(|e| format!("读取目录项失败：{e}"))?;
-        let ty = entry.file_type().map_err(|e| format!("读取目录项类型失败：{e}"))?;
-        let to = dest.join(entry.file_name());
-        if ty.is_symlink() {
-            return Err(format!("源目录含符号链接，拒收：{}", entry.path().display()));
-        }
-        if ty.is_dir() {
-            copy_tree_inner(&entry.path(), &to, depth + 1)?;
-        } else if ty.is_file() {
-            std::fs::copy(entry.path(), &to).map_err(|e| format!("复制文件失败：{e}"))?;
-        }
+/// 目录安装的发布口径：按源目录的 `.gitignore` 取内容。
+///
+/// 只认源目录内的 `.gitignore`（git 语义：嵌套规则、`!` 反选、`**`、目录锚定）——全局 excludes
+/// 与 `.git/info/exclude` 属于本机配置，读了会让同一目录在不同机器上装出不同内容；`require_git(false)`
+/// 让源目录不在 git 仓库里时规则照样生效（开发目录常在仓库内，但发布目录不一定）。`.git` 恒跳过。
+fn walk_published(
+    src: &Path,
+    mut visit: impl FnMut(&ignore::DirEntry) -> Result<(), String>,
+) -> Result<(), String> {
+    let mut builder = WalkBuilder::new(src);
+    builder
+        .hidden(false)
+        .parents(false)
+        .ignore(false)
+        .git_ignore(true)
+        .git_global(false)
+        .git_exclude(false)
+        .require_git(false)
+        .follow_links(false);
+    builder.filter_entry(|entry| entry.file_name() != std::ffi::OsStr::new(GIT_DIR));
+    for entry in builder.build() {
+        let entry = entry.map_err(|e| format!("读取源目录失败：{e}"))?;
+        visit(&entry)?;
     }
     Ok(())
+}
+
+/// 复制前预检：符号链接拒收、层级设上限、总量先统计（不先拷几百 MB 才发现超限）。
+///
+/// 层级上限防目录联接（Windows junction 不被 `is_symlink` 识别）指回安装根造成的无限加深。
+fn precheck_source(src: &Path) -> Result<(), String> {
+    let mut total: u64 = 0;
+    walk_published(src, |entry| {
+        if entry.depth() == 0 {
+            return Ok(());
+        }
+        let path = entry.path();
+        if entry.depth() > MAX_COPY_DEPTH {
+            return Err(format!("源目录层级过深，拒收：{}", path.display()));
+        }
+        let Some(ty) = entry.file_type() else { return Ok(()) };
+        if ty.is_symlink() {
+            return Err(format!("源目录含符号链接，拒收：{}", path.display()));
+        }
+        if ty.is_file() {
+            let size = entry
+                .metadata()
+                .map_err(|e| format!("读取文件信息失败（{}）：{e}", path.display()))?
+                .len();
+            total = total
+                .checked_add(size)
+                .ok_or_else(|| "源目录总量溢出".to_string())?;
+            if total > MAX_TOTAL_BYTES {
+                return Err(source_total_exceeded());
+            }
+        }
+        Ok(())
+    })
+}
+
+/// 按 [`walk_published`] 的口径把源目录复制进 `dest`（目录结构保真，空目录一并建立）。
+fn copy_published_tree(src: &Path, dest: &Path) -> Result<(), String> {
+    let mut written: u64 = 0;
+    walk_published(src, |entry| {
+        if entry.depth() == 0 {
+            return Ok(());
+        }
+        let path = entry.path();
+        if entry.depth() > MAX_COPY_DEPTH {
+            return Err(format!("源目录层级过深，拒收：{}", path.display()));
+        }
+        let rel = path
+            .strip_prefix(src)
+            .map_err(|_| format!("源目录路径越界：{}", path.display()))?;
+        let to = dest.join(rel);
+        let Some(ty) = entry.file_type() else { return Ok(()) };
+        // 预检与复制是两次遍历，其间目录可能被改动：复制时按同一口径再判一次
+        if ty.is_symlink() {
+            return Err(format!("源目录含符号链接，拒收：{}", path.display()));
+        }
+        if ty.is_dir() {
+            std::fs::create_dir_all(&to).map_err(|e| format!("创建目录失败：{e}"))?;
+        } else if ty.is_file() {
+            if let Some(parent) = to.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败：{e}"))?;
+            }
+            let size = std::fs::copy(path, &to)
+                .map_err(|e| format!("复制文件失败（{}）：{e}", path.display()))?;
+            written = written
+                .checked_add(size)
+                .ok_or_else(|| "源目录总量溢出".to_string())?;
+            if written > MAX_TOTAL_BYTES {
+                return Err(source_total_exceeded());
+            }
+        }
+        Ok(())
+    })
+}
+
+/// 入口必须真的落在发布内容里：入口写了却被 `.gitignore` 排除时，装了也起不来，当场可读拒绝。
+fn require_staged_entry(staged: &Path, manifest: &Manifest) -> Result<(), String> {
+    let Some(entry) = manifest.entry.for_current_platform() else {
+        return Ok(());
+    };
+    if staged.join(entry).is_file() {
+        return Ok(());
+    }
+    Err(format!(
+        "入口文件不在安装内容里：{entry}（检查源目录的 .gitignore 是否把它排除了）"
+    ))
 }
 
 /// 解压 zip：先按中央目录声明做路径穿越 / 压缩比 / 总量预检，再逐条解压并实计数兜底
@@ -342,6 +428,13 @@ fn precheck(archive: &mut zip::ZipArchive<std::fs::File>) -> Result<(), String> 
 fn total_exceeded() -> String {
     format!(
         "解压总量超过上限（{} GiB），拒收",
+        MAX_TOTAL_BYTES / (1024 * 1024 * 1024)
+    )
+}
+
+fn source_total_exceeded() -> String {
+    format!(
+        "源目录内容超过总量上限（{} GiB），拒收",
         MAX_TOTAL_BYTES / (1024 * 1024 * 1024)
     )
 }
@@ -460,6 +553,67 @@ mod tests {
             assert!(safe_rel_path(bad).is_err(), "应拒绝：{bad}");
         }
         assert_eq!(safe_rel_path("a/b/c.txt").unwrap(), PathBuf::from("a/b/c.txt"));
+    }
+
+    #[test]
+    fn dir_install_honors_gitignore_and_skips_git_dir() {
+        let tmp = TempDir::new("plugin-install-gitignore");
+        let root = plugin_root(&tmp);
+        let src = tmp.join("src");
+        make_plugin(&src, "com.example.demo");
+        std::fs::write(src.join(".gitignore"), "target/\n*.log\n").unwrap();
+        std::fs::write(src.join("README.md"), "docs").unwrap();
+        std::fs::create_dir_all(src.join("target")).unwrap();
+        std::fs::write(src.join("target").join("junk.bin"), "build").unwrap();
+        std::fs::write(src.join("run.log"), "log").unwrap();
+        std::fs::create_dir_all(src.join("sub")).unwrap();
+        std::fs::write(src.join("sub").join(".gitignore"), "secret.txt\n").unwrap();
+        std::fs::write(src.join("sub").join("secret.txt"), "hidden").unwrap();
+        std::fs::write(src.join("sub").join("public.txt"), "shown").unwrap();
+        std::fs::create_dir_all(src.join(".git")).unwrap();
+        std::fs::write(src.join(".git").join("config"), "meta").unwrap();
+
+        let id = install_from_dir(&root, &src).expect("目录安装应成功");
+        let installed = layout::plugin_dir(&root, &id);
+        assert!(installed.join("README.md").is_file(), "未忽略的文件照常安装");
+        assert!(!installed.join("target").exists(), "被忽略的目录不拷入");
+        assert!(!installed.join("run.log").exists(), "被忽略的文件不拷入");
+        assert!(!installed.join("sub").join("secret.txt").exists(), "嵌套 .gitignore 生效");
+        assert!(installed.join("sub").join("public.txt").is_file());
+        assert!(!installed.join(".git").exists(), "版本库目录恒跳过");
+    }
+
+    #[test]
+    fn dir_install_rejects_entry_excluded_by_gitignore() {
+        let tmp = TempDir::new("plugin-install-entry-ignored");
+        let root = plugin_root(&tmp);
+        let src = tmp.join("src");
+        make_plugin(&src, "com.example.demo");
+        std::fs::write(src.join(".gitignore"), format!("{}\n", entry_name())).unwrap();
+
+        let err = install_from_dir(&root, &src).expect_err("入口被排除应拒收");
+        assert!(err.contains("入口文件不在安装内容里"), "{err}");
+        assert!(!layout::plugin_dir(&root, "com.example.demo").exists(), "拒收不动安装根");
+    }
+
+    #[test]
+    fn dir_install_rejects_source_with_symlink() {
+        let tmp = TempDir::new("plugin-install-symlink");
+        let root = plugin_root(&tmp);
+        let src = tmp.join("src");
+        make_plugin(&src, "com.example.demo");
+        std::fs::write(src.join("README.md"), "docs").unwrap();
+        let link = src.join("escape.txt");
+        // 无符号链接权限的环境（Windows 非管理员 / 无开发者模式）创建会失败：此时无事可验证
+        #[cfg(unix)]
+        let created = std::os::unix::fs::symlink(tmp.join("outside.txt"), &link).is_ok();
+        #[cfg(windows)]
+        let created = std::os::windows::fs::symlink_file(tmp.join("outside.txt"), &link).is_ok();
+        if !created {
+            return;
+        }
+        let err = install_from_dir(&root, &src).expect_err("源目录含符号链接应被拒");
+        assert!(err.contains("符号链接"), "{err}");
     }
 
     #[test]
@@ -710,17 +864,5 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o111, 0o111, "入口应具备可执行位：{mode:o}");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn dir_install_rejects_symlink() {
-        let tmp = TempDir::new("plugin-install-symlink");
-        let root = plugin_root(&tmp);
-        let src = tmp.join("src");
-        make_plugin(&src, "com.example.demo");
-        std::os::unix::fs::symlink("/etc/hosts", src.join("escape")).unwrap();
-        let err = install_from_dir(&root, &src).expect_err("源目录含符号链接应被拒");
-        assert!(err.contains("符号链接"), "{err}");
     }
 }

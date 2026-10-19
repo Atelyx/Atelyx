@@ -583,7 +583,12 @@ pub struct PluginWindowActive {
     pub plugin_id: String,
     /// 插件声明的窗口 id（= 该窗口面的 surfaceId）。
     pub window_key: String,
+    /// 窗口标题（`window.open` 声明），OS 标题栏按它取。
+    pub title: String,
     pub hide_on_blur: bool,
+    /// 插件已请求关闭、OS 窗口尚未销毁：同 id 可立即重新开窗，销毁事件到达时按是否已有新窗
+    /// 决定要不要通知插件（见 [`on_plugin_window_closed`]）。
+    pub closing: bool,
 }
 
 /// 插件接管请求：应用到当前聚焦窗口。贡献未注册 / 目标不可接管（插件窗口 / 已关闭窗口 /
@@ -666,8 +671,10 @@ pub fn exit_takeover(app: &mut App, os_id: window::Id) -> Task<Message> {
     refresh_projection(app)
 }
 
-/// 插件开窗请求：校验后建 OS 窗口（重复 id 以可读原因拒绝；窗口参数声明尺寸 / 置顶 /
+/// 插件开窗请求：校验后建 OS 窗口（重复 id 以可读原因拒绝；窗口参数声明标题 / 尺寸 / 置顶 /
 /// 不进任务栏 / 失焦收起）。`window::open` 返回的 OS id 即壳侧映射键。
+///
+/// 关闭在途的同 id 窗口不算重复：插件关窗后可以立刻重开，不必等 OS 销毁完成。
 pub fn on_window_open(
     app: &mut App,
     request_id: u64,
@@ -677,7 +684,7 @@ pub fn on_window_open(
     let dup = app
         .plugin_windows
         .values()
-        .any(|w| w.plugin_id == plugin_id && w.window_key == params.id);
+        .any(|w| w.plugin_id == plugin_id && w.window_key == params.id && !w.closing);
     if dup {
         app.plugins
             .resolve_ui_call(request_id, Err(format!("窗口 id 已存在：{}", params.id)));
@@ -704,7 +711,9 @@ pub fn on_window_open(
         PluginWindowActive {
             plugin_id: plugin_id.clone(),
             window_key: params.id.clone(),
+            title: params.title.clone(),
             hide_on_blur,
+            closing: false,
         },
     );
     app.plugins.resolve_ui_call(request_id, Ok(()));
@@ -721,17 +730,34 @@ pub fn on_window_open(
         .chain(refresh_projection(app))
 }
 
-/// 插件请求关闭自己的一个窗口。
+/// 插件请求关闭自己的一个窗口。应答语义 = 关闭已受理（OS 窗口随后销毁），插件可立即用同 id
+/// 重新开窗；重复关闭同一窗口是幂等成功。
 pub fn on_window_close(app: &mut App, request_id: u64, plugin_id: String, window_key: String) -> Task<Message> {
-    let found = app
-        .plugin_windows
-        .iter()
-        .find(|(_, w)| w.plugin_id == plugin_id && w.window_key == window_key)
-        .map(|(os, _)| *os);
-    match found {
+    // 只找还活着的条目：关闭在途的旧窗不可再当目标（否则回执了「已受理」却关不掉新窗）
+    let mut live: Option<window::Id> = None;
+    let mut closing_only = false;
+    for (os, w) in &app.plugin_windows {
+        if w.plugin_id != plugin_id || w.window_key != window_key {
+            continue;
+        }
+        if w.closing {
+            closing_only = true;
+        } else {
+            live = Some(*os);
+        }
+    }
+    match live {
         Some(os_id) => {
             app.plugins.resolve_ui_call(request_id, Ok(()));
+            if let Some(entry) = app.plugin_windows.get_mut(&os_id) {
+                entry.closing = true;
+            }
             window::close(os_id)
+        }
+        // 全部条目都已在途：这次关闭无事可做，按幂等成功回执
+        None if closing_only => {
+            app.plugins.resolve_ui_call(request_id, Ok(()));
+            Task::none()
         }
         None => {
             app.plugins
@@ -741,7 +767,9 @@ pub fn on_window_close(app: &mut App, request_id: u64, plugin_id: String, window
     }
 }
 
-/// OS 窗口已关闭（用户关闭插件窗口）：摘记账、撤投影并发 `host:surface.detached`（`host:window.closed` 未接线）；
+/// OS 窗口已关闭（用户关闭或插件请求关闭的窗口真正销毁）：摘记账。同 id 还有其他条目时只摘记账
+/// （面仍挂着，不发卸下通知），否则发 `host:surface.detached` 并清节点态。用户关窗（条目非
+/// 关闭在途）另发 `host:window.closed`——包括「同 id 的旧窗还在途、用户关掉最后一个活窗」的序列。
 /// 若该窗口在接管中（不可达路径，防御性清理）一并摘除接管条目。
 pub fn on_plugin_window_closed(app: &mut App, os_id: window::Id) -> Task<Message> {
     app.plugin_takeovers.remove(&os_id);
@@ -751,9 +779,23 @@ pub fn on_plugin_window_closed(app: &mut App, os_id: window::Id) -> Task<Message
     let Some(entry) = app.plugin_windows.remove(&os_id) else {
         return refresh_projection(app);
     };
-    app.plugins
-        .notify_surface_detached(&entry.plugin_id, &entry.window_key);
-    drop_node_state(app, &entry.plugin_id, &entry.window_key);
+    let mut any_elsewhere = false;
+    let mut live_elsewhere = false;
+    for w in app.plugin_windows.values() {
+        if w.plugin_id == entry.plugin_id && w.window_key == entry.window_key {
+            any_elsewhere = true;
+            live_elsewhere |= !w.closing;
+        }
+    }
+    if !entry.closing && !live_elsewhere {
+        // 用户关窗才发「窗口没了」：插件自己请求的关闭不必回报（它知道，且关闭回执已受理）
+        app.plugins.notify_window_closed(&entry.plugin_id, &entry.window_key);
+    }
+    if !any_elsewhere {
+        app.plugins
+            .notify_surface_detached(&entry.plugin_id, &entry.window_key);
+        drop_node_state(app, &entry.plugin_id, &entry.window_key);
+    }
     refresh_projection(app)
 }
 

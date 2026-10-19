@@ -30,11 +30,15 @@ struct Owners {
 }
 
 impl Owners {
-    /// 登记归属：`Ok(true)` = 新增，`Ok(false)` = 本插件重复注册（幂等），`Err` = 已被其他插件占用。
+    /// 登记归属：`Ok(true)` = 新增，`Ok(false)` = 本插件重复注册（幂等，登记串更新为这一次的写法），
+    /// `Err` = 已被其他插件占用。触发上报的是登记串，故同一组键换写法重注册后必须报最新串。
     fn acquire(&mut self, hotkey: HotKey, accelerator: &str, plugin_id: &str) -> Result<bool, String> {
-        if let Some(existing) = self.by_id.get(&hotkey.id()) {
+        if let Some(existing) = self.by_id.get_mut(&hotkey.id()) {
             if existing.plugin_id != plugin_id {
                 return Err(format!("快捷键 {accelerator} 已被插件 {} 注册", existing.plugin_id));
+            }
+            if existing.accelerator != accelerator {
+                existing.accelerator = accelerator.to_string();
             }
             return Ok(false);
         }
@@ -153,8 +157,8 @@ impl Registrar {
     }
 
     /// 注册全局快捷键（归属插件仅用于占用仲裁与随插件整体释放）。
-    /// 同插件重复注册幂等成功；被其他插件占用、格式非法或 OS 注册失败（被系统 / 其他应用占用）
-    /// 均返回可读错误。
+    /// 同插件重复注册幂等成功且登记串取最新一次；被其他插件占用、格式非法或 OS 注册失败
+    /// （被系统 / 其他应用占用）均返回可读错误。
     pub(crate) fn register(&self, plugin_id: &str, accelerator: &str) -> Result<(), String> {
         if let Some(reason) = &self.unavailable {
             return Err(reason.clone());
@@ -422,8 +426,9 @@ mod tests {
         let mut owners = Owners::default();
         let key = hotkey("Shift+Alt+E");
         assert!(owners.acquire(key, "Shift+Alt+E", "com.a.one").unwrap(), "首次登记");
-        // 同插件换一种书写（同 id）重复注册：幂等，不是新条目
+        // 同插件换一种书写（同 id）重复注册：幂等，不是新条目，但登记串更新为最新写法
         assert!(!owners.acquire(hotkey("Alt+Shift+E"), "Alt+Shift+E", "com.a.one").unwrap());
+        assert_eq!(owners.get(key.id()).unwrap().accelerator, "Alt+Shift+E");
         // 其他插件来抢：可读拒绝
         let err = owners.acquire(key, "Shift+Alt+E", "com.a.two").unwrap_err();
         assert!(err.contains("com.a.one"), "{err}");

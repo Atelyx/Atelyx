@@ -6513,6 +6513,10 @@ impl App {
         if self.main_id == Some(id) {
             return "Atelyx".into();
         }
+        // 插件窗口标题 = 插件在 window.open 声明的 title
+        if let Some(entry) = self.plugin_windows.get(&id) {
+            return entry.title.clone();
+        }
         // 撕裂窗口标题 = 激活视图名
         let Some(model_id) = self.detached_os.get(&id) else { return "Atelyx".into() };
         self.ui
