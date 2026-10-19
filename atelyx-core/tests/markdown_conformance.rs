@@ -1,7 +1,7 @@
 //! Markdown 内核对拍：快照（`fixtures/markdown/parse.json`）= 唯一期望源。
 //!
-//! 偏移空间：快照的 from/to 为 UTF-16 单位，本测试按 source 逐字映射转换为
-//! Rust 字节偏移后再比较；Rust 解析器全程使用字节偏移。
+//! 快照里的 from/to 是字节偏移（与解析器同一口径）；语义变更被确认为预期后，
+//! 用 `cargo run -p xtask -- fixtures` 重生成期望值，语料与选项保持不动。
 
 use serde_json::Value;
 use std::fs;
@@ -9,48 +9,6 @@ use std::path::PathBuf;
 
 fn fixture_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures/markdown/parse.json")
-}
-
-/// 快照 JSON 里承载源偏移的字段名。
-const OFFSET_FIELDS: [&str; 4] = ["from", "to", "contentFrom", "contentTo"];
-
-/// 构建 UTF-16 单位下标 → 字节偏移映射（含末位哨兵）。
-fn utf16_to_byte_map(source: &str) -> Vec<usize> {
-    let mut map = Vec::with_capacity(source.chars().count() + 1 + 1);
-    let mut byte = 0usize;
-    for ch in source.chars() {
-        map.push(byte);
-        byte += ch.len_utf8();
-        if (ch as u32) > 0xFFFF {
-            // 代理对：UTF-16 占 2 单位，补一个相同映射
-            map.push(byte);
-        }
-    }
-    map.push(byte);
-    map
-}
-
-/// 递归把 expected 里的偏移字段从 UTF-16 单位转换为字节偏移。
-fn convert_offsets(value: &mut Value, map: &[usize]) {
-    match value {
-        Value::Object(obj) => {
-            for (k, v) in obj.iter_mut() {
-                if OFFSET_FIELDS.contains(&k.as_str()) {
-                    if let Some(u16idx) = v.as_u64() {
-                        *v = Value::from(map[u16idx as usize]);
-                    }
-                } else {
-                    convert_offsets(v, map);
-                }
-            }
-        }
-        Value::Array(items) => {
-            for v in items.iter_mut() {
-                convert_offsets(v, map);
-            }
-        }
-        _ => {}
-    }
 }
 
 fn snapshot_cases() -> Vec<(String, Value)> {
@@ -121,9 +79,7 @@ fn truncate(v: &Value) -> String {
 fn parse_conformance() {
     for (name, value) in snapshot_cases() {
         let source = value["source"].as_str().expect("快照缺 source");
-        let map = utf16_to_byte_map(source);
-        let mut expected = value["expected"].clone();
-        convert_offsets(&mut expected, &map);
+        let expected = value["expected"].clone();
 
         let mentions: Vec<atelyx_core::markdown::MentionCandidate> =
             serde_json::from_value(value["mentions"].clone()).unwrap_or_default();
@@ -179,12 +135,9 @@ fn indented_atx_heading_does_not_panic() {
 
 #[test]
 fn snapshot_contract_roundtrip() {
-    // serde 契约自检：快照 → core 类型 → 回 JSON（UTF-16 转换后）与原快照逐值相等。
+    // serde 契约自检：快照 → core 类型 → 回 JSON 与原快照逐值相等。
     for (name, value) in snapshot_cases() {
-        let source = value["source"].as_str().expect("快照缺 source");
-        let map = utf16_to_byte_map(source);
-        let mut expected = value["expected"].clone();
-        convert_offsets(&mut expected, &map);
+        let expected = value["expected"].clone();
         let doc: atelyx_core::markdown::MarkdownDocument =
             serde_json::from_value(expected.clone())
                 .unwrap_or_else(|e| panic!("{name}: 快照与 core 类型不兼容: {e}"));

@@ -422,37 +422,37 @@
             "kind": "heading",
             "level": 1,
             "from": 0,
-            "to": 21,
+            "to": 45,
             "inline": [
               {
                 "kind": "text",
                 "from": 2,
-                "to": 7,
+                "to": 15,
                 "text": "中文标题 "
               },
               {
                 "kind": "highlight",
-                "from": 7,
-                "to": 15,
+                "from": 15,
+                "to": 31,
                 "children": [
                   {
                     "kind": "text",
-                    "from": 9,
-                    "to": 13,
+                    "from": 17,
+                    "to": 29,
                     "text": "中文高亮"
                   }
                 ]
               },
               {
                 "kind": "text",
-                "from": 15,
-                "to": 16,
+                "from": 31,
+                "to": 32,
                 "text": " "
               },
               {
                 "kind": "tag",
-                "from": 16,
-                "to": 21,
+                "from": 32,
+                "to": 45,
                 "tag": "中文标签"
               }
             ]
@@ -776,12 +776,12 @@
           {
             "kind": "paragraph",
             "from": 0,
-            "to": 7,
+            "to": 15,
             "inline": [
               {
                 "kind": "mention",
                 "from": 0,
-                "to": 7,
+                "to": 15,
                 "key": "f1",
                 "label": "示例\"标题\"",
                 "char": "#"
@@ -807,12 +807,12 @@
           {
             "kind": "paragraph",
             "from": 0,
-            "to": 5,
+            "to": 13,
             "inline": [
               {
                 "kind": "tag",
                 "from": 0,
-                "to": 5,
+                "to": 13,
                 "tag": "示例标题"
               }
             ]
@@ -1247,15 +1247,15 @@
           {
             "kind": "table",
             "from": 0,
-            "to": 36,
+            "to": 44,
             "header": [
               {
                 "from": 2,
-                "to": 3
+                "to": 5
               },
               {
-                "from": 6,
-                "to": 8
+                "from": 8,
+                "to": 14
               }
             ],
             "aligns": [
@@ -1265,12 +1265,12 @@
             "rows": [
               [
                 {
-                  "from": 28,
-                  "to": 29
+                  "from": 34,
+                  "to": 35
                 },
                 {
-                  "from": 32,
-                  "to": 33
+                  "from": 38,
+                  "to": 41
                 }
               ]
             ]
@@ -1289,15 +1289,15 @@
           {
             "kind": "table",
             "from": 0,
-            "to": 39,
+            "to": 47,
             "header": [
               {
                 "from": 2,
-                "to": 3
+                "to": 5
               },
               {
-                "from": 6,
-                "to": 8
+                "from": 8,
+                "to": 14
               }
             ],
             "aligns": [
@@ -1307,12 +1307,12 @@
             "rows": [
               [
                 {
-                  "from": 30,
-                  "to": 31
+                  "from": 36,
+                  "to": 37
                 },
                 {
-                  "from": 34,
-                  "to": 35
+                  "from": 40,
+                  "to": 43
                 }
               ]
             ]
@@ -2659,31 +2659,31 @@
           {
             "kind": "paragraph",
             "from": 0,
-            "to": 13,
+            "to": 29,
             "inline": [
               {
                 "kind": "strong",
                 "from": 0,
-                "to": 6,
+                "to": 10,
                 "children": [
                   {
                     "kind": "text",
                     "from": 2,
-                    "to": 4,
+                    "to": 8,
                     "text": "中文"
                   }
                 ]
               },
               {
                 "kind": "text",
-                "from": 6,
-                "to": 10,
+                "from": 10,
+                "to": 22,
                 "text": "「引号」"
               },
               {
                 "kind": "tag",
-                "from": 10,
-                "to": 13,
+                "from": 22,
+                "to": 29,
                 "tag": "标签"
               }
             ]
@@ -2806,11 +2806,11 @@
             "kind": "list",
             "ordered": false,
             "from": 0,
-            "to": 23,
+            "to": 35,
             "items": [
               {
                 "from": 0,
-                "to": 23,
+                "to": 35,
                 "task": false,
                 "checked": false,
                 "children": [
@@ -2818,12 +2818,12 @@
                     "kind": "heading",
                     "level": 1,
                     "from": 2,
-                    "to": 6,
+                    "to": 10,
                     "inline": [
                       {
                         "kind": "text",
                         "from": 4,
-                        "to": 6,
+                        "to": 10,
                         "text": "顶层"
                       }
                     ]
@@ -2831,25 +2831,25 @@
                   {
                     "kind": "list",
                     "ordered": false,
-                    "from": 8,
-                    "to": 23,
+                    "from": 12,
+                    "to": 35,
                     "items": [
                       {
-                        "from": 8,
-                        "to": 23,
+                        "from": 12,
+                        "to": 35,
                         "task": false,
                         "checked": false,
                         "children": [
                           {
                             "kind": "heading",
                             "level": 2,
-                            "from": 10,
-                            "to": 15,
+                            "from": 14,
+                            "to": 23,
                             "inline": [
                               {
                                 "kind": "text",
-                                "from": 13,
-                                "to": 15,
+                                "from": 17,
+                                "to": 23,
                                 "text": "二级"
                               }
                             ]
@@ -2857,13 +2857,13 @@
                           {
                             "kind": "heading",
                             "level": 1,
-                            "from": 19,
-                            "to": 23,
+                            "from": 27,
+                            "to": 35,
                             "inline": [
                               {
                                 "kind": "text",
-                                "from": 21,
-                                "to": 23,
+                                "from": 29,
+                                "to": 35,
                                 "text": "三级"
                               }
                             ]
@@ -3416,18 +3416,18 @@
           {
             "kind": "blockquote",
             "from": 0,
-            "to": 9,
+            "to": 13,
             "callout": null,
             "children": [
               {
                 "kind": "paragraph",
                 "from": 2,
-                "to": 9,
+                "to": 13,
                 "inline": [
                   {
                     "kind": "text",
                     "from": 2,
-                    "to": 9,
+                    "to": 13,
                     "text": "[!中文] x"
                   }
                 ]

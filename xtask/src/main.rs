@@ -1,7 +1,8 @@
-//! 文档任务：`cargo run -p xtask -- docs` 重生成对外 API 参考。
-//! `cargo test --workspace` 会跑本 crate 的检查测试——协议改动后忘记重生成即失败。
+//! 仓库维护任务：`docs` 重生成对外 API 参考，`fixtures` 重生成对拍快照。
+//! `cargo test --workspace` 会跑本 crate 的检查——文档落后于协议源码即失败。
 
 mod api_doc;
+mod fixtures;
 
 use std::path::{Path, PathBuf};
 
@@ -32,8 +33,14 @@ fn main() {
             std::fs::write(&path, render_docs(&root)).expect("写入文档失败");
             println!("已生成 {OUTPUT}");
         }
+        Some("fixtures") => {
+            let written = fixtures::regenerate(&repo_root()).unwrap_or_else(|e| panic!("{e}"));
+            for path in written {
+                println!("已重生成 {path}");
+            }
+        }
         _ => {
-            eprintln!("用法：cargo run -p xtask -- docs");
+            eprintln!("用法：cargo run -p xtask -- docs | fixtures");
             std::process::exit(2);
         }
     }

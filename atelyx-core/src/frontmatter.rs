@@ -96,6 +96,71 @@ pub fn stringify(data: &Yaml, body: &str) -> String {
     out
 }
 
+// ===== 对拍快照编码 =====
+
+/// 快照数据编码：`Yaml → { "t": 类型标签, "v": 值 }`，map 以键值对数组保键序。
+/// 一致性测试与快照生成器共用这一份编码——两边各写一份必然漂移，形状改动即改快照。
+#[doc(hidden)]
+pub fn snapshot_json(y: &Yaml) -> serde_json::Value {
+    use serde_json::json;
+    match y {
+        Yaml::Null => json!({ "t": "null" }),
+        Yaml::Bool(v) => json!({ "t": "bool", "v": v }),
+        Yaml::Num(f) => {
+            // 整数安全范围内落为整数：快照里 `3` 与 `3.0` 是两种形状，整数不带小数点更贴近源文本
+            let v = if f.fract() == 0.0 && f.abs() < 1e15 {
+                serde_json::Value::from(*f as i64)
+            } else {
+                serde_json::Value::from(*f)
+            };
+            json!({ "t": "num", "v": v })
+        }
+        Yaml::Date(d) => json!({ "t": "date", "v": d }),
+        Yaml::Str(s) => json!({ "t": "str", "v": s }),
+        Yaml::Seq(items) => json!({ "t": "seq", "v": items.iter().map(snapshot_json).collect::<Vec<_>>() }),
+        Yaml::Map(pairs) => json!({
+            "t": "map",
+            "v": pairs.iter().map(|(k, v)| json!([k, snapshot_json(v)])).collect::<Vec<_>>(),
+        }),
+    }
+}
+
+/// [`snapshot_json`] 的逆：快照里的数据编码还原成 `Yaml`（stringify 语料的输入）。
+#[doc(hidden)]
+pub fn yaml_from_snapshot(v: &serde_json::Value) -> Yaml {
+    let inner = &v["v"];
+    match v["t"].as_str().unwrap_or_default() {
+        "bool" => Yaml::Bool(inner.as_bool().unwrap_or(false)),
+        "num" => Yaml::Num(inner.as_f64().unwrap_or_default()),
+        "date" => Yaml::Date(inner.as_str().unwrap_or_default().into()),
+        "str" => Yaml::Str(inner.as_str().unwrap_or_default().into()),
+        "seq" => Yaml::Seq(
+            inner
+                .as_array()
+                .map(|items| items.iter().map(yaml_from_snapshot).collect())
+                .unwrap_or_default(),
+        ),
+        "map" => Yaml::Map(
+            inner
+                .as_array()
+                .map(|pairs| {
+                    pairs
+                        .iter()
+                        .filter_map(|pair| {
+                            let pair = pair.as_array()?;
+                            Some((
+                                pair.first()?.as_str()?.to_string(),
+                                yaml_from_snapshot(pair.get(1)?),
+                            ))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        ),
+        _ => Yaml::Null,
+    }
+}
+
 // ===== 定位 =====
 
 /// 文档开头 frontmatter 块的结束字节位置（闭合行行尾，含换行）；无块返回 None。

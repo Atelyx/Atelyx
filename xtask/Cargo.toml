@@ -5,5 +5,8 @@ edition = "2021"
 publish = false
 description = "仓库维护任务：从协议源码生成对外 API 参考（不进发布物）"
 
-# 只读源码文件与写文档，无外部依赖：不引入解析库，靠顶层项边界抽取原文。
+# 文档生成只读源码文本；快照重生成要直接调用解析器（唯一真源），故依赖 core。
 [dependencies]
+atelyx-core = { path = "../atelyx-core" }
+# preserve_order：快照回写必须保持原有键序（否则整份文件被按字母重排）
+serde_json = { version = "1", features = ["preserve_order"] }
