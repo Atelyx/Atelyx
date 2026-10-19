@@ -111,7 +111,7 @@ fn handshake_shape_is_frozen_and_version_checked() {
     let result: InitializeResult =
         serde_json::from_value(snapshot["handshake"]["result"].clone()).expect("握手 result 可反序列化");
 
-    assert_eq!(params.api_version, 2);
+    assert_eq!(params.api_version, 1);
     assert_eq!(params.plugin.id, "com.atelyx.echo");
     assert_eq!(result.host.name, "Atelyx");
     assert!(handshake::compatible(params.api_version, result.api_version));

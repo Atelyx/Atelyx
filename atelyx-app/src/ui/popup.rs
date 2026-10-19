@@ -97,6 +97,11 @@ pub fn overlay<'a>(
 /// 居中模态覆盖层：全屏半透明黑遮罩（点击关闭）+ 阴影环 + 水平垂直居中卡。
 /// 卡片内容与尺寸由调用方构建（历史记录 / 许可信息等阻断式面板共用此壳）。
 pub fn modal_overlay<'a>(window: iced::window::Id, card: Element<'a, Message>) -> Element<'a, Message> {
+    modal_overlay_with(Message::Ui(UiMsg::PopupClose { window }), card)
+}
+
+/// 居中模态覆盖层（遮罩点击的处理由调用方给定：不经全局弹层状态的模态用这条）。
+pub fn modal_overlay_with<'a>(close: Message, card: Element<'a, Message>) -> Element<'a, Message> {
     let capture = mouse_area(
         container(space().width(Length::Fill).height(Length::Fill))
             .width(Length::Fill)
@@ -106,7 +111,7 @@ pub fn modal_overlay<'a>(window: iced::window::Id, card: Element<'a, Message>) -
                 ..Style::default()
             }),
     )
-    .on_press(Message::Ui(UiMsg::PopupClose { window }));
+    .on_press(close);
     let shadow_wrap = container(card)
         .padding(Padding {
             left: SHADOW_PAD_LEFT,

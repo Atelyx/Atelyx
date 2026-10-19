@@ -26,7 +26,7 @@ fn make_plugin(dir: &std::path::Path, id: &str, exe: &str, extra: &str) {
     std::fs::write(
         dir.join(MANIFEST_FILE),
         format!(
-            r#"{{"id":"{id}","name":"Fixture","version":"1.0.0","apiVersion":2,
+            r#"{{"id":"{id}","name":"Fixture","version":"1.0.0","apiVersion":1,
                 "entry":{{"windows":"plugin.exe","linux":"plugin"}},"permissions":["state"]{extra}}}"#
         ),
     )

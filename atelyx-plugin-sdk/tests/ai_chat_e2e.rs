@@ -94,7 +94,7 @@ fn install_ai_stub(runtime: &Arc<PluginRuntime>, tmp: &std::path::Path) -> Strin
     std::fs::create_dir_all(&src).unwrap();
     std::fs::write(
         src.join(MANIFEST_FILE),
-        r#"{"id":"com.atelyx.ai-stub","name":"AiStub","version":"1.0.0","apiVersion":2,
+        r#"{"id":"com.atelyx.ai-stub","name":"AiStub","version":"1.0.0","apiVersion":1,
             "entry":{"windows":"plugin.exe","linux":"plugin"},"permissions":["state","ai"]}"#,
     )
     .unwrap();

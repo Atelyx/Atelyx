@@ -445,7 +445,16 @@ pub fn form_input(
     on_submit: Message,
 ) -> Element<'static, Message> {
     let (on_input, on_submit) = arm_input(on_input, on_submit);
-    styled_input(placeholder, value, width, Some(on_input), Some(on_submit), false)
+    styled_input(placeholder, value, Length::Fixed(width), Some(on_input), Some(on_submit), false)
+}
+
+/// 搜索输入（填满可用宽度；逐键回发即时过滤，无提交语义）。
+pub fn search_input(
+    placeholder: &str,
+    value: &str,
+    on_input: impl Fn(String) -> Message + 'static,
+) -> Element<'static, Message> {
+    styled_input(placeholder, value, Length::Fill, Some(on_input), None, false)
 }
 
 /// 设置输入双提交装配：逐键武装失焦提交消息（同一提交消息也挂在 Enter 上），
@@ -469,7 +478,7 @@ fn arm_input(
 
 /// 只读展示输入（无输入/提交处理：值由服务端管理等场景）。
 pub fn form_input_static(placeholder: &str, value: &str, width: f32) -> Element<'static, Message> {
-    styled_input(placeholder, value, width, None::<fn(String) -> Message>, None, false)
+    styled_input(placeholder, value, Length::Fixed(width), None::<fn(String) -> Message>, None, false)
 }
 
 /// 密文输入（API key 等敏感值：掩码显示，其余同 form_input）。
@@ -481,7 +490,7 @@ pub fn secret_input(
     on_submit: Message,
 ) -> Element<'static, Message> {
     let (on_input, on_submit) = arm_input(on_input, on_submit);
-    styled_input(placeholder, value, width, Some(on_input), Some(on_submit), true)
+    styled_input(placeholder, value, Length::Fixed(width), Some(on_input), Some(on_submit), true)
 }
 
 /// 插件卡片容器样式（ViewNode card：列表条目、信息分组；accent = 选中强调边框）。
@@ -509,11 +518,11 @@ pub(crate) fn form_input_style(status: text_input::Status) -> text_input::Style 
     }
 }
 
-/// form_input / secret_input 共用的样式构建（处理器缺省 = 不可编辑）。
+/// form_input / secret_input / search_input 共用的样式构建（处理器缺省 = 不可编辑）。
 fn styled_input(
     placeholder: &str,
     value: &str,
-    width: f32,
+    width: Length,
     on_input: Option<impl Fn(String) -> Message + 'static>,
     on_submit: Option<Message>,
     secure: bool,
@@ -522,7 +531,7 @@ fn styled_input(
         .size(pal::fs_caption())
         .font(regular())
         .padding(Padding::ZERO.horizontal(8.0).vertical(6.0))
-        .width(Length::Fixed(width))
+        .width(width)
         .secure(secure)
         .style(|_theme, status| form_input_style(status));
     if let Some(f) = on_input {

@@ -652,6 +652,11 @@ fn with_overlays<'a>(
         root = root.push(el);
     }
 
+    // 插件页模态（详情 / 市场安装确认；与开源许可同级）
+    if let Some(el) = crate::settings_view::plugins::overlay(app, window) {
+        root = root.push(el);
+    }
+
     // 悬停提示：跟随光标（锚在光标下方半边长 + 4），视口钳制 + 上下翻转
     if let Some((w, label, _, shown, _, _)) = &app.tooltip {
         if *w == window && *shown {

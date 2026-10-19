@@ -323,7 +323,7 @@ mod tests {
 
     fn manifest_json(id: &str) -> String {
         format!(
-            r#"{{"id":"{id}","name":"Demo","version":"1.0.0","apiVersion":2,"entry":{{"windows":"app.exe","linux":"app"}},"permissions":["state"]}}"#
+            r#"{{"id":"{id}","name":"Demo","version":"1.0.0","apiVersion":1,"entry":{{"windows":"app.exe","linux":"app"}},"permissions":["state"]}}"#
         )
     }
 
@@ -433,7 +433,7 @@ mod tests {
         std::fs::create_dir_all(&bad_id).unwrap();
         std::fs::write(
             bad_id.join(MANIFEST_FILE),
-            r#"{"id":"bad","name":"x","version":"1","apiVersion":2}"#,
+            r#"{"id":"bad","name":"x","version":"1","apiVersion":1}"#,
         )
         .unwrap();
         assert!(install_from_dir(root, &bad_id).is_err(), "非反域名 id 应被拒");
@@ -452,7 +452,7 @@ mod tests {
         std::fs::create_dir_all(&no_entry).unwrap();
         std::fs::write(
             no_entry.join(MANIFEST_FILE),
-            r#"{"id":"com.example.demo","name":"x","version":"1","apiVersion":2,"entry":{"windows":"app.exe","linux":"app"}}"#,
+            r#"{"id":"com.example.demo","name":"x","version":"1","apiVersion":1,"entry":{"windows":"app.exe","linux":"app"}}"#,
         )
         .unwrap();
         assert!(install_from_dir(root, &no_entry).is_err(), "入口缺失应被拒");

@@ -824,13 +824,13 @@ impl PluginRuntime {
         instance.start()
     }
 
-    /// 从本地目录安装（安装即启用）。返回安装的插件 id。
+    /// 从本地目录安装：只落位内容，不置启用标记；曾启用的插件更新后由宿主重启。返回安装的插件 id。
     pub fn install_dir(self: &Arc<Self>, src: &Path) -> Result<String, String> {
         let id = install::install_from_dir(&self.root, src)?;
         self.after_install(&id)
     }
 
-    /// 从 zip 安装（安装即启用）。返回安装的插件 id。
+    /// 从 zip 安装：只落位内容，不置启用标记；曾启用的插件更新后由宿主重启。返回安装的插件 id。
     pub fn install_zip(self: &Arc<Self>, zip_path: &Path) -> Result<String, String> {
         let id = install::install_from_zip(&self.root, zip_path)?;
         self.after_install(&id)
@@ -1035,7 +1035,7 @@ mod tests {
         std::fs::write(
             dir.join(MANIFEST_FILE),
             format!(
-                r#"{{"id":"{id}","name":"Demo","version":"1.0.0","apiVersion":2,"entry":{{"windows":"app.exe","linux":"app"}},"permissions":[]}}"#
+                r#"{{"id":"{id}","name":"Demo","version":"1.0.0","apiVersion":1,"entry":{{"windows":"app.exe","linux":"app"}},"permissions":[]}}"#
             ),
         )
         .unwrap();
@@ -1245,7 +1245,7 @@ mod tests {
         let entry = if cfg!(windows) { "app.exe" } else { "app" };
         std::fs::write(
             dir.join(MANIFEST_FILE),
-            r#"{"id":"com.example.board","name":"Board","version":"1.0.0","apiVersion":2,
+            r#"{"id":"com.example.board","name":"Board","version":"1.0.0","apiVersion":1,
                 "entry":{"windows":"app.exe","linux":"app"},"permissions":[],
                 "docTypeRegistrations":[{"extension":"board","label":"画板","icon":"layout-dashboard","surface":"board-view"}]}"#,
         )

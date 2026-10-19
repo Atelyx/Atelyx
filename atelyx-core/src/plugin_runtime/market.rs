@@ -53,6 +53,9 @@ pub struct MarketEntry {
     pub tagline: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// 索引自报的插件类型（取值由索引侧定义，如 `panel` / `tableview`）；索引缺该字段即无类型。
+    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+    pub r#type: Option<String>,
     /// `owner/repo`，Release 下载与更新定位。
     pub repo: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -291,7 +294,8 @@ pub async fn download_release_asset(
     updater::download(dest_dir, url, None, cancel, on_progress).await
 }
 
-fn now_ms() -> u64 {
+/// 当前 unix 毫秒时刻（缓存新鲜度判定用）。
+pub fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -309,7 +313,7 @@ mod tests {
             "generatedAt": "2026-10-14T17:13:19.904Z",
             "version": "v1",
             "items": [
-                { "id": "com.atelyx.demo", "name": "Demo", "repo": "Atelyx/demo", "stars": 2 },
+                { "id": "com.atelyx.demo", "name": "Demo", "repo": "Atelyx/demo", "stars": 2, "type": "panel" },
                 { "id": "com.x.third", "name": "Third", "repo": "third/plugin" }
             ]
         }))
@@ -318,6 +322,11 @@ mod tests {
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].repo, "Atelyx/demo");
         assert_eq!(items[0].stars, Some(2));
+        assert_eq!(items[0].r#type.as_deref(), Some("panel"), "索引 type 字段映射到插件类型");
+        assert_eq!(items[1].r#type, None, "缺 type 即无类型");
+        // 索引的 type 字段名与序列化口径一致（回写快照不丢类型）
+        let encoded = serde_json::to_value(&items[0]).unwrap();
+        assert_eq!(encoded["type"], "panel");
         // 缺 items / 空对象都按空市场，不报错
         assert!(parse_index(&json!({})).unwrap().1.is_empty());
     }
