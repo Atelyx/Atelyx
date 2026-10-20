@@ -174,7 +174,7 @@ impl PluginHandler for Stub {
                 eprintln!("订阅 {name} 失败：{e}");
             }
         }
-        if let Err(e) = ctx.register(ContributionSlot::Panel, PANEL, "面板", Some("puzzle")).await {
+        if let Err(e) = ctx.register(ContributionSlot::Panel, PANEL, "面板", Some("puzzle"), None).await {
             eprintln!("注册面板贡献失败：{e}");
         }
         self.apply(ctx, |m| {

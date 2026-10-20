@@ -39,14 +39,17 @@ pub use atelyx_plugin_protocol::canvas::{CanvasColor, CanvasPoint, DrawCommand};
 pub use atelyx_plugin_protocol::event::{TableChangedPayload, VaultSwitchPayload};
 pub use atelyx_plugin_protocol::manifest::{DocTypeRegistration, Permission};
 pub use atelyx_plugin_protocol::method::{
-    ChatEvent, ChatEventParams, ChatHistoryParams, ChatHistoryResult, ChatSendParams,
-    ChatSessionSummary, ChatSessionWire, ChatStopParams, ClipboardImage, ContributionSlot,
-    FileFilter, NotificationLevel, SurfaceKind, TableField, TableSelection, TableRow, TableSnapshot,
-    TakeoverScope, WindowOpenParams,
+    CanvasResizedParams, ChatEvent, ChatEventParams, ChatHistoryParams, ChatHistoryResult,
+    ChatRenameParams, ChatSendParams, ChatSessionParams, ChatSessionSummary, ChatSessionWire,
+    ChatStopParams, ClipboardImage, ContributionSlot, DefineIconParams, FileFilter,
+    NotificationLevel, ScrollEdge, ScrollToParams, ShortcutQueryResult, SurfaceKind,
+    TableField, TableSelection, TableRow, TableSetCellImageParams, TableSnapshot, TakeoverScope,
+    WindowOpenParams, WindowUpdateParams,
 };
 pub use atelyx_plugin_protocol::view::{
-    Align, Axis, ButtonVariant, CanvasEventKind, CanvasPointer, ColorToken, EventKind, EventValue,
-    Fill, ImageFit, ImageSource, MenuItem, MouseButton, NodeBody, TextWeight, ViewEvent, ViewNode,
+    Align, Axis, ButtonVariant, CanvasEventKind, CanvasPointer, CardTone, ColorToken, ControlSize,
+    EventKind, EventValue, Fill, ImageFit, ImageSource, Justify, MenuItem, MouseButton, NodeBody,
+    TextWeight, ViewEvent, ViewNode,
 };
 
 /// 插件运行状态。
@@ -98,6 +101,8 @@ pub struct Contribution {
     pub label: String,
     /// 宿主图标形状表里的图标名；插件未声明时为 `None`（宿主回落拼图）。
     pub icon: Option<String>,
+    /// 面外壳内边距（px）；`None` = 宿主默认（面板 12/10、窗口与接管面 0）。
+    pub padding: Option<f32>,
 }
 
 /// 一个领域文档类型注册及其所属插件（文件树图标 / 新建菜单 / 打开路由用）。
@@ -202,6 +207,24 @@ pub enum HostRequest {
     TableRemoveRow { plugin_id: String, request_id: u64, row_id: String },
     /// 插件请求写宿主表格选中态。
     TableSelectRow { plugin_id: String, request_id: u64, row_id: String },
+    /// 插件请求向图片字段单元格写入图片引用（壳侧走与本地编辑同一出口）。
+    TableSetCellImage {
+        plugin_id: String,
+        request_id: u64,
+        params: method::TableSetCellImageParams,
+    },
+    /// 插件请求把某可滚动容器（list / scroll）滚到一端（滚动位置归壳的控件态）。
+    ScrollTo { plugin_id: String, request_id: u64, params: method::ScrollToParams },
+    /// 插件请求运行时改一个已打开窗口的属性（壳侧 OS 窗口副作用）。
+    WindowUpdate { plugin_id: String, request_id: u64, params: method::WindowUpdateParams },
+    /// 插件请求重新显示一个因失焦被隐藏的窗口。
+    WindowShow { plugin_id: String, request_id: u64, window_id: String },
+    /// 插件请求重命名一个会话（写元数据标题）。
+    ChatRename { plugin_id: String, request_id: u64, params: method::ChatRenameParams },
+    /// 插件请求删除一个会话（连同其消息文件）。
+    ChatDelete { plugin_id: String, request_id: u64, params: method::ChatSessionParams },
+    /// 插件请求压缩一个会话（回执 = 已受理，结果经 `ai.chat.history` 复核）。
+    ChatCompact { plugin_id: String, request_id: u64, params: method::ChatSessionParams },
 }
 
 /// 插件列表项（设置页渲染用）。
@@ -264,6 +287,9 @@ type ShellCallWait = (String, ShellReplyTx);
 /// 插件宿主运行时。
 pub struct PluginRuntime {
     root: PathBuf,
+    /// 宿主产品版本：比较插件 `minHostVersion` 与握手自报宿主信息用。
+    /// core 自身的包版本与产品版本不同，故由壳在启动时传入（默认取 core 包版本）。
+    host_version: String,
     process_host: Arc<PluginProcessHost>,
     shortcuts: Arc<shortcut::Registrar>,
     events: tokio::sync::broadcast::Sender<PluginEvent>,
@@ -295,12 +321,19 @@ pub struct PluginRuntime {
 
 impl PluginRuntime {
     /// 建立运行时（`root` = 应用数据目录下 `plugins/`）。顺带清理遗留的安装临时目录。
+    /// 宿主版本默认取 core 包版本——产品壳应改用 [`PluginRuntime::with_host_version`] 传入应用版本。
     pub fn new(root: PathBuf) -> Arc<Self> {
+        Self::with_host_version(root, env!("CARGO_PKG_VERSION"))
+    }
+
+    /// 建立运行时并显式给出宿主产品版本（`minHostVersion` 校验与握手自报都用它）。
+    pub fn with_host_version(root: PathBuf, host_version: impl Into<String>) -> Arc<Self> {
         layout::sweep_temp(&root);
         let (events, _) = tokio::sync::broadcast::channel(256);
         let (host_requests, host_requests_rx) = tokio::sync::mpsc::unbounded_channel();
         let runtime = Arc::new(Self {
             root,
+            host_version: host_version.into(),
             process_host: Arc::new(PluginProcessHost::new()),
             shortcuts: shortcut::Registrar::new(),
             events,
@@ -427,10 +460,23 @@ impl PluginRuntime {
                 request_id,
                 window_id,
             },
+            HostRequest::WindowUpdate { plugin_id, params, .. } => HostRequest::WindowUpdate {
+                plugin_id,
+                request_id,
+                params,
+            },
+            HostRequest::WindowShow { plugin_id, window_id, .. } => HostRequest::WindowShow {
+                plugin_id,
+                request_id,
+                window_id,
+            },
             HostRequest::Dialog { .. } => return Err("界面服务请求形态不符".to_string()),
             HostRequest::ChatSend { .. }
             | HostRequest::ChatStop { .. }
             | HostRequest::ChatHistory { .. }
+            | HostRequest::ChatRename { .. }
+            | HostRequest::ChatDelete { .. }
+            | HostRequest::ChatCompact { .. }
             | HostRequest::ClipboardWrite { .. }
             | HostRequest::ClipboardRead { .. }
             | HostRequest::ClipboardReadImage { .. }
@@ -444,7 +490,9 @@ impl PluginRuntime {
             | HostRequest::TableUpdateCell { .. }
             | HostRequest::TableAddRow { .. }
             | HostRequest::TableRemoveRow { .. }
-            | HostRequest::TableSelectRow { .. } => return Err("界面服务请求形态不符".to_string()),
+            | HostRequest::TableSelectRow { .. }
+            | HostRequest::TableSetCellImage { .. }
+            | HostRequest::ScrollTo { .. } => return Err("界面服务请求形态不符".to_string()),
         };
         self.ui_calls
             .lock()
@@ -577,6 +625,31 @@ impl PluginRuntime {
                 request_id,
                 row_id,
             },
+            HostRequest::TableSetCellImage { plugin_id, params, .. } => HostRequest::TableSetCellImage {
+                plugin_id,
+                request_id,
+                params,
+            },
+            HostRequest::ScrollTo { plugin_id, params, .. } => HostRequest::ScrollTo {
+                plugin_id,
+                request_id,
+                params,
+            },
+            HostRequest::ChatRename { plugin_id, params, .. } => HostRequest::ChatRename {
+                plugin_id,
+                request_id,
+                params,
+            },
+            HostRequest::ChatDelete { plugin_id, params, .. } => HostRequest::ChatDelete {
+                plugin_id,
+                request_id,
+                params,
+            },
+            HostRequest::ChatCompact { plugin_id, params, .. } => HostRequest::ChatCompact {
+                plugin_id,
+                request_id,
+                params,
+            },
             _ => return Err("壳侧服务请求形态不符".to_string()),
         };
         self.shell_calls
@@ -708,6 +781,33 @@ impl PluginRuntime {
         })
     }
 
+    /// 插件请求运行时改一个已打开窗口的属性（无字段可改即拒；窗口不存在由壳拒绝并回填）。
+    fn update_plugin_window(&self, plugin_id: &str, params: WindowUpdateParams) -> Result<std::sync::mpsc::Receiver<Result<(), String>>, String> {
+        if params.id.trim().is_empty() {
+            return Err("窗口 id 不能为空".to_string());
+        }
+        if params.width.is_none() && params.height.is_none() && params.always_on_top.is_none() {
+            return Err("window.update 未给出任何要改的属性".to_string());
+        }
+        self.open_ui_call(HostRequest::WindowUpdate {
+            plugin_id: plugin_id.to_string(),
+            request_id: 0,
+            params,
+        })
+    }
+
+    /// 插件请求重新显示一个因失焦被隐藏的窗口（窗口不存在由壳拒绝并回填）。
+    fn show_plugin_window(&self, plugin_id: &str, window_id: &str) -> Result<std::sync::mpsc::Receiver<Result<(), String>>, String> {
+        if window_id.trim().is_empty() {
+            return Err("窗口 id 不能为空".to_string());
+        }
+        self.open_ui_call(HostRequest::WindowShow {
+            plugin_id: plugin_id.to_string(),
+            request_id: 0,
+            window_id: window_id.to_string(),
+        })
+    }
+
     // ---------- 领域文档类型 ----------
 
     /// 全部已安装插件注册的领域文档类型（按插件 id + 扩展名排序；文件树 / 新建菜单 / 打开路由用）。
@@ -764,13 +864,16 @@ impl PluginRuntime {
     pub fn scan(self: &Arc<Self>) {
         let mut discovered = HashMap::new();
         for (name, dir) in layout::discover(&self.root) {
-            let manifest = manifest::read_manifest(&dir).and_then(|m| {
-                if m.id == name {
-                    Ok(m)
-                } else {
-                    Err(format!("目录名与 manifest id 不一致：目录 {name}，声明 {}", m.id))
-                }
-            });
+            let manifest = manifest::read_manifest(&dir)
+                .and_then(|m| {
+                    if m.id == name {
+                        Ok(m)
+                    } else {
+                        Err(format!("目录名与 manifest id 不一致：目录 {name}，声明 {}", m.id))
+                    }
+                })
+                // 版本闸门在装载期判：宿主产品版本低于插件声明的最低版本即不可装载
+                .and_then(|m| manifest::check_host_version(&m, &self.host_version).map(|()| m));
             let enabled = layout::is_enabled(&self.root, &name);
             discovered.insert(name.clone(), Discovered { manifest, dir, enabled });
         }
@@ -841,6 +944,32 @@ impl PluginRuntime {
         let instance = self.instances.lock().unwrap().get(plugin_id).cloned();
         if let Some(instance) = instance {
             instance.notify_view_event(surface_id, node_id, event);
+        }
+    }
+
+    /// 某插件定义的自备图标形状（名字 → 24x24 描边路径）；未定义 / 已随会话清除 = 空表。
+    pub fn plugin_icons(&self, plugin_id: &str) -> HashMap<String, String> {
+        self.instances
+            .lock()
+            .unwrap()
+            .get(plugin_id)
+            .map(|i| i.icons())
+            .unwrap_or_default()
+    }
+
+    /// 告知插件某画布节点当前的像素尺寸（`host:canvas.resized`；尺寸变化时发）。
+    pub fn notify_canvas_resized(&self, plugin_id: &str, surface_id: &str, node_id: &str, width: f32, height: f32) {
+        let instance = self.instances.lock().unwrap().get(plugin_id).cloned();
+        if let Some(instance) = instance {
+            instance.notify_canvas_resized(surface_id, node_id, width, height);
+        }
+    }
+
+    /// 告知插件某个窗口因失焦被收起（`host:window.hidden`）；插件可用 `window.show` 重新显示。
+    pub fn notify_window_hidden(&self, plugin_id: &str, window_id: &str) {
+        let instance = self.instances.lock().unwrap().get(plugin_id).cloned();
+        if let Some(instance) = instance {
+            instance.notify_window_hidden(window_id);
         }
     }
 
@@ -1163,6 +1292,7 @@ impl PluginRuntime {
             manifest.clone(),
             dir.to_path_buf(),
             layout::data_dir(&self.root, &manifest.id),
+            self.host_version.clone(),
             self.process_host.clone(),
             self.shortcuts.clone(),
             self.events.clone(),
@@ -1204,7 +1334,14 @@ fn request_plugin_id(request: &HostRequest) -> &str {
         | HostRequest::TableUpdateCell { plugin_id, .. }
         | HostRequest::TableAddRow { plugin_id, .. }
         | HostRequest::TableRemoveRow { plugin_id, .. }
-        | HostRequest::TableSelectRow { plugin_id, .. } => plugin_id,
+        | HostRequest::TableSelectRow { plugin_id, .. }
+        | HostRequest::TableSetCellImage { plugin_id, .. }
+        | HostRequest::ScrollTo { plugin_id, .. }
+        | HostRequest::WindowUpdate { plugin_id, .. }
+        | HostRequest::WindowShow { plugin_id, .. }
+        | HostRequest::ChatRename { plugin_id, .. }
+        | HostRequest::ChatDelete { plugin_id, .. }
+        | HostRequest::ChatCompact { plugin_id, .. } => plugin_id,
     }
 }
 
@@ -1428,6 +1565,24 @@ mod tests {
         colon.title = " ".into();
         assert!(runtime.open_plugin_window("com.a", colon).is_err(), "空标题应被拒");
         assert!(runtime.open_plugin_window("com.a", ui_open_window_params("ok")).is_ok());
+
+        // window.update：空 id 与「一个属性都不改」都在分派处拒，不投递请求
+        let update = |id: &str| WindowUpdateParams {
+            id: id.into(),
+            width: None,
+            height: None,
+            always_on_top: None,
+        };
+        assert!(runtime.update_plugin_window("com.a", update("  ")).is_err(), "空 id 应被拒");
+        assert!(
+            runtime.update_plugin_window("com.a", update("w")).is_err(),
+            "未给任何要改的属性应被拒"
+        );
+        let mut sized = update("w");
+        sized.height = Some(400.0);
+        assert!(runtime.update_plugin_window("com.a", sized).is_ok());
+        assert!(runtime.show_plugin_window("com.a", "w").is_ok());
+        assert!(runtime.show_plugin_window("com.a", "  ").is_err(), "空窗口 id 应被拒");
     }
 
     #[test]

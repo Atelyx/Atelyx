@@ -11,7 +11,8 @@ Atelyx 插件协议的全部公开类型与方法名。概念、取舍与常见�
 
 ```rust
 // atelyx-plugin-protocol/src/lib.rs
-/// API 版本。破坏性变更（方法/控件/事件语义不兼容）必须递增；握手时双方不一致即失败。
+/// API 版本。破坏性变更（方法/控件/事件语义不兼容）递增后，握手时双方不一致即失败。
+/// 协议冻结为稳定契约前不递增本号（同版本发布，避免每次扩容都要求重建在装插件）。
 pub const API_VERSION: u32 = 1;
 ```
 
@@ -32,6 +33,9 @@ pub struct Manifest {
     pub version: String,
     /// 协议版本，必须等于宿主的 [`crate::API_VERSION`]。
     pub api_version: u32,
+    /// 最低宿主版本（语义化版本，如 `0.4.0`）；缺省 = 不限。宿主低于它即拒绝装载。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_host_version: Option<String>,
     pub entry: Entry,
     /// 能力声明清单：未声明的能力调用一律被宿主拒绝（fail-closed）。
     pub permissions: Vec<Permission>,
@@ -236,13 +240,15 @@ pub enum NodeBody {
         gap: Option<f32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         padding: Option<f32>,
+        /// 主轴分布：`spaceBetween` 在行占满宽度时把子项推向两端（工具行：左信息 + 右操作）。
+        /// 缺省 `start`（子项紧贴左缘）。fill 行内 justify 仍生效。
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        align: Option<Align>,
+        justify: Option<Justify>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cross_align: Option<Align>,
         /// 撑满语义：`both` = 行占满父容器剩余宽高、Fill 子项均分剩余宽度（如左右分栏）；
         /// `width` = 仅占满宽度（高度仍按内容，用于工具行左右分布）。
-        /// 缺省行宽收缩、子项 Fill 按各自内容宽解析；fill 行内 `align` 不生效。
+        /// 缺省行宽收缩、子项 Fill 按各自内容宽解析。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         fill: Option<Fill>,
     },
@@ -257,37 +263,65 @@ pub enum NodeBody {
     /// 卡片容器：主题化背景 + 边框 + 圆角的分组盒（列表条目、信息分组）。
     Card {
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        gap: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         padding: Option<f32>,
         /// 强调态（列表选中项）：accent 边框。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         accent: Option<bool>,
+        /// 底色档位（缺省主题卡底）。插件只选主题档位，不写死色值。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tone: Option<CardTone>,
+        /// 圆角半径（px）；缺省用宿主卡片圆角。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        radius: Option<f32>,
+        /// 是否画边框；缺省 true。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bordered: Option<bool>,
     },
+    /// 叠层：子节点按提交顺序重叠（后提交的在上），同尺寸对齐于左上角。
+    /// 用于「自绘画布当底 + 宿主控件叠其上」或徽标叠图。
+    Stack {},
     Scroll {
         /// 子节点按主轴单向排列：`horizontal` 排成行，其余（含缺省）排成列。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         direction: Option<Axis>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gap: Option<f32>,
     },
     Grid {
         columns: u32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         gap: Option<f32>,
     },
-    /// 可滚动列表：语义等同纵向 scroll + column，为宿主后续做虚拟化预留的分型。
-    List {},
+    /// 可滚动列表：语义等同纵向 scroll + column（宿主对子项按键复用控件态）。
+    /// 滚动位置由宿主经 `view.scrollTo` 指令控制（插件侧无滚动事件）。
+    List {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gap: Option<f32>,
+    },
     Text {
         content: String,
+        /// 字号倍率（相对界面基准正文字号；缺省 1.0）。跟界面字号缩放，不是绝对像素。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         size: Option<f32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         weight: Option<TextWeight>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         color: Option<ColorToken>,
+        /// 水平对齐（节点宽度恒占满父容器）：`end` 用于右对齐气泡，`center` 用于居中标题。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        align: Option<Align>,
     },
     /// 只读 Markdown 正文：宿主按笔记同源解析器渲染（标题 / 列表 / 引用 / 代码块 / 表格 / 链接）。
     /// 块级图片与笔记同源载入：http(s) 走下载，其余按仓库相对路径。
+    /// 取色与字重走宿主主题与 Markdown 语义（标题层级 / 强调），只开放整体字号缩放。
     /// 无编辑态与事件：插件要交互请用其他控件。
     Markdown {
         content: String,
+        /// 整体字号倍率（相对界面基准正文字号；缺省 1.0）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size: Option<f32>,
     },
     TextInput {
         #[serde(default)]
@@ -332,6 +366,9 @@ pub enum NodeBody {
         variant: Option<ButtonVariant>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         enabled: Option<bool>,
+        /// 尺寸档位（缺省 Sm，高 24 的紧凑钮）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size: Option<ControlSize>,
     },
     /// 图标名必须存在于宿主图标形状表（lucide 线性形状），未知名字宿主按可读错误拒绝。
     IconButton {
@@ -340,17 +377,32 @@ pub enum NodeBody {
         tooltip: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         enabled: Option<bool>,
+        /// 尺寸档位（缺省 Sm：14px 图标 + 28 方框）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size: Option<ControlSize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        variant: Option<ButtonVariant>,
+        /// 悬停才显示（列表行的操作钮常驻会喧宾夺主）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hover_only: Option<bool>,
     },
-    /// 无尺寸字段：宿主按图片原始尺寸渲染，`fit` 在父容器给定尺寸时生效。
+    /// 图片：`width` / `height` 给定时按该尺寸渲染（缺省按原图尺寸）；
+    /// 节点声明 `click` 事件即成为可点击图片（大图预览入口）。
     Image {
         source: ImageSource,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         fit: Option<ImageFit>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        width: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        height: Option<f32>,
     },
     Progress {
         /// 0.0 ~ 1.0；越界值宿主钳制。
         value: f64,
     },
+    /// 菜单：`label` 与 `icon` 可并存（并存时渲染为紧凑的「图标 + 文字」触发钮，非全宽下拉钮）；
+    /// 只给 `icon` 为纯图标触发钮，只给 `label` 为全宽下拉钮。二者都缺省时回落到 `…` 触发钮。
     Menu {
         items: Vec<MenuItem>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -360,10 +412,18 @@ pub enum NodeBody {
     },
     /// 自绘画布：宿主保留一块区域执行 `canvas.submit` 提交的指令清单（见 [`crate::canvas`]）。
     /// 指针事件按 `mouseEvents` 声明子集回发，未声明不上行；命中由插件按指令几何自算。
+    /// `height` 给定时取该高度；`fill` = 占满父容器剩余空间（放在 Fill 容器里才有可分配空间）。
+    /// 画布尺寸变化时宿主回发 `host:canvas.resized`（插件据此对齐绘制坐标与滚动范围）。
     Canvas {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         mouse_events: Vec<CanvasEventKind>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        height: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fill: Option<bool>,
     },
+    /// 分隔线：主题弱边界色的 1px 水平线（分组容器内的轻分割）。
+    Divider {},
     /// 拖动热区：自身不渲染任何内容，用户在其占位区域内按下即由宿主发起整窗拖动
     /// （全接管时插件自绘标题栏的拖动把手）。事件不回发。
     DragRegion {},
@@ -377,6 +437,19 @@ pub enum Align {
     Start,
     Center,
     End,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/view.rs
+/// 行主轴分布（[`NodeBody::Row`] 的 `justify`）。
+#[serde(rename_all = "camelCase")]
+pub enum Justify {
+    Start,
+    Center,
+    End,
+    /// 两端对齐：行占满宽度时首个贴左、末个贴右，中间拉开（工具行）。
+    SpaceBetween,
 }
 ```
 
@@ -438,6 +511,34 @@ pub enum ButtonVariant {
 
 ```rust
 // atelyx-plugin-protocol/src/view.rs
+/// 卡片底色档位（[`NodeBody::Card`] 的 `tone`）。插件只选主题档位，不写死色值。
+#[serde(rename_all = "camelCase")]
+pub enum CardTone {
+    /// 默认卡片底（比面板底色略深一档）。
+    Default,
+    /// 更淡的底（次级信息分组）。
+    Muted,
+    /// 强调软底（accent 的低饱和底）。
+    AccentSoft,
+    /// 无底色（只用边框分组）。
+    Transparent,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/view.rs
+/// 控件尺寸档位。`Sm` = 紧凑（Button 高 24、IconButton 14px 图标 + 28 方框）；
+/// `Md` = 常规（Button 高 32、IconButton 16px 图标 + 32 方框）；`Lg` = 宽松。
+#[serde(rename_all = "camelCase")]
+pub enum ControlSize {
+    Sm,
+    Md,
+    Lg,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/view.rs
 #[serde(rename_all = "camelCase")]
 pub enum ImageFit {
     Contain,
@@ -468,6 +569,9 @@ pub struct MenuItem {
     pub disabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub danger: Option<bool>,
+    /// 当前项标记（宿主在条目前画勾）：用于「历史会话列表」这类单选菜单。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<bool>,
 }
 ```
 
@@ -677,6 +781,18 @@ pub struct CanvasSubmitParams {
 }
 ```
 
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// `host:canvas.resized` 的 params：画布节点当前的像素尺寸（逻辑像素），尺寸变化时发。
+#[serde(rename_all = "camelCase")]
+pub struct CanvasResizedParams {
+    pub surface_id: String,
+    pub node_id: String,
+    pub width: f32,
+    pub height: f32,
+}
+```
+
 ## 6. 贡献点与窗口面
 
 贡献点决定插件界面出现在哪里；`surfaceId` 即贡献 id（插件窗口与文档实例另有宿主分配的 id）。
@@ -746,6 +862,67 @@ pub struct SubmitResult {
 
 ```rust
 // atelyx-plugin-protocol/src/method.rs
+/// `view.register` 的 params：声明一个贡献点。`id` 插件内唯一且不得含 `:`（宿主的面标识以它作分隔），
+/// 同时是该面挂载后的 `surfaceId`；`icon` 缺省时宿主用拼图图标。
+#[serde(rename_all = "camelCase")]
+pub struct RegisterParams {
+    pub slot: ContributionSlot,
+    pub id: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    /// 面外壳内边距（px）：面板 / 设置面根树外层由宿主加的内边距；0 = 贴边，缺省 = 宿主默认。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub padding: Option<f32>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// `view.unregister` 的 params：按 id 撤销自己的贡献；id 未注册时报可读错误。
+#[serde(rename_all = "camelCase")]
+pub struct UnregisterParams {
+    pub id: String,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// `view.defineIcon` 的 params：定义一枚自备图标形状，此后按 `name` 在贡献注册与图标钮里引用。
+/// `path` 为 24x24 网格的描边路径（与宿主形状表同口径）；名字须为字母 / 数字 / `_` / `-` 且不与
+/// 宿主内置形状重名。定义随插件会话收尾清除。
+#[serde(rename_all = "camelCase")]
+pub struct DefineIconParams {
+    pub name: String,
+    pub path: String,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 可滚动容器的主轴一端（[`view::SCROLL_TO`] 的 `edge`）。
+#[serde(rename_all = "camelCase")]
+pub enum ScrollEdge {
+    /// 纵向容器 = 顶部；横向容器 = 最左。
+    Start,
+    /// 纵向容器 = 底部；横向容器 = 最右。
+    End,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// `view.scrollTo` 的 params：把某可滚动节点（`list` / `scroll`）滚到一端。
+#[serde(rename_all = "camelCase")]
+pub struct ScrollToParams {
+    pub surface_id: String,
+    pub node_id: String,
+    pub edge: ScrollEdge,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
 /// 接管范围（封闭枚举）。`page` = 内容区全给插件（宿主标题栏保留）；`full` = 整窗归插件呈现
 /// （含标题栏区域，窗口拖动 / 缩放 / 关闭由宿主代执行）。
 #[serde(rename_all = "camelCase")]
@@ -801,6 +978,32 @@ pub struct WindowCloseParams {
 
 ```rust
 // atelyx-plugin-protocol/src/method.rs
+/// `window.update` 的 params：运行时改一个已打开窗口的属性（缺省字段不动）。至少给一项。
+/// 「不进任务栏」是开窗期设置，运行时不支持改。
+#[serde(rename_all = "camelCase")]
+pub struct WindowUpdateParams {
+    /// 插件声明的窗口 id（`window.open` 的 `id`）。
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub always_on_top: Option<bool>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// `window.show` / `host:window.hidden` 的 params：按插件声明的窗口 id。
+#[serde(rename_all = "camelCase")]
+pub struct WindowIdParams {
+    pub id: String,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
 /// [`window::HOST_CLOSED`] 的 params：用户（而非插件）关闭了该窗口。
 #[serde(rename_all = "camelCase")]
 pub struct WindowClosedParams {
@@ -821,6 +1024,10 @@ pub mod view {
     pub const REGISTER: &str = "view.register";
     /// 插件按 id 撤销自己的一个贡献点。
     pub const UNREGISTER: &str = "view.unregister";
+    /// 插件定义一枚自备图标形状（24x24 网格的描边路径），此后按名字在贡献与控件里引用。
+    pub const DEFINE_ICON: &str = "view.defineIcon";
+    /// 把一个可滚动容器（list / scroll）滚到一端。目标节点须在当前树里且为可滚动容器。
+    pub const SCROLL_TO: &str = "view.scrollTo";
     /// 插件请求接管当前聚焦窗口（整页 / 全接管）。宿主按窗应用，退出入口由宿主常驻提供。
     pub const TAKEOVER: &str = "view.takeover";
     /// 宿主回发节点事件（通知）。
@@ -838,8 +1045,14 @@ pub mod window {
     pub const OPEN: &str = "window.open";
     /// 插件关闭自己打开的一个窗口。
     pub const CLOSE: &str = "window.close";
+    /// 插件运行时改一个已打开窗口的属性（尺寸 / 置顶；「不进任务栏」只能在开窗时声明）。
+    pub const UPDATE: &str = "window.update";
+    /// 插件重新显示一个因失焦被隐藏的窗口（`hideOnBlur` 的唤起回路）。
+    pub const SHOW: &str = "window.show";
     /// 宿主告知插件某个窗口已被用户关闭（通知）。
     pub const HOST_CLOSED: &str = "host:window.closed";
+    /// 宿主告知插件某个窗口因失焦被收起（通知）；插件可用 [`SHOW`] 重新显示。
+    pub const HOST_HIDDEN: &str = "host:window.hidden";
 }
 ```
 
@@ -900,6 +1113,8 @@ pub mod table {
     pub const REMOVE_ROW: &str = "table.removeRow";
     /// 写宿主选中态（视图与表格联动用）。
     pub const SELECT_ROW: &str = "table.selectRow";
+    /// 向图片字段单元格写入图片引用（图片须先经 `vault.writeBinary` 落到仓库）。
+    pub const SET_CELL_IMAGE: &str = "table.setCellImage";
 }
 ```
 
@@ -923,6 +1138,8 @@ pub mod notification {
 pub mod shortcut {
     pub const REGISTER: &str = "shortcut.register";
     pub const UNREGISTER: &str = "shortcut.unregister";
+    /// 事前查询某键位是否已被占用（返回占用方插件 id，或仅知「被系统 / 其他应用占用」）。
+    pub const QUERY: &str = "shortcut.query";
     /// 全局快捷键触发（通知）。
     pub const HOST_TRIGGERED: &str = "host:shortcut.triggered";
 }
@@ -969,6 +1186,8 @@ pub mod doc {
 pub mod canvas {
     /// 插件提交一份绘图指令清单到某个画布节点。宿主合帧应用（渲染每帧只取最新一份）。
     pub const SUBMIT: &str = "canvas.submit";
+    /// 宿主告知插件画布节点的像素尺寸（通知，尺寸变化时发）。
+    pub const HOST_RESIZED: &str = "host:canvas.resized";
 }
 ```
 
@@ -983,6 +1202,12 @@ pub mod ai {
     pub const CHAT_STOP: &str = "ai.chat.stop";
     /// 读当前激活仓库的会话清单或单会话消息历史。
     pub const CHAT_HISTORY: &str = "ai.chat.history";
+    /// 重命名一个会话（写其元数据标题）。
+    pub const CHAT_RENAME: &str = "ai.chat.rename";
+    /// 删除一个会话（连同其消息文件）。
+    pub const CHAT_DELETE: &str = "ai.chat.delete";
+    /// 压缩一个会话（把较早消息总结为压缩起点；回执 = 已受理，结果经 `ai.chat.history` 复核）。
+    pub const CHAT_COMPACT: &str = "ai.chat.compact";
     /// 对话事件流（通知）：快照节流拍 + 终态 + 命名结果。
     pub const HOST_CHAT_EVENT: &str = "host:ai.chat.event";
     /// 注册一个可被 Agent 调用的工具（名称全局唯一，不得与内置工具或其他插件的工具重名）。
@@ -1216,6 +1441,27 @@ pub struct ShortcutTriggeredParams {
 
 ```rust
 // atelyx-plugin-protocol/src/method.rs
+/// `shortcut.query` 的 params。
+#[serde(rename_all = "camelCase")]
+pub struct ShortcutQueryParams {
+    pub accelerator: String,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// `shortcut.query` 的 result：`available` = 可注册；`owner` = 占用方插件 id（被系统 / 其他应用占用
+/// 或无占用时为缺省——此时只有 `available` 可信，宿主无从得知占用者身份）。
+#[serde(rename_all = "camelCase")]
+pub struct ShortcutQueryResult {
+    pub available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
 /// 剪贴板写 params 与读 result 共用：一段纯文本。
 #[serde(rename_all = "camelCase")]
 pub struct TextPayload {
@@ -1375,6 +1621,7 @@ pub struct ChatStopParams {
 ```rust
 // atelyx-plugin-protocol/src/method.rs
 /// [`ai::CHAT_HISTORY`] 的 params：`session_id` 缺省 = 列会话清单；非缺省 = 读该会话消息。
+/// 单会话模式可给 `offset` / `query` 做分页与搜索（`offset` 为末尾起算的跳过条数）。
 #[serde(rename_all = "camelCase")]
 pub struct ChatHistoryParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1382,6 +1629,32 @@ pub struct ChatHistoryParams {
     /// 消息条数上限（读单会话时生效；缺省全量，超出取末尾）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
+    /// 从末尾起跳过的条数（分页：先按 `query` 过滤，再取 `[len-offset-limit, len-offset)`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<u32>,
+    /// 关键词过滤（在消息文本中不区分大小写搜索；缺省不过滤）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`ai::CHAT_RENAME`] 的 params。
+#[serde(rename_all = "camelCase")]
+pub struct ChatRenameParams {
+    pub session_id: String,
+    /// 新标题（非空；空白视为非法）。
+    pub title: String,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`ai::CHAT_DELETE`] / [`ai::CHAT_COMPACT`] 的 params。
+#[serde(rename_all = "camelCase")]
+pub struct ChatSessionParams {
+    pub session_id: String,
 }
 ```
 
@@ -1596,6 +1869,20 @@ pub struct TableAddRowResult {
 #[serde(rename_all = "camelCase")]
 pub struct TableRowIdParams {
     pub row_id: String,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`table::SET_CELL_IMAGE`] 的 params：整格替换图片引用列表（`images` 为仓库相对路径，
+/// 须先经 `vault.writeBinary` 落盘）。`display` 为显示形态（如 `grid`），缺省保持宿主默认。
+#[serde(rename_all = "camelCase")]
+pub struct TableSetCellImageParams {
+    pub row_id: String,
+    pub field_id: String,
+    pub images: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<String>,
 }
 ```
 

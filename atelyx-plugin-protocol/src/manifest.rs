@@ -16,6 +16,9 @@ pub struct Manifest {
     pub version: String,
     /// 协议版本，必须等于宿主的 [`crate::API_VERSION`]。
     pub api_version: u32,
+    /// 最低宿主版本（语义化版本，如 `0.4.0`）；缺省 = 不限。宿主低于它即拒绝装载。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_host_version: Option<String>,
     pub entry: Entry,
     /// 能力声明清单：未声明的能力调用一律被宿主拒绝（fail-closed）。
     pub permissions: Vec<Permission>,
@@ -98,6 +101,11 @@ impl Manifest {
         if self.api_version == 0 {
             return Err("apiVersion 不能为空或 0".into());
         }
+        if let Some(min) = &self.min_host_version {
+            if parse_semver(min).is_none() {
+                return Err(format!("minHostVersion 非法（须为点分数字版本，如 0.4 或 0.4.0）：{min}"));
+            }
+        }
         for reg in &self.doc_type_registrations {
             if reg.extension.trim().is_empty() || reg.extension.contains('.') {
                 return Err(format!("文档类型扩展名非法：{}", reg.extension));
@@ -108,6 +116,28 @@ impl Manifest {
         }
         Ok(())
     }
+}
+
+/// 宽松语义化版本解析：`x` / `x.y` / `x.y.z`（缺段补 0），可带 `-` 预发布后缀（忽略）。
+/// 返回 `None` = 非法形态。宿主与插件两侧共用同一口径做版本比较。
+pub fn parse_semver(version: &str) -> Option<(u32, u32, u32)> {
+    let core = version.trim().split('-').next().unwrap_or("");
+    if core.is_empty() {
+        return None;
+    }
+    let mut parts = [0u32; 3];
+    let mut count = 0;
+    for (index, segment) in core.split('.').enumerate() {
+        if index >= 3 {
+            return None;
+        }
+        if segment.is_empty() || !segment.chars().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        parts[index] = segment.parse().ok()?;
+        count += 1;
+    }
+    (count >= 1).then_some((parts[0], parts[1], parts[2]))
 }
 
 /// 反向域名 id：至少两段、每段为字母数字或 `-` 且不以 `-` 起止；同时用作目录名，

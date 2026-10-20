@@ -55,6 +55,8 @@ pub(crate) struct Instance {
     manifest: Manifest,
     dir: PathBuf,
     state_dir: PathBuf,
+    /// 宿主产品版本（握手自报宿主信息用；由运行时在建立实例时给定）。
+    host_version: String,
     process_host: Arc<PluginProcessHost>,
     shortcuts: Arc<shortcut::Registrar>,
     events: tokio::sync::broadcast::Sender<PluginEvent>,
@@ -86,6 +88,8 @@ pub(crate) struct Instance {
     canvases: CanvasLists,
     /// 已注册贡献点（按注册序）；id 插件内唯一，撤销按 id 摘除。
     contributions: Mutex<Vec<ContributionEntry>>,
+    /// 插件经 `view.defineIcon` 定义的自备图标形状（名字 → 24x24 描边路径）；随会话收尾清除。
+    icons: Mutex<HashMap<String, String>>,
     view_submits: AtomicU64,
     crash_times: Mutex<Vec<Instant>>,
     /// 本插件日志（插件 stderr、协议违规与生命周期失败的唯一可查落点）。
@@ -101,6 +105,7 @@ struct ContributionEntry {
     id: String,
     label: String,
     icon: Option<String>,
+    padding: Option<f32>,
 }
 
 impl Instance {
@@ -108,6 +113,7 @@ impl Instance {
         manifest: Manifest,
         dir: PathBuf,
         state_dir: PathBuf,
+        host_version: String,
         process_host: Arc<PluginProcessHost>,
         shortcuts: Arc<shortcut::Registrar>,
         events: tokio::sync::broadcast::Sender<PluginEvent>,
@@ -118,6 +124,7 @@ impl Instance {
             manifest,
             dir,
             state_dir,
+            host_version,
             process_host,
             shortcuts,
             events,
@@ -136,6 +143,7 @@ impl Instance {
             surfaces: Mutex::new(HashMap::new()),
             canvases: Mutex::new(HashMap::new()),
             contributions: Mutex::new(Vec::new()),
+            icons: Mutex::new(HashMap::new()),
             view_submits: AtomicU64::new(0),
             crash_times: Mutex::new(Vec::new()),
             log,
@@ -192,8 +200,14 @@ impl Instance {
                 id: entry.id.clone(),
                 label: entry.label.clone(),
                 icon: entry.icon.clone(),
+                padding: entry.padding,
             })
             .collect()
+    }
+
+    /// 本插件定义的自备图标形状（名字 → 路径）；会话收尾即清空。
+    pub(crate) fn icons(&self) -> HashMap<String, String> {
+        self.icons.lock().unwrap().clone()
     }
 
     /// 手动重试前清零崩溃计数（否则窗口内的旧崩溃会立刻把新会话判为熔断）。
@@ -303,6 +317,7 @@ impl Instance {
         self.canvases.lock().unwrap().clear();
         let contributions_dropped = !self.contributions.lock().unwrap().is_empty();
         self.contributions.lock().unwrap().clear();
+        self.icons.lock().unwrap().clear();
         for child in self.children.take_all() {
             if let Err(e) = self.process_host.kill_process_tree(child) {
                 eprintln!("[plugin {}] 结束子进程 {child} 失败：{e}", self.id);
@@ -552,7 +567,11 @@ impl Instance {
         // 读线程不等待窗口创建与接管应用。
         if matches!(
             method,
-            method::view::TAKEOVER | method::window::OPEN | method::window::CLOSE
+            method::view::TAKEOVER
+                | method::window::OPEN
+                | method::window::CLOSE
+                | method::window::UPDATE
+                | method::window::SHOW
         ) {
             self.handle_ui_request(token, id, method, &request.params);
             return;
@@ -564,6 +583,9 @@ impl Instance {
             method::ai::CHAT_SEND
                 | method::ai::CHAT_STOP
                 | method::ai::CHAT_HISTORY
+                | method::ai::CHAT_RENAME
+                | method::ai::CHAT_DELETE
+                | method::ai::CHAT_COMPACT
                 | method::clipboard::WRITE_TEXT
                 | method::clipboard::READ_TEXT
                 | method::clipboard::READ_IMAGE
@@ -578,6 +600,8 @@ impl Instance {
                 | method::table::ADD_ROW
                 | method::table::REMOVE_ROW
                 | method::table::SELECT_ROW
+                | method::table::SET_CELL_IMAGE
+                | method::view::SCROLL_TO
         ) {
             self.handle_shell_request(token, id, method, &request.params);
             return;
@@ -657,6 +681,15 @@ impl Instance {
                     let p: method::WindowCloseParams =
                         parse(params).map_err(|e| e.to_string())?;
                     runtime.close_plugin_window(&self.id, &p.id)
+                }
+                method::window::UPDATE => {
+                    let p: method::WindowUpdateParams =
+                        parse(params).map_err(|e| e.to_string())?;
+                    runtime.update_plugin_window(&self.id, p)
+                }
+                method::window::SHOW => {
+                    let p: method::WindowIdParams = parse(params).map_err(|e| e.to_string())?;
+                    runtime.show_plugin_window(&self.id, &p.id)
                 }
                 _ => Err("未知界面服务请求".to_string()),
             }
@@ -809,6 +842,47 @@ impl Instance {
                         row_id: p.row_id,
                     }
                 }
+                method::table::SET_CELL_IMAGE => {
+                    let p: method::TableSetCellImageParams =
+                        parse(params).map_err(|e| e.to_string())?;
+                    HostRequest::TableSetCellImage {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        params: p,
+                    }
+                }
+                method::view::SCROLL_TO => {
+                    let p: method::ScrollToParams = parse(params).map_err(|e| e.to_string())?;
+                    HostRequest::ScrollTo {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        params: p,
+                    }
+                }
+                method::ai::CHAT_RENAME => {
+                    let p: method::ChatRenameParams = parse(params).map_err(|e| e.to_string())?;
+                    HostRequest::ChatRename {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        params: p,
+                    }
+                }
+                method::ai::CHAT_DELETE => {
+                    let p: method::ChatSessionParams = parse(params).map_err(|e| e.to_string())?;
+                    HostRequest::ChatDelete {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        params: p,
+                    }
+                }
+                method::ai::CHAT_COMPACT => {
+                    let p: method::ChatSessionParams = parse(params).map_err(|e| e.to_string())?;
+                    HostRequest::ChatCompact {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        params: p,
+                    }
+                }
                 _ => return Err("未知宿主服务请求".to_string()),
             };
             runtime.open_shell_call(request)
@@ -846,6 +920,7 @@ impl Instance {
             method::view::SUBMIT => self.on_submit(token, params),
             method::view::REGISTER => self.on_register(token, params),
             method::view::UNREGISTER => self.on_unregister(token, params),
+            method::view::DEFINE_ICON => self.on_define_icon(token, params),
             method::canvas::SUBMIT => self.on_canvas_submit(token, params),
             method::state::READ => {
                 let json = capability::read_state(&self.state_dir).map_err(RpcError::failed)?;
@@ -949,6 +1024,16 @@ impl Instance {
                     .map_err(RpcError::failed)?;
                 Ok(json!({}))
             }
+            method::shortcut::QUERY => {
+                let p: method::ShortcutQueryParams = parse(params)?;
+                // 与同面注册 / 注销同口径过会话闸门：已停会话的在途查询不再白跑一次 OS 试探
+                let (available, owner) = self
+                    .with_session(token, || self.shortcuts.query(&self.id, &p.accelerator))
+                    .map_err(RpcError::failed)?;
+                let result = method::ShortcutQueryResult { available, owner };
+                serde_json::to_value(result)
+                    .map_err(|e| RpcError::failed(format!("应答序列化失败：{e}")))
+            }
 
             // ---------- http / dialog ----------
             method::http::REQUEST => {
@@ -989,10 +1074,13 @@ impl Instance {
                 );
                 Ok(json!({}))
             }
-            // AI 对话 / 剪贴板 / 仓库读写 / 表格读写走异步应答（见 handle_request 的分流），不经此处同步应答
+            // AI 对话 / 剪贴板 / 仓库读写 / 表格读写 / 滚动指令走异步应答（见 handle_request 的分流）
             method::ai::CHAT_SEND
             | method::ai::CHAT_STOP
             | method::ai::CHAT_HISTORY
+            | method::ai::CHAT_RENAME
+            | method::ai::CHAT_DELETE
+            | method::ai::CHAT_COMPACT
             | method::clipboard::WRITE_TEXT
             | method::clipboard::READ_TEXT
             | method::clipboard::READ_IMAGE
@@ -1006,7 +1094,11 @@ impl Instance {
             | method::table::UPDATE_CELL
             | method::table::ADD_ROW
             | method::table::REMOVE_ROW
-            | method::table::SELECT_ROW => {
+            | method::table::SELECT_ROW
+            | method::table::SET_CELL_IMAGE
+            | method::view::SCROLL_TO
+            | method::window::UPDATE
+            | method::window::SHOW => {
                 Err(RpcError::failed("宿主服务请求须走异步应答路径"))
             }
             // 已声明但尚未实现的能力面：以可读失败收场，不静默成功
@@ -1038,7 +1130,7 @@ impl Instance {
             api_version: API_VERSION,
             host: HostInfo {
                 name: HOST_NAME.to_string(),
-                version: env!("CARGO_PKG_VERSION").to_string(),
+                version: self.host_version.clone(),
             },
         };
         serde_json::to_value(result).map_err(|e| RpcError::failed(format!("握手应答序列化失败：{e}")))
@@ -1146,7 +1238,30 @@ impl Instance {
                 id: p.id,
                 label: p.label,
                 icon: p.icon,
+                padding: p.padding,
             });
+            Ok(())
+        })
+        .map_err(RpcError::failed)?;
+        let _ = self.events.send(PluginEvent::ContributionsChanged { id: self.id.clone() });
+        Ok(json!({}))
+    }
+
+    /// 定义一枚自备图标形状：名字须为字母 / 数字 / `_` / `-` 且不超过 64，路径非空。
+    /// 同名重复定义即原地更新。定义是界面通道（不占权限声明），随会话收尾清除。
+    fn on_define_icon(self: &Arc<Self>, token: u64, params: &Value) -> Result<Value, RpcError> {
+        let p: method::DefineIconParams = parse(params)?;
+        if !valid_icon_name(&p.name) {
+            return Err(RpcError::failed(format!(
+                "图标名非法（字母 / 数字 / `_` / `-`，最长 64）：{}",
+                p.name
+            )));
+        }
+        if p.path.trim().is_empty() {
+            return Err(RpcError::failed("图标路径不能为空"));
+        }
+        self.with_session(token, || {
+            self.icons.lock().unwrap().insert(p.name, p.path);
             Ok(())
         })
         .map_err(RpcError::failed)?;
@@ -1259,6 +1374,23 @@ impl Instance {
             event,
         };
         self.notify(method::view::HOST_EVENT, &params);
+    }
+
+    /// 回发画布节点当前的像素尺寸（`host:canvas.resized`；尺寸变化时发）。
+    pub(crate) fn notify_canvas_resized(&self, surface_id: &str, node_id: &str, width: f32, height: f32) {
+        let params = method::CanvasResizedParams {
+            surface_id: surface_id.to_string(),
+            node_id: node_id.to_string(),
+            width,
+            height,
+        };
+        self.notify(method::canvas::HOST_RESIZED, &params);
+    }
+
+    /// 告知插件某窗口因失焦被收起（`host:window.hidden`）。
+    pub(crate) fn notify_window_hidden(&self, window_id: &str) {
+        let params = method::WindowIdParams { id: window_id.to_string() };
+        self.notify(method::window::HOST_HIDDEN, &params);
     }
 
     /// 告知插件某个面已挂载（`host:surface.attached`）。
@@ -1437,6 +1569,13 @@ fn record_crash(times: &mut Vec<Instant>, now: Instant) -> usize {
     times.len()
 }
 
+/// 自备图标名的形态：字母 / 数字 / `_` / `-`，非空且不超过 64。
+fn valid_icon_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
 /// 树里是否存在指定 id 的 canvas 节点（树重发时清理孤儿清单的判据）。
 fn has_canvas_node(tree: &ViewNode, node_id: &str) -> bool {
     tree.find(node_id).is_some_and(|node| matches!(node.body, view::NodeBody::Canvas { .. }))
@@ -1500,6 +1639,7 @@ mod tests {
             manifest,
             dir,
             tmp.join("state"),
+            env!("CARGO_PKG_VERSION").to_string(),
             Arc::new(PluginProcessHost::new()),
             // 无 OS 层的注册器：单测不落真实热键，注册路径以可读失败收场
             shortcut::Registrar::unavailable("全局快捷键不可用：测试"),
@@ -1668,8 +1808,28 @@ mod tests {
 
         instance.handle_line(&request_line(method::window::CLOSE, &json!({ "id": "float" })));
         let request = rt.block_on(runtime.recv_host_request()).unwrap();
-        let HostRequest::CloseWindow { window_id, .. } = request else {
+        let HostRequest::CloseWindow { request_id, window_id, .. } = request else {
             panic!("应投递关窗请求");
+        };
+        assert_eq!(window_id, "float");
+        runtime.resolve_ui_call(request_id, Ok(()));
+
+        instance.handle_line(&request_line(
+            method::window::UPDATE,
+            &json!({ "id": "float", "height": 520.0, "alwaysOnTop": false }),
+        ));
+        let request = rt.block_on(runtime.recv_host_request()).unwrap();
+        let HostRequest::WindowUpdate { request_id, params, .. } = request else {
+            panic!("应投递窗口更新请求");
+        };
+        assert_eq!(params.height, Some(520.0));
+        assert_eq!(params.always_on_top, Some(false));
+        runtime.resolve_ui_call(request_id, Ok(()));
+
+        instance.handle_line(&request_line(method::window::SHOW, &json!({ "id": "float" })));
+        let request = rt.block_on(runtime.recv_host_request()).unwrap();
+        let HostRequest::WindowShow { window_id, .. } = request else {
+            panic!("应投递窗口显示请求");
         };
         assert_eq!(window_id, "float");
     }
@@ -1721,7 +1881,7 @@ mod tests {
     fn shell_side_service_requests_route_and_resolve() {
         let tmp = TempDir::new("instance-shell-request");
         let runtime = PluginRuntime::new(tmp.to_path_buf());
-        let (_t, instance) = make_instance(vec![Permission::Clipboard, Permission::Vault, Permission::Table]);
+        let (_t, instance) = make_instance(vec![Permission::Clipboard, Permission::Vault, Permission::Table, Permission::Ai]);
         instance.attach_runtime(&runtime);
         runtime
             .instances
@@ -1851,6 +2011,51 @@ mod tests {
         };
         assert_eq!(row_id, "r1");
         runtime.resolve_shell_call(request_id, Ok(json!({})));
+
+        instance.handle_line(&request_line(
+            method::table::SET_CELL_IMAGE,
+            &json!({ "rowId": "r1", "fieldId": "f2", "images": ["assets/a.png"], "display": "grid" }),
+        ));
+        let request = rt.block_on(runtime.recv_host_request()).unwrap();
+        let HostRequest::TableSetCellImage { request_id, params, .. } = request else {
+            panic!("应投递图片单元格写入请求");
+        };
+        assert_eq!(params.images, vec!["assets/a.png"]);
+        assert_eq!(params.display.as_deref(), Some("grid"));
+        runtime.resolve_shell_call(request_id, Ok(json!({})));
+
+        instance.handle_line(&request_line(
+            method::view::SCROLL_TO,
+            &json!({ "surfaceId": "panel", "nodeId": "log", "edge": "end" }),
+        ));
+        let request = rt.block_on(runtime.recv_host_request()).unwrap();
+        let HostRequest::ScrollTo { request_id, params, .. } = request else {
+            panic!("应投递滚动指令");
+        };
+        assert_eq!(params.edge, method::ScrollEdge::End);
+        runtime.resolve_shell_call(request_id, Ok(json!({})));
+
+        instance.handle_line(&request_line(method::ai::CHAT_RENAME, &json!({ "sessionId": "s1", "title": "周报" })));
+        let request = rt.block_on(runtime.recv_host_request()).unwrap();
+        let HostRequest::ChatRename { request_id, params, .. } = request else {
+            panic!("应投递重命名请求");
+        };
+        assert_eq!(params.title, "周报");
+        runtime.resolve_shell_call(request_id, Ok(json!({})));
+
+        instance.handle_line(&request_line(method::ai::CHAT_DELETE, &json!({ "sessionId": "s1" })));
+        let request = rt.block_on(runtime.recv_host_request()).unwrap();
+        let HostRequest::ChatDelete { request_id, .. } = request else {
+            panic!("应投递删除请求");
+        };
+        runtime.resolve_shell_call(request_id, Ok(json!({})));
+
+        instance.handle_line(&request_line(method::ai::CHAT_COMPACT, &json!({ "sessionId": "s1" })));
+        let request = rt.block_on(runtime.recv_host_request()).unwrap();
+        let HostRequest::ChatCompact { request_id, .. } = request else {
+            panic!("应投递压缩请求");
+        };
+        runtime.resolve_shell_call(request_id, Ok(json!({})));
     }
 
     #[test]
@@ -1866,14 +2071,17 @@ mod tests {
     /// 各能力面「未声明被拒」：闸门只认 manifest 声明，未声明一律 fail-closed 且记审计。
     #[test]
     fn undeclared_calls_of_each_face_are_denied() {
-        let cases: [(Permission, &str, Value); 6] = [
+        let cases: [(Permission, &str, Value); 9] = [
             // 入参一律取「必然执行失败但不会真的落盘 / 出网 / 弹框」的形态
             (Permission::Process, method::process::SPAWN, json!({ "program": "atelyx-no-such-program" })),
             (Permission::Fs, method::fs::LIST, json!({ "path": "atelyx-no-such-dir" })),
             (Permission::Shortcuts, method::shortcut::REGISTER, json!({ "accelerator": "Ctrl+F9" })),
+            (Permission::Shortcuts, method::shortcut::QUERY, json!({ "accelerator": "Ctrl+F9" })),
             (Permission::Http, method::http::REQUEST, json!({ "method": "GET", "url": "ftp://example.com" })),
             (Permission::Dialog, method::dialog::PICK_DIRECTORY, Value::Null),
             (Permission::Table, method::table::SNAPSHOT, Value::Null),
+            (Permission::Table, method::table::SET_CELL_IMAGE, json!({ "rowId": "r1", "fieldId": "f1", "images": [] })),
+            (Permission::Ai, method::ai::CHAT_RENAME, json!({ "sessionId": "s1", "title": "T" })),
         ];
         for (permission, method_name, params) in cases {
             // 未声明：拒绝并留痕（响应写往不存在的插件进程，观测点在审计记录）
@@ -1993,6 +2201,49 @@ mod tests {
     fn unknown_method_fails() {
         let (_tmp, instance) = make_instance(Vec::new());
         assert!(instance.dispatch("nope.method", &Value::Null).is_err());
+    }
+
+    /// 自备图标定义：名字 / 路径校验通过即登记，随会话收尾清除。
+    #[test]
+    fn define_icon_validates_and_clears_on_teardown() {
+        let (_tmp, instance) = make_instance(Vec::new());
+        instance
+            .dispatch(method::view::DEFINE_ICON, &json!({ "name": "model-chip", "path": "M4 4h16v16H4z" }))
+            .expect("合法自备图标应被登记");
+        assert_eq!(instance.icons().get("model-chip").map(String::as_str), Some("M4 4h16v16H4z"));
+        for bad in [
+            json!({ "name": "", "path": "M4 4" }),
+            json!({ "name": "has space", "path": "M4 4" }),
+            json!({ "name": "ok", "path": "   " }),
+        ] {
+            assert!(instance.dispatch(method::view::DEFINE_ICON, &bad).is_err(), "应拒绝：{bad}");
+        }
+        instance.stop();
+        assert!(instance.icons().is_empty(), "收尾后自备图标应清空");
+    }
+
+    /// 快捷键占用查询：无 OS 层时以可读失败收场（与注册同一原因），非法加速键亦拒。
+    #[test]
+    fn shortcut_query_reports_platform_unavailability() {
+        let (_tmp, instance) = make_instance(vec![Permission::Shortcuts]);
+        let error = instance
+            .dispatch(method::shortcut::QUERY, &json!({ "accelerator": "Ctrl+F9" }))
+            .expect_err("无 OS 层时查询应可读失败");
+        assert!(error.message.contains("不可用"), "{}", error.message);
+        assert!(
+            instance.dispatch(method::shortcut::QUERY, &json!({ "accelerator": "不认识的键" })).is_err(),
+            "非法加速键应被拒"
+        );
+    }
+
+    /// 运行时时序方法（界面通道）不占权限：未声明任何能力的插件也能定义图标 / 发滚动指令。
+    #[test]
+    fn interface_channel_methods_need_no_permission() {
+        let (_tmp, instance) = make_instance(Vec::new());
+        instance
+            .dispatch(method::view::DEFINE_ICON, &json!({ "name": "chip", "path": "M4 4h4v4H4z" }))
+            .expect("定义图标不占权限声明");
+        assert_eq!(instance.denied_count(), 0);
     }
 
     #[test]

@@ -415,7 +415,15 @@ pub enum ChatMsg {
         request_id: u64,
         session_id: Option<String>,
         limit: Option<u32>,
+        offset: Option<u32>,
+        query: Option<String>,
     },
+    /// 插件请求重命名一个会话（ai.chat.rename）。
+    PluginRename { request_id: u64, session_id: String, title: String },
+    /// 插件请求删除一个会话（ai.chat.delete）。
+    PluginDelete { request_id: u64, session_id: String },
+    /// 插件请求压缩一个会话（ai.chat.compact；回执 = 已受理）。
+    PluginCompact { request_id: u64, session_id: String },
 }
 
 /// 用户发起的对话动作（决定提示词补齐后回到哪个入口续跑）。
@@ -910,29 +918,8 @@ fn update_inner(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
             }
             app.chat.delete_confirm = None;
             app.chat.session_menu = None;
-            let _ = store().commit(CommitBatch {
-                deletes: vec![DeleteEntry {
-                    session_id: id.clone(),
-                    remove_files: true,
-                }],
-                ..Default::default()
-            });
-            app.chat.sessions.retain(|s| s["id"] != json!(id));
-            if app.chat.active.as_deref() == Some(id.as_str()) {
-                app.chat.active = latest_session_id(&app.chat.sessions);
-            }
-            // 附件临时目录随会话清理（本地仓库自管区；空间侧附件随服务端内容）
-            if matches!(app.repo_kind, RepoKind::Local) {
-                if let Some(root) = app.vault_root.clone() {
-                    if let Ok(dir) = atelyx_core::vault::chat_attachment_dir(&root, &id) {
-                        if let Err(e) = std::fs::remove_dir_all(&dir) {
-                            app.notify(
-                                crate::NoticeLevel::Warning,
-                                format!("会话附件临时目录清理失败：{e}"),
-                            );
-                        }
-                    }
-                }
+            if let Err(e) = delete_session_now(app, &id) {
+                app.notify(crate::NoticeLevel::Error, format!("会话删除失败：{e}"));
             }
             iced::Task::none()
         }
@@ -1030,7 +1017,12 @@ fn update_inner(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
             app.chat.rollback_confirm = None;
             iced::Task::none()
         }
-        ChatMsg::Compact => compact(app),
+        ChatMsg::Compact => {
+            let Some(session_id) = app.chat.active.clone() else {
+                return iced::Task::none();
+            };
+            compact(app, &session_id)
+        }
         ChatMsg::Run(event) => on_run_event(app, event),
         ChatMsg::PluginSend { request_id, plugin_id, text, session_id } => {
             plugin_chat_send(app, request_id, &plugin_id, text, session_id)
@@ -1040,10 +1032,32 @@ fn update_inner(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
             app.plugins.resolve_shell_call(request_id, Ok(json!({})));
             iced::Task::none()
         }
-        ChatMsg::PluginHistory { request_id, session_id, limit } => {
-            let result = plugin_history(&session_id, limit);
+        ChatMsg::PluginHistory { request_id, session_id, limit, offset, query } => {
+            let result = plugin_history(&session_id, limit, offset, query.as_deref());
             app.plugins.resolve_shell_call(request_id, result);
             iced::Task::none()
+        }
+        ChatMsg::PluginRename { request_id, session_id, title } => {
+            let result = plugin_rename(app, &session_id, &title);
+            app.plugins.resolve_shell_call(request_id, result);
+            iced::Task::none()
+        }
+        ChatMsg::PluginDelete { request_id, session_id } => {
+            let result = plugin_delete(app, &session_id);
+            app.plugins.resolve_shell_call(request_id, result);
+            iced::Task::none()
+        }
+        ChatMsg::PluginCompact { request_id, session_id } => {
+            match plugin_compact_check(app, &session_id) {
+                Ok(()) => {
+                    app.plugins.resolve_shell_call(request_id, Ok(json!({})));
+                    compact(app, &session_id)
+                }
+                Err(e) => {
+                    app.plugins.resolve_shell_call(request_id, Err(e));
+                    iced::Task::none()
+                }
+            }
         }
         ChatMsg::AidDone(kind, session_id, result) => {
             match kind {
@@ -1915,11 +1929,8 @@ fn rollback(app: &mut App, message_id: &str) -> iced::Task<Message> {
 }
 
 /// 手动压缩：全部消息折进检查点（≥2 条），摘要写会话 compaction 注解（非破坏）。
-fn compact(app: &mut App) -> iced::Task<Message> {
-    let Some(session_id) = app.chat.active.clone() else {
-        return iced::Task::none();
-    };
-    if app.chat.streaming.contains(&session_id) || app.chat.compacting.is_some() {
+fn compact(app: &mut App, session_id: &str) -> iced::Task<Message> {
+    if app.chat.streaming.contains(&session_id.to_string()) || app.chat.compacting.is_some() {
         return iced::Task::none();
     }
     let config = match resolve_run_config(app, app.chat.active_agent_id().as_deref(), None, false) {
@@ -1965,10 +1976,11 @@ fn compact(app: &mut App) -> iced::Task<Message> {
             LlmMessage::System { .. } => {}
         }
     }
-    app.chat.compacting = Some(session_id.clone());
+    app.chat.compacting = Some(session_id.to_string());
+    let sid = session_id.to_string();
     iced::Task::future(async move {
         let Some(client) = agent::aid_client(&config.base_url) else {
-            return Message::Chat(ChatMsg::AidDone(AidKind::Compact, session_id, None));
+            return Message::Chat(ChatMsg::AidDone(AidKind::Compact, sid, None));
         };
         let summary = agent::compact_summary(
             &client,
@@ -1978,7 +1990,7 @@ fn compact(app: &mut App) -> iced::Task<Message> {
             &transcript,
         )
         .await;
-        Message::Chat(ChatMsg::AidDone(AidKind::Compact, session_id, summary))
+        Message::Chat(ChatMsg::AidDone(AidKind::Compact, sid, summary))
     })
 }
 
@@ -2295,8 +2307,14 @@ fn plugin_chat_send(
     })
 }
 
-/// 插件读历史：无参 = 会话清单（按最近更新排序）；带参 = 单会话（limit 取末尾 N 条）。
-fn plugin_history(session_id: &Option<String>, limit: Option<u32>) -> Result<Value, String> {
+/// 插件读会话历史：清单模式只填 `sessions`；单会话模式先按 `query` 过滤、再按末尾 `offset` 跳过后取
+/// `limit` 条（缺省全量）。
+fn plugin_history(
+    session_id: &Option<String>,
+    limit: Option<u32>,
+    offset: Option<u32>,
+    query: Option<&str>,
+) -> Result<Value, String> {
     let store = store();
     match session_id {
         Some(id) => {
@@ -2304,12 +2322,16 @@ fn plugin_history(session_id: &Option<String>, limit: Option<u32>) -> Result<Val
                 .session_meta(id)
                 .ok_or_else(|| format!("会话 {id} 不存在"))?;
             let mut messages = store.session_messages(id).unwrap_or_default();
-            if let Some(limit) = limit {
-                let limit = limit as usize;
-                if messages.len() > limit {
-                    messages = messages.split_off(messages.len() - limit);
-                }
+            if let Some(query) = query.map(str::trim).filter(|q| !q.is_empty()) {
+                let needle = query.to_lowercase();
+                messages.retain(|m| message_matches_query(m, &needle));
             }
+            let end = messages.len().saturating_sub(offset.unwrap_or(0) as usize);
+            let start = match limit {
+                Some(limit) => end.saturating_sub(limit as usize),
+                None => 0,
+            };
+            let messages: Vec<Value> = messages.drain(start..end).collect();
             let wire = ChatSessionWire {
                 id: id.clone(),
                 title: meta.get("title").and_then(Value::as_str).map(str::to_string),
@@ -2340,6 +2362,90 @@ fn plugin_history(session_id: &Option<String>, limit: Option<u32>) -> Result<Val
                 .map_err(|e| format!("会话清单序列化失败：{e}"))
         }
     }
+}
+
+/// 一条消息是否命中关键词：在正文与展示文本里不区分大小写查找。
+fn message_matches_query(message: &Value, needle: &str) -> bool {
+    ["content", "displayContent"]
+        .iter()
+        .any(|key| message.get(key).and_then(Value::as_str).is_some_and(|text| text.to_lowercase().contains(needle)))
+}
+
+/// 立即删除一个会话：落盘删除、会话清单剔除、附件临时目录清理（本地仓库自管区）。
+/// 手工删除（二段确认后）与插件 `ai.chat.delete` 共用同一条链；落盘失败即中止，不把投影删成孤影。
+fn delete_session_now(app: &mut App, id: &str) -> Result<(), String> {
+    store().commit(CommitBatch {
+        deletes: vec![DeleteEntry { session_id: id.to_string(), remove_files: true }],
+        ..Default::default()
+    })?;
+    app.chat.sessions.retain(|s| s["id"] != json!(id));
+    if app.chat.active.as_deref() == Some(id) {
+        app.chat.active = latest_session_id(&app.chat.sessions);
+    }
+    if matches!(app.repo_kind, RepoKind::Local) {
+        if let Some(root) = app.vault_root.clone() {
+            if let Ok(dir) = atelyx_core::vault::chat_attachment_dir(&root, id) {
+                if let Err(e) = std::fs::remove_dir_all(&dir) {
+                    app.notify(crate::NoticeLevel::Warning, format!("会话附件临时目录清理失败：{e}"));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 插件重命名会话：写元数据标题并同步投影（时间戳与全仓库同一口径：毫秒）。
+fn plugin_rename(app: &mut App, session_id: &str, title: &str) -> Result<Value, String> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err("标题不能为空".to_string());
+    }
+    if store().session_meta(session_id).is_none() {
+        return Err(format!("会话 {session_id} 不存在"));
+    }
+    let now = now_ms();
+    store().commit(CommitBatch {
+        metas: vec![MetaPatch {
+            id: session_id.to_string(),
+            title: Some(title.to_string()),
+            agent_id: None,
+            compaction: None,
+            updated_at: Some(now),
+        }],
+        ..Default::default()
+    })?;
+    if let Some(session) = app.chat.sessions.iter_mut().find(|s| s["id"] == json!(session_id)) {
+        session["title"] = json!(title);
+        session["updatedAt"] = json!(now);
+    }
+    Ok(json!({}))
+}
+
+/// 插件删除会话：走与手工删除同一条链；落盘失败以可读原因回给插件，不静默当成功。
+fn plugin_delete(app: &mut App, session_id: &str) -> Result<Value, String> {
+    if store().session_meta(session_id).is_none() {
+        return Err(format!("会话 {session_id} 不存在"));
+    }
+    delete_session_now(app, session_id)?;
+    Ok(json!({}))
+}
+
+/// 插件压缩会话的前置校验：只放行「确实能起压缩」的请求（会话存在、无进行中的 run / 压缩、
+/// 且消息数够）。真正压缩复用面板的 [`compact`] 编排；回执 = 已受理，结果经 `ai.chat.history` 复核。
+fn plugin_compact_check(app: &App, session_id: &str) -> Result<(), String> {
+    if store().session_meta(session_id).is_none() {
+        return Err(format!("会话 {session_id} 不存在"));
+    }
+    if app.chat.compacting.is_some() {
+        return Err("已有压缩在进行".to_string());
+    }
+    if app.chat.streaming.contains(&session_id.to_string()) {
+        return Err("该会话有进行中的回复，暂不能压缩".to_string());
+    }
+    if store().session_messages(session_id).unwrap_or_default().len() < 2 {
+        return Err("对话内容太少，无需压缩".to_string());
+    }
+    Ok(())
 }
 
 /// 向发起会话的插件下发一条对话事件（无映射或运行时不可用静默跳过）。

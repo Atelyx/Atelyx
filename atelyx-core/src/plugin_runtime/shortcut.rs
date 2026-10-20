@@ -77,10 +77,12 @@ impl Owners {
     }
 }
 
-/// 交给 OS 工作线程执行的请求；注册 / 注销带一条回执通道（插件侧要同步结果）。
+/// 交给 OS 工作线程执行的请求；注册 / 注销 / 试探带一条回执通道（插件侧要同步结果）。
 enum WorkerRequest {
     Register(HotKey, Sender<Result<(), String>>),
     Unregister(HotKey, Sender<Result<(), String>>),
+    /// 试探某键位是否可注册：注册成功即空闲（随即注销），失败即被占用。
+    Probe(HotKey, Sender<Result<bool, String>>),
     Shutdown,
 }
 
@@ -176,6 +178,34 @@ impl Registrar {
             return Err(format!("全局快捷键注册失败（{accelerator}）：{e}"));
         }
         Ok(())
+    }
+
+    /// 事前查询某键位是否可注册：宿主已知归属时直接答（含占用方插件 id），否则探一次 OS
+    /// （注册成功即空闲、随即注销；被系统 / 其他应用占用即不可用，占用者身份无从得知）。
+    /// 返回 `(available, owner)`——`owner` 仅在本进程内有归属时给出。
+    pub(crate) fn query(&self, plugin_id: &str, accelerator: &str) -> Result<(bool, Option<String>), String> {
+        let hotkey = parse(accelerator)?;
+        if let Some(owner) = self.owners.lock().unwrap().get(hotkey.id()) {
+            return Ok((owner.plugin_id == plugin_id, Some(owner.plugin_id)));
+        }
+        if let Some(reason) = &self.unavailable {
+            return Err(reason.clone());
+        }
+        Ok((self.os_probe(hotkey)?, None))
+    }
+
+    /// 试探一次 OS 层占用（在 OS 工作线程上注册后立刻注销）。
+    fn os_probe(&self, hotkey: HotKey) -> Result<bool, String> {
+        let Some(worker) = &self.os else {
+            return Ok(true);
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        if worker.tx.send(WorkerRequest::Probe(hotkey, tx)).is_err() {
+            return Err("全局快捷键不可用：OS 工作线程已结束".to_string());
+        }
+        wake_worker(worker.thread_id);
+        rx.recv()
+            .unwrap_or_else(|_| Err("全局快捷键不可用：OS 工作线程已结束".to_string()))
     }
 
     /// 注销本插件注册的单个快捷键；未注册即幂等成功，非本插件注册的可读拒绝。
@@ -287,6 +317,21 @@ fn handle_worker_request(manager: &GlobalHotKeyManager, request: WorkerRequest) 
         }
         WorkerRequest::Unregister(hotkey, reply) => {
             let _ = reply.send(manager.unregister(hotkey).map_err(|e| e.to_string()));
+            true
+        }
+        WorkerRequest::Probe(hotkey, reply) => {
+            // 注册成功即空闲（立刻注销还回去）；失败即被系统 / 其他应用占用
+            let free = match manager.register(hotkey) {
+                Ok(()) => {
+                    if let Err(e) = manager.unregister(hotkey) {
+                        // 探测用的注销失败会留下一枚不属于归属表的占用：必须留痕，便于排障
+                        eprintln!("[plugin] 快捷键探测注销失败（{}）：{e}", hotkey);
+                    }
+                    true
+                }
+                Err(_) => false,
+            };
+            let _ = reply.send(Ok(free));
             true
         }
         WorkerRequest::Shutdown => false,

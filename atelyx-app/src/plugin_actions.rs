@@ -13,7 +13,8 @@ use iced::{Task, window};
 use atelyx_core::layout::{self, LayoutNode};
 use atelyx_core::plugin_runtime::{
     CanvasPointer, Contribution, ContributionSlot, DrawCommand, EventKind, EventValue, ImageSource,
-    NodeBody, SurfaceKind, TakeoverScope, ViewEvent, ViewNode, WindowOpenParams,
+    NodeBody, ScrollEdge, ScrollToParams, SurfaceKind, TakeoverScope, ViewEvent, ViewNode,
+    WindowOpenParams, WindowUpdateParams,
 };
 
 use crate::{App, Message};
@@ -179,7 +180,7 @@ fn event_kind(event: &ViewEvent) -> Option<EventKind> {
 
 /// 画布指针事件是否由节点声明。
 fn declares_pointer(node_body: &NodeBody, pointer: &CanvasPointer) -> bool {
-    let NodeBody::Canvas { mouse_events } = node_body else {
+    let NodeBody::Canvas { mouse_events, .. } = node_body else {
         return false;
     };
     mouse_events.iter().any(|kind| kind.matches(pointer))
@@ -299,6 +300,7 @@ pub fn refresh_projection(app: &mut App) -> Task<Message> {
     let contributions = app.plugins.contributions();
     app.plugin_contributions = contributions;
     app.plugin_doc_types = app.plugins.doc_types();
+    sync_plugin_icons(app);
     sync_settings_surfaces(app);
     sync_table_surfaces(app);
     let mut surfaces: Vec<(String, String)> = app.plugin_surfaces.iter().cloned().collect();
@@ -349,6 +351,21 @@ pub fn refresh_projection(app: &mut App) -> Task<Message> {
     ensure_images(app)
 }
 
+/// 重建自备图标注册表：先清空再按当前有界面的插件全量注册（插件停用 / 卸载后不留孤儿）。
+/// 每次投影刷新整体重建，避免维护一份跨事件的生命周期表。
+fn sync_plugin_icons(app: &App) {
+    crate::ui::icon::reset_dynamic();
+    let mut ids: HashSet<String> = app.plugin_trees.keys().map(|(plugin_id, _)| plugin_id.clone()).collect();
+    for contribution in &app.plugin_contributions {
+        ids.insert(contribution.plugin_id.clone());
+    }
+    for id in ids {
+        for (name, path) in app.plugins.plugin_icons(&id) {
+            crate::ui::icon::register_dynamic(&format!("{id}::{name}"), &path);
+        }
+    }
+}
+
 /// 撤掉某面的本地草稿、多行编辑器、画布清单与树投影（面移除 / 插件停用）。
 pub fn drop_node_state(app: &mut App, plugin_id: &str, surface_id: &str) {
     app.plugin_trees
@@ -361,15 +378,18 @@ pub fn drop_node_state(app: &mut App, plugin_id: &str, surface_id: &str) {
         .retain(|key, _| !(key.0 == plugin_id && key.1 == surface_id));
     app.plugin_markdown
         .retain(|key, _| !(key.0 == plugin_id && key.1 == surface_id));
+    app.plugin_hovered
+        .retain(|key| !(key.0 == plugin_id && key.1 == surface_id));
 }
 
-/// 撤掉树里已不存在的节点上的草稿与编辑器。
+/// 撤掉树里已不存在的节点上的草稿、编辑器与悬停态。
 fn prune_node_state(app: &mut App, plugin_id: &str, surface_id: &str, tree: &ViewNode) {
     let alive = |key: &InputKey| {
         key.0 != plugin_id || key.1 != surface_id || find_node(tree, key.2.as_str()).is_some()
     };
     app.plugin_drafts.retain(|key, _| alive(key));
     app.plugin_editors.retain(|key, _| alive(key));
+    app.plugin_hovered.retain(|key| alive(key));
 }
 
 /// 多行输入节点的本机编辑器同步：仅当插件值既不同于本机当前文本、也不同于已上报值时接管
@@ -439,7 +459,7 @@ fn sync_markdown(app: &mut App, plugin_id: &str, surface_id: &str, tree: &ViewNo
 }
 
 fn collect_markdown<'a>(node: &'a ViewNode, out: &mut Vec<(&'a str, &'a str)>) {
-    if let NodeBody::Markdown { content } = &node.body {
+    if let NodeBody::Markdown { content, .. } = &node.body {
         out.push((node.id.as_str(), content.as_str()));
     }
     for child in &node.children {
@@ -586,6 +606,11 @@ pub struct PluginWindowActive {
     /// 窗口标题（`window.open` 声明），OS 标题栏按它取。
     pub title: String,
     pub hide_on_blur: bool,
+    /// 最近一次已知窗口尺寸（开窗声明 + `window.update` 与 OS 调整事件共同维护）：
+    /// `window.update` 只改一维时另一维取它。
+    pub size: iced::Size,
+    /// 是否置顶（`window.update` 与开窗声明共同维护）。
+    pub always_on_top: bool,
     /// 插件已请求关闭、OS 窗口尚未销毁：同 id 可立即重新开窗，销毁事件到达时按是否已有新窗
     /// 决定要不要通知插件（见 [`on_plugin_window_closed`]）。
     pub closing: bool,
@@ -690,11 +715,13 @@ pub fn on_window_open(
             .resolve_ui_call(request_id, Err(format!("窗口 id 已存在：{}", params.id)));
         return Task::none();
     }
+    let size = iced::Size::new(
+        params.width.unwrap_or(480.0).max(160.0),
+        params.height.unwrap_or(640.0).max(120.0),
+    );
+    let always_on_top = params.always_on_top.unwrap_or(false);
     let mut settings = iced::window::Settings {
-        size: iced::Size::new(
-            params.width.unwrap_or(480.0).max(160.0),
-            params.height.unwrap_or(640.0).max(120.0),
-        ),
+        size,
         exit_on_close_request: true,
         icon: crate::ui::window_icon(),
         ..iced::window::Settings::default()
@@ -713,13 +740,15 @@ pub fn on_window_open(
             window_key: params.id.clone(),
             title: params.title.clone(),
             hide_on_blur,
+            size,
+            always_on_top,
             closing: false,
         },
     );
     app.plugins.resolve_ui_call(request_id, Ok(()));
     // 面就绪通知先于窗口可见（进程在跑时插件即刻可提交树；树投影由 ViewSubmitted 事件刷新）
     app.plugins.notify_surface_attached(&plugin_id, &params.id, SurfaceKind::Window);
-    let level = if params.always_on_top.unwrap_or(false) {
+    let level = if always_on_top {
         iced::window::Level::AlwaysOnTop
     } else {
         iced::window::Level::Normal
@@ -799,17 +828,111 @@ pub fn on_plugin_window_closed(app: &mut App, os_id: window::Id) -> Task<Message
     refresh_projection(app)
 }
 
-/// 插件窗口失焦：声明了 hide_on_blur 的隐藏窗口（浮窗形态）。
-pub fn on_plugin_window_blur(app: &mut App, os_id: window::Id) -> Task<Message> {
-    let hide = app
-        .plugin_windows
-        .get(&os_id)
-        .is_some_and(|w| w.hide_on_blur);
-    if hide {
-        iced::window::set_mode(os_id, iced::window::Mode::Hidden)
-    } else {
-        Task::none()
+/// 插件请求运行时改一个已打开窗口的属性：只改给出的项，其余保持现值。
+/// 尺寸只给一维时另一维取记账里的现值；窗口未打开（或关闭在途）以可读原因回填失败。
+pub fn on_window_update(
+    app: &mut App,
+    request_id: u64,
+    plugin_id: String,
+    params: WindowUpdateParams,
+) -> Task<Message> {
+    let Some(os_id) = live_plugin_window(app, &plugin_id, &params.id) else {
+        app.plugins
+            .resolve_ui_call(request_id, Err(format!("窗口未打开：{}", params.id)));
+        return Task::none();
+    };
+    app.plugins.resolve_ui_call(request_id, Ok(()));
+    let mut task = Task::none();
+    if let Some(entry) = app.plugin_windows.get_mut(&os_id) {
+        let mut size = entry.size;
+        if let Some(width) = params.width {
+            size.width = width.max(160.0);
+        }
+        if let Some(height) = params.height {
+            size.height = height.max(120.0);
+        }
+        if size != entry.size {
+            entry.size = size;
+            task = task.chain(iced::window::resize(os_id, size));
+        }
+        if let Some(on_top) = params.always_on_top {
+            if on_top != entry.always_on_top {
+                entry.always_on_top = on_top;
+                let level = if on_top {
+                    iced::window::Level::AlwaysOnTop
+                } else {
+                    iced::window::Level::Normal
+                };
+                task = task.chain(iced::window::set_level(os_id, level));
+            }
+        }
     }
+    task
+}
+
+/// 插件请求重新显示一个因失焦被隐藏的窗口（`hideOnBlur` 的唤起回路）。
+pub fn on_window_show(app: &mut App, request_id: u64, plugin_id: String, window_key: String) -> Task<Message> {
+    let Some(os_id) = live_plugin_window(app, &plugin_id, &window_key) else {
+        app.plugins
+            .resolve_ui_call(request_id, Err(format!("窗口未打开：{window_key}")));
+        return Task::none();
+    };
+    app.plugins.resolve_ui_call(request_id, Ok(()));
+    iced::window::set_mode(os_id, iced::window::Mode::Windowed)
+}
+
+/// 插件请求把某可滚动容器滚到一端。目标须在当前树里且为 `list` / `scroll` 容器。
+/// 该请求由运行时登记为**壳侧服务调用**（应答走 [`PluginRuntime::resolve_shell_call`]）。
+pub fn on_scroll_to(
+    app: &mut App,
+    request_id: u64,
+    plugin_id: String,
+    params: ScrollToParams,
+) -> Task<Message> {
+    let node = app
+        .plugin_trees
+        .get(&(plugin_id.clone(), params.surface_id.clone()))
+        .and_then(|tree| find_node(tree, &params.node_id))
+        .map(|node| node.body.clone());
+    let scrollable = matches!(node, Some(NodeBody::List { .. }) | Some(NodeBody::Scroll { .. }));
+    if !scrollable {
+        app.plugins.resolve_shell_call(
+            request_id,
+            Err(format!("目标不是可滚动容器：{}", params.node_id)),
+        );
+        return Task::none();
+    }
+    app.plugins.resolve_shell_call(request_id, Ok(serde_json::json!({})));
+    let id = crate::plugin_view::scroll_id(&plugin_id, &params.surface_id, &params.node_id);
+    match params.edge {
+        // `RelativeOffset` 按比例定位：START = 0（顶端 / 最左）、END = 1（底端 / 最右），由控件钳到真实末端
+        ScrollEdge::Start => iced::widget::operation::snap_to(
+            id,
+            iced::widget::operation::RelativeOffset::START,
+        ),
+        ScrollEdge::End => iced::widget::operation::snap_to_end(id),
+    }
+}
+
+/// 按插件 id + 窗口 key 找活窗（关闭在途的不算）。
+fn live_plugin_window(app: &App, plugin_id: &str, window_key: &str) -> Option<window::Id> {
+    app.plugin_windows
+        .iter()
+        .find(|(_, w)| w.plugin_id == plugin_id && w.window_key == window_key && !w.closing)
+        .map(|(id, _)| *id)
+}
+
+/// 插件窗口失焦：声明了 hide_on_blur 的隐藏窗口（浮窗形态），并通知插件（可用 `window.show` 唤起）。
+pub fn on_plugin_window_blur(app: &mut App, os_id: window::Id) -> Task<Message> {
+    let Some(entry) = app.plugin_windows.get(&os_id) else {
+        return Task::none();
+    };
+    if !entry.hide_on_blur {
+        return Task::none();
+    }
+    let (plugin_id, window_key) = (entry.plugin_id.clone(), entry.window_key.clone());
+    app.plugins.notify_window_hidden(&plugin_id, &window_key);
+    iced::window::set_mode(os_id, iced::window::Mode::Hidden)
 }
 
 /// 插件停用 / 崩溃后重启就绪：按当前壳侧状态重发面就绪通知（面板 / 设置 / 表格视图 / 插件窗口 / 接管面），

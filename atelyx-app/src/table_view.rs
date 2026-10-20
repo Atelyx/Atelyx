@@ -673,6 +673,14 @@ pub enum TableMsg {
     PluginRemoveRow { request_id: u64, row_id: String },
     /// 插件写：选中行（与网格联动）。
     PluginSelectRow { request_id: u64, row_id: String },
+    /// 插件向图片字段单元格写入图片引用（整格替换；`images` 为仓库相对路径）。
+    PluginSetCellImage {
+        request_id: u64,
+        row_id: String,
+        field_id: String,
+        images: Vec<String>,
+        display: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

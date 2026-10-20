@@ -13,6 +13,10 @@ pub mod view {
     pub const REGISTER: &str = "view.register";
     /// 插件按 id 撤销自己的一个贡献点。
     pub const UNREGISTER: &str = "view.unregister";
+    /// 插件定义一枚自备图标形状（24x24 网格的描边路径），此后按名字在贡献与控件里引用。
+    pub const DEFINE_ICON: &str = "view.defineIcon";
+    /// 把一个可滚动容器（list / scroll）滚到一端。目标节点须在当前树里且为可滚动容器。
+    pub const SCROLL_TO: &str = "view.scrollTo";
     /// 插件请求接管当前聚焦窗口（整页 / 全接管）。宿主按窗应用，退出入口由宿主常驻提供。
     pub const TAKEOVER: &str = "view.takeover";
     /// 宿主回发节点事件（通知）。
@@ -27,8 +31,14 @@ pub mod window {
     pub const OPEN: &str = "window.open";
     /// 插件关闭自己打开的一个窗口。
     pub const CLOSE: &str = "window.close";
+    /// 插件运行时改一个已打开窗口的属性（尺寸 / 置顶；「不进任务栏」只能在开窗时声明）。
+    pub const UPDATE: &str = "window.update";
+    /// 插件重新显示一个因失焦被隐藏的窗口（`hideOnBlur` 的唤起回路）。
+    pub const SHOW: &str = "window.show";
     /// 宿主告知插件某个窗口已被用户关闭（通知）。
     pub const HOST_CLOSED: &str = "host:window.closed";
+    /// 宿主告知插件某个窗口因失焦被收起（通知）；插件可用 [`SHOW`] 重新显示。
+    pub const HOST_HIDDEN: &str = "host:window.hidden";
 }
 
 pub mod fs {
@@ -77,6 +87,8 @@ pub mod table {
     pub const REMOVE_ROW: &str = "table.removeRow";
     /// 写宿主选中态（视图与表格联动用）。
     pub const SELECT_ROW: &str = "table.selectRow";
+    /// 向图片字段单元格写入图片引用（图片须先经 `vault.writeBinary` 落到仓库）。
+    pub const SET_CELL_IMAGE: &str = "table.setCellImage";
 }
 
 pub mod state {
@@ -91,6 +103,8 @@ pub mod notification {
 pub mod shortcut {
     pub const REGISTER: &str = "shortcut.register";
     pub const UNREGISTER: &str = "shortcut.unregister";
+    /// 事前查询某键位是否已被占用（返回占用方插件 id，或仅知「被系统 / 其他应用占用」）。
+    pub const QUERY: &str = "shortcut.query";
     /// 全局快捷键触发（通知）。
     pub const HOST_TRIGGERED: &str = "host:shortcut.triggered";
 }
@@ -122,6 +136,8 @@ pub mod doc {
 pub mod canvas {
     /// 插件提交一份绘图指令清单到某个画布节点。宿主合帧应用（渲染每帧只取最新一份）。
     pub const SUBMIT: &str = "canvas.submit";
+    /// 宿主告知插件画布节点的像素尺寸（通知，尺寸变化时发）。
+    pub const HOST_RESIZED: &str = "host:canvas.resized";
 }
 
 pub mod ai {
@@ -133,6 +149,12 @@ pub mod ai {
     pub const CHAT_STOP: &str = "ai.chat.stop";
     /// 读当前激活仓库的会话清单或单会话消息历史。
     pub const CHAT_HISTORY: &str = "ai.chat.history";
+    /// 重命名一个会话（写其元数据标题）。
+    pub const CHAT_RENAME: &str = "ai.chat.rename";
+    /// 删除一个会话（连同其消息文件）。
+    pub const CHAT_DELETE: &str = "ai.chat.delete";
+    /// 压缩一个会话（把较早消息总结为压缩起点；回执 = 已受理，结果经 `ai.chat.history` 复核）。
+    pub const CHAT_COMPACT: &str = "ai.chat.compact";
     /// 对话事件流（通知）：快照节流拍 + 终态 + 命名结果。
     pub const HOST_CHAT_EVENT: &str = "host:ai.chat.event";
     /// 注册一个可被 Agent 调用的工具（名称全局唯一，不得与内置工具或其他插件的工具重名）。
@@ -208,6 +230,87 @@ pub struct RegisterParams {
     pub label: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
+    /// 面外壳内边距（px）：面板 / 设置面根树外层由宿主加的内边距；0 = 贴边，缺省 = 宿主默认。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub padding: Option<f32>,
+}
+
+/// `view.defineIcon` 的 params：定义一枚自备图标形状，此后按 `name` 在贡献注册与图标钮里引用。
+/// `path` 为 24x24 网格的描边路径（与宿主形状表同口径）；名字须为字母 / 数字 / `_` / `-` 且不与
+/// 宿主内置形状重名。定义随插件会话收尾清除。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefineIconParams {
+    pub name: String,
+    pub path: String,
+}
+
+/// 可滚动容器的主轴一端（[`view::SCROLL_TO`] 的 `edge`）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ScrollEdge {
+    /// 纵向容器 = 顶部；横向容器 = 最左。
+    Start,
+    /// 纵向容器 = 底部；横向容器 = 最右。
+    End,
+}
+
+/// `view.scrollTo` 的 params：把某可滚动节点（`list` / `scroll`）滚到一端。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScrollToParams {
+    pub surface_id: String,
+    pub node_id: String,
+    pub edge: ScrollEdge,
+}
+
+/// `window.update` 的 params：运行时改一个已打开窗口的属性（缺省字段不动）。至少给一项。
+/// 「不进任务栏」是开窗期设置，运行时不支持改。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowUpdateParams {
+    /// 插件声明的窗口 id（`window.open` 的 `id`）。
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub always_on_top: Option<bool>,
+}
+
+/// `window.show` / `host:window.hidden` 的 params：按插件声明的窗口 id。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowIdParams {
+    pub id: String,
+}
+
+/// `shortcut.query` 的 params。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShortcutQueryParams {
+    pub accelerator: String,
+}
+
+/// `shortcut.query` 的 result：`available` = 可注册；`owner` = 占用方插件 id（被系统 / 其他应用占用
+/// 或无占用时为缺省——此时只有 `available` 可信，宿主无从得知占用者身份）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShortcutQueryResult {
+    pub available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+}
+
+/// `host:canvas.resized` 的 params：画布节点当前的像素尺寸（逻辑像素），尺寸变化时发。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanvasResizedParams {
+    pub surface_id: String,
+    pub node_id: String,
+    pub width: f32,
+    pub height: f32,
 }
 
 /// `view.unregister` 的 params：按 id 撤销自己的贡献；id 未注册时报可读错误。
@@ -596,6 +699,7 @@ pub struct ChatStopParams {
 }
 
 /// [`ai::CHAT_HISTORY`] 的 params：`session_id` 缺省 = 列会话清单；非缺省 = 读该会话消息。
+/// 单会话模式可给 `offset` / `query` 做分页与搜索（`offset` 为末尾起算的跳过条数）。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatHistoryParams {
@@ -604,6 +708,28 @@ pub struct ChatHistoryParams {
     /// 消息条数上限（读单会话时生效；缺省全量，超出取末尾）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
+    /// 从末尾起跳过的条数（分页：先按 `query` 过滤，再取 `[len-offset-limit, len-offset)`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<u32>,
+    /// 关键词过滤（在消息文本中不区分大小写搜索；缺省不过滤）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+}
+
+/// [`ai::CHAT_RENAME`] 的 params。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatRenameParams {
+    pub session_id: String,
+    /// 新标题（非空；空白视为非法）。
+    pub title: String,
+}
+
+/// [`ai::CHAT_DELETE`] / [`ai::CHAT_COMPACT`] 的 params。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatSessionParams {
+    pub session_id: String,
 }
 
 /// 一条会话摘要（清单模式）。
@@ -784,6 +910,18 @@ pub struct TableAddRowResult {
 #[serde(rename_all = "camelCase")]
 pub struct TableRowIdParams {
     pub row_id: String,
+}
+
+/// [`table::SET_CELL_IMAGE`] 的 params：整格替换图片引用列表（`images` 为仓库相对路径，
+/// 须先经 `vault.writeBinary` 落盘）。`display` 为显示形态（如 `grid`），缺省保持宿主默认。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableSetCellImageParams {
+    pub row_id: String,
+    pub field_id: String,
+    pub images: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<String>,
 }
 
 #[cfg(test)]

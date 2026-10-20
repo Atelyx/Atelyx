@@ -229,7 +229,7 @@ fn canvas_submit_and_pointer_event_roundtrip() {
 
     // 树里有画布节点，指针事件按 mouseEvents 声明
     let tree = runtime.surface_tree(&id, "panel").expect("应已存档首棵树");
-    let NodeBody::Canvas { mouse_events } = &tree.find("board").expect("树里应有画布节点").body
+    let NodeBody::Canvas { mouse_events, .. } = &tree.find("board").expect("树里应有画布节点").body
     else {
         panic!("board 应为 canvas 节点");
     };

@@ -109,7 +109,7 @@ impl PluginHandler for Echo {
     /// 握手完成：注册贡献点、订阅事件都放这里。
     async fn on_ready(&self, ctx: &Context) {
         if let Err(e) = ctx
-            .register(ContributionSlot::Panel, "main", "Echo", None)
+            .register(ContributionSlot::Panel, "main", "Echo", None, None)
             .await
         {
             eprintln!("注册贡献失败：{e}");
@@ -187,16 +187,18 @@ async fn main() {
 
 ### 5.1 控件
 
-控件集：`column` / `row` / `card` / `scroll` / `grid` / `list` / `text` / `markdown` / `textInput` / `numberInput` / `dropdown` / `checkbox` / `button` / `iconButton` / `image` / `progress` / `menu` / `canvas` / `dragRegion`。每个 `kind` 的字段与语义以 [API 参考 · 界面控件树](plugin-api.md#3-界面控件树) 为准（含 `NodeBody` 的完整声明）。
+控件集：`column` / `row` / `card` / `stack` / `scroll` / `grid` / `list` / `text` / `markdown` / `textInput` / `numberInput` / `dropdown` / `checkbox` / `button` / `iconButton` / `image` / `progress` / `menu` / `divider` / `canvas` / `dragRegion`。每个 `kind` 的字段与语义以 [API 参考 · 界面控件树](plugin-api.md#3-界面控件树) 为准（含 `NodeBody` 的完整声明）。
 
 几条不在类型里的约定：
 
 - 颜色只用 `color` 引用主题 token（`text` / `textSecondary` / `textMuted` / `accent` / `danger` / `success` / `warning`），插件不写死色值，主题切换自动跟随；
-- `text` 的 `size` 是绝对像素，省略时跟随界面基准字号——写死像素就不随用户缩放；
-- 行内 `Fill` 子项按内容宽解析，要均分剩余宽度用行的 `fill`（`both` / `width`）；
-- `image` 没有尺寸字段：按原图尺寸渲染，`fit` 在父容器给定尺寸时生效；
-- `iconButton` 的图标名取自宿主内置形状表（lucide 线性图标），表外名字不渲染；
-- `menu` 有 `label` 即全宽下拉钮，没 `label` 才是图标触发。
+- `text` 的 `size` 是**字号倍率**（相对界面基准正文，缺省 1.0），写 `1.5` 即放大一半并跟随用户字号缩放；`align` 给水平对齐（`end` 右对齐气泡、`center` 居中标题）；
+- 行内 `Fill` 子项按内容宽解析，要均分剩余宽度用行的 `fill`（`both` / `width`）；工具行左右分布用 `justify: "spaceBetween"`；
+- `card` 的底色档 `tone`（`default` / `muted` / `accentSoft` / `transparent`）、圆角 `radius`、边框开关 `bordered` 可调；分组内轻分割用 `divider`；`stack` 把子节点叠起来（后提交的在上，可做「画布当底 + 控件叠其上」）；
+- `image` 给 `width` / `height` 即按该尺寸渲染（缺省按原图尺寸）；声明 `click` 事件即可点击；
+- `iconButton` 的图标名默认取自宿主内置形状表（lucide 线性图标）；先用 `ctx.define_icon(name, path)` 登记自备的 24x24 描边路径，即可用自己的图形（`size` 档 `sm`/`md`/`lg`，`variant` 复用按钮档位，`hoverOnly` 悬停才显示）；
+- `menu` 的 `label` 与 `icon` 可并存（并存为紧凑的「图标 + 文字」触发钮），只给 `label` 才是全宽下拉钮；条目可标 `current`（宿主在条目前画勾）；
+- 可滚动容器（`list` / `scroll`）用 `ctx.scroll_to(surface, node, ScrollEdge::End)` 滚到底，无需插件自己维护滚动状态。
 
 ### 5.2 事件与取值
 
@@ -218,7 +220,7 @@ async fn main() {
 
 ### 5.5 面外层内边距
 
-面板、表格视图与设置页这三个面，宿主会在根树外层加 12/10 的内边距；整页接管与插件窗口不加。需要贴边的内容放进接管面或窗口面，面板里不要自带同样的外边距（会叠加）。
+面板、表格视图与设置页这三个面，宿主默认在根树外层加 12/10 的内边距；整页接管与插件窗口不加。注册贡献时给 `padding`（px）可改这个值，`0` 即贴边。需要贴边的内容也可放进接管面或窗口面；面板里不要自带同样的外边距（会叠加）。
 
 ## 6. 自绘画布
 
@@ -234,6 +236,8 @@ ctx.submit_canvas("main", "board", commands).await?;   // 整发整换，空清�
 
 指针事件在节点的 `mouseEvents` 里声明要收的子集：`pointerDown` / `pointerMove` / `pointerUp` / `pointerLeave` / `wheel` / `doubleClick`。`wheel` 增量是行数（正 = 向下 / 向右）；双击由宿主判定（同键二次按下、500ms 内、位移 < 4 像素）。命中测试由插件按指令几何自算——宿主只负责把事件送到画布。
 
+画布节点用 `height` 指定高度、或用 `fill: true` 占满父容器剩余空间。宿主在画布尺寸变化时回发 `host:canvas.resized { surfaceId, nodeId, width, height }`（尺寸不变不发），插件据此对齐绘制坐标与滚动范围——不必再按名义宽度兜底。
+
 两条限制：按住拖出画布不会丢事件（绝对坐标换算，抬起为止）；画布文字永远绘制在所有图形之上，需要被图形遮盖的文字请改用树里的 `text` 控件分层。
 
 ## 7. 能力面
@@ -247,9 +251,9 @@ ctx.submit_canvas("main", "board", commands).await?;   // 整发整换，空清�
 | `state` | 按插件隔离的自持 JSON，落 `<插件目录>/data/state.json`；损坏时宿主先备份原文再降级 |
 | `fs` | `private_dir()` 给私有数据目录；其余接受**任意绝对路径**，父目录自动创建 |
 | `vault` | 路径相对当前仓库根，不能越出仓库、不开放隐藏段；本地仓库与协作空间同构；**正被编辑器打开的文件拒写**。文本与二进制两条通道，二进制单次上限 32 MiB（更大的文件请用 `fs`） |
-| `table` | 读写当前打开的表格。真源在宿主，写入与用户编辑同一出口（合并落盘 + 协作补丁）；**禁止**用 `fs` 旁路读写 `.atb`。快照含列宽、行内单元格样式与用户当前选区 |
+| `table` | 读写当前打开的表格。真源在宿主，写入与用户编辑同一出口（合并落盘 + 协作补丁）；**禁止**用 `fs` 旁路读写 `.atb`。快照含列宽、行内单元格样式与用户当前选区；向图片字段写图片用 `table_set_cell_image`（图片先经 `vault_write_binary` 落仓库，再传仓库相对路径） |
 | `notification` | 应用内通知条 |
-| `shortcuts` | 系统级全局快捷键（如 `Shift+Alt+E`）；被占用时注册返回可读错误，停用自动注销；同一组键重复注册幂等，触发上报的是最后一次注册的写法 |
+| `shortcuts` | 系统级全局快捷键（如 `Shift+Alt+E`）；被占用时注册返回可读错误，停用自动注销；同一组键重复注册幂等，触发上报的是最后一次注册的写法。`query_shortcut` 可事前问某键位是否被占用（`owner` 为占用方插件 id；被系统 / 其他应用占用时为缺省） |
 | `clipboard` | 文本与图片（图片为 PNG + 尺寸，由宿主读系统剪贴板） |
 | `dialog` | 系统对话框，等用户交互不设上限；取消返回 `None` |
 | `http` | 便利层：目标地址、方法、大小、超时全由插件自负，宿主不设限。响应体以 base64 返回；大文件请插件进程自己直连 |
@@ -278,13 +282,17 @@ let params = WindowOpenParams {
     id: "palette".into(),      // 插件内唯一、不含 ':'，同时是窗口面的 surfaceId
     title: "命令面板".into(),
     width: Some(560.0), height: Some(360.0),
-    always_on_top: Some(true), skip_taskbar: Some(true), hide_on_blur: None,
+    always_on_top: Some(true), skip_taskbar: Some(true), hide_on_blur: Some(true),
 };
 ctx.window_open(params).await?;   // 之后用 submit_view("palette", tree) 提交内容
+// 运行时改尺寸 / 置顶（只给一维时另一维取现值；「不进任务栏」只能在开窗时给）
+ctx.window_update(WindowUpdateParams { id: "palette".into(), width: Some(640.0), height: None, always_on_top: None }).await?;
 ctx.window_close("palette").await?;
+// 因失焦被收起后的唤起回路（宿主收起时会发 host:window.hidden）
+ctx.window_show("palette").await?;
 ```
 
-`title` 就是 OS 标题栏显示的文字。窗口属性只在开窗时给定，没有运行时更新；仍开着的同一 id 会被拒，但**插件请求关闭后可以立刻用同 id 重开**——`window_close` 的回执表示「关闭已受理」，不必等系统销毁完成。用户关窗时宿主先发 `host:window.closed`（`{ id }`）、再发 `host:surface.detached`（`kind: "window"`）；插件自己请求的关闭只发后者。`hideOnBlur` 是「隐藏窗口」而非关闭，宿主没有提供再次显示的方法——需要反复唤起的场景请用 `window_close` + `window_open`。
+`title` 就是 OS 标题栏显示的文字。仍开着的同一 id 会被拒，但**插件请求关闭后可以立刻用同 id 重开**——`window_close` 的回执表示「关闭已受理」，不必等系统销毁完成。用户关窗时宿主先发 `host:window.closed`（`{ id }`）、再发 `host:surface.detached`（`kind: "window"`）；插件自己请求的关闭只发后者。`hideOnBlur` 是「隐藏窗口」而非关闭：宿主隐藏时发 `host:window.hidden`，插件可用 `window_show` 重新显示。
 
 ### 8.3 领域文档类型
 

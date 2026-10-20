@@ -47,9 +47,20 @@ pub fn btn_pill() -> TextSize {
     TextSize { h: 26.0, pad_x: 14.0, font: pal::fs_micro(), radius: 999.0 }
 }
 
+/// 常规档（h 32；插件控件的 `Md` 尺寸）。
+pub fn btn_md() -> TextSize {
+    TextSize { h: 32.0, pad_x: 12.0, font: pal::fs_ui(), radius: pal::RADIUS_SM }
+}
+
+/// 宽松档（h 40；插件控件的 `Lg` 尺寸）。
+pub fn btn_lg() -> TextSize {
+    TextSize { h: 40.0, pad_x: 16.0, font: pal::fs_ui(), radius: pal::RADIUS_MD }
+}
+
 /// 图标按钮边长档（与文字按钮高度同档）。
 pub const ICON_MD: f32 = 28.0;
 pub const ICON_LG: f32 = 32.0;
+pub const ICON_XL: f32 = 40.0;
 
 struct VariantStyle {
     bg: Color,
@@ -158,6 +169,11 @@ pub fn btn(
     }
 }
 
+/// 档位的文字 / 图标取色（图标钮自备图形取色用）。
+pub fn variant_text_color(variant: Variant) -> Color {
+    variant_style(variant).text
+}
+
 /// 图标按钮（正方形；`label` 同时是无障碍语义名与悬停提示来源）。
 pub fn icon_button(
     name: &str,
@@ -167,9 +183,20 @@ pub fn icon_button(
     on_press: Option<Message>,
     tip: Option<(iced::window::Id, String)>,
 ) -> Element<'static, Message> {
+    icon_button_el(icon(name, icon_px, variant_style(variant).text), box_px, variant, on_press, tip)
+}
+
+/// 图标按钮（图标内容由调用方给定：内置形状或插件自备图形都走这条）。
+pub fn icon_button_el(
+    icon_el: Element<'static, Message>,
+    box_px: f32,
+    variant: Variant,
+    on_press: Option<Message>,
+    tip: Option<(iced::window::Id, String)>,
+) -> Element<'static, Message> {
     let radius = if box_px <= 20.0 { pal::RADIUS_XS } else if box_px <= ICON_MD { pal::RADIUS_SM } else { pal::RADIUS_MD };
     let mut widget = button(
-        container(icon(name, icon_px, variant_style(variant).text))
+        container(icon_el)
             .width(Length::Fill)
             .height(Length::Fill)
             .align_x(iced::alignment::Horizontal::Center)
@@ -491,17 +518,6 @@ pub fn secret_input(
 ) -> Element<'static, Message> {
     let (on_input, on_submit) = arm_input(on_input, on_submit);
     styled_input(placeholder, value, Length::Fixed(width), Some(on_input), Some(on_submit), true)
-}
-
-/// 插件卡片容器样式（ViewNode card：列表条目、信息分组；accent = 选中强调边框）。
-pub fn plugin_card_style(accent: bool) -> container::Style {
-    container::Style {
-        background: Some(pal::BG_TERTIARY.into()),
-        border: border::rounded(pal::RADIUS_SM)
-            .color(if accent { pal::ACCENT } else { pal::BORDER })
-            .width(1.0),
-        ..Default::default()
-    }
 }
 
 /// 表单输入统一样式（设置表单与弹层表单同口径）。

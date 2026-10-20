@@ -5,13 +5,16 @@ use atelyx_plugin_protocol::envelope::{Envelope, RequestId};
 use atelyx_plugin_protocol::event::{TableChangedPayload, VaultSwitchPayload};
 use atelyx_plugin_protocol::handshake::{self, InitializeParams, InitializeResult};
 use atelyx_plugin_protocol::method::{
-    CanvasSubmitParams, DocCloseParams, DocOpenParams, HttpRequestParams, HttpResult, ListResult,
-    PathParams, PickFileParams, PickedPath, ProcessEventParams, RegisterParams,
-    RegisterShortcutParams, RegisterToolParams,
+    CanvasResizedParams, CanvasSubmitParams, ChatHistoryParams, ChatRenameParams,
+    ChatSessionParams, DefineIconParams, DocCloseParams, DocOpenParams, HttpRequestParams,
+    HttpResult, ListResult, PathParams, PickFileParams, PickedPath, ProcessEventParams,
+    RegisterParams, RegisterShortcutParams, RegisterToolParams, ScrollToParams,
+    ShortcutQueryParams, ShortcutQueryResult,
     ShowNotificationParams, SurfaceAttachedParams, TableAddRowResult, TableRowIdParams,
-    TableSnapshot, TableUpdateCellParams, TakeoverParams, TextPayload, ToolCallParams,
-    ToolResultParams, UnregisterParams, UnregisterToolParams,
-    ViewEventParams, WindowCloseParams, WindowClosedParams, WindowOpenParams,
+    TableSetCellImageParams, TableSnapshot, TableUpdateCellParams, TakeoverParams, TextPayload,
+    ToolCallParams, ToolResultParams, UnregisterParams, UnregisterToolParams,
+    ViewEventParams, WindowCloseParams, WindowClosedParams, WindowIdParams, WindowOpenParams,
+    WindowUpdateParams,
 };
 use atelyx_plugin_protocol::view::{EventKind, NodeBody, ViewNode};
 use serde::de::DeserializeOwned;
@@ -81,9 +84,9 @@ fn view_tree_shape_is_frozen() {
     let mut kinds = std::collections::HashSet::new();
     walk(&tree, &mut kinds);
     for expected in [
-        "row", "column", "scroll", "grid", "list", "text", "markdown", "textInput", "numberInput",
-        "dropdown", "checkbox", "button", "iconButton", "image", "progress", "menu", "canvas",
-        "dragRegion",
+        "row", "column", "card", "stack", "scroll", "grid", "list", "text", "markdown", "textInput",
+        "numberInput", "dropdown", "checkbox", "button", "iconButton", "image", "progress", "menu",
+        "canvas", "divider", "dragRegion",
     ] {
         assert!(kinds.contains(expected), "控件集 v1 缺快照覆盖：{expected}");
     }
@@ -98,7 +101,7 @@ fn view_tree_shape_is_frozen() {
     let menu = find(&tree, "more").unwrap();
     assert!(matches!(&menu.body, NodeBody::Menu { items, .. } if items.len() == 2));
     let canvas = find(&tree, "board").unwrap();
-    assert!(matches!(&canvas.body, NodeBody::Canvas { mouse_events } if mouse_events.len() == 6));
+    assert!(matches!(&canvas.body, NodeBody::Canvas { mouse_events, .. } if mouse_events.len() == 6));
 
     // 冻结编码：序列化产物与快照值逐字段一致
     assert_eq!(serde_json::to_value(&tree).unwrap(), snapshot["viewTree"], "ViewNode 编码与快照不一致");
@@ -217,6 +220,17 @@ fn method_type_shapes_are_frozen() {
             "TableUpdateCellParams" => frozen_roundtrip::<TableUpdateCellParams>(&value),
             "TableAddRowResult" => frozen_roundtrip::<TableAddRowResult>(&value),
             "TableRowIdParams" => frozen_roundtrip::<TableRowIdParams>(&value),
+            "DefineIconParams" => frozen_roundtrip::<DefineIconParams>(&value),
+            "ScrollToParams" => frozen_roundtrip::<ScrollToParams>(&value),
+            "CanvasResizedParams" => frozen_roundtrip::<CanvasResizedParams>(&value),
+            "WindowUpdateParams" => frozen_roundtrip::<WindowUpdateParams>(&value),
+            "WindowIdParams" => frozen_roundtrip::<WindowIdParams>(&value),
+            "ShortcutQueryParams" => frozen_roundtrip::<ShortcutQueryParams>(&value),
+            "ShortcutQueryResult" => frozen_roundtrip::<ShortcutQueryResult>(&value),
+            "TableSetCellImageParams" => frozen_roundtrip::<TableSetCellImageParams>(&value),
+            "ChatHistoryParams" => frozen_roundtrip::<ChatHistoryParams>(&value),
+            "ChatRenameParams" => frozen_roundtrip::<ChatRenameParams>(&value),
+            "ChatSessionParams" => frozen_roundtrip::<ChatSessionParams>(&value),
             "RegisterToolParams" => frozen_roundtrip::<RegisterToolParams>(&value),
             "UnregisterToolParams" => frozen_roundtrip::<UnregisterToolParams>(&value),
             "ToolCallParams" => frozen_roundtrip::<ToolCallParams>(&value),

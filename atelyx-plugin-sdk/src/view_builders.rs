@@ -28,16 +28,45 @@ impl NodeExt for ViewNode {
 }
 
 pub fn row(id: &str, children: Vec<ViewNode>) -> ViewNode {
-    node(id, NodeBody::Row { gap: None, padding: None, align: None, cross_align: None, fill: None })
-        .with_children(children)
+    node(
+        id,
+        NodeBody::Row { gap: None, padding: None, justify: None, cross_align: None, fill: None },
+    )
+    .with_children(children)
 }
 
 pub fn column(id: &str, children: Vec<ViewNode>) -> ViewNode {
     node(id, NodeBody::Column { gap: None, padding: None, cross_align: None }).with_children(children)
 }
 
+/// 卡片容器：主题底 + 边框 + 圆角的分组盒（底色 / 圆角 / 边框由链式改字段指定）。
+pub fn card(id: &str, children: Vec<ViewNode>) -> ViewNode {
+    node(
+        id,
+        NodeBody::Card {
+            gap: None,
+            padding: None,
+            accent: None,
+            tone: None,
+            radius: None,
+            bordered: None,
+        },
+    )
+    .with_children(children)
+}
+
+/// 叠层容器：子节点按提交顺序重叠（后提交的在上），用于「画布当底 + 宿主控件叠其上」。
+pub fn stack(id: &str, children: Vec<ViewNode>) -> ViewNode {
+    node(id, NodeBody::Stack {}).with_children(children)
+}
+
+/// 分隔线（主题弱边界色的 1px 水平线）。
+pub fn divider(id: &str) -> ViewNode {
+    node(id, NodeBody::Divider {})
+}
+
 pub fn scroll(id: &str, children: Vec<ViewNode>) -> ViewNode {
-    node(id, NodeBody::Scroll { direction: None }).with_children(children)
+    node(id, NodeBody::Scroll { direction: None, gap: None }).with_children(children)
 }
 
 pub fn grid(id: &str, columns: u32, children: Vec<ViewNode>) -> ViewNode {
@@ -45,16 +74,19 @@ pub fn grid(id: &str, columns: u32, children: Vec<ViewNode>) -> ViewNode {
 }
 
 pub fn list(id: &str, children: Vec<ViewNode>) -> ViewNode {
-    node(id, NodeBody::List {}).with_children(children)
+    node(id, NodeBody::List { gap: None }).with_children(children)
 }
 
 pub fn text(id: &str, content: impl Into<String>) -> ViewNode {
-    node(id, NodeBody::Text { content: content.into(), size: None, weight: None, color: None })
+    node(
+        id,
+        NodeBody::Text { content: content.into(), size: None, weight: None, color: None, align: None },
+    )
 }
 
 /// 只读 Markdown 正文（宿主按笔记同源解析器渲染）。
 pub fn markdown(id: &str, content: impl Into<String>) -> ViewNode {
-    node(id, NodeBody::Markdown { content: content.into() })
+    node(id, NodeBody::Markdown { content: content.into(), size: None })
 }
 
 pub fn text_input(id: &str, value: impl Into<String>) -> ViewNode {
@@ -74,15 +106,28 @@ pub fn checkbox(id: &str, checked: bool) -> ViewNode {
 }
 
 pub fn button(id: &str, label: impl Into<String>, variant: ButtonVariant) -> ViewNode {
-    node(id, NodeBody::Button { label: label.into(), variant: Some(variant), enabled: None })
+    node(
+        id,
+        NodeBody::Button { label: label.into(), variant: Some(variant), enabled: None, size: None },
+    )
 }
 
 pub fn icon_button(id: &str, icon: &str) -> ViewNode {
-    node(id, NodeBody::IconButton { icon: icon.into(), tooltip: None, enabled: None })
+    node(
+        id,
+        NodeBody::IconButton {
+            icon: icon.into(),
+            tooltip: None,
+            enabled: None,
+            size: None,
+            variant: None,
+            hover_only: None,
+        },
+    )
 }
 
 pub fn image(id: &str, source: ImageSource) -> ViewNode {
-    node(id, NodeBody::Image { source, fit: None })
+    node(id, NodeBody::Image { source, fit: None, width: None, height: None })
 }
 
 pub fn progress(id: &str, value: f64) -> ViewNode {
@@ -96,11 +141,11 @@ pub fn menu(id: &str, label: &str, items: Vec<MenuItem>) -> ViewNode {
 /// 自绘画布节点：`mouse_events` 声明要接收的指针事件子集（未声明不上行）。
 /// 内容经 `Context::submit_canvas` 提交指令清单，命中由插件按指令几何自算。
 pub fn canvas(id: &str, mouse_events: Vec<CanvasEventKind>) -> ViewNode {
-    node(id, NodeBody::Canvas { mouse_events })
+    node(id, NodeBody::Canvas { mouse_events, height: None, fill: None })
 }
 
 /// 拖动热区：自身不渲染内容，用户在其占位区域内按下即由宿主发起整窗拖动
-/// （全接管时自绘标题栏的拖动把手）。占位大小由父容器布局决定。
+/// （全接管时插件自绘标题栏的拖动把手）。占位大小由父容器布局决定。
 pub fn drag_region(id: &str) -> ViewNode {
     node(id, NodeBody::DragRegion {})
 }

@@ -107,6 +107,9 @@ pub const NAMES: &[&str] = &[
     "box",
     "zoom-in",
     "zoom-out",
+    "play",
+    "pause",
+    "stop",
 ];
 
 /// 一个图标的组成图元（lucide 图标 = 路径/圆/矩形/线段的组合）。
@@ -234,6 +237,9 @@ pub fn icon(name: &str) -> Option<&'static [Shape]> {
     "box" => &[Shape::Path("M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"), Shape::Path("m3.3 7 8.7 5 8.7-5"), Shape::Path("M12 22V12")],
     "zoom-in" => &[Shape::Circle(11.0, 11.0, 8.0), Shape::Line([21.0, 21.0, 16.65, 16.65]), Shape::Line([11.0, 8.0, 11.0, 14.0]), Shape::Line([8.0, 11.0, 14.0, 11.0])],
     "zoom-out" => &[Shape::Circle(11.0, 11.0, 8.0), Shape::Line([21.0, 21.0, 16.65, 16.65]), Shape::Line([8.0, 11.0, 14.0, 11.0])],
+    "play" => &[Shape::Path("m6 3 14 9-14 9z")],
+    "pause" => &[Shape::Rect(14.0, 4.0, 4.0, 16.0, 0.0), Shape::Rect(6.0, 4.0, 4.0, 16.0, 0.0)],
+    "stop" => &[Shape::Rect(6.0, 6.0, 12.0, 12.0, 1.0)],
         _ => return None,
     })
 }

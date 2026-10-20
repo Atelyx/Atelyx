@@ -222,6 +222,15 @@ pub fn host_requests_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<It
                 HostRequest::CloseWindow { plugin_id, request_id, window_id } => {
                     Message::PluginWindowClose { request_id, plugin_id, window_key: window_id }
                 }
+                HostRequest::WindowUpdate { plugin_id, request_id, params } => {
+                    Message::PluginWindowUpdate { request_id, plugin_id, params }
+                }
+                HostRequest::WindowShow { plugin_id, request_id, window_id } => {
+                    Message::PluginWindowShow { request_id, plugin_id, window_key: window_id }
+                }
+                HostRequest::ScrollTo { plugin_id, request_id, params } => {
+                    Message::PluginScrollTo { request_id, plugin_id, params }
+                }
                 HostRequest::ChatSend { plugin_id, request_id, params } => Message::Chat(
                     crate::chat_actions::ChatMsg::PluginSend {
                         request_id,
@@ -241,6 +250,27 @@ pub fn host_requests_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<It
                         request_id,
                         session_id: params.session_id,
                         limit: params.limit,
+                        offset: params.offset,
+                        query: params.query,
+                    },
+                ),
+                HostRequest::ChatRename { request_id, params, .. } => Message::Chat(
+                    crate::chat_actions::ChatMsg::PluginRename {
+                        request_id,
+                        session_id: params.session_id,
+                        title: params.title,
+                    },
+                ),
+                HostRequest::ChatDelete { request_id, params, .. } => Message::Chat(
+                    crate::chat_actions::ChatMsg::PluginDelete {
+                        request_id,
+                        session_id: params.session_id,
+                    },
+                ),
+                HostRequest::ChatCompact { request_id, params, .. } => Message::Chat(
+                    crate::chat_actions::ChatMsg::PluginCompact {
+                        request_id,
+                        session_id: params.session_id,
                     },
                 ),
                 HostRequest::ClipboardWrite { request_id, text, .. } => {
@@ -292,6 +322,15 @@ pub fn host_requests_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<It
                 HostRequest::TableSelectRow { request_id, row_id, .. } => {
                     Message::Table(crate::table_view::TableMsg::PluginSelectRow { request_id, row_id })
                 }
+                HostRequest::TableSetCellImage { request_id, params, .. } => Message::Table(
+                    crate::table_view::TableMsg::PluginSetCellImage {
+                        request_id,
+                        row_id: params.row_id,
+                        field_id: params.field_id,
+                        images: params.images,
+                        display: params.display,
+                    },
+                ),
             };
             let _ = iced::futures::SinkExt::send(&mut output, message).await;
         }

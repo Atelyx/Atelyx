@@ -35,6 +35,9 @@ pub struct CanvasState {
     /// 悬停中：Leave 按「从内到外」边沿触发，不逐帧重发。
     inside: std::cell::Cell<bool>,
     last_press: std::cell::RefCell<Option<(MouseButton, Instant, Point)>>,
+    /// 上次上报给插件的画布身份与尺寸（节点 id 哈希 + 逻辑像素尺寸）；节点或尺寸变化即在绘制时
+    /// 回发 `host:canvas.resized`——只比尺寸会让复用同一 `tree::State` 的另一个画布节点漏报初始尺寸。
+    reported: std::cell::Cell<Option<(u64, f32, f32)>>,
 }
 
 impl Default for CanvasState {
@@ -46,6 +49,7 @@ impl Default for CanvasState {
             pressed: std::cell::Cell::new(false),
             inside: std::cell::Cell::new(false),
             last_press: std::cell::RefCell::new(None),
+            reported: std::cell::Cell::new(None),
         }
     }
 }
@@ -193,6 +197,18 @@ impl canvas::Program<Message> for PluginCanvas<'_> {
             state.list_key.set(list_key);
             state.font_epoch.set(epoch);
         }
+        // 节点或尺寸变化即上报插件：绘制拿到的是真实分配尺寸，这是插件对齐坐标与滚动范围的唯一来源
+        let reported = (node_identity(self.node_id), bounds.width, bounds.height);
+        if state.reported.get() != Some(reported) {
+            state.reported.set(Some(reported));
+            self.app.plugins.notify_canvas_resized(
+                &self.plugin_id,
+                &self.surface_id,
+                self.node_id,
+                reported.1,
+                reported.2,
+            );
+        }
         let commands: &[DrawCommand] = self.list.map(|list| list.as_slice()).unwrap_or(&[]);
         let geometry = state.cache.draw(renderer, bounds.size(), |frame| {
             for command in commands {
@@ -207,6 +223,16 @@ impl<'a> From<PluginCanvas<'a>> for Element<'a, Message> {
     fn from(widget: PluginCanvas<'a>) -> Element<'a, Message> {
         Canvas::new(widget).width(Length::Fill).height(Length::Fill).into()
     }
+}
+
+/// 节点身份哈希（FNV-1a；仅用于"是不是同一个画布节点"的判重，不参与协议）。
+fn node_identity(node_id: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in node_id.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 /// 两点距离平方（双击位移阈值比较用，免开方）。

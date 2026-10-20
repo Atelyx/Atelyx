@@ -21,17 +21,17 @@ pub(crate) fn permission_for(name: &str) -> Option<Permission> {
         vault::READ_TEXT | vault::WRITE_TEXT | vault::READ_BINARY | vault::WRITE_BINARY
         | vault::LIST | vault::EXISTS => Some(Vault),
         table::SNAPSHOT | table::UPDATE_CELL | table::ADD_ROW | table::REMOVE_ROW
-        | table::SELECT_ROW => Some(Table),
+        | table::SELECT_ROW | table::SET_CELL_IMAGE => Some(Table),
         process::SPAWN | process::WRITE_STDIN | process::CLOSE_STDIN | process::KILL => Some(Process),
         state::READ | state::WRITE => Some(State),
         notification::SHOW => Some(Notification),
-        shortcut::REGISTER | shortcut::UNREGISTER => Some(Shortcuts),
+        shortcut::REGISTER | shortcut::UNREGISTER | shortcut::QUERY => Some(Shortcuts),
         clipboard::WRITE_TEXT | clipboard::READ_TEXT | clipboard::READ_IMAGE => Some(Clipboard),
         dialog::PICK_FILE | dialog::PICK_DIRECTORY => Some(Dialog),
         http::REQUEST => Some(Http),
-        window::OPEN | window::CLOSE => Some(Window),
-        ai::CHAT_SEND | ai::CHAT_STOP | ai::CHAT_HISTORY | ai::REGISTER_TOOL
-        | ai::UNREGISTER_TOOL | ai::TOOL_RESULT => Some(Ai),
+        window::OPEN | window::CLOSE | window::UPDATE | window::SHOW => Some(Window),
+        ai::CHAT_SEND | ai::CHAT_STOP | ai::CHAT_HISTORY | ai::CHAT_RENAME | ai::CHAT_DELETE
+        | ai::CHAT_COMPACT | ai::REGISTER_TOOL | ai::UNREGISTER_TOOL | ai::TOOL_RESULT => Some(Ai),
         _ => None,
     }
 }
@@ -94,7 +94,17 @@ mod tests {
         // 运行时时序方法不占权限
         assert_eq!(permission_for("initialize"), None);
         assert_eq!(permission_for(method::view::SUBMIT), None);
+        assert_eq!(permission_for(method::view::REGISTER), None);
+        assert_eq!(permission_for(method::view::DEFINE_ICON), None, "自备图标是界面通道，不占权限声明");
+        assert_eq!(permission_for(method::view::SCROLL_TO), None, "滚动指令是界面通道，不占权限声明");
         assert_eq!(permission_for(method::canvas::SUBMIT), None, "画布清单是界面通道，不占权限声明");
+        assert_eq!(permission_for(method::window::UPDATE), Some(Permission::Window));
+        assert_eq!(permission_for(method::window::SHOW), Some(Permission::Window));
+        assert_eq!(permission_for(method::shortcut::QUERY), Some(Permission::Shortcuts));
+        assert_eq!(permission_for(method::table::SET_CELL_IMAGE), Some(Permission::Table));
+        assert_eq!(permission_for(method::ai::CHAT_RENAME), Some(Permission::Ai));
+        assert_eq!(permission_for(method::ai::CHAT_DELETE), Some(Permission::Ai));
+        assert_eq!(permission_for(method::ai::CHAT_COMPACT), Some(Permission::Ai));
     }
 
     #[test]

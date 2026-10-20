@@ -6,14 +6,14 @@
 
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::{
-    column, container, grid, image, keyed_column, progress_bar, row, scrollable, space,
-    text_editor, text_input,
+    column, container, grid, image, keyed_column, mouse_area, progress_bar, row, scrollable, space,
+    text_editor, text_input, Stack,
 };
 use iced::{Color, Element, Length, Padding};
 
 use atelyx_core::plugin_runtime::{
-    Align, Axis, ButtonVariant, ColorToken, EventKind, EventValue, Fill, ImageFit, ImageSource,
-    NodeBody, TextWeight, ViewEvent, ViewNode,
+    Align, Axis, ButtonVariant, CardTone, ColorToken, ControlSize, EventKind, EventValue, Fill,
+    ImageFit, ImageSource, Justify, NodeBody, TextWeight, ViewEvent, ViewNode,
 };
 
 use crate::plugin_actions::{contribution, declares, image_key, input_display, node_value_text, PopupEntry};
@@ -29,6 +29,8 @@ const INPUT_PAD_X: f32 = 8.0;
 const INPUT_PAD_Y: f32 = 6.0;
 /// 多行输入高度。
 const EDITOR_H: f32 = 96.0;
+/// 画布缺省高度（未给 `height` 也未声明撑满时）。
+const CANVAS_DEFAULT_H: f32 = 160.0;
 
 /// 面身份与所在窗口（弹层与图标钮悬停提示都要窗口 id）。
 struct Ctx {
@@ -121,11 +123,15 @@ pub(crate) fn surface_view<'a>(
         window,
     };
     let key = (ctx.plugin_id.clone(), ctx.surface_id.clone());
+    let outer_pad = match contribution.padding {
+        Some(pad) => Padding::from(pad),
+        None => Padding::ZERO.horizontal(12.0).vertical(10.0),
+    };
     match app.plugin_trees.get(&key) {
         Some(tree) => container(render_root(app, &ctx, tree))
             .width(Length::Fill)
             .height(Length::Fill)
-            .padding(Padding::ZERO.horizontal(12.0).vertical(10.0))
+            .padding(outer_pad)
             .into(),
         None => placeholder(
             contribution.icon.as_deref().unwrap_or("puzzle"),
@@ -143,7 +149,7 @@ fn placeholder<'a>(icon_name: &str, title: &str, desc: &str) -> Element<'a, Mess
 /// Shrink 根列内的 Fill 子项会塌缩成 0 高）。嵌套容器保持收缩语义。
 fn render_root<'a>(app: &'a App, ctx: &Ctx, node: &'a ViewNode) -> Element<'a, Message> {
     match &node.body {
-        NodeBody::Column { .. } | NodeBody::Row { .. } | NodeBody::Card { .. } => {
+        NodeBody::Column { .. } | NodeBody::Row { .. } | NodeBody::Card { .. } | NodeBody::Stack { .. } => {
             render_node_in(app, ctx, node, true)
         }
         _ => render_node_in(app, ctx, node, false),
@@ -175,10 +181,26 @@ fn render_node_in<'a>(
             }
             col.into()
         }
-        NodeBody::Row { gap, padding, align, cross_align, fill } => {
-            let mut line = row(children_elements(app, ctx, node))
-                .spacing(gap.unwrap_or(DEFAULT_GAP))
-                .align_y(cross_align.map(vertical).unwrap_or(Vertical::Center));
+        NodeBody::Row { gap, padding, justify, cross_align, fill } => {
+            let spacing = gap.unwrap_or(DEFAULT_GAP);
+            let declared = justify.is_some();
+            let justify = justify.unwrap_or(Justify::Start);
+            let kids = children_elements(app, ctx, node);
+            // spaceBetween：在占满宽度的行里插入弹性空档把子项推向两端
+            let mut line = if justify == Justify::SpaceBetween {
+                let mut els = Vec::new();
+                for (index, child) in kids.into_iter().enumerate() {
+                    if index > 0 {
+                        els.push(space().width(Length::Fill).into());
+                    }
+                    els.push(child);
+                }
+                row(els).width(Length::Fill)
+            } else {
+                row(kids)
+            }
+            .spacing(spacing)
+            .align_y(cross_align.map(vertical).unwrap_or(Vertical::Center));
             // fill 行：宽度 Fill 关掉子项的宽度压缩（Fill 子项均分剩余宽度）；
             // both 再加高度 Fill，让行延迟到父列的第三趟布局、占满剩余高度（分栏的前提）
             match fill {
@@ -196,57 +218,84 @@ fn render_node_in<'a>(
             if let Some(pad) = padding {
                 line = line.padding(Padding::from(*pad));
             }
-            match align {
-                // 主轴对齐要在行占满宽度后才谈得上分布（不填充时子项紧贴左缘，对齐无意义）
-                Some(align) => container(line)
+            // 声明了 justify 才谈得上主轴分布（spaceBetween 行自身已撑满，其余套占满宽度的容器）；
+            // 未声明时保持 row 原样——宽度收缩，随父列的 cross_align 对齐
+            if !declared {
+                line.into()
+            } else if justify == Justify::SpaceBetween {
+                line.into()
+            } else {
+                container(line)
                     .width(Length::Fill)
-                    .align_x(horizontal(*align))
-                    .into(),
-                None => line.into(),
+                    .align_x(justify_x(justify))
+                    .into()
             }
         }
-        NodeBody::Card { padding, accent } => {
+        NodeBody::Card { gap, padding, accent, tone, radius, bordered } => {
             let inner = keyed_column(children(app, ctx, node))
                 .width(Length::Fill)
                 .height(Length::Shrink)
-                .spacing(DEFAULT_GAP);
-            let accent = accent.unwrap_or_default();
+                .spacing(gap.unwrap_or(DEFAULT_GAP));
+            let style = card_style(accent.unwrap_or_default(), *tone, *radius, *bordered);
             let mut card = container(inner)
                 .width(Length::Fill)
                 .padding(Padding::from(padding.unwrap_or(10.0)))
-                .style(move |_t| controls::plugin_card_style(accent));
+                .style(move |_t| style);
             if fill_height {
                 card = card.height(Length::Fill);
             }
             card.into()
         }
-        NodeBody::Scroll { direction } => {
+        NodeBody::Stack {} => {
+            let mut stack = Stack::new();
+            for child in children_elements(app, ctx, node) {
+                stack = stack.push(child);
+            }
+            let element: Element<'a, Message> = stack.into();
+            if fill_height {
+                container(element).width(Length::Fill).height(Length::Fill).into()
+            } else {
+                element
+            }
+        }
+        NodeBody::Scroll { direction, gap } => {
+            let spacing = gap.unwrap_or(DEFAULT_GAP);
             let inner: Element<Message> = match direction.unwrap_or(Axis::Vertical) {
-                Axis::Horizontal => row(children_elements(app, ctx, node)).spacing(DEFAULT_GAP).into(),
-                Axis::Vertical => column(children_elements(app, ctx, node)).spacing(DEFAULT_GAP).into(),
+                Axis::Horizontal => row(children_elements(app, ctx, node)).spacing(spacing).into(),
+                Axis::Vertical => column(children_elements(app, ctx, node)).spacing(spacing).into(),
             };
-            scrollable(inner).width(Length::Fill).height(Length::Fill).into()
+            scrollable(inner)
+                .id(node_scroll_id(ctx, &node.id))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into()
         }
         NodeBody::Grid { columns, gap } => grid(children_elements(app, ctx, node))
             .columns((*columns).max(1) as usize)
             .spacing(gap.unwrap_or(DEFAULT_GAP))
             .into(),
-        NodeBody::List {} => scrollable(
+        NodeBody::List { gap } => scrollable(
             keyed_column(children(app, ctx, node))
                 .width(Length::Fill)
                 .height(Length::Shrink)
-                .spacing(DEFAULT_GAP),
+                .spacing(gap.unwrap_or(DEFAULT_GAP)),
         )
+        .id(node_scroll_id(ctx, &node.id))
         .width(Length::Fill)
         .height(Length::Fill)
         .into(),
-        NodeBody::Text { content, size, weight, color } => text(content.as_str())
-            .size(size.unwrap_or_else(pal::fs_body))
-            .font(weight.map(text_weight).unwrap_or_default())
-            .color(token_color(color.unwrap_or(ColorToken::Text)))
-            .width(Length::Fill)
-            .into(),
-        NodeBody::Markdown { .. } => {
+        NodeBody::Divider {} => controls::h_divider_subtle(),
+        NodeBody::Text { content, size, weight, color, align } => {
+            let line = text(content.as_str())
+                .size(pal::fs_body() * size.unwrap_or(1.0))
+                .font(weight.map(text_weight).unwrap_or_default())
+                .color(token_color(color.unwrap_or(ColorToken::Text)));
+            container(line)
+                .width(Length::Fill)
+                .align_x(horizontal(align.unwrap_or(Align::Start)))
+                .into()
+        }
+        NodeBody::Markdown { size, .. } => {
             let key = (ctx.plugin_id.clone(), ctx.surface_id.clone(), node.id.clone());
             match app.plugin_markdown.get(&key) {
                 Some(entry) => crate::markdown_view::document_body_scaled(
@@ -254,7 +303,7 @@ fn render_node_in<'a>(
                     &app.theme,
                     &app.note_images,
                     app.global.soft_wrap,
-                    1.0,
+                    size.unwrap_or(1.0),
                 ),
                 None => text("").into(),
             }
@@ -318,23 +367,47 @@ fn render_node_in<'a>(
                 None => controls::checkbox(state, on_press),
             }
         }
-        NodeBody::Button { label, variant, enabled } => controls::btn(
+        NodeBody::Button { label, variant, enabled, size } => controls::btn(
             label.as_str(),
-            &controls::btn_sm(),
+            &button_size(*size),
             button_variant(*variant),
             enabled.unwrap_or(true).then(|| click(ctx, node)).flatten(),
         )
         .into(),
-        NodeBody::IconButton { icon, tooltip, enabled } => controls::icon_button(
-            icon,
-            14.0,
-            controls::ICON_MD,
-            Variant::Ghost,
-            enabled.unwrap_or(true).then(|| click(ctx, node)).flatten(),
-            tooltip.as_ref().map(|tip| (ctx.window, tip.clone())),
-        ),
-        NodeBody::Image { source, fit } => {
-            image_node(app, &ctx.plugin_id, source, fit.unwrap_or(ImageFit::Contain))
+        NodeBody::IconButton { icon, tooltip, enabled, size, variant, hover_only } => {
+            let (icon_px, box_px) = icon_box(*size);
+            let variant = icon_variant(*variant);
+            let on_press = enabled.unwrap_or(true).then(|| click(ctx, node)).flatten();
+            let tip = tooltip.as_ref().map(|label| (ctx.window, label.clone()));
+            let icon_el = icon_element(ctx, icon, icon_px, controls::variant_text_color(variant));
+            if hover_only.unwrap_or(false) {
+                // 悬停才显示：未悬停时占位同尺寸（布局不跳），进出由覆盖热区上报
+                let shown = hovered(app, ctx, &node.id);
+                let inner: Element<Message> = if shown {
+                    controls::icon_button_el(icon_el, box_px, variant, None, tip)
+                } else {
+                    container(space())
+                        .width(Length::Fixed(box_px))
+                        .height(Length::Fixed(box_px))
+                        .into()
+                };
+                let mut area = mouse_area(inner)
+                    .on_enter(hover_msg(ctx, &node.id, true))
+                    .on_exit(hover_msg(ctx, &node.id, false));
+                if let Some(msg) = on_press {
+                    area = area.on_press(msg);
+                }
+                area.into()
+            } else {
+                controls::icon_button_el(icon_el, box_px, variant, on_press, tip)
+            }
+        }
+        NodeBody::Image { source, fit, width, height } => {
+            let el = image_node(app, &ctx.plugin_id, source, fit.unwrap_or(ImageFit::Contain), *width, *height);
+            match click(ctx, node) {
+                Some(msg) => mouse_area(el).on_press(msg).into(),
+                None => el,
+            }
         }
         NodeBody::Progress { value } => progress_bar(0.0..=1.0, value.clamp(0.0, 1.0) as f32)
             .length(Length::Fill)
@@ -344,7 +417,7 @@ fn render_node_in<'a>(
                 .iter()
                 .map(|item| PopupEntry {
                     label: item.label.clone(),
-                    current: false,
+                    current: item.current.unwrap_or(false),
                     disabled: item.disabled.unwrap_or(false),
                     danger: item.danger.unwrap_or(false),
                     on_press: node_event(ctx, &node.id, ViewEvent::Change { value: EventValue::Text(item.action.clone()) }),
@@ -355,15 +428,24 @@ fn render_node_in<'a>(
                 entries,
             });
             match (label, icon) {
-                (Some(label), _) => controls::dropdown_trigger(label, Length::Fill, open),
+                // 图标 + 文字并存：紧凑的「图标 + 文字」触发钮（非全宽下拉钮）
+                (Some(label), Some(icon)) => {
+                    let icon_el = icon_element(ctx, icon, 14.0, pal::TEXT_SECONDARY);
+                    row![icon_el, controls::dropdown_trigger(label, Length::Shrink, open)]
+                        .spacing(4)
+                        .align_y(Vertical::Center)
+                        .into()
+                }
+                (Some(label), None) => controls::dropdown_trigger(label, Length::Fill, open),
                 (None, Some(icon)) => {
-                    controls::icon_button(icon, 14.0, controls::ICON_MD, Variant::Ghost, open, None)
+                    let icon_el = icon_element(ctx, icon, 14.0, controls::variant_text_color(Variant::Ghost));
+                    controls::icon_button_el(icon_el, controls::ICON_MD, Variant::Ghost, open, None)
                 }
                 (None, None) => controls::dropdown_trigger("…", Length::Fill, open),
             }
         }
-        NodeBody::Canvas { mouse_events } => {
-            crate::plugin_canvas::PluginCanvas {
+        NodeBody::Canvas { mouse_events, height, fill } => {
+            let canvas: Element<Message> = crate::plugin_canvas::PluginCanvas {
                 app,
                 window: ctx.window,
                 plugin_id: ctx.plugin_id.clone(),
@@ -374,7 +456,13 @@ fn render_node_in<'a>(
                     .get(&(ctx.plugin_id.clone(), ctx.surface_id.clone(), node.id.clone())),
                 mouse_events,
             }
-            .into()
+            .into();
+            let height = if fill.unwrap_or(false) {
+                Length::Fill
+            } else {
+                Length::Fixed(height.unwrap_or(CANVAS_DEFAULT_H))
+            };
+            container(canvas).width(Length::Fill).height(height).into()
         }
         NodeBody::DragRegion {} => iced::widget::mouse_area(
             container(space())
@@ -501,11 +589,116 @@ fn multiline_input<'a>(
 }
 
 /// 界面图片：句柄已载入则呈现，否则给可读占位（载入任务由 `plugin_actions::refresh_projection` 发起）。
-fn image_node<'a>(app: &'a App, plugin_id: &str, source: &ImageSource, fit: ImageFit) -> Element<'a, Message> {
+/// `width` / `height` 给定时按该尺寸渲染（缺省按原图尺寸）。
+fn image_node<'a>(
+    app: &'a App,
+    plugin_id: &str,
+    source: &ImageSource,
+    fit: ImageFit,
+    width: Option<f32>,
+    height: Option<f32>,
+) -> Element<'a, Message> {
     let handle = image_key(app, plugin_id, source).and_then(|key| app.note_images.get(&key).cloned());
     match handle {
-        Some(handle) => image(handle).content_fit(content_fit(fit)).into(),
+        Some(handle) => {
+            let mut widget = image(handle).content_fit(content_fit(fit));
+            if let Some(width) = width {
+                widget = widget.width(Length::Fixed(width));
+            }
+            if let Some(height) = height {
+                widget = widget.height(Length::Fixed(height));
+            }
+            widget.into()
+        }
         None => placeholder("image", "图片", "加载中或不可用"),
+    }
+}
+
+/// 自备图标名 → 图标元素：内置形状名直接命中，否则按 `<插件 id>::<名>` 取自备图形。
+/// `Ctx` 的插件身份决定命名空间，故同名图形不跨插件串用。
+fn icon_element<'a>(ctx: &Ctx, name: &str, px: f32, color: Color) -> Element<'a, Message> {
+    let key = icon_key(ctx, name);
+    crate::ui::icon::icon_resolved(&key, px, color, 1.5)
+}
+
+/// 图标解析键：内置名原样，未知名按插件命名空间拼限定名（取自备图形，缺省画空）。
+fn icon_key(ctx: &Ctx, name: &str) -> String {
+    if crate::ui::icon::is_builtin(name) {
+        return name.to_string();
+    }
+    format!("{}::{}", ctx.plugin_id, name)
+}
+
+/// 文字按钮尺寸档（缺省 `Sm`）。
+fn button_size(size: Option<ControlSize>) -> controls::TextSize {
+    match size {
+        Some(ControlSize::Md) => controls::btn_md(),
+        Some(ControlSize::Lg) => controls::btn_lg(),
+        _ => controls::btn_sm(),
+    }
+}
+
+/// 图标钮的（图标边长, 方框边长）档（缺省 `Sm`：14 / 28）。
+fn icon_box(size: Option<ControlSize>) -> (f32, f32) {
+    match size {
+        Some(ControlSize::Md) => (16.0, controls::ICON_LG),
+        Some(ControlSize::Lg) => (20.0, controls::ICON_XL),
+        _ => (14.0, controls::ICON_MD),
+    }
+}
+
+/// 卡片样式：底色按档位、边框可关、圆角可调。
+fn card_style(
+    accent: bool,
+    tone: Option<CardTone>,
+    radius: Option<f32>,
+    bordered: Option<bool>,
+) -> container::Style {
+    let background = match tone.unwrap_or(CardTone::Default) {
+        CardTone::Default => Some(pal::BG_TERTIARY.into()),
+        CardTone::Muted => Some(pal::BG_SECONDARY.into()),
+        CardTone::AccentSoft => Some(pal::ACCENT_SOFT.into()),
+        CardTone::Transparent => None,
+    };
+    let border = if bordered.unwrap_or(true) {
+        iced::border::rounded(radius.unwrap_or(pal::RADIUS_SM))
+            .color(if accent { pal::ACCENT } else { pal::BORDER })
+            .width(1.0)
+    } else {
+        iced::border::rounded(radius.unwrap_or(pal::RADIUS_SM)).color(Color::TRANSPARENT).width(0.0)
+    };
+    container::Style { background, border, ..container::Style::default() }
+}
+
+/// 可滚动节点的稳定 id（插件 id + 面 id + 节点 id；`view.scrollTo` 按它定位）。
+pub(crate) fn scroll_id(plugin_id: &str, surface_id: &str, node_id: &str) -> String {
+    format!("plugin-scroll:{plugin_id}:{surface_id}:{node_id}")
+}
+
+fn node_scroll_id(ctx: &Ctx, node_id: &str) -> String {
+    scroll_id(&ctx.plugin_id, &ctx.surface_id, node_id)
+}
+
+/// 某节点的悬停态（`hoverOnly` 图标钮据此显示 / 隐藏）。
+fn hovered(app: &App, ctx: &Ctx, node_id: &str) -> bool {
+    app.plugin_hovered.contains(&(ctx.plugin_id.clone(), ctx.surface_id.clone(), node_id.to_string()))
+}
+
+/// 悬停进出消息（`hoverOnly` 图标钮的显隐开关）。
+fn hover_msg(ctx: &Ctx, node_id: &str, entered: bool) -> Message {
+    Message::PluginHover {
+        plugin_id: ctx.plugin_id.clone(),
+        surface_id: ctx.surface_id.clone(),
+        node_id: node_id.to_string(),
+        entered,
+    }
+}
+
+fn justify_x(justify: Justify) -> Horizontal {
+    match justify {
+        Justify::Start | Justify::SpaceBetween => Horizontal::Left,
+        Justify::Center => Horizontal::Center,
+        Justify::End => Horizontal::Right,
     }
 }
 
@@ -517,9 +710,20 @@ fn text_weight(weight: TextWeight) -> iced::Font {
     crate::plugin_canvas::font_of(weight)
 }
 
+/// 按钮档位映射（缺省 `Secondary`）。
 fn button_variant(variant: Option<ButtonVariant>) -> Variant {
     match variant {
         None => Variant::Secondary,
+        Some(ButtonVariant::Primary) => Variant::Primary,
+        Some(ButtonVariant::Ghost) => Variant::Ghost,
+        Some(ButtonVariant::Danger) => Variant::Danger,
+    }
+}
+
+/// 图标钮档位映射：缺省 `Ghost`（透明底、悬停才出底——工具条图标钮的常态）。
+fn icon_variant(variant: Option<ButtonVariant>) -> Variant {
+    match variant {
+        None => Variant::Ghost,
         Some(ButtonVariant::Primary) => Variant::Primary,
         Some(ButtonVariant::Ghost) => Variant::Ghost,
         Some(ButtonVariant::Danger) => Variant::Danger,

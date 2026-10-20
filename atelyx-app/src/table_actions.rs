@@ -519,6 +519,11 @@ fn on_msg_open(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
             resolve_plugin_call(app, request_id, result.map(|()| serde_json::json!({})));
             Task::none()
         }
+        tv::TableMsg::PluginSetCellImage { request_id, row_id, field_id, images, display } => {
+            let result = plugin_set_cell_image(app, &row_id, &field_id, images, display);
+            resolve_plugin_call(app, request_id, result.map(|()| serde_json::json!({})));
+            Task::none()
+        }
         tv::TableMsg::Downloaded(result) => {
             match result {
                 Ok(path) => app.notify(NoticeLevel::Success, format!("已保存到 {}", path.display())),
@@ -889,6 +894,31 @@ fn plugin_set_cell(
         drop_undo(session);
     }
     Ok(())
+}
+
+/// 插件向图片字段单元格写入图片引用：只接受 image 字段，值写成 `{ images, display? }`（走与本地
+/// 编辑同一出口：撤销栈、置脏与保存链一致）。
+fn plugin_set_cell_image(
+    app: &mut App,
+    row_id: &str,
+    field_id: &str,
+    images: Vec<String>,
+    display: Option<String>,
+) -> Result<(), String> {
+    let Some(session) = app.table.as_ref() else {
+        return Err("未打开表格，无法写入".to_string());
+    };
+    let Some(field) = session.data.fields.iter().find(|f| f.id == field_id) else {
+        return Err(format!("字段不存在：{field_id}"));
+    };
+    if field.field_type != "image" {
+        return Err(format!("字段不是图片类型：{field_id}"));
+    }
+    let mut value = serde_json::json!({ "images": images });
+    if let Some(display) = display {
+        value["display"] = serde_json::Value::String(display);
+    }
+    plugin_set_cell(app, row_id, field_id, value)
 }
 
 /// 插件新增行：返回宿主分配的新行 id（插件据此继续引用该行）。

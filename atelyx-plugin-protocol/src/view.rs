@@ -61,13 +61,15 @@ pub enum NodeBody {
         gap: Option<f32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         padding: Option<f32>,
+        /// 主轴分布：`spaceBetween` 在行占满宽度时把子项推向两端（工具行：左信息 + 右操作）。
+        /// 缺省 `start`（子项紧贴左缘）。fill 行内 justify 仍生效。
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        align: Option<Align>,
+        justify: Option<Justify>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cross_align: Option<Align>,
         /// 撑满语义：`both` = 行占满父容器剩余宽高、Fill 子项均分剩余宽度（如左右分栏）；
         /// `width` = 仅占满宽度（高度仍按内容，用于工具行左右分布）。
-        /// 缺省行宽收缩、子项 Fill 按各自内容宽解析；fill 行内 `align` 不生效。
+        /// 缺省行宽收缩、子项 Fill 按各自内容宽解析。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         fill: Option<Fill>,
     },
@@ -82,37 +84,65 @@ pub enum NodeBody {
     /// 卡片容器：主题化背景 + 边框 + 圆角的分组盒（列表条目、信息分组）。
     Card {
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        gap: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         padding: Option<f32>,
         /// 强调态（列表选中项）：accent 边框。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         accent: Option<bool>,
+        /// 底色档位（缺省主题卡底）。插件只选主题档位，不写死色值。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tone: Option<CardTone>,
+        /// 圆角半径（px）；缺省用宿主卡片圆角。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        radius: Option<f32>,
+        /// 是否画边框；缺省 true。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bordered: Option<bool>,
     },
+    /// 叠层：子节点按提交顺序重叠（后提交的在上），同尺寸对齐于左上角。
+    /// 用于「自绘画布当底 + 宿主控件叠其上」或徽标叠图。
+    Stack {},
     Scroll {
         /// 子节点按主轴单向排列：`horizontal` 排成行，其余（含缺省）排成列。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         direction: Option<Axis>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gap: Option<f32>,
     },
     Grid {
         columns: u32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         gap: Option<f32>,
     },
-    /// 可滚动列表：语义等同纵向 scroll + column，为宿主后续做虚拟化预留的分型。
-    List {},
+    /// 可滚动列表：语义等同纵向 scroll + column（宿主对子项按键复用控件态）。
+    /// 滚动位置由宿主经 `view.scrollTo` 指令控制（插件侧无滚动事件）。
+    List {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gap: Option<f32>,
+    },
     Text {
         content: String,
+        /// 字号倍率（相对界面基准正文字号；缺省 1.0）。跟界面字号缩放，不是绝对像素。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         size: Option<f32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         weight: Option<TextWeight>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         color: Option<ColorToken>,
+        /// 水平对齐（节点宽度恒占满父容器）：`end` 用于右对齐气泡，`center` 用于居中标题。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        align: Option<Align>,
     },
     /// 只读 Markdown 正文：宿主按笔记同源解析器渲染（标题 / 列表 / 引用 / 代码块 / 表格 / 链接）。
     /// 块级图片与笔记同源载入：http(s) 走下载，其余按仓库相对路径。
+    /// 取色与字重走宿主主题与 Markdown 语义（标题层级 / 强调），只开放整体字号缩放。
     /// 无编辑态与事件：插件要交互请用其他控件。
     Markdown {
         content: String,
+        /// 整体字号倍率（相对界面基准正文字号；缺省 1.0）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size: Option<f32>,
     },
     TextInput {
         #[serde(default)]
@@ -157,6 +187,9 @@ pub enum NodeBody {
         variant: Option<ButtonVariant>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         enabled: Option<bool>,
+        /// 尺寸档位（缺省 Sm，高 24 的紧凑钮）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size: Option<ControlSize>,
     },
     /// 图标名必须存在于宿主图标形状表（lucide 线性形状），未知名字宿主按可读错误拒绝。
     IconButton {
@@ -165,17 +198,32 @@ pub enum NodeBody {
         tooltip: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         enabled: Option<bool>,
+        /// 尺寸档位（缺省 Sm：14px 图标 + 28 方框）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size: Option<ControlSize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        variant: Option<ButtonVariant>,
+        /// 悬停才显示（列表行的操作钮常驻会喧宾夺主）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hover_only: Option<bool>,
     },
-    /// 无尺寸字段：宿主按图片原始尺寸渲染，`fit` 在父容器给定尺寸时生效。
+    /// 图片：`width` / `height` 给定时按该尺寸渲染（缺省按原图尺寸）；
+    /// 节点声明 `click` 事件即成为可点击图片（大图预览入口）。
     Image {
         source: ImageSource,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         fit: Option<ImageFit>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        width: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        height: Option<f32>,
     },
     Progress {
         /// 0.0 ~ 1.0；越界值宿主钳制。
         value: f64,
     },
+    /// 菜单：`label` 与 `icon` 可并存（并存时渲染为紧凑的「图标 + 文字」触发钮，非全宽下拉钮）；
+    /// 只给 `icon` 为纯图标触发钮，只给 `label` 为全宽下拉钮。二者都缺省时回落到 `…` 触发钮。
     Menu {
         items: Vec<MenuItem>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -185,10 +233,18 @@ pub enum NodeBody {
     },
     /// 自绘画布：宿主保留一块区域执行 `canvas.submit` 提交的指令清单（见 [`crate::canvas`]）。
     /// 指针事件按 `mouseEvents` 声明子集回发，未声明不上行；命中由插件按指令几何自算。
+    /// `height` 给定时取该高度；`fill` = 占满父容器剩余空间（放在 Fill 容器里才有可分配空间）。
+    /// 画布尺寸变化时宿主回发 `host:canvas.resized`（插件据此对齐绘制坐标与滚动范围）。
     Canvas {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         mouse_events: Vec<CanvasEventKind>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        height: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fill: Option<bool>,
     },
+    /// 分隔线：主题弱边界色的 1px 水平线（分组容器内的轻分割）。
+    Divider {},
     /// 拖动热区：自身不渲染任何内容，用户在其占位区域内按下即由宿主发起整窗拖动
     /// （全接管时插件自绘标题栏的拖动把手）。事件不回发。
     DragRegion {},
@@ -199,7 +255,13 @@ impl NodeBody {
     pub fn allows_children(&self) -> bool {
         matches!(
             self,
-            Self::Row { .. } | Self::Column { .. } | Self::Card { .. } | Self::Scroll { .. } | Self::Grid { .. } | Self::List { .. }
+            Self::Row { .. }
+                | Self::Column { .. }
+                | Self::Card { .. }
+                | Self::Stack { .. }
+                | Self::Scroll { .. }
+                | Self::Grid { .. }
+                | Self::List { .. }
         )
     }
 
@@ -208,6 +270,7 @@ impl NodeBody {
             Self::Row { .. } => "row",
             Self::Column { .. } => "column",
             Self::Card { .. } => "card",
+            Self::Stack { .. } => "stack",
             Self::Scroll { .. } => "scroll",
             Self::Grid { .. } => "grid",
             Self::List { .. } => "list",
@@ -223,9 +286,21 @@ impl NodeBody {
             Self::Progress { .. } => "progress",
             Self::Menu { .. } => "menu",
             Self::Canvas { .. } => "canvas",
+            Self::Divider { .. } => "divider",
             Self::DragRegion { .. } => "dragRegion",
         }
     }
+}
+
+/// 行主轴分布（[`NodeBody::Row`] 的 `justify`）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Justify {
+    Start,
+    Center,
+    End,
+    /// 两端对齐：行占满宽度时首个贴左、末个贴右，中间拉开（工具行）。
+    SpaceBetween,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -282,6 +357,30 @@ pub enum ButtonVariant {
     Danger,
 }
 
+/// 卡片底色档位（[`NodeBody::Card`] 的 `tone`）。插件只选主题档位，不写死色值。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CardTone {
+    /// 默认卡片底（比面板底色略深一档）。
+    Default,
+    /// 更淡的底（次级信息分组）。
+    Muted,
+    /// 强调软底（accent 的低饱和底）。
+    AccentSoft,
+    /// 无底色（只用边框分组）。
+    Transparent,
+}
+
+/// 控件尺寸档位。`Sm` = 紧凑（Button 高 24、IconButton 14px 图标 + 28 方框）；
+/// `Md` = 常规（Button 高 32、IconButton 16px 图标 + 32 方框）；`Lg` = 宽松。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ControlSize {
+    Sm,
+    Md,
+    Lg,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ImageFit {
@@ -309,11 +408,14 @@ pub struct MenuItem {
     pub disabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub danger: Option<bool>,
+    /// 当前项标记（宿主在条目前画勾）：用于「历史会话列表」这类单选菜单。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<bool>,
 }
 
 impl MenuItem {
     pub fn new(label: impl Into<String>, action: impl Into<String>) -> Self {
-        Self { label: label.into(), action: action.into(), disabled: None, danger: None }
+        Self { label: label.into(), action: action.into(), disabled: None, danger: None, current: None }
     }
 
     pub fn disabled(mut self) -> Self {
@@ -323,6 +425,12 @@ impl MenuItem {
 
     pub fn danger(mut self) -> Self {
         self.danger = Some(true);
+        self
+    }
+
+    /// 标记为当前项（宿主在条目前画勾）。
+    pub fn current(mut self) -> Self {
+        self.current = Some(true);
         self
     }
 }
@@ -444,6 +552,7 @@ mod tests {
                         label: "开始".into(),
                         variant: Some(ButtonVariant::Primary),
                         enabled: None,
+                        size: None,
                     },
                     children: vec![],
                     events: vec![EventKind::Click],
@@ -493,7 +602,7 @@ mod tests {
         let fill = NodeBody::Row {
             gap: None,
             padding: None,
-            align: None,
+            justify: None,
             cross_align: None,
             fill: Some(Fill::Both),
         };
@@ -504,7 +613,7 @@ mod tests {
         let width_only = NodeBody::Row {
             gap: None,
             padding: None,
-            align: None,
+            justify: None,
             cross_align: None,
             fill: Some(Fill::Width),
         };
@@ -518,20 +627,71 @@ mod tests {
             serde_json::from_value(serde_json::json!({ "kind": "row" })).unwrap();
         assert_eq!(
             legacy,
-            NodeBody::Row { gap: None, padding: None, align: None, cross_align: None, fill: None }
+            NodeBody::Row { gap: None, padding: None, justify: None, cross_align: None, fill: None }
         );
     }
 
+    /// 行主轴两端对齐与文本水平对齐走独立枚举（不与交叉轴 Align 混用）。
     #[test]
-    fn card_body_roundtrips() {
-        let card = NodeBody::Card { padding: Some(10.0), accent: Some(true) };
+    fn justify_and_card_tone_roundtrip() {
+        let row = NodeBody::Row {
+            gap: None,
+            padding: None,
+            justify: Some(Justify::SpaceBetween),
+            cross_align: None,
+            fill: Some(Fill::Width),
+        };
+        let json = serde_json::to_value(&row).unwrap();
+        assert_eq!(json["justify"], "spaceBetween");
+        assert_eq!(serde_json::from_value::<NodeBody>(json).unwrap(), row);
+
+        let text = NodeBody::Text {
+            content: "右对齐".into(),
+            size: Some(1.25),
+            weight: None,
+            color: None,
+            align: Some(Align::End),
+        };
+        let json = serde_json::to_value(&text).unwrap();
+        assert_eq!(json["align"], "end");
+        assert_eq!(json["size"], 1.25);
+        assert_eq!(serde_json::from_value::<NodeBody>(json).unwrap(), text);
+
+        let card = NodeBody::Card {
+            gap: Some(4.0),
+            padding: None,
+            accent: None,
+            tone: Some(CardTone::AccentSoft),
+            radius: Some(12.0),
+            bordered: Some(false),
+        };
         let json = serde_json::to_value(&card).unwrap();
-        assert_eq!(json["kind"], "card");
-        assert_eq!(json["accent"], true);
+        assert_eq!(json["tone"], "accentSoft");
+        assert_eq!(json["bordered"], false);
         assert_eq!(serde_json::from_value::<NodeBody>(json).unwrap(), card);
-        let plain: NodeBody =
-            serde_json::from_value(serde_json::json!({ "kind": "card" })).unwrap();
-        assert_eq!(plain, NodeBody::Card { padding: None, accent: None });
+    }
+
+    /// 新增分型：Stack（叠层容器）可携带 children，Divider 为叶子。
+    #[test]
+    fn stack_allows_children_and_divider_is_leaf() {
+        let stack = NodeBody::Stack {};
+        assert!(stack.allows_children());
+        assert_eq!(stack.kind_name(), "stack");
+        let divider = NodeBody::Divider {};
+        assert!(!divider.allows_children());
+        assert_eq!(divider.kind_name(), "divider");
+        let with_children = ViewNode {
+            id: "s".into(),
+            body: stack,
+            children: vec![ViewNode {
+                id: "d".into(),
+                body: divider,
+                children: vec![],
+                events: vec![],
+            }],
+            events: vec![],
+        };
+        assert!(with_children.validate().is_ok());
     }
 
     #[test]

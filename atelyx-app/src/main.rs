@@ -586,6 +586,27 @@ enum Message {
     },
     /// 插件请求关闭自己的一个窗口。
     PluginWindowClose { request_id: u64, plugin_id: String, window_key: String },
+    /// 插件请求运行时改一个已打开窗口的属性（尺寸 / 置顶）。
+    PluginWindowUpdate {
+        request_id: u64,
+        plugin_id: String,
+        params: atelyx_core::plugin_runtime::WindowUpdateParams,
+    },
+    /// 插件请求重新显示一个因失焦被隐藏的窗口。
+    PluginWindowShow { request_id: u64, plugin_id: String, window_key: String },
+    /// 插件请求把某可滚动容器滚到一端。
+    PluginScrollTo {
+        request_id: u64,
+        plugin_id: String,
+        params: atelyx_core::plugin_runtime::ScrollToParams,
+    },
+    /// 插件节点悬停进出（`hoverOnly` 图标钮的显隐开关）。
+    PluginHover {
+        plugin_id: String,
+        surface_id: String,
+        node_id: String,
+        entered: bool,
+    },
     /// 全接管标题栏的拖动热区被按下（宿主代执行整窗拖动）。
     PluginWindowDrag(window::Id),
     /// 退出接管（常驻退出入口 / Esc）。
@@ -1089,6 +1110,8 @@ pub struct App {
         HashMap<plugin_actions::InputKey, std::sync::Arc<Vec<atelyx_core::plugin_runtime::DrawCommand>>>,
     /// markdown 节点的解析投影（键 = 插件 id + 面 id + 节点 id；源码不变不重解析）。
     pub plugin_markdown: HashMap<plugin_actions::InputKey, plugin_actions::MarkdownNode>,
+    /// 悬停中的插件节点（键 = 插件 id + 面 id + 节点 id；`hoverOnly` 图标钮据此显隐）。
+    pub plugin_hovered: HashSet<plugin_actions::InputKey>,
     /// 各窗口的接管态（键 = OS 窗口 id；布局真源不动，退出即恢复）。
     pub plugin_takeovers: HashMap<window::Id, plugin_actions::TakeoverActive>,
     /// 插件窗口记账（键 = OS 窗口 id；随窗口关闭 / 插件停用收尾）。
@@ -1387,11 +1410,12 @@ impl App {
             ..Settings::default()
         });
         ui::icon::init();
-        // 插件运行时：根 = 应用数据目录下 `plugins/`（数据目录不可用时回落系统临时目录，功能降级不崩溃）
+        // 插件运行时：根 = 应用数据目录下 `plugins/`（数据目录不可用时回落系统临时目录，功能降级不崩溃）。
+        // 宿主版本取应用版本：插件 `minHostVersion` 校验与握手自报都以产品版本为准（core 包版本不参与）。
         let plugins_root = app_data_dir()
             .map(|d| d.join("plugins"))
             .unwrap_or_else(|| std::env::temp_dir().join("atelyx-plugins"));
-        let plugins = PluginRuntime::new(plugins_root);
+        let plugins = PluginRuntime::with_host_version(plugins_root, env!("CARGO_PKG_VERSION"));
         let (global, global_notice) = load_global_boot();
         // 市场索引缓存落应用数据目录根（与 plugins/ 平级；目录不可用 = 不缓存）
         let market_cache_path = app_data_dir().map(|d| d.join("market-cache.json"));
@@ -1469,6 +1493,7 @@ impl App {
                 plugin_editors: HashMap::new(),
                 plugin_canvases: HashMap::new(),
                 plugin_markdown: HashMap::new(),
+                plugin_hovered: HashSet::new(),
                 plugin_takeovers: HashMap::new(),
                 plugin_windows: HashMap::new(),
                 doc_open: None,
@@ -2695,6 +2720,11 @@ impl App {
                     self.main_size = size;
                     return Task::none();
                 }
+                // 插件窗口：记账里的尺寸随 OS 调整更新（`window.update` 只改一维时取它）
+                if let Some(entry) = self.plugin_windows.get_mut(&id) {
+                    entry.size = size;
+                    return Task::none();
+                }
                 // 撕裂窗口尺寸回写模型 bounds（OS 窗口事件 = bounds 唯一写者）
                 self.os_sizes.insert(id, size);
                 let Some(model_id) = self.detached_os.get(&id) else { return Task::none() };
@@ -3182,6 +3212,24 @@ impl App {
             }
             Message::PluginWindowClose { request_id, plugin_id, window_key } => {
                 plugin_actions::on_window_close(self, request_id, plugin_id, window_key)
+            }
+            Message::PluginWindowUpdate { request_id, plugin_id, params } => {
+                plugin_actions::on_window_update(self, request_id, plugin_id, params)
+            }
+            Message::PluginWindowShow { request_id, plugin_id, window_key } => {
+                plugin_actions::on_window_show(self, request_id, plugin_id, window_key)
+            }
+            Message::PluginScrollTo { request_id, plugin_id, params } => {
+                plugin_actions::on_scroll_to(self, request_id, plugin_id, params)
+            }
+            Message::PluginHover { plugin_id, surface_id, node_id, entered } => {
+                let key = (plugin_id, surface_id, node_id);
+                if entered {
+                    self.plugin_hovered.insert(key);
+                } else {
+                    self.plugin_hovered.remove(&key);
+                }
+                Task::none()
             }
             Message::PluginWindowDrag(id) => {
                 // 拖动热区只在工作区窗口的接管态生效（普通面板里的 dragRegion 不拖宿主窗口）

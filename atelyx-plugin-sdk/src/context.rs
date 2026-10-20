@@ -142,22 +142,38 @@ impl Context {
         self.call_typed(method::canvas::SUBMIT, &params).await
     }
 
-    /// 注册一个贡献点，使其出现在宿主对应入口（面板 / 表格视图下拉）。
+    /// 注册一个贡献点，使其出现在宿主对应入口（面板 / 表格视图 / 设置页）。
     /// `id` 插件内唯一且不得含 `:`，同时是该面挂载后的 surfaceId；重复或非法 id 由宿主可读拒绝。
+    /// `padding` = 面外壳内边距（px，0 = 贴边；缺省用宿主默认）。
     pub async fn register(
         &self,
         slot: ContributionSlot,
         id: &str,
         label: &str,
         icon: Option<&str>,
+        padding: Option<f32>,
     ) -> Result<(), RpcError> {
         let params = RegisterParams {
             slot,
             id: id.into(),
             label: label.into(),
             icon: icon.map(Into::into),
+            padding,
         };
         self.call_unit(method::view::REGISTER, &params).await
+    }
+
+    /// 定义一枚自备图标形状（24x24 网格描边路径），此后按名字在贡献注册与图标钮里引用。
+    /// 名字须为字母 / 数字 / `_` / `-`；同名重复定义即原地更新；随插件会话收尾清除。
+    pub async fn define_icon(&self, name: &str, path: &str) -> Result<(), RpcError> {
+        let params = DefineIconParams { name: name.into(), path: path.into() };
+        self.call_unit(method::view::DEFINE_ICON, &params).await
+    }
+
+    /// 把一个可滚动容器（`list` / `scroll`）滚到一端。目标节点须在当前树里且为可滚动容器。
+    pub async fn scroll_to(&self, surface_id: &str, node_id: &str, edge: ScrollEdge) -> Result<(), RpcError> {
+        let params = ScrollToParams { surface_id: surface_id.into(), node_id: node_id.into(), edge };
+        self.call_unit(method::view::SCROLL_TO, &params).await
     }
 
     /// 按 id 撤销自己的一个贡献点（未注册的 id 报可读错误）。
@@ -186,6 +202,17 @@ impl Context {
         self.call_unit(method::window::CLOSE, &WindowCloseParams { id: id.into() }).await
     }
 
+    /// 运行时改一个已打开窗口的属性（尺寸 / 置顶；至少给一项；「不进任务栏」只能在开窗时声明，
+    /// 窗口不存在报可读错误）。
+    pub async fn window_update(&self, params: WindowUpdateParams) -> Result<(), RpcError> {
+        self.call_unit(method::window::UPDATE, &params).await
+    }
+
+    /// 重新显示一个因失焦被隐藏的窗口（`hideOnBlur` 的唤起回路）。
+    pub async fn window_show(&self, id: &str) -> Result<(), RpcError> {
+        self.call_unit(method::window::SHOW, &WindowIdParams { id: id.into() }).await
+    }
+
     // ---------- ai ----------
 
     /// 发起 / 续聊一轮 AI 对话（须在 manifest 声明 `ai` 权限）。回执 = run 已就位，
@@ -207,16 +234,42 @@ impl Context {
     }
 
     /// 读当前仓库的会话清单（`session_id` = `None`）或单会话消息历史。
+    /// 单会话模式可用 `offset`（从末尾起跳过的条数）与 `query`（关键词过滤）做分页与搜索。
     pub async fn chat_history(
         &self,
         session_id: Option<&str>,
         limit: Option<u32>,
+        offset: Option<u32>,
+        query: Option<&str>,
     ) -> Result<ChatHistoryResult, RpcError> {
         self.call_typed(
             method::ai::CHAT_HISTORY,
-            &ChatHistoryParams { session_id: session_id.map(Into::into), limit },
+            &ChatHistoryParams {
+                session_id: session_id.map(Into::into),
+                limit,
+                offset,
+                query: query.map(Into::into),
+            },
         )
         .await
+    }
+
+    /// 重命名一个会话（写其元数据标题；标题空白或会话不存在报可读错误）。
+    pub async fn chat_rename(&self, session_id: &str, title: &str) -> Result<(), RpcError> {
+        let params = ChatRenameParams { session_id: session_id.into(), title: title.into() };
+        self.call_unit(method::ai::CHAT_RENAME, &params).await
+    }
+
+    /// 删除一个会话（连同其消息文件）。
+    pub async fn chat_delete(&self, session_id: &str) -> Result<(), RpcError> {
+        let params = ChatSessionParams { session_id: session_id.into() };
+        self.call_unit(method::ai::CHAT_DELETE, &params).await
+    }
+
+    /// 压缩一个会话（把较早消息总结为压缩起点）。回执 = 已受理，结果经 [`Context::chat_history`] 复核。
+    pub async fn chat_compact(&self, session_id: &str) -> Result<(), RpcError> {
+        let params = ChatSessionParams { session_id: session_id.into() };
+        self.call_unit(method::ai::CHAT_COMPACT, &params).await
     }
 
     /// 注册一个可被 Agent 调用的工具：名称全局唯一（不得与内置工具或其他插件的工具重名），
@@ -383,6 +436,24 @@ impl Context {
         self.call_unit(method::table::SELECT_ROW, &TableRowIdParams { row_id: row_id.into() }).await
     }
 
+    /// 向图片字段单元格写入图片引用（整格替换）：`images` 为仓库相对路径，须先经
+    /// [`Context::vault_write_binary`] 落盘；`display` 为显示形态（缺省保持宿主默认）。
+    pub async fn table_set_cell_image(
+        &self,
+        row_id: &str,
+        field_id: &str,
+        images: Vec<String>,
+        display: Option<&str>,
+    ) -> Result<(), RpcError> {
+        let params = TableSetCellImageParams {
+            row_id: row_id.into(),
+            field_id: field_id.into(),
+            images,
+            display: display.map(Into::into),
+        };
+        self.call_unit(method::table::SET_CELL_IMAGE, &params).await
+    }
+
     // ---------- process ----------
 
     pub async fn spawn(
@@ -441,6 +512,13 @@ impl Context {
 
     pub async fn unregister_shortcut(&self, accelerator: &str) -> Result<(), RpcError> {
         self.call_unit(method::shortcut::UNREGISTER, &AcceleratorParams { accelerator: accelerator.into() }).await
+    }
+
+    /// 事前查询某键位是否可注册：`available` = 可注册，`owner` = 占用方插件 id（被系统 / 其他
+    /// 应用占用或无占用时缺省）。
+    pub async fn query_shortcut(&self, accelerator: &str) -> Result<ShortcutQueryResult, RpcError> {
+        let params = ShortcutQueryParams { accelerator: accelerator.into() };
+        self.call_typed(method::shortcut::QUERY, &params).await
     }
 
     // ---------- clipboard / dialog / http ----------
