@@ -975,7 +975,7 @@ fn scroll_target_for_row(session: &tv::TableSession, index: usize) -> Option<f32
     let (y, h) = (layout.row_y.get(index)?.to_owned(), layout.row_h.get(index)?.to_owned());
     let geo = tv::geo(session, size);
     let top = geo.content_y(geo.header_h());
-    let bottom = geo.content_y(geo.rows_bottom());
+    let bottom = geo.content_y(geo.rows_viewport_bottom());
     (y < top || y + h > bottom).then_some((y - size.height * 0.5 + h * 0.5).max(0.0))
 }
 
@@ -1095,7 +1095,8 @@ fn on_press(app: &mut App, window: iced::window::Id, pos: Point, size: Size, ori
             let bar = g.hscrollbar();
             let max = g.max_scroll_x();
             let gutter = g.gutter_w();
-            let track_w = (g.width - gutter).max(1.0);
+            // 滑块行程与 hscrollbar() 同口径：行程收在列区视口右缘内（竖条占位时左收）
+            let track_w = (g.cols_viewport_right() - gutter).max(1.0);
             if let Some(bar) = bar {
                 // 点在滑块外 = 滑块中心跳到点击处；随拖拽按 grab 偏移跟手
                 let grab = if bar.contains(pos) {
@@ -1113,7 +1114,8 @@ fn on_press(app: &mut App, window: iced::window::Id, pos: Point, size: Size, ori
             let bar = g.vscrollbar();
             let max = g.max_scroll_y();
             let header = g.header_h();
-            let track_h = (g.rows_bottom() - tv::HSCROLLBAR_H - header).max(1.0);
+            // 滑块行程与 vscrollbar() 同口径：轨道高 = 行区视口高（横条占位时上收）
+            let track_h = (g.rows_viewport_bottom() - header).max(1.0);
             if let Some(bar) = bar {
                 // 点在滑块外 = 滑块中心跳到点击处；随拖拽按 grab 偏移跟手
                 let grab = if bar.contains(pos) {
@@ -1444,17 +1446,19 @@ fn on_move(app: &mut App, window: iced::window::Id, pos: Point, size: Size, orig
     // 每次画布悬停都回写原点：格式气泡的窗口锚点须与本窗口当前画布位置同源
     s.view.canvas_origin = Some((window, origin));
     if s.view.canvas_size != size {
-        // 首帧悬停播种画布尺寸（打开表格后图片即按可见区加载，无需先按压）
+        // 首帧悬停播种画布尺寸（打开表格后图片即按可见区加载，无需先按压）；
+        // 尺寸变化收口滚动视口，旧滚动值一并钳回新上限
         s.view.canvas_size = size;
+        clamp_scroll(s);
     }
     // 竖向滚动条拖拽（滑块按 grab 偏移跟手）
     let vscroll = s.view.vscroll_drag.as_ref().map(|d| d.grab).map(|grab| {
         let g = tv::geo(s, size);
-        (grab, g.vscrollbar(), g.max_scroll_y(), g.header_h(), g.rows_bottom())
+        (grab, g.vscrollbar(), g.max_scroll_y(), g.header_h(), g.rows_viewport_bottom())
     });
-    if let Some((grab, bar, max, header, bottom)) = vscroll {
+    if let Some((grab, bar, max, header, viewport_bottom)) = vscroll {
         if let Some(bar) = bar {
-            let track_h = (bottom - tv::HSCROLLBAR_H - header).max(1.0);
+            let track_h = (viewport_bottom - header).max(1.0);
             let t = ((pos.y - header - grab) / (track_h - bar.height)).clamp(0.0, 1.0);
             s.view.scroll_y = t * max;
         }
@@ -1463,11 +1467,11 @@ fn on_move(app: &mut App, window: iced::window::Id, pos: Point, size: Size, orig
     // 横向滚动条拖拽（滑块按 grab 偏移跟手）
     let hscroll = s.view.hscroll_drag.as_ref().map(|d| d.grab).map(|grab| {
         let g = tv::geo(s, size);
-        (grab, g.hscrollbar(), g.max_scroll_x(), g.gutter_w(), g.width)
+        (grab, g.hscrollbar(), g.max_scroll_x(), g.gutter_w(), g.cols_viewport_right())
     });
-    if let Some((grab, bar, max, gutter, width)) = hscroll {
+    if let Some((grab, bar, max, gutter, viewport_right)) = hscroll {
         if let Some(bar) = bar {
-            let track_w = (width - gutter).max(1.0);
+            let track_w = (viewport_right - gutter).max(1.0);
             let t = ((pos.x - gutter - grab) / (track_w - bar.width)).clamp(0.0, 1.0);
             s.view.scroll_x = t * max;
         }

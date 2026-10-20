@@ -21,6 +21,7 @@ use crate::ui::controls;
 use crate::ui::icon::icon;
 use crate::ui::notify::Level as NoticeLevel;
 use crate::ui::palette as pal;
+use crate::ui::scroll;
 use crate::ui::{bold, text};
 use crate::{layout_view, vault, App, Message};
 
@@ -1205,7 +1206,7 @@ pub fn view(app: &App) -> Element<'static, Message> {
         .padding(Padding::ZERO.horizontal(20.0))
         .push(tabs)
         .push(body);
-    scrollable(container(col).padding(Padding::ZERO.top(4.0).bottom(24.0)))
+    scroll::v(container(col).padding(Padding::ZERO.top(4.0).bottom(24.0)))
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
@@ -1313,7 +1314,7 @@ fn type_filters(app: &App, types: &[String]) -> Element<'static, Message> {
     }
     scrollable(bar)
         .direction(iced::widget::scrollable::Direction::Horizontal(
-            iced::widget::scrollable::Scrollbar::new().width(0.0).scroller_width(0.0),
+            scroll::hidden(),
         ))
         .width(Length::Fill)
         .height(Length::Shrink)
@@ -1669,7 +1670,7 @@ fn detail_modal(app: &App, window: iced::window::Id, summary: &PluginSummary) ->
         }
     }
     rows.push(
-        scrollable(audit)
+        scroll::v(audit)
             .width(Length::Fill)
             .height(Length::Fixed(DETAIL_AUDIT_MAX_H))
             .into(),
@@ -1721,7 +1722,7 @@ fn log_modal(app: &App, window: iced::window::Id, id: &str) -> Element<'static, 
     .align_y(iced::alignment::Vertical::Center);
 
     let body: Element<'static, Message> = match &app.plugins_state.log_text {
-        Some(lines) if !lines.trim().is_empty() => scrollable(
+        Some(lines) if !lines.trim().is_empty() => scroll::v(
             text(lines.clone())
                 .size(pal::fs_caption())
                 .color(pal::TEXT_SECONDARY),

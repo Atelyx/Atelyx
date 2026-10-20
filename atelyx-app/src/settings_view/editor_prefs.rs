@@ -1,11 +1,12 @@
 //! 设置-编辑器：宽松换行 / 页面内标题 / 正文行宽（应用级阅读偏好）。
 
-use iced::widget::{column, container, row, scrollable};
+use iced::widget::{column, container, row};
 use iced::{Element, Length, Padding};
 
 use crate::settings_view::{group_head, setting_row};
 use crate::ui::controls;
 use crate::ui::palette as pal;
+use crate::ui::scroll;
 use crate::ui::text;
 use crate::{App, Message};
 
@@ -39,7 +40,7 @@ pub fn view(app: &App) -> Element<'static, Message> {
     ));
     col = col.push(group_head("正文", "", false));
     col = col.push(setting_row("正文行宽", "正文区最大宽度（px）", width_input.into()));
-    scrollable(container(col).padding(Padding::ZERO.top(4.0).bottom(24.0)))
+    scroll::v(container(col).padding(Padding::ZERO.top(4.0).bottom(24.0)))
         .width(Length::Fill)
         .height(Length::Fill)
         .into()

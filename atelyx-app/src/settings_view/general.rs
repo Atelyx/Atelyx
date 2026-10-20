@@ -1,11 +1,12 @@
 //! 设置-通用：界面字体 / 界面字号 / 自动恢复 / 自动更新 / 开机自启（应用级）。
 
-use iced::widget::{column, container, scrollable};
+use iced::widget::{column, container};
 use iced::{Element, Length, Padding};
 
 use crate::layout_view::PopupState;
 use crate::settings_view::{group_head, setting_row};
 use crate::ui::controls;
+use crate::ui::scroll;
 use crate::{App, Message};
 
 /// 字体族下拉触发钮宽（族名长短不一，给足一屏可读宽度）。
@@ -51,7 +52,7 @@ pub fn view(app: &App, window: iced::window::Id) -> Element<'static, Message> {
         "登录系统时自动启动",
         controls::toggle(autostart_on, Some(Message::AutostartToggle)),
     ));
-    scrollable(container(col).padding(Padding::ZERO.top(4.0).bottom(24.0)))
+    scroll::v(container(col).padding(Padding::ZERO.top(4.0).bottom(24.0)))
         .width(Length::Fill)
         .height(Length::Fill)
         .into()

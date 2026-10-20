@@ -1,12 +1,13 @@
 //! 设置-工作区：启动场景选择（仓库级，写仓库 config 的 entrySceneId）。
 
-use iced::widget::{column, container, scrollable};
+use iced::widget::{column, container};
 use iced::{Element, Length, Padding};
 
 use crate::layout_view::PopupState;
 use crate::settings_view::{group_head, setting_row};
 use crate::ui::controls;
 use crate::ui::palette as pal;
+use crate::ui::scroll;
 use crate::ui::text;
 use crate::{App, Message, RepoKind};
 
@@ -54,7 +55,7 @@ pub fn view(app: &App, window: iced::window::Id) -> Element<'static, Message> {
         "进入仓库时切到指定场景（跟随当前 = 保持上次界面）",
         trigger,
     ));
-    scrollable(container(col).padding(Padding::ZERO.top(4.0).bottom(24.0)))
+    scroll::v(container(col).padding(Padding::ZERO.top(4.0).bottom(24.0)))
         .width(Length::Fill)
         .height(Length::Fill)
         .into()

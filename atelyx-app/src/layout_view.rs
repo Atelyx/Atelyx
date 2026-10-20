@@ -24,6 +24,7 @@ use crate::ui::palette as pal;
 use crate::ui::{mono, text};
 use crate::ui::popup::{self, PopupSpec};
 use crate::ui::notify;
+use crate::ui::scroll;
 use crate::{App, DraftKind, Message, NoteMode, markdown_edit, markdown_view};
 
 pub struct UiMetrics;
@@ -837,7 +838,7 @@ fn titlebar<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, Message> 
         controls::icon_button("plus", 13.0, 28.0, Variant::SubtleBg,
             Some(Message::LayoutNew), Some((window, "新建布局".into()))),
     ]))
-    .direction(scrollable::Direction::Horizontal(scrollable::Scrollbar::new().width(0.0).scroller_width(0.0)))
+    .direction(scrollable::Direction::Horizontal(scroll::hidden()))
     .on_scroll(|v| Message::TabStripScrolled(None, v.absolute_offset().x))
     .width(Length::Shrink)
     .height(Length::Shrink);
@@ -1294,9 +1295,7 @@ fn panel_view<'a>(
             .align_y(Vertical::Bottom),
         row![
             scrollable(container(row![tab_row]).padding(Padding::ZERO.left(UiMetrics::HEADER_INSET)))
-                .direction(scrollable::Direction::Horizontal(
-                    scrollable::Scrollbar::new().width(0.0).scroller_width(0.0)
-                ))
+                .direction(scrollable::Direction::Horizontal(scroll::hidden()))
                 .on_scroll({
                     let panel_id = panel_id.to_string();
                     move |v| Message::TabStripScrolled(Some(panel_id.clone()), v.absolute_offset().x)
@@ -1719,7 +1718,7 @@ fn collab_room_view(app: &App) -> Element<'_, Message> {
             ));
         }
     }
-    scrollable(container(col).width(Length::Fill).height(Length::Fill))
+    scroll::v(container(col).width(Length::Fill).height(Length::Fill))
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
@@ -1892,7 +1891,7 @@ fn search_view(app: &App) -> Element<'_, Message> {
                     value: pal::TEXT_PRIMARY,
                     selection: pal::SELECTION,
                 }),
-            scrollable(rows).width(Length::Fill).height(Length::Fill),
+            scroll::v(rows).width(Length::Fill).height(Length::Fill),
         ]
         .spacing(8),
     )
@@ -2323,7 +2322,7 @@ fn files_view(app: &App) -> Element<'_, Message> {
     }
 
     let body = mouse_area(
-        scrollable(
+        scroll::v(
             container(tree_col)
                 .width(Length::Fill)
                 .padding(Padding::ZERO.horizontal(4.0)),
@@ -2955,7 +2954,7 @@ fn note_view(app: &App, window: iced::window::Id) -> Element<'_, Message> {
             };
             // 正文行宽：>0 时钳制只读/预览编辑正文区最大宽度并水平居中（源码档不受限）
             let scrolled =
-                scrollable(bounded_column(inner, app.global.content_width))
+                scroll::v(bounded_column(inner, app.global.content_width))
                     .width(Length::Fill)
                     .height(Length::Fill);
             // 两档同包一层 mouse_area（同型同位保滚动状态）；双击进编辑只在只读档挂处理器
@@ -3413,10 +3412,9 @@ fn wiki_picker_overlay<'a>(app: &'a App, surface: Element<'a, Message>) -> Eleme
         }
     }
     let panel = container(
-        scrollable(col)
+        scroll::v(col)
             .width(Length::Fill)
-            .height(Length::Fixed(264.0))
-            .direction(scrollable::Direction::Vertical(scrollable::Scrollbar::new())),
+            .height(Length::Fixed(264.0)),
     )
     .width(Length::Fixed(288.0))
     .style(|_t| Style {

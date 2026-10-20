@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use iced::widget::{button, column, container, row, scrollable, space};
+use iced::widget::{button, column, container, row, space};
 use iced::{Element, Length, Padding, Task};
 
 use serde::{Deserialize, Serialize};
@@ -17,6 +17,7 @@ use crate::space_actions;
 use crate::ui::controls;
 use crate::ui::icon::icon;
 use crate::ui::palette as pal;
+use crate::ui::scroll;
 use crate::ui::text;
 use crate::{App, Message, RepoKind};
 
@@ -265,7 +266,7 @@ pub fn recent_view(app: &App) -> Element<'_, Message> {
             }),
         );
     }
-    scrollable(container(col).width(Length::Fill).height(Length::Fill))
+    scroll::v(container(col).width(Length::Fill).height(Length::Fill))
         .width(Length::Fill)
         .height(Length::Fill)
         .into()

@@ -6,7 +6,7 @@
 
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::{
-    column, container, grid, image, keyed_column, mouse_area, progress_bar, row, scrollable, space,
+    column, container, grid, image, keyed_column, mouse_area, progress_bar, row, space,
     text_editor, text_input, Stack,
 };
 use iced::{Color, Element, Length, Padding};
@@ -19,6 +19,7 @@ use atelyx_core::plugin_runtime::{
 use crate::plugin_actions::{contribution, declares, image_key, input_display, node_value_text, PopupEntry};
 use crate::ui::controls::{self, Variant};
 use crate::ui::palette as pal;
+use crate::ui::scroll;
 use crate::ui::text;
 use crate::{App, Message};
 
@@ -264,7 +265,7 @@ fn render_node_in<'a>(
                 Axis::Horizontal => row(children_elements(app, ctx, node)).spacing(spacing).into(),
                 Axis::Vertical => column(children_elements(app, ctx, node)).spacing(spacing).into(),
             };
-            scrollable(inner)
+            scroll::v(inner)
                 .id(node_scroll_id(ctx, &node.id))
                 .width(Length::Fill)
                 .height(Length::Fill)
@@ -274,7 +275,7 @@ fn render_node_in<'a>(
             .columns((*columns).max(1) as usize)
             .spacing(gap.unwrap_or(DEFAULT_GAP))
             .into(),
-        NodeBody::List { gap } => scrollable(
+        NodeBody::List { gap } => scroll::v(
             keyed_column(children(app, ctx, node))
                 .width(Length::Fill)
                 .height(Length::Shrink)

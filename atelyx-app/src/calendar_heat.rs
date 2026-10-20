@@ -4,12 +4,12 @@
 use std::collections::HashMap;
 
 use iced::widget::container::Style;
-use iced::widget::scrollable::{Direction, Scrollbar};
-use iced::widget::{container, mouse_area, scrollable, space};
+use iced::widget::{container, mouse_area, space};
 use iced::{Element, Length, border};
 
 use crate::calendar_grid;
 use crate::ui::palette as pal;
+use crate::ui::scroll;
 use crate::ui::text;
 use crate::ui::UiMsg;
 use crate::{App, Message, RepoKind};
@@ -58,10 +58,7 @@ pub fn heatmap(app: &App, window: iced::window::Id) -> Element<'static, Message>
         );
     }
     let mut col = iced::widget::Column::<Message>::new().push(
-        scrollable(container(blocks))
-            .direction(Direction::Horizontal(
-                Scrollbar::new().width(6.0).scroller_width(6.0),
-            ))
+        scroll::h(container(blocks))
             .width(Length::Fill),
     );
     // 装载失败 / 在途以一行微字提示（热力图本体按空档渲染）

@@ -993,12 +993,16 @@ impl Render<'_> {
 
         let lines = code.trim_end_matches('\n').lines().count().max(1);
         let height = lines.min(CODE_MAX_LINES) as f32 * self.mono() * 1.4 + 16.0;
+        // 双向滚动条保持浮层：iced 的 Both 方向不为滚动条预留布局空间（上游限制），
+        // 内嵌基元只覆盖单向；厚度随 scale 缩放（画布卡内与正文同比例，面板 1× 口径不变）
+        let bar_w = (6.0 * self.scale).max(2.0);
+        let thumb_w = (10.0 * self.scale).max(2.0);
         let body = scrollable(
             container(Self::code_body(code, hit, self.scale)).padding(8.0),
         )
         .direction(scrollable::Direction::Both {
-            vertical: scrollable::Scrollbar::new().width(6.0),
-            horizontal: scrollable::Scrollbar::new().width(6.0),
+            vertical: scrollable::Scrollbar::new().width(bar_w).scroller_width(thumb_w),
+            horizontal: scrollable::Scrollbar::new().width(bar_w).scroller_width(thumb_w),
         })
         .width(Length::Fill)
         .height(Length::Fixed(height));

@@ -1,7 +1,7 @@
 //! 设置-编辑器（仓库级）：批量重建内部链接（危险操作卡，二段确认 + 写盘队列执行）。
 
 use iced::alignment::Vertical;
-use iced::widget::{column, container, row, scrollable};
+use iced::widget::{column, container, row};
 use iced::{Element, Length, Padding, Task, border, widget::container::Style};
 use atelyx_core::rebuild_links;
 
@@ -10,6 +10,7 @@ use crate::ui::controls;
 use crate::ui::icon::icon;
 use crate::ui::notify::Level as NoticeLevel;
 use crate::ui::palette as pal;
+use crate::ui::scroll;
 use crate::ui::text;
 use crate::ui::bold;
 use crate::{App, Message, RepoKind};
@@ -142,7 +143,7 @@ pub fn view(app: &App) -> Element<'static, Message> {
     let mut col = column![].spacing(8).padding(Padding::ZERO.horizontal(20.0));
     col = col.push(group_head("批量操作", "", true));
     col = col.push(rebuild_card(app));
-    scrollable(container(col).padding(Padding::ZERO.top(4.0).bottom(24.0)))
+    scroll::v(container(col).padding(Padding::ZERO.top(4.0).bottom(24.0)))
         .width(Length::Fill)
         .height(Length::Fill)
         .into()

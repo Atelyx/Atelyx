@@ -1,7 +1,7 @@
 //! 设置-AI：供应商 / 模型服务 / Agent / 联网搜索（仓库级，本地落 `.atelyx/`，空间落服务端）。
 //! 编辑走草稿 + 保存；API key 缺省只进密钥链，`syncKeys` 开启才随仓库落盘（切换落点先迁移不丢 key）。
 
-use iced::widget::{button, column, container, row, scrollable, space};
+use iced::widget::{button, column, container, row, space};
 use iced::{Element, Length, Padding, Task, border, widget::container::Style};
 
 use atelyx_core::credentials;
@@ -13,6 +13,7 @@ use crate::ui::controls;
 use crate::ui::icon::icon;
 use crate::ui::notify::Level as NoticeLevel;
 use crate::ui::palette as pal;
+use crate::ui::scroll;
 use crate::ui::text;
 use crate::{App, Message};
 
@@ -1177,7 +1178,7 @@ fn providers_view(app: &App, window: iced::window::Id) -> Element<'static, Messa
     quick = quick.push(quick_add_row("自定义", (!ro).then(|| Message::Ai(AiMsg::ProviderAddCustom))));
 
     let left = container(
-        scrollable(
+        scroll::v(
             container(
                 column![
                     list,
@@ -1217,7 +1218,7 @@ fn providers_view(app: &App, window: iced::window::Id) -> Element<'static, Messa
         .width(Length::Fill)
         .height(Length::Fill)
         .into(),
-        Some(p) => scrollable(
+        Some(p) => scroll::v(
             container(provider_form(app, p, window)).padding(Padding::ZERO.left(20.0).bottom(24.0)),
         )
         .width(Length::Fill)
@@ -1600,7 +1601,7 @@ fn models_view(app: &App, window: iced::window::Id) -> Element<'static, Message>
         );
         col = col.push(super::setting_row("命名模型", "话题命名一般用小模型；跟随所选 = 用对话时选择的模型", model_trigger));
     }
-    scrollable(container(col).padding(Padding::ZERO.bottom(24.0)))
+    scroll::v(container(col).padding(Padding::ZERO.bottom(24.0)))
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
@@ -1670,7 +1671,7 @@ fn agents_view(app: &App, window: iced::window::Id) -> Element<'static, Message>
         .width(Length::Fill)
         .height(Length::Fill)
         .into(),
-        Some(a) => scrollable(
+        Some(a) => scroll::v(
             container(agent_form(app, a, window)).padding(Padding::ZERO.left(20.0).bottom(24.0)),
         )
         .width(Length::Fill)
@@ -1680,7 +1681,7 @@ fn agents_view(app: &App, window: iced::window::Id) -> Element<'static, Message>
 
     row![
         container(
-            scrollable(container(column![list, space().height(Length::Fixed(8.0)), new_btn]).padding(
+            scroll::v(container(column![list, space().height(Length::Fixed(8.0)), new_btn]).padding(
                 Padding::ZERO.right(12.0).bottom(24.0)
             ))
             .height(Length::Fill)
@@ -1971,7 +1972,7 @@ fn search_view(app: &App, window: iced::window::Id) -> Element<'static, Message>
         };
         col = col.push(super::setting_row("Tavily API Key", "请求鉴权凭据", key_control));
     }
-    scrollable(container(col).padding(Padding::ZERO.bottom(24.0)))
+    scroll::v(container(col).padding(Padding::ZERO.bottom(24.0)))
         .width(Length::Fill)
         .height(Length::Fill)
         .into()

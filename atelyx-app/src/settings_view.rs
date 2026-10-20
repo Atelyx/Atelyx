@@ -1,7 +1,7 @@
 //! 设置整页：左栏分组导航（应用级 / 仓库级 / 关于）+ 右侧分区内容（本模块或 `settings_view/` 子模块）。
 //! 分区只渲染表单，配置真源在 `App.global`（应用级）与仓库 `VaultConfig`（仓库级）。
 
-use iced::widget::{button, column, container, row, scrollable, space};
+use iced::widget::{button, column, container, row, space};
 use iced::{Element, Length, Padding, Point, border, widget::container::Style};
 
 use atelyx_core::plugin_runtime::ContributionSlot;
@@ -10,6 +10,7 @@ use crate::layout_view::{PopupOpen, PopupState, format_ts, parse_hex_color};
 use crate::ui::controls;
 use crate::ui::icon::icon;
 use crate::ui::palette as pal;
+use crate::ui::scroll;
 use crate::ui::{bold, mono, text};
 use crate::{App, Message};
 
@@ -163,7 +164,7 @@ pub fn settings_view<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, 
     // 左栏：标题行 + 滚动导航 + 底部「关于」（不随分组滚走）+ 折叠钮
     let mut aside_col = column![header];
     if !collapsed {
-        aside_col = aside_col.push(scrollable(container(nav).padding(8.0)).width(Length::Fill).height(Length::Fill));
+        aside_col = aside_col.push(scroll::v(container(nav).padding(8.0)).width(Length::Fill).height(Length::Fill));
         aside_col = aside_col.push(controls::h_divider_subtle());
         aside_col = aside_col.push(
             container(settings_item(&SettingsItem { id: "about", label: "关于", icon: "info" }, active))
@@ -450,7 +451,7 @@ fn collab_settings_view(app: &App) -> Element<'static, Message> {
             }
         }
     }
-    scrollable(container(col).padding(Padding::ZERO.top(4.0).bottom(24.0)))
+    scroll::v(container(col).padding(Padding::ZERO.top(4.0).bottom(24.0)))
         .width(Length::Fill)
         .height(Length::Fill)
         .into()

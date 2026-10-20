@@ -3,7 +3,7 @@
 //! 回滚复用各保存链：笔记/表格走会话回滚，画布为快照直写仓库（无会话链）。
 
 use iced::alignment::{Horizontal, Vertical};
-use iced::widget::{button, column, container, row, scrollable, space};
+use iced::widget::{button, column, container, row, space};
 use iced::{Element, Length, Padding, Point, Size, Task, border, widget::container::Style};
 use atelyx_core::history::{HistoryAction, HistoryKind, HistoryVersion};
 use atelyx_core::history_diff::{DiffLine, DiffLineKind, TableDiffItem};
@@ -14,6 +14,7 @@ use crate::ui::icon::icon;
 use crate::ui::mono;
 use crate::ui::notify::Level as NoticeLevel;
 use crate::ui::palette as pal;
+use crate::ui::scroll;
 use crate::ui::text;
 use crate::ui::bold;
 use crate::{App, Message};
@@ -214,7 +215,7 @@ fn browser_card<'a>(
                 list = list.push(preview_block(app, v));
             }
         }
-        scrollable(container(list).width(Length::Fill))
+        scroll::v(container(list).width(Length::Fill))
             .width(Length::Fill)
             .height(Length::Fill)
             .into()
@@ -385,7 +386,7 @@ fn preview_block<'a>(app: &'a App, v: &'a HistoryVersion) -> Element<'a, Message
         };
     }
     container(
-        scrollable(container(inner).width(Length::Fill).padding(8.0))
+        scroll::v(container(inner).width(Length::Fill).padding(8.0))
             .width(Length::Fill)
             .height(Length::Fixed(PREVIEW_H)),
     )

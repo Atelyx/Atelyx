@@ -4,11 +4,12 @@
 //! 一次只渲染一个面板；子面板（pane > 0）头部固定「返回 + 分隔线」。
 
 use iced::alignment::Vertical;
-use iced::widget::{column, container, row, scrollable, space};
+use iced::widget::{column, container, row, space};
 use iced::{Element, Length, Padding, widget::container::Style};
 
 use super::icon::icon;
 use super::palette as pal;
+use super::scroll;
 use super::text;
 use super::UiMsg;
 use crate::Message;
@@ -160,12 +161,9 @@ fn entry_element<'a>(entry: MenuEntry<'a>, window: iced::window::Id) -> (Element
                 col = col.push(entry_element(entry, window).0);
             }
             (
-                scrollable(col)
+                scroll::v(col)
                     .width(Length::Fill)
                     .height(Length::Fixed(height))
-                    .direction(scrollable::Direction::Vertical(
-                        scrollable::Scrollbar::new().width(6.0).scroller_width(6.0),
-                    ))
                     .into(),
                 height,
             )

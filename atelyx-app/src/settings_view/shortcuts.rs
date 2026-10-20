@@ -1,13 +1,14 @@
 //! 设置-快捷键：可重映射命令的键位列表（按作用域分组；录制改键 / 恢复默认 / 同作用域冲突警示）。
 
 use iced::alignment::Vertical;
-use iced::widget::{column, container, mouse_area, row, scrollable, space};
+use iced::widget::{column, container, mouse_area, row, space};
 use iced::{border, Element, Length, Padding};
 
 use crate::commands::{self, Scope};
 use crate::settings_view::group_head;
 use crate::ui::controls;
 use crate::ui::palette as pal;
+use crate::ui::scroll;
 use crate::ui::text;
 use crate::ui::UiMsg;
 use crate::{App, Message};
@@ -27,7 +28,7 @@ pub fn view(app: &App, window: iced::window::Id) -> Element<'static, Message> {
             col = col.push(scope_group(app, window, scope, &resolved));
         }
     }
-    scrollable(container(col).padding(Padding::ZERO.top(4.0).bottom(24.0)))
+    scroll::v(container(col).padding(Padding::ZERO.top(4.0).bottom(24.0)))
         .width(Length::Fill)
         .height(Length::Fill)
         .into()

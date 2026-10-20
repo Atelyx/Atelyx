@@ -720,6 +720,23 @@ pub struct Geo<'a> {
     pub z: f32,
 }
 
+/// 滚动条占位与滚动上限：滚动条占布局空间（内容边界从条带内缘算起，不浮在内容上），
+/// 仅该方向内容溢出收口后的视口时才占位。
+///
+/// 两轴溢出互为对方的占位条件（竖条占位挤横向视口、横条占位挤纵向视口）：
+/// 从「两轴都不占位」起按固定顺序迭代至不动点——占位只能新增不会撤销，
+/// 每个标志至多翻转一次，三轮内必收敛。
+pub struct ScrollExtent {
+    /// 竖向滚动条可见（行区内容含新行条带超出收口后的行区高）。
+    pub v_visible: bool,
+    /// 横向滚动条可见（列区内容超出收口后的列区宽）。
+    pub h_visible: bool,
+    /// 横向滚动上限（内容右缘滚到列区右缘）。
+    pub max_x: f32,
+    /// 纵向滚动上限（内容含新行条带的下缘滚到行区底缘）。
+    pub max_y: f32,
+}
+
 impl<'a> Geo<'a> {
     pub fn header_h(&self) -> f32 {
         HEADER_H * self.z
@@ -740,7 +757,7 @@ impl<'a> Geo<'a> {
     pub fn visible_rows(&self, total_rows: usize) -> (usize, usize) {
         let first = self.row_at(self.content_y(self.header_h())).unwrap_or(0);
         let last = self
-            .row_at(self.content_y(self.rows_bottom() - 1.0))
+            .row_at(self.content_y(self.rows_viewport_bottom() - 1.0))
             .unwrap_or(total_rows.saturating_sub(1));
         (first, last)
     }
@@ -756,42 +773,81 @@ impl<'a> Geo<'a> {
     pub fn total_w(&self) -> f32 {
         self.cache.total_w
     }
-    pub fn max_scroll_x(&self) -> f32 {
-        // total_w 是内容宽（不含行号列），滚动范围需补回 gutter
-        (self.total_w() + self.gutter_w() - self.width).max(0.0)
+    /// 滚动条占位与滚动上限（见 [`ScrollExtent`]）。
+    pub fn scroll_extent(&self) -> ScrollExtent {
+        let mut v = false;
+        let mut h = false;
+        for _ in 0..3 {
+            let nv = self.cache.content_h + self.header_h()
+                > self.rows_bottom() - if h { HSCROLLBAR_H } else { 0.0 };
+            let nh =
+                self.total_w() + self.gutter_w() > self.width - if nv { VSCROLLBAR_W } else { 0.0 };
+            if nv == v && nh == h {
+                break;
+            }
+            v = nv;
+            h = nh;
+        }
+        ScrollExtent {
+            v_visible: v,
+            h_visible: h,
+            max_x: (self.total_w() + self.gutter_w()
+                - (self.width - if v { VSCROLLBAR_W } else { 0.0 }))
+            .max(0.0),
+            max_y: (self.cache.content_h + self.header_h()
+                - (self.rows_bottom() - if h { HSCROLLBAR_H } else { 0.0 }))
+            .max(0.0),
+        }
     }
-    /// 横向滚动条滑块几何（无横向可滚 = None）：track = 行号列右侧全宽，滑块宽按视口/内容占比。
+    /// 行区视口底缘（横向滚动条占位时上收其厚度；网格内容边界）。
+    pub fn rows_viewport_bottom(&self) -> f32 {
+        self.rows_bottom() - if self.scroll_extent().h_visible { HSCROLLBAR_H } else { 0.0 }
+    }
+    /// 列区视口右缘（竖向滚动条占位时左收其厚度；网格内容边界）。
+    pub fn cols_viewport_right(&self) -> f32 {
+        self.width - if self.scroll_extent().v_visible { VSCROLLBAR_W } else { 0.0 }
+    }
+    pub fn max_scroll_x(&self) -> f32 {
+        self.scroll_extent().max_x
+    }
+    pub fn max_scroll_y(&self) -> f32 {
+        self.scroll_extent().max_y
+    }
+    /// 横向滚动条滑块几何（无横向可滚 = None）：track = 行号列右侧全宽（含两轨交角），
+    /// 滑块行程收在列区视口右缘内（竖条占位时不入其条带），滑块宽按视口/内容占比。
     pub fn hscrollbar(&self) -> Option<Rectangle> {
-        let max = self.max_scroll_x();
-        if max <= 0.0 {
+        let ext = self.scroll_extent();
+        if !ext.h_visible {
             return None;
         }
         let track_x = self.gutter_w();
-        let track_w = (self.width - track_x).max(0.0);
-        let thumb_w = (track_w * track_w / (track_w + max)).clamp(24.0, track_w.max(24.0));
-        let t = (self.session.view.scroll_x / max).clamp(0.0, 1.0);
-        Some(rect(track_x + t * (track_w - thumb_w), self.rows_bottom() - HSCROLLBAR_H, thumb_w, HSCROLLBAR_H))
+        let travel_w = (self.cols_viewport_right() - track_x).max(0.0);
+        let thumb_w = (travel_w * travel_w / (travel_w + ext.max_x)).clamp(24.0, travel_w.max(24.0));
+        let t = (self.session.view.scroll_x / ext.max_x).clamp(0.0, 1.0);
+        Some(rect(
+            track_x + t * (travel_w - thumb_w),
+            self.rows_bottom() - HSCROLLBAR_H,
+            thumb_w,
+            HSCROLLBAR_H,
+        ))
     }
-    /// 竖向滚动条滑块几何（无竖向可滚 = None）：track = 表格区右缘（横向条上方），滑块高按占比。
+    /// 竖向滚动条滑块几何（无竖向可滚 = None）：track = 表格区右缘（横向条占位时上收），
+    /// 滑块高按占比。
     pub fn vscrollbar(&self) -> Option<Rectangle> {
-        let max = self.max_scroll_y();
-        if max <= 0.0 {
+        let ext = self.scroll_extent();
+        if !ext.v_visible {
             return None;
         }
         let track_y = self.header_h();
-        let track_h = (self.rows_bottom() - HSCROLLBAR_H - track_y).max(0.0);
-        let thumb_h = (track_h * track_h / (track_h + max)).clamp(24.0, track_h.max(24.0));
-        let t = (self.session.view.scroll_y / max).clamp(0.0, 1.0);
+        let track_h = (self.rows_viewport_bottom() - track_y).max(0.0);
+        let thumb_h = (track_h * track_h / (track_h + ext.max_y)).clamp(24.0, track_h.max(24.0));
+        let t = (self.session.view.scroll_y / ext.max_y).clamp(0.0, 1.0);
         Some(rect(
             self.width - VSCROLLBAR_W,
             track_y + t * (track_h - thumb_h),
             VSCROLLBAR_W,
             thumb_h,
         ))
-    }
-    pub fn max_scroll_y(&self) -> f32 {
-        let content = self.cache.content_h + self.header_h();
-        (content - (self.height - self.status_h())).max(0.0)
     }
     pub fn col_at(&self, content_x: f32) -> Option<usize> {
         let n = self.cache.col_w.len();
@@ -1476,9 +1532,9 @@ fn draw_table(session: &TableSession, frame: &mut canvas::Frame, size: Size, hov
         }
     }
 
-    // 「+ 新行」（行号列区段属于 chrome 覆盖层，条带从行号列右缘起）
+    // 「+ 新行」（行号列区段属于 chrome 覆盖层，条带从行号列右缘起；超出行区视口 = 不可见）
     let new_row_y = g.cache.content_h - view.scroll_y + g.header_h();
-    if new_row_y < g.rows_bottom() {
+    if new_row_y < g.rows_viewport_bottom() {
         let nr = rect(g.gutter_w(), new_row_y, (g.total_w() - view.scroll_x - g.gutter_w()).max(0.0), NEW_ROW_H * g.z);
         let hovered = hover.is_some_and(|p| nr.contains(p));
         if hovered {
@@ -1617,18 +1673,33 @@ fn draw_chrome(session: &TableSession, frame: &mut canvas::Frame, size: Size, ho
     draw_header(session, &g, frame);
     frame.fill_rectangle(Point::new(0.0, g.rows_bottom()), Size::new(g.width, g.status_h()), pal::BG_SECONDARY);
     draw_status(session, &g, frame);
-    // 横向滚动条（无横向可滚 = 不画）
+    // 横向滚动条（无横向可滚 = 不画）；滑块三态与 ui::scroll 同语言：
+    // 悬停轨道即亮（拖动 ACCENT / 悬停 TEXT_SECONDARY / 常态 BORDER_STRONG）
     if let Some(bar) = g.hscrollbar() {
         let track = rect(g.gutter_w(), bar.y, g.width - g.gutter_w(), HSCROLLBAR_H);
         frame.fill_rectangle(track.position(), track.size(), pal::BG_SUNKEN);
         frame.fill_rectangle(Point::new(track.x, track.y), Size::new(track.width, 1.0), pal::BORDER_SUBTLE);
-        frame.fill_rectangle(bar.position(), bar.size(), if view.hscroll_drag.is_some() { pal::ACCENT } else { pal::BORDER_STRONG });
+        let thumb = if view.hscroll_drag.is_some() {
+            pal::ACCENT
+        } else if hover.is_some_and(|p| track.contains(p)) {
+            pal::TEXT_SECONDARY
+        } else {
+            pal::BORDER_STRONG
+        };
+        frame.fill_rectangle(bar.position(), bar.size(), thumb);
     }
-    // 竖向滚动条（无竖向可滚 = 不画）
+    // 竖向滚动条（无竖向可滚 = 不画）；轨道高 = 行区视口高（横向条占位时上收），滑块三态同上
     if let Some(bar) = g.vscrollbar() {
-        let track = rect(g.width - VSCROLLBAR_W, g.header_h(), VSCROLLBAR_W, g.rows_bottom() - HSCROLLBAR_H - g.header_h());
+        let track = rect(g.width - VSCROLLBAR_W, g.header_h(), VSCROLLBAR_W, g.rows_viewport_bottom() - g.header_h());
         frame.fill_rectangle(track.position(), track.size(), pal::BG_SUNKEN);
-        frame.fill_rectangle(bar.position(), bar.size(), if view.vscroll_drag.is_some() { pal::ACCENT } else { pal::BORDER_STRONG });
+        let thumb = if view.vscroll_drag.is_some() {
+            pal::ACCENT
+        } else if hover.is_some_and(|p| track.contains(p)) {
+            pal::TEXT_SECONDARY
+        } else {
+            pal::BORDER_STRONG
+        };
+        frame.fill_rectangle(bar.position(), bar.size(), thumb);
     }
     draw_image_buttons(session, &g, frame, hover);
 }
@@ -3009,5 +3080,90 @@ mod tests {
         let mut budget = PinBudget::default();
         budget.insert("a", THUMB_PIN_BUDGET, &rels(&[]));
         assert_eq!(budget.insert("b", THUMB_PIN_BUDGET, &rels(&[])), vec!["a".to_string()]);
+    }
+
+    /// 手工布局缓存（zoom 1、单行 32 高，直接指定内容宽高绕开实测）。
+    fn extent_session(total_w: f32, content_h: f32) -> TableSession {
+        let mut s = text_session(&["短"]);
+        s.view.layout = Some(LayoutCache {
+            version: s.version,
+            zoom: 1.0,
+            col_w: vec![total_w],
+            col_x: vec![0.0, total_w],
+            total_w,
+            row_h: vec![32.0],
+            row_y: vec![0.0, 32.0],
+            content_h,
+            wrap: Default::default(),
+        });
+        s
+    }
+
+    /// 仅纵向溢出：竖条占位、横条不出现，行区视口不收横向条带。
+    #[test]
+    fn extent_vertical_only() {
+        let s = extent_session(100.0, 600.0);
+        let g = geo(&s, Size::new(800.0, 600.0));
+        let ext = g.scroll_extent();
+        assert!(ext.v_visible);
+        assert!(!ext.h_visible);
+        assert_eq!(ext.max_x, 0.0);
+        assert_eq!(ext.max_y, 600.0 + 32.0 - (600.0 - 32.0));
+        assert_eq!(g.rows_viewport_bottom(), 568.0);
+        assert_eq!(g.cols_viewport_right(), 792.0);
+    }
+
+    /// 仅横向溢出：横条占位，内容（含新行条带）在收口后的行区高内放得下则竖条不出现。
+    #[test]
+    fn extent_horizontal_only() {
+        let s = extent_session(900.0, 500.0);
+        let g = geo(&s, Size::new(800.0, 600.0));
+        let ext = g.scroll_extent();
+        assert!(!ext.v_visible);
+        assert!(ext.h_visible);
+        assert_eq!(ext.max_x, 940.0 - 800.0);
+        assert_eq!(ext.max_y, 0.0);
+        assert_eq!(g.rows_viewport_bottom(), 560.0);
+        assert_eq!(g.cols_viewport_right(), 800.0);
+    }
+
+    /// 双向溢出：两轨互相挤占对方的视口，滚动上限都按对方条带收口。
+    #[test]
+    fn extent_both_axes() {
+        let s = extent_session(900.0, 600.0);
+        let g = geo(&s, Size::new(800.0, 600.0));
+        let ext = g.scroll_extent();
+        assert!(ext.v_visible && ext.h_visible);
+        assert_eq!(ext.max_x, 940.0 - 792.0);
+        assert_eq!(ext.max_y, 632.0 - 560.0);
+        let bar = g.hscrollbar().expect("横条可见");
+        assert_eq!(bar.y, 560.0);
+        assert!(bar.x >= 40.0, "滑块从行号列右缘起");
+        assert!(bar.x + bar.width <= 792.0, "滑块行程不越列区视口右缘");
+        let vbar = g.vscrollbar().expect("竖条可见");
+        assert_eq!(vbar.x, 792.0);
+        assert!(vbar.y + vbar.height <= 560.0, "滑块行程不越行区视口底缘");
+    }
+
+    /// 横向溢出只在竖条占位后出现：竖条先判、横条按收口后的列区宽判。
+    #[test]
+    fn extent_horizontal_created_by_vertical_reservation() {
+        // 内容宽 + gutter = 796 < 800（全宽放得下），但 > 792（竖条占位后放不下）
+        let s = extent_session(756.0, 600.0);
+        let g = geo(&s, Size::new(800.0, 600.0));
+        let ext = g.scroll_extent();
+        assert!(ext.v_visible && ext.h_visible);
+        assert_eq!(ext.max_x, 796.0 - 792.0);
+    }
+
+    /// 纵向溢出只在横条占位后出现：横条先判可见，竖条按收口后的行区高判。
+    #[test]
+    fn extent_vertical_created_by_horizontal_reservation() {
+        // 内容高 + header = 566：全高（568）放得下，横条占位后（560）放不下
+        let s = extent_session(900.0, 534.0);
+        let g = geo(&s, Size::new(800.0, 600.0));
+        let ext = g.scroll_extent();
+        assert!(ext.v_visible && ext.h_visible);
+        assert_eq!(ext.max_y, 566.0 - 560.0);
     }
 }

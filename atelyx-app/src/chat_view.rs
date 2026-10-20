@@ -1,7 +1,7 @@
 //! AI 对话面板：会话侧栏 + 顶部行 + 输入区（发送/停止圆钮）；消息流渲染走
 //! [`crate::chat_stream`] 公共段（面板与画布对话卡共用，悬浮操作按钮组经操作钩子注入）。
 
-use iced::widget::{button, column, container, mouse_area, row, scrollable, space, stack, Space};
+use iced::widget::{button, column, container, mouse_area, row, space, stack, Space};
 use iced::widget::container::Style;
 use iced::{border, Length, Padding};
 use serde_json::{json, Value};
@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 use crate::chat_actions::ChatMsg;
 use crate::ui::icon::icon;
 use crate::ui::{controls, palette as pal};
+use crate::ui::scroll;
 use crate::ui::text;
 use crate::{App, Message};
 
@@ -110,7 +111,7 @@ fn sidebar(app: &App) -> iced::Element<'_, Message> {
         col = col.push(session_row(app, s));
     }
     container(
-        scrollable(col).width(Length::Fill).height(Length::Fill),
+        scroll::v(col).width(Length::Fill).height(Length::Fill),
     )
     .width(228.0)
     .height(Length::Fill)
@@ -409,11 +410,7 @@ fn message_flow(app: &App, window: iced::window::Id) -> iced::Element<'_, Messag
     };
     let col = crate::chat_stream::message_column(messages, session, ctx);
     // 覆盖层恒定 Stack 承载、按需追加：显隐不换型（Scrollable ↔ Stack 换型会整树重建、丢滚动位置）
-    let flow = scrollable(
-        container(col)
-            .width(Length::Fill)
-            .padding(Padding::ZERO.right(10.0)),
-    )
+    let flow = scroll::v(container(col).width(Length::Fill))
         .id(crate::chat_actions::chat_flow_id())
         .on_scroll(|v| Message::Chat(ChatMsg::FlowScrolled(v.relative_offset().y)))
         .width(Length::Fill)
@@ -659,7 +656,7 @@ fn mention_picker_view<'a>(
             .on_press(press)
     });
     let list = container(
-        scrollable(column(rows.map(iced::Element::from)).spacing(0).width(Length::Fill))
+        scroll::v(column(rows.map(iced::Element::from)).spacing(0).width(Length::Fill))
             .height(iced::Length::Shrink)
             .width(Length::Fill),
     )
@@ -696,7 +693,7 @@ fn image_tray(app: &App) -> iced::Element<'_, Message> {
         .style(controls::row_style(false, pal::RADIUS_XS))
         .on_press(remove)
     });
-    container(scrollable(row(chips.map(iced::Element::from)).spacing(6)))
+    container(scroll::v(row(chips.map(iced::Element::from)).spacing(6)))
         .width(Length::Fill)
         .padding(Padding::new(12.0).top(8.0).bottom(0.0))
         .into()

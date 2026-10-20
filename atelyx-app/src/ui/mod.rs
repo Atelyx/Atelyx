@@ -1,4 +1,4 @@
-//! UI 组件库：调色板 / 矢量图标 / 字体 / 基础控件 / 统一弹层 / 菜单 / 通知。
+//! UI 组件库：调色板 / 矢量图标 / 字体 / 基础控件 / 统一弹层 / 菜单 / 通知 / 滚动容器。
 //!
 //! 视觉 token 定义于 `palette`；弹层与菜单是全应用
 //! 唯一浮层入口，右键菜单、下拉、就地确认都经 [`popup`] + [`menu`] 组合。
@@ -11,6 +11,7 @@ pub mod menu;
 pub mod notify;
 pub mod palette;
 pub mod popup;
+pub mod scroll;
 pub mod svgpath;
 
 pub use font::{bold, epoch, family, italic, mono, regular, set_family, text};

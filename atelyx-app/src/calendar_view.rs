@@ -13,6 +13,7 @@ use crate::calendar_heat;
 use crate::calendar_month;
 use crate::ui::controls;
 use crate::ui::palette as pal;
+use crate::ui::scroll;
 use crate::ui::text;
 use crate::ui::bold;
 use crate::{App, Message, layout_view};
@@ -32,7 +33,7 @@ pub fn calendar_view(app: &App, window: iced::window::Id) -> Element<'_, Message
     .spacing(12)
     .padding(iced::Padding::ZERO.horizontal(12.0).vertical(10.0))
     .width(Length::Fill);
-    iced::widget::scrollable(container(content).width(Length::Fill))
+    scroll::v(container(content).width(Length::Fill))
         .width(Length::Fill)
         .height(Length::Fill)
         .into()

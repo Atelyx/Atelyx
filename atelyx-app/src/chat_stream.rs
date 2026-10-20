@@ -4,13 +4,14 @@
 
 use std::collections::{HashMap, HashSet};
 
-use iced::widget::{button, column, container, row, scrollable};
+use iced::widget::{button, column, container, row};
 use iced::{border, Length, Padding};
 use serde_json::{json, Value};
 
 use crate::chat_actions::ChatMsg;
 use crate::ui::icon::icon;
 use crate::ui::{controls, palette as pal};
+use crate::ui::scroll;
 use crate::ui::text;
 use crate::Message;
 
@@ -439,7 +440,7 @@ fn details_block<'a>(
         if !body.is_empty() {
             col = col.push(controls::h_divider_subtle());
             col = col.push(
-                scrollable(
+                scroll::v_scaled(
                     container(
                         text(body.to_string())
                             .size(pal::fs_micro() * s)
@@ -447,6 +448,7 @@ fn details_block<'a>(
                     )
                     .width(Length::Fill)
                     .padding(Padding::ZERO.vertical(6.0 * s)),
+                    s,
                 )
                 .height(160.0 * s),
             );

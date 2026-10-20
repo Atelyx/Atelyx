@@ -14,12 +14,13 @@ use iced::event::Event;
 use iced::widget::canvas::{
     self, Canvas, Frame, LineDash, Path, Stroke, Text as CanvasText,
 };
-use iced::widget::{column, container, responsive, row, scrollable, space, stack};
+use iced::widget::{column, container, responsive, row, space, stack};
 use iced::{alignment, Color, Length, Padding, Point, Rectangle, Size, Vector};
 use serde_json::Value;
 
 use crate::ui::icon::{icon, polylines};
 use crate::ui::{controls, palette as pal};
+use crate::ui::scroll;
 use crate::ui::text;
 use crate::{layout_view, App, Message};
 
@@ -1261,10 +1262,11 @@ fn card_overlays<'a>(
         };
         out.push(match inner {
             Some(inner) => {
-                let body = scrollable(
+                let body = scroll::v_scaled(
                     container(inner)
                         .width(Length::Fill)
-                        .padding(Padding::ZERO.right(4.0)),
+                        .padding(Padding::ZERO.right(4.0 * view.zoom)),
+                    view.zoom,
                 )
                 .width(Length::Fill)
                 .height(Length::Fill);
@@ -1279,7 +1281,7 @@ fn card_overlays<'a>(
 }
 
 /// 把卡体浮层锚到卡的内容区：坐标与尺寸按世界坐标换算，可越出视口。
-/// 右 / 下内缩取「卡内边距与 resize 把手」的较大者，保证选中卡右下角把手留在浮层之外可点。
+/// 下缘内缩让出选中卡右下角 resize 把手（把手只占角、不占整条右缘），滚动条贴卡片右缘。
 fn place_card_overlay<'a>(
     inner: Element<'a>,
     sx: f32,
@@ -1288,14 +1290,14 @@ fn place_card_overlay<'a>(
     sh: f32,
     zoom: f32,
 ) -> Element<'a> {
-    // 卡内边距随视口缩放；右下额外让出 resize 把手（屏幕像素定值）
+    // 卡内边距随视口缩放；把手让位为屏幕像素定值
     let pad = CARD_PAD * zoom;
-    let inset = pad.max(HANDLE_SIZE);
+    let bottom = pad.max(HANDLE_SIZE);
     let top = (CARD_HEADER_H + CARD_PAD) * zoom;
     ClipLayer::new(
         inner,
         Point::new(sx + pad, sy + top),
-        Size::new((sw - pad - inset).max(0.0), (sh - top - inset).max(0.0)),
+        Size::new((sw - pad).max(0.0), (sh - top - bottom).max(0.0)),
     )
     .into()
 }

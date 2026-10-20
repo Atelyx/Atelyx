@@ -2,7 +2,7 @@
 //! 本地扫侧文件元数据，空间走服务端聚合端点。
 
 use iced::alignment::Vertical;
-use iced::widget::{button, column, container, row, scrollable, space};
+use iced::widget::{button, column, container, row, space};
 use iced::{Element, Length, Padding, Task};
 
 use atelyx_core::history::HistoryKind;
@@ -13,6 +13,7 @@ use crate::ui::controls;
 use crate::ui::icon::icon;
 use crate::ui::notify::Level as NoticeLevel;
 use crate::ui::palette as pal;
+use crate::ui::scroll;
 use crate::ui::text;
 use crate::{App, Message, RepoKind, layout_view};
 
@@ -228,7 +229,7 @@ pub fn repohistory_view(app: &App, window: iced::window::Id) -> Element<'_, Mess
         }
     };
     let col = iced::widget::Column::<Message>::new().push(header).push(body);
-    scrollable(container(col.width(Length::Fill)).width(Length::Fill).height(Length::Fill))
+    scroll::v(container(col.width(Length::Fill)).width(Length::Fill).height(Length::Fill))
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
