@@ -562,6 +562,14 @@ enum Message {
         node_id: String,
         event: atelyx_core::plugin_runtime::ViewEvent,
     },
+    /// 插件正文链接点击（回发 linkClick 后按宿主默认行为打开）。
+    PluginLink {
+        plugin_id: String,
+        surface_id: String,
+        node_id: String,
+        href: String,
+        form: LinkForm,
+    },
     /// 插件菜单 / 下拉节点被按下：用光标锚点打开弹层。
     PluginList { window: window::Id, entries: Vec<plugin_actions::PopupEntry> },
     /// 插件多行输入的编辑器动作。
@@ -3188,6 +3196,9 @@ impl App {
             }
             Message::PluginView { plugin_id, surface_id, node_id, event } => {
                 plugin_actions::on_view_event(self, plugin_id, surface_id, node_id, event)
+            }
+            Message::PluginLink { plugin_id, surface_id, node_id, href, form } => {
+                plugin_actions::on_link_click(self, plugin_id, surface_id, node_id, href, form)
             }
             Message::PluginList { window, entries } => {
                 let point = self.cursor_for(window);

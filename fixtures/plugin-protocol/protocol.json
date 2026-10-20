@@ -68,7 +68,11 @@
       {
         "id": "guide",
         "kind": "markdown",
-        "content": "## 使用说明\n\n- 支持 **强调** 与 `行内代码`\n- 链接按仓库路径解析"
+        "content": "## 使用说明\n\n- 支持 **强调** 与 `行内代码`\n- [链接按仓库路径解析](notes/a.md)",
+        "size": 0.75,
+        "weight": "medium",
+        "color": "textSecondary",
+        "events": ["linkClick"]
       },
       {
         "id": "query",
@@ -554,6 +558,68 @@
       "name": "ai.chat.delete params",
       "type": "ChatSessionParams",
       "value": { "sessionId": "s1" }
+    },
+    {
+      "name": "ai.chat.send params (agent + model + images)",
+      "type": "ChatSendParams",
+      "value": {
+        "text": "看这张图",
+        "sessionId": "s1",
+        "agentId": "builtin-chat",
+        "model": "gpt-4o-mini",
+        "providerId": "p1",
+        "images": ["assets/a.png"]
+      }
+    },
+    {
+      "name": "ai.chat.send params (minimal)",
+      "type": "ChatSendParams",
+      "value": { "text": "你好" }
+    },
+    {
+      "name": "ai:chat.changed payload (created)",
+      "type": "ChatChangedPayload",
+      "value": { "sessionId": "s1", "kind": "created" }
+    },
+    {
+      "name": "ai:chat.changed payload (messages)",
+      "type": "ChatChangedPayload",
+      "value": { "sessionId": "s1", "kind": "messages" }
+    },
+    {
+      "name": "ai:chat.changed payload (meta)",
+      "type": "ChatChangedPayload",
+      "value": { "sessionId": "s1", "kind": "meta" }
+    },
+    {
+      "name": "ai:chat.changed payload (deleted)",
+      "type": "ChatChangedPayload",
+      "value": { "sessionId": "s1", "kind": "deleted" }
+    },
+    {
+      "name": "view.event link click",
+      "type": "ViewEvent",
+      "value": { "kind": "linkClick", "href": "notes/a.md", "form": "path" }
+    },
+    {
+      "name": "view.event link click (wiki)",
+      "type": "ViewEvent",
+      "value": { "kind": "linkClick", "href": "周报", "form": "wiki" }
+    },
+    {
+      "name": "view.event link click (external)",
+      "type": "ViewEvent",
+      "value": { "kind": "linkClick", "href": "https://example.com/a?b=1", "form": "external" }
+    },
+    {
+      "name": "link form create",
+      "type": "LinkForm",
+      "value": "create"
+    },
+    {
+      "name": "link form plain",
+      "type": "LinkForm",
+      "value": "plain"
     }
   ]
 }

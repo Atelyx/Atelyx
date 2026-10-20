@@ -1,6 +1,8 @@
 //! 设置整页：左栏分组导航（应用级 / 仓库级 / 关于）+ 右侧分区内容（本模块或 `settings_view/` 子模块）。
 //! 分区只渲染表单，配置真源在 `App.global`（应用级）与仓库 `VaultConfig`（仓库级）。
 
+use std::borrow::Cow;
+
 use iced::widget::{button, column, container, row, space};
 use iced::{Element, Length, Padding, Point, border, widget::container::Style};
 
@@ -8,7 +10,7 @@ use atelyx_core::plugin_runtime::ContributionSlot;
 
 use crate::layout_view::{PopupOpen, PopupState, format_ts, parse_hex_color};
 use crate::ui::controls;
-use crate::ui::icon::icon;
+use crate::ui::icon::{icon, icon_resolved};
 use crate::ui::palette as pal;
 use crate::ui::scroll;
 use crate::ui::{bold, mono, text};
@@ -59,12 +61,12 @@ fn settings_item(item: &SettingsItem, active_tab: &str) -> Element<'static, Mess
     settings_item_dyn(item.id, item.label, item.icon, active_tab)
 }
 
-/// 动态导航项（插件设置 tab：id/label 取自贡献，icon 名已由贡献查询解析为形状表静态名）。
-fn settings_item_dyn(id: &str, label: &str, icon_name: &'static str, active_tab: &str) -> Element<'static, Message> {
+/// 动态导航项（插件设置 tab：id/label 取自贡献，icon 为内置名或自备图形限定名）。
+fn settings_item_dyn(id: &str, label: &str, icon_name: &str, active_tab: &str) -> Element<'static, Message> {
     let active = id == active_tab;
     button(
         row![
-            icon(icon_name, 14.0, if active { pal::ACCENT } else { pal::TEXT_SECONDARY }),
+            icon_resolved(icon_name, 14.0, if active { pal::ACCENT } else { pal::TEXT_SECONDARY }, 1.5),
             text(label.to_string())
                 .size(pal::fs_caption())
                 .color(if active { pal::ACCENT } else { pal::TEXT_SECONDARY })
@@ -102,7 +104,7 @@ pub fn settings_view<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, 
     let active = app.settings_tab.as_str();
     let mut nav = column![].spacing(4);
     // 插件设置 tab：运行中插件的设置贡献（label/icon 取自注册），与应用级设置并列
-    let plugin_items: Vec<(String, String, &'static str)> =
+    let plugin_items: Vec<(String, String, Cow<'static, str>)> =
         crate::plugin_actions::contributions_of(app, ContributionSlot::Settings)
             .map(|c| {
                 (

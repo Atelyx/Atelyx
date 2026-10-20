@@ -2,11 +2,14 @@
 //! 信封行冻结逐字节编码；ViewNode 与握手冻结字段形状。改协议 = 显式改快照并升版本。
 
 use atelyx_plugin_protocol::envelope::{Envelope, RequestId};
-use atelyx_plugin_protocol::event::{TableChangedPayload, VaultSwitchPayload};
+use atelyx_plugin_protocol::event::{
+    ChatChangedPayload, TableChangedPayload, VaultSwitchPayload,
+};
 use atelyx_plugin_protocol::handshake::{self, InitializeParams, InitializeResult};
 use atelyx_plugin_protocol::method::{
     CanvasResizedParams, CanvasSubmitParams, ChatHistoryParams, ChatRenameParams,
-    ChatSessionParams, DefineIconParams, DocCloseParams, DocOpenParams, HttpRequestParams,
+    ChatSendParams, ChatSessionParams, DefineIconParams, DocCloseParams, DocOpenParams,
+    HttpRequestParams,
     HttpResult, ListResult, PathParams, PickFileParams, PickedPath, ProcessEventParams,
     RegisterParams, RegisterShortcutParams, RegisterToolParams, ScrollToParams,
     ShortcutQueryParams, ShortcutQueryResult,
@@ -16,7 +19,7 @@ use atelyx_plugin_protocol::method::{
     ViewEventParams, WindowCloseParams, WindowClosedParams, WindowIdParams, WindowOpenParams,
     WindowUpdateParams,
 };
-use atelyx_plugin_protocol::view::{EventKind, NodeBody, ViewNode};
+use atelyx_plugin_protocol::view::{EventKind, NodeBody, ViewEvent, ViewNode};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::Value;
@@ -216,6 +219,9 @@ fn method_type_shapes_are_frozen() {
             "WindowClosedParams" => frozen_roundtrip::<WindowClosedParams>(&value),
             "VaultSwitchPayload" => frozen_roundtrip::<VaultSwitchPayload>(&value),
             "TableChangedPayload" => frozen_roundtrip::<TableChangedPayload>(&value),
+            "ChatChangedPayload" => frozen_roundtrip::<ChatChangedPayload>(&value),
+            "ViewEvent" => frozen_roundtrip::<ViewEvent>(&value),
+            "LinkForm" => frozen_roundtrip::<atelyx_plugin_protocol::view::LinkForm>(&value),
             "TableSnapshot" => frozen_roundtrip::<TableSnapshot>(&value),
             "TableUpdateCellParams" => frozen_roundtrip::<TableUpdateCellParams>(&value),
             "TableAddRowResult" => frozen_roundtrip::<TableAddRowResult>(&value),
@@ -231,6 +237,7 @@ fn method_type_shapes_are_frozen() {
             "ChatHistoryParams" => frozen_roundtrip::<ChatHistoryParams>(&value),
             "ChatRenameParams" => frozen_roundtrip::<ChatRenameParams>(&value),
             "ChatSessionParams" => frozen_roundtrip::<ChatSessionParams>(&value),
+            "ChatSendParams" => frozen_roundtrip::<ChatSendParams>(&value),
             "RegisterToolParams" => frozen_roundtrip::<RegisterToolParams>(&value),
             "UnregisterToolParams" => frozen_roundtrip::<UnregisterToolParams>(&value),
             "ToolCallParams" => frozen_roundtrip::<ToolCallParams>(&value),

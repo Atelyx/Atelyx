@@ -4,8 +4,8 @@
 use std::time::{Duration, Instant};
 
 use atelyx_core::plugin_runtime::{
-    CanvasPointer, ContributionSlot, DrawCommand, EventValue, MouseButton, NodeBody, PluginRuntime,
-    PluginStatus, SurfaceKind, VaultSwitchPayload, ViewEvent, ViewNode,
+    CanvasPointer, ChatChangeKind, ContributionSlot, DrawCommand, EventValue, MouseButton, NodeBody,
+    PluginRuntime, PluginStatus, SurfaceKind, VaultSwitchPayload, ViewEvent, ViewNode,
 };
 use atelyx_core::vault::test_support::TempDir;
 use atelyx_plugin_sdk::protocol::manifest::MANIFEST_FILE;
@@ -353,4 +353,14 @@ fn vault_switch_keeps_mounted_subscriber_informed() {
 
     // 保活即不重载：界面提交次数仍是 on_ready 那一次
     assert_eq!(submits_of(&runtime, &id), 1, "声明保活的插件不应被重载");
+}
+
+/// 会话变更广播：订阅了 ai:chat.changed 的运行中插件收到载荷并写进自持数据。
+#[test]
+fn chat_changed_reaches_subscribers() {
+    let (_tmp, runtime, _id, state_path) = install_ready_stub(true);
+
+    runtime.on_chat_changed("s-42", ChatChangeKind::Messages);
+    wait_state_contains(&state_path, "s-42");
+    wait_state_contains(&state_path, "messages");
 }

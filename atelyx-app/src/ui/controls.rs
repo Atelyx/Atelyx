@@ -6,7 +6,7 @@
 use iced::widget::{button, column, container, mouse_area, row, space, text_input};
 use iced::{Color, Element, Length, Padding, Theme, border, widget::container::Style};
 
-use super::icon::{icon, icon_stroke};
+use super::icon::{icon, icon_resolved};
 use super::palette as pal;
 use super::{bold, regular, text};
 use super::UiMsg;
@@ -303,7 +303,7 @@ pub fn view_placeholder(
 ) -> Element<'static, Message> {
     container(
         column![
-            icon_stroke(icon_name, 64.0, pal::TEXT_MUTED.scale_alpha(0.6), 1.5),
+            icon_resolved(icon_name, 64.0, pal::TEXT_MUTED.scale_alpha(0.6), 1.5),
             text(title.into())
                 .size(pal::fs_h1())
                 .color(pal::TEXT_PRIMARY)

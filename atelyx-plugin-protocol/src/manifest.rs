@@ -80,7 +80,7 @@ pub struct DocTypeRegistration {
     /// 不带点的扩展名（如 `board`）。
     pub extension: String,
     pub label: String,
-    /// 宿主图标形状表中的图标名。
+    /// 宿主内置形状名或经 `view.defineIcon` 定义的自备名（内置名优先）。
     pub icon: String,
     /// 承载该文档实例界面树的贡献 id（插件须同时以 `view.register` 注册同名贡献，
     /// `slot` 为面板）；打开该扩展名文件时宿主按文件实例分配 surfaceId 并通知插件提交树。

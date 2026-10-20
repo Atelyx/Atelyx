@@ -136,13 +136,20 @@ pub enum NodeBody {
     },
     /// 只读 Markdown 正文：宿主按笔记同源解析器渲染（标题 / 列表 / 引用 / 代码块 / 表格 / 链接）。
     /// 块级图片与笔记同源载入：http(s) 走下载，其余按仓库相对路径。
-    /// 取色与字重走宿主主题与 Markdown 语义（标题层级 / 强调），只开放整体字号缩放。
-    /// 无编辑态与事件：插件要交互请用其他控件。
+    /// 字重与取色默认走宿主主题与 Markdown 语义（标题层级 / 强调），`weight` / `color` 作整体覆盖。
+    /// 链接可点击：宿主按形态默认打开（外链 / wiki / 仓库路径），节点声明 `linkClick` 时同时回发事件。
+    /// 无编辑态；其余交互请用其他控件。
     Markdown {
         content: String,
         /// 整体字号倍率（相对界面基准正文字号；缺省 1.0）。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         size: Option<f32>,
+        /// 基础字重（标题与加粗片段恒为加粗，不受此项影响）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        weight: Option<TextWeight>,
+        /// 基础文字色（链接 / 代码块等语义色不受影响）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        color: Option<ColorToken>,
     },
     TextInput {
         #[serde(default)]
@@ -191,7 +198,8 @@ pub enum NodeBody {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         size: Option<ControlSize>,
     },
-    /// 图标名必须存在于宿主图标形状表（lucide 线性形状），未知名字宿主按可读错误拒绝。
+    /// 图标名：宿主内置形状（lucide 线性形状）或经 `view.defineIcon` 定义的自备名（内置名优先）；
+    /// 两者都未命中时画空。
     IconButton {
         icon: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -444,6 +452,8 @@ pub enum EventKind {
     Submit,
     Focus,
     Blur,
+    /// Markdown 正文内的链接点击（仅 `markdown` 节点；宿主默认打开行为不受声明影响）。
+    LinkClick,
 }
 
 /// 宿主回发给插件的事件负载。`change`/`submit` 携带新值；菜单条目选择复用 `change`，
@@ -456,8 +466,23 @@ pub enum ViewEvent {
     Submit { value: EventValue },
     Focus,
     Blur,
+    /// Markdown 链接点击（仅声明 `linkClick` 的节点）。`href` 为源文本原样（未解码；
+    /// wiki 为笔记名），`form` 与宿主笔记链接解析同一口径。
+    LinkClick { href: String, form: LinkForm },
     /// 画布指针事件（仅 `canvas` 节点按 `mouseEvents` 声明后回发）。
     Canvas { pointer: CanvasPointer },
+}
+
+/// Markdown 链接形态：外链 / wiki / 仓库路径 / 可新建 / 未识别（保持原文）。
+/// `create` / `plain` 在 Markdown 正文里不可点击，`linkClick` 只会带来前三种。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LinkForm {
+    External,
+    Wiki,
+    Path,
+    Create,
+    Plain,
 }
 
 /// 事件值的四形态。untagged 按序匹配即可无歧义区分（字符串 / 数值 / 布尔 / null 互不重叠）；

@@ -196,17 +196,19 @@ async fn main() {
 - 行内 `Fill` 子项按内容宽解析，要均分剩余宽度用行的 `fill`（`both` / `width`）；工具行左右分布用 `justify: "spaceBetween"`；
 - `card` 的底色档 `tone`（`default` / `muted` / `accentSoft` / `transparent`）、圆角 `radius`、边框开关 `bordered` 可调；分组内轻分割用 `divider`；`stack` 把子节点叠起来（后提交的在上，可做「画布当底 + 控件叠其上」）；
 - `image` 给 `width` / `height` 即按该尺寸渲染（缺省按原图尺寸）；声明 `click` 事件即可点击；
-- `iconButton` 的图标名默认取自宿主内置形状表（lucide 线性图标）；先用 `ctx.define_icon(name, path)` 登记自备的 24x24 描边路径，即可用自己的图形（`size` 档 `sm`/`md`/`lg`，`variant` 复用按钮档位，`hoverOnly` 悬停才显示）；
+- `iconButton` 的图标名默认取自宿主内置形状表（lucide 线性图标）；先用 `ctx.define_icon(name, path)` 登记自备的 24x24 描边路径，即可用自己的图形（`size` 档 `sm`/`md`/`lg`，`variant` 复用按钮档位，`hoverOnly` 悬停才显示）；同一批自备名也可用作贡献注册的 `icon`（面板标签头 / 设置 tab / 文档类型图标）；
+- `markdown` 的 `content` 用笔记同源解析器渲染，`size` 是整体字号倍率，`weight` / `color` 覆盖基础字重与文字色（标题与加粗片段恒为加粗，链接与代码块语义色不受影响）；正文里的链接可点击，宿主按形态默认打开（外链 / wiki / 仓库路径），节点声明 `linkClick` 时同时回发链接点击事件；
 - `menu` 的 `label` 与 `icon` 可并存（并存为紧凑的「图标 + 文字」触发钮），只给 `label` 才是全宽下拉钮；条目可标 `current`（宿主在条目前画勾）；
-- 可滚动容器（`list` / `scroll`）用 `ctx.scroll_to(surface, node, ScrollEdge::End)` 滚到底，无需插件自己维护滚动状态。
+- 可滚动容器（`list` / `scroll`）用 `ctx.scroll_to(surface, node, ScrollEdge::End)` 滚到底，无需插件自己维护滚动状态；`scroll` 的 `direction` 决定子项排布与滚动主轴（`horizontal` = 子项排成行并横向滚动）。
 
 ### 5.2 事件与取值
 
-节点在 `events` 里声明了哪几种，宿主才回发哪几种（`click` / `change` / `submit`，`focus` / `blur` 为保留种类、当前无控件产出）。事件值按控件定型：
+节点在 `events` 里声明了哪几种，宿主才回发哪几种（`click` / `change` / `submit` / `linkClick`，`focus` / `blur` 为保留种类、当前无控件产出）。事件值按控件定型：
 
 - 文本类 → 字符串；`submit` 只在单行输入回车时触发；
 - 数字输入 → 数值（不可解析为数值不发事件；清空 → `null`，与 0 区分）；
-- 勾选 → 布尔；下拉 → 选中项**下标**；菜单条目 → 条目的 `action` 字符串。
+- 勾选 → 布尔；下拉 → 选中项**下标**；菜单条目 → 条目的 `action` 字符串；
+- `markdown` 链接点击 → `{ href, form }`（`form` 为 `external` / `wiki` / `path`；可新建与未识别链接不可点，不产生事件）；`href` 是源文本原样（未解码，wiki 即笔记名），声明与否不影响宿主默认打开。
 
 三者的完整声明见 [API 参考 · 视图事件与指针](plugin-api.md#4-视图事件与指针)。
 
@@ -309,8 +311,19 @@ ctx.window_show("palette").await?;
 ### 8.4 AI 总线
 
 ```rust
+use atelyx_plugin_sdk::protocol::method::ChatSendParams;
+
 // 发起对话（会话 = 仓库里的普通会话，对话面板可见）；事件经 on_chat_event 流达
 let sent = ctx.chat_send("帮我总结这篇笔记", None).await?;
+
+// 完整参数：指定 Agent / 模型，附带仓库内图片
+let sent = ctx.chat_send_with(ChatSendParams {
+    text: "这张截图里是什么错误？".into(),
+    agent_id: Some("my-agent".into()),
+    model: Some("gpt-4o".into()),
+    images: vec!["attachments/error.png".into()],
+    ..ChatSendParams::default()
+}).await?;
 
 // 注册一个 Agent 可调用的工具
 ctx.register_tool("echo.search", "在笔记里搜索", json!({
@@ -319,6 +332,10 @@ ctx.register_tool("echo.search", "在笔记里搜索", json!({
     "required": ["query"]
 })).await?;
 ```
+
+- `agent_id`：缺省时新建会话用内置「对话」工具集、续聊沿用会话已记录的 Agent；新建会话的记录会写入该 Agent，续聊时只作用于本轮；指定但不在当前仓库名册即拒绝。
+- `model` 缺省沿用对话面板当前选择；同一模型名被多个供应商配置时须给 `provider_id` 消歧（单独给 `provider_id` 拒绝）。
+- `images` 是仓库相对路径（png / jpg / jpeg / webp / gif），逐张校验，任一张不可用即整条拒绝（不部分发送）；`text` 为空时 `images` 必须非空。校验通过后、run 读取前文件仍可能消失，读不到的那张在该轮请求里跳过。
 
 ```rust
 async fn on_tool_call(&self, ctx: &Context, params: ToolCallParams) {
@@ -337,9 +354,11 @@ async fn on_tool_call(&self, ctx: &Context, params: ToolCallParams) {
 ```rust
 ctx.subscribe("vault:switch").await?;    // 容器切换（本地仓库 / 协作空间 / 换仓库）
 ctx.subscribe("table:changed").await?;   // 当前打开表格变更
+ctx.subscribe("ai:chat.changed").await?; // AI 会话内容变更（含对话面板里的改动）
 ```
 
 - `vault:switch` 只在声明了 `keepMountedOnVaultSwitch` 时才有意义：未声明的插件在收到它之前就被宿主重载了。payload：`{ kind: "local", root }` 或 `{ kind: "space", spaceId }`。
+- `ai:chat.changed` payload：`{ sessionId, kind }`，`kind` 为 `created` / `messages` / `meta` / `deleted`（新会话、消息增减、标题或 Agent 等元数据变化、删除）。只在变更提交后广播、不补发历史，需要当前内容用 `ctx.chat_history` 重读。
 - `table:changed` payload 是当前表格的仓库相对路径；订阅时会先补发一次当前状态（迟到订阅不丢当前表格）。
 
 ## 9. 构建与打包

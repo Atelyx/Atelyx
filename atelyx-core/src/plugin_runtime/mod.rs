@@ -26,6 +26,7 @@ use std::sync::{Arc, Mutex};
 use atelyx_plugin_protocol::event;
 use atelyx_plugin_protocol::manifest::Manifest;
 use atelyx_plugin_protocol::method;
+use serde::Serialize;
 use serde_json::Value;
 
 use crate::plugin_process::PluginProcessHost;
@@ -36,7 +37,9 @@ use instance::Instance;
 /// 协议类型再导出：壳只依赖 `atelyx-core`，不直接依赖协议 crate。
 pub use ai_tools::{PluginToolOutput, PluginToolSpec};
 pub use atelyx_plugin_protocol::canvas::{CanvasColor, CanvasPoint, DrawCommand};
-pub use atelyx_plugin_protocol::event::{TableChangedPayload, VaultSwitchPayload};
+pub use atelyx_plugin_protocol::event::{
+    ChatChangeKind, ChatChangedPayload, TableChangedPayload, VaultSwitchPayload,
+};
 pub use atelyx_plugin_protocol::manifest::{DocTypeRegistration, Permission};
 pub use atelyx_plugin_protocol::method::{
     CanvasResizedParams, ChatEvent, ChatEventParams, ChatHistoryParams, ChatHistoryResult,
@@ -48,8 +51,8 @@ pub use atelyx_plugin_protocol::method::{
 };
 pub use atelyx_plugin_protocol::view::{
     Align, Axis, ButtonVariant, CanvasEventKind, CanvasPointer, CardTone, ColorToken, ControlSize,
-    EventKind, EventValue, Fill, ImageFit, ImageSource, Justify, MenuItem, MouseButton, NodeBody,
-    TextWeight, ViewEvent, ViewNode,
+    EventKind, EventValue, Fill, ImageFit, ImageSource, Justify, LinkForm as ProtocolLinkForm,
+    MenuItem, MouseButton, NodeBody, TextWeight, ViewEvent, ViewNode,
 };
 
 /// 插件运行状态。
@@ -1210,19 +1213,34 @@ impl PluginRuntime {
         }
     }
 
-    /// 广播当前打开表格的变更（打开 / 切换 / 关闭表格、本地编辑结算、协作远端补丁落地）
-    /// 给订阅了 `table:changed` 的运行中插件；`path` = 无打开表格（payload 缺省路径）。
-    /// 路径同步缓存，供迟到的订阅者补发当前状态（见 [`PluginRuntime::current_table_path`]）。
+    /// 广播当前打开表格的变更（打开 / 切换 / 关闭表格、本地编辑结算、协作远端补丁落地）；
+    /// `path` = 无打开表格（payload 缺省路径）。路径同步缓存，供迟到的订阅者补发当前状态
+    /// （见 [`PluginRuntime::current_table_path`]）。
     pub fn on_table_changed(self: &Arc<Self>, path: Option<&str>) {
         *self.current_table.lock().unwrap() = path.map(str::to_string);
         let payload = TableChangedPayload { path: path.map(str::to_string) };
+        self.broadcast_event(event::name::TABLE_CHANGED, &payload);
+    }
+
+    /// 广播会话变更给订阅了 `ai:chat.changed` 的运行中插件。不缓存补发：订阅者需要当前
+    /// 状态时用 `ai.chat.history` 拉取。
+    pub fn on_chat_changed(self: &Arc<Self>, session_id: &str, kind: ChatChangeKind) {
+        let payload = ChatChangedPayload {
+            session_id: session_id.to_string(),
+            kind,
+        };
+        self.broadcast_event(event::name::AI_CHAT_CHANGED, &payload);
+    }
+
+    /// 领域事件广播：只投给运行中且订阅了该名字的实例（停用 / 崩溃 / 退避中的实例不收）。
+    fn broadcast_event(self: &Arc<Self>, name: &str, payload: &impl Serialize) {
         let targets: Vec<Arc<Instance>> = self.instances.lock().unwrap().values().cloned().collect();
         for instance in targets {
             if instance.status() != PluginStatus::Running {
                 continue;
             }
-            if instance.subscribed_to(event::name::TABLE_CHANGED) {
-                instance.notify_domain_event(event::name::TABLE_CHANGED, &payload);
+            if instance.subscribed_to(name) {
+                instance.notify_domain_event(name, payload);
             }
         }
     }

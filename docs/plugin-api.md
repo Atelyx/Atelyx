@@ -89,7 +89,7 @@ pub struct DocTypeRegistration {
     /// 不带点的扩展名（如 `board`）。
     pub extension: String,
     pub label: String,
-    /// 宿主图标形状表中的图标名。
+    /// 宿主内置形状名或经 `view.defineIcon` 定义的自备名（内置名优先）。
     pub icon: String,
     /// 承载该文档实例界面树的贡献 id（插件须同时以 `view.register` 注册同名贡献，
     /// `slot` 为面板）；打开该扩展名文件时宿主按文件实例分配 surfaceId 并通知插件提交树。
@@ -315,13 +315,20 @@ pub enum NodeBody {
     },
     /// 只读 Markdown 正文：宿主按笔记同源解析器渲染（标题 / 列表 / 引用 / 代码块 / 表格 / 链接）。
     /// 块级图片与笔记同源载入：http(s) 走下载，其余按仓库相对路径。
-    /// 取色与字重走宿主主题与 Markdown 语义（标题层级 / 强调），只开放整体字号缩放。
-    /// 无编辑态与事件：插件要交互请用其他控件。
+    /// 字重与取色默认走宿主主题与 Markdown 语义（标题层级 / 强调），`weight` / `color` 作整体覆盖。
+    /// 链接可点击：宿主按形态默认打开（外链 / wiki / 仓库路径），节点声明 `linkClick` 时同时回发事件。
+    /// 无编辑态；其余交互请用其他控件。
     Markdown {
         content: String,
         /// 整体字号倍率（相对界面基准正文字号；缺省 1.0）。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         size: Option<f32>,
+        /// 基础字重（标题与加粗片段恒为加粗，不受此项影响）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        weight: Option<TextWeight>,
+        /// 基础文字色（链接 / 代码块等语义色不受影响）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        color: Option<ColorToken>,
     },
     TextInput {
         #[serde(default)]
@@ -370,7 +377,8 @@ pub enum NodeBody {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         size: Option<ControlSize>,
     },
-    /// 图标名必须存在于宿主图标形状表（lucide 线性形状），未知名字宿主按可读错误拒绝。
+    /// 图标名：宿主内置形状（lucide 线性形状）或经 `view.defineIcon` 定义的自备名（内置名优先）；
+    /// 两者都未命中时画空。
     IconButton {
         icon: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -589,6 +597,8 @@ pub enum EventKind {
     Submit,
     Focus,
     Blur,
+    /// Markdown 正文内的链接点击（仅 `markdown` 节点；宿主默认打开行为不受声明影响）。
+    LinkClick,
 }
 ```
 
@@ -603,8 +613,25 @@ pub enum ViewEvent {
     Submit { value: EventValue },
     Focus,
     Blur,
+    /// Markdown 链接点击（仅声明 `linkClick` 的节点）。`href` 为源文本原样（未解码；
+    /// wiki 为笔记名），`form` 与宿主笔记链接解析同一口径。
+    LinkClick { href: String, form: LinkForm },
     /// 画布指针事件（仅 `canvas` 节点按 `mouseEvents` 声明后回发）。
     Canvas { pointer: CanvasPointer },
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/view.rs
+/// Markdown 链接形态：外链 / wiki / 仓库路径 / 可新建 / 未识别（保持原文）。
+/// `create` / `plain` 在 Markdown 正文里不可点击，`linkClick` 只会带来前三种。
+#[serde(rename_all = "lowercase")]
+pub enum LinkForm {
+    External,
+    Wiki,
+    Path,
+    Create,
+    Plain,
 }
 ```
 
@@ -863,7 +890,8 @@ pub struct SubmitResult {
 ```rust
 // atelyx-plugin-protocol/src/method.rs
 /// `view.register` 的 params：声明一个贡献点。`id` 插件内唯一且不得含 `:`（宿主的面标识以它作分隔），
-/// 同时是该面挂载后的 `surfaceId`；`icon` 缺省时宿主用拼图图标。
+/// 同时是该面挂载后的 `surfaceId`；`icon` 为宿主内置形状名或 `view.defineIcon` 定义的自备名
+/// （内置名优先），缺省 / 未注册时宿主用拼图图标。
 #[serde(rename_all = "camelCase")]
 pub struct RegisterParams {
     pub slot: ContributionSlot,
@@ -1195,8 +1223,9 @@ pub mod canvas {
 // atelyx-plugin-protocol/src/method.rs
 pub mod ai {
     /// 插件发起 / 续聊一轮对话（须声明 `ai` 权限）。回执 = run 已就位，事件随后经
-    /// [`HOST_CHAT_EVENT`] 流达。会话 = 仓库普通会话（主面板可见）；供应商 / 模型 / Agent
-    /// 一律跟随对话面板当前选择（不指定、不带 key），未选择时拒绝并把原因回传插件。
+    /// [`HOST_CHAT_EVENT`] 流达。会话 = 仓库普通会话（主面板可见）；可指定 Agent / 模型 /
+    /// 图片（见 [`ChatSendParams`]），Agent 缺省沿用会话或内置「对话」、模型缺省跟随面板
+    /// 当前选择；解析失败时拒绝并回传原因。
     pub const CHAT_SEND: &str = "ai.chat.send";
     /// 中断一个会话的活跃 run（幂等：无活跃 run 也成功）。
     pub const CHAT_STOP: &str = "ai.chat.stop";
@@ -1592,9 +1621,24 @@ pub struct DocCloseParams {
 /// （会话须存在于当前仓库，否则可读拒绝）。同会话已有活跃 run 时拒绝（每会话单 run）。
 #[serde(rename_all = "camelCase")]
 pub struct ChatSendParams {
+    /// 正文；为空时 `images` 必须非空（纯图片消息）。
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// Agent id（当前仓库名册）；缺省 = 新建会话用内置「对话」工具集、续聊沿用会话已记录的
+    /// Agent。新建会话时写入会话记录，续聊时只作用于本轮；指定但不存在 = 拒绝。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    /// 模型 id（供应商配置里的模型名）；缺省 = 面板当前选择，指定但未配置 = 拒绝。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// 供应商 id：给 `model` 消歧（同模型多供应商时必填；单独给出 = 拒绝）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<String>,
+    /// 仓库内图片相对路径（png / jpg / jpeg / webp / gif）；逐张校验，任一不可用 = 整条拒绝。
+    /// 校验通过后到 run 读取之间文件可能消失：读不到的那张在该轮请求里跳过。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<String>,
 }
 ```
 
@@ -1911,6 +1955,8 @@ pub mod name {
     /// 当前打开表格的内容变更（打开 / 切换 / 关闭表格、本地编辑结算、协作远端补丁落地）。
     /// payload 见 [`TableChangedPayload`]。
     pub const TABLE_CHANGED: &str = "table:changed";
+    /// 会话语义变更（流式增量不广播）。payload 见 [`ChatChangedPayload`]。
+    pub const AI_CHAT_CHANGED: &str = "ai:chat.changed";
 }
 ```
 
@@ -1931,6 +1977,28 @@ pub enum VaultSwitchPayload {
 pub struct TableChangedPayload {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/event.rs
+/// [`name::AI_CHAT_CHANGED`] 的 payload。
+#[serde(rename_all = "camelCase")]
+pub struct ChatChangedPayload {
+    pub session_id: String,
+    pub kind: ChatChangeKind,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/event.rs
+/// 会话变更种类：创建 / 消息列表变化 / 元数据变化 / 删除。
+#[serde(rename_all = "camelCase")]
+pub enum ChatChangeKind {
+    Created,
+    Messages,
+    Meta,
+    Deleted,
 }
 ```
 

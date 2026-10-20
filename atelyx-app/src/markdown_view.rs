@@ -1,6 +1,6 @@
 //! Markdown 只读渲染：块规格 → iced 控件（阅读面，不含编辑态与源码标记）。
 //! 块间距 = 源码空行数 × 行高（块级不设外边距）；公式与 raw HTML 降级源码文本，
-//! 独立成段的图片按块渲染（句柄由应用层载入，未载入或行内位置以替代文字占位），链接只作样式。
+//! 独立成段的图片按块渲染（句柄由应用层载入，未载入或行内位置以替代文字占位）。
 
 use std::collections::HashMap;
 
@@ -36,11 +36,29 @@ const CODE_MAX_LINES: usize = 18;
 /// 任务项标记列宽（勾选框所在窄列）。普通项的列宽按源码标记串实测，见 `item_marker_width`。
 const LIST_MARKER_W: f32 = 20.0;
 
-/// 编辑档可点的链接目标（外链 / 仓库路径 / wiki），命中后由视图层打开。
+/// 可点的链接目标（外链 / 仓库路径 / wiki）；`plugin` 非空 = 来自插件正文，
+/// 点击除默认打开外还向该插件的面回发 `linkClick`。
 #[derive(Clone)]
 pub struct LinkTarget {
     pub href: String,
     pub form: LinkForm,
+    pub plugin: Option<PluginLinkScope>,
+}
+
+/// 插件正文的归属（点击事件回发时定位插件、面与节点）。
+#[derive(Clone)]
+pub struct PluginLinkScope {
+    pub plugin_id: String,
+    pub surface_id: String,
+    pub node_id: String,
+}
+
+/// 正文整体样式覆盖：基础字体 / 文字色与插件链接作用域（缺省 = 主题语义）。
+#[derive(Clone, Default)]
+pub struct BodyStyle {
+    pub font: Option<Font>,
+    pub color: Option<Color>,
+    pub link_scope: Option<PluginLinkScope>,
 }
 
 /// 行内可见片段：可见文本 + 该文本对应的源区间 + 样式。
@@ -104,6 +122,18 @@ pub fn document_body_scaled<'a>(
     soft_break: bool,
     scale: f32,
 ) -> Element<'a, Message> {
+    document_body_styled(doc, theme, images, soft_break, scale, BodyStyle::default())
+}
+
+/// 带整体样式覆盖的正文体（插件 Markdown 节点的字重 / 字色与链接作用域）。
+pub fn document_body_styled<'a>(
+    doc: &'a MarkdownDocument,
+    theme: &iced::Theme,
+    images: &'a ImageHandles,
+    soft_break: bool,
+    scale: f32,
+    body: BodyStyle,
+) -> Element<'a, Message> {
     let render = Render {
         pal: Palette::from_theme(theme),
         opts: link_options(),
@@ -111,6 +141,7 @@ pub fn document_body_scaled<'a>(
         images,
         soft_break,
         scale,
+        body,
     };
     let mut body = column![].width(Length::Fill).spacing(0);
     for chunk in render.chunks(&doc.source, &doc.blocks) {
@@ -422,6 +453,7 @@ pub fn edit_rows<'a>(
         images,
         soft_break: true,
         scale: 1.0,
+        body: BodyStyle::default(),
     };
     render.rows(source, blocks)
 }
@@ -429,13 +461,15 @@ pub fn edit_rows<'a>(
 struct Render<'a> {
     pal: Palette,
     opts: ParseOptions,
-    /// 链接可点、任务框可勾（编辑档）；只读档为假。
+    /// 任务框可勾（编辑档）；只读档为假。
     interactive: bool,
     images: &'a ImageHandles,
     /// 宽松换行（false = 段内单个换行渲染为空格；编辑档恒 true，见 block_chunks）。
     soft_break: bool,
     /// 字号与行高倍数（画布卡浮层按视口缩放；面板与编辑面传 1.0）。
     scale: f32,
+    /// 整体样式覆盖（插件正文；缺省 = 主题语义）。
+    body: BodyStyle,
 }
 
 impl Render<'_> {
@@ -450,6 +484,15 @@ impl Render<'_> {
 
     fn heading(&self, level: u8) -> f32 {
         heading_size(level) * self.scale
+    }
+
+    /// 行内基础样式：字体与字色可被插件正文整体覆盖，其余从默认值起。
+    fn text_style(&self) -> TextStyle {
+        TextStyle {
+            font: self.body.font.unwrap_or_else(crate::ui::regular),
+            color: self.body.color,
+            ..TextStyle::base()
+        }
     }
 
     /// 块序列：每块附源区间与前置空行数（间距由调用方按空行数补行高）。
@@ -492,7 +535,7 @@ impl Render<'_> {
     fn block<'a>(&self, source: &'a str, block: &'a MarkdownBlock) -> Element<'a, Message> {
         match block {
             MarkdownBlock::Heading { level, inline, .. } => {
-                let mut st = TextStyle::base();
+                let mut st = self.text_style();
                 st.font.weight = iced::font::Weight::Bold;
                 rich(
                     self.spans(source, inline, st),
@@ -507,7 +550,7 @@ impl Render<'_> {
                     self.image_block(src, alt, width.as_deref(), height.as_deref())
                 } else {
                     rich(
-                        self.spans(source, inline, TextStyle::base()),
+                        self.spans(source, inline, self.text_style()),
                         self.base(),
                         LINE_HEIGHT,
                         None,
@@ -648,7 +691,7 @@ impl Render<'_> {
             MarkdownBlock::Heading { level, inline, .. } => {
                 let st = TextStyle {
                     font: crate::ui::bold(),
-                    ..TextStyle::base()
+                    ..self.text_style()
                 };
                 runs = self.runs(source, inline, st);
                 rich(
@@ -663,7 +706,7 @@ impl Render<'_> {
                 if let Some(InlineSpan::Image { src, alt, width, height, .. }) = image_only(inline) {
                     self.image_block(src, alt, width.as_deref(), height.as_deref())
                 } else {
-                    runs = self.runs(source, inline, TextStyle::base());
+                    runs = self.runs(source, inline, self.text_style());
                     rich(
                         self.run_spans(runs.clone()),
                         self.base(),
@@ -827,7 +870,7 @@ impl Render<'_> {
             if let Some(InlineSpan::Image { src, alt, width, height, .. }) = image_only(&inline) {
                 return (Vec::new(), self.image_block(src, alt, width.as_deref(), height.as_deref()));
             }
-            let runs = self.runs(source, &inline, TextStyle::base());
+            let runs = self.runs(source, &inline, self.text_style());
             if runs.is_empty() {
                 return (Vec::new(), self.empty_item_filler());
             }
@@ -844,7 +887,7 @@ impl Render<'_> {
         if inline.is_empty() {
             return (Vec::new(), self.empty_item_filler());
         }
-        let spans = self.run_spans(self.runs(&stripped, &inline, TextStyle::base()));
+        let spans = self.run_spans(self.runs(&stripped, &inline, self.text_style()));
         (
             Vec::new(),
             rich(spans, self.base(), LINE_HEIGHT, None, iced::alignment::Horizontal::Left),
@@ -889,11 +932,11 @@ impl Render<'_> {
         let mut runs = vec![LineRun {
             text: format!("[{label}] "),
             src: (from, from),
-            st: TextStyle { color: Some(self.pal.accent), ..TextStyle::base() },
+            st: TextStyle { color: Some(self.pal.accent), ..self.text_style() },
             scale: 1.0,
             link: None,
         }];
-        runs.extend(self.runs(source, inline, TextStyle { color: Some(self.pal.muted), ..TextStyle::base() }));
+        runs.extend(self.runs(source, inline, TextStyle { color: Some(self.pal.muted), ..self.text_style() }));
         runs
     }
 
@@ -1057,6 +1100,7 @@ fn code_body<'a>(code: &str, hit: Option<((usize, usize), f32)>, scale: f32) -> 
                 images,
                 soft_break: self.soft_break,
                 scale: self.scale,
+                body: self.body.clone(),
             };
             table::column(head, move |row: usize| {
                 let cell = rows.get(row).and_then(|r| r.get(i));
@@ -1096,7 +1140,7 @@ fn code_body<'a>(code: &str, hit: Option<((usize, usize), f32)>, scale: f32) -> 
             _ => iced::alignment::Horizontal::Left,
         };
         container(rich(
-            self.spans(source, &spans, TextStyle::base()),
+            self.spans(source, &spans, self.text_style()),
             self.base(),
             LINE_HEIGHT,
             None,
@@ -1145,11 +1189,11 @@ fn code_body<'a>(code: &str, hit: Option<((usize, usize), f32)>, scale: f32) -> 
     }
 
     fn footnote<'a>(&self, source: &str, label: &str, inline: &[InlineSpan]) -> Element<'a, Message> {
-        let st = TextStyle { color: Some(self.pal.muted), ..TextStyle::base() };
+        let st = TextStyle { color: Some(self.pal.muted), ..self.text_style() };
         let mut spans = vec![
             self.leaf(
                 format!("[{label}]"),
-                TextStyle { color: Some(self.pal.accent), ..TextStyle::base() },
+                TextStyle { color: Some(self.pal.accent), ..self.text_style() },
             ),
             self.leaf(" ".to_string(), st),
         ];
@@ -1261,7 +1305,7 @@ fn code_body<'a>(code: &str, hit: Option<((usize, usize), f32)>, scale: f32) -> 
                             src,
                             st: inner,
                             scale: 1.0,
-                            link: Some(LinkTarget { href: href.clone(), form: *form }),
+                            link: Some(LinkTarget { href: href.clone(), form: *form, plugin: None }),
                         });
                     }
                     LinkForm::Create => {
@@ -1277,7 +1321,7 @@ fn code_body<'a>(code: &str, hit: Option<((usize, usize), f32)>, scale: f32) -> 
                     src: Self::aligned_src(source, *from, *to, label),
                     st: inner,
                     scale: 1.0,
-                    link: Some(LinkTarget { href: href.clone(), form: LinkForm::External }),
+                    link: Some(LinkTarget { href: href.clone(), form: LinkForm::External, plugin: None }),
                 });
             }
             InlineSpan::Wiki { from, to, target, label } => {
@@ -1287,7 +1331,7 @@ fn code_body<'a>(code: &str, hit: Option<((usize, usize), f32)>, scale: f32) -> 
                     src: Self::aligned_src(source, *from, *to, label),
                     st: inner,
                     scale: 1.0,
-                    link: Some(LinkTarget { href: target.clone(), form: LinkForm::Wiki }),
+                    link: Some(LinkTarget { href: target.clone(), form: LinkForm::Wiki, plugin: None }),
                 });
             }
             // 图片以替代文字占位（不加载图片字节）
@@ -1388,15 +1432,16 @@ fn code_body<'a>(code: &str, hit: Option<((usize, usize), f32)>, scale: f32) -> 
         self.run_spans(self.runs(source, list, st))
     }
 
-    /// 交互档给链接片段挂触点（只读档不挂，链接仅作样式）。
+    /// 交互档或插件正文给链接片段挂触点（纯只读档不挂，链接仅作样式）；
+    /// 插件正文的触点带上面的归属，点击时回发 `linkClick`。
     fn linked<'a>(
         &self,
         leaf: Span<'a, LinkTarget, Font>,
         href: String,
         form: LinkForm,
     ) -> Span<'a, LinkTarget, Font> {
-        if self.interactive {
-            leaf.link(LinkTarget { href, form })
+        if self.interactive || self.body.link_scope.is_some() {
+            leaf.link(LinkTarget { href, form, plugin: self.body.link_scope.clone() })
         } else {
             leaf
         }
@@ -1530,7 +1575,7 @@ fn collect_walk(source: &str, opts: &ParseOptions, blocks: &[MarkdownBlock], out
 }
 
 /// 行内富文本（默认字色与行内对齐可选，供引用/脚注的弱化文本与表格单元格对齐用）。
-/// 链接触点常驻：只读档的行内片段不带链接，处理器不会触发。
+/// 链接触点常驻：纯只读档的行内片段不带链接，处理器不会触发。
 fn rich<'a>(
     spans: Vec<Span<'a, LinkTarget, Font>>,
     size: f32,
@@ -1544,7 +1589,16 @@ fn rich<'a>(
         .line_height(LineHeight::Relative(line_height))
         .align_x(align)
         .width(Length::Fill)
-        .on_link_click(|target: LinkTarget| Message::OpenLink(target.href, target.form));
+        .on_link_click(|target: LinkTarget| match target.plugin {
+            Some(scope) => Message::PluginLink {
+                plugin_id: scope.plugin_id,
+                surface_id: scope.surface_id,
+                node_id: scope.node_id,
+                href: target.href,
+                form: target.form,
+            },
+            None => Message::OpenLink(target.href, target.form),
+        });
     if let Some(c) = color {
         text = text.color(c);
     }

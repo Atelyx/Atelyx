@@ -233,12 +233,7 @@ pub fn host_requests_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<It
                     Message::PluginScrollTo { request_id, plugin_id, params }
                 }
                 HostRequest::ChatSend { plugin_id, request_id, params } => Message::Chat(
-                    crate::chat_actions::ChatMsg::PluginSend {
-                        request_id,
-                        plugin_id,
-                        text: params.text,
-                        session_id: params.session_id,
-                    },
+                    crate::chat_actions::ChatMsg::PluginSend { request_id, plugin_id, params },
                 ),
                 HostRequest::ChatStop { request_id, params, .. } => Message::Chat(
                     crate::chat_actions::ChatMsg::PluginStop {

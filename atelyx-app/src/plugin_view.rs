@@ -134,11 +134,15 @@ pub(crate) fn surface_view<'a>(
             .height(Length::Fill)
             .padding(outer_pad)
             .into(),
-        None => placeholder(
-            contribution.icon.as_deref().unwrap_or("puzzle"),
-            &contribution.label,
-            "等待插件提交界面（插件未运行或尚未就绪）",
-        ),
+        None => {
+            let icon_key =
+                crate::plugin_actions::plugin_icon_key(&ctx.plugin_id, contribution.icon.as_deref(), "puzzle");
+            placeholder(
+                &icon_key,
+                &contribution.label,
+                "等待插件提交界面（插件未运行或尚未就绪）",
+            )
+        }
     }
 }
 
@@ -261,11 +265,16 @@ fn render_node_in<'a>(
         }
         NodeBody::Scroll { direction, gap } => {
             let spacing = gap.unwrap_or(DEFAULT_GAP);
-            let inner: Element<Message> = match direction.unwrap_or(Axis::Vertical) {
+            let axis = direction.unwrap_or(Axis::Vertical);
+            let inner: Element<Message> = match axis {
                 Axis::Horizontal => row(children_elements(app, ctx, node)).spacing(spacing).into(),
                 Axis::Vertical => column(children_elements(app, ctx, node)).spacing(spacing).into(),
             };
-            scroll::v(inner)
+            let scroll = match axis {
+                Axis::Horizontal => scroll::h(inner),
+                Axis::Vertical => scroll::v(inner),
+            };
+            scroll
                 .id(node_scroll_id(ctx, &node.id))
                 .width(Length::Fill)
                 .height(Length::Fill)
@@ -296,15 +305,24 @@ fn render_node_in<'a>(
                 .align_x(horizontal(align.unwrap_or(Align::Start)))
                 .into()
         }
-        NodeBody::Markdown { size, .. } => {
+        NodeBody::Markdown { size, weight, color, .. } => {
             let key = (ctx.plugin_id.clone(), ctx.surface_id.clone(), node.id.clone());
             match app.plugin_markdown.get(&key) {
-                Some(entry) => crate::markdown_view::document_body_scaled(
+                Some(entry) => crate::markdown_view::document_body_styled(
                     &entry.doc,
                     &app.theme,
                     &app.note_images,
                     app.global.soft_wrap,
                     size.unwrap_or(1.0),
+                    crate::markdown_view::BodyStyle {
+                        font: weight.map(text_weight),
+                        color: color.map(token_color),
+                        link_scope: Some(crate::markdown_view::PluginLinkScope {
+                            plugin_id: ctx.plugin_id.clone(),
+                            surface_id: ctx.surface_id.clone(),
+                            node_id: node.id.clone(),
+                        }),
+                    },
                 ),
                 None => text("").into(),
             }

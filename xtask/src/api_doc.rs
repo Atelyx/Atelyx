@@ -95,6 +95,7 @@ const SECTIONS: &[Section] = &[
         items: items!(
             "view.rs": "EventKind",
             "view.rs": "ViewEvent",
+            "view.rs": "LinkForm",
             "view.rs": "EventValue",
             "method.rs": "ViewEventParams",
         ),
@@ -246,6 +247,8 @@ const SECTIONS: &[Section] = &[
             "event.rs": "name",
             "event.rs": "VaultSwitchPayload",
             "event.rs": "TableChangedPayload",
+            "event.rs": "ChatChangedPayload",
+            "event.rs": "ChatChangeKind",
             "event.rs": "PublishParams",
             "event.rs": "SubscribeParams",
             "event.rs": "SubscribeResult",

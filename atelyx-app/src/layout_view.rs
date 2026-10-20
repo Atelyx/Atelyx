@@ -4,6 +4,7 @@
 //! 几何计算与渲染共用同一套度量（UiMetrics）：把手/落点命中矩形由布局树 +
 //! 窗口内容区尺寸纯推导，与 iced FillPortion 的分配规则保持一致。
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
@@ -18,7 +19,7 @@ use atelyx_core::plugin_runtime::ContributionSlot;
 
 use crate::settings_view::ai;
 use crate::ui::controls::{self, Variant};
-use crate::ui::icon::icon;
+use crate::ui::icon::{icon, icon_resolved};
 use crate::ui::menu::MenuEntry;
 use crate::ui::palette as pal;
 use crate::ui::{mono, text};
@@ -80,8 +81,9 @@ pub fn view_label(app: &App, kind: &str) -> String {
     kind.to_string()
 }
 
-/// 内置视图图标（lucide 名）；插件面板取贡献 icon（缺省拼图）；未知 kind 拼图。
-pub fn view_icon(app: &App, kind: &str) -> &'static str {
+/// 内置视图图标（lucide 名）；插件面板取贡献 icon（内置名或自备图形限定名）；
+/// 未知 kind 拼图。
+pub fn view_icon(app: &App, kind: &str) -> Cow<'static, str> {
     let builtin = match kind {
         "canvas" => Some("palette"),
         "note" => Some("file-text"),
@@ -98,12 +100,12 @@ pub fn view_icon(app: &App, kind: &str) -> &'static str {
         _ => None,
     };
     if let Some(name) = builtin {
-        return name;
+        return Cow::Borrowed(name);
     }
     if let Some((plugin_id, id)) = crate::plugin_actions::parse_view_kind(kind) {
         return crate::plugin_actions::contribution_icon(app, plugin_id, id);
     }
-    "puzzle"
+    Cow::Borrowed("puzzle")
 }
 
 /// 可选视图 kind 清单：内置视图 + 已注册的插件面板贡献（壳侧命名空间化 kind）。
@@ -704,7 +706,7 @@ fn with_overlays<'a>(
                 let local = Point::new(drag.current.x - wpos.x, drag.current.y - wpos.y);
                 let ghost = container(
                     row![
-                        icon(view_icon(app, &drag.view), 13.0, pal::TEXT_PRIMARY),
+                        icon_resolved(&view_icon(app, &drag.view), 13.0, pal::TEXT_PRIMARY, 1.5),
                         text(drag.label.clone()).size(pal::fs_caption()).color(pal::TEXT_PRIMARY),
                     ]
                     .spacing(6),
@@ -733,7 +735,11 @@ fn with_overlays<'a>(
         if drag.cursor_window == window {
             if let Some(wpos) = app.os_positions.get(&window) {
                 let local = Point::new(drag.current.x - wpos.x, drag.current.y - wpos.y);
-                let icon_name = if drag.is_dir { "folder" } else { file_icon(app, &drag.label) };
+                let icon_name = if drag.is_dir {
+                    Cow::Borrowed("folder")
+                } else {
+                    file_icon(app, &drag.label)
+                };
                 let hint = app.file_drag_target.as_ref().map(|dir| {
                     if dir.is_empty() {
                         "移到根目录".to_string()
@@ -744,7 +750,7 @@ fn with_overlays<'a>(
                 });
                 let mut card = column![
                     row![
-                        icon(icon_name, 13.0, pal::TEXT_PRIMARY),
+                        icon_resolved(&icon_name, 13.0, pal::TEXT_PRIMARY, 1.5),
                         text(drag.label.clone()).size(pal::fs_caption()).color(pal::TEXT_PRIMARY),
                     ]
                     .spacing(6),
@@ -1437,7 +1443,7 @@ fn panel_tab<'a>(
 
     let text_color = if active { pal::TEXT_PRIMARY } else { pal::TEXT_SECONDARY };
     let mut label_row = row![].spacing(4);
-    label_row = label_row.push(icon(view_icon(app, &t.view), 13.0, text_color));
+    label_row = label_row.push(icon_resolved(&view_icon(app, &t.view), 13.0, text_color, 1.5));
     label_row = label_row.push(
         text(ellipsize(&label, UiMetrics::TAB_TEXT_MAX_W, 12.0))
             .size(pal::fs_caption())
@@ -1685,6 +1691,7 @@ fn collab_room_view(app: &App) -> Element<'_, Message> {
                 false,
             ));
             col = col.push(device_row(
+                app,
                 app.global
                     .last_identity
                     .as_ref()
@@ -1699,7 +1706,7 @@ fn collab_room_view(app: &App) -> Element<'_, Message> {
                 true,
             ));
             for (nickname, device, color, files) in merge_peers(&app.space_peers) {
-                col = col.push(device_row(nickname, color, device, files, false));
+                col = col.push(device_row(app, nickname, color, device, files, false));
             }
             if app.space_peers.is_empty() {
                 col = col.push(
@@ -1726,6 +1733,7 @@ fn collab_room_view(app: &App) -> Element<'_, Message> {
 
 /// 在线设备卡片：色点 + 昵称（自己标「我」）一行，设备名次行，打开文件清单可点击。
 fn device_row(
+    app: &App,
     nickname: String,
     color_hex: String,
     device: String,
@@ -1762,10 +1770,11 @@ fn device_row(
     } else {
         for rel in files {
             let name = rel.rsplit('/').next().unwrap_or(&rel).to_string();
+            let icon_key = file_icon(app, &name);
             col = col.push(
                 button(
                     row![
-                        icon(file_icon_base(&name), 11.0, pal::TEXT_SECONDARY),
+                        icon(&icon_key, 11.0, pal::TEXT_SECONDARY),
                         text(name).size(pal::fs_micro()).color(pal::TEXT_SECONDARY),
                     ]
                     .spacing(4),
@@ -1921,8 +1930,9 @@ fn inspector_view<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, Mes
 
 /// 占位视图：大图标 + 名称 + 未实现说明（PanelPlaceholder 同款形态）。
 fn placeholder_view(app: &App, kind: &str) -> Element<'static, Message> {
+    let icon_key = view_icon(app, kind);
     controls::view_placeholder(
-        view_icon(app, kind),
+        &icon_key,
         view_label(app, kind),
         "该视图尚未实现".to_string(),
     )
@@ -1976,7 +1986,7 @@ pub fn detached_view<'a>(
                 .is_some_and(|d| crate::plugin_actions::doc_view_kind(&d.plugin_id, &d.contribution_id) == t.view);
         let text_color = if active { pal::TEXT_PRIMARY } else { pal::TEXT_SECONDARY };
         let mut label_row = row![].spacing(4);
-        label_row = label_row.push(icon(view_icon(app, &t.view), 13.0, text_color));
+        label_row = label_row.push(icon_resolved(&view_icon(app, &t.view), 13.0, text_color, 1.5));
         label_row = label_row.push(
             text(ellipsize(&label, UiMetrics::TAB_TEXT_MAX_W, 12.0))
                 .size(pal::fs_caption())
@@ -2569,7 +2579,7 @@ fn tree_row_element(
         None
     };
     let (icon_name, icon_color) = if r.is_dir {
-        ("folder", folder_color.unwrap_or(pal::TEXT_MUTED))
+        (Cow::Borrowed("folder"), folder_color.unwrap_or(pal::TEXT_MUTED))
     } else {
         let active_icon = pal::ACCENT;
         let color = if r.active { active_icon } else { pal::TEXT_SECONDARY };
@@ -2591,7 +2601,7 @@ fn tree_row_element(
             pal::TEXT_MUTED,
         ));
     }
-    content = content.push(icon(icon_name, 14.0, icon_color));
+    content = content.push(icon_resolved(&icon_name, 14.0, icon_color, 1.5));
     content = content.push(text(r.name.clone()).size(pal::fs_caption()).color(name_color));
     if !r.is_dir {
         content = content.push(space().width(Length::Fill));
@@ -2749,7 +2759,7 @@ fn file_inline_input(app: &App, r: &TreeRow) -> Option<Element<'static, Message>
     )
 }
 
-fn file_icon(app: &App, name: &str) -> &'static str {
+fn file_icon(app: &App, name: &str) -> Cow<'static, str> {
     // 插件领域文档类型按注册图标呈现（扩展名大小写不敏感），其余走内置映射
     // （投影缓存随贡献刷新，避免文件树逐行渲染时重查运行时）
     if let Some(ext) = name.rsplit('.').next() {
@@ -2758,10 +2768,14 @@ fn file_icon(app: &App, name: &str) -> &'static str {
             .iter()
             .find(|i| i.registration.extension.eq_ignore_ascii_case(ext))
         {
-            return crate::plugin_actions::normalize_icon(&info.registration.icon, "paperclip");
+            return crate::plugin_actions::plugin_icon_key(
+                &info.plugin_id,
+                Some(&info.registration.icon),
+                "paperclip",
+            );
         }
     }
-    file_icon_base(name)
+    Cow::Borrowed(file_icon_base(name))
 }
 
 /// 内置扩展名图标映射（无 app 上下文的调用点用）。
@@ -3563,7 +3577,7 @@ fn popup_element<'a>(
                     0,
                     MenuEntry::Action {
                         label: "关闭该标签".into(),
-                        icon: Some("x"),
+                        icon: Some("x".into()),
                         danger: false,
                         disabled: locked,
                         on_press: (!locked).then(|| Message::DetachedTabClose(wid.clone(), tid.clone())),
@@ -3722,7 +3736,7 @@ fn popup_element<'a>(
                 0,
                 MenuEntry::Action {
                     label: "成员管理".into(),
-                    icon: Some("users"),
+                    icon: Some("users".into()),
                     danger: false,
                     disabled: !active,
                     on_press: active.then(|| {
@@ -3744,7 +3758,7 @@ fn popup_element<'a>(
                 0,
                 MenuEntry::Action {
                     label: "邀请码".into(),
-                    icon: Some("user-plus"),
+                    icon: Some("user-plus".into()),
                     danger: false,
                     disabled: !owner,
                     on_press: owner.then(|| {
@@ -3771,7 +3785,7 @@ fn popup_element<'a>(
                 0,
                 MenuEntry::Action {
                     label: "从列表移除".into(),
-                    icon: Some("x"),
+                    icon: Some("x".into()),
                     danger: true,
                     disabled: active,
                     on_press: (!active).then(|| Message::RemoveSpaceAsk {
@@ -3794,7 +3808,7 @@ fn popup_element<'a>(
                     0,
                     MenuEntry::Action {
                         label: "历史记录".into(),
-                        icon: Some("history"),
+                        icon: Some("history".into()),
                         danger: false,
                         disabled: !note_open,
                         on_press: app.ui.last_note_file.clone().map(|file| {
@@ -3837,7 +3851,7 @@ fn popup_element<'a>(
                         0,
                         MenuEntry::Action {
                             label: (*label).to_string(),
-                            icon: Some(icon_name),
+                            icon: Some(icon_name.to_string()),
                             danger: false,
                             disabled: locked,
                             on_press: (!locked)
@@ -3982,7 +3996,7 @@ fn popup_element<'a>(
                     0,
                     MenuEntry::Action {
                         label: o.clone(),
-                        icon: Some("x"),
+                        icon: Some("x".into()),
                         danger: true,
                         disabled: false,
                         on_press: Some(Message::Table(crate::table_view::TableMsg::OptionsRemove {
@@ -4194,7 +4208,7 @@ fn popup_element<'a>(
                     0,
                     MenuEntry::Action {
                         label: "历史记录".into(),
-                        icon: Some("history"),
+                        icon: Some("history".into()),
                         danger: false,
                         disabled: !table_open,
                         on_press: app.ui.last_table_file.clone().map(|file| {
@@ -4535,7 +4549,7 @@ fn popup_element<'a>(
             vec![
                 (
                     0,
-                    MenuEntry::Submenu { label: "删除供应商".into(), icon: Some("trash-2"), disabled: false, pane: 1 },
+                    MenuEntry::Submenu { label: "删除供应商".into(), icon: Some("trash-2".into()), disabled: false, pane: 1 },
                 ),
                 (
                     1,
@@ -4548,7 +4562,7 @@ fn popup_element<'a>(
             vec![
                 (
                     0,
-                    MenuEntry::Submenu { label: "删除 Agent".into(), icon: Some("trash-2"), disabled: false, pane: 1 },
+                    MenuEntry::Submenu { label: "删除 Agent".into(), icon: Some("trash-2".into()), disabled: false, pane: 1 },
                 ),
                 (1, MenuEntry::danger("确认删除", "trash-2", Message::Ai(ai::AiMsg::AgentDelete))),
                 (1, MenuEntry::action("取消", Message::Ui(crate::ui::UiMsg::PopupClose { window }))),
@@ -5080,7 +5094,7 @@ fn tab_context_entries(
             0,
             MenuEntry::Action {
                 label: "关闭该标签".into(),
-                icon: Some("x"),
+                icon: Some("x".into()),
                 danger: false,
                 disabled: locked,
                 on_press: (!locked).then(|| Message::PanelTabClose(pid.clone(), tid.clone())),
@@ -5205,7 +5219,7 @@ fn vault_menu_entries(app: &App, root: &str) -> Vec<(usize, MenuEntry<'static>)>
         (0, MenuEntry::Divider),
         (0, MenuEntry::Action {
             label: "从列表移除".to_string(),
-            icon: Some("unlink"),
+            icon: Some("unlink".into()),
             danger: true,
             disabled: active,
             on_press: (!active).then(|| Message::RemoveVaultAsk(root.to_string())),
@@ -5789,7 +5803,11 @@ fn file_menu_entries(
                 0,
                 MenuEntry::action_icon(
                     &label,
-                    crate::plugin_actions::normalize_icon(&info.registration.icon, "file-text"),
+                    crate::plugin_actions::plugin_icon_key(
+                        &info.plugin_id,
+                        Some(&info.registration.icon),
+                        "file-text",
+                    ),
                     Message::DraftStart(
                         rel.to_string(),
                         DraftKind::Doc { extension, label: info.registration.label.clone() },
@@ -5803,7 +5821,7 @@ fn file_menu_entries(
             entries.push((0, MenuEntry::Divider));
             entries.push((0, MenuEntry::Submenu {
                 label: "图标颜色".into(),
-                icon: Some("palette"),
+                icon: Some("palette".into()),
                 disabled: false,
                 pane: 2,
             }));
@@ -5831,7 +5849,7 @@ fn file_menu_entries(
             let marked = app.prompt_notes.iter().any(|n| n == rel);
             entries.push((0, MenuEntry::Action {
                 label: if marked { "注销提示词" } else { "注册为提示词" }.into(),
-                icon: Some(if marked { "bookmark-minus" } else { "bookmark-plus" }),
+                icon: Some(if marked { "bookmark-minus" } else { "bookmark-plus" }.into()),
                 danger: false,
                 disabled: viewer,
                 on_press: (!viewer).then(|| Message::PromptToggle(rel.to_string())),

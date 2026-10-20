@@ -15,6 +15,8 @@ pub mod name {
     /// 当前打开表格的内容变更（打开 / 切换 / 关闭表格、本地编辑结算、协作远端补丁落地）。
     /// payload 见 [`TableChangedPayload`]。
     pub const TABLE_CHANGED: &str = "table:changed";
+    /// 会话语义变更（流式增量不广播）。payload 见 [`ChatChangedPayload`]。
+    pub const AI_CHAT_CHANGED: &str = "ai:chat.changed";
 }
 
 /// [`name::VAULT_SWITCH`] 的 payload（`kind` 与字段名均 camelCase，与协议其余类型同一口径）。
@@ -31,6 +33,24 @@ pub enum VaultSwitchPayload {
 pub struct TableChangedPayload {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+}
+
+/// [`name::AI_CHAT_CHANGED`] 的 payload。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatChangedPayload {
+    pub session_id: String,
+    pub kind: ChatChangeKind,
+}
+
+/// 会话变更种类：创建 / 消息列表变化 / 元数据变化 / 删除。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ChatChangeKind {
+    Created,
+    Messages,
+    Meta,
+    Deleted,
 }
 
 /// 宿主广播的通知 params（[`HOST_PUBLISH`]）。

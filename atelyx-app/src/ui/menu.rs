@@ -7,7 +7,7 @@ use iced::alignment::Vertical;
 use iced::widget::{column, container, row, space};
 use iced::{Element, Length, Padding, widget::container::Style};
 
-use super::icon::icon;
+use super::icon::{icon, icon_resolved};
 use super::palette as pal;
 use super::scroll;
 use super::text;
@@ -18,7 +18,8 @@ use crate::Message;
 pub enum MenuEntry<'a> {
     Action {
         label: String,
-        icon: Option<&'static str>,
+        /// 内置图标名或插件自备图形的限定名（`<插件 id>::<名>`）。
+        icon: Option<String>,
         /// 危险操作：红字 + hover 红调底。
         danger: bool,
         disabled: bool,
@@ -34,7 +35,7 @@ pub enum MenuEntry<'a> {
     Checked { label: String, on_press: Message },
     Divider,
     /// 钻入子面板。
-    Submenu { label: String, icon: Option<&'static str>, disabled: bool, pane: usize },
+    Submenu { label: String, icon: Option<String>, disabled: bool, pane: usize },
     /// 自定义内容块（高度调用方给出，用于估高与钳制）。
     Custom(Element<'a, Message>, f32),
     /// 长清单滚动区（族名表等）：内部条目按菜单行渲染，`height` = 可视区高度（同时计入估高）。
@@ -57,12 +58,12 @@ impl<'a> MenuEntry<'a> {
 
     pub fn action_icon(
         label: impl Into<String>,
-        icon: &'static str,
+        icon: impl Into<String>,
         on_press: Message,
     ) -> Self {
         MenuEntry::Action {
             label: label.into(),
-            icon: Some(icon),
+            icon: Some(icon.into()),
             danger: false,
             disabled: false,
             on_press: Some(on_press),
@@ -71,10 +72,10 @@ impl<'a> MenuEntry<'a> {
         }
     }
 
-    pub fn danger(label: impl Into<String>, icon: &'static str, on_press: Message) -> Self {
+    pub fn danger(label: impl Into<String>, icon: impl Into<String>, on_press: Message) -> Self {
         MenuEntry::Action {
             label: label.into(),
-            icon: Some(icon),
+            icon: Some(icon.into()),
             danger: true,
             disabled: false,
             on_press: Some(on_press),
@@ -86,14 +87,14 @@ impl<'a> MenuEntry<'a> {
     /// 带行尾角标的条目（非禁用 = 强调色文字，点击动作；禁用 = 灰字无动作）。
     pub fn noted(
         label: impl Into<String>,
-        icon: &'static str,
+        icon: impl Into<String>,
         note: &'static str,
         disabled: bool,
         on_press: Option<Message>,
     ) -> Self {
         MenuEntry::Action {
             label: label.into(),
-            icon: Some(icon),
+            icon: Some(icon.into()),
             danger: false,
             disabled,
             on_press,
@@ -174,7 +175,7 @@ fn entry_element<'a>(entry: MenuEntry<'a>, window: iced::window::Id) -> (Element
 #[allow(clippy::too_many_arguments)]
 fn item(
     label: &str,
-    icon_name: Option<&'static str>,
+    icon_name: Option<String>,
     danger: bool,
     disabled: bool,
     on_press: Option<Message>,
@@ -199,7 +200,7 @@ fn item(
     };
     let mut row = row![].spacing(6).width(Length::Fill);
     if let Some(name) = icon_name {
-        row = row.push(icon(name, 13.0, text_color));
+        row = row.push(icon_resolved(&name, 13.0, text_color, 1.5));
     }
     row = row.push(text(label.to_string()).size(pal::fs_caption()).color(text_color));
     if let Some(note) = note {
@@ -224,7 +225,7 @@ fn checked_item(
 
 fn submenu_item(
     label: &str,
-    icon_name: Option<&'static str>,
+    icon_name: Option<String>,
     disabled: bool,
     pane: usize,
     window: iced::window::Id,
@@ -232,7 +233,7 @@ fn submenu_item(
     let mut row = row![].spacing(6).width(Length::Fill);
     row = row.push(icon("chevron-right", 13.0, text_color));
     if let Some(name) = icon_name {
-        row = row.push(icon(name, 13.0, text_color));
+        row = row.push(icon_resolved(&name, 13.0, text_color, 1.5));
     }
     row = row.push(text(label.to_string()).size(pal::fs_caption()).color(text_color));
     if disabled {

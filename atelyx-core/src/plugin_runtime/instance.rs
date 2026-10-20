@@ -1138,7 +1138,10 @@ impl Instance {
 
     fn on_subscribe(&self, params: &Value) -> Result<Value, RpcError> {
         let p: event::SubscribeParams = parse(params)?;
-        if p.name != event::name::VAULT_SWITCH && p.name != event::name::TABLE_CHANGED {
+        if !matches!(
+            p.name.as_str(),
+            event::name::VAULT_SWITCH | event::name::TABLE_CHANGED | event::name::AI_CHAT_CHANGED
+        ) {
             return Err(RpcError::failed(format!("未知事件名：{}", p.name)));
         }
         self.subscriptions.lock().unwrap().insert(p.name.clone());
@@ -1655,6 +1658,25 @@ mod tests {
     /// 造一行插件→宿主请求（走 `handle_line`，闸门与审计都在那条路径上）。
     fn request_line(method_name: &str, params: &Value) -> String {
         json!({ "jsonrpc": "2.0", "id": 1, "method": method_name, "params": params }).to_string()
+    }
+
+    #[test]
+    fn subscribe_accepts_domain_event_names_and_rejects_unknown() {
+        let (_tmp, instance) = make_instance(Vec::new());
+        for name in [
+            event::name::VAULT_SWITCH,
+            event::name::TABLE_CHANGED,
+            event::name::AI_CHAT_CHANGED,
+        ] {
+            let ack = instance
+                .dispatch(event::SUBSCRIBE, &json!({ "name": name }))
+                .unwrap();
+            assert_eq!(ack["subscribed"], json!(true));
+            assert!(instance.subscribed_to(name));
+        }
+        assert!(instance
+            .dispatch(event::SUBSCRIBE, &json!({ "name": "unknown:event" }))
+            .is_err());
     }
 
     #[test]
@@ -2254,18 +2276,6 @@ mod tests {
             .expect("写 state 应成功");
         let read = instance.dispatch(method::state::READ, &Value::Null).expect("读 state 应成功");
         assert_eq!(read["json"]["n"], 1);
-    }
-
-    #[test]
-    fn subscribe_only_accepts_known_events() {
-        let (_tmp, instance) = make_instance(Vec::new());
-        assert!(instance
-            .dispatch(event::SUBSCRIBE, &json!({ "name": event::name::VAULT_SWITCH }))
-            .is_ok());
-        assert!(instance
-            .dispatch(event::SUBSCRIBE, &json!({ "name": event::name::TABLE_CHANGED }))
-            .is_ok());
-        assert!(instance.dispatch(event::SUBSCRIBE, &json!({ "name": "nope" })).is_err());
     }
 
     /// table:changed 订阅注册，且运行时缓存最近广播的表格路径（迟到订阅补发的数据源）。

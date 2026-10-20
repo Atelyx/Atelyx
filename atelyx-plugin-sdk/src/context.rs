@@ -216,16 +216,23 @@ impl Context {
     // ---------- ai ----------
 
     /// 发起 / 续聊一轮 AI 对话（须在 manifest 声明 `ai` 权限）。回执 = run 已就位，
-    /// 流式事件经 [`PluginHandler::on_chat_event`] 流达。供应商 / 模型 / Agent 用仓库
-    /// AI 设置的默认值；`session_id` 缺省 = 新建会话。
+    /// 流式事件经 [`PluginHandler::on_chat_event`] 流达。模型跟随面板当前选择，Agent 缺省沿用
+    /// 会话或内置「对话」；`session_id` 缺省 = 新建会话。
     /// 受 [`CALL_TIMEOUT`] 约束：超时后宿主侧 run 可能已启动（事件照常流达），
     /// 调用方应把超时当作「结果未知」而非「未发送」。
     pub async fn chat_send(&self, text: &str, session_id: Option<&str>) -> Result<ChatSendResult, RpcError> {
-        self.call_typed(
-            method::ai::CHAT_SEND,
-            &ChatSendParams { text: text.into(), session_id: session_id.map(Into::into) },
-        )
+        self.chat_send_with(ChatSendParams {
+            text: text.into(),
+            session_id: session_id.map(Into::into),
+            ..ChatSendParams::default()
+        })
         .await
+    }
+
+    /// [`Self::chat_send`] 的完整参数入口：可另指定 Agent、模型、供应商与仓库内图片。
+    /// 显式指定的 Agent / 模型须在当前仓库可用，否则宿主可读拒绝。
+    pub async fn chat_send_with(&self, params: ChatSendParams) -> Result<ChatSendResult, RpcError> {
+        self.call_typed(method::ai::CHAT_SEND, &params).await
     }
 
     /// 中断一个会话的活跃 run（幂等：无活跃 run 也成功）。

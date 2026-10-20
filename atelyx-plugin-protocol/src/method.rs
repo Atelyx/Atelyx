@@ -142,8 +142,9 @@ pub mod canvas {
 
 pub mod ai {
     /// 插件发起 / 续聊一轮对话（须声明 `ai` 权限）。回执 = run 已就位，事件随后经
-    /// [`HOST_CHAT_EVENT`] 流达。会话 = 仓库普通会话（主面板可见）；供应商 / 模型 / Agent
-    /// 一律跟随对话面板当前选择（不指定、不带 key），未选择时拒绝并把原因回传插件。
+    /// [`HOST_CHAT_EVENT`] 流达。会话 = 仓库普通会话（主面板可见）；可指定 Agent / 模型 /
+    /// 图片（见 [`ChatSendParams`]），Agent 缺省沿用会话或内置「对话」、模型缺省跟随面板
+    /// 当前选择；解析失败时拒绝并回传原因。
     pub const CHAT_SEND: &str = "ai.chat.send";
     /// 中断一个会话的活跃 run（幂等：无活跃 run 也成功）。
     pub const CHAT_STOP: &str = "ai.chat.stop";
@@ -221,7 +222,8 @@ pub enum ContributionSlot {
 }
 
 /// `view.register` 的 params：声明一个贡献点。`id` 插件内唯一且不得含 `:`（宿主的面标识以它作分隔），
-/// 同时是该面挂载后的 `surfaceId`；`icon` 缺省时宿主用拼图图标。
+/// 同时是该面挂载后的 `surfaceId`；`icon` 为宿主内置形状名或 `view.defineIcon` 定义的自备名
+/// （内置名优先），缺省 / 未注册时宿主用拼图图标。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RegisterParams {
@@ -674,12 +676,27 @@ pub struct DocCloseParams {
 
 /// [`ai::CHAT_SEND`] 的 params：`session_id` 缺省 = 新建会话；非缺省 = 在该会话续聊
 /// （会话须存在于当前仓库，否则可读拒绝）。同会话已有活跃 run 时拒绝（每会话单 run）。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatSendParams {
+    /// 正文；为空时 `images` 必须非空（纯图片消息）。
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// Agent id（当前仓库名册）；缺省 = 新建会话用内置「对话」工具集、续聊沿用会话已记录的
+    /// Agent。新建会话时写入会话记录，续聊时只作用于本轮；指定但不存在 = 拒绝。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    /// 模型 id（供应商配置里的模型名）；缺省 = 面板当前选择，指定但未配置 = 拒绝。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// 供应商 id：给 `model` 消歧（同模型多供应商时必填；单独给出 = 拒绝）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<String>,
+    /// 仓库内图片相对路径（png / jpg / jpeg / webp / gif）；逐张校验，任一不可用 = 整条拒绝。
+    /// 校验通过后到 run 读取之间文件可能消失：读不到的那张在该轮请求里跳过。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<String>,
 }
 
 /// [`ai::CHAT_SEND`] 的 result：run 已就位；流式事件随后经 [`ai::HOST_CHAT_EVENT`] 流达。
@@ -964,6 +981,10 @@ mod tests {
         );
         let send: ChatSendParams = serde_json::from_value(serde_json::json!({ "text": "hi" })).unwrap();
         assert_eq!(send.session_id, None);
+        assert_eq!(send.agent_id, None);
+        assert_eq!(send.model, None);
+        assert_eq!(send.provider_id, None);
+        assert!(send.images.is_empty());
     }
 
     #[test]

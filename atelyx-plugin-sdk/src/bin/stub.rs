@@ -168,8 +168,8 @@ impl Stub {
 #[async_trait::async_trait]
 impl PluginHandler for Stub {
     async fn on_ready(&self, ctx: &Context) {
-        // `stub.ping` 为夹具事件名（宿主只广播 `vault:switch`，该名由宿主桩直接发送）
-        for name in ["stub.ping", event::name::VAULT_SWITCH] {
+        // `stub.ping` 为夹具事件名（宿主只广播领域事件，该名由宿主桩直接发送）
+        for name in ["stub.ping", event::name::VAULT_SWITCH, event::name::AI_CHAT_CHANGED] {
             if let Err(e) = ctx.subscribe(name).await {
                 eprintln!("订阅 {name} 失败：{e}");
             }
@@ -241,6 +241,12 @@ impl PluginHandler for Stub {
             event::name::VAULT_SWITCH => {
                 if let Err(e) = ctx.state_write(json!({ "vault_switch": params.payload })).await {
                     eprintln!("写 vault:switch 失败：{e}");
+                }
+            }
+            // 会话变更：载荷落进自持数据
+            event::name::AI_CHAT_CHANGED => {
+                if let Err(e) = ctx.state_write(json!({ "chat_changed": params.payload })).await {
+                    eprintln!("写 ai:chat.changed 失败：{e}");
                 }
             }
             _ => {}

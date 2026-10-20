@@ -4,6 +4,7 @@
 //! 贡献与面树的投影缓存在 `App`（`plugin_contributions` / `plugin_surfaces` / `plugin_trees`），
 //! 由 [`refresh_projection`] 随运行时事件刷新；渲染在 [`crate::plugin_view`]。
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 
@@ -11,10 +12,11 @@ use iced::widget::text_editor;
 use iced::{Task, window};
 
 use atelyx_core::layout::{self, LayoutNode};
+use atelyx_core::markdown::LinkForm;
 use atelyx_core::plugin_runtime::{
     CanvasPointer, Contribution, ContributionSlot, DrawCommand, EventKind, EventValue, ImageSource,
-    NodeBody, ScrollEdge, ScrollToParams, SurfaceKind, TakeoverScope, ViewEvent, ViewNode,
-    WindowOpenParams, WindowUpdateParams,
+    NodeBody, ProtocolLinkForm, ScrollEdge, ScrollToParams, SurfaceKind, TakeoverScope, ViewEvent,
+    ViewNode, WindowOpenParams, WindowUpdateParams,
 };
 
 use crate::{App, Message};
@@ -54,19 +56,31 @@ pub fn contributions_of(app: &App, slot: ContributionSlot) -> impl Iterator<Item
     app.plugin_contributions.iter().filter(move |c| c.slot == slot)
 }
 
-/// 插件面板的图标名（归一为形状表里的 'static 名；贡献未声明 / 名字未知回落拼图）。
-pub fn contribution_icon(app: &App, plugin_id: &str, contribution_id: &str) -> &'static str {
-    let name = contribution(app, plugin_id, contribution_id)
-        .and_then(|c| c.icon.as_deref())
-        .unwrap_or("puzzle");
-    normalize_icon(name, "puzzle")
+/// 插件面板的图标键（内置名原样，自备名按插件命名空间限定；未声明 / 未注册回落拼图）。
+pub fn contribution_icon(app: &App, plugin_id: &str, contribution_id: &str) -> Cow<'static, str> {
+    let name = contribution(app, plugin_id, contribution_id).and_then(|c| c.icon.as_deref());
+    plugin_icon_key(plugin_id, name, "puzzle")
 }
 
-/// 图标名归一为宿主形状表里的 'static 名；未知 / 空名回落指定兜底。
-pub fn normalize_icon(name: &str, fallback: &'static str) -> &'static str {
+/// 插件声明图标的解析键：内置名原样返回；自备名返回限定名 `<插件 id>::<名>`，
+/// 未注册（插件未定义或已停用）回落 `fallback`。
+pub fn plugin_icon_key(
+    plugin_id: &str,
+    name: Option<&str>,
+    fallback: &'static str,
+) -> Cow<'static, str> {
+    let Some(name) = name.filter(|name| !name.is_empty()) else {
+        return Cow::Borrowed(fallback);
+    };
     match crate::ui::icon::icon_name(name) {
-        "" => fallback,
-        resolved => resolved,
+        "" => {}
+        builtin => return Cow::Borrowed(builtin),
+    }
+    let key = format!("{plugin_id}::{name}");
+    if crate::ui::icon::is_dynamic(&key) {
+        Cow::Owned(key)
+    } else {
+        Cow::Borrowed(fallback)
     }
 }
 
@@ -174,6 +188,7 @@ fn event_kind(event: &ViewEvent) -> Option<EventKind> {
         ViewEvent::Submit { .. } => Some(EventKind::Submit),
         ViewEvent::Focus => Some(EventKind::Focus),
         ViewEvent::Blur => Some(EventKind::Blur),
+        ViewEvent::LinkClick { .. } => Some(EventKind::LinkClick),
         ViewEvent::Canvas { .. } => None,
     }
 }
@@ -358,6 +373,9 @@ fn sync_plugin_icons(app: &App) {
     let mut ids: HashSet<String> = app.plugin_trees.keys().map(|(plugin_id, _)| plugin_id.clone()).collect();
     for contribution in &app.plugin_contributions {
         ids.insert(contribution.plugin_id.clone());
+    }
+    for info in &app.plugin_doc_types {
+        ids.insert(info.plugin_id.clone());
     }
     for id in ids {
         for (name, path) in app.plugins.plugin_icons(&id) {
@@ -1176,6 +1194,31 @@ pub fn on_view_event(
     app.plugins
         .send_view_event(&plugin_id, &surface_id, &node_id, event);
     Task::none()
+}
+
+/// 插件正文链接点击：按节点声明回发 `linkClick`，同时走宿主默认的打开行为。
+pub fn on_link_click(
+    app: &mut App,
+    plugin_id: String,
+    surface_id: String,
+    node_id: String,
+    href: String,
+    form: LinkForm,
+) -> Task<Message> {
+    let event = ViewEvent::LinkClick { href: href.clone(), form: protocol_link_form(form) };
+    let task = on_view_event(app, plugin_id, surface_id, node_id, event);
+    task.chain(app.open_link(&href, form))
+}
+
+/// 核心链接形态 → 协议链接形态（两端词汇一一对应）。
+fn protocol_link_form(form: LinkForm) -> ProtocolLinkForm {
+    match form {
+        LinkForm::External => ProtocolLinkForm::External,
+        LinkForm::Wiki => ProtocolLinkForm::Wiki,
+        LinkForm::Path => ProtocolLinkForm::Path,
+        LinkForm::Create => ProtocolLinkForm::Create,
+        LinkForm::Plain => ProtocolLinkForm::Plain,
+    }
 }
 
 /// 多行输入的编辑器动作：应用到本机内容，文本有变化才按节点声明上行。

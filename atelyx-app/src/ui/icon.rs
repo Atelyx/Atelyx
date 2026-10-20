@@ -184,6 +184,11 @@ pub fn reset_dynamic() {
     dynamic_map().lock().unwrap().clear();
 }
 
+/// 限定名是否已注册自备图形（注册表随投影刷新整体重建，渲染时即最新）。
+pub fn is_dynamic(key: &str) -> bool {
+    dynamic_map().lock().unwrap().contains_key(key)
+}
+
 /// 自备图形部件：与内置图标同口径描边绘制（24 单位视框）。
 pub struct ShapeIcon {
     pub polylines: std::sync::Arc<svgpath::FlatShapes>,
