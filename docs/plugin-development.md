@@ -187,18 +187,34 @@ async fn main() {
 
 ### 5.1 控件
 
-控件集：`column` / `row` / `card` / `stack` / `scroll` / `grid` / `list` / `text` / `markdown` / `textInput` / `numberInput` / `dropdown` / `checkbox` / `button` / `iconButton` / `image` / `progress` / `menu` / `divider` / `canvas` / `dragRegion`。每个 `kind` 的字段与语义以 [API 参考 · 界面控件树](plugin-api.md#3-界面控件树) 为准（含 `NodeBody` 的完整声明）。
+控件集：`column` / `row` / `card` / `stack` / `scroll` / `grid` / `list` / `text` / `markdown` / `textInput` / `numberInput` / `dropdown` / `checkbox` / `button` / `iconButton` / `icon` / `image` / `progress` / `menu` / `divider` / `canvas` / `dragRegion`。每个 `kind` 的字段与语义以 [API 参考 · 界面控件树](plugin-api.md#3-界面控件树) 为准（含 `NodeBody` 的完整声明）。
 
-几条不在类型里的约定：
+控件之上还有四个**节点级能力**，写在节点上（与 `kind` 并列）：
 
-- 颜色只用 `color` 引用主题 token（`text` / `textSecondary` / `textMuted` / `accent` / `danger` / `success` / `warning`），插件不写死色值，主题切换自动跟随；
+- `size`（`column` / `row` / `card`）：自身尺寸 `{ width, height, minWidth, maxWidth, minHeight, maxHeight }`。`width` / `height` 取 `"fill"` / `"shrink"` / 数字像素；缺省列与卡片占满宽、行按内容收缩（行内有 `grow` 子项或声明了 `justify` 时按占满宽布局）。**上下限只对固定或收缩尺寸的子项生效**：流体子项（`"fill"` 或按 `grow` 分配）的空间由父容器分配，此时声明上下限不参与布局。
+- `grow`：在父级行 / 列 / 网格里按权重分剩余空间，`grow: 35` 与 `grow: 65` 就是 35% 与 65%。带 `grow` 子项的行会自动占满宽度、列会自动占满高度（否则没有剩余空间可分配）；交叉轴尺寸仍由子项自己的 `size` 决定。
+- `interaction`：交互外观与状态，`{ state, normal, hover, active, disabled }`，每一档给 `{ background, border, radius }`。取档顺序 **禁用 > 激活 > 悬停 > 常态**，某档没声明就继续往后找、最终取常态；`state: "disabled"` 下不接受点击与悬停。列表选中项写 `state: "active"`，配 `active` 底色与描边即可——选中项在指针下仍保留选中外观，不会被悬停态盖掉。按钮与图标钮自带底色与按下态，`interaction` 在它们身上只决定可用性（`state: "disabled"` 即不可点）。
+- `events` 里的 `click` 对任何节点生效（容器也行），可点击的节点鼠标呈指针；点击落在子控件上时由子控件优先处理。按钮与图标钮的按下由控件自身处理，不必再包一层。
+
+取色（`color`、`interaction` 各档的 `background` / `border`、`icon.color`、`progress.tone`）统一两种写法：
+
+- 主题 token：`text` / `textSecondary` / `textMuted` / `accent` / `accentSoft` / `success` / `successSoft` / `warning` / `warningSoft` / `danger` / `dangerSoft` / `surface` / `surfaceMuted` / `surfaceSunken` / `hover` / `border` / `borderStrong` / `transparent`；
+- 自定义色：`#rgb` / `#rgba` / `#rrggbb` / `#rrggbbaa`。
+
+token 随主题与界面字号设置联动，自定义色由插件自负对比度（写错色值或拼错 token 会被拒收，不会静默回退成默认色）。
+
+排版（`text` / `markdown`）：`family` 取 `"ui"`（跟随界面字体，缺省）或 `"mono"`（系统等宽族，数值、路径、日志按位列对齐）；`weight` 取 `normal` / `medium` / `semiBold`，系统字体族缺该字重时由字体库匹配最近一档；`text.wrap: false` 单行不换行（长标签不把行撑高；宿主不做截断，超长文本会溢出节点框，长文案请自行缩短）。
+
+其余约定：
+
 - `text` 的 `size` 是**字号倍率**（相对界面基准正文，缺省 1.0），写 `1.5` 即放大一半并跟随用户字号缩放；`align` 给水平对齐（`end` 右对齐气泡、`center` 居中标题），**声明了 `align` 才占满父容器宽度**，不给就按内容宽度收缩；
-- 宽度控制：`column` / `card` 的 `width` 取 `fill`（占满，缺省）或 `shrink`（按内容收缩），配 `maxWidth` 与 `align` 就能做居中的窄阅读列表或内容自适应的右对齐气泡；
-- 行内 `Fill` 子项按内容宽解析，要均分剩余宽度用行的 `fill`（`both` / `width`）；工具行左右分布用 `justify: "spaceBetween"`；
-- `grid` 两种列法：`columns` 固定列数，`minColumnWidth` 按可用宽度自动换列（面板变窄时不会把各列一起挤扁），同时给定时后者只作列数上限；都不给按单列；
-- `card` 的底色档 `tone`（`default` / `muted` / `accentSoft` / `transparent`）、圆角 `radius`、边框开关 `bordered` 可调；分组内轻分割用 `divider`；`stack` 把子节点叠起来（后提交的在上，可做「画布当底 + 控件叠其上」）；
-- `image` 的 `width` / `height`：数字 = 固定像素，`"fill"` = 占满父容器该轴，都不给按原图尺寸；`fit` 决定尺寸内的适配方式（缺省 `contain`——不裁切不拉伸、留空边；`cover` 铺满并裁掉溢出；`fill` 拉伸），要看原图长宽用 `ctx.vault_image_info(path)` 取；声明 `click` 事件即成为可点击图片（大图预览入口）；
+- 列的宽度收缩配 `size.maxWidth` 与 `align`，就能做居中的窄阅读列表或内容自适应的右对齐气泡；工具行的左右分布用 `justify: "spaceBetween"`；
+- `grid` 两种列法：`columns` 固定列数，`minColumnWidth` 按可用宽度自动换列（面板变窄时不会把各列一起挤扁），同时给定时后者只作列数上限；都不给按单列。`rowHeight` 取数字像素或 `"content"`（按内容高度）——缺省按列宽 1:1 定行高，「标签 + 单行控件」这类短内容会被拉成方格；
+- `card` 的底色档 `tone`（`default` / `muted` / `accentSoft` / `transparent`）、圆角 `radius`、边框开关 `bordered` 可调。**当前状态命中某个交互外观档时，底色与边框由该档提供**，卡片自身的 `tone` / `accent` / `bordered` / `radius` 让位（避免两层底色互相盖住）；当前状态没有对应档位时仍按卡片自身的档位绘制；分组内轻分割用 `divider`；`stack` 把子节点叠起来（后提交的在上，可做「画布当底 + 控件叠其上」）；
+- `image` 的 `width` / `height`：数字 = 固定像素，`"fill"` = 占满父容器该轴，`"shrink"` / 不给按原图尺寸；`fit` 决定尺寸内的适配方式（缺省 `contain`——不裁切不拉伸、留空边；`cover` 铺满并裁掉溢出；`fill` 拉伸），要看原图长宽用 `ctx.vault_image_info(path)` 取；声明 `click` 事件即成为可点击图片（大图预览入口）；
 - `iconButton` 的图标名默认取自宿主内置形状表（lucide 线性图标）；先用 `ctx.define_icon(name, path)` 登记自备的 24x24 描边路径，即可用自己的图形（`size` 档 `sm`/`md`/`lg`，`variant` 复用按钮档位，`hoverOnly` 悬停才显示）；同一批自备名也可用作贡献注册的 `icon`（面板标签头 / 设置 tab / 文档类型图标）；
+- `icon` 是纯装饰图标（空态、状态行、标题前的标记），不接受点击；需要可点的图标用 `iconButton`。`button` 可给 `icon` 做「图标 + 文字」的主按钮；
+- `progress` 的 `girth` 是轨道粗细（px，缺省 30 的粗条；细进度条写 `3` / `4`），`tone` 是完成段颜色（缺省主题强调色）；
 - `markdown` 的 `content` 用笔记同源解析器渲染，`size` 是整体字号倍率，`weight` / `color` 覆盖基础字重与文字色（标题与加粗片段恒为加粗，链接与代码块语义色不受影响）；正文里的链接可点击，宿主按形态默认打开（外链 / wiki / 仓库路径），节点声明 `linkClick` 时同时回发链接点击事件；
 - `menu` 的 `label` 与 `icon` 可并存（并存为紧凑的「图标 + 文字」触发钮），只给 `label` 才是全宽下拉钮；条目可标 `current`（宿主在条目前画勾）；
 - 可滚动容器（`list` / `scroll`）用 `ctx.scroll_to(surface, node, ScrollEdge::End)` 滚到主轴一端，无需插件自己维护滚动状态；`scroll` 的 `direction` 决定子项排布与滚动主轴（`horizontal` = 子项排成行并横向滚动），`height` 给定即收住自身高度（把横向图条嵌进纵向内容流），缺省占满父容器剩余高度；
@@ -209,6 +225,7 @@ async fn main() {
 
 节点在 `events` 里声明了哪几种，宿主才回发哪几种（`click` / `change` / `submit` / `linkClick` / `scroll`，`focus` / `blur` 为保留种类、当前无控件产出）。事件值按控件定型：
 
+- `click` 对任何节点生效（含容器）；点击落在子控件上时由子控件优先处理，父节点收不到该次点击；
 - 文本类 → 字符串；`submit` 只在单行输入回车时触发；
 - 数字输入 → 数值（不可解析为数值不发事件；清空 → `null`，与 0 区分）；
 - 勾选 → 布尔；下拉 → 选中项**下标**；菜单条目 → 条目的 `action` 字符串；
@@ -228,6 +245,25 @@ async fn main() {
 ### 5.5 面外层内边距
 
 面板、表格视图与设置页这三个面，宿主默认在根树外层加 12/10 的内边距；整页接管与插件窗口不加。注册贡献时给 `padding` 可改这个值：数字 = 四边等距（`0` 即贴边），也可按轴 `{ "horizontal": 16, "vertical": 8 }` 或按边 `{ "top": 4, "right": 0, "bottom": 4, "left": 0 }` 声明。需要贴边的内容也可放进接管面或窗口面；面板里不要自带同样的外边距（会叠加）。
+
+### 5.6 组合配方（先拼，再加控件）
+
+宿主只提供基元与节点级能力，常用形态直接组合出来。SDK 的 `presets` 模块已把这批组合做成函数，
+优先用它；需要自定义时按表里的组合关系拼：
+
+| 形态 | 组合 | SDK |
+| --- | --- | --- |
+| 可点列表项 | `row` + `interaction`（悬停 / 选中档）+ 调用方声明 `click` | `presets::list_item` |
+| 徽标 / chip | `row` + 收缩宽 + 交互外观取语义软底 + 圆角 + 小号 `text` | `presets::chip` |
+| 提示块 | `column` + 交互外观（软底 + 同色描边） | `presets::alert` |
+| tab 条 | 一排 `row` 条目，当前项 `state: "active"`，各带 `click` | `presets::tabs` |
+| 状态点 | 空 `row` + 8×8 尺寸 + 实色底 + 圆角 | `presets::status_dot` |
+| 表单行 | `row` + 定宽标签列 + 控件 `grow: 1` | `presets::field_row` |
+| 空态 | `column` + `icon` + 两行居中 `text` | `presets::empty_state` |
+| 左右分栏 | 行占满宽高，两栏 `grow` 写 35 / 65 | 手写 |
+| 状态行 | `row` + `status_dot` + `text`（数值用 `mono`） | 手写 |
+
+拼不出来的形态才值得回到宿主侧讨论——一个诉求一个控件会让协议与渲染分支同时膨胀。
 
 ## 6. 自绘画布
 

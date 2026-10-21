@@ -379,9 +379,29 @@ pub(crate) fn token_color(token: ColorToken) -> Color {
         ColorToken::TextSecondary => pal::TEXT_SECONDARY,
         ColorToken::TextMuted => pal::TEXT_MUTED,
         ColorToken::Accent => pal::ACCENT,
+        ColorToken::AccentSoft => pal::ACCENT_SOFT,
         ColorToken::Danger => pal::DANGER,
+        ColorToken::DangerSoft => pal::DANGER_SOFT,
         ColorToken::Success => pal::SUCCESS,
+        ColorToken::SuccessSoft => pal::SUCCESS_SOFT,
         ColorToken::Warning => pal::WARNING,
+        ColorToken::WarningSoft => pal::WARNING_SOFT,
+        ColorToken::Surface => pal::BG_TERTIARY,
+        ColorToken::SurfaceMuted => pal::BG_SECONDARY,
+        ColorToken::SurfaceSunken => pal::BG_SUNKEN,
+        ColorToken::Hover => pal::HOVER,
+        ColorToken::Border => pal::BORDER,
+        ColorToken::BorderStrong => pal::BORDER_STRONG,
+        ColorToken::Transparent => Color::TRANSPARENT,
+    }
+}
+
+/// 插件声明的取色：主题 token 走调色板，自定义色按 sRGB 直取。
+pub(crate) fn spec_color(spec: atelyx_core::plugin_runtime::ColorSpec) -> Color {
+    use atelyx_core::plugin_runtime::{ColorSpec, Rgba};
+    match spec {
+        ColorSpec::Token(name) => token_color(name),
+        ColorSpec::Custom(Rgba([r, g, b, a])) => Color::from_rgba(r, g, b, a),
     }
 }
 
@@ -392,11 +412,15 @@ fn color(value: CanvasColor) -> Color {
     }
 }
 
-/// 字重 → 字体（同 [`crate::plugin_view`] 的控件口径）；插件只有常规与强调两档。
+/// 字重 → 字体（同 [`crate::plugin_view`] 的控件口径）；系统族缺该字重时由字体库匹配最近一档。
 pub(crate) fn font_of(weight: TextWeight) -> iced::Font {
-    match weight {
-        TextWeight::Normal => crate::ui::regular(),
-        TextWeight::Medium | TextWeight::SemiBold => crate::ui::bold(),
+    iced::Font {
+        weight: match weight {
+            TextWeight::Normal => iced::font::Weight::Normal,
+            TextWeight::Medium => iced::font::Weight::Medium,
+            TextWeight::SemiBold => iced::font::Weight::Semibold,
+        },
+        ..crate::ui::regular()
     }
 }
 

@@ -174,6 +174,34 @@ pub fn variant_text_color(variant: Variant) -> Color {
     variant_style(variant).text
 }
 
+/// 前置图标的文字按钮：图标与文字同排居中，尺寸档与文字按钮一致。
+pub fn btn_with_icon(
+    label: impl Into<String>,
+    icon: Element<'static, Message>,
+    size: &TextSize,
+    variant: Variant,
+    on_press: Option<Message>,
+) -> button::Button<'static, Message> {
+    let content = row![
+        icon,
+        text(label.into()).size(size.font).font(bold()),
+    ]
+    .spacing(6)
+    .align_y(iced::alignment::Vertical::Center);
+    let widget = button(
+        container(content)
+            .height(Length::Fill)
+            .align_y(iced::alignment::Vertical::Center),
+    )
+    .padding(Padding::ZERO.horizontal(size.pad_x))
+    .height(Length::Fixed(size.h))
+    .style(style_for(variant, size.radius));
+    match on_press {
+        Some(m) => widget.on_press(m),
+        None => widget,
+    }
+}
+
 /// 图标按钮（正方形；`label` 同时是无障碍语义名与悬停提示来源）。
 pub fn icon_button(
     name: &str,

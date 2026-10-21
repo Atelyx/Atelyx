@@ -2,11 +2,19 @@
 //! 事件声明保持显式——构造器不替调用方挂事件，避免「按钮没反应」这类静默偏差。
 
 use crate::protocol::view::{
-    ButtonVariant, CanvasEventKind, EventKind, ImageSource, MenuItem, NodeBody, ViewNode,
+    BoxSize, ButtonVariant, CanvasEventKind, ColorSpec, EventKind, ImageSource, Interaction,
+    MenuItem, NodeBody, SizeSpec, ViewNode,
 };
 
 fn node(id: &str, body: NodeBody) -> ViewNode {
-    ViewNode { id: id.into(), body, children: Vec::new(), events: Vec::new() }
+    ViewNode {
+        id: id.into(),
+        body,
+        interaction: None,
+        grow: None,
+        children: Vec::new(),
+        events: Vec::new(),
+    }
 }
 
 /// 给节点补子节点与事件（构造器不自带事件，链式补齐）。
@@ -27,10 +35,50 @@ impl NodeExt for ViewNode {
     }
 }
 
+/// 节点级表述能力：交互外观、弹性权重与容器尺寸，可叠在任意节点上。
+pub trait NodeStyleExt {
+    fn with_interaction(self, interaction: Interaction) -> ViewNode;
+    fn with_grow(self, grow: u16) -> ViewNode;
+    /// 设置容器自身尺寸；只有 `column` / `row` / `card` 有此字段，其余节点忽略（尺寸由控件自身语义决定）。
+    fn with_size(self, size: BoxSize) -> ViewNode;
+}
+
+impl NodeStyleExt for ViewNode {
+    fn with_interaction(mut self, interaction: Interaction) -> ViewNode {
+        self.interaction = Some(interaction);
+        self
+    }
+
+    fn with_grow(mut self, grow: u16) -> ViewNode {
+        self.grow = Some(grow);
+        self
+    }
+
+    fn with_size(mut self, size: BoxSize) -> ViewNode {
+        match &mut self.body {
+            NodeBody::Row { size: slot, .. }
+            | NodeBody::Column { size: slot, .. }
+            | NodeBody::Card { size: slot, .. } => *slot = Some(size),
+            _ => {}
+        }
+        self
+    }
+}
+
+/// 主题 token 取色便捷。
+pub fn token(color: crate::protocol::view::ColorToken) -> ColorSpec {
+    ColorSpec::Token(color)
+}
+
+/// 固定像素尺寸便捷。
+pub fn px(value: f32) -> SizeSpec {
+    SizeSpec::Fixed(value)
+}
+
 pub fn row(id: &str, children: Vec<ViewNode>) -> ViewNode {
     node(
         id,
-        NodeBody::Row { gap: None, padding: None, justify: None, cross_align: None, fill: None },
+        NodeBody::Row { gap: None, padding: None, justify: None, cross_align: None, size: None },
     )
     .with_children(children)
 }
@@ -38,14 +86,7 @@ pub fn row(id: &str, children: Vec<ViewNode>) -> ViewNode {
 pub fn column(id: &str, children: Vec<ViewNode>) -> ViewNode {
     node(
         id,
-        NodeBody::Column {
-            gap: None,
-            padding: None,
-            cross_align: None,
-            width: None,
-            max_width: None,
-            align: None,
-        },
+        NodeBody::Column { gap: None, padding: None, cross_align: None, align: None, size: None },
     )
     .with_children(children)
 }
@@ -61,9 +102,8 @@ pub fn card(id: &str, children: Vec<ViewNode>) -> ViewNode {
             tone: None,
             radius: None,
             bordered: None,
-            width: None,
-            max_width: None,
             align: None,
+            size: None,
         },
     )
     .with_children(children)
@@ -85,14 +125,30 @@ pub fn scroll(id: &str, children: Vec<ViewNode>) -> ViewNode {
 
 /// 固定列数网格。
 pub fn grid(id: &str, columns: u32, children: Vec<ViewNode>) -> ViewNode {
-    node(id, NodeBody::Grid { columns: Some(columns), min_column_width: None, gap: None })
-        .with_children(children)
+    node(
+        id,
+        NodeBody::Grid {
+            columns: Some(columns),
+            min_column_width: None,
+            gap: None,
+            row_height: None,
+        },
+    )
+    .with_children(children)
 }
 
 /// 按可用宽度换列的网格：每列不窄于 `min_column_width`，列数随宽度自适应。
 pub fn grid_min(id: &str, min_column_width: f32, children: Vec<ViewNode>) -> ViewNode {
-    node(id, NodeBody::Grid { columns: None, min_column_width: Some(min_column_width), gap: None })
-        .with_children(children)
+    node(
+        id,
+        NodeBody::Grid {
+            columns: None,
+            min_column_width: Some(min_column_width),
+            gap: None,
+            row_height: None,
+        },
+    )
+    .with_children(children)
 }
 
 pub fn list(id: &str, children: Vec<ViewNode>) -> ViewNode {
@@ -102,7 +158,15 @@ pub fn list(id: &str, children: Vec<ViewNode>) -> ViewNode {
 pub fn text(id: &str, content: impl Into<String>) -> ViewNode {
     node(
         id,
-        NodeBody::Text { content: content.into(), size: None, weight: None, color: None, align: None },
+        NodeBody::Text {
+            content: content.into(),
+            size: None,
+            weight: None,
+            color: None,
+            align: None,
+            family: None,
+            wrap: None,
+        },
     )
 }
 
@@ -110,7 +174,13 @@ pub fn text(id: &str, content: impl Into<String>) -> ViewNode {
 pub fn markdown(id: &str, content: impl Into<String>) -> ViewNode {
     node(
         id,
-        NodeBody::Markdown { content: content.into(), size: None, weight: None, color: None },
+        NodeBody::Markdown {
+            content: content.into(),
+            size: None,
+            weight: None,
+            color: None,
+            family: None,
+        },
     )
 }
 
@@ -145,7 +215,13 @@ pub fn checkbox(id: &str, checked: bool) -> ViewNode {
 pub fn button(id: &str, label: impl Into<String>, variant: ButtonVariant) -> ViewNode {
     node(
         id,
-        NodeBody::Button { label: label.into(), variant: Some(variant), enabled: None, size: None },
+        NodeBody::Button {
+            label: label.into(),
+            icon: None,
+            variant: Some(variant),
+            enabled: None,
+            size: None,
+        },
     )
 }
 
@@ -168,7 +244,12 @@ pub fn image(id: &str, source: ImageSource) -> ViewNode {
 }
 
 pub fn progress(id: &str, value: f64) -> ViewNode {
-    node(id, NodeBody::Progress { value })
+    node(id, NodeBody::Progress { value, girth: None, tone: None })
+}
+
+/// 纯装饰图标（不接受点击；可点的图标用 [`icon_button`]）。
+pub fn icon(id: &str, name: &str) -> ViewNode {
+    node(id, NodeBody::Icon { name: name.into(), size: None, color: None })
 }
 
 pub fn menu(id: &str, label: &str, items: Vec<MenuItem>) -> ViewNode {

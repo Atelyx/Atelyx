@@ -1268,6 +1268,8 @@ mod tests {
     fn text_input(id: &str, value: &str) -> ViewNode {
         ViewNode {
             id: id.into(),
+            interaction: None,
+            grow: None,
             body: NodeBody::TextInput {
                 value: value.into(),
                 placeholder: None,
@@ -1387,7 +1389,9 @@ mod tests {
     fn find_node_locates_nested_children() {
         let tree = ViewNode {
             id: "root".into(),
-            body: NodeBody::Column { gap: None, padding: None, cross_align: None, width: None, max_width: None, align: None },
+            interaction: None,
+            grow: None,
+            body: NodeBody::Column { gap: None, padding: None, cross_align: None, align: None, size: None },
             children: vec![text_input("query", "x")],
             events: Vec::new(),
         };
@@ -1399,11 +1403,15 @@ mod tests {
     fn multiline_collection_only_takes_multiline_inputs() {
         let tree = ViewNode {
             id: "root".into(),
-            body: NodeBody::Column { gap: None, padding: None, cross_align: None, width: None, max_width: None, align: None },
+            interaction: None,
+            grow: None,
+            body: NodeBody::Column { gap: None, padding: None, cross_align: None, align: None, size: None },
             children: vec![
                 text_input("single", "s"),
                 ViewNode {
                     id: "multi".into(),
+                    interaction: None,
+                    grow: None,
                     body: NodeBody::TextInput {
                         value: "m".into(),
                         placeholder: None,

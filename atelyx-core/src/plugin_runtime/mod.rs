@@ -52,10 +52,11 @@ pub use atelyx_plugin_protocol::method::{
     WindowOpenParams, WindowUpdateParams,
 };
 pub use atelyx_plugin_protocol::view::{
-    Align, Axis, ButtonVariant, CanvasEventKind, CanvasPointer, CardTone, ColorToken,
-    ControlSize, Dimension, EventKind, EventValue, Fill, ImageFit, ImageSource,
-    Justify, LinkForm as ProtocolLinkForm, MenuItem, MouseButton, NodeBody, NodeWidth, PaddingSpec,
-    TextWeight, ViewEvent, ViewNode,
+    Align, AxesPadding, Axis, BoxSize, ButtonVariant, CanvasEventKind, CanvasPointer, CardTone,
+    ColorSpec,
+    ColorToken, ControlSize, EdgesPadding, EventKind, EventValue, ImageFit, ImageSource, Interaction,
+    InteractionState, Justify, LinkForm as ProtocolLinkForm, MenuItem, MouseButton, NodeBody,
+    PaddingSpec, RowHeight, Rgba, SizeSpec, Surface, TextFamily, TextWeight, ViewEvent, ViewNode,
 };
 
 /// 插件运行状态。

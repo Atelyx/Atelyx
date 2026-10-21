@@ -55,8 +55,10 @@
     "gap": 8.0,
     "padding": 12.0,
     "crossAlign": "start",
-    "maxWidth": 640.0,
     "align": "center",
+    "size": {
+      "maxWidth": 640.0
+    },
     "children": [
       {
         "id": "title",
@@ -65,7 +67,16 @@
         "size": 1.25,
         "weight": "semiBold",
         "color": "text",
-        "align": "center"
+        "align": "center",
+        "family": "ui"
+      },
+      {
+        "id": "speed",
+        "kind": "text",
+        "content": "1.20 GB/s",
+        "color": "#e0a94e",
+        "family": "mono",
+        "wrap": false
       },
       {
         "id": "guide",
@@ -74,14 +85,19 @@
         "size": 0.75,
         "weight": "medium",
         "color": "textSecondary",
-        "events": ["linkClick"]
+        "family": "mono",
+        "events": [
+          "linkClick"
+        ]
       },
       {
         "id": "query",
         "kind": "textInput",
         "value": "示例文本",
         "placeholder": "输入…",
-        "events": ["submit"]
+        "events": [
+          "submit"
+        ]
       },
       {
         "id": "size",
@@ -90,21 +106,30 @@
         "max": 100.0,
         "step": 1.0,
         "readOnly": true,
-        "events": ["change"]
+        "events": [
+          "change"
+        ]
       },
       {
         "id": "engine",
         "kind": "dropdown",
-        "options": ["a", "b"],
+        "options": [
+          "a",
+          "b"
+        ],
         "selected": 0,
-        "events": ["change"]
+        "events": [
+          "change"
+        ]
       },
       {
         "id": "flag",
         "kind": "checkbox",
         "checked": true,
         "label": "自动启动",
-        "events": ["change"]
+        "events": [
+          "change"
+        ]
       },
       {
         "id": "tools",
@@ -112,7 +137,9 @@
         "gap": 6.0,
         "justify": "spaceBetween",
         "crossAlign": "center",
-        "fill": "width",
+        "size": {
+          "width": "fill"
+        },
         "children": [
           {
             "id": "shot",
@@ -122,20 +149,114 @@
             "size": "md",
             "variant": "ghost",
             "hoverOnly": true,
-            "events": ["click"]
+            "events": [
+              "click"
+            ]
           },
           {
             "id": "go",
             "kind": "button",
             "label": "开始",
+            "icon": "refresh",
             "variant": "primary",
             "size": "lg",
-            "events": ["click"]
+            "events": [
+              "click"
+            ]
           },
           {
             "id": "load",
             "kind": "progress",
-            "value": 0.4
+            "value": 0.4,
+            "girth": 4.0,
+            "tone": "accent"
+          }
+        ]
+      },
+      {
+        "id": "badge",
+        "kind": "row",
+        "gap": 6.0,
+        "crossAlign": "center",
+        "size": {
+          "width": "shrink",
+          "height": 24.0,
+          "minWidth": 64.0,
+          "maxWidth": 240.0
+        },
+        "interaction": {
+          "state": "active",
+          "normal": {
+            "background": "surface",
+            "border": "border",
+            "radius": 6.0
+          },
+          "hover": {
+            "background": "hover"
+          },
+          "active": {
+            "background": "accentSoft",
+            "border": "accent"
+          }
+        },
+        "events": [
+          "click"
+        ],
+        "children": [
+          {
+            "id": "badgeIcon",
+            "kind": "icon",
+            "name": "circle-check",
+            "size": 12.0,
+            "color": "success"
+          },
+          {
+            "id": "badgeText",
+            "kind": "text",
+            "content": "就绪",
+            "size": 0.75
+          }
+        ]
+      },
+      {
+        "id": "panes",
+        "kind": "row",
+        "gap": 8.0,
+        "size": {
+          "width": "fill",
+          "height": "fill",
+          "minHeight": 120.0
+        },
+        "children": [
+          {
+            "id": "leftPane",
+            "grow": 35,
+            "kind": "column",
+            "size": {
+              "width": "fill"
+            },
+            "children": [
+              {
+                "id": "leftHint",
+                "kind": "text",
+                "content": "列表"
+              }
+            ]
+          },
+          {
+            "id": "rightPane",
+            "grow": 65,
+            "kind": "column",
+            "size": {
+              "width": "fill"
+            },
+            "children": [
+              {
+                "id": "rightHint",
+                "kind": "text",
+                "content": "详情"
+              }
+            ]
           }
         ]
       },
@@ -145,15 +266,21 @@
         "columns": 2,
         "minColumnWidth": 160.0,
         "gap": 6.0,
+        "rowHeight": "content",
         "children": [
           {
             "id": "last",
             "kind": "image",
-            "source": { "type": "private", "path": "shots/last.png" },
+            "source": {
+              "type": "private",
+              "path": "shots/last.png"
+            },
             "fit": "contain",
             "width": "fill",
             "height": 90.0,
-            "events": ["click"]
+            "events": [
+              "click"
+            ]
           },
           {
             "id": "more",
@@ -161,10 +288,20 @@
             "label": "更多",
             "icon": "ellipsis",
             "items": [
-              { "label": "重载", "action": "reload", "current": true },
-              { "label": "清除", "action": "purge", "danger": true }
+              {
+                "label": "重载",
+                "action": "reload",
+                "current": true
+              },
+              {
+                "label": "清除",
+                "action": "purge",
+                "danger": true
+              }
             ],
-            "events": ["change"]
+            "events": [
+              "change"
+            ]
           }
         ]
       },
@@ -174,15 +311,26 @@
         "direction": "vertical",
         "gap": 4.0,
         "height": 240.0,
-        "events": ["scroll"],
+        "events": [
+          "scroll"
+        ],
         "children": [
           {
             "id": "log",
             "kind": "list",
             "gap": 2.0,
             "children": [
-              { "id": "log1", "kind": "text", "content": "已加载" },
-              { "id": "log2", "kind": "text", "content": "就绪", "color": "textMuted" }
+              {
+                "id": "log1",
+                "kind": "text",
+                "content": "已加载"
+              },
+              {
+                "id": "log2",
+                "kind": "text",
+                "content": "就绪",
+                "color": "textMuted"
+              }
             ]
           }
         ]
@@ -194,18 +342,32 @@
         "tone": "accentSoft",
         "radius": 12.0,
         "bordered": false,
-        "width": "shrink",
         "align": "end",
+        "size": {
+          "width": "shrink"
+        },
         "children": [
-          { "id": "infoText", "kind": "text", "content": "运行中" }
+          {
+            "id": "infoText",
+            "kind": "text",
+            "content": "运行中"
+          }
         ]
       },
       {
         "id": "overlay",
         "kind": "stack",
         "children": [
-          { "id": "overlayBoard", "kind": "canvas", "height": 120.0 },
-          { "id": "overlayHint", "kind": "text", "content": "浮层" }
+          {
+            "id": "overlayBoard",
+            "kind": "canvas",
+            "height": 120.0
+          },
+          {
+            "id": "overlayHint",
+            "kind": "text",
+            "content": "浮层"
+          }
         ]
       },
       {
@@ -215,7 +377,14 @@
       {
         "id": "board",
         "kind": "canvas",
-        "mouseEvents": ["pointerDown", "pointerMove", "pointerUp", "pointerLeave", "wheel", "doubleClick"],
+        "mouseEvents": [
+          "pointerDown",
+          "pointerMove",
+          "pointerUp",
+          "pointerLeave",
+          "wheel",
+          "doubleClick"
+        ],
         "fill": true
       },
       {

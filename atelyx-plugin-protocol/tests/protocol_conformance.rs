@@ -79,7 +79,7 @@ fn view_tree_shape_is_frozen() {
         serde_json::from_value(snapshot["viewTree"].clone()).expect("快照 viewTree 应可反序列化");
     tree.validate().unwrap_or_else(|e| panic!("快照 viewTree 应通过校验：{e}"));
 
-    // 语料规模兜底 + 控件集 v1 覆盖：容器类与事件绑定都能从快照里数出来
+    // 语料规模兜底 + 控件集覆盖：容器类与事件绑定都能从快照里数出来
     fn walk(node: &ViewNode, kinds: &mut std::collections::HashSet<&'static str>) {
         kinds.insert(node.body.kind_name());
         for child in &node.children {
@@ -90,10 +90,10 @@ fn view_tree_shape_is_frozen() {
     walk(&tree, &mut kinds);
     for expected in [
         "row", "column", "card", "stack", "scroll", "grid", "list", "text", "markdown", "textInput",
-        "numberInput", "dropdown", "checkbox", "button", "iconButton", "image", "progress", "menu",
-        "canvas", "divider", "dragRegion",
+        "numberInput", "dropdown", "checkbox", "button", "iconButton", "icon", "image", "progress",
+        "menu", "canvas", "divider", "dragRegion",
     ] {
-        assert!(kinds.contains(expected), "控件集 v1 缺快照覆盖：{expected}");
+        assert!(kinds.contains(expected), "控件集缺快照覆盖：{expected}");
     }
     fn find<'a>(node: &'a ViewNode, id: &str) -> Option<&'a ViewNode> {
         if node.id == id {

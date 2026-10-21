@@ -222,6 +222,13 @@ pub struct ViewNode {
     pub id: String,
     #[serde(flatten)]
     pub body: NodeBody,
+    /// 交互外观（见 [`Interaction`]）；缺省该节点只按自身控件渲染，不参与悬停 / 激活着色。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interaction: Option<Interaction>,
+    /// 在父级行 / 列 / 网格里按权重分剩余空间（缺省不参与分配，按控件自身尺寸）。
+    /// 与兄弟的权重之比即分得空间之比（35 / 65 即写 35 与 65）；权重须大于 0。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grow: Option<u16>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<ViewNode>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -238,42 +245,43 @@ pub enum NodeBody {
     Row {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         gap: Option<f32>,
+        /// 内边距：数字 = 四边等距，也可按轴 / 按边声明。
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        padding: Option<f32>,
+        padding: Option<PaddingSpec>,
         /// 主轴分布：`spaceBetween` 在行占满宽度时把子项推向两端（工具行：左信息 + 右操作）。
-        /// 缺省 `start`（子项紧贴左缘）。fill 行内 justify 仍生效。
+        /// 缺省 `start`（子项紧贴左缘）；声明 `size.width` 为 `fill` 时仍生效。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         justify: Option<Justify>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cross_align: Option<Align>,
-        /// 撑满语义：`both` = 行占满父容器剩余宽高、Fill 子项均分剩余宽度（如左右分栏）；
-        /// `width` = 仅占满宽度（高度仍按内容，用于工具行左右分布）。
-        /// 缺省行宽收缩、子项 Fill 按各自内容宽解析。
+        /// 自身尺寸：缺省按内容收缩（有 `grow` 子项或声明 `justify` 时按占满宽度布局）；`width: fill` 即占满父容器。
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        fill: Option<Fill>,
+        size: Option<BoxSize>,
     },
     Column {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         gap: Option<f32>,
+        /// 内边距：数字 = 四边等距，也可按轴 / 按边声明。
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        padding: Option<f32>,
+        padding: Option<PaddingSpec>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cross_align: Option<Align>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        width: Option<NodeWidth>,
-        /// 最大宽度（px）：配合 `align` 得到居中的窄阅读列，配合 `shrink` 形成内容自适应气泡。
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        max_width: Option<f32>,
         /// 宽度不足父容器时的水平摆放（`center` 居中、`end` 右对齐）；缺省靠左。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         align: Option<Align>,
+        /// 自身尺寸：缺省宽度占满父容器、高度按内容。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size: Option<BoxSize>,
     },
     /// 卡片容器：主题化背景 + 边框 + 圆角的分组盒（列表条目、信息分组）。
+    /// 声明 `interaction` 且当前状态命中某个外观档时，底色与边框由该档提供，本控件自身不再绘制（单一底色来源）；
+    /// 当前状态没有对应档位时仍按本控件的 `tone` / `accent` / `bordered` / `radius` 绘制。
     Card {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         gap: Option<f32>,
+        /// 内边距：数字 = 四边等距，也可按轴 / 按边声明。
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        padding: Option<f32>,
+        padding: Option<PaddingSpec>,
         /// 强调态（列表选中项）：accent 边框。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         accent: Option<bool>,
@@ -286,15 +294,12 @@ pub enum NodeBody {
         /// 是否画边框；缺省 true。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         bordered: Option<bool>,
-        /// 缺省 `fill`（同 `Column`）。
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        width: Option<NodeWidth>,
-        /// 最大宽度（px）：配合 `align` 得到居中的窄卡片。
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        max_width: Option<f32>,
         /// 宽度不足父容器时的水平摆放（`center` 居中、`end` 右对齐）；缺省靠左。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         align: Option<Align>,
+        /// 自身尺寸：缺省宽度占满父容器、高度按内容。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size: Option<BoxSize>,
     },
     /// 叠层：子节点按提交顺序重叠（后提交的在上），同尺寸对齐于左上角。
     /// 用于「自绘画布当底 + 宿主控件叠其上」或徽标叠图。
@@ -311,7 +316,7 @@ pub enum NodeBody {
         height: Option<f32>,
     },
     /// 网格：`columns` 固定列数；`min_column_width` 按可用宽度换列（`columns` 同时给定时作列数上限）。
-    /// 二者都缺省按单列渲染。
+    /// 二者都缺省按单列渲染。`row_height` 缺省按列宽 1:1 定行高。
     Grid {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         columns: Option<u32>,
@@ -319,6 +324,9 @@ pub enum NodeBody {
         min_column_width: Option<f32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         gap: Option<f32>,
+        /// 行高：数字 = 固定逻辑像素，`content` = 按单元格内容高度（短内容行不被拉成方格）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        row_height: Option<RowHeight>,
     },
     /// 可滚动列表：语义等同纵向 scroll + column（宿主对子项按键复用控件态）。
     /// 位置可用 `view.scrollTo` 指令控制；声明 `scroll` 事件即上报滚动位置。
@@ -334,10 +342,16 @@ pub enum NodeBody {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         weight: Option<TextWeight>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        color: Option<ColorToken>,
+        color: Option<ColorSpec>,
         /// 水平对齐：声明后节点占满父容器并按该值摆放入文本；缺省按内容宽度收缩。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         align: Option<Align>,
+        /// 字体族：`ui` 跟随界面字体（缺省），`mono` 用系统等宽族（数值 / 路径 / 日志按位列对齐）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        family: Option<TextFamily>,
+        /// 是否允许按词换行；缺省 true。`false` 即单行（长标签不把行撑高）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        wrap: Option<bool>,
     },
     /// 只读 Markdown 正文：宿主按笔记同源解析器渲染（标题 / 列表 / 引用 / 代码块 / 表格 / 链接）。
     /// 块级图片与笔记同源载入：http(s) 走下载，其余按仓库相对路径。
@@ -354,7 +368,10 @@ pub enum NodeBody {
         weight: Option<TextWeight>,
         /// 基础文字色（链接 / 代码块等语义色不受影响）。
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        color: Option<ColorToken>,
+        color: Option<ColorSpec>,
+        /// 字体族：`ui` 跟随界面字体（缺省），`mono` 用系统等宽族。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        family: Option<TextFamily>,
     },
     TextInput {
         #[serde(default)]
@@ -407,6 +424,9 @@ pub enum NodeBody {
     },
     Button {
         label: String,
+        /// 前置图标（内置形状名或 `view.defineIcon` 登记的自备名）；缺省只有文字。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        icon: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         variant: Option<ButtonVariant>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -432,8 +452,19 @@ pub enum NodeBody {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         hover_only: Option<bool>,
     },
-    /// 图片：`width` / `height` 给定时按该尺寸渲染（数字 = px，`"fill"` = 撑满父容器该轴；
-    /// 缺省按原图尺寸）；`fit` 决定尺寸内的适配方式，缺省 `contain`（不裁切不拉伸）。
+    /// 纯装饰图标（不接受点击与悬停；空态、状态行、标题前的语义标记）。
+    /// 需要可点的图标用 `iconButton`。
+    Icon {
+        /// 名字解析与 `iconButton` 同口径。
+        name: String,
+        /// 图标边长（px，缺省 16）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        color: Option<ColorSpec>,
+    },
+    /// 图片：`width` / `height` 给定时按该尺寸渲染（数字 = px，`"fill"` = 撑满父容器该轴，
+    /// `"shrink"` = 按原图；缺省按原图尺寸）；`fit` 决定尺寸内的适配方式，缺省 `contain`（不裁切不拉伸）。
     /// 节点声明 `click` 事件即成为可点击图片（大图预览入口）。
     Image {
         source: ImageSource,
@@ -441,13 +472,19 @@ pub enum NodeBody {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         fit: Option<ImageFit>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        width: Option<Dimension>,
+        width: Option<SizeSpec>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        height: Option<Dimension>,
+        height: Option<SizeSpec>,
     },
+    /// 进度条：0.0 ~ 1.0（越界值宿主钳制）。
     Progress {
-        /// 0.0 ~ 1.0；越界值宿主钳制。
         value: f64,
+        /// 轨道粗细（px，缺省 30 = 系统标准粗条）；细进度条写 3 / 4。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        girth: Option<f32>,
+        /// 完成段颜色（缺省主题强调色）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tone: Option<ColorSpec>,
     },
     /// 菜单：`label` 与 `icon` 可并存（并存时渲染为紧凑的「图标 + 文字」触发钮，非全宽下拉钮）；
     /// 只给 `icon` 为纯图标触发钮，只给 `label` 为全宽下拉钮。二者都缺省时回落到 `…` 触发钮。
@@ -460,7 +497,7 @@ pub enum NodeBody {
     },
     /// 自绘画布：宿主保留一块区域执行 `canvas.submit` 提交的指令清单（见 [`crate::canvas`]）。
     /// 指针事件按 `mouseEvents` 声明子集回发，未声明不上行；命中由插件按指令几何自算。
-    /// `height` 给定时取该高度；`fill` = 占满父容器剩余空间（放在 Fill 容器里才有可分配空间）。
+    /// `height` 给定时取该高度；`fill` = 占满父容器剩余空间（父容器可分配空间才有实际意义）。
     /// 画布尺寸变化时宿主回发 `host:canvas.resized`（插件据此对齐绘制坐标与滚动范围）。
     Canvas {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -503,22 +540,131 @@ pub enum Justify {
 
 ```rust
 // atelyx-plugin-protocol/src/view.rs
-/// 行的撑满语义（[`NodeBody::Row`] 的 `fill`）。
 #[serde(rename_all = "camelCase")]
-pub enum Fill {
-    /// 宽高都撑满（分栏行：Fill 子项均分剩余宽度、行占满剩余高度）。
-    Both,
-    /// 仅宽度撑满（高度仍按内容：工具行的左右分布）。
-    Width,
+pub enum Axis {
+    Horizontal,
+    Vertical,
 }
 ```
 
 ```rust
 // atelyx-plugin-protocol/src/view.rs
+/// 容器自身尺寸与上下限（`Row` / `Column` / `Card` 的 `size`）。
+/// 上下限只对固定或收缩尺寸的子项生效：流体（`fill` 或父级按 `grow` 分配）子项的空间由父容器分配，
+/// 此时上下限不参与布局，需要约束空间用父级的 `grow` 权重。最小尺寸抬的是节点外框，内容仍按自身
+/// 尺寸贴左上摆放（要让内容一起撑开，把内容声明为 `fill`）。
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BoxSize {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<SizeSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<SizeSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_width: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_width: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_height: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_height: Option<f32>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/view.rs
+/// 单轴尺寸：`fill` 占满父容器该轴、`shrink` 按内容收缩、数字为固定逻辑像素。
+pub enum SizeSpec {
+    Fill,
+    Shrink,
+    Fixed(f32),
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/view.rs
+/// 网格行高（[`NodeBody::Grid`] 的 `row_height`）：数字 = 固定逻辑像素，`content` = 按内容。
+pub enum RowHeight {
+    Fixed(f32),
+    Content,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/view.rs
+/// 交互外观（节点的 `interaction`）：决定该节点的命中与状态着色。
+/// 交互态按「禁用 > 激活 > 悬停 > 常态」取第一个已声明且命中的档位；该档未声明时继续往后找，最终落到常态（连常态也没有则不绘制外观）。
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Interaction {
+    /// 当前状态：缺省 `normal`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<InteractionState>,
+    /// 常态外观。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub normal: Option<Surface>,
+    /// 悬停外观（鼠标进入节点矩形）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hover: Option<Surface>,
+    /// 激活外观（列表选中项、当前 tab）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active: Option<Surface>,
+    /// 禁用外观（不接受点击，也不响应悬停）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disabled: Option<Surface>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/view.rs
+/// 交互状态。
 #[serde(rename_all = "camelCase")]
-pub enum Axis {
-    Horizontal,
-    Vertical,
+pub enum InteractionState {
+    Normal,
+    Active,
+    /// 不接受点击与悬停，可选声明 `disabled` 外观。
+    Disabled,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/view.rs
+/// 一层外观：底色 + 边框色 + 圆角。三者都可省，只声明的项生效。
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Surface {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<ColorSpec>,
+    /// 边框色（1px 描边）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub border: Option<ColorSpec>,
+    /// 圆角半径（px）；缺省用宿主小圆角。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radius: Option<f32>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/view.rs
+/// 取色：引用宿主主题 token，或给 `#rgb` / `#rgba` / `#rrggbb` / `#rrggbbaa` 自定义色。
+/// 主题 token 随主题与字号设置联动；自定义色由插件自负对比度。未知 token 与非法色值都拒收。
+#[serde(untagged)]
+pub enum ColorSpec {
+    Token(ColorToken),
+    Custom(Rgba),
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/view.rs
+/// 自定义色（sRGB，各通道 0.0–1.0）。
+pub struct Rgba(pub [f32; 4]);
+```
+
+```rust
+// atelyx-plugin-protocol/src/view.rs
+/// 字体族：界面字体（跟随用户设置）或系统等宽族。
+#[serde(rename_all = "camelCase")]
+pub enum TextFamily {
+    Ui,
+    Mono,
 }
 ```
 
@@ -534,16 +680,34 @@ pub enum TextWeight {
 
 ```rust
 // atelyx-plugin-protocol/src/view.rs
-/// 颜色只允许引用宿主主题 token（插件不得自带色值，主题一致性由此保证）。
+/// 主题 token：取色引用宿主调色板，主题与字号设置变化时自动跟随。
+/// `accentSoft` / `warningSoft` / `dangerSoft` / `successSoft` 为对应语义色的低饱和底（提示块、徽标），
+/// `surface*` / `hover` / `border*` 为层次底色与边界（分组盒、分隔、悬停反馈）。
 #[serde(rename_all = "camelCase")]
 pub enum ColorToken {
     Text,
     TextSecondary,
     TextMuted,
     Accent,
+    AccentSoft,
     Danger,
+    DangerSoft,
     Success,
+    SuccessSoft,
     Warning,
+    WarningSoft,
+    /// 内嵌表面（比面板底色深一档：输入框、内嵌卡片）。
+    Surface,
+    /// 次级表面（面板头 / 工具条底）。
+    SurfaceMuted,
+    /// 最深表面（内陷区域）。
+    SurfaceSunken,
+    /// 悬停反馈底色。
+    Hover,
+    Border,
+    BorderStrong,
+    /// 无底色 / 无边框。
+    Transparent,
 }
 ```
 
@@ -620,27 +784,6 @@ pub struct MenuItem {
     /// 当前项标记（宿主在条目前画勾）：用于「历史会话列表」这类单选菜单。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current: Option<bool>,
-}
-```
-
-```rust
-// atelyx-plugin-protocol/src/view.rs
-/// 容器宽度语义（[`NodeBody::Column`] / [`NodeBody::Card`] 的 `width`）。
-#[serde(rename_all = "camelCase")]
-pub enum NodeWidth {
-    /// 占满父容器可用宽度（缺省）。
-    Fill,
-    /// 按内容宽度收缩（右对齐气泡、贴内容边界的卡片）。
-    Shrink,
-}
-```
-
-```rust
-// atelyx-plugin-protocol/src/view.rs
-/// 图片单轴尺寸：数字 = 固定像素；`"fill"` = 占满父容器该轴。
-pub enum Dimension {
-    Fixed(f32),
-    Fill,
 }
 ```
 

@@ -1,19 +1,22 @@
-//! 插件面板渲染：把 [`ViewNode`] 树解释成 iced 控件（布局容器 / 文本 / markdown / 输入 / 按钮 /
-//! 列表 / 图片 / 进度条 / 菜单），按主题 token 取色、按节点声明绑定事件。
-//!
-//! 状态与接线（视图 kind 编解码、贡献查询、输入草稿、面树投影、事件回发）在
-//! [`crate::plugin_actions`]；本模块只读 `App` 里的投影缓存，不持运行时锁。
+//! 插件面板渲染：把 [`ViewNode`] 树解释成 iced 控件，按节点声明绑定事件与交互外观。
+//! 交互外观、尺寸上下限与点击命中由 [`NodeBox`] 统一收口：布局交给子项，只在子项矩形内绘制并约束尺寸。
+//! 状态与接线在 [`crate::plugin_actions`]；本模块只读 `App` 里的投影缓存，不持运行时锁。
 
+use iced::advanced::layout::{Layout, Limits, Node};
+use iced::advanced::widget::tree;
+use iced::advanced::{overlay, renderer, Clipboard, Shell, Widget};
 use iced::alignment::{Horizontal, Vertical};
+use iced::mouse;
 use iced::widget::{
     column, container, grid, image, keyed_column, mouse_area, progress_bar, responsive, row, space,
     text_editor, text_input, Stack,
 };
-use iced::{Color, Element, Length, Padding, Theme};
+use iced::{Color, Element, Length, Padding, Rectangle, Renderer, Size, Theme, Vector};
 
 use atelyx_core::plugin_runtime::{
-    Align, Axis, ButtonVariant, CardTone, ColorToken, ControlSize, Dimension, EventKind, EventValue,
-    Fill, ImageFit, ImageSource, Justify, NodeBody, NodeWidth, TextWeight, ViewEvent, ViewNode,
+    Align, Axis, BoxSize, ButtonVariant, CardTone, ColorSpec, ControlSize, EventKind, EventValue,
+    ImageFit, ImageSource, Justify, NodeBody, PaddingSpec, RowHeight, SizeSpec, Surface, TextFamily,
+    TextWeight, ViewEvent, ViewNode,
 };
 
 use crate::plugin_actions::{contribution, declares, image_key, input_display, node_value_text, PopupEntry};
@@ -32,6 +35,10 @@ const INPUT_PAD_Y: f32 = 6.0;
 const EDITOR_H: f32 = 96.0;
 /// 画布缺省高度（未给 `height` 也未声明撑满时）。
 const CANVAS_DEFAULT_H: f32 = 160.0;
+/// 图标缺省边长。
+const ICON_DEFAULT_PX: f32 = 16.0;
+/// 进度条缺省粗细（与系统标准粗条一致）。
+const PROGRESS_DEFAULT_GIRTH: f32 = 30.0;
 
 /// 面身份与所在窗口（弹层与图标钮悬停提示都要窗口 id）。
 #[derive(Clone)]
@@ -126,10 +133,7 @@ pub(crate) fn surface_view<'a>(
     };
     let key = (ctx.plugin_id.clone(), ctx.surface_id.clone());
     let outer_pad = match contribution.padding {
-        Some(pad) => {
-            let [top, right, bottom, left] = pad.edges();
-            Padding { top, right, bottom, left }
-        }
+        Some(pad) => padding_of(pad),
         None => Padding::ZERO.horizontal(12.0).vertical(10.0),
     };
     match app.plugin_trees.get(&key) {
@@ -155,7 +159,7 @@ fn placeholder<'a>(icon_name: &str, title: &str, desc: &str) -> Element<'a, Mess
 }
 
 /// 根节点渲染：容器按面区域撑满高度（Fill 子项——画布 / 列表——才有可分配空间；
-/// Shrink 根列内的 Fill 子项会塌缩成 0 高）。嵌套容器保持收缩语义。
+/// Shrink 根列内的 Fill 子项会塌缩成 0 高）。嵌套容器保持各自声明的尺寸语义。
 fn render_root<'a>(app: &'a App, ctx: &Ctx, node: &'a ViewNode) -> Element<'a, Message> {
     match &node.body {
         NodeBody::Column { .. } | NodeBody::Row { .. } | NodeBody::Card { .. } | NodeBody::Stack { .. } => {
@@ -176,28 +180,116 @@ fn render_node_in<'a>(
     node: &'a ViewNode,
     fill_height: bool,
 ) -> Element<'a, Message> {
+    let element = render_body(app, ctx, node, fill_height);
+    let element = finish_node(app, ctx, node, element);
+    align_node(element, node, fill_height)
+}
+
+/// 节点自身外观：交互外观（底色 + 边框）、尺寸上下限、点击命中与悬停上报。
+fn finish_node<'a>(
+    app: &'a App,
+    ctx: &Ctx,
+    node: &'a ViewNode,
+    element: Element<'a, Message>,
+) -> Element<'a, Message> {
+    let interaction = node.interaction.as_ref();
+    // 按钮与图标钮自带底色与按下态：外观交给控件，`interaction` 在其中只决定可用性
+    let owns_press = binds_press_itself(&node.body);
+    let wants_hover = !owns_press && interaction.is_some_and(|spec| spec.hover.is_some());
+    let skin = if owns_press { None } else { current_surface(app, ctx, node).map(|surface| skin_of(&surface)) };
+    let size = node.body.size();
+    let min = Size::new(
+        size.and_then(|size| size.min_width).unwrap_or(0.0),
+        size.and_then(|size| size.min_height).unwrap_or(0.0),
+    );
+    let max = size.and_then(|size| match (size.max_width, size.max_height) {
+        (None, None) => None,
+        (width, height) => Some(Size::new(
+            width.unwrap_or(f32::INFINITY),
+            height.unwrap_or(f32::INFINITY),
+        )),
+    });
+    // 装饰层的存在只随树变化（不随悬停进出）：结构抖动会让子项控件态被重建，滚动位置与焦点随之丢失
+    let needs_box = (!owns_press && interaction.is_some())
+        || min.width > 0.0
+        || min.height > 0.0
+        || max.is_some();
+    let mut element = element;
+    if needs_box {
+        element = NodeBox::new(element, skin.unwrap_or_default(), min, max).into();
+    }
+
+    let enabled = interaction.is_none_or(|spec| spec.interactive());
+    // 按钮与图标钮自身承接按下（含按下态外观），此处不再重复挂命中
+    let on_press = (enabled && !owns_press).then(|| click(ctx, node)).flatten();
+    let wants_hover = enabled && wants_hover;
+    if on_press.is_none() && !wants_hover {
+        return element;
+    }
+    let mut area = mouse_area(element);
+    if wants_hover {
+        area = area
+            .on_enter(hover_msg(ctx, &node.id, true))
+            .on_exit(hover_msg(ctx, &node.id, false));
+    }
+    match on_press {
+        Some(message) => area.on_press(message).interaction(mouse::Interaction::Pointer).into(),
+        None => area.into(),
+    }
+}
+
+/// 节点当前状态命中的交互外观（禁用 / 激活 / 悬停 / 常态依次取第一个已声明的档位）。
+fn current_surface(app: &App, ctx: &Ctx, node: &ViewNode) -> Option<Surface> {
+    let spec = node.interaction.as_ref()?;
+    let hovered = spec.hover.is_some() && hovered(app, ctx, &node.id);
+    spec.appearance(hovered).copied()
+}
+
+/// 节点是否接受交互（`interaction.state` 为 `disabled` 时关掉点击与悬停）。
+fn interaction_enabled(node: &ViewNode) -> bool {
+    node.interaction.as_ref().is_none_or(|spec| spec.interactive())
+}
+
+/// 控件自身承接按下的节点（点击由控件自己的按下处理产生）。
+fn binds_press_itself(body: &NodeBody) -> bool {
+    matches!(body, NodeBody::Button { .. } | NodeBody::IconButton { .. })
+}
+
+/// 列 / 卡片的水平摆放（宽度不足父容器时按 `align` 放到左 / 中 / 右）。
+fn align_node<'a>(element: Element<'a, Message>, node: &ViewNode, fill_height: bool) -> Element<'a, Message> {
+    let align = match &node.body {
+        NodeBody::Column { align, .. } | NodeBody::Card { align, .. } => *align,
+        _ => None,
+    };
+    align_block(element, align, fill_height)
+}
+
+/// 单节点本体的控件语义（不含交互外观与摆放）。
+fn render_body<'a>(
+    app: &'a App,
+    ctx: &Ctx,
+    node: &'a ViewNode,
+    fill_height: bool,
+) -> Element<'a, Message> {
     match &node.body {
-        NodeBody::Column { gap, padding, cross_align, width, max_width, align } => {
-            let mut col = keyed_column(children(app, ctx, node))
-                .width(node_width(*width))
-                .height(if fill_height { Length::Fill } else { Length::Shrink })
+        NodeBody::Column { gap, padding, cross_align, align: _, size } => {
+            let mut col = keyed_column(children(app, ctx, node, Some(Axis::Vertical)))
+                .width(column_width(*size))
+                .height(column_height(*size, fill_height || grows(node)))
                 .spacing(gap.unwrap_or(DEFAULT_GAP));
             if let Some(pad) = padding {
-                col = col.padding(Padding::from(*pad));
-            }
-            if let Some(max_width) = max_width {
-                col = col.max_width(*max_width);
+                col = col.padding(padding_of(*pad));
             }
             if let Some(align) = cross_align {
                 col = col.align_items(alignment(*align));
             }
-            align_block(col.into(), *align, fill_height)
+            col.into()
         }
-        NodeBody::Row { gap, padding, justify, cross_align, fill } => {
+        NodeBody::Row { gap, padding, justify, cross_align, size } => {
             let spacing = gap.unwrap_or(DEFAULT_GAP);
             let declared = justify.is_some();
             let justify = justify.unwrap_or(Justify::Start);
-            let kids = children_elements(app, ctx, node);
+            let kids = children_elements(app, ctx, node, Some(Axis::Horizontal));
             // spaceBetween：在占满宽度的行里插入弹性空档把子项推向两端
             let mut line = if justify == Justify::SpaceBetween {
                 let mut els = Vec::new();
@@ -207,34 +299,31 @@ fn render_node_in<'a>(
                     }
                     els.push(child);
                 }
-                row(els).width(Length::Fill)
+                row(els)
             } else {
                 row(kids)
             }
             .spacing(spacing)
             .align_y(cross_align.map(vertical).unwrap_or(Vertical::Center));
-            // fill 行：宽度 Fill 关掉子项的宽度压缩（Fill 子项均分剩余宽度）；
-            // both 再加高度 Fill，让行延迟到父列的第三趟布局、占满剩余高度（分栏的前提）
-            match fill {
-                Some(Fill::Both) => {
-                    line = line.width(Length::Fill).height(Length::Fill);
-                }
-                Some(Fill::Width) => {
-                    line = line.width(Length::Fill);
-                }
-                None => {}
-            }
-            if fill_height {
-                line = line.height(Length::Fill);
-            }
+            // 占满宽度是「按权重分配子项」与「两端对齐」的前提：行自身收缩就没有可分配的剩余空间
+            let fill_width = grows(node) || justify == Justify::SpaceBetween;
+            let width = axis_length(
+                size.and_then(|size| size.width),
+                if fill_width { Length::Fill } else { Length::Shrink },
+            );
+            line = line
+                .width(width)
+                .height(axis_length(size.and_then(|size| size.height), if fill_height {
+                    Length::Fill
+                } else {
+                    Length::Shrink
+                }));
             if let Some(pad) = padding {
-                line = line.padding(Padding::from(*pad));
+                line = line.padding(padding_of(*pad));
             }
             // 声明了 justify 才谈得上主轴分布（spaceBetween 行自身已撑满，其余套占满宽度的容器）；
             // 未声明时保持 row 原样——宽度收缩，随父列的 cross_align 对齐
-            if !declared {
-                line.into()
-            } else if justify == Justify::SpaceBetween {
+            if !declared || justify == Justify::SpaceBetween {
                 line.into()
             } else {
                 container(line)
@@ -243,27 +332,31 @@ fn render_node_in<'a>(
                     .into()
             }
         }
-        NodeBody::Card { gap, padding, accent, tone, radius, bordered, width, max_width, align } => {
-            let inner = keyed_column(children(app, ctx, node))
-                .width(node_width(*width))
+        NodeBody::Card { gap, padding, accent, tone, radius, bordered, align: _, size } => {
+            let inner = keyed_column(children(app, ctx, node, Some(Axis::Vertical)))
+                .width(column_width(*size))
                 .height(Length::Shrink)
                 .spacing(gap.unwrap_or(DEFAULT_GAP));
-            let style = card_style(accent.unwrap_or_default(), *tone, *radius, *bordered);
+            // 交互外观接管底色与边框时自身不再绘制（避免两层底色互相盖住）；
+            // 当前状态没有对应档位时仍按卡片自己的档位绘制，避免整张卡片消失
+            let skin_paints = current_surface(app, ctx, node).is_some();
+            let style = if skin_paints {
+                container::Style::default()
+            } else {
+                card_style(accent.unwrap_or_default(), *tone, *radius, *bordered)
+            };
             let mut card = container(inner)
-                .width(node_width(*width))
-                .padding(Padding::from(padding.unwrap_or(10.0)))
+                .width(column_width(*size))
+                .padding(padding_of(padding.unwrap_or(PaddingSpec::All(10.0))))
                 .style(move |_t| style);
-            if let Some(max_width) = max_width {
-                card = card.max_width(*max_width);
+            if let Some(height) = card_height(*size, fill_height) {
+                card = card.height(height);
             }
-            if fill_height {
-                card = card.height(Length::Fill);
-            }
-            align_block(card.into(), *align, fill_height)
+            card.into()
         }
         NodeBody::Stack {} => {
             let mut stack = Stack::new();
-            for child in children_elements(app, ctx, node) {
+            for child in children_elements(app, ctx, node, None) {
                 stack = stack.push(child);
             }
             let element: Element<'a, Message> = stack.into();
@@ -278,8 +371,8 @@ fn render_node_in<'a>(
             let axis = direction.unwrap_or(Axis::Vertical);
             let inner: Element<Message> = match axis {
                 // 纵向内容撑满视口宽度（自适应换行）；横向内容按自身宽度溢出
-                Axis::Horizontal => row(children_elements(app, ctx, node)).spacing(spacing).into(),
-                Axis::Vertical => column(children_elements(app, ctx, node))
+                Axis::Horizontal => row(children_elements(app, ctx, node, None)).spacing(spacing).into(),
+                Axis::Vertical => column(children_elements(app, ctx, node, None))
                     .width(Length::Fill)
                     .spacing(spacing)
                     .into(),
@@ -296,12 +389,18 @@ fn render_node_in<'a>(
             }
             scroll.into()
         }
-        NodeBody::Grid { columns, min_column_width, gap } => {
-            grid_node(app, ctx, node, *columns, *min_column_width, gap.unwrap_or(DEFAULT_GAP))
-        }
+        NodeBody::Grid { columns, min_column_width, gap, row_height } => grid_node(
+            app,
+            ctx,
+            node,
+            *columns,
+            *min_column_width,
+            gap.unwrap_or(DEFAULT_GAP),
+            *row_height,
+        ),
         NodeBody::List { gap } => {
             let mut list = scroll::v(
-                keyed_column(children(app, ctx, node))
+                keyed_column(children(app, ctx, node, None))
                     .width(Length::Fill)
                     .height(Length::Shrink)
                     .spacing(gap.unwrap_or(DEFAULT_GAP)),
@@ -315,11 +414,14 @@ fn render_node_in<'a>(
             list.into()
         }
         NodeBody::Divider {} => controls::h_divider_subtle(),
-        NodeBody::Text { content, size, weight, color, align } => {
-            let line = text(content.as_str())
+        NodeBody::Text { content, size, weight, color, align, family, wrap } => {
+            let mut line = text(content.as_str())
                 .size(pal::fs_body() * size.unwrap_or(1.0))
-                .font(weight.map(text_weight).unwrap_or_default())
-                .color(token_color(color.unwrap_or(ColorToken::Text)));
+                .font(text_font(*weight, *family))
+                .color(color.map_or(pal::TEXT_PRIMARY, spec_color));
+            if *wrap == Some(false) {
+                line = line.wrapping(iced::advanced::text::Wrapping::None);
+            }
             // 声明对齐才占满父容器宽度（对齐只在该前提下有意义）；否则按内容宽度收缩，
             // 让 shrink 容器能形成内容自适应气泡
             match align {
@@ -330,8 +432,11 @@ fn render_node_in<'a>(
                 None => line.into(),
             }
         }
-        NodeBody::Markdown { size, weight, color, .. } => {
+        NodeBody::Markdown { size, weight, color, family, .. } => {
             let key = (ctx.plugin_id.clone(), ctx.surface_id.clone(), node.id.clone());
+            let font = (*weight)
+                .map(|weight| text_font(Some(weight), *family))
+                .or_else(|| family.map(|family| text_font(None, Some(family))));
             match app.plugin_markdown.get(&key) {
                 Some(entry) => crate::markdown_view::document_body_styled(
                     &entry.doc,
@@ -340,8 +445,8 @@ fn render_node_in<'a>(
                     app.global.soft_wrap,
                     size.unwrap_or(1.0),
                     crate::markdown_view::BodyStyle {
-                        font: weight.map(text_weight),
-                        color: color.map(token_color),
+                        font,
+                        color: color.map(spec_color),
                         link_scope: Some(crate::markdown_view::PluginLinkScope {
                             plugin_id: ctx.plugin_id.clone(),
                             surface_id: ctx.surface_id.clone(),
@@ -412,17 +517,25 @@ fn render_node_in<'a>(
                 None => controls::checkbox(state, on_press),
             }
         }
-        NodeBody::Button { label, variant, enabled, size } => controls::btn(
-            label.as_str(),
-            &button_size(*size),
-            button_variant(*variant),
-            enabled.unwrap_or(true).then(|| click(ctx, node)).flatten(),
-        )
-        .into(),
+        NodeBody::Button { label, icon, variant, enabled, size } => {
+            let variant = button_variant(*variant);
+            let on_press = (enabled.unwrap_or(true) && interaction_enabled(node))
+                .then(|| click(ctx, node))
+                .flatten();
+            match icon {
+                Some(name) => {
+                    let glyph = icon_element(ctx, name, 14.0, controls::variant_text_color(variant));
+                    controls::btn_with_icon(label.as_str(), glyph, &button_size(*size), variant, on_press).into()
+                }
+                None => controls::btn(label.as_str(), &button_size(*size), variant, on_press).into(),
+            }
+        }
         NodeBody::IconButton { icon, tooltip, enabled, size, variant, hover_only } => {
             let (icon_px, box_px) = icon_box(*size);
             let variant = icon_variant(*variant);
-            let on_press = enabled.unwrap_or(true).then(|| click(ctx, node)).flatten();
+            let on_press = (enabled.unwrap_or(true) && interaction_enabled(node))
+                .then(|| click(ctx, node))
+                .flatten();
             let tip = tooltip.as_ref().map(|label| (ctx.window, label.clone()));
             let icon_el = icon_element(ctx, icon, icon_px, controls::variant_text_color(variant));
             if hover_only.unwrap_or(false) {
@@ -447,16 +560,31 @@ fn render_node_in<'a>(
                 controls::icon_button_el(icon_el, box_px, variant, on_press, tip)
             }
         }
-        NodeBody::Image { source, fit, width, height } => {
-            let el = image_node(app, &ctx.plugin_id, source, fit.unwrap_or(ImageFit::Contain), *width, *height);
-            match click(ctx, node) {
-                Some(msg) => mouse_area(el).on_press(msg).into(),
-                None => el,
-            }
+        NodeBody::Icon { name, size, color } => {
+            let color = color.map_or(pal::TEXT_SECONDARY, spec_color);
+            icon_element(ctx, name, size.unwrap_or(ICON_DEFAULT_PX), color)
         }
-        NodeBody::Progress { value } => progress_bar(0.0..=1.0, value.clamp(0.0, 1.0) as f32)
-            .length(Length::Fill)
-            .into(),
+        NodeBody::Image { source, fit, width, height } => image_node(
+            app,
+            &ctx.plugin_id,
+            source,
+            fit.unwrap_or(ImageFit::Contain),
+            *width,
+            *height,
+        ),
+        NodeBody::Progress { value, girth, tone } => {
+            let thickness = girth.unwrap_or(PROGRESS_DEFAULT_GIRTH).max(1.0);
+            let bar_color = tone.map_or(pal::ACCENT, spec_color);
+            progress_bar(0.0..=1.0, value.clamp(0.0, 1.0) as f32)
+                .length(Length::Fill)
+                .girth(Length::Fixed(thickness))
+                .style(move |_theme| progress_bar::Style {
+                    background: pal::BG_SUNKEN.into(),
+                    bar: bar_color.into(),
+                    border: iced::border::rounded(thickness / 2.0),
+                })
+                .into()
+        }
         NodeBody::Menu { items, label, icon } => {
             let entries = items
                 .iter()
@@ -521,23 +649,102 @@ fn render_node_in<'a>(
 
 /// 子节点渲染（键 = 节点 id 哈希：插件整树重发时纵向容器按 id 复用控件态，输入焦点与光标不丢）。
 /// 横向容器不做按键（iced 无按键行），其控件态依赖结构稳定。
-fn children<'a>(app: &'a App, ctx: &Ctx, node: &'a ViewNode) -> Vec<(u64, Element<'a, Message>)> {
+fn children<'a>(
+    app: &'a App,
+    ctx: &Ctx,
+    node: &'a ViewNode,
+    axis: Option<Axis>,
+) -> Vec<(u64, Element<'a, Message>)> {
     node.children
         .iter()
-        .map(|child| (node_key(&child.id), render_node(app, ctx, child)))
+        .map(|child| (node_key(&child.id), child_element(app, ctx, child, axis)))
         .collect()
 }
 
 /// 子节点元素序列（行 / 滚动 / 网格容器用）。
-fn children_elements<'a>(app: &'a App, ctx: &Ctx, node: &'a ViewNode) -> Vec<Element<'a, Message>> {
-    node.children.iter().map(|child| render_node(app, ctx, child)).collect()
+fn children_elements<'a>(
+    app: &'a App,
+    ctx: &Ctx,
+    node: &'a ViewNode,
+    axis: Option<Axis>,
+) -> Vec<Element<'a, Message>> {
+    node.children.iter().map(|child| child_element(app, ctx, child, axis)).collect()
 }
 
-/// 容器宽度语义：缺省占满父容器。
-fn node_width(width: Option<NodeWidth>) -> Length {
-    match width {
-        Some(NodeWidth::Shrink) => Length::Shrink,
-        _ => Length::Fill,
+/// 子节点元素：声明 `grow` 的子项按权重占父容器主轴剩余空间（交叉轴由子项自身尺寸决定）。
+fn child_element<'a>(
+    app: &'a App,
+    ctx: &Ctx,
+    child: &'a ViewNode,
+    axis: Option<Axis>,
+) -> Element<'a, Message> {
+    let element = render_node(app, ctx, child);
+    match (child.grow, axis) {
+        (Some(portion), Some(Axis::Horizontal)) => {
+            container(element).width(Length::FillPortion(portion)).into()
+        }
+        (Some(portion), Some(Axis::Vertical)) => {
+            container(element).height(Length::FillPortion(portion)).into()
+        }
+        _ => element,
+    }
+}
+
+/// 子项是否声明了弹性权重（决定父容器主轴须占满才分配得了剩余空间）。
+fn grows(node: &ViewNode) -> bool {
+    node.children.iter().any(|child| child.grow.is_some())
+}
+
+/// 列与卡片缺省占满宽度。
+fn column_width(size: Option<BoxSize>) -> Length {
+    axis_length(size.and_then(|size| size.width), Length::Fill)
+}
+
+/// 列与卡片的高度（缺省按内容；根节点与带权重子项的容器撑满）。
+fn column_height(size: Option<BoxSize>, fill_height: bool) -> Length {
+    axis_length(size.and_then(|size| size.height), if fill_height {
+        Length::Fill
+    } else {
+        Length::Shrink
+    })
+}
+
+/// 卡片高度：未声明且不需要撑满时不设（保持容器缺省按内容）。
+fn card_height(size: Option<BoxSize>, fill_height: bool) -> Option<Length> {
+    match size.and_then(|size| size.height) {
+        Some(spec) => Some(axis_length(Some(spec), Length::Shrink)),
+        None if fill_height => Some(Length::Fill),
+        None => None,
+    }
+}
+
+/// 单轴尺寸声明 → iced 长度（缺省取 `fallback`）。
+fn axis_length(spec: Option<SizeSpec>, fallback: Length) -> Length {
+    match spec {
+        Some(SizeSpec::Fill) => Length::Fill,
+        Some(SizeSpec::Shrink) => Length::Shrink,
+        Some(SizeSpec::Fixed(value)) => Length::Fixed(value.max(0.0)),
+        None => fallback,
+    }
+}
+
+/// 内边距声明 → iced 内边距（四边取值）。
+fn padding_of(spec: PaddingSpec) -> Padding {
+    let [top, right, bottom, left] = spec.edges();
+    Padding { top, right, bottom, left }
+}
+
+/// 一层交互外观 → 容器样式（底色 + 1px 描边 + 圆角）。
+fn skin_of(surface: &Surface) -> container::Style {
+    let radius = surface.radius.unwrap_or(pal::RADIUS_SM).max(0.0);
+    let border = match surface.border {
+        Some(color) => iced::border::rounded(radius).color(spec_color(color)).width(1.0),
+        None => iced::border::rounded(radius),
+    };
+    container::Style {
+        background: surface.background.map(|color| spec_color(color).into()),
+        border,
+        ..container::Style::default()
     }
 }
 
@@ -588,6 +795,7 @@ fn scroll_report<'a>(
 }
 
 /// 网格：`columns` 固定列数；`min_column_width` 按可用宽度换列（`columns` 同时给定时作列数上限）。
+/// `row_height` 缺省按列宽 1:1 定行高，`content` 让每行按内容高度。
 fn grid_node<'a>(
     app: &'a App,
     ctx: &Ctx,
@@ -595,14 +803,29 @@ fn grid_node<'a>(
     columns: Option<u32>,
     min_column_width: Option<f32>,
     gap: f32,
+    row_height: Option<RowHeight>,
 ) -> Element<'a, Message> {
     let count = node.children.len().max(1);
     let fixed = columns.map(|columns| columns.max(1) as usize);
+    let build = move |app: &'a App, ctx: &Ctx, columns: usize| -> Element<'a, Message> {
+        let mut grid = grid(children_elements(app, ctx, node, Some(Axis::Horizontal)))
+            .columns(columns)
+            .spacing(gap);
+        match row_height {
+            // 内容高度：每行按自身内容（缺省按列宽 1:1，短内容会被拉成方格）
+            Some(RowHeight::Content) => grid = grid.height(Length::Shrink),
+            // 固定行高：网格把可用高度均分给各行，故按行数换算成整网格高度
+            Some(RowHeight::Fixed(value)) => {
+                let rows = count.div_ceil(columns.max(1));
+                let total = value.max(0.0) * rows as f32 + gap * rows.saturating_sub(1) as f32;
+                grid = grid.height(Length::Fixed(total));
+            }
+            None => {}
+        }
+        grid.into()
+    };
     let Some(min_column_width) = min_column_width else {
-        return grid(children_elements(app, ctx, node))
-            .columns(fixed.unwrap_or(1))
-            .spacing(gap)
-            .into();
+        return build(app, ctx, fixed.unwrap_or(1));
     };
     let min_column_width = min_column_width.max(1.0);
     // 列数随可用宽度变化：布局期取实际宽度算列，固定列数只作换列上限。
@@ -614,10 +837,7 @@ fn grid_node<'a>(
             Some(fixed) => fit.min(fixed),
             None => fit.min(count),
         };
-        grid(children_elements(app, &ctx, node))
-            .columns(columns)
-            .spacing(gap)
-            .into()
+        build(app, &ctx, columns)
     })
     .height(Length::Shrink)
     .into()
@@ -766,17 +986,17 @@ fn image_node<'a>(
     plugin_id: &str,
     source: &ImageSource,
     fit: ImageFit,
-    width: Option<Dimension>,
-    height: Option<Dimension>,
+    width: Option<SizeSpec>,
+    height: Option<SizeSpec>,
 ) -> Element<'a, Message> {
     let handle = image_key(app, plugin_id, source).and_then(|key| app.note_images.get(&key).cloned());
     match handle {
         Some(handle) => {
             let mut widget = image(handle).content_fit(content_fit(fit));
-            if let Some(width) = width.map(image_length) {
+            if let Some(width) = width.map(axis_length_of) {
                 widget = widget.width(width);
             }
-            if let Some(height) = height.map(image_length) {
+            if let Some(height) = height.map(axis_length_of) {
                 widget = widget.height(height);
             }
             widget.into()
@@ -785,11 +1005,8 @@ fn image_node<'a>(
     }
 }
 
-fn image_length(dimension: Dimension) -> Length {
-    match dimension {
-        Dimension::Fixed(value) => Length::Fixed(value),
-        Dimension::Fill => Length::Fill,
-    }
+fn axis_length_of(spec: SizeSpec) -> Length {
+    axis_length(Some(spec), Length::Shrink)
 }
 
 /// 自备图标名 → 图标元素：内置形状名直接命中，否则按 `<插件 id>::<名>` 取自备图形。
@@ -857,12 +1074,12 @@ fn node_scroll_id(ctx: &Ctx, node_id: &str) -> String {
     scroll_id(&ctx.plugin_id, &ctx.surface_id, node_id)
 }
 
-/// 某节点的悬停态（`hoverOnly` 图标钮据此显示 / 隐藏）。
+/// 某节点的悬停态（交互外观与 `hoverOnly` 图标钮据此切换）。
 fn hovered(app: &App, ctx: &Ctx, node_id: &str) -> bool {
     app.plugin_hovered.contains(&(ctx.plugin_id.clone(), ctx.surface_id.clone(), node_id.to_string()))
 }
 
-/// 悬停进出消息（`hoverOnly` 图标钮的显隐开关）。
+/// 悬停进出消息。
 fn hover_msg(ctx: &Ctx, node_id: &str, entered: bool) -> Message {
     Message::PluginHover {
         plugin_id: ctx.plugin_id.clone(),
@@ -880,12 +1097,29 @@ fn justify_x(justify: Justify) -> Horizontal {
     }
 }
 
-fn token_color(token: ColorToken) -> Color {
-    crate::plugin_canvas::token_color(token)
+/// 插件声明的取色（主题 token 或自定义色）。
+fn spec_color(spec: ColorSpec) -> Color {
+    crate::plugin_canvas::spec_color(spec)
 }
 
-fn text_weight(weight: TextWeight) -> iced::Font {
-    crate::plugin_canvas::font_of(weight)
+/// 字体族与字重 → 字体（等宽族始终取系统等宽字体，不随界面字体族设置变化）。
+fn text_font(weight: Option<TextWeight>, family: Option<TextFamily>) -> iced::Font {
+    let base = match family {
+        Some(TextFamily::Mono) => crate::ui::font::mono(),
+        _ => crate::ui::regular(),
+    };
+    iced::Font {
+        weight: weight.map(weight_of).unwrap_or(iced::font::Weight::Normal),
+        ..base
+    }
+}
+
+fn weight_of(weight: TextWeight) -> iced::font::Weight {
+    match weight {
+        TextWeight::Normal => iced::font::Weight::Normal,
+        TextWeight::Medium => iced::font::Weight::Medium,
+        TextWeight::SemiBold => iced::font::Weight::Semibold,
+    }
 }
 
 /// 按钮档位映射（缺省 `Secondary`）。
@@ -940,13 +1174,202 @@ fn vertical(align: Align) -> Vertical {
     }
 }
 
+/// 节点外观装饰：在子项矩形内绘制底色与边框、按上下限钳制尺寸，布局完全委托子项。
+///
+/// 不能改用 `container` 包一层：容器自带交叉轴收缩语义，套在 `Fill` 子项或滚动容器上会把布局
+/// 压塌。这里的 `layout` 只把子项的尺寸抬到最小、把上限压进 limits，其余照搬子项结果。
+struct NodeBox<'a, Message> {
+    inner: Element<'a, Message>,
+    skin: container::Style,
+    min: Size,
+    max: Option<Size>,
+}
+
+impl<'a, Message> NodeBox<'a, Message> {
+    fn new(inner: Element<'a, Message>, skin: container::Style, min: Size, max: Option<Size>) -> Self {
+        Self { inner, skin, min, max }
+    }
+}
+
+impl<'a, Message: Clone + 'static> Widget<Message, Theme, Renderer> for NodeBox<'a, Message> {
+    fn size(&self) -> Size<Length> {
+        self.inner.as_widget().size()
+    }
+
+    fn size_hint(&self) -> Size<Length> {
+        self.inner.as_widget().size_hint()
+    }
+
+    fn state(&self) -> tree::State {
+        tree::State::new(())
+    }
+
+    fn children(&self) -> Vec<tree::Tree> {
+        vec![tree::Tree::new(self.inner.as_widget())]
+    }
+
+    fn diff(&self, tree: &mut tree::Tree) {
+        tree.diff_children(std::slice::from_ref(&self.inner));
+    }
+
+    fn layout(
+        &mut self,
+        tree: &mut tree::Tree,
+        renderer: &Renderer,
+        limits: &Limits,
+    ) -> Node {
+        let limits = match self.max {
+            Some(max) => limits.max_width(max.width).max_height(max.height),
+            None => *limits,
+        };
+        let child = self.inner.as_widget_mut().layout(&mut tree.children[0], renderer, &limits);
+        let size = child.size();
+        let size = Size::new(
+            size.width.max(self.min.width),
+            size.height.max(self.min.height),
+        );
+        Node::with_children(size, vec![child])
+    }
+
+    fn operate(
+        &mut self,
+        tree: &mut tree::Tree,
+        layout: Layout<'_>,
+        renderer: &Renderer,
+        operation: &mut dyn iced::advanced::widget::Operation,
+    ) {
+        let child = layout.children().next().expect("装饰节点必有子布局");
+        self.inner.as_widget_mut().operate(&mut tree.children[0], child, renderer, operation);
+    }
+
+    fn update(
+        &mut self,
+        tree: &mut tree::Tree,
+        event: &iced::Event,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        renderer: &Renderer,
+        clipboard: &mut dyn Clipboard,
+        shell: &mut Shell<'_, Message>,
+        viewport: &Rectangle,
+    ) {
+        let child = layout.children().next().expect("装饰节点必有子布局");
+        self.inner.as_widget_mut().update(
+            &mut tree.children[0],
+            event,
+            child,
+            cursor,
+            renderer,
+            clipboard,
+            shell,
+            viewport,
+        );
+    }
+
+    fn draw(
+        &self,
+        tree: &tree::Tree,
+        renderer: &mut Renderer,
+        theme: &Theme,
+        style: &renderer::Style,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+    ) {
+        container::draw_background(renderer, &self.skin, layout.bounds());
+        let child = layout.children().next().expect("装饰节点必有子布局");
+        self.inner.as_widget().draw(&tree.children[0], renderer, theme, style, child, cursor, viewport);
+    }
+
+    fn mouse_interaction(
+        &self,
+        tree: &tree::Tree,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+        renderer: &Renderer,
+    ) -> mouse::Interaction {
+        let child = layout.children().next().expect("装饰节点必有子布局");
+        self.inner.as_widget().mouse_interaction(&tree.children[0], child, cursor, viewport, renderer)
+    }
+
+    fn overlay<'b>(
+        &'b mut self,
+        tree: &'b mut tree::Tree,
+        layout: Layout<'b>,
+        renderer: &Renderer,
+        viewport: &Rectangle,
+        translation: Vector,
+    ) -> Option<overlay::Element<'b, Message, Theme, Renderer>> {
+        let child = layout.children().next()?;
+        self.inner
+            .as_widget_mut()
+            .overlay(&mut tree.children[0], child, renderer, viewport, translation)
+    }
+}
+
+impl<'a, Message: Clone + 'static> From<NodeBox<'a, Message>> for Element<'a, Message> {
+    fn from(node: NodeBox<'a, Message>) -> Self {
+        Element::new(node)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use atelyx_core::plugin_runtime::{AxesPadding, EdgesPadding, ColorToken};
 
     #[test]
     fn node_keys_are_stable_and_distinct() {
         assert_eq!(node_key("status"), node_key("status"), "同一节点 id 的键必须稳定");
         assert_ne!(node_key("status"), node_key("status2"));
+    }
+
+    #[test]
+    fn axis_length_maps_specs_and_falls_back() {
+        assert_eq!(axis_length(None, Length::Shrink), Length::Shrink);
+        assert_eq!(axis_length(Some(SizeSpec::Fill), Length::Shrink), Length::Fill);
+        assert_eq!(axis_length(Some(SizeSpec::Shrink), Length::Fill), Length::Shrink);
+        assert_eq!(axis_length(Some(SizeSpec::Fixed(24.0)), Length::Fill), Length::Fixed(24.0));
+        // 负值按 0 处理，不产生反向尺寸
+        assert_eq!(axis_length(Some(SizeSpec::Fixed(-4.0)), Length::Fill), Length::Fixed(0.0));
+    }
+
+    #[test]
+    fn padding_spec_maps_all_four_edges() {
+        let axes = padding_of(PaddingSpec::Axes(AxesPadding {
+            horizontal: 2.0,
+            vertical: 1.0,
+        }));
+        assert_eq!(axes, Padding { top: 1.0, right: 2.0, bottom: 1.0, left: 2.0 });
+        let edges = padding_of(PaddingSpec::Edges(EdgesPadding {
+            top: 1.0,
+            right: 2.0,
+            bottom: 3.0,
+            left: 4.0,
+        }));
+        assert_eq!(edges, Padding { top: 1.0, right: 2.0, bottom: 3.0, left: 4.0 });
+    }
+
+    #[test]
+    fn skin_carries_background_border_and_radius() {
+        let skin = skin_of(&Surface {
+            background: Some(ColorSpec::Token(ColorToken::AccentSoft)),
+            border: Some(ColorSpec::Token(ColorToken::Accent)),
+            radius: Some(8.0),
+        });
+        assert!(matches!(skin.background, Some(iced::Background::Color(color)) if color == pal::ACCENT_SOFT));
+        assert_eq!(skin.border.width, 1.0);
+        assert_eq!(skin.border.color, pal::ACCENT);
+        assert_eq!(skin.border.radius.top_left, 8.0);
+    }
+
+    #[test]
+    fn weight_maps_to_real_font_weights() {
+        assert_eq!(weight_of(TextWeight::Medium), iced::font::Weight::Medium);
+        assert_eq!(weight_of(TextWeight::SemiBold), iced::font::Weight::Semibold);
+        // 等宽族：换族但不动字重
+        let mono = text_font(Some(TextWeight::Normal), Some(TextFamily::Mono));
+        assert!(matches!(mono.family, iced::font::Family::Monospace));
     }
 }

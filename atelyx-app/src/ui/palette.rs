@@ -67,10 +67,17 @@ pub const SELECTION: Color = rgba(224, 169, 78, 0.25);
 // ===== 状态语义色 =====
 /// 成功
 pub const SUCCESS: Color = rgb(0x5f, 0xbf, 0x8b);
-/// 警告
-pub const WARNING: Color = ACCENT;
+/// 警告（琥珀，与强调金区分：警告与就绪提示不可同色）
+pub const WARNING: Color = rgb(0xef, 0xc7, 0x5e);
 /// 危险 / 错误
 pub const DANGER: Color = rgb(0xe8, 0x77, 0x6c);
+
+/// 成功软底（提示块 / 徽标底）
+pub const SUCCESS_SOFT: Color = rgba(0x5f, 0xbf, 0x8b, 0.14);
+/// 警告软底
+pub const WARNING_SOFT: Color = rgba(0xef, 0xc7, 0x5e, 0.14);
+/// 危险软底
+pub const DANGER_SOFT: Color = rgba(0xe8, 0x77, 0x6c, 0.14);
 
 // ===== 日程色板 =====
 /// 日程标记 7 色循环（`CalendarItem.color` 存对应 hex，顺序即循环序）
