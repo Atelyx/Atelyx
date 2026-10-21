@@ -71,8 +71,21 @@ pub mod vault {
     pub const READ_BINARY: &str = "vault.readBinary";
     /// 写二进制文件（base64；父目录自动创建；正在编辑器中打开的文件拒写）。
     pub const WRITE_BINARY: &str = "vault.writeBinary";
+    /// 读图片的像素宽高（png / jpeg / gif / bmp / webp），不返回文件内容。
+    pub const IMAGE_INFO: &str = "vault.imageInfo";
     pub const LIST: &str = "vault.list";
     pub const EXISTS: &str = "vault.exists";
+}
+
+/// 协作空间内的插件消息：按「通道」隔离，宿主把插件 id 作为通道前缀，
+/// 同空间的同插件实例互通（跨空间不达、不可抢占他人通道）。
+pub mod collab {
+    /// 当前空间的连接状态与在场成员清单（不含自己）。
+    pub const PEERS: &str = "collab.peers";
+    /// 向同空间的对等插件发一条消息：缺省广播给全部对端，给了目标即单播。
+    pub const SEND: &str = "collab.send";
+    /// 对端消息到达（通知）。
+    pub const HOST_MESSAGE: &str = "host:collab.message";
 }
 
 /// 表格面：读写当前打开表格。写入与宿主自身编辑同一出口（宿主合并落盘并广播协作补丁），
@@ -98,6 +111,14 @@ pub mod state {
 
 pub mod notification {
     pub const SHOW: &str = "notification.show";
+}
+
+/// 系统托盘：插件提交自己的菜单条目，宿主维护唯一托盘图标（无条目时图标消失）。
+pub mod tray {
+    /// 整发整换本插件的托盘菜单（空清单 = 收起）。宿主自有的「显示 / 退出」条目恒在末尾。
+    pub const SET_ITEMS: &str = "tray.setItems";
+    /// 用户点了本插件的某个托盘条目（通知）。
+    pub const HOST_CLICK: &str = "host:tray.click";
 }
 
 pub mod shortcut {
@@ -232,9 +253,10 @@ pub struct RegisterParams {
     pub label: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
-    /// 面外壳内边距（px）：面板 / 设置面根树外层由宿主加的内边距；0 = 贴边，缺省 = 宿主默认。
+    /// 面外壳内边距：数字 = 四边等距，也可按轴 / 按边声明（见 [`crate::view::PaddingSpec`]）；
+    /// 0 = 贴边，缺省 = 宿主默认。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub padding: Option<f32>,
+    pub padding: Option<crate::view::PaddingSpec>,
 }
 
 /// `view.defineIcon` 的 params：定义一枚自备图标形状，此后按 `name` 在贡献注册与图标钮里引用。
@@ -441,6 +463,14 @@ pub struct WriteBinaryParams {
 #[serde(rename_all = "camelCase")]
 pub struct ExistsResult {
     pub exists: bool,
+}
+
+/// [`vault::IMAGE_INFO`] 的 result：图片固有像素尺寸（不随界面缩放）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageInfoResult {
+    pub width: u32,
+    pub height: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -941,6 +971,134 @@ pub struct TableSetCellImageParams {
     pub display: Option<String>,
 }
 
+// ---------- tray / collab ----------
+
+/// 托盘菜单条目上限（超出拒绝）。
+const MAX_TRAY_ITEMS: usize = 32;
+/// 协作通道名长度上限（字符数）。
+const MAX_CHANNEL_CHARS: usize = 64;
+
+/// 托盘菜单条目：`id` 插件内唯一、非空，用户点击时原样随 [`tray::HOST_CLICK`] 回发。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrayItemSpec {
+    pub id: String,
+    /// 条目文字（非空）。
+    pub label: String,
+    /// 置灰不可点（缺省 true）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+}
+
+/// [`tray::SET_ITEMS`] 的 params：整发整换本插件的托盘菜单，空清单 = 收起。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetTrayItemsParams {
+    pub items: Vec<TrayItemSpec>,
+}
+
+impl SetTrayItemsParams {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.items.len() > MAX_TRAY_ITEMS {
+            return Err(format!("托盘条目不能超过 {MAX_TRAY_ITEMS} 条"));
+        }
+        let mut ids = std::collections::HashSet::new();
+        for item in &self.items {
+            if item.id.trim().is_empty() {
+                return Err("托盘条目 id 不能为空".into());
+            }
+            if !ids.insert(item.id.as_str()) {
+                return Err(format!("托盘条目 id 重复：{}", item.id));
+            }
+            if item.label.trim().is_empty() {
+                return Err(format!("托盘条目 {} 的文字不能为空", item.id));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// [`tray::HOST_CLICK`] 的 params：用户点击的条目 id。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrayClickParams {
+    pub id: String,
+}
+
+/// 同空间的一个在场成员。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollabPeer {
+    pub peer_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// [`collab::PEERS`] 的 result：`connected` = 当前空间连接可用；未连接时 `selfId` 与 `peers` 缺省。
+/// `peers` 不含自己，宿主已剔除。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollabPeersResult {
+    pub connected: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub peers: Vec<CollabPeer>,
+}
+
+/// [`collab::SEND`] 的 params：`channel` 为插件自定义的通道名（非空、不含 `:`、≤ 64 字符），
+/// 宿主在投递时加插件前缀；`payload` 任意 JSON。`targetPeerId` 取 [`CollabPeersResult`] 里的
+/// `peerId` 原值，缺省 = 广播给全部对端。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollabSendParams {
+    pub channel: String,
+    pub payload: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_peer_id: Option<String>,
+}
+
+impl CollabSendParams {
+    pub fn validate(&self) -> Result<(), String> {
+        let channel = &self.channel;
+        if channel.is_empty() {
+            return Err("协作通道名不能为空".into());
+        }
+        // 通道名会原样拼进宿主命名空间，首尾空白不报错只会让收发两端名字对不上
+        if channel.trim() != channel {
+            return Err("协作通道名首尾不能含空白".into());
+        }
+        if channel.contains(':') {
+            return Err("协作通道名不能含 `:`".into());
+        }
+        if channel.chars().count() > MAX_CHANNEL_CHARS {
+            return Err(format!("协作通道名不能超过 {MAX_CHANNEL_CHARS} 字符"));
+        }
+        Ok(())
+    }
+}
+
+/// [`collab::SEND`] 的 result：`queued` = 消息已交本机空间连接发出。
+/// 发出不等于送达：广播不确认，单播目标离线时被服务端丢弃，`queued` 仍为 true；
+/// 未连接空间时 `queued` = false。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollabSendResult {
+    pub queued: bool,
+}
+
+/// [`collab::HOST_MESSAGE`] 的 params：`channel` 为发送方给的通道名（不含插件前缀），
+/// `peerId` / `peerName` 标识发送方。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollabMessageParams {
+    pub channel: String,
+    pub payload: Value,
+    pub peer_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_name: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1015,5 +1173,66 @@ mod tests {
         let wire = serde_json::to_value(&image).unwrap();
         assert_eq!(wire["image"]["width"], 1);
         assert_eq!(serde_json::to_value(ClipboardImageResult { image: None }).unwrap(), serde_json::json!({}));
+    }
+
+    #[test]
+    fn tray_items_validate_ids_labels_and_capacity() {
+        let ok = SetTrayItemsParams {
+            items: vec![TrayItemSpec {
+                id: "open".into(),
+                label: "打开".into(),
+                enabled: None,
+            }],
+        };
+        assert!(ok.validate().is_ok());
+        let dup = SetTrayItemsParams {
+            items: vec![
+                TrayItemSpec { id: "a".into(), label: "甲".into(), enabled: None },
+                TrayItemSpec { id: "a".into(), label: "乙".into(), enabled: Some(false) },
+            ],
+        };
+        assert!(dup.validate().unwrap_err().contains("重复"));
+        let blank = SetTrayItemsParams {
+            items: vec![TrayItemSpec { id: "a".into(), label: " ".into(), enabled: None }],
+        };
+        assert!(blank.validate().unwrap_err().contains("文字"));
+        let many = SetTrayItemsParams {
+            items: (0..=MAX_TRAY_ITEMS)
+                .map(|i| TrayItemSpec { id: format!("i{i}"), label: format!("条目 {i}"), enabled: None })
+                .collect(),
+        };
+        assert!(many.validate().unwrap_err().contains("不能超过"));
+        // 空清单合法（收起菜单）
+        assert!(SetTrayItemsParams { items: vec![] }.validate().is_ok());
+    }
+
+    #[test]
+    fn collab_send_channel_rules_and_peers_shape() {
+        let ok = CollabSendParams {
+            channel: "cursor".into(),
+            payload: serde_json::json!({ "line": 3 }),
+            target_peer_id: None,
+        };
+        assert!(ok.validate().is_ok());
+        for bad in ["", "  ", "a:b", &"x".repeat(MAX_CHANNEL_CHARS + 1)] {
+            let params = CollabSendParams {
+                channel: bad.to_string(),
+                payload: serde_json::Value::Null,
+                target_peer_id: None,
+            };
+            assert!(params.validate().is_err(), "应拒绝通道：{bad}");
+        }
+        let peers = CollabPeersResult {
+            connected: true,
+            self_id: Some("p1".into()),
+            peers: vec![CollabPeer { peer_id: "p2".into(), name: Some("队友".into()) }],
+        };
+        let wire = serde_json::to_value(&peers).unwrap();
+        assert_eq!(wire["selfId"], "p1");
+        assert_eq!(wire["peers"][0]["peerId"], "p2");
+        assert_eq!(
+            serde_json::to_value(CollabPeersResult::default()).unwrap(),
+            serde_json::json!({ "connected": false })
+        );
     }
 }

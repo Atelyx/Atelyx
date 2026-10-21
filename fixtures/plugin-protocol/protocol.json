@@ -55,6 +55,8 @@
     "gap": 8.0,
     "padding": 12.0,
     "crossAlign": "start",
+    "maxWidth": 640.0,
+    "align": "center",
     "children": [
       {
         "id": "title",
@@ -87,6 +89,7 @@
         "min": 1.0,
         "max": 100.0,
         "step": 1.0,
+        "readOnly": true,
         "events": ["change"]
       },
       {
@@ -140,6 +143,7 @@
         "id": "paneGrid",
         "kind": "grid",
         "columns": 2,
+        "minColumnWidth": 160.0,
         "gap": 6.0,
         "children": [
           {
@@ -147,7 +151,7 @@
             "kind": "image",
             "source": { "type": "private", "path": "shots/last.png" },
             "fit": "contain",
-            "width": 120.0,
+            "width": "fill",
             "height": 90.0,
             "events": ["click"]
           },
@@ -169,6 +173,8 @@
         "kind": "scroll",
         "direction": "vertical",
         "gap": 4.0,
+        "height": 240.0,
+        "events": ["scroll"],
         "children": [
           {
             "id": "log",
@@ -188,6 +194,8 @@
         "tone": "accentSoft",
         "radius": 12.0,
         "bordered": false,
+        "width": "shrink",
+        "align": "end",
         "children": [
           { "id": "infoText", "kind": "text", "content": "运行中" }
         ]
@@ -408,7 +416,7 @@
           { "kind": "path", "points": [ { "x": 0.0, "y": 0.0 }, { "x": 4.5, "y": 5.0 }, { "x": 9.0, "y": 0.0 } ], "closed": true, "fill": { "type": "token", "name": "success" }, "stroke": null },
           { "kind": "circle", "cx": 5.0, "cy": 5.0, "r": 3.0, "fill": null, "stroke": { "type": "token", "name": "textMuted" } },
           { "kind": "text", "x": 1.0, "y": 1.0, "content": "播放头", "size": 12.0, "color": { "type": "token", "name": "text" }, "weight": "medium" },
-          { "kind": "image", "source": { "type": "vault", "path": "assets/tile.png" }, "x": 0.0, "y": 0.0, "w": 16.0, "h": 16.0 }
+          { "kind": "image", "source": { "type": "vault", "path": "assets/tile.png" }, "x": 0.0, "y": 0.0, "w": 16.0, "h": 16.0, "fit": "cover" }
         ]
       }
     },
@@ -620,6 +628,95 @@
       "name": "link form plain",
       "type": "LinkForm",
       "value": "plain"
+    },
+    {
+      "name": "vault.imageInfo result",
+      "type": "ImageInfoResult",
+      "value": { "width": 1920, "height": 1080 }
+    },
+    {
+      "name": "view.register params (axis padding)",
+      "type": "RegisterParams",
+      "value": {
+        "slot": "panel",
+        "id": "com.atelyx.chat",
+        "label": "对话",
+        "padding": { "horizontal": 8.0, "vertical": 4.0 }
+      }
+    },
+    {
+      "name": "view.register params (edge padding)",
+      "type": "RegisterParams",
+      "value": {
+        "slot": "settings",
+        "id": "com.atelyx.chat.settings",
+        "label": "对话",
+        "padding": { "top": 12.0, "right": 8.0, "bottom": 12.0, "left": 8.0 }
+      }
+    },
+    {
+      "name": "view event scroll",
+      "type": "ViewEvent",
+      "value": { "kind": "scroll", "offset": 24.0, "maxOffset": 96.0 }
+    },
+    {
+      "name": "tray.setItems params",
+      "type": "SetTrayItemsParams",
+      "value": {
+        "items": [
+          { "id": "show", "label": "打开面板" },
+          { "id": "pause", "label": "暂停监听", "enabled": false }
+        ]
+      }
+    },
+    {
+      "name": "tray.setItems params (clear)",
+      "type": "SetTrayItemsParams",
+      "value": { "items": [] }
+    },
+    {
+      "name": "host:tray.click params",
+      "type": "TrayClickParams",
+      "value": { "id": "show" }
+    },
+    {
+      "name": "collab.peers result",
+      "type": "CollabPeersResult",
+      "value": {
+        "connected": true,
+        "selfId": "1",
+        "peers": [ { "peerId": "2", "name": "林" }, { "peerId": "3" } ]
+      }
+    },
+    {
+      "name": "collab.peers result (disconnected)",
+      "type": "CollabPeersResult",
+      "value": { "connected": false }
+    },
+    {
+      "name": "collab.send params",
+      "type": "CollabSendParams",
+      "value": { "channel": "cursor", "payload": { "line": 3, "col": 8 } }
+    },
+    {
+      "name": "collab.send params (targeted)",
+      "type": "CollabSendParams",
+      "value": { "channel": "chat", "payload": "hi", "targetPeerId": "2" }
+    },
+    {
+      "name": "collab.send result",
+      "type": "CollabSendResult",
+      "value": { "queued": true }
+    },
+    {
+      "name": "host:collab.message params",
+      "type": "CollabMessageParams",
+      "value": {
+        "channel": "cursor",
+        "payload": { "line": 3 },
+        "peerId": "2",
+        "peerName": "林"
+      }
     }
   ]
 }

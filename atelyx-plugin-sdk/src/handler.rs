@@ -5,9 +5,9 @@ use serde_json::Value;
 use crate::context::Context;
 use crate::protocol::event::PublishParams;
 use crate::protocol::method::{
-    ChatEventParams, DocCloseParams, DocOpenParams, ProcessEventParams,
-    ShortcutTriggeredParams, SurfaceAttachedParams, SurfaceDetachedParams, ToolCallParams,
-    ViewEventParams, WindowClosedParams,
+    CanvasResizedParams, ChatEventParams, CollabMessageParams, DocCloseParams, DocOpenParams,
+    ProcessEventParams, ShortcutTriggeredParams, SurfaceAttachedParams, SurfaceDetachedParams,
+    ToolCallParams, TrayClickParams, ViewEventParams, WindowClosedParams, WindowIdParams,
 };
 
 /// 宿主通知处理面。全部 `host:` 通知按方法名分派；实现只需覆盖关心的项。
@@ -29,6 +29,14 @@ pub trait PluginHandler: Send + Sync + 'static {
     async fn on_doc_open(&self, _ctx: &Context, _params: DocOpenParams) {}
     async fn on_doc_close(&self, _ctx: &Context, _params: DocCloseParams) {}
     async fn on_window_closed(&self, _ctx: &Context, _params: WindowClosedParams) {}
+    /// 窗口因失焦被收起（`host:window.hidden`）：需要再唤起时经 [`Context::window_show`] 重新显示。
+    async fn on_window_hidden(&self, _ctx: &Context, _params: WindowIdParams) {}
+    /// 画布节点的像素尺寸变化（`host:canvas.resized`）：按新尺寸对齐绘制坐标与滚动范围。
+    async fn on_canvas_resized(&self, _ctx: &Context, _params: CanvasResizedParams) {}
+    /// 用户点击了本插件的某个托盘条目（`host:tray.click`）。
+    async fn on_tray_click(&self, _ctx: &Context, _params: TrayClickParams) {}
+    /// 同空间的对等插件发来消息（`host:collab.message`）。
+    async fn on_collab_message(&self, _ctx: &Context, _params: CollabMessageParams) {}
     /// 对话事件流（`host:ai.chat.event`）：快照节流拍 + 终态 + 命名结果。
     async fn on_chat_event(&self, _ctx: &Context, _params: ChatEventParams) {}
 
@@ -78,6 +86,10 @@ pub(crate) async fn dispatch<H: PluginHandler + ?Sized>(
         m::doc::HOST_OPEN => typed!(DocOpenParams, |p| handler.on_doc_open(ctx, p)),
         m::doc::HOST_CLOSE => typed!(DocCloseParams, |p| handler.on_doc_close(ctx, p)),
         m::window::HOST_CLOSED => typed!(WindowClosedParams, |p| handler.on_window_closed(ctx, p)),
+        m::window::HOST_HIDDEN => typed!(WindowIdParams, |p| handler.on_window_hidden(ctx, p)),
+        m::canvas::HOST_RESIZED => typed!(CanvasResizedParams, |p| handler.on_canvas_resized(ctx, p)),
+        m::tray::HOST_CLICK => typed!(TrayClickParams, |p| handler.on_tray_click(ctx, p)),
+        m::collab::HOST_MESSAGE => typed!(CollabMessageParams, |p| handler.on_collab_message(ctx, p)),
         m::ai::HOST_CHAT_EVENT => typed!(ChatEventParams, |p| handler.on_chat_event(ctx, p)),
         m::ai::HOST_TOOL_CALL => typed!(ToolCallParams, |p| handler.on_tool_call(ctx, p)),
         other => handler.on_unknown_notification(ctx, other, params).await,

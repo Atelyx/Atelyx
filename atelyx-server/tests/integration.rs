@@ -3129,6 +3129,9 @@ async fn ws_plugin_msg_binary_and_reliable_replay() {
     assert_eq!(msg["channel"], "com.a:ch");
     assert_eq!(msg["payload"], json!({ "n": 1 }));
     assert_eq!(msg["seq"], 1);
+    // 广播不含发送方：给 A 回一条同序号回执，供其推进序号
+    let ack_a = next_frame_of(&mut a, "plugin-msg-ack").await;
+    assert_eq!(ack_a["seq"], 1);
 
     // 二进制广播：载荷原样还原，seq 递进，sender 回填
     let payload: Vec<u8> = (0u8..=255).collect();
@@ -3138,6 +3141,9 @@ async fn ws_plugin_msg_binary_and_reliable_replay() {
     assert_eq!(got, payload, "二进制载荷往返无损");
     assert_eq!(seq, 2);
     assert_eq!(sender, a_peer);
+    // 二进制广播与 JSON 同口径回执发送方
+    let ack_bin = next_frame_of(&mut a, "plugin-msg-ack").await;
+    assert_eq!(ack_bin["seq"], 2);
 
     // 定向单播（JSON 与二进制）：只发目标 peer；单播帧不携带房间级 seq
     a.send(Message::text(json!({ "type": "plugin-msg", "channel": "com.a:ch", "payload": "hi", "targetPeerId": b_peer }).to_string())).await.unwrap();
@@ -3167,4 +3173,11 @@ async fn ws_plugin_msg_binary_and_reliable_replay() {
     let (_, replay_payload, replay_seq, _) = next_binary_plugin_frame(&mut b2).await;
     assert_eq!(replay_seq, 4);
     assert_eq!(replay_payload, vec![1, 2, 3]);
+
+    // 补投不回放请求者自己的帧：A 请求全量补投后收到的第一条广播是 B 的直播帧
+    a.send(Message::text(json!({ "type": "plugin-replay", "after": 0 }).to_string())).await.unwrap();
+    b2.send(Message::text(json!({ "type": "plugin-msg", "channel": "com.b:ch", "payload": { "n": 5 } }).to_string())).await.unwrap();
+    let live = next_frame_of(&mut a, "plugin-msg").await;
+    assert_eq!(live["seq"], 5, "缓存里 A 自己的帧不回放给 A");
+    assert_eq!(live["peerId"], ack_re["peerId"]);
 }

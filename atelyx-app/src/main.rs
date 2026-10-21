@@ -35,6 +35,7 @@ mod space_actions;
 mod table_actions;
 mod table_text;
 mod table_view;
+mod tray;
 mod ui;
 mod update;
 
@@ -555,6 +556,8 @@ enum Message {
     Plugins(settings_view::plugins::PluginsMsg),
     /// 插件运行时事件（单一通道进 update）。
     PluginEvent(Box<PluginEvent>),
+    /// 托盘选择（插件条目回发 `host:tray.click`，宿主条目由壳处理）。
+    Tray(tray::TrayEvent),
     /// 插件界面节点事件（点击 / 变更 / 提交）。
     PluginView {
         plugin_id: String,
@@ -1095,6 +1098,8 @@ pub struct App {
     pub shortcut_recording: Option<commands::CommandId>,
     /// 插件宿主运行时（进程内单例；多窗口共享）。
     pub plugins: Arc<PluginRuntime>,
+    /// 系统托盘（插件条目 + 宿主条目；点击经订阅回到 update）。
+    pub tray: tray::Service,
     /// 设置-插件页状态（列表缓存 / 详情 / 卸载确认 / 安装在途）。
     pub plugins_state: settings_view::plugins::PluginsState,
     /// 已注册贡献投影（运行时事件后刷新；菜单、标签与面板渲染都读它）。
@@ -1263,6 +1268,8 @@ pub struct App {
     pub preview_doc: Option<MarkdownDocument>,
     /// 笔记图片句柄缓存（key = src 原文；随文件载入清空，在途与失败集合防重复发起）。
     pub note_images: markdown_view::ImageHandles,
+    /// 图片像素尺寸（key 同 `note_images`）：自绘画布按 contain / cover 摆放贴片要用原图长宽。
+    pub note_image_sizes: HashMap<String, (u32, u32)>,
     note_images_inflight: HashSet<String>,
     note_images_failed: HashSet<String>,
     /// ensure_image_srcs 收集的载入任务（update 收尾统一 chain，调用点不必逐个穿 Task）。
@@ -1490,6 +1497,7 @@ impl App {
                 settings_tab: "general".into(),
                 shortcut_recording: None,
                 plugins: plugins.clone(),
+                tray: tray::Service::new(),
                 plugins_state: settings_view::plugins::PluginsState::default(),
                 plugin_contributions: Vec::new(),
                 plugin_surfaces: HashSet::new(),
@@ -1546,6 +1554,7 @@ impl App {
                 note_edit_caret_pending: false,
                 preview_doc: None,
                 note_images: markdown_view::ImageHandles::new(),
+                note_image_sizes: HashMap::new(),
                 note_images_inflight: HashSet::new(),
                 note_images_failed: HashSet::new(),
                 image_loads: None,
@@ -1870,6 +1879,7 @@ impl App {
                 self.history.clear();
                 // 图片缓存随文件清空：同 src 不同仓库指向不同文件，过期句柄不得复用
                 self.note_images.clear();
+                self.note_image_sizes.clear();
                 self.note_images_inflight.clear();
                 self.note_images_failed.clear();
                 self.refresh_preview();
@@ -2228,6 +2238,11 @@ impl App {
                 if gen == self.epoch() {
                     match result {
                         Ok(bytes) => {
+                            // 画布 contain / cover 需要原图尺寸，装载点顺手记下（解码失败不入表）
+                            let size = crate::canvas_actions::image_dimensions(&bytes);
+                            if size.0 > 0 && size.1 > 0 {
+                                self.note_image_sizes.insert(key.clone(), size);
+                            }
                             self.note_images.insert(key, iced::widget::image::Handle::from_bytes(bytes));
                         }
                         // 失败进失败集：占位回落且本次会话不重试（避免滚动反复发起）
@@ -3161,6 +3176,25 @@ impl App {
             }
             Message::Ai(msg) => settings_view::ai::update(self, msg),
             Message::Plugins(msg) => settings_view::plugins::update(self, msg),
+            Message::Tray(event) => match event {
+                tray::TrayEvent::PluginClick { plugin_id, item_id } => {
+                    self.plugins.notify_tray_click(&plugin_id, &item_id);
+                    Task::none()
+                }
+                tray::TrayEvent::ShowMain => match self.main_id {
+                    Some(id) => window::minimize(id, false).chain(window::gain_focus(id)),
+                    None => Task::none(),
+                },
+                // 退出与关主窗同一条路径：先放行在途保存再收尾退出
+                tray::TrayEvent::Quit => match self.main_id {
+                    Some(id) => self.update(Message::WindowCloseRequested(id)),
+                    None => iced::exit(),
+                },
+                tray::TrayEvent::Unavailable(reason) => {
+                    self.notify(NoticeLevel::Warning, format!("系统托盘：{reason}"));
+                    Task::none()
+                }
+            },
             Message::PluginEvent(event) => {
                 // 插件（重启 / 重新启用后）就绪：已挂的面重新通知，插件据此重建界面；
                 // 停用 / 失败 / 熔断：该插件的窗口随会话收尾关闭（重启退避中不动作）
@@ -6732,6 +6766,7 @@ impl App {
             self.space_pump_subscription(),
             self.plugin_events_subscription(),
             self.plugin_host_requests_subscription(),
+            Subscription::run_with(self.tray.spec(), tray::events_stream).map(Message::Tray),
             chat_actions::run_events_subscription(),
             chat_actions::control_subscription(),
         ])

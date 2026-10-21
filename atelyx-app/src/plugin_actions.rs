@@ -189,6 +189,7 @@ fn event_kind(event: &ViewEvent) -> Option<EventKind> {
         ViewEvent::Focus => Some(EventKind::Focus),
         ViewEvent::Blur => Some(EventKind::Blur),
         ViewEvent::LinkClick { .. } => Some(EventKind::LinkClick),
+        ViewEvent::Scroll { .. } => Some(EventKind::Scroll),
         ViewEvent::Canvas { .. } => None,
     }
 }
@@ -441,9 +442,13 @@ fn sync_editors(app: &mut App, plugin_id: &str, surface_id: &str, tree: &ViewNod
     }
 }
 
-/// 收集树里的多行输入节点（节点 id + 值文本）。
+/// 收集树里的可编辑多行输入节点（节点 id + 值文本）：只读多行画静态框，不建编辑器状态。
 fn collect_multiline<'a>(node: &'a ViewNode, out: &mut impl FnMut(&'a str, String)) {
-    if matches!(node.body, NodeBody::TextInput { multiline: Some(true), .. }) {
+    let editable = matches!(
+        node.body,
+        NodeBody::TextInput { multiline: Some(true), read_only: None | Some(false), .. }
+    );
+    if editable {
         if let Some(value) = node_value_text(&node.body) {
             out(node.id.as_str(), value);
         }
@@ -1268,6 +1273,7 @@ mod tests {
                 placeholder: None,
                 multiline: None,
                 password: None,
+                read_only: None,
             },
             children: Vec::new(),
             events: vec![EventKind::Change],
@@ -1275,7 +1281,14 @@ mod tests {
     }
 
     fn number_input(value: Option<f64>) -> NodeBody {
-        NodeBody::NumberInput { value, min: Some(1.0), max: Some(10.0), step: None, placeholder: None }
+        NodeBody::NumberInput {
+            value,
+            min: Some(1.0),
+            max: Some(10.0),
+            step: None,
+            placeholder: None,
+            read_only: None,
+        }
     }
 
     #[test]
@@ -1334,10 +1347,24 @@ mod tests {
 
     #[test]
     fn number_text_and_value_agree_on_roundtrip() {
-        let body = NodeBody::NumberInput { value: Some(3.5), min: None, max: None, step: None, placeholder: None };
+        let body = NodeBody::NumberInput {
+            value: Some(3.5),
+            min: None,
+            max: None,
+            step: None,
+            placeholder: None,
+            read_only: None,
+        };
         assert_eq!(node_value_text(&body).as_deref(), Some("3.5"));
         assert_eq!(number_event_value(&body, "3.5"), Some(EventValue::Number(3.5)));
-        let whole = NodeBody::NumberInput { value: Some(7.0), min: None, max: None, step: None, placeholder: None };
+        let whole = NodeBody::NumberInput {
+            value: Some(7.0),
+            min: None,
+            max: None,
+            step: None,
+            placeholder: None,
+            read_only: None,
+        };
         assert_eq!(node_value_text(&whole).as_deref(), Some("7"));
         // 未给值时不产生值文本（输入草稿按空串起算）
         assert_eq!(node_value_text(&number_input(None)), None);
@@ -1360,7 +1387,7 @@ mod tests {
     fn find_node_locates_nested_children() {
         let tree = ViewNode {
             id: "root".into(),
-            body: NodeBody::Column { gap: None, padding: None, cross_align: None },
+            body: NodeBody::Column { gap: None, padding: None, cross_align: None, width: None, max_width: None, align: None },
             children: vec![text_input("query", "x")],
             events: Vec::new(),
         };
@@ -1372,7 +1399,7 @@ mod tests {
     fn multiline_collection_only_takes_multiline_inputs() {
         let tree = ViewNode {
             id: "root".into(),
-            body: NodeBody::Column { gap: None, padding: None, cross_align: None },
+            body: NodeBody::Column { gap: None, padding: None, cross_align: None, width: None, max_width: None, align: None },
             children: vec![
                 text_input("single", "s"),
                 ViewNode {
@@ -1382,6 +1409,7 @@ mod tests {
                         placeholder: None,
                         multiline: Some(true),
                         password: None,
+                        read_only: None,
                     },
                     children: Vec::new(),
                     events: vec![EventKind::Change],

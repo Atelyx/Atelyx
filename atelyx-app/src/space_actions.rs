@@ -2758,6 +2758,28 @@ fn send_cmd(app: &App, cmd: atelyx_core::collab::SpaceCmd) {
     }
 }
 
+/// 插件通道前缀分隔：出站拼 `<插件 id>:<通道>`，入站按第一个分隔符拆回。
+/// 插件通道名自身不含 `:`（协议已校验），故首个分隔符恒为宿主加的前缀。
+pub(crate) const PLUGIN_CHANNEL_SEP: char = ':';
+
+/// 插件消息上行：通道在投递前加插件命名空间，同空间其他实例据此路由回本插件。
+pub(crate) fn send_plugin_message(
+    app: &App,
+    plugin_id: &str,
+    channel: &str,
+    payload: serde_json::Value,
+    target_peer_id: Option<u64>,
+) {
+    send_cmd(
+        app,
+        atelyx_core::collab::SpaceCmd::PluginMsg {
+            channel: format!("{plugin_id}{PLUGIN_CHANNEL_SEP}{channel}"),
+            payload,
+            target_peer_id,
+        },
+    );
+}
+
 /// note-sync 通道帧批量上行（帧 = 完整通道载荷，由 note_collab 产出）。
 fn send_note_frames(app: &App, file: &str, frames: Vec<Vec<u8>>) {
     if frames.is_empty() {
@@ -3100,6 +3122,27 @@ fn on_space_event(app: &mut App, event: atelyx_core::collab::SpaceEvent) -> Task
                     send_note_frames(app, &file, vec![step1]);
                 }
             }
+            Task::none()
+        }
+        E::PluginMsg { peer_id, channel, payload } => {
+            // 通道前缀由发送方宿主加：拆不出来或该插件不在跑即丢弃（消息不跨插件串道）
+            let Some((plugin_id, channel)) = channel.split_once(PLUGIN_CHANNEL_SEP) else {
+                return Task::none();
+            };
+            let peer_name = app
+                .space_peers
+                .iter()
+                .find(|peer| peer.peer_id == peer_id)
+                .map(|peer| peer.nickname.clone());
+            app.plugins.notify_collab_message(
+                plugin_id,
+                &atelyx_core::plugin_runtime::CollabMessageParams {
+                    channel: channel.to_string(),
+                    payload,
+                    peer_id,
+                    peer_name,
+                },
+            );
             Task::none()
         }
         E::Error { message } => {

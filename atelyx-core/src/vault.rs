@@ -1341,6 +1341,17 @@ pub fn read_file_bytes(root: &Path, file: &str) -> Result<Vec<u8>, String> {
     std::fs::read(&path).map_err(|e| e.to_string())
 }
 
+/// 读仓库内文件的前 `max_bytes` 字节（safe_join 防穿越）：
+/// 图片固有尺寸等只落在起始段的读取，不必整读大文件。
+pub fn read_file_head(root: &Path, file: &str, max_bytes: u64) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let path = safe_join(root, file, false)?;
+    let file = std::fs::File::open(&path).map_err(|e| e.to_string())?;
+    let mut buf = Vec::new();
+    file.take(max_bytes).read_to_end(&mut buf).map_err(|e| e.to_string())?;
+    Ok(buf)
+}
+
 // ===== 仓库级配置（.atelyx/config.json）=====
 
 /// 供应商下的单个模型：id = API 请求用的模型名；nickname = 可选显示昵称（缺省 = id）。
@@ -4187,6 +4198,28 @@ mod copy_folder_tests {
             .unwrap()
             .file_type()
             .is_symlink());
+    }
+}
+
+#[cfg(test)]
+mod read_file_head_tests {
+    use super::test_support::TempDir;
+    use super::read_file_head;
+
+    #[test]
+    fn head_reads_only_prefix_and_keeps_tail() {
+        let root = TempDir::new("readhead-prefix");
+        std::fs::write(root.join("a.bin"), b"0123456789").unwrap();
+        assert_eq!(read_file_head(&root, "a.bin", 4).unwrap(), b"0123");
+        // 限额大于文件长度时读到文件末尾
+        assert_eq!(read_file_head(&root, "a.bin", 99).unwrap(), b"0123456789");
+    }
+
+    #[test]
+    fn head_rejects_escape_and_missing() {
+        let root = TempDir::new("readhead-reject");
+        assert!(read_file_head(&root, "../out.bin", 8).is_err());
+        assert!(read_file_head(&root, "missing.bin", 8).is_err());
     }
 }
 

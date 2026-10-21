@@ -36,7 +36,18 @@ pub fn row(id: &str, children: Vec<ViewNode>) -> ViewNode {
 }
 
 pub fn column(id: &str, children: Vec<ViewNode>) -> ViewNode {
-    node(id, NodeBody::Column { gap: None, padding: None, cross_align: None }).with_children(children)
+    node(
+        id,
+        NodeBody::Column {
+            gap: None,
+            padding: None,
+            cross_align: None,
+            width: None,
+            max_width: None,
+            align: None,
+        },
+    )
+    .with_children(children)
 }
 
 /// 卡片容器：主题底 + 边框 + 圆角的分组盒（底色 / 圆角 / 边框由链式改字段指定）。
@@ -50,6 +61,9 @@ pub fn card(id: &str, children: Vec<ViewNode>) -> ViewNode {
             tone: None,
             radius: None,
             bordered: None,
+            width: None,
+            max_width: None,
+            align: None,
         },
     )
     .with_children(children)
@@ -66,11 +80,19 @@ pub fn divider(id: &str) -> ViewNode {
 }
 
 pub fn scroll(id: &str, children: Vec<ViewNode>) -> ViewNode {
-    node(id, NodeBody::Scroll { direction: None, gap: None }).with_children(children)
+    node(id, NodeBody::Scroll { direction: None, gap: None, height: None }).with_children(children)
 }
 
+/// 固定列数网格。
 pub fn grid(id: &str, columns: u32, children: Vec<ViewNode>) -> ViewNode {
-    node(id, NodeBody::Grid { columns, gap: None }).with_children(children)
+    node(id, NodeBody::Grid { columns: Some(columns), min_column_width: None, gap: None })
+        .with_children(children)
+}
+
+/// 按可用宽度换列的网格：每列不窄于 `min_column_width`，列数随宽度自适应。
+pub fn grid_min(id: &str, min_column_width: f32, children: Vec<ViewNode>) -> ViewNode {
+    node(id, NodeBody::Grid { columns: None, min_column_width: Some(min_column_width), gap: None })
+        .with_children(children)
 }
 
 pub fn list(id: &str, children: Vec<ViewNode>) -> ViewNode {
@@ -93,19 +115,31 @@ pub fn markdown(id: &str, content: impl Into<String>) -> ViewNode {
 }
 
 pub fn text_input(id: &str, value: impl Into<String>) -> ViewNode {
-    node(id, NodeBody::TextInput { value: value.into(), placeholder: None, multiline: None, password: None })
+    node(
+        id,
+        NodeBody::TextInput {
+            value: value.into(),
+            placeholder: None,
+            multiline: None,
+            password: None,
+            read_only: None,
+        },
+    )
 }
 
 pub fn number_input(id: &str, value: Option<f64>) -> ViewNode {
-    node(id, NodeBody::NumberInput { value, min: None, max: None, step: None, placeholder: None })
+    node(
+        id,
+        NodeBody::NumberInput { value, min: None, max: None, step: None, placeholder: None, read_only: None },
+    )
 }
 
 pub fn dropdown(id: &str, options: Vec<String>, selected: Option<u32>) -> ViewNode {
-    node(id, NodeBody::Dropdown { options, selected, placeholder: None })
+    node(id, NodeBody::Dropdown { options, selected, placeholder: None, read_only: None })
 }
 
 pub fn checkbox(id: &str, checked: bool) -> ViewNode {
-    node(id, NodeBody::Checkbox { checked, label: None })
+    node(id, NodeBody::Checkbox { checked, label: None, read_only: None })
 }
 
 pub fn button(id: &str, label: impl Into<String>, variant: ButtonVariant) -> ViewNode {

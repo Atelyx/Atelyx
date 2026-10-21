@@ -6,14 +6,14 @@
 
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::{
-    column, container, grid, image, keyed_column, mouse_area, progress_bar, row, space,
+    column, container, grid, image, keyed_column, mouse_area, progress_bar, responsive, row, space,
     text_editor, text_input, Stack,
 };
-use iced::{Color, Element, Length, Padding};
+use iced::{Color, Element, Length, Padding, Theme};
 
 use atelyx_core::plugin_runtime::{
-    Align, Axis, ButtonVariant, CardTone, ColorToken, ControlSize, EventKind, EventValue, Fill,
-    ImageFit, ImageSource, Justify, NodeBody, TextWeight, ViewEvent, ViewNode,
+    Align, Axis, ButtonVariant, CardTone, ColorToken, ControlSize, Dimension, EventKind, EventValue,
+    Fill, ImageFit, ImageSource, Justify, NodeBody, NodeWidth, TextWeight, ViewEvent, ViewNode,
 };
 
 use crate::plugin_actions::{contribution, declares, image_key, input_display, node_value_text, PopupEntry};
@@ -34,6 +34,7 @@ const EDITOR_H: f32 = 96.0;
 const CANVAS_DEFAULT_H: f32 = 160.0;
 
 /// 面身份与所在窗口（弹层与图标钮悬停提示都要窗口 id）。
+#[derive(Clone)]
 struct Ctx {
     plugin_id: String,
     surface_id: String,
@@ -125,7 +126,10 @@ pub(crate) fn surface_view<'a>(
     };
     let key = (ctx.plugin_id.clone(), ctx.surface_id.clone());
     let outer_pad = match contribution.padding {
-        Some(pad) => Padding::from(pad),
+        Some(pad) => {
+            let [top, right, bottom, left] = pad.edges();
+            Padding { top, right, bottom, left }
+        }
         None => Padding::ZERO.horizontal(12.0).vertical(10.0),
     };
     match app.plugin_trees.get(&key) {
@@ -173,18 +177,21 @@ fn render_node_in<'a>(
     fill_height: bool,
 ) -> Element<'a, Message> {
     match &node.body {
-        NodeBody::Column { gap, padding, cross_align } => {
+        NodeBody::Column { gap, padding, cross_align, width, max_width, align } => {
             let mut col = keyed_column(children(app, ctx, node))
-                .width(Length::Fill)
+                .width(node_width(*width))
                 .height(if fill_height { Length::Fill } else { Length::Shrink })
                 .spacing(gap.unwrap_or(DEFAULT_GAP));
             if let Some(pad) = padding {
                 col = col.padding(Padding::from(*pad));
             }
+            if let Some(max_width) = max_width {
+                col = col.max_width(*max_width);
+            }
             if let Some(align) = cross_align {
                 col = col.align_items(alignment(*align));
             }
-            col.into()
+            align_block(col.into(), *align, fill_height)
         }
         NodeBody::Row { gap, padding, justify, cross_align, fill } => {
             let spacing = gap.unwrap_or(DEFAULT_GAP);
@@ -236,20 +243,23 @@ fn render_node_in<'a>(
                     .into()
             }
         }
-        NodeBody::Card { gap, padding, accent, tone, radius, bordered } => {
+        NodeBody::Card { gap, padding, accent, tone, radius, bordered, width, max_width, align } => {
             let inner = keyed_column(children(app, ctx, node))
-                .width(Length::Fill)
+                .width(node_width(*width))
                 .height(Length::Shrink)
                 .spacing(gap.unwrap_or(DEFAULT_GAP));
             let style = card_style(accent.unwrap_or_default(), *tone, *radius, *bordered);
             let mut card = container(inner)
-                .width(Length::Fill)
+                .width(node_width(*width))
                 .padding(Padding::from(padding.unwrap_or(10.0)))
                 .style(move |_t| style);
+            if let Some(max_width) = max_width {
+                card = card.max_width(*max_width);
+            }
             if fill_height {
                 card = card.height(Length::Fill);
             }
-            card.into()
+            align_block(card.into(), *align, fill_height)
         }
         NodeBody::Stack {} => {
             let mut stack = Stack::new();
@@ -263,47 +273,62 @@ fn render_node_in<'a>(
                 element
             }
         }
-        NodeBody::Scroll { direction, gap } => {
+        NodeBody::Scroll { direction, gap, height } => {
             let spacing = gap.unwrap_or(DEFAULT_GAP);
             let axis = direction.unwrap_or(Axis::Vertical);
             let inner: Element<Message> = match axis {
+                // 纵向内容撑满视口宽度（自适应换行）；横向内容按自身宽度溢出
                 Axis::Horizontal => row(children_elements(app, ctx, node)).spacing(spacing).into(),
-                Axis::Vertical => column(children_elements(app, ctx, node)).spacing(spacing).into(),
+                Axis::Vertical => column(children_elements(app, ctx, node))
+                    .width(Length::Fill)
+                    .spacing(spacing)
+                    .into(),
             };
-            let scroll = match axis {
+            let mut scroll = match axis {
                 Axis::Horizontal => scroll::h(inner),
                 Axis::Vertical => scroll::v(inner),
-            };
-            scroll
-                .id(node_scroll_id(ctx, &node.id))
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .into()
+            }
+            .id(node_scroll_id(ctx, &node.id))
+            .width(Length::Fill)
+            .height(height.map_or(Length::Fill, Length::Fixed));
+            if declares(node, EventKind::Scroll) {
+                scroll = scroll.on_scroll(scroll_report(ctx, &node.id, axis));
+            }
+            scroll.into()
         }
-        NodeBody::Grid { columns, gap } => grid(children_elements(app, ctx, node))
-            .columns((*columns).max(1) as usize)
-            .spacing(gap.unwrap_or(DEFAULT_GAP))
-            .into(),
-        NodeBody::List { gap } => scroll::v(
-            keyed_column(children(app, ctx, node))
-                .width(Length::Fill)
-                .height(Length::Shrink)
-                .spacing(gap.unwrap_or(DEFAULT_GAP)),
-        )
-        .id(node_scroll_id(ctx, &node.id))
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into(),
+        NodeBody::Grid { columns, min_column_width, gap } => {
+            grid_node(app, ctx, node, *columns, *min_column_width, gap.unwrap_or(DEFAULT_GAP))
+        }
+        NodeBody::List { gap } => {
+            let mut list = scroll::v(
+                keyed_column(children(app, ctx, node))
+                    .width(Length::Fill)
+                    .height(Length::Shrink)
+                    .spacing(gap.unwrap_or(DEFAULT_GAP)),
+            )
+            .id(node_scroll_id(ctx, &node.id))
+            .width(Length::Fill)
+            .height(Length::Fill);
+            if declares(node, EventKind::Scroll) {
+                list = list.on_scroll(scroll_report(ctx, &node.id, Axis::Vertical));
+            }
+            list.into()
+        }
         NodeBody::Divider {} => controls::h_divider_subtle(),
         NodeBody::Text { content, size, weight, color, align } => {
             let line = text(content.as_str())
                 .size(pal::fs_body() * size.unwrap_or(1.0))
                 .font(weight.map(text_weight).unwrap_or_default())
                 .color(token_color(color.unwrap_or(ColorToken::Text)));
-            container(line)
-                .width(Length::Fill)
-                .align_x(horizontal(align.unwrap_or(Align::Start)))
-                .into()
+            // 声明对齐才占满父容器宽度（对齐只在该前提下有意义）；否则按内容宽度收缩，
+            // 让 shrink 容器能形成内容自适应气泡
+            match align {
+                Some(align) => container(line)
+                    .width(Length::Fill)
+                    .align_x(horizontal(*align))
+                    .into(),
+                None => line.into(),
+            }
         }
         NodeBody::Markdown { size, weight, color, .. } => {
             let key = (ctx.plugin_id.clone(), ctx.surface_id.clone(), node.id.clone());
@@ -327,27 +352,27 @@ fn render_node_in<'a>(
                 None => text("").into(),
             }
         }
-        NodeBody::TextInput { placeholder, multiline, password, .. } => {
-            if multiline.unwrap_or(false) {
-                multiline_input(app, ctx, node, placeholder.as_deref().unwrap_or_default())
+        NodeBody::TextInput { placeholder, multiline, password, read_only, .. } => {
+            let placeholder = placeholder.as_deref().unwrap_or_default();
+            if read_only.unwrap_or(false) {
+                let value = node_value_text(&node.body).unwrap_or_default();
+                read_only_field(&value, placeholder, password.unwrap_or(false), multiline.unwrap_or(false))
+            } else if multiline.unwrap_or(false) {
+                multiline_input(app, ctx, node, placeholder)
             } else {
-                single_line_input(
-                    app,
-                    ctx,
-                    node,
-                    placeholder.as_deref().unwrap_or_default(),
-                    password.unwrap_or(false),
-                )
+                single_line_input(app, ctx, node, placeholder, password.unwrap_or(false))
             }
         }
-        NodeBody::NumberInput { placeholder, .. } => single_line_input(
-            app,
-            ctx,
-            node,
-            placeholder.as_deref().unwrap_or_default(),
-            false,
-        ),
-        NodeBody::Dropdown { options, selected, placeholder } => {
+        NodeBody::NumberInput { placeholder, read_only, .. } => {
+            let placeholder = placeholder.as_deref().unwrap_or_default();
+            if read_only.unwrap_or(false) {
+                let value = node_value_text(&node.body).unwrap_or_default();
+                read_only_field(&value, placeholder, false, false)
+            } else {
+                single_line_input(app, ctx, node, placeholder, false)
+            }
+        }
+        NodeBody::Dropdown { options, selected, placeholder, read_only } => {
             let label = selected
                 .and_then(|index| options.get(index as usize))
                 .cloned()
@@ -364,15 +389,16 @@ fn render_node_in<'a>(
                     on_press: node_event(ctx, &node.id, ViewEvent::Change { value: EventValue::Number(index as f64) }),
                 })
                 .collect();
-            let open = declares(node, EventKind::Change).then(|| Message::PluginList {
-                window: ctx.window,
-                entries,
-            });
+            let open = (declares(node, EventKind::Change) && !read_only.unwrap_or(false))
+                .then(|| Message::PluginList {
+                    window: ctx.window,
+                    entries,
+                });
             controls::dropdown_trigger(&label, Length::Fill, open)
         }
-        NodeBody::Checkbox { checked, label } => {
+        NodeBody::Checkbox { checked, label, read_only } => {
             let state = if *checked { controls::CheckState::On } else { controls::CheckState::Off };
-            let on_press = declares(node, EventKind::Change).then(|| {
+            let on_press = (declares(node, EventKind::Change) && !read_only.unwrap_or(false)).then(|| {
                 node_event(ctx, &node.id, ViewEvent::Change { value: EventValue::Bool(!checked) })
             });
             match label {
@@ -507,6 +533,136 @@ fn children_elements<'a>(app: &'a App, ctx: &Ctx, node: &'a ViewNode) -> Vec<Ele
     node.children.iter().map(|child| render_node(app, ctx, child)).collect()
 }
 
+/// 容器宽度语义：缺省占满父容器。
+fn node_width(width: Option<NodeWidth>) -> Length {
+    match width {
+        Some(NodeWidth::Shrink) => Length::Shrink,
+        _ => Length::Fill,
+    }
+}
+
+/// 容器宽度小于父容器时的水平摆放（声明 `align` 才套占满宽度的外层）。
+fn align_block<'a>(
+    element: Element<'a, Message>,
+    align: Option<Align>,
+    fill_height: bool,
+) -> Element<'a, Message> {
+    match align {
+        Some(align) => {
+            let mut wrap = container(element)
+                .width(Length::Fill)
+                .align_x(horizontal(align));
+            if fill_height {
+                wrap = wrap.height(Length::Fill);
+            }
+            wrap.into()
+        }
+        None => element,
+    }
+}
+
+/// 滚动位置回发（主轴偏移 + 可滚动余量）；相同视口不重复发布由控件自身保证。
+fn scroll_report<'a>(
+    ctx: &Ctx,
+    node_id: &str,
+    axis: Axis,
+) -> impl Fn(iced::widget::scrollable::Viewport) -> Message + 'a {
+    let plugin_id = ctx.plugin_id.clone();
+    let surface_id = ctx.surface_id.clone();
+    let node_id = node_id.to_string();
+    move |viewport| {
+        let bounds = viewport.bounds();
+        let content = viewport.content_bounds();
+        let offset = viewport.absolute_offset();
+        let (offset, max_offset) = match axis {
+            Axis::Horizontal => (offset.x, (content.width - bounds.width).max(0.0)),
+            Axis::Vertical => (offset.y, (content.height - bounds.height).max(0.0)),
+        };
+        Message::PluginView {
+            plugin_id: plugin_id.clone(),
+            surface_id: surface_id.clone(),
+            node_id: node_id.clone(),
+            event: ViewEvent::Scroll { offset, max_offset },
+        }
+    }
+}
+
+/// 网格：`columns` 固定列数；`min_column_width` 按可用宽度换列（`columns` 同时给定时作列数上限）。
+fn grid_node<'a>(
+    app: &'a App,
+    ctx: &Ctx,
+    node: &'a ViewNode,
+    columns: Option<u32>,
+    min_column_width: Option<f32>,
+    gap: f32,
+) -> Element<'a, Message> {
+    let count = node.children.len().max(1);
+    let fixed = columns.map(|columns| columns.max(1) as usize);
+    let Some(min_column_width) = min_column_width else {
+        return grid(children_elements(app, ctx, node))
+            .columns(fixed.unwrap_or(1))
+            .spacing(gap)
+            .into();
+    };
+    let min_column_width = min_column_width.max(1.0);
+    // 列数随可用宽度变化：布局期取实际宽度算列，固定列数只作换列上限。
+    // 面身份按值进闭包——元素本身不借它，避免把整棵树的返回寿命绑到局部 `ctx`。
+    let ctx = ctx.clone();
+    responsive(move |size| {
+        let fit = ((size.width + gap) / (min_column_width + gap)).floor().max(1.0) as usize;
+        let columns = match fixed {
+            Some(fixed) => fit.min(fixed),
+            None => fit.min(count),
+        };
+        grid(children_elements(app, &ctx, node))
+            .columns(columns)
+            .spacing(gap)
+            .into()
+    })
+    .height(Length::Shrink)
+    .into()
+}
+
+/// 表单框外观（多行输入与只读多行共用：同款底色、边框、圆角）。
+fn form_box_style(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(pal::BG_TERTIARY.into()),
+        border: iced::border::rounded(pal::RADIUS_SM).color(pal::BORDER_STRONG).width(1.0),
+        ..container::Style::default()
+    }
+}
+
+/// 只读输入：保留表单外观但不接受编辑（单行用禁用态输入框，多行用同款静态框）。
+fn read_only_field<'a>(
+    value: &str,
+    placeholder: &str,
+    password: bool,
+    multiline: bool,
+) -> Element<'a, Message> {
+    if !multiline {
+        return text_input(placeholder, value)
+            .size(pal::fs_ui())
+            .font(crate::ui::regular())
+            .padding(Padding::ZERO.horizontal(INPUT_PAD_X).vertical(INPUT_PAD_Y))
+            .width(Length::Fill)
+            .secure(password)
+            .style(|_theme, status| controls::form_input_style(status))
+            .into();
+    }
+    let content = if value.is_empty() {
+        text(placeholder.to_string()).size(pal::fs_ui()).color(pal::INPUT_PLACEHOLDER)
+    } else {
+        text(value.to_string()).size(pal::fs_ui()).color(pal::TEXT_PRIMARY)
+    };
+    // 固定高度内可滚动：长文不裁切、也不把后面的节点挤出可视区
+    container(scroll::v(content).height(Length::Fill))
+        .width(Length::Fill)
+        .height(Length::Fixed(EDITOR_H))
+        .padding(Padding::ZERO.horizontal(INPUT_PAD_X).vertical(INPUT_PAD_Y))
+        .style(form_box_style)
+        .into()
+}
+
 /// 节点 id → 容器子项键（`keyed_column` 要求 `Copy + PartialEq`，故用 64 位哈希）。
 fn node_key(id: &str) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
@@ -577,11 +733,7 @@ fn multiline_input<'a>(
         return container(text(String::new()))
             .width(Length::Fill)
             .height(Length::Fixed(EDITOR_H))
-            .style(|_t| container::Style {
-                background: Some(pal::BG_TERTIARY.into()),
-                border: iced::border::rounded(pal::RADIUS_SM).color(pal::BORDER_STRONG).width(1.0),
-                ..container::Style::default()
-            })
+            .style(form_box_style)
             .into();
     };
     let (plugin_id, surface_id, node_id) = key;
@@ -608,28 +760,35 @@ fn multiline_input<'a>(
 }
 
 /// 界面图片：句柄已载入则呈现，否则给可读占位（载入任务由 `plugin_actions::refresh_projection` 发起）。
-/// `width` / `height` 给定时按该尺寸渲染（缺省按原图尺寸）。
+/// 尺寸缺省按原图；`fill` 占满父容器该轴。
 fn image_node<'a>(
     app: &'a App,
     plugin_id: &str,
     source: &ImageSource,
     fit: ImageFit,
-    width: Option<f32>,
-    height: Option<f32>,
+    width: Option<Dimension>,
+    height: Option<Dimension>,
 ) -> Element<'a, Message> {
     let handle = image_key(app, plugin_id, source).and_then(|key| app.note_images.get(&key).cloned());
     match handle {
         Some(handle) => {
             let mut widget = image(handle).content_fit(content_fit(fit));
-            if let Some(width) = width {
-                widget = widget.width(Length::Fixed(width));
+            if let Some(width) = width.map(image_length) {
+                widget = widget.width(width);
             }
-            if let Some(height) = height {
-                widget = widget.height(Length::Fixed(height));
+            if let Some(height) = height.map(image_length) {
+                widget = widget.height(height);
             }
             widget.into()
         }
         None => placeholder("image", "图片", "加载中或不可用"),
+    }
+}
+
+fn image_length(dimension: Dimension) -> Length {
+    match dimension {
+        Dimension::Fixed(value) => Length::Fixed(value),
+        Dimension::Fill => Length::Fill,
     }
 }
 

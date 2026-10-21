@@ -8,14 +8,16 @@ use atelyx_plugin_protocol::event::{
 use atelyx_plugin_protocol::handshake::{self, InitializeParams, InitializeResult};
 use atelyx_plugin_protocol::method::{
     CanvasResizedParams, CanvasSubmitParams, ChatHistoryParams, ChatRenameParams,
-    ChatSendParams, ChatSessionParams, DefineIconParams, DocCloseParams, DocOpenParams,
+    ChatSendParams, ChatSessionParams, CollabMessageParams, CollabPeersResult,
+    CollabSendParams, CollabSendResult, DefineIconParams, DocCloseParams, DocOpenParams,
     HttpRequestParams,
-    HttpResult, ListResult, PathParams, PickFileParams, PickedPath, ProcessEventParams,
-    RegisterParams, RegisterShortcutParams, RegisterToolParams, ScrollToParams,
+    HttpResult, ImageInfoResult, ListResult, PathParams, PickFileParams, PickedPath,
+    ProcessEventParams, RegisterParams, RegisterShortcutParams, RegisterToolParams,
+    ScrollToParams, SetTrayItemsParams,
     ShortcutQueryParams, ShortcutQueryResult,
     ShowNotificationParams, SurfaceAttachedParams, TableAddRowResult, TableRowIdParams,
     TableSetCellImageParams, TableSnapshot, TableUpdateCellParams, TakeoverParams, TextPayload,
-    ToolCallParams, ToolResultParams, UnregisterParams, UnregisterToolParams,
+    ToolCallParams, ToolResultParams, TrayClickParams, UnregisterParams, UnregisterToolParams,
     ViewEventParams, WindowCloseParams, WindowClosedParams, WindowIdParams, WindowOpenParams,
     WindowUpdateParams,
 };
@@ -242,6 +244,13 @@ fn method_type_shapes_are_frozen() {
             "UnregisterToolParams" => frozen_roundtrip::<UnregisterToolParams>(&value),
             "ToolCallParams" => frozen_roundtrip::<ToolCallParams>(&value),
             "ToolResultParams" => frozen_roundtrip::<ToolResultParams>(&value),
+            "ImageInfoResult" => frozen_roundtrip::<ImageInfoResult>(&value),
+            "SetTrayItemsParams" => frozen_roundtrip::<SetTrayItemsParams>(&value),
+            "TrayClickParams" => frozen_roundtrip::<TrayClickParams>(&value),
+            "CollabPeersResult" => frozen_roundtrip::<CollabPeersResult>(&value),
+            "CollabSendParams" => frozen_roundtrip::<CollabSendParams>(&value),
+            "CollabSendResult" => frozen_roundtrip::<CollabSendResult>(&value),
+            "CollabMessageParams" => frozen_roundtrip::<CollabMessageParams>(&value),
             other => panic!("语料 {name}: 未知类型 {other}"),
         };
         assert!(ok, "语料 {name}: 编码与快照不一致");

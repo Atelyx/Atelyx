@@ -17,7 +17,7 @@ Atelyx 的插件是一个**独立进程**：宿主启动它、通过标准输入
 | 信任模型 = 本地程序 | 宿主不做沙箱：插件本来就能读写文件、起进程、联网。「权限」是透明度与审计口径，不是隔离边界 |
 | 一个插件一个进程 | 宿主多窗口共享同一份进程；进程从启动到停用是一个「会话」 |
 
-生命周期：启用即启动 → 握手（`initialize`，10 秒内未完成判失败）→ 运行 → 停用 / 崩溃 / 卸载。崩溃按 `1s → 2s → 4s → 8s …`（上限 30s）退避重启，60 秒内崩 5 次熔断，用户在设置页可手动重试。停用会结束**整棵**进程树，并收掉插件经能力面创建的一切（托管子进程、全局热键、打开的窗口、注册的 AI 工具）。
+生命周期：启用即启动 → 握手（`initialize`，10 秒内未完成判失败）→ 运行 → 停用 / 崩溃 / 卸载。崩溃按 `1s → 2s → 4s → 8s …`（上限 30s）退避重启，60 秒内崩 5 次熔断，用户在设置页可手动重试。停用会结束**整棵**进程树，并收掉插件经能力面创建的一切（托管子进程、全局热键、托盘条目、打开的窗口、注册的 AI 工具）。
 
 ## 2. 环境准备
 
@@ -192,22 +192,27 @@ async fn main() {
 几条不在类型里的约定：
 
 - 颜色只用 `color` 引用主题 token（`text` / `textSecondary` / `textMuted` / `accent` / `danger` / `success` / `warning`），插件不写死色值，主题切换自动跟随；
-- `text` 的 `size` 是**字号倍率**（相对界面基准正文，缺省 1.0），写 `1.5` 即放大一半并跟随用户字号缩放；`align` 给水平对齐（`end` 右对齐气泡、`center` 居中标题）；
+- `text` 的 `size` 是**字号倍率**（相对界面基准正文，缺省 1.0），写 `1.5` 即放大一半并跟随用户字号缩放；`align` 给水平对齐（`end` 右对齐气泡、`center` 居中标题），**声明了 `align` 才占满父容器宽度**，不给就按内容宽度收缩；
+- 宽度控制：`column` / `card` 的 `width` 取 `fill`（占满，缺省）或 `shrink`（按内容收缩），配 `maxWidth` 与 `align` 就能做居中的窄阅读列表或内容自适应的右对齐气泡；
 - 行内 `Fill` 子项按内容宽解析，要均分剩余宽度用行的 `fill`（`both` / `width`）；工具行左右分布用 `justify: "spaceBetween"`；
+- `grid` 两种列法：`columns` 固定列数，`minColumnWidth` 按可用宽度自动换列（面板变窄时不会把各列一起挤扁），同时给定时后者只作列数上限；都不给按单列；
 - `card` 的底色档 `tone`（`default` / `muted` / `accentSoft` / `transparent`）、圆角 `radius`、边框开关 `bordered` 可调；分组内轻分割用 `divider`；`stack` 把子节点叠起来（后提交的在上，可做「画布当底 + 控件叠其上」）；
-- `image` 给 `width` / `height` 即按该尺寸渲染（缺省按原图尺寸）；声明 `click` 事件即可点击；
+- `image` 的 `width` / `height`：数字 = 固定像素，`"fill"` = 占满父容器该轴，都不给按原图尺寸；`fit` 决定尺寸内的适配方式（缺省 `contain`——不裁切不拉伸、留空边；`cover` 铺满并裁掉溢出；`fill` 拉伸），要看原图长宽用 `ctx.vault_image_info(path)` 取；声明 `click` 事件即成为可点击图片（大图预览入口）；
 - `iconButton` 的图标名默认取自宿主内置形状表（lucide 线性图标）；先用 `ctx.define_icon(name, path)` 登记自备的 24x24 描边路径，即可用自己的图形（`size` 档 `sm`/`md`/`lg`，`variant` 复用按钮档位，`hoverOnly` 悬停才显示）；同一批自备名也可用作贡献注册的 `icon`（面板标签头 / 设置 tab / 文档类型图标）；
 - `markdown` 的 `content` 用笔记同源解析器渲染，`size` 是整体字号倍率，`weight` / `color` 覆盖基础字重与文字色（标题与加粗片段恒为加粗，链接与代码块语义色不受影响）；正文里的链接可点击，宿主按形态默认打开（外链 / wiki / 仓库路径），节点声明 `linkClick` 时同时回发链接点击事件；
 - `menu` 的 `label` 与 `icon` 可并存（并存为紧凑的「图标 + 文字」触发钮），只给 `label` 才是全宽下拉钮；条目可标 `current`（宿主在条目前画勾）；
-- 可滚动容器（`list` / `scroll`）用 `ctx.scroll_to(surface, node, ScrollEdge::End)` 滚到底，无需插件自己维护滚动状态；`scroll` 的 `direction` 决定子项排布与滚动主轴（`horizontal` = 子项排成行并横向滚动）。
+- 可滚动容器（`list` / `scroll`）用 `ctx.scroll_to(surface, node, ScrollEdge::End)` 滚到主轴一端，无需插件自己维护滚动状态；`scroll` 的 `direction` 决定子项排布与滚动主轴（`horizontal` = 子项排成行并横向滚动），`height` 给定即收住自身高度（把横向图条嵌进纵向内容流），缺省占满父容器剩余高度；
+- 输入控件（`textInput` / `numberInput` / `dropdown` / `checkbox`）给 `readOnly: true` 即保留控件外观展示只读值，不接受编辑、不产生事件；
+- 滚动位置：给 `list` / `scroll` 节点声明 `scroll` 事件，宿主就回发 `{ offset, maxOffset }`（主轴当前偏移与可滚动余量，`offset >= maxOffset` 即停在末端）。内容不足一屏没有可滚动余量，不会发事件。「用户停在底部才跟随最新」「滚离底部时露出回底入口」都按这一对值判断，不用插件自己记账。
 
 ### 5.2 事件与取值
 
-节点在 `events` 里声明了哪几种，宿主才回发哪几种（`click` / `change` / `submit` / `linkClick`，`focus` / `blur` 为保留种类、当前无控件产出）。事件值按控件定型：
+节点在 `events` 里声明了哪几种，宿主才回发哪几种（`click` / `change` / `submit` / `linkClick` / `scroll`，`focus` / `blur` 为保留种类、当前无控件产出）。事件值按控件定型：
 
 - 文本类 → 字符串；`submit` 只在单行输入回车时触发；
 - 数字输入 → 数值（不可解析为数值不发事件；清空 → `null`，与 0 区分）；
 - 勾选 → 布尔；下拉 → 选中项**下标**；菜单条目 → 条目的 `action` 字符串；
+- 滚动容器（`list` / `scroll`）→ `{ offset, maxOffset }`（主轴当前偏移与可滚动余量）；
 - `markdown` 链接点击 → `{ href, form }`（`form` 为 `external` / `wiki` / `path`；可新建与未识别链接不可点，不产生事件）；`href` 是源文本原样（未解码，wiki 即笔记名），声明与否不影响宿主默认打开。
 
 三者的完整声明见 [API 参考 · 视图事件与指针](plugin-api.md#4-视图事件与指针)。
@@ -222,7 +227,7 @@ async fn main() {
 
 ### 5.5 面外层内边距
 
-面板、表格视图与设置页这三个面，宿主默认在根树外层加 12/10 的内边距；整页接管与插件窗口不加。注册贡献时给 `padding`（px）可改这个值，`0` 即贴边。需要贴边的内容也可放进接管面或窗口面；面板里不要自带同样的外边距（会叠加）。
+面板、表格视图与设置页这三个面，宿主默认在根树外层加 12/10 的内边距；整页接管与插件窗口不加。注册贡献时给 `padding` 可改这个值：数字 = 四边等距（`0` 即贴边），也可按轴 `{ "horizontal": 16, "vertical": 8 }` 或按边 `{ "top": 4, "right": 0, "bottom": 4, "left": 0 }` 声明。需要贴边的内容也可放进接管面或窗口面；面板里不要自带同样的外边距（会叠加）。
 
 ## 6. 自绘画布
 
@@ -232,7 +237,7 @@ async fn main() {
 ctx.submit_canvas("main", "board", commands).await?;   // 整发整换，空清单 = 清空
 ```
 
-指令集是封闭枚举：线 / 矩形（含圆角）/ 路径（折线·多边形）/ 圆 / 文字 / 图片贴片，`fill` 与 `stroke` 至少给一个。字段与校验规则见 [API 参考 · 自绘画布](plugin-api.md#5-自绘画布)（`DrawCommand`）。
+指令集是封闭枚举：线 / 矩形（含圆角）/ 路径（折线·多边形）/ 圆 / 文字 / 图片贴片，`fill` 与 `stroke` 至少给一个。图片贴片的 `fit` 缺省 = 按给定矩形拉伸；`contain` / `cover` 走等比（cover 的溢出部分裁掉），原图长宽用 `ctx.vault_image_info(path)` 取。字段与校验规则见 [API 参考 · 自绘画布](plugin-api.md#5-自绘画布)（`DrawCommand`）。
 
 坐标一律画布本地逻辑像素、左上原点，宿主不做坐标变换（平移缩放由插件算好坐标）。颜色双轨：`{ "type": "token", "name": "accent" }` 跟主题，`{ "type": "rgba", "rgba": [r,g,b,a] }` 用于内容谱系色（连线分类、播放头等）。
 
@@ -252,7 +257,7 @@ ctx.submit_canvas("main", "board", commands).await?;   // 整发整换，空清�
 | --- | --- |
 | `state` | 按插件隔离的自持 JSON，落 `<插件目录>/data/state.json`；损坏时宿主先备份原文再降级 |
 | `fs` | `private_dir()` 给私有数据目录；其余接受**任意绝对路径**，父目录自动创建 |
-| `vault` | 路径相对当前仓库根，不能越出仓库、不开放隐藏段；本地仓库与协作空间同构；**正被编辑器打开的文件拒写**。文本与二进制两条通道，二进制单次上限 32 MiB（更大的文件请用 `fs`） |
+| `vault` | 路径相对当前仓库根，不能越出仓库、不开放隐藏段；本地仓库与协作空间同构；**正被编辑器打开的文件拒写**。文本与二进制两条通道，二进制单次上限 32 MiB（更大的文件请用 `fs`）。`vault_image_info` 只解文件头给出图片固有像素尺寸（png / jpeg / gif / bmp / webp），不送回文件内容 |
 | `table` | 读写当前打开的表格。真源在宿主，写入与用户编辑同一出口（合并落盘 + 协作补丁）；**禁止**用 `fs` 旁路读写 `.atb`。快照含列宽、行内单元格样式与用户当前选区；向图片字段写图片用 `table_set_cell_image`（图片先经 `vault_write_binary` 落仓库，再传仓库相对路径） |
 | `notification` | 应用内通知条 |
 | `shortcuts` | 系统级全局快捷键（如 `Shift+Alt+E`）；被占用时注册返回可读错误，停用自动注销；同一组键重复注册幂等，触发上报的是最后一次注册的写法。`query_shortcut` 可事前问某键位是否被占用（`owner` 为占用方插件 id；被系统 / 其他应用占用时为缺省） |
@@ -262,7 +267,8 @@ ctx.submit_canvas("main", "board", commands).await?;   // 整发整换，空清�
 | `process` | 托管子进程：输出与退出经 `host:process.event` 转发；停用 / 崩溃 / 卸载时连同子孙进程一起结束 |
 | `window` | 见 §8.2 |
 | `ai` | 见 §8.4 |
-| `tray` / `collab` | 预留，当前没有对应方法 |
+| `tray` | 见 §8.6 |
+| `collab` | 见 §8.7 |
 
 `vault` 的读写**必须**经能力面：直接改盘会绕过写盘队列与协作通道，属于内容丢失级缺陷。
 
@@ -361,6 +367,37 @@ ctx.subscribe("ai:chat.changed").await?; // AI 会话内容变更（含对话面
 - `ai:chat.changed` payload：`{ sessionId, kind }`，`kind` 为 `created` / `messages` / `meta` / `deleted`（新会话、消息增减、标题或 Agent 等元数据变化、删除）。只在变更提交后广播、不补发历史，需要当前内容用 `ctx.chat_history` 重读。
 - `table:changed` payload 是当前表格的仓库相对路径；订阅时会先补发一次当前状态（迟到订阅不丢当前表格）。
 
+### 8.6 系统托盘
+
+```rust
+ctx.tray_set_items(vec![
+    TrayItemSpec { id: "open".into(), label: "打开面板".into(), enabled: None },
+    TrayItemSpec { id: "pause".into(), label: "暂停".into(), enabled: Some(false) },
+]).await?;   // 整发整换本插件的条目；空清单 = 收起
+```
+
+- 全应用共用一枚托盘图标，图标只在「还有条目」时出现；各插件的条目按插件 id 排序，宿主自有的「显示主窗口 / 退出」恒在末尾。
+- 用户点击经 `on_tray_click` 回发条目 `id`；置灰条目（`enabled: false`）不响应。
+- 至多 32 条，`id` 与文字都要非空、`id` 不得重复，违反即整批拒绝并给可读原因。
+- 停用 / 崩溃 / 卸载时宿主摘掉本插件的条目，重启后需要重新提交；插件不必自己收尾。
+- 托盘目前只有 Windows 实现，其余平台调用返回可读错误。按失败降级、不要在循环里重试，也别把托盘当必需的入口。
+
+### 8.7 同空间插件互联
+
+只在协作空间里生效，收发双方是**同一空间的同一个插件的其他实例**（各客户端上跑着的本插件）。
+
+```rust
+let peers = ctx.collab_peers().await?;      // connected / selfId / peers（不含自己）
+let sent = ctx.collab_send("sync", payload, None).await?;   // None = 广播给全部对端
+if !sent.queued { /* 本机没连上空间 */ }
+ctx.collab_send("sync", payload, Some(&peers.peers[0].peer_id)).await?;   // 定向单播
+```
+
+- 通道名按插件命名空间隔离：宿主在投递时给通道加上发送方插件 id 前缀，收端只会拿到**同一插件的其他实例**发出的消息，`on_collab_message` 里的 `channel` 已去掉前缀。通道名非空、不含 `:`、不超过 64 字符。
+- `peerId` 取 `collab_peers()` 里的原值，不要自己拼或猜。未连接空间时 `peers` 为空、`connected = false`；`send` 回 `queued = false`（这是状态而非错误），`queued = true` 只表示已交本机连接发出，不代表对端收到。
+- **广播不会回到发送方自己**；自己那份要显示在自己的界面上，请本地回显。
+- 断线期间的广播由服务端短期缓存并在重连后补投（缓存有容量上限，超出后补不回来）；定向单播不缓存、不补投。把这条通道当「在线提示」用，需要可靠的共享请落在仓库内容上。
+
 ## 9. 构建与打包
 
 ```bash
@@ -433,4 +470,5 @@ Linux 上宿主会为入口补可执行位（zip 不保留权限位也不影响�
 
 - `apiVersion` 是硬闸门：宿主只接受完全相等的版本，版本不符的插件响亮拒绝，不做兼容推断。协议破坏性变更一定伴随 `apiVersion` 递增。
 - 控件集、事件、贡献槽位、画布指令都是封闭枚举，扩容随协议升版；未知取值会被拒绝而不是被忽略。
+- 扩容只加不改：新增的控件字段都可缺省（旧树照常解析），SDK 的 `PluginHandler` 新增通知回调都带缺省实现，不重写即忽略。
 - 插件应把「宿主关闭 stdin」当作正常退出信号，不要依赖宿主发来的额外终止通知。

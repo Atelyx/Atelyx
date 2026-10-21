@@ -11,8 +11,9 @@ use iced::{border, widget::container::Style, Element, Length, Padding, Task};
 
 use atelyx_core::plugin_runtime::market::{self, MarketSnapshot};
 use atelyx_core::plugin_runtime::{
-    AuditRecord, ClipboardImage, DialogKind, DialogRequest, HostRequest, InstallOutcome,
-    NotificationLevel, Permission, PluginEvent, PluginRuntime, PluginStatus, PluginSummary,
+    AuditRecord, ClipboardImage, CollabPeer, CollabPeersResult, CollabSendParams, CollabSendResult,
+    DialogKind, DialogRequest, HostRequest, ImageInfoResult, InstallOutcome, NotificationLevel,
+    Permission, PluginEvent, PluginRuntime, PluginStatus, PluginSummary, SetTrayItemsParams,
     MAX_VAULT_BINARY_BYTES,
 };
 
@@ -169,9 +170,17 @@ pub enum PluginsMsg {
     VaultWriteBinary { request_id: u64, path: String, bytes: Vec<u8> },
     VaultList { request_id: u64, path: String },
     VaultExists { request_id: u64, path: String },
+    /// 图片固有像素尺寸（只读文件头，不送回内容）。
+    VaultImageInfo { request_id: u64, path: String },
     VaultCallDone { request_id: u64, result: Result<serde_json::Value, String> },
     /// 表格只读快照（读壳的表格会话；写走表格消息流）。
     TableSnapshot { request_id: u64 },
+    /// 系统托盘条目整发整换（空清单 = 收起该插件条目）。
+    TraySetItems { request_id: u64, plugin_id: String, params: SetTrayItemsParams },
+    /// 协作空间在场成员（未连接 = `connected: false`）。
+    CollabPeers { request_id: u64 },
+    /// 向同空间对等插件发消息（通道加插件前缀，未连接时回 `queued: false`）。
+    CollabSend { request_id: u64, plugin_id: String, params: CollabSendParams },
 }
 
 /// 订阅标识：运行时 `Arc` 指针哈希（同一运行时不重建订阅流）。
@@ -296,6 +305,18 @@ pub fn host_requests_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<It
                 HostRequest::VaultExists { request_id, path, .. } => {
                     Message::Plugins(PluginsMsg::VaultExists { request_id, path })
                 }
+                HostRequest::VaultImageInfo { request_id, path, .. } => {
+                    Message::Plugins(PluginsMsg::VaultImageInfo { request_id, path })
+                }
+                HostRequest::TraySetItems { plugin_id, request_id, params } => {
+                    Message::Plugins(PluginsMsg::TraySetItems { request_id, plugin_id, params })
+                }
+                HostRequest::CollabPeers { request_id, .. } => {
+                    Message::Plugins(PluginsMsg::CollabPeers { request_id })
+                }
+                HostRequest::CollabSend { plugin_id, request_id, params } => {
+                    Message::Plugins(PluginsMsg::CollabSend { request_id, plugin_id, params })
+                }
                 // 表格读写：读走本页回填；写出壳的表格消息流承担（与本地编辑同一出口，
                 // 自动保存期限与 table:changed 广播都由该流统一处理）
                 HostRequest::TableSnapshot { request_id, .. } => {
@@ -413,6 +434,7 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
         }
         PluginsMsg::Uninstalled(id, result) => {
             app.plugins_state.installing = false;
+            app.tray.remove_plugin(&id);
             match result {
                 Ok(()) => {
                     app.plugins_state.detail = None;
@@ -793,8 +815,57 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
                 }
             }
         }
+        PluginsMsg::VaultImageInfo { request_id, path } => {
+            let rel = match tool_path(Some(&path)) {
+                Ok(rel) => rel,
+                Err(e) => return resolve_vault(app, request_id, Err(e)),
+            };
+            match app.repo_kind.clone() {
+                crate::RepoKind::Local => match app.vault.root() {
+                    Ok(root) => Task::perform(
+                        async move { run_blocking(move || read_image_info(&root, &rel)).await },
+                        move |result| Message::Plugins(PluginsMsg::VaultCallDone { request_id, result }),
+                    ),
+                    Err(e) => resolve_vault(app, request_id, Err(e)),
+                },
+                crate::RepoKind::Space(space) => {
+                    let (client, space_id) = (space.client.clone(), space.space_id.clone());
+                    Task::perform(
+                        async move {
+                            // 空间侧无区间读接口，取回整文件后仍只解析起始段（服务端单文件限额封顶）
+                            let bytes = client
+                                .get_file_bytes(&space_id, &rel)
+                                .await
+                                .map_err(|e| e.to_string())?;
+                            let head = &bytes[..bytes.len().min(IMAGE_HEADER_BYTES as usize)];
+                            image_info_json(head, &rel)
+                        },
+                        move |result| Message::Plugins(PluginsMsg::VaultCallDone { request_id, result }),
+                    )
+                }
+            }
+        }
         PluginsMsg::VaultCallDone { request_id, result } => {
             resolve_vault(app, request_id, result)
+        }
+        PluginsMsg::TraySetItems { request_id, plugin_id, params } => {
+            let result = app
+                .tray
+                .set_items(&plugin_id, &params.items)
+                .map(|_| serde_json::json!({}));
+            app.plugins.resolve_shell_call(request_id, result);
+            Task::none()
+        }
+        PluginsMsg::CollabPeers { request_id } => {
+            let result = serde_json::to_value(collab_peers(app))
+                .map_err(|e| format!("协作成员序列化失败：{e}"));
+            app.plugins.resolve_shell_call(request_id, result);
+            Task::none()
+        }
+        PluginsMsg::CollabSend { request_id, plugin_id, params } => {
+            let result = collab_send(app, &plugin_id, params);
+            app.plugins.resolve_shell_call(request_id, result);
+            Task::none()
         }
         PluginsMsg::TableSnapshot { request_id } => {
             let snapshot: atelyx_core::plugin_runtime::TableSnapshot = match &app.table {
@@ -885,6 +956,72 @@ fn vault_binary_too_large() -> String {
         "文件超过仓库二进制上限（{} MiB），请改用 fs",
         MAX_VAULT_BINARY_BYTES / (1024 * 1024)
     )
+}
+
+/// 读图片尺寸只需文件头，按此上限取前缀（各支持格式的尺寸字段都在起始段内）。
+const IMAGE_HEADER_BYTES: u64 = 4 * 1024 * 1024;
+
+/// 本地读图片固有尺寸：超限的大图也能取（只读文件头前缀，不整读文件）。
+fn read_image_info(root: &std::path::Path, rel: &str) -> Result<serde_json::Value, String> {
+    let head =
+        vault::read_file_head(root, rel, IMAGE_HEADER_BYTES).map_err(|e| format!("读取图片失败（{rel}）：{e}"))?;
+    image_info_json(&head, rel)
+}
+
+/// 图片头 → 协议尺寸；认不出格式可读失败（插件据此提示而不是拿 0 继续画）。
+fn image_info_json(bytes: &[u8], rel: &str) -> Result<serde_json::Value, String> {
+    let (width, height) = crate::canvas_actions::image_dimensions(bytes);
+    if width == 0 || height == 0 {
+        return Err(format!("不是可识别的图片（png / jpeg / gif / bmp / webp）：{rel}"));
+    }
+    serde_json::to_value(ImageInfoResult { width, height })
+        .map_err(|e| format!("图片尺寸序列化失败：{e}"))
+}
+
+/// 当前空间的在场清单：未连接时只给 `connected: false`（名册是连接期快照，断开即失效）。
+fn collab_peers(app: &App) -> CollabPeersResult {
+    if !app.space_connected {
+        return CollabPeersResult::default();
+    }
+    CollabPeersResult {
+        connected: true,
+        self_id: app.space_own_peer_id.clone(),
+        peers: app
+            .space_peers
+            .iter()
+            .map(|peer| CollabPeer {
+                peer_id: peer.peer_id.clone(),
+                name: Some(peer.nickname.clone()),
+            })
+            .collect(),
+    }
+}
+
+/// 发一条插件消息：未连接时按协议回 `queued: false`（不是错误）；对端 id 非法是可读失败。
+fn collab_send(
+    app: &App,
+    plugin_id: &str,
+    params: CollabSendParams,
+) -> Result<serde_json::Value, String> {
+    let target = match params.target_peer_id {
+        Some(id) => Some(
+            id.parse::<u64>()
+                .map_err(|_| format!("对端 id 无效：{id}"))?,
+        ),
+        None => None,
+    };
+    let queued = app.space_connected && app.space_cmds.is_some();
+    if queued {
+        crate::space_actions::send_plugin_message(
+            app,
+            plugin_id,
+            &params.channel,
+            params.payload,
+            target,
+        );
+    }
+    serde_json::to_value(CollabSendResult { queued })
+        .map_err(|e| format!("协作发送结果序列化失败：{e}"))
 }
 
 /// 读系统剪贴板里的图片并编成 PNG（阻塞调用，在任务线程池执行）。像素读取走常驻剪贴板线程
@@ -1054,16 +1191,22 @@ pub fn on_event(app: &mut App, event: PluginEvent) {
                 format!("插件 {id} 调用了未声明的能力：{method}"),
             );
         }
-        PluginEvent::StatusChanged { id, status } => match status {
-            PluginStatus::Failed(reason) => {
-                app.notify(NoticeLevel::Error, format!("插件 {id} 启动失败：{reason}"));
+        PluginEvent::StatusChanged { id, status } => {
+            // 进程不在跑就不再持有托盘条目（重启后由插件重新提交）
+            if *status != PluginStatus::Running {
+                app.tray.remove_plugin(id);
             }
-            PluginStatus::CircuitBroken => app.notify(
-                NoticeLevel::Error,
-                format!("插件 {id} 连续崩溃，已熔断；可在设置中重试"),
-            ),
-            _ => {}
-        },
+            match status {
+                PluginStatus::Failed(reason) => {
+                    app.notify(NoticeLevel::Error, format!("插件 {id} 启动失败：{reason}"));
+                }
+                PluginStatus::CircuitBroken => app.notify(
+                    NoticeLevel::Error,
+                    format!("插件 {id} 连续崩溃，已熔断；可在设置中重试"),
+                ),
+                _ => {}
+            }
+        }
         // 界面 / 贡献 / AI 工具变化由壳的投影刷新统一处理（见 main.rs 的事件分支）
         PluginEvent::ViewSubmitted { .. }
         | PluginEvent::ContributionsChanged { .. }

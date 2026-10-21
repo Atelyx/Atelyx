@@ -80,6 +80,14 @@ pub enum NodeBody {
         padding: Option<f32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cross_align: Option<Align>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        width: Option<NodeWidth>,
+        /// 最大宽度（px）：配合 `align` 得到居中的窄阅读列，配合 `shrink` 形成内容自适应气泡。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_width: Option<f32>,
+        /// 宽度不足父容器时的水平摆放（`center` 居中、`end` 右对齐）；缺省靠左。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        align: Option<Align>,
     },
     /// 卡片容器：主题化背景 + 边框 + 圆角的分组盒（列表条目、信息分组）。
     Card {
@@ -99,6 +107,15 @@ pub enum NodeBody {
         /// 是否画边框；缺省 true。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         bordered: Option<bool>,
+        /// 缺省 `fill`（同 `Column`）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        width: Option<NodeWidth>,
+        /// 最大宽度（px）：配合 `align` 得到居中的窄卡片。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_width: Option<f32>,
+        /// 宽度不足父容器时的水平摆放（`center` 居中、`end` 右对齐）；缺省靠左。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        align: Option<Align>,
     },
     /// 叠层：子节点按提交顺序重叠（后提交的在上），同尺寸对齐于左上角。
     /// 用于「自绘画布当底 + 宿主控件叠其上」或徽标叠图。
@@ -109,14 +126,23 @@ pub enum NodeBody {
         direction: Option<Axis>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         gap: Option<f32>,
+        /// 交叉轴高度（px）：纵向滚动时收住自身高度，横向滚动时按该高度做图条；
+        /// 缺省占满父容器剩余高度。节点声明 `scroll` 事件即上报滚动位置。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        height: Option<f32>,
     },
+    /// 网格：`columns` 固定列数；`min_column_width` 按可用宽度换列（`columns` 同时给定时作列数上限）。
+    /// 二者都缺省按单列渲染。
     Grid {
-        columns: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        columns: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        min_column_width: Option<f32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         gap: Option<f32>,
     },
     /// 可滚动列表：语义等同纵向 scroll + column（宿主对子项按键复用控件态）。
-    /// 滚动位置由宿主经 `view.scrollTo` 指令控制（插件侧无滚动事件）。
+    /// 位置可用 `view.scrollTo` 指令控制；声明 `scroll` 事件即上报滚动位置。
     List {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         gap: Option<f32>,
@@ -130,7 +156,7 @@ pub enum NodeBody {
         weight: Option<TextWeight>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         color: Option<ColorToken>,
-        /// 水平对齐（节点宽度恒占满父容器）：`end` 用于右对齐气泡，`center` 用于居中标题。
+        /// 水平对齐：声明后节点占满父容器并按该值摆放入文本；缺省按内容宽度收缩。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         align: Option<Align>,
     },
@@ -161,6 +187,9 @@ pub enum NodeBody {
         multiline: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         password: Option<bool>,
+        /// 只读：保留输入控件外观但不接受编辑，不产生事件。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        read_only: Option<bool>,
     },
     NumberInput {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -173,6 +202,9 @@ pub enum NodeBody {
         step: Option<f64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         placeholder: Option<String>,
+        /// 只读：保留输入控件外观但不接受编辑、无步进，不产生事件。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        read_only: Option<bool>,
     },
     Dropdown {
         options: Vec<String>,
@@ -181,12 +213,18 @@ pub enum NodeBody {
         selected: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         placeholder: Option<String>,
+        /// 只读：保留触发钮外观但不展开、不产生事件。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        read_only: Option<bool>,
     },
     Checkbox {
         #[serde(default)]
         checked: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         label: Option<String>,
+        /// 只读：保留勾选态展示但不响应点击。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        read_only: Option<bool>,
     },
     Button {
         label: String,
@@ -215,16 +253,18 @@ pub enum NodeBody {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         hover_only: Option<bool>,
     },
-    /// 图片：`width` / `height` 给定时按该尺寸渲染（缺省按原图尺寸）；
+    /// 图片：`width` / `height` 给定时按该尺寸渲染（数字 = px，`"fill"` = 撑满父容器该轴；
+    /// 缺省按原图尺寸）；`fit` 决定尺寸内的适配方式，缺省 `contain`（不裁切不拉伸）。
     /// 节点声明 `click` 事件即成为可点击图片（大图预览入口）。
     Image {
         source: ImageSource,
+        /// 尺寸内适配：`contain` 完整可见、`cover` 铺满并裁掉溢出、`fill` 拉伸铺满。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         fit: Option<ImageFit>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        width: Option<f32>,
+        width: Option<Dimension>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        height: Option<f32>,
+        height: Option<Dimension>,
     },
     Progress {
         /// 0.0 ~ 1.0；越界值宿主钳制。
@@ -327,6 +367,114 @@ pub enum Fill {
     Both,
     /// 仅宽度撑满（高度仍按内容：工具行的左右分布）。
     Width,
+}
+
+/// 容器宽度语义（[`NodeBody::Column`] / [`NodeBody::Card`] 的 `width`）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NodeWidth {
+    /// 占满父容器可用宽度（缺省）。
+    Fill,
+    /// 按内容宽度收缩（右对齐气泡、贴内容边界的卡片）。
+    Shrink,
+}
+
+/// 内边距声明：数字 = 四边等距；`{horizontal, vertical}` = 分轴；`{top, right, bottom, left}` = 分边。
+/// 两个对象形态都不接受未声明字段，避免分边写法被分轴形态吞掉。
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PaddingSpec {
+    All(f32),
+    Axes(AxesPadding),
+    Edges(EdgesPadding),
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AxesPadding {
+    #[serde(default)]
+    pub horizontal: f32,
+    #[serde(default)]
+    pub vertical: f32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EdgesPadding {
+    #[serde(default)]
+    pub top: f32,
+    #[serde(default)]
+    pub right: f32,
+    #[serde(default)]
+    pub bottom: f32,
+    #[serde(default)]
+    pub left: f32,
+}
+
+impl PaddingSpec {
+    /// 四边取值（上 / 右 / 下 / 左）；宿主据此校验并换算成自身布局类型。
+    pub fn edges(self) -> [f32; 4] {
+        match self {
+            Self::All(value) => [value; 4],
+            Self::Axes(axes) => [axes.vertical, axes.horizontal, axes.vertical, axes.horizontal],
+            Self::Edges(edges) => [edges.top, edges.right, edges.bottom, edges.left],
+        }
+    }
+}
+
+/// 图片单轴尺寸：数字 = 固定像素；`"fill"` = 占满父容器该轴。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Dimension {
+    Fixed(f32),
+    Fill,
+}
+
+impl Serialize for Dimension {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Fixed(value) => serializer.serialize_f32(*value),
+            Self::Fill => serializer.serialize_str("fill"),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Dimension {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct DimensionVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for DimensionVisitor {
+            type Value = Dimension;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("像素数字或 \"fill\"")
+            }
+
+            fn visit_f32<E: serde::de::Error>(self, value: f32) -> Result<Dimension, E> {
+                Ok(Dimension::Fixed(value))
+            }
+
+            fn visit_f64<E: serde::de::Error>(self, value: f64) -> Result<Dimension, E> {
+                Ok(Dimension::Fixed(value as f32))
+            }
+
+            fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<Dimension, E> {
+                Ok(Dimension::Fixed(value as f32))
+            }
+
+            fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<Dimension, E> {
+                Ok(Dimension::Fixed(value as f32))
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Dimension, E> {
+                match value {
+                    "fill" => Ok(Dimension::Fill),
+                    other => Err(E::unknown_variant(other, &["fill"])),
+                }
+            }
+        }
+
+        deserializer.deserialize_any(DimensionVisitor)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -454,12 +602,16 @@ pub enum EventKind {
     Blur,
     /// Markdown 正文内的链接点击（仅 `markdown` 节点；宿主默认打开行为不受声明影响）。
     LinkClick,
+    /// 滚动位置变化（仅 `scroll` / `list` 节点）：滚动时回发当前偏移与可滚动余量；
+    /// 内容不足一屏时没有滚动，不发事件。
+    Scroll,
 }
 
 /// 宿主回发给插件的事件负载。`change`/`submit` 携带新值；菜单条目选择复用 `change`，
 /// 值为条目的 `action` 文本（[`EventValue::Text`]）。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(rename_all_fields = "camelCase")]
 pub enum ViewEvent {
     Click,
     Change { value: EventValue },
@@ -471,6 +623,9 @@ pub enum ViewEvent {
     LinkClick { href: String, form: LinkForm },
     /// 画布指针事件（仅 `canvas` 节点按 `mouseEvents` 声明后回发）。
     Canvas { pointer: CanvasPointer },
+    /// 滚动位置（仅声明 `scroll` 的 `scroll` / `list` 节点）：`offset` = 主轴当前偏移，
+    /// `max_offset` = 主轴可滚动余量；`offset >= max_offset` 即停在末端。
+    Scroll { offset: f32, max_offset: f32 },
 }
 
 /// Markdown 链接形态：外链 / wiki / 仓库路径 / 可新建 / 未识别（保持原文）。
@@ -558,6 +713,9 @@ mod tests {
                 gap: Some(8.0),
                 padding: Some(12.0),
                 cross_align: Some(Align::Start),
+                width: None,
+                max_width: None,
+                align: None,
             },
             children: vec![
                 ViewNode {
@@ -567,6 +725,7 @@ mod tests {
                         placeholder: Some("输入…".into()),
                         multiline: None,
                         password: None,
+                        read_only: None,
                     },
                     children: vec![],
                     events: vec![EventKind::Submit],
@@ -689,6 +848,9 @@ mod tests {
             tone: Some(CardTone::AccentSoft),
             radius: Some(12.0),
             bordered: Some(false),
+            width: None,
+            max_width: None,
+            align: None,
         };
         let json = serde_json::to_value(&card).unwrap();
         assert_eq!(json["tone"], "accentSoft");
@@ -728,5 +890,70 @@ mod tests {
         assert!(!Wheel.matches(&down));
         assert!(Wheel.matches(&CanvasPointer::Wheel { x: 0.0, y: 0.0, delta_x: 0.0, delta_y: 1.0 }));
         assert!(DoubleClick.matches(&CanvasPointer::DoubleClick { x: 0.0, y: 0.0, button: MouseButton::Right }));
+    }
+
+    /// 分轴与分边共用对象形态：分边写法必须落到 `Edges`，不能被 `Axes` 忽略多余字段吞掉。
+    #[test]
+    fn padding_spec_distinguishes_axes_from_edges() {
+        let all: PaddingSpec = serde_json::from_value(serde_json::json!(8.0)).unwrap();
+        assert_eq!(all, PaddingSpec::All(8.0));
+        let axes: PaddingSpec =
+            serde_json::from_value(serde_json::json!({ "horizontal": 6.0, "vertical": 3.0 })).unwrap();
+        assert_eq!(axes, PaddingSpec::Axes(AxesPadding { horizontal: 6.0, vertical: 3.0 }));
+        let edges: PaddingSpec =
+            serde_json::from_value(serde_json::json!({ "top": 4.0, "left": 2.0 })).unwrap();
+        assert_eq!(
+            edges,
+            PaddingSpec::Edges(EdgesPadding { top: 4.0, right: 0.0, bottom: 0.0, left: 2.0 })
+        );
+        assert!(serde_json::from_value::<PaddingSpec>(
+            serde_json::json!({ "top": 4.0, "horizontal": 2.0 })
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn dimension_accepts_pixels_and_fill_keyword() {
+        let image = NodeBody::Image {
+            source: ImageSource::Vault { path: "a.png".into() },
+            fit: Some(ImageFit::Contain),
+            width: Some(Dimension::Fill),
+            height: Some(Dimension::Fixed(120.0)),
+        };
+        let json = serde_json::to_value(&image).unwrap();
+        assert_eq!(json["width"], "fill");
+        assert_eq!(json["height"], 120.0);
+        assert_eq!(serde_json::from_value::<NodeBody>(json).unwrap(), image);
+        assert!(serde_json::from_value::<Dimension>(serde_json::json!("cover")).is_err());
+    }
+
+    /// 滚动事件与新增布局字段：缺省字段反序列化照常（旧树不受影响）。
+    #[test]
+    fn scroll_event_and_layout_extensions_roundtrip() {
+        let scroll = NodeBody::Scroll {
+            direction: Some(Axis::Horizontal),
+            gap: Some(8.0),
+            height: Some(120.0),
+        };
+        let json = serde_json::to_value(&scroll).unwrap();
+        assert_eq!(json["height"], 120.0);
+        assert_eq!(serde_json::from_value::<NodeBody>(json).unwrap(), scroll);
+
+        let grid = NodeBody::Grid {
+            columns: Some(3),
+            min_column_width: Some(180.0),
+            gap: None,
+        };
+        assert_eq!(serde_json::to_value(&grid).unwrap()["minColumnWidth"], 180.0);
+        assert_eq!(
+            serde_json::from_value::<NodeBody>(serde_json::json!({ "kind": "grid" })).unwrap(),
+            NodeBody::Grid { columns: None, min_column_width: None, gap: None }
+        );
+
+        let event = ViewEvent::Scroll { offset: 24.0, max_offset: 96.0 };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["kind"], "scroll");
+        assert_eq!(json["maxOffset"], 96.0);
+        assert_eq!(serde_json::from_value::<ViewEvent>(json).unwrap(), event);
     }
 }

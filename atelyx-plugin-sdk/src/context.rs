@@ -14,6 +14,7 @@ use crate::connection::PendingMap;
 use crate::protocol::envelope::{Envelope, RequestId, RpcError};
 use crate::protocol::event::{SubscribeParams, SubscribeResult};
 use crate::protocol::method::{self, *};
+use crate::protocol::view::PaddingSpec;
 
 /// 常规能力调用的默认等待上限（读文件 / 起进程 / 通知等宿主侧可预期的操作）。
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -144,14 +145,14 @@ impl Context {
 
     /// 注册一个贡献点，使其出现在宿主对应入口（面板 / 表格视图 / 设置页）。
     /// `id` 插件内唯一且不得含 `:`，同时是该面挂载后的 surfaceId；重复或非法 id 由宿主可读拒绝。
-    /// `padding` = 面外壳内边距（px，0 = 贴边；缺省用宿主默认）。
+    /// `padding` = 面外壳内边距（0 = 贴边；缺省用宿主默认），按四边等距或分轴 / 分边声明。
     pub async fn register(
         &self,
         slot: ContributionSlot,
         id: &str,
         label: &str,
         icon: Option<&str>,
-        padding: Option<f32>,
+        padding: Option<PaddingSpec>,
     ) -> Result<(), RpcError> {
         let params = RegisterParams {
             slot,
@@ -409,6 +410,11 @@ impl Context {
         Ok(result.exists)
     }
 
+    /// 读图片的固有像素尺寸（png / jpeg / gif / bmp / webp）；只取文件头，不送回文件内容。
+    pub async fn vault_image_info(&self, path: &str) -> Result<ImageInfoResult, RpcError> {
+        self.call_typed(method::vault::IMAGE_INFO, &PathParams { path: path.into() }).await
+    }
+
     // ---------- table（当前打开表格；写入与宿主编辑同一出口，由宿主合并落盘并广播协作补丁） ----------
 
     /// 读当前打开表格的只读快照（字段 / 行 / 路径）；未打开表格 = `open: false`。
@@ -526,6 +532,37 @@ impl Context {
     pub async fn query_shortcut(&self, accelerator: &str) -> Result<ShortcutQueryResult, RpcError> {
         let params = ShortcutQueryParams { accelerator: accelerator.into() };
         self.call_typed(method::shortcut::QUERY, &params).await
+    }
+
+    // ---------- tray（插件条目与宿主条目共用一个托盘图标） ----------
+
+    /// 整发整换本插件的托盘菜单（空清单 = 收起）；宿主条目恒在末尾。
+    /// 平台不支持托盘时回可读错误（插件应据此降级，不重试）。
+    pub async fn tray_set_items(&self, items: Vec<TrayItemSpec>) -> Result<(), RpcError> {
+        self.call_unit(method::tray::SET_ITEMS, &SetTrayItemsParams { items }).await
+    }
+
+    // ---------- collab（同空间的同插件实例互通；通道按插件命名空间隔离） ----------
+
+    /// 当前空间连接状态与在场成员（不含自己）。
+    pub async fn collab_peers(&self) -> Result<CollabPeersResult, RpcError> {
+        self.call_null(method::collab::PEERS).await
+    }
+
+    /// 向同空间对等插件发消息：`target_peer_id` 缺省 = 广播给全部对端。
+    /// `queued` = 已交本机连接发出（不代表送达）；未连接空间时 `queued = false`。
+    pub async fn collab_send(
+        &self,
+        channel: &str,
+        payload: Value,
+        target_peer_id: Option<&str>,
+    ) -> Result<CollabSendResult, RpcError> {
+        let params = CollabSendParams {
+            channel: channel.into(),
+            payload,
+            target_peer_id: target_peer_id.map(Into::into),
+        };
+        self.call_typed(method::collab::SEND, &params).await
     }
 
     // ---------- clipboard / dialog / http ----------

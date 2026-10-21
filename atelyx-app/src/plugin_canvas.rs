@@ -9,8 +9,8 @@ use iced::widget::canvas::{self, Canvas, Path as CanvasPath, Stroke, Text as Can
 use iced::{Color, Element, Length, Point, Rectangle};
 
 use atelyx_core::plugin_runtime::{
-    CanvasColor, CanvasEventKind, CanvasPointer, ColorToken, DrawCommand, ImageSource, MouseButton,
-    TextWeight,
+    CanvasColor, CanvasEventKind, CanvasPointer, ColorToken, DrawCommand, ImageFit, ImageSource,
+    MouseButton, TextWeight,
 };
 
 use crate::plugin_actions;
@@ -311,11 +311,39 @@ fn execute(frame: &mut canvas::Frame, command: &DrawCommand, widget: &PluginCanv
                 ..CanvasText::default()
             });
         }
-        DrawCommand::Image { source, x, y, w, h } => {
-            let Some(handle) = image_handle(widget, source) else {
+        DrawCommand::Image { source, x, y, w, h, fit } => {
+            let Some((handle, source_size)) = image_handle(widget, source) else {
                 return;
             };
-            frame.draw_image(Rectangle::new(Point::new(*x, *y), iced::Size::new(*w, *h)), &handle);
+            let target = Rectangle::new(Point::new(*x, *y), iced::Size::new(*w, *h));
+            let fit = fit.unwrap_or(ImageFit::Fill);
+            // 原图尺寸未就绪（或解码失败）：按拉伸绘制，等比尺寸无从计算
+            let Some((source_w, source_h)) = source_size.filter(|(w, h)| *w > 0 && *h > 0) else {
+                frame.draw_image(target, &handle);
+                return;
+            };
+            let (source_w, source_h) = (source_w as f32, source_h as f32);
+            let scale = match fit {
+                ImageFit::Fill => None,
+                ImageFit::Contain => Some((w / source_w).min(h / source_h)),
+                ImageFit::Cover => Some((w / source_w).max(h / source_h)),
+            };
+            let Some(scale) = scale else {
+                frame.draw_image(target, &handle);
+                return;
+            };
+            let draw_w = source_w * scale;
+            let draw_h = source_h * scale;
+            let rect = Rectangle::new(
+                Point::new(x + (w - draw_w) / 2.0, y + (h - draw_h) / 2.0),
+                iced::Size::new(draw_w, draw_h),
+            );
+            // cover 的溢出部分裁到目标框；contain 的绘制框本就不超出
+            if fit == ImageFit::Cover {
+                frame.with_clip(target, |frame| frame.draw_image(rect, &handle));
+            } else {
+                frame.draw_image(rect, &handle);
+            }
         }
     }
 }
@@ -335,9 +363,13 @@ fn polyline(points: &[atelyx_core::plugin_runtime::CanvasPoint], closed: bool) -
     })
 }
 
-fn image_handle(widget: &PluginCanvas<'_>, source: &ImageSource) -> Option<iced::widget::image::Handle> {
+fn image_handle(
+    widget: &PluginCanvas<'_>,
+    source: &ImageSource,
+) -> Option<(iced::widget::image::Handle, Option<(u32, u32)>)> {
     let key = plugin_actions::image_key(widget.app, &widget.plugin_id, source)?;
-    widget.app.note_images.get(&key).cloned()
+    let handle = widget.app.note_images.get(&key).cloned()?;
+    Some((handle, widget.app.note_image_sizes.get(&key).copied()))
 }
 
 /// token → 主题色（插件控件与画布共用同一映射）。

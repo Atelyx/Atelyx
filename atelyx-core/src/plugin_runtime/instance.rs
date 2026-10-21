@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use atelyx_plugin_protocol::envelope::{Envelope, Request, RequestId, RpcError};
 use atelyx_plugin_protocol::event;
 use atelyx_plugin_protocol::handshake::{self, HostInfo, InitializeParams, InitializeResult};
-use atelyx_plugin_protocol::manifest::Manifest;
+use atelyx_plugin_protocol::manifest::{Manifest, Permission};
 use atelyx_plugin_protocol::method::{
     self, ContributionSlot, RegisterParams, SurfaceAttachedParams, SurfaceDetachedParams,
     UnregisterParams, ViewEventParams,
@@ -30,8 +30,8 @@ use crate::plugin_process::{EventSink, PluginProcessHost, ProcessEvent as HostEv
 
 use super::{capability, child_process, fs, http, log, shortcut};
 use super::{
-    AuditRecord, Contribution, DialogKind, DialogRequest, HostRequest, PluginEvent, PluginRuntime,
-    PluginStatus, SurfaceKind, ViewEvent, ViewNode, MAX_VAULT_BINARY_BYTES,
+    AuditRecord, Contribution, DialogKind, DialogRequest, HostRequest, PaddingSpec, PluginEvent,
+    PluginRuntime, PluginStatus, SurfaceKind, ViewEvent, ViewNode, MAX_VAULT_BINARY_BYTES,
 };
 
 /// 崩溃判定窗口：窗口内累计达到 [`CRASH_LIMIT`] 即熔断。
@@ -105,7 +105,7 @@ struct ContributionEntry {
     id: String,
     label: String,
     icon: Option<String>,
-    padding: Option<f32>,
+    padding: Option<PaddingSpec>,
 }
 
 impl Instance {
@@ -576,8 +576,8 @@ impl Instance {
             self.handle_ui_request(token, id, method, &request.params);
             return;
         }
-        // AI 对话编排在壳、剪贴板与仓库读写由壳执行（协作空间经服务端；打开中文件的写保护也只在
-        // 壳侧可知）——这些调用分流为异步应答，结果由回填线程写回，读线程继续消费插件输出。
+        // 壳侧执行的服务调用（对话编排、剪贴板、仓库读写、托盘、协作、表格等）分流为异步应答：
+        // 结果由回填线程写回，读线程继续消费插件输出。
         if matches!(
             method,
             method::ai::CHAT_SEND
@@ -593,6 +593,7 @@ impl Instance {
                 | method::vault::WRITE_TEXT
                 | method::vault::READ_BINARY
                 | method::vault::WRITE_BINARY
+                | method::vault::IMAGE_INFO
                 | method::vault::LIST
                 | method::vault::EXISTS
                 | method::table::SNAPSHOT
@@ -601,6 +602,9 @@ impl Instance {
                 | method::table::REMOVE_ROW
                 | method::table::SELECT_ROW
                 | method::table::SET_CELL_IMAGE
+                | method::tray::SET_ITEMS
+                | method::collab::PEERS
+                | method::collab::SEND
                 | method::view::SCROLL_TO
         ) {
             self.handle_shell_request(token, id, method, &request.params);
@@ -709,7 +713,7 @@ impl Instance {
         });
     }
 
-    /// 转发一次壳侧服务调用（AI 对话 / 剪贴板 / 仓库读写）并在独立线程上等壳回填。
+    /// 转发一次壳侧服务调用并在独立线程上等壳回填（耗时由壳侧操作决定，不能占读线程）。
     fn handle_shell_request(
         self: &Arc<Self>,
         token: u64,
@@ -806,6 +810,36 @@ impl Instance {
                         plugin_id: self.id.clone(),
                         request_id: 0,
                         path: p.path,
+                    }
+                }
+                method::vault::IMAGE_INFO => {
+                    let p: method::PathParams = parse(params).map_err(|e| e.to_string())?;
+                    HostRequest::VaultImageInfo {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        path: p.path,
+                    }
+                }
+                method::tray::SET_ITEMS => {
+                    let p: method::SetTrayItemsParams = parse(params).map_err(|e| e.to_string())?;
+                    p.validate()?;
+                    HostRequest::TraySetItems {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        params: p,
+                    }
+                }
+                method::collab::PEERS => HostRequest::CollabPeers {
+                    plugin_id: self.id.clone(),
+                    request_id: 0,
+                },
+                method::collab::SEND => {
+                    let p: method::CollabSendParams = parse(params).map_err(|e| e.to_string())?;
+                    p.validate()?;
+                    HostRequest::CollabSend {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        params: p,
                     }
                 }
                 method::table::SNAPSHOT => HostRequest::TableSnapshot {
@@ -1088,6 +1122,7 @@ impl Instance {
             | method::vault::WRITE_TEXT
             | method::vault::READ_BINARY
             | method::vault::WRITE_BINARY
+            | method::vault::IMAGE_INFO
             | method::vault::LIST
             | method::vault::EXISTS
             | method::table::SNAPSHOT
@@ -1096,6 +1131,9 @@ impl Instance {
             | method::table::REMOVE_ROW
             | method::table::SELECT_ROW
             | method::table::SET_CELL_IMAGE
+            | method::tray::SET_ITEMS
+            | method::collab::PEERS
+            | method::collab::SEND
             | method::view::SCROLL_TO
             | method::window::UPDATE
             | method::window::SHOW => {
@@ -1230,6 +1268,11 @@ impl Instance {
         }
         if p.label.trim().is_empty() {
             return Err(RpcError::failed("贡献 label 不能为空"));
+        }
+        if let Some(padding) = p.padding {
+            if padding.edges().iter().any(|value| !value.is_finite() || *value < 0.0) {
+                return Err(RpcError::failed("贡献内边距须为有限的非负数"));
+            }
         }
         self.with_session(token, || {
             let mut contributions = self.contributions.lock().unwrap();
@@ -1367,6 +1410,22 @@ impl Instance {
     /// 转投一条全局快捷键触发（`host:shortcut.triggered`）。
     pub(crate) fn notify_shortcut(&self, accelerator: &str) {
         self.notify(method::shortcut::HOST_TRIGGERED, &shortcut::triggered_params(accelerator));
+    }
+
+    /// 转投一次托盘条目点击（`host:tray.click`）。条目只由声明过 `tray` 的插件建立，
+    /// 点击事件不再判权限。
+    pub(crate) fn notify_tray_click(&self, item_id: &str) {
+        let params = method::TrayClickParams { id: item_id.to_string() };
+        self.notify(method::tray::HOST_CLICK, &params);
+    }
+
+    /// 转投一条同空间对等插件的消息（`host:collab.message`）。通道名由发送方填写，
+    /// 未声明 `collab` 的插件不收（与能力面同一条闸门）。
+    pub(crate) fn notify_collab_message(&self, params: &method::CollabMessageParams) {
+        if !self.manifest.permissions.contains(&Permission::Collab) {
+            return;
+        }
+        self.notify(method::collab::HOST_MESSAGE, params);
     }
 
     /// 回发一条节点界面事件（`host:view.event`）。
@@ -1903,7 +1962,14 @@ mod tests {
     fn shell_side_service_requests_route_and_resolve() {
         let tmp = TempDir::new("instance-shell-request");
         let runtime = PluginRuntime::new(tmp.to_path_buf());
-        let (_t, instance) = make_instance(vec![Permission::Clipboard, Permission::Vault, Permission::Table, Permission::Ai]);
+        let (_t, instance) = make_instance(vec![
+            Permission::Clipboard,
+            Permission::Vault,
+            Permission::Table,
+            Permission::Ai,
+            Permission::Tray,
+            Permission::Collab,
+        ]);
         instance.attach_runtime(&runtime);
         runtime
             .instances
@@ -2056,6 +2122,44 @@ mod tests {
         };
         assert_eq!(params.edge, method::ScrollEdge::End);
         runtime.resolve_shell_call(request_id, Ok(json!({})));
+
+        instance.handle_line(&request_line(method::vault::IMAGE_INFO, &json!({ "path": "a.png" })));
+        let request = rt.block_on(runtime.recv_host_request()).unwrap();
+        let HostRequest::VaultImageInfo { request_id, path, .. } = request else {
+            panic!("应投递图片尺寸请求");
+        };
+        assert_eq!(path, "a.png");
+        runtime.resolve_shell_call(request_id, Ok(json!({ "width": 10, "height": 20 })));
+
+        instance.handle_line(&request_line(
+            method::tray::SET_ITEMS,
+            &json!({ "items": [{ "id": "show", "label": "显示" }] }),
+        ));
+        let request = rt.block_on(runtime.recv_host_request()).unwrap();
+        let HostRequest::TraySetItems { request_id, params, .. } = request else {
+            panic!("应投递托盘条目请求");
+        };
+        assert_eq!(params.items[0].id, "show");
+        runtime.resolve_shell_call(request_id, Ok(json!({})));
+
+        instance.handle_line(&request_line(method::collab::PEERS, &Value::Null));
+        let request = rt.block_on(runtime.recv_host_request()).unwrap();
+        let HostRequest::CollabPeers { request_id, .. } = request else {
+            panic!("应投递协作在场清单请求");
+        };
+        runtime.resolve_shell_call(request_id, Ok(json!({ "connected": false })));
+
+        instance.handle_line(&request_line(
+            method::collab::SEND,
+            &json!({ "channel": "chat", "payload": { "n": 1 }, "targetPeerId": "2" }),
+        ));
+        let request = rt.block_on(runtime.recv_host_request()).unwrap();
+        let HostRequest::CollabSend { request_id, params, .. } = request else {
+            panic!("应投递协作消息请求");
+        };
+        assert_eq!(params.channel, "chat");
+        assert_eq!(params.target_peer_id.as_deref(), Some("2"));
+        runtime.resolve_shell_call(request_id, Ok(json!({ "queued": true })));
 
         instance.handle_line(&request_line(method::ai::CHAT_RENAME, &json!({ "sessionId": "s1", "title": "周报" })));
         let request = rt.block_on(runtime.recv_host_request()).unwrap();

@@ -2,7 +2,7 @@
 //! 命中判断由插件按自己提交的指令几何自算——坐标口径与指令一致（节点本地逻辑像素）。
 
 use crate::protocol::canvas::{CanvasColor, CanvasPoint, DrawCommand};
-use crate::protocol::view::{ColorToken, ImageSource, TextWeight};
+use crate::protocol::view::{ColorToken, ImageFit, ImageSource, TextWeight};
 
 /// 主题 token 颜色。
 pub fn token(name: ColorToken) -> CanvasColor {
@@ -84,7 +84,19 @@ pub fn draw_text_weighted(
     DrawCommand::Text { x, y, content: content.into(), size, color, weight: Some(weight) }
 }
 
-/// 图片贴片，按给定矩形绘制（比例由插件自己保持）。
+/// 图片贴片，按给定矩形绘制（缺省拉伸填满，比例由插件自己保持）。
 pub fn image_tile(source: ImageSource, x: f32, y: f32, w: f32, h: f32) -> DrawCommand {
-    DrawCommand::Image { source, x, y, w, h }
+    DrawCommand::Image { source, x, y, w, h, fit: None }
+}
+
+/// 图片贴片，按 `fit` 在矩形内等比适配（`contain` 留边 / `cover` 裁切）。
+pub fn image_tile_fit(
+    source: ImageSource,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    fit: ImageFit,
+) -> DrawCommand {
+    DrawCommand::Image { source, x, y, w, h, fit: Some(fit) }
 }

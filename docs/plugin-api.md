@@ -259,6 +259,14 @@ pub enum NodeBody {
         padding: Option<f32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cross_align: Option<Align>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        width: Option<NodeWidth>,
+        /// 最大宽度（px）：配合 `align` 得到居中的窄阅读列，配合 `shrink` 形成内容自适应气泡。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_width: Option<f32>,
+        /// 宽度不足父容器时的水平摆放（`center` 居中、`end` 右对齐）；缺省靠左。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        align: Option<Align>,
     },
     /// 卡片容器：主题化背景 + 边框 + 圆角的分组盒（列表条目、信息分组）。
     Card {
@@ -278,6 +286,15 @@ pub enum NodeBody {
         /// 是否画边框；缺省 true。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         bordered: Option<bool>,
+        /// 缺省 `fill`（同 `Column`）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        width: Option<NodeWidth>,
+        /// 最大宽度（px）：配合 `align` 得到居中的窄卡片。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_width: Option<f32>,
+        /// 宽度不足父容器时的水平摆放（`center` 居中、`end` 右对齐）；缺省靠左。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        align: Option<Align>,
     },
     /// 叠层：子节点按提交顺序重叠（后提交的在上），同尺寸对齐于左上角。
     /// 用于「自绘画布当底 + 宿主控件叠其上」或徽标叠图。
@@ -288,14 +305,23 @@ pub enum NodeBody {
         direction: Option<Axis>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         gap: Option<f32>,
+        /// 交叉轴高度（px）：纵向滚动时收住自身高度，横向滚动时按该高度做图条；
+        /// 缺省占满父容器剩余高度。节点声明 `scroll` 事件即上报滚动位置。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        height: Option<f32>,
     },
+    /// 网格：`columns` 固定列数；`min_column_width` 按可用宽度换列（`columns` 同时给定时作列数上限）。
+    /// 二者都缺省按单列渲染。
     Grid {
-        columns: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        columns: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        min_column_width: Option<f32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         gap: Option<f32>,
     },
     /// 可滚动列表：语义等同纵向 scroll + column（宿主对子项按键复用控件态）。
-    /// 滚动位置由宿主经 `view.scrollTo` 指令控制（插件侧无滚动事件）。
+    /// 位置可用 `view.scrollTo` 指令控制；声明 `scroll` 事件即上报滚动位置。
     List {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         gap: Option<f32>,
@@ -309,7 +335,7 @@ pub enum NodeBody {
         weight: Option<TextWeight>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         color: Option<ColorToken>,
-        /// 水平对齐（节点宽度恒占满父容器）：`end` 用于右对齐气泡，`center` 用于居中标题。
+        /// 水平对齐：声明后节点占满父容器并按该值摆放入文本；缺省按内容宽度收缩。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         align: Option<Align>,
     },
@@ -340,6 +366,9 @@ pub enum NodeBody {
         multiline: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         password: Option<bool>,
+        /// 只读：保留输入控件外观但不接受编辑，不产生事件。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        read_only: Option<bool>,
     },
     NumberInput {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -352,6 +381,9 @@ pub enum NodeBody {
         step: Option<f64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         placeholder: Option<String>,
+        /// 只读：保留输入控件外观但不接受编辑、无步进，不产生事件。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        read_only: Option<bool>,
     },
     Dropdown {
         options: Vec<String>,
@@ -360,12 +392,18 @@ pub enum NodeBody {
         selected: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         placeholder: Option<String>,
+        /// 只读：保留触发钮外观但不展开、不产生事件。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        read_only: Option<bool>,
     },
     Checkbox {
         #[serde(default)]
         checked: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         label: Option<String>,
+        /// 只读：保留勾选态展示但不响应点击。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        read_only: Option<bool>,
     },
     Button {
         label: String,
@@ -394,16 +432,18 @@ pub enum NodeBody {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         hover_only: Option<bool>,
     },
-    /// 图片：`width` / `height` 给定时按该尺寸渲染（缺省按原图尺寸）；
+    /// 图片：`width` / `height` 给定时按该尺寸渲染（数字 = px，`"fill"` = 撑满父容器该轴；
+    /// 缺省按原图尺寸）；`fit` 决定尺寸内的适配方式，缺省 `contain`（不裁切不拉伸）。
     /// 节点声明 `click` 事件即成为可点击图片（大图预览入口）。
     Image {
         source: ImageSource,
+        /// 尺寸内适配：`contain` 完整可见、`cover` 铺满并裁掉溢出、`fill` 拉伸铺满。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         fit: Option<ImageFit>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        width: Option<f32>,
+        width: Option<Dimension>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        height: Option<f32>,
+        height: Option<Dimension>,
     },
     Progress {
         /// 0.0 ~ 1.0；越界值宿主钳制。
@@ -583,6 +623,65 @@ pub struct MenuItem {
 }
 ```
 
+```rust
+// atelyx-plugin-protocol/src/view.rs
+/// 容器宽度语义（[`NodeBody::Column`] / [`NodeBody::Card`] 的 `width`）。
+#[serde(rename_all = "camelCase")]
+pub enum NodeWidth {
+    /// 占满父容器可用宽度（缺省）。
+    Fill,
+    /// 按内容宽度收缩（右对齐气泡、贴内容边界的卡片）。
+    Shrink,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/view.rs
+/// 图片单轴尺寸：数字 = 固定像素；`"fill"` = 占满父容器该轴。
+pub enum Dimension {
+    Fixed(f32),
+    Fill,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/view.rs
+/// 内边距声明：数字 = 四边等距；`{horizontal, vertical}` = 分轴；`{top, right, bottom, left}` = 分边。
+/// 两个对象形态都不接受未声明字段，避免分边写法被分轴形态吞掉。
+#[serde(untagged)]
+pub enum PaddingSpec {
+    All(f32),
+    Axes(AxesPadding),
+    Edges(EdgesPadding),
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/view.rs
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AxesPadding {
+    #[serde(default)]
+    pub horizontal: f32,
+    #[serde(default)]
+    pub vertical: f32,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/view.rs
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EdgesPadding {
+    #[serde(default)]
+    pub top: f32,
+    #[serde(default)]
+    pub right: f32,
+    #[serde(default)]
+    pub bottom: f32,
+    #[serde(default)]
+    pub left: f32,
+}
+```
+
 ## 4. 视图事件与指针
 
 宿主回发给插件的事件种类与取值形态；画布指针事件单列在下一节。
@@ -599,6 +698,9 @@ pub enum EventKind {
     Blur,
     /// Markdown 正文内的链接点击（仅 `markdown` 节点；宿主默认打开行为不受声明影响）。
     LinkClick,
+    /// 滚动位置变化（仅 `scroll` / `list` 节点）：滚动时回发当前偏移与可滚动余量；
+    /// 内容不足一屏时没有滚动，不发事件。
+    Scroll,
 }
 ```
 
@@ -607,6 +709,7 @@ pub enum EventKind {
 /// 宿主回发给插件的事件负载。`change`/`submit` 携带新值；菜单条目选择复用 `change`，
 /// 值为条目的 `action` 文本（[`EventValue::Text`]）。
 #[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(rename_all_fields = "camelCase")]
 pub enum ViewEvent {
     Click,
     Change { value: EventValue },
@@ -618,6 +721,9 @@ pub enum ViewEvent {
     LinkClick { href: String, form: LinkForm },
     /// 画布指针事件（仅 `canvas` 节点按 `mouseEvents` 声明后回发）。
     Canvas { pointer: CanvasPointer },
+    /// 滚动位置（仅声明 `scroll` 的 `scroll` / `list` 节点）：`offset` = 主轴当前偏移，
+    /// `max_offset` = 主轴可滚动余量；`offset >= max_offset` 即停在末端。
+    Scroll { offset: f32, max_offset: f32 },
 }
 ```
 
@@ -785,13 +891,16 @@ pub enum DrawCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         weight: Option<TextWeight>,
     },
-    /// 图片贴片，按给定矩形绘制（不做等比约束，比例由插件自己保持）。
+    /// 图片贴片：绘制在给定矩形内。`fit` 缺省 = 拉伸填满；`contain` 等比完整可见（留空边），
+    /// `cover` 等比覆盖并裁剪溢出部分。
     Image {
         source: ImageSource,
         x: f32,
         y: f32,
         w: f32,
         h: f32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fit: Option<ImageFit>,
     },
 }
 ```
@@ -899,9 +1008,10 @@ pub struct RegisterParams {
     pub label: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
-    /// 面外壳内边距（px）：面板 / 设置面根树外层由宿主加的内边距；0 = 贴边，缺省 = 宿主默认。
+    /// 面外壳内边距：数字 = 四边等距，也可按轴 / 按边声明（见 [`crate::view::PaddingSpec`]）；
+    /// 0 = 贴边，缺省 = 宿主默认。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub padding: Option<f32>,
+    pub padding: Option<crate::view::PaddingSpec>,
 }
 ```
 
@@ -1122,6 +1232,8 @@ pub mod vault {
     pub const READ_BINARY: &str = "vault.readBinary";
     /// 写二进制文件（base64；父目录自动创建；正在编辑器中打开的文件拒写）。
     pub const WRITE_BINARY: &str = "vault.writeBinary";
+    /// 读图片的像素宽高（png / jpeg / gif / bmp / webp），不返回文件内容。
+    pub const IMAGE_INFO: &str = "vault.imageInfo";
     pub const LIST: &str = "vault.list";
     pub const EXISTS: &str = "vault.exists";
 }
@@ -1250,6 +1362,31 @@ pub mod ai {
 }
 ```
 
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 系统托盘：插件提交自己的菜单条目，宿主维护唯一托盘图标（无条目时图标消失）。
+pub mod tray {
+    /// 整发整换本插件的托盘菜单（空清单 = 收起）。宿主自有的「显示 / 退出」条目恒在末尾。
+    pub const SET_ITEMS: &str = "tray.setItems";
+    /// 用户点了本插件的某个托盘条目（通知）。
+    pub const HOST_CLICK: &str = "host:tray.click";
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 协作空间内的插件消息：按「通道」隔离，宿主把插件 id 作为通道前缀，
+/// 同空间的同插件实例互通（跨空间不达、不可抢占他人通道）。
+pub mod collab {
+    /// 当前空间的连接状态与在场成员清单（不含自己）。
+    pub const PEERS: &str = "collab.peers";
+    /// 向同空间的对等插件发一条消息：缺省广播给全部对端，给了目标即单播。
+    pub const SEND: &str = "collab.send";
+    /// 对端消息到达（通知）。
+    pub const HOST_MESSAGE: &str = "host:collab.message";
+}
+```
+
 ## 8. 能力面负载：文件、进程与系统服务
 
 上表方法的 params / result 形态（`path` 在 `fs` 面是绝对路径，在 `vault` 面是仓库相对路径）。
@@ -1312,6 +1449,16 @@ pub struct WriteBinaryParams {
 #[serde(rename_all = "camelCase")]
 pub struct ExistsResult {
     pub exists: bool,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`vault::IMAGE_INFO`] 的 result：图片固有像素尺寸（不随界面缩放）。
+#[serde(rename_all = "camelCase")]
+pub struct ImageInfoResult {
+    pub width: u32,
+    pub height: u32,
 }
 ```
 
@@ -1930,7 +2077,107 @@ pub struct TableSetCellImageParams {
 }
 ```
 
-## 11. 宿主广播事件
+## 11. 能力面负载：托盘与协作
+
+系统托盘条目与空间内插件间消息的负载形态；两类能力的可用性都随宿主平台与容器类型而变。
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 托盘菜单条目：`id` 插件内唯一、非空，用户点击时原样随 [`tray::HOST_CLICK`] 回发。
+#[serde(rename_all = "camelCase")]
+pub struct TrayItemSpec {
+    pub id: String,
+    /// 条目文字（非空）。
+    pub label: String,
+    /// 置灰不可点（缺省 true）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`tray::SET_ITEMS`] 的 params：整发整换本插件的托盘菜单，空清单 = 收起。
+#[serde(rename_all = "camelCase")]
+pub struct SetTrayItemsParams {
+    pub items: Vec<TrayItemSpec>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`tray::HOST_CLICK`] 的 params：用户点击的条目 id。
+#[serde(rename_all = "camelCase")]
+pub struct TrayClickParams {
+    pub id: String,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 同空间的一个在场成员。
+#[serde(rename_all = "camelCase")]
+pub struct CollabPeer {
+    pub peer_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`collab::PEERS`] 的 result：`connected` = 当前空间连接可用；未连接时 `selfId` 与 `peers` 缺省。
+/// `peers` 不含自己，宿主已剔除。
+#[serde(rename_all = "camelCase")]
+pub struct CollabPeersResult {
+    pub connected: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub peers: Vec<CollabPeer>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`collab::SEND`] 的 params：`channel` 为插件自定义的通道名（非空、不含 `:`、≤ 64 字符），
+/// 宿主在投递时加插件前缀；`payload` 任意 JSON。`targetPeerId` 取 [`CollabPeersResult`] 里的
+/// `peerId` 原值，缺省 = 广播给全部对端。
+#[serde(rename_all = "camelCase")]
+pub struct CollabSendParams {
+    pub channel: String,
+    pub payload: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_peer_id: Option<String>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`collab::SEND`] 的 result：`queued` = 消息已交本机空间连接发出。
+/// 发出不等于送达：广播不确认，单播目标离线时被服务端丢弃，`queued` 仍为 true；
+/// 未连接空间时 `queued` = false。
+#[serde(rename_all = "camelCase")]
+pub struct CollabSendResult {
+    pub queued: bool,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`collab::HOST_MESSAGE`] 的 params：`channel` 为发送方给的通道名（不含插件前缀），
+/// `peerId` / `peerName` 标识发送方。
+#[serde(rename_all = "camelCase")]
+pub struct CollabMessageParams {
+    pub channel: String,
+    pub payload: Value,
+    pub peer_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_name: Option<String>,
+}
+```
+
+## 12. 宿主广播事件
 
 插件经 `event.subscribe` 声明订阅的事件名与载荷；未上表的名字宿主拒绝订阅。
 

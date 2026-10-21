@@ -14,21 +14,26 @@ use serde_json::Value;
 /// 常驻退出入口与按窗生效兜底。OS 资源消耗型方法（起进程 / 开窗等）一律占权限。
 pub(crate) fn permission_for(name: &str) -> Option<Permission> {
     use Permission::*;
-    use method::{ai, clipboard, dialog, fs, http, notification, process, shortcut, state, table, vault, window};
+    use method::{
+        ai, clipboard, collab, dialog, fs, http, notification, process, shortcut, state, table, tray,
+        vault, window,
+    };
     match name {
         fs::PRIVATE_DIR | fs::READ_TEXT | fs::WRITE_TEXT | fs::READ_BINARY | fs::WRITE_BINARY
         | fs::REMOVE | fs::EXISTS | fs::LIST => Some(Fs),
         vault::READ_TEXT | vault::WRITE_TEXT | vault::READ_BINARY | vault::WRITE_BINARY
-        | vault::LIST | vault::EXISTS => Some(Vault),
+        | vault::IMAGE_INFO | vault::LIST | vault::EXISTS => Some(Vault),
         table::SNAPSHOT | table::UPDATE_CELL | table::ADD_ROW | table::REMOVE_ROW
         | table::SELECT_ROW | table::SET_CELL_IMAGE => Some(Table),
         process::SPAWN | process::WRITE_STDIN | process::CLOSE_STDIN | process::KILL => Some(Process),
         state::READ | state::WRITE => Some(State),
         notification::SHOW => Some(Notification),
+        tray::SET_ITEMS => Some(Tray),
         shortcut::REGISTER | shortcut::UNREGISTER | shortcut::QUERY => Some(Shortcuts),
         clipboard::WRITE_TEXT | clipboard::READ_TEXT | clipboard::READ_IMAGE => Some(Clipboard),
         dialog::PICK_FILE | dialog::PICK_DIRECTORY => Some(Dialog),
         http::REQUEST => Some(Http),
+        collab::PEERS | collab::SEND => Some(Collab),
         window::OPEN | window::CLOSE | window::UPDATE | window::SHOW => Some(Window),
         ai::CHAT_SEND | ai::CHAT_STOP | ai::CHAT_HISTORY | ai::CHAT_RENAME | ai::CHAT_DELETE
         | ai::CHAT_COMPACT | ai::REGISTER_TOOL | ai::UNREGISTER_TOOL | ai::TOOL_RESULT => Some(Ai),
@@ -105,6 +110,10 @@ mod tests {
         assert_eq!(permission_for(method::ai::CHAT_RENAME), Some(Permission::Ai));
         assert_eq!(permission_for(method::ai::CHAT_DELETE), Some(Permission::Ai));
         assert_eq!(permission_for(method::ai::CHAT_COMPACT), Some(Permission::Ai));
+        assert_eq!(permission_for(method::vault::IMAGE_INFO), Some(Permission::Vault));
+        assert_eq!(permission_for(method::tray::SET_ITEMS), Some(Permission::Tray));
+        assert_eq!(permission_for(method::collab::PEERS), Some(Permission::Collab));
+        assert_eq!(permission_for(method::collab::SEND), Some(Permission::Collab));
     }
 
     #[test]

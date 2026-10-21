@@ -119,14 +119,16 @@ const PLUGIN_CACHE_MAX_BYTES: usize = 4 * 1024 * 1024;
 
 struct CachedPluginFrame {
     seq: u64,
+    /// 原始发送方：补投不回放请求者自己的帧。
+    sender: u64,
     frame: WireFrame,
 }
 
 impl Room {
     /// 追加缓存一条广播插件帧（超限逐出最旧，缓存保持 seq 升序）。
-    fn cache_plugin_frame(&mut self, seq: u64, frame: WireFrame) {
+    fn cache_plugin_frame(&mut self, seq: u64, sender: u64, frame: WireFrame) {
         self.plugin_cache_bytes += frame.len();
-        self.plugin_cache.push_back(CachedPluginFrame { seq, frame });
+        self.plugin_cache.push_back(CachedPluginFrame { seq, sender, frame });
         while self.plugin_cache.len() > PLUGIN_CACHE_MAX_ENTRIES
             || self.plugin_cache_bytes > PLUGIN_CACHE_MAX_BYTES
         {
@@ -135,6 +137,18 @@ impl Room {
             };
             self.plugin_cache_bytes -= oldest.frame.len();
         }
+    }
+
+    /// 补投 seq > after 的缓存广播帧，跳过请求者自己的帧（广播不回显发送方，补投同口径）。
+    fn replayed_frames(
+        &self,
+        after: u64,
+        except_sender: u64,
+    ) -> impl Iterator<Item = (u64, &WireFrame)> {
+        self.plugin_cache
+            .iter()
+            .filter(move |cached| cached.seq > after && cached.sender != except_sender)
+            .map(|cached| (cached.seq, &cached.frame))
     }
 }
 
@@ -210,7 +224,8 @@ pub(crate) struct ClientMsg {
     /// 插件消息定向目标（单播：只转发给该 peer；缺省 = 广播房间内其他成员）。
     #[serde(default)]
     pub target_peer_id: Option<u64>,
-    /// 可靠补投请求（`plugin-replay`）：客户端已收到的房间级插件帧序号，回放 seq > after 的缓存帧。
+    /// 可靠补投请求（`plugin-replay`）：客户端已收到的房间级插件帧序号，回放 seq > after 的缓存帧
+    /// （跳过请求者自己发出的帧）。
     #[serde(default)]
     pub after: Option<u64>,
 }
@@ -246,7 +261,7 @@ struct PeerInfo {
 }
 
 /// S→C 帧：`hello-ack`（先于 peers 帧，带房间插件序号头）/ `peers` / `presence` / 各转发帧
-/// （不含自己；`plugin-msg` 广播帧带房间级 seq）/ 服务端落地广播帧（`table-patch`、
+/// （不含自己；`plugin-msg` 广播帧带房间级 seq，发送方另收 `plugin-msg-ack` 回执）/ 服务端落地广播帧（`table-patch`、
 /// `canvas-patch`、`renamed`、`fs-changed`、`meta-changed`，发全员含发起者，补丁落地帧带
 /// `landed` 标记与发起者 peerId）/ `resync`（慢消费者重新握手）/ `error`。
 #[derive(Serialize)]
@@ -350,6 +365,25 @@ fn server_plugin_msg(
         channel: Some(channel),
         payload: Some(payload),
         seq,
+        plugin_seq: None,
+        key: None,
+        landed: None,
+    }))
+}
+
+/// 构造插件广播帧的发送方回执：广播帧不发给发送方本人，发送方靠它推进房间序号
+/// （否则自己的帧在序号里留洞，后续帧永远等不齐）。
+fn server_plugin_msg_ack(seq: u64) -> WireFrame {
+    WireFrame::Text(server_text_msg(ServerMsg {
+        kind: "plugin-msg-ack",
+        peer_id: None,
+        peers: None,
+        presence: None,
+        file: None,
+        patch: None,
+        channel: None,
+        payload: None,
+        seq: Some(seq),
         plugin_seq: None,
         key: None,
         landed: None,
@@ -840,29 +874,30 @@ pub(crate) async fn run_room_connection(
                                         let frame =
                                             server_plugin_msg(peer_id, channel, payload, Some(seq));
                                         stats.forwarded_bytes += frame.len() as u64;
-                                        room.cache_plugin_frame(seq, frame.clone());
+                                        room.cache_plugin_frame(seq, peer_id, frame.clone());
                                         for (id, peer) in room.peers.iter() {
                                             if *id != peer_id {
                                                 let _ = peer.tx.send(frame.clone());
                                             }
                                         }
+                                        // 广播不含自己：给发送方回执它的帧序号，补上序号洞
+                                        let _ = btx.send(server_plugin_msg_ack(seq));
                                     }
                                 }
                             }
                         }
                     }
-                    // 可靠补投：回放 seq > after 的缓存广播帧（经本连接出站通道，与直播帧保序）。
-                    // 回放上限 = 缓存条数上限 < 通道容量，回放本身不会触发 Lagged。
+                    // 可靠补投：回放 seq > after 的缓存广播帧（经本连接出站通道，与直播帧保序；
+                    // 跳过请求者自己的帧，广播不回显发送方）。回放上限 = 缓存条数上限
+                    // < 通道容量，回放本身不会触发 Lagged。
                     "plugin-replay" => {
                         if let Some(after) = msg.after {
                             let mut rooms = hub.0.lock().unwrap();
                             if let Some(room) = rooms.get_mut(&room_id) {
                                 let mut replayed = 0usize;
-                                for cached in &room.plugin_cache {
-                                    if cached.seq > after {
-                                        let _ = btx.send(cached.frame.clone());
-                                        replayed += 1;
-                                    }
+                                for (_, frame) in room.replayed_frames(after, peer_id) {
+                                    let _ = btx.send(frame.clone());
+                                    replayed += 1;
                                 }
                                 debug!(peer_id, room = %room_id, after, replayed, "插件帧补投");
                             }
@@ -926,12 +961,14 @@ pub(crate) async fn run_room_connection(
                             frame.seq = room.plugin_seq;
                             let wire = WireFrame::Binary(Arc::new(build_plugin_binary(&frame)));
                             stats.forwarded_bytes += wire.len() as u64;
-                            room.cache_plugin_frame(frame.seq, wire.clone());
+                            room.cache_plugin_frame(frame.seq, peer_id, wire.clone());
                             for (id, peer) in room.peers.iter() {
                                 if *id != peer_id {
                                     let _ = peer.tx.send(wire.clone());
                                 }
                             }
+                            // 广播不含自己：与 JSON 路径同口径回执序号，发送方据此推进
+                            let _ = btx.send(server_plugin_msg_ack(frame.seq));
                         }
                     }
                 }
@@ -1136,7 +1173,7 @@ mod tests {
     fn plugin_cache_evicts_oldest() {
         let mut room = Room::default();
         for seq in 1..=(PLUGIN_CACHE_MAX_ENTRIES as u64 + 10) {
-            room.cache_plugin_frame(seq, server_msg("plugin-msg", None, None, None, None, None, None));
+            room.cache_plugin_frame(seq, 1, server_msg("plugin-msg", None, None, None, None, None, None));
         }
         assert_eq!(room.plugin_cache.len(), PLUGIN_CACHE_MAX_ENTRIES);
         let seqs: Vec<u64> = room.plugin_cache.iter().map(|c| c.seq).collect();
@@ -1144,6 +1181,20 @@ mod tests {
         sorted.sort_unstable();
         assert_eq!(seqs, sorted, "缓存保持 seq 升序");
         assert_eq!(seqs[0], 11, "最旧的 1..10 已逐出");
+    }
+
+    /// 补投按 seq 升序回放 `after` 之后的缓存帧，并跳过请求者自己发出的帧。
+    #[test]
+    fn plugin_replay_skips_requester_own_frames() {
+        let mut room = Room::default();
+        for seq in [1u64, 2, 3, 4] {
+            let sender = if seq % 2 == 0 { 2 } else { 1 };
+            room.cache_plugin_frame(seq, sender, server_msg("plugin-msg", None, None, None, None, None, None));
+        }
+        let for_peer_1: Vec<u64> = room.replayed_frames(1, 1).map(|(seq, _)| seq).collect();
+        assert_eq!(for_peer_1, vec![2, 4], "只回放他人帧");
+        let for_peer_2: Vec<u64> = room.replayed_frames(1, 2).map(|(seq, _)| seq).collect();
+        assert_eq!(for_peer_2, vec![3], "另一请求者看到自己的 2 被跳过");
     }
 
     /// meta 变更广播帧：只带键名（值由客户端回读磁盘真源），不带 peerId 与其他字段。

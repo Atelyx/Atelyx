@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::view::{ColorToken, ImageSource, TextWeight};
+use crate::view::{ColorToken, ImageFit, ImageSource, TextWeight};
 
 fn default_stroke_width() -> f32 {
     1.0
@@ -85,13 +85,16 @@ pub enum DrawCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         weight: Option<TextWeight>,
     },
-    /// 图片贴片，按给定矩形绘制（不做等比约束，比例由插件自己保持）。
+    /// 图片贴片：绘制在给定矩形内。`fit` 缺省 = 拉伸填满；`contain` 等比完整可见（留空边），
+    /// `cover` 等比覆盖并裁剪溢出部分。
     Image {
         source: ImageSource,
         x: f32,
         y: f32,
         w: f32,
         h: f32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fit: Option<ImageFit>,
     },
 }
 
@@ -227,5 +230,30 @@ mod tests {
             serde_json::to_value(rgba).unwrap(),
             serde_json::json!({"type": "rgba", "rgba": [16, 32, 64, 255]})
         );
+    }
+
+    #[test]
+    fn image_fit_is_optional_and_roundtrips() {
+        let source = ImageSource::Vault { path: "a.png".into() };
+        let stretch = DrawCommand::Image {
+            source: source.clone(),
+            x: 0.0,
+            y: 0.0,
+            w: 10.0,
+            h: 10.0,
+            fit: None,
+        };
+        assert!(serde_json::to_value(&stretch).unwrap().get("fit").is_none(), "缺省不落字段");
+        let contain = DrawCommand::Image {
+            source,
+            x: 0.0,
+            y: 0.0,
+            w: 10.0,
+            h: 10.0,
+            fit: Some(ImageFit::Contain),
+        };
+        let wire = serde_json::to_value(&contain).unwrap();
+        assert_eq!(wire["fit"], "contain");
+        assert_eq!(serde_json::from_value::<DrawCommand>(wire).unwrap(), contain);
     }
 }

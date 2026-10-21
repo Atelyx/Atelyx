@@ -44,15 +44,18 @@ pub use atelyx_plugin_protocol::manifest::{DocTypeRegistration, Permission};
 pub use atelyx_plugin_protocol::method::{
     CanvasResizedParams, ChatEvent, ChatEventParams, ChatHistoryParams, ChatHistoryResult,
     ChatRenameParams, ChatSendParams, ChatSessionParams, ChatSessionSummary, ChatSessionWire,
-    ChatStopParams, ClipboardImage, ContributionSlot, DefineIconParams, FileFilter,
-    NotificationLevel, ScrollEdge, ScrollToParams, ShortcutQueryResult, SurfaceKind,
-    TableField, TableSelection, TableRow, TableSetCellImageParams, TableSnapshot, TakeoverScope,
+    ChatStopParams, ClipboardImage, CollabMessageParams, CollabPeer, CollabPeersResult,
+    CollabSendParams, CollabSendResult, ContributionSlot, DefineIconParams, FileFilter,
+    ImageInfoResult, NotificationLevel, ScrollEdge, ScrollToParams, SetTrayItemsParams,
+    ShortcutQueryResult, SurfaceKind, TableField, TableSelection, TableRow,
+    TableSetCellImageParams, TableSnapshot, TakeoverScope, TrayClickParams, TrayItemSpec,
     WindowOpenParams, WindowUpdateParams,
 };
 pub use atelyx_plugin_protocol::view::{
-    Align, Axis, ButtonVariant, CanvasEventKind, CanvasPointer, CardTone, ColorToken, ControlSize,
-    EventKind, EventValue, Fill, ImageFit, ImageSource, Justify, LinkForm as ProtocolLinkForm,
-    MenuItem, MouseButton, NodeBody, TextWeight, ViewEvent, ViewNode,
+    Align, Axis, ButtonVariant, CanvasEventKind, CanvasPointer, CardTone, ColorToken,
+    ControlSize, Dimension, EventKind, EventValue, Fill, ImageFit, ImageSource,
+    Justify, LinkForm as ProtocolLinkForm, MenuItem, MouseButton, NodeBody, NodeWidth, PaddingSpec,
+    TextWeight, ViewEvent, ViewNode,
 };
 
 /// 插件运行状态。
@@ -104,8 +107,9 @@ pub struct Contribution {
     pub label: String,
     /// 宿主图标形状表里的图标名；插件未声明时为 `None`（宿主回落拼图）。
     pub icon: Option<String>,
-    /// 面外壳内边距（px）；`None` = 宿主默认（面板 12/10、窗口与接管面 0）。
-    pub padding: Option<f32>,
+    /// 面外壳内边距，只作用于面板 / 设置 / 表格视图这类有宿主外壳的面；
+    /// `None` = 宿主默认（左右 12、上下 10）。插件窗口与接管面无宿主外壳内边距。
+    pub padding: Option<PaddingSpec>,
 }
 
 /// 一个领域文档类型注册及其所属插件（文件树图标 / 新建菜单 / 打开路由用）。
@@ -228,6 +232,14 @@ pub enum HostRequest {
     ChatDelete { plugin_id: String, request_id: u64, params: method::ChatSessionParams },
     /// 插件请求压缩一个会话（回执 = 已受理，结果经 `ai.chat.history` 复核）。
     ChatCompact { plugin_id: String, request_id: u64, params: method::ChatSessionParams },
+    /// 插件请求读当前仓库内一张图片的固有像素尺寸。
+    VaultImageInfo { plugin_id: String, request_id: u64, path: String },
+    /// 插件请求整发整换自己的托盘菜单（条目存于壳的托盘服务）。
+    TraySetItems { plugin_id: String, request_id: u64, params: method::SetTrayItemsParams },
+    /// 插件请求当前空间的连接状态与在场成员。
+    CollabPeers { plugin_id: String, request_id: u64 },
+    /// 插件请求向同空间的对等插件发一条消息。
+    CollabSend { plugin_id: String, request_id: u64, params: method::CollabSendParams },
 }
 
 /// 插件列表项（设置页渲染用）。
@@ -495,7 +507,13 @@ impl PluginRuntime {
             | HostRequest::TableRemoveRow { .. }
             | HostRequest::TableSelectRow { .. }
             | HostRequest::TableSetCellImage { .. }
-            | HostRequest::ScrollTo { .. } => return Err("界面服务请求形态不符".to_string()),
+            | HostRequest::ScrollTo { .. }
+            | HostRequest::VaultImageInfo { .. }
+            | HostRequest::TraySetItems { .. }
+            | HostRequest::CollabPeers { .. }
+            | HostRequest::CollabSend { .. } => {
+                return Err("界面服务请求形态不符".to_string())
+            }
         };
         self.ui_calls
             .lock()
@@ -653,6 +671,25 @@ impl PluginRuntime {
                 request_id,
                 params,
             },
+            HostRequest::VaultImageInfo { plugin_id, path, .. } => HostRequest::VaultImageInfo {
+                plugin_id,
+                request_id,
+                path,
+            },
+            HostRequest::TraySetItems { plugin_id, params, .. } => HostRequest::TraySetItems {
+                plugin_id,
+                request_id,
+                params,
+            },
+            HostRequest::CollabPeers { plugin_id, .. } => HostRequest::CollabPeers {
+                plugin_id,
+                request_id,
+            },
+            HostRequest::CollabSend { plugin_id, params, .. } => HostRequest::CollabSend {
+                plugin_id,
+                request_id,
+                params,
+            },
             _ => return Err("壳侧服务请求形态不符".to_string()),
         };
         self.shell_calls
@@ -666,8 +703,9 @@ impl PluginRuntime {
         Ok(rx)
     }
 
-    /// 壳侧回填一次服务调用的结果（AI 对话：会话 / 消息 id、清单或历史；剪贴板：文本；
-    /// 仓库：文件内容 / 写入完成 / 目录清单 / 存在性）。失败带可读原因。
+    /// 壳侧回填一次服务调用的结果（AI 对话：会话 / 消息 id、清单或历史；剪贴板：文本或图片；
+    /// 仓库：文件内容 / 写入完成 / 目录清单 / 存在性 / 图片尺寸；表格：快照与写入回执；
+    /// 托盘：条目已应用；协作：在场清单 / 消息已投递）。失败带可读原因。
     pub fn resolve_shell_call(&self, request_id: u64, result: Result<Value, String>) {
         let waiter = self.shell_calls.lock().unwrap().remove(&request_id);
         if let Some((_, tx)) = waiter {
@@ -1258,6 +1296,22 @@ impl PluginRuntime {
         }
     }
 
+    /// 转投一次托盘条目点击给拥有该条目的插件。
+    pub fn notify_tray_click(&self, plugin_id: &str, item_id: &str) {
+        let instance = self.instances.lock().unwrap().get(plugin_id).cloned();
+        if let Some(instance) = instance {
+            instance.notify_tray_click(item_id);
+        }
+    }
+
+    /// 转投一条同空间对等插件的消息给目标插件。
+    pub fn notify_collab_message(&self, plugin_id: &str, params: &CollabMessageParams) {
+        let instance = self.instances.lock().unwrap().get(plugin_id).cloned();
+        if let Some(instance) = instance {
+            instance.notify_collab_message(params);
+        }
+    }
+
     /// 安装 / 更新后的收尾：重扫清单。更新的若是曾启用的插件，先停旧进程再用新内容重启
     /// （否则旧进程继续跑、新内容不生效）；**新装的插件不自动启用**，由用户在设置页启用。
     /// 重启失败不改判安装结果——内容已落位，失败只是这次没跑起来。
@@ -1359,7 +1413,11 @@ fn request_plugin_id(request: &HostRequest) -> &str {
         | HostRequest::WindowShow { plugin_id, .. }
         | HostRequest::ChatRename { plugin_id, .. }
         | HostRequest::ChatDelete { plugin_id, .. }
-        | HostRequest::ChatCompact { plugin_id, .. } => plugin_id,
+        | HostRequest::ChatCompact { plugin_id, .. }
+        | HostRequest::VaultImageInfo { plugin_id, .. }
+        | HostRequest::TraySetItems { plugin_id, .. }
+        | HostRequest::CollabPeers { plugin_id, .. }
+        | HostRequest::CollabSend { plugin_id, .. } => plugin_id,
     }
 }
 

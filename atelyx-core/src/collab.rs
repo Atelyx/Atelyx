@@ -1,7 +1,8 @@
-//! 协作空间 WebSocket 帧泵：连接生命周期、心跳保活、半开检测与断线退避重连。
-//! 帧格式 = JSON 文本帧（camelCase，`type` 分派）；本模块只管传输编解码，业务语义归壳层。
+//! 协作空间 WebSocket 帧泵：连接生命周期、心跳保活、半开检测与断线退避重连，
+//! 以及插件广播帧的序号去重与缺口补投；业务语义归壳层。
+//! 帧格式 = JSON 文本帧（camelCase，`type` 分派）。
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
@@ -29,6 +30,9 @@ const SEND_TIMEOUT: Duration = Duration::from_secs(10);
 /// 连接建立超时（TCP + TLS + WS 握手）：对端 accept 后停滞时裸 connect 永不返回，
 /// 泵在 bye_pending 置位后会永久卡死无法终结。
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// 插件帧缺口积压上限（条）：服务端补投缓存只留 128 条，积压逼近它就先要补投，
+/// 免等缺口被新帧挤出缓存窗口。
+const PLUGIN_PENDING_MAX: usize = 64;
 
 /// 一条已建立的 WebSocket 连接。
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -66,6 +70,9 @@ pub enum SpaceCmd {
     NoteAware { file: String, payload: Vec<u8> },
     /// presence 上行（JSON 对象，字段由壳组装，服务端不解析）。
     Presence { presence: Value },
+    /// 插件通用消息上行（频道由壳按插件命名空间拼好，载荷服务端不解析）。
+    /// `target_peer_id` 缺省 = 广播房间内其他成员；定向单播为尽力而为、不经补投。
+    PluginMsg { channel: String, payload: Value, target_peer_id: Option<u64> },
     /// 优雅断开（切空间前发）。泵收此命令即终结，不再产事件。
     Bye,
 }
@@ -100,6 +107,8 @@ pub enum SpaceEvent {
     Renamed { old_path: String, new_path: String },
     /// 文件结构变更（他端新建/删除文件与文件夹、复制）：客户端重拉整树刷新面板。
     FsChanged,
+    /// 插件通用消息（广播帧已按房间序号去重补序，单播帧原样直达）。
+    PluginMsg { peer_id: String, channel: String, payload: Value },
     /// 服务端提示本端消费过慢：需重新握手补齐状态。
     Resync,
     Error { message: String },
@@ -126,6 +135,8 @@ pub struct PumpConfig {
     pub backoff_max: Duration,
     /// 断线期命令缓冲条数上限（满丢最旧）。
     pub cmd_buffer: usize,
+    /// 插件广播帧缺口宽限：补投也补不齐时按现有帧补序投递的等待上限。
+    pub plugin_gap_grace: Duration,
 }
 
 impl Default for PumpConfig {
@@ -136,6 +147,7 @@ impl Default for PumpConfig {
             backoff_initial: Duration::from_secs(1),
             backoff_max: Duration::from_secs(15),
             cmd_buffer: 1024,
+            plugin_gap_grace: Duration::from_secs(3),
         }
     }
 }
@@ -187,6 +199,19 @@ struct PumpState {
     buf: VecDeque<SpaceCmd>,
     /// 当前失败连片是否已发过 Error 事件（Ready 清零）。
     fail_reported: bool,
+    /// 已按序投递到的房间插件帧序号（跨连接保持，重连据此请求补投）。
+    plugin_delivered: u64,
+    /// 本泵是否已就绪过：首次加入不回放加入前的缓存帧。
+    plugin_joined: bool,
+    /// 缺口暂存的广播帧（序号 → 事件），补齐连续段后按序投递。
+    plugin_pending: BTreeMap<u64, SpaceEvent>,
+    /// 占房间序号但不投递的帧：本端发出的广播帧（服务端不回发本人，凭 `plugin-msg-ack`
+    /// 记账）与二进制帧（宿主插件面的载荷只有 JSON）。投递推进时按洞跳过。
+    plugin_void: BTreeSet<u64>,
+    /// 缺口宽限截止：到点仍补不齐即再要一轮补投，再不齐才按现有帧补序投递。
+    plugin_gap_deadline: Option<tokio::time::Instant>,
+    /// 当前缺口是否已要过补投：同一缺口只补一次，避免补不回来时反复空转。
+    plugin_gap_replayed: bool,
 }
 
 /// 连接失败的两类原因：校验被拒产 Error 事件，网络不可达只走退避重连。
@@ -211,8 +236,8 @@ enum SessionEnd {
 /// 文本帧处理结果。
 enum FrameFlow {
     Continue,
-    /// hello-ack：进入就绪态，缓冲待冲刷。
-    Ready,
+    /// hello-ack：进入就绪态，缓冲待冲刷；`replay_after` = 待补投的房间插件帧序号（重连才有）。
+    Ready { replay_after: Option<u64> },
     /// 服务端拒绝：泵终结不重连（重新进入空间时由壳层重建）。
     Fatal,
     /// 事件流消费端已离场：泵立即终结（任何路径上「无人消费即终结」都必须成立）。
@@ -232,6 +257,12 @@ async fn run_pump(
         backoff: config.backoff_initial,
         buf: VecDeque::new(),
         fail_reported: false,
+        plugin_delivered: 0,
+        plugin_joined: false,
+        plugin_pending: BTreeMap::new(),
+        plugin_void: BTreeSet::new(),
+        plugin_gap_deadline: None,
+        plugin_gap_replayed: false,
     };
     let mut bye_pending = false;
     loop {
@@ -412,6 +443,8 @@ async fn run_session(
     );
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
+        // 每轮重取值：帧处理里可能新开或撤掉缺口宽限
+        let plugin_gap_deadline = state.plugin_gap_deadline;
         tokio::select! {
             cmd = cmd_rx.recv() => match cmd {
                 None => return SessionEnd::Ended,
@@ -443,6 +476,25 @@ async fn run_session(
                     return SessionEnd::Closed { was_ready: ready };
                 }
             }
+            // 缺口宽限到点仍未补齐：先就地在位补投一次，再补不齐才按现有帧补序投递
+            _ = gap_wait(plugin_gap_deadline) => {
+                if !ready {
+                    // 断线残留的宽限：等本次握手重计，不在就绪前投递暂存帧
+                    state.plugin_gap_deadline = None;
+                } else if !state.plugin_gap_replayed {
+                    state.plugin_gap_replayed = true;
+                    state.plugin_gap_deadline =
+                        Some(tokio::time::Instant::now() + config.plugin_gap_grace);
+                    let text = plugin_replay_frame_text(state.plugin_delivered);
+                    if send_with_timeout(&mut ws, Message::text(text)).await.is_err() {
+                        close_quiet(&mut ws).await;
+                        return SessionEnd::Closed { was_ready: true };
+                    }
+                } else if let FrameFlow::Abort = flush_plugin_gap(state, events).await {
+                    close_quiet(&mut ws).await;
+                    return SessionEnd::Ended;
+                }
+            }
             frame = ws.next() => {
                 let msg = match frame {
                     Some(Ok(msg)) => msg,
@@ -452,10 +504,31 @@ async fn run_session(
                     }
                 };
                 last_inbound = Instant::now();
-                let Message::Text(text) = msg else { continue };
-                match handle_text_frame(text.as_str(), ready, events).await {
+                let text = match msg {
+                    Message::Text(text) => text,
+                    Message::Binary(data) => {
+                        // 二进制插件帧占房间序号但不进插件面（插件载荷只有 JSON）：
+                        // 只推进序号，免后续帧等一个永远投不出来的洞
+                        if ready {
+                            if let Some(seq) =
+                                binary_plugin_seq(&data).filter(|seq| *seq > state.plugin_delivered)
+                            {
+                                state.plugin_void.insert(seq);
+                                if let FrameFlow::Abort =
+                                    flush_plugin_contiguous(state, events).await
+                                {
+                                    close_quiet(&mut ws).await;
+                                    return SessionEnd::Ended;
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    _ => continue,
+                };
+                match handle_text_frame(text.as_str(), ready, &config, state, events).await {
                     FrameFlow::Continue => {}
-                    FrameFlow::Ready => {
+                    FrameFlow::Ready { replay_after } => {
                         ready = true;
                         // 重连成功：清退避与失败连片标记，下次断线从头计
                         state.attempt = 0;
@@ -463,6 +536,15 @@ async fn run_session(
                         state.fail_reported = false;
                         while let Some(cmd) = state.buf.pop_front() {
                             if !send_cmd(&mut ws, cmd).await {
+                                close_quiet(&mut ws).await;
+                                return SessionEnd::Closed { was_ready: true };
+                            }
+                        }
+                        // 补投请求经本连接上行，回放帧与直播帧同出站通道保序；
+                        // 缺口暂存已按就绪时刻重计宽限，等补投期间不会被提前弃等
+                        if let Some(after) = replay_after {
+                            let text = plugin_replay_frame_text(after);
+                            if send_with_timeout(&mut ws, Message::text(text)).await.is_err() {
                                 close_quiet(&mut ws).await;
                                 return SessionEnd::Closed { was_ready: true };
                             }
@@ -499,7 +581,13 @@ async fn close_quiet(ws: &mut WsStream) {
 
 /// 文本帧 → 事件：字段抽取与 base64 解码，业务匹配归壳层。
 /// 握手完成前的业务帧忽略（服务端先发 hello-ack 再 peers）；载荷解码失败丢帧。
-async fn handle_text_frame(text: &str, ready: bool, events: &EventSink) -> FrameFlow {
+async fn handle_text_frame(
+    text: &str,
+    ready: bool,
+    config: &PumpConfig,
+    state: &mut PumpState,
+    events: &EventSink,
+) -> FrameFlow {
     let Ok(frame) = serde_json::from_str::<Value>(text) else {
         return FrameFlow::Continue;
     };
@@ -512,8 +600,32 @@ async fn handle_text_frame(text: &str, ready: bool, events: &EventSink) -> Frame
                 .get("peerId")
                 .and_then(peer_id_string)
                 .unwrap_or_default();
+            // 序号头 = 服务端当前已分配的插件帧序号。首次加入从序号头续上（之前的帧发生在
+            // 加入前）；小于已投递序号 = 房间重建、序号空间重置，归零重来
+            if let Some(header) = frame.get("pluginSeq").and_then(Value::as_u64) {
+                if !state.plugin_joined {
+                    state.plugin_delivered = state.plugin_delivered.max(header);
+                } else if header < state.plugin_delivered {
+                    state.plugin_delivered = 0;
+                    state.plugin_void.clear();
+                }
+                state.plugin_pending.retain(|seq, _| *seq <= header);
+                state.plugin_void.retain(|seq| *seq > state.plugin_delivered);
+                if state.plugin_pending.is_empty() {
+                    state.plugin_gap_deadline = None;
+                }
+            }
+            // 重连才请求补投：首次加入不回放加入前的缓存帧
+            let replay_after = state.plugin_joined.then_some(state.plugin_delivered);
+            state.plugin_joined = true;
+            // 重连自带一次补投：断线前的暂存帧由它补齐；无暂存帧时下一个缺口仍可再请求一次
+            state.plugin_gap_replayed = replay_after.is_some() && !state.plugin_pending.is_empty();
+            if !state.plugin_pending.is_empty() {
+                state.plugin_gap_deadline =
+                    Some(tokio::time::Instant::now() + config.plugin_gap_grace);
+            }
             if events.send(SpaceEvent::Ready { peer_id }).await {
-                FrameFlow::Ready
+                FrameFlow::Ready { replay_after }
             } else {
                 FrameFlow::Abort
             }
@@ -589,7 +701,33 @@ async fn handle_text_frame(text: &str, ready: bool, events: &EventSink) -> Frame
             deliver(events.send(SpaceEvent::Renamed { old_path, new_path }).await)
         }
         "resync" => deliver(events.send(SpaceEvent::Resync).await),
-        // canvas-patch / plugin-msg / 未知类型：泵不承载
+        "plugin-msg" => {
+            let (Some(peer_id), Some(channel)) = (
+                frame.get("peerId").and_then(peer_id_string),
+                str_field(&frame, "channel"),
+            ) else {
+                return FrameFlow::Continue;
+            };
+            let payload = frame.get("payload").cloned().unwrap_or(Value::Null);
+            let event = SpaceEvent::PluginMsg { peer_id, channel, payload };
+            match frame.get("seq").and_then(Value::as_u64).filter(|seq| *seq > 0) {
+                // 广播帧：按房间序号去重补序（重连期缺帧由补投送来）
+                Some(seq) => deliver_plugin_broadcast(state, seq, event, config, events).await,
+                // 单播帧：不占序号、不入补投缓存，原样直达
+                None => deliver(events.send(event).await),
+            }
+        }
+        // 自己发出的广播帧只收回执（服务端不回发本人）：记入跳过集推进序号
+        "plugin-msg-ack" => {
+            let Some(seq) = frame.get("seq").and_then(Value::as_u64).filter(|seq| *seq > 0) else {
+                return FrameFlow::Continue;
+            };
+            if seq > state.plugin_delivered {
+                state.plugin_void.insert(seq);
+            }
+            flush_plugin_contiguous(state, events).await
+        }
+        // canvas-patch / 未知类型：泵不承载
         _ => FrameFlow::Continue,
     }
 }
@@ -603,12 +741,92 @@ fn deliver(sent: bool) -> FrameFlow {
     }
 }
 
+/// 广播插件帧按房间序号投递：重复丢弃、连续直达、缺口暂存等补投。
+/// 积压超过 [`PLUGIN_PENDING_MAX`] 时把宽限压到最短（立即请求补投）；仍补不齐才按现有帧补序投递。
+async fn deliver_plugin_broadcast(
+    state: &mut PumpState,
+    seq: u64,
+    event: SpaceEvent,
+    config: &PumpConfig,
+    events: &EventSink,
+) -> FrameFlow {
+    if seq <= state.plugin_delivered {
+        return FrameFlow::Continue;
+    }
+    if seq > state.plugin_delivered + 1 {
+        state.plugin_pending.insert(seq, event);
+        if state.plugin_pending.len() >= PLUGIN_PENDING_MAX {
+            // 立即要补投：宽限到点由会话循环发请求，此处只把等待压到最短
+            state.plugin_gap_deadline = Some(tokio::time::Instant::now());
+        } else {
+            state
+                .plugin_gap_deadline
+                .get_or_insert_with(|| tokio::time::Instant::now() + config.plugin_gap_grace);
+        }
+        return FrameFlow::Continue;
+    }
+    state.plugin_delivered = seq;
+    if !events.send(event).await {
+        return FrameFlow::Abort;
+    }
+    flush_plugin_contiguous(state, events).await
+}
+
+/// 投递暂存里接着当前序号的连续帧（本端自己的帧序号只推进不投递）；暂存清空即撤掉宽限。
+async fn flush_plugin_contiguous(state: &mut PumpState, events: &EventSink) -> FrameFlow {
+    loop {
+        let next = state.plugin_delivered + 1;
+        if state.plugin_void.remove(&next) {
+            state.plugin_delivered = next;
+            continue;
+        }
+        let Some(event) = state.plugin_pending.remove(&next) else {
+            break;
+        };
+        state.plugin_delivered = next;
+        if !events.send(event).await {
+            return FrameFlow::Abort;
+        }
+    }
+    if state.plugin_pending.is_empty() {
+        state.plugin_gap_deadline = None;
+        state.plugin_gap_replayed = false;
+    }
+    FrameFlow::Continue
+}
+
+/// 弃等缺口：按现有序号升序投递暂存帧（跳过的序号补不回来，只能以现有帧续上）。
+async fn flush_plugin_gap(state: &mut PumpState, events: &EventSink) -> FrameFlow {
+    state.plugin_gap_deadline = None;
+    state.plugin_gap_replayed = false;
+    for (seq, event) in std::mem::take(&mut state.plugin_pending) {
+        state.plugin_delivered = seq;
+        if !events.send(event).await {
+            return FrameFlow::Abort;
+        }
+    }
+    // 已越过游标的跳过集条目不会再命中，只留游标之后的（自己的帧可能随后到达）
+    state.plugin_void.retain(|seq| *seq > state.plugin_delivered);
+    FrameFlow::Continue
+}
+
+/// 缺口宽限等待；无缺口时永不就绪。
+async fn gap_wait(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
+    }
+}
+
 /// 命令编码上行（false = 写失败，连接已死）。Bye 由会话循环拦截，不经此路径。
 async fn send_cmd(ws: &mut WsStream, cmd: SpaceCmd) -> bool {
     let text = match cmd {
         SpaceCmd::NoteSync { file, payload } => note_frame_text("note-sync", &file, &payload),
         SpaceCmd::NoteAware { file, payload } => note_frame_text("note-aware", &file, &payload),
         SpaceCmd::Presence { presence } => presence_frame_text(presence),
+        SpaceCmd::PluginMsg { channel, payload, target_peer_id } => {
+            plugin_frame_text(&channel, payload, target_peer_id)
+        }
         SpaceCmd::Bye => return true,
     };
     send_with_timeout(ws, Message::text(text)).await.is_ok()
@@ -622,6 +840,39 @@ fn note_frame_text(kind: &str, file: &str, payload: &[u8]) -> String {
         "payload": base64::engine::general_purpose::STANDARD.encode(payload),
     })
     .to_string()
+}
+
+/// 二进制插件帧的房间序号。线格式：kind(1) flags(1) 频道字节长(2) 频道 seq(8) sender(8)
+/// [target(8)] 载荷；不是本类帧或长度不足即 None。
+fn binary_plugin_seq(data: &[u8]) -> Option<u64> {
+    const KIND: u8 = 1;
+    const HEADER: usize = 4;
+    if data.len() < HEADER + 8 || data[0] != KIND {
+        return None;
+    }
+    let channel_len = u16::from_le_bytes([data[2], data[3]]) as usize;
+    let offset = HEADER + channel_len;
+    data.get(offset..offset + 8)?
+        .try_into()
+        .ok()
+        .map(u64::from_le_bytes)
+}
+
+/// 插件广播帧补投请求：服务端按房间序号补发 `seq > after` 的缓存帧（缓存窗口外的补不回）。
+fn plugin_replay_frame_text(after: u64) -> String {
+    json!({ "type": "plugin-replay", "after": after }).to_string()
+}
+
+/// 插件消息上行：频道 + 任意 JSON 载荷透传；定向单播带数值 `targetPeerId`。
+fn plugin_frame_text(channel: &str, payload: Value, target_peer_id: Option<u64>) -> String {
+    let mut obj = Map::new();
+    obj.insert("type".to_string(), Value::from("plugin-msg"));
+    obj.insert("channel".to_string(), Value::from(channel));
+    obj.insert("payload".to_string(), payload);
+    if let Some(target) = target_peer_id {
+        obj.insert("targetPeerId".to_string(), Value::from(target));
+    }
+    Value::Object(obj).to_string()
 }
 
 /// presence 上行：壳组装的 JSON 对象打上 `type` 原样透传（非对象则只发 type）。
@@ -727,6 +978,7 @@ mod tests {
             backoff_initial: Duration::from_millis(20),
             backoff_max: Duration::from_millis(100),
             cmd_buffer: 8,
+            plugin_gap_grace: Duration::from_millis(80),
         }
     }
 
@@ -806,6 +1058,18 @@ mod tests {
         assert_eq!(hello["deviceName"], "dev-a");
         assert_eq!(hello["version"], "0.1.0");
         send_json(&mut ws, json!({"type": "hello-ack", "peerId": 1})).await;
+        ws
+    }
+
+    /// 带房间插件序号头的握手（序号空间重置/补投断言用）。
+    async fn handshake_with_plugin_seq(mut ws: ServerWs, plugin_seq: u64) -> ServerWs {
+        let hello = read_json(&mut ws).await;
+        assert_eq!(hello["type"], "hello");
+        send_json(
+            &mut ws,
+            json!({"type": "hello-ack", "peerId": 1, "pluginSeq": plugin_seq}),
+        )
+        .await;
         ws
     }
 
@@ -1115,6 +1379,249 @@ mod tests {
             recv_event(&mut events).await,
             SpaceEvent::Ready { peer_id: "1".to_string() }
         );
+        server.await.unwrap();
+    }
+
+    fn plugin_event(peer_id: &str, payload: Value) -> SpaceEvent {
+        SpaceEvent::PluginMsg {
+            peer_id: peer_id.to_string(),
+            channel: "chat".to_string(),
+            payload,
+        }
+    }
+
+    /// 插件消息：连续广播按序直达、重复序号丢弃、单播无序号原样直达；
+    /// 上行编码带 channel / payload 与数值 targetPeerId。
+    #[tokio::test]
+    async fn plugin_messages_flow_without_duplicates() {
+        let (base, server) = spawn_handshake_server(|mut ws| async move {
+            send_json(&mut ws, json!({"type": "plugin-msg", "peerId": 2, "channel": "chat", "payload": {"n": 1}, "seq": 1})).await;
+            send_json(&mut ws, json!({"type": "plugin-msg", "peerId": 2, "channel": "chat", "payload": {"n": 2}, "seq": 2})).await;
+            send_json(&mut ws, json!({"type": "plugin-msg", "peerId": 2, "channel": "chat", "payload": {"n": 2}, "seq": 2})).await;
+            send_json(&mut ws, json!({"type": "plugin-msg", "peerId": 3, "channel": "chat", "payload": {"n": 3}})).await;
+            let frame = read_json(&mut ws).await;
+            assert_eq!(frame, json!({"type": "plugin-msg", "channel": "chat", "payload": {"m": 1}}));
+            let frame = read_json(&mut ws).await;
+            assert_eq!(
+                frame,
+                json!({"type": "plugin-msg", "channel": "chat", "payload": {"m": 2}, "targetPeerId": 3})
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        })
+        .await;
+        let (cmd_tx, mut events) = spawn_pump_with(&base, test_hello(), test_config());
+        assert!(matches!(recv_event(&mut events).await, SpaceEvent::Ready { .. }));
+        cmd_tx
+            .send(SpaceCmd::PluginMsg {
+                channel: "chat".to_string(),
+                payload: json!({"m": 1}),
+                target_peer_id: None,
+            })
+            .unwrap();
+        cmd_tx
+            .send(SpaceCmd::PluginMsg {
+                channel: "chat".to_string(),
+                payload: json!({"m": 2}),
+                target_peer_id: Some(3),
+            })
+            .unwrap();
+        assert_eq!(recv_event(&mut events).await, plugin_event("2", json!({"n": 1})));
+        assert_eq!(recv_event(&mut events).await, plugin_event("2", json!({"n": 2})));
+        assert_eq!(recv_event(&mut events).await, plugin_event("3", json!({"n": 3})));
+        server.await.unwrap();
+    }
+
+    /// 自己发出的广播帧：服务端只回 `plugin-msg-ack`，客户端凭它推进序号，
+    /// 后续帧不因这处序号洞等补投宽限。
+    #[tokio::test]
+    async fn own_broadcast_ack_advances_sequence() {
+        let (base, server) = spawn_handshake_server(|mut ws| async move {
+            send_json(&mut ws, json!({"type": "plugin-msg-ack", "seq": 1})).await;
+            send_json(&mut ws, json!({"type": "plugin-msg", "peerId": 2, "channel": "chat", "payload": {"n": 2}, "seq": 2})).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        })
+        .await;
+        // 宽限放到 5s：回执没生效时这里会卡到 recv_event 的 2s 超时
+        let config = PumpConfig {
+            plugin_gap_grace: Duration::from_secs(5),
+            ..test_config()
+        };
+        let (_cmd_tx, mut events) = spawn_pump_with(&base, test_hello(), config);
+        assert!(matches!(recv_event(&mut events).await, SpaceEvent::Ready { .. }));
+        assert_eq!(recv_event(&mut events).await, plugin_event("2", json!({"n": 2})));
+        server.await.unwrap();
+    }
+
+    /// 二进制插件帧占房间序号：宿主跳过它的载荷但推进序号，后续帧照常直达。
+    #[tokio::test]
+    async fn binary_plugin_frame_advances_sequence() {
+        let (base, server) = spawn_handshake_server(|mut ws| async move {
+            let channel = b"chat";
+            let mut binary = vec![1u8, 0];
+            binary.extend_from_slice(&(channel.len() as u16).to_le_bytes());
+            binary.extend_from_slice(channel);
+            binary.extend_from_slice(&1u64.to_le_bytes());
+            binary.extend_from_slice(&2u64.to_le_bytes());
+            binary.extend_from_slice(b"raw");
+            let _ = ws.send(Message::Binary(binary.into())).await;
+            send_json(&mut ws, json!({"type": "plugin-msg", "peerId": 2, "channel": "chat", "payload": {"n": 2}, "seq": 2})).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        })
+        .await;
+        let config = PumpConfig {
+            plugin_gap_grace: Duration::from_secs(5),
+            ..test_config()
+        };
+        let (_cmd_tx, mut events) = spawn_pump_with(&base, test_hello(), config);
+        assert!(matches!(recv_event(&mut events).await, SpaceEvent::Ready { .. }));
+        assert_eq!(recv_event(&mut events).await, plugin_event("2", json!({"n": 2})));
+        server.await.unwrap();
+    }
+
+    /// 重连补投：首次加入不回放缓存帧，重连按已投递序号请求补投；
+    /// 补投前先到的直播帧按序号暂存，缺口补齐后按序投递。
+    #[tokio::test]
+    async fn reconnect_replays_missed_plugin_frames_in_order() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            // 连接 1：发一条广播帧后断开
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws1 = handshake(accept_ws(stream).await).await;
+            send_json(&mut ws1, json!({"type": "plugin-msg", "peerId": 2, "channel": "chat", "payload": {"n": 1}, "seq": 1})).await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            drop(ws1);
+            // 连接 2：序号头正常时从已投递序号之后补投
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws2 = handshake_with_plugin_seq(accept_ws(stream).await, 1).await;
+            let replay = read_json(&mut ws2).await;
+            assert_eq!(replay, json!({"type": "plugin-replay", "after": 1}));
+            // 直播帧（seq 3）先于补投帧（seq 2）到达：客户端须按 2、3 投递
+            send_json(&mut ws2, json!({"type": "plugin-msg", "peerId": 2, "channel": "chat", "payload": {"n": 3}, "seq": 3})).await;
+            send_json(&mut ws2, json!({"type": "plugin-msg", "peerId": 2, "channel": "chat", "payload": {"n": 2}, "seq": 2})).await;
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        });
+        let (_cmd_tx, mut events) =
+            spawn_pump_with(&format!("http://{addr}"), test_hello(), test_config());
+        assert!(matches!(recv_event(&mut events).await, SpaceEvent::Ready { .. }));
+        assert_eq!(recv_event(&mut events).await, plugin_event("2", json!({"n": 1})));
+        assert_eq!(recv_event(&mut events).await, SpaceEvent::Disconnected);
+        assert_eq!(recv_event(&mut events).await, SpaceEvent::Reconnecting { attempt: 1 });
+        assert!(matches!(recv_event(&mut events).await, SpaceEvent::Ready { .. }));
+        assert_eq!(recv_event(&mut events).await, plugin_event("2", json!({"n": 2})));
+        assert_eq!(recv_event(&mut events).await, plugin_event("2", json!({"n": 3})));
+        server.await.unwrap();
+    }
+
+    /// 缺口宽限：缺号超出补投窗口时不会永久卡住，宽限到点按现有帧补序投递；
+    /// 之后迟到的缺号帧按重复丢弃，后续帧照常续上。
+    #[tokio::test]
+    async fn plugin_gap_flushes_after_grace() {
+        let (base, server) = spawn_handshake_server(|mut ws| async move {
+            send_json(&mut ws, json!({"type": "plugin-msg", "peerId": 2, "channel": "chat", "payload": {"n": 1}, "seq": 1})).await;
+            send_json(&mut ws, json!({"type": "plugin-msg", "peerId": 2, "channel": "chat", "payload": {"n": 3}, "seq": 3})).await;
+            // 超过宽限（测试 80ms）后再送缺号帧，验证弃等后按重复丢弃
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            send_json(&mut ws, json!({"type": "plugin-msg", "peerId": 2, "channel": "chat", "payload": {"n": 2}, "seq": 2})).await;
+            send_json(&mut ws, json!({"type": "plugin-msg", "peerId": 2, "channel": "chat", "payload": {"n": 4}, "seq": 4})).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        })
+        .await;
+        // 服务端静默 200ms 等宽限到点：放宽半开阈值，避免静默期间被判假死重连
+        let config = PumpConfig {
+            dead_after: Duration::from_millis(400),
+            ..test_config()
+        };
+        let (_cmd_tx, mut events) = spawn_pump_with(&base, test_hello(), config);
+        assert!(matches!(recv_event(&mut events).await, SpaceEvent::Ready { .. }));
+        assert_eq!(recv_event(&mut events).await, plugin_event("2", json!({"n": 1})));
+        assert_eq!(recv_event(&mut events).await, plugin_event("2", json!({"n": 3})));
+        assert_eq!(recv_event(&mut events).await, plugin_event("2", json!({"n": 4})));
+        server.await.unwrap();
+    }
+
+    /// 序号空间重置：hello-ack 序号头小于已投递序号（房间重建）即归零，
+    /// 按新空间从零补投，新空间的同号帧不被旧游标当作重复。
+    #[tokio::test]
+    async fn plugin_seq_space_reset_restarts_ordering() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws1 = handshake(accept_ws(stream).await).await;
+            send_json(&mut ws1, json!({"type": "plugin-msg", "peerId": 2, "channel": "chat", "payload": {"n": 1}, "seq": 1})).await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            drop(ws1);
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws2 = handshake_with_plugin_seq(accept_ws(stream).await, 0).await;
+            let replay = read_json(&mut ws2).await;
+            assert_eq!(replay, json!({"type": "plugin-replay", "after": 0}));
+            send_json(&mut ws2, json!({"type": "plugin-msg", "peerId": 3, "channel": "chat", "payload": {"n": "new"}, "seq": 1})).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        });
+        let (_cmd_tx, mut events) =
+            spawn_pump_with(&format!("http://{addr}"), test_hello(), test_config());
+        assert!(matches!(recv_event(&mut events).await, SpaceEvent::Ready { .. }));
+        assert_eq!(recv_event(&mut events).await, plugin_event("2", json!({"n": 1})));
+        assert_eq!(recv_event(&mut events).await, SpaceEvent::Disconnected);
+        assert_eq!(recv_event(&mut events).await, SpaceEvent::Reconnecting { attempt: 1 });
+        assert!(matches!(recv_event(&mut events).await, SpaceEvent::Ready { .. }));
+        assert_eq!(recv_event(&mut events).await, plugin_event("3", json!({"n": "new"})));
+        server.await.unwrap();
+    }
+
+    /// 首次加入活跃房间：序号头之前的帧发生在加入前，不补投、不等宽限，直播帧直接续上。
+    #[tokio::test]
+    async fn first_join_starts_after_plugin_seq_header() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = handshake_with_plugin_seq(accept_ws(stream).await, 5).await;
+            send_json(&mut ws, json!({"type": "plugin-msg", "peerId": 2, "channel": "chat", "payload": {"n": 6}, "seq": 6})).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        });
+        // 宽限放到 5s：游标没对齐时这里会卡到 recv_event 的 2s 超时
+        let config = PumpConfig {
+            plugin_gap_grace: Duration::from_secs(5),
+            ..test_config()
+        };
+        let (_cmd_tx, mut events) =
+            spawn_pump_with(&format!("http://{addr}"), test_hello(), config);
+        assert!(matches!(recv_event(&mut events).await, SpaceEvent::Ready { .. }));
+        assert_eq!(recv_event(&mut events).await, plugin_event("2", json!({"n": 6})));
+        server.await.unwrap();
+    }
+
+    /// 重连后的新缺口仍会请求补投：重连自带的那次补投只覆盖断线前的缓存。
+    #[tokio::test]
+    async fn reconnect_requests_replay_for_new_gap() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws1 = handshake(accept_ws(stream).await).await;
+            send_json(&mut ws1, json!({"type": "plugin-msg", "peerId": 2, "channel": "chat", "payload": {"n": 1}, "seq": 1})).await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            drop(ws1);
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws2 = handshake_with_plugin_seq(accept_ws(stream).await, 1).await;
+            assert_eq!(read_json(&mut ws2).await, json!({"type": "plugin-replay", "after": 1}));
+            // 新连接上出现缺口：宽限到点须再请求一次补投，而不是直接弃等
+            send_json(&mut ws2, json!({"type": "plugin-msg", "peerId": 2, "channel": "chat", "payload": {"n": 3}, "seq": 3})).await;
+            assert_eq!(read_json(&mut ws2).await, json!({"type": "plugin-replay", "after": 1}));
+            send_json(&mut ws2, json!({"type": "plugin-msg", "peerId": 2, "channel": "chat", "payload": {"n": 2}, "seq": 2})).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        });
+        let (_cmd_tx, mut events) =
+            spawn_pump_with(&format!("http://{addr}"), test_hello(), test_config());
+        assert!(matches!(recv_event(&mut events).await, SpaceEvent::Ready { .. }));
+        assert_eq!(recv_event(&mut events).await, plugin_event("2", json!({"n": 1})));
+        assert_eq!(recv_event(&mut events).await, SpaceEvent::Disconnected);
+        assert_eq!(recv_event(&mut events).await, SpaceEvent::Reconnecting { attempt: 1 });
+        assert!(matches!(recv_event(&mut events).await, SpaceEvent::Ready { .. }));
+        assert_eq!(recv_event(&mut events).await, plugin_event("2", json!({"n": 2})));
+        assert_eq!(recv_event(&mut events).await, plugin_event("2", json!({"n": 3})));
         server.await.unwrap();
     }
 }
