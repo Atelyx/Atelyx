@@ -34,6 +34,8 @@ const BASELINE_REPLY_INTERVAL: Duration = Duration::from_secs(2);
 const AWARENESS_TIMEOUT: Duration = Duration::from_secs(30);
 /// awareness 保活重发间隔：空闲端（不再编辑/重连）的身份帧须按此周期重发，否则被对端超时剔除。
 const AWARENESS_KEEPALIVE: Duration = Duration::from_secs(15);
+/// 本端状态上行的最小间隔：拖选等连续变化按此合并，最新一份由 [`NoteCollab::flush_awareness`] 补发。
+const AWARENESS_MIN_INTERVAL: Duration = Duration::from_millis(50);
 /// awareness state 缺失或解析失败时的光标颜色兜底。
 const FALLBACK_CURSOR_COLOR: &str = "#9aa0a6";
 
@@ -71,6 +73,8 @@ struct RemoteState {
     clock: u64,
     state_json: String,
     seen: Instant,
+    /// 上报该条目的连接（名册剔除该连接时一并移除，对端退出即时生效）。
+    peer_id: String,
 }
 
 struct ActiveDoc {
@@ -101,7 +105,9 @@ pub struct NoteCollab {
     local_clock: u64,
     /// 本端 state JSON 上次广播值：变化才产出增量。
     local_state_json: Option<String>,
-    /// 本端身份帧上次广播时刻（保活限频记账）。
+    /// 已上行的本端 state JSON：与 `local_state_json` 不同 = 有被限频压下的变化待补发。
+    local_sent_json: Option<String>,
+    /// 本端身份帧上次广播时刻（保活与限频共用记账）。
     awareness_sent_at: Option<Instant>,
     remote_states: HashMap<u64, RemoteState>,
 }
@@ -119,6 +125,7 @@ impl NoteCollab {
             local_selection: None,
             local_clock: 0,
             local_state_json: None,
+            local_sent_json: None,
             awareness_sent_at: None,
             remote_states: HashMap::new(),
         }
@@ -161,6 +168,7 @@ impl NoteCollab {
         self.remote_states.clear();
         self.local_selection = None;
         self.local_state_json = None;
+        self.local_sent_json = None;
         // null 帧用旧文档的 clientID（对端按它移除条目），clock 沿用本端 awareness 序列
         let leave = self.local_user_json.take().map(|_| {
             self.local_clock += 1;
@@ -283,38 +291,74 @@ impl NoteCollab {
 
     /// 本端 awareness 状态（`user_json` = `{"name":..,"color":..,"colorLight":..}` 片段）。
     /// 状态 JSON 未变化返回 None；返回值 = 壳上行的 awareness 增量编码。
+    /// 距上次上行不足 [`AWARENESS_MIN_INTERVAL`] 的变化只记录不产帧（拖选连续变化），
+    /// 最新一份由 [`flush_awareness`](Self::flush_awareness) 补发。
     pub fn set_local_state(
         &mut self,
         user_json: &str,
         selection: Option<(u32, u32)>,
     ) -> Option<Vec<u8>> {
-        let state = match selection {
-            Some((anchor, head)) => {
-                format!(r##"{{"user":{user_json},"selection":{{"anchor":{anchor},"head":{head}}}}}"##)
-            }
-            None => format!(r##"{{"user":{user_json}}}"##),
-        };
+        self.doc.as_ref()?;
+        let state = local_state_json_of(user_json, selection);
         if self.local_state_json.as_deref() == Some(state.as_str()) {
             return None;
         }
-        let client_id = self.doc.as_ref()?.doc.client_id().get();
         self.local_user_json = Some(user_json.to_owned());
         self.local_selection = selection;
-        self.local_state_json = Some(state.clone());
+        self.local_state_json = Some(state);
+        let now = Instant::now();
+        if self
+            .awareness_sent_at
+            .is_some_and(|at| now.duration_since(at) < AWARENESS_MIN_INTERVAL)
+        {
+            return None;
+        }
+        self.emit_local_state(now)
+    }
+
+    /// 补发被限频压下的本端状态（壳周期搭载）：无待发变化或未到间隔 = None。
+    /// `now` 由壳传入便于测试。
+    pub fn flush_awareness(&mut self, now: Instant) -> Option<Vec<u8>> {
+        self.doc.as_ref()?;
+        if self.local_state_json.is_none() || self.local_state_json == self.local_sent_json {
+            return None;
+        }
+        if self
+            .awareness_sent_at
+            .is_some_and(|at| now.duration_since(at) < AWARENESS_MIN_INTERVAL)
+        {
+            return None;
+        }
+        self.emit_local_state(now)
+    }
+
+    /// 是否有被限频压下、尚未上行的本端状态（壳据此保证补发拍不缺席）。
+    pub fn has_pending_awareness(&self) -> bool {
+        self.doc.is_some()
+            && self.local_state_json.is_some()
+            && self.local_state_json != self.local_sent_json
+    }
+
+    /// 强制重发本端 awareness 身份帧（重连后对端旧条目将在 30s 过期，主动补发维持光标可见）。
+    /// 不受限频压制：身份帧缺失会让本端在对端整段不可见。
+    pub fn resend_awareness(&mut self) -> Option<Vec<u8>> {
+        let json = self.local_user_json.clone()?;
+        self.local_state_json = Some(local_state_json_of(&json, self.local_selection));
+        self.emit_local_state(Instant::now())
+    }
+
+    /// 产出本端身份帧：clock 递增、记账上行时刻与已上行状态。
+    fn emit_local_state(&mut self, now: Instant) -> Option<Vec<u8>> {
+        let state = self.local_state_json.clone()?;
+        let client_id = self.doc.as_ref()?.doc.client_id().get();
         self.local_clock += 1;
-        self.awareness_sent_at = Some(Instant::now());
+        self.awareness_sent_at = Some(now);
+        self.local_sent_json = Some(state.clone());
         Some(encode_awareness_update(&[AwarenessEntry {
             client_id,
             clock: self.local_clock,
             state_json: state,
         }]))
-    }
-
-    /// 强制重发本端 awareness 身份帧（重连后对端旧条目将在 30s 过期，主动补发维持光标可见）。
-    pub fn resend_awareness(&mut self) -> Option<Vec<u8>> {
-        self.local_state_json = None;
-        let json = self.local_user_json.clone()?;
-        self.set_local_state(&json, self.local_selection)
     }
 
     /// 到期保活：重发本端身份帧（无文档 / 未发过身份 / 未到间隔 = None）。
@@ -333,8 +377,8 @@ impl NoteCollab {
     /// 合入远端 awareness（只应用不回发，防回环）。clock 已记忆的更小值丢弃；**同 clock
     /// 视为保活重发照常应用**（y-protocols 心跳重发不递增 clock，严格过滤会把空闲对端的
     /// 身份帧全丢——对端表现为「不可见」）；`null` 移除该端（不受 clock 门槛）；本端
-    /// clientID 跳过；解码失败整体丢弃。
-    pub fn apply_awareness(&mut self, payload: &[u8], now: Instant) {
+    /// clientID 跳过；解码失败整体丢弃。`peer_id` = 帧来源连接（名册剔除时据此移条目）。
+    pub fn apply_awareness(&mut self, peer_id: &str, payload: &[u8], now: Instant) {
         let Some(entries) = decode_awareness_update(payload) else { return };
         let Some(local) = self
             .doc
@@ -365,9 +409,18 @@ impl NoteCollab {
                     clock: entry.clock,
                     state_json: entry.state_json,
                     seen: now,
+                    peer_id: peer_id.to_owned(),
                 },
             );
         }
+    }
+
+    /// 对端连接消失：移除其上报过的全部 awareness 条目（对端退出 / 断网即时摘除光标，
+    /// 不必等 [`AWARENESS_TIMEOUT`]）。返回是否有条目被移除。
+    pub fn drop_peer(&mut self, peer_id: &str) -> bool {
+        let before = self.remote_states.len();
+        self.remote_states.retain(|_, s| s.peer_id != peer_id);
+        self.remote_states.len() != before
     }
 
     /// 远端光标（按 clientID 稳定排序）；超时未刷新的端先剔除。
@@ -577,6 +630,7 @@ impl NoteCollab {
         // 远端光标随旧实例作废；本端 clock 归零，在新 clientID 下重发身份
         self.remote_states.clear();
         self.local_state_json = None;
+        self.local_sent_json = None;
         self.local_selection = None;
         self.local_clock = 0;
     }
@@ -599,12 +653,12 @@ impl NoteCollab {
     }
 
     /// 重建后的本端身份重发：保留 user（从未设置过 = None），选区随旧文本作废，
-    /// clock 从 1 起（`rebuild` 已归零）。
+    /// clock 从 1 起（`rebuild` 已归零）。不受限频压制（新 clientID 的首帧必须立刻上行）。
     fn resend_local_state(&mut self) -> Option<Vec<u8>> {
         let user_json = self.local_user_json.clone()?;
         self.local_selection = None;
-        self.local_state_json = None;
-        self.set_local_state(&user_json, None)
+        self.local_state_json = Some(local_state_json_of(&user_json, None));
+        self.emit_local_state(Instant::now())
     }
 
     // ---------- 序号与黑名单 ----------
@@ -775,6 +829,16 @@ fn yrs_index_for_byte(text: &str, byte: usize) -> u32 {
     byte_to_utf16_offset(text, byte) as u32
 }
 
+/// 本端 awareness state JSON（`user_json` 已是裸对象片段；无选区时不带 selection 键）。
+fn local_state_json_of(user_json: &str, selection: Option<(u32, u32)>) -> String {
+    match selection {
+        Some((anchor, head)) => {
+            format!(r##"{{"user":{user_json},"selection":{{"anchor":{anchor},"head":{head}}}}}"##)
+        }
+        None => format!(r##"{{"user":{user_json}}}"##),
+    }
+}
+
 fn cursor_from_state(client_id: u64, state_json: &str) -> RemoteCursor {
     let value: Value = serde_json::from_str(state_json).unwrap_or(Value::Null);
     let user = value.get("user");
@@ -871,7 +935,7 @@ mod tests {
         let mut nc = NoteCollab::new("a".to_owned());
         nc.open("a.md", "");
         let now = Instant::now();
-        nc.apply_awareness(&unhex(GOLDEN_AWARENESS), now);
+        nc.apply_awareness("p1", &unhex(GOLDEN_AWARENESS), now);
         let states = nc.remote_states(now);
         assert_eq!(states.len(), 1);
         assert_eq!(states[0].name, "小明");
@@ -881,7 +945,7 @@ mod tests {
 
         let golden_id = decode_awareness_update(&unhex(GOLDEN_AWARENESS)).unwrap()[0].client_id;
         // 同 clock 重发照常应用（y-protocols 心跳不递增 clock）：seen 刷新为重发时刻
-        nc.apply_awareness(&unhex(GOLDEN_AWARENESS), now + Duration::from_secs(10));
+        nc.apply_awareness("p1", &unhex(GOLDEN_AWARENESS), now + Duration::from_secs(10));
         assert_eq!(nc.remote_states(now + Duration::from_secs(10))[0].name, "小明");
         assert_eq!(nc.remote_states(now + Duration::from_secs(31)).len(), 1,
             "首次应用 31s 后本应超时，保活重发把存活窗口顶到重发时刻");
@@ -891,7 +955,7 @@ mod tests {
             clock: 0,
             state_json: r##"{"user":{"name":"旧","color":"#000000"}}"##.to_owned(),
         }]);
-        nc.apply_awareness(&stale, now + Duration::from_secs(10));
+        nc.apply_awareness("p1", &stale, now + Duration::from_secs(10));
         assert_eq!(nc.remote_states(now + Duration::from_secs(10))[0].name, "小明");
         // 更高 clock 被采纳
         let newer = encode_awareness_update(&[AwarenessEntry {
@@ -899,7 +963,7 @@ mod tests {
             clock: 2,
             state_json: r##"{"user":{"name":"新","color":"#111111"}}"##.to_owned(),
         }]);
-        nc.apply_awareness(&newer, now);
+        nc.apply_awareness("p1", &newer, now);
         assert_eq!(nc.remote_states(now)[0].name, "新");
         // null 移除该端
         let removal = encode_awareness_update(&[AwarenessEntry {
@@ -907,10 +971,10 @@ mod tests {
             clock: 3,
             state_json: "null".to_owned(),
         }]);
-        nc.apply_awareness(&removal, now);
+        nc.apply_awareness("p1", &removal, now);
         assert!(nc.remote_states(now).is_empty());
         // 超 30s 剔除
-        nc.apply_awareness(&newer, now);
+        nc.apply_awareness("p1", &newer, now);
         assert!(nc.remote_states(now + Duration::from_secs(31)).is_empty());
 
         // 本端状态跳过：set_local_state 得到的 clientID 不进远端表
@@ -923,7 +987,7 @@ mod tests {
             clock: 9,
             state_json: r##"{"user":{"name":"回声","color":"#000000"}}"##.to_owned(),
         }]);
-        nc.apply_awareness(&echo, now);
+        nc.apply_awareness("p1", &echo, now);
         assert!(nc.remote_states(now).is_empty());
     }
 
@@ -1199,16 +1263,70 @@ mod tests {
             .set_local_state(r##"{"name":"我","color":"#111111"}"##, None)
             .is_none());
         let with_sel = nc
-            .set_local_state(r##"{"name":"我","color":"#111111"}"##, Some((3, 7)))
-            .unwrap();
-        let entry = &decode_awareness_update(&with_sel).unwrap()[0];
+            .set_local_state(r##"{"name":"我","color":"#111111"}"##, Some((3, 7)));
+        // 紧接上一帧的选区变化被限频压下（状态已记录），由补发产出
+        assert!(with_sel.is_none());
+        let flushed = nc
+            .flush_awareness(Instant::now() + AWARENESS_MIN_INTERVAL)
+            .expect("到间隔应补发");
+        let entry = &decode_awareness_update(&flushed).unwrap()[0];
         assert_eq!(entry.clock, 2);
         assert!(entry.state_json.ends_with(r##","selection":{"anchor":3,"head":7}}"##));
+        assert!(
+            nc.flush_awareness(Instant::now() + Duration::from_secs(1))
+                .is_none(),
+            "无待发变化不产帧"
+        );
         // 未打开文档时不产出增量
         nc.close();
         assert!(nc
             .set_local_state(r##"{"name":"我","color":"#111111"}"##, None)
             .is_none());
+    }
+
+    /// 连续选区变化只上最新一份：限频期内仅记录，到间隔后补发一帧。
+    #[test]
+    fn 选区连续变化合并为最新一帧() {
+        let mut nc = NoteCollab::new("a".to_owned());
+        nc.open("f.md", "v1\n");
+        let user = r##"{"name":"我","color":"#111111"}"##;
+        assert!(nc.set_local_state(user, Some((1, 1))).is_some());
+        assert!(nc.set_local_state(user, Some((2, 2))).is_none());
+        assert!(nc.set_local_state(user, Some((3, 3))).is_none());
+        let at = Instant::now() + AWARENESS_MIN_INTERVAL;
+        let frame = nc.flush_awareness(at).expect("到间隔补发最新一份");
+        let entry = &decode_awareness_update(&frame).unwrap()[0];
+        assert_eq!(entry.clock, 2);
+        assert!(entry.state_json.contains(r##""anchor":3,"head":3"##));
+        assert!(nc.flush_awareness(at + Duration::from_secs(1)).is_none());
+    }
+
+    /// 对端连接消失即摘除其光标（名册驱动），其它对端条目与超时剔除互不影响。
+    #[test]
+    fn 对端断链即时摘除其光标() {
+        let mut nc = NoteCollab::new("a".to_owned());
+        nc.open("f.md", "v1\n");
+        let now = Instant::now();
+        let first = encode_awareness_update(&[AwarenessEntry {
+            client_id: 11,
+            clock: 1,
+            state_json: r##"{"user":{"name":"甲","color":"#111111"}}"##.to_owned(),
+        }]);
+        let second = encode_awareness_update(&[AwarenessEntry {
+            client_id: 22,
+            clock: 1,
+            state_json: r##"{"user":{"name":"乙","color":"#222222"}}"##.to_owned(),
+        }]);
+        nc.apply_awareness("peer-1", &first, now);
+        nc.apply_awareness("peer-2", &second, now);
+        assert_eq!(nc.remote_states(now).len(), 2);
+        assert!(nc.drop_peer("peer-1"));
+        let left = nc.remote_states(now);
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].name, "乙");
+        // 已摘除的连接与从未上报过的连接：无变化
+        assert!(!nc.drop_peer("peer-1"));
+        assert!(!nc.drop_peer("peer-9"));
     }
 
     /// 保活限频：身份已发未到期不重发；到期重发且 clock 递增；无文档或未发过身份恒不产帧。
@@ -1244,7 +1362,7 @@ mod tests {
         let mut b = NoteCollab::new("b".to_owned());
         b.open("f.md", "v1\n");
         let now = Instant::now();
-        b.apply_awareness(&frame, now);
+        b.apply_awareness("pa", &frame, now);
         let cursors = b.remote_states(now);
         assert_eq!(cursors.len(), 1);
         assert_eq!(cursors[0].anchor, Some(70_000));

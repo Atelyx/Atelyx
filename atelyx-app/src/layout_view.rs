@@ -2944,18 +2944,22 @@ fn note_view(app: &App, window: iced::window::Id) -> Element<'_, Message> {
     // 只读 / 预览编辑两档共用同一 scrollable（同型同位，iced 保留滚动状态）：切档不回顶，
     // 两档块渲染逐点一致，偏移直接对齐。源码档 text_editor 自带内部滚动，不进共享层。
     let content: Element<'_, Message> = match app.note_mode {
-        NoteMode::Source => iced::widget::text_editor(&app.source_editor)
-            .height(Length::Fill)
-            .font(crate::ui::regular())
-            .on_action(Message::Edited)
-            .style(|_t, _s| text_editor::Style {
-                background: iced::Background::Color(iced::Color::TRANSPARENT),
-                border: border::Border::default(),
-                placeholder: pal::TEXT_MUTED,
-                value: pal::TEXT_PRIMARY,
-                selection: pal::SELECTION,
-            })
-            .into(),
+        NoteMode::Source => bounded_column(
+            iced::widget::text_editor(&app.source_editor)
+                .height(Length::Fill)
+                .font(crate::ui::regular())
+                .on_action(Message::Edited)
+                .style(|_t, _s| text_editor::Style {
+                    background: iced::Background::Color(iced::Color::TRANSPARENT),
+                    border: border::Border::default(),
+                    placeholder: pal::TEXT_MUTED,
+                    value: pal::TEXT_PRIMARY,
+                    selection: pal::SELECTION,
+                })
+                .into(),
+            app.global.content_width,
+            Length::Fill,
+        ),
         NoteMode::Read | NoteMode::Edit => {
             let inner: Element<'_, Message> = match app.note_mode {
                 NoteMode::Edit => edit_view(app),
@@ -2966,9 +2970,9 @@ fn note_view(app: &App, window: iced::window::Id) -> Element<'_, Message> {
                     None => placeholder_panel("正在渲染…"),
                 },
             };
-            // 正文行宽：>0 时钳制只读/预览编辑正文区最大宽度并水平居中（源码档不受限）
+            // 正文行宽：>0 时钳制正文区最大宽度并水平居中（三档同一列宽）
             let scrolled =
-                scroll::v(bounded_column(inner, app.global.content_width))
+                scroll::v(bounded_column(inner, app.global.content_width, Length::Shrink))
                     .width(Length::Fill)
                     .height(Length::Fill);
             // 两档同包一层 mouse_area（同型同位保滚动状态）；双击进编辑只在只读档挂处理器
@@ -2995,7 +2999,7 @@ fn note_view(app: &App, window: iced::window::Id) -> Element<'_, Message> {
 
     // 页面内标题：钉在正文列顶部（只有正文滚动），与属性区 / 正文同宽居中；源码档不渲染
     let title = (app.global.in_page_title && app.note_mode != NoteMode::Source)
-        .then(|| bounded_column(page_title(app, window), app.global.content_width));
+        .then(|| bounded_column(page_title(app, window), app.global.content_width, Length::Shrink));
 
     let mut body = column![toolbar, controls::h_divider_subtle()];
     if let Some(t) = title {
@@ -3024,17 +3028,27 @@ fn note_view(app: &App, window: iced::window::Id) -> Element<'_, Message> {
     .into()
 }
 
-/// 正文行宽钳制：宽度 > 0 时给正文列加上限宽并水平居中（0 = 不限，铺满面板）。
-fn bounded_column<'a>(el: Element<'a, Message>, width: u32) -> Element<'a, Message> {
-    if width > 0 {
+/// 正文行宽钳制：宽度 > 0 时给正文列加上限宽并水平居中，0 = 不限（铺满面板）。
+/// 居中须由外层容器承担——iced 的 `center_x` 只摆自身矩形内的子项，容器自身被
+/// `max_width` 钳窄后仍贴父容器左缘，单层写法只会「变窄」而不会居中。
+fn bounded_column<'a>(
+    el: Element<'a, Message>,
+    width: u32,
+    height: Length,
+) -> Element<'a, Message> {
+    if width == 0 {
+        return el;
+    }
+    container(
         container(el)
             .width(Length::Fill)
-            .max_width(width as f32)
-            .center_x(Length::Fill)
-            .into()
-    } else {
-        el
-    }
+            .height(height)
+            .max_width(width as f32),
+    )
+    .width(Length::Fill)
+    .height(height)
+    .center_x(Length::Fill)
+    .into()
 }
 
 /// 页面内标题度量：左右内边距与正文 16px 内边距对齐；行高 1.4 = 20px 字 / 28px 行。
@@ -3305,6 +3319,8 @@ fn edit_view(app: &App) -> Element<'_, Message> {
             app.edit_surface_focused(),
             app.note_edit_caret_pending,
             note_bindings,
+            &app.remote_cursors,
+            body_start,
         )
         .into();
     }
@@ -3385,6 +3401,8 @@ fn edit_view(app: &App) -> Element<'_, Message> {
         app.edit_surface_focused(),
         app.note_edit_caret_pending,
         note_bindings,
+        &app.remote_cursors,
+        body_start,
     )
     .into()
 }

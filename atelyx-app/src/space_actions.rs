@@ -2895,6 +2895,85 @@ fn local_user_json(app: &App) -> String {
         .to_string()
 }
 
+/// 字节偏移对（全文，可越界）→ awareness 选区的 UTF-16 偏移对。
+fn selection_units(text: &str, anchor: usize, head: usize) -> Option<(u32, u32)> {
+    let unit = |byte: usize| {
+        u32::try_from(atelyx_core::space_frame::byte_to_utf16_offset(
+            text,
+            byte.min(text.len()),
+        ))
+        .ok()
+    };
+    Some((unit(anchor)?, unit(head)?))
+}
+
+/// 纯文本编辑面光标位置（行号 + 行内字节列）→ 全文字节偏移。列按字节计（与编辑面
+/// 内部命中口径一致）；行号越界（文本比光标短）时钳到末行。
+fn source_offset(text: &str, pos: text_editor::Position) -> usize {
+    let mut line = 0;
+    let mut start = 0;
+    for (i, ch) in text.char_indices() {
+        if line == pos.line {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            start = i + 1;
+        }
+    }
+    let line_len = text[start..].find('\n').unwrap_or(text.len() - start);
+    start + pos.column.min(line_len)
+}
+
+/// 本端选区（awareness 口径：全文 UTF-16，anchor = 锚点、head = 光标）。源码档取纯文本
+/// 编辑面光标；预览编辑档取正文编辑面（偏移相对正文，剥 frontmatter 前缀）；只读档无光标。
+fn local_selection(app: &App) -> Option<(u32, u32)> {
+    let text = app.note_text.as_str();
+    match app.note_mode {
+        NoteMode::Read => None,
+        NoteMode::Source => {
+            let cursor = app.source_editor.cursor();
+            let anchor = source_offset(text, cursor.selection.unwrap_or(cursor.position));
+            selection_units(text, anchor, source_offset(text, cursor.position))
+        }
+        NoteMode::Edit => {
+            let base = atelyx_core::frontmatter::block_end(text).unwrap_or(0);
+            selection_units(text, base + app.edit.anchor, base + app.edit.caret)
+        }
+    }
+}
+
+/// 选区 / 光标变化上行（不涉内容）：点选、拖选、方向键移动都要让对端可见，
+/// 内容变化路径（`collab_after_edit`）另走差分与 Update 帧。限频与补发在 core。
+pub fn collab_after_caret(app: &mut App) {
+    if !matches!(app.repo_kind, crate::RepoKind::Space(_)) || app.note_collab_file.is_none() {
+        return;
+    }
+    let Some(rel) = app.note_collab_file.clone() else { return };
+    let user_json = local_user_json(app);
+    let selection = local_selection(app);
+    let aware = app
+        .note_collab
+        .as_mut()
+        .and_then(|nc| nc.set_local_state(&user_json, selection));
+    if let Some(frame) = aware {
+        send_awareness(app, &rel, frame);
+    }
+}
+
+/// 限频压下的选区变化补发（UiTick 搭载）：拖选收尾后对端仍须拿到最终选区。
+pub(crate) fn awareness_flush(app: &mut App) {
+    let Some(file) = app.note_collab_file.clone() else { return };
+    let Some(frame) = app
+        .note_collab
+        .as_mut()
+        .and_then(|nc| nc.flush_awareness(Instant::now()))
+    else {
+        return;
+    };
+    send_awareness(app, &file, frame);
+}
+
 /// 绑定当前打开笔记到协作文档（打开 / 重连后调用）：基线通告 + 握手 + 身份帧。
 pub fn collab_bind_note(app: &mut App) {
     let Some(rel) = app.ui.last_note_file.clone() else { return };
@@ -2982,19 +3061,7 @@ pub fn collab_after_edit(app: &mut App) {
     };
     let new = app.note_text.clone();
     let user_json = local_user_json(app);
-    let selection = {
-        let start = app.edit.selection().0.min(app.edit.caret);
-        let end = app.edit.selection().1.max(app.edit.caret);
-        // 编辑面坐标相对正文（剥 frontmatter 前缀）；awareness 偏移以全文为基准
-        let base = atelyx_core::frontmatter::block_end(&new).unwrap_or(0);
-        let anchor = base + start;
-        let head = base + end;
-        let units = |byte: usize| u32::try_from(atelyx_core::space_frame::byte_to_utf16_offset(&new, byte.min(new.len()))).ok();
-        match (units(anchor), units(head)) {
-            (Some(a), Some(h)) => Some((a, h)),
-            _ => None,
-        }
-    };
+    let selection = local_selection(app);
     let mut update_frame = None;
     if let Some(nc) = app.note_collab.as_mut() {
         let inner = nc.local_edit(&new);
@@ -3036,19 +3103,18 @@ pub(crate) fn refresh_remote_cursors(app: &mut App) {
         .unwrap_or_default();
     app.remote_cursors = cursors
         .into_iter()
-        .filter_map(|c| {
-            let head: u32 = c.head?;
-            let anchor = c.anchor.unwrap_or(head);
-            Some(crate::RemoteCursorView {
+        .map(|c| {
+            let byte = |unit: u32| atelyx_core::space_frame::utf16_to_byte_offset(&text, unit as usize);
+            crate::RemoteCursorView {
                 name: c.name,
                 color: if c.color.is_empty() {
                     "#9aa0a6".to_string()
                 } else {
                     c.color
                 },
-                anchor: atelyx_core::space_frame::utf16_to_byte_offset(&text, anchor as usize),
-                head: atelyx_core::space_frame::utf16_to_byte_offset(&text, head as usize),
-            })
+                anchor: c.anchor.map(byte),
+                head: c.head.map(byte),
+            }
         })
         .collect();
 }
@@ -3065,11 +3131,27 @@ fn on_space_event(app: &mut App, event: atelyx_core::collab::SpaceEvent) -> Task
             Task::none()
         }
         E::Peers(list) => {
+            // 名册里消失的连接 = 对端退出 / 断链：其光标条目立即摘除（不必等 awareness 超时）
+            let gone: Vec<String> = app
+                .space_peers
+                .iter()
+                .map(|p| p.peer_id.clone())
+                .filter(|id| !list.iter().any(|p| &p.peer_id == id))
+                .collect();
             // 名册不含自己（hello-ack 分配的 peerId 过滤）：工具条胶囊与在线人数都只算他人
             app.space_peers = list
                 .into_iter()
                 .filter(|p| Some(p.peer_id.as_str()) != app.space_own_peer_id.as_deref())
                 .collect();
+            let mut dropped = false;
+            if let Some(nc) = app.note_collab.as_mut() {
+                for peer in &gone {
+                    dropped |= nc.drop_peer(peer);
+                }
+            }
+            if dropped {
+                refresh_remote_cursors(app);
+            }
             Task::none()
         }
         E::Presence { peer_id, presence } => {
@@ -3082,11 +3164,11 @@ fn on_space_event(app: &mut App, event: atelyx_core::collab::SpaceEvent) -> Task
             collab_remote_note(app, &peer_id, &file, &payload);
             Task::none()
         }
-        E::NoteAware { file, payload, .. } => {
+        E::NoteAware { peer_id, file, payload } => {
             let now = std::time::Instant::now();
             if app.note_collab_file.as_deref() == Some(file.as_str()) {
                 if let Some(nc) = app.note_collab.as_mut() {
-                    nc.apply_awareness(&payload, now);
+                    nc.apply_awareness(&peer_id, &payload, now);
                 }
                 refresh_remote_cursors(app);
             }

@@ -677,16 +677,122 @@ pub(crate) fn hit_offset(p: &ParagraphT, content: &str, point: Point) -> usize {
 
 /// 远端协作者光标竖条宽（比本端光标 1.5 略宽，便于区分归属）。
 const REMOTE_CARET_W: f32 = 2.0;
-/// 远端名签与光标条的垂直间距（名签画在条上方）。
-const REMOTE_LABEL_GAP: f32 = 2.0;
+/// 远端选区色块透明度：压在正文上仍可读。
+const REMOTE_SELECTION_ALPHA: f32 = 0.18;
+/// 名签内边距、圆角与名签底边到光标条顶端的间距。
+const REMOTE_TAG_PAD_X: f32 = 4.0;
+const REMOTE_TAG_PAD_Y: f32 = 2.0;
+const REMOTE_TAG_RADIUS: f32 = 3.0;
+const REMOTE_TAG_GAP: f32 = 1.0;
+
+/// 名签占用的纵向空间（胶囊高 + 与光标条的间距）：光标绘制裁切框按此向上外扩。
+fn remote_tag_height() -> f32 {
+    pal::fs_micro() + REMOTE_TAG_PAD_Y * 2.0 + REMOTE_TAG_GAP
+}
+
+/// 光标绘制裁切框：向上外扩出名签高度，名签浮在行上方不会被行边界裁掉。
+fn remote_clip(bounds: Rectangle) -> Rectangle {
+    let room = remote_tag_height();
+    Rectangle::new(
+        Point::new(bounds.x, bounds.y - room),
+        Size::new(bounds.width, bounds.height + room),
+    )
+}
+
+/// 名签文字色：按胶囊底色亮度取白 / 近黑（浅色成员色上白字不可读）。
+fn remote_tag_text_color(bg: Color) -> Color {
+    if 0.299 * bg.r + 0.587 * bg.g + 0.114 * bg.b > 0.6 {
+        Color::from_rgb8(0x1a, 0x1a, 0x1a)
+    } else {
+        Color::WHITE
+    }
+}
+
+/// 远端选区色块（成员色低透明）：`rects` 为行内局部矩形，`origin` 为行左缘。
+fn draw_remote_selection(
+    renderer: &mut iced::Renderer,
+    rects: &[Rectangle],
+    origin: Point,
+    color: Color,
+) {
+    let tint = color.scale_alpha(REMOTE_SELECTION_ALPHA);
+    for r in rects {
+        renderer.fill_quad(
+            Quad {
+                bounds: Rectangle::new(origin + Vector::new(r.x, r.y), r.size()),
+                ..Quad::default()
+            },
+            tint,
+        );
+    }
+}
+
+/// 远端光标：竖条 + 上方名签胶囊。名签右缘放不下即整体左翻，纵向不足（块首行）时
+/// 浮在行上缘之上而不是下移盖字；`clip` 由 [`remote_clip`] 按名签高度外扩。
+fn draw_remote_caret(
+    renderer: &mut iced::Renderer,
+    x: f32,
+    top: f32,
+    height: f32,
+    color: Color,
+    name: &str,
+    clip: Rectangle,
+) {
+    renderer.fill_quad(
+        Quad {
+            bounds: Rectangle::new(Point::new(x, top), Size::new(REMOTE_CARET_W, height)),
+            border: iced::border::rounded(REMOTE_CARET_W / 2.0),
+            ..Quad::default()
+        },
+        color,
+    );
+    if name.is_empty() {
+        return;
+    }
+    let tag_h = pal::fs_micro() + REMOTE_TAG_PAD_Y * 2.0;
+    let tag_w = measured_text_width(name, pal::fs_micro(), 1.0, bold()) + REMOTE_TAG_PAD_X * 2.0;
+    let tag_y = top - tag_h - REMOTE_TAG_GAP;
+    let tag_x = if x + tag_w > clip.x + clip.width {
+        (x - tag_w).max(clip.x)
+    } else {
+        x
+    };
+    renderer.fill_quad(
+        Quad {
+            bounds: Rectangle::new(Point::new(tag_x, tag_y), Size::new(tag_w, tag_h)),
+            border: iced::border::rounded(REMOTE_TAG_RADIUS),
+            ..Quad::default()
+        },
+        color,
+    );
+    renderer.fill_text(
+        advanced_text::Text {
+            content: name.to_string(),
+            bounds: Size::new(f32::INFINITY, tag_h),
+            size: pal::fs_micro().into(),
+            line_height: advanced_text::LineHeight::Relative(1.0),
+            font: bold(),
+            align_x: advanced_text::Alignment::Left,
+            align_y: alignment::Vertical::Top,
+            shaping: advanced_text::Shaping::Auto,
+            wrapping: advanced_text::Wrapping::None,
+        },
+        Point::new(tag_x + REMOTE_TAG_PAD_X, tag_y + REMOTE_TAG_PAD_Y),
+        remote_tag_text_color(color),
+        clip,
+    );
+}
 
 /// 远端光标（note_text 偏移）→ 本块绘制区间（块内字节偏移）：选区两端夹回块界，
-/// 光标位仅在 head 落在块内时给出。head 在 frontmatter 区（< body_start）时整条不画；
-/// 锚点落在 frontmatter 区时归正文零点，选区伸入正文的部分照画。
+/// 光标位仅在 head 落在块内时给出。端点归后一行（`head == to` 由下一行画，否则
+/// 相邻两行会在不同 x 上各画一根），正文末尾（`to >= body_len`）无后继行才由本行画。
+/// head 在 frontmatter 区（< body_start）时整条不画；锚点落在 frontmatter 区时归正文零点，
+/// 选区伸入正文的部分照画。
 fn remote_span_in_block(
     head: usize,
     anchor: usize,
     body_start: usize,
+    body_len: usize,
     from: usize,
     to: usize,
 ) -> Option<(usize, usize, Option<usize>)> {
@@ -694,7 +800,7 @@ fn remote_span_in_block(
     let anchor = anchor.saturating_sub(body_start);
     let lo = anchor.min(head).clamp(from, to);
     let hi = anchor.max(head).clamp(from, to);
-    let caret = (from <= head && head <= to).then_some(head);
+    let caret = (from <= head && (head < to || to >= body_len)).then_some(head);
     (hi > lo || caret.is_some()).then_some((lo, hi, caret))
 }
 
@@ -822,7 +928,7 @@ impl Widget<Message, Theme, iced::Renderer> for SourceBlock<'_> {
         let line_px = source_line_px(&self.source);
         let count = state.content.chars().count();
 
-        // 选区（先画，压在正文下）
+        // 选区（先画，压在正文下；本端与远端同层）
         let sel_from = self.anchor.min(self.caret).max(self.from).min(self.to) - self.from;
         let sel_to = self.anchor.max(self.caret).max(self.from).min(self.to) - self.from;
         if sel_to > sel_from {
@@ -834,6 +940,7 @@ impl Widget<Message, Theme, iced::Renderer> for SourceBlock<'_> {
                 );
             }
         }
+        self.draw_remote_selections(renderer, state, p, origin);
 
         // 正文
         iced::advanced::widget::text::draw(
@@ -845,8 +952,8 @@ impl Widget<Message, Theme, iced::Renderer> for SourceBlock<'_> {
             viewport,
         );
 
-        // 远端协作者光标（不随本端焦点隐藏；本端组合串与光标压其上）
-        self.draw_remote_cursors(renderer, state, p, origin, bounds, count);
+        // 远端协作者光标条与名签（不随本端焦点隐藏；本端组合串与光标压其上）
+        self.draw_remote_carets(renderer, state, p, origin, bounds, count);
 
         if !self.focused {
             return;
@@ -975,9 +1082,45 @@ impl Widget<Message, Theme, iced::Renderer> for SourceBlock<'_> {
 }
 
 impl SourceBlock<'_> {
-    /// 远端协作者光标绘制：选区（成员色 25%，压正文上）+ 光标条 + 条上方名签。
-    /// 名签上方无空间时落回块内首行；越出块右缘由块边界裁剪。`count` = 块内字符数（复用主绘制）。
-    fn draw_remote_cursors(
+    /// 远端协作者选区（画在正文之下，不压暗文字）。
+    fn draw_remote_selections(
+        &self,
+        renderer: &mut iced::Renderer,
+        state: &SourceState,
+        p: &ParagraphT,
+        origin: Point,
+    ) {
+        for cursor in self.cursors {
+            let (Some(head), Some(anchor)) = (cursor.head, cursor.anchor) else {
+                continue;
+            };
+            let Some((lo, hi, _)) = remote_span_in_block(
+                head,
+                anchor,
+                self.body_start,
+                self.text.len(),
+                self.from,
+                self.to,
+            ) else {
+                continue;
+            };
+            if hi <= lo {
+                continue;
+            }
+            let Some(color) = parse_hex_color(&cursor.color) else {
+                continue;
+            };
+            let rects = selection_rects(
+                p,
+                char_index(&state.content, lo - self.from),
+                char_index(&state.content, hi - self.from),
+            );
+            draw_remote_selection(renderer, &rects, origin, color);
+        }
+    }
+
+    /// 远端协作者光标条与名签（画在正文之上）。`count` = 块内字符数（复用主绘制）。
+    fn draw_remote_carets(
         &self,
         renderer: &mut iced::Renderer,
         state: &SourceState,
@@ -990,55 +1133,33 @@ impl SourceBlock<'_> {
             return;
         }
         let line_px = source_line_px(&self.source);
+        let clip = remote_clip(bounds);
         for cursor in self.cursors {
-            let Some((lo, hi, caret)) =
-                remote_span_in_block(cursor.head, cursor.anchor, self.body_start, self.from, self.to)
-            else {
+            let (Some(head), Some(anchor)) = (cursor.head, cursor.anchor) else {
+                continue;
+            };
+            let Some((_, _, Some(caret))) = remote_span_in_block(
+                head,
+                anchor,
+                self.body_start,
+                self.text.len(),
+                self.from,
+                self.to,
+            ) else {
                 continue;
             };
             let Some(color) = parse_hex_color(&cursor.color) else {
                 continue;
             };
-            if hi > lo {
-                let tint = color.scale_alpha(0.25);
-                for r in selection_rects(
-                    p,
-                    char_index(&state.content, lo - self.from),
-                    char_index(&state.content, hi - self.from),
-                ) {
-                    renderer.fill_quad(
-                        Quad {
-                            bounds: Rectangle::new(origin + Vector::new(r.x, r.y), r.size()),
-                            ..Quad::default()
-                        },
-                        tint,
-                    );
-                }
-            }
-            let Some(caret) = caret else { continue };
             let (x, y, h) = caret_xy(p, count, char_index(&state.content, caret - self.from), line_px);
-            renderer.fill_quad(
-                Quad {
-                    bounds: Rectangle::new(origin + Vector::new(x, y), Size::new(REMOTE_CARET_W, h)),
-                    ..Quad::default()
-                },
+            draw_remote_caret(
+                renderer,
+                origin.x + x,
+                origin.y + y,
+                h,
                 color,
-            );
-            renderer.fill_text(
-                advanced_text::Text {
-                    content: cursor.name.clone(),
-                    bounds: Size::new(f32::INFINITY, f32::INFINITY),
-                    size: pal::fs_micro().into(),
-                    line_height: advanced_text::LineHeight::Relative(1.0),
-                    font: bold(),
-                    align_x: advanced_text::Alignment::Left,
-                    align_y: alignment::Vertical::Top,
-                    shaping: advanced_text::Shaping::Auto,
-                    wrapping: advanced_text::Wrapping::None,
-                },
-                origin + Vector::new(x, (y - pal::fs_micro() - REMOTE_LABEL_GAP).max(0.0)),
-                color,
-                bounds,
+                &cursor.name,
+                clip,
             );
         }
     }
@@ -1394,6 +1515,10 @@ pub struct EditSurface<'a> {
     pending_caret: bool,
     /// 撤销/重做键位（空行光标路径的按键匹配源）。
     bindings: NoteBindings,
+    /// 协作成员远端光标（note_text 字节偏移）：源码态块由块自绘，其余行由本容器绘制。
+    cursors: &'a [crate::RemoteCursorView],
+    /// 正文在 note_text 中的起点（远端偏移 → 行内坐标换算基准）。
+    body_start: usize,
 }
 
 /// 编辑面容器的持久状态（跨帧存活：拖选在途）。
@@ -1426,8 +1551,22 @@ impl<'a> EditSurface<'a> {
         focused: bool,
         pending_caret: bool,
         bindings: NoteBindings,
+        cursors: &'a [crate::RemoteCursorView],
+        body_start: usize,
     ) -> Self {
-        Self { rows, pal, text, caret, anchor, preedit, focused, pending_caret, bindings }
+        Self {
+            rows,
+            pal,
+            text,
+            caret,
+            anchor,
+            preedit,
+            focused,
+            pending_caret,
+            bindings,
+            cursors,
+            body_start,
+        }
     }
 
     /// 命中行：返回 (行号, 行内局部坐标, 行宽, 行高)；行间无空隙，仅区分上下越界。
@@ -1547,6 +1686,122 @@ impl<'a> EditSurface<'a> {
         let phase = unix_millis() % BLINK_MS;
         shell.request_redraw_at(Instant::now() + Duration::from_millis((BLINK_MS - phase) as u64));
     }
+
+    /// 一行内的远端选区与光标：揭示态行由源码块自绘（此处跳过），富渲染行按可见片段的
+    /// 源映射反算位置，空行行按空行粒度。无逐字映射的行（图片 / 表格等）整行轻染。
+    fn draw_row_remote(
+        &self,
+        renderer: &mut iced::Renderer,
+        row: &SurfaceRow<'_>,
+        bounds: Rectangle,
+    ) {
+        if self.cursors.is_empty() {
+            return;
+        }
+        let clip = remote_clip(bounds);
+        for cursor in self.cursors {
+            let Some(color) = parse_hex_color(&cursor.color) else {
+                continue;
+            };
+            let (Some(head), Some(anchor)) = (cursor.head, cursor.anchor) else {
+                continue;
+            };
+            let head = head.saturating_sub(self.body_start);
+            let anchor = anchor.saturating_sub(self.body_start);
+            let (sel_from, sel_to) = (head.min(anchor), head.max(anchor));
+            match row {
+                SurfaceRow::Row { from, to, revealed: false, runs, indent, source, .. }
+                    if *to > *from =>
+                {
+                    let lo = sel_from.clamp(*from, *to);
+                    let hi = sel_to.clamp(*from, *to);
+                    // 端点归后一行，正文末尾无后继行才由本行画（与源码态块同口径）
+                    let caret_here = *from <= head && (head < *to || *to >= self.text.len());
+                    // 整行被选中：按整行粒度染色（不建探针）；只有选区首末行需要逐字几何
+                    let whole = hi > lo && sel_from <= *from && sel_to >= *to;
+                    if whole {
+                        renderer.fill_quad(
+                            Quad { bounds, ..Quad::default() },
+                            color.scale_alpha(REMOTE_SELECTION_ALPHA),
+                        );
+                    }
+                    if (hi > lo && !whole) || caret_here {
+                        match LineProbe::build(runs, source, (bounds.width - *indent).max(1.0)) {
+                            Some(probe) => {
+                                if hi > lo && !whole {
+                                    let rects = selection_rects(
+                                        &probe.paragraph,
+                                        probe.char_at_source(lo),
+                                        probe.char_at_source(hi),
+                                    );
+                                    draw_remote_selection(
+                                        renderer,
+                                        &rects,
+                                        Point::new(bounds.x + *indent, bounds.y),
+                                        color,
+                                    );
+                                }
+                                if caret_here {
+                                    let (x, y, h) =
+                                        probe.caret_at(head, *indent, source_line_px(source));
+                                    draw_remote_caret(
+                                        renderer,
+                                        bounds.x + x,
+                                        bounds.y + y,
+                                        h,
+                                        color,
+                                        &cursor.name,
+                                        clip,
+                                    );
+                                }
+                            }
+                            // 图片 / 表格等无逐字映射的行：整行轻染，至少标明有选区经过
+                            None if hi > lo => renderer.fill_quad(
+                                Quad { bounds, ..Quad::default() },
+                                color.scale_alpha(REMOTE_SELECTION_ALPHA / 2.0),
+                            ),
+                            None => {}
+                        }
+                    }
+                }
+                SurfaceRow::Gap { from, to, line_starts, .. } => {
+                    let line_h = gap_line_height(bounds.height, line_starts.len());
+                    // 选区覆盖按空行粒度算（横跨本行的选区其端点不在本行，不能按端点判定）
+                    let (k0, k1) = gap_covered_lines(line_starts, *to, sel_from, sel_to);
+                    for k in k0..k1 {
+                        renderer.fill_quad(
+                            Quad {
+                                bounds: Rectangle::new(
+                                    Point::new(bounds.x, bounds.y + k as f32 * line_h),
+                                    Size::new(bounds.width, line_h),
+                                ),
+                                ..Quad::default()
+                            },
+                            color.scale_alpha(REMOTE_SELECTION_ALPHA),
+                        );
+                    }
+                    // 光标：行区间半开认领（端点归后一行，正文末尾归末行），空行行与块行
+                    // 同一条规则，避免相邻两行在同一偏移上各画一根
+                    let owns = *from <= head && (head < *to || *to >= self.text.len());
+                    if owns {
+                        if let Some(k) = gap_caret_line(line_starts, *to, head) {
+                            let y = bounds.y + k as f32 * line_h + (line_h - GAP_CARET_H).max(0.0) * 0.5;
+                            draw_remote_caret(
+                                renderer,
+                                bounds.x + row.gap_indent(),
+                                y,
+                                GAP_CARET_H,
+                                color,
+                                &cursor.name,
+                                clip,
+                            );
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 impl Widget<Message, Theme, iced::Renderer> for EditSurface<'_> {
@@ -1646,6 +1901,8 @@ impl Widget<Message, Theme, iced::Renderer> for EditSurface<'_> {
                 }
                 _ => {}
             }
+            // 远端协作者：本行内的选区与光标（揭示态行已由源码块自绘）
+            self.draw_row_remote(renderer, row, bounds);
             // 空行行的光标与预编辑：空行不属任何块，由容器自绘。
             // 区间端点归相邻块的光标（文首行的 0 端点无相邻块，归自己），避免同帧画两根。
             if let SurfaceRow::Gap { from, to, line_starts, .. } = row {
@@ -2034,6 +2291,73 @@ impl<'a> From<CodeBody<'a>> for Element<'a, Message> {
     }
 }
 
+/// 富渲染行的可见片段探针：与富渲染同一份文本、字体、行高与宽度排版，落点换算与
+/// 远端光标反算共用一份口径。
+struct LineProbe {
+    paragraph: ParagraphT,
+    /// 逐可见字符的源区间：1:1 片段按字节线性对应，替换形态（图片 / 角标等）整段取边界。
+    offsets: Vec<(usize, usize)>,
+}
+
+impl LineProbe {
+    /// `width` = 行内文字可用宽（已扣除行缩进）。片段表为空（图片 / 表格等无逐字映射）
+    /// 返回 None，由调用方吸附行首 / 行尾或整行降级。
+    fn build(runs: &[LineRun], source: &SourceKind, width: f32) -> Option<Self> {
+        let (size, line_height) = source_metrics(source);
+        let mut spans: Vec<Span<'static, (), Font>> = Vec::new();
+        let mut offsets: Vec<(usize, usize)> = Vec::new();
+        for run in runs {
+            let (src_from, src_to) = run.src;
+            let aligned = src_to.saturating_sub(src_from) == run.text.len();
+            for (k, ch) in run.text.chars().enumerate() {
+                spans.push(Span::new(ch.to_string()).font(run.font()));
+                offsets.push(if aligned {
+                    (
+                        src_from + byte_of_char(&run.text, k),
+                        src_from + byte_of_char(&run.text, k + 1),
+                    )
+                } else {
+                    (src_from, src_to)
+                });
+            }
+        }
+        if spans.is_empty() {
+            return None;
+        }
+        let paragraph = ParagraphT::with_spans(advanced_text::Text {
+            content: spans.as_slice(),
+            bounds: Size::new(width.max(1.0), f32::INFINITY),
+            size: size.into(),
+            line_height: advanced_text::LineHeight::Relative(line_height),
+            font: crate::ui::regular(),
+            align_x: advanced_text::Alignment::Left,
+            align_y: alignment::Vertical::Top,
+            shaping: advanced_text::Shaping::Auto,
+            wrapping: advanced_text::Wrapping::default(),
+        });
+        Some(Self { paragraph, offsets })
+    }
+
+    fn len(&self) -> usize {
+        self.offsets.len()
+    }
+
+    /// 源偏移 → 字符下标：取源区间越过该偏移的首个可见字符（偏移落在隐藏标记内时吸到其
+    /// 后的可见字符），行尾与越界归末字符之后。
+    fn char_at_source(&self, offset: usize) -> usize {
+        self.offsets
+            .iter()
+            .position(|(_, to)| offset < *to)
+            .unwrap_or(self.offsets.len())
+    }
+
+    /// 源偏移 → 行内坐标（x 已加回行缩进）。
+    fn caret_at(&self, offset: usize, indent: f32, line_px: f32) -> (f32, f32, f32) {
+        let (x, y, h) = caret_xy(&self.paragraph, self.len(), self.char_at_source(offset), line_px);
+        (x + indent, y, h)
+    }
+}
+
 /// 富渲染行的落点换算：按行的可见片段建探针排版（与富渲染同一份文本、字体、行高
 /// 与宽度），取离落点最近的可见字符，再映射回源偏移。
 /// 片段表为空（图片 / 表格 / 分隔线等无逐字映射的行）返回 None，由调用方吸附行首 / 行尾。
@@ -2044,46 +2368,15 @@ fn probe_offset(
     indent: f32,
     point: Point,
 ) -> Option<usize> {
-    let (size, line_height) = source_metrics(source);
-    let mut spans: Vec<Span<'static, (), Font>> = Vec::new();
-    // 逐可见字符的源区间：1:1 片段按字节线性对应，替换形态整段取边界
-    let mut offsets: Vec<(usize, usize)> = Vec::new();
-    for run in runs {
-        let (src_from, src_to) = run.src;
-        let aligned = src_to.saturating_sub(src_from) == run.text.len();
-        for (k, ch) in run.text.chars().enumerate() {
-            spans.push(Span::new(ch.to_string()).font(run.font()));
-            offsets.push(if aligned {
-                (
-                    src_from + byte_of_char(&run.text, k),
-                    src_from + byte_of_char(&run.text, k + 1),
-                )
-            } else {
-                (src_from, src_to)
-            });
-        }
-    }
-    if spans.is_empty() {
-        return None;
-    }
-    let paragraph = ParagraphT::with_spans(advanced_text::Text {
-        content: spans.as_slice(),
-        bounds: Size::new(width.max(1.0), f32::INFINITY),
-        size: size.into(),
-        line_height: advanced_text::LineHeight::Relative(line_height),
-        font: crate::ui::regular(),
-        align_x: advanced_text::Alignment::Left,
-        align_y: alignment::Vertical::Top,
-        shaping: advanced_text::Shaping::Auto,
-        wrapping: advanced_text::Wrapping::default(),
-    });
+    let probe = LineProbe::build(runs, source, width - indent)?;
     let local = Point::new(point.x - indent, point.y);
-    let i = char_at_point(&paragraph, offsets.len(), local);
-    let (from, to) = offsets[i];
+    let i = char_at_point(&probe.paragraph, probe.len(), local);
+    let (from, to) = probe.offsets[i];
     if to <= from {
         return None;
     }
-    let split = paragraph
+    let split = probe
+        .paragraph
         .span_bounds(i)
         .into_iter()
         .next()
@@ -2202,6 +2495,30 @@ mod tests {
         let line = paragraph.span_bounds(0).into_iter().next().unwrap();
         assert!((preedit_width(text, size, line_height) - (line.x + line.width)).abs() < 0.5);
         assert!(preedit_width("gai", size, line_height) > preedit_width("g", size, line_height));
+    }
+
+    /// 富渲染行的源偏移反算：隐藏的强调标记不占可见字符，落在标记内的偏移吸到其后的
+    /// 可见字符，行尾之后归末字符之后（远端光标在富渲染行上的定位基准）。
+    #[test]
+    fn 富渲染行源偏移反算到可见字符() {
+        let source = "**粗体**尾\n";
+        let doc = atelyx_core::markdown::parse_markdown(source, &ParseOptions::default());
+        let images = crate::markdown_view::ImageHandles::default();
+        let rows = crate::markdown_view::edit_rows(source, &doc.blocks, &Theme::Dark, &images);
+        let row = rows
+            .iter()
+            .find(|r| !r.runs.is_empty())
+            .expect("段落在编辑档应有可见片段");
+        let probe = LineProbe::build(&row.runs, &row.source, 600.0).expect("有可见片段即有探针");
+        assert_eq!(probe.len(), 3, "可见字符 = 粗 / 体 / 尾");
+        // 前两个字节是隐藏的 "**"：偏移 0 与 2 都吸到首个可见字符
+        assert_eq!(probe.char_at_source(0), 0);
+        assert_eq!(probe.char_at_source(2), 0);
+        // 可见字符内部按字节 1:1 对应（"粗" 占 2..5、"体" 占 5..8、"尾" 占 8..11）
+        assert_eq!(probe.char_at_source(3), 0);
+        assert_eq!(probe.char_at_source(5), 1);
+        assert_eq!(probe.char_at_source(8), 2);
+        assert_eq!(probe.char_at_source(source.len()), probe.len());
     }
 
     #[test]
@@ -2436,19 +2753,31 @@ mod tests {
 
     #[test]
     fn remote_span_converts_note_offsets_to_block() {
+        let body_len = 100;
         // 前缀剥除：note 偏移 15/17 → 正文 5/7，选区落块 [4, 10) 内
-        assert_eq!(remote_span_in_block(17, 15, 10, 4, 10), Some((5, 7, Some(7))));
+        assert_eq!(
+            remote_span_in_block(17, 15, 10, body_len, 4, 10),
+            Some((5, 7, Some(7)))
+        );
         // 折叠光标：选区为空，光标条保留
-        assert_eq!(remote_span_in_block(16, 16, 10, 4, 10), Some((6, 6, Some(6))));
-        // 块末边界光标归本块（端点闭区间）
-        assert_eq!(remote_span_in_block(20, 20, 10, 4, 10), Some((10, 10, Some(10))));
+        assert_eq!(
+            remote_span_in_block(16, 16, 10, body_len, 4, 10),
+            Some((6, 6, Some(6)))
+        );
+        // 块末偏移归后一行（中段块不画，否则与下一行各画一根）
+        assert_eq!(remote_span_in_block(20, 20, 10, body_len, 4, 10), None);
+        // 正文末尾（to == body_len）没有后继行：仍归本块
+        assert_eq!(
+            remote_span_in_block(20, 20, 10, 10, 4, 10),
+            Some((10, 10, Some(10)))
+        );
         // 选区跨越块界：两端夹回块界，head 在块外则不画光标条
-        assert_eq!(remote_span_in_block(30, 1, 10, 4, 10), Some((4, 10, None)));
+        assert_eq!(remote_span_in_block(30, 1, 10, body_len, 4, 10), Some((4, 10, None)));
         // 锚点在 frontmatter 区（< body_start）：归正文零点，伸入块内的部分照画
-        assert_eq!(remote_span_in_block(17, 3, 10, 4, 10), Some((4, 7, Some(7))));
+        assert_eq!(remote_span_in_block(17, 3, 10, body_len, 4, 10), Some((4, 7, Some(7))));
         // head 在 frontmatter 区：整条不画
-        assert_eq!(remote_span_in_block(8, 20, 10, 0, 10), None);
+        assert_eq!(remote_span_in_block(8, 20, 10, body_len, 0, 10), None);
         // 光标与选区都不触及块
-        assert_eq!(remote_span_in_block(22, 24, 10, 4, 10), None);
+        assert_eq!(remote_span_in_block(22, 24, 10, body_len, 4, 10), None);
     }
 }

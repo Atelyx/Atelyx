@@ -1374,13 +1374,14 @@ pub struct App {
     pub file_drag_target: Option<String>,
 }
 
-/// 编辑面渲染用的远端光标视图（字节偏移，UTF-16 已换算）。
+/// 编辑面渲染用的远端光标视图（字节偏移，UTF-16 已换算）。选区缺省 = 对端在场但
+/// 光标不在文档内（只读档 / 未进编辑），此时只参与协作者胶囊，不画光标。
 #[derive(Debug, Clone)]
 pub struct RemoteCursorView {
     pub name: String,
     pub color: String,
-    pub anchor: usize,
-    pub head: usize,
+    pub anchor: Option<usize>,
+    pub head: Option<usize>,
 }
 
 /// 文件树拖拽按下候选。
@@ -1925,8 +1926,11 @@ impl App {
                         // Source 档同样接入协作：差分合入协作文档并上行（否则本端按键对端不可见，
                         // 且远端合入后本端继续输入会以旧全文覆盖 note_text 回退远端内容）
                         space_actions::collab_after_edit(self);
+                        return Task::none();
                     }
                 }
+                // 未改动内容的动作（点选 / 拖选 / 方向键）：选区与光标照样上行
+                space_actions::collab_after_caret(self);
                 Task::none()
             }
             Message::Save => {
@@ -2043,6 +2047,8 @@ impl App {
                         self.source_editor = text_editor::Content::with_text(&self.note_text);
                     }
                 }
+                // 换档即换光标来源（正文编辑面 / 纯文本面 / 无光标）：选区立即随档上行
+                space_actions::collab_after_caret(self);
                 Task::none()
             }
             Message::NoteEnterEdit => {
@@ -2699,6 +2705,9 @@ impl App {
                 if self.space_connected {
                     space_actions::awareness_keepalive(self);
                 }
+                // 限频压下的选区变化（拖选连续位移）由本拍补发最新一份：断线期产出即丢弃，
+                // 重连时的强制重发以最新状态兜底
+                space_actions::awareness_flush(self);
                 // 重名提醒条 3s 过期
                 if self
                     .rename_notice
@@ -6452,6 +6461,7 @@ impl App {
                 self.edit.caret = offset.min(self.edit_body().len());
                 self.edit.focused = true;
                 self.sync_active();
+                space_actions::collab_after_caret(self);
                 Task::none()
             }
             E::Blur => {
@@ -6468,6 +6478,7 @@ impl App {
                 }
                 self.edit.caret = offset;
                 self.sync_active();
+                space_actions::collab_after_caret(self);
                 Task::none()
             }
             E::Insert(text) => {
@@ -6502,6 +6513,7 @@ impl App {
             }
             E::Move { motion, extend } => {
                 self.edit_move(motion, extend);
+                space_actions::collab_after_caret(self);
                 Task::none()
             }
             E::Undo => {
@@ -6516,6 +6528,7 @@ impl App {
                 self.edit.anchor = 0;
                 self.edit.caret = self.edit_body().len();
                 self.edit.active = self.nearest_block(self.edit.caret);
+                space_actions::collab_after_caret(self);
                 Task::none()
             }
             E::Preedit(preedit) => {
@@ -6640,12 +6653,17 @@ impl App {
 
     fn subscription(&self) -> Subscription<Message> {
         // 心跳仅在有待过期通知、提醒条在途、悬停提示在途（距离收起判定）、编辑面聚焦、
-        // 远端光标在册（过期剔除节流搭载）、表格图片长按候选或快捷键页展示中（冲突警示两态闪烁）时挂载
+        // 远端光标在册（过期剔除节流搭载）、选区待补发、表格图片长按候选或快捷键页展示中
+        // （冲突警示两态闪烁）时挂载
         let need_tick = !self.notifications.is_empty()
             || self.rename_notice.is_some()
             || self.tooltip.is_some()
             || self.edit.focused
             || !self.remote_cursors.is_empty()
+            || self
+                .note_collab
+                .as_ref()
+                .is_some_and(|nc| nc.has_pending_awareness())
             || !self.chat.renaming.is_empty()
             || (self.settings_open && self.settings_tab == "shortcuts")
             || self.table.as_ref().is_some_and(|t| {
