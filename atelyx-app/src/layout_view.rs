@@ -302,7 +302,7 @@ pub(crate) enum PopupState {
     /// 历史记录弹层（居中模态；kind+file 定位侧文件）。
     HistoryBrowser { kind: atelyx_core::history::HistoryKind, file: String },
     /// 插件菜单 / 下拉节点的弹层（条目由插件界面树带来，点击回发节点事件）。
-    PluginList { entries: Vec<crate::plugin_actions::PopupEntry> },
+    PluginList { entries: Vec<atelyx_view::render::PopupEntry<Message>> },
 }
 
 impl PopupState {
@@ -889,7 +889,7 @@ fn titlebar<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, Message> 
 
     let brand = row![
         container(
-            iced::widget::image(crate::ui::icon_handle())
+            iced::widget::image(crate::app_icon::icon_handle())
                 .width(Length::Fixed(16.0))
                 .height(Length::Fixed(16.0)),
         )
@@ -3533,7 +3533,7 @@ fn popup_element<'a>(
     pane: usize,
     window: iced::window::Id,
 ) -> (Element<'a, Message>, f32) {
-    let entries: Vec<(usize, MenuEntry)> = match state {
+    let entries: Vec<(usize, MenuEntry<Message>)> = match state {
         PopupState::SceneSelector { confirm } => scene_selector_entries(app, confirm),
         PopupState::LayoutTabMenu { layout_id } => {
             let deletable = app
@@ -3590,7 +3590,7 @@ fn popup_element<'a>(
                 .and_then(|w| w.tabs.iter().find(|t| t.id == *tab_id))
                 .is_some_and(|t| t.locked);
             let (wid, tid) = (window_id.clone(), tab_id.clone());
-            let mut entries: Vec<(usize, MenuEntry)> = vec![
+            let mut entries: Vec<(usize, MenuEntry<Message>)> = vec![
                 (
                     0,
                     MenuEntry::Action {
@@ -3670,7 +3670,7 @@ fn popup_element<'a>(
         PopupState::EntrySceneMenu => {
             let pick = |id: Option<String>| Message::EntryScenePick(id);
             let current = app.entry_scene_id.as_deref();
-            let mut entries: Vec<(usize, MenuEntry<'static>)> = vec![(
+            let mut entries: Vec<(usize, MenuEntry<'static, Message>)> = vec![(
                 0,
                 if current.is_none() {
                     MenuEntry::Checked { label: "跟随当前".into(), on_press: pick(None) }
@@ -3750,7 +3750,7 @@ fn popup_element<'a>(
             // 邀请码（列出/生成/撤销）与管理操作为 owner 专属
             let owner = active
                 && matches!(&app.repo_kind, crate::RepoKind::Space(s) if s.role == atelyx_core::space_client::SpaceRole::Owner);
-            let mut entries: Vec<(usize, MenuEntry<'static>)> = vec![(
+            let mut entries: Vec<(usize, MenuEntry<'static, Message>)> = vec![(
                 0,
                 MenuEntry::Action {
                     label: "成员管理".into(),
@@ -4384,7 +4384,7 @@ fn popup_element<'a>(
                 .and_then(|t| t.view.active_view.as_deref())
                 .map(str::to_string);
             let grid = Message::Table(crate::table_view::TableMsg::SetView(None));
-            let mut entries: Vec<(usize, MenuEntry)> = vec![(
+            let mut entries: Vec<(usize, MenuEntry<Message>)> = vec![(
                 0,
                 if active.is_none() {
                     MenuEntry::Checked { label: "表格".into(), on_press: grid }
@@ -4410,7 +4410,7 @@ fn popup_element<'a>(
             entries
         }
         PopupState::AiModelMenu => {
-            let mut entries: Vec<(usize, MenuEntry)> = Vec::new();
+            let mut entries: Vec<(usize, MenuEntry<Message>)> = Vec::new();
             for p in app.repo_config.providers.iter().flatten() {
                 if p.models.is_empty() {
                     continue;
@@ -4442,7 +4442,7 @@ fn popup_element<'a>(
                 .chat
                 .active_agent_id()
                 .unwrap_or_else(|| atelyx_core::vault::BUILTIN_AGENT_CHAT_ID.to_string());
-            let mut entries: Vec<(usize, MenuEntry)> = Vec::new();
+            let mut entries: Vec<(usize, MenuEntry<Message>)> = Vec::new();
             for agent in &app.agents {
                 let pick = Message::Chat(crate::chat_actions::ChatMsg::AgentPick(Some(
                     agent.id.clone(),
@@ -4540,7 +4540,7 @@ fn popup_element<'a>(
         PopupState::AiAgentPromptMenu => {
             // 弹层由 Agent 表单触发：当前值以草稿优先（可能含未保存的改动）
             let current = app.ai.agent_draft.as_ref().and_then(|d| d.prompt_file.clone());
-            let mut entries: Vec<(usize, MenuEntry)> = vec![(
+            let mut entries: Vec<(usize, MenuEntry<Message>)> = vec![(
                 0,
                 if current.is_none() {
                     MenuEntry::Checked { label: "无".into(), on_press: Message::Ai(ai::AiMsg::AgentPromptPick(None)) }
@@ -4707,13 +4707,13 @@ pub(crate) fn chat_effort_label(app: &App) -> &'static str {
 }
 
 /// 面板模型子面板条目：按供应商分组，昵称显示。
-fn chat_model_entries(app: &App) -> Vec<(usize, MenuEntry<'static>)> {
+fn chat_model_entries(app: &App) -> Vec<(usize, MenuEntry<'static, Message>)> {
     let current = app.chat.model_override.as_ref().and_then(|v| {
         let provider = v.get("providerId").and_then(serde_json::Value::as_str)?;
         let model = v.get("model").and_then(serde_json::Value::as_str)?;
         Some((provider.to_string(), model.to_string()))
     });
-    let mut entries: Vec<(usize, MenuEntry<'static>)> = Vec::new();
+    let mut entries: Vec<(usize, MenuEntry<'static, Message>)> = Vec::new();
     for p in app.repo_config.providers.iter().flatten() {
         if p.models.is_empty() {
             continue;
@@ -4745,7 +4745,7 @@ fn font_picker_entries(
     app: &App,
     for_table: bool,
     window: iced::window::Id,
-) -> Vec<(usize, MenuEntry<'static>)> {
+) -> Vec<(usize, MenuEntry<'static, Message>)> {
     const SEARCH_H: f32 = 30.0;
     /// 清单可视区行数上下限（再多也只给滚动区，不让弹层顶满屏幕）。
     const MIN_ROWS: usize = 2;
@@ -4760,7 +4760,7 @@ fn font_picker_entries(
         Message::InterfaceFontSet(None)
     };
     let reset_label = if for_table { "默认" } else { "跟随系统" };
-    let mut entries: Vec<(usize, MenuEntry<'static>)> = vec![
+    let mut entries: Vec<(usize, MenuEntry<'static, Message>)> = vec![
         (
             0,
             MenuEntry::Custom(
@@ -4884,8 +4884,8 @@ pub fn view_displayed(app: &App, kind: &str) -> bool {
 }
 
 /// 场景选择器：根面板（场景行 + 新建）与删除确认面板。
-fn scene_selector_entries(app: &App, confirm: &Option<String>) -> Vec<(usize, MenuEntry<'static>)> {
-    let mut root: Vec<(usize, MenuEntry<'static>)> = vec![(0, MenuEntry::Group("场景".into()))];
+fn scene_selector_entries(app: &App, confirm: &Option<String>) -> Vec<(usize, MenuEntry<'static, Message>)> {
+    let mut root: Vec<(usize, MenuEntry<'static, Message>)> = vec![(0, MenuEntry::Group("场景".into()))];
     let active_id = app.ui.active_scene_id.clone();
     for s in &app.ui.scenes {
         let is_active = active_id.as_deref() == Some(s.id.as_str());
@@ -4965,7 +4965,7 @@ fn scene_selector_entries(app: &App, confirm: &Option<String>) -> Vec<(usize, Me
     root.push((0, MenuEntry::action_icon("新建场景", "plus", Message::SceneNew)));
 
     // 确认面板：标题用强调字重，按钮区与文案间距 12
-    let confirm_entries: Vec<(usize, MenuEntry<'static>)> = if let Some(id) = confirm {
+    let confirm_entries: Vec<(usize, MenuEntry<'static, Message>)> = if let Some(id) = confirm {
         let scene = app.ui.scenes.iter().find(|s| s.id == *id);
         let name = scene.map(|s| s.name.clone()).unwrap_or_default();
         let count = scene.map(|s| s.layouts.len()).unwrap_or(0);
@@ -5011,7 +5011,7 @@ fn scene_selector_entries(app: &App, confirm: &Option<String>) -> Vec<(usize, Me
 }
 
 /// 面板 ≡ 菜单：锁定（整块）/ 删除面板（最后一个禁用）/ 分割；空面板无锁定项。
-fn panel_menu_entries(app: &App, panel_id: &str) -> Vec<(usize, MenuEntry<'static>)> {
+fn panel_menu_entries(app: &App, panel_id: &str) -> Vec<(usize, MenuEntry<'static, Message>)> {
     let has_active = find_active_tab_in(app, panel_id).is_some();
     let main_tree = layout::active_layout(&app.ui).tree;
     let panel_count = count_panels(&main_tree);
@@ -5102,12 +5102,12 @@ fn tab_context_entries(
     app: &App,
     panel_id: &str,
     tab_id: &str,
-) -> Vec<(usize, MenuEntry<'static>)> {
+) -> Vec<(usize, MenuEntry<'static, Message>)> {
     let tab = find_tab_in_active(app, tab_id);
     let locked = tab.as_ref().is_some_and(|(_, locked)| *locked);
     let current_view = tab.as_ref().map(|(view, _)| view.clone());
     let (pid, tid) = (panel_id.to_string(), tab_id.to_string());
-    let mut entries: Vec<(usize, MenuEntry<'static>)> = vec![
+    let mut entries: Vec<(usize, MenuEntry<'static, Message>)> = vec![
         (
             0,
             MenuEntry::Action {
@@ -5164,7 +5164,7 @@ fn find_tab_in_active(app: &App, tab_id: &str) -> Option<(String, bool)> {
 }
 
 /// 空面板右键的视图选择器：本组 = 点击激活已有标签（角标「本组」）；已占用停用；其余添加。
-fn view_picker_entries(app: &App, panel_id: &str) -> Vec<(usize, MenuEntry<'static>)> {
+fn view_picker_entries(app: &App, panel_id: &str) -> Vec<(usize, MenuEntry<'static, Message>)> {
     let pid = panel_id.to_string();
     available_view_kinds(app)
         .into_iter()
@@ -5221,14 +5221,14 @@ pub(crate) fn window_has_view(app: &App, kind: &str) -> bool {
 
 /// 最近仓库行菜单：在系统文件管理器中打开 / 从列表移除（激活仓库行不可移除）。
 /// 移除进二段确认 pane（只移出列表，不删磁盘文件）。
-fn vault_menu_entries(app: &App, root: &str) -> Vec<(usize, MenuEntry<'static>)> {
+fn vault_menu_entries(app: &App, root: &str) -> Vec<(usize, MenuEntry<'static, Message>)> {
     let active = app
         .vault_root
         .as_ref()
         .map(|r| r.to_string_lossy().into_owned())
         .as_deref()
         == Some(root);
-    let mut entries: Vec<(usize, MenuEntry)> = vec![
+    let mut entries: Vec<(usize, MenuEntry<Message>)> = vec![
         (0, MenuEntry::action_icon(
             "在文件管理器中打开",
             "folder-open",
@@ -5277,8 +5277,8 @@ fn space_sub_popup(window: iced::window::Id, app: &App, state: PopupState) -> Me
 
 /// 协作空间菜单：身份概览 / 登录（切换账号）/ 创建 / 邀请码加入。
 /// 账号下的空间直接列在文件面板空间区（登录即见），不在弹层中转。
-fn space_menu_entries(app: &App, window: iced::window::Id) -> Vec<(usize, MenuEntry<'static>)> {
-    let mut entries: Vec<(usize, MenuEntry)> = Vec::new();
+fn space_menu_entries(app: &App, window: iced::window::Id) -> Vec<(usize, MenuEntry<'static, Message>)> {
+    let mut entries: Vec<(usize, MenuEntry<Message>)> = Vec::new();
     if let Some(identity) = &app.global.last_identity {
         entries.push((
             0,
@@ -5307,10 +5307,10 @@ fn space_menu_entries(app: &App, window: iced::window::Id) -> Vec<(usize, MenuEn
 fn space_login_entries(
     app: &App,
     register: bool,
-) -> Vec<(usize, MenuEntry<'static>)> {
+) -> Vec<(usize, MenuEntry<'static, Message>)> {
     let form = &app.space_form;
     let field = |f: crate::SpaceField| move |v: String| Message::Space(crate::SpaceMsg::LoginField(f, v));
-    let mut entries: Vec<(usize, MenuEntry)> = vec![
+    let mut entries: Vec<(usize, MenuEntry<Message>)> = vec![
         (
             0,
             MenuEntry::Custom(
@@ -5446,9 +5446,9 @@ fn mini_badge(label: &str, color: iced::Color) -> Element<'static, Message> {
 /// 管理操作仅 owner 可见（服务端同口径）；owner 行无操作。
 fn space_members_entries(
     app: &App,
-) -> Vec<(usize, MenuEntry<'static>)> {
+) -> Vec<(usize, MenuEntry<'static, Message>)> {
     use atelyx_core::space_client::SpaceRole;
-    let mut entries: Vec<(usize, MenuEntry)> = Vec::new();
+    let mut entries: Vec<(usize, MenuEntry<Message>)> = Vec::new();
     if let Some(err) = &app.space_members_error {
         entries.push((0, MenuEntry::Custom(popup_error_bar(err), 22.0)));
     } else if app.space_members.is_none() {
@@ -5617,9 +5617,9 @@ fn invite_revoke_row(code: String, confirmed: bool) -> Element<'static, Message>
 /// 邀请码弹层：表单（角色 / 过期小时 / 次数）+ 最近生成结果块 + 已有邀请码列表 + 错误条。
 fn space_invite_entries(
     app: &App,
-) -> Vec<(usize, MenuEntry<'static>)> {
+) -> Vec<(usize, MenuEntry<'static, Message>)> {
     use atelyx_core::space_client::SpaceRole;
-    let mut entries: Vec<(usize, MenuEntry)> = vec![
+    let mut entries: Vec<(usize, MenuEntry<Message>)> = vec![
         (
             0,
             MenuEntry::Submenu {
@@ -5806,8 +5806,8 @@ fn file_menu_entries(
     rel: &str,
     is_dir: bool,
     is_root: bool,
-) -> Vec<(usize, MenuEntry<'static>)> {
-    let mut entries: Vec<(usize, MenuEntry)> = Vec::new();
+) -> Vec<(usize, MenuEntry<'static, Message>)> {
+    let mut entries: Vec<(usize, MenuEntry<Message>)> = Vec::new();
     if is_dir {
         entries.push((0, MenuEntry::action_icon("新建画布", "palette", Message::DraftStart(rel.to_string(), crate::DraftKind::Canvas))));
         entries.push((0, MenuEntry::action_icon("新建笔记", "sticky-note",

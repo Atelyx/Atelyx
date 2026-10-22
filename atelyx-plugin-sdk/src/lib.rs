@@ -7,11 +7,12 @@ pub mod canvas_builders;
 pub mod connection;
 pub mod context;
 pub mod handler;
-pub mod presets;
-pub mod view_builders;
+pub mod ui;
 
 /// 协议类型再导出：插件代码只依赖本 crate。
 pub use atelyx_plugin_protocol as protocol;
+/// 界面树构建辅助与常用预制件（由 atelyx-view 提供，插件侧不引入 iced）。
+pub use atelyx_view::{presets, view_builders};
 pub use connection::{run_stdio, ConnectError, Connection};
 pub use context::Context;
 pub use handler::PluginHandler;

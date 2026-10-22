@@ -3,11 +3,11 @@
 //! 新界面诉求先在这里找组合——列表项、徽标、提示块、tab 条、状态点、表单行、空态都由既有控件
 //! 与节点级表述能力（交互外观、尺寸、排版）拼成；拼不出来的才考虑宿主侧新增能力。
 
-use crate::protocol::view::{
+use atelyx_plugin_protocol::view::{
     Align, AxesPadding, BoxSize, ColorSpec, ColorToken, EventKind, Interaction, InteractionState,
     NodeBody, PaddingSpec, SizeSpec, Surface, TextWeight, ViewNode,
 };
-use crate::view_builders::icon;
+use crate::view_builders::{icon, NodeId};
 
 /// 语义色档：软底 + 实色成对取用（提示块底 / 徽标底 / 状态点实色）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -99,9 +99,10 @@ fn shrink_width() -> Option<BoxSize> {
 /// 列表条目：悬停高亮、选中态描边（整行可点还需调用方声明 `with_events(vec![EventKind::Click])`）。
 ///
 /// 内容按需给子节点。
-pub fn list_item(id: &str, children: Vec<ViewNode>, selected: bool) -> ViewNode {
+pub fn list_item<'a>(id: impl Into<NodeId<'a>>, children: Vec<ViewNode>, selected: bool) -> ViewNode {
+    let id = id.into();
     let mut item = node(
-        id,
+        id.as_str(),
         NodeBody::Row {
             gap: Some(8.0),
             padding: Some(axes(8.0, 6.0)),
@@ -126,10 +127,11 @@ pub fn list_item(id: &str, children: Vec<ViewNode>, selected: bool) -> ViewNode 
 }
 
 /// 徽标 / chip：小尺寸圆角底 + 短文本，底色与文字色按语义档配对。
-pub fn chip(id: &str, label: impl Into<String>, tone: Tone) -> ViewNode {
+pub fn chip<'a>(id: impl Into<NodeId<'a>>, label: impl Into<String>, tone: Tone) -> ViewNode {
+    let id = id.into();
     let label = label.into();
     let mut item = node(
-        id,
+        id.as_str(),
         NodeBody::Row {
             gap: Some(4.0),
             padding: Some(axes(6.0, 2.0)),
@@ -158,9 +160,10 @@ pub fn chip(id: &str, label: impl Into<String>, tone: Tone) -> ViewNode {
 }
 
 /// 提示块：语义软底 + 同色描边的分组盒（信息 / 警告 / 错误）。
-pub fn alert(id: &str, tone: Tone, children: Vec<ViewNode>) -> ViewNode {
+pub fn alert<'a>(id: impl Into<NodeId<'a>>, tone: Tone, children: Vec<ViewNode>) -> ViewNode {
+    let id = id.into();
     let mut block = node(
-        id,
+        id.as_str(),
         NodeBody::Column {
             gap: Some(4.0),
             padding: Some(PaddingSpec::All(10.0)),
@@ -181,7 +184,8 @@ pub fn alert(id: &str, tone: Tone, children: Vec<ViewNode>) -> ViewNode {
 }
 
 /// tab 条：一行条目，选中项取激活外观；每个条目回发 `click`（条目 id 为 `<id>-<键>`）。
-pub fn tabs(id: &str, entries: &[(&str, &str)], active: &str) -> ViewNode {
+pub fn tabs<'a>(id: impl Into<NodeId<'a>>, entries: &[(&str, &str)], active: &str) -> ViewNode {
+    let id = id.into();
     let items = entries
         .iter()
         .map(|(key, label)| {
@@ -218,7 +222,7 @@ pub fn tabs(id: &str, entries: &[(&str, &str)], active: &str) -> ViewNode {
         })
         .collect();
     node(
-        id,
+        id.as_str(),
         NodeBody::Row {
             gap: Some(4.0),
             padding: None,
@@ -231,9 +235,10 @@ pub fn tabs(id: &str, entries: &[(&str, &str)], active: &str) -> ViewNode {
 }
 
 /// 状态点：8×8 圆点，颜色按语义档取实色（配一行文字表达状态）。
-pub fn status_dot(id: &str, tone: Tone) -> ViewNode {
+pub fn status_dot<'a>(id: impl Into<NodeId<'a>>, tone: Tone) -> ViewNode {
+    let id = id.into();
     let mut dot = node(
-        id,
+        id.as_str(),
         NodeBody::Row {
             gap: None,
             padding: None,
@@ -258,11 +263,12 @@ pub fn status_dot(id: &str, tone: Tone) -> ViewNode {
 }
 
 /// 表单行：定宽标签列 + 控件（控件按 `grow` 占满剩余宽度）。
-pub fn field_row(id: &str, label: &str, control: ViewNode) -> ViewNode {
+pub fn field_row<'a>(id: impl Into<NodeId<'a>>, label: &str, control: ViewNode) -> ViewNode {
+    let id = id.into();
     let mut control = control;
     control.grow = Some(1);
     node(
-        id,
+        id.as_str(),
         NodeBody::Row {
             gap: Some(8.0),
             padding: None,
@@ -299,7 +305,8 @@ pub fn field_row(id: &str, label: &str, control: ViewNode) -> ViewNode {
 }
 
 /// 空态：水平居中的图标 + 标题 + 说明（高度按内容；需要撑满可视区时给外层容器 `size.height`）。
-pub fn empty_state(id: &str, icon_name: &str, title: &str, hint: &str) -> ViewNode {
+pub fn empty_state<'a>(id: impl Into<NodeId<'a>>, icon_name: &str, title: &str, hint: &str) -> ViewNode {
+    let id = id.into();
     let mut glyph = icon(&format!("{id}-icon"), icon_name);
     glyph.body = NodeBody::Icon {
         name: icon_name.to_string(),
@@ -307,7 +314,7 @@ pub fn empty_state(id: &str, icon_name: &str, title: &str, hint: &str) -> ViewNo
         color: Some(ColorToken::TextMuted.into()),
     };
     node(
-        id,
+        id.as_str(),
         NodeBody::Column {
             gap: Some(6.0),
             padding: Some(axes(16.0, 24.0)),
@@ -342,7 +349,7 @@ pub fn empty_state(id: &str, icon_name: &str, title: &str, hint: &str) -> ViewNo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::view::ButtonVariant;
+    use atelyx_plugin_protocol::view::ButtonVariant;
     use crate::view_builders::button;
 
     fn sample() -> ViewNode {

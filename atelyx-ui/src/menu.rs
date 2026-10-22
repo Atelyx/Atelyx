@@ -11,11 +11,10 @@ use super::icon::{icon, icon_resolved};
 use super::palette as pal;
 use super::scroll;
 use super::text;
-use super::UiMsg;
-use crate::Message;
+use super::{UiHost, UiMsg};
 
 /// 一条菜单内容。渲染顺序即数组顺序。
-pub enum MenuEntry<'a> {
+pub enum MenuEntry<'a, M> {
     Action {
         label: String,
         /// 内置图标名或插件自备图形的限定名（`<插件 id>::<名>`）。
@@ -23,7 +22,7 @@ pub enum MenuEntry<'a> {
         /// 危险操作：红字 + hover 红调底。
         danger: bool,
         disabled: bool,
-        on_press: Option<Message>,
+        on_press: Option<M>,
         /// 行尾角标（「当前/本组/已占用」）：非禁用条目文字转强调色。
         note: Option<&'static str>,
         /// 悬停提示文案（None = 无）。
@@ -32,19 +31,19 @@ pub enum MenuEntry<'a> {
     /// 分组头（灰底小字）。
     Group(String),
     /// 当前选中项（下拉选项行形态：强调色文字 + 右侧对勾）。
-    Checked { label: String, on_press: Message },
+    Checked { label: String, on_press: M },
     Divider,
     /// 钻入子面板。
     Submenu { label: String, icon: Option<String>, disabled: bool, pane: usize },
     /// 自定义内容块（高度调用方给出，用于估高与钳制）。
-    Custom(Element<'a, Message>, f32),
+    Custom(Element<'a, M>, f32),
     /// 长清单滚动区（族名表等）：内部条目按菜单行渲染，`height` = 可视区高度（同时计入估高）。
-    Scroll { entries: Vec<MenuEntry<'a>>, height: f32 },
+    Scroll { entries: Vec<MenuEntry<'a, M>>, height: f32 },
 }
 
-impl<'a> MenuEntry<'a> {
+impl<'a, M> MenuEntry<'a, M> {
     /// 快捷构造：普通动作项。
-    pub fn action(label: impl Into<String>, on_press: Message) -> Self {
+    pub fn action(label: impl Into<String>, on_press: M) -> Self {
         MenuEntry::Action {
             label: label.into(),
             icon: None,
@@ -59,7 +58,7 @@ impl<'a> MenuEntry<'a> {
     pub fn action_icon(
         label: impl Into<String>,
         icon: impl Into<String>,
-        on_press: Message,
+        on_press: M,
     ) -> Self {
         MenuEntry::Action {
             label: label.into(),
@@ -72,7 +71,7 @@ impl<'a> MenuEntry<'a> {
         }
     }
 
-    pub fn danger(label: impl Into<String>, icon: impl Into<String>, on_press: Message) -> Self {
+    pub fn danger(label: impl Into<String>, icon: impl Into<String>, on_press: M) -> Self {
         MenuEntry::Action {
             label: label.into(),
             icon: Some(icon.into()),
@@ -90,7 +89,7 @@ impl<'a> MenuEntry<'a> {
         icon: impl Into<String>,
         note: &'static str,
         disabled: bool,
-        on_press: Option<Message>,
+        on_press: Option<M>,
     ) -> Self {
         MenuEntry::Action {
             label: label.into(),
@@ -114,11 +113,11 @@ impl<'a> MenuEntry<'a> {
 
 /// 渲染一个面板（`pane` 0 = 根；`entries` 含全部面板的条目，按 pane 过滤）。
 /// 子面板头部固定「返回 + 分隔线」，其余条目按数组顺序排列。
-pub fn pane_view<'a>(
-    entries: Vec<(usize, MenuEntry<'a>)>,
+pub fn pane_view<'a, M: UiHost>(
+    entries: Vec<(usize, MenuEntry<'a, M>)>,
     pane: usize,
     window: iced::window::Id,
-) -> (Element<'a, Message>, f32) {
+) -> (Element<'a, M>, f32) {
     let mut col = column![].padding(Padding::ZERO.vertical(pal::POPUP_PAD_Y));
     let mut height = pal::POPUP_PAD_Y * 2.0;
     let remaining = entries.into_iter().filter(|(p, _)| *p == pane);
@@ -136,7 +135,7 @@ pub fn pane_view<'a>(
 }
 
 /// 渲染单条目，并返回它占用的竖向高度（供弹层估高与钳制）。
-fn entry_element<'a>(entry: MenuEntry<'a>, window: iced::window::Id) -> (Element<'a, Message>, f32) {
+fn entry_element<'a, M: UiHost>(entry: MenuEntry<'a, M>, window: iced::window::Id) -> (Element<'a, M>, f32) {
     match entry {
         MenuEntry::Action { label, icon: ic, danger, disabled, on_press, note, hint } => {
             (item(&label, ic, danger, disabled, on_press, note, hint, window), pal::MENU_ITEM_H)
@@ -173,16 +172,16 @@ fn entry_element<'a>(entry: MenuEntry<'a>, window: iced::window::Id) -> (Element
 }
 
 #[allow(clippy::too_many_arguments)]
-fn item(
+fn item<M: UiHost>(
     label: &str,
     icon_name: Option<String>,
     danger: bool,
     disabled: bool,
-    on_press: Option<Message>,
+    on_press: Option<M>,
     note: Option<&'static str>,
     hint: Option<String>,
     window: iced::window::Id,
-) -> Element<'static, Message> {
+) -> Element<'static, M> {
     // 行尾角标条目（「当前」）：无论是否禁用都着强调色；其余按 danger/常规取色
     let text_color = if note.is_some() {
         pal::ACCENT
@@ -211,11 +210,11 @@ fn item(
 }
 
 /// 当前选中项（下拉选项行）：强调色文字 + 行尾对勾，与普通条目同款按钮底。
-fn checked_item(
+fn checked_item<M: UiHost>(
     label: &str,
-    on_press: Message,
+    on_press: M,
     window: iced::window::Id,
-) -> Element<'static, Message> {
+) -> Element<'static, M> {
     let mut row = row![].spacing(6).width(Length::Fill);
     row = row.push(text(label.to_string()).size(pal::fs_caption()).color(pal::ACCENT));
     row = row.push(space().width(Length::Fill));
@@ -223,13 +222,13 @@ fn checked_item(
     item_button(container(row), pal::HOVER, false, Some(on_press), None, window)
 }
 
-fn submenu_item(
+fn submenu_item<M: UiHost>(
     label: &str,
     icon_name: Option<String>,
     disabled: bool,
     pane: usize,
     window: iced::window::Id,
-) -> Element<'static, Message> {    let text_color = if disabled { pal::TEXT_MUTED } else { pal::TEXT_PRIMARY };
+) -> Element<'static, M> {    let text_color = if disabled { pal::TEXT_MUTED } else { pal::TEXT_PRIMARY };
     let mut row = row![].spacing(6).width(Length::Fill);
     row = row.push(icon("chevron-right", 13.0, text_color));
     if let Some(name) = icon_name {
@@ -243,14 +242,14 @@ fn submenu_item(
             container(row),
             pal::HOVER,
             false,
-            Some(Message::Ui(UiMsg::PopupPane(pane))),
+            Some(M::ui(UiMsg::PopupPane(pane))),
             None,
             window,
         )
     }
 }
 
-fn back_item(window: iced::window::Id) -> Element<'static, Message> {
+fn back_item<M: UiHost>(window: iced::window::Id) -> Element<'static, M> {
     let row = row![
         icon("chevron-left", 13.0, pal::TEXT_PRIMARY),
         text("返回").size(pal::fs_caption()).color(pal::TEXT_PRIMARY),
@@ -261,7 +260,7 @@ fn back_item(window: iced::window::Id) -> Element<'static, Message> {
         container(row),
         pal::HOVER,
         false,
-        Some(Message::Ui(UiMsg::PopupPane(0))),
+        Some(M::ui(UiMsg::PopupPane(0))),
         None,
         window,
     )
@@ -269,20 +268,20 @@ fn back_item(window: iced::window::Id) -> Element<'static, Message> {
 
 /// 菜单项按钮外壳：清零 iced 默认 padding、定高 MENU_ITEM_H、统一 hover 底；
 /// `hint` 非空时经 tooltip 通道（悬停 400ms 显现、移开 120ms 收起）。
-fn item_button(
-    content: container::Container<'static, Message>,
+fn item_button<M: UiHost>(
+    content: container::Container<'static, M>,
     hover_bg: iced::Color,
     disabled: bool,
-    on_press: Option<Message>,
+    on_press: Option<M>,
     hint: Option<String>,
     window: iced::window::Id,
-) -> Element<'static, Message> {
+) -> Element<'static, M> {
     let content = content
         .width(Length::Fill)
         .height(Length::Fixed(pal::MENU_ITEM_H))
         .padding(Padding::ZERO.horizontal(12.0))
         .align_y(Vertical::Center);
-    let element: Element<'static, Message> = if disabled {
+    let element: Element<'static, M> = if disabled {
         content.into()
     } else {
         iced::widget::button(content)
@@ -299,19 +298,19 @@ fn item_button(
     };
     match hint {
         Some(label) => iced::widget::mouse_area(element)
-            .on_enter(Message::Ui(UiMsg::HoverTip {
+            .on_enter(M::ui(UiMsg::HoverTip {
                 window,
                 label: label.clone(),
                 box_px: pal::MENU_ITEM_H,
             }))
-            .on_exit(Message::Ui(UiMsg::HoverTipEnd { window, label }))
+            .on_exit(M::ui(UiMsg::HoverTipEnd { window, label }))
             .into(),
         None => element,
     }
 }
 
 /// 分隔线：上下 4px 留白 + 1px 通栏线。
-fn divider() -> Element<'static, Message> {
+fn divider<M: 'static>() -> Element<'static, M> {
     container(
         container(space())
             .height(Length::Fixed(1.0))

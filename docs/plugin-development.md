@@ -95,47 +95,62 @@ lto = true
 ### 3.4 `src/main.rs`
 
 ```rust
+use std::sync::{Arc, Mutex};
+
 use atelyx_plugin_sdk::protocol::method::{
     ContributionSlot, NotificationLevel, SurfaceAttachedParams, ViewEventParams,
 };
 use atelyx_plugin_sdk::protocol::view::{ButtonVariant, EventKind};
-use atelyx_plugin_sdk::view_builders::{button, column, text, NodeExt};
+use atelyx_plugin_sdk::view_builders::{button, column, text, NodeExt, NodeId};
 use atelyx_plugin_sdk::{run_stdio, Context, PluginHandler, PluginInfo};
 
-struct Echo;
+/// 节点 id 与事件匹配共用同一份定义，改名只改常量一处。
+const PANEL: NodeId<'static> = NodeId::new("main");
+const PING: NodeId<'static> = NodeId::new("ping");
+
+struct Echo {
+    clicks: Arc<Mutex<u32>>,
+}
 
 #[async_trait::async_trait]
 impl PluginHandler for Echo {
-    /// 握手完成：注册贡献点、订阅事件都放这里。
+    /// 握手完成：注册贡献点、订阅事件、登记界面构建器都放这里。
     async fn on_ready(&self, ctx: &Context) {
         if let Err(e) = ctx
-            .register(ContributionSlot::Panel, "main", "Echo", None, None)
+            .register(ContributionSlot::Panel, PANEL.as_str(), "Echo", None, None)
             .await
         {
             eprintln!("注册贡献失败：{e}");
         }
-        // 先把界面树交上去：面挂载后宿主直接渲染这份存档
-        let tree = column(
-            "root",
-            vec![
-                text("hello", "你好，Atelyx"),
-                button("ping", "点我", ButtonVariant::Primary)
-                    .with_events(vec![EventKind::Click]),
-            ],
-        );
-        if let Err(e) = ctx.submit_view("main", tree).await {
-            eprintln!("提交界面失败：{e}");
-        }
+        let clicks = Arc::clone(&self.clicks);
+        ctx.ui()
+            .mount(PANEL.as_str(), move || {
+                let clicks = *clicks.lock().unwrap();
+                column(
+                    "root",
+                    vec![
+                        text("hello", "你好，Atelyx"),
+                        text("clicks", format!("点击次数：{clicks}")),
+                        button(PING.as_str(), "点我", ButtonVariant::Primary)
+                            .with_events(vec![EventKind::Click]),
+                    ],
+                )
+            })
+            .await;
     }
 
-    /// 面进入布局（面板被添加 / 插件重启后重发）。
+    /// 面进入布局（面板被添加 / 插件重启后重发）。SDK 已重发界面树，这里只补树以外的内容。
     async fn on_surface_attached(&self, _ctx: &Context, params: SurfaceAttachedParams) {
         eprintln!("面已挂载：{}", params.surface_id);
     }
 
     /// 节点事件：只有 events 里声明过的种类才会到达。
     async fn on_view_event(&self, ctx: &Context, params: ViewEventParams) {
-        if params.node_id == "ping" {
+        if params.node_id == PING {
+            *self.clicks.lock().unwrap() += 1;
+            if let Err(e) = ctx.ui().notify(PANEL.as_str()).await {
+                eprintln!("提交界面失败：{e}");
+            }
             let _ = ctx
                 .notify("Echo", Some("按钮被点击"), NotificationLevel::Info)
                 .await;
@@ -150,13 +165,21 @@ async fn main() {
         name: "Echo".into(),
         version: "0.1.0".into(),
     };
+    let plugin = Echo { clicks: Arc::new(Mutex::new(0)) };
     // 连接结束分两种：宿主关闭 stdin（正常退出，返回 Ok）/ 协议违规或读写失败（Err，非零码退出）
-    if let Err(e) = run_stdio(info, Echo).await {
+    if let Err(e) = run_stdio(info, plugin).await {
         eprintln!("连接异常结束：{e}");
         std::process::exit(1);
     }
 }
 ```
+
+界面提交由 SDK 托管：
+
+- `ctx.ui().mount(surfaceId, build)` 登记这一面的构建器——`build` 只读当前状态并返回整棵树；重复挂载同一面即替换构建器。
+- `ctx.ui().notify(surfaceId)` 触发一次「构建 → 与上次成功提交的树比较 → 未变跳过」，返回 `Ok(false)` 表示没有提交。事件处理里改完状态调它即可，不需要自己保存上次提交的树。
+- 面重新挂载时 SDK 先强制重发一次树再回调 `on_surface_attached`；该回调只补树以外的内容（如画布指令清单），不要在这里重复整树。
+- 构建器在 SDK 内同步执行，读状态用短锁、不要跨 `await` 持锁。
 
 三条容易踩的规则：
 
@@ -173,7 +196,7 @@ async fn main() {
 
 ## 5. 界面（ViewNode）
 
-一棵树 = 根节点 + 子节点。`id` 在同一棵树里必须唯一（宿主按 id 做控件态复用与事件回传）；容器节点才能带 `children`；节点要回发的事件写在 `events` 里。
+一棵树 = 根节点 + 子节点。`id` 在同一棵树里必须唯一（宿主按 id 做控件态复用与事件回传）；容器节点才能带 `children`；节点要回发的事件写在 `events` 里。Rust SDK 里用 `NodeId` 常量定义 id，构建与事件匹配共用同一份定义。
 
 ```json
 {
@@ -342,7 +365,7 @@ let params = WindowOpenParams {
     width: Some(560.0), height: Some(360.0),
     always_on_top: Some(true), skip_taskbar: Some(true), hide_on_blur: Some(true),
 };
-ctx.window_open(params).await?;   // 之后用 submit_view("palette", tree) 提交内容
+ctx.window_open(params).await?;   // 内容用 mount("palette", build) 登记后 notify("palette") 提交
 // 运行时改尺寸 / 置顶（只给一维时另一维取现值；「不进任务栏」只能在开窗时给）
 ctx.window_update(WindowUpdateParams { id: "palette".into(), width: Some(640.0), height: None, always_on_top: None }).await?;
 ctx.window_close("palette").await?;

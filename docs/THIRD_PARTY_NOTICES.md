@@ -6,7 +6,7 @@
 
 | 资产 | 许可 | 版权 | 说明 |
 | --- | --- | --- | --- |
-| `atelyx-app/src/ui/icons.rs`（形状数据） | ISC | © Lucide Contributors | 图标形状数据取自 lucide v1.31（https://lucide.dev），仅路径数据嵌入，绘制代码为本仓库实现 |
+| `atelyx-ui/src/icons.rs`（形状数据） | ISC | © Lucide Contributors | 图标形状数据取自 lucide v1.31（https://lucide.dev），仅路径数据嵌入，绘制代码为本仓库实现 |
 
 
 ## Rust 依赖

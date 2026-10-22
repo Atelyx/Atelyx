@@ -29,6 +29,7 @@ struct Inner {
     out_tx: mpsc::Sender<Envelope>,
     pending: PendingMap,
     next_id: AtomicU64,
+    ui: crate::ui::Registry,
 }
 
 impl Context {
@@ -38,8 +39,22 @@ impl Context {
                 out_tx,
                 pending: Arc::new(Mutex::new(std::collections::HashMap::new())),
                 next_id: AtomicU64::new(1),
+                ui: crate::ui::Registry::default(),
             }),
         }
+    }
+
+    /// 界面树托管句柄：挂「状态 → 树」构建器、按面通知提交（见 [`crate::ui::Ui`]）。
+    pub fn ui(&self) -> crate::ui::Ui<'_> {
+        crate::ui::Ui::new(self)
+    }
+
+    pub(crate) fn ui_registry(&self) -> &crate::ui::Registry {
+        &self.inner.ui
+    }
+
+    pub(crate) fn ui_slot(&self, surface_id: &str) -> Option<Arc<crate::ui::Slot>> {
+        self.inner.ui.lock().unwrap().get(surface_id).cloned()
     }
 
     /// 读任务收场在途调用时取走整表（drain）。

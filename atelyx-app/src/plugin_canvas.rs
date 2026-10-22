@@ -9,12 +9,12 @@ use iced::widget::canvas::{self, Canvas, Path as CanvasPath, Stroke, Text as Can
 use iced::{Color, Element, Length, Point, Rectangle};
 
 use atelyx_core::plugin_runtime::{
-    CanvasColor, CanvasEventKind, CanvasPointer, ColorToken, DrawCommand, ImageFit, ImageSource,
-    MouseButton, TextWeight,
+    CanvasColor, CanvasEventKind, CanvasPointer, DrawCommand, ImageFit, ImageSource, MouseButton,
+    TextWeight,
 };
+use atelyx_view::render::token_color;
 
 use crate::plugin_actions;
-use crate::ui::palette as pal;
 use crate::{App, Message};
 
 /// 双击判定：同键二次按下的最大间隔。
@@ -58,13 +58,14 @@ impl Default for CanvasState {
 pub struct PluginCanvas<'a> {
     pub app: &'a App,
     pub window: iced::window::Id,
-    /// 面身份随事件回发（树节点 id 借自投影树，此处收拢为自有值）。
+    /// 面身份随事件回发。
     pub plugin_id: String,
     pub surface_id: String,
-    pub node_id: &'a str,
+    /// 树节点 id 在渲染期取自投影树，进入部件时收拢为自有值。
+    pub node_id: String,
     /// 最新指令清单（`None` = 未提交过；`Some(空)` = 清空画布）。
     pub list: Option<&'a Arc<Vec<DrawCommand>>>,
-    pub mouse_events: &'a [CanvasEventKind],
+    pub mouse_events: Vec<CanvasEventKind>,
 }
 
 impl PluginCanvas<'_> {
@@ -76,7 +77,7 @@ impl PluginCanvas<'_> {
         Message::PluginView {
             plugin_id: self.plugin_id.clone(),
             surface_id: self.surface_id.clone(),
-            node_id: self.node_id.to_string(),
+            node_id: self.node_id.clone(),
             event: plugin_actions::view_event_canvas(pointer),
         }
     }
@@ -198,13 +199,13 @@ impl canvas::Program<Message> for PluginCanvas<'_> {
             state.font_epoch.set(epoch);
         }
         // 节点或尺寸变化即上报插件：绘制拿到的是真实分配尺寸，这是插件对齐坐标与滚动范围的唯一来源
-        let reported = (node_identity(self.node_id), bounds.width, bounds.height);
+        let reported = (node_identity(&self.node_id), bounds.width, bounds.height);
         if state.reported.get() != Some(reported) {
             state.reported.set(Some(reported));
             self.app.plugins.notify_canvas_resized(
                 &self.plugin_id,
                 &self.surface_id,
-                self.node_id,
+                &self.node_id,
                 reported.1,
                 reported.2,
             );
@@ -372,39 +373,6 @@ fn image_handle(
     Some((handle, widget.app.note_image_sizes.get(&key).copied()))
 }
 
-/// token → 主题色（插件控件与画布共用同一映射）。
-pub(crate) fn token_color(token: ColorToken) -> Color {
-    match token {
-        ColorToken::Text => pal::TEXT_PRIMARY,
-        ColorToken::TextSecondary => pal::TEXT_SECONDARY,
-        ColorToken::TextMuted => pal::TEXT_MUTED,
-        ColorToken::Accent => pal::ACCENT,
-        ColorToken::AccentSoft => pal::ACCENT_SOFT,
-        ColorToken::Danger => pal::DANGER,
-        ColorToken::DangerSoft => pal::DANGER_SOFT,
-        ColorToken::Success => pal::SUCCESS,
-        ColorToken::SuccessSoft => pal::SUCCESS_SOFT,
-        ColorToken::Warning => pal::WARNING,
-        ColorToken::WarningSoft => pal::WARNING_SOFT,
-        ColorToken::Surface => pal::BG_TERTIARY,
-        ColorToken::SurfaceMuted => pal::BG_SECONDARY,
-        ColorToken::SurfaceSunken => pal::BG_SUNKEN,
-        ColorToken::Hover => pal::HOVER,
-        ColorToken::Border => pal::BORDER,
-        ColorToken::BorderStrong => pal::BORDER_STRONG,
-        ColorToken::Transparent => Color::TRANSPARENT,
-    }
-}
-
-/// 插件声明的取色：主题 token 走调色板，自定义色按 sRGB 直取。
-pub(crate) fn spec_color(spec: atelyx_core::plugin_runtime::ColorSpec) -> Color {
-    use atelyx_core::plugin_runtime::{ColorSpec, Rgba};
-    match spec {
-        ColorSpec::Token(name) => token_color(name),
-        ColorSpec::Custom(Rgba([r, g, b, a])) => Color::from_rgba(r, g, b, a),
-    }
-}
-
 fn color(value: CanvasColor) -> Color {
     match value {
         CanvasColor::Token { name } => token_color(name),
@@ -412,7 +380,7 @@ fn color(value: CanvasColor) -> Color {
     }
 }
 
-/// 字重 → 字体（同 [`crate::plugin_view`] 的控件口径）；系统族缺该字重时由字体库匹配最近一档。
+/// 字重 → 字体（同 [`atelyx_view::render`] 的控件口径）；系统族缺该字重时由字体库匹配最近一档。
 pub(crate) fn font_of(weight: TextWeight) -> iced::Font {
     iced::Font {
         weight: match weight {

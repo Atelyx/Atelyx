@@ -1,0 +1,19 @@
+[package]
+name = "atelyx-view"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Atelyx 界面树构建与渲染：ViewNode 构造辅助、常用预制件与宿主渲染解释器"
+license = "Apache-2.0"
+repository = "https://github.com/Atelyx/Atelyx"
+readme = "../README.md"
+
+[features]
+default = []
+# 宿主侧渲染：把 ViewNode 树解释成 iced 控件（需要界面组件库与 iced）
+render = ["dep:atelyx-ui", "dep:iced"]
+
+[dependencies]
+atelyx-plugin-protocol = { version = "0.1.0", path = "../atelyx-plugin-protocol" }
+atelyx-ui = { version = "0.1.0", path = "../atelyx-ui", optional = true }
+iced = { version = "0.14", features = ["advanced", "canvas", "image"], optional = true }

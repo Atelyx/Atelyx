@@ -12,8 +12,7 @@ use iced::{Color, Element, Length, Padding, border, widget::container::Style};
 use super::icon::icon;
 use super::palette as pal;
 use super::text;
-use super::{UiMsg, controls};
-use crate::Message;
+use super::{UiHost, UiMsg, controls};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Level {
@@ -61,7 +60,7 @@ pub struct Progress {
 
 /// 一条通知。
 #[derive(Debug, Clone)]
-pub struct Notification {
+pub struct Notification<M> {
     pub id: u64,
     pub level: Level,
     pub text: String,
@@ -71,10 +70,10 @@ pub struct Notification {
     /// 下载进度（非空 = 渲染进度条）。
     pub progress: Option<Progress>,
     /// 动作按钮（文案 + 点击消息；渲染在文案下方）。
-    pub(crate) actions: Vec<(String, Message)>,
+    pub actions: Vec<(String, M)>,
 }
 
-impl Notification {
+impl<M> Notification<M> {
     /// 常规通知（自动消失、无进度无动作）。
     pub fn new(id: u64, level: Level, text: impl Into<String>) -> Self {
         Self { id, level, text: text.into(), at: Instant::now(), persistent: false, progress: None, actions: Vec::new() }
@@ -86,7 +85,7 @@ impl Notification {
 }
 
 /// 通知宿主（右下角、底对齐向上堆叠、边距 16px、条间距 8px；最新一条贴角在最下）。
-pub fn host<'a>(list: &'a [Notification], on_dismiss: impl Fn(u64) -> Message + 'a) -> Element<'a, Message> {
+pub fn host<'a, M: Clone + 'a + 'static>(list: &'a [Notification<M>], on_dismiss: impl Fn(u64) -> M + 'a) -> Element<'a, M> {
     let mut col = column![].spacing(8).width(Length::Shrink);
     for n in list {
         col = col.push(card(n, on_dismiss(n.id)));
@@ -100,7 +99,7 @@ pub fn host<'a>(list: &'a [Notification], on_dismiss: impl Fn(u64) -> Message + 
         .into()
 }
 
-fn card<'a>(n: &'a Notification, on_dismiss: Message) -> Element<'a, Message> {
+fn card<'a, M: Clone + 'a + 'static>(n: &'a Notification<M>, on_dismiss: M) -> Element<'a, M> {
     let level = n.level;
     // 文本用 Shrink（自适应内容宽）：Fill 在 Shrink 容器内不放量会塌成 0 宽
     let body = text(n.text.clone())
@@ -162,9 +161,9 @@ fn card<'a>(n: &'a Notification, on_dismiss: Message) -> Element<'a, Message> {
 }
 
 /// 通知区盖在内容之上（占满窗口、透明）：仅卡片本体承接点击。
-pub fn layer<'a>(list: &'a [Notification]) -> Element<'a, Message> {
+pub fn layer<'a, M: UiHost>(list: &'a [Notification<M>]) -> Element<'a, M> {
     if list.is_empty() {
         return space().into();
     }
-    host(list, |id| Message::Ui(UiMsg::NotifyDismiss(id)))
+    host(list, |id| M::ui(UiMsg::NotifyDismiss(id)))
 }

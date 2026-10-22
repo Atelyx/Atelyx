@@ -1,14 +1,95 @@
 //! ViewNode 树构建辅助：薄构造器，字段默认值收拢在此，插件只写关心的项。
 //! 事件声明保持显式——构造器不替调用方挂事件，避免「按钮没反应」这类静默偏差。
 
-use crate::protocol::view::{
+use std::borrow::Cow;
+use std::fmt;
+
+use atelyx_plugin_protocol::view::{
     BoxSize, ButtonVariant, CanvasEventKind, ColorSpec, EventKind, ImageSource, Interaction,
     MenuItem, NodeBody, ReportMode, SizeSpec, ViewNode,
 };
 
-fn node(id: &str, body: NodeBody) -> ViewNode {
+/// 节点 id：树构建与事件匹配共用同一份定义，节点改名只改常量一处。
+///
+/// 常量形式（`const BOARD: NodeId<'static> = NodeId::new("board")`）是推荐用法；
+/// `&str` / `String` 可直接传入各构造器。
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct NodeId<'a>(Cow<'a, str>);
+
+impl<'a> NodeId<'a> {
+    pub const fn new(name: &'a str) -> Self {
+        Self(Cow::Borrowed(name))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'a> From<&'a str> for NodeId<'a> {
+    fn from(name: &'a str) -> Self {
+        Self(Cow::Borrowed(name))
+    }
+}
+
+impl<'a> From<&'a String> for NodeId<'a> {
+    fn from(name: &'a String) -> Self {
+        Self(Cow::Borrowed(name.as_str()))
+    }
+}
+
+impl From<String> for NodeId<'static> {
+    fn from(name: String) -> Self {
+        Self(Cow::Owned(name))
+    }
+}
+
+impl fmt::Display for NodeId<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// 与事件里回发的节点 id（`&str` / `String`）直接比较。
+impl PartialEq<str> for NodeId<'_> {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
+impl PartialEq<&str> for NodeId<'_> {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
+
+impl<'a> PartialEq<NodeId<'a>> for str {
+    fn eq(&self, other: &NodeId<'a>) -> bool {
+        self == other.as_str()
+    }
+}
+
+impl<'a> PartialEq<NodeId<'a>> for String {
+    fn eq(&self, other: &NodeId<'a>) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl PartialEq<String> for NodeId<'_> {
+    fn eq(&self, other: &String) -> bool {
+        self.0 == other.as_str()
+    }
+}
+
+impl<'a> PartialEq<NodeId<'a>> for &str {
+    fn eq(&self, other: &NodeId<'a>) -> bool {
+        *self == other.as_str()
+    }
+}
+
+fn node<'a>(id: impl Into<NodeId<'a>>, body: NodeBody) -> ViewNode {
     ViewNode {
-        id: id.into(),
+        id: id.into().0.into_owned(),
         body,
         interaction: None,
         grow: None,
@@ -66,7 +147,7 @@ impl NodeStyleExt for ViewNode {
 }
 
 /// 主题 token 取色便捷。
-pub fn token(color: crate::protocol::view::ColorToken) -> ColorSpec {
+pub fn token(color: atelyx_plugin_protocol::view::ColorToken) -> ColorSpec {
     ColorSpec::Token(color)
 }
 
@@ -75,7 +156,7 @@ pub fn px(value: f32) -> SizeSpec {
     SizeSpec::Fixed(value)
 }
 
-pub fn row(id: &str, children: Vec<ViewNode>) -> ViewNode {
+pub fn row<'a>(id: impl Into<NodeId<'a>>, children: Vec<ViewNode>) -> ViewNode {
     node(
         id,
         NodeBody::Row { gap: None, padding: None, justify: None, cross_align: None, size: None },
@@ -83,7 +164,7 @@ pub fn row(id: &str, children: Vec<ViewNode>) -> ViewNode {
     .with_children(children)
 }
 
-pub fn column(id: &str, children: Vec<ViewNode>) -> ViewNode {
+pub fn column<'a>(id: impl Into<NodeId<'a>>, children: Vec<ViewNode>) -> ViewNode {
     node(
         id,
         NodeBody::Column { gap: None, padding: None, cross_align: None, align: None, size: None },
@@ -92,7 +173,7 @@ pub fn column(id: &str, children: Vec<ViewNode>) -> ViewNode {
 }
 
 /// 卡片容器：主题底 + 边框 + 圆角的分组盒（底色 / 圆角 / 边框由链式改字段指定）。
-pub fn card(id: &str, children: Vec<ViewNode>) -> ViewNode {
+pub fn card<'a>(id: impl Into<NodeId<'a>>, children: Vec<ViewNode>) -> ViewNode {
     node(
         id,
         NodeBody::Card {
@@ -110,21 +191,21 @@ pub fn card(id: &str, children: Vec<ViewNode>) -> ViewNode {
 }
 
 /// 叠层容器：子节点按提交顺序重叠（后提交的在上），用于「画布当底 + 宿主控件叠其上」。
-pub fn stack(id: &str, children: Vec<ViewNode>) -> ViewNode {
+pub fn stack<'a>(id: impl Into<NodeId<'a>>, children: Vec<ViewNode>) -> ViewNode {
     node(id, NodeBody::Stack {}).with_children(children)
 }
 
 /// 分隔线（主题弱边界色的 1px 水平线）。
-pub fn divider(id: &str) -> ViewNode {
+pub fn divider<'a>(id: impl Into<NodeId<'a>>) -> ViewNode {
     node(id, NodeBody::Divider {})
 }
 
-pub fn scroll(id: &str, children: Vec<ViewNode>) -> ViewNode {
+pub fn scroll<'a>(id: impl Into<NodeId<'a>>, children: Vec<ViewNode>) -> ViewNode {
     node(id, NodeBody::Scroll { direction: None, gap: None, height: None }).with_children(children)
 }
 
 /// 固定列数网格。
-pub fn grid(id: &str, columns: u32, children: Vec<ViewNode>) -> ViewNode {
+pub fn grid<'a>(id: impl Into<NodeId<'a>>, columns: u32, children: Vec<ViewNode>) -> ViewNode {
     node(
         id,
         NodeBody::Grid {
@@ -138,7 +219,7 @@ pub fn grid(id: &str, columns: u32, children: Vec<ViewNode>) -> ViewNode {
 }
 
 /// 按可用宽度换列的网格：每列不窄于 `min_column_width`，列数随宽度自适应。
-pub fn grid_min(id: &str, min_column_width: f32, children: Vec<ViewNode>) -> ViewNode {
+pub fn grid_min<'a>(id: impl Into<NodeId<'a>>, min_column_width: f32, children: Vec<ViewNode>) -> ViewNode {
     node(
         id,
         NodeBody::Grid {
@@ -151,11 +232,11 @@ pub fn grid_min(id: &str, min_column_width: f32, children: Vec<ViewNode>) -> Vie
     .with_children(children)
 }
 
-pub fn list(id: &str, children: Vec<ViewNode>) -> ViewNode {
+pub fn list<'a>(id: impl Into<NodeId<'a>>, children: Vec<ViewNode>) -> ViewNode {
     node(id, NodeBody::List { gap: None }).with_children(children)
 }
 
-pub fn text(id: &str, content: impl Into<String>) -> ViewNode {
+pub fn text<'a>(id: impl Into<NodeId<'a>>, content: impl Into<String>) -> ViewNode {
     node(
         id,
         NodeBody::Text {
@@ -171,7 +252,7 @@ pub fn text(id: &str, content: impl Into<String>) -> ViewNode {
 }
 
 /// 只读 Markdown 正文（宿主按笔记同源解析器渲染）。
-pub fn markdown(id: &str, content: impl Into<String>) -> ViewNode {
+pub fn markdown<'a>(id: impl Into<NodeId<'a>>, content: impl Into<String>) -> ViewNode {
     node(
         id,
         NodeBody::Markdown {
@@ -184,7 +265,7 @@ pub fn markdown(id: &str, content: impl Into<String>) -> ViewNode {
     )
 }
 
-pub fn text_input(id: &str, value: impl Into<String>, report: ReportMode) -> ViewNode {
+pub fn text_input<'a>(id: impl Into<NodeId<'a>>, value: impl Into<String>, report: ReportMode) -> ViewNode {
     node(
         id,
         NodeBody::TextInput {
@@ -198,7 +279,7 @@ pub fn text_input(id: &str, value: impl Into<String>, report: ReportMode) -> Vie
     )
 }
 
-pub fn number_input(id: &str, value: Option<f64>, report: ReportMode) -> ViewNode {
+pub fn number_input<'a>(id: impl Into<NodeId<'a>>, value: Option<f64>, report: ReportMode) -> ViewNode {
     node(
         id,
         NodeBody::NumberInput {
@@ -213,15 +294,15 @@ pub fn number_input(id: &str, value: Option<f64>, report: ReportMode) -> ViewNod
     )
 }
 
-pub fn dropdown(id: &str, options: Vec<String>, selected: Option<u32>) -> ViewNode {
+pub fn dropdown<'a>(id: impl Into<NodeId<'a>>, options: Vec<String>, selected: Option<u32>) -> ViewNode {
     node(id, NodeBody::Dropdown { options, selected, placeholder: None, read_only: None })
 }
 
-pub fn checkbox(id: &str, checked: bool) -> ViewNode {
+pub fn checkbox<'a>(id: impl Into<NodeId<'a>>, checked: bool) -> ViewNode {
     node(id, NodeBody::Checkbox { checked, label: None, read_only: None })
 }
 
-pub fn button(id: &str, label: impl Into<String>, variant: ButtonVariant) -> ViewNode {
+pub fn button<'a>(id: impl Into<NodeId<'a>>, label: impl Into<String>, variant: ButtonVariant) -> ViewNode {
     node(
         id,
         NodeBody::Button {
@@ -234,7 +315,7 @@ pub fn button(id: &str, label: impl Into<String>, variant: ButtonVariant) -> Vie
     )
 }
 
-pub fn icon_button(id: &str, icon: &str) -> ViewNode {
+pub fn icon_button<'a>(id: impl Into<NodeId<'a>>, icon: &str) -> ViewNode {
     node(
         id,
         NodeBody::IconButton {
@@ -248,31 +329,31 @@ pub fn icon_button(id: &str, icon: &str) -> ViewNode {
     )
 }
 
-pub fn image(id: &str, source: ImageSource) -> ViewNode {
+pub fn image<'a>(id: impl Into<NodeId<'a>>, source: ImageSource) -> ViewNode {
     node(id, NodeBody::Image { source, fit: None, width: None, height: None })
 }
 
-pub fn progress(id: &str, value: f64) -> ViewNode {
+pub fn progress<'a>(id: impl Into<NodeId<'a>>, value: f64) -> ViewNode {
     node(id, NodeBody::Progress { value, girth: None, tone: None })
 }
 
 /// 纯装饰图标（不接受点击；可点的图标用 [`icon_button`]）。
-pub fn icon(id: &str, name: &str) -> ViewNode {
+pub fn icon<'a>(id: impl Into<NodeId<'a>>, name: &str) -> ViewNode {
     node(id, NodeBody::Icon { name: name.into(), size: None, color: None })
 }
 
-pub fn menu(id: &str, label: &str, items: Vec<MenuItem>) -> ViewNode {
+pub fn menu<'a>(id: impl Into<NodeId<'a>>, label: &str, items: Vec<MenuItem>) -> ViewNode {
     node(id, NodeBody::Menu { items, label: Some(label.into()), icon: None })
 }
 
 /// 自绘画布节点：`mouse_events` 声明要接收的指针事件子集（未声明不上行）。
 /// 内容经 `Context::submit_canvas` 提交指令清单，命中由插件按指令几何自算。
-pub fn canvas(id: &str, mouse_events: Vec<CanvasEventKind>) -> ViewNode {
+pub fn canvas<'a>(id: impl Into<NodeId<'a>>, mouse_events: Vec<CanvasEventKind>) -> ViewNode {
     node(id, NodeBody::Canvas { mouse_events, height: None, fill: None })
 }
 
 /// 拖动热区：自身不渲染内容，用户在其占位区域内按下即由宿主发起整窗拖动
 /// （全接管时插件自绘标题栏的拖动把手）。占位大小由父容器布局决定。
-pub fn drag_region(id: &str) -> ViewNode {
+pub fn drag_region<'a>(id: impl Into<NodeId<'a>>) -> ViewNode {
     node(id, NodeBody::DragRegion {})
 }

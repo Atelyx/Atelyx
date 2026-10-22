@@ -34,10 +34,12 @@ bash scripts/package.sh                             # 构建并产出安装包
 
 | crate | 路径 | 职责 |
 | --- | --- | --- |
-| 应用壳 | `atelyx-app/` | iced 窗口与布局、视图、组件库与主题 |
+| 应用壳 | `atelyx-app/` | iced 窗口与布局、视图、插件面适配 |
+| 界面组件库 | `atelyx-ui/` | 调色板、字体、图标、基元控件、浮层与菜单 |
+| 界面树 | `atelyx-view/` | ViewNode 构建辅助与预制件；`render` 特性出宿主侧解释渲染 |
 | 核心 | `atelyx-core/` | UI 无关：仓库存储、Markdown 与 frontmatter 解析、会话与布局模型、插件宿主运行时、进程托管 |
 | 协议 | `atelyx-plugin-protocol/` | 插件契约：握手、JSON-RPC 信封、ViewNode 界面树、manifest |
-| SDK | `atelyx-plugin-sdk/` | 插件侧封装：连接泵、能力面代理、界面构建辅助 |
+| SDK | `atelyx-plugin-sdk/` | 插件侧封装：连接泵、能力面代理、界面树托管 |
 | 服务端 | `atelyx-server/` | 协作服务端（独立 Cargo 工程，不进 workspace） |
 
 ### 风格

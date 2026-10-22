@@ -21,6 +21,8 @@ pub trait PluginHandler: Send + Sync + 'static {
     async fn on_ready(&self, ctx: &Context);
 
     async fn on_view_event(&self, _ctx: &Context, _params: ViewEventParams) {}
+    /// 面重新进入布局（面板被添加 / 插件重启后重发）。已挂构建器时 SDK 在回调前强制重发树；
+    /// 画布清单等附加内容在此补交。
     async fn on_surface_attached(&self, _ctx: &Context, _params: SurfaceAttachedParams) {}
     async fn on_surface_detached(&self, _ctx: &Context, _params: SurfaceDetachedParams) {}
     async fn on_host_event(&self, _ctx: &Context, _params: PublishParams) {}
@@ -54,6 +56,17 @@ pub trait PluginHandler: Send + Sync + 'static {
     }
 }
 
+/// 面重新进入布局：宿主可能已丢掉该面的树，先按托管构建器强制重发（未挂载则跳过），
+/// 插件回调里的附加提交（画布清单）才有所依托。
+async fn on_attached<H: PluginHandler + ?Sized>(
+    handler: &H,
+    ctx: &Context,
+    params: SurfaceAttachedParams,
+) {
+    ctx.ui().resubmit(&params.surface_id).await;
+    handler.on_surface_attached(ctx, params).await;
+}
+
 /// 按方法名分派一条宿主通知。params 解析失败按未知通知处理并注明原因（不静默丢弃）。
 pub(crate) async fn dispatch<H: PluginHandler + ?Sized>(
     handler: &H,
@@ -78,7 +91,7 @@ pub(crate) async fn dispatch<H: PluginHandler + ?Sized>(
 
     match method {
         m::view::HOST_EVENT => typed!(ViewEventParams, |p| handler.on_view_event(ctx, p)),
-        m::view::HOST_ATTACHED => typed!(SurfaceAttachedParams, |p| handler.on_surface_attached(ctx, p)),
+        m::view::HOST_ATTACHED => typed!(SurfaceAttachedParams, |p| on_attached(handler, ctx, p)),
         m::view::HOST_DETACHED => typed!(SurfaceDetachedParams, |p| handler.on_surface_detached(ctx, p)),
         event::HOST_PUBLISH => typed!(PublishParams, |p| handler.on_host_event(ctx, p)),
         m::process::HOST_EVENT => typed!(ProcessEventParams, |p| handler.on_process_event(ctx, p)),

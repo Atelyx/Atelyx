@@ -17,6 +17,7 @@ mod canvas_view;
 mod chat_actions;
 mod chat_input;
 mod chat_stream;
+mod app_icon;
 mod chat_view;
 mod commands;
 mod history_browser;
@@ -36,7 +37,7 @@ mod table_actions;
 mod table_text;
 mod table_view;
 mod tray;
-mod ui;
+pub use atelyx_ui as ui;
 mod update;
 
 use std::collections::{HashMap, HashSet};
@@ -76,7 +77,7 @@ fn panel_settings(w: &DetachedWindow) -> Settings {
         position: Position::Specific(Point::new(w.bounds.x as f32, w.bounds.y as f32)),
         exit_on_close_request: false,
         decorations: false,
-        icon: ui::window_icon(),
+        icon: app_icon::window_icon(),
         ..Settings::default()
     };
     #[cfg(windows)]
@@ -521,7 +522,7 @@ enum Message {
     CursorMoved(window::Id, Point),
     Release,
     /// ui 层消息（悬停提示 / 弹层关闭与面板导航 / 通知关闭）。
-    Ui(ui::UiMsg),
+    Ui(ui::UiMsg<Message>),
     /// 表格视图消息（交互 / 命令 / 保存链回执）。
     Table(table_view::TableMsg),
     Canvas(canvas_view::CanvasMsg),
@@ -587,7 +588,7 @@ enum Message {
         form: LinkForm,
     },
     /// 插件菜单 / 下拉节点被按下：用光标锚点打开弹层。
-    PluginList { window: window::Id, entries: Vec<plugin_actions::PopupEntry> },
+    PluginList { window: window::Id, entries: Vec<atelyx_view::render::PopupEntry<Message>> },
     /// 插件多行输入的编辑器动作。
     PluginTextEdit {
         plugin_id: String,
@@ -1059,6 +1060,12 @@ pub enum SpaceMsg {
     OpenCollabSettings,
 }
 
+impl ui::UiHost for Message {
+    fn ui(msg: ui::UiMsg<Self>) -> Self {
+        Message::Ui(msg)
+    }
+}
+
 pub struct App {
     /// 布局状态真源（core 模型；磁盘格式由 schema 版本标识）。
     pub ui: AppUiState,
@@ -1077,7 +1084,7 @@ pub struct App {
     pub table_popup_draft: String,
     pub theme: Theme,
     /// 应用内通知（右下角；自动消失）。
-    pub notifications: Vec<Notification>,
+    pub(crate) notifications: Vec<Notification<Message>>,
     notify_seq: u64,
     /// 悬停提示（图标按钮；显现/收起由心跳按光标-锚点距离判定；
     /// 事件 enter 仅负责启动——批量事件中 exit 会被捕获状态吞掉，不可靠）。
@@ -1437,7 +1444,7 @@ impl App {
             min_size: Some(MIN_WINDOW_SIZE),
             exit_on_close_request: false,
             decorations: false,
-            icon: ui::window_icon(),
+            icon: app_icon::window_icon(),
             ..Settings::default()
         });
         ui::icon::init();
@@ -5099,7 +5106,7 @@ impl App {
     }
 
     /// ui 层消息转译：提示显隐 / 弹层关闭与面板导航 / 通知关闭。
-    fn on_ui(&mut self, msg: ui::UiMsg) -> Task<Message> {
+    fn on_ui(&mut self, msg: ui::UiMsg<Message>) -> Task<Message> {
         match msg {
             ui::UiMsg::HoverTip { window, label, box_px } => {
                 let anchor = self.cursor_for(window);

@@ -18,6 +18,7 @@ use atelyx_core::plugin_runtime::{
     NodeBody, ProtocolLinkForm, ReportMode, ScrollEdge, ScrollToParams, SurfaceKind, TakeoverScope,
     ViewEvent, ViewNode, WindowOpenParams, WindowUpdateParams,
 };
+use atelyx_view::support::{declares, node_value_text, report_mode};
 
 use crate::{App, Message};
 
@@ -169,37 +170,9 @@ pub struct MarkdownNode {
     pub(crate) doc: atelyx_core::markdown::MarkdownDocument,
 }
 
-/// 输入节点的值文本（单行取原值、数字按无多余零的十进制；草稿比对与事件回发共用它）。
-pub fn node_value_text(body: &NodeBody) -> Option<String> {
-    match body {
-        NodeBody::TextInput { value, .. } => Some(value.clone()),
-        NodeBody::NumberInput { value, .. } => value.map(format_number),
-        _ => None,
-    }
-}
-
-/// 数字的规范文本（整数不带小数点，其余取最短表示）。
-fn format_number(value: f64) -> String {
-    if value.fract() == 0.0 && value.abs() < 1e15 {
-        format!("{}", value as i64)
-    } else {
-        format!("{value}")
-    }
-}
-
 /// 输入类节点（文本 / 数字）：事件携带文本，需先写宿主草稿再上行。
 fn is_input(body: &NodeBody) -> bool {
     matches!(body, NodeBody::TextInput { .. } | NodeBody::NumberInput { .. })
-}
-
-/// 输入节点的上报档位（缺省逐键）；只读节点不产生事件，档位无意义，按逐键返回。
-pub(crate) fn report_mode(body: &NodeBody) -> ReportMode {
-    match body {
-        NodeBody::TextInput { report, .. } | NodeBody::NumberInput { report, .. } => {
-            report.unwrap_or(ReportMode::Immediate)
-        }
-        _ => ReportMode::Immediate,
-    }
 }
 
 /// 输入节点是否接受编辑（只读节点保留外观但不建草稿、不收事件）。
@@ -231,11 +204,6 @@ pub fn number_event_value(body: &NodeBody, text: &str) -> Option<EventValue> {
 /// 树里按 id 找节点（草稿维护与事件处理共用；查找实现在协议类型 [`ViewNode::find`]）。
 pub fn find_node<'a>(tree: &'a ViewNode, node_id: &str) -> Option<&'a ViewNode> {
     tree.find(node_id)
-}
-
-/// 事件是否由节点声明（未声明不上行）。画布节点的指针事件按 `mouseEvents` 声明子集判定。
-pub(crate) fn declares(node: &ViewNode, kind: EventKind) -> bool {
-    node.events.contains(&kind)
 }
 
 /// 事件对应的声明种类（上行闸门按它判定）。画布指针事件有独立的声明集（`mouseEvents`），
@@ -852,7 +820,7 @@ pub fn on_window_open(
     let mut settings = iced::window::Settings {
         size,
         exit_on_close_request: true,
-        icon: crate::ui::window_icon(),
+        icon: crate::app_icon::window_icon(),
         ..iced::window::Settings::default()
     };
     settings.min_size = Some(iced::Size::new(160.0, 120.0));
@@ -1032,7 +1000,7 @@ pub fn on_scroll_to(
         return Task::none();
     }
     app.plugins.resolve_shell_call(request_id, Ok(serde_json::json!({})));
-    let id = crate::plugin_view::scroll_id(&plugin_id, &params.surface_id, &params.node_id);
+    let id = atelyx_view::render::scroll_id(&plugin_id, &params.surface_id, &params.node_id);
     match params.edge {
         // `RelativeOffset` 按比例定位：START = 0（顶端 / 最左）、END = 1（底端 / 最右），由控件钳到真实末端
         ScrollEdge::Start => iced::widget::operation::snap_to(
@@ -1242,16 +1210,6 @@ fn first_panel_id(node: &LayoutNode) -> Option<String> {
 }
 
 // ===== 交互 =====
-
-/// 插件菜单 / 下拉的弹层条目：标签 + 选中标记 + 点击要回发的消息。
-#[derive(Clone, Debug)]
-pub(crate) struct PopupEntry {
-    pub(crate) label: String,
-    pub(crate) current: bool,
-    pub(crate) disabled: bool,
-    pub(crate) danger: bool,
-    pub(crate) on_press: Message,
-}
 
 /// 节点事件处理：输入类先写本机草稿（含回显抑制），再按该事件的声明决定是否上行。
 /// 输入框本地编辑（非逐键上报档位）：写草稿；`commit` 为真时按声明上报。

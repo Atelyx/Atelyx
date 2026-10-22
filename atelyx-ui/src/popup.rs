@@ -6,8 +6,7 @@ use iced::widget::{container, mouse_area, space, stack};
 use iced::{Color, Element, Length, Padding, Point, Size, border, widget::container::Style};
 
 use super::palette as pal;
-use super::UiMsg;
-use crate::Message;
+use super::{UiHost, UiMsg};
 
 /// 弹层规格：锚点（窗口局部坐标）+ 定宽 + 估算高 + 向上翻转的触发器顶边。
 #[derive(Clone, Copy, Debug)]
@@ -57,11 +56,11 @@ pub const SHADOW_PAD_BOTTOM: f32 = 14.0;
 ///
 /// 阴影用「外扩容器露出的半透明黑底环」近似（iced 无 box-shadow）；
 /// 定位偏移 = 弹层坐标回退外扩量，两处必须同步（见常量）。
-pub fn overlay<'a>(
+pub fn overlay<'a, M: Clone + 'a>(
     geom: PopupGeom,
-    content: Element<'a, Message>,
-    on_dismiss: Message,
-) -> Element<'a, Message> {
+    content: Element<'a, M>,
+    on_dismiss: M,
+) -> Element<'a, M> {
     let capture = mouse_area(space().width(Length::Fill).height(Length::Fill)).on_press(on_dismiss);
     let popup = container(content)
         .width(Length::Fixed(geom.w))
@@ -96,12 +95,12 @@ pub fn overlay<'a>(
 
 /// 居中模态覆盖层：全屏半透明黑遮罩（点击关闭）+ 阴影环 + 水平垂直居中卡。
 /// 卡片内容与尺寸由调用方构建（历史记录 / 许可信息等阻断式面板共用此壳）。
-pub fn modal_overlay<'a>(window: iced::window::Id, card: Element<'a, Message>) -> Element<'a, Message> {
-    modal_overlay_with(Message::Ui(UiMsg::PopupClose { window }), card)
+pub fn modal_overlay<'a, M: UiHost>(window: iced::window::Id, card: Element<'a, M>) -> Element<'a, M> {
+    modal_overlay_with(M::ui(UiMsg::PopupClose { window }), card)
 }
 
 /// 居中模态覆盖层（遮罩点击的处理由调用方给定：不经全局弹层状态的模态用这条）。
-pub fn modal_overlay_with<'a>(close: Message, card: Element<'a, Message>) -> Element<'a, Message> {
+pub fn modal_overlay_with<'a, M: Clone + 'a>(close: M, card: Element<'a, M>) -> Element<'a, M> {
     let capture = mouse_area(
         container(space().width(Length::Fill).height(Length::Fill))
             .width(Length::Fill)

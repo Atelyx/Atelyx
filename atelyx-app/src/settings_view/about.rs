@@ -10,7 +10,8 @@ use crate::ui::controls;
 use crate::ui::icon::icon;
 use crate::ui::palette as pal;
 use crate::ui::text;
-use crate::ui::{bold, icon_handle};
+use crate::app_icon::icon_handle;
+use crate::ui::bold;
 use crate::{update, App, Message};
 
 /// 开源许可条目（名称 + 许可 + 官方主页）：只列随应用分发的第三方资产。
