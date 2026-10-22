@@ -25,6 +25,7 @@ use std::time::{Duration, Instant};
 use crate::commands::{self, NoteBindings};
 use crate::layout_view::parse_hex_color;
 use crate::markdown_view::{LineRun, SourceKind};
+use crate::text_preedit::{self, Composed};
 use crate::ui::palette as pal;
 use crate::ui::bold;
 use crate::Message;
@@ -508,7 +509,14 @@ fn nest(
 }
 
 /// 块内逐字符样式：按行内片段覆盖，未被覆盖处按标记（弱化）；下标与字符一一对应。
-fn source_styles(source: &str, from: usize, to: usize, opts: &ParseOptions) -> Vec<CharStyle> {
+/// 组合态在插入点补组合串字符的弱化样式（与插入后的排版文本一一对应）。
+fn source_styles(
+    source: &str,
+    from: usize,
+    to: usize,
+    opts: &ParseOptions,
+    at: Composed,
+) -> Vec<CharStyle> {
     let mut runs: Vec<(usize, usize, CharStyle)> = Vec::new();
     let inline = parse_inline(source, from, to, opts);
     collect_runs(&inline, CharStyle::default(), &mut runs);
@@ -522,6 +530,12 @@ fn source_styles(source: &str, from: usize, to: usize, opts: &ParseOptions) -> V
             .map(|(_, _, s)| *s)
             .unwrap_or(CharStyle { muted: true, ..CharStyle::default() });
         out.push(st);
+    }
+    if at.is_active() {
+        let insert = at.span().start;
+        let mono = out.get(insert).or_else(|| out.last()).is_some_and(|s| s.mono);
+        let st = CharStyle { muted: true, mono, ..CharStyle::default() };
+        out.splice(insert..insert, std::iter::repeat_n(st, at.span().len()));
     }
     out
 }
@@ -583,13 +597,13 @@ pub(crate) fn char_index(content: &str, byte: usize) -> usize {
 }
 
 /// 组合串（未上屏文本）单行字宽：与画组合串同字体字号实测，光标竖条据此落在串尾。
-pub(crate) fn preedit_width(pre: &str, size: f32, line_height: f32) -> f32 {
+fn preedit_width(pre: &str, size: f32, line_height: f32) -> f32 {
     measured_text_width(pre, size, line_height, crate::ui::regular())
 }
 
 /// 组合串尾的光标竖条 x：让到串尾，串尾越出可用右缘 `right` 即贴边（不早于串首 `x`，
 /// 组合串在面内被裁时竖条仍留在面内）。
-pub(crate) fn caret_after_preedit(x: f32, pre_w: f32, right: f32) -> f32 {
+fn caret_after_preedit(x: f32, pre_w: f32, right: f32) -> f32 {
     (x + pre_w).min(right - 1.5).max(x)
 }
 
@@ -843,6 +857,10 @@ fn source_line_px(source: &SourceKind) -> f32 {
 struct SourceState {
     paragraph: Option<ParagraphT>,
     content: String,
+    /// 建段时的组合串（`None` = 未组合）。
+    preedit: Option<String>,
+    /// 建段时的组合串插入点（块内字符下标）。
+    insert: usize,
     size: f32,
     line_height: f32,
     width: f32,
@@ -852,6 +870,12 @@ struct SourceState {
     blink_anchor: Option<Instant>,
     /// 已见光标位（变化即重置相位）。
     seen_caret: usize,
+}
+
+impl SourceState {
+    fn composed(&self) -> Composed {
+        Composed::new(self.insert, self.preedit.as_deref())
+    }
 }
 
 impl Widget<Message, Theme, iced::Renderer> for SourceBlock<'_> {
@@ -881,16 +905,25 @@ impl Widget<Message, Theme, iced::Renderer> for SourceBlock<'_> {
             let content = &self.text[from..to];
             let state = tree.state.downcast_mut::<SourceState>();
             let font = crate::ui::regular();
+            let preedit = self.preedit.as_deref().filter(|s| !s.is_empty() && self.focused);
+            let caret = self.caret.clamp(from, to) - from;
+            let insert = char_index(content, caret);
             let stale = state.paragraph.is_none()
                 || state.content.as_str() != content
+                || state.preedit.as_deref() != preedit
+                || (preedit.is_some() && state.insert != insert)
                 || state.size != size
                 || state.line_height != line_height
                 || state.font != font
                 || (state.width - width).abs() > 0.5;
             if stale {
-                let styles = source_styles(self.text, from, to, self.opts);
-                state.paragraph = Some(build_paragraph(content, size, line_height, width, &styles, self.pal));
+                let at = Composed::new(insert, preedit);
+                let laid = text_preedit::compose(content, at, preedit);
+                let styles = source_styles(self.text, from, to, self.opts, at);
+                state.paragraph = Some(build_paragraph(&laid, size, line_height, width, &styles, self.pal));
                 state.content = content.to_string();
+                state.preedit = preedit.map(str::to_string);
+                state.insert = insert;
                 state.size = size;
                 state.line_height = line_height;
                 state.font = font;
@@ -927,13 +960,19 @@ impl Widget<Message, Theme, iced::Renderer> for SourceBlock<'_> {
         let origin = bounds.position();
         let line_px = source_line_px(&self.source);
         let count = state.content.chars().count();
+        let at = state.composed();
+        let laid_count = count + at.span().len();
 
         // 选区（先画，压在正文下；本端与远端同层）
         let sel_from = self.anchor.min(self.caret).max(self.from).min(self.to) - self.from;
         let sel_to = self.anchor.max(self.caret).max(self.from).min(self.to) - self.from;
         if sel_to > sel_from {
             let tint = pal::SELECTION;
-            for r in selection_rects(p, char_index(&state.content, sel_from), char_index(&state.content, sel_to)) {
+            let (lo, hi) = (
+                at.index(char_index(&state.content, sel_from)),
+                at.index(char_index(&state.content, sel_to)),
+            );
+            for r in selection_rects(p, lo, hi) {
                 renderer.fill_quad(
                     Quad { bounds: Rectangle::new(origin + Vector::new(r.x, r.y), r.size()), ..Quad::default() },
                     tint,
@@ -952,37 +991,16 @@ impl Widget<Message, Theme, iced::Renderer> for SourceBlock<'_> {
             viewport,
         );
 
-        // 远端协作者光标条与名签（不随本端焦点隐藏；本端组合串与光标压其上）
-        self.draw_remote_carets(renderer, state, p, origin, bounds, count);
+        // 远端协作者光标条与名签（不随本端焦点隐藏）
+        self.draw_remote_carets(renderer, state, p, origin, bounds, laid_count);
 
         if !self.focused {
             return;
         }
+        // 组合串已排进段落，光标竖条落在串尾
         let clamped = self.caret.clamp(self.from, self.to);
         let caret_char = char_index(&state.content, clamped - self.from);
-        let (x, y, h) = caret_xy(p, count, caret_char, line_px);
-        // 未上屏组合串画在光标处（组合期恒可见，不随光标闪烁）；竖条让到串尾
-        let preedit = self.preedit.as_deref().filter(|s| !s.is_empty());
-        let pre_w = preedit.map_or(0.0, |pre| preedit_width(pre, state.size, state.line_height));
-        let caret_x = caret_after_preedit(x, pre_w, bounds.width);
-        if let Some(pre) = preedit {
-            renderer.fill_text(
-                advanced_text::Text {
-                    content: pre.to_string(),
-                    bounds: Size::new(f32::INFINITY, h),
-                    size: state.size.into(),
-                    line_height: advanced_text::LineHeight::Relative(state.line_height),
-                    font: crate::ui::regular(),
-                    align_x: advanced_text::Alignment::Left,
-                    align_y: alignment::Vertical::Top,
-                    shaping: advanced_text::Shaping::Auto,
-                    wrapping: advanced_text::Wrapping::None,
-                },
-                origin + Vector::new(x, y),
-                self.pal.muted,
-                bounds,
-            );
-        }
+        let (x, y, h) = caret_xy(p, laid_count, at.caret(caret_char), line_px);
         // 闪烁相位：半周期可见
         let on = state
             .blink_anchor
@@ -993,7 +1011,7 @@ impl Widget<Message, Theme, iced::Renderer> for SourceBlock<'_> {
         }
         renderer.fill_quad(
             Quad {
-                bounds: Rectangle::new(origin + Vector::new(caret_x, y), Size::new(1.5, h)),
+                bounds: Rectangle::new(origin + Vector::new(x, y), Size::new(1.5, h)),
                 ..Quad::default()
             },
             self.pal.text,
@@ -1055,12 +1073,14 @@ impl Widget<Message, Theme, iced::Renderer> for SourceBlock<'_> {
                 }
             }
             Event::Window(window::Event::RedrawRequested(_)) => {
-                let count = state.content.chars().count();
+                let at = state.composed();
+                let count = state.content.chars().count() + at.span().len();
                 let clamped = self.caret.clamp(self.from, self.to);
                 let caret_char = char_index(&state.content, clamped - self.from);
                 let line_px = source_line_px(&self.source);
                 if let Some(p) = state.paragraph.as_ref() {
-                    let (x, y, h) = caret_xy(p, count, caret_char, line_px);
+                    // 组合期报组合起点：候选窗贴串首，串尾由本端自绘
+                    let (x, y, h) = caret_xy(p, count, at.index(caret_char), line_px);
                     let ime: InputMethod<&str> = InputMethod::Enabled {
                         cursor: Rectangle::new(bounds.position() + Vector::new(x, y), Size::new(1.0, h)),
                         purpose: Purpose::Normal,
@@ -1090,6 +1110,7 @@ impl SourceBlock<'_> {
         p: &ParagraphT,
         origin: Point,
     ) {
+        let at = state.composed();
         for cursor in self.cursors {
             let (Some(head), Some(anchor)) = (cursor.head, cursor.anchor) else {
                 continue;
@@ -1112,14 +1133,14 @@ impl SourceBlock<'_> {
             };
             let rects = selection_rects(
                 p,
-                char_index(&state.content, lo - self.from),
-                char_index(&state.content, hi - self.from),
+                at.index(char_index(&state.content, lo - self.from)),
+                at.index(char_index(&state.content, hi - self.from)),
             );
             draw_remote_selection(renderer, &rects, origin, color);
         }
     }
 
-    /// 远端协作者光标条与名签（画在正文之上）。`count` = 块内字符数（复用主绘制）。
+    /// 远端协作者光标条与名签（画在正文之上）。`count` = 排版字符数（复用主绘制）。
     fn draw_remote_carets(
         &self,
         renderer: &mut iced::Renderer,
@@ -1133,6 +1154,7 @@ impl SourceBlock<'_> {
             return;
         }
         let line_px = source_line_px(&self.source);
+        let at = state.composed();
         let clip = remote_clip(bounds);
         for cursor in self.cursors {
             let (Some(head), Some(anchor)) = (cursor.head, cursor.anchor) else {
@@ -1151,7 +1173,8 @@ impl SourceBlock<'_> {
             let Some(color) = parse_hex_color(&cursor.color) else {
                 continue;
             };
-            let (x, y, h) = caret_xy(p, count, char_index(&state.content, caret - self.from), line_px);
+            let (x, y, h) =
+                caret_xy(p, count, at.index(char_index(&state.content, caret - self.from)), line_px);
             draw_remote_caret(
                 renderer,
                 origin.x + x,
@@ -1182,8 +1205,9 @@ impl SourceBlock<'_> {
                 let line_px = source_line_px(&self.source);
                 let count = state.content.chars().count();
                 let idx = char_index(&state.content, self.caret.clamp(self.from, self.to) - self.from);
-                let moved = match state.paragraph.as_ref() {
-                    Some(p) => {
+                // 段落在组合态下按插入组合串后的文本排版，此时不按该几何换算
+                let moved = match (state.paragraph.as_ref(), state.preedit.is_none()) {
+                    (Some(p), true) => {
                         let (x, y, _) = caret_xy(p, count, idx, line_px);
                         let ty = y - line_px;
                         if ty < 0.0 {
@@ -1193,7 +1217,7 @@ impl SourceBlock<'_> {
                             Some(self.from + byte_of_char(&state.content, ci))
                         }
                     }
-                    None => None,
+                    _ => None,
                 };
                 match moved {
                     Some(off) => send(shell, EditorEvent::SetCaret { offset: off, extend }),
@@ -1204,8 +1228,9 @@ impl SourceBlock<'_> {
                 let line_px = source_line_px(&self.source);
                 let count = state.content.chars().count();
                 let idx = char_index(&state.content, self.caret.clamp(self.from, self.to) - self.from);
-                let moved = match state.paragraph.as_ref() {
-                    Some(p) => {
+                // 段落在组合态下按插入组合串后的文本排版，此时不按该几何换算
+                let moved = match (state.paragraph.as_ref(), state.preedit.is_none()) {
+                    (Some(p), true) => {
                         let (x, y, _) = caret_xy(p, count, idx, line_px);
                         let ty = y + line_px;
                         if ty > p.min_bounds().height {
@@ -1215,7 +1240,7 @@ impl SourceBlock<'_> {
                             Some(self.from + byte_of_char(&state.content, ci))
                         }
                     }
-                    None => None,
+                    _ => None,
                 };
                 match moved {
                     Some(off) => send(shell, EditorEvent::SetCaret { offset: off, extend }),
@@ -2403,7 +2428,7 @@ pub(crate) fn offset_in_block(
     let to = to.min(source.len());
     let from = from.min(to);
     let content = &source[from..to];
-    let styles = source_styles(source, from, to, opts);
+    let styles = source_styles(source, from, to, opts, Composed::default());
     let pal = EditPalette {
         text: Color::BLACK,
         muted: Color::BLACK,
@@ -2495,6 +2520,20 @@ mod tests {
         let line = paragraph.span_bounds(0).into_iter().next().unwrap();
         assert!((preedit_width(text, size, line_height) - (line.x + line.width)).abs() < 0.5);
         assert!(preedit_width("gai", size, line_height) > preedit_width("g", size, line_height));
+    }
+
+    /// 组合串样式按插入点空区间插入（不改正文样式），插入点在文末也不越界。
+    #[test]
+    fn composed_styles_insert_at_caret() {
+        let opts = ParseOptions::default();
+        let src = "abcdef";
+        let mid = source_styles(src, 0, src.len(), &opts, Composed::new(3, Some("ni")));
+        assert_eq!(mid.len(), 8);
+        assert!(mid[3].muted && mid[4].muted && !mid[5].muted);
+
+        let tail = source_styles(src, 0, src.len(), &opts, Composed::new(6, Some("n")));
+        assert_eq!(tail.len(), 7);
+        assert!(tail[6].muted);
     }
 
     /// 富渲染行的源偏移反算：隐藏的强调标记不占可见字符，落在标记内的偏移吸到其后的

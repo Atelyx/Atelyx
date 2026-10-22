@@ -25,9 +25,9 @@ use std::time::{Duration, Instant};
 use atelyx_core::ai::refs::{self, RefEntry};
 
 use crate::markdown_edit::{
-    byte_of_char, caret_after_preedit, char_index, line_end_at, line_start_at, preedit_width,
-    selection_rects, ParagraphT,
+    byte_of_char, char_index, line_end_at, line_start_at, selection_rects, ParagraphT,
 };
+use crate::text_preedit::{self, Composed};
 use crate::ui::palette as pal;
 use crate::Message;
 
@@ -200,6 +200,12 @@ impl<'a> Input<'a> {
 struct InputState {
     paragraph: Option<ParagraphT>,
     content: String,
+    /// 建段时的排版文本（组合串已插在光标处）。
+    layout: String,
+    /// 建段时的组合串（`None` = 未组合）。
+    preedit: Option<String>,
+    /// 建段时的组合串插入点（正文字符下标）。
+    insert: usize,
     size: f32,
     width: f32,
     /// 建段时的界面字体（换族后旧行段与命中几何即失效）。
@@ -217,9 +223,23 @@ struct InputState {
 }
 
 impl InputState {
-    fn stale(&self, content: &str, size: f32, width: f32, font: iced::Font) -> bool {
+    fn composed(&self) -> Composed {
+        Composed::new(self.insert, self.preedit.as_deref())
+    }
+
+    fn stale(
+        &self,
+        content: &str,
+        preedit: Option<&str>,
+        insert: usize,
+        size: f32,
+        width: f32,
+        font: iced::Font,
+    ) -> bool {
         self.paragraph.is_none()
             || self.content.as_str() != content
+            || self.preedit.as_deref() != preedit
+            || (preedit.is_some() && self.insert != insert)
             || self.size != size
             || self.font != font
             || (self.width - width).abs() > 0.5
@@ -227,10 +247,13 @@ impl InputState {
 }
 
 /// 逐字符 span 段落（`span_bounds` 按字符给几何——命中测试与光标定位的前提，
-/// 与笔记编辑面同口径）；组合期布局。
-fn build_paragraph(content: &str, size: f32, width: f32) -> ParagraphT {
-    let spans: Vec<Span<'static, (), Font>> =
-        content.chars().map(|ch| Span::new(ch.to_string())).collect();
+/// 与笔记编辑面同口径）；组合串按弱化色排在插入点。
+fn build_paragraph(content: &str, size: f32, width: f32, at: Composed) -> ParagraphT {
+    let mut spans: Vec<Span<'static, (), Font>> = Vec::with_capacity(content.chars().count());
+    for (k, ch) in content.chars().enumerate() {
+        let span = Span::new(ch.to_string());
+        spans.push(if at.span().contains(&k) { span.color(pal::TEXT_SECONDARY) } else { span });
+    }
     ParagraphT::with_spans(advanced_text::Text {
         content: spans.as_slice(),
         bounds: Size::new(width, f32::INFINITY),
@@ -499,14 +522,25 @@ impl Widget<Message, Theme, iced::Renderer> for Input<'_> {
             let line_px = size * LINE_FACTOR;
             let state = tree.state.downcast_mut::<InputState>();
             let font = crate::ui::regular();
-            if state.stale(text, size, width, font) {
-                state.paragraph = Some(build_paragraph(text, size, width));
+            let preedit = if self.draft.focused {
+                self.draft.preedit.as_deref().filter(|s| !s.is_empty())
+            } else {
+                None
+            };
+            let insert = char_index(text, self.draft.caret.min(text.len()));
+            if state.stale(text, preedit, insert, size, width, font) {
+                let at = Composed::new(insert, preedit);
+                let laid = text_preedit::compose(text, at, preedit);
+                state.paragraph = Some(build_paragraph(&laid, size, width, at));
                 state.content = text.to_string();
+                state.layout = laid.into_owned();
+                state.preedit = preedit.map(str::to_string);
+                state.insert = insert;
                 state.size = size;
                 state.font = font;
                 state.width = width;
                 let p = state.paragraph.as_ref().expect("段落已建");
-                state.rows = rows_of(p, text, line_px);
+                state.rows = rows_of(p, &state.layout, line_px);
             }
             let line_px = size * LINE_FACTOR;
             let content_h = state
@@ -545,6 +579,7 @@ impl Widget<Message, Theme, iced::Renderer> for Input<'_> {
         let origin = bounds.position() + Vector::new(0.0, -state.scroll_y);
         let text_bounds = Rectangle::new(origin, Size::new(bounds.width, f32::INFINITY));
         let clip = bounds.intersection(viewport).unwrap_or(bounds);
+        let at = state.composed();
 
         // 全部内容画进按 bounds 裁剪的层：滚动时超出可视区的部分不外溢
         renderer.with_layer(clip, |renderer| {
@@ -553,8 +588,8 @@ impl Widget<Message, Theme, iced::Renderer> for Input<'_> {
                 let (lo, hi) = (hit.start, hit.start + hit.len);
                 for r in selection_rects(
                     p,
-                    char_index(&state.content, lo),
-                    char_index(&state.content, hi),
+                    at.index(char_index(&state.content, lo)),
+                    at.index(char_index(&state.content, hi)),
                 ) {
                     renderer.fill_quad(
                         Quad {
@@ -578,8 +613,8 @@ impl Widget<Message, Theme, iced::Renderer> for Input<'_> {
             if sel_b > sel_a {
                 for r in selection_rects(
                     p,
-                    char_index(&state.content, sel_a),
-                    char_index(&state.content, sel_b),
+                    at.index(char_index(&state.content, sel_a)),
+                    at.index(char_index(&state.content, sel_b)),
                 ) {
                     renderer.fill_quad(
                         Quad {
@@ -624,31 +659,11 @@ impl Widget<Message, Theme, iced::Renderer> for Input<'_> {
             if !self.draft.focused {
                 return;
             }
+            // 组合串已排进段落，光标竖条落在串尾
             let caret = self.draft.caret.clamp(0, self.draft.text.len());
             let caret_char = char_index(&state.content, caret);
-            let (x, y, h) = caret_row_pos(&state.rows, p, &state.content, caret_char, line_px);
-            // 组合串画在光标处（组合期恒可见）；竖条让到串尾
-            let preedit = self.draft.preedit.as_deref().filter(|s| !s.is_empty());
-            let pre_w = preedit.map_or(0.0, |pre| preedit_width(pre, state.size, LINE_FACTOR));
-            let caret_x = caret_after_preedit(x, pre_w, bounds.width);
-            if let Some(pre) = preedit {
-                renderer.fill_text(
-                    advanced_text::Text {
-                        content: pre.to_string(),
-                        bounds: Size::new(f32::INFINITY, h),
-                        size: state.size.into(),
-                        line_height: advanced_text::LineHeight::Relative(LINE_FACTOR),
-                        font: crate::ui::regular(),
-                        align_x: advanced_text::Alignment::Left,
-                        align_y: alignment::Vertical::Top,
-                        shaping: advanced_text::Shaping::Auto,
-                        wrapping: advanced_text::Wrapping::None,
-                    },
-                    origin + Vector::new(x, y),
-                    pal::TEXT_SECONDARY,
-                    bounds,
-                );
-            }
+            let (x, y, h) =
+                caret_row_pos(&state.rows, p, &state.layout, at.caret(caret_char), line_px);
             // 闪烁相位：半周期可见
             let on = state
                 .blink_anchor
@@ -660,7 +675,7 @@ impl Widget<Message, Theme, iced::Renderer> for Input<'_> {
             renderer.fill_quad(
                 Quad {
                     bounds: Rectangle::new(
-                        origin + Vector::new(caret_x, y),
+                        origin + Vector::new(x, y),
                         Size::new(1.5, h.max(line_px)),
                     ),
                     ..Quad::default()
@@ -735,6 +750,11 @@ impl Widget<Message, Theme, iced::Renderer> for Input<'_> {
                 };
                 // IME 组合期点击会中断组合会话，光标换算暂不接管
                 if self.draft.preedit.is_some() {
+                    shell.capture_event();
+                    return;
+                }
+                // 建段态仍含组合串（组合刚结束的一帧）：行表按排版文本，正文下标换算不成立
+                if state.preedit.is_some() {
                     shell.capture_event();
                     return;
                 }
@@ -845,9 +865,16 @@ impl Widget<Message, Theme, iced::Renderer> for Input<'_> {
             Event::Window(window::Event::RedrawRequested(_)) => {
                 let caret = self.draft.caret.clamp(0, self.draft.text.len());
                 let caret_char = char_index(&state.content, caret);
+                let at = state.composed();
                 if let Some(p) = state.paragraph.as_ref() {
-                    let (x, y, h) =
-                        caret_row_pos(&state.rows, p, &state.content, caret_char, line_px);
+                    // 组合期报组合起点：候选窗贴串首，串尾由本端自绘
+                    let (x, y, h) = caret_row_pos(
+                        &state.rows,
+                        p,
+                        &state.layout,
+                        at.index(caret_char),
+                        line_px,
+                    );
                     // 光标滚入可视区
                     let view_h = bounds.height;
                     if y < state.scroll_y {
@@ -1105,14 +1132,27 @@ impl Input<'_> {
         extend: bool,
         shell: &mut Shell<'_, Message>,
     ) {
+        let line_px = state.size * LINE_FACTOR;
+        let caret = self.draft.caret.clamp(0, self.draft.text.len());
+        let up = matches!(key, Key::Named(Named::ArrowUp));
+        // 建段态仍含组合串（组合刚结束的一帧）：行表按排版文本，退回行首 / 行尾
+        if state.preedit.is_some() {
+            let next = if up {
+                line_start_at(&self.draft.text, caret)
+            } else {
+                line_end_at(&self.draft.text, caret)
+            };
+            self.publish(
+                shell,
+                InputEvent::Select { caret: next, anchor: if extend { self.draft.anchor } else { next } },
+            );
+            return;
+        }
         let Some(p) = state.paragraph.as_ref() else {
             return;
         };
-        let line_px = state.size * LINE_FACTOR;
-        let caret = self.draft.caret.clamp(0, self.draft.text.len());
         let idx = char_index(&state.content, caret);
         let (x, y, _) = caret_row_pos(&state.rows, p, &state.content, idx, line_px);
-        let up = matches!(key, Key::Named(Named::ArrowUp));
         let target_y = if up { y - line_px } else { y + line_px };
         let content_h = p.min_bounds().height;
         let next = if target_y < 0.0 || target_y >= content_h {

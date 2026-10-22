@@ -36,6 +36,7 @@ mod space_actions;
 mod table_actions;
 mod table_text;
 mod table_view;
+mod text_preedit;
 mod tray;
 pub use atelyx_ui as ui;
 mod update;
